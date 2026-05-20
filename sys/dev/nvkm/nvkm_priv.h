@@ -50,6 +50,32 @@
 #define NV_PROM_SIZE		0x00100000	/* 1 MiB aperture */
 
 /*
+ * PRAMIN aperture: a BAR0-visible 1 MiB window into VRAM. The window's
+ * VRAM base is set via NV_PBUS_PRAMIN @ 0x001700 (value is base >> 16).
+ * GPU bootcode places the active VBIOS image in VRAM at attach; reading
+ * via PRAMIN gets the GPU's working copy, which differs from the raw
+ * PROM contents on cards that "stitch" pointers at boot time.
+ */
+#define NV_PRAMIN		0x00700000
+#define NV_PRAMIN_SIZE		0x00100000
+#define NV_PBUS_PRAMIN		0x00001700	/* window base, shifted right 16 */
+
+/*
+ * Display control regs used to discover where the GPU has staged its
+ * runtime VBIOS copy in VRAM. (See nouveau shadowramin.c.)
+ *   NV_PDISP_VGA_CR  : present for Volta and Turing (we use Turing path)
+ *   bit 3            : aperture enabled
+ *   bits 1:0 == 1    : aperture target is VRAM
+ *   bits 31:8        : staging address >> 8
+ */
+#define NV_PDISP_VGA_CR			0x00625f04
+#define   NV_PDISP_VGA_CR_TARGET_VRAM	0x00000001u
+#define   NV_PDISP_VGA_CR_TARGET_MASK	0x00000003u
+#define   NV_PDISP_VGA_CR_ENABLED	0x00000008u
+#define NV_PDISP_GENERAL_CTL		0x00021c04
+#define   NV_PDISP_GENERAL_CTL_DISABLED	0x00000001u
+
+/*
  * VBIOS image cache. PCI Option ROMs are chained: a legacy x86 image,
  * one or more UEFI images, and (on NVIDIA cards) private images chained
  * via NPDE that carry the FwSec firmware needed by GSP boot. NVIDIA's
