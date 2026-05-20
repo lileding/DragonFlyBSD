@@ -62,6 +62,19 @@
 struct firmware;
 struct nvkm_falcon;
 
+/*
+ * A chunk of system memory that is mapped for DMA and visible to both
+ * the host CPU (via kva) and the GPU (via paddr). Used for booter and
+ * GSP image staging, WPR descriptors, msgq rings, and similar.
+ */
+struct nvkm_dmamem {
+	void		*kva;
+	bus_addr_t	paddr;
+	bus_size_t	size;
+	bus_dma_tag_t	tag;
+	bus_dmamap_t	map;
+};
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -120,5 +133,10 @@ void	nvkm_fw_fini(struct nvkm_softc *sc);
 /* nvkm_sec2.c */
 int	nvkm_sec2_init(struct nvkm_softc *sc);
 void	nvkm_sec2_fini(struct nvkm_softc *sc);
+
+/* nvkm_mem.c -- DMA-coherent memory helpers */
+int	nvkm_dmamem_alloc(struct nvkm_softc *sc, bus_size_t size,
+	    bus_size_t alignment, struct nvkm_dmamem *out);
+void	nvkm_dmamem_free(struct nvkm_softc *sc, struct nvkm_dmamem *mem);
 
 #endif /* _NVKM_PRIV_H_ */
