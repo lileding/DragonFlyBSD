@@ -59,6 +59,74 @@ nvkm_prom_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t offset,
 }
 
 /*
+ * Configure the PRAMIN window to expose the GPU's working VBIOS copy in
+ * VRAM, then read length bytes from offset 0 of that copy. The window is
+ * limited to NV_PRAMIN_SIZE (1 MiB). The previous PBUS_PRAMIN value is
+ * restored before returning.
+ *
+ * Returns 0 on success; otherwise an errno explaining why PRAMIN was
+ * unavailable (display block off, aperture pointing elsewhere, etc).
+ */
+static int
+nvkm_pramin_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t length)
+{
+	uint32_t vga_cr, dctl, saved_window;
+	uint64_t vram_addr;
+	uint32_t i, word;
+	int error = 0;
+
+	if (length > NV_PRAMIN_SIZE)
+		return (ENOMEM);
+
+	/* Bail out if the display engine reports itself disabled. */
+	dctl = nvkm_rd32(sc, NV_PDISP_GENERAL_CTL);
+	if (dctl & NV_PDISP_GENERAL_CTL_DISABLED) {
+		device_printf(sc->dev,
+		    "PRAMIN: display disabled (0x021c04=0x%x)\n", dctl);
+		return (ENODEV);
+	}
+
+	/* Discover where the GPU staged the active VBIOS in VRAM. */
+	vga_cr = nvkm_rd32(sc, NV_PDISP_VGA_CR);
+	if (!(vga_cr & NV_PDISP_VGA_CR_ENABLED) ||
+	    (vga_cr & NV_PDISP_VGA_CR_TARGET_MASK) !=
+	    NV_PDISP_VGA_CR_TARGET_VRAM) {
+		device_printf(sc->dev,
+		    "PRAMIN: VGA aperture not in VRAM (0x625f04=0x%x)\n",
+		    vga_cr);
+		return (ENODEV);
+	}
+	vram_addr = ((uint64_t)(vga_cr & 0xffffff00u)) << 8;
+	if (vram_addr == 0) {
+		device_printf(sc->dev,
+		    "PRAMIN: vga_cr has no staged address (0x625f04=0x%x)\n",
+		    vga_cr);
+		return (ENODEV);
+	}
+
+	/* Point the PRAMIN window at the VBIOS staging area. */
+	saved_window = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(vram_addr >> 16));
+
+	device_printf(sc->dev,
+	    "PRAMIN: vga_cr=0x%x vram_addr=%#jx window saved=0x%x\n",
+	    vga_cr, (uintmax_t)vram_addr, saved_window);
+
+	for (i = 0; i < length; i += 4) {
+		word = nvkm_rd32(sc, NV_PRAMIN + i);
+		buf[i + 0] = (uint8_t)(word >>  0);
+		buf[i + 1] = (uint8_t)(word >>  8);
+		buf[i + 2] = (uint8_t)(word >> 16);
+		buf[i + 3] = (uint8_t)(word >> 24);
+	}
+
+	/* Restore the PRAMIN window. */
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_window);
+
+	return (error);
+}
+
+/*
  * Parse a single PCI Option ROM image at sc->vbios[offset].
  *
  * On success returns 0 and fills *size with the byte size to advance to
@@ -185,6 +253,20 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	nvkm_rom_shadow(sc, false);
 	nvkm_prom_read(sc, sc->vbios, 0, NVKM_VBIOS_MAX_SIZE);
 	nvkm_rom_shadow(sc, true);
+
+	/*
+	 * Try a quick PRAMIN probe. PRAMIN reads VRAM where the GPU's own
+	 * bootcode stages a "stitched" VBIOS with pointers resolved -- the
+	 * authoritative source for HS-ucode descriptor table walks per
+	 * nouveau bare-metal. In our VFIO+OVMF VM the VGA aperture register
+	 * stays uninitialised because OVMF skips the legacy x86 option ROM,
+	 * so this currently logs why it's unavailable. Kept as infrastructure
+	 * for future use (manual aperture init, alternative GPU configs).
+	 */
+	{
+		uint8_t probe[64];
+		(void)nvkm_pramin_read(sc, probe, sizeof(probe));
+	}
 
 	{
 		uint16_t sig = nvkm_le16(&sc->vbios[0]);
