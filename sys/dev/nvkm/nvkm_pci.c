@@ -122,13 +122,24 @@ static device_method_t nvkm_pci_methods[] = {
 	DEVMETHOD_END
 };
 
+/*
+ * driver_t.name must be "drm" to match the child device that vga_pci_attach()
+ * pre-creates via device_add_child(dev, "drm", -1). This is DFly's convention
+ * for GPU drivers attaching to vgapci — see amdgpu/i915/radeon, all of which
+ * use the same driver name.
+ */
 static driver_t nvkm_pci_driver = {
-	"nvkm",
+	"drm",
 	nvkm_pci_methods,
 	sizeof(struct nvkm_softc),
 };
 
 static devclass_t nvkm_devclass;
 
-DRIVER_MODULE(nvkm, pci, nvkm_pci_driver, nvkm_devclass, NULL, NULL);
-MODULE_DEPEND(nvkm, pci, 1, 1, 1);
+/*
+ * Attach on the vgapci bus, not pci directly. DFly's vga_pci driver claims
+ * any VGA-class PCI device and exposes it through a pre-allocated "drm"
+ * child slot. GPU-specific drivers (amdgpu/i915/radeon/us) bind to that
+ * child via the vgapci bus.
+ */
+DRIVER_MODULE(nvkm, vgapci, nvkm_pci_driver, nvkm_devclass, NULL, NULL);
