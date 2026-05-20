@@ -75,6 +75,31 @@ struct nvkm_dmamem {
 	bus_dmamap_t	map;
 };
 
+/*
+ * Parsed view of a booter / HS-signed Falcon ucode container.
+ * All offsets are bytes from the start of the blob.
+ */
+struct nvkm_booter_info {
+	const uint8_t	*blob;
+	uint32_t	blob_size;
+	uint32_t	data_offset;	/* code+data section start in blob */
+	uint32_t	data_size;
+
+	uint32_t	nmem_offset;	/* non-secure code, in blob */
+	uint32_t	nmem_size;
+	uint32_t	imem_offset;	/* secure code, in blob */
+	uint32_t	imem_size;
+	uint32_t	dmem_offset;	/* DMEM data, in blob */
+	uint32_t	dmem_size;
+	uint32_t	boot_addr;	/* Falcon BOOTVEC value */
+
+	uint32_t	sig_prod_offset;
+	uint32_t	sig_prod_size;
+	uint32_t	patch_loc;
+	uint32_t	patch_sig;
+	uint32_t	num_sig;
+};
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -87,6 +112,8 @@ struct nvkm_softc {
 	const struct firmware	*fw_booter_load;
 
 	struct nvkm_falcon	*sec2;
+
+	struct nvkm_booter_info	booter;
 };
 
 static __inline uint32_t
@@ -138,5 +165,10 @@ void	nvkm_sec2_fini(struct nvkm_softc *sc);
 int	nvkm_dmamem_alloc(struct nvkm_softc *sc, bus_size_t size,
 	    bus_size_t alignment, struct nvkm_dmamem *out);
 void	nvkm_dmamem_free(struct nvkm_softc *sc, struct nvkm_dmamem *mem);
+
+/* nvkm_booter.c -- HS Falcon container parser */
+struct firmware;
+int	nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
+	    struct nvkm_booter_info *info);
 
 #endif /* _NVKM_PRIV_H_ */
