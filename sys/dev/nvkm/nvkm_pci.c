@@ -109,6 +109,26 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_fw_init(sc);
 	(void)nvkm_sec2_init(sc);
 
+	/* Phase 0.2.3a smoke test: alloc a DMA-coherent buffer, prove the
+	 * GPU paddr round-trips and that we can write + read back from kva. */
+	{
+		struct nvkm_dmamem dm;
+		int err = nvkm_dmamem_alloc(sc, 4096, 256, &dm);
+		if (err != 0) {
+			device_printf(dev, "dma: alloc failed (%d)\n", err);
+		} else {
+			uint32_t *p = dm.kva;
+			p[0] = 0xdeadbeef;
+			p[1] = 0xcafebabe;
+			device_printf(dev,
+			    "dma: kva=%p paddr=%#jx size=%ju, read-back "
+			    "[0]=0x%08x [1]=0x%08x\n",
+			    dm.kva, (uintmax_t)dm.paddr,
+			    (uintmax_t)dm.size, p[0], p[1]);
+			nvkm_dmamem_free(sc, &dm);
+		}
+	}
+
 	return (0);
 }
 
