@@ -105,8 +105,7 @@ nvkm_pci_attach(device_t dev)
 	boot0 = nvkm_rd32(sc, NV_PMC_BOOT_0);
 	device_printf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
 
-	if (nvkm_bios_init(sc) == 0)
-		(void)nvkm_vbios_bit_init(sc);
+	(void)nvkm_bios_init(sc);
 
 	return (0);
 }
