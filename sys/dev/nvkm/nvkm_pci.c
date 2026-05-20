@@ -106,6 +106,7 @@ nvkm_pci_attach(device_t dev)
 	device_printf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
 
 	(void)nvkm_bios_init(sc);
+	(void)nvkm_fw_init(sc);
 
 	return (0);
 }
@@ -115,6 +116,7 @@ nvkm_pci_detach(device_t dev)
 {
 	struct nvkm_softc *sc = device_get_softc(dev);
 
+	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
 	return (0);
