@@ -65,15 +65,9 @@ nvkm_prom_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t offset,
  * reach the next image, *last with the is-last-image flag, *npde with
  * 1 if an NPDE extension was used to override PCIR fields.
  */
-/* code_type values seen in PCIR.code_type. */
-#define NVKM_VBIOS_CODE_TYPE_X86_BIOS	0x00
-#define NVKM_VBIOS_CODE_TYPE_EFI	0x03
-#define NVKM_VBIOS_CODE_TYPE_NBSI	0x70
-#define NVKM_VBIOS_CODE_TYPE_NV_EXT	0xe0	/* "VBIOS_EXT" in open-rm */
-
 static int
 nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
-    uint32_t *size, int *last, int *npde_used, uint8_t *code_type_out)
+    uint32_t *size, int *last, int *npde_used)
 {
 	uint16_t pcir_rel, pcir_struct_len, vendor, device;
 	uint32_t pcir, class_code, image_bytes, advance_bytes;
@@ -175,8 +169,6 @@ nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
 	    *npde_used ? " (NPDE)" : "");
 
 	*size = advance_bytes;
-	if (code_type_out != NULL)
-		*code_type_out = code_type;
 	return (0);
 }
 
@@ -189,7 +181,6 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	sc->vbios = kmalloc(NVKM_VBIOS_MAX_SIZE, M_NVKM_VBIOS,
 	    M_WAITOK | M_ZERO);
 	sc->vbios_size = NVKM_VBIOS_MAX_SIZE;
-	sc->vbios_expansion_rom_off = 0;
 
 	nvkm_rom_shadow(sc, false);
 	nvkm_prom_read(sc, sc->vbios, 0, NVKM_VBIOS_MAX_SIZE);
@@ -216,19 +207,13 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	last = 0;
 	size = 0;
 	while (!last) {
-		uint8_t code_type = 0;
-
 		error = nvkm_bios_parse_image(sc, offset, idx, &size, &last,
-		    &npde_used, &code_type);
+		    &npde_used);
 		if (error != 0) {
 			device_printf(sc->dev,
 			    "VBIOS: chain truncated at image %d (offset 0x%05x)\n",
 			    idx, offset);
 			break;
-		}
-		if (code_type == NVKM_VBIOS_CODE_TYPE_NV_EXT &&
-		    sc->vbios_expansion_rom_off == 0) {
-			sc->vbios_expansion_rom_off = offset;
 		}
 		idx++;
 		if (last)
@@ -239,10 +224,8 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	if (last)
 		sc->vbios_size = offset + size;
 
-	device_printf(sc->dev,
-	    "VBIOS: %d image%s, total %u bytes, expansion_rom_off=0x%x\n",
-	    idx, idx == 1 ? "" : "s", sc->vbios_size,
-	    sc->vbios_expansion_rom_off);
+	device_printf(sc->dev, "VBIOS: %d image%s, total %u bytes\n",
+	    idx, idx == 1 ? "" : "s", sc->vbios_size);
 
 	return (0);
 }
