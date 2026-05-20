@@ -48,6 +48,42 @@
 
 #define NVKM_NUM_BARS		6
 
+/*
+ * Parsed FWSEC ucode descriptor, populated by nvkm_vbios_bit_init from the
+ * VBIOS image. Fields common to V2 and V3 are flattened; version-specific
+ * fields live behind a version tag. desc_offset points into sc->vbios where
+ * the original FALCON_UCODE_DESC starts.
+ */
+struct nvkm_fwsec_info {
+	bool		present;
+	uint8_t		app_id;		/* PROD (0x85) or DBG (0x45) */
+	uint32_t	desc_offset;
+	uint32_t	desc_version;	/* 2 or 3 */
+	uint32_t	desc_size;
+	bool		encrypted;
+
+	uint32_t	stored_size;
+	uint32_t	interface_offset;
+	uint32_t	imem_phys_base;
+	uint32_t	imem_load_size;
+	uint32_t	imem_virt_base;
+
+	uint32_t	dmem_phys_base;
+	uint32_t	dmem_load_size;
+
+	/* V2 only */
+	uint32_t	imem_sec_base;
+	uint32_t	imem_sec_size;
+	uint32_t	dmem_offset;
+	uint32_t	virtual_entry;
+
+	/* V3 only */
+	uint32_t	pkc_data_offset;
+	uint16_t	engine_id_mask;
+	uint8_t		ucode_id;
+	uint8_t		signature_count;
+};
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -56,6 +92,16 @@ struct nvkm_softc {
 
 	uint8_t			*vbios;
 	uint32_t		vbios_size;
+	/*
+	 * Offset of the first NVIDIA-extended ROM image (code_type 0xE0)
+	 * within sc->vbios. Several VBIOS-internal pointers (notably the
+	 * Falcon ucode table pointer reached via BIT) are stored as offsets
+	 * relative to this base, not absolute, so we have to remember it.
+	 * Zero if no extended image is present.
+	 */
+	uint32_t		vbios_expansion_rom_off;
+
+	struct nvkm_fwsec_info	fwsec;
 };
 
 static __inline uint32_t
@@ -94,5 +140,8 @@ nvkm_le24(const uint8_t *p)
 /* nvkm_bios.c */
 int	nvkm_bios_init(struct nvkm_softc *sc);
 void	nvkm_bios_fini(struct nvkm_softc *sc);
+
+/* nvkm_vbios_bit.c */
+int	nvkm_vbios_bit_init(struct nvkm_softc *sc);
 
 #endif /* _NVKM_PRIV_H_ */
