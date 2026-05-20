@@ -39,10 +39,12 @@
 #define NV_PROM_SIZE		0x00100000	/* 1 MiB aperture */
 
 /*
- * VBIOS image cache. 64 KiB is more than enough for headers and the FwSec
- * blob we will need for GSP boot; the full VBIOS rarely exceeds this.
+ * VBIOS image cache. PCI Option ROMs are chained: a legacy x86 image is
+ * commonly followed by one or more UEFI images. The PROM aperture itself
+ * is 1 MiB; we cap the cache at 256 KiB which is enough for both images
+ * plus the FwSec blob needed by GSP boot.
  */
-#define NVKM_VBIOS_MAX_SIZE	0x10000
+#define NVKM_VBIOS_MAX_SIZE	0x40000
 
 #define NVKM_NUM_BARS		6
 
