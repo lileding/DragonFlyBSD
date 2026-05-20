@@ -257,17 +257,69 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	nvkm_rom_shadow(sc, true);
 
 	/*
-	 * Try a quick PRAMIN probe. PRAMIN reads VRAM where the GPU's own
-	 * bootcode stages a "stitched" VBIOS with pointers resolved -- the
-	 * authoritative source for HS-ucode descriptor table walks per
-	 * nouveau bare-metal. In our VFIO+OVMF VM the VGA aperture register
-	 * stays uninitialised because OVMF skips the legacy x86 option ROM,
-	 * so this currently logs why it's unavailable. Kept as infrastructure
-	 * for future use (manual aperture init, alternative GPU configs).
+	 * Phase 0.2.3d follow-up diagnostics: with OVMF's GOP driver actually
+	 * executed (image 1 from romfile), the GPU displays an EFI framebuffer
+	 * but legacy VBIOS stitching to VRAM does NOT happen (that's the
+	 * legacy x86 image's job, not GOP's). So PRAMIN+BIT is still out.
+	 *
+	 * Two replacement findings made here:
+	 *   1. WPR2_LO/HI (0x1fa824/8) are PLM-locked from PRI -- a kernel
+	 *      write does not stick, so we cannot fake WPR2 setup directly.
+	 *   2. FALCON_UCODE_DESC_V2 records for FwSec ARE present in raw PROM
+	 *      data in the NV-private (code_type 0xE0) extension images. They
+	 *      can be located by content scan (4-byte magic pattern) rather
+	 *      than by following BIT's broken ucode_table_ptr. Once located,
+	 *      the FwSec body can be staged and run on SEC2 like booter_load.
 	 */
 	{
 		uint8_t probe[64];
 		(void)nvkm_pramin_read(sc, probe, sizeof(probe));
+	}
+	{
+		uint32_t orig_lo, orig_hi, after_lo;
+		orig_lo = nvkm_rd32(sc, 0x001fa824);
+		orig_hi = nvkm_rd32(sc, 0x001fa828);
+		nvkm_wr32(sc, 0x001fa824, 0xdeadbe00u);
+		after_lo = nvkm_rd32(sc, 0x001fa824);
+		nvkm_wr32(sc, 0x001fa824, orig_lo);
+		device_printf(sc->dev,
+		    "WPR2: lo=0x%08x hi=0x%08x, test-write -> readback=0x%08x %s\n",
+		    orig_lo, orig_hi, after_lo,
+		    after_lo == 0xdeadbe00u ? "(WRITABLE)" : "(LOCKED)");
+	}
+	{
+		uint32_t a, hits = 0;
+
+		for (a = 0; a + 60 <= sc->vbios_size && hits < 8; a += 4) {
+			uint8_t flags = sc->vbios[a + 0];
+			uint8_t ver   = sc->vbios[a + 1];
+			uint8_t sz_lo = sc->vbios[a + 2];
+			uint8_t sz_hi = sc->vbios[a + 3];
+
+			if ((flags & 0x01) == 0) continue;
+			if (ver != 2) continue;
+			if (sz_lo != 0x3c || sz_hi != 0x00) continue;
+
+			device_printf(sc->dev,
+			    "FwSec desc V2 @ 0x%05x: flags=0x%02x enc=%d "
+			    "imem_phys=0x%x imem_load=%u imem_virt=0x%x "
+			    "dmem_offset=0x%x dmem_phys=0x%x dmem_load=%u "
+			    "intf=0x%x ventry=0x%x\n",
+			    a, flags, (flags & 0x04) ? 1 : 0,
+			    nvkm_le32(&sc->vbios[a + 0x14]),
+			    nvkm_le32(&sc->vbios[a + 0x18]),
+			    nvkm_le32(&sc->vbios[a + 0x1c]),
+			    nvkm_le32(&sc->vbios[a + 0x28]),
+			    nvkm_le32(&sc->vbios[a + 0x2c]),
+			    nvkm_le32(&sc->vbios[a + 0x30]),
+			    nvkm_le32(&sc->vbios[a + 0x10]),
+			    nvkm_le32(&sc->vbios[a + 0x0c]));
+			hits++;
+		}
+		if (hits == 0)
+			device_printf(sc->dev,
+			    "FwSec: no V2 desc candidates in %u bytes\n",
+			    sc->vbios_size);
 	}
 
 	{
