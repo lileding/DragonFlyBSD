@@ -12,4 +12,7 @@ machine_base
 cpu
 cpu_base
 dragonfly
+
+# Auto-generated kernel option / interface stubs
 opt_*.h
+*_if.h
