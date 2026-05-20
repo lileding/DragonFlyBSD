@@ -39,12 +39,12 @@
 #define NV_PROM_SIZE		0x00100000	/* 1 MiB aperture */
 
 /*
- * VBIOS image cache. PCI Option ROMs are chained: a legacy x86 image is
- * commonly followed by one or more UEFI images. The PROM aperture itself
- * is 1 MiB; we cap the cache at 256 KiB which is enough for both images
- * plus the FwSec blob needed by GSP boot.
+ * VBIOS image cache. PCI Option ROMs are chained: a legacy x86 image,
+ * one or more UEFI images, and (on NVIDIA cards) private images chained
+ * via NPDE that carry the FwSec firmware needed by GSP boot. NVIDIA's
+ * own reader sizes this to the full 1 MiB PROM aperture.
  */
-#define NVKM_VBIOS_MAX_SIZE	0x40000
+#define NVKM_VBIOS_MAX_SIZE	0x100000
 
 #define NVKM_NUM_BARS		6
 
@@ -68,6 +68,27 @@ static __inline void
 nvkm_wr32(struct nvkm_softc *sc, uint32_t offset, uint32_t val)
 {
 	bus_write_4(sc->bar_res[0], offset, val);
+}
+
+/* Little-endian byte-buffer accessors used by ROM/VBIOS parsers. */
+static __inline uint16_t
+nvkm_le16(const uint8_t *p)
+{
+	return ((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static __inline uint32_t
+nvkm_le32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+
+static __inline uint32_t
+nvkm_le24(const uint8_t *p)
+{
+	return ((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+	    ((uint32_t)p[2] << 16));
 }
 
 /* nvkm_bios.c */
