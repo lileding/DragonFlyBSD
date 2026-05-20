@@ -26,6 +26,17 @@
 #define NV_PMC_BOOT_0		0x00000000
 
 /*
+ * TU102 SEC2 engine BAR0 offsets.
+ *   NV_PSEC                 = 0x840000..0x843fff
+ *   NV_PSEC_FBIF_BASE       = 0x840600
+ *   NV_PSEC_FALCON_ENGINE   = 0x8403c0
+ * Turing SEC2 is Falcon-only (no RISC-V), so the second register block
+ * is unused. From open-rm dev_sec_pri.h / dev_sec_addendum.h.
+ */
+#define NVKM_TU102_SEC2_BASE	0x00840000
+#define NVKM_TU102_SEC2_FBIF	0x00840600
+
+/*
  * PCI cfg-space mirror inside BAR0. cfg.addr is the same (0x088000) for the
  * entire gp100 family and later, including Turing. See linux/drivers/gpu/drm/
  * nouveau/nvkm/subdev/pci/gp100.c.
@@ -49,6 +60,7 @@
 #define NVKM_NUM_BARS		6
 
 struct firmware;
+struct nvkm_falcon;
 
 struct nvkm_softc {
 	device_t		dev;
@@ -60,6 +72,8 @@ struct nvkm_softc {
 	uint32_t		vbios_size;
 
 	const struct firmware	*fw_booter_load;
+
+	struct nvkm_falcon	*sec2;
 };
 
 static __inline uint32_t
@@ -102,5 +116,9 @@ void	nvkm_bios_fini(struct nvkm_softc *sc);
 /* nvkm_fw.c */
 int	nvkm_fw_init(struct nvkm_softc *sc);
 void	nvkm_fw_fini(struct nvkm_softc *sc);
+
+/* nvkm_sec2.c */
+int	nvkm_sec2_init(struct nvkm_softc *sc);
+void	nvkm_sec2_fini(struct nvkm_softc *sc);
 
 #endif /* _NVKM_PRIV_H_ */

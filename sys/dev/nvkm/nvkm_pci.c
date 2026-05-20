@@ -107,6 +107,7 @@ nvkm_pci_attach(device_t dev)
 
 	(void)nvkm_bios_init(sc);
 	(void)nvkm_fw_init(sc);
+	(void)nvkm_sec2_init(sc);
 
 	return (0);
 }
@@ -116,6 +117,7 @@ nvkm_pci_detach(device_t dev)
 {
 	struct nvkm_softc *sc = device_get_softc(dev);
 
+	nvkm_sec2_fini(sc);
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
