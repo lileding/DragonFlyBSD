@@ -5,6 +5,8 @@
  *
  * Phase 0.0: identify the GPU, map its BARs, and confirm MMIO works by
  * reading PMC_BOOT_0 (the chip identification register).
+ *
+ * Phase 0.1: read VBIOS via the BAR0 PROM aperture. See nvkm_bios.c.
  */
 
 #include "nvkm_priv.h"
@@ -100,8 +102,10 @@ nvkm_pci_attach(device_t dev)
 		return (ENXIO);
 	}
 
-	boot0 = bus_read_4(sc->bar_res[0], NV_PMC_BOOT_0);
+	boot0 = nvkm_rd32(sc, NV_PMC_BOOT_0);
 	device_printf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
+
+	(void)nvkm_bios_init(sc);
 
 	return (0);
 }
@@ -111,6 +115,7 @@ nvkm_pci_detach(device_t dev)
 {
 	struct nvkm_softc *sc = device_get_softc(dev);
 
+	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
 	return (0);
 }
