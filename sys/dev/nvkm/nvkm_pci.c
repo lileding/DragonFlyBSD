@@ -112,8 +112,10 @@ nvkm_pci_attach(device_t dev)
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
 
-		if (nvkm_booter_parse(sc, sc->fw_booter_load, &bi) == 0)
+		if (nvkm_booter_parse(sc, sc->fw_booter_load, &bi) == 0) {
 			sc->booter = bi;
+			(void)nvkm_booter_load_and_start(sc);
+		}
 	}
 
 	return (0);
@@ -124,6 +126,7 @@ nvkm_pci_detach(device_t dev)
 {
 	struct nvkm_softc *sc = device_get_softc(dev);
 
+	nvkm_booter_release(sc);
 	nvkm_sec2_fini(sc);
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
