@@ -1,0 +1,134 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * PCI bus attachment for nvkm.
+ *
+ * Phase 0.0: identify the GPU, map its BARs, and confirm MMIO works by
+ * reading PMC_BOOT_0 (the chip identification register).
+ */
+
+#include "nvkm_priv.h"
+
+#include <bus/pci/pcireg.h>
+#include <bus/pci/pcivar.h>
+
+struct nvkm_pci_id {
+	uint16_t	device;
+	const char	*name;
+};
+
+static const struct nvkm_pci_id nvkm_pci_ids[] = {
+	{ NVKM_PCI_DEVICE_TU102, "NVIDIA TU102 (RTX 2080 Ti family)" },
+	{ 0, NULL }
+};
+
+static const struct nvkm_pci_id *
+nvkm_pci_match(device_t dev)
+{
+	const struct nvkm_pci_id *id;
+
+	if (pci_get_vendor(dev) != NVKM_PCI_VENDOR_NVIDIA)
+		return (NULL);
+	for (id = nvkm_pci_ids; id->name != NULL; id++) {
+		if (id->device == pci_get_device(dev))
+			return (id);
+	}
+	return (NULL);
+}
+
+static int
+nvkm_pci_probe(device_t dev)
+{
+	const struct nvkm_pci_id *id;
+
+	id = nvkm_pci_match(dev);
+	if (id == NULL)
+		return (ENXIO);
+	device_set_desc(dev, id->name);
+	return (BUS_PROBE_DEFAULT);
+}
+
+static void
+nvkm_pci_release_bars(struct nvkm_softc *sc)
+{
+	int i;
+
+	for (i = 0; i < NVKM_NUM_BARS; i++) {
+		if (sc->bar_res[i] != NULL) {
+			bus_release_resource(sc->dev, SYS_RES_MEMORY,
+			    sc->bar_rid[i], sc->bar_res[i]);
+			sc->bar_res[i] = NULL;
+		}
+	}
+}
+
+static int
+nvkm_pci_attach(device_t dev)
+{
+	struct nvkm_softc *sc = device_get_softc(dev);
+	uint32_t boot0;
+	int i;
+
+	sc->dev = dev;
+
+	device_printf(dev,
+	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
+	    pci_get_vendor(dev), pci_get_device(dev), pci_get_revid(dev),
+	    pci_get_subvendor(dev), pci_get_subdevice(dev));
+
+	/*
+	 * Try to allocate every possible BAR slot. 64-bit BARs occupy two
+	 * consecutive slots and the upper half will fail to allocate, which
+	 * is expected.
+	 */
+	for (i = 0; i < NVKM_NUM_BARS; i++) {
+		sc->bar_rid[i] = PCIR_BAR(i);
+		sc->bar_res[i] = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
+		    &sc->bar_rid[i], RF_ACTIVE);
+		if (sc->bar_res[i] != NULL) {
+			device_printf(dev,
+			    "  BAR%d: %#jx-%#jx (%ju MiB)\n", i,
+			    (uintmax_t)rman_get_start(sc->bar_res[i]),
+			    (uintmax_t)rman_get_end(sc->bar_res[i]),
+			    (uintmax_t)rman_get_size(sc->bar_res[i]) >> 20);
+		}
+	}
+
+	if (sc->bar_res[0] == NULL) {
+		device_printf(dev, "BAR0 missing; cannot proceed\n");
+		nvkm_pci_release_bars(sc);
+		return (ENXIO);
+	}
+
+	boot0 = bus_read_4(sc->bar_res[0], NV_PMC_BOOT_0);
+	device_printf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
+
+	return (0);
+}
+
+static int
+nvkm_pci_detach(device_t dev)
+{
+	struct nvkm_softc *sc = device_get_softc(dev);
+
+	nvkm_pci_release_bars(sc);
+	return (0);
+}
+
+static device_method_t nvkm_pci_methods[] = {
+	DEVMETHOD(device_probe,		nvkm_pci_probe),
+	DEVMETHOD(device_attach,	nvkm_pci_attach),
+	DEVMETHOD(device_detach,	nvkm_pci_detach),
+	DEVMETHOD_END
+};
+
+static driver_t nvkm_pci_driver = {
+	"nvkm",
+	nvkm_pci_methods,
+	sizeof(struct nvkm_softc),
+};
+
+static devclass_t nvkm_devclass;
+
+DRIVER_MODULE(nvkm, pci, nvkm_pci_driver, nvkm_devclass, NULL, NULL);
+MODULE_DEPEND(nvkm, pci, 1, 1, 1);

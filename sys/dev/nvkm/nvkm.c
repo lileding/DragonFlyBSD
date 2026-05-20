@@ -3,23 +3,20 @@
  *
  * Native DragonFlyBSD driver for NVIDIA GPUs via the GSP firmware path.
  *
- * Phase 0 skeleton: load/unload only. No hardware interaction yet.
+ * Module entry point. PCI bus attachment lives in nvkm_pci.c.
  */
 
-#include <sys/param.h>
-#include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/module.h>
+#include "nvkm_priv.h"
 
 static int
 nvkm_modevent(module_t mod __unused, int type, void *data __unused)
 {
 	switch (type) {
 	case MOD_LOAD:
-		kprintf("nvkm: skeleton loaded, target firmware 570.144\n");
+		kprintf("nvkm: loaded (target GSP firmware 570.144)\n");
 		return (0);
 	case MOD_UNLOAD:
-		kprintf("nvkm: skeleton unloaded\n");
+		kprintf("nvkm: unloaded\n");
 		return (0);
 	default:
 		return (EOPNOTSUPP);
