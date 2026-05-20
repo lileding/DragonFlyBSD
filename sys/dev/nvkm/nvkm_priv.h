@@ -48,6 +48,8 @@
 
 #define NVKM_NUM_BARS		6
 
+struct firmware;
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -56,6 +58,8 @@ struct nvkm_softc {
 
 	uint8_t			*vbios;
 	uint32_t		vbios_size;
+
+	const struct firmware	*fw_booter_load;
 };
 
 static __inline uint32_t
@@ -94,5 +98,9 @@ nvkm_le24(const uint8_t *p)
 /* nvkm_bios.c */
 int	nvkm_bios_init(struct nvkm_softc *sc);
 void	nvkm_bios_fini(struct nvkm_softc *sc);
+
+/* nvkm_fw.c */
+int	nvkm_fw_init(struct nvkm_softc *sc);
+void	nvkm_fw_fini(struct nvkm_softc *sc);
 
 #endif /* _NVKM_PRIV_H_ */
