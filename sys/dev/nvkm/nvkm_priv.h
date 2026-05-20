@@ -177,8 +177,12 @@ nvkm_le24(const uint8_t *p)
 }
 
 /* nvkm_bios.c */
+struct sysctl_ctx_list;
+struct sysctl_oid;
 int	nvkm_bios_init(struct nvkm_softc *sc);
 void	nvkm_bios_fini(struct nvkm_softc *sc);
+void	nvkm_bios_publish_sysctl(struct nvkm_softc *sc,
+	    struct sysctl_ctx_list *ctx, struct sysctl_oid *parent);
 
 /* nvkm_fw.c */
 int	nvkm_fw_init(struct nvkm_softc *sc);

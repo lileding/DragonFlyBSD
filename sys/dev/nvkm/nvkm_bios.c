@@ -24,6 +24,8 @@
  */
 
 #include "nvkm_priv.h"
+
+#include <sys/sysctl.h>
 #include "nvkm_rom.h"
 
 static MALLOC_DEFINE(M_NVKM_VBIOS, "nvkm_vbios", "nvkm VBIOS image cache");
@@ -310,6 +312,31 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	    idx, idx == 1 ? "" : "s", sc->vbios_size);
 
 	return (0);
+}
+
+static int
+nvkm_bios_sysctl_dump(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+
+	if (sc->vbios == NULL || sc->vbios_size == 0)
+		return (ENXIO);
+	return (SYSCTL_OUT(req, sc->vbios, sc->vbios_size));
+}
+
+void
+nvkm_bios_publish_sysctl(struct nvkm_softc *sc, struct sysctl_ctx_list *ctx,
+    struct sysctl_oid *parent)
+{
+	if (sc->vbios == NULL)
+		return;
+	SYSCTL_ADD_INT(ctx, SYSCTL_CHILDREN(parent),
+	    OID_AUTO, "vbios_size", CTLFLAG_RD,
+	    &sc->vbios_size, 0, "VBIOS image size in bytes");
+	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(parent),
+	    OID_AUTO, "vbios", CTLTYPE_OPAQUE | CTLFLAG_RD,
+	    sc, 0, nvkm_bios_sysctl_dump, "S",
+	    "Full VBIOS image dump");
 }
 
 void

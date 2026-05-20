@@ -13,6 +13,7 @@
 
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
+#include <sys/sysctl.h>
 
 struct nvkm_pci_id {
 	uint16_t	device;
@@ -108,6 +109,13 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_bios_init(sc);
 	(void)nvkm_fw_init(sc);
 	(void)nvkm_sec2_init(sc);
+
+	/* Publish VBIOS via sysctl so userspace can dump it for romfile. */
+	{
+		struct sysctl_ctx_list *ctx = device_get_sysctl_ctx(dev);
+		struct sysctl_oid *oid = device_get_sysctl_tree(dev);
+		nvkm_bios_publish_sysctl(sc, ctx, oid);
+	}
 
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
