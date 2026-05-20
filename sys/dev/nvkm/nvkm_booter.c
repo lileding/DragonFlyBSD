@@ -27,8 +27,10 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvkm_falcon.h"
 
 #include <sys/firmware.h>
+#include <sys/libkern.h>		/* memcpy */
 
 struct nvkm_booter_bin_hdr {
 	uint32_t bin_magic;	/* 0x10de */
@@ -163,4 +165,147 @@ nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	    info->patch_loc, info->patch_sig, info->num_sig);
 
 	return (0);
+}
+
+/*
+ * Bootloader DMEM descriptor v2. The booter's nmem (non-secure)
+ * bootloader stub reads this at DMEM offset 0 to know where the rest of
+ * the image lives in system DMA memory and which DMA index to use for
+ * fetching it. Layout matches NVIDIA's flcn_bl_dmem_desc_v2.
+ */
+struct nvkm_bl_dmem_desc_v2 {
+	uint32_t	reserved[4];
+	uint32_t	signature[4];
+	uint32_t	ctx_dma;
+	uint64_t	code_dma_base;
+	uint32_t	non_sec_code_off;
+	uint32_t	non_sec_code_size;
+	uint32_t	sec_code_off;
+	uint32_t	sec_code_size;
+	uint32_t	code_entry_point;
+	uint64_t	data_dma_base;
+	uint32_t	data_size;
+	uint32_t	argc;
+	uint32_t	argv;
+} __packed;
+
+/* FALCON_DMAIDX values, see linux/nvkm/engine/falcon.h. */
+#define NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH	4
+
+/* FBIF TRANSCFG[ctx_dma]: tells Falcon how to interpret this DMA index.
+ * Value 0x5 == TARGET=NONCOHERENT_SYSMEM | MEMTYPE=PHYSICAL. */
+#define NVKM_FBIF_TRANSCFG(i)		(0x600u + (i) * 4u)
+#define NVKM_FBIF_TRANSCFG_NCOH_PHYS	0x00000005u
+
+int
+nvkm_booter_load_and_start(struct nvkm_softc *sc)
+{
+	const struct nvkm_booter_info *bi = &sc->booter;
+	struct nvkm_falcon *sec2 = sc->sec2;
+	struct nvkm_bl_dmem_desc_v2 desc;
+	uint32_t mb0, mb1, cpuctl, dmactl;
+	uint32_t imem_top_off;
+	int error;
+
+	if (bi->blob == NULL || sec2 == NULL) {
+		device_printf(sc->dev,
+		    "booter: cannot start (booter info or sec2 missing)\n");
+		return (ENXIO);
+	}
+
+	/* 1. Allocate DMA-coherent buffer of bi->data_size and copy the
+	 * data section into it. The GPU will DMA from here. */
+	error = nvkm_dmamem_alloc(sc, bi->data_size, 4096, &sc->booter_dma);
+	if (error != 0) {
+		device_printf(sc->dev, "booter: dma alloc failed (%d)\n", error);
+		return (error);
+	}
+	memcpy(sc->booter_dma.kva, bi->blob + bi->data_offset, bi->data_size);
+	device_printf(sc->dev,
+	    "booter: staged %u bytes to kva=%p paddr=%#jx\n",
+	    bi->data_size, sc->booter_dma.kva,
+	    (uintmax_t)sc->booter_dma.paddr);
+
+	/* 2. Build the bootloader DMEM descriptor v2. */
+	memset(&desc, 0, sizeof(desc));
+	desc.ctx_dma          = NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH;
+	desc.code_dma_base    = sc->booter_dma.paddr;
+	desc.non_sec_code_off = bi->nmem_offset;
+	desc.non_sec_code_size = bi->nmem_size;
+	desc.sec_code_off     = bi->imem_offset;
+	desc.sec_code_size    = bi->imem_size;
+	desc.code_entry_point = 0;
+	desc.data_dma_base    = sc->booter_dma.paddr + bi->dmem_offset;
+	desc.data_size        = bi->dmem_size;
+	desc.argc             = 0;
+	desc.argv             = 0;
+
+	/* 3. Set FBIF context translation for the DMA index we'll use. */
+	nvkm_falcon_mask(sec2, NVKM_FBIF_TRANSCFG(desc.ctx_dma),
+	    0x00000007u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
+
+	/* 4. Clear DMACTL.REQUIRE_CTX (no-instance-block path). */
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_DMACTL, 0);
+
+	/* 5. PIO-write descriptor to DMEM offset 0. */
+	error = nvkm_falcon_load_dmem(sec2, &desc, 0, sizeof(desc), 0);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "booter: load_dmem(desc) failed (%d)\n", error);
+		goto out_free;
+	}
+
+	/*
+	 * 6. PIO-write the non-secure bootloader stub (nmem) into the TOP
+	 * of IMEM with tag = boot_addr / IMEM_BLKSIZE. Falcon's tagged
+	 * IMEM means BOOTVEC=boot_addr will fetch from this block.
+	 */
+	imem_top_off = 65536u - NVKM_FLCN_IMEM_BLKSIZE;	/* 0xff00 */
+	error = nvkm_falcon_load_imem(sec2,
+	    bi->blob + bi->data_offset + bi->nmem_offset,
+	    imem_top_off,
+	    bi->nmem_size,
+	    bi->boot_addr / NVKM_FLCN_IMEM_BLKSIZE,
+	    0, false);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "booter: load_imem(bootloader) failed (%d)\n", error);
+		goto out_free;
+	}
+
+	/* 7. Set BOOTVEC and mailbox inputs. */
+	nvkm_falcon_set_bootvec(sec2, bi->boot_addr);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
+
+	device_printf(sc->dev,
+	    "booter: starting SEC2 (bootvec=0x%x, ctx_dma=%u, dma_base=%#jx)\n",
+	    bi->boot_addr, desc.ctx_dma, (uintmax_t)desc.code_dma_base);
+
+	/* 8. Start and wait. */
+	nvkm_falcon_start(sec2);
+	error = nvkm_falcon_wait_for_halt(sec2, 2000000);	/* 2 s */
+
+	mb0    = nvkm_falcon_rd32(sec2, NVKM_FLCN_MAILBOX0);
+	mb1    = nvkm_falcon_rd32(sec2, NVKM_FLCN_MAILBOX1);
+	cpuctl = nvkm_falcon_rd32(sec2, NVKM_FLCN_CPUCTL);
+	dmactl = nvkm_falcon_rd32(sec2, NVKM_FLCN_DMACTL);
+
+	device_printf(sc->dev,
+	    "booter: %s mb0=0x%08x mb1=0x%08x cpuctl=0x%08x dmactl=0x%08x\n",
+	    error == 0 ? "halted" : "timed out",
+	    mb0, mb1, cpuctl, dmactl);
+
+	return (error);
+
+out_free:
+	nvkm_dmamem_free(sc, &sc->booter_dma);
+	return (error);
+}
+
+void
+nvkm_booter_release(struct nvkm_softc *sc)
+{
+	if (sc->booter_dma.kva != NULL)
+		nvkm_dmamem_free(sc, &sc->booter_dma);
 }

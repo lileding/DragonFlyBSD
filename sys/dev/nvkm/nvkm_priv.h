@@ -114,6 +114,7 @@ struct nvkm_softc {
 	struct nvkm_falcon	*sec2;
 
 	struct nvkm_booter_info	booter;
+	struct nvkm_dmamem	booter_dma;	/* staged booter image */
 };
 
 static __inline uint32_t
@@ -166,9 +167,11 @@ int	nvkm_dmamem_alloc(struct nvkm_softc *sc, bus_size_t size,
 	    bus_size_t alignment, struct nvkm_dmamem *out);
 void	nvkm_dmamem_free(struct nvkm_softc *sc, struct nvkm_dmamem *mem);
 
-/* nvkm_booter.c -- HS Falcon container parser */
+/* nvkm_booter.c -- HS Falcon container parser + boot */
 struct firmware;
 int	nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	    struct nvkm_booter_info *info);
+int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
+void	nvkm_booter_release(struct nvkm_softc *sc);
 
 #endif /* _NVKM_PRIV_H_ */
