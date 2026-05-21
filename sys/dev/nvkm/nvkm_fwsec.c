@@ -432,6 +432,13 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	    0x7u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
 
 	/*
+	 * (DMA self-test confirmed sysmem->Falcon DMA works. The bug was
+	 * that nvkm_falcon_disable_ctx_req was only updating FBIF_CTL and
+	 * not clearing DMACTL, so REQUIRE_CTX kept blocking the BL's DMA.
+	 * Both are now done in the helper.)
+	 */
+
+	/*
 	 * 7. PIO-load the BL into IMEM. Per nouveau gm200_flcn_fw_load,
 	 * dest = code.limit - boot_size; tag = boot_addr >> 8 = start_tag.
 	 * For our 64 KiB SEC2/GSP IMEM with boot_size=512, dest=0xFE00,
