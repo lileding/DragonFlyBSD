@@ -398,15 +398,17 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 		if (vga & NV_PDISP_VGA_CR_ENABLED) {
 			uint64_t staged = ((uint64_t)(vga & 0xffffff00u)) << 8;
 			/*
-			 * Use whatever address the BIOS actually staged at
-			 * (override the high default). On TU102 with > 4 GiB
-			 * VRAM and a low-VRAM BIOS staging, this puts the
-			 * FRTS region just below the staged VBIOS rather
-			 * than at the very top of VRAM. (nouveau falls back
-			 * to fb_size-0x20000 in this case, but that placed
-			 * FRTS far from where FwSec actually expects it.)
+			 * Per nouveau tu102_gsp_vga_workspace_addr: on cards
+			 * with > 4 GiB VRAM, the 24-bit address field in
+			 * 0x625f04 cannot encode top-of-VRAM, so the BIOS
+			 * stages at a low address. In that case use
+			 * fb_size - 0x20000 so WPR2 lands near the top and
+			 * has room below for the GSP image + heap.
 			 */
-			bios_addr = staged;
+			if (staged < bios_addr)
+				bios_addr = fb_size - 0x20000;
+			else
+				bios_addr = staged;
 		}
 
 		frts_size = 0x100000u;
@@ -707,6 +709,11 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 		    nvkm_rd32(sc, 0x001428), nvkm_rd32(sc, 0x00142c),
 		    nvkm_rd32(sc, 0x001430), nvkm_rd32(sc, 0x001434),
 		    nvkm_rd32(sc, 0x001438), nvkm_rd32(sc, 0x00143c));
+		device_printf(sc->dev,
+		    "fwsec: scratch[14..17] %08x %08x %08x %08x "
+		    "(sb_err lo16 of [15])\n",
+		    nvkm_rd32(sc, 0x001450), nvkm_rd32(sc, 0x001454),
+		    nvkm_rd32(sc, 0x001458), nvkm_rd32(sc, 0x00145c));
 	}
 
 out:
