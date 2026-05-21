@@ -211,6 +211,18 @@ nvkm_pci_attach(device_t dev)
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x080, 0);
 
 		/*
+		 * Experiment NOT kept: writing CPUCTL.STARTCPU on GSP-Falcon
+		 * after the booter just briefly ran NS Falcon code at PC=0
+		 * (empty IMEM) before halting again -- it does NOT kick the
+		 * RISC-V core. TU102 has no separate RISC-V CPUCTL/BOOTVEC
+		 * (dev_riscv_pri.h only exposes STATUS/IRQ regs at 0x240/2b4),
+		 * so GSP RISC-V startup must be performed by the booter as
+		 * its final step. On our box the booter completes (mb0=0,
+		 * WPR2 expanded, MB0/1 rewritten by booter to a sysmem PA)
+		 * but does not perform the RISC-V kick. Open question.
+		 */
+
+		/*
 		 * RISC-V may take a moment to come up after the booter
 		 * released it. Poll for up to 1 s.
 		 */
@@ -225,6 +237,42 @@ nvkm_pci_attach(device_t dev)
 		    "gsp: post-booter polled %d us RISCV_STATUS=0x%08x "
 		    "(active=%u)\n",
 		    polls * 10, riscv_status, riscv_status & 1);
+
+		/* Dump more GSP-Falcon and RISC-V state to characterize. */
+		{
+			uint32_t cpuctl = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x100);
+			uint32_t bootvec= nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x104);
+			uint32_t irqstat= nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x008);
+			uint32_t mb0    = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x040);
+			uint32_t mb1    = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x044);
+			uint32_t exci   = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x024);
+			uint32_t sctl   = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x240);
+			uint32_t falcon_os_post = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_BASE + 0x080);
+			uint32_t riscv_bcr = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_RISCV + 0x100);
+			uint32_t riscv_cpuctl_t = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_RISCV + 0x200);
+			uint32_t riscv_irqstat = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_RISCV + 0x008);
+
+			device_printf(sc->dev,
+			    "gsp: F CPUCTL=0x%08x BOOTVEC=0x%08x SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x\n",
+			    cpuctl, bootvec, sctl, exci, irqstat);
+			device_printf(sc->dev,
+			    "gsp: F MB0=0x%08x MB1=0x%08x FALCON_OS=0x%08x\n",
+			    mb0, mb1, falcon_os_post);
+			device_printf(sc->dev,
+			    "gsp: R BCR=0x%08x CPUCTL@0x200=0x%08x IRQSTAT=0x%08x\n",
+			    riscv_bcr, riscv_cpuctl_t, riscv_irqstat);
+		}
 	}
 
 	if (sc->fw_booter_load != NULL) {
