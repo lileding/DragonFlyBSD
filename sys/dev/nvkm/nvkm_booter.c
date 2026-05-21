@@ -370,6 +370,38 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	    error == 0 ? "halted" : "timed out",
 	    mb0, mb1, cpuctl, dmactl);
 
+	/*
+	 * Post-halt diagnostics: dump SEC2 internal state + a few PMC
+	 * scratch regs in case the booter signaled there. Also peek the
+	 * first few u32 of DMEM in case it wrote a status block.
+	 */
+	{
+		uint32_t sctl   = nvkm_falcon_rd32(sec2, 0x240);
+		uint32_t exci   = nvkm_falcon_rd32(sec2, 0x024);
+		uint32_t irqstat= nvkm_falcon_rd32(sec2, 0x008);
+		uint32_t dmemc, d0, d1, d2, d3;
+		uint32_t wpr2_lo = nvkm_rd32(sc, 0x1fa824);
+		uint32_t wpr2_hi = nvkm_rd32(sc, 0x1fa828);
+
+		device_printf(sc->dev,
+		    "booter: SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x WPR2=0x%08x/0x%08x\n",
+		    sctl, exci, irqstat, wpr2_lo, wpr2_hi);
+
+		dmemc = 0x0u | (1u << 25);	/* DMEM[0], AINCR */
+		nvkm_falcon_wr32(sec2, 0x1c0, dmemc);
+		d0 = nvkm_falcon_rd32(sec2, 0x1c4);
+		d1 = nvkm_falcon_rd32(sec2, 0x1c4);
+		d2 = nvkm_falcon_rd32(sec2, 0x1c4);
+		d3 = nvkm_falcon_rd32(sec2, 0x1c4);
+		device_printf(sc->dev,
+		    "booter: DMEM[0..0x10] = %08x %08x %08x %08x\n",
+		    d0, d1, d2, d3);
+		device_printf(sc->dev,
+		    "booter: scratch[c..f] = %08x %08x %08x %08x\n",
+		    nvkm_rd32(sc, 0x001430), nvkm_rd32(sc, 0x001434),
+		    nvkm_rd32(sc, 0x001438), nvkm_rd32(sc, 0x00143c));
+	}
+
 	return (error);
 
 out_free:
