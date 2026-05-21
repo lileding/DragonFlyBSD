@@ -202,9 +202,8 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 {
 	const struct nvkm_booter_info *bi = &sc->booter;
 	struct nvkm_falcon *sec2 = sc->sec2;
-	struct nvkm_bl_dmem_desc_v2 desc;
 	uint32_t mb0, mb1, cpuctl, dmactl;
-	uint32_t imem_top_off;
+	uint8_t *data;
 	int error;
 
 	if (bi->blob == NULL || sec2 == NULL) {
@@ -213,68 +212,62 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		return (ENXIO);
 	}
 
-	/* 1. Allocate DMA-coherent buffer of bi->data_size and copy the
-	 * data section into it. The GPU will DMA from here. */
+	/*
+	 * 1. Stage the booter's data section in our own buffer so we can
+	 * patch the HS signature into it before PIO-loading to Falcon.
+	 * NO BL+DMA path here -- the booter is a complete HS image and
+	 * nouveau gm200_flcn_fw_load uploads nmem+imem+dmem via PIO when
+	 * fw->boot == NULL. We are not using sc->booter_dma for DMA; it
+	 * is just our editable copy of the signed image.
+	 */
 	error = nvkm_dmamem_alloc(sc, bi->data_size, 4096, &sc->booter_dma);
 	if (error != 0) {
 		device_printf(sc->dev, "booter: dma alloc failed (%d)\n", error);
 		return (error);
 	}
 	memcpy(sc->booter_dma.kva, bi->blob + bi->data_offset, bi->data_size);
+	data = (uint8_t *)sc->booter_dma.kva;
 	device_printf(sc->dev,
-	    "booter: staged %u bytes to kva=%p paddr=%#jx\n",
-	    bi->data_size, sc->booter_dma.kva,
-	    (uintmax_t)sc->booter_dma.paddr);
+	    "booter: staged %u bytes (data section) to kva=%p\n",
+	    bi->data_size, data);
 
 	/*
-	 * 1b. Patch the HS signature into the staged blob the way
-	 * nouveau nvkm_falcon_fw_patch does. The blob carries
-	 * num_sig signatures at blob[sig_prod_offset], each
-	 * sig_prod_size / num_sig bytes. The HS auth hardware looks
-	 * for the signature at blob[patch_loc]. With num_sig = 1 we
-	 * just copy that single signature from sig_prod_offset to
-	 * patch_loc inside the staging buffer (offsets are relative
-	 * to the start of the blob; subtract data_offset to land in
-	 * the kva-mapped staging copy).
+	 * 1b. Patch the HS signature into the staged data section.
+	 *
+	 * Per nouveau:
+	 *   src = blob[sig_prod_offset + patch_sig * sig_size]
+	 *         (sig_prod_offset is offset within WHOLE blob, in the
+	 *         HS header region before data_offset)
+	 *   dst = fw.img[patch_loc]
+	 *         (patch_loc is offset within fw.img = blob + data_offset,
+	 *         pointing into the dmem section once data is uploaded)
+	 *
+	 * Earlier code subtracted data_offset from patch_loc; that was
+	 * wrong because patch_loc is ALREADY data-section-relative.
 	 */
-	if (bi->num_sig > 0 && bi->sig_prod_size > 0 &&
-	    bi->patch_loc >= bi->data_offset) {
+	if (bi->num_sig > 0 && bi->sig_prod_size > 0) {
 		uint32_t sig_size = bi->sig_prod_size / bi->num_sig;
 		uint32_t src_off  = bi->sig_prod_offset +
 		    bi->patch_sig * sig_size;
-		uint32_t dst_in_kva = bi->patch_loc - bi->data_offset;
+		uint32_t dst_off  = bi->patch_loc;
 
 		if (src_off + sig_size <= bi->blob_size &&
-		    dst_in_kva + sig_size <= bi->data_size) {
-			memcpy((uint8_t *)sc->booter_dma.kva + dst_in_kva,
-			    bi->blob + src_off, sig_size);
+		    dst_off + sig_size <= bi->data_size) {
+			memcpy(data + dst_off, bi->blob + src_off, sig_size);
 			device_printf(sc->dev,
-			    "booter: patched %u-byte sig idx=%u from blob+0x%x to dmem(blob+0x%x)\n",
-			    sig_size, bi->patch_sig, src_off, bi->patch_loc);
+			    "booter: patched %u-byte sig idx=%u from blob+0x%x to data+0x%x\n",
+			    sig_size, bi->patch_sig, src_off, dst_off);
 		} else {
 			device_printf(sc->dev,
-			    "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u)\n",
-			    src_off, sig_size, bi->patch_loc, sig_size);
+			    "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u, "
+			    "blob_size=%u data_size=%u)\n",
+			    src_off, sig_size, dst_off, sig_size,
+			    bi->blob_size, bi->data_size);
 		}
 	}
 
-	/* 2. Build the bootloader DMEM descriptor v2. */
-	memset(&desc, 0, sizeof(desc));
-	desc.ctx_dma          = NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH;
-	desc.code_dma_base    = sc->booter_dma.paddr;
-	desc.non_sec_code_off = bi->nmem_offset;
-	desc.non_sec_code_size = bi->nmem_size;
-	desc.sec_code_off     = bi->imem_offset;
-	desc.sec_code_size    = bi->imem_size;
-	desc.code_entry_point = 0;
-	desc.data_dma_base    = sc->booter_dma.paddr + bi->dmem_offset;
-	desc.data_size        = bi->dmem_size;
-	desc.argc             = 0;
-	desc.argv             = 0;
-
 	/*
-	 * 3a. Reset SEC2 to a known state (matches the per-run reset
-	 * open-rm does before each HS Falcon execution).
+	 * 2. Reset SEC2 + disable context requirement.
 	 */
 	{
 		int rerr = nvkm_falcon_reset_eng(sec2);
@@ -283,44 +276,58 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 			    "booter: SEC2 reset_eng returned %d (continuing)\n",
 			    rerr);
 	}
-
-	/*
-	 * 3b. Disable context requirement: sets FBIF_CTL.ALLOW_PHYS_NO_CTX
-	 * AND clears DMACTL.REQUIRE_CTX. Without ALLOW_PHYS_NO_CTX the
-	 * booter's own nmem stub cannot DMA the rest of the ucode from
-	 * sysmem and HS auth fails silently.
-	 */
 	nvkm_falcon_disable_ctx_req(sec2);
 
-	/* 3c. Program FBIF TRANSCFG for the DMA index the booter uses. */
-	nvkm_falcon_mask(sec2, NVKM_FBIF_TRANSCFG(desc.ctx_dma),
-	    0x00000007u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
-
-	/* 5. PIO-write descriptor to DMEM offset 0. */
-	error = nvkm_falcon_load_dmem(sec2, &desc, 0, sizeof(desc), 0);
-	if (error != 0) {
-		device_printf(sc->dev,
-		    "booter: load_dmem(desc) failed (%d)\n", error);
-		goto out_free;
-	}
-
 	/*
-	 * 6. PIO-write the non-secure bootloader stub (nmem) into the TOP
-	 * of IMEM with tag = boot_addr / IMEM_BLKSIZE. Falcon's tagged
-	 * IMEM means BOOTVEC=boot_addr will fetch from this block.
+	 * 3. Upload nmem (NS code), imem (SEC code) and dmem to Falcon
+	 * via PIO. This mirrors nouveau gm200_flcn_fw_load's fw->boot ==
+	 * NULL fall-through path (gm200.c:299-314): three PIO writes
+	 * for NS code (IMEM, not secure), SEC code (IMEM, secure tag),
+	 * and DMEM data.
+	 *
+	 * Source offsets (within our staged data buffer):
+	 *   nmem at data + 0                       (nmem_base_img = 0)
+	 *   imem at data + nmem_size               (imem_base_img = nmem_size)
+	 *   dmem at data + dmem_offset             (dmem_base_img = dmem_offset)
 	 */
-	imem_top_off = 65536u - NVKM_FLCN_IMEM_BLKSIZE;	/* 0xff00 */
 	error = nvkm_falcon_load_imem(sec2,
-	    bi->blob + bi->data_offset + bi->nmem_offset,
-	    imem_top_off,
+	    data + 0,
+	    bi->nmem_offset,
 	    bi->nmem_size,
-	    bi->boot_addr / NVKM_FLCN_IMEM_BLKSIZE,
+	    bi->nmem_offset >> 8,
 	    0, false);
 	if (error != 0) {
 		device_printf(sc->dev,
-		    "booter: load_imem(bootloader) failed (%d)\n", error);
+		    "booter: load_imem(nmem) failed (%d)\n", error);
 		goto out_free;
 	}
+	error = nvkm_falcon_load_imem(sec2,
+	    data + bi->nmem_size,
+	    bi->imem_offset,
+	    bi->imem_size,
+	    bi->imem_offset >> 8,
+	    0, true);	/* secure tag */
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "booter: load_imem(sec) failed (%d)\n", error);
+		goto out_free;
+	}
+	error = nvkm_falcon_load_dmem(sec2,
+	    data + bi->dmem_offset,
+	    0,
+	    bi->dmem_size,
+	    0);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "booter: load_dmem failed (%d)\n", error);
+		goto out_free;
+	}
+	device_printf(sc->dev,
+	    "booter: PIO uploaded nmem@imem[0x%x]+%u (tag 0x%x), "
+	    "imem@imem[0x%x]+%u (tag 0x%x SEC), dmem[0]+%u\n",
+	    bi->nmem_offset, bi->nmem_size, bi->nmem_offset >> 8,
+	    bi->imem_offset, bi->imem_size, bi->imem_offset >> 8,
+	    bi->dmem_size);
 
 	/*
 	 * 7. Set BOOTVEC and mailbox inputs. The booter expects the
@@ -346,8 +353,8 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	}
 
 	device_printf(sc->dev,
-	    "booter: starting SEC2 (bootvec=0x%x, ctx_dma=%u, dma_base=%#jx)\n",
-	    bi->boot_addr, desc.ctx_dma, (uintmax_t)desc.code_dma_base);
+	    "booter: starting SEC2 (bootvec=0x%x)\n",
+	    bi->boot_addr);
 
 	/* 8. Start and wait. */
 	nvkm_falcon_start(sec2);
