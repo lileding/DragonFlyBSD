@@ -47,6 +47,32 @@ nvkm_falcon_riscv_active(struct nvkm_falcon *flcn)
 }
 
 int
+nvkm_falcon_reset_eng(struct nvkm_falcon *flcn)
+{
+	uint32_t v;
+
+	/*
+	 * Reset register lives at base+0x3c0 (NV_PFALCON_FALCON_ENGINE).
+	 * Bit 0 is the engine reset / power-up control. We assert it, hold
+	 * briefly, then deassert -- this brings the engine out of the
+	 * post-OVMF unknown state and gates power on. After deassert the
+	 * engine begins scrubbing IMEM/DMEM; wait for it to finish.
+	 * Mirrors nouveau gp102_flcn_reset_eng.
+	 */
+	(void)v;
+	/*
+	 * Write-only: avoid an initial read of 0x3c0 in case it too is
+	 * unsafe in the unknown state. Bit 0 is the only meaningful bit;
+	 * other bits read as 0 on TU102 and writing 0 to them is harmless.
+	 */
+	nvkm_falcon_wr32(flcn, 0x3c0, 0x1u);
+	DELAY(10);
+	nvkm_falcon_wr32(flcn, 0x3c0, 0x0u);
+
+	return (nvkm_falcon_wait_for_scrub(flcn, 100000)); /* 100 ms */
+}
+
+int
 nvkm_falcon_wait_for_scrub(struct nvkm_falcon *flcn, int timeout_us)
 {
 	int waited = 0;

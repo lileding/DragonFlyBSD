@@ -271,7 +271,7 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	const uint8_t *body;
 	uint32_t imem_total, dmem_size, ucode_size;
 	struct nvkm_dmamem fw_dma;
-	struct nvkm_falcon *sec2 = sc->sec2;
+	struct nvkm_falcon *sec2 = sc->gsp; /* FwSec runs on GSP-Falcon, not SEC2 */
 	const struct firmware *bl_fw;
 	const struct nvkm_bin_hdr *bl_bh;
 	const struct nvkm_bl_desc *bl_bd;
@@ -279,9 +279,31 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	uint32_t mb0, mb1, cpuctl, wpr2_lo, wpr2_hi;
 	int error;
 
-	device_printf(sc->dev, "fwsec: entry sec2=%p vbios=%p sz=%u\n", sec2, sc->vbios, sc->vbios_size);
+	device_printf(sc->dev, "fwsec: entry gsp_flcn=%p vbios=%p sz=%u\n",
+	    sec2, sc->vbios, sc->vbios_size);
 	if (sec2 == NULL || sc->vbios == NULL)
 		return (ENXIO);
+
+	/*
+	 * Bring the GSP-Falcon to a known state before touching any of its
+	 * registers. On TU102 post-OVMF the engine may be in a state where
+	 * naive PRI reads hang the bus and crash the VM. The reset register
+	 * at base+0x3c0 appears to be safe to write blindly.
+	 */
+	device_printf(sc->dev, "fwsec: resetting GSP-Falcon...\n");
+	error = nvkm_falcon_reset_eng(sec2);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "fwsec: GSP-Falcon reset_eng failed (%d)\n", error);
+		return (error);
+	}
+	device_printf(sc->dev,
+	    "fwsec: GSP-Falcon post-reset HWCFG=0x%08x HWCFG2=0x%08x "
+	    "DMACTL=0x%08x CPUCTL=0x%08x\n",
+	    nvkm_falcon_rd32(sec2, NVKM_FLCN_HWCFG),
+	    nvkm_falcon_rd32(sec2, NVKM_FLCN_HWCFG2),
+	    nvkm_falcon_rd32(sec2, NVKM_FLCN_DMACTL),
+	    nvkm_falcon_rd32(sec2, NVKM_FLCN_CPUCTL));
 
 	/* 1. Find FwSec V2 descriptor in PROM */
 	error = nvkm_fwsec_find_v2(sc, &desc_off);

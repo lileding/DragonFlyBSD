@@ -109,6 +109,7 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_bios_init(sc);
 	(void)nvkm_fw_init(sc);
 	(void)nvkm_sec2_init(sc);
+	(void)nvkm_gsp_init(sc);
 
 	/* Publish VBIOS via sysctl so userspace can dump it for romfile. */
 	{
@@ -138,6 +139,7 @@ nvkm_pci_detach(device_t dev)
 	struct nvkm_softc *sc = device_get_softc(dev);
 
 	nvkm_booter_release(sc);
+	nvkm_gsp_fini(sc);
 	nvkm_sec2_fini(sc);
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
