@@ -164,10 +164,19 @@ struct nvkm_bl_dmem_desc_v2 {
 
 /* ----- Implementation ----------------------------------------------- */
 
+/*
+ * Find the Nth FwSec V2 descriptor candidate in PROM. Two candidates
+ * with the same code/dmem sizes typically exist: one signed for
+ * "debug" fused chips and one for "production" fused chips. The chip's
+ * HS hardware accepts only the matching one and rejects the other with
+ * a silent halt + DEAD5EC3 scrub of the SEC IMEM. We try them in order.
+ */
 static int
-nvkm_fwsec_find_v2(struct nvkm_softc *sc, uint32_t *out_offset)
+nvkm_fwsec_find_v2_nth(struct nvkm_softc *sc, uint32_t skip,
+    uint32_t *out_offset)
 {
 	uint32_t a;
+	uint32_t seen = 0;
 
 	if (sc->vbios == NULL || sc->vbios_size < 64)
 		return (ENXIO);
@@ -178,11 +187,19 @@ nvkm_fwsec_find_v2(struct nvkm_softc *sc, uint32_t *out_offset)
 		if ((hdr & 0xff) & NVKM_FUD_V2_HDR_VER_AVAIL &&
 		    ((hdr >> 8) & 0xff) == NVKM_FUD_V2_HDR_VER &&
 		    ((hdr >> 16) & 0xffff) == NVKM_FUD_V2_SIZE) {
-			*out_offset = a;
-			return (0);
+			if (seen++ == skip) {
+				*out_offset = a;
+				return (0);
+			}
 		}
 	}
 	return (ENOENT);
+}
+
+static int
+nvkm_fwsec_find_v2(struct nvkm_softc *sc, uint32_t *out_offset)
+{
+	return nvkm_fwsec_find_v2_nth(sc, 0, out_offset);
 }
 
 static void
@@ -381,19 +398,15 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 		if (vga & NV_PDISP_VGA_CR_ENABLED) {
 			uint64_t staged = ((uint64_t)(vga & 0xffffff00u)) << 8;
 			/*
-			 * Per nouveau tu102_gsp_vga_workspace_addr: on cards
-			 * with > 4 GiB of VRAM the staging address field (24
-			 * bits in 0x625f04, value << 8) cannot encode the
-			 * actual top-of-VRAM. In that case the BIOS stages
-			 * the VBIOS at a low address that falls BELOW
-			 * (fb_size - 1 MiB); we recognise this case and use
-			 * the fixed "fb_size - 128 KiB" slot instead, which
-			 * is the convention FwSec expects.
+			 * Use whatever address the BIOS actually staged at
+			 * (override the high default). On TU102 with > 4 GiB
+			 * VRAM and a low-VRAM BIOS staging, this puts the
+			 * FRTS region just below the staged VBIOS rather
+			 * than at the very top of VRAM. (nouveau falls back
+			 * to fb_size-0x20000 in this case, but that placed
+			 * FRTS far from where FwSec actually expects it.)
 			 */
-			if (staged < bios_addr)
-				bios_addr = fb_size - 0x20000;
-			else
-				bios_addr = staged;
+			bios_addr = staged;
 		}
 
 		frts_size = 0x100000u;
@@ -429,7 +442,15 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 	    nvkm_falcon_rd32(sec2, NVKM_FLCN_CPUCTL));
 
 	/* 1. Find FwSec V2 descriptor in PROM */
-	error = nvkm_fwsec_find_v2(sc, &desc_off);
+	/*
+	 * Try the SECOND V2 candidate first (the production-signed one).
+	 * The first match in PROM is often the DBG variant and gets
+	 * rejected with a DEAD5EC3 IMEM scrub on retail chips. Fall back
+	 * to the first if the second isn't found.
+	 */
+	error = nvkm_fwsec_find_v2_nth(sc, 1, &desc_off);
+	if (error != 0)
+		error = nvkm_fwsec_find_v2(sc, &desc_off);
 	if (error != 0) {
 		device_printf(sc->dev, "fwsec: no V2 desc found\n");
 		return (error);
@@ -630,6 +651,37 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 	device_printf(sc->dev,
 	    "fwsec: post-run WPR2 lo=0x%08x hi=0x%08x\n",
 	    wpr2_lo, wpr2_hi);
+
+	/*
+	 * Dump IMEM[0x300..0x320] and IMEM[0x0..0x20]. If the BL's DMA
+	 * successfully loaded NS code at IMEM[0..768) and SEC code at
+	 * IMEM[768..38400), these should contain real Falcon instructions
+	 * (non-zero). If they're all zero, the BL's DMA didn't actually
+	 * pull the code from sysmem and HS auth ran on zeros.
+	 */
+	{
+		uint32_t imemc, w0, w1, w2, w3;
+		/* IMEM[0x300] read */
+		imemc = (0x300u & 0xffffu) | (1u << 25); /* AINCR */
+		nvkm_falcon_wr32(sec2, 0x180, imemc); /* IMEMC(0) */
+		w0 = nvkm_falcon_rd32(sec2, 0x184); /* IMEMD(0) */
+		w1 = nvkm_falcon_rd32(sec2, 0x184);
+		w2 = nvkm_falcon_rd32(sec2, 0x184);
+		w3 = nvkm_falcon_rd32(sec2, 0x184);
+		device_printf(sc->dev,
+		    "fwsec: IMEM[0x300..0x310] = %08x %08x %08x %08x "
+		    "(should match VBIOS body[0x300..])\n", w0, w1, w2, w3);
+		/* IMEM[0x0] read (NS code start) */
+		imemc = (0x0u & 0xffffu) | (1u << 25);
+		nvkm_falcon_wr32(sec2, 0x180, imemc);
+		w0 = nvkm_falcon_rd32(sec2, 0x184);
+		w1 = nvkm_falcon_rd32(sec2, 0x184);
+		w2 = nvkm_falcon_rd32(sec2, 0x184);
+		w3 = nvkm_falcon_rd32(sec2, 0x184);
+		device_printf(sc->dev,
+		    "fwsec: IMEM[0x0..0x10] = %08x %08x %08x %08x "
+		    "(NS code start)\n", w0, w1, w2, w3);
+	}
 	/*
 	 * Per nouveau nvkm_gsp_fwsec_frts: real FRTS status lives in
 	 * PMC scratch[0xE] @ 0x001438. Upper 16 bits = error code,
