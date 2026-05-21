@@ -119,7 +119,16 @@ nvkm_pci_attach(device_t dev)
 	}
 
 	/* FwSec FRTS: program WPR2 from HS Falcon (PRI is PLM-locked). */
-	(void)nvkm_fwsec_run_frts(sc, 0x2BFF00000ULL, 0x100000);
+	/*
+	 * Run the two FwSec invocations the way nouveau does on TU102:
+	 *   1. FRTS (cmd 0x15) sets up the FRTS region in VRAM
+	 *   2. SB   (cmd 0x19) does sub-boot, programs WPR2 PLMs, etc.
+	 * The frts_addr/size arguments are only used for FRTS; they're
+	 * computed inside nvkm_fwsec_run_cmd from the actual FB layout.
+	 * Pass 0/0 to make that explicit.
+	 */
+	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_FRTS, 0, 0);
+	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_SB,   0, 0);
 
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
