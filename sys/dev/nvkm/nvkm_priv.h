@@ -37,6 +37,20 @@
 #define NVKM_TU102_SEC2_FBIF	0x00840600
 
 /*
+ * TU102 GSP-Falcon (GSP-lite) BAR0 offsets. The GSP engine on Turing
+ * contains both a Falcon core (used for HS firmware like FwSec) and a
+ * RISC-V core (used for GSP-RM itself). FwSec-FRTS and FwSec-SB run
+ * on the Falcon; the booter then resets GSP into RISC-V mode.
+ *   NV_PGSP                 = 0x110000..0x113fff
+ *   NV_PGSP_FBIF_BASE       = 0x110600
+ *   NV_FALCON2_GSP_BASE     = 0x111000 (RISC-V control regs)
+ * From open-rm dev_gsp.h / dev_gsp_addendum.h / dev_riscv_pri.h.
+ */
+#define NVKM_TU102_GSP_BASE	0x00110000
+#define NVKM_TU102_GSP_FBIF	0x00110600
+#define NVKM_TU102_GSP_RISCV	0x00111000
+
+/*
  * PCI cfg-space mirror inside BAR0. cfg.addr is the same (0x088000) for the
  * entire gp100 family and later, including Turing. See linux/drivers/gpu/drm/
  * nouveau/nvkm/subdev/pci/gp100.c.
@@ -138,6 +152,7 @@ struct nvkm_softc {
 	const struct firmware	*fw_booter_load;
 
 	struct nvkm_falcon	*sec2;
+	struct nvkm_falcon	*gsp;	/* GSP-Falcon (HS host) */
 
 	struct nvkm_booter_info	booter;
 	struct nvkm_dmamem	booter_dma;	/* staged booter image */
@@ -191,6 +206,10 @@ void	nvkm_fw_fini(struct nvkm_softc *sc);
 /* nvkm_sec2.c */
 int	nvkm_sec2_init(struct nvkm_softc *sc);
 void	nvkm_sec2_fini(struct nvkm_softc *sc);
+
+/* nvkm_gsp.c -- GSP-Falcon engine (HS host for FwSec) */
+int	nvkm_gsp_init(struct nvkm_softc *sc);
+void	nvkm_gsp_fini(struct nvkm_softc *sc);
 
 /* nvkm_mem.c -- DMA-coherent memory helpers */
 int	nvkm_dmamem_alloc(struct nvkm_softc *sc, bus_size_t size,

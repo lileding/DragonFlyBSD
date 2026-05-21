@@ -110,4 +110,16 @@ int	nvkm_falcon_load_imem(struct nvkm_falcon *flcn, const void *data,
 int	nvkm_falcon_load_dmem(struct nvkm_falcon *flcn, const void *data,
 	    uint32_t dmem_offset, uint32_t size, uint8_t port);
 
+/*
+ * Reset and re-enable the Falcon engine (NV_PFALCON_FALCON_ENGINE @
+ * base+0x3c0, bit 0 = ENGINE_RESET). After the pulse, waits for IMEM/
+ * DMEM scrubbing to complete. Must be the first thing done on a
+ * Falcon whose post-OVMF state is unknown -- on TU102 GSP-Falcon a
+ * naive PRI read can hang the PRI hub before the engine is reset.
+ * Returns 0 on success, nonzero if the scrub-wait timed out.
+ *
+ * Reference: nouveau gp102_flcn_reset_eng (falcon/gp102.c).
+ */
+int	nvkm_falcon_reset_eng(struct nvkm_falcon *flcn);
+
 #endif /* _NVKM_FALCON_H_ */
