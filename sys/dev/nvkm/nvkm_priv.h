@@ -224,7 +224,9 @@ int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
 void	nvkm_booter_release(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */
-int	nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr,
-	    uint32_t frts_size);
+int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
+	    uint64_t frts_addr, uint32_t frts_size);
+#define	NVKM_FWSEC_CMD_FRTS	0x00000015u
+#define	NVKM_FWSEC_CMD_SB	0x00000019u
 
 #endif /* _NVKM_PRIV_H_ */
