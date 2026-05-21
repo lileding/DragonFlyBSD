@@ -285,6 +285,72 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 		return (ENXIO);
 
 	/*
+	 * VBIOS stitch. Under OVMF + x-vga the legacy BIOS POST does NOT
+	 * run for the passed-through GPU (OVMF has no CSM by default and
+	 * the GOP UEFI driver doesn't stage the legacy VBIOS into VRAM).
+	 * FwSec, when invoked, needs to find a valid VBIOS image in VRAM
+	 * to validate against -- with none present it silently halts
+	 * without writing mb0 / scratch[0xE] (exactly our symptom).
+	 *
+	 * Stage our PROM-read VBIOS (sc->vbios, ~320 KiB) into VRAM at
+	 * the "vga workspace" slot (top 1 MiB) via the PRAMIN window,
+	 * then point NV_PDISP_VGA_CR at it so the GPU advertises the
+	 * VBIOS image is at that VRAM address with target=VRAM.
+	 */
+	{
+		uint32_t lmr_v = nvkm_rd32(sc, 0x100ce0);
+		uint32_t lmag_v = (lmr_v & 0x3f0u) >> 4;
+		uint32_t lsca_v = lmr_v & 0xfu;
+		uint64_t fb_sz  = (uint64_t)lmag_v << (lsca_v + 20);
+		uint64_t bios_addr_v;
+		uint32_t saved_pramin, vga_val, verify;
+		uint32_t pramin_base;
+		uint32_t copy_size;
+		uint32_t i;
+
+		if (lmr_v & 0x40000000u)
+			fb_sz = fb_sz / 16 * 15;
+		bios_addr_v = fb_sz - 0x100000;	/* default; ignore 0x625f04
+						   override -- it's currently
+						   "not in VRAM" and we're about
+						   to fix exactly that */
+
+		copy_size = sc->vbios_size;
+		if (copy_size > NV_PRAMIN_SIZE)
+			copy_size = NV_PRAMIN_SIZE;
+
+		saved_pramin = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		pramin_base  = (uint32_t)(bios_addr_v >> 16);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, pramin_base);
+
+		for (i = 0; i + 4 <= copy_size; i += 4) {
+			uint32_t w =
+			    (uint32_t)sc->vbios[i + 0]        |
+			    ((uint32_t)sc->vbios[i + 1] << 8) |
+			    ((uint32_t)sc->vbios[i + 2] << 16)|
+			    ((uint32_t)sc->vbios[i + 3] << 24);
+			nvkm_wr32(sc, NV_PRAMIN + i, w);
+		}
+		verify = nvkm_rd32(sc, NV_PRAMIN);
+
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_pramin);
+
+		/* Program VGA aperture: bits 31:8 = staging>>8, bit 3 = en,
+		 * bits 1:0 = TARGET_VRAM (=1). */
+		vga_val = ((uint32_t)(bios_addr_v >> 8) & 0xffffff00u) |
+		    NV_PDISP_VGA_CR_ENABLED | NV_PDISP_VGA_CR_TARGET_VRAM;
+		nvkm_wr32(sc, NV_PDISP_VGA_CR, vga_val);
+
+		device_printf(sc->dev,
+		    "fwsec: stitched %u B VBIOS -> VRAM 0x%llx; "
+		    "first_word=0x%08x (raw[0..3]=%02x %02x %02x %02x) "
+		    "VGA_CR set to 0x%08x (was 0x%08x)\n",
+		    copy_size, (unsigned long long)bios_addr_v, verify,
+		    sc->vbios[0], sc->vbios[1], sc->vbios[2], sc->vbios[3],
+		    vga_val, nvkm_rd32(sc, NV_PDISP_VGA_CR));
+	}
+
+	/*
 	 * Recompute frts_addr/size from the GPU's actual FB layout the
 	 * way nouveau tu102_gsp_oneinit / tu102_gsp_vga_workspace_addr do:
 	 *   fb_size       = gp102_fb_vidmem_size (decoded from 0x100ce0)
