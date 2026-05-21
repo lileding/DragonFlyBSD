@@ -399,22 +399,22 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 		}
 
 		/*
-		 * WPR heap size per open-rm src/nvidia/inc/kernel/gpu/gsp/
-		 * gsp_fw_heap.h + kernel_gsp.c:5050-5053:
-		 *   heap = OS_carveout (22 MiB LibOS3 baremetal)
-		 *        + RM_BASE_TU10X (8 MiB)
-		 *        + ALIGN(96 KiB * fb_gb, 1 MiB)
-		 *        + ALIGN(48 KiB * 2048, 1 MiB)   = 96 MiB
-		 *   then clamped to heap_size_min = 88 MiB (r570 libos3 baremetal)
-		 * For 11 GiB FB: 22 + 8 + 2 + 96 = 128 MiB.
+		 * WPR heap size for r570 + TU102 (uses LibOS2, NOT LibOS3):
+		 *   r570_wpr_libos2 (nouveau rm/r570/rm.c:9):
+		 *     os_carveout_size = LIBOS2 (0 MiB -- no FB carveout for v2)
+		 *     base_size        = TU10X  (8 MiB)
+		 *     heap_size_min    = LIBOS2 (64 MiB)
+		 *   heap = 0 + 8 + ALIGN(96 KiB * fb_gb, 1 MiB) + ALIGN(48 KiB * 2048, 1 MiB)
+		 *        clamped to 64 MiB
+		 *   For 11 GiB FB: 0 + 8 + 2 + 96 = 106 MiB.
 		 */
 		fb_gb = (fb_sz + ((1ULL << 30) - 1)) >> 30;
-		heap_size = (22ULL << 20)
-		    + (8ULL << 20)
+		heap_size = (0ULL << 20)               /* LibOS2: no carveout */
+		    + (8ULL << 20)                     /* RM base, TU10X */
 		    + roundup((96ULL << 10) * fb_gb, 1ULL << 20)
 		    + roundup(((48ULL << 10) * 2048ULL), 1ULL << 20);
-		if (heap_size < (88ULL << 20))
-			heap_size = (88ULL << 20);
+		if (heap_size < (64ULL << 20))
+			heap_size = (64ULL << 20);
 
 		/*
 		 * Align tu102.c:323-336 exactly:

@@ -163,7 +163,16 @@ struct nvkm_softc {
 	struct nvkm_dmamem	gsp_sig;	/* .fwsignature_tu10x section */
 	uint32_t		gsp_sig_size;
 	uint32_t		gsp_fwimage_off; /* offset in original ELF */
-	struct nvkm_dmamem	gsp_libos;	/* LibOS init args (placeholder) */
+	struct nvkm_dmamem	gsp_libos;	/* LibOS init args (4 KiB) */
+	struct nvkm_dmamem	gsp_loginit;	/* LibOS LOGINIT ring (64 KiB) */
+	struct nvkm_dmamem	gsp_logintr;	/* LibOS LOGINTR ring (64 KiB) */
+	struct nvkm_dmamem	gsp_logrm;	/* LibOS LOGRM   ring (64 KiB) */
+	struct nvkm_dmamem	gsp_shm;	/* cmdq/msgq shared mem (PTEs+512KiB) */
+	struct nvkm_dmamem	gsp_rmargs;	/* GSP_ARGUMENTS_CACHED (4 KiB) */
+	uint32_t		gsp_shm_ptes_nr;
+	uint32_t		gsp_shm_ptes_size;	/* bytes of PTE region */
+	uint32_t		gsp_shm_cmdq_off;	/* = ptes_size */
+	uint32_t		gsp_shm_msgq_off;	/* = ptes_size + cmdq_size */
 };
 
 static __inline uint32_t
@@ -290,6 +299,10 @@ void	nvkm_gsp_meta_fini(struct nvkm_softc *sc);
 /* nvkm_gsp_boot.c */
 int	nvkm_gsp_boot_prepare(struct nvkm_softc *sc);
 void	nvkm_gsp_boot_release(struct nvkm_softc *sc);
+
+/* nvkm_gsp_libos.c -- libos init args, message queue, RM args */
+int	nvkm_gsp_libos_prepare(struct nvkm_softc *sc);
+void	nvkm_gsp_libos_release(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */
 int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
