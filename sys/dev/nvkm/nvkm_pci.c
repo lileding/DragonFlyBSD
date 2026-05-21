@@ -162,50 +162,31 @@ nvkm_pci_attach(device_t dev)
 		    (unsigned long long)lp);
 	}
 
+	/* Run the booter — this is what actually stages GSP-RM in VRAM. */
+	if (sc->fw_booter_load != NULL) {
+		struct nvkm_booter_info bi;
+
+		if (nvkm_booter_parse(sc, sc->fw_booter_load, &bi) == 0) {
+			sc->booter = bi;
+			(void)nvkm_booter_load_and_start(sc);
+		}
+	}
+
 	/*
-	 * Post-booter checks per open-rm kgspBootstrap_TU102:507-520.
-	 * Booter staged GSP-RM into WPR2 and started the RISC-V core.
-	 * Write the BL's appVersion to GSP-Falcon NV_PFALCON_FALCON_OS
-	 * (offset 0x080) and verify GSP RISC-V is now active by reading
-	 * NV_PRISCV_RISCV_CORE_SWITCH_RISCV_STATUS at addr2 + 0x240.
-	 * Doing this here is harmless on its own; we'll wire appVersion
-	 * from the actual BL desc once gsp_boot saves it.
+	 * Post-booter checks (per open-rm kgspBootstrap_TU102:507-520):
+	 *   1. Write FALCON_OS = appVersion (informational)
+	 *   2. Poll RISCV_STATUS for ACTIVE_STAT
+	 *   3. Dump GSP-Falcon + RISC-V state for diagnosis
+	 *   4. PRAMIN-peek WPR2 to confirm the booter copied GSP-RM
+	 *      (.fwimage at gspFwOffset, BL at bootBinOffset, wpr_meta
+	 *      at gspFwWprStart with verified = 0xa0a0a0a0a0a0a0a0).
 	 */
 	if (sc->gsp != NULL) {
 		uint32_t riscv_status;
-		uint32_t falcon_os_pre = nvkm_rd32(sc,
-		    NVKM_TU102_GSP_BASE + 0x080);
-		uint32_t riscv_pre = nvkm_rd32(sc,
-		    NVKM_TU102_GSP_RISCV + 0x240);
 		int polls;
 
-		device_printf(sc->dev,
-		    "gsp: pre FALCON_OS=0x%08x RISCV_STATUS=0x%08x\n",
-		    falcon_os_pre, riscv_pre);
-
-		/*
-		 * Open-rm writes appVersion to FALCON_OS post-booter. Our
-		 * bootloader.bin reports appVersion=0; that's still the
-		 * right value to write (matches what the BL desc carries).
-		 */
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x080, 0);
 
-		/*
-		 * Experiment NOT kept: writing CPUCTL.STARTCPU on GSP-Falcon
-		 * after the booter just briefly ran NS Falcon code at PC=0
-		 * (empty IMEM) before halting again -- it does NOT kick the
-		 * RISC-V core. TU102 has no separate RISC-V CPUCTL/BOOTVEC
-		 * (dev_riscv_pri.h only exposes STATUS/IRQ regs at 0x240/2b4),
-		 * so GSP RISC-V startup must be performed by the booter as
-		 * its final step. On our box the booter completes (mb0=0,
-		 * WPR2 expanded, MB0/1 rewritten by booter to a sysmem PA)
-		 * but does not perform the RISC-V kick. Open question.
-		 */
-
-		/*
-		 * RISC-V may take a moment to come up after the booter
-		 * released it. Poll for up to 1 s.
-		 */
 		for (polls = 0; polls < 100000; polls++) {
 			riscv_status = nvkm_rd32(sc,
 			    NVKM_TU102_GSP_RISCV + 0x240);
@@ -218,7 +199,6 @@ nvkm_pci_attach(device_t dev)
 		    "(active=%u)\n",
 		    polls * 10, riscv_status, riscv_status & 1);
 
-		/* Dump more GSP-Falcon and RISC-V state to characterize. */
 		{
 			uint32_t cpuctl = nvkm_rd32(sc,
 			    NVKM_TU102_GSP_BASE + 0x100);
@@ -234,33 +214,62 @@ nvkm_pci_attach(device_t dev)
 			    NVKM_TU102_GSP_BASE + 0x024);
 			uint32_t sctl   = nvkm_rd32(sc,
 			    NVKM_TU102_GSP_BASE + 0x240);
-			uint32_t falcon_os_post = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x080);
-			uint32_t riscv_bcr = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_RISCV + 0x100);
-			uint32_t riscv_cpuctl_t = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_RISCV + 0x200);
-			uint32_t riscv_irqstat = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_RISCV + 0x008);
-
 			device_printf(sc->dev,
-			    "gsp: F CPUCTL=0x%08x BOOTVEC=0x%08x SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x\n",
+			    "gsp: F CPUCTL=0x%08x BOOTVEC=0x%08x SCTL=0x%08x "
+			    "EXCI=0x%08x IRQSTAT=0x%08x\n",
 			    cpuctl, bootvec, sctl, exci, irqstat);
 			device_printf(sc->dev,
-			    "gsp: F MB0=0x%08x MB1=0x%08x FALCON_OS=0x%08x\n",
-			    mb0, mb1, falcon_os_post);
-			device_printf(sc->dev,
-			    "gsp: R BCR=0x%08x CPUCTL@0x200=0x%08x IRQSTAT=0x%08x\n",
-			    riscv_bcr, riscv_cpuctl_t, riscv_irqstat);
+			    "gsp: F MB0=0x%08x MB1=0x%08x\n", mb0, mb1);
 		}
-	}
 
-	if (sc->fw_booter_load != NULL) {
-		struct nvkm_booter_info bi;
-
-		if (nvkm_booter_parse(sc, sc->fw_booter_load, &bi) == 0) {
-			sc->booter = bi;
-			(void)nvkm_booter_load_and_start(sc);
+		/*
+		 * PRAMIN-peek WPR2 to verify the booter copied content
+		 * into VRAM. PRAMIN window is BAR0 + 0x700000 (1 MiB);
+		 * the window's VRAM base is set via 0x001700 (value =
+		 * vram_addr >> 16). Save+restore.
+		 */
+		if (sc->wpr_meta.kva != NULL) {
+			struct nvkm_gsp_wpr_meta *meta =
+			    (struct nvkm_gsp_wpr_meta *)sc->wpr_meta.kva;
+			uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+			uint64_t addrs[3];
+			const char *names[3] = { "wpr_meta", "bootBin",
+			    "gspFwImage" };
+			addrs[0] = meta->gspFwWprStart;
+			addrs[1] = meta->bootBinOffset;
+			addrs[2] = meta->gspFwOffset;
+			for (int i = 0; i < 3; i++) {
+				uint64_t a = addrs[i];
+				uint32_t pram_base = (uint32_t)(a >> 16);
+				uint32_t pram_off  = (uint32_t)(a & 0xffffu);
+				uint32_t w0, w1, w2, w3;
+				nvkm_wr32(sc, NV_PBUS_PRAMIN, pram_base);
+				w0 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0x0);
+				w1 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0x4);
+				w2 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0x8);
+				w3 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0xc);
+				device_printf(sc->dev,
+				    "gsp: VRAM %s @0x%llx: %08x %08x %08x %08x\n",
+				    names[i], (unsigned long long)a,
+				    w0, w1, w2, w3);
+			}
+			/* Also read the 'verified' field of the in-VRAM meta */
+			{
+				uint64_t a = meta->gspFwWprStart + 0xf8;
+				uint32_t pram_base = (uint32_t)(a >> 16);
+				uint32_t pram_off  = (uint32_t)(a & 0xffffu);
+				uint32_t v_lo, v_hi;
+				nvkm_wr32(sc, NV_PBUS_PRAMIN, pram_base);
+				v_lo = nvkm_rd32(sc,
+				    NV_PRAMIN + pram_off + 0x0);
+				v_hi = nvkm_rd32(sc,
+				    NV_PRAMIN + pram_off + 0x4);
+				device_printf(sc->dev,
+				    "gsp: VRAM meta.verified = 0x%08x%08x "
+				    "(expect 0xa0a0a0a0a0a0a0a0 on success)\n",
+				    v_hi, v_lo);
+			}
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		}
 	}
 
