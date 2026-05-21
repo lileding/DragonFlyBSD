@@ -12,6 +12,8 @@
 #include "nvkm_priv.h"
 #include "nvkm_falcon.h"
 
+#include <drm/drmP.h>            /* struct drm_softc, kzalloc, GFP_KERNEL */
+
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
 #include <sys/sysctl.h>
@@ -66,13 +68,70 @@ nvkm_pci_release_bars(struct nvkm_softc *sc)
 	}
 }
 
+static void
+nvkm_gsp_isr(void *arg)
+{
+	struct nvkm_softc *sc = arg;
+	uint32_t intr, inte, stat;
+
+	intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+	/* Falcon riscv_irqmask: addr2 (0x1000) + 0x2b4 */
+	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
+	stat = intr & inte;
+	if (stat == 0)
+		return;
+
+	if (stat & 0x40) {
+		/* doorbell from GSP-RM: drain msgq, dispatch events */
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, 0x40);
+		(void)nvkm_gsp_msg_dispatch_all(sc);
+		stat &= ~0x40;
+	}
+	if (stat != 0) {
+		device_printf(sc->dev,
+		    "gsp_isr: unexpected stat=0x%x\n", stat);
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
+	}
+	/* Falcon INTR_RETRIGGER0 (per gm200_flcn pattern) */
+	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x16c, 0x1);
+}
+
+static int
+nvkm_gsp_evt_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvkm_softc *sc = priv;
+	(void)repv;
+	device_printf(sc->dev, "gsp_evt: fn=0x%x len=%u (logged, no action)\n",
+	    fn, repc);
+	return (0);
+}
+
+static int
+nvkm_gsp_on_init_done(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvkm_softc *sc = priv;
+	(void)fn; (void)repv; (void)repc;
+	sc->gsp_running = true;
+	device_printf(sc->dev, "gsp: GSP_INIT_DONE event fired\n");
+	return (0);
+}
+
 static int
 nvkm_pci_attach(device_t dev)
 {
-	struct nvkm_softc *sc = device_get_softc(dev);
+	struct nvkm_softc *sc;
 	uint32_t boot0;
 	int i;
 
+	/* DragonFly amdgpu-style: device_t softc is just drm_softc (one void *).
+	 * Our state lives in a heap-alloc'd struct nvkm_softc, parked in
+	 * drm_device->dev_private after drm_dev_alloc later in this function. */
+	sc = kzalloc(sizeof(*sc), GFP_KERNEL);
+	if (sc == NULL) {
+		device_printf(dev, "nvkm: kzalloc softc failed\n");
+		return (ENOMEM);
+	}
 	sc->dev = dev;
 
 	device_printf(dev,
@@ -117,6 +176,7 @@ nvkm_pci_attach(device_t dev)
 		struct sysctl_ctx_list *ctx = device_get_sysctl_ctx(dev);
 		struct sysctl_oid *oid = device_get_sysctl_tree(dev);
 		nvkm_bios_publish_sysctl(sc, ctx, oid);
+		nvkm_gsp_debug_publish_sysctl(sc, ctx, oid);
 	}
 
 	/*
@@ -160,6 +220,16 @@ nvkm_pci_attach(device_t dev)
 		device_printf(sc->dev,
 		    "gsp: reset + libos args @0x%llx written to MB0/1\n",
 		    (unsigned long long)lp);
+	}
+
+	/*
+	 * Queue an empty SET_REGISTRY RPC (fn 73, NOSEQ) into cmdq before
+	 * booter runs. nouveau does this in oneinit. GSP-RM polls cmdq on
+	 * startup; no doorbell needed pre-init.
+	 */
+	if (sc->gsp_shm.kva != NULL) {
+		(void)nvkm_gsp_rpc_set_system_info(sc);
+		(void)nvkm_gsp_rpc_set_registry(sc);
 	}
 
 	/* Run the booter — this is what actually stages GSP-RM in VRAM. */
@@ -217,60 +287,86 @@ nvkm_pci_attach(device_t dev)
 		 * SWAP_RX layout nouveau uses.
 		 */
 		if ((riscv_status & 1) && sc->gsp_shm.kva != NULL) {
-			uint8_t *shm = (uint8_t *)sc->gsp_shm.kva;
-			uint8_t *msgq = shm + sc->gsp_shm_msgq_off;
-			uint8_t *cmdq = shm + sc->gsp_shm_cmdq_off;
-			uint32_t rptr = 0;	/* host's read cursor */
-			uint32_t wptr_seen_prev = 0;
 			int spin;
-			bool got_init_done = false;
 
-			for (spin = 0; spin < 5000 && !got_init_done; spin++) {
-				uint32_t wptr = *(volatile uint32_t *)(msgq + 0x10);
-				if (wptr != wptr_seen_prev) {
-					device_printf(sc->dev,
-					    "gsp: msgq wptr advanced %u -> %u (rptr=%u)\n",
-					    wptr_seen_prev, wptr, rptr);
-					wptr_seen_prev = wptr;
-				}
-				while (rptr != wptr) {
-					uint8_t *slot = msgq + 0x1000 +
-					    rptr * 0x1000;
-					/* r535_gsp_msg header = 52 bytes
-					 * (16 auth + 16 aad + 4 chksum + 4 seq
-					 *  + 4 elem_count + 4 pad + 4 unused).
-					 * Then nvfw_gsp_rpc:
-					 *   u32 header_version  off 0
-					 *   u32 signature       off 4
-					 *   u32 length          off 8
-					 *   u32 function        off 12  <-- want this
-					 *   u32 rpc_result      off 16
-					 *   ... */
-					uint32_t func, sig, len, result;
-					sig    = *(volatile uint32_t *)(slot + 52 + 4);
-					len    = *(volatile uint32_t *)(slot + 52 + 8);
-					func   = *(volatile uint32_t *)(slot + 52 + 12);
-					result = *(volatile uint32_t *)(slot + 52 + 16);
-					device_printf(sc->dev,
-					    "gsp: msgq[%u] sig=0x%08x len=%u func=%u(0x%x) result=0x%x\n",
-					    rptr, sig, len, func, func, result);
-					if (func == 4097 /* GSP_INIT_DONE */)
-						got_init_done = true;
-					rptr++;
-					if (rptr >= 63 /* msgCount */)
-						rptr = 0;
-				}
-				/* publish our rptr back to GSP via cmdq rxHdr */
-				*(volatile uint32_t *)(cmdq + 32) = rptr;
-				if (got_init_done)
+			/* Register event handlers via the RPC framework. */
+			nvkm_gsp_msg_ntfy_init(sc);
+			nvkm_gsp_msg_ntfy_add(sc,
+			    0x1001 /*GSP_INIT_DONE*/,
+			    nvkm_gsp_on_init_done, sc);
+			nvkm_gsp_msg_ntfy_add(sc,
+			    0x1002 /*RUN_CPU_SEQUENCER*/,
+			    nvkm_gsp_seq_msg_handler, sc);
+			nvkm_gsp_msg_ntfy_add(sc,
+			    0x1020 /*POST_NOCAT_RECORD*/,
+			    NULL, NULL);
+			/* Phase 2 stubs: dispatch but do nothing (or just log). */
+			nvkm_gsp_msg_ntfy_add(sc, 0x1003 /*POST_EVENT*/,
+			    nvkm_gsp_evt_log_only, sc);
+			nvkm_gsp_msg_ntfy_add(sc, 0x1004 /*RC_TRIGGERED*/,
+			    nvkm_gsp_evt_log_only, sc);
+			nvkm_gsp_msg_ntfy_add(sc, 0x1005 /*MMU_FAULT_QUEUED*/,
+			    nvkm_gsp_evt_log_only, sc);
+			nvkm_gsp_msg_ntfy_add(sc, 0x1006 /*OS_ERROR_LOG*/,
+			    nvkm_gsp_evt_log_only, sc);
+			nvkm_gsp_msg_ntfy_add(sc, 0x100c /*UCODE_LIBOS_PRINT*/,
+			    NULL, NULL);
+			nvkm_gsp_msg_ntfy_add(sc, 0x100f /*PERF_BRIDGELESS_INFO_UPDATE*/,
+			    NULL, NULL);
+
+			/* Drain msgq, dispatching events, until INIT_DONE handler
+			 * sets gsp_running or we time out. */
+			for (spin = 0; spin < 5000 && !sc->gsp_running; spin++) {
+				nvkm_gsp_msg_dispatch_all(sc);
+				if (sc->gsp_running)
 					break;
-				DELAY(1000);	/* 1 ms */
+				DELAY(1000);
 			}
 			device_printf(sc->dev,
-			    "gsp: %s after polling msgq for %d ms (final wptr=%u rptr=%u)\n",
-			    got_init_done ? "GSP_INIT_DONE received" :
+			    "gsp: %s after polling msgq for %d ms\n",
+			    sc->gsp_running ? "GSP_INIT_DONE received" :
 			    "no GSP_INIT_DONE",
-			    spin, wptr_seen_prev, rptr);
+			    spin);
+
+			if (sc->gsp_running)
+				(void)nvkm_gsp_get_static_info(sc);
+
+			/* Install IRQ handler + arm GSP doorbell interrupt to host.
+			 * After this point, GSP-RM events arrive via ithread; attach
+			 * must do no more cmdq writes (no concurrent caller). */
+			if (sc->gsp_running) {
+				sc->irq_rid = 0;
+				sc->irq_res = bus_alloc_resource_any(dev,
+				    SYS_RES_IRQ, &sc->irq_rid,
+				    RF_ACTIVE | RF_SHAREABLE);
+				if (sc->irq_res != NULL) {
+					lwkt_serialize_init(&sc->irq_serialize);
+					int err = bus_setup_intr(dev,
+					    sc->irq_res, INTR_MPSAFE,
+					    nvkm_gsp_isr, sc,
+					    &sc->irq_cookie,
+					    &sc->irq_serialize);
+					if (err == 0) {
+						/* Arm doorbell IRQ in NV_USERMODE. */
+						nvkm_wr32(sc, 0x110004, 0x40);
+						device_printf(dev,
+						    "gsp: IRQ wired (rid=%d), doorbell intr armed\n",
+						    sc->irq_rid);
+
+						/* Register as DRM driver -- creates /dev/dri/{card,renderD}*. */
+						(void)nvkm_drm_register(sc);
+					} else {
+						device_printf(dev,
+						    "gsp: bus_setup_intr failed (%d)\n", err);
+						bus_release_resource(dev, SYS_RES_IRQ,
+						    sc->irq_rid, sc->irq_res);
+						sc->irq_res = NULL;
+					}
+				} else {
+					device_printf(dev,
+					    "gsp: no IRQ resource available\n");
+				}
+			}
 
 			/*
 			 * Dump LOGINIT / LOGRM "put" pointer (u64 at offset 0)
@@ -423,7 +519,9 @@ static device_method_t nvkm_pci_methods[] = {
 static driver_t nvkm_pci_driver = {
 	"drm",
 	nvkm_pci_methods,
-	sizeof(struct nvkm_softc),
+	sizeof(struct drm_softc),     /* amdgpu/i915 convention: drm core writes
+	                                 softc->drm_driver_data; real state in
+	                                 heap-alloc'd nvkm_softc */
 };
 
 static devclass_t nvkm_devclass;
@@ -435,3 +533,4 @@ static devclass_t nvkm_devclass;
  * child via the vgapci bus.
  */
 DRIVER_MODULE(nvkm, vgapci, nvkm_pci_driver, nvkm_devclass, NULL, NULL);
+MODULE_DEPEND(nvkm, drm, 1, 1, 1);

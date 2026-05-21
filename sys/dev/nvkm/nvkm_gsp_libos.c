@@ -75,12 +75,15 @@ struct nvkm_msgq_rx_header {
 } __packed;
 
 /* GSP_ARGUMENTS_CACHED layout (r570 nvrm/gsp.h). 4 KiB page in sysmem. */
+/* Natural alignment (not __packed) -- NVIDIA r570 ABI relies on
+ * compiler padding after pageTableEntryCount to align cmdQueueOffset
+ * to 8 bytes. Total size = 32 bytes including 4 bytes pad. */
 struct nvkm_msgq_init_args {
 	uint64_t sharedMemPhysAddr;
 	uint32_t pageTableEntryCount;
 	uint64_t cmdQueueOffset;	/* NvLength (u64 on 64-bit) */
 	uint64_t statQueueOffset;
-} __packed;
+};
 
 struct nvkm_gsp_sr_init_args {
 	uint32_t oldLevel;
@@ -88,6 +91,8 @@ struct nvkm_gsp_sr_init_args {
 	uint32_t bInPMTransition;
 } __packed;
 
+/* Natural alignment (not __packed) -- profilerArgs at offset 56 after
+ * 4-byte pad inserted between bDmemStack and profilerArgs.pa. */
 struct nvkm_gsp_arguments_cached {
 	struct nvkm_msgq_init_args  messageQueueInitArguments;
 	struct nvkm_gsp_sr_init_args srInitArguments;
@@ -97,7 +102,7 @@ struct nvkm_gsp_arguments_cached {
 		uint64_t pa;
 		uint64_t size;
 	} profilerArgs;
-} __packed;
+};
 
 /*
  * LibosMemoryRegionInitArgument (per nova-core bindings, 32 bytes):

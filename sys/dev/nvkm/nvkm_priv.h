@@ -12,6 +12,7 @@
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/bus.h>
+#include <sys/serialize.h>
 #include <sys/resource.h>
 #include <sys/rman.h>
 #include <sys/lock.h>
@@ -140,6 +141,8 @@ struct nvkm_booter_info {
 	uint32_t	num_sig;
 };
 
+#define NVKM_GSP_NTFY_MAX 16
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -173,6 +176,34 @@ struct nvkm_softc {
 	uint32_t		gsp_shm_ptes_size;	/* bytes of PTE region */
 	uint32_t		gsp_shm_cmdq_off;	/* = ptes_size */
 	uint32_t		gsp_shm_msgq_off;	/* = ptes_size + cmdq_size */
+	uint32_t		gsp_cmdq_seq;		/* RPC envelope sequence */
+	/* Extracted from GspStaticConfigInfo reply post-INIT_DONE: */
+	uint32_t		gsp_internal_client;	/* hInternalClient */
+	uint32_t		gsp_internal_device;	/* hInternalDevice */
+	uint32_t		gsp_internal_subdevice;	/* hInternalSubdevice */
+	uint64_t		gsp_bar1_pdb;		/* bar1PdeBase */
+	uint64_t		gsp_bar2_pdb;		/* bar2PdeBase */
+	bool			gsp_running;		/* set true when GSP_INIT_DONE seen */
+	struct nvkm_gsp_ntfy_table {
+		struct {
+			uint32_t fn;
+			int (*func)(void *priv, uint32_t fn, void *repv, uint32_t repc);
+			void *priv;
+		} tab[NVKM_GSP_NTFY_MAX];
+		uint32_t cnt;
+	}			gsp_ntfy;
+	uint32_t		gsp_rpc_seq;		/* inner RPC sequence (matches reply) */
+	uint32_t		gsp_msgq_rptr;		/* host-side msgq read cursor */
+
+	/* IRQ resource + ithread serializer (DragonFly native model). */
+	int			irq_rid;
+	struct resource		*irq_res;
+	void			*irq_cookie;
+	struct lwkt_serialize	irq_serialize;
+
+	/* DRM driver registration (Phase 3). */
+	struct drm_device	*drm_dev;
+	struct pci_dev		*drm_pdev;
 };
 
 static __inline uint32_t
@@ -302,6 +333,59 @@ void	nvkm_gsp_boot_release(struct nvkm_softc *sc);
 
 /* nvkm_gsp_libos.c -- libos init args, message queue, RM args */
 int	nvkm_gsp_libos_prepare(struct nvkm_softc *sc);
+int	nvkm_gsp_rpc_set_system_info(struct nvkm_softc *sc);
+int	nvkm_gsp_rpc_set_registry(struct nvkm_softc *sc);
+
+enum {
+	NVKM_GSP_RPC_REPLY_NOWAIT = 0,
+	NVKM_GSP_RPC_REPLY_NOSEQ  = 1,
+	NVKM_GSP_RPC_REPLY_RECV   = 2,
+};
+
+/* Phase 2 RPC framework -- mirrors r570 (uses r535_rpc vtable). */
+typedef int (*nvkm_gsp_msg_ntfy_func)(void *priv, uint32_t fn,
+    void *repv, uint32_t repc);
+
+void	nvkm_gsp_msg_ntfy_init(struct nvkm_softc *sc);
+int	nvkm_gsp_msg_ntfy_add(struct nvkm_softc *sc, uint32_t fn,
+	    nvkm_gsp_msg_ntfy_func handler, void *priv);
+
+void   *nvkm_gsp_rpc_get(struct nvkm_softc *sc, uint32_t fn, uint32_t argc);
+void   *nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
+	    uint32_t repc);
+void	nvkm_gsp_rpc_done(struct nvkm_softc *sc, void *params);
+
+/* Convenience: alloc+send and wait for reply. Returns reply params ptr
+ * (caller frees with nvkm_gsp_rpc_done) or NULL on error. */
+static __inline void *
+nvkm_gsp_rpc_rd(struct nvkm_softc *sc, uint32_t fn, uint32_t argc)
+{
+	void *p = nvkm_gsp_rpc_get(sc, fn, argc);
+	if (p == NULL) return (NULL);
+	return nvkm_gsp_rpc_push(sc, p, NVKM_GSP_RPC_REPLY_RECV, argc);
+}
+
+/* Convenience: send the prepared params buffer, no reply needed. */
+static __inline int
+nvkm_gsp_rpc_wr(struct nvkm_softc *sc, void *params, int policy)
+{
+	void *r = nvkm_gsp_rpc_push(sc, params, policy, 0);
+	if (r == NULL) return (EIO);
+	nvkm_gsp_rpc_done(sc, r);
+	return (0);
+}
+
+int	nvkm_gsp_msg_dispatch_all(struct nvkm_softc *sc);
+
+/* DRM driver registration. */
+int	nvkm_drm_register(struct nvkm_softc *sc);
+void	nvkm_drm_unregister(struct nvkm_softc *sc);
+int	nvkm_gsp_get_static_info(struct nvkm_softc *sc);
+
+/* sequencer event handler -- registered via nvkm_gsp_msg_ntfy_add */
+int	nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn,
+	    void *repv, uint32_t repc);
+void	nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc, struct sysctl_ctx_list *ctx, struct sysctl_oid *parent);
 void	nvkm_gsp_libos_release(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */
