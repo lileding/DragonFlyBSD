@@ -157,9 +157,12 @@ struct nvkm_softc {
 	struct nvkm_booter_info	booter;
 	struct nvkm_dmamem	booter_dma;	/* staged booter image */
 	struct nvkm_dmamem	wpr_meta;	/* GspFwWprMeta in sysmem */
-	struct nvkm_dmamem	gsp_image;	/* GSP-RM ELF body */
+	struct nvkm_dmamem	gsp_image;	/* GSP-RM .fwimage section */
 	struct nvkm_dmamem	gsp_radix3;	/* 3-level page table for image */
 	struct nvkm_dmamem	gsp_bl;		/* GSP RISC-V bootloader */
+	struct nvkm_dmamem	gsp_sig;	/* .fwsignature_tu10x section */
+	uint32_t		gsp_sig_size;
+	uint32_t		gsp_fwimage_off; /* offset in original ELF */
 };
 
 static __inline uint32_t
