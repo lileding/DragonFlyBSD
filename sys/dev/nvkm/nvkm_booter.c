@@ -226,6 +226,38 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	    bi->data_size, sc->booter_dma.kva,
 	    (uintmax_t)sc->booter_dma.paddr);
 
+	/*
+	 * 1b. Patch the HS signature into the staged blob the way
+	 * nouveau nvkm_falcon_fw_patch does. The blob carries
+	 * num_sig signatures at blob[sig_prod_offset], each
+	 * sig_prod_size / num_sig bytes. The HS auth hardware looks
+	 * for the signature at blob[patch_loc]. With num_sig = 1 we
+	 * just copy that single signature from sig_prod_offset to
+	 * patch_loc inside the staging buffer (offsets are relative
+	 * to the start of the blob; subtract data_offset to land in
+	 * the kva-mapped staging copy).
+	 */
+	if (bi->num_sig > 0 && bi->sig_prod_size > 0 &&
+	    bi->patch_loc >= bi->data_offset) {
+		uint32_t sig_size = bi->sig_prod_size / bi->num_sig;
+		uint32_t src_off  = bi->sig_prod_offset +
+		    bi->patch_sig * sig_size;
+		uint32_t dst_in_kva = bi->patch_loc - bi->data_offset;
+
+		if (src_off + sig_size <= bi->blob_size &&
+		    dst_in_kva + sig_size <= bi->data_size) {
+			memcpy((uint8_t *)sc->booter_dma.kva + dst_in_kva,
+			    bi->blob + src_off, sig_size);
+			device_printf(sc->dev,
+			    "booter: patched %u-byte sig idx=%u from blob+0x%x to dmem(blob+0x%x)\n",
+			    sig_size, bi->patch_sig, src_off, bi->patch_loc);
+		} else {
+			device_printf(sc->dev,
+			    "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u)\n",
+			    src_off, sig_size, bi->patch_loc, sig_size);
+		}
+	}
+
 	/* 2. Build the bootloader DMEM descriptor v2. */
 	memset(&desc, 0, sizeof(desc));
 	desc.ctx_dma          = NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH;
@@ -240,12 +272,29 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	desc.argc             = 0;
 	desc.argv             = 0;
 
-	/* 3. Set FBIF context translation for the DMA index we'll use. */
+	/*
+	 * 3a. Reset SEC2 to a known state (matches the per-run reset
+	 * open-rm does before each HS Falcon execution).
+	 */
+	{
+		int rerr = nvkm_falcon_reset_eng(sec2);
+		if (rerr != 0)
+			device_printf(sc->dev,
+			    "booter: SEC2 reset_eng returned %d (continuing)\n",
+			    rerr);
+	}
+
+	/*
+	 * 3b. Disable context requirement: sets FBIF_CTL.ALLOW_PHYS_NO_CTX
+	 * AND clears DMACTL.REQUIRE_CTX. Without ALLOW_PHYS_NO_CTX the
+	 * booter's own nmem stub cannot DMA the rest of the ucode from
+	 * sysmem and HS auth fails silently.
+	 */
+	nvkm_falcon_disable_ctx_req(sec2);
+
+	/* 3c. Program FBIF TRANSCFG for the DMA index the booter uses. */
 	nvkm_falcon_mask(sec2, NVKM_FBIF_TRANSCFG(desc.ctx_dma),
 	    0x00000007u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
-
-	/* 4. Clear DMACTL.REQUIRE_CTX (no-instance-block path). */
-	nvkm_falcon_wr32(sec2, NVKM_FLCN_DMACTL, 0);
 
 	/* 5. PIO-write descriptor to DMEM offset 0. */
 	error = nvkm_falcon_load_dmem(sec2, &desc, 0, sizeof(desc), 0);
@@ -273,10 +322,28 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		goto out_free;
 	}
 
-	/* 7. Set BOOTVEC and mailbox inputs. */
+	/*
+	 * 7. Set BOOTVEC and mailbox inputs. The booter expects the
+	 * sysmem physical address of the GspFwWprMeta struct in
+	 * MAILBOX0 (low 32) / MAILBOX1 (high 32). Without this the
+	 * booter halts with mb0 = 0x31 ("no wpr_meta provided").
+	 */
 	nvkm_falcon_set_bootvec(sec2, bi->boot_addr);
-	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
-	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
+	if (sc->wpr_meta.kva != NULL) {
+		uint64_t mp = sc->wpr_meta.paddr;
+		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0,
+		    (uint32_t)(mp & 0xffffffffu));
+		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1,
+		    (uint32_t)(mp >> 32));
+		device_printf(sc->dev,
+		    "booter: passing wpr_meta sysmem=0x%llx (mb0=0x%08x mb1=0x%08x)\n",
+		    (unsigned long long)mp,
+		    (uint32_t)(mp & 0xffffffffu),
+		    (uint32_t)(mp >> 32));
+	} else {
+		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
+		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
+	}
 
 	device_printf(sc->dev,
 	    "booter: starting SEC2 (bootvec=0x%x, ctx_dma=%u, dma_base=%#jx)\n",

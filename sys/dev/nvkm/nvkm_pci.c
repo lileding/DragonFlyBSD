@@ -130,6 +130,16 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_FRTS, 0, 0);
 	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_SB,   0, 0);
 
+	/*
+	 * Stage minimal GspFwWprMeta in sysmem before the booter runs.
+	 * The booter expects its physical address in MAILBOX0/1; without
+	 * it the booter halts with mb0 = 0x31. Only magic + revision are
+	 * filled at this stage -- this lets us observe a distinct error
+	 * code from the booter so we can iterate on the rest of the
+	 * fields without flying blind.
+	 */
+	(void)nvkm_gsp_meta_init(sc);
+
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
 
@@ -148,6 +158,7 @@ nvkm_pci_detach(device_t dev)
 	struct nvkm_softc *sc = device_get_softc(dev);
 
 	nvkm_booter_release(sc);
+	nvkm_gsp_meta_fini(sc);
 	nvkm_gsp_fini(sc);
 	nvkm_sec2_fini(sc);
 	nvkm_fw_fini(sc);
