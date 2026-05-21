@@ -140,46 +140,26 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_gsp_boot_prepare(sc);
 
 	/*
-	 * Per nouveau tu102_gsp_oneinit (tu102.c:350-357): AFTER FwSec-FRTS
-	 * and BEFORE the booter, reset GSP-Falcon (so it switches into a
-	 * known state ready for RISC-V) and seed its MAILBOX0/1 with the
-	 * libos sysmem address. The booter doesn't read these, but GSP-RM
-	 * does once the booter releases the RISC-V core.
+	 * Build the libos init args + cmdq/msgq shared memory + RM args
+	 * that GSP-RM consumes at startup. Without these, GSP-RM halts on
+	 * RISC-V within microseconds of the booter releasing it, because
+	 * it cannot find its RMARGS / message queues.
 	 *
-	 * We don't have libos yet so feed 0/0; if the GSP-RM logging path
-	 * breaks later we'll come back and wire up real libos buffers.
+	 * Order matches nouveau tu102_gsp_oneinit (tu102.c:350-357):
+	 *   reset GSP-Falcon -> write libos.addr to MB0/1 -> later run booter.
 	 */
-	if (sc->gsp != NULL) {
-		/*
-		 * Per open-rm kgspBootstrap_TU102 (kernel_gsp_tu102.c:485-488):
-		 *   kflcnResetIntoRiscv         (= reset_eng + software state)
-		 *   kgspProgramLibosBootArgsAddr (writes libos.addr to MB0/1)
-		 * The booter on SEC2 then expects GSP-Falcon's mailboxes to
-		 * carry a valid sysmem PA -- it preserves these and lets
-		 * GSP-RM read them as init args once RISC-V starts. Allocate
-		 * a 4 KiB sysmem placeholder so the address is non-zero and
-		 * page-aligned. GSP-RM logging will be wrong but the booter
-		 * should now accept the handoff.
-		 */
+	(void)nvkm_gsp_libos_prepare(sc);
+
+	if (sc->gsp != NULL && sc->gsp_libos.kva != NULL) {
+		uint64_t lp = sc->gsp_libos.paddr;
 		(void)nvkm_falcon_reset_eng(sc->gsp);
-		if (sc->gsp_libos.kva == NULL) {
-			int er = nvkm_dmamem_alloc(sc, 4096, 4096,
-			    &sc->gsp_libos);
-			if (er != 0)
-				device_printf(sc->dev,
-				    "gsp: libos placeholder alloc failed (%d)\n",
-				    er);
-		}
-		if (sc->gsp_libos.kva != NULL) {
-			uint64_t lp = sc->gsp_libos.paddr;
-			nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x040,
-			    (uint32_t)(lp & 0xffffffffu));
-			nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
-			    (uint32_t)(lp >> 32));
-			device_printf(sc->dev,
-			    "gsp: reset + libos placeholder @0x%llx in MB0/1\n",
-			    (unsigned long long)lp);
-		}
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x040,
+		    (uint32_t)(lp & 0xffffffffu));
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
+		    (uint32_t)(lp >> 32));
+		device_printf(sc->dev,
+		    "gsp: reset + libos args @0x%llx written to MB0/1\n",
+		    (unsigned long long)lp);
 	}
 
 	/*
@@ -293,6 +273,7 @@ nvkm_pci_detach(device_t dev)
 	struct nvkm_softc *sc = device_get_softc(dev);
 
 	nvkm_booter_release(sc);
+	nvkm_gsp_libos_release(sc);
 	nvkm_gsp_boot_release(sc);
 	nvkm_gsp_meta_fini(sc);
 	nvkm_gsp_fini(sc);
