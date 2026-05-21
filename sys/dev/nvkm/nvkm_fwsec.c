@@ -320,6 +320,11 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	    desc_off, desc->imem_load_size, desc->imem_sec_size,
 	    desc->imem_virt_base, desc->dmem_offset, desc->dmem_load_size,
 	    desc->interface_offset);
+	device_printf(sc->dev,
+	    "fwsec: V2 more imem_phys=0x%x imem_sec_base=0x%x dmem_phys=0x%x "
+	    "ventry=0x%x stored_size=%u\n",
+	    desc->imem_phys_base, desc->imem_sec_base, desc->dmem_phys_base,
+	    desc->virtual_entry, desc->stored_size);
 
 	imem_total = desc->imem_load_size;
 	dmem_size  = desc->dmem_load_size;
@@ -349,20 +354,36 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 		    frts_addr, frts_size);
 	}
 
-	/* 4. Build flcn_bl_dmem_desc_v2 pointing at the staged ucode. */
+	/*
+	 * 4. Build flcn_bl_dmem_desc_v2 pointing at the staged ucode.
+	 * Fields match nouveau nvkm_gsp_fwsec_v2 / tu102_gsp_fwsec_load_bld:
+	 *   non_sec_code_off/size = IMEMPhysBase / (IMEMLoadSize - IMEMSecSize)
+	 *   sec_code_off/size     = IMEMSecBase  / IMEMSecSize  (raw, no rounding)
+	 *   code_dma_base         = sysmem PA of the IMEM portion (start of buffer)
+	 *   data_dma_base         = sysmem PA of the DMEM portion
+	 */
 	memset(&bl_desc, 0, sizeof(bl_desc));
 	bl_desc.ctx_dma = NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH;
-	bl_desc.code_dma_base   = fw_dma.paddr;
+	bl_desc.code_dma_base     = fw_dma.paddr;
 	bl_desc.non_sec_code_off  = desc->imem_phys_base;
 	bl_desc.non_sec_code_size = desc->imem_load_size - desc->imem_sec_size;
-	bl_desc.sec_code_off  = desc->imem_sec_base - desc->imem_virt_base +
-	    desc->imem_phys_base;
-	bl_desc.sec_code_size = roundup(desc->imem_sec_size, 256);
-	bl_desc.code_entry_point = 0;
-	bl_desc.data_dma_base = fw_dma.paddr + roundup(imem_total, 256);
-	bl_desc.data_size     = dmem_size;
+	bl_desc.sec_code_off      = desc->imem_sec_base;
+	bl_desc.sec_code_size     = desc->imem_sec_size;
+	bl_desc.code_entry_point  = 0;
+	bl_desc.data_dma_base     = fw_dma.paddr + roundup(imem_total, 256);
+	bl_desc.data_size         = dmem_size;
 	bl_desc.argc = 0;
 	bl_desc.argv = 0;
+
+	device_printf(sc->dev,
+	    "fwsec: BL desc ctx_dma=%u code_dma=0x%llx "
+	    "ns_off=0x%x ns_sz=%u sec_off=0x%x sec_sz=%u "
+	    "data_dma=0x%llx data_sz=%u entry=0x%x\n",
+	    bl_desc.ctx_dma, (unsigned long long)bl_desc.code_dma_base,
+	    bl_desc.non_sec_code_off, bl_desc.non_sec_code_size,
+	    bl_desc.sec_code_off, bl_desc.sec_code_size,
+	    (unsigned long long)bl_desc.data_dma_base, bl_desc.data_size,
+	    bl_desc.code_entry_point);
 
 	/* 5. Get the generic ACR bootloader firmware. */
 	bl_fw = firmware_get("nvidia/tu102/acr/bl");
@@ -388,23 +409,49 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	    bl_bd->start_tag, bl_bd->code_off, bl_bd->code_size,
 	    bl_bd->data_size);
 
-	/* 6. Program FBIF TRANSCFG, clear REQUIRE_CTX, write desc to DMEM. */
+	/*
+	 * 6. Configure the engine for the no-inst BL path (matches
+	 * nouveau gm200_flcn_fw_load when fw->inst == NULL):
+	 *   - 0x624 mask 0x80 -- enable arb-on-noctx scheduling
+	 *   - DMACTL = 0       -- clear REQUIRE_CTX (BL uses TRANSCFG slot)
+	 *   - FBIF TRANSCFG[ctx_dma] = 0x5 (TARGET=COH_SYS, MEM_TYPE=PHYS)
+	 *     so the BL's DMA fetches from code_dma_base hit our sysmem
+	 *     buffer (which is bus_dma-coherent).
+	 */
+	nvkm_falcon_mask(sec2, 0x624u, 0x00000080u, 0x00000080u);
+	/*
+	 * Per open-rm kflcnDisableCtxReq_TU102: must set FBIF_CTL bit
+	 * ALLOW_PHYS_NO_CTX (so DMA from physical sysmem proceeds without
+	 * a context binding) AND clear DMACTL.REQUIRE_CTX. Doing only
+	 * DMACTL=0 is not enough -- the FBIF will reject the BL's DMA
+	 * and HS authentication will then silently fail (SCTL=0x3000,
+	 * mb0 untouched). Use the existing helper.
+	 */
+	nvkm_falcon_disable_ctx_req(sec2);
 	nvkm_falcon_mask(sec2, NVKM_FBIF_TRANSCFG(bl_desc.ctx_dma),
 	    0x7u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
-	nvkm_falcon_wr32(sec2, NVKM_FLCN_DMACTL, 0);
-	error = nvkm_falcon_load_dmem(sec2, &bl_desc, 0, sizeof(bl_desc), 0);
-	if (error != 0) {
-		device_printf(sc->dev, "fwsec: dmem desc load failed (%d)\n",
-		    error);
-		goto out;
-	}
 
-	/* 7. PIO-load the generic BL stub into top of IMEM. */
+	/*
+	 * 7. PIO-load the BL into IMEM. Per nouveau gm200_flcn_fw_load,
+	 * dest = code.limit - boot_size; tag = boot_addr >> 8 = start_tag.
+	 * For our 64 KiB SEC2/GSP IMEM with boot_size=512, dest=0xFE00,
+	 * tag=0xFD. The Falcon IMEM tag table thus maps virtual PC
+	 * 0xFD00..0xFEFF to physical blocks 0xFE..0xFF. Must come BEFORE
+	 * the DMEM desc load (matches nouveau order).
+	 */
 	{
-		uint32_t imem_top = 65536u - NVKM_FLCN_IMEM_BLKSIZE;
+		uint32_t imem_size_bytes =
+		    (nvkm_falcon_rd32(sec2, NVKM_FLCN_HWCFG) &
+		     NVKM_FLCN_HWCFG_IMEM_SIZE_MASK) *
+		    NVKM_FLCN_IMEM_BLKSIZE;
+		uint32_t imem_dst = imem_size_bytes - bl_bd->code_size;
 		const uint8_t *src = (const uint8_t *)bl_fw->data +
 		    bl_bh->data_offset + bl_bd->code_off;
-		error = nvkm_falcon_load_imem(sec2, src, imem_top,
+		device_printf(sc->dev,
+		    "fwsec: BL upload imem_size=%u dst=0x%x tag=0x%x size=%u\n",
+		    imem_size_bytes, imem_dst, bl_bd->start_tag,
+		    bl_bd->code_size);
+		error = nvkm_falcon_load_imem(sec2, src, imem_dst,
 		    bl_bd->code_size,
 		    bl_bd->start_tag, 0, false);
 		if (error != 0) {
@@ -414,7 +461,19 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 		}
 	}
 
-	/* 8. Set BOOTVEC, zero mbox, start, wait halt. */
+	/* 8. Now write the BL DMEM descriptor at DMEM offset 0. */
+	error = nvkm_falcon_load_dmem(sec2, &bl_desc, 0, sizeof(bl_desc), 0);
+	if (error != 0) {
+		device_printf(sc->dev, "fwsec: dmem desc load failed (%d)\n",
+		    error);
+		goto out;
+	}
+
+	/*
+	 * 9. Set BOOTVEC, initialize mb0 to a sentinel so we can tell
+	 * whether FwSec actually wrote it, start, wait halt.
+	 * (Nouveau pre-writes 0xcafebeef when no explicit mbox is passed.)
+	 */
 	nvkm_falcon_set_bootvec(sec2, bl_bd->start_tag << 8);
 	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
 	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
@@ -439,6 +498,32 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 	device_printf(sc->dev,
 	    "fwsec: post-run WPR2 lo=0x%08x hi=0x%08x\n",
 	    wpr2_lo, wpr2_hi);
+	/*
+	 * Per nouveau nvkm_gsp_fwsec_frts: real FRTS status lives in
+	 * PMC scratch[0xE] @ 0x001438. Upper 16 bits = error code,
+	 * 0 = success. SB uses scratch[0x15]. Also dump a few neighbors
+	 * for context.
+	 */
+	{
+		uint32_t sctl   = nvkm_falcon_rd32(sec2, 0x240);
+		uint32_t exci   = nvkm_falcon_rd32(sec2, 0x024); /* EXCI */
+		uint32_t irqstat= nvkm_falcon_rd32(sec2, 0x008); /* IRQSTAT */
+		device_printf(sc->dev,
+		    "fwsec: SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x\n",
+		    sctl, exci, irqstat);
+		device_printf(sc->dev,
+		    "fwsec: scratch[0..7] %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		    nvkm_rd32(sc, 0x001400), nvkm_rd32(sc, 0x001404),
+		    nvkm_rd32(sc, 0x001408), nvkm_rd32(sc, 0x00140c),
+		    nvkm_rd32(sc, 0x001410), nvkm_rd32(sc, 0x001414),
+		    nvkm_rd32(sc, 0x001418), nvkm_rd32(sc, 0x00141c));
+		device_printf(sc->dev,
+		    "fwsec: scratch[8..f] %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		    nvkm_rd32(sc, 0x001420), nvkm_rd32(sc, 0x001424),
+		    nvkm_rd32(sc, 0x001428), nvkm_rd32(sc, 0x00142c),
+		    nvkm_rd32(sc, 0x001430), nvkm_rd32(sc, 0x001434),
+		    nvkm_rd32(sc, 0x001438), nvkm_rd32(sc, 0x00143c));
+	}
 
 out:
 	firmware_put(bl_fw, FIRMWARE_UNLOAD);
