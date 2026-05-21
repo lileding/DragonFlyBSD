@@ -285,6 +285,49 @@ nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_siz
 		return (ENXIO);
 
 	/*
+	 * Recompute frts_addr/size from the GPU's actual FB layout the
+	 * way nouveau tu102_gsp_oneinit / tu102_gsp_vga_workspace_addr do:
+	 *   fb_size       = gp102_fb_vidmem_size (decoded from 0x100ce0)
+	 *   bios.addr     = vga_workspace addr (top 1 MiB or 128 KiB, see
+	 *                   NV_PDISP_VGA_CR @ 0x625f04 -- if VGA aperture
+	 *                   is enabled and aimed at VRAM use the staged
+	 *                   address, else fb_size - 0x100000)
+	 *   frts.size     = 0x100000 (1 MiB, fixed)
+	 *   frts.addr     = ALIGN_DOWN(bios.addr, 0x20000) - frts.size
+	 * Override the caller-supplied frts_addr/size if the GPU disagrees.
+	 */
+	{
+		uint32_t lmr = nvkm_rd32(sc, 0x100ce0);
+		uint32_t lmag = (lmr & 0x000003f0u) >> 4;
+		uint32_t lsca = (lmr & 0x0000000fu);
+		uint64_t fb_size = (uint64_t)lmag << (lsca + 20);
+		uint32_t vga = nvkm_rd32(sc, NV_PDISP_VGA_CR);
+		uint64_t bios_addr;
+
+		if (lmr & 0x40000000u)
+			fb_size = fb_size / 16 * 15;
+
+		bios_addr = fb_size - 0x100000;
+		if (vga & 0x8u) {
+			uint64_t staged = ((uint64_t)(vga & 0xffffff00u)) << 8;
+			if (staged < bios_addr)
+				bios_addr = fb_size - 0x20000;
+			else
+				bios_addr = staged;
+		}
+
+		frts_size = 0x100000u;
+		frts_addr = (bios_addr & ~(uint64_t)0x1ffffu) - frts_size;
+
+		device_printf(sc->dev,
+		    "fwsec: FB lmr=0x%08x size=0x%llx vga=0x%08x "
+		    "bios_addr=0x%llx -> frts=0x%llx+%uKiB\n",
+		    lmr, (unsigned long long)fb_size, vga,
+		    (unsigned long long)bios_addr,
+		    (unsigned long long)frts_addr, frts_size >> 10);
+	}
+
+	/*
 	 * Bring the GSP-Falcon to a known state before touching any of its
 	 * registers. On TU102 post-OVMF the engine may be in a state where
 	 * naive PRI reads hang the bus and crash the VM. The reset register
