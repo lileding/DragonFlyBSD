@@ -182,6 +182,51 @@ nvkm_pci_attach(device_t dev)
 		}
 	}
 
+	/*
+	 * Post-booter checks per open-rm kgspBootstrap_TU102:507-520.
+	 * Booter staged GSP-RM into WPR2 and started the RISC-V core.
+	 * Write the BL's appVersion to GSP-Falcon NV_PFALCON_FALCON_OS
+	 * (offset 0x080) and verify GSP RISC-V is now active by reading
+	 * NV_PRISCV_RISCV_CORE_SWITCH_RISCV_STATUS at addr2 + 0x240.
+	 * Doing this here is harmless on its own; we'll wire appVersion
+	 * from the actual BL desc once gsp_boot saves it.
+	 */
+	if (sc->gsp != NULL) {
+		uint32_t riscv_status;
+		uint32_t falcon_os_pre = nvkm_rd32(sc,
+		    NVKM_TU102_GSP_BASE + 0x080);
+		uint32_t riscv_pre = nvkm_rd32(sc,
+		    NVKM_TU102_GSP_RISCV + 0x240);
+		int polls;
+
+		device_printf(sc->dev,
+		    "gsp: pre FALCON_OS=0x%08x RISCV_STATUS=0x%08x\n",
+		    falcon_os_pre, riscv_pre);
+
+		/*
+		 * Open-rm writes appVersion to FALCON_OS post-booter. Our
+		 * bootloader.bin reports appVersion=0; that's still the
+		 * right value to write (matches what the BL desc carries).
+		 */
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x080, 0);
+
+		/*
+		 * RISC-V may take a moment to come up after the booter
+		 * released it. Poll for up to 1 s.
+		 */
+		for (polls = 0; polls < 100000; polls++) {
+			riscv_status = nvkm_rd32(sc,
+			    NVKM_TU102_GSP_RISCV + 0x240);
+			if (riscv_status & 1)
+				break;
+			DELAY(10);
+		}
+		device_printf(sc->dev,
+		    "gsp: post-booter polled %d us RISCV_STATUS=0x%08x "
+		    "(active=%u)\n",
+		    polls * 10, riscv_status, riscv_status & 1);
+	}
+
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
 
