@@ -204,4 +204,8 @@ int	nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
 void	nvkm_booter_release(struct nvkm_softc *sc);
 
+/* nvkm_fwsec.c */
+int	nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr,
+	    uint32_t frts_size);
+
 #endif /* _NVKM_PRIV_H_ */

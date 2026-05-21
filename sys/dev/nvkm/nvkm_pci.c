@@ -117,6 +117,9 @@ nvkm_pci_attach(device_t dev)
 		nvkm_bios_publish_sysctl(sc, ctx, oid);
 	}
 
+	/* FwSec FRTS: program WPR2 from HS Falcon (PRI is PLM-locked). */
+	(void)nvkm_fwsec_run_frts(sc, 0x2BFF00000ULL, 0x100000);
+
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
 
