@@ -1,0 +1,349 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * GSP-RM boot staging: prepare everything booter_load needs to put GSP
+ * onto the RISC-V core.
+ *
+ * Inputs (all in sysmem, all DMA-coherent):
+ *   - GSP-RM ELF image (gsp-570.144.bin, ~27 MiB)
+ *     Reachable to the GPU via a 3-level "radix3" page table.
+ *   - GSP bootloader image (bootloader-570.144.bin, ~4 KiB)
+ *     Reachable as a single contiguous DMA region. Its
+ *     RM_RISCV_UCODE_DESC header carries the monitorCode /
+ *     monitorData / manifest offsets the booter needs.
+ *   - GspFwWprMeta (256 B): the handoff struct we already
+ *     allocated in nvkm_gsp_meta.c. Filled here with all the
+ *     addresses + sizes + FB-layout offsets booter expects.
+ *
+ * References:
+ *   linux nouveau:
+ *     drivers/gpu/drm/nouveau/nvkm/subdev/gsp/tu102.c
+ *     drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+ *       (nvkm_gsp_radix3_sg, r535_gsp_rm_boot_ctor)
+ *   open-rm 570.144:
+ *     src/nvidia/arch/nvalloc/common/inc/gsp/gsp_fw_wpr_meta.h
+ *     src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_tu102.c
+ */
+
+#include "nvkm_priv.h"
+
+#include <sys/firmware.h>	/* firmware_get / firmware_put */
+
+static MALLOC_DEFINE(M_NVKM_GSP_BOOT, "nvkm_gsp_boot", "nvkm GSP boot stage");
+
+#define NVKM_GSP_PAGE_SIZE	4096u
+#define NVKM_GSP_PAGE_SHIFT	12
+
+/* Wire-format RM_RISCV_UCODE_DESC -- the header inside bootloader.bin. */
+struct nvkm_riscv_ucode_desc {
+	uint32_t version;
+	uint32_t bootloaderOffset;
+	uint32_t bootloaderSize;
+	uint32_t bootloaderParamOffset;
+	uint32_t bootloaderParamSize;
+	uint32_t riscvElfOffset;
+	uint32_t riscvElfSize;
+	uint32_t appVersion;
+	uint32_t manifestOffset;
+	uint32_t manifestSize;
+	uint32_t monitorDataOffset;
+	uint32_t monitorDataSize;
+	uint32_t monitorCodeOffset;
+	uint32_t monitorCodeSize;
+	uint32_t bIsMonitorEnabled;
+	uint32_t swbromCodeOffset;
+	uint32_t swbromCodeSize;
+	uint32_t swbromDataOffset;
+	uint32_t swbromDataSize;
+} __packed;
+
+/* Same wrapping bin_hdr we already use for booter/acr_bl. */
+struct nvkm_gsp_bin_hdr {
+	uint32_t bin_magic;	/* 0x10de */
+	uint32_t bin_ver;
+	uint32_t bin_size;
+	uint32_t header_offset;
+	uint32_t data_offset;
+	uint32_t data_size;
+} __packed;
+
+struct nvkm_gsp_wpr_meta;	/* defined in nvkm_gsp_meta.c */
+
+/*
+ * Build a 3-level page table over a single contiguous DMA region.
+ *  L0: 1 page, 1 entry  -> bus addr of L1
+ *  L1: 1 page, N entries -> bus addrs of each L2 page (N = ceil(npages/512))
+ *  L2: each page covers 512 data pages -> bus addrs of data pages
+ *
+ * All levels live in the SAME page-table dmamem allocation (sc->gsp_radix3),
+ * one 4-KiB page after another, so we don't need separate allocations for
+ * each level. L0 sits at offset 0, L1 at offset 4 KiB, L2 starts at 8 KiB.
+ *
+ * Returns the sysmem bus address of L0 (= sysmemAddrOfRadix3Elf).
+ */
+static uint64_t
+nvkm_gsp_radix3_build(struct nvkm_softc *sc, uint64_t data_pa,
+    uint32_t data_size)
+{
+	uint32_t n_data_pg = (data_size + NVKM_GSP_PAGE_SIZE - 1) /
+	    NVKM_GSP_PAGE_SIZE;
+	uint32_t n_l2_pg = (n_data_pg + 511) / 512;
+	uint64_t *l0, *l1, *l2;
+	uint64_t l1_pa, l2_pa_base;
+	uint32_t i;
+
+	if (sc->gsp_radix3.kva == NULL) {
+		device_printf(sc->dev,
+		    "gsp_boot: radix3 alloc missing\n");
+		return (0);
+	}
+
+	l0 = (uint64_t *)((uint8_t *)sc->gsp_radix3.kva + 0);
+	l1 = (uint64_t *)((uint8_t *)sc->gsp_radix3.kva + NVKM_GSP_PAGE_SIZE);
+	l2 = (uint64_t *)((uint8_t *)sc->gsp_radix3.kva + 2 * NVKM_GSP_PAGE_SIZE);
+	l1_pa      = sc->gsp_radix3.paddr + NVKM_GSP_PAGE_SIZE;
+	l2_pa_base = sc->gsp_radix3.paddr + 2 * NVKM_GSP_PAGE_SIZE;
+
+	memset(sc->gsp_radix3.kva, 0, (2 + n_l2_pg) * NVKM_GSP_PAGE_SIZE);
+
+	l0[0] = l1_pa;
+	for (i = 0; i < n_l2_pg; i++)
+		l1[i] = l2_pa_base + (uint64_t)i * NVKM_GSP_PAGE_SIZE;
+	for (i = 0; i < n_data_pg; i++)
+		l2[i] = data_pa + (uint64_t)i * NVKM_GSP_PAGE_SIZE;
+
+	device_printf(sc->dev,
+	    "gsp_boot: radix3 built: data %u pages, L2 %u pages; "
+	    "L0=0x%llx L1=0x%llx L2=0x%llx\n",
+	    n_data_pg, n_l2_pg,
+	    (unsigned long long)sc->gsp_radix3.paddr,
+	    (unsigned long long)l1_pa,
+	    (unsigned long long)l2_pa_base);
+	return (sc->gsp_radix3.paddr);
+}
+
+int
+nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
+{
+	const struct firmware *gsp_fw, *bl_fw;
+	const struct nvkm_gsp_bin_hdr *bl_hdr;
+	const struct nvkm_riscv_ucode_desc *bl_desc;
+	struct nvkm_gsp_wpr_meta *meta;
+	uint32_t img_size, img_pages, l2_pages, radix3_alloc_size;
+	uint32_t bl_size, bl_payload_off, bl_payload_size;
+	uint64_t l0_pa;
+	int error;
+
+	if (sc->wpr_meta.kva == NULL) {
+		device_printf(sc->dev,
+		    "gsp_boot: wpr_meta not allocated\n");
+		return (ENXIO);
+	}
+
+	gsp_fw = firmware_get("nvidia/tu102/gsp/gsp-570.144");
+	if (gsp_fw == NULL) {
+		device_printf(sc->dev,
+		    "gsp_boot: GSP image firmware not loaded\n");
+		return (ENOENT);
+	}
+	bl_fw  = firmware_get("nvidia/tu102/gsp/bootloader-570.144");
+	if (bl_fw == NULL) {
+		device_printf(sc->dev,
+		    "gsp_boot: GSP bootloader firmware not loaded\n");
+		firmware_put(gsp_fw, FIRMWARE_UNLOAD);
+		return (ENOENT);
+	}
+
+	img_size = gsp_fw->datasize;
+	img_pages = (img_size + NVKM_GSP_PAGE_SIZE - 1) / NVKM_GSP_PAGE_SIZE;
+	l2_pages = (img_pages + 511) / 512;
+	radix3_alloc_size = (2 + l2_pages) * NVKM_GSP_PAGE_SIZE;
+
+	bl_size = bl_fw->datasize;
+	if (bl_size < sizeof(*bl_hdr)) {
+		device_printf(sc->dev, "gsp_boot: BL fw too small (%u)\n",
+		    bl_size);
+		error = EIO;
+		goto out_put;
+	}
+	bl_hdr = (const struct nvkm_gsp_bin_hdr *)bl_fw->data;
+	if (bl_hdr->header_offset + sizeof(*bl_desc) > bl_size ||
+	    bl_hdr->data_offset + bl_hdr->data_size > bl_size) {
+		device_printf(sc->dev,
+		    "gsp_boot: BL bin_hdr OOB (hdr@0x%x data@0x%x+%u of %u)\n",
+		    bl_hdr->header_offset, bl_hdr->data_offset,
+		    bl_hdr->data_size, bl_size);
+		error = EIO;
+		goto out_put;
+	}
+	bl_desc = (const struct nvkm_riscv_ucode_desc *)
+	    (bl_fw->data + bl_hdr->header_offset);
+	bl_payload_off  = bl_hdr->data_offset;
+	bl_payload_size = bl_hdr->data_size;
+
+	device_printf(sc->dev,
+	    "gsp_boot: gsp_image=%u B (%u pages, %u L2), BL=%u B "
+	    "(payload@0x%x size %u)\n",
+	    img_size, img_pages, l2_pages,
+	    bl_size, bl_payload_off, bl_payload_size);
+	device_printf(sc->dev,
+	    "gsp_boot: BL desc ver=%u appVer=0x%x monitorCode@0x%x+%u "
+	    "monitorData@0x%x+%u manifest@0x%x+%u\n",
+	    bl_desc->version, bl_desc->appVersion,
+	    bl_desc->monitorCodeOffset, bl_desc->monitorCodeSize,
+	    bl_desc->monitorDataOffset, bl_desc->monitorDataSize,
+	    bl_desc->manifestOffset, bl_desc->manifestSize);
+
+	/* 1. Allocate GSP image buffer (contig, page-aligned). */
+	error = nvkm_dmamem_alloc(sc,
+	    (bus_size_t)img_pages * NVKM_GSP_PAGE_SIZE,
+	    NVKM_GSP_PAGE_SIZE, &sc->gsp_image);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "gsp_boot: GSP image dma alloc failed (%d) for %u B\n",
+		    error, img_pages * NVKM_GSP_PAGE_SIZE);
+		goto out_put;
+	}
+	memcpy(sc->gsp_image.kva, gsp_fw->data, img_size);
+
+	/* 2. Allocate radix3 page-table buffer. */
+	error = nvkm_dmamem_alloc(sc, radix3_alloc_size,
+	    NVKM_GSP_PAGE_SIZE, &sc->gsp_radix3);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "gsp_boot: radix3 dma alloc failed (%d) for %u B\n",
+		    error, radix3_alloc_size);
+		nvkm_dmamem_free(sc, &sc->gsp_image);
+		goto out_put;
+	}
+
+	l0_pa = nvkm_gsp_radix3_build(sc, sc->gsp_image.paddr,
+	    img_pages * NVKM_GSP_PAGE_SIZE);
+
+	/* 3. Allocate BL buffer and copy the data section. */
+	error = nvkm_dmamem_alloc(sc,
+	    roundup(bl_payload_size, NVKM_GSP_PAGE_SIZE),
+	    NVKM_GSP_PAGE_SIZE, &sc->gsp_bl);
+	if (error != 0) {
+		device_printf(sc->dev,
+		    "gsp_boot: BL dma alloc failed (%d)\n", error);
+		nvkm_dmamem_free(sc, &sc->gsp_radix3);
+		nvkm_dmamem_free(sc, &sc->gsp_image);
+		goto out_put;
+	}
+	memcpy(sc->gsp_bl.kva, bl_fw->data + bl_payload_off,
+	    bl_payload_size);
+
+	/*
+	 * 4. Fill the wpr_meta. We position FRTS at the top of VRAM
+	 * (same as our FwSec FRTS request) and stack the rest below
+	 * it. WPR2 sub-regions go top-down:
+	 *
+	 *   frts.addr + frts.size  (= gspFwWprEnd)
+	 *   frts.addr              <- frtsOffset
+	 *   bootBin                <- bootBinOffset (= frtsOffset - bl_size, 4K aligned down)
+	 *   GSP ELF                <- gspFwOffset (= bootBinOffset - img_size, 64K aligned down)
+	 *   WPR heap               <- gspFwHeapOffset (some heap size below)
+	 *   wpr_meta               <- gspFwWprStart   (128K aligned down, sizeof(meta) below)
+	 *   non-WPR heap           <- nonWprHeapOffset (1 MiB)
+	 *
+	 * We use the same fb_size detection as FwSec.
+	 */
+	meta = (struct nvkm_gsp_wpr_meta *)sc->wpr_meta.kva;
+	{
+		uint32_t lmr_v = nvkm_rd32(sc, 0x100ce0);
+		uint32_t lmag_v = (lmr_v & 0x3f0u) >> 4;
+		uint32_t lsca_v = lmr_v & 0xfu;
+		uint64_t fb_sz  = (uint64_t)lmag_v << (lsca_v + 20);
+		uint64_t bios_addr;
+		uint64_t frts_off, frts_sz = 0x100000;
+		uint64_t boot_off, gsp_off, heap_off, heap_size = 0x100000;
+		uint64_t wpr_start, non_wpr_off, non_wpr_sz = 0x100000;
+		uint32_t vga = nvkm_rd32(sc, NV_PDISP_VGA_CR);
+
+		if (lmr_v & 0x40000000u)
+			fb_sz = fb_sz / 16 * 15;
+		bios_addr = fb_sz - 0x100000;
+		if (vga & NV_PDISP_VGA_CR_ENABLED) {
+			uint64_t staged = ((uint64_t)(vga & 0xffffff00u)) << 8;
+			if (staged < bios_addr)
+				bios_addr = fb_sz - 0x20000;
+			else
+				bios_addr = staged;
+		}
+
+		frts_off  = (bios_addr & ~(uint64_t)0x1ffffu) - frts_sz;
+		boot_off  = (frts_off - bl_payload_size) & ~(uint64_t)0xfffu;
+		gsp_off   = (boot_off - img_size) & ~(uint64_t)0xffffu;
+		heap_off  = (gsp_off - heap_size) & ~(uint64_t)0xfffffu;
+		wpr_start = (heap_off - sizeof(*meta)) & ~(uint64_t)0x1ffffu;
+		non_wpr_off = wpr_start - non_wpr_sz;
+
+		meta->sysmemAddrOfRadix3Elf = l0_pa;
+		meta->sizeOfRadix3Elf = img_size;
+		meta->sysmemAddrOfBootloader = sc->gsp_bl.paddr;
+		meta->sizeOfBootloader = bl_payload_size;
+		meta->bootloaderCodeOffset = bl_desc->monitorCodeOffset;
+		meta->bootloaderDataOffset = bl_desc->monitorDataOffset;
+		meta->bootloaderManifestOffset = bl_desc->manifestOffset;
+		meta->sysmemAddrOfSignature = 0;
+		meta->sizeOfSignature = 0;
+
+		meta->gspFwRsvdStart = non_wpr_off;
+		meta->nonWprHeapOffset = non_wpr_off;
+		meta->nonWprHeapSize = non_wpr_sz;
+		meta->gspFwWprStart = wpr_start;
+		meta->gspFwHeapOffset = heap_off;
+		meta->gspFwHeapSize = heap_size;
+		meta->gspFwOffset = gsp_off;
+		meta->bootBinOffset = boot_off;
+		meta->frtsOffset = frts_off;
+		meta->frtsSize = frts_sz;
+		meta->gspFwWprEnd = frts_off + frts_sz;
+		meta->fbSize = fb_sz;
+		meta->vgaWorkspaceOffset = bios_addr;
+		meta->vgaWorkspaceSize = fb_sz - bios_addr;
+		meta->bootCount = 0;
+		meta->verified = 0;
+
+		device_printf(sc->dev,
+		    "gsp_boot: FB layout fb=0x%llx bios=0x%llx frts=0x%llx+0x%llx\n",
+		    (unsigned long long)fb_sz,
+		    (unsigned long long)bios_addr,
+		    (unsigned long long)frts_off,
+		    (unsigned long long)frts_sz);
+		device_printf(sc->dev,
+		    "gsp_boot: WPR2 [0x%llx..0x%llx) bootbin=0x%llx gspfw=0x%llx heap=0x%llx\n",
+		    (unsigned long long)wpr_start,
+		    (unsigned long long)meta->gspFwWprEnd,
+		    (unsigned long long)boot_off,
+		    (unsigned long long)gsp_off,
+		    (unsigned long long)heap_off);
+		device_printf(sc->dev,
+		    "gsp_boot: meta.radix3=0x%llx (size %u) bl=0x%llx (size %u)\n",
+		    (unsigned long long)meta->sysmemAddrOfRadix3Elf,
+		    (uint32_t)meta->sizeOfRadix3Elf,
+		    (unsigned long long)meta->sysmemAddrOfBootloader,
+		    (uint32_t)meta->sizeOfBootloader);
+	}
+
+	firmware_put(bl_fw, FIRMWARE_UNLOAD);
+	firmware_put(gsp_fw, FIRMWARE_UNLOAD);
+	return (0);
+
+out_put:
+	firmware_put(bl_fw, FIRMWARE_UNLOAD);
+	firmware_put(gsp_fw, FIRMWARE_UNLOAD);
+	return (error);
+}
+
+void
+nvkm_gsp_boot_release(struct nvkm_softc *sc)
+{
+	if (sc->gsp_bl.kva != NULL)
+		nvkm_dmamem_free(sc, &sc->gsp_bl);
+	if (sc->gsp_radix3.kva != NULL)
+		nvkm_dmamem_free(sc, &sc->gsp_radix3);
+	if (sc->gsp_image.kva != NULL)
+		nvkm_dmamem_free(sc, &sc->gsp_image);
+}

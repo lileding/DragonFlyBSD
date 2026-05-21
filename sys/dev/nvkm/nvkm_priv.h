@@ -157,6 +157,9 @@ struct nvkm_softc {
 	struct nvkm_booter_info	booter;
 	struct nvkm_dmamem	booter_dma;	/* staged booter image */
 	struct nvkm_dmamem	wpr_meta;	/* GspFwWprMeta in sysmem */
+	struct nvkm_dmamem	gsp_image;	/* GSP-RM ELF body */
+	struct nvkm_dmamem	gsp_radix3;	/* 3-level page table for image */
+	struct nvkm_dmamem	gsp_bl;		/* GSP RISC-V bootloader */
 };
 
 static __inline uint32_t
@@ -225,8 +228,64 @@ int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
 void	nvkm_booter_release(struct nvkm_softc *sc);
 
 /* nvkm_gsp_meta.c */
+#define NVKM_GSP_FW_WPR_META_MAGIC    0xdc3aae21371a60b3ULL
+#define NVKM_GSP_FW_WPR_META_REVISION 1ULL
+#define NVKM_GSP_FW_WPR_META_SIZE     256
+
+struct nvkm_gsp_wpr_meta {
+	uint64_t magic;
+	uint64_t revision;
+
+	uint64_t sysmemAddrOfRadix3Elf;
+	uint64_t sizeOfRadix3Elf;
+	uint64_t sysmemAddrOfBootloader;
+	uint64_t sizeOfBootloader;
+	uint64_t bootloaderCodeOffset;
+	uint64_t bootloaderDataOffset;
+	uint64_t bootloaderManifestOffset;
+	uint64_t sysmemAddrOfSignature;
+	uint64_t sizeOfSignature;
+
+	uint64_t gspFwRsvdStart;
+	uint64_t nonWprHeapOffset;
+	uint64_t nonWprHeapSize;
+	uint64_t gspFwWprStart;
+	uint64_t gspFwHeapOffset;
+	uint64_t gspFwHeapSize;
+	uint64_t gspFwOffset;
+	uint64_t bootBinOffset;
+	uint64_t frtsOffset;
+	uint64_t frtsSize;
+	uint64_t gspFwWprEnd;
+	uint64_t fbSize;
+
+	uint64_t vgaWorkspaceOffset;
+	uint64_t vgaWorkspaceSize;
+	uint64_t bootCount;
+
+	uint64_t partitionRpcAddr;
+	uint16_t partitionRpcRequestOffset;
+	uint16_t partitionRpcReplyOffset;
+	uint32_t elfCodeOffset;
+	uint32_t elfDataOffset;
+	uint32_t elfCodeSize;
+	uint32_t elfDataSize;
+	uint32_t lsUcodeVersion;
+
+	uint8_t  gspFwHeapVfPartitionCount;
+	uint8_t  flags;
+	uint8_t  padding[2];
+	uint32_t pmuReservedSize;
+
+	uint64_t verified;
+} __packed;
+
 int	nvkm_gsp_meta_init(struct nvkm_softc *sc);
 void	nvkm_gsp_meta_fini(struct nvkm_softc *sc);
+
+/* nvkm_gsp_boot.c */
+int	nvkm_gsp_boot_prepare(struct nvkm_softc *sc);
+void	nvkm_gsp_boot_release(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */
 int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,

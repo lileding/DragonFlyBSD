@@ -139,6 +139,7 @@ nvkm_pci_attach(device_t dev)
 	 * fields without flying blind.
 	 */
 	(void)nvkm_gsp_meta_init(sc);
+	(void)nvkm_gsp_boot_prepare(sc);
 
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
@@ -158,6 +159,7 @@ nvkm_pci_detach(device_t dev)
 	struct nvkm_softc *sc = device_get_softc(dev);
 
 	nvkm_booter_release(sc);
+	nvkm_gsp_boot_release(sc);
 	nvkm_gsp_meta_fini(sc);
 	nvkm_gsp_fini(sc);
 	nvkm_sec2_fini(sc);
