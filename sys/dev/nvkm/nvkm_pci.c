@@ -199,6 +199,80 @@ nvkm_pci_attach(device_t dev)
 		    "(active=%u)\n",
 		    polls * 10, riscv_status, riscv_status & 1);
 
+		/*
+		 * If RISC-V is active, poll the msgq for the first event
+		 * GSP-RM emits at the end of its self-init: GSP_INIT_DONE
+		 * (= 0x1001). Layout per nouveau r535/rpc.c:
+		 *   each message slot is one 4 KiB page
+		 *   msgq region starts with a metadata page; entries follow
+		 *   at offset 0x1000 + rptr * 0x1000.
+		 *   slot header: r535_gsp_msg (52 B: 16+16+u32+u32+u32+u32)
+		 *   then       : nvfw_gsp_rpc (32 B), then payload
+		 *   function code = nvfw_gsp_rpc.function at offset 12 of rpc
+		 *   (= 44 from start of slot once you add the 52 B mqe hdr)
+		 *
+		 * GSP writes its writePtr into msgq region offset 0x10
+		 * (msgqTxHeader.writePtr). We update our readPtr into the
+		 * cmdq region's rx header at offset rxHdrOff (= 32) per the
+		 * SWAP_RX layout nouveau uses.
+		 */
+		if ((riscv_status & 1) && sc->gsp_shm.kva != NULL) {
+			uint8_t *shm = (uint8_t *)sc->gsp_shm.kva;
+			uint8_t *msgq = shm + sc->gsp_shm_msgq_off;
+			uint8_t *cmdq = shm + sc->gsp_shm_cmdq_off;
+			uint32_t rptr = 0;	/* host's read cursor */
+			uint32_t wptr_seen_prev = 0;
+			int spin;
+			bool got_init_done = false;
+
+			for (spin = 0; spin < 5000 && !got_init_done; spin++) {
+				uint32_t wptr = *(volatile uint32_t *)(msgq + 0x10);
+				if (wptr != wptr_seen_prev) {
+					device_printf(sc->dev,
+					    "gsp: msgq wptr advanced %u -> %u (rptr=%u)\n",
+					    wptr_seen_prev, wptr, rptr);
+					wptr_seen_prev = wptr;
+				}
+				while (rptr != wptr) {
+					uint8_t *slot = msgq + 0x1000 +
+					    rptr * 0x1000;
+					/* r535_gsp_msg header = 52 bytes
+					 * (16 auth + 16 aad + 4 chksum + 4 seq
+					 *  + 4 elem_count + 4 pad + 4 unused).
+					 * Then nvfw_gsp_rpc:
+					 *   u32 header_version  off 0
+					 *   u32 signature       off 4
+					 *   u32 length          off 8
+					 *   u32 function        off 12  <-- want this
+					 *   u32 rpc_result      off 16
+					 *   ... */
+					uint32_t func, sig, len, result;
+					sig    = *(volatile uint32_t *)(slot + 52 + 4);
+					len    = *(volatile uint32_t *)(slot + 52 + 8);
+					func   = *(volatile uint32_t *)(slot + 52 + 12);
+					result = *(volatile uint32_t *)(slot + 52 + 16);
+					device_printf(sc->dev,
+					    "gsp: msgq[%u] sig=0x%08x len=%u func=%u(0x%x) result=0x%x\n",
+					    rptr, sig, len, func, func, result);
+					if (func == 4097 /* GSP_INIT_DONE */)
+						got_init_done = true;
+					rptr++;
+					if (rptr >= 63 /* msgCount */)
+						rptr = 0;
+				}
+				/* publish our rptr back to GSP via cmdq rxHdr */
+				*(volatile uint32_t *)(cmdq + 32) = rptr;
+				if (got_init_done)
+					break;
+				DELAY(1000);	/* 1 ms */
+			}
+			device_printf(sc->dev,
+			    "gsp: %s after polling msgq for %d ms (final wptr=%u rptr=%u)\n",
+			    got_init_done ? "GSP_INIT_DONE received" :
+			    "no GSP_INIT_DONE",
+			    spin, wptr_seen_prev, rptr);
+		}
+
 		{
 			uint32_t cpuctl = nvkm_rd32(sc,
 			    NVKM_TU102_GSP_BASE + 0x100);
