@@ -156,6 +156,7 @@ struct nvkm_softc {
 
 	struct nvkm_booter_info	booter;
 	struct nvkm_dmamem	booter_dma;	/* staged booter image */
+	struct nvkm_dmamem	wpr_meta;	/* GspFwWprMeta in sysmem */
 };
 
 static __inline uint32_t
@@ -222,6 +223,10 @@ int	nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	    struct nvkm_booter_info *info);
 int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
 void	nvkm_booter_release(struct nvkm_softc *sc);
+
+/* nvkm_gsp_meta.c */
+int	nvkm_gsp_meta_init(struct nvkm_softc *sc);
+void	nvkm_gsp_meta_fini(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */
 int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
