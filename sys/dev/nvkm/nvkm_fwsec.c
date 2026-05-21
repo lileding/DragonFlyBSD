@@ -1,0 +1,425 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * FwSec extraction and execution on SEC2.
+ *
+ * NVIDIA's FwSec HS ucode lives embedded in VBIOS. It sets up the FRTS
+ * region in VRAM and programs the WPR2 hardware-protected window
+ * registers (0x1fa824/8). Those registers are PLM-locked from PRI access
+ * by RM, so writing them from the kernel is not possible; they have to
+ * be programmed from HS Falcon mode, which is exactly what FwSec runs in.
+ *
+ * Path:
+ *   1. Scan our PROM-extracted VBIOS for a FALCON_UCODE_DESC_V2 with
+ *      the FwSec layout (size=60, ver=2, version-avail bit set).
+ *   2. Parse the descriptor; body data follows immediately after.
+ *   3. Stage IMEM (nsec+sec) and DMEM into a DMA-coherent buffer.
+ *   4. Patch DMEM at the descriptor's interfaceOffset to walk the
+ *      Falcon Application Interface header, locate the DMEM_MAPPER_V3
+ *      entry, and write the FRTS command (init_cmd=0x15 plus a
+ *      FWSECLIC_FRTS_CMD payload at cmd_in_buffer_offset).
+ *   5. Load the generic ACR bootloader (nvidia/tu102/acr/bl) into
+ *      SEC2 IMEM at top, write its DMEM descriptor (flcn_bl_dmem_desc_v2)
+ *      with the staged ucode's DMA address, start, wait for halt.
+ *   6. Verify by reading WPR2_LO/HI and the FWSEC scratch register.
+ *
+ * Source references:
+ *   linux/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/fwsec.c
+ *   open-rm/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_frts_tu102.c
+ *   open-rm/src/nvidia/src/kernel/gpu/gsp/arch/turing/kernel_gsp_falcon_tu102.c
+ */
+
+#include "nvkm_priv.h"
+#include "nvkm_falcon.h"
+
+#include <sys/firmware.h>
+#include <sys/libkern.h>		/* memcpy/memset */
+
+static MALLOC_DEFINE(M_NVKM_FWSEC, "nvkm_fwsec", "nvkm FwSec staging");
+
+/* ----- Wire-level types (MIT-derived from open-rm/nouveau) ----------- */
+
+/* FALCON_UCODE_DESC_V2 -- 60 bytes */
+struct nvkm_fud_v2 {
+	uint32_t hdr;	/* bit0=ver_avail, bit2=encrypted, [15:8]=ver, [31:16]=size */
+	uint32_t stored_size;
+	uint32_t uncompressed_size;
+	uint32_t virtual_entry;
+	uint32_t interface_offset;
+	uint32_t imem_phys_base;
+	uint32_t imem_load_size;
+	uint32_t imem_virt_base;
+	uint32_t imem_sec_base;
+	uint32_t imem_sec_size;
+	uint32_t dmem_offset;
+	uint32_t dmem_phys_base;
+	uint32_t dmem_load_size;
+	uint32_t alt_imem_load_size;
+	uint32_t alt_dmem_load_size;
+} __packed;
+
+/* nvfw_bin_hdr wrapper (acr_bl uses this format too) */
+struct nvkm_bin_hdr {
+	uint32_t bin_magic;	/* 0x10de */
+	uint32_t bin_ver;
+	uint32_t bin_size;
+	uint32_t header_offset;
+	uint32_t data_offset;
+	uint32_t data_size;
+} __packed;
+
+/* nvfw_bl_desc -- inside acr bl bin, at header_offset */
+struct nvkm_bl_desc {
+	uint32_t start_tag;
+	uint32_t dmem_load_off;
+	uint32_t code_off;
+	uint32_t code_size;
+	uint32_t data_off;
+	uint32_t data_size;
+} __packed;
+
+/* Falcon Application Interface header v1 -- at dmem[interfaceOffset] */
+struct nvkm_appif_hdr_v1 {
+	uint8_t ver;
+	uint8_t hdr;	/* header size = offset of first entry */
+	uint8_t len;	/* entry length */
+	uint8_t cnt;	/* number of entries */
+} __packed;
+
+struct nvkm_appif_entry_v1 {
+	uint32_t id;
+	uint32_t dmem_offset;	/* offset within DMEM of the application's struct */
+} __packed;
+
+#define NVKM_APPIF_ID_DMEMMAPPER	0x4
+
+/* DMEMMAPPER_V3 -- 56 bytes, at dmem[entry.dmem_offset] for DMEMMAPPER entry */
+struct nvkm_dmemmap_v3 {
+	uint32_t signature;
+	uint16_t version;
+	uint16_t size;
+	uint32_t cmd_in_buffer_offset;
+	uint32_t cmd_in_buffer_size;
+	uint32_t cmd_out_buffer_offset;
+	uint32_t cmd_out_buffer_size;
+	uint32_t nvf_img_data_buffer_offset;
+	uint32_t nvf_img_data_buffer_size;
+	uint32_t printf_buffer_hdr;
+	uint32_t ucode_build_time_stamp;
+	uint32_t ucode_signature;
+	uint32_t init_cmd;
+	uint32_t ucode_feature;
+	uint32_t ucode_cmd_mask0;
+	uint32_t ucode_cmd_mask1;
+	uint32_t multi_tgt_tbl;
+} __packed;
+
+#define NVKM_DMEMMAP_CMD_FRTS	0x15
+#define NVKM_DMEMMAP_CMD_SB	0x19
+
+/* read_vbios + frts_region cmd; written at dmemmap.cmd_in_buffer_offset */
+struct nvkm_fwsec_frts_cmd {
+	struct {
+		uint32_t ver;
+		uint32_t hdr;
+		uint64_t addr;
+		uint32_t size;
+		uint32_t flags;
+	} __packed read_vbios;
+	struct {
+		uint32_t ver;
+		uint32_t hdr;
+		uint32_t addr_4k;
+		uint32_t size_4k;
+		uint32_t media_type;
+	} __packed frts_region;
+} __packed;
+
+#define NVKM_FRTS_MEDIA_FB	2
+
+/* flcn_bl_dmem_desc_v2 -- same as in nvkm_booter.c */
+struct nvkm_bl_dmem_desc_v2 {
+	uint32_t reserved[4];
+	uint32_t signature[4];
+	uint32_t ctx_dma;
+	uint64_t code_dma_base;
+	uint32_t non_sec_code_off;
+	uint32_t non_sec_code_size;
+	uint32_t sec_code_off;
+	uint32_t sec_code_size;
+	uint32_t code_entry_point;
+	uint64_t data_dma_base;
+	uint32_t data_size;
+	uint32_t argc;
+	uint32_t argv;
+} __packed;
+
+#define NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH		4
+#define NVKM_FBIF_TRANSCFG(i)			(0x600u + (i) * 4u)
+#define NVKM_FBIF_TRANSCFG_NCOH_PHYS		0x00000005u
+
+#define NVKM_FUD_V2_SIZE			60
+#define NVKM_FUD_V2_HDR_VER_AVAIL		0x01u
+#define NVKM_FUD_V2_HDR_VER			2
+
+/* ----- Implementation ----------------------------------------------- */
+
+static int
+nvkm_fwsec_find_v2(struct nvkm_softc *sc, uint32_t *out_offset)
+{
+	uint32_t a;
+
+	if (sc->vbios == NULL || sc->vbios_size < 64)
+		return (ENXIO);
+
+	for (a = 0; a + NVKM_FUD_V2_SIZE <= sc->vbios_size; a += 4) {
+		uint32_t hdr = nvkm_le32(&sc->vbios[a]);
+
+		if ((hdr & 0xff) & NVKM_FUD_V2_HDR_VER_AVAIL &&
+		    ((hdr >> 8) & 0xff) == NVKM_FUD_V2_HDR_VER &&
+		    ((hdr >> 16) & 0xffff) == NVKM_FUD_V2_SIZE) {
+			*out_offset = a;
+			return (0);
+		}
+	}
+	return (ENOENT);
+}
+
+static void
+nvkm_fwsec_patch_dmem(struct nvkm_softc *sc, uint8_t *dmem, uint32_t dmem_size,
+    uint32_t intf_off, uint32_t init_cmd, uint64_t frts_addr_bytes,
+    uint32_t frts_size_bytes)
+{
+	struct nvkm_appif_hdr_v1 *hdr;
+	uint32_t entry_off;
+	int i;
+
+	if (intf_off + sizeof(*hdr) > dmem_size) {
+		device_printf(sc->dev,
+		    "fwsec: appif hdr OOB (intf=0x%x dmem=%u)\n",
+		    intf_off, dmem_size);
+		return;
+	}
+	hdr = (struct nvkm_appif_hdr_v1 *)(dmem + intf_off);
+	if (hdr->ver != 1) {
+		device_printf(sc->dev,
+		    "fwsec: appif unsupported version %u\n", hdr->ver);
+		return;
+	}
+
+	entry_off = intf_off + hdr->hdr;
+	for (i = 0; i < hdr->cnt; i++) {
+		struct nvkm_appif_entry_v1 *ent;
+		struct nvkm_dmemmap_v3 *dmm;
+		struct nvkm_fwsec_frts_cmd *cmd;
+
+		if (entry_off + sizeof(*ent) > dmem_size)
+			break;
+		ent = (struct nvkm_appif_entry_v1 *)(dmem + entry_off);
+
+		if (ent->id != NVKM_APPIF_ID_DMEMMAPPER) {
+			entry_off += hdr->len;
+			continue;
+		}
+
+		if (ent->dmem_offset + sizeof(*dmm) > dmem_size) {
+			device_printf(sc->dev,
+			    "fwsec: dmemmap OOB (off=0x%x)\n",
+			    ent->dmem_offset);
+			return;
+		}
+		dmm = (struct nvkm_dmemmap_v3 *)(dmem + ent->dmem_offset);
+		dmm->init_cmd = init_cmd;
+
+		if (dmm->cmd_in_buffer_offset + sizeof(*cmd) > dmem_size) {
+			device_printf(sc->dev,
+			    "fwsec: cmd buf OOB (off=0x%x)\n",
+			    dmm->cmd_in_buffer_offset);
+			return;
+		}
+		cmd = (struct nvkm_fwsec_frts_cmd *)(dmem + dmm->cmd_in_buffer_offset);
+		memset(cmd, 0, sizeof(*cmd));
+		cmd->read_vbios.ver = 1;
+		cmd->read_vbios.hdr = sizeof(cmd->read_vbios);
+		cmd->read_vbios.flags = 2;
+		if (init_cmd == NVKM_DMEMMAP_CMD_FRTS) {
+			cmd->frts_region.ver = 1;
+			cmd->frts_region.hdr = sizeof(cmd->frts_region);
+			cmd->frts_region.addr_4k =
+			    (uint32_t)(frts_addr_bytes >> 12);
+			cmd->frts_region.size_4k = frts_size_bytes >> 12;
+			cmd->frts_region.media_type = NVKM_FRTS_MEDIA_FB;
+		}
+
+		device_printf(sc->dev,
+		    "fwsec: patched DMEM appif id=%u dmem_off=0x%x "
+		    "cmd_in=0x%x init_cmd=0x%x frts=0x%jx+%u KiB\n",
+		    ent->id, ent->dmem_offset, dmm->cmd_in_buffer_offset,
+		    init_cmd, (uintmax_t)frts_addr_bytes,
+		    frts_size_bytes >> 10);
+		return;
+	}
+	device_printf(sc->dev,
+	    "fwsec: no DMEMMAPPER entry in appif (cnt=%u)\n", hdr->cnt);
+}
+
+int
+nvkm_fwsec_run_frts(struct nvkm_softc *sc, uint64_t frts_addr, uint32_t frts_size)
+{
+	uint32_t desc_off;
+	const struct nvkm_fud_v2 *desc;
+	const uint8_t *body;
+	uint32_t imem_total, dmem_size, ucode_size;
+	struct nvkm_dmamem fw_dma;
+	struct nvkm_falcon *sec2 = sc->sec2;
+	const struct firmware *bl_fw;
+	const struct nvkm_bin_hdr *bl_bh;
+	const struct nvkm_bl_desc *bl_bd;
+	struct nvkm_bl_dmem_desc_v2 bl_desc;
+	uint32_t mb0, mb1, cpuctl, wpr2_lo, wpr2_hi;
+	int error;
+
+	device_printf(sc->dev, "fwsec: entry sec2=%p vbios=%p sz=%u\n", sec2, sc->vbios, sc->vbios_size);
+	if (sec2 == NULL || sc->vbios == NULL)
+		return (ENXIO);
+
+	/* 1. Find FwSec V2 descriptor in PROM */
+	error = nvkm_fwsec_find_v2(sc, &desc_off);
+	if (error != 0) {
+		device_printf(sc->dev, "fwsec: no V2 desc found\n");
+		return (error);
+	}
+	desc = (const struct nvkm_fud_v2 *)(sc->vbios + desc_off);
+	body = sc->vbios + desc_off + NVKM_FUD_V2_SIZE;
+
+	device_printf(sc->dev,
+	    "fwsec: V2 desc @ 0x%05x imem_load=%u imem_sec=%u imem_virt=0x%x "
+	    "dmem_off=0x%x dmem_load=%u intf=0x%x\n",
+	    desc_off, desc->imem_load_size, desc->imem_sec_size,
+	    desc->imem_virt_base, desc->dmem_offset, desc->dmem_load_size,
+	    desc->interface_offset);
+
+	imem_total = desc->imem_load_size;
+	dmem_size  = desc->dmem_load_size;
+	if (desc_off + NVKM_FUD_V2_SIZE + desc->dmem_offset + dmem_size >
+	    sc->vbios_size)
+		return (EIO);
+
+	/* 2. Allocate DMA-coherent staging: imem block + dmem block.
+	 * Open-rm aligns code and data sections to 256 bytes individually. */
+	ucode_size = roundup(imem_total, 256) + roundup(dmem_size, 256);
+	error = nvkm_dmamem_alloc(sc, ucode_size, 4096, &fw_dma);
+	if (error != 0)
+		return (error);
+
+	/* Copy IMEM at offset 0; DMEM at offset roundup(imem_total, 256). */
+	memcpy(fw_dma.kva, body, imem_total);
+	{
+		uint32_t dmem_dst = roundup(imem_total, 256);
+		memcpy((uint8_t *)fw_dma.kva + dmem_dst,
+		    body + desc->dmem_offset, dmem_size);
+
+		/* 3. Patch DMEM (in our buffer) with FRTS command. */
+		nvkm_fwsec_patch_dmem(sc,
+		    (uint8_t *)fw_dma.kva + dmem_dst, dmem_size,
+		    desc->interface_offset,
+		    NVKM_DMEMMAP_CMD_FRTS,
+		    frts_addr, frts_size);
+	}
+
+	/* 4. Build flcn_bl_dmem_desc_v2 pointing at the staged ucode. */
+	memset(&bl_desc, 0, sizeof(bl_desc));
+	bl_desc.ctx_dma = NVKM_FLCN_DMAIDX_PHYS_SYS_NCOH;
+	bl_desc.code_dma_base   = fw_dma.paddr;
+	bl_desc.non_sec_code_off  = desc->imem_phys_base;
+	bl_desc.non_sec_code_size = desc->imem_load_size - desc->imem_sec_size;
+	bl_desc.sec_code_off  = desc->imem_sec_base - desc->imem_virt_base +
+	    desc->imem_phys_base;
+	bl_desc.sec_code_size = roundup(desc->imem_sec_size, 256);
+	bl_desc.code_entry_point = 0;
+	bl_desc.data_dma_base = fw_dma.paddr + roundup(imem_total, 256);
+	bl_desc.data_size     = dmem_size;
+	bl_desc.argc = 0;
+	bl_desc.argv = 0;
+
+	/* 5. Get the generic ACR bootloader firmware. */
+	bl_fw = firmware_get("nvidia/tu102/acr/bl");
+	if (bl_fw == NULL) {
+		device_printf(sc->dev, "fwsec: acr/bl firmware not loaded\n");
+		nvkm_dmamem_free(sc, &fw_dma);
+		return (ENOENT);
+	}
+	if (bl_fw->datasize < sizeof(*bl_bh) + sizeof(*bl_bd)) {
+		device_printf(sc->dev, "fwsec: acr/bl too small\n");
+		firmware_put(bl_fw, FIRMWARE_UNLOAD);
+		nvkm_dmamem_free(sc, &fw_dma);
+		return (EIO);
+	}
+	bl_bh = (const struct nvkm_bin_hdr *)bl_fw->data;
+	bl_bd = (const struct nvkm_bl_desc *)
+	    ((const uint8_t *)bl_fw->data + bl_bh->header_offset);
+
+	device_printf(sc->dev,
+	    "fwsec: bl bin_size=%u hdr@0x%x data@0x%x; "
+	    "bl start_tag=0x%x code_off=0x%x code_size=%u data_size=%u\n",
+	    bl_bh->bin_size, bl_bh->header_offset, bl_bh->data_offset,
+	    bl_bd->start_tag, bl_bd->code_off, bl_bd->code_size,
+	    bl_bd->data_size);
+
+	/* 6. Program FBIF TRANSCFG, clear REQUIRE_CTX, write desc to DMEM. */
+	nvkm_falcon_mask(sec2, NVKM_FBIF_TRANSCFG(bl_desc.ctx_dma),
+	    0x7u, NVKM_FBIF_TRANSCFG_NCOH_PHYS);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_DMACTL, 0);
+	error = nvkm_falcon_load_dmem(sec2, &bl_desc, 0, sizeof(bl_desc), 0);
+	if (error != 0) {
+		device_printf(sc->dev, "fwsec: dmem desc load failed (%d)\n",
+		    error);
+		goto out;
+	}
+
+	/* 7. PIO-load the generic BL stub into top of IMEM. */
+	{
+		uint32_t imem_top = 65536u - NVKM_FLCN_IMEM_BLKSIZE;
+		const uint8_t *src = (const uint8_t *)bl_fw->data +
+		    bl_bh->data_offset + bl_bd->code_off;
+		error = nvkm_falcon_load_imem(sec2, src, imem_top,
+		    bl_bd->code_size,
+		    bl_bd->start_tag, 0, false);
+		if (error != 0) {
+			device_printf(sc->dev,
+			    "fwsec: imem bl load failed (%d)\n", error);
+			goto out;
+		}
+	}
+
+	/* 8. Set BOOTVEC, zero mbox, start, wait halt. */
+	nvkm_falcon_set_bootvec(sec2, bl_bd->start_tag << 8);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
+
+	device_printf(sc->dev,
+	    "fwsec: starting SEC2 (bootvec=0x%x ctx_dma=%u)\n",
+	    bl_bd->start_tag << 8, bl_desc.ctx_dma);
+
+	nvkm_falcon_start(sec2);
+	error = nvkm_falcon_wait_for_halt(sec2, 5000000);	/* 5 s */
+
+	mb0 = nvkm_falcon_rd32(sec2, NVKM_FLCN_MAILBOX0);
+	mb1 = nvkm_falcon_rd32(sec2, NVKM_FLCN_MAILBOX1);
+	cpuctl = nvkm_falcon_rd32(sec2, NVKM_FLCN_CPUCTL);
+	wpr2_lo = nvkm_rd32(sc, 0x001fa824);
+	wpr2_hi = nvkm_rd32(sc, 0x001fa828);
+
+	device_printf(sc->dev,
+	    "fwsec: %s mb0=0x%08x mb1=0x%08x cpuctl=0x%08x\n",
+	    error == 0 ? "halted" : "TIMEOUT",
+	    mb0, mb1, cpuctl);
+	device_printf(sc->dev,
+	    "fwsec: post-run WPR2 lo=0x%08x hi=0x%08x\n",
+	    wpr2_lo, wpr2_hi);
+
+out:
+	firmware_put(bl_fw, FIRMWARE_UNLOAD);
+	nvkm_dmamem_free(sc, &fw_dma);
+	return (error);
+}

@@ -2,10 +2,11 @@
 #
 # Each entry maps a source file to a firmware imagename and version.
 # Image names follow the linux-firmware naming convention so the same
-# blobs can be sourced from /lib/firmware/nvidia/tu102/gsp/ unchanged.
+# blobs can be sourced from /lib/firmware/nvidia/tu102/ unchanged.
 
 KMOD=	nvkm_fw_tu102_570
 
-FIRMWS=	booter_load.bin:nvidia/tu102/gsp/booter_load-570.144:570144
+FIRMWS=	booter_load.bin:nvidia/tu102/gsp/booter_load-570.144:570144 \
+	acr_bl.bin:nvidia/tu102/acr/bl:1
 
 .include <bsd.kmod.mk>
