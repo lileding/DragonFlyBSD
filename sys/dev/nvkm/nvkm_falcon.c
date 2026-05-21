@@ -141,6 +141,13 @@ nvkm_falcon_disable_ctx_req(struct nvkm_falcon *flcn)
 	v = nvkm_falcon_fbif_rd32(flcn, NVKM_FBIF_CTL);
 	v |= NVKM_FBIF_CTL_ALLOW_PHYS_NO_CTX;
 	nvkm_falcon_fbif_wr32(flcn, NVKM_FBIF_CTL, v);
+
+	/*
+	 * Per open-rm kflcnDisableCtxReq_TU102: BOTH FBIF_CTL and DMACTL
+	 * must be updated. Clearing DMACTL clears REQUIRE_CTX (bit 0)
+	 * which otherwise blocks DMA from sysmem when no context is bound.
+	 */
+	nvkm_falcon_wr32(flcn, NVKM_FLCN_DMACTL, 0);
 }
 
 /*
