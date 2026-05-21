@@ -34,66 +34,6 @@
 
 static MALLOC_DEFINE(M_NVKM_GSP_META, "nvkm_gsp_meta", "nvkm GSP wpr meta");
 
-#define NVKM_GSP_FW_WPR_META_MAGIC    0xdc3aae21371a60b3ULL
-#define NVKM_GSP_FW_WPR_META_REVISION 1ULL
-#define NVKM_GSP_FW_WPR_META_SIZE     256
-
-/*
- * Match the open-rm layout byte-for-byte. Field names follow nouveau's
- * lower_camel_case for easier diffing against their tu102 implementation.
- */
-struct nvkm_gsp_wpr_meta {
-	uint64_t magic;
-	uint64_t revision;
-
-	/* sysmem inputs */
-	uint64_t sysmemAddrOfRadix3Elf;
-	uint64_t sizeOfRadix3Elf;
-	uint64_t sysmemAddrOfBootloader;
-	uint64_t sizeOfBootloader;
-	uint64_t bootloaderCodeOffset;
-	uint64_t bootloaderDataOffset;
-	uint64_t bootloaderManifestOffset;
-	/* union { signature[2]; freeListWprOffset+pad } -- first variant */
-	uint64_t sysmemAddrOfSignature;
-	uint64_t sizeOfSignature;
-
-	/* FB layout */
-	uint64_t gspFwRsvdStart;
-	uint64_t nonWprHeapOffset;
-	uint64_t nonWprHeapSize;
-	uint64_t gspFwWprStart;
-	uint64_t gspFwHeapOffset;
-	uint64_t gspFwHeapSize;
-	uint64_t gspFwOffset;
-	uint64_t bootBinOffset;
-	uint64_t frtsOffset;
-	uint64_t frtsSize;
-	uint64_t gspFwWprEnd;
-	uint64_t fbSize;
-
-	uint64_t vgaWorkspaceOffset;
-	uint64_t vgaWorkspaceSize;
-	uint64_t bootCount;
-
-	/* union { partitionRpc + elf fields | crashReport variant } */
-	uint64_t partitionRpcAddr;
-	uint16_t partitionRpcRequestOffset;
-	uint16_t partitionRpcReplyOffset;
-	uint32_t elfCodeOffset;
-	uint32_t elfDataOffset;
-	uint32_t elfCodeSize;
-	uint32_t elfDataSize;
-	uint32_t lsUcodeVersion;
-
-	uint8_t  gspFwHeapVfPartitionCount;
-	uint8_t  flags;
-	uint8_t  padding[2];
-	uint32_t pmuReservedSize;
-
-	uint64_t verified;  /* 0 -> unverified, 0xa0... -> verified */
-} __packed;
-
 _Static_assert(sizeof(struct nvkm_gsp_wpr_meta) == NVKM_GSP_FW_WPR_META_SIZE,
     "GspFwWprMeta must be exactly 256 bytes");
 
