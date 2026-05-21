@@ -271,6 +271,46 @@ nvkm_pci_attach(device_t dev)
 			    got_init_done ? "GSP_INIT_DONE received" :
 			    "no GSP_INIT_DONE",
 			    spin, wptr_seen_prev, rptr);
+
+			/*
+			 * Dump LOGINIT / LOGRM "put" pointer (u64 at offset 0)
+			 * and the first 64 bytes of the logged data (starting
+			 * at offset 8 once the PTE array is past). If GSP-RM
+			 * wrote anything to its log buffers we see it here.
+			 */
+			if (sc->gsp_loginit.kva != NULL) {
+				const uint64_t *li = sc->gsp_loginit.kva;
+				const uint64_t *lr = sc->gsp_logrm.kva;
+				device_printf(sc->dev,
+				    "gsp: LOGINIT put=0x%llx data[0..0x40]: "
+				    "%016llx %016llx %016llx %016llx\n",
+				    (unsigned long long)li[0],
+				    (unsigned long long)li[1],
+				    (unsigned long long)li[2],
+				    (unsigned long long)li[3],
+				    (unsigned long long)li[4]);
+				device_printf(sc->dev,
+				    "gsp: LOGRM   put=0x%llx data[0..0x40]: "
+				    "%016llx %016llx %016llx %016llx\n",
+				    (unsigned long long)lr[0],
+				    (unsigned long long)lr[1],
+				    (unsigned long long)lr[2],
+				    (unsigned long long)lr[3],
+				    (unsigned long long)lr[4]);
+			}
+			/*
+			 * Re-read GSP-Falcon MB0/MB1: GSP-RM may write a
+			 * progress / panic code there as it dies.
+			 */
+			{
+				uint32_t mb0_late = nvkm_rd32(sc,
+				    NVKM_TU102_GSP_BASE + 0x040);
+				uint32_t mb1_late = nvkm_rd32(sc,
+				    NVKM_TU102_GSP_BASE + 0x044);
+				device_printf(sc->dev,
+				    "gsp: late MB0=0x%08x MB1=0x%08x\n",
+				    mb0_late, mb1_late);
+			}
 		}
 
 		{
