@@ -163,6 +163,7 @@ struct nvkm_softc {
 	struct nvkm_dmamem	gsp_sig;	/* .fwsignature_tu10x section */
 	uint32_t		gsp_sig_size;
 	uint32_t		gsp_fwimage_off; /* offset in original ELF */
+	struct nvkm_dmamem	gsp_libos;	/* LibOS init args (placeholder) */
 };
 
 static __inline uint32_t

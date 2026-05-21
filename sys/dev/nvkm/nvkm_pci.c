@@ -10,6 +10,7 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvkm_falcon.h"
 
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
@@ -118,17 +119,14 @@ nvkm_pci_attach(device_t dev)
 		nvkm_bios_publish_sysctl(sc, ctx, oid);
 	}
 
-	/* FwSec FRTS: program WPR2 from HS Falcon (PRI is PLM-locked). */
 	/*
-	 * Run the two FwSec invocations the way nouveau does on TU102:
-	 *   1. FRTS (cmd 0x15) sets up the FRTS region in VRAM
-	 *   2. SB   (cmd 0x19) does sub-boot, programs WPR2 PLMs, etc.
-	 * The frts_addr/size arguments are only used for FRTS; they're
-	 * computed inside nvkm_fwsec_run_cmd from the actual FB layout.
-	 * Pass 0/0 to make that explicit.
+	 * Run FwSec-FRTS to program WPR2 from HS Falcon (PRI is PLM-locked).
+	 * NOTE: only FRTS here. FwSec-SB runs at driver SHUTDOWN per
+	 * nouveau tu102_gsp_fini (tu102.c:175). Running SB at init time
+	 * alters engine state in a way that makes the subsequent booter
+	 * fail with mb0=0x1d. Do NOT call SB here.
 	 */
 	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_FRTS, 0, 0);
-	(void)nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_SB,   0, 0);
 
 	/*
 	 * Stage minimal GspFwWprMeta in sysmem before the booter runs.
@@ -140,6 +138,49 @@ nvkm_pci_attach(device_t dev)
 	 */
 	(void)nvkm_gsp_meta_init(sc);
 	(void)nvkm_gsp_boot_prepare(sc);
+
+	/*
+	 * Per nouveau tu102_gsp_oneinit (tu102.c:350-357): AFTER FwSec-FRTS
+	 * and BEFORE the booter, reset GSP-Falcon (so it switches into a
+	 * known state ready for RISC-V) and seed its MAILBOX0/1 with the
+	 * libos sysmem address. The booter doesn't read these, but GSP-RM
+	 * does once the booter releases the RISC-V core.
+	 *
+	 * We don't have libos yet so feed 0/0; if the GSP-RM logging path
+	 * breaks later we'll come back and wire up real libos buffers.
+	 */
+	if (sc->gsp != NULL) {
+		/*
+		 * Per open-rm kgspBootstrap_TU102 (kernel_gsp_tu102.c:485-488):
+		 *   kflcnResetIntoRiscv         (= reset_eng + software state)
+		 *   kgspProgramLibosBootArgsAddr (writes libos.addr to MB0/1)
+		 * The booter on SEC2 then expects GSP-Falcon's mailboxes to
+		 * carry a valid sysmem PA -- it preserves these and lets
+		 * GSP-RM read them as init args once RISC-V starts. Allocate
+		 * a 4 KiB sysmem placeholder so the address is non-zero and
+		 * page-aligned. GSP-RM logging will be wrong but the booter
+		 * should now accept the handoff.
+		 */
+		(void)nvkm_falcon_reset_eng(sc->gsp);
+		if (sc->gsp_libos.kva == NULL) {
+			int er = nvkm_dmamem_alloc(sc, 4096, 4096,
+			    &sc->gsp_libos);
+			if (er != 0)
+				device_printf(sc->dev,
+				    "gsp: libos placeholder alloc failed (%d)\n",
+				    er);
+		}
+		if (sc->gsp_libos.kva != NULL) {
+			uint64_t lp = sc->gsp_libos.paddr;
+			nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x040,
+			    (uint32_t)(lp & 0xffffffffu));
+			nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
+			    (uint32_t)(lp >> 32));
+			device_printf(sc->dev,
+			    "gsp: reset + libos placeholder @0x%llx in MB0/1\n",
+			    (unsigned long long)lp);
+		}
+	}
 
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
