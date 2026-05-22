@@ -345,6 +345,9 @@ nvkm_pci_attach(device_t dev)
 			 * If this works the rest of the resource tree (device,
 			 * vaspace, channel, ...) can be built on top. */
 			if (sc->gsp_running) {
+				/* Init VRAM bump allocator FIRST so vmm_ctor can
+				 * allocate VRAM PT pages (PD3/PD2/PD1). */
+				(void)nvkm_gsp_vram_init(sc);
 				sc->gsp_vmm = kzalloc(sizeof(*sc->gsp_vmm),
 				    GFP_KERNEL);
 				if (sc->gsp_vmm != NULL) {
@@ -352,8 +355,6 @@ nvkm_pci_attach(device_t dev)
 					    sc->gsp_vmm) != 0) {
 						kfree(sc->gsp_vmm);
 						sc->gsp_vmm = NULL;
-					} else {
-						(void)nvkm_gsp_vram_init(sc);
 					}
 				}
 				/* nouveau's GSP-RM path does NOT allocate

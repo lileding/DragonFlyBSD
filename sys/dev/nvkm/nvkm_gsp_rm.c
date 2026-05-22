@@ -685,13 +685,13 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 #define SUBMIT_GVA_GPFIFO	0x100101000ULL
 #define SUBMIT_GVA_SEMA		0x100102000ULL
 
-static uint64_t
+static uint64_t __attribute__((unused))
 nvkm_pte_sysmem(uint64_t paddr)
 {
 	return (paddr >> 4) | NV_MMU_APER_SYS_COH | NV_MMU_VOL | NV_MMU_VALID;
 }
 
-static uint64_t
+static uint64_t __attribute__((unused))
 nvkm_pde_sysmem(uint64_t paddr)
 {
 	/* PDE has no VALID bit; non-zero aperture = present. */
@@ -731,39 +731,100 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
 	chan->mthdbuf_size = mthdbuf_sz;
 
-	/* === Pre-allocate submit BOs and write host PT ===
-	 * 5 sysmem pages: PD0, SPT, pushbuf, gpfifo, sema. Mapped at
-	 * GVAs 0x100100000/0x100101000/0x100102000 below PD1[8]. */
+	/* === Pre-allocate submit BOs (VRAM PT + VRAM PD0/SPT,
+	 * sysmem data) and write host PT.
+	 * Mirrors nouveau r535/vmm.c:125 aperture=1 + VRAM PT. */
 	{
-		void **kvas[5] = { &chan->submit_pd0_kva,
-		    &chan->submit_spt_kva, &chan->submit_push_kva,
+		/* PD0, SPT in VRAM. Push/GPFIFO/sema stay in sysmem. */
+		chan->submit_pd0_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		chan->submit_spt_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		if (chan->submit_pd0_paddr == 0 || chan->submit_spt_paddr == 0) {
+			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
+			    M_NVKM_MTHDBUF);
+			chan->mthdbuf_kva = NULL;
+			return (ENOMEM);
+		}
+		chan->submit_pd0_kva = NULL;
+		chan->submit_spt_kva = NULL;
+		/* Sysmem data pages still via contigmalloc. */
+		void **kvas[3] = { &chan->submit_push_kva,
 		    &chan->submit_gpf_kva, &chan->submit_sema_kva };
-		uint64_t *paddrs[5] = { &chan->submit_pd0_paddr,
-		    &chan->submit_spt_paddr, &chan->submit_push_paddr,
+		uint64_t *paddrs[3] = { &chan->submit_push_paddr,
 		    &chan->submit_gpf_paddr, &chan->submit_sema_paddr };
-		for (int j = 0; j < 5; j++) {
+		for (int j = 0; j < 3; j++) {
 			*kvas[j] = contigmalloc(0x1000, M_NVKM_MTHDBUF,
 			    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
 			if (*kvas[j] == NULL) {
-				contigfree(chan->mthdbuf_kva,
-				    chan->mthdbuf_size, M_NVKM_MTHDBUF);
-				chan->mthdbuf_kva = NULL;
 				return (ENOMEM);
 			}
 			*paddrs[j] = vtophys(*kvas[j]);
 		}
-		uint64_t *pd1 = (uint64_t *)vmm->pt[2].kva;
-		uint64_t *pd0 = (uint64_t *)chan->submit_pd0_kva;
-		uint64_t *spt = (uint64_t *)chan->submit_spt_kva;
-		pd1[8]     = nvkm_pde_sysmem(chan->submit_pd0_paddr);
-		pd0[0]     = nvkm_pde_sysmem(chan->submit_spt_paddr);
-		pd0[1]     = 0;
-		spt[0x100] = nvkm_pte_sysmem(chan->submit_push_paddr);
-		spt[0x101] = nvkm_pte_sysmem(chan->submit_gpf_paddr);
-		spt[0x102] = nvkm_pte_sysmem(chan->submit_sema_paddr);
+
+		/* PRAMIN-zero PD0 + SPT (1 KiB each via 256+512 dwords). */
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved_p = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		for (int k = 0; k < 2; k++) {
+			uint64_t p = (k == 0) ? chan->submit_pd0_paddr
+			                     : chan->submit_spt_paddr;
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(p >> 16));
+			uint32_t off0 = (uint32_t)(p & 0xffffu);
+			for (int b = 0; b < 0x1000; b += 4)
+				nvkm_wr32(sc, NV_PRAMIN + off0 + b, 0);
+		}
+
+		/* PT writes via PRAMIN.
+		 * PD1[8] = PDE_VRAM(PD0_paddr); PD0[0] = PDE_VRAM(SPT_paddr);
+		 * SPT[0x100..0x102] = PTE_SYSCOH(<push/gpf/sema>_paddr). */
+		#define _PDE_VRAM(p) (((uint64_t)(p) >> 4) | (1ULL << 1))
+		#define _PTE_SYSCOH(p) (((uint64_t)(p) >> 4) | (2ULL << 1) | (1ULL << 3) | 1ULL)
+
+		/* PD1[8] in VRAM PT chain. */
+		uint64_t pd1p = vmm->pt[2].paddr;
+		uint64_t pd1_8 = _PDE_VRAM(chan->submit_pd0_paddr);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pd1p >> 16));
+		uint32_t off = (uint32_t)(pd1p & 0xffffu);
+		nvkm_wr32(sc, NV_PRAMIN + off + 8*8 + 0,
+		    (uint32_t)(pd1_8 & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 8*8 + 4,
+		    (uint32_t)(pd1_8 >> 32));
+
+		/* PD0[0] dual entry (low=SPT, high=LPT=0). */
+		uint64_t pd0p = chan->submit_pd0_paddr;
+		uint64_t pd0_0 = _PDE_VRAM(chan->submit_spt_paddr);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pd0p >> 16));
+		off = (uint32_t)(pd0p & 0xffffu);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0, (uint32_t)(pd0_0 & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 4, (uint32_t)(pd0_0 >> 32));
+		nvkm_wr32(sc, NV_PRAMIN + off + 8, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 12, 0);
+
+		/* SPT[0x100..0x102]: sysmem PTEs. */
+		uint64_t sptp = chan->submit_spt_paddr;
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(sptp >> 16));
+		off = (uint32_t)(sptp & 0xffffu);
+		uint64_t pte_push = _PTE_SYSCOH(chan->submit_push_paddr);
+		uint64_t pte_gpf  = _PTE_SYSCOH(chan->submit_gpf_paddr);
+		uint64_t pte_sema = _PTE_SYSCOH(chan->submit_sema_paddr);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x100*8 + 0,
+		    (uint32_t)(pte_push & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x100*8 + 4,
+		    (uint32_t)(pte_push >> 32));
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x101*8 + 0,
+		    (uint32_t)(pte_gpf & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x101*8 + 4,
+		    (uint32_t)(pte_gpf >> 32));
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x102*8 + 0,
+		    (uint32_t)(pte_sema & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x102*8 + 4,
+		    (uint32_t)(pte_sema >> 32));
+
+		(void)nvkm_rd32(sc, NV_PRAMIN + off);  /* flush */
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_p);
+		lwkt_reltoken(&sc->gsp_tok);
 		cpu_sfence();
+
 		device_printf(sc->dev,
-		    "gsp_rm: submit PT: PD0=0x%llx SPT=0x%llx "
+		    "gsp_rm: submit PT (VRAM): PD0=0x%llx SPT=0x%llx "
 		    "push=0x%llx gpf=0x%llx sema=0x%llx\n",
 		    (unsigned long long)chan->submit_pd0_paddr,
 		    (unsigned long long)chan->submit_spt_paddr,
@@ -1015,8 +1076,35 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 
 	{
 		struct nvkm_gsp_vmm *vmm = sc->gsp_vmm;
-		volatile uint64_t *pd1 = (volatile uint64_t *)vmm->pt[2].kva;
-		volatile uint64_t *pd0 = (volatile uint64_t *)chan->submit_pd0_kva;
+		/* Dump via PRAMIN (PT now in VRAM). */
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved_d = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		uint64_t pd1[16] = {0};
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(vmm->pt[2].paddr >> 16));
+		uint32_t off_d = (uint32_t)(vmm->pt[2].paddr & 0xffffu);
+		for (int j = 0; j < 16; j++) {
+			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 0);
+			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 4);
+			pd1[j] = ((uint64_t)hi << 32) | lo;
+		}
+		uint64_t pd0[4] = {0};
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->submit_pd0_paddr >> 16));
+		off_d = (uint32_t)(chan->submit_pd0_paddr & 0xffffu);
+		for (int j = 0; j < 4; j++) {
+			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 0);
+			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 4);
+			pd0[j] = ((uint64_t)hi << 32) | lo;
+		}
+		uint64_t spt[3] = {0};
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->submit_spt_paddr >> 16));
+		off_d = (uint32_t)(chan->submit_spt_paddr & 0xffffu);
+		for (int j = 0; j < 3; j++) {
+			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + (0x100+j)*8 + 0);
+			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + (0x100+j)*8 + 4);
+			spt[j] = ((uint64_t)hi << 32) | lo;
+		}
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_d);
+		lwkt_reltoken(&sc->gsp_tok);
 		device_printf(sc->dev,
 		    "gsp_submit: PD1[0..15] %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
 		    (unsigned long long)pd1[0], (unsigned long long)pd1[1],
@@ -1027,14 +1115,13 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		    (unsigned long long)pd1[10], (unsigned long long)pd1[11],
 		    (unsigned long long)pd1[12], (unsigned long long)pd1[13],
 		    (unsigned long long)pd1[14], (unsigned long long)pd1[15]);
-		volatile uint64_t *spt = (volatile uint64_t *)chan->submit_spt_kva;
 		volatile uint32_t *push = (volatile uint32_t *)chan->submit_push_kva;
 		volatile uint32_t *gpf  = (volatile uint32_t *)chan->submit_gpf_kva;
 		volatile uint32_t *sema = (volatile uint32_t *)chan->submit_sema_kva;
 		device_printf(sc->dev,
 		    "gsp_submit: SPT[0x100..0x102] %llx %llx %llx\n",
-		    (unsigned long long)spt[0x100], (unsigned long long)spt[0x101],
-		    (unsigned long long)spt[0x102]);
+		    (unsigned long long)spt[0], (unsigned long long)spt[1],
+		    (unsigned long long)spt[2]);
 		device_printf(sc->dev,
 		    "gsp_submit: push[0..5]= %08x %08x %08x %08x %08x %08x\n",
 		    push[0], push[1], push[2], push[3], push[4], push[5]);
@@ -1071,12 +1158,26 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		lwkt_gettoken(&sc->gsp_tok);
 		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, base);
+		/* USERD slot clear -- mirrors gf100_chan_userd_clear
+		 * (engine/fifo/gf100.c:118-132). Zero TOP_LEVEL_GET,
+		 * GP_GET and the surrounding state fields so PBDMA
+		 * starts from a known empty slot. */
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x40, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x44, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x48, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x4c, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x50, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x58, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x5c, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x60, 0);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x88, 0);
+		(void)nvkm_rd32(sc, NV_PRAMIN + off);  /* flush */
 		uint32_t put_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x8c);
 		uint32_t get_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x88);
 		device_printf(sc->dev,
-		    "gsp_submit: USERD pre  GP_GET=0x%08x GP_PUT=0x%08x\n",
+		    "gsp_submit: USERD cleared, pre GP_GET=0x%08x GP_PUT=0x%08x\n",
 		    get_pre, put_pre);
-		/* Re-set GP_PUT=1 here to be sure */
+		/* Now set GP_PUT=1 to schedule entry[0] */
 		nvkm_wr32(sc, NV_PRAMIN + off + 0x8c, 1);
 		(void)nvkm_rd32(sc, NV_PRAMIN + off + 0x00);
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
@@ -1218,14 +1319,7 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 	int err = nvkm_gsp_rm_free(&chan->object);
 	if (sc != NULL && chan->chid > 0)
 		nvkm_chid_free(sc, chan->chid);
-	if (chan->submit_pd0_kva != NULL) {
-		contigfree(chan->submit_pd0_kva, 0x1000, M_NVKM_MTHDBUF);
-		chan->submit_pd0_kva = NULL;
-	}
-	if (chan->submit_spt_kva != NULL) {
-		contigfree(chan->submit_spt_kva, 0x1000, M_NVKM_MTHDBUF);
-		chan->submit_spt_kva = NULL;
-	}
+	/* PD0/SPT are in VRAM (bump alloc, no free). */
 	if (chan->submit_push_kva != NULL) {
 		contigfree(chan->submit_push_kva, 0x1000, M_NVKM_MTHDBUF);
 		chan->submit_push_kva = NULL;
