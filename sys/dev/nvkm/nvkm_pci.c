@@ -489,7 +489,32 @@ nvkm_pci_attach(device_t dev)
 static int
 nvkm_pci_detach(device_t dev)
 {
-	struct nvkm_softc *sc = device_get_softc(dev);
+	/* device_get_softc returns the small drm_softc shim, not our
+	 * nvkm_softc. The real state lives in drm_device->dev_private. */
+	struct drm_softc *shim = device_get_softc(dev);
+	struct drm_device *ddev = shim ? shim->drm_driver_data : NULL;
+	struct nvkm_softc *sc = ddev ? ddev->dev_private : NULL;
+
+	if (sc == NULL)
+		return (0);
+
+	/* Order: disarm IRQ → teardown ISR → unregister DRM → fini state.
+	 * Disarm first so the doorbell IRQ stops firing into a handler
+	 * we are about to remove. */
+	if (sc->bar_res[0] != NULL)
+		nvkm_wr32(sc, 0x110004, 0x00);
+
+	if (sc->irq_cookie != NULL) {
+		bus_teardown_intr(dev, sc->irq_res, sc->irq_cookie);
+		sc->irq_cookie = NULL;
+	}
+	if (sc->irq_res != NULL) {
+		bus_release_resource(dev, SYS_RES_IRQ,
+		    sc->irq_rid, sc->irq_res);
+		sc->irq_res = NULL;
+	}
+
+	nvkm_drm_unregister(sc);
 
 	nvkm_booter_release(sc);
 	nvkm_gsp_libos_release(sc);
@@ -500,6 +525,8 @@ nvkm_pci_detach(device_t dev)
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
+
+	kfree(sc);
 	return (0);
 }
 
