@@ -11,13 +11,14 @@
  *   - rpc_update_bar_pde_v15_00 (fn=70, r570/rpcfn.h)
  *   - PDE/PTE encoding from vmmgp100.c
  *
- * Layout: host owns PD2/PD1/PD0/SPT (all sysmem, SYS_COH aperture
- * with VOL bit so the GMMU walker reads them coherently). PD3 (root)
- * stays GSP-side; we hand over the single PD3[0] PDE value via the
- * UPDATE_BAR_PDE RPC.
+ * IMPORTANT: nouveau allocates BAR2 PT pages in VRAM (NVKM_MEM_TARGET_INST
+ * -> VRAM on Pascal+). The PDE chain therefore uses aperture=VRAM(1) for
+ * PD3[0]/PD2[0]/PD1[0]/PD0[0]. Leaf SPT entries map BAR2 GVA->VRAM with
+ * aperture=VRAM. The Turing GMMU BAR2 walker appears to only honor VRAM
+ * apertures in GSP-managed PT chains.
  *
- * GVA layout in our BAR2 vmm (we use a tiny window):
- *   GVA 0x000000..0x1fffff -> 512 4 KiB slots; first slot for USERD
+ * All host writes to these VRAM PT pages go through PRAMIN before the
+ * UPDATE_BAR_PDE RPC; after that we use BAR2 itself for further updates.
  */
 
 #include "nvkm_priv.h"
@@ -25,8 +26,6 @@
 #include <sys/malloc.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
-
-static MALLOC_DEFINE(M_NVKM_BAR2, "nvkm_bar2", "nvkm BAR2 PT pages");
 
 /* RPC function from r570/rpcfn.h:86. */
 #define NV_VGPU_MSG_FUNCTION_UPDATE_BAR_PDE	70
@@ -43,21 +42,13 @@ struct rpc_update_bar_pde_v15_00 {
 	uint64_t entryLevelShift;
 };
 
-/* PDE/PTE encoding (Pascal+) -- see vmmgp100.c:gp100_vmm_pde
- *   bit 0:    VALID  (PTE only; PDEs are valid when aperture != 0)
- *   bits 2:1: aperture (1=VRAM, 2=SYS_COH, 3=SYS_NCOH)
- *   bit 3:    VOL    (set for SYS_COH; tells walker to snoop)
- *   bits 39:4: physical address >> 4
- */
 #define APER_VRAM	(1ULL << 1)
-#define APER_SYS_COH	(2ULL << 1)
-#define VOL		(1ULL << 3)
 #define VALID		(1ULL << 0)
 
 static __inline uint64_t
-pde_sys_coh(uint64_t paddr)
+pde_vram(uint64_t paddr)
 {
-	return (paddr >> 4) | APER_SYS_COH | VOL;
+	return (paddr >> 4) | APER_VRAM;
 }
 
 static __inline uint64_t
@@ -66,26 +57,43 @@ pte_vram(uint64_t paddr)
 	return (paddr >> 4) | APER_VRAM | VALID;
 }
 
-/* Allocate one 4 KiB contiguous sysmem page, zero it, return KVA. */
+/* Allocate one 4 KiB VRAM page from the bump allocator and PRAMIN-zero
+ * it. Returns the VRAM paddr in pt->paddr; pt->kva stays NULL (we never
+ * have a CPU mapping into VRAM PT — PRAMIN or BAR2 only). */
 static int
-bar2_pt_alloc(struct nvkm_gsp_bar2_pt *pt)
+bar2_pt_alloc(struct nvkm_softc *sc, struct nvkm_gsp_bar2_pt *pt)
 {
-	pt->kva = contigmalloc(0x1000, M_NVKM_BAR2,
-	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
-	if (pt->kva == NULL)
+	uint64_t p = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	if (p == 0)
 		return (ENOMEM);
-	pt->paddr = vtophys(pt->kva);
+	pt->paddr = p;
+	pt->kva = NULL;
+
+	lwkt_gettoken(&sc->gsp_tok);
+	uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(p >> 16));
+	uint32_t off = (uint32_t)(p & 0xffffu);
+	for (int j = 0; j < 0x1000; j += 4)
+		nvkm_wr32(sc, NV_PRAMIN + off + j, 0);
+	(void)nvkm_rd32(sc, NV_PRAMIN + off);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
 	return (0);
 }
 
 static void
-bar2_pt_free(struct nvkm_gsp_bar2_pt *pt)
+bar2_pt_free(struct nvkm_gsp_bar2_pt *pt __unused)
 {
-	if (pt->kva != NULL) {
-		contigfree(pt->kva, 0x1000, M_NVKM_BAR2);
-		pt->kva = NULL;
-		pt->paddr = 0;
-	}
+	/* VRAM bump allocator has no free. */
+}
+
+/* Write one 64-bit value to a VRAM page via PRAMIN. Caller holds gsp_tok
+ * and PRAMIN base has been set to (paddr_base >> 16). */
+static __inline void
+pramin_wr64(struct nvkm_softc *sc, uint32_t pramin_off, uint64_t val)
+{
+	nvkm_wr32(sc, NV_PRAMIN + pramin_off + 0, (uint32_t)(val & 0xffffffffu));
+	nvkm_wr32(sc, NV_PRAMIN + pramin_off + 4, (uint32_t)(val >> 32));
 }
 
 int
@@ -102,34 +110,38 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 		return (ENXIO);
 	}
 
-	if ((err = bar2_pt_alloc(&b2->pd2)) ||
-	    (err = bar2_pt_alloc(&b2->pd1)) ||
-	    (err = bar2_pt_alloc(&b2->pd0)) ||
-	    (err = bar2_pt_alloc(&b2->spt))) {
-		bar2_pt_free(&b2->pd2);
-		bar2_pt_free(&b2->pd1);
-		bar2_pt_free(&b2->pd0);
-		bar2_pt_free(&b2->spt);
+	if ((err = bar2_pt_alloc(sc, &b2->pd2)) ||
+	    (err = bar2_pt_alloc(sc, &b2->pd1)) ||
+	    (err = bar2_pt_alloc(sc, &b2->pd0)) ||
+	    (err = bar2_pt_alloc(sc, &b2->spt)))
 		return (err);
-	}
 
-	/* Wire PD2[0] -> PD1, PD1[0] -> PD0, PD0[0].low -> SPT.
-	 * PT pages are sysmem; aperture = SYS_COH so MMU walker uses
-	 * snooped reads (x86 coherent). VOL bit set per nouveau.
-	 *
+	/* Write PDEs via PRAMIN:
+	 *   PD2[0] = PDE_VRAM(PD1)
+	 *   PD1[0] = PDE_VRAM(PD0)
+	 *   PD0[0].lo = PDE_VRAM(SPT); PD0[0].hi = 0 (no big-page LPT)
 	 * SPT entries are written later by nvkm_gsp_bar2_map_vram. */
-	((volatile uint64_t *)b2->pd2.kva)[0] = pde_sys_coh(b2->pd1.paddr);
-	((volatile uint64_t *)b2->pd1.kva)[0] = pde_sys_coh(b2->pd0.paddr);
-	((volatile uint64_t *)b2->pd0.kva)[0] = pde_sys_coh(b2->spt.paddr);
-	((volatile uint64_t *)b2->pd0.kva)[1] = 0;	/* no big-page LPT */
-	cpu_sfence();
+	lwkt_gettoken(&sc->gsp_tok);
+	uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 
-	/* PD3[0] PDE that GSP should program into the GPU's BAR2 PDB.
-	 * Points at our host-owned PD2.
-	 *
-	 * entryLevelShift = 47 = the bit position of the root PD (PD3
-	 * covers 2^47 = 128 TiB per entry on the Pascal+ 16K-page layout). */
-	pd3_pde = pde_sys_coh(b2->pd2.paddr);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(b2->pd2.paddr >> 16));
+	pramin_wr64(sc, (uint32_t)(b2->pd2.paddr & 0xffffu),
+	    pde_vram(b2->pd1.paddr));
+
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(b2->pd1.paddr >> 16));
+	pramin_wr64(sc, (uint32_t)(b2->pd1.paddr & 0xffffu),
+	    pde_vram(b2->pd0.paddr));
+
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(b2->pd0.paddr >> 16));
+	pramin_wr64(sc, (uint32_t)(b2->pd0.paddr & 0xffffu) + 0,
+	    pde_vram(b2->spt.paddr));	/* PD0[0].lo = SPT (small page) */
+	pramin_wr64(sc, (uint32_t)(b2->pd0.paddr & 0xffffu) + 8, 0); /* LPT */
+
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
+
+	/* PD3[0] PDE points at our host-owned PD2 (in VRAM, aperture=VRAM). */
+	pd3_pde = pde_vram(b2->pd2.paddr);
 
 	rpc = nvkm_gsp_rpc_get(sc, NV_VGPU_MSG_FUNCTION_UPDATE_BAR_PDE,
 	    sizeof(*rpc));
@@ -139,7 +151,7 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	}
 	rpc->barType        = NV_RPC_UPDATE_PDE_BAR_2;
 	rpc->entryValue     = pd3_pde;
-	rpc->entryLevelShift = 47;
+	rpc->entryLevelShift = 47;	/* Pascal+ root PD level */
 
 	err = nvkm_gsp_rpc_wr(sc, rpc, NVKM_GSP_RPC_REPLY_RECV);
 	if (err != 0) {
@@ -151,9 +163,29 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	uint32_t pdb_reg = nvkm_rd32(sc, 0xb80f48u);
 	device_printf(sc->dev,
 	    "bar2: GPU BAR2 PDB reg @0xb80f48 = 0x%08x\n", pdb_reg);
+	/* Belt-and-suspenders: PRAMIN-write our PDE into the GSP-owned
+	 * PDB[0] as well. PDB paddr decoded from the GPU reg:
+	 *   pdb_paddr = (reg & 0x3fffffff) << 12   (bits 30..0 hold addr>>12) */
+	if ((pdb_reg & 0x80000000u) != 0) {
+		uint64_t pdb_paddr = ((uint64_t)(pdb_reg & 0x3fffffffu)) << 12;
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t s2 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pdb_paddr >> 16));
+		uint32_t off2 = (uint32_t)(pdb_paddr & 0xffffu);
+		uint32_t old_lo = nvkm_rd32(sc, NV_PRAMIN + off2 + 0);
+		uint32_t old_hi = nvkm_rd32(sc, NV_PRAMIN + off2 + 4);
+		pramin_wr64(sc, off2, pd3_pde);
+		(void)nvkm_rd32(sc, NV_PRAMIN + off2);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, s2);
+		lwkt_reltoken(&sc->gsp_tok);
+		device_printf(sc->dev,
+		    "bar2: PDB @0x%llx PDE[0] %08x:%08x -> %016llx (PRAMIN)\n",
+		    (unsigned long long)pdb_paddr, old_hi, old_lo,
+		    (unsigned long long)pd3_pde);
+	}
 	device_printf(sc->dev,
-	    "bar2: vmm ready (PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx, "
-	    "PD3[0]=0x%016llx, BAR3@%llx size %lluMiB)\n",
+	    "bar2: vmm ready VRAM PT (PD2=0x%llx PD1=0x%llx PD0=0x%llx "
+	    "SPT=0x%llx, PD3[0]=0x%016llx, BAR3@%llx size %lluMiB)\n",
 	    (unsigned long long)b2->pd2.paddr,
 	    (unsigned long long)b2->pd1.paddr,
 	    (unsigned long long)b2->pd0.paddr,
@@ -178,8 +210,7 @@ nvkm_gsp_bar2_fini(struct nvkm_softc *sc)
 }
 
 /* Map one 4 KiB VRAM page into BAR2 at the given GVA. GVA must be
- * 4 KiB-aligned and within range covered by our minimal PT (currently
- * 2 MiB = 512 SPT entries). */
+ * 4 KiB-aligned and < 2 MiB (we use a single SPT, 512 entries). */
 int
 nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
     uint64_t vram_paddr)
@@ -191,18 +222,25 @@ nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
 		return (ENXIO);
 	if ((bar2_gva & 0xfffULL) || (vram_paddr & 0xfffULL))
 		return (EINVAL);
-	if (bar2_gva >= 0x200000ULL)	/* 2 MiB: 512 * 4 KiB */
+	if (bar2_gva >= 0x200000ULL)
 		return (ERANGE);
 
 	spt_idx = (uint32_t)(bar2_gva >> 12);
-	((volatile uint64_t *)b2->spt.kva)[spt_idx] = pte_vram(vram_paddr);
-	cpu_sfence();
+
+	/* Write the PTE via PRAMIN. SPT is VRAM, 8 bytes per entry. */
+	lwkt_gettoken(&sc->gsp_tok);
+	uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(b2->spt.paddr >> 16));
+	uint32_t off = (uint32_t)(b2->spt.paddr & 0xffffu) + spt_idx * 8;
+	pramin_wr64(sc, off, pte_vram(vram_paddr));
+	(void)nvkm_rd32(sc, NV_PRAMIN + off);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
 
 	device_printf(sc->dev,
-	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%016llx)\n",
+	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=PTE_VRAM)\n",
 	    (unsigned long long)bar2_gva, (unsigned long long)vram_paddr,
-	    spt_idx,
-	    (unsigned long long)((volatile uint64_t *)b2->spt.kva)[spt_idx]);
+	    spt_idx);
 	return (0);
 }
 
