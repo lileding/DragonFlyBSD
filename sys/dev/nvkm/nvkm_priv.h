@@ -168,6 +168,20 @@ struct nvkm_gsp_pending {
 };
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
+
+/* BAR1 host-managed vmm — see nvkm_gsp_bar1.c. */
+struct nvkm_gsp_bar1_pt {
+	void		*kva;	/* sysmem KVA */
+	vm_paddr_t	 paddr;	/* sysmem physical */
+};
+struct nvkm_gsp_bar1 {
+	struct nvkm_gsp_bar1_pt	pd2;
+	struct nvkm_gsp_bar1_pt	pd1;
+	struct nvkm_gsp_bar1_pt	pd0;
+	struct nvkm_gsp_bar1_pt	spt;
+	bool			ready;
+};
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -240,6 +254,7 @@ struct nvkm_softc {
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
+	struct nvkm_gsp_bar1	bar1;	/* host BAR1 vmm */
 
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
 	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
@@ -510,5 +525,23 @@ nvkm_pte_to_sysmem(uint64_t paddr)
 #define NVKM_VMM_RM_SIZE         0x000020000000ULL   /* 512 MiB */
 #define NVKM_VMM_CLIENT_BASE     0x000400000000ULL   /* 16 GiB */
 #define NVKM_VMM_CLIENT_SIZE     0x001000000000ULL   /* 64 GiB */
+
+
+/* === BAR1 host-managed vmm (nvkm_gsp_bar1.c) === */
+int	nvkm_gsp_bar1_init(struct nvkm_softc *sc);
+void	nvkm_gsp_bar1_fini(struct nvkm_softc *sc);
+int	nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
+	    uint64_t vram_paddr);
+void	nvkm_gsp_bar1_wr32(struct nvkm_softc *sc, uint64_t bar1_gva,
+	    uint32_t val);
+uint32_t nvkm_gsp_bar1_rd32(struct nvkm_softc *sc, uint64_t bar1_gva);
+
+
+/* BAR1 GVA layout (single page for USERD, for now). */
+#define BAR1_GVA_USERD		0x0ULL
+
+/* BAR1 PDB control register (tu102_bar.c references 0xb80f40
+ * for tu102_bar_bar1_fini). */
+#define NV_BAR1_PDB_REG		0xb80f40u
 
 #endif /* _NVKM_PRIV_H_ */
