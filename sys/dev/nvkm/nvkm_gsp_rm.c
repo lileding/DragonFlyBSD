@@ -360,9 +360,8 @@ nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 		return (ENOMEM);
 
 	args->index = NV_VASPACE_ALLOCATION_INDEX_GPU_NEW;
-	/* flags = 0 -> server-managed (kernel-owned) PDEs; nouveau's
-	 * non-external path. We don't yet do COPY_SERVER_RESERVED_PDES
-	 * — that goes in when we need to install our own mappings. */
+	/* Non-external vaspace; channel alloc still needs PDE copy via
+	 * NV90F1_CTRL_VASPACE_COPY_SERVER_RESERVED_PDES — TODO. */
 	err = nvkm_gsp_rm_alloc_wr(&vas->object, args);
 	if (err != 0) {
 		device_printf(sc->dev,
@@ -480,4 +479,188 @@ int
 nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
 {
 	return (nvkm_gsp_rm_free(&grp->object));
+}
+
+/* === TURING_CHANNEL_GPFIFO_A ===
+ *
+ * Mirror of Linux nouveau drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r570/
+ * fifo.c r570_chan_alloc. Struct from rm/r570/nvrm/fifo.h
+ * (NV_CHANNEL_ALLOC_PARAMS). The r570 layout is slightly larger than
+ * r535 (CC IV/nonce fields added) — use r570.
+ *
+ * gpFifoOffset is left at 0 for now: GSP only validates it at first
+ * push/exec, and we're not pushing yet. mthdbufMem size is hard-coded
+ * to 0x4000 (Turing default) instead of querying
+ * NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE — TODO.
+ */
+
+#include <sys/malloc.h>
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
+
+#define TURING_CHANNEL_GPFIFO_A		0x0000c46fU
+#define NVKM_RM_CHANNEL			0xf1f00000u  /* nouveau NVKM_RM_CHAN(0) */
+
+#define NV_CHANNEL_INST_SIZE		0x1000U
+#define NV_CHANNEL_USERD_SIZE		0x200U
+#define NV_CHANNEL_RAMFC_SIZE		0x200U
+#define NV_CHANNEL_MTHDBUF_SIZE		0x4000U
+#define NV_CHANNEL_GPFIFO_ENTRIES	0x80U
+
+#define NV_MEMORY_DESC_ADDRSPACE_SYSMEM_COH	0U
+#define NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH	1U
+#define NV_MEMORY_DESC_ADDRSPACE_VIDMEM		2U
+
+/* Bit field positions extracted from r570/nvrm/fifo.h. */
+#define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED	(1U << 21)
+
+#define NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER	(0U << 0)
+#define NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE	(1U << 2)
+#define NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE	(1U << 4)
+
+#define NV_MAX_SUBDEVICES	8
+#define CC_CHAN_ALLOC_IV_SIZE_DWORD	3U
+#define CC_CHAN_ALLOC_NONCE_SIZE_DWORD	8U
+
+struct NV_MEMORY_DESC_PARAMS_r570 {
+	uint64_t base;
+	uint64_t size;
+	uint32_t addressSpace;
+	uint32_t cacheAttrib;
+};
+
+struct NV_CHANNEL_ALLOC_PARAMS_r570 {
+	uint32_t hObjectError;
+	uint32_t hObjectBuffer;
+	uint64_t gpFifoOffset;
+	uint32_t gpFifoEntries;
+	uint32_t flags;
+	uint32_t hContextShare;
+	uint32_t hVASpace;
+	uint32_t hUserdMemory[NV_MAX_SUBDEVICES];
+	uint64_t userdOffset[NV_MAX_SUBDEVICES];
+	uint32_t engineType;
+	uint32_t cid;
+	uint32_t subDeviceId;
+	uint32_t hObjectEccError;
+	struct NV_MEMORY_DESC_PARAMS_r570 instanceMem;
+	struct NV_MEMORY_DESC_PARAMS_r570 userdMem;
+	struct NV_MEMORY_DESC_PARAMS_r570 ramfcMem;
+	struct NV_MEMORY_DESC_PARAMS_r570 mthdbufMem;
+	uint32_t hPhysChannelGroup;
+	uint32_t internalFlags;
+	struct NV_MEMORY_DESC_PARAMS_r570 errorNotifierMem;
+	struct NV_MEMORY_DESC_PARAMS_r570 eccErrorNotifierMem;
+	uint32_t ProcessID;
+	uint32_t SubProcessID;
+	uint32_t encryptIv[CC_CHAN_ALLOC_IV_SIZE_DWORD];
+	uint32_t decryptIv[CC_CHAN_ALLOC_IV_SIZE_DWORD];
+	uint32_t hmacNonce[CC_CHAN_ALLOC_NONCE_SIZE_DWORD];
+	uint32_t tpcConfigID;
+};
+
+static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
+
+int
+nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
+    struct nvkm_gsp_vaspace *vas, struct nvkm_gsp_chgrp *chgrp,
+    uint32_t engine_type, struct nvkm_gsp_chan *chan)
+{
+	struct nvkm_softc *sc = device->object.client->sc;
+	struct NV_CHANNEL_ALLOC_PARAMS_r570 *args;
+	int err;
+
+	memset(chan, 0, sizeof(*chan));
+
+	/* VRAM: inst block + USERD (separate pages). */
+	chan->inst_vram  = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_INST_SIZE, 0x1000);
+	chan->userd_vram = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_USERD_SIZE, 0x1000);
+	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: channel VRAM alloc failed\n");
+		return (ENOMEM);
+	}
+
+	/* sysmem: CE method buffer. Physically contiguous, page-aligned. */
+	chan->mthdbuf_kva = contigmalloc(NV_CHANNEL_MTHDBUF_SIZE, M_NVKM_MTHDBUF,
+	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
+	if (chan->mthdbuf_kva == NULL) {
+		device_printf(sc->dev,
+		    "gsp_rm: mthdbuf contigmalloc failed\n");
+		return (ENOMEM);
+	}
+	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
+
+	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
+	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
+	if (args == NULL) {
+		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		    M_NVKM_MTHDBUF);
+		chan->mthdbuf_kva = NULL;
+		return (ENOMEM);
+	}
+
+	/* gpFifoOffset stays 0 — GSP only validates it on first push. */
+	args->gpFifoEntries = NV_CHANNEL_GPFIFO_ENTRIES;
+	args->flags = NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED;
+	args->hVASpace = vas->object.handle;
+	args->engineType = engine_type;
+	args->subDeviceId = 1;	/* one-hot for subDevice 0 */
+
+	args->instanceMem.base = chan->inst_vram;
+	args->instanceMem.size = NV_CHANNEL_INST_SIZE;
+	args->instanceMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->instanceMem.cacheAttrib = 1;
+
+	args->userdMem.base = chan->userd_vram;
+	args->userdMem.size = NV_CHANNEL_USERD_SIZE;
+	args->userdMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->userdMem.cacheAttrib = 1;
+
+	args->ramfcMem.base = chan->inst_vram;	/* ramfc lives inside inst block */
+	args->ramfcMem.size = NV_CHANNEL_RAMFC_SIZE;
+	args->ramfcMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->ramfcMem.cacheAttrib = 1;
+
+	args->mthdbufMem.base = chan->mthdbuf_paddr;
+	args->mthdbufMem.size = NV_CHANNEL_MTHDBUF_SIZE;
+	args->mthdbufMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH;
+	args->mthdbufMem.cacheAttrib = 0;
+
+	(void)chgrp;  /* not used: GSP path doesn't take explicit CHGRP */
+	args->internalFlags =
+	    NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER |
+	    NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE |
+	    NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE;
+
+	err = nvkm_gsp_rm_alloc_wr(&chan->object, args);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
+		    "(inst=0x%llx userd=0x%llx mthdbuf=0x%llx)\n", err,
+		    (unsigned long long)chan->inst_vram,
+		    (unsigned long long)chan->userd_vram,
+		    (unsigned long long)chan->mthdbuf_paddr);
+		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		    M_NVKM_MTHDBUF);
+		chan->mthdbuf_kva = NULL;
+		return (err);
+	}
+
+	device_printf(sc->dev,
+	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x ok\n",
+	    chan->object.handle, engine_type);
+	return (0);
+}
+
+int
+nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
+{
+	int err = nvkm_gsp_rm_free(&chan->object);
+	if (chan->mthdbuf_kva != NULL) {
+		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		    M_NVKM_MTHDBUF);
+		chan->mthdbuf_kva = NULL;
+	}
+	return (err);
 }

@@ -147,6 +147,7 @@ struct nvkm_gsp_client;
 struct nvkm_gsp_device;
 struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
+struct nvkm_gsp_chan;
 
 struct nvkm_softc {
 	device_t		dev;
@@ -215,6 +216,7 @@ struct nvkm_softc {
 	struct nvkm_gsp_device	*gsp_device;
 	struct nvkm_gsp_vaspace	*gsp_vaspace;
 	struct nvkm_gsp_chgrp	*gsp_chgrp;
+	struct nvkm_gsp_chan	*gsp_chan;
 
 	/* Phase 5: VRAM bump allocator. Hands out physical VRAM
 	 * addresses for channel inst block, USERD, etc. */
