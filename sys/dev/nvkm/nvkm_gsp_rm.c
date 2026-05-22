@@ -687,7 +687,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	args->instanceMem.cacheAttrib = 1;
 
 	args->userdMem.base = chan->userd_vram;
-	args->userdMem.size = NV_CHANNEL_USERD_SIZE;
+	/* Cover the whole 4 KiB USERD page so GSP can pick any
+	 * chid in [1, 7] (chid 0 is reserved per rsvd_chids=1
+	 * in nouveau r570_fifo). Each slot is 0x200 bytes. */
+	args->userdMem.size = 0x1000;
 	args->userdMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
 	args->userdMem.cacheAttrib = 1;
 
