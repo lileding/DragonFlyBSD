@@ -242,6 +242,64 @@ nvkm_gsp_client_dtor(struct nvkm_gsp_client *client)
 	return (nvkm_gsp_rm_free(&client->object));
 }
 
+/* === NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE ===
+ *
+ * Linux nouveau queries this in r5xx fifo subdev oneinit. Stores
+ * the per-channel CE fault method buffer size, which is then used
+ * as args->mthdbufMem.size in channel alloc.
+ *
+ * Reply struct just has u32 size at offset 0 (open-rm 570.144). */
+#define NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE	0x20802a08U
+
+struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS {
+	uint32_t size;
+};
+
+int
+nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *p;
+	void *q;
+	int err;
+
+	if (sc->gsp_internal_subdevice == 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: no internal subdevice handle\n");
+		return (ENXIO);
+	}
+
+	/* Build a stack-local object pair so we can RM_CONTROL the
+	 * GSP-internal subdevice without owning it. */
+	memset(&tmp_client, 0, sizeof(tmp_client));
+	tmp_client.sc = sc;
+	tmp_client.object.client = &tmp_client;
+	tmp_client.object.handle = sc->gsp_internal_client;
+	tmp_subdev.client = &tmp_client;
+	tmp_subdev.parent = NULL;
+	tmp_subdev.handle = sc->gsp_internal_subdevice;
+
+	p = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE, sizeof(*p));
+	if (p == NULL)
+		return (ENOMEM);
+	q = p;
+	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
+	if (err != 0 || q == NULL) {
+		device_printf(sc->dev,
+		    "gsp_rm: CE_GET_FAULT_METHOD_BUFFER_SIZE failed err=%d\n",
+		    err);
+		return (err ? err : EIO);
+	}
+	sc->mthdbuf_size = ((struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *)q)->size;
+	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
+
+	device_printf(sc->dev,
+	    "gsp_rm: CE mthdbuf_size = 0x%x\n", sc->mthdbuf_size);
+	return (0);
+}
+
 /* === NV01_DEVICE_0 + NV20_SUBDEVICE_0 ===
  * No r570 override for these; structs match Linux nouveau r535/nvrm/device.h. */
 
@@ -504,7 +562,7 @@ nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
 #define NV_CHANNEL_INST_SIZE		0x1000U
 #define NV_CHANNEL_USERD_SIZE		0x200U
 #define NV_CHANNEL_RAMFC_SIZE		0x200U
-#define NV_CHANNEL_MTHDBUF_SIZE		0x4000U
+/* mthdbuf size now queried from GSP at attach; sc->mthdbuf_size. */
 #define NV_CHANNEL_GPFIFO_ENTRIES	0x80U
 
 #define NV_MEMORY_DESC_ADDRSPACE_SYSMEM_COH	0U
@@ -515,6 +573,7 @@ nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
 #define NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED	(1U << 21)
 
 #define NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER	(0U << 0)
+#define NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_ADMIN	(1U << 0)
 #define NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE	(1U << 2)
 #define NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE	(1U << 4)
 
@@ -581,8 +640,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		return (ENOMEM);
 	}
 
-	/* sysmem: CE method buffer. Physically contiguous, page-aligned. */
-	chan->mthdbuf_kva = contigmalloc(NV_CHANNEL_MTHDBUF_SIZE, M_NVKM_MTHDBUF,
+	/* sysmem: CE method buffer. Size queried at attach. */
+	uint32_t mthdbuf_sz = sc->mthdbuf_size ?
+	    sc->mthdbuf_size : 0x4000U;
+	chan->mthdbuf_kva = contigmalloc(mthdbuf_sz, M_NVKM_MTHDBUF,
 	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
 	if (chan->mthdbuf_kva == NULL) {
 		device_printf(sc->dev,
@@ -594,7 +655,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
 	if (args == NULL) {
-		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		contigfree(chan->mthdbuf_kva, 0x4000,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 		return (ENOMEM);
@@ -602,10 +663,13 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	/* gpFifoOffset stays 0 — GSP only validates it on first push. */
 	args->gpFifoEntries = NV_CHANNEL_GPFIFO_ENTRIES;
-	args->flags = NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED;
+	/* Kernel channel: PRIVILEGED + USERD page-fixed. Matches
+	 * Linux nouveau r535_chan_ramfc.priv=true. */
+	args->flags = NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED |
+	              (1U << 5) /* NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE */;
 	args->hVASpace = vmm->vaspace.handle;
 	args->engineType = engine_type;
-	args->subDeviceId = 1;	/* one-hot for subDevice 0 */
+	/* subDeviceId stays 0 — matches nouveau */
 
 	args->instanceMem.base = chan->inst_vram;
 	args->instanceMem.size = NV_CHANNEL_INST_SIZE;
@@ -623,12 +687,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	args->ramfcMem.cacheAttrib = 1;
 
 	args->mthdbufMem.base = chan->mthdbuf_paddr;
-	args->mthdbufMem.size = NV_CHANNEL_MTHDBUF_SIZE;
+	args->mthdbufMem.size = mthdbuf_sz;
 	args->mthdbufMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH;
 	args->mthdbufMem.cacheAttrib = 0;
 
 	args->internalFlags =
-	    NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER |
+	    NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_ADMIN |
 	    NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE |
 	    NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE;
 
@@ -640,7 +704,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->inst_vram,
 		    (unsigned long long)chan->userd_vram,
 		    (unsigned long long)chan->mthdbuf_paddr);
-		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		contigfree(chan->mthdbuf_kva, 0x4000,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 		return (err);
@@ -657,7 +721,7 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 {
 	int err = nvkm_gsp_rm_free(&chan->object);
 	if (chan->mthdbuf_kva != NULL) {
-		contigfree(chan->mthdbuf_kva, NV_CHANNEL_MTHDBUF_SIZE,
+		contigfree(chan->mthdbuf_kva, 0x4000,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 	}

@@ -242,6 +242,7 @@ struct nvkm_softc {
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
 	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
 	uint64_t		fb_usable_base;
+	uint32_t		mthdbuf_size;	/* CE fault method buffer size from NV2080 ctrl */
 	uint64_t		fb_usable_size;
 
 	/* Phase 5: VRAM bump allocator. Hands out physical VRAM
