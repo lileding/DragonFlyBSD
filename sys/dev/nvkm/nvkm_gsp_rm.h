@@ -121,6 +121,21 @@ int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 /* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour
  * (external = false). Caller still has to call COPY_SERVER_RESERVED_PDES
  * to obtain the page-table copies before issuing map ops. */
+#define FERMI_VASPACE_A			0x000090f1U
+#define NVKM_RM_VASPACE			0x90f10000u
+#define NV_VASPACE_ALLOCATION_INDEX_GPU_NEW	0x00U
+
+struct NV_VASPACE_ALLOCATION_PARAMETERS_r535 {
+	uint32_t index;
+	int32_t  flags;
+	uint64_t vaSize;
+	uint64_t vaStartInternal;
+	uint64_t vaLimitInternal;
+	uint32_t bigPageSize;
+	uint8_t  _pad[4];
+	uint64_t vaBase;
+};
+
 struct nvkm_gsp_vaspace {
 	struct nvkm_gsp_object	object;
 };
@@ -160,8 +175,7 @@ struct nvkm_gsp_chan {
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
 };
 
-int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
-	    struct nvkm_gsp_vaspace *vas, struct nvkm_gsp_chgrp *chgrp,
+int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    uint32_t engine_type, struct nvkm_gsp_chan *chan);
 int	 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan);
 

@@ -17,7 +17,7 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
-
+#include "nvkm_gsp_vmm.h"
 /* === RM_ALLOC === */
 
 void *
@@ -329,21 +329,6 @@ nvkm_gsp_device_dtor(struct nvkm_gsp_device *device)
  * Linux nouveau r535/nvrm/vmm.h (open-rm 535.113.01). The same layout
  * is accepted by r570 GSP firmware. */
 
-#define FERMI_VASPACE_A			0x000090f1U
-#define NVKM_RM_VASPACE			0x90f10000u
-#define NV_VASPACE_ALLOCATION_INDEX_GPU_NEW	0x00U
-
-struct NV_VASPACE_ALLOCATION_PARAMETERS_r535 {
-	uint32_t index;
-	int32_t  flags;
-	uint64_t vaSize;
-	uint64_t vaStartInternal;
-	uint64_t vaLimitInternal;
-	uint32_t bigPageSize;
-	uint8_t  _pad[4];
-	uint64_t vaBase;
-};
-
 int
 nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
     struct nvkm_gsp_vaspace *vas)
@@ -577,11 +562,11 @@ struct NV_CHANNEL_ALLOC_PARAMS_r570 {
 static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 
 int
-nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
-    struct nvkm_gsp_vaspace *vas, struct nvkm_gsp_chgrp *chgrp,
+nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
     uint32_t engine_type, struct nvkm_gsp_chan *chan)
 {
-	struct nvkm_softc *sc = device->object.client->sc;
+	struct nvkm_gsp_device *device = &vmm->device;
+	struct nvkm_softc *sc = vmm->sc;
 	struct NV_CHANNEL_ALLOC_PARAMS_r570 *args;
 	int err;
 
@@ -618,7 +603,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
 	/* gpFifoOffset stays 0 — GSP only validates it on first push. */
 	args->gpFifoEntries = NV_CHANNEL_GPFIFO_ENTRIES;
 	args->flags = NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED;
-	args->hVASpace = vas->object.handle;
+	args->hVASpace = vmm->vaspace.handle;
 	args->engineType = engine_type;
 	args->subDeviceId = 1;	/* one-hot for subDevice 0 */
 
@@ -642,7 +627,6 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
 	args->mthdbufMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH;
 	args->mthdbufMem.cacheAttrib = 0;
 
-	(void)chgrp;  /* not used: GSP path doesn't take explicit CHGRP */
 	args->internalFlags =
 	    NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER |
 	    NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE |
