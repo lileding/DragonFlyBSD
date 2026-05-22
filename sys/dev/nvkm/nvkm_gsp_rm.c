@@ -672,6 +672,32 @@ struct NV_CHANNEL_ALLOC_PARAMS_r570 {
 
 static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 
+/* === GPU submit smoke test ===
+ * Mirrors the chan_init + push + kick path nouveau runs from userspace
+ * for Volta+ GPFIFO channels, but driven entirely from kernel:
+ * host writes PT, builds push, kicks via PRAMIN/USERD, rings doorbell.
+ */
+#define NV_MMU_APER_SYS_NCOH	(3u << 1)
+#define NV_MMU_VOL		(1u << 3)
+#define NV_MMU_VALID		(1u << 0)
+
+#define SUBMIT_GVA_PUSHBUF	0x100100000ULL
+#define SUBMIT_GVA_GPFIFO	0x100101000ULL
+#define SUBMIT_GVA_SEMA		0x100102000ULL
+
+static uint64_t
+nvkm_pte_sysmem(uint64_t paddr)
+{
+	return (paddr >> 4) | NV_MMU_APER_SYS_NCOH | NV_MMU_VALID;
+}
+
+static uint64_t
+nvkm_pde_sysmem(uint64_t paddr)
+{
+	/* PDE has no VALID bit; non-zero aperture = present. */
+	return (paddr >> 4) | NV_MMU_APER_SYS_NCOH;
+}
+
 int
 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
     uint32_t engine_type, struct nvkm_gsp_chan *chan)
@@ -705,6 +731,47 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
 	chan->mthdbuf_size = mthdbuf_sz;
 
+	/* === Pre-allocate submit BOs and write host PT ===
+	 * 5 sysmem pages: PD0, SPT, pushbuf, gpfifo, sema. Mapped at
+	 * GVAs 0x100100000/0x100101000/0x100102000 below PD1[8]. */
+	{
+		void **kvas[5] = { &chan->submit_pd0_kva,
+		    &chan->submit_spt_kva, &chan->submit_push_kva,
+		    &chan->submit_gpf_kva, &chan->submit_sema_kva };
+		uint64_t *paddrs[5] = { &chan->submit_pd0_paddr,
+		    &chan->submit_spt_paddr, &chan->submit_push_paddr,
+		    &chan->submit_gpf_paddr, &chan->submit_sema_paddr };
+		for (int j = 0; j < 5; j++) {
+			*kvas[j] = contigmalloc(0x1000, M_NVKM_MTHDBUF,
+			    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
+			if (*kvas[j] == NULL) {
+				contigfree(chan->mthdbuf_kva,
+				    chan->mthdbuf_size, M_NVKM_MTHDBUF);
+				chan->mthdbuf_kva = NULL;
+				return (ENOMEM);
+			}
+			*paddrs[j] = vtophys(*kvas[j]);
+		}
+		uint64_t *pd1 = (uint64_t *)vmm->pt[2].kva;
+		uint64_t *pd0 = (uint64_t *)chan->submit_pd0_kva;
+		uint64_t *spt = (uint64_t *)chan->submit_spt_kva;
+		pd1[8]     = nvkm_pde_sysmem(chan->submit_pd0_paddr);
+		pd0[0]     = nvkm_pde_sysmem(chan->submit_spt_paddr);
+		pd0[1]     = 0;
+		spt[0x100] = nvkm_pte_sysmem(chan->submit_push_paddr);
+		spt[0x101] = nvkm_pte_sysmem(chan->submit_gpf_paddr);
+		spt[0x102] = nvkm_pte_sysmem(chan->submit_sema_paddr);
+		cpu_sfence();
+		device_printf(sc->dev,
+		    "gsp_rm: submit PT: PD0=0x%llx SPT=0x%llx "
+		    "push=0x%llx gpf=0x%llx sema=0x%llx\n",
+		    (unsigned long long)chan->submit_pd0_paddr,
+		    (unsigned long long)chan->submit_spt_paddr,
+		    (unsigned long long)chan->submit_push_paddr,
+		    (unsigned long long)chan->submit_gpf_paddr,
+		    (unsigned long long)chan->submit_sema_paddr);
+	}
+
 	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
 	if (args == NULL) {
@@ -714,8 +781,9 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		return (ENOMEM);
 	}
 
-	/* gpFifoOffset stays 0 — GSP only validates it on first push. */
-	args->gpFifoEntries = NV_CHANNEL_GPFIFO_ENTRIES;
+	/* gpFifoOffset/Entries point at our pre-mapped sysmem ring. */
+	args->gpFifoOffset = SUBMIT_GVA_GPFIFO;
+	args->gpFifoEntries = 512;   /* 4 KiB / 8 byte entry */
 	/* chid allocated from host pool (rsvd_chids=1 ->
 	 * nvkm_chid_alloc starts at 1). Encode into
 	 * USERD_INDEX_VALUE/PAGE_VALUE per r570/fifo.c:r570_chan_alloc. */
@@ -878,9 +946,158 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	device_printf(sc->dev,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
+
+	/* Alloc TURING_USERMODE_A so GSP forwards doorbell writes
+	 * at BAR0+0xbb0090 to the PFIFO runlist scheduler. Parent is
+	 * the subdevice; no params on Volta/Turing.
+	 * Ref: open-rm 570.144 nvidia-push-init.c:975-1004. */
+	{
+		struct nvkm_gsp_object tmp_subdev;
+		tmp_subdev.client = &vmm->client;
+		tmp_subdev.parent = &vmm->device.object;
+		tmp_subdev.handle = vmm->device.subdevice.handle;
+		void *up = nvkm_gsp_rm_alloc_get(&tmp_subdev,
+		    /* handle */ 0xc4610000u,
+		    /* TURING_USERMODE_A */ 0x0000c461u,
+		    0, &chan->usermode_obj);
+		if (up != NULL) {
+			int uerr = nvkm_gsp_rm_alloc_wr(&chan->usermode_obj, up);
+			device_printf(sc->dev,
+			    "gsp_rm: TURING_USERMODE_A handle=0x%x err=%d\n",
+			    chan->usermode_obj.handle, uerr);
+			if (uerr != 0)
+				memset(&chan->usermode_obj, 0,
+				    sizeof(chan->usermode_obj));
+		}
+	}
+
+	/* Pre-publish sc->gsp_chan so submit_test can see it. */
+	sc->gsp_chan = chan;
+	(void)nvkm_gsp_submit_test(sc);
 	return (0);
 }
 
+
+
+int
+nvkm_gsp_submit_test(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_chan *chan = sc->gsp_chan;
+	uint32_t *push, *gpf;
+	volatile uint32_t *sema;
+	uint32_t saved_pramin, pram_base, pram_off;
+	uint64_t gp_put_paddr;
+	int ms;
+
+	if (chan == NULL || chan->submit_push_kva == NULL)
+		return (ENXIO);
+
+	push = (uint32_t *)chan->submit_push_kva;
+	gpf  = (uint32_t *)chan->submit_gpf_kva;
+	sema = (volatile uint32_t *)chan->submit_sema_kva;
+
+	/* Pushbuf: NVC36F SEM_ADDR_LO/HI/PAYLOAD_LO + SEM_EXECUTE=RELEASE.
+	 * Refs: clc36f.h:95-128, push906f.h:23-49, chanc36f.c:26-49. */
+	push[0] = 0x20030017u;  /* INC, subc=0, mthd>>2=0x17 (=0x5c), count=3 */
+	push[1] = (uint32_t)(SUBMIT_GVA_SEMA & 0xffffffffu);
+	push[2] = (uint32_t)((SUBMIT_GVA_SEMA >> 32) & 0xffu);
+	push[3] = 0xdeadbeefu;
+	push[4] = 0x2001001bu;  /* INC, subc=0, mthd>>2=0x1b (=0x6c), count=1 */
+	push[5] = 0x00000001u;  /* OPERATION=RELEASE */
+
+	/* GPFIFO entry[0]: 8 bytes, dw1 carries hi8 of GVA + (dwords<<10).
+	 * Refs: nvif/chan506f.c:nvif_chan506f_gpfifo_push. */
+	gpf[0] = (uint32_t)(SUBMIT_GVA_PUSHBUF & 0xffffffffu);
+	gpf[1] = (uint32_t)((SUBMIT_GVA_PUSHBUF >> 32) & 0xffu) | (6u << 10);
+
+	*sema = 0;
+	cpu_sfence();
+
+	/* USERD::GP_PUT = 1 via PRAMIN. chid=1 slot offset = chid * 0x200;
+	 * GP_PUT = slot + 0x8c. */
+	gp_put_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200ULL + 0x8cULL;
+	pram_base = (uint32_t)(gp_put_paddr >> 16);
+	pram_off  = (uint32_t)(gp_put_paddr & 0xffffu);
+	lwkt_gettoken(&sc->gsp_tok);
+	saved_pramin = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, pram_base);
+	nvkm_wr32(sc, NV_PRAMIN + pram_off, 1);
+	(void)nvkm_rd32(sc, NV_PRAMIN + pram_off);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_pramin);
+	lwkt_reltoken(&sc->gsp_tok);
+
+	cpu_sfence();
+	/* Zero USERD slot regs + read back GP_GET/PUT around the doorbell
+	 * to confirm PRAMIN access actually targets the channel slot. */
+	{
+		uint64_t slot = chan->userd_vram + (uint64_t)chan->chid * 0x200ULL;
+		uint32_t base = (uint32_t)(slot >> 16);
+		uint32_t off  = (uint32_t)(slot & 0xffffu);
+		uint32_t put_post, get_post;
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, base);
+		uint32_t put_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x8c);
+		uint32_t get_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x88);
+		device_printf(sc->dev,
+		    "gsp_submit: USERD pre  GP_GET=0x%08x GP_PUT=0x%08x\n",
+		    get_pre, put_pre);
+		/* Re-set GP_PUT=1 here to be sure */
+		nvkm_wr32(sc, NV_PRAMIN + off + 0x8c, 1);
+		(void)nvkm_rd32(sc, NV_PRAMIN + off + 0x00);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+		cpu_sfence();
+		/* TIME tick test: USERMODE+0x80/0x84 = NV_RUNLIST_TIMER.
+		 * Two reads 1us apart; if hi/lo advance, USERMODE BAR
+		 * is reachable. Ref: nvif/userc361.c:24-35. */
+		uint32_t t0_lo = nvkm_rd32(sc, 0xbb0080u);
+		uint32_t t0_hi = nvkm_rd32(sc, 0xbb0084u);
+		DELAY(100);
+		uint32_t t1_lo = nvkm_rd32(sc, 0xbb0080u);
+		uint32_t t1_hi = nvkm_rd32(sc, 0xbb0084u);
+		device_printf(sc->dev,
+		    "gsp_submit: USERMODE TIME %08x:%08x -> %08x:%08x\n",
+		    t0_hi, t0_lo, t1_hi, t1_lo);
+		/* Doorbell */
+		nvkm_wr32(sc, 0xbb0090u, (uint32_t)chan->chid);
+		cpu_sfence();
+		/* Tight GP_GET poll for 200 ms. */
+		int advanced = 0;
+		for (int k = 0; k < 200; k++) {
+			DELAY(1000);
+			lwkt_gettoken(&sc->gsp_tok);
+			saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, base);
+			put_post = nvkm_rd32(sc, NV_PRAMIN + off + 0x8c);
+			get_post = nvkm_rd32(sc, NV_PRAMIN + off + 0x88);
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+			lwkt_reltoken(&sc->gsp_tok);
+			if (get_post != 0) { advanced = k+1; break; }
+		}
+		device_printf(sc->dev,
+		    "gsp_submit: USERD post GP_GET=0x%08x GP_PUT=0x%08x advanced_at=%d ms\n",
+		    get_post, put_post, advanced);
+	}
+
+	device_printf(sc->dev,
+	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
+	    (uint32_t)chan->chid);
+
+	for (ms = 0; ms < 1000; ms += 10) {
+		cpu_lfence();
+		if (*sema == 0xdeadbeefu) {
+			device_printf(sc->dev,
+			    "gsp_submit: SEM release OK after %d ms (sema=0x%08x)\n",
+			    ms, *sema);
+			return (0);
+		}
+		DELAY(10000);
+	}
+	device_printf(sc->dev,
+	    "gsp_submit: SEM TIMEOUT 1s, sema=0x%08x\n", *sema);
+	return (0);
+}
 
 int
 nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
@@ -947,6 +1164,26 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 	int err = nvkm_gsp_rm_free(&chan->object);
 	if (sc != NULL && chan->chid > 0)
 		nvkm_chid_free(sc, chan->chid);
+	if (chan->submit_pd0_kva != NULL) {
+		contigfree(chan->submit_pd0_kva, 0x1000, M_NVKM_MTHDBUF);
+		chan->submit_pd0_kva = NULL;
+	}
+	if (chan->submit_spt_kva != NULL) {
+		contigfree(chan->submit_spt_kva, 0x1000, M_NVKM_MTHDBUF);
+		chan->submit_spt_kva = NULL;
+	}
+	if (chan->submit_push_kva != NULL) {
+		contigfree(chan->submit_push_kva, 0x1000, M_NVKM_MTHDBUF);
+		chan->submit_push_kva = NULL;
+	}
+	if (chan->submit_gpf_kva != NULL) {
+		contigfree(chan->submit_gpf_kva, 0x1000, M_NVKM_MTHDBUF);
+		chan->submit_gpf_kva = NULL;
+	}
+	if (chan->submit_sema_kva != NULL) {
+		contigfree(chan->submit_sema_kva, 0x1000, M_NVKM_MTHDBUF);
+		chan->submit_sema_kva = NULL;
+	}
 	if (chan->mthdbuf_kva != NULL) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
