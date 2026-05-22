@@ -144,6 +144,8 @@ struct nvkm_booter_info {
 #define NVKM_GSP_NTFY_MAX 16
 
 struct nvkm_gsp_client;
+struct nvkm_gsp_device;
+struct nvkm_gsp_vaspace;
 
 struct nvkm_softc {
 	device_t		dev;
@@ -209,6 +211,8 @@ struct nvkm_softc {
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_client	*gsp_client;
+	struct nvkm_gsp_device	*gsp_device;
+	struct nvkm_gsp_vaspace	*gsp_vaspace;
 };
 
 static __inline uint32_t

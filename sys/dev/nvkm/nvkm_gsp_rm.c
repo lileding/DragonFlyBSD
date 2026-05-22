@@ -241,3 +241,141 @@ nvkm_gsp_client_dtor(struct nvkm_gsp_client *client)
 		return (0);
 	return (nvkm_gsp_rm_free(&client->object));
 }
+
+/* === NV01_DEVICE_0 + NV20_SUBDEVICE_0 ===
+ * No r570 override for these; structs match Linux nouveau r535/nvrm/device.h. */
+
+#define NV01_DEVICE_0		0x00000080U
+#define NV20_SUBDEVICE_0	0x00002080U
+
+/* Nouveau handle scheme (drm/nouveau/nvkm/subdev/gsp/rm/handles.h). */
+#define NVKM_RM_DEVICE		0xde1d0000u
+#define NVKM_RM_SUBDEVICE	0x5d1d0000u
+
+/* Open-rm uses NV_DECLARE_ALIGNED(NvU64 ..., 8); on x86_64 the default
+ * alignof(u64)==8 so the compiler inserts 4 bytes of padding between
+ * flags and vaSpaceSize automatically. Do NOT mark this packed. */
+struct NV0080_ALLOC_PARAMETERS_r535 {
+	uint32_t deviceId;
+	uint32_t hClientShare;
+	uint32_t hTargetClient;
+	uint32_t hTargetDevice;
+	int32_t  flags;
+	uint64_t vaSpaceSize;
+	uint64_t vaStartInternal;
+	uint64_t vaLimitInternal;
+	int32_t  vaMode;
+};
+
+struct NV2080_ALLOC_PARAMETERS_r535 {
+	uint32_t subDeviceId;
+};
+
+int
+nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
+    struct nvkm_gsp_device *device)
+{
+	struct nvkm_softc *sc = client->sc;
+	struct NV0080_ALLOC_PARAMETERS_r535 *dargs;
+	struct NV2080_ALLOC_PARAMETERS_r535 *sargs;
+	int err;
+
+	memset(device, 0, sizeof(*device));
+
+	dargs = nvkm_gsp_rm_alloc_get(&client->object, NVKM_RM_DEVICE,
+	    NV01_DEVICE_0, sizeof(*dargs), &device->object);
+	if (dargs == NULL)
+		return (ENOMEM);
+	dargs->hClientShare = client->object.handle;
+	err = nvkm_gsp_rm_alloc_wr(&device->object, dargs);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: NV01_DEVICE alloc failed err=%d\n", err);
+		return (err);
+	}
+	device_printf(sc->dev,
+	    "gsp_rm: NV01_DEVICE_0 handle=0x%x ok\n", device->object.handle);
+
+	sargs = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_SUBDEVICE,
+	    NV20_SUBDEVICE_0, sizeof(*sargs), &device->subdevice);
+	if (sargs == NULL) {
+		nvkm_gsp_rm_free(&device->object);
+		return (ENOMEM);
+	}
+	sargs->subDeviceId = 0;
+	err = nvkm_gsp_rm_alloc_wr(&device->subdevice, sargs);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: NV20_SUBDEVICE alloc failed err=%d\n", err);
+		nvkm_gsp_rm_free(&device->object);
+		return (err);
+	}
+	device_printf(sc->dev,
+	    "gsp_rm: NV20_SUBDEVICE_0 handle=0x%x ok\n",
+	    device->subdevice.handle);
+	return (0);
+}
+
+int
+nvkm_gsp_device_dtor(struct nvkm_gsp_device *device)
+{
+	nvkm_gsp_rm_free(&device->subdevice);
+	nvkm_gsp_rm_free(&device->object);
+	return (0);
+}
+
+/* === FERMI_VASPACE_A ===
+ * No r570 override (.vmm is part of r535_alloc/r535_ctrl). Struct from
+ * Linux nouveau r535/nvrm/vmm.h (open-rm 535.113.01). The same layout
+ * is accepted by r570 GSP firmware. */
+
+#define FERMI_VASPACE_A			0x000090f1U
+#define NVKM_RM_VASPACE			0x90f10000u
+#define NV_VASPACE_ALLOCATION_INDEX_GPU_NEW	0x00U
+
+struct NV_VASPACE_ALLOCATION_PARAMETERS_r535 {
+	uint32_t index;
+	int32_t  flags;
+	uint64_t vaSize;
+	uint64_t vaStartInternal;
+	uint64_t vaLimitInternal;
+	uint32_t bigPageSize;
+	uint8_t  _pad[4];
+	uint64_t vaBase;
+};
+
+int
+nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
+    struct nvkm_gsp_vaspace *vas)
+{
+	struct nvkm_gsp_client *client = device->object.client;
+	struct nvkm_softc *sc = client->sc;
+	struct NV_VASPACE_ALLOCATION_PARAMETERS_r535 *args;
+	int err;
+
+	memset(vas, 0, sizeof(*vas));
+	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_VASPACE,
+	    FERMI_VASPACE_A, sizeof(*args), &vas->object);
+	if (args == NULL)
+		return (ENOMEM);
+
+	args->index = NV_VASPACE_ALLOCATION_INDEX_GPU_NEW;
+	/* flags = 0 -> server-managed (kernel-owned) PDEs; nouveau's
+	 * non-external path. We don't yet do COPY_SERVER_RESERVED_PDES
+	 * — that goes in when we need to install our own mappings. */
+	err = nvkm_gsp_rm_alloc_wr(&vas->object, args);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: FERMI_VASPACE_A alloc failed err=%d\n", err);
+		return (err);
+	}
+	device_printf(sc->dev,
+	    "gsp_rm: FERMI_VASPACE_A handle=0x%x ok\n", vas->object.handle);
+	return (0);
+}
+
+int
+nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas)
+{
+	return (nvkm_gsp_rm_free(&vas->object));
+}
