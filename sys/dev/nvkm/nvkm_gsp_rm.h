@@ -108,4 +108,25 @@ int	 nvkm_gsp_client_ctor(struct nvkm_softc *sc, uint32_t handle,
 	    struct nvkm_gsp_client *client);
 int	 nvkm_gsp_client_dtor(struct nvkm_gsp_client *client);
 
+/* Allocated device + subdevice tree under a client. */
+struct nvkm_gsp_device {
+	struct nvkm_gsp_object	object;		/* NV01_DEVICE_0 */
+	struct nvkm_gsp_object	subdevice;	/* NV20_SUBDEVICE_0 */
+};
+
+int	 nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
+	    struct nvkm_gsp_device *device);
+int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
+
+/* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour
+ * (external = false). Caller still has to call COPY_SERVER_RESERVED_PDES
+ * to obtain the page-table copies before issuing map ops. */
+struct nvkm_gsp_vaspace {
+	struct nvkm_gsp_object	object;
+};
+
+int	 nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
+	    struct nvkm_gsp_vaspace *vas);
+int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
+
 #endif /* _NVKM_GSP_RM_H_ */

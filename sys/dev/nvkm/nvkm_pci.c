@@ -345,6 +345,26 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_client = NULL;
 					}
 				}
+				if (sc->gsp_client != NULL) {
+					sc->gsp_device = kzalloc(
+					    sizeof(*sc->gsp_device), GFP_KERNEL);
+					if (sc->gsp_device != NULL &&
+					    nvkm_gsp_device_ctor(sc->gsp_client,
+					        sc->gsp_device) != 0) {
+						kfree(sc->gsp_device);
+						sc->gsp_device = NULL;
+					}
+				}
+				if (sc->gsp_device != NULL) {
+					sc->gsp_vaspace = kzalloc(
+					    sizeof(*sc->gsp_vaspace), GFP_KERNEL);
+					if (sc->gsp_vaspace != NULL &&
+					    nvkm_gsp_vaspace_ctor(sc->gsp_device,
+					        sc->gsp_vaspace) != 0) {
+						kfree(sc->gsp_vaspace);
+						sc->gsp_vaspace = NULL;
+					}
+				}
 			}
 
 			/* Install IRQ handler + arm GSP doorbell interrupt to host.
