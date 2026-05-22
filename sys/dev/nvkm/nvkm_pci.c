@@ -10,6 +10,7 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvkm_gsp_rm.h"
 #include "nvkm_falcon.h"
 
 #include <drm/drmP.h>            /* struct drm_softc, kzalloc, GFP_KERNEL */
@@ -330,6 +331,21 @@ nvkm_pci_attach(device_t dev)
 
 			if (sc->gsp_running)
 				(void)nvkm_gsp_get_static_info(sc);
+
+			/* Phase 5 smoke test: allocate the RM client root via RPC.
+			 * If this works the rest of the resource tree (device,
+			 * vaspace, channel, ...) can be built on top. */
+			if (sc->gsp_running) {
+				sc->gsp_client = kzalloc(sizeof(*sc->gsp_client),
+				    GFP_KERNEL);
+				if (sc->gsp_client != NULL) {
+					if (nvkm_gsp_client_ctor(sc, 0xc1d00001,
+					    sc->gsp_client) != 0) {
+						kfree(sc->gsp_client);
+						sc->gsp_client = NULL;
+					}
+				}
+			}
 
 			/* Install IRQ handler + arm GSP doorbell interrupt to host.
 			 * After this point, GSP-RM events arrive via ithread; attach
