@@ -355,6 +355,8 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_device = NULL;
 					}
 				}
+				if (sc->gsp_device != NULL)
+					(void)nvkm_gsp_vram_init(sc);
 				if (sc->gsp_device != NULL) {
 					sc->gsp_vaspace = kzalloc(
 					    sizeof(*sc->gsp_vaspace), GFP_KERNEL);
@@ -363,6 +365,18 @@ nvkm_pci_attach(device_t dev)
 					        sc->gsp_vaspace) != 0) {
 						kfree(sc->gsp_vaspace);
 						sc->gsp_vaspace = NULL;
+					}
+				}
+				if (sc->gsp_vaspace != NULL) {
+					sc->gsp_chgrp = kzalloc(
+					    sizeof(*sc->gsp_chgrp), GFP_KERNEL);
+					if (sc->gsp_chgrp != NULL &&
+					    nvkm_gsp_chgrp_ctor(sc->gsp_device,
+					        sc->gsp_vaspace,
+					        NV2080_ENGINE_TYPE_COPY0,
+					        sc->gsp_chgrp) != 0) {
+						kfree(sc->gsp_chgrp);
+						sc->gsp_chgrp = NULL;
 					}
 				}
 			}

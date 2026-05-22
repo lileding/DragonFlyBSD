@@ -379,3 +379,105 @@ nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas)
 {
 	return (nvkm_gsp_rm_free(&vas->object));
 }
+
+/* === VRAM bump allocator ===
+ *
+ * Carve out a fixed safe window inside the GPU's local VRAM. Eventually
+ * this should be replaced with proper fbRegion parsing (see
+ * r535_gsp_get_static_info_fb in Linux nouveau), but the FwSec-stitched
+ * WPR2 region on our 2080 Ti lives near the very top of the 11 GiB
+ * frame buffer (~0x2b7900000), so a range well below that is safe for
+ * small driver allocations.
+ */
+
+#define NVKM_VRAM_BUMP_BASE	0x10000000ULL	/* 256 MiB into VRAM */
+#define NVKM_VRAM_BUMP_SIZE	0x10000000ULL	/* 256 MiB window */
+
+int
+nvkm_gsp_vram_init(struct nvkm_softc *sc)
+{
+	sc->vram_bump_base  = NVKM_VRAM_BUMP_BASE;
+	sc->vram_bump_next  = NVKM_VRAM_BUMP_BASE;
+	sc->vram_bump_limit = NVKM_VRAM_BUMP_BASE + NVKM_VRAM_BUMP_SIZE;
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM bump alloc window 0x%llx..0x%llx\n",
+	    (unsigned long long)sc->vram_bump_base,
+	    (unsigned long long)sc->vram_bump_limit);
+	return (0);
+}
+
+uint64_t
+nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
+{
+	uint64_t off;
+
+	if (align == 0)
+		align = 0x1000;	/* PAGE_SIZE */
+	size = (size + align - 1) & ~(align - 1);
+
+	off = (sc->vram_bump_next + align - 1) & ~(align - 1);
+	if (off + size > sc->vram_bump_limit) {
+		device_printf(sc->dev,
+		    "gsp_rm: VRAM bump alloc exhausted (need 0x%llx)\n",
+		    (unsigned long long)size);
+		return (0);
+	}
+	sc->vram_bump_next = off + size;
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
+	    (unsigned long long)off, (unsigned long long)size);
+	return (off);
+}
+
+/* === KEPLER_CHANNEL_GROUP_A (TSG) ===
+ * Engine-bound channel group. NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS is
+ * defined in open-rm 570.144 src/common/sdk/nvidia/inc/nvos.h. */
+
+#define KEPLER_CHANNEL_GROUP_A		0x0000a06cU
+#define NVKM_RM_CHGRP			0xa06c0000u
+
+struct NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS_r570 {
+	uint32_t hObjectError;
+	uint32_t hObjectEccError;
+	uint32_t hVASpace;
+	uint32_t engineType;
+	uint8_t  bIsCallingContextVgpuPlugin;
+	uint8_t  _pad[3];
+};
+
+int
+nvkm_gsp_chgrp_ctor(struct nvkm_gsp_device *device,
+    struct nvkm_gsp_vaspace *vas, uint32_t engine_type,
+    struct nvkm_gsp_chgrp *grp)
+{
+	struct nvkm_softc *sc = device->object.client->sc;
+	struct NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS_r570 *args;
+	int err;
+
+	memset(grp, 0, sizeof(*grp));
+	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHGRP,
+	    KEPLER_CHANNEL_GROUP_A, sizeof(*args), &grp->object);
+	if (args == NULL)
+		return (ENOMEM);
+
+	args->hVASpace = vas->object.handle;
+	args->engineType = engine_type;
+
+	err = nvkm_gsp_rm_alloc_wr(&grp->object, args);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: KEPLER_CHANNEL_GROUP_A engineType=0x%x failed err=%d\n",
+		    engine_type, err);
+		return (err);
+	}
+	device_printf(sc->dev,
+	    "gsp_rm: KEPLER_CHANNEL_GROUP_A handle=0x%x engineType=0x%x ok\n",
+	    grp->object.handle, engine_type);
+	return (0);
+}
+
+int
+nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
+{
+	return (nvkm_gsp_rm_free(&grp->object));
+}

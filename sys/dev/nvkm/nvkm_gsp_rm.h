@@ -129,4 +129,25 @@ int	 nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 	    struct nvkm_gsp_vaspace *vas);
 int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
 
+/* VRAM bump allocator. The window is set in nvkm_gsp_vram_init using
+ * a fixed safe carveout (TODO: parse GSP fbRegionInfoParams). All
+ * allocations are PAGE_SIZE-aligned; alloc returns the physical VRAM
+ * offset to hand to GSP-RM as NV_MEMORY_DESC_PARAMS.base. */
+int	  nvkm_gsp_vram_init(struct nvkm_softc *sc);
+uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,
+	    uint64_t align);
+
+/* RM_ENGINE_TYPE values used as channel/cgrp engineType field. */
+#define NV2080_ENGINE_TYPE_COPY0	0x00000009U
+
+/* Channel group (KEPLER_CHANNEL_GROUP_A / TSG). */
+struct nvkm_gsp_chgrp {
+	struct nvkm_gsp_object	object;
+};
+
+int	 nvkm_gsp_chgrp_ctor(struct nvkm_gsp_device *device,
+	    struct nvkm_gsp_vaspace *vas, uint32_t engine_type,
+	    struct nvkm_gsp_chgrp *grp);
+int	 nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp);
+
 #endif /* _NVKM_GSP_RM_H_ */
