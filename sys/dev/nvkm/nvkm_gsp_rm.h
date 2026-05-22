@@ -185,6 +185,7 @@ struct nvkm_gsp_chan {
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
 	int			chid;		/* allocated chid (>=1) */
+	struct nvkm_gsp_object	ce_obj;	/* TURING_DMA_COPY_A engine obj */
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
