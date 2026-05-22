@@ -78,6 +78,49 @@ nvkm_gsp_get_static_info(struct nvkm_softc *sc)
 	    (unsigned long long)sc->gsp_bar1_pdb,
 	    (unsigned long long)sc->gsp_bar2_pdb);
 
+	/* fbRegionInfoParams — r570 layout. See script comments. */
+	{
+		const uint32_t OFF_NUM_FB_REGIONS = 0x158;
+		const uint32_t OFF_FB_REGION_ARRAY = 0x160;
+		const uint32_t FB_REGION_STRIDE = 48;
+		uint32_t n = *(uint32_t *)(r + OFF_NUM_FB_REGIONS);
+		uint64_t best_base = 0, best_size = 0;
+		uint32_t i;
+
+		if (n > 16)
+			n = 16;
+		for (i = 0; i < n; i++) {
+			uint8_t *e = r + OFF_FB_REGION_ARRAY + i * FB_REGION_STRIDE;
+			uint64_t base  = *(uint64_t *)(e + 0);
+			uint64_t limit = *(uint64_t *)(e + 8);
+			uint64_t rsvd  = *(uint64_t *)(e + 16);
+			uint8_t  prot  = *(uint8_t  *)(e + 30);
+			uint64_t size;
+
+			if (limit <= base)
+				continue;
+			size = (limit + 1) - base;
+			device_printf(sc->dev,
+			    "static_info: fb_region[%u] base=0x%llx limit=0x%llx "
+			    "rsvd=0x%llx prot=%u\n", i,
+			    (unsigned long long)base,
+			    (unsigned long long)limit,
+			    (unsigned long long)rsvd, prot);
+			if (rsvd != 0 || prot != 0)
+				continue;
+			if (size > best_size) {
+				best_base = base;
+				best_size = size;
+			}
+		}
+		sc->fb_usable_base = best_base;
+		sc->fb_usable_size = best_size;
+		device_printf(sc->dev,
+		    "static_info: usable VRAM region 0x%llx + 0x%llx\n",
+		    (unsigned long long)best_base,
+		    (unsigned long long)best_size);
+	}
+
 	nvkm_gsp_rpc_done(sc, r);
 	return (0);
 }
