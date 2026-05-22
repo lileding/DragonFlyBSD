@@ -120,19 +120,19 @@ nvkm_gsp_vmm_copy_pdes(struct nvkm_gsp_vmm *vmm)
 	/* PD3 — root. Holds 4 entries of 8 bytes each (2-bit index). */
 	ctrl->levels[0].physAddress = (uint64_t)vmm->pt[0].paddr;
 	ctrl->levels[0].size        = (1ULL << 2) * 8;	/* 32 bytes used */
-	ctrl->levels[0].aperture    = NV_PDE_APERTURE_SYS_NCOH;
+	ctrl->levels[0].aperture    = NV_PDE_APERTURE_SYS_COH;
 	ctrl->levels[0].pageShift   = 47;
 
 	/* PD2 — 512 entries × 8 bytes = 4 KiB. */
 	ctrl->levels[1].physAddress = (uint64_t)vmm->pt[1].paddr;
 	ctrl->levels[1].size        = (1ULL << 9) * 8;	/* 4096 */
-	ctrl->levels[1].aperture    = NV_PDE_APERTURE_SYS_NCOH;
+	ctrl->levels[1].aperture    = NV_PDE_APERTURE_SYS_COH;
 	ctrl->levels[1].pageShift   = 38;
 
 	/* PD1 — 512 entries × 8 bytes = 4 KiB. */
 	ctrl->levels[2].physAddress = (uint64_t)vmm->pt[2].paddr;
 	ctrl->levels[2].size        = (1ULL << 9) * 8;	/* 4096 */
-	ctrl->levels[2].aperture    = NV_PDE_APERTURE_SYS_NCOH;
+	ctrl->levels[2].aperture    = NV_PDE_APERTURE_SYS_COH;
 	ctrl->levels[2].pageShift   = 29;
 
 	p = ctrl;
