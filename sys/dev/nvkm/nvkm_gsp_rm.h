@@ -165,4 +165,27 @@ int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
 	    uint32_t engine_type, struct nvkm_gsp_chan *chan);
 int	 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan);
 
+/* NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO — same struct as in static_info,
+ * but cleaner to query via RM_CONTROL on the subdevice. */
+#define NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO	0x20801320U
+#define NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES	16U
+#define NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MEM_TYPES	17U
+
+struct nvkm_fb_region_info {
+	uint64_t base;
+	uint64_t limit;
+	uint64_t reserved;
+	uint32_t performance;
+	uint8_t  supportCompressed;
+	uint8_t  supportISO;
+	uint8_t  bProtected;
+	uint8_t  blackList[17];
+};
+
+struct NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS_r570 {
+	uint32_t numFBRegions;
+	uint8_t  _pad[4];
+	struct nvkm_fb_region_info fbRegion[16];
+};
+
 #endif /* _NVKM_GSP_RM_H_ */
