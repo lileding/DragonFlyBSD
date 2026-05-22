@@ -223,6 +223,8 @@ struct nvkm_softc {
 	/* Phase 5: RPC token + pending list. gsp_tok serialises
 	 * cmdq writes and msgq reads across ioctl lwkts + ithread. */
 	struct lwkt_token       gsp_tok;
+	struct lwkt_token       chid_tok;       /* per-fifo chid pool lock */
+	uint64_t                chid_used[32];  /* 2048-bit chid bitmap */
 	struct nvkm_gsp_pending_list gsp_pending;
 
 	/* IRQ resource + ithread serializer (DragonFly native model). */

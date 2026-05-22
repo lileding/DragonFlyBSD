@@ -108,6 +108,12 @@ void	 nvkm_gsp_rm_ctrl_done(struct nvkm_gsp_object *obj, void *params);
  * internal subdevice; stores into sc->mthdbuf_size. */
 int	 nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc);
 
+/* Host-side chid pool. Mirrors nouveau chid.c:nvkm_chid_new with
+ * nr=2048, first=1, count=2047 -- chid 0 is reserved. */
+void	  nvkm_chid_init(struct nvkm_softc *sc);
+int	  nvkm_chid_alloc(struct nvkm_softc *sc);
+void	  nvkm_chid_free(struct nvkm_softc *sc, int chid);
+
 int	 nvkm_gsp_client_ctor(struct nvkm_softc *sc, uint32_t handle,
 	    struct nvkm_gsp_client *client);
 int	 nvkm_gsp_client_dtor(struct nvkm_gsp_client *client);
@@ -178,6 +184,7 @@ struct nvkm_gsp_chan {
 	void			*mthdbuf_kva;	/* sysmem kva (contigmalloc) */
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
+	int			chid;		/* allocated chid (>=1) */
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
