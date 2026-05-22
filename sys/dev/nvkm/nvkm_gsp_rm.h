@@ -215,4 +215,37 @@ struct NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS_r570 {
 	struct nvkm_fb_region_info fbRegion[16];
 };
 
+
+/* NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE.
+ * Source: nouveau r535/nvrm/fifo.h:11-34, fifo.c:469-490. */
+#define NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE	0x20801112U
+#define NV2080_FIFO_DEV_INFO_MAX_ENTRIES		32U
+#define NV2080_FIFO_DEV_INFO_ENG_DATA_TYPES		16U
+#define NV2080_FIFO_DEV_INFO_ENG_MAX_PBDMA		2U
+#define NV2080_FIFO_DEV_INFO_ENG_MAX_NAME_LEN		16U
+
+#define ENGINE_INFO_TYPE_RM_ENGINE_TYPE			2U
+#define ENGINE_INFO_TYPE_RUNLIST			3U
+#define RM_ENGINE_TYPE_COPY0				9U
+
+struct NV2080_CTRL_FIFO_DEVICE_ENTRY_r570 {
+	uint32_t engineData[NV2080_FIFO_DEV_INFO_ENG_DATA_TYPES];
+	uint32_t pbdmaIds[NV2080_FIFO_DEV_INFO_ENG_MAX_PBDMA];
+	uint32_t pbdmaFaultIds[NV2080_FIFO_DEV_INFO_ENG_MAX_PBDMA];
+	uint32_t numPbdmas;
+	char     engineName[NV2080_FIFO_DEV_INFO_ENG_MAX_NAME_LEN];
+};
+
+struct NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS_r570 {
+	uint32_t baseIndex;
+	uint32_t numEntries;
+	uint8_t  bMore;
+	uint8_t  _pad[3];
+	struct NV2080_CTRL_FIFO_DEVICE_ENTRY_r570
+	    entries[NV2080_FIFO_DEV_INFO_MAX_ENTRIES];
+};
+
+/* Returns 0 + writes *runl on success. */
+int	 nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl);
+
 #endif /* _NVKM_GSP_RM_H_ */

@@ -861,9 +861,79 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    chan->ce_obj.handle, chan->object.handle);
 	}
 
+	{
+		uint32_t runl = 0;
+		int qerr = nvkm_gsp_query_ce0_runlist(sc, &runl);
+		if (qerr == 0) {
+			uint32_t token = (runl << 16) | (uint32_t)chan->chid;
+			device_printf(sc->dev,
+			    "gsp_rm: CE0 runlist=%u chid=%d doorbell_token=0x%08x\n",
+			    runl, chan->chid, token);
+		} else {
+			device_printf(sc->dev,
+			    "gsp_rm: runlist query failed err=%d\n", qerr);
+		}
+	}
+
 	device_printf(sc->dev,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
+	return (0);
+}
+
+
+int
+nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
+{
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS_r570 *p;
+	void *q;
+	int err;
+	uint32_t i, found = 0;
+
+	if (sc->gsp_internal_subdevice == 0)
+		return (ENXIO);
+
+	memset(&tmp_client, 0, sizeof(tmp_client));
+	tmp_client.sc = sc;
+	tmp_client.object.client = &tmp_client;
+	tmp_client.object.handle = sc->gsp_internal_client;
+	tmp_subdev.client = &tmp_client;
+	tmp_subdev.parent = NULL;
+	tmp_subdev.handle = sc->gsp_internal_subdevice;
+
+	p = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE, sizeof(*p));
+	if (p == NULL)
+		return (ENOMEM);
+	q = p;
+	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
+	if (err != 0 || q == NULL) {
+		device_printf(sc->dev,
+		    "gsp_rm: FIFO_GET_DEVICE_INFO_TABLE failed err=%d\n",
+		    err);
+		return (err ? err : EIO);
+	}
+	p = q;
+
+	for (i = 0; i < p->numEntries && i < NV2080_FIFO_DEV_INFO_MAX_ENTRIES; i++) {
+		uint32_t rmtype = p->entries[i].engineData[ENGINE_INFO_TYPE_RM_ENGINE_TYPE];
+		uint32_t runl   = p->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
+		device_printf(sc->dev,
+		    "gsp_rm: fifo entry[%u] name=%.16s rm_type=%u runlist=%u\n",
+		    i, p->entries[i].engineName, rmtype, runl);
+		if (rmtype == RM_ENGINE_TYPE_COPY0 && !found) {
+			*runl_out = runl;
+			found = 1;
+		}
+	}
+	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
+
+	if (!found) {
+		device_printf(sc->dev, "gsp_rm: COPY0 not in fifo info table\n");
+		return (ENOENT);
+	}
 	return (0);
 }
 
