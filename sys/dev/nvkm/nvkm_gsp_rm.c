@@ -453,11 +453,14 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	if (size > (64ULL << 20))
 		size -= (64ULL << 20);
 
+	/* nouveau allocates instmem from the TOP of VRAM (nvkm_ram_get
+	 * with back=true -> nvkm_mm_tail). Stick to that pattern: bump
+	 * downward from limit. base = lower bound; next = current top edge. */
 	sc->vram_bump_base  = base;
-	sc->vram_bump_next  = base;
+	sc->vram_bump_next  = base + size;
 	sc->vram_bump_limit = base + size;
 	device_printf(sc->dev,
-	    "gsp_rm: VRAM bump window 0x%llx..0x%llx\n",
+	    "gsp_rm: VRAM bump window 0x%llx..0x%llx (alloc top-down)\n",
 	    (unsigned long long)sc->vram_bump_base,
 	    (unsigned long long)sc->vram_bump_limit);
 	return (0);
@@ -472,14 +475,20 @@ nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
 		align = 0x1000;	/* PAGE_SIZE */
 	size = (size + align - 1) & ~(align - 1);
 
-	off = (sc->vram_bump_next + align - 1) & ~(align - 1);
-	if (off + size > sc->vram_bump_limit) {
+	/* Top-down bump: lower the next pointer by size, then align down. */
+	if (sc->vram_bump_next < sc->vram_bump_base + size) {
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM bump alloc exhausted (need 0x%llx)\n",
 		    (unsigned long long)size);
 		return (0);
 	}
-	sc->vram_bump_next = off + size;
+	off = (sc->vram_bump_next - size) & ~(align - 1);
+	if (off < sc->vram_bump_base) {
+		device_printf(sc->dev,
+		    "gsp_rm: VRAM bump alloc exhausted (align mismatch)\n");
+		return (0);
+	}
+	sc->vram_bump_next = off;
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
 	    (unsigned long long)off, (unsigned long long)size);
@@ -651,11 +660,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		return (ENOMEM);
 	}
 	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
+	chan->mthdbuf_size = mthdbuf_sz;
 
 	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
 	if (args == NULL) {
-		contigfree(chan->mthdbuf_kva, 0x4000,
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 		return (ENOMEM);
@@ -704,7 +714,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->inst_vram,
 		    (unsigned long long)chan->userd_vram,
 		    (unsigned long long)chan->mthdbuf_paddr);
-		contigfree(chan->mthdbuf_kva, 0x4000,
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 		return (err);
@@ -721,7 +731,7 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 {
 	int err = nvkm_gsp_rm_free(&chan->object);
 	if (chan->mthdbuf_kva != NULL) {
-		contigfree(chan->mthdbuf_kva, 0x4000,
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 	}

@@ -177,6 +177,7 @@ struct nvkm_gsp_chan {
 	uint64_t		userd_vram;	/* VRAM physical base */
 	void			*mthdbuf_kva;	/* sysmem kva (contigmalloc) */
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
+	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
