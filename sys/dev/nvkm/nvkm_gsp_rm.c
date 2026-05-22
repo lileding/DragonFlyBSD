@@ -1053,6 +1053,14 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	if (chan == NULL || chan->submit_push_kva == NULL)
 		return (ENXIO);
 
+	/* Map USERD VRAM page into BAR2 @ GVA 0 -- must happen BEFORE
+	 * we read/write USERD via BAR2. */
+	if (nvkm_gsp_bar2_map_vram(sc, 0, chan->userd_vram) != 0) {
+		device_printf(sc->dev,
+		    "gsp_submit: BAR2 map USERD failed\n");
+		return (EIO);
+	}
+
 	push = (uint32_t *)chan->submit_push_kva;
 	gpf  = (uint32_t *)chan->submit_gpf_kva;
 	sema = (volatile uint32_t *)chan->submit_sema_kva;
@@ -1150,42 +1158,18 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	cpu_sfence();
 	/* Zero USERD slot regs + read back GP_GET/PUT around the doorbell
 	 * to confirm PRAMIN access actually targets the channel slot. */
+	/* USERD slot clear + GP_PUT=1 via BAR2 (L2-coherent).
+	 * chid=1 slot at BAR2 GVA = chid * 0x200 = 0x200. */
 	{
-		uint64_t slot = chan->userd_vram + (uint64_t)chan->chid * 0x200ULL;
-		uint32_t base = (uint32_t)(slot >> 16);
-		uint32_t off  = (uint32_t)(slot & 0xffffu);
-		uint32_t put_post, get_post;
-		lwkt_gettoken(&sc->gsp_tok);
-		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, base);
-		/* USERD slot clear -- mirrors gf100_chan_userd_clear
-		 * (engine/fifo/gf100.c:118-132). Zero TOP_LEVEL_GET,
-		 * GP_GET and the surrounding state fields so PBDMA
-		 * starts from a known empty slot. */
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x40, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x44, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x48, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x4c, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x50, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x58, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x5c, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x60, 0);
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x88, 0);
-		(void)nvkm_rd32(sc, NV_PRAMIN + off);  /* flush */
-		uint32_t put_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x8c);
-		uint32_t get_pre = nvkm_rd32(sc, NV_PRAMIN + off + 0x88);
-		device_printf(sc->dev,
-		    "gsp_submit: USERD cleared, pre GP_GET=0x%08x GP_PUT=0x%08x\n",
-		    get_pre, put_pre);
-		/* Now set GP_PUT=1 to schedule entry[0] */
-		nvkm_wr32(sc, NV_PRAMIN + off + 0x8c, 1);
-		(void)nvkm_rd32(sc, NV_PRAMIN + off + 0x00);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
-		lwkt_reltoken(&sc->gsp_tok);
+		uint64_t slot = (uint64_t)chan->chid * 0x200ULL;
+		/* Zero the per-slot fields nouveau zeros in
+		 * gf100_chan_userd_clear (fifo/gf100.c:118-132). */
+		static const uint32_t off[] = { 0x40, 0x44, 0x48, 0x4c,
+		    0x50, 0x58, 0x5c, 0x60, 0x88 };
+		for (unsigned k = 0; k < sizeof(off)/sizeof(off[0]); k++)
+			nvkm_gsp_bar2_wr32(sc, slot + off[k], 0);
 		cpu_sfence();
-		/* TIME tick test: USERMODE+0x80/0x84 = NV_RUNLIST_TIMER.
-		 * Two reads 1us apart; if hi/lo advance, USERMODE BAR
-		 * is reachable. Ref: nvif/userc361.c:24-35. */
+		/* USERMODE TIME reachability probe (PRI / BAR0). */
 		uint32_t t0_lo = nvkm_rd32(sc, 0xbb0080u);
 		uint32_t t0_hi = nvkm_rd32(sc, 0xbb0084u);
 		DELAY(100);
@@ -1194,45 +1178,20 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_submit: USERMODE TIME %08x:%08x -> %08x:%08x\n",
 		    t0_hi, t0_lo, t1_hi, t1_lo);
-		/* Doorbell */
+		/* Write GP_PUT=1 via BAR2 (L2-coherent). */
+		nvkm_gsp_bar2_wr32(sc, slot + 0x8c, 1);
+		/* Read-back to flush PCIe posted writes. */
+		(void)nvkm_gsp_bar2_rd32(sc, slot + 0x00);
+		cpu_sfence();
+		/* Doorbell at BAR0+0xbb0090 = token (chid). */
 		nvkm_wr32(sc, 0xbb0090u, (uint32_t)chan->chid);
 		cpu_sfence();
-		/* Tight GP_GET poll for 200 ms. */
-		int advanced = 0;
-		for (int k = 0; k < 200; k++) {
-			DELAY(1000);
-			lwkt_gettoken(&sc->gsp_tok);
-			saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-			nvkm_wr32(sc, NV_PBUS_PRAMIN, base);
-			put_post = nvkm_rd32(sc, NV_PRAMIN + off + 0x8c);
-			get_post = nvkm_rd32(sc, NV_PRAMIN + off + 0x88);
-			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
-			lwkt_reltoken(&sc->gsp_tok);
-			if (get_post != 0) { advanced = k+1; break; }
-		}
+		DELAY(50000);  /* 50 ms for PBDMA to consume */
+		uint32_t put_post = nvkm_gsp_bar2_rd32(sc, slot + 0x8c);
+		uint32_t get_post = nvkm_gsp_bar2_rd32(sc, slot + 0x88);
 		device_printf(sc->dev,
-		    "gsp_submit: USERD post GP_GET=0x%08x GP_PUT=0x%08x advanced_at=%d ms\n",
-		    get_post, put_post, advanced);
-	}
-
-	/* Ask GSP for the authoritative doorbell token. Returns
-	 * INVALID_STATE if channel is not yet on a runlist. */
-	{
-		struct { uint32_t workSubmitToken; } *tp;
-		void *q;
-		tp = nvkm_gsp_rm_ctrl_get(&chan->object,
-		    /* NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN */ 0xc36f0108u,
-		    sizeof(*tp));
-		if (tp != NULL) {
-			q = tp;
-			int terr = nvkm_gsp_rm_ctrl_rd(&chan->object, &q, sizeof(*tp));
-			device_printf(sc->dev,
-			    "gsp_submit: GET_WORK_SUBMIT_TOKEN err=%d token=0x%08x (expect chid=0x%x)\n",
-			    terr, q ? ((struct { uint32_t workSubmitToken; } *)q)->workSubmitToken : 0xffffffffu,
-			    (uint32_t)chan->chid);
-			if (q != NULL)
-				nvkm_gsp_rm_ctrl_done(&chan->object, q);
-		}
+		    "gsp_submit: USERD via BAR2 post GP_GET=0x%08x GP_PUT=0x%08x\n",
+		    get_post, put_post);
 	}
 
 	device_printf(sc->dev,
