@@ -365,6 +365,9 @@ nvkm_pci_attach(device_t dev)
 					    nvkm_gsp_chan_ctor(sc->gsp_vmm,
 					        NV2080_ENGINE_TYPE_COPY0,
 					        sc->gsp_chan) != 0) {
+						/* chan_ctor cleans up the contig mthdbuf
+						 * internally on its failure paths, so the
+						 * struct here is safe to just kfree. */
 						kfree(sc->gsp_chan);
 						sc->gsp_chan = NULL;
 					}
