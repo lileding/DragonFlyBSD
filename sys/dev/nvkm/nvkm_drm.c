@@ -11,6 +11,7 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvkm_bo.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
@@ -42,6 +43,18 @@ static const struct drm_ioctl_desc nvkm_drm_ioctls[];
     DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, struct drm_nouveau_channel_alloc)
 #define DRM_IOCTL_NOUVEAU_CHANNEL_FREE \
     DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_FREE, struct drm_nouveau_channel_free)
+#define DRM_IOCTL_NOUVEAU_GEM_NEW \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_NEW, struct drm_nouveau_gem_new)
+#define DRM_IOCTL_NOUVEAU_GEM_INFO \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_INFO, struct drm_nouveau_gem_info)
+#define DRM_IOCTL_NOUVEAU_GEM_CPU_PREP \
+    DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_CPU_PREP, struct drm_nouveau_gem_cpu_prep)
+#define DRM_IOCTL_NOUVEAU_GEM_CPU_FINI \
+    DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_CPU_FINI, struct drm_nouveau_gem_cpu_fini)
+#define DRM_IOCTL_NOUVEAU_VM_BIND \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_BIND, struct drm_nouveau_vm_bind)
+#define DRM_IOCTL_NOUVEAU_EXEC \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
 #define DRM_IOCTL_NOUVEAU_NVIF \
     _IOC(IOC_INOUT, DRM_IOCTL_BASE, DRM_COMMAND_BASE + DRM_NOUVEAU_NVIF, 0)
 
@@ -50,13 +63,15 @@ static struct drm_driver nvkm_drm_driver = {
 	    DRIVER_PRIME,
 	.fops    = &nvkm_drm_fops,
 	.ioctls  = nvkm_drm_ioctls,
-	.num_ioctls = 17 /* sparse: max index DRM_NOUVEAU_VM_INIT(0x10)+1 */,
+	.num_ioctls = 0x45 /* sparse: max index DRM_NOUVEAU_GEM_INFO(0x44)+1 */,
 	.name    = NVKM_DRM_NAME,
 	.desc    = NVKM_DRM_DESC,
 	.date    = NVKM_DRM_DATE,
 	.major   = NVKM_DRM_MAJOR,
 	.minor   = NVKM_DRM_MINOR,
 	.patchlevel = NVKM_DRM_PATCH,
+	.gem_vm_ops = &nvkm_gem_pager_ops,
+	.gem_free_object_unlocked = nvkm_bo_gem_free,
 };
 
 int
@@ -126,6 +141,11 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 #define DRM_NOUVEAU_VM_INIT		0x10
 #define DRM_NOUVEAU_VM_BIND		0x11
 #define DRM_NOUVEAU_EXEC		0x12
+#define DRM_NOUVEAU_GEM_NEW		0x40
+#define DRM_NOUVEAU_GEM_PUSHBUF		0x41
+#define DRM_NOUVEAU_GEM_CPU_PREP	0x42
+#define DRM_NOUVEAU_GEM_CPU_FINI	0x43
+#define DRM_NOUVEAU_GEM_INFO		0x44
 
 #define NOUVEAU_GETPARAM_PCI_VENDOR	3
 #define NOUVEAU_GETPARAM_PCI_DEVICE	4
@@ -425,6 +445,50 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 	return (0);
 }
 
+/* ---- DRM_NOUVEAU_VM_BIND (stub) ---- */
+struct drm_nouveau_vm_bind {
+	uint32_t op_count;
+	uint32_t flags;
+	uint32_t wait_count;
+	uint32_t sig_count;
+	uint64_t wait_ptr;
+	uint64_t sig_ptr;
+	uint64_t op_ptr;
+};
+static int
+nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct drm_nouveau_vm_bind *req = data;
+	device_printf(sc->dev,
+	    "nvkm_drm: VM_BIND ops=%u flags=0x%x (stub success)\n",
+	    req->op_count, req->flags);
+	return (0);
+}
+
+/* ---- DRM_NOUVEAU_EXEC (stub) ---- */
+struct drm_nouveau_exec {
+	uint32_t channel;
+	uint32_t push_count;
+	uint32_t wait_count;
+	uint32_t sig_count;
+	uint64_t wait_ptr;
+	uint64_t sig_ptr;
+	uint64_t push_ptr;
+};
+static int
+nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct drm_nouveau_exec *req = data;
+	device_printf(sc->dev,
+	    "nvkm_drm: EXEC channel=%u pushes=%u (stub: not submitted)\n",
+	    req->channel, req->push_count);
+	return (0);
+}
+
 /* ---- ioctl table ---- */
 #define DRM_IOCTL_NOUVEAU_GETPARAM \
     DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, struct drm_nouveau_getparam)
@@ -442,5 +506,17 @@ static const struct drm_ioctl_desc nvkm_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_ALLOC, nvkm_drm_ioctl_channel_alloc,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_FREE, nvkm_drm_ioctl_channel_free,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_NEW, nvkm_drm_ioctl_gem_new,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_INFO, nvkm_drm_ioctl_gem_info,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_CPU_PREP, nvkm_drm_ioctl_gem_cpu_prep,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_CPU_FINI, nvkm_drm_ioctl_gem_cpu_fini,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_VM_BIND, nvkm_drm_ioctl_vm_bind,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_EXEC, nvkm_drm_ioctl_exec,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 };
