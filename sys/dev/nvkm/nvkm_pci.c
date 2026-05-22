@@ -367,16 +367,19 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_vaspace = NULL;
 					}
 				}
+				/* nouveau's GSP-RM path does NOT allocate
+				 * KEPLER_CHANNEL_GROUP_A; GSP creates the TSG
+				 * implicitly during channel alloc. */
 				if (sc->gsp_vaspace != NULL) {
-					sc->gsp_chgrp = kzalloc(
-					    sizeof(*sc->gsp_chgrp), GFP_KERNEL);
-					if (sc->gsp_chgrp != NULL &&
-					    nvkm_gsp_chgrp_ctor(sc->gsp_device,
-					        sc->gsp_vaspace,
+					sc->gsp_chan = kzalloc(
+					    sizeof(*sc->gsp_chan), GFP_KERNEL);
+					if (sc->gsp_chan != NULL &&
+					    nvkm_gsp_chan_ctor(sc->gsp_device,
+					        sc->gsp_vaspace, NULL,
 					        NV2080_ENGINE_TYPE_COPY0,
-					        sc->gsp_chgrp) != 0) {
-						kfree(sc->gsp_chgrp);
-						sc->gsp_chgrp = NULL;
+					        sc->gsp_chan) != 0) {
+						kfree(sc->gsp_chan);
+						sc->gsp_chan = NULL;
 					}
 				}
 			}

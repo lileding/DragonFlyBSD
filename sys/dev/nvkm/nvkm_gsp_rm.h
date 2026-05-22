@@ -150,4 +150,19 @@ int	 nvkm_gsp_chgrp_ctor(struct nvkm_gsp_device *device,
 	    struct nvkm_gsp_chgrp *grp);
 int	 nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp);
 
+/* GPFIFO channel (TURING_CHANNEL_GPFIFO_A for our Turing target).
+ * Owns the VRAM backing for inst/USERD and the sysmem mthdbuf. */
+struct nvkm_gsp_chan {
+	struct nvkm_gsp_object	object;
+	uint64_t		inst_vram;	/* VRAM physical base */
+	uint64_t		userd_vram;	/* VRAM physical base */
+	void			*mthdbuf_kva;	/* sysmem kva (contigmalloc) */
+	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
+};
+
+int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_device *device,
+	    struct nvkm_gsp_vaspace *vas, struct nvkm_gsp_chgrp *chgrp,
+	    uint32_t engine_type, struct nvkm_gsp_chan *chan);
+int	 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan);
+
 #endif /* _NVKM_GSP_RM_H_ */
