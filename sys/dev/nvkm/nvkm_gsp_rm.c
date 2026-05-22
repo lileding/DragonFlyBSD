@@ -1061,6 +1061,18 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		return (EIO);
 	}
 
+	/* BAR2 self-test: write 0xdeadbeef at GVA 0x100 (within the
+	 * USERD page, away from PFIFO regs). Read back. If readback == 
+	 * 0xdeadbeef, BAR2 PT walk works. */
+	nvkm_gsp_bar2_wr32(sc, 0x100, 0xdeadbeefu);
+	(void)nvkm_gsp_bar2_rd32(sc, 0x000);  /* flush */
+	{
+		uint32_t v = nvkm_gsp_bar2_rd32(sc, 0x100);
+		device_printf(sc->dev,
+		    "gsp_submit: BAR2 self-test 0xdeadbeef @ GVA 0x100 -> readback 0x%08x %s\n",
+		    v, (v == 0xdeadbeefu) ? "OK" : "FAIL");
+	}
+
 	push = (uint32_t *)chan->submit_push_kva;
 	gpf  = (uint32_t *)chan->submit_gpf_kva;
 	sema = (volatile uint32_t *)chan->submit_sema_kva;
