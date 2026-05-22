@@ -677,26 +677,58 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
  * for Volta+ GPFIFO channels, but driven entirely from kernel:
  * host writes PT, builds push, kicks via PRAMIN/USERD, rings doorbell.
  */
-#define NV_MMU_APER_SYS_COH	(2u << 1)
-#define NV_MMU_VOL		(1u << 3)
-#define NV_MMU_VALID		(1u << 0)
+/* === Submit BO GVAs (client-managed VMM range) ===
+ * Three 4-KiB sysmem BOs mapped at consecutive GVAs starting at
+ * NVKM_VMM_CLIENT_BASE. PD1 entry index = CLIENT_BASE >> PD1_SHIFT;
+ * choosing CLIENT_BASE = 16 GiB lands them on PD1[32], well clear of
+ * the server-reserved PD1[8]. */
+#define SUBMIT_GVA_PUSHBUF	(NVKM_VMM_CLIENT_BASE + 0x0000ULL)
+#define SUBMIT_GVA_GPFIFO	(NVKM_VMM_CLIENT_BASE + 0x1000ULL)
+#define SUBMIT_GVA_SEMA		(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
 
-#define SUBMIT_GVA_PUSHBUF	0x100100000ULL
-#define SUBMIT_GVA_GPFIFO	0x100101000ULL
-#define SUBMIT_GVA_SEMA		0x100102000ULL
+/* === Sem release payload === */
+#define SEM_PAYLOAD		0xdeadbeefu
 
-static uint64_t __attribute__((unused))
-nvkm_pte_sysmem(uint64_t paddr)
-{
-	return (paddr >> 4) | NV_MMU_APER_SYS_COH | NV_MMU_VOL | NV_MMU_VALID;
-}
+/* === NVC36F method push header constants (clc36f.h:95-128) ===
+ * Header dword format (push906f.h:23-49):
+ *   bits 28:16 method-data count
+ *   bits 31:29 SEC_OP (INC_METHOD = 1)
+ *   bits 15:13 subchannel (host methods = 0)
+ *   bits 11:0  method address >> 2
+ * Methods:
+ *   0x5c SEM_ADDR_LO, 0x60 SEM_ADDR_HI, 0x64 SEM_PAYLOAD_LO,
+ *   0x6c SEM_EXECUTE.
+ */
+#define NVC06F_DMA_SEC_OP_INC_METHOD	1u
+#define NVC06F_GP_ENTRY1_LENGTH_SHIFT	10  /* clc06f.h:217 LENGTH 30:10 */
+#define NVC36F_SEM_ADDR_LO_OFFSET	0x5c
+#define NVC36F_SEM_EXECUTE_OFFSET	0x6c
+#define NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET	\
+	((NVC06F_DMA_SEC_OP_INC_METHOD << 29) | (3u << 16) \
+	 | (NVC36F_SEM_ADDR_LO_OFFSET >> 2))
+#define NVC36F_PUSH_HDR_SEM_EXECUTE	\
+	((NVC06F_DMA_SEC_OP_INC_METHOD << 29) | (1u << 16) \
+	 | (NVC36F_SEM_EXECUTE_OFFSET >> 2))
+#define NVC36F_SEM_EXECUTE_RELEASE	1u  /* clc36f.h:106 OPERATION=RELEASE */
 
-static uint64_t __attribute__((unused))
-nvkm_pde_sysmem(uint64_t paddr)
-{
-	/* PDE has no VALID bit; non-zero aperture = present. */
-	return (paddr >> 4) | NV_MMU_APER_SYS_COH | NV_MMU_VOL;
-}
+#define SUBMIT_PUSH_DWORDS	6  /* total dwords in our push */
+
+/* === USERD slot layout (gv100_chan_userd.size = 0x200) === */
+#define NV_USERD_SLOT_SIZE	0x200
+#define NV_USERD_GP_GET		0x88
+#define NV_USERD_GP_PUT		0x8c
+
+/* === USERMODE PRI regs (tu102/dev_vm.h:228-229, vfn/tu102.c:102) ===
+ * BAR0 base of TURING_USERMODE_A = VFN_PRIV_BASE(0xb80000) + USER_OFF(0x30000)
+ *                                  = 0xbb0000. */
+#define NV_USERMODE_BASE	0xbb0000u
+#define NV_USERMODE_TIME_LO	(NV_USERMODE_BASE + 0x80)
+#define NV_USERMODE_TIME_HI	(NV_USERMODE_BASE + 0x84)
+#define NV_USERMODE_DOORBELL	(NV_USERMODE_BASE + 0x90)
+
+#define SUBMIT_POLL_MS		1000
+#define SUBMIT_POLL_STEP_MS	10
+
 
 int
 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
@@ -737,107 +769,77 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	{
 		/* PD0, SPT in VRAM. Push/GPFIFO/sema stay in sysmem. */
 		chan->submit_pd0_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-		chan->submit_spt_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-		if (chan->submit_pd0_paddr == 0 || chan->submit_spt_paddr == 0) {
+		/* PD0, SPT: sysmem 4 KiB pages, host KVA. PT writes are
+		 * directly via KVA; x86 PCIe snoop makes them visible to the
+		 * GMMU walker (which reads PT via SYS_COH aperture). */
+		chan->submit_pd0_kva = contigmalloc(NVKM_GMMU_PT_PAGE_SIZE,
+		    M_NVKM_MTHDBUF, M_WAITOK | M_ZERO,
+		    0, ~(vm_paddr_t)0, NVKM_GMMU_PT_PAGE_SIZE, 0);
+		chan->submit_spt_kva = contigmalloc(NVKM_GMMU_PT_PAGE_SIZE,
+		    M_NVKM_MTHDBUF, M_WAITOK | M_ZERO,
+		    0, ~(vm_paddr_t)0, NVKM_GMMU_PT_PAGE_SIZE, 0);
+		if (chan->submit_pd0_kva == NULL || chan->submit_spt_kva == NULL) {
 			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 			    M_NVKM_MTHDBUF);
 			chan->mthdbuf_kva = NULL;
 			return (ENOMEM);
 		}
-		chan->submit_pd0_kva = NULL;
-		chan->submit_spt_kva = NULL;
-		/* Sysmem data pages still via contigmalloc. */
+		chan->submit_pd0_paddr = vtophys(chan->submit_pd0_kva);
+		chan->submit_spt_paddr = vtophys(chan->submit_spt_kva);
+
+		/* Sysmem data BOs (push/gpfifo/sema). */
 		void **kvas[3] = { &chan->submit_push_kva,
 		    &chan->submit_gpf_kva, &chan->submit_sema_kva };
 		uint64_t *paddrs[3] = { &chan->submit_push_paddr,
 		    &chan->submit_gpf_paddr, &chan->submit_sema_paddr };
 		for (int j = 0; j < 3; j++) {
-			*kvas[j] = contigmalloc(0x1000, M_NVKM_MTHDBUF,
-			    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
-			if (*kvas[j] == NULL) {
+			*kvas[j] = contigmalloc(NVKM_GMMU_PT_PAGE_SIZE,
+			    M_NVKM_MTHDBUF, M_WAITOK | M_ZERO,
+			    0, ~(vm_paddr_t)0, NVKM_GMMU_PT_PAGE_SIZE, 0);
+			if (*kvas[j] == NULL)
 				return (ENOMEM);
-			}
 			*paddrs[j] = vtophys(*kvas[j]);
 		}
 
-		/* PT writes via BAR2 (L2-coherent, so the GMMU walker sees
-		 * them). PRAMIN bypasses L2, walker would read stale 0. */
-		#define _PDE_VRAM(p) (((uint64_t)(p) >> 4) | (1ULL << 1))
-		#define _PTE_SYSCOH(p) (((uint64_t)(p) >> 4) | (2ULL << 1) | (1ULL << 3) | 1ULL)
+		/* Compute PT indices for the chosen submit GVAs. All three BO
+		 * GVAs share PD3[0]/PD2[0]/PD1[k]/PD0[k]; only SPT idx differs. */
+		const uint32_t pd1_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_PD1_SHIFT)
+		    & (NVKM_GMMU_PD1_ENTRIES - 1);
+		const uint32_t pd0_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_PD0_SHIFT)
+		    & (NVKM_GMMU_PD0_ENTRIES - 1);
+		const uint32_t spt_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_SPT_SHIFT)
+		    & (NVKM_GMMU_SPT_ENTRIES - 1);
 
-		/* PRAMIN-zero PD0 + SPT (fresh VRAM, L2 not cached -> safe). */
-		lwkt_gettoken(&sc->gsp_tok);
-		uint32_t saved_p = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-		for (int k = 0; k < 2; k++) {
-			uint64_t p = (k == 0) ? chan->submit_pd0_paddr
-			                     : chan->submit_spt_paddr;
-			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(p >> 16));
-			uint32_t off0 = (uint32_t)(p & 0xffffu);
-			for (int b = 0; b < 0x1000; b += 4)
-				nvkm_wr32(sc, NV_PRAMIN + off0 + b, 0);
-		}
-		(void)nvkm_rd32(sc, NV_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_p);
-		lwkt_reltoken(&sc->gsp_tok);
+		volatile uint64_t *pd1 = (volatile uint64_t *)vmm->pt[2].kva;
+		volatile uint64_t *pd0 = (volatile uint64_t *)chan->submit_pd0_kva;
+		volatile uint64_t *spt = (volatile uint64_t *)chan->submit_spt_kva;
 
-		/* Map PT pages into BAR2 at fixed GVAs (slots 2/3/4) so the
-		 * entry writes below land L2-coherently for the GMMU walker. */
-		nvkm_gsp_bar2_map_vram(sc, 0x2000, vmm->pt[2].paddr);
-		nvkm_gsp_bar2_map_vram(sc, 0x3000, chan->submit_pd0_paddr);
-		nvkm_gsp_bar2_map_vram(sc, 0x4000, chan->submit_spt_paddr);
-
-		uint64_t pd1_8  = _PDE_VRAM(chan->submit_pd0_paddr);
-		uint64_t pd0_0  = _PDE_VRAM(chan->submit_spt_paddr);
-		uint64_t pte_pu = _PTE_SYSCOH(chan->submit_push_paddr);
-		uint64_t pte_gp = _PTE_SYSCOH(chan->submit_gpf_paddr);
-		uint64_t pte_se = _PTE_SYSCOH(chan->submit_sema_paddr);
-
-		/* PD1[8]. */
-		nvkm_gsp_bar2_wr32(sc, 0x2000 + 8*8 + 0,
-		    (uint32_t)(pd1_8 & 0xffffffffu));
-		nvkm_gsp_bar2_wr32(sc, 0x2000 + 8*8 + 4,
-		    (uint32_t)(pd1_8 >> 32));
-		/* PD0[0] dual: low SPT PDE, high LPT=0. */
-		nvkm_gsp_bar2_wr32(sc, 0x3000 + 0,
-		    (uint32_t)(pd0_0 & 0xffffffffu));
-		nvkm_gsp_bar2_wr32(sc, 0x3000 + 4,
-		    (uint32_t)(pd0_0 >> 32));
-		nvkm_gsp_bar2_wr32(sc, 0x3000 + 8, 0);
-		nvkm_gsp_bar2_wr32(sc, 0x3000 + 12, 0);
-		/* SPT[0x100..0x102]. */
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x100*8 + 0,
-		    (uint32_t)(pte_pu & 0xffffffffu));
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x100*8 + 4,
-		    (uint32_t)(pte_pu >> 32));
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x101*8 + 0,
-		    (uint32_t)(pte_gp & 0xffffffffu));
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x101*8 + 4,
-		    (uint32_t)(pte_gp >> 32));
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x102*8 + 0,
-		    (uint32_t)(pte_se & 0xffffffffu));
-		nvkm_gsp_bar2_wr32(sc, 0x4000 + 0x102*8 + 4,
-		    (uint32_t)(pte_se >> 32));
-		/* Read-back flush + diagnostic on PT writes. */
-		uint32_t pd1_lo = nvkm_gsp_bar2_rd32(sc, 0x2000 + 8*8 + 0);
-		uint32_t pd1_hi = nvkm_gsp_bar2_rd32(sc, 0x2000 + 8*8 + 4);
-		uint32_t pd0_lo = nvkm_gsp_bar2_rd32(sc, 0x3000 + 0);
-		uint32_t pd0_hi = nvkm_gsp_bar2_rd32(sc, 0x3000 + 4);
-		uint32_t spt_lo = nvkm_gsp_bar2_rd32(sc, 0x4000 + 0x100*8);
-		uint32_t spt_hi = nvkm_gsp_bar2_rd32(sc, 0x4000 + 0x100*8 + 4);
-		device_printf(sc->dev,
-		    "gsp_rm: PT readback PD1[8]=%08x:%08x PD0[0]=%08x:%08x SPT[0x100]=%08x:%08x\n",
-		    pd1_hi, pd1_lo, pd0_hi, pd0_lo, spt_hi, spt_lo);
-
+		pd1[pd1_idx] = nvkm_pde_to_sysmem(chan->submit_pd0_paddr);
+		/* PD0 dual entry: low=SPT (small page), high=LPT=0. */
+		pd0[pd0_idx * 2 + 0] = nvkm_pde_to_sysmem(chan->submit_spt_paddr);
+		pd0[pd0_idx * 2 + 1] = 0;
+		spt[spt_idx + 0] = nvkm_pte_to_sysmem(chan->submit_push_paddr);
+		spt[spt_idx + 1] = nvkm_pte_to_sysmem(chan->submit_gpf_paddr);
+		spt[spt_idx + 2] = nvkm_pte_to_sysmem(chan->submit_sema_paddr);
 		cpu_sfence();
 
 		device_printf(sc->dev,
-		    "gsp_rm: submit PT (VRAM): PD0=0x%llx SPT=0x%llx "
+		    "gsp_rm: submit PT (sysmem): PD0=0x%llx SPT=0x%llx "
 		    "push=0x%llx gpf=0x%llx sema=0x%llx\n",
 		    (unsigned long long)chan->submit_pd0_paddr,
 		    (unsigned long long)chan->submit_spt_paddr,
 		    (unsigned long long)chan->submit_push_paddr,
 		    (unsigned long long)chan->submit_gpf_paddr,
 		    (unsigned long long)chan->submit_sema_paddr);
+		device_printf(sc->dev,
+		    "gsp_rm: PT entries PD1[%u]=0x%llx PD0[%u].lo=0x%llx "
+		    "SPT[%u..%u]=0x%llx,0x%llx,0x%llx\n",
+		    pd1_idx, (unsigned long long)pd1[pd1_idx],
+		    pd0_idx, (unsigned long long)pd0[pd0_idx * 2 + 0],
+		    spt_idx, spt_idx + 2,
+		    (unsigned long long)spt[spt_idx + 0],
+		    (unsigned long long)spt[spt_idx + 1],
+		    (unsigned long long)spt[spt_idx + 2]);
 	}
 
 	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
@@ -1053,210 +1055,98 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	struct nvkm_gsp_chan *chan = sc->gsp_chan;
 	uint32_t *push, *gpf;
 	volatile uint32_t *sema;
-	uint32_t saved_pramin, pram_base, pram_off;
-	uint64_t gp_put_paddr;
+	uint32_t saved_pramin;
 	int ms;
 
 	if (chan == NULL || chan->submit_push_kva == NULL)
 		return (ENXIO);
 
-	/* Map USERD VRAM page into BAR2 @ GVA 0 -- must happen BEFORE
-	 * we read/write USERD via BAR2. */
-	if (nvkm_gsp_bar2_map_vram(sc, 0, chan->userd_vram) != 0) {
-		device_printf(sc->dev,
-		    "gsp_submit: BAR2 map USERD failed\n");
-		return (EIO);
-	}
-
-	/* Map channel PD1 into BAR2 GVA 0x1000 + read PD1[8] to compare
-	 * with what we wrote via PRAMIN. If different -> L2 cached old.   */
-	{
-		struct nvkm_gsp_vmm *vmm = sc->gsp_vmm;
-		nvkm_gsp_bar2_map_vram(sc, 0x1000, vmm->pt[2].paddr);
-		uint32_t lo = nvkm_gsp_bar2_rd32(sc, 0x1000 + 8*8 + 0);
-		uint32_t hi = nvkm_gsp_bar2_rd32(sc, 0x1000 + 8*8 + 4);
-		device_printf(sc->dev,
-		    "gsp_submit: BAR2-read PD1[8] = %08x:%08x  (PRAMIN wrote 0x%llx)\n",
-		    hi, lo, (unsigned long long)chan->submit_pd0_paddr);
-	}
-
-	/* BAR2 self-test: write 0xdeadbeef at GVA 0x100 (within the
-	 * USERD page, away from PFIFO regs). Read back. If readback == 
-	 * 0xdeadbeef, BAR2 PT walk works. */
-	nvkm_gsp_bar2_wr32(sc, 0x100, 0xdeadbeefu);
-	(void)nvkm_gsp_bar2_rd32(sc, 0x000);  /* flush */
-	{
-		uint32_t v = nvkm_gsp_bar2_rd32(sc, 0x100);
-		device_printf(sc->dev,
-		    "gsp_submit: BAR2 self-test 0xdeadbeef @ GVA 0x100 -> readback 0x%08x %s\n",
-		    v, (v == 0xdeadbeefu) ? "OK" : "FAIL");
-	}
-
 	push = (uint32_t *)chan->submit_push_kva;
 	gpf  = (uint32_t *)chan->submit_gpf_kva;
 	sema = (volatile uint32_t *)chan->submit_sema_kva;
 
-	/* Pushbuf: NVC36F SEM_ADDR_LO/HI/PAYLOAD_LO + SEM_EXECUTE=RELEASE.
+	/* Pushbuf -- NVC36F SEM_ADDR_LO/HI/PAYLOAD_LO + SEM_EXECUTE.
 	 * Refs: clc36f.h:95-128, push906f.h:23-49, chanc36f.c:26-49. */
-	push[0] = 0x20030017u;  /* INC, subc=0, mthd>>2=0x17 (=0x5c), count=3 */
+	push[0] = NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET;
 	push[1] = (uint32_t)(SUBMIT_GVA_SEMA & 0xffffffffu);
 	push[2] = (uint32_t)((SUBMIT_GVA_SEMA >> 32) & 0xffu);
-	push[3] = 0xdeadbeefu;
-	push[4] = 0x2001001bu;  /* INC, subc=0, mthd>>2=0x1b (=0x6c), count=1 */
-	push[5] = 0x00000001u;  /* OPERATION=RELEASE */
+	push[3] = SEM_PAYLOAD;
+	push[4] = NVC36F_PUSH_HDR_SEM_EXECUTE;
+	push[5] = NVC36F_SEM_EXECUTE_RELEASE;
 
-	/* GPFIFO entry[0]: 8 bytes, dw1 carries hi8 of GVA + (dwords<<10).
-	 * Refs: nvif/chan506f.c:nvif_chan506f_gpfifo_push. */
+	/* GPFIFO entry[0] -- nvif/chan506f.c:nvif_chan506f_gpfifo_push.
+	 * dw0 = lower_32(push_gva); dw1 = upper_8(push_gva) | (dwords<<10). */
 	gpf[0] = (uint32_t)(SUBMIT_GVA_PUSHBUF & 0xffffffffu);
-	gpf[1] = (uint32_t)((SUBMIT_GVA_PUSHBUF >> 32) & 0xffu) | (6u << 10);
+	gpf[1] = (uint32_t)((SUBMIT_GVA_PUSHBUF >> 32) & 0xffu)
+	       | (SUBMIT_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 
 	*sema = 0;
 	cpu_sfence();
 
-	{
-		struct nvkm_gsp_vmm *vmm = sc->gsp_vmm;
-		/* Dump via PRAMIN (PT now in VRAM). */
-		lwkt_gettoken(&sc->gsp_tok);
-		uint32_t saved_d = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-		uint64_t pd1[16] = {0};
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(vmm->pt[2].paddr >> 16));
-		uint32_t off_d = (uint32_t)(vmm->pt[2].paddr & 0xffffu);
-		for (int j = 0; j < 16; j++) {
-			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 0);
-			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 4);
-			pd1[j] = ((uint64_t)hi << 32) | lo;
-		}
-		uint64_t pd0[4] = {0};
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->submit_pd0_paddr >> 16));
-		off_d = (uint32_t)(chan->submit_pd0_paddr & 0xffffu);
-		for (int j = 0; j < 4; j++) {
-			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 0);
-			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + j*8 + 4);
-			pd0[j] = ((uint64_t)hi << 32) | lo;
-		}
-		uint64_t spt[3] = {0};
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->submit_spt_paddr >> 16));
-		off_d = (uint32_t)(chan->submit_spt_paddr & 0xffffu);
-		for (int j = 0; j < 3; j++) {
-			uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off_d + (0x100+j)*8 + 0);
-			uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off_d + (0x100+j)*8 + 4);
-			spt[j] = ((uint64_t)hi << 32) | lo;
-		}
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_d);
-		lwkt_reltoken(&sc->gsp_tok);
-		device_printf(sc->dev,
-		    "gsp_submit: PD1[0..15] %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
-		    (unsigned long long)pd1[0], (unsigned long long)pd1[1],
-		    (unsigned long long)pd1[2], (unsigned long long)pd1[3],
-		    (unsigned long long)pd1[4], (unsigned long long)pd1[5],
-		    (unsigned long long)pd1[6], (unsigned long long)pd1[7],
-		    (unsigned long long)pd1[8], (unsigned long long)pd1[9],
-		    (unsigned long long)pd1[10], (unsigned long long)pd1[11],
-		    (unsigned long long)pd1[12], (unsigned long long)pd1[13],
-		    (unsigned long long)pd1[14], (unsigned long long)pd1[15]);
-		volatile uint32_t *push = (volatile uint32_t *)chan->submit_push_kva;
-		volatile uint32_t *gpf  = (volatile uint32_t *)chan->submit_gpf_kva;
-		volatile uint32_t *sema = (volatile uint32_t *)chan->submit_sema_kva;
-		device_printf(sc->dev,
-		    "gsp_submit: SPT[0x100..0x102] %llx %llx %llx\n",
-		    (unsigned long long)spt[0], (unsigned long long)spt[1],
-		    (unsigned long long)spt[2]);
-		device_printf(sc->dev,
-		    "gsp_submit: push[0..5]= %08x %08x %08x %08x %08x %08x\n",
-		    push[0], push[1], push[2], push[3], push[4], push[5]);
-		device_printf(sc->dev,
-		    "gsp_submit: gpf[0..1]= %08x %08x  sema=%08x\n",
-		    gpf[0], gpf[1], sema[0]);
-		device_printf(sc->dev,
-		    "gsp_submit: PD0[0..3] %llx %llx %llx %llx\n",
-		    (unsigned long long)pd0[0], (unsigned long long)pd0[1],
-		    (unsigned long long)pd0[2], (unsigned long long)pd0[3]);
-	}
+	device_printf(sc->dev,
+	    "gsp_submit: push[0..5]= %08x %08x %08x %08x %08x %08x\n",
+	    push[0], push[1], push[2], push[3], push[4], push[5]);
+	device_printf(sc->dev,
+	    "gsp_submit: gpf[0..1]= %08x %08x  sema=%08x\n",
+	    gpf[0], gpf[1], sema[0]);
 
-	/* USERD::GP_PUT = 1 via PRAMIN. chid=1 slot offset = chid * 0x200;
-	 * GP_PUT = slot + 0x8c. */
-	gp_put_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200ULL + 0x8cULL;
-	pram_base = (uint32_t)(gp_put_paddr >> 16);
-	pram_off  = (uint32_t)(gp_put_paddr & 0xffffu);
+	/* USERD slot housekeeping + GP_PUT=1, via PRAMIN backdoor.
+	 * USERD is in VRAM at chan->userd_vram + chid * USERD_SLOT_SIZE.
+	 * Mirror gf100_chan_userd_clear (fifo/gf100.c:118-132). */
+	uint64_t slot_paddr = chan->userd_vram
+	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
+	uint32_t pram_base  = (uint32_t)(slot_paddr >> 16);
+	uint32_t pram_off   = (uint32_t)(slot_paddr & 0xffffu);
+
 	lwkt_gettoken(&sc->gsp_tok);
 	saved_pramin = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, pram_base);
-	nvkm_wr32(sc, NV_PRAMIN + pram_off, 1);
-	(void)nvkm_rd32(sc, NV_PRAMIN + pram_off);
+	static const uint32_t userd_clear_offs[] = {
+		0x40, 0x44, 0x48, 0x4c, 0x50, 0x58, 0x5c, 0x60, 0x88
+	};
+	for (unsigned k = 0; k < sizeof(userd_clear_offs)/sizeof(userd_clear_offs[0]); k++)
+		nvkm_wr32(sc, NV_PRAMIN + pram_off + userd_clear_offs[k], 0);
+	nvkm_wr32(sc, NV_PRAMIN + pram_off + NV_USERD_GP_PUT, 1);
+	(void)nvkm_rd32(sc, NV_PRAMIN + pram_off);  /* flush */
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_pramin);
 	lwkt_reltoken(&sc->gsp_tok);
 
 	cpu_sfence();
-	/* Zero USERD slot regs + read back GP_GET/PUT around the doorbell
-	 * to confirm PRAMIN access actually targets the channel slot. */
-	/* USERD slot clear + GP_PUT=1 via BAR2 (L2-coherent).
-	 * chid=1 slot at BAR2 GVA = chid * 0x200 = 0x200. */
-	{
-		uint64_t slot = (uint64_t)chan->chid * 0x200ULL;
-		/* Zero the per-slot fields nouveau zeros in
-		 * gf100_chan_userd_clear (fifo/gf100.c:118-132). */
-		static const uint32_t off[] = { 0x40, 0x44, 0x48, 0x4c,
-		    0x50, 0x58, 0x5c, 0x60, 0x88 };
-		for (unsigned k = 0; k < sizeof(off)/sizeof(off[0]); k++)
-			nvkm_gsp_bar2_wr32(sc, slot + off[k], 0);
-		cpu_sfence();
-		/* USERMODE TIME reachability probe (PRI / BAR0). */
-		uint32_t t0_lo = nvkm_rd32(sc, 0xbb0080u);
-		uint32_t t0_hi = nvkm_rd32(sc, 0xbb0084u);
-		DELAY(100);
-		uint32_t t1_lo = nvkm_rd32(sc, 0xbb0080u);
-		uint32_t t1_hi = nvkm_rd32(sc, 0xbb0084u);
-		device_printf(sc->dev,
-		    "gsp_submit: USERMODE TIME %08x:%08x -> %08x:%08x\n",
-		    t0_hi, t0_lo, t1_hi, t1_lo);
-		/* Write GP_PUT=1 via BAR2 (L2-coherent). */
-		nvkm_gsp_bar2_wr32(sc, slot + 0x8c, 1);
-		/* Read-back to flush PCIe posted writes. */
-		(void)nvkm_gsp_bar2_rd32(sc, slot + 0x00);
-		cpu_sfence();
-		/* Doorbell at BAR0+0xbb0090 = token (chid). */
-		nvkm_wr32(sc, 0xbb0090u, (uint32_t)chan->chid);
-		cpu_sfence();
-		DELAY(50000);  /* 50 ms for PBDMA to consume */
-		uint32_t put_post = nvkm_gsp_bar2_rd32(sc, slot + 0x8c);
-		uint32_t get_post = nvkm_gsp_bar2_rd32(sc, slot + 0x88);
-		device_printf(sc->dev,
-		    "gsp_submit: USERD via BAR2 post GP_GET=0x%08x GP_PUT=0x%08x\n",
-		    get_post, put_post);
-	}
+	/* USERMODE TIME tick test (PRI / BAR0 reachability). */
+	uint32_t t0_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
+	uint32_t t0_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
+	DELAY(100);
+	uint32_t t1_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
+	uint32_t t1_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
+	device_printf(sc->dev,
+	    "gsp_submit: USERMODE TIME %08x:%08x -> %08x:%08x\n",
+	    t0_hi, t0_lo, t1_hi, t1_lo);
 
-	/* Force runlist restart after doorbell. */
-	{
-		struct { uint8_t bForceRestart; uint8_t bBypassWait; } *rr;
-		rr = nvkm_gsp_rm_ctrl_get(&chan->object,
-		    0xa06f0111u, sizeof(*rr));
-		if (rr != NULL) {
-			rr->bForceRestart = 1;
-			rr->bBypassWait = 0;
-			int rerr = nvkm_gsp_rm_ctrl_wr(&chan->object, rr);
-			device_printf(sc->dev,
-			    "gsp_submit: RESTART_RUNLIST err=%d\n", rerr);
-		}
-	}
+	/* Doorbell at BAR0+USERMODE_DOORBELL = (runlist<<16) | chid.
+	 * runlist=0 for CE0, so token = chid. */
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
+	cpu_sfence();
 
 	device_printf(sc->dev,
 	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
 	    (uint32_t)chan->chid);
 
-	for (ms = 0; ms < 1000; ms += 10) {
+	for (ms = 0; ms < SUBMIT_POLL_MS; ms += SUBMIT_POLL_STEP_MS) {
 		cpu_lfence();
-		if (*sema == 0xdeadbeefu) {
+		if (*sema == SEM_PAYLOAD) {
 			device_printf(sc->dev,
 			    "gsp_submit: SEM release OK after %d ms (sema=0x%08x)\n",
 			    ms, *sema);
 			return (0);
 		}
-		DELAY(10000);
+		DELAY(SUBMIT_POLL_STEP_MS * 1000);
 	}
 	device_printf(sc->dev,
-	    "gsp_submit: SEM TIMEOUT 1s, sema=0x%08x\n", *sema);
+	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x\n",
+	    SUBMIT_POLL_MS, *sema);
 	return (0);
 }
+
 
 int
 nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
