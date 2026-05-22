@@ -186,6 +186,21 @@ struct nvkm_gsp_chan {
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
 	int			chid;		/* allocated chid (>=1) */
 	struct nvkm_gsp_object	ce_obj;	/* TURING_DMA_COPY_A engine obj */
+	struct nvkm_gsp_object	usermode_obj;	/* TURING_USERMODE_A */
+
+	/* GPU-submit BOs: pre-allocated before channel alloc so we
+	 * can pass a real gpFifoOffset to GSP. PD0/SPT hold the host
+	 * PT under PD1[8] (covers GVA 0x100000000..). */
+	void			*submit_pd0_kva;
+	uint64_t		submit_pd0_paddr;
+	void			*submit_spt_kva;
+	uint64_t		submit_spt_paddr;
+	void			*submit_push_kva;
+	uint64_t		submit_push_paddr;
+	void			*submit_gpf_kva;
+	uint64_t		submit_gpf_paddr;
+	void			*submit_sema_kva;
+	uint64_t		submit_sema_paddr;
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
@@ -247,5 +262,10 @@ struct NV2080_CTRL_FIFO_GET_DEVICE_INFO_TABLE_PARAMS_r570 {
 
 /* Returns 0 + writes *runl on success. */
 int	 nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl);
+
+/* End-to-end smoke test: build host PT for 3 sysmem pages
+ * (pushbuf/gpfifo/sema) at fixed GVAs, encode an NVC36F SEM
+ * RELEASE pushbuf, kick + doorbell, poll sema for 0xdeadbeef. */
+int	 nvkm_gsp_submit_test(struct nvkm_softc *sc);
 
 #endif /* _NVKM_GSP_RM_H_ */
