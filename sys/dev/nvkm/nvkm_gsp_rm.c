@@ -781,8 +781,56 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		return (err);
 	}
 
+	/* nouveau r535_chan_ramfc_write fifo.c:188-216: bind engine + enable
+	 * GPFIFO scheduling. Both are RM_CONTROL on the channel object. */
+	{
+		struct {
+			uint32_t engineType;
+		} *bind;
+		bind = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    /* NVA06F_CTRL_CMD_BIND */ 0xa06f0104u,
+		    sizeof(*bind));
+		if (bind == NULL) {
+			device_printf(sc->dev,
+			    "gsp_rm: BIND ctrl_get failed\n");
+			return (ENOMEM);
+		}
+		bind->engineType = engine_type;
+		err = nvkm_gsp_rm_ctrl_wr(&chan->object, bind);
+		if (err != 0) {
+			device_printf(sc->dev,
+			    "gsp_rm: NVA06F_BIND engine=0x%x failed err=%d\n",
+			    engine_type, err);
+			return (err);
+		}
+	}
+
+	{
+		struct {
+			uint8_t bEnable;
+			uint8_t bSkipSubmit;
+		} *sched;
+		sched = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    /* NVA06F_CTRL_CMD_GPFIFO_SCHEDULE */ 0xa06f0103u,
+		    sizeof(*sched));
+		if (sched == NULL) {
+			device_printf(sc->dev,
+			    "gsp_rm: SCHEDULE ctrl_get failed\n");
+			return (ENOMEM);
+		}
+		sched->bEnable = 1;
+		sched->bSkipSubmit = 0;
+		err = nvkm_gsp_rm_ctrl_wr(&chan->object, sched);
+		if (err != 0) {
+			device_printf(sc->dev,
+			    "gsp_rm: NVA06F_GPFIFO_SCHEDULE failed err=%d\n",
+			    err);
+			return (err);
+		}
+	}
+
 	device_printf(sc->dev,
-	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x ok\n",
+	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled\n",
 	    chan->object.handle, engine_type);
 	return (0);
 }
