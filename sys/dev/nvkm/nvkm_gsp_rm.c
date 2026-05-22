@@ -829,8 +829,40 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 
+	/* TURING_DMA_COPY_A engine object under the channel.
+	 * nouveau r535/ce.c:28-44: parent=chan, params version=1,
+	 * engineType=NV2080_ENGINE_TYPE_COPY0+inst. */
+	{
+		struct {
+			uint32_t version;
+			uint32_t engineType;
+		} *args;
+		args = nvkm_gsp_rm_alloc_get(&chan->object,
+		    /* handle */ 0xc5b50000u,
+		    /* TURING_DMA_COPY_A */ 0x0000c5b5u,
+		    sizeof(*args), &chan->ce_obj);
+		if (args == NULL) {
+			device_printf(sc->dev,
+			    "gsp_rm: CE alloc_get failed\n");
+			return (ENOMEM);
+		}
+		args->version = 1;
+		args->engineType = engine_type;
+		err = nvkm_gsp_rm_alloc_wr(&chan->ce_obj, args);
+		if (err != 0) {
+			device_printf(sc->dev,
+			    "gsp_rm: TURING_DMA_COPY_A alloc failed err=%d\n",
+			    err);
+			memset(&chan->ce_obj, 0, sizeof(chan->ce_obj));
+			return (err);
+		}
+		device_printf(sc->dev,
+		    "gsp_rm: TURING_DMA_COPY_A handle=0x%x on channel=0x%x ok\n",
+		    chan->ce_obj.handle, chan->object.handle);
+	}
+
 	device_printf(sc->dev,
-	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled\n",
+	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 	return (0);
 }
@@ -840,6 +872,8 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 {
 	struct nvkm_softc *sc = chan->object.client ?
 	    chan->object.client->sc : NULL;
+	if (chan->ce_obj.handle != 0)
+		(void)nvkm_gsp_rm_free(&chan->ce_obj);
 	int err = nvkm_gsp_rm_free(&chan->object);
 	if (sc != NULL && chan->chid > 0)
 		nvkm_chid_free(sc, chan->chid);
