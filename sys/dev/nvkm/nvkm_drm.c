@@ -130,10 +130,12 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 #define NOUVEAU_GETPARAM_VM_VRAM_BASE	12
 #define NOUVEAU_GETPARAM_GRAPH_UNITS	13
 #define NOUVEAU_GETPARAM_PTIMER_TIME	14
-#define NOUVEAU_GETPARAM_HAS_VMA_TILEMODE 15
-#define NOUVEAU_GETPARAM_VRAM_BAR_SIZE	16
+#define NOUVEAU_GETPARAM_HAS_BO_USAGE	15
+#define NOUVEAU_GETPARAM_HAS_PAGEFLIP	16
+#define NOUVEAU_GETPARAM_EXEC_PUSH_MAX	17
+#define NOUVEAU_GETPARAM_VRAM_BAR_SIZE	18
 #define NOUVEAU_GETPARAM_VRAM_USED	19
-#define NOUVEAU_GETPARAM_EXEC_PUSH_MAX	20
+#define NOUVEAU_GETPARAM_HAS_VMA_TILEMODE 20
 
 struct drm_nouveau_getparam {
 	uint64_t param;
@@ -151,7 +153,7 @@ struct nvif_ioctl_v0 {
 	uint8_t  type;
 #define NVIF_IOCTL_V0_NEW	0x02
 #define NVIF_IOCTL_V0_DEL	0x03
-#define NVIF_IOCTL_V0_MTHD	0x06
+#define NVIF_IOCTL_V0_MTHD	0x04
 	uint8_t  path_nr;
 	uint8_t  pad03[3];
 	uint8_t  owner;
