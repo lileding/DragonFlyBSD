@@ -38,6 +38,10 @@ static const struct drm_ioctl_desc nvkm_drm_ioctls[];
 
 /* NVIF ioctl is variable-size; encode with size=0 since dispatch
  * matches by NR only and the actual copy size comes from userspace. */
+#define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, struct drm_nouveau_channel_alloc)
+#define DRM_IOCTL_NOUVEAU_CHANNEL_FREE \
+    DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_FREE, struct drm_nouveau_channel_free)
 #define DRM_IOCTL_NOUVEAU_NVIF \
     _IOC(IOC_INOUT, DRM_IOCTL_BASE, DRM_COMMAND_BASE + DRM_NOUVEAU_NVIF, 0)
 
@@ -46,7 +50,7 @@ static struct drm_driver nvkm_drm_driver = {
 	    DRIVER_PRIME,
 	.fops    = &nvkm_drm_fops,
 	.ioctls  = nvkm_drm_ioctls,
-	.num_ioctls = 10 /* sparse: max index DRM_NOUVEAU_VM_INIT(0x9)+1 */,
+	.num_ioctls = 17 /* sparse: max index DRM_NOUVEAU_VM_INIT(0x10)+1 */,
 	.name    = NVKM_DRM_NAME,
 	.desc    = NVKM_DRM_DESC,
 	.date    = NVKM_DRM_DATE,
@@ -116,10 +120,12 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 
 /* ---- nouveau_drm.h subset (from Linux uapi) ---- */
 #define DRM_NOUVEAU_GETPARAM		0x00
+#define DRM_NOUVEAU_CHANNEL_ALLOC	0x02
+#define DRM_NOUVEAU_CHANNEL_FREE	0x03
 #define DRM_NOUVEAU_NVIF		0x07
-#define DRM_NOUVEAU_VM_INIT		0x09
-#define DRM_NOUVEAU_VM_BIND		0x0a
-#define DRM_NOUVEAU_EXEC		0x0b
+#define DRM_NOUVEAU_VM_INIT		0x10
+#define DRM_NOUVEAU_VM_BIND		0x11
+#define DRM_NOUVEAU_EXEC		0x12
 
 #define NOUVEAU_GETPARAM_PCI_VENDOR	3
 #define NOUVEAU_GETPARAM_PCI_DEVICE	4
@@ -206,6 +212,43 @@ struct nv_device_info_v0 {
 	char     name[64];
 } __packed;
 
+struct drm_nouveau_channel_alloc {
+	uint32_t fb_ctxdma_handle;
+	uint32_t tt_ctxdma_handle;
+	int32_t  channel;
+	uint32_t pushbuf_domains;
+	uint32_t notifier_handle;
+	struct {
+		uint32_t handle;
+		uint32_t grclass;
+	} subchan[8];
+	uint32_t nr_subchan;
+};
+
+struct nvif_ioctl_sclass_oclass_v0 {
+	int32_t  oclass;
+	int16_t  minver;
+	int16_t  maxver;
+};
+struct nvif_ioctl_sclass_v0 {
+	uint8_t  version;
+	uint8_t  count;
+	uint8_t  pad02[6];
+	struct nvif_ioctl_sclass_oclass_v0 oclass[];
+};
+#define NVIF_IOCTL_V0_SCLASS	0x01
+
+/* TU102 supported object classes (low byte = engine type). */
+static const struct nvif_ioctl_sclass_oclass_v0 nvkm_tu102_classes[] = {
+	{ .oclass = 0xc597 },    /* TURING_A          — 3D */
+	{ .oclass = 0xc5c0 },    /* TURING_COMPUTE_A  — compute */
+	{ .oclass = 0xc5b5 },    /* TURING_DMA_COPY_A — copy */
+	{ .oclass = 0x902d },    /* FERMI_TWOD_A      — 2D */
+	{ .oclass = 0x9039 },    /* FERMI_DMA         — m2mf (legacy) */
+};
+#define NVKM_TU102_NUM_CLASSES \
+	(sizeof(nvkm_tu102_classes) / sizeof(nvkm_tu102_classes[0]))
+
 /* ---- Helper: locate nvkm_softc from drm_file ---- */
 static struct nvkm_softc *
 nvkm_drm_sc(struct drm_device *ddev)
@@ -248,8 +291,8 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		gp->value = 0;
 		break;
 	case NOUVEAU_GETPARAM_VRAM_USED:
-		gp->value = 0;
-		break;
+		/* NVK asserts >0 on success; force fail so NVK uses 0 fallback. */
+		return (-EINVAL);
 	case NOUVEAU_GETPARAM_PTIMER_TIME:
 		/* TODO: read GPU PTIMER. */
 		gp->value = 0;
@@ -300,6 +343,12 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			/* stub: accept the NV_DEVICE allocation. */
 			return (0);
 		}
+		/* Accept TU102 subchannel oclasses too (stub). */
+		switch (new_->oclass) {
+		case 0xc597: case 0xc5c0: case 0xc5b5:
+		case 0x902d: case 0x9039:
+			return (0);
+		}
 		return (-EINVAL);
 	}
 	case NVIF_IOCTL_V0_MTHD: {
@@ -324,6 +373,18 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 		}
 		return (-EINVAL);
 	}
+	case NVIF_IOCTL_V0_SCLASS: {
+		struct nvif_ioctl_sclass_v0 *sc_ = (void *)hdr->data;
+		uint32_t want = sc_->count;
+		uint32_t fill = want < NVKM_TU102_NUM_CLASSES ?
+		    want : NVKM_TU102_NUM_CLASSES;
+		device_printf(sc->dev,
+		    "nvkm_drm: NVIF SCLASS want=%u fill=%u\n", want, fill);
+		for (uint32_t i = 0; i < fill; i++)
+			sc_->oclass[i] = nvkm_tu102_classes[i];
+		sc_->count = fill;
+		return (0);
+	}
 	case NVIF_IOCTL_V0_DEL:
 		return (0);
 	default:
@@ -331,6 +392,37 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 		    "nvkm_drm: NVIF type %u unhandled\n", hdr->type);
 		return (-EINVAL);
 	}
+}
+
+/* ---- DRM_NOUVEAU_CHANNEL_ALLOC ---- */
+static int
+nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct drm_nouveau_channel_alloc *req = data;
+	static int next_channel = 1;
+
+	req->channel = next_channel++;
+	req->pushbuf_domains = 2;
+	req->notifier_handle = 0;
+	req->nr_subchan = 0;
+	device_printf(sc->dev,
+	    "nvkm_drm: CHANNEL_ALLOC -> channel=%d (stub)\n", req->channel);
+	return (0);
+}
+
+/* ---- DRM_NOUVEAU_CHANNEL_FREE ---- */
+struct drm_nouveau_channel_free { int32_t channel; };
+static int
+nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct drm_nouveau_channel_free *req = data;
+	device_printf(sc->dev,
+	    "nvkm_drm: CHANNEL_FREE channel=%d (stub)\n", req->channel);
+	return (0);
 }
 
 /* ---- ioctl table ---- */
@@ -346,5 +438,9 @@ static const struct drm_ioctl_desc nvkm_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(NOUVEAU_VM_INIT,  nvkm_drm_ioctl_vm_init,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_NVIF,     nvkm_drm_ioctl_nvif,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_ALLOC, nvkm_drm_ioctl_channel_alloc,
+	    DRM_AUTH | DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_FREE, nvkm_drm_ioctl_channel_free,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 };
