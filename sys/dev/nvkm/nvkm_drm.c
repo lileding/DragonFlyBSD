@@ -264,7 +264,7 @@ static const struct nvif_ioctl_sclass_oclass_v0 nvkm_tu102_classes[] = {
 	{ .oclass = 0xc5c0 },    /* TURING_COMPUTE_A  — compute */
 	{ .oclass = 0xc5b5 },    /* TURING_DMA_COPY_A — copy */
 	{ .oclass = 0x902d },    /* FERMI_TWOD_A      — 2D */
-	{ .oclass = 0x9039 },    /* FERMI_DMA         — m2mf (legacy) */
+	{ .oclass = 0xa140 },    /* KEPLER_INLINE_TO_MEMORY_B — m2mf; Turing reports this, not 0x9039 (NVK queue init asserts if M2MF<=FERMI) */
 };
 #define NVKM_TU102_NUM_CLASSES \
 	(sizeof(nvkm_tu102_classes) / sizeof(nvkm_tu102_classes[0]))
@@ -366,7 +366,7 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 		/* Accept TU102 subchannel oclasses too (stub). */
 		switch (new_->oclass) {
 		case 0xc597: case 0xc5c0: case 0xc5b5:
-		case 0x902d: case 0x9039:
+		case 0x902d: case 0xa140:
 			return (0);
 		}
 		return (-EINVAL);
