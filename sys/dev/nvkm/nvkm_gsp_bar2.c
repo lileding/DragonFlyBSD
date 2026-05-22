@@ -54,7 +54,9 @@ pde_vram(uint64_t paddr)
 static __inline uint64_t
 pte_vram(uint64_t paddr)
 {
-	return (paddr >> 4) | APER_VRAM | VALID;
+	/* PTE VRAM aperture is 0 (PEER is 1). Different from PDE,
+	 * where VRAM is 1. See tu102/dev_mmu.h NV_MMU_VER2_PTE_APERTURE. */
+	return (paddr >> 4) | VALID;
 }
 
 /* Allocate one 4 KiB VRAM page from the bump allocator and PRAMIN-zero
