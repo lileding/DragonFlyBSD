@@ -146,6 +146,7 @@ struct nvkm_booter_info {
 struct nvkm_gsp_client;
 struct nvkm_gsp_device;
 struct nvkm_gsp_vaspace;
+struct nvkm_gsp_chgrp;
 
 struct nvkm_softc {
 	device_t		dev;
@@ -213,6 +214,13 @@ struct nvkm_softc {
 	struct nvkm_gsp_client	*gsp_client;
 	struct nvkm_gsp_device	*gsp_device;
 	struct nvkm_gsp_vaspace	*gsp_vaspace;
+	struct nvkm_gsp_chgrp	*gsp_chgrp;
+
+	/* Phase 5: VRAM bump allocator. Hands out physical VRAM
+	 * addresses for channel inst block, USERD, etc. */
+	uint64_t		vram_bump_base;
+	uint64_t		vram_bump_next;
+	uint64_t		vram_bump_limit;
 };
 
 static __inline uint32_t
