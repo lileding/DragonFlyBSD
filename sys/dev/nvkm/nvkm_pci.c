@@ -357,21 +357,29 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_vmm = NULL;
 					}
 				}
+				/* Bring up host BAR2 vmm now: needed for CPU
+				 * to write USERD via L2-coherent PCIe path. */
+				(void)nvkm_gsp_bar2_init(sc);
 				/* nouveau's GSP-RM path does NOT allocate
 				 * KEPLER_CHANNEL_GROUP_A; GSP creates the TSG
 				 * implicitly during channel alloc. */
 				if (sc->gsp_vmm != NULL) {
 					sc->gsp_chan = kzalloc(
 					    sizeof(*sc->gsp_chan), GFP_KERNEL);
-					if (sc->gsp_chan != NULL &&
-					    nvkm_gsp_chan_ctor(sc->gsp_vmm,
-					        NV2080_ENGINE_TYPE_COPY0,
-					        sc->gsp_chan) != 0) {
-						/* chan_ctor cleans up the contig mthdbuf
-						 * internally on its failure paths, so the
-						 * struct here is safe to just kfree. */
-						kfree(sc->gsp_chan);
-						sc->gsp_chan = NULL;
+					if (sc->gsp_chan != NULL) {
+						int cerr = nvkm_gsp_chan_ctor(
+						    sc->gsp_vmm,
+						    NV2080_ENGINE_TYPE_COPY0,
+						    sc->gsp_chan);
+						if (cerr != 0) {
+							kfree(sc->gsp_chan);
+							sc->gsp_chan = NULL;
+						} else {
+							/* Map USERD into BAR2 @ GVA 0 so
+							 * CPU can write GP_PUT L2-coherently. */
+							(void)nvkm_gsp_bar2_map_vram(sc, 0,
+							    sc->gsp_chan->userd_vram);
+						}
 					}
 				}
 			}

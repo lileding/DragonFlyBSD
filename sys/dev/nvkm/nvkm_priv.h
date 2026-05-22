@@ -168,6 +168,19 @@ struct nvkm_gsp_pending {
 };
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
+/* BAR2 host-managed vmm — see nvkm_gsp_bar2.c. */
+struct nvkm_gsp_bar2_pt {
+	void		*kva;
+	vm_paddr_t	 paddr;
+};
+struct nvkm_gsp_bar2 {
+	struct nvkm_gsp_bar2_pt	pd2;
+	struct nvkm_gsp_bar2_pt	pd1;
+	struct nvkm_gsp_bar2_pt	pd0;
+	struct nvkm_gsp_bar2_pt	spt;
+	bool			ready;
+};
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -240,6 +253,7 @@ struct nvkm_softc {
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
+	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */
 
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
 	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
@@ -441,5 +455,16 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 	    uint64_t frts_addr, uint32_t frts_size);
 #define	NVKM_FWSEC_CMD_FRTS	0x00000015u
 #define	NVKM_FWSEC_CMD_SB	0x00000019u
+
+
+
+/* === BAR2 host-managed vmm (nvkm_gsp_bar2.c) === */
+int	nvkm_gsp_bar2_init(struct nvkm_softc *sc);
+void	nvkm_gsp_bar2_fini(struct nvkm_softc *sc);
+int	nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
+	    uint64_t vram_paddr);
+void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
+	    uint32_t val);
+uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
 
 #endif /* _NVKM_PRIV_H_ */
