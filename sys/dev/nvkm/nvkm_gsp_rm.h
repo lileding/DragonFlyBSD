@@ -104,6 +104,10 @@ int	 nvkm_gsp_rm_ctrl_wr(struct nvkm_gsp_object *obj, void *params);
 void	 nvkm_gsp_rm_ctrl_done(struct nvkm_gsp_object *obj, void *params);
 
 /* === Convenience === */
+/* Query NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE on GSP's
+ * internal subdevice; stores into sc->mthdbuf_size. */
+int	 nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc);
+
 int	 nvkm_gsp_client_ctor(struct nvkm_softc *sc, uint32_t handle,
 	    struct nvkm_gsp_client *client);
 int	 nvkm_gsp_client_dtor(struct nvkm_gsp_client *client);
