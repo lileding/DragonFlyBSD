@@ -276,32 +276,50 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	return (buf);
 }
 
-/*
- * Drain msgq looking for a message with function == want_fn.
- * Other events get dispatched to their ntfy handlers inline.
- * Returns the reply buffer (caller frees via nvkm_gsp_rpc_done) or NULL
- * on timeout.
+/* Drain the msgq while gsp_tok is held. For each message:
+ *   - Function < 0x1000 + matches a pending->seq -> set pending->done + wakeup.
+ *   - Otherwise treat as an unsolicited event and dispatch via ntfy table.
+ *
+ * The pending->reply_buf takes ownership of the kmalloc'd buffer returned
+ * by nvkm_gsp_msgq_recv_one_elem.
  */
-static void *
-nvkm_gsp_msg_recv(struct nvkm_softc *sc, uint32_t want_fn,
-    uint32_t want_len)
+static void
+nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 {
-	uint32_t spin;
-	uint32_t timeout_ms = 5000;
-
-	for (spin = 0; spin < timeout_ms; spin++) {
+	for (;;) {
 		uint32_t fn = 0, len = 0;
-		void *buf = nvkm_gsp_msgq_recv_one_elem(sc, want_len, &fn, &len);
+		void *buf = nvkm_gsp_msgq_recv_one_elem(sc, 0, &fn, &len);
+		if (buf == NULL)
+			return;
 
-		if (buf == NULL) {
-			DELAY(1000);
+		if (fn < 0x1000) {
+			struct nvkm_nvfw_gsp_rpc *r =
+			    (struct nvkm_nvfw_gsp_rpc *)buf;
+			struct nvkm_gsp_pending *p;
+			bool matched = false;
+
+			LIST_FOREACH(p, &sc->gsp_pending, link) {
+				if (p->seq == r->sequence) {
+					p->reply_buf = buf;
+					p->reply_len = len;
+					/* release: reply_buf/_len stores precede done
+					 * publication on all architectures. */
+					atomic_store_rel_int(&p->done, 1);
+					wakeup(p);
+					matched = true;
+					break;
+				}
+			}
+			if (!matched) {
+				device_printf(sc->dev,
+				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
+				    fn, r->sequence);
+				kfree(buf, M_TEMP);
+			}
 			continue;
 		}
-		if (fn == want_fn) {
-			/* Return params ptr (past inner header). */
-			return ((uint8_t *)buf + NVKM_GSP_RPC_HDR_SIZE);
-		}
-		/* Event: dispatch and continue draining. */
+
+		/* Event >= 0x1000: dispatch via ntfy table, then free. */
 		{
 			uint32_t plen = (len > NVKM_GSP_RPC_HDR_SIZE) ?
 			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
@@ -310,39 +328,17 @@ nvkm_gsp_msg_recv(struct nvkm_softc *sc, uint32_t want_fn,
 		}
 		kfree(buf, M_TEMP);
 	}
-	return (NULL);
 }
 
-/*
- * Public helper: drain msgq dispatching events until empty.
- * Returns count of messages processed. Used by attach to poll for
- * GSP_INIT_DONE without setting up a full RPC reply wait.
- *
- * Replies (fn < 0x1000) that arrive here are unexpected and logged.
- */
+/* Public drain entry: takes gsp_tok and runs msgq_drain_locked. Safe to
+ * call from any lwkt (ISR or ioctl). */
 int
 nvkm_gsp_msg_dispatch_all(struct nvkm_softc *sc)
 {
-	int count = 0;
-	for (;;) {
-		uint32_t fn = 0, len = 0;
-		void *buf = nvkm_gsp_msgq_recv_one_elem(sc, 0, &fn, &len);
-		if (buf == NULL)
-			break;
-		if (fn >= 0x1000) {
-			uint32_t plen = (len > NVKM_GSP_RPC_HDR_SIZE) ?
-			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
-			uint8_t *params = (uint8_t *)buf + NVKM_GSP_RPC_HDR_SIZE;
-			(void)nvkm_gsp_msg_handle(sc, fn, params, plen);
-		} else {
-			device_printf(sc->dev,
-			    "msg_dispatch: unexpected reply fn=%u len=%u (dropped)\n",
-			    fn, len);
-		}
-		kfree(buf, M_TEMP);
-		count++;
-	}
-	return count;
+	lwkt_gettoken(&sc->gsp_tok);
+	nvkm_gsp_msgq_drain_locked(sc);
+	lwkt_reltoken(&sc->gsp_tok);
+	return (0);
 }
 
 /* ===================================================================
@@ -394,7 +390,12 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 	if (policy != NVKM_GSP_RPC_REPLY_NOSEQ)
 		rpc->sequence = sc->gsp_rpc_seq++;
 
+	/* Wrap cmdq_push with gsp_tok so concurrent senders serialise. For
+	 * REPLY_RECV we'll re-take the token below; lwkt tokens are
+	 * refcount-recursive so this is safe. */
+	lwkt_gettoken(&sc->gsp_tok);
 	err = nvkm_gsp_cmdq_push(sc, params);	/* frees the buffer */
+	lwkt_reltoken(&sc->gsp_tok);
 	if (err != 0)
 		return (NULL);
 
@@ -407,13 +408,42 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		return ((void *)(uintptr_t)1);
 
 	case NVKM_GSP_RPC_REPLY_RECV: {
-		void *reply = nvkm_gsp_msg_recv(sc, fn, repc);
-		if (reply == NULL) {
+		struct nvkm_gsp_pending p = { .seq = rpc->sequence };
+		int ticks_to_wait;
+		int timeout_ticks = 5 * hz;
+
+		/* sc->gsp_tok is already held by caller? No --- caller does
+		 * NOT hold it. Take it here and surround the wait. The token
+		 * is auto-released by tsleep() and reacquired on wake, so a
+		 * concurrent drainer (ISR or another lwkt) can run during
+		 * the wait and signal our pending entry. */
+		lwkt_gettoken(&sc->gsp_tok);
+		LIST_INSERT_HEAD(&sc->gsp_pending, &p, link);
+
+		while (!atomic_load_acq_int(&p.done) && timeout_ticks > 0) {
+			/* Drain whatever's already in msgq; may complete us. */
+			nvkm_gsp_msgq_drain_locked(sc);
+			if (atomic_load_acq_int(&p.done))
+				break;
+
+			/* Sleep up to 1 tick, then re-drain. Bound the total
+			 * wait at 5s. */
+			ticks_to_wait = (timeout_ticks > hz/10) ? hz/10 : timeout_ticks;
+			(void)tsleep(&p, 0, "gsprpc", ticks_to_wait);
+			timeout_ticks -= ticks_to_wait;
+		}
+
+		LIST_REMOVE(&p, link);
+		lwkt_reltoken(&sc->gsp_tok);
+
+		if (!atomic_load_acq_int(&p.done)) {
 			device_printf(sc->dev,
-			    "rpc_push: timeout waiting for fn=%u reply\n", fn);
+			    "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
+			    fn, p.seq);
 			return (NULL);
 		}
-		return (reply);
+
+		return ((uint8_t *)p.reply_buf + NVKM_GSP_RPC_HDR_SIZE);
 	}
 	}
 	return (NULL);
