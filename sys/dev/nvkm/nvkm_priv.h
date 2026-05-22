@@ -153,6 +153,7 @@ struct nvkm_gsp_device;
 struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
+struct nvkm_gsp_vmm;
 
 /* Per-RPC pending entry: queued on sc->gsp_pending while waiting
  * for a reply that matches sequence. The msgq drainer (ISR or
@@ -235,10 +236,7 @@ struct nvkm_softc {
 	struct pci_dev		*drm_pdev;
 
 	/* Phase 5: GSP-RM resource manager root client. */
-	struct nvkm_gsp_client	*gsp_client;
-	struct nvkm_gsp_device	*gsp_device;
-	struct nvkm_gsp_vaspace	*gsp_vaspace;
-	struct nvkm_gsp_chgrp	*gsp_chgrp;
+	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
 
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
