@@ -168,19 +168,6 @@ struct nvkm_gsp_pending {
 };
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
-/* BAR2 host-managed vmm — see nvkm_gsp_bar2.c. */
-struct nvkm_gsp_bar2_pt {
-	void		*kva;
-	vm_paddr_t	 paddr;
-};
-struct nvkm_gsp_bar2 {
-	struct nvkm_gsp_bar2_pt	pd2;
-	struct nvkm_gsp_bar2_pt	pd1;
-	struct nvkm_gsp_bar2_pt	pd0;
-	struct nvkm_gsp_bar2_pt	spt;
-	bool			ready;
-};
-
 struct nvkm_softc {
 	device_t		dev;
 
@@ -253,7 +240,6 @@ struct nvkm_softc {
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
-	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */
 
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
 	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
@@ -458,13 +444,71 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 
 
 
-/* === BAR2 host-managed vmm (nvkm_gsp_bar2.c) === */
-int	nvkm_gsp_bar2_init(struct nvkm_softc *sc);
-void	nvkm_gsp_bar2_fini(struct nvkm_softc *sc);
-int	nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
-	    uint64_t vram_paddr);
-void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
-	    uint32_t val);
-uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
+
+
+/* === GMMU VER2 PDE/PTE encoding (Pascal+) ===
+ * Refs:
+ *   vmmgp100.c:237-251 gp100_vmm_pde -- PDE aperture
+ *   tu102/dev_mmu.h:79-83 NV_MMU_PTE_APERTURE -- PTE aperture
+ *   gp100/dev_mmu.h:120-151 NV_MMU_VER2_PTE -- bit layout
+ */
+#define NV_PT_ADDR_SHIFT          4
+
+#define NV_PDE_APERTURE_INVALID   0ULL
+#define NV_PDE_APERTURE_VRAM      (1ULL << 1)
+#define NV_PDE_APERTURE_SYS_COH   (2ULL << 1)
+#define NV_PDE_APERTURE_SYS_NCOH  (3ULL << 1)
+#define NV_PDE_VOL                (1ULL << 3)
+
+#define NV_PTE_VALID              (1ULL << 0)
+#define NV_PTE_APERTURE_VRAM      0ULL
+#define NV_PTE_APERTURE_PEER      (1ULL << 1)
+#define NV_PTE_APERTURE_SYS_COH   (2ULL << 1)
+#define NV_PTE_APERTURE_SYS_NCOH  (3ULL << 1)
+#define NV_PTE_VOL                (1ULL << 3)
+#define NV_PTE_PRIV               (1ULL << 5)
+
+/* Pascal+ 16K-page 5-level GMMU (gp100_vmm_16, vmmgp100.c:603-608). */
+#define NVKM_GMMU_PD3_SHIFT       47
+#define NVKM_GMMU_PD2_SHIFT       38
+#define NVKM_GMMU_PD1_SHIFT       29
+#define NVKM_GMMU_PD0_SHIFT       21
+#define NVKM_GMMU_SPT_SHIFT       12
+#define NVKM_GMMU_PD2_ENTRIES    512
+#define NVKM_GMMU_PD1_ENTRIES    512
+#define NVKM_GMMU_PD0_ENTRIES    256
+#define NVKM_GMMU_SPT_ENTRIES    512
+#define NVKM_GMMU_PD0_ENTRY_SIZE  16   /* dual entry: small + big */
+#define NVKM_GMMU_PT_PAGE_SIZE 0x1000
+
+static __inline uint64_t
+nvkm_pde_to_sysmem(uint64_t pt_paddr)
+{
+	return ((uint64_t)pt_paddr >> NV_PT_ADDR_SHIFT)
+	     | NV_PDE_APERTURE_SYS_COH | NV_PDE_VOL;
+}
+
+static __inline uint64_t
+nvkm_pte_to_sysmem(uint64_t paddr)
+{
+	return ((uint64_t)paddr >> NV_PT_ADDR_SHIFT)
+	     | NV_PTE_APERTURE_SYS_COH | NV_PTE_VOL | NV_PTE_VALID;
+}
+
+/* === VMM VA layout ===
+ *
+ * Server-managed: handed to GSP via COPY_SERVER_RESERVED_PDES. GSP
+ *   maintains PDEs in this range; host MUST NOT modify any PT entry
+ *   inside it. Matches nouveau SPLIT_VAS_SERVER_RM_MANAGED_VA_START/_SIZE
+ *   (r535/nvrm/vmm.h:28-29) = [4 GiB, 4.5 GiB) -> PD1[8].
+ *
+ * Client-managed: host owns PT entries. We map sysmem BOs (push,
+ *   gpfifo, sema, ...) here. 16 GiB-aligned so the first GVA lands
+ *   on PD1[32], well clear of server's PD1[8].
+ */
+#define NVKM_VMM_RM_BASE         0x000100000000ULL   /* 4 GiB */
+#define NVKM_VMM_RM_SIZE         0x000020000000ULL   /* 512 MiB */
+#define NVKM_VMM_CLIENT_BASE     0x000400000000ULL   /* 16 GiB */
+#define NVKM_VMM_CLIENT_SIZE     0x001000000000ULL   /* 64 GiB */
 
 #endif /* _NVKM_PRIV_H_ */
