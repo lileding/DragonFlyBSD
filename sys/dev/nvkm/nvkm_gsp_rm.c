@@ -1017,6 +1017,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 
+	/* Map USERD VRAM page into BAR1 so host can L2-coherently
+	 * write GP_PUT to wake PBDMA. */
+	(void)nvkm_gsp_bar1_map_vram(sc, BAR1_GVA_USERD,
+	    chan->userd_vram);
+
 	/* Alloc TURING_USERMODE_A so GSP forwards doorbell writes
 	 * at BAR0+0xbb0090 to the PFIFO runlist scheduler. Parent is
 	 * the subdevice; no params on Volta/Turing.
@@ -1090,26 +1095,26 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    "gsp_submit: gpf[0..1]= %08x %08x  sema=%08x\n",
 	    gpf[0], gpf[1], sema[0]);
 
-	/* USERD slot housekeeping + GP_PUT=1, via PRAMIN backdoor.
+	/* USERD slot housekeeping + GP_PUT=1, via BAR1 (L2-coherent).
 	 * USERD is in VRAM at chan->userd_vram + chid * USERD_SLOT_SIZE.
-	 * Mirror gf100_chan_userd_clear (fifo/gf100.c:118-132). */
-	uint64_t slot_paddr = chan->userd_vram
+	 * BAR1 maps chan->userd_vram -> BAR1_GVA_USERD (4 KiB page),
+	 * so the chid slot is at BAR1_GVA_USERD + chid * USERD_SLOT_SIZE.
+	 * Mirrors gf100_chan_userd_clear (fifo/gf100.c:118-132). */
+	uint64_t slot_bar1 = BAR1_GVA_USERD
 	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
-	uint32_t pram_base  = (uint32_t)(slot_paddr >> 16);
-	uint32_t pram_off   = (uint32_t)(slot_paddr & 0xffffu);
-
-	lwkt_gettoken(&sc->gsp_tok);
-	saved_pramin = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	nvkm_wr32(sc, NV_PBUS_PRAMIN, pram_base);
 	static const uint32_t userd_clear_offs[] = {
 		0x40, 0x44, 0x48, 0x4c, 0x50, 0x58, 0x5c, 0x60, 0x88
 	};
 	for (unsigned k = 0; k < sizeof(userd_clear_offs)/sizeof(userd_clear_offs[0]); k++)
-		nvkm_wr32(sc, NV_PRAMIN + pram_off + userd_clear_offs[k], 0);
-	nvkm_wr32(sc, NV_PRAMIN + pram_off + NV_USERD_GP_PUT, 1);
-	(void)nvkm_rd32(sc, NV_PRAMIN + pram_off);  /* flush */
-	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_pramin);
-	lwkt_reltoken(&sc->gsp_tok);
+		nvkm_gsp_bar1_wr32(sc, slot_bar1 + userd_clear_offs[k], 0);
+	nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, 1);
+	/* Read back GP_PUT and GP_GET to confirm BAR1 walker reached our PT. */
+	uint32_t put_rb = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT);
+	uint32_t get_rb = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
+	device_printf(sc->dev,
+	    "gsp_submit: BAR1 USERD readback GP_PUT=0x%08x GP_GET=0x%08x (expect PUT=1)\n",
+	    put_rb, get_rb);
+	(void)saved_pramin;
 
 	cpu_sfence();
 	/* USERMODE TIME tick test (PRI / BAR0 reachability). */
