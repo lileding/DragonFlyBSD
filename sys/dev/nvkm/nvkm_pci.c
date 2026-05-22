@@ -135,6 +135,11 @@ nvkm_pci_attach(device_t dev)
 	}
 	sc->dev = dev;
 
+	/* Phase 5: serialise GSP cmdq writes + msgq drain across ioctl
+	 * lwkts and the ithread. Init here, before any RPC is issued. */
+	lwkt_token_init(&sc->gsp_tok, "nvkm-gsp");
+	LIST_INIT(&sc->gsp_pending);
+
 	device_printf(dev,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
 	    pci_get_vendor(dev), pci_get_device(dev), pci_get_revid(dev),

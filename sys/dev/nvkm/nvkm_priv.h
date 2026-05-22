@@ -17,6 +17,11 @@
 #include <sys/rman.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
+#include <sys/queue.h>
+#include <sys/thread.h>
+#include <sys/thread2.h>
+#include <machine/atomic.h>
+#include <sys/proc.h>
 
 #define NVKM_PCI_VENDOR_NVIDIA	0x10de
 
@@ -149,6 +154,19 @@ struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 
+/* Per-RPC pending entry: queued on sc->gsp_pending while waiting
+ * for a reply that matches sequence. The msgq drainer (ISR or
+ * another lwkt) sets done + wakeup; the issuer then consumes
+ * reply_buf and removes from the list. */
+struct nvkm_gsp_pending {
+	LIST_ENTRY(nvkm_gsp_pending) link;
+	uint32_t  seq;
+	volatile u_int done;     /* 0 = pending, 1 = reply ready; use atomic_*_acq/rel */
+	void     *reply_buf;
+	uint32_t  reply_len;
+};
+LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
+
 struct nvkm_softc {
 	device_t		dev;
 
@@ -200,6 +218,11 @@ struct nvkm_softc {
 	}			gsp_ntfy;
 	uint32_t		gsp_rpc_seq;		/* inner RPC sequence (matches reply) */
 	uint32_t		gsp_msgq_rptr;		/* host-side msgq read cursor */
+
+	/* Phase 5: RPC token + pending list. gsp_tok serialises
+	 * cmdq writes and msgq reads across ioctl lwkts + ithread. */
+	struct lwkt_token       gsp_tok;
+	struct nvkm_gsp_pending_list gsp_pending;
 
 	/* IRQ resource + ithread serializer (DragonFly native model). */
 	int			irq_rid;
