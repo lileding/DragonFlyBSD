@@ -422,6 +422,49 @@ nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas)
 	return (nvkm_gsp_rm_free(&vas->object));
 }
 
+/* === chid pool (host-side, 2048 bits, chid 0 reserved) ===
+ *
+ * 2048-entry bitmap, chid 0 reserved (rsvd_chids=1 in r570_fifo).
+ * Init: set bit 0. Alloc: find first 0-bit, set, return id.
+ * Free: clear bit. Mirrors nouveau chid.c. */
+void
+nvkm_chid_init(struct nvkm_softc *sc)
+{
+	lwkt_token_init(&sc->chid_tok, "nvkm-chid");
+	memset(sc->chid_used, 0, sizeof(sc->chid_used));
+	sc->chid_used[0] |= 1ULL;  /* chid 0 reserved */
+}
+
+int
+nvkm_chid_alloc(struct nvkm_softc *sc)
+{
+	int chid = -1;
+	lwkt_gettoken(&sc->chid_tok);
+	for (int w = 0; w < 32 && chid < 0; w++) {
+		uint64_t v = sc->chid_used[w];
+		if (v == ~0ULL) continue;
+		for (int b = 0; b < 64; b++) {
+			if (!(v & (1ULL << b))) {
+				sc->chid_used[w] |= (1ULL << b);
+				chid = w * 64 + b;
+				break;
+			}
+		}
+	}
+	lwkt_reltoken(&sc->chid_tok);
+	return chid;
+}
+
+void
+nvkm_chid_free(struct nvkm_softc *sc, int chid)
+{
+	if (chid < 0 || chid >= 2048)
+		return;
+	lwkt_gettoken(&sc->chid_tok);
+	sc->chid_used[chid >> 6] &= ~(1ULL << (chid & 63));
+	lwkt_reltoken(&sc->chid_tok);
+}
+
 /* === VRAM bump allocator ===
  *
  * Carve out a fixed safe window inside the GPU's local VRAM. Eventually
@@ -673,10 +716,25 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	/* gpFifoOffset stays 0 — GSP only validates it on first push. */
 	args->gpFifoEntries = NV_CHANNEL_GPFIFO_ENTRIES;
-	/* Kernel channel: PRIVILEGED + USERD page-fixed. Matches
-	 * Linux nouveau r535_chan_ramfc.priv=true. */
-	args->flags = NVOS04_FLAGS_CHANNEL_USERD_INDEX_PAGE_FIXED |
-	              (1U << 5) /* NVOS04_FLAGS_PRIVILEGED_CHANNEL_TRUE */;
+	/* chid allocated from host pool (rsvd_chids=1 ->
+	 * nvkm_chid_alloc starts at 1). Encode into
+	 * USERD_INDEX_VALUE/PAGE_VALUE per r570/fifo.c:r570_chan_alloc. */
+	chan->chid = nvkm_chid_alloc(sc);
+	if (chan->chid < 0) {
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
+		    M_NVKM_MTHDBUF);
+		chan->mthdbuf_kva = NULL;
+		return (ENOMEM);
+	}
+	{
+		uint32_t userd_p = (uint32_t)chan->chid / 8u;
+		uint32_t userd_i = (uint32_t)chan->chid % 8u;
+		args->flags =
+		    ((userd_i & 7u) << 8) |
+		    ((userd_p & 0x1ffu) << 12) |
+		    (1U << 21) /* USERD_INDEX_PAGE_FIXED */ |
+		    (1U << 5) /* PRIVILEGED_CHANNEL_TRUE */;
+	}
 	args->hVASpace = vmm->vaspace.handle;
 	args->engineType = engine_type;
 	/* subDeviceId stays 0 — matches nouveau */
@@ -732,7 +790,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 int
 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 {
+	struct nvkm_softc *sc = chan->object.client ?
+	    chan->object.client->sc : NULL;
 	int err = nvkm_gsp_rm_free(&chan->object);
+	if (sc != NULL && chan->chid > 0)
+		nvkm_chid_free(sc, chan->chid);
 	if (chan->mthdbuf_kva != NULL) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
