@@ -41,11 +41,12 @@ static MALLOC_DEFINE(M_NVKM_VMM, "nvkm_vmm", "nvkm GMMU page table pages");
 #define NVKM_PDE_APERTURE_SYS_COH	(2ULL << 1)
 #define NVKM_PDE_VOL			(1ULL << 3)
 
+#define NVKM_PDE_APERTURE_VRAM	(1ULL << 1)
+
 static uint64_t
-nvkm_gsp_pde_sysmem_coh(vm_paddr_t child_paddr)
+nvkm_gsp_pde_vram(uint64_t child_paddr)
 {
-	return ((uint64_t)child_paddr >> 4) | NVKM_PDE_APERTURE_SYS_COH |
-	    NVKM_PDE_VOL;
+	return ((uint64_t)child_paddr >> 4) | NVKM_PDE_APERTURE_VRAM;
 }
 
 /* NV90F1_CTRL_CMD_VASPACE_COPY_SERVER_RESERVED_PDES — params from
@@ -77,23 +78,26 @@ struct NV90F1_CTRL_VASPACE_COPY_SERVER_RESERVED_PDES_PARAMS {
 static int
 nvkm_gsp_vmm_pt_alloc(struct nvkm_softc *sc, struct nvkm_gsp_vmm_pt *pt)
 {
-	pt->kva = contigmalloc(0x1000, M_NVKM_VMM, M_WAITOK | M_ZERO,
-	    /*low*/ 0, /*high*/ ~(vm_paddr_t)0,
-	    /*align*/ 0x1000, /*boundary*/ 0);
-	if (pt->kva == NULL)
+	pt->paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	if (pt->paddr == 0)
 		return (ENOMEM);
-	pt->paddr = vtophys(pt->kva);
+	/* PRAMIN-zero the 4 KiB PT page. */
+	lwkt_gettoken(&sc->gsp_tok);
+	uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pt->paddr >> 16));
+	uint32_t off = (uint32_t)(pt->paddr & 0xffffu);
+	for (int j = 0; j < 0x1000; j += 4)
+		nvkm_wr32(sc, NV_PRAMIN + off + j, 0);
+	(void)nvkm_rd32(sc, NV_PRAMIN + off);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
 	return (0);
 }
 
 static void
-nvkm_gsp_vmm_pt_free(struct nvkm_gsp_vmm_pt *pt)
+nvkm_gsp_vmm_pt_free(struct nvkm_gsp_vmm_pt *pt __unused)
 {
-	if (pt->kva != NULL) {
-		contigfree(pt->kva, 0x1000, M_NVKM_VMM);
-		pt->kva = NULL;
-		pt->paddr = 0;
-	}
+	/* VRAM bump allocator has no free. */
 }
 
 static int
@@ -120,19 +124,19 @@ nvkm_gsp_vmm_copy_pdes(struct nvkm_gsp_vmm *vmm)
 	/* PD3 — root. Holds 4 entries of 8 bytes each (2-bit index). */
 	ctrl->levels[0].physAddress = (uint64_t)vmm->pt[0].paddr;
 	ctrl->levels[0].size        = (1ULL << 2) * 8;	/* 32 bytes used */
-	ctrl->levels[0].aperture    = NV_PDE_APERTURE_SYS_COH;
+	ctrl->levels[0].aperture    = NV_PDE_APERTURE_VIDMEM;
 	ctrl->levels[0].pageShift   = 47;
 
 	/* PD2 — 512 entries × 8 bytes = 4 KiB. */
 	ctrl->levels[1].physAddress = (uint64_t)vmm->pt[1].paddr;
 	ctrl->levels[1].size        = (1ULL << 9) * 8;	/* 4096 */
-	ctrl->levels[1].aperture    = NV_PDE_APERTURE_SYS_COH;
+	ctrl->levels[1].aperture    = NV_PDE_APERTURE_VIDMEM;
 	ctrl->levels[1].pageShift   = 38;
 
 	/* PD1 — 512 entries × 8 bytes = 4 KiB. */
 	ctrl->levels[2].physAddress = (uint64_t)vmm->pt[2].paddr;
 	ctrl->levels[2].size        = (1ULL << 9) * 8;	/* 4096 */
-	ctrl->levels[2].aperture    = NV_PDE_APERTURE_SYS_COH;
+	ctrl->levels[2].aperture    = NV_PDE_APERTURE_VIDMEM;
 	ctrl->levels[2].pageShift   = 29;
 
 	p = ctrl;
@@ -190,17 +194,32 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	 *
 	 *    PT pages are write-back cacheable sysmem, x86 has PCIe cache
 	 *    snoop, so SYS_COH + VOL is the right aperture. */
-	*(volatile uint64_t *)((uint8_t *)vmm->pt[0].kva + 0) =
-	    nvkm_gsp_pde_sysmem_coh(vmm->pt[1].paddr);	/* PD3[0] -> PD2 */
-	*(volatile uint64_t *)((uint8_t *)vmm->pt[1].kva + 0) =
-	    nvkm_gsp_pde_sysmem_coh(vmm->pt[2].paddr);	/* PD2[0] -> PD1 */
-	/* PD1 stays zero — GSP writes PD1[8] when needed. */
+	/* PD3[0] = PDE(PD2 VRAM); PD2[0] = PDE(PD1 VRAM). PRAMIN. */
+	{
+		uint64_t pd3_e = nvkm_gsp_pde_vram(vmm->pt[1].paddr);
+		uint64_t pd2_e = nvkm_gsp_pde_vram(vmm->pt[2].paddr);
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		uint64_t pd3p = vmm->pt[0].paddr;
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pd3p >> 16));
+		uint32_t off = (uint32_t)(pd3p & 0xffffu);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0, (uint32_t)(pd3_e & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 4, (uint32_t)(pd3_e >> 32));
+		uint64_t pd2p = vmm->pt[1].paddr;
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(pd2p >> 16));
+		off = (uint32_t)(pd2p & 0xffffu);
+		nvkm_wr32(sc, NV_PRAMIN + off + 0, (uint32_t)(pd2_e & 0xffffffffu));
+		nvkm_wr32(sc, NV_PRAMIN + off + 4, (uint32_t)(pd2_e >> 32));
+		(void)nvkm_rd32(sc, NV_PRAMIN + off);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+	}
 
 	device_printf(sc->dev,
-	    "gsp_rm: PT chain PD3=%p/0x%llx PD2=%p/0x%llx PD1=%p/0x%llx\n",
-	    vmm->pt[0].kva, (unsigned long long)vmm->pt[0].paddr,
-	    vmm->pt[1].kva, (unsigned long long)vmm->pt[1].paddr,
-	    vmm->pt[2].kva, (unsigned long long)vmm->pt[2].paddr);
+	    "gsp_rm: PT chain (VRAM) PD3=0x%llx PD2=0x%llx PD1=0x%llx\n",
+	    (unsigned long long)vmm->pt[0].paddr,
+	    (unsigned long long)vmm->pt[1].paddr,
+	    (unsigned long long)vmm->pt[2].paddr);
 
 	/* 4) Allocate FERMI_VASPACE_A (non-external, server-managed PDE flavour). */
 	{
