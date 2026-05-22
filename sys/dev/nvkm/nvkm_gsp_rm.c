@@ -1116,6 +1116,21 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    put_rb, get_rb);
 	(void)saved_pramin;
 
+	/* Force PFIFO to re-evaluate runlist (NVA06F_CTRL_CMD_RESTART_RUNLIST).
+	 * Ensures the channel is actively scheduled before the doorbell. */
+	{
+		struct { uint8_t bForceRestart; uint8_t bBypassWait; } *rr;
+		rr = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    0xa06f0111u, sizeof(*rr));
+		if (rr != NULL) {
+			rr->bForceRestart = 1;
+			rr->bBypassWait = 0;
+			int rerr = nvkm_gsp_rm_ctrl_wr(&chan->object, rr);
+			device_printf(sc->dev,
+			    "gsp_submit: RESTART_RUNLIST err=%d\n", rerr);
+		}
+	}
+
 	cpu_sfence();
 	/* USERMODE TIME tick test (PRI / BAR0 reachability). */
 	uint32_t t0_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
@@ -1136,6 +1151,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
 	    (uint32_t)chan->chid);
 
+	uint32_t last_get = 0xffffffffu;
 	for (ms = 0; ms < SUBMIT_POLL_MS; ms += SUBMIT_POLL_STEP_MS) {
 		cpu_lfence();
 		if (*sema == SEM_PAYLOAD) {
@@ -1144,11 +1160,19 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			    ms, *sema);
 			return (0);
 		}
+		/* Sample GP_GET every step; log whenever it changes. */
+		uint32_t cur_get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
+		if (cur_get != last_get) {
+			device_printf(sc->dev,
+			    "gsp_submit: t=%dms GP_GET=0x%08x (sema=0x%08x)\n",
+			    ms, cur_get, *sema);
+			last_get = cur_get;
+		}
 		DELAY(SUBMIT_POLL_STEP_MS * 1000);
 	}
 	device_printf(sc->dev,
-	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x\n",
-	    SUBMIT_POLL_MS, *sema);
+	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x, last GP_GET=0x%08x\n",
+	    SUBMIT_POLL_MS, *sema, last_get);
 	return (0);
 }
 
