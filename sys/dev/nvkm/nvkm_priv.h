@@ -218,6 +218,11 @@ struct nvkm_softc {
 	struct nvkm_gsp_chgrp	*gsp_chgrp;
 	struct nvkm_gsp_chan	*gsp_chan;
 
+	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
+	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
+	uint64_t		fb_usable_base;
+	uint64_t		fb_usable_size;
+
 	/* Phase 5: VRAM bump allocator. Hands out physical VRAM
 	 * addresses for channel inst block, USERD, etc. */
 	uint64_t		vram_bump_base;

@@ -395,71 +395,26 @@ nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas)
 int
 nvkm_gsp_vram_init(struct nvkm_softc *sc)
 {
-	struct NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS_r570 *ctrl;
-	void *p;
-	uint32_t n, i;
-	uint64_t best_base = 0, best_size = 0;
-	int err;
+	uint64_t base, size;
 
-	if (sc->gsp_device == NULL) {
+	base = sc->fb_usable_base;
+	size = sc->fb_usable_size;
+	if (size == 0) {
 		device_printf(sc->dev,
-		    "gsp_rm: vram_init called before device ctor\n");
-		return (EINVAL);
-	}
-
-	ctrl = nvkm_gsp_rm_ctrl_get(&sc->gsp_device->subdevice,
-	    NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO, sizeof(*ctrl));
-	if (ctrl == NULL)
-		return (ENOMEM);
-	p = ctrl;
-	err = nvkm_gsp_rm_ctrl_rd(&sc->gsp_device->subdevice, &p, sizeof(*ctrl));
-	if (err != 0 || p == NULL) {
-		device_printf(sc->dev,
-		    "gsp_rm: FB_GET_FB_REGION_INFO failed err=%d\n", err);
-		return (err ? err : EIO);
-	}
-	ctrl = p;
-
-	n = ctrl->numFBRegions;
-	if (n > NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES)
-		n = NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_MAX_ENTRIES;
-	for (i = 0; i < n; i++) {
-		struct nvkm_fb_region_info *r = &ctrl->fbRegion[i];
-		uint64_t size;
-
-		if (r->limit <= r->base)
-			continue;
-		size = (r->limit + 1) - r->base;
-		device_printf(sc->dev,
-		    "gsp_rm: fb_region[%u] base=0x%llx limit=0x%llx rsvd=0x%llx "
-		    "prot=%u\n", i, (unsigned long long)r->base,
-		    (unsigned long long)r->limit,
-		    (unsigned long long)r->reserved, r->bProtected);
-		if (r->reserved != 0 || r->bProtected != 0)
-			continue;
-		if (size > best_size) {
-			best_base = r->base;
-			best_size = size;
-		}
-	}
-	nvkm_gsp_rm_ctrl_done(&sc->gsp_device->subdevice, ctrl);
-
-	if (best_size == 0) {
-		device_printf(sc->dev,
-		    "gsp_rm: no usable FB region reported by GSP\n");
+		    "gsp_rm: usable VRAM region unknown (static_info parse failed)\n");
 		return (ENXIO);
 	}
 
-	/* Stay below the WPR2 region by reserving the top 64 MiB of the
-	 * chosen region as a safety margin (FwSec/booter footprint). */
-	if (best_size > (64ULL << 20))
-		best_size -= (64ULL << 20);
+	/* Leave 64 MiB at the top of the chosen region as a safety margin
+	 * (FwSec/booter footprint sits near the top of FB). */
+	if (size > (64ULL << 20))
+		size -= (64ULL << 20);
 
-	sc->vram_bump_base  = best_base;
-	sc->vram_bump_next  = best_base;
-	sc->vram_bump_limit = best_base + best_size;
+	sc->vram_bump_base  = base;
+	sc->vram_bump_next  = base;
+	sc->vram_bump_limit = base + size;
 	device_printf(sc->dev,
-	    "gsp_rm: VRAM bump window 0x%llx..0x%llx (from GSP fbRegion)\n",
+	    "gsp_rm: VRAM bump window 0x%llx..0x%llx\n",
 	    (unsigned long long)sc->vram_bump_base,
 	    (unsigned long long)sc->vram_bump_limit);
 	return (0);
