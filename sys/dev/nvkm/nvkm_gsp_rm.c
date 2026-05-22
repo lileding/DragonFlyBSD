@@ -677,7 +677,7 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
  * for Volta+ GPFIFO channels, but driven entirely from kernel:
  * host writes PT, builds push, kicks via PRAMIN/USERD, rings doorbell.
  */
-#define NV_MMU_APER_SYS_NCOH	(3u << 1)
+#define NV_MMU_APER_SYS_COH	(2u << 1)
 #define NV_MMU_VOL		(1u << 3)
 #define NV_MMU_VALID		(1u << 0)
 
@@ -688,14 +688,14 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 static uint64_t
 nvkm_pte_sysmem(uint64_t paddr)
 {
-	return (paddr >> 4) | NV_MMU_APER_SYS_NCOH | NV_MMU_VALID;
+	return (paddr >> 4) | NV_MMU_APER_SYS_COH | NV_MMU_VOL | NV_MMU_VALID;
 }
 
 static uint64_t
 nvkm_pde_sysmem(uint64_t paddr)
 {
 	/* PDE has no VALID bit; non-zero aperture = present. */
-	return (paddr >> 4) | NV_MMU_APER_SYS_NCOH;
+	return (paddr >> 4) | NV_MMU_APER_SYS_COH | NV_MMU_VOL;
 }
 
 int
@@ -1013,6 +1013,40 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	*sema = 0;
 	cpu_sfence();
 
+	{
+		struct nvkm_gsp_vmm *vmm = sc->gsp_vmm;
+		volatile uint64_t *pd1 = (volatile uint64_t *)vmm->pt[2].kva;
+		volatile uint64_t *pd0 = (volatile uint64_t *)chan->submit_pd0_kva;
+		device_printf(sc->dev,
+		    "gsp_submit: PD1[0..15] %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
+		    (unsigned long long)pd1[0], (unsigned long long)pd1[1],
+		    (unsigned long long)pd1[2], (unsigned long long)pd1[3],
+		    (unsigned long long)pd1[4], (unsigned long long)pd1[5],
+		    (unsigned long long)pd1[6], (unsigned long long)pd1[7],
+		    (unsigned long long)pd1[8], (unsigned long long)pd1[9],
+		    (unsigned long long)pd1[10], (unsigned long long)pd1[11],
+		    (unsigned long long)pd1[12], (unsigned long long)pd1[13],
+		    (unsigned long long)pd1[14], (unsigned long long)pd1[15]);
+		volatile uint64_t *spt = (volatile uint64_t *)chan->submit_spt_kva;
+		volatile uint32_t *push = (volatile uint32_t *)chan->submit_push_kva;
+		volatile uint32_t *gpf  = (volatile uint32_t *)chan->submit_gpf_kva;
+		volatile uint32_t *sema = (volatile uint32_t *)chan->submit_sema_kva;
+		device_printf(sc->dev,
+		    "gsp_submit: SPT[0x100..0x102] %llx %llx %llx\n",
+		    (unsigned long long)spt[0x100], (unsigned long long)spt[0x101],
+		    (unsigned long long)spt[0x102]);
+		device_printf(sc->dev,
+		    "gsp_submit: push[0..5]= %08x %08x %08x %08x %08x %08x\n",
+		    push[0], push[1], push[2], push[3], push[4], push[5]);
+		device_printf(sc->dev,
+		    "gsp_submit: gpf[0..1]= %08x %08x  sema=%08x\n",
+		    gpf[0], gpf[1], sema[0]);
+		device_printf(sc->dev,
+		    "gsp_submit: PD0[0..3] %llx %llx %llx %llx\n",
+		    (unsigned long long)pd0[0], (unsigned long long)pd0[1],
+		    (unsigned long long)pd0[2], (unsigned long long)pd0[3]);
+	}
+
 	/* USERD::GP_PUT = 1 via PRAMIN. chid=1 slot offset = chid * 0x200;
 	 * GP_PUT = slot + 0x8c. */
 	gp_put_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200ULL + 0x8cULL;
@@ -1078,6 +1112,26 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_submit: USERD post GP_GET=0x%08x GP_PUT=0x%08x advanced_at=%d ms\n",
 		    get_post, put_post, advanced);
+	}
+
+	/* Ask GSP for the authoritative doorbell token. Returns
+	 * INVALID_STATE if channel is not yet on a runlist. */
+	{
+		struct { uint32_t workSubmitToken; } *tp;
+		void *q;
+		tp = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    /* NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN */ 0xc36f0108u,
+		    sizeof(*tp));
+		if (tp != NULL) {
+			q = tp;
+			int terr = nvkm_gsp_rm_ctrl_rd(&chan->object, &q, sizeof(*tp));
+			device_printf(sc->dev,
+			    "gsp_submit: GET_WORK_SUBMIT_TOKEN err=%d token=0x%08x (expect chid=0x%x)\n",
+			    terr, q ? ((struct { uint32_t workSubmitToken; } *)q)->workSubmitToken : 0xffffffffu,
+			    (uint32_t)chan->chid);
+			if (q != NULL)
+				nvkm_gsp_rm_ctrl_done(&chan->object, q);
+		}
 	}
 
 	device_printf(sc->dev,
