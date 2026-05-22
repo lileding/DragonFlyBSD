@@ -11,6 +11,7 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
+#include "nvkm_gsp_vmm.h"
 #include "nvkm_falcon.h"
 
 #include <drm/drmP.h>            /* struct drm_softc, kzalloc, GFP_KERNEL */
@@ -341,46 +342,25 @@ nvkm_pci_attach(device_t dev)
 			 * If this works the rest of the resource tree (device,
 			 * vaspace, channel, ...) can be built on top. */
 			if (sc->gsp_running) {
-				sc->gsp_client = kzalloc(sizeof(*sc->gsp_client),
+				sc->gsp_vmm = kzalloc(sizeof(*sc->gsp_vmm),
 				    GFP_KERNEL);
-				if (sc->gsp_client != NULL) {
-					if (nvkm_gsp_client_ctor(sc, 0xc1d00001,
-					    sc->gsp_client) != 0) {
-						kfree(sc->gsp_client);
-						sc->gsp_client = NULL;
-					}
-				}
-				if (sc->gsp_client != NULL) {
-					sc->gsp_device = kzalloc(
-					    sizeof(*sc->gsp_device), GFP_KERNEL);
-					if (sc->gsp_device != NULL &&
-					    nvkm_gsp_device_ctor(sc->gsp_client,
-					        sc->gsp_device) != 0) {
-						kfree(sc->gsp_device);
-						sc->gsp_device = NULL;
-					}
-				}
-				if (sc->gsp_device != NULL)
-					(void)nvkm_gsp_vram_init(sc);
-				if (sc->gsp_device != NULL) {
-					sc->gsp_vaspace = kzalloc(
-					    sizeof(*sc->gsp_vaspace), GFP_KERNEL);
-					if (sc->gsp_vaspace != NULL &&
-					    nvkm_gsp_vaspace_ctor(sc->gsp_device,
-					        sc->gsp_vaspace) != 0) {
-						kfree(sc->gsp_vaspace);
-						sc->gsp_vaspace = NULL;
+				if (sc->gsp_vmm != NULL) {
+					if (nvkm_gsp_vmm_ctor(sc, 0xc1d00001,
+					    sc->gsp_vmm) != 0) {
+						kfree(sc->gsp_vmm);
+						sc->gsp_vmm = NULL;
+					} else {
+						(void)nvkm_gsp_vram_init(sc);
 					}
 				}
 				/* nouveau's GSP-RM path does NOT allocate
 				 * KEPLER_CHANNEL_GROUP_A; GSP creates the TSG
 				 * implicitly during channel alloc. */
-				if (sc->gsp_vaspace != NULL) {
+				if (sc->gsp_vmm != NULL) {
 					sc->gsp_chan = kzalloc(
 					    sizeof(*sc->gsp_chan), GFP_KERNEL);
 					if (sc->gsp_chan != NULL &&
-					    nvkm_gsp_chan_ctor(sc->gsp_device,
-					        sc->gsp_vaspace, NULL,
+					    nvkm_gsp_chan_ctor(sc->gsp_vmm,
 					        NV2080_ENGINE_TYPE_COPY0,
 					        sc->gsp_chan) != 0) {
 						kfree(sc->gsp_chan);
