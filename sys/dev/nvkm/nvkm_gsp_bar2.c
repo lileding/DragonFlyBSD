@@ -70,7 +70,8 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	pd1 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
 	pd0 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
 	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	if (!pd2 || !pd1 || !pd0 || !spt) {
+	uint64_t lpt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	if (!pd2 || !pd1 || !pd0 || !spt || !lpt) {
 		device_printf(sc->dev, "bar2: VRAM alloc failed\n");
 		return (ENOMEM);
 	}
@@ -86,8 +87,8 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 	b2_pramin_set_base(sc, pd2 & ~(uint64_t)0xffffu);
 
-	uint64_t zpages[4] = { pd2, pd1, pd0, spt };
-	for (int zi = 0; zi < 4; zi++) {
+	uint64_t zpages[5] = { pd2, pd1, pd0, spt, lpt };
+	for (int zi = 0; zi < 5; zi++) {
 		for (uint32_t off = 0; off < 0x1000; off += 4)
 			b2_pramin_wr32(sc, zpages[zi] + off, 0);
 	}
@@ -96,9 +97,11 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	    (pd1 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
 	b2_pramin_wr64(sc, pd1 + 0,
 	    (pd0 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
+	/* PD0 dual entry: BAR2 walker also uses 64 KiB BIG. SPT in BIG slot. */
 	b2_pramin_wr64(sc, pd0 + 0,
 	    (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
 	b2_pramin_wr64(sc, pd0 + 8, 0);
+	(void)lpt;  /* unused */
 
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
