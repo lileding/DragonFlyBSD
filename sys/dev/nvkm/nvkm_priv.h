@@ -169,20 +169,30 @@ struct nvkm_gsp_pending {
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
 
-/* BAR1 host-managed vmm -- see nvkm_gsp_bar1.c. PT chain stays sysmem
- * (bootstrap), only the leaf SPT entries map VRAM pages. */
-struct nvkm_gsp_bar1_pt {
-	void		*kva;	/* sysmem KVA */
-	vm_paddr_t	 paddr;	/* sysmem physical */
-};
+/* BAR1 host-managed vmm -- see nvkm_gsp_bar1.c.
+ * All PT pages live in VRAM (fresh allocations the walker has never
+ * touched), set up via PRAMIN. After bar1_init we repoint 0xb80f40
+ * at our new inst block. */
 struct nvkm_gsp_bar1 {
-	struct nvkm_gsp_bar1_pt	pd2;
-	struct nvkm_gsp_bar1_pt	pd1;
-	struct nvkm_gsp_bar1_pt	pd0;
-	struct nvkm_gsp_bar1_pt	spt;
-	uint64_t		next_gva;  /* bump cursor for bar1_alloc_page */
-	bool			ready;
+	uint64_t	pd3_paddr;
+	uint64_t	pd2_paddr;
+	uint64_t	pd1_paddr;
+	uint64_t	pd0_paddr;
+	uint64_t	spt_paddr;
+	uint64_t	next_gva;
+	bool		ready;
 };
+
+struct nvkm_gsp_bar2 {
+	uint64_t	pd3_paddr;	/* GSP\'s BAR2 PDB (we adopt) */
+	uint64_t	pd2_paddr;
+	uint64_t	pd1_paddr;
+	uint64_t	pd0_paddr;
+	uint64_t	spt_paddr;
+	uint64_t	next_gva;
+	bool		ready;
+};
+
 
 /* A VRAM page paired with a BAR1 GVA mapping so the host can read/write
  * the page L2-coherently. Created by nvkm_gsp_bar1_alloc_page; do not
@@ -265,6 +275,7 @@ struct nvkm_softc {
 	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
 	struct nvkm_gsp_bar1	bar1;	/* host BAR1 vmm */
+	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */
 
 	/* Phase 5: usable VRAM range parsed from GspStaticConfigInfo
 	 * fbRegionInfoParams (set in nvkm_gsp_get_static_info). */
@@ -550,6 +561,18 @@ nvkm_pte_to_vram(uint64_t paddr)
 #define NVKM_VMM_CLIENT_SIZE     0x001000000000ULL   /* 64 GiB */
 
 
+/* === BAR2 host-managed vmm (nvkm_gsp_bar2.c) === */
+int	nvkm_gsp_bar2_init(struct nvkm_softc *sc);
+void	nvkm_gsp_bar2_fini(struct nvkm_softc *sc);
+int	nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
+	    uint64_t vram_paddr);
+void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
+	    uint32_t val);
+uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
+
+#define BAR2_GVA_ALLOC_BASE	0x1000ULL
+
+
 /* === BAR1 host-managed vmm (nvkm_gsp_bar1.c) === */
 int	nvkm_gsp_bar1_init(struct nvkm_softc *sc);
 void	nvkm_gsp_bar1_fini(struct nvkm_softc *sc);
@@ -567,6 +590,7 @@ uint64_t nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t bar1_gva);
  * BAR1 GVA (for host reads/writes via bar1_{wr,rd}{32,64}). */
 int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
+void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page bump-allocates
