@@ -347,3 +347,19 @@ nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva)
 	uint32_t hi = bus_read_4(sc->bar_res[3], (bus_size_t)(bar2_gva + 4));
 	return ((uint64_t)hi << 32) | lo;
 }
+
+
+int
+nvkm_gsp_pramin_rd64(struct nvkm_softc *sc, uint64_t paddr, uint64_t *out)
+{
+	uint32_t saved;
+	lwkt_gettoken(&sc->gsp_tok);
+	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	b2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
+	uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 0) & 0xffffu));
+	uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 4) & 0xffffu));
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
+	*out = ((uint64_t)hi << 32) | lo;
+	return (0);
+}
