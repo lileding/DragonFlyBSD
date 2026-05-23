@@ -583,6 +583,7 @@ uint64_t nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva);
 /* === BAR1 host-managed vmm (nvkm_gsp_bar1.c) === */
 int	nvkm_gsp_bar1_init(struct nvkm_softc *sc);
 void	nvkm_gsp_bar1_fini(struct nvkm_softc *sc);
+void	nvkm_gsp_bar1_flush(struct nvkm_softc *sc);
 int	nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	    uint64_t vram_paddr);
 void	nvkm_gsp_bar1_wr32(struct nvkm_softc *sc, uint64_t bar1_gva,

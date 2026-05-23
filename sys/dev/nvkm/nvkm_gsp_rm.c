@@ -316,36 +316,18 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE tableLen=%u\n",
 		    r->tableLen);
-		/* Per nouveau tu102_vfn_intr_allow + nvkm_inth_allow: enable each
-		 * vector by writing 0xb81200 + leaf*4 with mask of bits. Without
-		 * this, doorbell-derived interrupts never reach GSP. */
-		uint32_t leaf_mask[8] = {0};
-		for (uint32_t i = 0; i < r->tableLen && i < NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE; i++) {
-			if (i < 8u)
-				device_printf(sc->dev,
-				    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
-				    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
-				    r->table[i].vectorStall, r->table[i].vectorNonStall);
-			uint32_t v = r->table[i].vectorStall;
-			if (v < 256u) {
-				leaf_mask[v / 32] |= (1u << (v % 32));
-			}
-			v = r->table[i].vectorNonStall;
-			if (v < 256u) {
-				leaf_mask[v / 32] |= (1u << (v % 32));
-			}
+		for (uint32_t i = 0; i < r->tableLen && i < 8u; i++) {
+			device_printf(sc->dev,
+			    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
+			    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
+			    r->table[i].vectorStall, r->table[i].vectorNonStall);
 		}
-		for (int leaf = 0; leaf < 8; leaf++) {
-			if (leaf_mask[leaf] != 0) {
-				nvkm_wr32(sc, 0xb81200u + leaf * 4u, leaf_mask[leaf]);
-				device_printf(sc->dev,
-				    "gsp_rm: intr_allow leaf[%d] (0xb81200+0x%x) = 0x%08x\n",
-				    leaf, leaf * 4, leaf_mask[leaf]);
-			}
-		}
-		/* Rearm intr top: 0xb81608 = 0x0000000f */
-		nvkm_wr32(sc, 0xb81608u, 0x0000000fu);
-		device_printf(sc->dev, "gsp_rm: intr rearm 0xb81608 = 0xf\n");
+		/* Match Fedora 44 nouveau\'s EN_SET pattern exactly. Over-enabling
+		 * triggers spurious GSP intr we never service. */
+		nvkm_wr32(sc, 0xb81200u, 0x00031c80u);  /* leaf[0] */
+		nvkm_wr32(sc, 0xb81210u, 0x0c000000u);  /* leaf[4] */
+		device_printf(sc->dev,
+		    "gsp_rm: intr_allow Fedora-pattern leaf[0]=0x00031c80 leaf[4]=0x0c000000\n");
 	}
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
@@ -850,7 +832,9 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	/* VRAM: inst block + USERD (separate pages). */
 	chan->inst_vram  = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_INST_SIZE, 0x1000);
-	chan->userd_vram = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_USERD_SIZE, 0x1000);
+	/* USERD page: 4 KiB / 8 slots * 0x200. GSP indexes within using
+	CHANNEL_USERD_INDEX_VALUE=chid%8. Match nouveau B.2 walkthrough. */
+	chan->userd_vram = nvkm_gsp_vram_alloc(sc, 0x1000U, 0x1000);
 	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
 		device_printf(sc->dev,
 		    "gsp_rm: channel VRAM alloc failed\n");
@@ -1114,39 +1098,55 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 
+	/* Ask GSP for the work-submit token. RPC fails with INVALID_STATE
+	 * if channel isn\'t on runlist - definitive proof SCHEDULE worked. */
+	{
+		struct { uint32_t workSubmitToken; } *t;
+		t = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    /* NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN */ 0xc36f0108u,
+		    sizeof(*t));
+		if (t == NULL) {
+			device_printf(sc->dev,
+			    "gsp_rm: GET_WORK_SUBMIT_TOKEN ctrl_get failed\n");
+		} else {
+			t->workSubmitToken = 0xdeadbeef;
+			int werr = nvkm_gsp_rm_ctrl_rd(&chan->object, (void**)&t,
+			    sizeof(*t));
+			if (werr != 0) {
+				device_printf(sc->dev,
+				    "gsp_rm: GET_WORK_SUBMIT_TOKEN err=%d "
+				    "(channel not on runlist?)\n", werr);
+			} else {
+				chan->gsp_token = t->workSubmitToken;
+				device_printf(sc->dev,
+				    "gsp_rm: GSP workSubmitToken=0x%08x\n",
+				    chan->gsp_token);
+			}
+		}
+	}
+
 	device_printf(sc->dev,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 
-	/* Map USERD VRAM page into BAR1 so host can L2-coherently
-	 * write GP_PUT to wake PBDMA. */
-	/* Allocate a BAR2 GVA for USERD (BAR2 GVA 0 is reserved for flush). */
-	chan->userd_bar2_gva = sc->bar2.next_gva;
-	sc->bar2.next_gva += 0x1000;
+	/* Map USERD VRAM page at a BAR1 GVA so host writes go through
+	 * BAR1 walker -> L2-coherent VRAM (path nouveau uses). */
+	chan->userd_bar2_gva = sc->bar1.next_gva;
+	sc->bar1.next_gva += 0x1000;
 	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
 	    chan->userd_vram);
+	nvkm_gsp_bar1_flush(sc);
 
-	/* Diag: write 0xCAFEBABE via BAR1 at GVA 0x10 (USERD scratch), read back.
-	 * If PT chain in VRAM works, readback should equal CAFEBABE. */
+	/* Diag: write+readback marker at the actual USERD GVA we just mapped. */
 	{
-		/* BAR2 sanity: map one VRAM page into BAR2, write/read.
-		 * If BAR2 walker works, write CAFEBABE via BAR2 reads back CAFEBABE. */
-		uint64_t b2_test_vram = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-		if (b2_test_vram) {
-			(void)nvkm_gsp_bar2_map_vram(sc, 0x1000, b2_test_vram);
-			nvkm_gsp_bar2_wr32(sc, 0x1000 + 0x10, 0xDEADBEEFu);
-			uint32_t b2rb = nvkm_gsp_bar2_rd32(sc, 0x1000 + 0x10);
-			device_printf(sc->dev,
-			    "bar2_diag: wr DEADBEEF @ BAR2 GVA 0x1010, readback = 0x%08x\n", b2rb);
-		}
-
-		nvkm_gsp_bar1_wr32(sc, BAR1_GVA_USERD + 0x10, 0xCAFEBABEu);
-		uint32_t rb = nvkm_gsp_bar1_rd32(sc, BAR1_GVA_USERD + 0x10);
+		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0xCAFEBABEu);
+		nvkm_gsp_bar1_flush(sc);
+		uint32_t rb = nvkm_gsp_bar1_rd32(sc, chan->userd_bar2_gva + 0x10);
 		device_printf(sc->dev,
-		    "bar1_diag: wr CAFEBABE @ BAR1 GVA 0x10, readback = 0x%08x\n", rb);
-		/* Walker translated BAR1 GVA 0+0x10 to chan->userd_vram + 0x10.
-		 * Read VRAM directly via PRAMIN to see if write actually landed. */
-		nvkm_gsp_bar1_dump_pt(sc, chan->userd_vram, 0x10);
+		    "bar1_diag: USERD page via BAR1 GVA 0x%llx+0x10 readback = 0x%08x (expect cafebabe)\n",
+		    (unsigned long long)chan->userd_bar2_gva, rb);
+		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0); /* clean for USERD */
+		nvkm_gsp_bar1_flush(sc);
 	}
 
 	/* TURING_USERMODE_A is allocated once per device in vmm_ctor
@@ -1251,9 +1251,24 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    (unsigned long long)logrm_put_pre);
 
 	/* Doorbell at BAR0+USERMODE_DOORBELL = (runlist<<16) | chid.
-	 * runlist=0 for CE0, so token = chid. */
-	nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
+	 * Try multiple writes with different tokens as a diagnostic.
+	 * If any one triggers PBDMA, we'll see GP_GET advance. */
+	device_printf(sc->dev, "gsp_submit: doorbell spray begin\n");
+	for (int rep = 0; rep < 10; rep++) {
+		nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
+		DELAY(1000);
+	}
+	/* Also try token formats: alternative runlist encoding, raw chid, etc. */
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00000001u);
+	DELAY(1000);
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00010001u); /* runlist=1? */
+	DELAY(1000);
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00000000u); /* zero token */
+	DELAY(1000);
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0xffffffffu); /* all-ones */
+	DELAY(1000);
 	cpu_sfence();
+	device_printf(sc->dev, "gsp_submit: doorbell spray end\n");
 
 	device_printf(sc->dev,
 	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",

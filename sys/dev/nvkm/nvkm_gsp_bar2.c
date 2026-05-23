@@ -185,6 +185,24 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	    bar2_inst, (unsigned long long)bar2_inst_paddr,
 	    bar1_inst, (unsigned long long)bar1_inst_paddr);
 
+	/* Re-verify whether GSP populated BAR1 inst[0x200] PDB ptr.
+	 * Earlier conclusion was "GSP doesn\'t init BAR1" -- recheck. */
+	if (bar1_inst_paddr != 0) {
+		lwkt_gettoken(&sc->gsp_tok);
+		saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		b2_pramin_set_base(sc, bar1_inst_paddr & ~(uint64_t)0xffffu);
+		uint32_t b1_lo = nvkm_rd32(sc, NV_PRAMIN +
+		    (uint32_t)((bar1_inst_paddr + 0x200) & 0xffffu));
+		uint32_t b1_hi = nvkm_rd32(sc, NV_PRAMIN +
+		    (uint32_t)((bar1_inst_paddr + 0x204) & 0xffffu));
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+		device_printf(sc->dev,
+		    "bar2: BAR1_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x %s\n",
+		    b1_hi, b1_lo,
+		    (b1_lo == 0 && b1_hi == 0) ? "*** UNINITIALIZED ***" : "(populated)");
+	}
+
 	/* Read PDB pointer from BAR2 inst block (offset 0x200) via PRAMIN. */
 	if (bar2_inst_paddr != 0) {
 		lwkt_gettoken(&sc->gsp_tok);
