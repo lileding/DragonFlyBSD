@@ -1484,7 +1484,22 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
 	    (uint32_t)chan->chid);
 
-	/* Give GSP its own RISC-V time to react before we start polling.
+	/* Sample LOGRM put every 100ms x10 to characterize GSP activity. */
+	{
+		uint64_t lr_t0 = (sc->gsp_logrm.kva != NULL)
+		    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
+		device_printf(sc->dev, "gsp_submit: LOGRM tick t=0 put=0x%llx\n",
+		    (unsigned long long)lr_t0);
+		for (int t = 1; t <= 10; t++) {
+			DELAY(100000);
+			uint64_t lr = (sc->gsp_logrm.kva != NULL)
+			    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
+			device_printf(sc->dev, "gsp_submit: LOGRM tick t=%dms put=0x%llx delta=%lld\n",
+			    t*100, (unsigned long long)lr, (long long)(lr - lr_t0));
+		}
+	}
+
+		/* Give GSP its own RISC-V time to react before we start polling.
 	 * Any PBDMA fault / RC trigger from this submit lands in logrm
 	 * within milliseconds. We snapshot here so we know whether
 	 * doorbell ever produced any observable side-effect. */
@@ -1621,6 +1636,24 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	device_printf(sc->dev,
 	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x, last GP_GET=0x%08x\n",
 	    SUBMIT_POLL_MS, nvkm_gsp_bar1_rd32(sc, sema_bar1 + 0), last_get);
+
+	/* Dump LOGRM + LOGINIT bytes to see GSP-side activity. */
+	for (int which = 0; which < 2; which++) {
+		void *kva = which ? (void *)sc->gsp_loginit.kva : (void *)sc->gsp_logrm.kva;
+		const char *name = which ? "LOGINIT" : "LOGRM";
+		if (kva == NULL) continue;
+		uint8_t *lr = (uint8_t *)kva;
+		uint64_t lr_put = *(volatile uint64_t *)lr;
+		device_printf(sc->dev, "GSP %s put=0x%llx dump 0..0x180:\n",
+		    name, (unsigned long long)lr_put);
+		for (uint32_t o = 0; o < 0x180; o += 16) {
+			device_printf(sc->dev,
+			    "  %s[0x%03x]: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    name, o,
+			    lr[o+0], lr[o+1], lr[o+2], lr[o+3], lr[o+4], lr[o+5], lr[o+6], lr[o+7],
+			    lr[o+8], lr[o+9], lr[o+10], lr[o+11], lr[o+12], lr[o+13], lr[o+14], lr[o+15]);
+		}
+	}
 	return (0);
 }
 
