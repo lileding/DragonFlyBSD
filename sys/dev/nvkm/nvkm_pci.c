@@ -343,6 +343,18 @@ nvkm_pci_attach(device_t dev)
 			if (sc->gsp_running)
 				(void)nvkm_gsp_intr_get_kernel_table(sc);
 
+			/* Per nouveau tu102_fifo_init_pbdmas: BAR0+0xb65000 bit 31
+			 * "enables doorbell to function". Non-GSP nouveau sets this
+			 * explicitly; GSP-RM mode assumes firmware does it -- but our
+			 * r570 firmware apparently doesn\'t (doorbells silently dropped). */
+			if (sc->gsp_running) {
+				uint32_t v = nvkm_rd32(sc, 0xb65000);
+				nvkm_wr32(sc, 0xb65000, v | 0x80000000u);
+				device_printf(sc->dev,
+				    "gsp_rm: doorbell enable 0xb65000 was 0x%08x, set to 0x%08x\n",
+				    v, v | 0x80000000u);
+			}
+
 			/* Phase 5 smoke test: allocate the RM client root via RPC.
 			 * If this works the rest of the resource tree (device,
 			 * vaspace, channel, ...) can be built on top. */
