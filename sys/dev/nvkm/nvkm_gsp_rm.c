@@ -879,8 +879,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		/* All PT pages + data BOs in VRAM, host-accessed via BAR1.
 		 * Matches nouveau (everything in VRAM, L2-coherent both
 		 * sides). PDE/PTE aperture = VIDMEM. */
+		struct nvkm_bar1_page submit_lpt = {0};
 		if ((err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_pd0)) ||
 		    (err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_spt)) ||
+		    (err = nvkm_gsp_bar1_alloc_page(sc, &submit_lpt)) ||
 		    (err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_push)) ||
 		    (err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_gpf)) ||
 		    (err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_sema))) {
@@ -904,11 +906,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr64(sc,
 		    vmm->pt[2].page.bar1_gva + pd1_idx * 8,
 		    nvkm_pde_to_vram(chan->submit_pd0.vram_paddr));
-		/* PD0 dual entry: BIG (bytes 0..7) for 64 KiB pages = 0 (we have
-		 * none); SMALL (bytes 8..15) for 4 KiB pages = our SPT.  Per
-		 * gp100_vmm_pd0_pde() in nouveau. */
+		/* PD0 dual entry: BIG = empty LPT (all-zero so 64 KiB walks invalid,
+		 * walker falls back to SMALL); SMALL = SPT (our 4 KiB pages). */
 		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8, 0);
+		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8,
+		    nvkm_pde_to_vram(submit_lpt.vram_paddr));
 		nvkm_gsp_bar1_wr64(sc,
 		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8,
 		    nvkm_pde_to_vram(chan->submit_spt.vram_paddr));
@@ -1025,7 +1027,21 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			uint32_t sc0_lo = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0);
 			uint32_t sc0_hi = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4);
 			uint64_t sc0_pdb = ((uint64_t)sc0_hi << 32) | (sc0_lo & ~0xfffu);
-			device_printf(sc->dev,
+			/* Scan whole 4 KiB inst block for any non-zero dword. */
+			{
+				uint32_t nz_count = 0;
+				for (uint32_t off = 0; off < 0x1000; off += 4) {
+					uint32_t v = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + off);
+					if (v != 0) {
+						device_printf(sc->dev,
+						    "gsp_rm: inst[0x%03x] = 0x%08x\n", off, v);
+						nz_count++;
+						if (nz_count > 20) break;
+					}
+				}
+				device_printf(sc->dev, "gsp_rm: total non-zero inst dwords: %u\n", nz_count);
+			}
+						device_printf(sc->dev,
 			    "gsp_rm: SC0 PDB target=%u vol=%u pdb_paddr=0x%llx (our PD3=0x%llx)\n",
 			    sc0_lo & 3u, (sc0_lo >> 2) & 1u,
 			    (unsigned long long)sc0_pdb,
@@ -1440,7 +1456,21 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	DELAY(100000);
 	uint64_t logrm_put_post = (sc->gsp_logrm.kva != NULL)
 	    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-	device_printf(sc->dev,
+	/* PRAMIN-read USERD slot to verify GP_PUT actually landed in
+	 * chan->userd_vram (independent of BAR1 path). */
+	{
+		uint64_t userd_slot_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200;
+		uint64_t pramin_gp_put = 0, pramin_gp_get = 0;
+		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x88, &pramin_gp_get);
+		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x8c, &pramin_gp_put);
+		device_printf(sc->dev,
+		    "gsp_submit: PRAMIN USERD@0x%llx (chid %d slot): GP_GET=0x%08x GP_PUT=0x%08x\n",
+		    (unsigned long long)userd_slot_paddr, chan->chid,
+		    (uint32_t)(pramin_gp_get & 0xffffffffu),
+		    (uint32_t)(pramin_gp_put & 0xffffffffu));
+	}
+
+		device_printf(sc->dev,
 	    "gsp_submit: post-doorbell 100ms snapshot: GP_GET=0x%08x "
 	    "GP_PUT=0x%08x sema=0x%08x LOGRM put=0x%llx (delta=%lld)\n",
 	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET),
