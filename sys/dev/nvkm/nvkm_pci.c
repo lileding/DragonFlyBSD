@@ -100,6 +100,39 @@ nvkm_gsp_isr(void *arg)
 }
 
 static int
+nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvkm_softc *sc = priv;
+	struct {
+		uint32_t nv2080EngineType;
+		uint32_t chid;
+		uint32_t gfid;
+		uint32_t exceptLevel;
+		uint32_t exceptType;
+		uint32_t scope;
+		uint16_t partitionAttributionId;
+		uint8_t  _pad[2];
+		uint32_t mmuFaultAddrLo;
+		uint32_t mmuFaultAddrHi;
+		uint32_t mmuFaultType;
+		uint8_t  bCallbackNeeded;
+		uint8_t  _pad2[3];
+		uint32_t rcJournalBufferSize;
+	} *rc = repv;
+	if (repc < sizeof(*rc)) {
+		device_printf(sc->dev, "RC_TRIGGERED: short msg len=%u\n", repc);
+		return (0);
+	}
+	uint64_t mmu_addr = ((uint64_t)rc->mmuFaultAddrHi << 32) | rc->mmuFaultAddrLo;
+	device_printf(sc->dev,
+	    "RC_TRIGGERED: engineType=%u chid=%u exceptLevel=%u exceptType=0x%x scope=%u "
+	    "mmuFaultAddr=0x%llx mmuFaultType=0x%x rcJournalSz=%u\n",
+	    rc->nv2080EngineType, rc->chid, rc->exceptLevel, rc->exceptType, rc->scope,
+	    (unsigned long long)mmu_addr, rc->mmuFaultType, rc->rcJournalBufferSize);
+	return (0);
+}
+
+static int
 nvkm_gsp_evt_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 	struct nvkm_softc *sc = priv;
@@ -312,7 +345,7 @@ nvkm_pci_attach(device_t dev)
 			nvkm_gsp_msg_ntfy_add(sc, 0x1003 /*POST_EVENT*/,
 			    nvkm_gsp_evt_log_only, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1004 /*RC_TRIGGERED*/,
-			    nvkm_gsp_evt_log_only, sc);
+			    nvkm_gsp_evt_rc_triggered, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1005 /*MMU_FAULT_QUEUED*/,
 			    nvkm_gsp_evt_log_only, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1006 /*OS_ERROR_LOG*/,
