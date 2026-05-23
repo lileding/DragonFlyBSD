@@ -904,11 +904,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr64(sc,
 		    vmm->pt[2].page.bar1_gva + pd1_idx * 8,
 		    nvkm_pde_to_vram(chan->submit_pd0.vram_paddr));
+		/* PD0 dual entry: BIG (bytes 0..7) for 64 KiB pages = 0 (we have
+		 * none); SMALL (bytes 8..15) for 4 KiB pages = our SPT.  Per
+		 * gp100_vmm_pd0_pde() in nouveau. */
 		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8,
+		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8, 0);
+		nvkm_gsp_bar1_wr64(sc,
+		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8,
 		    nvkm_pde_to_vram(chan->submit_spt.vram_paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8, 0);
 		nvkm_gsp_bar1_wr64(sc,
 		    chan->submit_spt.bar1_gva + (spt_idx + 0) * 8,
 		    nvkm_pte_to_vram(chan->submit_push.vram_paddr));
