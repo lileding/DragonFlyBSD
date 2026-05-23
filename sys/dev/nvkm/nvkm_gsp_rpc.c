@@ -261,8 +261,14 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 			    slot[i+8], slot[i+9], slot[i+10], slot[i+11],
 			    slot[i+12], slot[i+13], slot[i+14], slot[i+15]);
 		}
-		/* Skip this msg: advance rptr but don't dispatch. */
-		sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + 1) % 64;
+		/* Skip this msg: advance rptr AND publish to shared memory. */
+		sc->gsp_msgq_rptr++;
+		if (sc->gsp_msgq_rptr >= NVKM_GSP_MSGCOUNT)
+			sc->gsp_msgq_rptr = 0;
+		{
+			uint8_t *cmdq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_cmdq_off;
+			*(volatile uint32_t *)(cmdq + 32) = sc->gsp_msgq_rptr;
+		}
 		return (NULL);
 	}
 
@@ -274,10 +280,14 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	buf = kmalloc(alloc_sz, M_TEMP, M_WAITOK | M_ZERO);
 	memcpy(buf, rpc, (len > alloc_sz) ? alloc_sz : len);
 
-	/* Advance host rptr in softc + publish to cmdq.rx (crossover). */
-	sc->gsp_msgq_rptr++;
-	if (sc->gsp_msgq_rptr >= NVKM_GSP_MSGCOUNT)
-		sc->gsp_msgq_rptr = 0;
+	/* Advance host rptr by message elemCount (multi-slot messages are
+	 * supported - large RPC replies / events span multiple 4 KiB slots).
+	 * elemCount is at offset 40 in GSP_MSG_QUEUE_ELEMENT (after authTag+
+	 * AAD+checkSum+seqNum). */
+	uint32_t elem_count = *(volatile uint32_t *)(slot + 40);
+	if (elem_count == 0 || elem_count > 16)
+		elem_count = 1;
+	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + elem_count) % NVKM_GSP_MSGCOUNT;
 	{
 		uint8_t *cmdq = (uint8_t *)sc->gsp_shm.kva +
 		    sc->gsp_shm_cmdq_off;
