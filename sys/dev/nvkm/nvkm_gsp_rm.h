@@ -182,6 +182,7 @@ struct nvkm_gsp_chan {
 	struct nvkm_gsp_object	object;
 	uint64_t		inst_vram;	/* VRAM physical base */
 	uint64_t		userd_vram;	/* VRAM physical base */
+	uint64_t		userd_bar2_gva;	/* BAR2 GVA for host access */
 	void			*mthdbuf_kva;	/* sysmem kva (contigmalloc) */
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */

@@ -1093,7 +1093,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	/* Map USERD VRAM page into BAR1 so host can L2-coherently
 	 * write GP_PUT to wake PBDMA. */
-	(void)nvkm_gsp_bar1_map_vram(sc, BAR1_GVA_USERD,
+	/* Allocate a BAR2 GVA for USERD (BAR2 GVA 0 is reserved for flush). */
+	chan->userd_bar2_gva = sc->bar2.next_gva;
+	sc->bar2.next_gva += 0x1000;
+	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
 	    chan->userd_vram);
 
 	/* Diag: write 0xCAFEBABE via BAR1 at GVA 0x10 (USERD scratch), read back.
@@ -1203,7 +1206,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	 * BAR1 maps chan->userd_vram -> BAR1_GVA_USERD (4 KiB page),
 	 * so the chid slot is at BAR1_GVA_USERD + chid * USERD_SLOT_SIZE.
 	 * Mirrors gf100_chan_userd_clear (fifo/gf100.c:118-132). */
-	uint64_t slot_bar1 = BAR1_GVA_USERD
+	uint64_t slot_bar1 = chan->userd_bar2_gva
 	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
 	static const uint32_t userd_clear_offs[] = {
 		0x40, 0x44, 0x48, 0x4c, 0x50, 0x58, 0x5c, 0x60, 0x88
