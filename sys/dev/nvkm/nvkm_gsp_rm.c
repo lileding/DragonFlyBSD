@@ -1681,6 +1681,52 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		}
 	}
 
+	/* Probe channel scheduling state by issuing STOP_CHANNEL.
+	 * If channel was scheduled and running, STOP preempts it (visible).
+	 * If never scheduled, STOP returns NV_ERR_INVALID_STATE. */
+	{
+		struct { uint8_t bImmediate; } *sp;
+		sp = nvkm_gsp_rm_ctrl_get(&chan->object,
+		    /* NVA06F_CTRL_CMD_STOP_CHANNEL */ 0xa06f0112u,
+		    sizeof(*sp));
+		if (sp != NULL) {
+			sp->bImmediate = 1;
+			int sperr = nvkm_gsp_rm_ctrl_wr(&chan->object, sp);
+			device_printf(sc->dev, "STOP_CHANNEL bImmediate=1 err=%d\n", sperr);
+		} else {
+			device_printf(sc->dev, "STOP_CHANNEL ctrl_get failed\n");
+		}
+	}
+
+	/* After STOP, re-SCHEDULE the channel + bump GP_PUT to 2 + doorbell again. */
+	{
+		struct {
+			uint8_t bEnable;
+			uint8_t bSkipSubmit;
+		} *sched;
+		sched = nvkm_gsp_rm_ctrl_get(&chan->object, 0xa06f0103u, sizeof(*sched));
+		if (sched) {
+			sched->bEnable = 1;
+			sched->bSkipSubmit = 0;
+			int serr = nvkm_gsp_rm_ctrl_wr(&chan->object, sched);
+			device_printf(sc->dev, "RE-SCHEDULE err=%d\n", serr);
+			if (serr == 0) {
+				/* Bump GP_PUT to 2 and write doorbell again */
+				nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, 2);
+				nvkm_gsp_bar1_flush(sc);
+				uint64_t lr0 = (sc->gsp_logrm.kva) ? *(volatile uint64_t*)sc->gsp_logrm.kva : 0;
+				nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
+				DELAY(200000);
+				uint64_t lr1 = (sc->gsp_logrm.kva) ? *(volatile uint64_t*)sc->gsp_logrm.kva : 0;
+				uint32_t gp_get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
+				uint32_t sema_val = nvkm_gsp_bar1_rd32(sc, sema_bar1 + 0);
+				device_printf(sc->dev,
+				    "RE-DOORBELL after STOP+SCHED+GP_PUT=2: GP_GET=0x%08x sema=0x%08x LOGRM delta=%lld\n",
+				    gp_get, sema_val, (long long)(lr1 - lr0));
+			}
+		}
+	}
+
 	/* Dump LOGRM + LOGINIT bytes to see GSP-side activity. */
 	for (int which = 0; which < 2; which++) {
 		void *kva = which ? (void *)sc->gsp_loginit.kva : (void *)sc->gsp_logrm.kva;
