@@ -249,8 +249,21 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 
 	if (sig != NVKM_GSP_SIGNATURE) {
 		device_printf(sc->dev,
-		    "msgq[%u]: bad signature 0x%08x (slot=%p)\n",
+		    "msgq[%u]: bad signature 0x%08x (slot=%p) - skipping\n",
 		    sc->gsp_msgq_rptr, sig, slot);
+		/* Dump first 96 bytes of slot to identify format. */
+		for (int i = 0; i < 96; i += 16) {
+			device_printf(sc->dev,
+			    "  slot[+%02d]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    i,
+			    slot[i+0], slot[i+1], slot[i+2], slot[i+3],
+			    slot[i+4], slot[i+5], slot[i+6], slot[i+7],
+			    slot[i+8], slot[i+9], slot[i+10], slot[i+11],
+			    slot[i+12], slot[i+13], slot[i+14], slot[i+15]);
+		}
+		/* Skip this msg: advance rptr but don't dispatch. */
+		sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + 1) % 64;
+		return (NULL);
 	}
 
 	/* Allocate buffer sized max(rpc->length, want_len) so caller can
