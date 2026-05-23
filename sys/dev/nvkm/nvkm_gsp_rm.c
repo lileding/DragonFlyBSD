@@ -316,12 +316,36 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE tableLen=%u\n",
 		    r->tableLen);
-		for (uint32_t i = 0; i < r->tableLen && i < 8u; i++) {
-			device_printf(sc->dev,
-			    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
-			    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
-			    r->table[i].vectorStall, r->table[i].vectorNonStall);
+		/* Per nouveau tu102_vfn_intr_allow + nvkm_inth_allow: enable each
+		 * vector by writing 0xb81200 + leaf*4 with mask of bits. Without
+		 * this, doorbell-derived interrupts never reach GSP. */
+		uint32_t leaf_mask[8] = {0};
+		for (uint32_t i = 0; i < r->tableLen && i < NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE; i++) {
+			if (i < 8u)
+				device_printf(sc->dev,
+				    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
+				    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
+				    r->table[i].vectorStall, r->table[i].vectorNonStall);
+			uint32_t v = r->table[i].vectorStall;
+			if (v < 256u) {
+				leaf_mask[v / 32] |= (1u << (v % 32));
+			}
+			v = r->table[i].vectorNonStall;
+			if (v < 256u) {
+				leaf_mask[v / 32] |= (1u << (v % 32));
+			}
 		}
+		for (int leaf = 0; leaf < 8; leaf++) {
+			if (leaf_mask[leaf] != 0) {
+				nvkm_wr32(sc, 0xb81200u + leaf * 4u, leaf_mask[leaf]);
+				device_printf(sc->dev,
+				    "gsp_rm: intr_allow leaf[%d] (0xb81200+0x%x) = 0x%08x\n",
+				    leaf, leaf * 4, leaf_mask[leaf]);
+			}
+		}
+		/* Rearm intr top: 0xb81608 = 0x0000000f */
+		nvkm_wr32(sc, 0xb81608u, 0x0000000fu);
+		device_printf(sc->dev, "gsp_rm: intr rearm 0xb81608 = 0xf\n");
 	}
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
@@ -910,7 +934,17 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->submit_sema.bar1_gva);
 	}
 
-	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_CHANNEL,
+	/* Allocate chid FIRST -- nouveau encodes it in the channel handle:
+	 * NVKM_RM_CHAN(chid) = 0xf1f00000 | chid. GSP uses handle\'s chid to
+	 * route doorbells; mismatched handle silently drops doorbell signals. */
+	chan->chid = nvkm_chid_alloc(sc);
+	if (chan->chid < 0) {
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size, M_NVKM_MTHDBUF);
+		chan->mthdbuf_kva = NULL;
+		return (ENOMEM);
+	}
+	args = nvkm_gsp_rm_alloc_get(&device->object,
+	    NVKM_RM_CHANNEL | (uint32_t)chan->chid,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
 	if (args == NULL) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
@@ -925,13 +959,6 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	/* chid allocated from host pool (rsvd_chids=1 ->
 	 * nvkm_chid_alloc starts at 1). Encode into
 	 * USERD_INDEX_VALUE/PAGE_VALUE per r570/fifo.c:r570_chan_alloc. */
-	chan->chid = nvkm_chid_alloc(sc);
-	if (chan->chid < 0) {
-		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
-		    M_NVKM_MTHDBUF);
-		chan->mthdbuf_kva = NULL;
-		return (ENOMEM);
-	}
 	{
 		uint32_t userd_p = (uint32_t)chan->chid / 8u;
 		uint32_t userd_i = (uint32_t)chan->chid % 8u;
