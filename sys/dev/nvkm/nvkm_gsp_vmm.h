@@ -19,8 +19,7 @@
  * for PD3 / PD2 / PD1; the 512 MiB RM-managed range falls inside
  * PD1 entry 8 (VA 0x100000000 / 512MiB = 8). */
 struct nvkm_gsp_vmm_pt {
-	void		*kva;	/* sysmem KVA (contigmalloc) */
-	vm_paddr_t	 paddr;	/* physical address */
+	struct nvkm_bar1_page	page;  /* VRAM page mapped into BAR1 */
 };
 
 struct nvkm_gsp_vmm {
