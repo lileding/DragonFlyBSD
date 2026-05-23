@@ -201,20 +201,35 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 		    inst_hi, inst_lo);
 	}
 
-	/* Immediate self-test: map test VRAM page into BAR2, write+read.
-	 * This runs RIGHT after PDB[0] update -- before anything else has
-	 * touched BAR2, so walker TLB has no stale entries. */
+	b2->ready = true;  /* enable map_vram + flush */
+
+	/* Nouveau-style flush setup: map a guaranteed-valid VRAM page at
+	 * BAR2_GVA_FLUSH (=0); flush() reads from that GVA to force walker
+	 * re-walk after PT updates (port of r535_bar_bar2_init lines 100-114
+	 * + r535_bar_flush). */
+	{
+		uint64_t flush_vram = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		if (flush_vram != 0) {
+			b2->flush_vram_paddr = flush_vram;
+			(void)nvkm_gsp_bar2_map_vram(sc, BAR2_GVA_FLUSH, flush_vram);
+			/* First flush: forces walker to walk our chain end-to-end. */
+			nvkm_gsp_bar2_flush(sc);
+		}
+	}
+
+	/* Immediate self-test (post-flush): map test VRAM page, write+read. */
 	{
 		uint64_t tv = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
 		if (tv != 0) {
-			b2->ready = true;  /* enable map_vram early */
-			(void)nvkm_gsp_bar2_map_vram(sc, 0x1000, tv);
-			nvkm_gsp_bar2_wr32(sc, 0x1000 + 0x10, 0xC0FFEE12u);
-			uint32_t rb = nvkm_gsp_bar2_rd32(sc, 0x1000 + 0x10);
+			(void)nvkm_gsp_bar2_map_vram(sc, 0x2000, tv);
+			nvkm_gsp_bar2_flush(sc);
+			nvkm_gsp_bar2_wr32(sc, 0x2000 + 0x10, 0xC0FFEE12u);
+			nvkm_gsp_bar2_flush(sc);
+			uint32_t rb = nvkm_gsp_bar2_rd32(sc, 0x2000 + 0x10);
 			device_printf(sc->dev,
-			    "bar2_diag: immediate test wr C0FFEE12, readback = 0x%08x (target VRAM 0x%llx)\n",
+			    "bar2_diag: post-flush test wr C0FFEE12, readback = 0x%08x (target VRAM 0x%llx)\n",
 			    rb, (unsigned long long)tv);
-			b2->next_gva = 0x2000;  /* skip the test page */
+			b2->next_gva = 0x3000;
 		}
 	}
 
@@ -283,4 +298,34 @@ uint32_t
 nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva)
 {
 	return bus_read_4(sc->bar_res[3], (bus_size_t)bar2_gva);
+}
+
+
+/* Nouveau r535_bar_flush equivalent: read from BAR2 GVA 0 via PCIe BAR3.
+ * Walker translates the GVA through our PDB->PD2->PD1->PD0->SPT chain
+ * and returns data from the flush_vram page. The read itself serves as
+ * the "flush" -- it forces walker to walk the chain and refresh TLB. */
+void
+nvkm_gsp_bar2_flush(struct nvkm_softc *sc)
+{
+	if (!sc->bar2.ready)
+		return;
+	(void)bus_read_4(sc->bar_res[3], (bus_size_t)BAR2_GVA_FLUSH);
+}
+
+void
+nvkm_gsp_bar2_wr64(struct nvkm_softc *sc, uint64_t bar2_gva, uint64_t val)
+{
+	bus_write_4(sc->bar_res[3], (bus_size_t)(bar2_gva + 0),
+	    (uint32_t)(val & 0xffffffffu));
+	bus_write_4(sc->bar_res[3], (bus_size_t)(bar2_gva + 4),
+	    (uint32_t)(val >> 32));
+}
+
+uint64_t
+nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva)
+{
+	uint32_t lo = bus_read_4(sc->bar_res[3], (bus_size_t)(bar2_gva + 0));
+	uint32_t hi = bus_read_4(sc->bar_res[3], (bus_size_t)(bar2_gva + 4));
+	return ((uint64_t)hi << 32) | lo;
 }
