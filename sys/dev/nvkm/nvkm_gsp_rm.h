@@ -107,6 +107,7 @@ void	 nvkm_gsp_rm_ctrl_done(struct nvkm_gsp_object *obj, void *params);
 /* Query NV2080_CTRL_CMD_CE_GET_FAULT_METHOD_BUFFER_SIZE on GSP's
  * internal subdevice; stores into sc->mthdbuf_size. */
 int	 nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc);
+int	 nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc);
 
 /* Host-side chid pool. Mirrors nouveau chid.c:nvkm_chid_new with
  * nr=2048, first=1, count=2047 -- chid 0 is reserved. */
@@ -191,16 +192,12 @@ struct nvkm_gsp_chan {
 	/* GPU-submit BOs: pre-allocated before channel alloc so we
 	 * can pass a real gpFifoOffset to GSP. PD0/SPT hold the host
 	 * PT under PD1[8] (covers GVA 0x100000000..). */
-	void			*submit_pd0_kva;
-	uint64_t		submit_pd0_paddr;
-	void			*submit_spt_kva;
-	uint64_t		submit_spt_paddr;
-	void			*submit_push_kva;
-	uint64_t		submit_push_paddr;
-	void			*submit_gpf_kva;
-	uint64_t		submit_gpf_paddr;
-	void			*submit_sema_kva;
-	uint64_t		submit_sema_paddr;
+	/* PT + data BOs all in VRAM, accessed via BAR1 (nvkm_bar1_page). */
+	struct nvkm_bar1_page	submit_pd0;
+	struct nvkm_bar1_page	submit_spt;
+	struct nvkm_bar1_page	submit_push;
+	struct nvkm_bar1_page	submit_gpf;
+	struct nvkm_bar1_page	submit_sema;
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,

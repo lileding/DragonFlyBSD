@@ -340,6 +340,8 @@ nvkm_pci_attach(device_t dev)
 				(void)nvkm_gsp_get_static_info(sc);
 			if (sc->gsp_running)
 				(void)nvkm_gsp_query_mthdbuf_size(sc);
+			if (sc->gsp_running)
+				(void)nvkm_gsp_intr_get_kernel_table(sc);
 
 			/* Phase 5 smoke test: allocate the RM client root via RPC.
 			 * If this works the rest of the resource tree (device,

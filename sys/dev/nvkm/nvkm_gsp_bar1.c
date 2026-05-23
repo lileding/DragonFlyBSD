@@ -192,6 +192,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    (unsigned long long)b1->spt.paddr,
 	    (unsigned long long)rman_get_start(sc->bar_res[1]),
 	    (unsigned long long)rman_get_size(sc->bar_res[1]) >> 20);
+	b1->next_gva = BAR1_GVA_ALLOC_BASE;
 	b1->ready = true;
 	return (0);
 }
@@ -252,4 +253,66 @@ uint32_t
 nvkm_gsp_bar1_rd32(struct nvkm_softc *sc, uint64_t bar1_gva)
 {
 	return bus_read_4(sc->bar_res[1], (bus_size_t)bar1_gva);
+}
+
+
+void
+nvkm_gsp_bar1_wr64(struct nvkm_softc *sc, uint64_t bar1_gva, uint64_t val)
+{
+	bus_write_4(sc->bar_res[1], (bus_size_t)(bar1_gva + 0),
+	    (uint32_t)(val & 0xffffffffu));
+	bus_write_4(sc->bar_res[1], (bus_size_t)(bar1_gva + 4),
+	    (uint32_t)(val >> 32));
+}
+
+uint64_t
+nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t bar1_gva)
+{
+	uint32_t lo = bus_read_4(sc->bar_res[1], (bus_size_t)(bar1_gva + 0));
+	uint32_t hi = bus_read_4(sc->bar_res[1], (bus_size_t)(bar1_gva + 4));
+	return ((uint64_t)hi << 32) | lo;
+}
+
+int
+nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
+{
+	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
+	uint64_t paddr;
+	int err;
+
+	if (!b1->ready)
+		return (ENXIO);
+	if ((b1->next_gva >> NVKM_GMMU_SPT_SHIFT) >= NVKM_GMMU_SPT_ENTRIES)
+		return (ENOSPC);
+
+	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (paddr == 0)
+		return (ENOMEM);
+
+	page->vram_paddr = paddr;
+	page->bar1_gva   = b1->next_gva;
+	b1->next_gva += NVKM_GMMU_PT_PAGE_SIZE;
+
+	err = nvkm_gsp_bar1_map_vram(sc, page->bar1_gva, page->vram_paddr);
+	if (err != 0) {
+		page->vram_paddr = 0;
+		page->bar1_gva   = 0;
+		return (err);
+	}
+
+	/* Zero the page through BAR1 so callers get a clean slate. */
+	for (uint32_t off = 0; off < NVKM_GMMU_PT_PAGE_SIZE; off += 4)
+		bus_write_4(sc->bar_res[1],
+		    (bus_size_t)(page->bar1_gva + off), 0);
+	return (0);
+}
+
+void
+nvkm_gsp_bar1_free_page(struct nvkm_softc *sc __unused,
+    struct nvkm_bar1_page *page)
+{
+	/* VRAM bump allocator has no free; just clear the bookkeeping. */
+	page->vram_paddr = 0;
+	page->bar1_gva   = 0;
 }
