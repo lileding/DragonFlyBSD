@@ -187,6 +187,7 @@ struct nvkm_gsp_chan {
 	uint64_t		mthdbuf_paddr;	/* sysmem physical base */
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
 	int			chid;		/* allocated chid (>=1) */
+	uint32_t		gsp_token;	/* GSP-issued doorbell token */
 	struct nvkm_gsp_object	ce_obj;	/* TURING_DMA_COPY_A engine obj */
 	struct nvkm_gsp_object	usermode_obj;	/* TURING_USERMODE_A */
 
