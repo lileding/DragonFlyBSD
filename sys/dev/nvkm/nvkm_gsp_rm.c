@@ -1637,6 +1637,50 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x, last GP_GET=0x%08x\n",
 	    SUBMIT_POLL_MS, nvkm_gsp_bar1_rd32(sc, sema_bar1 + 0), last_get);
 
+	/* Query GSP for channel state via NV20_SUBDEVICE_DIAG class. */
+	{
+		struct nvkm_gsp_object diag = {0};
+		void *sargs;
+		sargs = nvkm_gsp_rm_alloc_get(&sc->gsp_vmm->device.subdevice, 0xd1a00000u,
+		    0x0000208fu /* NV20_SUBDEVICE_DIAG */, 0, &diag);
+		if (false) {
+			device_printf(sc->dev, "DIAG: alloc_get failed\n");
+		} else {
+			int derr = nvkm_gsp_rm_alloc_wr(&diag, sargs);
+			device_printf(sc->dev, "DIAG: alloc err=%d handle=0x%x\n", derr, diag.handle);
+			if (derr == 0) {
+				/* NV208F_CTRL_CMD_FIFO_GET_CHANNEL_STATE = 0x208f0403 */
+				struct {
+					uint32_t hChannel;
+					uint32_t hClient;
+					uint8_t  bBound;
+					uint8_t  bEnabled;
+					uint8_t  bScheduled;
+					uint8_t  bCpuMap;
+					uint8_t  bContention;
+					uint8_t  bRunlistSet;
+					uint8_t  bDeferRC;
+				} *cs;
+				cs = nvkm_gsp_rm_ctrl_get(&diag, 0x208f0403u, sizeof(*cs));
+				if (cs != NULL) {
+					cs->hChannel = chan->object.handle;
+					cs->hClient = sc->gsp_vmm->client.object.handle;
+					int cerr = nvkm_gsp_rm_ctrl_rd(&diag, (void**)&cs, sizeof(*cs));
+					if (cerr == 0) {
+						device_printf(sc->dev,
+						    "DIAG CHANNEL_STATE chid=%d: bBound=%d bEnabled=%d bScheduled=%d "
+						    "bCpuMap=%d bContention=%d bRunlistSet=%d bDeferRC=%d\n",
+						    chan->chid, cs->bBound, cs->bEnabled, cs->bScheduled,
+						    cs->bCpuMap, cs->bContention, cs->bRunlistSet, cs->bDeferRC);
+					} else {
+						device_printf(sc->dev, "DIAG GET_CHANNEL_STATE err=%d\n", cerr);
+					}
+				}
+				nvkm_gsp_rm_free(&diag);
+			}
+		}
+	}
+
 	/* Dump LOGRM + LOGINIT bytes to see GSP-side activity. */
 	for (int which = 0; which < 2; which++) {
 		void *kva = which ? (void *)sc->gsp_loginit.kva : (void *)sc->gsp_logrm.kva;
