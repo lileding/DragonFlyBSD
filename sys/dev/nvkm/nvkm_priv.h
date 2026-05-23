@@ -573,6 +573,7 @@ void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
 	    uint32_t val);
 uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
 void	nvkm_gsp_bar2_flush(struct nvkm_softc *sc);
+int	nvkm_gsp_pramin_rd64(struct nvkm_softc *sc, uint64_t paddr, uint64_t *out);
 void	nvkm_gsp_bar2_wr64(struct nvkm_softc *sc, uint64_t bar2_gva, uint64_t val);
 uint64_t nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva);
 

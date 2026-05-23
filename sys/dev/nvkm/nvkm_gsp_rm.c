@@ -835,6 +835,24 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	/* USERD page: 4 KiB / 8 slots * 0x200. GSP indexes within using
 	CHANNEL_USERD_INDEX_VALUE=chid%8. Match nouveau B.2 walkthrough. */
 	chan->userd_vram = nvkm_gsp_vram_alloc(sc, 0x1000U, 0x1000);
+	device_printf(sc->dev,
+	    "gsp_rm: chan->inst_vram=0x%llx chan->userd_vram=0x%llx (alloc\'d)\n",
+	    (unsigned long long)chan->inst_vram,
+	    (unsigned long long)chan->userd_vram);
+
+	/* Zero inst block via PRAMIN so we know any later non-zero bytes
+	 * are written by GSP, not stale data from prior allocator state. */
+	if (chan->inst_vram != 0) {
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
+		for (uint32_t off = 0; off < 0x1000; off += 4)
+			nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + off) & 0xffffu), 0);
+		(void)nvkm_rd32(sc, NV_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+		device_printf(sc->dev, "gsp_rm: chan inst block zeroed via PRAMIN\n");
+	}
 	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
 		device_printf(sc->dev,
 		    "gsp_rm: channel VRAM alloc failed\n");
@@ -900,6 +918,144 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr64(sc,
 		    chan->submit_spt.bar1_gva + (spt_idx + 2) * 8,
 		    nvkm_pte_to_vram(chan->submit_sema.vram_paddr));
+
+		/* Read back EVERY level of the PT chain via BAR1 to verify
+		 * that COPY_SERVER_RESERVED_PDES didn't clobber our PD3/PD2/PD1
+		 * chain and that our PD0/SPT writes landed. */
+		uint64_t rb_pd3 = nvkm_gsp_bar1_rd64(sc, vmm->pt[0].page.bar1_gva + 0);
+		uint64_t rb_pd2 = nvkm_gsp_bar1_rd64(sc, vmm->pt[1].page.bar1_gva + 0);
+		uint64_t rb_pd1 = nvkm_gsp_bar1_rd64(sc, vmm->pt[2].page.bar1_gva + pd1_idx * 8);
+		uint64_t rb_pd0_big = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8);
+		uint64_t rb_pd0_small = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8);
+		uint64_t rb_spt0 = nvkm_gsp_bar1_rd64(sc, chan->submit_spt.bar1_gva + spt_idx * 8);
+		device_printf(sc->dev,
+		    "gsp_rm: PT readback: PD3[0]=0x%016llx PD2[0]=0x%016llx PD1[%u]=0x%016llx\n",
+		    (unsigned long long)rb_pd3, (unsigned long long)rb_pd2,
+		    pd1_idx, (unsigned long long)rb_pd1);
+		device_printf(sc->dev,
+		    "gsp_rm: PT readback: PD0[%u].BIG=0x%016llx .SMALL=0x%016llx SPT[%u]=0x%016llx\n",
+		    pd0_idx, (unsigned long long)rb_pd0_big,
+		    (unsigned long long)rb_pd0_small,
+		    spt_idx, (unsigned long long)rb_spt0);
+		/* Read channel inst[0x200] via BAR1 (L2-coherent). PRAMIN bypasses L2
+		 * so we couldn\'t see GSP\'s writes through it. Map chan inst into BAR1
+		 * temporarily. Also read PDB via PRAMIN for comparison. */
+		{
+			uint64_t pramin_pdb = 0, bar1_pdb = 0;
+			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x200, &pramin_pdb);
+			/* alloc one BAR1 GVA for chan inst */
+			uint64_t inst_bar1_gva = sc->bar1.next_gva;
+			sc->bar1.next_gva += 0x1000;
+			device_printf(sc->dev,
+			    "gsp_rm: DIAG inst_bar1_gva=0x%llx mapping to vram=0x%llx (bar1 SPT=0x%llx idx=%llu)\n",
+			    (unsigned long long)inst_bar1_gva,
+			    (unsigned long long)chan->inst_vram,
+			    (unsigned long long)sc->bar1.spt_paddr,
+			    (unsigned long long)(inst_bar1_gva >> 12));
+
+			(void)nvkm_gsp_bar1_map_vram(sc, inst_bar1_gva, chan->inst_vram);
+			nvkm_gsp_bar1_flush(sc);
+			/* Full PDB invalidate on BAR1\'s PDB (sc->gsp_bar1_pdb) so walker
+			 * picks up the new SPT entry. */
+			uint64_t bar1_inv = (sc->gsp_bar1_pdb >> 12) << 4;
+			for (int spin = 0; spin < 200; spin++) {
+				if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
+				DELAY(10);
+			}
+			nvkm_wr32(sc, 0x100cb8, (uint32_t)bar1_inv);
+			nvkm_wr32(sc, 0x100cbc, 0x80000000u);
+			for (int spin = 0; spin < 200; spin++) {
+				if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
+				DELAY(10);
+			}
+
+			/* AFTER map_vram + TLB invalidate: dump BAR1 SPT, should see
+			 * SPT[9] = our inst PDE if writes actually landed. */
+			for (uint64_t si = 7; si < 12; si++) {
+				uint64_t spte = 0;
+				(void)nvkm_gsp_pramin_rd64(sc, sc->bar1.spt_paddr + si*8, &spte);
+				device_printf(sc->dev,
+				    "gsp_rm: POST-MAP BAR1_SPT[%llu] = 0x%016llx\n",
+				    (unsigned long long)si, (unsigned long long)spte);
+			}
+			bar1_pdb = nvkm_gsp_bar1_rd64(sc, inst_bar1_gva + 0x200);
+			device_printf(sc->dev,
+			    "gsp_rm: chan inst[0x200] PRAMIN=0x%016llx BAR1=0x%016llx (our PD3 paddr=0x%llx)\n",
+			    (unsigned long long)pramin_pdb,
+			    (unsigned long long)bar1_pdb,
+			    (unsigned long long)vmm->pt[0].page.vram_paddr);
+			/* Dump first 64 bytes of inst block via BAR1 */
+			device_printf(sc->dev,
+			    "gsp_rm: chan inst[0..0x40] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  0),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  4),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  8),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 12),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 16),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 20),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 24),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 28));
+			device_printf(sc->dev,
+			    "gsp_rm: chan inst[0x200..0x220] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x200),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x204),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x208),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x20c),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x210),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x214),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x218),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x21c));
+			/* Volta+ channel RAMIN: PDB at NV_RAMIN_SC_PAGE_DIR_BASE_LO/HI(0)
+			 * = byte offset 0x2a0/0x2a4 (subcontext 0). bits: target[1:0],
+			 * vol[2], fault_replay_tex[4], fault_replay_gcc[5], lo[31:12]
+			 * in dword 0x2a0; hi[31:0] in dword 0x2a4. */
+			device_printf(sc->dev,
+			    "gsp_rm: chan inst[0x2a0..0x2c0] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a8),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2ac),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b0),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b4),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b8),
+			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2bc));
+			uint32_t sc0_lo = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0);
+			uint32_t sc0_hi = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4);
+			uint64_t sc0_pdb = ((uint64_t)sc0_hi << 32) | (sc0_lo & ~0xfffu);
+			device_printf(sc->dev,
+			    "gsp_rm: SC0 PDB target=%u vol=%u pdb_paddr=0x%llx (our PD3=0x%llx)\n",
+			    sc0_lo & 3u, (sc0_lo >> 2) & 1u,
+			    (unsigned long long)sc0_pdb,
+			    (unsigned long long)vmm->pt[0].page.vram_paddr);
+
+			/* Sanity: write marker via PRAMIN to chan->inst_vram[0x100],
+			 * read via BAR1, vice versa. If both read the marker, mapping
+			 * is consistent. */
+			lwkt_gettoken(&sc->gsp_tok);
+			uint32_t s2 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
+			nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x100) & 0xffffu), 0x11223344u);
+			(void)nvkm_rd32(sc, NV_PRAMIN);
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, s2);
+			lwkt_reltoken(&sc->gsp_tok);
+			nvkm_gsp_bar1_flush(sc);
+			uint32_t bar1_at_100 = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x100);
+			nvkm_gsp_bar1_wr32(sc, inst_bar1_gva + 0x180, 0x55667788u);
+			nvkm_gsp_bar1_flush(sc);
+			uint64_t pramin_at_180 = 0;
+			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x180, &pramin_at_180);
+			device_printf(sc->dev,
+			    "gsp_rm: SANITY PRAMIN-wrote 0x11223344 @inst+0x100, BAR1 reads 0x%08x | BAR1-wrote 0x55667788 @inst+0x180, PRAMIN reads 0x%08x\n",
+			    bar1_at_100, (uint32_t)(pramin_at_180 & 0xffffffffu));
+		}
+
+		device_printf(sc->dev,
+		    "gsp_rm: expected: PD3[0]=0x%llx (PD2 paddr) PD2[0]=0x%llx (PD1 paddr) PD1[%u]=0x%llx (PD0 paddr) PD0.SMALL=0x%llx (SPT paddr) SPT[0]=0x%llx (push paddr)\n",
+		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[1].page.vram_paddr),
+		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[2].page.vram_paddr),
+		    pd1_idx, (unsigned long long)nvkm_pde_to_vram(chan->submit_pd0.vram_paddr),
+		    (unsigned long long)nvkm_pde_to_vram(chan->submit_spt.vram_paddr),
+		    (unsigned long long)nvkm_pte_to_vram(chan->submit_push.vram_paddr));
 
 		device_printf(sc->dev,
 		    "gsp_rm: submit PT (VRAM via BAR1): PD0 vram=0x%llx bar1=0x%llx "
