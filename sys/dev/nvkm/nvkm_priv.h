@@ -174,12 +174,14 @@ LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
  * touched), set up via PRAMIN. After bar1_init we repoint 0xb80f40
  * at our new inst block. */
 struct nvkm_gsp_bar1 {
+	uint64_t	spt_bar2_gva;
 	uint64_t	pd3_paddr;
 	uint64_t	pd2_paddr;
 	uint64_t	pd1_paddr;
 	uint64_t	pd0_paddr;
 	uint64_t	spt_paddr;
 	uint64_t	next_gva;
+	uint64_t	flush_vram_paddr;
 	bool		ready;
 };
 
@@ -190,6 +192,7 @@ struct nvkm_gsp_bar2 {
 	uint64_t	pd0_paddr;
 	uint64_t	spt_paddr;
 	uint64_t	next_gva;
+	uint64_t	flush_vram_paddr;
 	bool		ready;
 };
 
@@ -569,7 +572,11 @@ int	nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
 void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
 	    uint32_t val);
 uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
+void	nvkm_gsp_bar2_flush(struct nvkm_softc *sc);
+void	nvkm_gsp_bar2_wr64(struct nvkm_softc *sc, uint64_t bar2_gva, uint64_t val);
+uint64_t nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva);
 
+#define BAR2_GVA_FLUSH		0x0ULL    /* nouveau flush slot */
 #define BAR2_GVA_ALLOC_BASE	0x1000ULL
 
 
