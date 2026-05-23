@@ -74,7 +74,8 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	pd1 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
 	pd0 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
 	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	if (!pd2 || !pd1 || !pd0 || !spt) {
+	uint64_t lpt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	if (!pd2 || !pd1 || !pd0 || !spt || !lpt) {
 		device_printf(sc->dev, "bar1: VRAM alloc failed\n");
 		return (ENOMEM);
 	}
@@ -90,8 +91,8 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 	b1_pramin_set_base(sc, pd2 & ~(uint64_t)0xffffu);
 
-	uint64_t zpages[4] = { pd2, pd1, pd0, spt };
-	for (int zi = 0; zi < 4; zi++) {
+	uint64_t zpages[5] = { pd2, pd1, pd0, spt, lpt };
+	for (int zi = 0; zi < 5; zi++) {
 		for (uint32_t off = 0; off < 0x1000; off += 4)
 			b1_pramin_wr32(sc, zpages[zi] + off, 0);
 	}
@@ -100,9 +101,12 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    (pd1 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
 	b1_pramin_wr64(sc, pd1 + 0,
 	    (pd0 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
+	/* Dual slot: BIG = LPT (all-invalid zeros so walker falls back to SMALL
+	 * for 4 KiB GVAs); SMALL = SPT (our 4 KiB-page maps live here). */
 	b1_pramin_wr64(sc, pd0 + 0,
+	    (lpt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
+	b1_pramin_wr64(sc, pd0 + 8,
 	    (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	b1_pramin_wr64(sc, pd0 + 8, 0);
 
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
@@ -187,7 +191,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	 * write via BAR1, read via BAR2, then vice versa.  If walker works,
 	 * both reads return the values written. */
 	{
-		uint64_t test_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		uint64_t test_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x10000);
 		if (test_paddr != 0) {
 			(void)nvkm_gsp_bar1_map_vram(sc, 0, test_paddr);
 			nvkm_gsp_bar1_flush(sc);
@@ -227,7 +231,7 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	if (bar1_gva >= (512ULL << 20)) /* SPT covers 2 MiB; we only use small range */
 		return (EINVAL);
 
-	spt_idx = (uint32_t)(bar1_gva >> 12);  /* 4 KiB pages */
+	spt_idx = (uint32_t)(bar1_gva >> 12);  /* 4 KiB SMALL pages */
 	pte = (vram_paddr >> 12) << 8;          /* PTE: paddr in [39:8] */
 	pte |= 0x1;                              /* VALID = bit 0 */
 
@@ -238,6 +242,20 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
+
+	/* Force MMU TLB invalidate for BAR1\'s PDB. Without this, walker may
+	 * have cached translations from before this map call. */
+	uint64_t pdb_inv = (sc->gsp_bar1_pdb >> 12) << 4;
+	for (int spin = 0; spin < 200; spin++) {
+		if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
+		DELAY(10);
+	}
+	nvkm_wr32(sc, 0x100cb8, (uint32_t)pdb_inv);
+	nvkm_wr32(sc, 0x100cbc, 0x80000000u);
+	for (int spin = 0; spin < 200; spin++) {
+		if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
+		DELAY(10);
+	}
 
 	device_printf(sc->dev,
 	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
@@ -295,8 +313,7 @@ nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
-	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
-	    NVKM_GMMU_PT_PAGE_SIZE);
+	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE, NVKM_GMMU_PT_PAGE_SIZE);
 	if (paddr == 0)
 		return (ENOMEM);
 
