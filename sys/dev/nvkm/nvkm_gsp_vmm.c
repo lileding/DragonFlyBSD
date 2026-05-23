@@ -239,6 +239,21 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 			device_printf(sc->dev,
 			    "gsp_rm: TURING_USERMODE_A handle=0x%x err=%d (device-level)\n",
 			    usermode_obj.handle, uerr);
+			/* Dump BAR0 regs post-USERMODE_A to compare with Fedora. */
+			uint32_t um0 = nvkm_rd32(sc, 0xbb0000);
+			uint32_t um80 = nvkm_rd32(sc, 0xbb0080);
+			uint32_t um84 = nvkm_rd32(sc, 0xbb0084);
+			device_printf(sc->dev,
+			    "fed_diag: USERMODE[0]=0x%08x TIME=%08x:%08x (Fedora: 0xc461)\n",
+			    um0, um84, um80);
+			/* If 0, GSP didn\'t write class id -- write it ourselves. */
+			if (um0 == 0) {
+				nvkm_wr32(sc, 0xbb0000, 0xc461u);
+				uint32_t um0b = nvkm_rd32(sc, 0xbb0000);
+				device_printf(sc->dev,
+				    "fed_diag: wrote 0xc461 to USERMODE[0], readback = 0x%08x\n",
+				    um0b);
+			}
 		}
 	}
 
