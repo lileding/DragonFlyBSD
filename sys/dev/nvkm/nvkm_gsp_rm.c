@@ -1149,29 +1149,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_dump_pt(sc, chan->userd_vram, 0x10);
 	}
 
-	/* Alloc TURING_USERMODE_A so GSP forwards doorbell writes
-	 * at BAR0+0xbb0090 to the PFIFO runlist scheduler. Parent is
-	 * the subdevice; no params on Volta/Turing.
-	 * Ref: open-rm 570.144 nvidia-push-init.c:975-1004. */
-	{
-		struct nvkm_gsp_object tmp_subdev;
-		tmp_subdev.client = &vmm->client;
-		tmp_subdev.parent = &vmm->device.object;
-		tmp_subdev.handle = vmm->device.subdevice.handle;
-		void *up = nvkm_gsp_rm_alloc_get(&tmp_subdev,
-		    /* handle */ 0xc4610000u,
-		    /* TURING_USERMODE_A */ 0x0000c461u,
-		    0, &chan->usermode_obj);
-		if (up != NULL) {
-			int uerr = nvkm_gsp_rm_alloc_wr(&chan->usermode_obj, up);
-			device_printf(sc->dev,
-			    "gsp_rm: TURING_USERMODE_A handle=0x%x err=%d\n",
-			    chan->usermode_obj.handle, uerr);
-			if (uerr != 0)
-				memset(&chan->usermode_obj, 0,
-				    sizeof(chan->usermode_obj));
-		}
-	}
+	/* TURING_USERMODE_A is allocated once per device in vmm_ctor
+	 * (nouveau does this at drm init, before any channel). */
 
 	/* Pre-publish sc->gsp_chan so submit_test can see it. */
 	sc->gsp_chan = chan;

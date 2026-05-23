@@ -227,6 +227,21 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	    "gsp_rm: VMM ready (client=0x%x device=0x%x vaspace=0x%x)\n",
 	    vmm->client.object.handle, vmm->device.object.handle,
 	    vmm->vaspace.handle);
+
+	/* Allocate TURING_USERMODE_A at device level (nouveau allocates this
+	 * once at drm init). GSP may gate doorbell delivery on its presence. */
+	{
+		struct nvkm_gsp_object usermode_obj;
+		void *up = nvkm_gsp_rm_alloc_get(&vmm->device.subdevice,
+		    0xc4610000u, 0x0000c461u, 0, &usermode_obj);
+		if (up != NULL) {
+			int uerr = nvkm_gsp_rm_alloc_wr(&usermode_obj, up);
+			device_printf(sc->dev,
+			    "gsp_rm: TURING_USERMODE_A handle=0x%x err=%d (device-level)\n",
+			    usermode_obj.handle, uerr);
+		}
+	}
+
 	return (0);
 
 fail_vaspace:
