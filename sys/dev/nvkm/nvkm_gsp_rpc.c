@@ -486,12 +486,17 @@ nvkm_gsp_rpc_set_system_info(struct nvkm_softc *sc)
 	info->gpuPhysInstAddr = rman_get_start(sc->bar_res[3]);
 	info->gpuPhysIoAddr   = 0;
 	{
-		uint32_t bus  = pci_get_bus(sc->dev);
-		uint32_t slot = pci_get_slot(sc->dev);
-		uint32_t func = pci_get_function(sc->dev);
-		uint32_t dom  = pci_get_domain(sc->dev);
+		/* Open-rm encoding (g_gpu_nvoc.h:476-478):
+		 *   bits 63:32 DOMAIN, bits 15:8 BUS, bits 7:0 DEVICE (devfn).
+		 * Matches Linux pci_dev_id() = (bus<<8) | devfn,
+		 * where devfn = (slot<<3) | func. */
+		uint32_t bus    = pci_get_bus(sc->dev);
+		uint32_t slot   = pci_get_slot(sc->dev);
+		uint32_t func   = pci_get_function(sc->dev);
+		uint32_t dom    = pci_get_domain(sc->dev);
+		uint32_t devfn  = ((slot & 0x1f) << 3) | (func & 0x7);
 		info->nvDomainBusDeviceFunc =
-		    ((uint64_t)dom << 32) | (bus << 16) | (slot << 8) | func;
+		    ((uint64_t)dom << 32) | ((bus & 0xff) << 8) | (devfn & 0xff);
 	}
 	info->maxUserVa          = (1ULL << 47);
 	info->pciConfigMirrorBase= 0x88000;

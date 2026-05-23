@@ -350,6 +350,9 @@ nvkm_pci_attach(device_t dev)
 				/* Init VRAM bump allocator FIRST so vmm_ctor can
 				 * allocate VRAM PT pages (PD3/PD2/PD1). */
 				(void)nvkm_gsp_vram_init(sc);
+				/* BAR2 first -- gives L2-coherent VRAM access
+				 * needed to manipulate BAR1 PT pages. */
+				(void)nvkm_gsp_bar2_init(sc);
 				/* Bring up BAR1 vmm so the host can write
 				 * USERD via L2-coherent paged path. */
 				(void)nvkm_gsp_bar1_init(sc);

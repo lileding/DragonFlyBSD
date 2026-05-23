@@ -563,6 +563,11 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 
 	base = sc->fb_usable_base;
 	size = sc->fb_usable_size;
+	device_printf(sc->dev,
+	    "gsp_rm: vram_init: sc->fb_usable_base=0x%llx size=0x%llx mthdbuf=0x%x\n",
+	    (unsigned long long)sc->fb_usable_base,
+	    (unsigned long long)sc->fb_usable_size,
+	    sc->mthdbuf_size);
 	if (size == 0) {
 		device_printf(sc->dev,
 		    "gsp_rm: usable VRAM region unknown (static_info parse failed)\n");
@@ -1090,6 +1095,29 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	 * write GP_PUT to wake PBDMA. */
 	(void)nvkm_gsp_bar1_map_vram(sc, BAR1_GVA_USERD,
 	    chan->userd_vram);
+
+	/* Diag: write 0xCAFEBABE via BAR1 at GVA 0x10 (USERD scratch), read back.
+	 * If PT chain in VRAM works, readback should equal CAFEBABE. */
+	{
+		/* BAR2 sanity: map one VRAM page into BAR2, write/read.
+		 * If BAR2 walker works, write CAFEBABE via BAR2 reads back CAFEBABE. */
+		uint64_t b2_test_vram = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		if (b2_test_vram) {
+			(void)nvkm_gsp_bar2_map_vram(sc, 0x1000, b2_test_vram);
+			nvkm_gsp_bar2_wr32(sc, 0x1000 + 0x10, 0xDEADBEEFu);
+			uint32_t b2rb = nvkm_gsp_bar2_rd32(sc, 0x1000 + 0x10);
+			device_printf(sc->dev,
+			    "bar2_diag: wr DEADBEEF @ BAR2 GVA 0x1010, readback = 0x%08x\n", b2rb);
+		}
+
+		nvkm_gsp_bar1_wr32(sc, BAR1_GVA_USERD + 0x10, 0xCAFEBABEu);
+		uint32_t rb = nvkm_gsp_bar1_rd32(sc, BAR1_GVA_USERD + 0x10);
+		device_printf(sc->dev,
+		    "bar1_diag: wr CAFEBABE @ BAR1 GVA 0x10, readback = 0x%08x\n", rb);
+		/* Walker translated BAR1 GVA 0+0x10 to chan->userd_vram + 0x10.
+		 * Read VRAM directly via PRAMIN to see if write actually landed. */
+		nvkm_gsp_bar1_dump_pt(sc, chan->userd_vram, 0x10);
+	}
 
 	/* Alloc TURING_USERMODE_A so GSP forwards doorbell writes
 	 * at BAR0+0xbb0090 to the PFIFO runlist scheduler. Parent is
