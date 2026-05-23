@@ -328,6 +328,13 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		nvkm_wr32(sc, 0xb81210u, 0x0c000000u);  /* leaf[4] */
 		device_printf(sc->dev,
 		    "gsp_rm: intr_allow Fedora-pattern leaf[0]=0x00031c80 leaf[4]=0x0c000000\n");
+
+		/* Enable INTR_TOP_EN_SET[0] = 0xf to enable subtree-0 intrs to fire.
+		 * Fedora has this set; we missed it. Without TOP enable, LEAF intrs
+		 * pend but never propagate to CPU/PBDMA scheduler ack path. */
+		nvkm_wr32(sc, 0xb81608u, 0x0000000fu);
+		device_printf(sc->dev,
+		    "gsp_rm: INTR_TOP_EN_SET[0] = 0xf (was 0)\n");
 	}
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
@@ -852,6 +859,28 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
 		device_printf(sc->dev, "gsp_rm: chan inst block zeroed via PRAMIN\n");
+
+		/* Pre-populate inst[0x200/0x204] with our PD3 PDB ptr in NV_RAMIN
+		 * format so PBDMA on context switch-in has a valid PDB. If GSP fills
+		 * RAMFC lazily and uses our values, walker uses our PT chain. */
+		uint64_t pdb_paddr = vmm->pt[0].page.vram_paddr;
+		uint32_t pdb_lo = (uint32_t)((pdb_paddr >> 12) << 12)
+		    | (1u << 10) /* USE_NEW_PT_FORMAT (VER2) */
+		    | (1u << 11) /* BIG_PAGE_SIZE_64KB */
+		    /* target VID_MEM = bits[1:0] = 0 */
+		    /* vol = bit 2 = 0 */;
+		uint32_t pdb_hi = (uint32_t)(pdb_paddr >> 32);
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved3 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
+		nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x200) & 0xffffu), pdb_lo);
+		nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x204) & 0xffffu), pdb_hi);
+		(void)nvkm_rd32(sc, NV_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved3);
+		lwkt_reltoken(&sc->gsp_tok);
+		device_printf(sc->dev,
+		    "gsp_rm: PRE-FILL chan inst[0x200]=0x%08x [0x204]=0x%08x (PDB=0x%llx)\n",
+		    pdb_lo, pdb_hi, (unsigned long long)pdb_paddr);
 	}
 	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
 		device_printf(sc->dev,
@@ -1428,7 +1457,13 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	/* Doorbell at BAR0+USERMODE_DOORBELL = (runlist<<16) | chid.
 	 * Try multiple writes with different tokens as a diagnostic.
 	 * If any one triggers PBDMA, we'll see GP_GET advance. */
-	device_printf(sc->dev, "gsp_submit: doorbell spray begin\n");
+	/* Sleep 200ms after SCHEDULE for GSP scheduler to load runlist into
+	 * PBDMA. SCHEDULE returns when GSP-side scheduling decision is made
+	 * but actual PBDMA RUNLIST_BASE write may be deferred. */
+	device_printf(sc->dev, "gsp_submit: 200ms wait for GSP scheduler...\n");
+	DELAY(200000);
+
+		device_printf(sc->dev, "gsp_submit: doorbell spray begin\n");
 	for (int rep = 0; rep < 10; rep++) {
 		nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
 		DELAY(1000);
