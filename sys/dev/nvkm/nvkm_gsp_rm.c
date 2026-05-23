@@ -1456,7 +1456,68 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	DELAY(100000);
 	uint64_t logrm_put_post = (sc->gsp_logrm.kva != NULL)
 	    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-	/* PRAMIN-read USERD slot to verify GP_PUT actually landed in
+	/* Scan VRAM for GSP-allocated inst block. Look for our chan->userd_vram
+	 * paddr stored anywhere as a 64-bit value, which would be GSP\'s RAMFC
+	 * USERD ptr. Scan VRAM region 0x2b00_0000..0x2b80_0000 (top 8 MiB).
+	 * Try a few PRAMIN windows to widen coverage. */
+	{
+		uint64_t needle = chan->userd_vram;
+		uint64_t needle_pte = nvkm_pte_to_vram(needle);
+		device_printf(sc->dev,
+		    "gsp_rm: SCAN looking for userd_vram=0x%llx (or PTE 0x%llx) in VRAM\n",
+		    (unsigned long long)needle, (unsigned long long)needle_pte);
+		uint64_t scan_start = 0x2b4070000ULL;
+		uint64_t scan_end   = 0x2c0000000ULL;
+		uint64_t needle2 = chan->inst_vram;
+		uint64_t needle2_pte = nvkm_pte_to_vram(needle2);
+		device_printf(sc->dev,
+		    "gsp_rm: SCAN also looking for inst_vram=0x%llx (PTE 0x%llx) in 0x%llx..0x%llx\n",
+		    (unsigned long long)needle2, (unsigned long long)needle2_pte,
+		    (unsigned long long)scan_start, (unsigned long long)scan_end);
+		int found = 0;
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		for (uint64_t p = scan_start; p < scan_end && found < 10; p += 0x10000) {
+			
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(p >> 16));
+			for (uint32_t off = 0; off < 0x10000 && found < 10; off += 8) {
+				uint32_t lo = nvkm_rd32(sc, NV_PRAMIN + off);
+				uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off + 4);
+				uint64_t val = ((uint64_t)hi << 32) | lo;
+				if (val == needle || val == needle_pte || val == needle2 || val == needle2_pte) {
+					device_printf(sc->dev,
+					    "gsp_rm: SCAN FOUND at 0x%llx (val=0x%016llx)\n",
+					    (unsigned long long)(p + off),
+					    (unsigned long long)val);
+					found++;
+				}
+			}
+		}
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+		device_printf(sc->dev, "gsp_rm: SCAN total occurrences: %d\n", found);
+
+		/* Dump 256 bytes around where we found userd_vram. */
+		{
+			uint64_t dump_base = 0x2b6b90000ULL;
+			lwkt_gettoken(&sc->gsp_tok);
+			uint32_t s2 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(dump_base >> 16));
+			for (uint32_t off = 0; off < 0x100; off += 16) {
+				uint32_t w0 = nvkm_rd32(sc, NV_PRAMIN + off + 0);
+				uint32_t w1 = nvkm_rd32(sc, NV_PRAMIN + off + 4);
+				uint32_t w2 = nvkm_rd32(sc, NV_PRAMIN + off + 8);
+				uint32_t w3 = nvkm_rd32(sc, NV_PRAMIN + off + 12);
+				device_printf(sc->dev,
+				    "gsp_rm: DUMP@0x%llx: %08x %08x %08x %08x\n",
+				    (unsigned long long)(dump_base + off), w0, w1, w2, w3);
+			}
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, s2);
+			lwkt_reltoken(&sc->gsp_tok);
+		}
+	}
+
+		/* PRAMIN-read USERD slot to verify GP_PUT actually landed in
 	 * chan->userd_vram (independent of BAR1 path). */
 	{
 		uint64_t userd_slot_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200;
