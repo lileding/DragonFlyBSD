@@ -1616,6 +1616,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 
 	uint32_t last_get = 0xffffffffu;
 	for (ms = 0; ms < SUBMIT_POLL_MS; ms += SUBMIT_POLL_STEP_MS) {
+		(void)nvkm_gsp_msg_dispatch_all(sc);
 		cpu_lfence();
 		uint32_t sema_val = nvkm_gsp_bar1_rd32(sc, sema_bar1 + 0); if (sema_val == SEM_PAYLOAD) {
 			device_printf(sc->dev,
