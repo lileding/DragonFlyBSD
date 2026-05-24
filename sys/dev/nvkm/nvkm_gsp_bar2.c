@@ -47,6 +47,31 @@ b2_pramin_wr64(struct nvkm_softc *sc, uint64_t paddr, uint64_t val)
 	b2_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
 }
 
+void
+nvkm_gsp_bar2_invalidate(struct nvkm_softc *sc)
+{
+	uint32_t trig_rb = 0xffffffffu;
+
+	/*
+	 * Match nouveau TU102 BAR VMM flush.  Under GSP-RM, BAR2 updates are
+	 * invalidated through the GSP-provided BAR2 PDB with PAGE_ALL,
+	 * HUB_ONLY, and ALL_PDB set.
+	 */
+	nvkm_wr32(sc, 0xb830a0, (uint32_t)(sc->gsp_bar2_pdb >> 8));
+	nvkm_wr32(sc, 0xb830a4, 0x00000000u);
+	nvkm_wr32(sc, 0xb830b0, 0x80000000u | 0x00000007u);
+	for (int spin = 0; spin < 200; spin++) {
+		trig_rb = nvkm_rd32(sc, 0xb830b0);
+		if (!(trig_rb & 0x80000000u))
+			break;
+		DELAY(10);
+	}
+
+	device_printf(sc->dev,
+	    "bar2: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
+	    (unsigned long long)sc->gsp_bar2_pdb, trig_rb);
+}
+
 int
 nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 {
@@ -97,7 +122,7 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	    (pd1 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
 	b2_pramin_wr64(sc, pd1 + 0,
 	    (pd0 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	/* PD0 dual entry: BAR2 walker also uses 64 KiB BIG. SPT in BIG slot. */
+	/* Preserve the existing BAR2 bootstrap layout: BAR2 uses the BIG half. */
 	b2_pramin_wr64(sc, pd0 + 0,
 	    (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
 	b2_pramin_wr64(sc, pd0 + 8, 0);
@@ -150,33 +175,7 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	    pdb0_pre_hi, pdb0_pre_lo, pdb0_post_hi, pdb0_post_lo,
 	    (unsigned long long)pd2_pde);
 
-	/* Full TLB+PDB invalidate, per gf100_vmm_invalidate (vmmgf100.c).
-	 * Sequence:
-	 *   1. Wait for free slot: 0x100c80 & 0x00ff0000 != 0
-	 *   2. Write PDB addr | aperture to 0x100cb8
-	 *   3. Write 0x80000000 | type to 0x100cbc (REPLAY_NONE=0)
-	 *   4. Wait trigger clear: 0x100cbc & 0x80000000 == 0
-	 */
-	uint64_t pdb_inv = (pdb_paddr >> 12) << 4;  /* aperture VRAM = 0 */
-	uint32_t inv_slot_rb = 0;
-	for (int spin = 0; spin < 200; spin++) {
-		inv_slot_rb = nvkm_rd32(sc, 0x100c80);
-		if (inv_slot_rb & 0x00ff0000u)
-			break;
-		DELAY(10);
-	}
-	nvkm_wr32(sc, 0x100cb8, (uint32_t)pdb_inv);
-	nvkm_wr32(sc, 0x100cbc, 0x80000000u | 0x00u);
-	uint32_t trig_rb = 0xffffffffu;
-	for (int spin = 0; spin < 200; spin++) {
-		trig_rb = nvkm_rd32(sc, 0x100cbc);
-		if (!(trig_rb & 0x80000000u))
-			break;
-		DELAY(10);
-	}
-	device_printf(sc->dev,
-	    "bar2: PDB invalidate: slot 0x100c80=0x%x, 0x100cb8=0x%x, trigger 0x100cbc=0x%x\n",
-	    inv_slot_rb, (uint32_t)pdb_inv, trig_rb);
+	nvkm_gsp_bar2_invalidate(sc);
 
 	/* Read BAR2 inst reg (0xb80f48) -- the address walker uses as root. */
 	uint32_t bar2_inst = nvkm_rd32(sc, 0xb80f48);
