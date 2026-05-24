@@ -47,6 +47,42 @@ b1_pramin_wr64(struct nvkm_softc *sc, uint64_t paddr, uint64_t val)
 	b1_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
 }
 
+static __inline uint64_t
+b1_pramin_rd64(struct nvkm_softc *sc, uint64_t paddr)
+{
+	uint32_t lo, hi;
+
+	lo = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 0) & 0xffffu));
+	hi = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 4) & 0xffffu));
+	return (((uint64_t)hi << 32) | lo);
+}
+
+void
+nvkm_gsp_bar1_invalidate(struct nvkm_softc *sc)
+{
+	uint32_t trig_rb = 0xffffffffu;
+
+	/*
+	 * Nouveau TU102 BAR VMM flush uses HUB MMU invalidate registers:
+	 *   0xb830a0 = PDB >> 8
+	 *   0xb830a4 = upper PDB
+	 *   0xb830b0 = TRIGGER | PAGE_ALL | HUB_ONLY | ALL_PDB
+	 */
+	nvkm_wr32(sc, 0xb830a0, (uint32_t)(sc->gsp_bar1_pdb >> 8));
+	nvkm_wr32(sc, 0xb830a4, 0x00000000u);
+	nvkm_wr32(sc, 0xb830b0, 0x80000000u | 0x00000007u);
+	for (int spin = 0; spin < 200; spin++) {
+		trig_rb = nvkm_rd32(sc, 0xb830b0);
+		if (!(trig_rb & 0x80000000u))
+			break;
+		DELAY(10);
+	}
+
+	device_printf(sc->dev,
+	    "bar1: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
+	    (unsigned long long)sc->gsp_bar1_pdb, trig_rb);
+}
+
 int
 nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 {
@@ -54,6 +90,9 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	uint64_t spt;
 	uint64_t gsp_pd2, gsp_pd1, gsp_pd0;
 	uint64_t spt_pde;
+	uint64_t pd0_127_big, pd0_127_small;
+	uint64_t pd0_127_big_pre, pd0_127_small_pre;
+	uint64_t pd0_127_big_post, pd0_127_small_post;
 	uint32_t saved;
 
 	if (sc->bar_res[1] == NULL) {
@@ -136,14 +175,21 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	for (uint32_t off = 0; off < 0x1000; off += 4)
 		b1_pramin_wr32(sc, spt + off, 0);
 
-	/* Write GSP PD0[127].SMALL = our SPT PDE.
-	 * PD0 entry layout: 16-byte dual; .BIG at +0, .SMALL at +8.
-	 * Entry 127 starts at gsp_pd0 + 127*16 = gsp_pd0 + 0x7f0. */
+	/* Write GSP PD0[127] as a full dual PDE, like nouveau's
+	 * gp100_vmm_pd0_pde() VMM_WO128() path.  We only install a
+	 * 4 KiB SMALL SPT, so BIG is invalid and SMALL points at our SPT.
+	 */
 	spt_pde = (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
-	uint64_t pd0_127_small = gsp_pd0 + 127 * 16 + 8;
-	b1_pramin_set_base(sc, pd0_127_small & ~(uint64_t)0xffffu);
+	pd0_127_big = gsp_pd0 + 127 * 16 + 0;
+	pd0_127_small = gsp_pd0 + 127 * 16 + 8;
+	b1_pramin_set_base(sc, pd0_127_big & ~(uint64_t)0xffffu);
+	pd0_127_big_pre = b1_pramin_rd64(sc, pd0_127_big);
+	pd0_127_small_pre = b1_pramin_rd64(sc, pd0_127_small);
+	b1_pramin_wr64(sc, pd0_127_big, 0);
 	b1_pramin_wr64(sc, pd0_127_small, spt_pde);
 	(void)nvkm_rd32(sc, NV_PRAMIN);
+	pd0_127_big_post = b1_pramin_rd64(sc, pd0_127_big);
+	pd0_127_small_post = b1_pramin_rd64(sc, pd0_127_small);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
@@ -156,30 +202,15 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	b1->next_gva  = 127ULL * (2ULL << 20);
 
 	device_printf(sc->dev,
-	    "bar1: mounted OUR SPT 0x%llx at GSP PD0[127].SMALL = 0x%llx (PDE 0x%llx); GVA base 0x%llx\n",
-	    (unsigned long long)spt, (unsigned long long)pd0_127_small,
-	    (unsigned long long)spt_pde, (unsigned long long)b1->next_gva);
+	    "bar1: mounted OUR SPT 0x%llx at GSP PD0[127] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx; GVA base 0x%llx\n",
+	    (unsigned long long)spt,
+	    (unsigned long long)pd0_127_big_pre,
+	    (unsigned long long)pd0_127_big_post,
+	    (unsigned long long)pd0_127_small_pre,
+	    (unsigned long long)pd0_127_small_post,
+	    (unsigned long long)b1->next_gva);
 
-	/* PDB invalidate -- same sequence as BAR2. */
-	uint64_t pdb_inv = (pdb_paddr >> 12) << 4;
-	uint32_t inv_slot_rb = 0;
-	for (int spin = 0; spin < 200; spin++) {
-		inv_slot_rb = nvkm_rd32(sc, 0x100c80);
-		if (inv_slot_rb & 0x00ff0000u)
-			break;
-		DELAY(10);
-	}
-	nvkm_wr32(sc, 0x100cb8, (uint32_t)pdb_inv);
-	nvkm_wr32(sc, 0x100cbc, 0x80000000u | 0x00u);
-	uint32_t trig_rb = 0xffffffffu;
-	for (int spin = 0; spin < 200; spin++) {
-		trig_rb = nvkm_rd32(sc, 0x100cbc);
-		if (!(trig_rb & 0x80000000u))
-			break;
-		DELAY(10);
-	}
-	device_printf(sc->dev,
-	    "bar1: PDB invalidate trigger 0x100cbc=0x%x\n", trig_rb);
+	nvkm_gsp_bar1_invalidate(sc);
 
 	device_printf(sc->dev,
 	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
@@ -245,19 +276,7 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
-	/* Force MMU TLB invalidate for BAR1\'s PDB. Without this, walker may
-	 * have cached translations from before this map call. */
-	uint64_t pdb_inv = (sc->gsp_bar1_pdb >> 12) << 4;
-	for (int spin = 0; spin < 200; spin++) {
-		if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
-		DELAY(10);
-	}
-	nvkm_wr32(sc, 0x100cb8, (uint32_t)pdb_inv);
-	nvkm_wr32(sc, 0x100cbc, 0x80000000u);
-	for (int spin = 0; spin < 200; spin++) {
-		if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
-		DELAY(10);
-	}
+	nvkm_gsp_bar1_invalidate(sc);
 
 	device_printf(sc->dev,
 	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",

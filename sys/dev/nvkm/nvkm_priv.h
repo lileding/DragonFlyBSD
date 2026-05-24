@@ -578,6 +578,7 @@ void	nvkm_gsp_bar2_wr32(struct nvkm_softc *sc, uint64_t bar2_gva,
 	    uint32_t val);
 uint32_t nvkm_gsp_bar2_rd32(struct nvkm_softc *sc, uint64_t bar2_gva);
 void	nvkm_gsp_bar2_flush(struct nvkm_softc *sc);
+void	nvkm_gsp_bar2_invalidate(struct nvkm_softc *sc);
 int	nvkm_gsp_pramin_rd64(struct nvkm_softc *sc, uint64_t paddr, uint64_t *out);
 void	nvkm_gsp_bar2_wr64(struct nvkm_softc *sc, uint64_t bar2_gva, uint64_t val);
 uint64_t nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva);
@@ -590,6 +591,7 @@ uint64_t nvkm_gsp_bar2_rd64(struct nvkm_softc *sc, uint64_t bar2_gva);
 int	nvkm_gsp_bar1_init(struct nvkm_softc *sc);
 void	nvkm_gsp_bar1_fini(struct nvkm_softc *sc);
 void	nvkm_gsp_bar1_flush(struct nvkm_softc *sc);
+void	nvkm_gsp_bar1_invalidate(struct nvkm_softc *sc);
 int	nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	    uint64_t vram_paddr);
 void	nvkm_gsp_bar1_wr32(struct nvkm_softc *sc, uint64_t bar1_gva,
