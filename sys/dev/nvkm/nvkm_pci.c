@@ -19,6 +19,7 @@
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
 #include <sys/sysctl.h>
+#include <sys/kthread.h>
 
 struct nvkm_pci_id {
 	uint16_t	device;
@@ -68,6 +69,21 @@ nvkm_pci_release_bars(struct nvkm_softc *sc)
 			sc->bar_res[i] = NULL;
 		}
 	}
+}
+
+static void
+nvkm_gsp_drain_kthread(void *arg)
+{
+	struct nvkm_softc *sc = arg;
+	/* Wait 2 sec for attach to finish before draining. */
+	tsleep(&sc->gsp_drain_td, 0, "gsp_warm", hz * 2);
+	device_printf(sc->dev, "gsp: msgq drain kthread started\n");
+	while (!sc->gsp_drain_exit) {
+		(void)nvkm_gsp_msg_dispatch_all(sc);
+		tsleep(&sc->gsp_drain_td, 0, "gsp_drain", hz / 10);
+	}
+	device_printf(sc->dev, "gsp: msgq drain kthread exiting\n");
+	kthread_exit();
 }
 
 static void
@@ -474,6 +490,10 @@ nvkm_pci_attach(device_t dev)
 
 						/* Register as DRM driver -- creates /dev/dri/{card,renderD}*. */
 						(void)nvkm_drm_register(sc);
+						/* Start msgq drain kthread last - attach is done. */
+						sc->gsp_drain_exit = false;
+						(void)kthread_create(nvkm_gsp_drain_kthread, sc,
+						    &sc->gsp_drain_td, "nvkm-msgq-drain");
 					} else {
 						device_printf(dev,
 						    "gsp: bus_setup_intr failed (%d)\n", err);
@@ -624,6 +644,12 @@ nvkm_pci_detach(device_t dev)
 		nvkm_wr32(sc, 0x110004, 0x00);
 
 	if (sc->irq_cookie != NULL) {
+		if (sc->gsp_drain_td != NULL) {
+			sc->gsp_drain_exit = true;
+			wakeup(&sc->gsp_drain_td);
+			tsleep(&sc->gsp_drain_td, 0, "gsp_join", hz);
+			sc->gsp_drain_td = NULL;
+		}
 		bus_teardown_intr(dev, sc->irq_res, sc->irq_cookie);
 		sc->irq_cookie = NULL;
 	}
