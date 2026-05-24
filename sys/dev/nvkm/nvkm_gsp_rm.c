@@ -847,39 +847,50 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    (unsigned long long)chan->inst_vram,
 	    (unsigned long long)chan->userd_vram);
 
-	/* Zero inst block via PRAMIN so we know any later non-zero bytes
-	 * are written by GSP, not stale data from prior allocator state. */
+	/* Map inst block to BAR1 immediately for L2-coherent writes.
+	 * nouveau writes inst via BAR1/instmem path (also L2-coherent);
+	 * we previously used PRAMIN which bypasses L2 so GSP's later reads
+	 * (through its own BAR1 view) could miss our writes. */
 	if (chan->inst_vram != 0) {
-		lwkt_gettoken(&sc->gsp_tok);
-		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
-		for (uint32_t off = 0; off < 0x1000; off += 4)
-			nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + off) & 0xffffu), 0);
-		(void)nvkm_rd32(sc, NV_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
-		lwkt_reltoken(&sc->gsp_tok);
-		device_printf(sc->dev, "gsp_rm: chan inst block zeroed via PRAMIN\n");
+		chan->inst_bar1_gva = sc->bar1.next_gva;
+		sc->bar1.next_gva += 0x1000;
+		(void)nvkm_gsp_bar1_map_vram(sc, chan->inst_bar1_gva, chan->inst_vram);
+		nvkm_gsp_bar1_flush(sc);
+		/* Full BAR1 PDB TLB invalidate so walker picks up new SPT entry. */
+		uint64_t bar1_inv = (sc->gsp_bar1_pdb >> 12) << 4;
+		for (int spin = 0; spin < 200; spin++) {
+			if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
+			DELAY(10);
+		}
+		nvkm_wr32(sc, 0x100cb8, (uint32_t)bar1_inv);
+		nvkm_wr32(sc, 0x100cbc, 0x80000000u);
+		for (int spin = 0; spin < 200; spin++) {
+			if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
+			DELAY(10);
+		}
+		device_printf(sc->dev,
+		    "gsp_rm: inst mapped to BAR1 GVA 0x%llx (paddr 0x%llx)\n",
+		    (unsigned long long)chan->inst_bar1_gva,
+		    (unsigned long long)chan->inst_vram);
 
-		/* Pre-populate inst[0x200/0x204] with our PD3 PDB ptr in NV_RAMIN
-		 * format so PBDMA on context switch-in has a valid PDB. If GSP fills
-		 * RAMFC lazily and uses our values, walker uses our PT chain. */
+		/* Zero inst block (4 KiB) via BAR1 wr32. */
+		for (uint32_t off = 0; off < 0x1000; off += 4)
+			nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + off, 0);
+		nvkm_gsp_bar1_flush(sc);
+		device_printf(sc->dev, "gsp_rm: chan inst block zeroed via BAR1\n");
+
+		/* PRE-FILL inst[0x200/0x204] with PD3 PDB in NV_RAMIN format. */
 		uint64_t pdb_paddr = vmm->pt[0].page.vram_paddr;
 		uint32_t pdb_lo = (uint32_t)((pdb_paddr >> 12) << 12)
 		    | (1u << 10) /* USE_NEW_PT_FORMAT (VER2) */
 		    | (1u << 11) /* BIG_PAGE_SIZE_64KB */
-		    /* target VID_MEM = bits[1:0] = 0 */
-		    /* vol = bit 2 = 0 */;
+		    /* target VID_MEM = bits[1:0] = 0, vol = bit 2 = 0 */;
 		uint32_t pdb_hi = (uint32_t)(pdb_paddr >> 32);
-		lwkt_gettoken(&sc->gsp_tok);
-		uint32_t saved3 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
-		nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x200) & 0xffffu), pdb_lo);
-		nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x204) & 0xffffu), pdb_hi);
-		(void)nvkm_rd32(sc, NV_PRAMIN);
-		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved3);
-		lwkt_reltoken(&sc->gsp_tok);
+		nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + 0x200, pdb_lo);
+		nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + 0x204, pdb_hi);
+		nvkm_gsp_bar1_flush(sc);
 		device_printf(sc->dev,
-		    "gsp_rm: PRE-FILL chan inst[0x200]=0x%08x [0x204]=0x%08x (PDB=0x%llx)\n",
+		    "gsp_rm: PRE-FILL chan inst[0x200]=0x%08x [0x204]=0x%08x via BAR1 (PDB=0x%llx)\n",
 		    pdb_lo, pdb_hi, (unsigned long long)pdb_paddr);
 	}
 	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
@@ -977,9 +988,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		{
 			uint64_t pramin_pdb = 0, bar1_pdb = 0;
 			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x200, &pramin_pdb);
-			/* alloc one BAR1 GVA for chan inst */
-			uint64_t inst_bar1_gva = sc->bar1.next_gva;
-			sc->bar1.next_gva += 0x1000;
+			/* inst already mapped to BAR1 in chan_ctor early; reuse */
+			uint64_t inst_bar1_gva = chan->inst_bar1_gva;
 			device_printf(sc->dev,
 			    "gsp_rm: DIAG inst_bar1_gva=0x%llx mapping to vram=0x%llx (bar1 SPT=0x%llx idx=%llu)\n",
 			    (unsigned long long)inst_bar1_gva,
@@ -987,21 +997,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    (unsigned long long)sc->bar1.spt_paddr,
 			    (unsigned long long)(inst_bar1_gva >> 12));
 
-			(void)nvkm_gsp_bar1_map_vram(sc, inst_bar1_gva, chan->inst_vram);
-			nvkm_gsp_bar1_flush(sc);
-			/* Full PDB invalidate on BAR1\'s PDB (sc->gsp_bar1_pdb) so walker
-			 * picks up the new SPT entry. */
-			uint64_t bar1_inv = (sc->gsp_bar1_pdb >> 12) << 4;
-			for (int spin = 0; spin < 200; spin++) {
-				if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
-				DELAY(10);
-			}
-			nvkm_wr32(sc, 0x100cb8, (uint32_t)bar1_inv);
-			nvkm_wr32(sc, 0x100cbc, 0x80000000u);
-			for (int spin = 0; spin < 200; spin++) {
-				if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
-				DELAY(10);
-			}
+			/* (no need to re-map or invalidate — done in chan_ctor early) */
 
 			/* AFTER map_vram + TLB invalidate: dump BAR1 SPT, should see
 			 * SPT[9] = our inst PDE if writes actually landed. */
@@ -1076,25 +1072,6 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    (unsigned long long)sc0_pdb,
 			    (unsigned long long)vmm->pt[0].page.vram_paddr);
 
-			/* Sanity: write marker via PRAMIN to chan->inst_vram[0x100],
-			 * read via BAR1, vice versa. If both read the marker, mapping
-			 * is consistent. */
-			lwkt_gettoken(&sc->gsp_tok);
-			uint32_t s2 = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-			nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
-			nvkm_wr32(sc, NV_PRAMIN + (uint32_t)((chan->inst_vram + 0x100) & 0xffffu), 0x11223344u);
-			(void)nvkm_rd32(sc, NV_PRAMIN);
-			nvkm_wr32(sc, NV_PBUS_PRAMIN, s2);
-			lwkt_reltoken(&sc->gsp_tok);
-			nvkm_gsp_bar1_flush(sc);
-			uint32_t bar1_at_100 = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x100);
-			nvkm_gsp_bar1_wr32(sc, inst_bar1_gva + 0x180, 0x55667788u);
-			nvkm_gsp_bar1_flush(sc);
-			uint64_t pramin_at_180 = 0;
-			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x180, &pramin_at_180);
-			device_printf(sc->dev,
-			    "gsp_rm: SANITY PRAMIN-wrote 0x11223344 @inst+0x100, BAR1 reads 0x%08x | BAR1-wrote 0x55667788 @inst+0x180, PRAMIN reads 0x%08x\n",
-			    bar1_at_100, (uint32_t)(pramin_at_180 & 0xffffffffu));
 		}
 
 		device_printf(sc->dev,
