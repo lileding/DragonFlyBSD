@@ -18,6 +18,8 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
+
+#define NVKM_ALIGN_UP(v, a)	(((v) + (a) - 1) & ~((a) - 1))
 /* === RM_ALLOC === */
 
 void *
@@ -253,6 +255,87 @@ nvkm_gsp_client_dtor(struct nvkm_gsp_client *client)
 
 struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS {
 	uint32_t size;
+};
+
+/* === GR context promotion (nouveau r535/r570 gr.c) === */
+#define NV2080_CTRL_CMD_INTERNAL_STATIC_KGR_GET_CONTEXT_BUFFERS_INFO 0x20800a32U
+#define NV2080_CTRL_INTERNAL_GR_MAX_ENGINES 8U
+#define NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT 0x1aU
+
+struct NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO_dfly {
+	uint32_t size;
+	uint32_t alignment;
+};
+
+struct NV2080_CTRL_INTERNAL_STATIC_GR_CONTEXT_BUFFERS_INFO_dfly {
+	struct NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO_dfly
+	    engine[NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT];
+};
+
+struct NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS_dfly {
+	struct NV2080_CTRL_INTERNAL_STATIC_GR_CONTEXT_BUFFERS_INFO_dfly
+	    engineContextBuffersInfo[NV2080_CTRL_INTERNAL_GR_MAX_ENGINES];
+};
+
+#define NV0080_ENGINE_ID_GRAPHICS		0x00U
+#define NV0080_ENGINE_ID_GRAPHICS_PATCH		0x10U
+#define NV0080_ENGINE_ID_GRAPHICS_BUNDLE_CB	0x11U
+#define NV0080_ENGINE_ID_GRAPHICS_PAGEPOOL_GLOBAL 0x12U
+#define NV0080_ENGINE_ID_GRAPHICS_ATTRIBUTE_CB	0x13U
+#define NV0080_ENGINE_ID_GRAPHICS_RTV_CB_GLOBAL	0x14U
+#define NV0080_ENGINE_ID_GRAPHICS_FECS_EVENT	0x17U
+#define NV0080_ENGINE_ID_GRAPHICS_PRIV_ACCESS_MAP 0x18U
+
+#define NV2080_CTXBUF_ID_MAIN			0U
+#define NV2080_CTXBUF_ID_PATCH			2U
+#define NV2080_CTXBUF_ID_BUFFER_BUNDLE_CB	3U
+#define NV2080_CTXBUF_ID_PAGEPOOL		4U
+#define NV2080_CTXBUF_ID_ATTRIBUTE_CB		5U
+#define NV2080_CTXBUF_ID_RTV_CB_GLOBAL		6U
+#define NV2080_CTXBUF_ID_FECS_EVENT		9U
+#define NV2080_CTXBUF_ID_PRIV_ACCESS_MAP	10U
+#define NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP 11U
+
+#define NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES 16U
+#define NV2080_CTRL_CMD_GPU_PROMOTE_CTX		0x2080012bU
+#define NV2080_CTRL_CMD_GR_GET_ZCULL_INFO	0x20801206U
+
+struct NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY_dfly {
+	uint64_t gpuPhysAddr;
+	uint64_t gpuVirtAddr;
+	uint64_t size;
+	uint32_t physAttr;
+	uint16_t bufferId;
+	uint8_t  bInitialize;
+	uint8_t  bNonmapped;
+};
+
+struct NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS_dfly {
+	uint32_t engineType;
+	uint32_t hClient;
+	uint32_t ChID;
+	uint32_t hChanClient;
+	uint32_t hObject;
+	uint32_t hVirtMemory;
+	uint64_t virtAddress;
+	uint64_t size;
+	uint32_t entryCount;
+	uint8_t  _pad[4];
+	struct NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY_dfly
+	    promoteEntry[NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES];
+};
+
+struct NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS_dfly {
+	uint32_t widthAlignPixels;
+	uint32_t heightAlignPixels;
+	uint32_t pixelSquaresByAliquots;
+	uint32_t aliquotTotal;
+	uint32_t zcullRegionByteMultiplier;
+	uint32_t zcullRegionHeaderSize;
+	uint32_t zcullSubregionHeaderSize;
+	uint32_t subregionCount;
+	uint32_t subregionWidthAlignPixels;
+	uint32_t subregionHeightAlignPixels;
 };
 
 /* NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE (0x20800a5c).
@@ -515,15 +598,15 @@ nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas)
 
 /* === chid pool (host-side, 2048 bits, chid 0 reserved) ===
  *
- * 2048-entry bitmap, chid 0 reserved (rsvd_chids=1 in r570_fifo).
- * Init: set bit 0. Alloc: find first 0-bit, set, return id.
- * Free: clear bit. Mirrors nouveau chid.c. */
+ * 2048-entry bitmap. chid 0 is not allocatable, and chid 1 is kept free for
+ * the GR golden channel path that nouveau allocates with rsvd_chids.
+ * Alloc: find first 0-bit, set, return id. Free: clear bit. */
 void
 nvkm_chid_init(struct nvkm_softc *sc)
 {
 	lwkt_token_init(&sc->chid_tok, "nvkm-chid");
 	memset(sc->chid_used, 0, sizeof(sc->chid_used));
-	sc->chid_used[0] |= 1ULL;  /* chid 0 reserved */
+	sc->chid_used[0] |= 0x3ULL;  /* chid 0 reserved, chid 1 for GR golden */
 }
 
 int
@@ -788,6 +871,8 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 #define SUBMIT_GVA_PUSHBUF	(NVKM_VMM_CLIENT_BASE + 0x0000ULL)
 #define SUBMIT_GVA_GPFIFO	(NVKM_VMM_CLIENT_BASE + 0x1000ULL)
 #define SUBMIT_GVA_SEMA		(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
+#define SUBMIT_GVA_STRIDE	0x10000ULL
+static uint32_t nvkm_gsp_submit_gva_slot;
 
 /* === Sem release payload === */
 #define SEM_PAYLOAD		0xdeadbeefu
@@ -903,17 +988,154 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 #endif
 }
 
+static void nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr,
+    uint64_t size);
+
+static uint32_t
+nvkm_order_base_2_u64(uint64_t value)
+{
+	uint32_t shift;
+	uint64_t n;
+
+	if (value <= 1)
+		return (0);
+
+	shift = 0;
+	n = 1;
+	while (n < value) {
+		n <<= 1;
+		shift++;
+	}
+	return (shift);
+}
+
+static int
+nvkm_gsp_chan_rm_alloc(struct nvkm_gsp_vmm *vmm, struct nvkm_gsp_chan *chan,
+    uint32_t handle, uint32_t engine_type, uint8_t priv, uint64_t inst_addr,
+    uint64_t userd_addr, uint64_t mthdbuf_addr, uint32_t mthdbuf_size,
+    uint64_t gpfifo_offset, uint32_t gpfifo_length)
+{
+	struct nvkm_gsp_device *device = &vmm->device;
+	struct nvkm_softc *sc = vmm->sc;
+	struct NV_CHANNEL_ALLOC_PARAMS_r570 *args;
+	uint32_t userd_p, userd_i;
+	int err;
+
+	args = nvkm_gsp_rm_alloc_get(&device->object, handle,
+	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
+	if (args == NULL)
+		return (ENOMEM);
+
+	args->gpFifoOffset = gpfifo_offset;
+	args->gpFifoEntries = gpfifo_length / 8;
+
+	userd_p = (uint32_t)chan->chid / 8u;
+	userd_i = (uint32_t)chan->chid % 8u;
+	args->flags =
+	    ((userd_i & 7u) << 8) |
+	    ((userd_p & 0x1ffu) << 12) |
+	    (1U << 21) /* USERD_INDEX_PAGE_FIXED */;
+	if (priv)
+		args->flags |= (1U << 5) /* PRIVILEGED_CHANNEL_TRUE */;
+
+	args->hVASpace = vmm->vaspace.handle;
+	args->engineType = engine_type;
+
+	args->instanceMem.base = inst_addr;
+	args->instanceMem.size = NV_CHANNEL_INST_SIZE;
+	args->instanceMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->instanceMem.cacheAttrib = 1;
+
+	args->userdMem.base = userd_addr;
+	args->userdMem.size = NV_CHANNEL_USERD_SIZE;
+	args->userdMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->userdMem.cacheAttrib = 1;
+
+	args->ramfcMem.base = inst_addr;
+	args->ramfcMem.size = NV_CHANNEL_RAMFC_SIZE;
+	args->ramfcMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
+	args->ramfcMem.cacheAttrib = 1;
+
+	args->mthdbufMem.base = mthdbuf_addr;
+	args->mthdbufMem.size = mthdbuf_size;
+	args->mthdbufMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH;
+	args->mthdbufMem.cacheAttrib = 0;
+
+	args->internalFlags = NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE |
+	    NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE;
+	if (priv)
+		args->internalFlags |= NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_ADMIN;
+	else
+		args->internalFlags |= NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_USER;
+
+	err = nvkm_gsp_rm_alloc_wr(&chan->object, args);
+	if (err != 0) {
+		device_printf(sc->dev,
+		    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
+		    "handle=0x%x chid=%d inst=0x%llx userd=0x%llx "
+		    "mthdbuf=0x%llx gpfifo=0x%llx/0x%x\n",
+		    err, handle, chan->chid, (unsigned long long)inst_addr,
+		    (unsigned long long)userd_addr,
+		    (unsigned long long)mthdbuf_addr,
+		    (unsigned long long)gpfifo_offset, gpfifo_length);
+		return (err);
+	}
+
+	nvkm_gsp_sched_trace(sc, "after-chan-alloc", chan, engine_type);
+	return (0);
+}
+
+static int
+nvkm_gsp_golden_chan_ctor(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_chan *chan)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	uint32_t mthdbuf_size;
+	int err;
+
+	memset(chan, 0, sizeof(*chan));
+
+	chan->chid = 1;
+	chan->inst_vram = nvkm_gsp_vram_alloc(sc, 0x12000, 0x1000);
+	if (chan->inst_vram == 0)
+		return (ENOMEM);
+	chan->userd_vram = chan->inst_vram + 0x1000;
+	chan->mthdbuf_paddr = chan->inst_vram + 0x2000;
+	mthdbuf_size = sc->mthdbuf_size ? sc->mthdbuf_size : 0x4000U;
+	chan->mthdbuf_size = mthdbuf_size;
+	nvkm_gsp_zero_vram(sc, chan->inst_vram, 0x12000);
+
+	device_printf(sc->dev,
+	    "gsp_rm: GR oneinit golden inst=0x%llx userd=0x%llx "
+	    "mthdbuf=0x%llx size=0x%x handle=0x%x chid=%d\n",
+	    (unsigned long long)chan->inst_vram,
+	    (unsigned long long)chan->userd_vram,
+	    (unsigned long long)chan->mthdbuf_paddr, mthdbuf_size,
+	    NVKM_RM_CHANNEL, chan->chid);
+
+	err = nvkm_gsp_chan_rm_alloc(vmm, chan, NVKM_RM_CHANNEL,
+	    NV2080_ENGINE_TYPE_GRAPHICS, 1, chan->inst_vram,
+	    chan->userd_vram, chan->mthdbuf_paddr, mthdbuf_size, 0, 0x1000);
+	if (err != 0)
+		return (err);
+
+	return (0);
+}
 
 int
 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
     uint32_t engine_type, struct nvkm_gsp_chan *chan)
 {
-	struct nvkm_gsp_device *device = &vmm->device;
 	struct nvkm_softc *sc = vmm->sc;
-	struct NV_CHANNEL_ALLOC_PARAMS_r570 *args;
+	uint32_t mthdbuf_sz;
 	int err;
 
 	memset(chan, 0, sizeof(*chan));
+	chan->submit_gva_push = NVKM_VMM_CLIENT_BASE +
+	    (uint64_t)nvkm_gsp_submit_gva_slot * SUBMIT_GVA_STRIDE;
+	chan->submit_gva_gpf = chan->submit_gva_push + 0x1000ULL;
+	chan->submit_gva_sema = chan->submit_gva_push + 0x2000ULL;
+	nvkm_gsp_submit_gva_slot++;
 
 	/* VRAM: inst block + USERD (separate pages). */
 	chan->inst_vram  = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_INST_SIZE, 0x1000);
@@ -967,8 +1189,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	}
 
 	/* sysmem: CE method buffer. Size queried at attach. */
-	uint32_t mthdbuf_sz = sc->mthdbuf_size ?
-	    sc->mthdbuf_size : 0x4000U;
+	mthdbuf_sz = sc->mthdbuf_size ? sc->mthdbuf_size : 0x4000U;
 	chan->mthdbuf_kva = contigmalloc(mthdbuf_sz, M_NVKM_MTHDBUF,
 	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
 	if (chan->mthdbuf_kva == NULL) {
@@ -1019,11 +1240,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->submit_gpf.paddr,
 		    (unsigned long long)chan->submit_sema.paddr);
 
-		const uint32_t pd1_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_PD1_SHIFT)
+		const uint32_t pd1_idx = (chan->submit_gva_push >> NVKM_GMMU_PD1_SHIFT)
 		    & (NVKM_GMMU_PD1_ENTRIES - 1);
-		const uint32_t pd0_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_PD0_SHIFT)
+		const uint32_t pd0_idx = (chan->submit_gva_push >> NVKM_GMMU_PD0_SHIFT)
 		    & (NVKM_GMMU_PD0_ENTRIES - 1);
-		const uint32_t spt_idx = (SUBMIT_GVA_PUSHBUF >> NVKM_GMMU_SPT_SHIFT)
+		const uint32_t spt_idx = (chan->submit_gva_push >> NVKM_GMMU_SPT_SHIFT)
 		    & (NVKM_GMMU_SPT_ENTRIES - 1);
 
 		/* PD1[k] -> PD0 (VRAM); PD0[k].small -> SPT (VRAM); SPT entries
@@ -1222,80 +1443,20 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	}
 #endif
 
-	args = nvkm_gsp_rm_alloc_get(&device->object,
-	    NVKM_RM_CHANNEL | (uint32_t)chan->chid,
-	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
-	if (args == NULL) {
+	/* gpFifoOffset/Entries point at our pre-mapped sysmem ring.  Per
+	 * nouveau r570_chan_alloc caller (r535/fifo.c:185), userd_addr is
+	 * the per-chid slot address, not just the USERD page base. */
+	err = nvkm_gsp_chan_rm_alloc(vmm, chan,
+	    NVKM_RM_CHANNEL | (uint32_t)chan->chid, engine_type, 1,
+	    chan->inst_vram,
+	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
+	    chan->mthdbuf_paddr, mthdbuf_sz, chan->submit_gva_gpf, 0x1000);
+	if (err != 0) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
-		return (ENOMEM);
+		return (err);
 	}
-
-	/* gpFifoOffset/Entries point at our pre-mapped sysmem ring. */
-	args->gpFifoOffset = SUBMIT_GVA_GPFIFO;
-	args->gpFifoEntries = 512;   /* 4 KiB / 8 byte entry */
-	/* chid allocated from host pool (rsvd_chids=1 ->
-	 * nvkm_chid_alloc starts at 1). Encode into
-	 * USERD_INDEX_VALUE/PAGE_VALUE per r570/fifo.c:r570_chan_alloc. */
-	{
-		uint32_t userd_p = (uint32_t)chan->chid / 8u;
-		uint32_t userd_i = (uint32_t)chan->chid % 8u;
-		args->flags =
-		    ((userd_i & 7u) << 8) |
-		    ((userd_p & 0x1ffu) << 12) |
-		    (1U << 21) /* USERD_INDEX_PAGE_FIXED */ |
-		    (1U << 5) /* PRIVILEGED_CHANNEL_TRUE */;
-	}
-	args->hVASpace = vmm->vaspace.handle;
-	args->engineType = engine_type;
-	/* subDeviceId stays 0 — matches nouveau */
-
-	args->instanceMem.base = chan->inst_vram;
-	args->instanceMem.size = NV_CHANNEL_INST_SIZE;
-	args->instanceMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
-	args->instanceMem.cacheAttrib = 1;
-
-	/* Per nouveau r570_chan_alloc caller (r535/fifo.c:185):
-	 *   userd_addr = nvkm_memory_addr(chan->userd.mem) + chan->userd.base
-	 * where chan->userd.base = chid * USERD_SLOT_SIZE. GSP writes this
-	 * value verbatim into RAMFC USERD_PTR field (inst[0x008..0x010]),
-	 * so PBDMA needs the per-chid SLOT paddr, not the page base. */
-	args->userdMem.base = chan->userd_vram
-	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
-	args->userdMem.size = NV_CHANNEL_USERD_SIZE;
-	args->userdMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
-	args->userdMem.cacheAttrib = 1;
-
-	args->ramfcMem.base = chan->inst_vram;	/* ramfc lives inside inst block */
-	args->ramfcMem.size = NV_CHANNEL_RAMFC_SIZE;
-	args->ramfcMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
-	args->ramfcMem.cacheAttrib = 1;
-
-	args->mthdbufMem.base = chan->mthdbuf_paddr;
-	args->mthdbufMem.size = mthdbuf_sz;
-	args->mthdbufMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH;
-	args->mthdbufMem.cacheAttrib = 0;
-
-	args->internalFlags =
-	    NV_KERNELCHANNEL_INTERNALFLAGS_PRIV_ADMIN |
-	    NV_KERNELCHANNEL_INTERNALFLAGS_ERRNOT_NONE |
-	    NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE;
-
-	err = nvkm_gsp_rm_alloc_wr(&chan->object, args);
-		if (err != 0) {
-			device_printf(sc->dev,
-			    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
-			    "(inst=0x%llx userd=0x%llx mthdbuf=0x%llx)\n", err,
-		    (unsigned long long)chan->inst_vram,
-		    (unsigned long long)chan->userd_vram,
-		    (unsigned long long)chan->mthdbuf_paddr);
-		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
-		    M_NVKM_MTHDBUF);
-			chan->mthdbuf_kva = NULL;
-			return (err);
-		}
-		nvkm_gsp_sched_trace(sc, "after-chan-alloc", chan, engine_type);
 
 		/* nouveau r535_chan_ramfc_write fifo.c:188-216: bind engine + enable
 		 * GPFIFO scheduling. Both are RM_CONTROL on the channel object. */
@@ -1504,12 +1665,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	/* TURING_USERMODE_A is allocated once per device in vmm_ctor
 	 * (nouveau does this at drm init, before any channel). */
 
-	/* Pre-publish sc->gsp_chan so the test kthread (spawned in attach)
-	 * can see it. The test kthread sleeps a few seconds after attach
-	 * completes, then calls nvkm_gsp_submit_test() off the dfly driver
-	 * thread so the rest of bus attach is not blocked by the 1 s sema
-	 * timeout. */
-	sc->gsp_chan = chan;
+	/* The first ctor call builds the bootstrap submit_test channel.  DRM
+	 * user channels are tracked by nvkm_drm.c and must not replace it. */
+	if (sc->gsp_chan == NULL)
+		sc->gsp_chan = chan;
 	return (0);
 }
 
@@ -1533,16 +1692,16 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	/* Pushbuf -- NVC36F SEM_ADDR_LO/HI/PAYLOAD_LO + SEM_EXECUTE.
 	 * Refs: clc36f.h:95-128, push906f.h:23-49, chanc36f.c:26-49. */
 	push_w[0] = NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET;
-	push_w[1] = (uint32_t)(SUBMIT_GVA_SEMA & 0xffffffffu);
-	push_w[2] = (uint32_t)((SUBMIT_GVA_SEMA >> 32) & 0xffu);
+	push_w[1] = (uint32_t)(chan->submit_gva_sema & 0xffffffffu);
+	push_w[2] = (uint32_t)((chan->submit_gva_sema >> 32) & 0xffu);
 	push_w[3] = SEM_PAYLOAD;
 	push_w[4] = NVC36F_PUSH_HDR_SEM_EXECUTE;
 	push_w[5] = NVC36F_SEM_EXECUTE_RELEASE;
 
 	/* GPFIFO entry[0] -- nvif/chan506f.c:nvif_chan506f_gpfifo_push.
 	 * dw0 = lower_32(push_gva); dw1 = upper_8(push_gva) | (dwords<<10). */
-	gpf_w[0] = (uint32_t)(SUBMIT_GVA_PUSHBUF & 0xffffffffu);
-	gpf_w[1] = (uint32_t)((SUBMIT_GVA_PUSHBUF >> 32) & 0xffu)
+	gpf_w[0] = (uint32_t)(chan->submit_gva_push & 0xffffffffu);
+	gpf_w[1] = (uint32_t)((chan->submit_gva_push >> 32) & 0xffu)
 	    | (SUBMIT_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 	cpu_sfence();  /* ensure push/gpf stores reach sysmem before USERD GP_PUT */
 
@@ -2123,10 +2282,402 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 		contigfree(chan->submit_gpf.kva, 0x1000, M_NVKM_MTHDBUF);
 	if (chan->submit_sema.kva != NULL)
 		contigfree(chan->submit_sema.kva, 0x1000, M_NVKM_MTHDBUF);
+	for (uint32_t i = 0; i < chan->gr_ctxbuf_nr; i++) {
+		if (chan->gr_ctxbuf[i].kva != NULL)
+			contigfree(chan->gr_ctxbuf[i].kva,
+			    chan->gr_ctxbuf[i].size, M_NVKM_MTHDBUF);
+	}
 	if (chan->mthdbuf_kva != NULL) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
 		chan->mthdbuf_kva = NULL;
 	}
+	return (err);
+}
+
+static int
+nvkm_gsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id,
+    uint8_t *init, uint8_t *nonmapped)
+{
+	*init = 0;
+	*nonmapped = 0;
+
+	switch (engine_id) {
+	case NV0080_ENGINE_ID_GRAPHICS:
+		*buffer_id = NV2080_CTXBUF_ID_MAIN;
+		*init = 1;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_PATCH:
+		*buffer_id = NV2080_CTXBUF_ID_PATCH;
+		*init = 1;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_BUNDLE_CB:
+		*buffer_id = NV2080_CTXBUF_ID_BUFFER_BUNDLE_CB;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_PAGEPOOL_GLOBAL:
+		*buffer_id = NV2080_CTXBUF_ID_PAGEPOOL;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_ATTRIBUTE_CB:
+		*buffer_id = NV2080_CTXBUF_ID_ATTRIBUTE_CB;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_RTV_CB_GLOBAL:
+		*buffer_id = NV2080_CTXBUF_ID_RTV_CB_GLOBAL;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_FECS_EVENT:
+		*buffer_id = NV2080_CTXBUF_ID_FECS_EVENT;
+		*init = 1;
+		return (0);
+	case NV0080_ENGINE_ID_GRAPHICS_PRIV_ACCESS_MAP:
+		*buffer_id = NV2080_CTXBUF_ID_PRIV_ACCESS_MAP;
+		*init = 1;
+		*nonmapped = 1;
+		return (0);
+	default:
+		return (ENOENT);
+	}
+}
+
+static void
+nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr, uint64_t size)
+{
+	static uint64_t scratch_gva;
+
+	if (scratch_gva == 0) {
+		scratch_gva = sc->bar1.next_gva;
+		sc->bar1.next_gva += NVKM_GMMU_PT_PAGE_SIZE;
+	}
+
+	for (uint64_t off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
+		(void)nvkm_gsp_bar1_map_vram(sc, scratch_gva, paddr + off);
+		for (uint32_t i = 0; i < NVKM_GMMU_PT_PAGE_SIZE; i += 4)
+			nvkm_gsp_bar1_wr32(sc, scratch_gva + i, 0);
+	}
+	nvkm_gsp_bar1_flush(sc);
+	nvkm_gsp_bar1_invalidate(sc);
+}
+
+int
+nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_chan *chan)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct NV2080_CTRL_INTERNAL_STATIC_GR_GET_CONTEXT_BUFFERS_INFO_PARAMS_dfly *info;
+	struct NV2080_CTRL_GPU_PROMOTE_CTX_PARAMS_dfly *ctrl;
+	void *q;
+	uint64_t next_gva;
+	int err;
+
+	if (chan->gr_ctx_promoted)
+		return (0);
+
+	memset(&tmp_client, 0, sizeof(tmp_client));
+	tmp_client.sc = sc;
+	tmp_client.object.client = &tmp_client;
+	tmp_client.object.handle = sc->gsp_internal_client;
+	tmp_subdev.client = &tmp_client;
+	tmp_subdev.parent = NULL;
+	tmp_subdev.handle = sc->gsp_internal_subdevice;
+
+	info = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_INTERNAL_STATIC_KGR_GET_CONTEXT_BUFFERS_INFO,
+	    sizeof(*info));
+	if (info == NULL)
+		return (ENOMEM);
+	q = info;
+	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*info));
+	if (err != 0 || q == NULL)
+		return (err ? err : EIO);
+	info = q;
+
+	{
+		struct NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS_dfly *zcull;
+		zcull = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+		    NV2080_CTRL_CMD_GR_GET_ZCULL_INFO, sizeof(*zcull));
+		if (zcull == NULL) {
+			nvkm_gsp_rm_ctrl_done(&tmp_subdev, info);
+			return (ENOMEM);
+		}
+		q = zcull;
+		err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*zcull));
+		if (err != 0 || q == NULL) {
+			nvkm_gsp_rm_ctrl_done(&tmp_subdev, info);
+			return (err ? err : EIO);
+		}
+		zcull = q;
+		device_printf(sc->dev,
+		    "gsp_rm: GR zcull widthAlign=%u heightAlign=%u "
+		    "subregions=%u err=0\n",
+		    zcull->widthAlignPixels, zcull->heightAlignPixels,
+		    zcull->subregionCount);
+		nvkm_gsp_rm_ctrl_done(&tmp_subdev, zcull);
+	}
+
+	next_gva = NVKM_VMM_CLIENT_BASE + 0x01000000ULL +
+	    (uint64_t)chan->chid * 0x01000000ULL;
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&vmm->device.subdevice,
+	   NV2080_CTRL_CMD_GPU_PROMOTE_CTX, sizeof(*ctrl));
+	if (ctrl == NULL) {
+		nvkm_gsp_rm_ctrl_done(&tmp_subdev, info);
+		return (ENOMEM);
+	}
+	memset(ctrl, 0, sizeof(*ctrl));
+	ctrl->engineType = NV2080_ENGINE_TYPE_GRAPHICS;
+	ctrl->hChanClient = vmm->client.object.handle;
+	ctrl->hObject = chan->object.handle;
+
+	for (uint32_t i = 0;
+	    i < NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT;
+	    i++) {
+		struct NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_BUFFER_INFO_dfly *bi =
+		    &info->engineContextBuffersInfo[0].engine[i];
+		struct NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY_dfly *e;
+		struct nvkm_gsp_gr_ctxbuf *buf;
+		uint32_t buffer_id;
+		uint64_t size, mem_align, gva_align;
+		uint32_t page_shift, gva_align_shift;
+		uint8_t init, nonmapped;
+
+		if (bi->size == 0)
+			continue;
+		if (nvkm_gsp_gr_ctxbuf_map(i, &buffer_id, &init,
+		    &nonmapped) != 0)
+			continue;
+		if (ctrl->entryCount >= NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES ||
+		    chan->gr_ctxbuf_nr >= NVKM_GSP_GR_MAX_CTXBUFS) {
+			err = ENOSPC;
+			goto out_done;
+		}
+
+		size = bi->size;
+		if (buffer_id == NV2080_CTXBUF_ID_MAIN)
+			size = NVKM_ALIGN_UP(size, 0x1000) + 64 * 0x1000;
+
+		if (size >= (1ULL << 21))
+			page_shift = 21;
+		else if (size >= (1ULL << 16))
+			page_shift = 16;
+		else
+			page_shift = 12;
+
+		if (buffer_id == NV2080_CTXBUF_ID_ATTRIBUTE_CB)
+			gva_align_shift = nvkm_order_base_2_u64(size);
+		else
+			gva_align_shift = page_shift;
+
+		mem_align = 1ULL << page_shift;
+		gva_align = 1ULL << gva_align_shift;
+		size = NVKM_ALIGN_UP(size, mem_align);
+		next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
+
+		buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
+		buf->paddr = nvkm_gsp_vram_alloc(sc, size, mem_align);
+		if (buf->paddr == 0) {
+			err = ENOMEM;
+			goto out_done;
+		}
+		buf->size = size;
+		buf->gva = next_gva;
+		buf->buffer_id = buffer_id;
+		buf->nonmapped = nonmapped;
+		chan->gr_ctxbuf_nr++;
+
+		nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+		if (!nonmapped) {
+			err = nvkm_gsp_vmm_map_vram(vmm, buf->gva,
+			    buf->paddr, buf->size);
+			if (err != 0)
+				goto out_done;
+		}
+
+		e = &ctrl->promoteEntry[ctrl->entryCount++];
+		e->gpuVirtAddr = nonmapped ? 0 : buf->gva;
+		e->bufferId = (uint16_t)buffer_id;
+		e->bInitialize = init;
+		e->bNonmapped = nonmapped;
+		if (e->bInitialize) {
+			e->gpuPhysAddr = buf->paddr;
+			e->size = buf->size;
+			e->physAttr = 4;
+		}
+		device_printf(sc->dev,
+		    "gsp_rm: gr promote ctxbuf id=%u eng=%u size=0x%llx pa=0x%llx va=0x%llx init=%u nm=%u\n",
+		    buffer_id, i, (unsigned long long)e->size,
+		    (unsigned long long)e->gpuPhysAddr,
+		    (unsigned long long)e->gpuVirtAddr, init, nonmapped);
+		next_gva += buf->size;
+
+		/* nouveau r535_gr_get_ctxbuf_info() duplicates PRIV_ACCESS_MAP
+		 * as UNRESTRICTED_PRIV_ACCESS_MAP.  The first one is nonmapped;
+		 * the unrestricted copy is separately allocated and mapped. */
+		if (buffer_id == NV2080_CTXBUF_ID_PRIV_ACCESS_MAP) {
+			if (ctrl->entryCount >=
+			    NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES ||
+			    chan->gr_ctxbuf_nr >= NVKM_GSP_GR_MAX_CTXBUFS) {
+				err = ENOSPC;
+				goto out_done;
+			}
+
+			next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
+			buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
+			buf->paddr = nvkm_gsp_vram_alloc(sc, size, mem_align);
+			if (buf->paddr == 0) {
+				err = ENOMEM;
+				goto out_done;
+			}
+			buf->size = size;
+			buf->gva = next_gva;
+			buf->buffer_id =
+			    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP;
+			buf->nonmapped = 0;
+			chan->gr_ctxbuf_nr++;
+
+			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+			err = nvkm_gsp_vmm_map_vram(vmm, buf->gva,
+			    buf->paddr, buf->size);
+			if (err != 0)
+				goto out_done;
+
+			e = &ctrl->promoteEntry[ctrl->entryCount++];
+			e->gpuVirtAddr = buf->gva;
+			e->bufferId =
+			    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP;
+			e->bInitialize = init;
+			e->bNonmapped = 0;
+			if (e->bInitialize) {
+				e->gpuPhysAddr = buf->paddr;
+				e->size = buf->size;
+				e->physAttr = 4;
+			}
+			device_printf(sc->dev,
+			    "gsp_rm: gr promote ctxbuf id=%u eng=%u size=0x%llx pa=0x%llx va=0x%llx init=%u nm=%u\n",
+			    e->bufferId, i, (unsigned long long)e->size,
+			    (unsigned long long)e->gpuPhysAddr,
+			    (unsigned long long)e->gpuVirtAddr, init, 0);
+			next_gva += buf->size;
+		}
+	}
+
+	uint32_t entry_count = ctrl->entryCount;
+	err = nvkm_gsp_rm_ctrl_wr(&vmm->device.subdevice, ctrl);
+	device_printf(sc->dev,
+	    "gsp_rm: GPU_PROMOTE_CTX chan=0x%x chid=%d entries=%u err=%d\n",
+	    chan->object.handle, chan->chid, entry_count, err);
+	if (err == 0)
+		chan->gr_ctx_promoted = 1;
+out_done:
+	nvkm_gsp_rm_ctrl_done(&tmp_subdev, info);
+	return (err);
+}
+
+int
+nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm *golden_vmm;
+	struct nvkm_gsp_chan *golden;
+	struct nvkm_gsp_object threed;
+	int err;
+	static int done;
+
+	if (done)
+		return (0);
+
+	golden_vmm = kzalloc(sizeof(*golden_vmm), GFP_KERNEL);
+	if (golden_vmm == NULL)
+		return (ENOMEM);
+
+	golden = kzalloc(sizeof(*golden), GFP_KERNEL);
+	if (golden == NULL) {
+		kfree(golden_vmm);
+		return (ENOMEM);
+	}
+
+	device_printf(sc->dev,
+	    "gsp_rm: GR oneinit: golden channel begin\n");
+
+	err = nvkm_gsp_vmm_ctor(sc, 0xc1d00002, golden_vmm);
+	if (err != 0)
+		goto out_free;
+
+	err = nvkm_gsp_golden_chan_ctor(golden_vmm, golden);
+	if (err != 0)
+		goto out_vmm;
+
+	err = nvkm_gsp_chan_promote_gr_ctx(golden_vmm, golden);
+	if (err != 0)
+		goto out_chan;
+
+	memset(&threed, 0, sizeof(threed));
+	err = nvkm_gsp_chan_alloc_obj(golden, 0x97000000u, 0x0000c597u,
+	    &threed);
+	if (err != 0)
+		goto out_chan;
+
+	(void)nvkm_gsp_rm_free(&threed);
+	done = 1;
+	device_printf(sc->dev,
+	    "gsp_rm: GR oneinit: golden channel complete\n");
+
+out_chan:
+	(void)nvkm_gsp_chan_dtor(golden);
+out_vmm:
+	nvkm_gsp_vmm_dtor(golden_vmm);
+out_free:
+	kfree(golden);
+	kfree(golden_vmm);
+	return (err);
+}
+
+int
+nvkm_gsp_chan_alloc_obj(struct nvkm_gsp_chan *chan, uint32_t handle,
+    uint32_t oclass, struct nvkm_gsp_object *obj)
+{
+	struct nvkm_softc *sc = chan->object.client->sc;
+	int err;
+
+	memset(obj, 0, sizeof(*obj));
+
+	switch (oclass) {
+	case 0x0000c5b5: { /* TURING_DMA_COPY_A */
+		struct {
+			uint32_t version;
+			uint32_t engineType;
+		} *args;
+
+		args = nvkm_gsp_rm_alloc_get(&chan->object, handle, oclass,
+		    sizeof(*args), obj);
+		if (args == NULL)
+			return (ENOMEM);
+		args->version = 1;
+		args->engineType = NV2080_ENGINE_TYPE_COPY0;
+		err = nvkm_gsp_rm_alloc_wr(obj, args);
+		break;
+	}
+	case 0x0000c597: /* TURING_A */
+	case 0x0000c5c0: /* TURING_COMPUTE_A */
+	case 0x0000902d: /* FERMI_TWOD_A */
+	case 0x0000a140: /* KEPLER_INLINE_TO_MEMORY_B */
+	{
+		void *args;
+
+		args = nvkm_gsp_rm_alloc_get(&chan->object, handle, oclass, 0,
+		    obj);
+		if (args == NULL)
+			return (ENOMEM);
+		err = nvkm_gsp_rm_alloc_wr(obj, args);
+		break;
+	}
+	default:
+		return (EINVAL);
+	}
+
+	device_printf(sc->dev,
+	    "gsp_rm: channel obj alloc cls=0x%x handle=0x%x chan=0x%x err=%d\n",
+	    oclass, handle, chan->object.handle, err);
+	if (err != 0)
+		memset(obj, 0, sizeof(*obj));
 	return (err);
 }

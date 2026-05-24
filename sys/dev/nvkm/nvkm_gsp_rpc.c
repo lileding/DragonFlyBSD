@@ -411,11 +411,14 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 {
 	struct nvkm_nvfw_gsp_rpc *rpc = params_to_rpc(params);
 	uint32_t fn = rpc->function;
+	uint32_t seq = 0;
 	int err;
 
 	/* Assign inner sequence iff policy expects a reply. */
-	if (policy != NVKM_GSP_RPC_REPLY_NOSEQ)
-		rpc->sequence = sc->gsp_rpc_seq++;
+	if (policy != NVKM_GSP_RPC_REPLY_NOSEQ) {
+		seq = sc->gsp_rpc_seq++;
+		rpc->sequence = seq;
+	}
 
 	/* Wrap cmdq_push with gsp_tok so concurrent senders serialise. For
 	 * REPLY_RECV we'll re-take the token below; lwkt tokens are
@@ -435,7 +438,7 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		return ((void *)(uintptr_t)1);
 
 	case NVKM_GSP_RPC_REPLY_RECV: {
-		struct nvkm_gsp_pending p = { .seq = rpc->sequence };
+		struct nvkm_gsp_pending p = { .seq = seq };
 		int ticks_to_wait;
 		int timeout_ticks = 5 * hz;
 
