@@ -430,13 +430,34 @@ nvkm_pci_attach(device_t dev)
 			}
 
 			/* Install IRQ handler + arm GSP doorbell interrupt to host.
+			 * Prefer MSI; fall back to INTx. Set INTx Disable bit in CMD
+			 * when MSI succeeds (matches Fedora).
 			 * After this point, GSP-RM events arrive via ithread; attach
 			 * must do no more cmdq writes (no concurrent caller). */
 			if (sc->gsp_running) {
-				sc->irq_rid = 0;
+				int msi_count = pci_msi_count(dev);
+				int want = 1;
+				bool used_msi = false;
+				device_printf(dev,
+				    "gsp: PCI advertises %d MSI vectors\n", msi_count);
+				if (msi_count >= 1 &&
+				    pci_alloc_msi(dev, &want, 1, -1) == 0) {
+					sc->irq_rid = 1;
+					used_msi = true;
+					/* Disable INTx now that MSI is owned. */
+					uint16_t cmd = pci_read_config(dev, 0x04, 2);
+					pci_write_config(dev, 0x04, cmd | 0x0400, 2);
+					device_printf(dev,
+					    "gsp: MSI 1 vector acquired (rid=1), INTx disabled\n");
+				} else {
+					sc->irq_rid = 0;
+					device_printf(dev,
+					    "gsp: MSI alloc failed, falling back to INTx (rid=0)\n");
+				}
+				sc->irq_msi = used_msi;
 				sc->irq_res = bus_alloc_resource_any(dev,
 				    SYS_RES_IRQ, &sc->irq_rid,
-				    RF_ACTIVE | RF_SHAREABLE);
+				    used_msi ? RF_ACTIVE : (RF_ACTIVE | RF_SHAREABLE));
 				if (sc->irq_res != NULL) {
 					lwkt_serialize_init(&sc->irq_serialize);
 					int err = bus_setup_intr(dev,
@@ -610,6 +631,10 @@ nvkm_pci_detach(device_t dev)
 		bus_release_resource(dev, SYS_RES_IRQ,
 		    sc->irq_rid, sc->irq_res);
 		sc->irq_res = NULL;
+		if (sc->irq_msi) {
+			pci_release_msi(dev);
+			sc->irq_msi = false;
+		}
 	}
 
 	nvkm_drm_unregister(sc);
