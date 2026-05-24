@@ -180,6 +180,12 @@ int	 nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp);
 
 /* GPFIFO channel (TURING_CHANNEL_GPFIFO_A for our Turing target).
  * Owns the VRAM backing for inst/USERD and the sysmem mthdbuf. */
+/* Sysmem-allocated 4 KiB page for GART-style data BOs. */
+struct nvkm_gsp_sysmem_page {
+	void			*kva;
+	vm_paddr_t		paddr;
+};
+
 struct nvkm_gsp_chan {
 	struct nvkm_gsp_object	object;
 	uint64_t		inst_vram;	/* VRAM physical base */
@@ -198,11 +204,11 @@ struct nvkm_gsp_chan {
 	 * can pass a real gpFifoOffset to GSP. PD0/SPT hold the host
 	 * PT under PD1[8] (covers GVA 0x100000000..). */
 	/* PT + data BOs all in VRAM, accessed via BAR1 (nvkm_bar1_page). */
-	struct nvkm_bar1_page	submit_pd0;
-	struct nvkm_bar1_page	submit_spt;
-	struct nvkm_bar1_page	submit_push;
-	struct nvkm_bar1_page	submit_gpf;
-	struct nvkm_bar1_page	submit_sema;
+	struct nvkm_bar1_page	submit_pd0;	/* VRAM (PT page) */
+	struct nvkm_bar1_page	submit_spt;	/* VRAM (PT page) */
+	struct nvkm_gsp_sysmem_page submit_push;	/* sysmem (matches nouveau GART) */
+	struct nvkm_gsp_sysmem_page submit_gpf;	/* sysmem */
+	struct nvkm_gsp_sysmem_page submit_sema;	/* sysmem */
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
