@@ -1497,6 +1497,51 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_submit: DIAG pre-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
 		    um_t0_hi, um_t0_lo, db_rb);
+
+		/* Per nouveau tu102_runl_commit (fifo/tu102.c:71):
+		 *   NV_RUNLIST_BASE_LO = 0x002b00 + (runl_id * 0x10)
+		 *   NV_RUNLIST_BASE_HI = 0x002b04 + (runl_id * 0x10)
+		 *   NV_RUNLIST_NUM     = 0x002b08 + (runl_id * 0x10)
+		 *   NV_RUNLIST_STATUS  = 0x002b0c + (runl_id * 0x10)  bit15 = PENDING
+		 * Read runlist 0 (GRAPHICS+CE0+CE1) and runlist 8 (CE2 = ours).
+		 * If GSP populated them, RUNLIST_BASE is a real VRAM paddr; if
+		 * unconfigured, reads PRI_BAD (0xbadf5040). */
+		for (uint32_t rl = 0; rl <= 8; rl += 8) {
+			uint32_t base_lo = nvkm_rd32(sc, 0x002b00 + rl * 0x10);
+			uint32_t base_hi = nvkm_rd32(sc, 0x002b04 + rl * 0x10);
+			uint32_t num     = nvkm_rd32(sc, 0x002b08 + rl * 0x10);
+			uint32_t status  = nvkm_rd32(sc, 0x002b0c + rl * 0x10);
+			device_printf(sc->dev,
+			    "gsp_submit: DIAG RUNLIST[%u]: BASE=%08x:%08x NUM=0x%08x STATUS=0x%08x\n",
+			    rl, base_hi, base_lo, num, status);
+			/* If BASE looks like a real VRAM paddr (not PRI_BAD, not zero),
+			 * dump first 256 bytes of runlist VRAM. */
+			if (base_lo != 0xbadf5040u && base_lo != 0 && (base_hi & 0xffffff00) == 0) {
+				uint64_t rl_paddr = ((uint64_t)base_hi << 32) | base_lo;
+				/* nouveau encodes BASE as (target<<28) | (addr>>12) on pre-Turing
+				 * but Turing splits lo/hi differently. Try both interpretations. */
+				uint64_t rl_paddr_alt = ((uint64_t)base_hi << 32) | ((uint64_t)base_lo << 12);
+				device_printf(sc->dev,
+				    "gsp_submit:   raw paddr=0x%llx  shifted-lo=0x%llx\n",
+				    (unsigned long long)rl_paddr,
+				    (unsigned long long)rl_paddr_alt);
+				/* Try raw paddr interpretation - dump up to 256B via PRAMIN. */
+				lwkt_gettoken(&sc->gsp_tok);
+				uint32_t saved_p = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+				nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(rl_paddr >> 16));
+				for (uint32_t off = 0; off < 0x100; off += 0x10) {
+					uint32_t w[4];
+					for (int k = 0; k < 4; k++)
+						w[k] = nvkm_rd32(sc, NV_PRAMIN +
+						    (uint32_t)((rl_paddr + off + k * 4) & 0xffffu));
+					device_printf(sc->dev,
+					    "gsp_submit:   runlist[%u]+0x%02x: %08x %08x %08x %08x\n",
+					    rl, off, w[0], w[1], w[2], w[3]);
+				}
+				nvkm_wr32(sc, NV_PBUS_PRAMIN, saved_p);
+				lwkt_reltoken(&sc->gsp_tok);
+			}
+		}
 	}
 		device_printf(sc->dev, "gsp_submit: doorbell spray begin (gsp_token=0x%08x)\n",
 		    chan->gsp_token);
