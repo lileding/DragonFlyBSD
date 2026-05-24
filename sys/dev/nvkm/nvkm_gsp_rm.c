@@ -1359,6 +1359,46 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 
+	/* HAIL MARY: manually write NV_RUNLIST_NUM register to commit runlist
+	 * to PBDMA. nouveau non-GSP path (tu102_runl_commit) writes this
+	 * as the commit trigger. In GSP mode nouveau doesn't, expecting
+	 * GSP to do it — but our PBDMA never picks up channels. Try writing
+	 * NUM ourselves and see if PBDMA wakes.
+	 * Runlist VRAM contains our cgrp+chan entries (2 cgrp headers + 2
+	 * channels = 4 entries based on dump). Write count=4. */
+	{
+		uint32_t runl_id = 0;
+		switch (engine_type) {
+		case NV2080_ENGINE_TYPE_COPY0:
+		case NV2080_ENGINE_TYPE_COPY1:
+			runl_id = 0;
+			break;
+		case NV2080_ENGINE_TYPE_COPY2:
+			runl_id = 8;
+			break;
+		default:
+			runl_id = 0;
+		}
+		uint32_t b_lo = nvkm_rd32(sc, 0x002b00 + runl_id * 0x10);
+		uint32_t b_hi = nvkm_rd32(sc, 0x002b04 + runl_id * 0x10);
+		uint32_t num_pre  = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
+		uint32_t stat_pre = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
+		device_printf(sc->dev,
+		    "gsp_rm: HAIL MARY pre-write RUNLIST[%u]: BASE=%08x:%08x NUM=0x%08x STATUS=0x%08x\n",
+		    runl_id, b_hi, b_lo, num_pre, stat_pre);
+
+		/* Write count=4 to NUM to trigger commit. Try various counts. */
+		if (b_lo != 0xbadf5040u && b_lo != 0) {
+			nvkm_wr32(sc, 0x002b08 + runl_id * 0x10, 4);
+			DELAY(10000);
+			uint32_t num_post  = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
+			uint32_t stat_post = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
+			device_printf(sc->dev,
+			    "gsp_rm: HAIL MARY wrote NUM=4 → post NUM=0x%08x STATUS=0x%08x\n",
+			    num_post, stat_post);
+		}
+	}
+
 	/* Map USERD VRAM page at a BAR1 GVA so host writes go through
 	 * BAR1 walker -> L2-coherent VRAM (path nouveau uses). */
 	chan->userd_bar2_gva = sc->bar1.next_gva;
@@ -1492,6 +1532,74 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		device_printf(sc->dev,
 		    "gsp_submit: DIAG pre-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
 		    um_t0_hi, um_t0_lo, db_rb);
+
+		/* PCCSR_CHANNEL read for our chid. Per TU104 dev_fifo.ref.txt:
+		 *   NV_PCCSR_CHANNEL_INST(i)    = 0x00800000 + i*8  (bit 31 = BIND)
+		 *   NV_PCCSR_CHANNEL(i)         = 0x00800004 + i*8  (bit 0 = ENABLE)
+		 * PBDMA gates scheduling on ENABLE=IN_USE; if BIND/SCHEDULE
+		 * didn't set these, PBDMA ignores doorbells. */
+		{
+			uint32_t pccsr_inst = nvkm_rd32(sc, 0x00800000 + chan->chid * 8);
+			uint32_t pccsr_chan = nvkm_rd32(sc, 0x00800004 + chan->chid * 8);
+			/* Dump RAMFC at the paddr PCCSR points at — may differ from
+			 * chan->inst_vram if GSP allocated its own inst block. */
+			{
+				uint64_t real_inst = ((uint64_t)pccsr_inst & 0x0fffffffull) << 12;
+				device_printf(sc->dev,
+				    "gsp_submit: DIAG real inst (per PCCSR) = 0x%llx, chan->inst_vram = 0x%llx, %s\n",
+				    (unsigned long long)real_inst,
+				    (unsigned long long)chan->inst_vram,
+				    real_inst == chan->inst_vram ? "MATCH" : "*** DIFFER ***");
+				if (real_inst != 0 && real_inst != chan->inst_vram) {
+					lwkt_gettoken(&sc->gsp_tok);
+					uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+					nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(real_inst >> 16));
+					device_printf(sc->dev,
+					    "gsp_submit: DIAG real-inst[0x000..0x060]: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x\n",
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x00) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x04) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x08) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x0c) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x10) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x14) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x18) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x1c) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x20) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x24) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x28) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x2c) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x30) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x34) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x38) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x3c) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x40) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x44) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x48) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x4c) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x50) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x54) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x58) & 0xffffu)),
+					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x5c) & 0xffffu)));
+					nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+					lwkt_reltoken(&sc->gsp_tok);
+				}
+			}
+			device_printf(sc->dev,
+			    "gsp_submit: DIAG PCCSR[chid=%d]: INST=0x%08x (BIND=%u, INST_PTR>>12=0x%x, TARGET=%u) CHANNEL=0x%08x (ENABLE=%u, BUSY=%u)\n",
+			    chan->chid, pccsr_inst,
+			    (pccsr_inst >> 31) & 1u,
+			    pccsr_inst & 0x0fffffffu,
+			    (pccsr_inst >> 28) & 3u,
+			    pccsr_chan,
+			    pccsr_chan & 1u,
+			    (pccsr_chan >> 28) & 1u);
+			/* Also read PCCSR for chid=0 (GSP helper) for comparison. */
+			uint32_t h_inst = nvkm_rd32(sc, 0x00800000 + 0 * 8);
+			uint32_t h_chan = nvkm_rd32(sc, 0x00800004 + 0 * 8);
+			device_printf(sc->dev,
+			    "gsp_submit: DIAG PCCSR[chid=0 GSP-helper]: INST=0x%08x CHANNEL=0x%08x\n",
+			    h_inst, h_chan);
+		}
 
 		/* Per nouveau tu102_runl_commit (fifo/tu102.c:71):
 		 *   NV_RUNLIST_BASE_LO = 0x002b00 + (runl_id * 0x10)
