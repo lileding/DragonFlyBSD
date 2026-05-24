@@ -51,10 +51,9 @@ int
 nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 {
 	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
-	uint64_t pd2, pd1, pd0, spt;
-	uint64_t pd2_pde;
-	struct rpc_update_bar_pde_v15_00_b1 *rpc;
-	int err;
+	uint64_t spt;
+	uint64_t gsp_pd2, gsp_pd1, gsp_pd0;
+	uint64_t spt_pde;
 	uint32_t saved;
 
 	if (sc->bar_res[1] == NULL) {
@@ -70,89 +69,96 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 		return (ENXIO);
 	}
 
-	pd2 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	pd1 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	pd0 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	uint64_t lpt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	if (!pd2 || !pd1 || !pd0 || !spt || !lpt) {
-		device_printf(sc->dev, "bar1: VRAM alloc failed\n");
-		return (ENOMEM);
-	}
-
-	b1->pd3_paddr = sc->gsp_bar1_pdb;
-	b1->pd2_paddr = pd2;
-	b1->pd1_paddr = pd1;
-	b1->pd0_paddr = pd0;
-	b1->spt_paddr = spt;
-	b1->next_gva  = BAR1_GVA_ALLOC_BASE;
-
+	/* nouveau-style inheritance: don't allocate our own PD2/PD1/PD0,
+	 * don't issue UPDATE_BAR_PDE BAR_1 RPC. GSP already built a BAR1 PT
+	 * chain rooted at sc->gsp_bar1_pdb with mappings for GSP's own use
+	 * (e.g. its internal channel inst blocks, runlist VRAM, etc). If we
+	 * overwrite GSP's PD3[0], those GSP-internal BAR1 mappings break and
+	 * GSP can't access its own state — silently page-faulting on inst
+	 * reads, leaving PBDMA unable to schedule channels.
+	 *
+	 * Instead: walk GSP's chain (PD3[0]->PD2[0]->PD1[0]->PD0), allocate
+	 * one SPT, mount it on GSP's PD0[127].SMALL. That gives us 2 MiB of
+	 * GVA at [254 MiB, 256 MiB) within BAR1, plenty for USERD + inst,
+	 * without disturbing any of GSP's existing BAR1 mappings.
+	 */
+	uint64_t pdb_paddr = sc->gsp_bar1_pdb;
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b1_pramin_set_base(sc, pd2 & ~(uint64_t)0xffffu);
 
-	uint64_t zpages[5] = { pd2, pd1, pd0, spt, lpt };
-	for (int zi = 0; zi < 5; zi++) {
-		for (uint32_t off = 0; off < 0x1000; off += 4)
-			b1_pramin_wr32(sc, zpages[zi] + off, 0);
-	}
+	/* Read GSP PD3[0] = first 8 bytes of GSP PD3 page. */
+	b1_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
+	uint32_t pd3_lo = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
+	uint32_t pd3_hi = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((pdb_paddr + 4) & 0xffffu));
+	uint64_t pd3_0 = ((uint64_t)pd3_hi << 32) | pd3_lo;
+	gsp_pd2 = (pd3_0 & ~(uint64_t)0xffull) << 4;
 
-	b1_pramin_wr64(sc, pd2 + 0,
-	    (pd1 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	b1_pramin_wr64(sc, pd1 + 0,
-	    (pd0 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	/* Dual slot: BIG = LPT (all-invalid zeros so walker falls back to SMALL
-	 * for 4 KiB GVAs); SMALL = SPT (our 4 KiB-page maps live here). */
-	b1_pramin_wr64(sc, pd0 + 0,
-	    (lpt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	b1_pramin_wr64(sc, pd0 + 8,
-	    (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
+	/* Read GSP PD2[0]. */
+	b1_pramin_set_base(sc, gsp_pd2 & ~(uint64_t)0xffffu);
+	uint32_t pd2_lo = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((gsp_pd2 + 0) & 0xffffu));
+	uint32_t pd2_hi = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((gsp_pd2 + 4) & 0xffffu));
+	uint64_t pd2_0 = ((uint64_t)pd2_hi << 32) | pd2_lo;
+	gsp_pd1 = (pd2_0 & ~(uint64_t)0xffull) << 4;
+
+	/* Read GSP PD1[0]. */
+	b1_pramin_set_base(sc, gsp_pd1 & ~(uint64_t)0xffffu);
+	uint32_t pd1_lo = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((gsp_pd1 + 0) & 0xffffu));
+	uint32_t pd1_hi = nvkm_rd32(sc, NV_PRAMIN +
+	    (uint32_t)((gsp_pd1 + 4) & 0xffffu));
+	uint64_t pd1_0 = ((uint64_t)pd1_hi << 32) | pd1_lo;
+	gsp_pd0 = (pd1_0 & ~(uint64_t)0xffull) << 4;
 
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
-	pd2_pde = (pd2 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
+	device_printf(sc->dev,
+	    "bar1: walked GSP PT chain: PD3=0x%llx -> PD2=0x%llx -> PD1=0x%llx -> PD0=0x%llx\n",
+	    (unsigned long long)pdb_paddr, (unsigned long long)gsp_pd2,
+	    (unsigned long long)gsp_pd1, (unsigned long long)gsp_pd0);
 
-	uint64_t pdb_paddr = sc->gsp_bar1_pdb;
-	lwkt_gettoken(&sc->gsp_tok);
-	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b1_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
-	uint32_t pdb0_pre_lo = nvkm_rd32(sc, NV_PRAMIN +
-	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
-	uint32_t pdb0_pre_hi = nvkm_rd32(sc, NV_PRAMIN +
-	    (uint32_t)((pdb_paddr + 4) & 0xffffu));
-	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
-	lwkt_reltoken(&sc->gsp_tok);
-
-	rpc = nvkm_gsp_rpc_get(sc, NV_VGPU_MSG_FUNCTION_UPDATE_BAR_PDE,
-	    sizeof(*rpc));
-	if (rpc == NULL)
+	/* Alloc OUR SPT only. Mount on GSP's PD0[127].SMALL (last 2 MiB of
+	 * BAR1 GVA range, [254 MiB, 256 MiB)). */
+	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	if (spt == 0) {
+		device_printf(sc->dev, "bar1: SPT alloc failed\n");
 		return (ENOMEM);
-	rpc->barType         = NV_RPC_UPDATE_PDE_BAR_1;
-	rpc->entryValue      = pd2_pde;
-	rpc->entryLevelShift = NVKM_GMMU_PD3_SHIFT;
-	err = nvkm_gsp_rpc_wr(sc, rpc, NVKM_GSP_RPC_REPLY_RECV);
-	if (err != 0) {
-		device_printf(sc->dev,
-		    "bar1: UPDATE_BAR_PDE BAR_1 failed err=%d\n", err);
-		return (err);
 	}
-
+	/* Zero our SPT via PRAMIN. */
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b1_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
-	uint32_t pdb0_post_lo = nvkm_rd32(sc, NV_PRAMIN +
-	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
-	uint32_t pdb0_post_hi = nvkm_rd32(sc, NV_PRAMIN +
-	    (uint32_t)((pdb_paddr + 4) & 0xffffu));
+	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+	for (uint32_t off = 0; off < 0x1000; off += 4)
+		b1_pramin_wr32(sc, spt + off, 0);
+
+	/* Write GSP PD0[127].SMALL = our SPT PDE.
+	 * PD0 entry layout: 16-byte dual; .BIG at +0, .SMALL at +8.
+	 * Entry 127 starts at gsp_pd0 + 127*16 = gsp_pd0 + 0x7f0. */
+	spt_pde = (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
+	uint64_t pd0_127_small = gsp_pd0 + 127 * 16 + 8;
+	b1_pramin_set_base(sc, pd0_127_small & ~(uint64_t)0xffffu);
+	b1_pramin_wr64(sc, pd0_127_small, spt_pde);
+	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
+
+	b1->pd3_paddr = sc->gsp_bar1_pdb;
+	b1->pd2_paddr = gsp_pd2;   /* shared with GSP, informational */
+	b1->pd1_paddr = gsp_pd1;
+	b1->pd0_paddr = gsp_pd0;
+	b1->spt_paddr = spt;
+	/* GVA = 127 * 2 MiB = 0xfe00000 (254 MiB), first slot in our SPT. */
+	b1->next_gva  = 127ULL * (2ULL << 20);
 
 	device_printf(sc->dev,
-	    "bar1: GSP PDB[0] pre RPC = 0x%08x:%08x, post RPC = 0x%08x:%08x, expected pde = 0x%llx\n",
-	    pdb0_pre_hi, pdb0_pre_lo, pdb0_post_hi, pdb0_post_lo,
-	    (unsigned long long)pd2_pde);
+	    "bar1: mounted OUR SPT 0x%llx at GSP PD0[127].SMALL = 0x%llx (PDE 0x%llx); GVA base 0x%llx\n",
+	    (unsigned long long)spt, (unsigned long long)pd0_127_small,
+	    (unsigned long long)spt_pde, (unsigned long long)b1->next_gva);
 
 	/* PDB invalidate -- same sequence as BAR2. */
 	uint64_t pdb_inv = (pdb_paddr >> 12) << 4;
@@ -176,12 +182,11 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    "bar1: PDB invalidate trigger 0x100cbc=0x%x\n", trig_rb);
 
 	device_printf(sc->dev,
-	    "bar1: PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx; "
-	    "GSP PDB=0x%llx; UPDATE_BAR_PDE pde=0x%llx; "
+	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
+	    "our SPT=0x%llx (mounted on GSP PD0[127].SMALL); "
 	    "BAR1@%llx %lluMiB\n",
-	    (unsigned long long)pd2, (unsigned long long)pd1,
-	    (unsigned long long)pd0, (unsigned long long)spt,
-	    (unsigned long long)pdb_paddr, (unsigned long long)pd2_pde,
+	    (unsigned long long)gsp_pd2, (unsigned long long)gsp_pd1,
+	    (unsigned long long)gsp_pd0, (unsigned long long)spt,
 	    (unsigned long long)rman_get_start(sc->bar_res[1]),
 	    (unsigned long long)rman_get_size(sc->bar_res[1]) >> 20);
 
