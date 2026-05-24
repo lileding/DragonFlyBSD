@@ -214,14 +214,26 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
 	uint32_t saved;
 	uint32_t spt_idx;
+	uint32_t pd0_idx;
 	uint64_t pte;
 
 	if (!b1->ready)
 		return (ENXIO);
-	if (bar1_gva >= (512ULL << 20)) /* SPT covers 2 MiB; we only use small range */
+	if (bar1_gva >= (512ULL << 20)) /* BAR1 is 256 MiB on TU102 */
 		return (EINVAL);
 
-	spt_idx = (uint32_t)(bar1_gva >> 12);  /* 4 KiB SMALL pages */
+	/* Our SPT is mounted at GSP PD0[127].SMALL, covering the final
+	 * 2 MiB of BAR1.  Match nouveau's VMM iterator index split:
+	 *   SPT index = (gva >> 12) & 0x1ff
+	 *   PD0 index = (gva >> 21) & 0xff
+	 * The old code used gva >> 12 directly, which wrote far beyond the
+	 * 512-entry SPT for GVAs like 0xfe07000.
+	 */
+	pd0_idx = (uint32_t)((bar1_gva >> 21) & 0xffu);
+	if (pd0_idx != 127u)
+		return (EINVAL);
+
+	spt_idx = (uint32_t)((bar1_gva >> 12) & 0x1ffu);  /* 4 KiB SMALL pages */
 	pte = (vram_paddr >> 12) << 8;          /* PTE: paddr in [39:8] */
 	pte |= 0x1;                              /* VALID = bit 0 */
 
