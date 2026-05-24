@@ -1356,9 +1356,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	/* TURING_USERMODE_A is allocated once per device in vmm_ctor
 	 * (nouveau does this at drm init, before any channel). */
 
-	/* Pre-publish sc->gsp_chan so submit_test can see it. */
+	/* Pre-publish sc->gsp_chan so the test kthread (spawned in attach)
+	 * can see it. The test kthread sleeps a few seconds after attach
+	 * completes, then calls nvkm_gsp_submit_test() off the dfly driver
+	 * thread so the rest of bus attach is not blocked by the 1 s sema
+	 * timeout. */
 	sc->gsp_chan = chan;
-	(void)nvkm_gsp_submit_test(sc);
 	return (0);
 }
 
