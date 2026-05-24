@@ -830,6 +830,68 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 #define SUBMIT_POLL_MS		1000
 #define SUBMIT_POLL_STEP_MS	10
 
+static uint32_t
+nvkm_gsp_engine_runlist_id(uint32_t engine_type)
+{
+	switch (engine_type) {
+	case NV2080_ENGINE_TYPE_COPY2:
+		return (8);
+	case NV2080_ENGINE_TYPE_COPY0:
+	case NV2080_ENGINE_TYPE_COPY1:
+	default:
+		return (0);
+	}
+}
+
+static void
+nvkm_gsp_sched_trace(struct nvkm_softc *sc, const char *tag,
+    const struct nvkm_gsp_chan *chan, uint32_t engine_type)
+{
+	uint32_t chid = (uint32_t)chan->chid;
+	uint32_t runl_id = nvkm_gsp_engine_runlist_id(engine_type);
+	uint32_t pccsr_inst = nvkm_rd32(sc, 0x00800000 + chid * 8);
+	uint32_t pccsr_chan = nvkm_rd32(sc, 0x00800004 + chid * 8);
+	uint32_t rl_base_lo = nvkm_rd32(sc, 0x002b00 + runl_id * 0x10);
+	uint32_t rl_base_hi = nvkm_rd32(sc, 0x002b04 + runl_id * 0x10);
+	uint32_t rl_num = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
+	uint32_t rl_status = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
+
+	device_printf(sc->dev,
+	    "gsp_rm: SCHED_TRACE %-18s chid=%u runlist=%u "
+	    "PCCSR_INST=0x%08x(bind=%u ptr=0x%x target=%u) "
+	    "PCCSR_CHANNEL=0x%08x(enable=%u busy=%u) "
+	    "RUNLIST=%08x:%08x num=0x%08x status=0x%08x\n",
+	    tag, chid, runl_id, pccsr_inst, !!(pccsr_inst & 0x80000000u),
+	    pccsr_inst & 0x0fffffffu, (pccsr_inst >> 28) & 0x3u,
+	    pccsr_chan, pccsr_chan & 0x1u,
+	    (pccsr_chan >> 28) & 0x1u, rl_base_hi, rl_base_lo,
+	    rl_num, rl_status);
+}
+
+static void
+nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
+{
+	static const uint32_t userd_clear_offs[] = {
+		0x040, 0x044, 0x048, 0x04c, 0x050,
+		0x058, 0x05c, 0x060, NV_USERD_GP_GET, NV_USERD_GP_PUT,
+	};
+	uint64_t slot_bar1 = chan->userd_bar2_gva +
+	    (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
+	unsigned int i;
+
+	for (i = 0; i < sizeof(userd_clear_offs) /
+	    sizeof(userd_clear_offs[0]); i++)
+		nvkm_gsp_bar1_wr32(sc, slot_bar1 + userd_clear_offs[i], 0);
+	nvkm_gsp_bar1_flush(sc);
+
+	device_printf(sc->dev,
+	    "gsp_rm: USERD clear before schedule slot=0x%llx "
+	    "GP_GET=0x%08x GP_PUT=0x%08x\n",
+	    (unsigned long long)slot_bar1,
+	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET),
+	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT));
+}
+
 
 int
 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
@@ -1121,6 +1183,30 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		chan->mthdbuf_kva = NULL;
 		return (ENOMEM);
 	}
+
+	/* nouveau clears USERD before RAMFC/channel programming. Do the BAR1
+	 * mapping and clear before RM schedules the channel, otherwise HOST can
+	 * see stale GP_GET/GP_PUT immediately after SCHEDULE. */
+	chan->userd_bar2_gva = sc->bar1.next_gva;
+	sc->bar1.next_gva += 0x1000;
+	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
+	    chan->userd_vram);
+	nvkm_gsp_bar1_flush(sc);
+	nvkm_gsp_bar1_invalidate(sc);
+	nvkm_gsp_userd_clear(sc, chan);
+
+	/* Diag: write+readback marker at the actual USERD GVA we just mapped. */
+	{
+		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0xCAFEBABEu);
+		nvkm_gsp_bar1_flush(sc);
+		uint32_t rb = nvkm_gsp_bar1_rd32(sc, chan->userd_bar2_gva + 0x10);
+		device_printf(sc->dev,
+		    "bar1_diag: USERD page via BAR1 GVA 0x%llx+0x10 readback = 0x%08x (expect cafebabe)\n",
+		    (unsigned long long)chan->userd_bar2_gva, rb);
+		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0);
+		nvkm_gsp_bar1_flush(sc);
+	}
+
 	args = nvkm_gsp_rm_alloc_get(&device->object,
 	    NVKM_RM_CHANNEL | (uint32_t)chan->chid,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
@@ -1182,21 +1268,22 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    NV_KERNELCHANNEL_INTERNALFLAGS_ECCNOT_NONE;
 
 	err = nvkm_gsp_rm_alloc_wr(&chan->object, args);
-	if (err != 0) {
-		device_printf(sc->dev,
-		    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
-		    "(inst=0x%llx userd=0x%llx mthdbuf=0x%llx)\n", err,
+		if (err != 0) {
+			device_printf(sc->dev,
+			    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
+			    "(inst=0x%llx userd=0x%llx mthdbuf=0x%llx)\n", err,
 		    (unsigned long long)chan->inst_vram,
 		    (unsigned long long)chan->userd_vram,
 		    (unsigned long long)chan->mthdbuf_paddr);
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
-		chan->mthdbuf_kva = NULL;
-		return (err);
-	}
+			chan->mthdbuf_kva = NULL;
+			return (err);
+		}
+		nvkm_gsp_sched_trace(sc, "after-chan-alloc", chan, engine_type);
 
-	/* nouveau r535_chan_ramfc_write fifo.c:188-216: bind engine + enable
-	 * GPFIFO scheduling. Both are RM_CONTROL on the channel object. */
+		/* nouveau r535_chan_ramfc_write fifo.c:188-216: bind engine + enable
+		 * GPFIFO scheduling. Both are RM_CONTROL on the channel object. */
 	{
 		struct {
 			uint32_t engineType;
@@ -1215,12 +1302,13 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			device_printf(sc->dev,
 			    "gsp_rm: NVA06F_BIND engine=0x%x failed err=%d\n",
 			    engine_type, err);
-			return (err);
+				return (err);
+			}
 		}
-	}
+		nvkm_gsp_sched_trace(sc, "after-bind", chan, engine_type);
 
-	/* TASK 3 PROBE: query workSubmitToken BEFORE SCHEDULE so we can
-	 * see what state SCHEDULE actually transitions. open-rm Turing
+		/* TASK 3 PROBE: query workSubmitToken BEFORE SCHEDULE so we can
+		 * see what state SCHEDULE actually transitions. open-rm Turing
 	 * kfifoGenerateWorkSubmitTokenHal_TU102 returns NV_ERR_INVALID_STATE
 	 * when channel is not on a runlist. If pre-probe returns INVALID_STATE
 	 * and the later post-probe returns the token, SCHEDULE is the activator. */
@@ -1266,11 +1354,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			device_printf(sc->dev,
 			    "gsp_rm: NVA06F_GPFIFO_SCHEDULE failed err=%d\n",
 			    err);
-			return (err);
+				return (err);
+			}
 		}
-	}
+		nvkm_gsp_sched_trace(sc, "after-schedule", chan, engine_type);
 
-	/* Engine class object: TURING_DMA_COPY_A for CE engines.
+		/* Engine class object: TURING_DMA_COPY_A for CE engines.
 	 * GRAPHICS would need TURING_A (0xc597) + ctx buffers; we skip for
 	 * simple scheduling test - NVC36F SEM_RELEASE is channel-level and
 	 * does not require an engine class object. */
@@ -1303,13 +1392,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    "gsp_rm: TURING_DMA_COPY_A handle=0x%x on channel=0x%x ok\n",
 		    chan->ce_obj.handle, chan->object.handle);
 	} else {
-		device_printf(sc->dev,
-		    "gsp_rm: SKIP engine class alloc (engine_type=0x%x is not CE)\n",
-		    engine_type);
-	}
+			device_printf(sc->dev,
+			    "gsp_rm: SKIP engine class alloc (engine_type=0x%x is not CE)\n",
+			    engine_type);
+		}
+		nvkm_gsp_sched_trace(sc, "after-ce-alloc", chan, engine_type);
 
-	{
-		uint32_t runl = 0;
+		{
+			uint32_t runl = 0;
 		int qerr = nvkm_gsp_query_ce0_runlist(sc, &runl);
 		if (qerr == 0) {
 			uint32_t token = (runl << 16) | (uint32_t)chan->chid;
@@ -1345,11 +1435,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 				device_printf(sc->dev,
 				    "gsp_rm: TRACE post-SCHEDULE token: err=0 val=0x%08x\n",
 				    chan->gsp_token);
+				}
 			}
 		}
-	}
+		nvkm_gsp_sched_trace(sc, "after-token", chan, engine_type);
 
-	device_printf(sc->dev,
+		device_printf(sc->dev,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 
@@ -1394,26 +1485,6 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 #endif
-
-	/* Map USERD VRAM page at a BAR1 GVA so host writes go through
-	 * BAR1 walker -> L2-coherent VRAM (path nouveau uses). */
-	chan->userd_bar2_gva = sc->bar1.next_gva;
-	sc->bar1.next_gva += 0x1000;
-	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
-	    chan->userd_vram);
-	nvkm_gsp_bar1_flush(sc);
-
-	/* Diag: write+readback marker at the actual USERD GVA we just mapped. */
-	{
-		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0xCAFEBABEu);
-		nvkm_gsp_bar1_flush(sc);
-		uint32_t rb = nvkm_gsp_bar1_rd32(sc, chan->userd_bar2_gva + 0x10);
-		device_printf(sc->dev,
-		    "bar1_diag: USERD page via BAR1 GVA 0x%llx+0x10 readback = 0x%08x (expect cafebabe)\n",
-		    (unsigned long long)chan->userd_bar2_gva, rb);
-		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0); /* clean for USERD */
-		nvkm_gsp_bar1_flush(sc);
-	}
 
 	/* TURING_USERMODE_A is allocated once per device in vmm_ctor
 	 * (nouveau does this at drm init, before any channel). */
