@@ -3,10 +3,10 @@
  *
  * GSP-RM BAR2 vmm (port of nouveau r535_bar_bar2_init).
  *
- * Build a fresh VRAM PT chain (PD2/PD1/PD0/SPT), PRAMIN-write it, then
- * send UPDATE_BAR_PDE BAR_2 RPC so GSP firmware installs our PD2-pointing
- * PDE into GSP\'s own BAR2 PDB.  The BAR2 walker (rooted at GSP\'s PDB)
- * then traverses our chain on every access.
+ * Build a fresh BAR2 VMM root, bootstrap the whole BAR2 aperture, then
+ * send UPDATE_BAR_PDE BAR_2 with the first root PDE.  This mirrors
+ * nouveau's gf100_bar_oneinit_bar(..., NVKM_BAR2_INST) + nvkm_vmm_boot()
+ * before r535_bar_bar2_init() hands vmm->pd->pt[0][0] to GSP-RM.
  *
  * BAR2 gives us L2-coherent VRAM read/write -- needed to manipulate
  * BAR1 PT pages (which are in VRAM and must be visible to the BAR1
@@ -18,8 +18,14 @@
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
+static MALLOC_DEFINE(M_NVKM_BAR2_PT, "nvkm_bar2_pt", "nvkm BAR2 page tables");
+
 #define NV_VGPU_MSG_FUNCTION_UPDATE_BAR_PDE 70
 #define NV_RPC_UPDATE_PDE_BAR_2             1
+
+#define BAR2_PT_PD1	1
+#define BAR2_PT_PD0	2
+#define BAR2_PT_SPT	3
 
 struct rpc_update_bar_pde_v15_00_b2 {
 	uint32_t barType;
@@ -45,6 +51,158 @@ b2_pramin_wr64(struct nvkm_softc *sc, uint64_t paddr, uint64_t val)
 {
 	b2_pramin_wr32(sc, paddr + 0, (uint32_t)(val & 0xffffffffu));
 	b2_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
+}
+
+static void
+nvkm_gsp_bar2_zero_vram_page_locked(struct nvkm_softc *sc, uint64_t paddr)
+{
+	uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+
+	b2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
+	for (uint32_t off = 0; off < NVKM_GMMU_PT_PAGE_SIZE; off += 4)
+		b2_pramin_wr32(sc, paddr + off, 0);
+	(void)nvkm_rd32(sc, NV_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+}
+
+static struct nvkm_gsp_bar2_pt *
+nvkm_gsp_bar2_pt_find(struct nvkm_gsp_bar2 *b2, uint8_t level,
+    uint32_t pd2_idx, uint32_t pd1_idx, uint32_t pd0_idx)
+{
+	struct nvkm_gsp_bar2_pt *pt;
+
+	LIST_FOREACH(pt, &b2->pt_pages, link) {
+		if (pt->level == level &&
+		    pt->pd2_idx == pd2_idx &&
+		    pt->pd1_idx == pd1_idx &&
+		    pt->pd0_idx == pd0_idx)
+			return (pt);
+	}
+
+	return (NULL);
+}
+
+static int
+nvkm_gsp_bar2_pt_alloc(struct nvkm_softc *sc, uint8_t level,
+    uint32_t pd2_idx, uint32_t pd1_idx, uint32_t pd0_idx,
+    struct nvkm_gsp_bar2_pt **ppt)
+{
+	struct nvkm_gsp_bar2 *b2 = &sc->bar2;
+	struct nvkm_gsp_bar2_pt *pt;
+	uint64_t paddr;
+
+	pt = nvkm_gsp_bar2_pt_find(b2, level, pd2_idx, pd1_idx, pd0_idx);
+	if (pt != NULL) {
+		*ppt = pt;
+		return (0);
+	}
+
+	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (paddr == 0)
+		return (ENOMEM);
+
+	pt = kmalloc(sizeof(*pt), M_NVKM_BAR2_PT, M_WAITOK | M_ZERO);
+	pt->level = level;
+	pt->pd2_idx = pd2_idx;
+	pt->pd1_idx = pd1_idx;
+	pt->pd0_idx = pd0_idx;
+	pt->paddr = paddr;
+	LIST_INSERT_HEAD(&b2->pt_pages, pt, link);
+
+	lwkt_gettoken(&sc->gsp_tok);
+	nvkm_gsp_bar2_zero_vram_page_locked(sc, paddr);
+	lwkt_reltoken(&sc->gsp_tok);
+
+	*ppt = pt;
+	return (0);
+}
+
+static int
+nvkm_gsp_bar2_get_spt(struct nvkm_softc *sc, uint64_t bar2_gva,
+    struct nvkm_gsp_bar2_pt **pspt)
+{
+	struct nvkm_gsp_bar2 *b2 = &sc->bar2;
+	struct nvkm_gsp_bar2_pt *pd1_pt, *pd0_pt, *spt_pt;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+	uint32_t saved;
+	int err;
+
+	pd2_idx = (uint32_t)((bar2_gva >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((bar2_gva >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((bar2_gva >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	err = nvkm_gsp_bar2_pt_alloc(sc, BAR2_PT_PD1, pd2_idx, 0, 0, &pd1_pt);
+	if (err != 0)
+		return (err);
+
+	err = nvkm_gsp_bar2_pt_alloc(sc, BAR2_PT_PD0, pd2_idx, pd1_idx, 0,
+	    &pd0_pt);
+	if (err != 0)
+		return (err);
+
+	err = nvkm_gsp_bar2_pt_alloc(sc, BAR2_PT_SPT, pd2_idx, pd1_idx,
+	    pd0_idx, &spt_pt);
+	if (err != 0)
+		return (err);
+
+	lwkt_gettoken(&sc->gsp_tok);
+	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+
+	b2_pramin_set_base(sc, b2->pd2_paddr & ~(uint64_t)0xffffu);
+	b2_pramin_wr64(sc, b2->pd2_paddr + pd2_idx * 8,
+	    nvkm_pde_to_vram(pd1_pt->paddr));
+
+	b2_pramin_set_base(sc, pd1_pt->paddr & ~(uint64_t)0xffffu);
+	b2_pramin_wr64(sc, pd1_pt->paddr + pd1_idx * 8,
+	    nvkm_pde_to_vram(pd0_pt->paddr));
+
+	b2_pramin_set_base(sc, pd0_pt->paddr & ~(uint64_t)0xffffu);
+	b2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16,
+	    nvkm_pde_to_vram(spt_pt->paddr));
+	b2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16 + 8, 0);
+
+	(void)nvkm_rd32(sc, NV_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
+
+	if (b2->pd1_paddr == 0)
+		b2->pd1_paddr = pd1_pt->paddr;
+	if (b2->pd0_paddr == 0)
+		b2->pd0_paddr = pd0_pt->paddr;
+	if (b2->spt_paddr == 0)
+		b2->spt_paddr = spt_pt->paddr;
+
+	*pspt = spt_pt;
+	return (0);
+}
+
+static int
+nvkm_gsp_bar2_bootstrap(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_bar2 *b2 = &sc->bar2;
+	uint64_t gva;
+	int err;
+
+	/*
+	 * nouveau bootstraps BAR2 with the smallest supported page size
+	 * (tu102_vmm.page[] walks down to shift 12 before nvkm_vmm_boot()).
+	 * Pre-create every PD0->SPT edge that covers the halved BAR2 window,
+	 * instead of allocating the tree lazily after UPDATE_BAR_PDE.
+	 */
+	for (gva = 0; gva < b2->aperture_size; gva +=
+	    (1ULL << NVKM_GMMU_PD0_SHIFT)) {
+		struct nvkm_gsp_bar2_pt *spt_pt __unused;
+
+		err = nvkm_gsp_bar2_get_spt(sc, gva, &spt_pt);
+		if (err != 0)
+			return (err);
+	}
+
+	return (0);
 }
 
 void
@@ -76,7 +234,7 @@ int
 nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 {
 	struct nvkm_gsp_bar2 *b2 = &sc->bar2;
-	uint64_t pd2, pd1, pd0, spt;
+	uint64_t pd2;
 	uint64_t pd2_pde;
 	struct rpc_update_bar_pde_v15_00_b2 *rpc;
 	int err;
@@ -92,45 +250,31 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	}
 
 	pd2 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	pd1 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	pd0 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	uint64_t lpt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	if (!pd2 || !pd1 || !pd0 || !spt || !lpt) {
+	if (!pd2) {
 		device_printf(sc->dev, "bar2: VRAM alloc failed\n");
 		return (ENOMEM);
 	}
 
 	b2->pd3_paddr = sc->gsp_bar2_pdb;
 	b2->pd2_paddr = pd2;
-	b2->pd1_paddr = pd1;
-	b2->pd0_paddr = pd0;
-	b2->spt_paddr = spt;
+	b2->pd1_paddr = 0;
+	b2->pd0_paddr = 0;
+	b2->spt_paddr = 0;
+	b2->aperture_size = rman_get_size(sc->bar_res[3]) >> 1;
 	b2->next_gva  = BAR2_GVA_ALLOC_BASE;
+	LIST_INIT(&b2->pt_pages);
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, pd2 & ~(uint64_t)0xffffu);
-
-	uint64_t zpages[5] = { pd2, pd1, pd0, spt, lpt };
-	for (int zi = 0; zi < 5; zi++) {
-		for (uint32_t off = 0; off < 0x1000; off += 4)
-			b2_pramin_wr32(sc, zpages[zi] + off, 0);
-	}
-
-	b2_pramin_wr64(sc, pd2 + 0,
-	    (pd1 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	b2_pramin_wr64(sc, pd1 + 0,
-	    (pd0 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	/* Preserve the existing BAR2 bootstrap layout: BAR2 uses the BIG half. */
-	b2_pramin_wr64(sc, pd0 + 0,
-	    (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM);
-	b2_pramin_wr64(sc, pd0 + 8, 0);
-	(void)lpt;  /* unused */
-
-	(void)nvkm_rd32(sc, NV_PRAMIN);
+	nvkm_gsp_bar2_zero_vram_page_locked(sc, pd2);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
+
+	err = nvkm_gsp_bar2_bootstrap(sc);
+	if (err != 0) {
+		device_printf(sc->dev, "bar2: bootstrap failed err=%d\n", err);
+		return (err);
+	}
 
 	pd2_pde = (pd2 >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
 
@@ -255,13 +399,14 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 
 	device_printf(sc->dev,
 	    "bar2: PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx; "
-	    "GSP PDB=0x%llx; UPDATE_BAR_PDE pde=0x%llx; BAR2@%llx %lluMiB\n",
-	    (unsigned long long)pd2, (unsigned long long)pd1,
-	    (unsigned long long)pd0, (unsigned long long)spt,
+	    "GSP PDB=0x%llx; UPDATE_BAR_PDE pde=0x%llx; BAR2@%llx %lluMiB halve=%lluMiB\n",
+	    (unsigned long long)pd2, (unsigned long long)b2->pd1_paddr,
+	    (unsigned long long)b2->pd0_paddr, (unsigned long long)b2->spt_paddr,
 	    (unsigned long long)b2->pd3_paddr,
 	    (unsigned long long)pd2_pde,
 	    (unsigned long long)rman_get_start(sc->bar_res[3]),
-	    (unsigned long long)rman_get_size(sc->bar_res[3]) >> 20);
+	    (unsigned long long)rman_get_size(sc->bar_res[3]) >> 20,
+	    (unsigned long long)b2->aperture_size >> 20);
 	b2->ready = true;
 	return (0);
 }
@@ -269,7 +414,13 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 void
 nvkm_gsp_bar2_fini(struct nvkm_softc *sc)
 {
+	struct nvkm_gsp_bar2_pt *pt;
+
 	sc->bar2.ready = false;
+	while ((pt = LIST_FIRST(&sc->bar2.pt_pages)) != NULL) {
+		LIST_REMOVE(pt, link);
+		kfree(pt, M_NVKM_BAR2_PT);
+	}
 }
 
 int
@@ -277,17 +428,23 @@ nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
     uint64_t vram_paddr)
 {
 	struct nvkm_gsp_bar2 *b2 = &sc->bar2;
+	struct nvkm_gsp_bar2_pt *spt_pt;
 	uint32_t spt_idx;
 	uint64_t pte;
 	uint32_t saved;
+	int err;
 
 	if (!b2->ready)
 		return (ENXIO);
 	if ((bar2_gva & (NVKM_GMMU_PT_PAGE_SIZE - 1)) ||
 	    (vram_paddr & (NVKM_GMMU_PT_PAGE_SIZE - 1)))
 		return (EINVAL);
-	if ((bar2_gva >> NVKM_GMMU_SPT_SHIFT) >= NVKM_GMMU_SPT_ENTRIES)
+	if (bar2_gva >= b2->aperture_size)
 		return (ERANGE);
+
+	err = nvkm_gsp_bar2_get_spt(sc, bar2_gva, &spt_pt);
+	if (err != 0)
+		return (err);
 
 	spt_idx = (uint32_t)((bar2_gva >> NVKM_GMMU_SPT_SHIFT)
 	    & (NVKM_GMMU_SPT_ENTRIES - 1));
@@ -295,16 +452,17 @@ nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, b2->spt_paddr & ~(uint64_t)0xffffu);
-	b2_pramin_wr64(sc, b2->spt_paddr + spt_idx * 8, pte);
+	b2_pramin_set_base(sc, spt_pt->paddr & ~(uint64_t)0xffffu);
+	b2_pramin_wr64(sc, spt_pt->paddr + spt_idx * 8, pte);
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
 	device_printf(sc->dev,
-	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%016llx)\n",
+	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u] page=0x%llx pte=0x%016llx)\n",
 	    (unsigned long long)bar2_gva, (unsigned long long)vram_paddr,
-	    spt_idx, (unsigned long long)pte);
+	    spt_idx, (unsigned long long)spt_pt->paddr,
+	    (unsigned long long)pte);
 	return (0);
 }
 

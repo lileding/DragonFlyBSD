@@ -589,11 +589,11 @@ nvkm_pci_attach(device_t dev)
 			    "gsp: F MB0=0x%08x MB1=0x%08x\n", mb0, mb1);
 		}
 
+#ifdef NVKM_DEBUG_WPR_PRAMIN_PEEK
 		/*
-		 * PRAMIN-peek WPR2 to verify the booter copied content
-		 * into VRAM. PRAMIN window is BAR0 + 0x700000 (1 MiB);
-		 * the window's VRAM base is set via 0x001700 (value =
-		 * vram_addr >> 16). Save+restore.
+		 * Non-nouveau diagnostic only.  WPR is protected after GSP-RM
+		 * starts, and host PRAMIN reads here show up as BAR2
+		 * HUBCLIENT_HOST_CPU REGION_VIOLATION records in LOGRM.
 		 */
 		if (sc->wpr_meta.kva != NULL) {
 			struct nvkm_gsp_wpr_meta *meta =
@@ -638,6 +638,7 @@ nvkm_pci_attach(device_t dev)
 			}
 			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		}
+#endif
 	}
 
 	return (0);
