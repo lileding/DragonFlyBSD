@@ -261,10 +261,9 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 			    slot[i+8], slot[i+9], slot[i+10], slot[i+11],
 			    slot[i+12], slot[i+13], slot[i+14], slot[i+15]);
 		}
-		/* Skip this msg: advance rptr AND publish to shared memory. */
-		sc->gsp_msgq_rptr++;
-		if (sc->gsp_msgq_rptr >= NVKM_GSP_MSGCOUNT)
-			sc->gsp_msgq_rptr = 0;
+		/* Skip slot. Per r535: advance + mfence before publishing rptr. */
+		sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + 1) % NVKM_GSP_MSGCOUNT;
+		cpu_mfence();
 		{
 			uint8_t *cmdq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_cmdq_off;
 			*(volatile uint32_t *)(cmdq + 32) = sc->gsp_msgq_rptr;
@@ -280,14 +279,17 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	buf = kmalloc(alloc_sz, M_TEMP, M_WAITOK | M_ZERO);
 	memcpy(buf, rpc, (len > alloc_sz) ? alloc_sz : len);
 
-	/* Advance host rptr by message elemCount (multi-slot messages are
-	 * supported - large RPC replies / events span multiple 4 KiB slots).
-	 * elemCount is at offset 40 in GSP_MSG_QUEUE_ELEMENT (after authTag+
-	 * AAD+checkSum+seqNum). */
-	uint32_t elem_count = *(volatile uint32_t *)(slot + 40);
-	if (elem_count == 0 || elem_count > 16)
-		elem_count = 1;
-	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + elem_count) % NVKM_GSP_MSGCOUNT;
+	/* Per nouveau r535_gsp_msgq_recv_one_elem: page count comes from
+	 * DIV_ROUND_UP(GSP_MSG_HDR_SIZE + rpc->length, GSP_PAGE_SIZE), NOT
+	 * from elemCount header field. Clamp to 16 (GSP_MSG_MAX_SIZE / PAGE)
+	 * to defend against corrupt rpc->length. */
+	uint32_t total_bytes = NVKM_GSP_MSG_HDR_SIZE + len;
+	uint32_t pages = (total_bytes + NVKM_GSP_PAGE_SIZE - 1) /
+	    NVKM_GSP_PAGE_SIZE;
+	if (pages == 0) pages = 1;
+	if (pages > 16) pages = 16;
+	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + pages) % NVKM_GSP_MSGCOUNT;
+	cpu_mfence();
 	{
 		uint8_t *cmdq = (uint8_t *)sc->gsp_shm.kva +
 		    sc->gsp_shm_cmdq_off;
