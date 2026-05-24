@@ -185,14 +185,26 @@ struct nvkm_gsp_bar1 {
 	bool		ready;
 };
 
+struct nvkm_gsp_bar2_pt {
+	LIST_ENTRY(nvkm_gsp_bar2_pt) link;
+	uint8_t		level;
+	uint16_t	pd2_idx;
+	uint16_t	pd1_idx;
+	uint16_t	pd0_idx;
+	uint64_t	paddr;
+};
+LIST_HEAD(nvkm_gsp_bar2_pt_list, nvkm_gsp_bar2_pt);
+
 struct nvkm_gsp_bar2 {
 	uint64_t	pd3_paddr;	/* GSP\'s BAR2 PDB (we adopt) */
 	uint64_t	pd2_paddr;
 	uint64_t	pd1_paddr;
 	uint64_t	pd0_paddr;
 	uint64_t	spt_paddr;
+	uint64_t	aperture_size;
 	uint64_t	next_gva;
 	uint64_t	flush_vram_paddr;
+	struct nvkm_gsp_bar2_pt_list pt_pages;
 	bool		ready;
 };
 
