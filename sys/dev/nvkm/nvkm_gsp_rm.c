@@ -713,6 +713,11 @@ nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
 /* mthdbuf size now queried from GSP at attach; sc->mthdbuf_size. */
 #define NV_CHANNEL_GPFIFO_ENTRIES	0x80U
 
+/* GSP-RM owns runlist programming. Keep the old manual RUNLIST_NUM poke
+ * behind a debug switch so diagnostics observe the scheduler's state. */
+#define NVKM_GSP_DEBUG_HAIL_MARY_RUNLIST	0
+
+
 #define NV_MEMORY_DESC_ADDRSPACE_SYSMEM_COH	0U
 #define NV_MEMORY_DESC_ADDRSPACE_SYSMEM_NONCOH	1U
 #define NV_MEMORY_DESC_ADDRSPACE_VIDMEM		2U
@@ -1355,6 +1360,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	 * NUM ourselves and see if PBDMA wakes.
 	 * Runlist VRAM contains our cgrp+chan entries (2 cgrp headers + 2
 	 * channels = 4 entries based on dump). Write count=4. */
+#if NVKM_GSP_DEBUG_HAIL_MARY_RUNLIST
 	{
 		uint32_t runl_id = 0;
 		switch (engine_type) {
@@ -1387,6 +1393,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    num_post, stat_post);
 		}
 	}
+#endif
 
 	/* Map USERD VRAM page at a BAR1 GVA so host writes go through
 	 * BAR1 walker -> L2-coherent VRAM (path nouveau uses). */
