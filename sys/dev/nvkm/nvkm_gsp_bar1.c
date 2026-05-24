@@ -192,25 +192,10 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 
 	sc->bar1.ready = true;
 
-	/* Smoke test: alloc one VRAM page, map at BAR1 GVA 0 and at BAR2 GVA 0,
-	 * write via BAR1, read via BAR2, then vice versa.  If walker works,
-	 * both reads return the values written. */
-	{
-		uint64_t test_paddr = nvkm_gsp_vram_alloc(sc, 0x1000, 0x10000);
-		if (test_paddr != 0) {
-			(void)nvkm_gsp_bar1_map_vram(sc, 0, test_paddr);
-			nvkm_gsp_bar1_flush(sc);
-			nvkm_gsp_bar1_wr32(sc, 0, 0xcafebabe);
-			nvkm_gsp_bar1_wr32(sc, 4, 0xdeadc0de);
-			nvkm_gsp_bar1_flush(sc);
-			uint32_t b1_0 = nvkm_gsp_bar1_rd32(sc, 0);
-			uint32_t b1_4 = nvkm_gsp_bar1_rd32(sc, 4);
-			device_printf(sc->dev,
-			    "bar1: SMOKE wrote 0xcafebabe/0xdeadc0de via BAR1; readback BAR1[0]=0x%08x BAR1[4]=0x%08x %s\n",
-			    b1_0, b1_4,
-			    (b1_0 == 0xcafebabe && b1_4 == 0xdeadc0de) ? "OK" : "*** MISMATCH ***");
-		}
-	}
+	/* SMOKE test removed: GVA=0 maps through GSP's own PT chain
+	 * (our SPT is mounted at PD0[127], range [254 MiB, 256 MiB)). Writing
+	 * BAR1[0] would write to whatever GSP has at SPT[0] — likely a
+	 * critical GSP-internal page. Don't go there. */
 
 	return (0);
 }
