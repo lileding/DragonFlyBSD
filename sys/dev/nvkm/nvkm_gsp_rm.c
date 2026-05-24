@@ -1276,10 +1276,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 
-	/* TURING_DMA_COPY_A engine object under the channel.
-	 * nouveau r535/ce.c:28-44: parent=chan, params version=1,
-	 * engineType=NV2080_ENGINE_TYPE_COPY0+inst. */
-	{
+	/* Engine class object: TURING_DMA_COPY_A for CE engines.
+	 * GRAPHICS would need TURING_A (0xc597) + ctx buffers; we skip for
+	 * simple scheduling test - NVC36F SEM_RELEASE is channel-level and
+	 * does not require an engine class object. */
+	if (engine_type >= NV2080_ENGINE_TYPE_COPY0 &&
+	    engine_type <= NV2080_ENGINE_TYPE_COPY2) {
 		struct {
 			uint32_t version;
 			uint32_t engineType;
@@ -1306,6 +1308,10 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		device_printf(sc->dev,
 		    "gsp_rm: TURING_DMA_COPY_A handle=0x%x on channel=0x%x ok\n",
 		    chan->ce_obj.handle, chan->object.handle);
+	} else {
+		device_printf(sc->dev,
+		    "gsp_rm: SKIP engine class alloc (engine_type=0x%x is not CE)\n",
+		    engine_type);
 	}
 
 	{
