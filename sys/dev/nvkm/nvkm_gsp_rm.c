@@ -1226,6 +1226,27 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 
+	/* TASK 3 PROBE: query workSubmitToken BEFORE SCHEDULE so we can
+	 * see what state SCHEDULE actually transitions. open-rm Turing
+	 * kfifoGenerateWorkSubmitTokenHal_TU102 returns NV_ERR_INVALID_STATE
+	 * when channel is not on a runlist. If pre-probe returns INVALID_STATE
+	 * and the later post-probe returns the token, SCHEDULE is the activator. */
+	{
+		struct { uint32_t workSubmitToken; } *t;
+		t = nvkm_gsp_rm_ctrl_get(&chan->object, 0xc36f0108u, sizeof(*t));
+		if (t == NULL) {
+			device_printf(sc->dev,
+			    "gsp_rm: TRACE pre-SCHEDULE token: ctrl_get failed\n");
+		} else {
+			t->workSubmitToken = 0xdeadbeef;
+			int perr = nvkm_gsp_rm_ctrl_rd(&chan->object, (void**)&t,
+			    sizeof(*t));
+			device_printf(sc->dev,
+			    "gsp_rm: TRACE pre-SCHEDULE token: err=%d val=0x%08x\n",
+			    perr, t->workSubmitToken);
+		}
+	}
+
 	{
 		/* NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS as nouveau vendors it:
 		 * nouveau/nvkm/subdev/gsp/rm/r535/nvrm/fifo.h:310 -- only 2 bytes
@@ -1318,12 +1339,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    sizeof(*t));
 			if (werr != 0) {
 				device_printf(sc->dev,
-				    "gsp_rm: GET_WORK_SUBMIT_TOKEN err=%d "
+				    "gsp_rm: TRACE post-SCHEDULE token: err=%d "
 				    "(channel not on runlist?)\n", werr);
 			} else {
 				chan->gsp_token = t->workSubmitToken;
 				device_printf(sc->dev,
-				    "gsp_rm: GSP workSubmitToken=0x%08x\n",
+				    "gsp_rm: TRACE post-SCHEDULE token: err=0 val=0x%08x\n",
 				    chan->gsp_token);
 			}
 		}
