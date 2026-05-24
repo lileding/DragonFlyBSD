@@ -1165,10 +1165,13 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	args->instanceMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
 	args->instanceMem.cacheAttrib = 1;
 
-	args->userdMem.base = chan->userd_vram;
-	/* Match nouveau: single-slot size = gv100_chan_userd.size = 0x200
-	 * (fifo/gv100.c:73). Even though our VRAM allocation is a full
-	 * 4 KiB page, GSP expects size = per-channel slot, not the page. */
+	/* Per nouveau r570_chan_alloc caller (r535/fifo.c:185):
+	 *   userd_addr = nvkm_memory_addr(chan->userd.mem) + chan->userd.base
+	 * where chan->userd.base = chid * USERD_SLOT_SIZE. GSP writes this
+	 * value verbatim into RAMFC USERD_PTR field (inst[0x008..0x010]),
+	 * so PBDMA needs the per-chid SLOT paddr, not the page base. */
+	args->userdMem.base = chan->userd_vram
+	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
 	args->userdMem.size = NV_CHANNEL_USERD_SIZE;
 	args->userdMem.addressSpace = NV_MEMORY_DESC_ADDRSPACE_VIDMEM;
 	args->userdMem.cacheAttrib = 1;
@@ -1487,7 +1490,23 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	device_printf(sc->dev, "gsp_submit: 200ms wait for GSP scheduler...\n");
 	DELAY(200000);
 
-		device_printf(sc->dev, "gsp_submit: doorbell spray begin\n");
+	{
+		uint32_t um_t0_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
+		uint32_t um_t0_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
+		uint32_t db_rb    = nvkm_rd32(sc, NV_USERMODE_DOORBELL);
+		device_printf(sc->dev,
+		    "gsp_submit: DIAG pre-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
+		    um_t0_hi, um_t0_lo, db_rb);
+	}
+		device_printf(sc->dev, "gsp_submit: doorbell spray begin (gsp_token=0x%08x)\n",
+		    chan->gsp_token);
+	/* PRIMARY: use the workSubmitToken GSP gave us. Encodes (runlist<<16)|chid
+	 * — on runlist != 0, chid alone is the wrong value. */
+	for (int rep = 0; rep < 10; rep++) {
+		nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
+		DELAY(1000);
+	}
+	/* Legacy chid spray, diagnostic only. */
 	for (int rep = 0; rep < 10; rep++) {
 		nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
 		DELAY(1000);
@@ -1503,6 +1522,38 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	DELAY(1000);
 	cpu_sfence();
 	device_printf(sc->dev, "gsp_submit: doorbell spray end\n");
+
+	/* DIAG (a): re-read USERMODE TIME. If it ticked, BAR0 is reachable
+	 * and USERMODE is alive. If it's frozen, BAR0 wedged.
+	 * Also re-read DOORBELL (write-only typically, but try). */
+	{
+		uint32_t um_t1_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
+		uint32_t um_t1_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
+		uint32_t db_rb    = nvkm_rd32(sc, NV_USERMODE_DOORBELL);
+		device_printf(sc->dev,
+		    "gsp_submit: DIAG post-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
+		    um_t1_hi, um_t1_lo, db_rb);
+	}
+
+	/* DIAG (b): full channel inst block (RAMFC area) 0..0x400 via PRAMIN.
+	 * Look for GSP-written USERD_PTR (probably ~0x100-0x108 or 0x4-0xc),
+	 * GP_BASE/GP_PUT/GP_GET fields, ENG_CTX_PTR, etc. */
+	{
+		lwkt_gettoken(&sc->gsp_tok);
+		uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(chan->inst_vram >> 16));
+		for (uint32_t off = 0; off < 0x400; off += 0x20) {
+			uint32_t w[8];
+			for (int k = 0; k < 8; k++)
+				w[k] = nvkm_rd32(sc, NV_PRAMIN
+				    + (uint32_t)((chan->inst_vram + off + k * 4) & 0xffffu));
+			device_printf(sc->dev,
+			    "gsp_submit: DIAG inst[0x%03x]: %08x %08x %08x %08x  %08x %08x %08x %08x\n",
+			    off, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+		}
+		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+		lwkt_reltoken(&sc->gsp_tok);
+	}
 
 	device_printf(sc->dev,
 	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
@@ -1740,7 +1791,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, 2);
 				nvkm_gsp_bar1_flush(sc);
 				uint64_t lr0 = (sc->gsp_logrm.kva) ? *(volatile uint64_t*)sc->gsp_logrm.kva : 0;
-				nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
+				nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);  /* use GSP-provided token */
 				DELAY(200000);
 				uint64_t lr1 = (sc->gsp_logrm.kva) ? *(volatile uint64_t*)sc->gsp_logrm.kva : 0;
 				uint32_t gp_get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);

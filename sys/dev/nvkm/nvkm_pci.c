@@ -450,7 +450,7 @@ nvkm_pci_attach(device_t dev)
 					if (sc->gsp_chan != NULL) {
 						int cerr = nvkm_gsp_chan_ctor(
 						    sc->gsp_vmm,
-						    NV2080_ENGINE_TYPE_COPY0,
+						    NV2080_ENGINE_TYPE_COPY2,  /* runlist 8, pure CE; avoids GRAPHICS RC storm on runlist 0 */
 						    sc->gsp_chan);
 						if (cerr != 0) {
 							kfree(sc->gsp_chan);
