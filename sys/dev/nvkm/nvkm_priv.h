@@ -269,6 +269,8 @@ struct nvkm_softc {
 	bool			irq_msi;
 	struct thread		*gsp_drain_td;
 	bool			gsp_drain_exit;
+	struct thread		*gsp_test_td;
+	bool			gsp_test_done;
 	struct resource		*irq_res;
 	void			*irq_cookie;
 	struct lwkt_serialize	irq_serialize;

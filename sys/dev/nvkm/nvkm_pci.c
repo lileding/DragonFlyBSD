@@ -72,6 +72,21 @@ nvkm_pci_release_bars(struct nvkm_softc *sc)
 }
 
 static void
+nvkm_gsp_test_kthread(void *arg)
+{
+	struct nvkm_softc *sc = arg;
+
+	/* Let drm_register, drain kthread, msgq settle before submit. */
+	tsleep(&sc->gsp_test_td, 0, "gsp_twrm", hz * 3);
+	device_printf(sc->dev, "gsp: submit_test kthread starting\n");
+	(void)nvkm_gsp_submit_test(sc);
+	device_printf(sc->dev, "gsp: submit_test kthread exiting\n");
+	sc->gsp_test_done = true;
+	wakeup(&sc->gsp_test_done);
+	kthread_exit();
+}
+
+static void
 nvkm_gsp_drain_kthread(void *arg)
 {
 	struct nvkm_softc *sc = arg;
@@ -494,6 +509,9 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_drain_exit = false;
 						(void)kthread_create(nvkm_gsp_drain_kthread, sc,
 						    &sc->gsp_drain_td, "nvkm-msgq-drain");
+						sc->gsp_test_done = false;
+						(void)kthread_create(nvkm_gsp_test_kthread, sc,
+						    &sc->gsp_test_td, "nvkm-submit-test");
 					} else {
 						device_printf(dev,
 						    "gsp: bus_setup_intr failed (%d)\n", err);
@@ -644,6 +662,16 @@ nvkm_pci_detach(device_t dev)
 		nvkm_wr32(sc, 0x110004, 0x00);
 
 	if (sc->irq_cookie != NULL) {
+		if (sc->gsp_test_td != NULL) {
+			/* Wake any warmup sleep and wait up to 5s for test to finish. */
+			wakeup(&sc->gsp_test_td);
+			int w = 0;
+			while (!sc->gsp_test_done && w < 50) {
+				tsleep(&sc->gsp_test_done, 0, "gsp_tjoin", hz / 10);
+				w++;
+			}
+			sc->gsp_test_td = NULL;
+		}
 		if (sc->gsp_drain_td != NULL) {
 			sc->gsp_drain_exit = true;
 			wakeup(&sc->gsp_drain_td);
