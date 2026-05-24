@@ -165,6 +165,8 @@ uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,
 
 /* RM_ENGINE_TYPE values used as channel/cgrp engineType field. */
 #define NV2080_ENGINE_TYPE_COPY0	0x00000009U
+#define NV2080_ENGINE_TYPE_COPY1	0x0000000aU
+#define NV2080_ENGINE_TYPE_COPY2	0x0000000bU
 
 /* Channel group (KEPLER_CHANNEL_GROUP_A / TSG). */
 struct nvkm_gsp_chgrp {
