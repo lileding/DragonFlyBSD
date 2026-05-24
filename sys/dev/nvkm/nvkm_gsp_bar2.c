@@ -225,9 +225,11 @@ nvkm_gsp_bar2_invalidate(struct nvkm_softc *sc)
 		DELAY(10);
 	}
 
+#ifdef NVKM_DEBUG_BAR2
 	device_printf(sc->dev,
 	    "bar2: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
 	    (unsigned long long)sc->gsp_bar2_pdb, trig_rb);
+#endif
 }
 
 int
@@ -314,10 +316,17 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
+#ifdef NVKM_DEBUG_BAR2
 	device_printf(sc->dev,
 	    "bar2: GSP PDB[0] pre RPC = 0x%08x:%08x, post RPC = 0x%08x:%08x, expected pde = 0x%llx\n",
 	    pdb0_pre_hi, pdb0_pre_lo, pdb0_post_hi, pdb0_post_lo,
 	    (unsigned long long)pd2_pde);
+#else
+	(void)pdb0_pre_lo;
+	(void)pdb0_pre_hi;
+	(void)pdb0_post_lo;
+	(void)pdb0_post_hi;
+#endif
 
 	nvkm_gsp_bar2_invalidate(sc);
 
@@ -326,10 +335,12 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	uint32_t bar1_inst = nvkm_rd32(sc, 0xb80f40);
 	uint64_t bar2_inst_paddr = ((uint64_t)(bar2_inst & 0x0fffffffu)) << 12;
 	uint64_t bar1_inst_paddr = ((uint64_t)(bar1_inst & 0x0fffffffu)) << 12;
+#ifdef NVKM_DEBUG_BAR2
 	device_printf(sc->dev,
 	    "bar2: 0xb80f48=0x%08x (inst paddr=0x%llx), 0xb80f40=0x%08x (inst paddr=0x%llx)\n",
 	    bar2_inst, (unsigned long long)bar2_inst_paddr,
 	    bar1_inst, (unsigned long long)bar1_inst_paddr);
+#endif
 
 	/* Re-verify whether GSP populated BAR1 inst[0x200] PDB ptr.
 	 * Earlier conclusion was "GSP doesn\'t init BAR1" -- recheck. */
@@ -343,10 +354,15 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 		    (uint32_t)((bar1_inst_paddr + 0x204) & 0xffffu));
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
+#ifdef NVKM_DEBUG_BAR2
 		device_printf(sc->dev,
 		    "bar2: BAR1_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x %s\n",
 		    b1_hi, b1_lo,
 		    (b1_lo == 0 && b1_hi == 0) ? "*** UNINITIALIZED ***" : "(populated)");
+#else
+		(void)b1_lo;
+		(void)b1_hi;
+#endif
 	}
 
 	/* Read PDB pointer from BAR2 inst block (offset 0x200) via PRAMIN. */
@@ -360,9 +376,14 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 		    (uint32_t)((bar2_inst_paddr + 0x204) & 0xffffu));
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
+#ifdef NVKM_DEBUG_BAR2
 		device_printf(sc->dev,
 		    "bar2: BAR2_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x\n",
 		    inst_hi, inst_lo);
+#else
+		(void)inst_lo;
+		(void)inst_hi;
+#endif
 	}
 
 	b2->ready = true;  /* enable map_vram + flush */
@@ -390,13 +411,18 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 			nvkm_gsp_bar2_wr32(sc, 0x2000 + 0x10, 0xC0FFEE12u);
 			nvkm_gsp_bar2_flush(sc);
 			uint32_t rb = nvkm_gsp_bar2_rd32(sc, 0x2000 + 0x10);
+#ifdef NVKM_DEBUG_BAR2
 			device_printf(sc->dev,
 			    "bar2_diag: post-flush test wr C0FFEE12, readback = 0x%08x (target VRAM 0x%llx)\n",
 			    rb, (unsigned long long)tv);
+#else
+			(void)rb;
+#endif
 			b2->next_gva = 0x3000;
 		}
 	}
 
+#ifdef NVKM_DEBUG_BAR2
 	device_printf(sc->dev,
 	    "bar2: PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx; "
 	    "GSP PDB=0x%llx; UPDATE_BAR_PDE pde=0x%llx; BAR2@%llx %lluMiB halve=%lluMiB\n",
@@ -407,6 +433,7 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	    (unsigned long long)rman_get_start(sc->bar_res[3]),
 	    (unsigned long long)rman_get_size(sc->bar_res[3]) >> 20,
 	    (unsigned long long)b2->aperture_size >> 20);
+#endif
 	b2->ready = true;
 	return (0);
 }
@@ -458,11 +485,13 @@ nvkm_gsp_bar2_map_vram(struct nvkm_softc *sc, uint64_t bar2_gva,
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
+#ifdef NVKM_DEBUG_BAR2
 	device_printf(sc->dev,
 	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u] page=0x%llx pte=0x%016llx)\n",
 	    (unsigned long long)bar2_gva, (unsigned long long)vram_paddr,
 	    spt_idx, (unsigned long long)spt_pt->paddr,
 	    (unsigned long long)pte);
+#endif
 	return (0);
 }
 
