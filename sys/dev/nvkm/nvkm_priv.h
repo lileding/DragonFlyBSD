@@ -266,6 +266,7 @@ struct nvkm_softc {
 
 	/* IRQ resource + ithread serializer (DragonFly native model). */
 	int			irq_rid;
+	bool			irq_msi;
 	struct resource		*irq_res;
 	void			*irq_cookie;
 	struct lwkt_serialize	irq_serialize;
