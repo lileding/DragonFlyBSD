@@ -856,18 +856,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		sc->bar1.next_gva += 0x1000;
 		(void)nvkm_gsp_bar1_map_vram(sc, chan->inst_bar1_gva, chan->inst_vram);
 		nvkm_gsp_bar1_flush(sc);
-		/* Full BAR1 PDB TLB invalidate so walker picks up new SPT entry. */
-		uint64_t bar1_inv = (sc->gsp_bar1_pdb >> 12) << 4;
-		for (int spin = 0; spin < 200; spin++) {
-			if (nvkm_rd32(sc, 0x100c80) & 0x00ff0000u) break;
-			DELAY(10);
-		}
-		nvkm_wr32(sc, 0x100cb8, (uint32_t)bar1_inv);
-		nvkm_wr32(sc, 0x100cbc, 0x80000000u);
-		for (int spin = 0; spin < 200; spin++) {
-			if (!(nvkm_rd32(sc, 0x100cbc) & 0x80000000u)) break;
-			DELAY(10);
-		}
+		nvkm_gsp_bar1_invalidate(sc);
 		device_printf(sc->dev,
 		    "gsp_rm: inst mapped to BAR1 GVA 0x%llx (paddr 0x%llx)\n",
 		    (unsigned long long)chan->inst_bar1_gva,
