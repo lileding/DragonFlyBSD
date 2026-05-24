@@ -78,9 +78,11 @@ nvkm_gsp_bar1_invalidate(struct nvkm_softc *sc)
 		DELAY(10);
 	}
 
+#ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
 	    (unsigned long long)sc->gsp_bar1_pdb, trig_rb);
+#endif
 }
 
 int
@@ -156,10 +158,12 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
+#ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: walked GSP PT chain: PD3=0x%llx -> PD2=0x%llx -> PD1=0x%llx -> PD0=0x%llx\n",
 	    (unsigned long long)pdb_paddr, (unsigned long long)gsp_pd2,
 	    (unsigned long long)gsp_pd1, (unsigned long long)gsp_pd0);
+#endif
 
 	/* Alloc OUR SPT only. Mount on GSP's PD0[127].SMALL (last 2 MiB of
 	 * BAR1 GVA range, [254 MiB, 256 MiB)). */
@@ -201,6 +205,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	/* GVA = 127 * 2 MiB = 0xfe00000 (254 MiB), first slot in our SPT. */
 	b1->next_gva  = 127ULL * (2ULL << 20);
 
+#ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: mounted OUR SPT 0x%llx at GSP PD0[127] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx; GVA base 0x%llx\n",
 	    (unsigned long long)spt,
@@ -209,9 +214,11 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    (unsigned long long)pd0_127_small_pre,
 	    (unsigned long long)pd0_127_small_post,
 	    (unsigned long long)b1->next_gva);
+#endif
 
 	nvkm_gsp_bar1_invalidate(sc);
 
+#ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
 	    "our SPT=0x%llx (mounted on GSP PD0[127].SMALL); "
@@ -220,6 +227,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    (unsigned long long)gsp_pd0, (unsigned long long)spt,
 	    (unsigned long long)rman_get_start(sc->bar_res[1]),
 	    (unsigned long long)rman_get_size(sc->bar_res[1]) >> 20);
+#endif
 
 	sc->bar1.ready = true;
 
@@ -278,10 +286,12 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 
 	nvkm_gsp_bar1_invalidate(sc);
 
+#ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
 	    (unsigned long long)bar1_gva, (unsigned long long)vram_paddr,
 	    spt_idx, (unsigned long long)pte);
+#endif
 	return (0);
 }
 

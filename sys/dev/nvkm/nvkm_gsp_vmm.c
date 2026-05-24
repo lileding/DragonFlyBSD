@@ -243,16 +243,25 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 			uint32_t um0 = nvkm_rd32(sc, 0xbb0000);
 			uint32_t um80 = nvkm_rd32(sc, 0xbb0080);
 			uint32_t um84 = nvkm_rd32(sc, 0xbb0084);
+#ifdef NVKM_DEBUG_USERMODE_DIAG
 			device_printf(sc->dev,
 			    "fed_diag: USERMODE[0]=0x%08x TIME=%08x:%08x (Fedora: 0xc461)\n",
 			    um0, um84, um80);
+#else
+			(void)um80;
+			(void)um84;
+#endif
 			/* If 0, GSP didn\'t write class id -- write it ourselves. */
 			if (um0 == 0) {
 				nvkm_wr32(sc, 0xbb0000, 0xc461u);
 				uint32_t um0b = nvkm_rd32(sc, 0xbb0000);
+#ifdef NVKM_DEBUG_USERMODE_DIAG
 				device_printf(sc->dev,
 				    "fed_diag: wrote 0xc461 to USERMODE[0], readback = 0x%08x\n",
 				    um0b);
+#else
+				(void)um0b;
+#endif
 			}
 		}
 	}

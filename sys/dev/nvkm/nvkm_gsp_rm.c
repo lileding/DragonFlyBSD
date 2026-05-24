@@ -628,9 +628,11 @@ nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
 		return (0);
 	}
 	sc->vram_bump_next = off;
+#ifdef NVKM_DEBUG_VRAM_ALLOC
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
 	    (unsigned long long)off, (unsigned long long)size);
+#endif
 	return (off);
 }
 
@@ -830,31 +832,37 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 #define SUBMIT_POLL_MS		1000
 #define SUBMIT_POLL_STEP_MS	10
 
-static uint32_t
-nvkm_gsp_engine_runlist_id(uint32_t engine_type)
-{
-	switch (engine_type) {
-	case NV2080_ENGINE_TYPE_COPY2:
-		return (8);
-	case NV2080_ENGINE_TYPE_COPY0:
-	case NV2080_ENGINE_TYPE_COPY1:
-	default:
-		return (0);
-	}
-}
-
 static void
 nvkm_gsp_sched_trace(struct nvkm_softc *sc, const char *tag,
     const struct nvkm_gsp_chan *chan, uint32_t engine_type)
 {
+#ifndef NVKM_DEBUG_SCHED_TRACE
+	(void)sc;
+	(void)tag;
+	(void)chan;
+	(void)engine_type;
+	return;
+#else
+	uint32_t runl_id;
 	uint32_t chid = (uint32_t)chan->chid;
-	uint32_t runl_id = nvkm_gsp_engine_runlist_id(engine_type);
-	uint32_t pccsr_inst = nvkm_rd32(sc, 0x00800000 + chid * 8);
-	uint32_t pccsr_chan = nvkm_rd32(sc, 0x00800004 + chid * 8);
-	uint32_t rl_base_lo = nvkm_rd32(sc, 0x002b00 + runl_id * 0x10);
-	uint32_t rl_base_hi = nvkm_rd32(sc, 0x002b04 + runl_id * 0x10);
-	uint32_t rl_num = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
-	uint32_t rl_status = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
+	uint32_t pccsr_inst, pccsr_chan;
+	uint32_t rl_base_lo, rl_base_hi, rl_num, rl_status;
+	switch (engine_type) {
+	case NV2080_ENGINE_TYPE_COPY2:
+		runl_id = 8;
+		break;
+	case NV2080_ENGINE_TYPE_COPY0:
+	case NV2080_ENGINE_TYPE_COPY1:
+	default:
+		runl_id = 0;
+		break;
+	}
+	pccsr_inst = nvkm_rd32(sc, 0x00800000 + chid * 8);
+	pccsr_chan = nvkm_rd32(sc, 0x00800004 + chid * 8);
+	rl_base_lo = nvkm_rd32(sc, 0x002b00 + runl_id * 0x10);
+	rl_base_hi = nvkm_rd32(sc, 0x002b04 + runl_id * 0x10);
+	rl_num = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
+	rl_status = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
 
 	device_printf(sc->dev,
 	    "gsp_rm: SCHED_TRACE %-18s chid=%u runlist=%u "
@@ -866,6 +874,7 @@ nvkm_gsp_sched_trace(struct nvkm_softc *sc, const char *tag,
 	    pccsr_chan, pccsr_chan & 0x1u,
 	    (pccsr_chan >> 28) & 0x1u, rl_base_hi, rl_base_lo,
 	    rl_num, rl_status);
+#endif
 }
 
 static void
@@ -884,12 +893,14 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 		nvkm_gsp_bar1_wr32(sc, slot_bar1 + userd_clear_offs[i], 0);
 	nvkm_gsp_bar1_flush(sc);
 
+#ifdef NVKM_DEBUG_USERD_CLEAR
 	device_printf(sc->dev,
 	    "gsp_rm: USERD clear before schedule slot=0x%llx "
 	    "GP_GET=0x%08x GP_PUT=0x%08x\n",
 	    (unsigned long long)slot_bar1,
 	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET),
 	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT));
+#endif
 }
 
 
@@ -1039,6 +1050,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    chan->submit_spt.bar1_gva + (spt_idx + 2) * 8,
 		    nvkm_pte_to_sysmem(chan->submit_sema.paddr));
 
+#ifdef NVKM_DEBUG_SUBMIT_PT_DUMP
 		/* Read back EVERY level of the PT chain via BAR1 to verify
 		 * that COPY_SERVER_RESERVED_PDES didn't clobber our PD3/PD2/PD1
 		 * chain and that our PD0/SPT writes landed. */
@@ -1172,6 +1184,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)(uintptr_t)chan->submit_gpf.kva,
 		    (unsigned long long)chan->submit_sema.paddr,
 		    (unsigned long long)(uintptr_t)chan->submit_sema.kva);
+#endif
 	}
 
 	/* Allocate chid FIRST -- nouveau encodes it in the channel handle:
@@ -1195,6 +1208,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	nvkm_gsp_bar1_invalidate(sc);
 	nvkm_gsp_userd_clear(sc, chan);
 
+#ifdef NVKM_DEBUG_USERD_CLEAR
 	/* Diag: write+readback marker at the actual USERD GVA we just mapped. */
 	{
 		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0xCAFEBABEu);
@@ -1206,6 +1220,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0);
 		nvkm_gsp_bar1_flush(sc);
 	}
+#endif
 
 	args = nvkm_gsp_rm_alloc_get(&device->object,
 	    NVKM_RM_CHANNEL | (uint32_t)chan->chid,
@@ -1307,11 +1322,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 		nvkm_gsp_sched_trace(sc, "after-bind", chan, engine_type);
 
-		/* TASK 3 PROBE: query workSubmitToken BEFORE SCHEDULE so we can
-		 * see what state SCHEDULE actually transitions. open-rm Turing
-	 * kfifoGenerateWorkSubmitTokenHal_TU102 returns NV_ERR_INVALID_STATE
-	 * when channel is not on a runlist. If pre-probe returns INVALID_STATE
-	 * and the later post-probe returns the token, SCHEDULE is the activator. */
+#ifdef NVKM_DEBUG_SCHED_TRACE
+		/* Query workSubmitToken BEFORE SCHEDULE to show the transition. */
 	{
 		struct { uint32_t workSubmitToken; } *t;
 		t = nvkm_gsp_rm_ctrl_get(&chan->object, 0xc36f0108u, sizeof(*t));
@@ -1323,10 +1335,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			int perr = nvkm_gsp_rm_ctrl_rd(&chan->object, (void**)&t,
 			    sizeof(*t));
 			device_printf(sc->dev,
-			    "gsp_rm: TRACE pre-SCHEDULE token: err=%d val=0x%08x\n",
+		    "gsp_rm: TRACE pre-SCHEDULE token: err=%d val=0x%08x\n",
 			    perr, t->workSubmitToken);
 		}
 	}
+#endif
 
 	{
 		/* NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS as nouveau vendors it:
@@ -1398,8 +1411,9 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 		nvkm_gsp_sched_trace(sc, "after-ce-alloc", chan, engine_type);
 
-		{
-			uint32_t runl = 0;
+#ifdef NVKM_DEBUG_SCHED_TRACE
+	{
+		uint32_t runl = 0;
 		int qerr = nvkm_gsp_query_ce0_runlist(sc, &runl);
 		if (qerr == 0) {
 			uint32_t token = (runl << 16) | (uint32_t)chan->chid;
@@ -1411,6 +1425,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    "gsp_rm: runlist query failed err=%d\n", qerr);
 		}
 	}
+#endif
 
 	/* Ask GSP for the work-submit token. RPC fails with INVALID_STATE
 	 * if channel isn\'t on runlist - definitive proof SCHEDULE worked. */
@@ -1433,7 +1448,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			} else {
 				chan->gsp_token = t->workSubmitToken;
 				device_printf(sc->dev,
-				    "gsp_rm: TRACE post-SCHEDULE token: err=0 val=0x%08x\n",
+				    "gsp_rm: workSubmitToken=0x%08x\n",
 				    chan->gsp_token);
 				}
 			}
@@ -1592,6 +1607,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	device_printf(sc->dev, "gsp_submit: 200ms wait for GSP scheduler...\n");
 	DELAY(200000);
 
+#ifdef NVKM_DEBUG_SUBMIT_HW
 	{
 		uint32_t um_t0_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
 		uint32_t um_t0_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
@@ -1668,6 +1684,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			    h_inst, h_chan);
 		}
 
+#ifdef NVKM_DEBUG_SUBMIT_RUNLIST_DUMP
 		/* Per nouveau tu102_runl_commit (fifo/tu102.c:71):
 		 *   NV_RUNLIST_BASE_LO = 0x002b00 + (runl_id * 0x10)
 		 *   NV_RUNLIST_BASE_HI = 0x002b04 + (runl_id * 0x10)
@@ -1712,35 +1729,19 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				lwkt_reltoken(&sc->gsp_tok);
 			}
 		}
+#endif
 	}
-		device_printf(sc->dev, "gsp_submit: doorbell spray begin (gsp_token=0x%08x)\n",
-		    chan->gsp_token);
-	/* PRIMARY: use the workSubmitToken GSP gave us. Encodes (runlist<<16)|chid
-	 * — on runlist != 0, chid alone is the wrong value. */
-	for (int rep = 0; rep < 10; rep++) {
-		nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
-		DELAY(1000);
-	}
-	/* Legacy chid spray, diagnostic only. */
-	for (int rep = 0; rep < 10; rep++) {
-		nvkm_wr32(sc, NV_USERMODE_DOORBELL, (uint32_t)chan->chid);
-		DELAY(1000);
-	}
-	/* Also try token formats: alternative runlist encoding, raw chid, etc. */
-	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00000001u);
-	DELAY(1000);
-	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00010001u); /* runlist=1? */
-	DELAY(1000);
-	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0x00000000u); /* zero token */
-	DELAY(1000);
-	nvkm_wr32(sc, NV_USERMODE_DOORBELL, 0xffffffffu); /* all-ones */
-	DELAY(1000);
+#endif
+	device_printf(sc->dev,
+	    "gsp_submit: doorbell token=0x%08x\n", chan->gsp_token);
+	/* Use the workSubmitToken GSP gave us. It encodes the runlist/chid
+	 * tuple; raw chid or guessed token writes are diagnostic hail-marys.
+	 */
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
 	cpu_sfence();
-	device_printf(sc->dev, "gsp_submit: doorbell spray end\n");
 
-	/* DIAG (a): re-read USERMODE TIME. If it ticked, BAR0 is reachable
-	 * and USERMODE is alive. If it's frozen, BAR0 wedged.
-	 * Also re-read DOORBELL (write-only typically, but try). */
+#ifdef NVKM_DEBUG_SUBMIT_HW
+	/* Re-read USERMODE TIME and DOORBELL after the write. */
 	{
 		uint32_t um_t1_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
 		uint32_t um_t1_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
@@ -1749,7 +1750,9 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		    "gsp_submit: DIAG post-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
 		    um_t1_hi, um_t1_lo, db_rb);
 	}
+#endif
 
+#ifdef NVKM_DEBUG_SUBMIT_INST_DUMP
 	/* DIAG (b): full channel inst block (RAMFC area) 0..0x400 via PRAMIN.
 	 * Look for GSP-written USERD_PTR (probably ~0x100-0x108 or 0x4-0xc),
 	 * GP_BASE/GP_PUT/GP_GET fields, ENG_CTX_PTR, etc. */
@@ -1769,24 +1772,25 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
 	}
+#endif
 
 	device_printf(sc->dev,
-	    "gsp_submit: kicked GP_PUT=1 doorbell=0x%08x, polling sema...\n",
-	    (uint32_t)chan->chid);
+	    "gsp_submit: kicked GP_PUT=1 doorbell token=0x%08x, polling sema...\n",
+	    chan->gsp_token);
 
-	/* Sample LOGRM put every 100ms x10 to characterize GSP activity. */
+	/* Keep the same scheduler settle window, but avoid tick spam. */
 	{
 		uint64_t lr_t0 = (sc->gsp_logrm.kva != NULL)
 		    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-		device_printf(sc->dev, "gsp_submit: LOGRM tick t=0 put=0x%llx\n",
-		    (unsigned long long)lr_t0);
+		uint64_t lr = lr_t0;
 		for (int t = 1; t <= 10; t++) {
 			DELAY(100000);
-			uint64_t lr = (sc->gsp_logrm.kva != NULL)
+			lr = (sc->gsp_logrm.kva != NULL)
 			    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-			device_printf(sc->dev, "gsp_submit: LOGRM tick t=%dms put=0x%llx delta=%lld\n",
-			    t*100, (unsigned long long)lr, (long long)(lr - lr_t0));
 		}
+		device_printf(sc->dev,
+		    "gsp_submit: LOGRM wait 1000ms put=0x%llx delta=%lld\n",
+		    (unsigned long long)lr, (long long)(lr - lr_t0));
 	}
 
 		/* Give GSP its own RISC-V time to react before we start polling.
@@ -1796,10 +1800,11 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	DELAY(100000);
 	uint64_t logrm_put_post = (sc->gsp_logrm.kva != NULL)
 	    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-	/* Scan VRAM for GSP-allocated inst block. Look for our chan->userd_vram
-	 * paddr stored anywhere as a 64-bit value, which would be GSP\'s RAMFC
-	 * USERD ptr. Scan VRAM region 0x2b00_0000..0x2b80_0000 (top 8 MiB).
-	 * Try a few PRAMIN windows to widen coverage. */
+#ifdef NVKM_DEBUG_SUBMIT_VRAM_SCAN
+	/* Non-nouveau diagnostic: scans a large protected/high VRAM range and
+	 * can pollute LOGRM with host BAR2 region faults. Keep it off unless
+	 * specifically chasing RAMFC placement.
+	 */
 	{
 		uint64_t needle = chan->userd_vram;
 		uint64_t needle_pte = nvkm_pte_to_vram(needle);
@@ -1856,6 +1861,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			lwkt_reltoken(&sc->gsp_tok);
 		}
 	}
+#endif
 
 		/* PRAMIN-read USERD slot to verify GP_PUT actually landed in
 	 * chan->userd_vram (independent of BAR1 path). */
@@ -1880,6 +1886,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    (unsigned long long)logrm_put_post,
 	    (long long)(logrm_put_post - logrm_put_pre));
 
+#ifdef NVKM_DEBUG_SUBMIT_HW
 	/* Hardware-side post-doorbell state dump. If the doorbell at BAR0+
 	 * 0xbb0090 reached USERMODE -> PFIFO, PFIFO_INTR_0 should show
 	 * NOTIFY_CHANNEL_PENDING set; PBDMA_STATUS should advance.
@@ -1903,6 +1910,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		    pbdma0_intr_0, pbdma0_intr_1, pbdma0_status, pbdma0_runlist,
 		    pmc_intr_en_0, pmc_intr_en_1, pmc_enable);
 	}
+#endif
 
 	uint32_t last_get = 0xffffffffu;
 	for (ms = 0; ms < SUBMIT_POLL_MS; ms += SUBMIT_POLL_STEP_MS) {
@@ -2077,9 +2085,11 @@ nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
 	for (i = 0; i < p->numEntries && i < NV2080_FIFO_DEV_INFO_MAX_ENTRIES; i++) {
 		uint32_t rmtype = p->entries[i].engineData[ENGINE_INFO_TYPE_RM_ENGINE_TYPE];
 		uint32_t runl   = p->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
+#ifdef NVKM_DEBUG_FIFO_TABLE
 		device_printf(sc->dev,
 		    "gsp_rm: fifo entry[%u] name=%.16s rm_type=%u runlist=%u\n",
 		    i, p->entries[i].engineName, rmtype, runl);
+#endif
 		if (rmtype == RM_ENGINE_TYPE_COPY0 && !found) {
 			*runl_out = runl;
 			found = 1;

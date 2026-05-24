@@ -207,9 +207,11 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	if (sc->gsp_running)
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0xc00, 0);
 
+#ifdef NVKM_DEBUG_RPC_TRACE
 	device_printf(sc->dev,
 	    "cmdq_push: fn=%u len=%u wptr=%u seq=%u ring=%d\n",
 	    rpc->function, rpc_len, wptr, msg->sequence, sc->gsp_running);
+#endif
 	kfree(msg, M_TEMP);
 	return (0);
 }
