@@ -19,6 +19,8 @@
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
 
+#define NVKM_GSP_DEBUG_RM_ALLOC		0
+
 #define NVKM_ALIGN_UP(v, a)	(((v) + (a) - 1) & ~((a) - 1))
 /* === RM_ALLOC === */
 
@@ -72,6 +74,27 @@ nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params)
 	struct rpc_gsp_rm_alloc_v03_00 *rep;
 	int ret = 0;
 	uint32_t expected_repc = sizeof(*rpc) + rpc->paramsSize;
+	uint32_t h_client = rpc->hClient;
+	uint32_t h_parent = rpc->hParent;
+	uint32_t h_object = rpc->hObject;
+	uint32_t h_class = rpc->hClass;
+	uint32_t params_size = rpc->paramsSize;
+	uint32_t flags = rpc->flags;
+
+#if NVKM_GSP_DEBUG_RM_ALLOC
+	if (h_class == 0x0000c597U) {
+		device_printf(sc->dev,
+		    "gsp_rm: RM_ALLOC envelope cls=0x%x client=0x%x "
+		    "parent=0x%x object=0x%x paramsSize=%u flags=0x%x "
+		    "expected_repc=%u\n",
+		    h_class, h_client, h_parent, h_object, params_size,
+		    flags, expected_repc);
+	}
+#else
+	(void)h_client;
+	(void)params_size;
+	(void)flags;
+#endif
 
 	rep = nvkm_gsp_rpc_push(sc, rpc, NVKM_GSP_RPC_REPLY_RECV,
 	    expected_repc);
@@ -81,7 +104,7 @@ nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params)
 	if (rep->status != 0) {
 		device_printf(sc->dev,
 		    "gsp_rm: ALLOC cls=0x%x obj=0x%x parent=0x%x failed status=0x%x\n",
-		    rpc->hClass, rpc->hObject, rpc->hParent, rep->status);
+		    h_class, h_object, h_parent, rep->status);
 		ret = EIO;
 	}
 	nvkm_gsp_rpc_done(sc, rep);
@@ -2436,7 +2459,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		struct NV2080_CTRL_GPU_PROMOTE_CTX_BUFFER_ENTRY_dfly *e;
 		struct nvkm_gsp_gr_ctxbuf *buf;
 		uint32_t buffer_id;
-		uint64_t size, mem_align, gva_align;
+		uint64_t size, alloc_size, entry_size, mem_align, gva_align;
 		uint32_t page_shift, gva_align_shift;
 		uint8_t init, nonmapped;
 
@@ -2454,6 +2477,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		size = bi->size;
 		if (buffer_id == NV2080_CTXBUF_ID_MAIN)
 			size = NVKM_ALIGN_UP(size, 0x1000) + 64 * 0x1000;
+		entry_size = size;
 
 		if (size >= (1ULL << 21))
 			page_shift = 21;
@@ -2469,16 +2493,16 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 		mem_align = 1ULL << page_shift;
 		gva_align = 1ULL << gva_align_shift;
-		size = NVKM_ALIGN_UP(size, mem_align);
+		alloc_size = NVKM_ALIGN_UP(size, mem_align);
 		next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
 
 		buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
-		buf->paddr = nvkm_gsp_vram_alloc(sc, size, mem_align);
+		buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size, mem_align);
 		if (buf->paddr == 0) {
 			err = ENOMEM;
 			goto out_done;
 		}
-		buf->size = size;
+		buf->size = alloc_size;
 		buf->gva = next_gva;
 		buf->buffer_id = buffer_id;
 		buf->nonmapped = nonmapped;
@@ -2499,7 +2523,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		e->bNonmapped = nonmapped;
 		if (e->bInitialize) {
 			e->gpuPhysAddr = buf->paddr;
-			e->size = buf->size;
+			e->size = entry_size;
 			e->physAttr = 4;
 		}
 		device_printf(sc->dev,
@@ -2522,12 +2546,13 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 			next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
 			buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
-			buf->paddr = nvkm_gsp_vram_alloc(sc, size, mem_align);
+			buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
+			    mem_align);
 			if (buf->paddr == 0) {
 				err = ENOMEM;
 				goto out_done;
 			}
-			buf->size = size;
+			buf->size = alloc_size;
 			buf->gva = next_gva;
 			buf->buffer_id =
 			    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP;
@@ -2548,7 +2573,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			e->bNonmapped = 0;
 			if (e->bInitialize) {
 				e->gpuPhysAddr = buf->paddr;
-				e->size = buf->size;
+				e->size = entry_size;
 				e->physAttr = 4;
 			}
 			device_printf(sc->dev,

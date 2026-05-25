@@ -44,6 +44,7 @@
 #define NVKM_GSP_MSGCOUNT	63u		/* fixed: (256K - 4K) / 4K */
 #define NVKM_GSP_MAX_PAYLOAD	(NVKM_GSP_PAGE_SIZE - NVKM_GSP_HDR_TOTAL)
 #define NVKM_GSP_SIGNATURE	0x43505256u	/* 'C''P''R''V' LE */
+#define NVKM_GSP_RPC_DEBUG_QUEUES	0
 
 struct nvkm_gsp_msg_env {
 	uint8_t  auth_tag_buffer[16];
@@ -79,6 +80,37 @@ rpc_to_msg(struct nvkm_nvfw_gsp_rpc *rpc)
 {
 	return (struct nvkm_gsp_msg_env *)((uint8_t *)rpc -
 	    NVKM_GSP_MSG_HDR_SIZE);
+}
+
+static void
+nvkm_gsp_rpc_diag_queues(struct nvkm_softc *sc, const char *tag,
+    uint32_t fn, uint32_t seq)
+{
+#if NVKM_GSP_RPC_DEBUG_QUEUES
+	uint8_t *cmdq, *msgq;
+	uint32_t cmdq_tx, cmdq_rx, msgq_tx, msgq_rx;
+
+	if (sc->gsp_shm.kva == NULL)
+		return;
+
+	cmdq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_cmdq_off;
+	msgq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_msgq_off;
+	cmdq_tx = *(volatile uint32_t *)(cmdq + 0x10);
+	cmdq_rx = *(volatile uint32_t *)(cmdq + 0x20);
+	msgq_tx = *(volatile uint32_t *)(msgq + 0x10);
+	msgq_rx = *(volatile uint32_t *)(msgq + 0x20);
+
+	device_printf(sc->dev,
+	    "gsp_rpc: %s fn=%u seq=%u cmdq(tx=%u rx=%u) "
+	    "msgq(tx=%u rx=%u host_msgq_rptr=%u)\n",
+	    tag, fn, seq, cmdq_tx, cmdq_rx, msgq_tx, msgq_rx,
+	    sc->gsp_msgq_rptr);
+#else
+	(void)sc;
+	(void)tag;
+	(void)fn;
+	(void)seq;
+#endif
 }
 
 /* ===================================================================
@@ -304,7 +336,7 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 }
 
 /* Drain the msgq while gsp_tok is held. For each message:
- *   - Function < 0x1000 + matches a pending->seq -> set pending->done + wakeup.
+ *   - Function < 0x1000 + matches a pending->fn -> set pending->done + wakeup.
  *   - Otherwise treat as an unsolicited event and dispatch via ntfy table.
  *
  * The pending->reply_buf takes ownership of the kmalloc'd buffer returned
@@ -326,7 +358,15 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			bool matched = false;
 
 			LIST_FOREACH(p, &sc->gsp_pending, link) {
-				if (p->seq == r->sequence) {
+				if (p->fn == fn) {
+#if NVKM_GSP_RPC_DEBUG_QUEUES
+					if (fn == 103 && p->seq != r->sequence) {
+						device_printf(sc->dev,
+						    "gsp_rpc: reply fn=%u matched by fn "
+						    "reqseq=%u repseq=%u\n",
+						    fn, p->seq, r->sequence);
+					}
+#endif
 					p->reply_buf = buf;
 					p->reply_len = len;
 					/* release: reply_buf/_len stores precede done
@@ -420,35 +460,44 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		rpc->sequence = seq;
 	}
 
-	/* Wrap cmdq_push with gsp_tok so concurrent senders serialise. For
-	 * REPLY_RECV we'll re-take the token below; lwkt tokens are
-	 * refcount-recursive so this is safe. */
-	lwkt_gettoken(&sc->gsp_tok);
-	err = nvkm_gsp_cmdq_push(sc, params);	/* frees the buffer */
-	lwkt_reltoken(&sc->gsp_tok);
-	if (err != 0)
-		return (NULL);
-
 	switch (policy) {
 	case NVKM_GSP_RPC_REPLY_NOWAIT:
 	case NVKM_GSP_RPC_REPLY_NOSEQ:
+		/* Wrap cmdq_push with gsp_tok so concurrent senders serialise. */
+		lwkt_gettoken(&sc->gsp_tok);
+		if (fn == 103)
+			nvkm_gsp_rpc_diag_queues(sc, "before-push", fn, seq);
+		err = nvkm_gsp_cmdq_push(sc, params);	/* frees the buffer */
+		if (fn == 103)
+			nvkm_gsp_rpc_diag_queues(sc, "after-push", fn, seq);
+		lwkt_reltoken(&sc->gsp_tok);
+		if (err != 0)
+			return (NULL);
 		/* Caller passes NULL params in their rpc_wr wrapper.
 		 * Return a non-NULL sentinel so the wrapper sees success.
 		 * The pointer is never dereferenced. */
 		return ((void *)(uintptr_t)1);
 
 	case NVKM_GSP_RPC_REPLY_RECV: {
-		struct nvkm_gsp_pending p = { .seq = seq };
+		struct nvkm_gsp_pending p = { .fn = fn, .seq = seq };
 		int ticks_to_wait;
 		int timeout_ticks = 5 * hz;
 
-		/* sc->gsp_tok is already held by caller? No --- caller does
-		 * NOT hold it. Take it here and surround the wait. The token
-		 * is auto-released by tsleep() and reacquired on wake, so a
-		 * concurrent drainer (ISR or another lwkt) can run during
-		 * the wait and signal our pending entry. */
+		/* Nouveau waits for the reply by function, not by RPC
+		 * sequence. Install the pending entry before publishing the
+		 * command so an early msgq drain cannot discard the reply. */
 		lwkt_gettoken(&sc->gsp_tok);
 		LIST_INSERT_HEAD(&sc->gsp_pending, &p, link);
+		if (fn == 103)
+			nvkm_gsp_rpc_diag_queues(sc, "before-push", fn, seq);
+		err = nvkm_gsp_cmdq_push(sc, params);	/* frees the buffer */
+		if (fn == 103)
+			nvkm_gsp_rpc_diag_queues(sc, "after-push", fn, seq);
+		if (err != 0) {
+			LIST_REMOVE(&p, link);
+			lwkt_reltoken(&sc->gsp_tok);
+			return (NULL);
+		}
 
 		while (!atomic_load_acq_int(&p.done) && timeout_ticks > 0) {
 			/* Drain whatever's already in msgq; may complete us. */
@@ -467,6 +516,9 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		lwkt_reltoken(&sc->gsp_tok);
 
 		if (!atomic_load_acq_int(&p.done)) {
+			if (fn == 103)
+				nvkm_gsp_rpc_diag_queues(sc, "timeout", fn,
+				    p.seq);
 			device_printf(sc->dev,
 			    "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
 			    fn, p.seq);

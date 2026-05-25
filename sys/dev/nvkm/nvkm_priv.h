@@ -156,11 +156,12 @@ struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
 
 /* Per-RPC pending entry: queued on sc->gsp_pending while waiting
- * for a reply that matches sequence. The msgq drainer (ISR or
+ * for a reply that matches function. The msgq drainer (ISR or
  * another lwkt) sets done + wakeup; the issuer then consumes
  * reply_buf and removes from the list. */
 struct nvkm_gsp_pending {
 	LIST_ENTRY(nvkm_gsp_pending) link;
+	uint32_t  fn;
 	uint32_t  seq;
 	volatile u_int done;     /* 0 = pending, 1 = reply ready; use atomic_*_acq/rel */
 	void     *reply_buf;

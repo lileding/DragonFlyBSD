@@ -12,9 +12,13 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_bo.h"
+#include "nvkm_gsp_vmm.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_syncobj.h>
+#include <linux/dma-fence.h>
+#include <linux/slab.h>
 
 /* Identify ourselves as "nouveau" so unmodified Mesa NVK accepts us.
  * Version >= 1.0.3.1 is what NVK requires (winsys/nouveau_device.c). */
@@ -269,6 +273,62 @@ static const struct nvif_ioctl_sclass_oclass_v0 nvkm_tu102_classes[] = {
 #define NVKM_TU102_NUM_CLASSES \
 	(sizeof(nvkm_tu102_classes) / sizeof(nvkm_tu102_classes[0]))
 
+#define NOUVEAU_FIFO_ENGINE_GR	0x01
+#define NOUVEAU_FIFO_ENGINE_CE	0x30
+#define NVKM_DRM_MAX_CHANNELS	64
+#define NVKM_DRM_MAX_CHAN_OBJS	16
+
+struct nvkm_drm_chan_obj {
+	uint32_t handle;
+	uint32_t oclass;
+	struct nvkm_gsp_object object;
+};
+
+struct nvkm_drm_chan {
+	uint32_t id;
+	uint32_t engine_type;
+	struct nvkm_gsp_chan *chan;
+	struct nvkm_drm_chan_obj obj[NVKM_DRM_MAX_CHAN_OBJS];
+};
+
+static struct nvkm_drm_chan nvkm_drm_channels[NVKM_DRM_MAX_CHANNELS];
+static uint32_t nvkm_drm_next_channel = 1;
+
+static struct nvkm_drm_chan *
+nvkm_drm_channel_find(uint32_t id)
+{
+	for (uint32_t i = 0; i < NVKM_DRM_MAX_CHANNELS; i++) {
+		if (nvkm_drm_channels[i].id == id)
+			return (&nvkm_drm_channels[i]);
+	}
+	return (NULL);
+}
+
+static struct nvkm_drm_chan_obj *
+nvkm_drm_channel_obj_slot(struct nvkm_drm_chan *dchan)
+{
+	for (uint32_t i = 0; i < NVKM_DRM_MAX_CHAN_OBJS; i++) {
+		if (dchan->obj[i].oclass == 0)
+			return (&dchan->obj[i]);
+	}
+	return (NULL);
+}
+
+static void
+nvkm_drm_channel_clear(struct nvkm_drm_chan *dchan)
+{
+	if (dchan->chan != NULL) {
+		for (uint32_t i = 0; i < NVKM_DRM_MAX_CHAN_OBJS; i++) {
+			if (dchan->obj[i].oclass != 0 &&
+			    dchan->obj[i].object.handle != 0)
+				(void)nvkm_gsp_rm_free(&dchan->obj[i].object);
+		}
+		(void)nvkm_gsp_chan_dtor(dchan->chan);
+		kfree(dchan->chan);
+	}
+	memset(dchan, 0, sizeof(*dchan));
+}
+
 /* ---- Helper: locate nvkm_softc from drm_file ---- */
 static struct nvkm_softc *
 nvkm_drm_sc(struct drm_device *ddev)
@@ -355,6 +415,9 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 	switch (hdr->type) {
 	case NVIF_IOCTL_V0_NEW: {
 		struct nvif_ioctl_new_v0 *new_ = (void *)hdr->data;
+		struct nvkm_drm_chan *dchan;
+		struct nvkm_drm_chan_obj *obj;
+		int err;
 		device_printf(sc->dev,
 		    "nvkm_drm: NVIF NEW oclass=0x%x handle=0x%x token=0x%llx\n",
 		    new_->oclass, new_->handle,
@@ -363,10 +426,28 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			/* stub: accept the NV_DEVICE allocation. */
 			return (0);
 		}
-		/* Accept TU102 subchannel oclasses too (stub). */
 		switch (new_->oclass) {
 		case 0xc597: case 0xc5c0: case 0xc5b5:
 		case 0x902d: case 0xa140:
+			dchan = nvkm_drm_channel_find((uint32_t)hdr->token);
+			if (dchan == NULL || dchan->chan == NULL)
+				return (-ENOENT);
+			if (new_->oclass == 0xc597 || new_->oclass == 0xc5c0 ||
+			    new_->oclass == 0x902d || new_->oclass == 0xa140) {
+				err = nvkm_gsp_chan_promote_gr_ctx(sc->gsp_vmm,
+				    dchan->chan);
+				if (err != 0)
+					return (-err);
+			}
+			obj = nvkm_drm_channel_obj_slot(dchan);
+			if (obj == NULL)
+				return (-ENOMEM);
+			err = nvkm_gsp_chan_alloc_obj(dchan->chan, new_->handle,
+			    new_->oclass, &obj->object);
+			if (err != 0)
+				return (-err);
+			obj->handle = new_->handle;
+			obj->oclass = new_->oclass;
 			return (0);
 		}
 		return (-EINVAL);
@@ -421,14 +502,52 @@ nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct drm_nouveau_channel_alloc *req = data;
-	static int next_channel = 1;
+	struct nvkm_drm_chan *dchan = NULL;
+	uint32_t engine_type;
+	int err;
 
-	req->channel = next_channel++;
+	for (uint32_t i = 0; i < NVKM_DRM_MAX_CHANNELS; i++) {
+		if (nvkm_drm_channels[i].id == 0) {
+			dchan = &nvkm_drm_channels[i];
+			break;
+		}
+	}
+	if (dchan == NULL)
+		return (-ENOMEM);
+
+	engine_type = (req->tt_ctxdma_handle == NOUVEAU_FIFO_ENGINE_CE) ?
+	    NV2080_ENGINE_TYPE_COPY0 : NV2080_ENGINE_TYPE_GRAPHICS;
+	dchan->chan = kzalloc(sizeof(*dchan->chan), GFP_KERNEL);
+	if (dchan->chan == NULL)
+		return (-ENOMEM);
+
+	lwkt_gettoken(&sc->gsp_tok);
+	if (engine_type == NV2080_ENGINE_TYPE_GRAPHICS) {
+		err = nvkm_gsp_gr_oneinit(sc->gsp_vmm);
+		if (err != 0) {
+			lwkt_reltoken(&sc->gsp_tok);
+			kfree(dchan->chan);
+			memset(dchan, 0, sizeof(*dchan));
+			return (-err);
+		}
+	}
+	err = nvkm_gsp_chan_ctor(sc->gsp_vmm, engine_type, dchan->chan);
+	lwkt_reltoken(&sc->gsp_tok);
+	if (err != 0) {
+		kfree(dchan->chan);
+		memset(dchan, 0, sizeof(*dchan));
+		return (-err);
+	}
+
+	dchan->id = nvkm_drm_next_channel++;
+	dchan->engine_type = engine_type;
+	req->channel = dchan->id;
 	req->pushbuf_domains = 2;
 	req->notifier_handle = 0;
 	req->nr_subchan = 0;
 	device_printf(sc->dev,
-	    "nvkm_drm: CHANNEL_ALLOC -> channel=%d (stub)\n", req->channel);
+	    "nvkm_drm: CHANNEL_ALLOC -> channel=%d chid=%d engine=0x%x req_tt=0x%x\n",
+	    req->channel, dchan->chan->chid, engine_type, req->tt_ctxdma_handle);
 	return (0);
 }
 
@@ -440,12 +559,31 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct drm_nouveau_channel_free *req = data;
+	struct nvkm_drm_chan *dchan;
+
+	dchan = nvkm_drm_channel_find((uint32_t)req->channel);
+	if (dchan != NULL)
+		nvkm_drm_channel_clear(dchan);
 	device_printf(sc->dev,
-	    "nvkm_drm: CHANNEL_FREE channel=%d (stub)\n", req->channel);
+	    "nvkm_drm: CHANNEL_FREE channel=%d\n", req->channel);
 	return (0);
 }
 
-/* ---- DRM_NOUVEAU_VM_BIND (stub) ---- */
+/* ---- DRM_NOUVEAU_VM_BIND ---- */
+#define DRM_NOUVEAU_VM_BIND_OP_MAP	0x0
+#define DRM_NOUVEAU_VM_BIND_OP_UNMAP	0x1
+#define DRM_NOUVEAU_VM_BIND_SPARSE	(1 << 8)
+
+struct drm_nouveau_vm_bind_op {
+	uint32_t op;
+	uint32_t flags;
+	uint32_t handle;
+	uint32_t pad;
+	uint64_t addr;
+	uint64_t bo_offset;
+	uint64_t range;
+};
+
 struct drm_nouveau_vm_bind {
 	uint32_t op_count;
 	uint32_t flags;
@@ -455,19 +593,103 @@ struct drm_nouveau_vm_bind {
 	uint64_t sig_ptr;
 	uint64_t op_ptr;
 };
+
 static int
 nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct drm_nouveau_vm_bind *req = data;
-	device_printf(sc->dev,
-	    "nvkm_drm: VM_BIND ops=%u flags=0x%x (stub success)\n",
-	    req->op_count, req->flags);
-	return (0);
+	struct drm_nouveau_vm_bind_op *ops;
+	int err = 0;
+
+	if (sc->gsp_vmm == NULL)
+		return (-ENXIO);
+	if (req->op_count == 0)
+		return (0);
+	if (req->op_count > 1024)
+		return (-EINVAL);
+	if (req->wait_count != 0 || req->sig_count != 0)
+		return (-EINVAL);
+
+	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
+	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
+	    sizeof(*ops) * req->op_count);
+	if (err != 0) {
+		kfree(ops);
+		return (-EFAULT);
+	}
+
+	for (uint32_t i = 0; i < req->op_count; i++) {
+		struct drm_nouveau_vm_bind_op *op = &ops[i];
+
+		if (op->range == 0 ||
+		    ((op->addr | op->bo_offset | op->range) &
+		     (NVKM_GMMU_PT_PAGE_SIZE - 1))) {
+			err = -EINVAL;
+			break;
+		}
+
+		if (op->op == DRM_NOUVEAU_VM_BIND_OP_UNMAP ||
+		    (op->op == DRM_NOUVEAU_VM_BIND_OP_MAP &&
+		     (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) &&
+		     op->handle == 0)) {
+			err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, op->addr,
+			    op->range);
+			if (err != 0)
+				err = -err;
+			continue;
+		}
+
+		if (op->op == DRM_NOUVEAU_VM_BIND_OP_MAP) {
+			struct drm_gem_object *obj;
+			struct nvkm_bo *bo;
+
+			obj = drm_gem_object_lookup(file_priv, op->handle);
+			if (obj == NULL) {
+				err = -ENOENT;
+				break;
+			}
+			bo = to_nvkm_bo(obj);
+			if (op->bo_offset + op->range > obj->size) {
+				drm_gem_object_put_unlocked(obj);
+				err = -EINVAL;
+				break;
+			}
+			err = nvkm_gsp_vmm_map_sysmem(sc->gsp_vmm, op->addr,
+			    bo->paddr + (vm_paddr_t)op->bo_offset, op->range);
+			drm_gem_object_put_unlocked(obj);
+			if (err != 0) {
+				err = -err;
+				break;
+			}
+			continue;
+		}
+
+		err = -EINVAL;
+		break;
+	}
+
+	kfree(ops);
+	return (err);
 }
 
-/* ---- DRM_NOUVEAU_EXEC (stub) ---- */
+/* ---- DRM_NOUVEAU_EXEC ---- */
+#define DRM_NOUVEAU_SYNC_SYNCOBJ	0x0
+#define DRM_NOUVEAU_SYNC_TYPE_MASK	0xf
+
+struct drm_nouveau_sync {
+	uint32_t flags;
+	uint32_t handle;
+	uint64_t timeline_value;
+};
+
+struct drm_nouveau_exec_push {
+	uint64_t va;
+	uint32_t va_len;
+	uint32_t flags;
+};
+
 struct drm_nouveau_exec {
 	uint32_t channel;
 	uint32_t push_count;
@@ -477,16 +699,201 @@ struct drm_nouveau_exec {
 	uint64_t sig_ptr;
 	uint64_t push_ptr;
 };
+
+#define NV_USERD_SLOT_SIZE	0x200
+#define NV_USERD_GP_GET		0x88
+#define NV_USERD_GP_PUT		0x8c
+#define NV_USERMODE_BASE	0xbb0000u
+#define NV_USERMODE_DOORBELL	(NV_USERMODE_BASE + 0x90)
+#define NVC06F_GP_ENTRY1_LENGTH_SHIFT	10
+#define NVC36F_DMA_SEC_OP_INC_METHOD	1u
+#define NVC36F_SEM_ADDR_LO_OFFSET	0x5c
+#define NVC36F_SEM_EXECUTE_OFFSET	0x6c
+#define NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET \
+	((NVC36F_DMA_SEC_OP_INC_METHOD << 29) | (3u << 16) | \
+	 (NVC36F_SEM_ADDR_LO_OFFSET >> 2))
+#define NVC36F_PUSH_HDR_SEM_EXECUTE \
+	((NVC36F_DMA_SEC_OP_INC_METHOD << 29) | (1u << 16) | \
+	 (NVC36F_SEM_EXECUTE_OFFSET >> 2))
+#define NVC36F_SEM_EXECUTE_RELEASE	1u
+#define NVKM_DRM_SUBMIT_GVA_PUSHBUF	(NVKM_VMM_CLIENT_BASE + 0x0000ULL)
+#define NVKM_DRM_SUBMIT_GVA_GPFIFO	(NVKM_VMM_CLIENT_BASE + 0x1000ULL)
+#define NVKM_DRM_SUBMIT_GVA_SEMA	(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
+#define NVKM_DRM_POST_PUSH_DWORDS	6
+#define NVKM_DRM_GPFIFO_ENTRIES		512
+#define NVKM_DRM_EXEC_POLL_US		5000000
+
+struct nvkm_drm_signaled_fence {
+	struct dma_fence base;
+	spinlock_t lock;
+};
+
+static const char *
+nvkm_drm_fence_name(struct dma_fence *fence __unused)
+{
+	return ("nvkm-drm");
+}
+
+static const struct dma_fence_ops nvkm_drm_fence_ops = {
+	.get_driver_name = nvkm_drm_fence_name,
+	.get_timeline_name = nvkm_drm_fence_name,
+	.wait = dma_fence_default_wait,
+};
+
+static int
+nvkm_drm_signal_syncobjs(struct drm_file *file_priv, uint32_t count,
+    uint64_t sig_ptr)
+{
+	struct drm_nouveau_sync *sigs;
+	int err = 0;
+
+	if (count == 0)
+		return (0);
+	if (count > 64)
+		return (-EINVAL);
+
+	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
+	err = copyin((const void *)(uintptr_t)sig_ptr, sigs, sizeof(*sigs) * count);
+	if (err != 0) {
+		kfree(sigs);
+		return (-EFAULT);
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		struct drm_syncobj *syncobj;
+		struct nvkm_drm_signaled_fence *f;
+
+		if ((sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK) !=
+		    DRM_NOUVEAU_SYNC_SYNCOBJ) {
+			err = -EINVAL;
+			break;
+		}
+		syncobj = drm_syncobj_find(file_priv, sigs[i].handle);
+		if (syncobj == NULL) {
+			err = -ENOENT;
+			break;
+		}
+		f = kzalloc(sizeof(*f), GFP_KERNEL);
+		if (f == NULL) {
+			drm_syncobj_put(syncobj);
+			err = -ENOMEM;
+			break;
+		}
+		lockinit(&f->lock, "nvdfl", 0, 0);
+		dma_fence_init(&f->base, &nvkm_drm_fence_ops, &f->lock, 0, 0);
+		dma_fence_signal(&f->base);
+		drm_syncobj_replace_fence(syncobj, &f->base);
+		dma_fence_put(&f->base);
+		drm_syncobj_put(syncobj);
+	}
+
+	kfree(sigs);
+	return (err);
+}
+
 static int
 nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct drm_nouveau_exec *req = data;
-	device_printf(sc->dev,
-	    "nvkm_drm: EXEC channel=%u pushes=%u (stub: not submitted)\n",
-	    req->channel, req->push_count);
-	return (0);
+	struct nvkm_drm_chan *dchan;
+	struct nvkm_gsp_chan *chan;
+	struct drm_nouveau_exec_push *pushes;
+	uint32_t *gpf, *post, *sema;
+	uint64_t slot_bar1;
+	uint32_t put, payload;
+	int err = 0;
+
+	dchan = nvkm_drm_channel_find(req->channel);
+	if (dchan == NULL)
+		return (-ENOENT);
+	chan = dchan->chan;
+	if (chan == NULL || chan->submit_gpf.kva == NULL ||
+	    chan->submit_push.kva == NULL || chan->submit_sema.kva == NULL)
+		return (-ENXIO);
+	if (req->wait_count != 0)
+		return (-EINVAL);
+	if (req->push_count == 0) {
+		return (nvkm_drm_signal_syncobjs(file_priv, req->sig_count,
+		    req->sig_ptr));
+	}
+	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2)
+		return (-EINVAL);
+
+	pushes = kmalloc(sizeof(*pushes) * req->push_count, M_TEMP, M_WAITOK);
+	err = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
+	    sizeof(*pushes) * req->push_count);
+	if (err != 0) {
+		kfree(pushes);
+		return (-EFAULT);
+	}
+
+	lwkt_gettoken(&sc->gsp_tok);
+	gpf = (uint32_t *)chan->submit_gpf.kva;
+	post = (uint32_t *)chan->submit_push.kva;
+	sema = (uint32_t *)chan->submit_sema.kva;
+	slot_bar1 = chan->userd_bar2_gva + (uint64_t)chan->chid *
+	    NV_USERD_SLOT_SIZE;
+
+	put = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
+	    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	payload = (uint32_t)(req->channel << 16) ^ put ^ req->push_count ^
+	    0x51a70000u;
+	sema[0] = 0;
+
+	for (uint32_t i = 0; i < req->push_count; i++) {
+		if ((pushes[i].va | pushes[i].va_len) & 3 ||
+		    pushes[i].va_len == 0 || pushes[i].va_len >= (1U << 23)) {
+			err = -EINVAL;
+			goto out_unlock;
+		}
+		gpf[put * 2 + 0] = (uint32_t)(pushes[i].va & 0xffffffffu);
+		gpf[put * 2 + 1] = (uint32_t)((pushes[i].va >> 32) & 0xffu) |
+		    ((pushes[i].va_len / 4) << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
+		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	}
+
+	post[0] = NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET;
+	post[1] = (uint32_t)(chan->submit_gva_sema & 0xffffffffu);
+	post[2] = (uint32_t)((chan->submit_gva_sema >> 32) & 0xffu);
+	post[3] = payload;
+	post[4] = NVC36F_PUSH_HDR_SEM_EXECUTE;
+	post[5] = NVC36F_SEM_EXECUTE_RELEASE;
+
+	gpf[put * 2 + 0] = (uint32_t)(chan->submit_gva_push & 0xffffffffu);
+	gpf[put * 2 + 1] = (uint32_t)((chan->submit_gva_push >> 32) & 0xffu) |
+	    (NVKM_DRM_POST_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
+	put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+
+	cpu_sfence();
+	nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, put);
+	cpu_sfence();
+	(void)nvkm_gsp_bar1_rd32(sc, slot_bar1 + 0);
+	nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
+	cpu_sfence();
+
+	for (int us = 0; us < NVKM_DRM_EXEC_POLL_US; us += 10) {
+		if (*(volatile uint32_t *)sema == payload)
+			break;
+		DELAY(10);
+	}
+	if (*(volatile uint32_t *)sema != payload) {
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC timeout channel=%u pushes=%u put=%u sema=0x%08x want=0x%08x get=0x%08x\n",
+		    req->channel, req->push_count, put, sema[0], payload,
+		    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET));
+		err = -ETIME;
+		goto out_unlock;
+	}
+
+	chan->gpf_put = put;
+	err = nvkm_drm_signal_syncobjs(file_priv, req->sig_count, req->sig_ptr);
+
+out_unlock:
+	lwkt_reltoken(&sc->gsp_tok);
+	kfree(pushes);
+	return (err);
 }
 
 /* ---- ioctl table ---- */
