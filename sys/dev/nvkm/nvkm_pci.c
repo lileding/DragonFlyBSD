@@ -21,6 +21,8 @@
 #include <sys/sysctl.h>
 #include <sys/kthread.h>
 
+#define NVKM_GSP_DEBUG_NOCAT	0
+
 struct nvkm_pci_id {
 	uint16_t	device;
 	const char	*name;
@@ -128,6 +130,70 @@ nvkm_gsp_isr(void *arg)
 	}
 	/* Falcon INTR_RETRIGGER0 (per gm200_flcn pattern) */
 	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x16c, 0x1);
+}
+
+static int
+nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+#if NVKM_GSP_DEBUG_NOCAT
+	struct nvkm_softc *sc = priv;
+	const uint8_t *p = repv;
+	char source[66];
+	char faulting_engine[66];
+	uint32_t flags, bugcheck, subsystem, tdr_reason, diag_len;
+	uint64_t timestamp, error_code;
+	uint8_t rec_type;
+
+	(void)fn;
+	if (repc < 180) {
+		device_printf(sc->dev, "NOCAT: short msg len=%u\n", repc);
+		return (0);
+	}
+
+	flags = *(const uint32_t *)(const void *)(p + 0);
+	timestamp = *(const uint64_t *)(const void *)(p + 8);
+	rec_type = *(const uint8_t *)(const void *)(p + 16);
+	bugcheck = *(const uint32_t *)(const void *)(p + 20);
+	memcpy(source, p + 24, 65);
+	source[65] = '\0';
+	subsystem = *(const uint32_t *)(const void *)(p + 92);
+	error_code = *(const uint64_t *)(const void *)(p + 96);
+	memcpy(faulting_engine, p + 104, 65);
+	faulting_engine[65] = '\0';
+	tdr_reason = *(const uint32_t *)(const void *)(p + 172);
+	diag_len = *(const uint32_t *)(const void *)(p + 176);
+
+	device_printf(sc->dev,
+	    "NOCAT: flags=0x%x ts=0x%llx recType=%u bugcheck=0x%x "
+	    "source=\"%s\" subsystem=0x%x errorCode=0x%llx "
+	    "engine=\"%s\" tdrReason=0x%x diagLen=%u\n",
+	    flags, (unsigned long long)timestamp, rec_type, bugcheck,
+	    source, subsystem, (unsigned long long)error_code,
+	    faulting_engine, tdr_reason, diag_len);
+
+	if (repc >= 212) {
+		device_printf(sc->dev,
+		    "NOCAT: diag[0..31]= "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    p[180], p[181], p[182], p[183], p[184], p[185],
+		    p[186], p[187], p[188], p[189], p[190], p[191],
+		    p[192], p[193], p[194], p[195], p[196], p[197],
+		    p[198], p[199], p[200], p[201], p[202], p[203],
+		    p[204], p[205], p[206], p[207], p[208], p[209],
+		    p[210], p[211]);
+	}
+
+	return (0);
+#else
+	(void)priv;
+	(void)fn;
+	(void)repv;
+	(void)repc;
+	return (0);
+#endif
 }
 
 static int
@@ -371,7 +437,7 @@ nvkm_pci_attach(device_t dev)
 			    nvkm_gsp_seq_msg_handler, sc);
 			nvkm_gsp_msg_ntfy_add(sc,
 			    0x1020 /*POST_NOCAT_RECORD*/,
-			    NULL, NULL);
+			    nvkm_gsp_evt_nocat, sc);
 			/* Phase 2 stubs: dispatch but do nothing (or just log). */
 			nvkm_gsp_msg_ntfy_add(sc, 0x1003 /*POST_EVENT*/,
 			    nvkm_gsp_evt_log_only, sc);

@@ -187,6 +187,17 @@ struct nvkm_gsp_sysmem_page {
 	vm_paddr_t		paddr;
 };
 
+#define NVKM_GSP_GR_MAX_CTXBUFS	16
+
+struct nvkm_gsp_gr_ctxbuf {
+	void			*kva;
+	vm_paddr_t		paddr;
+	uint64_t		size;
+	uint64_t		gva;
+	uint32_t		buffer_id;
+	uint8_t			nonmapped;
+};
+
 struct nvkm_gsp_chan {
 	struct nvkm_gsp_object	object;
 	uint64_t		inst_vram;	/* VRAM physical base */
@@ -198,8 +209,15 @@ struct nvkm_gsp_chan {
 	uint32_t		mthdbuf_size;	/* alloc size for contigfree */
 	int			chid;		/* allocated chid (>=1) */
 	uint32_t		gsp_token;	/* GSP-issued doorbell token */
+	uint32_t		gpf_put;	/* software GP_PUT for submit_gpf ring */
 	struct nvkm_gsp_object	ce_obj;	/* TURING_DMA_COPY_A engine obj */
 	struct nvkm_gsp_object	usermode_obj;	/* TURING_USERMODE_A */
+	uint64_t		submit_gva_push;
+	uint64_t		submit_gva_gpf;
+	uint64_t		submit_gva_sema;
+	uint8_t			gr_ctx_promoted;
+	uint8_t			gr_ctxbuf_nr;
+	struct nvkm_gsp_gr_ctxbuf gr_ctxbuf[NVKM_GSP_GR_MAX_CTXBUFS];
 
 	/* GPU-submit BOs: pre-allocated before channel alloc so we
 	 * can pass a real gpFifoOffset to GSP. PD0/SPT hold the host
@@ -215,6 +233,11 @@ struct nvkm_gsp_chan {
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    uint32_t engine_type, struct nvkm_gsp_chan *chan);
 int	 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan);
+int	 nvkm_gsp_chan_alloc_obj(struct nvkm_gsp_chan *chan,
+	    uint32_t handle, uint32_t oclass, struct nvkm_gsp_object *obj);
+int	 nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_chan *chan);
+int	 nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm);
 
 /* NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO — same struct as in static_info,
  * but cleaner to query via RM_CONTROL on the subdevice. */
