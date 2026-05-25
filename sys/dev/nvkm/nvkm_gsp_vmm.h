@@ -22,6 +22,16 @@ struct nvkm_gsp_vmm_pt {
 	struct nvkm_bar1_page	page;  /* VRAM page mapped into BAR1 */
 };
 
+struct nvkm_gsp_vmm_user_pt {
+	LIST_ENTRY(nvkm_gsp_vmm_user_pt) link;
+	uint32_t		pd1_idx;
+	uint32_t		pd0_idx;
+	struct nvkm_bar1_page	pd0;
+	struct nvkm_bar1_page	lpt;
+	struct nvkm_bar1_page	spt;
+};
+LIST_HEAD(nvkm_gsp_vmm_user_pt_list, nvkm_gsp_vmm_user_pt);
+
 struct nvkm_gsp_vmm {
 	struct nvkm_softc	*sc;
 	struct lwkt_token	 tok;	/* protects PT writes + VA alloc */
@@ -37,6 +47,8 @@ struct nvkm_gsp_vmm {
 	/* The server-managed window: VA range [rm_va_base, rm_va_base+rm_va_size). */
 	uint64_t		 rm_va_base;
 	uint64_t		 rm_va_size;
+
+	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
 };
 
 /* Construct a complete VMM: allocate client/device/subdevice/vaspace,
@@ -49,5 +61,12 @@ int	 nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 
 /* Tear down. Frees PT pages + RM resources. */
 void	 nvkm_gsp_vmm_dtor(struct nvkm_gsp_vmm *vmm);
+
+int	 nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    vm_paddr_t paddr, uint64_t size);
+int	 nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t paddr, uint64_t size);
+int	 nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t size);
 
 #endif /* _NVKM_GSP_VMM_H_ */
