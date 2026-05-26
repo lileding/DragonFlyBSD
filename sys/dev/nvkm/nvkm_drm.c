@@ -367,8 +367,9 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		gp->value = 512;	/* default per NVK winsys */
 		break;
 	case NOUVEAU_GETPARAM_GRAPH_UNITS:
-		/* low 16 = GPC mask, high 16 = TPC count -- placeholder. */
-		gp->value = 0;
+		/* NVK interprets low 8 bits as GPC count and bits 8..23 as TPC count.
+		 * TU102 / RTX 2080 Ti has 6 GPCs and 34 TPCs (68 SMs / 2 MPs per TPC). */
+		gp->value = (34ULL << 8) | 6ULL;
 		break;
 	case NOUVEAU_GETPARAM_VRAM_USED:
 		/* NVK asserts >0 on success; force fail so NVK uses 0 fallback. */
@@ -435,7 +436,7 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			if (new_->oclass == 0xc597 || new_->oclass == 0xc5c0 ||
 			    new_->oclass == 0x902d || new_->oclass == 0xa140) {
 				err = nvkm_gsp_chan_promote_gr_ctx(sc->gsp_vmm,
-				    dchan->chan);
+				    dchan->chan, 0);
 				if (err != 0)
 					return (-err);
 			}
@@ -603,20 +604,36 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	struct drm_nouveau_vm_bind_op *ops;
 	int err = 0;
 
-	if (sc->gsp_vmm == NULL)
+	device_printf(sc->dev,
+	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
+	    req->op_count, req->wait_count, req->sig_count, req->flags);
+	if (sc->gsp_vmm == NULL) {
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND no gsp_vmm\n");
 		return (-ENXIO);
+	}
 	if (req->op_count == 0)
 		return (0);
-	if (req->op_count > 1024)
+	if (req->op_count > 1024) {
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
 		return (-EINVAL);
-	if (req->wait_count != 0 || req->sig_count != 0)
+	}
+	if (req->wait_count != 0 || req->sig_count != 0) {
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND unsupported sync waits=%u sigs=%u\n",
+		    req->wait_count, req->sig_count);
 		return (-EINVAL);
+	}
 
 	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
 	    sizeof(*ops) * req->op_count);
 	if (err != 0) {
 		kfree(ops);
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND copyin failed ops=%u err=%d\n",
+		    req->op_count, err);
 		return (-EFAULT);
 	}
 
@@ -626,6 +643,11 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		if (op->range == 0 ||
 		    ((op->addr | op->bo_offset | op->range) &
 		     (NVKM_GMMU_PT_PAGE_SIZE - 1))) {
+			device_printf(sc->dev,
+			    "nvkm_drm: VM_BIND invalid idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx bo_off=0x%016jx range=0x%016jx\n",
+			    i, op->op, op->flags, op->handle,
+			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
+			    (uintmax_t)op->range);
 			err = -EINVAL;
 			break;
 		}
@@ -634,10 +656,18 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		    (op->op == DRM_NOUVEAU_VM_BIND_OP_MAP &&
 		     (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) &&
 		     op->handle == 0)) {
+			device_printf(sc->dev,
+			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
+			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
+			    (uintmax_t)op->range);
 			err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, op->addr,
 			    op->range);
-			if (err != 0)
+			if (err != 0) {
 				err = -err;
+				device_printf(sc->dev,
+				    "nvkm_drm: VM_BIND unmap failed idx=%u err=%d\n",
+				    i, err);
+			}
 			continue;
 		}
 
@@ -647,35 +677,57 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 
 			obj = drm_gem_object_lookup(file_priv, op->handle);
 			if (obj == NULL) {
+				device_printf(sc->dev,
+				    "nvkm_drm: VM_BIND missing BO idx=%u handle=%u\n",
+				    i, op->handle);
 				err = -ENOENT;
 				break;
 			}
 			bo = to_nvkm_bo(obj);
 			if (op->bo_offset + op->range > obj->size) {
 				drm_gem_object_put_unlocked(obj);
+				device_printf(sc->dev,
+				    "nvkm_drm: VM_BIND BO range invalid idx=%u handle=%u bo_off=0x%016jx range=0x%016jx size=0x%016jx\n",
+				    i, op->handle, (uintmax_t)op->bo_offset,
+				    (uintmax_t)op->range, (uintmax_t)obj->size);
 				err = -EINVAL;
 				break;
 			}
+			device_printf(sc->dev,
+			    "nvkm_drm: VM_BIND map idx=%u flags=0x%08x handle=%u addr=0x%016jx bo_off=0x%016jx range=0x%016jx paddr=0x%016jx\n",
+			    i, op->flags, op->handle, (uintmax_t)op->addr,
+			    (uintmax_t)op->bo_offset, (uintmax_t)op->range,
+			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
 			err = nvkm_gsp_vmm_map_sysmem(sc->gsp_vmm, op->addr,
 			    bo->paddr + (vm_paddr_t)op->bo_offset, op->range);
 			drm_gem_object_put_unlocked(obj);
 			if (err != 0) {
 				err = -err;
+				device_printf(sc->dev,
+				    "nvkm_drm: VM_BIND map failed idx=%u err=%d\n",
+				    i, err);
 				break;
 			}
 			continue;
 		}
 
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND unknown op idx=%u op=%u flags=0x%08x\n",
+		    i, op->op, op->flags);
 		err = -EINVAL;
 		break;
 	}
 
 	kfree(ops);
+	device_printf(sc->dev,
+	    "nvkm_drm: VM_BIND complete ops=%u err=%d\n",
+	    req->op_count, err);
 	return (err);
 }
 
 /* ---- DRM_NOUVEAU_EXEC ---- */
 #define DRM_NOUVEAU_SYNC_SYNCOBJ	0x0
+#define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
 #define DRM_NOUVEAU_SYNC_TYPE_MASK	0xf
 
 struct drm_nouveau_sync {
@@ -706,6 +758,10 @@ struct drm_nouveau_exec {
 #define NV_USERMODE_BASE	0xbb0000u
 #define NV_USERMODE_DOORBELL	(NV_USERMODE_BASE + 0x90)
 #define NVC06F_GP_ENTRY1_LENGTH_SHIFT	10
+#define NVC06F_GP_ENTRY1_NO_PREFETCH	(1u << 31)
+#define DRM_NOUVEAU_EXEC_PUSH_NO_PREFETCH	0x1u
+#define DRM_NOUVEAU_EXEC_PUSH_FLAGS_KNOWN	\
+	DRM_NOUVEAU_EXEC_PUSH_NO_PREFETCH
 #define NVC36F_DMA_SEC_OP_INC_METHOD	1u
 #define NVC36F_SEM_ADDR_LO_OFFSET	0x5c
 #define NVC36F_SEM_EXECUTE_OFFSET	0x6c
@@ -741,41 +797,133 @@ static const struct dma_fence_ops nvkm_drm_fence_ops = {
 };
 
 static int
-nvkm_drm_signal_syncobjs(struct drm_file *file_priv, uint32_t count,
-    uint64_t sig_ptr)
+nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
+    uint32_t count, uint64_t wait_ptr)
+{
+	struct drm_nouveau_sync *waits;
+	int err = 0;
+
+	if (count == 0)
+		return (0);
+	if (count > 64) {
+		device_printf(sc->dev,
+		    "nvkm_drm: sync wait invalid count=%u\n", count);
+		return (-EINVAL);
+	}
+
+	waits = kmalloc(sizeof(*waits) * count, M_TEMP, M_WAITOK);
+	err = copyin((const void *)(uintptr_t)wait_ptr, waits,
+	    sizeof(*waits) * count);
+	if (err != 0) {
+		kfree(waits);
+		device_printf(sc->dev,
+		    "nvkm_drm: sync wait copyin failed count=%u err=%d\n",
+		    count, err);
+		return (-EFAULT);
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		struct dma_fence *fence;
+		uint32_t type = waits[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
+		int ret;
+
+		device_printf(sc->dev,
+		    "nvkm_drm: sync wait idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
+		    i, waits[i].flags, waits[i].handle,
+		    (uintmax_t)waits[i].timeline_value);
+		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
+		    type != DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync wait unsupported flags idx=%u flags=0x%08x\n",
+			    i, waits[i].flags);
+			err = -EINVAL;
+			break;
+		}
+
+		ret = drm_syncobj_find_fence(file_priv, waits[i].handle, &fence);
+		if (ret != 0) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync wait missing fence idx=%u handle=%u err=%d\n",
+			    i, waits[i].handle, ret);
+			err = ret;
+			break;
+		}
+
+		ret = dma_fence_wait(fence, true);
+		dma_fence_put(fence);
+		if (ret != 0) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync wait failed idx=%u handle=%u err=%d\n",
+			    i, waits[i].handle, ret);
+			err = ret;
+			break;
+		}
+	}
+
+	kfree(waits);
+	if (err != 0)
+		device_printf(sc->dev,
+		    "nvkm_drm: sync wait failed count=%u err=%d\n",
+		    count, err);
+	return (err);
+}
+
+static int
+nvkm_drm_signal_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
+    uint32_t count, uint64_t sig_ptr)
 {
 	struct drm_nouveau_sync *sigs;
 	int err = 0;
 
 	if (count == 0)
 		return (0);
-	if (count > 64)
+	if (count > 64) {
+		device_printf(sc->dev,
+		    "nvkm_drm: sync signal invalid count=%u\n", count);
 		return (-EINVAL);
+	}
 
 	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)sig_ptr, sigs, sizeof(*sigs) * count);
 	if (err != 0) {
 		kfree(sigs);
+		device_printf(sc->dev,
+		    "nvkm_drm: sync signal copyin failed count=%u err=%d\n",
+		    count, err);
 		return (-EFAULT);
 	}
 
 	for (uint32_t i = 0; i < count; i++) {
 		struct drm_syncobj *syncobj;
 		struct nvkm_drm_signaled_fence *f;
+		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
 
-		if ((sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK) !=
-		    DRM_NOUVEAU_SYNC_SYNCOBJ) {
+		device_printf(sc->dev,
+		    "nvkm_drm: sync signal idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
+		    i, sigs[i].flags, sigs[i].handle,
+		    (uintmax_t)sigs[i].timeline_value);
+		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
+		    type != DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync signal unsupported flags idx=%u flags=0x%08x\n",
+			    i, sigs[i].flags);
 			err = -EINVAL;
 			break;
 		}
 		syncobj = drm_syncobj_find(file_priv, sigs[i].handle);
 		if (syncobj == NULL) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync signal missing syncobj idx=%u handle=%u\n",
+			    i, sigs[i].handle);
 			err = -ENOENT;
 			break;
 		}
 		f = kzalloc(sizeof(*f), GFP_KERNEL);
 		if (f == NULL) {
 			drm_syncobj_put(syncobj);
+			device_printf(sc->dev,
+			    "nvkm_drm: sync signal fence alloc failed idx=%u handle=%u\n",
+			    i, sigs[i].handle);
 			err = -ENOMEM;
 			break;
 		}
@@ -788,7 +936,56 @@ nvkm_drm_signal_syncobjs(struct drm_file *file_priv, uint32_t count,
 	}
 
 	kfree(sigs);
+	if (err != 0)
+		device_printf(sc->dev,
+		    "nvkm_drm: sync signal failed count=%u err=%d\n",
+		    count, err);
 	return (err);
+}
+
+static void
+nvkm_drm_dump_ctxctl_unit(struct nvkm_softc *sc, uint32_t base)
+{
+	device_printf(sc->dev,
+	    "nvkm_drm: ctxctl[%06x] done=%08x stat=%08x %08x %08x %08x stat2=%08x %08x %08x %08x\n",
+	    base, nvkm_rd32(sc, base + 0x400),
+	    nvkm_rd32(sc, base + 0x800), nvkm_rd32(sc, base + 0x804),
+	    nvkm_rd32(sc, base + 0x808), nvkm_rd32(sc, base + 0x80c),
+	    nvkm_rd32(sc, base + 0x810), nvkm_rd32(sc, base + 0x814),
+	    nvkm_rd32(sc, base + 0x818), nvkm_rd32(sc, base + 0x81c));
+}
+
+static void
+nvkm_drm_dump_exec_timeout(struct nvkm_softc *sc)
+{
+	uint32_t gpcnr;
+
+	device_printf(sc->dev,
+	    "nvkm_drm: GR intr=%08x exc=%08x exc1=%08x cls_err=%08x trap_addr=%08x trap_data=%08x trap_hi=%08x status=%08x status1=%08x status2=%08x engine=%08x\n",
+	    nvkm_rd32(sc, 0x400100), nvkm_rd32(sc, 0x400108),
+	    nvkm_rd32(sc, 0x400118), nvkm_rd32(sc, 0x400110),
+	    nvkm_rd32(sc, 0x400704), nvkm_rd32(sc, 0x400708),
+	    nvkm_rd32(sc, 0x40070c), nvkm_rd32(sc, 0x400700),
+	    nvkm_rd32(sc, 0x400604), nvkm_rd32(sc, 0x400608),
+	    nvkm_rd32(sc, 0x40060c));
+	device_printf(sc->dev,
+	    "nvkm_drm: GR activity0=%08x activity1=%08x sked_activity=%08x grfifo_ctl=%08x grfifo_status=%08x\n",
+	    nvkm_rd32(sc, 0x400380), nvkm_rd32(sc, 0x400384),
+	    nvkm_rd32(sc, 0x407054), nvkm_rd32(sc, 0x400500),
+	    nvkm_rd32(sc, 0x400504));
+	device_printf(sc->dev,
+	    "nvkm_drm: FECS inst=%08x cfg=%08x intr=%08x code=%08x class=%08x addr=%08x data=%08x\n",
+	    nvkm_rd32(sc, 0x409b00), nvkm_rd32(sc, 0x409604),
+	    nvkm_rd32(sc, 0x409c18), nvkm_rd32(sc, 0x409814),
+	    nvkm_rd32(sc, 0x409808), nvkm_rd32(sc, 0x40980c),
+	    nvkm_rd32(sc, 0x409810));
+
+	gpcnr = nvkm_rd32(sc, 0x409604) & 0xffff;
+	if (gpcnr > 8)
+		gpcnr = 8;
+	nvkm_drm_dump_ctxctl_unit(sc, 0x409000);
+	for (uint32_t gpc = 0; gpc < gpcnr; gpc++)
+		nvkm_drm_dump_ctxctl_unit(sc, 0x502000 + gpc * 0x8000);
 }
 
 static int
@@ -806,26 +1003,49 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	int err = 0;
 
 	dchan = nvkm_drm_channel_find(req->channel);
-	if (dchan == NULL)
+	device_printf(sc->dev,
+	    "nvkm_drm: EXEC begin channel=%u pushes=%u waits=%u sigs=%u\n",
+	    req->channel, req->push_count, req->wait_count, req->sig_count);
+	if (dchan == NULL) {
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC missing channel=%u\n", req->channel);
 		return (-ENOENT);
+	}
 	chan = dchan->chan;
 	if (chan == NULL || chan->submit_gpf.kva == NULL ||
-	    chan->submit_push.kva == NULL || chan->submit_sema.kva == NULL)
+	    chan->submit_push.kva == NULL || chan->submit_sema.kva == NULL) {
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC channel=%u missing submit buffers chan=%p\n",
+		    req->channel, chan);
 		return (-ENXIO);
-	if (req->wait_count != 0)
-		return (-EINVAL);
-	if (req->push_count == 0) {
-		return (nvkm_drm_signal_syncobjs(file_priv, req->sig_count,
-		    req->sig_ptr));
 	}
-	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2)
+	err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
+	    req->wait_ptr);
+	if (err != 0)
+		return (err);
+	if (req->push_count == 0) {
+		err = nvkm_drm_signal_syncobjs(sc, file_priv, req->sig_count,
+		    req->sig_ptr);
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC signal-only channel=%u sigs=%u err=%d\n",
+		    req->channel, req->sig_count, err);
+		return (err);
+	}
+	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2) {
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC too many pushes channel=%u pushes=%u\n",
+		    req->channel, req->push_count);
 		return (-EINVAL);
+	}
 
 	pushes = kmalloc(sizeof(*pushes) * req->push_count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
 	    sizeof(*pushes) * req->push_count);
 	if (err != 0) {
 		kfree(pushes);
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC push copyin failed channel=%u pushes=%u err=%d\n",
+		    req->channel, req->push_count, err);
 		return (-EFAULT);
 	}
 
@@ -843,14 +1063,36 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	sema[0] = 0;
 
 	for (uint32_t i = 0; i < req->push_count; i++) {
-		if ((pushes[i].va | pushes[i].va_len) & 3 ||
-		    pushes[i].va_len == 0 || pushes[i].va_len >= (1U << 23)) {
+		uint32_t entry0, entry1;
+
+		if ((pushes[i].flags & ~DRM_NOUVEAU_EXEC_PUSH_FLAGS_KNOWN) != 0) {
+			device_printf(sc->dev,
+			    "nvkm_drm: EXEC unknown push flags channel=%u push=%u flags=0x%08x\n",
+			    req->channel, i, pushes[i].flags);
 			err = -EINVAL;
 			goto out_unlock;
 		}
-		gpf[put * 2 + 0] = (uint32_t)(pushes[i].va & 0xffffffffu);
-		gpf[put * 2 + 1] = (uint32_t)((pushes[i].va >> 32) & 0xffu) |
+		if ((pushes[i].va | pushes[i].va_len) & 3 ||
+		    pushes[i].va_len == 0 || pushes[i].va_len >= (1U << 23)) {
+			device_printf(sc->dev,
+			    "nvkm_drm: EXEC invalid push channel=%u idx=%u va=0x%016jx len=0x%08x flags=0x%08x\n",
+			    req->channel, i, (uintmax_t)pushes[i].va,
+			    pushes[i].va_len, pushes[i].flags);
+			err = -EINVAL;
+			goto out_unlock;
+		}
+		entry0 = (uint32_t)(pushes[i].va & 0xffffffffu);
+		entry1 = (uint32_t)((pushes[i].va >> 32) & 0xffu) |
 		    ((pushes[i].va_len / 4) << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
+		if ((pushes[i].flags & DRM_NOUVEAU_EXEC_PUSH_NO_PREFETCH) != 0)
+			entry1 |= NVC06F_GP_ENTRY1_NO_PREFETCH;
+
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC push channel=%u idx=%u va=0x%016jx len=0x%08x flags=0x%08x gpf[%u]=0x%08x:0x%08x\n",
+		    req->channel, i, (uintmax_t)pushes[i].va, pushes[i].va_len,
+		    pushes[i].flags, put, entry0, entry1);
+		gpf[put * 2 + 0] = entry0;
+		gpf[put * 2 + 1] = entry1;
 		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
 	}
 
@@ -883,14 +1125,24 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    "nvkm_drm: EXEC timeout channel=%u pushes=%u put=%u sema=0x%08x want=0x%08x get=0x%08x\n",
 		    req->channel, req->push_count, put, sema[0], payload,
 		    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET));
+		nvkm_drm_dump_exec_timeout(sc);
 		err = -ETIME;
 		goto out_unlock;
 	}
 
 	chan->gpf_put = put;
-	err = nvkm_drm_signal_syncobjs(file_priv, req->sig_count, req->sig_ptr);
+	err = nvkm_drm_signal_syncobjs(sc, file_priv, req->sig_count,
+	    req->sig_ptr);
+	device_printf(sc->dev,
+	    "nvkm_drm: EXEC complete channel=%u pushes=%u sigs=%u err=%d put=%u sema=0x%08x payload=0x%08x\n",
+	    req->channel, req->push_count, req->sig_count, err, put, sema[0],
+	    payload);
 
 out_unlock:
+	if (err != 0)
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC return channel=%u err=%d\n",
+		    req->channel, err);
 	lwkt_reltoken(&sc->gsp_tok);
 	kfree(pushes);
 	return (err);

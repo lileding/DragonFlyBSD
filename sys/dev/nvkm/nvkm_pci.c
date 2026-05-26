@@ -226,6 +226,36 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	    "mmuFaultAddr=0x%llx mmuFaultType=0x%x rcJournalSz=%u\n",
 	    rc->nv2080EngineType, rc->chid, rc->exceptLevel, rc->exceptType, rc->scope,
 	    (unsigned long long)mmu_addr, rc->mmuFaultType, rc->rcJournalBufferSize);
+	{
+		uint8_t *journal = (uint8_t *)(rc + 1);
+		uint32_t avail = repc > sizeof(*rc) ? repc - sizeof(*rc) : 0;
+		uint32_t n = rc->rcJournalBufferSize < avail ?
+		    rc->rcJournalBufferSize : avail;
+		if (n > 512)
+			n = 512;
+		for (uint32_t off = 0; off < n; off += 16) {
+			uint32_t left = n - off;
+			device_printf(sc->dev,
+			    "RC_TRIGGERED journal[%02x]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    off,
+			    left > 0 ? journal[off + 0] : 0,
+			    left > 1 ? journal[off + 1] : 0,
+			    left > 2 ? journal[off + 2] : 0,
+			    left > 3 ? journal[off + 3] : 0,
+			    left > 4 ? journal[off + 4] : 0,
+			    left > 5 ? journal[off + 5] : 0,
+			    left > 6 ? journal[off + 6] : 0,
+			    left > 7 ? journal[off + 7] : 0,
+			    left > 8 ? journal[off + 8] : 0,
+			    left > 9 ? journal[off + 9] : 0,
+			    left > 10 ? journal[off + 10] : 0,
+			    left > 11 ? journal[off + 11] : 0,
+			    left > 12 ? journal[off + 12] : 0,
+			    left > 13 ? journal[off + 13] : 0,
+			    left > 14 ? journal[off + 14] : 0,
+			    left > 15 ? journal[off + 15] : 0);
+		}
+	}
 	return (0);
 }
 
