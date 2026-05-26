@@ -849,7 +849,7 @@ nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp)
 #define NV_CHANNEL_USERD_SIZE		0x200U
 #define NV_CHANNEL_RAMFC_SIZE		0x200U
 /* mthdbuf size now queried from GSP at attach; sc->mthdbuf_size. */
-#define NV_CHANNEL_GPFIFO_ENTRIES	0x80U
+#define NV_CHANNEL_GPFIFO_ENTRIES	512U
 
 /* GSP-RM owns runlist programming. Keep the old manual RUNLIST_NUM poke
  * behind a debug switch so diagnostics observe the scheduler's state. */
@@ -1515,7 +1515,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	    NVKM_RM_CHANNEL | (uint32_t)chan->chid, engine_type, 1,
 	    chan->inst_vram,
 	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
-	    chan->mthdbuf_paddr, mthdbuf_sz, chan->submit_gva_gpf, 0x1000);
+	    chan->mthdbuf_paddr, mthdbuf_sz, chan->submit_gva_gpf,
+	    NV_CHANNEL_GPFIFO_ENTRIES * 8);
 	if (err != 0) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 		    M_NVKM_MTHDBUF);
