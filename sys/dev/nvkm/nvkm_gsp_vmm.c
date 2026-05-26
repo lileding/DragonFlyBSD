@@ -91,6 +91,74 @@ nvkm_gsp_vmm_zero_bar1_page(struct nvkm_softc *sc, const struct nvkm_bar1_page *
 	nvkm_gsp_bar1_flush(sc);
 }
 
+static void
+nvkm_gsp_vmm_invalidate(struct nvkm_gsp_vmm *vmm)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	uint64_t pdb = vmm->pt[0].page.vram_paddr;
+	uint32_t trig_rb = 0xffffffffu;
+
+	/* Match nouveau tu102_vmm_flush(): target this VMM root PDB and
+	 * invalidate all pages. BAR1/BAR2 have their own ALL_PDB path. */
+	nvkm_wr32(sc, 0xb830a0, (uint32_t)(pdb >> 8));
+	nvkm_wr32(sc, 0xb830a4, 0x00000000u);
+	nvkm_wr32(sc, 0xb830b0, 0x80000000u | 0x00000001u);
+	for (int spin = 0; spin < 200000; spin++) {
+		trig_rb = nvkm_rd32(sc, 0xb830b0);
+		if ((trig_rb & 0x80000000u) == 0)
+			break;
+		DELAY(10);
+	}
+	if ((trig_rb & 0x80000000u) != 0) {
+		device_printf(sc->dev,
+		    "gsp_vmm: invalidate timeout pdb=0x%llx trig=0x%08x\n",
+		    (unsigned long long)pdb, trig_rb);
+	}
+}
+
+static struct nvkm_gsp_vmm_pd0 *
+nvkm_gsp_vmm_pd0_find(struct nvkm_gsp_vmm *vmm, uint32_t pd1_idx)
+{
+	struct nvkm_gsp_vmm_pd0 *pd0;
+
+	LIST_FOREACH(pd0, &vmm->user_pd0_pages, link) {
+		if (pd0->pd1_idx == pd1_idx)
+			return (pd0);
+	}
+	return (NULL);
+}
+
+static int
+nvkm_gsp_vmm_pd0_get(struct nvkm_gsp_vmm *vmm, uint32_t pd1_idx,
+    struct nvkm_gsp_vmm_pd0 **ppd0)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	int err;
+
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd1_idx);
+	if (pd0 != NULL) {
+		*ppd0 = pd0;
+		return (0);
+	}
+
+	pd0 = kmalloc(sizeof(*pd0), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	pd0->pd1_idx = pd1_idx;
+	err = nvkm_gsp_bar1_alloc_page(sc, &pd0->page);
+	if (err != 0) {
+		kfree(pd0, M_NVKM_VMM);
+		return (err);
+	}
+
+	nvkm_gsp_vmm_zero_bar1_page(sc, &pd0->page);
+	nvkm_gsp_bar1_wr64(sc, vmm->pt[2].page.bar1_gva + pd1_idx * 8,
+	    nvkm_pde_to_vram(pd0->page.vram_paddr));
+	nvkm_gsp_bar1_flush(sc);
+	LIST_INSERT_HEAD(&vmm->user_pd0_pages, pd0, link);
+	*ppd0 = pd0;
+	return (0);
+}
+
 static struct nvkm_gsp_vmm_user_pt *
 nvkm_gsp_vmm_user_pt_find(struct nvkm_gsp_vmm *vmm, uint32_t pd1_idx,
     uint32_t pd0_idx)
@@ -110,6 +178,7 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 {
 	struct nvkm_softc *sc = vmm->sc;
 	struct nvkm_gsp_vmm_user_pt *pt;
+	struct nvkm_gsp_vmm_pd0 *pd0;
 	uint32_t pd1_idx, pd0_idx;
 	int err;
 
@@ -124,13 +193,15 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		return (0);
 	}
 
+	err = nvkm_gsp_vmm_pd0_get(vmm, pd1_idx, &pd0);
+	if (err != 0)
+		return (err);
+
 	pt = kmalloc(sizeof(*pt), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	pt->pd0 = pd0;
 	pt->pd1_idx = pd1_idx;
 	pt->pd0_idx = pd0_idx;
 
-	err = nvkm_gsp_bar1_alloc_page(sc, &pt->pd0);
-	if (err != 0)
-		goto fail;
 	err = nvkm_gsp_bar1_alloc_page(sc, &pt->lpt);
 	if (err != 0)
 		goto fail;
@@ -138,18 +209,15 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	if (err != 0)
 		goto fail;
 
-	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->pd0);
 	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->lpt);
 	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->spt);
 
-	/* PD1 -> PD0, then PD0 dual PDE: BIG invalid/zero LPT, SMALL SPT.
-	 * This matches the small-page path used by submit_test and nouveau's
-	 * gp100 PD0 dual-entry layout. */
-	nvkm_gsp_bar1_wr64(sc, vmm->pt[2].page.bar1_gva + pd1_idx * 8,
-	    nvkm_pde_to_vram(pt->pd0.vram_paddr));
-	nvkm_gsp_bar1_wr64(sc, pt->pd0.bar1_gva + (pd0_idx * 2 + 0) * 8,
+	/* PD1 owns one shared PD0 page. Each PD0 entry gets its own dual
+	 * BIG/SMALL PDE pair, so mappings in the same 512 MiB range do not
+	 * overwrite earlier PD0 entries. */
+	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 0) * 8,
 	    nvkm_pde_to_vram(pt->lpt.vram_paddr));
-	nvkm_gsp_bar1_wr64(sc, pt->pd0.bar1_gva + (pd0_idx * 2 + 1) * 8,
+	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
 	    nvkm_pde_to_vram(pt->spt.vram_paddr));
 	nvkm_gsp_bar1_flush(sc);
 
@@ -162,8 +230,6 @@ fail:
 		nvkm_gsp_bar1_free_page(sc, &pt->spt);
 	if (pt->lpt.vram_paddr != 0)
 		nvkm_gsp_bar1_free_page(sc, &pt->lpt);
-	if (pt->pd0.vram_paddr != 0)
-		nvkm_gsp_bar1_free_page(sc, &pt->pd0);
 	kfree(pt, M_NVKM_VMM);
 	return (err);
 }
@@ -195,13 +261,14 @@ nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		    nvkm_pte_to_sysmem((uint64_t)paddr + off));
 	}
 	nvkm_gsp_bar1_flush(sc);
+	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
 int
-nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t paddr, uint64_t size)
+nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro)
 {
 	struct nvkm_softc *sc = vmm->sc;
 	struct nvkm_gsp_vmm_user_pt *pt;
@@ -223,11 +290,19 @@ nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
 			return (err);
 		}
 		nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8,
-		    nvkm_pte_to_vram(paddr + off));
+		    nvkm_pte_to_vram_flags(paddr + off, priv, ro));
 	}
 	nvkm_gsp_bar1_flush(sc);
+	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+int
+nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t paddr, uint64_t size)
+{
+	return (nvkm_gsp_vmm_map_vram_flags(vmm, va, paddr, size, 0, 0));
 }
 
 int
@@ -255,6 +330,7 @@ nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 			nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, 0);
 	}
 	nvkm_gsp_bar1_flush(sc);
+	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
@@ -328,6 +404,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	vmm->rm_va_base = NVKM_VMM_RM_BASE;
 	vmm->rm_va_size = NVKM_VMM_RM_SIZE;
 	lwkt_token_init(&vmm->tok, "nvkm-vmm");
+	LIST_INIT(&vmm->user_pd0_pages);
 	LIST_INIT(&vmm->user_pt_pages);
 
 	/* 1) Client + device + subdevice. */
@@ -460,14 +537,19 @@ void
 nvkm_gsp_vmm_dtor(struct nvkm_gsp_vmm *vmm)
 {
 	struct nvkm_gsp_vmm_user_pt *pt;
+	struct nvkm_gsp_vmm_pd0 *pd0;
 	int i;
 
 	while ((pt = LIST_FIRST(&vmm->user_pt_pages)) != NULL) {
 		LIST_REMOVE(pt, link);
 		nvkm_gsp_bar1_free_page(vmm->sc, &pt->spt);
 		nvkm_gsp_bar1_free_page(vmm->sc, &pt->lpt);
-		nvkm_gsp_bar1_free_page(vmm->sc, &pt->pd0);
 		kfree(pt, M_NVKM_VMM);
+	}
+	while ((pd0 = LIST_FIRST(&vmm->user_pd0_pages)) != NULL) {
+		LIST_REMOVE(pd0, link);
+		nvkm_gsp_bar1_free_page(vmm->sc, &pd0->page);
+		kfree(pd0, M_NVKM_VMM);
 	}
 	if (vmm->vaspace.handle != 0)
 		nvkm_gsp_rm_free(&vmm->vaspace);

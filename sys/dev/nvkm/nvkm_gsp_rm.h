@@ -189,12 +189,20 @@ struct nvkm_gsp_sysmem_page {
 
 #define NVKM_GSP_GR_MAX_CTXBUFS	16
 
+enum nvkm_gsp_gr_ctxbuf_target {
+	NVKM_GSP_GR_CTXBUF_TARGET_INST = 0,
+	NVKM_GSP_GR_CTXBUF_TARGET_INST_SR_LOST = 1,
+};
+
 struct nvkm_gsp_gr_ctxbuf {
 	void			*kva;
 	vm_paddr_t		paddr;
 	uint64_t		size;
 	uint64_t		gva;
 	uint32_t		buffer_id;
+	uint8_t			target;
+	uint8_t			init;
+	uint8_t			ro;
 	uint8_t			nonmapped;
 };
 
@@ -236,7 +244,7 @@ int	 nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan);
 int	 nvkm_gsp_chan_alloc_obj(struct nvkm_gsp_chan *chan,
 	    uint32_t handle, uint32_t oclass, struct nvkm_gsp_object *obj);
 int	 nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
-	    struct nvkm_gsp_chan *chan);
+	    struct nvkm_gsp_chan *chan, uint8_t golden);
 int	 nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm);
 
 /* NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO — same struct as in static_info,
