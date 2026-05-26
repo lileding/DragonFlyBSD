@@ -138,6 +138,9 @@ nvkm_gsp_vmm_pd0_get(struct nvkm_gsp_vmm *vmm, uint32_t pd1_idx,
 
 	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd1_idx);
 	if (pd0 != NULL) {
+		nvkm_gsp_bar1_wr64(sc, vmm->pt[2].page.bar1_gva + pd1_idx * 8,
+		    nvkm_pde_to_vram(pd0->page.vram_paddr));
+		nvkm_gsp_bar1_flush(sc);
 		*ppd0 = pd0;
 		return (0);
 	}
@@ -189,6 +192,16 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	pt = nvkm_gsp_vmm_user_pt_find(vmm, pd1_idx, pd0_idx);
 	if (pt != NULL) {
+		nvkm_gsp_bar1_wr64(sc,
+		    vmm->pt[2].page.bar1_gva + pd1_idx * 8,
+		    nvkm_pde_to_vram(pt->pd0->page.vram_paddr));
+		nvkm_gsp_bar1_wr64(sc,
+		    pt->pd0->page.bar1_gva + (pd0_idx * 2 + 0) * 8,
+		    nvkm_pde_to_vram(pt->lpt.vram_paddr));
+		nvkm_gsp_bar1_wr64(sc,
+		    pt->pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
+		    nvkm_pde_to_vram(pt->spt.vram_paddr));
+		nvkm_gsp_bar1_flush(sc);
 		*ppt = pt;
 		return (0);
 	}
