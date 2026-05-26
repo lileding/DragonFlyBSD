@@ -180,7 +180,7 @@ struct nvkm_gsp_bar1 {
 	uint64_t	pd2_paddr;
 	uint64_t	pd1_paddr;
 	uint64_t	pd0_paddr;
-	uint64_t	spt_paddr;
+	uint64_t	spt_paddr[32];
 	uint64_t	next_gva;
 	uint64_t	flush_vram_paddr;
 	bool		ready;
@@ -528,6 +528,7 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 #define NV_PTE_VOL                (1ULL << 3)
 #define NV_PTE_PRIV               (1ULL << 5)
 #define NV_PTE_RO                 (1ULL << 6)
+#define NV_PTE_KIND_INVALID_TURING 0x07ULL
 
 /* Pascal+ 16K-page 5-level GMMU (gp100_vmm_16, vmmgp100.c:603-608). */
 #define NVKM_GMMU_PD3_SHIFT       47
@@ -579,6 +580,12 @@ nvkm_pte_to_vram_flags(uint64_t paddr, uint8_t priv, uint8_t ro)
 	if (ro)
 		pte |= NV_PTE_RO;
 	return (pte);
+}
+
+static __inline uint64_t
+nvkm_pte_to_sparse(void)
+{
+	return NV_PTE_VALID | (NV_PTE_KIND_INVALID_TURING << 56);
 }
 
 /* === VMM VA layout ===
@@ -639,9 +646,14 @@ void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_
 
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page bump-allocates
- * starting at BAR1_GVA_ALLOC_BASE. */
+ * inside a fixed high BAR1 window owned by the DragonFly driver. */
 #define BAR1_GVA_USERD		0x0ULL
-#define BAR1_GVA_ALLOC_BASE	0x1000ULL
+#define BAR1_PD0_MANAGED_FIRST	96u
+#define BAR1_PD0_MANAGED_LAST	127u
+#define BAR1_PD0_MANAGED_COUNT \
+	(BAR1_PD0_MANAGED_LAST - BAR1_PD0_MANAGED_FIRST + 1u)
+#define BAR1_GVA_ALLOC_BASE \
+	((uint64_t)BAR1_PD0_MANAGED_FIRST * (2ULL << 20))
 
 /* BAR1 PDB control register (tu102_bar.c references 0xb80f40
  * for tu102_bar_bar1_fini). */

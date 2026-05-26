@@ -1,10 +1,10 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * GEM-based BO layer for nvkm. GART-only host-RAM BOs backed by
- * contigmalloc'd physically-contiguous pages, exposed to userspace
- * via DRM's GEM handle + fake mmap-offset mechanism. The pages are
- * mapped through a cdev pager (i915 pattern) — see nvkm_bo.c.
+ * GEM-based BO layer for nvkm. GART host-RAM BOs are backed by
+ * page-aligned kmem virtual memory, exposed to userspace via DRM's GEM
+ * handle + fake mmap-offset mechanism. The pages are mapped through a
+ * cdev pager (i915 pattern) — see nvkm_bo.c.
  */
 
 #ifndef _NVKM_BO_H_
@@ -47,8 +47,8 @@ struct drm_nouveau_gem_cpu_fini {
 
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
-	void			*kva;		/* contigmalloc'd kva */
-	uint64_t		paddr;		/* system paddr or VRAM physical start */
+	void			*kva;		/* page-aligned system-memory KVA */
+	uint64_t		paddr;		/* first system paddr or VRAM physical start */
 	uint32_t		domain;
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
