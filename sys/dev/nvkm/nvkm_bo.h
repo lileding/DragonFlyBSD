@@ -41,12 +41,15 @@ struct drm_nouveau_gem_cpu_fini {
 #define NOUVEAU_GEM_DOMAIN_CPU		(1 << 0)
 #define NOUVEAU_GEM_DOMAIN_VRAM		(1 << 1)
 #define NOUVEAU_GEM_DOMAIN_GART		(1 << 2)
+#define NOUVEAU_GEM_DOMAIN_MAPPABLE	(1 << 3)
+#define NOUVEAU_GEM_DOMAIN_COHERENT	(1 << 4)
+#define NOUVEAU_GEM_DOMAIN_NO_SHARE	(1 << 5)
 
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
 	void			*kva;		/* contigmalloc'd kva */
-	vm_paddr_t		paddr;		/* physical start address */
-	uint32_t		domain;		/* NOUVEAU_GEM_DOMAIN_GART (only for now) */
+	uint64_t		paddr;		/* system paddr or VRAM physical start */
+	uint32_t		domain;
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
 };
