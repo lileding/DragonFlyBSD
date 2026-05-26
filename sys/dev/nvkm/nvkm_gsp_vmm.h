@@ -39,6 +39,13 @@ struct nvkm_gsp_vmm_user_pt {
 };
 LIST_HEAD(nvkm_gsp_vmm_user_pt_list, nvkm_gsp_vmm_user_pt);
 
+struct nvkm_gsp_vmm_sparse_region {
+	LIST_ENTRY(nvkm_gsp_vmm_sparse_region) link;
+	uint64_t		addr;
+	uint64_t		size;
+};
+LIST_HEAD(nvkm_gsp_vmm_sparse_region_list, nvkm_gsp_vmm_sparse_region);
+
 struct nvkm_gsp_vmm {
 	struct nvkm_softc	*sc;
 	struct lwkt_token	 tok;	/* protects PT writes + VA alloc */
@@ -57,6 +64,8 @@ struct nvkm_gsp_vmm {
 
 	struct nvkm_gsp_vmm_pd0_list user_pd0_pages;
 	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
+	struct nvkm_gsp_vmm_sparse_region_list sparse_regions;
+	struct nvkm_dmamem sparse_page;
 };
 
 /* Construct a complete VMM: allocate client/device/subdevice/vaspace,
@@ -72,11 +81,18 @@ void	 nvkm_gsp_vmm_dtor(struct nvkm_gsp_vmm *vmm);
 
 int	 nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    vm_paddr_t paddr, uint64_t size);
+int	 nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    void *kva, uint64_t size);
 int	 nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t paddr, uint64_t size);
 int	 nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro);
 int	 nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+int	 nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t size);
+int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t size);
+void	 nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va);
 
 #endif /* _NVKM_GSP_VMM_H_ */

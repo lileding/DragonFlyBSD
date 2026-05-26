@@ -3,12 +3,12 @@
  *
  * nvkm BO layer — minimal GART/VRAM BO backing.
  *
- * GART BOs are contigmalloc allocations of physically-contiguous host
- * pages and expose a mmap handle. VRAM BOs have only a GPU physical
+ * GART BOs are page-aligned kernel virtual allocations whose individual
+ * pages are mapped into the GPU VMM. VRAM BOs have only a GPU physical
  * address and are not CPU-mappable yet.
  *
- * No TTM or eviction yet. GART BOs use contiguous host memory. VRAM BOs
- * use the current GSP-RM bump allocator and are GPU-only for now.
+ * No TTM or eviction yet. VRAM BOs use the current GSP-RM bump allocator
+ * and are GPU-only for now.
  */
 
 #include <sys/param.h>
@@ -17,10 +17,13 @@
 #include <sys/malloc.h>
 #include <sys/conf.h>
 #include <vm/vm.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_param.h>
 #include <vm/vm_page.h>
 #include <vm/vm_object.h>
 #include <vm/vm_pager.h>
+#include <machine/pmap.h>
 
 #include <linux/slab.h>
 #include <linux/kref.h>
@@ -74,7 +77,7 @@ nvkm_gem_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 	 * backing page directly without inserting it into vm_obj. */
 	KKASSERT(*mres == NULL);
 
-	pa = bo->paddr + (vm_paddr_t)offset;
+	pa = vtophys((uint8_t *)bo->kva + offset);
 	m = PHYS_TO_VM_PAGE(pa);
 	if (m == NULL)
 		return (VM_PAGER_ERROR);
@@ -122,9 +125,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		}
 		bo->domain = NOUVEAU_GEM_DOMAIN_VRAM;
 	} else {
-		kva = contigmalloc(size, M_NVKM_BO, M_WAITOK | M_ZERO,
-		    /*low*/ 0, /*high*/ ~(vm_paddr_t)0,
-		    /*align*/ PAGE_SIZE, /*boundary*/ 0);
+		kva = (void *)kmem_alloc(kernel_map, size, VM_SUBSYS_DRM_GEM);
 		if (kva == NULL) {
 			kfree(bo);
 			return (NULL);
@@ -146,9 +147,15 @@ void
 nvkm_bo_gem_free(struct drm_gem_object *obj)
 {
 	struct nvkm_bo *bo = to_nvkm_bo(obj);
+	struct nvkm_softc *sc = obj->dev->dev_private;
+
+	device_printf(sc->dev,
+	    "nvkm_bo: GEM_FREE obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
+	    obj, bo->domain, (unsigned long long)obj->size,
+	    (unsigned long long)bo->paddr, bo->kva != NULL);
 
 	if (bo->kva != NULL) {
-		contigfree(bo->kva, obj->size, M_NVKM_BO);
+		kmem_free(kernel_map, (vm_offset_t)bo->kva, obj->size);
 		bo->kva = NULL;
 	}
 	drm_gem_object_release(obj);
@@ -174,16 +181,17 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	if (bo == NULL)
 		return (-ENOMEM);
 
-	device_printf(sc->dev,
-	    "nvkm_bo: GEM_NEW req_domain=0x%x domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
-	    req->info.domain, bo->domain, (unsigned long long)bo->base.size,
-	    (unsigned long long)bo->paddr, bo->kva != NULL);
-
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
 	/* drop our local reference; the handle holds one now. */
 	drm_gem_object_put_unlocked(&bo->base);
 	if (err != 0)
 		return (err);
+
+	device_printf(sc->dev,
+	    "nvkm_bo: GEM_NEW handle=%u obj=%p req_domain=0x%x domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
+	    handle, &bo->base, req->info.domain, bo->domain,
+	    (unsigned long long)bo->base.size,
+	    (unsigned long long)bo->paddr, bo->kva != NULL);
 
 	if (bo->kva != NULL) {
 		err = drm_gem_create_mmap_offset(&bo->base);
@@ -235,9 +243,20 @@ int
 nvkm_drm_ioctl_gem_cpu_prep(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
 {
-	(void)ddev; (void)data; (void)file_priv;
-	/* Pages are cache-coherent WB; nothing to do until we add GPU
-	 * access paths that need invalidation. */
+	struct nvkm_softc *sc = ddev->dev_private;
+	struct drm_nouveau_gem_cpu_prep *req = data;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+
+	obj = drm_gem_object_lookup(file_priv, req->handle);
+	if (obj == NULL)
+		return (-ENOENT);
+	bo = to_nvkm_bo(obj);
+	device_printf(sc->dev,
+	    "nvkm_bo: CPU_PREP handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flags=0x%x\n",
+	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
+	    (unsigned long long)bo->paddr, bo->kva != NULL, req->flags);
+	drm_gem_object_put_unlocked(obj);
 	return (0);
 }
 
@@ -245,6 +264,22 @@ int
 nvkm_drm_ioctl_gem_cpu_fini(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
 {
-	(void)ddev; (void)data; (void)file_priv;
+	struct nvkm_softc *sc = ddev->dev_private;
+	struct drm_nouveau_gem_cpu_fini *req = data;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+
+	obj = drm_gem_object_lookup(file_priv, req->handle);
+	if (obj == NULL)
+		return (-ENOENT);
+	bo = to_nvkm_bo(obj);
+	if (bo->kva != NULL)
+		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
+		    (vm_offset_t)bo->kva + obj->size);
+	device_printf(sc->dev,
+	    "nvkm_bo: CPU_FINI handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flushed=%u\n",
+	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
+	    (unsigned long long)bo->paddr, bo->kva != NULL, bo->kva != NULL);
+	drm_gem_object_put_unlocked(obj);
 	return (0);
 }

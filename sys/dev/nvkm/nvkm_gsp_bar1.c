@@ -92,9 +92,9 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	uint64_t spt;
 	uint64_t gsp_pd2, gsp_pd1, gsp_pd0;
 	uint64_t spt_pde;
-	uint64_t pd0_127_big, pd0_127_small;
-	uint64_t pd0_127_big_pre, pd0_127_small_pre;
-	uint64_t pd0_127_big_post, pd0_127_small_post;
+	uint64_t pd0_big, pd0_small;
+	uint64_t pd0_big_pre, pd0_small_pre;
+	uint64_t pd0_big_post, pd0_small_post;
 	uint32_t saved;
 
 	if (sc->bar_res[1] == NULL) {
@@ -119,9 +119,9 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	 * reads, leaving PBDMA unable to schedule channels.
 	 *
 	 * Instead: walk GSP's chain (PD3[0]->PD2[0]->PD1[0]->PD0), allocate
-	 * one SPT, mount it on GSP's PD0[127].SMALL. That gives us 2 MiB of
-	 * GVA at [254 MiB, 256 MiB) within BAR1, plenty for USERD + inst,
-	 * without disturbing any of GSP's existing BAR1 mappings.
+	 * our own SPT pages, and mount them on a fixed high BAR1 PD0 range.
+	 * This gives the driver a 64 MiB BAR1 window for host writes to VRAM
+	 * page-table pages without disturbing GSP's low BAR1 mappings.
 	 */
 	uint64_t pdb_paddr = sc->gsp_bar1_pdb;
 	lwkt_gettoken(&sc->gsp_tok);
@@ -165,35 +165,53 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	    (unsigned long long)gsp_pd1, (unsigned long long)gsp_pd0);
 #endif
 
-	/* Alloc OUR SPT only. Mount on GSP's PD0[127].SMALL (last 2 MiB of
-	 * BAR1 GVA range, [254 MiB, 256 MiB)). */
-	spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
-	if (spt == 0) {
-		device_printf(sc->dev, "bar1: SPT alloc failed\n");
-		return (ENOMEM);
-	}
-	/* Zero our SPT via PRAMIN. */
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
-	for (uint32_t off = 0; off < 0x1000; off += 4)
-		b1_pramin_wr32(sc, spt + off, 0);
+	for (uint32_t slot = BAR1_PD0_MANAGED_FIRST;
+	    slot <= BAR1_PD0_MANAGED_LAST; slot++) {
+		uint32_t idx = slot - BAR1_PD0_MANAGED_FIRST;
 
-	/* Write GSP PD0[127] as a full dual PDE, like nouveau's
-	 * gp100_vmm_pd0_pde() VMM_WO128() path.  We only install a
-	 * 4 KiB SMALL SPT, so BIG is invalid and SMALL points at our SPT.
-	 */
-	spt_pde = (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
-	pd0_127_big = gsp_pd0 + 127 * 16 + 0;
-	pd0_127_small = gsp_pd0 + 127 * 16 + 8;
-	b1_pramin_set_base(sc, pd0_127_big & ~(uint64_t)0xffffu);
-	pd0_127_big_pre = b1_pramin_rd64(sc, pd0_127_big);
-	pd0_127_small_pre = b1_pramin_rd64(sc, pd0_127_small);
-	b1_pramin_wr64(sc, pd0_127_big, 0);
-	b1_pramin_wr64(sc, pd0_127_small, spt_pde);
-	(void)nvkm_rd32(sc, NV_PRAMIN);
-	pd0_127_big_post = b1_pramin_rd64(sc, pd0_127_big);
-	pd0_127_small_post = b1_pramin_rd64(sc, pd0_127_small);
+		/* Alloc OUR SPT.  Each SPT covers one 2 MiB BAR1 PD0 slot. */
+		spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		if (spt == 0) {
+			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+			lwkt_reltoken(&sc->gsp_tok);
+			device_printf(sc->dev, "bar1: SPT alloc failed slot=%u\n", slot);
+			return (ENOMEM);
+		}
+
+		/* Zero our SPT via PRAMIN. */
+		b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+		for (uint32_t off = 0; off < 0x1000; off += 4)
+			b1_pramin_wr32(sc, spt + off, 0);
+
+		/* Write GSP PD0[slot] as a full dual PDE, like nouveau's
+		 * gp100_vmm_pd0_pde() VMM_WO128() path.  We only install a
+		 * 4 KiB SMALL SPT, so BIG is invalid and SMALL points at ours.
+		 */
+		spt_pde = (spt >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
+		pd0_big = gsp_pd0 + slot * 16 + 0;
+		pd0_small = gsp_pd0 + slot * 16 + 8;
+		b1_pramin_set_base(sc, pd0_big & ~(uint64_t)0xffffu);
+		pd0_big_pre = b1_pramin_rd64(sc, pd0_big);
+		pd0_small_pre = b1_pramin_rd64(sc, pd0_small);
+		b1_pramin_wr64(sc, pd0_big, 0);
+		b1_pramin_wr64(sc, pd0_small, spt_pde);
+		(void)nvkm_rd32(sc, NV_PRAMIN);
+		pd0_big_post = b1_pramin_rd64(sc, pd0_big);
+		pd0_small_post = b1_pramin_rd64(sc, pd0_small);
+		b1->spt_paddr[idx] = spt;
+
+#ifdef NVKM_DEBUG_BAR1
+		device_printf(sc->dev,
+		    "bar1: mounted OUR SPT 0x%llx at GSP PD0[%u] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx\n",
+		    (unsigned long long)spt, slot,
+		    (unsigned long long)pd0_big_pre,
+		    (unsigned long long)pd0_big_post,
+		    (unsigned long long)pd0_small_pre,
+		    (unsigned long long)pd0_small_post);
+#endif
+	}
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
@@ -201,18 +219,12 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	b1->pd2_paddr = gsp_pd2;   /* shared with GSP, informational */
 	b1->pd1_paddr = gsp_pd1;
 	b1->pd0_paddr = gsp_pd0;
-	b1->spt_paddr = spt;
-	/* GVA = 127 * 2 MiB = 0xfe00000 (254 MiB), first slot in our SPT. */
-	b1->next_gva  = 127ULL * (2ULL << 20);
+	b1->next_gva  = BAR1_GVA_ALLOC_BASE;
 
 #ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
-	    "bar1: mounted OUR SPT 0x%llx at GSP PD0[127] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx; GVA base 0x%llx\n",
-	    (unsigned long long)spt,
-	    (unsigned long long)pd0_127_big_pre,
-	    (unsigned long long)pd0_127_big_post,
-	    (unsigned long long)pd0_127_small_pre,
-	    (unsigned long long)pd0_127_small_post,
+	    "bar1: mounted OUR SPT window PD0[%u..%u]; GVA base 0x%llx\n",
+	    BAR1_PD0_MANAGED_FIRST, BAR1_PD0_MANAGED_LAST,
 	    (unsigned long long)b1->next_gva);
 #endif
 
@@ -221,10 +233,11 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 #ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
 	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
-	    "our SPT=0x%llx (mounted on GSP PD0[127].SMALL); "
+	    "our SPT window mounted on GSP PD0[%u..%u].SMALL; "
 	    "BAR1@%llx %lluMiB\n",
 	    (unsigned long long)gsp_pd2, (unsigned long long)gsp_pd1,
-	    (unsigned long long)gsp_pd0, (unsigned long long)spt,
+	    (unsigned long long)gsp_pd0, BAR1_PD0_MANAGED_FIRST,
+	    BAR1_PD0_MANAGED_LAST,
 	    (unsigned long long)rman_get_start(sc->bar_res[1]),
 	    (unsigned long long)rman_get_size(sc->bar_res[1]) >> 20);
 #endif
@@ -232,7 +245,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	sc->bar1.ready = true;
 
 	/* SMOKE test removed: GVA=0 maps through GSP's own PT chain
-	 * (our SPT is mounted at PD0[127], range [254 MiB, 256 MiB)). Writing
+	 * (our SPT window is mounted at high PD0 slots). Writing
 	 * BAR1[0] would write to whatever GSP has at SPT[0] — likely a
 	 * critical GSP-internal page. Don't go there. */
 
@@ -254,6 +267,7 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	uint32_t saved;
 	uint32_t spt_idx;
 	uint32_t pd0_idx;
+	uint64_t spt;
 	uint64_t pte;
 
 	if (!b1->ready)
@@ -269,7 +283,8 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	 * 512-entry SPT for GVAs like 0xfe07000.
 	 */
 	pd0_idx = (uint32_t)((bar1_gva >> 21) & 0xffu);
-	if (pd0_idx != 127u)
+	if (pd0_idx < BAR1_PD0_MANAGED_FIRST ||
+	    pd0_idx > BAR1_PD0_MANAGED_LAST)
 		return (EINVAL);
 
 	spt_idx = (uint32_t)((bar1_gva >> 12) & 0x1ffu);  /* 4 KiB SMALL pages */
@@ -278,8 +293,9 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
-	b1_pramin_set_base(sc, b1->spt_paddr & ~(uint64_t)0xffffu);
-	b1_pramin_wr64(sc, b1->spt_paddr + (uint64_t)spt_idx * 8, pte);
+	spt = b1->spt_paddr[pd0_idx - BAR1_PD0_MANAGED_FIRST];
+	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+	b1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, pte);
 	(void)nvkm_rd32(sc, NV_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
