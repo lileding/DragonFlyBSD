@@ -263,9 +263,36 @@ static int
 nvkm_gsp_evt_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 	struct nvkm_softc *sc = priv;
-	(void)repv;
+	const uint32_t *words = repv;
+	uint32_t count = repc / sizeof(*words);
+
 	device_printf(sc->dev, "gsp_evt: fn=0x%x len=%u (logged, no action)\n",
 	    fn, repc);
+	if (fn == 0x1006) {
+		const uint8_t *bytes = repv;
+		char text[161];
+		uint32_t start = repc >= 12 ? 12 : 0;
+		uint32_t n = repc > start ? repc - start : 0;
+
+		if (n >= sizeof(text))
+			n = sizeof(text) - 1;
+		for (uint32_t i = 0; i < n; i++) {
+			uint8_t c = bytes[start + i];
+
+			text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+		}
+		text[n] = '\0';
+		device_printf(sc->dev, "gsp_evt: OS_ERROR_LOG text=\"%s\"\n",
+		    text);
+		for (uint32_t i = 0; i < count && i < 32; i += 4) {
+			device_printf(sc->dev,
+			    "gsp_evt: 1006[%02u]=%08x %08x %08x %08x\n",
+			    i, words[i + 0],
+			    i + 1 < count ? words[i + 1] : 0,
+			    i + 2 < count ? words[i + 2] : 0,
+			    i + 3 < count ? words[i + 3] : 0);
+		}
+	}
 	return (0);
 }
 
