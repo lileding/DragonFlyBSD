@@ -22,11 +22,18 @@ struct nvkm_gsp_vmm_pt {
 	struct nvkm_bar1_page	page;  /* VRAM page mapped into BAR1 */
 };
 
+struct nvkm_gsp_vmm_pd0 {
+	LIST_ENTRY(nvkm_gsp_vmm_pd0) link;
+	uint32_t		pd1_idx;
+	struct nvkm_bar1_page	page;
+};
+LIST_HEAD(nvkm_gsp_vmm_pd0_list, nvkm_gsp_vmm_pd0);
+
 struct nvkm_gsp_vmm_user_pt {
 	LIST_ENTRY(nvkm_gsp_vmm_user_pt) link;
+	struct nvkm_gsp_vmm_pd0 *pd0;
 	uint32_t		pd1_idx;
 	uint32_t		pd0_idx;
-	struct nvkm_bar1_page	pd0;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
@@ -48,6 +55,7 @@ struct nvkm_gsp_vmm {
 	uint64_t		 rm_va_base;
 	uint64_t		 rm_va_size;
 
+	struct nvkm_gsp_vmm_pd0_list user_pd0_pages;
 	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
 };
 
@@ -66,6 +74,8 @@ int	 nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    vm_paddr_t paddr, uint64_t size);
 int	 nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t paddr, uint64_t size);
+int	 nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro);
 int	 nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
 

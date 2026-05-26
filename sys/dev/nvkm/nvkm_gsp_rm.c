@@ -419,21 +419,51 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 	}
 	{
 		struct NV2080_CTRL_INTERNAL_INTR_GET_KERNEL_TABLE_PARAMS_dfly *r = q;
+		uint32_t leaf_mask[8] = {
+			0x00031c80u, 0, 0, 0, 0x0c000000u, 0, 0, 0,
+		};
+
 		device_printf(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE tableLen=%u\n",
 		    r->tableLen);
-		for (uint32_t i = 0; i < r->tableLen && i < 8u; i++) {
+		for (uint32_t i = 0; i < r->tableLen &&
+		    i < NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE; i++) {
+			uint32_t vectors[2] = {
+				r->table[i].vectorStall,
+				r->table[i].vectorNonStall,
+			};
+
 			device_printf(sc->dev,
 			    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
 			    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
 			    r->table[i].vectorStall, r->table[i].vectorNonStall);
+			for (uint32_t j = 0; j < 2; j++) {
+				uint32_t vector = vectors[j];
+				uint32_t leaf = vector / 32u;
+				uint32_t bit = vector % 32u;
+
+				if (vector == 0xffffffffu || leaf >= 8u)
+					continue;
+				leaf_mask[leaf] |= (1u << bit);
+			}
 		}
-		/* Match Fedora 44 nouveau\'s EN_SET pattern exactly. Over-enabling
-		 * triggers spurious GSP intr we never service. */
-		nvkm_wr32(sc, 0xb81200u, 0x00031c80u);  /* leaf[0] */
-		nvkm_wr32(sc, 0xb81210u, 0x0c000000u);  /* leaf[4] */
+		/*
+		 * Nouveau stores this table in gsp->intr[] and lets the nvkm
+		 * interrupt framework allow the vectors requested by each GSP
+		 * backed subdev/engine.  We do not have that framework yet, so
+		 * allow the finite vectors from the RM table directly, keeping
+		 * the Fedora-observed bits as the base mask.
+		 */
+		for (uint32_t leaf = 0; leaf < 8u; leaf++) {
+			if (leaf_mask[leaf] != 0)
+				nvkm_wr32(sc, 0xb81200u + leaf * 4u,
+				    leaf_mask[leaf]);
+		}
 		device_printf(sc->dev,
-		    "gsp_rm: intr_allow Fedora-pattern leaf[0]=0x00031c80 leaf[4]=0x0c000000\n");
+		    "gsp_rm: intr_allow table leaf[0]=0x%08x leaf[1]=0x%08x "
+		    "leaf[2]=0x%08x leaf[3]=0x%08x leaf[4]=0x%08x\n",
+		    leaf_mask[0], leaf_mask[1], leaf_mask[2], leaf_mask[3],
+		    leaf_mask[4]);
 
 		/* Enable INTR_TOP_EN_SET[0] = 0xf to enable subtree-0 intrs to fire.
 		 * Fedora has this set; we missed it. Without TOP enable, LEAF intrs
@@ -1429,6 +1459,18 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->submit_sema.paddr,
 		    (unsigned long long)(uintptr_t)chan->submit_sema.kva);
 #endif
+		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_push,
+		    chan->submit_push.paddr, 0x1000);
+		if (err != 0)
+			return (err);
+		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_gpf,
+		    chan->submit_gpf.paddr, 0x1000);
+		if (err != 0)
+			return (err);
+		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_sema,
+		    chan->submit_sema.paddr, 0x1000);
+		if (err != 0)
+			return (err);
 	}
 
 	/* Allocate chid FIRST -- nouveau encodes it in the channel handle:
@@ -2320,18 +2362,22 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 
 static int
 nvkm_gsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id,
-    uint8_t *init, uint8_t *nonmapped)
+    uint8_t *global, uint8_t *init, uint8_t *ro, uint8_t *nonmapped)
 {
+	*global = 1;
 	*init = 0;
+	*ro = 0;
 	*nonmapped = 0;
 
 	switch (engine_id) {
 	case NV0080_ENGINE_ID_GRAPHICS:
 		*buffer_id = NV2080_CTXBUF_ID_MAIN;
+		*global = 0;
 		*init = 1;
 		return (0);
 	case NV0080_ENGINE_ID_GRAPHICS_PATCH:
 		*buffer_id = NV2080_CTXBUF_ID_PATCH;
+		*global = 0;
 		*init = 1;
 		return (0);
 	case NV0080_ENGINE_ID_GRAPHICS_BUNDLE_CB:
@@ -2353,6 +2399,7 @@ nvkm_gsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id,
 	case NV0080_ENGINE_ID_GRAPHICS_PRIV_ACCESS_MAP:
 		*buffer_id = NV2080_CTXBUF_ID_PRIV_ACCESS_MAP;
 		*init = 1;
+		*ro = 1;
 		*nonmapped = 1;
 		return (0);
 	default:
@@ -2379,9 +2426,36 @@ nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr, uint64_t size)
 	nvkm_gsp_bar1_invalidate(sc);
 }
 
+static struct nvkm_gsp_gr_ctxbuf *
+nvkm_gsp_gr_global_ctxbuf(struct nvkm_softc *sc, uint32_t buffer_id)
+{
+	for (uint32_t i = 0; i < sc->gr_ctxbuf_nr; i++) {
+		if (sc->gr_ctxbuf_mem[i].buffer_id == buffer_id)
+			return (&sc->gr_ctxbuf_mem[i]);
+	}
+	return (NULL);
+}
+
+static int
+nvkm_gsp_gr_save_global_ctxbuf(struct nvkm_softc *sc,
+    const struct nvkm_gsp_gr_ctxbuf *buf)
+{
+	if (sc->gr_ctxbuf_mem == NULL) {
+		sc->gr_ctxbuf_mem = kzalloc(sizeof(*sc->gr_ctxbuf_mem) *
+		    NVKM_GSP_GR_MAX_CTXBUFS, GFP_KERNEL);
+		if (sc->gr_ctxbuf_mem == NULL)
+			return (ENOMEM);
+	}
+	if (sc->gr_ctxbuf_nr >= NVKM_GSP_GR_MAX_CTXBUFS)
+		return (ENOSPC);
+
+	sc->gr_ctxbuf_mem[sc->gr_ctxbuf_nr++] = *buf;
+	return (0);
+}
+
 int
 nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
-    struct nvkm_gsp_chan *chan)
+    struct nvkm_gsp_chan *chan, uint8_t golden)
 {
 	struct nvkm_softc *sc = vmm->sc;
 	struct nvkm_gsp_client tmp_client;
@@ -2437,8 +2511,14 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_rm_ctrl_done(&tmp_subdev, zcull);
 	}
 
-	next_gva = NVKM_VMM_CLIENT_BASE + 0x01000000ULL +
-	    (uint64_t)chan->chid * 0x01000000ULL;
+	/*
+	 * Nouveau creates the GR golden VMM with start=0x1000 and no fixed
+	 * upper limit, then lets nvkm_vmm_get_locked() choose the first aligned
+	 * hole for each ctxbuf.  Keep the same low-VA allocation pattern here;
+	 * these addresses live in the GR golden VMM, not in the submit-test
+	 * client VA window.
+	 */
+	next_gva = 0x1000ULL;
 
 	ctrl = nvkm_gsp_rm_ctrl_get(&vmm->device.subdevice,
 	   NV2080_CTRL_CMD_GPU_PROMOTE_CTX, sizeof(*ctrl));
@@ -2450,6 +2530,8 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 	ctrl->engineType = NV2080_ENGINE_TYPE_GRAPHICS;
 	ctrl->hChanClient = vmm->client.object.handle;
 	ctrl->hObject = chan->object.handle;
+	if (golden && sc->gr_ctxbuf_mem != NULL)
+		sc->gr_ctxbuf_nr = 0;
 
 	for (uint32_t i = 0;
 	    i < NV2080_CTRL_INTERNAL_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_COUNT;
@@ -2461,12 +2543,14 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		uint32_t buffer_id;
 		uint64_t size, alloc_size, entry_size, mem_align, gva_align;
 		uint32_t page_shift, gva_align_shift;
-		uint8_t init, nonmapped;
+		uint8_t global, init, ro, nonmapped, target;
+		uint8_t alloc;
+		uint8_t entry_nonmapped;
 
 		if (bi->size == 0)
 			continue;
-		if (nvkm_gsp_gr_ctxbuf_map(i, &buffer_id, &init,
-		    &nonmapped) != 0)
+		if (nvkm_gsp_gr_ctxbuf_map(i, &buffer_id, &global, &init,
+		    &ro, &nonmapped) != 0)
 			continue;
 		if (ctrl->entryCount >= NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES ||
 		    chan->gr_ctxbuf_nr >= NVKM_GSP_GR_MAX_CTXBUFS) {
@@ -2495,42 +2579,79 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		gva_align = 1ULL << gva_align_shift;
 		alloc_size = NVKM_ALIGN_UP(size, mem_align);
 		next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
+		target = init ? NVKM_GSP_GR_CTXBUF_TARGET_INST :
+		    NVKM_GSP_GR_CTXBUF_TARGET_INST_SR_LOST;
+		alloc = golden || !global;
+		entry_nonmapped = nonmapped && alloc;
+
+		if (!alloc &&
+		    buffer_id == NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP)
+			continue;
 
 		buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
-		buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size, mem_align);
-		if (buf->paddr == 0) {
-			err = ENOMEM;
-			goto out_done;
+		if (alloc) {
+			buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
+			    mem_align);
+			if (buf->paddr == 0) {
+				err = ENOMEM;
+				goto out_done;
+			}
+		} else {
+			struct nvkm_gsp_gr_ctxbuf *global_buf;
+
+			global_buf = nvkm_gsp_gr_global_ctxbuf(sc, buffer_id);
+			if (global_buf == NULL) {
+				device_printf(sc->dev,
+				    "gsp_rm: missing global ctxbuf id=%u\n",
+				    buffer_id);
+				err = ENOENT;
+				goto out_done;
+			}
+			buf->paddr = global_buf->paddr;
+			alloc_size = global_buf->size;
 		}
 		buf->size = alloc_size;
 		buf->gva = next_gva;
 		buf->buffer_id = buffer_id;
-		buf->nonmapped = nonmapped;
+		buf->target = target;
+		buf->init = init;
+		buf->ro = ro;
+		buf->nonmapped = entry_nonmapped;
 		chan->gr_ctxbuf_nr++;
 
-		nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
-		if (!nonmapped) {
-			err = nvkm_gsp_vmm_map_vram(vmm, buf->gva,
-			    buf->paddr, buf->size);
+		if (init && alloc)
+			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+		if (!entry_nonmapped) {
+			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
+			    buf->paddr, buf->size, 1, ro);
+			if (err != 0)
+				goto out_done;
+		}
+		if (golden && global) {
+			err = nvkm_gsp_gr_save_global_ctxbuf(sc, buf);
 			if (err != 0)
 				goto out_done;
 		}
 
 		e = &ctrl->promoteEntry[ctrl->entryCount++];
-		e->gpuVirtAddr = nonmapped ? 0 : buf->gva;
+		e->gpuVirtAddr = entry_nonmapped ? 0 : buf->gva;
 		e->bufferId = (uint16_t)buffer_id;
-		e->bInitialize = init;
-		e->bNonmapped = nonmapped;
+		e->bInitialize = init && alloc;
+		e->bNonmapped = entry_nonmapped;
 		if (e->bInitialize) {
 			e->gpuPhysAddr = buf->paddr;
 			e->size = entry_size;
 			e->physAttr = 4;
 		}
 		device_printf(sc->dev,
-		    "gsp_rm: gr promote ctxbuf id=%u eng=%u size=0x%llx pa=0x%llx va=0x%llx init=%u nm=%u\n",
+		    "gsp_rm: gr promote ctxbuf id=%u eng=%u entry=0x%llx "
+		    "alloc=0x%llx pa=0x%llx va=0x%llx global=%u init=%u "
+		    "ro=%u target=%u nm=%u\n",
 		    buffer_id, i, (unsigned long long)e->size,
+		    (unsigned long long)buf->size,
 		    (unsigned long long)e->gpuPhysAddr,
-		    (unsigned long long)e->gpuVirtAddr, init, nonmapped);
+		    (unsigned long long)e->gpuVirtAddr, global, init, ro,
+		    target, entry_nonmapped);
 		next_gva += buf->size;
 
 		/* nouveau r535_gr_get_ctxbuf_info() duplicates PRIV_ACCESS_MAP
@@ -2546,30 +2667,55 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 			next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
 			buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
-			buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
-			    mem_align);
-			if (buf->paddr == 0) {
-				err = ENOMEM;
-				goto out_done;
+			if (alloc) {
+				buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
+				    mem_align);
+				if (buf->paddr == 0) {
+					err = ENOMEM;
+					goto out_done;
+				}
+			} else {
+				struct nvkm_gsp_gr_ctxbuf *global_buf;
+
+				global_buf = nvkm_gsp_gr_global_ctxbuf(sc,
+				    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP);
+				if (global_buf == NULL) {
+					device_printf(sc->dev,
+					    "gsp_rm: missing global ctxbuf id=%u\n",
+					    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP);
+					err = ENOENT;
+					goto out_done;
+				}
+				buf->paddr = global_buf->paddr;
+				alloc_size = global_buf->size;
 			}
 			buf->size = alloc_size;
 			buf->gva = next_gva;
 			buf->buffer_id =
 			    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP;
+			buf->target = target;
+			buf->init = init;
+			buf->ro = ro;
 			buf->nonmapped = 0;
 			chan->gr_ctxbuf_nr++;
 
-			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
-			err = nvkm_gsp_vmm_map_vram(vmm, buf->gva,
-			    buf->paddr, buf->size);
+			if (init && alloc)
+				nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
+			    buf->paddr, buf->size, 1, ro);
 			if (err != 0)
 				goto out_done;
+			if (golden && global) {
+				err = nvkm_gsp_gr_save_global_ctxbuf(sc, buf);
+				if (err != 0)
+					goto out_done;
+			}
 
 			e = &ctrl->promoteEntry[ctrl->entryCount++];
 			e->gpuVirtAddr = buf->gva;
 			e->bufferId =
 			    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP;
-			e->bInitialize = init;
+			e->bInitialize = init && alloc;
 			e->bNonmapped = 0;
 			if (e->bInitialize) {
 				e->gpuPhysAddr = buf->paddr;
@@ -2577,10 +2723,14 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 				e->physAttr = 4;
 			}
 			device_printf(sc->dev,
-			    "gsp_rm: gr promote ctxbuf id=%u eng=%u size=0x%llx pa=0x%llx va=0x%llx init=%u nm=%u\n",
+			    "gsp_rm: gr promote ctxbuf id=%u eng=%u entry=0x%llx "
+			    "alloc=0x%llx pa=0x%llx va=0x%llx global=%u "
+			    "init=%u ro=%u target=%u nm=%u\n",
 			    e->bufferId, i, (unsigned long long)e->size,
+			    (unsigned long long)buf->size,
 			    (unsigned long long)e->gpuPhysAddr,
-			    (unsigned long long)e->gpuVirtAddr, init, 0);
+			    (unsigned long long)e->gpuVirtAddr, global, init,
+			    ro, target, 0);
 			next_gva += buf->size;
 		}
 	}
@@ -2588,8 +2738,8 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 	uint32_t entry_count = ctrl->entryCount;
 	err = nvkm_gsp_rm_ctrl_wr(&vmm->device.subdevice, ctrl);
 	device_printf(sc->dev,
-	    "gsp_rm: GPU_PROMOTE_CTX chan=0x%x chid=%d entries=%u err=%d\n",
-	    chan->object.handle, chan->chid, entry_count, err);
+	    "gsp_rm: GPU_PROMOTE_CTX chan=0x%x chid=%d golden=%u entries=%u err=%d\n",
+	    chan->object.handle, chan->chid, golden, entry_count, err);
 	if (err == 0)
 		chan->gr_ctx_promoted = 1;
 out_done:
@@ -2631,7 +2781,7 @@ nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm)
 	if (err != 0)
 		goto out_vmm;
 
-	err = nvkm_gsp_chan_promote_gr_ctx(golden_vmm, golden);
+	err = nvkm_gsp_chan_promote_gr_ctx(golden_vmm, golden, 1);
 	if (err != 0)
 		goto out_chan;
 

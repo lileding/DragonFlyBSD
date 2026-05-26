@@ -309,6 +309,9 @@ struct nvkm_softc {
 	uint64_t		vram_bump_base;
 	uint64_t		vram_bump_next;
 	uint64_t		vram_bump_limit;
+
+	struct nvkm_gsp_gr_ctxbuf *gr_ctxbuf_mem;
+	uint8_t			gr_ctxbuf_nr;
 };
 
 static __inline uint32_t
@@ -524,6 +527,7 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 #define NV_PTE_APERTURE_SYS_NCOH  (3ULL << 1)
 #define NV_PTE_VOL                (1ULL << 3)
 #define NV_PTE_PRIV               (1ULL << 5)
+#define NV_PTE_RO                 (1ULL << 6)
 
 /* Pascal+ 16K-page 5-level GMMU (gp100_vmm_16, vmmgp100.c:603-608). */
 #define NVKM_GMMU_PD3_SHIFT       47
@@ -563,6 +567,18 @@ nvkm_pte_to_vram(uint64_t paddr)
 {
 	return ((uint64_t)paddr >> NV_PT_ADDR_SHIFT)
 	     | NV_PTE_APERTURE_VRAM | NV_PTE_VALID;
+}
+
+static __inline uint64_t
+nvkm_pte_to_vram_flags(uint64_t paddr, uint8_t priv, uint8_t ro)
+{
+	uint64_t pte = nvkm_pte_to_vram(paddr);
+
+	if (priv)
+		pte |= NV_PTE_PRIV;
+	if (ro)
+		pte |= NV_PTE_RO;
+	return (pte);
 }
 
 /* === VMM VA layout ===
