@@ -1,18 +1,14 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * nvkm BO layer — minimal, GART-only.
+ * nvkm BO layer — minimal GART/VRAM BO backing.
  *
- * Each BO is one contigmalloc allocation of physically-contiguous host
- * pages. Userspace gets a u32 handle (via drm_gem core) and a 64-bit
- * map_handle (the dfly GEM-mapping-key encoded offset). mmap(fd, ...,
- * offset = map_handle) hits drm_gem_mmap_single → cdev_pager_allocate
- * with our nvkm_gem_pager_ops; the fault callback hands back vm_pages
- * carved out of the BO's contigmalloc region.
+ * GART BOs are contigmalloc allocations of physically-contiguous host
+ * pages and expose a mmap handle. VRAM BOs have only a GPU physical
+ * address and are not CPU-mappable yet.
  *
- * No TTM, no VRAM, no eviction. VM_BIND / EXEC are unimplemented at
- * this layer — they'll need GSP-RM RPCs and live in a separate module
- * once compute submission lands.
+ * No TTM or eviction yet. GART BOs use contiguous host memory. VRAM BOs
+ * use the current GSP-RM bump allocator and are GPU-only for now.
  */
 
 #include <sys/param.h>
@@ -34,6 +30,7 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_bo.h"
+#include "nvkm_gsp_rm.h"
 
 static MALLOC_DEFINE(M_NVKM_BO, "nvkm_bo", "nvkm GEM buffer object pages");
 
@@ -66,6 +63,9 @@ nvkm_gem_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 	struct nvkm_bo *bo = to_nvkm_bo(obj);
 	vm_page_t m;
 	vm_paddr_t pa;
+
+	if (bo->kva == NULL)
+		return (VM_PAGER_ERROR);
 
 	if (offset < 0 || (vm_ooffset_t)offset >= obj->size)
 		return (VM_PAGER_ERROR);
@@ -101,6 +101,7 @@ static struct nvkm_bo *
 nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
     uint32_t tile_mode, uint32_t tile_flags)
 {
+	struct nvkm_softc *sc = ddev->dev_private;
 	struct nvkm_bo *bo;
 	void *kva;
 
@@ -108,20 +109,32 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	if (size == 0)
 		return (NULL);
 
-	kva = contigmalloc(size, M_NVKM_BO, M_WAITOK | M_ZERO,
-	    /*low*/ 0, /*high*/ ~(vm_paddr_t)0,
-	    /*align*/ PAGE_SIZE, /*boundary*/ 0);
-	if (kva == NULL)
+	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	if (bo == NULL)
 		return (NULL);
 
-	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
-	if (bo == NULL) {
-		contigfree(kva, size, M_NVKM_BO);
-		return (NULL);
+	if ((domain & NOUVEAU_GEM_DOMAIN_VRAM) &&
+	    !(domain & NOUVEAU_GEM_DOMAIN_MAPPABLE)) {
+		bo->paddr = nvkm_gsp_vram_alloc(sc, size, PAGE_SIZE);
+		if (bo->paddr == 0) {
+			kfree(bo);
+			return (NULL);
+		}
+		bo->domain = NOUVEAU_GEM_DOMAIN_VRAM;
+	} else {
+		kva = contigmalloc(size, M_NVKM_BO, M_WAITOK | M_ZERO,
+		    /*low*/ 0, /*high*/ ~(vm_paddr_t)0,
+		    /*align*/ PAGE_SIZE, /*boundary*/ 0);
+		if (kva == NULL) {
+			kfree(bo);
+			return (NULL);
+		}
+		bo->kva = kva;
+		bo->paddr = vtophys(kva);
+		bo->domain = (domain ? domain : NOUVEAU_GEM_DOMAIN_GART) &
+		    ~NOUVEAU_GEM_DOMAIN_VRAM;
+		bo->domain |= NOUVEAU_GEM_DOMAIN_GART;
 	}
-	bo->kva = kva;
-	bo->paddr = vtophys(kva);
-	bo->domain = domain ? domain : NOUVEAU_GEM_DOMAIN_GART;
 	bo->tile_mode = tile_mode;
 	bo->tile_flags = tile_flags;
 
@@ -150,6 +163,7 @@ int
 nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
 {
+	struct nvkm_softc *sc = ddev->dev_private;
 	struct drm_nouveau_gem_new *req = data;
 	struct nvkm_bo *bo;
 	uint32_t handle = 0;
@@ -160,24 +174,32 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	if (bo == NULL)
 		return (-ENOMEM);
 
+	device_printf(sc->dev,
+	    "nvkm_bo: GEM_NEW req_domain=0x%x domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
+	    req->info.domain, bo->domain, (unsigned long long)bo->base.size,
+	    (unsigned long long)bo->paddr, bo->kva != NULL);
+
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
 	/* drop our local reference; the handle holds one now. */
 	drm_gem_object_put_unlocked(&bo->base);
 	if (err != 0)
 		return (err);
 
-	err = drm_gem_create_mmap_offset(&bo->base);
-	if (err != 0) {
-		drm_gem_handle_delete(file_priv, handle);
-		return (err);
+	if (bo->kva != NULL) {
+		err = drm_gem_create_mmap_offset(&bo->base);
+		if (err != 0) {
+			drm_gem_handle_delete(file_priv, handle);
+			return (err);
+		}
 	}
 
 	req->info.handle = handle;
 	req->info.domain = bo->domain;
 	req->info.size = bo->base.size;
 	req->info.offset = 0;	/* GPU VA — set by VM_BIND later */
-	req->info.map_handle = DRM_GEM_MAPPING_KEY |
-	    DRM_GEM_MAPPING_OFF(bo->base.map_list.key);
+	req->info.map_handle = bo->kva != NULL ?
+	    (DRM_GEM_MAPPING_KEY |
+	    DRM_GEM_MAPPING_OFF(bo->base.map_list.key)) : 0;
 	req->info.tile_mode = bo->tile_mode;
 	req->info.tile_flags = bo->tile_flags;
 	return (0);
@@ -199,8 +221,9 @@ nvkm_drm_ioctl_gem_info(struct drm_device *ddev, void *data,
 	req->domain = bo->domain;
 	req->size = obj->size;
 	req->offset = 0;
-	req->map_handle = DRM_GEM_MAPPING_KEY |
-	    DRM_GEM_MAPPING_OFF(obj->map_list.key);
+	req->map_handle = bo->kva != NULL ?
+	    (DRM_GEM_MAPPING_KEY |
+	    DRM_GEM_MAPPING_OFF(obj->map_list.key)) : 0;
 	req->tile_mode = bo->tile_mode;
 	req->tile_flags = bo->tile_flags;
 

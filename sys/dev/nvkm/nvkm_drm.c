@@ -359,6 +359,9 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 	case NOUVEAU_GETPARAM_BUS_TYPE:
 		gp->value = 3;	/* NV_DEVICE_INFO_V0_PCIE */
 		break;
+	case NOUVEAU_GETPARAM_FB_SIZE:
+		gp->value = sc->fb_usable_size;
+		break;
 	case NOUVEAU_GETPARAM_VRAM_BAR_SIZE:
 		gp->value = sc->bar_res[1] != NULL ?
 		    rman_get_size(sc->bar_res[1]) : 0;
@@ -463,14 +466,17 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			info->chipset  = 0x162;	/* TU102 */
 			info->revision = pci_get_revid(sc->dev);
 			info->family   = 0x0a;	/* TURING per nv_device.h family enum */
-			info->ram_size = sc->bar_res[1] ?
-			    rman_get_size(sc->bar_res[1]) : 0;
-			info->ram_user = info->ram_size;
+			info->ram_size = sc->fb_usable_size;
+			info->ram_user = sc->fb_usable_size;
 			strncpy(info->chip, "TU102", sizeof(info->chip));
 			strncpy(info->name, "NVIDIA GeForce RTX 2080 Ti",
 			    sizeof(info->name));
 			device_printf(sc->dev,
-			    "nvkm_drm: NVIF MTHD DEVICE_INFO -> TU102\n");
+			    "nvkm_drm: NVIF MTHD DEVICE_INFO -> TU102 ram=0x%llx user=0x%llx bar1=0x%llx\n",
+			    (unsigned long long)info->ram_size,
+			    (unsigned long long)info->ram_user,
+			    (unsigned long long)(sc->bar_res[1] != NULL ?
+			    rman_get_size(sc->bar_res[1]) : 0));
 			return (0);
 		}
 		return (-EINVAL);
@@ -684,7 +690,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				break;
 			}
 			bo = to_nvkm_bo(obj);
-			if (op->bo_offset + op->range > obj->size) {
+			if (op->bo_offset > obj->size ||
+			    op->range > obj->size - op->bo_offset) {
 				drm_gem_object_put_unlocked(obj);
 				device_printf(sc->dev,
 				    "nvkm_drm: VM_BIND BO range invalid idx=%u handle=%u bo_off=0x%016jx range=0x%016jx size=0x%016jx\n",
@@ -694,12 +701,20 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				break;
 			}
 			device_printf(sc->dev,
-			    "nvkm_drm: VM_BIND map idx=%u flags=0x%08x handle=%u addr=0x%016jx bo_off=0x%016jx range=0x%016jx paddr=0x%016jx\n",
-			    i, op->flags, op->handle, (uintmax_t)op->addr,
-			    (uintmax_t)op->bo_offset, (uintmax_t)op->range,
+			    "nvkm_drm: VM_BIND map idx=%u flags=0x%08x handle=%u domain=0x%x addr=0x%016jx bo_off=0x%016jx range=0x%016jx paddr=0x%016jx\n",
+			    i, op->flags, op->handle, bo->domain,
+			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
+			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
-			err = nvkm_gsp_vmm_map_sysmem(sc->gsp_vmm, op->addr,
-			    bo->paddr + (vm_paddr_t)op->bo_offset, op->range);
+			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
+				err = nvkm_gsp_vmm_map_vram(sc->gsp_vmm,
+				    op->addr, bo->paddr + op->bo_offset,
+				    op->range);
+			} else {
+				err = nvkm_gsp_vmm_map_sysmem(sc->gsp_vmm,
+				    op->addr, bo->paddr + (vm_paddr_t)op->bo_offset,
+				    op->range);
+			}
 			drm_gem_object_put_unlocked(obj);
 			if (err != 0) {
 				err = -err;
