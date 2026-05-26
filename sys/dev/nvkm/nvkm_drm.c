@@ -855,12 +855,24 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			break;
 		}
 
-		ret = drm_syncobj_find_fence(file_priv, waits[i].handle, &fence);
+		ret = drm_syncobj_find_fence(file_priv, waits[i].handle,
+		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
+		    waits[i].timeline_value : 0, &fence);
 		if (ret != 0) {
 			device_printf(sc->dev,
 			    "nvkm_drm: sync wait missing fence idx=%u handle=%u err=%d\n",
 			    i, waits[i].handle, ret);
 			err = ret;
+			break;
+		}
+		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ &&
+		    fence->seqno < waits[i].timeline_value) {
+			device_printf(sc->dev,
+			    "nvkm_drm: sync wait point not ready idx=%u handle=%u have=0x%08x want=0x%016jx\n",
+			    i, waits[i].handle, fence->seqno,
+			    (uintmax_t)waits[i].timeline_value);
+			dma_fence_put(fence);
+			err = -ETIME;
 			break;
 		}
 
@@ -943,9 +955,13 @@ nvkm_drm_signal_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			break;
 		}
 		lockinit(&f->lock, "nvdfl", 0, 0);
-		dma_fence_init(&f->base, &nvkm_drm_fence_ops, &f->lock, 0, 0);
+		dma_fence_init(&f->base, &nvkm_drm_fence_ops, &f->lock, 0,
+		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
+		    (unsigned)sigs[i].timeline_value : 0);
 		dma_fence_signal(&f->base);
-		drm_syncobj_replace_fence(syncobj, &f->base);
+		drm_syncobj_replace_fence(syncobj,
+		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
+		    sigs[i].timeline_value : 0, &f->base);
 		dma_fence_put(&f->base);
 		drm_syncobj_put(syncobj);
 	}
