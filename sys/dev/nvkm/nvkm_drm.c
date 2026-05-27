@@ -1269,7 +1269,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	gpf = (uint32_t *)chan->submit_gpf.kva;
 	post = (uint32_t *)chan->submit_push.kva;
 	sema = (uint32_t *)chan->submit_sema.kva;
-	slot_bar1 = chan->userd_bar2_gva + (uint64_t)chan->chid *
+	slot_bar1 = chan->userd_bar2_gva +
+	    (uint64_t)((uint32_t)chan->chid % 8u) *
 	    NV_USERD_SLOT_SIZE;
 
 	put = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
