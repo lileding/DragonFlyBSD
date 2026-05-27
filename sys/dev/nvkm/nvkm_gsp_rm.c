@@ -1485,15 +1485,6 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			return (err);
 	}
 
-	/* Allocate chid FIRST -- nouveau encodes it in the channel handle:
-	 * NVKM_RM_CHAN(chid) = 0xf1f00000 | chid. GSP uses handle\'s chid to
-	 * route doorbells; mismatched handle silently drops doorbell signals. */
-	chan->chid = nvkm_chid_alloc(sc);
-	if (chan->chid < 0) {
-		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size, M_NVKM_MTHDBUF);
-		chan->mthdbuf_kva = NULL;
-		return (ENOMEM);
-	}
 
 	/* nouveau clears USERD before RAMFC/channel programming. Do the BAR1
 	 * mapping and clear before RM schedules the channel, otherwise HOST can
