@@ -1023,7 +1023,7 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 		0x058, 0x05c, 0x060, NV_USERD_GP_GET, NV_USERD_GP_PUT,
 	};
 	uint64_t slot_bar1 = chan->userd_bar2_gva +
-	    (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
+	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
 	unsigned int i;
 
 	for (i = 0; i < sizeof(userd_clear_offs) /
@@ -1082,7 +1082,10 @@ nvkm_gsp_chan_rm_alloc(struct nvkm_gsp_vmm *vmm, struct nvkm_gsp_chan *chan,
 	args->gpFifoOffset = gpfifo_offset;
 	args->gpFifoEntries = gpfifo_length / 8;
 
-	userd_p = (uint32_t)chan->chid / 8u;
+	/* Each DragonFly RM channel owns a private 4 KiB USERD page.  Keep
+	 * the slot index compatible with chid-based nouveau layout, but the
+	 * fixed USERD page index is always local page 0 for this descriptor. */
+	userd_p = 0;
 	userd_i = (uint32_t)chan->chid % 8u;
 	args->flags =
 	    ((userd_i & 7u) << 8) |
@@ -1514,7 +1517,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	err = nvkm_gsp_chan_rm_alloc(vmm, chan,
 	    NVKM_RM_CHANNEL | (uint32_t)chan->chid, engine_type, 1,
 	    chan->inst_vram,
-	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
+	    chan->userd_vram +
+	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE,
 	    chan->mthdbuf_paddr, mthdbuf_sz, chan->submit_gva_gpf,
 	    NV_CHANNEL_GPFIFO_ENTRIES * 8);
 	if (err != 0) {
@@ -1781,12 +1785,12 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	    gpf_w[0], gpf_w[1], sema_w[0]);
 
 	/* USERD slot housekeeping + GP_PUT=1, via BAR1 (L2-coherent).
-	 * USERD is in VRAM at chan->userd_vram + chid * USERD_SLOT_SIZE.
+	 * USERD is in VRAM at chan->userd_vram + (chid % 8) * USERD_SLOT_SIZE.
 	 * BAR1 maps chan->userd_vram -> BAR1_GVA_USERD (4 KiB page),
-	 * so the chid slot is at BAR1_GVA_USERD + chid * USERD_SLOT_SIZE.
+	 * so the chid slot is at BAR1_GVA_USERD + (chid % 8) * USERD_SLOT_SIZE.
 	 * Mirrors gf100_chan_userd_clear (fifo/gf100.c:118-132). */
 	uint64_t slot_bar1 = chan->userd_bar2_gva
-	    + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE;
+	    + (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
 	static const uint32_t userd_clear_offs[] = {
 		0x40, 0x44, 0x48, 0x4c, 0x50, 0x58, 0x5c, 0x60, 0x88
 	};
@@ -2091,7 +2095,8 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		/* PRAMIN-read USERD slot to verify GP_PUT actually landed in
 	 * chan->userd_vram (independent of BAR1 path). */
 	{
-		uint64_t userd_slot_paddr = chan->userd_vram + (uint64_t)chan->chid * 0x200;
+		uint64_t userd_slot_paddr = chan->userd_vram +
+		    (uint64_t)((uint32_t)chan->chid % 8u) * 0x200;
 		uint64_t pramin_gp_put = 0, pramin_gp_get = 0;
 		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x88, &pramin_gp_get);
 		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x8c, &pramin_gp_put);
