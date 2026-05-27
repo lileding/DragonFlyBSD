@@ -1082,10 +1082,9 @@ nvkm_gsp_chan_rm_alloc(struct nvkm_gsp_vmm *vmm, struct nvkm_gsp_chan *chan,
 	args->gpFifoOffset = gpfifo_offset;
 	args->gpFifoEntries = gpfifo_length / 8;
 
-	/* Each DragonFly RM channel owns a private 4 KiB USERD page.  Keep
-	 * the slot index compatible with chid-based nouveau layout, but the
-	 * fixed USERD page index is always local page 0 for this descriptor. */
-	userd_p = 0;
+	/* GSP validates the chid-derived USERD page and slot fields even
+	 * though DragonFly allocates private backing pages per channel. */
+	userd_p = (uint32_t)chan->chid / 8u;
 	userd_i = (uint32_t)chan->chid % 8u;
 	args->flags =
 	    ((userd_i & 7u) << 8) |
@@ -1184,6 +1183,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 {
 	struct nvkm_softc *sc = vmm->sc;
 	uint32_t mthdbuf_sz;
+	uint32_t userd_page;
 	int err;
 
 	memset(chan, 0, sizeof(*chan));
@@ -1193,11 +1193,20 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->submit_gva_sema = chan->submit_gva_push + 0x2000ULL;
 	nvkm_gsp_submit_gva_slot++;
 
+	/* Allocate chid before USERD allocation: GSP validates chid-derived
+	 * USERD page/slot fields during channel allocation. */
+	chan->chid = nvkm_chid_alloc(sc);
+	if (chan->chid < 0)
+		return (ENOMEM);
+	userd_page = (uint32_t)chan->chid / 8u;
+
 	/* VRAM: inst block + USERD (separate pages). */
 	chan->inst_vram  = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_INST_SIZE, 0x1000);
-	/* USERD page: 4 KiB / 8 slots * 0x200. GSP indexes within using
-	CHANNEL_USERD_INDEX_VALUE=chid%8. Match nouveau B.2 walkthrough. */
-	chan->userd_vram = nvkm_gsp_vram_alloc(sc, 0x1000U, 0x1000);
+	/* USERD pages: GSP still uses chid/8 as the fixed USERD page index.
+	 * Allocate enough private pages for that index, then map only the page
+	 * containing this channel's chid%8 slot for CPU BAR1 access. */
+	chan->userd_vram = nvkm_gsp_vram_alloc(sc,
+	    (uint64_t)(userd_page + 1u) * 0x1000U, 0x1000);
 	device_printf(sc->dev,
 	    "gsp_rm: chan->inst_vram=0x%llx chan->userd_vram=0x%llx (alloc\'d)\n",
 	    (unsigned long long)chan->inst_vram,
@@ -1492,7 +1501,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->userd_bar2_gva = sc->bar1.next_gva;
 	sc->bar1.next_gva += 0x1000;
 	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
-	    chan->userd_vram);
+	    chan->userd_vram + (uint64_t)userd_page * 0x1000U);
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_gsp_bar1_invalidate(sc);
 	nvkm_gsp_userd_clear(sc, chan);
@@ -1517,8 +1526,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	err = nvkm_gsp_chan_rm_alloc(vmm, chan,
 	    NVKM_RM_CHANNEL | (uint32_t)chan->chid, engine_type, 1,
 	    chan->inst_vram,
-	    chan->userd_vram +
-	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE,
+	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
 	    chan->mthdbuf_paddr, mthdbuf_sz, chan->submit_gva_gpf,
 	    NV_CHANNEL_GPFIFO_ENTRIES * 8);
 	if (err != 0) {
