@@ -22,6 +22,91 @@
 #define NVKM_GSP_DEBUG_RM_ALLOC		0
 
 #define NVKM_ALIGN_UP(v, a)	(((v) + (a) - 1) & ~((a) - 1))
+
+static MALLOC_DEFINE(M_NVKM_VRAM_META, "nvkm_vram_meta",
+    "nvkm VRAM allocation metadata");
+
+struct nvkm_vram_alloc {
+	TAILQ_ENTRY(nvkm_vram_alloc) link;
+	uint64_t paddr;
+	uint64_t size;
+	uint64_t align;
+	enum nvkm_vram_kind kind;
+	void *owner;
+};
+
+static const char *
+nvkm_vram_kind_name(enum nvkm_vram_kind kind)
+{
+	switch (kind) {
+	case NVKM_VRAM_UNKNOWN:
+		return ("unknown");
+	case NVKM_VRAM_GEM:
+		return ("gem");
+	case NVKM_VRAM_BAR1_SPT:
+		return ("bar1-spt");
+	case NVKM_VRAM_BAR1_PAGE:
+		return ("bar1-page");
+	case NVKM_VRAM_BAR2_ROOT:
+		return ("bar2-root");
+	case NVKM_VRAM_BAR2_PT:
+		return ("bar2-pt");
+	case NVKM_VRAM_BAR2_FLUSH:
+		return ("bar2-flush");
+	case NVKM_VRAM_BAR2_TEST:
+		return ("bar2-test");
+	case NVKM_VRAM_VMM_PT:
+		return ("vmm-pt");
+	case NVKM_VRAM_CHANNEL_GOLDEN:
+		return ("channel-golden");
+	case NVKM_VRAM_CHANNEL_INST:
+		return ("channel-inst");
+	case NVKM_VRAM_CHANNEL_USERD:
+		return ("channel-userd");
+	case NVKM_VRAM_CHANNEL_SUBMIT_PT:
+		return ("channel-submit-pt");
+	case NVKM_VRAM_GR_CTXBUF_GLOBAL:
+		return ("gr-ctxbuf-global");
+	case NVKM_VRAM_GR_CTXBUF_CHANNEL:
+		return ("gr-ctxbuf-channel");
+	default:
+		return ("invalid");
+	}
+}
+
+static void
+nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
+    uint64_t align, enum nvkm_vram_kind kind, void *owner)
+{
+	struct nvkm_vram_alloc *alloc;
+
+	if (kind < 0 || kind >= NVKM_VRAM_KIND_COUNT)
+		kind = NVKM_VRAM_UNKNOWN;
+
+	alloc = kmalloc(sizeof(*alloc), M_NVKM_VRAM_META, M_NOWAIT | M_ZERO);
+	if (alloc != NULL) {
+		alloc->paddr = paddr;
+		alloc->size = size;
+		alloc->align = align;
+		alloc->kind = kind;
+		alloc->owner = owner;
+		TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, link);
+	} else {
+		device_printf(sc->dev,
+		    "gsp_rm: VRAM metadata alloc failed kind=%s paddr=0x%llx size=0x%llx\n",
+		    nvkm_vram_kind_name(kind), (unsigned long long)paddr,
+		    (unsigned long long)size);
+	}
+
+	sc->vram_alloc_bytes[kind] += size;
+	sc->vram_alloc_count[kind]++;
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM alloc kind=%s paddr=0x%llx size=0x%llx align=0x%llx owner=%p count=%u bytes=0x%llx\n",
+	    nvkm_vram_kind_name(kind), (unsigned long long)paddr,
+	    (unsigned long long)size, (unsigned long long)align, owner,
+	    sc->vram_alloc_count[kind],
+	    (unsigned long long)sc->vram_alloc_bytes[kind]);
+}
 /* === RM_ALLOC === */
 
 void *
@@ -734,6 +819,9 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	sc->vram_bump_base  = base;
 	sc->vram_bump_next  = base + size;
 	sc->vram_bump_limit = base + size;
+	TAILQ_INIT(&sc->vram_allocs);
+	memset(sc->vram_alloc_bytes, 0, sizeof(sc->vram_alloc_bytes));
+	memset(sc->vram_alloc_count, 0, sizeof(sc->vram_alloc_count));
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM bump window 0x%llx..0x%llx (alloc top-down)\n",
 	    (unsigned long long)sc->vram_bump_base,
@@ -742,7 +830,8 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 }
 
 uint64_t
-nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
+nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size, uint64_t align,
+    enum nvkm_vram_kind kind, void *owner)
 {
 	uint64_t off;
 
@@ -764,12 +853,20 @@ nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
 		return (0);
 	}
 	sc->vram_bump_next = off;
+	nvkm_vram_record_alloc(sc, off, size, align, kind, owner);
 #ifdef NVKM_DEBUG_VRAM_ALLOC
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
 	    (unsigned long long)off, (unsigned long long)size);
 #endif
 	return (off);
+}
+
+uint64_t
+nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
+{
+	return (nvkm_gsp_vram_alloc_kind(sc, size, align, NVKM_VRAM_UNKNOWN,
+	    NULL));
 }
 
 /* === KEPLER_CHANNEL_GROUP_A (TSG) ===
@@ -1151,7 +1248,8 @@ nvkm_gsp_golden_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	memset(chan, 0, sizeof(*chan));
 
 	chan->chid = 1;
-	chan->inst_vram = nvkm_gsp_vram_alloc(sc, 0x12000, 0x1000);
+	chan->inst_vram = nvkm_gsp_vram_alloc_kind(sc, 0x12000, 0x1000,
+	    NVKM_VRAM_CHANNEL_GOLDEN, chan);
 	if (chan->inst_vram == 0)
 		return (ENOMEM);
 	chan->userd_vram = chan->inst_vram + 0x1000;
@@ -1201,12 +1299,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	userd_page = (uint32_t)chan->chid / 8u;
 
 	/* VRAM: inst block + USERD (separate pages). */
-	chan->inst_vram  = nvkm_gsp_vram_alloc(sc, NV_CHANNEL_INST_SIZE, 0x1000);
+	chan->inst_vram = nvkm_gsp_vram_alloc_kind(sc, NV_CHANNEL_INST_SIZE,
+	    0x1000, NVKM_VRAM_CHANNEL_INST, chan);
 	/* USERD pages: GSP still uses chid/8 as the fixed USERD page index.
 	 * Allocate enough private pages for that index, then map only the page
 	 * containing this channel's chid%8 slot for CPU BAR1 access. */
-	chan->userd_vram = nvkm_gsp_vram_alloc(sc,
-	    (uint64_t)(userd_page + 1u) * 0x1000U, 0x1000);
+	chan->userd_vram = nvkm_gsp_vram_alloc_kind(sc,
+	    (uint64_t)(userd_page + 1u) * 0x1000U, 0x1000,
+	    NVKM_VRAM_CHANNEL_USERD, chan);
 	device_printf(sc->dev,
 	    "gsp_rm: chan->inst_vram=0x%llx chan->userd_vram=0x%llx (alloc\'d)\n",
 	    (unsigned long long)chan->inst_vram,
@@ -1273,9 +1373,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		 * Matches nouveau (everything in VRAM, L2-coherent both
 		 * sides). PDE/PTE aperture = VIDMEM. */
 		struct nvkm_bar1_page submit_lpt = {0};
-		if ((err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_pd0)) ||
-		    (err = nvkm_gsp_bar1_alloc_page(sc, &chan->submit_spt)) ||
-		    (err = nvkm_gsp_bar1_alloc_page(sc, &submit_lpt))) {
+		if ((err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_pd0,
+		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
+		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_spt,
+		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
+		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &submit_lpt,
+		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan))) {
 			device_printf(sc->dev,
 			    "gsp_rm: chan submit page alloc failed err=%d\n", err);
 			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
@@ -2595,8 +2698,10 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 		buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
 		if (alloc) {
-			buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
-			    mem_align);
+			buf->paddr = nvkm_gsp_vram_alloc_kind(sc, alloc_size,
+			    mem_align, golden && global ?
+			    NVKM_VRAM_GR_CTXBUF_GLOBAL :
+			    NVKM_VRAM_GR_CTXBUF_CHANNEL, chan);
 			if (buf->paddr == 0) {
 				err = ENOMEM;
 				goto out_done;
@@ -2673,8 +2778,10 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			next_gva = NVKM_ALIGN_UP(next_gva, gva_align);
 			buf = &chan->gr_ctxbuf[chan->gr_ctxbuf_nr];
 			if (alloc) {
-				buf->paddr = nvkm_gsp_vram_alloc(sc, alloc_size,
-				    mem_align);
+				buf->paddr = nvkm_gsp_vram_alloc_kind(sc,
+				    alloc_size, mem_align, golden && global ?
+				    NVKM_VRAM_GR_CTXBUF_GLOBAL :
+				    NVKM_VRAM_GR_CTXBUF_CHANNEL, chan);
 				if (buf->paddr == 0) {
 					err = ENOMEM;
 					goto out_done;
