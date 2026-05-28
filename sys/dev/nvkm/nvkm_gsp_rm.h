@@ -155,10 +155,27 @@ int	 nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 	    struct nvkm_gsp_vaspace *vas);
 int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
 
-/* VRAM bump allocator. The window is set in nvkm_gsp_vram_init using
- * a fixed safe carveout (TODO: parse GSP fbRegionInfoParams). All
- * allocations are PAGE_SIZE-aligned; alloc returns the physical VRAM
- * offset to hand to GSP-RM as NV_MEMORY_DESC_PARAMS.base. */
+/* VRAM bump allocator.
+ *
+ * Ownership model:
+ * - nvkm_gsp_vram_alloc() currently returns owned VRAM backing to the
+ *   caller. The caller's object lifetime owns that backing.
+ * - Any BAR1/BAR2/GPU-VA mapping created from the returned paddr is a borrow.
+ *   The mapping may be read-borrowed by multiple users, but writable access
+ *   must be exclusive at the object level.
+ * - A borrow must not outlive its owner. VM_BIND records therefore borrow GEM
+ *   BO backing through a held GEM object reference; they must unmap/drop that
+ *   reference, not free the backing allocation directly.
+ * - Internal RM-visible objects such as BAR page tables, VMM page tables,
+ *   channel inst/USERD, and GR ctxbufs are pinned until their explicit owner
+ *   lifetime ends. They must never be returned by the GEM free path.
+ *
+ * The window is set in nvkm_gsp_vram_init using a fixed safe carveout. All
+ * allocations are PAGE_SIZE-aligned; alloc returns the physical VRAM offset to
+ * hand to GSP-RM as NV_MEMORY_DESC_PARAMS.base. Runtime VRAM reuse must be
+ * added as a typed GEM-only arena with owner/borrow metadata, not by freeing
+ * arbitrary paddr values back into this internal allocator.
+ */
 int	  nvkm_gsp_vram_init(struct nvkm_softc *sc);
 uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,
 	    uint64_t align);
