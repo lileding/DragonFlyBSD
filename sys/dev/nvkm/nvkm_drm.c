@@ -83,6 +83,10 @@ struct nvkm_drm_vm_binding {
 	LIST_ENTRY(nvkm_drm_vm_binding) link;
 	uint64_t addr;
 	uint64_t size;
+	/* Borrowed GEM BO backing. The binding owns only the GPU VA mapping
+	 * metadata/PTE state. The held GEM reference bounds this borrow lifetime;
+	 * unmap drops the ref and must not release the BO backing allocation.
+	 */
 	struct drm_gem_object *obj;
 };
 static LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding)
