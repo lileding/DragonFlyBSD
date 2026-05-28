@@ -25,6 +25,28 @@
 
 #define NVKM_PCI_VENDOR_NVIDIA	0x10de
 
+enum nvkm_vram_kind {
+	NVKM_VRAM_UNKNOWN = 0,
+	NVKM_VRAM_GEM,
+	NVKM_VRAM_BAR1_SPT,
+	NVKM_VRAM_BAR1_PAGE,
+	NVKM_VRAM_BAR2_ROOT,
+	NVKM_VRAM_BAR2_PT,
+	NVKM_VRAM_BAR2_FLUSH,
+	NVKM_VRAM_BAR2_TEST,
+	NVKM_VRAM_VMM_PT,
+	NVKM_VRAM_CHANNEL_GOLDEN,
+	NVKM_VRAM_CHANNEL_INST,
+	NVKM_VRAM_CHANNEL_USERD,
+	NVKM_VRAM_CHANNEL_SUBMIT_PT,
+	NVKM_VRAM_GR_CTXBUF_GLOBAL,
+	NVKM_VRAM_GR_CTXBUF_CHANNEL,
+	NVKM_VRAM_KIND_COUNT
+};
+
+struct nvkm_vram_alloc;
+TAILQ_HEAD(nvkm_vram_alloc_head, nvkm_vram_alloc);
+
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
 
@@ -309,6 +331,9 @@ struct nvkm_softc {
 	uint64_t		vram_bump_base;
 	uint64_t		vram_bump_next;
 	uint64_t		vram_bump_limit;
+	struct nvkm_vram_alloc_head vram_allocs;
+	uint64_t		vram_alloc_bytes[NVKM_VRAM_KIND_COUNT];
+	uint32_t		vram_alloc_count[NVKM_VRAM_KIND_COUNT];
 
 	struct nvkm_gsp_gr_ctxbuf *gr_ctxbuf_mem;
 	uint8_t			gr_ctxbuf_nr;
@@ -640,7 +665,10 @@ uint64_t nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t bar1_gva);
 /* Allocate a 4 KiB VRAM page and map it into BAR1 at the next free
  * GVA. Fills *page with the VRAM paddr (for PDE/PTE encoding) and the
  * BAR1 GVA (for host reads/writes via bar1_{wr,rd}{32,64}). */
-int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
+int	nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
+	    struct nvkm_bar1_page *page, enum nvkm_vram_kind kind, void *owner);
+int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc,
+	    struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 

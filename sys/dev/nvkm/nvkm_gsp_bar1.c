@@ -172,7 +172,8 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 		uint32_t idx = slot - BAR1_PD0_MANAGED_FIRST;
 
 		/* Alloc OUR SPT.  Each SPT covers one 2 MiB BAR1 PD0 slot. */
-		spt = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		spt = nvkm_gsp_vram_alloc_kind(sc, 0x1000, 0x1000,
+		    NVKM_VRAM_BAR1_SPT, &sc->bar1);
 		if (spt == 0) {
 			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 			lwkt_reltoken(&sc->gsp_tok);
@@ -352,7 +353,8 @@ nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t gva)
 }
 
 int
-nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
+nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
+    struct nvkm_bar1_page *page, enum nvkm_vram_kind kind, void *owner)
 {
 	uint64_t paddr, gva;
 	int err;
@@ -360,7 +362,8 @@ nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
-	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE, NVKM_GMMU_PT_PAGE_SIZE);
+	paddr = nvkm_gsp_vram_alloc_kind(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, kind, owner);
 	if (paddr == 0)
 		return (ENOMEM);
 
@@ -375,6 +378,13 @@ nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 	page->vram_paddr = paddr;
 	page->bar1_gva   = gva;
 	return (0);
+}
+
+int
+nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
+{
+	return (nvkm_gsp_bar1_alloc_page_kind(sc, page, NVKM_VRAM_BAR1_PAGE,
+	    &sc->bar1));
 }
 
 void

@@ -97,8 +97,8 @@ nvkm_gsp_bar2_pt_alloc(struct nvkm_softc *sc, uint8_t level,
 		return (0);
 	}
 
-	paddr = nvkm_gsp_vram_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
-	    NVKM_GMMU_PT_PAGE_SIZE);
+	paddr = nvkm_gsp_vram_alloc_kind(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, NVKM_VRAM_BAR2_PT, b2);
 	if (paddr == 0)
 		return (ENOMEM);
 
@@ -251,7 +251,8 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 		return (ENXIO);
 	}
 
-	pd2 = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+	pd2 = nvkm_gsp_vram_alloc_kind(sc, 0x1000, 0x1000,
+	    NVKM_VRAM_BAR2_ROOT, b2);
 	if (!pd2) {
 		device_printf(sc->dev, "bar2: VRAM alloc failed\n");
 		return (ENOMEM);
@@ -393,7 +394,8 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 	 * re-walk after PT updates (port of r535_bar_bar2_init lines 100-114
 	 * + r535_bar_flush). */
 	{
-		uint64_t flush_vram = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		uint64_t flush_vram = nvkm_gsp_vram_alloc_kind(sc, 0x1000,
+		    0x1000, NVKM_VRAM_BAR2_FLUSH, b2);
 		if (flush_vram != 0) {
 			b2->flush_vram_paddr = flush_vram;
 			(void)nvkm_gsp_bar2_map_vram(sc, BAR2_GVA_FLUSH, flush_vram);
@@ -404,7 +406,8 @@ nvkm_gsp_bar2_init(struct nvkm_softc *sc)
 
 	/* Immediate self-test (post-flush): map test VRAM page, write+read. */
 	{
-		uint64_t tv = nvkm_gsp_vram_alloc(sc, 0x1000, 0x1000);
+		uint64_t tv = nvkm_gsp_vram_alloc_kind(sc, 0x1000, 0x1000,
+		    NVKM_VRAM_BAR2_TEST, b2);
 		if (tv != 0) {
 			(void)nvkm_gsp_bar2_map_vram(sc, 0x2000, tv);
 			nvkm_gsp_bar2_flush(sc);

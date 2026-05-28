@@ -126,7 +126,8 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		 *   allocation metadata can prove this is GEM-owned backing
 		 *   from a reclaimable GEM arena.
 		 */
-		bo->paddr = nvkm_gsp_vram_alloc(sc, size, PAGE_SIZE);
+		bo->paddr = nvkm_gsp_vram_alloc_kind(sc, size, PAGE_SIZE,
+		    NVKM_VRAM_GEM, bo);
 		if (bo->paddr == 0) {
 			kfree(bo);
 			return (NULL);

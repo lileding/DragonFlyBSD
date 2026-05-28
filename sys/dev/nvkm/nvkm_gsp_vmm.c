@@ -74,7 +74,8 @@ struct NV90F1_CTRL_VASPACE_COPY_SERVER_RESERVED_PDES_PARAMS {
 static int
 nvkm_gsp_vmm_pt_alloc(struct nvkm_softc *sc, struct nvkm_gsp_vmm_pt *pt)
 {
-	return (nvkm_gsp_bar1_alloc_page(sc, &pt->page));
+	return (nvkm_gsp_bar1_alloc_page_kind(sc, &pt->page,
+	    NVKM_VRAM_VMM_PT, pt));
 }
 
 static void
@@ -156,7 +157,8 @@ nvkm_gsp_vmm_pd0_get(struct nvkm_gsp_vmm *vmm, uint32_t pd1_idx,
 
 	pd0 = kmalloc(sizeof(*pd0), M_NVKM_VMM, M_WAITOK | M_ZERO);
 	pd0->pd1_idx = pd1_idx;
-	err = nvkm_gsp_bar1_alloc_page(sc, &pd0->page);
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pd0->page,
+	    NVKM_VRAM_VMM_PT, pd0);
 	if (err != 0) {
 		kfree(pd0, M_NVKM_VMM);
 		return (err);
@@ -224,10 +226,12 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	pt->pd1_idx = pd1_idx;
 	pt->pd0_idx = pd0_idx;
 
-	err = nvkm_gsp_bar1_alloc_page(sc, &pt->lpt);
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->lpt,
+	    NVKM_VRAM_VMM_PT, pt);
 	if (err != 0)
 		goto fail;
-	err = nvkm_gsp_bar1_alloc_page(sc, &pt->spt);
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->spt,
+	    NVKM_VRAM_VMM_PT, pt);
 	if (err != 0)
 		goto fail;
 
