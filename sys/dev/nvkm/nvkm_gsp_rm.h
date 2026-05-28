@@ -177,6 +177,8 @@ int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
  * arbitrary paddr values back into this internal allocator.
  */
 int	  nvkm_gsp_vram_init(struct nvkm_softc *sc);
+uint64_t nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size,
+	    uint64_t align, enum nvkm_vram_kind kind, void *owner);
 uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,
 	    uint64_t align);
 
