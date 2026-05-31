@@ -197,12 +197,19 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr)
 {
 	long ret;
 
+	struct nvkm_softc *sc = bo->base.dev->dev_private;
+
+	sc->bo_resv_wait_count++;
 	ret = reservation_object_wait_timeout_rcu(&bo->resv, true, intr,
 	    MAX_SCHEDULE_TIMEOUT);
-	if (ret < 0)
+	if (ret < 0) {
+		sc->bo_resv_wait_error_count++;
 		return ((int)ret);
-	if (ret == 0)
+	}
+	if (ret == 0) {
+		sc->bo_resv_wait_error_count++;
 		return (-ETIME);
+	}
 	return (0);
 }
 
@@ -298,6 +305,9 @@ nvkm_drm_ioctl_gem_cpu_prep(struct drm_device *ddev, void *data,
 		return (-ENOENT);
 	bo = to_nvkm_bo(obj);
 	err = nvkm_bo_resv_wait(bo, true);
+	sc->cpu_prep_wait_count++;
+	if (err != 0)
+		sc->cpu_prep_wait_error_count++;
 	device_printf(sc->dev,
 	    "nvkm_bo: CPU_PREP handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flags=0x%x wait_err=%d\n",
 	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
