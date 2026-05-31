@@ -253,6 +253,8 @@ struct nvkm_gsp_bar2 {
 struct nvkm_bar1_page {
 	uint64_t	vram_paddr;
 	uint64_t	bar1_gva;
+	enum nvkm_vram_kind kind;
+	void		*owner;
 };
 
 struct nvkm_softc {
