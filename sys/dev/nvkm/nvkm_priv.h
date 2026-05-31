@@ -207,6 +207,18 @@ struct nvkm_gsp_pending {
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
 
+/* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
+ * page-sized slots inside a fixed high BAR1 window owned by this driver. */
+#define BAR1_GVA_USERD		0x0ULL
+#define BAR1_PD0_MANAGED_FIRST	96u
+#define BAR1_PD0_MANAGED_LAST	127u
+#define BAR1_PD0_MANAGED_COUNT \
+	(BAR1_PD0_MANAGED_LAST - BAR1_PD0_MANAGED_FIRST + 1u)
+#define BAR1_GVA_ALLOC_BASE \
+	((uint64_t)BAR1_PD0_MANAGED_FIRST * (2ULL << 20))
+#define BAR1_GVA_ALLOC_PAGES	(BAR1_PD0_MANAGED_COUNT * 512u)
+#define BAR1_GVA_ALLOC_BITMAP_SIZE	(BAR1_GVA_ALLOC_PAGES / 8u)
+
 /* BAR1 host-managed vmm -- see nvkm_gsp_bar1.c.
  * All PT pages live in VRAM (fresh allocations the walker has never
  * touched), set up via PRAMIN. After bar1_init we repoint 0xb80f40
@@ -219,6 +231,7 @@ struct nvkm_gsp_bar1 {
 	uint64_t	pd0_paddr;
 	uint64_t	spt_paddr[32];
 	uint64_t	next_gva;
+	uint8_t		gva_used[BAR1_GVA_ALLOC_BITMAP_SIZE];
 	uint64_t	flush_vram_paddr;
 	bool		ready;
 };
@@ -691,16 +704,6 @@ int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc,
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 
-
-/* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page bump-allocates
- * inside a fixed high BAR1 window owned by the DragonFly driver. */
-#define BAR1_GVA_USERD		0x0ULL
-#define BAR1_PD0_MANAGED_FIRST	96u
-#define BAR1_PD0_MANAGED_LAST	127u
-#define BAR1_PD0_MANAGED_COUNT \
-	(BAR1_PD0_MANAGED_LAST - BAR1_PD0_MANAGED_FIRST + 1u)
-#define BAR1_GVA_ALLOC_BASE \
-	((uint64_t)BAR1_PD0_MANAGED_FIRST * (2ULL << 20))
 
 /* BAR1 PDB control register (tu102_bar.c references 0xb80f40
  * for tu102_bar_bar1_fini). */
