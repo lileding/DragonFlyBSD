@@ -23,6 +23,8 @@
 #include <machine/atomic.h>
 #include <sys/proc.h>
 
+#include <drm/drm_mm.h>
+
 #define NVKM_PCI_VENDOR_NVIDIA	0x10de
 
 enum nvkm_vram_kind {
@@ -46,11 +48,10 @@ enum nvkm_vram_kind {
 
 struct nvkm_vram_alloc;
 TAILQ_HEAD(nvkm_vram_alloc_head, nvkm_vram_alloc);
-TAILQ_HEAD(nvkm_vram_free_head, nvkm_vram_alloc);
 
 struct nvkm_vram_alloc {
 	TAILQ_ENTRY(nvkm_vram_alloc) alloc_link;
-	TAILQ_ENTRY(nvkm_vram_alloc) free_link;
+	struct drm_mm_node node;
 	uint64_t paddr;
 	uint64_t size;
 	uint64_t align;
@@ -343,8 +344,9 @@ struct nvkm_softc {
 	uint64_t		vram_bump_base;
 	uint64_t		vram_bump_next;
 	uint64_t		vram_bump_limit;
+	struct drm_mm		vram_mm;
+	struct lock		vram_lock;
 	struct nvkm_vram_alloc_head vram_allocs;
-	struct nvkm_vram_free_head vram_free_gem;
 	uint64_t		vram_alloc_bytes[NVKM_VRAM_KIND_COUNT];
 	uint32_t		vram_alloc_count[NVKM_VRAM_KIND_COUNT];
 
