@@ -804,7 +804,7 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	memset(sc->vram_alloc_bytes, 0, sizeof(sc->vram_alloc_bytes));
 	memset(sc->vram_alloc_count, 0, sizeof(sc->vram_alloc_count));
 	device_printf(sc->dev,
-	    "gsp_rm: VRAM drm_mm window 0x%llx..0x%llx (alloc top-down)\n",
+	    "gsp_rm: VRAM drm_mm window 0x%llx..0x%llx\n",
 	    (unsigned long long)sc->vram_bump_base,
 	    (unsigned long long)sc->vram_bump_limit);
 	return (0);
