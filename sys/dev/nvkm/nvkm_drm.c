@@ -133,16 +133,37 @@ nvkm_drm_vm_ranges_overlap(uint64_t a, uint64_t as, uint64_t b, uint64_t bs)
 	return (a < b + bs && b < a + as);
 }
 
-static void
+static int
+nvkm_drm_vm_binding_wait(struct nvkm_softc *sc,
+    struct nvkm_drm_vm_binding *binding, bool intr)
+{
+	struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+	int err;
+
+	err = nvkm_bo_resv_wait(bo, intr);
+	if (err != 0)
+		device_printf(sc->dev,
+		    "nvkm_drm: VM_BIND wait failed addr=0x%016jx size=0x%016jx obj=%p err=%d\n",
+		    (uintmax_t)binding->addr, (uintmax_t)binding->size,
+		    binding->obj, err);
+	return (err);
+}
+
+static int
 nvkm_drm_vm_bindings_remove(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
+	int err = 0;
 
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
+
+		err = nvkm_drm_vm_binding_wait(sc, binding, true);
+		if (err != 0)
+			return (err);
 
 		LIST_REMOVE(binding, link);
 		device_printf(sc->dev,
@@ -154,6 +175,7 @@ nvkm_drm_vm_bindings_remove(struct nvkm_softc *sc,
 		drm_gem_object_put_unlocked(binding->obj);
 		kfree(binding);
 	}
+	return (0);
 }
 
 static int
@@ -889,8 +911,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
 			    (uintmax_t)op->range);
-			nvkm_drm_vm_bindings_remove(sc, nfile, op->addr,
+			err = nvkm_drm_vm_bindings_remove(sc, nfile, op->addr,
 			    op->range);
+			if (err != 0)
+				break;
 			if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
 				err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
 				    op->addr, op->range);
@@ -933,8 +957,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    "nvkm_drm: VM_BIND map-null idx=%u flags=0x%08x addr=0x%016jx range=0x%016jx\n",
 				    i, op->flags, (uintmax_t)op->addr,
 				    (uintmax_t)op->range);
-				nvkm_drm_vm_bindings_remove(sc, nfile,
+				err = nvkm_drm_vm_bindings_remove(sc, nfile,
 				    op->addr, op->range);
+				if (err != 0)
+					break;
 				err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
 				    op->addr, op->range);
 				if (err != 0) {
@@ -972,8 +998,20 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
 			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
-			nvkm_drm_vm_bindings_remove(sc, nfile, op->addr,
+			err = nvkm_bo_resv_wait(bo, true);
+			if (err != 0) {
+				drm_gem_object_put_unlocked(obj);
+				device_printf(sc->dev,
+				    "nvkm_drm: VM_BIND BO wait failed idx=%u handle=%u err=%d\n",
+				    i, op->handle, err);
+				break;
+			}
+			err = nvkm_drm_vm_bindings_remove(sc, nfile, op->addr,
 			    op->range);
+			if (err != 0) {
+				drm_gem_object_put_unlocked(obj);
+				break;
+			}
 			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
 				err = nvkm_gsp_vmm_map_vram(sc->gsp_vmm,
 				    op->addr, bo->paddr + op->bo_offset,
@@ -1328,6 +1366,28 @@ out_free_arrays:
 }
 
 static void
+nvkm_drm_exec_attach_reservations(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, struct dma_fence *fence)
+{
+	struct nvkm_drm_vm_binding *binding;
+	uint32_t count = 0;
+
+	if (fence == NULL)
+		return;
+
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+
+		nvkm_bo_resv_add_excl_fence(bo, fence);
+		count++;
+	}
+	if (count != 0)
+		device_printf(sc->dev,
+		    "nvkm_drm: EXEC attached fence to %u BO reservations\n",
+		    count);
+}
+
+static void
 nvkm_drm_dump_ctxctl_unit(struct nvkm_softc *sc, uint32_t base)
 {
 	device_printf(sc->dev,
@@ -1383,6 +1443,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct nvkm_gsp_chan *chan;
 	struct drm_nouveau_exec_push *pushes;
 	struct nvkm_drm_exec_signal *signals = NULL;
+	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1;
 	uint32_t put, payload;
@@ -1521,6 +1582,16 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    req->sig_ptr, &signals);
 	if (err != 0)
 		goto out_unlock;
+	if (signals != NULL && req->sig_count != 0) {
+		exec_fence = signals[0].fence;
+	} else {
+		exec_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
+		if (exec_fence == NULL) {
+			err = -ENOMEM;
+			goto out_unlock;
+		}
+	}
+	nvkm_drm_exec_attach_reservations(sc, nfile, exec_fence);
 
 	nvkm_drm_flush_cpu_vm_bindings(sc, nfile);
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_gpf.kva,
@@ -1563,6 +1634,11 @@ out_unlock:
 	if (signals != NULL) {
 		nvkm_drm_exec_signals_signal(signals, req->sig_count, err);
 		nvkm_drm_exec_signals_put(signals, req->sig_count);
+	} else if (exec_fence != NULL) {
+		if (err != 0)
+			dma_fence_set_error(exec_fence, err);
+		(void)dma_fence_signal(exec_fence);
+		dma_fence_put(exec_fence);
 	}
 	if (err != 0)
 		device_printf(sc->dev,
