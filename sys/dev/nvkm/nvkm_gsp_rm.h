@@ -155,7 +155,7 @@ int	 nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 	    struct nvkm_gsp_vaspace *vas);
 int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
 
-/* VRAM bump allocator.
+/* VRAM range allocator.
  *
  * Ownership model:
  * - nvkm_gsp_vram_alloc() currently returns owned VRAM backing to the
@@ -170,11 +170,11 @@ int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
  *   channel inst/USERD, and GR ctxbufs are pinned until their explicit owner
  *   lifetime ends. They must never be returned by the GEM free path.
  *
- * The window is set in nvkm_gsp_vram_init using a fixed safe carveout. All
- * allocations are PAGE_SIZE-aligned; alloc returns the physical VRAM offset to
- * hand to GSP-RM as NV_MEMORY_DESC_PARAMS.base. Runtime VRAM reuse must be
- * added as a typed GEM-only arena with owner/borrow metadata, not by freeing
- * arbitrary paddr values back into this internal allocator.
+ * The window is set in nvkm_gsp_vram_init from GSP static-info usable FB
+ * ranges and managed with drm_mm. All allocations are PAGE_SIZE-aligned; alloc
+ * returns the physical VRAM offset to hand to GSP-RM as
+ * NV_MEMORY_DESC_PARAMS.base. Runtime VRAM frees are accepted only through the
+ * typed GEM path after owner validation.
  */
 int	  nvkm_gsp_vram_init(struct nvkm_softc *sc);
 uint64_t nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size,

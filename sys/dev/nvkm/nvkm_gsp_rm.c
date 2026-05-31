@@ -82,7 +82,6 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 		alloc->kind = kind;
 		alloc->owner = owner;
 		alloc->free = false;
-		TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, alloc_link);
 	} else {
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM metadata alloc failed kind=%s paddr=0x%llx size=0x%llx\n",
@@ -90,122 +89,6 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 		    (unsigned long long)size);
 		return (NULL);
 	}
-
-	sc->vram_alloc_bytes[kind] += size;
-	sc->vram_alloc_count[kind]++;
-	device_printf(sc->dev,
-	    "gsp_rm: VRAM alloc kind=%s paddr=0x%llx size=0x%llx align=0x%llx owner=%p count=%u bytes=0x%llx\n",
-	    nvkm_vram_kind_name(kind), (unsigned long long)paddr,
-	    (unsigned long long)size, (unsigned long long)align, owner,
-	    sc->vram_alloc_count[kind],
-	    (unsigned long long)sc->vram_alloc_bytes[kind]);
-	return (alloc);
-}
-
-static bool
-nvkm_vram_free_gem_adjacent(struct nvkm_vram_alloc *a,
-    struct nvkm_vram_alloc *b)
-{
-	if (a == NULL || b == NULL || a == b)
-		return (false);
-	if (a->kind != NVKM_VRAM_GEM || b->kind != NVKM_VRAM_GEM)
-		return (false);
-	if (!a->free || !b->free || a->owner != NULL || b->owner != NULL)
-		return (false);
-	return (a->paddr + a->size == b->paddr ||
-	    b->paddr + b->size == a->paddr);
-}
-
-static struct nvkm_vram_alloc *
-nvkm_vram_reuse_gem_block(struct nvkm_softc *sc,
-    struct nvkm_vram_alloc *alloc, uint64_t size, uint64_t align, void *owner)
-{
-	struct nvkm_vram_alloc *remain;
-	uint64_t old_size;
-
-	TAILQ_REMOVE(&sc->vram_free_gem, alloc, free_link);
-	old_size = alloc->size;
-	if (old_size > size) {
-		remain = kmalloc(sizeof(*remain), M_NVKM_VRAM_META,
-		    M_NOWAIT | M_ZERO);
-		if (remain != NULL) {
-			alloc->size = size;
-
-			remain->paddr = alloc->paddr + size;
-			remain->size = old_size - size;
-			remain->align = align;
-			remain->kind = NVKM_VRAM_GEM;
-			remain->owner = NULL;
-			remain->free = true;
-
-			TAILQ_INSERT_AFTER(&sc->vram_allocs, alloc, remain,
-			    alloc_link);
-			TAILQ_INSERT_TAIL(&sc->vram_free_gem, remain,
-			    free_link);
-			device_printf(sc->dev,
-			    "gsp_rm: VRAM split kind=gem paddr=0x%llx request=0x%llx remain=0x%llx remain_paddr=0x%llx\n",
-			    (unsigned long long)alloc->paddr,
-			    (unsigned long long)size,
-			    (unsigned long long)remain->size,
-			    (unsigned long long)remain->paddr);
-		} else {
-			device_printf(sc->dev,
-			    "gsp_rm: VRAM split metadata failed paddr=0x%llx size=0x%llx request=0x%llx; reusing whole block\n",
-			    (unsigned long long)alloc->paddr,
-			    (unsigned long long)old_size,
-			    (unsigned long long)size);
-		}
-	}
-
-	alloc->align = align;
-	alloc->owner = owner;
-	alloc->free = false;
-	device_printf(sc->dev,
-	    "gsp_rm: VRAM reuse kind=gem paddr=0x%llx size=0x%llx request=0x%llx align=0x%llx owner=%p\n",
-	    (unsigned long long)alloc->paddr,
-	    (unsigned long long)alloc->size,
-	    (unsigned long long)size, (unsigned long long)align, owner);
-	return (alloc);
-}
-
-static struct nvkm_vram_alloc *
-nvkm_vram_coalesce_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc)
-{
-	struct nvkm_vram_alloc *other;
-	bool merged;
-
-	do {
-		merged = false;
-		TAILQ_FOREACH(other, &sc->vram_allocs, alloc_link) {
-			if (!nvkm_vram_free_gem_adjacent(alloc, other))
-				continue;
-
-			TAILQ_REMOVE(&sc->vram_free_gem, other, free_link);
-			if (other->paddr + other->size == alloc->paddr) {
-				other->size += alloc->size;
-				TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
-				device_printf(sc->dev,
-				    "gsp_rm: VRAM coalesce kind=gem paddr=0x%llx size=0x%llx absorbed=0x%llx\n",
-				    (unsigned long long)other->paddr,
-				    (unsigned long long)other->size,
-				    (unsigned long long)alloc->paddr);
-				kfree(alloc);
-				alloc = other;
-			} else {
-				alloc->size += other->size;
-				TAILQ_REMOVE(&sc->vram_allocs, other,
-				    alloc_link);
-				device_printf(sc->dev,
-				    "gsp_rm: VRAM coalesce kind=gem paddr=0x%llx size=0x%llx absorbed=0x%llx\n",
-				    (unsigned long long)alloc->paddr,
-				    (unsigned long long)alloc->size,
-				    (unsigned long long)other->paddr);
-				kfree(other);
-			}
-			merged = true;
-			break;
-		}
-	} while (merged);
 
 	return (alloc);
 }
@@ -879,18 +762,12 @@ nvkm_chid_free(struct nvkm_softc *sc, int chid)
 	lwkt_reltoken(&sc->chid_tok);
 }
 
-/* === VRAM bump allocator ===
+/* === VRAM range allocator ===
  *
- * Carve out a fixed safe window inside the GPU's local VRAM. Eventually
- * this should be replaced with proper fbRegion parsing (see
- * r535_gsp_get_static_info_fb in Linux nouveau), but the FwSec-stitched
- * WPR2 region on our 2080 Ti lives near the very top of the 11 GiB
- * frame buffer (~0x2b7900000), so a range well below that is safe for
- * small driver allocations.
+ * Carve the usable framebuffer range parsed from GSP static info with drm_mm.
+ * drm_mm owns split/coalesce/range-search mechanics; nvkm_vram_alloc carries
+ * ownership metadata so GEM frees cannot return internal/pinned VRAM objects.
  */
-
-#define NVKM_VRAM_BUMP_BASE	0x10000000ULL	/* 256 MiB into VRAM */
-#define NVKM_VRAM_BUMP_SIZE	0x10000000ULL	/* 256 MiB window */
 
 int
 nvkm_gsp_vram_init(struct nvkm_softc *sc)
@@ -921,12 +798,13 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	sc->vram_bump_base  = base;
 	sc->vram_bump_next  = base + size;
 	sc->vram_bump_limit = base + size;
+	drm_mm_init(&sc->vram_mm, base, size);
+	lockinit(&sc->vram_lock, "nvkmvram", 0, 0);
 	TAILQ_INIT(&sc->vram_allocs);
-	TAILQ_INIT(&sc->vram_free_gem);
 	memset(sc->vram_alloc_bytes, 0, sizeof(sc->vram_alloc_bytes));
 	memset(sc->vram_alloc_count, 0, sizeof(sc->vram_alloc_count));
 	device_printf(sc->dev,
-	    "gsp_rm: VRAM bump window 0x%llx..0x%llx (alloc top-down)\n",
+	    "gsp_rm: VRAM drm_mm window 0x%llx..0x%llx (alloc top-down)\n",
 	    (unsigned long long)sc->vram_bump_base,
 	    (unsigned long long)sc->vram_bump_limit);
 	return (0);
@@ -937,46 +815,44 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
     enum nvkm_vram_kind kind, void *owner)
 {
 	struct nvkm_vram_alloc *alloc;
-	uint64_t off, old_next;
+	int err;
 
 	if (align == 0)
 		align = 0x1000;	/* PAGE_SIZE */
 	size = (size + align - 1) & ~(align - 1);
 
-	if (kind == NVKM_VRAM_GEM) {
-		TAILQ_FOREACH(alloc, &sc->vram_free_gem, free_link) {
-			if (alloc->size < size ||
-			    (alloc->paddr & (align - 1)) != 0)
-				continue;
-			return (nvkm_vram_reuse_gem_block(sc, alloc, size,
-			    align, owner));
-		}
-	}
-
-	/* Top-down bump: lower the next pointer by size, then align down. */
-	if (sc->vram_bump_next < sc->vram_bump_base + size) {
+	alloc = nvkm_vram_record_alloc(sc, 0, size, align, kind, owner);
+	if (alloc == NULL)
+		return (NULL);
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	err = drm_mm_insert_node_in_range(&sc->vram_mm, &alloc->node, size,
+	    align, 0, sc->vram_bump_base, sc->vram_bump_limit,
+	    DRM_MM_INSERT_HIGH);
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+	if (err != 0) {
 		device_printf(sc->dev,
-		    "gsp_rm: VRAM bump alloc exhausted (need 0x%llx)\n",
-		    (unsigned long long)size);
+		    "gsp_rm: VRAM drm_mm alloc exhausted kind=%s need=0x%llx align=0x%llx err=%d\n",
+		    nvkm_vram_kind_name(kind), (unsigned long long)size,
+		    (unsigned long long)align, err);
+		kfree(alloc);
 		return (NULL);
 	}
-	off = (sc->vram_bump_next - size) & ~(align - 1);
-	if (off < sc->vram_bump_base) {
-		device_printf(sc->dev,
-		    "gsp_rm: VRAM bump alloc exhausted (align mismatch)\n");
-		return (NULL);
-	}
-	old_next = sc->vram_bump_next;
-	sc->vram_bump_next = off;
-	alloc = nvkm_vram_record_alloc(sc, off, size, align, kind, owner);
-	if (alloc == NULL) {
-		sc->vram_bump_next = old_next;
-		return (NULL);
-	}
+	alloc->paddr = alloc->node.start;
+	TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, alloc_link);
+	sc->vram_alloc_bytes[alloc->kind] += alloc->size;
+	sc->vram_alloc_count[alloc->kind]++;
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM alloc kind=%s paddr=0x%llx size=0x%llx align=0x%llx owner=%p count=%u bytes=0x%llx\n",
+	    nvkm_vram_kind_name(alloc->kind),
+	    (unsigned long long)alloc->paddr,
+	    (unsigned long long)alloc->size,
+	    (unsigned long long)alloc->align, alloc->owner,
+	    sc->vram_alloc_count[alloc->kind],
+	    (unsigned long long)sc->vram_alloc_bytes[alloc->kind]);
 #ifdef NVKM_DEBUG_VRAM_ALLOC
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
-	    (unsigned long long)off, (unsigned long long)size);
+	    (unsigned long long)alloc->paddr, (unsigned long long)size);
 #endif
 	return (alloc);
 }
@@ -1015,12 +891,17 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 
 	alloc->owner = NULL;
 	alloc->free = true;
-	alloc = nvkm_vram_coalesce_gem(sc, alloc);
-	TAILQ_INSERT_TAIL(&sc->vram_free_gem, alloc, free_link);
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	drm_mm_remove_node(&alloc->node);
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+	TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
+	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
+	sc->vram_alloc_count[alloc->kind]--;
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
 	    (unsigned long long)alloc->size, owner);
+	kfree(alloc);
 }
 
 uint64_t
