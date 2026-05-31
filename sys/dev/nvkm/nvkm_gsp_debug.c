@@ -3,15 +3,15 @@
  *
  * GSP-RM development-time debug sysctls.
  *
- *   dev.nvkm.0.loginit   (opaque) -- 64 KiB LIBOS LOGINIT buffer (raw)
- *   dev.nvkm.0.logintr   (opaque) -- 64 KiB LIBOS LOGINTR buffer (raw)
- *   dev.nvkm.0.logrm     (opaque) -- 64 KiB LIBOS LOGRM   buffer (raw)
- *   dev.nvkm.0.gsp_state (string) -- human-readable snapshot of GSP state
- *   dev.nvkm.0.vram_state (string) -- VRAM drm_mm allocation summary
+ *   dev.drm.0.loginit    (opaque) -- 64 KiB LIBOS LOGINIT buffer (raw)
+ *   dev.drm.0.logintr    (opaque) -- 64 KiB LIBOS LOGINTR buffer (raw)
+ *   dev.drm.0.logrm      (opaque) -- 64 KiB LIBOS LOGRM   buffer (raw)
+ *   dev.drm.0.gsp_state  (string) -- human-readable snapshot of GSP state
+ *   dev.drm.0.vram_state (string) -- VRAM drm_mm allocation summary
  *
  * Use from outside the box:
- *   ssh dfly 'doas sysctl -b dev.nvkm.0.loginit' > /tmp/loginit.bin
- *   ssh dfly 'doas sysctl    dev.nvkm.0.gsp_state'
+ *   ssh dfly 'doas sysctl -b dev.drm.0.loginit' > /tmp/loginit.bin
+ *   ssh dfly 'doas sysctl    dev.drm.0.gsp_state'
  *
  * No parsing yet -- buffers are dumped verbatim so we can inspect with
  * strings/xxd while we still don't have the .fwlogging_* format table
@@ -162,7 +162,7 @@ nvkm_gsp_sysctl_vram_state(SYSCTL_HANDLER_ARGS)
 	range_count = 0;
 	omitted_count = 0;
 	TAILQ_FOREACH(alloc, &sc->vram_allocs, alloc_link) {
-		if (range_count++ >= 64) {
+		if (range_count++ >= 24) {
 			omitted_count++;
 			continue;
 		}
@@ -177,7 +177,11 @@ nvkm_gsp_sysctl_vram_state(SYSCTL_HANDLER_ARGS)
 		sbuf_printf(&sb, "... omitted_ranges = %d\n", omitted_count);
 	lockmgr(&sc->vram_lock, LK_RELEASE);
 
-	sbuf_finish(&sb);
+	err = sbuf_finish(&sb);
+	if (err != 0) {
+		sbuf_delete(&sb);
+		return (err);
+	}
 	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
 	sbuf_delete(&sb);
 	return (err);
