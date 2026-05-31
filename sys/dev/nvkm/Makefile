@@ -3,6 +3,16 @@ SRCS=	nvkm.c nvkm_pci.c nvkm_bios.c nvkm_falcon.c nvkm_fw.c nvkm_sec2.c nvkm_gsp
 	nvkm_mem.c nvkm_booter.c nvkm_fwsec.c nvkm_bo.c nvkm_gsp_rm.c nvkm_gsp_vmm.c nvkm_gsp_bar1.c nvkm_gsp_bar2.c
 SRCS+=	device_if.h bus_if.h pci_if.h opt_ddb.h opt_acpi.h opt_drm.h
 
+NVKM_COMMON_HEADERS= \
+	nvkm_priv.h \
+	nvkm_bo.h \
+	nvkm_gsp_rm.h \
+	nvkm_gsp_vmm.h
+
+.for src in ${SRCS:M*.c}
+${src:R}.o: ${NVKM_COMMON_HEADERS}
+.endfor
+
 # DRM headers (Phase 3: register as drm driver)
 KCFLAGS+= -I${SYSDIR}/dev/drm/include
 KCFLAGS+= -I${SYSDIR}/dev/drm/include/drm
