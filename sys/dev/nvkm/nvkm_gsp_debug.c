@@ -189,7 +189,7 @@ nvkm_gsp_sysctl_vram_state(SYSCTL_HANDLER_ARGS)
 
 
 static int
-nvkm_gsp_sysctl_m5_state(SYSCTL_HANDLER_ARGS)
+nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 {
 	struct nvkm_softc *sc = arg1;
 	struct sbuf sb;
@@ -299,8 +299,8 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_vram_state, "A",
 	    "VRAM drm_mm allocation summary");
-	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "m5_state",
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "state",
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
-	    nvkm_gsp_sysctl_m5_state, "A",
-	    "M5 compute path counters and allocator snapshots");
+	    nvkm_gsp_sysctl_state_summary, "A",
+	    "compute path counters and allocator snapshots");
 }
