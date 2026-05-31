@@ -140,12 +140,15 @@ nvkm_drm_vm_binding_wait(struct nvkm_softc *sc,
 	struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 	int err;
 
+	sc->vm_bind_wait_count++;
 	err = nvkm_bo_resv_wait(bo, intr);
-	if (err != 0)
+	if (err != 0) {
+		sc->vm_bind_wait_error_count++;
 		device_printf(sc->dev,
 		    "nvkm_drm: VM_BIND wait failed addr=0x%016jx size=0x%016jx obj=%p err=%d\n",
 		    (uintmax_t)binding->addr, (uintmax_t)binding->size,
 		    binding->obj, err);
+	}
 	return (err);
 }
 
@@ -998,8 +1001,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
 			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
+			sc->vm_bind_wait_count++;
 			err = nvkm_bo_resv_wait(bo, true);
 			if (err != 0) {
+				sc->vm_bind_wait_error_count++;
 				drm_gem_object_put_unlocked(obj);
 				device_printf(sc->dev,
 				    "nvkm_drm: VM_BIND BO wait failed idx=%u handle=%u err=%d\n",
@@ -1162,6 +1167,7 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 
 	if (count == 0)
 		return (0);
+	sc->sync_wait_count += count;
 	if (count > 64) {
 		device_printf(sc->dev,
 		    "nvkm_drm: sync wait invalid count=%u\n", count);
@@ -1230,10 +1236,12 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 	}
 
 	kfree(waits);
-	if (err != 0)
+	if (err != 0) {
+		sc->sync_wait_error_count++;
 		device_printf(sc->dev,
 		    "nvkm_drm: sync wait failed count=%u err=%d\n",
 		    count, err);
+	}
 	return (err);
 }
 
@@ -1274,6 +1282,7 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 	*psignals = NULL;
 	if (count == 0)
 		return (0);
+	sc->sync_signal_count += count;
 	if (count > 64) {
 		device_printf(sc->dev,
 		    "nvkm_drm: sync signal invalid count=%u\n", count);
@@ -1358,10 +1367,12 @@ out_free_arrays:
 	}
 	nvkm_drm_exec_signals_put(signals, count);
 	kfree(sigs);
-	if (err != 0)
+	if (err != 0) {
+		sc->sync_signal_error_count++;
 		device_printf(sc->dev,
 		    "nvkm_drm: sync signal prepare failed count=%u err=%d\n",
 		    count, err);
+	}
 	return (err);
 }
 
@@ -1375,16 +1386,14 @@ nvkm_drm_exec_attach_reservations(struct nvkm_softc *sc,
 	if (fence == NULL)
 		return;
 
+	sc->exec_resv_attach_calls++;
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 
 		nvkm_bo_resv_add_excl_fence(bo, fence);
 		count++;
 	}
-	if (count != 0)
-		device_printf(sc->dev,
-		    "nvkm_drm: EXEC attached fence to %u BO reservations\n",
-		    count);
+	sc->exec_resv_attach_bos += count;
 }
 
 static void
@@ -1451,6 +1460,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 
 	if (nfile == NULL)
 		return (-ENXIO);
+	sc->exec_submit_count++;
 	dchan = nvkm_drm_channel_find(nfile, req->channel);
 	device_printf(sc->dev,
 	    "nvkm_drm: EXEC begin channel=%u pushes=%u waits=%u sigs=%u\n",
@@ -1473,6 +1483,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	if (err != 0)
 		return (err);
 	if (req->push_count == 0) {
+		sc->exec_signal_only_count++;
 		lwkt_gettoken(&sc->gsp_tok);
 		err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv,
 		    req->sig_count, req->sig_ptr, &signals);
@@ -1584,12 +1595,14 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		goto out_unlock;
 	if (signals != NULL && req->sig_count != 0) {
 		exec_fence = signals[0].fence;
+		sc->exec_signal_fence_count++;
 	} else {
 		exec_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
 		if (exec_fence == NULL) {
 			err = -ENOMEM;
 			goto out_unlock;
 		}
+		sc->exec_internal_fence_count++;
 	}
 	nvkm_drm_exec_attach_reservations(sc, nfile, exec_fence);
 
@@ -1620,6 +1633,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		nvkm_gsp_vmm_debug_dump_pte(sc->gsp_vmm, 0x0000003ffdf5c000ULL);
 		nvkm_gsp_vmm_debug_dump_pte(sc->gsp_vmm, 0x0000003ffdf41000ULL);
 		nvkm_drm_dump_exec_timeout(sc);
+		sc->exec_timeout_count++;
 		err = -ETIME;
 		goto out_unlock;
 	}

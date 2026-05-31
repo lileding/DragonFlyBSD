@@ -414,6 +414,22 @@ nvkm_gsp_bar1_free_gva(struct nvkm_gsp_bar1 *b1, uint64_t gva)
 	nvkm_gsp_bar1_gva_set(b1, idx, false);
 }
 
+
+void
+nvkm_gsp_bar1_count_gva(struct nvkm_softc *sc, uint32_t *used,
+    uint32_t *total)
+{
+	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
+	uint32_t count = 0;
+
+	for (uint32_t i = 0; i < BAR1_GVA_ALLOC_PAGES; i++) {
+		if (nvkm_gsp_bar1_gva_used(b1, i))
+			count++;
+	}
+	*used = count;
+	*total = BAR1_GVA_ALLOC_PAGES;
+}
+
 int
 nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
     struct nvkm_bar1_page *page, enum nvkm_vram_kind kind, void *owner)
