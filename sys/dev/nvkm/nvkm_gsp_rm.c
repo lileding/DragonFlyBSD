@@ -101,6 +101,114 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 	    (unsigned long long)sc->vram_alloc_bytes[kind]);
 	return (alloc);
 }
+
+static bool
+nvkm_vram_free_gem_adjacent(struct nvkm_vram_alloc *a,
+    struct nvkm_vram_alloc *b)
+{
+	if (a == NULL || b == NULL || a == b)
+		return (false);
+	if (a->kind != NVKM_VRAM_GEM || b->kind != NVKM_VRAM_GEM)
+		return (false);
+	if (!a->free || !b->free || a->owner != NULL || b->owner != NULL)
+		return (false);
+	return (a->paddr + a->size == b->paddr ||
+	    b->paddr + b->size == a->paddr);
+}
+
+static struct nvkm_vram_alloc *
+nvkm_vram_reuse_gem_block(struct nvkm_softc *sc,
+    struct nvkm_vram_alloc *alloc, uint64_t size, uint64_t align, void *owner)
+{
+	struct nvkm_vram_alloc *remain;
+	uint64_t old_size;
+
+	TAILQ_REMOVE(&sc->vram_free_gem, alloc, free_link);
+	old_size = alloc->size;
+	if (old_size > size) {
+		remain = kmalloc(sizeof(*remain), M_NVKM_VRAM_META,
+		    M_NOWAIT | M_ZERO);
+		if (remain != NULL) {
+			alloc->size = size;
+
+			remain->paddr = alloc->paddr + size;
+			remain->size = old_size - size;
+			remain->align = align;
+			remain->kind = NVKM_VRAM_GEM;
+			remain->owner = NULL;
+			remain->free = true;
+
+			TAILQ_INSERT_AFTER(&sc->vram_allocs, alloc, remain,
+			    alloc_link);
+			TAILQ_INSERT_TAIL(&sc->vram_free_gem, remain,
+			    free_link);
+			device_printf(sc->dev,
+			    "gsp_rm: VRAM split kind=gem paddr=0x%llx request=0x%llx remain=0x%llx remain_paddr=0x%llx\n",
+			    (unsigned long long)alloc->paddr,
+			    (unsigned long long)size,
+			    (unsigned long long)remain->size,
+			    (unsigned long long)remain->paddr);
+		} else {
+			device_printf(sc->dev,
+			    "gsp_rm: VRAM split metadata failed paddr=0x%llx size=0x%llx request=0x%llx; reusing whole block\n",
+			    (unsigned long long)alloc->paddr,
+			    (unsigned long long)old_size,
+			    (unsigned long long)size);
+		}
+	}
+
+	alloc->align = align;
+	alloc->owner = owner;
+	alloc->free = false;
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM reuse kind=gem paddr=0x%llx size=0x%llx request=0x%llx align=0x%llx owner=%p\n",
+	    (unsigned long long)alloc->paddr,
+	    (unsigned long long)alloc->size,
+	    (unsigned long long)size, (unsigned long long)align, owner);
+	return (alloc);
+}
+
+static struct nvkm_vram_alloc *
+nvkm_vram_coalesce_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc)
+{
+	struct nvkm_vram_alloc *other;
+	bool merged;
+
+	do {
+		merged = false;
+		TAILQ_FOREACH(other, &sc->vram_allocs, alloc_link) {
+			if (!nvkm_vram_free_gem_adjacent(alloc, other))
+				continue;
+
+			TAILQ_REMOVE(&sc->vram_free_gem, other, free_link);
+			if (other->paddr + other->size == alloc->paddr) {
+				other->size += alloc->size;
+				TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
+				device_printf(sc->dev,
+				    "gsp_rm: VRAM coalesce kind=gem paddr=0x%llx size=0x%llx absorbed=0x%llx\n",
+				    (unsigned long long)other->paddr,
+				    (unsigned long long)other->size,
+				    (unsigned long long)alloc->paddr);
+				kfree(alloc);
+				alloc = other;
+			} else {
+				alloc->size += other->size;
+				TAILQ_REMOVE(&sc->vram_allocs, other,
+				    alloc_link);
+				device_printf(sc->dev,
+				    "gsp_rm: VRAM coalesce kind=gem paddr=0x%llx size=0x%llx absorbed=0x%llx\n",
+				    (unsigned long long)alloc->paddr,
+				    (unsigned long long)alloc->size,
+				    (unsigned long long)other->paddr);
+				kfree(other);
+			}
+			merged = true;
+			break;
+		}
+	} while (merged);
+
+	return (alloc);
+}
 /* === RM_ALLOC === */
 
 void *
@@ -840,17 +948,8 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 			if (alloc->size < size ||
 			    (alloc->paddr & (align - 1)) != 0)
 				continue;
-			TAILQ_REMOVE(&sc->vram_free_gem, alloc, free_link);
-			alloc->owner = owner;
-			alloc->free = false;
-			device_printf(sc->dev,
-			    "gsp_rm: VRAM reuse kind=%s paddr=0x%llx size=0x%llx request=0x%llx align=0x%llx owner=%p\n",
-			    nvkm_vram_kind_name(kind),
-			    (unsigned long long)alloc->paddr,
-			    (unsigned long long)alloc->size,
-			    (unsigned long long)size,
-			    (unsigned long long)align, owner);
-			return (alloc);
+			return (nvkm_vram_reuse_gem_block(sc, alloc, size,
+			    align, owner));
 		}
 	}
 
@@ -916,6 +1015,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 
 	alloc->owner = NULL;
 	alloc->free = true;
+	alloc = nvkm_vram_coalesce_gem(sc, alloc);
 	TAILQ_INSERT_TAIL(&sc->vram_free_gem, alloc, free_link);
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
