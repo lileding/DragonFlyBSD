@@ -12,6 +12,7 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
+#include <linux/dma-fence.h>
 #include "nvkm_falcon.h"
 
 #include <drm/drmP.h>            /* struct drm_softc, kzalloc, GFP_KERNEL */
@@ -322,6 +323,8 @@ nvkm_pci_attach(device_t dev)
 		return (ENOMEM);
 	}
 	sc->dev = dev;
+	sc->fence_context = dma_fence_context_alloc(1);
+	sc->fence_seqno = 1;
 
 	/* Phase 5: serialise GSP cmdq writes + msgq drain across ioctl
 	 * lwkts and the ithread. Init here, before any RPC is issued. */

@@ -343,6 +343,8 @@ struct nvkm_softc {
 	/* DRM driver registration (Phase 3). */
 	struct drm_device	*drm_dev;
 	struct pci_dev		*drm_pdev;
+	uint64_t		fence_context;
+	uint32_t		fence_seqno;
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
