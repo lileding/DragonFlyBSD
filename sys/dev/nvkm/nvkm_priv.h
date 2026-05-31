@@ -346,6 +346,25 @@ struct nvkm_softc {
 	uint64_t		fence_context;
 	uint32_t		fence_seqno;
 
+	/* M5 observability counters. */
+	uint64_t		exec_submit_count;
+	uint64_t		exec_signal_only_count;
+	uint64_t		exec_timeout_count;
+	uint64_t		exec_internal_fence_count;
+	uint64_t		exec_signal_fence_count;
+	uint64_t		exec_resv_attach_calls;
+	uint64_t		exec_resv_attach_bos;
+	uint64_t		sync_wait_count;
+	uint64_t		sync_wait_error_count;
+	uint64_t		sync_signal_count;
+	uint64_t		sync_signal_error_count;
+	uint64_t		bo_resv_wait_count;
+	uint64_t		bo_resv_wait_error_count;
+	uint64_t		vm_bind_wait_count;
+	uint64_t		vm_bind_wait_error_count;
+	uint64_t		cpu_prep_wait_count;
+	uint64_t		cpu_prep_wait_error_count;
+
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
 	struct nvkm_gsp_chan	*gsp_chan;
@@ -553,6 +572,11 @@ int	nvkm_gsp_get_static_info(struct nvkm_softc *sc);
 int	nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn,
 	    void *repv, uint32_t repc);
 void	nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc, struct sysctl_ctx_list *ctx, struct sysctl_oid *parent);
+void	nvkm_gsp_bar1_count_gva(struct nvkm_softc *sc, uint32_t *used,
+	    uint32_t *total);
+void	nvkm_gsp_vmm_snapshot(struct nvkm_gsp_vmm *vmm, uint32_t *pd0_count,
+	    uint32_t *pt_count, uint64_t *valid_pte_count,
+	    uint32_t *sparse_region_count);
 void	nvkm_gsp_libos_release(struct nvkm_softc *sc);
 
 /* nvkm_fwsec.c */

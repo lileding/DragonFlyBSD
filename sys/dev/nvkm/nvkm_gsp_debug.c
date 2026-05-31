@@ -187,6 +187,95 @@ nvkm_gsp_sysctl_vram_state(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+
+static int
+nvkm_gsp_sysctl_m5_state(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	struct sbuf sb;
+	char buf[4096];
+	uint32_t bar1_used, bar1_total;
+	uint32_t vmm_pd0_count, vmm_pt_count, sparse_region_count;
+	uint64_t valid_pte_count;
+	int err;
+
+	bar1_used = 0;
+	bar1_total = 0;
+	vmm_pd0_count = 0;
+	vmm_pt_count = 0;
+	valid_pte_count = 0;
+	sparse_region_count = 0;
+	nvkm_gsp_bar1_count_gva(sc, &bar1_used, &bar1_total);
+	nvkm_gsp_vmm_snapshot(sc->gsp_vmm, &vmm_pd0_count, &vmm_pt_count,
+	    &valid_pte_count, &sparse_region_count);
+
+	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+	sbuf_printf(&sb, "fence_context = 0x%016llx\n",
+	    (unsigned long long)sc->fence_context);
+	sbuf_printf(&sb, "fence_seqno = %u\n", sc->fence_seqno);
+
+	sbuf_cat(&sb, "\nexec\n");
+	sbuf_printf(&sb, "submit_count = %llu\n",
+	    (unsigned long long)sc->exec_submit_count);
+	sbuf_printf(&sb, "signal_only_count = %llu\n",
+	    (unsigned long long)sc->exec_signal_only_count);
+	sbuf_printf(&sb, "timeout_count = %llu\n",
+	    (unsigned long long)sc->exec_timeout_count);
+	sbuf_printf(&sb, "internal_fence_count = %llu\n",
+	    (unsigned long long)sc->exec_internal_fence_count);
+	sbuf_printf(&sb, "signal_fence_count = %llu\n",
+	    (unsigned long long)sc->exec_signal_fence_count);
+	sbuf_printf(&sb, "resv_attach_calls = %llu\n",
+	    (unsigned long long)sc->exec_resv_attach_calls);
+	sbuf_printf(&sb, "resv_attach_bos = %llu\n",
+	    (unsigned long long)sc->exec_resv_attach_bos);
+
+	sbuf_cat(&sb, "\nsyncobj\n");
+	sbuf_printf(&sb, "wait_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_count);
+	sbuf_printf(&sb, "wait_error_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_error_count);
+	sbuf_printf(&sb, "signal_count = %llu\n",
+	    (unsigned long long)sc->sync_signal_count);
+	sbuf_printf(&sb, "signal_error_count = %llu\n",
+	    (unsigned long long)sc->sync_signal_error_count);
+
+	sbuf_cat(&sb, "\nreservation\n");
+	sbuf_printf(&sb, "bo_wait_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_count);
+	sbuf_printf(&sb, "bo_wait_error_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_error_count);
+	sbuf_printf(&sb, "vm_bind_wait_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_wait_count);
+	sbuf_printf(&sb, "vm_bind_wait_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_wait_error_count);
+	sbuf_printf(&sb, "cpu_prep_wait_count = %llu\n",
+	    (unsigned long long)sc->cpu_prep_wait_count);
+	sbuf_printf(&sb, "cpu_prep_wait_error_count = %llu\n",
+	    (unsigned long long)sc->cpu_prep_wait_error_count);
+
+	sbuf_cat(&sb, "\nbar1\n");
+	sbuf_printf(&sb, "gva_used = %u\n", bar1_used);
+	sbuf_printf(&sb, "gva_total = %u\n", bar1_total);
+	sbuf_printf(&sb, "gva_free = %u\n", bar1_total - bar1_used);
+
+	sbuf_cat(&sb, "\nvmm\n");
+	sbuf_printf(&sb, "user_pd0_count = %u\n", vmm_pd0_count);
+	sbuf_printf(&sb, "user_pt_count = %u\n", vmm_pt_count);
+	sbuf_printf(&sb, "valid_pte_count = %llu\n",
+	    (unsigned long long)valid_pte_count);
+	sbuf_printf(&sb, "sparse_region_count = %u\n", sparse_region_count);
+
+	err = sbuf_finish(&sb);
+	if (err != 0) {
+		sbuf_delete(&sb);
+		return (err);
+	}
+	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
+	sbuf_delete(&sb);
+	return (err);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -210,4 +299,8 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_vram_state, "A",
 	    "VRAM drm_mm allocation summary");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "m5_state",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_m5_state, "A",
+	    "M5 compute path counters and allocator snapshots");
 }

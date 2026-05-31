@@ -580,6 +580,35 @@ nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 	return (0);
 }
 
+
+void
+nvkm_gsp_vmm_snapshot(struct nvkm_gsp_vmm *vmm, uint32_t *pd0_count,
+    uint32_t *pt_count, uint64_t *valid_pte_count,
+    uint32_t *sparse_region_count)
+{
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	struct nvkm_gsp_vmm_user_pt *pt;
+	struct nvkm_gsp_vmm_sparse_region *region;
+
+	*pd0_count = 0;
+	*pt_count = 0;
+	*valid_pte_count = 0;
+	*sparse_region_count = 0;
+	if (vmm == NULL)
+		return;
+
+	lwkt_gettoken(&vmm->tok);
+	LIST_FOREACH(pd0, &vmm->user_pd0_pages, link)
+		(*pd0_count)++;
+	LIST_FOREACH(pt, &vmm->user_pt_pages, link) {
+		(*pt_count)++;
+		*valid_pte_count += pt->valid_pte_count;
+	}
+	LIST_FOREACH(region, &vmm->sparse_regions, link)
+		(*sparse_region_count)++;
+	lwkt_reltoken(&vmm->tok);
+}
+
 static int
 nvkm_gsp_vmm_copy_pdes(struct nvkm_gsp_vmm *vmm)
 {
