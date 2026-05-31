@@ -25,6 +25,7 @@ struct nvkm_gsp_vmm_pt {
 struct nvkm_gsp_vmm_pd0 {
 	LIST_ENTRY(nvkm_gsp_vmm_pd0) link;
 	uint32_t		pd1_idx;
+	uint32_t		refcount;
 	struct nvkm_bar1_page	page;
 };
 LIST_HEAD(nvkm_gsp_vmm_pd0_list, nvkm_gsp_vmm_pd0);
@@ -34,6 +35,7 @@ struct nvkm_gsp_vmm_user_pt {
 	struct nvkm_gsp_vmm_pd0 *pd0;
 	uint32_t		pd1_idx;
 	uint32_t		pd0_idx;
+	uint32_t		valid_pte_count;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
