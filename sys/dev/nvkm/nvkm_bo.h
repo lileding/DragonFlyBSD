@@ -12,6 +12,8 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
+#include <linux/dma-fence.h>
+#include <linux/reservation.h>
 
 struct nvkm_softc;
 
@@ -47,6 +49,7 @@ struct drm_nouveau_gem_cpu_fini {
 
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
+	struct reservation_object resv;		/* BO busy lifetime fences */
 	void			*kva;		/* page-aligned system-memory KVA */
 	struct nvkm_vram_alloc	*vram_alloc;	/* owned GEM VRAM allocation */
 	uint64_t		paddr;		/* first system paddr or VRAM physical start */
@@ -66,6 +69,8 @@ extern struct cdev_pager_ops nvkm_gem_pager_ops;
 
 /* drm_driver.gem_free_object_unlocked callback. */
 void nvkm_bo_gem_free(struct drm_gem_object *obj);
+void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
+int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
 
 /* DRM_NOUVEAU_GEM_* ioctl handlers. */
 int nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,

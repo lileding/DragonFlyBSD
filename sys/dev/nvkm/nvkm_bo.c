@@ -27,6 +27,9 @@
 
 #include <linux/slab.h>
 #include <linux/kref.h>
+#include <linux/dma-fence.h>
+#include <linux/reservation.h>
+#include <linux/sched.h>
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_vma_manager.h>
@@ -115,6 +118,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
 	if (bo == NULL)
 		return (NULL);
+	reservation_object_init(&bo->resv);
 
 	if ((domain & NOUVEAU_GEM_DOMAIN_VRAM) &&
 	    !(domain & NOUVEAU_GEM_DOMAIN_MAPPABLE)) {
@@ -129,6 +133,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size, PAGE_SIZE,
 		    NVKM_VRAM_GEM, bo);
 		if (bo->vram_alloc == NULL) {
+			reservation_object_fini(&bo->resv);
 			kfree(bo);
 			return (NULL);
 		}
@@ -137,6 +142,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	} else {
 		kva = (void *)kmem_alloc(kernel_map, size, VM_SUBSYS_DRM_GEM);
 		if (kva == NULL) {
+			reservation_object_fini(&bo->resv);
 			kfree(bo);
 			return (NULL);
 		}
@@ -164,6 +170,7 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	    obj, bo->domain, (unsigned long long)obj->size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL);
 
+	(void)nvkm_bo_resv_wait(bo, false);
 	if (bo->kva != NULL) {
 		kmem_free(kernel_map, (vm_offset_t)bo->kva, obj->size);
 		bo->kva = NULL;
@@ -172,8 +179,31 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	    bo->vram_alloc != NULL)
 		nvkm_gsp_vram_free_gem(sc, bo->vram_alloc, bo);
 
+	reservation_object_fini(&bo->resv);
 	drm_gem_object_release(obj);
 	kfree(bo);
+}
+
+void
+nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence)
+{
+	reservation_object_lock(&bo->resv, NULL);
+	reservation_object_add_excl_fence(&bo->resv, fence);
+	reservation_object_unlock(&bo->resv);
+}
+
+int
+nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr)
+{
+	long ret;
+
+	ret = reservation_object_wait_timeout_rcu(&bo->resv, true, intr,
+	    MAX_SCHEDULE_TIMEOUT);
+	if (ret < 0)
+		return ((int)ret);
+	if (ret == 0)
+		return (-ETIME);
+	return (0);
 }
 
 /* ============================================================
@@ -261,17 +291,19 @@ nvkm_drm_ioctl_gem_cpu_prep(struct drm_device *ddev, void *data,
 	struct drm_nouveau_gem_cpu_prep *req = data;
 	struct drm_gem_object *obj;
 	struct nvkm_bo *bo;
+	int err;
 
 	obj = drm_gem_object_lookup(file_priv, req->handle);
 	if (obj == NULL)
 		return (-ENOENT);
 	bo = to_nvkm_bo(obj);
+	err = nvkm_bo_resv_wait(bo, true);
 	device_printf(sc->dev,
-	    "nvkm_bo: CPU_PREP handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flags=0x%x\n",
+	    "nvkm_bo: CPU_PREP handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flags=0x%x wait_err=%d\n",
 	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
-	    (unsigned long long)bo->paddr, bo->kva != NULL, req->flags);
+	    (unsigned long long)bo->paddr, bo->kva != NULL, req->flags, err);
 	drm_gem_object_put_unlocked(obj);
-	return (0);
+	return (err);
 }
 
 int
