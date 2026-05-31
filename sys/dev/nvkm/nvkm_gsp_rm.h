@@ -186,6 +186,8 @@ struct nvkm_vram_alloc *nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc,
 	    void *owner);
 void	  nvkm_gsp_vram_free_gem(struct nvkm_softc *sc,
 	    struct nvkm_vram_alloc *alloc, void *owner);
+void	  nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
+	    enum nvkm_vram_kind kind, void *owner);
 
 /* RM_ENGINE_TYPE values used as channel/cgrp engineType field. */
 #define NV2080_ENGINE_TYPE_GRAPHICS	0x00000001U
@@ -256,6 +258,7 @@ struct nvkm_gsp_chan {
 	 * PT under PD1[8] (covers GVA 0x100000000..). */
 	/* PT + data BOs all in VRAM, accessed via BAR1 (nvkm_bar1_page). */
 	struct nvkm_bar1_page	submit_pd0;	/* VRAM (PT page) */
+	struct nvkm_bar1_page	submit_lpt;	/* VRAM (empty 64 KiB LPT) */
 	struct nvkm_bar1_page	submit_spt;	/* VRAM (PT page) */
 	struct nvkm_gsp_sysmem_page submit_push;	/* sysmem (matches nouveau GART) */
 	struct nvkm_gsp_sysmem_page submit_gpf;	/* sysmem */

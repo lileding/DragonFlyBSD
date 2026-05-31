@@ -377,6 +377,8 @@ nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
 
 	page->vram_paddr = paddr;
 	page->bar1_gva   = gva;
+	page->kind = kind;
+	page->owner = owner;
 	return (0);
 }
 
@@ -388,11 +390,15 @@ nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 }
 
 void
-nvkm_gsp_bar1_free_page(struct nvkm_softc *sc __unused,
-    struct nvkm_bar1_page *page)
+nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 {
+	if (page->vram_paddr != 0)
+		nvkm_gsp_vram_free_kind(sc, page->vram_paddr, page->kind,
+		    page->owner);
 	page->vram_paddr = 0;
 	page->bar1_gva   = 0;
+	page->kind = NVKM_VRAM_UNKNOWN;
+	page->owner = NULL;
 }
 
 void

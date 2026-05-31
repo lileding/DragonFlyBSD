@@ -908,6 +908,44 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	kfree(alloc);
 }
 
+void
+nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
+    enum nvkm_vram_kind kind, void *owner)
+{
+	struct nvkm_vram_alloc *alloc;
+	uint64_t size = 0;
+	const char *kind_name = nvkm_vram_kind_name(kind);
+
+	if (paddr == 0)
+		return;
+
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	TAILQ_FOREACH(alloc, &sc->vram_allocs, alloc_link) {
+		if (alloc->paddr == paddr && alloc->kind == kind &&
+		    alloc->owner == owner)
+			break;
+	}
+	if (alloc == NULL || alloc->free) {
+		lockmgr(&sc->vram_lock, LK_RELEASE);
+		return;
+	}
+
+	alloc->owner = NULL;
+	alloc->free = true;
+	size = alloc->size;
+	drm_mm_remove_node(&alloc->node);
+	TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
+	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
+	sc->vram_alloc_count[alloc->kind]--;
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p\n",
+	    kind_name, (unsigned long long)paddr, (unsigned long long)size,
+	    owner);
+	kfree(alloc);
+}
+
 uint64_t
 nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size, uint64_t align)
 {
@@ -1418,12 +1456,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		/* All PT pages + data BOs in VRAM, host-accessed via BAR1.
 		 * Matches nouveau (everything in VRAM, L2-coherent both
 		 * sides). PDE/PTE aperture = VIDMEM. */
-		struct nvkm_bar1_page submit_lpt = {0};
 		if ((err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_pd0,
 		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
 		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_spt,
 		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
-		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &submit_lpt,
+		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_lpt,
 		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan))) {
 			device_printf(sc->dev,
 			    "gsp_rm: chan submit page alloc failed err=%d\n", err);
@@ -1470,7 +1507,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		 * walker falls back to SMALL); SMALL = SPT (our 4 KiB pages). */
 		nvkm_gsp_bar1_wr64(sc,
 		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8,
-		    nvkm_pde_to_vram(submit_lpt.vram_paddr));
+		    nvkm_pde_to_vram(chan->submit_lpt.vram_paddr));
 		nvkm_gsp_bar1_wr64(sc,
 		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8,
 		    nvkm_pde_to_vram(chan->submit_spt.vram_paddr));
@@ -2487,14 +2524,23 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 {
 	struct nvkm_softc *sc = chan->object.client ?
 	    chan->object.client->sc : NULL;
+	int err = 0;
+
 	if (chan->ce_obj.handle != 0)
 		(void)nvkm_gsp_rm_free(&chan->ce_obj);
-	int err = nvkm_gsp_rm_free(&chan->object);
+	if (chan->object.handle != 0)
+		err = nvkm_gsp_rm_free(&chan->object);
 	if (sc != NULL && chan->chid > 0)
 		nvkm_chid_free(sc, chan->chid);
-	/* PT pages are VRAM bump allocations -- no host free; sysmem data pages contigfree. */
-	nvkm_gsp_bar1_free_page(sc, &chan->submit_pd0);
-	nvkm_gsp_bar1_free_page(sc, &chan->submit_spt);
+	if (sc != NULL) {
+		nvkm_gsp_bar1_free_page(sc, &chan->submit_pd0);
+		nvkm_gsp_bar1_free_page(sc, &chan->submit_lpt);
+		nvkm_gsp_bar1_free_page(sc, &chan->submit_spt);
+		nvkm_gsp_vram_free_kind(sc, chan->inst_vram,
+		    NVKM_VRAM_CHANNEL_INST, chan);
+		nvkm_gsp_vram_free_kind(sc, chan->userd_vram,
+		    NVKM_VRAM_CHANNEL_USERD, chan);
+	}
 	if (chan->submit_push.kva != NULL)
 		contigfree(chan->submit_push.kva, 0x1000, M_NVKM_MTHDBUF);
 	if (chan->submit_gpf.kva != NULL)
@@ -2502,9 +2548,17 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 	if (chan->submit_sema.kva != NULL)
 		contigfree(chan->submit_sema.kva, 0x1000, M_NVKM_MTHDBUF);
 	for (uint32_t i = 0; i < chan->gr_ctxbuf_nr; i++) {
-		if (chan->gr_ctxbuf[i].kva != NULL)
-			contigfree(chan->gr_ctxbuf[i].kva,
-			    chan->gr_ctxbuf[i].size, M_NVKM_MTHDBUF);
+		struct nvkm_gsp_gr_ctxbuf *buf = &chan->gr_ctxbuf[i];
+
+		if (buf->kva != NULL)
+			contigfree(buf->kva, buf->size, M_NVKM_MTHDBUF);
+		if (sc != NULL) {
+			if (!buf->nonmapped && buf->gva != 0 && buf->size != 0)
+				(void)nvkm_gsp_vmm_unmap(sc->gsp_vmm, buf->gva,
+				    buf->size);
+			nvkm_gsp_vram_free_kind(sc, buf->paddr,
+			    NVKM_VRAM_GR_CTXBUF_CHANNEL, chan);
+		}
 	}
 	if (chan->mthdbuf_kva != NULL) {
 		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
