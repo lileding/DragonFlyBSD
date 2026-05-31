@@ -60,6 +60,8 @@ struct nvkm_vram_alloc {
 	bool free;
 };
 
+const char *nvkm_vram_kind_name(enum nvkm_vram_kind kind);
+
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
 
