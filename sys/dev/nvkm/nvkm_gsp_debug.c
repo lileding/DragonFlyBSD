@@ -7,6 +7,7 @@
  *   dev.nvkm.0.logintr   (opaque) -- 64 KiB LIBOS LOGINTR buffer (raw)
  *   dev.nvkm.0.logrm     (opaque) -- 64 KiB LIBOS LOGRM   buffer (raw)
  *   dev.nvkm.0.gsp_state (string) -- human-readable snapshot of GSP state
+ *   dev.nvkm.0.vram_state (string) -- VRAM drm_mm allocation summary
  *
  * Use from outside the box:
  *   ssh dfly 'doas sysctl -b dev.nvkm.0.loginit' > /tmp/loginit.bin
@@ -105,6 +106,83 @@ nvkm_gsp_sysctl_state(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+static int
+nvkm_gsp_sysctl_vram_state(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	struct nvkm_vram_alloc *alloc;
+	struct drm_mm_node *hole;
+	struct sbuf sb;
+	char buf[4096];
+	uint64_t total, active, free_bytes, max_free;
+	uint64_t hole_start, hole_end, hole_size;
+	int i, err, range_count, omitted_count;
+
+	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+
+	total = sc->vram_bump_limit - sc->vram_bump_base;
+	active = 0;
+	free_bytes = 0;
+	max_free = 0;
+
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	for (i = 0; i < NVKM_VRAM_KIND_COUNT; i++)
+		active += sc->vram_alloc_bytes[i];
+	drm_mm_for_each_hole(hole, &sc->vram_mm, hole_start, hole_end) {
+		hole_size = hole_end - hole_start;
+		free_bytes += hole_size;
+		if (hole_size > max_free)
+			max_free = hole_size;
+	}
+
+	sbuf_printf(&sb, "window_base = 0x%016llx\n",
+	    (unsigned long long)sc->vram_bump_base);
+	sbuf_printf(&sb, "window_limit = 0x%016llx\n",
+	    (unsigned long long)sc->vram_bump_limit);
+	sbuf_printf(&sb, "window_bytes = 0x%016llx\n",
+	    (unsigned long long)total);
+	sbuf_printf(&sb, "active_bytes = 0x%016llx\n",
+	    (unsigned long long)active);
+	sbuf_printf(&sb, "free_bytes = 0x%016llx\n",
+	    (unsigned long long)free_bytes);
+	sbuf_printf(&sb, "max_free_bytes = 0x%016llx\n",
+	    (unsigned long long)max_free);
+
+	sbuf_cat(&sb, "\nkind active_count active_bytes\n");
+	for (i = 0; i < NVKM_VRAM_KIND_COUNT; i++) {
+		if (sc->vram_alloc_count[i] == 0 &&
+		    sc->vram_alloc_bytes[i] == 0)
+			continue;
+		sbuf_printf(&sb, "%s %u 0x%016llx\n",
+		    nvkm_vram_kind_name(i), sc->vram_alloc_count[i],
+		    (unsigned long long)sc->vram_alloc_bytes[i]);
+	}
+
+	sbuf_cat(&sb, "\nactive_ranges\n");
+	range_count = 0;
+	omitted_count = 0;
+	TAILQ_FOREACH(alloc, &sc->vram_allocs, alloc_link) {
+		if (range_count++ >= 64) {
+			omitted_count++;
+			continue;
+		}
+		sbuf_printf(&sb,
+		    "%s 0x%016llx 0x%016llx owner=%p free=%u\n",
+		    nvkm_vram_kind_name(alloc->kind),
+		    (unsigned long long)alloc->paddr,
+		    (unsigned long long)alloc->size,
+		    alloc->owner, alloc->free);
+	}
+	if (omitted_count != 0)
+		sbuf_printf(&sb, "... omitted_ranges = %d\n", omitted_count);
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+
+	sbuf_finish(&sb);
+	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
+	sbuf_delete(&sb);
+	return (err);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -124,4 +202,8 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_state, "A",
 	    "GSP boot/runtime state snapshot");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "vram_state",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_vram_state, "A",
+	    "VRAM drm_mm allocation summary");
 }

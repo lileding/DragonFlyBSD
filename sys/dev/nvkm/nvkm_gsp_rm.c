@@ -26,7 +26,7 @@
 static MALLOC_DEFINE(M_NVKM_VRAM_META, "nvkm_vram_meta",
     "nvkm VRAM allocation metadata");
 
-static const char *
+const char *
 nvkm_vram_kind_name(enum nvkm_vram_kind kind)
 {
 	switch (kind) {
@@ -824,12 +824,13 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 	alloc = nvkm_vram_record_alloc(sc, 0, size, align, kind, owner);
 	if (alloc == NULL)
 		return (NULL);
+
 	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
 	err = drm_mm_insert_node_in_range(&sc->vram_mm, &alloc->node, size,
 	    align, 0, sc->vram_bump_base, sc->vram_bump_limit,
 	    DRM_MM_INSERT_HIGH);
-	lockmgr(&sc->vram_lock, LK_RELEASE);
 	if (err != 0) {
+		lockmgr(&sc->vram_lock, LK_RELEASE);
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM drm_mm alloc exhausted kind=%s need=0x%llx align=0x%llx err=%d\n",
 		    nvkm_vram_kind_name(kind), (unsigned long long)size,
@@ -841,6 +842,7 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 	TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, alloc_link);
 	sc->vram_alloc_bytes[alloc->kind] += alloc->size;
 	sc->vram_alloc_count[alloc->kind]++;
+	lockmgr(&sc->vram_lock, LK_RELEASE);
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc kind=%s paddr=0x%llx size=0x%llx align=0x%llx owner=%p count=%u bytes=0x%llx\n",
 	    nvkm_vram_kind_name(alloc->kind),
@@ -873,7 +875,9 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 {
 	if (alloc == NULL)
 		return;
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
 	if (alloc->kind != NVKM_VRAM_GEM || alloc->owner != owner) {
+		lockmgr(&sc->vram_lock, LK_RELEASE);
 		device_printf(sc->dev,
 		    "gsp_rm: reject VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p expect=%p\n",
 		    nvkm_vram_kind_name(alloc->kind),
@@ -882,6 +886,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 		return;
 	}
 	if (alloc->free) {
+		lockmgr(&sc->vram_lock, LK_RELEASE);
 		device_printf(sc->dev,
 		    "gsp_rm: reject duplicate VRAM free paddr=0x%llx size=0x%llx owner=%p\n",
 		    (unsigned long long)alloc->paddr,
@@ -891,12 +896,11 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 
 	alloc->owner = NULL;
 	alloc->free = true;
-	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
 	drm_mm_remove_node(&alloc->node);
-	lockmgr(&sc->vram_lock, LK_RELEASE);
 	TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
 	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
 	sc->vram_alloc_count[alloc->kind]--;
+	lockmgr(&sc->vram_lock, LK_RELEASE);
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
