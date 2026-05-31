@@ -1079,9 +1079,13 @@ struct drm_nouveau_exec {
 #define NVKM_DRM_GPFIFO_FETCH_WINDOW	0x40
 #define NVKM_DRM_EXEC_POLL_US		5000000
 
-struct nvkm_drm_signaled_fence {
+struct nvkm_drm_exec_fence {
 	struct dma_fence base;
 	spinlock_t lock;
+};
+
+struct nvkm_drm_exec_signal {
+	struct dma_fence *fence;
 };
 
 static const char *
@@ -1095,6 +1099,21 @@ static const struct dma_fence_ops nvkm_drm_fence_ops = {
 	.get_timeline_name = nvkm_drm_fence_name,
 	.wait = dma_fence_default_wait,
 };
+
+static struct dma_fence *
+nvkm_drm_exec_fence_create(struct nvkm_softc *sc, unsigned seqno)
+{
+	struct nvkm_drm_exec_fence *f;
+
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (f == NULL)
+		return (NULL);
+
+	lockinit(&f->lock, "nvdfen", 0, 0);
+	dma_fence_init(&f->base, &nvkm_drm_fence_ops, &f->lock,
+	    sc->fence_context, seqno);
+	return (&f->base);
+}
 
 static int
 nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
@@ -1180,13 +1199,41 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 	return (err);
 }
 
+static void
+nvkm_drm_exec_signals_put(struct nvkm_drm_exec_signal *signals,
+    uint32_t count)
+{
+	if (signals == NULL)
+		return;
+	for (uint32_t i = 0; i < count; i++)
+		dma_fence_put(signals[i].fence);
+	kfree(signals);
+}
+
+static void
+nvkm_drm_exec_signals_signal(struct nvkm_drm_exec_signal *signals,
+    uint32_t count, int error)
+{
+	if (signals == NULL)
+		return;
+	for (uint32_t i = 0; i < count; i++) {
+		if (error != 0)
+			dma_fence_set_error(signals[i].fence, error);
+		(void)dma_fence_signal(signals[i].fence);
+	}
+}
+
 static int
-nvkm_drm_signal_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
-    uint32_t count, uint64_t sig_ptr)
+nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
+    struct drm_file *file_priv, uint32_t count, uint64_t sig_ptr,
+    struct nvkm_drm_exec_signal **psignals)
 {
 	struct drm_nouveau_sync *sigs;
+	struct drm_syncobj **syncobjs;
+	struct nvkm_drm_exec_signal *signals;
 	int err = 0;
 
+	*psignals = NULL;
 	if (count == 0)
 		return (0);
 	if (count > 64) {
@@ -1196,22 +1243,29 @@ nvkm_drm_signal_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 	}
 
 	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
-	err = copyin((const void *)(uintptr_t)sig_ptr, sigs, sizeof(*sigs) * count);
+	syncobjs = kcalloc(count, sizeof(*syncobjs), GFP_KERNEL);
+	signals = kcalloc(count, sizeof(*signals), GFP_KERNEL);
+	if (syncobjs == NULL || signals == NULL) {
+		err = -ENOMEM;
+		goto out_free_arrays;
+	}
+
+	err = copyin((const void *)(uintptr_t)sig_ptr, sigs,
+	    sizeof(*sigs) * count);
 	if (err != 0) {
-		kfree(sigs);
 		device_printf(sc->dev,
 		    "nvkm_drm: sync signal copyin failed count=%u err=%d\n",
 		    count, err);
-		return (-EFAULT);
+		err = -EFAULT;
+		goto out_free_arrays;
 	}
 
 	for (uint32_t i = 0; i < count; i++) {
-		struct drm_syncobj *syncobj;
-		struct nvkm_drm_signaled_fence *f;
 		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
+		unsigned seqno;
 
 		device_printf(sc->dev,
-		    "nvkm_drm: sync signal idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
+		    "nvkm_drm: sync signal prepare idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
 		    i, sigs[i].flags, sigs[i].handle,
 		    (uintmax_t)sigs[i].timeline_value);
 		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
@@ -1220,41 +1274,55 @@ nvkm_drm_signal_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			    "nvkm_drm: sync signal unsupported flags idx=%u flags=0x%08x\n",
 			    i, sigs[i].flags);
 			err = -EINVAL;
-			break;
+			goto out_free_arrays;
 		}
-		syncobj = drm_syncobj_find(file_priv, sigs[i].handle);
-		if (syncobj == NULL) {
+		syncobjs[i] = drm_syncobj_find(file_priv, sigs[i].handle);
+		if (syncobjs[i] == NULL) {
 			device_printf(sc->dev,
 			    "nvkm_drm: sync signal missing syncobj idx=%u handle=%u\n",
 			    i, sigs[i].handle);
 			err = -ENOENT;
-			break;
+			goto out_free_arrays;
 		}
-		f = kzalloc(sizeof(*f), GFP_KERNEL);
-		if (f == NULL) {
-			drm_syncobj_put(syncobj);
+
+		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ)
+			seqno = (unsigned)sigs[i].timeline_value;
+		else
+			seqno = ++sc->fence_seqno;
+		signals[i].fence = nvkm_drm_exec_fence_create(sc, seqno);
+		if (signals[i].fence == NULL) {
 			device_printf(sc->dev,
 			    "nvkm_drm: sync signal fence alloc failed idx=%u handle=%u\n",
 			    i, sigs[i].handle);
 			err = -ENOMEM;
-			break;
+			goto out_free_arrays;
 		}
-		lockinit(&f->lock, "nvdfl", 0, 0);
-		dma_fence_init(&f->base, &nvkm_drm_fence_ops, &f->lock, 0,
-		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    (unsigned)sigs[i].timeline_value : 0);
-		dma_fence_signal(&f->base);
-		drm_syncobj_replace_fence(syncobj,
-		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    sigs[i].timeline_value : 0, &f->base);
-		dma_fence_put(&f->base);
-		drm_syncobj_put(syncobj);
 	}
 
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
+		u64 point = type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
+		    sigs[i].timeline_value : 0;
+
+		drm_syncobj_replace_fence(syncobjs[i], point, signals[i].fence);
+	}
+
+	*psignals = signals;
+	signals = NULL;
+
+out_free_arrays:
+	if (syncobjs != NULL) {
+		for (uint32_t i = 0; i < count; i++) {
+			if (syncobjs[i] != NULL)
+				drm_syncobj_put(syncobjs[i]);
+		}
+		kfree(syncobjs);
+	}
+	nvkm_drm_exec_signals_put(signals, count);
 	kfree(sigs);
 	if (err != 0)
 		device_printf(sc->dev,
-		    "nvkm_drm: sync signal failed count=%u err=%d\n",
+		    "nvkm_drm: sync signal prepare failed count=%u err=%d\n",
 		    count, err);
 	return (err);
 }
@@ -1314,6 +1382,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct nvkm_drm_chan *dchan;
 	struct nvkm_gsp_chan *chan;
 	struct drm_nouveau_exec_push *pushes;
+	struct nvkm_drm_exec_signal *signals = NULL;
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1;
 	uint32_t put, payload;
@@ -1343,8 +1412,13 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	if (err != 0)
 		return (err);
 	if (req->push_count == 0) {
-		err = nvkm_drm_signal_syncobjs(sc, file_priv, req->sig_count,
-		    req->sig_ptr);
+		lwkt_gettoken(&sc->gsp_tok);
+		err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv,
+		    req->sig_count, req->sig_ptr, &signals);
+		if (err == 0)
+			nvkm_drm_exec_signals_signal(signals, req->sig_count, 0);
+		nvkm_drm_exec_signals_put(signals, req->sig_count);
+		lwkt_reltoken(&sc->gsp_tok);
 		device_printf(sc->dev,
 		    "nvkm_drm: EXEC signal-only channel=%u sigs=%u err=%d\n",
 		    req->channel, req->sig_count, err);
@@ -1443,6 +1517,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    (NVKM_DRM_POST_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 	put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
 
+	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
+	    req->sig_ptr, &signals);
+	if (err != 0)
+		goto out_unlock;
+
 	nvkm_drm_flush_cpu_vm_bindings(sc, nfile);
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_gpf.kva,
 	    (vm_offset_t)chan->submit_gpf.kva + 0x1000);
@@ -1475,14 +1554,16 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	}
 
 	chan->gpf_put = put;
-	err = nvkm_drm_signal_syncobjs(sc, file_priv, req->sig_count,
-	    req->sig_ptr);
 	device_printf(sc->dev,
 	    "nvkm_drm: EXEC complete channel=%u pushes=%u sigs=%u err=%d put=%u sema=0x%08x payload=0x%08x\n",
 	    req->channel, req->push_count, req->sig_count, err, put, sema[0],
 	    payload);
 
 out_unlock:
+	if (signals != NULL) {
+		nvkm_drm_exec_signals_signal(signals, req->sig_count, err);
+		nvkm_drm_exec_signals_put(signals, req->sig_count);
+	}
 	if (err != 0)
 		device_printf(sc->dev,
 		    "nvkm_drm: EXEC return channel=%u err=%d\n",
