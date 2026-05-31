@@ -181,6 +181,11 @@ uint64_t nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size,
 	    uint64_t align, enum nvkm_vram_kind kind, void *owner);
 uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,
 	    uint64_t align);
+struct nvkm_vram_alloc *nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc,
+	    uint64_t size, uint64_t align, enum nvkm_vram_kind kind,
+	    void *owner);
+void	  nvkm_gsp_vram_free_gem(struct nvkm_softc *sc,
+	    struct nvkm_vram_alloc *alloc, void *owner);
 
 /* RM_ENGINE_TYPE values used as channel/cgrp engineType field. */
 #define NV2080_ENGINE_TYPE_GRAPHICS	0x00000001U

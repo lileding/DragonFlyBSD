@@ -26,15 +26,6 @@
 static MALLOC_DEFINE(M_NVKM_VRAM_META, "nvkm_vram_meta",
     "nvkm VRAM allocation metadata");
 
-struct nvkm_vram_alloc {
-	TAILQ_ENTRY(nvkm_vram_alloc) link;
-	uint64_t paddr;
-	uint64_t size;
-	uint64_t align;
-	enum nvkm_vram_kind kind;
-	void *owner;
-};
-
 static const char *
 nvkm_vram_kind_name(enum nvkm_vram_kind kind)
 {
@@ -74,7 +65,7 @@ nvkm_vram_kind_name(enum nvkm_vram_kind kind)
 	}
 }
 
-static void
+static struct nvkm_vram_alloc *
 nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
     uint64_t align, enum nvkm_vram_kind kind, void *owner)
 {
@@ -90,12 +81,14 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 		alloc->align = align;
 		alloc->kind = kind;
 		alloc->owner = owner;
-		TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, link);
+		alloc->free = false;
+		TAILQ_INSERT_TAIL(&sc->vram_allocs, alloc, alloc_link);
 	} else {
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM metadata alloc failed kind=%s paddr=0x%llx size=0x%llx\n",
 		    nvkm_vram_kind_name(kind), (unsigned long long)paddr,
 		    (unsigned long long)size);
+		return (NULL);
 	}
 
 	sc->vram_alloc_bytes[kind] += size;
@@ -106,6 +99,7 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 	    (unsigned long long)size, (unsigned long long)align, owner,
 	    sc->vram_alloc_count[kind],
 	    (unsigned long long)sc->vram_alloc_bytes[kind]);
+	return (alloc);
 }
 /* === RM_ALLOC === */
 
@@ -820,6 +814,7 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	sc->vram_bump_next  = base + size;
 	sc->vram_bump_limit = base + size;
 	TAILQ_INIT(&sc->vram_allocs);
+	TAILQ_INIT(&sc->vram_free_gem);
 	memset(sc->vram_alloc_bytes, 0, sizeof(sc->vram_alloc_bytes));
 	memset(sc->vram_alloc_count, 0, sizeof(sc->vram_alloc_count));
 	device_printf(sc->dev,
@@ -829,37 +824,103 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	return (0);
 }
 
-uint64_t
-nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size, uint64_t align,
+struct nvkm_vram_alloc *
+nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
     enum nvkm_vram_kind kind, void *owner)
 {
-	uint64_t off;
+	struct nvkm_vram_alloc *alloc;
+	uint64_t off, old_next;
 
 	if (align == 0)
 		align = 0x1000;	/* PAGE_SIZE */
 	size = (size + align - 1) & ~(align - 1);
+
+	if (kind == NVKM_VRAM_GEM) {
+		TAILQ_FOREACH(alloc, &sc->vram_free_gem, free_link) {
+			if (alloc->size < size ||
+			    (alloc->paddr & (align - 1)) != 0)
+				continue;
+			TAILQ_REMOVE(&sc->vram_free_gem, alloc, free_link);
+			alloc->owner = owner;
+			alloc->free = false;
+			device_printf(sc->dev,
+			    "gsp_rm: VRAM reuse kind=%s paddr=0x%llx size=0x%llx request=0x%llx align=0x%llx owner=%p\n",
+			    nvkm_vram_kind_name(kind),
+			    (unsigned long long)alloc->paddr,
+			    (unsigned long long)alloc->size,
+			    (unsigned long long)size,
+			    (unsigned long long)align, owner);
+			return (alloc);
+		}
+	}
 
 	/* Top-down bump: lower the next pointer by size, then align down. */
 	if (sc->vram_bump_next < sc->vram_bump_base + size) {
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM bump alloc exhausted (need 0x%llx)\n",
 		    (unsigned long long)size);
-		return (0);
+		return (NULL);
 	}
 	off = (sc->vram_bump_next - size) & ~(align - 1);
 	if (off < sc->vram_bump_base) {
 		device_printf(sc->dev,
 		    "gsp_rm: VRAM bump alloc exhausted (align mismatch)\n");
-		return (0);
+		return (NULL);
 	}
+	old_next = sc->vram_bump_next;
 	sc->vram_bump_next = off;
-	nvkm_vram_record_alloc(sc, off, size, align, kind, owner);
+	alloc = nvkm_vram_record_alloc(sc, off, size, align, kind, owner);
+	if (alloc == NULL) {
+		sc->vram_bump_next = old_next;
+		return (NULL);
+	}
 #ifdef NVKM_DEBUG_VRAM_ALLOC
 	device_printf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
 	    (unsigned long long)off, (unsigned long long)size);
 #endif
-	return (off);
+	return (alloc);
+}
+
+uint64_t
+nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size, uint64_t align,
+    enum nvkm_vram_kind kind, void *owner)
+{
+	struct nvkm_vram_alloc *alloc;
+
+	alloc = nvkm_gsp_vram_alloc_ref(sc, size, align, kind, owner);
+	return (alloc != NULL ? alloc->paddr : 0);
+}
+
+void
+nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
+    void *owner)
+{
+	if (alloc == NULL)
+		return;
+	if (alloc->kind != NVKM_VRAM_GEM || alloc->owner != owner) {
+		device_printf(sc->dev,
+		    "gsp_rm: reject VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p expect=%p\n",
+		    nvkm_vram_kind_name(alloc->kind),
+		    (unsigned long long)alloc->paddr,
+		    (unsigned long long)alloc->size, owner, alloc->owner);
+		return;
+	}
+	if (alloc->free) {
+		device_printf(sc->dev,
+		    "gsp_rm: reject duplicate VRAM free paddr=0x%llx size=0x%llx owner=%p\n",
+		    (unsigned long long)alloc->paddr,
+		    (unsigned long long)alloc->size, owner);
+		return;
+	}
+
+	alloc->owner = NULL;
+	alloc->free = true;
+	TAILQ_INSERT_TAIL(&sc->vram_free_gem, alloc, free_link);
+	device_printf(sc->dev,
+	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
+	    (unsigned long long)alloc->paddr,
+	    (unsigned long long)alloc->size, owner);
 }
 
 uint64_t

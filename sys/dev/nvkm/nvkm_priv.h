@@ -46,6 +46,18 @@ enum nvkm_vram_kind {
 
 struct nvkm_vram_alloc;
 TAILQ_HEAD(nvkm_vram_alloc_head, nvkm_vram_alloc);
+TAILQ_HEAD(nvkm_vram_free_head, nvkm_vram_alloc);
+
+struct nvkm_vram_alloc {
+	TAILQ_ENTRY(nvkm_vram_alloc) alloc_link;
+	TAILQ_ENTRY(nvkm_vram_alloc) free_link;
+	uint64_t paddr;
+	uint64_t size;
+	uint64_t align;
+	enum nvkm_vram_kind kind;
+	void *owner;
+	bool free;
+};
 
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
@@ -332,6 +344,7 @@ struct nvkm_softc {
 	uint64_t		vram_bump_next;
 	uint64_t		vram_bump_limit;
 	struct nvkm_vram_alloc_head vram_allocs;
+	struct nvkm_vram_free_head vram_free_gem;
 	uint64_t		vram_alloc_bytes[NVKM_VRAM_KIND_COUNT];
 	uint32_t		vram_alloc_count[NVKM_VRAM_KIND_COUNT];
 
