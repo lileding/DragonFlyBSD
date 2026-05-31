@@ -221,6 +221,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	b1->pd1_paddr = gsp_pd1;
 	b1->pd0_paddr = gsp_pd0;
 	b1->next_gva  = BAR1_GVA_ALLOC_BASE;
+	memset(b1->gva_used, 0, sizeof(b1->gva_used));
 
 #ifdef NVKM_DEBUG_BAR1
 	device_printf(sc->dev,
@@ -352,6 +353,67 @@ nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t gva)
 	return ((hi << 32) | lo);
 }
 
+static bool
+nvkm_gsp_bar1_gva_used(struct nvkm_gsp_bar1 *b1, uint32_t idx)
+{
+	return ((b1->gva_used[idx / 8] & (1u << (idx % 8))) != 0);
+}
+
+static void
+nvkm_gsp_bar1_gva_set(struct nvkm_gsp_bar1 *b1, uint32_t idx,
+    bool used)
+{
+	uint8_t bit = 1u << (idx % 8);
+
+	if (used)
+		b1->gva_used[idx / 8] |= bit;
+	else
+		b1->gva_used[idx / 8] &= ~bit;
+}
+
+static int
+nvkm_gsp_bar1_alloc_gva(struct nvkm_gsp_bar1 *b1, uint64_t *pgva)
+{
+	uint32_t start, idx;
+
+	start = (uint32_t)((b1->next_gva - BAR1_GVA_ALLOC_BASE) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (start >= BAR1_GVA_ALLOC_PAGES)
+		start = 0;
+
+	for (uint32_t i = 0; i < BAR1_GVA_ALLOC_PAGES; i++) {
+		idx = (start + i) % BAR1_GVA_ALLOC_PAGES;
+		if (nvkm_gsp_bar1_gva_used(b1, idx))
+			continue;
+
+		nvkm_gsp_bar1_gva_set(b1, idx, true);
+		*pgva = BAR1_GVA_ALLOC_BASE +
+		    (uint64_t)idx * NVKM_GMMU_PT_PAGE_SIZE;
+		b1->next_gva = BAR1_GVA_ALLOC_BASE +
+		    (uint64_t)((idx + 1) % BAR1_GVA_ALLOC_PAGES) *
+		    NVKM_GMMU_PT_PAGE_SIZE;
+		return (0);
+	}
+
+	return (ENOSPC);
+}
+
+static void
+nvkm_gsp_bar1_free_gva(struct nvkm_gsp_bar1 *b1, uint64_t gva)
+{
+	uint32_t idx;
+
+	if (gva < BAR1_GVA_ALLOC_BASE ||
+	    gva >= BAR1_GVA_ALLOC_BASE +
+	    (uint64_t)BAR1_GVA_ALLOC_PAGES * NVKM_GMMU_PT_PAGE_SIZE ||
+	    (gva & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0)
+		return;
+
+	idx = (uint32_t)((gva - BAR1_GVA_ALLOC_BASE) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	nvkm_gsp_bar1_gva_set(b1, idx, false);
+}
+
 int
 nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
     struct nvkm_bar1_page *page, enum nvkm_vram_kind kind, void *owner)
@@ -362,17 +424,23 @@ nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
-	paddr = nvkm_gsp_vram_alloc_kind(sc, NVKM_GMMU_PT_PAGE_SIZE,
-	    NVKM_GMMU_PT_PAGE_SIZE, kind, owner);
-	if (paddr == 0)
-		return (ENOMEM);
-
-	gva = sc->bar1.next_gva;
-	sc->bar1.next_gva += NVKM_GMMU_PT_PAGE_SIZE;
-
-	err = nvkm_gsp_bar1_map_vram(sc, gva, paddr);
+	err = nvkm_gsp_bar1_alloc_gva(&sc->bar1, &gva);
 	if (err != 0)
 		return (err);
+
+	paddr = nvkm_gsp_vram_alloc_kind(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, kind, owner);
+	if (paddr == 0) {
+		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+		return (ENOMEM);
+	}
+
+	err = nvkm_gsp_bar1_map_vram(sc, gva, paddr);
+	if (err != 0) {
+		nvkm_gsp_vram_free_kind(sc, paddr, kind, owner);
+		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+		return (err);
+	}
 	nvkm_gsp_bar1_flush(sc);
 
 	page->vram_paddr = paddr;
@@ -395,6 +463,8 @@ nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 	if (page->vram_paddr != 0)
 		nvkm_gsp_vram_free_kind(sc, page->vram_paddr, page->kind,
 		    page->owner);
+	if (page->bar1_gva != 0)
+		nvkm_gsp_bar1_free_gva(&sc->bar1, page->bar1_gva);
 	page->vram_paddr = 0;
 	page->bar1_gva   = 0;
 	page->kind = NVKM_VRAM_UNKNOWN;
