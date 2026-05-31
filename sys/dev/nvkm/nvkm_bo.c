@@ -126,12 +126,13 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		 *   allocation metadata can prove this is GEM-owned backing
 		 *   from a reclaimable GEM arena.
 		 */
-		bo->paddr = nvkm_gsp_vram_alloc_kind(sc, size, PAGE_SIZE,
+		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size, PAGE_SIZE,
 		    NVKM_VRAM_GEM, bo);
-		if (bo->paddr == 0) {
+		if (bo->vram_alloc == NULL) {
 			kfree(bo);
 			return (NULL);
 		}
+		bo->paddr = bo->vram_alloc->paddr;
 		bo->domain = NOUVEAU_GEM_DOMAIN_VRAM;
 	} else {
 		kva = (void *)kmem_alloc(kernel_map, size, VM_SUBSYS_DRM_GEM);
@@ -167,11 +168,10 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 		kmem_free(kernel_map, (vm_offset_t)bo->kva, obj->size);
 		bo->kva = NULL;
 	}
-	/* Pure VRAM BO backing is intentionally not freed yet. The current
-	 * allocator also owns internal RM-visible VRAM objects, so a future free
-	 * path must first prove kind=GEM_VRAM, owner=bo, no active borrows, and
-	 * membership in the GEM reclaimable arena.
-	 */
+	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) &&
+	    bo->vram_alloc != NULL)
+		nvkm_gsp_vram_free_gem(sc, bo->vram_alloc, bo);
+
 	drm_gem_object_release(obj);
 	kfree(bo);
 }

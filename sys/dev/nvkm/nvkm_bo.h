@@ -48,6 +48,7 @@ struct drm_nouveau_gem_cpu_fini {
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
 	void			*kva;		/* page-aligned system-memory KVA */
+	struct nvkm_vram_alloc	*vram_alloc;	/* owned GEM VRAM allocation */
 	uint64_t		paddr;		/* first system paddr or VRAM physical start */
 	uint32_t		domain;
 	uint32_t		tile_mode;
