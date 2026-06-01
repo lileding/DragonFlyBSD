@@ -270,6 +270,28 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "signal_error_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_error_count);
 
+	sbuf_cat(&sb, "\ngsp_events\n");
+	sbuf_printf(&sb, "post_event_count = %llu\n",
+	    (unsigned long long)sc->gsp_post_event_count);
+	sbuf_printf(&sb, "post_event_short_count = %llu\n",
+	    (unsigned long long)sc->gsp_post_event_short_count);
+	sbuf_printf(&sb, "post_event_bad_size_count = %llu\n",
+	    (unsigned long long)sc->gsp_post_event_bad_size_count);
+	sbuf_printf(&sb, "post_event_unhandled_count = %llu\n",
+	    (unsigned long long)sc->gsp_post_event_unhandled_count);
+	sbuf_printf(&sb, "post_event_last_client = 0x%08x\n",
+	    sc->gsp_post_event_last_client);
+	sbuf_printf(&sb, "post_event_last_event = 0x%08x\n",
+	    sc->gsp_post_event_last_event);
+	sbuf_printf(&sb, "post_event_last_notify_index = %u\n",
+	    sc->gsp_post_event_last_notify_index);
+	sbuf_printf(&sb, "post_event_last_data = 0x%08x\n",
+	    sc->gsp_post_event_last_data);
+	sbuf_printf(&sb, "post_event_last_status = 0x%08x\n",
+	    sc->gsp_post_event_last_status);
+	sbuf_printf(&sb, "post_event_last_data_size = %u\n",
+	    sc->gsp_post_event_last_data_size);
+
 	sbuf_cat(&sb, "\nreservation\n");
 	sbuf_printf(&sb, "bo_wait_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_count);
