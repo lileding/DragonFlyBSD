@@ -18,6 +18,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_syncobj.h>
 #include <linux/dma-fence.h>
+#include <linux/ktime.h>
 #include <linux/slab.h>
 #include <machine/pmap.h>
 
@@ -86,6 +87,21 @@ static struct drm_driver nvkm_drm_driver = {
 	.gem_vm_ops = &nvkm_gem_pager_ops,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
 };
+
+static uint64_t
+nvkm_drm_profile_now_us(void)
+{
+	return ((uint64_t)ktime_to_us(ktime_get()));
+}
+
+static void
+nvkm_drm_profile_add_us(uint64_t *total, uint64_t start_us)
+{
+	uint64_t end_us = nvkm_drm_profile_now_us();
+
+	if (end_us >= start_us)
+		*total += end_us - start_us;
+}
 
 struct nvkm_drm_vm_binding {
 	LIST_ENTRY(nvkm_drm_vm_binding) link;
@@ -203,17 +219,21 @@ nvkm_drm_flush_cpu_vm_bindings(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile)
 {
 	struct nvkm_drm_vm_binding *binding;
+	uint32_t scanned = 0;
 	uint32_t flushed = 0;
 
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 
+		scanned++;
 		if (bo->kva == NULL)
 			continue;
 		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
 		    (vm_offset_t)bo->kva + binding->obj->size);
 		flushed++;
 	}
+	sc->exec_profile_cpu_bind_scanned += scanned;
+	sc->exec_profile_cpu_bind_flushed += flushed;
 	if (flushed != 0)
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC flushed %u CPU VM bindings\n", flushed);
@@ -1456,6 +1476,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1;
 	uint32_t put, payload;
+	uint64_t profile_start;
+	uint64_t profile_push_start = 0;
 	int err = 0;
 
 	if (nfile == NULL)
@@ -1478,18 +1500,30 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    req->channel, chan);
 		return (-ENXIO);
 	}
+	profile_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
 	    req->wait_ptr);
+	nvkm_drm_profile_add_us(&sc->exec_profile_wait_sync_us,
+	    profile_start);
 	if (err != 0)
 		return (err);
 	if (req->push_count == 0) {
 		sc->exec_signal_only_count++;
+		profile_start = nvkm_drm_profile_now_us();
 		lwkt_gettoken(&sc->gsp_tok);
+		nvkm_drm_profile_add_us(&sc->exec_profile_token_wait_us,
+		    profile_start);
+		profile_start = nvkm_drm_profile_now_us();
 		err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv,
 		    req->sig_count, req->sig_ptr, &signals);
+		nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
+		    profile_start);
 		if (err == 0)
 			nvkm_drm_exec_signals_signal(signals, req->sig_count, 0);
+		profile_start = nvkm_drm_profile_now_us();
 		nvkm_drm_exec_signals_put(signals, req->sig_count);
+		nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us,
+		    profile_start);
 		lwkt_reltoken(&sc->gsp_tok);
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC signal-only channel=%u sigs=%u err=%d\n",
@@ -1514,7 +1548,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		return (-EFAULT);
 	}
 
+	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&sc->gsp_tok);
+	nvkm_drm_profile_add_us(&sc->exec_profile_token_wait_us,
+	    profile_start);
+	profile_push_start = nvkm_drm_profile_now_us();
 	gpf = (uint32_t *)chan->submit_gpf.kva;
 	post = (uint32_t *)chan->submit_push.kva;
 	sema = (uint32_t *)chan->submit_sema.kva;
@@ -1569,6 +1607,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		gpf[put * 2 + 1] = entry1;
 		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
 	}
+	sc->exec_profile_pushes += req->push_count;
 
 	post[0] = NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET;
 	post[1] = (uint32_t)(chan->submit_gva_sema & 0xffffffffu);
@@ -1588,9 +1627,14 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	gpf[put * 2 + 1] = (uint32_t)((chan->submit_gva_push >> 32) & 0xffu) |
 	    (NVKM_DRM_POST_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 	put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	nvkm_drm_profile_add_us(&sc->exec_profile_push_build_us,
+	    profile_push_start);
 
+	profile_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
 	    req->sig_ptr, &signals);
+	nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
+	    profile_start);
 	if (err != 0)
 		goto out_unlock;
 	if (signals != NULL && req->sig_count != 0) {
@@ -1604,9 +1648,16 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		}
 		sc->exec_internal_fence_count++;
 	}
+	profile_start = nvkm_drm_profile_now_us();
 	nvkm_drm_exec_attach_reservations(sc, nfile, exec_fence);
+	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
+	    profile_start);
 
+	profile_start = nvkm_drm_profile_now_us();
 	nvkm_drm_flush_cpu_vm_bindings(sc, nfile);
+	nvkm_drm_profile_add_us(&sc->exec_profile_flush_cpu_us,
+	    profile_start);
+	profile_start = nvkm_drm_profile_now_us();
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_gpf.kva,
 	    (vm_offset_t)chan->submit_gpf.kva + 0x1000);
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_push.kva,
@@ -1614,17 +1665,25 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_sema.kva,
 	    (vm_offset_t)chan->submit_sema.kva + 0x1000);
 	cpu_sfence();
+	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
+	    profile_start);
+	profile_start = nvkm_drm_profile_now_us();
 	nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, put);
 	cpu_sfence();
 	(void)nvkm_gsp_bar1_rd32(sc, slot_bar1 + 0);
 	nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
 	cpu_sfence();
+	nvkm_drm_profile_add_us(&sc->exec_profile_doorbell_us,
+	    profile_start);
 
+	profile_start = nvkm_drm_profile_now_us();
 	for (int us = 0; us < NVKM_DRM_EXEC_POLL_US; us += 10) {
+		sc->exec_profile_poll_iters++;
 		if (*(volatile uint32_t *)sema == payload)
 			break;
 		DELAY(10);
 	}
+	nvkm_drm_profile_add_us(&sc->exec_profile_poll_us, profile_start);
 	if (*(volatile uint32_t *)sema != payload) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC timeout channel=%u pushes=%u put=%u sema=0x%08x want=0x%08x get=0x%08x\n",
@@ -1645,6 +1704,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    payload);
 
 out_unlock:
+	profile_start = nvkm_drm_profile_now_us();
 	if (signals != NULL) {
 		nvkm_drm_exec_signals_signal(signals, req->sig_count, err);
 		nvkm_drm_exec_signals_put(signals, req->sig_count);
@@ -1654,6 +1714,7 @@ out_unlock:
 		(void)dma_fence_signal(exec_fence);
 		dma_fence_put(exec_fence);
 	}
+	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
 	if (err != 0)
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC return channel=%u err=%d\n",
