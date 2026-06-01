@@ -246,6 +246,17 @@ nvkm_drm_vm_bindings_reclaim_hidden(struct nvkm_softc *sc,
 	return (0);
 }
 
+int
+nvkm_drm_reclaim_hidden_bindings(struct nvkm_softc *sc,
+    struct drm_file *file_priv)
+{
+	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+
+	if (nfile == NULL)
+		return (0);
+	return (nvkm_drm_vm_bindings_reclaim_hidden(sc, nfile));
+}
+
 static int
 nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
     uint64_t size, struct drm_gem_object *obj)
