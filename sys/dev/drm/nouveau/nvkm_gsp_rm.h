@@ -257,6 +257,7 @@ struct nvkm_gsp_chan {
 	uint32_t		gsp_token;	/* GSP-issued doorbell token */
 	uint32_t		gpf_put;	/* software GP_PUT for submit_gpf ring */
 	uint32_t		submit_post_slot;	/* next EXEC post/sema ring slot */
+	uint64_t		submit_post_slots_busy;	/* active EXEC post/sema slots */
 	struct nvkm_gsp_object	ce_obj;	/* TURING_DMA_COPY_A engine obj */
 	struct nvkm_gsp_object	usermode_obj;	/* TURING_USERMODE_A */
 	uint64_t		submit_gva_push;
