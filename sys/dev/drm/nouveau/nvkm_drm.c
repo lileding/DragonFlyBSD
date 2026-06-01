@@ -219,17 +219,22 @@ nvkm_drm_flush_cpu_vm_bindings(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile)
 {
 	struct nvkm_drm_vm_binding *binding;
+	uint64_t flush_seq;
 	uint32_t scanned = 0;
 	uint32_t flushed = 0;
 
+	flush_seq = ++sc->exec_cpu_flush_seq;
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 
 		scanned++;
 		if (bo->kva == NULL)
 			continue;
+		if (bo->cpu_flush_seq == flush_seq)
+			continue;
 		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
 		    (vm_offset_t)bo->kva + binding->obj->size);
+		bo->cpu_flush_seq = flush_seq;
 		flushed++;
 	}
 	sc->exec_profile_cpu_bind_scanned += scanned;
