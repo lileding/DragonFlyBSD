@@ -26,14 +26,14 @@ nvkm_fw_init(struct nvkm_softc *sc)
 
 	fw = firmware_get(NVKM_FW_BOOTER_LOAD_TU102_570);
 	if (fw == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "fw: cannot load \"%s\" (module nvkm_fw_tu102_570 absent?)\n",
 		    NVKM_FW_BOOTER_LOAD_TU102_570);
 		return (ENOENT);
 	}
 
 	sc->fw_booter_load = fw;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "fw: %s loaded, %zu bytes, version %u, first 8: "
 	    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
 	    NVKM_FW_BOOTER_LOAD_TU102_570,

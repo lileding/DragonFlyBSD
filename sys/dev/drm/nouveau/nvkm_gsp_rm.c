@@ -83,7 +83,7 @@ nvkm_vram_record_alloc(struct nvkm_softc *sc, uint64_t paddr, uint64_t size,
 		alloc->owner = owner;
 		alloc->free = false;
 	} else {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: VRAM metadata alloc failed kind=%s paddr=0x%llx size=0x%llx\n",
 		    nvkm_vram_kind_name(kind), (unsigned long long)paddr,
 		    (unsigned long long)size);
@@ -153,7 +153,7 @@ nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params)
 
 #if NVKM_GSP_DEBUG_RM_ALLOC
 	if (h_class == 0x0000c597U) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: RM_ALLOC envelope cls=0x%x client=0x%x "
 		    "parent=0x%x object=0x%x paramsSize=%u flags=0x%x "
 		    "expected_repc=%u\n",
@@ -172,7 +172,7 @@ nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params)
 		return (EIO);
 
 	if (rep->status != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: ALLOC cls=0x%x obj=0x%x parent=0x%x failed status=0x%x\n",
 		    h_class, h_object, h_parent, rep->status);
 		ret = EIO;
@@ -250,7 +250,7 @@ nvkm_gsp_rm_ctrl_rd(struct nvkm_gsp_object *obj, void **params, uint32_t repc)
 	}
 
 	if (rep->status != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: CONTROL cmd=0x%x obj=0x%x failed status=0x%x\n",
 		    rpc->cmd, rpc->hObject, rep->status);
 		ret = EIO;
@@ -319,12 +319,12 @@ nvkm_gsp_client_ctor(struct nvkm_softc *sc, uint32_t handle,
 
 	err = nvkm_gsp_rm_alloc_wr(&client->object, args);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: client_ctor(handle=0x%x) failed err=%d\n",
 		    handle, err);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: client root allocated handle=0x%x\n", handle);
 	return (0);
 }
@@ -483,7 +483,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 	q = p;
 	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
 	if (err != 0 || q == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE failed err=%d\n", err);
 		return (err ? err : EIO);
 	}
@@ -493,7 +493,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 			0x00031c80u, 0, 0, 0, 0x0c000000u, 0, 0, 0,
 		};
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE tableLen=%u\n",
 		    r->tableLen);
 		for (uint32_t i = 0; i < r->tableLen &&
@@ -503,7 +503,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 				r->table[i].vectorNonStall,
 			};
 
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
 			    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
 			    r->table[i].vectorStall, r->table[i].vectorNonStall);
@@ -529,7 +529,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 				nvkm_wr32(sc, 0xb81200u + leaf * 4u,
 				    leaf_mask[leaf]);
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: intr_allow table leaf[0]=0x%08x leaf[1]=0x%08x "
 		    "leaf[2]=0x%08x leaf[3]=0x%08x leaf[4]=0x%08x\n",
 		    leaf_mask[0], leaf_mask[1], leaf_mask[2], leaf_mask[3],
@@ -539,7 +539,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		 * Fedora has this set; we missed it. Without TOP enable, LEAF intrs
 		 * pend but never propagate to CPU/PBDMA scheduler ack path. */
 		nvkm_wr32(sc, 0xb81608u, 0x0000000fu);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: INTR_TOP_EN_SET[0] = 0xf (was 0)\n");
 	}
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
@@ -547,7 +547,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 	/* Pair with the hardware enable nouveau does immediately after
 	 * (r535/gsp.c:319). BAR0+0x110004 = 0x40 -- specific GSP intr line. */
 	nvkm_wr32(sc, 0x00110004u, 0x00000040u);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: enabled GSP intr (BAR0+0x110004 = 0x40)\n");
 	return (0);
 }
@@ -562,7 +562,7 @@ nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc)
 	int err;
 
 	if (sc->gsp_internal_subdevice == 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: no internal subdevice handle\n");
 		return (ENXIO);
 	}
@@ -584,7 +584,7 @@ nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc)
 	q = p;
 	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
 	if (err != 0 || q == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: CE_GET_FAULT_METHOD_BUFFER_SIZE failed err=%d\n",
 		    err);
 		return (err ? err : EIO);
@@ -592,7 +592,7 @@ nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc)
 	sc->mthdbuf_size = ((struct NV2080_CTRL_CE_GET_FAULT_METHOD_BUFFER_SIZE_PARAMS *)q)->size;
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: CE mthdbuf_size = 0x%x\n", sc->mthdbuf_size);
 	return (0);
 }
@@ -645,11 +645,11 @@ nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	dargs->hClientShare = client->object.handle;
 	err = nvkm_gsp_rm_alloc_wr(&device->object, dargs);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: NV01_DEVICE alloc failed err=%d\n", err);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: NV01_DEVICE_0 handle=0x%x ok\n", device->object.handle);
 
 	sargs = nvkm_gsp_rm_alloc_get(&device->object,
@@ -662,12 +662,12 @@ nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	sargs->subDeviceId = 0;
 	err = nvkm_gsp_rm_alloc_wr(&device->subdevice, sargs);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: NV20_SUBDEVICE alloc failed err=%d\n", err);
 		nvkm_gsp_rm_free(&device->object);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: NV20_SUBDEVICE_0 handle=0x%x ok\n",
 	    device->subdevice.handle);
 	return (0);
@@ -707,11 +707,11 @@ nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 	 * NV90F1_CTRL_VASPACE_COPY_SERVER_RESERVED_PDES — TODO. */
 	err = nvkm_gsp_rm_alloc_wr(&vas->object, args);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: FERMI_VASPACE_A alloc failed err=%d\n", err);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: FERMI_VASPACE_A handle=0x%x ok\n", vas->object.handle);
 	return (0);
 }
@@ -779,13 +779,13 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 
 	base = sc->fb_usable_base;
 	size = sc->fb_usable_size;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: vram_init: sc->fb_usable_base=0x%llx size=0x%llx mthdbuf=0x%x\n",
 	    (unsigned long long)sc->fb_usable_base,
 	    (unsigned long long)sc->fb_usable_size,
 	    sc->mthdbuf_size);
 	if (size == 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: usable VRAM region unknown (static_info parse failed)\n");
 		return (ENXIO);
 	}
@@ -806,7 +806,7 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	TAILQ_INIT(&sc->vram_allocs);
 	memset(sc->vram_alloc_bytes, 0, sizeof(sc->vram_alloc_bytes));
 	memset(sc->vram_alloc_count, 0, sizeof(sc->vram_alloc_count));
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM drm_mm window 0x%llx..0x%llx\n",
 	    (unsigned long long)sc->vram_bump_base,
 	    (unsigned long long)sc->vram_bump_limit);
@@ -834,7 +834,7 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 	    DRM_MM_INSERT_HIGH);
 	if (err != 0) {
 		lockmgr(&sc->vram_lock, LK_RELEASE);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: VRAM drm_mm alloc exhausted kind=%s need=0x%llx align=0x%llx err=%d\n",
 		    nvkm_vram_kind_name(kind), (unsigned long long)size,
 		    (unsigned long long)align, err);
@@ -846,7 +846,7 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 	sc->vram_alloc_bytes[alloc->kind] += alloc->size;
 	sc->vram_alloc_count[alloc->kind]++;
 	lockmgr(&sc->vram_lock, LK_RELEASE);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM alloc kind=%s paddr=0x%llx size=0x%llx align=0x%llx owner=%p count=%u bytes=0x%llx\n",
 	    nvkm_vram_kind_name(alloc->kind),
 	    (unsigned long long)alloc->paddr,
@@ -855,7 +855,7 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 	    sc->vram_alloc_count[alloc->kind],
 	    (unsigned long long)sc->vram_alloc_bytes[alloc->kind]);
 #ifdef NVKM_DEBUG_VRAM_ALLOC
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM alloc 0x%llx (size 0x%llx)\n",
 	    (unsigned long long)alloc->paddr, (unsigned long long)size);
 #endif
@@ -881,7 +881,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
 	if (alloc->kind != NVKM_VRAM_GEM || alloc->owner != owner) {
 		lockmgr(&sc->vram_lock, LK_RELEASE);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: reject VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p expect=%p\n",
 		    nvkm_vram_kind_name(alloc->kind),
 		    (unsigned long long)alloc->paddr,
@@ -890,7 +890,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	}
 	if (alloc->free) {
 		lockmgr(&sc->vram_lock, LK_RELEASE);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: reject duplicate VRAM free paddr=0x%llx size=0x%llx owner=%p\n",
 		    (unsigned long long)alloc->paddr,
 		    (unsigned long long)alloc->size, owner);
@@ -904,7 +904,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
 	sc->vram_alloc_count[alloc->kind]--;
 	lockmgr(&sc->vram_lock, LK_RELEASE);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
 	    (unsigned long long)alloc->size, owner);
@@ -942,7 +942,7 @@ nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
 	sc->vram_alloc_count[alloc->kind]--;
 	lockmgr(&sc->vram_lock, LK_RELEASE);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p\n",
 	    kind_name, (unsigned long long)paddr, (unsigned long long)size,
 	    owner);
@@ -992,12 +992,12 @@ nvkm_gsp_chgrp_ctor(struct nvkm_gsp_device *device,
 
 	err = nvkm_gsp_rm_alloc_wr(&grp->object, args);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: KEPLER_CHANNEL_GROUP_A engineType=0x%x failed err=%d\n",
 		    engine_type, err);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: KEPLER_CHANNEL_GROUP_A handle=0x%x engineType=0x%x ok\n",
 	    grp->object.handle, engine_type);
 	return (0);
@@ -1186,7 +1186,7 @@ nvkm_gsp_sched_trace(struct nvkm_softc *sc, const char *tag,
 	rl_num = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
 	rl_status = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: SCHED_TRACE %-18s chid=%u runlist=%u "
 	    "PCCSR_INST=0x%08x(bind=%u ptr=0x%x target=%u) "
 	    "PCCSR_CHANNEL=0x%08x(enable=%u busy=%u) "
@@ -1216,7 +1216,7 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 	nvkm_gsp_bar1_flush(sc);
 
 #ifdef NVKM_DEBUG_USERD_CLEAR
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: USERD clear before schedule slot=0x%llx "
 	    "GP_GET=0x%08x GP_PUT=0x%08x\n",
 	    (unsigned long long)slot_bar1,
@@ -1309,7 +1309,7 @@ nvkm_gsp_chan_rm_alloc(struct nvkm_gsp_vmm *vmm, struct nvkm_gsp_chan *chan,
 
 	err = nvkm_gsp_rm_alloc_wr(&chan->object, args);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: TURING_CHANNEL_GPFIFO_A alloc failed err=%d "
 		    "handle=0x%x chid=%d inst=0x%llx userd=0x%llx "
 		    "mthdbuf=0x%llx gpfifo=0x%llx/0x%x\n",
@@ -1345,7 +1345,7 @@ nvkm_gsp_golden_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_size = mthdbuf_size;
 	nvkm_gsp_zero_vram(sc, chan->inst_vram, 0x12000);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: GR oneinit golden inst=0x%llx userd=0x%llx "
 	    "mthdbuf=0x%llx size=0x%x handle=0x%x chid=%d\n",
 	    (unsigned long long)chan->inst_vram,
@@ -1394,7 +1394,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->userd_vram = nvkm_gsp_vram_alloc_kind(sc,
 	    (uint64_t)(userd_page + 1u) * 0x1000U, 0x1000,
 	    NVKM_VRAM_CHANNEL_USERD, chan);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: chan->inst_vram=0x%llx chan->userd_vram=0x%llx (alloc\'d)\n",
 	    (unsigned long long)chan->inst_vram,
 	    (unsigned long long)chan->userd_vram);
@@ -1409,7 +1409,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		(void)nvkm_gsp_bar1_map_vram(sc, chan->inst_bar1_gva, chan->inst_vram);
 		nvkm_gsp_bar1_flush(sc);
 		nvkm_gsp_bar1_invalidate(sc);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: inst mapped to BAR1 GVA 0x%llx (paddr 0x%llx)\n",
 		    (unsigned long long)chan->inst_bar1_gva,
 		    (unsigned long long)chan->inst_vram);
@@ -1418,7 +1418,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		for (uint32_t off = 0; off < 0x1000; off += 4)
 			nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + off, 0);
 		nvkm_gsp_bar1_flush(sc);
-		device_printf(sc->dev, "gsp_rm: chan inst block zeroed via BAR1\n");
+		nvkm_debugf(sc->dev, "gsp_rm: chan inst block zeroed via BAR1\n");
 
 		/* PRE-FILL inst[0x200/0x204] with PD3 PDB in NV_RAMIN format. */
 		uint64_t pdb_paddr = vmm->pt[0].page.vram_paddr;
@@ -1430,12 +1430,12 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + 0x200, pdb_lo);
 		nvkm_gsp_bar1_wr32(sc, chan->inst_bar1_gva + 0x204, pdb_hi);
 		nvkm_gsp_bar1_flush(sc);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: PRE-FILL chan inst[0x200]=0x%08x [0x204]=0x%08x via BAR1 (PDB=0x%llx)\n",
 		    pdb_lo, pdb_hi, (unsigned long long)pdb_paddr);
 	}
 	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: channel VRAM alloc failed\n");
 		return (ENOMEM);
 	}
@@ -1445,7 +1445,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_kva = contigmalloc(mthdbuf_sz, M_NVKM_MTHDBUF,
 	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
 	if (chan->mthdbuf_kva == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: mthdbuf contigmalloc failed\n");
 		return (ENOMEM);
 	}
@@ -1465,7 +1465,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
 		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_lpt,
 		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan))) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: chan submit page alloc failed err=%d\n", err);
 			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 			    M_NVKM_MTHDBUF);
@@ -1481,14 +1481,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
 		if (chan->submit_push.kva == NULL || chan->submit_gpf.kva == NULL ||
 		    chan->submit_sema.kva == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: sysmem submit BO alloc failed\n");
 			return (ENOMEM);
 		}
 		chan->submit_push.paddr = vtophys(chan->submit_push.kva);
 		chan->submit_gpf.paddr  = vtophys(chan->submit_gpf.kva);
 		chan->submit_sema.paddr = vtophys(chan->submit_sema.kva);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: sysmem BOs push=0x%llx gpf=0x%llx sema=0x%llx\n",
 		    (unsigned long long)chan->submit_push.paddr,
 		    (unsigned long long)chan->submit_gpf.paddr,
@@ -1535,11 +1535,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		uint64_t rb_pd0_big = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8);
 		uint64_t rb_pd0_small = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8);
 		uint64_t rb_spt0 = nvkm_gsp_bar1_rd64(sc, chan->submit_spt.bar1_gva + spt_idx * 8);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: PT readback: PD3[0]=0x%016llx PD2[0]=0x%016llx PD1[%u]=0x%016llx\n",
 		    (unsigned long long)rb_pd3, (unsigned long long)rb_pd2,
 		    pd1_idx, (unsigned long long)rb_pd1);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: PT readback: PD0[%u].BIG=0x%016llx .SMALL=0x%016llx SPT[%u]=0x%016llx\n",
 		    pd0_idx, (unsigned long long)rb_pd0_big,
 		    (unsigned long long)rb_pd0_small,
@@ -1552,7 +1552,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x200, &pramin_pdb);
 			/* inst already mapped to BAR1 in chan_ctor early; reuse */
 			uint64_t inst_bar1_gva = chan->inst_bar1_gva;
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: DIAG inst_bar1_gva=0x%llx mapping to vram=0x%llx (bar1 SPT=0x%llx idx=%llu)\n",
 			    (unsigned long long)inst_bar1_gva,
 			    (unsigned long long)chan->inst_vram,
@@ -1566,18 +1566,18 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			for (uint64_t si = 7; si < 12; si++) {
 				uint64_t spte = 0;
 				(void)nvkm_gsp_pramin_rd64(sc, sc->bar1.spt_paddr + si*8, &spte);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: POST-MAP BAR1_SPT[%llu] = 0x%016llx\n",
 				    (unsigned long long)si, (unsigned long long)spte);
 			}
 			bar1_pdb = nvkm_gsp_bar1_rd64(sc, inst_bar1_gva + 0x200);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: chan inst[0x200] PRAMIN=0x%016llx BAR1=0x%016llx (our PD3 paddr=0x%llx)\n",
 			    (unsigned long long)pramin_pdb,
 			    (unsigned long long)bar1_pdb,
 			    (unsigned long long)vmm->pt[0].page.vram_paddr);
 			/* Dump first 64 bytes of inst block via BAR1 */
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: chan inst[0..0x40] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  0),
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  4),
@@ -1587,7 +1587,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 20),
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 24),
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 28));
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: chan inst[0x200..0x220] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x200),
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x204),
@@ -1601,7 +1601,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			 * = byte offset 0x2a0/0x2a4 (subcontext 0). bits: target[1:0],
 			 * vol[2], fault_replay_tex[4], fault_replay_gcc[5], lo[31:12]
 			 * in dword 0x2a0; hi[31:0] in dword 0x2a4. */
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: chan inst[0x2a0..0x2c0] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0),
 			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4),
@@ -1620,15 +1620,15 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 				for (uint32_t off = 0; off < 0x1000; off += 4) {
 					uint32_t v = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + off);
 					if (v != 0) {
-						device_printf(sc->dev,
+						nvkm_debugf(sc->dev,
 						    "gsp_rm: inst[0x%03x] = 0x%08x\n", off, v);
 						nz_count++;
 						if (nz_count > 20) break;
 					}
 				}
-				device_printf(sc->dev, "gsp_rm: total non-zero inst dwords: %u\n", nz_count);
+				nvkm_debugf(sc->dev, "gsp_rm: total non-zero inst dwords: %u\n", nz_count);
 			}
-						device_printf(sc->dev,
+						nvkm_debugf(sc->dev,
 			    "gsp_rm: SC0 PDB target=%u vol=%u pdb_paddr=0x%llx (our PD3=0x%llx)\n",
 			    sc0_lo & 3u, (sc0_lo >> 2) & 1u,
 			    (unsigned long long)sc0_pdb,
@@ -1636,7 +1636,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 		}
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: expected: PD3[0]=0x%llx (PD2 paddr) PD2[0]=0x%llx (PD1 paddr) PD1[%u]=0x%llx (PD0 paddr) PD0.SMALL=0x%llx (SPT paddr) SPT[0]=0x%llx (push paddr)\n",
 		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[1].page.vram_paddr),
 		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[2].page.vram_paddr),
@@ -1644,14 +1644,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)nvkm_pde_to_vram(chan->submit_spt.vram_paddr),
 		    (unsigned long long)nvkm_pte_to_sysmem(chan->submit_push.paddr));
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: submit PT (VRAM via BAR1): PD0 vram=0x%llx bar1=0x%llx "
 		    "SPT vram=0x%llx bar1=0x%llx\n",
 		    (unsigned long long)chan->submit_pd0.vram_paddr,
 		    (unsigned long long)chan->submit_pd0.bar1_gva,
 		    (unsigned long long)chan->submit_spt.vram_paddr,
 		    (unsigned long long)chan->submit_spt.bar1_gva);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: BOs push vram=0x%llx bar1=0x%llx gpf vram=0x%llx bar1=0x%llx sema vram=0x%llx bar1=0x%llx\n",
 		    (unsigned long long)chan->submit_push.paddr,
 		    (unsigned long long)(uintptr_t)chan->submit_push.kva,
@@ -1692,7 +1692,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0xCAFEBABEu);
 		nvkm_gsp_bar1_flush(sc);
 		uint32_t rb = nvkm_gsp_bar1_rd32(sc, chan->userd_bar2_gva + 0x10);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "bar1_diag: USERD page via BAR1 GVA 0x%llx+0x10 readback = 0x%08x (expect cafebabe)\n",
 		    (unsigned long long)chan->userd_bar2_gva, rb);
 		nvkm_gsp_bar1_wr32(sc, chan->userd_bar2_gva + 0x10, 0);
@@ -1726,14 +1726,14 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    /* NVA06F_CTRL_CMD_BIND */ 0xa06f0104u,
 		    sizeof(*bind));
 		if (bind == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: BIND ctrl_get failed\n");
 			return (ENOMEM);
 		}
 		bind->engineType = engine_type;
 		err = nvkm_gsp_rm_ctrl_wr(&chan->object, bind);
 		if (err != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: NVA06F_BIND engine=0x%x failed err=%d\n",
 			    engine_type, err);
 				return (err);
@@ -1747,13 +1747,13 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		struct { uint32_t workSubmitToken; } *t;
 		t = nvkm_gsp_rm_ctrl_get(&chan->object, 0xc36f0108u, sizeof(*t));
 		if (t == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: TRACE pre-SCHEDULE token: ctrl_get failed\n");
 		} else {
 			t->workSubmitToken = 0xdeadbeef;
 			int perr = nvkm_gsp_rm_ctrl_rd(&chan->object, (void**)&t,
 			    sizeof(*t));
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 		    "gsp_rm: TRACE pre-SCHEDULE token: err=%d val=0x%08x\n",
 			    perr, t->workSubmitToken);
 		}
@@ -1775,7 +1775,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    /* NVA06F_CTRL_CMD_GPFIFO_SCHEDULE */ 0xa06f0103u,
 		    sizeof(*sched));
 		if (sched == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: SCHEDULE ctrl_get failed\n");
 			return (ENOMEM);
 		}
@@ -1783,7 +1783,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		sched->bSkipSubmit = 0;
 		err = nvkm_gsp_rm_ctrl_wr(&chan->object, sched);
 		if (err != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: NVA06F_GPFIFO_SCHEDULE failed err=%d\n",
 			    err);
 				return (err);
@@ -1806,7 +1806,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    /* TURING_DMA_COPY_A */ 0x0000c5b5u,
 		    sizeof(*args), &chan->ce_obj);
 		if (args == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: CE alloc_get failed\n");
 			return (ENOMEM);
 		}
@@ -1814,17 +1814,17 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		args->engineType = engine_type;
 		err = nvkm_gsp_rm_alloc_wr(&chan->ce_obj, args);
 		if (err != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: TURING_DMA_COPY_A alloc failed err=%d\n",
 			    err);
 			memset(&chan->ce_obj, 0, sizeof(chan->ce_obj));
 			return (err);
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: TURING_DMA_COPY_A handle=0x%x on channel=0x%x ok\n",
 		    chan->ce_obj.handle, chan->object.handle);
 	} else {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: SKIP engine class alloc (engine_type=0x%x is not CE)\n",
 			    engine_type);
 		}
@@ -1836,11 +1836,11 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		int qerr = nvkm_gsp_query_ce0_runlist(sc, &runl);
 		if (qerr == 0) {
 			uint32_t token = (runl << 16) | (uint32_t)chan->chid;
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: CE0 runlist=%u chid=%d doorbell_token=0x%08x\n",
 			    runl, chan->chid, token);
 		} else {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: runlist query failed err=%d\n", qerr);
 		}
 	}
@@ -1854,19 +1854,19 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    /* NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN */ 0xc36f0108u,
 		    sizeof(*t));
 		if (t == NULL) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: GET_WORK_SUBMIT_TOKEN ctrl_get failed\n");
 		} else {
 			t->workSubmitToken = 0xdeadbeef;
 			int werr = nvkm_gsp_rm_ctrl_rd(&chan->object, (void**)&t,
 			    sizeof(*t));
 			if (werr != 0) {
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: TRACE post-SCHEDULE token: err=%d "
 				    "(channel not on runlist?)\n", werr);
 			} else {
 				chan->gsp_token = t->workSubmitToken;
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: workSubmitToken=0x%08x\n",
 				    chan->gsp_token);
 				}
@@ -1874,7 +1874,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 		nvkm_gsp_sched_trace(sc, "after-token", chan, engine_type);
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 	    "gsp_rm: TURING_CHANNEL_GPFIFO_A handle=0x%x engine=0x%x bound+scheduled+CE\n",
 	    chan->object.handle, engine_type);
 
@@ -1903,7 +1903,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		uint32_t b_hi = nvkm_rd32(sc, 0x002b04 + runl_id * 0x10);
 		uint32_t num_pre  = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
 		uint32_t stat_pre = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: HAIL MARY pre-write RUNLIST[%u]: BASE=%08x:%08x NUM=0x%08x STATUS=0x%08x\n",
 		    runl_id, b_hi, b_lo, num_pre, stat_pre);
 
@@ -1913,7 +1913,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 			DELAY(10000);
 			uint32_t num_post  = nvkm_rd32(sc, 0x002b08 + runl_id * 0x10);
 			uint32_t stat_post = nvkm_rd32(sc, 0x002b0c + runl_id * 0x10);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: HAIL MARY wrote NUM=4 → post NUM=0x%08x STATUS=0x%08x\n",
 			    num_post, stat_post);
 		}
@@ -1965,10 +1965,10 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 
 	sema_w[0] = 0;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: push[0..5]= %08x %08x %08x %08x %08x %08x\n",
 	    push_w[0], push_w[1], push_w[2], push_w[3], push_w[4], push_w[5]);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: gpf[0..1]= %08x %08x  sema=%08x\n",
 	    gpf_w[0], gpf_w[1], sema_w[0]);
 
@@ -1992,7 +1992,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	uint32_t flush_rb = nvkm_gsp_bar1_rd32(sc, slot_bar1 + 0);
 	uint32_t put_rb   = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT);
 	uint32_t get_rb   = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: BAR1 USERD readback flush[0]=0x%08x GP_PUT=0x%08x GP_GET=0x%08x\n",
 	    flush_rb, put_rb, get_rb);
 	(void)saved_pramin;
@@ -2003,7 +2003,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	DELAY(100);
 	uint32_t t1_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
 	uint32_t t1_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: USERMODE TIME %08x:%08x -> %08x:%08x\n",
 	    t0_hi, t0_lo, t1_hi, t1_lo);
 
@@ -2011,7 +2011,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	 * exactly which log bytes (if any) are GSP's response. */
 	uint64_t logrm_put_pre = (sc->gsp_logrm.kva != NULL)
 	    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: pre-doorbell LOGRM put=0x%llx\n",
 	    (unsigned long long)logrm_put_pre);
 
@@ -2021,7 +2021,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	/* Sleep 200ms after SCHEDULE for GSP scheduler to load runlist into
 	 * PBDMA. SCHEDULE returns when GSP-side scheduling decision is made
 	 * but actual PBDMA RUNLIST_BASE write may be deferred. */
-	device_printf(sc->dev, "gsp_submit: 200ms wait for GSP scheduler...\n");
+	nvkm_debugf(sc->dev, "gsp_submit: 200ms wait for GSP scheduler...\n");
 	DELAY(200000);
 
 #ifdef NVKM_DEBUG_SUBMIT_HW
@@ -2029,7 +2029,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		uint32_t um_t0_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
 		uint32_t um_t0_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
 		uint32_t db_rb    = nvkm_rd32(sc, NV_USERMODE_DOORBELL);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_submit: DIAG pre-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
 		    um_t0_hi, um_t0_lo, db_rb);
 
@@ -2045,7 +2045,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			 * chan->inst_vram if GSP allocated its own inst block. */
 			{
 				uint64_t real_inst = ((uint64_t)pccsr_inst & 0x0fffffffull) << 12;
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_submit: DIAG real inst (per PCCSR) = 0x%llx, chan->inst_vram = 0x%llx, %s\n",
 				    (unsigned long long)real_inst,
 				    (unsigned long long)chan->inst_vram,
@@ -2054,7 +2054,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 					lwkt_gettoken(&sc->gsp_tok);
 					uint32_t saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 					nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(real_inst >> 16));
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "gsp_submit: DIAG real-inst[0x000..0x060]: %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x\n",
 					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x00) & 0xffffu)),
 					    nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((real_inst + 0x04) & 0xffffu)),
@@ -2084,7 +2084,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 					lwkt_reltoken(&sc->gsp_tok);
 				}
 			}
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: DIAG PCCSR[chid=%d]: INST=0x%08x (BIND=%u, INST_PTR>>12=0x%x, TARGET=%u) CHANNEL=0x%08x (ENABLE=%u, BUSY=%u)\n",
 			    chan->chid, pccsr_inst,
 			    (pccsr_inst >> 31) & 1u,
@@ -2096,7 +2096,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			/* Also read PCCSR for chid=0 (GSP helper) for comparison. */
 			uint32_t h_inst = nvkm_rd32(sc, 0x00800000 + 0 * 8);
 			uint32_t h_chan = nvkm_rd32(sc, 0x00800004 + 0 * 8);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: DIAG PCCSR[chid=0 GSP-helper]: INST=0x%08x CHANNEL=0x%08x\n",
 			    h_inst, h_chan);
 		}
@@ -2115,7 +2115,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			uint32_t base_hi = nvkm_rd32(sc, 0x002b04 + rl * 0x10);
 			uint32_t num     = nvkm_rd32(sc, 0x002b08 + rl * 0x10);
 			uint32_t status  = nvkm_rd32(sc, 0x002b0c + rl * 0x10);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: DIAG RUNLIST[%u]: BASE=%08x:%08x NUM=0x%08x STATUS=0x%08x\n",
 			    rl, base_hi, base_lo, num, status);
 			/* If BASE looks like a real VRAM paddr (not PRI_BAD, not zero),
@@ -2125,7 +2125,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				/* nouveau encodes BASE as (target<<28) | (addr>>12) on pre-Turing
 				 * but Turing splits lo/hi differently. Try both interpretations. */
 				uint64_t rl_paddr_alt = ((uint64_t)base_hi << 32) | ((uint64_t)base_lo << 12);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_submit:   raw paddr=0x%llx  shifted-lo=0x%llx\n",
 				    (unsigned long long)rl_paddr,
 				    (unsigned long long)rl_paddr_alt);
@@ -2138,7 +2138,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 					for (int k = 0; k < 4; k++)
 						w[k] = nvkm_rd32(sc, NV_PRAMIN +
 						    (uint32_t)((rl_paddr + off + k * 4) & 0xffffu));
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "gsp_submit:   runlist[%u]+0x%02x: %08x %08x %08x %08x\n",
 					    rl, off, w[0], w[1], w[2], w[3]);
 				}
@@ -2149,7 +2149,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 #endif
 	}
 #endif
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: doorbell token=0x%08x\n", chan->gsp_token);
 	/* Use the workSubmitToken GSP gave us. It encodes the runlist/chid
 	 * tuple; raw chid or guessed token writes are diagnostic hail-marys.
@@ -2163,7 +2163,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		uint32_t um_t1_lo = nvkm_rd32(sc, NV_USERMODE_TIME_LO);
 		uint32_t um_t1_hi = nvkm_rd32(sc, NV_USERMODE_TIME_HI);
 		uint32_t db_rb    = nvkm_rd32(sc, NV_USERMODE_DOORBELL);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_submit: DIAG post-doorbell USERMODE_TIME=%08x:%08x DOORBELL_RB=0x%08x\n",
 		    um_t1_hi, um_t1_lo, db_rb);
 	}
@@ -2182,7 +2182,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			for (int k = 0; k < 8; k++)
 				w[k] = nvkm_rd32(sc, NV_PRAMIN
 				    + (uint32_t)((chan->inst_vram + off + k * 4) & 0xffffu));
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: DIAG inst[0x%03x]: %08x %08x %08x %08x  %08x %08x %08x %08x\n",
 			    off, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
 		}
@@ -2191,7 +2191,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	}
 #endif
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: kicked GP_PUT=1 doorbell token=0x%08x, polling sema...\n",
 	    chan->gsp_token);
 
@@ -2205,7 +2205,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			lr = (sc->gsp_logrm.kva != NULL)
 			    ? *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_submit: LOGRM wait 1000ms put=0x%llx delta=%lld\n",
 		    (unsigned long long)lr, (long long)(lr - lr_t0));
 	}
@@ -2225,14 +2225,14 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 	{
 		uint64_t needle = chan->userd_vram;
 		uint64_t needle_pte = nvkm_pte_to_vram(needle);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: SCAN looking for userd_vram=0x%llx (or PTE 0x%llx) in VRAM\n",
 		    (unsigned long long)needle, (unsigned long long)needle_pte);
 		uint64_t scan_start = 0x2b4070000ULL;
 		uint64_t scan_end   = 0x2c0000000ULL;
 		uint64_t needle2 = chan->inst_vram;
 		uint64_t needle2_pte = nvkm_pte_to_vram(needle2);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: SCAN also looking for inst_vram=0x%llx (PTE 0x%llx) in 0x%llx..0x%llx\n",
 		    (unsigned long long)needle2, (unsigned long long)needle2_pte,
 		    (unsigned long long)scan_start, (unsigned long long)scan_end);
@@ -2247,7 +2247,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				uint32_t hi = nvkm_rd32(sc, NV_PRAMIN + off + 4);
 				uint64_t val = ((uint64_t)hi << 32) | lo;
 				if (val == needle || val == needle_pte || val == needle2 || val == needle2_pte) {
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "gsp_rm: SCAN FOUND at 0x%llx (val=0x%016llx)\n",
 					    (unsigned long long)(p + off),
 					    (unsigned long long)val);
@@ -2257,7 +2257,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		}
 		nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
-		device_printf(sc->dev, "gsp_rm: SCAN total occurrences: %d\n", found);
+		nvkm_debugf(sc->dev, "gsp_rm: SCAN total occurrences: %d\n", found);
 
 		/* Dump 256 bytes around where we found userd_vram. */
 		{
@@ -2270,7 +2270,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				uint32_t w1 = nvkm_rd32(sc, NV_PRAMIN + off + 4);
 				uint32_t w2 = nvkm_rd32(sc, NV_PRAMIN + off + 8);
 				uint32_t w3 = nvkm_rd32(sc, NV_PRAMIN + off + 12);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: DUMP@0x%llx: %08x %08x %08x %08x\n",
 				    (unsigned long long)(dump_base + off), w0, w1, w2, w3);
 			}
@@ -2288,14 +2288,14 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		uint64_t pramin_gp_put = 0, pramin_gp_get = 0;
 		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x88, &pramin_gp_get);
 		(void)nvkm_gsp_pramin_rd64(sc, userd_slot_paddr + 0x8c, &pramin_gp_put);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_submit: PRAMIN USERD@0x%llx (chid %d slot): GP_GET=0x%08x GP_PUT=0x%08x\n",
 		    (unsigned long long)userd_slot_paddr, chan->chid,
 		    (uint32_t)(pramin_gp_get & 0xffffffffu),
 		    (uint32_t)(pramin_gp_put & 0xffffffffu));
 	}
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 	    "gsp_submit: post-doorbell 100ms snapshot: GP_GET=0x%08x "
 	    "GP_PUT=0x%08x sema=0x%08x LOGRM put=0x%llx (delta=%lld)\n",
 	    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET),
@@ -2320,7 +2320,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		uint32_t pmc_intr_en_0     = nvkm_rd32(sc, 0x00000140u);
 		uint32_t pmc_intr_en_1     = nvkm_rd32(sc, 0x00000144u);
 		uint32_t pmc_enable        = nvkm_rd32(sc, 0x00000200u);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_submit: HW: PFIFO INTR_0=%08x EN_0=%08x INTR_1=%08x | "
 		    "PBDMA0 INTR_0=%08x INTR_1=%08x STATUS=%08x RUNLIST=%08x | "
 		    "PMC INTR_EN_0=%08x EN_1=%08x ENABLE=%08x\n",
@@ -2335,7 +2335,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		(void)nvkm_gsp_msg_dispatch_all(sc);
 		cpu_lfence();
 		uint32_t sema_val = sema_w[0]; if (sema_val == SEM_PAYLOAD) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: SEM release OK after %d ms (sema=0x%08x)\n",
 			    ms, sema_val);
 			return (0);
@@ -2343,14 +2343,14 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		/* Sample GP_GET every step; log whenever it changes. */
 		uint32_t cur_get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
 		if (cur_get != last_get) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_submit: t=%dms GP_GET=0x%08x (sema=0x%08x)\n",
 			    ms, cur_get, sema_w[0]);
 			last_get = cur_get;
 		}
 		DELAY(SUBMIT_POLL_STEP_MS * 1000);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_submit: SEM TIMEOUT %d ms, sema=0x%08x, last GP_GET=0x%08x\n",
 	    SUBMIT_POLL_MS, sema_w[0], last_get);
 
@@ -2361,10 +2361,10 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		sargs = nvkm_gsp_rm_alloc_get(&sc->gsp_vmm->device.subdevice, 0xd1a00000u,
 		    0x0000208fu /* NV20_SUBDEVICE_DIAG */, 0, &diag);
 		if (false) {
-			device_printf(sc->dev, "DIAG: alloc_get failed\n");
+			nvkm_debugf(sc->dev, "DIAG: alloc_get failed\n");
 		} else {
 			int derr = nvkm_gsp_rm_alloc_wr(&diag, sargs);
-			device_printf(sc->dev, "DIAG: alloc err=%d handle=0x%x\n", derr, diag.handle);
+			nvkm_debugf(sc->dev, "DIAG: alloc err=%d handle=0x%x\n", derr, diag.handle);
 			if (derr == 0) {
 				/* NV208F_CTRL_CMD_FIFO_GET_CHANNEL_STATE = 0x208f0403 */
 				struct {
@@ -2384,13 +2384,13 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 					cs->hClient = sc->gsp_vmm->client.object.handle;
 					int cerr = nvkm_gsp_rm_ctrl_rd(&diag, (void**)&cs, sizeof(*cs));
 					if (cerr == 0) {
-						device_printf(sc->dev,
+						nvkm_debugf(sc->dev,
 						    "DIAG CHANNEL_STATE chid=%d: bBound=%d bEnabled=%d bScheduled=%d "
 						    "bCpuMap=%d bContention=%d bRunlistSet=%d bDeferRC=%d\n",
 						    chan->chid, cs->bBound, cs->bEnabled, cs->bScheduled,
 						    cs->bCpuMap, cs->bContention, cs->bRunlistSet, cs->bDeferRC);
 					} else {
-						device_printf(sc->dev, "DIAG GET_CHANNEL_STATE err=%d\n", cerr);
+						nvkm_debugf(sc->dev, "DIAG GET_CHANNEL_STATE err=%d\n", cerr);
 					}
 				}
 				nvkm_gsp_rm_free(&diag);
@@ -2409,9 +2409,9 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		if (sp != NULL) {
 			sp->bImmediate = 1;
 			int sperr = nvkm_gsp_rm_ctrl_wr(&chan->object, sp);
-			device_printf(sc->dev, "STOP_CHANNEL bImmediate=1 err=%d\n", sperr);
+			nvkm_debugf(sc->dev, "STOP_CHANNEL bImmediate=1 err=%d\n", sperr);
 		} else {
-			device_printf(sc->dev, "STOP_CHANNEL ctrl_get failed\n");
+			nvkm_debugf(sc->dev, "STOP_CHANNEL ctrl_get failed\n");
 		}
 	}
 
@@ -2426,7 +2426,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 			sched->bEnable = 1;
 			sched->bSkipSubmit = 0;
 			int serr = nvkm_gsp_rm_ctrl_wr(&chan->object, sched);
-			device_printf(sc->dev, "RE-SCHEDULE err=%d\n", serr);
+			nvkm_debugf(sc->dev, "RE-SCHEDULE err=%d\n", serr);
 			if (serr == 0) {
 				/* Bump GP_PUT to 2 and write doorbell again */
 				nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, 2);
@@ -2437,7 +2437,7 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 				uint64_t lr1 = (sc->gsp_logrm.kva) ? *(volatile uint64_t*)sc->gsp_logrm.kva : 0;
 				uint32_t gp_get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET);
 				uint32_t sema_val = sema_w[0];
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "RE-DOORBELL after STOP+SCHED+GP_PUT=2: GP_GET=0x%08x sema=0x%08x LOGRM delta=%lld\n",
 				    gp_get, sema_val, (long long)(lr1 - lr0));
 			}
@@ -2451,10 +2451,10 @@ nvkm_gsp_submit_test(struct nvkm_softc *sc)
 		if (kva == NULL) continue;
 		uint8_t *lr = (uint8_t *)kva;
 		uint64_t lr_put = *(volatile uint64_t *)lr;
-		device_printf(sc->dev, "GSP %s put=0x%llx dump 0..0x180:\n",
+		nvkm_debugf(sc->dev, "GSP %s put=0x%llx dump 0..0x180:\n",
 		    name, (unsigned long long)lr_put);
 		for (uint32_t o = 0; o < 0x180; o += 16) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "  %s[0x%03x]: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			    name, o,
 			    lr[o+0], lr[o+1], lr[o+2], lr[o+3], lr[o+4], lr[o+5], lr[o+6], lr[o+7],
@@ -2493,7 +2493,7 @@ nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
 	q = p;
 	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
 	if (err != 0 || q == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: FIFO_GET_DEVICE_INFO_TABLE failed err=%d\n",
 		    err);
 		return (err ? err : EIO);
@@ -2504,7 +2504,7 @@ nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
 		uint32_t rmtype = p->entries[i].engineData[ENGINE_INFO_TYPE_RM_ENGINE_TYPE];
 		uint32_t runl   = p->entries[i].engineData[ENGINE_INFO_TYPE_RUNLIST];
 #ifdef NVKM_DEBUG_FIFO_TABLE
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: fifo entry[%u] name=%.16s rm_type=%u runlist=%u\n",
 		    i, p->entries[i].engineName, rmtype, runl);
 #endif
@@ -2516,7 +2516,7 @@ nvkm_gsp_query_ce0_runlist(struct nvkm_softc *sc, uint32_t *runl_out)
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
 	if (!found) {
-		device_printf(sc->dev, "gsp_rm: COPY0 not in fifo info table\n");
+		nvkm_debugf(sc->dev, "gsp_rm: COPY0 not in fifo info table\n");
 		return (ENOENT);
 	}
 	return (0);
@@ -2714,7 +2714,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			return (err ? err : EIO);
 		}
 		zcull = q;
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: GR zcull widthAlign=%u heightAlign=%u "
 		    "subregions=%u err=0\n",
 		    zcull->widthAlignPixels, zcull->heightAlignPixels,
@@ -2814,7 +2814,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 			global_buf = nvkm_gsp_gr_global_ctxbuf(sc, buffer_id);
 			if (global_buf == NULL) {
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: missing global ctxbuf id=%u\n",
 				    buffer_id);
 				err = ENOENT;
@@ -2856,7 +2856,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			e->size = entry_size;
 			e->physAttr = 4;
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: gr promote ctxbuf id=%u eng=%u entry=0x%llx "
 		    "alloc=0x%llx pa=0x%llx va=0x%llx global=%u init=%u "
 		    "ro=%u target=%u nm=%u\n",
@@ -2895,7 +2895,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 				global_buf = nvkm_gsp_gr_global_ctxbuf(sc,
 				    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP);
 				if (global_buf == NULL) {
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "gsp_rm: missing global ctxbuf id=%u\n",
 					    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP);
 					err = ENOENT;
@@ -2937,7 +2937,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 				e->size = entry_size;
 				e->physAttr = 4;
 			}
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: gr promote ctxbuf id=%u eng=%u entry=0x%llx "
 			    "alloc=0x%llx pa=0x%llx va=0x%llx global=%u "
 			    "init=%u ro=%u target=%u nm=%u\n",
@@ -2952,7 +2952,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 	uint32_t entry_count = ctrl->entryCount;
 	err = nvkm_gsp_rm_ctrl_wr(&vmm->device.subdevice, ctrl);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: GPU_PROMOTE_CTX chan=0x%x chid=%d golden=%u entries=%u err=%d\n",
 	    chan->object.handle, chan->chid, golden, entry_count, err);
 	if (err == 0)
@@ -2985,7 +2985,7 @@ nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm)
 		return (ENOMEM);
 	}
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: GR oneinit: golden channel begin\n");
 
 	err = nvkm_gsp_vmm_ctor(sc, 0xc1d00002, golden_vmm);
@@ -3008,7 +3008,7 @@ nvkm_gsp_gr_oneinit(struct nvkm_gsp_vmm *vmm)
 
 	(void)nvkm_gsp_rm_free(&threed);
 	done = 1;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: GR oneinit: golden channel complete\n");
 
 out_chan:
@@ -3064,7 +3064,7 @@ nvkm_gsp_chan_alloc_obj(struct nvkm_gsp_chan *chan, uint32_t handle,
 		return (EINVAL);
 	}
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: channel obj alloc cls=0x%x handle=0x%x chan=0x%x err=%d\n",
 	    oclass, handle, chan->object.handle, err);
 	if (err != 0)

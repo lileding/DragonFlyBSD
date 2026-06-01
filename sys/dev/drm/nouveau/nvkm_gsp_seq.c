@@ -61,7 +61,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	uint32_t op_count = 0;
 
 	if (payload_size < (2 + 8) * 4) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "seq: payload too small (%u bytes)\n", payload_size);
 		return (0);
 	}
@@ -72,7 +72,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	reg_save = (uint32_t *)(uintptr_t)&p[2];
 	cmdbuf   = &p[2 + 8];
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "seq: start (bufSizeDW=%u cmdIndex=%u)\n",
 	    buf_size_dw, cmd_index);
 
@@ -82,14 +82,14 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 
 		opcode = cmdbuf[ptr++];
 		if (opcode >= sizeof(nvkm_seq_payload_dw)) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "seq: unknown opcode %u at idx %u, stop\n",
 			    opcode, ptr - 1);
 			break;
 		}
 		pl_dw = nvkm_seq_payload_dw[opcode];
 		if (ptr + pl_dw > cmd_index) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "seq: truncated cmd at idx %u (need %u, have %u)\n",
 			    ptr - 1, pl_dw, cmd_index - ptr);
 			break;
@@ -124,7 +124,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 				elapsed += 10;
 			}
 			if (elapsed >= timeout)
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "seq: poll timeout on 0x%06x\n", addr);
 			break;
 		}
@@ -169,7 +169,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 				DELAY(10000);	/* 10 ms */
 			}
 			if (n >= 200)
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "seq: core wait-halt timeout\n");
 			break;
 		}
@@ -184,7 +184,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			 *   6. write FALCON_OS (0x080) = app_version (=0 for us)
 			 *   7. verify RISC-V active
 			 */
-			device_printf(sc->dev, "seq: CORE_RESUME\n");
+			nvkm_debugf(sc->dev, "seq: CORE_RESUME\n");
 			if (sc->gsp != NULL)
 				(void)nvkm_falcon_reset_eng(sc->gsp);
 			{
@@ -194,7 +194,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
 				    (uint32_t)(la >> 32));
 			}
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "seq: SEC2 pre-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x BOOTVEC=0x%x SCRATCH14=0x%x\n",
 			    nvkm_rd32(sc, 0x840100), nvkm_rd32(sc, 0x84010c),
 			    nvkm_rd32(sc, 0x840040), nvkm_rd32(sc, 0x840104),
@@ -202,7 +202,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			if (sc->sec2 != NULL)
 				nvkm_falcon_start(sc->sec2);
 			DELAY(100);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "seq: SEC2 post-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x SCRATCH14=0x%x\n",
 			    nvkm_rd32(sc, 0x840100), nvkm_rd32(sc, 0x84010c),
 			    nvkm_rd32(sc, 0x840040), nvkm_rd32(sc, 0x1180f8));
@@ -215,7 +215,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 					DELAY(10000);
 				}
 				if (n >= 200) {
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "seq: CORE_RESUME timeout waiting for SEC2\n");
 					return (0);
 				}
@@ -224,7 +224,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 				uint32_t sec2_mb0 = nvkm_rd32(sc,
 				    0x840040);
 				if (sec2_mb0 != 0) {
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "seq: CORE_RESUME SEC2 MB0=0x%x\n",
 					    sec2_mb0);
 					return (0);
@@ -234,13 +234,13 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			{
 				uint32_t rsv = nvkm_rd32(sc, 0x111240);
 				if (!(rsv & 1)) {
-					device_printf(sc->dev,
+					nvkm_debugf(sc->dev,
 					    "seq: CORE_RESUME failed (RISCV_STATUS=0x%x)\n",
 					    rsv);
 					return (0);
 				}
 			}
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "seq: CORE_RESUME ok, RISC-V active again\n");
 			break;
 		}
@@ -248,6 +248,6 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		ptr += pl_dw;
 		op_count++;
 	}
-	device_printf(sc->dev, "seq: done (%u ops processed)\n", op_count);
+	nvkm_debugf(sc->dev, "seq: done (%u ops processed)\n", op_count);
 	return (0);
 }

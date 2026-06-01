@@ -38,19 +38,19 @@ nvkm_sec2_init(struct nvkm_softc *sc)
 	imem_size_bytes =
 	    (hwcfg & NVKM_FLCN_HWCFG_IMEM_SIZE_MASK) * NVKM_FLCN_IMEM_BLKSIZE;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "sec2: HWCFG=0x%08x HWCFG2=0x%08x imem=%u bytes riscv=%s\n",
 	    hwcfg, hwcfg2, imem_size_bytes,
 	    (hwcfg2 & NVKM_FLCN_HWCFG2_RISCV) ? "yes" : "no");
 
 	error = nvkm_falcon_wait_for_scrub(flcn, 100000); /* 100 ms */
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "sec2: memory scrub wait failed (%d), DMACTL=0x%08x\n",
 		    error, nvkm_falcon_rd32(flcn, NVKM_FLCN_DMACTL));
 		/* not fatal yet -- diagnostic phase */
 	} else {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "sec2: memory scrub complete, DMACTL=0x%08x CPUCTL=0x%08x\n",
 		    nvkm_falcon_rd32(flcn, NVKM_FLCN_DMACTL),
 		    nvkm_falcon_rd32(flcn, NVKM_FLCN_CPUCTL));

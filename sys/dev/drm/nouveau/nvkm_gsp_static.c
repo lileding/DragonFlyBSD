@@ -32,13 +32,13 @@ nvkm_gsp_get_static_info(struct nvkm_softc *sc)
 	uint32_t i, j, m, scan;
 	char buf[80];
 
-	device_printf(sc->dev, "static_info: issuing fn=65 RECV...\n");
+	nvkm_debugf(sc->dev, "static_info: issuing fn=65 RECV...\n");
 
 	r = nvkm_gsp_rpc_rd(sc,
 	    NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
 	    NVKM_STATIC_INFO_SIZE);
 	if (r == NULL) {
-		device_printf(sc->dev, "static_info: rpc_rd failed\n");
+		nvkm_debugf(sc->dev, "static_info: rpc_rd failed\n");
 		return (EIO);
 	}
 
@@ -63,17 +63,17 @@ nvkm_gsp_get_static_info(struct nvkm_softc *sc)
 					buf[m++] = c;
 			}
 			buf[m] = 0;
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "static_info: GPU = \"%s\"\n", buf);
 			break;
 		}
 	}
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "static_info: hInternalClient=0x%08x device=0x%08x subdevice=0x%08x\n",
 	    sc->gsp_internal_client, sc->gsp_internal_device,
 	    sc->gsp_internal_subdevice);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "static_info: bar1PdeBase=0x%llx bar2PdeBase=0x%llx\n",
 	    (unsigned long long)sc->gsp_bar1_pdb,
 	    (unsigned long long)sc->gsp_bar2_pdb);
@@ -100,7 +100,7 @@ nvkm_gsp_get_static_info(struct nvkm_softc *sc)
 			if (limit <= base)
 				continue;
 			size = (limit + 1) - base;
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "static_info: fb_region[%u] base=0x%llx limit=0x%llx "
 			    "rsvd=0x%llx prot=%u\n", i,
 			    (unsigned long long)base,
@@ -115,7 +115,7 @@ nvkm_gsp_get_static_info(struct nvkm_softc *sc)
 		}
 		sc->fb_usable_base = best_base;
 		sc->fb_usable_size = best_size;
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "static_info: usable VRAM region 0x%llx + 0x%llx\n",
 		    (unsigned long long)best_base,
 		    (unsigned long long)best_size);

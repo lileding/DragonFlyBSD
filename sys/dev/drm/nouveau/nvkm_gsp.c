@@ -44,7 +44,7 @@ nvkm_gsp_init(struct nvkm_softc *sc)
 	    NVKM_TU102_GSP_FBIF);
 	sc->gsp = flcn;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp: handle allocated (PRI base 0x%x, RISC-V base 0x%x, "
 	    "FBIF 0x%x); register access deferred until reset\n",
 	    NVKM_TU102_GSP_BASE, NVKM_TU102_GSP_RISCV, NVKM_TU102_GSP_FBIF);

@@ -62,6 +62,10 @@ struct nvkm_vram_alloc {
 
 const char *nvkm_vram_kind_name(enum nvkm_vram_kind kind);
 
+extern int nvkm_debug;
+void	nvkm_debugf(device_t dev, const char *fmt, ...) __printflike(2, 3);
+void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
+
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
 
