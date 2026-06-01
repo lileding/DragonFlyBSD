@@ -1338,9 +1338,36 @@ nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
 	}
 }
 
+static int
+nvkm_drm_submit_slot_alloc(struct nvkm_gsp_chan *chan, uint32_t *slot)
+{
+	for (uint32_t i = 0; i < NVKM_DRM_POST_RING_SLOTS; i++) {
+		uint32_t candidate = (chan->submit_post_slot + i) %
+		    NVKM_DRM_POST_RING_SLOTS;
+		uint64_t bit = 1ULL << candidate;
+
+		if ((chan->submit_post_slots_busy & bit) != 0)
+			continue;
+
+		chan->submit_post_slots_busy |= bit;
+		chan->submit_post_slot = (candidate + 1) %
+		    NVKM_DRM_POST_RING_SLOTS;
+		*slot = candidate;
+		return (0);
+	}
+	return (-EAGAIN);
+}
+
+static void
+nvkm_drm_submit_slot_release(struct nvkm_gsp_chan *chan, uint32_t slot)
+{
+	chan->submit_post_slots_busy &= ~(1ULL << slot);
+	wakeup(chan);
+}
+
 static struct nvkm_drm_exec_pending *
 nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
-    volatile uint32_t *sema, uint32_t payload,
+    volatile uint32_t *sema, uint32_t payload, uint32_t post_slot,
     struct nvkm_drm_exec_signal *signals, uint32_t sig_count,
     struct dma_fence *exec_fence)
 {
@@ -1353,6 +1380,7 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
 	pending->chan = chan;
 	pending->sema = sema;
 	pending->payload = payload;
+	pending->post_slot = post_slot;
 	if (signals != NULL && sig_count != 0) {
 		pending->fence_count = sig_count;
 		for (uint32_t i = 0; i < sig_count; i++)
@@ -1390,6 +1418,8 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 		nvkm_drm_exec_pending_signal(pending, error);
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
+		nvkm_drm_submit_slot_release(chan, pending->post_slot);
+		nvkm_drm_exec_pending_put(pending);
 	}
 }
 
@@ -1410,6 +1440,8 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 		sc->exec_async_complete_count++;
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
+		nvkm_drm_submit_slot_release(pending->chan, pending->post_slot);
+		nvkm_drm_exec_pending_put(pending);
 	}
 	lwkt_reltoken(&sc->gsp_tok);
 }
@@ -1541,51 +1573,6 @@ nvkm_drm_exec_attach_reservations(struct nvkm_softc *sc,
 	sc->exec_resv_attach_bos += count;
 }
 
-static void
-nvkm_drm_dump_ctxctl_unit(struct nvkm_softc *sc, uint32_t base)
-{
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: ctxctl[%06x] done=%08x stat=%08x %08x %08x %08x stat2=%08x %08x %08x %08x\n",
-	    base, nvkm_rd32(sc, base + 0x400),
-	    nvkm_rd32(sc, base + 0x800), nvkm_rd32(sc, base + 0x804),
-	    nvkm_rd32(sc, base + 0x808), nvkm_rd32(sc, base + 0x80c),
-	    nvkm_rd32(sc, base + 0x810), nvkm_rd32(sc, base + 0x814),
-	    nvkm_rd32(sc, base + 0x818), nvkm_rd32(sc, base + 0x81c));
-}
-
-static void
-nvkm_drm_dump_exec_timeout(struct nvkm_softc *sc)
-{
-	uint32_t gpcnr;
-
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: GR intr=%08x exc=%08x exc1=%08x cls_err=%08x trap_addr=%08x trap_data=%08x trap_hi=%08x status=%08x status1=%08x status2=%08x engine=%08x\n",
-	    nvkm_rd32(sc, 0x400100), nvkm_rd32(sc, 0x400108),
-	    nvkm_rd32(sc, 0x400118), nvkm_rd32(sc, 0x400110),
-	    nvkm_rd32(sc, 0x400704), nvkm_rd32(sc, 0x400708),
-	    nvkm_rd32(sc, 0x40070c), nvkm_rd32(sc, 0x400700),
-	    nvkm_rd32(sc, 0x400604), nvkm_rd32(sc, 0x400608),
-	    nvkm_rd32(sc, 0x40060c));
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: GR activity0=%08x activity1=%08x sked_activity=%08x grfifo_ctl=%08x grfifo_status=%08x\n",
-	    nvkm_rd32(sc, 0x400380), nvkm_rd32(sc, 0x400384),
-	    nvkm_rd32(sc, 0x407054), nvkm_rd32(sc, 0x400500),
-	    nvkm_rd32(sc, 0x400504));
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: FECS inst=%08x cfg=%08x intr=%08x code=%08x class=%08x addr=%08x data=%08x\n",
-	    nvkm_rd32(sc, 0x409b00), nvkm_rd32(sc, 0x409604),
-	    nvkm_rd32(sc, 0x409c18), nvkm_rd32(sc, 0x409814),
-	    nvkm_rd32(sc, 0x409808), nvkm_rd32(sc, 0x40980c),
-	    nvkm_rd32(sc, 0x409810));
-
-	gpcnr = nvkm_rd32(sc, 0x409604) & 0xffff;
-	if (gpcnr > 8)
-		gpcnr = 8;
-	nvkm_drm_dump_ctxctl_unit(sc, 0x409000);
-	for (uint32_t gpc = 0; gpc < gpcnr; gpc++)
-		nvkm_drm_dump_ctxctl_unit(sc, 0x502000 + gpc * 0x8000);
-}
-
 static int
 nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
     struct drm_file *file_priv)
@@ -1604,10 +1591,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	uint32_t put, payload, post_slot, post_offset, sema_offset;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
-	long wait_ret;
 	int err = 0;
 	bool gsp_tok_held = false;
 	bool exec_completion_queued = false;
+	bool submit_slot_allocated = false;
 
 	if (nfile == NULL)
 		return (-ENXIO);
@@ -1684,9 +1671,14 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 	profile_push_start = nvkm_drm_profile_now_us();
 	gpf = (uint32_t *)chan->submit_gpf.kva;
-	post_slot = chan->submit_post_slot;
-	chan->submit_post_slot = (chan->submit_post_slot + 1) %
-	    NVKM_DRM_POST_RING_SLOTS;
+	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
+	if (err != 0) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC no free post slots channel=%u busy=0x%016jx\n",
+		    req->channel, (uintmax_t)chan->submit_post_slots_busy);
+		goto out_unlock;
+	}
+	submit_slot_allocated = true;
 	post_offset = post_slot * NVKM_DRM_POST_PUSH_DWORDS;
 	sema_offset = post_slot;
 	post = (uint32_t *)chan->submit_push.kva + post_offset;
@@ -1798,7 +1790,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 
 	pending = nvkm_drm_exec_pending_create(chan, (volatile uint32_t *)sema,
-	    payload, signals, req->sig_count, exec_fence);
+	    payload, post_slot, signals, req->sig_count, exec_fence);
 	if (pending == NULL) {
 		err = -ENOMEM;
 		goto out_unlock;
@@ -1831,45 +1823,15 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	cpu_sfence();
 	nvkm_drm_profile_add_us(&sc->exec_profile_doorbell_us,
 	    profile_start);
-
-	profile_start = nvkm_drm_profile_now_us();
+	chan->gpf_put = put;
+	pending = NULL;
+	submit_slot_allocated = false;
 	lwkt_reltoken(&sc->gsp_tok);
 	gsp_tok_held = false;
-	sc->exec_async_wait_count++;
-	wait_ret = dma_fence_wait_timeout(exec_fence, false, 5 * hz);
-	nvkm_drm_profile_add_us(&sc->exec_profile_poll_us, profile_start);
-	if (wait_ret <= 0) {
-		bool completed;
-
-		lwkt_gettoken(&sc->gsp_tok);
-		completed = atomic_load_acq_int(&pending->done) != 0;
-		if (!completed)
-			LIST_REMOVE(pending, link);
-		lwkt_reltoken(&sc->gsp_tok);
-		if (completed)
-			goto exec_complete;
-		exec_completion_queued = false;
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC timeout channel=%u pushes=%u put=%u sema=0x%08x want=0x%08x get=0x%08x\n",
-		    req->channel, req->push_count, put, sema[0], payload,
-		    nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET));
-		nvkm_gsp_vmm_debug_dump_pte(sc->gsp_vmm, 0x0000003ffdf5c000ULL);
-		nvkm_gsp_vmm_debug_dump_pte(sc->gsp_vmm, 0x0000003ffdf41000ULL);
-		nvkm_drm_dump_exec_timeout(sc);
-		sc->exec_timeout_count++;
-		sc->exec_async_wait_error_count++;
-		err = -ETIME;
-		goto out_unlock;
-	}
-	lwkt_gettoken(&sc->gsp_tok);
-	lwkt_reltoken(&sc->gsp_tok);
-
-exec_complete:
-	chan->gpf_put = put;
 	nvkm_debugf(sc->dev,
-	    "nvkm_drm: EXEC complete channel=%u pushes=%u sigs=%u err=%d put=%u sema=0x%08x payload=0x%08x\n",
+	    "nvkm_drm: EXEC submitted channel=%u pushes=%u sigs=%u err=%d put=%u sema=0x%08x payload=0x%08x slot=%u\n",
 	    req->channel, req->push_count, req->sig_count, err, put, sema[0],
-	    payload);
+	    payload, post_slot);
 
 out_unlock:
 	profile_start = nvkm_drm_profile_now_us();
@@ -1886,6 +1848,8 @@ out_unlock:
 		}
 		dma_fence_put(exec_fence);
 	}
+	if (submit_slot_allocated)
+		nvkm_drm_submit_slot_release(chan, post_slot);
 	nvkm_drm_exec_pending_put(pending);
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);

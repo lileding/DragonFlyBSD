@@ -213,9 +213,21 @@ LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
 struct nvkm_drm_exec_pending {
 	LIST_ENTRY(nvkm_drm_exec_pending) link;
+	/* Borrowed channel pointer. Its submit pages outlive this pending
+	 * record because channel teardown cancels matching pending records
+	 * before calling nvkm_gsp_chan_dtor().
+	 */
 	struct nvkm_gsp_chan *chan;
+	/* Borrowed semaphore slot inside chan->submit_sema. The slot remains
+	 * owned by this pending record until interrupt completion or channel
+	 * cancellation releases post_slot.
+	 */
 	volatile uint32_t *sema;
 	uint32_t payload;
+	uint32_t post_slot;
+	/* Owned fence references. The submit ioctl may drop its local signal
+	 * array and exec_fence references immediately after doorbell.
+	 */
 	struct dma_fence *fences[64];
 	uint32_t fence_count;
 	volatile u_int done;
