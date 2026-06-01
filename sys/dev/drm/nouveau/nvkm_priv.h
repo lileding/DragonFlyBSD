@@ -368,6 +368,20 @@ struct nvkm_softc {
 	uint64_t		vm_bind_wait_error_count;
 	uint64_t		cpu_prep_wait_count;
 	uint64_t		cpu_prep_wait_error_count;
+	uint64_t		exec_profile_token_wait_us;
+	uint64_t		exec_profile_wait_sync_us;
+	uint64_t		exec_profile_push_build_us;
+	uint64_t		exec_profile_prepare_signal_us;
+	uint64_t		exec_profile_attach_resv_us;
+	uint64_t		exec_profile_flush_cpu_us;
+	uint64_t		exec_profile_cache_flush_us;
+	uint64_t		exec_profile_doorbell_us;
+	uint64_t		exec_profile_poll_us;
+	uint64_t		exec_profile_cleanup_us;
+	uint64_t		exec_profile_poll_iters;
+	uint64_t		exec_profile_pushes;
+	uint64_t		exec_profile_cpu_bind_scanned;
+	uint64_t		exec_profile_cpu_bind_flushed;
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;

@@ -230,6 +230,36 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "resv_attach_bos = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_bos);
 
+	sbuf_cat(&sb, "\nexec_profile_us\n");
+	sbuf_printf(&sb, "token_wait_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_token_wait_us);
+	sbuf_printf(&sb, "wait_sync_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_wait_sync_us);
+	sbuf_printf(&sb, "push_build_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_push_build_us);
+	sbuf_printf(&sb, "prepare_signal_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_prepare_signal_us);
+	sbuf_printf(&sb, "attach_resv_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_attach_resv_us);
+	sbuf_printf(&sb, "flush_cpu_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_flush_cpu_us);
+	sbuf_printf(&sb, "cache_flush_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_cache_flush_us);
+	sbuf_printf(&sb, "doorbell_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_doorbell_us);
+	sbuf_printf(&sb, "poll_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_poll_us);
+	sbuf_printf(&sb, "cleanup_us = %llu\n",
+	    (unsigned long long)sc->exec_profile_cleanup_us);
+	sbuf_printf(&sb, "poll_iters = %llu\n",
+	    (unsigned long long)sc->exec_profile_poll_iters);
+	sbuf_printf(&sb, "pushes = %llu\n",
+	    (unsigned long long)sc->exec_profile_pushes);
+	sbuf_printf(&sb, "cpu_bind_scanned = %llu\n",
+	    (unsigned long long)sc->exec_profile_cpu_bind_scanned);
+	sbuf_printf(&sb, "cpu_bind_flushed = %llu\n",
+	    (unsigned long long)sc->exec_profile_cpu_bind_flushed);
+
 	sbuf_cat(&sb, "\nsyncobj\n");
 	sbuf_printf(&sb, "wait_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_count);

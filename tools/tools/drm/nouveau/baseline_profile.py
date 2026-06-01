@@ -223,6 +223,11 @@ def main():
             "submit_count", "signal_only_count", "timeout_count",
             "internal_fence_count", "signal_fence_count",
             "resv_attach_calls", "resv_attach_bos",
+            "token_wait_us", "wait_sync_us", "push_build_us",
+            "prepare_signal_us", "attach_resv_us", "flush_cpu_us",
+            "cache_flush_us", "doorbell_us", "poll_us", "cleanup_us",
+            "poll_iters", "pushes", "cpu_bind_scanned",
+            "cpu_bind_flushed",
             "wait_count", "wait_error_count", "signal_count",
             "signal_error_count", "bo_wait_count", "bo_wait_error_count",
             "vm_bind_wait_count", "vm_bind_wait_error_count",
@@ -257,8 +262,8 @@ def main():
         md.write("# Baseline Profile\n\n")
         md.write(f"- contract: `{contract_dir}`\n")
         md.write(f"- roofline: `{roofline_dir}`\n\n")
-        md.write("| Model | rc | pp tok/s | tg tok/s | 70% target | tg/target | real s | submit delta | timeout delta |\n")
-        md.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+        md.write("| Model | rc | pp tok/s | tg tok/s | 70% target | tg/target | real s | submit delta | timeout delta | poll s | flush CPU s |\n")
+        md.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
         for row in summary["models"]:
             pp = next((value for test, value in row["bench_tps"].items() if test.startswith("pp")), None)
             tg = next((value for test, value in row["bench_tps"].items() if test.startswith("tg")), None)
@@ -273,7 +278,9 @@ def main():
                 f"{target if target is not None else 0:.2f} | "
                 f"{ratio if ratio is not None else 0:.4f} | "
                 f"{real_s if real_s is not None else 0:.2f} | "
-                f"{delta.get('submit_count', 0)} | {delta.get('timeout_count', 0)} |\n"
+                f"{delta.get('submit_count', 0)} | {delta.get('timeout_count', 0)} | "
+                f"{delta.get('poll_us', 0) / 1000000.0:.2f} | "
+                f"{delta.get('flush_cpu_us', 0) / 1000000.0:.2f} |\n"
             )
 
     print(f"baseline_profile_dir={out_dir}")
