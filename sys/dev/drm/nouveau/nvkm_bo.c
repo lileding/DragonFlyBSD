@@ -40,6 +40,86 @@
 
 static MALLOC_DEFINE(M_NVKM_BO, "nvkm_bo", "nvkm GEM buffer object pages");
 
+static const char *
+nvkm_bo_alloc_fail_path_name(enum nvkm_bo_alloc_fail_path path)
+{
+	switch (path) {
+	case NVKM_BO_ALLOC_FAIL_NONE:
+		return ("none");
+	case NVKM_BO_ALLOC_FAIL_VRAM:
+		return ("vram");
+	case NVKM_BO_ALLOC_FAIL_SYSMEM:
+		return ("sysmem");
+	case NVKM_BO_ALLOC_FAIL_HANDLE:
+		return ("handle");
+	case NVKM_BO_ALLOC_FAIL_MMAP:
+		return ("mmap");
+	default:
+		return ("unknown");
+	}
+}
+
+static void
+nvkm_bo_record_alloc_fail(struct nvkm_softc *sc,
+    enum nvkm_bo_alloc_fail_path path, uint64_t size, uint32_t domain,
+    int error)
+{
+	sc->bo_alloc_fail_count++;
+	sc->bo_alloc_fail_path = path;
+	sc->bo_alloc_fail_size = size;
+	sc->bo_alloc_fail_domain = domain;
+	sc->bo_alloc_fail_error = error;
+
+	device_printf(sc->dev,
+	    "nvkm_bo: GEM_NEW failed path=%s error=%d req_domain=0x%x size=0x%llx\n",
+	    nvkm_bo_alloc_fail_path_name(path), error, domain,
+	    (unsigned long long)size);
+}
+
+static void
+nvkm_bo_account_alloc(struct nvkm_softc *sc, struct nvkm_bo *bo)
+{
+	uint64_t size = bo->base.size;
+
+	if (bo->kva != NULL) {
+		sc->bo_sysmem_active_count++;
+		sc->bo_sysmem_active_bytes += size;
+		if (sc->bo_sysmem_active_bytes > sc->bo_sysmem_high_bytes)
+			sc->bo_sysmem_high_bytes = sc->bo_sysmem_active_bytes;
+		return;
+	}
+	if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
+		sc->bo_vram_active_count++;
+		sc->bo_vram_active_bytes += size;
+		if (sc->bo_vram_active_bytes > sc->bo_vram_high_bytes)
+			sc->bo_vram_high_bytes = sc->bo_vram_active_bytes;
+	}
+}
+
+static void
+nvkm_bo_account_free(struct nvkm_softc *sc, struct nvkm_bo *bo)
+{
+	uint64_t size = bo->base.size;
+
+	if (bo->kva != NULL) {
+		if (sc->bo_sysmem_active_count != 0)
+			sc->bo_sysmem_active_count--;
+		if (sc->bo_sysmem_active_bytes >= size)
+			sc->bo_sysmem_active_bytes -= size;
+		else
+			sc->bo_sysmem_active_bytes = 0;
+		return;
+	}
+	if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
+		if (sc->bo_vram_active_count != 0)
+			sc->bo_vram_active_count--;
+		if (sc->bo_vram_active_bytes >= size)
+			sc->bo_vram_active_bytes -= size;
+		else
+			sc->bo_vram_active_bytes = 0;
+	}
+}
+
 /* ============================================================
  * cdev pager — backs userspace mmap with our contig pages.
  * ============================================================ */
@@ -133,6 +213,8 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size, PAGE_SIZE,
 		    NVKM_VRAM_GEM, bo);
 		if (bo->vram_alloc == NULL) {
+			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_VRAM,
+			    size, domain, -ENOMEM);
 			reservation_object_fini(&bo->resv);
 			kfree(bo);
 			return (NULL);
@@ -142,6 +224,8 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	} else {
 		kva = (void *)kmem_alloc(kernel_map, size, VM_SUBSYS_DRM_GEM);
 		if (kva == NULL) {
+			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
+			    size, domain, -ENOMEM);
 			reservation_object_fini(&bo->resv);
 			kfree(bo);
 			return (NULL);
@@ -156,6 +240,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	bo->tile_flags = tile_flags;
 
 	drm_gem_private_object_init(ddev, &bo->base, size);
+	nvkm_bo_account_alloc(sc, bo);
 	return (bo);
 }
 
@@ -169,6 +254,9 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	    "nvkm_bo: GEM_FREE obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
 	    obj, bo->domain, (unsigned long long)obj->size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL);
+
+	sc->bo_gem_free_count++;
+	nvkm_bo_account_free(sc, bo);
 
 	(void)nvkm_bo_resv_wait(bo, false);
 	if (bo->kva != NULL) {
@@ -227,12 +315,16 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	uint32_t handle = 0;
 	int err;
 
+	sc->bo_gem_new_count++;
 	bo = nvkm_bo_create(ddev, req->info.size, req->info.domain,
 	    req->info.tile_mode, req->info.tile_flags);
 	if (bo == NULL)
 		return (-ENOMEM);
 
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
+	if (err != 0)
+		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_HANDLE,
+		    bo->base.size, req->info.domain, err);
 	/* drop our local reference; the handle holds one now. */
 	drm_gem_object_put_unlocked(&bo->base);
 	if (err != 0)
@@ -247,6 +339,9 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	if (bo->kva != NULL) {
 		err = drm_gem_create_mmap_offset(&bo->base);
 		if (err != 0) {
+			nvkm_bo_record_alloc_fail(sc,
+			    NVKM_BO_ALLOC_FAIL_MMAP, bo->base.size,
+			    req->info.domain, err);
 			drm_gem_handle_delete(file_priv, handle);
 			return (err);
 		}

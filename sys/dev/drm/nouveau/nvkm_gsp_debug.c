@@ -518,6 +518,34 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		}
 	}
 
+	sbuf_cat(&sb, "\nbo\n");
+	sbuf_printf(&sb, "gem_new_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_count);
+	sbuf_printf(&sb, "gem_free_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_free_count);
+	sbuf_printf(&sb, "sysmem_active_count = %llu\n",
+	    (unsigned long long)sc->bo_sysmem_active_count);
+	sbuf_printf(&sb, "sysmem_active_bytes = 0x%016llx\n",
+	    (unsigned long long)sc->bo_sysmem_active_bytes);
+	sbuf_printf(&sb, "sysmem_high_bytes = 0x%016llx\n",
+	    (unsigned long long)sc->bo_sysmem_high_bytes);
+	sbuf_printf(&sb, "vram_active_count = %llu\n",
+	    (unsigned long long)sc->bo_vram_active_count);
+	sbuf_printf(&sb, "vram_active_bytes = 0x%016llx\n",
+	    (unsigned long long)sc->bo_vram_active_bytes);
+	sbuf_printf(&sb, "vram_high_bytes = 0x%016llx\n",
+	    (unsigned long long)sc->bo_vram_high_bytes);
+	sbuf_printf(&sb, "alloc_fail_count = %llu\n",
+	    (unsigned long long)sc->bo_alloc_fail_count);
+	sbuf_printf(&sb, "alloc_fail_path = %u\n",
+	    sc->bo_alloc_fail_path);
+	sbuf_printf(&sb, "alloc_fail_error = %d\n",
+	    sc->bo_alloc_fail_error);
+	sbuf_printf(&sb, "alloc_fail_domain = 0x%08x\n",
+	    sc->bo_alloc_fail_domain);
+	sbuf_printf(&sb, "alloc_fail_size = 0x%016llx\n",
+	    (unsigned long long)sc->bo_alloc_fail_size);
+
 	sbuf_cat(&sb, "\nreservation\n");
 	sbuf_printf(&sb, "bo_wait_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_count);

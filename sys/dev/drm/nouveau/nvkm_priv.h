@@ -46,6 +46,14 @@ enum nvkm_vram_kind {
 	NVKM_VRAM_KIND_COUNT
 };
 
+enum nvkm_bo_alloc_fail_path {
+	NVKM_BO_ALLOC_FAIL_NONE = 0,
+	NVKM_BO_ALLOC_FAIL_VRAM,
+	NVKM_BO_ALLOC_FAIL_SYSMEM,
+	NVKM_BO_ALLOC_FAIL_HANDLE,
+	NVKM_BO_ALLOC_FAIL_MMAP,
+};
+
 struct nvkm_vram_alloc;
 TAILQ_HEAD(nvkm_vram_alloc_head, nvkm_vram_alloc);
 
@@ -484,6 +492,19 @@ struct nvkm_softc {
 	uint64_t		rc_last_mmu_fault_addr;
 	uint32_t		rc_last_mmu_fault_type;
 	uint32_t		rc_last_journal_size;
+	uint64_t		bo_gem_new_count;
+	uint64_t		bo_gem_free_count;
+	uint64_t		bo_sysmem_active_count;
+	uint64_t		bo_sysmem_active_bytes;
+	uint64_t		bo_sysmem_high_bytes;
+	uint64_t		bo_vram_active_count;
+	uint64_t		bo_vram_active_bytes;
+	uint64_t		bo_vram_high_bytes;
+	uint64_t		bo_alloc_fail_count;
+	uint64_t		bo_alloc_fail_size;
+	uint32_t		bo_alloc_fail_domain;
+	uint32_t		bo_alloc_fail_path;
+	int			bo_alloc_fail_error;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
 	uint64_t		vm_init_kernel_addr;
