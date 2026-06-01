@@ -135,6 +135,12 @@ struct nvkm_drm_file {
 	struct nvkm_drm_chan_list channels;
 };
 
+struct drm_nouveau_exec_push {
+	uint64_t va;
+	uint32_t va_len;
+	uint32_t flags;
+};
+
 static uint32_t nvkm_drm_next_channel = 1;
 
 static struct nvkm_drm_file *
@@ -214,34 +220,52 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (0);
 }
 
-static void
-nvkm_drm_flush_cpu_vm_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile)
+static int
+nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
+    const struct drm_nouveau_exec_push *pushes, uint32_t push_count)
 {
 	struct nvkm_drm_vm_binding *binding;
 	uint64_t flush_seq;
 	uint32_t scanned = 0;
 	uint32_t flushed = 0;
+	int err = 0;
 
 	flush_seq = ++sc->exec_cpu_flush_seq;
-	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+	for (uint32_t i = 0; i < push_count; i++) {
+		bool found = false;
 
-		scanned++;
-		if (bo->kva == NULL)
-			continue;
-		if (bo->cpu_flush_seq == flush_seq)
-			continue;
-		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
-		    (vm_offset_t)bo->kva + binding->obj->size);
-		bo->cpu_flush_seq = flush_seq;
-		flushed++;
+		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+			struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+
+			scanned++;
+			if (!nvkm_drm_vm_ranges_overlap(pushes[i].va,
+			    pushes[i].va_len, binding->addr, binding->size))
+				continue;
+			found = true;
+			if (bo->kva == NULL)
+				break;
+			if (bo->cpu_flush_seq == flush_seq)
+				break;
+			pmap_invalidate_cache_range((vm_offset_t)bo->kva,
+			    (vm_offset_t)bo->kva + binding->obj->size);
+			bo->cpu_flush_seq = flush_seq;
+			flushed++;
+			break;
+		}
+		if (!found) {
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: EXEC push has no VM binding idx=%u va=0x%016jx len=0x%08x\n",
+			    i, (uintmax_t)pushes[i].va, pushes[i].va_len);
+			err = -EINVAL;
+			break;
+		}
 	}
 	sc->exec_profile_cpu_bind_scanned += scanned;
 	sc->exec_profile_cpu_bind_flushed += flushed;
 	if (flushed != 0)
 		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC flushed %u CPU VM bindings\n", flushed);
+		    "nvkm_drm: EXEC flushed %u push BOs\n", flushed);
+	return (err);
 }
 
 static void
@@ -1102,12 +1126,6 @@ struct drm_nouveau_sync {
 	uint64_t timeline_value;
 };
 
-struct drm_nouveau_exec_push {
-	uint64_t va;
-	uint32_t va_len;
-	uint32_t flags;
-};
-
 struct drm_nouveau_exec {
 	uint32_t channel;
 	uint32_t push_count;
@@ -1724,9 +1742,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	}
 
 	profile_start = nvkm_drm_profile_now_us();
-	nvkm_drm_flush_cpu_vm_bindings(sc, nfile);
+	err = nvkm_drm_flush_exec_pushes(sc, nfile, pushes, req->push_count);
 	nvkm_drm_profile_add_us(&sc->exec_profile_flush_cpu_us,
 	    profile_start);
+	if (err != 0)
+		goto out_unlock;
 	profile_start = nvkm_drm_profile_now_us();
 	pmap_invalidate_cache_range((vm_offset_t)chan->submit_gpf.kva,
 	    (vm_offset_t)chan->submit_gpf.kva + 0x1000);
