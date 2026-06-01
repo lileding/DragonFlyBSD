@@ -343,6 +343,8 @@ struct nvkm_softc {
 	struct resource		*irq_res;
 	void			*irq_cookie;
 	struct lwkt_serialize	irq_serialize;
+	uint64_t		irq_isr_count;
+	uint64_t		irq_msi_rearm_count;
 
 	/* DRM driver registration (Phase 3). */
 	struct drm_device	*drm_dev;
@@ -377,6 +379,11 @@ struct nvkm_softc {
 	uint64_t		gsp_nonstall_event_register_error_count;
 	uint32_t		gsp_nonstall_event_handle;
 	uint32_t		gsp_nonstall_event_last_error;
+	uint32_t		gsp_nonstall_leaf_mask[8];
+	uint64_t		gsp_nonstall_intr_count;
+	uint32_t		gsp_nonstall_intr_last_leaf;
+	uint32_t		gsp_nonstall_intr_last_mask;
+	uint32_t		gsp_nonstall_intr_last_top;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
 	uint64_t		vm_bind_wait_count;
