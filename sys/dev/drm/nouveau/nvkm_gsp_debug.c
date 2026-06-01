@@ -232,6 +232,14 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->exec_resv_attach_calls);
 	sbuf_printf(&sb, "resv_attach_bos = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_bos);
+	sbuf_printf(&sb, "async_pending_count = %llu\n",
+	    (unsigned long long)sc->exec_async_pending_count);
+	sbuf_printf(&sb, "async_complete_count = %llu\n",
+	    (unsigned long long)sc->exec_async_complete_count);
+	sbuf_printf(&sb, "async_wait_count = %llu\n",
+	    (unsigned long long)sc->exec_async_wait_count);
+	sbuf_printf(&sb, "async_wait_error_count = %llu\n",
+	    (unsigned long long)sc->exec_async_wait_error_count);
 
 	sbuf_cat(&sb, "\nexec_profile_us\n");
 	sbuf_printf(&sb, "token_wait_us = %llu\n",
