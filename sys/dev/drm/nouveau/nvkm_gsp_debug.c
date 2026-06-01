@@ -19,6 +19,7 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvkm_gsp_vmm.h"
 
 #include <sys/sysctl.h>
 #include <sys/sbuf.h>
@@ -401,6 +402,90 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			matches++;
 		}
 		sbuf_printf(&sb, "fault_trace_matches = %u\n", matches);
+	}
+
+	sbuf_cat(&sb, "\nvm_trace\n");
+	sbuf_printf(&sb, "next = %u\n", sc->vm_trace_next);
+	sbuf_printf(&sb, "seq = %llu\n",
+	    (unsigned long long)sc->vm_trace_seq);
+	if (sc->rc_last_mmu_fault_addr != 0) {
+		struct nvkm_gsp_vmm_pte_info pte_info;
+		uint64_t context_seq = 0;
+		uint32_t matches = 0;
+		uint32_t shown = 0;
+
+		nvkm_gsp_vmm_read_pte(sc->gsp_vmm,
+		    sc->rc_last_mmu_fault_addr, &pte_info);
+		sbuf_printf(&sb,
+		    "fault_pte va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
+		    (unsigned long long)pte_info.va, pte_info.pd2_idx,
+		    pte_info.pd1_idx, pte_info.pd0_idx, pte_info.spt_idx,
+		    pte_info.has_pt, (unsigned long long)pte_info.pte,
+		    (unsigned long long)nvkm_pte_to_sparse());
+
+		for (uint32_t i = 0; i < NVKM_DRM_VM_TRACE_COUNT; i++) {
+			const struct nvkm_drm_vm_trace *trace =
+			    &sc->vm_trace[i];
+
+			if (trace->seq == 0)
+				continue;
+			if (sc->rc_last_mmu_fault_addr < trace->addr ||
+			    sc->rc_last_mmu_fault_addr >=
+			    trace->addr + trace->range)
+				continue;
+			matches++;
+			if (trace->seq > context_seq)
+				context_seq = trace->seq;
+		}
+		sbuf_printf(&sb, "fault_vm_matches = %u\n", matches);
+		for (uint32_t n = 0; n < NVKM_DRM_VM_TRACE_COUNT &&
+		    shown < 16; n++) {
+			const struct nvkm_drm_vm_trace *trace;
+			uint32_t idx;
+
+			idx = (sc->vm_trace_next + NVKM_DRM_VM_TRACE_COUNT -
+			    1 - n) % NVKM_DRM_VM_TRACE_COUNT;
+			trace = &sc->vm_trace[idx];
+			if (trace->seq == 0)
+				continue;
+			if (sc->rc_last_mmu_fault_addr < trace->addr ||
+			    sc->rc_last_mmu_fault_addr >=
+			    trace->addr + trace->range)
+				continue;
+			sbuf_printf(&sb,
+			    "fault_vm_match seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
+			    (unsigned long long)trace->seq, trace->action,
+			    trace->flags, trace->handle,
+			    (unsigned long long)trace->addr,
+			    (unsigned long long)trace->range,
+			    (unsigned long long)trace->bo_offset,
+			    (uintmax_t)trace->obj, trace->bo_domain,
+			    (unsigned long long)trace->bo_paddr,
+			    (unsigned long long)trace->bo_size,
+			    trace->cpu_mapped, trace->error);
+			shown++;
+		}
+		if (context_seq != 0) {
+			uint64_t first_seq;
+
+			first_seq = context_seq > 4 ? context_seq - 4 : 1;
+			sbuf_cat(&sb, "fault_vm_context\n");
+			for (uint32_t i = 0; i < NVKM_DRM_VM_TRACE_COUNT; i++) {
+				const struct nvkm_drm_vm_trace *trace =
+				    &sc->vm_trace[i];
+
+				if (trace->seq < first_seq ||
+				    trace->seq > context_seq + 4)
+					continue;
+				sbuf_printf(&sb,
+				    "vm seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx err=%d\n",
+				    (unsigned long long)trace->seq, trace->action,
+				    trace->flags, trace->handle,
+				    (unsigned long long)trace->addr,
+				    (unsigned long long)trace->range,
+				    trace->error);
+			}
+		}
 	}
 
 	sbuf_cat(&sb, "\nreservation\n");

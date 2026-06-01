@@ -222,6 +222,35 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (0);
 }
 
+static void
+nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
+    uint32_t flags, uint32_t handle, uint64_t addr, uint64_t range,
+    uint64_t bo_offset, struct drm_gem_object *obj, int error)
+{
+	struct nvkm_drm_vm_trace *trace;
+
+	trace = &sc->vm_trace[sc->vm_trace_next % NVKM_DRM_VM_TRACE_COUNT];
+	memset(trace, 0, sizeof(*trace));
+	trace->seq = ++sc->vm_trace_seq;
+	trace->action = action;
+	trace->flags = flags;
+	trace->handle = handle;
+	trace->addr = addr;
+	trace->range = range;
+	trace->bo_offset = bo_offset;
+	trace->error = error;
+	if (obj != NULL) {
+		struct nvkm_bo *bo = to_nvkm_bo(obj);
+
+		trace->obj = (uintptr_t)obj;
+		trace->bo_size = obj->size;
+		trace->bo_paddr = bo->paddr;
+		trace->bo_domain = bo->domain;
+		trace->cpu_mapped = bo->kva != NULL;
+	}
+	sc->vm_trace_next++;
+}
+
 static int
 nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
     const struct drm_nouveau_exec_push *pushes, uint32_t push_count)
@@ -1025,14 +1054,23 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		}
 
 		if (op->op == DRM_NOUVEAU_VM_BIND_OP_UNMAP) {
+			uint32_t action =
+			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0 ?
+			    NVKM_DRM_VM_TRACE_UNMAP_SPARSE :
+			    NVKM_DRM_VM_TRACE_UNMAP;
+
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
 			    (uintmax_t)op->range);
 			err = nvkm_drm_vm_bindings_remove(sc, nfile, op->addr,
 			    op->range);
-			if (err != 0)
+			if (err != 0) {
+				nvkm_drm_vm_trace_record(sc, action, op->flags,
+				    op->handle, op->addr, op->range,
+				    op->bo_offset, NULL, err);
 				break;
+			}
 			if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
 				err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
 				    op->addr, op->range);
@@ -1040,6 +1078,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
 				    op->addr, op->range);
 			}
+			nvkm_drm_vm_trace_record(sc, action, op->flags,
+			    op->handle, op->addr, op->range, op->bo_offset,
+			    NULL, err != 0 ? -err : 0);
 			if (err != 0) {
 				err = -err;
 				nvkm_debugf(sc->dev,
@@ -1060,6 +1101,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    (uintmax_t)op->addr, (uintmax_t)op->range);
 				err = nvkm_gsp_vmm_map_sparse(sc->gsp_vmm,
 				    op->addr, op->range);
+				nvkm_drm_vm_trace_record(sc,
+				    NVKM_DRM_VM_TRACE_MAP_SPARSE, op->flags,
+				    op->handle, op->addr, op->range,
+				    op->bo_offset, NULL, err != 0 ? -err : 0);
 				if (err != 0) {
 					err = -err;
 					nvkm_debugf(sc->dev,
@@ -1081,6 +1126,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 					break;
 				err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
 				    op->addr, op->range);
+				nvkm_drm_vm_trace_record(sc,
+				    NVKM_DRM_VM_TRACE_MAP_NULL, op->flags,
+				    op->handle, op->addr, op->range,
+				    op->bo_offset, NULL, err != 0 ? -err : 0);
 				if (err != 0) {
 					err = -err;
 					nvkm_debugf(sc->dev,
@@ -1141,6 +1190,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    op->addr, (uint8_t *)bo->kva + op->bo_offset,
 				    op->range);
 			}
+			nvkm_drm_vm_trace_record(sc, NVKM_DRM_VM_TRACE_MAP,
+			    op->flags, op->handle, op->addr, op->range,
+			    op->bo_offset, obj, err != 0 ? -err : 0);
 			if (err != 0) {
 				drm_gem_object_put_unlocked(obj);
 				err = -err;
