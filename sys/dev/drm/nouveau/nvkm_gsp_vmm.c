@@ -840,6 +840,7 @@ nvkm_gsp_vmm_dtor(struct nvkm_gsp_vmm *vmm)
 		nvkm_gsp_bar1_free_page(vmm->sc, &pd0->page);
 		kfree(pd0, M_NVKM_VMM);
 	}
+	nvkm_gsp_unregister_nonstall_event(vmm);
 	if (vmm->vaspace.handle != 0)
 		nvkm_gsp_rm_free(&vmm->vaspace);
 	for (i = 0; i < 3; i++)
