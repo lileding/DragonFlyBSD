@@ -465,6 +465,9 @@ struct NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS_dfly {
 #define NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE 128
 #define NV2080_INTR_CATEGORY_ENUM_COUNT          7
 #define NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE 0x20800a5cu
+#define NVKM_CPU_INTR_LEAF(i)		(0x00b81000u + (i) * 4u)
+#define NVKM_CPU_INTR_LEAF_EN_SET(i)	(0x00b81200u + (i) * 4u)
+#define NVKM_CPU_INTR_TOP_EN_SET	0x00b81608u
 
 struct NV2080_CTRL_INTERNAL_INTR_GET_KERNEL_TABLE_ENTRY_dfly {
 	uint16_t engineIdx;
@@ -549,9 +552,21 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		 * allow the finite vectors from the RM table directly, keeping
 		 * the Fedora-observed bits as the base mask.
 		 */
+		memset(sc->gsp_nonstall_leaf_mask, 0,
+		    sizeof(sc->gsp_nonstall_leaf_mask));
+		for (uint32_t i = 0; i < r->tableLen &&
+		    i < NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE; i++) {
+			uint32_t vector = r->table[i].vectorNonStall;
+			uint32_t leaf = vector / 32u;
+			uint32_t bit = vector % 32u;
+
+			if (vector == 0xffffffffu || leaf >= 8u)
+				continue;
+			sc->gsp_nonstall_leaf_mask[leaf] |= (1u << bit);
+		}
 		for (uint32_t leaf = 0; leaf < 8u; leaf++) {
 			if (leaf_mask[leaf] != 0)
-				nvkm_wr32(sc, 0xb81200u + leaf * 4u,
+				nvkm_wr32(sc, NVKM_CPU_INTR_LEAF_EN_SET(leaf),
 				    leaf_mask[leaf]);
 		}
 		nvkm_debugf(sc->dev,
@@ -563,7 +578,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		/* Enable INTR_TOP_EN_SET[0] = 0xf to enable subtree-0 intrs to fire.
 		 * Fedora has this set; we missed it. Without TOP enable, LEAF intrs
 		 * pend but never propagate to CPU/PBDMA scheduler ack path. */
-		nvkm_wr32(sc, 0xb81608u, 0x0000000fu);
+		nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
 		nvkm_debugf(sc->dev,
 		    "gsp_rm: INTR_TOP_EN_SET[0] = 0xf (was 0)\n");
 	}
@@ -660,6 +675,8 @@ nvkm_gsp_unregister_nonstall_event(struct nvkm_gsp_vmm *vmm)
 	struct nvkm_gsp_object event_obj;
 
 	if (sc->gsp_nonstall_event_handle == 0)
+		return;
+	if (vmm != sc->gsp_vmm)
 		return;
 
 	memset(&event_obj, 0, sizeof(event_obj));

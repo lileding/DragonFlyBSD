@@ -23,6 +23,9 @@
 #include <sys/sysctl.h>
 #include <sys/sbuf.h>
 
+#define NVKM_CPU_INTR_LEAF(i)	(0x00b81000u + (i) * 4u)
+#define NVKM_CPU_INTR_TOP	0x00b81600u
+
 static int
 nvkm_gsp_sysctl_blob(SYSCTL_HANDLER_ARGS)
 {
@@ -193,7 +196,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 {
 	struct nvkm_softc *sc = arg1;
 	struct sbuf sb;
-	char buf[4096];
+	char buf[8192];
 	uint32_t bar1_used, bar1_total;
 	uint32_t vmm_pd0_count, vmm_pt_count, sparse_region_count;
 	uint64_t valid_pte_count;
@@ -270,6 +273,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "signal_error_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_error_count);
 
+	sbuf_cat(&sb, "\nirq\n");
+	sbuf_printf(&sb, "isr_count = %llu\n",
+	    (unsigned long long)sc->irq_isr_count);
+	sbuf_printf(&sb, "msi_rearm_count = %llu\n",
+	    (unsigned long long)sc->irq_msi_rearm_count);
+
 	sbuf_cat(&sb, "\ngsp_events\n");
 	sbuf_printf(&sb, "post_event_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_count);
@@ -301,6 +310,22 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->gsp_nonstall_event_handle);
 	sbuf_printf(&sb, "nonstall_event_last_error = %u\n",
 	    sc->gsp_nonstall_event_last_error);
+	sbuf_printf(&sb, "nonstall_intr_count = %llu\n",
+	    (unsigned long long)sc->gsp_nonstall_intr_count);
+	sbuf_printf(&sb, "nonstall_intr_last_leaf = %u\n",
+	    sc->gsp_nonstall_intr_last_leaf);
+	sbuf_printf(&sb, "nonstall_intr_last_mask = 0x%08x\n",
+	    sc->gsp_nonstall_intr_last_mask);
+	sbuf_printf(&sb, "nonstall_intr_last_top = 0x%08x\n",
+	    sc->gsp_nonstall_intr_last_top);
+	sbuf_printf(&sb, "nonstall_intr_top_now = 0x%08x\n",
+	    nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_TOP));
+	for (uint32_t leaf = 0; leaf < 8; leaf++)
+		sbuf_printf(&sb, "nonstall_leaf_mask[%u] = 0x%08x\n",
+		    leaf, sc->gsp_nonstall_leaf_mask[leaf]);
+	for (uint32_t leaf = 0; leaf < 8; leaf++)
+		sbuf_printf(&sb, "nonstall_leaf_pending[%u] = 0x%08x\n",
+		    leaf, nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_LEAF(leaf)));
 
 	sbuf_cat(&sb, "\nreservation\n");
 	sbuf_printf(&sb, "bo_wait_count = %llu\n",
