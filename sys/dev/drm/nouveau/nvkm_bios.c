@@ -83,7 +83,7 @@ nvkm_pramin_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t length)
 	/* Bail out if the display engine reports itself disabled. */
 	dctl = nvkm_rd32(sc, NV_PDISP_GENERAL_CTL);
 	if (dctl & NV_PDISP_GENERAL_CTL_DISABLED) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "PRAMIN: display disabled (0x021c04=0x%x)\n", dctl);
 		return (ENODEV);
 	}
@@ -93,14 +93,14 @@ nvkm_pramin_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t length)
 	if (!(vga_cr & NV_PDISP_VGA_CR_ENABLED) ||
 	    (vga_cr & NV_PDISP_VGA_CR_TARGET_MASK) !=
 	    NV_PDISP_VGA_CR_TARGET_VRAM) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "PRAMIN: VGA aperture not in VRAM (0x625f04=0x%x)\n",
 		    vga_cr);
 		return (ENODEV);
 	}
 	vram_addr = ((uint64_t)(vga_cr & 0xffffff00u)) << 8;
 	if (vram_addr == 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "PRAMIN: vga_cr has no staged address (0x625f04=0x%x)\n",
 		    vga_cr);
 		return (ENODEV);
@@ -110,7 +110,7 @@ nvkm_pramin_read(struct nvkm_softc *sc, uint8_t *buf, uint32_t length)
 	saved_window = nvkm_rd32(sc, NV_PBUS_PRAMIN);
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(vram_addr >> 16));
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "PRAMIN: vga_cr=0x%x vram_addr=%#jx window saved=0x%x\n",
 	    vga_cr, (uintmax_t)vram_addr, saved_window);
 
@@ -155,7 +155,7 @@ nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
 		if (sig != NVKM_ROM_SIG_STD &&
 		    sig != NVKM_ROM_SIG_NV &&
 		    sig != NVKM_ROM_SIG_NV2) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "VBIOS image %d: bad ROM signature 0x%04x at 0x%05x\n",
 			    idx, sig, offset);
 			return (EIO);
@@ -166,7 +166,7 @@ nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
 	pcir = offset + pcir_rel;
 
 	if (pcir + 0x18 > sc->vbios_size) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "VBIOS image %d: PCIR beyond buffer (off=0x%05x rel=0x%04x)\n",
 		    idx, offset, pcir_rel);
 		return (EIO);
@@ -177,7 +177,7 @@ nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
 		if (pcir_sig != NVKM_PCIR_SIG_PCIR &&
 		    pcir_sig != NVKM_PCIR_SIG_NPDS &&
 		    pcir_sig != NVKM_PCIR_SIG_RGIS) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "VBIOS image %d: bad PCIR signature 0x%08x at 0x%05x\n",
 			    idx, pcir_sig, pcir);
 			return (EIO);
@@ -231,7 +231,7 @@ nvkm_bios_parse_image(struct nvkm_softc *sc, uint32_t offset, int idx,
 		}
 	}
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "VBIOS image %d at 0x%05x: %u bytes vendor=0x%04x device=0x%04x "
 	    "class=0x%06x code_type=0x%02x last=%d%s\n",
 	    idx, offset, advance_bytes,
@@ -282,7 +282,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 		nvkm_wr32(sc, 0x001fa824, 0xdeadbe00u);
 		after_lo = nvkm_rd32(sc, 0x001fa824);
 		nvkm_wr32(sc, 0x001fa824, orig_lo);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "WPR2: lo=0x%08x hi=0x%08x, test-write -> readback=0x%08x %s\n",
 		    orig_lo, orig_hi, after_lo,
 		    after_lo == 0xdeadbe00u ? "(WRITABLE)" : "(LOCKED)");
@@ -300,7 +300,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 			if (ver != 2) continue;
 			if (sz_lo != 0x3c || sz_hi != 0x00) continue;
 
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "FwSec desc V2 @ 0x%05x: flags=0x%02x enc=%d "
 			    "imem_phys=0x%x imem_load=%u imem_virt=0x%x "
 			    "dmem_offset=0x%x dmem_phys=0x%x dmem_load=%u "
@@ -317,7 +317,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 			hits++;
 		}
 		if (hits == 0)
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "FwSec: no V2 desc candidates in %u bytes\n",
 			    sc->vbios_size);
 	}
@@ -328,7 +328,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 		if (sig != NVKM_ROM_SIG_STD &&
 		    sig != NVKM_ROM_SIG_NV &&
 		    sig != NVKM_ROM_SIG_NV2) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "VBIOS: no valid ROM signature at offset 0 (got 0x%04x)\n",
 			    sig);
 			kfree(sc->vbios, M_NVKM_VBIOS);
@@ -346,7 +346,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 		error = nvkm_bios_parse_image(sc, offset, idx, &size, &last,
 		    &npde_used);
 		if (error != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "VBIOS: chain truncated at image %d (offset 0x%05x)\n",
 			    idx, offset);
 			break;
@@ -360,7 +360,7 @@ nvkm_bios_init(struct nvkm_softc *sc)
 	if (last)
 		sc->vbios_size = offset + size;
 
-	device_printf(sc->dev, "VBIOS: %d image%s, total %u bytes\n",
+	nvkm_debugf(sc->dev, "VBIOS: %d image%s, total %u bytes\n",
 	    idx, idx == 1 ? "" : "s", sc->vbios_size);
 
 	return (0);

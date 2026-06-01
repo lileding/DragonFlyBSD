@@ -177,7 +177,7 @@ nvkm_gsp_libos_prepare(struct nvkm_softc *sc)
 	    ptes_size + NVKM_GSP_CMDQ_SIZE + NVKM_GSP_MSGQ_SIZE,
 	    NVKM_GSP_PAGE_SIZE, &sc->gsp_shm);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "libos: shm alloc failed (%d)\n", error);
 		return (error);
 	}
@@ -218,7 +218,7 @@ nvkm_gsp_libos_prepare(struct nvkm_softc *sc)
 	cmdq_tx->rxHdrOff = sizeof(*cmdq_tx);
 	cmdq_tx->entryOff = NVKM_GSP_PAGE_SIZE;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "libos: shm paddr=0x%llx pteSz=%u pte#=%u cmdq@+0x%x msgq@+0x%x\n",
 	    (unsigned long long)sc->gsp_shm.paddr,
 	    sc->gsp_shm_ptes_size, sc->gsp_shm_ptes_nr,
@@ -228,7 +228,7 @@ nvkm_gsp_libos_prepare(struct nvkm_softc *sc)
 	error = nvkm_dmamem_alloc(sc, NVKM_GSP_RMARGS_SIZE,
 	    NVKM_GSP_PAGE_SIZE, &sc->gsp_rmargs);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "libos: rmargs alloc failed (%d)\n", error);
 		goto err_shm;
 	}
@@ -305,14 +305,14 @@ nvkm_gsp_libos_prepare(struct nvkm_softc *sc)
 	args[3].kind = NVKM_LIBOS_KIND_CONTIGUOUS;
 	args[3].loc  = NVKM_LIBOS_LOC_SYSMEM;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "libos: args page @0x%llx, LOGINIT=0x%llx LOGINTR=0x%llx LOGRM=0x%llx RMARGS=0x%llx\n",
 	    (unsigned long long)sc->gsp_libos.paddr,
 	    (unsigned long long)args[0].pa,
 	    (unsigned long long)args[1].pa,
 	    (unsigned long long)args[2].pa,
 	    (unsigned long long)args[3].pa);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "libos: rmargs paddr=0x%llx shm=0x%llx ptes=%u cmdq+0x%x msgq+0x%x\n",
 	    (unsigned long long)sc->gsp_rmargs.paddr,
 	    (unsigned long long)sc->gsp_shm.paddr,

@@ -83,7 +83,7 @@ nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 		return (EIO);
 	bh = (const struct nvkm_booter_bin_hdr *)base;
 	if (bh->bin_magic != NVKM_BOOTER_BIN_MAGIC) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: bad bin magic 0x%08x\n", bh->bin_magic);
 		return (EIO);
 	}
@@ -95,7 +95,7 @@ nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	if (bh->header_offset >= fw->datasize ||
 	    bh->data_offset   >= fw->datasize ||
 	    bh->data_offset + bh->data_size > fw->datasize) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: bin_hdr offsets out of range "
 		    "(hdr=0x%x data=0x%x+%u file=%zu)\n",
 		    bh->header_offset, bh->data_offset, bh->data_size,
@@ -113,7 +113,7 @@ nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	lh = (const struct nvkm_booter_hs_load_header_v2 *)
 	    (base + hs->header_offset);
 	if (lh->num_apps < 1) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: no apps in load header (num_apps=%u)\n",
 		    lh->num_apps);
 		return (EIO);
@@ -147,19 +147,19 @@ nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	info->patch_sig	      = patch_sig;
 	info->num_sig	      = num_sig;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: bin magic=0x%x ver=%u size=%u, hs@0x%x ld@0x%x data@0x%x+%u\n",
 	    bh->bin_magic, bh->bin_ver, bh->bin_size,
 	    bh->header_offset, hs->header_offset,
 	    bh->data_offset, bh->data_size);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: nmem(off=0x%x sz=%u) imem(off=0x%x sz=%u) "
 	    "dmem(off=0x%x sz=%u) boot_addr=0x%x apps=%u\n",
 	    info->nmem_offset, info->nmem_size,
 	    info->imem_offset, info->imem_size,
 	    info->dmem_offset, info->dmem_size,
 	    info->boot_addr, lh->num_apps);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: sig_prod off=0x%x sz=%u, patch loc/sig/num = %u/%u/%u\n",
 	    info->sig_prod_offset, info->sig_prod_size,
 	    info->patch_loc, info->patch_sig, info->num_sig);
@@ -207,7 +207,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	int error;
 
 	if (bi->blob == NULL || sec2 == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: cannot start (booter info or sec2 missing)\n");
 		return (ENXIO);
 	}
@@ -222,12 +222,12 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	 */
 	error = nvkm_dmamem_alloc(sc, bi->data_size, 4096, &sc->booter_dma);
 	if (error != 0) {
-		device_printf(sc->dev, "booter: dma alloc failed (%d)\n", error);
+		nvkm_debugf(sc->dev, "booter: dma alloc failed (%d)\n", error);
 		return (error);
 	}
 	memcpy(sc->booter_dma.kva, bi->blob + bi->data_offset, bi->data_size);
 	data = (uint8_t *)sc->booter_dma.kva;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: staged %u bytes (data section) to kva=%p\n",
 	    bi->data_size, data);
 
@@ -254,11 +254,11 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		if (src_off + sig_size <= bi->blob_size &&
 		    dst_off + sig_size <= bi->data_size) {
 			memcpy(data + dst_off, bi->blob + src_off, sig_size);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "booter: patched %u-byte sig idx=%u from blob+0x%x to data+0x%x\n",
 			    sig_size, bi->patch_sig, src_off, dst_off);
 		} else {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u, "
 			    "blob_size=%u data_size=%u)\n",
 			    src_off, sig_size, dst_off, sig_size,
@@ -272,7 +272,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	{
 		int rerr = nvkm_falcon_reset_eng(sec2);
 		if (rerr != 0)
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "booter: SEC2 reset_eng returned %d (continuing)\n",
 			    rerr);
 	}
@@ -297,7 +297,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	    bi->nmem_offset >> 8,
 	    0, false);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: load_imem(nmem) failed (%d)\n", error);
 		goto out_free;
 	}
@@ -308,7 +308,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	    bi->imem_offset >> 8,
 	    0, true);	/* secure tag */
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: load_imem(sec) failed (%d)\n", error);
 		goto out_free;
 	}
@@ -318,11 +318,11 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	    bi->dmem_size,
 	    0);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: load_dmem failed (%d)\n", error);
 		goto out_free;
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: PIO uploaded nmem@imem[0x%x]+%u (tag 0x%x), "
 	    "imem@imem[0x%x]+%u (tag 0x%x SEC), dmem[0]+%u\n",
 	    bi->nmem_offset, bi->nmem_size, bi->nmem_offset >> 8,
@@ -342,7 +342,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		    (uint32_t)(mp & 0xffffffffu));
 		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1,
 		    (uint32_t)(mp >> 32));
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: passing wpr_meta sysmem=0x%llx (mb0=0x%08x mb1=0x%08x)\n",
 		    (unsigned long long)mp,
 		    (uint32_t)(mp & 0xffffffffu),
@@ -352,7 +352,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
 	}
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: starting SEC2 (bootvec=0x%x)\n",
 	    bi->boot_addr);
 
@@ -365,7 +365,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	cpuctl = nvkm_falcon_rd32(sec2, NVKM_FLCN_CPUCTL);
 	dmactl = nvkm_falcon_rd32(sec2, NVKM_FLCN_DMACTL);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "booter: %s mb0=0x%08x mb1=0x%08x cpuctl=0x%08x dmactl=0x%08x\n",
 	    error == 0 ? "halted" : "timed out",
 	    mb0, mb1, cpuctl, dmactl);
@@ -383,7 +383,7 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		uint32_t wpr2_lo = nvkm_rd32(sc, 0x1fa824);
 		uint32_t wpr2_hi = nvkm_rd32(sc, 0x1fa828);
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x WPR2=0x%08x/0x%08x\n",
 		    sctl, exci, irqstat, wpr2_lo, wpr2_hi);
 
@@ -393,10 +393,10 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		d1 = nvkm_falcon_rd32(sec2, 0x1c4);
 		d2 = nvkm_falcon_rd32(sec2, 0x1c4);
 		d3 = nvkm_falcon_rd32(sec2, 0x1c4);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: DMEM[0..0x10] = %08x %08x %08x %08x\n",
 		    d0, d1, d2, d3);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "booter: scratch[c..f] = %08x %08x %08x %08x\n",
 		    nvkm_rd32(sc, 0x001430), nvkm_rd32(sc, 0x001434),
 		    nvkm_rd32(sc, 0x001438), nvkm_rd32(sc, 0x00143c));

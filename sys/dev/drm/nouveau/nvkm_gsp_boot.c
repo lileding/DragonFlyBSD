@@ -178,7 +178,7 @@ nvkm_gsp_radix3_build(struct nvkm_softc *sc, uint64_t data_pa,
 	uint32_t i;
 
 	if (sc->gsp_radix3.kva == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: radix3 alloc missing\n");
 		return (0);
 	}
@@ -197,7 +197,7 @@ nvkm_gsp_radix3_build(struct nvkm_softc *sc, uint64_t data_pa,
 	for (i = 0; i < n_data_pg; i++)
 		l2[i] = data_pa + (uint64_t)i * NVKM_GSP_PAGE_SIZE;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_boot: radix3 built: data %u pages, L2 %u pages; "
 	    "L0=0x%llx L1=0x%llx L2=0x%llx\n",
 	    n_data_pg, n_l2_pg,
@@ -220,20 +220,20 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	int error;
 
 	if (sc->wpr_meta.kva == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: wpr_meta not allocated\n");
 		return (ENXIO);
 	}
 
 	gsp_fw = firmware_get("nvidia/tu102/gsp/gsp-570.144");
 	if (gsp_fw == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: GSP image firmware not loaded\n");
 		return (ENOENT);
 	}
 	bl_fw  = firmware_get("nvidia/tu102/gsp/bootloader-570.144");
 	if (bl_fw == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: GSP bootloader firmware not loaded\n");
 		firmware_put(gsp_fw, FIRMWARE_UNLOAD);
 		return (ENOENT);
@@ -246,19 +246,19 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 		error = nvkm_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    ".fwimage", &fwimage_off, &fwimage_size);
 		if (error != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_boot: ELF has no .fwimage (%d)\n", error);
 			goto out_put;
 		}
 		error = nvkm_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    ".fwsignature_tu10x", &sig_off, &sig_size);
 		if (error != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_boot: ELF has no .fwsignature_tu10x (%d)\n",
 			    error);
 			goto out_put;
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: ELF .fwimage @0x%llx+%llu .fwsignature_tu10x @0x%llx+%llu\n",
 		    (unsigned long long)fwimage_off,
 		    (unsigned long long)fwimage_size,
@@ -269,7 +269,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 		error = nvkm_dmamem_alloc(sc, roundup(sig_size,
 		    NVKM_GSP_PAGE_SIZE), NVKM_GSP_PAGE_SIZE, &sc->gsp_sig);
 		if (error != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_boot: sig dma alloc failed (%d)\n", error);
 			goto out_put;
 		}
@@ -286,7 +286,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 
 	bl_size = bl_fw->datasize;
 	if (bl_size < sizeof(*bl_hdr)) {
-		device_printf(sc->dev, "gsp_boot: BL fw too small (%u)\n",
+		nvkm_debugf(sc->dev, "gsp_boot: BL fw too small (%u)\n",
 		    bl_size);
 		error = EIO;
 		goto out_put;
@@ -294,7 +294,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	bl_hdr = (const struct nvkm_gsp_bin_hdr *)bl_fw->data;
 	if (bl_hdr->header_offset + sizeof(*bl_desc) > bl_size ||
 	    bl_hdr->data_offset + bl_hdr->data_size > bl_size) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: BL bin_hdr OOB (hdr@0x%x data@0x%x+%u of %u)\n",
 		    bl_hdr->header_offset, bl_hdr->data_offset,
 		    bl_hdr->data_size, bl_size);
@@ -306,12 +306,12 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	bl_payload_off  = bl_hdr->data_offset;
 	bl_payload_size = bl_hdr->data_size;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_boot: gsp_image=%u B (%u pages, %u L2), BL=%u B "
 	    "(payload@0x%x size %u)\n",
 	    img_size, img_pages, l2_pages,
 	    bl_size, bl_payload_off, bl_payload_size);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_boot: BL desc ver=%u appVer=0x%x monitorCode@0x%x+%u "
 	    "monitorData@0x%x+%u manifest@0x%x+%u\n",
 	    bl_desc->version, bl_desc->appVersion,
@@ -324,7 +324,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	    (bus_size_t)img_pages * NVKM_GSP_PAGE_SIZE,
 	    NVKM_GSP_PAGE_SIZE, &sc->gsp_image);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: GSP image dma alloc failed (%d) for %u B\n",
 		    error, img_pages * NVKM_GSP_PAGE_SIZE);
 		goto out_put;
@@ -335,7 +335,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	error = nvkm_dmamem_alloc(sc, radix3_alloc_size,
 	    NVKM_GSP_PAGE_SIZE, &sc->gsp_radix3);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: radix3 dma alloc failed (%d) for %u B\n",
 		    error, radix3_alloc_size);
 		nvkm_dmamem_free(sc, &sc->gsp_image);
@@ -350,7 +350,7 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 	    roundup(bl_payload_size, NVKM_GSP_PAGE_SIZE),
 	    NVKM_GSP_PAGE_SIZE, &sc->gsp_bl);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: BL dma alloc failed (%d)\n", error);
 		nvkm_dmamem_free(sc, &sc->gsp_radix3);
 		nvkm_dmamem_free(sc, &sc->gsp_image);
@@ -463,20 +463,20 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 		meta->bootCount = 0;
 		meta->verified = 0;
 
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: FB layout fb=0x%llx bios=0x%llx frts=0x%llx+0x%llx\n",
 		    (unsigned long long)fb_sz,
 		    (unsigned long long)bios_addr,
 		    (unsigned long long)frts_off,
 		    (unsigned long long)frts_sz);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: WPR2 [0x%llx..0x%llx) bootbin=0x%llx gspfw=0x%llx heap=0x%llx\n",
 		    (unsigned long long)wpr_start,
 		    (unsigned long long)meta->gspFwWprEnd,
 		    (unsigned long long)boot_off,
 		    (unsigned long long)gsp_off,
 		    (unsigned long long)heap_off);
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_boot: meta.radix3=0x%llx (size %u) bl=0x%llx (size %u)\n",
 		    (unsigned long long)meta->sysmemAddrOfRadix3Elf,
 		    (uint32_t)meta->sizeOfRadix3Elf,

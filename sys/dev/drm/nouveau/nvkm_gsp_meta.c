@@ -49,7 +49,7 @@ nvkm_gsp_meta_init(struct nvkm_softc *sc)
 	error = nvkm_dmamem_alloc(sc, NVKM_GSP_FW_WPR_META_SIZE, 4096,
 	    &sc->wpr_meta);
 	if (error != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_meta: alloc failed (%d)\n", error);
 		return (error);
 	}
@@ -65,7 +65,7 @@ nvkm_gsp_meta_init(struct nvkm_softc *sc)
 	 * bin, FRTS layout etc.).
 	 */
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_meta: allocated 256 B @ kva=%p paddr=0x%llx "
 	    "(magic=0x%llx revision=%llu)\n",
 	    m, (unsigned long long)sc->wpr_meta.paddr,
