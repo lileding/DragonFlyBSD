@@ -215,16 +215,13 @@ nvkm_drm_vm_binding_drop_visible(struct nvkm_softc *sc,
 static int
 nvkm_drm_vm_bindings_unmap(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    uint32_t *punmapped, uint32_t *pdeferred,
-    struct nvkm_drm_vm_binding **pwait_binding)
+    uint32_t *punmapped, uint32_t *pdeferred)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
 	int err = 0;
 
 	*punmapped = 0;
 	*pdeferred = 0;
-	if (pwait_binding != NULL)
-		*pwait_binding = NULL;
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
@@ -232,52 +229,13 @@ nvkm_drm_vm_bindings_unmap(struct nvkm_softc *sc,
 
 		if (binding->visible)
 			(*punmapped)++;
-		if (binding->exec_refs != 0) {
+		if (binding->exec_refs != 0)
 			(*pdeferred)++;
-			if (pwait_binding != NULL && *pwait_binding == NULL)
-				*pwait_binding = binding;
-		}
 		err = nvkm_drm_vm_binding_drop_visible(sc, binding, "unmap");
 		if (err != 0)
 			return (err);
 	}
 	return (0);
-}
-
-static int
-nvkm_drm_vm_bindings_unmap_wait(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    uint32_t *punmapped, uint32_t *pdeferred)
-{
-	struct nvkm_drm_vm_binding *wait_binding;
-	int err;
-	int wait_ticks = hz / 100;
-	int timeout_ticks = 5 * hz;
-
-	if (wait_ticks < 1)
-		wait_ticks = 1;
-
-	for (;;) {
-		nvkm_drm_exec_complete_intr(sc);
-		wait_binding = NULL;
-		err = nvkm_drm_vm_bindings_unmap(sc, nfile, addr, size,
-		    punmapped, pdeferred, &wait_binding);
-		if (err != 0 || *pdeferred == 0)
-			return (err);
-		if (timeout_ticks <= 0) {
-			sc->vm_bind_wait_error_count++;
-			return (-ETIME);
-		}
-
-		sc->vm_bind_wait_count++;
-		err = tsleep(wait_binding != NULL ? (void *)wait_binding :
-		    (void *)nfile, 0, "nvkvmb", wait_ticks);
-		if (err != 0 && err != EWOULDBLOCK) {
-			sc->vm_bind_wait_error_count++;
-			return (-err);
-		}
-		timeout_ticks -= wait_ticks;
-	}
 }
 
 static int
@@ -1168,7 +1126,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
 			    (uintmax_t)op->range);
 			err = nvkm_drm_vm_bindings_unmap(sc, nfile, op->addr,
-			    op->range, &unmapped, &deferred, NULL);
+			    op->range, &unmapped, &deferred);
 			if (err != 0) {
 				nvkm_drm_vm_trace_record(sc, action, op->flags,
 				    op->handle, op->addr, op->range,
@@ -1239,8 +1197,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    i, op->flags, (uintmax_t)op->addr,
 				    (uintmax_t)op->range);
 				err = nvkm_drm_vm_bindings_unmap(sc, nfile,
-				    op->addr, op->range, &unmapped, &deferred,
-				    NULL);
+				    op->addr, op->range, &unmapped, &deferred);
 				if (err != 0)
 					break;
 				if (deferred != 0) {
@@ -1293,8 +1250,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
 			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
-			err = nvkm_drm_vm_bindings_unmap_wait(sc, nfile,
-			    op->addr, op->range, &unmapped, &deferred);
+			err = nvkm_drm_vm_bindings_unmap(sc, nfile, op->addr,
+			    op->range, &unmapped, &deferred);
 			if (err != 0) {
 				drm_gem_object_put_unlocked(obj);
 				break;
@@ -1953,7 +1910,6 @@ nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
 		KASSERT(binding->exec_refs > 0,
 		    ("nvkm_drm: binding exec_refs underflow"));
 		binding->exec_refs--;
-		wakeup(binding);
 		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
 	}
 	kfree(bindings);
