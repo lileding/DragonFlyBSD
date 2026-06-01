@@ -735,7 +735,8 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 		struct NV_VASPACE_ALLOCATION_PARAMETERS_r535 *args;
 
 		args = nvkm_gsp_rm_alloc_get(&vmm->device.object,
-		    NVKM_RM_VASPACE, FERMI_VASPACE_A, sizeof(*args),
+		    nvkm_gsp_client_child_handle(&vmm->client,
+		    NVKM_RM_VASPACE), FERMI_VASPACE_A, sizeof(*args),
 		    &vmm->vaspace);
 		if (args == NULL) {
 			err = ENOMEM;
@@ -767,7 +768,8 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	{
 		struct nvkm_gsp_object usermode_obj;
 		void *up = nvkm_gsp_rm_alloc_get(&vmm->device.subdevice,
-		    0xc4610000u, 0x0000c461u, 0, &usermode_obj);
+		    nvkm_gsp_client_child_handle(&vmm->client, 0xc4610000u),
+		    0x0000c461u, 0, &usermode_obj);
 		if (up != NULL) {
 			int uerr = nvkm_gsp_rm_alloc_wr(&usermode_obj, up);
 			device_printf(sc->dev,

@@ -72,6 +72,16 @@ struct nvkm_gsp_client {
 	struct nvkm_softc	*sc;
 };
 
+static __inline uint32_t
+nvkm_gsp_client_child_handle(struct nvkm_gsp_client *client, uint32_t base)
+{
+	/* GSP treats RM object handles as global enough that fixed child
+	 * handles collide across our primary and golden clients.  Preserve
+	 * the readable nouveau-style base while making per-client children
+	 * distinct. */
+	return (base | (client->object.handle & 0x00000fffu));
+}
+
 /* === RM_ALLOC ===
  * Allocate a new RM resource under `parent`. `new_obj` is the caller's
  * uninitialised nvkm_gsp_object; we fill it in. Returned pointer is the
