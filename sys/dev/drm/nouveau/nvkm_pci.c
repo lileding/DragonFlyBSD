@@ -24,6 +24,11 @@
 
 #define NVKM_GSP_DEBUG_NOCAT	0
 #define NVKM_RUN_SUBMIT_TEST	0
+#define NVKM_CPU_INTR_LEAF(i)	(0x00b81000u + (i) * 4u)
+#define NVKM_CPU_INTR_TOP	0x00b81600u
+#define NVKM_CPU_INTR_TOP_EN_SET	0x00b81608u
+#define NVKM_CPU_INTR_TOP_EN_CLEAR	0x00b81610u
+#define NVKM_PCI_MSI_REARM	0x68
 
 struct nvkm_pci_id {
 	uint16_t	device;
@@ -93,6 +98,15 @@ nvkm_gsp_test_kthread(void *arg)
 #endif
 
 static void
+nvkm_gsp_msi_rearm(struct nvkm_softc *sc)
+{
+	if (!sc->irq_msi)
+		return;
+	pci_write_config(sc->dev, NVKM_PCI_MSI_REARM, 0xff, 1);
+	sc->irq_msi_rearm_count++;
+}
+
+static void
 nvkm_gsp_drain_kthread(void *arg)
 {
 	struct nvkm_softc *sc = arg;
@@ -111,14 +125,36 @@ static void
 nvkm_gsp_isr(void *arg)
 {
 	struct nvkm_softc *sc = arg;
-	uint32_t intr, inte, stat;
+	uint32_t intr, inte, stat, top;
 
+	sc->irq_isr_count++;
+	nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_CLEAR, 0x0000000fu);
+	nvkm_gsp_msi_rearm(sc);
 	intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
 	/* Falcon riscv_irqmask: addr2 (0x1000) + 0x2b4 */
 	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
 	stat = intr & inte;
-	if (stat == 0)
+	top = nvkm_rd32(sc, NVKM_CPU_INTR_TOP);
+	if (stat == 0 && top == 0) {
+		nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
 		return;
+	}
+
+	for (uint32_t leaf = 0; leaf < 8u; leaf++) {
+		uint32_t mask, nonstall;
+
+		if ((top & (1u << (leaf / 2u))) == 0)
+			continue;
+		mask = nvkm_rd32(sc, NVKM_CPU_INTR_LEAF(leaf));
+		nonstall = mask & sc->gsp_nonstall_leaf_mask[leaf];
+		if (nonstall == 0)
+			continue;
+		sc->gsp_nonstall_intr_count++;
+		sc->gsp_nonstall_intr_last_leaf = leaf;
+		sc->gsp_nonstall_intr_last_mask = nonstall;
+		sc->gsp_nonstall_intr_last_top = top;
+		nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), nonstall);
+	}
 
 	if (stat & 0x40) {
 		/* doorbell from GSP-RM: drain msgq, dispatch events */
@@ -132,6 +168,7 @@ nvkm_gsp_isr(void *arg)
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
 	}
+	nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
 	/* Falcon INTR_RETRIGGER0 (per gm200_flcn pattern) */
 	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x16c, 0x1);
 }
@@ -697,6 +734,7 @@ nvkm_pci_attach(device_t dev)
 					if (err == 0) {
 						/* Arm doorbell IRQ in NV_USERMODE. */
 						nvkm_wr32(sc, 0x110004, 0x40);
+						nvkm_gsp_msi_rearm(sc);
 						nvkm_debugf(dev,
 						    "gsp: IRQ wired (rid=%d), doorbell intr armed\n",
 						    sc->irq_rid);
