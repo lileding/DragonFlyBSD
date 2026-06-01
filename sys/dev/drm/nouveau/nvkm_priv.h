@@ -213,6 +213,7 @@ LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
 struct nvkm_drm_exec_pending {
 	LIST_ENTRY(nvkm_drm_exec_pending) link;
+	struct nvkm_gsp_chan *chan;
 	volatile uint32_t *sema;
 	uint32_t payload;
 	struct dma_fence *fences[64];
