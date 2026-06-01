@@ -271,6 +271,33 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "cpu_bind_flushed = %llu\n",
 	    (unsigned long long)sc->exec_profile_cpu_bind_flushed);
 
+	sbuf_cat(&sb, "\nexec_trace\n");
+	sbuf_printf(&sb, "next = %u\n", sc->exec_trace_next);
+	{
+		uint32_t end = sc->exec_trace_next;
+		uint32_t start = end > 8 ? end - 8 : 0;
+
+		for (uint32_t pos = start; pos < end; pos++) {
+			const struct nvkm_drm_exec_trace *trace;
+
+			trace = &sc->exec_trace[pos %
+			    NVKM_DRM_EXEC_TRACE_COUNT];
+			sbuf_printf(&sb,
+			    "trace[%u] seq=%llu ch=%u chid=%u slot=%u gpf=%u push=%u/%u va=0x%016llx len=0x%08x flags=0x%08x binding=0x%016llx+0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx cpu=%u done=%u err=%d\n",
+			    pos, (unsigned long long)trace->seq,
+			    trace->channel, trace->chid, trace->post_slot,
+			    trace->gpf_index, trace->push_index,
+			    trace->push_count, (unsigned long long)trace->va,
+			    trace->va_len, trace->flags,
+			    (unsigned long long)trace->binding_addr,
+			    (unsigned long long)trace->binding_size,
+			    (uintmax_t)trace->obj, trace->bo_domain,
+			    (unsigned long long)trace->bo_paddr,
+			    trace->cpu_mapped, trace->completed,
+			    trace->error);
+		}
+	}
+
 	sbuf_cat(&sb, "\nsyncobj\n");
 	sbuf_printf(&sb, "wait_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_count);
@@ -334,6 +361,47 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
 		sbuf_printf(&sb, "nonstall_leaf_pending[%u] = 0x%08x\n",
 		    leaf, nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_LEAF(leaf)));
+
+	sbuf_cat(&sb, "\nrc\n");
+	sbuf_printf(&sb, "triggered_count = %llu\n",
+	    (unsigned long long)sc->rc_triggered_count);
+	sbuf_printf(&sb, "last_engine_type = %u\n", sc->rc_last_engine_type);
+	sbuf_printf(&sb, "last_chid = %u\n", sc->rc_last_chid);
+	sbuf_printf(&sb, "last_except_level = %u\n",
+	    sc->rc_last_except_level);
+	sbuf_printf(&sb, "last_except_type = 0x%08x\n",
+	    sc->rc_last_except_type);
+	sbuf_printf(&sb, "last_scope = %u\n", sc->rc_last_scope);
+	sbuf_printf(&sb, "last_mmu_fault_addr = 0x%016llx\n",
+	    (unsigned long long)sc->rc_last_mmu_fault_addr);
+	sbuf_printf(&sb, "last_mmu_fault_type = 0x%08x\n",
+	    sc->rc_last_mmu_fault_type);
+	sbuf_printf(&sb, "last_journal_size = %u\n",
+	    sc->rc_last_journal_size);
+	if (sc->rc_last_mmu_fault_addr != 0) {
+		uint32_t matches = 0;
+
+		for (uint32_t i = 0; i < NVKM_DRM_EXEC_TRACE_COUNT; i++) {
+			const struct nvkm_drm_exec_trace *trace =
+			    &sc->exec_trace[i];
+
+			if (trace->seq == 0)
+				continue;
+			if (sc->rc_last_mmu_fault_addr < trace->va ||
+			    sc->rc_last_mmu_fault_addr >=
+			    trace->va + trace->va_len)
+				continue;
+			sbuf_printf(&sb,
+			    "fault_trace_match seq=%llu ch=%u chid=%u slot=%u gpf=%u push=%u/%u va=0x%016llx len=0x%08x done=%u err=%d\n",
+			    (unsigned long long)trace->seq, trace->channel,
+			    trace->chid, trace->post_slot, trace->gpf_index,
+			    trace->push_index, trace->push_count,
+			    (unsigned long long)trace->va, trace->va_len,
+			    trace->completed, trace->error);
+			matches++;
+		}
+		sbuf_printf(&sb, "fault_trace_matches = %u\n", matches);
+	}
 
 	sbuf_cat(&sb, "\nreservation\n");
 	sbuf_printf(&sb, "bo_wait_count = %llu\n",

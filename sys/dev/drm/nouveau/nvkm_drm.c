@@ -324,6 +324,67 @@ nvkm_drm_dump_large_push(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 		nvkm_drm_dump_push_buffer(sc, nfile, va, va_len);
 }
 
+static void
+nvkm_drm_exec_trace_record(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
+    uint64_t seq, uint32_t channel, uint32_t chid, uint32_t post_slot,
+    uint32_t gpf_index, uint32_t push_index, uint32_t push_count,
+    const struct drm_nouveau_exec_push *push)
+{
+	struct nvkm_drm_exec_trace *trace;
+	struct nvkm_drm_vm_binding *binding;
+
+	trace = &sc->exec_trace[sc->exec_trace_next %
+	    NVKM_DRM_EXEC_TRACE_COUNT];
+	memset(trace, 0, sizeof(*trace));
+	trace->seq = seq;
+	trace->channel = channel;
+	trace->chid = chid;
+	trace->post_slot = post_slot;
+	trace->gpf_index = gpf_index;
+	trace->push_index = push_index;
+	trace->push_count = push_count;
+	trace->flags = push->flags;
+	trace->va = push->va;
+	trace->va_len = push->va_len;
+
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		struct nvkm_bo *bo;
+
+		if (!nvkm_drm_vm_ranges_overlap(push->va, push->va_len,
+		    binding->addr, binding->size))
+			continue;
+
+		bo = to_nvkm_bo(binding->obj);
+		trace->binding_addr = binding->addr;
+		trace->binding_size = binding->size;
+		trace->bo_paddr = bo->paddr;
+		trace->bo_domain = bo->domain;
+		trace->obj = (uintptr_t)binding->obj;
+		trace->cpu_mapped = bo->kva != NULL;
+		break;
+	}
+
+	sc->exec_trace_next++;
+}
+
+static void
+nvkm_drm_exec_trace_complete(struct nvkm_softc *sc,
+    const struct nvkm_drm_exec_pending *pending, int error)
+{
+	for (uint32_t i = 0; i < pending->trace_count; i++) {
+		struct nvkm_drm_exec_trace *trace;
+		uint32_t idx = (pending->trace_first + i) %
+		    NVKM_DRM_EXEC_TRACE_COUNT;
+
+		trace = &sc->exec_trace[idx];
+		if (trace->seq != pending->trace_seq ||
+		    trace->post_slot != pending->post_slot)
+			continue;
+		trace->completed = 1;
+		trace->error = error;
+	}
+}
+
 int
 nvkm_drm_register(struct nvkm_softc *sc)
 {
@@ -1365,9 +1426,78 @@ nvkm_drm_submit_slot_release(struct nvkm_gsp_chan *chan, uint32_t slot)
 	wakeup(chan);
 }
 
+static uint32_t
+nvkm_drm_gpfifo_required(uint32_t put, uint32_t push_count)
+{
+	uint32_t required = 0;
+
+	for (uint32_t i = 0; i < push_count; i++) {
+		if ((put & (NVKM_DRM_GPFIFO_FETCH_WINDOW - 1)) ==
+		    NVKM_DRM_GPFIFO_FETCH_WINDOW - 1) {
+			required++;
+			put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+		}
+		required++;
+		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	}
+	if ((put & (NVKM_DRM_GPFIFO_FETCH_WINDOW - 1)) ==
+	    NVKM_DRM_GPFIFO_FETCH_WINDOW - 1)
+		required++;
+	required++;
+	return (required);
+}
+
+static uint32_t
+nvkm_drm_gpfifo_free(uint32_t get, uint32_t put)
+{
+	return ((get - put - 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1));
+}
+
+static int
+nvkm_drm_gpfifo_wait_space(struct nvkm_softc *sc, struct nvkm_gsp_chan *chan,
+    uint64_t slot_bar1, uint32_t push_count, uint32_t *put)
+{
+	uint32_t required;
+	int timeout_ticks = 5 * hz;
+	int wait_ticks = hz / 100;
+
+	if (wait_ticks < 1)
+		wait_ticks = 1;
+
+	while (timeout_ticks > 0) {
+		uint32_t get;
+		uint32_t free;
+
+		*put = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
+		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+		get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET) &
+		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+		required = nvkm_drm_gpfifo_required(*put, push_count);
+		if (required >= NVKM_DRM_GPFIFO_ENTRIES)
+			return (-EINVAL);
+		free = nvkm_drm_gpfifo_free(get, *put);
+		if (free >= required)
+			return (0);
+
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC waits for GPFIFO space chid=%d get=%u put=%u free=%u required=%u\n",
+		    chan->chid, get, *put, free, required);
+		lwkt_reltoken(&sc->gsp_tok);
+		(void)tsleep(chan, 0, "nvkgpf", wait_ticks);
+		lwkt_gettoken(&sc->gsp_tok);
+		timeout_ticks -= wait_ticks;
+	}
+
+	nvkm_debugf(sc->dev,
+	    "nvkm_drm: EXEC GPFIFO space timeout chid=%d put=%u required=%u\n",
+	    chan->chid, *put, nvkm_drm_gpfifo_required(*put, push_count));
+	return (-ETIME);
+}
+
 static struct nvkm_drm_exec_pending *
 nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
     volatile uint32_t *sema, uint32_t payload, uint32_t post_slot,
+    uint64_t trace_seq, uint32_t trace_first, uint32_t trace_count,
     struct nvkm_drm_exec_signal *signals, uint32_t sig_count,
     struct dma_fence *exec_fence)
 {
@@ -1381,6 +1511,9 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
 	pending->sema = sema;
 	pending->payload = payload;
 	pending->post_slot = post_slot;
+	pending->trace_seq = trace_seq;
+	pending->trace_first = trace_first;
+	pending->trace_count = trace_count;
 	if (signals != NULL && sig_count != 0) {
 		pending->fence_count = sig_count;
 		for (uint32_t i = 0; i < sig_count; i++)
@@ -1415,10 +1548,37 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 			continue;
 
 		LIST_REMOVE(pending, link);
+		nvkm_drm_exec_trace_complete(sc, pending, error);
 		nvkm_drm_exec_pending_signal(pending, error);
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
 		nvkm_drm_submit_slot_release(chan, pending->post_slot);
+		nvkm_drm_exec_pending_put(pending);
+	}
+}
+
+void
+nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
+    int error)
+{
+	struct nvkm_drm_exec_pending *pending, *next;
+
+	for (pending = LIST_FIRST(&sc->exec_pending); pending != NULL;
+	    pending = next) {
+		next = LIST_NEXT(pending, link);
+		if (pending->chan == NULL ||
+		    (uint32_t)pending->chan->chid != chid)
+			continue;
+
+		pending->chan->faulted = 1;
+		pending->chan->fault_error = error;
+		LIST_REMOVE(pending, link);
+		nvkm_drm_exec_trace_complete(sc, pending, error);
+		nvkm_drm_exec_pending_signal(pending, error);
+		sc->exec_async_wait_error_count++;
+		atomic_store_rel_int(&pending->done, 1);
+		wakeup(pending);
+		nvkm_drm_submit_slot_release(pending->chan, pending->post_slot);
 		nvkm_drm_exec_pending_put(pending);
 	}
 }
@@ -1436,6 +1596,7 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 			continue;
 
 		LIST_REMOVE(pending, link);
+		nvkm_drm_exec_trace_complete(sc, pending, 0);
 		nvkm_drm_exec_pending_signal(pending, 0);
 		sc->exec_async_complete_count++;
 		atomic_store_rel_int(&pending->done, 1);
@@ -1588,7 +1749,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1, post_gva, sema_gva;
-	uint32_t put, payload, post_slot, post_offset, sema_offset;
+	uint32_t put = 0, payload, post_slot, post_offset, sema_offset;
+	uint64_t trace_seq;
+	uint32_t trace_first = 0;
+	uint32_t trace_count = 0;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
 	int err = 0;
@@ -1671,6 +1835,13 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 	profile_push_start = nvkm_drm_profile_now_us();
 	gpf = (uint32_t *)chan->submit_gpf.kva;
+	if (chan->faulted) {
+		err = chan->fault_error != 0 ? chan->fault_error : -EIO;
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC rejected faulted channel=%u chid=%d err=%d\n",
+		    req->channel, chan->chid, err);
+		goto out_unlock;
+	}
 	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
@@ -1689,8 +1860,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    (uint64_t)((uint32_t)chan->chid % 8u) *
 	    NV_USERD_SLOT_SIZE;
 
-	put = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
-	    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	err = nvkm_drm_gpfifo_wait_space(sc, chan, slot_bar1, req->push_count,
+	    &put);
+	if (err != 0)
+		goto out_unlock;
 	payload = (uint32_t)(req->channel << 16) ^ put ^ req->push_count ^
 	    0x51a70000u;
 	sema[0] = 0;
@@ -1732,6 +1905,13 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    pushes[i].flags, put, entry0, entry1);
 		nvkm_drm_dump_large_push(sc, nfile, pushes[i].va,
 		    pushes[i].va_len);
+		if (trace_count == 0)
+			trace_first = sc->exec_trace_next;
+		trace_seq = sc->exec_submit_count;
+		nvkm_drm_exec_trace_record(sc, nfile, trace_seq, req->channel,
+		    chan->chid, post_slot, put, i, req->push_count,
+		    &pushes[i]);
+		trace_count++;
 		gpf[put * 2 + 0] = entry0;
 		gpf[put * 2 + 1] = entry1;
 		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
@@ -1790,7 +1970,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 
 	pending = nvkm_drm_exec_pending_create(chan, (volatile uint32_t *)sema,
-	    payload, post_slot, signals, req->sig_count, exec_fence);
+	    payload, post_slot, sc->exec_submit_count, trace_first,
+	    trace_count, signals, req->sig_count, exec_fence);
 	if (pending == NULL) {
 		err = -ENOMEM;
 		goto out_unlock;
