@@ -154,6 +154,7 @@ nvkm_gsp_isr(void *arg)
 		sc->gsp_nonstall_intr_last_mask = nonstall;
 		sc->gsp_nonstall_intr_last_top = top;
 		nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), nonstall);
+		nvkm_drm_exec_complete_intr(sc);
 	}
 
 	if (stat & 0x40) {
@@ -438,6 +439,7 @@ nvkm_pci_attach(device_t dev)
 	lwkt_token_init(&sc->gsp_tok, "nvkm-gsp");
 	nvkm_chid_init(sc);
 	LIST_INIT(&sc->gsp_pending);
+	LIST_INIT(&sc->exec_pending);
 
 	nvkm_debugf(dev,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",

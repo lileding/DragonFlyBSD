@@ -195,6 +195,7 @@ struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
+struct dma_fence;
 
 /* Per-RPC pending entry: queued on sc->gsp_pending while waiting
  * for a reply that matches function. The msgq drainer (ISR or
@@ -209,6 +210,16 @@ struct nvkm_gsp_pending {
 	uint32_t  reply_len;
 };
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
+
+struct nvkm_drm_exec_pending {
+	LIST_ENTRY(nvkm_drm_exec_pending) link;
+	volatile uint32_t *sema;
+	uint32_t payload;
+	struct dma_fence *fences[64];
+	uint32_t fence_count;
+	volatile u_int done;
+};
+LIST_HEAD(nvkm_drm_exec_pending_list, nvkm_drm_exec_pending);
 
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
@@ -332,6 +343,7 @@ struct nvkm_softc {
 	struct lwkt_token       chid_tok;       /* per-fifo chid pool lock */
 	uint64_t                chid_used[32];  /* 2048-bit chid bitmap */
 	struct nvkm_gsp_pending_list gsp_pending;
+	struct nvkm_drm_exec_pending_list exec_pending;
 
 	/* IRQ resource + ithread serializer (DragonFly native model). */
 	int			irq_rid;
@@ -360,6 +372,10 @@ struct nvkm_softc {
 	uint64_t		exec_signal_fence_count;
 	uint64_t		exec_resv_attach_calls;
 	uint64_t		exec_resv_attach_bos;
+	uint64_t		exec_async_pending_count;
+	uint64_t		exec_async_complete_count;
+	uint64_t		exec_async_wait_count;
+	uint64_t		exec_async_wait_error_count;
 	uint64_t		sync_wait_count;
 	uint64_t		sync_wait_error_count;
 	uint64_t		sync_signal_count;
@@ -769,6 +785,8 @@ int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc,
 	    struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
+
+void	nvkm_drm_exec_complete_intr(struct nvkm_softc *sc);
 
 
 /* BAR1 PDB control register (tu102_bar.c references 0xb80f40

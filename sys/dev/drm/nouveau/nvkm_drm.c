@@ -1299,6 +1299,37 @@ nvkm_drm_exec_signals_signal(struct nvkm_drm_exec_signal *signals,
 	}
 }
 
+static void
+nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
+{
+	for (uint32_t i = 0; i < pending->fence_count; i++) {
+		if (error != 0)
+			dma_fence_set_error(pending->fences[i], error);
+		(void)dma_fence_signal(pending->fences[i]);
+	}
+}
+
+void
+nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
+{
+	struct nvkm_drm_exec_pending *pending, *next;
+
+	lwkt_gettoken(&sc->gsp_tok);
+	for (pending = LIST_FIRST(&sc->exec_pending); pending != NULL;
+	    pending = next) {
+		next = LIST_NEXT(pending, link);
+		if (*(pending->sema) != pending->payload)
+			continue;
+
+		LIST_REMOVE(pending, link);
+		nvkm_drm_exec_pending_signal(pending, 0);
+		sc->exec_async_complete_count++;
+		atomic_store_rel_int(&pending->done, 1);
+		wakeup(pending);
+	}
+	lwkt_reltoken(&sc->gsp_tok);
+}
+
 static int
 nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
     struct drm_file *file_priv, uint32_t count, uint64_t sig_ptr,
@@ -1482,13 +1513,17 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct nvkm_gsp_chan *chan;
 	struct drm_nouveau_exec_push *pushes;
 	struct nvkm_drm_exec_signal *signals = NULL;
+	struct nvkm_drm_exec_pending pending;
 	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1;
 	uint32_t put, payload;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
+	long wait_ret;
 	int err = 0;
+	bool gsp_tok_held = false;
+	bool exec_completion_queued = false;
 
 	if (nfile == NULL)
 		return (-ENXIO);
@@ -1560,6 +1595,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 
 	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&sc->gsp_tok);
+	gsp_tok_held = true;
 	nvkm_drm_profile_add_us(&sc->exec_profile_token_wait_us,
 	    profile_start);
 	profile_push_start = nvkm_drm_profile_now_us();
@@ -1670,6 +1706,18 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
 	    profile_start);
 
+	memset(&pending, 0, sizeof(pending));
+	pending.sema = (volatile uint32_t *)sema;
+	pending.payload = payload;
+	if (signals != NULL && req->sig_count != 0) {
+		pending.fence_count = req->sig_count;
+		for (uint32_t i = 0; i < req->sig_count; i++)
+			pending.fences[i] = signals[i].fence;
+	} else {
+		pending.fence_count = 1;
+		pending.fences[0] = exec_fence;
+	}
+
 	profile_start = nvkm_drm_profile_now_us();
 	nvkm_drm_flush_cpu_vm_bindings(sc, nfile);
 	nvkm_drm_profile_add_us(&sc->exec_profile_flush_cpu_us,
@@ -1684,6 +1732,9 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	cpu_sfence();
 	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
 	    profile_start);
+	LIST_INSERT_HEAD(&sc->exec_pending, &pending, link);
+	exec_completion_queued = true;
+	sc->exec_async_pending_count++;
 	profile_start = nvkm_drm_profile_now_us();
 	nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, put);
 	cpu_sfence();
@@ -1694,14 +1745,21 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 
 	profile_start = nvkm_drm_profile_now_us();
-	for (int us = 0; us < NVKM_DRM_EXEC_POLL_US; us += 10) {
-		sc->exec_profile_poll_iters++;
-		if (*(volatile uint32_t *)sema == payload)
-			break;
-		DELAY(10);
-	}
+	lwkt_reltoken(&sc->gsp_tok);
+	gsp_tok_held = false;
+	sc->exec_async_wait_count++;
+	wait_ret = dma_fence_wait_timeout(exec_fence, false, 5 * hz);
 	nvkm_drm_profile_add_us(&sc->exec_profile_poll_us, profile_start);
-	if (*(volatile uint32_t *)sema != payload) {
+	if (wait_ret <= 0) {
+		bool completed;
+
+		lwkt_gettoken(&sc->gsp_tok);
+		completed = atomic_load_acq_int(&pending.done) != 0;
+		if (!completed)
+			LIST_REMOVE(&pending, link);
+		lwkt_reltoken(&sc->gsp_tok);
+		if (completed)
+			goto exec_complete;
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC timeout channel=%u pushes=%u put=%u sema=0x%08x want=0x%08x get=0x%08x\n",
 		    req->channel, req->push_count, put, sema[0], payload,
@@ -1710,10 +1768,12 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		nvkm_gsp_vmm_debug_dump_pte(sc->gsp_vmm, 0x0000003ffdf41000ULL);
 		nvkm_drm_dump_exec_timeout(sc);
 		sc->exec_timeout_count++;
+		sc->exec_async_wait_error_count++;
 		err = -ETIME;
 		goto out_unlock;
 	}
 
+exec_complete:
 	chan->gpf_put = put;
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: EXEC complete channel=%u pushes=%u sigs=%u err=%d put=%u sema=0x%08x payload=0x%08x\n",
@@ -1723,20 +1783,25 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 out_unlock:
 	profile_start = nvkm_drm_profile_now_us();
 	if (signals != NULL) {
-		nvkm_drm_exec_signals_signal(signals, req->sig_count, err);
+		if (!exec_completion_queued || err != 0)
+			nvkm_drm_exec_signals_signal(signals, req->sig_count,
+			    err);
 		nvkm_drm_exec_signals_put(signals, req->sig_count);
 	} else if (exec_fence != NULL) {
-		if (err != 0)
-			dma_fence_set_error(exec_fence, err);
-		(void)dma_fence_signal(exec_fence);
+		if (!exec_completion_queued || err != 0) {
+			if (err != 0)
+				dma_fence_set_error(exec_fence, err);
+			(void)dma_fence_signal(exec_fence);
+		}
 		dma_fence_put(exec_fence);
 	}
+	if (gsp_tok_held)
+		lwkt_reltoken(&sc->gsp_tok);
 	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
 	if (err != 0)
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC return channel=%u err=%d\n",
 		    req->channel, err);
-	lwkt_reltoken(&sc->gsp_tok);
 	kfree(pushes);
 	return (err);
 }
