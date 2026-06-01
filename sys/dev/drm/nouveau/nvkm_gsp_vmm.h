@@ -22,8 +22,17 @@ struct nvkm_gsp_vmm_pt {
 	struct nvkm_bar1_page	page;  /* VRAM page mapped into BAR1 */
 };
 
+struct nvkm_gsp_vmm_pd1 {
+	LIST_ENTRY(nvkm_gsp_vmm_pd1) link;
+	uint32_t		pd2_idx;
+	struct nvkm_bar1_page	page;
+};
+LIST_HEAD(nvkm_gsp_vmm_pd1_list, nvkm_gsp_vmm_pd1);
+
 struct nvkm_gsp_vmm_pd0 {
 	LIST_ENTRY(nvkm_gsp_vmm_pd0) link;
+	struct nvkm_bar1_page	*pd1_page;
+	uint32_t		pd2_idx;
 	uint32_t		pd1_idx;
 	uint32_t		refcount;
 	struct nvkm_bar1_page	page;
@@ -33,6 +42,7 @@ LIST_HEAD(nvkm_gsp_vmm_pd0_list, nvkm_gsp_vmm_pd0);
 struct nvkm_gsp_vmm_user_pt {
 	LIST_ENTRY(nvkm_gsp_vmm_user_pt) link;
 	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t		pd2_idx;
 	uint32_t		pd1_idx;
 	uint32_t		pd0_idx;
 	uint32_t		valid_pte_count;
@@ -64,10 +74,21 @@ struct nvkm_gsp_vmm {
 	uint64_t		 rm_va_base;
 	uint64_t		 rm_va_size;
 
+	struct nvkm_gsp_vmm_pd1_list user_pd1_pages;
 	struct nvkm_gsp_vmm_pd0_list user_pd0_pages;
 	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
 	struct nvkm_gsp_vmm_sparse_region_list sparse_regions;
 	struct nvkm_dmamem sparse_page;
+};
+
+struct nvkm_gsp_vmm_pte_info {
+	uint64_t	va;
+	uint64_t	pte;
+	uint32_t	pd2_idx;
+	uint32_t	pd1_idx;
+	uint32_t	pd0_idx;
+	uint32_t	spt_idx;
+	uint8_t		has_pt;
 };
 
 /* Construct a complete VMM: allocate client/device/subdevice/vaspace,
@@ -95,6 +116,8 @@ int	 nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
 int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+void	 nvkm_gsp_vmm_read_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    struct nvkm_gsp_vmm_pte_info *info);
 void	 nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va);
 
 #endif /* _NVKM_GSP_VMM_H_ */

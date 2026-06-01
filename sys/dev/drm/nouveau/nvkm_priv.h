@@ -263,6 +263,32 @@ struct nvkm_drm_exec_trace {
 	int error;
 };
 
+#define NVKM_DRM_VM_TRACE_COUNT	4096
+
+enum nvkm_drm_vm_trace_action {
+	NVKM_DRM_VM_TRACE_MAP = 1,
+	NVKM_DRM_VM_TRACE_UNMAP,
+	NVKM_DRM_VM_TRACE_MAP_NULL,
+	NVKM_DRM_VM_TRACE_MAP_SPARSE,
+	NVKM_DRM_VM_TRACE_UNMAP_SPARSE,
+};
+
+struct nvkm_drm_vm_trace {
+	uint64_t seq;
+	uint32_t action;
+	uint32_t flags;
+	uint32_t handle;
+	uint64_t addr;
+	uint64_t range;
+	uint64_t bo_offset;
+	uint64_t bo_size;
+	uint64_t bo_paddr;
+	uint32_t bo_domain;
+	uintptr_t obj;
+	uint8_t cpu_mapped;
+	int error;
+};
+
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
  * page-sized slots inside a fixed high BAR1 window owned by this driver. */
@@ -474,6 +500,9 @@ struct nvkm_softc {
 	uint64_t		exec_profile_cpu_bind_flushed;
 	uint32_t		exec_trace_next;
 	struct nvkm_drm_exec_trace exec_trace[NVKM_DRM_EXEC_TRACE_COUNT];
+	uint64_t		vm_trace_seq;
+	uint32_t		vm_trace_next;
+	struct nvkm_drm_vm_trace vm_trace[NVKM_DRM_VM_TRACE_COUNT];
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
@@ -778,7 +807,7 @@ nvkm_pte_to_vram_flags(uint64_t paddr, uint8_t priv, uint8_t ro)
 static __inline uint64_t
 nvkm_pte_to_sparse(void)
 {
-	return NV_PTE_VALID | (NV_PTE_KIND_INVALID_TURING << 56);
+	return NV_PTE_VOL;
 }
 
 /* === VMM VA layout ===
