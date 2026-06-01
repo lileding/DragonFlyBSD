@@ -637,7 +637,8 @@ nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 
 	memset(device, 0, sizeof(*device));
 
-	dargs = nvkm_gsp_rm_alloc_get(&client->object, NVKM_RM_DEVICE,
+	dargs = nvkm_gsp_rm_alloc_get(&client->object,
+	    nvkm_gsp_client_child_handle(client, NVKM_RM_DEVICE),
 	    NV01_DEVICE_0, sizeof(*dargs), &device->object);
 	if (dargs == NULL)
 		return (ENOMEM);
@@ -651,7 +652,8 @@ nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	device_printf(sc->dev,
 	    "gsp_rm: NV01_DEVICE_0 handle=0x%x ok\n", device->object.handle);
 
-	sargs = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_SUBDEVICE,
+	sargs = nvkm_gsp_rm_alloc_get(&device->object,
+	    nvkm_gsp_client_child_handle(client, NVKM_RM_SUBDEVICE),
 	    NV20_SUBDEVICE_0, sizeof(*sargs), &device->subdevice);
 	if (sargs == NULL) {
 		nvkm_gsp_rm_free(&device->object);
@@ -694,8 +696,9 @@ nvkm_gsp_vaspace_ctor(struct nvkm_gsp_device *device,
 	int err;
 
 	memset(vas, 0, sizeof(*vas));
-	args = nvkm_gsp_rm_alloc_get(&device->object, NVKM_RM_VASPACE,
-	    FERMI_VASPACE_A, sizeof(*args), &vas->object);
+	args = nvkm_gsp_rm_alloc_get(&device->object,
+	    nvkm_gsp_client_child_handle(device->object.client,
+	    NVKM_RM_VASPACE), FERMI_VASPACE_A, sizeof(*args), &vas->object);
 	if (args == NULL)
 		return (ENOMEM);
 
