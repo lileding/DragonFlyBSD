@@ -137,6 +137,69 @@ nvkm_gsp_isr(void *arg)
 }
 
 static int
+nvkm_gsp_evt_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvkm_softc *sc = priv;
+	const uint8_t *p = repv;
+	uint32_t h_client, h_event, notify_index, data, status;
+	uint32_t event_data_size;
+	uint16_t info16;
+	uint8_t b_notify_list;
+
+	(void)fn;
+	sc->gsp_post_event_count++;
+
+	if (repc < 32) {
+		sc->gsp_post_event_short_count++;
+		nvkm_debugf(sc->dev,
+		    "gsp_event: POST_EVENT short len=%u\n", repc);
+		return (EINVAL);
+	}
+
+	h_client = *(const uint32_t *)(const void *)(p + 0);
+	h_event = *(const uint32_t *)(const void *)(p + 4);
+	notify_index = *(const uint32_t *)(const void *)(p + 8);
+	data = *(const uint32_t *)(const void *)(p + 12);
+	info16 = *(const uint16_t *)(const void *)(p + 16);
+	status = *(const uint32_t *)(const void *)(p + 20);
+	event_data_size = *(const uint32_t *)(const void *)(p + 24);
+	b_notify_list = *(const uint8_t *)(const void *)(p + 28);
+
+	sc->gsp_post_event_last_client = h_client;
+	sc->gsp_post_event_last_event = h_event;
+	sc->gsp_post_event_last_notify_index = notify_index;
+	sc->gsp_post_event_last_data = data;
+	sc->gsp_post_event_last_status = status;
+	sc->gsp_post_event_last_data_size = event_data_size;
+
+	if (event_data_size != repc - 32) {
+		sc->gsp_post_event_bad_size_count++;
+		nvkm_debugf(sc->dev,
+		    "gsp_event: POST_EVENT bad size len=%u eventDataSize=%u "
+		    "client=0x%08x event=0x%08x notify=%u data=0x%08x "
+		    "info16=0x%04x status=0x%08x notifyList=%u\n",
+		    repc, event_data_size, h_client, h_event, notify_index, data,
+		    info16, status, b_notify_list);
+		return (EINVAL);
+	}
+
+	/*
+	 * This is the GSP-only event handoff point.  Future channel completion
+	 * support should look up hClient/hEvent here and signal completed
+	 * EXEC fences after checking their GPU-written completion markers.
+	 */
+	sc->gsp_post_event_unhandled_count++;
+	nvkm_debugf(sc->dev,
+	    "gsp_event: POST_EVENT client=0x%08x event=0x%08x notify=%u "
+	    "data=0x%08x info16=0x%04x status=0x%08x dataSize=%u "
+	    "notifyList=%u\n",
+	    h_client, h_event, notify_index, data, info16, status,
+	    event_data_size, b_notify_list);
+
+	return (0);
+}
+
+static int
 nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 #if NVKM_GSP_DEBUG_NOCAT
@@ -501,9 +564,8 @@ nvkm_pci_attach(device_t dev)
 			nvkm_gsp_msg_ntfy_add(sc,
 			    0x1020 /*POST_NOCAT_RECORD*/,
 			    nvkm_gsp_evt_nocat, sc);
-			/* Phase 2 stubs: dispatch but do nothing (or just log). */
 			nvkm_gsp_msg_ntfy_add(sc, 0x1003 /*POST_EVENT*/,
-			    nvkm_gsp_evt_log_only, sc);
+			    nvkm_gsp_evt_post_event, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1004 /*RC_TRIGGERED*/,
 			    nvkm_gsp_evt_rc_triggered, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1005 /*MMU_FAULT_QUEUED*/,
