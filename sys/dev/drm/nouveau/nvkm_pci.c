@@ -23,6 +23,7 @@
 #include <sys/kthread.h>
 
 #define NVKM_GSP_DEBUG_NOCAT	0
+#define NVKM_RUN_SUBMIT_TEST	0
 
 struct nvkm_pci_id {
 	uint16_t	device;
@@ -74,6 +75,7 @@ nvkm_pci_release_bars(struct nvkm_softc *sc)
 	}
 }
 
+#if NVKM_RUN_SUBMIT_TEST
 static void
 nvkm_gsp_test_kthread(void *arg)
 {
@@ -81,13 +83,14 @@ nvkm_gsp_test_kthread(void *arg)
 
 	/* Let drm_register, drain kthread, msgq settle before submit. */
 	tsleep(&sc->gsp_test_td, 0, "gsp_twrm", hz * 3);
-	device_printf(sc->dev, "gsp: submit_test kthread starting\n");
+	nvkm_debugf(sc->dev, "gsp: submit_test kthread starting\n");
 	(void)nvkm_gsp_submit_test(sc);
-	device_printf(sc->dev, "gsp: submit_test kthread exiting\n");
+	nvkm_debugf(sc->dev, "gsp: submit_test kthread exiting\n");
 	sc->gsp_test_done = true;
 	wakeup(&sc->gsp_test_done);
 	kthread_exit();
 }
+#endif
 
 static void
 nvkm_gsp_drain_kthread(void *arg)
@@ -95,12 +98,12 @@ nvkm_gsp_drain_kthread(void *arg)
 	struct nvkm_softc *sc = arg;
 	/* Wait 2 sec for attach to finish before draining. */
 	tsleep(&sc->gsp_drain_td, 0, "gsp_warm", hz * 2);
-	device_printf(sc->dev, "gsp: msgq drain kthread started\n");
+	nvkm_debugf(sc->dev, "gsp: msgq drain kthread started\n");
 	while (!sc->gsp_drain_exit) {
 		(void)nvkm_gsp_msg_dispatch_all(sc);
 		tsleep(&sc->gsp_drain_td, 0, "gsp_drain", hz / 10);
 	}
-	device_printf(sc->dev, "gsp: msgq drain kthread exiting\n");
+	nvkm_debugf(sc->dev, "gsp: msgq drain kthread exiting\n");
 	kthread_exit();
 }
 
@@ -124,7 +127,7 @@ nvkm_gsp_isr(void *arg)
 		stat &= ~0x40;
 	}
 	if (stat != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_isr: unexpected stat=0x%x\n", stat);
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
@@ -147,7 +150,7 @@ nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 
 	(void)fn;
 	if (repc < 180) {
-		device_printf(sc->dev, "NOCAT: short msg len=%u\n", repc);
+		nvkm_debugf(sc->dev, "NOCAT: short msg len=%u\n", repc);
 		return (0);
 	}
 
@@ -164,7 +167,7 @@ nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	tdr_reason = *(const uint32_t *)(const void *)(p + 172);
 	diag_len = *(const uint32_t *)(const void *)(p + 176);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "NOCAT: flags=0x%x ts=0x%llx recType=%u bugcheck=0x%x "
 	    "source=\"%s\" subsystem=0x%x errorCode=0x%llx "
 	    "engine=\"%s\" tdrReason=0x%x diagLen=%u\n",
@@ -173,7 +176,7 @@ nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	    faulting_engine, tdr_reason, diag_len);
 
 	if (repc >= 212) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "NOCAT: diag[0..31]= "
 		    "%02x %02x %02x %02x %02x %02x %02x %02x "
 		    "%02x %02x %02x %02x %02x %02x %02x %02x "
@@ -218,11 +221,11 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		uint32_t rcJournalBufferSize;
 	} *rc = repv;
 	if (repc < sizeof(*rc)) {
-		device_printf(sc->dev, "RC_TRIGGERED: short msg len=%u\n", repc);
+		nvkm_infof(sc->dev, "RC_TRIGGERED: short msg len=%u\n", repc);
 		return (0);
 	}
 	uint64_t mmu_addr = ((uint64_t)rc->mmuFaultAddrHi << 32) | rc->mmuFaultAddrLo;
-	device_printf(sc->dev,
+	nvkm_infof(sc->dev,
 	    "RC_TRIGGERED: engineType=%u chid=%u exceptLevel=%u exceptType=0x%x scope=%u "
 	    "mmuFaultAddr=0x%llx mmuFaultType=0x%x rcJournalSz=%u\n",
 	    rc->nv2080EngineType, rc->chid, rc->exceptLevel, rc->exceptType, rc->scope,
@@ -236,7 +239,7 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			n = 512;
 		for (uint32_t off = 0; off < n; off += 16) {
 			uint32_t left = n - off;
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "RC_TRIGGERED journal[%02x]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			    off,
 			    left > 0 ? journal[off + 0] : 0,
@@ -267,7 +270,7 @@ nvkm_gsp_evt_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	const uint32_t *words = repv;
 	uint32_t count = repc / sizeof(*words);
 
-	device_printf(sc->dev, "gsp_evt: fn=0x%x len=%u (logged, no action)\n",
+	nvkm_debugf(sc->dev, "gsp_evt: fn=0x%x len=%u (logged, no action)\n",
 	    fn, repc);
 	if (fn == 0x1006) {
 		const uint8_t *bytes = repv;
@@ -283,10 +286,10 @@ nvkm_gsp_evt_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
 		}
 		text[n] = '\0';
-		device_printf(sc->dev, "gsp_evt: OS_ERROR_LOG text=\"%s\"\n",
+		nvkm_infof(sc->dev, "gsp_evt: OS_ERROR_LOG text=\"%s\"\n",
 		    text);
 		for (uint32_t i = 0; i < count && i < 32; i += 4) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_evt: 1006[%02u]=%08x %08x %08x %08x\n",
 			    i, words[i + 0],
 			    i + 1 < count ? words[i + 1] : 0,
@@ -303,7 +306,7 @@ nvkm_gsp_on_init_done(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	struct nvkm_softc *sc = priv;
 	(void)fn; (void)repv; (void)repc;
 	sc->gsp_running = true;
-	device_printf(sc->dev, "gsp: GSP_INIT_DONE event fired\n");
+	nvkm_debugf(sc->dev, "gsp: GSP_INIT_DONE event fired\n");
 	return (0);
 }
 
@@ -319,7 +322,7 @@ nvkm_pci_attach(device_t dev)
 	 * drm_device->dev_private after drm_dev_alloc later in this function. */
 	sc = kzalloc(sizeof(*sc), GFP_KERNEL);
 	if (sc == NULL) {
-		device_printf(dev, "nvkm: kzalloc softc failed\n");
+		nvkm_infof(dev, "nvkm: kzalloc softc failed\n");
 		return (ENOMEM);
 	}
 	sc->dev = dev;
@@ -332,7 +335,7 @@ nvkm_pci_attach(device_t dev)
 	nvkm_chid_init(sc);
 	LIST_INIT(&sc->gsp_pending);
 
-	device_printf(dev,
+	nvkm_debugf(dev,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
 	    pci_get_vendor(dev), pci_get_device(dev), pci_get_revid(dev),
 	    pci_get_subvendor(dev), pci_get_subdevice(dev));
@@ -347,7 +350,7 @@ nvkm_pci_attach(device_t dev)
 		sc->bar_res[i] = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 		    &sc->bar_rid[i], RF_ACTIVE);
 		if (sc->bar_res[i] != NULL) {
-			device_printf(dev,
+			nvkm_debugf(dev,
 			    "  BAR%d: %#jx-%#jx (%ju MiB)\n", i,
 			    (uintmax_t)rman_get_start(sc->bar_res[i]),
 			    (uintmax_t)rman_get_end(sc->bar_res[i]),
@@ -356,13 +359,13 @@ nvkm_pci_attach(device_t dev)
 	}
 
 	if (sc->bar_res[0] == NULL) {
-		device_printf(dev, "BAR0 missing; cannot proceed\n");
+		nvkm_infof(dev, "BAR0 missing; cannot proceed\n");
 		nvkm_pci_release_bars(sc);
 		return (ENXIO);
 	}
 
 	boot0 = nvkm_rd32(sc, NV_PMC_BOOT_0);
-	device_printf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
+	nvkm_debugf(dev, "PMC_BOOT_0 = 0x%08x\n", boot0);
 
 	(void)nvkm_bios_init(sc);
 	(void)nvkm_fw_init(sc);
@@ -415,7 +418,7 @@ nvkm_pci_attach(device_t dev)
 		    (uint32_t)(lp & 0xffffffffu));
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
 		    (uint32_t)(lp >> 32));
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp: reset + libos args @0x%llx written to MB0/1\n",
 		    (unsigned long long)lp);
 	}
@@ -462,7 +465,7 @@ nvkm_pci_attach(device_t dev)
 				break;
 			DELAY(10);
 		}
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp: post-booter polled %d us RISCV_STATUS=0x%08x "
 		    "(active=%u)\n",
 		    polls * 10, riscv_status, riscv_status & 1);
@@ -520,7 +523,7 @@ nvkm_pci_attach(device_t dev)
 					break;
 				DELAY(1000);
 			}
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp: %s after polling msgq for %d ms\n",
 			    sc->gsp_running ? "GSP_INIT_DONE received" :
 			    "no GSP_INIT_DONE",
@@ -540,7 +543,7 @@ nvkm_pci_attach(device_t dev)
 			if (sc->gsp_running) {
 				uint32_t v = nvkm_rd32(sc, 0xb65000);
 				nvkm_wr32(sc, 0xb65000, v | 0x80000000u);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rm: doorbell enable 0xb65000 was 0x%08x, set to 0x%08x\n",
 				    v, v | 0x80000000u);
 			}
@@ -595,7 +598,7 @@ nvkm_pci_attach(device_t dev)
 				int msi_count = pci_msi_count(dev);
 				int want = 1;
 				bool used_msi = false;
-				device_printf(dev,
+				nvkm_debugf(dev,
 				    "gsp: PCI advertises %d MSI vectors\n", msi_count);
 				if (msi_count >= 1 &&
 				    pci_alloc_msi(dev, &want, 1, -1) == 0) {
@@ -604,11 +607,11 @@ nvkm_pci_attach(device_t dev)
 					/* Disable INTx now that MSI is owned. */
 					uint16_t cmd = pci_read_config(dev, 0x04, 2);
 					pci_write_config(dev, 0x04, cmd | 0x0400, 2);
-					device_printf(dev,
+					nvkm_debugf(dev,
 					    "gsp: MSI 1 vector acquired (rid=1), INTx disabled\n");
 				} else {
 					sc->irq_rid = 0;
-					device_printf(dev,
+					nvkm_debugf(dev,
 					    "gsp: MSI alloc failed, falling back to INTx (rid=0)\n");
 				}
 				sc->irq_msi = used_msi;
@@ -625,28 +628,33 @@ nvkm_pci_attach(device_t dev)
 					if (err == 0) {
 						/* Arm doorbell IRQ in NV_USERMODE. */
 						nvkm_wr32(sc, 0x110004, 0x40);
-						device_printf(dev,
+						nvkm_debugf(dev,
 						    "gsp: IRQ wired (rid=%d), doorbell intr armed\n",
 						    sc->irq_rid);
 
 						/* Register as DRM driver -- creates /dev/dri/{card,renderD}*. */
 						(void)nvkm_drm_register(sc);
+						nvkm_infof(dev,
+						    "ready: GSP-RM running, DRM registered; debug=%d\n",
+						    nvkm_debug);
 						/* Start msgq drain kthread last - attach is done. */
 						sc->gsp_drain_exit = false;
 						(void)kthread_create(nvkm_gsp_drain_kthread, sc,
 						    &sc->gsp_drain_td, "nvkm-msgq-drain");
+#if NVKM_RUN_SUBMIT_TEST
 						sc->gsp_test_done = false;
 						(void)kthread_create(nvkm_gsp_test_kthread, sc,
 						    &sc->gsp_test_td, "nvkm-submit-test");
+#endif
 					} else {
-						device_printf(dev,
+						nvkm_debugf(dev,
 						    "gsp: bus_setup_intr failed (%d)\n", err);
 						bus_release_resource(dev, SYS_RES_IRQ,
 						    sc->irq_rid, sc->irq_res);
 						sc->irq_res = NULL;
 					}
 				} else {
-					device_printf(dev,
+					nvkm_debugf(dev,
 					    "gsp: no IRQ resource available\n");
 				}
 			}
@@ -660,7 +668,7 @@ nvkm_pci_attach(device_t dev)
 			if (sc->gsp_loginit.kva != NULL) {
 				const uint64_t *li = sc->gsp_loginit.kva;
 				const uint64_t *lr = sc->gsp_logrm.kva;
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp: LOGINIT put=0x%llx data[0..0x40]: "
 				    "%016llx %016llx %016llx %016llx\n",
 				    (unsigned long long)li[0],
@@ -668,7 +676,7 @@ nvkm_pci_attach(device_t dev)
 				    (unsigned long long)li[2],
 				    (unsigned long long)li[3],
 				    (unsigned long long)li[4]);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp: LOGRM   put=0x%llx data[0..0x40]: "
 				    "%016llx %016llx %016llx %016llx\n",
 				    (unsigned long long)lr[0],
@@ -686,7 +694,7 @@ nvkm_pci_attach(device_t dev)
 				    NVKM_TU102_GSP_BASE + 0x040);
 				uint32_t mb1_late = nvkm_rd32(sc,
 				    NVKM_TU102_GSP_BASE + 0x044);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp: late MB0=0x%08x MB1=0x%08x\n",
 				    mb0_late, mb1_late);
 			}
@@ -707,11 +715,11 @@ nvkm_pci_attach(device_t dev)
 			    NVKM_TU102_GSP_BASE + 0x024);
 			uint32_t sctl   = nvkm_rd32(sc,
 			    NVKM_TU102_GSP_BASE + 0x240);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp: F CPUCTL=0x%08x BOOTVEC=0x%08x SCTL=0x%08x "
 			    "EXCI=0x%08x IRQSTAT=0x%08x\n",
 			    cpuctl, bootvec, sctl, exci, irqstat);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp: F MB0=0x%08x MB1=0x%08x\n", mb0, mb1);
 		}
 
@@ -741,7 +749,7 @@ nvkm_pci_attach(device_t dev)
 				w1 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0x4);
 				w2 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0x8);
 				w3 = nvkm_rd32(sc, NV_PRAMIN + pram_off + 0xc);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp: VRAM %s @0x%llx: %08x %08x %08x %08x\n",
 				    names[i], (unsigned long long)a,
 				    w0, w1, w2, w3);
@@ -757,7 +765,7 @@ nvkm_pci_attach(device_t dev)
 				    NV_PRAMIN + pram_off + 0x0);
 				v_hi = nvkm_rd32(sc,
 				    NV_PRAMIN + pram_off + 0x4);
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp: VRAM meta.verified = 0x%08x%08x "
 				    "(expect 0xa0a0a0a0a0a0a0a0 on success)\n",
 				    v_hi, v_lo);

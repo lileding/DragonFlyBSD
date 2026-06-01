@@ -79,7 +79,7 @@ nvkm_gsp_bar1_invalidate(struct nvkm_softc *sc)
 	}
 
 #ifdef NVKM_DEBUG_BAR1
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "bar1: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
 	    (unsigned long long)sc->gsp_bar1_pdb, trig_rb);
 #endif
@@ -98,15 +98,15 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	uint32_t saved;
 
 	if (sc->bar_res[1] == NULL) {
-		device_printf(sc->dev, "bar1: PCIe BAR1 not mapped\n");
+		nvkm_debugf(sc->dev, "bar1: PCIe BAR1 not mapped\n");
 		return (ENXIO);
 	}
 	if (sc->gsp_bar1_pdb == 0) {
-		device_printf(sc->dev, "bar1: GSP did not publish bar1PdeBase\n");
+		nvkm_debugf(sc->dev, "bar1: GSP did not publish bar1PdeBase\n");
 		return (ENXIO);
 	}
 	if (!sc->bar2.ready) {
-		device_printf(sc->dev, "bar1: BAR2 must be ready first (PRAMIN bootstrap)\n");
+		nvkm_debugf(sc->dev, "bar1: BAR2 must be ready first (PRAMIN bootstrap)\n");
 		return (ENXIO);
 	}
 
@@ -159,7 +159,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	lwkt_reltoken(&sc->gsp_tok);
 
 #ifdef NVKM_DEBUG_BAR1
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "bar1: walked GSP PT chain: PD3=0x%llx -> PD2=0x%llx -> PD1=0x%llx -> PD0=0x%llx\n",
 	    (unsigned long long)pdb_paddr, (unsigned long long)gsp_pd2,
 	    (unsigned long long)gsp_pd1, (unsigned long long)gsp_pd0);
@@ -177,7 +177,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 		if (spt == 0) {
 			nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 			lwkt_reltoken(&sc->gsp_tok);
-			device_printf(sc->dev, "bar1: SPT alloc failed slot=%u\n", slot);
+			nvkm_debugf(sc->dev, "bar1: SPT alloc failed slot=%u\n", slot);
 			return (ENOMEM);
 		}
 
@@ -204,7 +204,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 		b1->spt_paddr[idx] = spt;
 
 #ifdef NVKM_DEBUG_BAR1
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "bar1: mounted OUR SPT 0x%llx at GSP PD0[%u] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx\n",
 		    (unsigned long long)spt, slot,
 		    (unsigned long long)pd0_big_pre,
@@ -224,7 +224,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	memset(b1->gva_used, 0, sizeof(b1->gva_used));
 
 #ifdef NVKM_DEBUG_BAR1
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "bar1: mounted OUR SPT window PD0[%u..%u]; GVA base 0x%llx\n",
 	    BAR1_PD0_MANAGED_FIRST, BAR1_PD0_MANAGED_LAST,
 	    (unsigned long long)b1->next_gva);
@@ -233,7 +233,7 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	nvkm_gsp_bar1_invalidate(sc);
 
 #ifdef NVKM_DEBUG_BAR1
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
 	    "our SPT window mounted on GSP PD0[%u..%u].SMALL; "
 	    "BAR1@%llx %lluMiB\n",
@@ -305,7 +305,7 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	nvkm_gsp_bar1_invalidate(sc);
 
 #ifdef NVKM_DEBUG_BAR1
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
 	    (unsigned long long)bar1_gva, (unsigned long long)vram_paddr,
 	    spt_idx, (unsigned long long)pte);

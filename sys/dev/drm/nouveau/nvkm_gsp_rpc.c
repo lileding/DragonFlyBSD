@@ -100,7 +100,7 @@ nvkm_gsp_rpc_diag_queues(struct nvkm_softc *sc, const char *tag,
 	msgq_tx = *(volatile uint32_t *)(msgq + 0x10);
 	msgq_rx = *(volatile uint32_t *)(msgq + 0x20);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rpc: %s fn=%u seq=%u cmdq(tx=%u rx=%u) "
 	    "msgq(tx=%u rx=%u host_msgq_rptr=%u)\n",
 	    tag, fn, seq, cmdq_tx, cmdq_rx, msgq_tx, msgq_rx,
@@ -156,7 +156,7 @@ nvkm_gsp_msg_handle(struct nvkm_softc *sc, uint32_t fn,
 		return sc->gsp_ntfy.tab[i].func(
 		    sc->gsp_ntfy.tab[i].priv, fn, repv, repc);
 	}
-	device_printf(sc->dev, "gsp_rpc: unhandled event fn=0x%x len=%u\n",
+	nvkm_debugf(sc->dev, "gsp_rpc: unhandled event fn=0x%x len=%u\n",
 	    fn, repc);
 	return (0);
 }
@@ -187,7 +187,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	hdr_total = sizeof(*msg) + rpc_len;
 	padded    = roundup(hdr_total, NVKM_GSP_PAGE_SIZE);
 	if (padded > NVKM_GSP_PAGE_SIZE) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "cmdq_push: fn=%u len=%u exceeds single page (no continuation yet)\n",
 		    rpc->function, rpc_len);
 		kfree(msg, M_TEMP);
@@ -221,7 +221,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 		DELAY(10);
 	}
 	if (retries == 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "cmdq_push: timeout waiting for slot\n");
 		kfree(msg, M_TEMP);
 		return (ETIMEDOUT);
@@ -240,7 +240,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0xc00, 0);
 
 #ifdef NVKM_DEBUG_RPC_TRACE
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "cmdq_push: fn=%u len=%u wptr=%u seq=%u ring=%d\n",
 	    rpc->function, rpc_len, wptr, msg->sequence, sc->gsp_running);
 #endif
@@ -282,12 +282,12 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	fn  = rpc->function;
 
 	if (sig != NVKM_GSP_SIGNATURE) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "msgq[%u]: bad signature 0x%08x (slot=%p) - skipping\n",
 		    sc->gsp_msgq_rptr, sig, slot);
 		/* Dump first 96 bytes of slot to identify format. */
 		for (int i = 0; i < 96; i += 16) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "  slot[+%02d]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			    i,
 			    slot[i+0], slot[i+1], slot[i+2], slot[i+3],
@@ -361,7 +361,7 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 				if (p->fn == fn) {
 #if NVKM_GSP_RPC_DEBUG_QUEUES
 					if (fn == 103 && p->seq != r->sequence) {
-						device_printf(sc->dev,
+						nvkm_debugf(sc->dev,
 						    "gsp_rpc: reply fn=%u matched by fn "
 						    "reqseq=%u repseq=%u\n",
 						    fn, p->seq, r->sequence);
@@ -378,7 +378,7 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 				}
 			}
 			if (!matched) {
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
 				    fn, r->sequence);
 				kfree(buf, M_TEMP);
@@ -422,7 +422,7 @@ nvkm_gsp_rpc_get(struct nvkm_softc *sc, uint32_t fn, uint32_t argc)
 	uint32_t alloc_sz;
 
 	if (argc > NVKM_GSP_MAX_PAYLOAD) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "rpc_get: fn=%u argc=%u too large (no continuation yet)\n",
 		    fn, argc);
 		return (NULL);
@@ -519,7 +519,7 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 			if (fn == 103)
 				nvkm_gsp_rpc_diag_queues(sc, "timeout", fn,
 				    p.seq);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
 			    fn, p.seq);
 			return (NULL);
@@ -553,7 +553,7 @@ nvkm_gsp_rpc_set_system_info(struct nvkm_softc *sc)
 
 	if (sc->bar_res[0] == NULL || sc->bar_res[1] == NULL ||
 	    sc->bar_res[3] == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "set_system_info: skipped (BARs not allocated)\n");
 		return (ENXIO);
 	}

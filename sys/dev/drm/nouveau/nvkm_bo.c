@@ -165,7 +165,7 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	struct nvkm_bo *bo = to_nvkm_bo(obj);
 	struct nvkm_softc *sc = obj->dev->dev_private;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "nvkm_bo: GEM_FREE obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
 	    obj, bo->domain, (unsigned long long)obj->size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL);
@@ -238,7 +238,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	if (err != 0)
 		return (err);
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "nvkm_bo: GEM_NEW handle=%u obj=%p req_domain=0x%x domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
 	    handle, &bo->base, req->info.domain, bo->domain,
 	    (unsigned long long)bo->base.size,
@@ -308,7 +308,7 @@ nvkm_drm_ioctl_gem_cpu_prep(struct drm_device *ddev, void *data,
 	sc->cpu_prep_wait_count++;
 	if (err != 0)
 		sc->cpu_prep_wait_error_count++;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "nvkm_bo: CPU_PREP handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flags=0x%x wait_err=%d\n",
 	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL, req->flags, err);
@@ -332,7 +332,7 @@ nvkm_drm_ioctl_gem_cpu_fini(struct drm_device *ddev, void *data,
 	if (bo->kva != NULL)
 		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
 		    (vm_offset_t)bo->kva + obj->size);
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "nvkm_bo: CPU_FINI handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flushed=%u\n",
 	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL, bo->kva != NULL);

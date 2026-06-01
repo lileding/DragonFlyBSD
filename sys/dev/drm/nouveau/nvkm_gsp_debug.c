@@ -282,6 +282,9 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 {
 	struct sysctl_oid_list *children = SYSCTL_CHILDREN(parent);
 
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "debug",
+	    CTLFLAG_RW, &nvkm_debug, 0,
+	    "Enable verbose nvkm printf logging");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "loginit",
 	    CTLTYPE_OPAQUE | CTLFLAG_RD, &sc->gsp_loginit, 0,
 	    nvkm_gsp_sysctl_blob, "S", "GSP LIBOS LOGINIT buffer (raw)");

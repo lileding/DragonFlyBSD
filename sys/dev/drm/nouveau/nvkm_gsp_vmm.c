@@ -120,7 +120,7 @@ nvkm_gsp_vmm_invalidate(struct nvkm_gsp_vmm *vmm)
 		DELAY(10);
 	}
 	if ((trig_rb & 0x80000000u) != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_vmm: invalidate timeout pdb=0x%llx trig=0x%08x\n",
 		    (unsigned long long)pdb, trig_rb);
 	}
@@ -356,7 +356,7 @@ nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va)
 	lwkt_gettoken(&vmm->tok);
 	pt = nvkm_gsp_vmm_user_pt_find(vmm, pd1_idx, pd0_idx);
 	if (pt == NULL) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_vmm: pte va=0x%016jx pd1=%u pd0=%u spt=%u missing-pt sparse=0x%016jx\n",
 		    (uintmax_t)va, pd1_idx, pd0_idx, spt_idx,
 		    (uintmax_t)vmm->sparse_page.paddr);
@@ -367,7 +367,7 @@ nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va)
 	pte = (uint64_t)nvkm_gsp_bar1_rd32(sc, pt->spt.bar1_gva + spt_idx * 8);
 	pte |= (uint64_t)nvkm_gsp_bar1_rd32(sc,
 	    pt->spt.bar1_gva + spt_idx * 8 + 4) << 32;
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_vmm: pte va=0x%016jx pd1=%u pd0=%u spt=%u pte=0x%016jx sparse=0x%016jx sparse_pte=0x%016jx\n",
 	    (uintmax_t)va, pd1_idx, pd0_idx, spt_idx, (uintmax_t)pte,
 	    (uintmax_t)vmm->sparse_page.paddr,
@@ -651,12 +651,12 @@ nvkm_gsp_vmm_copy_pdes(struct nvkm_gsp_vmm *vmm)
 	p = ctrl;
 	err = nvkm_gsp_rm_ctrl_rd(&vmm->vaspace, &p, 0);
 	if (err != 0) {
-		device_printf(sc->dev,
+		nvkm_debugf(sc->dev,
 		    "gsp_rm: VASPACE_COPY_SERVER_RESERVED_PDES failed err=%d\n",
 		    err);
 		return (err);
 	}
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: COPY_SERVER_RESERVED_PDES ok (va=0x%llx+0x%llx, "
 	    "PD3=0x%llx PD2=0x%llx PD1=0x%llx)\n",
 	    (unsigned long long)vmm->rm_va_base,
@@ -699,7 +699,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	for (i = 0; i < 3; i++) {
 		err = nvkm_gsp_vmm_pt_alloc(sc, &vmm->pt[i]);
 		if (err != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: PT page %d alloc failed\n", i);
 			goto fail_pt;
 		}
@@ -721,7 +721,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	nvkm_gsp_bar1_wr64(sc, vmm->pt[1].page.bar1_gva + 0,
 	    nvkm_pde_to_vram(vmm->pt[2].page.vram_paddr));
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: PT chain (VRAM) PD3=0x%llx@bar1=0x%llx PD2=0x%llx@bar1=0x%llx PD1=0x%llx@bar1=0x%llx\n",
 	    (unsigned long long)vmm->pt[0].page.vram_paddr,
 	    (unsigned long long)vmm->pt[0].page.bar1_gva,
@@ -746,7 +746,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 		args->flags = 0;	/* server-managed */
 		err = nvkm_gsp_rm_alloc_wr(&vmm->vaspace, args);
 		if (err != 0) {
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: FERMI_VASPACE_A alloc failed err=%d\n",
 			    err);
 			goto fail_pt;
@@ -758,7 +758,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 	if (err != 0)
 		goto fail_vaspace;
 
-	device_printf(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "gsp_rm: VMM ready (client=0x%x device=0x%x vaspace=0x%x)\n",
 	    vmm->client.object.handle, vmm->device.object.handle,
 	    vmm->vaspace.handle);
@@ -772,7 +772,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 		    0x0000c461u, 0, &usermode_obj);
 		if (up != NULL) {
 			int uerr = nvkm_gsp_rm_alloc_wr(&usermode_obj, up);
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "gsp_rm: TURING_USERMODE_A handle=0x%x err=%d (device-level)\n",
 			    usermode_obj.handle, uerr);
 			/* Dump BAR0 regs post-USERMODE_A to compare with Fedora. */
@@ -780,7 +780,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 			uint32_t um80 = nvkm_rd32(sc, 0xbb0080);
 			uint32_t um84 = nvkm_rd32(sc, 0xbb0084);
 #ifdef NVKM_DEBUG_USERMODE_DIAG
-			device_printf(sc->dev,
+			nvkm_debugf(sc->dev,
 			    "fed_diag: USERMODE[0]=0x%08x TIME=%08x:%08x (Fedora: 0xc461)\n",
 			    um0, um84, um80);
 #else
@@ -792,7 +792,7 @@ nvkm_gsp_vmm_ctor(struct nvkm_softc *sc, uint32_t client_handle,
 				nvkm_wr32(sc, 0xbb0000, 0xc461u);
 				uint32_t um0b = nvkm_rd32(sc, 0xbb0000);
 #ifdef NVKM_DEBUG_USERMODE_DIAG
-				device_printf(sc->dev,
+				nvkm_debugf(sc->dev,
 				    "fed_diag: wrote 0xc461 to USERMODE[0], readback = 0x%08x\n",
 				    um0b);
 #else
