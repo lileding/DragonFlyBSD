@@ -183,6 +183,10 @@ nvkm_gsp_evt_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		return (EINVAL);
 	}
 
+	if (h_event == sc->gsp_nonstall_event_handle &&
+	    h_event != 0 && status == 0)
+		sc->gsp_post_event_nonstall_count++;
+
 	/*
 	 * This is the GSP-only event handoff point.  Future channel completion
 	 * support should look up hClient/hEvent here and signal completed
@@ -630,6 +634,9 @@ nvkm_pci_attach(device_t dev)
 					    sc->gsp_vmm) != 0) {
 						kfree(sc->gsp_vmm);
 						sc->gsp_vmm = NULL;
+					} else {
+						(void)nvkm_gsp_register_nonstall_event(
+						    sc->gsp_vmm);
 					}
 				}
 				/* nouveau's GSP-RM path does NOT allocate
