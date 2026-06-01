@@ -48,6 +48,8 @@ static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
+static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
+    struct nvkm_gsp_chan *chan, int error);
 
 /* NVIF ioctl is variable-size; encode with size=0 since dispatch
  * matches by NR only and the actual copy size comes from userspace. */
@@ -542,9 +544,12 @@ nvkm_drm_channel_obj_slot(struct nvkm_drm_chan *dchan)
 }
 
 static void
-nvkm_drm_channel_clear(struct nvkm_drm_chan *dchan)
+nvkm_drm_channel_clear(struct nvkm_softc *sc, struct nvkm_drm_chan *dchan)
 {
 	if (dchan->chan != NULL) {
+		lwkt_gettoken(&sc->gsp_tok);
+		nvkm_drm_exec_pending_cancel_channel(sc, dchan->chan, -ENODEV);
+		lwkt_reltoken(&sc->gsp_tok);
 		for (uint32_t i = 0; i < NVKM_DRM_MAX_CHAN_OBJS; i++) {
 			if (dchan->obj[i].oclass != 0 &&
 			    dchan->obj[i].object.handle != 0)
@@ -580,7 +585,7 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 
 	LIST_FOREACH_MUTABLE(dchan, &nfile->channels, link, dchan_next) {
 		LIST_REMOVE(dchan, link);
-		nvkm_drm_channel_clear(dchan);
+		nvkm_drm_channel_clear(sc, dchan);
 		channel_count++;
 	}
 
@@ -866,7 +871,7 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 	dchan = nvkm_drm_channel_find(nfile, (uint32_t)req->channel);
 	if (dchan != NULL) {
 		LIST_REMOVE(dchan, link);
-		nvkm_drm_channel_clear(dchan);
+		nvkm_drm_channel_clear(sc, dchan);
 	}
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: CHANNEL_FREE channel=%d\n", req->channel);
@@ -1334,7 +1339,8 @@ nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
 }
 
 static struct nvkm_drm_exec_pending *
-nvkm_drm_exec_pending_create(volatile uint32_t *sema, uint32_t payload,
+nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
+    volatile uint32_t *sema, uint32_t payload,
     struct nvkm_drm_exec_signal *signals, uint32_t sig_count,
     struct dma_fence *exec_fence)
 {
@@ -1344,6 +1350,7 @@ nvkm_drm_exec_pending_create(volatile uint32_t *sema, uint32_t payload,
 	if (pending == NULL)
 		return (NULL);
 
+	pending->chan = chan;
 	pending->sema = sema;
 	pending->payload = payload;
 	if (signals != NULL && sig_count != 0) {
@@ -1365,6 +1372,25 @@ nvkm_drm_exec_pending_put(struct nvkm_drm_exec_pending *pending)
 	for (uint32_t i = 0; i < pending->fence_count; i++)
 		dma_fence_put(pending->fences[i]);
 	kfree(pending);
+}
+
+static void
+nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
+    struct nvkm_gsp_chan *chan, int error)
+{
+	struct nvkm_drm_exec_pending *pending, *next;
+
+	for (pending = LIST_FIRST(&sc->exec_pending); pending != NULL;
+	    pending = next) {
+		next = LIST_NEXT(pending, link);
+		if (pending->chan != chan)
+			continue;
+
+		LIST_REMOVE(pending, link);
+		nvkm_drm_exec_pending_signal(pending, error);
+		atomic_store_rel_int(&pending->done, 1);
+		wakeup(pending);
+	}
 }
 
 void
@@ -1771,7 +1797,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
 	    profile_start);
 
-	pending = nvkm_drm_exec_pending_create((volatile uint32_t *)sema,
+	pending = nvkm_drm_exec_pending_create(chan, (volatile uint32_t *)sema,
 	    payload, signals, req->sig_count, exec_fence);
 	if (pending == NULL) {
 		err = -ENOMEM;
