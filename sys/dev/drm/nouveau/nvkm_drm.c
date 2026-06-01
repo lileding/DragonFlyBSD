@@ -1171,6 +1171,7 @@ struct drm_nouveau_exec {
 #define NVKM_DRM_SUBMIT_GVA_GPFIFO	(NVKM_VMM_CLIENT_BASE + 0x1000ULL)
 #define NVKM_DRM_SUBMIT_GVA_SEMA	(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
 #define NVKM_DRM_POST_PUSH_DWORDS	13
+#define NVKM_DRM_POST_RING_SLOTS	64
 #define NVKM_DRM_GPFIFO_ENTRIES		512
 #define NVKM_DRM_GPFIFO_FETCH_WINDOW	0x40
 #define NVKM_DRM_EXEC_POLL_US		5000000
@@ -1539,8 +1540,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct nvkm_drm_exec_pending pending;
 	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
-	uint64_t slot_bar1;
-	uint32_t put, payload;
+	uint64_t slot_bar1, post_gva, sema_gva;
+	uint32_t put, payload, post_slot, post_offset, sema_offset;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
 	long wait_ret;
@@ -1623,8 +1624,15 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 	profile_push_start = nvkm_drm_profile_now_us();
 	gpf = (uint32_t *)chan->submit_gpf.kva;
-	post = (uint32_t *)chan->submit_push.kva;
-	sema = (uint32_t *)chan->submit_sema.kva;
+	post_slot = chan->submit_post_slot;
+	chan->submit_post_slot = (chan->submit_post_slot + 1) %
+	    NVKM_DRM_POST_RING_SLOTS;
+	post_offset = post_slot * NVKM_DRM_POST_PUSH_DWORDS;
+	sema_offset = post_slot;
+	post = (uint32_t *)chan->submit_push.kva + post_offset;
+	sema = (uint32_t *)chan->submit_sema.kva + sema_offset;
+	post_gva = chan->submit_gva_push + (uint64_t)post_offset * 4;
+	sema_gva = chan->submit_gva_sema + (uint64_t)sema_offset * 4;
 	slot_bar1 = chan->userd_bar2_gva +
 	    (uint64_t)((uint32_t)chan->chid % 8u) *
 	    NV_USERD_SLOT_SIZE;
@@ -1679,8 +1687,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	sc->exec_profile_pushes += req->push_count;
 
 	post[0] = NVC36F_PUSH_HDR_SEM_ADDR_TRIPLET;
-	post[1] = (uint32_t)(chan->submit_gva_sema & 0xffffffffu);
-	post[2] = (uint32_t)((chan->submit_gva_sema >> 32) & 0xffu);
+	post[1] = (uint32_t)(sema_gva & 0xffffffffu);
+	post[2] = (uint32_t)((sema_gva >> 32) & 0xffu);
 	post[3] = payload;
 	post[4] = NVC36F_PUSH_HDR_SEM_EXECUTE;
 	post[5] = NVC36F_SEM_EXECUTE_RELEASE |
@@ -1699,8 +1707,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		gpf[put * 2 + 1] = 0;
 		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
 	}
-	gpf[put * 2 + 0] = (uint32_t)(chan->submit_gva_push & 0xffffffffu);
-	gpf[put * 2 + 1] = (uint32_t)((chan->submit_gva_push >> 32) & 0xffu) |
+	gpf[put * 2 + 0] = (uint32_t)(post_gva & 0xffffffffu);
+	gpf[put * 2 + 1] = (uint32_t)((post_gva >> 32) & 0xffu) |
 	    (NVKM_DRM_POST_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 	put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
 	nvkm_drm_profile_add_us(&sc->exec_profile_push_build_us,
