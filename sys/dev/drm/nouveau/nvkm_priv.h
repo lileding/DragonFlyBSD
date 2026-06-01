@@ -366,12 +366,17 @@ struct nvkm_softc {
 	uint64_t		gsp_post_event_short_count;
 	uint64_t		gsp_post_event_bad_size_count;
 	uint64_t		gsp_post_event_unhandled_count;
+	uint64_t		gsp_post_event_nonstall_count;
 	uint32_t		gsp_post_event_last_client;
 	uint32_t		gsp_post_event_last_event;
 	uint32_t		gsp_post_event_last_notify_index;
 	uint32_t		gsp_post_event_last_data;
 	uint32_t		gsp_post_event_last_status;
 	uint32_t		gsp_post_event_last_data_size;
+	uint64_t		gsp_nonstall_event_register_count;
+	uint64_t		gsp_nonstall_event_register_error_count;
+	uint32_t		gsp_nonstall_event_handle;
+	uint32_t		gsp_nonstall_event_last_error;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
 	uint64_t		vm_bind_wait_count;

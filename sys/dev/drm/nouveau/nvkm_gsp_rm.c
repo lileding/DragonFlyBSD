@@ -23,6 +23,31 @@
 
 #define NVKM_ALIGN_UP(v, a)	(((v) + (a) - 1) & ~((a) - 1))
 
+#define NV01_EVENT_KERNEL_CALLBACK_EX		0x0000007eU
+#define NV01_EVENT_NONSTALL_INTR		0x08000000U
+#define NV01_EVENT_CLIENT_RM			0x04000000U
+#define NV2080_NOTIFIERS_FIFO_EVENT_MTHD	35U
+#define NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION	0x20800301U
+#define NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_REPEAT 2U
+#define NVKM_RM_EVENT_NONSTALL			0x7e000000U
+
+struct NV0005_ALLOC_PARAMETERS_dfly {
+	uint32_t hParentClient;
+	uint32_t hSrcResource;
+	uint32_t hClass;
+	uint32_t notifyIndex;
+	uint64_t data;
+};
+
+struct NV2080_CTRL_EVENT_SET_NOTIFICATION_PARAMS_dfly {
+	uint32_t event;
+	uint32_t action;
+	uint32_t bNotifyState;
+	uint32_t info32;
+	uint16_t info16;
+	uint8_t  _pad[2];
+};
+
 static MALLOC_DEFINE(M_NVKM_VRAM_META, "nvkm_vram_meta",
     "nvkm VRAM allocation metadata");
 
@@ -550,6 +575,99 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 	nvkm_debugf(sc->dev,
 	    "gsp_rm: enabled GSP intr (BAR0+0x110004 = 0x40)\n");
 	return (0);
+}
+
+int
+nvkm_gsp_register_nonstall_event(struct nvkm_gsp_vmm *vmm)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_object event_obj;
+	struct NV0005_ALLOC_PARAMETERS_dfly *args;
+	struct NV2080_CTRL_EVENT_SET_NOTIFICATION_PARAMS_dfly *ctrl;
+	uint32_t handle;
+	int err;
+
+	if (sc->gsp_nonstall_event_handle != 0)
+		return (0);
+
+	handle = nvkm_gsp_client_child_handle(&vmm->client,
+	    NVKM_RM_EVENT_NONSTALL);
+	memset(&event_obj, 0, sizeof(event_obj));
+	args = nvkm_gsp_rm_alloc_get(&vmm->device.subdevice, handle,
+	    NV01_EVENT_KERNEL_CALLBACK_EX, sizeof(*args), &event_obj);
+	if (args == NULL) {
+		sc->gsp_nonstall_event_register_error_count++;
+		sc->gsp_nonstall_event_last_error = ENOMEM;
+		return (ENOMEM);
+	}
+
+	args->hParentClient = vmm->client.object.handle;
+	args->hSrcResource = 0;
+	args->hClass = NV01_EVENT_KERNEL_CALLBACK_EX;
+	args->notifyIndex = NV2080_NOTIFIERS_FIFO_EVENT_MTHD |
+	    NV01_EVENT_NONSTALL_INTR;
+	args->data = 0;
+
+	err = nvkm_gsp_rm_alloc_wr(&event_obj, args);
+	if (err != 0) {
+		sc->gsp_nonstall_event_register_error_count++;
+		sc->gsp_nonstall_event_last_error = err;
+		nvkm_debugf(sc->dev,
+		    "gsp_rm: nonstall event alloc failed err=%d handle=0x%x\n",
+		    err, handle);
+		return (err);
+	}
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&vmm->device.subdevice,
+	    NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION, sizeof(*ctrl));
+	if (ctrl == NULL) {
+		(void)nvkm_gsp_rm_free(&event_obj);
+		sc->gsp_nonstall_event_register_error_count++;
+		sc->gsp_nonstall_event_last_error = ENOMEM;
+		return (ENOMEM);
+	}
+
+	ctrl->event = NV2080_NOTIFIERS_FIFO_EVENT_MTHD;
+	ctrl->action = NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_REPEAT;
+	ctrl->bNotifyState = 0;
+	ctrl->info32 = 0;
+	ctrl->info16 = 0;
+
+	err = nvkm_gsp_rm_ctrl_wr(&vmm->device.subdevice, ctrl);
+	if (err != 0) {
+		(void)nvkm_gsp_rm_free(&event_obj);
+		sc->gsp_nonstall_event_register_error_count++;
+		sc->gsp_nonstall_event_last_error = err;
+		nvkm_debugf(sc->dev,
+		    "gsp_rm: nonstall event notification failed err=%d handle=0x%x\n",
+		    err, handle);
+		return (err);
+	}
+
+	sc->gsp_nonstall_event_handle = handle;
+	sc->gsp_nonstall_event_register_count++;
+	sc->gsp_nonstall_event_last_error = 0;
+	nvkm_debugf(sc->dev,
+	    "gsp_rm: nonstall event registered handle=0x%x notify=0x%08x\n",
+	    handle, NV2080_NOTIFIERS_FIFO_EVENT_MTHD | NV01_EVENT_NONSTALL_INTR);
+	return (0);
+}
+
+void
+nvkm_gsp_unregister_nonstall_event(struct nvkm_gsp_vmm *vmm)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_object event_obj;
+
+	if (sc->gsp_nonstall_event_handle == 0)
+		return;
+
+	memset(&event_obj, 0, sizeof(event_obj));
+	event_obj.client = &vmm->client;
+	event_obj.parent = &vmm->device.subdevice;
+	event_obj.handle = sc->gsp_nonstall_event_handle;
+	(void)nvkm_gsp_rm_free(&event_obj);
+	sc->gsp_nonstall_event_handle = 0;
 }
 
 int
