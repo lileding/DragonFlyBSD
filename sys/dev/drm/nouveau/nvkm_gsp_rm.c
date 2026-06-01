@@ -2671,6 +2671,9 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 	if (sc != NULL && chan->chid > 0)
 		nvkm_chid_free(sc, chan->chid);
 	if (sc != NULL) {
+		if (chan->submit_gva_push != 0)
+			(void)nvkm_gsp_vmm_unmap(sc->gsp_vmm,
+			    chan->submit_gva_push, 0x3000);
 		nvkm_gsp_bar1_free_page(sc, &chan->submit_pd0);
 		nvkm_gsp_bar1_free_page(sc, &chan->submit_lpt);
 		nvkm_gsp_bar1_free_page(sc, &chan->submit_spt);
