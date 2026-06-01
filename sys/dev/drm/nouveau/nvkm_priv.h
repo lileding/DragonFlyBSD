@@ -62,9 +62,12 @@ struct nvkm_vram_alloc {
 
 const char *nvkm_vram_kind_name(enum nvkm_vram_kind kind);
 
+struct nvkm_softc;
 extern int nvkm_debug;
 void	nvkm_debugf(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
+void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
+	    uint32_t chid, int error);
 
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
@@ -225,6 +228,9 @@ struct nvkm_drm_exec_pending {
 	volatile uint32_t *sema;
 	uint32_t payload;
 	uint32_t post_slot;
+	uint64_t trace_seq;
+	uint32_t trace_first;
+	uint32_t trace_count;
 	/* Owned fence references. The submit ioctl may drop its local signal
 	 * array and exec_fence references immediately after doorbell.
 	 */
@@ -233,6 +239,29 @@ struct nvkm_drm_exec_pending {
 	volatile u_int done;
 };
 LIST_HEAD(nvkm_drm_exec_pending_list, nvkm_drm_exec_pending);
+
+#define NVKM_DRM_EXEC_TRACE_COUNT	1024
+
+struct nvkm_drm_exec_trace {
+	uint64_t seq;
+	uint32_t channel;
+	uint32_t chid;
+	uint32_t post_slot;
+	uint32_t gpf_index;
+	uint32_t push_index;
+	uint32_t push_count;
+	uint32_t flags;
+	uint64_t va;
+	uint32_t va_len;
+	uint64_t binding_addr;
+	uint64_t binding_size;
+	uint64_t bo_paddr;
+	uint32_t bo_domain;
+	uintptr_t obj;
+	uint8_t cpu_mapped;
+	uint8_t completed;
+	int error;
+};
 
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
@@ -413,6 +442,15 @@ struct nvkm_softc {
 	uint32_t		gsp_nonstall_intr_last_leaf;
 	uint32_t		gsp_nonstall_intr_last_mask;
 	uint32_t		gsp_nonstall_intr_last_top;
+	uint64_t		rc_triggered_count;
+	uint32_t		rc_last_engine_type;
+	uint32_t		rc_last_chid;
+	uint32_t		rc_last_except_level;
+	uint32_t		rc_last_except_type;
+	uint32_t		rc_last_scope;
+	uint64_t		rc_last_mmu_fault_addr;
+	uint32_t		rc_last_mmu_fault_type;
+	uint32_t		rc_last_journal_size;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
 	uint64_t		vm_bind_wait_count;
@@ -434,6 +472,8 @@ struct nvkm_softc {
 	uint64_t		exec_cpu_flush_seq;
 	uint64_t		exec_profile_cpu_bind_scanned;
 	uint64_t		exec_profile_cpu_bind_flushed;
+	uint32_t		exec_trace_next;
+	struct nvkm_drm_exec_trace exec_trace[NVKM_DRM_EXEC_TRACE_COUNT];
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;

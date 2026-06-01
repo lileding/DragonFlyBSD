@@ -330,11 +330,21 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		return (0);
 	}
 	uint64_t mmu_addr = ((uint64_t)rc->mmuFaultAddrHi << 32) | rc->mmuFaultAddrLo;
+	sc->rc_triggered_count++;
+	sc->rc_last_engine_type = rc->nv2080EngineType;
+	sc->rc_last_chid = rc->chid;
+	sc->rc_last_except_level = rc->exceptLevel;
+	sc->rc_last_except_type = rc->exceptType;
+	sc->rc_last_scope = rc->scope;
+	sc->rc_last_mmu_fault_addr = mmu_addr;
+	sc->rc_last_mmu_fault_type = rc->mmuFaultType;
+	sc->rc_last_journal_size = rc->rcJournalBufferSize;
 	nvkm_infof(sc->dev,
 	    "RC_TRIGGERED: engineType=%u chid=%u exceptLevel=%u exceptType=0x%x scope=%u "
 	    "mmuFaultAddr=0x%llx mmuFaultType=0x%x rcJournalSz=%u\n",
 	    rc->nv2080EngineType, rc->chid, rc->exceptLevel, rc->exceptType, rc->scope,
 	    (unsigned long long)mmu_addr, rc->mmuFaultType, rc->rcJournalBufferSize);
+	nvkm_drm_exec_fault_channel_locked(sc, rc->chid, -EIO);
 	{
 		uint8_t *journal = (uint8_t *)(rc + 1);
 		uint32_t avail = repc > sizeof(*rc) ? repc - sizeof(*rc) : 0;
