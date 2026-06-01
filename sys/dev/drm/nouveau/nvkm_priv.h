@@ -199,6 +199,7 @@ struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
 struct dma_fence;
+struct nvkm_drm_vm_binding;
 
 /* Per-RPC pending entry: queued on sc->gsp_pending while waiting
  * for a reply that matches function. The msgq drainer (ISR or
@@ -236,6 +237,11 @@ struct nvkm_drm_exec_pending {
 	 */
 	struct dma_fence *fences[64];
 	uint32_t fence_count;
+	/* Owned async borrows of visible VM_BIND mappings. EXEC submit
+	 * increments binding->exec_refs; completion/fault decrements them.
+	 */
+	struct nvkm_drm_vm_binding **bindings;
+	uint32_t binding_count;
 	volatile u_int done;
 };
 LIST_HEAD(nvkm_drm_exec_pending_list, nvkm_drm_exec_pending);
@@ -479,6 +485,8 @@ struct nvkm_softc {
 	uint32_t		rc_last_journal_size;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
+	uint64_t		vm_init_kernel_addr;
+	uint64_t		vm_init_kernel_size;
 	uint64_t		vm_bind_wait_count;
 	uint64_t		vm_bind_wait_error_count;
 	uint64_t		cpu_prep_wait_count;

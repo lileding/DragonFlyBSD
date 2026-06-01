@@ -410,6 +410,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_trace_seq);
 	if (sc->rc_last_mmu_fault_addr != 0) {
 		struct nvkm_gsp_vmm_pte_info pte_info;
+		const struct nvkm_drm_vm_trace *nearest_lo = NULL;
+		const struct nvkm_drm_vm_trace *nearest_hi = NULL;
 		uint64_t context_seq = 0;
 		uint32_t matches = 0;
 		uint32_t shown = 0;
@@ -429,6 +431,14 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 
 			if (trace->seq == 0)
 				continue;
+			if (trace->addr <= sc->rc_last_mmu_fault_addr &&
+			    (nearest_lo == NULL ||
+			     trace->addr > nearest_lo->addr))
+				nearest_lo = trace;
+			if (trace->addr > sc->rc_last_mmu_fault_addr &&
+			    (nearest_hi == NULL ||
+			     trace->addr < nearest_hi->addr))
+				nearest_hi = trace;
 			if (sc->rc_last_mmu_fault_addr < trace->addr ||
 			    sc->rc_last_mmu_fault_addr >=
 			    trace->addr + trace->range)
@@ -438,6 +448,26 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 				context_seq = trace->seq;
 		}
 		sbuf_printf(&sb, "fault_vm_matches = %u\n", matches);
+		if (nearest_lo != NULL) {
+			sbuf_printf(&sb,
+			    "fault_vm_nearest_lo seq=%llu action=%u addr=0x%016llx range=0x%016llx delta=0x%016llx\n",
+			    (unsigned long long)nearest_lo->seq,
+			    nearest_lo->action,
+			    (unsigned long long)nearest_lo->addr,
+			    (unsigned long long)nearest_lo->range,
+			    (unsigned long long)(sc->rc_last_mmu_fault_addr -
+			    nearest_lo->addr));
+		}
+		if (nearest_hi != NULL) {
+			sbuf_printf(&sb,
+			    "fault_vm_nearest_hi seq=%llu action=%u addr=0x%016llx range=0x%016llx delta=0x%016llx\n",
+			    (unsigned long long)nearest_hi->seq,
+			    nearest_hi->action,
+			    (unsigned long long)nearest_hi->addr,
+			    (unsigned long long)nearest_hi->range,
+			    (unsigned long long)(nearest_hi->addr -
+			    sc->rc_last_mmu_fault_addr));
+		}
 		for (uint32_t n = 0; n < NVKM_DRM_VM_TRACE_COUNT &&
 		    shown < 16; n++) {
 			const struct nvkm_drm_vm_trace *trace;
@@ -493,6 +523,10 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->bo_resv_wait_count);
 	sbuf_printf(&sb, "bo_wait_error_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_error_count);
+	sbuf_printf(&sb, "vm_init_kernel_addr = 0x%016llx\n",
+	    (unsigned long long)sc->vm_init_kernel_addr);
+	sbuf_printf(&sb, "vm_init_kernel_size = 0x%016llx\n",
+	    (unsigned long long)sc->vm_init_kernel_size);
 	sbuf_printf(&sb, "vm_bind_wait_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_count);
 	sbuf_printf(&sb, "vm_bind_wait_error_count = %llu\n",
