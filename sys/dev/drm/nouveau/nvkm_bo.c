@@ -227,10 +227,6 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	uint32_t handle = 0;
 	int err;
 
-	err = nvkm_drm_reclaim_hidden_bindings(sc, file_priv);
-	if (err != 0)
-		return (err);
-
 	bo = nvkm_bo_create(ddev, req->info.size, req->info.domain,
 	    req->info.tile_mode, req->info.tile_flags);
 	if (bo == NULL)

@@ -50,7 +50,7 @@ static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
 static void nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_vm_binding **bindings, uint32_t count, bool reclaim);
+    struct nvkm_drm_vm_binding **bindings, uint32_t count);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
 
@@ -112,14 +112,16 @@ struct nvkm_drm_vm_binding {
 	LIST_ENTRY(nvkm_drm_vm_binding) link;
 	uint64_t addr;
 	uint64_t size;
-	/* Owned GEM ref for this VA->BO mapping. The PTE may remain installed
-	 * after UNMAP while older EXEC jobs still borrow this binding.
+	/*
+	 * Owned GEM ref for this VA->BO mapping. A visible binding is a
+	 * userspace VA owner; exec_refs are transient GPU borrows. The PTE
+	 * is reclaimed only after both the VA owner and every GPU borrow are
+	 * gone.
 	 */
 	struct drm_gem_object *obj;
 	uint32_t exec_refs;
 	bool visible;
 	bool pte_installed;
-	bool unmap_pending;
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 
@@ -197,6 +199,20 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 }
 
 static int
+nvkm_drm_vm_binding_drop_visible(struct nvkm_softc *sc,
+    struct nvkm_drm_vm_binding *binding, const char *reason)
+{
+	if (binding->visible)
+		binding->visible = false;
+
+	nvkm_debugf(sc->dev,
+	    "nvkm_drm: VM_BIND hide reason=%s addr=0x%016jx size=0x%016jx obj=%p refs=%u\n",
+	    reason, (uintmax_t)binding->addr, (uintmax_t)binding->size,
+	    binding->obj, binding->exec_refs);
+	return (nvkm_drm_vm_binding_reclaim(sc, binding));
+}
+
+static int
 nvkm_drm_vm_bindings_unmap(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
     uint32_t *punmapped, uint32_t *pdeferred)
@@ -211,18 +227,11 @@ nvkm_drm_vm_bindings_unmap(struct nvkm_softc *sc,
 		    binding->addr, binding->size))
 			continue;
 
-		if (binding->visible) {
-			binding->visible = false;
-			binding->unmap_pending = true;
+		if (binding->visible)
 			(*punmapped)++;
-		}
 		if (binding->exec_refs != 0)
 			(*pdeferred)++;
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND hide addr=0x%016jx size=0x%016jx obj=%p refs=%u\n",
-		    (uintmax_t)binding->addr, (uintmax_t)binding->size,
-		    binding->obj, binding->exec_refs);
-		err = nvkm_drm_vm_binding_reclaim(sc, binding);
+		err = nvkm_drm_vm_binding_drop_visible(sc, binding, "unmap");
 		if (err != 0)
 			return (err);
 	}
@@ -244,17 +253,6 @@ nvkm_drm_vm_bindings_reclaim_hidden(struct nvkm_softc *sc,
 			return (err);
 	}
 	return (0);
-}
-
-int
-nvkm_drm_reclaim_hidden_bindings(struct nvkm_softc *sc,
-    struct drm_file *file_priv)
-{
-	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
-
-	if (nfile == NULL)
-		return (0);
-	return (nvkm_drm_vm_bindings_reclaim_hidden(sc, nfile));
 }
 
 static int
@@ -731,9 +729,8 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link,
 	    binding_next) {
-		binding->visible = false;
-		binding->unmap_pending = true;
-		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
+		(void)nvkm_drm_vm_binding_drop_visible(sc, binding,
+		    "postclose");
 		binding_count++;
 	}
 
@@ -1668,12 +1665,12 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
 
 static void
 nvkm_drm_exec_pending_put(struct nvkm_softc *sc,
-    struct nvkm_drm_exec_pending *pending, bool reclaim)
+    struct nvkm_drm_exec_pending *pending)
 {
 	if (pending == NULL)
 		return;
 	nvkm_drm_exec_release_bindings(sc, pending->bindings,
-	    pending->binding_count, reclaim);
+	    pending->binding_count);
 	for (uint32_t i = 0; i < pending->fence_count; i++)
 		dma_fence_put(pending->fences[i]);
 	kfree(pending);
@@ -1697,7 +1694,7 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
 		nvkm_drm_submit_slot_release(chan, pending->post_slot);
-		nvkm_drm_exec_pending_put(sc, pending, false);
+		nvkm_drm_exec_pending_put(sc, pending);
 	}
 }
 
@@ -1723,7 +1720,7 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
 		nvkm_drm_submit_slot_release(pending->chan, pending->post_slot);
-		nvkm_drm_exec_pending_put(sc, pending, false);
+		nvkm_drm_exec_pending_put(sc, pending);
 	}
 }
 
@@ -1746,7 +1743,7 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
 		nvkm_drm_submit_slot_release(pending->chan, pending->post_slot);
-		nvkm_drm_exec_pending_put(sc, pending, false);
+		nvkm_drm_exec_pending_put(sc, pending);
 	}
 	lwkt_reltoken(&sc->gsp_tok);
 }
@@ -1901,7 +1898,7 @@ nvkm_drm_exec_capture_bindings(struct nvkm_softc *sc,
 
 static void
 nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_vm_binding **bindings, uint32_t count, bool reclaim)
+    struct nvkm_drm_vm_binding **bindings, uint32_t count)
 {
 	if (bindings == NULL)
 		return;
@@ -1913,8 +1910,7 @@ nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
 		KASSERT(binding->exec_refs > 0,
 		    ("nvkm_drm: binding exec_refs underflow"));
 		binding->exec_refs--;
-		if (reclaim)
-			(void)nvkm_drm_vm_binding_reclaim(sc, binding);
+		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
 	}
 	kfree(bindings);
 }
@@ -2228,8 +2224,8 @@ out_unlock:
 	if (submit_slot_allocated)
 		nvkm_drm_submit_slot_release(chan, post_slot);
 	nvkm_drm_exec_release_bindings(sc, borrowed_bindings,
-	    borrowed_binding_count, true);
-	nvkm_drm_exec_pending_put(sc, pending, true);
+	    borrowed_binding_count);
+	nvkm_drm_exec_pending_put(sc, pending);
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
 	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
