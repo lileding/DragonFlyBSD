@@ -18,5 +18,6 @@ KCFLAGS+= -I${SYSDIR}/dev/drm/include
 KCFLAGS+= -I${SYSDIR}/dev/drm/include/drm
 KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi
 KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi/drm
+KCFLAGS+= -Wno-error=cast-qual
 
 .include <bsd.kmod.mk>
