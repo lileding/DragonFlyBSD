@@ -14,10 +14,10 @@ ${src:R}.o: ${NVKM_COMMON_HEADERS}
 .endfor
 
 # DRM headers (Phase 3: register as drm driver)
-KCFLAGS+= -I${SYSDIR}/dev/drm/include
-KCFLAGS+= -I${SYSDIR}/dev/drm/include/drm
-KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi
-KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi/drm
+KCFLAGS+= -I${.CURDIR}/../include
+KCFLAGS+= -I${.CURDIR}/../include/drm
+KCFLAGS+= -I${.CURDIR}/../include/uapi
+KCFLAGS+= -I${.CURDIR}/../include/uapi/drm
 KCFLAGS+= -Wno-error=cast-qual
 
 .include <bsd.kmod.mk>
