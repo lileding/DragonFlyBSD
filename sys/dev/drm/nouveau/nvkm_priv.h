@@ -878,8 +878,6 @@ int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc,
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 
-int	nvkm_drm_reclaim_hidden_bindings(struct nvkm_softc *sc,
-	    struct drm_file *file_priv);
 void	nvkm_drm_exec_complete_intr(struct nvkm_softc *sc);
 
 
