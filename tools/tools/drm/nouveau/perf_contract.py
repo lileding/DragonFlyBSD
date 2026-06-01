@@ -67,7 +67,7 @@ def git_value(path, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="M6.0 performance measurement contract")
+    parser = argparse.ArgumentParser(description="nouveau performance measurement contract")
     parser.add_argument("--run-bench", action="store_true",
                         help="run the pinned llama-bench commands after writing the contract")
     parser.add_argument("--models", default="3b,7b,13b",
@@ -80,7 +80,7 @@ def main():
         raise SystemExit(f"unknown model key(s): {', '.join(unknown)}")
 
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = M6_DIR / "logs" / f"m6_0_contract_{run_id}"
+    out_dir = M6_DIR / "logs" / f"perf_contract_{run_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -91,7 +91,7 @@ def main():
     env.setdefault("MESA_SHADER_CACHE_DISABLE", "false")
 
     manifest = {
-        "m6_step": "M6.0 measurement contract",
+        "step": "performance measurement contract",
         "run_id": run_id,
         "host": subprocess.check_output(["hostname"], text=True).strip(),
         "date": subprocess.check_output(["date"], text=True).strip(),
@@ -150,9 +150,9 @@ def main():
         capture_shell(f"dmesg | egrep -i {shlex.quote(FAULT_PATTERN)} | tail -80 || true",
                       out_dir / "dmesg_fault_scan_after.txt")
 
-    print(f"m6_0_contract_dir={out_dir}")
-    print(f"m6_0_list_devices_rc={list_rc.returncode}")
-    print(f"m6_0_bench_plan={bench_plan}")
+    print(f"perf_contract_dir={out_dir}")
+    print(f"perf_contract_list_devices_rc={list_rc.returncode}")
+    print(f"perf_contract_bench_plan={bench_plan}")
     return list_rc.returncode
 
 

@@ -20,7 +20,7 @@ RTX_2080_TI = {
     "notes": [
         "NVIDIA lists 4352 CUDA cores, 1545 MHz reference boost clock, "
         "1635 MHz Founders Edition boost clock, and 616 GB/s memory bandwidth.",
-        "M6.1 uses the reference 1545 MHz clock for the conservative FP32 roof.",
+        "Uses the reference 1545 MHz clock for the conservative FP32 roof.",
     ],
 }
 
@@ -39,9 +39,13 @@ def git_value(path, args):
 
 
 def latest_contract():
-    paths = sorted(pathlib.Path(path) for path in glob.glob(str(M6_DIR / "logs" / "m6_0_contract_*")))
+    paths = sorted(
+        pathlib.Path(path)
+        for pattern in ("perf_contract_*", "m6_0_contract_*")
+        for path in glob.glob(str(M6_DIR / "logs" / pattern))
+    )
     if not paths:
-        raise SystemExit("no M6.0 contract directories found")
+        raise SystemExit("no performance contract directories found")
     for path in reversed(paths):
         try:
             manifest = json.loads((path / "manifest.json").read_text())
@@ -73,9 +77,9 @@ def human_gib(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="M6.1 RTX 2080 Ti llama.cpp roofline")
+    parser = argparse.ArgumentParser(description="RTX 2080 Ti llama.cpp roofline")
     parser.add_argument("--contract", default=None,
-                        help="M6.0 contract directory; defaults to latest")
+                        help="performance contract directory; defaults to latest complete contract")
     args = parser.parse_args()
 
     contract_dir = pathlib.Path(args.contract) if args.contract else latest_contract()
@@ -83,7 +87,7 @@ def main():
     manifest = json.loads(manifest_path.read_text())
 
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = M6_DIR / "logs" / f"m6_1_roofline_{run_id}"
+    out_dir = M6_DIR / "logs" / f"roofline_{run_id}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fp32_peak_ref = (
@@ -128,7 +132,7 @@ def main():
         })
 
     result = {
-        "m6_step": "M6.1 theoretical roofline",
+        "step": "theoretical roofline",
         "run_id": run_id,
         "date": subprocess.check_output(["date"], text=True).strip(),
         "contract_dir": str(contract_dir),
@@ -165,7 +169,7 @@ def main():
 
     md_path = out_dir / "roofline.md"
     with md_path.open("w") as md:
-        md.write("# M6.1 Theoretical Roofline\n\n")
+        md.write("# Theoretical Roofline\n\n")
         md.write(f"- contract: `{contract_dir}`\n")
         md.write(f"- llama.cpp: `{manifest.get('llama_commit')}`\n")
         md.write(f"- nvkm: `{result['nvkm_commit']}`\n")
@@ -180,13 +184,13 @@ def main():
                 f"{row['fp32_dense_matvec_tps']:.2f} | "
                 f"{row['dominant_limit']} | {row['target_70pct_tps']:.2f} |\n"
             )
-        md.write("\nThe selected M6.1 roofline is memory-bandwidth-bound for all pinned Q4_K_M gates.\n")
+        md.write("\nThe selected roofline is memory-bandwidth-bound for all pinned Q4_K_M gates.\n")
 
-    print(f"m6_1_roofline_dir={out_dir}")
-    print(f"m6_1_roofline_json={json_path}")
-    print(f"m6_1_roofline_md={md_path}")
+    print(f"roofline_dir={out_dir}")
+    print(f"roofline_json={json_path}")
+    print(f"roofline_md={md_path}")
     for row in rows:
-        print(f"m6_1_target_{row['model']}_tps={row['target_70pct_tps']:.2f}")
+        print(f"target_{row['model']}_tps={row['target_70pct_tps']:.2f}")
 
 
 if __name__ == "__main__":
