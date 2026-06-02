@@ -433,46 +433,31 @@ nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 
 	flush_seq = ++sc->exec_cpu_flush_seq;
 	for (uint32_t i = 0; i < push_count; i++) {
-		bool found = false;
+		struct nvkm_bo *bo = NULL;
 
 		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 			scanned++;
 			if (!nvkm_drm_vm_ranges_overlap(pushes[i].va,
 			    pushes[i].va_len, binding->addr, binding->size))
 				continue;
-			found = true;
+			bo = to_nvkm_bo(binding->obj);
 			break;
 		}
-		if (!found) {
+		if (bo == NULL) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: EXEC push has no VM binding idx=%u va=0x%016jx len=0x%08x\n",
 			    i, (uintmax_t)pushes[i].va, pushes[i].va_len);
 			err = -EINVAL;
 			break;
 		}
-	}
-	if (err == 0) {
-		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-			struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
-
-			scanned++;
-			if (bo->kva == NULL)
-				continue;
-			if (bo->cpu_flush_seq == flush_seq)
-				continue;
-			/*
-			 * Conservative correctness path: NVK currently does
-			 * not drive GEM_CPU_FINI for every CPU-written
-			 * descriptor/indirect BO, so a push can legally refer
-			 * to CPU-visible BOs that are not the push buffer
-			 * itself. Flush every mapped CPU backing before
-			 * doorbell until dirty tracking is implemented.
-			 */
-			pmap_invalidate_cache_range((vm_offset_t)bo->kva,
-			    (vm_offset_t)bo->kva + binding->obj->size);
-			bo->cpu_flush_seq = flush_seq;
-			flushed++;
-		}
+		if (bo->kva == NULL)
+			continue;
+		if (bo->cpu_flush_seq == flush_seq)
+			continue;
+		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
+		    (vm_offset_t)bo->kva + bo->base.size);
+		bo->cpu_flush_seq = flush_seq;
+		flushed++;
 	}
 	sc->exec_profile_cpu_bind_scanned += scanned;
 	sc->exec_profile_cpu_bind_flushed += flushed;
