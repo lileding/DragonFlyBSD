@@ -44,6 +44,7 @@ static const struct file_operations nvkm_drm_fops = {
 
 /* Forward decl: ioctl table defined at end of file. */
 static const struct drm_ioctl_desc nvkm_drm_ioctls[];
+struct nvkm_drm_file;
 struct nvkm_drm_vm_binding;
 static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
@@ -113,25 +114,19 @@ struct nvkm_drm_vm_binding {
 	uint64_t addr;
 	uint64_t size;
 	/*
-	 * Owned GEM ref for this VA->BO mapping. The lifetime is a strict
-	 * state machine:
-	 *
-	 *   VISIBLE: refs = 1 visible VA owner + exec_refs GPU borrows.
-	 *   RETIRED: refs = exec_refs GPU borrows only.
-	 *
-	 * The PTE and GEM reference are reclaimed exactly when refs reaches
-	 * zero. A non-zero refs count forbids PTE teardown or object free.
+	 * Owned GEM ref for this VA->BO mapping. grefcnt counts only GPU
+	 * borrows held by submitted EXEC jobs. MAP/UNMAP are remap
+	 * operations and may mutate the page table only when every
+	 * overlapping binding has grefcnt == 0.
 	 */
+	struct nvkm_drm_file *owner;
 	struct drm_gem_object *obj;
-	uint32_t refs;
-	uint32_t exec_refs;
-	uint32_t state;
+	uint32_t grefcnt;
 	bool pte_installed;
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 
-#define NVKM_DRM_VM_BINDING_VISIBLE	1
-#define NVKM_DRM_VM_BINDING_RETIRED	2
+#define NVKM_DRM_VM_REMAP_TIMEOUT_TICKS	(hz * 10)
 
 struct nvkm_drm_chan_obj {
 	uint32_t handle;
@@ -151,6 +146,8 @@ LIST_HEAD(nvkm_drm_chan_list, nvkm_drm_chan);
 struct nvkm_drm_file {
 	struct nvkm_drm_vm_binding_list vm_bindings;
 	struct nvkm_drm_chan_list channels;
+	bool vm_remap_busy;
+	uint64_t vm_epoch;
 };
 
 struct drm_nouveau_exec_push {
@@ -173,20 +170,82 @@ nvkm_drm_vm_ranges_overlap(uint64_t a, uint64_t as, uint64_t b, uint64_t bs)
 	return (a < b + bs && b < a + as);
 }
 
-#define NVKM_DRM_VM_BINDING_VISIBLE_REF(binding) \
-	((binding)->state == NVKM_DRM_VM_BINDING_VISIBLE ? 1 : 0)
-
 static void
 nvkm_drm_vm_binding_assert(const struct nvkm_drm_vm_binding *binding)
 {
-	KASSERT(binding->state == NVKM_DRM_VM_BINDING_VISIBLE ||
-	    binding->state == NVKM_DRM_VM_BINDING_RETIRED,
-	    ("nvkm_drm: invalid VM binding state %u", binding->state));
-	KASSERT(binding->refs ==
-	    NVKM_DRM_VM_BINDING_VISIBLE_REF(binding) + binding->exec_refs,
-	    ("nvkm_drm: VM binding refs mismatch refs=%u visible=%u exec=%u",
-	    binding->refs, NVKM_DRM_VM_BINDING_VISIBLE_REF(binding),
-	    binding->exec_refs));
+	KASSERT(binding->owner != NULL,
+	    ("nvkm_drm: VM binding without owner"));
+	KASSERT(binding->obj != NULL,
+	    ("nvkm_drm: VM binding without GEM object"));
+}
+
+static void
+nvkm_drm_vm_wakeup(struct nvkm_drm_file *nfile)
+{
+	nfile->vm_epoch++;
+	wakeup(&nfile->vm_epoch);
+}
+
+static int
+nvkm_drm_vm_sleep_changed(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, int start_ticks)
+{
+	int elapsed, remaining, err;
+
+	elapsed = ticks - start_ticks;
+	remaining = NVKM_DRM_VM_REMAP_TIMEOUT_TICKS - elapsed;
+	if (remaining <= 0) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM remap wait timeout before sleep\n");
+		return (-ETIMEDOUT);
+	}
+
+	tsleep_interlock(&nfile->vm_epoch, PCATCH);
+	err = tsleep(&nfile->vm_epoch, PCATCH | PINTERLOCKED, "nvkvmb",
+	    remaining);
+	if (err == EWOULDBLOCK) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM remap wait timed out\n");
+		return (-ETIMEDOUT);
+	}
+	if (err == EINTR || err == ERESTART)
+		return (-err);
+	return (0);
+}
+
+static int
+nvkm_drm_vm_wait_remap_idle(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile)
+{
+	int start_ticks = ticks;
+	int err;
+
+	while (nfile->vm_remap_busy) {
+		err = nvkm_drm_vm_sleep_changed(sc, nfile, start_ticks);
+		if (err != 0)
+			return (err);
+	}
+	return (0);
+}
+
+static int
+nvkm_drm_vm_remap_begin(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile)
+{
+	int err;
+
+	err = nvkm_drm_vm_wait_remap_idle(sc, nfile);
+	if (err != 0)
+		return (err);
+	nfile->vm_remap_busy = true;
+	return (0);
+}
+
+static void
+nvkm_drm_vm_remap_end(struct nvkm_drm_file *nfile)
+{
+	nfile->vm_remap_busy = false;
+	nvkm_drm_vm_wakeup(nfile);
 }
 
 static int
@@ -196,20 +255,19 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	int err;
 
 	nvkm_drm_vm_binding_assert(binding);
-	if (binding->refs != 0)
-		return (0);
-	KASSERT(binding->state == NVKM_DRM_VM_BINDING_RETIRED,
-	    ("nvkm_drm: visible VM binding reached zero refs"));
+	KASSERT(binding->grefcnt == 0,
+	    ("nvkm_drm: reclaim busy VM binding grefcnt=%u",
+	    binding->grefcnt));
 
 	if (binding->pte_installed) {
 		err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, binding->addr,
 		    binding->size);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
-			    "nvkm_drm: VM_BIND deferred unmap failed addr=0x%016jx size=0x%016jx obj=%p refs=%u err=%d\n",
+			    "nvkm_drm: VM_BIND unmap failed addr=0x%016jx size=0x%016jx obj=%p grefcnt=%u err=%d\n",
 			    (uintmax_t)binding->addr,
 			    (uintmax_t)binding->size, binding->obj,
-			    binding->exec_refs, err);
+			    binding->grefcnt, err);
 			return (-err);
 		}
 		binding->pte_installed = false;
@@ -230,68 +288,49 @@ nvkm_drm_vm_bind_record_busy(struct nvkm_softc *sc,
     const struct nvkm_drm_vm_binding *binding)
 {
 	sc->vm_bind_busy_count++;
-	sc->vm_bind_busy_state = binding->state;
-	sc->vm_bind_busy_refs = binding->refs;
-	sc->vm_bind_busy_exec_refs = binding->exec_refs;
+	sc->vm_bind_busy_state = 1;
+	sc->vm_bind_busy_refs = binding->grefcnt;
+	sc->vm_bind_busy_exec_refs = binding->grefcnt;
 	sc->vm_bind_busy_addr = binding->addr;
 	sc->vm_bind_busy_size = binding->size;
 }
 
 static int
-nvkm_drm_vm_binding_retire(struct nvkm_softc *sc,
-    struct nvkm_drm_vm_binding *binding, const char *reason)
+nvkm_drm_vm_wait_range_idle(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size)
 {
-	nvkm_drm_vm_binding_assert(binding);
-	if (binding->state == NVKM_DRM_VM_BINDING_RETIRED)
-		return (nvkm_drm_vm_binding_reclaim(sc, binding));
+	struct nvkm_drm_vm_binding *binding;
+	int start_ticks = ticks;
+	int err;
 
-	KASSERT(binding->refs > 0,
-	    ("nvkm_drm: visible VM binding has no visible ref"));
-	binding->state = NVKM_DRM_VM_BINDING_RETIRED;
-	binding->refs--;
+	for (;;) {
+		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+			if (!nvkm_drm_vm_ranges_overlap(addr, size,
+			    binding->addr, binding->size))
+				continue;
+			nvkm_drm_vm_binding_assert(binding);
+			if (binding->grefcnt == 0)
+				continue;
 
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: VM_BIND retire reason=%s addr=0x%016jx size=0x%016jx obj=%p refs=%u exec_refs=%u\n",
-	    reason, (uintmax_t)binding->addr, (uintmax_t)binding->size,
-	    binding->obj, binding->refs, binding->exec_refs);
-	return (nvkm_drm_vm_binding_reclaim(sc, binding));
-}
-
-static int
-nvkm_drm_vm_bindings_retire_range(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    uint32_t *punmapped, uint32_t *pactive)
-{
-	struct nvkm_drm_vm_binding *binding, *next;
-	int err = 0;
-
-	*punmapped = 0;
-	*pactive = 0;
-	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
-		if (!nvkm_drm_vm_ranges_overlap(addr, size,
-		    binding->addr, binding->size))
-			continue;
-
-		nvkm_drm_vm_binding_assert(binding);
-		if (binding->state == NVKM_DRM_VM_BINDING_VISIBLE) {
-			uint32_t refs = binding->refs;
-
-			(*punmapped)++;
-			err = nvkm_drm_vm_binding_retire(sc, binding, "unmap");
+			nvkm_drm_vm_bind_record_busy(sc, binding);
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: VM_BIND remap waits addr=0x%016jx size=0x%016jx old=0x%016jx+0x%016jx grefcnt=%u\n",
+			    (uintmax_t)addr, (uintmax_t)size,
+			    (uintmax_t)binding->addr,
+			    (uintmax_t)binding->size, binding->grefcnt);
+			err = nvkm_drm_vm_sleep_changed(sc, nfile,
+			    start_ticks);
 			if (err != 0)
 				return (err);
-			if (refs > 1)
-				(*pactive)++;
-			continue;
+			break;
 		}
-		if (binding->refs != 0)
-			(*pactive)++;
+		if (binding == NULL)
+			return (0);
 	}
-	return (0);
 }
 
 static int
-nvkm_drm_vm_bindings_prepare_map(struct nvkm_softc *sc,
+nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
     uint32_t *punmapped)
 {
@@ -299,32 +338,19 @@ nvkm_drm_vm_bindings_prepare_map(struct nvkm_softc *sc,
 	int err;
 
 	*punmapped = 0;
-	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-		if (!nvkm_drm_vm_ranges_overlap(addr, size,
-		    binding->addr, binding->size))
-			continue;
-
-		nvkm_drm_vm_binding_assert(binding);
-		if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE ||
-		    binding->refs != 1) {
-			nvkm_drm_vm_bind_record_busy(sc, binding);
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: VM_BIND map busy addr=0x%016jx size=0x%016jx old=0x%016jx+0x%016jx state=%u refs=%u exec_refs=%u\n",
-			    (uintmax_t)addr, (uintmax_t)size,
-			    (uintmax_t)binding->addr,
-			    (uintmax_t)binding->size, binding->state,
-			    binding->refs, binding->exec_refs);
-			return (-EBUSY);
-		}
-	}
-
+	err = nvkm_drm_vm_wait_range_idle(sc, nfile, addr, size);
+	if (err != 0)
+		return (err);
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
+		KASSERT(binding->grefcnt == 0,
+		    ("nvkm_drm: remap removes busy binding grefcnt=%u",
+		    binding->grefcnt));
 
 		(*punmapped)++;
-		err = nvkm_drm_vm_binding_retire(sc, binding, "replace");
+		err = nvkm_drm_vm_binding_reclaim(sc, binding);
 		if (err != 0)
 			return (err);
 	}
@@ -343,9 +369,9 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 
 	binding->addr = addr;
 	binding->size = size;
+	binding->owner = nfile;
 	binding->obj = obj;
-	binding->refs = 1;
-	binding->state = NVKM_DRM_VM_BINDING_VISIBLE;
+	binding->grefcnt = 0;
 	binding->pte_installed = true;
 	LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
 	return (0);
@@ -413,8 +439,6 @@ nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 			struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 
 			scanned++;
-			if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE)
-				continue;
 			if (!nvkm_drm_vm_ranges_overlap(pushes[i].va,
 			    pushes[i].va_len, binding->addr, binding->size))
 				continue;
@@ -457,8 +481,6 @@ nvkm_drm_dump_push_buffer(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 		uint32_t *dw;
 		uint32_t count;
 
-		if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE)
-			continue;
 		if (va < binding->addr ||
 		    va + va_len > binding->addr + binding->size)
 			continue;
@@ -527,8 +549,6 @@ nvkm_drm_exec_trace_record(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo;
 
-		if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE)
-			continue;
 		if (!nvkm_drm_vm_ranges_overlap(push->va, push->va_len,
 		    binding->addr, binding->size))
 			continue;
@@ -822,11 +842,10 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	lwkt_gettoken(&sc->gsp_tok);
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link,
 	    binding_next) {
-		if (binding->state == NVKM_DRM_VM_BINDING_VISIBLE)
-			(void)nvkm_drm_vm_binding_retire(sc, binding,
-			    "postclose");
-		else
-			(void)nvkm_drm_vm_binding_reclaim(sc, binding);
+		KASSERT(binding->grefcnt == 0,
+		    ("nvkm_drm: postclose found busy binding grefcnt=%u",
+		    binding->grefcnt));
+		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
 		binding_count++;
 	}
 	lwkt_reltoken(&sc->gsp_tok);
@@ -1158,6 +1177,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	struct drm_nouveau_vm_bind_op *current_op = NULL;
 	int err = 0;
 	bool gsp_tok_held = false;
+	bool remap_started = false;
 
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
@@ -1195,6 +1215,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
+	err = nvkm_drm_vm_remap_begin(sc, nfile);
+	if (err != 0)
+		goto out_unlock;
+	remap_started = true;
 
 	for (uint32_t i = 0; i < req->op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
@@ -1217,27 +1241,21 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0 ?
 			    NVKM_DRM_VM_TRACE_UNMAP_SPARSE :
 			    NVKM_DRM_VM_TRACE_UNMAP;
-			uint32_t active = 0;
 			uint32_t unmapped = 0;
 
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
 			    (uintmax_t)op->range);
-			err = nvkm_drm_vm_bindings_retire_range(sc, nfile,
-			    op->addr, op->range, &unmapped, &active);
+			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
+			    op->addr, op->range, &unmapped);
 			if (err != 0) {
 				nvkm_drm_vm_trace_record(sc, action, op->flags,
 				    op->handle, op->addr, op->range,
 				    op->bo_offset, NULL, err);
 				break;
 			}
-			if (active != 0) {
-				nvkm_debugf(sc->dev,
-				    "nvkm_drm: VM_BIND unmap active idx=%u retired=%u active=%u\n",
-				    i, unmapped, active);
-				err = 0;
-			} else if (unmapped == 0) {
+			if (unmapped == 0) {
 				if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
 					err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
 					    op->addr, op->range);
@@ -1270,7 +1288,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    "nvkm_drm: VM_BIND map sparse idx=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 				    i, op->flags, op->handle,
 				    (uintmax_t)op->addr, (uintmax_t)op->range);
-				err = nvkm_drm_vm_bindings_prepare_map(sc,
+				err = nvkm_drm_vm_bindings_remove_range(sc,
 				    nfile, op->addr, op->range, &unmapped);
 				if (err == 0) {
 					err = nvkm_gsp_vmm_map_sparse(
@@ -1292,24 +1310,17 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			}
 
 			if (op->handle == 0) {
-				uint32_t active = 0;
 				uint32_t unmapped = 0;
 
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND map-null idx=%u flags=0x%08x addr=0x%016jx range=0x%016jx\n",
 				    i, op->flags, (uintmax_t)op->addr,
 				    (uintmax_t)op->range);
-				err = nvkm_drm_vm_bindings_retire_range(sc,
-				    nfile, op->addr, op->range, &unmapped,
-				    &active);
+				err = nvkm_drm_vm_bindings_remove_range(sc,
+				    nfile, op->addr, op->range, &unmapped);
 				if (err != 0)
 					break;
-				if (active != 0) {
-					nvkm_debugf(sc->dev,
-					    "nvkm_drm: VM_BIND map-null active idx=%u retired=%u active=%u\n",
-					    i, unmapped, active);
-					err = 0;
-				} else if (unmapped == 0) {
+				if (unmapped == 0) {
 					err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
 					    op->addr, op->range);
 				} else {
@@ -1354,7 +1365,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
 			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
-			err = nvkm_drm_vm_bindings_prepare_map(sc, nfile,
+			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
 			    op->addr, op->range, &unmapped);
 			if (err != 0) {
 				drm_gem_object_put_unlocked(obj);
@@ -1405,6 +1416,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		break;
 	}
 
+out_unlock:
+	if (remap_started)
+		nvkm_drm_vm_remap_end(nfile);
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
 	if (err != 0 && current_op != NULL)
@@ -1971,10 +1985,8 @@ nvkm_drm_exec_capture_bindings(struct nvkm_softc *sc,
 	if (fence == NULL)
 		return (0);
 
-	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-		if (binding->state == NVKM_DRM_VM_BINDING_VISIBLE)
-			count++;
-	}
+	LIST_FOREACH(binding, &nfile->vm_bindings, link)
+		count++;
 	if (count == 0)
 		return (0);
 
@@ -1986,11 +1998,8 @@ nvkm_drm_exec_capture_bindings(struct nvkm_softc *sc,
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 
-		if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE)
-			continue;
 		nvkm_drm_vm_binding_assert(binding);
-		binding->refs++;
-		binding->exec_refs++;
+		binding->grefcnt++;
 		bindings[idx++] = binding;
 		nvkm_bo_resv_add_excl_fence(bo, fence);
 	}
@@ -2011,13 +2020,11 @@ nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
 
 		if (binding == NULL)
 			continue;
-		KASSERT(binding->exec_refs > 0,
-		    ("nvkm_drm: binding exec_refs underflow"));
-		binding->exec_refs--;
-		KASSERT(binding->refs > 0,
-		    ("nvkm_drm: binding refs underflow"));
-		binding->refs--;
-		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
+		KASSERT(binding->grefcnt > 0,
+		    ("nvkm_drm: binding grefcnt underflow"));
+		binding->grefcnt--;
+		if (binding->grefcnt == 0)
+			nvkm_drm_vm_wakeup(binding->owner);
 	}
 	kfree(bindings);
 }
@@ -2130,6 +2137,13 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC rejected faulted channel=%u chid=%d err=%d\n",
 		    req->channel, chan->chid, err);
+		goto out_unlock;
+	}
+	err = nvkm_drm_vm_wait_remap_idle(sc, nfile);
+	if (err != 0) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC waits for remap failed channel=%u err=%d\n",
+		    req->channel, err);
 		goto out_unlock;
 	}
 	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
