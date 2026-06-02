@@ -80,6 +80,12 @@ struct nvkm_gsp_vmm {
 	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
 	struct nvkm_gsp_vmm_sparse_region_list sparse_regions;
 	struct nvkm_dmamem sparse_page;
+
+	/* Next free submit GVA slot inside this VMM's CLIENT_BASE window.
+	 * Per-VMM (not global): different VMMs are separate address spaces,
+	 * so slot 0 is reusable across them and the counter cannot overflow
+	 * the global submit window. */
+	uint32_t		submit_gva_slot;
 };
 
 struct nvkm_gsp_vmm_pte_info {

@@ -426,6 +426,10 @@ struct nvkm_softc {
 	struct lwkt_token       gsp_tok;
 	struct lwkt_token       chid_tok;       /* per-fifo chid pool lock */
 	uint64_t                chid_used[32];  /* 2048-bit chid bitmap */
+	/* chid -> owning channel, for RC fault lookup of the faulting
+	 * channel's per-file VMM. Set in chan_ctor, cleared in chan_dtor
+	 * under chid_tok. */
+	struct nvkm_gsp_chan    *chid_chan[2048];
 	struct nvkm_gsp_pending_list gsp_pending;
 	struct nvkm_drm_exec_pending_list exec_pending;
 

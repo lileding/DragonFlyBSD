@@ -339,12 +339,26 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	sc->rc_last_mmu_fault_addr = mmu_addr;
 	sc->rc_last_mmu_fault_type = rc->mmuFaultType;
 	sc->rc_last_journal_size = rc->rcJournalBufferSize;
-	if (sc->gsp_vmm != NULL) {
+	/* Read the PTE from the faulting channel's own (per-file) VMM, not a
+	 * global one: the fault VA only has meaning in that address space. */
+	struct nvkm_gsp_vmm *fault_vmm = NULL;
+	if (rc->chid < 2048) {
+		struct nvkm_gsp_chan *fault_chan;
+
+		lwkt_gettoken(&sc->chid_tok);
+		fault_chan = sc->chid_chan[rc->chid];
+		if (fault_chan != NULL)
+			fault_vmm = fault_chan->vmm;
+		lwkt_reltoken(&sc->chid_tok);
+	}
+	if (fault_vmm == NULL)
+		fault_vmm = sc->gsp_vmm;
+	if (fault_vmm != NULL) {
 		struct nvkm_gsp_vmm_pte_info pte_info;
 
-		lwkt_gettoken(&sc->gsp_vmm->tok);
-		nvkm_gsp_vmm_read_pte(sc->gsp_vmm, mmu_addr, &pte_info);
-		lwkt_reltoken(&sc->gsp_vmm->tok);
+		lwkt_gettoken(&fault_vmm->tok);
+		nvkm_gsp_vmm_read_pte(fault_vmm, mmu_addr, &pte_info);
+		lwkt_reltoken(&fault_vmm->tok);
 		sc->rc_fault_pte_va = pte_info.va;
 		sc->rc_fault_pte = pte_info.pte;
 		sc->rc_fault_pte_pd2_idx = pte_info.pd2_idx;

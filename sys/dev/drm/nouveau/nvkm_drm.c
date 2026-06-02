@@ -145,6 +145,10 @@ struct nvkm_drm_chan {
 LIST_HEAD(nvkm_drm_chan_list, nvkm_drm_chan);
 
 struct nvkm_drm_file {
+	/* Per-file GPU address space. Each drm_file owns its own VMM (RM
+	 * vaspace + page-table tree) so concurrent NVK processes cannot
+	 * collide on GPU VAs. NULL only if vmm_ctor failed during open. */
+	struct nvkm_gsp_vmm *vmm;
 	struct nvkm_drm_vm_binding_list vm_bindings;
 	struct nvkm_drm_chan_list channels;
 	bool vm_remap_busy;
@@ -158,6 +162,12 @@ struct drm_nouveau_exec_push {
 };
 
 static uint32_t nvkm_drm_next_channel = 1;
+
+/* Per-file RM client handle allocator. Each drm_file's VMM needs a unique
+ * client handle; child object handles are derived from it. Kept clear of the
+ * kernel VMM (0xc1d00001) and golden VMM (0xc1d00002). Monotonic; reuse only
+ * after 2^16 opens, by which point earlier files are long gone. */
+static volatile uint32_t nvkm_drm_next_client_handle = 0xc1d10000u;
 
 static struct nvkm_drm_file *
 nvkm_drm_file_priv(struct drm_file *file_priv)
@@ -298,7 +308,7 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	    binding->grefcnt));
 
 	if (binding->pte_installed) {
-		err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, binding->addr,
+		err = nvkm_gsp_vmm_unmap(binding->owner->vmm, binding->addr,
 		    binding->size);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
@@ -417,7 +427,7 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 	}
 
 	if (clear_pte) {
-		err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, addr, size);
+		err = nvkm_gsp_vmm_unmap(nfile->vmm, addr, size);
 		if (err != 0) {
 			err = -err;
 			goto fail_tails;
@@ -959,6 +969,16 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	}
 	lwkt_reltoken(&sc->gsp_tok);
 
+	/* Tear down the per-file address space only after its channels and
+	 * bindings (which borrow this VMM) are gone. */
+	if (nfile->vmm != NULL) {
+		lwkt_gettoken(&sc->gsp_tok);
+		nvkm_gsp_vmm_dtor(nfile->vmm);
+		lwkt_reltoken(&sc->gsp_tok);
+		kfree(nfile->vmm);
+		nfile->vmm = NULL;
+	}
+
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: postclose released bindings=%u channels=%u\n",
 	    binding_count, channel_count);
@@ -967,15 +987,42 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 }
 
 static int
-nvkm_drm_open(struct drm_device *ddev __unused, struct drm_file *file_priv)
+nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 {
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct nvkm_drm_file *nfile;
+	uint32_t client_handle;
+	int err;
 
 	nfile = kzalloc(sizeof(*nfile), GFP_KERNEL);
 	if (nfile == NULL)
 		return (-ENOMEM);
 	LIST_INIT(&nfile->vm_bindings);
 	LIST_INIT(&nfile->channels);
+
+	/* Give this file its own GPU address space (RM vaspace + page-table
+	 * tree) so concurrent NVK processes cannot collide on GPU VAs. */
+	nfile->vmm = kzalloc(sizeof(*nfile->vmm), GFP_KERNEL);
+	if (nfile->vmm == NULL) {
+		kfree(nfile);
+		return (-ENOMEM);
+	}
+	client_handle = atomic_fetchadd_int(&nvkm_drm_next_client_handle, 1);
+	/* Hold gsp_tok across the whole multi-RPC ctor so the client/device/
+	 * vaspace/PDE-copy sequence is atomic against other GSP users; the
+	 * token auto-releases during each RPC reply wait. */
+	lwkt_gettoken(&sc->gsp_tok);
+	err = nvkm_gsp_vmm_ctor(sc, client_handle, nfile->vmm);
+	lwkt_reltoken(&sc->gsp_tok);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "nvkm_drm: per-file VMM ctor failed handle=0x%x err=%d\n",
+		    client_handle, err);
+		kfree(nfile->vmm);
+		kfree(nfile);
+		return (-err);
+	}
+
 	file_priv->driver_priv = nfile;
 	return (0);
 }
@@ -1101,7 +1148,7 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 				return (-ENOENT);
 			if (new_->oclass == 0xc597 || new_->oclass == 0xc5c0 ||
 			    new_->oclass == 0x902d || new_->oclass == 0xa140) {
-				err = nvkm_gsp_chan_promote_gr_ctx(sc->gsp_vmm,
+				err = nvkm_gsp_chan_promote_gr_ctx(nfile->vmm,
 				    dchan->chan, 0);
 				if (err != 0)
 					return (-err);
@@ -1206,7 +1253,7 @@ nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
 			return (-err);
 		}
 	}
-	err = nvkm_gsp_chan_ctor(sc->gsp_vmm, engine_type, dchan->chan);
+	err = nvkm_gsp_chan_ctor(nfile->vmm, engine_type, dchan->chan);
 	lwkt_reltoken(&sc->gsp_tok);
 	if (err != 0) {
 		kfree(dchan->chan);
@@ -1368,7 +1415,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			}
 			if (unmapped == 0 &&
 			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
-				err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
+				err = nvkm_gsp_vmm_unmap_sparse(nfile->vmm,
 				    op->addr, op->range);
 			} else {
 				err = 0;
@@ -1400,7 +1447,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    &unmapped);
 				if (err == 0) {
 					err = nvkm_gsp_vmm_map_sparse(
-					    sc->gsp_vmm, op->addr, op->range);
+					    nfile->vmm, op->addr, op->range);
 					if (err != 0)
 						err = -err;
 				}
@@ -1468,11 +1515,11 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				break;
 			}
 			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
-				err = nvkm_gsp_vmm_map_vram(sc->gsp_vmm,
+				err = nvkm_gsp_vmm_map_vram(nfile->vmm,
 				    op->addr, bo->paddr + op->bo_offset,
 				    op->range);
 			} else {
-				err = nvkm_gsp_vmm_map_sysmem_kva(sc->gsp_vmm,
+				err = nvkm_gsp_vmm_map_sysmem_kva(nfile->vmm,
 				    op->addr, (uint8_t *)bo->kva + op->bo_offset,
 				    op->range);
 			}
@@ -1490,7 +1537,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
 			    op->range, obj, op->bo_offset);
 			if (err != 0) {
-				(void)nvkm_gsp_vmm_unmap(sc->gsp_vmm,
+				(void)nvkm_gsp_vmm_unmap(nfile->vmm,
 				    op->addr, op->range);
 				drm_gem_object_put_unlocked(obj);
 				err = -err;
