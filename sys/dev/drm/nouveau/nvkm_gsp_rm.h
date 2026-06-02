@@ -246,6 +246,10 @@ struct nvkm_gsp_gr_ctxbuf {
 
 struct nvkm_gsp_chan {
 	struct nvkm_gsp_object	object;
+	/* Borrowed back-pointer to the VMM this channel was created in.
+	 * Used by submit-mapping teardown and the RC fault PTE walk to act
+	 * on the correct (per-file) address space. */
+	struct nvkm_gsp_vmm	*vmm;
 	uint64_t		inst_vram;	/* VRAM physical base */
 	uint64_t		userd_vram;	/* VRAM physical base */
 	uint64_t		userd_bar2_gva;	/* BAR2 GVA for host access */

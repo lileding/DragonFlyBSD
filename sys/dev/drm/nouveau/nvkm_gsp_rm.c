@@ -1244,7 +1244,6 @@ static MALLOC_DEFINE(M_NVKM_MTHDBUF, "nvkm_mthdbuf", "nvkm CE method buffer");
 #define SUBMIT_GVA_GPFIFO	(NVKM_VMM_CLIENT_BASE + 0x1000ULL)
 #define SUBMIT_GVA_SEMA		(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
 #define SUBMIT_GVA_STRIDE	0x10000ULL
-static uint32_t nvkm_gsp_submit_gva_slot;
 
 /* === Sem release payload === */
 #define SEM_PAYLOAD		0xdeadbeefu
@@ -1507,17 +1506,26 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	int err;
 
 	memset(chan, 0, sizeof(*chan));
+	chan->vmm = vmm;
+	/* Submit GVA slot is per-VMM: this channel's push/gpf/sema window
+	 * lives in vmm's own CLIENT_BASE region, so the slot index only has
+	 * to be unique within this VMM. */
 	chan->submit_gva_push = NVKM_VMM_CLIENT_BASE +
-	    (uint64_t)nvkm_gsp_submit_gva_slot * SUBMIT_GVA_STRIDE;
+	    (uint64_t)vmm->submit_gva_slot * SUBMIT_GVA_STRIDE;
 	chan->submit_gva_gpf = chan->submit_gva_push + 0x1000ULL;
 	chan->submit_gva_sema = chan->submit_gva_push + 0x2000ULL;
-	nvkm_gsp_submit_gva_slot++;
+	vmm->submit_gva_slot++;
 
 	/* Allocate chid before USERD allocation: GSP validates chid-derived
 	 * USERD page/slot fields during channel allocation. */
 	chan->chid = nvkm_chid_alloc(sc);
 	if (chan->chid < 0)
 		return (ENOMEM);
+	/* Publish chid -> channel so the RC fault path can find this
+	 * channel's VMM by chid. */
+	lwkt_gettoken(&sc->chid_tok);
+	sc->chid_chan[chan->chid] = chan;
+	lwkt_reltoken(&sc->chid_tok);
 	userd_page = (uint32_t)chan->chid / 8u;
 
 	/* VRAM: inst block + USERD (separate pages). */
@@ -2668,11 +2676,16 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 		(void)nvkm_gsp_rm_free(&chan->ce_obj);
 	if (chan->object.handle != 0)
 		err = nvkm_gsp_rm_free(&chan->object);
-	if (sc != NULL && chan->chid > 0)
+	if (sc != NULL && chan->chid > 0) {
+		lwkt_gettoken(&sc->chid_tok);
+		if (sc->chid_chan[chan->chid] == chan)
+			sc->chid_chan[chan->chid] = NULL;
+		lwkt_reltoken(&sc->chid_tok);
 		nvkm_chid_free(sc, chan->chid);
+	}
 	if (sc != NULL) {
-		if (chan->submit_gva_push != 0)
-			(void)nvkm_gsp_vmm_unmap(sc->gsp_vmm,
+		if (chan->submit_gva_push != 0 && chan->vmm != NULL)
+			(void)nvkm_gsp_vmm_unmap(chan->vmm,
 			    chan->submit_gva_push, 0x3000);
 		nvkm_gsp_bar1_free_page(sc, &chan->submit_pd0);
 		nvkm_gsp_bar1_free_page(sc, &chan->submit_lpt);
