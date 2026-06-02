@@ -46,6 +46,7 @@ struct nvkm_gsp_vmm_user_pt {
 	uint32_t		pd1_idx;
 	uint32_t		pd0_idx;
 	uint32_t		valid_pte_count;
+	uint32_t		sparse_pte_count;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
