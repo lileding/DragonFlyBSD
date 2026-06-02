@@ -559,6 +559,34 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_wait_count);
 	sbuf_printf(&sb, "vm_bind_wait_error_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_error_count);
+	sbuf_printf(&sb, "vm_bind_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_error_count);
+	sbuf_printf(&sb, "vm_bind_busy_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_busy_count);
+	sbuf_printf(&sb, "vm_bind_last_error = %d\n",
+	    sc->vm_bind_last_error);
+	sbuf_printf(&sb, "vm_bind_last_op = %u\n",
+	    sc->vm_bind_last_op);
+	sbuf_printf(&sb, "vm_bind_last_flags = 0x%08x\n",
+	    sc->vm_bind_last_flags);
+	sbuf_printf(&sb, "vm_bind_last_handle = %u\n",
+	    sc->vm_bind_last_handle);
+	sbuf_printf(&sb, "vm_bind_last_addr = 0x%016llx\n",
+	    (unsigned long long)sc->vm_bind_last_addr);
+	sbuf_printf(&sb, "vm_bind_last_range = 0x%016llx\n",
+	    (unsigned long long)sc->vm_bind_last_range);
+	sbuf_printf(&sb, "vm_bind_last_bo_offset = 0x%016llx\n",
+	    (unsigned long long)sc->vm_bind_last_bo_offset);
+	sbuf_printf(&sb, "vm_bind_busy_state = %u\n",
+	    sc->vm_bind_busy_state);
+	sbuf_printf(&sb, "vm_bind_busy_refs = %u\n",
+	    sc->vm_bind_busy_refs);
+	sbuf_printf(&sb, "vm_bind_busy_exec_refs = %u\n",
+	    sc->vm_bind_busy_exec_refs);
+	sbuf_printf(&sb, "vm_bind_busy_addr = 0x%016llx\n",
+	    (unsigned long long)sc->vm_bind_busy_addr);
+	sbuf_printf(&sb, "vm_bind_busy_size = 0x%016llx\n",
+	    (unsigned long long)sc->vm_bind_busy_size);
 	sbuf_printf(&sb, "cpu_prep_wait_count = %llu\n",
 	    (unsigned long long)sc->cpu_prep_wait_count);
 	sbuf_printf(&sb, "cpu_prep_wait_error_count = %llu\n",
