@@ -270,6 +270,7 @@ struct nvkm_drm_exec_trace {
 	uint32_t va_len;
 	uint64_t binding_addr;
 	uint64_t binding_size;
+	uint64_t bo_offset;
 	uint64_t bo_paddr;
 	uint32_t bo_domain;
 	uintptr_t obj;
