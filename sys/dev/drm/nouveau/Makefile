@@ -18,6 +18,6 @@ KCFLAGS+= -I${.CURDIR}/../include
 KCFLAGS+= -I${.CURDIR}/../include/drm
 KCFLAGS+= -I${.CURDIR}/../include/uapi
 KCFLAGS+= -I${.CURDIR}/../include/uapi/drm
-KCFLAGS+= -Wno-error=cast-qual
+CWARNFLAGS+= -Wno-error=cast-qual
 
 .include <bsd.kmod.mk>

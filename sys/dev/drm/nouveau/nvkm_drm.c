@@ -225,6 +225,18 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	return (0);
 }
 
+static void
+nvkm_drm_vm_bind_record_busy(struct nvkm_softc *sc,
+    const struct nvkm_drm_vm_binding *binding)
+{
+	sc->vm_bind_busy_count++;
+	sc->vm_bind_busy_state = binding->state;
+	sc->vm_bind_busy_refs = binding->refs;
+	sc->vm_bind_busy_exec_refs = binding->exec_refs;
+	sc->vm_bind_busy_addr = binding->addr;
+	sc->vm_bind_busy_size = binding->size;
+}
+
 static int
 nvkm_drm_vm_binding_retire(struct nvkm_softc *sc,
     struct nvkm_drm_vm_binding *binding, const char *reason)
@@ -295,6 +307,7 @@ nvkm_drm_vm_bindings_prepare_map(struct nvkm_softc *sc,
 		nvkm_drm_vm_binding_assert(binding);
 		if (binding->state != NVKM_DRM_VM_BINDING_VISIBLE ||
 		    binding->refs != 1) {
+			nvkm_drm_vm_bind_record_busy(sc, binding);
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND map busy addr=0x%016jx size=0x%016jx old=0x%016jx+0x%016jx state=%u refs=%u exec_refs=%u\n",
 			    (uintmax_t)addr, (uintmax_t)size,
@@ -336,6 +349,21 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 	binding->pte_installed = true;
 	LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
 	return (0);
+}
+
+static void
+nvkm_drm_vm_bind_record_error(struct nvkm_softc *sc, uint32_t op,
+    uint32_t flags, uint32_t handle, uint64_t addr, uint64_t range,
+    uint64_t bo_offset, int err)
+{
+	sc->vm_bind_error_count++;
+	sc->vm_bind_last_error = err;
+	sc->vm_bind_last_op = op;
+	sc->vm_bind_last_flags = flags;
+	sc->vm_bind_last_handle = handle;
+	sc->vm_bind_last_addr = addr;
+	sc->vm_bind_last_range = range;
+	sc->vm_bind_last_bo_offset = bo_offset;
 }
 
 static void
@@ -1127,6 +1155,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
 	struct drm_nouveau_vm_bind *req = data;
 	struct drm_nouveau_vm_bind_op *ops;
+	struct drm_nouveau_vm_bind_op *current_op = NULL;
 	int err = 0;
 	bool gsp_tok_held = false;
 
@@ -1170,6 +1199,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	for (uint32_t i = 0; i < req->op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
 
+		current_op = op;
 		if (op->range == 0 ||
 		    ((op->addr | op->bo_offset | op->range) &
 		     (NVKM_GMMU_PT_PAGE_SIZE - 1))) {
@@ -1377,6 +1407,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
+	if (err != 0 && current_op != NULL)
+		nvkm_drm_vm_bind_record_error(sc, current_op->op,
+		    current_op->flags, current_op->handle, current_op->addr,
+		    current_op->range, current_op->bo_offset, err);
 	kfree(ops);
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND complete ops=%u err=%d\n",
