@@ -436,21 +436,11 @@ nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 		bool found = false;
 
 		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-			struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
-
 			scanned++;
 			if (!nvkm_drm_vm_ranges_overlap(pushes[i].va,
 			    pushes[i].va_len, binding->addr, binding->size))
 				continue;
 			found = true;
-			if (bo->kva == NULL)
-				break;
-			if (bo->cpu_flush_seq == flush_seq)
-				break;
-			pmap_invalidate_cache_range((vm_offset_t)bo->kva,
-			    (vm_offset_t)bo->kva + binding->obj->size);
-			bo->cpu_flush_seq = flush_seq;
-			flushed++;
 			break;
 		}
 		if (!found) {
@@ -459,6 +449,29 @@ nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 			    i, (uintmax_t)pushes[i].va, pushes[i].va_len);
 			err = -EINVAL;
 			break;
+		}
+	}
+	if (err == 0) {
+		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+			struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+
+			scanned++;
+			if (bo->kva == NULL)
+				continue;
+			if (bo->cpu_flush_seq == flush_seq)
+				continue;
+			/*
+			 * Conservative correctness path: NVK currently does
+			 * not drive GEM_CPU_FINI for every CPU-written
+			 * descriptor/indirect BO, so a push can legally refer
+			 * to CPU-visible BOs that are not the push buffer
+			 * itself. Flush every mapped CPU backing before
+			 * doorbell until dirty tracking is implemented.
+			 */
+			pmap_invalidate_cache_range((vm_offset_t)bo->kva,
+			    (vm_offset_t)bo->kva + binding->obj->size);
+			bo->cpu_flush_seq = flush_seq;
+			flushed++;
 		}
 	}
 	sc->exec_profile_cpu_bind_scanned += scanned;
@@ -1814,11 +1827,125 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 	}
 }
 
+#define NVKM_DRM_FAULT_DATA_SCAN_MAX_SIZE	(16ULL * 1024ULL * 1024ULL)
+
+static void
+nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
+    struct nvkm_drm_exec_pending *pending, uint64_t fault_addr)
+{
+	uint32_t fault_lo = (uint32_t)fault_addr;
+	uint32_t fault_hi = (uint32_t)(fault_addr >> 32);
+
+	for (uint32_t n = 0; n < pending->trace_count; n++) {
+		struct nvkm_drm_exec_trace *trace;
+		struct drm_gem_object *obj;
+		struct nvkm_bo *bo;
+		uint32_t *dw;
+		uint64_t offset;
+		uint32_t count;
+
+		trace = &sc->exec_trace[(pending->trace_first + n) %
+		    NVKM_DRM_EXEC_TRACE_COUNT];
+		if (trace->seq == 0 || trace->obj == 0 ||
+		    trace->cpu_mapped == 0)
+			continue;
+		if (trace->va < trace->binding_addr)
+			continue;
+		offset = trace->va - trace->binding_addr;
+		if (offset + trace->va_len > trace->binding_size)
+			continue;
+
+		obj = (struct drm_gem_object *)trace->obj;
+		bo = to_nvkm_bo(obj);
+		if (bo->kva == NULL)
+			continue;
+
+		dw = (uint32_t *)((uint8_t *)bo->kva + offset);
+		count = trace->va_len / sizeof(uint32_t);
+		sc->rc_fault_push_scan_count++;
+		for (uint32_t i = 0; i + 1 < count; i++) {
+			uint64_t value = (uint64_t)dw[i] |
+			    ((uint64_t)dw[i + 1] << 32);
+
+			if (value != fault_addr &&
+			    !(dw[i] == fault_lo &&
+			    (dw[i + 1] & 0xffu) == fault_hi))
+				continue;
+			sc->rc_fault_push_hit_count++;
+			if (sc->rc_fault_push_hit_seq == 0) {
+				sc->rc_fault_push_hit_seq = trace->seq;
+				sc->rc_fault_push_hit_va = trace->va;
+				sc->rc_fault_push_hit_dword = i;
+			}
+		}
+	}
+}
+
+static void
+nvkm_drm_fault_scan_cpu_bindings(struct nvkm_softc *sc,
+    struct nvkm_drm_exec_pending *pending, uint64_t fault_addr)
+{
+	for (uint32_t n = 0; n < pending->binding_count; n++) {
+		struct nvkm_drm_vm_binding *binding = pending->bindings[n];
+		struct nvkm_bo *bo;
+		uint32_t *dw;
+		uint32_t count;
+
+		if (binding == NULL || binding->obj == NULL)
+			continue;
+		if (binding->size > NVKM_DRM_FAULT_DATA_SCAN_MAX_SIZE)
+			continue;
+		bo = to_nvkm_bo(binding->obj);
+		if (bo->kva == NULL)
+			continue;
+
+		dw = (uint32_t *)bo->kva;
+		count = binding->size / sizeof(uint32_t);
+		sc->rc_fault_data_scan_count++;
+		for (uint32_t i = 0; i + 1 < count; i++) {
+			uint64_t value = (uint64_t)dw[i] |
+			    ((uint64_t)dw[i + 1] << 32);
+
+			if (value != fault_addr)
+				continue;
+			sc->rc_fault_data_hit_count++;
+			if (sc->rc_fault_data_hit_addr == 0) {
+				sc->rc_fault_data_hit_addr = binding->addr;
+				sc->rc_fault_data_hit_size = binding->size;
+				sc->rc_fault_data_hit_offset =
+				    (uint64_t)i * sizeof(uint32_t);
+				sc->rc_fault_data_hit_value = value;
+			}
+		}
+	}
+}
+
 void
 nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
-    int error)
+    int error, uint64_t fault_addr)
 {
 	struct nvkm_drm_exec_pending *pending, *next;
+
+	sc->rc_fault_pending_count = 0;
+	sc->rc_fault_binding_count = 0;
+	sc->rc_fault_binding_addr = 0;
+	sc->rc_fault_binding_size = 0;
+	sc->rc_fault_binding_grefcnt = 0;
+	sc->rc_fault_nearest_lo_addr = 0;
+	sc->rc_fault_nearest_lo_size = 0;
+	sc->rc_fault_nearest_hi_addr = 0;
+	sc->rc_fault_nearest_hi_size = 0;
+	sc->rc_fault_push_scan_count = 0;
+	sc->rc_fault_push_hit_count = 0;
+	sc->rc_fault_push_hit_seq = 0;
+	sc->rc_fault_push_hit_va = 0;
+	sc->rc_fault_push_hit_dword = 0;
+	sc->rc_fault_data_scan_count = 0;
+	sc->rc_fault_data_hit_count = 0;
+	sc->rc_fault_data_hit_addr = 0;
+	sc->rc_fault_data_hit_size = 0;
+	sc->rc_fault_data_hit_offset = 0;
+	sc->rc_fault_data_hit_value = 0;
 
 	for (pending = LIST_FIRST(&sc->exec_pending); pending != NULL;
 	    pending = next) {
@@ -1826,6 +1953,44 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 		if (pending->chan == NULL ||
 		    (uint32_t)pending->chan->chid != chid)
 			continue;
+
+		sc->rc_fault_pending_count++;
+		nvkm_drm_fault_scan_pushes(sc, pending, fault_addr);
+		nvkm_drm_fault_scan_cpu_bindings(sc, pending, fault_addr);
+		for (uint32_t i = 0; i < pending->binding_count; i++) {
+			struct nvkm_drm_vm_binding *binding =
+			    pending->bindings[i];
+			uint64_t end;
+
+			if (binding == NULL)
+				continue;
+			end = binding->addr + binding->size;
+			if (fault_addr >= binding->addr && fault_addr < end) {
+				sc->rc_fault_binding_count++;
+				if (sc->rc_fault_binding_addr == 0) {
+					sc->rc_fault_binding_addr =
+					    binding->addr;
+					sc->rc_fault_binding_size =
+					    binding->size;
+					sc->rc_fault_binding_grefcnt =
+					    binding->grefcnt;
+				}
+				continue;
+			}
+			if (end <= fault_addr &&
+			    (sc->rc_fault_nearest_lo_size == 0 ||
+			     end > sc->rc_fault_nearest_lo_addr +
+			     sc->rc_fault_nearest_lo_size)) {
+				sc->rc_fault_nearest_lo_addr = binding->addr;
+				sc->rc_fault_nearest_lo_size = binding->size;
+			}
+			if (binding->addr > fault_addr &&
+			    (sc->rc_fault_nearest_hi_size == 0 ||
+			     binding->addr < sc->rc_fault_nearest_hi_addr)) {
+				sc->rc_fault_nearest_hi_addr = binding->addr;
+				sc->rc_fault_nearest_hi_size = binding->size;
+			}
+		}
 
 		pending->chan->faulted = 1;
 		pending->chan->fault_error = error;

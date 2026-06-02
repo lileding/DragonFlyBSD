@@ -379,6 +379,65 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->rc_last_mmu_fault_type);
 	sbuf_printf(&sb, "last_journal_size = %u\n",
 	    sc->rc_last_journal_size);
+	sbuf_printf(&sb,
+	    "fault_pte_snapshot va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
+	    (unsigned long long)sc->rc_fault_pte_va,
+	    sc->rc_fault_pte_pd2_idx, sc->rc_fault_pte_pd1_idx,
+	    sc->rc_fault_pte_pd0_idx, sc->rc_fault_pte_spt_idx,
+	    sc->rc_fault_pte_has_pt,
+	    (unsigned long long)sc->rc_fault_pte,
+	    (unsigned long long)nvkm_pte_to_sparse());
+	sbuf_printf(&sb, "fault_pending_count = %u\n",
+	    sc->rc_fault_pending_count);
+	sbuf_printf(&sb, "fault_binding_count = %u\n",
+	    sc->rc_fault_binding_count);
+	if (sc->rc_fault_binding_count != 0) {
+		sbuf_printf(&sb,
+		    "fault_binding addr=0x%016llx size=0x%016llx grefcnt=%u\n",
+		    (unsigned long long)sc->rc_fault_binding_addr,
+		    (unsigned long long)sc->rc_fault_binding_size,
+		    sc->rc_fault_binding_grefcnt);
+	}
+	if (sc->rc_fault_nearest_lo_size != 0) {
+		sbuf_printf(&sb,
+		    "fault_binding_nearest_lo addr=0x%016llx size=0x%016llx delta=0x%016llx\n",
+		    (unsigned long long)sc->rc_fault_nearest_lo_addr,
+		    (unsigned long long)sc->rc_fault_nearest_lo_size,
+		    (unsigned long long)(sc->rc_last_mmu_fault_addr -
+		    (sc->rc_fault_nearest_lo_addr +
+		    sc->rc_fault_nearest_lo_size)));
+	}
+	if (sc->rc_fault_nearest_hi_size != 0) {
+		sbuf_printf(&sb,
+		    "fault_binding_nearest_hi addr=0x%016llx size=0x%016llx delta=0x%016llx\n",
+		    (unsigned long long)sc->rc_fault_nearest_hi_addr,
+		    (unsigned long long)sc->rc_fault_nearest_hi_size,
+		    (unsigned long long)(sc->rc_fault_nearest_hi_addr -
+		    sc->rc_last_mmu_fault_addr));
+	}
+	sbuf_printf(&sb, "fault_push_scan_count = %u\n",
+	    sc->rc_fault_push_scan_count);
+	sbuf_printf(&sb, "fault_push_hit_count = %u\n",
+	    sc->rc_fault_push_hit_count);
+	if (sc->rc_fault_push_hit_count != 0) {
+		sbuf_printf(&sb,
+		    "fault_push_hit seq=%llu va=0x%016llx dword=%u\n",
+		    (unsigned long long)sc->rc_fault_push_hit_seq,
+		    (unsigned long long)sc->rc_fault_push_hit_va,
+		    sc->rc_fault_push_hit_dword);
+	}
+	sbuf_printf(&sb, "fault_data_scan_count = %u\n",
+	    sc->rc_fault_data_scan_count);
+	sbuf_printf(&sb, "fault_data_hit_count = %u\n",
+	    sc->rc_fault_data_hit_count);
+	if (sc->rc_fault_data_hit_count != 0) {
+		sbuf_printf(&sb,
+		    "fault_data_hit addr=0x%016llx size=0x%016llx offset=0x%016llx value=0x%016llx\n",
+		    (unsigned long long)sc->rc_fault_data_hit_addr,
+		    (unsigned long long)sc->rc_fault_data_hit_size,
+		    (unsigned long long)sc->rc_fault_data_hit_offset,
+		    (unsigned long long)sc->rc_fault_data_hit_value);
+	}
 	if (sc->rc_last_mmu_fault_addr != 0) {
 		uint32_t matches = 0;
 
@@ -614,6 +673,53 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+static int
+nvkm_gsp_sysctl_vm_trace(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	struct sbuf *sb;
+	uint32_t end, start;
+	int err;
+
+	sb = sbuf_new_auto();
+	if (sb == NULL)
+		return (ENOMEM);
+	sbuf_printf(sb, "next = %u\n", sc->vm_trace_next);
+	sbuf_printf(sb, "seq = %llu\n",
+	    (unsigned long long)sc->vm_trace_seq);
+
+	end = sc->vm_trace_next;
+	start = end > NVKM_DRM_VM_TRACE_COUNT ?
+	    end - NVKM_DRM_VM_TRACE_COUNT : 0;
+	for (uint32_t pos = start; pos < end; pos++) {
+		const struct nvkm_drm_vm_trace *trace;
+
+		trace = &sc->vm_trace[pos % NVKM_DRM_VM_TRACE_COUNT];
+		if (trace->seq == 0)
+			continue;
+		sbuf_printf(sb,
+		    "trace[%u] seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
+		    pos, (unsigned long long)trace->seq, trace->action,
+		    trace->flags, trace->handle,
+		    (unsigned long long)trace->addr,
+		    (unsigned long long)trace->range,
+		    (unsigned long long)trace->bo_offset,
+		    (uintmax_t)trace->obj, trace->bo_domain,
+		    (unsigned long long)trace->bo_paddr,
+		    (unsigned long long)trace->bo_size, trace->cpu_mapped,
+		    trace->error);
+	}
+
+	err = sbuf_finish(sb);
+	if (err != 0) {
+		sbuf_delete(sb);
+		return (err);
+	}
+	err = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (err);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -644,4 +750,8 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_state_summary, "A",
 	    "compute path counters and allocator snapshots");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "vm_trace",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_vm_trace, "A",
+	    "nouveau VM_BIND trace ring");
 }

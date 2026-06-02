@@ -101,6 +101,17 @@ nvkm_gsp_vmm_sparse_bar1_page(struct nvkm_softc *sc,
 	nvkm_gsp_bar1_flush(sc);
 }
 
+static void
+nvkm_gsp_vmm_pd0_write_slot(struct nvkm_softc *sc,
+    const struct nvkm_gsp_vmm_pd0 *pd0, uint32_t pd0_idx,
+    uint64_t big_pde, uint64_t small_pde)
+{
+	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 0) * 8,
+	    big_pde);
+	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
+	    small_pde);
+}
+
 static struct nvkm_bar1_page *
 nvkm_gsp_vmm_pd1_base_page(struct nvkm_gsp_vmm *vmm, uint32_t pd2_idx)
 {
@@ -205,7 +216,8 @@ nvkm_gsp_vmm_pd0_get(struct nvkm_gsp_vmm *vmm, uint32_t pd2_idx,
 		return (err);
 	}
 
-	nvkm_gsp_vmm_zero_bar1_page(sc, &pd0->page);
+	nvkm_gsp_vmm_sparse_bar1_page(sc, &pd0->page,
+	    nvkm_pde_to_sparse());
 	nvkm_gsp_bar1_wr64(sc, pd1_page->bar1_gva + pd1_idx * 8,
 	    nvkm_pde_to_vram(pd0->page.vram_paddr));
 	nvkm_gsp_bar1_flush(sc);
@@ -250,11 +262,8 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		nvkm_gsp_bar1_wr64(sc,
 		    pt->pd0->pd1_page->bar1_gva + pd1_idx * 8,
 		    nvkm_pde_to_vram(pt->pd0->page.vram_paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    pt->pd0->page.bar1_gva + (pd0_idx * 2 + 0) * 8,
-		    nvkm_pde_to_vram(pt->lpt.vram_paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    pt->pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
+		nvkm_gsp_vmm_pd0_write_slot(sc, pt->pd0, pd0_idx,
+		    nvkm_pde_to_vram(pt->lpt.vram_paddr),
 		    nvkm_pde_to_vram(pt->spt.vram_paddr));
 		nvkm_gsp_bar1_flush(sc);
 		*ppt = pt;
@@ -271,6 +280,7 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	pt->pd1_idx = pd1_idx;
 	pt->pd0_idx = pd0_idx;
 	pt->valid_pte_count = 0;
+	pt->sparse_pte_count = NVKM_GMMU_SPT_ENTRIES;
 
 	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->lpt,
 	    NVKM_VRAM_VMM_PT, pt);
@@ -288,9 +298,8 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	/* PD1 owns one shared PD0 page. Each PD0 entry gets its own dual
 	 * BIG/SMALL PDE pair, so mappings in the same 512 MiB range do not
 	 * overwrite earlier PD0 entries. */
-	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 0) * 8,
-	    nvkm_pde_to_vram(pt->lpt.vram_paddr));
-	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx,
+	    nvkm_pde_to_vram(pt->lpt.vram_paddr),
 	    nvkm_pde_to_vram(pt->spt.vram_paddr));
 	nvkm_gsp_bar1_flush(sc);
 	pd0->refcount++;
@@ -315,18 +324,26 @@ nvkm_gsp_vmm_write_pt_pte(struct nvkm_gsp_vmm *vmm,
 	struct nvkm_softc *sc = vmm->sc;
 	uint32_t spt_idx;
 	uint64_t old_pte, sparse_pte;
+	int old_valid, old_sparse, new_valid, new_sparse;
 
 	spt_idx = (uint32_t)((va >> NVKM_GMMU_SPT_SHIFT) &
 	    (NVKM_GMMU_SPT_ENTRIES - 1));
 	old_pte = nvkm_gsp_bar1_rd64(sc, pt->spt.bar1_gva + spt_idx * 8);
 	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
 	sparse_pte = nvkm_pte_to_sparse();
-	if ((old_pte == 0 || old_pte == sparse_pte) &&
-	    pte != 0 && pte != sparse_pte) {
+	old_valid = old_pte != 0 && old_pte != sparse_pte;
+	old_sparse = old_pte == sparse_pte;
+	new_valid = pte != 0 && pte != sparse_pte;
+	new_sparse = pte == sparse_pte;
+	if (!old_valid && new_valid) {
 		pt->valid_pte_count++;
-	} else if (old_pte != 0 && old_pte != sparse_pte &&
-	    (pte == 0 || pte == sparse_pte) && pt->valid_pte_count > 0) {
+	} else if (old_valid && !new_valid && pt->valid_pte_count > 0) {
 		pt->valid_pte_count--;
+	}
+	if (!old_sparse && new_sparse) {
+		pt->sparse_pte_count++;
+	} else if (old_sparse && !new_sparse && pt->sparse_pte_count > 0) {
+		pt->sparse_pte_count--;
 	}
 	return (0);
 }
@@ -357,6 +374,22 @@ nvkm_gsp_vmm_user_pt_find_va(struct nvkm_gsp_vmm *vmm, uint64_t va)
 	    pd0_idx));
 }
 
+static struct nvkm_gsp_vmm_pd0 *
+nvkm_gsp_vmm_pd0_find_va(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint32_t *pd0_idxp)
+{
+	uint32_t pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	uint32_t pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	uint32_t pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	if (pd0_idxp != NULL)
+		*pd0_idxp = pd0_idx;
+	return (nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx));
+}
+
 static int
 nvkm_gsp_vmm_pt_has_sparse_region(struct nvkm_gsp_vmm *vmm,
     const struct nvkm_gsp_vmm_user_pt *pt)
@@ -380,20 +413,20 @@ nvkm_gsp_vmm_pt_has_sparse_region(struct nvkm_gsp_vmm *vmm,
 
 static void
 nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
-    struct nvkm_gsp_vmm_user_pt *pt)
+    struct nvkm_gsp_vmm_user_pt *pt, uint64_t empty_pde)
 {
 	struct nvkm_softc *sc = vmm->sc;
 	struct nvkm_gsp_vmm_pd0 *pd0 = pt->pd0;
 
 	if (pt->valid_pte_count != 0)
 		return;
+	if (pt->sparse_pte_count != 0)
+		return;
 	if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
 		return;
 
-	nvkm_gsp_bar1_wr64(sc,
-	    pd0->page.bar1_gva + (pt->pd0_idx * 2 + 0) * 8, 0);
-	nvkm_gsp_bar1_wr64(sc,
-	    pd0->page.bar1_gva + (pt->pd0_idx * 2 + 1) * 8, 0);
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pt->pd0_idx, empty_pde,
+	    empty_pde);
 	LIST_REMOVE(pt, link);
 	nvkm_gsp_bar1_free_page(sc, &pt->spt);
 	nvkm_gsp_bar1_free_page(sc, &pt->lpt);
@@ -402,6 +435,8 @@ nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
 	if (pd0->refcount > 0)
 		pd0->refcount--;
 	if (pd0->refcount != 0)
+		return;
+	if (empty_pde != 0)
 		return;
 
 	nvkm_gsp_bar1_wr64(sc, pd0->pd1_page->bar1_gva + pd0->pd1_idx * 8,
@@ -413,15 +448,25 @@ nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
 
 static void
 nvkm_gsp_vmm_unmap_existing_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t pte)
+    uint64_t pte, uint64_t empty_pde)
 {
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_pd0 *pd0;
 	struct nvkm_gsp_vmm_user_pt *pt;
+	uint32_t pd0_idx;
 
 	pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va);
-	if (pt == NULL)
+	if (pt == NULL) {
+		if (empty_pde == 0) {
+			pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, va, &pd0_idx);
+			if (pd0 != NULL)
+				nvkm_gsp_vmm_pd0_write_slot(sc, pd0,
+				    pd0_idx, 0, 0);
+		}
 		return;
+	}
 	(void)nvkm_gsp_vmm_write_pt_pte(vmm, pt, va, pte);
-	nvkm_gsp_vmm_reclaim_empty_pt(vmm, pt);
+	nvkm_gsp_vmm_reclaim_empty_pt(vmm, pt, empty_pde);
 }
 
 static int
@@ -598,17 +643,16 @@ int
 nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 {
 	struct nvkm_softc *sc = vmm->sc;
-	uint64_t off;
+	int err;
 
 	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
 		return (EINVAL);
 
 	lwkt_gettoken(&vmm->tok);
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t gva = va + off;
-
-		nvkm_gsp_vmm_unmap_existing_pte(vmm, gva,
-		    nvkm_pte_to_sparse());
+	err = nvkm_gsp_vmm_write_sparse(vmm, va, size);
+	if (err != 0) {
+		lwkt_reltoken(&vmm->tok);
+		return (err);
 	}
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_gsp_vmm_invalidate(vmm);
@@ -670,7 +714,7 @@ nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
 		uint64_t gva = va + off;
 
-		nvkm_gsp_vmm_unmap_existing_pte(vmm, gva, 0);
+		nvkm_gsp_vmm_unmap_existing_pte(vmm, gva, 0, 0);
 	}
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_gsp_vmm_invalidate(vmm);
