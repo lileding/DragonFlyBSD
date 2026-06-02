@@ -249,6 +249,43 @@ nvkm_drm_vm_remap_end(struct nvkm_drm_file *nfile)
 	nvkm_drm_vm_wakeup(nfile);
 }
 
+static struct nvkm_drm_vm_binding *
+nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
+    uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset)
+{
+	struct nvkm_drm_vm_binding *binding;
+
+	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
+	if (binding == NULL)
+		return (NULL);
+
+	binding->addr = addr;
+	binding->size = size;
+	binding->bo_offset = bo_offset;
+	binding->owner = nfile;
+	binding->obj = obj;
+	binding->grefcnt = 0;
+	binding->pte_installed = true;
+	return (binding);
+}
+
+static void
+nvkm_drm_vm_binding_free(struct nvkm_drm_vm_binding *binding)
+{
+	nvkm_drm_vm_binding_assert(binding);
+	KASSERT(binding->grefcnt == 0,
+	    ("nvkm_drm: free busy VM binding grefcnt=%u", binding->grefcnt));
+	drm_gem_object_put_unlocked(binding->obj);
+	kfree(binding);
+}
+
+static void
+nvkm_drm_vm_binding_unlink_free(struct nvkm_drm_vm_binding *binding)
+{
+	LIST_REMOVE(binding, link);
+	nvkm_drm_vm_binding_free(binding);
+}
+
 static int
 nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
     struct nvkm_drm_vm_binding *binding)
@@ -274,13 +311,11 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 		binding->pte_installed = false;
 	}
 
-	LIST_REMOVE(binding, link);
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND reclaim addr=0x%016jx size=0x%016jx obj=%p\n",
 	    (uintmax_t)binding->addr, (uintmax_t)binding->size,
 	    binding->obj);
-	drm_gem_object_put_unlocked(binding->obj);
-	kfree(binding);
+	nvkm_drm_vm_binding_unlink_free(binding);
 	return (0);
 }
 
@@ -333,16 +368,24 @@ nvkm_drm_vm_wait_range_idle(struct nvkm_softc *sc,
 static int
 nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    uint32_t *punmapped)
+    bool clear_empty_range, uint32_t *punmapped)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
+	struct nvkm_drm_vm_binding_list tail_bindings;
+	uint64_t end = addr + size;
+	bool clear_pte = clear_empty_range;
 	int err;
 
+	LIST_INIT(&tail_bindings);
 	*punmapped = 0;
 	err = nvkm_drm_vm_wait_range_idle(sc, nfile, addr, size);
 	if (err != 0)
 		return (err);
-	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		struct nvkm_drm_vm_binding *tail;
+		uint64_t old_start, old_end, cut_start, cut_end;
+		uint64_t head_size, tail_size, tail_bo_offset;
+
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
@@ -351,11 +394,80 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		    binding->grefcnt));
 
 		(*punmapped)++;
-		err = nvkm_drm_vm_binding_reclaim(sc, binding);
-		if (err != 0)
-			return (err);
+		clear_pte = true;
+		old_start = binding->addr;
+		old_end = binding->addr + binding->size;
+		cut_start = old_start > addr ? old_start : addr;
+		cut_end = old_end < end ? old_end : end;
+		head_size = cut_start - old_start;
+		tail_size = old_end - cut_end;
+		if (head_size == 0 || tail_size == 0)
+			continue;
+
+		tail_bo_offset = binding->bo_offset + (cut_end - old_start);
+		drm_gem_object_get(binding->obj);
+		tail = nvkm_drm_vm_binding_alloc(nfile, cut_end, tail_size,
+		    binding->obj, tail_bo_offset);
+		if (tail == NULL) {
+			drm_gem_object_put_unlocked(binding->obj);
+			err = -ENOMEM;
+			goto fail_tails;
+		}
+		LIST_INSERT_HEAD(&tail_bindings, tail, link);
+	}
+
+	if (clear_pte) {
+		err = nvkm_gsp_vmm_unmap(sc->gsp_vmm, addr, size);
+		if (err != 0) {
+			err = -err;
+			goto fail_tails;
+		}
+	}
+
+	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
+		uint64_t old_start, old_end, cut_start, cut_end;
+		uint64_t head_size, tail_size;
+
+		if (!nvkm_drm_vm_ranges_overlap(addr, size,
+		    binding->addr, binding->size))
+			continue;
+		KASSERT(binding->grefcnt == 0,
+		    ("nvkm_drm: remap removes busy binding grefcnt=%u",
+		    binding->grefcnt));
+
+		old_start = binding->addr;
+		old_end = binding->addr + binding->size;
+		cut_start = old_start > addr ? old_start : addr;
+		cut_end = old_end < end ? old_end : end;
+		head_size = cut_start - old_start;
+		tail_size = old_end - cut_end;
+
+		if (head_size != 0 && tail_size != 0) {
+			binding->size = head_size;
+		} else if (head_size != 0) {
+			binding->size = head_size;
+		} else if (tail_size != 0) {
+			binding->addr = cut_end;
+			binding->size = tail_size;
+			binding->bo_offset += cut_end - old_start;
+		} else {
+			binding->pte_installed = false;
+			nvkm_drm_vm_binding_unlink_free(binding);
+		}
+	}
+
+	while ((binding = LIST_FIRST(&tail_bindings)) != NULL) {
+		LIST_REMOVE(binding, link);
+		LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
 	}
 	return (0);
+
+fail_tails:
+	while ((binding = LIST_FIRST(&tail_bindings)) != NULL) {
+		LIST_REMOVE(binding, link);
+		nvkm_drm_vm_binding_free(binding);
+	}
+	return (err);
 }
 
 static int
@@ -364,17 +476,10 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 {
 	struct nvkm_drm_vm_binding *binding;
 
-	binding = kzalloc(sizeof(*binding), GFP_KERNEL);
+	binding = nvkm_drm_vm_binding_alloc(nfile, addr, size, obj, bo_offset);
 	if (binding == NULL)
 		return (ENOMEM);
 
-	binding->addr = addr;
-	binding->size = size;
-	binding->bo_offset = bo_offset;
-	binding->owner = nfile;
-	binding->obj = obj;
-	binding->grefcnt = 0;
-	binding->pte_installed = true;
 	LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
 	return (0);
 }
@@ -1249,24 +1354,22 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
-			    i, op->op, op->flags, op->handle, (uintmax_t)op->addr,
-			    (uintmax_t)op->range);
+			    i, op->op, op->flags, op->handle,
+			    (uintmax_t)op->addr, (uintmax_t)op->range);
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
-			    op->addr, op->range, &unmapped);
+			    op->addr, op->range,
+			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) == 0,
+			    &unmapped);
 			if (err != 0) {
-				nvkm_drm_vm_trace_record(sc, action, op->flags,
-				    op->handle, op->addr, op->range,
-				    op->bo_offset, NULL, err);
+				nvkm_drm_vm_trace_record(sc, action,
+				    op->flags, op->handle, op->addr,
+				    op->range, op->bo_offset, NULL, err);
 				break;
 			}
-			if (unmapped == 0) {
-				if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
-					err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
-					    op->addr, op->range);
-				} else {
-					err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
-					    op->addr, op->range);
-				}
+			if (unmapped == 0 &&
+			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
+				err = nvkm_gsp_vmm_unmap_sparse(sc->gsp_vmm,
+				    op->addr, op->range);
 			} else {
 				err = 0;
 			}
@@ -1293,7 +1396,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    i, op->flags, op->handle,
 				    (uintmax_t)op->addr, (uintmax_t)op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
-				    nfile, op->addr, op->range, &unmapped);
+				    nfile, op->addr, op->range, false,
+				    &unmapped);
 				if (err == 0) {
 					err = nvkm_gsp_vmm_map_sparse(
 					    sc->gsp_vmm, op->addr, op->range);
@@ -1321,26 +1425,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    i, op->flags, (uintmax_t)op->addr,
 				    (uintmax_t)op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
-				    nfile, op->addr, op->range, &unmapped);
+				    nfile, op->addr, op->range, true,
+				    &unmapped);
 				if (err != 0)
 					break;
-				if (unmapped == 0) {
-					err = nvkm_gsp_vmm_unmap(sc->gsp_vmm,
-					    op->addr, op->range);
-				} else {
-					err = 0;
-				}
 				nvkm_drm_vm_trace_record(sc,
 				    NVKM_DRM_VM_TRACE_MAP_NULL, op->flags,
 				    op->handle, op->addr, op->range,
-				    op->bo_offset, NULL, err != 0 ? -err : 0);
-				if (err != 0) {
-					err = -err;
-					nvkm_debugf(sc->dev,
-					    "nvkm_drm: VM_BIND map-null failed idx=%u err=%d\n",
-					    i, err);
-					break;
-				}
+				    op->bo_offset, NULL, 0);
 				continue;
 			}
 
@@ -1370,7 +1462,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    (uintmax_t)op->range,
 			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
-			    op->addr, op->range, &unmapped);
+			    op->addr, op->range, false, &unmapped);
 			if (err != 0) {
 				drm_gem_object_put_unlocked(obj);
 				break;
