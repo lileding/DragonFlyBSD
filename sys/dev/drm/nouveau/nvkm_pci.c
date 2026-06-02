@@ -339,12 +339,34 @@ nvkm_gsp_evt_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	sc->rc_last_mmu_fault_addr = mmu_addr;
 	sc->rc_last_mmu_fault_type = rc->mmuFaultType;
 	sc->rc_last_journal_size = rc->rcJournalBufferSize;
+	if (sc->gsp_vmm != NULL) {
+		struct nvkm_gsp_vmm_pte_info pte_info;
+
+		lwkt_gettoken(&sc->gsp_vmm->tok);
+		nvkm_gsp_vmm_read_pte(sc->gsp_vmm, mmu_addr, &pte_info);
+		lwkt_reltoken(&sc->gsp_vmm->tok);
+		sc->rc_fault_pte_va = pte_info.va;
+		sc->rc_fault_pte = pte_info.pte;
+		sc->rc_fault_pte_pd2_idx = pte_info.pd2_idx;
+		sc->rc_fault_pte_pd1_idx = pte_info.pd1_idx;
+		sc->rc_fault_pte_pd0_idx = pte_info.pd0_idx;
+		sc->rc_fault_pte_spt_idx = pte_info.spt_idx;
+		sc->rc_fault_pte_has_pt = pte_info.has_pt;
+	} else {
+		sc->rc_fault_pte_va = mmu_addr;
+		sc->rc_fault_pte = 0;
+		sc->rc_fault_pte_pd2_idx = 0;
+		sc->rc_fault_pte_pd1_idx = 0;
+		sc->rc_fault_pte_pd0_idx = 0;
+		sc->rc_fault_pte_spt_idx = 0;
+		sc->rc_fault_pte_has_pt = 0;
+	}
 	nvkm_infof(sc->dev,
 	    "RC_TRIGGERED: engineType=%u chid=%u exceptLevel=%u exceptType=0x%x scope=%u "
 	    "mmuFaultAddr=0x%llx mmuFaultType=0x%x rcJournalSz=%u\n",
 	    rc->nv2080EngineType, rc->chid, rc->exceptLevel, rc->exceptType, rc->scope,
 	    (unsigned long long)mmu_addr, rc->mmuFaultType, rc->rcJournalBufferSize);
-	nvkm_drm_exec_fault_channel_locked(sc, rc->chid, -EIO);
+	nvkm_drm_exec_fault_channel_locked(sc, rc->chid, -EIO, mmu_addr);
 	{
 		uint8_t *journal = (uint8_t *)(rc + 1);
 		uint32_t avail = repc > sizeof(*rc) ? repc - sizeof(*rc) : 0;

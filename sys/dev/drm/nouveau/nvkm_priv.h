@@ -75,7 +75,7 @@ extern int nvkm_debug;
 void	nvkm_debugf(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
-	    uint32_t chid, int error);
+	    uint32_t chid, int error, uint64_t fault_addr);
 
 /* Initial supported device. Phase 0 targets only TU102. */
 #define NVKM_PCI_DEVICE_TU102	0x1e07
@@ -492,6 +492,33 @@ struct nvkm_softc {
 	uint64_t		rc_last_mmu_fault_addr;
 	uint32_t		rc_last_mmu_fault_type;
 	uint32_t		rc_last_journal_size;
+	uint64_t		rc_fault_pte_va;
+	uint64_t		rc_fault_pte;
+	uint32_t		rc_fault_pte_pd2_idx;
+	uint32_t		rc_fault_pte_pd1_idx;
+	uint32_t		rc_fault_pte_pd0_idx;
+	uint32_t		rc_fault_pte_spt_idx;
+	uint8_t			rc_fault_pte_has_pt;
+	uint32_t		rc_fault_pending_count;
+	uint32_t		rc_fault_binding_count;
+	uint64_t		rc_fault_binding_addr;
+	uint64_t		rc_fault_binding_size;
+	uint32_t		rc_fault_binding_grefcnt;
+	uint64_t		rc_fault_nearest_lo_addr;
+	uint64_t		rc_fault_nearest_lo_size;
+	uint64_t		rc_fault_nearest_hi_addr;
+	uint64_t		rc_fault_nearest_hi_size;
+	uint32_t		rc_fault_push_scan_count;
+	uint32_t		rc_fault_push_hit_count;
+	uint64_t		rc_fault_push_hit_seq;
+	uint64_t		rc_fault_push_hit_va;
+	uint32_t		rc_fault_push_hit_dword;
+	uint32_t		rc_fault_data_scan_count;
+	uint32_t		rc_fault_data_hit_count;
+	uint64_t		rc_fault_data_hit_addr;
+	uint64_t		rc_fault_data_hit_size;
+	uint64_t		rc_fault_data_hit_offset;
+	uint64_t		rc_fault_data_hit_value;
 	uint64_t		bo_gem_new_count;
 	uint64_t		bo_gem_free_count;
 	uint64_t		bo_sysmem_active_count;
@@ -827,6 +854,12 @@ static __inline uint64_t
 nvkm_pde_to_vram(uint64_t pt_paddr)
 {
 	return ((uint64_t)pt_paddr >> NV_PT_ADDR_SHIFT) | NV_PDE_APERTURE_VRAM;
+}
+
+static __inline uint64_t
+nvkm_pde_to_sparse(void)
+{
+	return NV_PDE_VOL;
 }
 
 static __inline uint64_t
