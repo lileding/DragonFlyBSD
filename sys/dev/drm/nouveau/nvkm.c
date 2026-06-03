@@ -10,21 +10,6 @@
 
 int nvkm_debug = 0;
 
-/* EXEC GPFIFO-entry flow control, modelled on nouveau's scheduler credit_limit =
- * gpfifo.max. Caps the total GPFIFO entries (push_count+1 per submit) of
- * not-yet-completed submits; a submit that would exceed it blocks (FIFO) until the
- * oldest completes (refunded on the completion interrupt). 0 = off.
- *
- * This was originally introduced as a tight bound (2) to contain the async-EXEC
- * torn-pointer fault, but that fault was actually caused by signal-only EXECs
- * signalling out of channel order (fixed in nvkm_drm.c); with that fix the fault
- * does not occur even with backpressure off (cr=0 validated clean, single and
- * parallel). So this is no longer load-bearing for correctness and now only bounds
- * ring usage like nouveau. Default = ring - 1, matching nouveau's gpfifo.max; the
- * real in-flight limits are the 64 post slots and gpfifo_wait_space, so this is an
- * effectively-inert backstop. cr 2..511 and 0 all validated RC-free. */
-int nvkm_exec_max_credits = NVKM_DRM_GPFIFO_ENTRIES - 1;
-
 static void
 nvkm_vprintf(device_t dev, const char *fmt, __va_list ap)
 {

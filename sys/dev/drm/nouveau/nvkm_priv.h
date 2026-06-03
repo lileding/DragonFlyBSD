@@ -72,10 +72,9 @@ const char *nvkm_vram_kind_name(enum nvkm_vram_kind kind);
 
 struct nvkm_softc;
 extern int nvkm_debug;
-extern int nvkm_exec_max_credits;
 
-/* Per-channel GPFIFO ring depth. Shared so the EXEC credit default (nvkm.c)
- * and the submit path (nvkm_drm.c) agree on the ring geometry. */
+/* Per-channel GPFIFO ring depth, used by the EXEC submit path and the
+ * EXEC_PUSH_MAX getparam (NVKM_DRM_GPFIFO_ENTRIES / 2 - 1). */
 #define NVKM_DRM_GPFIFO_ENTRIES	512
 void	nvkm_debugf(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
@@ -261,9 +260,6 @@ struct nvkm_drm_exec_pending {
 	 * submit using it is still in flight. */
 	uint64_t push_va_lo;
 	uint64_t push_va_hi;
-	/* GPFIFO entries this submit charged to sc->exec_inflight_entries;
-	 * refunded on completion/cancel. */
-	uint32_t entries;
 	volatile u_int done;
 };
 LIST_HEAD(nvkm_drm_exec_pending_list, nvkm_drm_exec_pending);
@@ -477,9 +473,6 @@ struct nvkm_softc {
 	uint64_t		exec_push_reuse_count;
 	uint64_t		exec_push_reuse_va;
 	uint32_t		exec_push_reuse_prev_payload;
-	/* Sum of GPFIFO entries of not-yet-completed submits (the credit in
-	 * flight). Updated under gsp_tok; waiters sleep on its address. */
-	uint32_t		exec_inflight_entries;
 	uint64_t		exec_resv_attach_calls;
 	uint64_t		exec_resv_attach_bos;
 	uint64_t		exec_async_pending_count;
