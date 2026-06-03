@@ -233,11 +233,19 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	wptr += msg->elem_count;
 	if (wptr >= NVKM_GSP_MSGCOUNT)
 		wptr -= NVKM_GSP_MSGCOUNT;
+	/* The ring payload (memcpy above) must be visible to GSP before the
+	 * write pointer that exposes it. cmdq lives in GSP-shared memory and
+	 * GSP is a separate processor, so order this explicitly rather than
+	 * relying on x86 store ordering (needed on aarch64). */
+	cpu_sfence();
 	*(volatile uint32_t *)(cmdq + 0x10) = wptr;
 
-	/* Doorbell iff GSP-RM has come up and is event-driven. */
-	if (sc->gsp_running)
+	/* Doorbell iff GSP-RM has come up and is event-driven. Fence so the
+	 * updated write pointer is visible before the doorbell MMIO write. */
+	if (sc->gsp_running) {
+		cpu_sfence();
 		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0xc00, 0);
+	}
 
 #ifdef NVKM_DEBUG_RPC_TRACE
 	nvkm_debugf(sc->dev,
@@ -273,6 +281,11 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	wptr = *(volatile uint32_t *)(msgq + 0x10);
 	if (sc->gsp_msgq_rptr == wptr)
 		return (NULL);
+
+	/* GSP writes the slot payload before advancing the write pointer we
+	 * just read; load-fence so we observe that payload and not a stale
+	 * slot (acquire side of the producer's release; needed on aarch64). */
+	cpu_lfence();
 
 	slot = msgq + NVKM_GSP_PAGE_SIZE +
 	    sc->gsp_msgq_rptr * NVKM_GSP_PAGE_SIZE;
@@ -357,20 +370,23 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			struct nvkm_gsp_pending *p;
 			bool matched = false;
 
+			/*
+			 * Route the reply by its echoed sequence, not by
+			 * function: with concurrent submitters several RPCs of
+			 * the same function can be in flight, and only the
+			 * sequence identifies which waiter this reply belongs
+			 * to. seq is unique (assigned under gsp_tok) and nonzero
+			 * for every awaited request.
+			 */
 			LIST_FOREACH(p, &sc->gsp_pending, link) {
-				if (p->fn == fn) {
-#if NVKM_GSP_RPC_DEBUG_QUEUES
-					if (fn == 103 && p->seq != r->sequence) {
-						nvkm_debugf(sc->dev,
-						    "gsp_rpc: reply fn=%u matched by fn "
-						    "reqseq=%u repseq=%u\n",
-						    fn, p->seq, r->sequence);
-					}
-#endif
+				if (p->seq == r->sequence) {
 					p->reply_buf = buf;
 					p->reply_len = len;
-					/* release: reply_buf/_len stores precede done
-					 * publication on all architectures. */
+					/* Release: the reply_buf/_len stores must
+					 * precede the done publication so the
+					 * waiter (which reads them only after an
+					 * acquire-load of done) observes them on
+					 * weak-memory archs, not just x86 TSO. */
 					atomic_store_rel_int(&p->done, 1);
 					wakeup(p);
 					matched = true;
@@ -454,17 +470,20 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 	uint32_t seq = 0;
 	int err;
 
-	/* Assign inner sequence iff policy expects a reply. */
-	if (policy != NVKM_GSP_RPC_REPLY_NOSEQ) {
-		seq = sc->gsp_rpc_seq++;
-		rpc->sequence = seq;
-	}
-
 	switch (policy) {
 	case NVKM_GSP_RPC_REPLY_NOWAIT:
 	case NVKM_GSP_RPC_REPLY_NOSEQ:
-		/* Wrap cmdq_push with gsp_tok so concurrent senders serialise. */
+		/* Wrap cmdq_push with gsp_tok so concurrent senders serialise.
+		 * Assign the inner sequence under the token too, so the counter
+		 * is not raced by concurrent senders and the value published in
+		 * the request is unique. */
 		lwkt_gettoken(&sc->gsp_tok);
+		if (policy != NVKM_GSP_RPC_REPLY_NOSEQ) {
+			do {
+				seq = ++sc->gsp_rpc_seq;
+			} while (seq == 0);	/* 0 is reserved for no-reply */
+			rpc->sequence = seq;
+		}
 		if (fn == 103)
 			nvkm_gsp_rpc_diag_queues(sc, "before-push", fn, seq);
 		err = nvkm_gsp_cmdq_push(sc, params);	/* frees the buffer */
@@ -479,14 +498,22 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		return ((void *)(uintptr_t)1);
 
 	case NVKM_GSP_RPC_REPLY_RECV: {
-		struct nvkm_gsp_pending p = { .fn = fn, .seq = seq };
+		struct nvkm_gsp_pending p = { .fn = fn };
 		int ticks_to_wait;
 		int timeout_ticks = 5 * hz;
 
-		/* Nouveau waits for the reply by function, not by RPC
-		 * sequence. Install the pending entry before publishing the
-		 * command so an early msgq drain cannot discard the reply. */
+		/* Assign a unique sequence under gsp_tok and publish it in the
+		 * request before the command becomes visible to GSP. The reply
+		 * echoes this sequence, so the drainer routes it to exactly this
+		 * waiter even when several concurrent submitters have RPCs of
+		 * the same function in flight. Install the pending entry before
+		 * pushing so an early drain cannot discard the reply. */
 		lwkt_gettoken(&sc->gsp_tok);
+		do {
+			seq = ++sc->gsp_rpc_seq;
+		} while (seq == 0);	/* 0 is reserved for no-reply */
+		rpc->sequence = seq;
+		p.seq = seq;
 		LIST_INSERT_HEAD(&sc->gsp_pending, &p, link);
 		if (fn == 103)
 			nvkm_gsp_rpc_diag_queues(sc, "before-push", fn, seq);
