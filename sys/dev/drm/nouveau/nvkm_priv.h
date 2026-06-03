@@ -73,6 +73,10 @@ const char *nvkm_vram_kind_name(enum nvkm_vram_kind kind);
 struct nvkm_softc;
 extern int nvkm_debug;
 extern int nvkm_exec_max_credits;
+
+/* Per-channel GPFIFO ring depth. Shared so the EXEC credit default (nvkm.c)
+ * and the submit path (nvkm_drm.c) agree on the ring geometry. */
+#define NVKM_DRM_GPFIFO_ENTRIES	512
 void	nvkm_debugf(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,

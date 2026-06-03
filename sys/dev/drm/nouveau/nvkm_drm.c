@@ -1115,7 +1115,14 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		    rman_get_size(sc->bar_res[1]) : 0;
 		break;
 	case NOUVEAU_GETPARAM_EXEC_PUSH_MAX:
-		gp->value = 512;	/* default per NVK winsys */
+		/*
+		 * Max pushes NVK may pack into one EXEC ioctl. Match nouveau's
+		 * nouveau_exec_push_max_from_ib_max(): half the GPFIFO ring minus
+		 * one, so a single submit cannot outrun the ring once the
+		 * completion trailer, fetch-window NOPs, and the get != put
+		 * headroom are accounted for, and two max submits still fit.
+		 */
+		gp->value = NVKM_DRM_GPFIFO_ENTRIES / 2 - 1;
 		break;
 	case NOUVEAU_GETPARAM_GRAPH_UNITS:
 		/* NVK interprets low 8 bits as GPC count and bits 8..23 as TPC count.
@@ -1676,7 +1683,6 @@ struct drm_nouveau_exec {
 #define NVKM_DRM_SUBMIT_GVA_SEMA	(NVKM_VMM_CLIENT_BASE + 0x2000ULL)
 #define NVKM_DRM_POST_PUSH_DWORDS	13
 #define NVKM_DRM_POST_RING_SLOTS	64
-#define NVKM_DRM_GPFIFO_ENTRIES		512
 #define NVKM_DRM_GPFIFO_FETCH_WINDOW	0x40
 #define NVKM_DRM_EXEC_POLL_US		5000000
 
