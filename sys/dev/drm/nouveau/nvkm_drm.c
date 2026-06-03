@@ -50,8 +50,6 @@ static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
-static void nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_vm_binding **bindings, uint32_t count);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
 
@@ -114,15 +112,8 @@ struct nvkm_drm_vm_binding {
 	uint64_t addr;
 	uint64_t size;
 	uint64_t bo_offset;
-	/*
-	 * Owned GEM ref for this VA->BO mapping. grefcnt counts only GPU
-	 * borrows held by submitted EXEC jobs. MAP/UNMAP are remap
-	 * operations and may mutate the page table only when every
-	 * overlapping binding has grefcnt == 0.
-	 */
 	struct nvkm_drm_file *owner;
 	struct drm_gem_object *obj;
-	uint32_t grefcnt;
 	bool pte_installed;
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
@@ -152,7 +143,18 @@ struct nvkm_drm_file {
 	struct nvkm_gsp_vmm *vmm;
 	struct nvkm_drm_vm_binding_list vm_bindings;
 	struct nvkm_drm_chan_list channels;
-	bool vm_remap_busy;
+	/* Serializes remap (VM_BIND) against EXEC and against other remaps on
+	 * this file's VMM. A remap holds it across the page-table mutation, so
+	 * no EXEC can charge exec_inflight (and submit) meanwhile. Order:
+	 * vm_token is acquired before gsp_tok; the completion ithread never
+	 * takes it (it only atomically decrements exec_inflight + wakes). */
+	struct lwkt_token vm_token;
+	/* Count of in-flight EXEC submits on this file's VMM. A VM_BIND remap
+	 * may mutate the page table only when this is 0: a GPU program's
+	 * runtime memory accesses cannot be predicted statically, so any
+	 * in-flight EXEC pins the whole address space. Atomic: charged under
+	 * vm_token by EXEC, decremented locklessly by the completion ithread. */
+	volatile u_int exec_inflight;
 	uint64_t vm_epoch;
 };
 
@@ -198,67 +200,7 @@ nvkm_drm_vm_wakeup(struct nvkm_drm_file *nfile)
 	wakeup(&nfile->vm_epoch);
 }
 
-static int
-nvkm_drm_vm_sleep_changed(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile, int start_ticks)
-{
-	int elapsed, remaining, err;
 
-	elapsed = ticks - start_ticks;
-	remaining = NVKM_DRM_VM_REMAP_TIMEOUT_TICKS - elapsed;
-	if (remaining <= 0) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM remap wait timeout before sleep\n");
-		return (-ETIMEDOUT);
-	}
-
-	tsleep_interlock(&nfile->vm_epoch, PCATCH);
-	err = tsleep(&nfile->vm_epoch, PCATCH | PINTERLOCKED, "nvkvmb",
-	    remaining);
-	if (err == EWOULDBLOCK) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM remap wait timed out\n");
-		return (-ETIMEDOUT);
-	}
-	if (err == EINTR || err == ERESTART)
-		return (-err);
-	return (0);
-}
-
-static int
-nvkm_drm_vm_wait_remap_idle(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile)
-{
-	int start_ticks = ticks;
-	int err;
-
-	while (nfile->vm_remap_busy) {
-		err = nvkm_drm_vm_sleep_changed(sc, nfile, start_ticks);
-		if (err != 0)
-			return (err);
-	}
-	return (0);
-}
-
-static int
-nvkm_drm_vm_remap_begin(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile)
-{
-	int err;
-
-	err = nvkm_drm_vm_wait_remap_idle(sc, nfile);
-	if (err != 0)
-		return (err);
-	nfile->vm_remap_busy = true;
-	return (0);
-}
-
-static void
-nvkm_drm_vm_remap_end(struct nvkm_drm_file *nfile)
-{
-	nfile->vm_remap_busy = false;
-	nvkm_drm_vm_wakeup(nfile);
-}
 
 static struct nvkm_drm_vm_binding *
 nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
@@ -275,7 +217,6 @@ nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
 	binding->bo_offset = bo_offset;
 	binding->owner = nfile;
 	binding->obj = obj;
-	binding->grefcnt = 0;
 	binding->pte_installed = true;
 	return (binding);
 }
@@ -284,8 +225,6 @@ static void
 nvkm_drm_vm_binding_free(struct nvkm_drm_vm_binding *binding)
 {
 	nvkm_drm_vm_binding_assert(binding);
-	KASSERT(binding->grefcnt == 0,
-	    ("nvkm_drm: free busy VM binding grefcnt=%u", binding->grefcnt));
 	drm_gem_object_put_unlocked(binding->obj);
 	kfree(binding);
 }
@@ -304,19 +243,15 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	int err;
 
 	nvkm_drm_vm_binding_assert(binding);
-	KASSERT(binding->grefcnt == 0,
-	    ("nvkm_drm: reclaim busy VM binding grefcnt=%u",
-	    binding->grefcnt));
 
 	if (binding->pte_installed) {
 		err = nvkm_gsp_vmm_unmap(binding->owner->vmm, binding->addr,
 		    binding->size);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
-			    "nvkm_drm: VM_BIND unmap failed addr=0x%016jx size=0x%016jx obj=%p grefcnt=%u err=%d\n",
+			    "nvkm_drm: VM_BIND unmap failed addr=0x%016jx size=0x%016jx obj=%p err=%d\n",
 			    (uintmax_t)binding->addr,
-			    (uintmax_t)binding->size, binding->obj,
-			    binding->grefcnt, err);
+			    (uintmax_t)binding->size, binding->obj, err);
 			return (-err);
 		}
 		binding->pte_installed = false;
@@ -330,49 +265,55 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	return (0);
 }
 
-static void
-nvkm_drm_vm_bind_record_busy(struct nvkm_softc *sc,
-    const struct nvkm_drm_vm_binding *binding)
-{
-	sc->vm_bind_busy_count++;
-	sc->vm_bind_busy_state = 1;
-	sc->vm_bind_busy_refs = binding->grefcnt;
-	sc->vm_bind_busy_exec_refs = binding->grefcnt;
-	sc->vm_bind_busy_addr = binding->addr;
-	sc->vm_bind_busy_size = binding->size;
-}
-
+/*
+ * A GPU EXEC is a program whose runtime memory accesses cannot be predicted
+ * statically, so any in-flight EXEC pins the file's whole VMM. A VM_BIND remap
+ * therefore waits for every in-flight EXEC on this file to complete before it
+ * may mutate the page table. The caller holds vm_token, so no new EXEC can
+ * charge exec_inflight while we hold it; the tsleep below drops vm_token, which
+ * does let new EXECs in, but those are simply counted and waited for in turn.
+ * The page table is mutated only once we observe inflight == 0 while holding
+ * vm_token, at which point no EXEC is in flight and none can start.
+ */
 static int
-nvkm_drm_vm_wait_range_idle(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size)
+nvkm_drm_vm_wait_exec_idle(struct nvkm_softc *sc, struct nvkm_drm_file *nfile)
 {
-	struct nvkm_drm_vm_binding *binding;
 	int start_ticks = ticks;
-	int err;
 
 	for (;;) {
-		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-			if (!nvkm_drm_vm_ranges_overlap(addr, size,
-			    binding->addr, binding->size))
-				continue;
-			nvkm_drm_vm_binding_assert(binding);
-			if (binding->grefcnt == 0)
-				continue;
+		int elapsed, remaining, err;
+		u_int inflight;
 
-			nvkm_drm_vm_bind_record_busy(sc, binding);
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: VM_BIND remap waits addr=0x%016jx size=0x%016jx old=0x%016jx+0x%016jx grefcnt=%u\n",
-			    (uintmax_t)addr, (uintmax_t)size,
-			    (uintmax_t)binding->addr,
-			    (uintmax_t)binding->size, binding->grefcnt);
-			err = nvkm_drm_vm_sleep_changed(sc, nfile,
-			    start_ticks);
-			if (err != 0)
-				return (err);
-			break;
-		}
-		if (binding == NULL)
+		/* Arm the interlock BEFORE reading exec_inflight: the completion
+		 * ithread decrements it locklessly (it does not hold vm_token)
+		 * and wakes vm_epoch, so a decrement-to-0 racing between the read
+		 * and the sleep would otherwise be lost. With the interlock armed
+		 * first, such a wakeup makes the PINTERLOCKED tsleep return at
+		 * once and the loop re-reads inflight == 0. */
+		tsleep_interlock(&nfile->vm_epoch, PCATCH);
+		inflight = atomic_load_acq_int(&nfile->exec_inflight);
+		if (inflight == 0)
 			return (0);
+		sc->vm_bind_busy_count++;
+		sc->vm_bind_busy_state = 1;
+		sc->vm_bind_busy_exec_refs = inflight;
+		elapsed = ticks - start_ticks;
+		remaining = NVKM_DRM_VM_REMAP_TIMEOUT_TICKS - elapsed;
+		if (remaining <= 0) {
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: VM_BIND remap wait timeout inflight=%u\n",
+			    inflight);
+			return (-ETIMEDOUT);
+		}
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM_BIND remap waits for %u in-flight EXEC\n",
+		    inflight);
+		err = tsleep(&nfile->vm_epoch, PCATCH | PINTERLOCKED, "nvkvmb",
+		    remaining);
+		if (err == EWOULDBLOCK)
+			return (-ETIMEDOUT);
+		if (err == EINTR || err == ERESTART)
+			return (-err);
 	}
 }
 
@@ -389,7 +330,7 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 
 	LIST_INIT(&tail_bindings);
 	*punmapped = 0;
-	err = nvkm_drm_vm_wait_range_idle(sc, nfile, addr, size);
+	err = nvkm_drm_vm_wait_exec_idle(sc, nfile);
 	if (err != 0)
 		return (err);
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
@@ -400,9 +341,6 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
-		KASSERT(binding->grefcnt == 0,
-		    ("nvkm_drm: remap removes busy binding grefcnt=%u",
-		    binding->grefcnt));
 
 		(*punmapped)++;
 		clear_pte = true;
@@ -442,9 +380,6 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
-		KASSERT(binding->grefcnt == 0,
-		    ("nvkm_drm: remap removes busy binding grefcnt=%u",
-		    binding->grefcnt));
 
 		old_start = binding->addr;
 		old_end = binding->addr + binding->size;
@@ -962,9 +897,6 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	lwkt_gettoken(&sc->gsp_tok);
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link,
 	    binding_next) {
-		KASSERT(binding->grefcnt == 0,
-		    ("nvkm_drm: postclose found busy binding grefcnt=%u",
-		    binding->grefcnt));
 		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
 		binding_count++;
 	}
@@ -1000,6 +932,7 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 		return (-ENOMEM);
 	LIST_INIT(&nfile->vm_bindings);
 	LIST_INIT(&nfile->channels);
+	lwkt_token_init(&nfile->vm_token, "nvkm-vm");
 
 	/* Give this file its own GPU address space (RM vaspace + page-table
 	 * tree) so concurrent NVK processes cannot collide on GPU VAs. */
@@ -1449,12 +1382,13 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		return (-EFAULT);
 	}
 
+	/* vm_token (outer) serializes this remap against EXEC and other remaps
+	 * on the file VMM; gsp_tok (inner) serializes the GSP RPCs. Order is
+	 * always vm_token -> gsp_tok. */
+	lwkt_gettoken(&nfile->vm_token);
+	remap_started = true;
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
-	err = nvkm_drm_vm_remap_begin(sc, nfile);
-	if (err != 0)
-		goto out_unlock;
-	remap_started = true;
 
 	for (uint32_t i = 0; i < req->op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
@@ -1640,10 +1574,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	}
 
 out_unlock:
-	if (remap_started)
-		nvkm_drm_vm_remap_end(nfile);
+	/* Release inner (gsp_tok) before outer (vm_token). Waking the file's
+	 * wait channel lets a blocked EXEC gate / another remap re-check. */
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
+	if (remap_started) {
+		nvkm_drm_vm_wakeup(nfile);
+		lwkt_reltoken(&nfile->vm_token);
+	}
 	if (err != 0 && current_op != NULL)
 		nvkm_drm_vm_bind_record_error(sc, current_op->op,
 		    current_op->flags, current_op->handle, current_op->addr,
@@ -1972,8 +1910,7 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
     volatile uint32_t *sema, uint32_t payload, uint32_t post_slot,
     uint64_t trace_seq, uint32_t trace_first, uint32_t trace_count,
     struct nvkm_drm_exec_signal *signals, uint32_t sig_count,
-    struct dma_fence *exec_fence, struct nvkm_drm_vm_binding **bindings,
-    uint32_t binding_count)
+    struct dma_fence *exec_fence)
 {
 	struct nvkm_drm_exec_pending *pending;
 
@@ -1988,8 +1925,6 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
 	pending->trace_seq = trace_seq;
 	pending->trace_first = trace_first;
 	pending->trace_count = trace_count;
-	pending->bindings = bindings;
-	pending->binding_count = binding_count;
 	if (signals != NULL && sig_count != 0) {
 		pending->fence_count = sig_count;
 		for (uint32_t i = 0; i < sig_count; i++)
@@ -2007,8 +1942,15 @@ nvkm_drm_exec_pending_put(struct nvkm_softc *sc,
 {
 	if (pending == NULL)
 		return;
-	nvkm_drm_exec_release_bindings(sc, pending->bindings,
-	    pending->binding_count);
+	/* Release this submit's hold on its file's VMM; wake a remap that is
+	 * draining in-flight EXEC once the count reaches 0. Caller holds
+	 * gsp_tok. Guarded so it decrements exactly once. */
+	if (pending->nfile != NULL) {
+		if (atomic_fetchadd_int(&pending->nfile->exec_inflight,
+		    (u_int)-1) == 1)
+			nvkm_drm_vm_wakeup(pending->nfile);
+		pending->nfile = NULL;
+	}
 	for (uint32_t i = 0; i < pending->fence_count; i++)
 		dma_fence_put(pending->fences[i]);
 	kfree(pending);
@@ -2095,49 +2037,6 @@ nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
 	}
 }
 
-static void
-nvkm_drm_fault_scan_cpu_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_exec_pending *pending, uint64_t fault_addr)
-{
-	for (uint32_t n = 0; n < pending->binding_count; n++) {
-		struct nvkm_drm_vm_binding *binding = pending->bindings[n];
-		struct nvkm_bo *bo;
-		uint32_t *dw;
-		uint32_t count;
-
-		if (binding == NULL || binding->obj == NULL)
-			continue;
-		if (binding->size > NVKM_DRM_FAULT_DATA_SCAN_MAX_SIZE)
-			continue;
-		bo = to_nvkm_bo(binding->obj);
-		if (bo->kva == NULL)
-			continue;
-		if (binding->bo_offset > bo->base.size ||
-		    binding->size > bo->base.size - binding->bo_offset)
-			continue;
-
-		dw = (uint32_t *)((uint8_t *)bo->kva +
-		    binding->bo_offset);
-		count = binding->size / sizeof(uint32_t);
-		sc->rc_fault_data_scan_count++;
-		for (uint32_t i = 0; i + 1 < count; i++) {
-			uint64_t value = (uint64_t)dw[i] |
-			    ((uint64_t)dw[i + 1] << 32);
-
-			if (value != fault_addr)
-				continue;
-			sc->rc_fault_data_hit_count++;
-			if (sc->rc_fault_data_hit_addr == 0) {
-				sc->rc_fault_data_hit_addr = binding->addr;
-				sc->rc_fault_data_hit_size = binding->size;
-				sc->rc_fault_data_hit_offset =
-				    (uint64_t)i * sizeof(uint32_t);
-				sc->rc_fault_data_hit_value = value;
-			}
-		}
-	}
-}
-
 void
 nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
     int error, uint64_t fault_addr)
@@ -2174,41 +2073,6 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 
 		sc->rc_fault_pending_count++;
 		nvkm_drm_fault_scan_pushes(sc, pending, fault_addr);
-		nvkm_drm_fault_scan_cpu_bindings(sc, pending, fault_addr);
-		for (uint32_t i = 0; i < pending->binding_count; i++) {
-			struct nvkm_drm_vm_binding *binding =
-			    pending->bindings[i];
-			uint64_t end;
-
-			if (binding == NULL)
-				continue;
-			end = binding->addr + binding->size;
-			if (fault_addr >= binding->addr && fault_addr < end) {
-				sc->rc_fault_binding_count++;
-				if (sc->rc_fault_binding_addr == 0) {
-					sc->rc_fault_binding_addr =
-					    binding->addr;
-					sc->rc_fault_binding_size =
-					    binding->size;
-					sc->rc_fault_binding_grefcnt =
-					    binding->grefcnt;
-				}
-				continue;
-			}
-			if (end <= fault_addr &&
-			    (sc->rc_fault_nearest_lo_size == 0 ||
-			     end > sc->rc_fault_nearest_lo_addr +
-			     sc->rc_fault_nearest_lo_size)) {
-				sc->rc_fault_nearest_lo_addr = binding->addr;
-				sc->rc_fault_nearest_lo_size = binding->size;
-			}
-			if (binding->addr > fault_addr &&
-			    (sc->rc_fault_nearest_hi_size == 0 ||
-			     binding->addr < sc->rc_fault_nearest_hi_addr)) {
-				sc->rc_fault_nearest_hi_addr = binding->addr;
-				sc->rc_fault_nearest_hi_size = binding->size;
-			}
-		}
 
 		pending->chan->faulted = 1;
 		pending->chan->fault_error = error;
@@ -2368,257 +2232,6 @@ nvkm_drm_vm_binding_find_overlap(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (NULL);
 }
 
-static struct nvkm_drm_vm_binding *
-nvkm_drm_vm_binding_find_addr(struct nvkm_drm_file *nfile, uint64_t addr)
-{
-	struct nvkm_drm_vm_binding *binding;
-
-	if (addr == 0)
-		return (NULL);
-	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-		if (addr >= binding->addr &&
-		    addr < binding->addr + binding->size)
-			return (binding);
-	}
-	return (NULL);
-}
-
-static bool
-nvkm_drm_exec_capture_has(struct nvkm_drm_vm_binding **bindings,
-    uint32_t count, struct nvkm_drm_vm_binding *binding)
-{
-	for (uint32_t i = 0; i < count; i++) {
-		if (bindings[i] == binding)
-			return (true);
-	}
-	return (false);
-}
-
-static int
-nvkm_drm_exec_capture_add(struct nvkm_drm_vm_binding **bindings,
-    uint32_t capacity, uint32_t *pcount, struct nvkm_drm_vm_binding *binding)
-{
-	if (binding == NULL)
-		return (0);
-	if (nvkm_drm_exec_capture_has(bindings, *pcount, binding))
-		return (0);
-	if (*pcount >= capacity)
-		return (-ENOSPC);
-	bindings[*pcount] = binding;
-	(*pcount)++;
-	return (0);
-}
-
-static int
-nvkm_drm_exec_capture_scan_kva(struct nvkm_drm_file *nfile,
-    struct nvkm_drm_vm_binding **bindings, uint32_t capacity,
-    uint32_t *pcount, void *kva, uint64_t size)
-{
-	uint32_t *dw;
-	uint32_t count;
-
-	if (size > NVKM_DRM_FAULT_DATA_SCAN_MAX_SIZE)
-		return (0);
-	dw = (uint32_t *)kva;
-	count = size / sizeof(uint32_t);
-	for (uint32_t i = 0; i + 1 < count; i++) {
-		uint64_t value;
-		struct nvkm_drm_vm_binding *target;
-		int err;
-
-		value = (uint64_t)dw[i] | ((uint64_t)dw[i + 1] << 32);
-		target = nvkm_drm_vm_binding_find_addr(nfile, value);
-		err = nvkm_drm_exec_capture_add(bindings, capacity, pcount,
-		    target);
-		if (err != 0)
-			return (err);
-
-		value = (uint64_t)dw[i] |
-		    (((uint64_t)dw[i + 1] & 0xffu) << 32);
-		target = nvkm_drm_vm_binding_find_addr(nfile, value);
-		err = nvkm_drm_exec_capture_add(bindings, capacity, pcount,
-		    target);
-		if (err != 0)
-			return (err);
-
-		value = (uint64_t)dw[i] << 8;
-		target = nvkm_drm_vm_binding_find_addr(nfile, value);
-		err = nvkm_drm_exec_capture_add(bindings, capacity, pcount,
-		    target);
-		if (err != 0)
-			return (err);
-
-		if (i + 7 < count) {
-			value = ((uint64_t)dw[i] << 8) |
-			    (uint64_t)(dw[i + 7] & 0xffu);
-			target = nvkm_drm_vm_binding_find_addr(nfile, value);
-			err = nvkm_drm_exec_capture_add(bindings, capacity,
-			    pcount, target);
-			if (err != 0)
-				return (err);
-		}
-	}
-	return (0);
-}
-
-static bool
-nvkm_drm_exec_binding_is_push(struct nvkm_drm_vm_binding *binding,
-    const struct drm_nouveau_exec_push *pushes, uint32_t push_count)
-{
-	for (uint32_t i = 0; i < push_count; i++) {
-		if (nvkm_drm_vm_ranges_overlap(pushes[i].va,
-		    pushes[i].va_len, binding->addr, binding->size))
-			return (true);
-	}
-	return (false);
-}
-
-static int
-nvkm_drm_exec_capture_scan_binding(struct nvkm_drm_file *nfile,
-    struct nvkm_drm_vm_binding **bindings, uint32_t capacity,
-    uint32_t *pcount, struct nvkm_drm_vm_binding *source)
-{
-	struct nvkm_bo *bo;
-
-	nvkm_drm_vm_binding_assert(source);
-	bo = to_nvkm_bo(source->obj);
-	if (bo->kva == NULL)
-		return (0);
-	if (source->bo_offset > bo->base.size ||
-	    source->size > bo->base.size - source->bo_offset)
-		return (0);
-
-	return (nvkm_drm_exec_capture_scan_kva(nfile, bindings, capacity,
-	    pcount, (uint8_t *)bo->kva + source->bo_offset,
-	    source->size));
-}
-
-static int
-nvkm_drm_exec_capture_scan_push(struct nvkm_drm_file *nfile,
-    struct nvkm_drm_vm_binding **bindings, uint32_t capacity,
-    uint32_t *pcount, struct nvkm_drm_vm_binding *source,
-    const struct drm_nouveau_exec_push *push)
-{
-	struct nvkm_bo *bo;
-	uint64_t va_delta, offset;
-
-	nvkm_drm_vm_binding_assert(source);
-	if (push->va < source->addr)
-		return (-EINVAL);
-	va_delta = push->va - source->addr;
-	if (va_delta > source->size ||
-	    push->va_len > source->size - va_delta)
-		return (-EINVAL);
-
-	bo = to_nvkm_bo(source->obj);
-	if (bo->kva == NULL)
-		return (0);
-	offset = source->bo_offset + va_delta;
-	if (offset > bo->base.size ||
-	    push->va_len > bo->base.size - offset)
-		return (-EINVAL);
-
-	return (nvkm_drm_exec_capture_scan_kva(nfile, bindings, capacity,
-	    pcount, (uint8_t *)bo->kva + offset, push->va_len));
-}
-
-static int
-nvkm_drm_exec_capture_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_file *nfile, struct dma_fence *fence,
-    const struct drm_nouveau_exec_push *pushes, uint32_t push_count,
-    struct nvkm_drm_vm_binding ***pbindings, uint32_t *pcount)
-{
-	struct nvkm_drm_vm_binding *binding;
-	struct nvkm_drm_vm_binding **bindings = NULL;
-	uint32_t capacity = 0, count = 0;
-	int err;
-
-	*pbindings = NULL;
-	*pcount = 0;
-	if (fence == NULL)
-		return (0);
-
-	LIST_FOREACH(binding, &nfile->vm_bindings, link)
-		capacity++;
-	if (capacity == 0)
-		return (0);
-
-	bindings = kcalloc(capacity, sizeof(*bindings), GFP_KERNEL);
-	if (bindings == NULL)
-		return (-ENOMEM);
-
-	for (uint32_t i = 0; i < push_count; i++) {
-		binding = nvkm_drm_vm_binding_find_overlap(nfile,
-		    pushes[i].va, pushes[i].va_len);
-		if (binding == NULL) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: EXEC capture push has no VM binding idx=%u va=0x%016jx len=0x%08x\n",
-			    i, (uintmax_t)pushes[i].va, pushes[i].va_len);
-			err = -EINVAL;
-			goto fail;
-		}
-		err = nvkm_drm_exec_capture_add(bindings, capacity, &count,
-		    binding);
-		if (err != 0)
-			goto fail;
-		err = nvkm_drm_exec_capture_scan_push(nfile, bindings,
-		    capacity, &count, binding, &pushes[i]);
-		if (err != 0)
-			goto fail;
-	}
-
-	for (uint32_t i = 0; i < count; i++) {
-		if (nvkm_drm_exec_binding_is_push(bindings[i], pushes,
-		    push_count))
-			continue;
-		err = nvkm_drm_exec_capture_scan_binding(nfile, bindings,
-		    capacity, &count, bindings[i]);
-		if (err != 0)
-			goto fail;
-	}
-
-	if (count == 0) {
-		kfree(bindings);
-		return (0);
-	}
-
-	sc->exec_resv_attach_calls++;
-	for (uint32_t i = 0; i < count; i++) {
-		struct nvkm_bo *bo = to_nvkm_bo(bindings[i]->obj);
-
-		nvkm_drm_vm_binding_assert(bindings[i]);
-		bindings[i]->grefcnt++;
-		nvkm_bo_resv_add_excl_fence(bo, fence);
-	}
-	sc->exec_resv_attach_bos += count;
-	*pbindings = bindings;
-	*pcount = count;
-	return (0);
-
-fail:
-	kfree(bindings);
-	return (err);
-}
-
-static void
-nvkm_drm_exec_release_bindings(struct nvkm_softc *sc,
-    struct nvkm_drm_vm_binding **bindings, uint32_t count)
-{
-	if (bindings == NULL)
-		return;
-	for (uint32_t i = 0; i < count; i++) {
-		struct nvkm_drm_vm_binding *binding = bindings[i];
-
-		if (binding == NULL)
-			continue;
-		KASSERT(binding->grefcnt > 0,
-		    ("nvkm_drm: binding grefcnt underflow"));
-		binding->grefcnt--;
-		if (binding->grefcnt == 0)
-			nvkm_drm_vm_wakeup(binding->owner);
-	}
-	kfree(bindings);
-}
 
 static int
 nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
@@ -2632,7 +2245,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct drm_nouveau_exec_push *pushes = NULL;
 	struct nvkm_drm_exec_signal *signals = NULL;
 	struct nvkm_drm_exec_pending *pending = NULL;
-	struct nvkm_drm_vm_binding **borrowed_bindings = NULL;
 	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1, post_gva, sema_gva;
@@ -2640,11 +2252,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	uint64_t trace_seq;
 	uint32_t trace_first = 0;
 	uint32_t trace_count = 0;
-	uint32_t borrowed_binding_count = 0;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
 	int err = 0;
 	bool gsp_tok_held = false;
+	bool exec_inflight_held = false;
 	bool exec_completion_queued = false;
 	bool submit_slot_allocated = false;
 	uint64_t push_va_lo = ~0ULL;
@@ -2718,6 +2330,17 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		}
 	}
 
+	/* Pin the file VMM against remap for this submit's lifetime. Charge
+	 * exec_inflight under vm_token: gettoken blocks until any in-progress
+	 * remap releases the token, and once charged a later remap waits for
+	 * this submit. vm_token is released before gsp_tok (order vm -> gsp,
+	 * not nested here). Ownership transfers to the pending record on
+	 * insert; an error before then refunds it in out_unlock. */
+	lwkt_gettoken(&nfile->vm_token);
+	atomic_add_int(&nfile->exec_inflight, 1);
+	exec_inflight_held = true;
+	lwkt_reltoken(&nfile->vm_token);
+
 	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
@@ -2730,13 +2353,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC rejected faulted channel=%u chid=%d err=%d\n",
 		    req->channel, chan->chid, err);
-		goto out_unlock;
-	}
-	err = nvkm_drm_vm_wait_remap_idle(sc, nfile);
-	if (err != 0) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC waits for remap failed channel=%u err=%d\n",
-		    req->channel, err);
 		goto out_unlock;
 	}
 	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
@@ -2865,25 +2481,13 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		}
 		sc->exec_internal_fence_count++;
 	}
-	profile_start = nvkm_drm_profile_now_us();
-	err = nvkm_drm_exec_capture_bindings(sc, nfile, exec_fence,
-	    pushes, req->push_count,
-	    &borrowed_bindings, &borrowed_binding_count);
-	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
-	    profile_start);
-	if (err != 0)
-		goto out_unlock;
-
 	pending = nvkm_drm_exec_pending_create(chan, (volatile uint32_t *)sema,
 	    payload, post_slot, sc->exec_submit_count, trace_first,
-	    trace_count, signals, req->sig_count, exec_fence,
-	    borrowed_bindings, borrowed_binding_count);
+	    trace_count, signals, req->sig_count, exec_fence);
 	if (pending == NULL) {
 		err = -ENOMEM;
 		goto out_unlock;
 	}
-	borrowed_bindings = NULL;
-	borrowed_binding_count = 0;
 
 	profile_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_flush_exec_pushes(sc, nfile, pushes, req->push_count);
@@ -2931,6 +2535,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 			}
 		}
 	}
+	/* The pending record now owns the exec_inflight hold; completion or
+	 * cancel refunds it via nvkm_drm_exec_pending_put. */
+	pending->nfile = nfile;
+	exec_inflight_held = false;
 	LIST_INSERT_HEAD(&sc->exec_pending, pending, link);
 	exec_completion_queued = true;
 	sc->exec_async_pending_count++;
@@ -2969,9 +2577,15 @@ out_unlock:
 	}
 	if (submit_slot_allocated)
 		nvkm_drm_submit_slot_release(chan, post_slot);
-	nvkm_drm_exec_release_bindings(sc, borrowed_bindings,
-	    borrowed_binding_count);
 	nvkm_drm_exec_pending_put(sc, pending);
+	/* Refund the VMM hold if it was taken but never handed to a pending
+	 * record (error after the increment, before insert). Reached under
+	 * gsp_tok. */
+	if (exec_inflight_held) {
+		if (atomic_fetchadd_int(&nfile->exec_inflight, (u_int)-1) == 1)
+			nvkm_drm_vm_wakeup(nfile);
+		exec_inflight_held = false;
+	}
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
 	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
