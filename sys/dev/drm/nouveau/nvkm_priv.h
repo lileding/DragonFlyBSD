@@ -250,11 +250,8 @@ struct nvkm_drm_exec_pending {
 	 */
 	struct dma_fence *fences[64];
 	uint32_t fence_count;
-	/* Owned async borrows of visible VM_BIND mappings. EXEC submit
-	 * increments binding->exec_refs; completion/fault decrements them.
-	 */
-	struct nvkm_drm_vm_binding **bindings;
-	uint32_t binding_count;
+	/* Owning file, so completion/cancel can decrement exec_inflight. */
+	struct nvkm_drm_file *nfile;
 	/* Canary: GPU-VA span of this submit's push command buffers. Used to
 	 * detect NVK reusing a cmd-pool chunk (same VA range) while a prior
 	 * submit using it is still in flight. */
