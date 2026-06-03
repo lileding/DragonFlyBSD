@@ -10,24 +10,20 @@
 
 int nvkm_debug = 0;
 
-/* EXEC completion-based backpressure (mirrors real nouveau, whose EXEC scheduler
- * uses credit_limit = gpfifo.max with credits freed on the job completion fence).
- * Caps the total GPFIFO entries (push_count+1 per submit) of not-yet-completed
- * submits; a submit that would exceed it blocks (FIFO) until the oldest completes.
- * Bounds how far NVK runs ahead so it cannot reuse a command-buffer / root-descriptor
- * chunk the GPU is still reading.
+/* EXEC GPFIFO-entry flow control, modelled on nouveau's scheduler credit_limit =
+ * gpfifo.max. Caps the total GPFIFO entries (push_count+1 per submit) of
+ * not-yet-completed submits; a submit that would exceed it blocks (FIFO) until the
+ * oldest completes (refunded on the completion interrupt). 0 = off.
  *
- * Nouveau's limit is gpfifo.max (1023). Empirically NVK/ggml reuse their command
- * buffers after only ~2 submits, so our safe limit is far tighter (~4 entries); the
- * gap is still under investigation (likely a separate completion-fence ordering bug
- * that lets ggml's per-reuse fence fire early, masked here by the tight bound). 0 = off.
- *
- * Default 2 = at most one submit in flight (push_count+1 credits per submit). This is
- * the robust value: ggml reuses its command buffers after ~2 submits, and heavy
- * dispatches keep the prior one executing, so 2 in flight (cr=4) faults intermittently.
- * Throughput at this bound is limited by per-submit overhead + interrupt-completion
- * latency, addressed separately. */
-int nvkm_exec_max_credits = 2;
+ * This was originally introduced as a tight bound (2) to contain the async-EXEC
+ * torn-pointer fault, but that fault was actually caused by signal-only EXECs
+ * signalling out of channel order (fixed in nvkm_drm.c); with that fix the fault
+ * does not occur even with backpressure off (cr=0 validated clean, single and
+ * parallel). So this is no longer load-bearing for correctness and now only bounds
+ * ring usage like nouveau. Default = ring - 1, matching nouveau's gpfifo.max; the
+ * real in-flight limits are the 64 post slots and gpfifo_wait_space, so this is an
+ * effectively-inert backstop. cr 2..511 and 0 all validated RC-free. */
+int nvkm_exec_max_credits = NVKM_DRM_GPFIFO_ENTRIES - 1;
 
 static void
 nvkm_vprintf(device_t dev, const char *fmt, __va_list ap)
