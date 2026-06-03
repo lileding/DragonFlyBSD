@@ -2604,7 +2604,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	struct drm_nouveau_exec *req = data;
 	struct nvkm_drm_chan *dchan;
 	struct nvkm_gsp_chan *chan;
-	struct drm_nouveau_exec_push *pushes;
+	struct drm_nouveau_exec_push *pushes = NULL;
 	struct nvkm_drm_exec_signal *signals = NULL;
 	struct nvkm_drm_exec_pending *pending = NULL;
 	struct nvkm_drm_vm_binding **borrowed_bindings = NULL;
@@ -2654,28 +2654,22 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 	if (err != 0)
 		return (err);
-	if (req->push_count == 0) {
+	/*
+	 * Truly empty submit (no pushes, no signals): nothing to order or signal
+	 * (waits, if any, were satisfied above). NVK uses this as a device-loss
+	 * error probe after QueueWaitIdle. Signal-only submits (push_count == 0
+	 * but sig_count > 0) deliberately fall through to the normal path below so
+	 * their signals are ordered behind the channel's in-flight work via the
+	 * completion trailer, matching nouveau (every EXEC, even push.count == 0,
+	 * is a scheduler job whose out-fences signal on the ordered done_fence).
+	 * CPU-signaling them here would let NVK observe completion early and reuse
+	 * a command-pool chunk the GPU is still reading.
+	 */
+	if (req->push_count == 0 && req->sig_count == 0) {
 		sc->exec_signal_only_count++;
-		profile_start = nvkm_drm_profile_now_us();
-		lwkt_gettoken(&sc->gsp_tok);
-		nvkm_drm_profile_add_us(&sc->exec_profile_token_wait_us,
-		    profile_start);
-		profile_start = nvkm_drm_profile_now_us();
-		err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv,
-		    req->sig_count, req->sig_ptr, &signals);
-		nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
-		    profile_start);
-		if (err == 0)
-			nvkm_drm_exec_signals_signal(signals, req->sig_count, 0);
-		profile_start = nvkm_drm_profile_now_us();
-		nvkm_drm_exec_signals_put(signals, req->sig_count);
-		nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us,
-		    profile_start);
-		lwkt_reltoken(&sc->gsp_tok);
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC signal-only channel=%u sigs=%u err=%d\n",
-		    req->channel, req->sig_count, err);
-		return (err);
+		if (chan->faulted)
+			return (chan->fault_error != 0 ? chan->fault_error : -EIO);
+		return (0);
 	}
 	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2) {
 		nvkm_debugf(sc->dev,
@@ -2684,15 +2678,21 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		return (-EINVAL);
 	}
 
-	pushes = kmalloc(sizeof(*pushes) * req->push_count, M_TEMP, M_WAITOK);
-	err = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
-	    sizeof(*pushes) * req->push_count);
-	if (err != 0) {
-		kfree(pushes);
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC push copyin failed channel=%u pushes=%u err=%d\n",
-		    req->channel, req->push_count, err);
-		return (-EFAULT);
+	/* push_count may be 0 here for a signal-only submit; pushes stays NULL
+	 * and the push loop below runs zero times, leaving only the completion
+	 * trailer (which orders the signals behind in-flight channel work). */
+	if (req->push_count > 0) {
+		pushes = kmalloc(sizeof(*pushes) * req->push_count, M_TEMP,
+		    M_WAITOK);
+		err = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
+		    sizeof(*pushes) * req->push_count);
+		if (err != 0) {
+			kfree(pushes);
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: EXEC push copyin failed channel=%u pushes=%u err=%d\n",
+			    req->channel, req->push_count, err);
+			return (-EFAULT);
+		}
 	}
 
 	profile_start = nvkm_drm_profile_now_us();
