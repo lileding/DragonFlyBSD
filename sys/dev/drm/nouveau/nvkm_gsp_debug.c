@@ -729,9 +729,6 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "debug",
 	    CTLFLAG_RW, &nvkm_debug, 0,
 	    "Enable verbose nvkm printf logging");
-	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "exec_max_credits",
-	    CTLFLAG_RW, &nvkm_exec_max_credits, 0,
-	    "Max GPFIFO entries of in-flight EXEC submits before backpressure (0=off)");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "loginit",
 	    CTLTYPE_OPAQUE | CTLFLAG_RD, &sc->gsp_loginit, 0,
 	    nvkm_gsp_sysctl_blob, "S", "GSP LIBOS LOGINIT buffer (raw)");

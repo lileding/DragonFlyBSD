@@ -259,50 +259,6 @@ nvkm_drm_vm_remap_end(struct nvkm_drm_file *nfile)
 	nvkm_drm_vm_wakeup(nfile);
 }
 
-/*
- * EXEC completion-based backpressure (mirrors real nouveau's EXEC scheduler:
- * credit_limit = gpfifo.max, credits freed on the job completion fence).
- * Block (FIFO) until the in-flight GPFIFO-entry credit leaves room for this
- * submit, then charge it. Caller holds gsp_tok; lwkt tokens auto-release on
- * tsleep so the completion ithread can take gsp_tok, refund, and wake us.
- * The charge is refunded on completion/cancel (see the retire sites).
- */
-static int
-nvkm_drm_exec_credit_acquire(struct nvkm_softc *sc, uint32_t credit)
-{
-	int start_ticks = ticks;
-	int max = nvkm_exec_max_credits;
-
-	if (max <= 0)
-		return (0);
-	if (credit > (uint32_t)max)
-		credit = (uint32_t)max;	/* never deadlock on an oversized submit */
-
-	while (sc->exec_inflight_entries + credit > (uint32_t)max) {
-		int elapsed = ticks - start_ticks;
-		int remaining = NVKM_DRM_VM_REMAP_TIMEOUT_TICKS - elapsed;
-		int err;
-
-		if (remaining <= 0) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: exec credit timeout inflight=%u credit=%u max=%d\n",
-			    sc->exec_inflight_entries, credit, max);
-			return (-ETIMEDOUT);
-		}
-		tsleep_interlock(&sc->exec_inflight_entries, PCATCH);
-		if (sc->exec_inflight_entries + credit <= (uint32_t)max)
-			break;
-		err = tsleep(&sc->exec_inflight_entries, PCATCH | PINTERLOCKED,
-		    "nvkexc", remaining);
-		if (err == EWOULDBLOCK)
-			return (-ETIMEDOUT);
-		if (err == EINTR || err == ERESTART)
-			return (-err);
-	}
-	sc->exec_inflight_entries += credit;
-	return (0);
-}
-
 static struct nvkm_drm_vm_binding *
 nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
     uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset)
@@ -1978,16 +1934,6 @@ nvkm_drm_exec_pending_put(struct nvkm_softc *sc,
 {
 	if (pending == NULL)
 		return;
-	/* Refund this submit's GPFIFO-entry credit and wake any backpressured
-	 * submit. Caller holds gsp_tok. Guarded so it refunds exactly once. */
-	if (pending->entries != 0) {
-		if (sc->exec_inflight_entries >= pending->entries)
-			sc->exec_inflight_entries -= pending->entries;
-		else
-			sc->exec_inflight_entries = 0;
-		pending->entries = 0;
-		wakeup(&sc->exec_inflight_entries);
-	}
 	nvkm_drm_exec_release_bindings(sc, pending->bindings,
 	    pending->binding_count);
 	for (uint32_t i = 0; i < pending->fence_count; i++)
@@ -2628,8 +2574,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	bool gsp_tok_held = false;
 	bool exec_completion_queued = false;
 	bool submit_slot_allocated = false;
-	bool exec_credit_held = false;
-	uint32_t exec_credit = 0;
 	uint64_t push_va_lo = ~0ULL;
 	uint64_t push_va_hi = 0;
 
@@ -2722,19 +2666,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    req->channel, err);
 		goto out_unlock;
 	}
-	/*
-	 * Completion-based backpressure: charge this submit's GPFIFO entries and
-	 * block (FIFO) if too many submits are still in flight. Done here, while
-	 * holding gsp_tok and before the GPFIFO-space wait below (which drops the
-	 * token), so NVK is throttled before it can record-ahead and reuse a
-	 * command-buffer chunk the GPU has not finished. Held until the pending
-	 * record takes ownership or an error path refunds it.
-	 */
-	exec_credit = req->push_count + 1;	/* GPFIFO entries: pushes + trailer (matches nouveau args.credits) */
-	err = nvkm_drm_exec_credit_acquire(sc, exec_credit);
-	if (err != 0)
-		goto out_unlock;
-	exec_credit_held = true;
 	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
@@ -2903,10 +2834,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	 * source). Under gsp_tok; scan before insert so we don't match self. */
 	pending->push_va_lo = push_va_lo;
 	pending->push_va_hi = push_va_hi;
-	/* The pending record now owns the credit charge; completion/cancel
-	 * refunds it. */
-	pending->entries = exec_credit;
-	exec_credit_held = false;
 	if (push_va_hi > push_va_lo) {
 		struct nvkm_drm_exec_pending *op;
 
@@ -2972,16 +2899,6 @@ out_unlock:
 	nvkm_drm_exec_release_bindings(sc, borrowed_bindings,
 	    borrowed_binding_count);
 	nvkm_drm_exec_pending_put(sc, pending);
-	/* Refund the credit if it was charged but never handed to a pending
-	 * record (error after acquire, before insert). Error paths reach here
-	 * still holding gsp_tok. */
-	if (exec_credit_held) {
-		if (sc->exec_inflight_entries >= exec_credit)
-			sc->exec_inflight_entries -= exec_credit;
-		else
-			sc->exec_inflight_entries = 0;
-		wakeup(&sc->exec_inflight_entries);
-	}
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
 	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
