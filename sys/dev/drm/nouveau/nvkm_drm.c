@@ -132,6 +132,7 @@ LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 struct nvkm_drm_chan_obj {
 	uint32_t handle;
 	uint32_t oclass;
+	uint64_t nvif_object;	/* NVIF object id (nvif_ioctl_v0.object) for DEL */
 	struct nvkm_gsp_object object;
 };
 
@@ -1061,7 +1062,10 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		gp->value = 0x162;
 		break;
 	case NOUVEAU_GETPARAM_BUS_TYPE:
-		gp->value = 3;	/* NV_DEVICE_INFO_V0_PCIE */
+		/* Legacy GETPARAM bus enum (Linux nouveau_abi16): AGP=0, PCI=1,
+		 * PCIE=2, SOC=3 — distinct from the NVIF NV_DEVICE_INFO_V0_PCIE
+		 * (=3) enum. We are a discrete PCIe card. */
+		gp->value = 2;
 		break;
 	case NOUVEAU_GETPARAM_FB_SIZE:
 		gp->value = sc->fb_usable_size;
@@ -1088,10 +1092,21 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 	case NOUVEAU_GETPARAM_VRAM_USED:
 		/* NVK asserts >0 on success; force fail so NVK uses 0 fallback. */
 		return (-EINVAL);
-	case NOUVEAU_GETPARAM_PTIMER_TIME:
-		/* TODO: read GPU PTIMER. */
-		gp->value = 0;
+	case NOUVEAU_GETPARAM_PTIMER_TIME: {
+		/* 64-bit nanosecond counter at NV_PTIMER_TIME_0/_1 (BAR0 MMIO).
+		 * Re-read the high word to guard against low-word rollover
+		 * between the two reads. Mesa treats 0 as a valid timestamp, so
+		 * a real value is required. */
+		uint32_t hi, lo, hi2;
+
+		do {
+			hi = nvkm_rd32(sc, 0x009410);
+			lo = nvkm_rd32(sc, 0x009400);
+			hi2 = nvkm_rd32(sc, 0x009410);
+		} while (hi != hi2);
+		gp->value = ((uint64_t)hi << 32) | lo;
 		break;
+	}
 	case NOUVEAU_GETPARAM_HAS_VMA_TILEMODE:
 		gp->value = 0;
 		break;
@@ -1128,6 +1143,12 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct nvif_ioctl_v0 *hdr = data;
+
+	if (hdr->version != 0) {
+		nvkm_debugf(sc->dev, "nvkm_drm: NVIF bad version %u\n",
+		    hdr->version);
+		return (-ENOSYS);
+	}
 
 	switch (hdr->type) {
 	case NVIF_IOCTL_V0_NEW: {
@@ -1169,6 +1190,7 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 				return (-err);
 			obj->handle = new_->handle;
 			obj->oclass = new_->oclass;
+			obj->nvif_object = new_->object;
 			return (0);
 		}
 		return (-EINVAL);
@@ -1210,8 +1232,36 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 		sc_->count = fill;
 		return (0);
 	}
-	case NVIF_IOCTL_V0_DEL:
+	case NVIF_IOCTL_V0_DEL: {
+		struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+		struct nvkm_drm_chan *dchan;
+
+		/* Free the engine object created by a matching NVIF NEW and
+		 * clear its slot (channel teardown then skips it). Untracked
+		 * handles — e.g. the NV_DEVICE stub, which allocates nothing —
+		 * succeed without action, as on Linux. */
+		if (nfile != NULL) {
+			LIST_FOREACH(dchan, &nfile->channels, link) {
+				for (uint32_t i = 0; i < NVKM_DRM_MAX_CHAN_OBJS;
+				    i++) {
+					struct nvkm_drm_chan_obj *o =
+					    &dchan->obj[i];
+
+					if (o->oclass == 0 ||
+					    o->nvif_object != hdr->object)
+						continue;
+					if (o->object.handle != 0)
+						(void)nvkm_gsp_rm_free(
+						    &o->object);
+					o->oclass = 0;
+					o->handle = 0;
+					o->nvif_object = 0;
+					return (0);
+				}
+			}
+		}
 		return (0);
+	}
 	default:
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: NVIF type %u unhandled\n", hdr->type);
@@ -1239,11 +1289,31 @@ nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
 	if (channel_count >= NVKM_DRM_MAX_CHANNELS)
 		return (-ENOMEM);
 
+	/* Engine selector matches nouveau (Kepler+): tt_ctxdma_handle is an
+	 * engine id only when fb_ctxdma_handle == ~0, and an unrecognised
+	 * engine is rejected rather than silently mapped to graphics. We
+	 * implement GR and CE; the video engines are absent. Determined before
+	 * any allocation so the reject path leaks nothing. */
+	engine_type = NV2080_ENGINE_TYPE_GRAPHICS;
+	if (req->fb_ctxdma_handle == ~0u) {
+		switch (req->tt_ctxdma_handle) {
+		case NOUVEAU_FIFO_ENGINE_GR:
+			engine_type = NV2080_ENGINE_TYPE_GRAPHICS;
+			break;
+		case NOUVEAU_FIFO_ENGINE_CE:
+			engine_type = NV2080_ENGINE_TYPE_COPY0;
+			break;
+		default:
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: CHANNEL_ALLOC unsupported engine tt=0x%x\n",
+			    req->tt_ctxdma_handle);
+			return (-ENOSYS);
+		}
+	}
+
 	dchan = kzalloc(sizeof(*dchan), GFP_KERNEL);
 	if (dchan == NULL)
 		return (-ENOMEM);
-	engine_type = (req->tt_ctxdma_handle == NOUVEAU_FIFO_ENGINE_CE) ?
-	    NV2080_ENGINE_TYPE_COPY0 : NV2080_ENGINE_TYPE_GRAPHICS;
 	dchan->chan = kzalloc(sizeof(*dchan->chan), GFP_KERNEL);
 	if (dchan->chan == NULL) {
 		kfree(dchan);
@@ -1295,10 +1365,13 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 	if (nfile == NULL)
 		return (-ENXIO);
 	dchan = nvkm_drm_channel_find(nfile, (uint32_t)req->channel);
-	if (dchan != NULL) {
-		LIST_REMOVE(dchan, link);
-		nvkm_drm_channel_clear(sc, dchan);
+	if (dchan == NULL) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: CHANNEL_FREE unknown channel=%d\n", req->channel);
+		return (-ENOENT);
 	}
+	LIST_REMOVE(dchan, link);
+	nvkm_drm_channel_clear(sc, dchan);
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: CHANNEL_FREE channel=%d\n", req->channel);
 	return (0);
@@ -2914,7 +2987,7 @@ out_unlock:
 #define DRM_IOCTL_NOUVEAU_GETPARAM \
     DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, struct drm_nouveau_getparam)
 #define DRM_IOCTL_NOUVEAU_VM_INIT \
-    DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_INIT, struct drm_nouveau_vm_init)
+    DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_INIT, struct drm_nouveau_vm_init)
 /* NVIF is variable-size; use DRM_IOWR with void marker */
 
 static const struct drm_ioctl_desc nvkm_drm_ioctls[] = {
