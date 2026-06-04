@@ -210,6 +210,7 @@ struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
+struct nvkm_gsp_disp;
 struct drm_file;
 struct dma_fence;
 struct nvkm_drm_vm_binding;
@@ -594,6 +595,7 @@ struct nvkm_softc {
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
+	struct nvkm_gsp_disp	*gsp_disp;	/* display subsystem (Phase 2) */
 	struct nvkm_gsp_chan	*gsp_chan;
 	struct nvkm_gsp_bar1	bar1;	/* host BAR1 vmm */
 	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */
