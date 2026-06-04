@@ -741,6 +741,11 @@ nvkm_pci_attach(device_t dev)
 						}
 					}
 				}
+
+				/* Phase 2 M1: display bring-up + read connected EDID
+				 * (after compute bring-up, before IRQ install -> RPC
+				 * replies arrive via caller self-drain). */
+				(void)nvkm_gsp_disp_init(sc);
 			}
 
 			/* Install IRQ handler + arm GSP doorbell interrupt to host.

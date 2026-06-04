@@ -141,6 +141,25 @@ int	 nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	    struct nvkm_gsp_device *device);
 int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 
+/* Display subsystem (Phase 2): NV04_DISPLAY_COMMON + connector/EDID.
+ * Allocated by nvkm_gsp_disp_init at attach; sc->gsp_disp points here. */
+struct nvkm_gsp_disp {
+	struct nvkm_softc	*sc;
+	struct nvkm_gsp_client	client;
+	struct nvkm_gsp_device	device;
+	struct nvkm_gsp_object	objcom;		/* NV04_DISPLAY_COMMON */
+	uint64_t		inst_paddr;	/* display instance RAM (RAMIN) */
+	uint32_t		num_heads;
+	uint32_t		head_mask;
+	uint32_t		window_mask;
+};
+
+/* Bring up the GSP display subsystem + read EDID of connected outputs.
+ * Runs on the attach thread (blockable; synchronous GSP RPCs). */
+int	 nvkm_gsp_disp_init(struct nvkm_softc *sc);
+/* Probe connected outputs and print their EDID. Blockable context only. */
+void	 nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc);
+
 /* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour
  * (external = false). Caller still has to call COPY_SERVER_RESERVED_PDES
  * to obtain the page-table copies before issuing map ops. */
