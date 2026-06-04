@@ -21,10 +21,15 @@
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/taskqueue.h>
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
+#include <vm/pmap.h>		/* vtophys */
 #include <linux/slab.h>
 
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
+
+static MALLOC_DEFINE(M_NVKM_DISP, "nvkm_disp", "nvkm display pushbuffers");
 
 /* ===== MIT definitions (open-gpu 570.144; NvU32->u32, NvU64->u64, NvBool/NvU8->u8) ===== */
 
@@ -123,6 +128,39 @@ struct disp_event_set_notification_params {
 	uint32_t info32;
 	uint16_t info16;
 	uint8_t  _pad[2];
+};
+
+/* Core display channel (M2a). TU102 NVDisplay classes. */
+#define TU102_DISP				0x0000c570u	/* display root */
+#define TU102_DISP_CORE_CHANNEL_DMA		0x0000c57du	/* core (NVC57D) */
+#define NVKM_RM_DISP_CORE			0xc57d0000u
+
+#define NV2080_CTRL_CMD_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER 0x20800a58u
+#define DISP_ADDR_SYSMEM			1u
+#define DISP_PHYS_PCI_COHERENT			3u	/* PBTARGETAPERTURE */
+
+struct disp_channel_pushbuffer_params {
+	uint32_t addressSpace;
+	uint64_t physicalAddr;	/* NV_DECLARE_ALIGNED 8 */
+	uint64_t limit;
+	uint32_t cacheSnoop;
+	uint32_t hclass;
+	uint32_t channelInstance;
+	uint8_t  valid;
+	uint32_t pbTargetAperture;
+	uint32_t channelPBSize;
+	uint32_t subDeviceId;
+};
+
+struct disp_channeldma_alloc_params {
+	uint32_t channelInstance;
+	uint32_t hObjectBuffer;
+	uint32_t hObjectNotify;
+	uint32_t offset;
+	uint64_t pControl;	/* NV_ALIGN_BYTES(8) */
+	uint32_t flags;
+	uint32_t channelPBSize;
+	uint32_t subDeviceId;
 };
 
 /* ===== EDID decode (just enough to prove we read the real monitor) ===== */
@@ -329,6 +367,91 @@ nvkm_gsp_disp_register_hotplug(struct nvkm_softc *sc)
 	return (0);
 }
 
+/* ===== core display channel (M2a) =====
+ * Allocate the TU102_DISP display root + the NVC57D core channel with a
+ * coherent-sysmem pushbuffer. This is the channel modeset (M4) pushes EVO
+ * methods to. M2a stops at allocation (no method push / PUT yet -> M2b). */
+static int
+nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct disp_channel_pushbuffer_params *pb;
+	struct disp_channeldma_alloc_params *ca;
+	void *args;
+	uint32_t handle;
+	int err;
+
+	/* (1) TU102_DISP display root (parent of all disp channels). */
+	handle = nvkm_gsp_client_child_handle(&disp->client, TU102_DISP << 16);
+	args = nvkm_gsp_rm_alloc_get(&disp->device.object, handle, TU102_DISP, 0,
+	    &disp->dispclass);
+	if (args == NULL)
+		return (ENOMEM);
+	err = nvkm_gsp_rm_alloc_wr(&disp->dispclass, args);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: TU102_DISP root alloc (handle=0x%x) err=%d\n",
+		    disp->dispclass.handle, err);
+		return (err);
+	}
+
+	/* (2) Core pushbuffer: 4KB coherent sysmem (Turing PB default). */
+	disp->core_push_size = 0x1000;
+	disp->core_push_kva = contigmalloc(disp->core_push_size, M_NVKM_DISP,
+	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
+	if (disp->core_push_kva == NULL)
+		return (ENOMEM);
+	disp->core_push_paddr = vtophys(disp->core_push_kva);
+
+	/* (3) Tell GSP the core channel's pushbuffer (on internal subdevice). */
+	nvkm_gsp_disp_internal_subdev(sc, &tmp_client, &tmp_subdev);
+	pb = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER, sizeof(*pb));
+	if (pb == NULL)
+		return (ENOMEM);
+	memset(pb, 0, sizeof(*pb));
+	pb->addressSpace = DISP_ADDR_SYSMEM;
+	pb->cacheSnoop = 1;
+	pb->pbTargetAperture = DISP_PHYS_PCI_COHERENT;
+	pb->physicalAddr = disp->core_push_paddr;
+	pb->limit = disp->core_push_size - 1;
+	pb->hclass = TU102_DISP_CORE_CHANNEL_DMA;
+	pb->channelInstance = 0;
+	pb->valid = 1;
+	pb->subDeviceId = 1u;		/* BIT(0) */
+	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
+	if (err != 0) {
+		nvkm_infof(sc->dev, "gsp_disp: core set_pushbuf err=%d\n", err);
+		return (err);
+	}
+
+	/* (4) Allocate the NVC57D core channel under the display root. */
+	handle = nvkm_gsp_client_child_handle(&disp->client, NVKM_RM_DISP_CORE);
+	ca = nvkm_gsp_rm_alloc_get(&disp->dispclass, handle,
+	    TU102_DISP_CORE_CHANNEL_DMA, sizeof(*ca), &disp->core);
+	if (ca == NULL)
+		return (ENOMEM);
+	memset(ca, 0, sizeof(*ca));
+	ca->channelInstance = 0;
+	ca->offset = 0;
+	ca->subDeviceId = 1u;		/* BIT(0) */
+	err = nvkm_gsp_rm_alloc_wr(&disp->core, ca);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: NVC57D core alloc (handle=0x%x) err=%d\n",
+		    disp->core.handle, err);
+		return (err);
+	}
+
+	nvkm_infof(sc->dev,
+	    "gsp_disp: core channel up -- root=0x%x core=0x%x pb@0x%llx\n",
+	    disp->dispclass.handle, disp->core.handle,
+	    (unsigned long long)disp->core_push_paddr);
+	return (0);
+}
+
 /* ===== display subsystem bring-up (attach thread) ===== */
 
 int
@@ -454,6 +577,10 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 	 * Inline on the attach thread (single-threaded bring-up); runtime
 	 * re-probes use the same probe_connected() from the hotplug worker. */
 	nvkm_gsp_disp_probe_connected(sc);
+
+	/* (7) Core display channel (M2a). Best-effort; EDID still useful if it
+	 * fails. The channel is what modeset (M4) will push EVO methods to. */
+	(void)nvkm_gsp_disp_core_init(sc);
 	return (0);
 
 fail_device:

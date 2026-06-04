@@ -158,6 +158,12 @@ struct nvkm_gsp_disp {
 	struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
 	uint32_t		hpd_event_handle;
 	struct task		hpd_task;
+	/* Core display channel (M2a): TU102_DISP root + NVC57D core channel. */
+	struct nvkm_gsp_object	dispclass;	/* TU102_DISP (0xc570) root */
+	struct nvkm_gsp_object	core;		/* NVC57D core channel DMAC */
+	void			*core_push_kva;	/* core pushbuffer (coherent sysmem) */
+	uint64_t		core_push_paddr;
+	uint32_t		core_push_size;
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
