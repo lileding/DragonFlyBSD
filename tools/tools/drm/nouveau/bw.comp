@@ -1,0 +1,30 @@
+#version 450
+/*
+ * Pure memory-read-bandwidth kernel with 4 independent accumulators (4 in-flight
+ * load streams per thread) to maximise memory-level parallelism and hide DRAM
+ * latency. Grid-stride over a large device-local buffer (>> L2). Mirrors what
+ * LLM decode is bound by (streaming weights = GEMV), isolated from llama.cpp's
+ * per-token / attention / sync overhead.
+ */
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Src { vec4 s[]; };
+layout(std430, binding = 1) writeonly buffer Dst { vec4 d[]; };
+layout(push_constant) uniform PC { uint n4; uint iters; } pc;
+
+void main() {
+	uint gid = gl_GlobalInvocationID.x;
+	uint stride = gl_NumWorkGroups.x * 256u;
+	vec4 a0 = vec4(0.0), a1 = vec4(0.0), a2 = vec4(0.0), a3 = vec4(0.0);
+	for (uint it = 0u; it < pc.iters; ++it) {
+		uint i = gid;
+		for (; i + 3u * stride < pc.n4; i += 4u * stride) {
+			a0 += s[i];
+			a1 += s[i + stride];
+			a2 += s[i + 2u * stride];
+			a3 += s[i + 3u * stride];
+		}
+		for (; i < pc.n4; i += stride)
+			a0 += s[i];
+	}
+	d[gid] = a0 + a1 + a2 + a3;
+}
