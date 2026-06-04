@@ -164,6 +164,7 @@ struct nvkm_gsp_disp {
 	void			*core_push_kva;	/* core pushbuffer (coherent sysmem) */
 	uint64_t		core_push_paddr;
 	uint32_t		core_push_size;
+	uint32_t		core_put_reg;	/* BAR0 MMIO PUT (0x680000); GET at +4 */
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
