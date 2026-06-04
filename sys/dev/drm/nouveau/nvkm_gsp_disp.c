@@ -20,6 +20,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/taskqueue.h>
 #include <linux/slab.h>
 
 #include "nvkm_priv.h"
@@ -97,6 +98,32 @@ struct disp_get_edid_v2_params {
  * Must NOT share the disp client's prefix, or child_handle() (base | client&0xfff)
  * would alias the client handle itself. 0x0073xxxx mirrors the class number. */
 #define NVKM_RM_DISP					0x00730000u
+
+/* Hotplug event (M1b). NV01_EVENT without NONSTALL_INTR -> delivered as a GSP
+ * POST_EVENT message (software event), not a HW interrupt. */
+#define NV01_EVENT_KERNEL_CALLBACK_EX			0x0000007eu
+#define NV2080_NOTIFIERS_HOTPLUG			1u
+#define NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION		0x20800301u
+#define NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_REPEAT 2u
+/* Event-object child handle base; distinct from client/objcom/device handles. */
+#define NVKM_RM_DISP_HPD				0x007e0000u
+
+struct disp_nv0005_alloc_params {
+	uint32_t hParentClient;
+	uint32_t hSrcResource;
+	uint32_t hClass;
+	uint32_t notifyIndex;
+	uint64_t data;
+};
+
+struct disp_event_set_notification_params {
+	uint32_t event;
+	uint32_t action;
+	uint32_t bNotifyState;
+	uint32_t info32;
+	uint16_t info16;
+	uint8_t  _pad[2];
+};
 
 /* ===== EDID decode (just enough to prove we read the real monitor) ===== */
 
@@ -238,6 +265,70 @@ nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc)
 	}
 }
 
+/* ===== hotplug event (M1b) ===== */
+
+/* Background-lwkt worker: re-probe connected outputs + log EDID. Enqueued by
+ * the GSP ithread on each hotplug POST_EVENT (which must not block). */
+static void
+nvkm_gsp_disp_hotplug_task(void *ctx, int pending)
+{
+	struct nvkm_softc *sc = ctx;
+
+	(void)pending;
+	nvkm_infof(sc->dev, "gsp_disp: hotplug event -> re-probing outputs\n");
+	nvkm_gsp_disp_probe_connected(sc);
+}
+
+/* Register for GSP hotplug notifications. The event arrives via POST_EVENT;
+ * nvkm_gsp_evt_post_event matches hpd_event_handle and enqueues hpd_task. */
+static int
+nvkm_gsp_disp_register_hotplug(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	struct disp_nv0005_alloc_params *args;
+	struct disp_event_set_notification_params *ctrl;
+	uint32_t handle;
+	int err;
+
+	TASK_INIT(&disp->hpd_task, 0, nvkm_gsp_disp_hotplug_task, sc);
+
+	handle = nvkm_gsp_client_child_handle(&disp->client, NVKM_RM_DISP_HPD);
+	memset(&disp->hpd_event, 0, sizeof(disp->hpd_event));
+	args = nvkm_gsp_rm_alloc_get(&disp->device.subdevice, handle,
+	    NV01_EVENT_KERNEL_CALLBACK_EX, sizeof(*args), &disp->hpd_event);
+	if (args == NULL)
+		return (ENOMEM);
+	args->hParentClient = disp->client.object.handle;
+	args->hSrcResource = 0;
+	args->hClass = NV01_EVENT_KERNEL_CALLBACK_EX;
+	args->notifyIndex = NV2080_NOTIFIERS_HOTPLUG;
+	args->data = handle;
+	err = nvkm_gsp_rm_alloc_wr(&disp->hpd_event, args);
+	if (err != 0) {
+		nvkm_infof(sc->dev, "gsp_disp: hotplug event alloc err=%d\n", err);
+		return (err);
+	}
+
+	ctrl = nvkm_gsp_rm_ctrl_get(&disp->device.subdevice,
+	    NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION, sizeof(*ctrl));
+	if (ctrl == NULL)
+		return (ENOMEM);
+	memset(ctrl, 0, sizeof(*ctrl));
+	ctrl->event = NV2080_NOTIFIERS_HOTPLUG;
+	ctrl->action = NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_REPEAT;
+	err = nvkm_gsp_rm_ctrl_wr(&disp->device.subdevice, ctrl);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: hotplug SET_NOTIFICATION err=%d\n", err);
+		return (err);
+	}
+
+	disp->hpd_event_handle = handle;
+	nvkm_infof(sc->dev,
+	    "gsp_disp: hotplug event registered (handle=0x%x)\n", handle);
+	return (0);
+}
+
 /* ===== display subsystem bring-up (attach thread) ===== */
 
 int
@@ -356,7 +447,12 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 	    (unsigned long long)disp->inst_paddr, disp->num_heads,
 	    disp->head_mask, disp->window_mask);
 
-	/* (5) Initial probe: read+print EDID of already-connected outputs. */
+	/* (5) Register for runtime hotplug events (deferred to a worker lwkt). */
+	(void)nvkm_gsp_disp_register_hotplug(sc);
+
+	/* (6) Initial probe: read+print EDID of already-connected outputs.
+	 * Inline on the attach thread (single-threaded bring-up); runtime
+	 * re-probes use the same probe_connected() from the hotplug worker. */
 	nvkm_gsp_disp_probe_connected(sc);
 	return (0);
 

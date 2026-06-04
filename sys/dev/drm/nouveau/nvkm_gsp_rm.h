@@ -17,6 +17,7 @@
 #define _NVKM_GSP_RM_H_
 
 #include "nvkm_priv.h"
+#include <sys/taskqueue.h>	/* struct task (nvkm_gsp_disp hotplug worker) */
 
 /* GSP-RM RPC function numbers — Linux nouveau r570/nvrm/rpcfn.h. */
 #define NV_VGPU_MSG_FUNCTION_FREE		10
@@ -152,6 +153,11 @@ struct nvkm_gsp_disp {
 	uint32_t		num_heads;
 	uint32_t		head_mask;
 	uint32_t		window_mask;
+	/* Hotplug event (M1b): GSP POST_EVENT -> ithread matches hpd_event_handle
+	 * -> enqueues hpd_task on a background lwkt, which re-probes + logs EDID. */
+	struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
+	uint32_t		hpd_event_handle;
+	struct task		hpd_task;
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
