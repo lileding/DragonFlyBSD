@@ -153,6 +153,7 @@ struct nvkm_gsp_disp {
 	uint32_t		num_heads;
 	uint32_t		head_mask;
 	uint32_t		window_mask;
+	uint32_t		supported_mask;	/* GET_SUPPORTED displayId mask */
 	/* Hotplug event (M1b): GSP POST_EVENT -> ithread matches hpd_event_handle
 	 * -> enqueues hpd_task on a background lwkt, which re-probes + logs EDID. */
 	struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
@@ -172,6 +173,14 @@ struct nvkm_gsp_disp {
 int	 nvkm_gsp_disp_init(struct nvkm_softc *sc);
 /* Probe connected outputs and print their EDID. Blockable context only. */
 void	 nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc);
+/* Is the given GSP displayId currently connected? 1/0, <0 on error. Blockable. */
+int	 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id);
+/* Read EDID for a displayId into out (<=*outlen); sets *outlen. Blockable. */
+int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
+	     uint8_t *out, uint32_t *outlen);
+
+/* KMS skeleton (M3a): register DRIVER_MODESET + mode_config + connectors. */
+int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
 
 /* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour
  * (external = false). Caller still has to call COPY_SERVER_RESERVED_PDES

@@ -76,7 +76,7 @@ static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
-	    DRIVER_PRIME,
+	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops    = &nvkm_drm_fops,
 	.ioctls  = nvkm_drm_ioctls,
 	.num_ioctls = 0x45 /* sparse: max index DRM_NOUVEAU_GEM_INFO(0x44)+1 */,
@@ -666,6 +666,11 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	ddev->dev_private = sc;
 	ddev->pdev        = pdev;
 	sc->drm_dev       = ddev;
+
+	/* Phase 2 M3a: KMS skeleton -- mode_config + connectors (EDID->modes)
+	 * so userspace can enumerate the display. Before drm_dev_register, which
+	 * registers the connectors created here. Best-effort. */
+	(void)nvkm_drm_kms_init(ddev, sc);
 
 	err = drm_dev_register(ddev, 0);
 	if (err != 0) {
