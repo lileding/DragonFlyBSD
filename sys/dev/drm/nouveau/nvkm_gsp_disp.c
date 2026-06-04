@@ -221,6 +221,67 @@ nvkm_gsp_disp_internal_subdev(struct nvkm_softc *sc,
 	tmp_subdev->handle = sc->gsp_internal_subdevice;
 }
 
+/* Is the given GSP displayId currently connected? Blockable context only. */
+int
+nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	struct disp_get_connect_state_params *cs;
+	void *p;
+	int err, connected;
+
+	if (disp == NULL)
+		return (-1);
+	cs = nvkm_gsp_rm_ctrl_get(&disp->objcom,
+	    NV0073_CTRL_CMD_SYSTEM_GET_CONNECT_STATE, sizeof(*cs));
+	if (cs == NULL)
+		return (-1);
+	memset(cs, 0, sizeof(*cs));
+	cs->displayMask = display_id;
+	p = cs;
+	err = nvkm_gsp_rm_ctrl_rd(&disp->objcom, &p, sizeof(*cs));
+	if (err != 0 || p == NULL)
+		return (-1);
+	connected = (((struct disp_get_connect_state_params *)p)->displayMask &
+	    display_id) ? 1 : 0;
+	nvkm_gsp_rm_ctrl_done(&disp->objcom, p);
+	return (connected);
+}
+
+/* Read EDID for a displayId into out (capacity *outlen); sets *outlen to the
+ * actual length. Blockable context only. Returns 0 on success. */
+int
+nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
+    uint8_t *out, uint32_t *outlen)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	struct disp_get_edid_v2_params *ed;
+	void *p;
+	int err;
+
+	if (disp == NULL)
+		return (ENXIO);
+	ed = nvkm_gsp_rm_ctrl_get(&disp->objcom,
+	    NV0073_CTRL_CMD_SPECIFIC_GET_EDID_V2, sizeof(*ed));
+	if (ed == NULL)
+		return (ENOMEM);
+	memset(ed, 0, sizeof(*ed));
+	ed->displayId = display_id;
+	p = ed;
+	err = nvkm_gsp_rm_ctrl_rd(&disp->objcom, &p, sizeof(*ed));
+	if (err != 0 || p == NULL)
+		return (err != 0 ? err : EIO);
+	ed = p;
+	if (ed->bufferSize == 0 || ed->bufferSize > *outlen) {
+		nvkm_gsp_rm_ctrl_done(&disp->objcom, ed);
+		return (EINVAL);
+	}
+	memcpy(out, ed->edidBuffer, ed->bufferSize);
+	*outlen = ed->bufferSize;
+	nvkm_gsp_rm_ctrl_done(&disp->objcom, ed);
+	return (0);
+}
+
 /* ===== connected-output probe: read + print EDID of every connected output =====
  * Shared by the attach-time initial probe (M1a) and the hotplug worker (M1b).
  * Caller context must be blockable (issues synchronous GSP RPCs). */
@@ -250,6 +311,7 @@ nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc)
 	}
 	supported_mask = ((struct disp_get_supported_params *)p)->displayMask;
 	nvkm_gsp_rm_ctrl_done(&disp->objcom, p);
+	disp->supported_mask = supported_mask;
 	nvkm_infof(sc->dev, "gsp_disp: supported displayId mask=0x%08x\n",
 	    supported_mask);
 
