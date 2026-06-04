@@ -445,10 +445,22 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 		return (err);
 	}
 
-	nvkm_infof(sc->dev,
-	    "gsp_disp: core channel up -- root=0x%x core=0x%x pb@0x%llx\n",
-	    disp->dispclass.handle, disp->core.handle,
-	    (unsigned long long)disp->core_push_paddr);
+	/* (M2b) The NVC57D core channel's control registers live in BAR0 MMIO
+	 * at 0x680000 (PUT, NV507C_PUT=0x0) and 0x680004 (GET, NV507C_GET=0x4).
+	 * GSP-RM did the HW init during dmac_alloc; read PUT/GET to confirm the
+	 * channel is a real, accessible HW channel at a sane initial state.
+	 * Pushing EVO methods (kick PUT) needs a completion notifier and lands
+	 * in M4 (first modeset) where it is meaningful. */
+	disp->core_put_reg = 0x680000;
+	{
+		uint32_t put = nvkm_rd32(sc, disp->core_put_reg);
+		uint32_t get = nvkm_rd32(sc, disp->core_put_reg + 4);
+		nvkm_infof(sc->dev,
+		    "gsp_disp: core channel up -- root=0x%x core=0x%x pb@0x%llx "
+		    "PUT=0x%x GET=0x%x\n",
+		    disp->dispclass.handle, disp->core.handle,
+		    (unsigned long long)disp->core_push_paddr, put, get);
+	}
 	return (0);
 }
 
