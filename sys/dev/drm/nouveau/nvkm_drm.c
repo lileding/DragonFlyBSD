@@ -164,7 +164,7 @@ struct drm_nouveau_exec_push {
 	uint32_t flags;
 };
 
-static uint32_t nvkm_drm_next_channel = 1;
+static volatile u_int nvkm_drm_next_channel = 1;
 
 /* Per-file RM client handle allocator. Each drm_file's VMM needs a unique
  * client handle; child object handles are derived from it. Kept clear of the
@@ -1271,7 +1271,8 @@ nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
 		return (-err);
 	}
 
-	dchan->id = nvkm_drm_next_channel++;
+	/* Atomic: concurrent drm_file opens must not collide on a channel id. */
+	dchan->id = atomic_fetchadd_int(&nvkm_drm_next_channel, 1);
 	dchan->engine_type = engine_type;
 	LIST_INSERT_HEAD(&nfile->channels, dchan, link);
 	req->channel = dchan->id;
