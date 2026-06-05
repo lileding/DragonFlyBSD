@@ -166,6 +166,13 @@ struct nvkm_gsp_disp {
 	uint64_t		core_push_paddr;
 	uint32_t		core_push_size;
 	uint32_t		core_put_reg;	/* BAR0 MMIO PUT (0x680000); GET at +4 */
+	/* instmem (M4b): RAMHT + ctxdma descriptors live in the display RAMIN
+	 * (inst_paddr). The display HW reads them physically; BAR1 is only our
+	 * CPU write window. RAMHT occupies RAMIN [0, 0x1000); ctxdma descriptors
+	 * are bump-allocated (32-byte slots) from descr_next. */
+	uint64_t		ramht_gva;	/* BAR1 GVA of RAMIN page 0 (RAMHT) */
+	uint64_t		descr_gva;	/* BAR1 GVA of RAMIN page 1 (ctxdmas) */
+	uint32_t		descr_next;	/* next free ctxdma RAMIN offset */
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.

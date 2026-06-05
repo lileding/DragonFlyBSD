@@ -487,6 +487,44 @@ nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 	page->owner = NULL;
 }
 
+/*
+ * Map an EXISTING 4 KiB VRAM page (already-allocated paddr) into BAR1 at the
+ * next free GVA, returning the GVA for host reads/writes. Unlike
+ * nvkm_gsp_bar1_alloc_page, this does not allocate VRAM -- the caller owns the
+ * paddr (e.g. the GSP-handed display instance RAM). paddr must be 4 KiB
+ * aligned. Release the GVA with nvkm_gsp_bar1_unmap_existing.
+ */
+int
+nvkm_gsp_bar1_map_existing(struct nvkm_softc *sc, uint64_t paddr, uint64_t *pgva)
+{
+	uint64_t gva;
+	int err;
+
+	if (!sc->bar1.ready)
+		return (ENXIO);
+
+	err = nvkm_gsp_bar1_alloc_gva(&sc->bar1, &gva);
+	if (err != 0)
+		return (err);
+
+	err = nvkm_gsp_bar1_map_vram(sc, gva, paddr);
+	if (err != 0) {
+		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+		return (err);
+	}
+	nvkm_gsp_bar1_flush(sc);
+
+	*pgva = gva;
+	return (0);
+}
+
+void
+nvkm_gsp_bar1_unmap_existing(struct nvkm_softc *sc, uint64_t gva)
+{
+	if (gva != 0)
+		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+}
+
 void
 nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc __unused,
     uint64_t target_paddr __unused, uint32_t target_off __unused)

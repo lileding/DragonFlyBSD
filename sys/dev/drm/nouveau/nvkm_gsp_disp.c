@@ -248,6 +248,186 @@ nvkm_gsp_disp_core_push_smoke(struct nvkm_softc *sc)
 	return (get == put_dw ? 0 : ETIMEDOUT);
 }
 
+/* ===== M4b: display instmem (RAMHT + ctxdma DMA-objects) =====
+ *
+ * The NVDisplay fixed-function front-end resolves EVO context-DMA handles
+ * (SET_CONTEXT_DMA_ISO / SET_CONTEXT_DMA_NOTIFIER) by reading a RAMHT and DMA-
+ * object descriptors out of the display instance RAM (RAMIN, inst_paddr) using
+ * physical addresses -- this predates GSP and GSP-RM leaves it to the host.
+ * Algorithm follows nouveau core/ramht.c + engine/dma/usergv100.c (GPL, rewritten);
+ * the on-chip byte layout is hardware ABI. RAMIN layout:
+ *   [0x0000, 0x1000)  RAMHT: 512 entries x 8 bytes {handle, context}
+ *   [0x1000, ...)     ctxdma DMA-object descriptors, 24 bytes, 32B-aligned
+ *
+ * RAMHT hash (bits=9 for 512 slots) and context mirror nouveau's gv100/r535
+ * disp bind: context = (chid<<25) | (client&0x3fff) | (descr_ramin_off<<9).
+ * The descriptor is the gv100 dmaobj: [0]=flags0, [4/8]=start>>8 lo/hi,
+ * [c/10]=limit>>8 lo/hi.
+ */
+#define DISP_RAMHT_BASE		0x0000u
+#define DISP_RAMHT_SIZE		0x1000u		/* 512 entries x 8 bytes */
+#define DISP_RAMHT_BITS		9u
+#define DISP_RAMHT_MASK		((1u << DISP_RAMHT_BITS) - 1u)
+#define DISP_DESCR_BASE		0x1000u		/* first ctxdma descriptor */
+#define DISP_DESCR_STRIDE	0x20u		/* 24-byte object, 32B aligned */
+/* gv100 DMA-object flags0: VRAM(0x1) | rw(0x4) | small-page(0x40), kind=0. */
+#define DISP_DMAOBJ_FLAGS0_VRAM_RW	0x00000045u
+
+static uint32_t
+disp_ramht_hash(uint32_t handle, uint32_t chid)
+{
+	uint32_t hash = 0;
+
+	while (handle) {
+		hash ^= handle & DISP_RAMHT_MASK;
+		handle >>= DISP_RAMHT_BITS;
+	}
+	hash ^= chid << (DISP_RAMHT_BITS - 4);
+	return (hash & DISP_RAMHT_MASK);
+}
+
+/* Write a 24-byte gv100 ctxdma descriptor at the given RAMIN offset (in the
+ * descriptor page). start/limit are VRAM physical addresses. */
+static void
+disp_dmaobj_write(struct nvkm_softc *sc, uint32_t ramin_off, uint64_t start,
+    uint64_t limit)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint64_t gva = disp->descr_gva + (ramin_off - DISP_DESCR_BASE);
+	uint64_t s = start >> 8;
+	uint64_t l = limit >> 8;
+
+	nvkm_gsp_bar1_wr32(sc, gva + 0x00, DISP_DMAOBJ_FLAGS0_VRAM_RW);
+	nvkm_gsp_bar1_wr32(sc, gva + 0x04, (uint32_t)s);
+	nvkm_gsp_bar1_wr32(sc, gva + 0x08, (uint32_t)(s >> 32));
+	nvkm_gsp_bar1_wr32(sc, gva + 0x0c, (uint32_t)l);
+	nvkm_gsp_bar1_wr32(sc, gva + 0x10, (uint32_t)(l >> 32));
+	nvkm_gsp_bar1_wr32(sc, gva + 0x14, 0);
+}
+
+/* Insert {handle -> descriptor at descr_off} into the RAMHT for channel chid,
+ * with linear probing on collision. Returns the slot index, or -1 if full. */
+static int
+disp_ramht_insert(struct nvkm_softc *sc, uint32_t handle, uint32_t chid,
+    uint32_t descr_off)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint32_t client = disp->client.object.handle & 0x3fffu;
+	uint32_t context = (chid << 25) | client | (descr_off << 9);
+	uint32_t slots = DISP_RAMHT_SIZE / 8;
+	uint32_t co, ho;
+
+	co = ho = disp_ramht_hash(handle, chid);
+	do {
+		uint64_t ent = disp->ramht_gva + (uint64_t)co * 8;
+		if (nvkm_gsp_bar1_rd32(sc, ent + 0) == 0) {
+			nvkm_gsp_bar1_wr32(sc, ent + 0, handle);
+			nvkm_gsp_bar1_wr32(sc, ent + 4, context);
+			return ((int)co);
+		}
+		if (++co >= slots)
+			co = 0;
+	} while (co != ho);
+
+	return (-1);
+}
+
+/*
+ * M4b: bring up the display instmem object model. Map the RAMHT and ctxdma
+ * descriptor pages of the display RAMIN into BAR1 for host writes, zero the
+ * RAMHT (GSP-RM does not init it; empty slots are handle==0), then self-test
+ * the RAMHT/dmaobj encoders against a read-back. No real ctxdma is created yet
+ * -- the ISO ctxdma needs the window channel (M4c) and the notifier ctxdma the
+ * core UPDATE (M4d); both reuse disp_dmaobj_write + disp_ramht_insert.
+ */
+static int
+nvkm_gsp_disp_instmem_init(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint32_t i;
+	int err;
+
+	err = nvkm_gsp_bar1_map_existing(sc, disp->inst_paddr + DISP_RAMHT_BASE,
+	    &disp->ramht_gva);
+	if (err != 0) {
+		nvkm_infof(sc->dev, "gsp_disp: RAMHT page map err=%d\n", err);
+		return (err);
+	}
+	err = nvkm_gsp_bar1_map_existing(sc, disp->inst_paddr + DISP_DESCR_BASE,
+	    &disp->descr_gva);
+	if (err != 0) {
+		nvkm_infof(sc->dev, "gsp_disp: ctxdma page map err=%d\n", err);
+		nvkm_gsp_bar1_unmap_existing(sc, disp->ramht_gva);
+		disp->ramht_gva = 0;
+		return (err);
+	}
+	disp->descr_next = DISP_DESCR_BASE;
+
+	/* Zero the RAMHT so all slots read empty (handle==0). */
+	for (i = 0; i < DISP_RAMHT_SIZE; i += 4)
+		nvkm_gsp_bar1_wr32(sc, disp->ramht_gva + i, 0);
+	nvkm_gsp_bar1_flush(sc);
+
+	/* Self-test: write one whole-VRAM descriptor + RAMHT entry, read it
+	 * back and bit-verify, then revert so steady state is a clean empty
+	 * RAMHT. This proves the encoders are byte-correct before any HW
+	 * scanout depends on them (HW acceptance is proven in M4c/M4d). */
+	{
+		const uint32_t h = 0xfeed0000u, chid = 0u, off = DISP_DESCR_BASE;
+		uint32_t client = disp->client.object.handle & 0x3fffu;
+		uint32_t want_ctx = (chid << 25) | client | (off << 9);
+		uint64_t lim = sc->fb_usable_size - 1;
+		uint64_t l = lim >> 8;
+		int slot;
+		uint32_t e_h, e_c, d0, d1, d2, d3, d4;
+		int ok;
+
+		disp_dmaobj_write(sc, off, 0, lim);
+		slot = disp_ramht_insert(sc, h, chid, off);
+		nvkm_gsp_bar1_flush(sc);
+
+		e_h = e_c = 0;
+		if (slot >= 0) {
+			e_h = nvkm_gsp_bar1_rd32(sc, disp->ramht_gva +
+			    (uint64_t)slot * 8 + 0);
+			e_c = nvkm_gsp_bar1_rd32(sc, disp->ramht_gva +
+			    (uint64_t)slot * 8 + 4);
+		}
+		d0 = nvkm_gsp_bar1_rd32(sc, disp->descr_gva + 0x00);
+		d1 = nvkm_gsp_bar1_rd32(sc, disp->descr_gva + 0x04);
+		d2 = nvkm_gsp_bar1_rd32(sc, disp->descr_gva + 0x08);
+		d3 = nvkm_gsp_bar1_rd32(sc, disp->descr_gva + 0x0c);
+		d4 = nvkm_gsp_bar1_rd32(sc, disp->descr_gva + 0x10);
+
+		ok = (slot >= 0) && (e_h == h) && (e_c == want_ctx) &&
+		    (d0 == DISP_DMAOBJ_FLAGS0_VRAM_RW) &&
+		    (d1 == 0) && (d2 == 0) &&
+		    (d3 == (uint32_t)l) && (d4 == (uint32_t)(l >> 32));
+
+		nvkm_infof(sc->dev,
+		    "gsp_disp: M4b instmem self-test: slot=%d ent={0x%x,0x%x} "
+		    "want_ctx=0x%x descr={0x%x,0x%x,0x%x,0x%x,0x%x} -> %s\n",
+		    slot, e_h, e_c, want_ctx, d0, d1, d2, d3, d4,
+		    ok ? "OK" : "MISMATCH");
+
+		/* Revert: clear the test entry and descriptor. */
+		if (slot >= 0) {
+			nvkm_gsp_bar1_wr32(sc, disp->ramht_gva +
+			    (uint64_t)slot * 8 + 0, 0);
+			nvkm_gsp_bar1_wr32(sc, disp->ramht_gva +
+			    (uint64_t)slot * 8 + 4, 0);
+		}
+		for (i = 0; i < DISP_DESCR_STRIDE; i += 4)
+			nvkm_gsp_bar1_wr32(sc, disp->descr_gva + i, 0);
+		nvkm_gsp_bar1_flush(sc);
+
+		if (!ok)
+			return (EIO);
+	}
+
+	return (0);
+}
+
 /* ===== EDID decode (just enough to prove we read the real monitor) ===== */
 
 static void
@@ -743,6 +923,11 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 	/* (7) Core display channel (M2a). Best-effort; EDID still useful if it
 	 * fails. The channel is what modeset (M4) will push EVO methods to. */
 	(void)nvkm_gsp_disp_core_init(sc);
+
+	/* (8) Display instmem object model (M4b): RAMHT + ctxdma descriptors in
+	 * the display RAMIN, needed to resolve EVO context-DMA handles for the
+	 * framebuffer (M4c) and core notifier (M4d). Best-effort/diagnostic. */
+	(void)nvkm_gsp_disp_instmem_init(sc);
 	return (0);
 
 fail_device:
