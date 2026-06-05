@@ -1996,8 +1996,10 @@ nvkm_gsp_disp_dump_state(struct nvkm_softc *sc)
 	    e10, e14, e78, sor1_live, sor1_arm);
 	nvkm_infof(sc->dev,
 	    "gsp_disp: STATE2 intr_c30=0x%x intr_top=0x%x super6107a8=0x%x "
-	    "intren611494=0x%x core PUT=%u GET=%u logrm_put=0x%llx\n",
+	    "intren611494=0x%x core PUT=%u GET=%u disp_intr=%llu vblank=0x%x "
+	    "logrm_put=0x%llx\n",
 	    intr_c30, intr_top, super_a8, intren, core_put, core_get,
+	    (unsigned long long)sc->gsp_disp_intr_count, sc->gsp_disp_vblank_mask,
 	    (unsigned long long)logrm_put);
 }
 
