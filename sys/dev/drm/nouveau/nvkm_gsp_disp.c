@@ -163,6 +163,91 @@ struct disp_channeldma_alloc_params {
 	uint32_t subDeviceId;
 };
 
+/* ===== M4a: NVDisplay core channel EVO method push =====
+ *
+ * NVDisplay (Volta+) DMA pushbuffer method encoding (MIT, open-gpu 570.144 via
+ * nouveau linux-v7.0 nvhw/class/clc37b.h). A method group is one header dword
+ * plus `count` data dwords:
+ *
+ *   header = (OPCODE_METHOD << 29) | (count << 18) | ((mthd >> 2) << 2)
+ *
+ * with OPCODE_METHOD = 0, METHOD_COUNT in bits [27:18], METHOD_OFFSET in bits
+ * [13:2]. PUT/GET are dword offsets into the pushbuffer; the host writes PUT
+ * directly and the channel's DMA fetcher advances GET to PUT as it consumes
+ * methods (nouveau dispnv50/disp.c nv50_dmac_kick writes PUT = cur_in_dwords).
+ */
+#define NVC57D_WINDOW_SET_WINDOW_FORMAT_USAGE_BOUNDS(i)	\
+						(0x00001004u + (i) * 0x00000080u)
+/* RGB_PACKED 1/2/4/8 BPP (bits 0..3) -- the harmless arm value nouveau's
+ * corec57d_init writes; meaningless without a following UPDATE. */
+#define EVO_FORMAT_USAGE_RGB_PACKED_ALL		0x0000000fu
+
+static inline uint32_t
+evo_method_hdr(uint32_t mthd, uint32_t count)
+{
+	/* OPCODE_METHOD(0) | METHOD_COUNT[27:18] | METHOD_OFFSET[13:2]. */
+	return ((count & 0x3ffu) << 18) | (mthd & 0x3ffcu);
+}
+
+/*
+ * M4a smoke: push a small batch of harmless arm methods into the NVC57D core
+ * channel pushbuffer, kick PUT, and confirm the channel's GET catches up to
+ * PUT. This proves three things end to end: EVO method encoding, the direct
+ * PUT doorbell write, and that the GSP-initialised core channel actually
+ * fetches and consumes host-written methods. It is the foundation for real
+ * modeset (M4b/c). No NOTIFIER/ctxdma is involved yet -- those arrive with the
+ * first real UPDATE round-trip. The methods pushed (WINDOW_SET_WINDOW_FORMAT_
+ * USAGE_BOUNDS) are arm-state config that does nothing without an UPDATE, so
+ * the channel state is left untouched.
+ */
+static int
+nvkm_gsp_disp_core_push_smoke(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	volatile uint32_t *pb = disp->core_push_kva;
+	uint32_t cap = disp->core_push_size / 4;	/* pushbuffer in dwords */
+	uint32_t base, put_dw, get, i, n;
+	int us;
+
+	/* Start where the channel will next fetch (fresh channel: 0). Keep the
+	 * smoke entirely within the buffer; do not handle wrap here. */
+	base = nvkm_rd32(sc, disp->core_put_reg);
+	if (base + 32u >= cap) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: M4a core push skipped -- PUT=%u near wrap (cap=%u)\n",
+		    base, cap);
+		return (0);
+	}
+
+	n = base;
+	for (i = 0; i < 8; i++) {
+		pb[n++] = evo_method_hdr(
+		    NVC57D_WINDOW_SET_WINDOW_FORMAT_USAGE_BOUNDS(i), 1);
+		pb[n++] = EVO_FORMAT_USAGE_RGB_PACKED_ALL;
+	}
+
+	cpu_sfence();	/* coherent sysmem stores visible before the PUT write */
+
+	put_dw = n;	/* PUT/GET are dword offsets into the pushbuffer */
+	nvkm_wr32(sc, disp->core_put_reg, put_dw);
+
+	/* Poll GET until it reaches PUT (methods fetched) or ~100ms timeout. */
+	get = base;
+	for (us = 0; us < 100000; us += 10) {
+		get = nvkm_rd32(sc, disp->core_put_reg + 4);
+		if (get == put_dw)
+			break;
+		DELAY(10);
+	}
+
+	nvkm_infof(sc->dev,
+	    "gsp_disp: M4a core push: %u methods [%u..%u) PUT=%u GET=%u -> %s\n",
+	    (n - base) / 2u, base, put_dw, put_dw, get,
+	    get == put_dw ? "consumed (GET caught PUT)" : "STUCK (GET != PUT)");
+
+	return (get == put_dw ? 0 : ETIMEDOUT);
+}
+
 /* ===== EDID decode (just enough to prove we read the real monitor) ===== */
 
 static void
@@ -510,9 +595,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	/* (M2b) The NVC57D core channel's control registers live in BAR0 MMIO
 	 * at 0x680000 (PUT, NV507C_PUT=0x0) and 0x680004 (GET, NV507C_GET=0x4).
 	 * GSP-RM did the HW init during dmac_alloc; read PUT/GET to confirm the
-	 * channel is a real, accessible HW channel at a sane initial state.
-	 * Pushing EVO methods (kick PUT) needs a completion notifier and lands
-	 * in M4 (first modeset) where it is meaningful. */
+	 * channel is a real, accessible HW channel at a sane initial state. */
 	disp->core_put_reg = 0x680000;
 	{
 		uint32_t put = nvkm_rd32(sc, disp->core_put_reg);
@@ -523,6 +606,11 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 		    disp->dispclass.handle, disp->core.handle,
 		    (unsigned long long)disp->core_push_paddr, put, get);
 	}
+
+	/* (M4a) Prove the EVO method-push path: encode methods, kick PUT, and
+	 * confirm the core channel consumes them (GET catches PUT). */
+	(void)nvkm_gsp_disp_core_push_smoke(sc);
+
 	return (0);
 }
 
