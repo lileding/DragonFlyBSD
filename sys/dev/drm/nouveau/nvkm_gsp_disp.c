@@ -303,19 +303,6 @@ evo_method_hdr(uint32_t mthd, uint32_t count)
 	return ((count & 0x3ffu) << 18) | (mthd & 0x3ffcu);
 }
 
-/* M4a smoke: keep the core channel pristine for the first real UPDATE. Older
- * smoke batches touched per-window usage methods and can leave a stale core FE
- * exception before modeset diagnostics run; the modeset batch below now proves
- * core PUT/GET consumption directly.
- */
-static int
-nvkm_gsp_disp_core_push_smoke(struct nvkm_softc *sc)
-{
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4a core push: deferred until modeset UPDATE\n");
-	return (0);
-}
-
 /* ===== M4b: display instmem (RAMHT + ctxdma DMA-objects) =====
  *
  * The NVDisplay fixed-function front-end resolves EVO context-DMA handles
@@ -1105,9 +1092,28 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 		    (unsigned long long)disp->core_push_paddr, put, get);
 	}
 
-	/* (M4a) Prove the EVO method-push path: encode methods, kick PUT, and
-	 * confirm the core channel consumes them (GET catches PUT). */
-	(void)nvkm_gsp_disp_core_push_smoke(sc);
+	/* (5) corec57d_init: declare each window's format/usage bounds so GSP
+	 * knows the window capabilities. nouveau pushes these at core init as the
+	 * channel's initial arm state (KICK only, no UPDATE). Without it the GSP
+	 * supervisor sees an incompletely-initialised core channel. */
+	{
+		volatile uint32_t *cpb = disp->core_push_kva;
+		uint32_t cmds[48], n = 0, i;
+		int cpush;
+#define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
+		for (i = 0; i < 8u; i++) {
+			M(NVC57D_WINDOW_SET_WINDOW_FORMAT_USAGE_BOUNDS(i),
+			    EVO_FORMAT_USAGE_RGB_PACKED_ALL);
+			M(NVC57D_WINDOW_SET_WINDOW_USAGE_BOUNDS(i),
+			    EVO_WINDOW_USAGE_BOUNDS);
+		}
+#undef M
+		cpush = disp_chan_push(sc, cpb, disp->core_put_reg,
+		    disp->core_push_size / 4, cmds, n);
+		nvkm_infof(sc->dev,
+		    "gsp_disp: core init -- window usage bounds pushed (rc=%d)\n",
+		    cpush);
+	}
 
 	return (0);
 }
