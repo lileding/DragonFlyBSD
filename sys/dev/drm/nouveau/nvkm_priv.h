@@ -963,6 +963,11 @@ int	nvkm_gsp_bar1_alloc_page_kind(struct nvkm_softc *sc,
 int	nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc,
 	    struct nvkm_bar1_page *page);
 void	nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page);
+/* Map an existing (caller-owned) 4 KiB VRAM paddr into BAR1; returns the GVA
+ * for host bar1_{wr,rd}{32,64}. Release with nvkm_gsp_bar1_unmap_existing. */
+int	nvkm_gsp_bar1_map_existing(struct nvkm_softc *sc, uint64_t paddr,
+	    uint64_t *pgva);
+void	nvkm_gsp_bar1_unmap_existing(struct nvkm_softc *sc, uint64_t gva);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 
 void	nvkm_drm_exec_complete_intr(struct nvkm_softc *sc);
