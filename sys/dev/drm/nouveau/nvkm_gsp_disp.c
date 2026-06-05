@@ -134,6 +134,11 @@ struct disp_event_set_notification_params {
 #define TU102_DISP				0x0000c570u	/* display root */
 #define TU102_DISP_CORE_CHANNEL_DMA		0x0000c57du	/* core (NVC57D) */
 #define NVKM_RM_DISP_CORE			0xc57d0000u
+#define TU102_DISP_WINDOW_CHANNEL_DMA		0x0000c57eu	/* window (NVC57E) */
+#define NVKM_RM_DISP_WINDOW			0xc57e0000u
+/* Window image methods (clc57e.h, MIT). */
+#define NVC57E_SET_SIZE				0x00000224u
+#define NVC57E_SET_SIZE_OUT			0x000002a4u
 
 #define NV2080_CTRL_CMD_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER 0x20800a58u
 #define DISP_ADDR_SYSMEM			1u
@@ -794,6 +799,118 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	return (0);
 }
 
+/* ===== window display channel (M4c) =====
+ * Allocate the NVC57E window channel (instance 0, drives head 0) with a
+ * coherent-sysmem pushbuffer under the TU102_DISP root, mirroring the core
+ * channel. The window is what plane updates push image methods to; first light
+ * (the framebuffer ISO ctxdma + full image push + head + UPDATE) is M4d. M4c
+ * stops at allocation + a method-push smoke proving the window channel consumes
+ * host-written methods (GET catches PUT), like the M4a core smoke.
+ */
+static int
+nvkm_gsp_disp_window_init(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct disp_channel_pushbuffer_params *pb;
+	struct disp_channeldma_alloc_params *ca;
+	volatile uint32_t *wpb;
+	uint32_t handle, base, put_dw, get, n;
+	int err, us;
+
+	if (disp->dispclass.handle == 0)	/* needs the TU102_DISP root */
+		return (ENXIO);
+
+	/* (1) Window pushbuffer: 4KB coherent sysmem. */
+	disp->window_push_size = 0x1000;
+	disp->window_push_kva = contigmalloc(disp->window_push_size, M_NVKM_DISP,
+	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
+	if (disp->window_push_kva == NULL)
+		return (ENOMEM);
+	disp->window_push_paddr = vtophys(disp->window_push_kva);
+
+	/* (2) Tell GSP the window channel's pushbuffer. */
+	nvkm_gsp_disp_internal_subdev(sc, &tmp_client, &tmp_subdev);
+	pb = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER, sizeof(*pb));
+	if (pb == NULL)
+		return (ENOMEM);
+	memset(pb, 0, sizeof(*pb));
+	pb->addressSpace = DISP_ADDR_SYSMEM;
+	pb->cacheSnoop = 1;
+	pb->pbTargetAperture = DISP_PHYS_PCI_COHERENT;
+	pb->physicalAddr = disp->window_push_paddr;
+	pb->limit = disp->window_push_size - 1;
+	pb->hclass = TU102_DISP_WINDOW_CHANNEL_DMA;
+	pb->channelInstance = 0;
+	pb->valid = 1;
+	pb->subDeviceId = 1u;		/* BIT(0) */
+	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
+	if (err != 0) {
+		nvkm_infof(sc->dev, "gsp_disp: window set_pushbuf err=%d\n", err);
+		return (err);
+	}
+
+	/* (3) Allocate the NVC57E window channel under the display root. */
+	handle = nvkm_gsp_client_child_handle(&disp->client, NVKM_RM_DISP_WINDOW);
+	ca = nvkm_gsp_rm_alloc_get(&disp->dispclass, handle,
+	    TU102_DISP_WINDOW_CHANNEL_DMA, sizeof(*ca), &disp->window);
+	if (ca == NULL)
+		return (ENOMEM);
+	memset(ca, 0, sizeof(*ca));
+	ca->channelInstance = 0;
+	ca->offset = 0;
+	ca->subDeviceId = 1u;		/* BIT(0) */
+	err = nvkm_gsp_rm_alloc_wr(&disp->window, ca);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: NVC57E window alloc (handle=0x%x) err=%d\n",
+		    disp->window.handle, err);
+		return (err);
+	}
+
+	/* Window channel control regs: PUT/GET at BAR0 0x690000 + inst*0x1000. */
+	disp->window_put_reg = 0x690000;
+	nvkm_infof(sc->dev,
+	    "gsp_disp: window channel up -- handle=0x%x pb@0x%llx PUT=0x%x GET=0x%x\n",
+	    disp->window.handle, (unsigned long long)disp->window_push_paddr,
+	    nvkm_rd32(sc, disp->window_put_reg),
+	    nvkm_rd32(sc, disp->window_put_reg + 4));
+
+	/* (M4c smoke) Push harmless arm methods (SET_SIZE / SET_SIZE_OUT), kick
+	 * PUT, and confirm the window channel consumes them (GET catches PUT).
+	 * Arm-only -- no UPDATE, no head ownership, so no scanout side effect. */
+	wpb = disp->window_push_kva;
+	base = nvkm_rd32(sc, disp->window_put_reg);
+	if (base + 16u >= disp->window_push_size / 4) {
+		nvkm_infof(sc->dev,
+		    "gsp_disp: M4c window smoke skipped (PUT=%u)\n", base);
+		return (0);
+	}
+	n = base;
+	wpb[n++] = evo_method_hdr(NVC57E_SET_SIZE, 1);
+	wpb[n++] = 1920u | (1080u << 16);
+	wpb[n++] = evo_method_hdr(NVC57E_SET_SIZE_OUT, 1);
+	wpb[n++] = 1920u | (1080u << 16);
+	cpu_sfence();
+	put_dw = n;
+	nvkm_wr32(sc, disp->window_put_reg, put_dw);
+
+	get = base;
+	for (us = 0; us < 100000; us += 10) {
+		get = nvkm_rd32(sc, disp->window_put_reg + 4);
+		if (get == put_dw)
+			break;
+		DELAY(10);
+	}
+	nvkm_infof(sc->dev,
+	    "gsp_disp: M4c window push: 2 methods [%u..%u) PUT=%u GET=%u -> %s\n",
+	    base, put_dw, put_dw, get,
+	    get == put_dw ? "consumed (GET caught PUT)" : "STUCK (GET != PUT)");
+	return (0);
+}
+
 /* ===== display subsystem bring-up (attach thread) ===== */
 
 int
@@ -926,8 +1043,12 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 
 	/* (8) Display instmem object model (M4b): RAMHT + ctxdma descriptors in
 	 * the display RAMIN, needed to resolve EVO context-DMA handles for the
-	 * framebuffer (M4c) and core notifier (M4d). Best-effort/diagnostic. */
+	 * framebuffer (M4d) and core notifier (M4d). Best-effort/diagnostic. */
 	(void)nvkm_gsp_disp_instmem_init(sc);
+
+	/* (9) Window display channel (M4c): NVC57E channel the plane pushes
+	 * image methods to. Best-effort; first light is M4d. */
+	(void)nvkm_gsp_disp_window_init(sc);
 	return (0);
 
 fail_device:
