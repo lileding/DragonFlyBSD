@@ -173,6 +173,13 @@ struct nvkm_gsp_disp {
 	uint64_t		ramht_gva;	/* BAR1 GVA of RAMIN page 0 (RAMHT) */
 	uint64_t		descr_gva;	/* BAR1 GVA of RAMIN page 1 (ctxdmas) */
 	uint32_t		descr_next;	/* next free ctxdma RAMIN offset */
+	/* Window display channel (M4c): NVC57E, instance 0 (drives head 0).
+	 * chid.user = 1 + instance; PUT/GET at BAR0 0x690000 + instance*0x1000. */
+	struct nvkm_gsp_object	window;		/* NVC57E window channel DMAC */
+	void			*window_push_kva; /* window pushbuffer (sysmem) */
+	uint64_t		window_push_paddr;
+	uint32_t		window_push_size;
+	uint32_t		window_put_reg;	/* BAR0 MMIO PUT (0x690000); GET at +4 */
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
