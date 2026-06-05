@@ -206,6 +206,38 @@ nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params)
 	return (ret);
 }
 
+/* Like nvkm_gsp_rm_alloc_wr, but returns the reply's (post-alloc) params so the
+ * caller can read [OUT] fields (e.g. the VRAM address RM picked). On success
+ * *params points into the reply; caller must nvkm_gsp_rm_alloc_done() it. */
+int
+nvkm_gsp_rm_alloc_rd(struct nvkm_gsp_object *obj, void **params, uint32_t repc)
+{
+	struct nvkm_softc *sc = obj->client->sc;
+	struct rpc_gsp_rm_alloc_v03_00 *rpc = nvkm_gsp_rm_alloc_hdr(*params);
+	struct rpc_gsp_rm_alloc_v03_00 *rep;
+	int ret = 0;
+	uint32_t expected_repc = sizeof(*rpc) + repc;
+
+	rep = nvkm_gsp_rpc_push(sc, rpc, NVKM_GSP_RPC_REPLY_RECV, expected_repc);
+	if (rep == NULL) {
+		*params = NULL;
+		return (EIO);
+	}
+	if (rep->status != 0) {
+		nvkm_debugf(sc->dev,
+		    "gsp_rm: ALLOC(rd) obj=0x%x failed status=0x%x\n",
+		    rep->hObject, rep->status);
+		ret = EIO;
+	}
+	if (repc != 0)
+		*params = rep->params;	/* caller frees via _done */
+	else {
+		nvkm_gsp_rpc_done(sc, rep);
+		*params = NULL;
+	}
+	return (ret);
+}
+
 void
 nvkm_gsp_rm_alloc_done(struct nvkm_gsp_object *obj, void *params)
 {

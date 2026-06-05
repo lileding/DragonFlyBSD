@@ -93,6 +93,9 @@ void	*nvkm_gsp_rm_alloc_get(struct nvkm_gsp_object *parent,
 
 /* Submit the prepared alloc params. Returns 0 on GSP-side success. */
 int	 nvkm_gsp_rm_alloc_wr(struct nvkm_gsp_object *obj, void *params);
+/* Alloc and return the reply params (for [OUT] fields); free via _done. */
+int	 nvkm_gsp_rm_alloc_rd(struct nvkm_gsp_object *obj, void **params,
+	    uint32_t repc);
 
 /* Discard the prepared buffer without sending (e.g. error path). */
 void	 nvkm_gsp_rm_alloc_done(struct nvkm_gsp_object *obj, void *params);
@@ -170,9 +173,8 @@ struct nvkm_gsp_disp {
 	 * (inst_paddr). The display HW reads them physically; BAR1 is only our
 	 * CPU write window. RAMHT occupies RAMIN [0, 0x1000); ctxdma descriptors
 	 * are bump-allocated (32-byte slots) from descr_next. */
-	uint64_t		ramht_gva;	/* BAR1 GVA of RAMIN page 0 (RAMHT) */
-	uint64_t		descr_gva;	/* BAR1 GVA of RAMIN page 1 (ctxdmas) */
-	uint32_t		descr_next;	/* next free ctxdma RAMIN offset */
+	uint64_t		instmem_gva[4];	/* BAR1 GVAs of the first 4 RAMIN pages */
+	uint32_t		descr_next;	/* next free ctxdma RAMIN byte offset */
 	/* Window display channel (M4c): NVC57E, instance 0 (drives head 0).
 	 * chid.user = 1 + instance; PUT/GET at BAR0 0x690000 + instance*0x1000. */
 	struct nvkm_gsp_object	window;		/* NVC57E window channel DMAC */
@@ -180,6 +182,22 @@ struct nvkm_gsp_disp {
 	uint64_t		window_push_paddr;
 	uint32_t		window_push_size;
 	uint32_t		window_put_reg;	/* BAR0 MMIO PUT (0x690000); GET at +4 */
+	/* Core completion notifier (M4d-1): VRAM page + ctxdma the core channel
+	 * signals on UPDATE; host polls STATUS via BAR1. */
+	uint64_t		notifier_paddr;	/* notifier VRAM page (physical) */
+	uint64_t		notifier_gva;	/* BAR1 GVA of the notifier page */
+	uint64_t		fb_paddr;	/* M4d test framebuffer (VRAM physical) */
+	uint64_t		olut_paddr;	/* M4q identity output LUT (VRAM physical) */
+	uint64_t		ilut_paddr;	/* M4t identity window input LUT (VRAM physical) */
+	/* M4d option Y: RM ContextDma delivery. Each surface is an
+	 * NV01_MEMORY_LOCAL_USER object plus an NV01_CONTEXT_DMA explicitly
+	 * bound to its display channel. */
+	struct nvkm_gsp_object	inst_mem;	/* RM-allocated display inst mem (RAMIN) */
+	struct nvkm_gsp_object	iso_mem;	/* fb memory object */
+	struct nvkm_gsp_object	olut_mem;	/* output LUT memory object */
+	struct nvkm_gsp_object	iso_dma;	/* fb ctxdma object */
+	struct nvkm_gsp_object	ntfy_mem;	/* notifier memory object */
+	struct nvkm_gsp_object	ntfy_dma;	/* notifier ctxdma object */
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
