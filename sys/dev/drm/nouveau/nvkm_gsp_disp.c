@@ -1697,267 +1697,188 @@ disp_retarget_gv100_route(struct nvkm_softc *sc, uint32_t old_orid,
  */
 #define DISP_HDMI_DISPLAY_ID	0x400u	/* connected HDMI (from M1 probe) */
 
-static int
-nvkm_gsp_disp_modeset_test(struct nvkm_softc *sc)
+/* ===== M9: atomic-KMS modeset helpers =====
+ * These carve the verified EVO blocks out of the former modeset_test so the
+ * drm atomic hooks (nvkm_drm_kms.c) drive modeset. They reuse the static
+ * push/ramht/olut helpers defined above. Prototypes in nvkm_gsp_rm.h. */
+
+int
+nvkm_gsp_disp_sor_enable(struct nvkm_softc *sc, uint32_t display_id,
+    uint32_t *out_orid, uint32_t *out_proto)
 {
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
 	struct disp_dfp_assign_sor_params *sor;
-	volatile uint32_t *cpb, *wpb;
-	uint32_t cmds[160], n, st0, status, i;
-	uint32_t orid = 0xff, inherited_orid = 0xff, inherited_proto = 0;
-	uint32_t assigned_sor_arm, assigned_proto, sormask, sor_proto;
-	uint32_t sor_ctrl[DFP_ASSIGN_SOR_MAX_SORS];
-	uint32_t mode_raster, mode_sync, mode_blanke, mode_blanks, mode_blank2;
-	uint32_t wput = 0, wget = 0;
-	uint64_t fb_paddr = 0, fb_size;
+	struct disp_set_hdmi_enable_params *he;
+	uint32_t orid = 0xffu, proto, sor_arm;
 	void *p;
-	int err, us, cpush, wpush;
-	const uint32_t HEAD = 0, WIN = 0;
-	const uint32_t h_active = 2200, h_synce = 43, h_blanke = 191, h_blanks = 2111;
-	const uint32_t v_active = 1125, v_synce = 4, v_blanke = 40, v_blanks = 1120;
-	const uint32_t fb_w = 1920, fb_h = 1080, fb_pitch = 1920u * 4u;
+	int err, i;
 
-	if (disp->core.handle == 0 || disp->window.handle == 0 ||
-	    disp->instmem_gva[0] == 0)
-		return (ENXIO);
-	cpb = disp->core_push_kva;
-	wpb = disp->window_push_kva;
-
-	/* (1) Assign a SOR to the HDMI display (GSP picks the OR). */
 	sor = nvkm_gsp_rm_ctrl_get(&disp->objcom, NV0073_CTRL_CMD_DFP_ASSIGN_SOR,
 	    sizeof(*sor));
 	if (sor == NULL)
 		return (ENOMEM);
 	memset(sor, 0, sizeof(*sor));
 	sor->subDeviceInstance = 0;
-	sor->displayId = DISP_HDMI_DISPLAY_ID;
+	sor->displayId = display_id;
 	sor->sorExcludeMask = 0;
 	p = sor;
 	err = nvkm_gsp_rm_ctrl_rd(&disp->objcom, &p, sizeof(*sor));
-	if (err != 0 || p == NULL) {
-		nvkm_infof(sc->dev, "gsp_disp: DFP_ASSIGN_SOR err=%d\n", err);
+	if (err != 0 || p == NULL)
 		return (EIO);
-	}
 	for (i = 0; i < DFP_ASSIGN_SOR_MAX_SORS; i++) {
-		uint32_t dm = ((struct disp_dfp_assign_sor_params *)p)->
-		    sorAssignListWithTag[i].displayMask;
-		if (dm & DISP_HDMI_DISPLAY_ID) {
-			orid = i;
+		if (((struct disp_dfp_assign_sor_params *)p)->
+		    sorAssignListWithTag[i].displayMask & display_id) {
+			orid = (uint32_t)i;
 			break;
 		}
 	}
-	sormask = 0;
-	for (i = 0; i < DFP_ASSIGN_SOR_MAX_SORS; i++)
-		sormask |= ((struct disp_dfp_assign_sor_params *)p)->
-		    sorAssignList[i] & 0xffu;
 	nvkm_gsp_rm_ctrl_done(&disp->objcom, p);
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y ASSIGN_SOR display=0x%x -> or=%u (listmask=0x%x)\n",
-	    DISP_HDMI_DISPLAY_ID, orid, sormask);
-	if (orid == 0xff)
-		orid = 0;	/* fall back; the log shows if assignment failed */
-	sor_proto = NVC57D_SOR_PROTOCOL_SINGLE_TMDS_A;
-	for (i = 0; i < DFP_ASSIGN_SOR_MAX_SORS; i++)
-		sor_ctrl[i] = nvkm_rd32(sc, 0x6101c4 + i * 0x20);
-	for (i = 0; i < DFP_ASSIGN_SOR_MAX_SORS; i++) {
-		if (sor_ctrl[i] != 0xbadf5040 && (sor_ctrl[i] & 0x00000f00u) != 0) {
-			inherited_orid = i;
-			inherited_proto = sor_ctrl[i] & 0x00000f00u;
-			break;
-		}
-	}
-	assigned_sor_arm = nvkm_rd32(sc, 0x680300 + 0x8000 + orid * 0x20);
-	assigned_proto = assigned_sor_arm & 0x00000f00u;
-	if (assigned_proto == NVC57D_SOR_PROTOCOL_SINGLE_TMDS_A ||
-	    assigned_proto == NVC57D_SOR_PROTOCOL_SINGLE_TMDS_B)
-		sor_proto = assigned_proto;
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y SOR ctrl[0..3]=0x%x 0x%x 0x%x 0x%x "
-	    "inherited_or=%u inherited_proto=0x%x assigned_arm=0x%x "
-	    "-> use assigned_or=%u proto=0x%x\n",
-	    sor_ctrl[0], sor_ctrl[1], sor_ctrl[2], sor_ctrl[3],
-	    inherited_orid, inherited_proto, assigned_sor_arm, orid, sor_proto);
-	disp_dump_gv100_sor_route_state(sc, "M4y pre-route");
-	(void)disp_retarget_gv100_route(sc, inherited_orid, orid);
-	disp_dump_gv100_sor_route_state(sc, "M4y post-route");
+	if (orid == 0xffu)
+		orid = 0;
 
-	/* (2) RM-allocate the framebuffer + notifier, then write nouveau-style
-	 * RAMHT entries that the display HW resolves from EVO ctxdma handles. */
-	fb_size = (uint64_t)fb_pitch * fb_h;
-	err = nvkm_gsp_disp_nouveau_ramht_setup(sc, fb_size);
-	if (err != 0) {
-		nvkm_infof(sc->dev,
-		    "gsp_disp: M4e nouveau RAMHT setup err=%d\n", err);
-		return (err);
+	/* Protocol: prefer the assigned OR's arm TMDS protocol (GV100 reg). */
+	proto = NVC57D_SOR_PROTOCOL_SINGLE_TMDS_A;
+	sor_arm = nvkm_rd32(sc, 0x680300 + 0x8000 + orid * 0x20) & 0x00000f00u;
+	if (sor_arm == NVC57D_SOR_PROTOCOL_SINGLE_TMDS_A ||
+	    sor_arm == NVC57D_SOR_PROTOCOL_SINGLE_TMDS_B)
+		proto = sor_arm;
+
+	/* Activate the HDMI encoder for this displayId. */
+	he = nvkm_gsp_rm_ctrl_get(&disp->objcom,
+	    NV0073_CTRL_CMD_SPECIFIC_SET_HDMI_ENABLE, sizeof(*he));
+	if (he != NULL) {
+		memset(he, 0, sizeof(*he));
+		he->subDeviceInstance = 0;
+		he->displayId = display_id;
+		he->enable = 1;
+		(void)nvkm_gsp_rm_ctrl_wr(&disp->objcom, he);
 	}
-	fb_paddr = disp->fb_paddr;
-	if (fb_paddr == 0)
-		return (ENXIO);
-	err = disp_fb_fill_bars(sc, fb_paddr, fb_pitch, fb_w, fb_h);
+
+	if (out_orid != NULL)
+		*out_orid = orid;
+	if (out_proto != NULL)
+		*out_proto = proto;
+	nvkm_infof(sc->dev,
+	    "gsp_disp: M9 sor_enable display=0x%x -> or=%u proto=0x%x\n",
+	    display_id, orid, proto);
+	return (0);
+}
+
+int
+nvkm_gsp_disp_modeset_setup(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint64_t fb_size;
+	int err;
+
+	if (disp->notifier_paddr != 0)
+		return (0);	/* idempotent: already set up */
+
+	/* RAMHT ctxdma binds (SYNCBUF/VRAM/WNDW_ISO) + notifier + test fb. */
+	fb_size = (uint64_t)1920u * 4u * 1080u;
+	err = nvkm_gsp_disp_nouveau_ramht_setup(sc, fb_size);
 	if (err != 0)
 		return (err);
-	disp_dump_gv100_head_window_state(sc, "M4z pre-core");
-	mode_raster = h_active | (v_active << 16);
-	mode_sync = h_synce | (v_synce << 16);
-	mode_blanke = h_blanke | (v_blanke << 16);
-	mode_blanks = h_blanks | (v_blanks << 16);
-	mode_blank2 = 0x00000001u;
-	/* M5d: do NOT inherit arm blank values. M5c latched raster/sync/blanke
-	 * from the mode batch but RASTER_BLANK_END/START failed (FE 0x206c): the
-	 * boot arm holds an interlaced blank2 (0x25c0694) and v-blank values that
-	 * are inconsistent with our progressive CONTROL(interlace=0). Use
-	 * nouveau's progressive computation (blanke=0x2800bf blanks=0x460083f
-	 * blank2=0x1) instead. */
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M5d computed timing raster=0x%x sync=0x%x blanke=0x%x "
-	    "blanks=0x%x blank2=0x%x\n",
-	    mode_raster, mode_sync, mode_blanke, mode_blanks, mode_blank2);
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4aa core scope: window%u bounds/control only\n", WIN);
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4ac core scope: inherit head0 timing/view from arm\n");
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4ad core scope: head%u notifier/update only\n", HEAD);
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4ae core scope: bare UPDATE, notifier disabled\n");
 
-	/* (3) M6a: activate the HDMI encoder (SET_HDMI_ENABLE), then push one full
-	 * single-shot head modeset + UPDATE. A-direction finding: GSP owns the disp
-	 * supervisor (r535 disp func has no .super/.intr); the host only pushes EVO
-	 * methods plus the output-path RM controls. We had ASSIGN_SOR but never
-	 * enabled HDMI, so the head timing latched (M5e had raster/sync/blanke/
-	 * blanks all correct in live) yet no TMDS output was driven. SET_HDMI_ENABLE
-	 * is the missing activation. */
-	{
-		struct disp_set_hdmi_enable_params *he;
-		he = nvkm_gsp_rm_ctrl_get(&disp->objcom,
-		    NV0073_CTRL_CMD_SPECIFIC_SET_HDMI_ENABLE, sizeof(*he));
-		if (he != NULL) {
-			memset(he, 0, sizeof(*he));
-			he->subDeviceInstance = 0;
-			he->displayId = DISP_HDMI_DISPLAY_ID;
-			he->enable = 1;
-			err = nvkm_gsp_rm_ctrl_wr(&disp->objcom, he);
-			nvkm_infof(sc->dev,
-			    "gsp_disp: M6a SET_HDMI_ENABLE displayId=0x%x err=%d\n",
-			    DISP_HDMI_DISPLAY_ID, err);
-		}
-	}
-
-	/* M7a: allocate + fill an identity OLUT in VRAM. The core vram ctxdma
-	 * (NV50_DISP_HANDLE_VRAM, already bound) covers it from offset 0, so
-	 * OFFSET_OLUT = olut_paddr>>8. */
 	if (disp->olut_paddr == 0) {
-		disp->olut_paddr = nvkm_gsp_vram_alloc(sc, DISP_OLUT_VRAM_SIZE, 0x1000);
+		disp->olut_paddr = nvkm_gsp_vram_alloc(sc, DISP_OLUT_VRAM_SIZE,
+		    0x1000);
 		if (disp->olut_paddr != 0)
 			(void)disp_olut_fill_identity(sc, disp->olut_paddr);
-		nvkm_infof(sc->dev, "gsp_disp: M7a identity olut@0x%llx\n",
-		    (unsigned long long)disp->olut_paddr);
 	}
+	/* Color bars into the test fb so a successful scanout is visible. */
+	if (disp->fb_paddr != 0)
+		(void)disp_fb_fill_bars(sc, disp->fb_paddr, 1920u * 4u, 1920u,
+		    1080u);
+	nvkm_infof(sc->dev,
+	    "gsp_disp: M9 modeset_setup notifier@0x%llx fb@0x%llx olut@0x%llx\n",
+	    (unsigned long long)disp->notifier_paddr,
+	    (unsigned long long)disp->fb_paddr,
+	    (unsigned long long)disp->olut_paddr);
+	return (0);
+}
 
-	nvkm_wr32(sc, 0x611020 + 0 * 12u, 0x90000000u);
+int
+nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head, uint32_t win,
+    uint32_t orid, uint32_t proto, uint32_t display_id,
+    const struct nvkm_disp_mode *m)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	volatile uint32_t *cpb = disp->core_push_kva;
+	uint32_t cmds[96], n, st0, status;
+	int cpush, us;
+
 #define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
+	nvkm_wr32(sc, 0x611020 + 0 * 12u, 0x90000000u);	/* clear stale FE exc */
 	n = 0;
-	/* nouveau headc57d_mode set (multi-method raster, M5e-validated) + output
-	 * binding (display_id + SOR route + window owner) so the GSP supervisor has
-	 * a complete output target. No CONTROL_OUTPUT_RESOURCE: M5g showed pushing
-	 * it (0xfc000040) regressed the latch; boot arm already holds out=0x40. */
-	cmds[n++] = evo_method_hdr(NVC57D_HEAD_SET_RASTER_SIZE(HEAD), 4);
-	cmds[n++] = mode_raster;
-	cmds[n++] = mode_sync;
-	cmds[n++] = mode_blanke;
-	cmds[n++] = mode_blanks;
-	M(NVC57D_HEAD_SET_RASTER_VERT_BLANK2(HEAD), mode_blank2);
-	M(NVC57D_HEAD_SET_CONTROL(HEAD), 0x00000000u);
-	M(NVC57D_HEAD_SET_PIXEL_CLOCK_FREQUENCY(HEAD),
-	    nvkm_rd32(sc, 0x682000 + 0x8000 + 0x00c) & 0x7fffffffu);
-	M(NVC57D_HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX(HEAD),
-	    nvkm_rd32(sc, 0x682000 + 0x8000 + 0x00c) & 0x7fffffffu);
-	M(NVC57D_HEAD_SET_HEAD_USAGE_BOUNDS(HEAD),
-	    0x4u | (1u << 4) | (1u << 8) | (1u << 12));	/* +OLUT_ALLOWED */
-	/* M7a: identity OLUT. nouveau headc57d always sets an identity OLUT for an
-	 * active head (olut_identity=true, USAGE OLUT_ALLOWED=TRUE). Without it the
-	 * head state is incomplete and the GSP supervisor REJECTED the whole modeset
-	 * (UPDATE INVALID_ARG, notifier never flipped, screen black). OLUT ctxdma
-	 * handle = the core vram ctxdma (NV50_DISP_HANDLE_VRAM, already bound),
-	 * offset = olut_paddr>>8 (vram ctxdma covers VRAM from 0). */
-	M(NVC57D_HEAD_SET_OLUT_CONTROL(HEAD), NVC57D_OLUT_CONTROL_IDENTITY_DIRECT10);
-	M(NVC57D_HEAD_SET_OLUT_FP_NORM_SCALE(HEAD), 0xffffffffu);
-	M(NVC57D_HEAD_SET_CONTEXT_DMA_OLUT(HEAD), NV50_DISP_HANDLE_VRAM);
-	M(NVC57D_HEAD_SET_OFFSET_OLUT(HEAD), (uint32_t)(disp->olut_paddr >> 8));
-	M(NVC57D_HEAD_SET_DISPLAY_ID(HEAD), DISP_HDMI_DISPLAY_ID);
-	M(NVC57D_SOR_SET_CONTROL(orid), sor_proto | (1u << HEAD));
-	M(NVC57D_WINDOW_SET_CONTROL(WIN), HEAD);
-	/* M6d: single atomic ntfy UPDATE. Hypothesis: the per-increment latch is
-	 * because we never armed the core completion notifier. Add SET_CONTEXT_DMA_
-	 * NOTIFIER(SYNCBUF) + SET_NOTIFIER_CONTROL(MODE_WRITE|NOTIFY_ENABLE=0x1000)
-	 * around UPDATE, then DISABLE after. If one UPDATE latches everything and the
-	 * notifier flips FINISHED, the 24-UPDATE workaround retires. */
+	M(NVC57D_HEAD_SET_VIEWPORT_SIZE_IN(head), m->iw | (m->ih << 16));
+	M(NVC57D_HEAD_SET_VIEWPORT_SIZE_OUT(head), m->ow | (m->oh << 16));
+	cmds[n++] = evo_method_hdr(NVC57D_HEAD_SET_RASTER_SIZE(head), 4);
+	cmds[n++] = m->raster;
+	cmds[n++] = m->sync;
+	cmds[n++] = m->blanke;
+	cmds[n++] = m->blanks;
+	M(NVC57D_HEAD_SET_RASTER_VERT_BLANK2(head), m->blank2);
+	M(NVC57D_HEAD_SET_CONTROL(head), 0x00000000u);
+	M(NVC57D_HEAD_SET_PIXEL_CLOCK_FREQUENCY(head), m->clk & 0x7fffffffu);
+	M(NVC57D_HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX(head), m->clk & 0x7fffffffu);
+	M(NVC57D_HEAD_SET_HEAD_USAGE_BOUNDS(head),
+	    0x4u | (1u << 4) | (1u << 8) | (1u << 12));
+	M(NVC57D_HEAD_SET_PROCAMP(head), 0x00000000u);
+	M(NVC57D_HEAD_SET_CONTROL_OUTPUT_RESOURCE(head), (0x4u << 4) | (0x3fu << 26));
+	M(NVC57D_HEAD_SET_OLUT_CONTROL(head), NVC57D_OLUT_CONTROL_IDENTITY_DIRECT10);
+	M(NVC57D_HEAD_SET_OLUT_FP_NORM_SCALE(head), 0xffffffffu);
+	M(NVC57D_HEAD_SET_CONTEXT_DMA_OLUT(head), NV50_DISP_HANDLE_VRAM);
+	M(NVC57D_HEAD_SET_OFFSET_OLUT(head), (uint32_t)(disp->olut_paddr >> 8));
+	M(NVC57D_HEAD_SET_DISPLAY_ID(head), display_id);
+	M(NVC57D_SOR_SET_CONTROL(orid), proto | (1u << head));
+	M(NVC57D_WINDOW_SET_CONTROL(win), head);
 	M(NVC57D_SET_CONTEXT_DMA_NOTIFIER, NV50_DISP_HANDLE_SYNCBUF);
-	M(NVC57D_SET_NOTIFIER_CONTROL, (1u << 12));	/* MODE_WRITE|OFFSET0|NOTIFY_ENABLE */
+	M(NVC57D_SET_NOTIFIER_CONTROL, (1u << 12));	/* NOTIFY_ENABLE */
 	M(NVC57D_SET_INTERLOCK_FLAGS, 0x00000000u);
 	M(NVC57D_SET_WINDOW_INTERLOCK_FLAGS, 0x00000000u);
 	M(NVC57D_UPDATE, 0x1u);
 	M(NVC57D_SET_NOTIFIER_CONTROL, 0x00000000u);	/* NOTIFY_DISABLE */
-	nvkm_wr32(sc, 0x611020 + 0 * 12u, 0x90000000u);
+#undef M
 	cpush = disp_chan_push(sc, cpb, disp->core_put_reg,
 	    disp->core_push_size / 4, cmds, n);
-	{
-		uint32_t nt = 0;
-		int us2;
-		for (us2 = 0; us2 < 500000; us2 += 100) {
-			nt = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x0);
-			if (((nt >> 30) & 0x3u) == DISP_NOTIFIER_STATUS_FINISHED)
-				break;
-			DELAY(100);
-		}
-		nvkm_infof(sc->dev,
-		    "gsp_disp: M6d single ntfy UPDATE: push=%d coreGET=%u ntfy=0x%x "
-		    "exc=0x%x raster=0x%x clk=0x%x -> %s\n",
-		    cpush, nvkm_rd32(sc, disp->core_put_reg + 4), nt,
-		    nvkm_rd32(sc, 0x611020),
-		    nvkm_rd32(sc, 0x682000 + 0x064),
-		    nvkm_rd32(sc, 0x682000 + 0x00c),
-		    ((nt >> 30) & 0x3u) == DISP_NOTIFIER_STATUS_FINISHED ?
-		    "NOTIFIER FINISHED (atomic latch!)" : "no notifier (per-increment)");
-	}
-	disp_dump_gv100_sor_route_state(sc, "M6d");
-	/* M7a: NO 24-UPDATE workaround. The single ntfy UPDATE above is the real
-	 * test: success == notifier flips FINISHED (supervisor committed). The
-	 * 24-UPDATE loop only copied arm->live registers without a real commit
-	 * (black screen). With the identity OLUT added, the head state should now
-	 * be complete enough for the supervisor to accept the UPDATE. */
-	disp_dump_gv100_head_window_state(sc, "M7a-final");
-	disp_dump_gv100_sor_route_state(sc, "M7a-final");
-
 	st0 = 0;
-	for (us = 0; us < 3000000; us += 50) {
+	for (us = 0; us < 500000; us += 100) {
 		st0 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x0);
 		if (((st0 >> 30) & 0x3u) == DISP_NOTIFIER_STATUS_FINISHED)
 			break;
-		DELAY(50);
+		DELAY(100);
 	}
 	status = (st0 >> 30) & 0x3u;
 	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y core first update: push=%d coreGET=%u ntfy=0x%x "
-	    "status=%u -> %s\n",
-	    cpush, nvkm_rd32(sc, disp->core_put_reg + 4), st0, status,
-	    status == DISP_NOTIFIER_STATUS_FINISHED ? "PIPE UP" : "no notifier");
-	disp_dump_gv100_head_window_state(sc, "M4z post-core");
-	disp_dump_gv100_exception_state(sc);
+	    "gsp_disp: M9 head_set head=%u or=%u push=%d coreGET=%u ntfy=0x%x -> %s\n",
+	    head, orid, cpush, nvkm_rd32(sc, disp->core_put_reg + 4), st0,
+	    status == DISP_NOTIFIER_STATUS_FINISHED ? "FINISHED" : "no notifier");
+	return (0);	/* never fail the drm commit on a notifier timeout */
+}
 
-	/* (4) Window batch: image over the ISO ctxdma + window UPDATE. */
+int
+nvkm_gsp_disp_window_set(struct nvkm_softc *sc, uint32_t win, uint32_t head,
+    uint64_t fb_paddr, uint32_t pitch, uint32_t w, uint32_t h)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	volatile uint32_t *wpb = disp->window_push_kva;
+	uint32_t cmds[64], n, wput = 0, wget;
+	int wpush;
+
+	(void)head;
+#define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
 	n = 0;
 	M(NVC57E_SET_PRESENT_CONTROL, NVC57E_SET_PRESENT_CONTROL_INTERVAL_1);
-	M(NVC57E_SET_SIZE, fb_w | (fb_h << 16));
+	M(NVC57E_SET_SIZE, w | (h << 16));
 	M(NVC57E_SET_STORAGE, NVC57E_SET_STORAGE_MEMORY_LAYOUT_PITCH);
 	M(NVC57E_SET_PARAMS, NVC57E_SET_PARAMS_FORMAT_A8R8G8B8);
-	M(NVC57E_SET_PLANAR_STORAGE(0), fb_pitch >> 6);
+	M(NVC57E_SET_PLANAR_STORAGE(0), pitch >> 6);
 	M(NVC57E_SET_CONTEXT_DMA_ISO(0), NV50_DISP_HANDLE_WNDW_ISO);
 	M(NVC57E_SET_OFFSET(0), (uint32_t)(fb_paddr >> 8));
 	M(NVC57E_SET_POINT_IN(0), 0x00000000u);
-	M(NVC57E_SET_SIZE_IN, fb_w | (fb_h << 16));
-	M(NVC57E_SET_SIZE_OUT, fb_w | (fb_h << 16));
+	M(NVC57E_SET_SIZE_IN, w | (h << 16));
+	M(NVC57E_SET_SIZE_OUT, w | (h << 16));
 	M(NVC57E_SET_COMPOSITION_CONTROL, NVC57E_COMPOSITION_DEPTH_PRIMARY);
 	M(NVC57E_SET_COMPOSITION_CONSTANT_ALPHA, NVC57E_COMPOSITION_ALPHA_OPAQUE);
 	M(NVC57E_SET_COMPOSITION_FACTOR_SELECT, NVC57E_COMPOSITION_FACTOR_PIXEL_NONE);
@@ -1966,39 +1887,53 @@ nvkm_gsp_disp_modeset_test(struct nvkm_softc *sc)
 	M(NVC57E_SET_KEY_GREEN_Y, NVC57E_KEY_RANGE_FULL);
 	M(NVC57E_SET_KEY_BLUE_CB, NVC57E_KEY_RANGE_FULL);
 	M(NVC57E_SET_INTERLOCK_FLAGS, 0x00000001u);
-	M(NVC57E_SET_WINDOW_INTERLOCK_FLAGS, 1u << WIN);
+	M(NVC57E_SET_WINDOW_INTERLOCK_FLAGS, 1u << win);
 	M(NVC57E_UPDATE, 0x1u);
+#undef M
 	wpush = disp_chan_emit(sc, wpb, disp->window_put_reg,
 	    disp->window_push_size / 4, cmds, n, &wput);
-#undef M
 	if (wpush == 0)
 		wget = disp_chan_wait_get(sc, disp->window_put_reg, wput, 2000000);
 	else
 		wget = nvkm_rd32(sc, disp->window_put_reg + 4);
 	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y window image: emit=%d winPUT=%u winGET=%u fb@0x%llx "
-	    "iso=whole-vram\n",
-	    wpush, wput, wget, (unsigned long long)fb_paddr);
-	disp_dump_gv100_head_window_state(sc, "M4z post-window");
-
-	/* (DIAG) Read display HW state to tell "pipe latched, ctxdma-only fail"
-	 * from "UPDATE never completed", without a monitor:
-	 *  - SOR control 0x6101c4 + or*0x20: proto[11:8]/owner[7:0] (did SOR latch?)
-	 *  - channel state 0x610664 + chid*4: bits[19:16]==4 => idle/healthy. */
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y DIAG SOR ctrl[0..3]=0x%x 0x%x 0x%x 0x%x\n",
-	    nvkm_rd32(sc, 0x6101c4 + 0 * 0x20),
-	    nvkm_rd32(sc, 0x6101c4 + 1 * 0x20),
-	    nvkm_rd32(sc, 0x6101c4 + 2 * 0x20),
-	    nvkm_rd32(sc, 0x6101c4 + 3 * 0x20));
-	nvkm_infof(sc->dev,
-	    "gsp_disp: M4y DIAG chan state[0..5]=0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
-	    nvkm_rd32(sc, 0x610664 + 0 * 4), nvkm_rd32(sc, 0x610664 + 1 * 4),
-	    nvkm_rd32(sc, 0x610664 + 2 * 4), nvkm_rd32(sc, 0x610664 + 3 * 4),
-	    nvkm_rd32(sc, 0x610664 + 4 * 4), nvkm_rd32(sc, 0x610664 + 5 * 4));
-	disp_dump_gv100_exception_state(sc);
-	disp_dump_gv100_sor_route_state(sc, "M4y DIAG");
+	    "gsp_disp: M9 window_set win=%u winPUT=%u winGET=%u fb@0x%llx pitch=%u\n",
+	    win, wput, wget, (unsigned long long)fb_paddr, pitch);
 	return (0);
+}
+
+/* Dump host-side disp state after a modeset, to tell apart "GSP latched but
+ * notifier didn't flip" from "disp engine PRI is dead (BROKEN_FB)". */
+void
+nvkm_gsp_disp_dump_state(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint32_t n0, n1, n2, n3;
+	uint32_t h0_state, h0_set, h612608, e10, e14, e78, sor1_live, sor1_arm;
+	uint64_t logrm_put;
+
+	n0 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x0);
+	n1 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x4);
+	n2 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x8);
+	n3 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0xc);
+
+	h0_state  = nvkm_rd32(sc, 0x612078);	/* FE_CORE_HEAD_STATE head0 */
+	h0_set    = nvkm_rd32(sc, 0x616300);
+	h612608   = nvkm_rd32(sc, 0x612608);
+	e10       = nvkm_rd32(sc, 0x610010);
+	e14       = nvkm_rd32(sc, 0x610014);
+	e78       = nvkm_rd32(sc, 0x610078);
+	sor1_live = nvkm_rd32(sc, 0x680300 + 1 * 0x20);
+	sor1_arm  = nvkm_rd32(sc, 0x680300 + 0x8000 + 1 * 0x20);
+	logrm_put = (sc->gsp_logrm.kva != NULL) ?
+	    *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
+
+	nvkm_infof(sc->dev,
+	    "gsp_disp: STATE ntfy=[%08x %08x %08x %08x] head0=0x%x(op=%u) "
+	    "set=0x%x 612608=0x%x e10/14/78=%x/%x/%x sor1 live=0x%x arm=0x%x "
+	    "logrm_put=0x%llx\n",
+	    n0, n1, n2, n3, h0_state, (h0_state >> 8) & 0x3u, h0_set, h612608,
+	    e10, e14, e78, sor1_live, sor1_arm, (unsigned long long)logrm_put);
 }
 
 /* ===== display subsystem bring-up (attach thread) ===== */
@@ -2141,8 +2076,6 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 	/* (9) Window display channel (M4c): NVC57E channel for plane images. */
 	(void)nvkm_gsp_disp_window_init(sc);
 
-	/* (10) M4e smoke: nouveau-style RAMHT ctxdma bind + minimal modeset. */
-	(void)nvkm_gsp_disp_modeset_test(sc);
 	return (0);
 
 fail_device:

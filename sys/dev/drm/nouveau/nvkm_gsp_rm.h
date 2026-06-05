@@ -211,8 +211,54 @@ int	 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id);
 int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 	     uint8_t *out, uint32_t *outlen);
 
+/* ===== Atomic KMS modeset helpers (M9) =====
+ * The drm atomic hooks in nvkm_drm_kms.c drive these instead of the old
+ * attach-time modeset_test probe. Each carves out a verified EVO block from
+ * the former modeset_test. */
+
+/* Per-head HW timing, computed from a drm_display_mode by the crtc atomic
+ * hook (nouveau headc57d convention), packed as the EVO methods expect. */
+struct nvkm_disp_mode {
+	uint32_t raster;	/* h.active | v.active<<16 */
+	uint32_t sync;		/* h.synce  | v.synce<<16  */
+	uint32_t blanke;	/* h.blanke | v.blanke<<16 */
+	uint32_t blanks;	/* h.blanks | v.blanks<<16 */
+	uint32_t blank2;	/* v.blank2e<<16 | v.blank2s (progressive => 1) */
+	uint32_t clk;		/* pixel clock, Hz */
+	uint32_t iw, ih;	/* viewport-in  active w,h */
+	uint32_t ow, oh;	/* viewport-out active w,h */
+};
+
+/* One-time disp resource setup (RAMHT ctxdma binds + notifier + fb + OLUT).
+ * Idempotent; the first crtc enable calls it. Returns 0 / errno. */
+int	 nvkm_gsp_disp_modeset_setup(struct nvkm_softc *sc);
+
+/* Acquire/route a SOR for a displayId and enable its HDMI encoder. Returns the
+ * assigned OR index in *out_orid and protocol in *out_proto. */
+int	 nvkm_gsp_disp_sor_enable(struct nvkm_softc *sc, uint32_t display_id,
+	     uint32_t *out_orid, uint32_t *out_proto);
+
+/* Program one head's full timing (NVC57D) + SOR route + OLUT + window owner,
+ * commit a notifier UPDATE and wait for the core notifier FINISHED. */
+int	 nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head,
+	     uint32_t win, uint32_t orid, uint32_t proto, uint32_t display_id,
+	     const struct nvkm_disp_mode *m);
+
+/* Push one window's scanout image (NVC57E) over fb_paddr + a window UPDATE. */
+int	 nvkm_gsp_disp_window_set(struct nvkm_softc *sc, uint32_t win,
+	     uint32_t head, uint64_t fb_paddr, uint32_t pitch,
+	     uint32_t w, uint32_t h);
+
+/* Dump host-side disp state after a modeset (diagnostic). */
+void	 nvkm_gsp_disp_dump_state(struct nvkm_softc *sc);
+
 /* KMS skeleton (M3a): register DRIVER_MODESET + mode_config + connectors. */
 int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
+
+/* Driver-internal atomic modeset: drive the first connected output's preferred
+ * mode through the full atomic path (-> crtc atomic_enable -> EVO modeset).
+ * Triggered via the dev.drm.<n>.kms_lightup sysctl. Returns 0 / errno. */
+int	 nvkm_drm_kms_light_up(struct nvkm_softc *sc);
 
 /* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour
  * (external = false). Caller still has to call COPY_SERVER_RESERVED_PDES
