@@ -1809,6 +1809,10 @@ nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head, uint32_t win,
 	int cpush, us;
 
 #define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x0, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x4, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x8, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0xc, 0);
 	nvkm_wr32(sc, 0x611020 + 0 * 12u, 0x90000000u);	/* clear stale FE exc */
 	n = 0;
 	M(NVC57D_HEAD_SET_VIEWPORT_SIZE_IN(head), m->iw | (m->ih << 16));
@@ -1832,11 +1836,11 @@ nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head, uint32_t win,
 	M(NVC57D_HEAD_SET_OFFSET_OLUT(head), (uint32_t)(disp->olut_paddr >> 8));
 	M(NVC57D_HEAD_SET_DISPLAY_ID(head), display_id);
 	M(NVC57D_SOR_SET_CONTROL(orid), proto | (1u << head));
-	M(NVC57D_WINDOW_SET_CONTROL(win), head);
+	/* WINDOW_SET_CONTROL is committed separately by assign_windows. */
 	M(NVC57D_SET_CONTEXT_DMA_NOTIFIER, NV50_DISP_HANDLE_SYNCBUF);
 	M(NVC57D_SET_NOTIFIER_CONTROL, (1u << 12));	/* NOTIFY_ENABLE */
-	M(NVC57D_SET_INTERLOCK_FLAGS, 0x00000000u);
-	M(NVC57D_SET_WINDOW_INTERLOCK_FLAGS, 0x00000000u);
+	M(NVC57D_SET_INTERLOCK_FLAGS, 0x00000000u);	/* no cursor interlock */
+	M(NVC57D_SET_WINDOW_INTERLOCK_FLAGS, 1u << win);  /* core waits for window */
 	M(NVC57D_UPDATE, 0x1u);
 	M(NVC57D_SET_NOTIFIER_CONTROL, 0x00000000u);	/* NOTIFY_DISABLE */
 #undef M
@@ -1864,7 +1868,6 @@ nvkm_gsp_disp_window_set(struct nvkm_softc *sc, uint32_t win, uint32_t head,
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
 	volatile uint32_t *wpb = disp->window_push_kva;
 	uint32_t cmds[64], n, wput = 0, wget;
-	int wpush;
 
 	(void)head;
 #define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
@@ -1886,19 +1889,64 @@ nvkm_gsp_disp_window_set(struct nvkm_softc *sc, uint32_t win, uint32_t head,
 	M(NVC57E_SET_KEY_RED_CR, NVC57E_KEY_RANGE_FULL);
 	M(NVC57E_SET_KEY_GREEN_Y, NVC57E_KEY_RANGE_FULL);
 	M(NVC57E_SET_KEY_BLUE_CB, NVC57E_KEY_RANGE_FULL);
-	M(NVC57E_SET_INTERLOCK_FLAGS, 0x00000001u);
-	M(NVC57E_SET_WINDOW_INTERLOCK_FLAGS, 1u << win);
+	M(NVC57E_SET_INTERLOCK_FLAGS, 0x00000001u);	/* bit0: INTERLOCK_WITH_CORE */
+	M(NVC57E_SET_WINDOW_INTERLOCK_FLAGS, 0x00000000u);  /* no window-to-window */
 	M(NVC57E_UPDATE, 0x1u);
 #undef M
-	wpush = disp_chan_emit(sc, wpb, disp->window_put_reg,
+	/* Window arms interlocked to core; the supervisor promotes arm->live
+	 * only when the core UPDATE arrives. GET stays stalled until then, so
+	 * don't wait for it here. */
+	(void)disp_chan_emit(sc, wpb, disp->window_put_reg,
 	    disp->window_push_size / 4, cmds, n, &wput);
-	if (wpush == 0)
-		wget = disp_chan_wait_get(sc, disp->window_put_reg, wput, 2000000);
-	else
-		wget = nvkm_rd32(sc, disp->window_put_reg + 4);
+	wget = nvkm_rd32(sc, disp->window_put_reg + 4);
 	nvkm_infof(sc->dev,
 	    "gsp_disp: M9 window_set win=%u winPUT=%u winGET=%u fb@0x%llx pitch=%u\n",
 	    win, wput, wget, (unsigned long long)fb_paddr, pitch);
+	return (0);
+}
+
+/* Assign window->head ownership for all 8 windows (fixed map HEAD(i>>1)) in a
+ * standalone core UPDATE that is NOT interlocked with any window channel.
+ * nouveau requires this separate, un-interlocked update or the supervisor
+ * hits HW error checks and refuses the modeset (dispnv50/disp.c:2304). */
+int
+nvkm_gsp_disp_assign_windows(struct nvkm_softc *sc)
+{
+	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	volatile uint32_t *cpb = disp->core_push_kva;
+	uint32_t cmds[48], n, st0, status, i;
+	int cpush, us;
+
+#define M(off, val) do { cmds[n++] = evo_method_hdr((off), 1); cmds[n++] = (val); } while (0)
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x0, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x4, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0x8, 0);
+	nvkm_gsp_bar1_wr32(sc, disp->notifier_gva + 0xc, 0);
+	nvkm_wr32(sc, 0x611020 + 0 * 12u, 0x90000000u);
+	n = 0;
+	for (i = 0; i < 8u; i++)
+		M(NVC57D_WINDOW_SET_CONTROL(i), i >> 1);  /* owner = HEAD(i>>1) */
+	M(NVC57D_SET_CONTEXT_DMA_NOTIFIER, NV50_DISP_HANDLE_SYNCBUF);
+	M(NVC57D_SET_NOTIFIER_CONTROL, (1u << 12));
+	M(NVC57D_SET_INTERLOCK_FLAGS, 0x00000000u);
+	M(NVC57D_SET_WINDOW_INTERLOCK_FLAGS, 0x00000000u);	/* NOT interlocked */
+	M(NVC57D_UPDATE, 0x1u);
+	M(NVC57D_SET_NOTIFIER_CONTROL, 0x00000000u);
+#undef M
+	cpush = disp_chan_push(sc, cpb, disp->core_put_reg,
+	    disp->core_push_size / 4, cmds, n);
+	st0 = 0;
+	for (us = 0; us < 500000; us += 100) {
+		st0 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x0);
+		if (((st0 >> 30) & 0x3u) == DISP_NOTIFIER_STATUS_FINISHED)
+			break;
+		DELAY(100);
+	}
+	status = (st0 >> 30) & 0x3u;
+	nvkm_infof(sc->dev,
+	    "gsp_disp: M9 assign_windows push=%d ntfy=0x%x -> %s\n",
+	    cpush, st0,
+	    status == DISP_NOTIFIER_STATUS_FINISHED ? "FINISHED" : "no notifier");
 	return (0);
 }
 
@@ -1910,6 +1958,7 @@ nvkm_gsp_disp_dump_state(struct nvkm_softc *sc)
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
 	uint32_t n0, n1, n2, n3;
 	uint32_t h0_state, h0_set, h612608, e10, e14, e78, sor1_live, sor1_arm;
+	uint32_t intr_c30, intr_top, super_a8, intren, core_put, core_get;
 	uint64_t logrm_put;
 
 	n0 = nvkm_gsp_bar1_rd32(sc, disp->notifier_gva + 0x0);
@@ -1925,15 +1974,25 @@ nvkm_gsp_disp_dump_state(struct nvkm_softc *sc)
 	e78       = nvkm_rd32(sc, 0x610078);
 	sor1_live = nvkm_rd32(sc, 0x680300 + 1 * 0x20);
 	sor1_arm  = nvkm_rd32(sc, 0x680300 + 0x8000 + 1 * 0x20);
+	intr_c30  = nvkm_rd32(sc, 0x611c30);	/* disp supervisor intr */
+	intr_top  = nvkm_rd32(sc, 0x611800);	/* disp intr top */
+	super_a8  = nvkm_rd32(sc, 0x6107a8);	/* FE pending-changes */
+	intren    = nvkm_rd32(sc, 0x611494);	/* disp intr enable */
+	core_put  = nvkm_rd32(sc, disp->core_put_reg);
+	core_get  = nvkm_rd32(sc, disp->core_put_reg + 4);
 	logrm_put = (sc->gsp_logrm.kva != NULL) ?
 	    *(volatile uint64_t *)sc->gsp_logrm.kva : 0;
 
 	nvkm_infof(sc->dev,
 	    "gsp_disp: STATE ntfy=[%08x %08x %08x %08x] head0=0x%x(op=%u) "
-	    "set=0x%x 612608=0x%x e10/14/78=%x/%x/%x sor1 live=0x%x arm=0x%x "
-	    "logrm_put=0x%llx\n",
+	    "set=0x%x 612608=0x%x e10/14/78=%x/%x/%x sor1 live=0x%x arm=0x%x\n",
 	    n0, n1, n2, n3, h0_state, (h0_state >> 8) & 0x3u, h0_set, h612608,
-	    e10, e14, e78, sor1_live, sor1_arm, (unsigned long long)logrm_put);
+	    e10, e14, e78, sor1_live, sor1_arm);
+	nvkm_infof(sc->dev,
+	    "gsp_disp: STATE2 intr_c30=0x%x intr_top=0x%x super6107a8=0x%x "
+	    "intren611494=0x%x core PUT=%u GET=%u logrm_put=0x%llx\n",
+	    intr_c30, intr_top, super_a8, intren, core_put, core_get,
+	    (unsigned long long)logrm_put);
 }
 
 /* ===== display subsystem bring-up (attach thread) ===== */
