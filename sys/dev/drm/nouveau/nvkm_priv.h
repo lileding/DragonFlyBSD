@@ -519,6 +519,12 @@ struct nvkm_softc {
 	uint32_t		gsp_nonstall_intr_last_leaf;
 	uint32_t		gsp_nonstall_intr_last_mask;
 	uint32_t		gsp_nonstall_intr_last_top;
+	/* disp engine stall interrupt (r535 stall-intr equivalent). */
+	uint32_t		gsp_stall_leaf_mask[8];
+	uint64_t		gsp_disp_intr_count;
+	uint32_t		gsp_disp_intr_last_leaf;
+	uint32_t		gsp_disp_intr_last_mask;
+	uint32_t		gsp_disp_vblank_mask;
 	uint64_t		rc_triggered_count;
 	uint32_t		rc_last_engine_type;
 	uint32_t		rc_last_chid;

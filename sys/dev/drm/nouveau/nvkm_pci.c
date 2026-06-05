@@ -142,20 +142,39 @@ nvkm_gsp_isr(void *arg)
 	}
 
 	for (uint32_t leaf = 0; leaf < 8u; leaf++) {
-		uint32_t mask, nonstall;
+		uint32_t mask, nonstall, stall;
 
 		if ((top & (1u << (leaf / 2u))) == 0)
 			continue;
 		mask = nvkm_rd32(sc, NVKM_CPU_INTR_LEAF(leaf));
 		nonstall = mask & sc->gsp_nonstall_leaf_mask[leaf];
-		if (nonstall == 0)
-			continue;
-		sc->gsp_nonstall_intr_count++;
-		sc->gsp_nonstall_intr_last_leaf = leaf;
-		sc->gsp_nonstall_intr_last_mask = nonstall;
-		sc->gsp_nonstall_intr_last_top = top;
-		nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), nonstall);
-		nvkm_drm_exec_complete_intr(sc);
+		stall = mask & sc->gsp_stall_leaf_mask[leaf];
+		if (nonstall != 0) {
+			sc->gsp_nonstall_intr_count++;
+			sc->gsp_nonstall_intr_last_leaf = leaf;
+			sc->gsp_nonstall_intr_last_mask = nonstall;
+			sc->gsp_nonstall_intr_last_top = top;
+			nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), nonstall);
+			nvkm_drm_exec_complete_intr(sc);
+		}
+		if (stall != 0) {
+			/* disp engine stalling interrupt (r535_disp_intr): the
+			 * host must service + ack it, or the disp engine stalls
+			 * and the GSP supervisor never advances arm->live.
+			 * Service per-head vblank, then ack the CPU leaf. */
+			uint32_t vb = nvkm_rd32(sc, 0x611ec0) & 0xffu;
+
+			sc->gsp_disp_vblank_mask = vb;
+			for (uint32_t h = 0; h < 8u; h++) {
+				if ((vb & (1u << h)) &&
+				    (nvkm_rd32(sc, 0x611c00 + h * 4u) & 0x2u))
+					nvkm_wr32(sc, 0x611800 + h * 4u, 0x2u);
+			}
+			nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), stall);
+			sc->gsp_disp_intr_count++;
+			sc->gsp_disp_intr_last_leaf = leaf;
+			sc->gsp_disp_intr_last_mask = stall;
+		}
 	}
 
 	if (stat & 0x40) {
