@@ -751,6 +751,24 @@ nvkm_gsp_sysctl_rpc_trace(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+/* Provided by nvkm_drm_kms.c. */
+int nvkm_drm_kms_light_up(struct nvkm_softc *sc);
+
+/* Write 1 to drive a driver-internal atomic modeset (light up the screen). */
+static int
+nvkm_gsp_sysctl_kms_lightup(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	int val = 0, err;
+
+	err = sysctl_handle_int(oidp, &val, 0, req);
+	if (err != 0 || req->newptr == 0)
+		return (err);
+	if (val != 0)
+		(void)nvkm_drm_kms_light_up(sc);
+	return (0);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -793,4 +811,8 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_rpc_trace, "A",
 	    "GSP RPC ring trace (host<->GSP TX/RX/EVENT/STALE)");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "kms_lightup",
+	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
+	    nvkm_gsp_sysctl_kms_lightup, "I",
+	    "write 1 to drive an internal atomic modeset (light up the screen)");
 }
