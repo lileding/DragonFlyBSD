@@ -230,10 +230,17 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	nvkm_kms_mode_to_disp(mode, &m);
 	(void)nvkm_gsp_disp_modeset_setup(sc);
 	(void)nvkm_gsp_disp_sor_enable(sc, display_id, &orid, &proto);
-	(void)nvkm_gsp_disp_head_set(sc, nc->head, nc->win, orid, proto,
-	    display_id, &m);
+	/* Stage 1: commit window->head ownership in a standalone, NON
+	 * window-interlocked core UPDATE (or the supervisor hits HW error
+	 * checks and refuses the modeset). */
+	(void)nvkm_gsp_disp_assign_windows(sc);
+	/* Stage 2: two-stage interlock -- the window arms first (interlocked
+	 * to core), then the core modeset UPDATE arrives and the supervisor
+	 * latches both atomically (promotes SOR arm->live + flips notifier). */
 	(void)nvkm_gsp_disp_window_set(sc, nc->win, nc->head, disp->fb_paddr,
 	    m.iw * 4u, m.iw, m.ih);
+	(void)nvkm_gsp_disp_head_set(sc, nc->head, nc->win, orid, proto,
+	    display_id, &m);
 
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u %ux%u display=0x%x or=%u proto=0x%x\n",

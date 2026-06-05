@@ -238,6 +238,10 @@ int	 nvkm_gsp_disp_modeset_setup(struct nvkm_softc *sc);
 int	 nvkm_gsp_disp_sor_enable(struct nvkm_softc *sc, uint32_t display_id,
 	     uint32_t *out_orid, uint32_t *out_proto);
 
+/* Commit window->head ownership for all windows in a standalone, NOT
+ * window-interlocked core UPDATE (nouveau requires this before modeset). */
+int	 nvkm_gsp_disp_assign_windows(struct nvkm_softc *sc);
+
 /* Program one head's full timing (NVC57D) + SOR route + OLUT + window owner,
  * commit a notifier UPDATE and wait for the core notifier FINISHED. */
 int	 nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head,
