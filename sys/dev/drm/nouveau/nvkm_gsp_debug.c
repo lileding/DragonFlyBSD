@@ -720,6 +720,37 @@ nvkm_gsp_sysctl_vm_trace(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+/* Dump the GSP RPC ring trace (host<->GSP RPC TX/RX/EVENT/STALE), newest at
+ * the bottom. Pairs with dev.drm.0.gsp_rpc_trace_on to gate recording. */
+static int
+nvkm_gsp_sysctl_rpc_trace(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	static const char * const dirs[4] = { "TX   ", "RX   ", "EVENT", "STALE" };
+	struct sbuf sb;
+	char buf[8192];
+	uint32_t head, total, show, k, i;
+	int err;
+
+	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+	head = sc->gsp_rpc_trace_head;
+	total = (head < NVKM_GSP_RPC_TRACE_N) ? head : NVKM_GSP_RPC_TRACE_N;
+	show = (total < 180u) ? total : 180u;
+	sbuf_printf(&sb, "gsp_rpc_trace on=%d head=%u showing last %u of %u\n",
+	    sc->gsp_rpc_trace_on, head, show, total);
+	for (k = 0; k < show; k++) {
+		struct nvkm_gsp_rpc_trace_ent *e;
+		i = (head - show + k) % NVKM_GSP_RPC_TRACE_N;
+		e = &sc->gsp_rpc_trace[i];
+		sbuf_printf(&sb, "%4u %s fn=%-5u seq=%-6u aux=0x%x\n",
+		    k, dirs[e->dir & 3u], e->fn, e->seq, e->aux);
+	}
+	sbuf_finish(&sb);
+	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
+	sbuf_delete(&sb);
+	return (err);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -754,4 +785,12 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_vm_trace, "A",
 	    "nouveau VM_BIND trace ring");
+	sc->gsp_rpc_trace_on = 1;	/* default on; low-overhead ring */
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
+	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,
+	    "Enable GSP RPC ring trace recording");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "gsp_rpc_trace",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_rpc_trace, "A",
+	    "GSP RPC ring trace (host<->GSP TX/RX/EVENT/STALE)");
 }
