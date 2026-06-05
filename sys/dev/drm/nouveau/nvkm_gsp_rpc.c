@@ -161,6 +161,24 @@ nvkm_gsp_msg_handle(struct nvkm_softc *sc, uint32_t fn,
 	return (0);
 }
 
+/* Record one entry in the GSP RPC ring trace (debug). Gated by
+ * gsp_rpc_trace_on; lock-free circular write (single producer per dir under
+ * gsp_tok / ithread, head races are benign for a debug ring). */
+static void
+nvkm_gsp_rpc_trace_add(struct nvkm_softc *sc, uint8_t dir, uint32_t fn,
+    uint32_t seq, uint32_t aux)
+{
+	uint32_t i;
+
+	if (!sc->gsp_rpc_trace_on)
+		return;
+	i = sc->gsp_rpc_trace_head++ % NVKM_GSP_RPC_TRACE_N;
+	sc->gsp_rpc_trace[i].dir = dir;
+	sc->gsp_rpc_trace[i].fn = fn;
+	sc->gsp_rpc_trace[i].seq = seq;
+	sc->gsp_rpc_trace[i].aux = aux;
+}
+
 /* ===================================================================
  * Layer 1: cmdq write + msgq read primitives.
  * =================================================================== */
@@ -170,6 +188,20 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 {
 	struct nvkm_nvfw_gsp_rpc *rpc = params_to_rpc(params);
 	struct nvkm_gsp_msg_env *msg = rpc_to_msg(rpc);
+
+	{
+		/* aux: for GSP_RM_CONTROL (fn 103) / GSP_RM_ALLOC (fn 76) record
+		 * the target object handle from the payload (shows which object
+		 * each RPC operates on -- e.g. 0xc57d0042=core, 0xc57e0042=window,
+		 * 0x730042=NV04_DISPLAY_COMMON); else the payload length. */
+		uint32_t aux = rpc->length;
+		const uint32_t *d = (const uint32_t *)rpc->data;
+		if ((rpc->function == 103 || rpc->function == 76) &&
+		    rpc->length >= 12)
+			aux = d[2];		/* target hObject */
+		nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_TX, rpc->function,
+		    rpc->sequence, aux);
+	}
 	uint8_t *cmdq, *msgq;
 	uint32_t rpc_len, hdr_total, padded;
 	uint32_t wptr, rptr, free_slots;
@@ -380,6 +412,8 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			 */
 			LIST_FOREACH(p, &sc->gsp_pending, link) {
 				if (p->seq == r->sequence) {
+					nvkm_gsp_rpc_trace_add(sc,
+					    NVKM_GSP_RPC_RX, fn, r->sequence, len);
 					p->reply_buf = buf;
 					p->reply_len = len;
 					/* Release: the reply_buf/_len stores must
@@ -394,6 +428,8 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 				}
 			}
 			if (!matched) {
+				nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_STALE,
+				    fn, r->sequence, len);
 				nvkm_debugf(sc->dev,
 				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
 				    fn, r->sequence);
@@ -407,6 +443,7 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			uint32_t plen = (len > NVKM_GSP_RPC_HDR_SIZE) ?
 			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
 			uint8_t *params = (uint8_t *)buf + NVKM_GSP_RPC_HDR_SIZE;
+			nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_EVENT, fn, 0, plen);
 			(void)nvkm_gsp_msg_handle(sc, fn, params, plen);
 		}
 		kfree(buf, M_TEMP);

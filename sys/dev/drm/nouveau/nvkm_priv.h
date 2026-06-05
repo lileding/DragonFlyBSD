@@ -229,6 +229,20 @@ struct nvkm_gsp_pending {
 };
 LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 
+/* GSP RPC ring trace (debug). Records every host<->GSP RPC: TX (host->GSP
+ * command), RX (GSP->host reply matched to a waiter), EVENT (GSP->host async
+ * event fn>=0x1000), and STALE (reply with no matching waiter). A circular
+ * buffer dumped via dev.drm.0.gsp_rpc_trace; gated by gsp_rpc_trace_on. */
+#define NVKM_GSP_RPC_TRACE_N	512u
+enum nvkm_gsp_rpc_dir { NVKM_GSP_RPC_TX = 0, NVKM_GSP_RPC_RX = 1,
+			NVKM_GSP_RPC_EVENT = 2, NVKM_GSP_RPC_STALE = 3 };
+struct nvkm_gsp_rpc_trace_ent {
+	uint32_t fn;
+	uint32_t seq;
+	uint32_t aux;	/* TX: policy; RX/EVENT/STALE: payload len */
+	uint8_t  dir;	/* enum nvkm_gsp_rpc_dir */
+};
+
 struct nvkm_drm_exec_pending {
 	LIST_ENTRY(nvkm_drm_exec_pending) link;
 	/* Borrowed channel pointer. Its submit pages outlive this pending
@@ -427,6 +441,10 @@ struct nvkm_softc {
 	}			gsp_ntfy;
 	uint32_t		gsp_rpc_seq;		/* inner RPC sequence (matches reply) */
 	uint32_t		gsp_msgq_rptr;		/* host-side msgq read cursor */
+	/* GSP RPC ring trace (debug, see struct nvkm_gsp_rpc_trace_ent). */
+	struct nvkm_gsp_rpc_trace_ent gsp_rpc_trace[NVKM_GSP_RPC_TRACE_N];
+	uint32_t		gsp_rpc_trace_head;
+	int			gsp_rpc_trace_on;
 
 	/* Phase 5: RPC token + pending list. gsp_tok serialises
 	 * cmdq writes and msgq reads across ioctl lwkts + ithread. */
