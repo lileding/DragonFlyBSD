@@ -42,7 +42,9 @@
 #define NVKM_GSP_RPC_HDR_SIZE	32		/* nvfw_gsp_rpc inner */
 #define NVKM_GSP_HDR_TOTAL	(NVKM_GSP_MSG_HDR_SIZE + NVKM_GSP_RPC_HDR_SIZE)
 #define NVKM_GSP_MSGCOUNT	63u		/* fixed: (256K - 4K) / 4K */
-#define NVKM_GSP_MAX_PAYLOAD	(NVKM_GSP_PAGE_SIZE - NVKM_GSP_HDR_TOTAL)
+#define NVKM_GSP_MAX_MSG_PAGES	16u		/* GSP_MSG_MAX_SIZE / PAGE */
+#define NVKM_GSP_MAX_PAYLOAD	\
+	(NVKM_GSP_PAGE_SIZE * NVKM_GSP_MAX_MSG_PAGES - NVKM_GSP_HDR_TOTAL)
 #define NVKM_GSP_SIGNATURE	0x43505256u	/* 'C''P''R''V' LE */
 #define NVKM_GSP_RPC_DEBUG_QUEUES	0
 
@@ -207,7 +209,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	uint32_t wptr, rptr, free_slots;
 	uint64_t csum;
 	const uint64_t *cp;
-	uint32_t nu64, i;
+	uint32_t nu64, i, copied;
 	int retries;
 
 	if (sc->gsp_shm.kva == NULL) {
@@ -218,9 +220,16 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	rpc_len   = rpc->length;	/* hdr + payload */
 	hdr_total = sizeof(*msg) + rpc_len;
 	padded    = roundup(hdr_total, NVKM_GSP_PAGE_SIZE);
-	if (padded > NVKM_GSP_PAGE_SIZE) {
+	if (padded / NVKM_GSP_PAGE_SIZE > NVKM_GSP_MAX_MSG_PAGES) {
 		nvkm_debugf(sc->dev,
-		    "cmdq_push: fn=%u len=%u exceeds single page (no continuation yet)\n",
+		    "cmdq_push: fn=%u len=%u exceeds %u pages\n",
+		    rpc->function, rpc_len, NVKM_GSP_MAX_MSG_PAGES);
+		kfree(msg, M_TEMP);
+		return (EINVAL);
+	}
+	if (padded / NVKM_GSP_PAGE_SIZE >= NVKM_GSP_MSGCOUNT) {
+		nvkm_debugf(sc->dev,
+		    "cmdq_push: fn=%u len=%u too large for ring\n",
 		    rpc->function, rpc_len);
 		kfree(msg, M_TEMP);
 		return (EINVAL);
@@ -248,7 +257,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 		free_slots = rptr + NVKM_GSP_MSGCOUNT - wptr - 1;
 		if (free_slots >= NVKM_GSP_MSGCOUNT)
 			free_slots -= NVKM_GSP_MSGCOUNT;
-		if (free_slots >= 1)
+		if (free_slots >= msg->elem_count)
 			break;
 		DELAY(10);
 	}
@@ -259,8 +268,17 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 		return (ETIMEDOUT);
 	}
 
-	memcpy(cmdq + NVKM_GSP_PAGE_SIZE + wptr * NVKM_GSP_PAGE_SIZE,
-	    msg, padded);
+	for (copied = 0; copied < padded; copied += NVKM_GSP_PAGE_SIZE) {
+		uint32_t slot = wptr + copied / NVKM_GSP_PAGE_SIZE;
+		uint32_t chunk = padded - copied;
+
+		if (slot >= NVKM_GSP_MSGCOUNT)
+			slot -= NVKM_GSP_MSGCOUNT;
+		if (chunk > NVKM_GSP_PAGE_SIZE)
+			chunk = NVKM_GSP_PAGE_SIZE;
+		memcpy(cmdq + NVKM_GSP_PAGE_SIZE + slot * NVKM_GSP_PAGE_SIZE,
+		    (const uint8_t *)msg + copied, chunk);
+	}
 
 	wptr += msg->elem_count;
 	if (wptr >= NVKM_GSP_MSGCOUNT)
@@ -306,7 +324,7 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	struct nvkm_nvfw_gsp_rpc *rpc;
 	uint32_t wptr;
 	uint32_t fn, len, sig;
-	uint32_t alloc_sz;
+	uint32_t alloc_sz, copy_len, copied, msg_off;
 	uint8_t *buf;
 
 	msgq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_msgq_off;
@@ -356,7 +374,23 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	if (alloc_sz < NVKM_GSP_RPC_HDR_SIZE)
 		alloc_sz = NVKM_GSP_RPC_HDR_SIZE;
 	buf = kmalloc(alloc_sz, M_TEMP, M_WAITOK | M_ZERO);
-	memcpy(buf, rpc, (len > alloc_sz) ? alloc_sz : len);
+	copy_len = (len > alloc_sz) ? alloc_sz : len;
+	msg_off = NVKM_GSP_MSG_HDR_SIZE;
+	for (copied = 0; copied < copy_len;) {
+		uint32_t slot_idx = sc->gsp_msgq_rptr + msg_off / NVKM_GSP_PAGE_SIZE;
+		uint32_t slot_off = msg_off % NVKM_GSP_PAGE_SIZE;
+		uint32_t chunk = NVKM_GSP_PAGE_SIZE - slot_off;
+
+		while (slot_idx >= NVKM_GSP_MSGCOUNT)
+			slot_idx -= NVKM_GSP_MSGCOUNT;
+		if (chunk > copy_len - copied)
+			chunk = copy_len - copied;
+		memcpy(buf + copied,
+		    msgq + NVKM_GSP_PAGE_SIZE + slot_idx * NVKM_GSP_PAGE_SIZE +
+		    slot_off, chunk);
+		copied += chunk;
+		msg_off += chunk;
+	}
 
 	/* Per nouveau r535_gsp_msgq_recv_one_elem: page count comes from
 	 * DIV_ROUND_UP(GSP_MSG_HDR_SIZE + rpc->length, GSP_PAGE_SIZE), NOT
@@ -476,8 +510,8 @@ nvkm_gsp_rpc_get(struct nvkm_softc *sc, uint32_t fn, uint32_t argc)
 
 	if (argc > NVKM_GSP_MAX_PAYLOAD) {
 		nvkm_debugf(sc->dev,
-		    "rpc_get: fn=%u argc=%u too large (no continuation yet)\n",
-		    fn, argc);
+		    "rpc_get: fn=%u argc=%u exceeds max payload %u\n",
+		    fn, argc, NVKM_GSP_MAX_PAYLOAD);
 		return (NULL);
 	}
 	alloc_sz = roundup(NVKM_GSP_HDR_TOTAL + argc, NVKM_GSP_PAGE_SIZE);
