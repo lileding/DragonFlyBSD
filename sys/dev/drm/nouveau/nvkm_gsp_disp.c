@@ -839,7 +839,7 @@ disp_ramht_insert(struct nvkm_softc *sc, uint32_t handle, uint32_t chn,
     uint32_t descr_off)
 {
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
-	uint32_t client = disp->client.object.handle & 0x3fffu;
+	uint32_t client = 0x00000040u;	/* nouveau gv100: fixed 0x40, NOT GSP client handle */
 	uint32_t chunk = descr_off >> 5;
 	uint32_t context = (client & 0x3fffu) | ((chunk & 0x7ffu) << 14) |
 	    ((chn & 0x7fu) << 25);
@@ -871,7 +871,7 @@ disp_ramht_insert_nouveau(struct nvkm_softc *sc, uint32_t handle, uint32_t chn,
     uint32_t descr_off, uint32_t *out_context)
 {
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
-	uint32_t client = disp->client.object.handle & 0x3fffu;
+	uint32_t client = 0x00000040u;	/* nouveau gv100: fixed 0x40, NOT GSP client handle */
 	uint32_t context = client | (descr_off << 9) | ((chn & 0x7fu) << 25);
 	uint32_t co, ho;
 
@@ -1146,7 +1146,7 @@ nvkm_gsp_disp_instmem_init(struct nvkm_softc *sc)
 	 * read back, bit-verify, then revert to a clean empty table. */
 	{
 		const uint32_t h = 0xfeed0000u, chn = 0u, off = DISP_DESCR_BASE;
-		uint32_t client = disp->client.object.handle & 0x3fffu;
+		uint32_t client = 0x00000040u;	/* nouveau gv100: fixed 0x40, NOT GSP client handle */
 		uint32_t chunk = off >> 5;
 		uint32_t want_ctx = (client & 0x3fffu) |
 		    ((chunk & 0x7ffu) << 14) | ((chn & 0x7fu) << 25);
@@ -2620,8 +2620,8 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	pb->hclass = TU102_DISP_CORE_CHANNEL_DMA;
 	pb->channelInstance = 0;
 	pb->valid = 1;
-	pb->pbTargetAperture = PBTARGET_PHYS_PCI_COHERENT;
-	pb->subDeviceId = DISP_SUBDEVICE_ID0;
+	pb->pbTargetAperture = 0u;		/* nouveau leaves 0 */
+	pb->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev, "gsp_disp: core set_pushbuf err=%d\n", err);
@@ -2637,7 +2637,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	memset(ca, 0, sizeof(*ca));
 	ca->channelInstance = 0;
 	ca->offset = 0;
-	ca->subDeviceId = DISP_SUBDEVICE_ID0;
+	ca->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_alloc_wr(&disp->core, ca);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2765,8 +2765,8 @@ nvkm_gsp_disp_window_channel_init(struct nvkm_softc *sc, uint32_t win)
 	pb->hclass = TU102_DISP_WINDOW_CHANNEL_DMA;
 	pb->channelInstance = win;
 	pb->valid = 1;
-	pb->pbTargetAperture = PBTARGET_PHYS_PCI_COHERENT;
-	pb->subDeviceId = DISP_SUBDEVICE_ID0;
+	pb->pbTargetAperture = 0u;		/* nouveau leaves 0 */
+	pb->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2783,7 +2783,7 @@ nvkm_gsp_disp_window_channel_init(struct nvkm_softc *sc, uint32_t win)
 	memset(ca, 0, sizeof(*ca));
 	ca->channelInstance = win;
 	ca->offset = 0;
-	ca->subDeviceId = DISP_SUBDEVICE_ID0;
+	ca->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_alloc_wr(&wndw->object, ca);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2861,8 +2861,8 @@ nvkm_gsp_disp_wimm_channel_init(struct nvkm_softc *sc, uint32_t win)
 	pb->hclass = TU102_DISP_WINDOW_IMM_CHANNEL_DMA;
 	pb->channelInstance = win;
 	pb->valid = 1;
-	pb->pbTargetAperture = PBTARGET_PHYS_PCI_COHERENT;
-	pb->subDeviceId = DISP_SUBDEVICE_ID0;
+	pb->pbTargetAperture = 0u;		/* nouveau leaves 0 */
+	pb->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2883,7 +2883,7 @@ nvkm_gsp_disp_wimm_channel_init(struct nvkm_softc *sc, uint32_t win)
 	memset(ca, 0, sizeof(*ca));
 	ca->channelInstance = win;
 	ca->offset = 0;
-	ca->subDeviceId = DISP_SUBDEVICE_ID0;
+	ca->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_alloc_wr(&wimm->object, ca);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2935,7 +2935,7 @@ nvkm_gsp_disp_cursor_channel_init(struct nvkm_softc *sc, uint32_t head)
 	pb->hclass = TU102_DISP_CURSOR;
 	pb->channelInstance = head;
 	pb->valid = 0;
-	pb->subDeviceId = DISP_SUBDEVICE_ID0;
+	pb->subDeviceId = 0u;		/* nouveau leaves 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -3761,25 +3761,8 @@ static int
 disp_nouveau_display_change(struct nvkm_softc *sc, uint32_t display_id,
     uint32_t enable, const char *tag)
 {
-	struct nvkm_gsp_disp *disp = sc->gsp_disp;
-	struct disp_display_change_params *dc;
-	int err;
-
-	dc = nvkm_gsp_rm_ctrl_get(&disp->objcom,
-	    NV0073_CTRL_CMD_SPECIFIC_DISPLAY_CHANGE, sizeof(*dc));
-	if (dc == NULL)
-		return (ENOMEM);
-	memset(dc, 0, sizeof(*dc));
-	dc->subDeviceInstance = 0;
-	dc->newDevices = display_id;
-	dc->properties = 0;
-	dc->enable = enable;
-	err = nvkm_gsp_rm_ctrl_wr(&disp->objcom, dc);
-	nvkm_infof(sc->dev,
-	    "gsp_disp: nouveau display_change %s display=0x%x enable=%u "
-	    "err=%d\n",
-	    tag, display_id, enable, err);
-	return (err);
+	(void)sc; (void)display_id; (void)enable; (void)tag;
+	return (0);	/* nouveau never issues DISPLAY_CHANGE; skip */
 }
 
 static int

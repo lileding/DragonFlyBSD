@@ -553,7 +553,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 			0x00031c80u, 0, 0, 0, 0x0c000000u, 0, 0, 0,
 		};
 
-		nvkm_debugf(sc->dev,
+		nvkm_infof(sc->dev,
 		    "gsp_rm: INTR_GET_KERNEL_TABLE tableLen=%u\n",
 		    r->tableLen);
 		for (uint32_t i = 0; i < r->tableLen &&
@@ -563,7 +563,7 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 				r->table[i].vectorNonStall,
 			};
 
-			nvkm_debugf(sc->dev,
+			nvkm_infof(sc->dev,
 			    "  [%u] engineIdx=%3u mask=0x%08x stall=%u nonStall=%u\n",
 			    i, r->table[i].engineIdx, r->table[i].pmcIntrMask,
 			    r->table[i].vectorStall, r->table[i].vectorNonStall);
