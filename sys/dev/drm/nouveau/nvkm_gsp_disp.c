@@ -1016,7 +1016,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	int err;
 
 	/* (1) TU102_DISP display root (parent of all disp channels). */
-	handle = nvkm_gsp_client_child_handle(&disp->client, TU102_DISP << 16);
+	handle = TU102_DISP << 16;	/* r535: root handle = oclass<<16 (low=0) */
 	args = nvkm_gsp_rm_alloc_get(&disp->device.object, handle, TU102_DISP, 0,
 	    &disp->dispclass);
 	if (args == NULL)
@@ -1052,7 +1052,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	pb->hclass = TU102_DISP_CORE_CHANNEL_DMA;
 	pb->channelInstance = 0;
 	pb->valid = 1;
-	pb->subDeviceId = 1u;		/* BIT(0) */
+	pb->subDeviceId = 0u;		/* r535 leaves SDM 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev, "gsp_disp: core set_pushbuf err=%d\n", err);
@@ -1060,7 +1060,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	}
 
 	/* (4) Allocate the NVC57D core channel under the display root. */
-	handle = nvkm_gsp_client_child_handle(&disp->client, NVKM_RM_DISP_CORE);
+	handle = NVKM_RM_DISP_CORE;	/* r535: (oclass<<16)|inst, low=inst=0 */
 	ca = nvkm_gsp_rm_alloc_get(&disp->dispclass, handle,
 	    TU102_DISP_CORE_CHANNEL_DMA, sizeof(*ca), &disp->core);
 	if (ca == NULL)
@@ -1068,7 +1068,7 @@ nvkm_gsp_disp_core_init(struct nvkm_softc *sc)
 	memset(ca, 0, sizeof(*ca));
 	ca->channelInstance = 0;
 	ca->offset = 0;
-	ca->subDeviceId = 1u;		/* BIT(0) */
+	ca->subDeviceId = 0u;		/* r535 leaves SDM 0 */
 	err = nvkm_gsp_rm_alloc_wr(&disp->core, ca);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -1164,7 +1164,7 @@ nvkm_gsp_disp_window_init(struct nvkm_softc *sc)
 	pb->hclass = TU102_DISP_WINDOW_CHANNEL_DMA;
 	pb->channelInstance = 0;
 	pb->valid = 1;
-	pb->subDeviceId = 1u;		/* BIT(0) */
+	pb->subDeviceId = 0u;		/* r535 leaves SDM 0 */
 	err = nvkm_gsp_rm_ctrl_wr(&tmp_subdev, pb);
 	if (err != 0) {
 		nvkm_infof(sc->dev, "gsp_disp: window set_pushbuf err=%d\n", err);
@@ -1172,7 +1172,7 @@ nvkm_gsp_disp_window_init(struct nvkm_softc *sc)
 	}
 
 	/* (3) Allocate the NVC57E window channel under the display root. */
-	handle = nvkm_gsp_client_child_handle(&disp->client, NVKM_RM_DISP_WINDOW);
+	handle = NVKM_RM_DISP_WINDOW;	/* r535: (oclass<<16)|inst, low=inst=0 */
 	ca = nvkm_gsp_rm_alloc_get(&disp->dispclass, handle,
 	    TU102_DISP_WINDOW_CHANNEL_DMA, sizeof(*ca), &disp->window);
 	if (ca == NULL)
@@ -1180,7 +1180,7 @@ nvkm_gsp_disp_window_init(struct nvkm_softc *sc)
 	memset(ca, 0, sizeof(*ca));
 	ca->channelInstance = 0;
 	ca->offset = 0;
-	ca->subDeviceId = 1u;		/* BIT(0) */
+	ca->subDeviceId = 0u;		/* r535 leaves SDM 0 */
 	err = nvkm_gsp_rm_alloc_wr(&disp->window, ca);
 	if (err != 0) {
 		nvkm_infof(sc->dev,
@@ -2094,6 +2094,25 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 			nvkm_gsp_rm_ctrl_done(&tmp_subdev, p);
 		}
 	}
+
+	/* (4b) DP_SET_MANUAL_DISPLAYPORT (0x731365): r535 issues this in oneinit
+	 * before reading heads -- tells GSP the driver drives DP/modeset
+	 * manually (vs GSP auto). params = { u32 subDeviceInstance; }. */
+	{
+		struct { uint32_t subDeviceInstance; } *dpm;
+
+		dpm = nvkm_gsp_rm_ctrl_get(&disp->objcom, 0x731365u, sizeof(*dpm));
+		if (dpm != NULL) {
+			dpm->subDeviceInstance = 0;
+			if (nvkm_gsp_rm_ctrl_wr(&disp->objcom, dpm) != 0)
+				nvkm_infof(sc->dev,
+				    "gsp_disp: DP_SET_MANUAL_DISPLAYPORT failed\n");
+			else
+				nvkm_infof(sc->dev,
+				    "gsp_disp: DP_SET_MANUAL_DISPLAYPORT ok\n");
+		}
+	}
+
 	nh = nvkm_gsp_rm_ctrl_get(&disp->objcom,
 	    NV0073_CTRL_CMD_SYSTEM_GET_NUM_HEADS, sizeof(*nh));
 	if (nh != NULL) {
