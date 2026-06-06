@@ -6,11 +6,9 @@
  * the attached display and its modes (drmModeGetConnector / modetest). detect()
  * and get_modes() proxy to the GSP display subsystem (connect-state + EDID).
  *
- * The full atomic pipeline (CRTC/plane/encoder + commit) lands in M3b/M4; for
- * M3a these are bare connectors using the standard DRM atomic helpers.
- *
- * dfly's DRM provides the entire KMS/atomic framework (~Linux 4.x); we only
- * implement the driver-specific connector hooks here.
+ * dfly's DRM provides the entire KMS/atomic framework (~Linux 4.x).  This
+ * file owns the DRM object model and validates the head/window atoms before
+ * nvkm_gsp_disp.c translates them into EVO methods.
  */
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
@@ -25,6 +23,7 @@
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_modeset_helper.h>	/* drm_helper_mode_fill_fb_struct */
 #include <drm/drm_plane_helper.h>
+#include <drm/drm_rect.h>
 
 #include <linux/slab.h>
 
@@ -109,15 +108,79 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 /* ===== plane (M3b skeleton: NVC57E window; EVO push lands in M4) ===== */
 
 static const uint32_t nvkm_plane_formats[] = {
+	DRM_FORMAT_C8,
+	DRM_FORMAT_YUYV,
+	DRM_FORMAT_UYVY,
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_RGB565,
+	DRM_FORMAT_XRGB1555,
+	DRM_FORMAT_ARGB1555,
+	DRM_FORMAT_XBGR2101010,
+	DRM_FORMAT_ABGR2101010,
+	DRM_FORMAT_XBGR8888,
+	DRM_FORMAT_ABGR8888,
+	DRM_FORMAT_XRGB2101010,
+	DRM_FORMAT_ARGB2101010,
+#ifdef DRM_FORMAT_XBGR16161616F
+	DRM_FORMAT_XBGR16161616F,
+#endif
+#ifdef DRM_FORMAT_ABGR16161616F
+	DRM_FORMAT_ABGR16161616F,
+#endif
 };
+
+static const uint64_t nvkm_plane_modifiers[] = {
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID,
+};
+
+static bool
+nvkm_plane_format_mod_supported(struct drm_plane *plane, uint32_t format,
+    uint64_t modifier)
+{
+	unsigned int i;
+
+	(void)plane;
+	if (modifier != DRM_FORMAT_MOD_LINEAR &&
+	    modifier != DRM_FORMAT_MOD_INVALID)
+		return (false);
+	for (i = 0; i < nitems(nvkm_plane_formats); i++) {
+		if (nvkm_plane_formats[i] == format)
+			return (true);
+	}
+	return (false);
+}
 
 static int
 nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 {
-	(void)plane; (void)state;
-	return (0);			/* M4: validate against window caps */
+	struct drm_crtc_state *crtc_state;
+	struct drm_framebuffer *fb;
+	int ret;
+
+	if (state->crtc == NULL)
+		return (state->fb == NULL ? 0 : -EINVAL);
+
+	crtc_state = drm_atomic_get_new_crtc_state(state->state, state->crtc);
+	if (crtc_state == NULL)
+		return (-EINVAL);
+
+	ret = drm_atomic_helper_check_plane_state(state, crtc_state,
+	    DRM_PLANE_HELPER_NO_SCALING, DRM_PLANE_HELPER_NO_SCALING,
+	    true, false);
+	if (ret != 0 || !state->visible)
+		return (ret);
+
+	fb = state->fb;
+	if (fb == NULL || fb->format == NULL)
+		return (-EINVAL);
+	if (!nvkm_plane_format_mod_supported(plane, fb->format->format,
+	    fb->modifier))
+		return (-EINVAL);
+	if ((fb->pitches[0] & 0x3fu) != 0)
+		return (-EINVAL);
+	return (0);
 }
 
 static void
@@ -146,6 +209,7 @@ static const struct drm_plane_funcs nvkm_plane_funcs = {
 	.reset			= drm_atomic_helper_plane_reset,
 	.atomic_duplicate_state	= drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
+	.format_mod_supported	= nvkm_plane_format_mod_supported,
 };
 
 /* ===== crtc (NVC57D HEAD): real atomic modeset ===== */
@@ -165,7 +229,14 @@ static void
 nvkm_kms_mode_to_disp(const struct drm_display_mode *mode,
     struct nvkm_disp_mode *m)
 {
+	struct drm_display_mode adjusted;
 	uint32_t ha, hse, hbe, hbs, va, vse, vbe, vbs;
+	uint32_t blank2e, blank2s;
+
+	adjusted = *mode;
+	drm_mode_set_crtcinfo(&adjusted,
+	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
+	mode = &adjusted;
 
 	ha  = mode->crtc_htotal;
 	hse = mode->crtc_hsync_end - mode->crtc_hsync_start - 1u;
@@ -176,11 +247,22 @@ nvkm_kms_mode_to_disp(const struct drm_display_mode *mode,
 	vbe = mode->crtc_vblank_end - mode->crtc_vsync_start - 1u;
 	vbs = vbe + mode->crtc_vdisplay;
 
+	m->interlace = (mode->flags & DRM_MODE_FLAG_INTERLACE) != 0;
+	m->nhsync = (mode->flags & DRM_MODE_FLAG_NHSYNC) != 0;
+	m->nvsync = (mode->flags & DRM_MODE_FLAG_NVSYNC) != 0;
+	if (m->interlace) {
+		blank2e = va + vbe;
+		blank2s = blank2e + mode->crtc_vdisplay;
+		va = va * 2u + 1u;
+		m->blank2 = (blank2e << 16) | blank2s;
+	} else {
+		m->blank2 = 0x00000001u;
+	}
+
 	m->raster = ha | (va << 16);
 	m->sync   = hse | (vse << 16);
 	m->blanke = hbe | (vbe << 16);
 	m->blanks = hbs | (vbs << 16);
-	m->blank2 = 0x00000001u;			/* progressive */
 	m->clk    = (uint32_t)mode->crtc_clock * 1000u;	/* kHz -> Hz */
 	m->iw = m->ow = mode->crtc_hdisplay;
 	m->ih = m->oh = mode->crtc_vdisplay;
@@ -189,14 +271,37 @@ nvkm_kms_mode_to_disp(const struct drm_display_mode *mode,
 static int
 nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 {
-	(void)crtc; (void)state;
+	struct drm_display_mode *mode = &state->adjusted_mode;
+
+	(void)crtc;
+	if (!state->enable)
+		return (0);
+
+	drm_mode_set_crtcinfo(mode,
+	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
+
+	if (mode->crtc_clock <= 0 ||
+	    mode->crtc_clock > (int)(0x7fffffffu / 1000u))
+		return (-EINVAL);
+	if (mode->crtc_htotal == 0 || mode->crtc_vtotal == 0 ||
+	    mode->crtc_hdisplay == 0 || mode->crtc_vdisplay == 0)
+		return (-EINVAL);
+	if (mode->crtc_hsync_end <= mode->crtc_hsync_start ||
+	    mode->crtc_vsync_end <= mode->crtc_vsync_start)
+		return (-EINVAL);
+	if (mode->crtc_hblank_end <= mode->crtc_hsync_start ||
+	    mode->crtc_vblank_end <= mode->crtc_vsync_start)
+		return (-EINVAL);
+	if (mode->crtc_htotal > 0xffff || mode->crtc_vtotal > 0xffff ||
+	    mode->crtc_hdisplay > 0xffff || mode->crtc_vdisplay > 0xffff)
+		return (-EINVAL);
 	return (0);
 }
 
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-	(void)crtc; (void)old_state;	/* UPDATE issued inside head/window_set */
+	(void)crtc; (void)old_state;	/* UPDATE is sequenced in atomic_enable. */
 }
 
 static void
@@ -206,9 +311,13 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct nvkm_softc *sc = nc->sc;
 	struct nvkm_gsp_disp *disp = sc->gsp_disp;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
+	struct drm_plane_state *pstate = crtc->primary->state;
+	struct drm_framebuffer *fb = pstate != NULL ? pstate->fb : NULL;
 	struct drm_connector *conn;
 	struct nvkm_disp_mode m;
-	uint32_t display_id = 0, orid = 0, proto = 0;
+	struct nvkm_disp_scanout scanout;
+	uint32_t display_id = 0;
+	int err;
 
 	(void)old_state;
 	if (disp == NULL)
@@ -227,24 +336,43 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		return;
 	}
 
+	if (fb == NULL || fb->format == NULL) {
+		nvkm_infof(sc->dev,
+		    "drm: crtc enable head=%u: no primary framebuffer\n",
+		    nc->head);
+		return;
+	}
+
+	memset(&scanout, 0, sizeof(scanout));
+	scanout.modifier = fb->modifier;
+	scanout.format = fb->format->format;
+	scanout.pitch = fb->pitches[0];
+	scanout.width = fb->width;
+	scanout.height = fb->height;
+	if (pstate->dst.x1 < 0 || pstate->dst.y1 < 0 ||
+	    drm_rect_width(&pstate->dst) <= 0 ||
+	    drm_rect_height(&pstate->dst) <= 0) {
+		nvkm_infof(sc->dev,
+		    "drm: crtc enable head=%u: primary plane not visible\n",
+		    nc->head);
+		return;
+	}
+	scanout.src_x = pstate->src.x1 >> 16;
+	scanout.src_y = pstate->src.y1 >> 16;
+	scanout.src_w = drm_rect_width(&pstate->src) >> 16;
+	scanout.src_h = drm_rect_height(&pstate->src) >> 16;
+	scanout.crtc_x = pstate->dst.x1;
+	scanout.crtc_y = pstate->dst.y1;
+	scanout.crtc_w = drm_rect_width(&pstate->dst);
+	scanout.crtc_h = drm_rect_height(&pstate->dst);
+
 	nvkm_kms_mode_to_disp(mode, &m);
-	(void)nvkm_gsp_disp_modeset_setup(sc);
-	(void)nvkm_gsp_disp_sor_enable(sc, display_id, &orid, &proto);
-	/* Stage 1: commit window->head ownership in a standalone, NON
-	 * window-interlocked core UPDATE (or the supervisor hits HW error
-	 * checks and refuses the modeset). */
-	(void)nvkm_gsp_disp_assign_windows(sc);
-	/* Stage 2: two-stage interlock -- the window arms first (interlocked
-	 * to core), then the core modeset UPDATE arrives and the supervisor
-	 * latches both atomically (promotes SOR arm->live + flips notifier). */
-	(void)nvkm_gsp_disp_window_set(sc, nc->win, nc->head, disp->fb_paddr,
-	    m.iw * 4u, m.iw, m.ih);
-	(void)nvkm_gsp_disp_head_set(sc, nc->head, nc->win, orid, proto,
-	    display_id, &m);
+	err = nvkm_gsp_disp_nouveau_commit_tail(sc, nc->head, nc->win,
+	    display_id, &m, &scanout);
 
 	nvkm_infof(sc->dev,
-	    "drm: crtc enable head=%u %ux%u display=0x%x or=%u proto=0x%x\n",
-	    nc->head, m.iw, m.ih, display_id, orid, proto);
+	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x err=%d\n",
+	    nc->head, nc->win, m.iw, m.ih, display_id, err);
 }
 
 static void
@@ -334,7 +462,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		crtc = &ncrtc->base;
 		if (drm_universal_plane_init(dev, plane, 1u << h,
 		    &nvkm_plane_funcs, nvkm_plane_formats,
-		    nitems(nvkm_plane_formats), NULL,
+		    nitems(nvkm_plane_formats), nvkm_plane_modifiers,
 		    DRM_PLANE_TYPE_PRIMARY, NULL) != 0) {
 			kfree(plane);
 			kfree(ncrtc);

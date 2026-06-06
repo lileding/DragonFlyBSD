@@ -145,6 +145,8 @@ int	 nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	    struct nvkm_gsp_device *device);
 int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 
+#define NVKM_GSP_DISP_WINDOW_NR	8
+
 /* Display subsystem (Phase 2): NV04_DISPLAY_COMMON + connector/EDID.
  * Allocated by nvkm_gsp_disp_init at attach; sc->gsp_disp points here. */
 struct nvkm_gsp_disp {
@@ -157,11 +159,15 @@ struct nvkm_gsp_disp {
 	uint32_t		head_mask;
 	uint32_t		window_mask;
 	uint32_t		supported_mask;	/* GET_SUPPORTED displayId mask */
-	/* Hotplug event (M1b): GSP POST_EVENT -> ithread matches hpd_event_handle
-	 * -> enqueues hpd_task on a background lwkt, which re-probes + logs EDID. */
-	struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
-	uint32_t		hpd_event_handle;
-	struct task		hpd_task;
+		/* Display events (r535 oneinit): GSP POST_EVENT -> ithread matches
+		 * hpd_event_handle -> enqueues hpd_task on a background lwkt, which
+		 * re-probes + logs EDID. DP IRQ is registered as a second event object
+		 * to mirror nouveau, but currently only logged by the generic handler. */
+		struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
+		struct nvkm_gsp_object	dp_irq_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
+		uint32_t		hpd_event_handle;
+		uint32_t		dp_irq_event_handle;
+		struct task		hpd_task;
 	/* Core display channel (M2a): TU102_DISP root + NVC57D core channel. */
 	struct nvkm_gsp_object	dispclass;	/* TU102_DISP (0xc570) root */
 	struct nvkm_gsp_object	core;		/* NVC57D core channel DMAC */
@@ -169,23 +175,56 @@ struct nvkm_gsp_disp {
 	uint64_t		core_push_paddr;
 	uint32_t		core_push_size;
 	uint32_t		core_put_reg;	/* BAR0 MMIO PUT (0x680000); GET at +4 */
+	uint32_t		core_put_cur;	/* nouveau dmac->put software cursor */
+	int			core_assign_windows;
 	/* instmem (M4b): RAMHT + ctxdma descriptors live in the display RAMIN
 	 * (inst_paddr). The display HW reads them physically; BAR1 is only our
 	 * CPU write window. RAMHT occupies RAMIN [0, 0x1000); ctxdma descriptors
 	 * are bump-allocated (32-byte slots) from descr_next. */
 	uint64_t		instmem_gva[4];	/* BAR1 GVAs of the first 4 RAMIN pages */
 	uint32_t		descr_next;	/* next free ctxdma RAMIN byte offset */
-	/* Window display channel (M4c): NVC57E, instance 0 (drives head 0).
-	 * chid.user = 1 + instance; PUT/GET at BAR0 0x690000 + instance*0x1000. */
-	struct nvkm_gsp_object	window;		/* NVC57E window channel DMAC */
-	void			*window_push_kva; /* window pushbuffer (sysmem) */
-	uint64_t		window_push_paddr;
-	uint32_t		window_push_size;
-	uint32_t		window_put_reg;	/* BAR0 MMIO PUT (0x690000); GET at +4 */
+	/* Window display channels (M4c): NVC57E instance N.  r535_dmac_init()
+	 * creates one DMA channel per window; chid.user = 1 + N and PUT/GET are
+	 * at BAR0 0x690000 + N*0x1000. */
+	struct nvkm_gsp_disp_window {
+		struct nvkm_gsp_object	object;		/* NVC57E window channel */
+		void			*push_kva;	/* coherent sysmem PB */
+		uint64_t		push_paddr;
+		uint32_t		push_size;
+		uint32_t		put_reg;
+		uint32_t		put_cur;
+		uint32_t		id;
+		uint32_t		heads;
+		uint32_t		interlock_data;
+		uint32_t		interlock_wimm;
+		uint32_t		ntfy;
+		uint32_t		armed_ntfy;
+		uint32_t		sema;
+		uint32_t		data;
+		int			ramht_ready;
+		int			ready;
+	} window[NVKM_GSP_DISP_WINDOW_NR];
+	struct nvkm_gsp_disp_wimm {
+		struct nvkm_gsp_object	object;		/* NVC57B window-immediate channel */
+		void			*push_kva;
+		uint64_t		push_paddr;
+		uint32_t		push_size;
+		uint32_t		put_reg;
+		uint32_t		put_cur;
+		uint32_t		id;
+		int			ready;
+	} wimm[NVKM_GSP_DISP_WINDOW_NR];
+	struct nvkm_gsp_disp_curs {
+		struct nvkm_gsp_object	object;		/* NVC57A cursor PIO channel */
+		uint32_t		put_reg;
+		uint32_t		id;
+		int			ready;
+	} curs[NVKM_GSP_DISP_WINDOW_NR];
 	/* Core completion notifier (M4d-1): VRAM page + ctxdma the core channel
 	 * signals on UPDATE; host polls STATUS via BAR1. */
 	uint64_t		notifier_paddr;	/* notifier VRAM page (physical) */
 	uint64_t		notifier_gva;	/* BAR1 GVA of the notifier page */
+	int			ramht_ready;	/* RAMHT ctxdma handles are valid */
 	uint64_t		fb_paddr;	/* M4d test framebuffer (VRAM physical) */
 	uint64_t		olut_paddr;	/* M4q identity output LUT (VRAM physical) */
 	uint64_t		ilut_paddr;	/* M4t identity window input LUT (VRAM physical) */
@@ -198,6 +237,7 @@ struct nvkm_gsp_disp {
 	struct nvkm_gsp_object	iso_dma;	/* fb ctxdma object */
 	struct nvkm_gsp_object	ntfy_mem;	/* notifier memory object */
 	struct nvkm_gsp_object	ntfy_dma;	/* notifier ctxdma object */
+	struct nvkm_gsp_object	caps;		/* GV100_DISP_CAPS host BAR0 map */
 };
 
 /* Bring up the GSP display subsystem + read EDID of connected outputs.
@@ -211,10 +251,9 @@ int	 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id);
 int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 	     uint8_t *out, uint32_t *outlen);
 
-/* ===== Atomic KMS modeset helpers (M9) =====
- * The drm atomic hooks in nvkm_drm_kms.c drive these instead of the old
- * attach-time modeset_test probe. Each carves out a verified EVO block from
- * the former modeset_test. */
+/* ===== nouveau_disp.txt display state machine =====
+ * The drm atomic hooks in nvkm_drm_kms.c call a single translated commit-tail
+ * entry point instead of individually sequencing display helper blocks. */
 
 /* Per-head HW timing, computed from a drm_display_mode by the crtc atomic
  * hook (nouveau headc57d convention), packed as the EVO methods expect. */
@@ -227,31 +266,32 @@ struct nvkm_disp_mode {
 	uint32_t clk;		/* pixel clock, Hz */
 	uint32_t iw, ih;	/* viewport-in  active w,h */
 	uint32_t ow, oh;	/* viewport-out active w,h */
+	uint32_t interlace;
+	uint32_t nhsync;
+	uint32_t nvsync;
 };
 
-/* One-time disp resource setup (RAMHT ctxdma binds + notifier + fb + OLUT).
- * Idempotent; the first crtc enable calls it. Returns 0 / errno. */
-int	 nvkm_gsp_disp_modeset_setup(struct nvkm_softc *sc);
+/* Per-window scanout state from the DRM plane atom.  The display engine code
+ * converts this to NVC57E SET_IMAGE/POINT/COMPOSITION methods. */
+struct nvkm_disp_scanout {
+	uint64_t paddr;		/* VRAM physical address; 0 => internal test fb */
+	uint64_t modifier;	/* DRM_FORMAT_MOD_* */
+	uint32_t format;	/* DRM fourcc */
+	uint32_t pitch;		/* bytes */
+	uint32_t width, height;	/* framebuffer size */
+	uint32_t src_x, src_y;	/* pixels */
+	uint32_t src_w, src_h;	/* pixels */
+	uint32_t crtc_x, crtc_y;	/* pixels */
+	uint32_t crtc_w, crtc_h;	/* pixels */
+	uint32_t async_flip;
+};
 
-/* Acquire/route a SOR for a displayId and enable its HDMI encoder. Returns the
- * assigned OR index in *out_orid and protocol in *out_proto. */
-int	 nvkm_gsp_disp_sor_enable(struct nvkm_softc *sc, uint32_t display_id,
-	     uint32_t *out_orid, uint32_t *out_proto);
-
-/* Commit window->head ownership for all windows in a standalone, NOT
- * window-interlocked core UPDATE (nouveau requires this before modeset). */
-int	 nvkm_gsp_disp_assign_windows(struct nvkm_softc *sc);
-
-/* Program one head's full timing (NVC57D) + SOR route + OLUT + window owner,
- * commit a notifier UPDATE and wait for the core notifier FINISHED. */
-int	 nvkm_gsp_disp_head_set(struct nvkm_softc *sc, uint32_t head,
-	     uint32_t win, uint32_t orid, uint32_t proto, uint32_t display_id,
-	     const struct nvkm_disp_mode *m);
-
-/* Push one window's scanout image (NVC57E) over fb_paddr + a window UPDATE. */
-int	 nvkm_gsp_disp_window_set(struct nvkm_softc *sc, uint32_t win,
-	     uint32_t head, uint64_t fb_paddr, uint32_t pitch,
-	     uint32_t w, uint32_t h);
+/* Driver-internal first-light state machine translated from nouveau_disp.txt's
+ * nv50_disp_atomic_commit_tail active-enable path. */
+int	 nvkm_gsp_disp_nouveau_commit_tail(struct nvkm_softc *sc,
+	     uint32_t head, uint32_t win, uint32_t display_id,
+	     const struct nvkm_disp_mode *m,
+	     const struct nvkm_disp_scanout *scanout);
 
 /* Dump host-side disp state after a modeset (diagnostic). */
 void	 nvkm_gsp_disp_dump_state(struct nvkm_softc *sc);

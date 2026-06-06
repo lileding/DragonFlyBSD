@@ -254,6 +254,19 @@ nvkm_gsp_evt_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		return (0);
 	}
 
+	if (sc->gsp_disp != NULL && h_event != 0 &&
+	    h_event == sc->gsp_disp->dp_irq_event_handle) {
+		uint32_t display_id = 0;
+
+		if (event_data_size >= sizeof(display_id))
+			display_id = *(const uint32_t *)(const void *)(p + 32);
+		nvkm_debugf(sc->dev,
+		    "gsp_event: DP_IRQ displayId=0x%08x notify=%u "
+		    "status=0x%08x dataSize=%u\n",
+		    display_id, notify_index, status, event_data_size);
+		return (0);
+	}
+
 	/*
 	 * This is the GSP-only event handoff point.  Future channel completion
 	 * support should look up hClient/hEvent here and signal completed
