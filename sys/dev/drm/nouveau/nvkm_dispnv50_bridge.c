@@ -483,6 +483,19 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x "
 	    "stat=0x%08x idle=%u attempts=%u\n",
 	    label, cur, user_put, ctrl, stat, idle, attempts);
+
+	if (!idle && (dmac->dfly_oclass & 0xff) == 0x7e) {
+		u32 chid = 1 + dmac->dfly_inst;
+		u32 err = 0x6101f0 + chid * 12;
+		u32 err_stat = nvkm_rd32(sc, err + 0x00);
+		u32 err_data = nvkm_rd32(sc, err + 0x04);
+		u32 err_code = nvkm_rd32(sc, err + 0x08);
+
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 %s error chid=%u stat=0x%08x data=0x%08x "
+		    "code=0x%08x\n",
+		    label, chid, err_stat, err_data, err_code);
+	}
 }
 
 static void
