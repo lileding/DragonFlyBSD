@@ -112,7 +112,14 @@ r535_disp_chan_set_pushbuf(struct nvkm_disp *disp, s32 oclass, int inst, struct 
 	ctrl->hclass = oclass;
 	ctrl->channelInstance = inst;
 	ctrl->valid = ((oclass & 0xff) != 0x7a) ? 1 : 0;
+#ifndef NVKM_DFLY_GSP_DISPLAY_ONLY
 	ctrl->channelPBSize = PB_SIZE_4KB;
+#else
+	/*
+	 * Linux v7.0 r570 display RM set_pushbuf does not set channelPBSize.
+	 * Keep the first-light GSP path on the 570 ABI shape.
+	 */
+#endif
 	ctrl->subDeviceId = BIT(0);
 
 	return nvkm_gsp_rm_ctrl_wr(&gsp->internal.device.subdevice, ctrl);
