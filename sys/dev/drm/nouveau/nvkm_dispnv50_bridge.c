@@ -22,6 +22,7 @@
 #include <engine/disp/outp.h>
 #include <engine/disp/ior.h>
 #include <nouveau_bo.h>
+#include <nvif/cl0002.h>
 #include <nvif/class.h>
 #include <nvif/if0014.h>
 #include <nvhw/class/clc37d.h>
@@ -45,6 +46,7 @@ struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
 	struct nouveau_bo sync_bo;
+	struct nvkm_memory *sync_mem;
 	struct nv50_head head[4];
 	struct nv50_wndw *wndw[8];
 	struct nvkm_memory *scanout;
@@ -120,6 +122,82 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 	}
 
 	nvkm_gsp_bar1_flush(sc);
+	return 0;
+}
+
+static void
+nvkm_dispnv50_ctxdma_drop(struct nvkm_gsp_object **pobject)
+{
+	if (pobject == NULL || *pobject == NULL)
+		return;
+
+	(void)nvkm_gsp_rm_free(*pobject);
+	kfree(*pobject);
+	*pobject = NULL;
+}
+
+static int
+nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, const char *name,
+    u32 handle, u64 start, u64 limit, struct nvif_object *object,
+    struct nvkm_gsp_object **pobject)
+{
+	struct nvkm_gsp_object *rm_object;
+	struct nv_dma_v0 *args;
+	int ret;
+
+	if (dmac == NULL || dmac->dfly_object == NULL || object == NULL ||
+	    pobject == NULL || limit < start)
+		return -EINVAL;
+
+	rm_object = kzalloc(sizeof(*rm_object), GFP_KERNEL);
+	if (rm_object == NULL)
+		return -ENOMEM;
+
+	args = nvkm_gsp_rm_alloc_get(dmac->dfly_object, handle,
+	    NV_DMA_IN_MEMORY, sizeof(*args), rm_object);
+	if (args == NULL) {
+		kfree(rm_object);
+		return -ENOMEM;
+	}
+
+	args->version = 0;
+	args->target = NV_DMA_V0_TARGET_VRAM;
+	args->access = NV_DMA_V0_ACCESS_RDWR;
+	args->start = start;
+	args->limit = limit;
+
+	ret = nvkm_gsp_rm_alloc_wr(rm_object, args);
+	if (ret != 0) {
+		kfree(rm_object);
+		return ret;
+	}
+
+	object->name = name;
+	object->handle = handle;
+	object->oclass = NV_DMA_IN_MEMORY;
+	object->priv = rm_object;
+	*pobject = rm_object;
+	return 0;
+}
+
+static int
+nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	int ret;
+
+	if (state->sync_mem != NULL)
+		return 0;
+
+	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM, 0x1000,
+	    0x1000, false, &state->sync_mem);
+	if (ret != 0)
+		return ret;
+
+	state->sync_bo.offset = nvkm_memory_addr(state->sync_mem);
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 sync buffer staged vram=0x%llx\n",
+	    (unsigned long long)state->sync_bo.offset);
 	return 0;
 }
 
@@ -216,8 +294,6 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	u32 user;
 	int ret;
 
-	(void)syncbuf;
-
 	if (drm == NULL || drm->dev == NULL || oclass == NULL || dmac == NULL)
 		return -EINVAL;
 
@@ -263,6 +339,30 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	if (ret)
 		goto fail;
 
+	if (syncbuf >= 0) {
+		u64 vram_limit;
+
+		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsSyncCtxDma",
+		    NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
+		    (u64)syncbuf + 0x0fff, &dmac->sync,
+		    &dmac->dfly_sync_object);
+		if (ret)
+			goto fail;
+
+		if (sc->fb_usable_size == 0 ||
+		    sc->fb_usable_base + sc->fb_usable_size <= sc->fb_usable_base) {
+			ret = -ENODEV;
+			goto fail;
+		}
+
+		vram_limit = sc->fb_usable_base + sc->fb_usable_size - 1;
+		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsVramCtxDma",
+		    NV50_DISP_HANDLE_VRAM, 0, vram_limit, &dmac->vram,
+		    &dmac->dfly_vram_object);
+		if (ret)
+			goto fail;
+	}
+
 	dmac->push.wait = nvkm_dispnv50_dmac_wait;
 	dmac->push.kick = nvkm_dispnv50_dmac_kick;
 	dmac->push.mem.object.map.ptr = dmac->dfly_shadow;
@@ -272,16 +372,18 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	dmac->push.cur = dmac->push.bgn;
 	dmac->push.end = dmac->push.bgn;
 	dmac->max = NVKM_DISPNV50_PUSH_DWORDS - 1;
-	dmac->sync.handle = 0;
-	dmac->vram.handle = NV50_DISP_HANDLE_VRAM;
 
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 dmac class=0x%x inst=%d push=0x%llx user=0x%x\n",
+	    "drm: dispnv50 dmac class=0x%x inst=%d push=0x%llx user=0x%x "
+	    "sync=0x%x vram=0x%x\n",
 	    oclass[0], inst,
-	    (unsigned long long)nvkm_memory_addr(dmac->dfly_push_mem), user);
+	    (unsigned long long)nvkm_memory_addr(dmac->dfly_push_mem), user,
+	    dmac->sync.handle, dmac->vram.handle);
 	return 0;
 
 fail:
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_vram_object);
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_sync_object);
 	nvkm_memory_unref(&dmac->dfly_push_mem);
 	kfree(dmac->dfly_object);
 	dmac->dfly_object = NULL;
@@ -375,6 +477,10 @@ nvkm_dispnv50_core_init(struct nvkm_softc *sc)
 		state->disp.sync = &state->sync_bo;
 		sc->dispnv50 = state;
 	}
+
+	ret = nvkm_dispnv50_sync_ensure(sc, state);
+	if (ret)
+		return ret;
 
 	drm.dev = sc->drm_dev;
 	ret = corec57d_new(&drm, TU102_DISP_CORE_CHANNEL_DMA,

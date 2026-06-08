@@ -49,6 +49,8 @@ struct nv50_dmac {
 	struct nvkm_softc *dfly_sc;
 	struct nvkm_memory *dfly_push_mem;
 	struct nvkm_gsp_object *dfly_object;
+	struct nvkm_gsp_object *dfly_sync_object;
+	struct nvkm_gsp_object *dfly_vram_object;
 	u32 *dfly_shadow;
 	u32 dfly_user;
 #endif
