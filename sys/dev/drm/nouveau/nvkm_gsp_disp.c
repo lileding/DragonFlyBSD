@@ -2111,7 +2111,16 @@ nvkm_gsp_disp_dmac_bind(struct nvkm_softc *sc, uint32_t oclass,
 		return -EINVAL;
 	}
 
-	return r535_dmac_bind(&chan, object, handle);
+	ret = r535_dmac_bind(&chan, object, handle);
+	if (ret > 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 dmac bind class=0x%x inst=%d chid=%d "
+		    "handle=0x%x client=0x%x cookie=%d\n",
+		    oclass, inst, chan.chid.user, handle,
+		    chan.disp->rm.client.object.handle, ret);
+		nvkm_gsp_bar1_flush(sc);
+	}
+	return ret;
 }
 
 void
