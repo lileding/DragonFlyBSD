@@ -50,6 +50,7 @@ struct nvkm_dispnv50_state {
 	struct nv50_head head[4];
 	struct nv50_wndw *wndw[8];
 	struct nvkm_memory *scanout;
+	u64 scanout_offset;
 	u32 scanout_width;
 	u32 scanout_height;
 	u32 scanout_pitch;
@@ -68,6 +69,31 @@ nvkm_dispnv50_neg_errno(int err)
 	if (err > 0)
 		return -err;
 	return err;
+}
+
+static int
+nvkm_dispnv50_vram_offset(struct nvkm_softc *sc, u64 paddr, u64 size,
+    u64 *offset)
+{
+	u64 base;
+	u64 off;
+
+	if (sc == NULL || offset == NULL || size == 0)
+		return -EINVAL;
+	if (sc->fb_usable_size == 0 ||
+	    sc->fb_usable_base + sc->fb_usable_size <= sc->fb_usable_base)
+		return -ENODEV;
+
+	base = sc->fb_usable_base;
+	if (paddr < base)
+		return -EINVAL;
+
+	off = paddr - base;
+	if (off >= sc->fb_usable_size || size > sc->fb_usable_size - off)
+		return -EINVAL;
+
+	*offset = off;
+	return 0;
 }
 
 static u32
@@ -194,9 +220,16 @@ nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
 	if (ret != 0)
 		return ret;
 
-	state->sync_bo.offset = nvkm_memory_addr(state->sync_mem);
+	ret = nvkm_dispnv50_vram_offset(sc, nvkm_memory_addr(state->sync_mem),
+	    nvkm_memory_size(state->sync_mem), &state->sync_bo.offset);
+	if (ret != 0) {
+		nvkm_memory_unref(&state->sync_mem);
+		return ret;
+	}
+
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 sync buffer staged vram=0x%llx\n",
+	    "drm: dispnv50 sync buffer staged vram=0x%llx offset=0x%llx\n",
+	    (unsigned long long)nvkm_memory_addr(state->sync_mem),
 	    (unsigned long long)state->sync_bo.offset);
 	return 0;
 }
@@ -367,18 +400,17 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 			goto fail;
 		}
 
-		if (sc->fb_usable_size == 0 ||
-		    sc->fb_usable_base + sc->fb_usable_size <= sc->fb_usable_base) {
+		if (sc->fb_usable_size == 0) {
 			nvkm_infof(sc->dev,
-			    "drm: dispnv50 invalid vram range base=0x%llx "
-			    "size=0x%llx\n",
+			    "drm: dispnv50 invalid vram size base=0x%llx "
+			    "size=0x0\n",
 			    (unsigned long long)sc->fb_usable_base,
 			    (unsigned long long)sc->fb_usable_size);
 			ret = -ENODEV;
 			goto fail;
 		}
 
-		vram_limit = sc->fb_usable_base + sc->fb_usable_size - 1;
+		vram_limit = sc->fb_usable_size - 1;
 		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsVramCtxDma",
 		    NV50_DISP_HANDLE_VRAM, 0, vram_limit, &dmac->vram,
 		    &dmac->dfly_vram_object);
@@ -684,13 +716,22 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 		return ret;
 	}
 
+	ret = nvkm_dispnv50_vram_offset(sc, nvkm_memory_addr(state->scanout),
+	    nvkm_memory_size(state->scanout), &state->scanout_offset);
+	if (ret != 0) {
+		nvkm_memory_unref(&state->scanout);
+		return ret;
+	}
+
 	state->scanout_width = width;
 	state->scanout_height = height;
 	state->scanout_pitch = pitch;
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx\n",
+	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx "
+	    "offset=0x%llx\n",
 	    width, height, pitch,
-	    (unsigned long long)nvkm_memory_addr(state->scanout));
+	    (unsigned long long)nvkm_memory_addr(state->scanout),
+	    (unsigned long long)state->scanout_offset);
 	return 0;
 }
 
@@ -723,7 +764,7 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	asyw->image.blocks[0] = 0;
 	asyw->image.pitch[0] = state->scanout_pitch;
 	asyw->image.handle[0] = NV50_DISP_HANDLE_VRAM;
-	asyw->image.offset[0] = nvkm_memory_addr(state->scanout);
+	asyw->image.offset[0] = state->scanout_offset;
 
 	asyw->blend.depth = 255;
 	asyw->blend.k1 = 255;
@@ -975,9 +1016,10 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
-	    "scanout=0x%llx\n",
+	    "scanout=0x%llx offset=0x%llx\n",
 	    head, win, display_id,
-	    (unsigned long long)nvkm_memory_addr(state->scanout));
+	    (unsigned long long)nvkm_memory_addr(state->scanout),
+	    (unsigned long long)state->scanout_offset);
 	return 0;
 
 fail:
