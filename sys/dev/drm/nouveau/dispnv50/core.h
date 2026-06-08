@@ -58,6 +58,8 @@ struct nv50_dmac {
 	u32 dfly_user;
 	s32 dfly_oclass;
 	int dfly_inst;
+	bool dfly_last_idle;
+	u32 dfly_last_stat;
 #endif
 };
 

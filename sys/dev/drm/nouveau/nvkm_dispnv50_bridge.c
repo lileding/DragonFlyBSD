@@ -464,8 +464,11 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 
 	for (attempt = 0; attempt < NVKM_DISPNV50_STATUS_POLL_COUNT; attempt++) {
 		if (!nvkm_dispnv50_dmac_read_status(sc, dmac, &user_put, &ctrl,
-		    &stat))
+		    &stat)) {
+			dmac->dfly_last_idle = false;
+			dmac->dfly_last_stat = 0;
 			return;
+		}
 		idle = nvkm_dispnv50_dmac_status_idle(dmac, stat);
 		if (idle)
 			break;
@@ -473,6 +476,8 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	}
 	attempts = attempt < NVKM_DISPNV50_STATUS_POLL_COUNT ?
 	    attempt + 1 : NVKM_DISPNV50_STATUS_POLL_COUNT;
+	dmac->dfly_last_idle = idle;
+	dmac->dfly_last_stat = stat;
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x "
@@ -1300,6 +1305,14 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
+	if (!wndw->wndw.dfly_last_idle) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 window update did not idle, aborting "
+		    "final core update win=%u stat=0x%08x\n",
+		    win, wndw->wndw.dfly_last_stat);
+		ret = -EIO;
+		goto fail;
+	}
 	ret = core->func->update(core, interlock, false);
 	if (ret != 0)
 		goto fail;
