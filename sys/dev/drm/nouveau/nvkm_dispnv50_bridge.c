@@ -590,6 +590,52 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
 }
 
+static u8
+nvkm_dispnv50_hdmi_max_ac_packet(struct drm_display_mode *mode)
+{
+	const u32 rekey = 56;
+	u32 blank;
+	u32 packet;
+
+	if (mode == NULL || mode->htotal <= mode->hdisplay)
+		return 0;
+
+	blank = mode->htotal - mode->hdisplay;
+	if (blank <= rekey + 18)
+		return 0;
+
+	packet = (blank - rekey - 18) / 32;
+	if (packet > 0x1f)
+		return 0x1f;
+	return (u8)packet;
+}
+
+static int
+nvkm_dispnv50_hdmi_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
+    struct drm_display_mode *mode, uint32_t head)
+{
+	const u8 rekey = 56;
+	struct nvkm_ior *ior;
+	u8 max_ac_packet;
+
+	if (outp == NULL || outp->ior == NULL)
+		return -ENODEV;
+
+	ior = outp->ior;
+	if (ior->func == NULL || ior->func->hdmi == NULL ||
+	    ior->func->hdmi->ctrl == NULL)
+		return -ENODEV;
+
+	max_ac_packet = nvkm_dispnv50_hdmi_max_ac_packet(mode);
+	ior->func->hdmi->ctrl(ior, (int)head, true, max_ac_packet, rekey);
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 hdmi enabled outp=%02x sor=%d head=%u "
+	    "max_ac_packet=%u rekey=%u\n",
+	    outp->index, ior->id, head, max_ac_packet, rekey);
+	return 0;
+}
+
 static struct nvkm_outp *
 nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 {
@@ -610,7 +656,8 @@ nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 
 static int
 nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
-    struct nv50_head_atom *asyh, uint32_t head, uint32_t display_id)
+    struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
+    uint32_t display_id)
 {
 	struct nvkm_outp *outp;
 	u32 proto;
@@ -638,6 +685,10 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 		return -ENODEV;
 	if (core->func->sor == NULL || core->func->sor->ctrl == NULL)
 		return -ENODEV;
+
+	ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head);
+	if (ret != 0)
+		return ret;
 
 	proto = (outp->ior->asy.link & 1) ?
 	    NVC37D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_A :
@@ -714,7 +765,7 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		if (ret != 0)
 			goto fail;
 	}
-	ret = nvkm_dispnv50_route_tmds(sc, core, &asyh, head, display_id);
+	ret = nvkm_dispnv50_route_tmds(sc, core, &asyh, mode, head, display_id);
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
