@@ -627,9 +627,13 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 		return -ENOSYS;
 	}
 
-	ret = nvkm_outp_acquire(outp, false);
-	if (ret != 0)
-		return ret;
+	if (outp->ior == NULL) {
+		if (outp->func == NULL || outp->func->acquire == NULL)
+			return -ENODEV;
+		ret = outp->func->acquire(outp, false);
+		if (ret != 0)
+			return ret;
+	}
 	if (outp->ior == NULL)
 		return -ENODEV;
 	if (core->func->sor == NULL || core->func->sor->ctrl == NULL)
