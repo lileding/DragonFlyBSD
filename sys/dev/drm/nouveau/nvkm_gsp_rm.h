@@ -165,10 +165,17 @@ int	 nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
 	     int inst, uint32_t put_offset, struct nvkm_gsp_object *object);
 
 /* dispnv50 bridge: adapt committed DragonFly DRM state to imported emitters. */
+struct nvkm_dispnv50_hdmi_info {
+	bool has_infoframe;
+	bool scdc_supported;
+	bool scdc_scrambling;
+	bool scdc_low_rates;
+};
+
 struct drm_crtc;
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
-	     uint32_t display_id);
+	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi);
 
 /* Register DRIVER_MODESET objects backed by imported GSP display discovery. */
 int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
