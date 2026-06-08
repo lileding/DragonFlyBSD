@@ -328,6 +328,27 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 		return;
 
 	cur = (u32)(push->cur - dmac->dfly_shadow);
+	if ((dmac->dfly_oclass & 0xff) == 0x7e) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 wndw push class=0x%x inst=%d put=%u cur=%u\n",
+		    dmac->dfly_oclass, dmac->dfly_inst, dmac->put, cur);
+		for (u32 i = dmac->put; i < cur; i++) {
+			u32 data = dmac->dfly_shadow[i];
+			u32 opcode = data >> 29;
+			u32 count = (data >> 18) & 0x3ff;
+
+			if (opcode == 0 && count != 0) {
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 wndw push[%03u] hdr method=0x%04x count=%u raw=0x%08x\n",
+				    i, data & 0x3ffc, count, data);
+			} else {
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 wndw push[%03u] data=0x%08x\n",
+				    i, data);
+			}
+		}
+	}
+
 	for (u32 i = dmac->put; i < cur; i++)
 		nvkm_wo32(dmac->dfly_push_mem, i * 4, dmac->dfly_shadow[i]);
 
@@ -385,6 +406,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	memset(dmac, 0, sizeof(*dmac));
 	dmac->dfly_sc = sc;
 	dmac->dfly_user = user;
+	dmac->dfly_oclass = oclass[0];
+	dmac->dfly_inst = inst;
 	dmac->dfly_shadow = kzalloc(0x1000, GFP_KERNEL);
 	dmac->dfly_object = kzalloc(sizeof(*dmac->dfly_object), GFP_KERNEL);
 	if (dmac->dfly_shadow == NULL || dmac->dfly_object == NULL) {
