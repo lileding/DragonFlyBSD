@@ -316,6 +316,93 @@ nvkm_dispnv50_dmac_wait(struct nvif_push *push, u32 size)
 	return 0;
 }
 
+static const char *
+nvkm_dispnv50_dmac_label(struct nv50_dmac *dmac)
+{
+	switch (dmac->dfly_oclass & 0xff) {
+	case 0x7d:
+		return "core";
+	case 0x7e:
+		return "wndw";
+	default:
+		return "chan";
+	}
+}
+
+static void
+nvkm_dispnv50_dmac_trace_push(struct nvkm_softc *sc, struct nv50_dmac *dmac,
+    u32 put, u32 cur)
+{
+	const char *label = nvkm_dispnv50_dmac_label(dmac);
+	u32 remaining = 0;
+	u32 method = 0;
+
+	if ((dmac->dfly_oclass & 0xff) != 0x7d &&
+	    (dmac->dfly_oclass & 0xff) != 0x7e)
+		return;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 %s push class=0x%x inst=%d put=%u cur=%u\n",
+	    label, dmac->dfly_oclass, dmac->dfly_inst, put, cur);
+
+	for (u32 i = put; i < cur; i++) {
+		u32 data = dmac->dfly_shadow[i];
+
+		if (remaining != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 %s push[%03u] method=0x%04x data=0x%08x\n",
+			    label, i, method, data);
+			method += 4;
+			remaining--;
+			continue;
+		}
+
+		if ((data >> 29) == 0 && ((data >> 18) & 0x3ff) != 0) {
+			method = data & 0x3ffc;
+			remaining = (data >> 18) & 0x3ff;
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 %s push[%03u] hdr method=0x%04x count=%u raw=0x%08x\n",
+			    label, i, method, remaining, data);
+		} else {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 %s push[%03u] raw=0x%08x\n",
+			    label, i, data);
+		}
+	}
+}
+
+static void
+nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
+    u32 cur)
+{
+	const char *label = nvkm_dispnv50_dmac_label(dmac);
+	u32 user_put;
+	u32 ctrl;
+	u32 stat;
+
+	switch (dmac->dfly_oclass & 0xff) {
+	case 0x7d:
+		user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		ctrl = nvkm_rd32(sc, 0x6104e0);
+		stat = nvkm_rd32(sc, 0x610630);
+		break;
+	case 0x7e: {
+		u32 channel = 1 + dmac->dfly_inst;
+
+		user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
+		stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
+		break;
+	}
+	default:
+		return;
+	}
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x stat=0x%08x\n",
+	    label, cur, user_put, ctrl, stat);
+}
+
 static void
 nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 {
@@ -328,26 +415,7 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 		return;
 
 	cur = (u32)(push->cur - dmac->dfly_shadow);
-	if ((dmac->dfly_oclass & 0xff) == 0x7e) {
-		nvkm_infof(sc->dev,
-		    "drm: dispnv50 wndw push class=0x%x inst=%d put=%u cur=%u\n",
-		    dmac->dfly_oclass, dmac->dfly_inst, dmac->put, cur);
-		for (u32 i = dmac->put; i < cur; i++) {
-			u32 data = dmac->dfly_shadow[i];
-			u32 opcode = data >> 29;
-			u32 count = (data >> 18) & 0x3ff;
-
-			if (opcode == 0 && count != 0) {
-				nvkm_infof(sc->dev,
-				    "drm: dispnv50 wndw push[%03u] hdr method=0x%04x count=%u raw=0x%08x\n",
-				    i, data & 0x3ffc, count, data);
-			} else {
-				nvkm_infof(sc->dev,
-				    "drm: dispnv50 wndw push[%03u] data=0x%08x\n",
-				    i, data);
-			}
-		}
-	}
+	nvkm_dispnv50_dmac_trace_push(sc, dmac, dmac->put, cur);
 
 	for (u32 i = dmac->put; i < cur; i++)
 		nvkm_wo32(dmac->dfly_push_mem, i * 4, dmac->dfly_shadow[i]);
@@ -355,6 +423,7 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_wr32(sc, dmac->dfly_user + 0x00, cur << 2);
 	(void)nvkm_rd32(sc, dmac->dfly_user + 0x00);
+	nvkm_dispnv50_dmac_trace_status(sc, dmac, cur);
 
 	dmac->put = cur;
 	dmac->cur = cur;
