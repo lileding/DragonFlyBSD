@@ -19,11 +19,22 @@
 #include <core/memory.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
+#include <engine/disp/outp.h>
+#include <engine/disp/ior.h>
 #include <nouveau_bo.h>
 #include <nvif/class.h>
 #include <nvif/if0014.h>
+#include <nvhw/class/clc37d.h>
 #include <nvhw/class/clc37e.h>
 #include <nvhw/class/clc57e.h>
+#include <subdev/bios/dcb.h>
+
+#ifdef nvkm_rd32
+#undef nvkm_rd32
+#endif
+#ifdef nvkm_wr32
+#undef nvkm_wr32
+#endif
 
 #define NV50_DISP_HANDLE_SYNCBUF	0xf0000000U
 #define NV50_DISP_HANDLE_VRAM		0xf0000001U
@@ -579,6 +590,66 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
 }
 
+static struct nvkm_outp *
+nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
+{
+	struct nvkm_outp *outp;
+	int id;
+
+	if (sc == NULL || sc->disp == NULL || display_id == 0)
+		return NULL;
+
+	id = ffs(display_id) - 1;
+	list_for_each_entry(outp, &sc->disp->outps, head) {
+		if (outp->index == id)
+			return outp;
+	}
+
+	return NULL;
+}
+
+static int
+nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
+    struct nv50_head_atom *asyh, uint32_t head, uint32_t display_id)
+{
+	struct nvkm_outp *outp;
+	u32 proto;
+	u32 ctrl;
+	int ret;
+
+	outp = nvkm_dispnv50_find_outp(sc, display_id);
+	if (outp == NULL)
+		return -ENODEV;
+	if (outp->info.type != DCB_OUTPUT_TMDS) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 route deferred: display=0x%x outp=%02x type=%02x\n",
+		    display_id, outp->index, outp->info.type);
+		return -ENOSYS;
+	}
+
+	ret = nvkm_outp_acquire(outp, false);
+	if (ret != 0)
+		return ret;
+	if (outp->ior == NULL)
+		return -ENODEV;
+	if (core->func->sor == NULL || core->func->sor->ctrl == NULL)
+		return -ENODEV;
+
+	proto = (outp->ior->asy.link & 1) ?
+	    NVC37D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_A :
+	    NVC37D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_B;
+	ctrl = NVVAL(NVC37D, SOR_SET_CONTROL, PROTOCOL, proto) | BIT(head);
+
+	ret = core->func->sor->ctrl(core, outp->ior->id, ctrl, asyh);
+	if (ret == 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 route display=0x%x outp=%02x sor=%d link=%u proto=%u head=%u\n",
+		    display_id, outp->index, outp->ior->id, outp->ior->asy.link,
+		    proto, head);
+	}
+	return ret;
+}
+
 int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id)
@@ -639,6 +710,9 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		if (ret != 0)
 			goto fail;
 	}
+	ret = nvkm_dispnv50_route_tmds(sc, core, &asyh, head, display_id);
+	if (ret != 0)
+		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
 	if (core->assign_windows) {
