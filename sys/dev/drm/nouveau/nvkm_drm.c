@@ -667,9 +667,9 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	ddev->pdev        = pdev;
 	sc->drm_dev       = ddev;
 
-	/* Phase 2 M3a: KMS skeleton -- mode_config + connectors (EDID->modes)
-	 * so userspace can enumerate the display. Before drm_dev_register, which
-	 * registers the connectors created here. Best-effort. */
+	/* Prepare KMS mode_config/connectors before drm_dev_register(), which
+	 * registers the objects created here.  The imported display engine owns
+	 * GSP display discovery; this layer owns DragonFly DRM object setup. */
 	(void)nvkm_drm_kms_init(ddev, sc);
 
 	err = drm_dev_register(ddev, 0);

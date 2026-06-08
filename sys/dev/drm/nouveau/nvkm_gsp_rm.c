@@ -298,18 +298,23 @@ nvkm_gsp_rm_ctrl_rd(struct nvkm_gsp_object *obj, void **params, uint32_t repc)
 	struct rpc_gsp_rm_control_v03_00 *rep;
 	int ret = 0;
 	uint32_t expected_repc = sizeof(*rpc) + repc;
+	uint32_t cmd = rpc->cmd;
+	uint32_t h_object = rpc->hObject;
 
 	rep = nvkm_gsp_rpc_push(sc, rpc, NVKM_GSP_RPC_REPLY_RECV,
 	    expected_repc);
 	if (rep == NULL) {
+		nvkm_infof(sc->dev,
+		    "gsp_rm: CONTROL cmd=0x%x obj=0x%x no reply repc=%u\n",
+		    cmd, h_object, expected_repc);
 		*params = NULL;
 		return (EIO);
 	}
 
 	if (rep->status != 0) {
-		nvkm_debugf(sc->dev,
+		nvkm_infof(sc->dev,
 		    "gsp_rm: CONTROL cmd=0x%x obj=0x%x failed status=0x%x\n",
-		    rpc->cmd, rpc->hObject, rep->status);
+		    cmd, h_object, rep->status);
 		ret = EIO;
 	}
 

@@ -1,5 +1,5 @@
 /*
- * nvkm_drm_kms.c -- DRM/KMS skeleton (Phase 2, M3a).
+ * nvkm_drm_kms.c -- DragonFly DRM/KMS setup for nvkm.
  *
  * Register the driver as a KMS (DRIVER_MODESET) device, init mode_config, and
  * create a connector per supported GSP displayId so userspace can enumerate
@@ -7,8 +7,8 @@
  * and get_modes() proxy to the GSP display subsystem (connect-state + EDID).
  *
  * dfly's DRM provides the entire KMS/atomic framework (~Linux 4.x).  This
- * file owns the DRM object model and validates the head/window atoms before
- * nvkm_gsp_disp.c translates them into EVO methods.
+ * file owns DragonFly DRM object setup and validation, then hands committed
+ * CRTC/window state to nvkm_dispnv50_bridge.c for imported dispnv50 emitters.
  */
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
@@ -96,7 +96,7 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
 {
 	(void)dev; (void)file; (void)cmd;
-	return (ERR_PTR(-ENOSYS));	/* scanout framebuffers land in M4 */
+	return (ERR_PTR(-ENOSYS));	/* framebuffer import is staged later */
 }
 
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
@@ -105,7 +105,7 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_commit	= drm_atomic_helper_commit,
 };
 
-/* ===== plane (M3b skeleton: NVC57E window; EVO push lands in M4) ===== */
+/* ===== plane: NVC57E window validation ===== */
 
 static const uint32_t nvkm_plane_formats[] = {
 	DRM_FORMAT_C8,
@@ -187,7 +187,7 @@ static void
 nvkm_plane_atomic_update(struct drm_plane *plane,
     struct drm_plane_state *old_state)
 {
-	(void)plane; (void)old_state;	/* M4: push NVC57E SET_* methods */
+	(void)plane; (void)old_state;	/* programming is staged in dispnv50 */
 }
 
 static const struct drm_plane_helper_funcs nvkm_plane_helper_funcs = {
@@ -223,50 +223,6 @@ struct nvkm_crtc {
 
 #define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
 
-/* drm_display_mode -> HW timing, nouveau headc57d convention. Verified to
- * reproduce the former hardcoded 1080p values exactly. */
-static void
-nvkm_kms_mode_to_disp(const struct drm_display_mode *mode,
-    struct nvkm_disp_mode *m)
-{
-	struct drm_display_mode adjusted;
-	uint32_t ha, hse, hbe, hbs, va, vse, vbe, vbs;
-	uint32_t blank2e, blank2s;
-
-	adjusted = *mode;
-	drm_mode_set_crtcinfo(&adjusted,
-	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
-	mode = &adjusted;
-
-	ha  = mode->crtc_htotal;
-	hse = mode->crtc_hsync_end - mode->crtc_hsync_start - 1u;
-	hbe = mode->crtc_hblank_end - mode->crtc_hsync_start - 1u;
-	hbs = hbe + mode->crtc_hdisplay;
-	va  = mode->crtc_vtotal;
-	vse = mode->crtc_vsync_end - mode->crtc_vsync_start - 1u;
-	vbe = mode->crtc_vblank_end - mode->crtc_vsync_start - 1u;
-	vbs = vbe + mode->crtc_vdisplay;
-
-	m->interlace = (mode->flags & DRM_MODE_FLAG_INTERLACE) != 0;
-	m->nhsync = (mode->flags & DRM_MODE_FLAG_NHSYNC) != 0;
-	m->nvsync = (mode->flags & DRM_MODE_FLAG_NVSYNC) != 0;
-	if (m->interlace) {
-		blank2e = va + vbe;
-		blank2s = blank2e + mode->crtc_vdisplay;
-		va = va * 2u + 1u;
-		m->blank2 = (blank2e << 16) | blank2s;
-	} else {
-		m->blank2 = 0x00000001u;
-	}
-
-	m->raster = ha | (va << 16);
-	m->sync   = hse | (vse << 16);
-	m->blanke = hbe | (vbe << 16);
-	m->blanks = hbs | (vbs << 16);
-	m->clk    = (uint32_t)mode->crtc_clock * 1000u;	/* kHz -> Hz */
-	m->iw = m->ow = mode->crtc_hdisplay;
-	m->ih = m->oh = mode->crtc_vdisplay;
-}
 
 static int
 nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
@@ -309,18 +265,13 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct nvkm_softc *sc = nc->sc;
-	struct nvkm_gsp_disp *disp = sc->gsp_disp;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
-	struct drm_plane_state *pstate = crtc->primary->state;
-	struct drm_framebuffer *fb = pstate != NULL ? pstate->fb : NULL;
 	struct drm_connector *conn;
-	struct nvkm_disp_mode m;
-	struct nvkm_disp_scanout scanout;
 	uint32_t display_id = 0;
 	int err;
 
 	(void)old_state;
-	if (disp == NULL)
+	if (sc->disp == NULL)
 		return;
 
 	/* Find the output routed to this head in the committed state. */
@@ -336,43 +287,11 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		return;
 	}
 
-	if (fb == NULL || fb->format == NULL) {
-		nvkm_infof(sc->dev,
-		    "drm: crtc enable head=%u: no primary framebuffer\n",
-		    nc->head);
-		return;
-	}
-
-	memset(&scanout, 0, sizeof(scanout));
-	scanout.modifier = fb->modifier;
-	scanout.format = fb->format->format;
-	scanout.pitch = fb->pitches[0];
-	scanout.width = fb->width;
-	scanout.height = fb->height;
-	if (pstate->dst.x1 < 0 || pstate->dst.y1 < 0 ||
-	    drm_rect_width(&pstate->dst) <= 0 ||
-	    drm_rect_height(&pstate->dst) <= 0) {
-		nvkm_infof(sc->dev,
-		    "drm: crtc enable head=%u: primary plane not visible\n",
-		    nc->head);
-		return;
-	}
-	scanout.src_x = pstate->src.x1 >> 16;
-	scanout.src_y = pstate->src.y1 >> 16;
-	scanout.src_w = drm_rect_width(&pstate->src) >> 16;
-	scanout.src_h = drm_rect_height(&pstate->src) >> 16;
-	scanout.crtc_x = pstate->dst.x1;
-	scanout.crtc_y = pstate->dst.y1;
-	scanout.crtc_w = drm_rect_width(&pstate->dst);
-	scanout.crtc_h = drm_rect_height(&pstate->dst);
-
-	nvkm_kms_mode_to_disp(mode, &m);
-	err = nvkm_gsp_disp_nouveau_commit_tail(sc, nc->head, nc->win,
-	    display_id, &m, &scanout);
-
+	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
+	    display_id);
 	nvkm_infof(sc->dev,
-	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x err=%d\n",
-	    nc->head, nc->win, m.iw, m.ih, display_id, err);
+	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
+	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);
 }
 
 static void
@@ -408,7 +327,7 @@ static const struct drm_crtc_funcs nvkm_crtc_funcs = {
 	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
 };
 
-/* ===== encoder (M3b skeleton: SOR) ===== */
+/* ===== encoder: SOR ===== */
 
 static void
 nvkm_encoder_destroy(struct drm_encoder *encoder)
@@ -426,12 +345,15 @@ static const struct drm_encoder_funcs nvkm_encoder_funcs = {
 int
 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 {
-	struct nvkm_gsp_disp *disp = sc->gsp_disp;
+	uint32_t supported_mask;
 	int id, h, nheads, crtc_mask, count = 0;
 
-	if (disp == NULL)
-		return (0);		/* no display subsystem; render-only */
-
+	/*
+	 * nvkm advertises DRIVER_MODESET while the imported display path is
+	 * still being staged.  drm_dev_register() will always call
+	 * drm_modeset_register_all(), so these lists must be initialised even
+	 * when this attach exposes an empty KMS configuration.
+	 */
 	drm_mode_config_init(dev);
 	dev->mode_config.min_width = 0;
 	dev->mode_config.min_height = 0;
@@ -439,9 +361,15 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	dev->mode_config.max_height = 8192;
 	dev->mode_config.funcs = &nvkm_mode_config_funcs;
 
+	if (sc->disp == NULL)
+		return (0);		/* no display subsystem; render-only */
+	supported_mask = nvkm_gsp_disp_supported_mask(sc);
+	if (supported_mask == 0)
+		return (0);
+
 	/* (1) One CRTC (HEAD) + primary plane (window) per head. The plane's
 	 * possible_crtcs is BIT(h) because CRTCs get index h in creation order. */
-	nheads = disp->num_heads ? disp->num_heads : 1;
+	nheads = nvkm_gsp_disp_head_count(sc);
 	if (nheads > 4)
 		nheads = 4;
 	for (h = 0; h < nheads; h++) {
@@ -486,8 +414,8 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		struct nvkm_drm_connector *nc;
 		struct drm_encoder *enc;
 
-		if (!(disp->supported_mask & (1u << id)))
-			continue;
+			if (!(supported_mask & (1u << id)))
+				continue;
 		nc = kzalloc(sizeof(*nc), GFP_KERNEL);
 		enc = kzalloc(sizeof(*enc), GFP_KERNEL);
 		if (nc == NULL || enc == NULL) {
@@ -669,7 +597,5 @@ out:
 	if (ret != 0)
 		drm_framebuffer_remove(fb);
 	nvkm_infof(sc->dev, "drm: light_up commit -> %d\n", ret);
-	if (ret == 0)
-		nvkm_gsp_disp_dump_state(sc);
 	return (ret < 0 ? -ret : 0);
 }
