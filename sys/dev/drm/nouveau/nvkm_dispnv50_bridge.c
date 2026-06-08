@@ -999,13 +999,27 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+	if (nvhead->func->static_wndw_map != NULL)
+		nvhead->func->static_wndw_map(nvhead, &asyh);
+	asyh.wndw.mask |= BIT(win);
+
 	if (nvhead->func->display_id != NULL) {
 		ret = nvhead->func->display_id(nvhead, display_id);
 		if (ret != 0)
 			goto fail;
 	}
+	if (nvhead->func->view != NULL) {
+		ret = nvhead->func->view(nvhead, &asyh);
+		if (ret != 0)
+			goto fail;
+	}
 	if (nvhead->func->mode != NULL) {
 		ret = nvhead->func->mode(nvhead, &asyh);
+		if (ret != 0)
+			goto fail;
+	}
+	if (nvhead->func->dither != NULL) {
+		ret = nvhead->func->dither(nvhead, &asyh);
 		if (ret != 0)
 			goto fail;
 	}
@@ -1024,6 +1038,12 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 head state head=%u view=%ux%u->%ux%u "
+	    "wndw_mask=0x%x wndw_owned=0x%x\n",
+	    head, asyh.view.iW, asyh.view.iH, asyh.view.oW, asyh.view.oH,
+	    asyh.wndw.mask, asyh.wndw.owned);
 
 	if (core->assign_windows) {
 		ret = core->func->wndw.owner(core);
