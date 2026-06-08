@@ -23,8 +23,11 @@
  */
 #ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
 #include "nvkm_priv.h"
+#include <sys/malloc.h>
 #include <core/memory.h>
 #include <subdev/gsp.h>
+
+static MALLOC_DEFINE(M_NVKM_MEMORY, "nvkm_memory", "nvkm display memory");
 
 /*
  * DragonFly display-only port:
@@ -38,6 +41,8 @@
 struct nvkm_dfly_memory {
 	struct nvkm_memory base;
 	struct nvkm_softc *sc;
+	enum nvkm_memory_target target;
+	void *kva;
 	uint64_t paddr;
 	uint64_t size;
 	enum nvkm_vram_kind kind;
@@ -54,15 +59,23 @@ nvkm_dfly_memory_dtor(struct nvkm_memory *memory)
 {
 	struct nvkm_dfly_memory *mem = nvkm_dfly_memory(memory);
 
-	nvkm_gsp_vram_free_kind(mem->sc, mem->paddr, mem->kind, mem);
+	switch (mem->target) {
+	case NVKM_MEM_TARGET_HOST:
+	case NVKM_MEM_TARGET_NCOH:
+		if (mem->kva != NULL)
+			contigfree(mem->kva, mem->size, M_NVKM_MEMORY);
+		break;
+	default:
+		nvkm_gsp_vram_free_kind(mem->sc, mem->paddr, mem->kind, mem);
+		break;
+	}
 	return mem;
 }
 
 static enum nvkm_memory_target
 nvkm_dfly_memory_target(struct nvkm_memory *memory)
 {
-	(void)memory;
-	return NVKM_MEM_TARGET_VRAM;
+	return nvkm_dfly_memory(memory)->target;
 }
 
 static u8
@@ -100,8 +113,7 @@ nvkm_dfly_memory_boot(struct nvkm_memory *memory, struct nvkm_vmm *vmm)
 static void __iomem *
 nvkm_dfly_memory_acquire(struct nvkm_memory *memory)
 {
-	(void)memory;
-	return NULL;
+	return nvkm_dfly_memory(memory)->kva;
 }
 
 static void
@@ -145,6 +157,11 @@ nvkm_dfly_memory_rd32(struct nvkm_memory *memory, u64 offset)
 	uint64_t gva;
 	u32 data = 0;
 
+	if (offset + sizeof(u32) > mem->size)
+		return 0;
+	if (mem->kva != NULL)
+		return *(volatile u32 *)((uint8_t *)mem->kva + offset);
+
 	if (nvkm_gsp_bar1_map_existing(mem->sc, page, &gva) == 0) {
 		data = nvkm_gsp_bar1_rd32(mem->sc, gva + page_off);
 		nvkm_gsp_bar1_unmap_existing(mem->sc, gva);
@@ -159,6 +176,13 @@ nvkm_dfly_memory_wr32(struct nvkm_memory *memory, u64 offset, u32 data)
 	uint64_t page = (mem->paddr + offset) & ~0xfffULL;
 	uint64_t page_off = (mem->paddr + offset) & 0xfffULL;
 	uint64_t gva;
+
+	if (offset + sizeof(u32) > mem->size)
+		return;
+	if (mem->kva != NULL) {
+		*(volatile u32 *)((uint8_t *)mem->kva + offset) = data;
+		return;
+	}
 
 	if (nvkm_gsp_bar1_map_existing(mem->sc, page, &gva) == 0) {
 		nvkm_gsp_bar1_wr32(mem->sc, gva + page_off, data);
@@ -213,7 +237,6 @@ nvkm_memory_new(struct nvkm_device *device, enum nvkm_memory_target target,
 {
 	struct nvkm_dfly_memory *mem;
 
-	(void)target;
 	if (device == NULL || device->gsp == NULL || device->gsp->sc == NULL)
 		return -ENODEV;
 
@@ -225,16 +248,39 @@ nvkm_memory_new(struct nvkm_device *device, enum nvkm_memory_target target,
 	mem->base.ptrs = &nvkm_dfly_memory_ptrs;
 	mem->sc = device->gsp->sc;
 	mem->size = roundup2(size, PAGE_SIZE);
-	mem->kind = NVKM_VRAM_BAR1_PAGE;
-	mem->paddr = nvkm_gsp_vram_alloc_kind(mem->sc, mem->size,
-	    MAX((uint64_t)align, (uint64_t)PAGE_SIZE), mem->kind, mem);
-	if (mem->paddr == 0) {
+	mem->target = target;
+
+	switch (target) {
+	case NVKM_MEM_TARGET_HOST:
+	case NVKM_MEM_TARGET_NCOH:
+		mem->kva = contigmalloc(mem->size, M_NVKM_MEMORY,
+		    M_WAITOK | (zero ? M_ZERO : 0), 0, ~(vm_paddr_t)0,
+		    MAX((uint64_t)align, (uint64_t)PAGE_SIZE), 0);
+		if (mem->kva == NULL) {
+			kfree(mem);
+			return -ENOMEM;
+		}
+		mem->paddr = vtophys(mem->kva);
+		break;
+	case NVKM_MEM_TARGET_INST_SR_LOST:
+	case NVKM_MEM_TARGET_INST:
+	case NVKM_MEM_TARGET_VRAM:
+		mem->target = NVKM_MEM_TARGET_VRAM;
+		mem->kind = NVKM_VRAM_BAR1_PAGE;
+		mem->paddr = nvkm_gsp_vram_alloc_kind(mem->sc, mem->size,
+		    MAX((uint64_t)align, (uint64_t)PAGE_SIZE), mem->kind, mem);
+		if (mem->paddr == 0) {
+			kfree(mem);
+			return -ENOMEM;
+		}
+		if (zero) {
+			for (u64 off = 0; off < mem->size; off += 4)
+				nvkm_dfly_memory_wr32(&mem->base, off, 0);
+		}
+		break;
+	default:
 		kfree(mem);
-		return -ENOMEM;
-	}
-	if (zero) {
-		for (u64 off = 0; off < mem->size; off += 4)
-			nvkm_dfly_memory_wr32(&mem->base, off, 0);
+		return -EINVAL;
 	}
 	*pmemory = &mem->base;
 	return 0;

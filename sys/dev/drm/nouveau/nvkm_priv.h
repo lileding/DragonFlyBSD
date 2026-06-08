@@ -212,6 +212,7 @@ struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
 struct nvkm_device;
 struct nvkm_disp;
+struct nvkm_dispnv50_state;
 struct nvkm_gsp;
 struct nvkm_rm;
 struct drm_file;
@@ -627,6 +628,7 @@ struct nvkm_softc {
 	struct nvkm_rm		*core_rm;	/* imported nouveau RM API table */
 	struct nvkm_gsp_client	*core_internal_client;
 	struct nvkm_disp	*disp;		/* imported nouveau display engine */
+	struct nvkm_dispnv50_state *dispnv50;	/* DragonFly dispnv50 KMS state */
 	struct nvkm_gsp_chan	*gsp_chan;
 	struct nvkm_gsp_bar1	bar1;	/* host BAR1 vmm */
 	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */

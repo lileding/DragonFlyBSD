@@ -743,11 +743,31 @@ typedef struct NV2080_CTRL_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER_PARAMS {
     NvU32  hclass;
     NvU32  channelInstance;
     NvBool valid;
+    NvU32  pbTargetAperture;
+    NvU32  channelPBSize;
+    NvU32  subDeviceId;
 } NV2080_CTRL_INTERNAL_DISPLAY_CHANNEL_PUSHBUFFER_PARAMS;
 
 #define ADDR_SYSMEM     (1)         // System memory (PCI)
 
 #define ADDR_FBMEM      2         // Frame buffer memory space
+
+typedef enum
+{
+    PB_SIZE_4KB = 0,
+    PB_SIZE_8KB,
+    PB_SIZE_16KB,
+    PB_SIZE_32KB,
+    PB_SIZE_64KB
+} ChannelPBSize;
+
+typedef enum
+{
+    IOVA,
+    PHYS_NVM,
+    PHYS_PCI,
+    PHYS_PCI_COHERENT
+} PBTARGETAPERTURE;
 
 typedef struct
 {
@@ -768,9 +788,11 @@ typedef struct
     NvP64    pControl NV_ALIGN_BYTES(8); // pControl gives virt addr of UDISP GET/PUT regs
 
     NvU32    flags;
+    ChannelPBSize channelPBSize;              // Size of Push Buffer requested by client
 #define NV50VAIO_CHANNELDMA_ALLOCATION_FLAGS_CONNECT_PB_AT_GRAB                1:1
 #define NV50VAIO_CHANNELDMA_ALLOCATION_FLAGS_CONNECT_PB_AT_GRAB_YES            0x00000000
 #define NV50VAIO_CHANNELDMA_ALLOCATION_FLAGS_CONNECT_PB_AT_GRAB_NO             0x00000001
 
+    NvU32    subDeviceId;                     // One-hot encoded subDeviceId
 } NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS;
 #endif
