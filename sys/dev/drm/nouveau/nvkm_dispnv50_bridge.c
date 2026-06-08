@@ -975,6 +975,34 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
 }
 
+static int
+nvkm_dispnv50_wndw_sanitize(struct nv50_wndw *wndw)
+{
+	int ret;
+
+	if (wndw->func->ntfy_clr != NULL) {
+		ret = wndw->func->ntfy_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	if (wndw->func->sema_clr != NULL) {
+		ret = wndw->func->sema_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	if (wndw->func->xlut_clr != NULL) {
+		ret = wndw->func->xlut_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	if (wndw->func->csc_clr != NULL) {
+		ret = wndw->func->csc_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	return 0;
+}
+
 static u8
 nvkm_dispnv50_hdmi_max_ac_packet(struct drm_display_mode *mode)
 {
@@ -1220,6 +1248,9 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
+	ret = nvkm_dispnv50_wndw_sanitize(wndw);
+	if (ret != 0)
+		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	ret = wndw->func->image_set(wndw, &asyw);
 	if (ret != 0)
