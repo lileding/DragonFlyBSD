@@ -54,6 +54,8 @@ struct nv50_dmac {
 	struct nvkm_dispnv50_dmaobj *dfly_vram_object;
 	u32 *dfly_shadow;
 	u32 dfly_user;
+	s32 dfly_oclass;
+	int dfly_inst;
 #endif
 };
 
