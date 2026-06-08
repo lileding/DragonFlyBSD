@@ -189,7 +189,15 @@ r535_dmac_alloc(struct nvkm_disp *disp, u32 oclass, int inst, u32 put_offset,
 
 	args->channelInstance = inst;
 	args->offset = put_offset;
+#ifndef NVKM_DFLY_GSP_DISPLAY_ONLY
 	args->channelPBSize = PB_SIZE_4KB;
+#else
+	/*
+	 * Linux v7.0 r570 display RM allocation omits channelPBSize.
+	 * Keep the DragonFly first-light path aligned with the running
+	 * 570.144 firmware ABI instead of the older r535 allocation shape.
+	 */
+#endif
 	args->subDeviceId = BIT(0);
 
 	return nvkm_gsp_rm_alloc_wr(dmac, args);
