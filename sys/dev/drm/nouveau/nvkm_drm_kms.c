@@ -266,18 +266,28 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct nvkm_softc *sc = nc->sc;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
-	struct drm_connector *conn;
+	struct drm_connector *conn = NULL;
+	struct nvkm_dispnv50_hdmi_info hdmi;
 	uint32_t display_id = 0;
 	int err;
 
 	(void)old_state;
 	if (sc->disp == NULL)
 		return;
+	memset(&hdmi, 0, sizeof(hdmi));
 
 	/* Find the output routed to this head in the committed state. */
 	list_for_each_entry(conn, &crtc->dev->mode_config.connector_list, head) {
 		if (conn->state != NULL && conn->state->crtc == crtc) {
 			display_id = to_nvkm_connector(conn)->display_id;
+			hdmi.has_infoframe =
+			    conn->display_info.has_hdmi_infoframe;
+			hdmi.scdc_supported =
+			    conn->display_info.hdmi.scdc.supported;
+			hdmi.scdc_scrambling =
+			    conn->display_info.hdmi.scdc.scrambling.supported;
+			hdmi.scdc_low_rates =
+			    conn->display_info.hdmi.scdc.scrambling.low_rates;
 			break;
 		}
 	}
@@ -288,7 +298,7 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	}
 
 	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
-	    display_id);
+	    display_id, &hdmi);
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);

@@ -610,13 +610,31 @@ nvkm_dispnv50_hdmi_max_ac_packet(struct drm_display_mode *mode)
 	return (u8)packet;
 }
 
+static u32
+nvkm_dispnv50_hdmi_clock_khz(struct drm_display_mode *mode)
+{
+	if (mode == NULL)
+		return 0;
+	if (mode->clock > 0)
+		return (u32)mode->clock;
+	if (mode->crtc_clock > 0)
+		return (u32)mode->crtc_clock;
+	return 0;
+}
+
 static int
 nvkm_dispnv50_hdmi_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
-    struct drm_display_mode *mode, uint32_t head)
+    struct drm_display_mode *mode, uint32_t head,
+    const struct nvkm_dispnv50_hdmi_info *hdmi)
 {
 	const u8 rekey = 56;
 	struct nvkm_ior *ior;
+	u32 clock_khz;
 	u8 max_ac_packet;
+	bool has_infoframe = false;
+	bool scdc_supported = false;
+	bool scdc_scrambling = false;
+	bool scdc_low_rates = false;
 
 	if (outp == NULL || outp->ior == NULL)
 		return -ENODEV;
@@ -627,12 +645,25 @@ nvkm_dispnv50_hdmi_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 		return -ENODEV;
 
 	max_ac_packet = nvkm_dispnv50_hdmi_max_ac_packet(mode);
+	clock_khz = nvkm_dispnv50_hdmi_clock_khz(mode);
+	if (hdmi != NULL) {
+		has_infoframe = hdmi->has_infoframe;
+		scdc_supported = hdmi->scdc_supported;
+		scdc_scrambling = hdmi->scdc_scrambling;
+		scdc_low_rates = hdmi->scdc_low_rates;
+	}
 	ior->func->hdmi->ctrl(ior, (int)head, true, max_ac_packet, rekey);
+	if (ior->func->hdmi->scdc != NULL) {
+		ior->func->hdmi->scdc(ior, clock_khz, scdc_supported,
+		    scdc_scrambling, scdc_low_rates);
+	}
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 hdmi enabled outp=%02x sor=%d head=%u "
-	    "max_ac_packet=%u rekey=%u\n",
-	    outp->index, ior->id, head, max_ac_packet, rekey);
+	    "max_ac_packet=%u rekey=%u clock=%u infoframe=%d scdc=%d "
+	    "scrambling=%d low_rates=%d\n",
+	    outp->index, ior->id, head, max_ac_packet, rekey, clock_khz,
+	    has_infoframe, scdc_supported, scdc_scrambling, scdc_low_rates);
 	return 0;
 }
 
@@ -657,7 +688,7 @@ nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 static int
 nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
     struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
-    uint32_t display_id)
+    uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi)
 {
 	struct nvkm_outp *outp;
 	u32 proto;
@@ -686,7 +717,7 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 	if (core->func->sor == NULL || core->func->sor->ctrl == NULL)
 		return -ENODEV;
 
-	ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head);
+	ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head, hdmi);
 	if (ret != 0)
 		return ret;
 
@@ -707,7 +738,8 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 
 int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    uint32_t head, uint32_t win, uint32_t display_id)
+    uint32_t head, uint32_t win, uint32_t display_id,
+    const struct nvkm_dispnv50_hdmi_info *hdmi)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head_atom asyh;
@@ -765,7 +797,8 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		if (ret != 0)
 			goto fail;
 	}
-	ret = nvkm_dispnv50_route_tmds(sc, core, &asyh, mode, head, display_id);
+	ret = nvkm_dispnv50_route_tmds(sc, core, &asyh, mode, head, display_id,
+	    hdmi);
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
