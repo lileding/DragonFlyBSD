@@ -210,7 +210,10 @@ struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
-struct nvkm_gsp_disp;
+struct nvkm_device;
+struct nvkm_disp;
+struct nvkm_gsp;
+struct nvkm_rm;
 struct drm_file;
 struct dma_fence;
 struct nvkm_drm_vm_binding;
@@ -619,7 +622,11 @@ struct nvkm_softc {
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
-	struct nvkm_gsp_disp	*gsp_disp;	/* display subsystem (Phase 2) */
+	struct nvkm_device	*core_device;	/* imported nouveau core device */
+	struct nvkm_gsp		*core_gsp;	/* imported nouveau GSP subdev shim */
+	struct nvkm_rm		*core_rm;	/* imported nouveau RM API table */
+	struct nvkm_gsp_client	*core_internal_client;
+	struct nvkm_disp	*disp;		/* imported nouveau display engine */
 	struct nvkm_gsp_chan	*gsp_chan;
 	struct nvkm_gsp_bar1	bar1;	/* host BAR1 vmm */
 	struct nvkm_gsp_bar2	bar2;	/* host BAR2 vmm */
@@ -645,17 +652,21 @@ struct nvkm_softc {
 	uint8_t			gr_ctxbuf_nr;
 };
 
+#ifndef nvkm_rd32
 static __inline uint32_t
 nvkm_rd32(struct nvkm_softc *sc, uint32_t offset)
 {
 	return (bus_read_4(sc->bar_res[0], offset));
 }
+#endif
 
+#ifndef nvkm_wr32
 static __inline void
 nvkm_wr32(struct nvkm_softc *sc, uint32_t offset, uint32_t val)
 {
 	bus_write_4(sc->bar_res[0], offset, val);
 }
+#endif
 
 /* Little-endian byte-buffer accessors used by ROM/VBIOS parsers. */
 static __inline uint16_t
@@ -781,7 +792,7 @@ enum {
 	NVKM_GSP_RPC_REPLY_RECV   = 2,
 };
 
-/* Phase 2 RPC framework -- mirrors r570 (uses r535_rpc vtable). */
+/* GSP RPC framework -- mirrors r570 (uses r535_rpc vtable). */
 typedef int (*nvkm_gsp_msg_ntfy_func)(void *priv, uint32_t fn,
     void *repv, uint32_t repc);
 

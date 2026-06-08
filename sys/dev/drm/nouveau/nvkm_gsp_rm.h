@@ -17,7 +17,6 @@
 #define _NVKM_GSP_RM_H_
 
 #include "nvkm_priv.h"
-#include <sys/taskqueue.h>	/* struct task (nvkm_gsp_disp hotplug worker) */
 
 /* GSP-RM RPC function numbers — Linux nouveau r570/nvrm/rpcfn.h. */
 #define NV_VGPU_MSG_FUNCTION_FREE		10
@@ -71,6 +70,7 @@ struct nvkm_gsp_object {
 struct nvkm_gsp_client {
 	struct nvkm_gsp_object	 object;	/* embedded; .client = self */
 	struct nvkm_softc	*sc;
+	struct nvkm_gsp		*gsp;
 };
 
 static __inline uint32_t
@@ -145,104 +145,11 @@ int	 nvkm_gsp_device_ctor(struct nvkm_gsp_client *client,
 	    struct nvkm_gsp_device *device);
 int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 
-#define NVKM_GSP_DISP_WINDOW_NR	8
-
-/* Display subsystem (Phase 2): NV04_DISPLAY_COMMON + connector/EDID.
- * Allocated by nvkm_gsp_disp_init at attach; sc->gsp_disp points here. */
-struct nvkm_gsp_disp {
-	struct nvkm_softc	*sc;
-	struct nvkm_gsp_client	client;
-	struct nvkm_gsp_device	device;
-	struct nvkm_gsp_object	objcom;		/* NV04_DISPLAY_COMMON */
-	uint64_t		inst_paddr;	/* display instance RAM (RAMIN) */
-	uint32_t		num_heads;
-	uint32_t		head_mask;
-	uint32_t		window_mask;
-	uint32_t		supported_mask;	/* GET_SUPPORTED displayId mask */
-		/* Display events (r535 oneinit): GSP POST_EVENT -> ithread matches
-		 * hpd_event_handle -> enqueues hpd_task on a background lwkt, which
-		 * re-probes + logs EDID. DP IRQ is registered as a second event object
-		 * to mirror nouveau, but currently only logged by the generic handler. */
-		struct nvkm_gsp_object	hpd_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
-		struct nvkm_gsp_object	dp_irq_event;	/* NV01_EVENT_KERNEL_CALLBACK_EX */
-		uint32_t		hpd_event_handle;
-		uint32_t		dp_irq_event_handle;
-		struct task		hpd_task;
-	/* Core display channel (M2a): TU102_DISP root + NVC57D core channel. */
-	struct nvkm_gsp_object	dispclass;	/* TU102_DISP (0xc570) root */
-	struct nvkm_gsp_object	core;		/* NVC57D core channel DMAC */
-	void			*core_push_kva;	/* core pushbuffer (coherent sysmem) */
-	uint64_t		core_push_paddr;
-	uint32_t		core_push_size;
-	uint32_t		core_put_reg;	/* BAR0 MMIO PUT (0x680000); GET at +4 */
-	uint32_t		core_put_cur;	/* nouveau dmac->put software cursor */
-	int			core_assign_windows;
-	/* instmem (M4b): RAMHT + ctxdma descriptors live in the display RAMIN
-	 * (inst_paddr). The display HW reads them physically; BAR1 is only our
-	 * CPU write window. RAMHT occupies RAMIN [0, 0x1000); ctxdma descriptors
-	 * are bump-allocated (32-byte slots) from descr_next. */
-	uint64_t		instmem_gva[4];	/* BAR1 GVAs of the first 4 RAMIN pages */
-	uint32_t		descr_next;	/* next free ctxdma RAMIN byte offset */
-	/* Window display channels (M4c): NVC57E instance N.  r535_dmac_init()
-	 * creates one DMA channel per window; chid.user = 1 + N and PUT/GET are
-	 * at BAR0 0x690000 + N*0x1000. */
-	struct nvkm_gsp_disp_window {
-		struct nvkm_gsp_object	object;		/* NVC57E window channel */
-		void			*push_kva;	/* coherent sysmem PB */
-		uint64_t		push_paddr;
-		uint32_t		push_size;
-		uint32_t		put_reg;
-		uint32_t		put_cur;
-		uint32_t		id;
-		uint32_t		heads;
-		uint32_t		interlock_data;
-		uint32_t		interlock_wimm;
-		uint32_t		ntfy;
-		uint32_t		armed_ntfy;
-		uint32_t		sema;
-		uint32_t		data;
-		int			ramht_ready;
-		int			ready;
-	} window[NVKM_GSP_DISP_WINDOW_NR];
-	struct nvkm_gsp_disp_wimm {
-		struct nvkm_gsp_object	object;		/* NVC57B window-immediate channel */
-		void			*push_kva;
-		uint64_t		push_paddr;
-		uint32_t		push_size;
-		uint32_t		put_reg;
-		uint32_t		put_cur;
-		uint32_t		id;
-		int			ready;
-	} wimm[NVKM_GSP_DISP_WINDOW_NR];
-	struct nvkm_gsp_disp_curs {
-		struct nvkm_gsp_object	object;		/* NVC57A cursor PIO channel */
-		uint32_t		put_reg;
-		uint32_t		id;
-		int			ready;
-	} curs[NVKM_GSP_DISP_WINDOW_NR];
-	/* Core completion notifier (M4d-1): VRAM page + ctxdma the core channel
-	 * signals on UPDATE; host polls STATUS via BAR1. */
-	uint64_t		notifier_paddr;	/* notifier VRAM page (physical) */
-	uint64_t		notifier_gva;	/* BAR1 GVA of the notifier page */
-	int			ramht_ready;	/* RAMHT ctxdma handles are valid */
-	uint64_t		fb_paddr;	/* M4d test framebuffer (VRAM physical) */
-	uint64_t		olut_paddr;	/* M4q identity output LUT (VRAM physical) */
-	uint64_t		ilut_paddr;	/* M4t identity window input LUT (VRAM physical) */
-	/* M4d option Y: RM ContextDma delivery. Each surface is an
-	 * NV01_MEMORY_LOCAL_USER object plus an NV01_CONTEXT_DMA explicitly
-	 * bound to its display channel. */
-	struct nvkm_gsp_object	inst_mem;	/* RM-allocated display inst mem (RAMIN) */
-	struct nvkm_gsp_object	iso_mem;	/* fb memory object */
-	struct nvkm_gsp_object	olut_mem;	/* output LUT memory object */
-	struct nvkm_gsp_object	iso_dma;	/* fb ctxdma object */
-	struct nvkm_gsp_object	ntfy_mem;	/* notifier memory object */
-	struct nvkm_gsp_object	ntfy_dma;	/* notifier ctxdma object */
-	struct nvkm_gsp_object	caps;		/* GV100_DISP_CAPS host BAR0 map */
-};
-
-/* Bring up the GSP display subsystem + read EDID of connected outputs.
+/* Bring up imported nouveau core/r535 GSP display.
  * Runs on the attach thread (blockable; synchronous GSP RPCs). */
 int	 nvkm_gsp_disp_init(struct nvkm_softc *sc);
+uint32_t nvkm_gsp_disp_supported_mask(struct nvkm_softc *sc);
+uint32_t nvkm_gsp_disp_head_count(struct nvkm_softc *sc);
 /* Probe connected outputs and print their EDID. Blockable context only. */
 void	 nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc);
 /* Is the given GSP displayId currently connected? 1/0, <0 on error. Blockable. */
@@ -251,52 +158,13 @@ int	 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id);
 int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 	     uint8_t *out, uint32_t *outlen);
 
-/* ===== nouveau_disp.txt display state machine =====
- * The drm atomic hooks in nvkm_drm_kms.c call a single translated commit-tail
- * entry point instead of individually sequencing display helper blocks. */
+/* dispnv50 bridge: adapt committed DragonFly DRM state to imported emitters. */
+struct drm_crtc;
+int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
+	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
+	     uint32_t display_id);
 
-/* Per-head HW timing, computed from a drm_display_mode by the crtc atomic
- * hook (nouveau headc57d convention), packed as the EVO methods expect. */
-struct nvkm_disp_mode {
-	uint32_t raster;	/* h.active | v.active<<16 */
-	uint32_t sync;		/* h.synce  | v.synce<<16  */
-	uint32_t blanke;	/* h.blanke | v.blanke<<16 */
-	uint32_t blanks;	/* h.blanks | v.blanks<<16 */
-	uint32_t blank2;	/* v.blank2e<<16 | v.blank2s (progressive => 1) */
-	uint32_t clk;		/* pixel clock, Hz */
-	uint32_t iw, ih;	/* viewport-in  active w,h */
-	uint32_t ow, oh;	/* viewport-out active w,h */
-	uint32_t interlace;
-	uint32_t nhsync;
-	uint32_t nvsync;
-};
-
-/* Per-window scanout state from the DRM plane atom.  The display engine code
- * converts this to NVC57E SET_IMAGE/POINT/COMPOSITION methods. */
-struct nvkm_disp_scanout {
-	uint64_t paddr;		/* VRAM physical address; 0 => internal test fb */
-	uint64_t modifier;	/* DRM_FORMAT_MOD_* */
-	uint32_t format;	/* DRM fourcc */
-	uint32_t pitch;		/* bytes */
-	uint32_t width, height;	/* framebuffer size */
-	uint32_t src_x, src_y;	/* pixels */
-	uint32_t src_w, src_h;	/* pixels */
-	uint32_t crtc_x, crtc_y;	/* pixels */
-	uint32_t crtc_w, crtc_h;	/* pixels */
-	uint32_t async_flip;
-};
-
-/* Driver-internal first-light state machine translated from nouveau_disp.txt's
- * nv50_disp_atomic_commit_tail active-enable path. */
-int	 nvkm_gsp_disp_nouveau_commit_tail(struct nvkm_softc *sc,
-	     uint32_t head, uint32_t win, uint32_t display_id,
-	     const struct nvkm_disp_mode *m,
-	     const struct nvkm_disp_scanout *scanout);
-
-/* Dump host-side disp state after a modeset (diagnostic). */
-void	 nvkm_gsp_disp_dump_state(struct nvkm_softc *sc);
-
-/* KMS skeleton (M3a): register DRIVER_MODESET + mode_config + connectors. */
+/* Register DRIVER_MODESET objects backed by imported GSP display discovery. */
 int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
 
 /* Driver-internal atomic modeset: drive the first connected output's preferred

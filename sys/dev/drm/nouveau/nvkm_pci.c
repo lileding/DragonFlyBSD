@@ -21,7 +21,6 @@
 #include <bus/pci/pcivar.h>
 #include <sys/sysctl.h>
 #include <sys/kthread.h>
-#include <sys/taskqueue.h>	/* hotplug event -> gsp_disp worker */
 
 #define NVKM_GSP_DEBUG_NOCAT	0
 #define NVKM_RUN_SUBMIT_TEST	0
@@ -244,28 +243,6 @@ nvkm_gsp_evt_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	if (h_event == sc->gsp_nonstall_event_handle &&
 	    h_event != 0 && status == 0)
 		sc->gsp_post_event_nonstall_count++;
-
-	/* Display hotplug: defer the blocking EDID re-probe to a worker lwkt
-	 * (we are on the GSP ithread and must not issue blocking RPCs here). */
-	if (sc->gsp_disp != NULL && h_event != 0 &&
-	    h_event == sc->gsp_disp->hpd_event_handle) {
-		taskqueue_enqueue(taskqueue_thread[mycpuid],
-		    &sc->gsp_disp->hpd_task);
-		return (0);
-	}
-
-	if (sc->gsp_disp != NULL && h_event != 0 &&
-	    h_event == sc->gsp_disp->dp_irq_event_handle) {
-		uint32_t display_id = 0;
-
-		if (event_data_size >= sizeof(display_id))
-			display_id = *(const uint32_t *)(const void *)(p + 32);
-		nvkm_debugf(sc->dev,
-		    "gsp_event: DP_IRQ displayId=0x%08x notify=%u "
-		    "status=0x%08x dataSize=%u\n",
-		    display_id, notify_index, status, event_data_size);
-		return (0);
-	}
 
 	/*
 	 * This is the GSP-only event handoff point.  Future channel completion
@@ -784,9 +761,9 @@ nvkm_pci_attach(device_t dev)
 					}
 				}
 
-				/* Phase 2 M1: display bring-up + read connected EDID
-				 * (after compute bring-up, before IRQ install -> RPC
-				 * replies arrive via caller self-drain). */
+				/* Imported GSP display bring-up.
+				 * Run before IRQ install so attach-time RPC replies
+				 * arrive via caller self-drain. */
 				(void)nvkm_gsp_disp_init(sc);
 			}
 
