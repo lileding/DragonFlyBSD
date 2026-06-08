@@ -100,25 +100,10 @@ nvif_chan_wait(struct nv50_dmac *dmac, u32 size)
 	return 0;
 }
 
-static inline int
-nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
+int nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
     enum drm_plane_type type, const char *name, int index,
     const u32 *format, u32 heads, enum nv50_disp_interlock_type interlock_type,
-    u32 interlock_data, struct nv50_wndw **pwndw)
-{
-	(void)func;
-	(void)dev;
-	(void)type;
-	(void)name;
-	(void)index;
-	(void)format;
-	(void)heads;
-	(void)interlock_type;
-	(void)interlock_data;
-	if (pwndw != NULL)
-		*pwndw = NULL;
-	return -ENOSYS;
-}
+    u32 interlock_data, struct nv50_wndw **pwndw);
 
 static inline int
 base507c_ntfy_wait_begun(struct nouveau_bo *bo, u32 offset,
