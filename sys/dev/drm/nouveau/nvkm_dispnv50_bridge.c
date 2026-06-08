@@ -1200,7 +1200,6 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_core *core;
 	struct drm_display_mode *mode;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
-	u32 wndw_interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -1298,13 +1297,7 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
-	/*
-	 * Diagnostic first-light path: current GSP rejects the window UPDATE
-	 * when it is interlocked with core.  Keep the final core update
-	 * interlocked below, but test whether the window image state itself is
-	 * accepted without the interlock.
-	 */
-	ret = wndw->func->update(wndw, wndw_interlock);
+	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
 	ret = core->func->update(core, interlock, false);
