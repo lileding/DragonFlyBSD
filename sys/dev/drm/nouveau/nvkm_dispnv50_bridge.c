@@ -65,6 +65,8 @@ struct nvkm_dispnv50_state {
 	struct nv50_wndw *wndw[8];
 	struct nvkm_memory *ilut;
 	u64 ilut_offset;
+	struct nvkm_memory *olut;
+	u64 olut_offset;
 	struct nvkm_memory *scanout;
 	u64 scanout_offset;
 	u32 scanout_width;
@@ -529,7 +531,12 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_wr32(sc, dmac->dfly_user + 0x00, cur << 2);
 	(void)nvkm_rd32(sc, dmac->dfly_user + 0x00);
-	nvkm_dispnv50_dmac_trace_status(sc, dmac, cur);
+	if ((dmac->dfly_oclass & 0xff) == 0x7e) {
+		dmac->dfly_last_idle = false;
+		dmac->dfly_last_stat = 0;
+	} else {
+		nvkm_dispnv50_dmac_trace_status(sc, dmac, cur);
+	}
 
 	dmac->put = cur;
 	dmac->cur = cur;
@@ -1072,6 +1079,57 @@ nvkm_dispnv50_ilut_ensure(struct nvkm_softc *sc,
 }
 
 static void
+nvkm_dispnv50_olut_write_entry(struct nvkm_memory *memory, u64 offset,
+    u16 value)
+{
+	nvkm_wo32(memory, offset + 0, (u32)value | ((u32)value << 16));
+	nvkm_wo32(memory, offset + 4, (u32)value);
+}
+
+static int
+nvkm_dispnv50_olut_ensure(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	u64 relative = 0;
+	u64 offset;
+	u32 i;
+	int ret;
+
+	if (state->olut != NULL)
+		return 0;
+
+	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM,
+	    NVKM_DISPNV50_ILUT_BYTES, 0x1000, true, &state->olut);
+	if (ret != 0)
+		return ret;
+
+	for (i = 0; i < NVKM_DISPNV50_ILUT_ENTRIES; i++) {
+		u16 value = (u16)((i << 16) >> 10);
+
+		offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + i) * 8ULL;
+		nvkm_dispnv50_olut_write_entry(state->olut, offset, value);
+	}
+
+	offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES +
+	    NVKM_DISPNV50_ILUT_ENTRIES) * 8ULL;
+	nvkm_dispnv50_olut_write_entry(state->olut, offset,
+	    (u16)(((NVKM_DISPNV50_ILUT_ENTRIES - 1U) << 16) >> 10));
+	nvkm_gsp_bar1_flush(sc);
+
+	state->olut_offset = nvkm_memory_addr(state->olut);
+	(void)nvkm_dispnv50_vram_offset(sc, state->olut_offset,
+	    nvkm_memory_size(state->olut), &relative);
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 olut staged entries=%u vram=0x%llx "
+	    "offset=0x%llx relative=0x%llx\n",
+	    NVKM_DISPNV50_ILUT_TOTAL_ENTRIES,
+	    (unsigned long long)nvkm_memory_addr(state->olut),
+	    (unsigned long long)state->olut_offset,
+	    (unsigned long long)relative);
+	return 0;
+}
+
+static void
 nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
     struct drm_crtc *crtc, struct nvkm_dispnv50_state *state)
 {
@@ -1138,6 +1196,33 @@ nvkm_dispnv50_wndw_ilut_set(struct nvkm_softc *sc,
 	    asyw->xlut.i.size, asyw->xlut.i.mode,
 	    asyw->xlut.i.output_mode);
 	return wndw->func->xlut_set(wndw, asyw);
+}
+
+static int
+nvkm_dispnv50_head_olut_set(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core,
+    struct nv50_head *head, struct nv50_head_atom *asyh)
+{
+	int ret;
+
+	if (head->func->olut == NULL || head->func->olut_set == NULL ||
+	    !head->func->olut_identity)
+		return 0;
+
+	ret = nvkm_dispnv50_olut_ensure(sc, state);
+	if (ret != 0)
+		return ret;
+	if (!head->func->olut(head, asyh, 0))
+		return -EINVAL;
+
+	asyh->olut.handle = core->chan.vram.handle;
+	asyh->olut.offset = state->olut_offset;
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 head olut handle=0x%x offset=0x%llx "
+	    "size=%u mode=%u output=%u\n",
+	    asyh->olut.handle, (unsigned long long)asyh->olut.offset,
+	    asyh->olut.size, asyh->olut.mode, asyh->olut.output_mode);
+	return head->func->olut_set(head, asyh);
 }
 
 static int
@@ -1412,6 +1497,11 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		memset(interlock, 0, sizeof(interlock));
 	}
 
+	ret = nvkm_dispnv50_head_olut_set(sc, state, core, nvhead, &asyh);
+	if (ret != 0)
+		goto fail;
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+
 	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
 	ret = nvkm_dispnv50_wndw_sanitize(wndw);
 	if (ret != 0)
@@ -1430,17 +1520,17 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
-	if (!wndw->wndw.dfly_last_idle) {
-		nvkm_infof(sc->dev,
-		    "drm: dispnv50 window update did not idle, aborting "
-		    "final core update win=%u stat=0x%08x\n",
-		    win, wndw->wndw.dfly_last_stat);
-		ret = -EIO;
-		goto fail;
-	}
 	ret = core->func->update(core, interlock, false);
 	if (ret != 0)
 		goto fail;
+	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
+	if (!wndw->wndw.dfly_last_idle) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 window update did not idle after core update "
+		    "win=%u stat=0x%08x\n", win, wndw->wndw.dfly_last_stat);
+		ret = -EIO;
+		goto fail;
+	}
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
