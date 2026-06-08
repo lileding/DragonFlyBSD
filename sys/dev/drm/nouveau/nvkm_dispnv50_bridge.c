@@ -45,6 +45,8 @@
 #define NVKM_DISPNV50_PUSH_DWORDS	(0x1000U / 4U)
 #define NVKM_DISPNV50_SCANOUT_BPP	4U
 #define NVKM_DISPNV50_SCANOUT_KIND	0U
+#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP	0x00000045U
+#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP	0x00000005U
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
 
@@ -245,7 +247,8 @@ nvkm_dispnv50_ctxdma_drop(struct nvkm_dispnv50_dmaobj **pobject)
 static int
 nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, s32 oclass, int inst,
     const char *name, u32 handle, u64 start, u64 limit,
-    struct nvif_object *object, struct nvkm_dispnv50_dmaobj **pobject)
+    u32 flags0, struct nvif_object *object,
+    struct nvkm_dispnv50_dmaobj **pobject)
 {
 	struct nvkm_dispnv50_dmaobj *dmaobj;
 	int ret;
@@ -262,7 +265,7 @@ nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, s32 oclass, int inst,
 	dmaobj->sc = dmac->dfly_sc;
 	dmaobj->start = start;
 	dmaobj->limit = limit;
-	dmaobj->flags0 = 0x00000045;
+	dmaobj->flags0 = flags0;
 
 	ret = nvkm_gsp_disp_dmac_bind(dmac->dfly_sc, oclass, inst,
 	    &dmaobj->object, handle);
@@ -611,8 +614,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 
 		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
 		    "kmsSyncCtxDma", NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
-		    (u64)syncbuf + 0x0fff, &dmac->sync,
-		    &dmac->dfly_sync_object);
+		    (u64)syncbuf + 0x0fff, NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP,
+		    &dmac->sync, &dmac->dfly_sync_object);
 		if (ret) {
 			nvkm_infof(sc->dev,
 			    "drm: dispnv50 sync ctxdma failed class=0x%x "
@@ -636,7 +639,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		vram_limit = sc->fb_usable_base + sc->fb_usable_size - 1;
 		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
 		    "kmsVramCtxDma", NV50_DISP_HANDLE_VRAM, 0, vram_limit,
-		    &dmac->vram, &dmac->dfly_vram_object);
+		    NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP, &dmac->vram,
+		    &dmac->dfly_vram_object);
 		if (ret) {
 			nvkm_infof(sc->dev,
 			    "drm: dispnv50 vram ctxdma failed class=0x%x "
@@ -657,8 +661,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 			 * bind the matching window framebuffer ctxdma here.
 			 */
 			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
-			    inst, "kmsWndwFbCtxDma", fb_handle, 0,
-			    vram_limit, &dmac->dfly_fb,
+			    inst, "kmsWndwFbCtxDma", fb_handle, 0, vram_limit,
+			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP, &dmac->dfly_fb,
 			    &dmac->dfly_fb_object);
 			if (ret) {
 				nvkm_infof(sc->dev,
