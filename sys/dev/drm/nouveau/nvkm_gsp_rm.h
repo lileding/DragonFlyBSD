@@ -18,6 +18,8 @@
 
 #include "nvkm_priv.h"
 
+struct nvkm_object;
+
 /* GSP-RM RPC function numbers — Linux nouveau r570/nvrm/rpcfn.h. */
 #define NV_VGPU_MSG_FUNCTION_FREE		10
 #define NV_VGPU_MSG_FUNCTION_DUP_OBJECT		21
@@ -162,7 +164,10 @@ int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 int	 nvkm_gsp_disp_channel_pushbuf(struct nvkm_softc *sc, int32_t oclass,
 	     int inst, struct nvkm_memory *memory);
 int	 nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
-	     int inst, uint32_t put_offset, struct nvkm_gsp_object *object);
+		     int inst, uint32_t put_offset, struct nvkm_gsp_object *object);
+int	 nvkm_gsp_disp_dmac_bind(struct nvkm_softc *sc, uint32_t oclass,
+		     int inst, struct nvkm_object *object, uint32_t handle);
+void	 nvkm_gsp_disp_dmac_unbind(struct nvkm_softc *sc, int cookie);
 
 /* dispnv50 bridge: adapt committed DragonFly DRM state to imported emitters. */
 struct nvkm_dispnv50_hdmi_info {

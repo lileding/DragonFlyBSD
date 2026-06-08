@@ -16,7 +16,9 @@
 #include "head.h"
 #include "wndw.h"
 
+#include <core/gpuobj.h>
 #include <core/memory.h>
+#include <core/object.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <engine/disp/outp.h>
@@ -151,58 +153,91 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 	return 0;
 }
 
+struct nvkm_dispnv50_dmaobj {
+	struct nvkm_object object;
+	struct nvkm_softc *sc;
+	u64 start;
+	u64 limit;
+	u32 flags0;
+	int ramht_cookie;
+};
+
+static int
+nvkm_dispnv50_dmaobj_bind(struct nvkm_object *object,
+    struct nvkm_gpuobj *parent, int align, struct nvkm_gpuobj **pgpuobj)
+{
+	struct nvkm_dispnv50_dmaobj *dmaobj =
+	    container_of(object, struct nvkm_dispnv50_dmaobj, object);
+	u64 start = dmaobj->start >> 8;
+	u64 limit = dmaobj->limit >> 8;
+	int ret;
+
+	ret = nvkm_gpuobj_new(NULL, 24, align, false, parent, pgpuobj);
+	if (ret != 0)
+		return ret;
+
+	nvkm_kmap(*pgpuobj);
+	nvkm_wo32(*pgpuobj, 0x00, dmaobj->flags0);
+	nvkm_wo32(*pgpuobj, 0x04, (u32)start);
+	nvkm_wo32(*pgpuobj, 0x08, (u32)(start >> 32));
+	nvkm_wo32(*pgpuobj, 0x0c, (u32)limit);
+	nvkm_wo32(*pgpuobj, 0x10, (u32)(limit >> 32));
+	nvkm_done(*pgpuobj);
+	return 0;
+}
+
+static const struct nvkm_object_func nvkm_dispnv50_dmaobj_func = {
+	.bind = nvkm_dispnv50_dmaobj_bind,
+};
+
 static void
-nvkm_dispnv50_ctxdma_drop(struct nvkm_gsp_object **pobject)
+nvkm_dispnv50_ctxdma_drop(struct nvkm_dispnv50_dmaobj **pobject)
 {
 	if (pobject == NULL || *pobject == NULL)
 		return;
 
-	(void)nvkm_gsp_rm_free(*pobject);
+	if ((*pobject)->ramht_cookie > 0)
+		nvkm_gsp_disp_dmac_unbind((*pobject)->sc,
+		    (*pobject)->ramht_cookie);
 	kfree(*pobject);
 	*pobject = NULL;
 }
 
 static int
-nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, const char *name,
-    u32 handle, u64 start, u64 limit, struct nvif_object *object,
-    struct nvkm_gsp_object **pobject)
+nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, s32 oclass, int inst,
+    const char *name, u32 handle, u64 start, u64 limit,
+    struct nvif_object *object, struct nvkm_dispnv50_dmaobj **pobject)
 {
-	struct nvkm_gsp_object *rm_object;
-	struct nv_dma_v0 *args;
+	struct nvkm_dispnv50_dmaobj *dmaobj;
 	int ret;
 
-	if (dmac == NULL || dmac->dfly_object == NULL || object == NULL ||
-	    pobject == NULL || limit < start)
+	if (dmac == NULL || object == NULL || pobject == NULL ||
+	    limit < start)
 		return -EINVAL;
 
-	rm_object = kzalloc(sizeof(*rm_object), GFP_KERNEL);
-	if (rm_object == NULL)
+	dmaobj = kzalloc(sizeof(*dmaobj), GFP_KERNEL);
+	if (dmaobj == NULL)
 		return -ENOMEM;
 
-	args = nvkm_gsp_rm_alloc_get(dmac->dfly_object, handle,
-	    NV_DMA_IN_MEMORY, sizeof(*args), rm_object);
-	if (args == NULL) {
-		kfree(rm_object);
-		return -ENOMEM;
-	}
+	dmaobj->object.func = &nvkm_dispnv50_dmaobj_func;
+	dmaobj->sc = dmac->dfly_sc;
+	dmaobj->start = start;
+	dmaobj->limit = limit;
+	dmaobj->flags0 = 0x00000045;
 
-	args->version = 0;
-	args->target = NV_DMA_V0_TARGET_VRAM;
-	args->access = NV_DMA_V0_ACCESS_RDWR;
-	args->start = start;
-	args->limit = limit;
-
-	ret = nvkm_gsp_rm_alloc_wr(rm_object, args);
-	if (ret != 0) {
-		kfree(rm_object);
+	ret = nvkm_gsp_disp_dmac_bind(dmac->dfly_sc, oclass, inst,
+	    &dmaobj->object, handle);
+	if (ret < 0) {
+		kfree(dmaobj);
 		return ret;
 	}
+	dmaobj->ramht_cookie = ret;
 
 	object->name = name;
 	object->handle = handle;
 	object->oclass = NV_DMA_IN_MEMORY;
-	object->priv = rm_object;
-	*pobject = rm_object;
+	object->priv = dmaobj;
+	*pobject = dmaobj;
 	return 0;
 }
 
@@ -387,8 +422,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	if (syncbuf >= 0) {
 		u64 vram_limit;
 
-		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsSyncCtxDma",
-		    NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
+		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
+		    "kmsSyncCtxDma", NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
 		    (u64)syncbuf + 0x0fff, &dmac->sync,
 		    &dmac->dfly_sync_object);
 		if (ret) {
@@ -411,9 +446,9 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		}
 
 		vram_limit = sc->fb_usable_size - 1;
-		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsVramCtxDma",
-		    NV50_DISP_HANDLE_VRAM, 0, vram_limit, &dmac->vram,
-		    &dmac->dfly_vram_object);
+		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
+		    "kmsVramCtxDma", NV50_DISP_HANDLE_VRAM, 0, vram_limit,
+		    &dmac->vram, &dmac->dfly_vram_object);
 		if (ret) {
 			nvkm_infof(sc->dev,
 			    "drm: dispnv50 vram ctxdma failed class=0x%x "
@@ -496,6 +531,7 @@ core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
 {
 	struct nv50_disp *disp;
 	struct nv50_core *core;
+	s64 syncbuf;
 	int ret;
 
 	if (func == NULL || drm == NULL || pcore == NULL)
@@ -512,7 +548,9 @@ core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
 	core->func = func;
 	core->disp = disp;
 
-	ret = nv50_dmac_create(drm, &oclass, 0, NULL, 0, -1, &core->chan);
+	syncbuf = disp->sync != NULL ? (s64)disp->sync->offset : -1;
+	ret = nv50_dmac_create(drm, &oclass, 0, NULL, 0, syncbuf,
+	    &core->chan);
 	if (ret) {
 		kfree(core);
 		*pcore = NULL;
