@@ -154,6 +154,7 @@ r535_curs = {
 	.func = &r535_curs_func,
 	.user = 73,
 };
+#endif
 
 static int
 r535_dmac_bind(struct nvkm_disp_chan *chan, struct nvkm_object *object, u32 handle)
@@ -163,6 +164,7 @@ r535_dmac_bind(struct nvkm_disp_chan *chan, struct nvkm_object *object, u32 hand
 				 (chan->disp->rm.client.object.handle & 0x3fff));
 }
 
+#ifndef NVKM_DFLY_GSP_DISPLAY_ONLY
 static void
 r535_dmac_fini(struct nvkm_disp_chan *chan)
 {
@@ -2079,5 +2081,45 @@ nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
 	if (sc == NULL || sc->disp == NULL || object == NULL)
 		return -ENODEV;
 	return r535_dmac_alloc(sc->disp, oclass, inst, put_offset, object);
+}
+
+int
+nvkm_gsp_disp_dmac_bind(struct nvkm_softc *sc, uint32_t oclass,
+    int inst, struct nvkm_object *object, uint32_t handle)
+{
+	struct nvkm_disp_chan chan = { 0 };
+	int ret;
+
+	if (sc == NULL || sc->disp == NULL || object == NULL || inst < 0)
+		return -ENODEV;
+
+	chan.disp = sc->disp;
+	switch (oclass & 0xff) {
+	case 0x7d:
+		chan.chid.user = 0;
+		break;
+	case 0x7e:
+		chan.chid.user = 1 + inst;
+		break;
+	case 0x7b:
+		chan.chid.user = 33 + inst;
+		break;
+	case 0x7a:
+		chan.chid.user = 73 + inst;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return r535_dmac_bind(&chan, object, handle);
+}
+
+void
+nvkm_gsp_disp_dmac_unbind(struct nvkm_softc *sc, int cookie)
+{
+	if (sc == NULL || sc->disp == NULL || sc->disp->ramht == NULL ||
+	    cookie <= 0)
+		return;
+	nvkm_ramht_remove(sc->disp->ramht, cookie);
 }
 #endif
