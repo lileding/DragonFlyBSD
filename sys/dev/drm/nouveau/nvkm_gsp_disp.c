@@ -89,13 +89,16 @@ r535_disp_chan_set_pushbuf(struct nvkm_disp *disp, s32 oclass, int inst, struct 
 		case NVKM_MEM_TARGET_NCOH:
 			ctrl->addressSpace = ADDR_SYSMEM;
 			ctrl->cacheSnoop = 0;
+			ctrl->pbTargetAperture = PHYS_PCI;
 			break;
 		case NVKM_MEM_TARGET_HOST:
 			ctrl->addressSpace = ADDR_SYSMEM;
 			ctrl->cacheSnoop = 1;
+			ctrl->pbTargetAperture = PHYS_PCI_COHERENT;
 			break;
 		case NVKM_MEM_TARGET_VRAM:
 			ctrl->addressSpace = ADDR_FBMEM;
+			ctrl->pbTargetAperture = PHYS_NVM;
 			break;
 		default:
 			WARN_ON(1);
@@ -109,6 +112,8 @@ r535_disp_chan_set_pushbuf(struct nvkm_disp *disp, s32 oclass, int inst, struct 
 	ctrl->hclass = oclass;
 	ctrl->channelInstance = inst;
 	ctrl->valid = ((oclass & 0xff) != 0x7a) ? 1 : 0;
+	ctrl->channelPBSize = PB_SIZE_4KB;
+	ctrl->subDeviceId = BIT(0);
 
 	return nvkm_gsp_rm_ctrl_wr(&gsp->internal.device.subdevice, ctrl);
 }
@@ -182,6 +187,8 @@ r535_dmac_alloc(struct nvkm_disp *disp, u32 oclass, int inst, u32 put_offset,
 
 	args->channelInstance = inst;
 	args->offset = put_offset;
+	args->channelPBSize = PB_SIZE_4KB;
+	args->subDeviceId = BIT(0);
 
 	return nvkm_gsp_rm_alloc_wr(dmac, args);
 }
@@ -2054,5 +2061,23 @@ nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 
 	nvkm_gsp_rm_ctrl_done(&disp->rm.objcom, ctrl);
 	return ret;
+}
+
+int
+nvkm_gsp_disp_channel_pushbuf(struct nvkm_softc *sc, int32_t oclass,
+    int inst, struct nvkm_memory *memory)
+{
+	if (sc == NULL || sc->disp == NULL || memory == NULL)
+		return -ENODEV;
+	return r535_disp_chan_set_pushbuf(sc->disp, oclass, inst, memory);
+}
+
+int
+nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
+    int inst, uint32_t put_offset, struct nvkm_gsp_object *object)
+{
+	if (sc == NULL || sc->disp == NULL || object == NULL)
+		return -ENODEV;
+	return r535_dmac_alloc(sc->disp, oclass, inst, put_offset, object);
 }
 #endif

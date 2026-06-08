@@ -14,6 +14,9 @@
 
 struct drm_device;
 struct nouveau_bo;
+struct nvkm_gsp_object;
+struct nvkm_memory;
+struct nvkm_softc;
 struct nv50_core;
 struct nv50_disp;
 struct nv50_head_atom;
@@ -39,6 +42,16 @@ struct nv50_dmac {
 	struct nvif_push push;
 	struct nvif_object sync;
 	struct nvif_object vram;
+	u32 cur;
+	u32 put;
+	u32 max;
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	struct nvkm_softc *dfly_sc;
+	struct nvkm_memory *dfly_push_mem;
+	struct nvkm_gsp_object *dfly_object;
+	u32 *dfly_shadow;
+	u32 dfly_user;
+#endif
 };
 
 struct nv50_core {
@@ -66,6 +79,9 @@ struct nv50_disp {
 	struct nv50_core *core;
 	struct nvif_object caps;
 	struct nouveau_bo *sync;
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	struct nvkm_softc *dfly_sc;
+#endif
 };
 
 struct nouveau_encoder {
@@ -103,32 +119,10 @@ struct nv50_core_func {
 #endif
 
 struct nv50_disp *nv50_disp(struct drm_device *dev);
-
-static inline int
-nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
-    void *args, u32 argc, int push, struct nv50_dmac *dmac)
-{
-	(void)drm;
-	(void)oclass;
-	(void)head;
-	(void)args;
-	(void)argc;
-	(void)push;
-	(void)dmac;
-	return -ENOSYS;
-}
-
-static inline int
-core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
-    s32 oclass, struct nv50_core **pcore)
-{
-	(void)func;
-	(void)drm;
-	(void)oclass;
-	if (pcore != NULL)
-		*pcore = NULL;
-	return -ENOSYS;
-}
+int nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
+    void *args, u32 argc, s64 syncbuf, struct nv50_dmac *dmac);
+int core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
+    s32 oclass, struct nv50_core **pcore);
 
 void corec37d_ntfy_init(struct nouveau_bo *, u32);
 int corec37d_caps_init(struct nouveau_drm *, struct nv50_disp *);
