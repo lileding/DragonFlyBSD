@@ -43,6 +43,8 @@
 #define NV50_DISP_HANDLE_VRAM		0xf0000001U
 #define NVKM_DISPNV50_PUSH_DWORDS	(0x1000U / 4U)
 #define NVKM_DISPNV50_SCANOUT_BPP	4U
+#define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
+#define NVKM_DISPNV50_STATUS_POLL_US	1000U
 
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
@@ -116,6 +118,25 @@ nvkm_dispnv50_pattern_pixel(u32 x, u32 y, u32 width, u32 height)
 }
 
 static int
+nvkm_dispnv50_read_scanout_pixel(struct nvkm_softc *sc,
+    struct nvkm_memory *memory, u32 pitch, u32 x, u32 y, u32 *pixel)
+{
+	u64 byte = (u64)y * pitch + (u64)x * NVKM_DISPNV50_SCANOUT_BPP;
+	u64 page = (nvkm_memory_addr(memory) + byte) & ~(u64)(PAGE_SIZE - 1);
+	u64 page_off = (nvkm_memory_addr(memory) + byte) - page;
+	uint64_t gva;
+	int err;
+
+	err = nvkm_gsp_bar1_map_existing(sc, page, &gva);
+	if (err != 0)
+		return nvkm_dispnv50_neg_errno(err);
+
+	*pixel = nvkm_gsp_bar1_rd32(sc, gva + page_off);
+	nvkm_gsp_bar1_unmap_existing(sc, gva);
+	return 0;
+}
+
+static int
 nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
     u32 width, u32 height, u32 pitch)
 {
@@ -150,6 +171,22 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 	}
 
 	nvkm_gsp_bar1_flush(sc);
+	if (width != 0 && height != 0) {
+		u32 p0 = 0, p1 = 0, p2 = 0, p3 = 0;
+		int e0, e1, e2, e3;
+
+		e0 = nvkm_dispnv50_read_scanout_pixel(sc, memory, pitch, 0, 0, &p0);
+		e1 = nvkm_dispnv50_read_scanout_pixel(sc, memory, pitch, width / 4,
+		    height / 2, &p1);
+		e2 = nvkm_dispnv50_read_scanout_pixel(sc, memory, pitch, width / 2,
+		    height / 2, &p2);
+		e3 = nvkm_dispnv50_read_scanout_pixel(sc, memory, pitch,
+		    (width * 3) / 4, height / 2, &p3);
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 scanout pattern readback err=%d/%d/%d/%d "
+		    "p00=0x%08x p25=0x%08x p50=0x%08x p75=0x%08x\n",
+		    e0, e1, e2, e3, p0, p1, p2, p3);
+	}
 	return 0;
 }
 
@@ -371,36 +408,70 @@ nvkm_dispnv50_dmac_trace_push(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	}
 }
 
+static bool
+nvkm_dispnv50_dmac_read_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
+    u32 *user_put, u32 *ctrl, u32 *stat)
+{
+	switch (dmac->dfly_oclass & 0xff) {
+	case 0x7d:
+		*user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		*ctrl = nvkm_rd32(sc, 0x6104e0);
+		*stat = nvkm_rd32(sc, 0x610630);
+		return true;
+	case 0x7e: {
+		u32 channel = 1 + dmac->dfly_inst;
+
+		*user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		*ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
+		*stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
+		return true;
+	}
+	default:
+		return false;
+	}
+}
+
+static bool
+nvkm_dispnv50_dmac_status_idle(struct nv50_dmac *dmac, u32 stat)
+{
+	switch (dmac->dfly_oclass & 0xff) {
+	case 0x7d:
+		return ((stat & 0x001f0000) == 0x000b0000);
+	case 0x7e:
+		return ((stat & 0x000f0000) == 0x00040000);
+	default:
+		return false;
+	}
+}
+
 static void
 nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
     u32 cur)
 {
 	const char *label = nvkm_dispnv50_dmac_label(dmac);
-	u32 user_put;
-	u32 ctrl;
-	u32 stat;
+	u32 user_put = 0;
+	u32 ctrl = 0;
+	u32 stat = 0;
+	u32 attempt;
+	u32 attempts;
+	bool idle = false;
 
-	switch (dmac->dfly_oclass & 0xff) {
-	case 0x7d:
-		user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
-		ctrl = nvkm_rd32(sc, 0x6104e0);
-		stat = nvkm_rd32(sc, 0x610630);
-		break;
-	case 0x7e: {
-		u32 channel = 1 + dmac->dfly_inst;
-
-		user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
-		ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
-		stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
-		break;
+	for (attempt = 0; attempt < NVKM_DISPNV50_STATUS_POLL_COUNT; attempt++) {
+		if (!nvkm_dispnv50_dmac_read_status(sc, dmac, &user_put, &ctrl,
+		    &stat))
+			return;
+		idle = nvkm_dispnv50_dmac_status_idle(dmac, stat);
+		if (idle)
+			break;
+		DELAY(NVKM_DISPNV50_STATUS_POLL_US);
 	}
-	default:
-		return;
-	}
+	attempts = attempt < NVKM_DISPNV50_STATUS_POLL_COUNT ?
+	    attempt + 1 : NVKM_DISPNV50_STATUS_POLL_COUNT;
 
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x stat=0x%08x\n",
-	    label, cur, user_put, ctrl, stat);
+	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x "
+	    "stat=0x%08x idle=%u attempts=%u\n",
+	    label, cur, user_put, ctrl, stat, idle, attempts);
 }
 
 static void
