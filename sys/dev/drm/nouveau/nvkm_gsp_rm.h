@@ -73,6 +73,8 @@ struct nvkm_gsp_client {
 	struct nvkm_gsp		*gsp;
 };
 
+struct nvkm_memory;
+
 static __inline uint32_t
 nvkm_gsp_client_child_handle(struct nvkm_gsp_client *client, uint32_t base)
 {
@@ -157,6 +159,10 @@ int	 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id);
 /* Read EDID for a displayId into out (<=*outlen); sets *outlen. Blockable. */
 int	 nvkm_gsp_disp_read_edid(struct nvkm_softc *sc, uint32_t display_id,
 	     uint8_t *out, uint32_t *outlen);
+int	 nvkm_gsp_disp_channel_pushbuf(struct nvkm_softc *sc, int32_t oclass,
+	     int inst, struct nvkm_memory *memory);
+int	 nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
+	     int inst, uint32_t put_offset, struct nvkm_gsp_object *object);
 
 /* dispnv50 bridge: adapt committed DragonFly DRM state to imported emitters. */
 struct drm_crtc;
