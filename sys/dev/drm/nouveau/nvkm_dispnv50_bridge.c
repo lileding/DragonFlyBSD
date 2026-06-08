@@ -49,6 +49,12 @@
 #define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP	0x00000005U
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
+#define NVKM_DISPNV50_ILUT_ENTRIES	1024U
+#define NVKM_DISPNV50_ILUT_VSS_ENTRIES	4U
+#define NVKM_DISPNV50_ILUT_TOTAL_ENTRIES \
+	(NVKM_DISPNV50_ILUT_VSS_ENTRIES + NVKM_DISPNV50_ILUT_ENTRIES + 1U)
+#define NVKM_DISPNV50_ILUT_BYTES \
+	(NVKM_DISPNV50_ILUT_TOTAL_ENTRIES * 8U)
 
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
@@ -57,6 +63,8 @@ struct nvkm_dispnv50_state {
 	struct nvkm_memory *sync_mem;
 	struct nv50_head head[4];
 	struct nv50_wndw *wndw[8];
+	struct nvkm_memory *ilut;
+	u64 ilut_offset;
 	struct nvkm_memory *scanout;
 	u64 scanout_offset;
 	u32 scanout_width;
@@ -995,6 +1003,74 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	return 0;
 }
 
+static u16
+nvkm_dispnv50_fixed_u0_16_fp16(u16 fixed)
+{
+	int exp = 0;
+	int mantissa = 0;
+
+	if (fixed != 0) {
+		while (--exp != 0 && !(fixed & 0x8000))
+			fixed <<= 1;
+		mantissa = ((fixed << 1) & 0xffc0) >> 6;
+		exp += 15;
+	}
+	return (u16)((exp << 10) | mantissa);
+}
+
+static void
+nvkm_dispnv50_ilut_write_entry(struct nvkm_memory *memory, u64 offset,
+    u16 value)
+{
+	nvkm_wo32(memory, offset + 0, (u32)value | ((u32)value << 16));
+	nvkm_wo32(memory, offset + 4, (u32)value);
+}
+
+static int
+nvkm_dispnv50_ilut_ensure(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	u64 relative = 0;
+	u64 offset;
+	u32 i;
+	int ret;
+
+	if (state->ilut != NULL)
+		return 0;
+
+	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM,
+	    NVKM_DISPNV50_ILUT_BYTES, 0x1000, true, &state->ilut);
+	if (ret != 0)
+		return ret;
+
+	for (i = 0; i < NVKM_DISPNV50_ILUT_ENTRIES; i++) {
+		u16 fixed = (u16)((i << 16) >> 10);
+		u16 value = nvkm_dispnv50_fixed_u0_16_fp16(fixed);
+
+		offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + i) * 8ULL;
+		nvkm_dispnv50_ilut_write_entry(state->ilut, offset, value);
+	}
+
+	offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES +
+	    NVKM_DISPNV50_ILUT_ENTRIES) * 8ULL;
+	nvkm_dispnv50_ilut_write_entry(state->ilut, offset,
+	    nvkm_dispnv50_fixed_u0_16_fp16(
+		(u16)(((NVKM_DISPNV50_ILUT_ENTRIES - 1U) << 16) >> 10)));
+	nvkm_gsp_bar1_flush(sc);
+
+	state->ilut_offset = nvkm_memory_addr(state->ilut);
+	(void)nvkm_dispnv50_vram_offset(sc, state->ilut_offset,
+	    nvkm_memory_size(state->ilut), &relative);
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 ilut staged entries=%u vram=0x%llx "
+	    "offset=0x%llx relative=0x%llx\n",
+	    NVKM_DISPNV50_ILUT_TOTAL_ENTRIES,
+	    (unsigned long long)nvkm_memory_addr(state->ilut),
+	    (unsigned long long)state->ilut_offset,
+	    (unsigned long long)relative);
+	return 0;
+}
+
 static void
 nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
     struct drm_crtc *crtc, struct nvkm_dispnv50_state *state)
@@ -1033,6 +1109,35 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_SRC_COLOR_FACTOR_MATCH_SELECT_K1;
 	asyw->blend.dst_color =
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
+}
+
+static int
+nvkm_dispnv50_wndw_ilut_set(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
+    struct nv50_wndw_atom *asyw)
+{
+	int ret;
+
+	if (wndw->func->ilut == NULL || wndw->func->xlut_set == NULL ||
+	    !wndw->func->ilut_identity)
+		return 0;
+
+	ret = nvkm_dispnv50_ilut_ensure(sc, state);
+	if (ret != 0)
+		return ret;
+
+	memset(&asyw->xlut, 0, sizeof(asyw->xlut));
+	wndw->func->ilut(wndw, asyw, 0);
+	asyw->xlut.handle = wndw->wndw.vram.handle;
+	asyw->xlut.i.offset = state->ilut_offset;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 window ilut handle=0x%x offset=0x%llx "
+	    "size=%u mode=%u output=%u\n",
+	    asyw->xlut.handle, (unsigned long long)asyw->xlut.i.offset,
+	    asyw->xlut.i.size, asyw->xlut.i.mode,
+	    asyw->xlut.i.output_mode);
+	return wndw->func->xlut_set(wndw, asyw);
 }
 
 static int
@@ -1313,6 +1418,9 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	ret = wndw->func->image_set(wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
 	ret = wndw->func->blend_set(wndw, &asyw);
