@@ -41,8 +41,10 @@
 
 #define NV50_DISP_HANDLE_SYNCBUF	0xf0000000U
 #define NV50_DISP_HANDLE_VRAM		0xf0000001U
+#define NV50_DISP_HANDLE_WNDW_CTX(kind)	(0xfb000000U | (kind))
 #define NVKM_DISPNV50_PUSH_DWORDS	(0x1000U / 4U)
 #define NVKM_DISPNV50_SCANOUT_BPP	4U
+#define NVKM_DISPNV50_SCANOUT_KIND	0U
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
 
@@ -626,11 +628,37 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 			goto fail;
 		}
 
+		if ((oclass[0] & 0xff) == 0x7e) {
+			u32 fb_handle =
+			    NV50_DISP_HANDLE_WNDW_CTX(
+				NVKM_DISPNV50_SCANOUT_KIND);
+
+			/*
+			 * Linux creates this object in nv50_wndw_prepare_fb().
+			 * The first-light path has one pitch-linear scanout, so
+			 * bind the matching window framebuffer ctxdma here.
+			 */
+			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
+			    inst, "kmsWndwFbCtxDma", fb_handle, 0,
+			    vram_limit, &dmac->dfly_fb,
+			    &dmac->dfly_fb_object);
+			if (ret) {
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 fb ctxdma failed "
+				    "class=0x%x inst=%d handle=0x%x "
+				    "limit=0x%llx err=%d\n",
+				    oclass[0], inst, fb_handle,
+				    (unsigned long long)vram_limit, ret);
+				goto fail;
+			}
+		}
+
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 ctxdma staged class=0x%x inst=%d "
-		    "sync=0x%x vram=0x%x syncbuf=0x%llx "
+		    "sync=0x%x vram=0x%x fb=0x%x syncbuf=0x%llx "
 		    "vram_limit=0x%llx\n",
-		    oclass[0], inst, dmac->sync.handle, dmac->vram.handle,
+		    oclass[0], inst, dmac->sync.handle,
+		    dmac->vram.handle, dmac->dfly_fb.handle,
 		    (unsigned long long)syncbuf,
 		    (unsigned long long)vram_limit);
 	}
@@ -654,6 +682,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	return 0;
 
 fail:
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_fb_object);
 	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_vram_object);
 	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_sync_object);
 	nvkm_memory_unref(&dmac->dfly_push_mem);
@@ -972,7 +1001,8 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	asyw->image.format = NVC57E_SET_PARAMS_FORMAT_A8R8G8B8;
 	asyw->image.blocks[0] = 0;
 	asyw->image.pitch[0] = state->scanout_pitch;
-	asyw->image.handle[0] = NV50_DISP_HANDLE_VRAM;
+	asyw->image.handle[0] =
+	    NV50_DISP_HANDLE_WNDW_CTX(NVKM_DISPNV50_SCANOUT_KIND);
 	asyw->image.offset[0] = state->scanout_offset;
 
 	asyw->blend.depth = 255;
