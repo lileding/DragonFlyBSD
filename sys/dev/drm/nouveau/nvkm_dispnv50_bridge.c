@@ -13,6 +13,7 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
 #include "core.h"
+#include "head.h"
 #include "wndw.h"
 
 #include <core/memory.h>
@@ -21,18 +22,95 @@
 #include <nouveau_bo.h>
 #include <nvif/class.h>
 #include <nvif/if0014.h>
+#include <nvhw/class/clc37e.h>
+#include <nvhw/class/clc57e.h>
 
 #define NV50_DISP_HANDLE_SYNCBUF	0xf0000000U
 #define NV50_DISP_HANDLE_VRAM		0xf0000001U
 #define NVKM_DISPNV50_PUSH_DWORDS	(0x1000U / 4U)
+#define NVKM_DISPNV50_SCANOUT_BPP	4U
 
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
 	struct nouveau_bo sync_bo;
+	struct nv50_head head[4];
 	struct nv50_wndw *wndw[8];
+	struct nvkm_memory *scanout;
+	u32 scanout_width;
+	u32 scanout_height;
+	u32 scanout_pitch;
 	bool core_ready;
 };
+
+static u32
+nvkm_dispnv50_align_u32(u32 value, u32 align)
+{
+	return ((value + align - 1) & ~(align - 1));
+}
+
+static int
+nvkm_dispnv50_neg_errno(int err)
+{
+	if (err > 0)
+		return -err;
+	return err;
+}
+
+static u32
+nvkm_dispnv50_pattern_pixel(u32 x, u32 y, u32 width, u32 height)
+{
+	u32 bar = width >= 4 ? width / 4 : 1;
+
+	if (width > 64 && height > 64 &&
+	    (y < 32 || x < 32 || x >= width - 32 || y >= height - 32))
+		return 0x00ffffff;
+	if (x < bar)
+		return 0x00ff3030;
+	if (x < bar * 2)
+		return 0x0030ff30;
+	if (x < bar * 3)
+		return 0x003030ff;
+	return ((x ^ y) & 0x20) ? 0x00d0d0d0 : 0x00404040;
+}
+
+static int
+nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
+    u32 width, u32 height, u32 pitch)
+{
+	const u64 base = nvkm_memory_addr(memory);
+	const u64 size = (u64)pitch * height;
+	u64 done = 0;
+
+	while (done < size) {
+		uint64_t gva;
+		u32 chunk;
+		int err;
+
+		err = nvkm_gsp_bar1_map_existing(sc, base + done, &gva);
+		if (err != 0)
+			return nvkm_dispnv50_neg_errno(err);
+
+		chunk = (size - done) > PAGE_SIZE ? PAGE_SIZE : (u32)(size - done);
+		for (u32 off = 0; off < chunk; off += 4) {
+			u64 pos = done + off;
+			u32 line = (u32)(pos / pitch);
+			u32 line_off = (u32)(pos - (u64)line * pitch);
+			u32 pixel = 0;
+
+			if (line < height && line_off < width * NVKM_DISPNV50_SCANOUT_BPP)
+				pixel = nvkm_dispnv50_pattern_pixel(line_off / 4,
+				    line, width, height);
+			nvkm_gsp_bar1_wr32(sc, gva + off, pixel);
+		}
+
+		nvkm_gsp_bar1_unmap_existing(sc, gva);
+		done += chunk;
+	}
+
+	nvkm_gsp_bar1_flush(sc);
+	return 0;
+}
 
 static int
 nvkm_dispnv50_user_offset(s32 oclass, int head, u32 *offset)
@@ -339,19 +417,269 @@ nvkm_dispnv50_wndw_init(struct nvkm_softc *sc, uint32_t win)
 	return 0;
 }
 
+static int
+nvkm_dispnv50_head_init(struct nvkm_softc *sc, uint32_t head)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_head *nvhead;
+
+	if (head >= nitems(((struct nvkm_dispnv50_state *)0)->head))
+		return -EINVAL;
+	if (nvkm_dispnv50_core_init(sc) != 0)
+		return -ENODEV;
+
+	state = sc->dispnv50;
+	nvhead = &state->head[head];
+	if (nvhead->func != NULL)
+		return 0;
+	if (state->disp.core->func->head == NULL)
+		return -ENODEV;
+
+	nvhead->func = state->disp.core->func->head;
+	nvhead->disp = &state->disp;
+	nvhead->base.base.dev = sc->drm_dev;
+	nvhead->base.index = (int)head;
+
+	nvkm_infof(sc->dev, "drm: dispnv50 head staged head=%u\n", head);
+	return 0;
+}
+
+static void
+nvkm_dispnv50_head_atom_mode(struct nv50_head_atom *asyh,
+    struct drm_display_mode *mode)
+{
+	struct nv50_head_mode *m = &asyh->mode;
+	u32 blankus;
+
+	drm_mode_set_crtcinfo(mode,
+	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
+
+	m->h.active = mode->crtc_htotal;
+	m->h.synce = mode->crtc_hsync_end - mode->crtc_hsync_start - 1;
+	m->h.blanke = mode->crtc_hblank_end - mode->crtc_hsync_start - 1;
+	m->h.blanks = m->h.blanke + mode->crtc_hdisplay;
+
+	m->v.active = mode->crtc_vtotal;
+	m->v.synce = mode->crtc_vsync_end - mode->crtc_vsync_start - 1;
+	m->v.blanke = mode->crtc_vblank_end - mode->crtc_vsync_start - 1;
+	m->v.blanks = m->v.blanke + mode->crtc_vdisplay;
+
+	blankus = (m->v.active - mode->crtc_vdisplay - 2) * m->h.active;
+	blankus *= 1000;
+	blankus /= mode->crtc_clock;
+	m->v.blankus = blankus;
+
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE) {
+		m->v.blank2e = m->v.active + m->v.blanke;
+		m->v.blank2s = m->v.blank2e + mode->crtc_vdisplay;
+		m->v.active = (m->v.active * 2) + 1;
+		m->interlace = true;
+	} else {
+		m->v.blank2e = 0;
+		m->v.blank2s = 1;
+		m->interlace = false;
+	}
+	m->clock = mode->crtc_clock;
+
+	asyh->or.depth = 0;
+	asyh->or.crc_raster = 0;
+	asyh->or.nhsync = !!(mode->flags & DRM_MODE_FLAG_NHSYNC);
+	asyh->or.nvsync = !!(mode->flags & DRM_MODE_FLAG_NVSYNC);
+	asyh->or.bpc = 8;
+}
+
+static void
+nvkm_dispnv50_head_atom_fill(struct nv50_head_atom *asyh,
+    struct drm_crtc_state *state)
+{
+	memset(asyh, 0, sizeof(*asyh));
+	asyh->state.mode = state->mode;
+	asyh->state.adjusted_mode = state->adjusted_mode;
+	asyh->view.iW = state->mode.hdisplay;
+	asyh->view.iH = state->mode.vdisplay;
+	asyh->view.oW = state->adjusted_mode.hdisplay;
+	asyh->view.oH = state->adjusted_mode.vdisplay;
+	nvkm_dispnv50_head_atom_mode(asyh, &asyh->state.adjusted_mode);
+}
+
+static int
+nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, u32 width, u32 height)
+{
+	u32 pitch = nvkm_dispnv50_align_u32(width * NVKM_DISPNV50_SCANOUT_BPP,
+	    256);
+	u64 size = (u64)pitch * height;
+	int ret;
+
+	if (state->scanout != NULL &&
+	    state->scanout_width == width &&
+	    state->scanout_height == height &&
+	    state->scanout_pitch == pitch)
+		return 0;
+
+	nvkm_memory_unref(&state->scanout);
+	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM, size,
+	    0x1000, false, &state->scanout);
+	if (ret != 0)
+		return ret;
+
+	ret = nvkm_dispnv50_fill_scanout(sc, state->scanout, width, height,
+	    pitch);
+	if (ret != 0) {
+		nvkm_memory_unref(&state->scanout);
+		return ret;
+	}
+
+	state->scanout_width = width;
+	state->scanout_height = height;
+	state->scanout_pitch = pitch;
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx\n",
+	    width, height, pitch,
+	    (unsigned long long)nvkm_memory_addr(state->scanout));
+	return 0;
+}
+
+static void
+nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
+    struct drm_crtc *crtc, struct nvkm_dispnv50_state *state)
+{
+	u32 width = state->scanout_width;
+	u32 height = state->scanout_height;
+
+	memset(asyw, 0, sizeof(*asyw));
+	asyw->state.crtc = crtc;
+	asyw->state.crtc_x = 0;
+	asyw->state.crtc_y = 0;
+	asyw->state.crtc_w = width;
+	asyw->state.crtc_h = height;
+	asyw->state.src_x = 0;
+	asyw->state.src_y = 0;
+	asyw->state.src_w = width << 16;
+	asyw->state.src_h = height << 16;
+
+	asyw->image.interval = 1;
+	asyw->image.mode = NVC57E_SET_PRESENT_CONTROL_BEGIN_MODE_NON_TEARING;
+	asyw->image.w = width;
+	asyw->image.h = height;
+	asyw->image.blockh =
+	    NVC57E_SET_STORAGE_BLOCK_HEIGHT_NVD_BLOCK_HEIGHT_ONE_GOB;
+	asyw->image.layout = NVC57E_SET_STORAGE_MEMORY_LAYOUT_PITCH;
+	asyw->image.format = NVC57E_SET_PARAMS_FORMAT_A8R8G8B8;
+	asyw->image.blocks[0] = 0;
+	asyw->image.pitch[0] = state->scanout_pitch;
+	asyw->image.handle[0] = NV50_DISP_HANDLE_VRAM;
+	asyw->image.offset[0] = nvkm_memory_addr(state->scanout);
+
+	asyw->blend.depth = 255;
+	asyw->blend.k1 = 255;
+	asyw->blend.src_color =
+	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_SRC_COLOR_FACTOR_MATCH_SELECT_K1;
+	asyw->blend.dst_color =
+	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
+}
+
 int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id)
 {
+	struct nvkm_dispnv50_state *state;
+	struct nv50_head_atom asyh;
+	struct nv50_wndw_atom asyw;
+	struct nv50_head *nvhead;
+	struct nv50_wndw *wndw;
+	struct nv50_core *core;
+	struct drm_display_mode *mode;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
 		return (-ENODEV);
 
-	if (nvkm_dispnv50_wndw_init(sc, win) != 0)
-		return (-ENODEV);
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
+	ret = nvkm_dispnv50_head_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	core = state->disp.core;
+	nvhead = &state->head[head];
+	wndw = state->wndw[win];
+	mode = &crtc->state->adjusted_mode;
+
+	ret = nvkm_dispnv50_scanout_ensure(sc, state, mode->hdisplay,
+	    mode->vdisplay);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 scanout alloc failed head=%u win=%u err=%d\n",
+		    head, win, ret);
+		return ret;
+	}
+
+	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+	if (nvhead->func->display_id != NULL) {
+		ret = nvhead->func->display_id(nvhead, display_id);
+		if (ret != 0)
+			goto fail;
+	}
+	if (nvhead->func->mode != NULL) {
+		ret = nvhead->func->mode(nvhead, &asyh);
+		if (ret != 0)
+			goto fail;
+	}
+	if (nvhead->func->procamp != NULL) {
+		ret = nvhead->func->procamp(nvhead, &asyh);
+		if (ret != 0)
+			goto fail;
+	}
+	if (nvhead->func->or != NULL) {
+		ret = nvhead->func->or(nvhead, &asyh);
+		if (ret != 0)
+			goto fail;
+	}
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+
+	if (core->assign_windows) {
+		ret = core->func->wndw.owner(core);
+		if (ret != 0)
+			goto fail;
+		ret = core->func->update(core, interlock, false);
+		if (ret != 0)
+			goto fail;
+		core->assign_windows = false;
+		memset(interlock, 0, sizeof(interlock));
+	}
+
+	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	ret = wndw->func->image_set(wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = wndw->func->blend_set(wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	ret = wndw->func->update(wndw, interlock);
+	if (ret != 0)
+		goto fail;
+	ret = core->func->update(core, interlock, false);
+	if (ret != 0)
+		goto fail;
 
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 bridge deferred: head/image ABI not staged "
-	    "head=%u win=%u display=0x%x\n",
-	    head, win, display_id);
-	return (-ENODEV);
+	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
+	    "scanout=0x%llx\n",
+	    head, win, display_id,
+	    (unsigned long long)nvkm_memory_addr(state->scanout));
+	return 0;
+
+fail:
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 bridge failed head=%u win=%u display=0x%x err=%d\n",
+	    head, win, display_id, ret);
+	if (ret == 0)
+		return (-ENODEV);
+	return ret;
 }
