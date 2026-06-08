@@ -13,12 +13,14 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
 #include "core.h"
+#include "wndw.h"
 
 #include <core/memory.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <nouveau_bo.h>
 #include <nvif/class.h>
+#include <nvif/if0014.h>
 
 #define NV50_DISP_HANDLE_SYNCBUF	0xf0000000U
 #define NV50_DISP_HANDLE_VRAM		0xf0000001U
@@ -28,6 +30,7 @@ struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
 	struct nouveau_bo sync_bo;
+	struct nv50_wndw *wndw[8];
 	bool core_ready;
 };
 
@@ -120,11 +123,10 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 {
 	struct nv50_disp *disp;
 	struct nvkm_softc *sc;
+	int inst = head;
 	u32 user;
 	int ret;
 
-	(void)args;
-	(void)argc;
 	(void)syncbuf;
 
 	if (drm == NULL || drm->dev == NULL || oclass == NULL || dmac == NULL)
@@ -135,7 +137,15 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		return -ENODEV;
 	sc = disp->dfly_sc;
 
-	ret = nvkm_dispnv50_user_offset(oclass[0], head, &user);
+	if (args != NULL && argc == sizeof(struct nvif_disp_chan_v0)) {
+		struct nvif_disp_chan_v0 *chan_args = args;
+
+		if (chan_args->version != 0)
+			return -ENOSYS;
+		inst = chan_args->id;
+	}
+
+	ret = nvkm_dispnv50_user_offset(oclass[0], inst, &user);
 	if (ret)
 		return ret;
 
@@ -154,12 +164,12 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	if (ret)
 		goto fail;
 
-	ret = nvkm_gsp_disp_channel_pushbuf(sc, oclass[0], head,
+	ret = nvkm_gsp_disp_channel_pushbuf(sc, oclass[0], inst,
 	    dmac->dfly_push_mem);
 	if (ret)
 		goto fail;
 
-	ret = nvkm_gsp_disp_dmac_alloc(sc, oclass[0], head, 0,
+	ret = nvkm_gsp_disp_dmac_alloc(sc, oclass[0], inst, 0,
 	    dmac->dfly_object);
 	if (ret)
 		goto fail;
@@ -177,8 +187,8 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	dmac->vram.handle = NV50_DISP_HANDLE_VRAM;
 
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 dmac class=0x%x head=%d push=0x%llx user=0x%x\n",
-	    oclass[0], head,
+	    "drm: dispnv50 dmac class=0x%x inst=%d push=0x%llx user=0x%x\n",
+	    oclass[0], inst,
 	    (unsigned long long)nvkm_memory_addr(dmac->dfly_push_mem), user);
 	return 0;
 
@@ -189,6 +199,35 @@ fail:
 	kfree(dmac->dfly_shadow);
 	dmac->dfly_shadow = NULL;
 	return ret;
+}
+
+int
+nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
+    enum drm_plane_type type, const char *name, int index,
+    const u32 *format, u32 heads, enum nv50_disp_interlock_type interlock_type,
+    u32 interlock_data, struct nv50_wndw **pwndw)
+{
+	struct nv50_wndw *wndw;
+
+	(void)dev;
+	(void)type;
+	(void)name;
+	(void)format;
+	(void)heads;
+	(void)interlock_type;
+
+	if (func == NULL || pwndw == NULL || index < 0)
+		return -EINVAL;
+
+	wndw = kzalloc(sizeof(*wndw), GFP_KERNEL);
+	if (wndw == NULL)
+		return -ENOMEM;
+
+	wndw->func = func;
+	wndw->id = index;
+	wndw->interlock.data = interlock_data;
+	*pwndw = wndw;
+	return 0;
 }
 
 int
@@ -269,6 +308,37 @@ nvkm_dispnv50_core_init(struct nvkm_softc *sc)
 	return 0;
 }
 
+static int
+nvkm_dispnv50_wndw_init(struct nvkm_softc *sc, uint32_t win)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nouveau_drm drm;
+	int ret;
+
+	if (win >= nitems(((struct nvkm_dispnv50_state *)0)->wndw))
+		return -EINVAL;
+	if (nvkm_dispnv50_core_init(sc) != 0)
+		return -ENODEV;
+
+	state = sc->dispnv50;
+	if (state->wndw[win] != NULL)
+		return 0;
+
+	drm.dev = sc->drm_dev;
+	ret = wndwc57e_new(&drm, DRM_PLANE_TYPE_PRIMARY, (int)win,
+	    TU102_DISP_WINDOW_CHANNEL_DMA, &state->wndw[win]);
+	if (ret) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 window channel alloc failed win=%u err=%d\n",
+		    win, ret);
+		return ret;
+	}
+
+	nvkm_infof(sc->dev, "drm: dispnv50 window channel staged win=%u\n",
+	    win);
+	return 0;
+}
+
 int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id)
@@ -276,11 +346,11 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
 		return (-ENODEV);
 
-	if (nvkm_dispnv50_core_init(sc) != 0)
+	if (nvkm_dispnv50_wndw_init(sc, win) != 0)
 		return (-ENODEV);
 
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 bridge deferred: window/head ABI not staged "
+	    "drm: dispnv50 bridge deferred: head/image ABI not staged "
 	    "head=%u win=%u display=0x%x\n",
 	    head, win, display_id);
 	return (-ENODEV);
