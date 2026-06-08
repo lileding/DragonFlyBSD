@@ -331,13 +331,25 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 
 	ret = nvkm_gsp_disp_channel_pushbuf(sc, oclass[0], inst,
 	    dmac->dfly_push_mem);
-	if (ret)
+	if (ret) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 set_pushbuf failed class=0x%x inst=%d "
+		    "push=0x%llx err=%d\n",
+		    oclass[0], inst,
+		    (unsigned long long)nvkm_memory_addr(dmac->dfly_push_mem),
+		    ret);
 		goto fail;
+	}
 
 	ret = nvkm_gsp_disp_dmac_alloc(sc, oclass[0], inst, 0,
 	    dmac->dfly_object);
-	if (ret)
+	if (ret) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 dmac alloc failed class=0x%x inst=%d "
+		    "err=%d\n",
+		    oclass[0], inst, ret);
 		goto fail;
+	}
 
 	if (syncbuf >= 0) {
 		u64 vram_limit;
@@ -346,11 +358,22 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		    NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
 		    (u64)syncbuf + 0x0fff, &dmac->sync,
 		    &dmac->dfly_sync_object);
-		if (ret)
+		if (ret) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 sync ctxdma failed class=0x%x "
+			    "inst=%d start=0x%llx limit=0x%llx err=%d\n",
+			    oclass[0], inst, (unsigned long long)syncbuf,
+			    (unsigned long long)syncbuf + 0x0fff, ret);
 			goto fail;
+		}
 
 		if (sc->fb_usable_size == 0 ||
 		    sc->fb_usable_base + sc->fb_usable_size <= sc->fb_usable_base) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 invalid vram range base=0x%llx "
+			    "size=0x%llx\n",
+			    (unsigned long long)sc->fb_usable_base,
+			    (unsigned long long)sc->fb_usable_size);
 			ret = -ENODEV;
 			goto fail;
 		}
@@ -359,8 +382,22 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		ret = nvkm_dispnv50_ctxdma_new(dmac, "kmsVramCtxDma",
 		    NV50_DISP_HANDLE_VRAM, 0, vram_limit, &dmac->vram,
 		    &dmac->dfly_vram_object);
-		if (ret)
+		if (ret) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 vram ctxdma failed class=0x%x "
+			    "inst=%d limit=0x%llx err=%d\n",
+			    oclass[0], inst, (unsigned long long)vram_limit,
+			    ret);
 			goto fail;
+		}
+
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 ctxdma staged class=0x%x inst=%d "
+		    "sync=0x%x vram=0x%x syncbuf=0x%llx "
+		    "vram_limit=0x%llx\n",
+		    oclass[0], inst, dmac->sync.handle, dmac->vram.handle,
+		    (unsigned long long)syncbuf,
+		    (unsigned long long)vram_limit);
 	}
 
 	dmac->push.wait = nvkm_dispnv50_dmac_wait;
