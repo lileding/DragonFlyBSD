@@ -358,7 +358,10 @@ struct nvkm_gsp_bar1 {
 	uint64_t	next_gva;
 	uint8_t		gva_used[BAR1_GVA_ALLOC_BITMAP_SIZE];
 	uint64_t	flush_vram_paddr;
+	vm_paddr_t	fictitious_start;
+	vm_paddr_t	fictitious_end;
 	bool		ready;
+	bool		fictitious_registered;
 };
 
 struct nvkm_gsp_bar2_pt {

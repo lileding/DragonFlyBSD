@@ -16,6 +16,7 @@
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/conf.h>
+#include <sys/rman.h>
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
@@ -33,6 +34,7 @@
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_vma_manager.h>
+#include <uapi/drm/drm_mode.h>
 
 #include "nvkm_priv.h"
 #include "nvkm_bo.h"
@@ -147,11 +149,9 @@ nvkm_gem_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 {
 	struct drm_gem_object *obj = vm_obj->handle;
 	struct nvkm_bo *bo = to_nvkm_bo(obj);
+	struct nvkm_softc *sc = obj->dev->dev_private;
 	vm_page_t m;
 	vm_paddr_t pa;
-
-	if (bo->kva == NULL)
-		return (VM_PAGER_ERROR);
 
 	if (offset < 0 || (vm_ooffset_t)offset >= obj->size)
 		return (VM_PAGER_ERROR);
@@ -160,8 +160,16 @@ nvkm_gem_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 	 * backing page directly without inserting it into vm_obj. */
 	KKASSERT(*mres == NULL);
 
-	pa = vtophys((uint8_t *)bo->kva + offset);
-	m = PHYS_TO_VM_PAGE(pa);
+	if (bo->kva != NULL) {
+		pa = vtophys((uint8_t *)bo->kva + offset);
+		m = PHYS_TO_VM_PAGE(pa);
+	} else if (bo->bar1_gva != 0 && bo->bar1_size >= (uint64_t)offset +
+	    PAGE_SIZE && sc->bar_res[1] != NULL) {
+		pa = rman_get_start(sc->bar_res[1]) + bo->bar1_gva + offset;
+		m = vm_phys_fictitious_to_vm_page(pa);
+	} else {
+		m = NULL;
+	}
 	if (m == NULL)
 		return (VM_PAGER_ERROR);
 
@@ -178,6 +186,34 @@ struct cdev_pager_ops nvkm_gem_pager_ops = {
 	.cdev_pg_dtor	= nvkm_gem_pager_dtor,
 	.cdev_pg_fault	= nvkm_gem_pager_fault,
 };
+
+static int
+nvkm_bo_bar1_map(struct nvkm_softc *sc, struct nvkm_bo *bo)
+{
+	int err;
+
+	if (bo->bar1_gva != 0)
+		return (0);
+	if (bo->vram_alloc == NULL || bo->paddr == 0)
+		return (EINVAL);
+
+	err = nvkm_gsp_bar1_map_existing_range(sc, bo->paddr, bo->base.size,
+	    &bo->bar1_gva);
+	if (err != 0)
+		return (err);
+	bo->bar1_size = bo->base.size;
+	return (0);
+}
+
+static void
+nvkm_bo_bar1_unmap(struct nvkm_softc *sc, struct nvkm_bo *bo)
+{
+	if (bo->bar1_gva == 0)
+		return;
+	nvkm_gsp_bar1_unmap_existing_range(sc, bo->bar1_gva, bo->bar1_size);
+	bo->bar1_gva = 0;
+	bo->bar1_size = 0;
+}
 
 /* ============================================================
  * BO alloc / free
@@ -259,6 +295,7 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	nvkm_bo_account_free(sc, bo);
 
 	(void)nvkm_bo_resv_wait(bo, false);
+	nvkm_bo_bar1_unmap(sc, bo);
 	if (bo->kva != NULL) {
 		kmem_free(kernel_map, (vm_offset_t)bo->kva, obj->size);
 		bo->kva = NULL;
@@ -299,6 +336,102 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr)
 		return (-ETIME);
 	}
 	return (0);
+}
+
+int
+nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,
+    struct drm_mode_create_dumb *args)
+{
+	struct nvkm_softc *sc = ddev->dev_private;
+	struct nvkm_bo *bo;
+	uint64_t pitch;
+	uint64_t size;
+	uint32_t domain;
+	uint32_t handle;
+	int err;
+
+	if (args->flags != 0)
+		return (-EINVAL);
+
+	pitch = roundup2((uint64_t)args->width * howmany(args->bpp, 8), 64);
+	size = roundup(pitch * args->height, PAGE_SIZE);
+	if (pitch > UINT32_MAX || size == 0)
+		return (-EINVAL);
+
+	domain = sc->bar1.ready ? NOUVEAU_GEM_DOMAIN_VRAM :
+	    NOUVEAU_GEM_DOMAIN_GART;
+	bo = nvkm_bo_create(ddev, size, domain, 0, 0);
+	if (bo == NULL)
+		return (-ENOMEM);
+	if (domain == NOUVEAU_GEM_DOMAIN_VRAM) {
+		err = nvkm_bo_bar1_map(sc, bo);
+		if (err != 0) {
+			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
+			    bo->base.size, domain, err);
+			drm_gem_object_put_unlocked(&bo->base);
+			return (err);
+		}
+	}
+
+	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
+	if (err != 0) {
+		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_HANDLE,
+		    bo->base.size, domain, err);
+		drm_gem_object_put_unlocked(&bo->base);
+		return (err);
+	}
+
+	err = drm_gem_create_mmap_offset(&bo->base);
+	drm_gem_object_put_unlocked(&bo->base);
+	if (err != 0) {
+		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
+		    bo->base.size, domain, err);
+		drm_gem_handle_delete(file_priv, handle);
+		return (err);
+	}
+
+	args->handle = handle;
+	args->pitch = (uint32_t)pitch;
+	args->size = bo->base.size;
+	nvkm_debugf(sc->dev,
+	    "nvkm_bo: DUMB_CREATE handle=%u %ux%u bpp=%u pitch=%u "
+	    "size=0x%llx domain=0x%x paddr=0x%llx bar1=0x%llx\n",
+	    handle, args->width, args->height, args->bpp, args->pitch,
+	    (unsigned long long)args->size, bo->domain,
+	    (unsigned long long)bo->paddr, (unsigned long long)bo->bar1_gva);
+	return (0);
+}
+
+int
+nvkm_bo_dumb_map_offset(struct drm_file *file_priv, struct drm_device *ddev,
+    uint32_t handle, uint64_t *offset)
+{
+	struct drm_gem_object *obj;
+	int err;
+
+	(void)ddev;
+	obj = drm_gem_object_lookup(file_priv, handle);
+	if (obj == NULL)
+		return (-ENOENT);
+	if (obj->import_attach) {
+		drm_gem_object_put_unlocked(obj);
+		return (-EINVAL);
+	}
+
+	err = drm_gem_create_mmap_offset(obj);
+	if (err == 0) {
+		*offset = DRM_GEM_MAPPING_KEY |
+		    DRM_GEM_MAPPING_OFF(obj->map_list.key);
+	}
+	drm_gem_object_put_unlocked(obj);
+	return (err);
+}
+
+int
+nvkm_bo_dumb_destroy(struct drm_file *file_priv, struct drm_device *ddev,
+    uint32_t handle)
+{
+	return (drm_gem_dumb_destroy(file_priv, ddev, handle));
 }
 
 /* ============================================================

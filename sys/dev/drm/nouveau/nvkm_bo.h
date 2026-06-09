@@ -16,6 +16,7 @@
 #include <linux/reservation.h>
 
 struct nvkm_softc;
+struct drm_mode_create_dumb;
 
 /* Mesa NVK / libdrm uapi mirror for ioctl arg structs. */
 struct drm_nouveau_gem_info {
@@ -53,6 +54,8 @@ struct nvkm_bo {
 	void			*kva;		/* page-aligned system-memory KVA */
 	struct nvkm_vram_alloc	*vram_alloc;	/* owned GEM VRAM allocation */
 	uint64_t		paddr;		/* first system paddr or VRAM physical start */
+	uint64_t		bar1_gva;	/* BAR1 GVA for CPU mmap of VRAM BOs */
+	uint64_t		bar1_size;
 	uint32_t		domain;
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
@@ -72,6 +75,12 @@ extern struct cdev_pager_ops nvkm_gem_pager_ops;
 void nvkm_bo_gem_free(struct drm_gem_object *obj);
 void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
+int nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,
+    struct drm_mode_create_dumb *args);
+int nvkm_bo_dumb_map_offset(struct drm_file *file_priv,
+    struct drm_device *ddev, uint32_t handle, uint64_t *offset);
+int nvkm_bo_dumb_destroy(struct drm_file *file_priv, struct drm_device *ddev,
+    uint32_t handle);
 
 /* DRM_NOUVEAU_GEM_* ioctl handlers. */
 int nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
