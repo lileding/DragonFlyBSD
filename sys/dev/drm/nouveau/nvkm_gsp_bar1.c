@@ -398,6 +398,50 @@ nvkm_gsp_bar1_alloc_gva(struct nvkm_gsp_bar1 *b1, uint64_t *pgva)
 	return (ENOSPC);
 }
 
+static int
+nvkm_gsp_bar1_alloc_gva_range(struct nvkm_gsp_bar1 *b1, uint32_t pages,
+    uint64_t *pgva)
+{
+	uint32_t start;
+
+	if (pages == 0 || pages > BAR1_GVA_ALLOC_PAGES)
+		return (EINVAL);
+
+	start = (uint32_t)((b1->next_gva - BAR1_GVA_ALLOC_BASE) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (start >= BAR1_GVA_ALLOC_PAGES)
+		start = 0;
+
+	for (uint32_t i = 0; i < BAR1_GVA_ALLOC_PAGES; i++) {
+		uint32_t idx = (start + i) % BAR1_GVA_ALLOC_PAGES;
+		bool used = false;
+
+		if (idx + pages > BAR1_GVA_ALLOC_PAGES)
+			continue;
+
+		for (uint32_t page = 0; page < pages; page++) {
+			if (nvkm_gsp_bar1_gva_used(b1, idx + page)) {
+				used = true;
+				break;
+			}
+		}
+		if (used)
+			continue;
+
+		for (uint32_t page = 0; page < pages; page++)
+			nvkm_gsp_bar1_gva_set(b1, idx + page, true);
+
+		*pgva = BAR1_GVA_ALLOC_BASE +
+		    (uint64_t)idx * NVKM_GMMU_PT_PAGE_SIZE;
+		b1->next_gva = BAR1_GVA_ALLOC_BASE +
+		    (uint64_t)((idx + pages) % BAR1_GVA_ALLOC_PAGES) *
+		    NVKM_GMMU_PT_PAGE_SIZE;
+		return (0);
+	}
+
+	return (ENOSPC);
+}
+
 static void
 nvkm_gsp_bar1_free_gva(struct nvkm_gsp_bar1 *b1, uint64_t gva)
 {
@@ -412,6 +456,28 @@ nvkm_gsp_bar1_free_gva(struct nvkm_gsp_bar1 *b1, uint64_t gva)
 	idx = (uint32_t)((gva - BAR1_GVA_ALLOC_BASE) /
 	    NVKM_GMMU_PT_PAGE_SIZE);
 	nvkm_gsp_bar1_gva_set(b1, idx, false);
+}
+
+static void
+nvkm_gsp_bar1_free_gva_range(struct nvkm_gsp_bar1 *b1, uint64_t gva,
+    uint32_t pages)
+{
+	uint32_t idx;
+
+	if (pages == 0 ||
+	    gva < BAR1_GVA_ALLOC_BASE ||
+	    gva >= BAR1_GVA_ALLOC_BASE +
+	    (uint64_t)BAR1_GVA_ALLOC_PAGES * NVKM_GMMU_PT_PAGE_SIZE ||
+	    (gva & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0)
+		return;
+
+	idx = (uint32_t)((gva - BAR1_GVA_ALLOC_BASE) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (idx + pages > BAR1_GVA_ALLOC_PAGES)
+		return;
+
+	for (uint32_t page = 0; page < pages; page++)
+		nvkm_gsp_bar1_gva_set(b1, idx + page, false);
 }
 
 
@@ -518,11 +584,63 @@ nvkm_gsp_bar1_map_existing(struct nvkm_softc *sc, uint64_t paddr, uint64_t *pgva
 	return (0);
 }
 
+int
+nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc, uint64_t paddr,
+    uint64_t size, uint64_t *pgva)
+{
+	uint64_t gva;
+	uint32_t pages;
+	int err;
+
+	if (!sc->bar1.ready)
+		return (ENXIO);
+	if (pgva == NULL || size == 0 ||
+	    (paddr & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0)
+		return (EINVAL);
+
+	pages = (uint32_t)((size + NVKM_GMMU_PT_PAGE_SIZE - 1) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (pages == 0 || pages > BAR1_GVA_ALLOC_PAGES)
+		return (EINVAL);
+
+	err = nvkm_gsp_bar1_alloc_gva_range(&sc->bar1, pages, &gva);
+	if (err != 0)
+		return (err);
+
+	for (uint32_t page = 0; page < pages; page++) {
+		err = nvkm_gsp_bar1_map_vram(sc,
+		    gva + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE,
+		    paddr + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE);
+		if (err != 0) {
+			nvkm_gsp_bar1_free_gva_range(&sc->bar1, gva, pages);
+			return (err);
+		}
+	}
+	nvkm_gsp_bar1_flush(sc);
+
+	*pgva = gva;
+	return (0);
+}
+
 void
 nvkm_gsp_bar1_unmap_existing(struct nvkm_softc *sc, uint64_t gva)
 {
 	if (gva != 0)
 		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+}
+
+void
+nvkm_gsp_bar1_unmap_existing_range(struct nvkm_softc *sc, uint64_t gva,
+    uint64_t size)
+{
+	uint32_t pages;
+
+	if (gva == 0 || size == 0)
+		return;
+
+	pages = (uint32_t)((size + NVKM_GMMU_PT_PAGE_SIZE - 1) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	nvkm_gsp_bar1_free_gva_range(&sc->bar1, gva, pages);
 }
 
 void
