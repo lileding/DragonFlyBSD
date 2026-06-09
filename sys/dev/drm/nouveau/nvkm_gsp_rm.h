@@ -181,6 +181,7 @@ struct drm_crtc;
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
 	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi);
+void	 nvkm_dispnv50_fini(struct nvkm_softc *sc);
 
 /* Register DRIVER_MODESET objects backed by imported GSP display discovery. */
 int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
