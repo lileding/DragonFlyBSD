@@ -22,6 +22,7 @@
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper.h>	/* drm_helper_mode_fill_fb_struct */
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_rect.h>
@@ -179,6 +180,30 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_commit	= drm_atomic_helper_commit,
 };
 
+struct nvkm_crtc {
+	struct drm_crtc		base;
+	struct nvkm_softc	*sc;
+	uint32_t		head;	/* HEAD index */
+	uint32_t		win;	/* primary window index */
+};
+
+#define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
+
+static void
+nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head, uint32_t win,
+    int err, const char *where)
+{
+	if (sc == NULL || err == 0)
+		return;
+
+	sc->kms_commit_error_count++;
+	sc->kms_last_error = err;
+	sc->kms_last_head = head;
+	sc->kms_last_win = win;
+	nvkm_infof(sc->dev, "drm: %s failed head=%u win=%u err=%d\n",
+	    where, head, win, err);
+}
+
 /* ===== plane: NVC57E window validation ===== */
 
 static const uint32_t nvkm_plane_formats[] = {
@@ -252,12 +277,67 @@ static void
 nvkm_plane_atomic_update(struct drm_plane *plane,
     struct drm_plane_state *old_state)
 {
-	(void)plane; (void)old_state;	/* programming is staged in dispnv50 */
+	struct drm_plane_state *state = plane->state;
+	struct drm_crtc_state *crtc_state;
+	struct nvkm_crtc *nc;
+	int err;
+
+	(void)old_state;
+	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
+	    !state->visible)
+		return;
+	if (state->crtc->primary != plane)
+		return;
+
+	crtc_state = state->crtc->state;
+	if (crtc_state == NULL || !crtc_state->active)
+		return;
+	if (drm_atomic_crtc_needs_modeset(crtc_state)) {
+		/*
+		 * drm_atomic_helper_commit_tail() commits planes before
+		 * modeset enables.  Full modesets are programmed from
+		 * crtc atomic_enable(); this hook is for same-mode primary
+		 * plane flips and console restore only.
+		 */
+		return;
+	}
+
+	nc = to_nvkm_crtc(state->crtc);
+	if (nc->sc->disp == NULL)
+		return;
+
+	nc->sc->kms_plane_update_count++;
+	err = nvkm_dispnv50_plane_update(nc->sc, state->crtc, nc->win);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "plane update");
+}
+
+static void
+nvkm_plane_atomic_disable(struct drm_plane *plane,
+    struct drm_plane_state *old_state)
+{
+	struct nvkm_crtc *nc;
+	int err;
+
+	if (old_state == NULL || old_state->crtc == NULL)
+		return;
+	if (old_state->crtc->primary != plane)
+		return;
+
+	nc = to_nvkm_crtc(old_state->crtc);
+	if (nc->sc->disp == NULL)
+		return;
+
+	nc->sc->kms_plane_disable_count++;
+	err = nvkm_dispnv50_plane_disable(nc->sc, nc->win);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "plane disable");
 }
 
 static const struct drm_plane_helper_funcs nvkm_plane_helper_funcs = {
 	.atomic_check	= nvkm_plane_atomic_check,
 	.atomic_update	= nvkm_plane_atomic_update,
+	.atomic_disable	= nvkm_plane_atomic_disable,
 };
 
 static void
@@ -278,16 +358,6 @@ static const struct drm_plane_funcs nvkm_plane_funcs = {
 };
 
 /* ===== crtc (NVC57D HEAD): real atomic modeset ===== */
-
-struct nvkm_crtc {
-	struct drm_crtc		base;
-	struct nvkm_softc	*sc;
-	uint32_t		head;	/* HEAD index */
-	uint32_t		win;	/* primary window index */
-};
-
-#define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
-
 
 static int
 nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
@@ -371,6 +441,7 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 
 	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 	    display_id, &hdmi);
+	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);
@@ -641,6 +712,7 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	struct drm_plane_state *pstate;
 	struct drm_display_mode *mode = NULL;
 	struct drm_framebuffer *fb;
+	bool force_modeset;
 	int ret;
 
 	nvkm_infof(sc->dev, "drm: light_up entry drm_dev=%p\n", dev);
@@ -671,12 +743,17 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	if (crtc == NULL)
 		return (ENXIO);
 
+	force_modeset = crtc->state == NULL || !crtc->state->active ||
+	    !drm_mode_equal(&crtc->state->mode, mode);
+
 	fb = nvkm_internal_fb(dev, mode->hdisplay, mode->vdisplay);
 	if (fb == NULL)
 		return (ENOMEM);
 
-	nvkm_infof(sc->dev, "drm: light_up -- mode %ux%u on crtc %u\n",
-	    mode->hdisplay, mode->vdisplay, drm_crtc_index(crtc));
+	nvkm_infof(sc->dev,
+	    "drm: light_up -- mode %ux%u on crtc %u full_modeset=%d\n",
+	    mode->hdisplay, mode->vdisplay, drm_crtc_index(crtc),
+	    force_modeset);
 
 	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
 	state = drm_atomic_state_alloc(dev);
@@ -699,14 +776,11 @@ retry:
 	if (ret != 0)
 		goto out;
 	crtc_state->active = true;
-	/*
-	 * Console restore must reprogram EVO even when userspace used the same
-	 * mode.  This driver currently stages hardware in crtc atomic_enable(),
-	 * while plane atomic_update() is only a DRM bookkeeping hook.
-	 */
-	crtc_state->mode_changed = true;
-	crtc_state->connectors_changed = true;
-	crtc_state->active_changed = true;
+	if (force_modeset) {
+		crtc_state->mode_changed = true;
+		crtc_state->connectors_changed = true;
+		crtc_state->active_changed = true;
+	}
 
 	pstate = drm_atomic_get_plane_state(state, crtc->primary);
 	if (IS_ERR(pstate)) { ret = PTR_ERR(pstate); goto out; }

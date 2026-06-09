@@ -1514,6 +1514,9 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	if (obj->size < min_size)
 		return (EINVAL);
 
+	if (!state->scanout_user || state->console_fb_registered)
+		nvkm_dispnv50_console_unregister(state);
+
 	state->scanout_offset = bo->paddr + fb->offsets[0];
 	state->scanout_width = fb->width;
 	state->scanout_height = fb->height;
@@ -1555,6 +1558,31 @@ nvkm_dispnv50_wndw_format(u32 format)
 	default:
 		return (0);
 	}
+}
+
+static int
+nvkm_dispnv50_select_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
+    bool allow_internal)
+{
+	struct drm_display_mode *mode;
+	int ret;
+
+	ret = nvkm_dispnv50_scanout_from_fb(sc, state, crtc);
+	if (ret == ENOENT && allow_internal) {
+		if (crtc == NULL || crtc->state == NULL)
+			return (EINVAL);
+		mode = &crtc->state->adjusted_mode;
+		if (mode->hdisplay == 0 || mode->vdisplay == 0)
+			return (EINVAL);
+		ret = nvkm_dispnv50_scanout_ensure(sc, state,
+		    mode->hdisplay, mode->vdisplay);
+	}
+	if (ret != 0)
+		return ret;
+	if (nvkm_dispnv50_wndw_format(state->scanout_format) == 0)
+		return (EINVAL);
+	return 0;
 }
 
 static u16
@@ -1884,6 +1912,128 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
 	return 0;
 }
 
+static int
+nvkm_dispnv50_window_program(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
+    struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
+    bool sanitize, const char *reason)
+{
+	struct nv50_wndw_atom asyw;
+	int ret;
+	bool commit_core;
+
+	if (interlock == NULL)
+		return -EINVAL;
+
+	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
+	if (sanitize) {
+		ret = nvkm_dispnv50_wndw_sanitize(wndw);
+		if (ret != 0)
+			goto fail;
+	}
+
+	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = wndw->func->image_set(wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = wndw->func->blend_set(wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+
+	commit_core = interlock[NV50_DISP_INTERLOCK_CORE] != 0;
+	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	ret = wndw->func->update(wndw, interlock);
+	if (ret != 0)
+		goto fail;
+	if (commit_core) {
+		ret = nvkm_dispnv50_core_commit_notify(sc, state, core,
+		    interlock);
+		if (ret != 0)
+			goto fail;
+	}
+
+	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
+	if (!wndw->wndw.dfly_last_idle) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 window channel not idle after %s "
+		    "win=%d stat=0x%08x\n", reason, wndw->id,
+		    wndw->wndw.dfly_last_stat);
+	}
+
+	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 %s armed win=%d scanout=0x%llx offset=0x%llx "
+	    "user=%d\n", reason, wndw->id,
+	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
+	    nvkm_memory_addr(state->scanout)),
+	    (unsigned long long)state->scanout_offset, state->scanout_user);
+	if (!state->scanout_user) {
+		ret = nvkm_dispnv50_console_register(sc, state);
+		if (ret != 0)
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 console fb deferred err=%d\n", ret);
+	}
+	return 0;
+
+fail:
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 %s failed win=%d err=%d\n",
+	    reason, wndw != NULL ? wndw->id : -1, ret);
+	if (ret == 0)
+		return -ENODEV;
+	return ret;
+}
+
+static int
+nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core,
+    struct nv50_wndw *wndw)
+{
+	struct nv50_wndw_atom asyw;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	(void)core;
+	if (wndw->func->image_clr == NULL)
+		return 0;
+
+	memset(&asyw, 0, sizeof(asyw));
+	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+	ret = wndw->func->image_clr(wndw);
+	if (ret != 0)
+		goto fail;
+
+	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	ret = wndw->func->update(wndw, interlock);
+	if (ret != 0)
+		goto fail;
+	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
+
+	nvkm_infof(sc->dev, "drm: dispnv50 window disabled win=%d\n",
+	    wndw->id);
+	return 0;
+
+fail:
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 window disable failed win=%d err=%d\n",
+	    wndw != NULL ? wndw->id : -1, ret);
+	if (ret == 0)
+		return -ENODEV;
+	return ret;
+}
+
 static u8
 nvkm_dispnv50_hdmi_max_ac_packet(struct drm_display_mode *mode)
 {
@@ -2031,13 +2181,73 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 }
 
 int
+nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t win)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_wndw *wndw;
+	struct nv50_core *core;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    win >= nitems(state->wndw) || state->wndw[win] == NULL)
+		return -ENODEV;
+
+	core = state->disp.core;
+	wndw = state->wndw[win];
+	ret = nvkm_dispnv50_select_scanout(sc, state, crtc, true);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 plane scanout select failed win=%u "
+		    "format=0x%08x err=%d\n", win, state->scanout_format, ret);
+		return ret;
+	}
+
+	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
+	    interlock, false, "plane update");
+}
+
+int
+nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_wndw *wndw;
+	struct nv50_core *core;
+	int ret;
+
+	if (sc == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    win >= nitems(state->wndw) || state->wndw[win] == NULL)
+		return -ENODEV;
+
+	core = state->disp.core;
+	wndw = state->wndw[win];
+	return nvkm_dispnv50_window_disable(sc, state, core, wndw);
+}
+
+int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id,
     const struct nvkm_dispnv50_hdmi_info *hdmi)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head_atom asyh;
-	struct nv50_wndw_atom asyw;
 	struct nv50_head *nvhead;
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
@@ -2061,16 +2271,13 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	wndw = state->wndw[win];
 	mode = &crtc->state->adjusted_mode;
 
-	ret = nvkm_dispnv50_scanout_from_fb(sc, state, crtc);
-	if (ret == ENOENT)
-		ret = nvkm_dispnv50_scanout_ensure(sc, state, mode->hdisplay,
-		    mode->vdisplay);
-	if (ret != 0 || nvkm_dispnv50_wndw_format(state->scanout_format) == 0) {
+	ret = nvkm_dispnv50_select_scanout(sc, state, crtc, true);
+	if (ret != 0) {
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 scanout select failed head=%u win=%u "
 		    "format=0x%08x err=%d\n",
 		    head, win, state->scanout_format, ret);
-		return (ret != 0 ? ret : EINVAL);
+		return ret;
 	}
 
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
@@ -2136,37 +2343,8 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
-	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
-	ret = nvkm_dispnv50_wndw_sanitize(wndw);
-	if (ret != 0)
-		goto fail;
-	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
-	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
-	if (ret != 0)
-		goto fail;
-	ret = wndw->func->image_set(wndw, &asyw);
-	if (ret != 0)
-		goto fail;
-	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
-	if (ret != 0)
-		goto fail;
-	ret = wndw->func->blend_set(wndw, &asyw);
-	if (ret != 0)
-		goto fail;
-	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
-	ret = wndw->func->update(wndw, interlock);
-	if (ret != 0)
-		goto fail;
-	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
-	if (ret != 0)
-		goto fail;
-	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
-	if (!wndw->wndw.dfly_last_idle) {
-		nvkm_infof(sc->dev,
-		    "drm: dispnv50 window channel not idle after core notifier "
-		    "win=%u stat=0x%08x\n", win, wndw->wndw.dfly_last_stat);
-	}
-	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
+	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
+	    interlock, true, "bridge");
 	if (ret != 0)
 		goto fail;
 
@@ -2177,12 +2355,6 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
 	    nvkm_memory_addr(state->scanout)),
 	    (unsigned long long)state->scanout_offset);
-	if (!state->scanout_user) {
-		ret = nvkm_dispnv50_console_register(sc, state);
-		if (ret != 0)
-			nvkm_infof(sc->dev,
-			    "drm: dispnv50 console fb deferred err=%d\n", ret);
-	}
 	return 0;
 
 fail:
