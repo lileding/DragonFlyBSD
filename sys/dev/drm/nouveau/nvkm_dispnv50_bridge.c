@@ -16,6 +16,9 @@
 #include "head.h"
 #include "wndw.h"
 
+#include <machine/framebuffer.h>
+#include <sys/callout.h>
+
 #include <core/gpuobj.h>
 #include <core/memory.h>
 #include <core/object.h>
@@ -55,6 +58,7 @@
 	(NVKM_DISPNV50_ILUT_VSS_ENTRIES + NVKM_DISPNV50_ILUT_ENTRIES + 1U)
 #define NVKM_DISPNV50_ILUT_BYTES \
 	(NVKM_DISPNV50_ILUT_TOTAL_ENTRIES * 8U)
+#define NVKM_DISPNV50_CONSOLE_FLUSH_DIV	4U
 
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
@@ -72,6 +76,15 @@ struct nvkm_dispnv50_state {
 	u32 scanout_width;
 	u32 scanout_height;
 	u32 scanout_pitch;
+	struct fb_info console_fb;
+	void *console_shadow;
+	u64 console_shadow_size;
+	struct callout console_flush_callout;
+	bool console_callout_ready;
+	bool console_flush_active;
+	bool console_fb_registered;
+	u64 console_flush_count;
+	u64 console_flush_error_count;
 	bool core_ready;
 };
 
@@ -201,6 +214,197 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 		    "p00=0x%08x p25=0x%08x p50=0x%08x p75=0x%08x\n",
 		    e0, e1, e2, e3, p0, p1, p2, p3);
 	}
+	return 0;
+}
+
+static int
+nvkm_dispnv50_copy_shadow_to_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	const u8 *src;
+	u64 base;
+	u64 size;
+	u64 done = 0;
+
+	if (sc == NULL || state == NULL || state->scanout == NULL ||
+	    state->console_shadow == NULL)
+		return -ENODEV;
+
+	base = nvkm_memory_addr(state->scanout);
+	size = (u64)state->scanout_pitch * state->scanout_height;
+	if (state->console_shadow_size < size)
+		return -ENODEV;
+
+	src = state->console_shadow;
+	while (done < size) {
+		uint64_t gva;
+		u32 chunk;
+		int err;
+
+		err = nvkm_gsp_bar1_map_existing(sc, base + done, &gva);
+		if (err != 0)
+			return nvkm_dispnv50_neg_errno(err);
+
+		chunk = (size - done) > PAGE_SIZE ? PAGE_SIZE :
+		    (u32)(size - done);
+		for (u32 off = 0; off < chunk; off += 4) {
+			u32 pixel;
+
+			memcpy(&pixel, src + done + off, sizeof(pixel));
+			nvkm_gsp_bar1_wr32(sc, gva + off, pixel);
+		}
+
+		nvkm_gsp_bar1_unmap_existing(sc, gva);
+		done += chunk;
+	}
+
+	nvkm_gsp_bar1_flush(sc);
+	return 0;
+}
+
+static void
+nvkm_dispnv50_console_flush(void *arg)
+{
+	struct nvkm_dispnv50_state *state = arg;
+	struct nvkm_softc *sc = state != NULL ? state->disp.dfly_sc : NULL;
+	int ret;
+	int ticks;
+
+	if (state == NULL || !state->console_flush_active)
+		return;
+
+	ret = nvkm_dispnv50_copy_shadow_to_scanout(sc, state);
+	state->console_flush_count++;
+	if (ret != 0) {
+		state->console_flush_error_count++;
+		if (sc != NULL && state->console_flush_error_count <= 4)
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 console flush failed err=%d "
+			    "count=%llu\n", ret,
+			    (unsigned long long)state->console_flush_error_count);
+	}
+
+	ticks = hz / NVKM_DISPNV50_CONSOLE_FLUSH_DIV;
+	if (ticks < 1)
+		ticks = 1;
+	callout_reset(&state->console_flush_callout, ticks,
+	    nvkm_dispnv50_console_flush, state);
+}
+
+static int
+nvkm_dispnv50_console_start_flush(struct nvkm_dispnv50_state *state)
+{
+	int ticks;
+
+	if (!state->console_callout_ready) {
+		callout_init_mp(&state->console_flush_callout);
+		state->console_callout_ready = true;
+	}
+
+	if (state->console_flush_active)
+		return 0;
+
+	ticks = hz / NVKM_DISPNV50_CONSOLE_FLUSH_DIV;
+	if (ticks < 1)
+		ticks = 1;
+	state->console_flush_active = true;
+	callout_reset(&state->console_flush_callout, ticks,
+	    nvkm_dispnv50_console_flush, state);
+	return 0;
+}
+
+static void
+nvkm_dispnv50_console_stop_flush(struct nvkm_dispnv50_state *state)
+{
+	if (state == NULL || !state->console_callout_ready)
+		return;
+
+	state->console_flush_active = false;
+	callout_drain(&state->console_flush_callout);
+}
+
+static void
+nvkm_dispnv50_console_unregister(struct nvkm_dispnv50_state *state)
+{
+	if (state == NULL)
+		return;
+
+	nvkm_dispnv50_console_stop_flush(state);
+	if (state->console_fb_registered) {
+		unregister_framebuffer(&state->console_fb);
+		state->console_fb_registered = false;
+	}
+	if (state->console_shadow != NULL) {
+		kfree(state->console_shadow);
+		state->console_shadow = NULL;
+	}
+	state->console_shadow_size = 0;
+	memset(&state->console_fb, 0, sizeof(state->console_fb));
+}
+
+static int
+nvkm_dispnv50_console_register(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	u64 size;
+	int ret;
+
+	if (state == NULL || state->scanout == NULL ||
+	    state->scanout_width == 0 || state->scanout_height == 0 ||
+	    state->scanout_pitch == 0)
+		return -ENODEV;
+
+	size = (u64)state->scanout_pitch * state->scanout_height;
+	if (state->console_fb_registered &&
+	    state->console_fb.width == state->scanout_width &&
+	    state->console_fb.height == state->scanout_height &&
+	    state->console_fb.stride == state->scanout_pitch &&
+	    state->console_shadow_size >= size)
+		return nvkm_dispnv50_console_start_flush(state);
+
+	nvkm_dispnv50_console_unregister(state);
+
+	state->console_shadow = kzalloc(size, GFP_KERNEL);
+	if (state->console_shadow == NULL)
+		return -ENOMEM;
+	state->console_shadow_size = size;
+
+	memset(&state->console_fb, 0, sizeof(state->console_fb));
+	state->console_fb.vaddr = (vm_offset_t)state->console_shadow;
+	state->console_fb.paddr = vtophys(state->console_shadow);
+	state->console_fb.width = state->scanout_width;
+	state->console_fb.height = state->scanout_height;
+	state->console_fb.stride = state->scanout_pitch;
+	state->console_fb.depth = 32;
+	state->console_fb.is_vga_boot_display = 0;
+	state->console_fb.par = state;
+	state->console_fb.device = sc->dev;
+
+	ret = register_framebuffer(&state->console_fb);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 console fb register failed err=%d\n", ret);
+		nvkm_dispnv50_console_unregister(state);
+		return ret;
+	}
+	state->console_fb_registered = true;
+
+	/*
+	 * syscons renders into this CPU shadow buffer.  Until we grow dirty
+	 * tracking or a stable linear BAR1 mapping, periodically mirror it to
+	 * the pitch-linear VRAM scanout BO programmed above.
+	 */
+	ret = nvkm_dispnv50_copy_shadow_to_scanout(sc, state);
+	if (ret != 0)
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 console initial flush failed err=%d\n", ret);
+	(void)nvkm_dispnv50_console_start_flush(state);
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 console fb registered %ux%u pitch=%u "
+	    "shadow=%p size=0x%llx\n",
+	    state->scanout_width, state->scanout_height, state->scanout_pitch,
+	    state->console_shadow, (unsigned long long)state->console_shadow_size);
 	return 0;
 }
 
@@ -1627,6 +1831,10 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	    head, win, display_id,
 	    (unsigned long long)nvkm_memory_addr(state->scanout),
 	    (unsigned long long)state->scanout_offset);
+	ret = nvkm_dispnv50_console_register(sc, state);
+	if (ret != 0)
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 console fb deferred err=%d\n", ret);
 	return 0;
 
 fail:
@@ -1636,4 +1844,13 @@ fail:
 	if (ret == 0)
 		return (-ENODEV);
 	return ret;
+}
+
+void
+nvkm_dispnv50_fini(struct nvkm_softc *sc)
+{
+	if (sc == NULL || sc->dispnv50 == NULL)
+		return;
+
+	nvkm_dispnv50_console_unregister(sc->dispnv50);
 }
