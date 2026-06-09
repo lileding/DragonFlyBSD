@@ -16,6 +16,9 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_plane.h>
 #include <drm/drm_plane_helper.h>
+#include <nvif/timer.h>
+#include <nvhw/class/clc37d.h>
+#include <nouveau_bo.h>
 
 #ifndef DRM_PLANE_NO_SCALING
 #define DRM_PLANE_NO_SCALING DRM_PLANE_HELPER_NO_SCALING
@@ -109,10 +112,14 @@ static inline int
 base507c_ntfy_wait_begun(struct nouveau_bo *bo, u32 offset,
     struct nvif_device *device)
 {
-	(void)bo;
-	(void)offset;
-	(void)device;
-	return -ENOSYS;
+	s64 time = nvif_msec(device, 2000ULL,
+		if (NVBO_TD32(bo, offset, NV_DISP_NOTIFIER, _0, STATUS, ==,
+		    BEGUN))
+			break;
+		usleep_range(1, 2);
+	);
+
+	return time < 0 ? time : 0;
 }
 
 static inline void
