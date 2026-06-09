@@ -699,6 +699,14 @@ retry:
 	if (ret != 0)
 		goto out;
 	crtc_state->active = true;
+	/*
+	 * Console restore must reprogram EVO even when userspace used the same
+	 * mode.  This driver currently stages hardware in crtc atomic_enable(),
+	 * while plane atomic_update() is only a DRM bookkeeping hook.
+	 */
+	crtc_state->mode_changed = true;
+	crtc_state->connectors_changed = true;
+	crtc_state->active_changed = true;
 
 	pstate = drm_atomic_get_plane_state(state, crtc->primary);
 	if (IS_ERR(pstate)) { ret = PTR_ERR(pstate); goto out; }
