@@ -50,6 +50,7 @@ static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
+static void nvkm_drm_lastclose(struct drm_device *ddev);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
 
@@ -88,6 +89,7 @@ static struct drm_driver nvkm_drm_driver = {
 	.patchlevel = NVKM_DRM_PATCH,
 	.open = nvkm_drm_open,
 	.postclose = nvkm_drm_postclose,
+	.lastclose = nvkm_drm_lastclose,
 	.gem_vm_ops = &nvkm_gem_pager_ops,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
 	.dumb_create = nvkm_bo_dumb_create,
@@ -975,6 +977,22 @@ static void
 nvkm_drm_postclose(struct drm_device *ddev, struct drm_file *file_priv)
 {
 	nvkm_drm_file_release(ddev, file_priv);
+}
+
+static void
+nvkm_drm_lastclose(struct drm_device *ddev)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	int err;
+
+	if (sc == NULL)
+		return;
+
+	err = nvkm_drm_kms_schedule(sc, "lastclose");
+	if (err != 0)
+		nvkm_infof(sc->dev,
+		    "drm: lastclose console restore schedule failed err=%d\n",
+		    err);
 }
 
 /* ---- Helper: locate nvkm_softc from drm_file ---- */
