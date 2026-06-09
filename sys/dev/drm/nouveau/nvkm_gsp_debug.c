@@ -315,6 +315,21 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "msi_rearm_count = %llu\n",
 	    (unsigned long long)sc->irq_msi_rearm_count);
 
+	sbuf_cat(&sb, "\nkms\n");
+	sbuf_printf(&sb, "auto_count = %llu\n",
+	    (unsigned long long)sc->kms_auto_count);
+	sbuf_printf(&sb, "hotplug_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_count);
+	sbuf_printf(&sb, "plane_update_count = %llu\n",
+	    (unsigned long long)sc->kms_plane_update_count);
+	sbuf_printf(&sb, "plane_disable_count = %llu\n",
+	    (unsigned long long)sc->kms_plane_disable_count);
+	sbuf_printf(&sb, "commit_error_count = %llu\n",
+	    (unsigned long long)sc->kms_commit_error_count);
+	sbuf_printf(&sb, "last_error = %d\n", sc->kms_last_error);
+	sbuf_printf(&sb, "last_head = %u\n", sc->kms_last_head);
+	sbuf_printf(&sb, "last_win = %u\n", sc->kms_last_win);
+
 	sbuf_cat(&sb, "\ngsp_events\n");
 	sbuf_printf(&sb, "post_event_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_count);
