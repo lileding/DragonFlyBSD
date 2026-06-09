@@ -185,10 +185,12 @@ void	 nvkm_dispnv50_fini(struct nvkm_softc *sc);
 
 /* Register DRIVER_MODESET objects backed by imported GSP display discovery. */
 int	 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc);
+void	 nvkm_drm_kms_fini(struct nvkm_softc *sc);
+int	 nvkm_drm_kms_schedule(struct nvkm_softc *sc, const char *reason);
 
 /* Driver-internal atomic modeset: drive the first connected output's preferred
  * mode through the full atomic path (-> crtc atomic_enable -> EVO modeset).
- * Triggered via the dev.drm.<n>.kms_lightup sysctl. Returns 0 / errno. */
+ * Used by the auto-KMS task and by the debug sysctl. Returns 0 / errno. */
 int	 nvkm_drm_kms_light_up(struct nvkm_softc *sc);
 
 /* Allocated VA space (FERMI_VASPACE_A) — server-managed PDE flavour

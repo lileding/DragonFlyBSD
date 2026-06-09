@@ -22,6 +22,7 @@
 #include <sys/thread2.h>
 #include <machine/atomic.h>
 #include <sys/proc.h>
+#include <sys/taskqueue.h>
 
 #include <drm/drm_mm.h>
 
@@ -480,6 +481,10 @@ struct nvkm_softc {
 	struct pci_dev		*drm_pdev;
 	uint64_t		fence_context;
 	uint32_t		fence_seqno;
+	struct task		kms_task;
+	bool			kms_task_initialized;
+	uint64_t		kms_auto_count;
+	uint64_t		kms_hotplug_count;
 
 	/* M5 observability counters. */
 	uint64_t		exec_submit_count;

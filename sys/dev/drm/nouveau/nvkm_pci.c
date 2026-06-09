@@ -820,6 +820,7 @@ nvkm_pci_attach(device_t dev)
 						sc->gsp_drain_exit = false;
 						(void)kthread_create(nvkm_gsp_drain_kthread, sc,
 						    &sc->gsp_drain_td, "nvkm-msgq-drain");
+						(void)nvkm_drm_kms_schedule(sc, "attach");
 #if NVKM_RUN_SUBMIT_TEST
 						sc->gsp_test_done = false;
 						(void)kthread_create(nvkm_gsp_test_kthread, sc,

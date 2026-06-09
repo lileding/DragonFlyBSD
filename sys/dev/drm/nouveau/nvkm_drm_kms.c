@@ -352,6 +352,51 @@ static const struct drm_encoder_funcs nvkm_encoder_funcs = {
 
 /* ===== init ===== */
 
+static void
+nvkm_drm_kms_task(void *arg, int pending)
+{
+	struct nvkm_softc *sc = arg;
+	int ret;
+
+	(void)pending;
+	if (sc == NULL || sc->drm_dev == NULL)
+		return;
+
+	ret = nvkm_drm_kms_light_up(sc);
+	nvkm_infof(sc->dev, "drm: auto KMS commit -> %d\n", ret);
+}
+
+int
+nvkm_drm_kms_schedule(struct nvkm_softc *sc, const char *reason)
+{
+	int ret;
+
+	if (sc == NULL || !sc->kms_task_initialized || sc->drm_dev == NULL)
+		return (ENODEV);
+
+	if (reason != NULL && strcmp(reason, "hotplug") == 0)
+		sc->kms_hotplug_count++;
+	else
+		sc->kms_auto_count++;
+
+	nvkm_infof(sc->dev, "drm: schedule auto KMS (%s)\n",
+	    reason != NULL ? reason : "unspecified");
+	ret = taskqueue_enqueue(taskqueue_thread[0], &sc->kms_task);
+	return (ret);
+}
+
+void
+nvkm_drm_kms_fini(struct nvkm_softc *sc)
+{
+	if (sc == NULL || !sc->kms_task_initialized)
+		return;
+
+	while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_task, NULL) != 0)
+		taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
+	taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
+	sc->kms_task_initialized = false;
+}
+
 int
 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 {
@@ -376,6 +421,10 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	supported_mask = nvkm_gsp_disp_supported_mask(sc);
 	if (supported_mask == 0)
 		return (0);
+	if (!sc->kms_task_initialized) {
+		TASK_INIT(&sc->kms_task, 0, nvkm_drm_kms_task, sc);
+		sc->kms_task_initialized = true;
+	}
 
 	/* (1) One CRTC (HEAD) + primary plane (window) per head. The plane's
 	 * possible_crtcs is BIT(h) because CRTCs get index h in creation order. */

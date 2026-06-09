@@ -156,6 +156,7 @@ SYSCTL_INT(_kern_syscons, OID_AUTO, enable_bell, CTLFLAG_RW, &enable_bell,
 	   0, "Enable bell");
 
 static int desired_cols = 0;
+static int desired_cols_fetched;
 TUNABLE_INT("kern.kms_columns", &desired_cols);
 
 #define SC_CONSOLECTL	255
@@ -460,6 +461,10 @@ void
 sc_font_scale(scr_stat *scp, int max_cols, int max_rows)
 {
 	int cols, rows;
+
+	if (!desired_cols_fetched &&
+	    TUNABLE_INT_FETCH("kern.kms_columns", &desired_cols))
+		desired_cols_fetched = 1;
 
 	/*
 	 * If columns not specified in /boot/loader.conf then
