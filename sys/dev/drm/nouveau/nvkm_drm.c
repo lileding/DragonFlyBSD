@@ -690,6 +690,7 @@ nvkm_drm_register(struct nvkm_softc *sc)
 void
 nvkm_drm_unregister(struct nvkm_softc *sc)
 {
+	nvkm_dispnv50_fini(sc);
 	if (sc->drm_dev != NULL) {
 		drm_dev_unregister(sc->drm_dev);
 		drm_dev_put(sc->drm_dev);
