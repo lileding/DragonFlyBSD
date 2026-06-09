@@ -1441,8 +1441,12 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	if (state->scanout != NULL &&
 	    state->scanout_width == width &&
 	    state->scanout_height == height &&
-	    state->scanout_pitch == pitch)
+	    state->scanout_pitch == pitch) {
+		state->scanout_offset = nvkm_memory_addr(state->scanout);
+		state->scanout_format = DRM_FORMAT_XRGB8888;
+		state->scanout_user = false;
 		return 0;
+	}
 
 	nvkm_memory_unref(&state->scanout);
 	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM, size,
