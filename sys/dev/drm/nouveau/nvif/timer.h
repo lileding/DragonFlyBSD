@@ -10,15 +10,22 @@
 
 #include <nvif/os.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
 
 struct nvif_device;
 
 #define nvif_msec(device, msec, body...) ({ \
-	s64 _nvif_timer_ret = -ETIMEDOUT; \
+	const ktime_t _nvif_timer_start = ktime_get(); \
+	const s64 _nvif_timer_limit = (s64)(msec) * NSEC_PER_MSEC; \
+	s64 _nvif_timer_taken = 0; \
+	(void)(device); \
 	do { \
 		body \
-	} while (0); \
-	_nvif_timer_ret; \
+		_nvif_timer_taken = ktime_to_ns( \
+		    ktime_sub(ktime_get(), _nvif_timer_start)); \
+	} while (_nvif_timer_taken <= _nvif_timer_limit); \
+	_nvif_timer_taken <= _nvif_timer_limit ? \
+	    _nvif_timer_taken : -ETIMEDOUT; \
 })
 
 #endif

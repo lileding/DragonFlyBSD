@@ -300,6 +300,7 @@ nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
 	u64 relative;
 	int ret;
 
+	state->sync_bo.sc = sc;
 	if (state->sync_mem != NULL)
 		return 0;
 
@@ -1253,6 +1254,90 @@ nvkm_dispnv50_wndw_sanitize(struct nv50_wndw *wndw)
 	return 0;
 }
 
+static int
+nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
+    struct nv50_wndw_atom *asyw)
+{
+	if (state->disp.sync == NULL || wndw->func->ntfy_reset == NULL ||
+	    wndw->func->ntfy_set == NULL)
+		return -ENODEV;
+
+	asyw->ntfy.handle = wndw->wndw.sync.handle;
+	asyw->ntfy.offset = wndw->ntfy;
+	asyw->ntfy.awaken = false;
+	wndw->func->ntfy_reset(state->disp.sync, wndw->ntfy);
+	wndw->ntfy ^= 0x10;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 window notifier armed win=%d handle=0x%x "
+	    "offset=0x%llx next=0x%x\n",
+	    wndw->id, asyw->ntfy.handle,
+	    (unsigned long long)asyw->ntfy.offset, wndw->ntfy);
+	return wndw->func->ntfy_set(wndw, asyw);
+}
+
+static int
+nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
+{
+	u32 status;
+	int ret;
+
+	if (state->disp.sync == NULL || core->func->ntfy_init == NULL ||
+	    core->func->ntfy_wait_done == NULL)
+		return -ENODEV;
+
+	core->func->ntfy_init(state->disp.sync, NV50_DISP_CORE_NTFY);
+	ret = core->func->update(core, interlock, true);
+	if (ret != 0)
+		return ret;
+
+	ret = core->func->ntfy_wait_done(state->disp.sync, NV50_DISP_CORE_NTFY,
+	    core->chan.base.device);
+	status = nouveau_bo_rd32(state->disp.sync, NV50_DISP_CORE_NTFY / 4);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 core notifier timeout status=0x%08x "
+		    "err=%d\n", status, ret);
+		return ret;
+	}
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 core notifier done status=0x%08x\n", status);
+	return 0;
+}
+
+static int
+nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
+    struct nv50_wndw_atom *asyw)
+{
+	u32 status;
+	int ret;
+
+	if (state->disp.sync == NULL || wndw->func->ntfy_wait_begun == NULL)
+		return -ENODEV;
+
+	ret = wndw->func->ntfy_wait_begun(state->disp.sync, asyw->ntfy.offset,
+	    wndw->wndw.base.device);
+	status = nouveau_bo_rd32(state->disp.sync, asyw->ntfy.offset / 4);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 window notifier timeout win=%d "
+		    "offset=0x%llx status=0x%08x err=%d\n",
+		    wndw->id, (unsigned long long)asyw->ntfy.offset,
+		    status, ret);
+		return ret;
+	}
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 window notifier begun win=%d offset=0x%llx "
+	    "status=0x%08x\n",
+	    wndw->id, (unsigned long long)asyw->ntfy.offset, status);
+	return 0;
+}
+
 static u8
 nvkm_dispnv50_hdmi_max_ac_packet(struct drm_display_mode *mode)
 {
@@ -1507,6 +1592,9 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
 	ret = wndw->func->image_set(wndw, &asyw);
 	if (ret != 0)
 		goto fail;
@@ -1520,17 +1608,18 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
-	ret = core->func->update(core, interlock, false);
+	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
 	if (ret != 0)
 		goto fail;
 	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
 	if (!wndw->wndw.dfly_last_idle) {
 		nvkm_infof(sc->dev,
-		    "drm: dispnv50 window update did not idle after core update "
+		    "drm: dispnv50 window channel not idle after core notifier "
 		    "win=%u stat=0x%08x\n", win, wndw->wndw.dfly_last_stat);
-		ret = -EIO;
-		goto fail;
 	}
+	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
+	if (ret != 0)
+		goto fail;
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
