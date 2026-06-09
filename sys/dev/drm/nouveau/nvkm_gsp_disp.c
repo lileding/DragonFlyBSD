@@ -1433,6 +1433,15 @@ r535_disp_hpd(struct nvkm_gsp_event *event, void *repv, u32 repc)
 		if (mask)
 			nvkm_event_ntfy(&disp->rm.event, i, mask);
 	}
+
+#ifdef __DragonFly__
+	if (hpd->plugDisplayMask) {
+		struct nvkm_gsp *gsp = disp->engine.subdev.device->gsp;
+
+		if (gsp && gsp->sc)
+			(void)nvkm_drm_kms_schedule(gsp->sc, "hotplug");
+	}
+#endif
 }
 
 static const struct nvkm_event_func
