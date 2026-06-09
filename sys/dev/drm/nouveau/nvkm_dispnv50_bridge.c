@@ -58,7 +58,7 @@
 	(NVKM_DISPNV50_ILUT_VSS_ENTRIES + NVKM_DISPNV50_ILUT_ENTRIES + 1U)
 #define NVKM_DISPNV50_ILUT_BYTES \
 	(NVKM_DISPNV50_ILUT_TOTAL_ENTRIES * 8U)
-#define NVKM_DISPNV50_CONSOLE_FLUSH_DIV	4U
+#define NVKM_DISPNV50_CONSOLE_FLUSH_HZ	25U
 
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
@@ -78,11 +78,18 @@ struct nvkm_dispnv50_state {
 	u32 scanout_pitch;
 	struct fb_info console_fb;
 	void *console_shadow;
+	void *console_snapshot;
 	u64 console_shadow_size;
+	uint64_t *console_shadow_bar1_gva;
+	uint64_t console_direct_bar1_gva;
+	u64 console_direct_bar1_size;
+	u64 console_scanout_addr;
+	u32 console_shadow_bar1_pages;
 	struct callout console_flush_callout;
 	bool console_callout_ready;
 	bool console_flush_active;
 	bool console_fb_registered;
+	bool console_direct_map;
 	u64 console_flush_count;
 	u64 console_flush_error_count;
 	bool core_ready;
@@ -218,43 +225,154 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 }
 
 static int
-nvkm_dispnv50_copy_shadow_to_scanout(struct nvkm_softc *sc,
-    struct nvkm_dispnv50_state *state)
+nvkm_dispnv50_console_map_direct(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, u64 size)
 {
-	const u8 *src;
-	u64 base;
-	u64 size;
-	u64 done = 0;
+	void *bar1_base;
+	u64 scanout_addr;
+	u64 map_addr;
+	u64 map_offset;
+	u64 map_size;
+	uint64_t bar1_gva;
+	int err;
 
 	if (sc == NULL || state == NULL || state->scanout == NULL ||
-	    state->console_shadow == NULL)
+	    sc->bar_res[1] == NULL || size == 0)
 		return -ENODEV;
+
+	bar1_base = rman_get_virtual(sc->bar_res[1]);
+	if (bar1_base == NULL)
+		return -ENODEV;
+
+	scanout_addr = nvkm_memory_addr(state->scanout);
+	map_addr = scanout_addr & ~(u64)(PAGE_SIZE - 1);
+	map_offset = scanout_addr - map_addr;
+	if (size > (u64)-1 - map_offset)
+		return -EINVAL;
+	map_size = size + map_offset;
+
+	err = nvkm_gsp_bar1_map_existing_range(sc, map_addr, map_size,
+	    &bar1_gva);
+	if (err != 0)
+		return nvkm_dispnv50_neg_errno(err);
+	if (bar1_gva > rman_get_size(sc->bar_res[1]) ||
+	    map_size > rman_get_size(sc->bar_res[1]) - bar1_gva) {
+		nvkm_gsp_bar1_unmap_existing_range(sc, bar1_gva, map_size);
+		return -ENOSPC;
+	}
+
+	state->console_direct_bar1_gva = bar1_gva;
+	state->console_direct_bar1_size = map_size;
+	state->console_scanout_addr = scanout_addr;
+	state->console_direct_map = true;
+	state->console_fb.vaddr = (vm_offset_t)((uintptr_t)bar1_base +
+	    bar1_gva + map_offset);
+	state->console_fb.paddr = (vm_paddr_t)(rman_get_start(sc->bar_res[1]) +
+	    bar1_gva + map_offset);
+	return 0;
+}
+
+static int
+nvkm_dispnv50_console_map_shadow_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, u64 size)
+{
+	u64 base;
+	u32 pages;
+	int err;
+
+	if (sc == NULL || state == NULL || state->scanout == NULL || size == 0)
+		return -ENODEV;
+
+	pages = (u32)((size + PAGE_SIZE - 1) / PAGE_SIZE);
+	state->console_shadow_bar1_gva = kzalloc((u64)pages * sizeof(u64),
+	    GFP_KERNEL);
+	if (state->console_shadow_bar1_gva == NULL)
+		return -ENOMEM;
+	state->console_shadow_bar1_pages = pages;
 
 	base = nvkm_memory_addr(state->scanout);
-	size = (u64)state->scanout_pitch * state->scanout_height;
-	if (state->console_shadow_size < size)
+	state->console_scanout_addr = base;
+	for (u32 i = 0; i < pages; i++) {
+		err = nvkm_gsp_bar1_map_existing(sc, base + (u64)i * PAGE_SIZE,
+		    &state->console_shadow_bar1_gva[i]);
+		if (err != 0) {
+			for (u32 j = 0; j < i; j++)
+				nvkm_gsp_bar1_unmap_existing(sc,
+				    state->console_shadow_bar1_gva[j]);
+			kfree(state->console_shadow_bar1_gva);
+			state->console_shadow_bar1_gva = NULL;
+			state->console_scanout_addr = 0;
+			state->console_shadow_bar1_pages = 0;
+			return nvkm_dispnv50_neg_errno(err);
+		}
+	}
+
+	return 0;
+}
+
+static void
+nvkm_dispnv50_console_unmap_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	if (state == NULL)
+		return;
+
+	if (state->console_direct_map && sc != NULL)
+		nvkm_gsp_bar1_unmap_existing_range(sc,
+		    state->console_direct_bar1_gva,
+		    state->console_direct_bar1_size);
+	state->console_direct_map = false;
+	state->console_direct_bar1_gva = 0;
+	state->console_direct_bar1_size = 0;
+
+	if (state->console_shadow_bar1_gva != NULL && sc != NULL) {
+		for (u32 i = 0; i < state->console_shadow_bar1_pages; i++)
+			nvkm_gsp_bar1_unmap_existing(sc,
+			    state->console_shadow_bar1_gva[i]);
+	}
+	kfree(state->console_shadow_bar1_gva);
+	state->console_shadow_bar1_gva = NULL;
+	state->console_scanout_addr = 0;
+	state->console_shadow_bar1_pages = 0;
+}
+
+static int
+nvkm_dispnv50_copy_buffer_range_to_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, const u8 *src, u64 start, u64 size)
+{
+	u64 done = 0;
+	u64 total;
+
+	if (sc == NULL || state == NULL || state->scanout == NULL ||
+	    state->console_shadow_bar1_gva == NULL || src == NULL)
 		return -ENODEV;
 
-	src = state->console_shadow;
+	total = (u64)state->scanout_pitch * state->scanout_height;
+	if (start > total || size > total - start)
+		return -ENODEV;
+
 	while (done < size) {
-		uint64_t gva;
+		u64 byte = start + done;
+		u32 page = (u32)(byte / PAGE_SIZE);
+		u32 page_off = (u32)(byte & (PAGE_SIZE - 1));
 		u32 chunk;
-		int err;
 
-		err = nvkm_gsp_bar1_map_existing(sc, base + done, &gva);
-		if (err != 0)
-			return nvkm_dispnv50_neg_errno(err);
+		if (page >= state->console_shadow_bar1_pages ||
+		    state->console_shadow_bar1_gva[page] == 0)
+			return -ENODEV;
 
-		chunk = (size - done) > PAGE_SIZE ? PAGE_SIZE :
-		    (u32)(size - done);
+		chunk = PAGE_SIZE - page_off;
+		if ((u64)chunk > size - done)
+			chunk = (u32)(size - done);
 		for (u32 off = 0; off < chunk; off += 4) {
 			u32 pixel;
 
-			memcpy(&pixel, src + done + off, sizeof(pixel));
-			nvkm_gsp_bar1_wr32(sc, gva + off, pixel);
+			memcpy(&pixel, src + start + done + off, sizeof(pixel));
+			nvkm_gsp_bar1_wr32(sc,
+			    state->console_shadow_bar1_gva[page] + page_off +
+			    off, pixel);
 		}
 
-		nvkm_gsp_bar1_unmap_existing(sc, gva);
 		done += chunk;
 	}
 
@@ -262,18 +380,108 @@ nvkm_dispnv50_copy_shadow_to_scanout(struct nvkm_softc *sc,
 	return 0;
 }
 
+static int
+nvkm_dispnv50_copy_shadow_to_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	u64 size;
+
+	if (state == NULL || state->console_shadow == NULL ||
+	    state->console_snapshot == NULL)
+		return -ENODEV;
+
+	size = (u64)state->scanout_pitch * state->scanout_height;
+	if (state->console_shadow_size < size)
+		return -ENODEV;
+
+	memcpy(state->console_snapshot, state->console_shadow, size);
+	return nvkm_dispnv50_copy_buffer_range_to_scanout(sc, state,
+	    state->console_snapshot, 0, size);
+}
+
+static int
+nvkm_dispnv50_console_flush_rows(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, u32 first, u32 last)
+{
+	u64 start;
+	u64 size;
+
+	if (last <= first)
+		return 0;
+
+	start = (u64)first * state->scanout_pitch;
+	size = (u64)(last - first) * state->scanout_pitch;
+
+	memcpy((u8 *)state->console_snapshot + start,
+	    (u8 *)state->console_shadow + start, size);
+	return nvkm_dispnv50_copy_buffer_range_to_scanout(sc, state,
+	    state->console_snapshot, start, size);
+}
+
+static int
+nvkm_dispnv50_copy_dirty_shadow_to_scanout(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, u32 *dirty_rows)
+{
+	const u32 height = state->scanout_height;
+	const u32 pitch = state->scanout_pitch;
+	u32 run_first = 0;
+	bool in_run = false;
+	int ret;
+
+	*dirty_rows = 0;
+	for (u32 y = 0; y < height; y++) {
+		u64 off = (u64)y * pitch;
+
+		if (memcmp((u8 *)state->console_shadow + off,
+		    (u8 *)state->console_snapshot + off, pitch) != 0) {
+			if (!in_run) {
+				run_first = y;
+				in_run = true;
+			}
+			(*dirty_rows)++;
+			continue;
+		}
+
+		if (!in_run)
+			continue;
+
+		ret = nvkm_dispnv50_console_flush_rows(sc, state, run_first, y);
+		if (ret != 0)
+			return ret;
+		in_run = false;
+	}
+
+	if (in_run) {
+		ret = nvkm_dispnv50_console_flush_rows(sc, state, run_first,
+		    height);
+		if (ret != 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int
+nvkm_dispnv50_console_flush_ticks(void)
+{
+	int ticks = hz / NVKM_DISPNV50_CONSOLE_FLUSH_HZ;
+
+	return ticks < 1 ? 1 : ticks;
+}
+
 static void
 nvkm_dispnv50_console_flush(void *arg)
 {
 	struct nvkm_dispnv50_state *state = arg;
 	struct nvkm_softc *sc = state != NULL ? state->disp.dfly_sc : NULL;
+	u32 dirty_rows = 0;
 	int ret;
-	int ticks;
 
 	if (state == NULL || !state->console_flush_active)
 		return;
 
-	ret = nvkm_dispnv50_copy_shadow_to_scanout(sc, state);
+	ret = nvkm_dispnv50_copy_dirty_shadow_to_scanout(sc, state,
+	    &dirty_rows);
 	state->console_flush_count++;
 	if (ret != 0) {
 		state->console_flush_error_count++;
@@ -284,18 +492,14 @@ nvkm_dispnv50_console_flush(void *arg)
 			    (unsigned long long)state->console_flush_error_count);
 	}
 
-	ticks = hz / NVKM_DISPNV50_CONSOLE_FLUSH_DIV;
-	if (ticks < 1)
-		ticks = 1;
-	callout_reset(&state->console_flush_callout, ticks,
+	callout_reset(&state->console_flush_callout,
+	    nvkm_dispnv50_console_flush_ticks(),
 	    nvkm_dispnv50_console_flush, state);
 }
 
 static int
 nvkm_dispnv50_console_start_flush(struct nvkm_dispnv50_state *state)
 {
-	int ticks;
-
 	if (!state->console_callout_ready) {
 		callout_init_mp(&state->console_flush_callout);
 		state->console_callout_ready = true;
@@ -304,11 +508,9 @@ nvkm_dispnv50_console_start_flush(struct nvkm_dispnv50_state *state)
 	if (state->console_flush_active)
 		return 0;
 
-	ticks = hz / NVKM_DISPNV50_CONSOLE_FLUSH_DIV;
-	if (ticks < 1)
-		ticks = 1;
 	state->console_flush_active = true;
-	callout_reset(&state->console_flush_callout, ticks,
+	callout_reset(&state->console_flush_callout,
+	    nvkm_dispnv50_console_flush_ticks(),
 	    nvkm_dispnv50_console_flush, state);
 	return 0;
 }
@@ -326,13 +528,21 @@ nvkm_dispnv50_console_stop_flush(struct nvkm_dispnv50_state *state)
 static void
 nvkm_dispnv50_console_unregister(struct nvkm_dispnv50_state *state)
 {
+	struct nvkm_softc *sc;
+
 	if (state == NULL)
 		return;
 
+	sc = state->disp.dfly_sc;
 	nvkm_dispnv50_console_stop_flush(state);
 	if (state->console_fb_registered) {
 		unregister_framebuffer(&state->console_fb);
 		state->console_fb_registered = false;
+	}
+	nvkm_dispnv50_console_unmap_scanout(sc, state);
+	if (state->console_snapshot != NULL) {
+		kfree(state->console_snapshot);
+		state->console_snapshot = NULL;
 	}
 	if (state->console_shadow != NULL) {
 		kfree(state->console_shadow);
@@ -348,6 +558,7 @@ nvkm_dispnv50_console_register(struct nvkm_softc *sc,
 {
 	u64 size;
 	int ret;
+	int direct_ret;
 
 	if (state == NULL || state->scanout == NULL ||
 	    state->scanout_width == 0 || state->scanout_height == 0 ||
@@ -359,19 +570,17 @@ nvkm_dispnv50_console_register(struct nvkm_softc *sc,
 	    state->console_fb.width == state->scanout_width &&
 	    state->console_fb.height == state->scanout_height &&
 	    state->console_fb.stride == state->scanout_pitch &&
-	    state->console_shadow_size >= size)
-		return nvkm_dispnv50_console_start_flush(state);
+	    state->console_scanout_addr == nvkm_memory_addr(state->scanout)) {
+		if (state->console_direct_map)
+			return 0;
+		if (state->console_shadow_size >= size &&
+		    state->console_snapshot != NULL)
+			return nvkm_dispnv50_console_start_flush(state);
+	}
 
 	nvkm_dispnv50_console_unregister(state);
 
-	state->console_shadow = kzalloc(size, GFP_KERNEL);
-	if (state->console_shadow == NULL)
-		return -ENOMEM;
-	state->console_shadow_size = size;
-
 	memset(&state->console_fb, 0, sizeof(state->console_fb));
-	state->console_fb.vaddr = (vm_offset_t)state->console_shadow;
-	state->console_fb.paddr = vtophys(state->console_shadow);
 	state->console_fb.width = state->scanout_width;
 	state->console_fb.height = state->scanout_height;
 	state->console_fb.stride = state->scanout_pitch;
@@ -380,19 +589,68 @@ nvkm_dispnv50_console_register(struct nvkm_softc *sc,
 	state->console_fb.par = state;
 	state->console_fb.device = sc->dev;
 
+	direct_ret = nvkm_dispnv50_console_map_direct(sc, state, size);
+	if (direct_ret == 0) {
+		ret = register_framebuffer(&state->console_fb);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 direct console fb register failed "
+			    "err=%d\n", ret);
+			nvkm_dispnv50_console_unregister(state);
+			return ret;
+		}
+		state->console_fb_registered = true;
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 console fb registered %ux%u pitch=%u "
+		    "direct_bar1=0x%llx size=0x%llx vaddr=%p paddr=0x%llx\n",
+		    state->scanout_width, state->scanout_height,
+		    state->scanout_pitch,
+		    (unsigned long long)state->console_direct_bar1_gva,
+		    (unsigned long long)state->console_direct_bar1_size,
+		    (void *)state->console_fb.vaddr,
+		    (unsigned long long)state->console_fb.paddr);
+		return 0;
+	}
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 direct console BAR1 map failed err=%d; "
+	    "falling back to shadow flush\n", direct_ret);
+
+	state->console_shadow = kzalloc(size, GFP_KERNEL);
+	if (state->console_shadow == NULL)
+		return -ENOMEM;
+	state->console_snapshot = kzalloc(size, GFP_KERNEL);
+	if (state->console_snapshot == NULL) {
+		nvkm_dispnv50_console_unregister(state);
+		return -ENOMEM;
+	}
+	state->console_shadow_size = size;
+
+	ret = nvkm_dispnv50_console_map_shadow_scanout(sc, state, size);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 shadow console BAR1 map failed err=%d\n",
+		    ret);
+		nvkm_dispnv50_console_unregister(state);
+		return ret;
+	}
+
+	state->console_fb.vaddr = (vm_offset_t)state->console_shadow;
+	state->console_fb.paddr = vtophys(state->console_shadow);
+
 	ret = register_framebuffer(&state->console_fb);
 	if (ret != 0) {
 		nvkm_infof(sc->dev,
-		    "drm: dispnv50 console fb register failed err=%d\n", ret);
+		    "drm: dispnv50 shadow console fb register failed err=%d\n",
+		    ret);
 		nvkm_dispnv50_console_unregister(state);
 		return ret;
 	}
 	state->console_fb_registered = true;
 
 	/*
-	 * syscons renders into this CPU shadow buffer.  Until we grow dirty
-	 * tracking or a stable linear BAR1 mapping, periodically mirror it to
-	 * the pitch-linear VRAM scanout BO programmed above.
+	 * Fallback only: syscons renders into this CPU shadow buffer. Mirror
+	 * changed rows to the pitch-linear VRAM scanout BO with cached BAR1
+	 * page mappings.
 	 */
 	ret = nvkm_dispnv50_copy_shadow_to_scanout(sc, state);
 	if (ret != 0)
@@ -402,9 +660,10 @@ nvkm_dispnv50_console_register(struct nvkm_softc *sc,
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 console fb registered %ux%u pitch=%u "
-	    "shadow=%p size=0x%llx\n",
+	    "shadow=%p size=0x%llx bar1_pages=%u flush_hz=%u\n",
 	    state->scanout_width, state->scanout_height, state->scanout_pitch,
-	    state->console_shadow, (unsigned long long)state->console_shadow_size);
+	    state->console_shadow, (unsigned long long)state->console_shadow_size,
+	    state->console_shadow_bar1_pages, NVKM_DISPNV50_CONSOLE_FLUSH_HZ);
 	return 0;
 }
 
