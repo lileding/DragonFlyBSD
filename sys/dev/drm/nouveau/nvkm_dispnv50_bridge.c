@@ -864,6 +864,8 @@ nvkm_dispnv50_dmac_trace_push(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	if ((dmac->dfly_oclass & 0xff) != 0x7d &&
 	    (dmac->dfly_oclass & 0xff) != 0x7e)
 		return;
+	if (!sc->kms_push_trace)
+		return;
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 %s push class=0x%x inst=%d put=%u cur=%u\n",
@@ -960,10 +962,12 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	dmac->dfly_last_idle = idle;
 	dmac->dfly_last_stat = stat;
 
-	nvkm_infof(sc->dev,
-	    "drm: dispnv50 %s status cur=%u user_put=0x%08x ctrl=0x%08x "
-	    "stat=0x%08x idle=%u attempts=%u\n",
-	    label, cur, user_put, ctrl, stat, idle, attempts);
+	if (sc->kms_push_trace || !idle) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 %s status cur=%u user_put=0x%08x "
+		    "ctrl=0x%08x stat=0x%08x idle=%u attempts=%u\n",
+		    label, cur, user_put, ctrl, stat, idle, attempts);
+	}
 
 	if (!idle && (dmac->dfly_oclass & 0xff) == 0x7e) {
 		u32 chid = 1 + dmac->dfly_inst;

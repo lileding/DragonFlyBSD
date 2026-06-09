@@ -494,6 +494,7 @@ struct nvkm_softc {
 	int			kms_last_error;
 	uint32_t		kms_last_head;
 	uint32_t		kms_last_win;
+	int			kms_push_trace;
 
 	/* M5 observability counters. */
 	uint64_t		exec_submit_count;
