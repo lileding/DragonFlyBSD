@@ -488,6 +488,12 @@ struct nvkm_softc {
 	bool			kms_task_initialized;
 	uint64_t		kms_auto_count;
 	uint64_t		kms_hotplug_count;
+	uint64_t		kms_plane_update_count;
+	uint64_t		kms_plane_disable_count;
+	uint64_t		kms_commit_error_count;
+	int			kms_last_error;
+	uint32_t		kms_last_head;
+	uint32_t		kms_last_win;
 
 	/* M5 observability counters. */
 	uint64_t		exec_submit_count;
