@@ -15,6 +15,7 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
+#include <drm/drmP.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
@@ -222,6 +223,24 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 	b1->pd0_paddr = gsp_pd0;
 	b1->next_gva  = BAR1_GVA_ALLOC_BASE;
 	memset(b1->gva_used, 0, sizeof(b1->gva_used));
+	b1->fictitious_start = rman_get_start(sc->bar_res[1]) +
+	    BAR1_GVA_ALLOC_BASE;
+	b1->fictitious_end = b1->fictitious_start +
+	    (vm_paddr_t)BAR1_GVA_ALLOC_PAGES * NVKM_GMMU_PT_PAGE_SIZE;
+	if (!b1->fictitious_registered) {
+		int r;
+
+		r = vm_phys_fictitious_reg_range(b1->fictitious_start,
+		    b1->fictitious_end, VM_MEMATTR_WRITE_COMBINING);
+		if (r != 0) {
+			nvkm_debugf(sc->dev,
+			    "bar1: fictitious range 0x%llx-0x%llx failed err=%d\n",
+			    (unsigned long long)b1->fictitious_start,
+			    (unsigned long long)b1->fictitious_end, r);
+			return (r);
+		}
+		b1->fictitious_registered = true;
+	}
 
 #ifdef NVKM_DEBUG_BAR1
 	nvkm_debugf(sc->dev,
@@ -257,6 +276,11 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 void
 nvkm_gsp_bar1_fini(struct nvkm_softc *sc)
 {
+	if (sc->bar1.fictitious_registered) {
+		vm_phys_fictitious_unreg_range(sc->bar1.fictitious_start,
+		    sc->bar1.fictitious_end);
+		sc->bar1.fictitious_registered = false;
+	}
 	sc->bar1.ready = false;
 }
 

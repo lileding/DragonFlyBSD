@@ -12,6 +12,7 @@
  */
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
+#include "nvkm_bo.h"
 #include "core.h"
 #include "head.h"
 #include "wndw.h"
@@ -24,6 +25,7 @@
 #include <core/object.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_fourcc.h>
 #include <engine/disp/outp.h>
 #include <engine/disp/ior.h>
 #include <nouveau_bo.h>
@@ -76,6 +78,7 @@ struct nvkm_dispnv50_state {
 	u32 scanout_width;
 	u32 scanout_height;
 	u32 scanout_pitch;
+	u32 scanout_format;
 	struct fb_info console_fb;
 	void *console_shadow;
 	void *console_snapshot;
@@ -88,6 +91,7 @@ struct nvkm_dispnv50_state {
 	struct callout console_flush_callout;
 	bool console_callout_ready;
 	bool console_flush_active;
+	bool scanout_user;
 	bool console_fb_registered;
 	bool console_direct_map;
 	u64 console_flush_count;
@@ -1464,6 +1468,8 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	state->scanout_width = width;
 	state->scanout_height = height;
 	state->scanout_pitch = pitch;
+	state->scanout_format = DRM_FORMAT_XRGB8888;
+	state->scanout_user = false;
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx "
 	    "offset=0x%llx relative=0x%llx\n",
@@ -1472,6 +1478,79 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	    (unsigned long long)state->scanout_offset,
 	    (unsigned long long)relative);
 	return 0;
+}
+
+static int
+nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct drm_crtc *crtc)
+{
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	u64 min_size;
+	u32 cpp;
+
+	(void)sc;
+	if (crtc->primary == NULL || crtc->primary->state == NULL)
+		return (ENOENT);
+	fb = crtc->primary->state->fb;
+	if (fb == NULL || fb->obj[0] == NULL || fb->format == NULL)
+		return (ENOENT);
+
+	obj = fb->obj[0];
+	bo = to_nvkm_bo(obj);
+	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->vram_alloc == NULL)
+		return (EINVAL);
+	if (fb->width == 0 || fb->height == 0)
+		return (EINVAL);
+
+	cpp = fb->format->cpp[0];
+	min_size = (u64)(fb->height - 1) * fb->pitches[0] +
+	    (u64)fb->width * cpp + fb->offsets[0];
+	if (obj->size < min_size)
+		return (EINVAL);
+
+	state->scanout_offset = bo->paddr + fb->offsets[0];
+	state->scanout_width = fb->width;
+	state->scanout_height = fb->height;
+	state->scanout_pitch = fb->pitches[0];
+	state->scanout_format = fb->format->format;
+	state->scanout_user = true;
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 user scanout %ux%u pitch=%u format=0x%08x "
+	    "vram=0x%llx bo=%p\n",
+	    state->scanout_width, state->scanout_height, state->scanout_pitch,
+	    state->scanout_format, (unsigned long long)state->scanout_offset,
+	    bo);
+	return (0);
+}
+
+static u32
+nvkm_dispnv50_wndw_format(u32 format)
+{
+	switch (format) {
+	case DRM_FORMAT_XRGB8888:
+		return (NVC57E_SET_PARAMS_FORMAT_X8R8G8B8);
+	case DRM_FORMAT_ARGB8888:
+		return (NVC57E_SET_PARAMS_FORMAT_A8R8G8B8);
+	case DRM_FORMAT_XBGR8888:
+		return (NVC57E_SET_PARAMS_FORMAT_X8B8G8R8);
+	case DRM_FORMAT_ABGR8888:
+		return (NVC57E_SET_PARAMS_FORMAT_A8B8G8R8);
+	case DRM_FORMAT_RGB565:
+		return (NVC57E_SET_PARAMS_FORMAT_R5G6B5);
+	case DRM_FORMAT_XRGB1555:
+	case DRM_FORMAT_ARGB1555:
+		return (NVC57E_SET_PARAMS_FORMAT_A1R5G5B5);
+	case DRM_FORMAT_XRGB2101010:
+	case DRM_FORMAT_ARGB2101010:
+		return (NVC57E_SET_PARAMS_FORMAT_A2R10G10B10);
+	case DRM_FORMAT_XBGR2101010:
+	case DRM_FORMAT_ABGR2101010:
+		return (NVC57E_SET_PARAMS_FORMAT_A2B10G10R10);
+	default:
+		return (0);
+	}
 }
 
 static u16
@@ -1618,7 +1697,7 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	asyw->image.blockh =
 	    NVC57E_SET_STORAGE_BLOCK_HEIGHT_NVD_BLOCK_HEIGHT_ONE_GOB;
 	asyw->image.layout = NVC57E_SET_STORAGE_MEMORY_LAYOUT_PITCH;
-	asyw->image.format = NVC57E_SET_PARAMS_FORMAT_A8R8G8B8;
+	asyw->image.format = nvkm_dispnv50_wndw_format(state->scanout_format);
 	asyw->image.blocks[0] = 0;
 	asyw->image.pitch[0] = state->scanout_pitch;
 	asyw->image.handle[0] =
@@ -1978,13 +2057,16 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	wndw = state->wndw[win];
 	mode = &crtc->state->adjusted_mode;
 
-	ret = nvkm_dispnv50_scanout_ensure(sc, state, mode->hdisplay,
-	    mode->vdisplay);
-	if (ret != 0) {
+	ret = nvkm_dispnv50_scanout_from_fb(sc, state, crtc);
+	if (ret == ENOENT)
+		ret = nvkm_dispnv50_scanout_ensure(sc, state, mode->hdisplay,
+		    mode->vdisplay);
+	if (ret != 0 || nvkm_dispnv50_wndw_format(state->scanout_format) == 0) {
 		nvkm_infof(sc->dev,
-		    "drm: dispnv50 scanout alloc failed head=%u win=%u err=%d\n",
-		    head, win, ret);
-		return ret;
+		    "drm: dispnv50 scanout select failed head=%u win=%u "
+		    "format=0x%08x err=%d\n",
+		    head, win, state->scanout_format, ret);
+		return (ret != 0 ? ret : EINVAL);
 	}
 
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
@@ -2088,12 +2170,15 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
 	    "scanout=0x%llx offset=0x%llx\n",
 	    head, win, display_id,
-	    (unsigned long long)nvkm_memory_addr(state->scanout),
+	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
+	    nvkm_memory_addr(state->scanout)),
 	    (unsigned long long)state->scanout_offset);
-	ret = nvkm_dispnv50_console_register(sc, state);
-	if (ret != 0)
-		nvkm_infof(sc->dev,
-		    "drm: dispnv50 console fb deferred err=%d\n", ret);
+	if (!state->scanout_user) {
+		ret = nvkm_dispnv50_console_register(sc, state);
+		if (ret != 0)
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 console fb deferred err=%d\n", ret);
+	}
 	return 0;
 
 fail:
