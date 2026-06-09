@@ -329,6 +329,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "last_error = %d\n", sc->kms_last_error);
 	sbuf_printf(&sb, "last_head = %u\n", sc->kms_last_head);
 	sbuf_printf(&sb, "last_win = %u\n", sc->kms_last_win);
+	sbuf_printf(&sb, "push_trace = %d\n", sc->kms_push_trace);
 
 	sbuf_cat(&sb, "\ngsp_events\n");
 	sbuf_printf(&sb, "post_event_count = %llu\n",
@@ -818,6 +819,9 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_vm_trace, "A",
 	    "nouveau VM_BIND trace ring");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "kms_push_trace",
+	    CTLFLAG_RW, &sc->kms_push_trace, 0,
+	    "Enable verbose dispnv50 DMAC push logging");
 	sc->gsp_rpc_trace_on = 1;	/* default on; low-overhead ring */
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
 	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,
