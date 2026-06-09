@@ -90,6 +90,9 @@ static struct drm_driver nvkm_drm_driver = {
 	.postclose = nvkm_drm_postclose,
 	.gem_vm_ops = &nvkm_gem_pager_ops,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
+	.dumb_create = nvkm_bo_dumb_create,
+	.dumb_map_offset = nvkm_bo_dumb_map_offset,
+	.dumb_destroy = nvkm_bo_dumb_destroy,
 };
 
 static uint64_t

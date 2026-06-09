@@ -12,6 +12,7 @@
  */
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
+#include "nvkm_bo.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>
@@ -91,12 +92,85 @@ static const struct drm_connector_funcs nvkm_connector_funcs = {
 
 /* ===== mode_config funcs ===== */
 
+static void
+nvkm_user_fb_destroy(struct drm_framebuffer *fb)
+{
+	if (fb->obj[0] != NULL)
+		drm_gem_object_put_unlocked(fb->obj[0]);
+	drm_framebuffer_cleanup(fb);
+	kfree(fb);
+}
+
+static int
+nvkm_user_fb_create_handle(struct drm_framebuffer *fb, struct drm_file *file,
+    unsigned int *handle)
+{
+	if (fb->obj[0] == NULL)
+		return (-ENODEV);
+	return (drm_gem_handle_create(file, fb->obj[0], handle));
+}
+
+static const struct drm_framebuffer_funcs nvkm_user_fb_funcs = {
+	.destroy	= nvkm_user_fb_destroy,
+	.create_handle	= nvkm_user_fb_create_handle,
+};
+
 static struct drm_framebuffer *
 nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
 {
-	(void)dev; (void)file; (void)cmd;
-	return (ERR_PTR(-ENOSYS));	/* framebuffer import is staged later */
+	const struct drm_format_info *info;
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	uint64_t line;
+	uint64_t min_size;
+	int ret;
+
+	if (cmd->width == 0 || cmd->height == 0)
+		return (ERR_PTR(-EINVAL));
+
+	info = drm_get_format_info(dev, cmd);
+	if (info == NULL || info->num_planes != 1)
+		return (ERR_PTR(-EINVAL));
+	if (cmd->modifier[0] != DRM_FORMAT_MOD_LINEAR &&
+	    cmd->modifier[0] != DRM_FORMAT_MOD_INVALID)
+		return (ERR_PTR(-EINVAL));
+
+	line = (uint64_t)cmd->width * info->cpp[0];
+	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0)
+		return (ERR_PTR(-EINVAL));
+	min_size = (uint64_t)(cmd->height - 1) * cmd->pitches[0] +
+	    line + cmd->offsets[0];
+
+	obj = drm_gem_object_lookup(file, cmd->handles[0]);
+	if (obj == NULL)
+		return (ERR_PTR(-ENOENT));
+	if (obj->size < min_size) {
+		drm_gem_object_put_unlocked(obj);
+		return (ERR_PTR(-EINVAL));
+	}
+	bo = to_nvkm_bo(obj);
+	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM)) {
+		drm_gem_object_put_unlocked(obj);
+		return (ERR_PTR(-EINVAL));
+	}
+
+	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
+	if (fb == NULL) {
+		drm_gem_object_put_unlocked(obj);
+		return (ERR_PTR(-ENOMEM));
+	}
+	drm_helper_mode_fill_fb_struct(dev, fb, cmd);
+	fb->obj[0] = obj;
+	ret = drm_framebuffer_init(dev, fb, &nvkm_user_fb_funcs);
+	if (ret != 0) {
+		fb->obj[0] = NULL;
+		kfree(fb);
+		drm_gem_object_put_unlocked(obj);
+		return (ERR_PTR(ret));
+	}
+	return (fb);
 }
 
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
@@ -108,26 +182,17 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 /* ===== plane: NVC57E window validation ===== */
 
 static const uint32_t nvkm_plane_formats[] = {
-	DRM_FORMAT_C8,
-	DRM_FORMAT_YUYV,
-	DRM_FORMAT_UYVY,
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_XBGR8888,
+	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_RGB565,
 	DRM_FORMAT_XRGB1555,
 	DRM_FORMAT_ARGB1555,
-	DRM_FORMAT_XBGR2101010,
-	DRM_FORMAT_ABGR2101010,
-	DRM_FORMAT_XBGR8888,
-	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_XRGB2101010,
 	DRM_FORMAT_ARGB2101010,
-#ifdef DRM_FORMAT_XBGR16161616F
-	DRM_FORMAT_XBGR16161616F,
-#endif
-#ifdef DRM_FORMAT_ABGR16161616F
-	DRM_FORMAT_ABGR16161616F,
-#endif
+	DRM_FORMAT_XBGR2101010,
+	DRM_FORMAT_ABGR2101010,
 };
 
 static const uint64_t nvkm_plane_modifiers[] = {
@@ -230,6 +295,13 @@ nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 	struct drm_display_mode *mode = &state->adjusted_mode;
 
 	(void)crtc;
+	/*
+	 * dispnv50 already waits for the window notifier, but nvkm does not yet
+	 * wire GSP display vblank into DRM core.  Mark commits as no_vblank so
+	 * drm_atomic_helper_fake_vblank() consumes page-flip events instead of
+	 * leaving commit->flip_done pending.
+	 */
+	state->no_vblank = true;
 	if (!state->enable)
 		return (0);
 
