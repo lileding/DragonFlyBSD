@@ -156,6 +156,21 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-EINVAL));
 	}
+	/*
+	 * The display engine scans pitch-linear only; a bo ever VM_BINDed
+	 * with a non-zero PTE kind holds blocklinear content and would show
+	 * as block garbage.  Reject until blocklinear scanout lands (P3-M3);
+	 * compositors fall back to a linear swapchain on this error.
+	 */
+	if (bo->vm_bound_tiled) {
+		struct nvkm_softc *sc = dev->dev_private;
+
+		nvkm_infof(sc->dev,
+		    "drm: reject scanout fb on tiled-bound bo handle=%u\n",
+		    cmd->handles[0]);
+		drm_gem_object_put_unlocked(obj);
+		return (ERR_PTR(-EINVAL));
+	}
 
 	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
 	if (fb == NULL) {
