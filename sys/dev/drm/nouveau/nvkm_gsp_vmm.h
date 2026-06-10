@@ -124,6 +124,22 @@ int	 nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
 int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+
+/* Publish pending PT writes + invalidate the VMM TLB.  Caller need not
+ * hold vmm->tok.  The *_noflush variants below write PTEs without it so a
+ * batch (VM_BIND) flushes once via this helper. */
+void	 nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm);
+int	 nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, void *kva, uint64_t size, uint8_t kind);
+int	 nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
+	    uint8_t ro, uint8_t kind);
+int	 nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    uint64_t size);
+int	 nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_unmap_sparse_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
 void	 nvkm_gsp_vmm_read_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    struct nvkm_gsp_vmm_pte_info *info);
 void	 nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va);

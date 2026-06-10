@@ -547,11 +547,19 @@ nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va)
 	    (uintmax_t)nvkm_pte_to_sparse());
 }
 
+void
+nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm)
+{
+	lwkt_gettoken(&vmm->tok);
+	nvkm_gsp_bar1_flush(vmm->sc);
+	nvkm_gsp_vmm_invalidate(vmm);
+	lwkt_reltoken(&vmm->tok);
+}
+
 int
-nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
+nvkm_gsp_vmm_map_sysmem_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
     vm_paddr_t paddr, uint64_t size)
 {
-	struct nvkm_softc *sc = vmm->sc;
 	uint64_t off;
 	int err;
 
@@ -560,26 +568,32 @@ nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	lwkt_gettoken(&vmm->tok);
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t gva = va + off;
-
-		err = nvkm_gsp_vmm_write_pte(vmm, gva,
+		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
 		    nvkm_pte_to_sysmem((uint64_t)paddr + off));
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
 		}
 	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
 int
-nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
+nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    vm_paddr_t paddr, uint64_t size)
+{
+	int err = nvkm_gsp_vmm_map_sysmem_noflush(vmm, va, paddr, size);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
     void *kva, uint64_t size, uint8_t kind)
 {
-	struct nvkm_softc *sc = vmm->sc;
 	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t off;
 	int err;
@@ -589,27 +603,34 @@ nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	lwkt_gettoken(&vmm->tok);
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t gva = va + off;
 		vm_paddr_t paddr = vtophys((uint8_t *)kva + off);
 
-		err = nvkm_gsp_vmm_write_pte(vmm, gva,
+		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
 		    nvkm_pte_to_sysmem((uint64_t)paddr) | kind_bits);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
 		}
 	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
 int
-nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
+nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    void *kva, uint64_t size, uint8_t kind)
+{
+	int err = nvkm_gsp_vmm_map_sysmem_kva_noflush(vmm, va, kva, size, kind);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind)
 {
-	struct nvkm_softc *sc = vmm->sc;
 	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t off;
 	int err;
@@ -619,19 +640,27 @@ nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	lwkt_gettoken(&vmm->tok);
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t gva = va + off;
-
-		err = nvkm_gsp_vmm_write_pte(vmm, gva,
+		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
 		    nvkm_pte_to_vram_flags(paddr + off, priv, ro) | kind_bits);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
 		}
 	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+int
+nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind)
+{
+	int err = nvkm_gsp_vmm_map_vram_flags_noflush(vmm, va, paddr, size,
+	    priv, ro, kind);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
 }
 
 int
@@ -642,9 +671,8 @@ nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
 }
 
 int
-nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 {
-	struct nvkm_softc *sc = vmm->sc;
 	int err;
 
 	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
@@ -652,20 +680,24 @@ nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 
 	lwkt_gettoken(&vmm->tok);
 	err = nvkm_gsp_vmm_write_sparse(vmm, va, size);
-	if (err != 0) {
-		lwkt_reltoken(&vmm->tok);
-		return (err);
-	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
-	return (0);
+	return (err);
 }
 
 int
-nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 {
-	struct nvkm_softc *sc = vmm->sc;
+	int err = nvkm_gsp_vmm_unmap_noflush(vmm, va, size);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
 	struct nvkm_gsp_vmm_sparse_region *region;
 	int err;
 
@@ -685,16 +717,24 @@ nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 		lwkt_reltoken(&vmm->tok);
 		return (err);
 	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
 int
-nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 {
-	struct nvkm_softc *sc = vmm->sc;
+	int err = nvkm_gsp_vmm_map_sparse_noflush(vmm, va, size);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_unmap_sparse_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
 	struct nvkm_gsp_vmm_sparse_region *region;
 	uint64_t off;
 
@@ -713,15 +753,20 @@ nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 	LIST_REMOVE(region, link);
 	kfree(region, M_NVKM_VMM);
 
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t gva = va + off;
-
-		nvkm_gsp_vmm_unmap_existing_pte(vmm, gva, 0, 0);
-	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_vmm_invalidate(vmm);
+	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE)
+		nvkm_gsp_vmm_unmap_existing_pte(vmm, va + off, 0, 0);
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+int
+nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+{
+	int err = nvkm_gsp_vmm_unmap_sparse_noflush(vmm, va, size);
+
+	if (err == 0)
+		nvkm_gsp_vmm_flush(vmm);
+	return (err);
 }
 
 
