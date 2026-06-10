@@ -53,6 +53,7 @@
 #define NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP	0x00000045U
 #define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP	0x00000005U
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
+#define NVKM_DISPNV50_WIND_POLL_COUNT	2000U	/* 2s, matches nouveau */
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
 #define NVKM_DISPNV50_ILUT_ENTRIES	1024U
 #define NVKM_DISPNV50_ILUT_VSS_ENTRIES	4U
@@ -843,29 +844,95 @@ nvkm_dispnv50_user_offset(s32 oclass, int head, u32 *offset)
 	}
 }
 
+static u32
+nvkm_dispnv50_dmac_get_dword(struct nv50_dmac *dmac)
+{
+	return nvkm_rd32(dmac->dfly_sc, dmac->dfly_user + 0x04) >> 2;
+}
+
+/* Dwords writable at cur before colliding with the HW fetch pointer; EVO
+ * fetch must stay 5 dwords short of GET (NVIDIA/nouveau behaviour). */
+static int
+nvkm_dispnv50_dmac_free_dwords(struct nv50_dmac *dmac)
+{
+	u32 get = nvkm_dispnv50_dmac_get_dword(dmac);
+
+	if (get > dmac->cur)
+		return (int)(get - dmac->cur - 5);
+	return (int)(dmac->max - dmac->cur);
+}
+
+/*
+ * Wrap the push buffer.  EVO is a PUT/GET ring: PUT may only rewind to 0
+ * via an explicit JUMP method, and only once GET has left offset 0
+ * (PUT == GET would be ignored by HW).  Unlike Linux nouveau we stage
+ * methods in a CPU shadow, so the staged dwords plus the JUMP must be
+ * copied into the real push buffer here -- the follow-up kick() rewinds
+ * PUT to 0 and its put..cur copy window no longer covers them.
+ */
+static int
+nvkm_dispnv50_dmac_wind(struct nv50_dmac *dmac)
+{
+	struct nvkm_softc *sc = dmac->dfly_sc;
+	u32 get = nvkm_dispnv50_dmac_get_dword(dmac);
+	u32 cur = (u32)(dmac->push.cur - dmac->dfly_shadow);
+	u32 i;
+
+	if (get == 0) {
+		if (dmac->put == 0 && cur != 0)
+			dmac->push.kick(&dmac->push);
+		for (i = 0; i < NVKM_DISPNV50_WIND_POLL_COUNT; i++) {
+			get = nvkm_dispnv50_dmac_get_dword(dmac);
+			if (get > 0)
+				break;
+			DELAY(NVKM_DISPNV50_STATUS_POLL_US);
+		}
+		if (get == 0)
+			return -ETIMEDOUT;
+		cur = (u32)(dmac->push.cur - dmac->dfly_shadow);
+	}
+
+	dmac->dfly_shadow[cur] = 0x20000000;	/* EVO JUMP to offset 0 */
+	for (i = dmac->put; i <= cur; i++)
+		nvkm_wo32(dmac->dfly_push_mem, i * 4, dmac->dfly_shadow[i]);
+	nvkm_gsp_bar1_flush(sc);
+	dmac->cur = 0;
+	return 0;
+}
+
 static int
 nvkm_dispnv50_dmac_wait(struct nvif_push *push, u32 size)
 {
 	struct nv50_dmac *dmac = container_of(push, struct nv50_dmac, push);
-	u32 cur;
+	int free;
+	u32 i;
+	int ret;
 
 	if (dmac->dfly_shadow == NULL || dmac->dfly_push_mem == NULL)
 		return -ENODEV;
 	if (size > dmac->max)
 		return -EINVAL;
 
-	cur = (u32)(push->cur - dmac->dfly_shadow);
-	if (cur + size >= dmac->max) {
-		if (cur != dmac->put)
-			push->kick(push);
-		cur = 0;
-		dmac->put = 0;
+	dmac->cur = (u32)(push->cur - dmac->dfly_shadow);
+	if (dmac->cur + size >= dmac->max) {
+		ret = nvkm_dispnv50_dmac_wind(dmac);
+		if (ret != 0)
+			return ret;
+		push->cur = dmac->dfly_shadow + dmac->cur;	/* offset 0 */
+		push->kick(push);	/* publishes the wrap: PUT = 0 */
 	}
 
-	dmac->cur = cur;
-	push->bgn = dmac->dfly_shadow + cur;
+	free = nvkm_dispnv50_dmac_free_dwords(dmac);
+	for (i = 0; free < (int)size && i < NVKM_DISPNV50_WIND_POLL_COUNT; i++) {
+		DELAY(NVKM_DISPNV50_STATUS_POLL_US);
+		free = nvkm_dispnv50_dmac_free_dwords(dmac);
+	}
+	if (free < (int)size)
+		return -ETIMEDOUT;
+
+	push->bgn = dmac->dfly_shadow + dmac->cur;
 	push->cur = push->bgn;
-	push->end = dmac->dfly_shadow + dmac->max;
+	push->end = push->bgn + free;
 	return 0;
 }
 
