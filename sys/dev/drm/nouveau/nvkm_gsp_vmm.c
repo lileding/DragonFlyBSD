@@ -577,9 +577,10 @@ nvkm_gsp_vmm_map_sysmem(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 int
 nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    void *kva, uint64_t size)
+    void *kva, uint64_t size, uint8_t kind)
 {
 	struct nvkm_softc *sc = vmm->sc;
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t off;
 	int err;
 
@@ -592,7 +593,7 @@ nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		vm_paddr_t paddr = vtophys((uint8_t *)kva + off);
 
 		err = nvkm_gsp_vmm_write_pte(vmm, gva,
-		    nvkm_pte_to_sysmem((uint64_t)paddr));
+		    nvkm_pte_to_sysmem((uint64_t)paddr) | kind_bits);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
@@ -606,9 +607,10 @@ nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 int
 nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro)
+    uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind)
 {
 	struct nvkm_softc *sc = vmm->sc;
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t off;
 	int err;
 
@@ -620,7 +622,7 @@ nvkm_gsp_vmm_map_vram_flags(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		uint64_t gva = va + off;
 
 		err = nvkm_gsp_vmm_write_pte(vmm, gva,
-		    nvkm_pte_to_vram_flags(paddr + off, priv, ro));
+		    nvkm_pte_to_vram_flags(paddr + off, priv, ro) | kind_bits);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
@@ -636,7 +638,7 @@ int
 nvkm_gsp_vmm_map_vram(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size)
 {
-	return (nvkm_gsp_vmm_map_vram_flags(vmm, va, paddr, size, 0, 0));
+	return (nvkm_gsp_vmm_map_vram_flags(vmm, va, paddr, size, 0, 0, 0));
 }
 
 int
