@@ -1089,9 +1089,10 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		/*
 		 * VM_BIND carries the PTE kind in op->flags bits 7:0 and the
 		 * map paths write it into GMMU PTE bits 63:56.  This is what
-		 * NVK gates VK_EXT_image_drm_format_modifier on.
+		 * NVK gates VK_EXT_image_drm_format_modifier on.  The sysctl
+		 * is a kill switch while tiled-rendering wedges are debugged.
 		 */
-		gp->value = 1;
+		gp->value = sc->vma_tilemode != 0 ? 1 : 0;
 		break;
 	default:
 		nvkm_debugf(sc->dev,
@@ -1933,12 +1934,29 @@ nvkm_drm_gpfifo_wait_space(struct nvkm_softc *sc, struct nvkm_gsp_chan *chan,
 	if (wait_ticks < 1)
 		wait_ticks = 1;
 
+	bool mismatch_logged = false;
+
 	while (timeout_ticks > 0) {
 		uint32_t get;
 		uint32_t free;
+		uint32_t put_rb;
 
-		*put = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
+		/*
+		 * GP_PUT is written only by this driver; chan->gpf_put is the
+		 * authoritative value.  The USERD BAR1 readback has been seen
+		 * returning stale zeros mid-session, which made PUT jump
+		 * backwards and wedged the channel -- keep reading it purely
+		 * as a diagnostic.
+		 */
+		put_rb = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
 		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+		*put = chan->gpf_put & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+		if (put_rb != *put && !mismatch_logged) {
+			mismatch_logged = true;
+			nvkm_infof(sc->dev,
+			    "EXEC GP_PUT readback mismatch chid=%d readback=%u shadow=%u\n",
+			    chan->chid, put_rb, *put);
+		}
 		get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET) &
 		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
 		required = nvkm_drm_gpfifo_required(*put, push_count);

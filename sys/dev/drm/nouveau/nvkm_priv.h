@@ -495,6 +495,7 @@ struct nvkm_softc {
 	uint32_t		kms_last_head;
 	uint32_t		kms_last_win;
 	int			kms_push_trace;
+	int			vma_tilemode;	/* GETPARAM_HAS_VMA_TILEMODE knob */
 
 	/* M5 observability counters. */
 	uint64_t		exec_submit_count;
