@@ -556,6 +556,34 @@ nvkm_dispnv50_console_unregister(struct nvkm_dispnv50_state *state)
 	memset(&state->console_fb, 0, sizeof(state->console_fb));
 }
 
+/*
+ * syscons fb_set_par hook.  do_switch_scr() enqueues this on taskqueue
+ * thread when a VT switch leaves a graphics VT; register_framebuffer()
+ * also calls it synchronously once.  Restoring is only valid when the
+ * screen still points at a userspace framebuffer and no DRM master is
+ * left to fight with, so both other cases bail out.
+ */
+static int
+nvkm_dispnv50_console_fb_set_par(struct fb_info *info)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nvkm_softc *sc;
+
+	state = info != NULL ? info->par : NULL;
+	if (state == NULL)
+		return (0);
+	sc = state->disp.dfly_sc;
+	if (sc == NULL || sc->drm_dev == NULL)
+		return (0);
+	if (sc->drm_dev->master != NULL)
+		return (0);
+	if (!state->scanout_user)
+		return (0);
+
+	(void)nvkm_drm_kms_schedule(sc, "fb_set_par");
+	return (0);
+}
+
 static int
 nvkm_dispnv50_console_register(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state)
@@ -592,6 +620,7 @@ nvkm_dispnv50_console_register(struct nvkm_softc *sc,
 	state->console_fb.is_vga_boot_display = 0;
 	state->console_fb.par = state;
 	state->console_fb.device = sc->dev;
+	state->console_fb.fbops.fb_set_par = nvkm_dispnv50_console_fb_set_par;
 
 	direct_ret = nvkm_dispnv50_console_map_direct(sc, state, size);
 	if (direct_ret == 0) {
@@ -1518,8 +1547,12 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	if (obj->size < min_size)
 		return (EINVAL);
 
-	if (!state->scanout_user || state->console_fb_registered)
-		nvkm_dispnv50_console_unregister(state);
+	/*
+	 * Keep the console fb registered while userspace scans out: syscons
+	 * only fires the fb_set_par hook on VT switch-away if sc->fbi still
+	 * carries it.  Console text keeps rendering into the (invisible)
+	 * console BO, same as Linux fbcon under X.
+	 */
 
 	state->scanout_offset = bo->paddr + fb->offsets[0];
 	state->scanout_width = fb->width;
