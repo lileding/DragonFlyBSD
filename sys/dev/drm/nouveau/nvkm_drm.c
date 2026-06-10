@@ -50,6 +50,8 @@ static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
+static void nvkm_drm_master_drop(struct drm_device *ddev,
+    struct drm_file *file_priv);
 static void nvkm_drm_lastclose(struct drm_device *ddev);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
@@ -89,6 +91,7 @@ static struct drm_driver nvkm_drm_driver = {
 	.patchlevel = NVKM_DRM_PATCH,
 	.open = nvkm_drm_open,
 	.postclose = nvkm_drm_postclose,
+	.master_drop = nvkm_drm_master_drop,
 	.lastclose = nvkm_drm_lastclose,
 	.gem_vm_ops = &nvkm_gem_pager_ops,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
@@ -980,7 +983,7 @@ nvkm_drm_postclose(struct drm_device *ddev, struct drm_file *file_priv)
 }
 
 static void
-nvkm_drm_lastclose(struct drm_device *ddev)
+nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	int err;
@@ -988,11 +991,24 @@ nvkm_drm_lastclose(struct drm_device *ddev)
 	if (sc == NULL)
 		return;
 
-	err = nvkm_drm_kms_schedule(sc, "lastclose");
+	err = nvkm_drm_kms_schedule(sc, reason);
 	if (err != 0)
 		nvkm_infof(sc->dev,
-		    "drm: lastclose console restore schedule failed err=%d\n",
-		    err);
+		    "drm: %s console restore schedule failed err=%d\n",
+		    reason, err);
+}
+
+static void
+nvkm_drm_master_drop(struct drm_device *ddev, struct drm_file *file_priv)
+{
+	(void)file_priv;
+	nvkm_drm_restore_console(ddev, "master_drop");
+}
+
+static void
+nvkm_drm_lastclose(struct drm_device *ddev)
+{
+	nvkm_drm_restore_console(ddev, "lastclose");
 }
 
 /* ---- Helper: locate nvkm_softc from drm_file ---- */
