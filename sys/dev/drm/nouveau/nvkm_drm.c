@@ -944,13 +944,58 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	file_priv->driver_priv = NULL;
 }
 
+/* Lazily build this file's per-file VMM.  Device open no longer creates
+ * it: libdrm probes the node (drmGetDevices2) with throwaway open/close
+ * cycles that never touch the GPU, and paying the multi-RPC VMM ctor
+ * (~0.4s) on each made enumeration cost tens of seconds.  The first
+ * VM_BIND or channel alloc that actually uses the GPU builds it here. */
+static int
+nvkm_drm_file_ensure_vmm(struct nvkm_softc *sc, struct nvkm_drm_file *nfile)
+{
+	struct nvkm_gsp_vmm *vmm;
+	uint32_t client_handle;
+	int err;
+
+	if (nfile->vmm != NULL)
+		return (0);
+
+	lwkt_gettoken(&nfile->vm_token);
+	if (nfile->vmm != NULL) {
+		lwkt_reltoken(&nfile->vm_token);
+		return (0);
+	}
+
+	vmm = kzalloc(sizeof(*vmm), GFP_KERNEL);
+	if (vmm == NULL) {
+		lwkt_reltoken(&nfile->vm_token);
+		return (-ENOMEM);
+	}
+	client_handle = atomic_fetchadd_int(&nvkm_drm_next_client_handle, 1);
+	/* Hold gsp_tok across the whole multi-RPC ctor so the client/device/
+	 * vaspace/PDE-copy sequence is atomic against other GSP users; the
+	 * token auto-releases during each RPC reply wait. */
+	lwkt_gettoken(&sc->gsp_tok);
+	err = nvkm_gsp_vmm_ctor(sc, client_handle, vmm);
+	lwkt_reltoken(&sc->gsp_tok);
+	if (err != 0) {
+		nvkm_infof(sc->dev,
+		    "nvkm_drm: per-file VMM ctor failed handle=0x%x err=%d\n",
+		    client_handle, err);
+		kfree(vmm);
+		lwkt_reltoken(&nfile->vm_token);
+		return (-err);
+	}
+	/* Publish only after the VMM is fully built so the lock-free fast
+	 * path above never observes a half-constructed vmm. */
+	nfile->vmm = vmm;
+	lwkt_reltoken(&nfile->vm_token);
+	return (0);
+}
+
 static int
 nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 {
-	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct nvkm_drm_file *nfile;
-	uint32_t client_handle;
-	int err;
 
 	nfile = kzalloc(sizeof(*nfile), GFP_KERNEL);
 	if (nfile == NULL)
@@ -959,29 +1004,8 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 	LIST_INIT(&nfile->channels);
 	lwkt_token_init(&nfile->vm_token, "nvkm-vm");
 
-	/* Give this file its own GPU address space (RM vaspace + page-table
-	 * tree) so concurrent NVK processes cannot collide on GPU VAs. */
-	nfile->vmm = kzalloc(sizeof(*nfile->vmm), GFP_KERNEL);
-	if (nfile->vmm == NULL) {
-		kfree(nfile);
-		return (-ENOMEM);
-	}
-	client_handle = atomic_fetchadd_int(&nvkm_drm_next_client_handle, 1);
-	/* Hold gsp_tok across the whole multi-RPC ctor so the client/device/
-	 * vaspace/PDE-copy sequence is atomic against other GSP users; the
-	 * token auto-releases during each RPC reply wait. */
-	lwkt_gettoken(&sc->gsp_tok);
-	err = nvkm_gsp_vmm_ctor(sc, client_handle, nfile->vmm);
-	lwkt_reltoken(&sc->gsp_tok);
-	if (err != 0) {
-		nvkm_infof(sc->dev,
-		    "nvkm_drm: per-file VMM ctor failed handle=0x%x err=%d\n",
-		    client_handle, err);
-		kfree(nfile->vmm);
-		kfree(nfile);
-		return (-err);
-	}
-
+	/* nfile->vmm stays NULL; nvkm_drm_file_ensure_vmm builds it on the
+	 * first GPU use so probe-only opens stay cheap (see that helper). */
 	file_priv->driver_priv = nfile;
 	return (0);
 }
@@ -1270,6 +1294,9 @@ nvkm_drm_ioctl_channel_alloc(struct drm_device *ddev, void *data,
 
 	if (nfile == NULL)
 		return (-ENXIO);
+	err = nvkm_drm_file_ensure_vmm(sc, nfile);
+	if (err != 0)
+		return (err);
 	LIST_FOREACH(dchan, &nfile->channels, link)
 		channel_count++;
 	if (channel_count >= NVKM_DRM_MAX_CHANNELS)
@@ -1417,6 +1444,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	}
 	if (nfile == NULL)
 		return (-ENXIO);
+	err = nvkm_drm_file_ensure_vmm(sc, nfile);
+	if (err != 0)
+		return (err);
 	if (req->op_count == 0)
 		return (0);
 	if (req->op_count > 1024) {
