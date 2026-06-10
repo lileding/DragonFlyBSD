@@ -1,0 +1,251 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Timeline fence chains -- see include/linux/dma-fence-chain.h.
+ *
+ * A chain node signals once its payload fence and its entire prefix
+ * (everything reachable through ->prev) have signalled.  Signal
+ * propagation keeps exactly one callback armed per node, hopping from
+ * blocker to blocker until none remains.
+ */
+
+#include <linux/dma-fence-chain.h>
+#include <linux/slab.h>
+
+struct dma_fence_chain *
+dma_fence_chain_alloc(void)
+{
+	return (kzalloc(sizeof(struct dma_fence_chain), GFP_KERNEL));
+}
+EXPORT_SYMBOL(dma_fence_chain_alloc);
+
+void
+dma_fence_chain_free(struct dma_fence_chain *chain)
+{
+	kfree(chain);
+}
+EXPORT_SYMBOL(dma_fence_chain_free);
+
+static const char *
+dma_fence_chain_get_driver_name(struct dma_fence *fence)
+{
+	return ("dma_fence_chain");
+}
+
+static const char *
+dma_fence_chain_get_timeline_name(struct dma_fence *fence)
+{
+	return ("timeline");
+}
+
+struct dma_fence *
+dma_fence_chain_prev_get(struct dma_fence_chain *chain)
+{
+	struct dma_fence *prev;
+
+	lockmgr(&chain->lock, LK_EXCLUSIVE);
+	prev = chain->prev;
+	if (prev != NULL)
+		dma_fence_get(prev);
+	lockmgr(&chain->lock, LK_RELEASE);
+	return (prev);
+}
+
+void
+dma_fence_chain_truncate_prev(struct dma_fence_chain *chain)
+{
+	struct dma_fence *prev;
+
+	lockmgr(&chain->lock, LK_EXCLUSIVE);
+	prev = chain->prev;
+	chain->prev = NULL;
+	lockmgr(&chain->lock, LK_RELEASE);
+	dma_fence_put(prev);
+}
+
+/*
+ * Return the current blocker (referenced) or NULL when the node's
+ * signal condition is met.  The payload is checked first so the chain
+ * drains front to back and prev links can be truncated early.
+ */
+static struct dma_fence *
+dma_fence_chain_blocker(struct dma_fence_chain *chain)
+{
+	struct dma_fence *prev;
+
+	if (chain->fence != NULL && !dma_fence_is_signaled(chain->fence))
+		return (dma_fence_get(chain->fence));
+
+	prev = dma_fence_chain_prev_get(chain);
+	if (prev != NULL) {
+		if (!dma_fence_is_signaled(prev))
+			return (prev);
+		/* Prefix complete: drop the history. */
+		dma_fence_put(prev);
+		dma_fence_chain_truncate_prev(chain);
+	}
+	return (NULL);
+}
+
+static void dma_fence_chain_cb(struct dma_fence *blocker,
+	    struct dma_fence_cb *cb);
+
+/*
+ * Re-arm the callback on the next blocker; signal the node when none
+ * is left.  Runs from enable_signaling (node lock held by core) and
+ * from blocker callbacks (blocker lock held) -- it only ever takes
+ * OTHER fences' locks, except the final dma_fence_signal which takes
+ * the node's own lock and therefore must not run with it held; the
+ * enable_signaling path returns false instead and lets the core
+ * handle the already-signalled case.
+ *
+ * Returns true if a callback was armed, false if the node is ready to
+ * signal.
+ */
+static bool
+dma_fence_chain_arm(struct dma_fence_chain *chain)
+{
+	struct dma_fence *blocker;
+
+	for (;;) {
+		blocker = dma_fence_chain_blocker(chain);
+		if (blocker == NULL)
+			return (false);
+		if (dma_fence_add_callback(blocker, &chain->cb,
+		    dma_fence_chain_cb) == 0) {
+			dma_fence_put(blocker);
+			return (true);
+		}
+		/* Blocker signalled between the check and the add. */
+		dma_fence_put(blocker);
+	}
+}
+
+static void
+dma_fence_chain_cb(struct dma_fence *blocker, struct dma_fence_cb *cb)
+{
+	struct dma_fence_chain *chain =
+	    container_of(cb, struct dma_fence_chain, cb);
+
+	if (!dma_fence_chain_arm(chain))
+		dma_fence_signal(&chain->base);
+}
+
+static bool
+dma_fence_chain_enable_signaling(struct dma_fence *fence)
+{
+	struct dma_fence_chain *chain =
+	    container_of(fence, struct dma_fence_chain, base);
+
+	/* Node lock is held by the core here; arming only touches other
+	 * fences' locks.  false = already met, core signals for us. */
+	return (dma_fence_chain_arm(chain));
+}
+
+static bool
+dma_fence_chain_signaled(struct dma_fence *fence)
+{
+	struct dma_fence_chain *chain =
+	    container_of(fence, struct dma_fence_chain, base);
+	struct dma_fence *prev;
+	bool ret = true;
+
+	if (chain->fence != NULL && !dma_fence_is_signaled(chain->fence))
+		return (false);
+	prev = dma_fence_chain_prev_get(chain);
+	if (prev != NULL) {
+		ret = dma_fence_is_signaled(prev);
+		dma_fence_put(prev);
+	}
+	return (ret);
+}
+
+static void
+dma_fence_chain_release(struct dma_fence *fence)
+{
+	struct dma_fence_chain *chain =
+	    container_of(fence, struct dma_fence_chain, base);
+
+	dma_fence_put(chain->prev);
+	chain->prev = NULL;
+	dma_fence_put(chain->fence);
+	chain->fence = NULL;
+	lockuninit(&chain->lock);
+	dma_fence_free(fence);
+}
+
+const struct dma_fence_ops dma_fence_chain_ops = {
+	.get_driver_name = dma_fence_chain_get_driver_name,
+	.get_timeline_name = dma_fence_chain_get_timeline_name,
+	.enable_signaling = dma_fence_chain_enable_signaling,
+	.signaled = dma_fence_chain_signaled,
+	.wait = dma_fence_default_wait,
+	.release = dma_fence_chain_release,
+};
+EXPORT_SYMBOL(dma_fence_chain_ops);
+
+void
+dma_fence_chain_init(struct dma_fence_chain *chain, struct dma_fence *prev,
+    struct dma_fence *fence, u64 point)
+{
+	struct dma_fence_chain *prev_chain = to_dma_fence_chain(prev);
+	u64 context;
+
+	/* Nodes of one timeline share a fence context. */
+	if (prev_chain != NULL) {
+		context = prev->context;
+		chain->prev_seqno = prev_chain->point;
+	} else {
+		context = dma_fence_context_alloc(1);
+		chain->prev_seqno = 0;
+	}
+
+	chain->prev = prev;
+	chain->fence = fence;
+	chain->point = point;
+	lockinit(&chain->lock, "dfchn", 0, 0);
+	dma_fence_init(&chain->base, &dma_fence_chain_ops, &chain->lock,
+	    context, (unsigned)point);
+}
+EXPORT_SYMBOL(dma_fence_chain_init);
+
+int
+dma_fence_chain_find_seqno(struct dma_fence **pfence, u64 point)
+{
+	struct dma_fence_chain *chain;
+	struct dma_fence *cur, *prev;
+
+	if (point == 0)
+		return (0);
+
+	chain = to_dma_fence_chain(*pfence);
+	if (chain == NULL)
+		return (-EINVAL);
+	if (chain->point < point)
+		return (-EINVAL);	/* not materialized yet */
+
+	cur = *pfence;
+	for (;;) {
+		chain = to_dma_fence_chain(cur);
+		/*
+		 * Stop when this node is the cover for @point: the
+		 * previous node's point is already below the target.
+		 * A truncated prev (collected, fully signalled prefix)
+		 * also stops here; for points inside that prefix the
+		 * boundary node is signalled, so waiters complete
+		 * immediately, which is exactly right.
+		 */
+		if (chain->prev_seqno < point)
+			break;
+		prev = dma_fence_chain_prev_get(chain);
+		if (prev == NULL || to_dma_fence_chain(prev) == NULL) {
+			dma_fence_put(prev);
+			break;
+		}
+		dma_fence_put(cur);
+		cur = prev;
+	}
+	*pfence = cur;
+	return (0);
+}
+EXPORT_SYMBOL(dma_fence_chain_find_seqno);
