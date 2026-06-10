@@ -43,11 +43,11 @@ dma_fence_chain_prev_get(struct dma_fence_chain *chain)
 {
 	struct dma_fence *prev;
 
-	lockmgr(&chain->lock, LK_EXCLUSIVE);
+	lockmgr(&chain->prev_lock, LK_EXCLUSIVE);
 	prev = chain->prev;
 	if (prev != NULL)
 		dma_fence_get(prev);
-	lockmgr(&chain->lock, LK_RELEASE);
+	lockmgr(&chain->prev_lock, LK_RELEASE);
 	return (prev);
 }
 
@@ -56,10 +56,10 @@ dma_fence_chain_truncate_prev(struct dma_fence_chain *chain)
 {
 	struct dma_fence *prev;
 
-	lockmgr(&chain->lock, LK_EXCLUSIVE);
+	lockmgr(&chain->prev_lock, LK_EXCLUSIVE);
 	prev = chain->prev;
 	chain->prev = NULL;
-	lockmgr(&chain->lock, LK_RELEASE);
+	lockmgr(&chain->prev_lock, LK_RELEASE);
 	dma_fence_put(prev);
 }
 
@@ -170,6 +170,7 @@ dma_fence_chain_release(struct dma_fence *fence)
 	chain->prev = NULL;
 	dma_fence_put(chain->fence);
 	chain->fence = NULL;
+	lockuninit(&chain->prev_lock);
 	lockuninit(&chain->lock);
 	dma_fence_free(fence);
 }
@@ -204,6 +205,7 @@ dma_fence_chain_init(struct dma_fence_chain *chain, struct dma_fence *prev,
 	chain->fence = fence;
 	chain->point = point;
 	lockinit(&chain->lock, "dfchn", 0, 0);
+	lockinit(&chain->prev_lock, "dfchnp", 0, 0);
 	dma_fence_init(&chain->base, &dma_fence_chain_ops, &chain->lock,
 	    context, (unsigned)point);
 }

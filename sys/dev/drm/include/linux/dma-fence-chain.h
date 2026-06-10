@@ -18,6 +18,7 @@
 struct dma_fence_chain {
 	struct dma_fence	base;
 	struct lock		lock;		/* base.lock points here */
+	struct lock		prev_lock;	/* serializes the prev edge */
 	struct dma_fence	*prev;		/* earlier chain/fence; ref */
 	u64			prev_seqno;	/* prev node's point, 0 if none */
 	u64			point;		/* this node's timeline point */
