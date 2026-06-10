@@ -383,7 +383,7 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 	}
 
 	if (clear_pte) {
-		err = nvkm_gsp_vmm_unmap(nfile->vmm, addr, size);
+		err = nvkm_gsp_vmm_unmap_noflush(nfile->vmm, addr, size);
 		if (err != 0) {
 			err = -err;
 			goto fail_tails;
@@ -1493,7 +1493,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			}
 			if (unmapped == 0 &&
 			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
-				err = nvkm_gsp_vmm_unmap_sparse(nfile->vmm,
+				err = nvkm_gsp_vmm_unmap_sparse_noflush(nfile->vmm,
 				    op->addr, op->range);
 			} else {
 				err = 0;
@@ -1524,7 +1524,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    nfile, op->addr, op->range, false,
 				    &unmapped);
 				if (err == 0) {
-					err = nvkm_gsp_vmm_map_sparse(
+					err = nvkm_gsp_vmm_map_sparse_noflush(
 					    nfile->vmm, op->addr, op->range);
 					if (err != 0)
 						err = -err;
@@ -1600,11 +1600,11 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			 * offending context just like any other bad mapping.
 			 */
 			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
-				err = nvkm_gsp_vmm_map_vram_flags(nfile->vmm,
+				err = nvkm_gsp_vmm_map_vram_flags_noflush(nfile->vmm,
 				    op->addr, bo->paddr + op->bo_offset,
 				    op->range, 0, 0, op->flags & 0xff);
 			} else {
-				err = nvkm_gsp_vmm_map_sysmem_kva(nfile->vmm,
+				err = nvkm_gsp_vmm_map_sysmem_kva_noflush(nfile->vmm,
 				    op->addr, (uint8_t *)bo->kva + op->bo_offset,
 				    op->range, op->flags & 0xff);
 			}
@@ -1630,7 +1630,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
 			    op->range, obj, op->bo_offset);
 			if (err != 0) {
-				(void)nvkm_gsp_vmm_unmap(nfile->vmm,
+				(void)nvkm_gsp_vmm_unmap_noflush(nfile->vmm,
 				    op->addr, op->range);
 				drm_gem_object_put_unlocked(obj);
 				err = -err;
@@ -1653,6 +1653,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	}
 
 out_unlock:
+	/* One TLB invalidate publishes every PTE the loop wrote,
+	 * instead of one per op (the _noflush calls skip it). */
+	if (gsp_tok_held)
+		nvkm_gsp_vmm_flush(nfile->vmm);
 	/* Release inner (gsp_tok) before outer (vm_token). Waking the file's
 	 * wait channel lets a blocked EXEC gate / another remap re-check. */
 	if (gsp_tok_held)
