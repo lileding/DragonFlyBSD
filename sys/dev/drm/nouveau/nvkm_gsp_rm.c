@@ -3031,7 +3031,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
 		if (!entry_nonmapped) {
 			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
-			    buf->paddr, buf->size, 1, ro);
+			    buf->paddr, buf->size, 1, ro, 0);
 			if (err != 0)
 				goto out_done;
 		}
@@ -3112,7 +3112,7 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			if (init && alloc)
 				nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
 			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
-			    buf->paddr, buf->size, 1, ro);
+			    buf->paddr, buf->size, 1, ro, 0);
 			if (err != 0)
 				goto out_done;
 			if (golden && global) {

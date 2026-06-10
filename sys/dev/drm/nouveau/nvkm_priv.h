@@ -893,6 +893,7 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 #define NV_PTE_PRIV               (1ULL << 5)
 #define NV_PTE_RO                 (1ULL << 6)
 #define NV_PTE_KIND_INVALID_TURING 0x07ULL
+#define NV_PTE_KIND_SHIFT         56	/* PTE kind field, bits 63:56 */
 
 /* Pascal+ 16K-page 5-level GMMU (gp100_vmm_16, vmmgp100.c:603-608). */
 #define NVKM_GMMU_PD3_SHIFT       47

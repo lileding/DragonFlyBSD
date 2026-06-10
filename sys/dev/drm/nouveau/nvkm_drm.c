@@ -1086,7 +1086,12 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		break;
 	}
 	case NOUVEAU_GETPARAM_HAS_VMA_TILEMODE:
-		gp->value = 0;
+		/*
+		 * VM_BIND carries the PTE kind in op->flags bits 7:0 and the
+		 * map paths write it into GMMU PTE bits 63:56.  This is what
+		 * NVK gates VK_EXT_image_drm_format_modifier on.
+		 */
+		gp->value = 1;
 		break;
 	default:
 		nvkm_debugf(sc->dev,
@@ -1574,14 +1579,21 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				drm_gem_object_put_unlocked(obj);
 				break;
 			}
+			/*
+			 * NVK's VMA-tilemode protocol: bits 7:0 of op->flags
+			 * carry the PTE kind (bit 8 is SPARSE).  Kinds are
+			 * passed through unvalidated -- NVK only emits
+			 * hardware-valid kinds, and a bogus one faults the
+			 * offending context just like any other bad mapping.
+			 */
 			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
-				err = nvkm_gsp_vmm_map_vram(nfile->vmm,
+				err = nvkm_gsp_vmm_map_vram_flags(nfile->vmm,
 				    op->addr, bo->paddr + op->bo_offset,
-				    op->range);
+				    op->range, 0, 0, op->flags & 0xff);
 			} else {
 				err = nvkm_gsp_vmm_map_sysmem_kva(nfile->vmm,
 				    op->addr, (uint8_t *)bo->kva + op->bo_offset,
-				    op->range);
+				    op->range, op->flags & 0xff);
 			}
 			nvkm_drm_vm_trace_record(sc, NVKM_DRM_VM_TRACE_MAP,
 			    op->flags, op->handle, op->addr, op->range,
