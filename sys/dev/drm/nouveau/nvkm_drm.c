@@ -92,6 +92,17 @@ static struct drm_driver nvkm_drm_driver = {
 	.lastclose = nvkm_drm_lastclose,
 	.gem_vm_ops = &nvkm_gem_pager_ops,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
+	/*
+	 * PRIME self-import only (wlroots requires DRM_PRIME_CAP_IMPORT even
+	 * for software rendering): same-device dmabuf round-trips resolve to
+	 * the original GEM object in drm_gem_prime_import_dev().  Cross-device
+	 * sharing needs gem_prime_get_sg_table/import_sg_table, which are
+	 * deliberately absent -- those paths fail with an errno, not a crash.
+	 */
+	.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
+	.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
+	.gem_prime_export = drm_gem_prime_export,
+	.gem_prime_import = drm_gem_prime_import,
 	.dumb_create = nvkm_bo_dumb_create,
 	.dumb_map_offset = nvkm_bo_dumb_map_offset,
 	.dumb_destroy = nvkm_bo_dumb_destroy,
