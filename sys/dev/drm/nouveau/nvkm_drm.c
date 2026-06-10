@@ -18,6 +18,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_syncobj.h>
 #include <linux/dma-fence.h>
+#include <linux/dma-fence-chain.h>
 #include <linux/ktime.h>
 #include <linux/slab.h>
 #include <machine/pmap.h>
@@ -1364,6 +1365,11 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 }
 
 /* ---- DRM_NOUVEAU_VM_BIND ---- */
+static int nvkm_drm_wait_syncobjs(struct nvkm_softc *sc,
+	    struct drm_file *file_priv, uint32_t count, uint64_t wait_ptr);
+static int nvkm_drm_signal_sync_array(struct nvkm_softc *sc,
+	    struct drm_file *file_priv, uint32_t count, uint64_t sig_ptr);
+
 #define DRM_NOUVEAU_VM_BIND_OP_MAP	0x0
 #define DRM_NOUVEAU_VM_BIND_OP_UNMAP	0x1
 #define DRM_NOUVEAU_VM_BIND_SPARSE	(1 << 8)
@@ -1418,11 +1424,16 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
 		return (-EINVAL);
 	}
-	if (req->wait_count != 0 || req->sig_count != 0) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND unsupported sync waits=%u sigs=%u\n",
-		    req->wait_count, req->sig_count);
-		return (-EINVAL);
+	/*
+	 * Binds execute synchronously, so syncobj semantics collapse to:
+	 * resolve and CPU-wait every wait fence up front, and install
+	 * already-signalled fences for the signal array on success.
+	 */
+	if (req->wait_count != 0) {
+		err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
+		    req->wait_ptr);
+		if (err != 0)
+			return (err);
 	}
 	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
@@ -1650,6 +1661,10 @@ out_unlock:
 		nvkm_drm_vm_wakeup(nfile);
 		lwkt_reltoken(&nfile->vm_token);
 	}
+	/* Binds completed synchronously: the signal array fires now. */
+	if (err == 0 && req->sig_count != 0)
+		err = nvkm_drm_signal_sync_array(sc, file_priv,
+		    req->sig_count, req->sig_ptr);
 	if (err != 0 && current_op != NULL)
 		nvkm_drm_vm_bind_record_error(sc, current_op->op,
 		    current_op->flags, current_op->handle, current_op->addr,
@@ -1757,6 +1772,76 @@ nvkm_drm_exec_fence_create(struct nvkm_softc *sc, unsigned seqno)
 	return (&f->base);
 }
 
+/*
+ * Install already-signalled fences on a drm_nouveau_sync signal array;
+ * used by synchronous paths (VM_BIND) where the work is complete by
+ * the time the ioctl returns.
+ */
+static int
+nvkm_drm_signal_sync_array(struct nvkm_softc *sc, struct drm_file *file_priv,
+    uint32_t count, uint64_t sig_ptr)
+{
+	struct drm_nouveau_sync *sigs;
+	int err = 0;
+
+	if (count == 0)
+		return (0);
+	if (count > 64)
+		return (-EINVAL);
+
+	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
+	err = copyin((const void *)(uintptr_t)sig_ptr, sigs,
+	    sizeof(*sigs) * count);
+	if (err != 0) {
+		kfree(sigs);
+		return (-EFAULT);
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
+		struct drm_syncobj *syncobj;
+		struct dma_fence *fence;
+
+		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
+		    type != DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			err = -EINVAL;
+			break;
+		}
+		syncobj = drm_syncobj_find(file_priv, sigs[i].handle);
+		if (syncobj == NULL) {
+			err = -ENOENT;
+			break;
+		}
+		fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
+		if (fence == NULL) {
+			drm_syncobj_put(syncobj);
+			err = -ENOMEM;
+			break;
+		}
+		dma_fence_signal(fence);
+		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			struct dma_fence_chain *chain = dma_fence_chain_alloc();
+
+			if (chain == NULL) {
+				dma_fence_put(fence);
+				drm_syncobj_put(syncobj);
+				err = -ENOMEM;
+				break;
+			}
+			/* add_point consumes the fence reference. */
+			drm_syncobj_add_point(syncobj, chain, fence,
+			    sigs[i].timeline_value);
+		} else {
+			drm_syncobj_replace_fence(syncobj, 0, fence);
+			dma_fence_put(fence);
+		}
+		drm_syncobj_put(syncobj);
+	}
+
+	kfree(sigs);
+	return (err);
+}
+
 static int
 nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
     uint32_t count, uint64_t wait_ptr)
@@ -1812,17 +1897,6 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			err = ret;
 			break;
 		}
-		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ &&
-		    fence->seqno < waits[i].timeline_value) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: sync wait point not ready idx=%u handle=%u have=0x%08x want=0x%016jx\n",
-			    i, waits[i].handle, fence->seqno,
-			    (uintmax_t)waits[i].timeline_value);
-			dma_fence_put(fence);
-			err = -ETIME;
-			break;
-		}
-
 		ret = dma_fence_wait(fence, true);
 		dma_fence_put(fence);
 		if (ret != 0) {
@@ -2275,10 +2349,23 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 
 	for (uint32_t i = 0; i < count; i++) {
 		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
-		u64 point = type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    sigs[i].timeline_value : 0;
 
-		drm_syncobj_replace_fence(syncobjs[i], point, signals[i].fence);
+		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			struct dma_fence_chain *chain;
+
+			chain = dma_fence_chain_alloc();
+			if (chain == NULL) {
+				err = -ENOMEM;
+				goto out_free_arrays;
+			}
+			/* add_point consumes a payload reference. */
+			drm_syncobj_add_point(syncobjs[i], chain,
+			    dma_fence_get(signals[i].fence),
+			    sigs[i].timeline_value);
+		} else {
+			drm_syncobj_replace_fence(syncobjs[i], 0,
+			    signals[i].fence);
+		}
 	}
 
 	*psignals = signals;
