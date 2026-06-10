@@ -446,6 +446,7 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (0);
 }
 
+
 static void
 nvkm_drm_vm_bind_record_error(struct nvkm_softc *sc, uint32_t op,
     uint32_t flags, uint32_t handle, uint64_t addr, uint64_t range,
@@ -1607,6 +1608,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    i, err);
 				break;
 			}
+			/*
+			 * Mark the bo itself: scanout fb creation happens on
+			 * a different drm file (compositor master fd) but
+			 * same-device dmabuf import resolves to this same
+			 * GEM object, so the flag travels with the buffer.
+			 */
+			if ((op->flags & 0xff) != 0)
+				bo->vm_bound_tiled = true;
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
 			    op->range, obj, op->bo_offset);
 			if (err != 0) {
