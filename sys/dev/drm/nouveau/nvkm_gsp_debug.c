@@ -822,6 +822,11 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "kms_push_trace",
 	    CTLFLAG_RW, &sc->kms_push_trace, 0,
 	    "Enable verbose dispnv50 DMAC push logging");
+	sc->vma_tilemode = 1;	/* per-VMA PTE kind; 0 = legacy BO tiling */
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vma_tilemode",
+	    CTLFLAG_RW, &sc->vma_tilemode, 0,
+	    "Report HAS_VMA_TILEMODE to userspace (kill switch for tiled "
+	    "rendering debug; takes effect at vulkan device open)");
 	sc->gsp_rpc_trace_on = 1;	/* default on; low-overhead ring */
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
 	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,

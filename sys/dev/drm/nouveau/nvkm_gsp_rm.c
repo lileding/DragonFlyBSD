@@ -1591,10 +1591,16 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	 * we previously used PRAMIN which bypasses L2 so GSP's later reads
 	 * (through its own BAR1 view) could miss our writes. */
 	if (chan->inst_vram != 0) {
-		chan->inst_bar1_gva = sc->bar1.next_gva;
-		sc->bar1.next_gva += 0x1000;
-		(void)nvkm_gsp_bar1_map_vram(sc, chan->inst_bar1_gva, chan->inst_vram);
-		nvkm_gsp_bar1_flush(sc);
+		/*
+		 * Must go through the bitmap allocator: bumping next_gva by
+		 * hand leaves the page unreserved, and the round-robin
+		 * allocator is guaranteed to wrap and hand the same GVA to a
+		 * transient display mapping, which then rewrites this PTE.
+		 */
+		err = nvkm_gsp_bar1_map_existing(sc, chan->inst_vram,
+		    &chan->inst_bar1_gva);
+		if (err != 0)
+			return (err);
 		nvkm_gsp_bar1_invalidate(sc);
 		nvkm_debugf(sc->dev,
 		    "gsp_rm: inst mapped to BAR1 GVA 0x%llx (paddr 0x%llx)\n",
@@ -1864,12 +1870,18 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	/* nouveau clears USERD before RAMFC/channel programming. Do the BAR1
 	 * mapping and clear before RM schedules the channel, otherwise HOST can
-	 * see stale GP_GET/GP_PUT immediately after SCHEDULE. */
-	chan->userd_bar2_gva = sc->bar1.next_gva;
-	sc->bar1.next_gva += 0x1000;
-	(void)nvkm_gsp_bar1_map_vram(sc, chan->userd_bar2_gva,
-	    chan->userd_vram + (uint64_t)userd_page * 0x1000U);
-	nvkm_gsp_bar1_flush(sc);
+	 * see stale GP_GET/GP_PUT immediately after SCHEDULE.
+	 *
+	 * The mapping must come from the bitmap allocator; a hand-bumped
+	 * next_gva page is invisible to it and gets recycled into transient
+	 * display mappings once the round-robin scan wraps, killing USERD
+	 * (GP_PUT writes land in the foreign page, readback returns zeros).
+	 */
+	err = nvkm_gsp_bar1_map_existing(sc,
+	    chan->userd_vram + (uint64_t)userd_page * 0x1000U,
+	    &chan->userd_bar2_gva);
+	if (err != 0)
+		return (err);
 	nvkm_gsp_bar1_invalidate(sc);
 	nvkm_gsp_userd_clear(sc, chan);
 
