@@ -661,6 +661,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	}
 	crtc_mask = (1u << nheads) - 1u;
 	if (nheads > 0) {
+		dev->vblank_disable_immediate = true;
 		drm_vblank_init(dev, nheads);
 		/* No drm_irq_install(); our GSP IRQ (nvkm_pci.c) drives
 		 * drm_crtc_handle_vblank, so advertise vblank as available. */
