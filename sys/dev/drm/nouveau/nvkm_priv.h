@@ -481,6 +481,7 @@ struct nvkm_softc {
 
 	/* DRM driver registration (Phase 3). */
 	struct drm_device	*drm_dev;
+	struct drm_crtc		*kms_crtc[4];	/* head index -> crtc, for vblank IRQ */
 	struct pci_dev		*drm_pdev;
 	uint64_t		fence_context;
 	uint32_t		fence_seqno;

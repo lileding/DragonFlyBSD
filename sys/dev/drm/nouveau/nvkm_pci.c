@@ -166,8 +166,12 @@ nvkm_gsp_isr(void *arg)
 			sc->gsp_disp_vblank_mask = vb;
 			for (uint32_t h = 0; h < 8u; h++) {
 				if ((vb & (1u << h)) &&
-				    (nvkm_rd32(sc, 0x611c00 + h * 4u) & 0x2u))
+				    (nvkm_rd32(sc, 0x611c00 + h * 4u) & 0x2u)) {
 					nvkm_wr32(sc, 0x611800 + h * 4u, 0x2u);
+					if (h < 4u && sc->kms_crtc[h] != NULL)
+						drm_crtc_handle_vblank(
+						    sc->kms_crtc[h]);
+				}
 			}
 			nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), stall);
 			sc->gsp_disp_intr_count++;

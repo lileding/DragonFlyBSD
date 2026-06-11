@@ -380,13 +380,6 @@ nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 	struct drm_display_mode *mode = &state->adjusted_mode;
 
 	(void)crtc;
-	/*
-	 * dispnv50 already waits for the window notifier, but nvkm does not yet
-	 * wire GSP display vblank into DRM core.  Mark commits as no_vblank so
-	 * drm_atomic_helper_fake_vblank() consumes page-flip events instead of
-	 * leaving commit->flip_done pending.
-	 */
-	state->no_vblank = true;
 	if (!state->enable)
 		return (0);
 
@@ -414,7 +407,22 @@ nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-	(void)crtc; (void)old_state;	/* UPDATE is sequenced in atomic_enable. */
+	struct drm_device *dev = crtc->dev;
+	unsigned long flags;
+
+	(void)old_state;	/* UPDATE is sequenced in atomic_enable. */
+
+	/* Complete the page-flip event on the next real vblank IRQ
+	 * (drm_crtc_handle_vblank sends it); send immediately if vblank off. */
+	if (crtc->state->event == NULL)
+		return;
+	spin_lock_irqsave(&dev->event_lock, flags);
+	if (drm_crtc_vblank_get(crtc) == 0)
+		drm_crtc_arm_vblank_event(crtc, crtc->state->event);
+	else
+		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+	crtc->state->event = NULL;
+	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
 
 static void
@@ -457,6 +465,7 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 	    display_id, &hdmi);
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
+	drm_crtc_vblank_on(crtc);
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);
@@ -468,6 +477,7 @@ nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 
 	(void)old_state;
+	drm_crtc_vblank_off(crtc);
 	nvkm_infof(nc->sc->dev, "drm: crtc disable head=%u\n", nc->head);
 	/* Head blank lands in a later milestone; leave timing latched. */
 }
@@ -486,7 +496,31 @@ nvkm_crtc_destroy(struct drm_crtc *crtc)
 	kfree(to_nvkm_crtc(crtc));
 }
 
+static int
+nvkm_crtc_enable_vblank(struct drm_crtc *crtc)
+{
+	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	uint32_t en = 0x611d80 + nc->head * 4;
+
+	/* Arm + unmask the per-head vblank interrupt (matches r535 head
+	 * vblank_get): 0x611800 arms, 0x611d80 bit1 enables delivery. */
+	nvkm_wr32(nc->sc, 0x611800 + nc->head * 4, 0x00000002);
+	nvkm_wr32(nc->sc, en, nvkm_rd32(nc->sc, en) | 0x00000002u);
+	return (0);
+}
+
+static void
+nvkm_crtc_disable_vblank(struct drm_crtc *crtc)
+{
+	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	uint32_t en = 0x611d80 + nc->head * 4;
+
+	nvkm_wr32(nc->sc, en, nvkm_rd32(nc->sc, en) & ~0x00000002u);
+}
+
 static const struct drm_crtc_funcs nvkm_crtc_funcs = {
+	.enable_vblank		= nvkm_crtc_enable_vblank,
+	.disable_vblank		= nvkm_crtc_disable_vblank,
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= drm_atomic_helper_page_flip,
 	.destroy		= nvkm_crtc_destroy,
@@ -622,8 +656,16 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 			continue;
 		}
 		drm_crtc_helper_add(crtc, &nvkm_crtc_helper_funcs);
+		if (h < 4)
+			sc->kms_crtc[h] = crtc;
 	}
 	crtc_mask = (1u << nheads) - 1u;
+	if (nheads > 0) {
+		drm_vblank_init(dev, nheads);
+		/* No drm_irq_install(); our GSP IRQ (nvkm_pci.c) drives
+		 * drm_crtc_handle_vblank, so advertise vblank as available. */
+		dev->irq_enabled = true;
+	}
 
 	/* (2) One connector + encoder per supported displayId; any head can
 	 * drive any output, so possible_crtcs is all heads. */
