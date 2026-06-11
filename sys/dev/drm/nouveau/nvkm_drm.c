@@ -76,10 +76,57 @@ static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 #define DRM_IOCTL_NOUVEAU_NVIF \
     _IOC(IOC_INOUT, DRM_IOCTL_BASE, DRM_COMMAND_BASE + DRM_NOUVEAU_NVIF, 0)
 
+/* Raster scanout position for precise vblank timestamps (TU102 = gv100):
+ * armed head timing at 0x6820xx, raster generator line at 0x616330/4. Lets
+ * the drm vblank core place page-flip events on the correct vblank. */
+static bool
+nvkm_drm_get_scanout_position(struct drm_device *dev, unsigned int pipe,
+    bool in_vblank_irq, int *vpos, int *hpos, ktime_t *stime, ktime_t *etime,
+    const struct drm_display_mode *mode)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(dev);
+	uint32_t rg = pipe * 0x800u;
+	uint32_t st = 0x8000u + pipe * 0x400u;	/* armed head state */
+	int vtotal, vblanks, vblanke, line;
+
+	(void)in_vblank_irq;
+	(void)mode;
+	if (sc == NULL)
+		return false;
+
+	vtotal  = (nvkm_rd32(sc, 0x682064 + st) >> 16) & 0xffff;
+	vblanke = (nvkm_rd32(sc, 0x68206c + st) >> 16) & 0xffff;
+	vblanks = (nvkm_rd32(sc, 0x682070 + st) >> 16) & 0xffff;
+	if (vtotal == 0)
+		return false;
+
+	if (stime != NULL)
+		*stime = ktime_get();
+	/* Reading vline (0x616330) latches hline (0x616334). */
+	line  = nvkm_rd32(sc, 0x616330 + rg) & 0xffff;
+	*hpos = nvkm_rd32(sc, 0x616334 + rg) & 0xffff;
+	if (etime != NULL)
+		*etime = ktime_get();
+
+	/* nouveau calc(): raster line -> vpos relative to active scanout. */
+	if (vblanke >= vblanks) {
+		if (line >= vblanks)
+			line -= vtotal;
+	} else {
+		if (line >= vblanks)
+			line -= vtotal;
+		line -= vblanke + 1;
+	}
+	*vpos = line;
+	return true;
+}
+
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
 	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
 	.fops    = &nvkm_drm_fops,
+	.get_scanout_position = nvkm_drm_get_scanout_position,
+	.get_vblank_timestamp = drm_calc_vbltimestamp_from_scanoutpos,
 	.ioctls  = nvkm_drm_ioctls,
 	.num_ioctls = 0x45 /* sparse: max index DRM_NOUVEAU_GEM_INFO(0x44)+1 */,
 	.name    = NVKM_DRM_NAME,
