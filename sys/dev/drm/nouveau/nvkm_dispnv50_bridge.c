@@ -2020,7 +2020,7 @@ static int
 nvkm_dispnv50_window_program(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
     struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
-    bool sanitize, const char *reason)
+    bool sanitize, bool async, const char *reason)
 {
 	struct nv50_wndw_atom asyw;
 	int ret;
@@ -2036,18 +2036,26 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 			goto fail;
 	}
 
-	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
-	if (ret != 0)
-		goto fail;
+	/* A page-flip only changes the scanout buffer (the image); notifier,
+	 * ILUT and blend were programmed at modeset and are unchanged, so the
+	 * async path pushes image_set + UPDATE only (mirrors nouveau
+	 * nv50_wndw_flush_set gating each emitter on a dirty bit). */
+	if (!async) {
+		ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
+		if (ret != 0)
+			goto fail;
+	}
 	ret = wndw->func->image_set(wndw, &asyw);
 	if (ret != 0)
 		goto fail;
-	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
-	if (ret != 0)
-		goto fail;
-	ret = wndw->func->blend_set(wndw, &asyw);
-	if (ret != 0)
-		goto fail;
+	if (!async) {
+		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
+		if (ret != 0)
+			goto fail;
+		ret = wndw->func->blend_set(wndw, &asyw);
+		if (ret != 0)
+			goto fail;
+	}
 
 	commit_core = interlock[NV50_DISP_INTERLOCK_CORE] != 0;
 	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
@@ -2060,6 +2068,13 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 		if (ret != 0)
 			goto fail;
 	}
+
+	/* Async (page-flip): the UPDATE is kicked; the HW latches the new
+	 * scanout at the next vblank and the DRM flip event completes there
+	 * (real vblank). Do not block the commit thread on the notifier or
+	 * read back channel status. DRM serialises flips via the event. */
+	if (async)
+		return 0;
 
 	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
 	if (!wndw->wndw.dfly_last_idle) {
@@ -2317,7 +2332,7 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, "plane update");
+	    interlock, false, true, "plane update");
 }
 
 int
@@ -2448,7 +2463,7 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, true, "bridge");
+	    interlock, true, false, "bridge");
 	if (ret != 0)
 		goto fail;
 
