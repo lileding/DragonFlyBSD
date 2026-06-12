@@ -304,6 +304,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->sync_wait_count);
 	sbuf_printf(&sb, "wait_error_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_error_count);
+	sbuf_printf(&sb, "wait_already_signaled_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_already_signaled_count);
+	sbuf_printf(&sb, "wait_blocking_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_blocking_count);
+	sbuf_printf(&sb, "wait_blocking_us = %llu\n",
+	    (unsigned long long)sc->sync_wait_blocking_us);
+	sbuf_printf(&sb, "wait_local_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_local_count);
+	sbuf_printf(&sb, "wait_external_count = %llu\n",
+	    (unsigned long long)sc->sync_wait_external_count);
 	sbuf_printf(&sb, "signal_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_count);
 	sbuf_printf(&sb, "signal_error_count = %llu\n",
@@ -314,6 +324,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->irq_isr_count);
 	sbuf_printf(&sb, "msi_rearm_count = %llu\n",
 	    (unsigned long long)sc->irq_msi_rearm_count);
+	sbuf_printf(&sb, "empty_count = %llu\n",
+	    (unsigned long long)sc->irq_empty_count);
+	sbuf_printf(&sb, "unhandled_leaf_count = %llu\n",
+	    (unsigned long long)sc->irq_unhandled_leaf_count);
+	sbuf_printf(&sb, "last_stat = 0x%08x\n", sc->irq_last_stat);
+	sbuf_printf(&sb, "last_top = 0x%08x\n", sc->irq_last_top);
+	sbuf_printf(&sb, "last_unhandled_leaf = %u\n",
+	    sc->irq_last_unhandled_leaf);
+	sbuf_printf(&sb, "last_unhandled_mask = 0x%08x\n",
+	    sc->irq_last_unhandled_mask);
 
 	sbuf_cat(&sb, "\nkms\n");
 	sbuf_printf(&sb, "auto_count = %llu\n",
@@ -342,6 +362,39 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->gsp_post_event_unhandled_count);
 	sbuf_printf(&sb, "post_event_nonstall_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_nonstall_count);
+	sbuf_printf(&sb, "nocat_count = %llu\n",
+	    (unsigned long long)sc->gsp_nocat_count);
+	sbuf_printf(&sb, "nocat_short_count = %llu\n",
+	    (unsigned long long)sc->gsp_nocat_short_count);
+	sbuf_printf(&sb, "nocat_last_flags = 0x%08x\n",
+	    sc->gsp_nocat_last_flags);
+	sbuf_printf(&sb, "nocat_last_timestamp = 0x%016llx\n",
+	    (unsigned long long)sc->gsp_nocat_last_timestamp);
+	sbuf_printf(&sb, "nocat_last_rec_type = %u\n",
+	    sc->gsp_nocat_last_rec_type);
+	sbuf_printf(&sb, "nocat_last_bugcheck = 0x%08x\n",
+	    sc->gsp_nocat_last_bugcheck);
+	sbuf_printf(&sb, "nocat_last_source = \"%s\"\n",
+	    sc->gsp_nocat_last_source);
+	sbuf_printf(&sb, "nocat_last_subsystem = 0x%08x\n",
+	    sc->gsp_nocat_last_subsystem);
+	sbuf_printf(&sb, "nocat_last_error_code = 0x%016llx\n",
+	    (unsigned long long)sc->gsp_nocat_last_error_code);
+	sbuf_printf(&sb, "nocat_last_engine = \"%s\"\n",
+	    sc->gsp_nocat_last_engine);
+	sbuf_printf(&sb, "nocat_last_tdr_reason = 0x%08x\n",
+	    sc->gsp_nocat_last_tdr_reason);
+	sbuf_printf(&sb, "nocat_last_diag_len = %u\n",
+	    sc->gsp_nocat_last_diag_len);
+	sbuf_printf(&sb, "nocat_last_diag_stack = "
+	    "%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
+	    sc->gsp_nocat_last_diag[0], sc->gsp_nocat_last_diag[1],
+	    sc->gsp_nocat_last_diag[2], sc->gsp_nocat_last_diag[3],
+	    sc->gsp_nocat_last_diag[4], sc->gsp_nocat_last_diag[5],
+	    sc->gsp_nocat_last_diag[6], sc->gsp_nocat_last_diag[7],
+	    sc->gsp_nocat_last_diag[8], sc->gsp_nocat_last_diag[9]);
+	sbuf_printf(&sb, "nocat_last_diag_count = %u\n",
+	    sc->gsp_nocat_last_diag[10]);
 	sbuf_printf(&sb, "post_event_last_client = 0x%08x\n",
 	    sc->gsp_post_event_last_client);
 	sbuf_printf(&sb, "post_event_last_event = 0x%08x\n",
@@ -372,6 +425,40 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->gsp_nonstall_intr_last_top);
 	sbuf_printf(&sb, "nonstall_intr_top_now = 0x%08x\n",
 	    nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_TOP));
+	sbuf_printf(&sb, "gsp_falcon_intr_count = %llu\n",
+	    (unsigned long long)sc->gsp_falcon_intr_count);
+	sbuf_printf(&sb, "gsp_falcon_msgq_wake_count = %llu\n",
+	    (unsigned long long)sc->gsp_falcon_msgq_wake_count);
+	sbuf_printf(&sb, "gsp_falcon_unexpected_count = %llu\n",
+	    (unsigned long long)sc->gsp_falcon_unexpected_count);
+	sbuf_printf(&sb, "gsp_falcon_last_stat = 0x%08x\n",
+	    sc->gsp_falcon_last_stat);
+	sbuf_printf(&sb, "disp_intr_count = %llu\n",
+	    (unsigned long long)sc->gsp_disp_intr_count);
+	sbuf_printf(&sb, "disp_intr_last_leaf = %u\n",
+	    sc->gsp_disp_intr_last_leaf);
+	sbuf_printf(&sb, "disp_intr_last_mask = 0x%08x\n",
+	    sc->gsp_disp_intr_last_mask);
+	sbuf_printf(&sb, "disp_vblank_mask = 0x%08x\n",
+	    sc->gsp_disp_vblank_mask);
+	for (uint32_t head = 0; head < 4; head++)
+		sbuf_printf(&sb, "disp_head_status[%u] = 0x%08x\n",
+		    head, sc->gsp_disp_head_status[head]);
+	sbuf_printf(&sb, "other_stall_count = %llu\n",
+	    (unsigned long long)sc->gsp_other_stall_count);
+	sbuf_printf(&sb, "other_stall_last_leaf = %u\n",
+	    sc->gsp_other_stall_last_leaf);
+	sbuf_printf(&sb, "other_stall_last_mask = 0x%08x\n",
+	    sc->gsp_other_stall_last_mask);
+	for (uint32_t leaf = 0; leaf < 8; leaf++)
+		sbuf_printf(&sb, "stall_leaf_mask[%u] = 0x%08x\n",
+		    leaf, sc->gsp_stall_leaf_mask[leaf]);
+	for (uint32_t leaf = 0; leaf < 8; leaf++)
+		sbuf_printf(&sb, "gsp_leaf_mask[%u] = 0x%08x\n",
+		    leaf, sc->gsp_engine_leaf_mask[leaf]);
+	for (uint32_t leaf = 0; leaf < 8; leaf++)
+		sbuf_printf(&sb, "disp_leaf_mask[%u] = 0x%08x\n",
+		    leaf, sc->gsp_disp_leaf_mask[leaf]);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
 		sbuf_printf(&sb, "nonstall_leaf_mask[%u] = 0x%08x\n",
 		    leaf, sc->gsp_nonstall_leaf_mask[leaf]);
@@ -837,7 +924,7 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLFLAG_RW, &sc->vma_tilemode, 0,
 	    "Report HAS_VMA_TILEMODE to userspace (kill switch for tiled "
 	    "rendering debug; takes effect at vulkan device open)");
-	sc->gsp_rpc_trace_on = 1;	/* default on; low-overhead ring */
+	sc->gsp_rpc_trace_on = 0;	/* opt-in; GSP events are X11 hot path. */
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
 	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,
 	    "Enable GSP RPC ring trace recording");

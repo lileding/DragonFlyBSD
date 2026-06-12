@@ -584,8 +584,7 @@ nvkm_crtc_enable_vblank(struct drm_crtc *crtc)
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	uint32_t en = 0x611d80 + nc->head * 4;
 
-	/* Arm + unmask the per-head vblank interrupt (matches r535 head
-	 * vblank_get): 0x611800 arms, 0x611d80 bit1 enables delivery. */
+	/* r535_head_vblank_get(): clear pending and enable delivery. */
 	nvkm_wr32(nc->sc, 0x611800 + nc->head * 4, 0x00000002);
 	nvkm_wr32(nc->sc, en, nvkm_rd32(nc->sc, en) | 0x00000002u);
 	return (0);

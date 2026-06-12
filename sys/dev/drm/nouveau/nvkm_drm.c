@@ -1785,6 +1785,8 @@ struct drm_nouveau_exec {
 struct nvkm_drm_exec_fence {
 	struct dma_fence base;
 	spinlock_t lock;
+	volatile uint32_t *sema;
+	uint32_t payload;
 };
 
 struct nvkm_drm_exec_signal {
@@ -1797,9 +1799,23 @@ nvkm_drm_fence_name(struct dma_fence *fence __unused)
 	return ("nvkm-drm");
 }
 
+static bool
+nvkm_drm_fence_is_signaled(struct dma_fence *fence)
+{
+	struct nvkm_drm_exec_fence *f =
+	    container_of(fence, struct nvkm_drm_exec_fence, base);
+	volatile uint32_t *sema = f->sema;
+
+	if (sema == NULL)
+		return (false);
+	cpu_lfence();
+	return (*sema == f->payload);
+}
+
 static const struct dma_fence_ops nvkm_drm_fence_ops = {
 	.get_driver_name = nvkm_drm_fence_name,
 	.get_timeline_name = nvkm_drm_fence_name,
+	.signaled = nvkm_drm_fence_is_signaled,
 	.wait = dma_fence_default_wait,
 };
 
@@ -1918,6 +1934,7 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 	for (uint32_t i = 0; i < count; i++) {
 		struct dma_fence *fence;
 		uint32_t type = waits[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
+		uint64_t wait_start;
 		int ret;
 
 		nvkm_debugf(sc->dev,
@@ -1943,7 +1960,20 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			err = ret;
 			break;
 		}
+		if (fence->ops == &nvkm_drm_fence_ops)
+			sc->sync_wait_local_count++;
+		else
+			sc->sync_wait_external_count++;
+		if (dma_fence_is_signaled(fence)) {
+			sc->sync_wait_already_signaled_count++;
+			dma_fence_put(fence);
+			continue;
+		}
+		sc->sync_wait_blocking_count++;
+		wait_start = nvkm_drm_profile_now_us();
 		ret = dma_fence_wait(fence, true);
+		nvkm_drm_profile_add_us(&sc->sync_wait_blocking_us,
+		    wait_start);
 		dma_fence_put(fence);
 		if (ret != 0) {
 			nvkm_debugf(sc->dev,
@@ -1996,6 +2026,29 @@ nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
 			dma_fence_set_error(pending->fences[i], error);
 		(void)dma_fence_signal(pending->fences[i]);
 	}
+}
+
+static void
+nvkm_drm_exec_fence_arm(struct dma_fence *fence, volatile uint32_t *sema,
+    uint32_t payload)
+{
+	struct nvkm_drm_exec_fence *f;
+
+	if (fence == NULL || fence->ops != &nvkm_drm_fence_ops)
+		return;
+
+	f = container_of(fence, struct nvkm_drm_exec_fence, base);
+	f->payload = payload;
+	cpu_mfence();
+	f->sema = sema;
+}
+
+static void
+nvkm_drm_exec_pending_arm_fences(struct nvkm_drm_exec_pending *pending)
+{
+	for (uint32_t i = 0; i < pending->fence_count; i++)
+		nvkm_drm_exec_fence_arm(pending->fences[i], pending->sema,
+		    pending->payload);
 }
 
 static int
@@ -2712,6 +2765,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		err = -ENOMEM;
 		goto out_unlock;
 	}
+	nvkm_drm_exec_pending_arm_fences(pending);
 
 	profile_start = nvkm_drm_profile_now_us();
 	/*
