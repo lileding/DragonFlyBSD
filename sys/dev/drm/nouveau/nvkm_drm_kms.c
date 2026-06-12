@@ -195,6 +195,45 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_commit	= drm_atomic_helper_commit,
 };
 
+static bool
+nvkm_atomic_commit_needs_vblank_wait(struct drm_atomic_state *old_state)
+{
+	struct drm_plane *plane;
+	struct drm_plane_state *old_plane_state;
+	struct drm_plane_state *new_plane_state;
+	bool saw_plane = false;
+	int i;
+
+	for_each_oldnew_plane_in_state(old_state, plane, old_plane_state,
+	    new_plane_state, i) {
+		(void)plane;
+		saw_plane = true;
+		if (!drm_atomic_plane_disabling(old_plane_state, new_plane_state))
+			return (true);
+	}
+
+	return (!saw_plane);
+}
+
+static void
+nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
+{
+	struct drm_device *dev = old_state->dev;
+
+	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+	drm_atomic_helper_commit_planes(dev, old_state, 0);
+	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+	drm_atomic_helper_fake_vblank(old_state);
+	drm_atomic_helper_commit_hw_done(old_state);
+	if (nvkm_atomic_commit_needs_vblank_wait(old_state))
+		drm_atomic_helper_wait_for_vblanks(dev, old_state);
+	drm_atomic_helper_cleanup_planes(dev, old_state);
+}
+
+static const struct drm_mode_config_helper_funcs nvkm_mode_config_helper_funcs = {
+	.atomic_commit_tail = nvkm_atomic_commit_tail,
+};
+
 struct nvkm_crtc {
 	struct drm_crtc		base;
 	struct nvkm_softc	*sc;
@@ -607,6 +646,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	dev->mode_config.max_width = 8192;
 	dev->mode_config.max_height = 8192;
 	dev->mode_config.funcs = &nvkm_mode_config_funcs;
+	dev->mode_config.helper_private = &nvkm_mode_config_helper_funcs;
 
 	if (sc->disp == NULL)
 		return (0);		/* no display subsystem; render-only */
