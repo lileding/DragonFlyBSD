@@ -814,6 +814,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->prime_fd_to_handle_count);
 	sbuf_printf(sb, "prime_fd_to_handle_error_count = %llu\n",
 	    (unsigned long long)sc->prime_fd_to_handle_error_count);
+	sbuf_printf(sb, "prime_dma_buf_export_count = %llu\n",
+	    (unsigned long long)sc->prime_dma_buf_export_count);
 	sbuf_printf(sb, "cpu_prep_wait_count = %llu\n",
 	    (unsigned long long)sc->cpu_prep_wait_count);
 	sbuf_printf(sb, "cpu_prep_wait_error_count = %llu\n",

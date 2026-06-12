@@ -34,6 +34,7 @@
 #include <linux/poll.h>
 #include <linux/reservation.h>
 #include <linux/mm.h>
+#include <linux/file.h>
 
 struct fileops dmabuf_fileops;
 
@@ -139,7 +140,7 @@ dma_buf_export(const struct dma_buf_export_info *exp_info)
 int
 dma_buf_fd(struct dma_buf *dmabuf, int flags)
 {
-	int fd, error;
+	int fd;
 
 	if (dmabuf == NULL)
 		return -EINVAL;
@@ -147,21 +148,11 @@ dma_buf_fd(struct dma_buf *dmabuf, int flags)
 	if (dmabuf->file == NULL)
 		return -EINVAL;
 
-	if (flags & O_CLOEXEC) {
-	/* XXX: CLOEXEC not handled yet */
-#if 0
-		__set_close_on_exec(fd, fdt);
-	else
-		__clear_close_on_exec(fd, fdt);
-#endif
-	}
+	fd = get_unused_fd_flags(flags);
+	if (fd < 0)
+		return fd;
 
-	error = fdalloc(curproc, 0, &fd);
-	if (error != 0)
-		return -error;
-
-	fsetfd(curproc->p_fd, dmabuf->file, fd);
-
+	fd_install(fd, dmabuf->file);
 	return fd;
 }
 
@@ -181,7 +172,7 @@ dma_buf_get(int fd)
 	}
 
 	dmabuf = fp->private_data;
-	dropfp(curthread, fd, fp);
+	/* Keep holdfp()'s reference; the caller releases it with dma_buf_put(). */
 
 	return dmabuf;
 }
@@ -212,4 +203,3 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *attach,
 {
 STUB();
 }
-

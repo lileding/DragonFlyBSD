@@ -681,6 +681,7 @@ struct nvkm_softc {
 	uint64_t		prime_handle_to_fd_error_count;
 	uint64_t		prime_fd_to_handle_count;
 	uint64_t		prime_fd_to_handle_error_count;
+	uint64_t		prime_dma_buf_export_count;
 	uint64_t		cpu_prep_wait_count;
 	uint64_t		cpu_fini_count;
 	uint64_t		cpu_fini_flush_count;

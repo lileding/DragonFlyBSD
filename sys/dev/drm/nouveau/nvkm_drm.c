@@ -153,6 +153,17 @@ nvkm_drm_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv,
 	return (ret);
 }
 
+static struct dma_buf *
+nvkm_drm_gem_prime_export(struct drm_device *dev, struct drm_gem_object *obj,
+    int flags)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(dev);
+
+	if (sc != NULL)
+		sc->prime_dma_buf_export_count++;
+	return (drm_gem_prime_export(dev, obj, flags));
+}
+
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
 	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
@@ -181,7 +192,7 @@ static struct drm_driver nvkm_drm_driver = {
 	 */
 	.prime_handle_to_fd = nvkm_drm_prime_handle_to_fd,
 	.prime_fd_to_handle = nvkm_drm_prime_fd_to_handle,
-	.gem_prime_export = drm_gem_prime_export,
+	.gem_prime_export = nvkm_drm_gem_prime_export,
 	.gem_prime_import = drm_gem_prime_import,
 	.dumb_create = nvkm_bo_dumb_create,
 	.dumb_map_offset = nvkm_bo_dumb_map_offset,
