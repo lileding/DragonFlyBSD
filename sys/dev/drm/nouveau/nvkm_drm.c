@@ -182,8 +182,6 @@ struct nvkm_drm_vm_binding {
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 
-#define NVKM_DRM_VM_REMAP_TIMEOUT_TICKS	(hz * 10)
-
 struct nvkm_drm_chan_obj {
 	uint32_t handle;
 	uint32_t oclass;
@@ -207,17 +205,16 @@ struct nvkm_drm_file {
 	struct nvkm_gsp_vmm *vmm;
 	struct nvkm_drm_vm_binding_list vm_bindings;
 	struct nvkm_drm_chan_list channels;
-	/* Serializes remap (VM_BIND) against EXEC and against other remaps on
-	 * this file's VMM. A remap holds it across the page-table mutation, so
-	 * no EXEC can charge exec_inflight (and submit) meanwhile. Order:
+	/* Serializes VM_BIND page-table mutation against other remaps and the
+	 * moment EXEC charges exec_inflight on this file's VMM. Ordering
+	 * against already submitted GPU work comes from userspace syncobjs or
+	 * the caller's synchronous sequencing, matching nouveau VM_BIND.
+	 * Order:
 	 * vm_token is acquired before gsp_tok; the completion ithread never
 	 * takes it (it only atomically decrements exec_inflight + wakes). */
 	struct lwkt_token vm_token;
-	/* Count of in-flight EXEC submits on this file's VMM. A VM_BIND remap
-	 * may mutate the page table only when this is 0: a GPU program's
-	 * runtime memory accesses cannot be predicted statically, so any
-	 * in-flight EXEC pins the whole address space. Atomic: charged under
-	 * vm_token by EXEC, decremented locklessly by the completion ithread. */
+	/* Count of in-flight EXEC submits on this file's VMM. Atomic: charged
+	 * under vm_token by EXEC, decremented locklessly by completion. */
 	volatile u_int exec_inflight;
 	uint64_t vm_epoch;
 };
@@ -344,58 +341,6 @@ nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
 	return (0);
 }
 
-/*
- * A GPU EXEC is a program whose runtime memory accesses cannot be predicted
- * statically, so any in-flight EXEC pins the file's whole VMM. A VM_BIND remap
- * therefore waits for every in-flight EXEC on this file to complete before it
- * may mutate the page table. The caller holds vm_token, so no new EXEC can
- * charge exec_inflight while we hold it; the tsleep below drops vm_token, which
- * does let new EXECs in, but those are simply counted and waited for in turn.
- * The page table is mutated only once we observe inflight == 0 while holding
- * vm_token, at which point no EXEC is in flight and none can start.
- */
-static int
-nvkm_drm_vm_wait_exec_idle(struct nvkm_softc *sc, struct nvkm_drm_file *nfile)
-{
-	int start_ticks = ticks;
-
-	for (;;) {
-		int elapsed, remaining, err;
-		u_int inflight;
-
-		/* Arm the interlock BEFORE reading exec_inflight: the completion
-		 * ithread decrements it locklessly (it does not hold vm_token)
-		 * and wakes vm_epoch, so a decrement-to-0 racing between the read
-		 * and the sleep would otherwise be lost. With the interlock armed
-		 * first, such a wakeup makes the PINTERLOCKED tsleep return at
-		 * once and the loop re-reads inflight == 0. */
-		tsleep_interlock(&nfile->vm_epoch, PCATCH);
-		inflight = atomic_load_acq_int(&nfile->exec_inflight);
-		if (inflight == 0)
-			return (0);
-		sc->vm_bind_busy_count++;
-		sc->vm_bind_busy_state = 1;
-		sc->vm_bind_busy_exec_refs = inflight;
-		elapsed = ticks - start_ticks;
-		remaining = NVKM_DRM_VM_REMAP_TIMEOUT_TICKS - elapsed;
-		if (remaining <= 0) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: VM_BIND remap wait timeout inflight=%u\n",
-			    inflight);
-			return (-ETIMEDOUT);
-		}
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND remap waits for %u in-flight EXEC\n",
-		    inflight);
-		err = tsleep(&nfile->vm_epoch, PCATCH | PINTERLOCKED, "nvkvmb",
-		    remaining);
-		if (err == EWOULDBLOCK)
-			return (-ETIMEDOUT);
-		if (err == EINTR || err == ERESTART)
-			return (-err);
-	}
-}
-
 static int
 nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
@@ -409,9 +354,6 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 
 	LIST_INIT(&tail_bindings);
 	*punmapped = 0;
-	err = nvkm_drm_vm_wait_exec_idle(sc, nfile);
-	if (err != 0)
-		return (err);
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_drm_vm_binding *tail;
 		uint64_t old_start, old_end, cut_start, cut_end;
@@ -1401,6 +1343,7 @@ static int nvkm_drm_signal_sync_array(struct nvkm_softc *sc,
 #define DRM_NOUVEAU_VM_BIND_OP_MAP	0x0
 #define DRM_NOUVEAU_VM_BIND_OP_UNMAP	0x1
 #define DRM_NOUVEAU_VM_BIND_SPARSE	(1 << 8)
+#define DRM_NOUVEAU_VM_BIND_RUN_ASYNC	0x1
 
 struct drm_nouveau_vm_bind_op {
 	uint32_t op;
@@ -1434,6 +1377,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	int err = 0;
 	bool gsp_tok_held = false;
 	bool remap_started = false;
+	bool async_bind;
 
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
@@ -1445,6 +1389,11 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	}
 	if (nfile == NULL)
 		return (-ENXIO);
+	if ((req->flags & ~DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0)
+		return (-EINVAL);
+	async_bind = (req->flags & DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0;
+	if (!async_bind && (req->wait_count != 0 || req->sig_count != 0))
+		return (-EINVAL);
 	err = nvkm_drm_file_ensure_vmm(sc, nfile);
 	if (err != 0)
 		return (err);
@@ -1452,23 +1401,27 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	sc->vm_bind_op_count += req->op_count;
 	if (req->op_count > sc->vm_bind_max_op_count)
 		sc->vm_bind_max_op_count = req->op_count;
-	if (req->op_count == 0)
-		return (0);
 	if (req->op_count > 1024) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
 		return (-EINVAL);
 	}
 	/*
-	 * Binds execute synchronously, so syncobj semantics collapse to:
-	 * resolve and CPU-wait every wait fence up front, and install
-	 * already-signalled fences for the signal array on success.
+	 * We execute VM_BIND inline, but async VM_BIND still follows nouveau's
+	 * syncobj contract: wait fences order the CPU PTE writes, and signal
+	 * fences are installed after the writes are flushed.
 	 */
 	if (req->wait_count != 0) {
 		err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
 		    req->wait_ptr);
 		if (err != 0)
 			return (err);
+	}
+	if (req->op_count == 0) {
+		if (req->sig_count != 0)
+			err = nvkm_drm_signal_sync_array(sc, file_priv,
+			    req->sig_count, req->sig_ptr);
+		return (err);
 	}
 	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
@@ -1481,9 +1434,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		return (-EFAULT);
 	}
 
-	/* vm_token (outer) serializes this remap against EXEC and other remaps
-	 * on the file VMM; gsp_tok (inner) serializes the GSP RPCs. Order is
-	 * always vm_token -> gsp_tok. */
+	/* vm_token (outer) serializes this remap against other remaps and
+	 * against concurrent EXEC charge on the file VMM; gsp_tok (inner)
+	 * serializes the GSP RPCs. Order is always vm_token -> gsp_tok. */
 	lwkt_gettoken(&nfile->vm_token);
 	remap_started = true;
 	lwkt_gettoken(&sc->gsp_tok);

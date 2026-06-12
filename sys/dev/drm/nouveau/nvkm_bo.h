@@ -59,6 +59,7 @@ struct nvkm_bo {
 	uint32_t		domain;
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
+	bool			bar1_mappable;	/* VRAM BO can fault in a BAR1 mmap */
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
 	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
 	bool			vm_bound_mixed_kind;
