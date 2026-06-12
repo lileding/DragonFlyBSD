@@ -630,6 +630,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_init_kernel_addr);
 	sbuf_printf(&sb, "vm_init_kernel_size = 0x%016llx\n",
 	    (unsigned long long)sc->vm_init_kernel_size);
+	sbuf_printf(&sb, "vm_bind_ioctl_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_ioctl_count);
+	sbuf_printf(&sb, "vm_bind_op_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_op_count);
+	sbuf_printf(&sb, "vm_bind_max_op_count = %u\n",
+	    sc->vm_bind_max_op_count);
 	sbuf_printf(&sb, "vm_bind_wait_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_count);
 	sbuf_printf(&sb, "vm_bind_wait_error_count = %llu\n",
@@ -673,6 +679,10 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(&sb, "gva_free = %u\n", bar1_total - bar1_used);
 
 	sbuf_cat(&sb, "\nvmm\n");
+	sbuf_printf(&sb, "flush_count = %llu\n",
+	    (unsigned long long)sc->vmm_flush_count);
+	sbuf_printf(&sb, "flush_us = %llu\n",
+	    (unsigned long long)sc->vmm_flush_us);
 	sbuf_printf(&sb, "user_pd0_count = %u\n", vmm_pd0_count);
 	sbuf_printf(&sb, "user_pt_count = %u\n", vmm_pt_count);
 	sbuf_printf(&sb, "valid_pte_count = %llu\n",
