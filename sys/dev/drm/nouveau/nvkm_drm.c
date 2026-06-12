@@ -248,6 +248,21 @@ nvkm_drm_vm_ranges_overlap(uint64_t a, uint64_t as, uint64_t b, uint64_t bs)
 	return (a < b + bs && b < a + as);
 }
 
+static bool
+nvkm_drm_gpu_va_fits_binding(const struct nvkm_drm_vm_binding *binding,
+    uint64_t va, uint64_t size, uint64_t *binding_offset)
+{
+	uint64_t offset;
+
+	if (va < binding->addr)
+		return (false);
+	offset = va - binding->addr;
+	if (offset > binding->size || size > binding->size - offset)
+		return (false);
+	*binding_offset = offset;
+	return (true);
+}
+
 static void
 nvkm_drm_vm_binding_assert(const struct nvkm_drm_vm_binding *binding)
 {
@@ -539,52 +554,6 @@ nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
 	sc->vm_trace_next++;
 }
 
-static int
-nvkm_drm_flush_exec_pushes(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
-    const struct drm_nouveau_exec_push *pushes, uint32_t push_count)
-{
-	struct nvkm_drm_vm_binding *binding;
-	uint64_t flush_seq;
-	uint32_t scanned = 0;
-	uint32_t flushed = 0;
-	int err = 0;
-
-	flush_seq = ++sc->exec_cpu_flush_seq;
-	for (uint32_t i = 0; i < push_count; i++) {
-		struct nvkm_bo *bo = NULL;
-
-		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-			scanned++;
-			if (!nvkm_drm_vm_ranges_overlap(pushes[i].va,
-			    pushes[i].va_len, binding->addr, binding->size))
-				continue;
-			bo = to_nvkm_bo(binding->obj);
-			break;
-		}
-		if (bo == NULL) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: EXEC push has no VM binding idx=%u va=0x%016jx len=0x%08x\n",
-			    i, (uintmax_t)pushes[i].va, pushes[i].va_len);
-			err = -EINVAL;
-			break;
-		}
-		if (bo->kva == NULL)
-			continue;
-		if (bo->cpu_flush_seq == flush_seq)
-			continue;
-		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
-		    (vm_offset_t)bo->kva + bo->base.size);
-		bo->cpu_flush_seq = flush_seq;
-		flushed++;
-	}
-	sc->exec_profile_cpu_bind_scanned += scanned;
-	sc->exec_profile_cpu_bind_flushed += flushed;
-	if (flushed != 0)
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: EXEC flushed %u push BOs\n", flushed);
-	return (err);
-}
-
 static void
 nvkm_drm_dump_push_buffer(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
     uint64_t va, uint32_t va_len)
@@ -638,18 +607,17 @@ static void
 nvkm_drm_dump_large_push(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
     uint64_t va, uint32_t va_len)
 {
-	if (va_len >= 0xa0)
+	if (nvkm_debug != 0 && va_len >= 0xa0)
 		nvkm_drm_dump_push_buffer(sc, nfile, va, va_len);
 }
 
 static void
-nvkm_drm_exec_trace_record(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
-    uint64_t seq, uint32_t channel, uint32_t chid, uint32_t post_slot,
+nvkm_drm_exec_trace_record(struct nvkm_softc *sc, uint64_t seq,
+    uint32_t channel, uint32_t chid, uint32_t post_slot,
     uint32_t gpf_index, uint32_t push_index, uint32_t push_count,
     const struct drm_nouveau_exec_push *push)
 {
 	struct nvkm_drm_exec_trace *trace;
-	struct nvkm_drm_vm_binding *binding;
 
 	trace = &sc->exec_trace[sc->exec_trace_next %
 	    NVKM_DRM_EXEC_TRACE_COUNT];
@@ -664,25 +632,6 @@ nvkm_drm_exec_trace_record(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 	trace->flags = push->flags;
 	trace->va = push->va;
 	trace->va_len = push->va_len;
-
-	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
-		struct nvkm_bo *bo;
-
-		if (!nvkm_drm_vm_ranges_overlap(push->va, push->va_len,
-		    binding->addr, binding->size))
-			continue;
-
-		bo = to_nvkm_bo(binding->obj);
-		trace->binding_addr = binding->addr;
-		trace->binding_size = binding->size;
-		trace->bo_offset = binding->bo_offset;
-		trace->bo_paddr = bo->paddr;
-		trace->bo_domain = bo->domain;
-		trace->obj = (uintptr_t)binding->obj;
-		trace->cpu_mapped = bo->kva != NULL;
-		break;
-	}
-
 	sc->exec_trace_next++;
 }
 
@@ -2243,35 +2192,41 @@ nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
 	uint32_t fault_lo = (uint32_t)fault_addr;
 	uint32_t fault_hi = (uint32_t)(fault_addr >> 32);
 
+	if (pending->nfile == NULL)
+		return;
+
 	for (uint32_t n = 0; n < pending->trace_count; n++) {
 		struct nvkm_drm_exec_trace *trace;
-		struct drm_gem_object *obj;
+		struct nvkm_drm_vm_binding *binding = NULL;
 		struct nvkm_bo *bo;
 		uint32_t *dw;
-		uint64_t offset, va_delta;
+		uint64_t binding_offset = 0;
+		uint64_t offset;
 		uint32_t count;
 
 		trace = &sc->exec_trace[(pending->trace_first + n) %
 		    NVKM_DRM_EXEC_TRACE_COUNT];
-		if (trace->seq == 0 || trace->obj == 0 ||
-		    trace->cpu_mapped == 0)
+		if (trace->seq == 0)
 			continue;
-		if (trace->va < trace->binding_addr)
+		LIST_FOREACH(binding, &pending->nfile->vm_bindings, link) {
+			if (!nvkm_drm_gpu_va_fits_binding(binding, trace->va,
+			    trace->va_len, &binding_offset))
+				continue;
+			break;
+		}
+		if (binding == NULL)
 			continue;
-		va_delta = trace->va - trace->binding_addr;
-		if (va_delta > trace->binding_size ||
-		    trace->va_len > trace->binding_size - va_delta)
-			continue;
-		offset = trace->bo_offset + va_delta;
 
-		obj = (struct drm_gem_object *)trace->obj;
-		bo = to_nvkm_bo(obj);
+		bo = to_nvkm_bo(binding->obj);
 		if (bo->kva == NULL)
 			continue;
-		if (offset > bo->base.size ||
-		    trace->va_len > bo->base.size - offset)
+		if (binding->bo_offset > bo->base.size ||
+		    binding_offset > bo->base.size - binding->bo_offset ||
+		    trace->va_len >
+		    bo->base.size - binding->bo_offset - binding_offset)
 			continue;
 
+		offset = binding->bo_offset + binding_offset;
 		dw = (uint32_t *)((uint8_t *)bo->kva + offset);
 		count = trace->va_len / sizeof(uint32_t);
 		sc->rc_fault_push_scan_count++;
@@ -2694,7 +2649,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		if (trace_count == 0)
 			trace_first = sc->exec_trace_next;
 		trace_seq = sc->exec_submit_count;
-		nvkm_drm_exec_trace_record(sc, nfile, trace_seq, req->channel,
+		nvkm_drm_exec_trace_record(sc, trace_seq, req->channel,
 		    chan->chid, post_slot, put, i, req->push_count,
 		    &pushes[i]);
 		trace_count++;
@@ -2759,18 +2714,15 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	}
 
 	profile_start = nvkm_drm_profile_now_us();
-	err = nvkm_drm_flush_exec_pushes(sc, nfile, pushes, req->push_count);
-	nvkm_drm_profile_add_us(&sc->exec_profile_flush_cpu_us,
-	    profile_start);
-	if (err != 0)
-		goto out_unlock;
-	profile_start = nvkm_drm_profile_now_us();
-	pmap_invalidate_cache_range((vm_offset_t)chan->submit_gpf.kva,
-	    (vm_offset_t)chan->submit_gpf.kva + 0x1000);
-	pmap_invalidate_cache_range((vm_offset_t)chan->submit_push.kva,
-	    (vm_offset_t)chan->submit_push.kva + 0x1000);
-	pmap_invalidate_cache_range((vm_offset_t)chan->submit_sema.kva,
-	    (vm_offset_t)chan->submit_sema.kva + 0x1000);
+	/*
+	 * NVK command BOs and the fixed submit GPFIFO/post/semaphore pages are
+	 * coherent sysmem on the x86 desktop targets supported by this driver.
+	 * DragonFly pmap_invalidate_cache_range() is for cache-domain changes
+	 * and broadcasts WBINVD on CPUs without CPUID_SS, which turns each EXEC
+	 * into several global cache flushes. Keep only the CPU store ordering
+	 * before ringing the doorbell; GPU-side completion ordering still comes
+	 * from the WFI/SYS_MEMBAR completion trailer.
+	 */
 	cpu_sfence();
 	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
 	    profile_start);
