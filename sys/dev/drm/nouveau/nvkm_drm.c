@@ -16,6 +16,7 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_syncobj.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-fence-chain.h>
@@ -121,6 +122,37 @@ nvkm_drm_get_scanout_position(struct drm_device *dev, unsigned int pipe,
 	return true;
 }
 
+static int
+nvkm_drm_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv,
+    uint32_t handle, uint32_t flags, int *prime_fd)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(dev);
+	int ret;
+
+	if (sc != NULL)
+		sc->prime_handle_to_fd_count++;
+	ret = drm_gem_prime_handle_to_fd(dev, file_priv, handle, flags,
+	    prime_fd);
+	if (ret != 0 && sc != NULL)
+		sc->prime_handle_to_fd_error_count++;
+	return (ret);
+}
+
+static int
+nvkm_drm_prime_fd_to_handle(struct drm_device *dev, struct drm_file *file_priv,
+    int prime_fd, uint32_t *handle)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(dev);
+	int ret;
+
+	if (sc != NULL)
+		sc->prime_fd_to_handle_count++;
+	ret = drm_gem_prime_fd_to_handle(dev, file_priv, prime_fd, handle);
+	if (ret != 0 && sc != NULL)
+		sc->prime_fd_to_handle_error_count++;
+	return (ret);
+}
+
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
 	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
@@ -147,8 +179,8 @@ static struct drm_driver nvkm_drm_driver = {
 	 * sharing needs gem_prime_get_sg_table/import_sg_table, which are
 	 * deliberately absent -- those paths fail with an errno, not a crash.
 	 */
-	.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
-	.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
+	.prime_handle_to_fd = nvkm_drm_prime_handle_to_fd,
+	.prime_fd_to_handle = nvkm_drm_prime_fd_to_handle,
 	.gem_prime_export = drm_gem_prime_export,
 	.gem_prime_import = drm_gem_prime_import,
 	.dumb_create = nvkm_bo_dumb_create,
