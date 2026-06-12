@@ -61,6 +61,8 @@ struct nvkm_bo {
 	uint32_t		tile_flags;
 	uint64_t		cpu_flush_seq;
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
+	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
+	bool			vm_bound_mixed_kind;
 };
 
 static inline struct nvkm_bo *

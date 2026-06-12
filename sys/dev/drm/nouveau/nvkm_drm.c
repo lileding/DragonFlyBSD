@@ -1711,8 +1711,15 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			 * same-device dmabuf import resolves to this same
 			 * GEM object, so the flag travels with the buffer.
 			 */
-			if ((op->flags & 0xff) != 0)
+			if ((op->flags & 0xff) != 0) {
+				uint8_t kind = op->flags & 0xff;
+
+				if (!bo->vm_bound_tiled)
+					bo->vm_bound_kind = kind;
+				else if (bo->vm_bound_kind != kind)
+					bo->vm_bound_mixed_kind = true;
 				bo->vm_bound_tiled = true;
+			}
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
 			    op->range, obj, op->bo_offset);
 			if (err != 0) {
