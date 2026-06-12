@@ -337,6 +337,39 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	return (0);
 }
 
+static int
+nvkm_gsp_bar1_clear_gva(struct nvkm_softc *sc, uint64_t bar1_gva)
+{
+	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
+	uint32_t saved;
+	uint32_t spt_idx;
+	uint32_t pd0_idx;
+	uint64_t spt;
+
+	if (!b1->ready)
+		return (ENXIO);
+	if (bar1_gva >= (512ULL << 20)) /* BAR1 is 256 MiB on TU102 */
+		return (EINVAL);
+
+	pd0_idx = (uint32_t)((bar1_gva >> 21) & 0xffu);
+	if (pd0_idx < BAR1_PD0_MANAGED_FIRST ||
+	    pd0_idx > BAR1_PD0_MANAGED_LAST)
+		return (EINVAL);
+
+	spt_idx = (uint32_t)((bar1_gva >> 12) & 0x1ffu);
+
+	lwkt_gettoken(&sc->gsp_tok);
+	saved = nvkm_rd32(sc, NV_PBUS_PRAMIN);
+	spt = b1->spt_paddr[pd0_idx - BAR1_PD0_MANAGED_FIRST];
+	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+	b1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, 0);
+	(void)nvkm_rd32(sc, NV_PRAMIN);
+	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
+	lwkt_reltoken(&sc->gsp_tok);
+
+	return (0);
+}
+
 /* Flush: read from BAR1 to force walker re-walk + L2 sync. */
 void
 nvkm_gsp_bar1_flush(struct nvkm_softc *sc)
@@ -566,11 +599,14 @@ nvkm_gsp_bar1_alloc_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 void
 nvkm_gsp_bar1_free_page(struct nvkm_softc *sc, struct nvkm_bar1_page *page)
 {
+	if (page->bar1_gva != 0) {
+		if (nvkm_gsp_bar1_clear_gva(sc, page->bar1_gva) == 0)
+			nvkm_gsp_bar1_invalidate(sc);
+		nvkm_gsp_bar1_free_gva(&sc->bar1, page->bar1_gva);
+	}
 	if (page->vram_paddr != 0)
 		nvkm_gsp_vram_free_kind(sc, page->vram_paddr, page->kind,
 		    page->owner);
-	if (page->bar1_gva != 0)
-		nvkm_gsp_bar1_free_gva(&sc->bar1, page->bar1_gva);
 	page->vram_paddr = 0;
 	page->bar1_gva   = 0;
 	page->kind = NVKM_VRAM_UNKNOWN;
@@ -636,6 +672,13 @@ nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc, uint64_t paddr,
 		    gva + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE,
 		    paddr + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE);
 		if (err != 0) {
+			for (uint32_t clear = 0; clear < page; clear++) {
+				(void)nvkm_gsp_bar1_clear_gva(sc,
+				    gva + (uint64_t)clear *
+				    NVKM_GMMU_PT_PAGE_SIZE);
+			}
+			if (page != 0)
+				nvkm_gsp_bar1_invalidate(sc);
 			nvkm_gsp_bar1_free_gva_range(&sc->bar1, gva, pages);
 			return (err);
 		}
@@ -649,8 +692,11 @@ nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc, uint64_t paddr,
 void
 nvkm_gsp_bar1_unmap_existing(struct nvkm_softc *sc, uint64_t gva)
 {
-	if (gva != 0)
+	if (gva != 0) {
+		if (nvkm_gsp_bar1_clear_gva(sc, gva) == 0)
+			nvkm_gsp_bar1_invalidate(sc);
 		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+	}
 }
 
 void
@@ -658,12 +704,20 @@ nvkm_gsp_bar1_unmap_existing_range(struct nvkm_softc *sc, uint64_t gva,
     uint64_t size)
 {
 	uint32_t pages;
+	bool cleared = false;
 
 	if (gva == 0 || size == 0)
 		return;
 
 	pages = (uint32_t)((size + NVKM_GMMU_PT_PAGE_SIZE - 1) /
 	    NVKM_GMMU_PT_PAGE_SIZE);
+	for (uint32_t page = 0; page < pages; page++) {
+		if (nvkm_gsp_bar1_clear_gva(sc,
+		    gva + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE) == 0)
+			cleared = true;
+	}
+	if (cleared)
+		nvkm_gsp_bar1_invalidate(sc);
 	nvkm_gsp_bar1_free_gva_range(&sc->bar1, gva, pages);
 }
 

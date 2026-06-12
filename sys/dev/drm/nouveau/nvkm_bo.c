@@ -125,8 +125,10 @@ nvkm_bo_account_free(struct nvkm_softc *sc, struct nvkm_bo *bo)
 static bool
 nvkm_bo_cpu_mappable(const struct nvkm_bo *bo)
 {
-	return (bo->kva != NULL || bo->bar1_gva != 0);
+	return (bo->kva != NULL || bo->bar1_mappable);
 }
+
+static int nvkm_bo_bar1_map(struct nvkm_softc *sc, struct nvkm_bo *bo);
 
 /* ============================================================
  * cdev pager — backs userspace mmap with our contig pages.
@@ -169,12 +171,19 @@ nvkm_gem_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 	if (bo->kva != NULL) {
 		pa = vtophys((uint8_t *)bo->kva + offset);
 		m = PHYS_TO_VM_PAGE(pa);
-	} else if (bo->bar1_gva != 0 && bo->bar1_size >= (uint64_t)offset +
-	    PAGE_SIZE && sc->bar_res[1] != NULL) {
-		pa = rman_get_start(sc->bar_res[1]) + bo->bar1_gva + offset;
-		m = vm_phys_fictitious_to_vm_page(pa);
 	} else {
-		m = NULL;
+		if (bo->bar1_mappable && bo->bar1_gva == 0 &&
+		    nvkm_bo_bar1_map(sc, bo) != 0)
+			return (VM_PAGER_ERROR);
+		if (bo->bar1_gva != 0 &&
+		    bo->bar1_size >= (uint64_t)offset + PAGE_SIZE &&
+		    sc->bar_res[1] != NULL) {
+			pa = rman_get_start(sc->bar_res[1]) +
+			    bo->bar1_gva + offset;
+			m = vm_phys_fictitious_to_vm_page(pa);
+		} else {
+			m = NULL;
+		}
 	}
 	if (m == NULL)
 		return (VM_PAGER_ERROR);
@@ -474,31 +483,29 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 		return (-ENOMEM);
 	if ((req->info.domain & NOUVEAU_GEM_DOMAIN_MAPPABLE) != 0 &&
 	    bo->vram_alloc != NULL) {
-		err = nvkm_bo_bar1_map(sc, bo);
-		if (err != 0 &&
-		    (req->info.domain & NOUVEAU_GEM_DOMAIN_GART) != 0) {
+		if (sc->bar1.ready) {
+			bo->bar1_mappable = true;
+		} else if ((req->info.domain & NOUVEAU_GEM_DOMAIN_GART) != 0) {
 			uint32_t gart_domain;
 
 			gart_domain = (req->info.domain &
 			    ~NOUVEAU_GEM_DOMAIN_VRAM) |
 			    NOUVEAU_GEM_DOMAIN_GART;
 			nvkm_debugf(sc->dev,
-			    "nvkm_bo: GEM_NEW mappable VRAM BAR1 fallback to GART req_domain=0x%x size=0x%llx err=%d\n",
+			    "nvkm_bo: GEM_NEW mappable VRAM fallback to GART req_domain=0x%x size=0x%llx\n",
 			    req->info.domain,
-			    (unsigned long long)bo->base.size, err);
+			    (unsigned long long)bo->base.size);
 			drm_gem_object_put_unlocked(&bo->base);
 			bo = nvkm_bo_create(ddev, req->info.size,
 			    gart_domain, req->info.tile_mode,
 			    req->info.tile_flags);
 			if (bo == NULL)
 				return (-ENOMEM);
-			err = 0;
-		}
-		if (err != 0) {
+		} else {
 			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
-			    bo->base.size, req->info.domain, err);
+			    bo->base.size, req->info.domain, ENXIO);
 			drm_gem_object_put_unlocked(&bo->base);
-			return (err);
+			return (ENXIO);
 		}
 	}
 
@@ -515,7 +522,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	    "nvkm_bo: GEM_NEW handle=%u obj=%p req_domain=0x%x domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u\n",
 	    handle, &bo->base, req->info.domain, bo->domain,
 	    (unsigned long long)bo->base.size,
-	    (unsigned long long)bo->paddr, bo->kva != NULL);
+	    (unsigned long long)bo->paddr, nvkm_bo_cpu_mappable(bo));
 
 	if (nvkm_bo_cpu_mappable(bo)) {
 		err = drm_gem_create_mmap_offset(&bo->base);
