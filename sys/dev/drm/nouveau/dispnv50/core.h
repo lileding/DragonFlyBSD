@@ -54,6 +54,8 @@ struct nv50_dmac {
 	struct nvkm_dispnv50_dmaobj *dfly_vram_object;
 	struct nvif_object dfly_fb;
 	struct nvkm_dispnv50_dmaobj *dfly_fb_object;
+	struct nvif_object dfly_fb_blocklinear;
+	struct nvkm_dispnv50_dmaobj *dfly_fb_blocklinear_object;
 	u32 *dfly_shadow;
 	u32 dfly_user;
 	s32 dfly_oclass;

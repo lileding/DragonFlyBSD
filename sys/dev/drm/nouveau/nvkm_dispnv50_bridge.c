@@ -50,8 +50,11 @@
 #define NVKM_DISPNV50_PUSH_DWORDS	(0x1000U / 4U)
 #define NVKM_DISPNV50_SCANOUT_BPP	4U
 #define NVKM_DISPNV50_SCANOUT_KIND	0U
+#define NVKM_DISPNV50_BLOCKLINEAR_KIND	0x06U
 #define NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP	0x00000045U
 #define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP	0x00000005U
+#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(kind) \
+	(NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP | ((uint32_t)(kind) << 20))
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
 #define NVKM_DISPNV50_WIND_POLL_COUNT	2000U	/* 2s, matches nouveau */
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
@@ -80,6 +83,8 @@ struct nvkm_dispnv50_state {
 	u32 scanout_height;
 	u32 scanout_pitch;
 	u32 scanout_format;
+	u64 scanout_modifier;
+	u8 scanout_kind;
 	struct fb_info console_fb;
 	void *console_shadow;
 	void *console_snapshot;
@@ -104,6 +109,31 @@ static u32
 nvkm_dispnv50_align_u32(u32 value, u32 align)
 {
 	return ((value + align - 1) & ~(align - 1));
+}
+
+static bool
+nvkm_dispnv50_modifier_is_linear(u64 modifier)
+{
+	return (modifier == DRM_FORMAT_MOD_LINEAR ||
+	    modifier == DRM_FORMAT_MOD_INVALID);
+}
+
+static bool
+nvkm_dispnv50_modifier_is_blocklinear(u64 modifier)
+{
+	return (!nvkm_dispnv50_modifier_is_linear(modifier));
+}
+
+static u8
+nvkm_dispnv50_modifier_kind(u64 modifier)
+{
+	return ((modifier >> 12) & 0xff);
+}
+
+static u8
+nvkm_dispnv50_modifier_blockh(u64 modifier)
+{
+	return (modifier & 0x0f);
 }
 
 static int
@@ -1234,25 +1264,43 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		}
 
 		if ((oclass[0] & 0xff) == 0x7e) {
-			u32 fb_handle =
-			    NV50_DISP_HANDLE_WNDW_CTX(
-				NVKM_DISPNV50_SCANOUT_KIND);
+			u32 fb_handle = NV50_DISP_HANDLE_WNDW_CTX(
+			    NVKM_DISPNV50_SCANOUT_KIND);
+			u32 fb_blocklinear_handle = NV50_DISP_HANDLE_WNDW_CTX(
+			    NVKM_DISPNV50_BLOCKLINEAR_KIND);
 
 			/*
 			 * Linux creates this object in nv50_wndw_prepare_fb().
-			 * The first-light path has one pitch-linear scanout, so
-			 * bind the matching window framebuffer ctxdma here.
+			 * Bind both pitch and TU102 blocklinear kind objects so
+			 * the image handle can match the framebuffer modifier.
 			 */
 			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
 			    inst, "kmsWndwFbCtxDma", fb_handle, 0, vram_limit,
-			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP, &dmac->dfly_fb,
-			    &dmac->dfly_fb_object);
+			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(
+				NVKM_DISPNV50_SCANOUT_KIND),
+			    &dmac->dfly_fb, &dmac->dfly_fb_object);
 			if (ret) {
 				nvkm_infof(sc->dev,
 				    "drm: dispnv50 fb ctxdma failed "
 				    "class=0x%x inst=%d handle=0x%x "
 				    "limit=0x%llx err=%d\n",
 				    oclass[0], inst, fb_handle,
+				    (unsigned long long)vram_limit, ret);
+				goto fail;
+			}
+			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
+			    inst, "kmsWndwFbBlocklinearCtxDma",
+			    fb_blocklinear_handle, 0, vram_limit,
+			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(
+				NVKM_DISPNV50_BLOCKLINEAR_KIND),
+			    &dmac->dfly_fb_blocklinear,
+			    &dmac->dfly_fb_blocklinear_object);
+			if (ret) {
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 blocklinear fb ctxdma "
+				    "failed class=0x%x inst=%d handle=0x%x "
+				    "limit=0x%llx err=%d\n",
+				    oclass[0], inst, fb_blocklinear_handle,
 				    (unsigned long long)vram_limit, ret);
 				goto fail;
 			}
@@ -1288,6 +1336,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 
 fail:
 	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_fb_object);
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_fb_blocklinear_object);
 	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_vram_object);
 	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_sync_object);
 	nvkm_memory_unref(&dmac->dfly_push_mem);
@@ -1544,6 +1593,8 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	    state->scanout_pitch == pitch) {
 		state->scanout_offset = nvkm_memory_addr(state->scanout);
 		state->scanout_format = DRM_FORMAT_XRGB8888;
+		state->scanout_modifier = DRM_FORMAT_MOD_LINEAR;
+		state->scanout_kind = NVKM_DISPNV50_SCANOUT_KIND;
 		state->scanout_user = false;
 		return 0;
 	}
@@ -1573,6 +1624,8 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	state->scanout_height = height;
 	state->scanout_pitch = pitch;
 	state->scanout_format = DRM_FORMAT_XRGB8888;
+	state->scanout_modifier = DRM_FORMAT_MOD_LINEAR;
+	state->scanout_kind = NVKM_DISPNV50_SCANOUT_KIND;
 	state->scanout_user = false;
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx "
@@ -1626,12 +1679,19 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	state->scanout_height = fb->height;
 	state->scanout_pitch = fb->pitches[0];
 	state->scanout_format = fb->format->format;
+	state->scanout_modifier = fb->modifier;
+	state->scanout_kind =
+	    nvkm_dispnv50_modifier_is_blocklinear(fb->modifier) ?
+	    nvkm_dispnv50_modifier_kind(fb->modifier) :
+	    NVKM_DISPNV50_SCANOUT_KIND;
 	state->scanout_user = true;
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 user scanout %ux%u pitch=%u format=0x%08x "
-	    "vram=0x%llx bo=%p\n",
+	    "modifier=0x%016llx kind=0x%02x vram=0x%llx bo=%p\n",
 	    state->scanout_width, state->scanout_height, state->scanout_pitch,
-	    state->scanout_format, (unsigned long long)state->scanout_offset,
+	    state->scanout_format,
+	    (unsigned long long)state->scanout_modifier, state->scanout_kind,
+	    (unsigned long long)state->scanout_offset,
 	    bo);
 	return (0);
 }
@@ -1830,14 +1890,23 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	asyw->image.mode = NVC57E_SET_PRESENT_CONTROL_BEGIN_MODE_NON_TEARING;
 	asyw->image.w = width;
 	asyw->image.h = height;
-	asyw->image.blockh =
-	    NVC57E_SET_STORAGE_BLOCK_HEIGHT_NVD_BLOCK_HEIGHT_ONE_GOB;
-	asyw->image.layout = NVC57E_SET_STORAGE_MEMORY_LAYOUT_PITCH;
 	asyw->image.format = nvkm_dispnv50_wndw_format(state->scanout_format);
-	asyw->image.blocks[0] = 0;
-	asyw->image.pitch[0] = state->scanout_pitch;
+	if (nvkm_dispnv50_modifier_is_blocklinear(state->scanout_modifier)) {
+		asyw->image.blockh =
+		    nvkm_dispnv50_modifier_blockh(state->scanout_modifier);
+		asyw->image.layout =
+		    NVC57E_SET_STORAGE_MEMORY_LAYOUT_BLOCKLINEAR;
+		asyw->image.blocks[0] = state->scanout_pitch >> 6;
+		asyw->image.pitch[0] = 0;
+	} else {
+		asyw->image.blockh =
+		    NVC57E_SET_STORAGE_BLOCK_HEIGHT_NVD_BLOCK_HEIGHT_ONE_GOB;
+		asyw->image.layout = NVC57E_SET_STORAGE_MEMORY_LAYOUT_PITCH;
+		asyw->image.blocks[0] = 0;
+		asyw->image.pitch[0] = state->scanout_pitch;
+	}
 	asyw->image.handle[0] =
-	    NV50_DISP_HANDLE_WNDW_CTX(NVKM_DISPNV50_SCANOUT_KIND);
+	    NV50_DISP_HANDLE_WNDW_CTX(state->scanout_kind);
 	asyw->image.offset[0] = state->scanout_offset;
 
 	asyw->blend.depth = 255;

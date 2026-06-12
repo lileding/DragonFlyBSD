@@ -29,6 +29,8 @@
 
 #include <linux/slab.h>
 
+extern const uint64_t wndwc57e_modifiers[];
+
 struct nvkm_drm_connector {
 	struct drm_connector	base;
 	struct nvkm_softc	*sc;
@@ -116,6 +118,43 @@ static const struct drm_framebuffer_funcs nvkm_user_fb_funcs = {
 	.create_handle	= nvkm_user_fb_create_handle,
 };
 
+static bool nvkm_plane_format_mod_supported(struct drm_plane *plane,
+    uint32_t format, uint64_t modifier);
+
+static bool
+nvkm_modifier_is_linear(uint64_t modifier)
+{
+	return (modifier == DRM_FORMAT_MOD_LINEAR ||
+	    modifier == DRM_FORMAT_MOD_INVALID);
+}
+
+static bool
+nvkm_modifier_is_supported(uint64_t modifier)
+{
+	unsigned int i;
+
+	if (modifier == DRM_FORMAT_MOD_INVALID)
+		return (true);
+	for (i = 0; wndwc57e_modifiers[i] != DRM_FORMAT_MOD_INVALID; i++) {
+		if (wndwc57e_modifiers[i] == modifier)
+			return (true);
+	}
+	return (false);
+}
+
+static bool
+nvkm_modifier_is_blocklinear(uint64_t modifier)
+{
+	return (!nvkm_modifier_is_linear(modifier) &&
+	    nvkm_modifier_is_supported(modifier));
+}
+
+static uint8_t
+nvkm_modifier_kind(uint64_t modifier)
+{
+	return ((modifier >> 12) & 0xff);
+}
+
 static struct drm_framebuffer *
 nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
@@ -126,6 +165,8 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	struct nvkm_bo *bo;
 	uint64_t line;
 	uint64_t min_size;
+	bool blocklinear;
+	uint8_t kind;
 	int ret;
 
 	if (cmd->width == 0 || cmd->height == 0)
@@ -134,9 +175,11 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	info = drm_get_format_info(dev, cmd);
 	if (info == NULL || info->num_planes != 1)
 		return (ERR_PTR(-EINVAL));
-	if (cmd->modifier[0] != DRM_FORMAT_MOD_LINEAR &&
-	    cmd->modifier[0] != DRM_FORMAT_MOD_INVALID)
+	if (!nvkm_plane_format_mod_supported(NULL, cmd->pixel_format,
+	    cmd->modifier[0]))
 		return (ERR_PTR(-EINVAL));
+	blocklinear = nvkm_modifier_is_blocklinear(cmd->modifier[0]);
+	kind = nvkm_modifier_kind(cmd->modifier[0]);
 
 	line = (uint64_t)cmd->width * info->cpp[0];
 	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0)
@@ -156,17 +199,25 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-EINVAL));
 	}
-	/*
-	 * The display engine scans pitch-linear only; a bo ever VM_BINDed
-	 * with a non-zero PTE kind holds blocklinear content and would show
-	 * as block garbage.  Reject until blocklinear scanout lands (P3-M3);
-	 * compositors fall back to a linear swapchain on this error.
-	 */
-	if (bo->vm_bound_tiled) {
+	if (blocklinear) {
+		if (!bo->vm_bound_tiled || bo->vm_bound_mixed_kind ||
+		    bo->vm_bound_kind != kind) {
+			struct nvkm_softc *sc = dev->dev_private;
+
+			nvkm_infof(sc->dev,
+			    "drm: reject blocklinear fb handle=%u "
+			    "modifier_kind=0x%02x bo_tiled=%d "
+			    "bo_kind=0x%02x mixed=%d\n",
+			    cmd->handles[0], kind, bo->vm_bound_tiled,
+			    bo->vm_bound_kind, bo->vm_bound_mixed_kind);
+			drm_gem_object_put_unlocked(obj);
+			return (ERR_PTR(-EINVAL));
+		}
+	} else if (bo->vm_bound_tiled) {
 		struct nvkm_softc *sc = dev->dev_private;
 
 		nvkm_infof(sc->dev,
-		    "drm: reject scanout fb on tiled-bound bo handle=%u\n",
+		    "drm: reject implicit-linear fb on tiled bo handle=%u\n",
 		    cmd->handles[0]);
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-EINVAL));
@@ -274,11 +325,6 @@ static const uint32_t nvkm_plane_formats[] = {
 	DRM_FORMAT_ABGR2101010,
 };
 
-static const uint64_t nvkm_plane_modifiers[] = {
-	DRM_FORMAT_MOD_LINEAR,
-	DRM_FORMAT_MOD_INVALID,
-};
-
 static bool
 nvkm_plane_format_mod_supported(struct drm_plane *plane, uint32_t format,
     uint64_t modifier)
@@ -286,12 +332,9 @@ nvkm_plane_format_mod_supported(struct drm_plane *plane, uint32_t format,
 	unsigned int i;
 
 	(void)plane;
-	if (modifier != DRM_FORMAT_MOD_LINEAR &&
-	    modifier != DRM_FORMAT_MOD_INVALID)
-		return (false);
 	for (i = 0; i < nitems(nvkm_plane_formats); i++) {
 		if (nvkm_plane_formats[i] == format)
-			return (true);
+			return (nvkm_modifier_is_supported(modifier));
 	}
 	return (false);
 }
@@ -645,6 +688,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	dev->mode_config.min_height = 0;
 	dev->mode_config.max_width = 8192;
 	dev->mode_config.max_height = 8192;
+	dev->mode_config.allow_fb_modifiers = true;
 	dev->mode_config.funcs = &nvkm_mode_config_funcs;
 	dev->mode_config.helper_private = &nvkm_mode_config_helper_funcs;
 
@@ -681,7 +725,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		crtc = &ncrtc->base;
 		if (drm_universal_plane_init(dev, plane, 1u << h,
 		    &nvkm_plane_funcs, nvkm_plane_formats,
-		    nitems(nvkm_plane_formats), nvkm_plane_modifiers,
+		    nitems(nvkm_plane_formats), wndwc57e_modifiers,
 		    DRM_PLANE_TYPE_PRIMARY, NULL) != 0) {
 			kfree(plane);
 			kfree(ncrtc);
