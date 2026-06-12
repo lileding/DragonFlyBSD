@@ -634,7 +634,6 @@ struct nvkm_softc {
 	uint64_t		exec_profile_cleanup_us;
 	uint64_t		exec_profile_poll_iters;
 	uint64_t		exec_profile_pushes;
-	uint64_t		exec_cpu_flush_seq;
 	uint64_t		exec_profile_cpu_bind_scanned;
 	uint64_t		exec_profile_cpu_bind_flushed;
 	uint32_t		exec_trace_next;
