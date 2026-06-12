@@ -301,7 +301,7 @@ nvkm_drm_vm_binding_unlink_free(struct nvkm_drm_vm_binding *binding)
 }
 
 static int
-nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
+nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
     struct nvkm_drm_vm_binding *binding)
 {
 	int err;
@@ -309,7 +309,7 @@ nvkm_drm_vm_binding_reclaim(struct nvkm_softc *sc,
 	nvkm_drm_vm_binding_assert(binding);
 
 	if (binding->pte_installed) {
-		err = nvkm_gsp_vmm_unmap(binding->owner->vmm, binding->addr,
+		err = nvkm_gsp_vmm_unmap_noflush(binding->owner->vmm, binding->addr,
 		    binding->size);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
@@ -956,6 +956,7 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	struct nvkm_drm_vm_binding *binding, *binding_next;
 	struct nvkm_drm_chan *dchan, *dchan_next;
 	uint32_t binding_count = 0, channel_count = 0;
+	bool vmm_dirty = false;
 
 	if (nfile == NULL)
 		return;
@@ -969,9 +970,13 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	lwkt_gettoken(&sc->gsp_tok);
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link,
 	    binding_next) {
-		(void)nvkm_drm_vm_binding_reclaim(sc, binding);
+		if (binding->pte_installed)
+			vmm_dirty = true;
+		(void)nvkm_drm_vm_binding_reclaim_noflush(sc, binding);
 		binding_count++;
 	}
+	if (vmm_dirty && nfile->vmm != NULL)
+		nvkm_gsp_vmm_flush(nfile->vmm);
 	lwkt_reltoken(&sc->gsp_tok);
 
 	/* Tear down the per-file address space only after its channels and
@@ -1494,6 +1499,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	err = nvkm_drm_file_ensure_vmm(sc, nfile);
 	if (err != 0)
 		return (err);
+	sc->vm_bind_ioctl_count++;
+	sc->vm_bind_op_count += req->op_count;
+	if (req->op_count > sc->vm_bind_max_op_count)
+		sc->vm_bind_max_op_count = req->op_count;
 	if (req->op_count == 0)
 		return (0);
 	if (req->op_count > 1024) {
