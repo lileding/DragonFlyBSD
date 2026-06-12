@@ -505,6 +505,8 @@ struct NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS_dfly {
 #define NVKM_CPU_INTR_LEAF(i)		(0x00b81000u + (i) * 4u)
 #define NVKM_CPU_INTR_LEAF_EN_SET(i)	(0x00b81200u + (i) * 4u)
 #define NVKM_CPU_INTR_TOP_EN_SET	0x00b81608u
+#define NVKM_GSP_ENGINE_IDX_DISP	2u
+#define NVKM_GSP_ENGINE_IDX_GSP	50u
 
 struct NV2080_CTRL_INTERNAL_INTR_GET_KERNEL_TABLE_ENTRY_dfly {
 	uint16_t engineIdx;
@@ -593,6 +595,10 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 		    sizeof(sc->gsp_nonstall_leaf_mask));
 		memset(sc->gsp_stall_leaf_mask, 0,
 		    sizeof(sc->gsp_stall_leaf_mask));
+		memset(sc->gsp_engine_leaf_mask, 0,
+		    sizeof(sc->gsp_engine_leaf_mask));
+		memset(sc->gsp_disp_leaf_mask, 0,
+		    sizeof(sc->gsp_disp_leaf_mask));
 		for (uint32_t i = 0; i < r->tableLen &&
 		    i < NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE; i++) {
 			uint32_t vector = r->table[i].vectorNonStall;
@@ -605,8 +611,18 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 			/* Track stall vectors too: the disp engine raises a
 			 * stalling interrupt the host must ack (r535 registers
 			 * an inth for it). We never acked these before. */
-			if (!(sv == 0xffffffffu || sv / 32u >= 8u))
-				sc->gsp_stall_leaf_mask[sv / 32u] |= (1u << (sv % 32u));
+			if (!(sv == 0xffffffffu || sv / 32u >= 8u)) {
+				sc->gsp_stall_leaf_mask[sv / 32u] |=
+				    (1u << (sv % 32u));
+				if (r->table[i].engineIdx ==
+				    NVKM_GSP_ENGINE_IDX_GSP)
+					sc->gsp_engine_leaf_mask[sv / 32u] |=
+					    (1u << (sv % 32u));
+				if (r->table[i].engineIdx ==
+				    NVKM_GSP_ENGINE_IDX_DISP)
+					sc->gsp_disp_leaf_mask[sv / 32u] |=
+					    (1u << (sv % 32u));
+			}
 		}
 		for (uint32_t leaf = 0; leaf < 8u; leaf++) {
 			if (leaf_mask[leaf] != 0)

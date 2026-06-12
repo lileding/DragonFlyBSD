@@ -107,38 +107,6 @@ static void drm_syncobj_add_callback_locked(struct drm_syncobj *syncobj,
 	list_add_tail(&cb->node, &syncobj->cb_list);
 }
 
-static int drm_syncobj_fence_get_or_add_callback(struct drm_syncobj *syncobj,
-						 struct dma_fence **fence,
-						 struct drm_syncobj_cb *cb,
-						 drm_syncobj_func_t func)
-{
-	int ret;
-
-	WARN_ON(*fence);
-
-	*fence = drm_syncobj_fence_get(syncobj);
-	if (*fence)
-		return 1;
-
-	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
-	/* We've already tried once to get a fence and failed.  Now that we
-	 * have the lock, try one more time just to be sure we don't add a
-	 * callback when a fence has already been set.
-	 */
-	if (syncobj->fence) {
-		*fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
-								 lockdep_is_held(&syncobj->lock)));
-		ret = 1;
-	} else {
-		*fence = NULL;
-		drm_syncobj_add_callback_locked(syncobj, cb, func);
-		ret = 0;
-	}
-	lockmgr(&syncobj->lock, LK_RELEASE);
-
-	return ret;
-}
-
 #if 0 /* unused */
 static
 void drm_syncobj_add_callback(struct drm_syncobj *syncobj,
@@ -754,6 +722,35 @@ drm_syncobj_point_get(struct drm_syncobj *syncobj, uint64_t point)
 	return (fence);
 }
 
+static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
+				      struct drm_syncobj_cb *cb);
+
+static void
+drm_syncobj_wait_add_callback(struct drm_syncobj *syncobj,
+			      struct syncobj_wait_entry *wait)
+{
+	struct dma_fence *fence;
+
+	if (wait->fence != NULL)
+		return;
+
+	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
+	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
+							lockdep_is_held(&syncobj->lock)));
+	if (fence != NULL && wait->point != 0 &&
+	    dma_fence_chain_find_seqno(&fence, wait->point) != 0) {
+		dma_fence_put(fence);
+		fence = NULL;
+	}
+	if (fence != NULL) {
+		wait->fence = fence;
+	} else {
+		drm_syncobj_add_callback_locked(syncobj, &wait->syncobj_cb,
+						syncobj_wait_syncobj_func);
+	}
+	lockmgr(&syncobj->lock, LK_RELEASE);
+}
+
 static void syncobj_wait_fence_func(struct dma_fence *fence,
 				    struct dma_fence_cb *cb)
 {
@@ -773,10 +770,12 @@ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 	/* This happens inside the syncobj lock */
 	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
 							lockdep_is_held(&syncobj->lock)));
-	if (fence != NULL && wait->point != 0 &&
-	    dma_fence_chain_find_seqno(&fence, wait->point) != 0) {
-		/* Head replaced but our point still isn't materialized;
-		 * re-arm for the next replace (cb_list is one-shot). */
+	if (fence == NULL || (wait->point != 0 &&
+	    dma_fence_chain_find_seqno(&fence, wait->point) != 0)) {
+		/* This port removes callbacks before invoking them.  Keep
+		 * waiting across NULL heads and across heads that do not yet
+		 * contain the requested timeline point.
+		 */
 		dma_fence_put(fence);
 		drm_syncobj_add_callback_locked(syncobj, cb,
 						syncobj_wait_syncobj_func);
@@ -820,7 +819,8 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 		entries[i].fence = drm_syncobj_point_get(syncobjs[i],
 							 entries[i].point);
 		if (!entries[i].fence) {
-			if (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) {
+			if (flags & (DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)) {
 			  DRM_DEBUG("continue\n");
 				continue;
 			} else {
@@ -850,16 +850,10 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 	 * fallthough and try a 0 timeout wait!
 	 */
 
-	if (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT) {
-		for (i = 0; i < count; ++i) {
-			if (entries[i].fence)
-				continue;
-
-			drm_syncobj_fence_get_or_add_callback(syncobjs[i],
-							      &entries[i].fence,
-							      &entries[i].syncobj_cb,
-							      syncobj_wait_syncobj_func);
-		}
+	if (flags & (DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)) {
+		for (i = 0; i < count; ++i)
+			drm_syncobj_wait_add_callback(syncobjs[i], &entries[i]);
 	}
 
 	do {
@@ -1255,6 +1249,17 @@ drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 				break;
 			}
 			prev = dma_fence_chain_prev_get(chain);
+			if (prev == NULL) {
+				/*
+				 * A completed prefix may have been garbage-collected.
+				 * Linux reports that boundary through prev_seqno, so
+				 * timeline queries can still observe forward progress
+				 * while the current point is pending.
+				 */
+				points[i] = chain->prev_seqno;
+				dma_fence_put(fence);
+				break;
+			}
 			dma_fence_put(fence);
 			fence = prev;
 		}

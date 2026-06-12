@@ -478,6 +478,12 @@ struct nvkm_softc {
 	struct lwkt_serialize	irq_serialize;
 	uint64_t		irq_isr_count;
 	uint64_t		irq_msi_rearm_count;
+	uint64_t		irq_empty_count;
+	uint64_t		irq_unhandled_leaf_count;
+	uint32_t		irq_last_stat;
+	uint32_t		irq_last_top;
+	uint32_t		irq_last_unhandled_leaf;
+	uint32_t		irq_last_unhandled_mask;
 
 	/* DRM driver registration (Phase 3). */
 	struct drm_device	*drm_dev;
@@ -518,6 +524,11 @@ struct nvkm_softc {
 	uint64_t		exec_async_wait_error_count;
 	uint64_t		sync_wait_count;
 	uint64_t		sync_wait_error_count;
+	uint64_t		sync_wait_already_signaled_count;
+	uint64_t		sync_wait_blocking_count;
+	uint64_t		sync_wait_blocking_us;
+	uint64_t		sync_wait_local_count;
+	uint64_t		sync_wait_external_count;
 	uint64_t		sync_signal_count;
 	uint64_t		sync_signal_error_count;
 	uint64_t		gsp_post_event_count;
@@ -525,6 +536,19 @@ struct nvkm_softc {
 	uint64_t		gsp_post_event_bad_size_count;
 	uint64_t		gsp_post_event_unhandled_count;
 	uint64_t		gsp_post_event_nonstall_count;
+	uint64_t		gsp_nocat_count;
+	uint64_t		gsp_nocat_short_count;
+	uint32_t		gsp_nocat_last_flags;
+	uint64_t		gsp_nocat_last_timestamp;
+	uint32_t		gsp_nocat_last_rec_type;
+	uint32_t		gsp_nocat_last_bugcheck;
+	uint32_t		gsp_nocat_last_subsystem;
+	uint64_t		gsp_nocat_last_error_code;
+	uint32_t		gsp_nocat_last_tdr_reason;
+	uint32_t		gsp_nocat_last_diag_len;
+	uint32_t		gsp_nocat_last_diag[11];
+	char			gsp_nocat_last_source[66];
+	char			gsp_nocat_last_engine[66];
 	uint32_t		gsp_post_event_last_client;
 	uint32_t		gsp_post_event_last_event;
 	uint32_t		gsp_post_event_last_notify_index;
@@ -540,12 +564,22 @@ struct nvkm_softc {
 	uint32_t		gsp_nonstall_intr_last_leaf;
 	uint32_t		gsp_nonstall_intr_last_mask;
 	uint32_t		gsp_nonstall_intr_last_top;
-	/* disp engine stall interrupt (r535 stall-intr equivalent). */
+	/* GSP/disp engine stall interrupts (r535 stall-intr equivalents). */
 	uint32_t		gsp_stall_leaf_mask[8];
+	uint32_t		gsp_engine_leaf_mask[8];
+	uint64_t		gsp_falcon_intr_count;
+	uint64_t		gsp_falcon_msgq_wake_count;
+	uint64_t		gsp_falcon_unexpected_count;
+	uint32_t		gsp_falcon_last_stat;
+	uint32_t		gsp_disp_leaf_mask[8];
 	uint64_t		gsp_disp_intr_count;
 	uint32_t		gsp_disp_intr_last_leaf;
 	uint32_t		gsp_disp_intr_last_mask;
 	uint32_t		gsp_disp_vblank_mask;
+	uint32_t		gsp_disp_head_status[4];
+	uint64_t		gsp_other_stall_count;
+	uint32_t		gsp_other_stall_last_leaf;
+	uint32_t		gsp_other_stall_last_mask;
 	uint64_t		rc_triggered_count;
 	uint32_t		rc_last_engine_type;
 	uint32_t		rc_last_chid;

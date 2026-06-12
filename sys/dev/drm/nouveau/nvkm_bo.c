@@ -122,6 +122,12 @@ nvkm_bo_account_free(struct nvkm_softc *sc, struct nvkm_bo *bo)
 	}
 }
 
+static bool
+nvkm_bo_cpu_mappable(const struct nvkm_bo *bo)
+{
+	return (bo->kva != NULL || bo->bar1_gva != 0);
+}
+
 /* ============================================================
  * cdev pager — backs userspace mmap with our contig pages.
  * ============================================================ */
@@ -226,6 +232,8 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	struct nvkm_softc *sc = ddev->dev_private;
 	struct nvkm_bo *bo;
 	void *kva;
+	bool wants_vram;
+	bool can_fallback_gart;
 
 	size = roundup(size, PAGE_SIZE);
 	if (size == 0)
@@ -236,8 +244,11 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		return (NULL);
 	reservation_object_init(&bo->resv);
 
-	if ((domain & NOUVEAU_GEM_DOMAIN_VRAM) &&
-	    !(domain & NOUVEAU_GEM_DOMAIN_MAPPABLE)) {
+	wants_vram = (domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0;
+	can_fallback_gart = (domain & NOUVEAU_GEM_DOMAIN_GART) != 0 ||
+	    !wants_vram;
+
+	if (wants_vram) {
 		/* GEM VRAM BO ownership:
 		 *
 		 * - owner: this struct nvkm_bo / drm_gem_object lifetime.
@@ -249,12 +260,20 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size, PAGE_SIZE,
 		    NVKM_VRAM_GEM, bo);
 		if (bo->vram_alloc == NULL) {
-			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_VRAM,
-			    size, domain, -ENOMEM);
-			reservation_object_fini(&bo->resv);
-			kfree(bo);
-			return (NULL);
+			if (!can_fallback_gart) {
+				nvkm_bo_record_alloc_fail(sc,
+				    NVKM_BO_ALLOC_FAIL_VRAM, size, domain,
+				    -ENOMEM);
+				reservation_object_fini(&bo->resv);
+				kfree(bo);
+				return (NULL);
+			}
+			nvkm_debugf(sc->dev,
+			    "nvkm_bo: GEM_NEW VRAM fallback to GART req_domain=0x%x size=0x%llx\n",
+			    domain, (unsigned long long)size);
 		}
+	}
+	if (bo->vram_alloc != NULL) {
 		bo->paddr = bo->vram_alloc->paddr;
 		bo->domain = NOUVEAU_GEM_DOMAIN_VRAM;
 	} else {
@@ -453,6 +472,35 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	    req->info.tile_mode, req->info.tile_flags);
 	if (bo == NULL)
 		return (-ENOMEM);
+	if ((req->info.domain & NOUVEAU_GEM_DOMAIN_MAPPABLE) != 0 &&
+	    bo->vram_alloc != NULL) {
+		err = nvkm_bo_bar1_map(sc, bo);
+		if (err != 0 &&
+		    (req->info.domain & NOUVEAU_GEM_DOMAIN_GART) != 0) {
+			uint32_t gart_domain;
+
+			gart_domain = (req->info.domain &
+			    ~NOUVEAU_GEM_DOMAIN_VRAM) |
+			    NOUVEAU_GEM_DOMAIN_GART;
+			nvkm_debugf(sc->dev,
+			    "nvkm_bo: GEM_NEW mappable VRAM BAR1 fallback to GART req_domain=0x%x size=0x%llx err=%d\n",
+			    req->info.domain,
+			    (unsigned long long)bo->base.size, err);
+			drm_gem_object_put_unlocked(&bo->base);
+			bo = nvkm_bo_create(ddev, req->info.size,
+			    gart_domain, req->info.tile_mode,
+			    req->info.tile_flags);
+			if (bo == NULL)
+				return (-ENOMEM);
+			err = 0;
+		}
+		if (err != 0) {
+			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
+			    bo->base.size, req->info.domain, err);
+			drm_gem_object_put_unlocked(&bo->base);
+			return (err);
+		}
+	}
 
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
 	if (err != 0)
@@ -469,7 +517,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	    (unsigned long long)bo->base.size,
 	    (unsigned long long)bo->paddr, bo->kva != NULL);
 
-	if (bo->kva != NULL) {
+	if (nvkm_bo_cpu_mappable(bo)) {
 		err = drm_gem_create_mmap_offset(&bo->base);
 		if (err != 0) {
 			nvkm_bo_record_alloc_fail(sc,
@@ -484,7 +532,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	req->info.domain = bo->domain;
 	req->info.size = bo->base.size;
 	req->info.offset = 0;	/* GPU VA — set by VM_BIND later */
-	req->info.map_handle = bo->kva != NULL ?
+	req->info.map_handle = nvkm_bo_cpu_mappable(bo) ?
 	    (DRM_GEM_MAPPING_KEY |
 	    DRM_GEM_MAPPING_OFF(bo->base.map_list.key)) : 0;
 	req->info.tile_mode = bo->tile_mode;
@@ -508,7 +556,7 @@ nvkm_drm_ioctl_gem_info(struct drm_device *ddev, void *data,
 	req->domain = bo->domain;
 	req->size = obj->size;
 	req->offset = 0;
-	req->map_handle = bo->kva != NULL ?
+	req->map_handle = nvkm_bo_cpu_mappable(bo) ?
 	    (DRM_GEM_MAPPING_KEY |
 	    DRM_GEM_MAPPING_OFF(obj->map_list.key)) : 0;
 	req->tile_mode = bo->tile_mode;

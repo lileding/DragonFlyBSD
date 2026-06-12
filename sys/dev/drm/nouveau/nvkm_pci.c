@@ -122,6 +122,53 @@ nvkm_gsp_drain_kthread(void *arg)
 }
 
 static void
+nvkm_gsp_disp_intr_head_timing(struct nvkm_softc *sc, uint32_t head)
+{
+	uint32_t stat;
+
+	stat = nvkm_rd32(sc, 0x611c00 + head * 4u);
+	if (head < 4u)
+		sc->gsp_disp_head_status[head] = stat;
+
+	if (stat & 0x00000002u) {
+		if (head < 4u && sc->kms_crtc[head] != NULL)
+			drm_crtc_handle_vblank(sc->kms_crtc[head]);
+		nvkm_wr32(sc, 0x611800 + head * 4u, 0x00000002u);
+	}
+}
+
+static void
+nvkm_gsp_falcon_intr_service(struct nvkm_softc *sc)
+{
+	uint32_t intr, inte, stat;
+
+	intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+	/* Falcon riscv_irqmask: addr2 (0x1000) + 0x2b4. */
+	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
+	stat = intr & inte;
+	sc->gsp_falcon_intr_count++;
+	sc->gsp_falcon_last_stat = stat;
+
+	if (stat == 0)
+		return;
+
+	if (stat & 0x00000040u) {
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, 0x00000040u);
+		sc->gsp_falcon_msgq_wake_count++;
+		if (sc->gsp_drain_td != NULL)
+			wakeup(&sc->gsp_drain_td);
+		stat &= ~0x00000040u;
+	}
+
+	if (stat != 0) {
+		sc->gsp_falcon_unexpected_count++;
+		nvkm_debugf(sc->dev, "gsp_isr: unexpected stat=0x%x\n", stat);
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
+		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
+	}
+}
+
+static void
 nvkm_gsp_isr(void *arg)
 {
 	struct nvkm_softc *sc = arg;
@@ -135,19 +182,30 @@ nvkm_gsp_isr(void *arg)
 	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
 	stat = intr & inte;
 	top = nvkm_rd32(sc, NVKM_CPU_INTR_TOP);
+	sc->irq_last_stat = stat;
+	sc->irq_last_top = top;
 	if (stat == 0 && top == 0) {
+		sc->irq_empty_count++;
 		nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
 		return;
 	}
 
 	for (uint32_t leaf = 0; leaf < 8u; leaf++) {
-		uint32_t mask, nonstall, stall;
+		uint32_t mask, known, nonstall, stall, unhandled;
 
 		if ((top & (1u << (leaf / 2u))) == 0)
 			continue;
 		mask = nvkm_rd32(sc, NVKM_CPU_INTR_LEAF(leaf));
 		nonstall = mask & sc->gsp_nonstall_leaf_mask[leaf];
 		stall = mask & sc->gsp_stall_leaf_mask[leaf];
+		known = sc->gsp_nonstall_leaf_mask[leaf] |
+		    sc->gsp_stall_leaf_mask[leaf];
+		unhandled = mask & ~known;
+		if (unhandled != 0) {
+			sc->irq_unhandled_leaf_count++;
+			sc->irq_last_unhandled_leaf = leaf;
+			sc->irq_last_unhandled_mask = unhandled;
+		}
 		if (nonstall != 0) {
 			sc->gsp_nonstall_intr_count++;
 			sc->gsp_nonstall_intr_last_leaf = leaf;
@@ -157,44 +215,46 @@ nvkm_gsp_isr(void *arg)
 			nvkm_drm_exec_complete_intr(sc);
 		}
 		if (stall != 0) {
-			/* disp engine stalling interrupt (r535_disp_intr): the
-			 * host must service + ack it, or the disp engine stalls
-			 * and the GSP supervisor never advances arm->live.
-			 * Service per-head vblank, then ack the CPU leaf. */
-			uint32_t vb = nvkm_rd32(sc, 0x611ec0) & 0xffu;
+			uint32_t gsp_stall = stall &
+			    sc->gsp_engine_leaf_mask[leaf];
+			uint32_t disp_stall = stall &
+			    sc->gsp_disp_leaf_mask[leaf];
+			uint32_t other_stall = stall &
+			    ~(gsp_stall | disp_stall);
 
-			sc->gsp_disp_vblank_mask = vb;
-			for (uint32_t h = 0; h < 8u; h++) {
-				if ((vb & (1u << h)) &&
-				    (nvkm_rd32(sc, 0x611c00 + h * 4u) & 0x2u)) {
-					nvkm_wr32(sc, 0x611800 + h * 4u, 0x2u);
-					if (h < 4u && sc->kms_crtc[h] != NULL)
-						drm_crtc_handle_vblank(
-						    sc->kms_crtc[h]);
+			if (gsp_stall != 0)
+				nvkm_gsp_falcon_intr_service(sc);
+
+			if (disp_stall != 0) {
+				uint32_t disp = nvkm_rd32(sc, 0x611ec0);
+				uint32_t head_mask = disp & 0xffu;
+
+				sc->gsp_disp_vblank_mask = disp;
+				for (uint32_t h = 0; h < 8u; h++) {
+					if (head_mask & (1u << h))
+						nvkm_gsp_disp_intr_head_timing(sc, h);
 				}
+				sc->gsp_disp_intr_count++;
+				sc->gsp_disp_intr_last_leaf = leaf;
+				sc->gsp_disp_intr_last_mask = disp_stall;
+			}
+			if (other_stall != 0) {
+				sc->gsp_other_stall_count++;
+				sc->gsp_other_stall_last_leaf = leaf;
+				sc->gsp_other_stall_last_mask = other_stall;
 			}
 			nvkm_wr32(sc, NVKM_CPU_INTR_LEAF(leaf), stall);
-			sc->gsp_disp_intr_count++;
-			sc->gsp_disp_intr_last_leaf = leaf;
-			sc->gsp_disp_intr_last_mask = stall;
 		}
 	}
 
-	if (stat & 0x40) {
-		/* doorbell from GSP-RM: drain msgq, dispatch events */
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, 0x40);
-		(void)nvkm_gsp_msg_dispatch_all(sc);
-		stat &= ~0x40;
-	}
 	if (stat != 0) {
-		nvkm_debugf(sc->dev,
-		    "gsp_isr: unexpected stat=0x%x\n", stat);
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
+		intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+		if ((intr & inte) != 0)
+			nvkm_gsp_falcon_intr_service(sc);
 	}
 	nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
-	/* Falcon INTR_RETRIGGER0 (per gm200_flcn pattern) */
-	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x16c, 0x1);
+	/* ga100_flcn_intr_retrigger(): NV_PFALCON_FALCON_INTR_RETRIGGER(0). */
+	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x3e8, 0x1);
 }
 
 static int
@@ -267,41 +327,59 @@ nvkm_gsp_evt_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
 static int
 nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
-#if NVKM_GSP_DEBUG_NOCAT
 	struct nvkm_softc *sc = priv;
 	const uint8_t *p = repv;
-	char source[66];
-	char faulting_engine[66];
-	uint32_t flags, bugcheck, subsystem, tdr_reason, diag_len;
-	uint64_t timestamp, error_code;
-	uint8_t rec_type;
+	uint32_t diag_words, i;
 
 	(void)fn;
+	sc->gsp_nocat_count++;
 	if (repc < 180) {
+		sc->gsp_nocat_short_count++;
+#if NVKM_GSP_DEBUG_NOCAT
 		nvkm_debugf(sc->dev, "NOCAT: short msg len=%u\n", repc);
+#endif
 		return (0);
 	}
+	if (sc->gsp_nocat_count > 8)
+		return (0);
 
-	flags = *(const uint32_t *)(const void *)(p + 0);
-	timestamp = *(const uint64_t *)(const void *)(p + 8);
-	rec_type = *(const uint8_t *)(const void *)(p + 16);
-	bugcheck = *(const uint32_t *)(const void *)(p + 20);
-	memcpy(source, p + 24, 65);
-	source[65] = '\0';
-	subsystem = *(const uint32_t *)(const void *)(p + 92);
-	error_code = *(const uint64_t *)(const void *)(p + 96);
-	memcpy(faulting_engine, p + 104, 65);
-	faulting_engine[65] = '\0';
-	tdr_reason = *(const uint32_t *)(const void *)(p + 172);
-	diag_len = *(const uint32_t *)(const void *)(p + 176);
+	sc->gsp_nocat_last_flags = *(const uint32_t *)(const void *)(p + 0);
+	sc->gsp_nocat_last_timestamp = *(const uint64_t *)(const void *)(p + 8);
+	sc->gsp_nocat_last_rec_type = *(const uint8_t *)(const void *)(p + 16);
+	sc->gsp_nocat_last_bugcheck = *(const uint32_t *)(const void *)(p + 20);
+	memcpy(sc->gsp_nocat_last_source, p + 24, 65);
+	sc->gsp_nocat_last_source[65] = '\0';
+	sc->gsp_nocat_last_subsystem = *(const uint32_t *)(const void *)(p + 92);
+	sc->gsp_nocat_last_error_code = *(const uint64_t *)(const void *)(p + 96);
+	memcpy(sc->gsp_nocat_last_engine, p + 104, 65);
+	sc->gsp_nocat_last_engine[65] = '\0';
+	sc->gsp_nocat_last_tdr_reason = *(const uint32_t *)(const void *)(p + 172);
+	sc->gsp_nocat_last_diag_len = *(const uint32_t *)(const void *)(p + 176);
+	memset(sc->gsp_nocat_last_diag, 0, sizeof(sc->gsp_nocat_last_diag));
+	diag_words = sc->gsp_nocat_last_diag_len / sizeof(uint32_t);
+	if (diag_words > sizeof(sc->gsp_nocat_last_diag) /
+	    sizeof(sc->gsp_nocat_last_diag[0]))
+		diag_words = sizeof(sc->gsp_nocat_last_diag) /
+		    sizeof(sc->gsp_nocat_last_diag[0]);
+	if (180 + diag_words * sizeof(uint32_t) > repc)
+		diag_words = (repc - 180) / sizeof(uint32_t);
+	for (i = 0; i < diag_words; i++)
+		memcpy(&sc->gsp_nocat_last_diag[i],
+		    p + 180 + i * sizeof(uint32_t),
+		    sizeof(sc->gsp_nocat_last_diag[i]));
 
+#if NVKM_GSP_DEBUG_NOCAT
 	nvkm_debugf(sc->dev,
 	    "NOCAT: flags=0x%x ts=0x%llx recType=%u bugcheck=0x%x "
 	    "source=\"%s\" subsystem=0x%x errorCode=0x%llx "
 	    "engine=\"%s\" tdrReason=0x%x diagLen=%u\n",
-	    flags, (unsigned long long)timestamp, rec_type, bugcheck,
-	    source, subsystem, (unsigned long long)error_code,
-	    faulting_engine, tdr_reason, diag_len);
+	    sc->gsp_nocat_last_flags,
+	    (unsigned long long)sc->gsp_nocat_last_timestamp,
+	    sc->gsp_nocat_last_rec_type, sc->gsp_nocat_last_bugcheck,
+	    sc->gsp_nocat_last_source, sc->gsp_nocat_last_subsystem,
+	    (unsigned long long)sc->gsp_nocat_last_error_code,
+	    sc->gsp_nocat_last_engine, sc->gsp_nocat_last_tdr_reason,
+	    sc->gsp_nocat_last_diag_len);
 
 	if (repc >= 212) {
 		nvkm_debugf(sc->dev,
@@ -317,15 +395,8 @@ nvkm_gsp_evt_nocat(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		    p[204], p[205], p[206], p[207], p[208], p[209],
 		    p[210], p[211]);
 	}
-
-	return (0);
-#else
-	(void)priv;
-	(void)fn;
-	(void)repv;
-	(void)repc;
-	return (0);
 #endif
+	return (0);
 }
 
 static int
@@ -675,7 +746,10 @@ nvkm_pci_attach(device_t dev)
 			    nvkm_gsp_seq_msg_handler, sc);
 			nvkm_gsp_msg_ntfy_add(sc,
 			    0x1020 /*POST_NOCAT_RECORD*/,
-			    nvkm_gsp_evt_nocat, sc);
+			    NULL, NULL);
+			nvkm_gsp_msg_ntfy_add(sc,
+			    0x101c /*GSP_LOCKDOWN_NOTICE*/,
+			    NULL, NULL);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1003 /*POST_EVENT*/,
 			    nvkm_gsp_evt_post_event, sc);
 			nvkm_gsp_msg_ntfy_add(sc, 0x1004 /*RC_TRIGGERED*/,
