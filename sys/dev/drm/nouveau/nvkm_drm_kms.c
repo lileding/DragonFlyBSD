@@ -98,6 +98,10 @@ static const struct drm_connector_funcs nvkm_connector_funcs = {
 static void
 nvkm_user_fb_destroy(struct drm_framebuffer *fb)
 {
+	struct nvkm_softc *sc = fb->dev != NULL ? fb->dev->dev_private : NULL;
+
+	if (sc != NULL)
+		sc->kms_fb_destroy_count++;
 	if (fb->obj[0] != NULL)
 		drm_gem_object_put_unlocked(fb->obj[0]);
 	drm_framebuffer_cleanup(fb);
@@ -159,6 +163,7 @@ static struct drm_framebuffer *
 nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
 {
+	struct nvkm_softc *sc = dev->dev_private;
 	const struct drm_format_info *info;
 	struct drm_framebuffer *fb;
 	struct drm_gem_object *obj;
@@ -169,41 +174,53 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	uint8_t kind;
 	int ret;
 
-	if (cmd->width == 0 || cmd->height == 0)
+	sc->kms_fb_create_count++;
+	if (cmd->width == 0 || cmd->height == 0) {
+		sc->kms_fb_create_error_count++;
 		return (ERR_PTR(-EINVAL));
+	}
 
 	info = drm_get_format_info(dev, cmd);
-	if (info == NULL || info->num_planes != 1)
+	if (info == NULL || info->num_planes != 1) {
+		sc->kms_fb_create_error_count++;
 		return (ERR_PTR(-EINVAL));
+	}
 	if (!nvkm_plane_format_mod_supported(NULL, cmd->pixel_format,
-	    cmd->modifier[0]))
+	    cmd->modifier[0])) {
+		sc->kms_fb_create_error_count++;
 		return (ERR_PTR(-EINVAL));
+	}
 	blocklinear = nvkm_modifier_is_blocklinear(cmd->modifier[0]);
 	kind = nvkm_modifier_kind(cmd->modifier[0]);
 
 	line = (uint64_t)cmd->width * info->cpp[0];
-	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0)
+	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0) {
+		sc->kms_fb_create_error_count++;
 		return (ERR_PTR(-EINVAL));
+	}
 	min_size = (uint64_t)(cmd->height - 1) * cmd->pitches[0] +
 	    line + cmd->offsets[0];
 
 	obj = drm_gem_object_lookup(file, cmd->handles[0]);
-	if (obj == NULL)
+	if (obj == NULL) {
+		sc->kms_fb_create_error_count++;
 		return (ERR_PTR(-ENOENT));
+	}
 	if (obj->size < min_size) {
+		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-EINVAL));
 	}
 	bo = to_nvkm_bo(obj);
 	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM)) {
+		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-EINVAL));
 	}
 	if (blocklinear) {
 		if (!bo->vm_bound_tiled || bo->vm_bound_mixed_kind ||
 		    bo->vm_bound_kind != kind) {
-			struct nvkm_softc *sc = dev->dev_private;
-
+			sc->kms_fb_create_error_count++;
 			nvkm_infof(sc->dev,
 			    "drm: reject blocklinear fb handle=%u "
 			    "modifier_kind=0x%02x bo_tiled=%d "
@@ -214,8 +231,7 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 			return (ERR_PTR(-EINVAL));
 		}
 	} else if (bo->vm_bound_tiled) {
-		struct nvkm_softc *sc = dev->dev_private;
-
+		sc->kms_fb_create_error_count++;
 		nvkm_infof(sc->dev,
 		    "drm: reject implicit-linear fb on tiled bo handle=%u\n",
 		    cmd->handles[0]);
@@ -225,6 +241,7 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 
 	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
 	if (fb == NULL) {
+		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(-ENOMEM));
 	}
@@ -232,11 +249,16 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	fb->obj[0] = obj;
 	ret = drm_framebuffer_init(dev, fb, &nvkm_user_fb_funcs);
 	if (ret != 0) {
+		sc->kms_fb_create_error_count++;
 		fb->obj[0] = NULL;
 		kfree(fb);
 		drm_gem_object_put_unlocked(obj);
 		return (ERR_PTR(ret));
 	}
+	if (blocklinear)
+		sc->kms_fb_create_blocklinear_count++;
+	else
+		sc->kms_fb_create_linear_count++;
 	return (fb);
 }
 
@@ -270,14 +292,20 @@ static void
 nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 {
 	struct drm_device *dev = old_state->dev;
+	struct nvkm_softc *sc = dev->dev_private;
+	bool wait_vblank;
 
+	sc->kms_atomic_commit_tail_count++;
 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
 	drm_atomic_helper_commit_planes(dev, old_state, 0);
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
 	drm_atomic_helper_fake_vblank(old_state);
 	drm_atomic_helper_commit_hw_done(old_state);
-	if (nvkm_atomic_commit_needs_vblank_wait(old_state))
+	wait_vblank = nvkm_atomic_commit_needs_vblank_wait(old_state);
+	if (wait_vblank) {
+		sc->kms_atomic_vblank_wait_count++;
 		drm_atomic_helper_wait_for_vblanks(dev, old_state);
+	}
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 }
 
@@ -564,6 +592,23 @@ nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state
 	/* Head blank lands in a later milestone; leave timing latched. */
 }
 
+static int
+nvkm_crtc_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
+    struct drm_pending_vblank_event *event, uint32_t flags,
+    struct drm_modeset_acquire_ctx *ctx)
+{
+	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	int ret;
+
+	nc->sc->kms_page_flip_count++;
+	if (event != NULL)
+		nc->sc->kms_page_flip_event_count++;
+	ret = drm_atomic_helper_page_flip(crtc, fb, event, flags, ctx);
+	if (ret != 0)
+		nc->sc->kms_page_flip_error_count++;
+	return (ret);
+}
+
 static const struct drm_crtc_helper_funcs nvkm_crtc_helper_funcs = {
 	.atomic_check	= nvkm_crtc_atomic_check,
 	.atomic_flush	= nvkm_crtc_atomic_flush,
@@ -603,7 +648,7 @@ static const struct drm_crtc_funcs nvkm_crtc_funcs = {
 	.enable_vblank		= nvkm_crtc_enable_vblank,
 	.disable_vblank		= nvkm_crtc_disable_vblank,
 	.set_config		= drm_atomic_helper_set_config,
-	.page_flip		= drm_atomic_helper_page_flip,
+	.page_flip		= nvkm_crtc_page_flip,
 	.destroy		= nvkm_crtc_destroy,
 	.reset			= drm_atomic_helper_crtc_reset,
 	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,

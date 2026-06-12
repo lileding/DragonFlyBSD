@@ -196,8 +196,7 @@ static int
 nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 {
 	struct nvkm_softc *sc = arg1;
-	struct sbuf sb;
-	char buf[8192];
+	struct sbuf *sb;
 	uint32_t bar1_used, bar1_total;
 	uint32_t vmm_pd0_count, vmm_pt_count, sparse_region_count;
 	uint64_t valid_pte_count;
@@ -213,67 +212,69 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	nvkm_gsp_vmm_snapshot(sc->gsp_vmm, &vmm_pd0_count, &vmm_pt_count,
 	    &valid_pte_count, &sparse_region_count);
 
-	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
-	sbuf_printf(&sb, "fence_context = 0x%016llx\n",
+	sb = sbuf_new_auto();
+	if (sb == NULL)
+		return (ENOMEM);
+	sbuf_printf(sb, "fence_context = 0x%016llx\n",
 	    (unsigned long long)sc->fence_context);
-	sbuf_printf(&sb, "fence_seqno = %u\n", sc->fence_seqno);
+	sbuf_printf(sb, "fence_seqno = %u\n", sc->fence_seqno);
 
-	sbuf_cat(&sb, "\nexec\n");
-	sbuf_printf(&sb, "submit_count = %llu\n",
+	sbuf_cat(sb, "\nexec\n");
+	sbuf_printf(sb, "submit_count = %llu\n",
 	    (unsigned long long)sc->exec_submit_count);
-	sbuf_printf(&sb, "signal_only_count = %llu\n",
+	sbuf_printf(sb, "signal_only_count = %llu\n",
 	    (unsigned long long)sc->exec_signal_only_count);
-	sbuf_printf(&sb, "timeout_count = %llu\n",
+	sbuf_printf(sb, "timeout_count = %llu\n",
 	    (unsigned long long)sc->exec_timeout_count);
-	sbuf_printf(&sb, "internal_fence_count = %llu\n",
+	sbuf_printf(sb, "internal_fence_count = %llu\n",
 	    (unsigned long long)sc->exec_internal_fence_count);
-	sbuf_printf(&sb, "signal_fence_count = %llu\n",
+	sbuf_printf(sb, "signal_fence_count = %llu\n",
 	    (unsigned long long)sc->exec_signal_fence_count);
-	sbuf_printf(&sb, "resv_attach_calls = %llu\n",
+	sbuf_printf(sb, "resv_attach_calls = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_calls);
-	sbuf_printf(&sb, "resv_attach_bos = %llu\n",
+	sbuf_printf(sb, "resv_attach_bos = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_bos);
-	sbuf_printf(&sb, "async_pending_count = %llu\n",
+	sbuf_printf(sb, "async_pending_count = %llu\n",
 	    (unsigned long long)sc->exec_async_pending_count);
-	sbuf_printf(&sb, "async_complete_count = %llu\n",
+	sbuf_printf(sb, "async_complete_count = %llu\n",
 	    (unsigned long long)sc->exec_async_complete_count);
-	sbuf_printf(&sb, "async_wait_count = %llu\n",
+	sbuf_printf(sb, "async_wait_count = %llu\n",
 	    (unsigned long long)sc->exec_async_wait_count);
-	sbuf_printf(&sb, "async_wait_error_count = %llu\n",
+	sbuf_printf(sb, "async_wait_error_count = %llu\n",
 	    (unsigned long long)sc->exec_async_wait_error_count);
 
-	sbuf_cat(&sb, "\nexec_profile_us\n");
-	sbuf_printf(&sb, "token_wait_us = %llu\n",
+	sbuf_cat(sb, "\nexec_profile_us\n");
+	sbuf_printf(sb, "token_wait_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_token_wait_us);
-	sbuf_printf(&sb, "wait_sync_us = %llu\n",
+	sbuf_printf(sb, "wait_sync_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_wait_sync_us);
-	sbuf_printf(&sb, "push_build_us = %llu\n",
+	sbuf_printf(sb, "push_build_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_push_build_us);
-	sbuf_printf(&sb, "prepare_signal_us = %llu\n",
+	sbuf_printf(sb, "prepare_signal_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_prepare_signal_us);
-	sbuf_printf(&sb, "attach_resv_us = %llu\n",
+	sbuf_printf(sb, "attach_resv_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_attach_resv_us);
-	sbuf_printf(&sb, "flush_cpu_us = %llu\n",
+	sbuf_printf(sb, "flush_cpu_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_flush_cpu_us);
-	sbuf_printf(&sb, "cache_flush_us = %llu\n",
+	sbuf_printf(sb, "cache_flush_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_cache_flush_us);
-	sbuf_printf(&sb, "doorbell_us = %llu\n",
+	sbuf_printf(sb, "doorbell_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_doorbell_us);
-	sbuf_printf(&sb, "poll_us = %llu\n",
+	sbuf_printf(sb, "poll_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_poll_us);
-	sbuf_printf(&sb, "cleanup_us = %llu\n",
+	sbuf_printf(sb, "cleanup_us = %llu\n",
 	    (unsigned long long)sc->exec_profile_cleanup_us);
-	sbuf_printf(&sb, "poll_iters = %llu\n",
+	sbuf_printf(sb, "poll_iters = %llu\n",
 	    (unsigned long long)sc->exec_profile_poll_iters);
-	sbuf_printf(&sb, "pushes = %llu\n",
+	sbuf_printf(sb, "pushes = %llu\n",
 	    (unsigned long long)sc->exec_profile_pushes);
-	sbuf_printf(&sb, "cpu_bind_scanned = %llu\n",
+	sbuf_printf(sb, "cpu_bind_scanned = %llu\n",
 	    (unsigned long long)sc->exec_profile_cpu_bind_scanned);
-	sbuf_printf(&sb, "cpu_bind_flushed = %llu\n",
+	sbuf_printf(sb, "cpu_bind_flushed = %llu\n",
 	    (unsigned long long)sc->exec_profile_cpu_bind_flushed);
 
-	sbuf_cat(&sb, "\nexec_trace\n");
-	sbuf_printf(&sb, "next = %u\n", sc->exec_trace_next);
+	sbuf_cat(sb, "\nexec_trace\n");
+	sbuf_printf(sb, "next = %u\n", sc->exec_trace_next);
 	{
 		uint32_t end = sc->exec_trace_next;
 		uint32_t start = end > 8 ? end - 8 : 0;
@@ -283,7 +284,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 
 			trace = &sc->exec_trace[pos %
 			    NVKM_DRM_EXEC_TRACE_COUNT];
-			sbuf_printf(&sb,
+			sbuf_printf(sb,
 			    "trace[%u] seq=%llu ch=%u chid=%u slot=%u gpf=%u push=%u/%u va=0x%016llx len=0x%08x flags=0x%08x binding=0x%016llx+0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx cpu=%u done=%u err=%d\n",
 			    pos, (unsigned long long)trace->seq,
 			    trace->channel, trace->chid, trace->post_slot,
@@ -299,190 +300,210 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		}
 	}
 
-	sbuf_cat(&sb, "\nsyncobj\n");
-	sbuf_printf(&sb, "wait_count = %llu\n",
+	sbuf_cat(sb, "\nsyncobj\n");
+	sbuf_printf(sb, "wait_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_count);
-	sbuf_printf(&sb, "wait_error_count = %llu\n",
+	sbuf_printf(sb, "wait_error_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_error_count);
-	sbuf_printf(&sb, "wait_already_signaled_count = %llu\n",
+	sbuf_printf(sb, "wait_already_signaled_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_already_signaled_count);
-	sbuf_printf(&sb, "wait_blocking_count = %llu\n",
+	sbuf_printf(sb, "wait_blocking_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_blocking_count);
-	sbuf_printf(&sb, "wait_blocking_us = %llu\n",
+	sbuf_printf(sb, "wait_blocking_us = %llu\n",
 	    (unsigned long long)sc->sync_wait_blocking_us);
-	sbuf_printf(&sb, "wait_local_count = %llu\n",
+	sbuf_printf(sb, "wait_local_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_local_count);
-	sbuf_printf(&sb, "wait_external_count = %llu\n",
+	sbuf_printf(sb, "wait_external_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_external_count);
-	sbuf_printf(&sb, "signal_count = %llu\n",
+	sbuf_printf(sb, "signal_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_count);
-	sbuf_printf(&sb, "signal_error_count = %llu\n",
+	sbuf_printf(sb, "signal_error_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_error_count);
 
-	sbuf_cat(&sb, "\nirq\n");
-	sbuf_printf(&sb, "isr_count = %llu\n",
+	sbuf_cat(sb, "\nirq\n");
+	sbuf_printf(sb, "isr_count = %llu\n",
 	    (unsigned long long)sc->irq_isr_count);
-	sbuf_printf(&sb, "msi_rearm_count = %llu\n",
+	sbuf_printf(sb, "msi_rearm_count = %llu\n",
 	    (unsigned long long)sc->irq_msi_rearm_count);
-	sbuf_printf(&sb, "empty_count = %llu\n",
+	sbuf_printf(sb, "empty_count = %llu\n",
 	    (unsigned long long)sc->irq_empty_count);
-	sbuf_printf(&sb, "unhandled_leaf_count = %llu\n",
+	sbuf_printf(sb, "unhandled_leaf_count = %llu\n",
 	    (unsigned long long)sc->irq_unhandled_leaf_count);
-	sbuf_printf(&sb, "last_stat = 0x%08x\n", sc->irq_last_stat);
-	sbuf_printf(&sb, "last_top = 0x%08x\n", sc->irq_last_top);
-	sbuf_printf(&sb, "last_unhandled_leaf = %u\n",
+	sbuf_printf(sb, "last_stat = 0x%08x\n", sc->irq_last_stat);
+	sbuf_printf(sb, "last_top = 0x%08x\n", sc->irq_last_top);
+	sbuf_printf(sb, "last_unhandled_leaf = %u\n",
 	    sc->irq_last_unhandled_leaf);
-	sbuf_printf(&sb, "last_unhandled_mask = 0x%08x\n",
+	sbuf_printf(sb, "last_unhandled_mask = 0x%08x\n",
 	    sc->irq_last_unhandled_mask);
 
-	sbuf_cat(&sb, "\nkms\n");
-	sbuf_printf(&sb, "auto_count = %llu\n",
+	sbuf_cat(sb, "\nkms\n");
+	sbuf_printf(sb, "auto_count = %llu\n",
 	    (unsigned long long)sc->kms_auto_count);
-	sbuf_printf(&sb, "hotplug_count = %llu\n",
+	sbuf_printf(sb, "hotplug_count = %llu\n",
 	    (unsigned long long)sc->kms_hotplug_count);
-	sbuf_printf(&sb, "plane_update_count = %llu\n",
+	sbuf_printf(sb, "fb_create_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_create_count);
+	sbuf_printf(sb, "fb_create_error_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_create_error_count);
+	sbuf_printf(sb, "fb_create_blocklinear_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_create_blocklinear_count);
+	sbuf_printf(sb, "fb_create_linear_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_create_linear_count);
+	sbuf_printf(sb, "fb_destroy_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_destroy_count);
+	sbuf_printf(sb, "page_flip_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_count);
+	sbuf_printf(sb, "page_flip_event_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_event_count);
+	sbuf_printf(sb, "page_flip_error_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_error_count);
+	sbuf_printf(sb, "atomic_commit_tail_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_commit_tail_count);
+	sbuf_printf(sb, "atomic_vblank_wait_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_vblank_wait_count);
+	sbuf_printf(sb, "plane_update_count = %llu\n",
 	    (unsigned long long)sc->kms_plane_update_count);
-	sbuf_printf(&sb, "plane_disable_count = %llu\n",
+	sbuf_printf(sb, "plane_disable_count = %llu\n",
 	    (unsigned long long)sc->kms_plane_disable_count);
-	sbuf_printf(&sb, "commit_error_count = %llu\n",
+	sbuf_printf(sb, "commit_error_count = %llu\n",
 	    (unsigned long long)sc->kms_commit_error_count);
-	sbuf_printf(&sb, "last_error = %d\n", sc->kms_last_error);
-	sbuf_printf(&sb, "last_head = %u\n", sc->kms_last_head);
-	sbuf_printf(&sb, "last_win = %u\n", sc->kms_last_win);
-	sbuf_printf(&sb, "push_trace = %d\n", sc->kms_push_trace);
+	sbuf_printf(sb, "last_error = %d\n", sc->kms_last_error);
+	sbuf_printf(sb, "last_head = %u\n", sc->kms_last_head);
+	sbuf_printf(sb, "last_win = %u\n", sc->kms_last_win);
+	sbuf_printf(sb, "push_trace = %d\n", sc->kms_push_trace);
 
-	sbuf_cat(&sb, "\ngsp_events\n");
-	sbuf_printf(&sb, "post_event_count = %llu\n",
+	sbuf_cat(sb, "\ngsp_events\n");
+	sbuf_printf(sb, "post_event_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_count);
-	sbuf_printf(&sb, "post_event_short_count = %llu\n",
+	sbuf_printf(sb, "post_event_short_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_short_count);
-	sbuf_printf(&sb, "post_event_bad_size_count = %llu\n",
+	sbuf_printf(sb, "post_event_bad_size_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_bad_size_count);
-	sbuf_printf(&sb, "post_event_unhandled_count = %llu\n",
+	sbuf_printf(sb, "post_event_unhandled_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_unhandled_count);
-	sbuf_printf(&sb, "post_event_nonstall_count = %llu\n",
+	sbuf_printf(sb, "post_event_nonstall_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_nonstall_count);
-	sbuf_printf(&sb, "nocat_count = %llu\n",
+	sbuf_printf(sb, "nocat_count = %llu\n",
 	    (unsigned long long)sc->gsp_nocat_count);
-	sbuf_printf(&sb, "nocat_short_count = %llu\n",
+	sbuf_printf(sb, "nocat_short_count = %llu\n",
 	    (unsigned long long)sc->gsp_nocat_short_count);
-	sbuf_printf(&sb, "nocat_last_flags = 0x%08x\n",
+	sbuf_printf(sb, "nocat_last_flags = 0x%08x\n",
 	    sc->gsp_nocat_last_flags);
-	sbuf_printf(&sb, "nocat_last_timestamp = 0x%016llx\n",
+	sbuf_printf(sb, "nocat_last_timestamp = 0x%016llx\n",
 	    (unsigned long long)sc->gsp_nocat_last_timestamp);
-	sbuf_printf(&sb, "nocat_last_rec_type = %u\n",
+	sbuf_printf(sb, "nocat_last_rec_type = %u\n",
 	    sc->gsp_nocat_last_rec_type);
-	sbuf_printf(&sb, "nocat_last_bugcheck = 0x%08x\n",
+	sbuf_printf(sb, "nocat_last_bugcheck = 0x%08x\n",
 	    sc->gsp_nocat_last_bugcheck);
-	sbuf_printf(&sb, "nocat_last_source = \"%s\"\n",
+	sbuf_printf(sb, "nocat_last_source = \"%s\"\n",
 	    sc->gsp_nocat_last_source);
-	sbuf_printf(&sb, "nocat_last_subsystem = 0x%08x\n",
+	sbuf_printf(sb, "nocat_last_subsystem = 0x%08x\n",
 	    sc->gsp_nocat_last_subsystem);
-	sbuf_printf(&sb, "nocat_last_error_code = 0x%016llx\n",
+	sbuf_printf(sb, "nocat_last_error_code = 0x%016llx\n",
 	    (unsigned long long)sc->gsp_nocat_last_error_code);
-	sbuf_printf(&sb, "nocat_last_engine = \"%s\"\n",
+	sbuf_printf(sb, "nocat_last_engine = \"%s\"\n",
 	    sc->gsp_nocat_last_engine);
-	sbuf_printf(&sb, "nocat_last_tdr_reason = 0x%08x\n",
+	sbuf_printf(sb, "nocat_last_tdr_reason = 0x%08x\n",
 	    sc->gsp_nocat_last_tdr_reason);
-	sbuf_printf(&sb, "nocat_last_diag_len = %u\n",
+	sbuf_printf(sb, "nocat_last_diag_len = %u\n",
 	    sc->gsp_nocat_last_diag_len);
-	sbuf_printf(&sb, "nocat_last_diag_stack = "
+	sbuf_printf(sb, "nocat_last_diag_stack = "
 	    "%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
 	    sc->gsp_nocat_last_diag[0], sc->gsp_nocat_last_diag[1],
 	    sc->gsp_nocat_last_diag[2], sc->gsp_nocat_last_diag[3],
 	    sc->gsp_nocat_last_diag[4], sc->gsp_nocat_last_diag[5],
 	    sc->gsp_nocat_last_diag[6], sc->gsp_nocat_last_diag[7],
 	    sc->gsp_nocat_last_diag[8], sc->gsp_nocat_last_diag[9]);
-	sbuf_printf(&sb, "nocat_last_diag_count = %u\n",
+	sbuf_printf(sb, "nocat_last_diag_count = %u\n",
 	    sc->gsp_nocat_last_diag[10]);
-	sbuf_printf(&sb, "post_event_last_client = 0x%08x\n",
+	sbuf_printf(sb, "post_event_last_client = 0x%08x\n",
 	    sc->gsp_post_event_last_client);
-	sbuf_printf(&sb, "post_event_last_event = 0x%08x\n",
+	sbuf_printf(sb, "post_event_last_event = 0x%08x\n",
 	    sc->gsp_post_event_last_event);
-	sbuf_printf(&sb, "post_event_last_notify_index = %u\n",
+	sbuf_printf(sb, "post_event_last_notify_index = %u\n",
 	    sc->gsp_post_event_last_notify_index);
-	sbuf_printf(&sb, "post_event_last_data = 0x%08x\n",
+	sbuf_printf(sb, "post_event_last_data = 0x%08x\n",
 	    sc->gsp_post_event_last_data);
-	sbuf_printf(&sb, "post_event_last_status = 0x%08x\n",
+	sbuf_printf(sb, "post_event_last_status = 0x%08x\n",
 	    sc->gsp_post_event_last_status);
-	sbuf_printf(&sb, "post_event_last_data_size = %u\n",
+	sbuf_printf(sb, "post_event_last_data_size = %u\n",
 	    sc->gsp_post_event_last_data_size);
-	sbuf_printf(&sb, "nonstall_event_register_count = %llu\n",
+	sbuf_printf(sb, "nonstall_event_register_count = %llu\n",
 	    (unsigned long long)sc->gsp_nonstall_event_register_count);
-	sbuf_printf(&sb, "nonstall_event_register_error_count = %llu\n",
+	sbuf_printf(sb, "nonstall_event_register_error_count = %llu\n",
 	    (unsigned long long)sc->gsp_nonstall_event_register_error_count);
-	sbuf_printf(&sb, "nonstall_event_handle = 0x%08x\n",
+	sbuf_printf(sb, "nonstall_event_handle = 0x%08x\n",
 	    sc->gsp_nonstall_event_handle);
-	sbuf_printf(&sb, "nonstall_event_last_error = %u\n",
+	sbuf_printf(sb, "nonstall_event_last_error = %u\n",
 	    sc->gsp_nonstall_event_last_error);
-	sbuf_printf(&sb, "nonstall_intr_count = %llu\n",
+	sbuf_printf(sb, "nonstall_intr_count = %llu\n",
 	    (unsigned long long)sc->gsp_nonstall_intr_count);
-	sbuf_printf(&sb, "nonstall_intr_last_leaf = %u\n",
+	sbuf_printf(sb, "nonstall_intr_last_leaf = %u\n",
 	    sc->gsp_nonstall_intr_last_leaf);
-	sbuf_printf(&sb, "nonstall_intr_last_mask = 0x%08x\n",
+	sbuf_printf(sb, "nonstall_intr_last_mask = 0x%08x\n",
 	    sc->gsp_nonstall_intr_last_mask);
-	sbuf_printf(&sb, "nonstall_intr_last_top = 0x%08x\n",
+	sbuf_printf(sb, "nonstall_intr_last_top = 0x%08x\n",
 	    sc->gsp_nonstall_intr_last_top);
-	sbuf_printf(&sb, "nonstall_intr_top_now = 0x%08x\n",
+	sbuf_printf(sb, "nonstall_intr_top_now = 0x%08x\n",
 	    nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_TOP));
-	sbuf_printf(&sb, "gsp_falcon_intr_count = %llu\n",
+	sbuf_printf(sb, "gsp_falcon_intr_count = %llu\n",
 	    (unsigned long long)sc->gsp_falcon_intr_count);
-	sbuf_printf(&sb, "gsp_falcon_msgq_wake_count = %llu\n",
+	sbuf_printf(sb, "gsp_falcon_msgq_wake_count = %llu\n",
 	    (unsigned long long)sc->gsp_falcon_msgq_wake_count);
-	sbuf_printf(&sb, "gsp_falcon_unexpected_count = %llu\n",
+	sbuf_printf(sb, "gsp_falcon_unexpected_count = %llu\n",
 	    (unsigned long long)sc->gsp_falcon_unexpected_count);
-	sbuf_printf(&sb, "gsp_falcon_last_stat = 0x%08x\n",
+	sbuf_printf(sb, "gsp_falcon_last_stat = 0x%08x\n",
 	    sc->gsp_falcon_last_stat);
-	sbuf_printf(&sb, "disp_intr_count = %llu\n",
+	sbuf_printf(sb, "disp_intr_count = %llu\n",
 	    (unsigned long long)sc->gsp_disp_intr_count);
-	sbuf_printf(&sb, "disp_intr_last_leaf = %u\n",
+	sbuf_printf(sb, "disp_intr_last_leaf = %u\n",
 	    sc->gsp_disp_intr_last_leaf);
-	sbuf_printf(&sb, "disp_intr_last_mask = 0x%08x\n",
+	sbuf_printf(sb, "disp_intr_last_mask = 0x%08x\n",
 	    sc->gsp_disp_intr_last_mask);
-	sbuf_printf(&sb, "disp_vblank_mask = 0x%08x\n",
+	sbuf_printf(sb, "disp_vblank_mask = 0x%08x\n",
 	    sc->gsp_disp_vblank_mask);
 	for (uint32_t head = 0; head < 4; head++)
-		sbuf_printf(&sb, "disp_head_status[%u] = 0x%08x\n",
+		sbuf_printf(sb, "disp_head_status[%u] = 0x%08x\n",
 		    head, sc->gsp_disp_head_status[head]);
-	sbuf_printf(&sb, "other_stall_count = %llu\n",
+	sbuf_printf(sb, "other_stall_count = %llu\n",
 	    (unsigned long long)sc->gsp_other_stall_count);
-	sbuf_printf(&sb, "other_stall_last_leaf = %u\n",
+	sbuf_printf(sb, "other_stall_last_leaf = %u\n",
 	    sc->gsp_other_stall_last_leaf);
-	sbuf_printf(&sb, "other_stall_last_mask = 0x%08x\n",
+	sbuf_printf(sb, "other_stall_last_mask = 0x%08x\n",
 	    sc->gsp_other_stall_last_mask);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
-		sbuf_printf(&sb, "stall_leaf_mask[%u] = 0x%08x\n",
+		sbuf_printf(sb, "stall_leaf_mask[%u] = 0x%08x\n",
 		    leaf, sc->gsp_stall_leaf_mask[leaf]);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
-		sbuf_printf(&sb, "gsp_leaf_mask[%u] = 0x%08x\n",
+		sbuf_printf(sb, "gsp_leaf_mask[%u] = 0x%08x\n",
 		    leaf, sc->gsp_engine_leaf_mask[leaf]);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
-		sbuf_printf(&sb, "disp_leaf_mask[%u] = 0x%08x\n",
+		sbuf_printf(sb, "disp_leaf_mask[%u] = 0x%08x\n",
 		    leaf, sc->gsp_disp_leaf_mask[leaf]);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
-		sbuf_printf(&sb, "nonstall_leaf_mask[%u] = 0x%08x\n",
+		sbuf_printf(sb, "nonstall_leaf_mask[%u] = 0x%08x\n",
 		    leaf, sc->gsp_nonstall_leaf_mask[leaf]);
 	for (uint32_t leaf = 0; leaf < 8; leaf++)
-		sbuf_printf(&sb, "nonstall_leaf_pending[%u] = 0x%08x\n",
+		sbuf_printf(sb, "nonstall_leaf_pending[%u] = 0x%08x\n",
 		    leaf, nvkm_gsp_rd32_safe(sc, NVKM_CPU_INTR_LEAF(leaf)));
 
-	sbuf_cat(&sb, "\nrc\n");
-	sbuf_printf(&sb, "triggered_count = %llu\n",
+	sbuf_cat(sb, "\nrc\n");
+	sbuf_printf(sb, "triggered_count = %llu\n",
 	    (unsigned long long)sc->rc_triggered_count);
-	sbuf_printf(&sb, "last_engine_type = %u\n", sc->rc_last_engine_type);
-	sbuf_printf(&sb, "last_chid = %u\n", sc->rc_last_chid);
-	sbuf_printf(&sb, "last_except_level = %u\n",
+	sbuf_printf(sb, "last_engine_type = %u\n", sc->rc_last_engine_type);
+	sbuf_printf(sb, "last_chid = %u\n", sc->rc_last_chid);
+	sbuf_printf(sb, "last_except_level = %u\n",
 	    sc->rc_last_except_level);
-	sbuf_printf(&sb, "last_except_type = 0x%08x\n",
+	sbuf_printf(sb, "last_except_type = 0x%08x\n",
 	    sc->rc_last_except_type);
-	sbuf_printf(&sb, "last_scope = %u\n", sc->rc_last_scope);
-	sbuf_printf(&sb, "last_mmu_fault_addr = 0x%016llx\n",
+	sbuf_printf(sb, "last_scope = %u\n", sc->rc_last_scope);
+	sbuf_printf(sb, "last_mmu_fault_addr = 0x%016llx\n",
 	    (unsigned long long)sc->rc_last_mmu_fault_addr);
-	sbuf_printf(&sb, "last_mmu_fault_type = 0x%08x\n",
+	sbuf_printf(sb, "last_mmu_fault_type = 0x%08x\n",
 	    sc->rc_last_mmu_fault_type);
-	sbuf_printf(&sb, "last_journal_size = %u\n",
+	sbuf_printf(sb, "last_journal_size = %u\n",
 	    sc->rc_last_journal_size);
-	sbuf_printf(&sb,
+	sbuf_printf(sb,
 	    "fault_pte_snapshot va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
 	    (unsigned long long)sc->rc_fault_pte_va,
 	    sc->rc_fault_pte_pd2_idx, sc->rc_fault_pte_pd1_idx,
@@ -490,19 +511,19 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->rc_fault_pte_has_pt,
 	    (unsigned long long)sc->rc_fault_pte,
 	    (unsigned long long)nvkm_pte_to_sparse());
-	sbuf_printf(&sb, "fault_pending_count = %u\n",
+	sbuf_printf(sb, "fault_pending_count = %u\n",
 	    sc->rc_fault_pending_count);
-	sbuf_printf(&sb, "fault_binding_count = %u\n",
+	sbuf_printf(sb, "fault_binding_count = %u\n",
 	    sc->rc_fault_binding_count);
 	if (sc->rc_fault_binding_count != 0) {
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_binding addr=0x%016llx size=0x%016llx grefcnt=%u\n",
 		    (unsigned long long)sc->rc_fault_binding_addr,
 		    (unsigned long long)sc->rc_fault_binding_size,
 		    sc->rc_fault_binding_grefcnt);
 	}
 	if (sc->rc_fault_nearest_lo_size != 0) {
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_binding_nearest_lo addr=0x%016llx size=0x%016llx delta=0x%016llx\n",
 		    (unsigned long long)sc->rc_fault_nearest_lo_addr,
 		    (unsigned long long)sc->rc_fault_nearest_lo_size,
@@ -511,30 +532,30 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		    sc->rc_fault_nearest_lo_size)));
 	}
 	if (sc->rc_fault_nearest_hi_size != 0) {
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_binding_nearest_hi addr=0x%016llx size=0x%016llx delta=0x%016llx\n",
 		    (unsigned long long)sc->rc_fault_nearest_hi_addr,
 		    (unsigned long long)sc->rc_fault_nearest_hi_size,
 		    (unsigned long long)(sc->rc_fault_nearest_hi_addr -
 		    sc->rc_last_mmu_fault_addr));
 	}
-	sbuf_printf(&sb, "fault_push_scan_count = %u\n",
+	sbuf_printf(sb, "fault_push_scan_count = %u\n",
 	    sc->rc_fault_push_scan_count);
-	sbuf_printf(&sb, "fault_push_hit_count = %u\n",
+	sbuf_printf(sb, "fault_push_hit_count = %u\n",
 	    sc->rc_fault_push_hit_count);
 	if (sc->rc_fault_push_hit_count != 0) {
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_push_hit seq=%llu va=0x%016llx dword=%u\n",
 		    (unsigned long long)sc->rc_fault_push_hit_seq,
 		    (unsigned long long)sc->rc_fault_push_hit_va,
 		    sc->rc_fault_push_hit_dword);
 	}
-	sbuf_printf(&sb, "fault_data_scan_count = %u\n",
+	sbuf_printf(sb, "fault_data_scan_count = %u\n",
 	    sc->rc_fault_data_scan_count);
-	sbuf_printf(&sb, "fault_data_hit_count = %u\n",
+	sbuf_printf(sb, "fault_data_hit_count = %u\n",
 	    sc->rc_fault_data_hit_count);
 	if (sc->rc_fault_data_hit_count != 0) {
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_data_hit addr=0x%016llx size=0x%016llx offset=0x%016llx value=0x%016llx\n",
 		    (unsigned long long)sc->rc_fault_data_hit_addr,
 		    (unsigned long long)sc->rc_fault_data_hit_size,
@@ -554,7 +575,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    sc->rc_last_mmu_fault_addr >=
 			    trace->va + trace->va_len)
 				continue;
-			sbuf_printf(&sb,
+			sbuf_printf(sb,
 			    "fault_trace_match seq=%llu ch=%u chid=%u slot=%u gpf=%u push=%u/%u va=0x%016llx len=0x%08x done=%u err=%d\n",
 			    (unsigned long long)trace->seq, trace->channel,
 			    trace->chid, trace->post_slot, trace->gpf_index,
@@ -563,12 +584,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    trace->completed, trace->error);
 			matches++;
 		}
-		sbuf_printf(&sb, "fault_trace_matches = %u\n", matches);
+		sbuf_printf(sb, "fault_trace_matches = %u\n", matches);
 	}
 
-	sbuf_cat(&sb, "\nvm_trace\n");
-	sbuf_printf(&sb, "next = %u\n", sc->vm_trace_next);
-	sbuf_printf(&sb, "seq = %llu\n",
+	sbuf_cat(sb, "\nvm_trace\n");
+	sbuf_printf(sb, "next = %u\n", sc->vm_trace_next);
+	sbuf_printf(sb, "seq = %llu\n",
 	    (unsigned long long)sc->vm_trace_seq);
 	if (sc->rc_last_mmu_fault_addr != 0) {
 		struct nvkm_gsp_vmm_pte_info pte_info;
@@ -580,7 +601,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 
 		nvkm_gsp_vmm_read_pte(sc->gsp_vmm,
 		    sc->rc_last_mmu_fault_addr, &pte_info);
-		sbuf_printf(&sb,
+		sbuf_printf(sb,
 		    "fault_pte va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
 		    (unsigned long long)pte_info.va, pte_info.pd2_idx,
 		    pte_info.pd1_idx, pte_info.pd0_idx, pte_info.spt_idx,
@@ -609,9 +630,9 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			if (trace->seq > context_seq)
 				context_seq = trace->seq;
 		}
-		sbuf_printf(&sb, "fault_vm_matches = %u\n", matches);
+		sbuf_printf(sb, "fault_vm_matches = %u\n", matches);
 		if (nearest_lo != NULL) {
-			sbuf_printf(&sb,
+			sbuf_printf(sb,
 			    "fault_vm_nearest_lo seq=%llu action=%u addr=0x%016llx range=0x%016llx delta=0x%016llx\n",
 			    (unsigned long long)nearest_lo->seq,
 			    nearest_lo->action,
@@ -621,7 +642,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    nearest_lo->addr));
 		}
 		if (nearest_hi != NULL) {
-			sbuf_printf(&sb,
+			sbuf_printf(sb,
 			    "fault_vm_nearest_hi seq=%llu action=%u addr=0x%016llx range=0x%016llx delta=0x%016llx\n",
 			    (unsigned long long)nearest_hi->seq,
 			    nearest_hi->action,
@@ -644,7 +665,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    sc->rc_last_mmu_fault_addr >=
 			    trace->addr + trace->range)
 				continue;
-			sbuf_printf(&sb,
+			sbuf_printf(sb,
 			    "fault_vm_match seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
 			    (unsigned long long)trace->seq, trace->action,
 			    trace->flags, trace->handle,
@@ -661,7 +682,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			uint64_t first_seq;
 
 			first_seq = context_seq > 4 ? context_seq - 4 : 1;
-			sbuf_cat(&sb, "fault_vm_context\n");
+			sbuf_cat(sb, "fault_vm_context\n");
 			for (uint32_t i = 0; i < NVKM_DRM_VM_TRACE_COUNT; i++) {
 				const struct nvkm_drm_vm_trace *trace =
 				    &sc->vm_trace[i];
@@ -669,7 +690,7 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 				if (trace->seq < first_seq ||
 				    trace->seq > context_seq + 4)
 					continue;
-				sbuf_printf(&sb,
+				sbuf_printf(sb,
 				    "vm seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx err=%d\n",
 				    (unsigned long long)trace->seq, trace->action,
 				    trace->flags, trace->handle,
@@ -680,109 +701,153 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		}
 	}
 
-	sbuf_cat(&sb, "\nbo\n");
-	sbuf_printf(&sb, "gem_new_count = %llu\n",
+	sbuf_cat(sb, "\nbo\n");
+	sbuf_printf(sb, "gem_new_count = %llu\n",
 	    (unsigned long long)sc->bo_gem_new_count);
-	sbuf_printf(&sb, "gem_free_count = %llu\n",
+	sbuf_printf(sb, "gem_new_vram_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_vram_count);
+	sbuf_printf(sb, "gem_new_gart_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_gart_count);
+	sbuf_printf(sb, "gem_new_mappable_req_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_mappable_req_count);
+	sbuf_printf(sb, "gem_new_mappable_vram_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_mappable_vram_count);
+	sbuf_printf(sb, "gem_new_mappable_gart_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_mappable_gart_count);
+	sbuf_printf(sb, "gem_new_map_handle_count = %llu\n",
+	    (unsigned long long)sc->bo_gem_new_map_handle_count);
+	sbuf_printf(sb, "gem_free_count = %llu\n",
 	    (unsigned long long)sc->bo_gem_free_count);
-	sbuf_printf(&sb, "sysmem_active_count = %llu\n",
+	sbuf_printf(sb, "dumb_create_count = %llu\n",
+	    (unsigned long long)sc->bo_dumb_create_count);
+	sbuf_printf(sb, "dumb_create_vram_count = %llu\n",
+	    (unsigned long long)sc->bo_dumb_create_vram_count);
+	sbuf_printf(sb, "dumb_create_gart_count = %llu\n",
+	    (unsigned long long)sc->bo_dumb_create_gart_count);
+	sbuf_printf(sb, "bar1_fault_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_fault_count);
+	sbuf_printf(sb, "bar1_fault_map_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_fault_map_count);
+	sbuf_printf(sb, "bar1_fault_error_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_fault_error_count);
+	sbuf_printf(sb, "bar1_map_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_map_count);
+	sbuf_printf(sb, "bar1_map_error_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_map_error_count);
+	sbuf_printf(sb, "bar1_unmap_count = %llu\n",
+	    (unsigned long long)sc->bo_bar1_unmap_count);
+	sbuf_printf(sb, "sysmem_active_count = %llu\n",
 	    (unsigned long long)sc->bo_sysmem_active_count);
-	sbuf_printf(&sb, "sysmem_active_bytes = 0x%016llx\n",
+	sbuf_printf(sb, "sysmem_active_bytes = 0x%016llx\n",
 	    (unsigned long long)sc->bo_sysmem_active_bytes);
-	sbuf_printf(&sb, "sysmem_high_bytes = 0x%016llx\n",
+	sbuf_printf(sb, "sysmem_high_bytes = 0x%016llx\n",
 	    (unsigned long long)sc->bo_sysmem_high_bytes);
-	sbuf_printf(&sb, "vram_active_count = %llu\n",
+	sbuf_printf(sb, "vram_active_count = %llu\n",
 	    (unsigned long long)sc->bo_vram_active_count);
-	sbuf_printf(&sb, "vram_active_bytes = 0x%016llx\n",
+	sbuf_printf(sb, "vram_active_bytes = 0x%016llx\n",
 	    (unsigned long long)sc->bo_vram_active_bytes);
-	sbuf_printf(&sb, "vram_high_bytes = 0x%016llx\n",
+	sbuf_printf(sb, "vram_high_bytes = 0x%016llx\n",
 	    (unsigned long long)sc->bo_vram_high_bytes);
-	sbuf_printf(&sb, "alloc_fail_count = %llu\n",
+	sbuf_printf(sb, "alloc_fail_count = %llu\n",
 	    (unsigned long long)sc->bo_alloc_fail_count);
-	sbuf_printf(&sb, "alloc_fail_path = %u\n",
+	sbuf_printf(sb, "alloc_fail_path = %u\n",
 	    sc->bo_alloc_fail_path);
-	sbuf_printf(&sb, "alloc_fail_error = %d\n",
+	sbuf_printf(sb, "alloc_fail_error = %d\n",
 	    sc->bo_alloc_fail_error);
-	sbuf_printf(&sb, "alloc_fail_domain = 0x%08x\n",
+	sbuf_printf(sb, "alloc_fail_domain = 0x%08x\n",
 	    sc->bo_alloc_fail_domain);
-	sbuf_printf(&sb, "alloc_fail_size = 0x%016llx\n",
+	sbuf_printf(sb, "alloc_fail_size = 0x%016llx\n",
 	    (unsigned long long)sc->bo_alloc_fail_size);
 
-	sbuf_cat(&sb, "\nreservation\n");
-	sbuf_printf(&sb, "bo_wait_count = %llu\n",
+	sbuf_cat(sb, "\nreservation\n");
+	sbuf_printf(sb, "bo_wait_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_count);
-	sbuf_printf(&sb, "bo_wait_error_count = %llu\n",
+	sbuf_printf(sb, "bo_wait_error_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_error_count);
-	sbuf_printf(&sb, "vm_init_kernel_addr = 0x%016llx\n",
+	sbuf_printf(sb, "vm_init_kernel_addr = 0x%016llx\n",
 	    (unsigned long long)sc->vm_init_kernel_addr);
-	sbuf_printf(&sb, "vm_init_kernel_size = 0x%016llx\n",
+	sbuf_printf(sb, "vm_init_kernel_size = 0x%016llx\n",
 	    (unsigned long long)sc->vm_init_kernel_size);
-	sbuf_printf(&sb, "vm_bind_ioctl_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_ioctl_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_ioctl_count);
-	sbuf_printf(&sb, "vm_bind_op_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_op_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_op_count);
-	sbuf_printf(&sb, "vm_bind_max_op_count = %u\n",
+	sbuf_printf(sb, "vm_bind_max_op_count = %u\n",
 	    sc->vm_bind_max_op_count);
-	sbuf_printf(&sb, "vm_bind_wait_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_wait_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_count);
-	sbuf_printf(&sb, "vm_bind_wait_error_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_wait_error_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_error_count);
-	sbuf_printf(&sb, "vm_bind_error_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_error_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_error_count);
-	sbuf_printf(&sb, "vm_bind_busy_count = %llu\n",
+	sbuf_printf(sb, "vm_bind_busy_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_busy_count);
-	sbuf_printf(&sb, "vm_bind_last_error = %d\n",
+	sbuf_printf(sb, "vm_bind_last_error = %d\n",
 	    sc->vm_bind_last_error);
-	sbuf_printf(&sb, "vm_bind_last_op = %u\n",
+	sbuf_printf(sb, "vm_bind_last_op = %u\n",
 	    sc->vm_bind_last_op);
-	sbuf_printf(&sb, "vm_bind_last_flags = 0x%08x\n",
+	sbuf_printf(sb, "vm_bind_last_flags = 0x%08x\n",
 	    sc->vm_bind_last_flags);
-	sbuf_printf(&sb, "vm_bind_last_handle = %u\n",
+	sbuf_printf(sb, "vm_bind_last_handle = %u\n",
 	    sc->vm_bind_last_handle);
-	sbuf_printf(&sb, "vm_bind_last_addr = 0x%016llx\n",
+	sbuf_printf(sb, "vm_bind_last_addr = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_last_addr);
-	sbuf_printf(&sb, "vm_bind_last_range = 0x%016llx\n",
+	sbuf_printf(sb, "vm_bind_last_range = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_last_range);
-	sbuf_printf(&sb, "vm_bind_last_bo_offset = 0x%016llx\n",
+	sbuf_printf(sb, "vm_bind_last_bo_offset = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_last_bo_offset);
-	sbuf_printf(&sb, "vm_bind_busy_state = %u\n",
+	sbuf_printf(sb, "vm_bind_busy_state = %u\n",
 	    sc->vm_bind_busy_state);
-	sbuf_printf(&sb, "vm_bind_busy_refs = %u\n",
+	sbuf_printf(sb, "vm_bind_busy_refs = %u\n",
 	    sc->vm_bind_busy_refs);
-	sbuf_printf(&sb, "vm_bind_busy_exec_refs = %u\n",
+	sbuf_printf(sb, "vm_bind_busy_exec_refs = %u\n",
 	    sc->vm_bind_busy_exec_refs);
-	sbuf_printf(&sb, "vm_bind_busy_addr = 0x%016llx\n",
+	sbuf_printf(sb, "vm_bind_busy_addr = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_busy_addr);
-	sbuf_printf(&sb, "vm_bind_busy_size = 0x%016llx\n",
+	sbuf_printf(sb, "vm_bind_busy_size = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_busy_size);
-	sbuf_printf(&sb, "cpu_prep_wait_count = %llu\n",
+	sbuf_printf(sb, "prime_handle_to_fd_count = %llu\n",
+	    (unsigned long long)sc->prime_handle_to_fd_count);
+	sbuf_printf(sb, "prime_handle_to_fd_error_count = %llu\n",
+	    (unsigned long long)sc->prime_handle_to_fd_error_count);
+	sbuf_printf(sb, "prime_fd_to_handle_count = %llu\n",
+	    (unsigned long long)sc->prime_fd_to_handle_count);
+	sbuf_printf(sb, "prime_fd_to_handle_error_count = %llu\n",
+	    (unsigned long long)sc->prime_fd_to_handle_error_count);
+	sbuf_printf(sb, "cpu_prep_wait_count = %llu\n",
 	    (unsigned long long)sc->cpu_prep_wait_count);
-	sbuf_printf(&sb, "cpu_prep_wait_error_count = %llu\n",
+	sbuf_printf(sb, "cpu_prep_wait_error_count = %llu\n",
 	    (unsigned long long)sc->cpu_prep_wait_error_count);
+	sbuf_printf(sb, "cpu_fini_count = %llu\n",
+	    (unsigned long long)sc->cpu_fini_count);
+	sbuf_printf(sb, "cpu_fini_flush_count = %llu\n",
+	    (unsigned long long)sc->cpu_fini_flush_count);
+	sbuf_printf(sb, "cpu_fini_flush_us = %llu\n",
+	    (unsigned long long)sc->cpu_fini_flush_us);
 
-	sbuf_cat(&sb, "\nbar1\n");
-	sbuf_printf(&sb, "gva_used = %u\n", bar1_used);
-	sbuf_printf(&sb, "gva_total = %u\n", bar1_total);
-	sbuf_printf(&sb, "gva_free = %u\n", bar1_total - bar1_used);
+	sbuf_cat(sb, "\nbar1\n");
+	sbuf_printf(sb, "gva_used = %u\n", bar1_used);
+	sbuf_printf(sb, "gva_total = %u\n", bar1_total);
+	sbuf_printf(sb, "gva_free = %u\n", bar1_total - bar1_used);
 
-	sbuf_cat(&sb, "\nvmm\n");
-	sbuf_printf(&sb, "flush_count = %llu\n",
+	sbuf_cat(sb, "\nvmm\n");
+	sbuf_printf(sb, "flush_count = %llu\n",
 	    (unsigned long long)sc->vmm_flush_count);
-	sbuf_printf(&sb, "flush_us = %llu\n",
+	sbuf_printf(sb, "flush_us = %llu\n",
 	    (unsigned long long)sc->vmm_flush_us);
-	sbuf_printf(&sb, "user_pd0_count = %u\n", vmm_pd0_count);
-	sbuf_printf(&sb, "user_pt_count = %u\n", vmm_pt_count);
-	sbuf_printf(&sb, "valid_pte_count = %llu\n",
+	sbuf_printf(sb, "user_pd0_count = %u\n", vmm_pd0_count);
+	sbuf_printf(sb, "user_pt_count = %u\n", vmm_pt_count);
+	sbuf_printf(sb, "valid_pte_count = %llu\n",
 	    (unsigned long long)valid_pte_count);
-	sbuf_printf(&sb, "sparse_region_count = %u\n", sparse_region_count);
+	sbuf_printf(sb, "sparse_region_count = %u\n", sparse_region_count);
 
-	err = sbuf_finish(&sb);
+	err = sbuf_finish(sb);
 	if (err != 0) {
-		sbuf_delete(&sb);
+		sbuf_delete(sb);
 		return (err);
 	}
-	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
-	sbuf_delete(&sb);
+	err = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
 	return (err);
 }
 
