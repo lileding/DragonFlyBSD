@@ -2361,7 +2361,8 @@ nvkm_drm_gpfifo_free(uint32_t get, uint32_t put)
 
 static int
 nvkm_drm_gpfifo_wait_space(struct nvkm_softc *sc, struct nvkm_gsp_chan *chan,
-    uint64_t slot_bar1, uint32_t push_count, uint32_t *put)
+    uint64_t slot_bar1, uint32_t push_count, uint32_t *put,
+    uint32_t *required_out)
 {
 	uint32_t required;
 	int timeout_ticks = 5 * hz;
@@ -2369,6 +2370,15 @@ nvkm_drm_gpfifo_wait_space(struct nvkm_softc *sc, struct nvkm_gsp_chan *chan,
 
 	if (wait_ticks < 1)
 		wait_ticks = 1;
+
+	*put = chan->gpf_put & (NVKM_DRM_GPFIFO_ENTRIES - 1);
+	required = nvkm_drm_gpfifo_required(*put, push_count);
+	if (required >= NVKM_DRM_GPFIFO_ENTRIES)
+		return (-EINVAL);
+	if (required_out != NULL)
+		*required_out = required;
+	if (chan->gpf_free >= required)
+		return (0);
 
 	bool mismatch_logged = false;
 
@@ -2378,27 +2388,27 @@ nvkm_drm_gpfifo_wait_space(struct nvkm_softc *sc, struct nvkm_gsp_chan *chan,
 		uint32_t put_rb;
 
 		/*
-		 * GP_PUT is written only by this driver; chan->gpf_put is the
-		 * authoritative value.  The USERD BAR1 readback has been seen
-		 * returning stale zeros mid-session, which made PUT jump
-		 * backwards and wedged the channel -- keep reading it purely
-		 * as a diagnostic.
+		 * Match Linux nvif_chan_gpfifo_wait(): cache the free count
+		 * and only refresh GP_GET when the software count is exhausted.
+		 * GP_PUT is written only by this driver; the shadow value is
+		 * authoritative, and USERD GP_PUT readback is debug-only because
+		 * it can be stale during channel bring-up.
 		 */
-		put_rb = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_PUT) &
-		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
-		*put = chan->gpf_put & (NVKM_DRM_GPFIFO_ENTRIES - 1);
-		if (put_rb != *put && !mismatch_logged) {
-			mismatch_logged = true;
-			nvkm_infof(sc->dev,
-			    "EXEC GP_PUT readback mismatch chid=%d readback=%u shadow=%u\n",
-			    chan->chid, put_rb, *put);
+		if (nvkm_debug != 0) {
+			put_rb = nvkm_gsp_bar1_rd32(sc,
+			    slot_bar1 + NV_USERD_GP_PUT) &
+			    (NVKM_DRM_GPFIFO_ENTRIES - 1);
+			if (put_rb != *put && !mismatch_logged) {
+				mismatch_logged = true;
+				nvkm_infof(sc->dev,
+				    "EXEC GP_PUT readback mismatch chid=%d readback=%u shadow=%u\n",
+				    chan->chid, put_rb, *put);
+			}
 		}
 		get = nvkm_gsp_bar1_rd32(sc, slot_bar1 + NV_USERD_GP_GET) &
 		    (NVKM_DRM_GPFIFO_ENTRIES - 1);
-		required = nvkm_drm_gpfifo_required(*put, push_count);
-		if (required >= NVKM_DRM_GPFIFO_ENTRIES)
-			return (-EINVAL);
 		free = nvkm_drm_gpfifo_free(get, *put);
+		chan->gpf_free = free;
 		if (free >= required)
 			return (0);
 
@@ -3248,6 +3258,7 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	uint32_t *gpf, *post, *sema;
 	uint64_t slot_bar1, post_gva, sema_gva;
 	uint32_t put = 0, payload, post_slot, post_offset, sema_offset;
+	uint32_t gpf_required = 0;
 	uint64_t trace_seq;
 	uint32_t trace_first = 0;
 	uint32_t trace_count = 0;
@@ -3354,7 +3365,7 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	    NV_USERD_SLOT_SIZE;
 
 	err = nvkm_drm_gpfifo_wait_space(sc, chan, slot_bar1, req->push_count,
-	    &put);
+	    &put, &gpf_required);
 	if (err != 0)
 		goto out_unlock;
 	payload = (uint32_t)(req->channel << 16) ^ put ^ req->push_count ^
@@ -3525,6 +3536,10 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	nvkm_drm_profile_add_us(&sc->exec_profile_doorbell_us,
 	    profile_start);
 	chan->gpf_put = put;
+	if (chan->gpf_free >= gpf_required)
+		chan->gpf_free -= gpf_required;
+	else
+		chan->gpf_free = 0;
 	pending = NULL;
 	submit_slot_allocated = false;
 	lwkt_reltoken(&sc->gsp_tok);

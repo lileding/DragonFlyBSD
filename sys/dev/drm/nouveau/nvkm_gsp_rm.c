@@ -1627,6 +1627,7 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 
 	memset(chan, 0, sizeof(*chan));
 	chan->vmm = vmm;
+	chan->gpf_free = NVKM_DRM_GPFIFO_ENTRIES - 1;
 	/* Submit GVA slot is per-VMM: this channel's push/gpf/sema window
 	 * lives in vmm's own CLIENT_BASE region, so the slot index only has
 	 * to be unique within this VMM. */
