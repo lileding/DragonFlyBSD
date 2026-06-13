@@ -315,6 +315,7 @@ struct nvkm_gsp_chan {
 	int			chid;		/* allocated chid (>=1) */
 	uint32_t		gsp_token;	/* GSP-issued doorbell token */
 	uint32_t		gpf_put;	/* software GP_PUT for submit_gpf ring */
+	uint32_t		gpf_free;	/* cached free submit_gpf entries */
 	uint32_t		submit_post_slot;	/* next EXEC post/sema ring slot */
 	uint64_t		submit_post_slots_busy;	/* active EXEC post/sema slots */
 	uint8_t			faulted;
