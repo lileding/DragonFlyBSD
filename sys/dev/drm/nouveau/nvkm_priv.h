@@ -561,6 +561,12 @@ struct nvkm_softc {
 	uint64_t		sync_wait_blocking_us;
 	uint64_t		sync_wait_local_count;
 	uint64_t		sync_wait_external_count;
+	uint64_t		sync_job_wait_armed_count;
+	uint64_t		sync_job_dep_cb_count;
+	uint64_t		sync_job_dep_queue_count;
+	uint64_t		sync_job_dep_queue_error_count;
+	uint64_t		sync_job_ready_count;
+	uint64_t		sync_job_cancel_count;
 	uint64_t		sync_signal_count;
 	uint64_t		sync_signal_error_count;
 	uint64_t		gsp_post_event_count;

@@ -315,6 +315,18 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->sync_wait_local_count);
 	sbuf_printf(sb, "wait_external_count = %llu\n",
 	    (unsigned long long)sc->sync_wait_external_count);
+	sbuf_printf(sb, "job_wait_armed_count = %llu\n",
+	    (unsigned long long)sc->sync_job_wait_armed_count);
+	sbuf_printf(sb, "job_dep_cb_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_cb_count);
+	sbuf_printf(sb, "job_dep_queue_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_queue_count);
+	sbuf_printf(sb, "job_dep_queue_error_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_queue_error_count);
+	sbuf_printf(sb, "job_ready_count = %llu\n",
+	    (unsigned long long)sc->sync_job_ready_count);
+	sbuf_printf(sb, "job_cancel_count = %llu\n",
+	    (unsigned long long)sc->sync_job_cancel_count);
 	sbuf_printf(sb, "signal_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_count);
 	sbuf_printf(sb, "signal_error_count = %llu\n",
