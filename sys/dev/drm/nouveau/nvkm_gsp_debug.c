@@ -701,6 +701,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		}
 	}
 
+	static const char *const bo_size_bucket_names[NVKM_BO_SIZE_BUCKET_COUNT] = {
+		"le_4k",
+		"le_16k",
+		"le_64k",
+		"le_256k",
+		"le_1m",
+		"le_4m",
+		"gt_4m",
+	};
+
 	sbuf_cat(sb, "\nbo\n");
 	sbuf_printf(sb, "gem_new_count = %llu\n",
 	    (unsigned long long)sc->bo_gem_new_count);
@@ -714,10 +724,69 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->bo_gem_new_mappable_vram_count);
 	sbuf_printf(sb, "gem_new_mappable_gart_count = %llu\n",
 	    (unsigned long long)sc->bo_gem_new_mappable_gart_count);
-	sbuf_printf(sb, "gem_new_map_handle_count = %llu\n",
-	    (unsigned long long)sc->bo_gem_new_map_handle_count);
-	sbuf_printf(sb, "gem_free_count = %llu\n",
-	    (unsigned long long)sc->bo_gem_free_count);
+		sbuf_printf(sb, "gem_new_map_handle_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_map_handle_count);
+		sbuf_printf(sb, "gem_new_req_cpu_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_cpu_count);
+		sbuf_printf(sb, "gem_new_req_vram_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_vram_count);
+		sbuf_printf(sb, "gem_new_req_gart_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_gart_count);
+		sbuf_printf(sb, "gem_new_req_vram_gart_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_vram_gart_count);
+		sbuf_printf(sb, "gem_new_req_no_domain_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_no_domain_count);
+		sbuf_printf(sb, "gem_new_req_coherent_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_coherent_count);
+		sbuf_printf(sb, "gem_new_req_no_share_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_no_share_count);
+		sbuf_printf(sb, "gem_new_req_tiled_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_req_tiled_count);
+		for (uint32_t i = 0; i < NVKM_BO_SIZE_BUCKET_COUNT; i++) {
+			sbuf_printf(sb, "gem_new_size_%s = %llu\n",
+			    bo_size_bucket_names[i],
+			    (unsigned long long)sc->bo_gem_new_size_bucket[i]);
+		sbuf_printf(sb, "gem_new_gart_size_%s = %llu\n",
+		    bo_size_bucket_names[i],
+		    (unsigned long long)sc->bo_gem_new_gart_size_bucket[i]);
+			sbuf_printf(sb, "gem_new_mappable_size_%s = %llu\n",
+			    bo_size_bucket_names[i],
+			    (unsigned long long)sc->bo_gem_new_mappable_size_bucket[i]);
+		}
+		sbuf_printf(sb, "gem_new_trace_seq = %llu\n",
+		    (unsigned long long)sc->bo_gem_new_trace_seq);
+		{
+			uint64_t seq = sc->bo_gem_new_trace_seq;
+			uint32_t count = seq < NVKM_BO_GEM_NEW_TRACE_COUNT ?
+			    (uint32_t)seq : NVKM_BO_GEM_NEW_TRACE_COUNT;
+
+			for (uint32_t i = 0; i < count; i++) {
+				const struct nvkm_bo_gem_new_trace *trace;
+				uint32_t idx = (uint32_t)((seq - count + i) %
+				    NVKM_BO_GEM_NEW_TRACE_COUNT);
+
+				trace = &sc->bo_gem_new_trace[idx];
+				if (trace->seq == 0)
+					continue;
+				sbuf_printf(sb,
+				    "gem_new_trace[%02u] seq=%llu pid=%u comm=%s "
+				    "handle=%u req_domain=0x%08x domain=0x%08x "
+				    "req_size=0x%llx size=0x%llx map_handle=0x%016llx "
+				    "tile_mode=0x%08x tile_flags=0x%08x "
+				    "mappable_req=%u cpu_mappable=%u\n",
+				    i, (unsigned long long)trace->seq,
+				    trace->pid, trace->comm, trace->handle,
+				    trace->req_domain, trace->domain,
+				    (unsigned long long)trace->req_size,
+				    (unsigned long long)trace->size,
+				    (unsigned long long)trace->map_handle,
+				    trace->tile_mode,
+				    trace->tile_flags, trace->mappable_req,
+				    trace->cpu_mappable);
+			}
+		}
+		sbuf_printf(sb, "gem_free_count = %llu\n",
+		    (unsigned long long)sc->bo_gem_free_count);
 	sbuf_printf(sb, "dumb_create_count = %llu\n",
 	    (unsigned long long)sc->bo_dumb_create_count);
 	sbuf_printf(sb, "dumb_create_vram_count = %llu\n",

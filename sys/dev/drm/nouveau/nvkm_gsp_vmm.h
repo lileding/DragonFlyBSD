@@ -15,6 +15,8 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_rm.h"
 
+struct nvkm_bo;
+
 /* Per-vmm GMMU page-table chain. Three sysmem 4 KiB pages, one each
  * for PD3 / PD2 / PD1; the 512 MiB RM-managed range falls inside
  * PD1 entry 8 (VA 0x100000000 / 512MiB = 8). */
@@ -131,6 +133,9 @@ int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 void	 nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm);
 int	 nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, void *kva, uint64_t size, uint8_t kind);
+int	 nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, const struct nvkm_bo *bo, uint64_t bo_offset,
+	    uint64_t size, uint8_t kind);
 int	 nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
 	    uint8_t ro, uint8_t kind);
