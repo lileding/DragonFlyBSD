@@ -3500,13 +3500,12 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 */
 	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
 	    profile_start);
-	/* Canary: does this submit's push VA range overlap any in-flight
-	 * submit's range? If so, NVK reused a cmd-pool chunk while the GPU is
-	 * still executing the prior user of it (the suspected torn-pointer
-	 * source). Under gsp_tok; scan before insert so we don't match self. */
+	/* Debug canary: detect command-pool chunk reuse while the GPU is still
+	 * reading the previous submit. The scan is diagnostic only and is kept
+	 * off the production submit path unless verbose DRM debug is enabled. */
 	pending->push_va_lo = push_va_lo;
 	pending->push_va_hi = push_va_hi;
-	if (push_va_hi > push_va_lo) {
+	if (nvkm_debug != 0 && push_va_hi > push_va_lo) {
 		struct nvkm_drm_exec_pending *op;
 
 		LIST_FOREACH(op, &sc->exec_pending, link) {
