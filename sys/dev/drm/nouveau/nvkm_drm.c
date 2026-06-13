@@ -584,6 +584,9 @@ nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
 {
 	struct nvkm_drm_vm_trace *trace;
 
+	if (nvkm_debug == 0)
+		return;
+
 	trace = &sc->vm_trace[sc->vm_trace_next % NVKM_DRM_VM_TRACE_COUNT];
 	memset(trace, 0, sizeof(*trace));
 	trace->seq = ++sc->vm_trace_seq;
@@ -672,6 +675,9 @@ nvkm_drm_exec_trace_record(struct nvkm_softc *sc, uint64_t seq,
     const struct drm_nouveau_exec_push *push)
 {
 	struct nvkm_drm_exec_trace *trace;
+
+	if (nvkm_debug == 0)
+		return;
 
 	trace = &sc->exec_trace[sc->exec_trace_next %
 	    NVKM_DRM_EXEC_TRACE_COUNT];
@@ -2799,13 +2805,15 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    pushes[i].flags, put, entry0, entry1);
 		nvkm_drm_dump_large_push(sc, nfile, pushes[i].va,
 		    pushes[i].va_len);
-		if (trace_count == 0)
-			trace_first = sc->exec_trace_next;
-		trace_seq = sc->exec_submit_count;
-		nvkm_drm_exec_trace_record(sc, trace_seq, req->channel,
-		    chan->chid, post_slot, put, i, req->push_count,
-		    &pushes[i]);
-		trace_count++;
+		if (nvkm_debug != 0) {
+			if (trace_count == 0)
+				trace_first = sc->exec_trace_next;
+			trace_seq = sc->exec_submit_count;
+			nvkm_drm_exec_trace_record(sc, trace_seq, req->channel,
+			    chan->chid, post_slot, put, i, req->push_count,
+			    &pushes[i]);
+			trace_count++;
+		}
 		gpf[put * 2 + 0] = entry0;
 		gpf[put * 2 + 1] = entry1;
 		put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
