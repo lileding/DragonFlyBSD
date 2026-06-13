@@ -129,6 +129,9 @@ nvkm_bo_record_gem_new_trace(struct nvkm_softc *sc, uint64_t req_size,
 	struct proc *proc;
 	uint64_t seq;
 
+	if (nvkm_debug == 0)
+		return;
+
 	seq = ++sc->bo_gem_new_trace_seq;
 	trace = &sc->bo_gem_new_trace[(seq - 1) %
 	    NVKM_BO_GEM_NEW_TRACE_COUNT];
