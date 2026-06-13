@@ -696,6 +696,8 @@ struct nvkm_softc {
 	uint64_t		vm_bind_ioctl_count;
 	uint64_t		vm_bind_op_count;
 	uint32_t		vm_bind_max_op_count;
+	uint64_t		vm_bind_async_count;
+	uint64_t		vm_bind_sync_count;
 	uint64_t		vm_bind_wait_count;
 	uint64_t		vm_bind_wait_error_count;
 	uint64_t		vm_bind_error_count;
@@ -712,6 +714,13 @@ struct nvkm_softc {
 	uint32_t		vm_bind_busy_exec_refs;
 	uint64_t		vm_bind_busy_addr;
 	uint64_t		vm_bind_busy_size;
+	uint64_t		vm_bind_profile_wait_us;
+	uint64_t		vm_bind_profile_copyin_us;
+	uint64_t		vm_bind_profile_token_wait_us;
+	uint64_t		vm_bind_profile_apply_us;
+	uint64_t		vm_bind_profile_flush_us;
+	uint64_t		vm_bind_profile_signal_us;
+	uint64_t		vm_bind_profile_total_us;
 	uint64_t		prime_handle_to_fd_count;
 	uint64_t		prime_handle_to_fd_error_count;
 	uint64_t		prime_fd_to_handle_count;

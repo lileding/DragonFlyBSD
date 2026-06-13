@@ -843,6 +843,10 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_op_count);
 	sbuf_printf(sb, "vm_bind_max_op_count = %u\n",
 	    sc->vm_bind_max_op_count);
+	sbuf_printf(sb, "vm_bind_async_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_async_count);
+	sbuf_printf(sb, "vm_bind_sync_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_sync_count);
 	sbuf_printf(sb, "vm_bind_wait_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_count);
 	sbuf_printf(sb, "vm_bind_wait_error_count = %llu\n",
@@ -875,6 +879,24 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_busy_addr);
 	sbuf_printf(sb, "vm_bind_busy_size = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_busy_size);
+
+	sbuf_cat(sb, "\nvm_bind_profile_us\n");
+	sbuf_printf(sb, "wait_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_wait_us);
+	sbuf_printf(sb, "copyin_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_copyin_us);
+	sbuf_printf(sb, "token_wait_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_token_wait_us);
+	sbuf_printf(sb, "apply_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_apply_us);
+	sbuf_printf(sb, "flush_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_flush_us);
+	sbuf_printf(sb, "signal_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_signal_us);
+	sbuf_printf(sb, "total_us = %llu\n",
+	    (unsigned long long)sc->vm_bind_profile_total_us);
+
+	sbuf_cat(sb, "\nprime\n");
 	sbuf_printf(sb, "prime_handle_to_fd_count = %llu\n",
 	    (unsigned long long)sc->prime_handle_to_fd_count);
 	sbuf_printf(sb, "prime_handle_to_fd_error_count = %llu\n",
