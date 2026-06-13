@@ -63,6 +63,7 @@ struct nvkm_bo {
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
 	bool			bar1_mappable;	/* VRAM BO can fault in a BAR1 mmap */
+	bool			no_share;	/* reject PRIME export */
 	bool			ttm_backed;	/* GEM BO owned by TTM */
 	bool			accounted;	/* active byte counters include this BO */
 	uint8_t			account_kind;	/* counter bucket charged at alloc */

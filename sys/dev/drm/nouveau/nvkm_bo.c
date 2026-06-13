@@ -789,6 +789,7 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	drm_gem_private_object_init(ddev, &bo->base, size);
 	bo->tile_mode = tile_mode;
 	bo->tile_flags = tile_flags;
+	bo->no_share = (domain & NOUVEAU_GEM_DOMAIN_NO_SHARE) != 0;
 
 	if (nvkm_ttm_bo_device(sc) != NULL) {
 		err = nvkm_bo_init_ttm(sc, bo, size, domain);
