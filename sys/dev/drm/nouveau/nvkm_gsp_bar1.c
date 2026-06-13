@@ -398,16 +398,17 @@ nvkm_gsp_bar1_rd32(struct nvkm_softc *sc, uint64_t gva)
 void
 nvkm_gsp_bar1_wr64(struct nvkm_softc *sc, uint64_t gva, uint64_t val)
 {
-	nvkm_gsp_bar1_wr32(sc, gva + 0, (uint32_t)(val & 0xffffffffu));
-	nvkm_gsp_bar1_wr32(sc, gva + 4, (uint32_t)(val >> 32));
+	if (!sc->bar1.ready)
+		return;
+	bus_write_8(sc->bar_res[1], gva, val);
 }
 
 uint64_t
 nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t gva)
 {
-	uint64_t lo = nvkm_gsp_bar1_rd32(sc, gva + 0);
-	uint64_t hi = nvkm_gsp_bar1_rd32(sc, gva + 4);
-	return ((hi << 32) | lo);
+	if (!sc->bar1.ready)
+		return (0xdeadbeefdeadbeefULL);
+	return (bus_read_8(sc->bar_res[1], gva));
 }
 
 static bool

@@ -25,6 +25,7 @@
 #include <sys/filedesc.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 
 #include <linux/dma-fence.h>
@@ -34,6 +35,28 @@
 #include <linux/sync_file.h>
 
 #define DTYPE_SYNC_FILE		9
+
+SYSCTL_DECL(_hw_dri);
+
+static uint64_t sync_file_create_count;
+static uint64_t sync_file_get_fence_count;
+static uint64_t sync_file_kqfilter_count;
+static uint64_t sync_file_callback_add_count;
+static uint64_t sync_file_callback_fire_count;
+static uint64_t sync_file_callback_remove_count;
+
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_create_count, CTLFLAG_RD,
+    &sync_file_create_count, 0, "sync_file create count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_get_fence_count, CTLFLAG_RD,
+    &sync_file_get_fence_count, 0, "sync_file get_fence count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_kqfilter_count, CTLFLAG_RD,
+    &sync_file_kqfilter_count, 0, "sync_file kqfilter count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_callback_add_count, CTLFLAG_RD,
+    &sync_file_callback_add_count, 0, "sync_file callback add count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_callback_fire_count, CTLFLAG_RD,
+    &sync_file_callback_fire_count, 0, "sync_file callback fire count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, sync_file_callback_remove_count, CTLFLAG_RD,
+    &sync_file_callback_remove_count, 0, "sync_file callback remove count");
 
 struct dragonfly_sync_file {
 	struct sync_file base;
@@ -50,7 +73,25 @@ sync_file_fence_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
 	struct dragonfly_sync_file *sync_file;
 
 	sync_file = container_of(cb, struct dragonfly_sync_file, cb);
+	sync_file_callback_fire_count++;
 	KNOTE(&sync_file->kq, 0);
+}
+
+static void
+sync_file_enable_callback(struct dragonfly_sync_file *dfly_sync_file)
+{
+	struct sync_file *sync_file = &dfly_sync_file->base;
+
+	if (dfly_sync_file->callback_added)
+		return;
+
+	if (dma_fence_add_callback(sync_file->fence, &dfly_sync_file->cb,
+	    sync_file_fence_cb) == 0) {
+		dfly_sync_file->callback_added = true;
+		sync_file_callback_add_count++;
+	} else {
+		KNOTE(&dfly_sync_file->kq, 0);
+	}
 }
 
 static int
@@ -78,9 +119,9 @@ sync_file_close(struct file *fp)
 	dfly_sync_file = container_of(sync_file, struct dragonfly_sync_file,
 	    base);
 
-	if (dfly_sync_file->callback_added)
-		dma_fence_remove_callback(sync_file->fence,
-		    &dfly_sync_file->cb);
+	if (dfly_sync_file->callback_added &&
+	    dma_fence_remove_callback(sync_file->fence, &dfly_sync_file->cb))
+		sync_file_callback_remove_count++;
 	dma_fence_put(sync_file->fence);
 	kfree(dfly_sync_file);
 
@@ -131,11 +172,17 @@ sync_file_kqfilter(struct file *fp, struct knote *kn)
 	if (sync_file == NULL)
 		return EINVAL;
 
+	sync_file_kqfilter_count++;
 	dfly_sync_file = container_of(sync_file, struct dragonfly_sync_file,
 	    base);
 	kn->kn_fop = &sync_file_rfiltops;
 	kn->kn_hook = (caddr_t)dfly_sync_file;
 	knote_insert(&dfly_sync_file->kq, kn);
+	if (dma_fence_is_signaled(sync_file->fence)) {
+		KNOTE(&dfly_sync_file->kq, 0);
+	} else {
+		sync_file_enable_callback(dfly_sync_file);
+	}
 
 	return 0;
 }
@@ -162,6 +209,7 @@ sync_file_create(struct dma_fence *fence)
 	if (fence == NULL)
 		return NULL;
 
+	sync_file_create_count++;
 	error = falloc(curthread->td_lwp, &fp, NULL);
 	if (error)
 		return NULL;
@@ -182,10 +230,6 @@ sync_file_create(struct dma_fence *fence)
 	fp->f_ops = &sync_file_fileops;
 	fp->private_data = sync_file;
 
-	if (dma_fence_add_callback(sync_file->fence, &dfly_sync_file->cb,
-	    sync_file_fence_cb) == 0)
-		dfly_sync_file->callback_added = true;
-
 	return sync_file;
 }
 EXPORT_SYMBOL(sync_file_create);
@@ -197,6 +241,7 @@ sync_file_get_fence(int fd)
 	struct sync_file *sync_file;
 	struct file *fp;
 
+	sync_file_get_fence_count++;
 	fp = holdfp(curthread, fd, -1);
 	if (fp == NULL)
 		return NULL;

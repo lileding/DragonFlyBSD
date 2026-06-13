@@ -273,7 +273,9 @@ struct nvkm_drm_exec_pending {
 	 */
 	struct dma_fence *fences[64];
 	uint32_t fence_count;
-	/* Owning file, so completion/cancel can decrement exec_inflight. */
+	/* Borrowed file pointer for fault-time binding diagnostics. Channel
+	 * teardown cancels pending records before the owning VMM is destroyed.
+	 */
 	struct nvkm_drm_file *nfile;
 	/* Canary: GPU-VA span of this submit's push command buffers. Used to
 	 * detect NVK reusing a cmd-pool chunk (same VA range) while a prior
@@ -738,6 +740,11 @@ struct nvkm_softc {
 	uint64_t		cpu_fini_flush_us;
 	uint64_t		vmm_flush_count;
 	uint64_t		vmm_flush_us;
+	uint64_t		vmm_pte_fast_write_count;
+	uint64_t		vmm_pte_fast_clear_count;
+	uint64_t		vmm_pte_fast_invalid_clear_count;
+	uint64_t		vmm_pte_fast_sparse_clear_count;
+	uint64_t		vmm_pte_read_modify_write_count;
 	uint64_t		cpu_prep_wait_error_count;
 	uint64_t		exec_profile_token_wait_us;
 	uint64_t		exec_profile_wait_sync_us;

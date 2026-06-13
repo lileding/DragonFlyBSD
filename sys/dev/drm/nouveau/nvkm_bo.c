@@ -480,7 +480,7 @@ nvkm_bo_account_free(struct nvkm_softc *sc, struct nvkm_bo *bo)
 static int nvkm_bo_bar1_map(struct nvkm_softc *sc, struct nvkm_bo *bo);
 static void nvkm_bo_ttm_destroy(struct ttm_buffer_object *tbo);
 
-static struct reservation_object *
+struct reservation_object *
 nvkm_bo_resv(struct nvkm_bo *bo)
 {
 	if (bo->ttm_backed)

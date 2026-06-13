@@ -940,6 +940,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vmm_flush_count);
 	sbuf_printf(sb, "flush_us = %llu\n",
 	    (unsigned long long)sc->vmm_flush_us);
+	sbuf_printf(sb, "pte_fast_write_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_fast_write_count);
+	sbuf_printf(sb, "pte_fast_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_fast_clear_count);
+	sbuf_printf(sb, "pte_fast_invalid_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_fast_invalid_clear_count);
+	sbuf_printf(sb, "pte_fast_sparse_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_fast_sparse_clear_count);
+	sbuf_printf(sb, "pte_read_modify_write_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_read_modify_write_count);
 	sbuf_printf(sb, "user_pd0_count = %u\n", vmm_pd0_count);
 	sbuf_printf(sb, "user_pt_count = %u\n", vmm_pt_count);
 	sbuf_printf(sb, "valid_pte_count = %llu\n",

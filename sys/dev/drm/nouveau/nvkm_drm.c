@@ -271,19 +271,15 @@ struct nvkm_drm_file {
 	 * collide on GPU VAs. NULL only if vmm_ctor failed during open. */
 	struct nvkm_gsp_vmm *vmm;
 	struct nvkm_drm_vm_binding_list vm_bindings;
+	uint64_t vm_bindings_max_end;
 	struct nvkm_drm_chan_list channels;
-	/* Serializes VM_BIND page-table mutation against other remaps and the
-	 * moment EXEC charges exec_inflight on this file's VMM. Ordering
-	 * against already submitted GPU work comes from userspace syncobjs or
-	 * the caller's synchronous sequencing, matching nouveau VM_BIND.
-	 * Order:
-	 * vm_token is acquired before gsp_tok; the completion ithread never
-	 * takes it (it only atomically decrements exec_inflight + wakes). */
+	/* Serializes VM_BIND page-table mutation against other remaps. EXEC
+	 * jobs take the same token before ringing the doorbell so they never
+	 * observe a half-written page-table update, but VM_BIND does not drain
+	 * already submitted GPU work. Nouveau relies on userspace fences for
+	 * that ordering, and synchronous VM_BIND only waits for its own bind job.
+	 * Order is always vm_token -> gsp_tok. */
 	struct lwkt_token vm_token;
-	/* Count of in-flight EXEC submits on this file's VMM. Atomic: charged
-	 * under vm_token by EXEC, decremented locklessly by completion. */
-	volatile u_int exec_inflight;
-	uint64_t vm_epoch;
 
 	/* Ordered per-file GPU job queue.  IOCTL handlers copy user data and
 	 * publish output fences before enqueueing; the worker waits dependency
@@ -346,15 +342,6 @@ nvkm_drm_vm_binding_assert(const struct nvkm_drm_vm_binding *binding)
 	    ("nvkm_drm: VM binding without GEM object"));
 }
 
-static void
-nvkm_drm_vm_wakeup(struct nvkm_drm_file *nfile)
-{
-	nfile->vm_epoch++;
-	wakeup(&nfile->vm_epoch);
-}
-
-
-
 static struct nvkm_drm_vm_binding *
 nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
     uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset)
@@ -372,6 +359,49 @@ nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
 	binding->obj = obj;
 	binding->pte_installed = true;
 	return (binding);
+}
+
+static void
+nvkm_drm_vm_binding_insert_sorted(struct nvkm_drm_file *nfile,
+    struct nvkm_drm_vm_binding *binding)
+{
+	struct nvkm_drm_vm_binding *pos, *prev = NULL;
+	uint64_t end = binding->addr + binding->size;
+
+	if (nfile->vm_bindings_max_end < end)
+		nfile->vm_bindings_max_end = end;
+
+	LIST_FOREACH(pos, &nfile->vm_bindings, link) {
+		if (binding->addr < pos->addr) {
+			if (prev != NULL)
+				LIST_INSERT_AFTER(prev, binding, link);
+			else
+				LIST_INSERT_HEAD(&nfile->vm_bindings,
+				    binding, link);
+			return;
+		}
+		prev = pos;
+	}
+
+	if (prev != NULL)
+		LIST_INSERT_AFTER(prev, binding, link);
+	else
+		LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
+}
+
+static void
+nvkm_drm_vm_bindings_recalc_max_end(struct nvkm_drm_file *nfile)
+{
+	struct nvkm_drm_vm_binding *binding;
+	uint64_t max_end = 0;
+
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		uint64_t end = binding->addr + binding->size;
+
+		if (max_end < end)
+			max_end = end;
+	}
+	nfile->vm_bindings_max_end = max_end;
 }
 
 static int
@@ -441,8 +471,8 @@ nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
 	nvkm_drm_vm_binding_assert(binding);
 
 	if (binding->pte_installed) {
-		err = nvkm_gsp_vmm_unmap_noflush(binding->owner->vmm, binding->addr,
-		    binding->size);
+		err = nvkm_gsp_vmm_unmap_valid_noflush(binding->owner->vmm,
+		    binding->addr, binding->size);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND unmap failed addr=0x%016jx size=0x%016jx obj=%p err=%d\n",
@@ -469,22 +499,31 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 	struct nvkm_drm_vm_binding *binding, *next;
 	struct nvkm_drm_vm_binding_list tail_bindings;
 	uint64_t end = addr + size;
-	bool clear_pte = clear_empty_range;
 	int err;
 
 	LIST_INIT(&tail_bindings);
 	*punmapped = 0;
+	if (addr >= nfile->vm_bindings_max_end) {
+		if (!clear_empty_range)
+			return (0);
+		err = nvkm_gsp_vmm_unmap_noflush(nfile->vmm, addr, size);
+		return (err != 0 ? -err : 0);
+	}
+
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_drm_vm_binding *tail;
 		uint64_t old_start, old_end, cut_start, cut_end;
 		uint64_t head_size, tail_size, tail_bo_offset;
 
+		if (binding->addr >= end)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
 
 		(*punmapped)++;
-		clear_pte = true;
 		old_start = binding->addr;
 		old_end = binding->addr + binding->size;
 		cut_start = old_start > addr ? old_start : addr;
@@ -512,7 +551,30 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		LIST_INSERT_HEAD(&tail_bindings, tail, link);
 	}
 
-	if (clear_pte) {
+	if (*punmapped != 0) {
+		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+			uint64_t old_start, old_end, cut_start, cut_end;
+
+			if (binding->addr >= end)
+				break;
+			if (binding->addr + binding->size <= addr)
+				continue;
+			if (!nvkm_drm_vm_ranges_overlap(addr, size,
+			    binding->addr, binding->size))
+				continue;
+
+			old_start = binding->addr;
+			old_end = binding->addr + binding->size;
+			cut_start = old_start > addr ? old_start : addr;
+			cut_end = old_end < end ? old_end : end;
+			err = nvkm_gsp_vmm_unmap_valid_noflush(nfile->vmm,
+			    cut_start, cut_end - cut_start);
+			if (err != 0) {
+				err = -err;
+				goto fail_tails;
+			}
+		}
+	} else if (clear_empty_range) {
 		err = nvkm_gsp_vmm_unmap_noflush(nfile->vmm, addr, size);
 		if (err != 0) {
 			err = -err;
@@ -524,6 +586,10 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		uint64_t old_start, old_end, cut_start, cut_end;
 		uint64_t head_size, tail_size;
 
+		if (binding->addr >= end)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
 		if (!nvkm_drm_vm_ranges_overlap(addr, size,
 		    binding->addr, binding->size))
 			continue;
@@ -551,8 +617,10 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 
 	while ((binding = LIST_FIRST(&tail_bindings)) != NULL) {
 		LIST_REMOVE(binding, link);
-		LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
+		nvkm_drm_vm_binding_insert_sorted(nfile, binding);
 	}
+	if (*punmapped != 0)
+		nvkm_drm_vm_bindings_recalc_max_end(nfile);
 	return (0);
 
 fail_tails:
@@ -581,7 +649,7 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 		kfree(binding);
 		return (err);
 	}
-	LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
+	nvkm_drm_vm_binding_insert_sorted(nfile, binding);
 	return (0);
 }
 
@@ -1536,21 +1604,6 @@ static int nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
     const struct drm_nouveau_vm_bind *req,
     struct drm_nouveau_vm_bind_op *ops);
 
-static void
-nvkm_drm_vm_wait_idle_locked(struct nvkm_drm_file *nfile)
-{
-	uint64_t epoch;
-
-	while (atomic_load_acq_int(&nfile->exec_inflight) != 0) {
-		epoch = nfile->vm_epoch;
-		lwkt_reltoken(&nfile->vm_token);
-		(void)tsleep(&nfile->vm_epoch, 0, "nvkvmb", hz / 100);
-		lwkt_gettoken(&nfile->vm_token);
-		if (epoch == nfile->vm_epoch)
-			continue;
-	}
-}
-
 static int
 nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
     struct nvkm_drm_file *nfile, struct drm_nouveau_vm_bind_op *ops,
@@ -1563,12 +1616,12 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 	uint64_t profile_start;
 
 	/* vm_token (outer) serializes this remap against other remaps and
-	 * against concurrent EXEC charge on the file VMM; gsp_tok (inner)
-	 * serializes the GSP RPCs. Order is always vm_token -> gsp_tok. */
+	 * prevents EXEC from doorbelling while the PTE update is half-written.
+	 * It deliberately does not wait for already submitted GPU work; nouveau
+	 * exposes that ordering through syncobjs and VM_BIND/EXEC fences. */
 	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&nfile->vm_token);
 	remap_started = true;
-	nvkm_drm_vm_wait_idle_locked(nfile);
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
 	nvkm_drm_profile_add_us(&sc->vm_bind_profile_token_wait_us,
@@ -1786,8 +1839,8 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
 			    op->range, obj, op->bo_offset, bo_pinned);
 			if (err != 0) {
-				(void)nvkm_gsp_vmm_unmap_noflush(nfile->vmm,
-				    op->addr, op->range);
+				(void)nvkm_gsp_vmm_unmap_valid_noflush(
+				    nfile->vmm, op->addr, op->range);
 				(void)nvkm_bo_vm_bind_unpin(bo);
 				if (!job_object)
 					drm_gem_object_put_unlocked(obj);
@@ -1824,14 +1877,11 @@ out_unlock:
 		nvkm_drm_profile_add_us(&sc->vm_bind_profile_flush_us,
 		    profile_start);
 	}
-	/* Release inner (gsp_tok) before outer (vm_token). Waking the file's
-	 * wait channel lets a blocked EXEC gate / another remap re-check. */
+	/* Release inner (gsp_tok) before outer (vm_token). */
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
-	if (remap_started) {
-		nvkm_drm_vm_wakeup(nfile);
+	if (remap_started)
 		lwkt_reltoken(&nfile->vm_token);
-	}
 	if (err != 0 && current_op != NULL)
 		nvkm_drm_vm_bind_record_error(sc, current_op->op,
 		    current_op->flags, current_op->handle, current_op->addr,
@@ -1994,7 +2044,6 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		return (err);
 	}
 
-	nvkm_drm_jobs_flush(nfile);
 	if (req->op_count != 0)
 		err = nvkm_drm_vm_bind_apply(sc, file_priv, nfile, ops,
 		    req->op_count, NULL);
@@ -2405,15 +2454,6 @@ nvkm_drm_exec_pending_put(struct nvkm_softc *sc,
 {
 	if (pending == NULL)
 		return;
-	/* Release this submit's hold on its file's VMM; wake a remap that is
-	 * draining in-flight EXEC once the count reaches 0. Caller holds
-	 * gsp_tok. Guarded so it decrements exactly once. */
-	if (pending->nfile != NULL) {
-		if (atomic_fetchadd_int(&pending->nfile->exec_inflight,
-		    (u_int)-1) == 1)
-			nvkm_drm_vm_wakeup(pending->nfile);
-		pending->nfile = NULL;
-	}
 	for (uint32_t i = 0; i < pending->fence_count; i++)
 		dma_fence_put(pending->fences[i]);
 	kfree(pending);
@@ -3181,6 +3221,10 @@ nvkm_drm_vm_binding_find_overlap(struct nvkm_drm_file *nfile, uint64_t addr,
 	struct nvkm_drm_vm_binding *binding;
 
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		if (binding->addr >= addr + size)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
 		if (nvkm_drm_vm_ranges_overlap(addr, size, binding->addr,
 		    binding->size))
 			return (binding);
@@ -3211,7 +3255,6 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	uint64_t profile_push_start = 0;
 	int err = 0;
 	bool gsp_tok_held = false;
-	bool exec_inflight_held = false;
 	bool exec_completion_queued = false;
 	bool submit_slot_allocated = false;
 	uint64_t push_va_lo = ~0ULL;
@@ -3271,15 +3314,11 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	/* push_count may be 0 here for a signal-only submit; pushes stays NULL
 	 * and the push loop below runs zero times, leaving only the completion
 	 * trailer (which orders the signals behind in-flight channel work). */
-	/* Pin the file VMM against remap for this submit's lifetime. Charge
-	 * exec_inflight under vm_token: gettoken blocks until any in-progress
-	 * remap releases the token, and once charged a later remap waits for
-	 * this submit. vm_token is released before gsp_tok (order vm -> gsp,
-	 * not nested here). Ownership transfers to the pending record on
-	 * insert; an error before then refunds it in out_unlock. */
+	/* Block only against an in-progress page-table mutation. Once the
+	 * doorbell is written, VM_BIND no longer waits for this submit; userspace
+	 * syncobjs describe the GPU ordering, matching nouveau's VM_BIND UAPI.
+	 */
 	lwkt_gettoken(&nfile->vm_token);
-	atomic_add_int(&nfile->exec_inflight, 1);
-	exec_inflight_held = true;
 	lwkt_reltoken(&nfile->vm_token);
 
 	profile_start = nvkm_drm_profile_now_us();
@@ -3469,10 +3508,11 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 			}
 		}
 	}
-	/* The pending record now owns the exec_inflight hold; completion or
-	 * cancel refunds it via nvkm_drm_exec_pending_put. */
+	/* Keep the file pointer only for fault-time binding diagnostics. The
+	 * drm_file owns the channel and cancels pending records before the VMM
+	 * is destroyed, so this borrowed pointer stays valid while pending.
+	 */
 	pending->nfile = nfile;
-	exec_inflight_held = false;
 	LIST_INSERT_HEAD(&sc->exec_pending, pending, link);
 	exec_completion_queued = true;
 	sc->exec_async_pending_count++;
@@ -3511,14 +3551,6 @@ out_unlock:
 	if (submit_slot_allocated)
 		nvkm_drm_submit_slot_release(chan, post_slot);
 	nvkm_drm_exec_pending_put(sc, pending);
-	/* Refund the VMM hold if it was taken but never handed to a pending
-	 * record (error after the increment, before insert). Reached under
-	 * gsp_tok. */
-	if (exec_inflight_held) {
-		if (atomic_fetchadd_int(&nfile->exec_inflight, (u_int)-1) == 1)
-			nvkm_drm_vm_wakeup(nfile);
-		exec_inflight_held = false;
-	}
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
 	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
