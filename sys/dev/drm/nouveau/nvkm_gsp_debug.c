@@ -20,6 +20,7 @@
 
 #include "nvkm_priv.h"
 #include "nvkm_gsp_vmm.h"
+#include "nvkm_gsp_rm.h"
 
 #include <sys/sysctl.h>
 #include <sys/sbuf.h>
@@ -1050,6 +1051,52 @@ nvkm_gsp_sysctl_rpc_trace(SYSCTL_HANDLER_ARGS)
 	return (err);
 }
 
+static int
+nvkm_gsp_sysctl_perf_state(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	struct sbuf *sb;
+	uint32_t current_pstate;
+	const char *name;
+	int err, pstate_err;
+
+	sb = sbuf_new_auto();
+	if (sb == NULL)
+		return (ENOMEM);
+
+	pstate_err = nvkm_gsp_query_perf_current_pstate(sc, &current_pstate);
+
+	if (pstate_err != 0) {
+		sbuf_printf(sb, "current_pstate_error = %d\n", pstate_err);
+		goto out;
+	}
+
+	switch (current_pstate) {
+	case NV2080_CTRL_PERF_PSTATES_P0:
+		name = "P0";
+		break;
+	case NV2080_CTRL_PERF_PSTATES_P8:
+		name = "P8";
+		break;
+	case NV2080_CTRL_PERF_PSTATES_UNDEFINED:
+		name = "undefined";
+		break;
+	default:
+		name = "unknown";
+		break;
+	}
+
+	sbuf_printf(sb, "current_pstate = 0x%08x\n", current_pstate);
+	sbuf_printf(sb, "current_pstate_name = %s\n", name);
+
+out:
+	err = sbuf_finish(sb);
+	if (err == 0)
+		err = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (err);
+}
+
 /* Provided by nvkm_drm_kms.c. */
 int nvkm_drm_kms_light_up(struct nvkm_softc *sc);
 
@@ -1118,6 +1165,10 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_rpc_trace, "A",
 	    "GSP RPC ring trace (host<->GSP TX/RX/EVENT/STALE)");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "perf_state",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_perf_state, "A",
+	    "GSP RM current performance pstate");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "kms_lightup",
 	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
 	    nvkm_gsp_sysctl_kms_lightup, "I",
