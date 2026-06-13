@@ -1508,6 +1508,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	bool gsp_tok_held = false;
 	bool remap_started = false;
 	bool async_bind;
+	uint64_t profile_start;
+	uint64_t profile_total_start;
 
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
@@ -1524,6 +1526,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	async_bind = (req->flags & DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0;
 	if (!async_bind && (req->wait_count != 0 || req->sig_count != 0))
 		return (-EINVAL);
+	profile_total_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_file_ensure_vmm(sc, nfile);
 	if (err != 0)
 		return (err);
@@ -1531,6 +1534,10 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	sc->vm_bind_op_count += req->op_count;
 	if (req->op_count > sc->vm_bind_max_op_count)
 		sc->vm_bind_max_op_count = req->op_count;
+	if (async_bind)
+		sc->vm_bind_async_count++;
+	else
+		sc->vm_bind_sync_count++;
 	if (req->op_count > 1024) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
@@ -1541,21 +1548,33 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	 * syncobj contract: wait fences order the CPU PTE writes, and signal
 	 * fences are installed after the writes are flushed.
 	 */
+	profile_start = nvkm_drm_profile_now_us();
 	if (req->wait_count != 0) {
 		err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
 		    req->wait_ptr);
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_wait_us,
+		    profile_start);
 		if (err != 0)
 			return (err);
 	}
 	if (req->op_count == 0) {
-		if (req->sig_count != 0)
+		if (req->sig_count != 0) {
+			profile_start = nvkm_drm_profile_now_us();
 			err = nvkm_drm_signal_sync_array(sc, file_priv,
 			    req->sig_count, req->sig_ptr);
+			nvkm_drm_profile_add_us(&sc->vm_bind_profile_signal_us,
+			    profile_start);
+		}
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
+		    profile_total_start);
 		return (err);
 	}
+	profile_start = nvkm_drm_profile_now_us();
 	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
 	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
 	    sizeof(*ops) * req->op_count);
+	nvkm_drm_profile_add_us(&sc->vm_bind_profile_copyin_us,
+	    profile_start);
 	if (err != 0) {
 		kfree(ops);
 		nvkm_debugf(sc->dev,
@@ -1567,10 +1586,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	/* vm_token (outer) serializes this remap against other remaps and
 	 * against concurrent EXEC charge on the file VMM; gsp_tok (inner)
 	 * serializes the GSP RPCs. Order is always vm_token -> gsp_tok. */
+	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&nfile->vm_token);
 	remap_started = true;
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
+	nvkm_drm_profile_add_us(&sc->vm_bind_profile_token_wait_us,
+	    profile_start);
+	profile_start = nvkm_drm_profile_now_us();
 
 	for (uint32_t i = 0; i < req->op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
@@ -1796,10 +1819,16 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	}
 
 out_unlock:
+	nvkm_drm_profile_add_us(&sc->vm_bind_profile_apply_us,
+	    profile_start);
 	/* One TLB invalidate publishes every PTE the loop wrote,
 	 * instead of one per op (the _noflush calls skip it). */
-	if (gsp_tok_held)
+	if (gsp_tok_held) {
+		profile_start = nvkm_drm_profile_now_us();
 		nvkm_gsp_vmm_flush(nfile->vmm);
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_flush_us,
+		    profile_start);
+	}
 	/* Release inner (gsp_tok) before outer (vm_token). Waking the file's
 	 * wait channel lets a blocked EXEC gate / another remap re-check. */
 	if (gsp_tok_held)
@@ -1809,9 +1838,15 @@ out_unlock:
 		lwkt_reltoken(&nfile->vm_token);
 	}
 	/* Binds completed synchronously: the signal array fires now. */
-	if (err == 0 && req->sig_count != 0)
+	if (err == 0 && req->sig_count != 0) {
+		profile_start = nvkm_drm_profile_now_us();
 		err = nvkm_drm_signal_sync_array(sc, file_priv,
 		    req->sig_count, req->sig_ptr);
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_signal_us,
+		    profile_start);
+	}
+	nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
+	    profile_total_start);
 	if (err != 0 && current_op != NULL)
 		nvkm_drm_vm_bind_record_error(sc, current_op->op,
 		    current_op->flags, current_op->handle, current_op->addr,
