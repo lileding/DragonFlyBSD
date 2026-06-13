@@ -26,6 +26,10 @@
 
 static MALLOC_DEFINE(M_NVKM_VMM, "nvkm_vmm", "nvkm GMMU page table pages");
 
+struct nvkm_bo;
+int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
+    vm_paddr_t *paddr);
+
 static uint64_t
 nvkm_gsp_vmm_profile_now_us(void)
 {
@@ -627,6 +631,37 @@ nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
 		vm_paddr_t paddr = vtophys((uint8_t *)kva + off);
 
+		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
+		    nvkm_pte_to_sysmem((uint64_t)paddr) | kind_bits);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+	}
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+int
+nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    const struct nvkm_bo *bo, uint64_t bo_offset, uint64_t size, uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t off;
+	int err;
+
+	if ((va | bo_offset | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
+		vm_paddr_t paddr;
+
+		err = nvkm_bo_paddr_at(bo, bo_offset + off, &paddr);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
 		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
 		    nvkm_pte_to_sysmem((uint64_t)paddr) | kind_bits);
 		if (err != 0) {

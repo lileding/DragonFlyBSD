@@ -64,6 +64,8 @@ struct nvkm_vram_alloc {
 	uint64_t paddr;
 	uint64_t size;
 	uint64_t align;
+	uint64_t bar1_gva;
+	uint64_t bar1_size;
 	enum nvkm_vram_kind kind;
 	void *owner;
 	bool free;
@@ -211,6 +213,7 @@ struct nvkm_gsp_vaspace;
 struct nvkm_gsp_chgrp;
 struct nvkm_gsp_chan;
 struct nvkm_gsp_vmm;
+struct nvkm_ttm;
 struct nvkm_device;
 struct nvkm_disp;
 struct nvkm_dispnv50_state;
@@ -331,6 +334,23 @@ struct nvkm_drm_vm_trace {
 	int error;
 };
 
+#define NVKM_BO_GEM_NEW_TRACE_COUNT	64
+
+struct nvkm_bo_gem_new_trace {
+	uint64_t	seq;
+	uint64_t	req_size;
+	uint64_t	size;
+	uint32_t	pid;
+	uint32_t	handle;
+	uint32_t	req_domain;
+	uint32_t	domain;
+	uint64_t	map_handle;
+	uint32_t	tile_mode;
+	uint32_t	tile_flags;
+	uint8_t		mappable_req;
+	uint8_t		cpu_mappable;
+	char		comm[MAXCOMLEN + 1];
+};
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
  * page-sized slots inside a fixed high BAR1 window owned by this driver. */
@@ -397,6 +417,8 @@ struct nvkm_bar1_page {
 	enum nvkm_vram_kind kind;
 	void		*owner;
 };
+
+#define NVKM_BO_SIZE_BUCKET_COUNT	7
 
 struct nvkm_softc {
 	device_t		dev;
@@ -633,6 +655,19 @@ struct nvkm_softc {
 	uint64_t		bo_gem_new_mappable_vram_count;
 	uint64_t		bo_gem_new_mappable_gart_count;
 	uint64_t		bo_gem_new_map_handle_count;
+	uint64_t		bo_gem_new_req_cpu_count;
+	uint64_t		bo_gem_new_req_vram_count;
+	uint64_t		bo_gem_new_req_gart_count;
+	uint64_t		bo_gem_new_req_vram_gart_count;
+	uint64_t		bo_gem_new_req_no_domain_count;
+	uint64_t		bo_gem_new_req_coherent_count;
+	uint64_t		bo_gem_new_req_no_share_count;
+	uint64_t		bo_gem_new_req_tiled_count;
+	uint64_t		bo_gem_new_size_bucket[NVKM_BO_SIZE_BUCKET_COUNT];
+	uint64_t		bo_gem_new_gart_size_bucket[NVKM_BO_SIZE_BUCKET_COUNT];
+	uint64_t		bo_gem_new_mappable_size_bucket[NVKM_BO_SIZE_BUCKET_COUNT];
+	uint64_t		bo_gem_new_trace_seq;
+	struct nvkm_bo_gem_new_trace bo_gem_new_trace[NVKM_BO_GEM_NEW_TRACE_COUNT];
 	uint64_t		bo_gem_free_count;
 	uint64_t		bo_dumb_create_count;
 	uint64_t		bo_dumb_create_vram_count;
@@ -711,6 +746,7 @@ struct nvkm_softc {
 
 	/* Phase 5: GSP-RM resource manager root client. */
 	struct nvkm_gsp_vmm	*gsp_vmm;
+	struct nvkm_ttm		*ttm;		/* DragonFly TTM BO device */
 	struct nvkm_device	*core_device;	/* imported nouveau core device */
 	struct nvkm_gsp		*core_gsp;	/* imported nouveau GSP subdev shim */
 	struct nvkm_rm		*core_rm;	/* imported nouveau RM API table */

@@ -1,10 +1,8 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * GEM-based BO layer for nvkm. GART host-RAM BOs are backed by
- * page-aligned kmem virtual memory, exposed to userspace via DRM's GEM
- * handle + fake mmap-offset mechanism. The pages are mapped through a
- * cdev pager (i915 pattern) — see nvkm_bo.c.
+ * GEM-based BO layer for nvkm. GART host-RAM and VRAM BOs use DragonFly's
+ * TTM device, placement, mmap, and TT/VRAM managers.
  */
 
 #ifndef _NVKM_BO_H_
@@ -12,8 +10,10 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
+#include <drm/ttm/ttm_bo_api.h>
 #include <linux/dma-fence.h>
 #include <linux/reservation.h>
+#include <vm/vm_page.h>
 
 struct nvkm_softc;
 struct drm_mode_create_dumb;
@@ -50,8 +50,11 @@ struct drm_nouveau_gem_cpu_fini {
 
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
+	struct ttm_buffer_object tbo;		/* TTM BO for GEM backing */
 	struct reservation_object resv;		/* BO busy lifetime fences */
-	void			*kva;		/* page-aligned system-memory KVA */
+	void			*kva;		/* legacy page-aligned sysmem KVA */
+	vm_page_t		*pages;		/* legacy sysmem page vector */
+	uint32_t		page_count;
 	struct nvkm_vram_alloc	*vram_alloc;	/* owned GEM VRAM allocation */
 	uint64_t		paddr;		/* first system paddr or VRAM physical start */
 	uint64_t		bar1_gva;	/* BAR1 GVA for CPU mmap of VRAM BOs */
@@ -60,8 +63,12 @@ struct nvkm_bo {
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
 	bool			bar1_mappable;	/* VRAM BO can fault in a BAR1 mmap */
+	bool			ttm_backed;	/* GEM BO owned by TTM */
+	bool			accounted;	/* active byte counters include this BO */
+	uint8_t			account_kind;	/* counter bucket charged at alloc */
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
 	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
+	uint32_t		vm_bind_pin_count; /* active VM_BIND records pin TTM */
 	bool			vm_bound_mixed_kind;
 };
 
@@ -76,6 +83,15 @@ extern struct cdev_pager_ops nvkm_gem_pager_ops;
 
 /* drm_driver.gem_free_object_unlocked callback. */
 void nvkm_bo_gem_free(struct drm_gem_object *obj);
+bool nvkm_bo_cpu_mappable(const struct nvkm_bo *bo);
+bool nvkm_bo_has_sysmem(const struct nvkm_bo *bo);
+int nvkm_bo_ensure_ttm_populated(struct nvkm_bo *bo);
+int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
+    vm_paddr_t *paddr);
+int nvkm_bo_read32(struct nvkm_bo *bo, uint64_t offset,
+    uint32_t *value);
+int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo);
+int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo);
 void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
 int nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,

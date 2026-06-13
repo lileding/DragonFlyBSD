@@ -1071,6 +1071,9 @@ void
 nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
     void *owner)
 {
+	uint64_t bar1_gva;
+	uint64_t bar1_size;
+
 	if (alloc == NULL)
 		return;
 	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
@@ -1092,6 +1095,10 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 		return;
 	}
 
+	bar1_gva = alloc->bar1_gva;
+	bar1_size = alloc->bar1_size;
+	alloc->bar1_gva = 0;
+	alloc->bar1_size = 0;
 	alloc->owner = NULL;
 	alloc->free = true;
 	drm_mm_remove_node(&alloc->node);
@@ -1099,6 +1106,8 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
 	sc->vram_alloc_count[alloc->kind]--;
 	lockmgr(&sc->vram_lock, LK_RELEASE);
+	if (bar1_gva != 0)
+		nvkm_gsp_bar1_unmap_existing_range(sc, bar1_gva, bar1_size);
 	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
@@ -1112,6 +1121,8 @@ nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
 {
 	struct nvkm_vram_alloc *alloc;
 	uint64_t size = 0;
+	uint64_t bar1_gva = 0;
+	uint64_t bar1_size = 0;
 	const char *kind_name = nvkm_vram_kind_name(kind);
 
 	if (paddr == 0)
@@ -1128,6 +1139,10 @@ nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
 		return;
 	}
 
+	bar1_gva = alloc->bar1_gva;
+	bar1_size = alloc->bar1_size;
+	alloc->bar1_gva = 0;
+	alloc->bar1_size = 0;
 	alloc->owner = NULL;
 	alloc->free = true;
 	size = alloc->size;
@@ -1136,6 +1151,8 @@ nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
 	sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
 	sc->vram_alloc_count[alloc->kind]--;
 	lockmgr(&sc->vram_lock, LK_RELEASE);
+	if (bar1_gva != 0)
+		nvkm_gsp_bar1_unmap_existing_range(sc, bar1_gva, bar1_size);
 
 	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p\n",

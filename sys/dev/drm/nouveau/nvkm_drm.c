@@ -13,6 +13,7 @@
 #include "nvkm_priv.h"
 #include "nvkm_bo.h"
 #include "nvkm_gsp_vmm.h"
+#include "nvkm_ttm.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
@@ -222,6 +223,7 @@ struct nvkm_drm_vm_binding {
 	struct nvkm_drm_file *owner;
 	struct drm_gem_object *obj;
 	bool pte_installed;
+	bool bo_pinned;
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 
@@ -340,10 +342,53 @@ nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (binding);
 }
 
+static int
+nvkm_drm_vm_binding_pin(struct nvkm_drm_vm_binding *binding)
+{
+	struct nvkm_bo *bo;
+	int err;
+
+	nvkm_drm_vm_binding_assert(binding);
+	if (binding->bo_pinned)
+		return (0);
+
+	bo = to_nvkm_bo(binding->obj);
+	err = nvkm_bo_vm_bind_pin(bo);
+	if (err != 0)
+		return (err);
+	binding->bo_pinned = true;
+	return (0);
+}
+
+static int
+nvkm_drm_vm_binding_unpin(struct nvkm_drm_vm_binding *binding)
+{
+	struct nvkm_bo *bo;
+	int err;
+
+	nvkm_drm_vm_binding_assert(binding);
+	if (!binding->bo_pinned)
+		return (0);
+
+	bo = to_nvkm_bo(binding->obj);
+	err = nvkm_bo_vm_bind_unpin(bo);
+	if (err == 0)
+		binding->bo_pinned = false;
+	return (err);
+}
+
 static void
 nvkm_drm_vm_binding_free(struct nvkm_drm_vm_binding *binding)
 {
+	struct nvkm_softc *sc = binding->obj->dev->dev_private;
+	int err;
+
 	nvkm_drm_vm_binding_assert(binding);
+	err = nvkm_drm_vm_binding_unpin(binding);
+	if (err != 0)
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM_BIND unpin failed obj=%p err=%d\n",
+		    binding->obj, err);
 	drm_gem_object_put_unlocked(binding->obj);
 	kfree(binding);
 }
@@ -426,6 +471,12 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 			err = -ENOMEM;
 			goto fail_tails;
 		}
+		err = nvkm_drm_vm_binding_pin(tail);
+		if (err != 0) {
+			nvkm_drm_vm_binding_free(tail);
+			err = -err;
+			goto fail_tails;
+		}
 		LIST_INSERT_HEAD(&tail_bindings, tail, link);
 	}
 
@@ -482,14 +533,22 @@ fail_tails:
 
 static int
 nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
-    uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset)
+    uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset,
+    bool bo_pinned)
 {
 	struct nvkm_drm_vm_binding *binding;
+	int err;
 
 	binding = nvkm_drm_vm_binding_alloc(nfile, addr, size, obj, bo_offset);
 	if (binding == NULL)
 		return (ENOMEM);
 
+	binding->bo_pinned = bo_pinned;
+	err = nvkm_drm_vm_binding_pin(binding);
+	if (err != 0) {
+		kfree(binding);
+		return (err);
+	}
 	LIST_INSERT_HEAD(&nfile->vm_bindings, binding, link);
 	return (0);
 }
@@ -534,7 +593,7 @@ nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
 		trace->bo_size = obj->size;
 		trace->bo_paddr = bo->paddr;
 		trace->bo_domain = bo->domain;
-		trace->cpu_mapped = bo->kva != NULL;
+		trace->cpu_mapped = nvkm_bo_cpu_mappable(bo);
 	}
 	sc->vm_trace_next++;
 }
@@ -548,7 +607,6 @@ nvkm_drm_dump_push_buffer(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_bo *bo;
 		uint64_t offset;
-		uint32_t *dw;
 		uint32_t count;
 
 		if (va < binding->addr ||
@@ -561,24 +619,27 @@ nvkm_drm_dump_push_buffer(struct nvkm_softc *sc, struct nvkm_drm_file *nfile,
 		    "nvkm_drm: EXEC dump push va=0x%016jx len=0x%08x binding=0x%016jx+0x%016jx obj=%p domain=0x%x paddr=0x%016jx offset=0x%jx cpu_map=%u\n",
 		    (uintmax_t)va, va_len, (uintmax_t)binding->addr,
 		    (uintmax_t)binding->size, binding->obj, bo->domain,
-		    (uintmax_t)bo->paddr, (uintmax_t)offset, bo->kva != NULL);
-		if (bo->kva == NULL)
+		    (uintmax_t)bo->paddr, (uintmax_t)offset,
+		    nvkm_bo_has_sysmem(bo));
+		if (!nvkm_bo_has_sysmem(bo))
 			return;
 		if (offset > bo->base.size ||
 		    va_len > bo->base.size - offset)
 			return;
 
-		dw = (uint32_t *)((uint8_t *)bo->kva + offset);
 		count = va_len / sizeof(uint32_t);
 		if (count > 48)
 			count = 48;
 		for (uint32_t i = 0; i < count; i += 4) {
+			uint32_t word[4] = {};
+
+			for (uint32_t j = 0; j < 4 && i + j < count; j++)
+				(void)nvkm_bo_read32(bo, offset +
+				    (uint64_t)(i + j) * sizeof(uint32_t),
+				    &word[j]);
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: EXEC push[%02u]=%08x %08x %08x %08x\n",
-			    i, dw[i + 0],
-			    (i + 1 < count) ? dw[i + 1] : 0,
-			    (i + 2 < count) ? dw[i + 2] : 0,
-			    (i + 3 < count) ? dw[i + 3] : 0);
+			    i, word[0], word[1], word[2], word[3]);
 		}
 		return;
 	}
@@ -666,6 +727,15 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	ddev->pdev        = pdev;
 	sc->drm_dev       = ddev;
 
+	err = nvkm_ttm_init(sc, ddev);
+	if (err != 0) {
+		nvkm_debugf(sc->dev,
+		    "drm: nvkm_ttm_init failed (%d)\n", err);
+		drm_dev_put(ddev);
+		sc->drm_dev = NULL;
+		return (err);
+	}
+
 	/* Prepare KMS mode_config/connectors before drm_dev_register(), which
 	 * registers the objects created here.  The imported display engine owns
 	 * GSP display discovery; this layer owns DragonFly DRM object setup. */
@@ -675,6 +745,8 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
 		    "drm: drm_dev_register failed (%d)\n", err);
+		nvkm_drm_kms_fini(sc);
+		nvkm_ttm_fini(sc);
 		drm_dev_put(ddev);
 		sc->drm_dev = NULL;
 		return (err);
@@ -693,6 +765,7 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 	nvkm_dispnv50_fini(sc);
 	if (sc->drm_dev != NULL) {
 		drm_dev_unregister(sc->drm_dev);
+		nvkm_ttm_fini(sc);
 		drm_dev_put(sc->drm_dev);
 		sc->drm_dev = NULL;
 	}
@@ -1544,6 +1617,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		if (op->op == DRM_NOUVEAU_VM_BIND_OP_MAP) {
 			struct drm_gem_object *obj;
 			struct nvkm_bo *bo;
+			bool bo_pinned = false;
 			uint32_t unmapped = 0;
 
 			if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
@@ -1615,14 +1689,20 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    "nvkm_drm: VM_BIND map idx=%u flags=0x%08x handle=%u obj=%p domain=0x%x addr=0x%016jx bo_off=0x%016jx range=0x%016jx paddr=0x%016jx\n",
 			    i, op->flags, op->handle, obj, bo->domain,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
-			    (uintmax_t)op->range,
-			    (uintmax_t)(bo->paddr + (vm_paddr_t)op->bo_offset));
+			    (uintmax_t)op->range, (uintmax_t)bo->paddr);
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
 			    op->addr, op->range, false, &unmapped);
 			if (err != 0) {
 				drm_gem_object_put_unlocked(obj);
 				break;
 			}
+			err = nvkm_bo_vm_bind_pin(bo);
+			if (err != 0) {
+				drm_gem_object_put_unlocked(obj);
+				err = -err;
+				break;
+			}
+			bo_pinned = true;
 			/*
 			 * NVK's VMA-tilemode protocol: bits 7:0 of op->flags
 			 * carry the PTE kind (bit 8 is SPARSE).  Kinds are
@@ -1635,14 +1715,23 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    op->addr, bo->paddr + op->bo_offset,
 				    op->range, 0, 0, op->flags & 0xff);
 			} else {
-				err = nvkm_gsp_vmm_map_sysmem_kva_noflush(nfile->vmm,
-				    op->addr, (uint8_t *)bo->kva + op->bo_offset,
-				    op->range, op->flags & 0xff);
+				err = nvkm_bo_ensure_ttm_populated(bo);
+				if (err != 0) {
+					(void)nvkm_bo_vm_bind_unpin(bo);
+					drm_gem_object_put_unlocked(obj);
+					err = -err;
+					break;
+				}
+
+				err = nvkm_gsp_vmm_map_sysmem_bo_noflush(nfile->vmm,
+				    op->addr, bo, op->bo_offset, op->range,
+				    op->flags & 0xff);
 			}
 			nvkm_drm_vm_trace_record(sc, NVKM_DRM_VM_TRACE_MAP,
 			    op->flags, op->handle, op->addr, op->range,
 			    op->bo_offset, obj, err != 0 ? -err : 0);
 			if (err != 0) {
+				(void)nvkm_bo_vm_bind_unpin(bo);
 				drm_gem_object_put_unlocked(obj);
 				err = -err;
 				nvkm_debugf(sc->dev,
@@ -1666,10 +1755,11 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				bo->vm_bound_tiled = true;
 			}
 			err = nvkm_drm_vm_binding_add(nfile, op->addr,
-			    op->range, obj, op->bo_offset);
+			    op->range, obj, op->bo_offset, bo_pinned);
 			if (err != 0) {
 				(void)nvkm_gsp_vmm_unmap_noflush(nfile->vmm,
 				    op->addr, op->range);
+				(void)nvkm_bo_vm_bind_unpin(bo);
 				drm_gem_object_put_unlocked(obj);
 				err = -err;
 				nvkm_debugf(sc->dev,
@@ -1677,6 +1767,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				    i, err);
 				break;
 			}
+			bo_pinned = false;
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND track addr=0x%016jx size=0x%016jx obj=%p\n",
 			    (uintmax_t)op->addr, (uintmax_t)op->range, obj);
@@ -2248,7 +2339,6 @@ nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
 		struct nvkm_drm_exec_trace *trace;
 		struct nvkm_drm_vm_binding *binding = NULL;
 		struct nvkm_bo *bo;
-		uint32_t *dw;
 		uint64_t binding_offset = 0;
 		uint64_t offset;
 		uint32_t count;
@@ -2267,7 +2357,7 @@ nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
 			continue;
 
 		bo = to_nvkm_bo(binding->obj);
-		if (bo->kva == NULL)
+		if (!nvkm_bo_has_sysmem(bo))
 			continue;
 		if (binding->bo_offset > bo->base.size ||
 		    binding_offset > bo->base.size - binding->bo_offset ||
@@ -2276,16 +2366,22 @@ nvkm_drm_fault_scan_pushes(struct nvkm_softc *sc,
 			continue;
 
 		offset = binding->bo_offset + binding_offset;
-		dw = (uint32_t *)((uint8_t *)bo->kva + offset);
 		count = trace->va_len / sizeof(uint32_t);
 		sc->rc_fault_push_scan_count++;
 		for (uint32_t i = 0; i + 1 < count; i++) {
-			uint64_t value = (uint64_t)dw[i] |
-			    ((uint64_t)dw[i + 1] << 32);
+			uint32_t lo;
+			uint32_t hi;
+			uint64_t value;
+
+			if (nvkm_bo_read32(bo, offset +
+			    (uint64_t)i * sizeof(uint32_t), &lo) != 0 ||
+			    nvkm_bo_read32(bo, offset +
+			    (uint64_t)(i + 1) * sizeof(uint32_t), &hi) != 0)
+				break;
+			value = (uint64_t)lo | ((uint64_t)hi << 32);
 
 			if (value != fault_addr &&
-			    !(dw[i] == fault_lo &&
-			    (dw[i + 1] & 0xffu) == fault_hi))
+			    !(lo == fault_lo && (hi & 0xffu) == fault_hi))
 				continue;
 			sc->rc_fault_push_hit_count++;
 			if (sc->rc_fault_push_hit_seq == 0) {
