@@ -2168,13 +2168,15 @@ nvkm_drm_wait_fences_put(struct dma_fence **fences, uint32_t count)
 static int
 nvkm_drm_collect_wait_syncobjs(struct nvkm_softc *sc,
     struct drm_file *file_priv, uint32_t count, uint64_t wait_ptr,
-    struct dma_fence ***pfences)
+    struct dma_fence ***pfences, uint32_t *pretained_count)
 {
 	struct drm_nouveau_sync *waits;
 	struct dma_fence **fences;
+	uint32_t retained = 0;
 	int err = 0;
 
 	*pfences = NULL;
+	*pretained_count = 0;
 	if (count == 0)
 		return (0);
 	sc->sync_wait_count += count;
@@ -2201,6 +2203,7 @@ nvkm_drm_collect_wait_syncobjs(struct nvkm_softc *sc,
 	}
 
 	for (uint32_t i = 0; i < count; i++) {
+		struct dma_fence *fence;
 		uint32_t type = waits[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
 
 		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
@@ -2213,30 +2216,40 @@ nvkm_drm_collect_wait_syncobjs(struct nvkm_softc *sc,
 		}
 		err = drm_syncobj_find_fence(file_priv, waits[i].handle,
 		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    waits[i].timeline_value : 0, &fences[i]);
+		    waits[i].timeline_value : 0, &fence);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: sync wait missing fence idx=%u handle=%u err=%d\n",
 			    i, waits[i].handle, err);
 			break;
 		}
-		if (fences[i]->ops == &nvkm_drm_fence_ops)
+		if (fence->ops == &nvkm_drm_fence_ops)
 			sc->sync_wait_local_count++;
 		else
 			sc->sync_wait_external_count++;
-		if (dma_fence_is_signaled(fences[i]))
+		if (dma_fence_is_signaled(fence)) {
 			sc->sync_wait_already_signaled_count++;
+			dma_fence_put(fence);
+			continue;
+		}
+		fences[retained++] = fence;
 	}
 
 out:
 	kfree(waits);
 	if (err != 0) {
-		nvkm_drm_wait_fences_put(fences, count);
+		nvkm_drm_wait_fences_put(fences, retained);
 		sc->sync_wait_error_count++;
 		*pfences = NULL;
+		*pretained_count = 0;
 		return (err);
 	}
+	if (retained == 0) {
+		kfree(fences);
+		fences = NULL;
+	}
 	*pfences = fences;
+	*pretained_count = retained;
 	return (0);
 }
 
@@ -3199,10 +3212,9 @@ nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
 		goto fail;
 
 	err = nvkm_drm_collect_wait_syncobjs(sc, file_priv, req->wait_count,
-	    req->wait_ptr, &job->wait_fences);
+	    req->wait_ptr, &job->wait_fences, &job->wait_count);
 	if (err != 0)
 		goto fail;
-	job->wait_count = req->wait_count;
 	err = nvkm_drm_job_prepare_deps(job);
 	if (err != 0)
 		goto fail;
@@ -3650,12 +3662,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 
 	profile_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_collect_wait_syncobjs(sc, file_priv, req->wait_count,
-	    req->wait_ptr, &job->wait_fences);
+	    req->wait_ptr, &job->wait_fences, &job->wait_count);
 	nvkm_drm_profile_add_us(&sc->exec_profile_wait_sync_us,
 	    profile_start);
 	if (err != 0)
 		goto fail;
-	job->wait_count = req->wait_count;
 	err = nvkm_drm_job_prepare_deps(job);
 	if (err != 0)
 		goto fail;
