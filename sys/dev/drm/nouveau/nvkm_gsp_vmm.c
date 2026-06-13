@@ -286,7 +286,6 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		nvkm_gsp_vmm_pd0_write_slot(sc, pt->pd0, pd0_idx,
 		    nvkm_pde_to_vram(pt->lpt.vram_paddr),
 		    nvkm_pde_to_vram(pt->spt.vram_paddr));
-		nvkm_gsp_bar1_flush(sc);
 		*ppt = pt;
 		return (0);
 	}
