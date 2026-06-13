@@ -576,6 +576,9 @@ struct nvkm_softc {
 	uint64_t		gsp_post_event_bad_size_count;
 	uint64_t		gsp_post_event_unhandled_count;
 	uint64_t		gsp_post_event_nonstall_count;
+	uint64_t		gsp_msgq_null_event_drop_count;
+	uint64_t		gsp_msgq_null_event_drop_bytes;
+	uint32_t		gsp_msgq_null_event_last_fn;
 	uint64_t		gsp_nocat_count;
 	uint64_t		gsp_nocat_short_count;
 	uint32_t		gsp_nocat_last_flags;

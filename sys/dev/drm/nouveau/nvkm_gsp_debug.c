@@ -395,6 +395,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->gsp_post_event_unhandled_count);
 	sbuf_printf(sb, "post_event_nonstall_count = %llu\n",
 	    (unsigned long long)sc->gsp_post_event_nonstall_count);
+	sbuf_printf(sb, "msgq_null_event_drop_count = %llu\n",
+	    (unsigned long long)sc->gsp_msgq_null_event_drop_count);
+	sbuf_printf(sb, "msgq_null_event_drop_bytes = %llu\n",
+	    (unsigned long long)sc->gsp_msgq_null_event_drop_bytes);
+	sbuf_printf(sb, "msgq_null_event_last_fn = 0x%08x\n",
+	    sc->gsp_msgq_null_event_last_fn);
 	sbuf_printf(sb, "nocat_count = %llu\n",
 	    (unsigned long long)sc->gsp_nocat_count);
 	sbuf_printf(sb, "nocat_short_count = %llu\n",

@@ -163,6 +163,18 @@ nvkm_gsp_msg_handle(struct nvkm_softc *sc, uint32_t fn,
 	return (0);
 }
 
+static bool
+nvkm_gsp_msg_is_null_event(struct nvkm_softc *sc, uint32_t fn)
+{
+	uint32_t i;
+
+	for (i = 0; i < sc->gsp_ntfy.cnt; i++) {
+		if (sc->gsp_ntfy.tab[i].fn == fn)
+			return (sc->gsp_ntfy.tab[i].func == NULL);
+	}
+	return (false);
+}
+
 /* Record one entry in the GSP RPC ring trace (debug). Gated by
  * gsp_rpc_trace_on; lock-free circular write (single producer per dir under
  * gsp_tok / ithread, head races are benign for a debug ring). */
@@ -184,6 +196,68 @@ nvkm_gsp_rpc_trace_add(struct nvkm_softc *sc, uint8_t dir, uint32_t fn,
 /* ===================================================================
  * Layer 1: cmdq write + msgq read primitives.
  * =================================================================== */
+
+static uint32_t
+nvkm_gsp_msgq_pages(uint32_t len)
+{
+	uint32_t total_bytes = NVKM_GSP_MSG_HDR_SIZE + len;
+	uint32_t pages = (total_bytes + NVKM_GSP_PAGE_SIZE - 1) /
+	    NVKM_GSP_PAGE_SIZE;
+
+	if (pages == 0)
+		pages = 1;
+	if (pages > 16)
+		pages = 16;
+	return (pages);
+}
+
+static void
+nvkm_gsp_msgq_publish_rptr(struct nvkm_softc *sc)
+{
+	uint8_t *cmdq;
+
+	cpu_mfence();
+	cmdq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_cmdq_off;
+	*(volatile uint32_t *)(cmdq + 32) = sc->gsp_msgq_rptr;
+}
+
+static bool
+nvkm_gsp_msgq_peek_meta(struct nvkm_softc *sc, uint32_t *out_fn,
+    uint32_t *out_len, uint32_t *out_pages)
+{
+	uint8_t *msgq, *slot;
+	struct nvkm_nvfw_gsp_rpc *rpc;
+	uint32_t wptr, len;
+
+	msgq = (uint8_t *)sc->gsp_shm.kva + sc->gsp_shm_msgq_off;
+	wptr = *(volatile uint32_t *)(msgq + 0x10);
+	if (sc->gsp_msgq_rptr == wptr)
+		return (false);
+
+	cpu_lfence();
+	slot = msgq + NVKM_GSP_PAGE_SIZE +
+	    sc->gsp_msgq_rptr * NVKM_GSP_PAGE_SIZE;
+	rpc = (struct nvkm_nvfw_gsp_rpc *)(slot + NVKM_GSP_MSG_HDR_SIZE);
+	if (rpc->signature != NVKM_GSP_SIGNATURE)
+		return (false);
+
+	len = rpc->length;
+	if (out_fn != NULL)
+		*out_fn = rpc->function;
+	if (out_len != NULL)
+		*out_len = len;
+	if (out_pages != NULL)
+		*out_pages = nvkm_gsp_msgq_pages(len);
+	return (true);
+}
+
+static void
+nvkm_gsp_msgq_skip_pages(struct nvkm_softc *sc, uint32_t pages)
+{
+	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + pages) %
+	    NVKM_GSP_MSGCOUNT;
+	nvkm_gsp_msgq_publish_rptr(sc);
+}
 
 static int
 nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
@@ -393,21 +467,10 @@ nvkm_gsp_msgq_recv_one_elem(struct nvkm_softc *sc, uint32_t want_len,
 	}
 
 	/* Per nouveau r535_gsp_msgq_recv_one_elem: page count comes from
-	 * DIV_ROUND_UP(GSP_MSG_HDR_SIZE + rpc->length, GSP_PAGE_SIZE), NOT
-	 * from elemCount header field. Clamp to 16 (GSP_MSG_MAX_SIZE / PAGE)
-	 * to defend against corrupt rpc->length. */
-	uint32_t total_bytes = NVKM_GSP_MSG_HDR_SIZE + len;
-	uint32_t pages = (total_bytes + NVKM_GSP_PAGE_SIZE - 1) /
-	    NVKM_GSP_PAGE_SIZE;
-	if (pages == 0) pages = 1;
-	if (pages > 16) pages = 16;
-	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + pages) % NVKM_GSP_MSGCOUNT;
-	cpu_mfence();
-	{
-		uint8_t *cmdq = (uint8_t *)sc->gsp_shm.kva +
-		    sc->gsp_shm_cmdq_off;
-		*(volatile uint32_t *)(cmdq + 32) = sc->gsp_msgq_rptr;
-	}
+	 * DIV_ROUND_UP(GSP_MSG_HDR_SIZE + rpc->length, GSP_PAGE_SIZE),
+	 * not from elemCount header field.
+	 */
+	nvkm_gsp_msgq_skip_pages(sc, nvkm_gsp_msgq_pages(len));
 
 	if (out_fn)  *out_fn = fn;
 	if (out_len) *out_len = len;
@@ -426,7 +489,24 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 {
 	for (;;) {
 		uint32_t fn = 0, len = 0;
-		void *buf = nvkm_gsp_msgq_recv_one_elem(sc, 0, &fn, &len);
+		uint32_t pages = 0;
+		void *buf;
+
+		if (nvkm_gsp_msgq_peek_meta(sc, &fn, &len, &pages) &&
+		    fn >= 0x1000 && nvkm_gsp_msg_is_null_event(sc, fn)) {
+			uint32_t plen = (len > NVKM_GSP_RPC_HDR_SIZE) ?
+			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
+
+			nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_EVENT, fn, 0,
+			    plen);
+			sc->gsp_msgq_null_event_drop_count++;
+			sc->gsp_msgq_null_event_drop_bytes += plen;
+			sc->gsp_msgq_null_event_last_fn = fn;
+			nvkm_gsp_msgq_skip_pages(sc, pages);
+			continue;
+		}
+
+		buf = nvkm_gsp_msgq_recv_one_elem(sc, 0, &fn, &len);
 		if (buf == NULL)
 			return;
 
