@@ -792,6 +792,49 @@ nvkm_gsp_query_mthdbuf_size(struct nvkm_softc *sc)
 	return (0);
 }
 
+int
+nvkm_gsp_query_perf_current_pstate(struct nvkm_softc *sc, uint32_t *pstate)
+{
+	struct nvkm_gsp_client tmp_client;
+	struct nvkm_gsp_object tmp_subdev;
+	struct NV2080_CTRL_PERF_GET_CURRENT_PSTATE_PARAMS_r570 *p;
+	void *q;
+	int err;
+
+	if (pstate == NULL)
+		return (EINVAL);
+	*pstate = NV2080_CTRL_PERF_PSTATES_UNDEFINED;
+	if (sc->gsp_internal_subdevice == 0)
+		return (ENXIO);
+
+	memset(&tmp_client, 0, sizeof(tmp_client));
+	tmp_client.sc = sc;
+	tmp_client.object.client = &tmp_client;
+	tmp_client.object.handle = sc->gsp_internal_client;
+	tmp_subdev.client = &tmp_client;
+	tmp_subdev.parent = NULL;
+	tmp_subdev.handle = sc->gsp_internal_subdevice;
+
+	p = nvkm_gsp_rm_ctrl_get(&tmp_subdev,
+	    NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE, sizeof(*p));
+	if (p == NULL)
+		return (ENOMEM);
+	memset(p, 0, sizeof(*p));
+
+	q = p;
+	err = nvkm_gsp_rm_ctrl_rd(&tmp_subdev, &q, sizeof(*p));
+	if (err == 0 && q != NULL) {
+		p = q;
+		*pstate = p->currPstate;
+	}
+	if (q != NULL)
+		nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
+	if (err != 0 || q == NULL)
+		return (err != 0 ? err : EIO);
+
+	return (0);
+}
+
 /* === NV01_DEVICE_0 + NV20_SUBDEVICE_0 ===
  * No r570 override for these; structs match Linux nouveau r535/nvrm/device.h. */
 

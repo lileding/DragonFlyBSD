@@ -816,11 +816,17 @@ nvkm_pci_attach(device_t dev)
 					    sc->gsp_vmm) != 0) {
 						kfree(sc->gsp_vmm);
 						sc->gsp_vmm = NULL;
-					} else {
-						(void)nvkm_gsp_register_nonstall_event(
-						    sc->gsp_vmm);
 					}
 				}
+				/*
+				 * Linux nouveau's GSP FIFO path uses the RM
+				 * kernel interrupt table to wire CPU nonstall
+				 * vectors, then signals FIFO events directly from
+				 * the interrupt handler.  Do not additionally arm
+				 * an RM FIFO_EVENT_MTHD notification here: on r570
+				 * it drives a GSP msgq event for every submit
+				 * completion, duplicating the CPU nonstall path.
+				 */
 				/* nouveau's GSP-RM path does NOT allocate
 				 * KEPLER_CHANNEL_GROUP_A; GSP creates the TSG
 				 * implicitly during channel alloc. */

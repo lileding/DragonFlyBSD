@@ -372,6 +372,18 @@ struct NV2080_CTRL_CMD_FB_GET_FB_REGION_INFO_PARAMS_r570 {
 	struct nvkm_fb_region_info fbRegion[16];
 };
 
+#define NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE	0x20802068U
+#define NV2080_CTRL_PERF_PSTATES_UNDEFINED	0x00000000U
+#define NV2080_CTRL_PERF_PSTATES_P0		0x00000001U
+#define NV2080_CTRL_PERF_PSTATES_P8		0x00000100U
+
+struct NV2080_CTRL_PERF_GET_CURRENT_PSTATE_PARAMS_r570 {
+	uint32_t currPstate;
+};
+
+int	 nvkm_gsp_query_perf_current_pstate(struct nvkm_softc *sc,
+	    uint32_t *pstate);
+
 
 /* NV2080_CTRL_CMD_FIFO_GET_DEVICE_INFO_TABLE.
  * Source: nouveau r535/nvrm/fifo.h:11-34, fifo.c:469-490. */
