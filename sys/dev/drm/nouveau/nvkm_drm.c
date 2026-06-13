@@ -3494,11 +3494,10 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 * coherent sysmem on the x86 desktop targets supported by this driver.
 	 * DragonFly pmap_invalidate_cache_range() is for cache-domain changes
 	 * and broadcasts WBINVD on CPUs without CPUID_SS, which turns each EXEC
-	 * into several global cache flushes. Keep only the CPU store ordering
-	 * before ringing the doorbell; GPU-side completion ordering still comes
-	 * from the WFI/SYS_MEMBAR completion trailer.
+	 * into several global cache flushes. The only ordering needed here is
+	 * the Linux nouveau kick sequence below: GP_PUT, wmb/sfence, USERD read
+	 * flush, then doorbell.
 	 */
-	cpu_sfence();
 	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
 	    profile_start);
 	/* Canary: does this submit's push VA range overlap any in-flight
@@ -3544,7 +3543,6 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	cpu_sfence();
 	(void)nvkm_gsp_bar1_rd32(sc, slot_bar1 + 0);
 	nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
-	cpu_sfence();
 	nvkm_drm_profile_add_us(&sc->exec_profile_doorbell_us,
 	    profile_start);
 	chan->gpf_put = put;
