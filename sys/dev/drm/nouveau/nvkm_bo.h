@@ -93,6 +93,7 @@ int nvkm_bo_read32(struct nvkm_bo *bo, uint64_t offset,
     uint32_t *value);
 int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo);
 int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo);
+struct reservation_object *nvkm_bo_resv(struct nvkm_bo *bo);
 void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
 int nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,

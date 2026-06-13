@@ -49,15 +49,22 @@ void dma_fence_chain_init(struct dma_fence_chain *chain,
 /* Reference-taking accessor for the (mutable) prev link. */
 struct dma_fence *dma_fence_chain_prev_get(struct dma_fence_chain *chain);
 
+/*
+ * Walk to the previous fence while compacting signalled history.  Consumes the
+ * caller's reference to @fence and returns a referenced previous fence, or NULL
+ * at the end of the chain.
+ */
+struct dma_fence *dma_fence_chain_walk(struct dma_fence *fence);
+
 /* Drop the history below @chain once it is known to be signalled. */
 void dma_fence_chain_truncate_prev(struct dma_fence_chain *chain);
 
 /*
  * Resolve the chain node covering @point.  On entry *pfence holds a
- * referenced chain head; on success the reference is moved to the
- * returned node.  Points at or below a collected (already signalled)
- * region resolve to the signalled boundary node.  Returns -EINVAL if
- * *pfence is not a chain or @point has not been materialized yet.
+ * referenced chain head; on success the reference is moved to the returned
+ * node.  If @point is in a collected, already signalled prefix, *pfence is
+ * set to NULL.  Returns -EINVAL if *pfence is not a chain or @point has not
+ * been materialized yet.
  */
 int dma_fence_chain_find_seqno(struct dma_fence **pfence, u64 point);
 

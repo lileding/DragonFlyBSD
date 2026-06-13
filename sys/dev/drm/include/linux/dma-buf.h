@@ -27,7 +27,10 @@
 #ifndef LINUX_DMA_BUF_H
 #define LINUX_DMA_BUF_H
 
+#include <sys/ioccom.h>
+
 #include <linux/err.h>
+#include <linux/types.h>
 #include <linux/scatterlist.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
@@ -36,6 +39,26 @@
 #include <linux/wait.h>
 
 #include <linux/slab.h>
+
+#define DMA_BUF_SYNC_READ	(1 << 0)
+#define DMA_BUF_SYNC_WRITE	(2 << 0)
+#define DMA_BUF_SYNC_RW		(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
+
+struct dma_buf_export_sync_file {
+	uint32_t flags;
+	int32_t fd;
+};
+
+struct dma_buf_import_sync_file {
+	uint32_t flags;
+	int32_t fd;
+};
+
+#define DMA_BUF_BASE			'b'
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE	\
+	_IOWR(DMA_BUF_BASE, 2, struct dma_buf_export_sync_file)
+#define DMA_BUF_IOCTL_IMPORT_SYNC_FILE	\
+	_IOW(DMA_BUF_BASE, 3, struct dma_buf_import_sync_file)
 
 struct dma_buf;
 struct dma_buf_attachment;

@@ -47,6 +47,7 @@
  */
 
 #include <drm/drmP.h>
+#include <sys/sysctl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/anon_inodes.h>
@@ -56,6 +57,118 @@
 
 #include "drm_internal.h"
 #include <drm/drm_syncobj.h>
+
+SYSCTL_DECL(_hw_dri);
+
+static uint64_t syncobj_query_count;
+static uint64_t syncobj_query_handle_count;
+static uint64_t syncobj_query_zero_count;
+static uint64_t syncobj_query_lag_count;
+static uint64_t syncobj_query_lag_max;
+static uint64_t syncobj_query_head_point_max;
+static uint64_t syncobj_query_return_point_max;
+static uint64_t syncobj_wait_count;
+static uint64_t syncobj_wait_handle_count;
+static uint64_t syncobj_wait_timeout0_count;
+static uint64_t syncobj_wait_wait_for_submit_count;
+static uint64_t syncobj_wait_wait_all_count;
+static uint64_t syncobj_wait_success_count;
+static uint64_t syncobj_wait_etime_count;
+static uint64_t syncobj_wait_error_count;
+static uint64_t syncobj_wait_timeout0_success_count;
+static uint64_t syncobj_wait_timeout0_etime_count;
+static uint64_t syncobj_timeline_wait_count;
+static uint64_t syncobj_timeline_wait_handle_count;
+static uint64_t syncobj_timeline_wait_timeout0_count;
+static uint64_t syncobj_timeline_wait_wait_available_count;
+static uint64_t syncobj_timeline_wait_wait_for_submit_count;
+static uint64_t syncobj_timeline_wait_wait_all_count;
+static uint64_t syncobj_timeline_wait_success_count;
+static uint64_t syncobj_timeline_wait_etime_count;
+static uint64_t syncobj_timeline_wait_error_count;
+static uint64_t syncobj_timeline_wait_timeout0_success_count;
+static uint64_t syncobj_timeline_wait_timeout0_etime_count;
+static uint64_t syncobj_timeline_wait_available_success_count;
+static uint64_t syncobj_timeline_wait_available_etime_count;
+static uint64_t syncobj_timeline_wait_timeout0_available_count;
+static uint64_t syncobj_timeline_wait_timeout0_available_success_count;
+static uint64_t syncobj_timeline_wait_timeout0_available_etime_count;
+static uint64_t syncobj_timeline_wait_timeout0_complete_count;
+static uint64_t syncobj_timeline_wait_timeout0_complete_success_count;
+static uint64_t syncobj_timeline_wait_timeout0_complete_etime_count;
+
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_count, CTLFLAG_RD,
+    &syncobj_query_count, 0, "syncobj query ioctl count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_handle_count, CTLFLAG_RD,
+    &syncobj_query_handle_count, 0, "syncobj query handle count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_zero_count, CTLFLAG_RD,
+    &syncobj_query_zero_count, 0, "syncobj query returned zero count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_lag_count, CTLFLAG_RD,
+    &syncobj_query_lag_count, 0, "syncobj query returned below head count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_lag_max, CTLFLAG_RD,
+    &syncobj_query_lag_max, 0, "syncobj query maximum head-return gap");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_head_point_max, CTLFLAG_RD,
+    &syncobj_query_head_point_max, 0, "syncobj query maximum head point");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_return_point_max, CTLFLAG_RD,
+    &syncobj_query_return_point_max, 0, "syncobj query maximum returned point");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_count, CTLFLAG_RD,
+    &syncobj_wait_count, 0, "syncobj wait ioctl count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_handle_count, CTLFLAG_RD,
+    &syncobj_wait_handle_count, 0, "syncobj wait handle count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_timeout0_count, CTLFLAG_RD,
+    &syncobj_wait_timeout0_count, 0, "syncobj wait timeout=0 count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_wait_for_submit_count, CTLFLAG_RD,
+    &syncobj_wait_wait_for_submit_count, 0, "syncobj wait WAIT_FOR_SUBMIT count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_wait_all_count, CTLFLAG_RD,
+    &syncobj_wait_wait_all_count, 0, "syncobj wait WAIT_ALL count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_success_count, CTLFLAG_RD,
+    &syncobj_wait_success_count, 0, "syncobj wait success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_etime_count, CTLFLAG_RD,
+    &syncobj_wait_etime_count, 0, "syncobj wait ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_error_count, CTLFLAG_RD,
+    &syncobj_wait_error_count, 0, "syncobj wait non-ETIME error count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_timeout0_success_count, CTLFLAG_RD,
+    &syncobj_wait_timeout0_success_count, 0, "syncobj wait timeout=0 success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_wait_timeout0_etime_count, CTLFLAG_RD,
+    &syncobj_wait_timeout0_etime_count, 0, "syncobj wait timeout=0 ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_count, 0, "syncobj timeline wait ioctl count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_handle_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_handle_count, 0, "syncobj timeline wait handle count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_count, 0, "syncobj timeline wait timeout=0 count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_wait_available_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_wait_available_count, 0, "syncobj timeline wait WAIT_AVAILABLE count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_wait_for_submit_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_wait_for_submit_count, 0, "syncobj timeline wait WAIT_FOR_SUBMIT count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_wait_all_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_wait_all_count, 0, "syncobj timeline wait WAIT_ALL count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_success_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_success_count, 0, "syncobj timeline wait success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_etime_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_etime_count, 0, "syncobj timeline wait ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_error_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_error_count, 0, "syncobj timeline wait non-ETIME error count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_success_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_success_count, 0, "syncobj timeline wait timeout=0 success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_etime_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_etime_count, 0, "syncobj timeline wait timeout=0 ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_available_success_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_available_success_count, 0, "syncobj timeline wait WAIT_AVAILABLE success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_available_etime_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_available_etime_count, 0, "syncobj timeline wait WAIT_AVAILABLE ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_available_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_available_count, 0, "syncobj timeline wait timeout=0 WAIT_AVAILABLE count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_available_success_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_available_success_count, 0, "syncobj timeline wait timeout=0 WAIT_AVAILABLE success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_available_etime_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_available_etime_count, 0, "syncobj timeline wait timeout=0 WAIT_AVAILABLE ETIME count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_complete_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_complete_count, 0, "syncobj timeline wait timeout=0 completion count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_complete_success_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_complete_success_count, 0, "syncobj timeline wait timeout=0 completion success count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_complete_etime_count, CTLFLAG_RD,
+    &syncobj_timeline_wait_timeout0_complete_etime_count, 0, "syncobj timeline wait timeout=0 completion ETIME count");
 
 struct drm_syncobj_stub_fence {
 	struct dma_fence base;
@@ -71,6 +184,23 @@ static const struct dma_fence_ops drm_syncobj_stub_fence_ops = {
 	.get_driver_name = drm_syncobj_stub_fence_get_name,
 	.get_timeline_name = drm_syncobj_stub_fence_get_name,
 };
+
+static struct dma_fence *
+drm_syncobj_stub_fence_create(void)
+{
+	struct drm_syncobj_stub_fence *fence;
+
+	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	if (fence == NULL)
+		return NULL;
+
+	lockinit(&fence->lock, "dsofl", 0, 0);
+	dma_fence_init(&fence->base, &drm_syncobj_stub_fence_ops,
+		       &fence->lock, 0, 0);
+	dma_fence_signal(&fence->base);
+
+	return (&fence->base);
+}
 
 
 /**
@@ -202,44 +332,24 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 
 	lockmgr(&syncobj->lock, LK_RELEASE);
 
-	/* Garbage-collect: cut history below the first signalled node. */
-	it = dma_fence_get(&chain->base);
-	while (it != NULL) {
-		struct dma_fence_chain *node = to_dma_fence_chain(it);
-		struct dma_fence *next;
-
-		if (node == NULL) {
-			dma_fence_put(it);
-			break;
-		}
-		next = dma_fence_chain_prev_get(node);
-		if (next != NULL && dma_fence_is_signaled(next)) {
-			dma_fence_chain_truncate_prev(node);
-			dma_fence_put(next);
-			dma_fence_put(it);
-			break;
-		}
-		dma_fence_put(it);
-		it = next;
-	}
+	/* Walk once to match Linux's timeline-chain garbage collection. */
+	it = dma_fence_chain_walk(dma_fence_get(&chain->base));
+	while (it != NULL)
+		it = dma_fence_chain_walk(it);
 }
 EXPORT_SYMBOL(drm_syncobj_add_point);
 
 static int drm_syncobj_assign_null_handle(struct drm_syncobj *syncobj)
 {
-	struct drm_syncobj_stub_fence *fence;
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
+	struct dma_fence *fence;
+
+	fence = drm_syncobj_stub_fence_create();
 	if (fence == NULL)
 		return -ENOMEM;
 
-	lockinit(&fence->lock, "dsofl", 0, 0);
-	dma_fence_init(&fence->base, &drm_syncobj_stub_fence_ops,
-		       &fence->lock, 0, 0);
-	dma_fence_signal(&fence->base);
+	drm_syncobj_replace_fence(syncobj, 0, fence);
 
-	drm_syncobj_replace_fence(syncobj, 0, &fence->base);
-
-	dma_fence_put(&fence->base);
+	dma_fence_put(fence);
 
 	return 0;
 }
@@ -276,6 +386,10 @@ int drm_syncobj_find_fence(struct drm_file *file_private,
 		if (ret != 0) {
 			dma_fence_put(*fence);
 			*fence = NULL;
+		} else if (*fence == NULL) {
+			*fence = drm_syncobj_stub_fence_create();
+			if (*fence == NULL)
+				ret = -ENOMEM;
 		}
 	}
 	drm_syncobj_put(syncobj);
@@ -705,19 +819,25 @@ struct syncobj_wait_entry {
 };
 
 /*
- * Fetch a syncobj's current fence resolved to @point.  Returns NULL
- * both for an empty syncobj and for a not-yet-materialized point, so
- * WAIT_FOR_SUBMIT treats the two identically.
+ * Fetch a syncobj's current fence resolved to @point.  A collected,
+ * already-signalled prefix is represented with a temporary signalled stub.
+ * NULL means an empty syncobj, a not-yet-materialized point, or allocation
+ * failure while creating the stub.
  */
 static struct dma_fence *
 drm_syncobj_point_get(struct drm_syncobj *syncobj, uint64_t point)
 {
 	struct dma_fence *fence = drm_syncobj_fence_get(syncobj);
+	int ret;
 
-	if (fence != NULL && point != 0 &&
-	    dma_fence_chain_find_seqno(&fence, point) != 0) {
-		dma_fence_put(fence);
-		fence = NULL;
+	if (fence != NULL && point != 0) {
+		ret = dma_fence_chain_find_seqno(&fence, point);
+		if (ret != 0) {
+			dma_fence_put(fence);
+			fence = NULL;
+		} else if (fence == NULL) {
+			fence = drm_syncobj_stub_fence_create();
+		}
 	}
 	return (fence);
 }
@@ -737,10 +857,15 @@ drm_syncobj_wait_add_callback(struct drm_syncobj *syncobj,
 	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
 	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
 							lockdep_is_held(&syncobj->lock)));
-	if (fence != NULL && wait->point != 0 &&
-	    dma_fence_chain_find_seqno(&fence, wait->point) != 0) {
-		dma_fence_put(fence);
-		fence = NULL;
+	if (fence != NULL && wait->point != 0) {
+		int ret = dma_fence_chain_find_seqno(&fence, wait->point);
+
+		if (ret != 0) {
+			dma_fence_put(fence);
+			fence = NULL;
+		} else if (fence == NULL) {
+			fence = drm_syncobj_stub_fence_create();
+		}
 	}
 	if (fence != NULL) {
 		wait->fence = fence;
@@ -770,13 +895,21 @@ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 	/* This happens inside the syncobj lock */
 	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
 							lockdep_is_held(&syncobj->lock)));
-	if (fence == NULL || (wait->point != 0 &&
-	    dma_fence_chain_find_seqno(&fence, wait->point) != 0)) {
+	if (fence != NULL && wait->point != 0) {
+		int ret = dma_fence_chain_find_seqno(&fence, wait->point);
+
+		if (ret != 0) {
+			dma_fence_put(fence);
+			fence = NULL;
+		} else if (fence == NULL) {
+			fence = drm_syncobj_stub_fence_create();
+		}
+	}
+	if (fence == NULL) {
 		/* This port removes callbacks before invoking them.  Keep
 		 * waiting across NULL heads and across heads that do not yet
 		 * contain the requested timeline point.
 		 */
-		dma_fence_put(fence);
 		drm_syncobj_add_callback_locked(syncobj, cb,
 						syncobj_wait_syncobj_func);
 		return;
@@ -1043,6 +1176,15 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 	if (args->count_handles == 0)
 		return -EINVAL;
 
+	syncobj_wait_count++;
+	syncobj_wait_handle_count += args->count_handles;
+	if (args->timeout_nsec == 0)
+		syncobj_wait_timeout0_count++;
+	if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
+		syncobj_wait_wait_for_submit_count++;
+	if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)
+		syncobj_wait_wait_all_count++;
+
 	ret = drm_syncobj_array_find(file_private,
 				     u64_to_user_ptr(args->handles),
 				     args->count_handles,
@@ -1052,6 +1194,17 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 
 	ret = drm_syncobj_array_wait(dev, file_private,
 				     args, syncobjs);
+	if (ret == 0) {
+		syncobj_wait_success_count++;
+		if (args->timeout_nsec == 0)
+			syncobj_wait_timeout0_success_count++;
+	} else if (ret == -ETIME) {
+		syncobj_wait_etime_count++;
+		if (args->timeout_nsec == 0)
+			syncobj_wait_timeout0_etime_count++;
+	} else {
+		syncobj_wait_error_count++;
+	}
 
 	drm_syncobj_array_free(syncobjs, args->count_handles);
 
@@ -1080,6 +1233,22 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 	if (args->count_handles == 0)
 		return -EINVAL;
 
+	syncobj_timeline_wait_count++;
+	syncobj_timeline_wait_handle_count += args->count_handles;
+	if (args->timeout_nsec == 0) {
+		syncobj_timeline_wait_timeout0_count++;
+		if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+			syncobj_timeline_wait_timeout0_available_count++;
+		else
+			syncobj_timeline_wait_timeout0_complete_count++;
+	}
+	if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+		syncobj_timeline_wait_wait_available_count++;
+	if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
+		syncobj_timeline_wait_wait_for_submit_count++;
+	if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)
+		syncobj_timeline_wait_wait_all_count++;
+
 	ret = drm_syncobj_array_find(file_private,
 				     u64_to_user_ptr(args->handles),
 				     args->count_handles,
@@ -1103,17 +1272,41 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 		signed long timeout =
 		    drm_timeout_abs_to_jiffies(args->timeout_nsec);
 
-		timeout = drm_syncobj_array_wait_timeout(syncobjs, points,
-							 args->count_handles,
-							 args->flags,
-							 timeout, &first);
-		if (timeout < 0) {
-			ret = timeout;
-			goto out_points;
+			timeout = drm_syncobj_array_wait_timeout(syncobjs, points,
+								 args->count_handles,
+								 args->flags,
+								 timeout, &first);
+			if (timeout < 0) {
+				if (timeout == -ETIME) {
+					syncobj_timeline_wait_etime_count++;
+					if (args->timeout_nsec == 0) {
+						syncobj_timeline_wait_timeout0_etime_count++;
+						if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+							syncobj_timeline_wait_timeout0_available_etime_count++;
+						else
+							syncobj_timeline_wait_timeout0_complete_etime_count++;
+					}
+					if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+						syncobj_timeline_wait_available_etime_count++;
+				} else {
+					syncobj_timeline_wait_error_count++;
+				}
+				ret = timeout;
+				goto out_points;
+			}
+			args->first_signaled = first;
+			syncobj_timeline_wait_success_count++;
+			if (args->timeout_nsec == 0) {
+				syncobj_timeline_wait_timeout0_success_count++;
+				if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+					syncobj_timeline_wait_timeout0_available_success_count++;
+				else
+					syncobj_timeline_wait_timeout0_complete_success_count++;
+			}
+			if (args->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE)
+				syncobj_timeline_wait_available_success_count++;
+			ret = 0;
 		}
-		args->first_signaled = first;
-		ret = 0;
-	}
 
 	(void)i;
 	(void)signaled;
@@ -1212,6 +1405,9 @@ drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 	if (args->count_handles == 0)
 		return -EINVAL;
 
+	syncobj_query_count++;
+	syncobj_query_handle_count += args->count_handles;
+
 	ret = drm_syncobj_array_find(file_private,
 				     u64_to_user_ptr(args->handles),
 				     args->count_handles,
@@ -1227,42 +1423,56 @@ drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 
 	for (i = 0; i < args->count_handles; i++) {
 		struct dma_fence *fence = drm_syncobj_fence_get(syncobjs[i]);
+		struct dma_fence_chain *chain = to_dma_fence_chain(fence);
+		uint64_t head_point = 0;
+		uint64_t gap;
 
-		/* Timeline value = highest point whose prefix has fully
-		 * signalled: walk from the head to the first signalled
-		 * chain node. */
 		points[i] = 0;
-		while (fence != NULL) {
-			struct dma_fence_chain *chain =
-			    to_dma_fence_chain(fence);
-			struct dma_fence *prev;
+		if (chain != NULL) {
+			struct dma_fence *iter;
+			struct dma_fence *last = dma_fence_get(fence);
 
-			if (chain == NULL) {
-				if (dma_fence_is_signaled(fence))
-					points[i] = fence->seqno;
-				dma_fence_put(fence);
-				break;
+			head_point = chain->point;
+			if (syncobj_query_head_point_max < head_point)
+				syncobj_query_head_point_max = head_point;
+
+			for (iter = dma_fence_get(fence); iter != NULL;
+			    iter = dma_fence_chain_walk(iter)) {
+				if (iter->context != fence->context) {
+					dma_fence_put(iter);
+					break;
+				}
+				dma_fence_put(last);
+				last = dma_fence_get(iter);
 			}
-			if (dma_fence_is_signaled(fence)) {
-				points[i] = chain->point;
-				dma_fence_put(fence);
-				break;
+
+			if (dma_fence_is_signaled(last)) {
+				points[i] = last->seqno;
+			} else {
+				struct dma_fence_chain *last_chain =
+				    to_dma_fence_chain(last);
+
+				if (last_chain != NULL)
+					points[i] = last_chain->prev_seqno;
 			}
-			prev = dma_fence_chain_prev_get(chain);
-			if (prev == NULL) {
-				/*
-				 * A completed prefix may have been garbage-collected.
-				 * Linux reports that boundary through prev_seqno, so
-				 * timeline queries can still observe forward progress
-				 * while the current point is pending.
-				 */
-				points[i] = chain->prev_seqno;
-				dma_fence_put(fence);
-				break;
-			}
-			dma_fence_put(fence);
-			fence = prev;
+			dma_fence_put(last);
+		} else if (fence != NULL && dma_fence_is_signaled(fence)) {
+			points[i] = fence->seqno;
+			head_point = fence->seqno;
+			if (syncobj_query_head_point_max < head_point)
+				syncobj_query_head_point_max = head_point;
 		}
+		if (points[i] == 0)
+			syncobj_query_zero_count++;
+		if (syncobj_query_return_point_max < points[i])
+			syncobj_query_return_point_max = points[i];
+		if (head_point > points[i]) {
+			syncobj_query_lag_count++;
+			gap = head_point - points[i];
+			if (syncobj_query_lag_max < gap)
+				syncobj_query_lag_max = gap;
+		}
+		dma_fence_put(fence);
 	}
 
 	if (copy_to_user(u64_to_user_ptr(args->points), points,

@@ -49,6 +49,7 @@ struct nvkm_gsp_vmm_user_pt {
 	uint32_t		pd0_idx;
 	uint32_t		valid_pte_count;
 	uint32_t		sparse_pte_count;
+	bool			conservative_pte_accounting;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
@@ -141,6 +142,8 @@ int	 nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint8_t ro, uint8_t kind);
 int	 nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+int	 nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
 int	 nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t size);
 int	 nvkm_gsp_vmm_unmap_sparse_noflush(struct nvkm_gsp_vmm *vmm,

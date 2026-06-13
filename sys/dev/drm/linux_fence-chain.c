@@ -51,6 +51,57 @@ dma_fence_chain_prev_get(struct dma_fence_chain *chain)
 	return (prev);
 }
 
+struct dma_fence *
+dma_fence_chain_walk(struct dma_fence *fence)
+{
+	struct dma_fence_chain *chain, *prev_chain;
+	struct dma_fence *prev, *replacement;
+
+	chain = to_dma_fence_chain(fence);
+	if (chain == NULL) {
+		dma_fence_put(fence);
+		return (NULL);
+	}
+
+	for (;;) {
+		bool replaced = false;
+
+		prev = dma_fence_chain_prev_get(chain);
+		if (prev == NULL)
+			break;
+
+		prev_chain = to_dma_fence_chain(prev);
+		if (prev_chain != NULL) {
+			if (prev_chain->fence != NULL &&
+			    !dma_fence_is_signaled(prev_chain->fence))
+				break;
+			replacement = dma_fence_chain_prev_get(prev_chain);
+		} else {
+			if (!dma_fence_is_signaled(prev))
+				break;
+			replacement = NULL;
+		}
+
+		lockmgr(&chain->prev_lock, LK_EXCLUSIVE);
+		if (chain->prev == prev) {
+			chain->prev = replacement;
+			replacement = NULL;
+			replaced = true;
+		}
+		lockmgr(&chain->prev_lock, LK_RELEASE);
+
+		if (replaced)
+			dma_fence_put(prev);
+		else
+			dma_fence_put(replacement);
+		dma_fence_put(prev);
+	}
+
+	dma_fence_put(fence);
+	return (prev);
+}
+EXPORT_SYMBOL(dma_fence_chain_walk);
+
 void
 dma_fence_chain_truncate_prev(struct dma_fence_chain *chain)
 {
@@ -76,13 +127,11 @@ dma_fence_chain_blocker(struct dma_fence_chain *chain)
 	if (chain->fence != NULL && !dma_fence_is_signaled(chain->fence))
 		return (dma_fence_get(chain->fence));
 
-	prev = dma_fence_chain_prev_get(chain);
+	prev = dma_fence_chain_walk(dma_fence_get(&chain->base));
 	if (prev != NULL) {
 		if (!dma_fence_is_signaled(prev))
 			return (prev);
-		/* Prefix complete: drop the history. */
 		dma_fence_put(prev);
-		dma_fence_chain_truncate_prev(chain);
 	}
 	return (NULL);
 }
@@ -152,7 +201,7 @@ dma_fence_chain_signaled(struct dma_fence *fence)
 
 	if (chain->fence != NULL && !dma_fence_is_signaled(chain->fence))
 		return (false);
-	prev = dma_fence_chain_prev_get(chain);
+	prev = dma_fence_chain_walk(dma_fence_get(&chain->base));
 	if (prev != NULL) {
 		ret = dma_fence_is_signaled(prev);
 		dma_fence_put(prev);
@@ -216,6 +265,7 @@ dma_fence_chain_find_seqno(struct dma_fence **pfence, u64 point)
 {
 	struct dma_fence_chain *chain;
 	struct dma_fence *cur, *prev;
+	u64 context;
 
 	if (point == 0)
 		return (0);
@@ -226,22 +276,17 @@ dma_fence_chain_find_seqno(struct dma_fence **pfence, u64 point)
 	if (chain->point < point)
 		return (-EINVAL);	/* not materialized yet */
 
+	context = (*pfence)->context;
 	cur = *pfence;
 	for (;;) {
 		chain = to_dma_fence_chain(cur);
-		/*
-		 * Stop when this node is the cover for @point: the
-		 * previous node's point is already below the target.
-		 * A truncated prev (collected, fully signalled prefix)
-		 * also stops here; for points inside that prefix the
-		 * boundary node is signalled, so waiters complete
-		 * immediately, which is exactly right.
-		 */
-		if (chain->prev_seqno < point)
+		if (cur->context != context || chain == NULL ||
+		    chain->prev_seqno < point)
 			break;
-		prev = dma_fence_chain_prev_get(chain);
-		if (prev == NULL || to_dma_fence_chain(prev) == NULL) {
-			dma_fence_put(prev);
+		prev = dma_fence_chain_walk(dma_fence_get(cur));
+		if (prev == NULL) {
+			dma_fence_put(cur);
+			cur = NULL;
 			break;
 		}
 		dma_fence_put(cur);
