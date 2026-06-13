@@ -22,8 +22,10 @@
 #include <linux/err.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-fence-chain.h>
+#include <linux/kref.h>
 #include <linux/ktime.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <machine/pmap.h>
 
 /* Identify ourselves as "nouveau" so unmodified Mesa NVK accepts us.
@@ -49,7 +51,9 @@ static const struct file_operations nvkm_drm_fops = {
 /* Forward decl: ioctl table defined at end of file. */
 static const struct drm_ioctl_desc nvkm_drm_ioctls[];
 struct nvkm_drm_file;
+struct nvkm_drm_job;
 struct nvkm_drm_vm_binding;
+TAILQ_HEAD(nvkm_drm_job_list, nvkm_drm_job);
 static struct nvkm_softc *nvkm_drm_sc(struct drm_device *ddev);
 static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
@@ -57,6 +61,9 @@ static void nvkm_drm_postclose(struct drm_device *ddev,
 static void nvkm_drm_lastclose(struct drm_device *ddev);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
+static void nvkm_drm_job_work(struct work_struct *work);
+static void nvkm_drm_jobs_flush(struct nvkm_drm_file *nfile);
+static void nvkm_drm_jobs_close(struct nvkm_drm_file *nfile);
 
 /* NVIF ioctl is variable-size; encode with size=0 since dispatch
  * matches by NR only and the actual copy size comes from userspace. */
@@ -173,6 +180,12 @@ nvkm_drm_gem_prime_export(struct drm_device *dev, struct drm_gem_object *obj,
 	return (dmabuf);
 }
 
+static struct reservation_object *
+nvkm_drm_gem_prime_res_obj(struct drm_gem_object *obj)
+{
+	return (nvkm_bo_resv(to_nvkm_bo(obj)));
+}
+
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
 	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
@@ -202,6 +215,7 @@ static struct drm_driver nvkm_drm_driver = {
 	.prime_handle_to_fd = nvkm_drm_prime_handle_to_fd,
 	.prime_fd_to_handle = nvkm_drm_prime_fd_to_handle,
 	.gem_prime_export = nvkm_drm_gem_prime_export,
+	.gem_prime_res_obj = nvkm_drm_gem_prime_res_obj,
 	.gem_prime_import = drm_gem_prime_import,
 	.dumb_create = nvkm_bo_dumb_create,
 	.dumb_map_offset = nvkm_bo_dumb_map_offset,
@@ -270,6 +284,16 @@ struct nvkm_drm_file {
 	 * under vm_token by EXEC, decremented locklessly by completion. */
 	volatile u_int exec_inflight;
 	uint64_t vm_epoch;
+
+	/* Ordered per-file GPU job queue.  IOCTL handlers copy user data and
+	 * publish output fences before enqueueing; the worker waits dependency
+	 * fences and performs the actual EXEC/async VM_BIND work. */
+	struct work_struct job_work;
+	struct lwkt_token job_token;
+	struct nvkm_drm_job_list job_queue;
+	bool job_work_queued;
+	bool job_closing;
+	uint64_t job_epoch;
 };
 
 struct drm_nouveau_exec_push {
@@ -982,6 +1006,8 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	if (nfile == NULL)
 		return;
 
+	nvkm_drm_jobs_close(nfile);
+
 	LIST_FOREACH_MUTABLE(dchan, &nfile->channels, link, dchan_next) {
 		LIST_REMOVE(dchan, link);
 		nvkm_drm_channel_clear(sc, dchan);
@@ -1075,7 +1101,10 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 		return (-ENOMEM);
 	LIST_INIT(&nfile->vm_bindings);
 	LIST_INIT(&nfile->channels);
+	TAILQ_INIT(&nfile->job_queue);
 	lwkt_token_init(&nfile->vm_token, "nvkm-vm");
+	lwkt_token_init(&nfile->job_token, "nvkm-job");
+	INIT_WORK(&nfile->job_work, nvkm_drm_job_work);
 
 	/* nfile->vmm stays NULL; nvkm_drm_file_ensure_vmm builds it on the
 	 * first GPU use so probe-only opens stay cheap (see that helper). */
@@ -1451,6 +1480,7 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 
 	if (nfile == NULL)
 		return (-ENXIO);
+	nvkm_drm_jobs_flush(nfile);
 	dchan = nvkm_drm_channel_find(nfile, (uint32_t)req->channel);
 	if (dchan == NULL) {
 		nvkm_debugf(sc->dev,
@@ -1464,11 +1494,15 @@ nvkm_drm_ioctl_channel_free(struct drm_device *ddev, void *data,
 	return (0);
 }
 
-/* ---- DRM_NOUVEAU_VM_BIND ---- */
-static int nvkm_drm_wait_syncobjs(struct nvkm_softc *sc,
-	    struct drm_file *file_priv, uint32_t count, uint64_t wait_ptr);
-static int nvkm_drm_signal_sync_array(struct nvkm_softc *sc,
-	    struct drm_file *file_priv, uint32_t count, uint64_t sig_ptr);
+#define DRM_NOUVEAU_SYNC_SYNCOBJ	0x0
+#define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
+#define DRM_NOUVEAU_SYNC_TYPE_MASK	0xf
+
+struct drm_nouveau_sync {
+	uint32_t flags;
+	uint32_t handle;
+	uint64_t timeline_value;
+};
 
 #define DRM_NOUVEAU_VM_BIND_OP_MAP	0x0
 #define DRM_NOUVEAU_VM_BIND_OP_UNMAP	0x1
@@ -1495,93 +1529,38 @@ struct drm_nouveau_vm_bind {
 	uint64_t op_ptr;
 };
 
-static int
-nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
-    struct drm_file *file_priv)
+struct nvkm_drm_exec_signal;
+
+static int nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
+    struct drm_file *file_priv, struct nvkm_drm_file *nfile,
+    const struct drm_nouveau_vm_bind *req,
+    struct drm_nouveau_vm_bind_op *ops);
+
+static void
+nvkm_drm_vm_wait_idle_locked(struct nvkm_drm_file *nfile)
 {
-	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
-	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
-	struct drm_nouveau_vm_bind *req = data;
-	struct drm_nouveau_vm_bind_op *ops;
+	uint64_t epoch;
+
+	while (atomic_load_acq_int(&nfile->exec_inflight) != 0) {
+		epoch = nfile->vm_epoch;
+		lwkt_reltoken(&nfile->vm_token);
+		(void)tsleep(&nfile->vm_epoch, 0, "nvkvmb", hz / 100);
+		lwkt_gettoken(&nfile->vm_token);
+		if (epoch == nfile->vm_epoch)
+			continue;
+	}
+}
+
+static int
+nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
+    struct nvkm_drm_file *nfile, struct drm_nouveau_vm_bind_op *ops,
+    uint32_t op_count, struct drm_gem_object **objects)
+{
 	struct drm_nouveau_vm_bind_op *current_op = NULL;
 	int err = 0;
 	bool gsp_tok_held = false;
 	bool remap_started = false;
-	bool async_bind;
 	uint64_t profile_start;
-	uint64_t profile_total_start;
-
-	nvkm_debugf(sc->dev,
-	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
-	    req->op_count, req->wait_count, req->sig_count, req->flags);
-	if (sc->gsp_vmm == NULL) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND no gsp_vmm\n");
-		return (-ENXIO);
-	}
-	if (nfile == NULL)
-		return (-ENXIO);
-	if ((req->flags & ~DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0)
-		return (-EINVAL);
-	async_bind = (req->flags & DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0;
-	if (!async_bind && (req->wait_count != 0 || req->sig_count != 0))
-		return (-EINVAL);
-	profile_total_start = nvkm_drm_profile_now_us();
-	err = nvkm_drm_file_ensure_vmm(sc, nfile);
-	if (err != 0)
-		return (err);
-	sc->vm_bind_ioctl_count++;
-	sc->vm_bind_op_count += req->op_count;
-	if (req->op_count > sc->vm_bind_max_op_count)
-		sc->vm_bind_max_op_count = req->op_count;
-	if (async_bind)
-		sc->vm_bind_async_count++;
-	else
-		sc->vm_bind_sync_count++;
-	if (req->op_count > 1024) {
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
-		return (-EINVAL);
-	}
-	/*
-	 * We execute VM_BIND inline, but async VM_BIND still follows nouveau's
-	 * syncobj contract: wait fences order the CPU PTE writes, and signal
-	 * fences are installed after the writes are flushed.
-	 */
-	profile_start = nvkm_drm_profile_now_us();
-	if (req->wait_count != 0) {
-		err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
-		    req->wait_ptr);
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_wait_us,
-		    profile_start);
-		if (err != 0)
-			return (err);
-	}
-	if (req->op_count == 0) {
-		if (req->sig_count != 0) {
-			profile_start = nvkm_drm_profile_now_us();
-			err = nvkm_drm_signal_sync_array(sc, file_priv,
-			    req->sig_count, req->sig_ptr);
-			nvkm_drm_profile_add_us(&sc->vm_bind_profile_signal_us,
-			    profile_start);
-		}
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
-		    profile_total_start);
-		return (err);
-	}
-	profile_start = nvkm_drm_profile_now_us();
-	ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
-	err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
-	    sizeof(*ops) * req->op_count);
-	nvkm_drm_profile_add_us(&sc->vm_bind_profile_copyin_us,
-	    profile_start);
-	if (err != 0) {
-		kfree(ops);
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: VM_BIND copyin failed ops=%u err=%d\n",
-		    req->op_count, err);
-		return (-EFAULT);
-	}
 
 	/* vm_token (outer) serializes this remap against other remaps and
 	 * against concurrent EXEC charge on the file VMM; gsp_tok (inner)
@@ -1589,13 +1568,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 	profile_start = nvkm_drm_profile_now_us();
 	lwkt_gettoken(&nfile->vm_token);
 	remap_started = true;
+	nvkm_drm_vm_wait_idle_locked(nfile);
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
 	nvkm_drm_profile_add_us(&sc->vm_bind_profile_token_wait_us,
 	    profile_start);
 	profile_start = nvkm_drm_profile_now_us();
 
-	for (uint32_t i = 0; i < req->op_count; i++) {
+	for (uint32_t i = 0; i < op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
 
 		current_op = op;
@@ -1655,6 +1635,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			struct drm_gem_object *obj;
 			struct nvkm_bo *bo;
 			bool bo_pinned = false;
+			bool job_object = false;
 			uint32_t unmapped = 0;
 
 			if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
@@ -1703,7 +1684,13 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				continue;
 			}
 
-			obj = drm_gem_object_lookup(file_priv, op->handle);
+			if (objects != NULL && objects[i] != NULL) {
+				obj = objects[i];
+				job_object = true;
+			} else {
+				obj = drm_gem_object_lookup(file_priv,
+				    op->handle);
+			}
 			if (obj == NULL) {
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND missing BO idx=%u handle=%u\n",
@@ -1714,7 +1701,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			bo = to_nvkm_bo(obj);
 			if (op->bo_offset > obj->size ||
 			    op->range > obj->size - op->bo_offset) {
-				drm_gem_object_put_unlocked(obj);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND BO range invalid idx=%u handle=%u bo_off=0x%016jx range=0x%016jx size=0x%016jx\n",
 				    i, op->handle, (uintmax_t)op->bo_offset,
@@ -1730,12 +1718,14 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
 			    op->addr, op->range, false, &unmapped);
 			if (err != 0) {
-				drm_gem_object_put_unlocked(obj);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
 				break;
 			}
 			err = nvkm_bo_vm_bind_pin(bo);
 			if (err != 0) {
-				drm_gem_object_put_unlocked(obj);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
 				err = -err;
 				break;
 			}
@@ -1755,7 +1745,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				err = nvkm_bo_ensure_ttm_populated(bo);
 				if (err != 0) {
 					(void)nvkm_bo_vm_bind_unpin(bo);
-					drm_gem_object_put_unlocked(obj);
+					if (!job_object)
+						drm_gem_object_put_unlocked(obj);
 					err = -err;
 					break;
 				}
@@ -1769,7 +1760,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			    op->bo_offset, obj, err != 0 ? -err : 0);
 			if (err != 0) {
 				(void)nvkm_bo_vm_bind_unpin(bo);
-				drm_gem_object_put_unlocked(obj);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
 				err = -err;
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND map failed idx=%u err=%d\n",
@@ -1797,7 +1789,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				(void)nvkm_gsp_vmm_unmap_noflush(nfile->vmm,
 				    op->addr, op->range);
 				(void)nvkm_bo_vm_bind_unpin(bo);
-				drm_gem_object_put_unlocked(obj);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
 				err = -err;
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND track failed idx=%u err=%d\n",
@@ -1805,6 +1798,8 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 				break;
 			}
 			bo_pinned = false;
+			if (job_object)
+				objects[i] = NULL;
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND track addr=0x%016jx size=0x%016jx obj=%p\n",
 			    (uintmax_t)op->addr, (uintmax_t)op->range, obj);
@@ -1837,38 +1832,179 @@ out_unlock:
 		nvkm_drm_vm_wakeup(nfile);
 		lwkt_reltoken(&nfile->vm_token);
 	}
-	/* Binds completed synchronously: the signal array fires now. */
-	if (err == 0 && req->sig_count != 0) {
-		profile_start = nvkm_drm_profile_now_us();
-		err = nvkm_drm_signal_sync_array(sc, file_priv,
-		    req->sig_count, req->sig_ptr);
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_signal_us,
-		    profile_start);
-	}
-	nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
-	    profile_total_start);
 	if (err != 0 && current_op != NULL)
 		nvkm_drm_vm_bind_record_error(sc, current_op->op,
 		    current_op->flags, current_op->handle, current_op->addr,
 		    current_op->range, current_op->bo_offset, err);
-	kfree(ops);
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: VM_BIND complete ops=%u err=%d\n",
-	    req->op_count, err);
+	    op_count, err);
+	return (err);
+}
+
+static int
+nvkm_drm_vm_bind_prepare_objects(struct drm_file *file_priv,
+    struct drm_nouveau_vm_bind_op *ops, uint32_t op_count,
+    struct drm_gem_object ***pobjects)
+{
+	struct drm_gem_object **objects;
+	int err = 0;
+
+	*pobjects = NULL;
+	if (op_count == 0)
+		return (0);
+
+	objects = kcalloc(op_count, sizeof(*objects), GFP_KERNEL);
+	if (objects == NULL)
+		return (-ENOMEM);
+
+	for (uint32_t i = 0; i < op_count; i++) {
+		struct drm_nouveau_vm_bind_op *op = &ops[i];
+		struct drm_gem_object *obj;
+
+		if (op->range == 0 ||
+		    ((op->addr | op->bo_offset | op->range) &
+		     (NVKM_GMMU_PT_PAGE_SIZE - 1))) {
+			err = -EINVAL;
+			break;
+		}
+		switch (op->op) {
+		case DRM_NOUVEAU_VM_BIND_OP_MAP:
+			break;
+		case DRM_NOUVEAU_VM_BIND_OP_UNMAP:
+			continue;
+		default:
+			err = -EINVAL;
+			goto out;
+		}
+		if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0 ||
+		    op->handle == 0)
+			continue;
+
+		obj = drm_gem_object_lookup(file_priv, op->handle);
+		if (obj == NULL) {
+			err = -ENOENT;
+			break;
+		}
+		if (op->bo_offset > obj->size ||
+		    op->range > obj->size - op->bo_offset) {
+			drm_gem_object_put_unlocked(obj);
+			err = -EINVAL;
+			break;
+		}
+		objects[i] = obj;
+	}
+
+out:
+	if (err != 0) {
+		for (uint32_t i = 0; i < op_count; i++) {
+			if (objects[i] != NULL)
+				drm_gem_object_put_unlocked(objects[i]);
+		}
+		kfree(objects);
+		return (err);
+	}
+
+	*pobjects = objects;
+	return (0);
+}
+
+static void
+nvkm_drm_vm_bind_objects_put(struct drm_gem_object **objects,
+    uint32_t op_count)
+{
+	if (objects == NULL)
+		return;
+	for (uint32_t i = 0; i < op_count; i++) {
+		if (objects[i] != NULL)
+			drm_gem_object_put_unlocked(objects[i]);
+	}
+	kfree(objects);
+}
+
+static int
+nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+	struct drm_nouveau_vm_bind *req = data;
+	struct drm_nouveau_vm_bind_op *ops = NULL;
+	int err = 0;
+	bool async_bind;
+	uint64_t profile_start;
+	uint64_t profile_total_start;
+
+	nvkm_debugf(sc->dev,
+	    "nvkm_drm: VM_BIND begin ops=%u waits=%u sigs=%u flags=0x%08x\n",
+	    req->op_count, req->wait_count, req->sig_count, req->flags);
+	if (sc->gsp_vmm == NULL) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM_BIND no gsp_vmm\n");
+		return (-ENXIO);
+	}
+	if (nfile == NULL)
+		return (-ENXIO);
+	if ((req->flags & ~DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0)
+		return (-EINVAL);
+	async_bind = (req->flags & DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0;
+	if (!async_bind && (req->wait_count != 0 || req->sig_count != 0))
+		return (-EINVAL);
+	if (req->op_count > 1024) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: VM_BIND too many ops=%u\n", req->op_count);
+		return (-EINVAL);
+	}
+
+	profile_total_start = nvkm_drm_profile_now_us();
+	err = nvkm_drm_file_ensure_vmm(sc, nfile);
+	if (err != 0)
+		return (err);
+	sc->vm_bind_ioctl_count++;
+	sc->vm_bind_op_count += req->op_count;
+	if (req->op_count > sc->vm_bind_max_op_count)
+		sc->vm_bind_max_op_count = req->op_count;
+	if (async_bind)
+		sc->vm_bind_async_count++;
+	else
+		sc->vm_bind_sync_count++;
+
+	if (req->op_count != 0) {
+		profile_start = nvkm_drm_profile_now_us();
+		ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
+		err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
+		    sizeof(*ops) * req->op_count);
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_copyin_us,
+		    profile_start);
+		if (err != 0) {
+			kfree(ops);
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: VM_BIND copyin failed ops=%u err=%d\n",
+			    req->op_count, err);
+			return (-EFAULT);
+		}
+	}
+
+	if (async_bind) {
+		err = nvkm_drm_queue_vm_bind_async(sc, file_priv, nfile,
+		    req, ops);
+		ops = NULL;
+		nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
+		    profile_total_start);
+		return (err);
+	}
+
+	nvkm_drm_jobs_flush(nfile);
+	if (req->op_count != 0)
+		err = nvkm_drm_vm_bind_apply(sc, file_priv, nfile, ops,
+		    req->op_count, NULL);
+	kfree(ops);
+	nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
+	    profile_total_start);
 	return (err);
 }
 
 /* ---- DRM_NOUVEAU_EXEC ---- */
-#define DRM_NOUVEAU_SYNC_SYNCOBJ	0x0
-#define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
-#define DRM_NOUVEAU_SYNC_TYPE_MASK	0xf
-
-struct drm_nouveau_sync {
-	uint32_t flags;
-	uint32_t handle;
-	uint64_t timeline_value;
-};
-
 struct drm_nouveau_exec {
 	uint32_t channel;
 	uint32_t push_count;
@@ -1970,83 +2106,26 @@ nvkm_drm_exec_fence_create(struct nvkm_softc *sc, unsigned seqno)
 	return (&f->base);
 }
 
-/*
- * Install already-signalled fences on a drm_nouveau_sync signal array;
- * used by synchronous paths (VM_BIND) where the work is complete by
- * the time the ioctl returns.
- */
-static int
-nvkm_drm_signal_sync_array(struct nvkm_softc *sc, struct drm_file *file_priv,
-    uint32_t count, uint64_t sig_ptr)
+static void
+nvkm_drm_wait_fences_put(struct dma_fence **fences, uint32_t count)
 {
-	struct drm_nouveau_sync *sigs;
-	int err = 0;
-
-	if (count == 0)
-		return (0);
-	if (count > 64)
-		return (-EINVAL);
-
-	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
-	err = copyin((const void *)(uintptr_t)sig_ptr, sigs,
-	    sizeof(*sigs) * count);
-	if (err != 0) {
-		kfree(sigs);
-		return (-EFAULT);
-	}
-
-	for (uint32_t i = 0; i < count; i++) {
-		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
-		struct drm_syncobj *syncobj;
-		struct dma_fence *fence;
-
-		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
-		    type != DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
-			err = -EINVAL;
-			break;
-		}
-		syncobj = drm_syncobj_find(file_priv, sigs[i].handle);
-		if (syncobj == NULL) {
-			err = -ENOENT;
-			break;
-		}
-		fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
-		if (fence == NULL) {
-			drm_syncobj_put(syncobj);
-			err = -ENOMEM;
-			break;
-		}
-		dma_fence_signal(fence);
-		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
-			struct dma_fence_chain *chain = dma_fence_chain_alloc();
-
-			if (chain == NULL) {
-				dma_fence_put(fence);
-				drm_syncobj_put(syncobj);
-				err = -ENOMEM;
-				break;
-			}
-			/* add_point consumes the fence reference. */
-			drm_syncobj_add_point(syncobj, chain, fence,
-			    sigs[i].timeline_value);
-		} else {
-			drm_syncobj_replace_fence(syncobj, 0, fence);
-			dma_fence_put(fence);
-		}
-		drm_syncobj_put(syncobj);
-	}
-
-	kfree(sigs);
-	return (err);
+	if (fences == NULL)
+		return;
+	for (uint32_t i = 0; i < count; i++)
+		dma_fence_put(fences[i]);
+	kfree(fences);
 }
 
 static int
-nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
-    uint32_t count, uint64_t wait_ptr)
+nvkm_drm_collect_wait_syncobjs(struct nvkm_softc *sc,
+    struct drm_file *file_priv, uint32_t count, uint64_t wait_ptr,
+    struct dma_fence ***pfences)
 {
 	struct drm_nouveau_sync *waits;
+	struct dma_fence **fences;
 	int err = 0;
 
+	*pfences = NULL;
 	if (count == 0)
 		return (0);
 	sc->sync_wait_count += count;
@@ -2057,26 +2136,24 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 	}
 
 	waits = kmalloc(sizeof(*waits) * count, M_TEMP, M_WAITOK);
+	fences = kcalloc(count, sizeof(*fences), GFP_KERNEL);
+	if (fences == NULL) {
+		kfree(waits);
+		return (-ENOMEM);
+	}
 	err = copyin((const void *)(uintptr_t)wait_ptr, waits,
 	    sizeof(*waits) * count);
 	if (err != 0) {
-		kfree(waits);
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: sync wait copyin failed count=%u err=%d\n",
 		    count, err);
-		return (-EFAULT);
+		err = -EFAULT;
+		goto out;
 	}
 
 	for (uint32_t i = 0; i < count; i++) {
-		struct dma_fence *fence;
 		uint32_t type = waits[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
-		uint64_t wait_start;
-		int ret;
 
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: sync wait idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
-		    i, waits[i].flags, waits[i].handle,
-		    (uintmax_t)waits[i].timeline_value);
 		if (type != DRM_NOUVEAU_SYNC_SYNCOBJ &&
 		    type != DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
 			nvkm_debugf(sc->dev,
@@ -2085,49 +2162,33 @@ nvkm_drm_wait_syncobjs(struct nvkm_softc *sc, struct drm_file *file_priv,
 			err = -EINVAL;
 			break;
 		}
-
-		ret = drm_syncobj_find_fence(file_priv, waits[i].handle,
+		err = drm_syncobj_find_fence(file_priv, waits[i].handle,
 		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    waits[i].timeline_value : 0, &fence);
-		if (ret != 0) {
+		    waits[i].timeline_value : 0, &fences[i]);
+		if (err != 0) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: sync wait missing fence idx=%u handle=%u err=%d\n",
-			    i, waits[i].handle, ret);
-			err = ret;
+			    i, waits[i].handle, err);
 			break;
 		}
-		if (fence->ops == &nvkm_drm_fence_ops)
+		if (fences[i]->ops == &nvkm_drm_fence_ops)
 			sc->sync_wait_local_count++;
 		else
 			sc->sync_wait_external_count++;
-		if (dma_fence_is_signaled(fence)) {
+		if (dma_fence_is_signaled(fences[i]))
 			sc->sync_wait_already_signaled_count++;
-			dma_fence_put(fence);
-			continue;
-		}
-		sc->sync_wait_blocking_count++;
-		wait_start = nvkm_drm_profile_now_us();
-		ret = dma_fence_wait(fence, true);
-		nvkm_drm_profile_add_us(&sc->sync_wait_blocking_us,
-		    wait_start);
-		dma_fence_put(fence);
-		if (ret != 0) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: sync wait failed idx=%u handle=%u err=%d\n",
-			    i, waits[i].handle, ret);
-			err = ret;
-			break;
-		}
 	}
 
+out:
 	kfree(waits);
 	if (err != 0) {
+		nvkm_drm_wait_fences_put(fences, count);
 		sc->sync_wait_error_count++;
-		nvkm_debugf(sc->dev,
-		    "nvkm_drm: sync wait failed count=%u err=%d\n",
-		    count, err);
+		*pfences = NULL;
+		return (err);
 	}
-	return (err);
+	*pfences = fences;
+	return (0);
 }
 
 static void
@@ -2142,6 +2203,14 @@ nvkm_drm_exec_signals_put(struct nvkm_drm_exec_signal *signals,
 }
 
 static void
+nvkm_drm_fence_set_error(struct dma_fence *fence, int error)
+{
+	if (fence == NULL || error == 0)
+		return;
+	fence->error = error;
+}
+
+static void
 nvkm_drm_exec_signals_signal(struct nvkm_drm_exec_signal *signals,
     uint32_t count, int error)
 {
@@ -2149,7 +2218,7 @@ nvkm_drm_exec_signals_signal(struct nvkm_drm_exec_signal *signals,
 		return;
 	for (uint32_t i = 0; i < count; i++) {
 		if (error != 0)
-			dma_fence_set_error(signals[i].fence, error);
+			nvkm_drm_fence_set_error(signals[i].fence, error);
 		(void)dma_fence_signal(signals[i].fence);
 	}
 }
@@ -2159,7 +2228,7 @@ nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
 {
 	for (uint32_t i = 0; i < pending->fence_count; i++) {
 		if (error != 0)
-			dma_fence_set_error(pending->fences[i], error);
+			nvkm_drm_fence_set_error(pending->fences[i], error);
 		(void)dma_fence_signal(pending->fences[i]);
 	}
 }
@@ -2636,6 +2705,475 @@ out_free_arrays:
 	return (err);
 }
 
+enum nvkm_drm_job_type {
+	NVKM_DRM_JOB_EXEC,
+	NVKM_DRM_JOB_VM_BIND,
+};
+
+struct nvkm_drm_job_dep {
+	struct dma_fence_cb cb;
+	struct nvkm_drm_job *job;
+	struct dma_fence *fence;
+	bool armed;
+};
+
+struct nvkm_drm_job {
+	TAILQ_ENTRY(nvkm_drm_job) link;
+	struct kref refcount;
+	enum nvkm_drm_job_type type;
+	struct nvkm_softc *sc;
+	struct drm_file *file_priv;
+	struct nvkm_drm_file *nfile;
+	struct dma_fence **wait_fences;
+	struct nvkm_drm_job_dep *wait_deps;
+	uint32_t wait_count;
+	uint32_t dep_pending;
+	bool deps_armed;
+	bool queued;
+	bool running;
+	union {
+		struct {
+			uint32_t channel;
+			uint32_t push_count;
+			uint32_t sig_count;
+			struct drm_nouveau_exec_push *pushes;
+			struct nvkm_drm_exec_signal *signals;
+		} exec;
+		struct {
+			uint32_t op_count;
+			uint32_t sig_count;
+			struct drm_nouveau_vm_bind_op *ops;
+			struct drm_gem_object **objects;
+			struct nvkm_drm_exec_signal *signals;
+		} vm_bind;
+	};
+};
+
+static int nvkm_drm_exec_submit(struct nvkm_softc *sc,
+    struct drm_file *file_priv, struct nvkm_drm_file *nfile,
+    uint32_t channel_id, struct drm_nouveau_exec_push *pushes,
+    uint32_t push_count, struct nvkm_drm_exec_signal *signals,
+    uint32_t sig_count);
+
+static int
+nvkm_drm_job_queue_work_locked(struct nvkm_drm_file *nfile)
+{
+	if (nfile->job_work_queued)
+		return (0);
+	nfile->job_work_queued = true;
+	if (!queue_work(system_wq, &nfile->job_work)) {
+		nfile->job_work_queued = false;
+		return (-EIO);
+	}
+	return (0);
+}
+
+static void
+nvkm_drm_job_wakeup_locked(struct nvkm_drm_file *nfile)
+{
+	nfile->job_epoch++;
+	wakeup(&nfile->job_epoch);
+}
+
+static void
+nvkm_drm_job_signal(struct nvkm_drm_job *job, int error)
+{
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		nvkm_drm_exec_signals_signal(job->exec.signals,
+		    job->exec.sig_count, error);
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		nvkm_drm_exec_signals_signal(job->vm_bind.signals,
+		    job->vm_bind.sig_count, error);
+		break;
+	}
+}
+
+static void
+nvkm_drm_job_release(struct kref *kref)
+{
+	struct nvkm_drm_job *job =
+	    container_of(kref, struct nvkm_drm_job, refcount);
+
+	if (job == NULL)
+		return;
+	nvkm_drm_wait_fences_put(job->wait_fences, job->wait_count);
+	kfree(job->wait_deps);
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		nvkm_drm_exec_signals_put(job->exec.signals,
+		    job->exec.sig_count);
+		kfree(job->exec.pushes);
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		nvkm_drm_exec_signals_put(job->vm_bind.signals,
+		    job->vm_bind.sig_count);
+		nvkm_drm_vm_bind_objects_put(job->vm_bind.objects,
+		    job->vm_bind.op_count);
+		kfree(job->vm_bind.ops);
+		break;
+	}
+	kfree(job);
+}
+
+static void
+nvkm_drm_job_get(struct nvkm_drm_job *job)
+{
+	kref_get(&job->refcount);
+}
+
+static void
+nvkm_drm_job_put(struct nvkm_drm_job *job)
+{
+	if (job != NULL)
+		kref_put(&job->refcount, nvkm_drm_job_release);
+}
+
+static int
+nvkm_drm_job_prepare_deps(struct nvkm_drm_job *job)
+{
+	if (job->wait_count == 0)
+		return (0);
+	job->wait_deps = kcalloc(job->wait_count, sizeof(*job->wait_deps),
+	    GFP_KERNEL);
+	if (job->wait_deps == NULL)
+		return (-ENOMEM);
+	for (uint32_t i = 0; i < job->wait_count; i++) {
+		job->wait_deps[i].job = job;
+		job->wait_deps[i].fence = job->wait_fences[i];
+	}
+	return (0);
+}
+
+static void
+nvkm_drm_job_dep_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
+{
+	struct nvkm_drm_job_dep *dep =
+	    container_of(cb, struct nvkm_drm_job_dep, cb);
+	struct nvkm_drm_job *job = dep->job;
+	struct nvkm_drm_file *nfile = job->nfile;
+	struct nvkm_softc *sc = job->sc;
+	int err;
+
+	(void)fence;
+	sc->sync_job_dep_cb_count++;
+	lwkt_gettoken(&nfile->job_token);
+	if (dep->armed) {
+		dep->armed = false;
+		if (job->dep_pending != 0)
+			job->dep_pending--;
+		if (job->dep_pending == 0 && job->queued &&
+		    !nfile->job_closing) {
+			err = nvkm_drm_job_queue_work_locked(nfile);
+			if (err == 0)
+				sc->sync_job_dep_queue_count++;
+			else
+				sc->sync_job_dep_queue_error_count++;
+		}
+		nvkm_drm_job_wakeup_locked(nfile);
+		wakeup(job);
+	}
+	lwkt_reltoken(&nfile->job_token);
+
+	nvkm_drm_job_put(job);
+}
+
+static int
+nvkm_drm_job_arm_deps_locked(struct nvkm_drm_job *job)
+{
+	struct nvkm_softc *sc = job->sc;
+	int err;
+
+	if (job->deps_armed)
+		return (0);
+	job->deps_armed = true;
+
+	for (uint32_t i = 0; i < job->wait_count; i++) {
+		struct nvkm_drm_job_dep *dep = &job->wait_deps[i];
+		struct dma_fence *fence = dep->fence;
+
+		if (fence == NULL || dma_fence_is_signaled(fence))
+			continue;
+		sc->sync_wait_blocking_count++;
+		dep->armed = true;
+		job->dep_pending++;
+		nvkm_drm_job_get(job);
+		err = dma_fence_add_callback(fence, &dep->cb,
+		    nvkm_drm_job_dep_cb);
+		if (err == 0) {
+			sc->sync_job_wait_armed_count++;
+			continue;
+		}
+
+		dep->armed = false;
+		if (job->dep_pending != 0)
+			job->dep_pending--;
+		nvkm_drm_job_put(job);
+		if (err == -ENOENT)
+			continue;
+		sc->sync_wait_error_count++;
+		return (err);
+	}
+
+	return (0);
+}
+
+static void
+nvkm_drm_job_disarm_deps_locked(struct nvkm_drm_job *job)
+{
+	for (uint32_t i = 0; i < job->wait_count; i++) {
+		struct nvkm_drm_job_dep *dep = &job->wait_deps[i];
+
+		if (!dep->armed)
+			continue;
+		if (dma_fence_remove_callback(dep->fence, &dep->cb)) {
+			dep->armed = false;
+			if (job->dep_pending != 0)
+				job->dep_pending--;
+			nvkm_drm_job_put(job);
+		}
+	}
+}
+
+static bool
+nvkm_drm_job_has_armed_deps_locked(struct nvkm_drm_job *job)
+{
+	for (uint32_t i = 0; i < job->wait_count; i++) {
+		if (job->wait_deps[i].armed)
+			return (true);
+	}
+	return (false);
+}
+
+static void
+nvkm_drm_job_wait_deps_disarmed(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile = job->nfile;
+
+	for (;;) {
+		lwkt_gettoken(&nfile->job_token);
+		if (!nvkm_drm_job_has_armed_deps_locked(job)) {
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		lwkt_reltoken(&nfile->job_token);
+		(void)tsleep(job, 0, "nvkjcb", hz / 10);
+	}
+}
+
+static int
+nvkm_drm_job_enqueue(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile = job->nfile;
+	int err = 0;
+
+	lwkt_gettoken(&nfile->job_token);
+	if (nfile->job_closing) {
+		err = -ENODEV;
+	} else {
+		TAILQ_INSERT_TAIL(&nfile->job_queue, job, link);
+		job->queued = true;
+		err = nvkm_drm_job_queue_work_locked(nfile);
+		if (err != 0) {
+			job->queued = false;
+			TAILQ_REMOVE(&nfile->job_queue, job, link);
+		}
+	}
+	lwkt_reltoken(&nfile->job_token);
+	return (err);
+}
+
+static void
+nvkm_drm_job_run(struct nvkm_drm_job *job)
+{
+	int err;
+
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		err = nvkm_drm_exec_submit(job->sc, job->file_priv,
+		    job->nfile, job->exec.channel, job->exec.pushes,
+		    job->exec.push_count, job->exec.signals,
+		    job->exec.sig_count);
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		if (job->vm_bind.op_count != 0) {
+			err = nvkm_drm_vm_bind_apply(job->sc, job->file_priv,
+			    job->nfile, job->vm_bind.ops,
+			    job->vm_bind.op_count, job->vm_bind.objects);
+		} else {
+			err = 0;
+		}
+		nvkm_drm_exec_signals_signal(job->vm_bind.signals,
+		    job->vm_bind.sig_count, err);
+		break;
+	}
+}
+
+static void
+nvkm_drm_job_work(struct work_struct *work)
+{
+	struct nvkm_drm_file *nfile =
+	    container_of(work, struct nvkm_drm_file, job_work);
+	struct nvkm_drm_job *job;
+	int err;
+
+	for (;;) {
+		lwkt_gettoken(&nfile->job_token);
+		if (nfile->job_closing) {
+			nfile->job_work_queued = false;
+			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		job = TAILQ_FIRST(&nfile->job_queue);
+		if (job == NULL) {
+			nfile->job_work_queued = false;
+			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		err = nvkm_drm_job_arm_deps_locked(job);
+		if (err != 0) {
+			TAILQ_REMOVE(&nfile->job_queue, job, link);
+			job->queued = false;
+			nvkm_drm_job_disarm_deps_locked(job);
+			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+
+			nvkm_drm_job_signal(job, err);
+			nvkm_drm_job_put(job);
+			continue;
+		}
+		if (job->dep_pending != 0) {
+			nfile->job_work_queued = false;
+			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		TAILQ_REMOVE(&nfile->job_queue, job, link);
+		job->queued = false;
+		job->running = true;
+		job->sc->sync_job_ready_count++;
+		lwkt_reltoken(&nfile->job_token);
+
+		nvkm_drm_job_run(job);
+		lwkt_gettoken(&nfile->job_token);
+		job->running = false;
+		nvkm_drm_job_wakeup_locked(nfile);
+		lwkt_reltoken(&nfile->job_token);
+		nvkm_drm_job_put(job);
+	}
+}
+
+static void
+nvkm_drm_jobs_flush(struct nvkm_drm_file *nfile)
+{
+	struct nvkm_drm_job *job;
+
+	if (nfile == NULL)
+		return;
+	for (;;) {
+		flush_work(&nfile->job_work);
+		lwkt_gettoken(&nfile->job_token);
+		if (TAILQ_EMPTY(&nfile->job_queue)) {
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		job = TAILQ_FIRST(&nfile->job_queue);
+		if (job != NULL &&
+		    (!job->deps_armed || job->dep_pending == 0))
+			(void)nvkm_drm_job_queue_work_locked(nfile);
+		lwkt_reltoken(&nfile->job_token);
+		(void)tsleep(&nfile->job_epoch, 0, "nvkjfl", hz / 10);
+	}
+}
+
+static void
+nvkm_drm_jobs_close(struct nvkm_drm_file *nfile)
+{
+	struct nvkm_drm_job *job;
+
+	if (nfile == NULL)
+		return;
+
+	for (;;) {
+		lwkt_gettoken(&nfile->job_token);
+		nfile->job_closing = true;
+		job = TAILQ_FIRST(&nfile->job_queue);
+		if (job == NULL) {
+			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+			break;
+		}
+		TAILQ_REMOVE(&nfile->job_queue, job, link);
+		job->queued = false;
+		nvkm_drm_job_disarm_deps_locked(job);
+		nvkm_drm_job_wakeup_locked(nfile);
+		lwkt_reltoken(&nfile->job_token);
+
+		nvkm_drm_job_wait_deps_disarmed(job);
+		job->sc->sync_job_cancel_count++;
+		nvkm_drm_job_signal(job, -ECANCELED);
+		nvkm_drm_job_put(job);
+	}
+	flush_work(&nfile->job_work);
+}
+
+static int
+nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
+    struct drm_file *file_priv, struct nvkm_drm_file *nfile,
+    const struct drm_nouveau_vm_bind *req,
+    struct drm_nouveau_vm_bind_op *ops)
+{
+	struct nvkm_drm_job *job;
+	int err;
+
+	job = kzalloc(sizeof(*job), GFP_KERNEL);
+	if (job == NULL) {
+		kfree(ops);
+		return (-ENOMEM);
+	}
+	kref_init(&job->refcount);
+	job->type = NVKM_DRM_JOB_VM_BIND;
+	job->sc = sc;
+	job->file_priv = file_priv;
+	job->nfile = nfile;
+	job->vm_bind.op_count = req->op_count;
+	job->vm_bind.sig_count = req->sig_count;
+	job->vm_bind.ops = ops;
+
+	err = nvkm_drm_vm_bind_prepare_objects(file_priv, ops, req->op_count,
+	    &job->vm_bind.objects);
+	if (err != 0)
+		goto fail;
+
+	err = nvkm_drm_collect_wait_syncobjs(sc, file_priv, req->wait_count,
+	    req->wait_ptr, &job->wait_fences);
+	if (err != 0)
+		goto fail;
+	job->wait_count = req->wait_count;
+	err = nvkm_drm_job_prepare_deps(job);
+	if (err != 0)
+		goto fail;
+
+	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
+	    req->sig_ptr, &job->vm_bind.signals);
+	if (err != 0)
+		goto fail;
+
+	err = nvkm_drm_job_enqueue(job);
+	if (err != 0)
+		goto fail_signal;
+	return (0);
+
+fail_signal:
+	nvkm_drm_job_signal(job, err);
+fail:
+	nvkm_drm_job_put(job);
+	return (err);
+}
+
 static struct nvkm_drm_vm_binding *
 nvkm_drm_vm_binding_find_overlap(struct nvkm_drm_file *nfile, uint64_t addr,
     uint64_t size)
@@ -2652,16 +3190,15 @@ nvkm_drm_vm_binding_find_overlap(struct nvkm_drm_file *nfile, uint64_t addr,
 
 
 static int
-nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
-    struct drm_file *file_priv)
+nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
+    struct nvkm_drm_file *nfile, uint32_t channel_id,
+    struct drm_nouveau_exec_push *pushes, uint32_t push_count,
+    struct nvkm_drm_exec_signal *signals, uint32_t sig_count)
 {
-	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
-	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
-	struct drm_nouveau_exec *req = data;
+	struct drm_nouveau_exec req_storage;
+	struct drm_nouveau_exec *req = &req_storage;
 	struct nvkm_drm_chan *dchan;
 	struct nvkm_gsp_chan *chan;
-	struct drm_nouveau_exec_push *pushes = NULL;
-	struct nvkm_drm_exec_signal *signals = NULL;
 	struct nvkm_drm_exec_pending *pending = NULL;
 	struct dma_fence *exec_fence = NULL;
 	uint32_t *gpf, *post, *sema;
@@ -2679,6 +3216,12 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	bool submit_slot_allocated = false;
 	uint64_t push_va_lo = ~0ULL;
 	uint64_t push_va_hi = 0;
+
+	(void)file_priv;
+	memset(&req_storage, 0, sizeof(req_storage));
+	req->channel = channel_id;
+	req->push_count = push_count;
+	req->sig_count = sig_count;
 
 	if (nfile == NULL)
 		return (-ENXIO);
@@ -2700,17 +3243,11 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		    req->channel, chan);
 		return (-ENXIO);
 	}
-	profile_start = nvkm_drm_profile_now_us();
-	err = nvkm_drm_wait_syncobjs(sc, file_priv, req->wait_count,
-	    req->wait_ptr);
-	nvkm_drm_profile_add_us(&sc->exec_profile_wait_sync_us,
-	    profile_start);
-	if (err != 0)
-		return (err);
 	/*
 	 * Truly empty submit (no pushes, no signals): nothing to order or signal
-	 * (waits, if any, were satisfied above). NVK uses this as a device-loss
-	 * error probe after QueueWaitIdle. Signal-only submits (push_count == 0
+	 * (waits, if any, are handled by the queued job before this helper runs).
+	 * NVK uses this as a device-loss error probe after QueueWaitIdle.
+	 * Signal-only submits (push_count == 0
 	 * but sig_count > 0) deliberately fall through to the normal path below so
 	 * their signals are ordered behind the channel's in-flight work via the
 	 * completion trailer, matching nouveau (every EXEC, even push.count == 0,
@@ -2734,20 +3271,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	/* push_count may be 0 here for a signal-only submit; pushes stays NULL
 	 * and the push loop below runs zero times, leaving only the completion
 	 * trailer (which orders the signals behind in-flight channel work). */
-	if (req->push_count > 0) {
-		pushes = kmalloc(sizeof(*pushes) * req->push_count, M_TEMP,
-		    M_WAITOK);
-		err = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
-		    sizeof(*pushes) * req->push_count);
-		if (err != 0) {
-			kfree(pushes);
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: EXEC push copyin failed channel=%u pushes=%u err=%d\n",
-			    req->channel, req->push_count, err);
-			return (-EFAULT);
-		}
-	}
-
 	/* Pin the file VMM against remap for this submit's lifetime. Charge
 	 * exec_inflight under vm_token: gettoken blocks until any in-progress
 	 * remap releases the token, and once charged a later remap waits for
@@ -2883,13 +3406,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	nvkm_drm_profile_add_us(&sc->exec_profile_push_build_us,
 	    profile_push_start);
 
-	profile_start = nvkm_drm_profile_now_us();
-	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
-	    req->sig_ptr, &signals);
-	nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
-	    profile_start);
-	if (err != 0)
-		goto out_unlock;
 	if (signals != NULL && req->sig_count != 0) {
 		exec_fence = signals[0].fence;
 		sc->exec_signal_fence_count++;
@@ -2984,11 +3500,10 @@ out_unlock:
 		if (!exec_completion_queued || err != 0)
 			nvkm_drm_exec_signals_signal(signals, req->sig_count,
 			    err);
-		nvkm_drm_exec_signals_put(signals, req->sig_count);
 	} else if (exec_fence != NULL) {
 		if (!exec_completion_queued || err != 0) {
 			if (err != 0)
-				dma_fence_set_error(exec_fence, err);
+				nvkm_drm_fence_set_error(exec_fence, err);
 			(void)dma_fence_signal(exec_fence);
 		}
 		dma_fence_put(exec_fence);
@@ -3011,7 +3526,110 @@ out_unlock:
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC return channel=%u err=%d\n",
 		    req->channel, err);
-	kfree(pushes);
+	return (err);
+}
+
+static int
+nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
+    struct drm_file *file_priv)
+{
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+	struct drm_nouveau_exec *req = data;
+	struct nvkm_drm_chan *dchan;
+	struct nvkm_gsp_chan *chan;
+	struct nvkm_drm_job *job;
+	uint64_t profile_start;
+	int err;
+
+	if (nfile == NULL)
+		return (-ENXIO);
+	dchan = nvkm_drm_channel_find(nfile, req->channel);
+	nvkm_debugf(sc->dev,
+	    "nvkm_drm: EXEC queue channel=%u pushes=%u waits=%u sigs=%u\n",
+	    req->channel, req->push_count, req->wait_count, req->sig_count);
+	if (dchan == NULL) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC missing channel=%u\n", req->channel);
+		return (-ENOENT);
+	}
+	chan = dchan->chan;
+	if (chan == NULL || chan->submit_gpf.kva == NULL ||
+	    chan->submit_push.kva == NULL || chan->submit_sema.kva == NULL) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC channel=%u missing submit buffers chan=%p\n",
+		    req->channel, chan);
+		return (-ENXIO);
+	}
+	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC too many pushes channel=%u pushes=%u\n",
+		    req->channel, req->push_count);
+		return (-EINVAL);
+	}
+
+	if (req->push_count == 0 && req->sig_count == 0 &&
+	    req->wait_count == 0) {
+		return (nvkm_drm_exec_submit(sc, file_priv, nfile,
+		    req->channel, NULL, 0, NULL, 0));
+	}
+
+	job = kzalloc(sizeof(*job), GFP_KERNEL);
+	if (job == NULL)
+		return (-ENOMEM);
+	kref_init(&job->refcount);
+	job->type = NVKM_DRM_JOB_EXEC;
+	job->sc = sc;
+	job->file_priv = file_priv;
+	job->nfile = nfile;
+	job->exec.channel = req->channel;
+	job->exec.push_count = req->push_count;
+	job->exec.sig_count = req->sig_count;
+
+	if (req->push_count != 0) {
+		job->exec.pushes = kmalloc(sizeof(*job->exec.pushes) *
+		    req->push_count, M_TEMP, M_WAITOK);
+		err = copyin((const void *)(uintptr_t)req->push_ptr,
+		    job->exec.pushes,
+		    sizeof(*job->exec.pushes) * req->push_count);
+		if (err != 0) {
+			nvkm_debugf(sc->dev,
+			    "nvkm_drm: EXEC push copyin failed channel=%u pushes=%u err=%d\n",
+			    req->channel, req->push_count, err);
+			err = -EFAULT;
+			goto fail;
+		}
+	}
+
+	profile_start = nvkm_drm_profile_now_us();
+	err = nvkm_drm_collect_wait_syncobjs(sc, file_priv, req->wait_count,
+	    req->wait_ptr, &job->wait_fences);
+	nvkm_drm_profile_add_us(&sc->exec_profile_wait_sync_us,
+	    profile_start);
+	if (err != 0)
+		goto fail;
+	job->wait_count = req->wait_count;
+	err = nvkm_drm_job_prepare_deps(job);
+	if (err != 0)
+		goto fail;
+
+	profile_start = nvkm_drm_profile_now_us();
+	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
+	    req->sig_ptr, &job->exec.signals);
+	nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
+	    profile_start);
+	if (err != 0)
+		goto fail;
+
+	err = nvkm_drm_job_enqueue(job);
+	if (err != 0)
+		goto fail_signal;
+	return (0);
+
+fail_signal:
+	nvkm_drm_job_signal(job, err);
+fail:
+	nvkm_drm_job_put(job);
 	return (err);
 }
 
