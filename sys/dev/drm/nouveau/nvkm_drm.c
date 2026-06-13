@@ -19,6 +19,7 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_syncobj.h>
+#include <linux/err.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-fence-chain.h>
 #include <linux/ktime.h>
@@ -159,10 +160,17 @@ nvkm_drm_gem_prime_export(struct drm_device *dev, struct drm_gem_object *obj,
     int flags)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(dev);
+	struct nvkm_bo *bo = to_nvkm_bo(obj);
+	struct dma_buf *dmabuf;
 
-	if (sc != NULL)
+	if (bo->no_share)
+		return (ERR_PTR(-EPERM));
+
+	dmabuf = drm_gem_prime_export(dev, obj, flags);
+	if (!IS_ERR(dmabuf) && sc != NULL)
 		sc->prime_dma_buf_export_count++;
-	return (drm_gem_prime_export(dev, obj, flags));
+
+	return (dmabuf);
 }
 
 static struct drm_driver nvkm_drm_driver = {
