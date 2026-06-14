@@ -403,6 +403,33 @@ nvkm_gsp_bar1_wr64(struct nvkm_softc *sc, uint64_t gva, uint64_t val)
 	bus_write_8(sc->bar_res[1], gva, val);
 }
 
+/*
+ * nvkm_gsp_bar1_set_region64()
+ *
+ * Ownership:
+ *   Borrows sc and its BAR1 resource; it does not retain references or change
+ *   BAR1 virtual address ownership.
+ *
+ * Lifetime:
+ *   The caller must ensure [gva, gva + count * 8) is currently mapped in BAR1
+ *   for the full duration of the call.
+ *
+ * Threading:
+ *   Performs synchronous MMIO writes.  Callers provide higher-level
+ *   serialization for the page table or object being updated.
+ */
+void
+nvkm_gsp_bar1_set_region64(struct nvkm_softc *sc, uint64_t gva, uint64_t val,
+    uint32_t count)
+{
+	uint32_t i;
+
+	if (!sc->bar1.ready || count == 0)
+		return;
+	for (i = 0; i < count; i++)
+		bus_write_8(sc->bar_res[1], gva + (uint64_t)i * 8, val);
+}
+
 uint64_t
 nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t gva)
 {

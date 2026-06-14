@@ -943,6 +943,50 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_busy_addr);
 	sbuf_printf(sb, "vm_bind_busy_size = 0x%016llx\n",
 	    (unsigned long long)sc->vm_bind_busy_size);
+	sbuf_printf(sb, "vm_bind_empty_clear_skip_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_empty_clear_skip_count);
+	sbuf_printf(sb, "vm_bind_empty_clear_skip_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_empty_clear_skip_pages);
+	sbuf_printf(sb, "vm_bind_replace_clear_skip_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_replace_clear_skip_count);
+	sbuf_printf(sb, "vm_bind_replace_clear_skip_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_replace_clear_skip_pages);
+	sbuf_printf(sb, "vm_bind_map_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_count);
+	sbuf_printf(sb, "vm_bind_map_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_pages);
+	sbuf_printf(sb, "vm_bind_unmap_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_unmap_count);
+	sbuf_printf(sb, "vm_bind_unmap_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_unmap_pages);
+	sbuf_printf(sb, "vm_bind_map_null_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_null_count);
+	sbuf_printf(sb, "vm_bind_map_null_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_null_pages);
+	sbuf_printf(sb, "vm_bind_map_sparse_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_sparse_count);
+	sbuf_printf(sb, "vm_bind_map_sparse_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_sparse_pages);
+	sbuf_printf(sb, "vm_bind_unmap_sparse_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_unmap_sparse_count);
+	sbuf_printf(sb, "vm_bind_unmap_sparse_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_unmap_sparse_pages);
+	sbuf_printf(sb, "vm_bind_clear_unmap_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_unmap_count);
+	sbuf_printf(sb, "vm_bind_clear_unmap_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_unmap_pages);
+	sbuf_printf(sb, "vm_bind_clear_map_null_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_map_null_count);
+	sbuf_printf(sb, "vm_bind_clear_map_null_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_map_null_pages);
+	sbuf_printf(sb, "vm_bind_clear_map_sparse_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_map_sparse_count);
+	sbuf_printf(sb, "vm_bind_clear_map_sparse_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_map_sparse_pages);
+	sbuf_printf(sb, "vm_bind_clear_unmap_sparse_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_unmap_sparse_count);
+	sbuf_printf(sb, "vm_bind_clear_unmap_sparse_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_clear_unmap_sparse_pages);
 
 	sbuf_cat(sb, "\nvm_bind_profile_us\n");
 	sbuf_printf(sb, "wait_us = %llu\n",
@@ -994,12 +1038,20 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vmm_flush_us);
 	sbuf_printf(sb, "pte_fast_write_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_fast_write_count);
+	sbuf_printf(sb, "pte_bulk_write_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_bulk_write_count);
+	sbuf_printf(sb, "pte_bulk_write_pages = %llu\n",
+	    (unsigned long long)sc->vmm_pte_bulk_write_pages);
 	sbuf_printf(sb, "pte_fast_clear_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_fast_clear_count);
 	sbuf_printf(sb, "pte_fast_invalid_clear_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_fast_invalid_clear_count);
 	sbuf_printf(sb, "pte_fast_sparse_clear_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_fast_sparse_clear_count);
+	sbuf_printf(sb, "pte_bulk_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pte_bulk_clear_count);
+	sbuf_printf(sb, "pte_bulk_clear_pages = %llu\n",
+	    (unsigned long long)sc->vmm_pte_bulk_clear_pages);
 	sbuf_printf(sb, "pte_read_modify_write_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_read_modify_write_count);
 	sbuf_printf(sb, "user_pd0_count = %u\n", vmm_pd0_count);

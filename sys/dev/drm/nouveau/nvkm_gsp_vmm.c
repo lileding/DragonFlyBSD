@@ -108,8 +108,8 @@ nvkm_gsp_vmm_pt_free(struct nvkm_softc *sc, struct nvkm_gsp_vmm_pt *pt)
 static void
 nvkm_gsp_vmm_zero_bar1_page(struct nvkm_softc *sc, const struct nvkm_bar1_page *p)
 {
-	for (uint32_t off = 0; off < NVKM_GMMU_PT_PAGE_SIZE; off += 8)
-		nvkm_gsp_bar1_wr64(sc, p->bar1_gva + off, 0);
+	nvkm_gsp_bar1_set_region64(sc, p->bar1_gva, 0,
+	    NVKM_GMMU_PT_PAGE_SIZE / sizeof(uint64_t));
 	nvkm_gsp_bar1_flush(sc);
 }
 
@@ -117,8 +117,8 @@ static void
 nvkm_gsp_vmm_sparse_bar1_page(struct nvkm_softc *sc,
     const struct nvkm_bar1_page *p, uint64_t pte)
 {
-	for (uint32_t off = 0; off < NVKM_GMMU_PT_PAGE_SIZE; off += 8)
-		nvkm_gsp_bar1_wr64(sc, p->bar1_gva + off, pte);
+	nvkm_gsp_bar1_set_region64(sc, p->bar1_gva, pte,
+	    NVKM_GMMU_PT_PAGE_SIZE / sizeof(uint64_t));
 	nvkm_gsp_bar1_flush(sc);
 }
 
@@ -398,11 +398,38 @@ nvkm_gsp_vmm_write_pte(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t pte)
 	return (nvkm_gsp_vmm_write_pt_pte(vmm, pt, va, pte));
 }
 
+/*
+ * nvkm_gsp_vmm_write_new_valid_pt_pte()
+ *
+ * Ownership:
+ *   Borrows vmm and an already-owned user PT. It does not allocate page-table
+ *   pages or retain caller-owned mapping state.
+ *
+ * Lifetime:
+ *   The PT must remain linked in vmm while this helper writes the PTE. Callers
+ *   hold vmm->tok and pass an spt_idx within that PT.
+ *
+ * Threading:
+ *   Writes one valid leaf PTE synchronously through BAR1. The caller owns the
+ *   final flush/TLB invalidate boundary.
+ */
+static void
+nvkm_gsp_vmm_write_new_valid_pt_pte(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint32_t spt_idx, uint64_t pte)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	pt->conservative_pte_accounting = true;
+	if (pt->valid_pte_count < NVKM_GMMU_SPT_ENTRIES)
+		pt->valid_pte_count++;
+	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
+	sc->vmm_pte_fast_write_count++;
+}
+
 static int
 nvkm_gsp_vmm_write_new_valid_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t pte)
 {
-	struct nvkm_softc *sc = vmm->sc;
 	struct nvkm_gsp_vmm_user_pt *pt;
 	uint32_t spt_idx;
 	int err;
@@ -413,17 +440,69 @@ nvkm_gsp_vmm_write_new_valid_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	spt_idx = (uint32_t)((va >> NVKM_GMMU_SPT_SHIFT) &
 	    (NVKM_GMMU_SPT_ENTRIES - 1));
-	/*
-	 * VM_BIND removes overlapping tracked bindings before installing the
-	 * new BO mapping, so this PTE is not another live mapping. Nouveau's
-	 * hot map path writes PTEs directly; avoid the BAR1 read here and keep
-	 * PT reclamation conservative for pages touched by this fast path.
-	 */
-	pt->conservative_pte_accounting = true;
-	if (pt->valid_pte_count < NVKM_GMMU_SPT_ENTRIES)
-		pt->valid_pte_count++;
-	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
-	sc->vmm_pte_fast_write_count++;
+	nvkm_gsp_vmm_write_new_valid_pt_pte(vmm, pt, spt_idx, pte);
+	return (0);
+}
+
+static uint32_t
+nvkm_gsp_vmm_spt_chunk_count(uint64_t va, uint64_t size)
+{
+	uint64_t remaining_pages = size / NVKM_GMMU_PT_PAGE_SIZE;
+	uint32_t spt_idx = (uint32_t)((va >> NVKM_GMMU_SPT_SHIFT) &
+	    (NVKM_GMMU_SPT_ENTRIES - 1));
+
+	return ((uint32_t)MIN(remaining_pages,
+	    NVKM_GMMU_SPT_ENTRIES - spt_idx));
+}
+
+static void
+nvkm_gsp_vmm_note_bulk_write(struct nvkm_gsp_vmm *vmm, uint32_t count)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	if (count == 0)
+		return;
+	sc->vmm_pte_bulk_write_count++;
+	sc->vmm_pte_bulk_write_pages += count;
+}
+
+/*
+ * nvkm_gsp_vmm_ensure_pt_range()
+ *
+ * Ownership:
+ *   Borrows vmm and ensures the host-owned page-table pages for the requested
+ *   VA range exist.  It does not acquire ownership of caller data and does not
+ *   install leaf PTEs.
+ *
+ * Lifetime:
+ *   Allocated PT pages become part of vmm and live until the VMM destructor or
+ *   later page-table reclamation.  The caller retains ownership of the range.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  Callers may already hold higher-level DRM or
+ *   GSP serialization tokens.  This helper only prepares page-table storage; it
+ *   does not publish a mapping and does not perform a final TLB invalidate.
+ */
+int
+nvkm_gsp_vmm_ensure_pt_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	struct nvkm_gsp_vmm_user_pt *pt;
+	uint64_t off;
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
+		err = nvkm_gsp_vmm_user_pt_get(vmm, va + off, &pt);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+	}
+	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
@@ -464,6 +543,46 @@ nvkm_gsp_vmm_write_old_valid_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		sc->vmm_pte_fast_invalid_clear_count++;
 	else if (pte == nvkm_pte_to_sparse())
 		sc->vmm_pte_fast_sparse_clear_count++;
+}
+
+/*
+ * nvkm_gsp_vmm_write_old_valid_pte_range()
+ *
+ * Ownership:
+ *   Borrows vmm and an already-owned user PT.  It does not allocate or free
+ *   page-table pages and does not change sparse-region ownership.
+ *
+ * Lifetime:
+ *   The PT must remain linked in vmm for the duration of the call.  Callers
+ *   hold vmm->tok while walking the range.
+ *
+ * Threading:
+ *   Writes a contiguous run of leaf PTEs synchronously through BAR1.  The
+ *   caller is responsible for the final VMM flush/TLB invalidate boundary.
+ */
+static void
+nvkm_gsp_vmm_write_old_valid_pte_range(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint32_t spt_idx, uint32_t count,
+    uint64_t pte)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	if (count == 0)
+		return;
+	pt->conservative_pte_accounting = true;
+	if (pt->valid_pte_count > count)
+		pt->valid_pte_count -= count;
+	else
+		pt->valid_pte_count = 0;
+	nvkm_gsp_bar1_set_region64(sc, pt->spt.bar1_gva + spt_idx * 8,
+	    pte, count);
+	sc->vmm_pte_fast_clear_count += count;
+	if (pte == 0)
+		sc->vmm_pte_fast_invalid_clear_count += count;
+	else if (pte == nvkm_pte_to_sparse())
+		sc->vmm_pte_fast_sparse_clear_count += count;
+	sc->vmm_pte_bulk_clear_count++;
+	sc->vmm_pte_bulk_clear_pages += count;
 }
 
 static void
@@ -745,20 +864,34 @@ nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		return (EINVAL);
 
 	lwkt_gettoken(&vmm->tok);
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		vm_paddr_t paddr;
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t spt_idx, count, i;
 
-		err = nvkm_bo_paddr_at(bo, bo_offset + off, &paddr);
+		err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
 		}
-		err = nvkm_gsp_vmm_write_new_valid_pte(vmm, va + off,
-		    nvkm_pte_to_sysmem((uint64_t)paddr) | kind_bits);
-		if (err != 0) {
-			lwkt_reltoken(&vmm->tok);
-			return (err);
+		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+		    (NVKM_GMMU_SPT_ENTRIES - 1));
+		count = nvkm_gsp_vmm_spt_chunk_count(cur, size - off);
+		for (i = 0; i < count; i++) {
+			uint64_t page_off = off + (uint64_t)i * NVKM_GMMU_PT_PAGE_SIZE;
+			vm_paddr_t paddr;
+
+			err = nvkm_bo_paddr_at(bo, bo_offset + page_off, &paddr);
+			if (err != 0) {
+				lwkt_reltoken(&vmm->tok);
+				return (err);
+			}
+			nvkm_gsp_vmm_write_new_valid_pt_pte(vmm, pt,
+			    spt_idx + i, nvkm_pte_to_sysmem((uint64_t)paddr) |
+			    kind_bits);
 		}
+		nvkm_gsp_vmm_note_bulk_write(vmm, count);
+		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
@@ -787,19 +920,28 @@ nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		return (EINVAL);
 
 	lwkt_gettoken(&vmm->tok);
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		/*
-		 * VM_BIND removes overlapping tracked mappings before MAP reaches
-		 * this helper.  Match the sysmem BO fast path and Linux nouveau's
-		 * leaf map path by writing the new valid PTE directly instead of
-		 * reading the old PTE from BAR1 first.
-		 */
-		err = nvkm_gsp_vmm_write_new_valid_pte(vmm, va + off,
-		    nvkm_pte_to_vram_flags(paddr + off, priv, ro) | kind_bits);
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t spt_idx, count, i;
+
+		err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
 			return (err);
 		}
+		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+		    (NVKM_GMMU_SPT_ENTRIES - 1));
+		count = nvkm_gsp_vmm_spt_chunk_count(cur, size - off);
+		for (i = 0; i < count; i++) {
+			uint64_t page_off = off + (uint64_t)i * NVKM_GMMU_PT_PAGE_SIZE;
+
+			nvkm_gsp_vmm_write_new_valid_pt_pte(vmm, pt,
+			    spt_idx + i, nvkm_pte_to_vram_flags(paddr + page_off,
+			    priv, ro) | kind_bits);
+		}
+		nvkm_gsp_vmm_note_bulk_write(vmm, count);
+		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
@@ -854,12 +996,32 @@ nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		return (EINVAL);
 
 	lwkt_gettoken(&vmm->tok);
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		uint64_t pte = nvkm_gsp_vmm_range_has_sparse_region(vmm,
-		    va + off, NVKM_GMMU_PT_PAGE_SIZE) ?
-		    nvkm_pte_to_sparse() : 0;
+	if (!nvkm_gsp_vmm_range_has_sparse_region(vmm, va, size)) {
+		for (off = 0; off < size;) {
+			struct nvkm_gsp_vmm_user_pt *pt;
+			uint64_t cur = va + off;
+			uint64_t remaining_pages;
+			uint32_t spt_idx, count;
 
-		nvkm_gsp_vmm_write_old_valid_pte(vmm, va + off, pte);
+			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+			spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+			    (NVKM_GMMU_SPT_ENTRIES - 1));
+			remaining_pages = (size - off) / NVKM_GMMU_PT_PAGE_SIZE;
+			count = (uint32_t)MIN(remaining_pages,
+			    NVKM_GMMU_SPT_ENTRIES - spt_idx);
+			if (pt != NULL)
+				nvkm_gsp_vmm_write_old_valid_pte_range(vmm, pt,
+				    spt_idx, count, 0);
+			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+		}
+	} else {
+		for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
+			uint64_t pte = nvkm_gsp_vmm_range_has_sparse_region(vmm,
+			    va + off, NVKM_GMMU_PT_PAGE_SIZE) ?
+			    nvkm_pte_to_sparse() : 0;
+
+			nvkm_gsp_vmm_write_old_valid_pte(vmm, va + off, pte);
+		}
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
