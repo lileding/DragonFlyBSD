@@ -19,11 +19,13 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_syncobj.h>
+#include <linux/bitops.h>
 #include <linux/err.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-fence-chain.h>
 #include <linux/kref.h>
 #include <linux/ktime.h>
+#include <linux/reservation.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <machine/pmap.h>
@@ -59,6 +61,7 @@ static int nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv);
 static void nvkm_drm_postclose(struct drm_device *ddev,
     struct drm_file *file_priv);
 static void nvkm_drm_lastclose(struct drm_device *ddev);
+static unsigned int nvkm_drm_primary_client_count(struct drm_device *ddev);
 static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
     struct nvkm_gsp_chan *chan, int error);
 static void nvkm_drm_job_work(struct work_struct *work);
@@ -280,6 +283,33 @@ struct nvkm_drm_file {
 	 * that ordering, and synchronous VM_BIND only waits for its own bind job.
 	 * Order is always vm_token -> gsp_tok. */
 	struct lwkt_token vm_token;
+
+	/* Private GPUVM reservation object.
+	 *
+	 * Linux nouveau publishes EXEC fences through drm_gpuvm_exec using
+	 * dma_resv usage metadata. DragonFly's current reservation_object has no
+	 * usage classes, so VM-wide EXEC fences live here instead of being
+	 * exported as per-BO dma-buf content fences. */
+	struct reservation_object vm_resv;
+
+	/*
+	 * Serializes the userspace-visible submit point for EXEC and VM_BIND.
+	 *
+	 * Ownership:
+	 *   Owned by the drm_file; callers borrow it only for the duration of a
+	 *   single ioctl submit sequence.
+	 *
+	 * Lifetime:
+	 *   Initialized at open and valid until postclose has drained and
+	 *   cancelled this file's job queue.
+	 *
+	 * Threading:
+	 *   Guards the order in which a job publishes reservation fences, publishes
+	 *   out-sync fences, and becomes visible to the per-file job queue.  Worker
+	 *   execution does not take this lock, matching Linux nouveau's scheduler
+	 *   submit mutex rather than turning execution itself into a global lock.
+	 */
+	struct lock job_submit_lock;
 
 	/* Ordered per-file GPU job queue.  IOCTL handlers copy user data and
 	 * publish output fences before enqueueing; the worker waits dependency
@@ -1104,6 +1134,7 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 		nfile->vmm = NULL;
 	}
 
+	reservation_object_fini(&nfile->vm_resv);
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: postclose released bindings=%u channels=%u\n",
 	    binding_count, channel_count);
@@ -1172,6 +1203,8 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 	TAILQ_INIT(&nfile->job_queue);
 	lwkt_token_init(&nfile->vm_token, "nvkm-vm");
 	lwkt_token_init(&nfile->job_token, "nvkm-job");
+	lockinit(&nfile->job_submit_lock, "nvkjsb", 0, 0);
+	reservation_object_init(&nfile->vm_resv);
 	INIT_WORK(&nfile->job_work, nvkm_drm_job_work);
 
 	/* nfile->vmm stays NULL; nvkm_drm_file_ensure_vmm builds it on the
@@ -1190,10 +1223,23 @@ static void
 nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
+	unsigned int primary_clients;
 	int err;
 
 	if (sc == NULL)
 		return;
+
+	primary_clients = nvkm_drm_primary_client_count(ddev);
+	if (primary_clients != 0) {
+		sc->kms_restore_skip_primary_count++;
+		sc->kms_restore_last_primary_count = primary_clients;
+		sc->kms_restore_last_open_count = ddev->open_count;
+		nvkm_debugf(sc->dev,
+		    "drm: skip %s console restore: primary_clients=%u "
+		    "open_count=%d\n",
+		    reason, primary_clients, ddev->open_count);
+		return;
+	}
 
 	err = nvkm_drm_kms_schedule(sc, reason);
 	if (err != 0)
@@ -1206,6 +1252,26 @@ static void
 nvkm_drm_lastclose(struct drm_device *ddev)
 {
 	nvkm_drm_restore_console(ddev, "lastclose");
+}
+
+static unsigned int
+nvkm_drm_primary_client_count(struct drm_device *ddev)
+{
+	struct drm_file *file_priv;
+	unsigned int count = 0;
+
+	if (ddev == NULL)
+		return (0);
+
+	mutex_lock(&ddev->filelist_mutex);
+	list_for_each_entry(file_priv, &ddev->filelist, lhead) {
+		if (file_priv->minor != NULL &&
+		    file_priv->minor->type == DRM_MINOR_PRIMARY)
+			count++;
+	}
+	mutex_unlock(&ddev->filelist_mutex);
+
+	return (count);
 }
 
 /* ---- Helper: locate nvkm_softc from drm_file ---- */
@@ -1599,10 +1665,15 @@ struct drm_nouveau_vm_bind {
 
 struct nvkm_drm_exec_signal;
 
-static int nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
+static int nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
     struct drm_file *file_priv, struct nvkm_drm_file *nfile,
     const struct drm_nouveau_vm_bind *req,
-    struct drm_nouveau_vm_bind_op *ops);
+    struct drm_nouveau_vm_bind_op *ops, bool sync);
+
+static int nvkm_drm_vm_bind_attach_resv_fence(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, struct drm_nouveau_vm_bind_op *ops,
+    uint32_t op_count, struct drm_gem_object **objects,
+    struct dma_fence *fence);
 
 static int
 nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
@@ -2021,7 +2092,9 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 
 	if (req->op_count != 0) {
 		profile_start = nvkm_drm_profile_now_us();
-		ops = kmalloc(sizeof(*ops) * req->op_count, M_TEMP, M_WAITOK);
+		ops = kmalloc_array(req->op_count, sizeof(*ops), GFP_KERNEL);
+		if (ops == NULL)
+			return (-ENOMEM);
 		err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
 		    sizeof(*ops) * req->op_count);
 		nvkm_drm_profile_add_us(&sc->vm_bind_profile_copyin_us,
@@ -2035,22 +2108,19 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		}
 	}
 
-	if (async_bind) {
-		err = nvkm_drm_queue_vm_bind_async(sc, file_priv, nfile,
-		    req, ops);
+	if (async_bind || req->op_count != 0) {
+		err = nvkm_drm_queue_vm_bind_job(sc, file_priv, nfile,
+		    req, ops, !async_bind);
 		ops = NULL;
 		nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
 		    profile_total_start);
 		return (err);
 	}
 
-	if (req->op_count != 0)
-		err = nvkm_drm_vm_bind_apply(sc, file_priv, nfile, ops,
-		    req->op_count, NULL);
 	kfree(ops);
 	nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
 	    profile_total_start);
-	return (err);
+	return (0);
 }
 
 /* ---- DRM_NOUVEAU_EXEC ---- */
@@ -2112,6 +2182,10 @@ struct nvkm_drm_exec_fence {
 
 struct nvkm_drm_exec_signal {
 	struct dma_fence *fence;
+	struct drm_syncobj *syncobj;
+	struct dma_fence_chain *chain;
+	uint64_t timeline_value;
+	uint32_t type;
 };
 
 static const char *
@@ -2139,6 +2213,62 @@ static const struct dma_fence_ops nvkm_drm_fence_ops = {
 	.signaled = nvkm_drm_fence_is_signaled,
 	.wait = dma_fence_default_wait,
 };
+
+/*
+ * nvkm_drm_fence_flag_signaled()
+ *
+ * Ownership:
+ *   Borrows fence.  It does not take, drop, or publish a dma_fence
+ *   reference.
+ *
+ * Lifetime:
+ *   The caller must hold a valid fence reference for the duration of the
+ *   call.  This helper samples only the software completion flag and must
+ *   not be used for functional wait decisions.
+ *
+ * Threading:
+ *   Lockless diagnostic read.  The value is best-effort telemetry and may
+ *   race with a concurrent signal path.
+ */
+static bool
+nvkm_drm_fence_flag_signaled(struct dma_fence *fence)
+{
+	return (fence != NULL &&
+	    test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags));
+}
+
+/*
+ * nvkm_drm_exec_fence_hw_ready()
+ *
+ * Ownership:
+ *   Borrows fence and reads the nvkm EXEC fence payload in place.  It never
+ *   takes ownership and never calls dma_fence_signal().
+ *
+ * Lifetime:
+ *   The caller must hold a valid fence reference.  For nvkm EXEC fences the
+ *   semaphore pointer remains owned by the pending EXEC/job object; a NULL
+ *   pointer means the fence has not been armed yet.
+ *
+ * Threading:
+ *   Lockless diagnostic read paired with a CPU load fence before sampling the
+ *   GPU-written semaphore value.  It is telemetry only; completion is still
+ *   published by the normal dma_fence signal path.
+ */
+static bool
+nvkm_drm_exec_fence_hw_ready(struct dma_fence *fence)
+{
+	struct nvkm_drm_exec_fence *f;
+	volatile uint32_t *sema;
+
+	if (fence == NULL || fence->ops != &nvkm_drm_fence_ops)
+		return (false);
+	f = container_of(fence, struct nvkm_drm_exec_fence, base);
+	sema = f->sema;
+	if (sema == NULL)
+		return (false);
+	cpu_lfence();
+	return (*sema == f->payload);
+}
 
 static struct dma_fence *
 nvkm_drm_exec_fence_create(struct nvkm_softc *sc, unsigned seqno)
@@ -2186,8 +2316,11 @@ nvkm_drm_collect_wait_syncobjs(struct nvkm_softc *sc,
 		return (-EINVAL);
 	}
 
-	waits = kmalloc(sizeof(*waits) * count, M_TEMP, M_WAITOK);
+	waits = kmalloc_array(count, sizeof(*waits), GFP_KERNEL);
 	fences = kcalloc(count, sizeof(*fences), GFP_KERNEL);
+	if (waits == NULL) {
+		return (-ENOMEM);
+	}
 	if (fences == NULL) {
 		kfree(waits);
 		return (-ENOMEM);
@@ -2259,9 +2392,56 @@ nvkm_drm_exec_signals_put(struct nvkm_drm_exec_signal *signals,
 {
 	if (signals == NULL)
 		return;
-	for (uint32_t i = 0; i < count; i++)
+	for (uint32_t i = 0; i < count; i++) {
 		dma_fence_put(signals[i].fence);
+		if (signals[i].chain != NULL)
+			dma_fence_chain_free(signals[i].chain);
+		if (signals[i].syncobj != NULL)
+			drm_syncobj_put(signals[i].syncobj);
+	}
 	kfree(signals);
+}
+
+/*
+ * nvkm_drm_exec_signals_publish()
+ *
+ * Ownership:
+ *   Consumes each prepared syncobj reference stored in signals.  For timeline
+ *   syncobjs it also transfers ownership of the prepared dma_fence_chain node
+ *   to drm_syncobj_add_point().  The per-signal fence reference remains owned
+ *   by signals and is released by nvkm_drm_exec_signals_put().
+ *
+ * Lifetime:
+ *   Must be called after the job done fence exists and before the job can be
+ *   observed by the worker queue.  After this returns, userspace may wait on
+ *   the published syncobj while the job object still owns the fence reference
+ *   needed to signal completion.
+ *
+ * Threading:
+ *   Called under nfile->job_submit_lock so out-sync publication is ordered with
+ *   reservation-fence publication and per-file job enqueue.
+ */
+static void
+nvkm_drm_exec_signals_publish(struct nvkm_drm_exec_signal *signals,
+    uint32_t count)
+{
+	if (signals == NULL)
+		return;
+	for (uint32_t i = 0; i < count; i++) {
+		if (signals[i].syncobj == NULL)
+			continue;
+		if (signals[i].type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
+			drm_syncobj_add_point(signals[i].syncobj,
+			    signals[i].chain, dma_fence_get(signals[i].fence),
+			    signals[i].timeline_value);
+			signals[i].chain = NULL;
+		} else {
+			drm_syncobj_replace_fence(signals[i].syncobj, 0,
+			    signals[i].fence);
+		}
+		drm_syncobj_put(signals[i].syncobj);
+		signals[i].syncobj = NULL;
+	}
 }
 
 static void
@@ -2282,6 +2462,25 @@ nvkm_drm_exec_signals_signal(struct nvkm_drm_exec_signal *signals,
 		if (error != 0)
 			nvkm_drm_fence_set_error(signals[i].fence, error);
 		(void)dma_fence_signal(signals[i].fence);
+	}
+}
+
+static void
+nvkm_drm_probe_pending_signal(struct nvkm_softc *sc,
+    const struct nvkm_drm_exec_pending *pending, int error)
+{
+	if (sc == NULL || pending == NULL)
+		return;
+
+	sc->exec_pending_signal_count++;
+	if (error != 0)
+		sc->exec_pending_signal_error_count++;
+	sc->exec_pending_signal_fence_count += pending->fence_count;
+	for (uint32_t i = 0; i < pending->fence_count; i++) {
+		if (nvkm_drm_fence_flag_signaled(pending->fences[i]))
+			sc->exec_pending_signal_already_signaled_count++;
+		if (nvkm_drm_exec_fence_hw_ready(pending->fences[i]))
+			sc->exec_pending_signal_hw_ready_count++;
 	}
 }
 
@@ -2460,14 +2659,14 @@ nvkm_drm_exec_pending_create(struct nvkm_gsp_chan *chan,
 	pending->trace_seq = trace_seq;
 	pending->trace_first = trace_first;
 	pending->trace_count = trace_count;
-	if (signals != NULL && sig_count != 0) {
-		pending->fence_count = sig_count;
-		for (uint32_t i = 0; i < sig_count; i++)
-			pending->fences[i] = dma_fence_get(signals[i].fence);
-	} else {
-		pending->fence_count = 1;
-		pending->fences[0] = dma_fence_get(exec_fence);
+	(void)signals;
+	(void)sig_count;
+	if (exec_fence == NULL) {
+		kfree(pending);
+		return (NULL);
 	}
+	pending->fence_count = 1;
+	pending->fences[0] = dma_fence_get(exec_fence);
 	return (pending);
 }
 
@@ -2496,6 +2695,7 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 
 		LIST_REMOVE(pending, link);
 		nvkm_drm_exec_trace_complete(sc, pending, error);
+		nvkm_drm_probe_pending_signal(sc, pending, error);
 		nvkm_drm_exec_pending_signal(pending, error);
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
@@ -2615,6 +2815,7 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 		pending->chan->fault_error = error;
 		LIST_REMOVE(pending, link);
 		nvkm_drm_exec_trace_complete(sc, pending, error);
+		nvkm_drm_probe_pending_signal(sc, pending, error);
 		nvkm_drm_exec_pending_signal(pending, error);
 		sc->exec_async_wait_error_count++;
 		atomic_store_rel_int(&pending->done, 1);
@@ -2638,6 +2839,7 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 
 		LIST_REMOVE(pending, link);
 		nvkm_drm_exec_trace_complete(sc, pending, 0);
+		nvkm_drm_probe_pending_signal(sc, pending, 0);
 		nvkm_drm_exec_pending_signal(pending, 0);
 		sc->exec_async_complete_count++;
 		atomic_store_rel_int(&pending->done, 1);
@@ -2651,16 +2853,17 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 static int
 nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
     struct drm_file *file_priv, uint32_t count, uint64_t sig_ptr,
-    struct nvkm_drm_exec_signal **psignals)
+    struct dma_fence *done_fence, struct nvkm_drm_exec_signal **psignals)
 {
 	struct drm_nouveau_sync *sigs;
-	struct drm_syncobj **syncobjs;
 	struct nvkm_drm_exec_signal *signals;
 	int err = 0;
 
 	*psignals = NULL;
 	if (count == 0)
 		return (0);
+	if (done_fence == NULL)
+		return (-EINVAL);
 	sc->sync_signal_count += count;
 	if (count > 64) {
 		nvkm_debugf(sc->dev,
@@ -2668,10 +2871,9 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 		return (-EINVAL);
 	}
 
-	sigs = kmalloc(sizeof(*sigs) * count, M_TEMP, M_WAITOK);
-	syncobjs = kcalloc(count, sizeof(*syncobjs), GFP_KERNEL);
+	sigs = kmalloc_array(count, sizeof(*sigs), GFP_KERNEL);
 	signals = kcalloc(count, sizeof(*signals), GFP_KERNEL);
-	if (syncobjs == NULL || signals == NULL) {
+	if (sigs == NULL || signals == NULL) {
 		err = -ENOMEM;
 		goto out_free_arrays;
 	}
@@ -2688,7 +2890,6 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 
 	for (uint32_t i = 0; i < count; i++) {
 		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
-		unsigned seqno;
 
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: sync signal prepare idx=%u flags=0x%08x handle=%u timeline=0x%016jx\n",
@@ -2702,47 +2903,24 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 			err = -EINVAL;
 			goto out_free_arrays;
 		}
-		syncobjs[i] = drm_syncobj_find(file_priv, sigs[i].handle);
-		if (syncobjs[i] == NULL) {
+		signals[i].syncobj = drm_syncobj_find(file_priv,
+		    sigs[i].handle);
+		if (signals[i].syncobj == NULL) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: sync signal missing syncobj idx=%u handle=%u\n",
 			    i, sigs[i].handle);
 			err = -ENOENT;
 			goto out_free_arrays;
 		}
-
-		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ)
-			seqno = (unsigned)sigs[i].timeline_value;
-		else
-			seqno = ++sc->fence_seqno;
-		signals[i].fence = nvkm_drm_exec_fence_create(sc, seqno);
-		if (signals[i].fence == NULL) {
-			nvkm_debugf(sc->dev,
-			    "nvkm_drm: sync signal fence alloc failed idx=%u handle=%u\n",
-			    i, sigs[i].handle);
-			err = -ENOMEM;
-			goto out_free_arrays;
-		}
-	}
-
-	for (uint32_t i = 0; i < count; i++) {
-		uint32_t type = sigs[i].flags & DRM_NOUVEAU_SYNC_TYPE_MASK;
-
+		signals[i].type = type;
+		signals[i].timeline_value = sigs[i].timeline_value;
+		signals[i].fence = dma_fence_get(done_fence);
 		if (type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ) {
-			struct dma_fence_chain *chain;
-
-			chain = dma_fence_chain_alloc();
-			if (chain == NULL) {
+			signals[i].chain = dma_fence_chain_alloc();
+			if (signals[i].chain == NULL) {
 				err = -ENOMEM;
 				goto out_free_arrays;
 			}
-			/* add_point consumes a payload reference. */
-			drm_syncobj_add_point(syncobjs[i], chain,
-			    dma_fence_get(signals[i].fence),
-			    sigs[i].timeline_value);
-		} else {
-			drm_syncobj_replace_fence(syncobjs[i], 0,
-			    signals[i].fence);
 		}
 	}
 
@@ -2750,13 +2928,6 @@ nvkm_drm_prepare_signal_syncobjs(struct nvkm_softc *sc,
 	signals = NULL;
 
 out_free_arrays:
-	if (syncobjs != NULL) {
-		for (uint32_t i = 0; i < count; i++) {
-			if (syncobjs[i] != NULL)
-				drm_syncobj_put(syncobjs[i]);
-		}
-		kfree(syncobjs);
-	}
 	nvkm_drm_exec_signals_put(signals, count);
 	kfree(sigs);
 	if (err != 0) {
@@ -2787,10 +2958,13 @@ struct nvkm_drm_job {
 	struct nvkm_softc *sc;
 	struct drm_file *file_priv;
 	struct nvkm_drm_file *nfile;
+	struct dma_fence *done_fence;
 	struct dma_fence **wait_fences;
 	struct nvkm_drm_job_dep *wait_deps;
+	int result;
 	uint32_t wait_count;
 	uint32_t dep_pending;
+	bool completed;
 	bool deps_armed;
 	bool queued;
 	bool running;
@@ -2815,8 +2989,8 @@ struct nvkm_drm_job {
 static int nvkm_drm_exec_submit(struct nvkm_softc *sc,
     struct drm_file *file_priv, struct nvkm_drm_file *nfile,
     uint32_t channel_id, struct drm_nouveau_exec_push *pushes,
-    uint32_t push_count, struct nvkm_drm_exec_signal *signals,
-    uint32_t sig_count);
+    uint32_t push_count, struct dma_fence *done_fence,
+    struct nvkm_drm_exec_signal *signals, uint32_t sig_count);
 
 static int
 nvkm_drm_job_queue_work_locked(struct nvkm_drm_file *nfile)
@@ -2841,6 +3015,20 @@ nvkm_drm_job_wakeup_locked(struct nvkm_drm_file *nfile)
 static void
 nvkm_drm_job_signal(struct nvkm_drm_job *job, int error)
 {
+	if (job->done_fence != NULL) {
+		job->sc->job_done_signal_count++;
+		if (error != 0)
+			job->sc->job_done_signal_error_count++;
+		if (nvkm_drm_fence_flag_signaled(job->done_fence))
+			job->sc->job_done_signal_already_signaled_count++;
+		if (nvkm_drm_exec_fence_hw_ready(job->done_fence))
+			job->sc->job_done_signal_hw_ready_count++;
+		if (error != 0)
+			nvkm_drm_fence_set_error(job->done_fence, error);
+		(void)dma_fence_signal(job->done_fence);
+		return;
+	}
+
 	switch (job->type) {
 	case NVKM_DRM_JOB_EXEC:
 		nvkm_drm_exec_signals_signal(job->exec.signals,
@@ -2861,6 +3049,7 @@ nvkm_drm_job_release(struct kref *kref)
 
 	if (job == NULL)
 		return;
+	dma_fence_put(job->done_fence);
 	nvkm_drm_wait_fences_put(job->wait_fences, job->wait_count);
 	kfree(job->wait_deps);
 	switch (job->type) {
@@ -3047,7 +3236,28 @@ nvkm_drm_job_enqueue(struct nvkm_drm_job *job)
 	return (err);
 }
 
-static void
+static int
+nvkm_drm_job_wait_complete(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile = job->nfile;
+	int result;
+
+	for (;;) {
+		lwkt_gettoken(&nfile->job_token);
+		if (job->completed) {
+			result = job->result;
+			lwkt_reltoken(&nfile->job_token);
+			return (result);
+		}
+		if (!job->running && !nfile->job_work_queued &&
+		    (!job->queued || job->dep_pending == 0))
+			(void)nvkm_drm_job_queue_work_locked(nfile);
+		lwkt_reltoken(&nfile->job_token);
+		(void)tsleep(job, 0, "nvkjsy", hz / 10);
+	}
+}
+
+static int
 nvkm_drm_job_run(struct nvkm_drm_job *job)
 {
 	int err;
@@ -3056,7 +3266,7 @@ nvkm_drm_job_run(struct nvkm_drm_job *job)
 	case NVKM_DRM_JOB_EXEC:
 		err = nvkm_drm_exec_submit(job->sc, job->file_priv,
 		    job->nfile, job->exec.channel, job->exec.pushes,
-		    job->exec.push_count, job->exec.signals,
+		    job->exec.push_count, job->done_fence, job->exec.signals,
 		    job->exec.sig_count);
 		break;
 	case NVKM_DRM_JOB_VM_BIND:
@@ -3067,10 +3277,10 @@ nvkm_drm_job_run(struct nvkm_drm_job *job)
 		} else {
 			err = 0;
 		}
-		nvkm_drm_exec_signals_signal(job->vm_bind.signals,
-		    job->vm_bind.sig_count, err);
+		nvkm_drm_job_signal(job, err);
 		break;
 	}
+	return (err);
 }
 
 static void
@@ -3100,8 +3310,11 @@ nvkm_drm_job_work(struct work_struct *work)
 		if (err != 0) {
 			TAILQ_REMOVE(&nfile->job_queue, job, link);
 			job->queued = false;
+			job->result = err;
+			job->completed = true;
 			nvkm_drm_job_disarm_deps_locked(job);
 			nvkm_drm_job_wakeup_locked(nfile);
+			wakeup(job);
 			lwkt_reltoken(&nfile->job_token);
 
 			nvkm_drm_job_signal(job, err);
@@ -3120,10 +3333,13 @@ nvkm_drm_job_work(struct work_struct *work)
 		job->sc->sync_job_ready_count++;
 		lwkt_reltoken(&nfile->job_token);
 
-		nvkm_drm_job_run(job);
+		err = nvkm_drm_job_run(job);
 		lwkt_gettoken(&nfile->job_token);
 		job->running = false;
+		job->result = err;
+		job->completed = true;
 		nvkm_drm_job_wakeup_locked(nfile);
+		wakeup(job);
 		lwkt_reltoken(&nfile->job_token);
 		nvkm_drm_job_put(job);
 	}
@@ -3171,8 +3387,11 @@ nvkm_drm_jobs_close(struct nvkm_drm_file *nfile)
 		}
 		TAILQ_REMOVE(&nfile->job_queue, job, link);
 		job->queued = false;
+		job->result = -ECANCELED;
+		job->completed = true;
 		nvkm_drm_job_disarm_deps_locked(job);
 		nvkm_drm_job_wakeup_locked(nfile);
+		wakeup(job);
 		lwkt_reltoken(&nfile->job_token);
 
 		nvkm_drm_job_wait_deps_disarmed(job);
@@ -3184,12 +3403,14 @@ nvkm_drm_jobs_close(struct nvkm_drm_file *nfile)
 }
 
 static int
-nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
+nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
     struct drm_file *file_priv, struct nvkm_drm_file *nfile,
     const struct drm_nouveau_vm_bind *req,
-    struct drm_nouveau_vm_bind_op *ops)
+    struct drm_nouveau_vm_bind_op *ops, bool sync)
 {
 	struct nvkm_drm_job *job;
+	bool published = false;
+	bool sync_ref_taken = false;
 	int err;
 
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
@@ -3205,6 +3426,11 @@ nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
 	job->vm_bind.op_count = req->op_count;
 	job->vm_bind.sig_count = req->sig_count;
 	job->vm_bind.ops = ops;
+	job->done_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
+	if (job->done_fence == NULL) {
+		err = -ENOMEM;
+		goto fail;
+	}
 
 	err = nvkm_drm_vm_bind_prepare_objects(file_priv, ops, req->op_count,
 	    &job->vm_bind.objects);
@@ -3220,17 +3446,39 @@ nvkm_drm_queue_vm_bind_async(struct nvkm_softc *sc,
 		goto fail;
 
 	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
-	    req->sig_ptr, &job->vm_bind.signals);
+	    req->sig_ptr, job->done_fence, &job->vm_bind.signals);
 	if (err != 0)
 		goto fail;
 
-	err = nvkm_drm_job_enqueue(job);
-	if (err != 0)
-		goto fail_signal;
-	return (0);
+	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
+	err = nvkm_drm_vm_bind_attach_resv_fence(sc, nfile, ops,
+	    req->op_count, job->vm_bind.objects, job->done_fence);
+	if (err == 0) {
+		nvkm_drm_exec_signals_publish(job->vm_bind.signals,
+		    job->vm_bind.sig_count);
+		published = true;
+		if (sync) {
+			nvkm_drm_job_get(job);
+			sync_ref_taken = true;
+		}
+		err = nvkm_drm_job_enqueue(job);
+	}
+	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
+	if (err != 0) {
+		if (published)
+			goto fail_signal;
+		goto fail;
+	}
+	if (sync) {
+		err = nvkm_drm_job_wait_complete(job);
+		nvkm_drm_job_put(job);
+	}
+	return (err);
 
 fail_signal:
 	nvkm_drm_job_signal(job, err);
+	if (sync_ref_taken)
+		nvkm_drm_job_put(job);
 fail:
 	nvkm_drm_job_put(job);
 	return (err);
@@ -3254,12 +3502,268 @@ nvkm_drm_vm_binding_find_overlap(struct nvkm_drm_file *nfile, uint64_t addr,
 	return (NULL);
 }
 
+static bool
+nvkm_drm_gem_object_array_has(struct drm_gem_object **objects,
+    uint32_t count, struct drm_gem_object *obj)
+{
+	for (uint32_t i = 0; i < count; i++) {
+		if (objects[i] == obj)
+			return (true);
+	}
+	return (false);
+}
+
+static void
+nvkm_drm_gem_object_array_put(struct drm_gem_object **objects,
+    uint32_t count)
+{
+	if (objects == NULL)
+		return;
+	for (uint32_t i = 0; i < count; i++) {
+		if (objects[i] != NULL)
+			drm_gem_object_put_unlocked(objects[i]);
+	}
+	kfree(objects);
+}
+
+static int
+nvkm_drm_gem_object_array_append(struct drm_gem_object ***pobjects,
+    uint32_t *pcount, uint32_t *pcapacity, struct drm_gem_object *obj)
+{
+	struct drm_gem_object **objects = *pobjects;
+	uint32_t count = *pcount;
+	uint32_t capacity = *pcapacity;
+
+	if (obj == NULL)
+		return (0);
+	if (nvkm_drm_gem_object_array_has(objects, count, obj))
+		return (0);
+	if (count == capacity) {
+		uint32_t new_capacity = capacity != 0 ? capacity * 2 : 8;
+		struct drm_gem_object **new_objects;
+
+		new_objects = krealloc(objects,
+		    sizeof(*new_objects) * new_capacity, M_DRM, GFP_KERNEL);
+		if (new_objects == NULL)
+			return (-ENOMEM);
+		objects = new_objects;
+		capacity = new_capacity;
+	}
+	drm_gem_object_get(obj);
+	objects[count++] = obj;
+	*pobjects = objects;
+	*pcount = count;
+	*pcapacity = capacity;
+	return (0);
+}
+
+/*
+ * nvkm_drm_vm_bind_snapshot_resv_objects()
+ *
+ * Ownership:
+ *   On success, returns a newly allocated array whose entries each hold one
+ *   GEM reference.  The caller owns the array and every entry reference and
+ *   must release them with nvkm_drm_gem_object_array_put().  The objects
+ *   argument is borrowed; this helper takes independent references for entries
+ *   it returns.
+ *
+ * Lifetime:
+ *   The snapshot covers the BOs whose GPUVA bookkeeping can be changed by the
+ *   VM_BIND job: explicit MAP objects plus currently active bindings
+ *   overlapped by any MAP or UNMAP op.  The references keep those BOs alive
+ *   after nfile->vm_token is released.
+ *
+ * Threading:
+ *   Takes nfile->vm_token only while walking the binding list.  It never locks
+ *   BO reservation objects while holding vm_token; reservation fences are
+ *   attached only after the snapshot owns stable GEM references.
+ */
+static int
+nvkm_drm_vm_bind_snapshot_resv_objects(struct nvkm_drm_file *nfile,
+    struct drm_nouveau_vm_bind_op *ops, uint32_t op_count,
+    struct drm_gem_object **objects, struct drm_gem_object ***pobjects,
+    uint32_t *pobject_count)
+{
+	*pobjects = NULL;
+	*pobject_count = 0;
+
+	for (;;) {
+		struct drm_gem_object **resv_objects = NULL;
+		struct nvkm_drm_vm_binding *binding;
+		uint32_t binding_count = 0;
+		uint32_t object_count = 0;
+		uint32_t object_capacity;
+		uint32_t seen_count = 0;
+		bool retry = false;
+		int err = 0;
+
+		lwkt_gettoken(&nfile->vm_token);
+		LIST_FOREACH(binding, &nfile->vm_bindings, link)
+			binding_count++;
+		lwkt_reltoken(&nfile->vm_token);
+
+		object_capacity = op_count + binding_count;
+		if (object_capacity != 0) {
+			resv_objects = kcalloc(object_capacity,
+			    sizeof(*resv_objects), GFP_KERNEL);
+			if (resv_objects == NULL)
+				return (-ENOMEM);
+		}
+
+		for (uint32_t i = 0; i < op_count; i++) {
+			if (objects != NULL && objects[i] != NULL) {
+				err = nvkm_drm_gem_object_array_append(&resv_objects,
+				    &object_count, &object_capacity, objects[i]);
+				if (err != 0)
+					goto fail;
+			}
+		}
+
+		lwkt_gettoken(&nfile->vm_token);
+		LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+			if (seen_count == binding_count) {
+				retry = true;
+				break;
+			}
+			seen_count++;
+			for (uint32_t i = 0; i < op_count; i++) {
+				struct drm_nouveau_vm_bind_op *op = &ops[i];
+
+				if (binding->addr >= op->addr + op->range ||
+				    binding->addr + binding->size <= op->addr)
+					continue;
+				if (!nvkm_drm_vm_ranges_overlap(op->addr, op->range,
+				    binding->addr, binding->size))
+					continue;
+				err = nvkm_drm_gem_object_array_append(&resv_objects,
+				    &object_count, &object_capacity, binding->obj);
+				break;
+			}
+			if (err != 0)
+				break;
+		}
+		lwkt_reltoken(&nfile->vm_token);
+		if (err != 0)
+			goto fail;
+		if (retry) {
+			nvkm_drm_gem_object_array_put(resv_objects, object_count);
+			continue;
+		}
+
+		*pobjects = resv_objects;
+		*pobject_count = object_count;
+		return (0);
+
+fail:
+		nvkm_drm_gem_object_array_put(resv_objects, object_count);
+		return (err);
+	}
+}
+
+/*
+ * nvkm_drm_exec_attach_resv_fence()
+ *
+ * Ownership:
+ *   Borrows fence and nfile. nfile->vm_resv takes its own fence reference
+ *   through reservation_object_add_excl_fence(); the caller keeps ownership
+ *   of its existing reference.
+ *
+ * Lifetime:
+ *   Must be called after the EXEC done fence exists and before the job can
+ *   run. It models nouveau drm_gpuvm_exec reservation attachment at the
+ *   per-file GPUVM boundary. The fence is deliberately not attached to every
+ *   mapped BO because DragonFly's current reservation_object cannot encode
+ *   dma_resv usage classes; publishing a VM-wide EXEC fence through BO
+ *   reservation objects would make dma-buf import/export report unrelated
+ *   GPUVM work as buffer-content synchronization.
+ *
+ * Threading:
+ *   May sleep while locking vm_resv. It does not hold nfile->vm_token or
+ *   sc->gsp_tok, and it never locks BO reservation objects.
+ */
+static int
+nvkm_drm_exec_attach_resv_fence(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, struct dma_fence *fence)
+{
+	uint64_t profile_start;
+
+	if (fence == NULL)
+		return (-EINVAL);
+
+	if (nvkm_drm_fence_flag_signaled(fence))
+		sc->exec_resv_attach_signaled_count++;
+	else
+		sc->exec_resv_attach_pending_count++;
+	profile_start = nvkm_drm_profile_now_us();
+	reservation_object_lock(&nfile->vm_resv, NULL);
+	reservation_object_add_excl_fence(&nfile->vm_resv, fence);
+	reservation_object_unlock(&nfile->vm_resv);
+	sc->exec_resv_attach_calls++;
+	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
+	    profile_start);
+	return (0);
+}
+
+/*
+ * nvkm_drm_vm_bind_attach_resv_fence()
+ *
+ * Ownership:
+ *   Borrows ops, objects, nfile, and fence.  Each BO reservation object takes
+ *   its own fence reference through nvkm_bo_resv_add_shared_fence().
+ *
+ * Lifetime:
+ *   Must be called after the VM_BIND done fence is visible to out syncobjs and
+ *   before the job can run.  This mirrors nouveau BOOKKEEP reservation usage
+ *   for VM_BIND: the fence protects GPUVA bookkeeping for the specific BOs the
+ *   bind operation maps, unmaps, or replaces.
+ *
+ * Threading:
+ *   May sleep while snapshotting affected VM_BIND objects and while locking BO
+ *   reservation objects.  It does not hold nfile->vm_token across reservation
+ *   locks.
+ */
+static int
+nvkm_drm_vm_bind_attach_resv_fence(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, struct drm_nouveau_vm_bind_op *ops,
+    uint32_t op_count, struct drm_gem_object **objects,
+    struct dma_fence *fence)
+{
+	struct drm_gem_object **resv_objects;
+	uint32_t object_count;
+	uint64_t profile_start;
+	int err;
+
+	if (fence == NULL)
+		return (-EINVAL);
+
+	if (nvkm_drm_fence_flag_signaled(fence))
+		sc->vm_bind_resv_attach_signaled_count++;
+	else
+		sc->vm_bind_resv_attach_pending_count++;
+	profile_start = nvkm_drm_profile_now_us();
+	err = nvkm_drm_vm_bind_snapshot_resv_objects(nfile, ops, op_count,
+	    objects, &resv_objects, &object_count);
+	if (err != 0)
+		return (err);
+
+	for (uint32_t i = 0; i < object_count; i++) {
+		err = nvkm_bo_resv_add_shared_fence(to_nvkm_bo(resv_objects[i]),
+		    fence);
+		if (err != 0)
+			break;
+	}
+	nvkm_drm_gem_object_array_put(resv_objects, object_count);
+	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
+	    profile_start);
+	return (err);
+}
 
 static int
 nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
     struct nvkm_drm_file *nfile, uint32_t channel_id,
     struct drm_nouveau_exec_push *pushes, uint32_t push_count,
-    struct nvkm_drm_exec_signal *signals, uint32_t sig_count)
+    struct dma_fence *done_fence, struct nvkm_drm_exec_signal *signals,
+    uint32_t sig_count)
 {
 	struct drm_nouveau_exec req_storage;
 	struct drm_nouveau_exec *req = &req_storage;
@@ -3468,9 +3972,12 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	nvkm_drm_profile_add_us(&sc->exec_profile_push_build_us,
 	    profile_push_start);
 
-	if (signals != NULL && req->sig_count != 0) {
-		exec_fence = signals[0].fence;
-		sc->exec_signal_fence_count++;
+	if (done_fence != NULL) {
+		exec_fence = done_fence;
+		if (signals != NULL && req->sig_count != 0)
+			sc->exec_signal_fence_count++;
+		else
+			sc->exec_internal_fence_count++;
 	} else {
 		exec_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
 		if (exec_fence == NULL) {
@@ -3560,17 +4067,14 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 
 out_unlock:
 	profile_start = nvkm_drm_profile_now_us();
-	if (signals != NULL) {
-		if (!exec_completion_queued || err != 0)
-			nvkm_drm_exec_signals_signal(signals, req->sig_count,
-			    err);
-	} else if (exec_fence != NULL) {
+	if (exec_fence != NULL) {
 		if (!exec_completion_queued || err != 0) {
 			if (err != 0)
 				nvkm_drm_fence_set_error(exec_fence, err);
 			(void)dma_fence_signal(exec_fence);
 		}
-		dma_fence_put(exec_fence);
+		if (done_fence == NULL)
+			dma_fence_put(exec_fence);
 	}
 	if (submit_slot_allocated)
 		nvkm_drm_submit_slot_release(chan, post_slot);
@@ -3627,7 +4131,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	if (req->push_count == 0 && req->sig_count == 0 &&
 	    req->wait_count == 0) {
 		return (nvkm_drm_exec_submit(sc, file_priv, nfile,
-		    req->channel, NULL, 0, NULL, 0));
+		    req->channel, NULL, 0, NULL, NULL, 0));
 	}
 
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
@@ -3641,10 +4145,19 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	job->exec.channel = req->channel;
 	job->exec.push_count = req->push_count;
 	job->exec.sig_count = req->sig_count;
+	job->done_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
+	if (job->done_fence == NULL) {
+		err = -ENOMEM;
+		goto fail;
+	}
 
 	if (req->push_count != 0) {
-		job->exec.pushes = kmalloc(sizeof(*job->exec.pushes) *
-		    req->push_count, M_TEMP, M_WAITOK);
+		job->exec.pushes = kmalloc_array(req->push_count,
+		    sizeof(*job->exec.pushes), GFP_KERNEL);
+		if (job->exec.pushes == NULL) {
+			err = -ENOMEM;
+			goto fail;
+		}
 		err = copyin((const void *)(uintptr_t)req->push_ptr,
 		    job->exec.pushes,
 		    sizeof(*job->exec.pushes) * req->push_count);
@@ -3670,13 +4183,24 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 
 	profile_start = nvkm_drm_profile_now_us();
 	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
-	    req->sig_ptr, &job->exec.signals);
+	    req->sig_ptr, job->done_fence, &job->exec.signals);
 	nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
 	    profile_start);
 	if (err != 0)
 		goto fail;
 
-	err = nvkm_drm_job_enqueue(job);
+	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
+	err = nvkm_drm_exec_attach_resv_fence(sc, nfile, job->done_fence);
+	if (err != 0) {
+		nvkm_debugf(sc->dev,
+		    "nvkm_drm: EXEC attach reservation fence failed err=%d\n",
+		    err);
+	} else {
+		nvkm_drm_exec_signals_publish(job->exec.signals,
+		    job->exec.sig_count);
+		err = nvkm_drm_job_enqueue(job);
+	}
+	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
 	if (err != 0)
 		goto fail_signal;
 	return (0);

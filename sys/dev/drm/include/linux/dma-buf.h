@@ -116,12 +116,25 @@ struct sg_table * dma_buf_map_attachment(struct dma_buf_attachment *,
 void dma_buf_unmap_attachment(struct dma_buf_attachment *,
 				struct sg_table *, enum dma_data_direction);
 
-static inline struct dma_buf_attachment *
-dma_buf_attach(struct dma_buf *dmabuf, struct device *dev)
-{
-	STUB();
-	return NULL;
-}
+/*
+ * dma_buf_attach()
+ *
+ * Ownership:
+ *   The caller keeps ownership of the dma-buf reference it already holds.
+ *   The returned attachment is owned by the caller and must be released with
+ *   dma_buf_detach().
+ *
+ * Lifetime:
+ *   dmabuf and dev must remain valid until dma_buf_detach() returns.  The
+ *   attachment does not take an extra dma-buf file reference; this matches the
+ *   Linux dma-buf contract where the importer owns the reference separately.
+ *
+ * Threading:
+ *   Exporter-specific attach hooks may sleep.  Callers must not hold locks
+ *   that the exporter's attach path can re-enter.
+ */
+struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
+    struct device *dev);
 
 static inline void
 get_dma_buf(struct dma_buf *dmabuf)
@@ -145,11 +158,21 @@ int dma_buf_fd(struct dma_buf *dmabuf, int flags);
 
 struct dma_buf *dma_buf_get(int fd);
 
-static inline void
-dma_buf_detach(struct dma_buf *dmabuf,
-	       struct dma_buf_attachment *dmabuf_attach)
-{
-	panic("dma_buf_attach is not implemented");
-}
+/*
+ * dma_buf_detach()
+ *
+ * Ownership:
+ *   Consumes and frees the attachment returned by dma_buf_attach().  It does
+ *   not drop the caller's dma-buf reference; the importer must call
+ *   dma_buf_put() for any reference it owns.
+ *
+ * Lifetime:
+ *   dmabuf must be the same object used for dma_buf_attach().
+ *
+ * Threading:
+ *   Exporter-specific detach hooks may sleep and must not be called from IRQ.
+ */
+void dma_buf_detach(struct dma_buf *dmabuf,
+    struct dma_buf_attachment *dmabuf_attach);
 
 #endif /* LINUX_DMA_BUF_H */

@@ -21,6 +21,7 @@
 #include <drm/drm_crtc_helper.h>	/* drm_helper_probe_single_connector_modes */
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
+#include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper.h>	/* drm_helper_mode_fill_fb_struct */
@@ -459,8 +460,113 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
 	    "plane disable");
 }
 
+/*
+ * nvkm_plane_prepare_fb()
+ *
+ * Ownership:
+ *   Borrows the plane state and framebuffer references owned by the atomic
+ *   helper.  A successful call creates one scanout pin record on the backing
+ *   BO; cleanup_fb owns and consumes that record.
+ *
+ * Lifetime:
+ *   The framebuffer's GEM reference keeps the BO alive from prepare_fb until
+ *   cleanup_fb.  The scanout pin keeps TTM from evicting the allocation while
+ *   the display engine can read it.
+ *
+ * Threading:
+ *   Runs from atomic commit preparation and may sleep while waiting on
+ *   reservation fences or reserving TTM.  It must not be called from IRQ.
+ */
+static int
+nvkm_plane_prepare_fb(struct drm_plane *plane,
+    struct drm_plane_state *state)
+{
+	struct nvkm_softc *sc = plane->dev->dev_private;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	int ret;
+
+	if (state == NULL || state->fb == NULL)
+		return (0);
+
+	sc->kms_prepare_fb_count++;
+	obj = drm_gem_fb_get_obj(state->fb, 0);
+	if (obj == NULL) {
+		/*
+		 * Driver-internal light_up uses a bare framebuffer with no GEM
+		 * object.  The real scanout BO for that path is owned by the
+		 * CRTC enable hook, so there is no user BO to wait on or pin.
+		 */
+		return (0);
+	}
+
+	bo = to_nvkm_bo(obj);
+	ret = nvkm_bo_resv_wait(bo, false);
+	if (ret != 0) {
+		sc->kms_prepare_fb_error_count++;
+		return (ret);
+	}
+
+	ret = nvkm_bo_scanout_pin(bo);
+	if (ret != 0) {
+		sc->kms_prepare_fb_error_count++;
+		return (ret < 0 ? ret : -ret);
+	}
+	sc->kms_scanout_pin_count++;
+
+	ret = drm_gem_fb_prepare_fb(plane, state);
+	if (ret != 0) {
+		int unpin_ret;
+
+		unpin_ret = nvkm_bo_scanout_unpin(bo);
+		if (unpin_ret == 0 && sc->kms_scanout_pin_count != 0)
+			sc->kms_scanout_unpin_count++;
+		sc->kms_prepare_fb_error_count++;
+		return (ret);
+	}
+	return (0);
+}
+
+/*
+ * nvkm_plane_cleanup_fb()
+ *
+ * Ownership:
+ *   Consumes one scanout pin record created by nvkm_plane_prepare_fb().
+ *
+ * Lifetime:
+ *   old_state->fb still owns the GEM reference while cleanup_fb runs.
+ *
+ * Threading:
+ *   Runs from atomic helper cleanup and may sleep in TTM reservation code.
+ */
+static void
+nvkm_plane_cleanup_fb(struct drm_plane *plane,
+    struct drm_plane_state *old_state)
+{
+	struct nvkm_softc *sc = plane->dev->dev_private;
+	struct drm_gem_object *obj;
+	int ret;
+
+	if (old_state == NULL || old_state->fb == NULL)
+		return;
+
+	sc->kms_cleanup_fb_count++;
+	obj = drm_gem_fb_get_obj(old_state->fb, 0);
+	if (obj == NULL) {
+		/* Matches the internal light_up framebuffer handled above. */
+		return;
+	}
+	ret = nvkm_bo_scanout_unpin(to_nvkm_bo(obj));
+	if (ret == 0)
+		sc->kms_scanout_unpin_count++;
+	else
+		sc->kms_prepare_fb_error_count++;
+}
+
 static const struct drm_plane_helper_funcs nvkm_plane_helper_funcs = {
 	.atomic_check	= nvkm_plane_atomic_check,
+	.prepare_fb	= nvkm_plane_prepare_fb,
+	.cleanup_fb	= nvkm_plane_cleanup_fb,
 	.atomic_update	= nvkm_plane_atomic_update,
 	.atomic_disable	= nvkm_plane_atomic_disable,
 };

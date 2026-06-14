@@ -331,9 +331,20 @@ struct drm_file {
 	 */
 	int event_space;
 
+#ifdef __DragonFly__
+	/**
+	 * @event_bytes:
+	 *
+	 * Bytes currently ready in @event_list for DragonFly kqueue readiness.
+	 * Protected by &drm_device.event_lock for updates. Readers in kqueue
+	 * filters use this as a best-effort readiness hint and must not take
+	 * event_lock because KNOTE can run while drm_send_event_locked() holds it.
+	 */
+	int event_bytes;
+#endif
+
 	/** @event_read_lock: Serializes drm_read(). */
 	struct lock event_read_lock;
-
 	/**
 	 * @prime:
 	 *

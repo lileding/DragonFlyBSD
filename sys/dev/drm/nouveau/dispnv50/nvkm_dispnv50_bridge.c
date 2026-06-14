@@ -19,6 +19,7 @@
 
 #include <machine/framebuffer.h>
 #include <sys/callout.h>
+#include <sys/sbuf.h>
 
 #include <core/gpuobj.h>
 #include <core/memory.h>
@@ -104,6 +105,73 @@ struct nvkm_dispnv50_state {
 	u64 console_flush_error_count;
 	bool core_ready;
 };
+
+static void
+nvkm_dispnv50_debug_dmac_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
+    const char *name, struct nv50_dmac *dmac)
+{
+	u32 user_put;
+	u32 user_get;
+	u32 ctrl = 0;
+	u32 stat = 0;
+	u32 channel;
+	bool valid = false;
+	bool idle = false;
+
+	/*
+	 * Ownership: this diagnostic borrows the display channel and never owns
+	 * USERD, push memory, or hardware register state.
+	 * Lifetime: every value is a racing snapshot; commits and IRQ handlers may
+	 * update PUT/GET/status while the sysctl string is being built.
+	 * Threading: callers hold no display locks.  Reads are side-effect free and
+	 * must not be used for synchronization or forward progress decisions.
+	 */
+	if (sc == NULL || sb == NULL || name == NULL || dmac == NULL ||
+	    dmac->dfly_user == 0) {
+		sbuf_printf(sb, "%s_dmac = unavailable\n", name);
+		return;
+	}
+
+	user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+	user_get = nvkm_rd32(sc, dmac->dfly_user + 0x04);
+
+	switch (dmac->dfly_oclass & 0xff) {
+	case 0x7d:
+		ctrl = nvkm_rd32(sc, 0x6104e0);
+		stat = nvkm_rd32(sc, 0x610630);
+		idle = ((stat & 0x001f0000) == 0x000b0000);
+		valid = true;
+		break;
+	case 0x7e:
+		channel = 1 + dmac->dfly_inst;
+		ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
+		stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
+		idle = ((stat & 0x000f0000) == 0x00040000);
+		valid = true;
+		break;
+	default:
+		break;
+	}
+
+	sbuf_printf(sb, "%s_dmac = %p\n", name, dmac);
+	sbuf_printf(sb, "%s_dmac_class = 0x%08x\n", name,
+	    (u32)dmac->dfly_oclass);
+	sbuf_printf(sb, "%s_dmac_inst = %d\n", name, dmac->dfly_inst);
+	sbuf_printf(sb, "%s_dmac_user = 0x%08x\n", name, dmac->dfly_user);
+	sbuf_printf(sb, "%s_dmac_sw_put = %u\n", name, dmac->put);
+	sbuf_printf(sb, "%s_dmac_sw_cur = %u\n", name, dmac->cur);
+	sbuf_printf(sb, "%s_dmac_hw_put = 0x%08x\n", name, user_put);
+	sbuf_printf(sb, "%s_dmac_hw_get = 0x%08x\n", name, user_get);
+	sbuf_printf(sb, "%s_dmac_hw_get_dwords = %u\n", name, user_get >> 2);
+	sbuf_printf(sb, "%s_dmac_status_valid = %d\n", name, valid);
+	sbuf_printf(sb, "%s_dmac_ctrl = 0x%08x\n", name, ctrl);
+	sbuf_printf(sb, "%s_dmac_stat = 0x%08x\n", name, stat);
+	sbuf_printf(sb, "%s_dmac_idle = %d\n", name, idle);
+	sbuf_printf(sb, "%s_dmac_last_idle = %d\n", name,
+	    dmac->dfly_last_idle);
+	sbuf_printf(sb, "%s_dmac_last_stat = 0x%08x\n", name,
+	    dmac->dfly_last_stat);
+}
 
 static u32
 nvkm_dispnv50_align_u32(u32 value, u32 align)
@@ -205,6 +273,27 @@ nvkm_dispnv50_read_scanout_pixel(struct nvkm_softc *sc,
 	return 0;
 }
 
+
+static int
+nvkm_dispnv50_read_paddr_pixel(struct nvkm_softc *sc, u64 paddr,
+    u32 pitch, u32 x, u32 y, u32 *pixel)
+{
+	u64 byte = (u64)y * pitch + (u64)x * NVKM_DISPNV50_SCANOUT_BPP;
+	u64 addr = paddr + byte;
+	u64 page = addr & ~(u64)(PAGE_SIZE - 1);
+	u64 page_off = addr - page;
+	uint64_t gva;
+	int err;
+
+	err = nvkm_gsp_bar1_map_existing(sc, page, &gva);
+	if (err != 0)
+		return nvkm_dispnv50_neg_errno(err);
+
+	*pixel = nvkm_gsp_bar1_rd32(sc, gva + page_off);
+	nvkm_gsp_bar1_unmap_existing(sc, gva);
+	return 0;
+}
+
 static int
 nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
     u32 width, u32 height, u32 pitch)
@@ -257,6 +346,99 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 		    e0, e1, e2, e3, p0, p1, p2, p3);
 	}
 	return 0;
+}
+
+
+void
+nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
+{
+	struct nvkm_dispnv50_state *state;
+	u64 scanout_addr;
+	u32 xs[4];
+	u32 ys[2];
+	u32 pixel;
+	int err;
+
+	/*
+	 * Ownership: this diagnostic borrows sc->dispnv50 and never owns the
+	 * scanout BO, framebuffer, or BAR1 mappings beyond each readback call.
+	 * Lifetime: the sampled values are a best-effort snapshot; KMS commits may
+	 * replace the state immediately after a field is read.
+	 * Threading: callers do not hold the atomic commit locks.  Reads must stay
+	 * side-effect free and tolerate racing with modesets, VT switches, and BO
+	 * cleanup.  This is for postmortem observability, not synchronization.
+	 */
+	state = sc != NULL ? sc->dispnv50 : NULL;
+	if (state == NULL) {
+		sbuf_cat(sb, "dispnv50 = NULL\n");
+		return;
+	}
+
+	scanout_addr = state->scanout_user || state->scanout == NULL ?
+	    state->scanout_offset : nvkm_memory_addr(state->scanout);
+	sbuf_printf(sb, "dispnv50 = %p\n", state);
+	sbuf_printf(sb, "core_ready = %d\n", state->core_ready);
+	sbuf_printf(sb, "scanout_user = %d\n", state->scanout_user);
+	sbuf_printf(sb, "scanout_memory = %p\n", state->scanout);
+	sbuf_printf(sb, "scanout_addr = 0x%016llx\n",
+	    (unsigned long long)scanout_addr);
+	sbuf_printf(sb, "scanout_offset = 0x%016llx\n",
+	    (unsigned long long)state->scanout_offset);
+	sbuf_printf(sb, "scanout_width = %u\n", state->scanout_width);
+	sbuf_printf(sb, "scanout_height = %u\n", state->scanout_height);
+	sbuf_printf(sb, "scanout_pitch = %u\n", state->scanout_pitch);
+	sbuf_printf(sb, "scanout_format = 0x%08x\n", state->scanout_format);
+	sbuf_printf(sb, "scanout_modifier = 0x%016llx\n",
+	    (unsigned long long)state->scanout_modifier);
+	sbuf_printf(sb, "scanout_kind = 0x%02x\n", state->scanout_kind);
+	sbuf_printf(sb, "scanout_blocklinear = %d\n",
+	    nvkm_dispnv50_modifier_is_blocklinear(state->scanout_modifier));
+	sbuf_printf(sb, "console_registered = %d\n", state->console_fb_registered);
+	sbuf_printf(sb, "console_direct_map = %d\n", state->console_direct_map);
+	sbuf_printf(sb, "console_flush_active = %d\n", state->console_flush_active);
+	sbuf_printf(sb, "console_scanout_addr = 0x%016llx\n",
+	    (unsigned long long)state->console_scanout_addr);
+	sbuf_printf(sb, "console_flush_count = %llu\n",
+	    (unsigned long long)state->console_flush_count);
+	sbuf_printf(sb, "console_flush_error_count = %llu\n",
+	    (unsigned long long)state->console_flush_error_count);
+	if (state->disp.core != NULL)
+		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "core",
+		    &state->disp.core->chan);
+	else
+		sbuf_cat(sb, "core_dmac = unavailable\n");
+	if (state->wndw[0] != NULL) {
+		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "wndw0",
+		    &state->wndw[0]->wndw);
+		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "wimm0",
+		    &state->wndw[0]->wimm);
+	} else {
+		sbuf_cat(sb, "wndw0_dmac = unavailable\n");
+		sbuf_cat(sb, "wimm0_dmac = unavailable\n");
+	}
+
+	if (scanout_addr == 0 || state->scanout_width == 0 ||
+	    state->scanout_height == 0 || state->scanout_pitch == 0) {
+		sbuf_cat(sb, "scanout_samples = unavailable\n");
+		return;
+	}
+
+	xs[0] = 0;
+	xs[1] = state->scanout_width / 4;
+	xs[2] = state->scanout_width / 2;
+	xs[3] = (state->scanout_width * 3) / 4;
+	ys[0] = 0;
+	ys[1] = state->scanout_height / 2;
+	for (u32 yi = 0; yi < nitems(ys); yi++) {
+		for (u32 xi = 0; xi < nitems(xs); xi++) {
+			pixel = 0;
+			err = nvkm_dispnv50_read_paddr_pixel(sc, scanout_addr,
+			    state->scanout_pitch, xs[xi], ys[yi], &pixel);
+			sbuf_printf(sb,
+			    "scanout_sample[%u,%u] err=%d pixel=0x%08x\n",
+			    xs[xi], ys[yi], err, pixel);
+		}
+	}
 }
 
 static int
@@ -1656,7 +1838,7 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 
 	obj = fb->obj[0];
 	bo = to_nvkm_bo(obj);
-	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->vram_alloc == NULL)
+	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->paddr == 0)
 		return (EINVAL);
 	if (fb->width == 0 || fb->height == 0)
 		return (EINVAL);
@@ -2376,8 +2558,6 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
-	bool async;
-	const char *reason;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -2402,16 +2582,8 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return ret;
 	}
 
-	async = state->scanout_user;
-	reason = async ? "plane update" : "console restore";
-	/*
-	 * User framebuffer updates are page flips and can use the async window
-	 * path.  The internal console framebuffer is different: it is used after
-	 * Xorg disables the window during teardown, so lastclose restore must
-	 * reprogram notifier/ILUT/blend and wait until the window is armed.
-	 */
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, async, reason);
+	    interlock, false, true, "plane update");
 }
 
 int

@@ -519,6 +519,9 @@ struct nvkm_softc {
 	bool			kms_task_initialized;
 	uint64_t		kms_auto_count;
 	uint64_t		kms_hotplug_count;
+	uint64_t		kms_restore_skip_primary_count;
+	uint32_t		kms_restore_last_primary_count;
+	int			kms_restore_last_open_count;
 	uint64_t		kms_fb_create_count;
 	uint64_t		kms_fb_create_error_count;
 	uint64_t		kms_fb_create_blocklinear_count;
@@ -531,6 +534,11 @@ struct nvkm_softc {
 	uint64_t		kms_atomic_vblank_wait_count;
 	uint64_t		kms_plane_update_count;
 	uint64_t		kms_plane_disable_count;
+	uint64_t		kms_prepare_fb_count;
+	uint64_t		kms_prepare_fb_error_count;
+	uint64_t		kms_cleanup_fb_count;
+	uint64_t		kms_scanout_pin_count;
+	uint64_t		kms_scanout_unpin_count;
 	uint64_t		kms_commit_error_count;
 	int			kms_last_error;
 	uint32_t		kms_last_head;
@@ -552,10 +560,23 @@ struct nvkm_softc {
 	uint32_t		exec_push_reuse_prev_payload;
 	uint64_t		exec_resv_attach_calls;
 	uint64_t		exec_resv_attach_bos;
+	uint64_t		exec_resv_attach_signaled_count;
+	uint64_t		exec_resv_attach_pending_count;
+	uint64_t		vm_bind_resv_attach_signaled_count;
+	uint64_t		vm_bind_resv_attach_pending_count;
 	uint64_t		exec_async_pending_count;
 	uint64_t		exec_async_complete_count;
 	uint64_t		exec_async_wait_count;
 	uint64_t		exec_async_wait_error_count;
+	uint64_t		exec_pending_signal_count;
+	uint64_t		exec_pending_signal_error_count;
+	uint64_t		exec_pending_signal_fence_count;
+	uint64_t		exec_pending_signal_already_signaled_count;
+	uint64_t		exec_pending_signal_hw_ready_count;
+	uint64_t		job_done_signal_count;
+	uint64_t		job_done_signal_error_count;
+	uint64_t		job_done_signal_already_signaled_count;
+	uint64_t		job_done_signal_hw_ready_count;
 	uint64_t		sync_wait_count;
 	uint64_t		sync_wait_error_count;
 	uint64_t		sync_wait_already_signaled_count;
@@ -987,6 +1008,8 @@ int	nvkm_gsp_get_static_info(struct nvkm_softc *sc);
 int	nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn,
 	    void *repv, uint32_t repc);
 void	nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc, struct sysctl_ctx_list *ctx, struct sysctl_oid *parent);
+struct sbuf;
+void	nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb);
 void	nvkm_gsp_bar1_count_gva(struct nvkm_softc *sc, uint32_t *used,
 	    uint32_t *total);
 void	nvkm_gsp_vmm_snapshot(struct nvkm_gsp_vmm *vmm, uint32_t *pd0_count,

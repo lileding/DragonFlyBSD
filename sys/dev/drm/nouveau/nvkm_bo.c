@@ -488,8 +488,8 @@ nvkm_bo_resv(struct nvkm_bo *bo)
 	return (&bo->resv);
 }
 
-int
-nvkm_bo_vm_bind_pin(struct nvkm_bo *bo)
+static int
+nvkm_bo_ttm_pin_record(struct nvkm_bo *bo, uint32_t *record_count)
 {
 	struct ttm_buffer_object *tbo;
 	int err;
@@ -502,14 +502,46 @@ nvkm_bo_vm_bind_pin(struct nvkm_bo *bo)
 	if (err != 0)
 		return (err < 0 ? -err : err);
 
-	if (bo->vm_bind_pin_count == UINT32_MAX) {
+	if (*record_count == UINT32_MAX || bo->ttm_pin_count == UINT32_MAX) {
 		err = EOVERFLOW;
 		goto out_unreserve;
 	}
 
-	if (bo->vm_bind_pin_count == 0)
+	if (bo->ttm_pin_count == 0)
 		tbo->mem.placement |= TTM_PL_FLAG_NO_EVICT;
-	bo->vm_bind_pin_count++;
+	bo->ttm_pin_count++;
+	(*record_count)++;
+	err = 0;
+
+out_unreserve:
+	ttm_bo_unreserve(tbo);
+	return (err);
+}
+
+static int
+nvkm_bo_ttm_unpin_record(struct nvkm_bo *bo, uint32_t *record_count)
+{
+	struct ttm_buffer_object *tbo;
+	int err;
+
+	if (!bo->ttm_backed)
+		return (0);
+
+	tbo = &bo->tbo;
+	err = ttm_bo_reserve(tbo, false, false, NULL);
+	if (err != 0)
+		return (err < 0 ? -err : err);
+
+	if (*record_count == 0 || bo->ttm_pin_count == 0) {
+		err = EINVAL;
+		goto out_unreserve;
+	}
+
+	(*record_count)--;
+	bo->ttm_pin_count--;
+	if (bo->ttm_pin_count == 0 &&
+	    tbo->mem.mem_type != TTM_PL_VRAM)
+		tbo->mem.placement &= ~TTM_PL_FLAG_NO_EVICT;
 	err = 0;
 
 out_unreserve:
@@ -518,33 +550,27 @@ out_unreserve:
 }
 
 int
+nvkm_bo_vm_bind_pin(struct nvkm_bo *bo)
+{
+	return (nvkm_bo_ttm_pin_record(bo, &bo->vm_bind_pin_count));
+}
+
+int
 nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo)
 {
-	struct ttm_buffer_object *tbo;
-	int err;
+	return (nvkm_bo_ttm_unpin_record(bo, &bo->vm_bind_pin_count));
+}
 
-	if (!bo->ttm_backed)
-		return (0);
+int
+nvkm_bo_scanout_pin(struct nvkm_bo *bo)
+{
+	return (nvkm_bo_ttm_pin_record(bo, &bo->scanout_pin_count));
+}
 
-	tbo = &bo->tbo;
-	err = ttm_bo_reserve(tbo, false, false, NULL);
-	if (err != 0)
-		return (err < 0 ? -err : err);
-
-	if (bo->vm_bind_pin_count == 0) {
-		err = EINVAL;
-		goto out_unreserve;
-	}
-
-	bo->vm_bind_pin_count--;
-	if (bo->vm_bind_pin_count == 0 &&
-	    tbo->mem.mem_type != TTM_PL_VRAM)
-		tbo->mem.placement &= ~TTM_PL_FLAG_NO_EVICT;
-	err = 0;
-
-out_unreserve:
-	ttm_bo_unreserve(tbo);
-	return (err);
+int
+nvkm_bo_scanout_unpin(struct nvkm_bo *bo)
+{
+	return (nvkm_bo_ttm_unpin_record(bo, &bo->scanout_pin_count));
 }
 
 static void
@@ -913,6 +939,20 @@ nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence)
 	reservation_object_lock(resv, NULL);
 	reservation_object_add_excl_fence(resv, fence);
 	reservation_object_unlock(resv);
+}
+
+int
+nvkm_bo_resv_add_shared_fence(struct nvkm_bo *bo, struct dma_fence *fence)
+{
+	struct reservation_object *resv = nvkm_bo_resv(bo);
+	int err;
+
+	reservation_object_lock(resv, NULL);
+	err = reservation_object_reserve_shared(resv);
+	if (err == 0)
+		reservation_object_add_shared_fence(resv, fence);
+	reservation_object_unlock(resv);
+	return (err < 0 ? -err : err);
 }
 
 int

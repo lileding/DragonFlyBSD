@@ -69,7 +69,9 @@ struct nvkm_bo {
 	uint8_t			account_kind;	/* counter bucket charged at alloc */
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
 	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
-	uint32_t		vm_bind_pin_count; /* active VM_BIND records pin TTM */
+	uint32_t		ttm_pin_count;	/* VM_BIND + scanout no-evict pins */
+	uint32_t		vm_bind_pin_count; /* active VM_BIND records */
+	uint32_t		scanout_pin_count; /* active prepare_fb records */
 	bool			vm_bound_mixed_kind;
 };
 
@@ -91,9 +93,58 @@ int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
     vm_paddr_t *paddr);
 int nvkm_bo_read32(struct nvkm_bo *bo, uint64_t offset,
     uint32_t *value);
+/*
+ * nvkm_bo_vm_bind_pin()
+ *
+ * Ownership:
+ *   The caller borrows bo; no GEM reference is consumed or acquired.  Each
+ *   successful call creates one VM_BIND pin record that the caller owns until
+ *   nvkm_bo_vm_bind_unpin().
+ *
+ * Lifetime:
+ *   bo must stay alive for the whole pin/unpin pair.  For TTM-backed BOs the
+ *   pin record keeps the current backing allocation non-evictable; legacy
+ *   non-TTM allocations are already immobile and treat the record as a no-op.
+ *
+ * Threading:
+ *   May sleep while reserving the TTM BO.  Callers must not hold locks that
+ *   would be acquired from TTM eviction or reservation callbacks.
+ */
 int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo);
+
+/*
+ * nvkm_bo_vm_bind_unpin()
+ *
+ * Ownership:
+ *   Consumes one VM_BIND pin record previously returned by
+ *   nvkm_bo_vm_bind_pin().
+ *
+ * Lifetime:
+ *   bo must remain alive until the call returns.
+ *
+ * Threading:
+ *   May sleep while reserving the TTM BO.  Balanced unpins may run from file
+ *   close after GPUVM bindings have been removed from the per-file list.
+ */
 int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo);
+/*
+ * nvkm_bo_scanout_pin()/nvkm_bo_scanout_unpin()
+ *
+ * Ownership:
+ *   A successful scanout pin creates one KMS prepare_fb record owned by the
+ *   plane state until cleanup_fb consumes it with nvkm_bo_scanout_unpin().
+ *
+ * Lifetime:
+ *   bo must outlive the plane state holding the framebuffer reference.
+ *
+ * Threading:
+ *   May sleep while reserving TTM.  The pair must be called from atomic helper
+ *   prepare/cleanup paths, not from interrupt context.
+ */
+int nvkm_bo_scanout_pin(struct nvkm_bo *bo);
+int nvkm_bo_scanout_unpin(struct nvkm_bo *bo);
 struct reservation_object *nvkm_bo_resv(struct nvkm_bo *bo);
+int nvkm_bo_resv_add_shared_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
 int nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,

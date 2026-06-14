@@ -235,6 +235,14 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->exec_resv_attach_calls);
 	sbuf_printf(sb, "resv_attach_bos = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_bos);
+	sbuf_printf(sb, "resv_attach_signaled_count = %llu\n",
+	    (unsigned long long)sc->exec_resv_attach_signaled_count);
+	sbuf_printf(sb, "resv_attach_pending_count = %llu\n",
+	    (unsigned long long)sc->exec_resv_attach_pending_count);
+	sbuf_printf(sb, "vm_bind_resv_attach_signaled_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_resv_attach_signaled_count);
+	sbuf_printf(sb, "vm_bind_resv_attach_pending_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_resv_attach_pending_count);
 	sbuf_printf(sb, "async_pending_count = %llu\n",
 	    (unsigned long long)sc->exec_async_pending_count);
 	sbuf_printf(sb, "async_complete_count = %llu\n",
@@ -243,6 +251,24 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->exec_async_wait_count);
 	sbuf_printf(sb, "async_wait_error_count = %llu\n",
 	    (unsigned long long)sc->exec_async_wait_error_count);
+	sbuf_printf(sb, "pending_signal_count = %llu\n",
+	    (unsigned long long)sc->exec_pending_signal_count);
+	sbuf_printf(sb, "pending_signal_error_count = %llu\n",
+	    (unsigned long long)sc->exec_pending_signal_error_count);
+	sbuf_printf(sb, "pending_signal_fence_count = %llu\n",
+	    (unsigned long long)sc->exec_pending_signal_fence_count);
+	sbuf_printf(sb, "pending_signal_already_signaled_count = %llu\n",
+	    (unsigned long long)sc->exec_pending_signal_already_signaled_count);
+	sbuf_printf(sb, "pending_signal_hw_ready_count = %llu\n",
+	    (unsigned long long)sc->exec_pending_signal_hw_ready_count);
+	sbuf_printf(sb, "job_done_signal_count = %llu\n",
+	    (unsigned long long)sc->job_done_signal_count);
+	sbuf_printf(sb, "job_done_signal_error_count = %llu\n",
+	    (unsigned long long)sc->job_done_signal_error_count);
+	sbuf_printf(sb, "job_done_signal_already_signaled_count = %llu\n",
+	    (unsigned long long)sc->job_done_signal_already_signaled_count);
+	sbuf_printf(sb, "job_done_signal_hw_ready_count = %llu\n",
+	    (unsigned long long)sc->job_done_signal_hw_ready_count);
 
 	sbuf_cat(sb, "\nexec_profile_us\n");
 	sbuf_printf(sb, "token_wait_us = %llu\n",
@@ -354,6 +380,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_auto_count);
 	sbuf_printf(sb, "hotplug_count = %llu\n",
 	    (unsigned long long)sc->kms_hotplug_count);
+	sbuf_printf(sb, "restore_skip_primary_count = %llu\n",
+	    (unsigned long long)sc->kms_restore_skip_primary_count);
+	sbuf_printf(sb, "restore_last_primary_count = %u\n",
+	    sc->kms_restore_last_primary_count);
+	sbuf_printf(sb, "restore_last_open_count = %d\n",
+	    sc->kms_restore_last_open_count);
 	sbuf_printf(sb, "fb_create_count = %llu\n",
 	    (unsigned long long)sc->kms_fb_create_count);
 	sbuf_printf(sb, "fb_create_error_count = %llu\n",
@@ -378,12 +410,25 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_plane_update_count);
 	sbuf_printf(sb, "plane_disable_count = %llu\n",
 	    (unsigned long long)sc->kms_plane_disable_count);
+	sbuf_printf(sb, "prepare_fb_count = %llu\n",
+	    (unsigned long long)sc->kms_prepare_fb_count);
+	sbuf_printf(sb, "prepare_fb_error_count = %llu\n",
+	    (unsigned long long)sc->kms_prepare_fb_error_count);
+	sbuf_printf(sb, "cleanup_fb_count = %llu\n",
+	    (unsigned long long)sc->kms_cleanup_fb_count);
+	sbuf_printf(sb, "scanout_pin_count = %llu\n",
+	    (unsigned long long)sc->kms_scanout_pin_count);
+	sbuf_printf(sb, "scanout_unpin_count = %llu\n",
+	    (unsigned long long)sc->kms_scanout_unpin_count);
 	sbuf_printf(sb, "commit_error_count = %llu\n",
 	    (unsigned long long)sc->kms_commit_error_count);
 	sbuf_printf(sb, "last_error = %d\n", sc->kms_last_error);
 	sbuf_printf(sb, "last_head = %u\n", sc->kms_last_head);
 	sbuf_printf(sb, "last_win = %u\n", sc->kms_last_win);
 	sbuf_printf(sb, "push_trace = %d\n", sc->kms_push_trace);
+
+	sbuf_cat(sb, "\nscanout\n");
+	nvkm_dispnv50_debug_sbuf(sc, sb);
 
 	sbuf_cat(sb, "\ngsp_events\n");
 	sbuf_printf(sb, "post_event_count = %llu\n",

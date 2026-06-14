@@ -51,6 +51,35 @@ static void drm_events_release(struct drm_file *file_priv);
 /* from BKL pushdown */
 DEFINE_MUTEX(drm_global_mutex);
 
+#ifdef __DragonFly__
+SYSCTL_DECL(_hw_dri);
+static uint64_t drm_event_send_count;
+static uint64_t drm_event_send_bytes;
+static uint64_t drm_event_read_count;
+static uint64_t drm_event_read_bytes;
+static uint64_t drm_event_pending_bytes;
+static uint64_t drm_event_kqfilter_read_count;
+static uint64_t drm_event_kqfilter_read_ready_count;
+static uint64_t drm_event_kqfilter_write_count;
+
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_send_count, CTLFLAG_RD,
+    &drm_event_send_count, 0, "DRM event send count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_send_bytes, CTLFLAG_RD,
+    &drm_event_send_bytes, 0, "DRM event send bytes");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_read_count, CTLFLAG_RD,
+    &drm_event_read_count, 0, "DRM event read count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_read_bytes, CTLFLAG_RD,
+    &drm_event_read_bytes, 0, "DRM event read bytes");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_pending_bytes, CTLFLAG_RD,
+    &drm_event_pending_bytes, 0, "DRM event queued bytes");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_kqfilter_read_count, CTLFLAG_RD,
+    &drm_event_kqfilter_read_count, 0, "DRM kqueue read filter count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_kqfilter_read_ready_count, CTLFLAG_RD,
+    &drm_event_kqfilter_read_ready_count, 0, "DRM kqueue read ready count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_kqfilter_write_count, CTLFLAG_RD,
+    &drm_event_kqfilter_write_count, 0, "DRM kqueue write filter count");
+#endif
+
 /**
  * DOC: file operations
  *
@@ -199,6 +228,10 @@ static void drm_events_release(struct drm_file *file_priv)
 	/* Remove unconsumed events */
 	list_for_each_entry_safe(e, et, &file_priv->event_list, link) {
 		list_del(&e->link);
+#ifdef __DragonFly__
+		file_priv->event_bytes -= e->event->length;
+		drm_event_pending_bytes -= e->event->length;
+#endif
 		kfree(e);
 	}
 
@@ -677,6 +710,10 @@ int drm_read(struct dev_read_args *ap)
 			e = list_first_entry(&file_priv->event_list,
 					struct drm_pending_event, link);
 			file_priv->event_space += e->event->length;
+#ifdef __DragonFly__
+			file_priv->event_bytes -= e->event->length;
+			drm_event_pending_bytes -= e->event->length;
+#endif
 			list_del(&e->link);
 		}
 		spin_unlock_irq(&dev->event_lock);
@@ -706,6 +743,10 @@ int drm_read(struct dev_read_args *ap)
 put_back_event:
 				spin_lock_irq(&dev->event_lock);
 				file_priv->event_space -= length;
+#ifdef __DragonFly__
+				file_priv->event_bytes += length;
+				drm_event_pending_bytes += length;
+#endif
 				list_add(&e->link, &file_priv->event_list);
 				spin_unlock_irq(&dev->event_lock);
 				break;
@@ -718,6 +759,10 @@ put_back_event:
 			}
 
 			ret += length;
+#ifdef __DragonFly__
+			drm_event_read_count++;
+			drm_event_read_bytes += length;
+#endif
 			kfree(e);
 		}
 	}
@@ -744,33 +789,64 @@ EXPORT_SYMBOL(drm_read);
  * Mask of POLL flags indicating the current status of the file.
  */
 static int
-drmfilt(struct knote *kn, long hint)
+drmfilt_read(struct knote *kn, long hint)
 {
 	struct drm_file *file_priv = (struct drm_file *)kn->kn_hook;
-	int ready = 0;
 
-//	poll_wait(filp, &file_priv->event_wait, wait);
+	(void)hint;
 
-	if (!list_empty(&file_priv->event_list))
-		ready = 1;
+	/*
+	 * Ownership: this filter borrows file_priv from kn_hook; the open DRM
+	 * file owns it until the knote is detached by drm_kqfilter cleanup.
+	 * Lifetime: event_bytes is updated while event_list entries are queued or
+	 * removed; it never owns the events themselves.
+	 * Threading: do not take event_lock here. drm_send_event_locked() calls
+	 * KNOTE() while holding event_lock, so taking it here would self-deadlock
+	 * on the first delivered DRM event.
+	 */
+	kn->kn_data = file_priv->event_bytes;
+	drm_event_kqfilter_read_count++;
+	if (file_priv->event_bytes != 0)
+		drm_event_kqfilter_read_ready_count++;
 
-	return (ready);
+	return (file_priv->event_bytes != 0);
+}
+
+static int
+drmfilt_write(struct knote *kn, long hint)
+{
+	struct drm_file *file_priv = (struct drm_file *)kn->kn_hook;
+
+	(void)hint;
+
+	/*
+	 * Ownership: this filter only observes file_priv; userspace cannot write
+	 * DRM events through this fd, so there is no per-writer buffer to own.
+	 * Lifetime: file_priv outlives the knote registration as above.
+	 * Threading: Linux drm_poll() always reports EPOLLOUT/EPOLLWRNORM for DRM
+	 * fds. Mirror that contract for DragonFly poll/kqueue users instead of
+	 * tying write readiness to the asynchronous event queue.
+	 */
+	kn->kn_data = file_priv->event_space;
+	drm_event_kqfilter_write_count++;
+	return (1);
 }
 
 static void
 drmfilt_detach(struct knote *kn)
 {
 	struct drm_file *file_priv;
-	struct klist *klist;
  
 	file_priv = (struct drm_file *)kn->kn_hook;
 
-	klist = &file_priv->dkq.ki_note;
-	knote_remove(klist, kn);
+	knote_remove(&file_priv->dkq.ki_note, kn);
 }
 
-static struct filterops drmfiltops =
-        { FILTEROP_MPSAFE | FILTEROP_ISFD, NULL, drmfilt_detach, drmfilt };
+static struct filterops drmread_filtops =
+	{ FILTEROP_MPSAFE | FILTEROP_ISFD, NULL, drmfilt_detach, drmfilt_read };
+
+static struct filterops drmwrite_filtops =
+	{ FILTEROP_MPSAFE | FILTEROP_ISFD, NULL, drmfilt_detach, drmfilt_write };
 
 int
 drm_kqfilter(struct dev_kqfilter_args *ap)
@@ -784,8 +860,11 @@ drm_kqfilter(struct dev_kqfilter_args *ap)
 
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
+		kn->kn_fop = &drmread_filtops;
+		kn->kn_hook = (caddr_t)file_priv;
+		break;
 	case EVFILT_WRITE:
-		kn->kn_fop = &drmfiltops;
+		kn->kn_fop = &drmwrite_filtops;
 		kn->kn_hook = (caddr_t)file_priv;
 		break;
 	default:
@@ -945,6 +1024,12 @@ void drm_send_event_locked(struct drm_device *dev, struct drm_pending_event *e)
 	list_del(&e->pending_link);
 	list_add_tail(&e->link,
 		      &e->file_priv->event_list);
+#ifdef __DragonFly__
+	e->file_priv->event_bytes += e->event->length;
+	drm_event_send_count++;
+	drm_event_send_bytes += e->event->length;
+	drm_event_pending_bytes += e->event->length;
+#endif
 	wake_up_interruptible(&e->file_priv->event_wait);
 #ifdef __DragonFly__
 	KNOTE(&e->file_priv->dkq.ki_note, 0);
