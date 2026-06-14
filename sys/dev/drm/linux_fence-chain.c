@@ -209,19 +209,74 @@ dma_fence_chain_signaled(struct dma_fence *fence)
 	return (ret);
 }
 
+static void dma_fence_chain_put(struct dma_fence *fence);
+
+/*
+ * dma_fence_chain_release_detach - free one chain node and return its prefix.
+ *
+ * Ownership:
+ * - The caller has exclusive ownership of @chain. Its base fence is either
+ *   already in dma_fence_release(), or the caller proved that the chain's
+ *   incoming prefix edge is its final reference.
+ * - The chain->prev reference is moved to the return value. The caller owns
+ *   that reference and must drop it.
+ * - The chain->fence payload reference is consumed here.
+ *
+ * Lifetime:
+ * - @chain is freed before this function returns.
+ * - The returned fence, when non-NULL, remains alive until the caller drops
+ *   the moved reference.
+ *
+ * Threading:
+ * - No external strong reference may remain to @chain.
+ * - prev_lock is still taken while detaching chain->prev so this helper keeps
+ *   the same mutable-edge invariant as dma_fence_chain_walk().
+ */
+static struct dma_fence *
+dma_fence_chain_release_detach(struct dma_fence_chain *chain)
+{
+	struct dma_fence *payload;
+	struct dma_fence *prev;
+
+	lockmgr(&chain->prev_lock, LK_EXCLUSIVE);
+	prev = chain->prev;
+	chain->prev = NULL;
+	lockmgr(&chain->prev_lock, LK_RELEASE);
+
+	payload = chain->fence;
+	chain->fence = NULL;
+	dma_fence_chain_put(payload);
+
+	lockuninit(&chain->prev_lock);
+	lockuninit(&chain->lock);
+	dma_fence_free(&chain->base);
+	return (prev);
+}
+
+static void
+dma_fence_chain_put(struct dma_fence *fence)
+{
+	struct dma_fence_chain *chain;
+
+	while (fence != NULL) {
+		chain = to_dma_fence_chain(fence);
+		if (chain == NULL || kref_read(&fence->refcount) != 1) {
+			dma_fence_put(fence);
+			return;
+		}
+
+		fence = dma_fence_chain_release_detach(chain);
+	}
+}
+
 static void
 dma_fence_chain_release(struct dma_fence *fence)
 {
 	struct dma_fence_chain *chain =
 	    container_of(fence, struct dma_fence_chain, base);
 
-	dma_fence_put(chain->prev);
-	chain->prev = NULL;
-	dma_fence_put(chain->fence);
-	chain->fence = NULL;
-	lockuninit(&chain->prev_lock);
-	lockuninit(&chain->lock);
-	dma_fence_free(fence);
+	fence = dma_fence_chain_release_detach(chain);
+	dma_fence_chain_put(fence);
 }
 
 const struct dma_fence_ops dma_fence_chain_ops = {
