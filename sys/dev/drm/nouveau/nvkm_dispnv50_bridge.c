@@ -2376,6 +2376,8 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	bool async;
+	const char *reason;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -2400,8 +2402,16 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return ret;
 	}
 
+	async = state->scanout_user;
+	reason = async ? "plane update" : "console restore";
+	/*
+	 * User framebuffer updates are page flips and can use the async window
+	 * path.  The internal console framebuffer is different: it is used after
+	 * Xorg disables the window during teardown, so lastclose restore must
+	 * reprogram notifier/ILUT/blend and wait until the window is armed.
+	 */
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, true, "plane update");
+	    interlock, false, async, reason);
 }
 
 int
