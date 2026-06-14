@@ -521,10 +521,326 @@ nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
 	return (0);
 }
 
+/*
+ * nvkm_drm_vm_bind_note_empty_clear_skip()
+ *
+ * Ownership:
+ *   Borrows sc for counter updates only; it does not acquire references to the
+ *   VMM, GEM objects, or VM binding records.
+ *
+ * Lifetime:
+ *   The range is an ioctl-local value that remains owned by the caller.  The
+ *   helper stores only aggregate diagnostic counters.
+ *
+ * Threading:
+ *   Called from VM_BIND mutation paths while the caller holds the drm_file's
+ *   vm_token.  Counters follow the driver's existing best-effort debug counter
+ *   model and are not part of the ABI.
+ */
+static void
+nvkm_drm_vm_bind_note_empty_clear_skip(struct nvkm_softc *sc, uint64_t size)
+{
+	sc->vm_bind_empty_clear_skip_count++;
+	sc->vm_bind_empty_clear_skip_pages += size / NVKM_GMMU_PT_PAGE_SIZE;
+}
+
+/*
+ * nvkm_drm_vm_bind_note_replace_clear_skip()
+ *
+ * Ownership:
+ *   Borrows sc for diagnostic counter updates only.  It does not acquire or
+ *   release VM binding, VMM, or GEM ownership.
+ *
+ * Lifetime:
+ *   The byte range is caller-owned and used only to update aggregate counters.
+ *
+ * Threading:
+ *   Called while the drm_file VM token serializes VM_BIND mutations.  Counters
+ *   follow the driver's best-effort debug accounting and are not UAPI.
+ */
+static void
+nvkm_drm_vm_bind_note_replace_clear_skip(struct nvkm_softc *sc, uint64_t size)
+{
+	sc->vm_bind_replace_clear_skip_count++;
+	sc->vm_bind_replace_clear_skip_pages += size / NVKM_GMMU_PT_PAGE_SIZE;
+}
+
+/*
+ * nvkm_drm_vm_bind_note_op()
+ *
+ * Ownership:
+ *   Borrows sc for aggregate diagnostics.  No VM_BIND, BO, or VMM ownership is
+ *   changed.
+ *
+ * Lifetime:
+ *   The range is caller-owned and not retained.
+ *
+ * Threading:
+ *   Called while a VM_BIND ioctl/job is applying under the per-file VM token.
+ */
+static void
+nvkm_drm_vm_bind_note_op(struct nvkm_softc *sc, uint32_t action,
+    uint64_t size)
+{
+	uint64_t pages = size / NVKM_GMMU_PT_PAGE_SIZE;
+
+	switch (action) {
+	case NVKM_DRM_VM_TRACE_MAP:
+		sc->vm_bind_map_count++;
+		sc->vm_bind_map_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_UNMAP:
+		sc->vm_bind_unmap_count++;
+		sc->vm_bind_unmap_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_MAP_NULL:
+		sc->vm_bind_map_null_count++;
+		sc->vm_bind_map_null_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_MAP_SPARSE:
+		sc->vm_bind_map_sparse_count++;
+		sc->vm_bind_map_sparse_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_UNMAP_SPARSE:
+		sc->vm_bind_unmap_sparse_count++;
+		sc->vm_bind_unmap_sparse_pages += pages;
+		break;
+	}
+}
+
+/*
+ * nvkm_drm_vm_bind_note_clear()
+ *
+ * Ownership:
+ *   Borrows sc for aggregate diagnostics only.
+ *
+ * Lifetime:
+ *   The range is caller-owned and not retained.
+ *
+ * Threading:
+ *   Called immediately before remove_range writes invalid/sparse PTEs for a
+ *   tracked overlap, while VM_BIND serialization is held.
+ */
+static void
+nvkm_drm_vm_bind_note_clear(struct nvkm_softc *sc, uint32_t action,
+    uint64_t size)
+{
+	uint64_t pages = size / NVKM_GMMU_PT_PAGE_SIZE;
+
+	switch (action) {
+	case NVKM_DRM_VM_TRACE_UNMAP:
+		sc->vm_bind_clear_unmap_count++;
+		sc->vm_bind_clear_unmap_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_MAP_NULL:
+		sc->vm_bind_clear_map_null_count++;
+		sc->vm_bind_clear_map_null_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_MAP_SPARSE:
+		sc->vm_bind_clear_map_sparse_count++;
+		sc->vm_bind_clear_map_sparse_pages += pages;
+		break;
+	case NVKM_DRM_VM_TRACE_UNMAP_SPARSE:
+		sc->vm_bind_clear_unmap_sparse_count++;
+		sc->vm_bind_clear_unmap_sparse_pages += pages;
+		break;
+	}
+}
+
+/*
+ * nvkm_drm_vm_bindings_free_prepared()
+ *
+ * Ownership:
+ *   Consumes every binding currently linked on bindings.  Each binding owns a
+ *   GEM reference and may own a VM_BIND BO pin; both are released here.
+ *
+ * Lifetime:
+ *   The list head remains owned by the caller and is empty on return.
+ *
+ * Threading:
+ *   Called from VM_BIND prepare/abort paths while the caller owns the per-file
+ *   VM token.  It does not touch hardware page tables.
+ */
+static void
+nvkm_drm_vm_bindings_free_prepared(
+    struct nvkm_drm_vm_binding_list *bindings)
+{
+	struct nvkm_drm_vm_binding *binding;
+
+	while ((binding = LIST_FIRST(bindings)) != NULL) {
+		LIST_REMOVE(binding, link);
+		nvkm_drm_vm_binding_free(binding);
+	}
+}
+
+/*
+ * nvkm_drm_vm_bindings_prepare_replace_range()
+ *
+ * Ownership:
+ *   Borrows nfile and the existing binding list.  On success, tail_bindings
+ *   owns any preallocated tail bindings needed to split old mappings.  The
+ *   caller must later pass the list to commit or abort.
+ *
+ * Lifetime:
+ *   No existing binding is mutated here.  The prepared tail bindings remain
+ *   valid until commit/abort while the caller keeps the VM token held.
+ *
+ * Threading:
+ *   Requires nfile->vm_token.  It may acquire BO pin references for prepared
+ *   tails, but it does not write PTEs and cannot expose a partial VA update.
+ */
+static int
+nvkm_drm_vm_bindings_prepare_replace_range(struct nvkm_drm_file *nfile,
+    uint64_t addr, uint64_t size,
+    struct nvkm_drm_vm_binding_list *tail_bindings)
+{
+	struct nvkm_drm_vm_binding *binding;
+	uint64_t end = addr + size;
+	int err;
+
+	LIST_INIT(tail_bindings);
+	if (addr >= nfile->vm_bindings_max_end)
+		return (0);
+
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		struct nvkm_drm_vm_binding *tail;
+		uint64_t old_start, old_end, cut_start, cut_end;
+		uint64_t head_size, tail_size, tail_bo_offset;
+
+		if (binding->addr >= end)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
+		if (!nvkm_drm_vm_ranges_overlap(addr, size,
+		    binding->addr, binding->size))
+			continue;
+
+		old_start = binding->addr;
+		old_end = binding->addr + binding->size;
+		cut_start = old_start > addr ? old_start : addr;
+		cut_end = old_end < end ? old_end : end;
+		head_size = cut_start - old_start;
+		tail_size = old_end - cut_end;
+		if (head_size == 0 || tail_size == 0)
+			continue;
+
+		tail_bo_offset = binding->bo_offset + (cut_end - old_start);
+		drm_gem_object_get(binding->obj);
+		tail = nvkm_drm_vm_binding_alloc(nfile, cut_end, tail_size,
+		    binding->obj, tail_bo_offset);
+		if (tail == NULL) {
+			drm_gem_object_put_unlocked(binding->obj);
+			err = -ENOMEM;
+			goto fail;
+		}
+		err = nvkm_drm_vm_binding_pin(tail);
+		if (err != 0) {
+			nvkm_drm_vm_binding_free(tail);
+			err = -err;
+			goto fail;
+		}
+		LIST_INSERT_HEAD(tail_bindings, tail, link);
+	}
+	return (0);
+
+fail:
+	nvkm_drm_vm_bindings_free_prepared(tail_bindings);
+	return (err);
+}
+
+/*
+ * nvkm_drm_vm_bindings_abort_replace_range()
+ *
+ * Ownership:
+ *   Consumes the prepared tail bindings produced by prepare_replace_range().
+ *   Existing live bindings and hardware PTEs are untouched.
+ *
+ * Lifetime:
+ *   The prepared list must not be used after this call except as an empty list.
+ *
+ * Threading:
+ *   Requires the same VM_BIND serialization as prepare/commit.
+ */
+static void
+nvkm_drm_vm_bindings_abort_replace_range(
+    struct nvkm_drm_vm_binding_list *tail_bindings)
+{
+	nvkm_drm_vm_bindings_free_prepared(tail_bindings);
+}
+
+/*
+ * nvkm_drm_vm_bindings_commit_replace_range()
+ *
+ * Ownership:
+ *   Consumes prepared tail bindings and mutates nfile's binding tracker to
+ *   describe the final VA state after a successful MAP replacement.
+ *
+ * Lifetime:
+ *   The caller must have already installed the new PTEs for [addr, addr+size).
+ *   Old bindings covering that exact range are removed from the software
+ *   tracker without first writing invalid PTEs, because the new valid PTEs have
+ *   already overwritten them and the caller will flush once before ioctl return.
+ *
+ * Threading:
+ *   Requires nfile->vm_token.  This function does not acquire the VMM token and
+ *   does not touch BAR1; it is a no-fail software state transition.
+ */
+static void
+nvkm_drm_vm_bindings_commit_replace_range(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
+    struct nvkm_drm_vm_binding_list *tail_bindings)
+{
+	struct nvkm_drm_vm_binding *binding, *next;
+	uint64_t end = addr + size;
+	bool changed = false;
+
+	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
+		uint64_t old_start, old_end, cut_start, cut_end;
+		uint64_t head_size, tail_size;
+
+		if (binding->addr >= end)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
+		if (!nvkm_drm_vm_ranges_overlap(addr, size,
+		    binding->addr, binding->size))
+			continue;
+
+		changed = true;
+		old_start = binding->addr;
+		old_end = binding->addr + binding->size;
+		cut_start = old_start > addr ? old_start : addr;
+		cut_end = old_end < end ? old_end : end;
+		head_size = cut_start - old_start;
+		tail_size = old_end - cut_end;
+		nvkm_drm_vm_bind_note_replace_clear_skip(sc, cut_end - cut_start);
+
+		if (head_size != 0 && tail_size != 0) {
+			binding->size = head_size;
+		} else if (head_size != 0) {
+			binding->size = head_size;
+		} else if (tail_size != 0) {
+			binding->addr = cut_end;
+			binding->size = tail_size;
+			binding->bo_offset += cut_end - old_start;
+		} else {
+			binding->pte_installed = false;
+			nvkm_drm_vm_binding_unlink_free(binding);
+		}
+	}
+
+	while ((binding = LIST_FIRST(tail_bindings)) != NULL) {
+		LIST_REMOVE(binding, link);
+		nvkm_drm_vm_binding_insert_sorted(nfile, binding);
+	}
+	if (changed)
+		nvkm_drm_vm_bindings_recalc_max_end(nfile);
+}
+
 static int
 nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    bool clear_empty_range, uint32_t *punmapped)
+    bool clear_empty_range, uint32_t clear_action, uint32_t *punmapped)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
 	struct nvkm_drm_vm_binding_list tail_bindings;
@@ -534,10 +850,9 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 	LIST_INIT(&tail_bindings);
 	*punmapped = 0;
 	if (addr >= nfile->vm_bindings_max_end) {
-		if (!clear_empty_range)
-			return (0);
-		err = nvkm_gsp_vmm_unmap_noflush(nfile->vmm, addr, size);
-		return (err != 0 ? -err : 0);
+		if (clear_empty_range)
+			nvkm_drm_vm_bind_note_empty_clear_skip(sc, size);
+		return (0);
 	}
 
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
@@ -597,6 +912,8 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 			old_end = binding->addr + binding->size;
 			cut_start = old_start > addr ? old_start : addr;
 			cut_end = old_end < end ? old_end : end;
+			nvkm_drm_vm_bind_note_clear(sc, clear_action,
+			    cut_end - cut_start);
 			err = nvkm_gsp_vmm_unmap_valid_noflush(nfile->vmm,
 			    cut_start, cut_end - cut_start);
 			if (err != 0) {
@@ -605,11 +922,7 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 			}
 		}
 	} else if (clear_empty_range) {
-		err = nvkm_gsp_vmm_unmap_noflush(nfile->vmm, addr, size);
-		if (err != 0) {
-			err = -err;
-			goto fail_tails;
-		}
+		nvkm_drm_vm_bind_note_empty_clear_skip(sc, size);
 	}
 
 	LIST_FOREACH_MUTABLE(binding, &nfile->vm_bindings, link, next) {
@@ -1726,10 +2039,11 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			    "nvkm_drm: VM_BIND unmap idx=%u op=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 			    i, op->op, op->flags, op->handle,
 			    (uintmax_t)op->addr, (uintmax_t)op->range);
+			nvkm_drm_vm_bind_note_op(sc, action, op->range);
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
 			    op->addr, op->range,
 			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) == 0,
-			    &unmapped);
+			    action, &unmapped);
 			if (err != 0) {
 				nvkm_drm_vm_trace_record(sc, action,
 				    op->flags, op->handle, op->addr,
@@ -1758,18 +2072,24 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 		if (op->op == DRM_NOUVEAU_VM_BIND_OP_MAP) {
 			struct drm_gem_object *obj;
 			struct nvkm_bo *bo;
+			struct nvkm_drm_vm_binding *new_binding = NULL;
+			struct nvkm_drm_vm_binding_list replace_tails;
 			bool bo_pinned = false;
 			bool job_object = false;
 			uint32_t unmapped = 0;
+
+			LIST_INIT(&replace_tails);
 
 			if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0) {
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND map sparse idx=%u flags=0x%08x handle=%u addr=0x%016jx range=0x%016jx\n",
 				    i, op->flags, op->handle,
 				    (uintmax_t)op->addr, (uintmax_t)op->range);
+				nvkm_drm_vm_bind_note_op(sc,
+				    NVKM_DRM_VM_TRACE_MAP_SPARSE, op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
 				    nfile, op->addr, op->range, false,
-				    &unmapped);
+				    NVKM_DRM_VM_TRACE_MAP_SPARSE, &unmapped);
 				if (err == 0) {
 					err = nvkm_gsp_vmm_map_sparse_noflush(
 					    nfile->vmm, op->addr, op->range);
@@ -1796,9 +2116,11 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				    "nvkm_drm: VM_BIND map-null idx=%u flags=0x%08x addr=0x%016jx range=0x%016jx\n",
 				    i, op->flags, (uintmax_t)op->addr,
 				    (uintmax_t)op->range);
+				nvkm_drm_vm_bind_note_op(sc,
+				    NVKM_DRM_VM_TRACE_MAP_NULL, op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
 				    nfile, op->addr, op->range, true,
-				    &unmapped);
+				    NVKM_DRM_VM_TRACE_MAP_NULL, &unmapped);
 				if (err != 0)
 					break;
 				nvkm_drm_vm_trace_record(sc,
@@ -1839,8 +2161,10 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			    i, op->flags, op->handle, obj, bo->domain,
 			    (uintmax_t)op->addr, (uintmax_t)op->bo_offset,
 			    (uintmax_t)op->range, (uintmax_t)bo->paddr);
-			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
-			    op->addr, op->range, false, &unmapped);
+			nvkm_drm_vm_bind_note_op(sc, NVKM_DRM_VM_TRACE_MAP,
+			    op->range);
+			err = nvkm_drm_vm_bindings_prepare_replace_range(nfile,
+			    op->addr, op->range, &replace_tails);
 			if (err != 0) {
 				if (!job_object)
 					drm_gem_object_put_unlocked(obj);
@@ -1848,12 +2172,46 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			}
 			err = nvkm_bo_vm_bind_pin(bo);
 			if (err != 0) {
+				nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
 				if (!job_object)
 					drm_gem_object_put_unlocked(obj);
 				err = -err;
 				break;
 			}
 			bo_pinned = true;
+			if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) == 0) {
+				err = nvkm_bo_ensure_ttm_populated(bo);
+				if (err != 0) {
+					nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
+					(void)nvkm_bo_vm_bind_unpin(bo);
+					if (!job_object)
+						drm_gem_object_put_unlocked(obj);
+					err = -err;
+					break;
+				}
+			}
+			new_binding = nvkm_drm_vm_binding_alloc(nfile, op->addr,
+			    op->range, obj, op->bo_offset);
+			if (new_binding == NULL) {
+				nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
+				(void)nvkm_bo_vm_bind_unpin(bo);
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
+				err = -ENOMEM;
+				break;
+			}
+			new_binding->bo_pinned = bo_pinned;
+			bo_pinned = false;
+			if (job_object)
+				objects[i] = NULL;
+			err = nvkm_gsp_vmm_ensure_pt_range(nfile->vmm, op->addr,
+			    op->range);
+			if (err != 0) {
+				nvkm_drm_vm_binding_free(new_binding);
+				nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
+				err = -err;
+				break;
+			}
 			/*
 			 * NVK's VMA-tilemode protocol: bits 7:0 of op->flags
 			 * carry the PTE kind (bit 8 is SPARSE).  Kinds are
@@ -1866,15 +2224,6 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				    op->addr, bo->paddr + op->bo_offset,
 				    op->range, 0, 0, op->flags & 0xff);
 			} else {
-				err = nvkm_bo_ensure_ttm_populated(bo);
-				if (err != 0) {
-					(void)nvkm_bo_vm_bind_unpin(bo);
-					if (!job_object)
-						drm_gem_object_put_unlocked(obj);
-					err = -err;
-					break;
-				}
-
 				err = nvkm_gsp_vmm_map_sysmem_bo_noflush(nfile->vmm,
 				    op->addr, bo, op->bo_offset, op->range,
 				    op->flags & 0xff);
@@ -1883,9 +2232,8 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			    op->flags, op->handle, op->addr, op->range,
 			    op->bo_offset, obj, err != 0 ? -err : 0);
 			if (err != 0) {
-				(void)nvkm_bo_vm_bind_unpin(bo);
-				if (!job_object)
-					drm_gem_object_put_unlocked(obj);
+				nvkm_drm_vm_binding_free(new_binding);
+				nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
 				err = -err;
 				nvkm_debugf(sc->dev,
 				    "nvkm_drm: VM_BIND map failed idx=%u err=%d\n",
@@ -1907,23 +2255,10 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 					bo->vm_bound_mixed_kind = true;
 				bo->vm_bound_tiled = true;
 			}
-			err = nvkm_drm_vm_binding_add(nfile, op->addr,
-			    op->range, obj, op->bo_offset, bo_pinned);
-			if (err != 0) {
-				(void)nvkm_gsp_vmm_unmap_valid_noflush(
-				    nfile->vmm, op->addr, op->range);
-				(void)nvkm_bo_vm_bind_unpin(bo);
-				if (!job_object)
-					drm_gem_object_put_unlocked(obj);
-				err = -err;
-				nvkm_debugf(sc->dev,
-				    "nvkm_drm: VM_BIND track failed idx=%u err=%d\n",
-				    i, err);
-				break;
-			}
-			bo_pinned = false;
-			if (job_object)
-				objects[i] = NULL;
+			nvkm_drm_vm_bindings_commit_replace_range(sc, nfile,
+			    op->addr, op->range, &replace_tails);
+			nvkm_drm_vm_binding_insert_sorted(nfile, new_binding);
+			new_binding = NULL;
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND track addr=0x%016jx size=0x%016jx obj=%p\n",
 			    (uintmax_t)op->addr, (uintmax_t)op->range, obj);

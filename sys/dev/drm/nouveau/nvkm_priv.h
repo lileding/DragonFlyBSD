@@ -746,6 +746,28 @@ struct nvkm_softc {
 	uint32_t		vm_bind_busy_exec_refs;
 	uint64_t		vm_bind_busy_addr;
 	uint64_t		vm_bind_busy_size;
+	uint64_t		vm_bind_empty_clear_skip_count;
+	uint64_t		vm_bind_empty_clear_skip_pages;
+	uint64_t		vm_bind_replace_clear_skip_count;
+	uint64_t		vm_bind_replace_clear_skip_pages;
+	uint64_t		vm_bind_map_count;
+	uint64_t		vm_bind_map_pages;
+	uint64_t		vm_bind_unmap_count;
+	uint64_t		vm_bind_unmap_pages;
+	uint64_t		vm_bind_map_null_count;
+	uint64_t		vm_bind_map_null_pages;
+	uint64_t		vm_bind_map_sparse_count;
+	uint64_t		vm_bind_map_sparse_pages;
+	uint64_t		vm_bind_unmap_sparse_count;
+	uint64_t		vm_bind_unmap_sparse_pages;
+	uint64_t		vm_bind_clear_unmap_count;
+	uint64_t		vm_bind_clear_unmap_pages;
+	uint64_t		vm_bind_clear_map_null_count;
+	uint64_t		vm_bind_clear_map_null_pages;
+	uint64_t		vm_bind_clear_map_sparse_count;
+	uint64_t		vm_bind_clear_map_sparse_pages;
+	uint64_t		vm_bind_clear_unmap_sparse_count;
+	uint64_t		vm_bind_clear_unmap_sparse_pages;
 	uint64_t		vm_bind_profile_wait_us;
 	uint64_t		vm_bind_profile_copyin_us;
 	uint64_t		vm_bind_profile_token_wait_us;
@@ -765,9 +787,13 @@ struct nvkm_softc {
 	uint64_t		vmm_flush_count;
 	uint64_t		vmm_flush_us;
 	uint64_t		vmm_pte_fast_write_count;
+	uint64_t		vmm_pte_bulk_write_count;
+	uint64_t		vmm_pte_bulk_write_pages;
 	uint64_t		vmm_pte_fast_clear_count;
 	uint64_t		vmm_pte_fast_invalid_clear_count;
 	uint64_t		vmm_pte_fast_sparse_clear_count;
+	uint64_t		vmm_pte_bulk_clear_count;
+	uint64_t		vmm_pte_bulk_clear_pages;
 	uint64_t		vmm_pte_read_modify_write_count;
 	uint64_t		cpu_prep_wait_error_count;
 	uint64_t		exec_profile_token_wait_us;
@@ -1164,6 +1190,8 @@ uint32_t nvkm_gsp_bar1_rd32(struct nvkm_softc *sc, uint64_t bar1_gva);
 void	nvkm_gsp_bar1_wr64(struct nvkm_softc *sc, uint64_t bar1_gva,
 	    uint64_t val);
 uint64_t nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t bar1_gva);
+void	nvkm_gsp_bar1_set_region64(struct nvkm_softc *sc, uint64_t bar1_gva,
+	    uint64_t val, uint32_t count);
 
 /* Allocate a 4 KiB VRAM page and map it into BAR1 at the next free
  * GVA. Fills *page with the VRAM paddr (for PDE/PTE encoding) and the
