@@ -788,7 +788,13 @@ nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 
 	lwkt_gettoken(&vmm->tok);
 	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
+		/*
+		 * VM_BIND removes overlapping tracked mappings before MAP reaches
+		 * this helper.  Match the sysmem BO fast path and Linux nouveau's
+		 * leaf map path by writing the new valid PTE directly instead of
+		 * reading the old PTE from BAR1 first.
+		 */
+		err = nvkm_gsp_vmm_write_new_valid_pte(vmm, va + off,
 		    nvkm_pte_to_vram_flags(paddr + off, priv, ro) | kind_bits);
 		if (err != 0) {
 			lwkt_reltoken(&vmm->tok);
