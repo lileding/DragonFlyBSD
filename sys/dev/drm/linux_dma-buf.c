@@ -26,6 +26,7 @@
 
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include <linux/bitops.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-fence-array.h>
@@ -47,8 +48,19 @@ SYSCTL_DECL(_hw_dri);
 
 static uint64_t dmabuf_export_sync_file_count;
 static uint64_t dmabuf_export_sync_file_us;
+static uint64_t dmabuf_export_sync_file_read_count;
+static uint64_t dmabuf_export_sync_file_write_count;
+static uint64_t dmabuf_export_sync_file_empty_count;
+static uint64_t dmabuf_export_sync_file_single_count;
+static uint64_t dmabuf_export_sync_file_array_count;
+static uint64_t dmabuf_export_sync_file_signaled_count;
+static uint64_t dmabuf_export_sync_file_pending_count;
 static uint64_t dmabuf_import_sync_file_count;
 static uint64_t dmabuf_import_sync_file_us;
+static uint64_t dmabuf_import_sync_file_read_count;
+static uint64_t dmabuf_import_sync_file_write_count;
+static uint64_t dmabuf_import_sync_file_signaled_count;
+static uint64_t dmabuf_import_sync_file_pending_count;
 static uint64_t dmabuf_fd_count;
 static uint64_t dmabuf_fd_error_count;
 static uint64_t dmabuf_fd_us;
@@ -56,15 +68,40 @@ static uint64_t dmabuf_export_count;
 static uint64_t dmabuf_get_count;
 static uint64_t dmabuf_get_error_count;
 static uint64_t dmabuf_close_count;
+static uint64_t dmabuf_attach_count;
+static uint64_t dmabuf_attach_error_count;
+static uint64_t dmabuf_detach_count;
 
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_count, CTLFLAG_RD,
     &dmabuf_export_sync_file_count, 0, "dma-buf export sync_file count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_us, CTLFLAG_RD,
     &dmabuf_export_sync_file_us, 0, "dma-buf export sync_file time");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_read_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_read_count, 0, "dma-buf export sync_file read count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_write_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_write_count, 0, "dma-buf export sync_file write count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_empty_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_empty_count, 0, "dma-buf export sync_file empty reservation count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_single_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_single_count, 0, "dma-buf export sync_file single fence count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_array_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_array_count, 0, "dma-buf export sync_file fence array count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_signaled_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_signaled_count, 0, "dma-buf export sync_file signaled fence count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_pending_count, CTLFLAG_RD,
+    &dmabuf_export_sync_file_pending_count, 0, "dma-buf export sync_file pending fence count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_count, CTLFLAG_RD,
     &dmabuf_import_sync_file_count, 0, "dma-buf import sync_file count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_us, CTLFLAG_RD,
     &dmabuf_import_sync_file_us, 0, "dma-buf import sync_file time");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_read_count, CTLFLAG_RD,
+    &dmabuf_import_sync_file_read_count, 0, "dma-buf import sync_file read count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_write_count, CTLFLAG_RD,
+    &dmabuf_import_sync_file_write_count, 0, "dma-buf import sync_file write count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_signaled_count, CTLFLAG_RD,
+    &dmabuf_import_sync_file_signaled_count, 0, "dma-buf import sync_file signaled fence count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_import_sync_file_pending_count, CTLFLAG_RD,
+    &dmabuf_import_sync_file_pending_count, 0, "dma-buf import sync_file pending fence count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_fd_count, CTLFLAG_RD,
     &dmabuf_fd_count, 0, "dma-buf fd export count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_fd_error_count, CTLFLAG_RD,
@@ -79,11 +116,43 @@ SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_get_error_count, CTLFLAG_RD,
     &dmabuf_get_error_count, 0, "dma-buf get error count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_close_count, CTLFLAG_RD,
     &dmabuf_close_count, 0, "dma-buf close count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_attach_count, CTLFLAG_RD,
+    &dmabuf_attach_count, 0, "dma-buf attach count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_attach_error_count, CTLFLAG_RD,
+    &dmabuf_attach_error_count, 0, "dma-buf attach error count");
+SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_detach_count, CTLFLAG_RD,
+    &dmabuf_detach_count, 0, "dma-buf detach count");
 
 static uint64_t
 dmabuf_now_us(void)
 {
 	return ((uint64_t)ktime_to_us(ktime_get()));
+}
+
+static void
+dmabuf_probe_fence_state(struct dma_fence *fence, uint64_t *signaled,
+    uint64_t *pending)
+{
+	/*
+	 * Ownership:
+	 *   Borrows fence.  The caller owns the reference and this helper
+	 *   never takes, drops, or publishes one.
+	 *
+	 * Lifetime:
+	 *   Must run while the caller's fence reference is valid.  It only
+	 *   samples the dma_fence software signaled flag; it deliberately does
+	 *   not call dma_fence_is_signaled(), because that may invoke the
+	 *   driver's .signaled() callback and publish completion.
+	 *
+	 * Threading:
+	 *   Lockless diagnostic read.  The counters are best-effort telemetry
+	 *   and may race with a concurrent signal path.
+	 */
+	if (fence != NULL &&
+	    test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
+		(*signaled)++;
+	else
+		(*pending)++;
 }
 
 struct dmabuf_stub_fence {
@@ -178,17 +247,26 @@ dmabuf_export_sync_file(struct dma_buf *dmabuf,
 		return (EINVAL);
 
 	if ((args->flags & DMA_BUF_SYNC_WRITE) == 0) {
+		dmabuf_export_sync_file_read_count++;
 		fence = reservation_object_get_excl_rcu(dmabuf->resv);
-		if (fence == NULL)
+		if (fence == NULL) {
+			dmabuf_export_sync_file_empty_count++;
 			fence = dmabuf_signaled_fence_create();
+		} else {
+			dmabuf_export_sync_file_single_count++;
+		}
 		if (fence == NULL)
 			return (ENOMEM);
 
+		dmabuf_probe_fence_state(fence,
+		    &dmabuf_export_sync_file_signaled_count,
+		    &dmabuf_export_sync_file_pending_count);
 		ret = dmabuf_sync_file_install(fence, &args->fd);
 		dma_fence_put(fence);
 		return (ret);
 	}
 
+	dmabuf_export_sync_file_write_count++;
 	ret = reservation_object_get_fences_rcu(dmabuf->resv, &excl,
 	    &shared_count, &shared);
 	if (ret < 0)
@@ -196,21 +274,30 @@ dmabuf_export_sync_file(struct dma_buf *dmabuf,
 
 	count = shared_count + (excl != NULL ? 1 : 0);
 	if (count == 0) {
+		dmabuf_export_sync_file_empty_count++;
 		fence = dmabuf_signaled_fence_create();
 		if (fence == NULL)
 			return (ENOMEM);
+		dmabuf_probe_fence_state(fence,
+		    &dmabuf_export_sync_file_signaled_count,
+		    &dmabuf_export_sync_file_pending_count);
 		ret = dmabuf_sync_file_install(fence, &args->fd);
 		dma_fence_put(fence);
 		return (ret);
 	}
 
 	if (count == 1) {
+		dmabuf_export_sync_file_single_count++;
 		fence = excl != NULL ? excl : shared[0];
+		dmabuf_probe_fence_state(fence,
+		    &dmabuf_export_sync_file_signaled_count,
+		    &dmabuf_export_sync_file_pending_count);
 		ret = dmabuf_sync_file_install(fence, &args->fd);
 		dmabuf_put_fences(excl, shared_count, shared);
 		return (ret);
 	}
 
+	dmabuf_export_sync_file_array_count++;
 	fences = kmalloc_array(count, sizeof(*fences), GFP_KERNEL);
 	if (fences == NULL) {
 		dmabuf_put_fences(excl, shared_count, shared);
@@ -218,10 +305,18 @@ dmabuf_export_sync_file(struct dma_buf *dmabuf,
 	}
 
 	out = 0;
-	if (excl != NULL)
+	if (excl != NULL) {
+		dmabuf_probe_fence_state(excl,
+		    &dmabuf_export_sync_file_signaled_count,
+		    &dmabuf_export_sync_file_pending_count);
 		fences[out++] = excl;
-	for (i = 0; i < shared_count; i++)
+	}
+	for (i = 0; i < shared_count; i++) {
+		dmabuf_probe_fence_state(shared[i],
+		    &dmabuf_export_sync_file_signaled_count,
+		    &dmabuf_export_sync_file_pending_count);
 		fences[out++] = shared[i];
+	}
 	kfree(shared);
 
 	array = dma_fence_array_create(count, fences, dma_fence_context_alloc(1),
@@ -253,6 +348,12 @@ dmabuf_import_sync_file(struct dma_buf *dmabuf,
 	fence = sync_file_get_fence(args->fd);
 	if (fence == NULL)
 		return (EINVAL);
+	if ((args->flags & DMA_BUF_SYNC_WRITE) != 0)
+		dmabuf_import_sync_file_write_count++;
+	else
+		dmabuf_import_sync_file_read_count++;
+	dmabuf_probe_fence_state(fence, &dmabuf_import_sync_file_signaled_count,
+	    &dmabuf_import_sync_file_pending_count);
 
 	ret = reservation_object_lock(dmabuf->resv, NULL);
 	if (ret < 0) {
@@ -406,6 +507,87 @@ dma_buf_export(const struct dma_buf_export_info *exp_info)
 	return dmabuf;
 }
 
+/*
+ * dma_buf_attach()
+ *
+ * Ownership:
+ *   The returned attachment is newly allocated and owned by the caller.  The
+ *   caller's existing dma-buf reference remains owned by the caller; this
+ *   helper does not acquire a file reference.
+ *
+ * Lifetime:
+ *   The attachment is valid until dma_buf_detach().  Exporter attach hooks may
+ *   store exporter-private state in attach->priv and must release it from
+ *   their detach hook or from their own attach error path.
+ *
+ * Threading:
+ *   May sleep in the exporter attach hook.  No global dma-buf lock is held
+ *   across the callback in this DragonFly shim.
+ */
+struct dma_buf_attachment *
+dma_buf_attach(struct dma_buf *dmabuf, struct device *dev)
+{
+	struct dma_buf_attachment *attach;
+	int ret;
+
+	dmabuf_attach_count++;
+	if (dmabuf == NULL || dmabuf->ops == NULL) {
+		dmabuf_attach_error_count++;
+		return ERR_PTR(-EINVAL);
+	}
+
+	attach = kzalloc(sizeof(*attach), GFP_KERNEL);
+	if (attach == NULL) {
+		dmabuf_attach_error_count++;
+		return ERR_PTR(-ENOMEM);
+	}
+	attach->dmabuf = dmabuf;
+	attach->dev = dev;
+	attach->priv = NULL;
+
+	if (dmabuf->ops->attach != NULL) {
+		ret = dmabuf->ops->attach(dmabuf, attach);
+		if (ret != 0) {
+			if (ret > 0)
+				ret = -ret;
+			kfree(attach);
+			dmabuf_attach_error_count++;
+			return ERR_PTR(ret);
+		}
+	}
+
+	return attach;
+}
+
+/*
+ * dma_buf_detach()
+ *
+ * Ownership:
+ *   Consumes the attachment allocation.  The caller still owns and must release
+ *   any dma-buf reference it acquired for the import.
+ *
+ * Lifetime:
+ *   attach->dmabuf must match dmabuf.  A mismatch is ignored after counting it
+ *   as an attach/detach protocol error because detach paths can run during
+ *   object teardown.
+ *
+ * Threading:
+ *   May sleep in exporter detach hooks.  Callers must serialize against their
+ *   own imported-object lifetime.
+ */
+void
+dma_buf_detach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
+{
+	if (dmabuf == NULL || attach == NULL || attach->dmabuf != dmabuf) {
+		dmabuf_attach_error_count++;
+		return;
+	}
+	if (dmabuf->ops != NULL && dmabuf->ops->detach != NULL)
+		dmabuf->ops->detach(dmabuf, attach);
+	kfree(attach);
+	dmabuf_detach_count++;
+}
+
 int
 dma_buf_fd(struct dma_buf *dmabuf, int flags)
 {
@@ -469,13 +651,13 @@ struct sg_table *
 dma_buf_map_attachment(struct dma_buf_attachment *attach,
 				enum dma_data_direction direction)
 {
-STUB();
 	struct sg_table *sg_table;
 
 	if (attach == NULL)
 		return ERR_PTR(-EINVAL);
 
-	if (attach->dmabuf == NULL)
+	if (attach->dmabuf == NULL || attach->dmabuf->ops == NULL ||
+	    attach->dmabuf->ops->map_dma_buf == NULL)
 		return ERR_PTR(-EINVAL);
 
 	sg_table = attach->dmabuf->ops->map_dma_buf(attach, direction);
@@ -489,5 +671,9 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *attach,
 				struct sg_table *sg_table,
 				enum dma_data_direction direction)
 {
-STUB();
+	if (attach == NULL || attach->dmabuf == NULL ||
+	    attach->dmabuf->ops == NULL ||
+	    attach->dmabuf->ops->unmap_dma_buf == NULL)
+		return;
+	attach->dmabuf->ops->unmap_dma_buf(attach, sg_table, direction);
 }

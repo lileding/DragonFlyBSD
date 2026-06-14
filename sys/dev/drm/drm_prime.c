@@ -200,6 +200,7 @@ int drm_gem_map_attach(struct dma_buf *dma_buf,
 	struct drm_prime_attachment *prime_attach;
 	struct drm_gem_object *obj = dma_buf->priv;
 	struct drm_device *dev = obj->dev;
+	int ret;
 
 	prime_attach = kzalloc(sizeof(*prime_attach), GFP_KERNEL);
 	if (!prime_attach)
@@ -211,7 +212,12 @@ int drm_gem_map_attach(struct dma_buf *dma_buf,
 	if (!dev->driver->gem_prime_pin)
 		return 0;
 
-	return dev->driver->gem_prime_pin(obj);
+	ret = dev->driver->gem_prime_pin(obj);
+	if (ret != 0) {
+		attach->priv = NULL;
+		kfree(prime_attach);
+	}
+	return ret;
 }
 EXPORT_SYMBOL(drm_gem_map_attach);
 
