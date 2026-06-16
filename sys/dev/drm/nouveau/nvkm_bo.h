@@ -37,6 +37,8 @@ struct drm_nouveau_gem_cpu_prep {
 	uint32_t handle;
 	uint32_t flags;
 };
+#define NOUVEAU_GEM_CPU_PREP_NOWAIT	0x00000001
+#define NOUVEAU_GEM_CPU_PREP_WRITE	0x00000004
 struct drm_nouveau_gem_cpu_fini {
 	uint32_t handle;
 };
@@ -149,7 +151,7 @@ int nvkm_bo_scanout_unpin(struct nvkm_bo *bo);
 struct reservation_object *nvkm_bo_resv(struct nvkm_bo *bo);
 int nvkm_bo_resv_add_shared_fence(struct nvkm_bo *bo, struct dma_fence *fence);
 void nvkm_bo_resv_add_excl_fence(struct nvkm_bo *bo, struct dma_fence *fence);
-int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr);
+int nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait);
 int nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,
     struct drm_mode_create_dumb *args);
 int nvkm_bo_dumb_map_offset(struct drm_file *file_priv,
