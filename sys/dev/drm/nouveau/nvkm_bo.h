@@ -52,6 +52,9 @@ struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
 	struct ttm_buffer_object tbo;		/* TTM BO for GEM backing */
 	struct reservation_object resv;		/* BO busy lifetime fences */
+	struct reservation_object *vm_resv;	/* no_share: alias to the VM's
+						 * vm_resv so CPU_PREP/free wait
+						 * the VM's EXEC completion */
 	void			*kva;		/* legacy page-aligned sysmem KVA */
 	vm_page_t		*pages;		/* legacy sysmem page vector */
 	uint32_t		page_count;
