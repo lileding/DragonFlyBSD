@@ -946,14 +946,12 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait)
 	sc->bo_resv_wait_count++;
 
 	/*
-	 * write access tests/waits read+write fences (wait_all=true); read
-	 * access only the exclusive (write) fence (wait_all=false).
+	 * write waits read+write fences (wait_all=true); read only the
+	 * exclusive (write) fence (wait_all=false).
 	 *
-	 * NOWAIT must be strictly non-blocking, but the DragonFly reservation
-	 * helper rewrites a 0 timeout to 1 tick (reservation_object_wait_timeout
-	 * _rcu: "timeout ? timeout : 1"), so wait_timeout_rcu(0) would still sleep
-	 * up to a tick. Use the non-sleeping signaled test instead and map a
-	 * pending fence straight to -EBUSY, matching nouveau's timeout=0 path.
+	 * NOWAIT must be strictly non-blocking.  DragonFly's
+	 * reservation_object_wait_timeout_rcu rewrites timeout 0 to 1
+	 * tick, so use the non-sleeping signaled test instead.
 	 */
 	if (nowait) {
 		if (reservation_object_test_signaled_rcu(resv, write))
