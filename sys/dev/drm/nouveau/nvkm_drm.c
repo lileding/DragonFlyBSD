@@ -252,6 +252,28 @@ struct nvkm_drm_vm_binding {
 };
 LIST_HEAD(nvkm_drm_vm_binding_list, nvkm_drm_vm_binding);
 
+/*
+ * VM_BIND retire cleanup.
+ *
+ * Ownership:
+ *   Owned by one VM_BIND job until the job signals its done fence.  After
+ *   that point, ownership moves to system_unbound_wq and the job drops the
+ *   pointer.
+ *
+ * Lifetime:
+ *   Contains old live bindings removed from the GPUVA tracker by a VM_BIND
+ *   operation.  The bindings stay alive until the done fence is observable.
+ *
+ * Threading:
+ *   The job worker only moves bindings onto this list while holding the
+ *   drm_file VM token.  The cleanup worker later owns the detached list
+ *   exclusively and may sleep while GEM/TTM waits reservation fences.
+ */
+struct nvkm_drm_vm_bind_retire {
+	struct work_struct work;
+	struct nvkm_drm_vm_binding_list bindings;
+};
+
 struct nvkm_drm_chan_obj {
 	uint32_t handle;
 	uint32_t oclass;
@@ -504,6 +526,137 @@ nvkm_drm_vm_binding_unlink_free(struct nvkm_drm_vm_binding *binding)
 	nvkm_drm_vm_binding_free(binding);
 }
 
+/*
+ * nvkm_drm_vm_bindings_release()
+ *
+ * Ownership:
+ *   Consumes every binding currently linked on bindings.  Each binding owns a
+ *   GEM reference and may own a VM_BIND BO pin; both are released here.
+ *
+ * Lifetime:
+ *   The list head remains owned by the caller and is empty on return.
+ *
+ * Threading:
+ *   The caller must own the detached list exclusively.  This helper may sleep
+ *   through GEM/TTM destruction and reservation-object waits.
+ */
+static void
+nvkm_drm_vm_bindings_release(
+    struct nvkm_drm_vm_binding_list *bindings)
+{
+	struct nvkm_drm_vm_binding *binding;
+
+	while ((binding = LIST_FIRST(bindings)) != NULL) {
+		LIST_REMOVE(binding, link);
+		nvkm_drm_vm_binding_free(binding);
+	}
+}
+
+/*
+ * nvkm_drm_vm_bind_retire_work()
+ *
+ * Ownership:
+ *   Consumes the retire record handed to system_unbound_wq by
+ *   nvkm_drm_vm_bind_retire_schedule().
+ *
+ * Lifetime:
+ *   Runs after the VM_BIND done fence has been signaled.  Frees the detached
+ *   list and then frees the retire record itself.
+ *
+ * Threading:
+ *   Runs outside the ordered VM_BIND/EXEC job worker and may sleep in GEM/TTM
+ *   destruction.
+ */
+static void
+nvkm_drm_vm_bind_retire_work(struct work_struct *work)
+{
+	struct nvkm_drm_vm_bind_retire *retire =
+	    container_of(work, struct nvkm_drm_vm_bind_retire, work);
+
+	nvkm_drm_vm_bindings_release(&retire->bindings);
+	kfree(retire);
+}
+
+/*
+ * nvkm_drm_vm_bind_retire_free()
+ *
+ * Ownership:
+ *   Consumes retire when a VM_BIND job fails before scheduling cleanup.
+ *
+ * Lifetime:
+ *   Used only while the job still owns retire.  A scheduled retire record must
+ *   not be passed here because system_unbound_wq owns it.
+ *
+ * Threading:
+ *   May sleep while releasing any bindings left on the list.  Normal failed
+ *   submit paths call it with an empty list.
+ */
+static void
+nvkm_drm_vm_bind_retire_free(struct nvkm_drm_vm_bind_retire *retire)
+{
+	if (retire == NULL)
+		return;
+	nvkm_drm_vm_bindings_release(&retire->bindings);
+	kfree(retire);
+}
+
+/*
+ * nvkm_drm_vm_bind_retire_schedule()
+ *
+ * Ownership:
+ *   Consumes *pretire.  On success, system_unbound_wq owns the retire record
+ *   and the caller's pointer is cleared.  Empty lists are freed immediately.
+ *
+ * Lifetime:
+ *   Must be called only after the VM_BIND done fence has been signaled.
+ *   Delaying old binding release until this point prevents no_share BO final
+ *   put from waiting on the same VM_BIND fence that is currently completing.
+ *
+ * Threading:
+ *   Intended for job-worker context.  Non-empty cleanup is queued to the
+ *   unbound workqueue so the ordered VM_BIND/EXEC worker cannot block on
+ *   reservation waits for later jobs published to the same per-file vm_resv.
+ */
+static void
+nvkm_drm_vm_bind_retire_schedule(
+    struct nvkm_drm_vm_bind_retire **pretire)
+{
+	struct nvkm_drm_vm_bind_retire *retire = *pretire;
+
+	if (retire == NULL)
+		return;
+	*pretire = NULL;
+	if (LIST_FIRST(&retire->bindings) == NULL) {
+		kfree(retire);
+		return;
+	}
+	if (!queue_work(system_unbound_wq, &retire->work))
+		nvkm_drm_vm_bind_retire_free(retire);
+}
+
+/*
+ * nvkm_drm_vm_binding_unlink_retire()
+ *
+ * Ownership:
+ *   Moves a live VM binding from nfile->vm_bindings into retired_bindings.
+ *   The binding keeps owning its GEM reference and VM_BIND pin.
+ *
+ * Lifetime:
+ *   Used after the VM_BIND job has updated PTEs but before its done fence is
+ *   signaled.  The retired list is released after the done fence is visible.
+ *
+ * Threading:
+ *   Requires the caller to hold the per-file vm_token that serializes the live
+ *   binding tracker.  The retired list is detached from other threads.
+ */
+static void
+nvkm_drm_vm_binding_unlink_retire(struct nvkm_drm_vm_binding *binding,
+    struct nvkm_drm_vm_binding_list *retired_bindings)
+{
+	LIST_REMOVE(binding, link);
+	LIST_INSERT_HEAD(retired_bindings, binding, link);
+}
+
 static int
 nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
     struct nvkm_drm_vm_binding *binding)
@@ -677,12 +830,7 @@ static void
 nvkm_drm_vm_bindings_free_prepared(
     struct nvkm_drm_vm_binding_list *bindings)
 {
-	struct nvkm_drm_vm_binding *binding;
-
-	while ((binding = LIST_FIRST(bindings)) != NULL) {
-		LIST_REMOVE(binding, link);
-		nvkm_drm_vm_binding_free(binding);
-	}
+	nvkm_drm_vm_bindings_release(bindings);
 }
 
 /*
@@ -791,7 +939,9 @@ nvkm_drm_vm_bindings_abort_replace_range(
  *   The caller must have already installed the new PTEs for [addr, addr+size).
  *   Old bindings covering that exact range are removed from the software
  *   tracker without first writing invalid PTEs, because the new valid PTEs have
- *   already overwritten them and the caller will flush once before ioctl return.
+ *   already overwritten them and the caller will flush once before ioctl
+ *   return.  Fully covered old bindings move to retired_bindings; the caller
+ *   must release them only after the VM_BIND done fence is signaled.
  *
  * Threading:
  *   Requires nfile->vm_token.  This function does not acquire the VMM token and
@@ -800,7 +950,8 @@ nvkm_drm_vm_bindings_abort_replace_range(
 static void
 nvkm_drm_vm_bindings_commit_replace_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    struct nvkm_drm_vm_binding_list *tail_bindings)
+    struct nvkm_drm_vm_binding_list *tail_bindings,
+    struct nvkm_drm_vm_binding_list *retired_bindings)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
 	uint64_t end = addr + size;
@@ -837,7 +988,8 @@ nvkm_drm_vm_bindings_commit_replace_range(struct nvkm_softc *sc,
 			binding->bo_offset += cut_end - old_start;
 		} else {
 			binding->pte_installed = false;
-			nvkm_drm_vm_binding_unlink_free(binding);
+			nvkm_drm_vm_binding_unlink_retire(binding,
+			    retired_bindings);
 		}
 	}
 
@@ -849,10 +1001,29 @@ nvkm_drm_vm_bindings_commit_replace_range(struct nvkm_softc *sc,
 		nvkm_drm_vm_bindings_recalc_max_end(nfile);
 }
 
+/*
+ * nvkm_drm_vm_bindings_remove_range()
+ *
+ * Ownership:
+ *   Mutates nfile's live binding tracker and writes invalid/sparse PTEs for
+ *   covered live ranges.  Fully covered old bindings move to
+ *   retired_bindings; partially covered bindings keep their GEM ownership in
+ *   the live tracker, with any newly allocated tail consumed on success.
+ *
+ * Lifetime:
+ *   The caller must keep retired_bindings alive until after the VM_BIND done
+ *   fence is signaled, then release it with nvkm_drm_vm_bindings_release().
+ *   Prepared tail bindings are private to this call and are freed on failure.
+ *
+ * Threading:
+ *   Requires nfile->vm_token.  The caller must already serialize VMM PTE
+ *   mutation with sc->gsp_tok.  This function does not publish fences.
+ */
 static int
 nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
     struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size,
-    bool clear_empty_range, uint32_t clear_action, uint32_t *punmapped)
+    bool clear_empty_range, uint32_t clear_action, uint32_t *punmapped,
+    struct nvkm_drm_vm_binding_list *retired_bindings)
 {
 	struct nvkm_drm_vm_binding *binding, *next;
 	struct nvkm_drm_vm_binding_list tail_bindings;
@@ -966,7 +1137,8 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 			binding->bo_offset += cut_end - old_start;
 		} else {
 			binding->pte_installed = false;
-			nvkm_drm_vm_binding_unlink_free(binding);
+			nvkm_drm_vm_binding_unlink_retire(binding,
+			    retired_bindings);
 		}
 	}
 
@@ -979,10 +1151,7 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 	return (0);
 
 fail_tails:
-	while ((binding = LIST_FIRST(&tail_bindings)) != NULL) {
-		LIST_REMOVE(binding, link);
-		nvkm_drm_vm_binding_free(binding);
-	}
+	nvkm_drm_vm_bindings_release(&tail_bindings);
 	return (err);
 }
 
@@ -2000,10 +2169,30 @@ static int nvkm_drm_vm_bind_attach_resv_fence(struct nvkm_softc *sc,
     uint32_t op_count, struct drm_gem_object **objects,
     struct dma_fence *fence);
 
+/*
+ * nvkm_drm_vm_bind_apply()
+ *
+ * Ownership:
+ *   Borrows ops and objects from the VM_BIND job.  When a MAP op succeeds,
+ *   ownership of that op's GEM reference moves into a live binding.  Old live
+ *   bindings removed or replaced by the operation move into retired_bindings.
+ *
+ * Lifetime:
+ *   retired_bindings remains owned by the caller.  It must outlive this call
+ *   and must not be released until after the VM_BIND done fence is signaled.
+ *   That preserves nouveau's visible completion ordering while avoiding
+ *   no_share BO free waits on the current job's own reservation fence.
+ *
+ * Threading:
+ *   Takes nfile->vm_token and sc->gsp_tok for the PTE update window.  It does
+ *   not wait for GPU execution fences; userspace-provided syncobjs express
+ *   those dependencies.
+ */
 static int
 nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
     struct nvkm_drm_file *nfile, struct drm_nouveau_vm_bind_op *ops,
-    uint32_t op_count, struct drm_gem_object **objects)
+    uint32_t op_count, struct drm_gem_object **objects,
+    struct nvkm_drm_vm_binding_list *retired_bindings)
 {
 	struct drm_nouveau_vm_bind_op *current_op = NULL;
 	int err = 0;
@@ -2055,7 +2244,7 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			err = nvkm_drm_vm_bindings_remove_range(sc, nfile,
 			    op->addr, op->range,
 			    (op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) == 0,
-			    action, &unmapped);
+			    action, &unmapped, retired_bindings);
 			if (err != 0) {
 				nvkm_drm_vm_trace_record(sc, action,
 				    op->flags, op->handle, op->addr,
@@ -2101,7 +2290,8 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				    NVKM_DRM_VM_TRACE_MAP_SPARSE, op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
 				    nfile, op->addr, op->range, false,
-				    NVKM_DRM_VM_TRACE_MAP_SPARSE, &unmapped);
+				    NVKM_DRM_VM_TRACE_MAP_SPARSE, &unmapped,
+				    retired_bindings);
 				if (err == 0) {
 					err = nvkm_gsp_vmm_map_sparse_noflush(
 					    nfile->vmm, op->addr, op->range);
@@ -2132,7 +2322,8 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				    NVKM_DRM_VM_TRACE_MAP_NULL, op->range);
 				err = nvkm_drm_vm_bindings_remove_range(sc,
 				    nfile, op->addr, op->range, true,
-				    NVKM_DRM_VM_TRACE_MAP_NULL, &unmapped);
+				    NVKM_DRM_VM_TRACE_MAP_NULL, &unmapped,
+				    retired_bindings);
 				if (err != 0)
 					break;
 				nvkm_drm_vm_trace_record(sc,
@@ -2268,7 +2459,8 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				bo->vm_bound_tiled = true;
 			}
 			nvkm_drm_vm_bindings_commit_replace_range(sc, nfile,
-			    op->addr, op->range, &replace_tails);
+			    op->addr, op->range, &replace_tails,
+			    retired_bindings);
 			nvkm_drm_vm_binding_insert_sorted(nfile, new_binding);
 			new_binding = NULL;
 			nvkm_debugf(sc->dev,
@@ -3329,6 +3521,7 @@ struct nvkm_drm_job {
 			struct drm_nouveau_vm_bind_op *ops;
 			struct drm_gem_object **objects;
 			struct nvkm_drm_exec_signal *signals;
+			struct nvkm_drm_vm_bind_retire *retire;
 		} vm_bind;
 	};
 };
@@ -3408,6 +3601,7 @@ nvkm_drm_job_release(struct kref *kref)
 	case NVKM_DRM_JOB_VM_BIND:
 		nvkm_drm_exec_signals_put(job->vm_bind.signals,
 		    job->vm_bind.sig_count);
+		nvkm_drm_vm_bind_retire_free(job->vm_bind.retire);
 		nvkm_drm_vm_bind_objects_put(job->vm_bind.objects,
 		    job->vm_bind.op_count);
 		kfree(job->vm_bind.ops);
@@ -3620,11 +3814,13 @@ nvkm_drm_job_run(struct nvkm_drm_job *job)
 		if (job->vm_bind.op_count != 0) {
 			err = nvkm_drm_vm_bind_apply(job->sc, job->file_priv,
 			    job->nfile, job->vm_bind.ops,
-			    job->vm_bind.op_count, job->vm_bind.objects);
+			    job->vm_bind.op_count, job->vm_bind.objects,
+			    &job->vm_bind.retire->bindings);
 		} else {
 			err = 0;
 		}
 		nvkm_drm_job_signal(job, err);
+		nvkm_drm_vm_bind_retire_schedule(&job->vm_bind.retire);
 		break;
 	}
 	return (err);
@@ -3773,6 +3969,17 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 	job->vm_bind.op_count = req->op_count;
 	job->vm_bind.sig_count = req->sig_count;
 	job->vm_bind.ops = ops;
+	if (req->op_count != 0) {
+		job->vm_bind.retire = kzalloc(sizeof(*job->vm_bind.retire),
+		    GFP_KERNEL);
+		if (job->vm_bind.retire == NULL) {
+			err = -ENOMEM;
+			goto fail;
+		}
+		INIT_WORK(&job->vm_bind.retire->work,
+		    nvkm_drm_vm_bind_retire_work);
+		LIST_INIT(&job->vm_bind.retire->bindings);
+	}
 	job->done_fence = nvkm_drm_exec_fence_create(sc, ++sc->fence_seqno);
 	if (job->done_fence == NULL) {
 		err = -ENOMEM;
