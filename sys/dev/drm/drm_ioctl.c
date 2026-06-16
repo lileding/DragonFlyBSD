@@ -794,6 +794,18 @@ long drm_ioctl_kernel(struct file *file, drm_ioctl_t *func, void *kdata,
 EXPORT_SYMBOL(drm_ioctl_kernel);
 #endif
 
+#ifdef __DragonFly__
+static int
+drm_ioctl_bsd_errno(int retcode)
+{
+	if (retcode < 0)
+		retcode = -retcode;
+	if (retcode == ERESTARTSYS)
+		retcode = EINTR;
+	return retcode;
+}
+#endif
+
 /**
  * drm_ioctl - ioctl callback implementation for DRM drivers
  * @filp: file this ioctl is called on
@@ -823,7 +835,11 @@ int drm_ioctl(struct dev_ioctl_args *ap)
 	dev = file_priv->minor->dev;
 
 	if (drm_dev_is_unplugged(dev))
+#ifdef __DragonFly__
+		return drm_ioctl_bsd_errno(-ENODEV);
+#else
 		return -ENODEV;
+#endif
 
 	is_driver_ioctl = nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END;
 
@@ -867,10 +883,15 @@ int drm_ioctl(struct dev_ioctl_args *ap)
 		mutex_unlock(&drm_global_mutex);
 	}
 
+#ifndef __DragonFly__
 	if (retcode == ERESTARTSYS)
-			retcode = EINTR;
+		retcode = EINTR;
+#endif
 
       err_i1:
+#ifdef __DragonFly__
+	retcode = drm_ioctl_bsd_errno(retcode);
+#endif
 	if (!ioctl)
 		DRM_DEBUG_FIOCTL("invalid ioctl: pid=%d, dev=0x%lx, auth=%d, cmd=0x%02lx, nr=0x%02x\n",
 			  DRM_CURRENTPID,
