@@ -10,7 +10,6 @@
  */
 
 #include "nvkm_priv.h"
-#include "nvkm_rwfence.h"
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
 #include <linux/dma-fence.h>
@@ -901,7 +900,6 @@ nvkm_pci_attach(device_t dev)
 						nvkm_infof(dev,
 						    "ready: GSP-RM running, DRM registered; debug=%d\n",
 						    nvkm_debug);
-						(void)rwfs_selftest();
 						/* Start msgq drain kthread last - attach is done. */
 						sc->gsp_drain_exit = false;
 						(void)kthread_create(nvkm_gsp_drain_kthread, sc,
