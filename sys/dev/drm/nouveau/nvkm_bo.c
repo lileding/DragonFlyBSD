@@ -483,6 +483,15 @@ static void nvkm_bo_ttm_destroy(struct ttm_buffer_object *tbo);
 struct reservation_object *
 nvkm_bo_resv(struct nvkm_bo *bo)
 {
+	/*
+	 * A no_share BO is never exported, so EXEC never publishes a content
+	 * fence on its own resv -- the VM-wide EXEC completion lives on the
+	 * file's vm_resv. Alias to it so CPU_PREP and free wait the GPU work
+	 * that may still be reading this BO. SHARED BOs keep their own resv,
+	 * which the DRM/dma-buf framework exposes for cross-process sync.
+	 */
+	if (bo->no_share && bo->vm_resv != NULL)
+		return (bo->vm_resv);
 	if (bo->ttm_backed)
 		return (bo->tbo.resv);
 	return (&bo->resv);
@@ -1109,6 +1118,11 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 			return (ENXIO);
 		}
 	}
+
+	/* no_share BOs alias their fence-wait resv to this file's vm_resv so
+	 * CPU_PREP/free wait the VM's EXEC completion (see nvkm_bo_resv). */
+	if (bo->no_share)
+		bo->vm_resv = nvkm_drm_file_vm_resv(file_priv);
 
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
 	if (err != 0)

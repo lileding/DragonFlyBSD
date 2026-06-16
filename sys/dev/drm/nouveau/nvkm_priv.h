@@ -1028,6 +1028,11 @@ int	nvkm_gsp_msg_dispatch_all(struct nvkm_softc *sc);
 /* DRM driver registration. */
 int	nvkm_drm_register(struct nvkm_softc *sc);
 void	nvkm_drm_unregister(struct nvkm_softc *sc);
+
+/* Per-file VM-wide EXEC completion set; no_share BOs alias their fence-wait
+ * resv to it (see nvkm_bo_resv). */
+struct reservation_object;
+struct reservation_object *nvkm_drm_file_vm_resv(struct drm_file *file_priv);
 int	nvkm_gsp_get_static_info(struct nvkm_softc *sc);
 
 /* sequencer event handler -- registered via nvkm_gsp_msg_ntfy_add */

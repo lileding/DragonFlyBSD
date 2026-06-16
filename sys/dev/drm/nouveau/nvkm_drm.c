@@ -342,6 +342,18 @@ nvkm_drm_file_priv(struct drm_file *file_priv)
 	return (file_priv->driver_priv);
 }
 
+/* Exposed to nvkm_bo so a no_share BO can alias its fence-wait resv to this
+ * file's VM-wide EXEC completion set (vm_resv). */
+struct reservation_object *
+nvkm_drm_file_vm_resv(struct drm_file *file_priv)
+{
+	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+
+	if (nfile == NULL)
+		return (NULL);
+	return (&nfile->vm_resv);
+}
+
 static bool
 nvkm_drm_vm_ranges_overlap(uint64_t a, uint64_t as, uint64_t b, uint64_t bs)
 {
