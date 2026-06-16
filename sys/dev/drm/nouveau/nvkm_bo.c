@@ -573,42 +573,6 @@ nvkm_bo_scanout_unpin(struct nvkm_bo *bo)
 	return (nvkm_bo_ttm_unpin_record(bo, &bo->scanout_pin_count));
 }
 
-static void
-nvkm_bo_flush_sysmem(struct nvkm_bo *bo)
-{
-	uint32_t page_count;
-
-	if (bo->kva != NULL) {
-		pmap_invalidate_cache_range((vm_offset_t)bo->kva,
-		    (vm_offset_t)bo->kva + bo->base.size);
-		return;
-	}
-
-	if (nvkm_bo_ttm_sysmem(bo)) {
-		page_count = bo->tbo.num_pages;
-		for (uint32_t i = 0; i < page_count; i++) {
-			vm_page_t page;
-			vm_offset_t dmap;
-
-			page = (vm_page_t)bo->tbo.ttm->pages[i];
-			if (page == NULL)
-				continue;
-			dmap = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(page));
-			pmap_invalidate_cache_range(dmap, dmap + PAGE_SIZE);
-		}
-		return;
-	}
-
-	for (uint32_t i = 0; i < bo->page_count; i++) {
-		vm_offset_t dmap;
-
-		if (bo->pages[i] == NULL)
-			continue;
-		dmap = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(bo->pages[i]));
-		pmap_invalidate_cache_range(dmap, dmap + PAGE_SIZE);
-	}
-}
-
 /* ============================================================
  * cdev pager — backs userspace mmap with our contig pages.
  * ============================================================ */
@@ -1262,14 +1226,15 @@ nvkm_drm_ioctl_gem_cpu_fini(struct drm_device *ddev, void *data,
 		return (-ENOENT);
 	bo = to_nvkm_bo(obj);
 	sc->cpu_fini_count++;
-	if (nvkm_bo_has_sysmem(bo)) {
-		uint64_t flush_start;
-
-		flush_start = nvkm_bo_now_us();
-		nvkm_bo_flush_sysmem(bo);
-		nvkm_bo_add_us(&sc->cpu_fini_flush_us, flush_start);
-		sc->cpu_fini_flush_count++;
-	}
+	/*
+	 * Discrete x86 sysmem BOs are WB-coherent (the GPU snoops), so the
+	 * device sees CPU writes without an explicit cache flush. A store
+	 * barrier is enough to order those writes ahead of the subsequent GPU
+	 * access. This mirrors the EXEC submit path, which already dropped the
+	 * per-page pmap_invalidate_cache_range (it degrades to an all-CPU
+	 * WBINVD on this hardware). See README 288ec48262.
+	 */
+	cpu_sfence();
 	nvkm_debugf(sc->dev,
 	    "nvkm_bo: CPU_FINI handle=%u obj=%p domain=0x%x size=0x%llx paddr=0x%llx cpu_map=%u flushed=%u\n",
 	    req->handle, obj, bo->domain, (unsigned long long)obj->size,
