@@ -883,12 +883,20 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 
 	sc->bo_gem_free_count++;
 	if (bo->ttm_backed) {
+		/*
+		 * no_share BOs alias their fence resv to the file's vm_resv, but
+		 * TTM's own delayed destroy only waits the BO's tbo.resv (which
+		 * carries no EXEC/VM_BIND fence). Wait the VM's GPU completion
+		 * here so TTM does not reclaim pages a still-in-flight job reads.
+		 */
+		if (bo->no_share && bo->vm_resv != NULL)
+			(void)nvkm_bo_resv_wait(bo, false, true, false);
 		ttm_bo_put(&bo->tbo);
 		return;
 	}
 
 	nvkm_bo_account_free(sc, bo);
-	(void)nvkm_bo_resv_wait(bo, false);
+	(void)nvkm_bo_resv_wait(bo, false, true, false);
 	nvkm_bo_bar1_unmap(sc, bo);
 	if (bo->kva != NULL) {
 		kmem_free(kernel_map, (vm_offset_t)bo->kva, obj->size);
@@ -929,22 +937,27 @@ nvkm_bo_resv_add_shared_fence(struct nvkm_bo *bo, struct dma_fence *fence)
 }
 
 int
-nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr)
+nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait)
 {
+	struct nvkm_softc *sc = bo->base.dev->dev_private;
+	long timeout = nowait ? 0 : MAX_SCHEDULE_TIMEOUT;
 	long ret;
 
-	struct nvkm_softc *sc = bo->base.dev->dev_private;
-
 	sc->bo_resv_wait_count++;
-	ret = reservation_object_wait_timeout_rcu(nvkm_bo_resv(bo), true, intr,
-	    MAX_SCHEDULE_TIMEOUT);
+	/*
+	 * Write access must wait read+write fences (wait_all); read access only
+	 * needs the exclusive (write) fence. reservation_object_wait_timeout_rcu
+	 * takes wait_all: true=excl+shared, false=excl only.
+	 */
+	ret = reservation_object_wait_timeout_rcu(nvkm_bo_resv(bo), write, intr,
+	    timeout);
 	if (ret < 0) {
 		sc->bo_resv_wait_error_count++;
 		return ((int)ret);
 	}
 	if (ret == 0) {
 		sc->bo_resv_wait_error_count++;
-		return (-ETIME);
+		return (nowait ? -EBUSY : -ETIME);
 	}
 	return (0);
 }
@@ -1213,7 +1226,9 @@ nvkm_drm_ioctl_gem_cpu_prep(struct drm_device *ddev, void *data,
 	if (obj == NULL)
 		return (-ENOENT);
 	bo = to_nvkm_bo(obj);
-	err = nvkm_bo_resv_wait(bo, true);
+	err = nvkm_bo_resv_wait(bo, true,
+	    (req->flags & NOUVEAU_GEM_CPU_PREP_WRITE) != 0,
+	    (req->flags & NOUVEAU_GEM_CPU_PREP_NOWAIT) != 0);
 	sc->cpu_prep_wait_count++;
 	if (err != 0)
 		sc->cpu_prep_wait_error_count++;

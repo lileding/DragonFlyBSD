@@ -501,7 +501,7 @@ nvkm_plane_prepare_fb(struct drm_plane *plane,
 	}
 
 	bo = to_nvkm_bo(obj);
-	ret = nvkm_bo_resv_wait(bo, false);
+	ret = nvkm_bo_resv_wait(bo, false, true, false);
 	if (ret != 0) {
 		sc->kms_prepare_fb_error_count++;
 		return (ret);
