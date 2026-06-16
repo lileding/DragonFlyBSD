@@ -55,6 +55,23 @@
  * trusted clients.
  */
 
+static struct drm_master *
+drm_master_owner(struct drm_master *master)
+{
+	while (master != NULL && master->lessor != NULL)
+		master = master->lessor;
+	return master;
+}
+
+static bool
+drm_is_current_master_locked(struct drm_file *fpriv)
+{
+	struct drm_device *dev = fpriv->minor->dev;
+
+	return fpriv->is_master &&
+	    drm_master_owner(fpriv->master) == dev->master;
+}
+
 int drm_getmagic(struct drm_device *dev, void *data, struct drm_file *file_priv)
 {
 	struct drm_auth *auth = data;
@@ -184,7 +201,7 @@ int drm_setmaster_ioctl(struct drm_device *dev, void *data,
 	int ret = 0;
 
 	mutex_lock(&dev->master_mutex);
-	if (drm_is_current_master(file_priv))
+	if (drm_is_current_master_locked(file_priv))
 		goto out_unlock;
 
 	/*
@@ -240,7 +257,7 @@ int drm_dropmaster_ioctl(struct drm_device *dev, void *data,
 
 	kprintf("drm_dropmaster_ioctl\n");
 	mutex_lock(&dev->master_mutex);
-	if (!drm_is_current_master(file_priv))
+	if (!drm_is_current_master_locked(file_priv))
 		goto out_unlock;
 
 	if (!dev->master)
@@ -285,7 +302,7 @@ void drm_master_release(struct drm_file *file_priv)
 	if (file_priv->magic)
 		idr_remove(&file_priv->master->magic_map, file_priv->magic);
 
-	if (!drm_is_current_master(file_priv))
+	if (!drm_is_current_master_locked(file_priv))
 		goto out;
 
 	if (drm_core_check_feature(dev, DRIVER_LEGACY)) {
@@ -332,7 +349,14 @@ out:
  */
 bool drm_is_current_master(struct drm_file *fpriv)
 {
-	return fpriv->is_master;
+	struct drm_device *dev = fpriv->minor->dev;
+	bool ret;
+
+	mutex_lock(&dev->master_mutex);
+	ret = drm_is_current_master_locked(fpriv);
+	mutex_unlock(&dev->master_mutex);
+
+	return ret;
 }
 EXPORT_SYMBOL(drm_is_current_master);
 
