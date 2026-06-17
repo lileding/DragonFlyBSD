@@ -31,16 +31,23 @@ int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
     vm_paddr_t *paddr);
 
 static uint64_t
-nvkm_gsp_vmm_profile_now_us(void)
+nvkm_gsp_vmm_profile_now_us(struct nvkm_softc *sc)
 {
+	if (sc == NULL || sc->sync_diag_enable == 0)
+		return (0);
 	return ((uint64_t)ktime_to_us(ktime_get()));
 }
 
 static void
-nvkm_gsp_vmm_profile_add_us(uint64_t *total, uint64_t start_us)
+nvkm_gsp_vmm_profile_add_us(struct nvkm_softc *sc, uint64_t *total,
+    uint64_t start_us)
 {
-	uint64_t end_us = nvkm_gsp_vmm_profile_now_us();
+	uint64_t end_us;
 
+	if (sc == NULL || sc->sync_diag_enable == 0 || start_us == 0)
+		return;
+
+	end_us = nvkm_gsp_vmm_profile_now_us(sc);
 	if (end_us >= start_us)
 		*total += end_us - start_us;
 }
@@ -782,13 +789,13 @@ void
 nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm)
 {
 	struct nvkm_softc *sc = vmm->sc;
-	uint64_t profile_start = nvkm_gsp_vmm_profile_now_us();
+	uint64_t profile_start = nvkm_gsp_vmm_profile_now_us(sc);
 
 	lwkt_gettoken(&vmm->tok);
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_gsp_vmm_invalidate(vmm);
 	sc->vmm_flush_count++;
-	nvkm_gsp_vmm_profile_add_us(&sc->vmm_flush_us, profile_start);
+	nvkm_gsp_vmm_profile_add_us(sc, &sc->vmm_flush_us, profile_start);
 	lwkt_reltoken(&vmm->tok);
 }
 

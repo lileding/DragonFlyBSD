@@ -46,6 +46,36 @@ nvkm_gsp_rd32_safe(struct nvkm_softc *sc, uint32_t off)
 	return (nvkm_rd32(sc, off));
 }
 
+static const char *
+nvkm_debug_pte_kind_name(uint8_t kind)
+{
+	switch (kind) {
+	case 0x00: return ("pitch");
+	case 0x01: return ("z16");
+	case 0x02: return ("s8");
+	case 0x03: return ("s8z24");
+	case 0x04: return ("zf32_x24s8");
+	case 0x05: return ("z24s8");
+	case 0x06: return ("generic");
+	case 0x07: return ("invalid");
+	case 0x08: return ("generic_compressible");
+	case 0x09: return ("generic_compressible_disable_plc");
+	case 0x0a: return ("s8_compressible_disable_plc");
+	case 0x0b: return ("z16_compressible_disable_plc");
+	case 0x0c: return ("s8z24_compressible_disable_plc");
+	case 0x0d: return ("zf32_x24s8_compressible_disable_plc");
+	case 0x0e: return ("z24s8_compressible_disable_plc");
+	case 0x0f: return ("smsked_message");
+	default: return ("other");
+	}
+}
+
+static uint8_t
+nvkm_debug_pte_kind(uint64_t pte)
+{
+	return ((uint8_t)(pte >> NV_PTE_KIND_SHIFT));
+}
+
 static int
 nvkm_gsp_sysctl_state(SYSCTL_HANDLER_ARGS)
 {
@@ -359,6 +389,80 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(sb, "signal_error_count = %llu\n",
 	    (unsigned long long)sc->sync_signal_error_count);
 
+	sbuf_cat(sb, "\nsync_diag\n");
+	sbuf_printf(sb, "enable = %d\n", sc->sync_diag_enable);
+	sbuf_printf(sb, "job_enter_count = %llu\n",
+	    (unsigned long long)sc->job_diag_enter_count);
+	sbuf_printf(sb, "job_leave_count = %llu\n",
+	    (unsigned long long)sc->job_diag_leave_count);
+	sbuf_printf(sb, "job_active_seq = %llu\n",
+	    (unsigned long long)sc->job_diag_active_seq);
+	sbuf_printf(sb, "job_active_start_us = %llu\n",
+	    (unsigned long long)sc->job_diag_active_start_us);
+	sbuf_printf(sb, "job_active_stage = %u\n",
+	    sc->job_diag_active_stage);
+	sbuf_printf(sb, "job_active_type = %u\n",
+	    sc->job_diag_active_type);
+	sbuf_printf(sb, "job_active_channel = %u\n",
+	    sc->job_diag_active_channel);
+	sbuf_printf(sb, "job_active_wait_count = %u\n",
+	    sc->job_diag_active_wait_count);
+	sbuf_printf(sb, "job_active_dep_pending = %u\n",
+	    sc->job_diag_active_dep_pending);
+	sbuf_printf(sb, "job_active_sig_count = %u\n",
+	    sc->job_diag_active_sig_count);
+	sbuf_printf(sb, "job_last_seq = %llu\n",
+	    (unsigned long long)sc->job_diag_last_seq);
+	sbuf_printf(sb, "job_last_us = %llu\n",
+	    (unsigned long long)sc->job_diag_last_us);
+	sbuf_printf(sb, "job_last_stage = %u\n",
+	    sc->job_diag_last_stage);
+	sbuf_printf(sb, "job_last_ret = %d\n",
+	    sc->job_diag_last_ret);
+	sbuf_printf(sb, "job_slow_count = %llu\n",
+	    (unsigned long long)sc->job_diag_slow_count);
+	sbuf_printf(sb, "job_slow_us_max = %llu\n",
+	    (unsigned long long)sc->job_diag_slow_us_max);
+	sbuf_printf(sb, "exec_enter_count = %llu\n",
+	    (unsigned long long)sc->exec_diag_enter_count);
+	sbuf_printf(sb, "exec_leave_count = %llu\n",
+	    (unsigned long long)sc->exec_diag_leave_count);
+	sbuf_printf(sb, "exec_active_seq = %llu\n",
+	    (unsigned long long)sc->exec_diag_active_seq);
+	sbuf_printf(sb, "exec_active_start_us = %llu\n",
+	    (unsigned long long)sc->exec_diag_active_start_us);
+	sbuf_printf(sb, "exec_active_stage = %u\n",
+	    sc->exec_diag_active_stage);
+	sbuf_printf(sb, "exec_active_channel = %u\n",
+	    sc->exec_diag_active_channel);
+	sbuf_printf(sb, "exec_active_push_count = %u\n",
+	    sc->exec_diag_active_push_count);
+	sbuf_printf(sb, "exec_active_sig_count = %u\n",
+	    sc->exec_diag_active_sig_count);
+	sbuf_printf(sb, "exec_active_put = %u\n",
+	    sc->exec_diag_active_put);
+	sbuf_printf(sb, "exec_active_slot = %u\n",
+	    sc->exec_diag_active_slot);
+	sbuf_printf(sb, "exec_last_seq = %llu\n",
+	    (unsigned long long)sc->exec_diag_last_seq);
+	sbuf_printf(sb, "exec_last_us = %llu\n",
+	    (unsigned long long)sc->exec_diag_last_us);
+	sbuf_printf(sb, "exec_last_stage = %u\n",
+	    sc->exec_diag_last_stage);
+	sbuf_printf(sb, "exec_last_channel = %u\n",
+	    sc->exec_diag_last_channel);
+	sbuf_printf(sb, "exec_last_push_count = %u\n",
+	    sc->exec_diag_last_push_count);
+	sbuf_printf(sb, "exec_last_sig_count = %u\n",
+	    sc->exec_diag_last_sig_count);
+	sbuf_printf(sb, "exec_last_put = %u\n", sc->exec_diag_last_put);
+	sbuf_printf(sb, "exec_last_slot = %u\n", sc->exec_diag_last_slot);
+	sbuf_printf(sb, "exec_last_ret = %d\n", sc->exec_diag_last_ret);
+	sbuf_printf(sb, "exec_slow_count = %llu\n",
+	    (unsigned long long)sc->exec_diag_slow_count);
+	sbuf_printf(sb, "exec_slow_us_max = %llu\n",
+	    (unsigned long long)sc->exec_diag_slow_us_max);
+
 	sbuf_cat(sb, "\nirq\n");
 	sbuf_printf(sb, "isr_count = %llu\n",
 	    (unsigned long long)sc->irq_isr_count);
@@ -568,12 +672,15 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(sb, "last_journal_size = %u\n",
 	    sc->rc_last_journal_size);
 	sbuf_printf(sb,
-	    "fault_pte_snapshot va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
+	    "fault_pte_snapshot va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx kind=0x%02x(%s) sparse_pte=0x%016llx\n",
 	    (unsigned long long)sc->rc_fault_pte_va,
 	    sc->rc_fault_pte_pd2_idx, sc->rc_fault_pte_pd1_idx,
 	    sc->rc_fault_pte_pd0_idx, sc->rc_fault_pte_spt_idx,
 	    sc->rc_fault_pte_has_pt,
 	    (unsigned long long)sc->rc_fault_pte,
+	    nvkm_debug_pte_kind(sc->rc_fault_pte),
+	    nvkm_debug_pte_kind_name(
+	    nvkm_debug_pte_kind(sc->rc_fault_pte)),
 	    (unsigned long long)nvkm_pte_to_sparse());
 	sbuf_printf(sb, "fault_pending_count = %u\n",
 	    sc->rc_fault_pending_count);
@@ -666,10 +773,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 		nvkm_gsp_vmm_read_pte(sc->gsp_vmm,
 		    sc->rc_last_mmu_fault_addr, &pte_info);
 		sbuf_printf(sb,
-		    "fault_pte va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx sparse_pte=0x%016llx\n",
+		    "fault_pte va=0x%016llx pd2=%u pd1=%u pd0=%u spt=%u has_pt=%u pte=0x%016llx kind=0x%02x(%s) sparse_pte=0x%016llx\n",
 		    (unsigned long long)pte_info.va, pte_info.pd2_idx,
 		    pte_info.pd1_idx, pte_info.pd0_idx, pte_info.spt_idx,
 		    pte_info.has_pt, (unsigned long long)pte_info.pte,
+		    nvkm_debug_pte_kind(pte_info.pte),
+		    nvkm_debug_pte_kind_name(nvkm_debug_pte_kind(pte_info.pte)),
 		    (unsigned long long)nvkm_pte_to_sparse());
 
 		for (uint32_t i = 0; i < NVKM_DRM_VM_TRACE_COUNT; i++) {
@@ -730,13 +839,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    trace->addr + trace->range)
 				continue;
 			sbuf_printf(sb,
-			    "fault_vm_match seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
+			    "fault_vm_match seq=%llu action=%u flags=0x%08x pte_kind=0x%02x(%s) handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x tile_mode=0x%08x tile_flags=0x%08x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
 			    (unsigned long long)trace->seq, trace->action,
-			    trace->flags, trace->handle,
+			    trace->flags, trace->pte_kind,
+			    nvkm_debug_pte_kind_name(trace->pte_kind),
+			    trace->handle,
 			    (unsigned long long)trace->addr,
 			    (unsigned long long)trace->range,
 			    (unsigned long long)trace->bo_offset,
 			    (uintmax_t)trace->obj, trace->bo_domain,
+			    trace->bo_tile_mode, trace->bo_tile_flags,
 			    (unsigned long long)trace->bo_paddr,
 			    (unsigned long long)trace->bo_size,
 			    trace->cpu_mapped, trace->error);
@@ -755,11 +867,14 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 				    trace->seq > context_seq + 4)
 					continue;
 				sbuf_printf(sb,
-				    "vm seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx err=%d\n",
+				    "vm seq=%llu action=%u flags=0x%08x pte_kind=0x%02x(%s) handle=%u addr=0x%016llx range=0x%016llx tile_mode=0x%08x tile_flags=0x%08x err=%d\n",
 				    (unsigned long long)trace->seq, trace->action,
-				    trace->flags, trace->handle,
+				    trace->flags, trace->pte_kind,
+				    nvkm_debug_pte_kind_name(trace->pte_kind),
+				    trace->handle,
 				    (unsigned long long)trace->addr,
 				    (unsigned long long)trace->range,
+				    trace->bo_tile_mode, trace->bo_tile_flags,
 				    trace->error);
 			}
 		}
@@ -1095,13 +1210,16 @@ nvkm_gsp_sysctl_vm_trace(SYSCTL_HANDLER_ARGS)
 		if (trace->seq == 0)
 			continue;
 		sbuf_printf(sb,
-		    "trace[%u] seq=%llu action=%u flags=0x%08x handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
+		    "trace[%u] seq=%llu action=%u flags=0x%08x pte_kind=0x%02x(%s) handle=%u addr=0x%016llx range=0x%016llx bo_off=0x%016llx obj=0x%jx domain=0x%x tile_mode=0x%08x tile_flags=0x%08x paddr=0x%016llx size=0x%016llx cpu=%u err=%d\n",
 		    pos, (unsigned long long)trace->seq, trace->action,
-		    trace->flags, trace->handle,
+		    trace->flags, trace->pte_kind,
+		    nvkm_debug_pte_kind_name(trace->pte_kind),
+		    trace->handle,
 		    (unsigned long long)trace->addr,
 		    (unsigned long long)trace->range,
 		    (unsigned long long)trace->bo_offset,
 		    (uintmax_t)trace->obj, trace->bo_domain,
+		    trace->bo_tile_mode, trace->bo_tile_flags,
 		    (unsigned long long)trace->bo_paddr,
 		    (unsigned long long)trace->bo_size, trace->cpu_mapped,
 		    trace->error);
@@ -1254,6 +1372,10 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLFLAG_RW, &sc->vma_tilemode, 0,
 	    "Report HAS_VMA_TILEMODE to userspace (kill switch for tiled "
 	    "rendering debug; takes effect at vulkan device open)");
+	sc->sync_diag_enable = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "sync_diag_enable",
+	    CTLFLAG_RW, &sc->sync_diag_enable, 0,
+	    "Enable nvkm sync/submit active-call diagnostics");
 	sc->gsp_rpc_trace_on = 0;	/* opt-in; GSP events are X11 hot path. */
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
 	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,

@@ -226,16 +226,23 @@ static struct drm_driver nvkm_drm_driver = {
 };
 
 static uint64_t
-nvkm_drm_profile_now_us(void)
+nvkm_drm_profile_now_us(struct nvkm_softc *sc)
 {
+	if (sc == NULL || sc->sync_diag_enable == 0)
+		return (0);
 	return ((uint64_t)ktime_to_us(ktime_get()));
 }
 
 static void
-nvkm_drm_profile_add_us(uint64_t *total, uint64_t start_us)
+nvkm_drm_profile_add_us(struct nvkm_softc *sc, uint64_t *total,
+    uint64_t start_us)
 {
-	uint64_t end_us = nvkm_drm_profile_now_us();
+	uint64_t end_us;
 
+	if (sc == NULL || sc->sync_diag_enable == 0 || start_us == 0)
+		return;
+
+	end_us = nvkm_drm_profile_now_us(sc);
 	if (end_us >= start_us)
 		*total += end_us - start_us;
 }
@@ -335,7 +342,9 @@ struct nvkm_drm_file {
 
 	/* Ordered per-file GPU job queue.  IOCTL handlers copy user data and
 	 * publish output fences before enqueueing; the worker waits dependency
-	 * fences and performs the actual EXEC/async VM_BIND work. */
+	 * fences and performs all EXEC work plus synchronous/asynchronous VM_BIND
+	 * work.  A synchronous VM_BIND ioctl waits for this job to complete; EXEC
+	 * ioctls never execute inline. */
 	struct work_struct job_work;
 	struct lwkt_token job_token;
 	struct nvkm_drm_job_list job_queue;
@@ -1213,6 +1222,7 @@ nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
 	trace->range = range;
 	trace->bo_offset = bo_offset;
 	trace->error = error;
+	trace->pte_kind = flags & 0xff;
 	if (obj != NULL) {
 		struct nvkm_bo *bo = to_nvkm_bo(obj);
 
@@ -1220,6 +1230,8 @@ nvkm_drm_vm_trace_record(struct nvkm_softc *sc, uint32_t action,
 		trace->bo_size = obj->size;
 		trace->bo_paddr = bo->paddr;
 		trace->bo_domain = bo->domain;
+		trace->bo_tile_mode = bo->tile_mode;
+		trace->bo_tile_flags = bo->tile_flags;
 		trace->cpu_mapped = nvkm_bo_cpu_mappable(bo);
 	}
 	sc->vm_trace_next++;
@@ -2204,14 +2216,14 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 * prevents EXEC from doorbelling while the PTE update is half-written.
 	 * It deliberately does not wait for already submitted GPU work; nouveau
 	 * exposes that ordering through syncobjs and VM_BIND/EXEC fences. */
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	lwkt_gettoken(&nfile->vm_token);
 	remap_started = true;
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
-	nvkm_drm_profile_add_us(&sc->vm_bind_profile_token_wait_us,
+	nvkm_drm_profile_add_us(sc, &sc->vm_bind_profile_token_wait_us,
 	    profile_start);
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 
 	for (uint32_t i = 0; i < op_count; i++) {
 		struct drm_nouveau_vm_bind_op *op = &ops[i];
@@ -2477,14 +2489,14 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 	}
 
 out_unlock:
-	nvkm_drm_profile_add_us(&sc->vm_bind_profile_apply_us,
+	nvkm_drm_profile_add_us(sc, &sc->vm_bind_profile_apply_us,
 	    profile_start);
 	/* One TLB invalidate publishes every PTE the loop wrote,
 	 * instead of one per op (the _noflush calls skip it). */
 	if (gsp_tok_held) {
-		profile_start = nvkm_drm_profile_now_us();
+		profile_start = nvkm_drm_profile_now_us(sc);
 		nvkm_gsp_vmm_flush(nfile->vmm);
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_flush_us,
+		nvkm_drm_profile_add_us(sc, &sc->vm_bind_profile_flush_us,
 		    profile_start);
 	}
 	/* Release inner (gsp_tok) before outer (vm_token). */
@@ -2616,7 +2628,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		return (-EINVAL);
 	}
 
-	profile_total_start = nvkm_drm_profile_now_us();
+	profile_total_start = nvkm_drm_profile_now_us(sc);
 	err = nvkm_drm_file_ensure_vmm(sc, nfile);
 	if (err != 0)
 		return (err);
@@ -2630,13 +2642,13 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		sc->vm_bind_sync_count++;
 
 	if (req->op_count != 0) {
-		profile_start = nvkm_drm_profile_now_us();
+		profile_start = nvkm_drm_profile_now_us(sc);
 		ops = kmalloc_array(req->op_count, sizeof(*ops), GFP_KERNEL);
 		if (ops == NULL)
 			return (-ENOMEM);
 		err = copyin((const void *)(uintptr_t)req->op_ptr, ops,
 		    sizeof(*ops) * req->op_count);
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_copyin_us,
+		nvkm_drm_profile_add_us(sc, &sc->vm_bind_profile_copyin_us,
 		    profile_start);
 		if (err != 0) {
 			kfree(ops);
@@ -2647,19 +2659,12 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 		}
 	}
 
-	if (async_bind || req->op_count != 0) {
-		err = nvkm_drm_queue_vm_bind_job(sc, file_priv, nfile,
-		    req, ops, !async_bind);
-		ops = NULL;
-		nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
-		    profile_total_start);
-		return (err);
-	}
-
-	kfree(ops);
-	nvkm_drm_profile_add_us(&sc->vm_bind_profile_total_us,
+	err = nvkm_drm_queue_vm_bind_job(sc, file_priv, nfile, req, ops,
+	    !async_bind);
+	ops = NULL;
+	nvkm_drm_profile_add_us(sc, &sc->vm_bind_profile_total_us,
 	    profile_total_start);
-	return (0);
+	return (err);
 }
 
 /* ---- DRM_NOUVEAU_EXEC ---- */
@@ -3532,6 +3537,172 @@ static int nvkm_drm_exec_submit(struct nvkm_softc *sc,
     uint32_t push_count, struct dma_fence *done_fence,
     struct nvkm_drm_exec_signal *signals, uint32_t sig_count);
 
+#define NVKM_DRM_JOB_DIAG_ARM_DEPS	1
+#define NVKM_DRM_JOB_DIAG_WAIT_DEPS	2
+#define NVKM_DRM_JOB_DIAG_RUN		3
+#define NVKM_DRM_JOB_DIAG_COMPLETE	4
+
+#define NVKM_DRM_EXEC_DIAG_VALIDATE	1
+#define NVKM_DRM_EXEC_DIAG_VM_TOKEN	2
+#define NVKM_DRM_EXEC_DIAG_GSP_TOKEN	3
+#define NVKM_DRM_EXEC_DIAG_SLOT_ALLOC	4
+#define NVKM_DRM_EXEC_DIAG_GPFIFO_WAIT	5
+#define NVKM_DRM_EXEC_DIAG_BUILD_PUSH	6
+#define NVKM_DRM_EXEC_DIAG_FENCE	7
+#define NVKM_DRM_EXEC_DIAG_QUEUE	8
+#define NVKM_DRM_EXEC_DIAG_DOORBELL	9
+#define NVKM_DRM_EXEC_DIAG_CLEANUP	10
+
+/*
+ * Ownership:
+ *   The diagnostic snapshot is owned by nvkm_softc.  Job and EXEC callers lend
+ *   metadata by value only; the helpers do not retain job, channel, BO, or
+ *   fence references.
+ *
+ * Lifetime:
+ *   Fields live with the device softc and remain readable after a userspace
+ *   client wedges or exits.  They do not point into userspace memory.
+ *
+ * Threading:
+ *   Updates are lockless best-effort telemetry.  The helpers intentionally do
+ *   not take job_token, vm_token, gsp_tok, or reservation locks, so they cannot
+ *   add a new lock dependency to the sync path being diagnosed.
+ */
+static uint64_t
+nvkm_drm_job_diag_begin(struct nvkm_softc *sc,
+    const struct nvkm_drm_job *job, uint32_t stage, uint64_t *start_us)
+{
+	uint64_t seq;
+
+	if (sc == NULL || sc->sync_diag_enable == 0) {
+		*start_us = 0;
+		return (0);
+	}
+
+	*start_us = nvkm_drm_profile_now_us(sc);
+	seq = ++sc->job_diag_enter_count;
+	sc->job_diag_active_seq = seq;
+	sc->job_diag_active_start_us = *start_us;
+	sc->job_diag_active_stage = stage;
+	sc->job_diag_active_type = job != NULL ? job->type : 0;
+	sc->job_diag_active_channel =
+	    job != NULL && job->type == NVKM_DRM_JOB_EXEC ?
+	    job->exec.channel : 0;
+	sc->job_diag_active_wait_count = job != NULL ? job->wait_count : 0;
+	sc->job_diag_active_dep_pending =
+	    job != NULL ? job->dep_pending : 0;
+	sc->job_diag_active_sig_count =
+	    job != NULL && job->type == NVKM_DRM_JOB_EXEC ?
+	    job->exec.sig_count :
+	    (job != NULL && job->type == NVKM_DRM_JOB_VM_BIND ?
+	     job->vm_bind.sig_count : 0);
+	sc->job_diag_last_stage = stage;
+	return (seq);
+}
+
+static void
+nvkm_drm_job_diag_stage(struct nvkm_softc *sc, uint64_t seq,
+    const struct nvkm_drm_job *job, uint32_t stage)
+{
+	if (sc == NULL || sc->sync_diag_enable == 0 || seq == 0)
+		return;
+	if (sc->job_diag_active_seq != seq)
+		return;
+	sc->job_diag_active_stage = stage;
+	sc->job_diag_last_stage = stage;
+	sc->job_diag_active_dep_pending =
+	    job != NULL ? job->dep_pending : 0;
+}
+
+static void
+nvkm_drm_job_diag_finish(struct nvkm_softc *sc, uint64_t seq, int ret,
+    uint64_t start_us)
+{
+	uint64_t end_us, elapsed_us;
+
+	if (sc == NULL || seq == 0)
+		return;
+
+	end_us = nvkm_drm_profile_now_us(sc);
+	elapsed_us = end_us >= start_us ? end_us - start_us : 0;
+	sc->job_diag_leave_count++;
+	sc->job_diag_last_seq = seq;
+	sc->job_diag_last_us = elapsed_us;
+	sc->job_diag_last_ret = ret;
+	if (elapsed_us > sc->job_diag_slow_us_max)
+		sc->job_diag_slow_us_max = elapsed_us;
+	if (elapsed_us >= 10000)
+		sc->job_diag_slow_count++;
+	if (sc->job_diag_active_seq == seq)
+		sc->job_diag_active_stage = 0;
+}
+
+static uint64_t
+nvkm_drm_exec_diag_begin(struct nvkm_softc *sc, uint32_t channel,
+    uint32_t push_count, uint32_t sig_count, uint64_t *start_us)
+{
+	uint64_t seq;
+
+	if (sc == NULL || sc->sync_diag_enable == 0) {
+		*start_us = 0;
+		return (0);
+	}
+
+	*start_us = nvkm_drm_profile_now_us(sc);
+	seq = ++sc->exec_diag_enter_count;
+	sc->exec_diag_active_seq = seq;
+	sc->exec_diag_active_start_us = *start_us;
+	sc->exec_diag_active_stage = NVKM_DRM_EXEC_DIAG_VALIDATE;
+	sc->exec_diag_active_channel = channel;
+	sc->exec_diag_active_push_count = push_count;
+	sc->exec_diag_active_sig_count = sig_count;
+	sc->exec_diag_active_put = 0;
+	sc->exec_diag_active_slot = 0;
+	return (seq);
+}
+
+static void
+nvkm_drm_exec_diag_stage(struct nvkm_softc *sc, uint64_t seq,
+    uint32_t stage, uint32_t put, uint32_t slot)
+{
+	if (sc == NULL || sc->sync_diag_enable == 0 || seq == 0)
+		return;
+	if (sc->exec_diag_active_seq != seq)
+		return;
+	sc->exec_diag_active_stage = stage;
+	sc->exec_diag_active_put = put;
+	sc->exec_diag_active_slot = slot;
+}
+
+static void
+nvkm_drm_exec_diag_finish(struct nvkm_softc *sc, uint64_t seq, int ret,
+    uint64_t start_us)
+{
+	uint64_t end_us, elapsed_us;
+
+	if (sc == NULL || seq == 0)
+		return;
+
+	end_us = nvkm_drm_profile_now_us(sc);
+	elapsed_us = end_us >= start_us ? end_us - start_us : 0;
+	sc->exec_diag_leave_count++;
+	sc->exec_diag_last_seq = seq;
+	sc->exec_diag_last_us = elapsed_us;
+	sc->exec_diag_last_ret = ret;
+	sc->exec_diag_last_stage = sc->exec_diag_active_stage;
+	sc->exec_diag_last_channel = sc->exec_diag_active_channel;
+	sc->exec_diag_last_push_count = sc->exec_diag_active_push_count;
+	sc->exec_diag_last_sig_count = sc->exec_diag_active_sig_count;
+	sc->exec_diag_last_put = sc->exec_diag_active_put;
+	sc->exec_diag_last_slot = sc->exec_diag_active_slot;
+	if (elapsed_us > sc->exec_diag_slow_us_max)
+		sc->exec_diag_slow_us_max = elapsed_us;
+	if (elapsed_us >= 10000)
+		sc->exec_diag_slow_count++;
+	if (sc->exec_diag_active_seq == seq)
+		sc->exec_diag_active_stage = 0;
+}
+
 static int
 nvkm_drm_job_queue_work_locked(struct nvkm_drm_file *nfile)
 {
@@ -3832,6 +4003,7 @@ nvkm_drm_job_work(struct work_struct *work)
 	struct nvkm_drm_file *nfile =
 	    container_of(work, struct nvkm_drm_file, job_work);
 	struct nvkm_drm_job *job;
+	uint64_t diag_seq, diag_start;
 	int err;
 
 	for (;;) {
@@ -3849,8 +4021,12 @@ nvkm_drm_job_work(struct work_struct *work)
 			lwkt_reltoken(&nfile->job_token);
 			break;
 		}
+		diag_seq = nvkm_drm_job_diag_begin(job->sc, job,
+		    NVKM_DRM_JOB_DIAG_ARM_DEPS, &diag_start);
 		err = nvkm_drm_job_arm_deps_locked(job);
 		if (err != 0) {
+			nvkm_drm_job_diag_finish(job->sc, diag_seq, err,
+			    diag_start);
 			TAILQ_REMOVE(&nfile->job_queue, job, link);
 			job->queued = false;
 			job->result = err;
@@ -3865,6 +4041,10 @@ nvkm_drm_job_work(struct work_struct *work)
 			continue;
 		}
 		if (job->dep_pending != 0) {
+			nvkm_drm_job_diag_stage(job->sc, diag_seq, job,
+			    NVKM_DRM_JOB_DIAG_WAIT_DEPS);
+			nvkm_drm_job_diag_finish(job->sc, diag_seq, 0,
+			    diag_start);
 			nfile->job_work_queued = false;
 			nvkm_drm_job_wakeup_locked(nfile);
 			lwkt_reltoken(&nfile->job_token);
@@ -3874,6 +4054,8 @@ nvkm_drm_job_work(struct work_struct *work)
 		job->queued = false;
 		job->running = true;
 		job->sc->sync_job_ready_count++;
+		nvkm_drm_job_diag_stage(job->sc, diag_seq, job,
+		    NVKM_DRM_JOB_DIAG_RUN);
 		lwkt_reltoken(&nfile->job_token);
 
 		err = nvkm_drm_job_run(job);
@@ -3881,6 +4063,10 @@ nvkm_drm_job_work(struct work_struct *work)
 		job->running = false;
 		job->result = err;
 		job->completed = true;
+		nvkm_drm_job_diag_stage(job->sc, diag_seq, job,
+		    NVKM_DRM_JOB_DIAG_COMPLETE);
+		nvkm_drm_job_diag_finish(job->sc, diag_seq, err,
+		    diag_start);
 		nvkm_drm_job_wakeup_locked(nfile);
 		wakeup(job);
 		lwkt_reltoken(&nfile->job_token);
@@ -4248,12 +4434,12 @@ nvkm_drm_exec_attach_resv_fence(struct nvkm_softc *sc,
 		sc->exec_resv_attach_signaled_count++;
 	else
 		sc->exec_resv_attach_pending_count++;
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	reservation_object_lock(&nfile->vm_resv, NULL);
 	reservation_object_add_excl_fence(&nfile->vm_resv, fence);
 	reservation_object_unlock(&nfile->vm_resv);
 	sc->exec_resv_attach_calls++;
-	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_attach_resv_us,
 	    profile_start);
 	return (0);
 }
@@ -4294,7 +4480,7 @@ nvkm_drm_vm_bind_attach_resv_fence(struct nvkm_softc *sc,
 		sc->vm_bind_resv_attach_signaled_count++;
 	else
 		sc->vm_bind_resv_attach_pending_count++;
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	err = nvkm_drm_vm_bind_snapshot_resv_objects(nfile, ops, op_count,
 	    objects, &resv_objects, &object_count);
 	if (err != 0)
@@ -4307,7 +4493,7 @@ nvkm_drm_vm_bind_attach_resv_fence(struct nvkm_softc *sc,
 			break;
 	}
 	nvkm_drm_gem_object_array_put(resv_objects, object_count);
-	nvkm_drm_profile_add_us(&sc->exec_profile_attach_resv_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_attach_resv_us,
 	    profile_start);
 	return (err);
 }
@@ -4334,6 +4520,8 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	uint32_t trace_count = 0;
 	uint64_t profile_start;
 	uint64_t profile_push_start = 0;
+	uint64_t diag_seq = 0;
+	uint64_t diag_start = 0;
 	int err = 0;
 	bool gsp_tok_held = false;
 	bool exec_completion_queued = false;
@@ -4349,6 +4537,8 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 
 	if (nfile == NULL)
 		return (-ENXIO);
+	diag_seq = nvkm_drm_exec_diag_begin(sc, channel_id, push_count,
+	    sig_count, &diag_start);
 	sc->exec_submit_count++;
 	dchan = nvkm_drm_channel_find(nfile, req->channel);
 	nvkm_debugf(sc->dev,
@@ -4357,7 +4547,8 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	if (dchan == NULL) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC missing channel=%u\n", req->channel);
-		return (-ENOENT);
+		err = -ENOENT;
+		goto out_diag;
 	}
 	chan = dchan->chan;
 	if (chan == NULL || chan->submit_gpf.kva == NULL ||
@@ -4365,31 +4556,45 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC channel=%u missing submit buffers chan=%p\n",
 		    req->channel, chan);
-		return (-ENXIO);
+		err = -ENXIO;
+		goto out_diag;
 	}
 	/*
-	 * Truly empty submit (no pushes, no signals): nothing to order or signal
-	 * (waits, if any, are handled by the queued job before this helper runs).
-	 * NVK uses this as a device-loss error probe after QueueWaitIdle.
-	 * Signal-only submits (push_count == 0
-	 * but sig_count > 0) deliberately fall through to the normal path below so
-	 * their signals are ordered behind the channel's in-flight work via the
-	 * completion trailer, matching nouveau (every EXEC, even push.count == 0,
-	 * is a scheduler job whose out-fences signal on the ordered done_fence).
-	 * CPU-signaling them here would let NVK observe completion early and reuse
-	 * a command-pool chunk the GPU is still reading.
+	 * Empty EXEC job:
+	 *
+	 * Ownership:
+	 *   Borrows done_fence.  The job and VM reservation object own their fence
+	 *   references; this helper only completes the fence state.
+	 *
+	 * Lifetime:
+	 *   Dependency waits have already completed before the worker calls this
+	 *   helper.  With no GPU push there will be no pending interrupt record, so
+	 *   the done fence must complete here instead of waiting for GPU completion.
+	 *
+	 * Threading:
+	 *   Runs from the ordered per-file job worker, never from the ioctl fast
+	 *   path.  Signal-only EXECs fall through to the normal completion trailer
+	 *   so their fences stay ordered behind in-flight channel work.
 	 */
 	if (req->push_count == 0 && req->sig_count == 0) {
 		sc->exec_signal_only_count++;
 		if (chan->faulted)
-			return (chan->fault_error != 0 ? chan->fault_error : -EIO);
-		return (0);
+			err = chan->fault_error != 0 ? chan->fault_error : -EIO;
+		else
+			err = 0;
+		if (done_fence != NULL) {
+			if (err != 0)
+				nvkm_drm_fence_set_error(done_fence, err);
+			(void)dma_fence_signal(done_fence);
+		}
+		goto out_diag;
 	}
 	if (req->push_count > NVKM_DRM_GPFIFO_ENTRIES - 2) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC too many pushes channel=%u pushes=%u\n",
 		    req->channel, req->push_count);
-		return (-EINVAL);
+		err = -EINVAL;
+		goto out_diag;
 	}
 
 	/* push_count may be 0 here for a signal-only submit; pushes stays NULL
@@ -4399,15 +4604,19 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 * doorbell is written, VM_BIND no longer waits for this submit; userspace
 	 * syncobjs describe the GPU ordering, matching nouveau's VM_BIND UAPI.
 	 */
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_VM_TOKEN,
+	    0, 0);
 	lwkt_gettoken(&nfile->vm_token);
 	lwkt_reltoken(&nfile->vm_token);
 
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_GSP_TOKEN,
+	    0, 0);
 	lwkt_gettoken(&sc->gsp_tok);
 	gsp_tok_held = true;
-	nvkm_drm_profile_add_us(&sc->exec_profile_token_wait_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_token_wait_us,
 	    profile_start);
-	profile_push_start = nvkm_drm_profile_now_us();
+	profile_push_start = nvkm_drm_profile_now_us(sc);
 	gpf = (uint32_t *)chan->submit_gpf.kva;
 	if (chan->faulted) {
 		err = chan->fault_error != 0 ? chan->fault_error : -EIO;
@@ -4416,6 +4625,8 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 		    req->channel, chan->chid, err);
 		goto out_unlock;
 	}
+	nvkm_drm_exec_diag_stage(sc, diag_seq,
+	    NVKM_DRM_EXEC_DIAG_SLOT_ALLOC, put, 0);
 	err = nvkm_drm_submit_slot_alloc(chan, &post_slot);
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
@@ -4434,10 +4645,14 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	    (uint64_t)((uint32_t)chan->chid % 8u) *
 	    NV_USERD_SLOT_SIZE;
 
+	nvkm_drm_exec_diag_stage(sc, diag_seq,
+	    NVKM_DRM_EXEC_DIAG_GPFIFO_WAIT, put, post_slot);
 	err = nvkm_drm_gpfifo_wait_space(sc, chan, slot_bar1, req->push_count,
 	    &put, &gpf_required);
 	if (err != 0)
 		goto out_unlock;
+	nvkm_drm_exec_diag_stage(sc, diag_seq,
+	    NVKM_DRM_EXEC_DIAG_BUILD_PUSH, put, post_slot);
 	payload = (uint32_t)(req->channel << 16) ^ put ^ req->push_count ^
 	    0x51a70000u;
 	sema[0] = 0;
@@ -4523,9 +4738,11 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	gpf[put * 2 + 1] = (uint32_t)((post_gva >> 32) & 0xffu) |
 	    (NVKM_DRM_POST_PUSH_DWORDS << NVC06F_GP_ENTRY1_LENGTH_SHIFT);
 	put = (put + 1) & (NVKM_DRM_GPFIFO_ENTRIES - 1);
-	nvkm_drm_profile_add_us(&sc->exec_profile_push_build_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_push_build_us,
 	    profile_push_start);
 
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_FENCE,
+	    put, post_slot);
 	if (done_fence != NULL) {
 		exec_fence = done_fence;
 		if (signals != NULL && req->sig_count != 0)
@@ -4549,7 +4766,7 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	}
 	nvkm_drm_exec_pending_arm_fences(pending);
 
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	/*
 	 * NVK command BOs and the fixed submit GPFIFO/post/semaphore pages are
 	 * coherent sysmem on the x86 desktop targets supported by this driver.
@@ -4559,7 +4776,7 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 * the Linux nouveau kick sequence below: GP_PUT, wmb/sfence, USERD read
 	 * flush, then doorbell.
 	 */
-	nvkm_drm_profile_add_us(&sc->exec_profile_cache_flush_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_cache_flush_us,
 	    profile_start);
 	/* Debug canary: detect command-pool chunk reuse while the GPU is still
 	 * reading the previous submit. The scan is diagnostic only and is kept
@@ -4595,15 +4812,19 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	 * is destroyed, so this borrowed pointer stays valid while pending.
 	 */
 	pending->nfile = nfile;
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_QUEUE,
+	    put, post_slot);
 	LIST_INSERT_HEAD(&sc->exec_pending, pending, link);
 	exec_completion_queued = true;
 	sc->exec_async_pending_count++;
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_DOORBELL,
+	    put, post_slot);
 	nvkm_gsp_bar1_wr32(sc, slot_bar1 + NV_USERD_GP_PUT, put);
 	cpu_sfence();
 	(void)nvkm_gsp_bar1_rd32(sc, slot_bar1 + 0);
 	nvkm_wr32(sc, NV_USERMODE_DOORBELL, chan->gsp_token);
-	nvkm_drm_profile_add_us(&sc->exec_profile_doorbell_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_doorbell_us,
 	    profile_start);
 	chan->gpf_put = put;
 	if (chan->gpf_free >= gpf_required)
@@ -4620,7 +4841,9 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 	    payload, post_slot);
 
 out_unlock:
-	profile_start = nvkm_drm_profile_now_us();
+	nvkm_drm_exec_diag_stage(sc, diag_seq, NVKM_DRM_EXEC_DIAG_CLEANUP,
+	    put, submit_slot_allocated ? post_slot : 0);
+	profile_start = nvkm_drm_profile_now_us(sc);
 	if (exec_fence != NULL) {
 		if (!exec_completion_queued || err != 0) {
 			if (err != 0)
@@ -4635,11 +4858,16 @@ out_unlock:
 	nvkm_drm_exec_pending_put(sc, pending);
 	if (gsp_tok_held)
 		lwkt_reltoken(&sc->gsp_tok);
-	nvkm_drm_profile_add_us(&sc->exec_profile_cleanup_us, profile_start);
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_cleanup_us, profile_start);
 	if (err != 0)
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC return channel=%u err=%d\n",
 		    req->channel, err);
+	nvkm_drm_exec_diag_finish(sc, diag_seq, err, diag_start);
+	return (err);
+
+out_diag:
+	nvkm_drm_exec_diag_finish(sc, diag_seq, err, diag_start);
 	return (err);
 }
 
@@ -4682,12 +4910,6 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		return (-EINVAL);
 	}
 
-	if (req->push_count == 0 && req->sig_count == 0 &&
-	    req->wait_count == 0) {
-		return (nvkm_drm_exec_submit(sc, file_priv, nfile,
-		    req->channel, NULL, 0, NULL, NULL, 0));
-	}
-
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
 	if (job == NULL)
 		return (-ENOMEM);
@@ -4724,10 +4946,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		}
 	}
 
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	err = nvkm_drm_collect_wait_syncobjs(sc, file_priv, req->wait_count,
 	    req->wait_ptr, &job->wait_fences, &job->wait_count);
-	nvkm_drm_profile_add_us(&sc->exec_profile_wait_sync_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_wait_sync_us,
 	    profile_start);
 	if (err != 0)
 		goto fail;
@@ -4735,10 +4957,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	if (err != 0)
 		goto fail;
 
-	profile_start = nvkm_drm_profile_now_us();
+	profile_start = nvkm_drm_profile_now_us(sc);
 	err = nvkm_drm_prepare_signal_syncobjs(sc, file_priv, req->sig_count,
 	    req->sig_ptr, job->done_fence, &job->exec.signals);
-	nvkm_drm_profile_add_us(&sc->exec_profile_prepare_signal_us,
+	nvkm_drm_profile_add_us(sc, &sc->exec_profile_prepare_signal_us,
 	    profile_start);
 	if (err != 0)
 		goto fail;
