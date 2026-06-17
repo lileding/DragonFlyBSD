@@ -47,6 +47,8 @@
 	(NVKM_GSP_PAGE_SIZE * NVKM_GSP_MAX_MSG_PAGES - NVKM_GSP_HDR_TOTAL)
 #define NVKM_GSP_SIGNATURE	0x43505256u	/* 'C''P''R''V' LE */
 #define NVKM_GSP_RPC_DEBUG_QUEUES	0
+#define NVKM_GSP_RPC_FAST_POLL_US	2000
+#define NVKM_GSP_RPC_FAST_POLL_STEP_US	2
 
 struct nvkm_gsp_msg_env {
 	uint8_t  auth_tag_buffer[16];
@@ -650,6 +652,7 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 
 	case NVKM_GSP_RPC_REPLY_RECV: {
 		struct nvkm_gsp_pending p = { .fn = fn };
+		int fast_poll_us;
 		int ticks_to_wait;
 		int timeout_ticks = 5 * hz;
 
@@ -677,15 +680,46 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 			return (NULL);
 		}
 
+		/*
+		 * Ownership:
+		 *   p is stack-owned by this RPC call.  While it is linked on
+		 *   sc->gsp_pending, msgq drainers may borrow it only to store
+		 *   the reply pointer, publish done, and wake this waiter.
+		 *
+		 * Lifetime:
+		 *   The pending entry remains valid until we remove it below.
+		 *   cmdq_push consumed the request buffer; a RECV reply owns a
+		 *   fresh kmalloc buffer that is returned to the caller.
+		 *
+		 * Threading:
+		 *   Keep gsp_tok held across send+reply, matching nouveau's
+		 *   cmdq mutex serialization for RM RPCs.  Because the token
+		 *   holder is also the only guaranteed msgq consumer for this
+		 *   awaited reply, poll the msgq at microsecond granularity
+		 *   before falling back to a scheduler tick.  This mirrors
+		 *   Linux r535_gsp_msgq_wait()'s fast wptr/rptr polling and
+		 *   avoids quantizing every RM RPC to hz/10.
+		 */
 		while (!atomic_load_acq_int(&p.done) && timeout_ticks > 0) {
 			/* Drain whatever's already in msgq; may complete us. */
 			nvkm_gsp_msgq_drain_locked(sc);
 			if (atomic_load_acq_int(&p.done))
 				break;
 
-			/* Sleep up to 1 tick, then re-drain. Bound the total
-			 * wait at 5s. */
-			ticks_to_wait = (timeout_ticks > hz/10) ? hz/10 : timeout_ticks;
+			for (fast_poll_us = 0;
+			    fast_poll_us < NVKM_GSP_RPC_FAST_POLL_US;
+			    fast_poll_us += NVKM_GSP_RPC_FAST_POLL_STEP_US) {
+				DELAY(NVKM_GSP_RPC_FAST_POLL_STEP_US);
+				nvkm_gsp_msgq_drain_locked(sc);
+				if (atomic_load_acq_int(&p.done))
+					break;
+			}
+			if (atomic_load_acq_int(&p.done))
+				break;
+
+			/* Fall back to one scheduler tick, keeping the original
+			 * 5s total timeout bound. */
+			ticks_to_wait = (timeout_ticks > 1) ? 1 : timeout_ticks;
 			(void)tsleep(&p, 0, "gsprpc", ticks_to_wait);
 			timeout_ticks -= ticks_to_wait;
 		}
