@@ -1242,27 +1242,32 @@ nvkm_gsp_sysctl_rpc_trace(SYSCTL_HANDLER_ARGS)
 {
 	struct nvkm_softc *sc = arg1;
 	static const char * const dirs[4] = { "TX   ", "RX   ", "EVENT", "STALE" };
-	struct sbuf sb;
-	char buf[8192];
+	struct sbuf *sb;
 	uint32_t head, total, show, k, i;
 	int err;
 
-	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
+	sb = sbuf_new_auto();
+	if (sb == NULL)
+		return (ENOMEM);
 	head = sc->gsp_rpc_trace_head;
 	total = (head < NVKM_GSP_RPC_TRACE_N) ? head : NVKM_GSP_RPC_TRACE_N;
 	show = (total < 180u) ? total : 180u;
-	sbuf_printf(&sb, "gsp_rpc_trace on=%d head=%u showing last %u of %u\n",
+	sbuf_printf(sb, "gsp_rpc_trace on=%d head=%u showing last %u of %u\n",
 	    sc->gsp_rpc_trace_on, head, show, total);
 	for (k = 0; k < show; k++) {
 		struct nvkm_gsp_rpc_trace_ent *e;
 		i = (head - show + k) % NVKM_GSP_RPC_TRACE_N;
 		e = &sc->gsp_rpc_trace[i];
-		sbuf_printf(&sb, "%4u %s fn=%-5u seq=%-6u aux=0x%x\n",
-		    k, dirs[e->dir & 3u], e->fn, e->seq, e->aux);
+		sbuf_printf(sb,
+		    "%4u %s t=%llu fn=%-5u seq=%-6u aux=0x%x aux2=0x%x dt=%uus\n",
+		    k, dirs[e->dir & 3u],
+		    (unsigned long long)e->time_us, e->fn, e->seq,
+		    e->aux, e->aux2, e->latency_us);
 	}
-	sbuf_finish(&sb);
-	err = SYSCTL_OUT(req, sbuf_data(&sb), sbuf_len(&sb) + 1);
-	sbuf_delete(&sb);
+	err = sbuf_finish(sb);
+	if (err == 0)
+		err = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
 	return (err);
 }
 

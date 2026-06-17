@@ -34,6 +34,7 @@
 #include "nvkm_gsp_abi.h"
 
 #include <sys/libkern.h>
+#include <sys/time.h>
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
 
@@ -47,8 +48,8 @@
 	(NVKM_GSP_PAGE_SIZE * NVKM_GSP_MAX_MSG_PAGES - NVKM_GSP_HDR_TOTAL)
 #define NVKM_GSP_SIGNATURE	0x43505256u	/* 'C''P''R''V' LE */
 #define NVKM_GSP_RPC_DEBUG_QUEUES	0
-#define NVKM_GSP_RPC_FAST_POLL_US	2000
-#define NVKM_GSP_RPC_FAST_POLL_STEP_US	2
+#define NVKM_GSP_RPC_FAST_POLL_US	25000
+#define NVKM_GSP_RPC_FAST_POLL_STEP_US	10
 
 struct nvkm_gsp_msg_env {
 	uint8_t  auth_tag_buffer[16];
@@ -177,22 +178,67 @@ nvkm_gsp_msg_is_null_event(struct nvkm_softc *sc, uint32_t fn)
 	return (false);
 }
 
+static uint64_t
+nvkm_gsp_rpc_time_us(void)
+{
+	struct timeval tv;
+
+	microuptime(&tv);
+	return ((uint64_t)tv.tv_sec * 1000000u + (uint64_t)tv.tv_usec);
+}
+
+static void
+nvkm_gsp_rpc_trace_aux(struct nvkm_nvfw_gsp_rpc *rpc, uint32_t *aux,
+    uint32_t *aux2)
+{
+	const uint32_t *d = (const uint32_t *)rpc->data;
+
+	*aux = rpc->length;
+	*aux2 = 0;
+	if (rpc->length < NVKM_GSP_RPC_HDR_SIZE + sizeof(uint32_t))
+		return;
+
+	switch (rpc->function) {
+	case 103:	/* NV_VGPU_MSG_FUNCTION_GSP_RM_ALLOC */
+		if (rpc->length >= NVKM_GSP_RPC_HDR_SIZE + 16) {
+			*aux = d[3];	/* hClass */
+			*aux2 = d[2];	/* hObject */
+		}
+		break;
+	case 76:	/* NV_VGPU_MSG_FUNCTION_GSP_RM_CONTROL */
+		if (rpc->length >= NVKM_GSP_RPC_HDR_SIZE + 12) {
+			*aux = d[2];	/* cmd */
+			*aux2 = d[1];	/* hObject */
+		}
+		break;
+	case 10:	/* NV_VGPU_MSG_FUNCTION_FREE */
+		if (rpc->length >= NVKM_GSP_RPC_HDR_SIZE + 12)
+			*aux = d[2];	/* hObjectOld */
+		break;
+	default:
+		break;
+	}
+}
+
 /* Record one entry in the GSP RPC ring trace (debug). Gated by
  * gsp_rpc_trace_on; lock-free circular write (single producer per dir under
  * gsp_tok / ithread, head races are benign for a debug ring). */
 static void
 nvkm_gsp_rpc_trace_add(struct nvkm_softc *sc, uint8_t dir, uint32_t fn,
-    uint32_t seq, uint32_t aux)
+    uint32_t seq, uint32_t aux, uint32_t aux2, uint32_t latency_us)
 {
 	uint32_t i;
 
 	if (!sc->gsp_rpc_trace_on)
 		return;
 	i = sc->gsp_rpc_trace_head++ % NVKM_GSP_RPC_TRACE_N;
+	sc->gsp_rpc_trace[i].time_us = nvkm_gsp_rpc_time_us();
 	sc->gsp_rpc_trace[i].dir = dir;
 	sc->gsp_rpc_trace[i].fn = fn;
 	sc->gsp_rpc_trace[i].seq = seq;
 	sc->gsp_rpc_trace[i].aux = aux;
+	sc->gsp_rpc_trace[i].aux2 = aux2;
+	sc->gsp_rpc_trace[i].latency_us = latency_us;
 }
 
 /* ===================================================================
@@ -267,18 +313,12 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	struct nvkm_nvfw_gsp_rpc *rpc = params_to_rpc(params);
 	struct nvkm_gsp_msg_env *msg = rpc_to_msg(rpc);
 
-	{
-		/* aux: for GSP_RM_CONTROL (fn 103) / GSP_RM_ALLOC (fn 76) record
-		 * the target object handle from the payload (shows which object
-		 * each RPC operates on -- e.g. 0xc57d0042=core, 0xc57e0042=window,
-		 * 0x730042=NV04_DISPLAY_COMMON); else the payload length. */
-		uint32_t aux = rpc->length;
-		const uint32_t *d = (const uint32_t *)rpc->data;
-		if ((rpc->function == 103 || rpc->function == 76) &&
-		    rpc->length >= 12)
-			aux = d[2];		/* target hObject */
+	if (sc->gsp_rpc_trace_on) {
+		uint32_t aux, aux2;
+
+		nvkm_gsp_rpc_trace_aux(rpc, &aux, &aux2);
 		nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_TX, rpc->function,
-		    rpc->sequence, aux);
+		    rpc->sequence, aux, aux2, 0);
 	}
 	uint8_t *cmdq, *msgq;
 	uint32_t rpc_len, hdr_total, padded;
@@ -500,7 +540,7 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
 
 			nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_EVENT, fn, 0,
-			    plen);
+			    plen, 0, 0);
 			sc->gsp_msgq_null_event_drop_count++;
 			sc->gsp_msgq_null_event_drop_bytes += plen;
 			sc->gsp_msgq_null_event_last_fn = fn;
@@ -528,8 +568,25 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			 */
 			LIST_FOREACH(p, &sc->gsp_pending, link) {
 				if (p->seq == r->sequence) {
-					nvkm_gsp_rpc_trace_add(sc,
-					    NVKM_GSP_RPC_RX, fn, r->sequence, len);
+					if (sc->gsp_rpc_trace_on) {
+						uint64_t now_us =
+						    nvkm_gsp_rpc_time_us();
+						uint32_t latency_us = 0;
+
+						if (p->tx_us != 0 &&
+						    now_us >= p->tx_us) {
+							uint64_t delta =
+							    now_us - p->tx_us;
+							latency_us =
+							    (delta > UINT32_MAX) ?
+							    UINT32_MAX :
+							    (uint32_t)delta;
+						}
+						nvkm_gsp_rpc_trace_add(sc,
+						    NVKM_GSP_RPC_RX, fn,
+						    r->sequence, len, 0,
+						    latency_us);
+					}
 					p->reply_buf = buf;
 					p->reply_len = len;
 					/* Release: the reply_buf/_len stores must
@@ -545,7 +602,7 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			}
 			if (!matched) {
 				nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_STALE,
-				    fn, r->sequence, len);
+				    fn, r->sequence, len, 0, 0);
 				nvkm_debugf(sc->dev,
 				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
 				    fn, r->sequence);
@@ -559,7 +616,8 @@ nvkm_gsp_msgq_drain_locked(struct nvkm_softc *sc)
 			uint32_t plen = (len > NVKM_GSP_RPC_HDR_SIZE) ?
 			    len - NVKM_GSP_RPC_HDR_SIZE : 0;
 			uint8_t *params = (uint8_t *)buf + NVKM_GSP_RPC_HDR_SIZE;
-			nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_EVENT, fn, 0, plen);
+			nvkm_gsp_rpc_trace_add(sc, NVKM_GSP_RPC_EVENT, fn, 0,
+			    plen, 0, 0);
 			(void)nvkm_gsp_msg_handle(sc, fn, params, plen);
 		}
 		kfree(buf, M_TEMP);
@@ -668,6 +726,8 @@ nvkm_gsp_rpc_push(struct nvkm_softc *sc, void *params, int policy,
 		} while (seq == 0);	/* 0 is reserved for no-reply */
 		rpc->sequence = seq;
 		p.seq = seq;
+		if (sc->gsp_rpc_trace_on)
+			p.tx_us = nvkm_gsp_rpc_time_us();
 		LIST_INSERT_HEAD(&sc->gsp_pending, &p, link);
 		if (fn == 103)
 			nvkm_gsp_rpc_diag_queues(sc, "before-push", fn, seq);

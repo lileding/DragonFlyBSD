@@ -284,9 +284,8 @@ nvkm_gsp_bar1_fini(struct nvkm_softc *sc)
 	sc->bar1.ready = false;
 }
 
-/* Map a 4 KiB VRAM page at a specific BAR1 GVA by writing the SPT entry. */
-int
-nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
+static int
+nvkm_gsp_bar1_map_vram_pte(struct nvkm_softc *sc, uint64_t bar1_gva,
     uint64_t vram_paddr)
 {
 	struct nvkm_gsp_bar1 *b1 = &sc->bar1;
@@ -326,8 +325,6 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	nvkm_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
-	nvkm_gsp_bar1_invalidate(sc);
-
 #ifdef NVKM_DEBUG_BAR1
 	nvkm_debugf(sc->dev,
 	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
@@ -335,6 +332,19 @@ nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
 	    spt_idx, (unsigned long long)pte);
 #endif
 	return (0);
+}
+
+/* Map a 4 KiB VRAM page at a specific BAR1 GVA by writing the SPT entry. */
+int
+nvkm_gsp_bar1_map_vram(struct nvkm_softc *sc, uint64_t bar1_gva,
+    uint64_t vram_paddr)
+{
+	int err;
+
+	err = nvkm_gsp_bar1_map_vram_pte(sc, bar1_gva, vram_paddr);
+	if (err == 0)
+		nvkm_gsp_bar1_invalidate(sc);
+	return (err);
 }
 
 static int
@@ -696,7 +706,7 @@ nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc, uint64_t paddr,
 		return (err);
 
 	for (uint32_t page = 0; page < pages; page++) {
-		err = nvkm_gsp_bar1_map_vram(sc,
+		err = nvkm_gsp_bar1_map_vram_pte(sc,
 		    gva + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE,
 		    paddr + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE);
 		if (err != 0) {
@@ -711,6 +721,7 @@ nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc, uint64_t paddr,
 			return (err);
 		}
 	}
+	nvkm_gsp_bar1_invalidate(sc);
 	nvkm_gsp_bar1_flush(sc);
 
 	*pgva = gva;

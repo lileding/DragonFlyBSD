@@ -1479,7 +1479,7 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 #endif
 }
 
-static void nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr,
+static int nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr,
     uint64_t size);
 
 static uint32_t
@@ -1597,7 +1597,9 @@ nvkm_gsp_golden_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_paddr = chan->inst_vram + 0x2000;
 	mthdbuf_size = sc->mthdbuf_size ? sc->mthdbuf_size : 0x4000U;
 	chan->mthdbuf_size = mthdbuf_size;
-	nvkm_gsp_zero_vram(sc, chan->inst_vram, 0x12000);
+	err = nvkm_gsp_zero_vram(sc, chan->inst_vram, 0x12000);
+	if (err != 0)
+		return (err);
 
 	nvkm_debugf(sc->dev,
 	    "gsp_rm: GR oneinit golden inst=0x%llx userd=0x%llx "
@@ -2929,23 +2931,73 @@ nvkm_gsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id,
 	}
 }
 
-static void
+/*
+ * Ownership:
+ *   Borrows the caller-owned VRAM range [paddr, paddr + size). The function
+ *   owns only temporary BAR1 GVAs, which are released before returning.
+ *
+ * Lifetime:
+ *   The temporary BAR1 mapping is valid only while this function runs. All
+ *   writes are flushed before the mapping is removed so GSP-RM observes zeroed
+ *   initialized ctxbufs before GPU_PROMOTE_CTX.
+ *
+ * Threading:
+ *   Synchronous and called while the promote path is serialized by gsp_tok.
+ *   BAR1 helpers perform their own page-table serialization.
+ */
+static int
 nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr, uint64_t size)
 {
-	static uint64_t scratch_gva;
+	uint64_t done = 0;
 
-	if (scratch_gva == 0) {
-		scratch_gva = sc->bar1.next_gva;
-		sc->bar1.next_gva += NVKM_GMMU_PT_PAGE_SIZE;
-	}
+	while (done < size) {
+		uint64_t chunk = size - done;
+		uint64_t gva = 0;
+		uint64_t qwords;
+		uint64_t tail;
+		int err;
 
-	for (uint64_t off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		(void)nvkm_gsp_bar1_map_vram(sc, scratch_gva, paddr + off);
-		for (uint32_t i = 0; i < NVKM_GMMU_PT_PAGE_SIZE; i += 4)
-			nvkm_gsp_bar1_wr32(sc, scratch_gva + i, 0);
+		if (chunk > (8ULL << 20))
+			chunk = 8ULL << 20;
+		chunk = NVKM_ALIGN_UP(chunk, NVKM_GMMU_PT_PAGE_SIZE);
+		if (done + chunk > size)
+			chunk = size - done;
+
+		err = nvkm_gsp_bar1_map_existing_range(sc, paddr + done,
+		    chunk, &gva);
+		if (err == 0) {
+			qwords = chunk / sizeof(uint64_t);
+			tail = qwords * sizeof(uint64_t);
+			if (qwords > UINT32_MAX) {
+				nvkm_gsp_bar1_unmap_existing_range(sc, gva,
+				    chunk);
+				return (EFBIG);
+			}
+			nvkm_gsp_bar1_set_region64(sc, gva, 0,
+			    (uint32_t)qwords);
+			for (uint64_t off = tail; off < chunk;
+			    off += sizeof(uint32_t))
+				nvkm_gsp_bar1_wr32(sc, gva + off, 0);
+			nvkm_gsp_bar1_flush(sc);
+			nvkm_gsp_bar1_unmap_existing_range(sc, gva, chunk);
+			done += chunk;
+			continue;
+		}
+
+		for (uint64_t page = 0; page < chunk;
+		    page += NVKM_GMMU_PT_PAGE_SIZE) {
+			err = nvkm_gsp_bar1_map_existing(sc,
+			    paddr + done + page, &gva);
+			if (err != 0)
+				return (err);
+			nvkm_gsp_bar1_set_region64(sc, gva, 0,
+			    NVKM_GMMU_PT_PAGE_SIZE / sizeof(uint64_t));
+			nvkm_gsp_bar1_flush(sc);
+			nvkm_gsp_bar1_unmap_existing(sc, gva);
+		}
+		done += chunk;
 	}
-	nvkm_gsp_bar1_flush(sc);
-	nvkm_gsp_bar1_invalidate(sc);
+	return (0);
 }
 
 static struct nvkm_gsp_gr_ctxbuf *
@@ -3145,8 +3197,11 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		buf->nonmapped = entry_nonmapped;
 		chan->gr_ctxbuf_nr++;
 
-		if (init && alloc)
-			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+		if (init && alloc) {
+			err = nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+			if (err != 0)
+				goto out_done;
+		}
 		if (!entry_nonmapped) {
 			err = nvkm_gsp_vmm_map_vram_flags_noflush(vmm, buf->gva,
 			    buf->paddr, buf->size, 1, ro, 0);
@@ -3228,8 +3283,12 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 			buf->nonmapped = 0;
 			chan->gr_ctxbuf_nr++;
 
-			if (init && alloc)
-				nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
+			if (init && alloc) {
+				err = nvkm_gsp_zero_vram(sc, buf->paddr,
+				    buf->size);
+				if (err != 0)
+					goto out_done;
+			}
 			err = nvkm_gsp_vmm_map_vram_flags_noflush(vmm, buf->gva,
 			    buf->paddr, buf->size, 1, ro, 0);
 			if (err != 0)
