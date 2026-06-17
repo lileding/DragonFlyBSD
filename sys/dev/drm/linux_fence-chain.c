@@ -148,6 +148,22 @@ static void dma_fence_chain_cb(struct dma_fence *blocker,
  * enable_signaling path returns false instead and lets the core
  * handle the already-signalled case.
  *
+ * Ownership:
+ * - On success, transfers the referenced blocker returned by
+ *   dma_fence_chain_blocker() to chain->cb.  The callback must release that
+ *   blocker reference when it runs.
+ * - On failure to arm because the blocker already signalled, releases the
+ *   transient blocker reference before retrying.
+ *
+ * Lifetime:
+ * - The caller must keep chain->base alive for the whole callback lifetime.
+ *   dma_fence_chain_enable_signaling() owns that extra reference until a later
+ *   callback either rearms on another blocker or completes the chain.
+ *
+ * Threading:
+ * - The callback node is single-shot.  It is re-used only after the previous
+ *   blocker has invoked dma_fence_chain_cb().
+ *
  * Returns true if a callback was armed, false if the node is ready to
  * signal.
  */
@@ -161,10 +177,8 @@ dma_fence_chain_arm(struct dma_fence_chain *chain)
 		if (blocker == NULL)
 			return (false);
 		if (dma_fence_add_callback(blocker, &chain->cb,
-		    dma_fence_chain_cb) == 0) {
-			dma_fence_put(blocker);
+		    dma_fence_chain_cb) == 0)
 			return (true);
-		}
 		/* Blocker signalled between the check and the add. */
 		dma_fence_put(blocker);
 	}
@@ -176,8 +190,11 @@ dma_fence_chain_cb(struct dma_fence *blocker, struct dma_fence_cb *cb)
 	struct dma_fence_chain *chain =
 	    container_of(cb, struct dma_fence_chain, cb);
 
-	if (!dma_fence_chain_arm(chain))
+	dma_fence_put(blocker);
+	if (!dma_fence_chain_arm(chain)) {
 		dma_fence_signal(&chain->base);
+		dma_fence_put(&chain->base);
+	}
 }
 
 static bool
@@ -186,9 +203,28 @@ dma_fence_chain_enable_signaling(struct dma_fence *fence)
 	struct dma_fence_chain *chain =
 	    container_of(fence, struct dma_fence_chain, base);
 
-	/* Node lock is held by the core here; arming only touches other
-	 * fences' locks.  false = already met, core signals for us. */
-	return (dma_fence_chain_arm(chain));
+	/*
+	 * Ownership:
+	 *   Takes one signaling reference on chain->base before publishing
+	 *   chain->cb into another fence's callback list.  If arming succeeds, that
+	 *   reference is owned by the callback chain and is released when the chain
+	 *   finally signals.  If no blocker remains, this helper releases the
+	 *   reference and returns false so the core handles the already-signalled
+	 *   case.
+	 *
+	 * Lifetime:
+	 *   The signaling reference keeps chain and chain->cb valid even if the
+	 *   syncobj drops its head reference before the blocker signals.
+	 *
+	 * Threading:
+	 *   The node lock is held by the core here; arming only touches other
+	 *   fences' locks.
+	 */
+	dma_fence_get(&chain->base);
+	if (dma_fence_chain_arm(chain))
+		return (true);
+	dma_fence_put(&chain->base);
+	return (false);
 }
 
 static bool
@@ -308,6 +344,7 @@ dma_fence_chain_init(struct dma_fence_chain *chain, struct dma_fence *prev,
 	chain->prev = prev;
 	chain->fence = fence;
 	chain->point = point;
+	INIT_LIST_HEAD(&chain->cb.node);
 	lockinit(&chain->lock, "dfchn", 0, 0);
 	lockinit(&chain->prev_lock, "dfchnp", 0, 0);
 	dma_fence_init(&chain->base, &dma_fence_chain_ops, &chain->lock,
