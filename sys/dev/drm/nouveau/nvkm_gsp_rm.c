@@ -1726,6 +1726,8 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	 * sysmem data) and write host PT.
 	 * Mirrors nouveau r535/vmm.c:125 aperture=1 + VRAM PT. */
 	{
+		bool submit_map_dirty = false;
+
 		/* All PT pages + data BOs in VRAM, host-accessed via BAR1.
 		 * Matches nouveau (everything in VRAM, L2-coherent both
 		 * sides). PDE/PTE aperture = VIDMEM. */
@@ -1930,16 +1932,41 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		    (unsigned long long)chan->submit_sema.paddr,
 		    (unsigned long long)(uintptr_t)chan->submit_sema.kva);
 #endif
-		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_push,
+		/*
+		 * Ownership:
+		 *   The submit push, GPFIFO, and semaphore pages are owned by
+		 *   this channel.  The VMM only borrows their physical
+		 *   addresses to write leaf PTEs.
+		 *
+		 * Lifetime:
+		 *   These mappings are private channel infrastructure and must
+		 *   be visible before RM allocates/schedules the channel below.
+		 *   The channel has not been exposed to userspace yet, so
+		 *   batching the PTE writes behind one flush preserves the
+		 *   external ioctl contract.
+		 *
+		 * Threading:
+		 *   The caller holds sc->gsp_tok.  Each noflush helper
+		 *   serializes its own page-table writes with vmm->tok; the
+		 *   single final flush is the publication boundary for all
+		 *   three mappings.
+		 */
+		err = nvkm_gsp_vmm_map_sysmem_noflush(vmm, chan->submit_gva_push,
 		    chan->submit_push.paddr, 0x1000);
-		if (err != 0)
-			return (err);
-		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_gpf,
-		    chan->submit_gpf.paddr, 0x1000);
-		if (err != 0)
-			return (err);
-		err = nvkm_gsp_vmm_map_sysmem(vmm, chan->submit_gva_sema,
-		    chan->submit_sema.paddr, 0x1000);
+		if (err == 0) {
+			submit_map_dirty = true;
+			err = nvkm_gsp_vmm_map_sysmem_noflush(vmm,
+			    chan->submit_gva_gpf, chan->submit_gpf.paddr,
+			    0x1000);
+		}
+		if (err == 0) {
+			submit_map_dirty = true;
+			err = nvkm_gsp_vmm_map_sysmem_noflush(vmm,
+			    chan->submit_gva_sema, chan->submit_sema.paddr,
+			    0x1000);
+		}
+		if (submit_map_dirty)
+			nvkm_gsp_vmm_flush(vmm);
 		if (err != 0)
 			return (err);
 	}
@@ -2960,6 +2987,8 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 	void *q;
 	uint64_t next_gva;
 	int err;
+	bool ctx_map_dirty = false;
+	bool ctx_map_flushed = false;
 
 	if (chan->gr_ctx_promoted)
 		return (0);
@@ -3119,10 +3148,11 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		if (init && alloc)
 			nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
 		if (!entry_nonmapped) {
-			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
+			err = nvkm_gsp_vmm_map_vram_flags_noflush(vmm, buf->gva,
 			    buf->paddr, buf->size, 1, ro, 0);
 			if (err != 0)
 				goto out_done;
+			ctx_map_dirty = true;
 		}
 		if (golden && global) {
 			err = nvkm_gsp_gr_save_global_ctxbuf(sc, buf);
@@ -3200,10 +3230,11 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 
 			if (init && alloc)
 				nvkm_gsp_zero_vram(sc, buf->paddr, buf->size);
-			err = nvkm_gsp_vmm_map_vram_flags(vmm, buf->gva,
+			err = nvkm_gsp_vmm_map_vram_flags_noflush(vmm, buf->gva,
 			    buf->paddr, buf->size, 1, ro, 0);
 			if (err != 0)
 				goto out_done;
+			ctx_map_dirty = true;
 			if (golden && global) {
 				err = nvkm_gsp_gr_save_global_ctxbuf(sc, buf);
 				if (err != 0)
@@ -3234,6 +3265,28 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 		}
 	}
 
+	/*
+	 * Ownership:
+	 *   GR ctxbuf mappings belong to the channel being promoted.  The
+	 *   promote control command only borrows their GPU virtual addresses.
+	 *
+	 * Lifetime:
+	 *   RM must see all ctxbuf PTEs before GPU_PROMOTE_CTX.  Userspace
+	 *   sees only the enclosing NVIF NEW ioctl, so many internal PTE
+	 *   writes can be published with one flush without changing
+	 *   ABI-visible behavior.
+	 *
+	 * Threading:
+	 *   The caller holds sc->gsp_tok.  Individual PTE writes are
+	 *   protected by vmm->tok inside the noflush helpers; this single
+	 *   flush is the cross-engine visibility point for the whole ctxbuf
+	 *   batch.
+	 */
+	if (ctx_map_dirty) {
+		nvkm_gsp_vmm_flush(vmm);
+		ctx_map_flushed = true;
+	}
+
 	uint32_t entry_count = ctrl->entryCount;
 	err = nvkm_gsp_rm_ctrl_wr(&vmm->device.subdevice, ctrl);
 	nvkm_debugf(sc->dev,
@@ -3242,6 +3295,8 @@ nvkm_gsp_chan_promote_gr_ctx(struct nvkm_gsp_vmm *vmm,
 	if (err == 0)
 		chan->gr_ctx_promoted = 1;
 out_done:
+	if (err != 0 && ctx_map_dirty && !ctx_map_flushed)
+		nvkm_gsp_vmm_flush(vmm);
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, info);
 	return (err);
 }

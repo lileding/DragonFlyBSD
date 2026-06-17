@@ -134,6 +134,8 @@ int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 void	 nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm);
 int	 nvkm_gsp_vmm_ensure_pt_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		    uint64_t size);
+int	 nvkm_gsp_vmm_map_sysmem_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+	    vm_paddr_t paddr, uint64_t size);
 int	 nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, void *kva, uint64_t size, uint8_t kind);
 int	 nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm,
