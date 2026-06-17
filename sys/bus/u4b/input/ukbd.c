@@ -414,6 +414,21 @@ ukbd_put_key(struct ukbd_softc *sc, uint32_t key)
 		evdev_push_event(sc->sc_evdev, EV_KEY,
 		    evdev_hid2key(KEY_INDEX(key)), !(key & KEY_RELEASE));
 		evdev_sync(sc->sc_evdev);
+
+		/*
+		 * Ownership: the evdev client that successfully issued EVIOCGRAB
+		 * owns delivery of this key event until it releases the grab.
+		 * Lifetime: sc_evdev is owned by sc and remains valid for the
+		 * duration of this call under the USB keyboard context lock.
+		 * Concurrency: evdev_is_grabbed() is explicitly lockless so input
+		 * backends can test grab state from their legacy delivery path.
+		 *
+		 * Match atkbd: once Xorg grabs the evdev keyboard, do not also queue
+		 * the same event for syscons/kbdmux where it can signal the tty that
+		 * launched startx.
+		 */
+		if (evdev_is_grabbed(sc->sc_evdev))
+			return;
 	}
 #endif
 
