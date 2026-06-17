@@ -231,6 +231,7 @@ struct nvkm_gsp_pending {
 	LIST_ENTRY(nvkm_gsp_pending) link;
 	uint32_t  fn;
 	uint32_t  seq;
+	uint64_t  tx_us;
 	volatile u_int done;     /* 0 = pending, 1 = reply ready; use atomic_*_acq/rel */
 	void     *reply_buf;
 	uint32_t  reply_len;
@@ -245,9 +246,12 @@ LIST_HEAD(nvkm_gsp_pending_list, nvkm_gsp_pending);
 enum nvkm_gsp_rpc_dir { NVKM_GSP_RPC_TX = 0, NVKM_GSP_RPC_RX = 1,
 			NVKM_GSP_RPC_EVENT = 2, NVKM_GSP_RPC_STALE = 3 };
 struct nvkm_gsp_rpc_trace_ent {
+	uint64_t time_us;
 	uint32_t fn;
 	uint32_t seq;
-	uint32_t aux;	/* TX: policy; RX/EVENT/STALE: payload len */
+	uint32_t aux;	/* TX: command/class/object; RX/EVENT/STALE: payload len */
+	uint32_t aux2;	/* TX: companion object/class info; otherwise 0 */
+	uint32_t latency_us; /* RX: TX->RX match latency; otherwise 0 */
 	uint8_t  dir;	/* enum nvkm_gsp_rpc_dir */
 };
 
