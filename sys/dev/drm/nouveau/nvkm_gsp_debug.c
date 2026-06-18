@@ -1026,6 +1026,10 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_async_count);
 	sbuf_printf(sb, "vm_bind_sync_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_sync_count);
+	sbuf_printf(sb, "vm_bind_fast_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_fast_count);
+	sbuf_printf(sb, "vm_bind_fast_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_fast_error_count);
 	sbuf_printf(sb, "vm_bind_wait_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_wait_count);
 	sbuf_printf(sb, "vm_bind_wait_error_count = %llu\n",
@@ -1103,6 +1107,50 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(sb, "vm_bind_clear_unmap_sparse_pages = %llu\n",
 	    (unsigned long long)sc->vm_bind_clear_unmap_sparse_pages);
 
+	sbuf_cat(sb, "\nvm_bind_pte_kind\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PTE_KIND_COUNT; i++) {
+		if (sc->vm_bind_map_kind_count[i] == 0 &&
+		    sc->vm_bind_clear_kind_count[i] == 0)
+			continue;
+		sbuf_printf(sb,
+		    "kind[0x%02x] map=%llu map_pages=%llu clear=%llu clear_pages=%llu\n",
+		    i,
+		    (unsigned long long)sc->vm_bind_map_kind_count[i],
+		    (unsigned long long)sc->vm_bind_map_kind_pages[i],
+		    (unsigned long long)sc->vm_bind_clear_kind_count[i],
+		    (unsigned long long)sc->vm_bind_clear_kind_pages[i]);
+	}
+
+	sbuf_cat(sb, "\nvm_bind_size_pages\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT; i++) {
+		uint64_t min_pages;
+		uint64_t max_pages;
+
+		if (sc->vm_bind_map_size_count[i] == 0 &&
+		    sc->vm_bind_clear_size_count[i] == 0)
+			continue;
+		min_pages = i == 0 ? 1 : (1ULL << (i - 1)) + 1;
+		max_pages = 1ULL << i;
+		if (i + 1 == NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT) {
+			sbuf_printf(sb,
+			    "bucket[%02u] pages>=%llu map=%llu map_pages=%llu clear=%llu clear_pages=%llu\n",
+			    i, (unsigned long long)min_pages,
+			    (unsigned long long)sc->vm_bind_map_size_count[i],
+			    (unsigned long long)sc->vm_bind_map_size_pages[i],
+			    (unsigned long long)sc->vm_bind_clear_size_count[i],
+			    (unsigned long long)sc->vm_bind_clear_size_pages[i]);
+		} else {
+			sbuf_printf(sb,
+			    "bucket[%02u] pages=%llu-%llu map=%llu map_pages=%llu clear=%llu clear_pages=%llu\n",
+			    i, (unsigned long long)min_pages,
+			    (unsigned long long)max_pages,
+			    (unsigned long long)sc->vm_bind_map_size_count[i],
+			    (unsigned long long)sc->vm_bind_map_size_pages[i],
+			    (unsigned long long)sc->vm_bind_clear_size_count[i],
+			    (unsigned long long)sc->vm_bind_clear_size_pages[i]);
+		}
+	}
+
 	sbuf_cat(sb, "\nvm_bind_profile_us\n");
 	sbuf_printf(sb, "wait_us = %llu\n",
 	    (unsigned long long)sc->vm_bind_profile_wait_us);
@@ -1140,6 +1188,41 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->cpu_fini_flush_count);
 	sbuf_printf(sb, "cpu_fini_flush_us = %llu\n",
 	    (unsigned long long)sc->cpu_fini_flush_us);
+
+	{
+		struct nvkm_hotproc_slot hotproc[NVKM_HOTPROC_SLOT_COUNT];
+
+		memset(hotproc, 0, sizeof(hotproc));
+		nvkm_hotproc_snapshot(sc, hotproc, NVKM_HOTPROC_SLOT_COUNT);
+		sbuf_cat(sb, "\nhotproc\n");
+		for (uint32_t i = 0; i < NVKM_HOTPROC_SLOT_COUNT; i++) {
+			const struct nvkm_hotproc_slot *slot = &hotproc[i];
+
+			if (!slot->active)
+				continue;
+			sbuf_printf(sb,
+			    "hotproc[%02u] pid=%d comm=%s vm_bind_ioctl=%llu vm_bind_ops=%llu vm_bind_sync=%llu vm_bind_async=%llu vm_bind_waits=%llu vm_bind_sigs=%llu vm_bind_map=%llu vm_bind_map_pages=%llu vm_bind_unmap=%llu vm_bind_unmap_pages=%llu vm_bind_sparse=%llu vm_bind_other=%llu vm_bind_max_pages=%llu prime_handle_to_fd=%llu prime_repeat=%llu prime_seen=%llu prime_overflow=%llu gem_new=%llu\n",
+			    i, slot->pid, slot->comm,
+			    (unsigned long long)slot->vm_bind_ioctl_count,
+			    (unsigned long long)slot->vm_bind_op_count,
+			    (unsigned long long)slot->vm_bind_sync_count,
+			    (unsigned long long)slot->vm_bind_async_count,
+			    (unsigned long long)slot->vm_bind_wait_count,
+			    (unsigned long long)slot->vm_bind_sig_count,
+			    (unsigned long long)slot->vm_bind_map_count,
+			    (unsigned long long)slot->vm_bind_map_pages,
+			    (unsigned long long)slot->vm_bind_unmap_count,
+			    (unsigned long long)slot->vm_bind_unmap_pages,
+			    (unsigned long long)slot->vm_bind_sparse_count,
+			    (unsigned long long)slot->vm_bind_other_count,
+			    (unsigned long long)slot->vm_bind_max_pages,
+			    (unsigned long long)slot->prime_handle_to_fd_count,
+			    (unsigned long long)slot->prime_handle_repeat_count,
+			    (unsigned long long)slot->prime_handle_seen_count,
+			    (unsigned long long)slot->prime_handle_overflow_count,
+			    (unsigned long long)slot->gem_new_count);
+		}
+	}
 
 	sbuf_cat(sb, "\nbar1\n");
 	sbuf_printf(sb, "gva_used = %u\n", bar1_used);
