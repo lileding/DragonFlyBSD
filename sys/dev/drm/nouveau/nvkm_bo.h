@@ -93,6 +93,7 @@ extern struct cdev_pager_ops nvkm_gem_pager_ops;
 void nvkm_bo_gem_free(struct drm_gem_object *obj);
 bool nvkm_bo_cpu_mappable(const struct nvkm_bo *bo);
 bool nvkm_bo_has_sysmem(const struct nvkm_bo *bo);
+uint8_t nvkm_bo_gpu_page_shift(const struct nvkm_bo *bo);
 int nvkm_bo_ensure_ttm_populated(struct nvkm_bo *bo);
 int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
     vm_paddr_t *paddr);

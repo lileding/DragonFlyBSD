@@ -134,6 +134,144 @@ nvkm_drm_get_scanout_position(struct drm_device *dev, unsigned int pipe,
 	return true;
 }
 
+void
+nvkm_proc_snapshot(pid_t *pid, char *comm, size_t comm_len)
+{
+	struct proc *proc;
+
+	if (pid != NULL)
+		*pid = -1;
+	if (comm != NULL && comm_len != 0)
+		strlcpy(comm, "<kernel>", comm_len);
+
+	proc = curproc;
+	if (proc == NULL)
+		return;
+
+	lwkt_gettoken_shared(&proc->p_token);
+	if (pid != NULL)
+		*pid = proc->p_pid;
+	if (comm != NULL && comm_len != 0)
+		strlcpy(comm, proc->p_comm, comm_len);
+	lwkt_reltoken(&proc->p_token);
+}
+
+static struct nvkm_hotproc_slot *
+nvkm_hotproc_find_slot_locked(struct nvkm_softc *sc, pid_t pid,
+    const char *comm)
+{
+	struct nvkm_hotproc_slot *empty = NULL;
+
+	for (uint32_t i = 0; i < NVKM_HOTPROC_OVERFLOW_SLOT; i++) {
+		struct nvkm_hotproc_slot *slot = &sc->hotproc[i];
+
+		if (!slot->active) {
+			if (empty == NULL)
+				empty = slot;
+			continue;
+		}
+		if (slot->pid == pid && strcmp(slot->comm, comm) == 0)
+			return (slot);
+	}
+
+	if (empty != NULL) {
+		empty->active = true;
+		empty->pid = pid;
+		strlcpy(empty->comm, comm, sizeof(empty->comm));
+		return (empty);
+	}
+
+	sc->hotproc[NVKM_HOTPROC_OVERFLOW_SLOT].active = true;
+	sc->hotproc[NVKM_HOTPROC_OVERFLOW_SLOT].pid = -2;
+	strlcpy(sc->hotproc[NVKM_HOTPROC_OVERFLOW_SLOT].comm, "<overflow>",
+	    sizeof(sc->hotproc[NVKM_HOTPROC_OVERFLOW_SLOT].comm));
+	return (&sc->hotproc[NVKM_HOTPROC_OVERFLOW_SLOT]);
+}
+
+void
+nvkm_hotproc_record(struct nvkm_softc *sc, enum nvkm_hotproc_event event,
+    uint32_t op_count)
+{
+	struct nvkm_hotproc_slot *slot;
+	char comm[MAXCOMLEN + 1];
+	pid_t pid;
+
+	if (sc == NULL)
+		return;
+
+	nvkm_proc_snapshot(&pid, comm, sizeof(comm));
+
+	spin_lock(&sc->hotproc_lock);
+	slot = nvkm_hotproc_find_slot_locked(sc, pid, comm);
+	switch (event) {
+	case NVKM_HOTPROC_VM_BIND:
+		slot->vm_bind_ioctl_count++;
+		slot->vm_bind_op_count += op_count;
+		break;
+	case NVKM_HOTPROC_PRIME_HANDLE_TO_FD:
+		slot->prime_handle_to_fd_count++;
+		break;
+	case NVKM_HOTPROC_GEM_NEW:
+		slot->gem_new_count++;
+		break;
+	default:
+		break;
+	}
+	spin_unlock(&sc->hotproc_lock);
+}
+
+static void
+nvkm_hotproc_record_prime_handle_to_fd(struct nvkm_softc *sc, uint32_t handle)
+{
+	struct nvkm_hotproc_slot *slot;
+	char comm[MAXCOMLEN + 1];
+	pid_t pid;
+	bool found = false;
+
+	if (sc == NULL)
+		return;
+
+	nvkm_proc_snapshot(&pid, comm, sizeof(comm));
+
+	spin_lock(&sc->hotproc_lock);
+	slot = nvkm_hotproc_find_slot_locked(sc, pid, comm);
+	slot->prime_handle_to_fd_count++;
+	for (uint32_t i = 0; i < slot->prime_handle_count; i++) {
+		if (slot->prime_handles[i] == handle) {
+			found = true;
+			break;
+		}
+	}
+	if (found) {
+		slot->prime_handle_repeat_count++;
+	} else if (slot->prime_handle_count <
+	    NVKM_HOTPROC_PRIME_HANDLE_SLOT_COUNT) {
+		slot->prime_handles[slot->prime_handle_count++] = handle;
+		slot->prime_handle_seen_count++;
+	} else {
+		slot->prime_handle_overflow_count++;
+	}
+	spin_unlock(&sc->hotproc_lock);
+}
+
+void
+nvkm_hotproc_snapshot(struct nvkm_softc *sc, struct nvkm_hotproc_slot *dst,
+    uint32_t dst_count)
+{
+	uint32_t count;
+
+	if (sc == NULL || dst == NULL || dst_count == 0)
+		return;
+
+	count = dst_count;
+	if (count > NVKM_HOTPROC_SLOT_COUNT)
+		count = NVKM_HOTPROC_SLOT_COUNT;
+
+	spin_lock(&sc->hotproc_lock);
+	memcpy(dst, sc->hotproc, sizeof(sc->hotproc[0]) * count);
+	spin_unlock(&sc->hotproc_lock);
+}
+
 static int
 nvkm_drm_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv,
     uint32_t handle, uint32_t flags, int *prime_fd)
@@ -141,8 +279,10 @@ nvkm_drm_prime_handle_to_fd(struct drm_device *dev, struct drm_file *file_priv,
 	struct nvkm_softc *sc = nvkm_drm_sc(dev);
 	int ret;
 
-	if (sc != NULL)
+	if (sc != NULL) {
 		sc->prime_handle_to_fd_count++;
+		nvkm_hotproc_record_prime_handle_to_fd(sc, handle);
+	}
 	ret = drm_gem_prime_handle_to_fd(dev, file_priv, handle, flags,
 	    prime_fd);
 	if (ret != 0 && sc != NULL)
@@ -254,6 +394,8 @@ struct nvkm_drm_vm_binding {
 	uint64_t bo_offset;
 	struct nvkm_drm_file *owner;
 	struct drm_gem_object *obj;
+	uint8_t pte_kind;
+	uint8_t page_shift;
 	bool pte_installed;
 	bool bo_pinned;
 };
@@ -413,11 +555,15 @@ nvkm_drm_vm_binding_assert(const struct nvkm_drm_vm_binding *binding)
 	    ("nvkm_drm: VM binding without owner"));
 	KASSERT(binding->obj != NULL,
 	    ("nvkm_drm: VM binding without GEM object"));
+	KASSERT(binding->page_shift == NVKM_GMMU_SPT_SHIFT ||
+	    binding->page_shift == NVKM_GMMU_LPT_SHIFT,
+	    ("nvkm_drm: VM binding with invalid page shift"));
 }
 
 static struct nvkm_drm_vm_binding *
 nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
-    uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset)
+    uint64_t size, struct drm_gem_object *obj, uint64_t bo_offset,
+    uint8_t pte_kind, uint8_t page_shift)
 {
 	struct nvkm_drm_vm_binding *binding;
 
@@ -430,6 +576,8 @@ nvkm_drm_vm_binding_alloc(struct nvkm_drm_file *nfile, uint64_t addr,
 	binding->bo_offset = bo_offset;
 	binding->owner = nfile;
 	binding->obj = obj;
+	binding->pte_kind = pte_kind;
+	binding->page_shift = page_shift;
 	binding->pte_installed = true;
 	return (binding);
 }
@@ -740,6 +888,94 @@ nvkm_drm_vm_bind_note_replace_clear_skip(struct nvkm_softc *sc, uint64_t size)
 }
 
 /*
+ * nvkm_drm_vm_bind_size_bucket()
+ *
+ * Ownership:
+ *   Borrows no objects and changes no state. The pages value is copied by
+ *   value and is only used for debug-counter classification.
+ *
+ * Lifetime:
+ *   The returned bucket is an immediate value. It carries no reference to VM,
+ *   VMM, or GEM state.
+ *
+ * Threading:
+ *   Pure helper; callers provide any required serialization for the counters
+ *   they update with the returned bucket.
+ */
+static uint32_t
+nvkm_drm_vm_bind_size_bucket(uint64_t pages)
+{
+	uint32_t bucket = 0;
+
+	if (pages == 0)
+		return (0);
+	pages--;
+	while (pages != 0 &&
+	    bucket + 1 < NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT) {
+		pages >>= 1;
+		bucket++;
+	}
+	return (bucket);
+}
+
+/*
+ * nvkm_drm_vm_bind_note_map_shape()
+ *
+ * Ownership:
+ *   Borrows sc for debug counter updates only. It does not acquire or release
+ *   VM_BIND, VMM, GEM, or BO ownership.
+ *
+ * Lifetime:
+ *   The range and flags are copied into aggregate counters only. No pointer
+ *   or user-provided state is retained.
+ *
+ * Threading:
+ *   Called after a MAP PTE write succeeds while VM_BIND serialization is held.
+ *   Counters are best-effort diagnostics and are not part of the ABI.
+ */
+static void
+nvkm_drm_vm_bind_note_map_shape(struct nvkm_softc *sc, uint32_t flags,
+    uint64_t size)
+{
+	uint64_t pages = size / NVKM_GMMU_PT_PAGE_SIZE;
+	uint32_t bucket = nvkm_drm_vm_bind_size_bucket(pages);
+	uint8_t pte_kind = flags & 0xff;
+
+	sc->vm_bind_map_kind_count[pte_kind]++;
+	sc->vm_bind_map_kind_pages[pte_kind] += pages;
+	sc->vm_bind_map_size_count[bucket]++;
+	sc->vm_bind_map_size_pages[bucket] += pages;
+}
+
+/*
+ * nvkm_drm_vm_bind_note_clear_shape()
+ *
+ * Ownership:
+ *   Borrows sc and the pte_kind copied from a live binding. It does not own
+ *   or retain the binding, GEM object, or VMM range.
+ *
+ * Lifetime:
+ *   The covered range is reduced to aggregate debug counters before return.
+ *   No live-binding state escapes this call.
+ *
+ * Threading:
+ *   Called immediately before clearing tracked valid PTEs while the drm_file
+ *   VM token serializes live-binding mutations. Counters are diagnostics only.
+ */
+static void
+nvkm_drm_vm_bind_note_clear_shape(struct nvkm_softc *sc, uint8_t pte_kind,
+    uint64_t size)
+{
+	uint64_t pages = size / NVKM_GMMU_PT_PAGE_SIZE;
+	uint32_t bucket = nvkm_drm_vm_bind_size_bucket(pages);
+
+	sc->vm_bind_clear_kind_count[pte_kind]++;
+	sc->vm_bind_clear_kind_pages[pte_kind] += pages;
+	sc->vm_bind_clear_size_count[bucket]++;
+	sc->vm_bind_clear_size_pages[bucket] += pages;
+}
+
+/*
  * nvkm_drm_vm_bind_note_op()
  *
  * Ownership:
@@ -822,6 +1058,126 @@ nvkm_drm_vm_bind_note_clear(struct nvkm_softc *sc, uint32_t action,
 }
 
 /*
+ * nvkm_drm_vm_bind_select_page_shift()
+ *
+ * Ownership:
+ *   Borrows bo and copies the MAP operation range values.  It does not keep a
+ *   GEM reference and does not change BO, VMM, or binding state.
+ *
+ * Lifetime:
+ *   The returned shift is valid only for the mapping being installed.  VM_BIND
+ *   stores it in the live binding so later partial replace/unmap can preserve
+ *   or downgrade the hardware representation correctly.
+ *
+ * Threading:
+ *   Called after VM_BIND pins the BO, while nfile->vm_token serializes the
+ *   remap.  The helper only reads stable placement/alignment state.
+ */
+static uint8_t
+nvkm_drm_vm_bind_select_page_shift(const struct nvkm_bo *bo, uint64_t addr,
+    uint64_t bo_offset, uint64_t size)
+{
+	uint8_t page_shift;
+
+	page_shift = nvkm_bo_gpu_page_shift(bo);
+	if (page_shift != NVKM_GMMU_LPT_SHIFT)
+		return (NVKM_GMMU_SPT_SHIFT);
+	if (((addr | bo_offset | size) & (NVKM_GMMU_LPT_PAGE_SIZE - 1)) != 0)
+		return (NVKM_GMMU_SPT_SHIFT);
+	if (((bo->paddr + bo_offset) & (NVKM_GMMU_LPT_PAGE_SIZE - 1)) != 0)
+		return (NVKM_GMMU_SPT_SHIFT);
+	return (NVKM_GMMU_LPT_SHIFT);
+}
+
+/*
+ * nvkm_drm_vm_binding_materialize_4k()
+ *
+ * Ownership:
+ *   Borrows the live binding and its owner VMM.  The binding keeps owning its
+ *   GEM reference and VM_BIND BO pin; this helper only changes the hardware
+ *   PTE representation for the same GPUVA range.
+ *
+ * Lifetime:
+ *   The binding must remain linked and pinned for the whole call.  On success
+ *   page_shift is downgraded to 4 KiB so later split/tail bookkeeping matches
+ *   the hardware PTEs that now carry the mapping.
+ *
+ * Threading:
+ *   Called while the drm_file VM token serializes binding mutations and the
+ *   caller holds the GSP token.  The helper writes PTEs without flushing; the
+ *   enclosing VM_BIND operation publishes all changes with one final flush.
+ */
+static int
+nvkm_drm_vm_binding_materialize_4k(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, struct nvkm_drm_vm_binding *binding)
+{
+	struct nvkm_bo *bo;
+	int err;
+
+	if (binding->page_shift <= NVKM_GMMU_SPT_SHIFT)
+		return (0);
+
+	bo = to_nvkm_bo(binding->obj);
+	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+		err = nvkm_gsp_vmm_map_vram_flags_page_noflush(nfile->vmm,
+		    binding->addr, bo->paddr + binding->bo_offset,
+		    binding->size, 0, 0, binding->pte_kind,
+		    NVKM_GMMU_SPT_SHIFT);
+	} else {
+		err = nvkm_gsp_vmm_map_sysmem_bo_noflush(nfile->vmm,
+		    binding->addr, bo, binding->bo_offset, binding->size,
+		    binding->pte_kind);
+	}
+	if (err != 0)
+		return (-err);
+
+	binding->page_shift = NVKM_GMMU_SPT_SHIFT;
+	nvkm_debugf(sc->dev,
+	    "nvkm_drm: VM_BIND materialize 4K addr=0x%016jx size=0x%016jx obj=%p\n",
+	    (uintmax_t)binding->addr, (uintmax_t)binding->size,
+	    binding->obj);
+	return (0);
+}
+
+static int
+nvkm_drm_vm_bindings_materialize_large_partials(struct nvkm_softc *sc,
+    struct nvkm_drm_file *nfile, uint64_t addr, uint64_t size)
+{
+	struct nvkm_drm_vm_binding *binding;
+	uint64_t end = addr + size;
+	int err;
+
+	if (addr >= nfile->vm_bindings_max_end)
+		return (0);
+
+	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
+		uint64_t old_start, old_end, cut_start, cut_end;
+
+		if (binding->addr >= end)
+			break;
+		if (binding->addr + binding->size <= addr)
+			continue;
+		if (!nvkm_drm_vm_ranges_overlap(addr, size,
+		    binding->addr, binding->size))
+			continue;
+		if (binding->page_shift <= NVKM_GMMU_SPT_SHIFT)
+			continue;
+
+		old_start = binding->addr;
+		old_end = binding->addr + binding->size;
+		cut_start = old_start > addr ? old_start : addr;
+		cut_end = old_end < end ? old_end : end;
+		if (cut_start == old_start && cut_end == old_end)
+			continue;
+
+		err = nvkm_drm_vm_binding_materialize_4k(sc, nfile, binding);
+		if (err != 0)
+			return (err);
+	}
+	return (0);
+}
+
+/*
  * nvkm_drm_vm_bindings_free_prepared()
  *
  * Ownership:
@@ -896,7 +1252,8 @@ nvkm_drm_vm_bindings_prepare_replace_range(struct nvkm_drm_file *nfile,
 		tail_bo_offset = binding->bo_offset + (cut_end - old_start);
 		drm_gem_object_get(binding->obj);
 		tail = nvkm_drm_vm_binding_alloc(nfile, cut_end, tail_size,
-		    binding->obj, tail_bo_offset);
+		    binding->obj, tail_bo_offset, binding->pte_kind,
+		    binding->page_shift);
 		if (tail == NULL) {
 			drm_gem_object_put_unlocked(binding->obj);
 			err = -ENOMEM;
@@ -1047,6 +1404,11 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		return (0);
 	}
 
+	err = nvkm_drm_vm_bindings_materialize_large_partials(sc, nfile,
+	    addr, size);
+	if (err != 0)
+		return (err);
+
 	LIST_FOREACH(binding, &nfile->vm_bindings, link) {
 		struct nvkm_drm_vm_binding *tail;
 		uint64_t old_start, old_end, cut_start, cut_end;
@@ -1073,7 +1435,8 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 		tail_bo_offset = binding->bo_offset + (cut_end - old_start);
 		drm_gem_object_get(binding->obj);
 		tail = nvkm_drm_vm_binding_alloc(nfile, cut_end, tail_size,
-		    binding->obj, tail_bo_offset);
+		    binding->obj, tail_bo_offset, binding->pte_kind,
+		    binding->page_shift);
 		if (tail == NULL) {
 			drm_gem_object_put_unlocked(binding->obj);
 			err = -ENOMEM;
@@ -1104,6 +1467,8 @@ nvkm_drm_vm_bindings_remove_range(struct nvkm_softc *sc,
 			old_end = binding->addr + binding->size;
 			cut_start = old_start > addr ? old_start : addr;
 			cut_end = old_end < end ? old_end : end;
+			nvkm_drm_vm_bind_note_clear_shape(sc, binding->pte_kind,
+			    cut_end - cut_start);
 			nvkm_drm_vm_bind_note_clear(sc, clear_action,
 			    cut_end - cut_start);
 			err = nvkm_gsp_vmm_unmap_valid_noflush(nfile->vmm,
@@ -1172,7 +1537,8 @@ nvkm_drm_vm_binding_add(struct nvkm_drm_file *nfile, uint64_t addr,
 	struct nvkm_drm_vm_binding *binding;
 	int err;
 
-	binding = nvkm_drm_vm_binding_alloc(nfile, addr, size, obj, bo_offset);
+	binding = nvkm_drm_vm_binding_alloc(nfile, addr, size, obj, bo_offset,
+	    0, NVKM_GMMU_SPT_SHIFT);
 	if (binding == NULL)
 		return (ENOMEM);
 
@@ -2169,6 +2535,71 @@ struct drm_nouveau_vm_bind {
 	uint64_t op_ptr;
 };
 
+static void
+nvkm_hotproc_record_vm_bind(struct nvkm_softc *sc,
+    const struct drm_nouveau_vm_bind *req,
+    const struct drm_nouveau_vm_bind_op *ops)
+{
+	struct nvkm_hotproc_slot *slot;
+	char comm[MAXCOMLEN + 1];
+	pid_t pid;
+	uint64_t map_count = 0;
+	uint64_t map_pages = 0;
+	uint64_t unmap_count = 0;
+	uint64_t unmap_pages = 0;
+	uint64_t sparse_count = 0;
+	uint64_t other_count = 0;
+	uint64_t max_pages = 0;
+
+	if (sc == NULL || req == NULL)
+		return;
+
+	for (uint32_t i = 0; ops != NULL && i < req->op_count; i++) {
+		const struct drm_nouveau_vm_bind_op *op = &ops[i];
+		uint64_t pages = op->range / NVKM_GMMU_PT_PAGE_SIZE;
+
+		if (pages > max_pages)
+			max_pages = pages;
+		if ((op->flags & DRM_NOUVEAU_VM_BIND_SPARSE) != 0)
+			sparse_count++;
+		switch (op->op) {
+		case DRM_NOUVEAU_VM_BIND_OP_MAP:
+			map_count++;
+			map_pages += pages;
+			break;
+		case DRM_NOUVEAU_VM_BIND_OP_UNMAP:
+			unmap_count++;
+			unmap_pages += pages;
+			break;
+		default:
+			other_count++;
+			break;
+		}
+	}
+
+	nvkm_proc_snapshot(&pid, comm, sizeof(comm));
+
+	spin_lock(&sc->hotproc_lock);
+	slot = nvkm_hotproc_find_slot_locked(sc, pid, comm);
+	slot->vm_bind_ioctl_count++;
+	slot->vm_bind_op_count += req->op_count;
+	if ((req->flags & DRM_NOUVEAU_VM_BIND_RUN_ASYNC) != 0)
+		slot->vm_bind_async_count++;
+	else
+		slot->vm_bind_sync_count++;
+	slot->vm_bind_wait_count += req->wait_count;
+	slot->vm_bind_sig_count += req->sig_count;
+	slot->vm_bind_map_count += map_count;
+	slot->vm_bind_map_pages += map_pages;
+	slot->vm_bind_unmap_count += unmap_count;
+	slot->vm_bind_unmap_pages += unmap_pages;
+	slot->vm_bind_sparse_count += sparse_count;
+	slot->vm_bind_other_count += other_count;
+	if (max_pages > slot->vm_bind_max_pages)
+		slot->vm_bind_max_pages = max_pages;
+	spin_unlock(&sc->hotproc_lock);
+}
+
 struct nvkm_drm_exec_signal;
 
 static int nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
@@ -2290,6 +2721,7 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			bool bo_pinned = false;
 			bool job_object = false;
 			uint32_t unmapped = 0;
+			uint8_t page_shift = NVKM_GMMU_SPT_SHIFT;
 
 			LIST_INIT(&replace_tails);
 
@@ -2378,6 +2810,13 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			    (uintmax_t)op->range, (uintmax_t)bo->paddr);
 			nvkm_drm_vm_bind_note_op(sc, NVKM_DRM_VM_TRACE_MAP,
 			    op->range);
+			err = nvkm_drm_vm_bindings_materialize_large_partials(
+			    sc, nfile, op->addr, op->range);
+			if (err != 0) {
+				if (!job_object)
+					drm_gem_object_put_unlocked(obj);
+				break;
+			}
 			err = nvkm_drm_vm_bindings_prepare_replace_range(nfile,
 			    op->addr, op->range, &replace_tails);
 			if (err != 0) {
@@ -2405,8 +2844,11 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 					break;
 				}
 			}
+			page_shift = nvkm_drm_vm_bind_select_page_shift(bo,
+			    op->addr, op->bo_offset, op->range);
 			new_binding = nvkm_drm_vm_binding_alloc(nfile, op->addr,
-			    op->range, obj, op->bo_offset);
+			    op->range, obj, op->bo_offset, op->flags & 0xff,
+			    page_shift);
 			if (new_binding == NULL) {
 				nvkm_drm_vm_bindings_abort_replace_range(&replace_tails);
 				(void)nvkm_bo_vm_bind_unpin(bo);
@@ -2435,9 +2877,10 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 			 * offending context just like any other bad mapping.
 			 */
 			if (bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) {
-				err = nvkm_gsp_vmm_map_vram_flags_noflush(nfile->vmm,
+				err = nvkm_gsp_vmm_map_vram_flags_page_noflush(nfile->vmm,
 				    op->addr, bo->paddr + op->bo_offset,
-				    op->range, 0, 0, op->flags & 0xff);
+				    op->range, 0, 0, op->flags & 0xff,
+				    page_shift);
 			} else {
 				err = nvkm_gsp_vmm_map_sysmem_bo_noflush(nfile->vmm,
 				    op->addr, bo, op->bo_offset, op->range,
@@ -2455,6 +2898,7 @@ nvkm_drm_vm_bind_apply(struct nvkm_softc *sc, struct drm_file *file_priv,
 				    i, err);
 				break;
 			}
+			nvkm_drm_vm_bind_note_map_shape(sc, op->flags, op->range);
 			/*
 			 * Mark the bo itself: scanout fb creation happens on
 			 * a different drm file (compositor master fd) but
@@ -2658,6 +3102,7 @@ nvkm_drm_ioctl_vm_bind(struct drm_device *ddev, void *data,
 			return (-EFAULT);
 		}
 	}
+	nvkm_hotproc_record_vm_bind(sc, req, ops);
 
 	err = nvkm_drm_queue_vm_bind_job(sc, file_priv, nfile, req, ops,
 	    !async_bind);
@@ -4131,6 +4576,103 @@ nvkm_drm_jobs_close(struct nvkm_drm_file *nfile)
 	flush_work(&nfile->job_work);
 }
 
+/*
+ * nvkm_drm_try_vm_bind_sync_fast()
+ *
+ * Ownership:
+ *   Borrows req, file_priv, nfile, and sc. ops remains owned by the caller
+ *   when this function returns -EAGAIN. Any other return value consumes ops,
+ *   either by applying the bind or by failing before submission can be useful.
+ *
+ * Lifetime:
+ *   This path is only valid for synchronous VM_BIND calls with no explicit
+ *   wait or signal syncobjs. It runs only while the per-file job queue is idle,
+ *   so it cannot overtake an EXEC or async VM_BIND already published to the
+ *   queue. On success, the ioctl returns after PTE updates are applied and the
+ *   VMM flush/TLB invalidate has completed, which is the same completion point
+ *   that a signaled synchronous VM_BIND job would expose.
+ *
+ * Threading:
+ *   The first job_submit_lock check is only a cheap filter that avoids GEM
+ *   lookup work when the queue is already busy.  The second check, held from
+ *   the idle decision through the direct apply, is the ordering boundary that
+ *   prevents a later submit from entering the queue ahead of this bind. The
+ *   apply helper still owns vm_token and gsp_tok for the actual PTE mutation.
+ */
+static int
+nvkm_drm_try_vm_bind_sync_fast(struct nvkm_softc *sc,
+    struct drm_file *file_priv, struct nvkm_drm_file *nfile,
+    const struct drm_nouveau_vm_bind *req,
+    struct drm_nouveau_vm_bind_op *ops, bool sync)
+{
+	struct drm_gem_object **objects = NULL;
+	struct nvkm_drm_vm_bind_retire *retire = NULL;
+	bool idle;
+	int err;
+
+	if (!sync || req->wait_count != 0 || req->sig_count != 0)
+		return (-EAGAIN);
+
+	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
+	lwkt_gettoken(&nfile->job_token);
+	idle = !nfile->job_closing && TAILQ_EMPTY(&nfile->job_queue) &&
+	    !nfile->job_work_queued;
+	lwkt_reltoken(&nfile->job_token);
+	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
+	if (!idle)
+		return (-EAGAIN);
+
+	if (req->op_count != 0) {
+		retire = kzalloc(sizeof(*retire), GFP_KERNEL);
+		if (retire == NULL) {
+			kfree(ops);
+			sc->vm_bind_fast_count++;
+			sc->vm_bind_fast_error_count++;
+			return (-ENOMEM);
+		}
+		INIT_WORK(&retire->work, nvkm_drm_vm_bind_retire_work);
+		LIST_INIT(&retire->bindings);
+
+		err = nvkm_drm_vm_bind_prepare_objects(file_priv, ops,
+		    req->op_count, &objects);
+		if (err != 0) {
+			nvkm_drm_vm_bind_retire_free(retire);
+			kfree(ops);
+			sc->vm_bind_fast_count++;
+			sc->vm_bind_fast_error_count++;
+			return (err);
+		}
+	}
+
+	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
+	lwkt_gettoken(&nfile->job_token);
+	idle = !nfile->job_closing && TAILQ_EMPTY(&nfile->job_queue) &&
+	    !nfile->job_work_queued;
+	lwkt_reltoken(&nfile->job_token);
+	if (!idle) {
+		lockmgr(&nfile->job_submit_lock, LK_RELEASE);
+		nvkm_drm_vm_bind_retire_free(retire);
+		nvkm_drm_vm_bind_objects_put(objects, req->op_count);
+		return (-EAGAIN);
+	}
+
+	sc->vm_bind_fast_count++;
+	if (req->op_count != 0) {
+		err = nvkm_drm_vm_bind_apply(sc, file_priv, nfile, ops,
+		    req->op_count, objects, &retire->bindings);
+		if (err != 0)
+			sc->vm_bind_fast_error_count++;
+		nvkm_drm_vm_bind_retire_schedule(&retire);
+	} else {
+		err = 0;
+	}
+	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
+
+	nvkm_drm_vm_bind_objects_put(objects, req->op_count);
+	kfree(ops);
+	return (err);
+}
+
 static int
 nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
     struct drm_file *file_priv, struct nvkm_drm_file *nfile,
@@ -4141,6 +4683,11 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 	bool published = false;
 	bool sync_ref_taken = false;
 	int err;
+
+	err = nvkm_drm_try_vm_bind_sync_fast(sc, file_priv, nfile, req,
+	    ops, sync);
+	if (err != -EAGAIN)
+		return (err);
 
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
 	if (job == NULL) {

@@ -440,6 +440,36 @@ nvkm_gsp_bar1_set_region64(struct nvkm_softc *sc, uint64_t gva, uint64_t val,
 		bus_write_8(sc->bar_res[1], gva + (uint64_t)i * 8, val);
 }
 
+/*
+ * nvkm_gsp_bar1_write_linear_region64()
+ *
+ * Ownership:
+ *   Borrows sc and its BAR1 resource.  The helper writes caller-owned BAR1
+ *   virtual addresses only; it does not allocate or retain BAR1 mappings.
+ *
+ * Lifetime:
+ *   The caller must guarantee that [gva, gva + count * 8) remains mapped in
+ *   BAR1 until the function returns.  first and step are plain qword values;
+ *   no pointer ownership is transferred.
+ *
+ * Threading:
+ *   Performs synchronous MMIO writes in caller order.  The caller serializes
+ *   access to the object represented by the BAR1 mapping and performs any
+ *   required flush/TLB invalidate after the write batch.
+ */
+void
+nvkm_gsp_bar1_write_linear_region64(struct nvkm_softc *sc, uint64_t gva,
+    uint64_t first, uint64_t step, uint32_t count)
+{
+	uint32_t i;
+
+	if (!sc->bar1.ready || count == 0)
+		return;
+	for (i = 0; i < count; i++)
+		bus_write_8(sc->bar_res[1], gva + (uint64_t)i * 8,
+		    first + (uint64_t)i * step);
+}
+
 uint64_t
 nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t gva)
 {

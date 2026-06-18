@@ -126,7 +126,8 @@ nvkm_bo_record_gem_new_trace(struct nvkm_softc *sc, uint64_t req_size,
     uint64_t map_handle, bool mappable_req)
 {
 	struct nvkm_bo_gem_new_trace *trace;
-	struct proc *proc;
+	char comm[MAXCOMLEN + 1];
+	pid_t pid;
 	uint64_t seq;
 
 	if (nvkm_debug == 0)
@@ -149,11 +150,10 @@ nvkm_bo_record_gem_new_trace(struct nvkm_softc *sc, uint64_t req_size,
 	trace->cpu_mappable = nvkm_bo_cpu_mappable(bo) ? 1 : 0;
 	trace->comm[0] = '\0';
 
-	proc = curproc;
-	if (proc != NULL) {
-		trace->pid = (uint32_t)proc->p_pid;
-		strlcpy(trace->comm, proc->p_comm, sizeof(trace->comm));
-	}
+	nvkm_proc_snapshot(&pid, comm, sizeof(comm));
+	if (pid > 0)
+		trace->pid = (uint32_t)pid;
+	strlcpy(trace->comm, comm, sizeof(trace->comm));
 }
 
 static bool
@@ -234,6 +234,34 @@ nvkm_bo_cpu_mappable(const struct nvkm_bo *bo)
 	if (bo->base.dev != NULL && bo->base.dev->drm_ttm_bdev != NULL)
 		return (false);
 	return (bo->bar1_mappable);
+}
+
+/*
+ * nvkm_bo_gpu_page_shift()
+ *
+ * Ownership:
+ *   Borrows bo and reads its current backing placement.  No GEM, TTM, or VRAM
+ *   ownership is acquired.
+ *
+ * Lifetime:
+ *   The returned shift is a snapshot.  VM_BIND records the chosen shift for
+ *   the mapping it installs; future BO relocation must re-evaluate this helper
+ *   before installing new PTEs.
+ *
+ * Threading:
+ *   Callers must hold whatever serialization makes bo->domain and bo->paddr
+ *   stable for their operation.  VM_BIND calls this after pinning the BO.
+ */
+uint8_t
+nvkm_bo_gpu_page_shift(const struct nvkm_bo *bo)
+{
+	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) == 0)
+		return (NVKM_GMMU_SPT_SHIFT);
+	if (bo->base.size < NVKM_GMMU_LPT_PAGE_SIZE)
+		return (NVKM_GMMU_SPT_SHIFT);
+	if ((bo->paddr & (NVKM_GMMU_LPT_PAGE_SIZE - 1)) != 0)
+		return (NVKM_GMMU_SPT_SHIFT);
+	return (NVKM_GMMU_LPT_SHIFT);
 }
 
 static vm_page_t
@@ -817,8 +845,9 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		 *   allocation metadata can prove this is GEM-owned backing
 		 *   from a reclaimable GEM arena.
 		 */
-		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size, PAGE_SIZE,
-		    NVKM_VRAM_GEM, bo);
+		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size,
+		    size >= NVKM_GMMU_LPT_PAGE_SIZE ?
+		    NVKM_GMMU_LPT_PAGE_SIZE : PAGE_SIZE, NVKM_VRAM_GEM, bo);
 		if (bo->vram_alloc == NULL) {
 			if (!can_fallback_gart) {
 				nvkm_bo_record_alloc_fail(sc,
@@ -1108,6 +1137,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 		create_domain = (req_domain & ~NOUVEAU_GEM_DOMAIN_VRAM) |
 		    NOUVEAU_GEM_DOMAIN_GART;
 	sc->bo_gem_new_count++;
+	nvkm_hotproc_record(sc, NVKM_HOTPROC_GEM_NEW, 0);
 	nvkm_bo_record_gem_new_request(sc, &req->info);
 	if (mappable_req)
 		sc->bo_gem_new_mappable_req_count++;

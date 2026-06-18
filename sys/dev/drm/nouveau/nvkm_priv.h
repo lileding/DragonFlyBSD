@@ -18,6 +18,8 @@
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/queue.h>
+#include <sys/spinlock.h>
+#include <sys/spinlock2.h>
 #include <sys/thread.h>
 #include <sys/thread2.h>
 #include <machine/atomic.h>
@@ -343,6 +345,8 @@ struct nvkm_drm_vm_trace {
 	int error;
 };
 
+#define NVKM_DRM_VM_BIND_PTE_KIND_COUNT	256
+#define NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT	16
 #define NVKM_BO_GEM_NEW_TRACE_COUNT	64
 
 struct nvkm_bo_gem_new_trace {
@@ -359,6 +363,42 @@ struct nvkm_bo_gem_new_trace {
 	uint8_t		mappable_req;
 	uint8_t		cpu_mappable;
 	char		comm[MAXCOMLEN + 1];
+};
+
+#define NVKM_HOTPROC_SLOT_COUNT			16
+#define NVKM_HOTPROC_OVERFLOW_SLOT		(NVKM_HOTPROC_SLOT_COUNT - 1)
+#define NVKM_HOTPROC_PRIME_HANDLE_SLOT_COUNT	64
+
+enum nvkm_hotproc_event {
+	NVKM_HOTPROC_VM_BIND = 0,
+	NVKM_HOTPROC_PRIME_HANDLE_TO_FD,
+	NVKM_HOTPROC_GEM_NEW,
+};
+
+struct nvkm_hotproc_slot {
+	bool		active;
+	pid_t		pid;
+	char		comm[MAXCOMLEN + 1];
+	uint64_t	vm_bind_ioctl_count;
+	uint64_t	vm_bind_op_count;
+	uint64_t	vm_bind_sync_count;
+	uint64_t	vm_bind_async_count;
+	uint64_t	vm_bind_wait_count;
+	uint64_t	vm_bind_sig_count;
+	uint64_t	vm_bind_map_count;
+	uint64_t	vm_bind_map_pages;
+	uint64_t	vm_bind_unmap_count;
+	uint64_t	vm_bind_unmap_pages;
+	uint64_t	vm_bind_sparse_count;
+	uint64_t	vm_bind_other_count;
+	uint64_t	vm_bind_max_pages;
+	uint64_t	prime_handle_to_fd_count;
+	uint64_t	prime_handle_repeat_count;
+	uint64_t	prime_handle_seen_count;
+	uint64_t	prime_handle_overflow_count;
+	uint32_t	prime_handles[NVKM_HOTPROC_PRIME_HANDLE_SLOT_COUNT];
+	uint32_t	prime_handle_count;
+	uint64_t	gem_new_count;
 };
 
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
@@ -496,6 +536,8 @@ struct nvkm_softc {
 	struct nvkm_gsp_chan    *chid_chan[2048];
 	struct nvkm_gsp_pending_list gsp_pending;
 	struct nvkm_drm_exec_pending_list exec_pending;
+	struct spinlock		hotproc_lock;
+	struct nvkm_hotproc_slot hotproc[NVKM_HOTPROC_SLOT_COUNT];
 
 	/* IRQ resource + ithread serializer (DragonFly native model). */
 	int			irq_rid;
@@ -775,6 +817,8 @@ struct nvkm_softc {
 	uint32_t		vm_bind_max_op_count;
 	uint64_t		vm_bind_async_count;
 	uint64_t		vm_bind_sync_count;
+	uint64_t		vm_bind_fast_count;
+	uint64_t		vm_bind_fast_error_count;
 	uint64_t		vm_bind_wait_count;
 	uint64_t		vm_bind_wait_error_count;
 	uint64_t		vm_bind_error_count;
@@ -813,6 +857,14 @@ struct nvkm_softc {
 	uint64_t		vm_bind_clear_map_sparse_pages;
 	uint64_t		vm_bind_clear_unmap_sparse_count;
 	uint64_t		vm_bind_clear_unmap_sparse_pages;
+	uint64_t		vm_bind_map_kind_count[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
+	uint64_t		vm_bind_map_kind_pages[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
+	uint64_t		vm_bind_clear_kind_count[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
+	uint64_t		vm_bind_clear_kind_pages[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
+	uint64_t		vm_bind_map_size_count[NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT];
+	uint64_t		vm_bind_map_size_pages[NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT];
+	uint64_t		vm_bind_clear_size_count[NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT];
+	uint64_t		vm_bind_clear_size_pages[NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT];
 	uint64_t		vm_bind_profile_wait_us;
 	uint64_t		vm_bind_profile_copyin_us;
 	uint64_t		vm_bind_profile_token_wait_us;
@@ -1073,6 +1125,30 @@ int	nvkm_gsp_msg_dispatch_all(struct nvkm_softc *sc);
 /* DRM driver registration. */
 int	nvkm_drm_register(struct nvkm_softc *sc);
 void	nvkm_drm_unregister(struct nvkm_softc *sc);
+/*
+ * Ownership: borrows curproc only long enough to copy pid/comm by value.
+ * Lifetime: the returned identity is detached from proc/lwp/lwkt lifetime;
+ * callers must not infer that the process still exists after the call.
+ * Threading: takes p_token while reading p_comm and releases it before
+ * returning; no nvkm locks are held or required by the caller.
+ */
+void	nvkm_proc_snapshot(pid_t *pid, char *comm, size_t comm_len);
+/*
+ * Ownership: stores only pid/comm values, never proc/lwp/lwkt pointers.
+ * Lifetime: counters live with nvkm_softc and are cleared by module reload.
+ * Threading: may be called from ioctl hot paths; it snapshots curproc first
+ * and then updates the fixed slot array under sc->hotproc_lock.
+ */
+void	nvkm_hotproc_record(struct nvkm_softc *sc,
+	    enum nvkm_hotproc_event event, uint32_t op_count);
+/*
+ * Ownership: copies nvkm-owned diagnostic slots into caller-owned storage.
+ * Lifetime: dst remains valid according to the caller's allocation only.
+ * Threading: holds sc->hotproc_lock only for the memcpy; sbuf/sysctl work
+ * must happen after this function returns.
+ */
+void	nvkm_hotproc_snapshot(struct nvkm_softc *sc,
+	    struct nvkm_hotproc_slot *dst, uint32_t dst_count);
 
 /* Per-file VM-wide EXEC completion set; no_share BOs alias their fence-wait
  * resv to it (see nvkm_bo_resv). */
@@ -1128,18 +1204,22 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 #define NV_PTE_KIND_INVALID_TURING 0x07ULL
 #define NV_PTE_KIND_SHIFT         56	/* PTE kind field, bits 63:56 */
 
-/* Pascal+ 16K-page 5-level GMMU (gp100_vmm_16, vmmgp100.c:603-608). */
+/* Pascal+ 5-level GMMU with dual 64 KiB big / 4 KiB small leaf PTs. */
 #define NVKM_GMMU_PD3_SHIFT       47
 #define NVKM_GMMU_PD2_SHIFT       38
 #define NVKM_GMMU_PD1_SHIFT       29
 #define NVKM_GMMU_PD0_SHIFT       21
+#define NVKM_GMMU_LPT_SHIFT       16
 #define NVKM_GMMU_SPT_SHIFT       12
 #define NVKM_GMMU_PD2_ENTRIES    512
 #define NVKM_GMMU_PD1_ENTRIES    512
 #define NVKM_GMMU_PD0_ENTRIES    256
+#define NVKM_GMMU_LPT_ENTRIES    (1U << (NVKM_GMMU_PD0_SHIFT - NVKM_GMMU_LPT_SHIFT))
 #define NVKM_GMMU_SPT_ENTRIES    512
+#define NVKM_GMMU_LPT_SPTE_COUNT (1U << (NVKM_GMMU_LPT_SHIFT - NVKM_GMMU_SPT_SHIFT))
 #define NVKM_GMMU_PD0_ENTRY_SIZE  16   /* dual entry: small + big */
-#define NVKM_GMMU_PT_PAGE_SIZE 0x1000
+#define NVKM_GMMU_PT_PAGE_SIZE    0x1000
+#define NVKM_GMMU_LPT_PAGE_SIZE   (1ULL << NVKM_GMMU_LPT_SHIFT)
 
 static __inline uint64_t
 nvkm_pde_to_sysmem(uint64_t pt_paddr)
@@ -1242,6 +1322,8 @@ void	nvkm_gsp_bar1_wr64(struct nvkm_softc *sc, uint64_t bar1_gva,
 uint64_t nvkm_gsp_bar1_rd64(struct nvkm_softc *sc, uint64_t bar1_gva);
 void	nvkm_gsp_bar1_set_region64(struct nvkm_softc *sc, uint64_t bar1_gva,
 	    uint64_t val, uint32_t count);
+void	nvkm_gsp_bar1_write_linear_region64(struct nvkm_softc *sc,
+	    uint64_t bar1_gva, uint64_t first, uint64_t step, uint32_t count);
 
 /* Allocate a 4 KiB VRAM page and map it into BAR1 at the next free
  * GVA. Fills *page with the VRAM paddr (for PDE/PTE encoding) and the

@@ -33,6 +33,7 @@ LIST_HEAD(nvkm_gsp_vmm_pd1_list, nvkm_gsp_vmm_pd1);
 
 struct nvkm_gsp_vmm_pd0 {
 	LIST_ENTRY(nvkm_gsp_vmm_pd0) link;
+	LIST_ENTRY(nvkm_gsp_vmm_pd0) lookup_link;
 	struct nvkm_bar1_page	*pd1_page;
 	uint32_t		pd2_idx;
 	uint32_t		pd1_idx;
@@ -40,20 +41,29 @@ struct nvkm_gsp_vmm_pd0 {
 	struct nvkm_bar1_page	page;
 };
 LIST_HEAD(nvkm_gsp_vmm_pd0_list, nvkm_gsp_vmm_pd0);
+LIST_HEAD(nvkm_gsp_vmm_pd0_lookup_list, nvkm_gsp_vmm_pd0);
 
 struct nvkm_gsp_vmm_user_pt {
 	LIST_ENTRY(nvkm_gsp_vmm_user_pt) link;
+	LIST_ENTRY(nvkm_gsp_vmm_user_pt) lookup_link;
 	struct nvkm_gsp_vmm_pd0 *pd0;
 	uint32_t		pd2_idx;
 	uint32_t		pd1_idx;
 	uint32_t		pd0_idx;
 	uint32_t		valid_pte_count;
+	uint32_t		valid_lpte_count;
 	uint32_t		sparse_pte_count;
 	bool			conservative_pte_accounting;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
 LIST_HEAD(nvkm_gsp_vmm_user_pt_list, nvkm_gsp_vmm_user_pt);
+LIST_HEAD(nvkm_gsp_vmm_user_pt_lookup_list, nvkm_gsp_vmm_user_pt);
+
+#define NVKM_GSP_VMM_PD0_HASH_BITS	8
+#define NVKM_GSP_VMM_PD0_HASH_SIZE	(1U << NVKM_GSP_VMM_PD0_HASH_BITS)
+#define NVKM_GSP_VMM_USER_PT_HASH_BITS	10
+#define NVKM_GSP_VMM_USER_PT_HASH_SIZE	(1U << NVKM_GSP_VMM_USER_PT_HASH_BITS)
 
 struct nvkm_gsp_vmm_sparse_region {
 	LIST_ENTRY(nvkm_gsp_vmm_sparse_region) link;
@@ -81,6 +91,10 @@ struct nvkm_gsp_vmm {
 	struct nvkm_gsp_vmm_pd1_list user_pd1_pages;
 	struct nvkm_gsp_vmm_pd0_list user_pd0_pages;
 	struct nvkm_gsp_vmm_user_pt_list user_pt_pages;
+	struct nvkm_gsp_vmm_pd0_lookup_list
+	    user_pd0_lookup[NVKM_GSP_VMM_PD0_HASH_SIZE];
+	struct nvkm_gsp_vmm_user_pt_lookup_list
+	    user_pt_lookup[NVKM_GSP_VMM_USER_PT_HASH_SIZE];
 	struct nvkm_gsp_vmm_sparse_region_list sparse_regions;
 	struct nvkm_dmamem sparse_page;
 
@@ -94,9 +108,11 @@ struct nvkm_gsp_vmm {
 struct nvkm_gsp_vmm_pte_info {
 	uint64_t	va;
 	uint64_t	pte;
+	uint64_t	lpte;
 	uint32_t	pd2_idx;
 	uint32_t	pd1_idx;
 	uint32_t	pd0_idx;
+	uint32_t	lpt_idx;
 	uint32_t	spt_idx;
 	uint8_t		has_pt;
 };
@@ -144,6 +160,9 @@ int	 nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm,
 int	 nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
 	    uint8_t ro, uint8_t kind);
+int	 nvkm_gsp_vmm_map_vram_flags_page_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
+	    uint8_t ro, uint8_t kind, uint8_t page_shift);
 int	 nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
 int	 nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm,

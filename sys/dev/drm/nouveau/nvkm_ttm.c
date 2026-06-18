@@ -205,6 +205,9 @@ nvkm_ttm_vram_man_get_node(struct ttm_mem_type_manager *man,
 	size = (uint64_t)mem->num_pages << PAGE_SHIFT;
 	align = mem->page_alignment != 0 ?
 	    (uint64_t)mem->page_alignment << PAGE_SHIFT : PAGE_SIZE;
+	if (size >= NVKM_GMMU_LPT_PAGE_SIZE &&
+	    align < NVKM_GMMU_LPT_PAGE_SIZE)
+		align = NVKM_GMMU_LPT_PAGE_SIZE;
 	base = sc->fb_usable_base;
 	lpfn = place->lpfn != 0 ? place->lpfn : man->size;
 
