@@ -1482,6 +1482,75 @@ nvkm_gsp_userd_clear(struct nvkm_softc *sc, const struct nvkm_gsp_chan *chan)
 static int nvkm_gsp_zero_vram(struct nvkm_softc *sc, uint64_t paddr,
     uint64_t size);
 
+/*
+ * nvkm_gsp_chan_submit_dmamem_free()
+ *
+ * Ownership:
+ *   Consumes any DMA-coherent submit pages currently owned by chan.  The
+ *   function is idempotent and may be called on a partially constructed
+ *   channel.
+ *
+ * Lifetime:
+ *   After return, submit_push/submit_gpf/submit_sema no longer expose a CPU
+ *   mapping or GPU DMA address and must not be referenced by the channel or
+ *   EXEC path.
+ *
+ * Threading:
+ *   Called during channel construction failure or destruction while the
+ *   channel is not reachable by new EXEC submissions.
+ */
+static void
+nvkm_gsp_chan_submit_dmamem_free(struct nvkm_softc *sc,
+    struct nvkm_gsp_chan *chan)
+{
+	nvkm_dmamem_free(sc, &chan->submit_sema);
+	nvkm_dmamem_free(sc, &chan->submit_gpf);
+	nvkm_dmamem_free(sc, &chan->submit_push);
+}
+
+/*
+ * nvkm_gsp_chan_submit_dmamem_alloc()
+ *
+ * Ownership:
+ *   Allocates three channel-owned DMA-coherent pages for the fixed submit
+ *   push, GPFIFO, and semaphore GPU VA window.  On failure it releases every
+ *   page obtained during this call.
+ *
+ * Lifetime:
+ *   The pages remain valid until nvkm_gsp_chan_submit_dmamem_free() runs.
+ *   The returned paddr values are busdma addresses suitable for SYS_COH GMMU
+ *   PTEs; callers must not derive them with vtophys().
+ *
+ * Threading:
+ *   Called before the channel is exposed to userspace.  It may sleep in the
+ *   busdma allocator and performs no GMMU writes.
+ */
+static int
+nvkm_gsp_chan_submit_dmamem_alloc(struct nvkm_softc *sc,
+    struct nvkm_gsp_chan *chan)
+{
+	int err;
+
+	err = nvkm_dmamem_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, &chan->submit_push);
+	if (err != 0)
+		return (err);
+	err = nvkm_dmamem_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, &chan->submit_gpf);
+	if (err != 0)
+		goto fail;
+	err = nvkm_dmamem_alloc(sc, NVKM_GMMU_PT_PAGE_SIZE,
+	    NVKM_GMMU_PT_PAGE_SIZE, &chan->submit_sema);
+	if (err != 0)
+		goto fail;
+
+	return (0);
+
+fail:
+	nvkm_gsp_chan_submit_dmamem_free(sc, chan);
+	return (err);
+}
+
 static uint32_t
 nvkm_order_base_2_u64(uint64_t value)
 {
@@ -1724,221 +1793,33 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
 	chan->mthdbuf_size = mthdbuf_sz;
 
-	/* === Pre-allocate submit BOs (VRAM PT + VRAM PD0/SPT,
-	 * sysmem data) and write host PT.
-	 * Mirrors nouveau r535/vmm.c:125 aperture=1 + VRAM PT. */
+	/* === Pre-allocate submit data pages and publish their GVA mappings. */
 	{
 		bool submit_map_dirty = false;
 
-		/* All PT pages + data BOs in VRAM, host-accessed via BAR1.
-		 * Matches nouveau (everything in VRAM, L2-coherent both
-		 * sides). PDE/PTE aperture = VIDMEM. */
-		if ((err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_pd0,
-		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
-		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_spt,
-		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan)) ||
-		    (err = nvkm_gsp_bar1_alloc_page_kind(sc, &chan->submit_lpt,
-		    NVKM_VRAM_CHANNEL_SUBMIT_PT, chan))) {
+		/* push/gpf/sema in DMA-coherent sysmem, matching nouveau's
+		 * coherent GART submit buffers. */
+		err = nvkm_gsp_chan_submit_dmamem_alloc(sc, chan);
+		if (err != 0) {
 			nvkm_debugf(sc->dev,
-			    "gsp_rm: chan submit page alloc failed err=%d\n", err);
+			    "gsp_rm: sysmem submit DMA alloc failed err=%d\n",
+			    err);
 			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
 			    M_NVKM_MTHDBUF);
 			chan->mthdbuf_kva = NULL;
 			return (err);
 		}
-		/* push/gpf/sema in sysmem (matches nouveau NVIF_MEM_COHERENT GART). */
-		chan->submit_push.kva = contigmalloc(0x1000, M_NVKM_MTHDBUF,
-		    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
-		chan->submit_gpf.kva  = contigmalloc(0x1000, M_NVKM_MTHDBUF,
-		    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
-		chan->submit_sema.kva = contigmalloc(0x1000, M_NVKM_MTHDBUF,
-		    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
-		if (chan->submit_push.kva == NULL || chan->submit_gpf.kva == NULL ||
-		    chan->submit_sema.kva == NULL) {
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: sysmem submit BO alloc failed\n");
-			return (ENOMEM);
-		}
-		chan->submit_push.paddr = vtophys(chan->submit_push.kva);
-		chan->submit_gpf.paddr  = vtophys(chan->submit_gpf.kva);
-		chan->submit_sema.paddr = vtophys(chan->submit_sema.kva);
 		nvkm_debugf(sc->dev,
 		    "gsp_rm: sysmem BOs push=0x%llx gpf=0x%llx sema=0x%llx\n",
 		    (unsigned long long)chan->submit_push.paddr,
 		    (unsigned long long)chan->submit_gpf.paddr,
 		    (unsigned long long)chan->submit_sema.paddr);
 
-		const uint32_t pd1_idx = (chan->submit_gva_push >> NVKM_GMMU_PD1_SHIFT)
-		    & (NVKM_GMMU_PD1_ENTRIES - 1);
-		const uint32_t pd0_idx = (chan->submit_gva_push >> NVKM_GMMU_PD0_SHIFT)
-		    & (NVKM_GMMU_PD0_ENTRIES - 1);
-		const uint32_t spt_idx = (chan->submit_gva_push >> NVKM_GMMU_SPT_SHIFT)
-		    & (NVKM_GMMU_SPT_ENTRIES - 1);
-
-		/* PD1[k] -> PD0 (VRAM); PD0[k].small -> SPT (VRAM); SPT entries
-		 * for push/gpf/sema (all VRAM). All writes via BAR1. */
-		nvkm_gsp_bar1_wr64(sc,
-		    vmm->pt[2].page.bar1_gva + pd1_idx * 8,
-		    nvkm_pde_to_vram(chan->submit_pd0.vram_paddr));
-		/* PD0 dual entry: BIG = empty LPT (all-zero so 64 KiB walks invalid,
-		 * walker falls back to SMALL); SMALL = SPT (our 4 KiB pages). */
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8,
-		    nvkm_pde_to_vram(chan->submit_lpt.vram_paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8,
-		    nvkm_pde_to_vram(chan->submit_spt.vram_paddr));
-		/* SPT entries: 3 sysmem data pages, aperture SYS_COH. */
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_spt.bar1_gva + (spt_idx + 0) * 8,
-		    nvkm_pte_to_sysmem(chan->submit_push.paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_spt.bar1_gva + (spt_idx + 1) * 8,
-		    nvkm_pte_to_sysmem(chan->submit_gpf.paddr));
-		nvkm_gsp_bar1_wr64(sc,
-		    chan->submit_spt.bar1_gva + (spt_idx + 2) * 8,
-		    nvkm_pte_to_sysmem(chan->submit_sema.paddr));
-
-#ifdef NVKM_DEBUG_SUBMIT_PT_DUMP
-		/* Read back EVERY level of the PT chain via BAR1 to verify
-		 * that COPY_SERVER_RESERVED_PDES didn't clobber our PD3/PD2/PD1
-		 * chain and that our PD0/SPT writes landed. */
-		uint64_t rb_pd3 = nvkm_gsp_bar1_rd64(sc, vmm->pt[0].page.bar1_gva + 0);
-		uint64_t rb_pd2 = nvkm_gsp_bar1_rd64(sc, vmm->pt[1].page.bar1_gva + 0);
-		uint64_t rb_pd1 = nvkm_gsp_bar1_rd64(sc, vmm->pt[2].page.bar1_gva + pd1_idx * 8);
-		uint64_t rb_pd0_big = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 0) * 8);
-		uint64_t rb_pd0_small = nvkm_gsp_bar1_rd64(sc, chan->submit_pd0.bar1_gva + (pd0_idx * 2 + 1) * 8);
-		uint64_t rb_spt0 = nvkm_gsp_bar1_rd64(sc, chan->submit_spt.bar1_gva + spt_idx * 8);
-		nvkm_debugf(sc->dev,
-		    "gsp_rm: PT readback: PD3[0]=0x%016llx PD2[0]=0x%016llx PD1[%u]=0x%016llx\n",
-		    (unsigned long long)rb_pd3, (unsigned long long)rb_pd2,
-		    pd1_idx, (unsigned long long)rb_pd1);
-		nvkm_debugf(sc->dev,
-		    "gsp_rm: PT readback: PD0[%u].BIG=0x%016llx .SMALL=0x%016llx SPT[%u]=0x%016llx\n",
-		    pd0_idx, (unsigned long long)rb_pd0_big,
-		    (unsigned long long)rb_pd0_small,
-		    spt_idx, (unsigned long long)rb_spt0);
-		/* Read channel inst[0x200] via BAR1 (L2-coherent). PRAMIN bypasses L2
-		 * so we couldn\'t see GSP\'s writes through it. Map chan inst into BAR1
-		 * temporarily. Also read PDB via PRAMIN for comparison. */
-		{
-			uint64_t pramin_pdb = 0, bar1_pdb = 0;
-			(void)nvkm_gsp_pramin_rd64(sc, chan->inst_vram + 0x200, &pramin_pdb);
-			/* inst already mapped to BAR1 in chan_ctor early; reuse */
-			uint64_t inst_bar1_gva = chan->inst_bar1_gva;
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: DIAG inst_bar1_gva=0x%llx mapping to vram=0x%llx (bar1 SPT=0x%llx idx=%llu)\n",
-			    (unsigned long long)inst_bar1_gva,
-			    (unsigned long long)chan->inst_vram,
-			    (unsigned long long)sc->bar1.spt_paddr,
-			    (unsigned long long)(inst_bar1_gva >> 12));
-
-			/* (no need to re-map or invalidate — done in chan_ctor early) */
-
-			/* AFTER map_vram + TLB invalidate: dump BAR1 SPT, should see
-			 * SPT[9] = our inst PDE if writes actually landed. */
-			for (uint64_t si = 7; si < 12; si++) {
-				uint64_t spte = 0;
-				(void)nvkm_gsp_pramin_rd64(sc, sc->bar1.spt_paddr + si*8, &spte);
-				nvkm_debugf(sc->dev,
-				    "gsp_rm: POST-MAP BAR1_SPT[%llu] = 0x%016llx\n",
-				    (unsigned long long)si, (unsigned long long)spte);
-			}
-			bar1_pdb = nvkm_gsp_bar1_rd64(sc, inst_bar1_gva + 0x200);
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: chan inst[0x200] PRAMIN=0x%016llx BAR1=0x%016llx (our PD3 paddr=0x%llx)\n",
-			    (unsigned long long)pramin_pdb,
-			    (unsigned long long)bar1_pdb,
-			    (unsigned long long)vmm->pt[0].page.vram_paddr);
-			/* Dump first 64 bytes of inst block via BAR1 */
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: chan inst[0..0x40] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  0),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  4),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva +  8),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 12),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 16),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 20),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 24),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 28));
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: chan inst[0x200..0x220] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x200),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x204),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x208),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x20c),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x210),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x214),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x218),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x21c));
-			/* Volta+ channel RAMIN: PDB at NV_RAMIN_SC_PAGE_DIR_BASE_LO/HI(0)
-			 * = byte offset 0x2a0/0x2a4 (subcontext 0). bits: target[1:0],
-			 * vol[2], fault_replay_tex[4], fault_replay_gcc[5], lo[31:12]
-			 * in dword 0x2a0; hi[31:0] in dword 0x2a4. */
-			nvkm_debugf(sc->dev,
-			    "gsp_rm: chan inst[0x2a0..0x2c0] via BAR1: %08x %08x %08x %08x   %08x %08x %08x %08x\n",
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a8),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2ac),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b0),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b4),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2b8),
-			    nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2bc));
-			uint32_t sc0_lo = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a0);
-			uint32_t sc0_hi = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + 0x2a4);
-			uint64_t sc0_pdb = ((uint64_t)sc0_hi << 32) | (sc0_lo & ~0xfffu);
-			/* Scan whole 4 KiB inst block for any non-zero dword. */
-			{
-				uint32_t nz_count = 0;
-				for (uint32_t off = 0; off < 0x1000; off += 4) {
-					uint32_t v = nvkm_gsp_bar1_rd32(sc, inst_bar1_gva + off);
-					if (v != 0) {
-						nvkm_debugf(sc->dev,
-						    "gsp_rm: inst[0x%03x] = 0x%08x\n", off, v);
-						nz_count++;
-						if (nz_count > 20) break;
-					}
-				}
-				nvkm_debugf(sc->dev, "gsp_rm: total non-zero inst dwords: %u\n", nz_count);
-			}
-						nvkm_debugf(sc->dev,
-			    "gsp_rm: SC0 PDB target=%u vol=%u pdb_paddr=0x%llx (our PD3=0x%llx)\n",
-			    sc0_lo & 3u, (sc0_lo >> 2) & 1u,
-			    (unsigned long long)sc0_pdb,
-			    (unsigned long long)vmm->pt[0].page.vram_paddr);
-
-		}
-
-		nvkm_debugf(sc->dev,
-		    "gsp_rm: expected: PD3[0]=0x%llx (PD2 paddr) PD2[0]=0x%llx (PD1 paddr) PD1[%u]=0x%llx (PD0 paddr) PD0.SMALL=0x%llx (SPT paddr) SPT[0]=0x%llx (push paddr)\n",
-		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[1].page.vram_paddr),
-		    (unsigned long long)nvkm_pde_to_vram(vmm->pt[2].page.vram_paddr),
-		    pd1_idx, (unsigned long long)nvkm_pde_to_vram(chan->submit_pd0.vram_paddr),
-		    (unsigned long long)nvkm_pde_to_vram(chan->submit_spt.vram_paddr),
-		    (unsigned long long)nvkm_pte_to_sysmem(chan->submit_push.paddr));
-
-		nvkm_debugf(sc->dev,
-		    "gsp_rm: submit PT (VRAM via BAR1): PD0 vram=0x%llx bar1=0x%llx "
-		    "SPT vram=0x%llx bar1=0x%llx\n",
-		    (unsigned long long)chan->submit_pd0.vram_paddr,
-		    (unsigned long long)chan->submit_pd0.bar1_gva,
-		    (unsigned long long)chan->submit_spt.vram_paddr,
-		    (unsigned long long)chan->submit_spt.bar1_gva);
-		nvkm_debugf(sc->dev,
-		    "gsp_rm: BOs push vram=0x%llx bar1=0x%llx gpf vram=0x%llx bar1=0x%llx sema vram=0x%llx bar1=0x%llx\n",
-		    (unsigned long long)chan->submit_push.paddr,
-		    (unsigned long long)(uintptr_t)chan->submit_push.kva,
-		    (unsigned long long)chan->submit_gpf.paddr,
-		    (unsigned long long)(uintptr_t)chan->submit_gpf.kva,
-		    (unsigned long long)chan->submit_sema.paddr,
-		    (unsigned long long)(uintptr_t)chan->submit_sema.kva);
-#endif
 		/*
 		 * Ownership:
 		 *   The submit push, GPFIFO, and semaphore pages are owned by
-		 *   this channel.  The VMM only borrows their physical
-		 *   addresses to write leaf PTEs.
+		 *   this channel.  The VMM owns all page-table storage used to
+		 *   make their GVAs visible to the GPU.
 		 *
 		 * Lifetime:
 		 *   These mappings are private channel infrastructure and must
@@ -1969,8 +1850,16 @@ nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
 		}
 		if (submit_map_dirty)
 			nvkm_gsp_vmm_flush(vmm);
-		if (err != 0)
+		if (err != 0) {
+			if (submit_map_dirty)
+				(void)nvkm_gsp_vmm_unmap(vmm,
+				    chan->submit_gva_push, 0x3000);
+			nvkm_gsp_chan_submit_dmamem_free(sc, chan);
+			contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
+			    M_NVKM_MTHDBUF);
+			chan->mthdbuf_kva = NULL;
 			return (err);
+		}
 	}
 
 
@@ -2849,20 +2738,13 @@ nvkm_gsp_chan_dtor(struct nvkm_gsp_chan *chan)
 		if (chan->submit_gva_push != 0 && chan->vmm != NULL)
 			(void)nvkm_gsp_vmm_unmap(chan->vmm,
 			    chan->submit_gva_push, 0x3000);
-		nvkm_gsp_bar1_free_page(sc, &chan->submit_pd0);
-		nvkm_gsp_bar1_free_page(sc, &chan->submit_lpt);
-		nvkm_gsp_bar1_free_page(sc, &chan->submit_spt);
 		nvkm_gsp_vram_free_kind(sc, chan->inst_vram,
 		    NVKM_VRAM_CHANNEL_INST, chan);
 		nvkm_gsp_vram_free_kind(sc, chan->userd_vram,
 		    NVKM_VRAM_CHANNEL_USERD, chan);
 	}
-	if (chan->submit_push.kva != NULL)
-		contigfree(chan->submit_push.kva, 0x1000, M_NVKM_MTHDBUF);
-	if (chan->submit_gpf.kva != NULL)
-		contigfree(chan->submit_gpf.kva, 0x1000, M_NVKM_MTHDBUF);
-	if (chan->submit_sema.kva != NULL)
-		contigfree(chan->submit_sema.kva, 0x1000, M_NVKM_MTHDBUF);
+	if (sc != NULL)
+		nvkm_gsp_chan_submit_dmamem_free(sc, chan);
 	for (uint32_t i = 0; i < chan->gr_ctxbuf_nr; i++) {
 		struct nvkm_gsp_gr_ctxbuf *buf = &chan->gr_ctxbuf[i];
 

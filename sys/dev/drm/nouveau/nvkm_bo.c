@@ -171,6 +171,28 @@ nvkm_bo_ttm_vram(const struct nvkm_bo *bo)
 	return (bo->ttm_backed && bo->tbo.mem.mem_type == TTM_PL_VRAM);
 }
 
+/*
+ * nvkm_bo_ttm_prefers_vram()
+ *
+ * Ownership:
+ *   Borrows bo and reads the immutable placement preference captured at GEM
+ *   creation.  It does not touch TTM placement or reservation state.
+ *
+ * Lifetime:
+ *   The preferred_domain field is stable for the BO lifetime.  bo->domain may
+ *   change after TTM migration and must not be used as the validate target.
+ *
+ * Threading:
+ *   Lockless read of immutable BO metadata.  Callers still need TTM
+ *   reservation or VM serialization for current placement and GPUVA state.
+ */
+bool
+nvkm_bo_ttm_prefers_vram(const struct nvkm_bo *bo)
+{
+	return (bo != NULL && bo->ttm_backed &&
+	    (bo->preferred_domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0);
+}
+
 static void
 nvkm_bo_refresh_ttm_domain(struct nvkm_bo *bo, uint32_t req_domain)
 {
@@ -257,6 +279,9 @@ nvkm_bo_gpu_page_shift(const struct nvkm_bo *bo)
 {
 	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) == 0)
 		return (NVKM_GMMU_SPT_SHIFT);
+	if (bo->base.size >= NVKM_GMMU_PD0_PAGE_SIZE &&
+	    (bo->paddr & (NVKM_GMMU_PD0_PAGE_SIZE - 1)) == 0)
+		return (NVKM_GMMU_PD0_SHIFT);
 	if (bo->base.size < NVKM_GMMU_LPT_PAGE_SIZE)
 		return (NVKM_GMMU_SPT_SHIFT);
 	if ((bo->paddr & (NVKM_GMMU_LPT_PAGE_SIZE - 1)) != 0)
@@ -330,16 +355,24 @@ nvkm_bo_ensure_ttm_populated(struct nvkm_bo *bo)
 int
 nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset, vm_paddr_t *paddr)
 {
+	struct ttm_dma_tt *dma;
+	unsigned long page_index;
 	vm_page_t page;
 
 	if (offset >= bo->base.size)
 		return (EINVAL);
 
 	if (nvkm_bo_ttm_sysmem(bo)) {
-		page = nvkm_bo_page_at(bo, offset);
-		if (page == NULL)
+		if (bo->tbo.ttm == NULL)
 			return (ENXIO);
-		*paddr = VM_PAGE_TO_PHYS(page) + (offset & PAGE_MASK);
+		dma = (struct ttm_dma_tt *)bo->tbo.ttm;
+		page_index = offset >> PAGE_SHIFT;
+		if (page_index >= bo->tbo.ttm->num_pages ||
+		    dma->dma_address == NULL ||
+		    dma->dma_address[page_index] == 0)
+			return (ENXIO);
+		*paddr = (vm_paddr_t)dma->dma_address[page_index] +
+		    (offset & PAGE_MASK);
 		return (0);
 	}
 
@@ -362,6 +395,175 @@ nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset, vm_paddr_t *paddr)
 	}
 
 	return (ENXIO);
+}
+
+/*
+ * nvkm_bo_paddr_at_mem()
+ *
+ * Ownership:
+ *   Borrows bo and a caller-owned TTM placement snapshot.  It does not acquire
+ *   GEM, TTM reservation, or VRAM allocation ownership.
+ *
+ * Lifetime:
+ *   mem must remain valid and backed by the BO's TTM object for the call.  The
+ *   returned paddr is a snapshot for the caller's already-serialized remap or
+ *   move operation.
+ *
+ * Threading:
+ *   Pure lookup helper.  It does not sleep, reserve the BO, or write VMM state.
+ *   TTM move code can use it before bo->tbo.mem is switched to new_mem.
+ */
+int
+nvkm_bo_paddr_at_mem(const struct nvkm_bo *bo, const struct ttm_mem_reg *mem,
+    uint64_t offset, vm_paddr_t *paddr)
+{
+	struct nvkm_vram_alloc *alloc;
+	struct ttm_dma_tt *dma;
+	unsigned long page_index;
+
+	if (mem == NULL || offset >= bo->base.size)
+		return (EINVAL);
+	if (!bo->ttm_backed)
+		return (nvkm_bo_paddr_at(bo, offset, paddr));
+
+	switch (mem->mem_type) {
+	case TTM_PL_VRAM:
+		if (mem->mm_node == NULL)
+			return (ENXIO);
+		alloc = container_of(mem->mm_node, struct nvkm_vram_alloc, node);
+		if (offset >= alloc->size)
+			return (EINVAL);
+		*paddr = alloc->paddr + offset;
+		return (0);
+	case TTM_PL_TT:
+	case TTM_PL_SYSTEM:
+		if (bo->tbo.ttm == NULL)
+			return (ENXIO);
+		dma = (struct ttm_dma_tt *)bo->tbo.ttm;
+		page_index = offset >> PAGE_SHIFT;
+		if (page_index >= bo->tbo.ttm->num_pages ||
+		    dma->dma_address == NULL ||
+		    dma->dma_address[page_index] == 0)
+			return (ENXIO);
+		*paddr = (vm_paddr_t)dma->dma_address[page_index] +
+		    (offset & PAGE_MASK);
+		return (0);
+	default:
+		return (ENXIO);
+	}
+}
+
+/*
+ * nvkm_bo_paddr_run_at()
+ *
+ * Ownership:
+ *   Borrows bo and returns a physical run snapshot.  It does not acquire GEM,
+ *   TTM, or reservation ownership and never pins or migrates backing memory.
+ *
+ * Lifetime:
+ *   The returned run is valid only while the caller's existing serialization
+ *   keeps the BO placement stable.  VM_BIND calls this after taking its
+ *   temporary bind pin.
+ *
+ * Threading:
+ *   Does not sleep except through nvkm_bo_paddr_at()'s existing page lookup
+ *   path.  It performs no VMM writes and must not be used as a sysmem PTE
+ *   batching primitive.
+ */
+int
+nvkm_bo_paddr_run_at(const struct nvkm_bo *bo, uint64_t offset,
+    uint64_t max_size, vm_paddr_t *paddr, uint64_t *run_size)
+{
+	vm_paddr_t first, next;
+	uint64_t limit, run, page_left, chunk;
+	int err;
+
+	if (max_size == 0 || offset >= bo->base.size)
+		return (EINVAL);
+
+	limit = MIN(max_size, bo->base.size - offset);
+	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+		*paddr = bo->paddr + offset;
+		*run_size = limit;
+		return (0);
+	}
+
+	err = nvkm_bo_paddr_at(bo, offset, &first);
+	if (err != 0)
+		return (err);
+
+	page_left = PAGE_SIZE - (offset & PAGE_MASK);
+	run = MIN(limit, page_left);
+	while (run < limit) {
+		err = nvkm_bo_paddr_at(bo, offset + run, &next);
+		if (err != 0)
+			return (err);
+		if (next != first + run)
+			break;
+		chunk = MIN(limit - run, (uint64_t)PAGE_SIZE);
+		run += chunk;
+	}
+
+	*paddr = first;
+	*run_size = run;
+	return (0);
+}
+
+/*
+ * nvkm_bo_paddr_run_at_mem()
+ *
+ * Ownership:
+ *   Borrows bo and a caller-owned TTM placement snapshot.  It does not acquire
+ *   or release object ownership.
+ *
+ * Lifetime:
+ *   The returned run is valid only while the caller keeps mem and the BO backing
+ *   stable.  TTM move code uses this for new_mem before publishing bo->tbo.mem.
+ *
+ * Threading:
+ *   Pure lookup helper; it performs no VMM writes and must not be used without
+ *   external move/remap serialization.
+ */
+int
+nvkm_bo_paddr_run_at_mem(const struct nvkm_bo *bo,
+    const struct ttm_mem_reg *mem, uint64_t offset, uint64_t max_size,
+    vm_paddr_t *paddr, uint64_t *run_size)
+{
+	vm_paddr_t first, next;
+	uint64_t limit, run, page_left, chunk;
+	int err;
+
+	if (mem == NULL || max_size == 0 || offset >= bo->base.size)
+		return (EINVAL);
+
+	limit = MIN(max_size, bo->base.size - offset);
+	if (bo->ttm_backed && mem->mem_type == TTM_PL_VRAM) {
+		err = nvkm_bo_paddr_at_mem(bo, mem, offset, paddr);
+		if (err != 0)
+			return (err);
+		*run_size = limit;
+		return (0);
+	}
+
+	err = nvkm_bo_paddr_at_mem(bo, mem, offset, &first);
+	if (err != 0)
+		return (err);
+
+	page_left = PAGE_SIZE - (offset & PAGE_MASK);
+	run = MIN(limit, page_left);
+	while (run < limit) {
+		err = nvkm_bo_paddr_at_mem(bo, mem, offset + run, &next);
+		if (err != 0)
+			return (err);
+		if (next != first + run)
+			break;
+		chunk = MIN(limit - run, (uint64_t)PAGE_SIZE);
+		run += chunk;
+	}
+
+	*paddr = first;
+	*run_size = run;
+	return (0);
 }
 
 int
@@ -512,11 +714,13 @@ struct reservation_object *
 nvkm_bo_resv(struct nvkm_bo *bo)
 {
 	/*
-	 * A no_share BO is never exported, so EXEC never publishes a content
-	 * fence on its own resv -- the VM-wide EXEC completion lives on the
-	 * file's vm_resv. Alias to it so CPU_PREP and free wait the GPU work
-	 * that may still be reading this BO. SHARED BOs keep their own resv,
-	 * which the DRM/dma-buf framework exposes for cross-process sync.
+	 * A no_share BO is never exported, so EXEC never publishes a public
+	 * content fence on the BO-local resv.  VM-wide EXEC completion lives on
+	 * the file's vm_resv; expose that object to CPU_PREP and other public
+	 * nvkm waits.  TTM internals still use tbo.resv for placement and move
+	 * ordering, and final TTM free is protected by GEM/binding references.
+	 * SHARED BOs keep their own resv, which the DRM/dma-buf framework exposes
+	 * for cross-process sync.
 	 */
 	if (bo->no_share && bo->vm_resv != NULL)
 		return (bo->vm_resv);
@@ -525,12 +729,33 @@ nvkm_bo_resv(struct nvkm_bo *bo)
 	return (&bo->resv);
 }
 
+/*
+ * nvkm_bo_ttm_pin_record()
+ *
+ * Ownership:
+ *   Adds one caller-owned logical pin record.  When set_no_evict is true it
+ *   also adds one TTM no-evict record owned by the same caller.
+ *
+ * Lifetime:
+ *   Logical pin records are balanced by nvkm_bo_ttm_unpin_record().  The
+ *   no-evict record protects the current TTM backing only while its matching
+ *   logical record is live.
+ *
+ * Threading:
+ *   Reserves the TTM BO to serialize placement flag and per-BO pin counters.
+ *   Callers must not hold locks that TTM eviction can acquire.
+ */
 static int
-nvkm_bo_ttm_pin_record(struct nvkm_bo *bo, uint32_t *record_count)
+nvkm_bo_ttm_pin_record(struct nvkm_bo *bo, uint32_t *record_count,
+    uint32_t *no_evict_record_count, bool set_no_evict,
+    bool *no_evict_pinned)
 {
 	struct ttm_buffer_object *tbo;
 	int err;
 
+	if (no_evict_pinned == NULL)
+		return (EINVAL);
+	*no_evict_pinned = false;
 	if (!bo->ttm_backed)
 		return (0);
 
@@ -539,15 +764,21 @@ nvkm_bo_ttm_pin_record(struct nvkm_bo *bo, uint32_t *record_count)
 	if (err != 0)
 		return (err < 0 ? -err : err);
 
-	if (*record_count == UINT32_MAX || bo->ttm_pin_count == UINT32_MAX) {
+	if (*record_count == UINT32_MAX ||
+	    (set_no_evict && (bo->ttm_pin_count == UINT32_MAX ||
+	    *no_evict_record_count == UINT32_MAX))) {
 		err = EOVERFLOW;
 		goto out_unreserve;
 	}
 
-	if (bo->ttm_pin_count == 0)
-		tbo->mem.placement |= TTM_PL_FLAG_NO_EVICT;
-	bo->ttm_pin_count++;
 	(*record_count)++;
+	if (set_no_evict) {
+		if (bo->ttm_pin_count == 0)
+			tbo->mem.placement |= TTM_PL_FLAG_NO_EVICT;
+		bo->ttm_pin_count++;
+		(*no_evict_record_count)++;
+		*no_evict_pinned = true;
+	}
 	err = 0;
 
 out_unreserve:
@@ -556,7 +787,8 @@ out_unreserve:
 }
 
 static int
-nvkm_bo_ttm_unpin_record(struct nvkm_bo *bo, uint32_t *record_count)
+nvkm_bo_ttm_unpin_record(struct nvkm_bo *bo, uint32_t *record_count,
+    uint32_t *no_evict_record_count, bool no_evict_pinned)
 {
 	struct ttm_buffer_object *tbo;
 	int err;
@@ -569,16 +801,23 @@ nvkm_bo_ttm_unpin_record(struct nvkm_bo *bo, uint32_t *record_count)
 	if (err != 0)
 		return (err < 0 ? -err : err);
 
-	if (*record_count == 0 || bo->ttm_pin_count == 0) {
+	if (*record_count == 0) {
 		err = EINVAL;
 		goto out_unreserve;
 	}
 
+	if (no_evict_pinned) {
+		if (*no_evict_record_count == 0 || bo->ttm_pin_count == 0) {
+			err = EINVAL;
+			goto out_unreserve;
+		}
+		(*no_evict_record_count)--;
+		bo->ttm_pin_count--;
+		if (bo->ttm_pin_count == 0 &&
+		    !bo->ttm_permanent_no_evict)
+			tbo->mem.placement &= ~TTM_PL_FLAG_NO_EVICT;
+	}
 	(*record_count)--;
-	bo->ttm_pin_count--;
-	if (bo->ttm_pin_count == 0 &&
-	    tbo->mem.mem_type != TTM_PL_VRAM)
-		tbo->mem.placement &= ~TTM_PL_FLAG_NO_EVICT;
 	err = 0;
 
 out_unreserve:
@@ -587,27 +826,45 @@ out_unreserve:
 }
 
 int
-nvkm_bo_vm_bind_pin(struct nvkm_bo *bo)
+nvkm_bo_vm_bind_pin(struct nvkm_bo *bo, bool *no_evict_pinned)
 {
-	return (nvkm_bo_ttm_pin_record(bo, &bo->vm_bind_pin_count));
+	struct nvkm_softc *sc = bo->base.dev->dev_private;
+	bool set_no_evict = sc->ttm_bound_move_test_enable == 0;
+	int err;
+
+	err = nvkm_bo_ttm_pin_record(bo, &bo->vm_bind_pin_count,
+	    &bo->vm_bind_no_evict_pin_count, set_no_evict,
+	    no_evict_pinned);
+	if (err == 0 && bo->ttm_backed) {
+		if (*no_evict_pinned)
+			sc->ttm_vm_bind_no_evict_pin_count++;
+		else
+			sc->ttm_vm_bind_evictable_pin_count++;
+	}
+	return (err);
 }
 
 int
-nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo)
+nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo, bool no_evict_pinned)
 {
-	return (nvkm_bo_ttm_unpin_record(bo, &bo->vm_bind_pin_count));
+	return (nvkm_bo_ttm_unpin_record(bo, &bo->vm_bind_pin_count,
+	    &bo->vm_bind_no_evict_pin_count, no_evict_pinned));
 }
 
 int
 nvkm_bo_scanout_pin(struct nvkm_bo *bo)
 {
-	return (nvkm_bo_ttm_pin_record(bo, &bo->scanout_pin_count));
+	bool no_evict_pinned;
+
+	return (nvkm_bo_ttm_pin_record(bo, &bo->scanout_pin_count,
+	    &bo->scanout_no_evict_pin_count, true, &no_evict_pinned));
 }
 
 int
 nvkm_bo_scanout_unpin(struct nvkm_bo *bo)
 {
-	return (nvkm_bo_ttm_unpin_record(bo, &bo->scanout_pin_count));
+	return (nvkm_bo_ttm_unpin_record(bo, &bo->scanout_pin_count,
+	    &bo->scanout_no_evict_pin_count, true));
 }
 
 /* ============================================================
@@ -735,7 +992,7 @@ nvkm_bo_free_pages(struct nvkm_bo *bo)
 
 static int
 nvkm_bo_init_ttm(struct nvkm_softc *sc, struct nvkm_bo *bo, uint64_t size,
-    uint32_t domain)
+    uint32_t domain, uint32_t align)
 {
 	struct ttm_place places[3];
 	struct ttm_placement placement = {
@@ -751,6 +1008,7 @@ nvkm_bo_init_ttm(struct nvkm_softc *sc, struct nvkm_bo *bo, uint64_t size,
 	unsigned int n = 0;
 	size_t acc_size;
 	int err;
+	uint32_t page_alignment;
 
 	bdev = nvkm_ttm_bo_device(sc);
 	if (bdev == NULL)
@@ -763,8 +1021,15 @@ nvkm_bo_init_ttm(struct nvkm_softc *sc, struct nvkm_bo *bo, uint64_t size,
 	if ((placement_domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
 		places[n].fpfn = 0;
 		places[n].lpfn = 0;
-		places[n].flags = TTM_PL_FLAG_VRAM | TTM_PL_FLAG_WC |
-		    TTM_PL_FLAG_NO_EVICT;
+		places[n].flags = TTM_PL_FLAG_VRAM | TTM_PL_FLAG_WC;
+		if (sc->ttm_bound_move_test_enable == 0) {
+			places[n].flags |= TTM_PL_FLAG_NO_EVICT;
+			bo->ttm_permanent_no_evict = true;
+			sc->ttm_vram_no_evict_create_count++;
+		} else {
+			bo->ttm_permanent_no_evict = false;
+			sc->ttm_vram_evictable_create_count++;
+		}
 		n++;
 	}
 	if ((placement_domain & NOUVEAU_GEM_DOMAIN_GART) != 0) {
@@ -783,10 +1048,23 @@ nvkm_bo_init_ttm(struct nvkm_softc *sc, struct nvkm_bo *bo, uint64_t size,
 	placement.num_busy_placement = n;
 
 	bo->ttm_backed = true;
+	bo->preferred_domain = placement_domain;
 	bo->domain = domain;
+	page_alignment = 1;
+	if (align > PAGE_SIZE)
+		page_alignment = howmany(align, PAGE_SIZE);
+	if ((placement_domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+		if (size >= NVKM_GMMU_PD0_PAGE_SIZE)
+			page_alignment = MAX(page_alignment,
+			    NVKM_GMMU_PD0_PAGE_SIZE >> PAGE_SHIFT);
+		else if (size >= NVKM_GMMU_LPT_PAGE_SIZE)
+			page_alignment = MAX(page_alignment,
+			    NVKM_GMMU_LPT_PAGE_SIZE >> PAGE_SHIFT);
+	}
 	acc_size = ttm_bo_dma_acc_size(bdev, size, sizeof(*bo));
 	err = ttm_bo_init_reserved(bdev, &bo->tbo, size, ttm_bo_type_device,
-	    &placement, 1, &ctx, acc_size, NULL, NULL, nvkm_bo_ttm_destroy);
+	    &placement, page_alignment, &ctx, acc_size, NULL, NULL,
+	    nvkm_bo_ttm_destroy);
 	if (err == 0) {
 		nvkm_bo_refresh_ttm_domain(bo, domain);
 		ttm_bo_unreserve(&bo->tbo);
@@ -798,15 +1076,70 @@ nvkm_bo_init_ttm(struct nvkm_softc *sc, struct nvkm_bo *bo, uint64_t size,
  * BO alloc / free
  * ============================================================ */
 
+/*
+ * nvkm_bo_vm_mapping_init()
+ *
+ * Ownership:
+ *   Initializes BO-owned reverse GPUVA tracking storage.  No mapping ownership
+ *   exists yet; live VM_BIND records attach later from nvkm_drm.c.
+ *
+ * Lifetime:
+ *   The list lives for the whole GEM object lifetime and must be empty before
+ *   the BO is destroyed.
+ *
+ * Threading:
+ *   The BO-local token protects the reverse list across multiple drm_file VMs.
+ *   VM_BIND mutates it while also holding the owning file's VM token.
+ */
+static void
+nvkm_bo_vm_mapping_init(struct nvkm_bo *bo)
+{
+	lwkt_token_init(&bo->vm_mapping_token, "nvkm-bo-vm");
+	LIST_INIT(&bo->vm_mappings);
+	bo->vm_mapping_count = 0;
+}
+
+/*
+ * nvkm_bo_warn_live_vm_mappings()
+ *
+ * Ownership:
+ *   Borrows bo and sc for diagnostics.  It does not detach mappings or drop
+ *   references; any non-empty list here means a live mapping reference has
+ *   outlived the expected GEM lifetime.
+ *
+ * Lifetime:
+ *   Called during BO destruction, after all normal GEM handles and VM_BIND
+ *   bindings should have released their references.
+ *
+ * Threading:
+ *   Takes only the BO-local reverse-map token.  It must not take a drm_file
+ *   vm_token from this destruction path.
+ */
+static void
+nvkm_bo_warn_live_vm_mappings(struct nvkm_softc *sc, struct nvkm_bo *bo,
+    const char *where)
+{
+	uint32_t count;
+
+	lwkt_gettoken(&bo->vm_mapping_token);
+	count = bo->vm_mapping_count;
+	lwkt_reltoken(&bo->vm_mapping_token);
+	if (count == 0)
+		return;
+
+	sc->vm_bind_bo_reverse_free_nonempty_count++;
+	device_printf(sc->dev,
+	    "nvkm_bo: %s freeing BO with %u live VM reverse mappings obj=%p\n",
+	    where, count, &bo->base);
+}
+
 static struct nvkm_bo *
 nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
-    uint32_t tile_mode, uint32_t tile_flags)
+    uint32_t align, uint32_t tile_mode, uint32_t tile_flags)
 {
 	struct nvkm_softc *sc = ddev->dev_private;
 	struct nvkm_bo *bo;
 	int err;
-	bool wants_vram;
-	bool can_fallback_gart;
 
 	size = roundup(size, PAGE_SIZE);
 	if (size == 0)
@@ -815,72 +1148,27 @@ nvkm_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
 	if (bo == NULL)
 		return (NULL);
+	nvkm_bo_vm_mapping_init(bo);
 	reservation_object_init(&bo->resv);
 	drm_gem_private_object_init(ddev, &bo->base, size);
 	bo->tile_mode = tile_mode;
 	bo->tile_flags = tile_flags;
 	bo->no_share = (domain & NOUVEAU_GEM_DOMAIN_NO_SHARE) != 0;
 
-	if (nvkm_ttm_bo_device(sc) != NULL) {
-		err = nvkm_bo_init_ttm(sc, bo, size, domain);
-		if (err != 0) {
-			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
-			    size, domain, err);
-			return (NULL);
-		}
-		nvkm_bo_account_alloc(sc, bo);
-		return (bo);
+	if (nvkm_ttm_bo_device(sc) == NULL) {
+		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
+		    size, domain, -ENODEV);
+		drm_gem_object_release(&bo->base);
+		reservation_object_fini(&bo->resv);
+		kfree(bo);
+		return (NULL);
 	}
 
-	wants_vram = (domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0;
-	can_fallback_gart = (domain & NOUVEAU_GEM_DOMAIN_GART) != 0 ||
-	    !wants_vram;
-
-	if (wants_vram) {
-		/* GEM VRAM BO ownership:
-		 *
-		 * - owner: this struct nvkm_bo / drm_gem_object lifetime.
-		 * - borrows: VM_BIND GPU-VA mappings, held through GEM refs.
-		 * - release: nvkm_bo_gem_free(), but only after VRAM
-		 *   allocation metadata can prove this is GEM-owned backing
-		 *   from a reclaimable GEM arena.
-		 */
-		bo->vram_alloc = nvkm_gsp_vram_alloc_ref(sc, size,
-		    size >= NVKM_GMMU_LPT_PAGE_SIZE ?
-		    NVKM_GMMU_LPT_PAGE_SIZE : PAGE_SIZE, NVKM_VRAM_GEM, bo);
-		if (bo->vram_alloc == NULL) {
-			if (!can_fallback_gart) {
-				nvkm_bo_record_alloc_fail(sc,
-				    NVKM_BO_ALLOC_FAIL_VRAM, size, domain,
-				    -ENOMEM);
-				drm_gem_object_release(&bo->base);
-				reservation_object_fini(&bo->resv);
-				kfree(bo);
-				return (NULL);
-			}
-			nvkm_debugf(sc->dev,
-			    "nvkm_bo: GEM_NEW VRAM fallback to GART req_domain=0x%x size=0x%llx\n",
-			    domain, (unsigned long long)size);
-		}
-	}
-	if (bo->vram_alloc != NULL) {
-		bo->paddr = bo->vram_alloc->paddr;
-		bo->domain = NOUVEAU_GEM_DOMAIN_VRAM;
-	} else {
-		if (nvkm_ttm_bo_device(sc) == NULL) {
-			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
-			    size, domain, -ENODEV);
-			drm_gem_object_release(&bo->base);
-			reservation_object_fini(&bo->resv);
-			kfree(bo);
-			return (NULL);
-		}
-		err = nvkm_bo_init_ttm(sc, bo, size, domain);
-		if (err != 0) {
-			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
-			    size, domain, err);
-			return (NULL);
-		}
+	err = nvkm_bo_init_ttm(sc, bo, size, domain, align);
+	if (err != 0) {
+		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_SYSMEM,
+		    size, domain, err);
+		return (NULL);
 	}
 
 	nvkm_bo_account_alloc(sc, bo);
@@ -893,6 +1181,7 @@ nvkm_bo_ttm_destroy(struct ttm_buffer_object *tbo)
 	struct nvkm_bo *bo = container_of(tbo, struct nvkm_bo, tbo);
 	struct nvkm_softc *sc = bo->base.dev->dev_private;
 
+	nvkm_bo_warn_live_vm_mappings(sc, bo, "ttm_destroy");
 	nvkm_bo_account_free(sc, bo);
 	reservation_object_fini(&bo->resv);
 	drm_gem_object_release(&bo->base);
@@ -911,15 +1200,16 @@ nvkm_bo_gem_free(struct drm_gem_object *obj)
 	    (unsigned long long)bo->paddr, nvkm_bo_has_sysmem(bo));
 
 	sc->bo_gem_free_count++;
+	nvkm_bo_warn_live_vm_mappings(sc, bo, "gem_free");
 	if (bo->ttm_backed) {
 		/*
-		 * no_share BOs alias their fence resv to the file's vm_resv, but
-		 * TTM's own delayed destroy only waits the BO's tbo.resv (which
-		 * carries no EXEC/VM_BIND fence). Wait the VM's GPU completion
-		 * here so TTM does not reclaim pages a still-in-flight job reads.
+		 * Live GPUVA bindings own a GEM reference and a VM_BIND pin until
+		 * their done fence has been signaled and retire work releases the
+		 * detached binding.  Reaching final GEM free means no live binding
+		 * still points at this BO, so TTM may reclaim the backing without a
+		 * coarse wait on the file-wide vm_resv.  CPU_PREP still uses
+		 * nvkm_bo_resv_wait() when userspace asks for CPU access.
 		 */
-		if (bo->no_share && bo->vm_resv != NULL)
-			(void)nvkm_bo_resv_wait(bo, false, true, false);
 		ttm_bo_put(&bo->tbo);
 		return;
 	}
@@ -970,9 +1260,28 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait)
 {
 	struct nvkm_softc *sc = bo->base.dev->dev_private;
 	struct reservation_object *resv = nvkm_bo_resv(bo);
+	uint32_t resv_kind;
 	long ret;
 
 	sc->bo_resv_wait_count++;
+	if (nowait)
+		sc->bo_resv_wait_nowait_count++;
+	if (intr)
+		sc->bo_resv_wait_intr_count++;
+	if (bo->no_share && bo->vm_resv != NULL && resv == bo->vm_resv) {
+		resv_kind = 2;
+		sc->bo_resv_wait_no_share_vm_count++;
+	} else if (bo->ttm_backed && resv == bo->tbo.resv) {
+		resv_kind = 1;
+		sc->bo_resv_wait_ttm_count++;
+	} else {
+		resv_kind = 0;
+		sc->bo_resv_wait_local_count++;
+	}
+	sc->bo_resv_wait_last_write = write ? 1 : 0;
+	sc->bo_resv_wait_last_nowait = nowait ? 1 : 0;
+	sc->bo_resv_wait_last_no_share = bo->no_share ? 1 : 0;
+	sc->bo_resv_wait_last_resv_kind = resv_kind;
 
 	/*
 	 * write waits read+write fences (wait_all=true); read only the
@@ -983,9 +1292,12 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait)
 	 * tick, so use the non-sleeping signaled test instead.
 	 */
 	if (nowait) {
-		if (reservation_object_test_signaled_rcu(resv, write))
+		if (reservation_object_test_signaled_rcu(resv, write)) {
+			sc->bo_resv_wait_last_error = 0;
 			return (0);
+		}
 		sc->bo_resv_wait_error_count++;
+		sc->bo_resv_wait_last_error = -EBUSY;
 		return (-EBUSY);
 	}
 
@@ -993,12 +1305,15 @@ nvkm_bo_resv_wait(struct nvkm_bo *bo, bool intr, bool write, bool nowait)
 	    MAX_SCHEDULE_TIMEOUT);
 	if (ret < 0) {
 		sc->bo_resv_wait_error_count++;
+		sc->bo_resv_wait_last_error = (int)ret;
 		return ((int)ret);
 	}
 	if (ret == 0) {
 		sc->bo_resv_wait_error_count++;
+		sc->bo_resv_wait_last_error = -ETIME;
 		return (-ETIME);
 	}
+	sc->bo_resv_wait_last_error = 0;
 	return (0);
 }
 
@@ -1029,18 +1344,9 @@ nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,
 		sc->bo_dumb_create_vram_count++;
 	else
 		sc->bo_dumb_create_gart_count++;
-	bo = nvkm_bo_create(ddev, size, domain, 0, 0);
+	bo = nvkm_bo_create(ddev, size, domain, 0, 0, 0);
 	if (bo == NULL)
 		return (-ENOMEM);
-	if (domain == NOUVEAU_GEM_DOMAIN_VRAM && !bo->ttm_backed) {
-		err = nvkm_bo_bar1_map(sc, bo);
-		if (err != 0) {
-			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
-			    bo->base.size, domain, err);
-			drm_gem_object_put_unlocked(&bo->base);
-			return (err);
-		}
-	}
 
 	err = drm_gem_handle_create(file_priv, &bo->base, &handle);
 	if (err != 0) {
@@ -1050,17 +1356,7 @@ nvkm_bo_dumb_create(struct drm_file *file_priv, struct drm_device *ddev,
 		return (err);
 	}
 
-	if (bo->ttm_backed || !nvkm_bo_cpu_mappable(bo))
-		err = 0;
-	else
-		err = drm_gem_create_mmap_offset(&bo->base);
 	drm_gem_object_put_unlocked(&bo->base);
-	if (err != 0) {
-		nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
-		    bo->base.size, domain, err);
-		drm_gem_handle_delete(file_priv, handle);
-		return (err);
-	}
 
 	args->handle = handle;
 	args->pitch = (uint32_t)pitch;
@@ -1092,15 +1388,13 @@ nvkm_bo_dumb_map_offset(struct drm_file *file_priv, struct drm_device *ddev,
 	}
 
 	bo = to_nvkm_bo(obj);
-	if (!nvkm_bo_cpu_mappable(bo)) {
+	if (!bo->ttm_backed) {
+		err = -ENODEV;
+	} else if (!nvkm_bo_cpu_mappable(bo)) {
 		err = -ENXIO;
-	} else if (bo->ttm_backed) {
+	} else {
 		*offset = nvkm_bo_mmap_handle(bo);
 		err = 0;
-	} else {
-		err = drm_gem_create_mmap_offset(obj);
-		if (err == 0)
-			*offset = nvkm_bo_mmap_handle(bo);
 	}
 	drm_gem_object_put_unlocked(obj);
 	return (err);
@@ -1141,7 +1435,7 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	nvkm_bo_record_gem_new_request(sc, &req->info);
 	if (mappable_req)
 		sc->bo_gem_new_mappable_req_count++;
-	bo = nvkm_bo_create(ddev, req->info.size, create_domain,
+	bo = nvkm_bo_create(ddev, req->info.size, create_domain, req->align,
 	    req->info.tile_mode, req->info.tile_flags);
 	if (bo == NULL)
 		return (-ENOMEM);
@@ -1159,12 +1453,10 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 			    (unsigned long long)bo->base.size);
 			drm_gem_object_put_unlocked(&bo->base);
 			bo = nvkm_bo_create(ddev, req->info.size,
-			    gart_domain, req->info.tile_mode,
+			    gart_domain, req->align, req->info.tile_mode,
 			    req->info.tile_flags);
 			if (bo == NULL)
 				return (-ENOMEM);
-		} else if (sc->bar1.ready && ddev->drm_ttm_bdev == NULL) {
-			bo->bar1_mappable = true;
 		} else {
 			nvkm_bo_record_alloc_fail(sc, NVKM_BO_ALLOC_FAIL_MMAP,
 			    bo->base.size, req_domain, ENXIO);
@@ -1173,8 +1465,8 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 		}
 	}
 
-	/* no_share BOs alias their fence-wait resv to this file's vm_resv so
-	 * CPU_PREP/free wait the VM's EXEC completion (see nvkm_bo_resv). */
+		/* no_share BOs alias public fence waits to this file's vm_resv so
+		 * CPU_PREP sees the VM's EXEC completion (see nvkm_bo_resv). */
 	if (bo->no_share)
 		bo->vm_resv = nvkm_drm_file_vm_resv(file_priv);
 
@@ -1192,17 +1484,6 @@ nvkm_drm_ioctl_gem_new(struct drm_device *ddev, void *data,
 	    handle, &bo->base, req_domain, bo->domain,
 	    (unsigned long long)bo->base.size,
 	    (unsigned long long)bo->paddr, nvkm_bo_cpu_mappable(bo));
-
-	if (nvkm_bo_cpu_mappable(bo) && !bo->ttm_backed) {
-		err = drm_gem_create_mmap_offset(&bo->base);
-		if (err != 0) {
-			nvkm_bo_record_alloc_fail(sc,
-			    NVKM_BO_ALLOC_FAIL_MMAP, bo->base.size,
-			    req_domain, err);
-			drm_gem_handle_delete(file_priv, handle);
-			return (err);
-		}
-	}
 
 	req->info.handle = handle;
 	req->info.domain = bo->domain;

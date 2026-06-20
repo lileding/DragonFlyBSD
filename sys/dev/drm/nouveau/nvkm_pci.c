@@ -573,6 +573,26 @@ nvkm_pci_attach(device_t dev)
 	sc->dev = dev;
 	sc->fence_context = dma_fence_context_alloc(1);
 	sc->fence_seqno = 1;
+	/*
+	 * VM_BIND large-page production defaults.
+	 *
+	 * Ownership:
+	 *   These flags are owned by nvkm_softc and exported as writable debug
+	 *   sysctls so a bad runtime can be disabled without an ABI change.
+	 *
+	 * Lifetime:
+	 *   Initialized once during device attach. They persist until the module
+	 *   is unloaded or the machine reboots.
+	 *
+	 * Threading:
+	 *   VM_BIND reads them while holding the per-file VM serialization;
+	 *   sysctl writes are scalar updates and only affect future plans.
+	 */
+	sc->vm_bind_map_2m_enable = 1;
+	sc->vm_bind_map_host_large_enable = 1;
+	sc->vm_bind_sparse_large_enable = 1;
+	sc->vm_bind_sparse_2m_enable = 1;
+	sc->vm_bind_promote_2m_enable = 1;
 
 	/* Phase 5: serialise GSP cmdq writes + msgq drain across ioctl
 	 * lwkts and the ithread. Init here, before any RPC is issued. */

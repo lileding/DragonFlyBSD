@@ -21,6 +21,7 @@
 #include "nvkm_priv.h"
 #include "nvkm_gsp_vmm.h"
 #include "nvkm_gsp_rm.h"
+#include "nvkm_ttm.h"
 
 #include <sys/sysctl.h>
 #include <sys/sbuf.h>
@@ -231,6 +232,29 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	uint32_t bar1_used, bar1_total;
 	uint32_t vmm_pd0_count, vmm_pt_count, sparse_region_count;
 	uint64_t valid_pte_count;
+	static const char * const page_shift_names[
+	    NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT] = {
+		"12",
+		"16",
+		"21",
+	};
+	static const char * const vm_bind_domain_names[
+	    NVKM_DRM_VM_BIND_DOMAIN_COUNT] = {
+		"vram",
+		"host",
+	};
+	static const char * const reject_reason_names[
+	    NVKM_DRM_VM_BIND_REJECT_REASON_COUNT] = {
+		"domain",
+		"capability_gate",
+		"va_align",
+		"range_align",
+		"bo_offset_align",
+		"paddr_align",
+		"paddr_run",
+		"kind_flags",
+		"sparse_state",
+	};
 	int err;
 
 	bar1_used = 0;
@@ -269,6 +293,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->exec_resv_attach_signaled_count);
 	sbuf_printf(sb, "resv_attach_pending_count = %llu\n",
 	    (unsigned long long)sc->exec_resv_attach_pending_count);
+	sbuf_printf(sb, "runtime_resv_attach_calls = %llu\n",
+	    (unsigned long long)sc->exec_runtime_resv_attach_calls);
+	sbuf_printf(sb, "runtime_resv_attach_signaled_count = %llu\n",
+	    (unsigned long long)sc->exec_runtime_resv_attach_signaled_count);
+	sbuf_printf(sb, "runtime_resv_attach_pending_count = %llu\n",
+	    (unsigned long long)sc->exec_runtime_resv_attach_pending_count);
 	sbuf_printf(sb, "vm_bind_resv_attach_signaled_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_resv_attach_signaled_count);
 	sbuf_printf(sb, "vm_bind_resv_attach_pending_count = %llu\n",
@@ -411,6 +441,84 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->job_diag_active_dep_pending);
 	sbuf_printf(sb, "job_active_sig_count = %u\n",
 	    sc->job_diag_active_sig_count);
+	sbuf_printf(sb, "job_active_dep_index = %u\n",
+	    sc->job_diag_active_dep_index);
+	sbuf_printf(sb, "job_active_dep_type = %u\n",
+	    sc->job_diag_active_dep_type);
+	sbuf_printf(sb, "job_active_dep_signaled = %u\n",
+	    sc->job_diag_active_dep_signaled);
+	sbuf_printf(sb, "job_active_dep_hw_ready = %u\n",
+	    sc->job_diag_active_dep_hw_ready);
+	sbuf_printf(sb, "job_active_dep_context = %llu\n",
+	    (unsigned long long)sc->job_diag_active_dep_context);
+	sbuf_printf(sb, "job_active_dep_seqno = %llu\n",
+	    (unsigned long long)sc->job_diag_active_dep_seqno);
+	sbuf_printf(sb, "job_active_dep_flags = 0x%llx\n",
+	    (unsigned long long)sc->job_diag_active_dep_flags);
+	sbuf_printf(sb, "job_active_dep_error = %d\n",
+	    sc->job_diag_active_dep_error);
+	sbuf_printf(sb, "job_active_dep_chain_point = %llu\n",
+	    (unsigned long long)sc->job_diag_active_dep_chain_point);
+	sbuf_printf(sb, "job_active_dep_chain_prev_seqno = %llu\n",
+	    (unsigned long long)sc->job_diag_active_dep_chain_prev_seqno);
+	sbuf_printf(sb, "job_active_dep_array_count = %u\n",
+	    sc->job_diag_active_dep_array_count);
+	sbuf_printf(sb, "job_active_dep_array_pending = %u\n",
+	    sc->job_diag_active_dep_array_pending);
+	sbuf_printf(sb, "job_active_dep_producer_type = %u\n",
+	    sc->job_diag_active_dep_producer_type);
+	sbuf_printf(sb, "job_active_dep_producer_channel = %u\n",
+	    sc->job_diag_active_dep_producer_channel);
+	sbuf_printf(sb, "job_active_dep_producer_chid = %d\n",
+	    sc->job_diag_active_dep_producer_chid);
+	sbuf_printf(sb, "job_active_dep_producer_post_slot = %u\n",
+	    sc->job_diag_active_dep_producer_post_slot);
+	sbuf_printf(sb, "job_active_dep_producer_payload = 0x%08x\n",
+	    sc->job_diag_active_dep_producer_payload);
+	sbuf_printf(sb, "job_active_dep_producer_submit_count = %llu\n",
+	    (unsigned long long)sc->job_diag_active_dep_producer_submit_count);
+	sbuf_printf(sb, "job_active_dep_signal_source = %u\n",
+	    sc->job_diag_active_dep_signal_source);
+	sbuf_printf(sb, "job_active_dep_signal_count = %u\n",
+	    sc->job_diag_active_dep_signal_count);
+	sbuf_printf(sb, "job_active_dep_signal_error = %d\n",
+	    sc->job_diag_active_dep_signal_error);
+	sbuf_printf(sb, "fence_wait_count = %llu\n",
+	    (unsigned long long)sc->fence_wait_count);
+	sbuf_printf(sb, "fence_wait_active = %u\n",
+	    sc->fence_wait_active);
+	sbuf_printf(sb, "fence_wait_last_intr = %u\n",
+	    sc->fence_wait_last_intr);
+	sbuf_printf(sb, "fence_wait_last_timeout = %lld\n",
+	    (long long)sc->fence_wait_last_timeout);
+	sbuf_printf(sb, "fence_wait_last_ret = %lld\n",
+	    (long long)sc->fence_wait_last_ret);
+	sbuf_printf(sb, "fence_wait_last_context = %llu\n",
+	    (unsigned long long)sc->fence_wait_last_context);
+	sbuf_printf(sb, "fence_wait_last_seqno = %llu\n",
+	    (unsigned long long)sc->fence_wait_last_seqno);
+	sbuf_printf(sb, "fence_wait_last_flags = 0x%llx\n",
+	    (unsigned long long)sc->fence_wait_last_flags);
+	sbuf_printf(sb, "fence_wait_last_error = %d\n",
+	    sc->fence_wait_last_error);
+	sbuf_printf(sb, "fence_wait_last_producer_type = %u\n",
+	    sc->fence_wait_last_producer_type);
+	sbuf_printf(sb, "fence_wait_last_producer_channel = %u\n",
+	    sc->fence_wait_last_producer_channel);
+	sbuf_printf(sb, "fence_wait_last_producer_chid = %d\n",
+	    sc->fence_wait_last_producer_chid);
+	sbuf_printf(sb, "fence_wait_last_producer_post_slot = %u\n",
+	    sc->fence_wait_last_producer_post_slot);
+	sbuf_printf(sb, "fence_wait_last_producer_payload = 0x%08x\n",
+	    sc->fence_wait_last_producer_payload);
+	sbuf_printf(sb, "fence_wait_last_producer_submit_count = %llu\n",
+	    (unsigned long long)sc->fence_wait_last_producer_submit_count);
+	sbuf_printf(sb, "fence_wait_last_signal_source = %u\n",
+	    sc->fence_wait_last_signal_source);
+	sbuf_printf(sb, "fence_wait_last_signal_count = %u\n",
+	    sc->fence_wait_last_signal_count);
+	sbuf_printf(sb, "fence_wait_last_signal_error = %d\n",
+	    sc->fence_wait_last_signal_error);
 	sbuf_printf(sb, "job_last_seq = %llu\n",
 	    (unsigned long long)sc->job_diag_last_seq);
 	sbuf_printf(sb, "job_last_us = %llu\n",
@@ -1012,6 +1120,26 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->bo_resv_wait_count);
 	sbuf_printf(sb, "bo_wait_error_count = %llu\n",
 	    (unsigned long long)sc->bo_resv_wait_error_count);
+	sbuf_printf(sb, "bo_wait_no_share_vm_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_no_share_vm_count);
+	sbuf_printf(sb, "bo_wait_ttm_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_ttm_count);
+	sbuf_printf(sb, "bo_wait_local_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_local_count);
+	sbuf_printf(sb, "bo_wait_nowait_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_nowait_count);
+	sbuf_printf(sb, "bo_wait_intr_count = %llu\n",
+	    (unsigned long long)sc->bo_resv_wait_intr_count);
+	sbuf_printf(sb, "bo_wait_last_error = %d\n",
+	    sc->bo_resv_wait_last_error);
+	sbuf_printf(sb, "bo_wait_last_write = %u\n",
+	    sc->bo_resv_wait_last_write);
+	sbuf_printf(sb, "bo_wait_last_nowait = %u\n",
+	    sc->bo_resv_wait_last_nowait);
+	sbuf_printf(sb, "bo_wait_last_no_share = %u\n",
+	    sc->bo_resv_wait_last_no_share);
+	sbuf_printf(sb, "bo_wait_last_resv_kind = %u\n",
+	    sc->bo_resv_wait_last_resv_kind);
 	sbuf_printf(sb, "vm_init_kernel_addr = 0x%016llx\n",
 	    (unsigned long long)sc->vm_init_kernel_addr);
 	sbuf_printf(sb, "vm_init_kernel_size = 0x%016llx\n",
@@ -1022,6 +1150,58 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_op_count);
 	sbuf_printf(sb, "vm_bind_max_op_count = %u\n",
 	    sc->vm_bind_max_op_count);
+	sbuf_printf(sb, "vm_bind_batch_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_batch_count);
+	sbuf_printf(sb, "vm_bind_batch_multi_op_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_batch_multi_op_count);
+	sbuf_printf(sb, "vm_bind_batch_committed_op_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_batch_committed_op_count);
+	sbuf_printf(sb, "vm_bind_batch_prepare_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_batch_prepare_error_count);
+	sbuf_printf(sb, "vm_bind_batch_commit_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_batch_commit_error_count);
+	sbuf_printf(sb, "vm_bind_prepare_fail_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_prepare_fail_count);
+	sbuf_printf(sb, "vm_bind_prepare_fail_last_index = %u\n",
+	    sc->vm_bind_prepare_fail_last_index);
+	sbuf_printf(sb, "vm_bind_pt_alloc_fail_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_pt_alloc_fail_count);
+	sbuf_printf(sb, "vm_bind_pt_alloc_fail_last_va = 0x%llx\n",
+	    (unsigned long long)sc->vm_bind_pt_alloc_fail_last_va);
+	sbuf_printf(sb, "vm_bind_commit_pt_fail_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_commit_pt_fail_count);
+	sbuf_printf(sb, "vm_bind_commit_pt_fail_last_index = %u\n",
+	    sc->vm_bind_commit_pt_fail_last_index);
+	sbuf_printf(sb, "vm_bind_commit_pt_fail_last_va = 0x%llx\n",
+	    (unsigned long long)sc->vm_bind_commit_pt_fail_last_va);
+	sbuf_printf(sb, "vm_bind_parent_child_fail_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_parent_child_fail_count);
+	sbuf_printf(sb, "vm_bind_parent_child_fail_last_index = %u\n",
+	    sc->vm_bind_parent_child_fail_last_index);
+	sbuf_printf(sb, "vm_bind_parent_child_fail_last_va = 0x%llx\n",
+	    (unsigned long long)sc->vm_bind_parent_child_fail_last_va);
+	sbuf_printf(sb, "vm_bind_release_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_release_count);
+	sbuf_printf(sb, "vm_bind_release_binding_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_release_binding_count);
+	sbuf_printf(sb, "vm_bind_release_channel_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_release_channel_count);
+	sbuf_printf(sb, "vm_bind_release_reclaim_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_release_reclaim_error_count);
+	sbuf_printf(sb, "vm_bind_retire_schedule_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_schedule_count);
+	sbuf_printf(sb, "vm_bind_retire_empty_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_empty_count);
+	sbuf_printf(sb, "vm_bind_retire_queue_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_queue_error_count);
+	sbuf_printf(sb, "vm_bind_retire_work_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_work_count);
+	sbuf_printf(sb, "vm_bind_retire_work_binding_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_work_binding_count);
+	sbuf_printf(sb, "vm_bind_retire_free_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_free_count);
+	sbuf_printf(sb, "vm_bind_retire_free_binding_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_retire_free_binding_count);
 	sbuf_printf(sb, "vm_bind_async_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_async_count);
 	sbuf_printf(sb, "vm_bind_sync_count = %llu\n",
@@ -1070,6 +1250,10 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_replace_clear_skip_count);
 	sbuf_printf(sb, "vm_bind_replace_clear_skip_pages = %llu\n",
 	    (unsigned long long)sc->vm_bind_replace_clear_skip_pages);
+	sbuf_printf(sb, "vm_bind_noop_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_noop_count);
+	sbuf_printf(sb, "vm_bind_noop_fast_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_noop_fast_count);
 	sbuf_printf(sb, "vm_bind_map_count = %llu\n",
 	    (unsigned long long)sc->vm_bind_map_count);
 	sbuf_printf(sb, "vm_bind_map_pages = %llu\n",
@@ -1106,6 +1290,315 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vm_bind_clear_unmap_sparse_count);
 	sbuf_printf(sb, "vm_bind_clear_unmap_sparse_pages = %llu\n",
 	    (unsigned long long)sc->vm_bind_clear_unmap_sparse_pages);
+	sbuf_printf(sb, "vm_bind_map_segment_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_segment_count);
+	sbuf_printf(sb, "vm_bind_map_segment_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_segment_pages);
+	sbuf_printf(sb, "vm_bind_map_split_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_split_count);
+	sbuf_printf(sb, "vm_bind_map_split_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_map_split_pages);
+	sbuf_printf(sb, "vm_bind_paddr_run_split_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_paddr_run_split_count);
+	sbuf_printf(sb, "vm_bind_paddr_run_split_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_paddr_run_split_pages);
+	sbuf_printf(sb, "vm_bind_dirty_range_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_range_count);
+	sbuf_printf(sb, "vm_bind_dirty_range_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_range_pages);
+	sbuf_printf(sb, "vm_bind_dirty_set_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_set_count);
+	sbuf_printf(sb, "vm_bind_dirty_set_range_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_set_range_count);
+	sbuf_printf(sb, "vm_bind_dirty_set_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_set_pages);
+	sbuf_printf(sb, "vm_bind_dirty_set_merged_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_set_merged_count);
+	sbuf_printf(sb, "vm_bind_dirty_set_overflow_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_dirty_set_overflow_count);
+	sbuf_printf(sb, "vm_bind_flush_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_flush_count);
+	sbuf_printf(sb, "vm_bind_clean_batch_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_clean_batch_count);
+	sbuf_printf(sb, "vm_bind_materialize_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_materialize_count);
+	sbuf_printf(sb, "vm_bind_materialize_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_materialize_pages);
+	sbuf_printf(sb, "vm_bind_mapping_merge_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_mapping_merge_count);
+	sbuf_printf(sb, "vm_bind_mapping_merge_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_mapping_merge_pages);
+	sbuf_printf(sb, "vm_bind_bo_reverse_link_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_bo_reverse_link_count);
+	sbuf_printf(sb, "vm_bind_bo_reverse_unlink_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_bo_reverse_unlink_count);
+	sbuf_printf(sb, "vm_bind_bo_reverse_live_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_bo_reverse_live_count);
+	sbuf_printf(sb, "vm_bind_bo_reverse_max_live_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_bo_reverse_max_live_count);
+	sbuf_printf(sb, "vm_bind_bo_reverse_free_nonempty_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_bo_reverse_free_nonempty_count);
+	sbuf_printf(sb, "ttm_move_bound_attempt_count = %llu\n",
+	    (unsigned long long)sc->ttm_move_bound_attempt_count);
+	sbuf_printf(sb, "ttm_move_bound_reject_count = %llu\n",
+	    (unsigned long long)sc->ttm_move_bound_reject_count);
+	sbuf_printf(sb, "ttm_move_bo_wait_count = %llu\n",
+	    (unsigned long long)sc->ttm_move_bo_wait_count);
+	sbuf_printf(sb, "ttm_move_bo_wait_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_move_bo_wait_error_count);
+	sbuf_printf(sb, "ttm_move_bo_wait_last_error = %d\n",
+	    sc->ttm_move_bo_wait_last_error);
+	sbuf_printf(sb, "ttm_move_bo_wait_last_interruptible = %u\n",
+	    sc->ttm_move_bo_wait_last_interruptible);
+	sbuf_printf(sb, "ttm_move_bo_wait_last_no_wait = %u\n",
+	    sc->ttm_move_bo_wait_last_no_wait);
+	sbuf_printf(sb, "ttm_move_bo_wait_last_no_share = %u\n",
+	    sc->ttm_move_bo_wait_last_no_share);
+	sbuf_printf(sb, "ttm_move_bo_wait_last_resv_is_ttm = %u\n",
+	    sc->ttm_move_bo_wait_last_resv_is_ttm);
+	sbuf_printf(sb, "ttm_rebind_prepare_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_prepare_count);
+	sbuf_printf(sb, "ttm_rebind_prepare_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_prepare_error_count);
+	sbuf_printf(sb, "ttm_rebind_abort_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_abort_count);
+	sbuf_printf(sb, "ttm_rebind_vm_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_vm_count);
+	sbuf_printf(sb, "ttm_rebind_unmap_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_unmap_count);
+	sbuf_printf(sb, "ttm_rebind_unmap_pages = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_unmap_pages);
+	sbuf_printf(sb, "ttm_rebind_map_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_map_count);
+	sbuf_printf(sb, "ttm_rebind_map_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_map_error_count);
+	sbuf_printf(sb, "ttm_rebind_rollback_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_rollback_count);
+	sbuf_printf(sb, "ttm_rebind_rollback_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_rollback_error_count);
+	sbuf_printf(sb, "ttm_rebind_binding_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_binding_count);
+	sbuf_printf(sb, "ttm_rebind_pages = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_pages);
+	sbuf_printf(sb, "ttm_rebind_flush_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_flush_count);
+	sbuf_printf(sb, "ttm_rebind_fence_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_fence_count);
+	sbuf_printf(sb, "ttm_rebind_fence_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_fence_error_count);
+	sbuf_printf(sb, "ttm_rebind_resv_attach_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_resv_attach_count);
+	sbuf_printf(sb, "ttm_rebind_exec_resv_wait_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_exec_resv_wait_count);
+	sbuf_printf(sb, "ttm_rebind_exec_resv_wait_owner_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_exec_resv_wait_owner_count);
+	sbuf_printf(sb, "ttm_rebind_exec_resv_wait_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_rebind_exec_resv_wait_error_count);
+	sbuf_printf(sb, "ttm_rebind_exec_resv_wait_last_error = %d\n",
+	    sc->ttm_rebind_exec_resv_wait_last_error);
+	sbuf_printf(sb, "ttm_rebind_last_error = %d\n",
+	    sc->ttm_rebind_last_error);
+	sbuf_printf(sb, "ttm_rebind_last_error_stage = %u\n",
+	    sc->ttm_rebind_last_error_stage);
+	sbuf_printf(sb, "ttm_rebind_last_error_index = %u\n",
+	    sc->ttm_rebind_last_error_index);
+	sbuf_printf(sb, "ttm_rebind_last_error_count = %u\n",
+	    sc->ttm_rebind_last_error_count);
+	sbuf_printf(sb, "ttm_rebind_last_old_shift = %u\n",
+	    sc->ttm_rebind_last_old_shift);
+	sbuf_printf(sb, "ttm_rebind_last_target_shift = %u\n",
+	    sc->ttm_rebind_last_target_shift);
+	sbuf_printf(sb, "ttm_rebind_last_target_vram = %u\n",
+	    sc->ttm_rebind_last_target_vram);
+	sbuf_printf(sb, "ttm_rebind_last_error_addr = 0x%llx\n",
+	    (unsigned long long)sc->ttm_rebind_last_error_addr);
+	sbuf_printf(sb, "ttm_rebind_last_error_size = 0x%llx\n",
+	    (unsigned long long)sc->ttm_rebind_last_error_size);
+	sbuf_printf(sb, "ttm_rebind_last_error_bo_offset = 0x%llx\n",
+	    (unsigned long long)sc->ttm_rebind_last_error_bo_offset);
+	sbuf_printf(sb, "ttm_vm_validate_mark_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_mark_count);
+	sbuf_printf(sb, "ttm_vm_validate_clear_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_clear_count);
+	sbuf_printf(sb, "ttm_vm_validate_live_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_live_count);
+	sbuf_printf(sb, "ttm_vm_validate_max_live_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_max_live_count);
+	sbuf_printf(sb, "ttm_vm_validate_exec_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_exec_count);
+	sbuf_printf(sb, "ttm_vm_validate_empty_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_empty_count);
+	sbuf_printf(sb, "ttm_vm_validate_candidate_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_candidate_count);
+	sbuf_printf(sb, "ttm_vm_validate_bo_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_bo_count);
+	sbuf_printf(sb, "ttm_vm_validate_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_validate_error_count);
+	sbuf_printf(sb, "ttm_vm_validate_last_error = %d\n",
+	    sc->ttm_vm_validate_last_error);
+	sbuf_printf(sb, "ttm_evict_vram_test_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_vram_test_count);
+	sbuf_printf(sb, "ttm_evict_vram_test_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_vram_test_error_count);
+	sbuf_printf(sb, "ttm_evict_vram_test_last_error = %d\n",
+	    sc->ttm_evict_vram_test_last_error);
+	sbuf_printf(sb, "ttm_evict_lru_sample_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_sample_count);
+	sbuf_printf(sb, "ttm_evict_lru_before_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_before_count);
+	sbuf_printf(sb, "ttm_evict_lru_before_no_evict_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_before_no_evict_count);
+	sbuf_printf(sb, "ttm_evict_lru_before_live_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_before_live_count);
+	sbuf_printf(sb, "ttm_evict_lru_before_reserve_ok_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_before_reserve_ok_count);
+	sbuf_printf(sb, "ttm_evict_lru_before_reserve_busy_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_before_reserve_busy_count);
+	sbuf_printf(sb, "ttm_evict_lru_after_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_after_count);
+	sbuf_printf(sb, "ttm_evict_lru_after_no_evict_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_after_no_evict_count);
+	sbuf_printf(sb, "ttm_evict_lru_after_live_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_after_live_count);
+	sbuf_printf(sb, "ttm_evict_lru_after_reserve_ok_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_after_reserve_ok_count);
+	sbuf_printf(sb, "ttm_evict_lru_after_reserve_busy_count = %llu\n",
+	    (unsigned long long)sc->ttm_evict_lru_after_reserve_busy_count);
+	sbuf_printf(sb, "ttm_evict_lru_last_error = %d\n",
+	    sc->ttm_evict_lru_last_error);
+	sbuf_printf(sb, "ttm_validate_vram_test_count = %llu\n",
+	    (unsigned long long)sc->ttm_validate_vram_test_count);
+	sbuf_printf(sb, "ttm_validate_vram_test_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_validate_vram_test_error_count);
+	sbuf_printf(sb, "ttm_validate_vram_test_empty_count = %llu\n",
+	    (unsigned long long)sc->ttm_validate_vram_test_empty_count);
+	sbuf_printf(sb, "ttm_last_bound_move_capture_count = %llu\n",
+	    (unsigned long long)sc->ttm_last_bound_move_capture_count);
+	sbuf_printf(sb, "ttm_last_bound_move_clear_count = %llu\n",
+	    (unsigned long long)sc->ttm_last_bound_move_clear_count);
+	sbuf_printf(sb, "ttm_validate_vram_test_last_error = %d\n",
+	    sc->ttm_validate_vram_test_last_error);
+	sbuf_printf(sb, "ttm_io_reserve_count = %llu\n",
+	    (unsigned long long)sc->ttm_io_reserve_count);
+	sbuf_printf(sb, "ttm_io_reserve_error_count = %llu\n",
+	    (unsigned long long)sc->ttm_io_reserve_error_count);
+	sbuf_printf(sb, "ttm_io_reserve_bar1_retry_count = %llu\n",
+	    (unsigned long long)sc->ttm_io_reserve_bar1_retry_count);
+	sbuf_printf(sb, "ttm_io_free_count = %llu\n",
+	    (unsigned long long)sc->ttm_io_free_count);
+	sbuf_printf(sb, "ttm_io_free_bar1_count = %llu\n",
+	    (unsigned long long)sc->ttm_io_free_bar1_count);
+	sbuf_printf(sb, "ttm_io_reserve_last_size = %llu\n",
+	    (unsigned long long)sc->ttm_io_reserve_last_size);
+	sbuf_printf(sb, "ttm_io_reserve_last_error = %d\n",
+	    sc->ttm_io_reserve_last_error);
+	sbuf_printf(sb, "ttm_vm_bind_no_evict_pin_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_bind_no_evict_pin_count);
+	sbuf_printf(sb, "ttm_vm_bind_evictable_pin_count = %llu\n",
+	    (unsigned long long)sc->ttm_vm_bind_evictable_pin_count);
+	sbuf_printf(sb, "ttm_vram_no_evict_create_count = %llu\n",
+	    (unsigned long long)sc->ttm_vram_no_evict_create_count);
+	sbuf_printf(sb, "ttm_vram_evictable_create_count = %llu\n",
+	    (unsigned long long)sc->ttm_vram_evictable_create_count);
+	sbuf_printf(sb, "ttm_bound_move_test_enable = %d\n",
+	    sc->ttm_bound_move_test_enable);
+	sbuf_printf(sb, "ttm_bound_rebind_test_enable = %d\n",
+	    sc->ttm_bound_rebind_test_enable);
+
+	sbuf_cat(sb, "\nttm_rebind_page_shift\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
+		if (sc->ttm_rebind_page_shift_old_count[i] == 0 &&
+		    sc->ttm_rebind_page_shift_new_count[i] == 0)
+			continue;
+		sbuf_printf(sb,
+		    "shift[%s] old=%llu old_pages=%llu new=%llu new_pages=%llu\n",
+		    page_shift_names[i],
+		    (unsigned long long)sc->ttm_rebind_page_shift_old_count[i],
+		    (unsigned long long)sc->ttm_rebind_page_shift_old_pages[i],
+		    (unsigned long long)sc->ttm_rebind_page_shift_new_count[i],
+		    (unsigned long long)sc->ttm_rebind_page_shift_new_pages[i]);
+	}
+	sbuf_printf(sb, "vm_bind_map_2m_enable = %d\n",
+	    sc->vm_bind_map_2m_enable);
+	sbuf_printf(sb, "vm_bind_job_delay_ms = %d\n",
+	    sc->vm_bind_job_delay_ms);
+	sbuf_printf(sb, "vm_bind_prepare_fail_after = %d\n",
+	    sc->vm_bind_prepare_fail_after);
+	sbuf_printf(sb, "vm_bind_pt_alloc_fail_after = %d\n",
+	    sc->vm_bind_pt_alloc_fail_after);
+	sbuf_printf(sb, "vm_bind_commit_pt_fail_after = %d\n",
+	    sc->vm_bind_commit_pt_fail_after);
+	sbuf_printf(sb, "vm_bind_parent_child_fail_after = %d\n",
+	    sc->vm_bind_parent_child_fail_after);
+	sbuf_printf(sb, "vm_bind_map_host_large_enable = %d\n",
+	    sc->vm_bind_map_host_large_enable);
+	sbuf_printf(sb, "vm_bind_sparse_large_enable = %d\n",
+	    sc->vm_bind_sparse_large_enable);
+	sbuf_printf(sb, "vm_bind_sparse_2m_enable = %d\n",
+	    sc->vm_bind_sparse_2m_enable);
+	sbuf_printf(sb, "vm_bind_promote_2m_enable = %d\n",
+	    sc->vm_bind_promote_2m_enable);
+	sbuf_printf(sb, "vm_bind_promote_error_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_promote_error_count);
+	sbuf_printf(sb, "vm_bind_promote_split_count = %llu\n",
+	    (unsigned long long)sc->vm_bind_promote_split_count);
+	sbuf_printf(sb, "vm_bind_promote_split_pages = %llu\n",
+	    (unsigned long long)sc->vm_bind_promote_split_pages);
+
+	sbuf_cat(sb, "\nvm_bind_promote\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
+		if (sc->vm_bind_promote_count[i] == 0)
+			continue;
+		sbuf_printf(sb, "shift[%s] count=%llu pages=%llu\n",
+		    page_shift_names[i],
+		    (unsigned long long)sc->vm_bind_promote_count[i],
+		    (unsigned long long)sc->vm_bind_promote_pages[i]);
+	}
+
+	sbuf_cat(sb, "\nvm_bind_page_shift\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
+		if (sc->vm_bind_page_shift_map_count[i] == 0 &&
+		    sc->vm_bind_page_shift_unmap_count[i] == 0)
+			continue;
+		sbuf_printf(sb,
+		    "shift[%s] map=%llu map_pages=%llu unmap=%llu unmap_pages=%llu\n",
+		    page_shift_names[i],
+		    (unsigned long long)sc->vm_bind_page_shift_map_count[i],
+		    (unsigned long long)sc->vm_bind_page_shift_map_pages[i],
+		    (unsigned long long)sc->vm_bind_page_shift_unmap_count[i],
+		    (unsigned long long)sc->vm_bind_page_shift_unmap_pages[i]);
+	}
+
+	sbuf_cat(sb, "\nvm_bind_valid_page_shift_domain\n");
+	for (uint32_t domain = 0; domain < NVKM_DRM_VM_BIND_DOMAIN_COUNT;
+	    domain++) {
+		for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
+			if (sc->vm_bind_valid_page_shift_map_count[domain][i] == 0 &&
+			    sc->vm_bind_valid_page_shift_unmap_count[domain][i] == 0)
+				continue;
+			sbuf_printf(sb,
+			    "%s shift[%s] map=%llu map_pages=%llu unmap=%llu unmap_pages=%llu\n",
+			    vm_bind_domain_names[domain], page_shift_names[i],
+			    (unsigned long long)
+			    sc->vm_bind_valid_page_shift_map_count[domain][i],
+			    (unsigned long long)
+			    sc->vm_bind_valid_page_shift_map_pages[domain][i],
+			    (unsigned long long)
+			    sc->vm_bind_valid_page_shift_unmap_count[domain][i],
+			    (unsigned long long)
+			    sc->vm_bind_valid_page_shift_unmap_pages[domain][i]);
+		}
+	}
+
+	sbuf_cat(sb, "\nvm_bind_reject_reason\n");
+	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_REJECT_REASON_COUNT; i++) {
+		if (sc->vm_bind_reject_reason_count[i] == 0)
+			continue;
+		sbuf_printf(sb, "%s count=%llu pages=%llu\n",
+		    reject_reason_names[i],
+		    (unsigned long long)sc->vm_bind_reject_reason_count[i],
+		    (unsigned long long)sc->vm_bind_reject_reason_pages[i]);
+	}
 
 	sbuf_cat(sb, "\nvm_bind_pte_kind\n");
 	for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PTE_KIND_COUNT; i++) {
@@ -1230,12 +1723,24 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_printf(sb, "gva_free = %u\n", bar1_total - bar1_used);
 
 	sbuf_cat(sb, "\nvmm\n");
-	sbuf_printf(sb, "flush_count = %llu\n",
-	    (unsigned long long)sc->vmm_flush_count);
-	sbuf_printf(sb, "flush_us = %llu\n",
-	    (unsigned long long)sc->vmm_flush_us);
-	sbuf_printf(sb, "pte_fast_write_count = %llu\n",
-	    (unsigned long long)sc->vmm_pte_fast_write_count);
+		sbuf_printf(sb, "flush_count = %llu\n",
+		    (unsigned long long)sc->vmm_flush_count);
+		sbuf_printf(sb, "flush_us = %llu\n",
+		    (unsigned long long)sc->vmm_flush_us);
+		sbuf_printf(sb, "dirty_flush_count = %llu\n",
+		    (unsigned long long)sc->vmm_dirty_flush_count);
+		sbuf_printf(sb, "dirty_flush_range_count = %llu\n",
+		    (unsigned long long)sc->vmm_dirty_flush_range_count);
+		sbuf_printf(sb, "dirty_flush_pages = %llu\n",
+		    (unsigned long long)sc->vmm_dirty_flush_pages);
+		sbuf_printf(sb, "dirty_flush_overflow_count = %llu\n",
+		    (unsigned long long)sc->vmm_dirty_flush_overflow_count);
+		sbuf_printf(sb, "dirty_flush_all_fallback_count = %llu\n",
+		    (unsigned long long)sc->vmm_dirty_flush_all_fallback_count);
+		sbuf_printf(sb, "pte_backend_flush_count = %llu\n",
+		    (unsigned long long)sc->vmm_pte_backend_flush_count);
+		sbuf_printf(sb, "pte_fast_write_count = %llu\n",
+		    (unsigned long long)sc->vmm_pte_fast_write_count);
 	sbuf_printf(sb, "pte_bulk_write_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_bulk_write_count);
 	sbuf_printf(sb, "pte_bulk_write_pages = %llu\n",
@@ -1252,6 +1757,29 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vmm_pte_bulk_clear_pages);
 	sbuf_printf(sb, "pte_read_modify_write_count = %llu\n",
 	    (unsigned long long)sc->vmm_pte_read_modify_write_count);
+	sbuf_printf(sb, "pt_empty_free_count = %llu\n",
+	    (unsigned long long)sc->vmm_pt_empty_free_count);
+	sbuf_printf(sb, "pd0_empty_free_count = %llu\n",
+	    (unsigned long long)sc->vmm_pd0_empty_free_count);
+	sbuf_printf(sb, "pt_skip_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pt_skip_clear_count);
+	sbuf_printf(sb, "pt_skip_clear_pages = %llu\n",
+	    (unsigned long long)sc->vmm_pt_skip_clear_pages);
+		for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
+			if (sc->vmm_pte_leaf_write_count[i] == 0 &&
+			    sc->vmm_pte_leaf_clear_count[i] == 0 &&
+			    sc->vmm_pte_write_batch_count[i] == 0 &&
+			    sc->vmm_pte_clear_batch_count[i] == 0)
+				continue;
+			sbuf_printf(sb, "pte_leaf_shift[%s] write=%llu clear=%llu\n",
+			    page_shift_names[i],
+			    (unsigned long long)sc->vmm_pte_leaf_write_count[i],
+			    (unsigned long long)sc->vmm_pte_leaf_clear_count[i]);
+			sbuf_printf(sb, "pte_batch_shift[%s] write=%llu clear=%llu\n",
+			    page_shift_names[i],
+			    (unsigned long long)sc->vmm_pte_write_batch_count[i],
+			    (unsigned long long)sc->vmm_pte_clear_batch_count[i]);
+		}
 	sbuf_printf(sb, "user_pd0_count = %u\n", vmm_pd0_count);
 	sbuf_printf(sb, "user_pt_count = %u\n", vmm_pt_count);
 	sbuf_printf(sb, "valid_pte_count = %llu\n",
@@ -1418,6 +1946,116 @@ nvkm_gsp_sysctl_kms_lightup(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
+/*
+ * nvkm_gsp_sysctl_ttm_evict_vram_test()
+ *
+ * Ownership:
+ *   Borrows sc and delegates the eviction walk to DragonFly DRM/TTM.  nvkm
+ *   does not pick BOs, reserve BOs, or synthesize placement changes here.
+ *
+ * Lifetime:
+ *   Write 1 is a one-shot debug trigger.  TTM owns the LRU walk and calls back
+ *   into nvkm_ttm_bo_move() for each movable BO before this sysctl returns.
+ *
+ * Threading:
+ *   May sleep in TTM.  The handler must not be called while holding nvkm VM,
+ *   GSP, BO reverse-map, or KMS locks.
+ */
+static int
+nvkm_gsp_sysctl_ttm_evict_vram_test(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	int val = 0, err;
+
+	err = sysctl_handle_int(oidp, &val, 0, req);
+	if (err != 0 || req->newptr == 0)
+		return (err);
+	if (val == 0)
+		return (0);
+
+	sc->ttm_evict_vram_test_count++;
+	err = nvkm_ttm_evict_vram(sc);
+	sc->ttm_evict_vram_test_last_error = err;
+	if (err != 0) {
+		sc->ttm_evict_vram_test_error_count++;
+		return (err < 0 ? -err : err);
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_sysctl_ttm_validate_vram_test()
+ *
+ * Ownership:
+ *   Borrows sc and delegates the actual placement transition to DragonFly
+ *   DRM/TTM via ttm_bo_validate().  nvkm only supplies the debug trigger and
+ *   observes counters.
+ *
+ * Lifetime:
+ *   Write 1 is a one-shot debug trigger.  The target BO is the last live-bound
+ *   BO that successfully moved through nvkm's TTM callback and is held by a
+ *   temporary TTM reference while validation runs.
+ *
+ * Threading:
+ *   May sleep in TTM reservation, eviction, and move paths.  The handler must
+ *   not be called while holding nvkm VM, GSP, BO reverse-map, or KMS locks.
+ */
+static int
+nvkm_gsp_sysctl_ttm_validate_vram_test(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	int val = 0, err;
+
+	err = sysctl_handle_int(oidp, &val, 0, req);
+	if (err != 0 || req->newptr == 0)
+		return (err);
+	if (val == 0)
+		return (0);
+
+	sc->ttm_validate_vram_test_count++;
+	err = nvkm_ttm_validate_last_bound_to_vram(sc);
+	sc->ttm_validate_vram_test_last_error = err;
+	if (err != 0) {
+		sc->ttm_validate_vram_test_error_count++;
+		return (err < 0 ? -err : err);
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_sysctl_ttm_clear_last_bound_move()
+ *
+ * Ownership:
+ *   Borrows sc and asks nvkm TTM glue to drop its debug-only BO reference.
+ *   The handler does not inspect or mutate BO placement.
+ *
+ * Lifetime:
+ *   Write 1 is a one-shot cleanup trigger for debug tests.  It exists so an
+ *   evict-only run can release the captured BO without rebooting.
+ *
+ * Threading:
+ *   May sleep if the debug reference is the last TTM BO reference.  The
+ *   handler must not be called while holding nvkm VM, GSP, BO reverse-map, or
+ *   KMS locks.
+ */
+static int
+nvkm_gsp_sysctl_ttm_clear_last_bound_move(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	int val = 0, err;
+
+	err = sysctl_handle_int(oidp, &val, 0, req);
+	if (err != 0 || req->newptr == 0)
+		return (err);
+	if (val == 0)
+		return (0);
+
+	err = nvkm_ttm_clear_last_bound_move(sc);
+	if (err != 0)
+		return (err < 0 ? -err : err);
+	return (0);
+}
+
 void
 nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
     struct sysctl_ctx_list *ctx, struct sysctl_oid *parent)
@@ -1452,6 +2090,10 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_vm_trace, "A",
 	    "nouveau VM_BIND trace ring");
+	sc->vm_trace_enable = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_trace_enable",
+	    CTLFLAG_RW, &sc->vm_trace_enable, 0,
+	    "Enable lightweight nouveau VM_BIND trace ring recording");
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "kms_push_trace",
 	    CTLFLAG_RW, &sc->kms_push_trace, 0,
 	    "Enable verbose dispnv50 DMAC push logging");
@@ -1464,6 +2106,67 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "sync_diag_enable",
 	    CTLFLAG_RW, &sc->sync_diag_enable, 0,
 	    "Enable nvkm sync/submit active-call diagnostics");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "ttm_bound_move_test_enable",
+	    CTLFLAG_RW, &sc->ttm_bound_move_test_enable, 0,
+	    "Debug-only: let new VRAM BOs and VM_BIND pins stay TTM-evictable");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "ttm_bound_rebind_test_enable",
+	    CTLFLAG_RW, &sc->ttm_bound_rebind_test_enable, 0,
+	    "Debug-only: rebind live GPUVA PTEs during bound TTM moves");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "ttm_evict_vram_test",
+	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
+	    nvkm_gsp_sysctl_ttm_evict_vram_test, "I",
+	    "Debug-only: write 1 to call DragonFly TTM ttm_bo_evict_mm(VRAM)");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "ttm_validate_vram_test",
+	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
+	    nvkm_gsp_sysctl_ttm_validate_vram_test, "I",
+	    "Debug-only: write 1 to call DragonFly TTM ttm_bo_validate(VRAM) "
+	    "on the last live-bound moved BO");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "ttm_clear_last_bound_move",
+	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
+	    nvkm_gsp_sysctl_ttm_clear_last_bound_move, "I",
+	    "Debug-only: write 1 to drop nvkm's last live-bound TTM BO test "
+	    "reference");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_map_2m_enable",
+	    CTLFLAG_RW, &sc->vm_bind_map_2m_enable, 0,
+	    "Enable direct 2 MiB VRAM VM_BIND MAP segments; default on, "
+	    "writable as a debug kill switch");
+	sc->vm_bind_job_delay_ms = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_job_delay_ms",
+	    CTLFLAG_RW, &sc->vm_bind_job_delay_ms, 0,
+	    "Debug-only VM_BIND job delay before applying prepared remap plans");
+	sc->vm_bind_prepare_fail_after = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_prepare_fail_after",
+	    CTLFLAG_RW, &sc->vm_bind_prepare_fail_after, 0,
+	    "Debug-only one-shot: fail the Nth prepared VM_BIND op before commit");
+	sc->vm_bind_pt_alloc_fail_after = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_pt_alloc_fail_after",
+	    CTLFLAG_RW, &sc->vm_bind_pt_alloc_fail_after, 0,
+	    "Debug-only one-shot: fail the Nth new user PT allocation before commit");
+	sc->vm_bind_commit_pt_fail_after = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_commit_pt_fail_after",
+	    CTLFLAG_RW, &sc->vm_bind_commit_pt_fail_after, 0,
+	    "Debug-only one-shot: fail after VM_BIND commit preflight");
+	sc->vm_bind_parent_child_fail_after = 0;
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO,
+	    "vm_bind_parent_child_fail_after", CTLFLAG_RW,
+	    &sc->vm_bind_parent_child_fail_after, 0,
+	    "Debug-only one-shot: fail parent/child invariant after preflight");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_map_host_large_enable",
+	    CTLFLAG_RW, &sc->vm_bind_map_host_large_enable, 0,
+	    "Enable 64 KiB/2 MiB HOST/GART VM_BIND MAP segments; default on, "
+	    "writable as a debug kill switch");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_sparse_large_enable",
+	    CTLFLAG_RW, &sc->vm_bind_sparse_large_enable, 0,
+	    "Enable 64 KiB VM_BIND sparse segments; default on, "
+	    "writable as a debug kill switch");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_sparse_2m_enable",
+	    CTLFLAG_RW, &sc->vm_bind_sparse_2m_enable, 0,
+	    "Enable 2 MiB VM_BIND sparse segments; default on, "
+	    "writable as a debug kill switch");
+	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "vm_bind_promote_2m_enable",
+	    CTLFLAG_RW, &sc->vm_bind_promote_2m_enable, 0,
+	    "Enable 64 KiB to 2 MiB VRAM VM_BIND promotion; default on, "
+	    "writable as a debug kill switch");
 	sc->gsp_rpc_trace_on = 0;	/* opt-in; GSP events are X11 hot path. */
 	SYSCTL_ADD_INT(ctx, children, OID_AUTO, "gsp_rpc_trace_on",
 	    CTLFLAG_RW, &sc->gsp_rpc_trace_on, 0,

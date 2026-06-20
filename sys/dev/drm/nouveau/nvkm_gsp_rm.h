@@ -274,11 +274,6 @@ int	 nvkm_gsp_chgrp_dtor(struct nvkm_gsp_chgrp *grp);
 
 /* GPFIFO channel (TURING_CHANNEL_GPFIFO_A for our Turing target).
  * Owns the VRAM backing for inst/USERD and the sysmem mthdbuf. */
-/* Sysmem-allocated 4 KiB page for GART-style data BOs. */
-struct nvkm_gsp_sysmem_page {
-	void			*kva;
-	vm_paddr_t		paddr;
-};
 
 #define NVKM_GSP_GR_MAX_CTXBUFS	16
 
@@ -329,16 +324,12 @@ struct nvkm_gsp_chan {
 	uint8_t			gr_ctxbuf_nr;
 	struct nvkm_gsp_gr_ctxbuf gr_ctxbuf[NVKM_GSP_GR_MAX_CTXBUFS];
 
-	/* GPU-submit BOs: pre-allocated before channel alloc so we
-	 * can pass a real gpFifoOffset to GSP. PD0/SPT hold the host
-	 * PT under PD1[8] (covers GVA 0x100000000..). */
-	/* PT + data BOs all in VRAM, accessed via BAR1 (nvkm_bar1_page). */
-	struct nvkm_bar1_page	submit_pd0;	/* VRAM (PT page) */
-	struct nvkm_bar1_page	submit_lpt;	/* VRAM (empty 64 KiB LPT) */
-	struct nvkm_bar1_page	submit_spt;	/* VRAM (PT page) */
-	struct nvkm_gsp_sysmem_page submit_push;	/* sysmem (matches nouveau GART) */
-	struct nvkm_gsp_sysmem_page submit_gpf;	/* sysmem */
-	struct nvkm_gsp_sysmem_page submit_sema;	/* sysmem */
+	/* GPU-submit data pages: pre-allocated before channel alloc so we
+	 * can pass a real gpFifoOffset to GSP.  The GVA mappings are installed
+	 * through the owning VMM; channel code must not keep a parallel PT tree. */
+	struct nvkm_dmamem	submit_push;	/* DMA-coherent sysmem push page */
+	struct nvkm_dmamem	submit_gpf;	/* DMA-coherent sysmem GPFIFO page */
+	struct nvkm_dmamem	submit_sema;	/* DMA-coherent sysmem semaphore page */
 };
 
 int	 nvkm_gsp_chan_ctor(struct nvkm_gsp_vmm *vmm,
