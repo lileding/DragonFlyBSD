@@ -16,6 +16,54 @@
 #include "nvkm_gsp_rm.h"
 
 struct nvkm_bo;
+struct nvkm_gsp_vmm_sparse_unmap_plan;
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_clear_fn
+ *
+ * Ownership:
+ *   Borrows one prepared sparse-clear range.  The callback must not retain
+ *   pointers into the VMM sparse-unmap plan.
+ *
+ * Lifetime:
+ *   The scalar va, size, and page_shift values are valid only for the callback
+ *   invocation.  They describe prepared clear ranges that remain owned by the
+ *   sparse-unmap plan.
+ *
+ * Threading:
+ *   Called while the caller owns the sparse-unmap plan.  The callback must not
+ *   mutate the plan or take VMM ownership from it.
+ */
+typedef void (*nvkm_gsp_vmm_sparse_unmap_clear_fn)(void *arg,
+	    uint64_t va, uint64_t size, uint8_t page_shift);
+
+struct nvkm_gsp_vmm_dirty_range {
+	uint64_t	start;
+	uint64_t	end;
+};
+
+/*
+ * nvkm_gsp_vmm_dirty_set
+ *
+ * Ownership:
+ *   Borrows a caller-owned array of dirty ranges.  The backend does not retain
+ *   the array or any VMM/remap ownership from it.
+ *
+ * Lifetime:
+ *   The range array must remain valid for the duration of
+ *   nvkm_gsp_vmm_flush_dirty().  Ranges are scalar [start,end) GPU VA facts
+ *   for PTE/PDE writes already performed by the enclosing commit.
+ *
+ * Threading:
+ *   The caller owns the higher-level remap serialization.  The backend takes
+ *   vmm->tok while flushing BAR1 writes and issuing the hardware invalidate.
+ */
+struct nvkm_gsp_vmm_dirty_set {
+	const struct nvkm_gsp_vmm_dirty_range *ranges;
+	uint32_t	range_count;
+	uint64_t	page_count;
+	int		overflow;
+};
 
 /* Per-vmm GMMU page-table chain. Three sysmem 4 KiB pages, one each
  * for PD3 / PD2 / PD1; the 512 MiB RM-managed range falls inside
@@ -31,6 +79,13 @@ struct nvkm_gsp_vmm_pd1 {
 };
 LIST_HEAD(nvkm_gsp_vmm_pd1_list, nvkm_gsp_vmm_pd1);
 
+enum nvkm_gsp_vmm_pd0_slot_state {
+	NVKM_GSP_VMM_PD0_SLOT_EMPTY = 0,
+	NVKM_GSP_VMM_PD0_SLOT_CHILD,
+	NVKM_GSP_VMM_PD0_SLOT_VALID_2M,
+	NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M,
+};
+
 struct nvkm_gsp_vmm_pd0 {
 	LIST_ENTRY(nvkm_gsp_vmm_pd0) link;
 	LIST_ENTRY(nvkm_gsp_vmm_pd0) lookup_link;
@@ -38,10 +93,15 @@ struct nvkm_gsp_vmm_pd0 {
 	uint32_t		pd2_idx;
 	uint32_t		pd1_idx;
 	uint32_t		refcount;
+	uint32_t		valid_2m_count;
+	uint32_t		sparse_2m_count;
+	uint8_t			slot_state[NVKM_GMMU_PD0_ENTRIES];
 	struct nvkm_bar1_page	page;
 };
 LIST_HEAD(nvkm_gsp_vmm_pd0_list, nvkm_gsp_vmm_pd0);
 LIST_HEAD(nvkm_gsp_vmm_pd0_lookup_list, nvkm_gsp_vmm_pd0);
+
+#define NVKM_GSP_VMM_SPT_MASK_WORDS	(NVKM_GMMU_SPT_ENTRIES / 64)
 
 struct nvkm_gsp_vmm_user_pt {
 	LIST_ENTRY(nvkm_gsp_vmm_user_pt) link;
@@ -53,7 +113,11 @@ struct nvkm_gsp_vmm_user_pt {
 	uint32_t		valid_pte_count;
 	uint32_t		valid_lpte_count;
 	uint32_t		sparse_pte_count;
-	bool			conservative_pte_accounting;
+	uint32_t		sparse_lpte_count;
+	uint64_t		valid_spt_mask[NVKM_GSP_VMM_SPT_MASK_WORDS];
+	uint64_t		sparse_spt_mask[NVKM_GSP_VMM_SPT_MASK_WORDS];
+	uint32_t		valid_lpt_mask;
+	uint32_t		sparse_lpt_mask;
 	struct nvkm_bar1_page	lpt;
 	struct nvkm_bar1_page	spt;
 };
@@ -69,6 +133,7 @@ struct nvkm_gsp_vmm_sparse_region {
 	LIST_ENTRY(nvkm_gsp_vmm_sparse_region) link;
 	uint64_t		addr;
 	uint64_t		size;
+	uint8_t			page_shift;
 };
 LIST_HEAD(nvkm_gsp_vmm_sparse_region_list, nvkm_gsp_vmm_sparse_region);
 
@@ -143,13 +208,57 @@ int	 nvkm_gsp_vmm_map_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
 int	 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+int	 nvkm_gsp_vmm_has_sparse_region(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_prepare_sparse_region(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size,
+	    struct nvkm_gsp_vmm_sparse_region **pregion);
+int	 nvkm_gsp_vmm_prepare_sparse_region_page(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size, uint8_t page_shift,
+	    struct nvkm_gsp_vmm_sparse_region **pregion);
+int	 nvkm_gsp_vmm_alloc_sparse_region(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size,
+	    struct nvkm_gsp_vmm_sparse_region **pregion);
+int	 nvkm_gsp_vmm_alloc_sparse_region_page(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size, uint8_t page_shift,
+	    struct nvkm_gsp_vmm_sparse_region **pregion);
+int	 nvkm_gsp_vmm_commit_sparse_noflush(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_region *region);
+int	 nvkm_gsp_vmm_check_sparse_regions_commit(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_region **regions,
+	    uint32_t region_count, uint64_t replace_addr,
+	    uint64_t replace_size);
+void	 nvkm_gsp_vmm_abort_sparse_region(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_region *region);
 
 /* Publish pending PT writes + invalidate the VMM TLB.  Caller need not
  * hold vmm->tok.  The *_noflush variants below write PTEs without it so a
  * batch (VM_BIND) flushes once via this helper. */
 void	 nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm);
+/*
+ * nvkm_gsp_vmm_flush_dirty
+ *
+ * Ownership:
+ *   Borrows vmm and a caller-owned dirty set.  Dirty ranges are consumed only
+ *   as scalar invalidate inputs and are not retained.
+ *
+ * Lifetime:
+ *   The dirty set must remain alive for the call.  On return, backend PTE/PDE
+ *   writes covered by the dirty set have passed the required visibility and
+ *   hardware invalidate boundary.
+ *
+ * Threading:
+ *   Caller owns higher-level remap/job ordering.  The backend takes vmm->tok
+ *   internally while flushing BAR1 writes and issuing the TU102 invalidate.
+ */
+void	 nvkm_gsp_vmm_flush_dirty(struct nvkm_gsp_vmm *vmm,
+	    const struct nvkm_gsp_vmm_dirty_set *dirty);
 int	 nvkm_gsp_vmm_ensure_pt_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		    uint64_t size);
+int	 nvkm_gsp_vmm_ensure_pd0_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+		    uint64_t size);
+int	 nvkm_gsp_vmm_check_prepared_pt_range(struct nvkm_gsp_vmm *vmm,
+		    uint64_t va, uint64_t size, uint8_t page_shift);
 int	 nvkm_gsp_vmm_map_sysmem_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    vm_paddr_t paddr, uint64_t size);
 int	 nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm,
@@ -157,19 +266,103 @@ int	 nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm,
 int	 nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, const struct nvkm_bo *bo, uint64_t bo_offset,
 	    uint64_t size, uint8_t kind);
+int	 nvkm_gsp_vmm_map_sysmem_bo_prepared_noflush(
+		    struct nvkm_gsp_vmm *vmm, uint64_t va, const struct nvkm_bo *bo,
+		    uint64_t bo_offset, uint64_t size, uint8_t kind);
+int	 nvkm_gsp_vmm_map_sysmem_paddrs_prepared_noflush(
+		    struct nvkm_gsp_vmm *vmm, uint64_t va,
+		    const vm_paddr_t *paddrs, uint32_t page_count, uint8_t kind);
+int	 nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush(
+		    struct nvkm_gsp_vmm *vmm, uint64_t va,
+		    const vm_paddr_t *paddrs, uint32_t page_count,
+		    uint8_t kind, uint8_t page_shift);
 int	 nvkm_gsp_vmm_map_vram_flags_noflush(struct nvkm_gsp_vmm *vmm,
-	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
-	    uint8_t ro, uint8_t kind);
+		    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
+		    uint8_t ro, uint8_t kind);
 int	 nvkm_gsp_vmm_map_vram_flags_page_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
 	    uint8_t ro, uint8_t kind, uint8_t page_shift);
+int	 nvkm_gsp_vmm_map_vram_flags_page_prepared_noflush(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t paddr,
+	    uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind,
+	    uint8_t page_shift);
+int	 nvkm_gsp_vmm_promote_vram_64k_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
+	    uint8_t ro, uint8_t kind);
+int	 nvkm_gsp_vmm_promote_vram_2m_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
+	    uint8_t ro, uint8_t kind);
+int	 nvkm_gsp_vmm_promote_sysmem_2m_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, const vm_paddr_t *paddrs, uint32_t page_count,
+	    uint8_t kind);
+int	 nvkm_gsp_vmm_prepare_split_vram_2m(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, struct nvkm_gsp_vmm_user_pt **ppt);
+int	 nvkm_gsp_vmm_check_split_vram_2m(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, struct nvkm_gsp_vmm_user_pt *pt);
+int	 nvkm_gsp_vmm_commit_split_vram_2m_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, struct nvkm_gsp_vmm_user_pt *pt);
+void	 nvkm_gsp_vmm_abort_split_vram_2m(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_user_pt *pt);
 int	 nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    uint64_t size);
+int	 nvkm_gsp_vmm_check_unmap_valid_range(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size, int preserve_target_pts);
+int	 nvkm_gsp_vmm_check_unmap_valid_range_page(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size, int preserve_target_pts,
+	    uint8_t preserve_page_shift);
 int	 nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
+	    uint8_t preserve_page_shift);
+int	 nvkm_gsp_vmm_unmap_valid_preserve_pt_noflush(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_check_clear_pd0_target_range(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_check_clear_pd0_target_range_allow_sparse(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_clear_pd0_target_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t size);
 int	 nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t size);
 int	 nvkm_gsp_vmm_unmap_sparse_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_prepare_unmap_sparse_range(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan);
+int	 nvkm_gsp_vmm_prepare_unmap_sparse_range_page(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
+	    uint8_t clear_page_shift, int preserve_target_pts,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan);
+int	 nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(
+	    struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan *plan);
+/*
+ * nvkm_gsp_vmm_sparse_unmap_plan_for_each_clear
+ *
+ * Ownership:
+ *   Borrows the prepared sparse-unmap plan and calls fn for each clear range.
+ *   The function does not consume or publish any plan ownership.
+ *
+ * Lifetime:
+ *   The caller must invoke this before fini releases the plan.  It is safe both
+ *   before and after commit because clear-range descriptors stay linked until
+ *   fini.
+ *
+ * Threading:
+ *   Does not take vmm->tok and does not mutate VMM state.  The caller must
+ *   provide the same external serialization that protects the plan lifetime.
+ */
+void	 nvkm_gsp_vmm_sparse_unmap_plan_for_each_clear(
+	    const struct nvkm_gsp_vmm_sparse_unmap_plan *plan,
+	    nvkm_gsp_vmm_sparse_unmap_clear_fn fn, void *arg);
+int	 nvkm_gsp_vmm_check_unmap_sparse_range_prepared(
+	    struct nvkm_gsp_vmm *vmm,
+	    const struct nvkm_gsp_vmm_sparse_unmap_plan *plan,
+	    uint64_t va, uint64_t size, uint8_t page_shift);
+void	 nvkm_gsp_vmm_fini_unmap_sparse_range(struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan *plan);
+int	 nvkm_gsp_vmm_unmap_sparse_range_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t size);
 void	 nvkm_gsp_vmm_read_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	    struct nvkm_gsp_vmm_pte_info *info);

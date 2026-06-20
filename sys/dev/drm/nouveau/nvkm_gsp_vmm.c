@@ -129,21 +129,149 @@ nvkm_gsp_vmm_sparse_bar1_page(struct nvkm_softc *sc,
 	nvkm_gsp_bar1_flush(sc);
 }
 
+/*
+ * nvkm_gsp_vmm_sparse_region_overlaps_range()
+ *
+ * Ownership:
+ *   Borrows a sparse-region record and caller-owned scalar range.  It does
+ *   not take sparse ownership, mutate the list, or inspect page tables.
+ *
+ * Lifetime:
+ *   The returned value is valid only while the caller's sparse-list walk keeps
+ *   the region record alive.  Corrupt or overflowing ranges are reported as
+ *   overlapping so direct valid/invalid writers fail closed instead of
+ *   treating broken sparse metadata as absence.
+ *
+ * Threading:
+ *   Caller owns the required VMM serialization.  This helper is pure scalar
+ *   arithmetic and performs no allocation, BAR1 access, or GPU wait.
+ */
+static int
+nvkm_gsp_vmm_sparse_region_overlaps_range(
+    const struct nvkm_gsp_vmm_sparse_region *region, uint64_t va,
+    uint64_t size)
+{
+	uint64_t end, region_end;
+
+	if (size == 0)
+		return (0);
+	if (region == NULL || va > UINT64_MAX - size ||
+	    region->size == 0 ||
+	    region->addr > UINT64_MAX - region->size)
+		return (1);
+	end = va + size;
+	region_end = region->addr + region->size;
+	return (region->addr < end && region_end > va);
+}
+
 static int
 nvkm_gsp_vmm_range_has_sparse_region(struct nvkm_gsp_vmm *vmm,
     uint64_t va, uint64_t size)
 {
 	struct nvkm_gsp_vmm_sparse_region *region;
-	uint64_t end = va + size;
 
 	LIST_FOREACH(region, &vmm->sparse_regions, link) {
-		uint64_t region_end = region->addr + region->size;
-
-		if (region->addr < end && region_end > va)
+		if (nvkm_gsp_vmm_sparse_region_overlaps_range(region, va,
+		    size))
 			return (1);
 	}
 	return (0);
 }
+
+/*
+ * nvkm_gsp_vmm_has_sparse_region()
+ *
+ * Ownership:
+ *   Borrows the VMM and caller-owned scalar range.  It does not acquire,
+ *   release, insert, remove, or retain sparse-region ownership.
+ *
+ * Lifetime:
+ *   The result is a read-only snapshot for the caller's current serialized
+ *   VM_BIND prepare decision.  Corrupt sparse metadata is reported as present
+ *   through nvkm_gsp_vmm_sparse_region_overlaps_range(), so callers fail
+ *   closed instead of skipping required sparse cleanup.
+ *
+ * Threading:
+ *   Acquires vmm->tok for the sparse-list walk.  This helper is prepare-stage
+ *   read-only code; it performs no allocation, BAR1 write, flush, or GPU wait.
+ */
+int
+nvkm_gsp_vmm_has_sparse_region(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	int has_sparse;
+
+	lwkt_gettoken(&vmm->tok);
+	has_sparse = nvkm_gsp_vmm_range_has_sparse_region(vmm, va, size);
+	lwkt_reltoken(&vmm->tok);
+	return (has_sparse);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_state_run_locked()
+ *
+ * Ownership:
+ *   Borrows vmm's sparse-region list and the caller-owned VA cursor.  It does
+ *   not acquire, release, insert, or remove sparse-region ownership.
+ *
+ * Lifetime:
+ *   The result is valid while the caller keeps vmm->tok and VM remap
+ *   serialization held.  *run_size is bounded by [va, limit) and stops at the
+ *   next sparse-state transition, so callers can batch one same-state PTE run.
+ *   Corrupt sparse records create a fail-closed transition: callers either see
+ *   sparse state or an invalid run boundary before mutating PTEs.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  The helper only scans linked sparse records and
+ *   does not write PTEs, allocate memory, or wait on GPU work.
+ */
+static int
+nvkm_gsp_vmm_sparse_state_run_locked(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t limit, uint64_t *run_size)
+{
+	struct nvkm_gsp_vmm_sparse_region *region;
+	uint64_t boundary = limit;
+	int sparse = 0;
+
+	LIST_FOREACH(region, &vmm->sparse_regions, link) {
+		uint64_t region_end;
+
+		if (region->size == 0 ||
+		    region->addr > UINT64_MAX - region->size) {
+			if (region->addr >= limit)
+				continue;
+			if (region->addr <= va) {
+				sparse = 1;
+				boundary = limit;
+			} else if (region->addr < boundary) {
+				boundary = region->addr;
+			}
+			continue;
+		}
+		region_end = region->addr + region->size;
+
+		if (region_end <= va || region->addr >= limit)
+			continue;
+		if (region->addr <= va && region_end > va) {
+			sparse = 1;
+			if (region_end < boundary)
+				boundary = region_end;
+		} else if (region->addr > va && region->addr < boundary) {
+			boundary = region->addr;
+		}
+	}
+	if (boundary <= va || boundary > limit)
+		boundary = limit;
+	*run_size = boundary - va;
+	return (sparse);
+}
+
+static int nvkm_gsp_vmm_sparse_region_page_size(uint8_t page_shift,
+    uint64_t *page_size);
+static int nvkm_gsp_vmm_sparse_region_insert_preflight_locked(
+    struct nvkm_gsp_vmm *vmm, const struct nvkm_gsp_vmm_sparse_region *region);
+static void nvkm_gsp_vmm_sparse_regions_merge_locked(
+    struct nvkm_gsp_vmm *vmm, struct nvkm_gsp_vmm_sparse_region *region);
 
 static void
 nvkm_gsp_vmm_pd0_write_slot(struct nvkm_softc *sc,
@@ -154,6 +282,110 @@ nvkm_gsp_vmm_pd0_write_slot(struct nvkm_softc *sc,
 	    big_pde);
 	nvkm_gsp_bar1_wr64(sc, pd0->page.bar1_gva + (pd0_idx * 2 + 1) * 8,
 	    small_pde);
+}
+
+/*
+ * nvkm_gsp_vmm_pd0_mark_slot_state()
+ *
+ * Ownership:
+ *   Borrows pd0 and updates only the software state for one PD0 slot.  The
+ *   helper does not own or release the child PT or mapped BO backing.
+ *
+ * Lifetime:
+ *   The recorded state must describe the hardware PD0 slot written by the
+ *   caller in the same commit section.  The pd0 object must remain linked
+ *   until all non-empty slot states are cleared.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This is the single accounting point for PD0 child
+ *   table, 2 MiB valid leaf, and 2 MiB sparse leaf ownership.
+ */
+static void
+nvkm_gsp_vmm_pd0_mark_slot_state(struct nvkm_gsp_vmm_pd0 *pd0,
+    uint32_t pd0_idx, enum nvkm_gsp_vmm_pd0_slot_state new_state)
+{
+	enum nvkm_gsp_vmm_pd0_slot_state old_state;
+
+	old_state = pd0->slot_state[pd0_idx];
+	if (old_state == new_state)
+		return;
+
+	switch (old_state) {
+	case NVKM_GSP_VMM_PD0_SLOT_CHILD:
+		if (pd0->refcount > 0)
+			pd0->refcount--;
+		break;
+	case NVKM_GSP_VMM_PD0_SLOT_VALID_2M:
+		if (pd0->valid_2m_count > 0)
+			pd0->valid_2m_count--;
+		break;
+	case NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M:
+		if (pd0->sparse_2m_count > 0)
+			pd0->sparse_2m_count--;
+		break;
+	default:
+		break;
+	}
+
+	pd0->slot_state[pd0_idx] = (uint8_t)new_state;
+
+	switch (new_state) {
+	case NVKM_GSP_VMM_PD0_SLOT_CHILD:
+		pd0->refcount++;
+		break;
+	case NVKM_GSP_VMM_PD0_SLOT_VALID_2M:
+		pd0->valid_2m_count++;
+		break;
+	case NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M:
+		pd0->sparse_2m_count++;
+		break;
+	default:
+		break;
+	}
+}
+
+static int
+nvkm_gsp_vmm_pd0_has_live_slot(const struct nvkm_gsp_vmm_pd0 *pd0)
+{
+	return (pd0->refcount != 0 || pd0->valid_2m_count != 0 ||
+	    pd0->sparse_2m_count != 0);
+}
+
+static void
+nvkm_gsp_vmm_pd0_write_child_slot(struct nvkm_softc *sc,
+    struct nvkm_gsp_vmm_pd0 *pd0, uint32_t pd0_idx, uint64_t big_pde,
+    uint64_t small_pde)
+{
+	nvkm_gsp_vmm_pd0_mark_slot_state(pd0, pd0_idx,
+	    NVKM_GSP_VMM_PD0_SLOT_CHILD);
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx, big_pde, small_pde);
+}
+
+static void
+nvkm_gsp_vmm_pd0_write_empty_slot(struct nvkm_softc *sc,
+    struct nvkm_gsp_vmm_pd0 *pd0, uint32_t pd0_idx)
+{
+	nvkm_gsp_vmm_pd0_mark_slot_state(pd0, pd0_idx,
+	    NVKM_GSP_VMM_PD0_SLOT_EMPTY);
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx, 0, 0);
+}
+
+static void
+nvkm_gsp_vmm_pd0_write_valid_2m_slot(struct nvkm_softc *sc,
+    struct nvkm_gsp_vmm_pd0 *pd0, uint32_t pd0_idx, uint64_t pte)
+{
+	nvkm_gsp_vmm_pd0_mark_slot_state(pd0, pd0_idx,
+	    NVKM_GSP_VMM_PD0_SLOT_VALID_2M);
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx, pte, 0);
+}
+
+static void
+nvkm_gsp_vmm_pd0_write_sparse_2m_slot(struct nvkm_softc *sc,
+    struct nvkm_gsp_vmm_pd0 *pd0, uint32_t pd0_idx, uint64_t pde)
+{
+	nvkm_gsp_vmm_pd0_mark_slot_state(pd0, pd0_idx,
+	    NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M);
+	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx, pde, 0);
 }
 
 static struct nvkm_bar1_page *
@@ -345,6 +577,41 @@ nvkm_gsp_vmm_user_pt_lookup_insert(struct nvkm_gsp_vmm *vmm,
 	LIST_INSERT_HEAD(&vmm->user_pt_lookup[bucket], pt, lookup_link);
 }
 
+/*
+ * nvkm_gsp_vmm_inject_user_pt_alloc_failure()
+ *
+ * Ownership:
+ *   Borrows vmm and sc.  The function only consumes the debug one-shot counter
+ *   and records the VA that would have needed a new user PT.
+ *
+ * Lifetime:
+ *   Called after lookup proves the user PT is absent, but before allocating or
+ *   publishing any parent/leaf page-table storage.  A non-zero return therefore
+ *   leaves the VM's page-table object lifetime graph unchanged.
+ *
+ * Threading:
+ *   The caller holds vmm->tok.  The debug counter is per-device and intended for
+ *   single-probe fault injection; normal paths leave it at zero.
+ */
+static int
+nvkm_gsp_vmm_inject_user_pt_alloc_failure(struct nvkm_gsp_vmm *vmm,
+    uint64_t va)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	if (sc == NULL || sc->vm_bind_pt_alloc_fail_after <= 0)
+		return (0);
+	if (sc->vm_bind_pt_alloc_fail_after > 1) {
+		sc->vm_bind_pt_alloc_fail_after--;
+		return (0);
+	}
+
+	sc->vm_bind_pt_alloc_fail_after = 0;
+	sc->vm_bind_pt_alloc_fail_count++;
+	sc->vm_bind_pt_alloc_fail_last_va = va;
+	return (ENOMEM);
+}
+
 static int
 nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
     struct nvkm_gsp_vmm_user_pt **ppt)
@@ -368,9 +635,17 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		return (0);
 	}
 
+	err = nvkm_gsp_vmm_inject_user_pt_alloc_failure(vmm, va);
+	if (err != 0)
+		return (err);
+
 	err = nvkm_gsp_vmm_pd0_get(vmm, pd2_idx, pd1_idx, &pd0);
 	if (err != 0)
 		return (err);
+	if (pd0->slot_state[pd0_idx] == NVKM_GSP_VMM_PD0_SLOT_CHILD)
+		return (EIO);
+	if (pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_EMPTY)
+		return (EBUSY);
 
 	pt = kmalloc(sizeof(*pt), M_NVKM_VMM, M_WAITOK | M_ZERO);
 	pt->pd0 = pd0;
@@ -396,11 +671,10 @@ nvkm_gsp_vmm_user_pt_get(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	/* PD1 owns one shared PD0 page. Each PD0 entry gets its own dual
 	 * BIG/SMALL PDE pair, so mappings in the same 512 MiB range do not
 	 * overwrite earlier PD0 entries. */
-	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pd0_idx,
+	nvkm_gsp_vmm_pd0_write_child_slot(sc, pd0, pd0_idx,
 	    nvkm_pde_to_vram(pt->lpt.vram_paddr),
 	    nvkm_pde_to_vram(pt->spt.vram_paddr));
 	nvkm_gsp_bar1_flush(sc);
-	pd0->refcount++;
 
 	LIST_INSERT_HEAD(&vmm->user_pt_pages, pt, link);
 	nvkm_gsp_vmm_user_pt_lookup_insert(vmm, pt);
@@ -430,6 +704,243 @@ nvkm_gsp_vmm_lpt_idx(uint64_t va)
 	    (NVKM_GMMU_LPT_ENTRIES - 1)));
 }
 
+static uint32_t
+nvkm_gsp_vmm_page_shift_bucket(uint8_t page_shift)
+{
+	switch (page_shift) {
+	case NVKM_GMMU_SPT_SHIFT:
+		return (NVKM_DRM_VM_BIND_PAGE_SHIFT_4K);
+	case NVKM_GMMU_LPT_SHIFT:
+		return (NVKM_DRM_VM_BIND_PAGE_SHIFT_64K);
+	case NVKM_GMMU_PD0_SHIFT:
+		return (NVKM_DRM_VM_BIND_PAGE_SHIFT_2M);
+	default:
+		return (NVKM_DRM_VM_BIND_PAGE_SHIFT_4K);
+	}
+}
+
+static int
+nvkm_gsp_vmm_spt_mask_test(const uint64_t *mask, uint32_t spt_idx)
+{
+	return ((mask[spt_idx >> 6] & (1ULL << (spt_idx & 63))) != 0);
+}
+
+static void
+nvkm_gsp_vmm_spt_mask_set(uint64_t *mask, uint32_t spt_idx)
+{
+	mask[spt_idx >> 6] |= 1ULL << (spt_idx & 63);
+}
+
+static void
+nvkm_gsp_vmm_spt_mask_clear(uint64_t *mask, uint32_t spt_idx)
+{
+	mask[spt_idx >> 6] &= ~(1ULL << (spt_idx & 63));
+}
+
+/*
+ * nvkm_gsp_vmm_pt_check_promote_64k()
+ *
+ * Ownership:
+ *   Borrows one linked userspace PT and checks only software leaf-state.  It
+ *   does not write BAR1, allocate page tables, or mutate refcounts.
+ *
+ * Lifetime:
+ *   The result is valid while vmm->tok and VM remap serialization keep the PT
+ *   linked and unchanged.  A successful result means the requested LPT slots
+ *   are empty and every covered SPT leaf is a valid non-sparse mapping.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.  This is the read-only preflight half of
+ *   4 KiB -> 64 KiB promotion; the paired commit may then clear the lower
+ *   SPT leaves and install LPT leaves without discovering a semantic conflict.
+ */
+static int
+nvkm_gsp_vmm_pt_check_promote_64k(const struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t lpt_idx, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t cur_lpt = lpt_idx + i;
+		uint32_t bit = 1U << cur_lpt;
+		uint32_t spt_start = cur_lpt * NVKM_GMMU_LPT_SPTE_COUNT;
+
+		if ((pt->valid_lpt_mask & bit) != 0 ||
+		    (pt->sparse_lpt_mask & bit) != 0)
+			return (EBUSY);
+		for (uint32_t j = 0; j < NVKM_GMMU_LPT_SPTE_COUNT; j++) {
+			uint32_t spt_idx = spt_start + j;
+
+			if (!nvkm_gsp_vmm_spt_mask_test(pt->valid_spt_mask,
+			    spt_idx) ||
+			    nvkm_gsp_vmm_spt_mask_test(pt->sparse_spt_mask,
+			    spt_idx))
+				return (EBUSY);
+		}
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_spt_mark_state()
+ *
+ * Ownership:
+ *   Borrows pt and updates only its software SPT leaf-state.  It does not
+ *   write BAR1, allocate page-table pages, or acquire mapping ownership.
+ *
+ * Lifetime:
+ *   The state describes the hardware PTE write that the caller performs in
+ *   the same no-fail commit section.  The PT must remain linked until both the
+ *   software state and hardware PTE write complete.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This helper is the single ref/unref authority for
+ *   SPT valid/sparse counts, including bulk paths that do not read old PTEs.
+ */
+static void
+nvkm_gsp_vmm_spt_mark_state(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t spt_idx, int new_valid, int new_sparse)
+{
+	int old_valid, old_sparse;
+
+	if (new_valid)
+		new_sparse = 0;
+	old_valid = nvkm_gsp_vmm_spt_mask_test(pt->valid_spt_mask, spt_idx);
+	old_sparse = nvkm_gsp_vmm_spt_mask_test(pt->sparse_spt_mask, spt_idx);
+
+	if (new_valid) {
+		nvkm_gsp_vmm_spt_mask_set(pt->valid_spt_mask, spt_idx);
+		nvkm_gsp_vmm_spt_mask_clear(pt->sparse_spt_mask, spt_idx);
+	} else {
+		nvkm_gsp_vmm_spt_mask_clear(pt->valid_spt_mask, spt_idx);
+		if (new_sparse)
+			nvkm_gsp_vmm_spt_mask_set(pt->sparse_spt_mask,
+			    spt_idx);
+		else
+			nvkm_gsp_vmm_spt_mask_clear(pt->sparse_spt_mask,
+			    spt_idx);
+	}
+
+	if (!old_valid && new_valid) {
+		pt->valid_pte_count++;
+	} else if (old_valid && !new_valid && pt->valid_pte_count > 0) {
+		pt->valid_pte_count--;
+	}
+	if (!old_sparse && new_sparse) {
+		pt->sparse_pte_count++;
+	} else if (old_sparse && !new_sparse &&
+	    pt->sparse_pte_count > 0) {
+		pt->sparse_pte_count--;
+	}
+}
+
+static void
+nvkm_gsp_vmm_spt_mark_range_state(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t spt_idx, uint32_t count, int new_valid, int new_sparse)
+{
+	uint32_t i;
+
+	for (i = 0; i < count; i++)
+		nvkm_gsp_vmm_spt_mark_state(pt, spt_idx + i, new_valid,
+		    new_sparse);
+}
+
+static int
+nvkm_gsp_vmm_lpt_mask_test(const struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t lpt_idx)
+{
+	return ((pt->valid_lpt_mask & (1U << lpt_idx)) != 0);
+}
+
+/*
+ * nvkm_gsp_vmm_lpt_mark_state()
+ *
+ * Ownership:
+ *   Borrows pt and updates only its software LPT leaf-state.  Hardware LPT
+ *   writes are performed by the caller in the same commit section.
+ *
+ * Lifetime:
+ *   The PT must remain linked until the paired software state and hardware
+ *   BAR1 write complete.  The caller owns the final VMM flush boundary.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This helper is the single ref/unref authority for
+ *   LPT valid/sparse counts.  Valid and sparse are mutually exclusive; invalid
+ *   clears both.
+ */
+static void
+nvkm_gsp_vmm_lpt_mark_state(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t lpt_idx, int new_valid, int new_sparse)
+{
+	int old_valid, old_sparse;
+	uint32_t bit;
+
+	if (new_valid)
+		new_sparse = 0;
+	old_valid = nvkm_gsp_vmm_lpt_mask_test(pt, lpt_idx);
+	old_sparse = (pt->sparse_lpt_mask & (1U << lpt_idx)) != 0;
+	bit = 1U << lpt_idx;
+	if (new_valid) {
+		pt->valid_lpt_mask |= bit;
+		pt->sparse_lpt_mask &= ~bit;
+	} else {
+		pt->valid_lpt_mask &= ~bit;
+		if (new_sparse)
+			pt->sparse_lpt_mask |= bit;
+		else
+			pt->sparse_lpt_mask &= ~bit;
+	}
+
+	if (!old_valid && new_valid) {
+		pt->valid_lpte_count++;
+	} else if (old_valid && !new_valid &&
+	    pt->valid_lpte_count > 0) {
+		pt->valid_lpte_count--;
+	}
+	if (!old_sparse && new_sparse) {
+		pt->sparse_lpte_count++;
+	} else if (old_sparse && !new_sparse &&
+	    pt->sparse_lpte_count > 0) {
+		pt->sparse_lpte_count--;
+	}
+}
+
+static void
+nvkm_gsp_vmm_lpt_mark_range_state(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t lpt_idx, uint32_t count, int new_valid, int new_sparse)
+{
+	uint32_t i;
+
+	for (i = 0; i < count; i++)
+		nvkm_gsp_vmm_lpt_mark_state(pt, lpt_idx + i, new_valid,
+		    new_sparse);
+}
+
+static void
+nvkm_gsp_vmm_mark_spt_from_pte(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t spt_idx, uint64_t pte)
+{
+	uint64_t sparse_pte;
+
+	sparse_pte = nvkm_pte_to_sparse();
+	nvkm_gsp_vmm_spt_mark_state(pt, spt_idx,
+	    pte != 0 && pte != sparse_pte, pte == sparse_pte);
+}
+
+static void
+nvkm_gsp_vmm_mark_spt_range_from_pte(struct nvkm_gsp_vmm_user_pt *pt,
+    uint32_t spt_idx, uint32_t count, uint64_t pte)
+{
+	uint64_t sparse_pte;
+
+	sparse_pte = nvkm_pte_to_sparse();
+	nvkm_gsp_vmm_spt_mark_range_state(pt, spt_idx, count,
+	    pte != 0 && pte != sparse_pte, pte == sparse_pte);
+}
+
+static void nvkm_gsp_vmm_note_bulk_write(struct nvkm_gsp_vmm *vmm,
+    uint8_t page_shift, uint64_t count);
+static void nvkm_gsp_vmm_note_bulk_clear(struct nvkm_gsp_vmm *vmm,
+    uint8_t page_shift, uint64_t count);
+
 /*
  * nvkm_gsp_vmm_clear_lpt_range()
  *
@@ -451,20 +962,39 @@ nvkm_gsp_vmm_clear_lpt_range(struct nvkm_gsp_vmm *vmm,
     struct nvkm_gsp_vmm_user_pt *pt, uint32_t lpt_idx, uint32_t count)
 {
 	struct nvkm_softc *sc = vmm->sc;
+	uint32_t end, cur;
 
 	if (count == 0)
 		return;
-	pt->conservative_pte_accounting = true;
-	if (pt->valid_lpte_count > count)
-		pt->valid_lpte_count -= count;
-	else
-		pt->valid_lpte_count = 0;
-	nvkm_gsp_bar1_set_region64(sc, pt->lpt.bar1_gva + lpt_idx * 8, 0,
-	    count);
-	sc->vmm_pte_fast_clear_count += count;
-	sc->vmm_pte_fast_invalid_clear_count += count;
-	sc->vmm_pte_bulk_clear_count++;
-	sc->vmm_pte_bulk_clear_pages += count;
+	end = lpt_idx + count;
+	cur = lpt_idx;
+	while (cur < end) {
+		uint32_t start, run;
+
+		while (cur < end &&
+		    (((pt->valid_lpt_mask | pt->sparse_lpt_mask) &
+		    (1U << cur)) == 0))
+			cur++;
+		start = cur;
+		while (cur < end &&
+		    (((pt->valid_lpt_mask | pt->sparse_lpt_mask) &
+		    (1U << cur)) != 0))
+			cur++;
+		run = cur - start;
+		if (run == 0)
+			continue;
+
+		/* Software leaf-state is the fact source; skip empty LPT slots. */
+		nvkm_gsp_vmm_lpt_mark_range_state(pt, start, run, 0, 0);
+		nvkm_gsp_bar1_set_region64(sc,
+		    pt->lpt.bar1_gva + (uint64_t)start * 8, 0, run);
+		sc->vmm_pte_fast_clear_count += run;
+		sc->vmm_pte_fast_invalid_clear_count += run;
+		nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT, run);
+		sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+		    run;
+	}
 }
 
 static void
@@ -488,31 +1018,18 @@ nvkm_gsp_vmm_write_pt_pte(struct nvkm_gsp_vmm *vmm,
 {
 	struct nvkm_softc *sc = vmm->sc;
 	uint32_t spt_idx;
-	uint64_t old_pte, sparse_pte;
-	int old_valid, old_sparse, new_valid, new_sparse;
 
 	spt_idx = nvkm_gsp_vmm_spt_idx(va);
 	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, 1);
-	old_pte = nvkm_gsp_bar1_rd64(sc, pt->spt.bar1_gva + spt_idx * 8);
+	nvkm_gsp_vmm_mark_spt_from_pte(pt, spt_idx, pte);
 	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
 	sc->vmm_pte_read_modify_write_count++;
-	sparse_pte = nvkm_pte_to_sparse();
-	old_valid = old_pte != 0 && old_pte != sparse_pte;
-	old_sparse = old_pte == sparse_pte;
-	new_valid = pte != 0 && pte != sparse_pte;
-	new_sparse = pte == sparse_pte;
-	if (!old_valid && new_valid) {
-		pt->valid_pte_count++;
-	} else if (old_valid && !new_valid && pt->valid_pte_count > 0) {
-		pt->valid_pte_count--;
-	}
-	if (!pt->conservative_pte_accounting) {
-		if (!old_sparse && new_sparse) {
-			pt->sparse_pte_count++;
-		} else if (old_sparse && !new_sparse &&
-		    pt->sparse_pte_count > 0) {
-			pt->sparse_pte_count--;
-		}
+	if (pte != 0 && pte != nvkm_pte_to_sparse()) {
+		sc->vmm_pte_leaf_write_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)]++;
+	} else {
+		sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)]++;
 	}
 	return (0);
 }
@@ -550,11 +1067,11 @@ nvkm_gsp_vmm_write_new_valid_pt_pte_raw(struct nvkm_gsp_vmm *vmm,
 {
 	struct nvkm_softc *sc = vmm->sc;
 
-	pt->conservative_pte_accounting = true;
-	if (pt->valid_pte_count < NVKM_GMMU_SPT_ENTRIES)
-		pt->valid_pte_count++;
+	nvkm_gsp_vmm_spt_mark_state(pt, spt_idx, 1, 0);
 	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
 	sc->vmm_pte_fast_write_count++;
+	sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)]++;
 }
 
 static void
@@ -587,19 +1104,72 @@ nvkm_gsp_vmm_write_new_valid_pt_pte_linear(struct nvkm_gsp_vmm *vmm,
     uint64_t pte_step, uint32_t count)
 {
 	struct nvkm_softc *sc = vmm->sc;
-	uint32_t room;
 
 	if (count == 0)
 		return;
 
-	pt->conservative_pte_accounting = true;
-	room = NVKM_GMMU_SPT_ENTRIES - pt->valid_pte_count;
-	pt->valid_pte_count += MIN(count, room);
 	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, count);
+	nvkm_gsp_vmm_spt_mark_range_state(pt, spt_idx, count, 1, 0);
 	nvkm_gsp_bar1_write_linear_region64(sc,
 	    pt->spt.bar1_gva + (uint64_t)spt_idx * 8, first_pte, pte_step,
 	    count);
 	sc->vmm_pte_fast_write_count += count;
+	sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)] += count;
+}
+
+/*
+ * nvkm_gsp_vmm_write_new_valid_pt_pte_paddrs()
+ *
+ * Ownership:
+ *   Borrows vmm, an already-owned user PT, and a caller-owned DMA paddr
+ *   snapshot.  It does not allocate page-table storage or retain the paddr
+ *   array after returning.
+ *
+ * Lifetime:
+ *   paddrs must cover count 4 KiB leaves starting at spt_idx.  The PT remains
+ *   owned by vmm and the written PTEs become visible only after the enclosing
+ *   VM_BIND flush/TLB invalidate.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and own the surrounding VM_BIND serialization.  This
+ *   helper performs synchronous BAR1 writes and batches software leaf-state
+ *   updates for one prepared SPT chunk.
+ */
+static void
+nvkm_gsp_vmm_write_new_valid_pt_pte_paddrs(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint32_t spt_idx,
+    const vm_paddr_t *paddrs, uint32_t count, uint64_t kind_bits)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	const uint64_t pte_step = NVKM_GMMU_PT_PAGE_SIZE >> NV_PT_ADDR_SHIFT;
+	uint32_t run_start;
+
+	if (count == 0)
+		return;
+
+	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, count);
+	nvkm_gsp_vmm_spt_mark_range_state(pt, spt_idx, count, 1, 0);
+	for (run_start = 0; run_start < count;) {
+		uint32_t run = 1;
+		uint64_t first_paddr = (uint64_t)paddrs[run_start];
+		uint64_t first_pte = nvkm_pte_to_sysmem(first_paddr) |
+		    kind_bits;
+
+		while (run_start + run < count &&
+		    (uint64_t)paddrs[run_start + run] ==
+		    first_paddr + (uint64_t)run * NVKM_GMMU_PT_PAGE_SIZE) {
+			run++;
+		}
+		nvkm_gsp_bar1_write_linear_region64(sc,
+		    pt->spt.bar1_gva +
+		    (uint64_t)(spt_idx + run_start) * 8,
+		    first_pte, pte_step, run);
+		run_start += run;
+	}
+	sc->vmm_pte_fast_write_count += count;
+	sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)] += count;
 }
 
 static int
@@ -651,14 +1221,33 @@ nvkm_gsp_vmm_user_pt_chunk_size(uint64_t va, uint64_t size)
 }
 
 static void
-nvkm_gsp_vmm_note_bulk_write(struct nvkm_gsp_vmm *vmm, uint32_t count)
+nvkm_gsp_vmm_note_bulk_write(struct nvkm_gsp_vmm *vmm, uint8_t page_shift,
+    uint64_t count)
 {
 	struct nvkm_softc *sc = vmm->sc;
+	uint32_t bucket;
 
 	if (count == 0)
 		return;
+	bucket = nvkm_gsp_vmm_page_shift_bucket(page_shift);
 	sc->vmm_pte_bulk_write_count++;
 	sc->vmm_pte_bulk_write_pages += count;
+	sc->vmm_pte_write_batch_count[bucket]++;
+}
+
+static void
+nvkm_gsp_vmm_note_bulk_clear(struct nvkm_gsp_vmm *vmm, uint8_t page_shift,
+    uint64_t count)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	uint32_t bucket;
+
+	if (count == 0)
+		return;
+	bucket = nvkm_gsp_vmm_page_shift_bucket(page_shift);
+	sc->vmm_pte_bulk_clear_count++;
+	sc->vmm_pte_bulk_clear_pages += count;
+	sc->vmm_pte_clear_batch_count[bucket]++;
 }
 
 /*
@@ -703,6 +1292,148 @@ nvkm_gsp_vmm_ensure_pt_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	return (0);
 }
 
+/*
+ * nvkm_gsp_vmm_ensure_pd0_range()
+ *
+ * Ownership:
+ *   Borrows vmm and ensures the parent PD0 pages for the requested 2 MiB
+ *   prepared-writer range exist.  It does not create LPT/SPT child tables and
+ *   does not install PD0 leaf state.
+ *
+ * Lifetime:
+ *   Allocated PD0 pages become owned by vmm.  The target PD0 slots remain
+ *   empty until a prepared writer installs valid/sparse state in commit.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  This is a prepare-stage helper for direct
+ *   2 MiB valid MAP and large sparse paths; it may allocate PD0 storage, so
+ *   callers must not use it from the no-fail VM_BIND commit section.
+ */
+int
+nvkm_gsp_vmm_ensure_pd0_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	uint64_t off;
+	int err;
+
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size; off += page_size) {
+		uint64_t cur = va + off;
+		uint32_t pd2_idx, pd1_idx;
+
+		pd2_idx = (uint32_t)((cur >> NVKM_GMMU_PD2_SHIFT) &
+		    (NVKM_GMMU_PD2_ENTRIES - 1));
+		pd1_idx = (uint32_t)((cur >> NVKM_GMMU_PD1_SHIFT) &
+		    (NVKM_GMMU_PD1_ENTRIES - 1));
+		err = nvkm_gsp_vmm_pd0_get(vmm, pd2_idx, pd1_idx, &pd0);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+	}
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+static struct nvkm_gsp_vmm_user_pt *
+nvkm_gsp_vmm_user_pt_find_va(struct nvkm_gsp_vmm *vmm, uint64_t va);
+
+/*
+ * nvkm_gsp_vmm_check_prepared_pt_range()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  It does not allocate page
+ *   tables, write BAR1, retain pointers, or change leaf-state.
+ *
+ * Lifetime:
+ *   The check proves that a later VM_BIND prepared writer can direct-lookup
+ *   every PT or PD0 page it will touch for this range and page size.  The
+ *   caller must keep VM remap serialization until the checked writer runs,
+ *   otherwise another remap could reclaim the page-table storage.
+ *
+ * Threading:
+ *   Acquires vmm->tok for the lookup walk.  This belongs to VM_BIND prepare /
+ *   pre-commit validation and mirrors the prepared writer's lookup granularity.
+ *   For 2 MiB PD0 sparse this validates parent PD0 slots, not child PTs.
+ */
+static int
+nvkm_gsp_vmm_check_prepared_pt_range_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, uint8_t page_shift)
+{
+	uint64_t off;
+
+	if (size == 0)
+		return (0);
+	if (page_shift == NVKM_GMMU_SPT_SHIFT) {
+		if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+			return (EINVAL);
+	} else if (page_shift == NVKM_GMMU_LPT_SHIFT) {
+		if ((va | size) & (NVKM_GMMU_LPT_PAGE_SIZE - 1))
+			return (EINVAL);
+	} else if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+		if ((va | size) & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+			return (EINVAL);
+	} else {
+		return (EINVAL);
+	}
+
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t count, pd0_idx;
+
+		if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+			uint32_t pd2_idx, pd1_idx;
+
+			pd2_idx = (uint32_t)((cur >> NVKM_GMMU_PD2_SHIFT) &
+			    (NVKM_GMMU_PD2_ENTRIES - 1));
+			pd1_idx = (uint32_t)((cur >> NVKM_GMMU_PD1_SHIFT) &
+			    (NVKM_GMMU_PD1_ENTRIES - 1));
+			pd0_idx = (uint32_t)((cur >> NVKM_GMMU_PD0_SHIFT) &
+			    (NVKM_GMMU_PD0_ENTRIES - 1));
+			pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+			if (pd0 == NULL)
+				return (ENOENT);
+			if (pd0->slot_state[pd0_idx] !=
+			    NVKM_GSP_VMM_PD0_SLOT_EMPTY)
+				return (EBUSY);
+			off += 1ULL << NVKM_GMMU_PD0_SHIFT;
+			continue;
+		}
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL)
+			return (ENOENT);
+		if (page_shift == NVKM_GMMU_LPT_SHIFT) {
+			count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+			off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+		} else {
+			count = nvkm_gsp_vmm_spt_chunk_count(cur, size - off);
+			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+		}
+	}
+	return (0);
+}
+
+int
+nvkm_gsp_vmm_check_prepared_pt_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, uint8_t page_shift)
+{
+	int err;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va, size,
+	    page_shift);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
 static struct nvkm_gsp_vmm_user_pt *
 nvkm_gsp_vmm_user_pt_find_va(struct nvkm_gsp_vmm *vmm, uint64_t va)
 {
@@ -715,31 +1446,6 @@ nvkm_gsp_vmm_user_pt_find_va(struct nvkm_gsp_vmm *vmm, uint64_t va)
 
 	return (nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
 	    pd0_idx));
-}
-
-static void
-nvkm_gsp_vmm_write_old_valid_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t pte)
-{
-	struct nvkm_softc *sc = vmm->sc;
-	struct nvkm_gsp_vmm_user_pt *pt;
-	uint32_t spt_idx;
-
-	pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va);
-	if (pt == NULL)
-		return;
-
-	spt_idx = nvkm_gsp_vmm_spt_idx(va);
-	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, 1);
-	pt->conservative_pte_accounting = true;
-	if (pt->valid_pte_count > 0)
-		pt->valid_pte_count--;
-	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
-	sc->vmm_pte_fast_clear_count++;
-	if (pte == 0)
-		sc->vmm_pte_fast_invalid_clear_count++;
-	else if (pte == nvkm_pte_to_sparse())
-		sc->vmm_pte_fast_sparse_clear_count++;
 }
 
 /*
@@ -766,12 +1472,8 @@ nvkm_gsp_vmm_write_old_valid_pte_range(struct nvkm_gsp_vmm *vmm,
 
 	if (count == 0)
 		return;
-	pt->conservative_pte_accounting = true;
-	if (pt->valid_pte_count > count)
-		pt->valid_pte_count -= count;
-	else
-		pt->valid_pte_count = 0;
 	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, count);
+	nvkm_gsp_vmm_mark_spt_range_from_pte(pt, spt_idx, count, pte);
 	nvkm_gsp_bar1_set_region64(sc, pt->spt.bar1_gva + spt_idx * 8,
 	    pte, count);
 	sc->vmm_pte_fast_clear_count += count;
@@ -779,8 +1481,9 @@ nvkm_gsp_vmm_write_old_valid_pte_range(struct nvkm_gsp_vmm *vmm,
 		sc->vmm_pte_fast_invalid_clear_count += count;
 	else if (pte == nvkm_pte_to_sparse())
 		sc->vmm_pte_fast_sparse_clear_count += count;
-	sc->vmm_pte_bulk_clear_count++;
-	sc->vmm_pte_bulk_clear_pages += count;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_SPT_SHIFT, count);
+	sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)] += count;
 }
 
 /*
@@ -828,37 +1531,18 @@ nvkm_gsp_vmm_write_new_valid_lpt_pte_linear(struct nvkm_gsp_vmm *vmm,
     uint64_t pte_step, uint32_t count)
 {
 	struct nvkm_softc *sc = vmm->sc;
-	uint32_t room;
 
 	if (count == 0)
 		return;
 
-	pt->conservative_pte_accounting = true;
 	nvkm_gsp_vmm_clear_spt_for_lpt_range(vmm, pt, lpt_idx, count);
-	room = NVKM_GMMU_LPT_ENTRIES - pt->valid_lpte_count;
-	pt->valid_lpte_count += MIN(count, room);
+	nvkm_gsp_vmm_lpt_mark_range_state(pt, lpt_idx, count, 1, 0);
 	nvkm_gsp_bar1_write_linear_region64(sc,
 	    pt->lpt.bar1_gva + (uint64_t)lpt_idx * 8, first_pte, pte_step,
 	    count);
 	sc->vmm_pte_fast_write_count += count;
-}
-
-static void
-nvkm_gsp_vmm_write_existing_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t pte)
-{
-	struct nvkm_softc *sc = vmm->sc;
-	struct nvkm_gsp_vmm_user_pt *pt;
-	uint32_t spt_idx;
-
-	pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va);
-	if (pt == NULL)
-		return;
-
-	spt_idx = nvkm_gsp_vmm_spt_idx(va);
-	nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, 1);
-	pt->conservative_pte_accounting = true;
-	nvkm_gsp_bar1_wr64(sc, pt->spt.bar1_gva + spt_idx * 8, pte);
+	sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] += count;
 }
 
 static struct nvkm_gsp_vmm_pd0 *
@@ -890,43 +1574,35 @@ nvkm_gsp_vmm_pt_has_sparse_region(struct nvkm_gsp_vmm *vmm,
 	pt_end = pt_start + (1ULL << NVKM_GMMU_PD0_SHIFT);
 
 	LIST_FOREACH(region, &vmm->sparse_regions, link) {
-		uint64_t region_end = region->addr + region->size;
-
-		if (region->addr < pt_end && region_end > pt_start)
+		if (nvkm_gsp_vmm_sparse_region_overlaps_range(region,
+		    pt_start, pt_end - pt_start))
 			return (1);
 	}
 	return (0);
 }
 
+/*
+ * nvkm_gsp_vmm_release_pd0_if_empty()
+ *
+ * Ownership:
+ *   Borrows pd0 from vmm.  If every PD0 slot is empty, the helper consumes the
+ *   pd0 object and releases its BAR1-backed page-table page.
+ *
+ * Lifetime:
+ *   pd0 is invalid after this helper frees it.  Callers must not dereference
+ *   pd0 after calling when nvkm_gsp_vmm_pd0_has_live_slot() was false.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  Parent PD1 writes are synchronous BAR1 MMIO; the
+ *   enclosing commit owns the final flush/TLB invalidate.
+ */
 static void
-nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
-    struct nvkm_gsp_vmm_user_pt *pt, uint64_t empty_pde)
+nvkm_gsp_vmm_release_pd0_if_empty(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_pd0 *pd0)
 {
 	struct nvkm_softc *sc = vmm->sc;
-	struct nvkm_gsp_vmm_pd0 *pd0 = pt->pd0;
 
-	if (pt->valid_pte_count != 0 || pt->valid_lpte_count != 0)
-		return;
-	if (pt->conservative_pte_accounting)
-		return;
-	if (pt->sparse_pte_count != 0)
-		return;
-	if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
-		return;
-
-	nvkm_gsp_vmm_pd0_write_slot(sc, pd0, pt->pd0_idx, empty_pde,
-	    empty_pde);
-	LIST_REMOVE(pt, lookup_link);
-	LIST_REMOVE(pt, link);
-	nvkm_gsp_bar1_free_page(sc, &pt->spt);
-	nvkm_gsp_bar1_free_page(sc, &pt->lpt);
-	kfree(pt, M_NVKM_VMM);
-
-	if (pd0->refcount > 0)
-		pd0->refcount--;
-	if (pd0->refcount != 0)
-		return;
-	if (empty_pde != 0)
+	if (nvkm_gsp_vmm_pd0_has_live_slot(pd0))
 		return;
 
 	nvkm_gsp_bar1_wr64(sc, pd0->pd1_page->bar1_gva + pd0->pd1_idx * 8,
@@ -935,6 +1611,157 @@ nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
 	LIST_REMOVE(pd0, link);
 	nvkm_gsp_bar1_free_page(sc, &pd0->page);
 	kfree(pd0, M_NVKM_VMM);
+	sc->vmm_pd0_empty_free_count++;
+}
+
+/*
+ * nvkm_gsp_vmm_free_pt()
+ *
+ * Ownership:
+ *   Consumes pt from vmm's live PT lists and releases its BAR1-backed LPT/SPT
+ *   pages.  The caller must have already decided that the parent PDE may be
+ *   cleared or replaced with empty_pde.
+ *
+ * Lifetime:
+ *   pt is invalid after return.  Its parent pd0 may also be consumed if this
+ *   was the last child PT and empty_pde is invalid.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This helper performs synchronous BAR1 writes but
+ *   does not flush or invalidate; the enclosing VM_BIND commit owns that
+ *   boundary.
+ */
+static void
+nvkm_gsp_vmm_free_pt(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint64_t empty_pde)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_pd0 *pd0 = pt->pd0;
+
+	if (empty_pde != 0)
+		nvkm_gsp_vmm_pd0_write_sparse_2m_slot(sc, pd0, pt->pd0_idx,
+		    empty_pde);
+	else
+		nvkm_gsp_vmm_pd0_write_empty_slot(sc, pd0, pt->pd0_idx);
+	LIST_REMOVE(pt, lookup_link);
+	LIST_REMOVE(pt, link);
+	nvkm_gsp_bar1_free_page(sc, &pt->spt);
+	nvkm_gsp_bar1_free_page(sc, &pt->lpt);
+	kfree(pt, M_NVKM_VMM);
+	sc->vmm_pt_empty_free_count++;
+
+	nvkm_gsp_vmm_release_pd0_if_empty(vmm, pd0);
+}
+
+/*
+ * nvkm_gsp_vmm_free_pt_preserve_pd0()
+ *
+ * Ownership:
+ *   Consumes a child PT from vmm's live PT lists, but deliberately keeps the
+ *   parent PD0 page owned by the VMM for a following prepared PD0 writer.
+ *
+ * Lifetime:
+ *   pt is invalid after return.  The parent PD0 slot is empty and the PD0 page
+ *   remains linked until the enclosing remap commit installs the next PD0
+ *   state or a later reclaim sees it empty.
+ *
+ * Threading:
+ *   Callers hold vmm->tok in a no-fail VM_BIND commit section.  This helper
+ *   performs deterministic BAR1 writes and page-table frees only.
+ */
+static void
+nvkm_gsp_vmm_free_pt_preserve_pd0(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_pd0 *pd0 = pt->pd0;
+
+	nvkm_gsp_vmm_pd0_write_empty_slot(sc, pd0, pt->pd0_idx);
+	LIST_REMOVE(pt, lookup_link);
+	LIST_REMOVE(pt, link);
+	nvkm_gsp_bar1_free_page(sc, &pt->spt);
+	nvkm_gsp_bar1_free_page(sc, &pt->lpt);
+	kfree(pt, M_NVKM_VMM);
+	sc->vmm_pt_empty_free_count++;
+}
+
+/*
+ * nvkm_gsp_vmm_free_pt_to_2m()
+ *
+ * Ownership:
+ *   Consumes a child PT and replaces its parent PD0 slot with one 2 MiB valid
+ *   leaf.  The caller owns the BO/mapping state that proves the replacement is
+ *   semantically identical to the 64 KiB leaves being removed.
+ *
+ * Lifetime:
+ *   pt is invalid after return.  The parent pd0 remains live because the same
+ *   slot is now a 2 MiB leaf.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This helper performs deterministic BAR1 writes
+ *   and page-table page frees; the caller owns the final invalidate.
+ */
+static void
+nvkm_gsp_vmm_free_pt_to_2m(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint64_t pte)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_pd0 *pd0 = pt->pd0;
+
+	nvkm_gsp_vmm_pd0_write_valid_2m_slot(sc, pd0, pt->pd0_idx, pte);
+	LIST_REMOVE(pt, lookup_link);
+	LIST_REMOVE(pt, link);
+	nvkm_gsp_bar1_free_page(sc, &pt->spt);
+	nvkm_gsp_bar1_free_page(sc, &pt->lpt);
+	kfree(pt, M_NVKM_VMM);
+	sc->vmm_pt_empty_free_count++;
+}
+
+static void
+nvkm_gsp_vmm_reclaim_empty_pt(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt, uint64_t empty_pde)
+{
+	if (pt->valid_pte_count != 0 || pt->valid_lpte_count != 0)
+		return;
+	if (pt->sparse_pte_count != 0 || pt->sparse_lpte_count != 0)
+		return;
+	if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
+		return;
+
+	nvkm_gsp_vmm_free_pt(vmm, pt, empty_pde);
+}
+
+/*
+ * nvkm_gsp_vmm_skip_clear_full_pt()
+ *
+ * Ownership:
+ *   Consumes pt only when the caller is unmapping the full 2 MiB PT window.
+ *   No leaf PTE ownership remains after the parent PDE is cleared.
+ *
+ * Lifetime:
+ *   pt is invalid on success.  On failure no state changes are made and the
+ *   caller must fall back to ordinary leaf clear.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and have already proven the VM_BIND target covers
+ *   the whole PT window.  This helper does not flush; the caller owns the
+ *   final invalidate.
+ */
+static bool
+nvkm_gsp_vmm_skip_clear_full_pt(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	if (pt->sparse_pte_count != 0 || pt->sparse_lpte_count != 0)
+		return (false);
+	if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
+		return (false);
+
+	sc->vmm_pt_skip_clear_count++;
+	sc->vmm_pt_skip_clear_pages += NVKM_GMMU_SPT_ENTRIES;
+	nvkm_gsp_vmm_free_pt(vmm, pt, 0);
+	return (true);
 }
 
 static void
@@ -950,9 +1777,14 @@ nvkm_gsp_vmm_unmap_existing_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	if (pt == NULL) {
 		if (empty_pde == 0) {
 			pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, va, &pd0_idx);
-			if (pd0 != NULL)
-				nvkm_gsp_vmm_pd0_write_slot(sc, pd0,
-				    pd0_idx, 0, 0);
+			if (pd0 != NULL &&
+			    (pd0->slot_state[pd0_idx] ==
+			    NVKM_GSP_VMM_PD0_SLOT_EMPTY ||
+			    (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1)) == 0)) {
+				nvkm_gsp_vmm_pd0_write_empty_slot(sc, pd0,
+				    pd0_idx);
+				nvkm_gsp_vmm_release_pd0_if_empty(vmm, pd0);
+			}
 		}
 		return;
 	}
@@ -960,20 +1792,202 @@ nvkm_gsp_vmm_unmap_existing_pte(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	nvkm_gsp_vmm_reclaim_empty_pt(vmm, pt, empty_pde);
 }
 
+/*
+ * nvkm_gsp_vmm_write_sparse_prepared()
+ *
+ * Ownership:
+ *   Borrows vmm and consumes no sparse-region ownership.  The caller owns the
+ *   region record and is responsible for linking or unlinking it around this
+ *   writer.
+ *
+ * Lifetime:
+ *   All PTs covering [va, va + size) must have been created by prepare before
+ *   commit.  This helper only borrows those PTs by direct lookup and never
+ *   calls the legacy lazy allocation path.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and are already in the VM_BIND commit section.  BAR1
+ *   writes complete synchronously here; the caller owns the final VMM flush/TLB
+ *   invalidate boundary.
+ */
 static int
-nvkm_gsp_vmm_write_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va,
+nvkm_gsp_vmm_write_sparse_spt_prepared(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t size)
 {
-	uint64_t off;
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *pt;
+	uint64_t cur, chunk, off, sparse_pte;
+	uint32_t spt_idx, count;
 	int err;
 
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-		err = nvkm_gsp_vmm_write_pte(vmm, va + off,
-		    nvkm_pte_to_sparse());
-		if (err != 0)
-			return (err);
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	sparse_pte = nvkm_pte_to_sparse();
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va, size,
+	    NVKM_GMMU_SPT_SHIFT);
+	if (err != 0)
+		return (err);
+	for (off = 0; off < size; off += chunk) {
+		cur = va + off;
+		chunk = nvkm_gsp_vmm_user_pt_chunk_size(cur, size - off);
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL)
+			return (ENOENT);
+
+		spt_idx = nvkm_gsp_vmm_spt_idx(cur);
+		count = (uint32_t)(chunk / NVKM_GMMU_PT_PAGE_SIZE);
+		nvkm_gsp_vmm_clear_lpt_for_spt_range(vmm, pt, spt_idx, count);
+		nvkm_gsp_vmm_mark_spt_range_from_pte(pt, spt_idx, count,
+		    sparse_pte);
+		nvkm_gsp_bar1_set_region64(sc,
+		    pt->spt.bar1_gva + (uint64_t)spt_idx * 8, sparse_pte,
+		    count);
+		sc->vmm_pte_fast_clear_count += count;
+		sc->vmm_pte_fast_sparse_clear_count += count;
+		nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_SPT_SHIFT,
+		    count);
+		sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_SPT_SHIFT)] +=
+		    count;
 	}
 	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_sparse_lpt_prepared()
+ *
+ * Ownership:
+ *   Borrows vmm and consumes no sparse-region ownership.  It only rewrites the
+ *   prepared child LPT/SPT storage that the caller already owns through the
+ *   enclosing sparse-region commit.
+ *
+ * Lifetime:
+ *   All PTs covering [va, va + size) must remain linked until the paired LPT
+ *   sparse writes and SPT clears are published by the caller's final flush.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This is the large-page sparse backend path; the
+ *   current DRM VM_BIND planner still calls the 4 KiB sparse path until the
+ *   large-sparse enable gate is deliberately opened.
+ */
+static int
+nvkm_gsp_vmm_write_sparse_lpt_prepared(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *pt;
+	uint64_t cur, off, sparse_pte;
+	uint32_t lpt_idx, count;
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_LPT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	sparse_pte = nvkm_pte_to_sparse();
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va, size,
+	    NVKM_GMMU_LPT_SHIFT);
+	if (err != 0)
+		return (err);
+	for (off = 0; off < size;) {
+		cur = va + off;
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL)
+			return (ENOENT);
+
+		lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
+		count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+		nvkm_gsp_vmm_clear_spt_for_lpt_range(vmm, pt, lpt_idx,
+		    count);
+		nvkm_gsp_vmm_lpt_mark_range_state(pt, lpt_idx, count, 0,
+		    1);
+		nvkm_gsp_bar1_set_region64(sc,
+		    pt->lpt.bar1_gva + (uint64_t)lpt_idx * 8, sparse_pte,
+		    count);
+		sc->vmm_pte_fast_clear_count += count;
+		sc->vmm_pte_fast_sparse_clear_count += count;
+		nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT,
+		    count);
+		sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+		    count;
+		off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_sparse_pd0_prepared()
+ *
+ * Ownership:
+ *   Borrows vmm and consumes no sparse-region ownership.  It writes only PD0
+ *   slots whose parent PD0 pages were prepared earlier by
+ *   ensure_pd0_range().
+ *
+ * Lifetime:
+ *   The target slots must stay empty from the prepared-range check through the
+ *   PD0 sparse writes.  The caller holds VM remap serialization and publishes
+ *   the new sparse region only after the enclosing flush/invalidate boundary.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and are in the no-fail commit section.  This helper
+ *   does not allocate PD0 pages, create child LPT/SPT tables, or call any
+ *   legacy lazy page-table helper.
+ */
+static int
+nvkm_gsp_vmm_write_sparse_pd0_prepared(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	uint64_t off, sparse_pde;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	uint64_t count = 0;
+	int err;
+
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va, size,
+	    NVKM_GMMU_PD0_SHIFT);
+	if (err != 0)
+		return (err);
+
+	sparse_pde = nvkm_pde_to_sparse();
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		uint32_t pd0_idx;
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, va + off, &pd0_idx);
+		if (pd0 == NULL)
+			return (ENOENT);
+		if (pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_EMPTY)
+			return (EBUSY);
+		nvkm_gsp_vmm_pd0_write_sparse_2m_slot(sc, pd0, pd0_idx,
+		    sparse_pde);
+		count++;
+	}
+	sc->vmm_pte_fast_clear_count += count;
+	sc->vmm_pte_fast_sparse_clear_count += count;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_PD0_SHIFT, count);
+	sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] += count;
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_write_sparse_prepared(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, uint8_t page_shift)
+{
+	if (page_shift == NVKM_GMMU_SPT_SHIFT)
+		return (nvkm_gsp_vmm_write_sparse_spt_prepared(vmm, va,
+		    size));
+	if (page_shift == NVKM_GMMU_LPT_SHIFT)
+		return (nvkm_gsp_vmm_write_sparse_lpt_prepared(vmm, va,
+		    size));
+	if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		return (nvkm_gsp_vmm_write_sparse_pd0_prepared(vmm, va,
+		    size));
+	return (EINVAL);
 }
 
 void
@@ -1044,18 +2058,103 @@ nvkm_gsp_vmm_debug_dump_pte(struct nvkm_gsp_vmm *vmm, uint64_t va)
 	    (uintmax_t)nvkm_pte_to_sparse());
 }
 
-void
-nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm)
+static uint64_t
+nvkm_gsp_vmm_dirty_set_page_count(const struct nvkm_gsp_vmm_dirty_set *dirty)
+{
+	uint64_t pages = 0;
+
+	if (dirty == NULL)
+		return (0);
+	if (dirty->page_count != 0)
+		return (dirty->page_count);
+	for (uint32_t i = 0; i < dirty->range_count; i++) {
+		const struct nvkm_gsp_vmm_dirty_range *range =
+		    &dirty->ranges[i];
+
+		if (range->end <= range->start)
+			continue;
+		pages += (range->end - range->start) / NVKM_GMMU_PT_PAGE_SIZE;
+	}
+	return (pages);
+}
+
+/*
+ * nvkm_gsp_vmm_flush_common()
+ *
+ * Ownership:
+ *   Borrows vmm and an optional dirty set.  The backend consumes only scalar
+ *   range facts and never retains dirty-set storage or remap ownership.
+ *
+ * Lifetime:
+ *   PTE/PDE writes issued before this call become visible to GMMU after the
+ *   BAR1 flush and hardware invalidate complete.  Dirty range storage only has
+ *   to live through this call.
+ *
+ * Threading:
+ *   Takes vmm->tok while flushing backend writes and issuing the TU102
+ *   invalidate.  The caller owns higher-level VM_BIND/job ordering and must not
+ *   publish fences or release retired BO refs before this call returns.
+ */
+static void
+nvkm_gsp_vmm_flush_common(struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_dirty_set *dirty)
 {
 	struct nvkm_softc *sc = vmm->sc;
 	uint64_t profile_start = nvkm_gsp_vmm_profile_now_us(sc);
+	uint32_t dirty_ranges = dirty != NULL ? dirty->range_count : 0;
 
 	lwkt_gettoken(&vmm->tok);
 	nvkm_gsp_bar1_flush(sc);
+	sc->vmm_pte_backend_flush_count++;
+	if (dirty_ranges != 0) {
+		sc->vmm_dirty_flush_count++;
+		sc->vmm_dirty_flush_range_count += dirty_ranges;
+		sc->vmm_dirty_flush_pages +=
+		    nvkm_gsp_vmm_dirty_set_page_count(dirty);
+		if (dirty->overflow)
+			sc->vmm_dirty_flush_overflow_count++;
+		/*
+		 * TU102/GSP exposes the same PAGE_ALL invalidate shape as
+		 * Linux nouveau tu102_vmm_flush().  The dirty set is still the
+		 * backend boundary; this counter marks the current whole-PDB
+		 * fallback until a narrower hardware/RM command is proven.
+		 */
+		sc->vmm_dirty_flush_all_fallback_count++;
+	}
 	nvkm_gsp_vmm_invalidate(vmm);
 	sc->vmm_flush_count++;
 	nvkm_gsp_vmm_profile_add_us(sc, &sc->vmm_flush_us, profile_start);
 	lwkt_reltoken(&vmm->tok);
+}
+
+void
+nvkm_gsp_vmm_flush(struct nvkm_gsp_vmm *vmm)
+{
+	nvkm_gsp_vmm_flush_common(vmm, NULL);
+}
+
+/*
+ * nvkm_gsp_vmm_flush_dirty()
+ *
+ * Ownership:
+ *   Borrows a VMM and a caller-owned dirty set.  It does not retain dirty
+ *   ranges after the call and does not own any VM_BIND plan objects.
+ *
+ * Lifetime:
+ *   Completes the visibility boundary for all PTE/PDE writes described by the
+ *   dirty set before returning.  Callers may signal fences or release retired
+ *   BO refs only after this function returns.
+ *
+ * Threading:
+ *   May be called while the caller holds the outer remap serialization.  The
+ *   helper takes vmm->tok internally for backend write visibility and hardware
+ *   invalidate, matching nvkm_gsp_vmm_flush().
+ */
+void
+nvkm_gsp_vmm_flush_dirty(struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_dirty_set *dirty)
+{
+	nvkm_gsp_vmm_flush_common(vmm, dirty);
 }
 
 int
@@ -1118,9 +2217,27 @@ nvkm_gsp_vmm_map_sysmem_kva_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	return (0);
 }
 
-int
-nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    const struct nvkm_bo *bo, uint64_t bo_offset, uint64_t size, uint8_t kind)
+/*
+ * nvkm_gsp_vmm_map_sysmem_bo_worker()
+ *
+ * Ownership:
+ *   Borrows vmm and bo.  It does not take GEM/BO references and does not own
+ *   the VM binding; callers must keep the BO populated and pinned.
+ *
+ * Lifetime:
+ *   In prepared_only mode the target PTs must already be linked in vmm by
+ *   nvkm_gsp_vmm_ensure_pt_range().  The written PTEs become visible only
+ *   after the caller performs the enclosing VMM flush/TLB invalidate.
+ *
+ * Threading:
+ *   Acquires vmm->tok while writing PTEs.  prepared_only never allocates page
+ *   tables; the legacy mode may allocate through user_pt_get() for internal
+ *   non-VM_BIND callers.
+ */
+static int
+nvkm_gsp_vmm_map_sysmem_bo_worker(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    const struct nvkm_bo *bo, uint64_t bo_offset, uint64_t size, uint8_t kind,
+    int prepared_only)
 {
 	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t off;
@@ -1135,10 +2252,18 @@ nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 		uint64_t cur = va + off;
 		uint32_t spt_idx, count, i;
 
-		err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
-		if (err != 0) {
-			lwkt_reltoken(&vmm->tok);
-			return (err);
+		if (prepared_only) {
+			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+			if (pt == NULL) {
+				lwkt_reltoken(&vmm->tok);
+				return (ENOENT);
+			}
+		} else {
+			err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
+			if (err != 0) {
+				lwkt_reltoken(&vmm->tok);
+				return (err);
+			}
 		}
 		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
 		    (NVKM_GMMU_SPT_ENTRIES - 1));
@@ -1154,15 +2279,231 @@ nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 				lwkt_reltoken(&vmm->tok);
 				return (err);
 			}
-			nvkm_gsp_vmm_write_new_valid_pt_pte_raw(vmm, pt,
-			    spt_idx + i, nvkm_pte_to_sysmem((uint64_t)paddr) |
-			    kind_bits);
+				nvkm_gsp_vmm_write_new_valid_pt_pte_raw(vmm, pt,
+				    spt_idx + i, nvkm_pte_to_sysmem((uint64_t)paddr) |
+				    kind_bits);
+			}
+			nvkm_gsp_vmm_note_bulk_write(vmm,
+			    NVKM_GMMU_SPT_SHIFT, count);
+			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
 		}
-		nvkm_gsp_vmm_note_bulk_write(vmm, count);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+int
+nvkm_gsp_vmm_map_sysmem_bo_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    const struct nvkm_bo *bo, uint64_t bo_offset, uint64_t size, uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_sysmem_bo_worker(vmm, va, bo, bo_offset,
+	    size, kind, 0));
+}
+
+int
+nvkm_gsp_vmm_map_sysmem_bo_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, const struct nvkm_bo *bo, uint64_t bo_offset, uint64_t size,
+    uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_sysmem_bo_worker(vmm, va, bo, bo_offset,
+	    size, kind, 1));
+}
+
+static int
+nvkm_gsp_vmm_check_sysmem_paddr_snapshot(const vm_paddr_t *paddrs,
+    uint32_t page_count, uint8_t page_shift)
+{
+	uint64_t page_size;
+	uint64_t first;
+
+	if (paddrs == NULL || page_count == 0)
+		return (EINVAL);
+	if (page_shift != NVKM_GMMU_SPT_SHIFT &&
+	    page_shift != NVKM_GMMU_LPT_SHIFT &&
+	    page_shift != NVKM_GMMU_PD0_SHIFT)
+		return (EINVAL);
+
+	page_size = 1ULL << page_shift;
+	first = (uint64_t)paddrs[0];
+	if ((first & (page_size - 1)) != 0)
+		return (EINVAL);
+	if (page_count > 1 &&
+	    first > UINT64_MAX -
+	    (uint64_t)(page_count - 1) * NVKM_GMMU_PT_PAGE_SIZE)
+		return (EINVAL);
+	for (uint32_t i = 0; i < page_count; i++) {
+		uint64_t expected = first +
+		    (uint64_t)i * NVKM_GMMU_PT_PAGE_SIZE;
+
+		if ((uint64_t)paddrs[i] != expected)
+			return (EINVAL);
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and a caller-owned physical-page snapshot.  It does not retain
+ *   the array and does not own the backing BO; VM_BIND prepare keeps that
+ *   backing pinned for the enclosing operation.
+ *
+ * Lifetime:
+ *   paddrs must contain one 4 KiB page address for every page in the target VA
+ *   range and remain valid until this function returns.  The written PTEs are
+ *   published only after the caller performs the enclosing VMM flush/invalidate.
+ *
+ * Threading:
+ *   Acquires vmm->tok while updating leaf-state and BAR1 PTEs.  This is a
+ *   prepared-only writer: it direct-lookups existing PTs and never allocates
+ *   page tables or queries BO backing.
+ */
+int
+nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush(
+    struct nvkm_gsp_vmm *vmm, uint64_t va, const vm_paddr_t *paddrs,
+    uint32_t page_count, uint8_t kind, uint8_t page_shift)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t off;
+	uint32_t page_index;
+	int err;
+
+	if (paddrs == NULL || page_count == 0 ||
+	    (va & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0)
+		return (EINVAL);
+	if (page_shift == NVKM_GMMU_LPT_SHIFT ||
+	    page_shift == NVKM_GMMU_PD0_SHIFT) {
+		uint64_t page_size = 1ULL << page_shift;
+		uint32_t pages_per_leaf =
+		    (uint32_t)(page_size / NVKM_GMMU_PT_PAGE_SIZE);
+
+		if ((va & (page_size - 1)) != 0 ||
+		    (page_count % pages_per_leaf) != 0)
+			return (EINVAL);
+		err = nvkm_gsp_vmm_check_sysmem_paddr_snapshot(paddrs,
+		    page_count, page_shift);
+		if (err != 0)
+			return (err);
+	} else if (page_shift != NVKM_GMMU_SPT_SHIFT) {
+		return (EINVAL);
+	}
+
+	lwkt_gettoken(&vmm->tok);
+	if (page_count > UINT64_MAX / NVKM_GMMU_PT_PAGE_SIZE) {
+		lwkt_reltoken(&vmm->tok);
+		return (EINVAL);
+	}
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va,
+	    (uint64_t)page_count * NVKM_GMMU_PT_PAGE_SIZE,
+	    page_shift);
+	if (err != 0) {
+		lwkt_reltoken(&vmm->tok);
+		return (err);
+	}
+	if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+		uint32_t pages_per_leaf =
+		    (uint32_t)(NVKM_GMMU_PD0_PAGE_SIZE /
+		    NVKM_GMMU_PT_PAGE_SIZE);
+		uint32_t pd0_count = 0;
+
+		for (page_index = 0, off = 0; page_index < page_count;
+		    page_index += pages_per_leaf,
+		    off += NVKM_GMMU_PD0_PAGE_SIZE) {
+			struct nvkm_gsp_vmm_pd0 *pd0;
+			uint64_t cur = va + off;
+			uint64_t pte = nvkm_pte_to_sysmem(
+			    (uint64_t)paddrs[page_index]) | kind_bits;
+			uint32_t pd0_idx;
+
+			pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+			if (pd0 == NULL) {
+				lwkt_reltoken(&vmm->tok);
+				return (EIO);
+			}
+			if (pd0->slot_state[pd0_idx] !=
+			    NVKM_GSP_VMM_PD0_SLOT_EMPTY) {
+				lwkt_reltoken(&vmm->tok);
+				return (EBUSY);
+			}
+			nvkm_gsp_vmm_pd0_write_valid_2m_slot(vmm->sc, pd0,
+			    pd0_idx, pte);
+			pd0_count++;
+		}
+		vmm->sc->vmm_pte_fast_write_count += pd0_count;
+		vmm->sc->vmm_pte_leaf_write_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] +=
+		    pd0_count;
+		nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_PD0_SHIFT,
+		    pd0_count);
+		lwkt_reltoken(&vmm->tok);
+		return (0);
+	}
+	if (page_shift == NVKM_GMMU_LPT_SHIFT) {
+		uint64_t pte_step = NVKM_GMMU_LPT_PAGE_SIZE >>
+		    NV_PT_ADDR_SHIFT;
+
+		for (page_index = 0, off = 0; page_index < page_count;) {
+			struct nvkm_gsp_vmm_user_pt *pt;
+			uint64_t cur = va + off;
+			uint64_t first_pte;
+			uint32_t lpt_idx, count;
+
+			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+			if (pt == NULL) {
+				lwkt_reltoken(&vmm->tok);
+				return (ENOENT);
+			}
+
+			lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
+			count = nvkm_gsp_vmm_lpt_chunk_count(cur,
+			    (uint64_t)(page_count - page_index) *
+			    NVKM_GMMU_PT_PAGE_SIZE);
+			first_pte = nvkm_pte_to_sysmem(
+			    (uint64_t)paddrs[page_index]) | kind_bits;
+			nvkm_gsp_vmm_write_new_valid_lpt_pte_linear(vmm, pt,
+			    lpt_idx, first_pte, pte_step, count);
+			nvkm_gsp_vmm_note_bulk_write(vmm,
+			    NVKM_GMMU_LPT_SHIFT, count);
+			page_index += count * NVKM_GMMU_LPT_SPTE_COUNT;
+			off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+		}
+		lwkt_reltoken(&vmm->tok);
+		return (0);
+	}
+
+	for (page_index = 0, off = 0; page_index < page_count;) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t spt_idx, count;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (ENOENT);
+		}
+
+		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+		    (NVKM_GMMU_SPT_ENTRIES - 1));
+		count = nvkm_gsp_vmm_spt_chunk_count(cur,
+		    (uint64_t)(page_count - page_index) *
+		    NVKM_GMMU_PT_PAGE_SIZE);
+		nvkm_gsp_vmm_write_new_valid_pt_pte_paddrs(vmm, pt,
+		    spt_idx, paddrs + page_index, count, kind_bits);
+		nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_SPT_SHIFT,
+		    count);
+		page_index += count;
 		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+int
+nvkm_gsp_vmm_map_sysmem_paddrs_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, const vm_paddr_t *paddrs, uint32_t page_count, uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush(vmm, va,
+	    paddrs, page_count, kind, NVKM_GMMU_SPT_SHIFT));
 }
 
 int
@@ -1177,9 +2518,9 @@ nvkm_gsp_vmm_map_sysmem_kva(struct nvkm_gsp_vmm *vmm, uint64_t va,
 }
 
 static int
-nvkm_gsp_vmm_map_vram_flags_spt_noflush(struct nvkm_gsp_vmm *vmm,
+nvkm_gsp_vmm_map_vram_flags_spt_worker(struct nvkm_gsp_vmm *vmm,
     uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
-    uint8_t kind)
+    uint8_t kind, int prepared_only)
 {
 	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
@@ -1195,24 +2536,41 @@ nvkm_gsp_vmm_map_vram_flags_spt_noflush(struct nvkm_gsp_vmm *vmm,
 		flags |= NV_PTE_RO;
 
 	lwkt_gettoken(&vmm->tok);
+	if (prepared_only) {
+		err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va,
+		    size, NVKM_GMMU_SPT_SHIFT);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+	}
 	for (off = 0; off < size;) {
 		struct nvkm_gsp_vmm_user_pt *pt;
 		uint64_t cur = va + off;
 		uint64_t first_pte;
 		uint32_t spt_idx, count;
 
-		err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
-		if (err != 0) {
-			lwkt_reltoken(&vmm->tok);
-			return (err);
+		if (prepared_only) {
+			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+			if (pt == NULL) {
+				lwkt_reltoken(&vmm->tok);
+				return (ENOENT);
+			}
+		} else {
+			err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
+			if (err != 0) {
+				lwkt_reltoken(&vmm->tok);
+				return (err);
+			}
 		}
-		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
-		    (NVKM_GMMU_SPT_ENTRIES - 1));
-		count = nvkm_gsp_vmm_spt_chunk_count(cur, size - off);
-		first_pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
-		nvkm_gsp_vmm_write_new_valid_pt_pte_linear(vmm, pt, spt_idx,
-		    first_pte, pte_step, count);
-		nvkm_gsp_vmm_note_bulk_write(vmm, count);
+			spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+			    (NVKM_GMMU_SPT_ENTRIES - 1));
+			count = nvkm_gsp_vmm_spt_chunk_count(cur, size - off);
+			first_pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+			nvkm_gsp_vmm_write_new_valid_pt_pte_linear(vmm, pt, spt_idx,
+			    first_pte, pte_step, count);
+			nvkm_gsp_vmm_note_bulk_write(vmm,
+			    NVKM_GMMU_SPT_SHIFT, count);
 		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
 	}
 	lwkt_reltoken(&vmm->tok);
@@ -1220,9 +2578,9 @@ nvkm_gsp_vmm_map_vram_flags_spt_noflush(struct nvkm_gsp_vmm *vmm,
 }
 
 static int
-nvkm_gsp_vmm_map_vram_flags_lpt_noflush(struct nvkm_gsp_vmm *vmm,
+nvkm_gsp_vmm_map_vram_flags_lpt_worker(struct nvkm_gsp_vmm *vmm,
     uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
-    uint8_t kind)
+    uint8_t kind, int prepared_only)
 {
 	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
 	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
@@ -1238,27 +2596,763 @@ nvkm_gsp_vmm_map_vram_flags_lpt_noflush(struct nvkm_gsp_vmm *vmm,
 		flags |= NV_PTE_RO;
 
 	lwkt_gettoken(&vmm->tok);
+	if (prepared_only) {
+		err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va,
+		    size, NVKM_GMMU_LPT_SHIFT);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+	}
 	for (off = 0; off < size;) {
 		struct nvkm_gsp_vmm_user_pt *pt;
 		uint64_t cur = va + off;
 		uint64_t first_pte;
 		uint32_t lpt_idx, count;
 
-		err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
-		if (err != 0) {
-			lwkt_reltoken(&vmm->tok);
-			return (err);
+		if (prepared_only) {
+			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+			if (pt == NULL) {
+				lwkt_reltoken(&vmm->tok);
+				return (ENOENT);
+			}
+		} else {
+			err = nvkm_gsp_vmm_user_pt_get(vmm, cur, &pt);
+			if (err != 0) {
+				lwkt_reltoken(&vmm->tok);
+				return (err);
+			}
 		}
-		lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
-		count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
-		first_pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
-		nvkm_gsp_vmm_write_new_valid_lpt_pte_linear(vmm, pt, lpt_idx,
-		    first_pte, pte_step, count);
-		nvkm_gsp_vmm_note_bulk_write(vmm, count);
+			lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
+			count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+			first_pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+			nvkm_gsp_vmm_write_new_valid_lpt_pte_linear(vmm, pt, lpt_idx,
+			    first_pte, pte_step, count);
+			nvkm_gsp_vmm_note_bulk_write(vmm,
+			    NVKM_GMMU_LPT_SHIFT, count);
 		off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_map_vram_flags_*_worker()
+ *
+ * Ownership:
+ *   Borrows vmm and caller-provided physical VRAM metadata.  It does not take
+ *   BO/GEM references; VM_BIND callers keep the live binding pinned.
+ *
+ * Lifetime:
+ *   prepared_only requires the LPT/SPT storage to exist before entry.  The
+ *   caller owns the final VMM flush/TLB invalidate that publishes the PTEs.
+ *
+ * Threading:
+ *   Writers hold vmm->tok while updating leaf-state and BAR1 PTEs.  The
+ *   prepared path never allocates PTs; the legacy path may allocate for
+ *   internal RM/GSP users that still rely on the older helper contract.
+ */
+static int
+nvkm_gsp_vmm_map_vram_flags_spt_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_vram_flags_spt_worker(vmm, va, paddr,
+	    size, priv, ro, kind, 0));
+}
+
+static int
+nvkm_gsp_vmm_map_vram_flags_lpt_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_vram_flags_lpt_worker(vmm, va, paddr,
+	    size, priv, ro, kind, 0));
+}
+
+static int
+nvkm_gsp_vmm_map_vram_flags_spt_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_vram_flags_spt_worker(vmm, va, paddr,
+	    size, priv, ro, kind, 1));
+}
+
+static int
+nvkm_gsp_vmm_map_vram_flags_lpt_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	return (nvkm_gsp_vmm_map_vram_flags_lpt_worker(vmm, va, paddr,
+	    size, priv, ro, kind, 1));
+}
+
+/*
+ * nvkm_gsp_vmm_map_vram_flags_pd0_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and caller-owned VRAM physical range metadata.  It does not
+ *   acquire BO, GEM, or VM binding ownership.
+ *
+ * Lifetime:
+ *   The target PD0 slots must be clean: no lower LPT/SPT child table and no
+ *   existing 2 MiB leaf may be live.  The caller owns any required remap
+ *   materialization before calling and must publish the final VMM flush after
+ *   this helper returns.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  The first pass allocates all needed PD0
+ *   pages and verifies empty target slots; the second pass is deterministic
+ *   BAR1 MMIO and cannot allocate.
+ */
+static int
+nvkm_gsp_vmm_map_vram_flags_pd0_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	uint64_t off;
+	uint32_t count = 0;
+	int err;
+
+	if (size == 0)
+		return (0);
+	if ((va | paddr | size) & (page_size - 1))
+		return (EINVAL);
+	if (priv)
+		flags |= NV_PTE_PRIV;
+	if (ro)
+		flags |= NV_PTE_RO;
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		uint64_t cur = va + off;
+		uint32_t pd2_idx, pd1_idx, pd0_idx;
+
+		pd2_idx = (uint32_t)((cur >> NVKM_GMMU_PD2_SHIFT) &
+		    (NVKM_GMMU_PD2_ENTRIES - 1));
+		pd1_idx = (uint32_t)((cur >> NVKM_GMMU_PD1_SHIFT) &
+		    (NVKM_GMMU_PD1_ENTRIES - 1));
+		pd0_idx = (uint32_t)((cur >> NVKM_GMMU_PD0_SHIFT) &
+		    (NVKM_GMMU_PD0_ENTRIES - 1));
+		err = nvkm_gsp_vmm_pd0_get(vmm, pd2_idx, pd1_idx, &pd0);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+		if (pd0->slot_state[pd0_idx] !=
+		    NVKM_GSP_VMM_PD0_SLOT_EMPTY) {
+			lwkt_reltoken(&vmm->tok);
+			return (EBUSY);
+		}
+	}
+
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		uint64_t cur = va + off;
+		uint64_t pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+		uint32_t pd0_idx;
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+		if (pd0 == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (EIO);
+		}
+		nvkm_gsp_vmm_pd0_write_valid_2m_slot(vmm->sc, pd0,
+		    pd0_idx, pte);
+		count++;
+	}
+	vmm->sc->vmm_pte_fast_write_count += count;
+	vmm->sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] += count;
+	nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_PD0_SHIFT, count);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_map_vram_flags_pd0_prepared_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and caller-owned VRAM physical range metadata.  It does not
+ *   acquire BO, GEM, VM binding, or page-table ownership.
+ *
+ * Lifetime:
+ *   The parent PD0 pages and target empty slots must already have been
+ *   prepared and kept stable by VM_BIND serialization.  The written 2 MiB
+ *   leaves become visible only after the caller performs the enclosing
+ *   VMM flush/TLB invalidate.
+ *
+ * Threading:
+ *   Acquires vmm->tok while validating prepared PD0 slots and writing BAR1
+ *   PD0 leaf entries.  It never allocates PD0 pages, creates child LPT/SPT
+ *   tables, queries user objects, or changes state outside the requested
+ *   range.
+ */
+static int
+nvkm_gsp_vmm_map_vram_flags_pd0_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
+	uint64_t off;
+	uint32_t count = 0;
+	int err;
+
+	if (size == 0)
+		return (0);
+	if ((va | paddr | size) & (NVKM_GMMU_PD0_PAGE_SIZE - 1))
+		return (EINVAL);
+	if (priv)
+		flags |= NV_PTE_PRIV;
+	if (ro)
+		flags |= NV_PTE_RO;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va, size,
+	    NVKM_GMMU_PD0_SHIFT);
+	if (err != 0) {
+		lwkt_reltoken(&vmm->tok);
+		return (err);
+	}
+
+	for (off = 0; off < size; off += NVKM_GMMU_PD0_PAGE_SIZE) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		uint64_t cur = va + off;
+		uint64_t pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+		uint32_t pd0_idx;
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+		if (pd0 == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (EIO);
+		}
+		if (pd0->slot_state[pd0_idx] !=
+		    NVKM_GSP_VMM_PD0_SLOT_EMPTY) {
+			lwkt_reltoken(&vmm->tok);
+			return (EBUSY);
+		}
+		nvkm_gsp_vmm_pd0_write_valid_2m_slot(vmm->sc, pd0,
+		    pd0_idx, pte);
+		count++;
+	}
+	vmm->sc->vmm_pte_fast_write_count += count;
+	vmm->sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] += count;
+	nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_PD0_SHIFT, count);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_promote_vram_64k_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and caller-owned VRAM physical range metadata.  It does not
+ *   acquire BO, GEM, or VM binding ownership, and it does not allocate or free
+ *   page-table pages.
+ *
+ * Lifetime:
+ *   The covered SPT pages must already exist and describe the same VA range
+ *   in the caller's live mapping tracker.  This helper rewrites the hardware
+ *   representation from 4 KiB SPT leaves to 64 KiB LPT leaves; the caller must
+ *   update the live mapping page_shift before publishing the final VMM flush.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  The first pass verifies every covered PT is
+ *   already present and that each target LPT slot is backed by complete valid
+ *   SPT leaves with no sparse/LPT conflict, so the second pass is
+ *   deterministic and cannot allocate.  The caller owns the surrounding
+ *   VM_BIND serialization and final flush/TLB-invalidate boundary.
+ */
+int
+nvkm_gsp_vmm_promote_vram_64k_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
+	uint64_t pte_step = NVKM_GMMU_LPT_PAGE_SIZE >> NV_PT_ADDR_SHIFT;
+	uint64_t off;
+	int err;
+
+	if (size == 0)
+		return (0);
+	if ((va | paddr | size) & (NVKM_GMMU_LPT_PAGE_SIZE - 1))
+		return (EINVAL);
+	if (priv)
+		flags |= NV_PTE_PRIV;
+	if (ro)
+		flags |= NV_PTE_RO;
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t count;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (ENOENT);
+		}
+		count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+		err = nvkm_gsp_vmm_pt_check_promote_64k(pt,
+		    nvkm_gsp_vmm_lpt_idx(cur), count);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
+		}
+		off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+	}
+
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint64_t first_pte;
+		uint32_t lpt_idx, count;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (EIO);
+		}
+		lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
+		count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+		first_pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+		nvkm_gsp_vmm_write_new_valid_lpt_pte_linear(vmm, pt,
+		    lpt_idx, first_pte, pte_step, count);
+		nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_LPT_SHIFT,
+		    count);
+		off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+	}
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_promote_vram_2m_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and caller-owned VRAM physical range metadata.  It does not
+ *   acquire BO, GEM, or live mapping ownership.
+ *
+ * Lifetime:
+ *   Each covered 2 MiB window must already be represented by a complete set
+ *   of 64 KiB LPT leaves with identical mapping semantics in the caller's live
+ *   mapping tree.  This helper only rewrites the GMMU representation; the
+ *   caller must update live mapping page_shift before publishing the final
+ *   VMM flush.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  The first pass verifies the whole range,
+ *   and the second pass performs deterministic BAR1 writes and child-table
+ *   frees.  No allocation or user object lookup occurs after verification.
+ */
+int
+nvkm_gsp_vmm_promote_vram_2m_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t flags = NV_PTE_APERTURE_VRAM | NV_PTE_VALID | kind_bits;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	uint64_t off;
+	uint32_t count = 0;
+
+	if (size == 0)
+		return (0);
+	if ((va | paddr | size) & (page_size - 1))
+		return (EINVAL);
+	if (priv)
+		flags |= NV_PTE_PRIV;
+	if (ro)
+		flags |= NV_PTE_RO;
+
+	lwkt_gettoken(&vmm->tok);
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va + off);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (ENOENT);
+		}
+		if (pt->valid_lpte_count != NVKM_GMMU_LPT_ENTRIES ||
+		    pt->valid_lpt_mask != UINT32_MAX ||
+		    pt->sparse_lpt_mask != 0 ||
+		    pt->sparse_lpte_count != 0 ||
+		    pt->valid_pte_count != 0 ||
+		    pt->sparse_pte_count != 0 ||
+		    nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt)) {
+			lwkt_reltoken(&vmm->tok);
+			return (EBUSY);
+		}
+	}
+
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t pte = ((paddr + off) >> NV_PT_ADDR_SHIFT) | flags;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va + off);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (EIO);
+		}
+		nvkm_gsp_vmm_free_pt_to_2m(vmm, pt, pte);
+		count++;
+	}
+	vmm->sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+	    (uint64_t)count * NVKM_GMMU_LPT_ENTRIES;
+	vmm->sc->vmm_pte_fast_write_count += count;
+	vmm->sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] += count;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT,
+	    (uint64_t)count * NVKM_GMMU_LPT_ENTRIES);
+	nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_PD0_SHIFT, count);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_promote_sysmem_2m_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and a caller-owned sysmem/GART paddr snapshot.  It does not
+ *   retain the paddr array, acquire BO/GEM ownership, or allocate page tables.
+ *
+ * Lifetime:
+ *   Each covered 2 MiB window must already be represented by a complete child
+ *   PT whose 64 KiB LPT leaves match the caller's live mapping semantics.
+ *   The caller must keep the paddr snapshot stable until this helper returns
+ *   and update the live mapping tree before publishing the final flush.
+ *
+ * Threading:
+ *   Acquires vmm->tok internally.  The first pass validates the entire range
+ *   and paddr snapshot; the second pass performs deterministic BAR1 writes and
+ *   child-table frees.  No allocation, BO lookup, or backing query occurs
+ *   after validation starts.
+ */
+int
+nvkm_gsp_vmm_promote_sysmem_2m_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, const vm_paddr_t *paddrs, uint32_t page_count, uint8_t kind)
+{
+	uint64_t kind_bits = (uint64_t)kind << NV_PTE_KIND_SHIFT;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	uint64_t size;
+	uint32_t pages_per_leaf =
+	    (uint32_t)(NVKM_GMMU_PD0_PAGE_SIZE / NVKM_GMMU_PT_PAGE_SIZE);
+	uint32_t page_index;
+	uint32_t count = 0;
+	int err;
+
+	if (paddrs == NULL || page_count == 0 ||
+	    page_count > UINT64_MAX / NVKM_GMMU_PT_PAGE_SIZE ||
+	    (page_count % pages_per_leaf) != 0)
+		return (EINVAL);
+	size = (uint64_t)page_count * NVKM_GMMU_PT_PAGE_SIZE;
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+	err = nvkm_gsp_vmm_check_sysmem_paddr_snapshot(paddrs, page_count,
+	    NVKM_GMMU_PD0_SHIFT);
+	if (err != 0)
+		return (err);
+
+	lwkt_gettoken(&vmm->tok);
+	for (page_index = 0; page_index < page_count;
+	    page_index += pages_per_leaf) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va +
+		    (uint64_t)page_index * NVKM_GMMU_PT_PAGE_SIZE;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (ENOENT);
+		}
+		if (pt->valid_lpte_count != NVKM_GMMU_LPT_ENTRIES ||
+		    pt->valid_lpt_mask != UINT32_MAX ||
+		    pt->sparse_lpt_mask != 0 ||
+		    pt->sparse_lpte_count != 0 ||
+		    pt->valid_pte_count != 0 ||
+		    pt->sparse_pte_count != 0 ||
+		    nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt)) {
+			lwkt_reltoken(&vmm->tok);
+			return (EBUSY);
+		}
+	}
+
+	for (page_index = 0; page_index < page_count;
+	    page_index += pages_per_leaf) {
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va +
+		    (uint64_t)page_index * NVKM_GMMU_PT_PAGE_SIZE;
+		uint64_t pte = nvkm_pte_to_sysmem(
+		    (uint64_t)paddrs[page_index]) | kind_bits;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			lwkt_reltoken(&vmm->tok);
+			return (EIO);
+		}
+		nvkm_gsp_vmm_free_pt_to_2m(vmm, pt, pte);
+		count++;
+	}
+	vmm->sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+	    (uint64_t)count * NVKM_GMMU_LPT_ENTRIES;
+	vmm->sc->vmm_pte_fast_write_count += count;
+	vmm->sc->vmm_pte_leaf_write_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)] += count;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT,
+	    (uint64_t)count * NVKM_GMMU_LPT_ENTRIES);
+	nvkm_gsp_vmm_note_bulk_write(vmm, NVKM_GMMU_PD0_SHIFT, count);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_prepare_split_vram_2m()
+ *
+ * Ownership:
+ *   Allocates an unlinked child LPT/SPT pair for one valid 2 MiB PD0 leaf and
+ *   transfers that prepared page-table ownership to *ppt.  If the PD0 slot is
+ *   already a child table, *ppt is NULL and the caller owns nothing.
+ *
+ * Lifetime:
+ *   The prepared PT is private until commit_split_vram_2m_noflush() links it
+ *   into vmm.  A failed or abandoned prepare must be released with
+ *   abort_split_vram_2m().  The old 2 MiB PD0 leaf remains untouched.
+ *
+ * Threading:
+ *   May sleep and may allocate BAR1-backed page-table pages, so callers must
+ *   run this in VM_BIND prepare before the no-fail commit section.  It borrows
+ *   vmm->tok only long enough to validate current PD0 ownership.
+ */
+int
+nvkm_gsp_vmm_prepare_split_vram_2m(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    struct nvkm_gsp_vmm_user_pt **ppt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_user_pt *pt;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+	int err;
+
+	*ppt = NULL;
+	if (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	lwkt_gettoken(&vmm->tok);
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (existing != NULL) {
+		lwkt_reltoken(&vmm->tok);
+		return (0);
+	}
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_VALID_2M) {
+		lwkt_reltoken(&vmm->tok);
+		return (ENOENT);
+	}
+	lwkt_reltoken(&vmm->tok);
+
+	pt = kmalloc(sizeof(*pt), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	pt->pd0 = pd0;
+	pt->pd2_idx = pd2_idx;
+	pt->pd1_idx = pd1_idx;
+	pt->pd0_idx = pd0_idx;
+
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->lpt,
+	    NVKM_VRAM_VMM_PT, pt);
+	if (err != 0)
+		goto fail;
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->spt,
+	    NVKM_VRAM_VMM_PT, pt);
+	if (err != 0)
+		goto fail;
+
+	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->lpt);
+	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->spt);
+	nvkm_gsp_vmm_lpt_mark_range_state(pt, 0, NVKM_GMMU_LPT_ENTRIES, 0,
+	    1);
+	nvkm_gsp_bar1_set_region64(sc, pt->lpt.bar1_gva,
+	    nvkm_pte_to_sparse(), NVKM_GMMU_LPT_ENTRIES);
+	*ppt = pt;
+	return (0);
+
+fail:
+	nvkm_gsp_vmm_abort_split_vram_2m(vmm, pt);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_check_split_vram_2m()
+ *
+ * Ownership:
+ *   Borrows vmm and the prepared split PT.  It does not consume pt, link it
+ *   into the VMM tree, write PD0, allocate page tables, or free ownership.
+ *
+ * Lifetime:
+ *   The result is valid while VM remap serialization keeps the PD0 slot and
+ *   any existing child table stable.  A NULL pt means prepare observed an
+ *   already-linked child table, and this helper verifies the same condition
+ *   still holds.
+ *
+ * Threading:
+ *   Acquires vmm->tok for a read-only state check.  This is the preflight half
+ *   of commit_split_vram_2m_noflush(); callers use it to validate every split
+ *   in a larger materialize plan before the first PD0 slot is rewritten.
+ */
+int
+nvkm_gsp_vmm_check_split_vram_2m(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+	int err = 0;
+
+	if (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	lwkt_gettoken(&vmm->tok);
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (existing != NULL) {
+		err = (pt == NULL ? 0 : EEXIST);
+		goto out;
+	}
+	if (pt == NULL || pt->pd2_idx != pd2_idx || pt->pd1_idx != pd1_idx ||
+	    pt->pd0_idx != pd0_idx) {
+		err = EINVAL;
+		goto out;
+	}
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL || pd0 != pt->pd0 ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_VALID_2M)
+		err = EIO;
+out:
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_commit_split_vram_2m_noflush()
+ *
+ * Ownership:
+ *   Consumes pt on success and links it into vmm as the child LPT/SPT pair for
+ *   va's PD0 slot.  If pt is NULL, the slot must already be a child table and
+ *   no ownership is consumed.
+ *
+ * Lifetime:
+ *   On success, lower-page writers may use the child table immediately.  The
+ *   caller owns the final GMMU invalidate; this helper only flushes BAR1 so
+ *   the freshly zeroed child tables and rewritten PD0 slot are visible before
+ *   later lower-leaf writes.
+ *
+ * Threading:
+ *   Runs in the VM_BIND no-fail commit section and only acquires vmm->tok.  It
+ *   does not allocate, pin, lookup GEM handles, or sleep on user-owned state.
+ */
+int
+nvkm_gsp_vmm_commit_split_vram_2m_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+
+	if (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	lwkt_gettoken(&vmm->tok);
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (existing != NULL) {
+		lwkt_reltoken(&vmm->tok);
+		return (pt == NULL ? 0 : EEXIST);
+	}
+	if (pt == NULL || pt->pd2_idx != pd2_idx || pt->pd1_idx != pd1_idx ||
+	    pt->pd0_idx != pd0_idx) {
+		lwkt_reltoken(&vmm->tok);
+		return (EINVAL);
+	}
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL || pd0 != pt->pd0 ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_VALID_2M) {
+		lwkt_reltoken(&vmm->tok);
+		return (EIO);
+	}
+
+	nvkm_gsp_vmm_pd0_write_child_slot(sc, pd0, pd0_idx,
+	    nvkm_pde_to_vram(pt->lpt.vram_paddr),
+	    nvkm_pde_to_vram(pt->spt.vram_paddr));
+	nvkm_gsp_bar1_flush(sc);
+	LIST_INSERT_HEAD(&vmm->user_pt_pages, pt, link);
+	nvkm_gsp_vmm_user_pt_lookup_insert(vmm, pt);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_abort_split_vram_2m()
+ *
+ * Ownership:
+ *   Consumes an unlinked PT returned by prepare_split_vram_2m().  Passing NULL
+ *   is allowed and consumes nothing.
+ *
+ * Lifetime:
+ *   Only call this for PTs that were not successfully committed.  Linked PTs
+ *   are owned by vmm and must be reclaimed by the normal page-table teardown.
+ *
+ * Threading:
+ *   Does not acquire vmm->tok because the PT is not visible in vmm lists or
+ *   lookup tables.  It only frees private BAR1-backed pages.
+ */
+void
+nvkm_gsp_vmm_abort_split_vram_2m(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+
+	if (pt == NULL)
+		return;
+	if (pt->spt.vram_paddr != 0)
+		nvkm_gsp_bar1_free_page(sc, &pt->spt);
+	if (pt->lpt.vram_paddr != 0)
+		nvkm_gsp_bar1_free_page(sc, &pt->lpt);
+	kfree(pt, M_NVKM_VMM);
 }
 
 int
@@ -1266,6 +3360,9 @@ nvkm_gsp_vmm_map_vram_flags_page_noflush(struct nvkm_gsp_vmm *vmm,
     uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
     uint8_t kind, uint8_t page_shift)
 {
+	if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		return (nvkm_gsp_vmm_map_vram_flags_pd0_noflush(vmm, va,
+		    paddr, size, priv, ro, kind));
 	if (page_shift == NVKM_GMMU_LPT_SHIFT)
 		return (nvkm_gsp_vmm_map_vram_flags_lpt_noflush(vmm, va,
 		    paddr, size, priv, ro, kind));
@@ -1273,6 +3370,23 @@ nvkm_gsp_vmm_map_vram_flags_page_noflush(struct nvkm_gsp_vmm *vmm,
 		return (EINVAL);
 	return (nvkm_gsp_vmm_map_vram_flags_spt_noflush(vmm, va, paddr,
 	    size, priv, ro, kind));
+}
+
+int
+nvkm_gsp_vmm_map_vram_flags_page_prepared_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro,
+    uint8_t kind, uint8_t page_shift)
+{
+	if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		return (nvkm_gsp_vmm_map_vram_flags_pd0_prepared_noflush(vmm,
+		    va, paddr, size, priv, ro, kind));
+	if (page_shift == NVKM_GMMU_LPT_SHIFT)
+		return (nvkm_gsp_vmm_map_vram_flags_lpt_prepared_noflush(vmm,
+		    va, paddr, size, priv, ro, kind));
+	if (page_shift != NVKM_GMMU_SPT_SHIFT)
+		return (EINVAL);
+	return (nvkm_gsp_vmm_map_vram_flags_spt_prepared_noflush(vmm, va,
+	    paddr, size, priv, ro, kind));
 }
 
 int
@@ -1316,51 +3430,666 @@ nvkm_gsp_vmm_unmap_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 		    va + off, NVKM_GMMU_PT_PAGE_SIZE) ?
 		    nvkm_pte_to_sparse() : 0;
 
-		nvkm_gsp_vmm_write_existing_pte(vmm, va + off, pte);
+		nvkm_gsp_vmm_unmap_existing_pte(vmm, va + off, pte, 0);
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
-int
-nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
-    uint64_t size)
+/*
+ * nvkm_gsp_vmm_check_unmap_valid_range_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  It does not write PTEs,
+ *   allocate page-table storage, release PTs, or mutate sparse-region state.
+ *
+ * Lifetime:
+ *   The result is valid while the caller keeps VM remap serialization and
+ *   vmm->tok held.  It proves that a following valid-clear writer will not
+ *   discover an unhandled parent/child ownership conflict after clearing
+ *   earlier chunks.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  preserve_target_pts is used by remap-to-sparse.
+ *   For SPT/LPT targets, a live 2 MiB parent must already be materialized so
+ *   the child storage survives for the sparse writer.  For a PD0 sparse
+ *   target, a full child PT may be consumed only when no linked sparse region
+ *   still depends on it; the parent PD0 storage is preserved for the following
+ *   prepared PD0 sparse writer.
+ */
+static int
+nvkm_gsp_vmm_check_unmap_valid_range_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int preserve_target_pts,
+    uint8_t preserve_page_shift)
 {
 	uint64_t off;
 
 	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
 		return (EINVAL);
 
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint64_t remaining_pages;
+		uint32_t pd0_idx, spt_idx, count;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+		    (NVKM_GMMU_SPT_ENTRIES - 1));
+		remaining_pages = (size - off) / NVKM_GMMU_PT_PAGE_SIZE;
+		count = (uint32_t)MIN(remaining_pages,
+		    NVKM_GMMU_SPT_ENTRIES - spt_idx);
+		if (pt != NULL) {
+			if (preserve_target_pts &&
+			    preserve_page_shift == NVKM_GMMU_PD0_SHIFT) {
+				if (spt_idx != 0 ||
+				    count != NVKM_GMMU_SPT_ENTRIES)
+					return (EBUSY);
+				if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
+					return (EBUSY);
+			}
+			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+			continue;
+		}
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+		if (pd0 != NULL && pd0->slot_state[pd0_idx] !=
+		    NVKM_GSP_VMM_PD0_SLOT_EMPTY) {
+			if (preserve_target_pts &&
+			    preserve_page_shift != NVKM_GMMU_PD0_SHIFT)
+				return (EBUSY);
+			if (spt_idx != 0 || count != NVKM_GMMU_SPT_ENTRIES)
+				return (EBUSY);
+		}
+		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_invalid_spt_prepared_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  It consumes no BO mapping or
+ *   sparse-region ownership; callers must unlink mapping/region state as part
+ *   of the enclosing remap plan.
+ *
+ * Lifetime:
+ *   The target range is rewritten to semantic invalid/empty 4 KiB leaves.  If
+ *   preserve_target_pts is false, empty child PTs may be reclaimed before the
+ *   caller's final flush/invalidate; otherwise target PTs remain linked for a
+ *   following prepared writer such as remap-to-sparse.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and are in a prepared commit section.  This helper
+ *   does not allocate page tables, pin BOs, lookup handles, or wait on fences.
+ */
+static int
+nvkm_gsp_vmm_write_invalid_spt_prepared_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int preserve_target_pts)
+{
+	uint64_t off;
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	err = nvkm_gsp_vmm_check_unmap_valid_range_locked(vmm, va, size,
+	    preserve_target_pts, NVKM_GMMU_SPT_SHIFT);
+	if (err != 0)
+		return (err);
+
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint64_t remaining_pages;
+		uint32_t pd0_idx, spt_idx, count;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
+		    (NVKM_GMMU_SPT_ENTRIES - 1));
+		remaining_pages = (size - off) / NVKM_GMMU_PT_PAGE_SIZE;
+		count = (uint32_t)MIN(remaining_pages,
+		    NVKM_GMMU_SPT_ENTRIES - spt_idx);
+		if (pt != NULL) {
+			if (preserve_target_pts || spt_idx != 0 ||
+			    count != NVKM_GMMU_SPT_ENTRIES ||
+			    !nvkm_gsp_vmm_skip_clear_full_pt(vmm, pt)) {
+				nvkm_gsp_vmm_write_old_valid_pte_range(vmm,
+				    pt, spt_idx, count, 0);
+				if (!preserve_target_pts)
+					nvkm_gsp_vmm_reclaim_empty_pt(vmm,
+					    pt, 0);
+			}
+			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+			continue;
+		}
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+		if (pd0 != NULL &&
+		    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_EMPTY) {
+			if (preserve_target_pts || spt_idx != 0 ||
+			    count != NVKM_GMMU_SPT_ENTRIES)
+				return (EBUSY);
+			nvkm_gsp_vmm_pd0_write_empty_slot(vmm->sc, pd0,
+			    pd0_idx);
+			vmm->sc->vmm_pte_fast_clear_count++;
+			vmm->sc->vmm_pte_fast_invalid_clear_count++;
+			nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_PD0_SHIFT,
+			    1);
+			vmm->sc->vmm_pte_leaf_clear_count[
+			    nvkm_gsp_vmm_page_shift_bucket(
+			    NVKM_GMMU_PD0_SHIFT)]++;
+			nvkm_gsp_vmm_release_pd0_if_empty(vmm, pd0);
+		}
+		off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_invalid_preserve_sparse_spt_prepared_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  Existing sparse regions remain
+ *   owned by vmm; this helper only projects their target state into SPT PTEs
+ *   while clearing valid mappings from the same range.
+ *
+ * Lifetime:
+ *   The target range becomes invalid except where an already-linked sparse
+ *   region covers it, in which case the corresponding 4 KiB leaf is written as
+ *   sparse.  Empty PTs may be reclaimed only when no sparse state or sparse
+ *   region still pins the PT window.
+ *
+ * Threading:
+ *   Callers hold vmm->tok and are in a prepared commit section.  Live 2 MiB
+ *   parent leaves must have been materialized before entry; encountering one
+ *   is treated as a prepare/planner error and returned before mutation.
+ */
+static int
+nvkm_gsp_vmm_write_invalid_preserve_sparse_spt_prepared_locked(
+    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+{
+	struct nvkm_gsp_vmm_user_pt *pt;
+	uint64_t off, cur, chunk, limit, run_size;
+	uint64_t sparse_pte = nvkm_pte_to_sparse();
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	err = nvkm_gsp_vmm_check_unmap_valid_range_locked(vmm, va, size, 1,
+	    NVKM_GMMU_SPT_SHIFT);
+	if (err != 0)
+		return (err);
+
+	for (off = 0; off < size;) {
+		cur = va + off;
+		chunk = nvkm_gsp_vmm_user_pt_chunk_size(cur, size - off);
+		limit = cur + chunk;
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		while (cur < limit) {
+			int sparse;
+
+			sparse = nvkm_gsp_vmm_sparse_state_run_locked(vmm,
+			    cur, limit, &run_size);
+			if ((run_size & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0 ||
+			    run_size == 0)
+				return (EIO);
+			if (pt == NULL && sparse)
+				return (ENOENT);
+			cur += run_size;
+		}
+		off += chunk;
+	}
+
+	for (off = 0; off < size;) {
+		cur = va + off;
+		chunk = nvkm_gsp_vmm_user_pt_chunk_size(cur, size - off);
+		limit = cur + chunk;
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		while (cur < limit) {
+			uint32_t count, spt_idx;
+			uint64_t pte;
+			int sparse;
+
+			sparse = nvkm_gsp_vmm_sparse_state_run_locked(vmm,
+			    cur, limit, &run_size);
+			if ((run_size & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0 ||
+			    run_size == 0)
+				return (EIO);
+			if (pt == NULL) {
+				if (sparse)
+					return (ENOENT);
+				cur += run_size;
+				continue;
+			}
+
+			pte = sparse ? sparse_pte : 0;
+			spt_idx = nvkm_gsp_vmm_spt_idx(cur);
+			count = (uint32_t)(run_size / NVKM_GMMU_PT_PAGE_SIZE);
+			nvkm_gsp_vmm_write_old_valid_pte_range(vmm, pt,
+			    spt_idx, count, pte);
+			cur += run_size;
+		}
+		if (pt != NULL)
+			nvkm_gsp_vmm_reclaim_empty_pt(vmm, pt, 0);
+		off += chunk;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_invalid_lpt_prepared_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and rewrites only the target LPT/SPT page-table storage.  The
+ *   enclosing remap plan owns mapping, BO, and sparse-region lifetime.
+ *
+ * Lifetime:
+ *   The 64 KiB target leaves become semantic invalid/empty after the caller's
+ *   final flush/invalidate.  Empty child PTs may be reclaimed unless
+ *   preserve_target_pts asks the backend to keep them for a following writer.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  The helper is prepared-only and performs no lazy
+ *   allocation or external waits.
+ */
+static int
+nvkm_gsp_vmm_write_invalid_lpt_prepared_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int preserve_target_pts)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	uint64_t off;
+
+	if ((va | size) & (NVKM_GMMU_LPT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	for (off = 0; off < size;) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint64_t cur = va + off;
+		uint32_t count, lpt_idx, pd0_idx;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
+		if (pt == NULL) {
+			pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, cur, &pd0_idx);
+			if (pd0 != NULL && pd0->slot_state[pd0_idx] !=
+			    NVKM_GSP_VMM_PD0_SLOT_EMPTY)
+				return (EBUSY);
+			off += NVKM_GMMU_LPT_PAGE_SIZE;
+			continue;
+		}
+
+		lpt_idx = nvkm_gsp_vmm_lpt_idx(cur);
+		count = nvkm_gsp_vmm_lpt_chunk_count(cur, size - off);
+		nvkm_gsp_vmm_clear_spt_for_lpt_range(vmm, pt, lpt_idx,
+		    count);
+		nvkm_gsp_vmm_lpt_mark_range_state(pt, lpt_idx, count, 0,
+		    0);
+		nvkm_gsp_bar1_set_region64(sc,
+		    pt->lpt.bar1_gva + (uint64_t)lpt_idx * 8, 0, count);
+		sc->vmm_pte_fast_clear_count += count;
+		sc->vmm_pte_fast_invalid_clear_count += count;
+		nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT,
+		    count);
+		sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+		    count;
+		if (!preserve_target_pts)
+			nvkm_gsp_vmm_reclaim_empty_pt(vmm, pt, 0);
+		off += (uint64_t)count * NVKM_GMMU_LPT_PAGE_SIZE;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_write_invalid_pd0_prepared_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and rewrites only PD0 page-table ownership for full 2 MiB
+ *   windows.  The caller owns mapping and sparse-region publication.
+ *
+ * Lifetime:
+ *   A PD0 valid/sparse leaf is cleared to empty.  A child PT covering the whole
+ *   window may be freed only when no linked sparse region still refers to it.
+ *   If preserve_target_pd0 is true, the PD0 page itself remains linked so the
+ *   immediately following prepared PD0 sparse writer can install the new leaf
+ *   state without allocating in commit.
+ *
+ * Threading:
+ *   Callers hold vmm->tok.  This backend op performs deterministic BAR1 writes
+ *   and page-table frees only; it does not allocate or wait on GPU work.
+ */
+static int
+nvkm_gsp_vmm_write_invalid_pd0_prepared_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int preserve_target_pd0)
+{
+	uint64_t off;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint32_t pd0_idx;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va + off);
+		if (pt != NULL) {
+			if (nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt))
+				return (EBUSY);
+			vmm->sc->vmm_pt_skip_clear_count++;
+			vmm->sc->vmm_pt_skip_clear_pages +=
+			    NVKM_GMMU_SPT_ENTRIES;
+			if (preserve_target_pd0)
+				nvkm_gsp_vmm_free_pt_preserve_pd0(vmm, pt);
+			else
+				nvkm_gsp_vmm_free_pt(vmm, pt, 0);
+			continue;
+		}
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, va + off, &pd0_idx);
+		if (pd0 == NULL ||
+		    pd0->slot_state[pd0_idx] == NVKM_GSP_VMM_PD0_SLOT_EMPTY)
+			continue;
+		nvkm_gsp_vmm_pd0_write_empty_slot(vmm->sc, pd0, pd0_idx);
+		vmm->sc->vmm_pte_fast_clear_count++;
+		vmm->sc->vmm_pte_fast_invalid_clear_count++;
+		nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_PD0_SHIFT, 1);
+		vmm->sc->vmm_pte_leaf_clear_count[
+		    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)]++;
+		if (!preserve_target_pd0)
+			nvkm_gsp_vmm_release_pd0_if_empty(vmm, pd0);
+	}
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_write_invalid_prepared_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, uint8_t page_shift, int preserve_target_pts)
+{
+	if (page_shift == NVKM_GMMU_SPT_SHIFT)
+		return (nvkm_gsp_vmm_write_invalid_spt_prepared_locked(vmm,
+		    va, size, preserve_target_pts));
+	if (page_shift == NVKM_GMMU_LPT_SHIFT)
+		return (nvkm_gsp_vmm_write_invalid_lpt_prepared_locked(vmm,
+		    va, size, preserve_target_pts));
+	if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+		return (nvkm_gsp_vmm_write_invalid_pd0_prepared_locked(vmm,
+		    va, size, preserve_target_pts));
+	}
+	return (EINVAL);
+}
+
+/*
+ * nvkm_gsp_vmm_check_clear_pd0_target_range_locked()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned 2 MiB-aligned VA range.  It does not
+ *   allocate page tables, write BAR1, mutate sparse regions, or retain
+ *   pointers.
+ *
+ * Lifetime:
+ *   The check is valid only while VM remap serialization is held until the
+ *   matching clear_pd0_target writer runs.  A successful result means a direct
+ *   2 MiB MAP target can clear any old valid 2 MiB leaf or whole child PT in
+ *   the range without preserving lower-table storage.  When allow_sparse is
+ *   true, sparse ownership is treated as already covered by a prepared sparse
+ *   clear plan; other invariant failures are still reported.
+ *
+ * Threading:
+ *   Caller holds vmm->tok for the prepared-state walk.  This is a read-only
+ *   prepare/preflight helper for direct 2 MiB MAP.
+ */
+static int
+nvkm_gsp_vmm_check_clear_pd0_target_range_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int allow_sparse)
+{
+	uint64_t off;
+	uint64_t page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	if (!allow_sparse && nvkm_gsp_vmm_range_has_sparse_region(vmm, va,
+	    size))
+		return (EBUSY);
+
+	for (off = 0; off < size; off += page_size) {
+		struct nvkm_gsp_vmm_pd0 *pd0;
+		struct nvkm_gsp_vmm_user_pt *pt;
+		uint32_t pd0_idx;
+
+		pt = nvkm_gsp_vmm_user_pt_find_va(vmm, va + off);
+		if (pt != NULL) {
+			if (!allow_sparse && (pt->sparse_pte_count != 0 ||
+			    pt->sparse_lpte_count != 0 ||
+			    nvkm_gsp_vmm_pt_has_sparse_region(vmm, pt)))
+				return (EBUSY);
+			continue;
+		}
+
+		pd0 = nvkm_gsp_vmm_pd0_find_va(vmm, va + off, &pd0_idx);
+		if (pd0 != NULL && pd0->slot_state[pd0_idx] ==
+		    NVKM_GSP_VMM_PD0_SLOT_CHILD)
+			return (EIO);
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_check_clear_pd0_target_range()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned 2 MiB-aligned VA range.  It does not
+ *   allocate page tables, write BAR1, mutate sparse regions, or retain
+ *   pointers.
+ *
+ * Lifetime:
+ *   The check is valid only while VM remap serialization is held until the
+ *   matching clear_pd0_target writer runs.  Sparse ownership is rejected here;
+ *   callers that already own a prepared sparse-clear plan must use
+ *   nvkm_gsp_vmm_check_clear_pd0_target_range_allow_sparse().
+ *
+ * Threading:
+ *   Acquires vmm->tok for a read-only prepared-state walk.
+ */
+int
+nvkm_gsp_vmm_check_clear_pd0_target_range(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size)
+{
+	int err;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_check_clear_pd0_target_range_locked(vmm, va, size,
+	    0);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_check_clear_pd0_target_range_allow_sparse()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned direct 2 MiB MAP target.  It consumes no
+ *   sparse-unmap plan; the caller owns that prepared plan and must commit it
+ *   before clear_pd0_target_noflush().
+ *
+ * Lifetime:
+ *   The successful result is valid only while VM remap serialization keeps the
+ *   prepared sparse-clear plan and live VMM state paired.  It permits old sparse
+ *   leaf state to exist during prepare, but still rejects malformed child-table
+ *   ownership that sparse clear cannot repair.
+ *
+ * Threading:
+ *   Acquires vmm->tok for a read-only prepared-state walk.  No allocation,
+ *   PTE/PDE write, sparse-list mutation, or GPU wait occurs.
+ */
+int
+nvkm_gsp_vmm_check_clear_pd0_target_range_allow_sparse(
+    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
+{
+	int err;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_check_clear_pd0_target_range_locked(vmm, va, size,
+	    1);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_clear_pd0_target_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and consumes no external object ownership.  It clears only the
+ *   caller's 2 MiB-aligned target windows so a following prepared PD0 writer
+ *   can install valid_2m leaves in the same VM_BIND commit.
+ *
+ * Lifetime:
+ *   Any freed child PTs are removed from vmm ownership immediately.  The PD0
+ *   parent page is retained so the following prepared PD0 writer can install
+ *   the direct 2 MiB target without allocating in commit.  Hardware visibility
+ *   of the clear still belongs to the caller's final flush/TLB invalidate
+ *   boundary.
+ *
+ * Threading:
+ *   Acquires vmm->tok and performs no allocation, GEM lookup, BO pin, user
+ *   copy, or GPU wait.  Sparse-region replacement is deliberately rejected:
+ *   direct 2 MiB MAP must first have an explicit sparse cleanup plan.
+ */
+int
+nvkm_gsp_vmm_clear_pd0_target_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size)
+{
+	int err;
+
+	if ((va | size) & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	if (nvkm_gsp_vmm_range_has_sparse_region(vmm, va, size)) {
+		lwkt_reltoken(&vmm->tok);
+		return (EBUSY);
+	}
+	err = nvkm_gsp_vmm_write_invalid_prepared_locked(vmm, va, size,
+	    NVKM_GMMU_PD0_SHIFT, 1);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_check_unmap_valid_range()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  It never mutates hardware
+ *   PTEs, page-table ownership, or sparse-region records.
+ *
+ * Lifetime:
+ *   The caller must keep VM remap serialization until the corresponding
+ *   unmap_valid writer runs.  A successful check proves the page-shift-aware
+ *   writer will not encounter a partial parent leaf, an unpreservable child
+ *   table, or sparse-region ownership that would fail after earlier clear
+ *   chunks have already committed.
+ *
+ * Threading:
+ *   Acquires vmm->tok for the direct lookup/state walk.  This is a prepare /
+ *   pre-commit gate for DRM remove_range().
+ */
+int
+nvkm_gsp_vmm_check_unmap_valid_range_page(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, int preserve_target_pts,
+    uint8_t preserve_page_shift)
+{
+	int err;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_check_unmap_valid_range_locked(vmm, va, size,
+	    preserve_target_pts, preserve_page_shift);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_check_unmap_valid_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, int preserve_target_pts)
+{
+	return (nvkm_gsp_vmm_check_unmap_valid_range_page(vmm, va, size,
+	    preserve_target_pts, NVKM_GMMU_SPT_SHIFT));
+}
+
+int
+nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
 	lwkt_gettoken(&vmm->tok);
 	if (!nvkm_gsp_vmm_range_has_sparse_region(vmm, va, size)) {
-		for (off = 0; off < size;) {
-			struct nvkm_gsp_vmm_user_pt *pt;
-			uint64_t cur = va + off;
-			uint64_t remaining_pages;
-			uint32_t spt_idx, count;
-
-			pt = nvkm_gsp_vmm_user_pt_find_va(vmm, cur);
-			spt_idx = (uint32_t)((cur >> NVKM_GMMU_SPT_SHIFT) &
-			    (NVKM_GMMU_SPT_ENTRIES - 1));
-			remaining_pages = (size - off) / NVKM_GMMU_PT_PAGE_SIZE;
-			count = (uint32_t)MIN(remaining_pages,
-			    NVKM_GMMU_SPT_ENTRIES - spt_idx);
-			if (pt != NULL)
-				nvkm_gsp_vmm_write_old_valid_pte_range(vmm, pt,
-				    spt_idx, count, 0);
-			off += (uint64_t)count * NVKM_GMMU_PT_PAGE_SIZE;
+		err = nvkm_gsp_vmm_write_invalid_prepared_locked(vmm, va,
+		    size, NVKM_GMMU_SPT_SHIFT, 0);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
 		}
 	} else {
-		for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE) {
-			uint64_t pte = nvkm_gsp_vmm_range_has_sparse_region(vmm,
-			    va + off, NVKM_GMMU_PT_PAGE_SIZE) ?
-			    nvkm_pte_to_sparse() : 0;
-
-			nvkm_gsp_vmm_write_old_valid_pte(vmm, va + off, pte);
+		err = nvkm_gsp_vmm_write_invalid_preserve_sparse_spt_prepared_locked(
+		    vmm, va, size);
+		if (err != 0) {
+			lwkt_reltoken(&vmm->tok);
+			return (err);
 		}
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_unmap_valid_preserve_page_noflush()
+ *
+ * Ownership:
+ *   Borrows vmm and the caller-owned VA range.  It consumes no sparse-region
+ *   ownership and does not allocate or free page-table pages.
+ *
+ * Lifetime:
+ *   This helper is for remap-to-sparse commits: the target storage selected by
+ *   preserve_page_shift must remain linked so the immediately following sparse
+ *   writer can consume it.  For PD0 sparse, this keeps the parent PD0 page
+ *   linked while clearing any child PT ownership.
+ *
+ * Threading:
+ *   Acquires vmm->tok while writing PTEs/PDEs.  The helper is prepared-only:
+ *   all required target storage must already exist before it is called.
+ */
+int
+nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, uint8_t preserve_page_shift)
+{
+	int err;
+
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_write_invalid_prepared_locked(vmm, va, size,
+	    preserve_page_shift, 1);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_unmap_valid_preserve_pt_noflush(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size)
+{
+	return (nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(vmm, va,
+	    size, NVKM_GMMU_SPT_SHIFT));
 }
 
 int
@@ -1373,6 +4102,189 @@ nvkm_gsp_vmm_unmap(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 	return (err);
 }
 
+/*
+ * nvkm_gsp_vmm_alloc_sparse_region()
+ *
+ * Ownership:
+ *   Allocates an unlinked sparse-region record and transfers it to *pregion.
+ *   It does not allocate or validate any page-table storage.  The default
+ *   helper creates a 4 KiB sparse region; page-aware callers use
+ *   alloc_sparse_region_page() to keep the target page size with the region.
+ *
+ * Lifetime:
+ *   The returned region is private until commit_sparse_noflush() links it into
+ *   vmm.  A failed or abandoned prepare must release it with
+ *   abort_sparse_region().
+ *
+ * Threading:
+ *   May sleep while allocating the region record.  Callers that need prepared PTs
+ *   must ensure them separately before entering the no-fail commit section.
+ */
+int
+nvkm_gsp_vmm_alloc_sparse_region_page(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, uint8_t page_shift,
+    struct nvkm_gsp_vmm_sparse_region **pregion)
+{
+	struct nvkm_gsp_vmm_sparse_region *region;
+	uint64_t page_size;
+
+	(void)vmm;
+	*pregion = NULL;
+	if (page_shift == NVKM_GMMU_SPT_SHIFT)
+		page_size = NVKM_GMMU_PT_PAGE_SIZE;
+	else if (page_shift == NVKM_GMMU_LPT_SHIFT)
+		page_size = NVKM_GMMU_LPT_PAGE_SIZE;
+	else if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	else
+		return (EINVAL);
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	region = kmalloc(sizeof(*region), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	region->addr = va;
+	region->size = size;
+	region->page_shift = page_shift;
+	*pregion = region;
+	return (0);
+}
+
+int
+nvkm_gsp_vmm_alloc_sparse_region(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, struct nvkm_gsp_vmm_sparse_region **pregion)
+{
+	return (nvkm_gsp_vmm_alloc_sparse_region_page(vmm, va, size,
+	    NVKM_GMMU_SPT_SHIFT, pregion));
+}
+
+/*
+ * nvkm_gsp_vmm_prepare_sparse_region()
+ *
+ * Ownership:
+ *   Allocates an unlinked sparse-region record and transfers it to *pregion.
+ *   It also ensures all target page-table storage for the sparse range exists
+ *   before commit.  The default helper prepares 4 KiB sparse storage; 2 MiB
+ *   callers prepare only PD0 parent pages and do not allocate child LPT/SPT
+ *   tables.
+ *
+ * Lifetime:
+ *   The returned region is private until commit_sparse_noflush() links it into
+ *   vmm.  A failed or abandoned prepare must be released with
+ *   abort_sparse_region().
+ *
+ * Threading:
+ *   May sleep and allocate, so VM_BIND callers run it in prepare before the
+ *   no-fail commit section.  It does not publish sparse PTEs.
+ */
+int
+nvkm_gsp_vmm_prepare_sparse_region_page(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, uint8_t page_shift,
+    struct nvkm_gsp_vmm_sparse_region **pregion)
+{
+	uint64_t page_size;
+	int err;
+
+	*pregion = NULL;
+	if (page_shift == NVKM_GMMU_SPT_SHIFT)
+		page_size = NVKM_GMMU_PT_PAGE_SIZE;
+	else if (page_shift == NVKM_GMMU_LPT_SHIFT)
+		page_size = NVKM_GMMU_LPT_PAGE_SIZE;
+	else if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+	else
+		return (EINVAL);
+	if ((va | size) & (page_size - 1))
+		return (EINVAL);
+
+	if (page_shift == NVKM_GMMU_PD0_SHIFT)
+		err = nvkm_gsp_vmm_ensure_pd0_range(vmm, va, size);
+	else
+		err = nvkm_gsp_vmm_ensure_pt_range(vmm, va, size);
+	if (err != 0)
+		return (err);
+
+	return (nvkm_gsp_vmm_alloc_sparse_region_page(vmm, va, size,
+	    page_shift, pregion));
+}
+
+int
+nvkm_gsp_vmm_prepare_sparse_region(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, struct nvkm_gsp_vmm_sparse_region **pregion)
+{
+	return (nvkm_gsp_vmm_prepare_sparse_region_page(vmm, va, size,
+	    NVKM_GMMU_SPT_SHIFT, pregion));
+}
+
+/*
+ * nvkm_gsp_vmm_commit_sparse_noflush()
+ *
+ * Ownership:
+ *   Consumes region on success and links it into vmm.  On failure the region
+ *   remains unlinked and caller-owned so abort_sparse_region() can release it.
+ *
+ * Lifetime:
+ *   Sparse PTEs become visible to the GPU only after the caller performs the
+ *   enclosing VMM flush/TLB invalidate.  region->page_shift selects the
+ *   backend sparse writer; existing DRM VM_BIND callers still pass 4 KiB
+ *   regions until the large-sparse gate is explicitly enabled.
+ *
+ * Threading:
+ *   Runs in the VM_BIND commit section.  It does not allocate page tables or
+ *   sparse records; prepare_sparse_region() already did that work.
+ */
+int
+nvkm_gsp_vmm_commit_sparse_noflush(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_region *region)
+{
+	int err;
+
+	if (region == NULL)
+		return (EINVAL);
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_sparse_region_insert_preflight_locked(vmm,
+	    region);
+	if (err != 0) {
+		lwkt_reltoken(&vmm->tok);
+		return (err);
+	}
+	LIST_INSERT_HEAD(&vmm->sparse_regions, region, link);
+	err = nvkm_gsp_vmm_write_sparse_prepared(vmm, region->addr,
+	    region->size, region->page_shift);
+	if (err != 0) {
+		LIST_REMOVE(region, link);
+		lwkt_reltoken(&vmm->tok);
+		return (err);
+	}
+	nvkm_gsp_vmm_sparse_regions_merge_locked(vmm, region);
+	lwkt_reltoken(&vmm->tok);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_abort_sparse_region()
+ *
+ * Ownership:
+ *   Consumes an unlinked sparse region returned by prepare_sparse_region().
+ *   Passing NULL is allowed.
+ *
+ * Lifetime:
+ *   Only call this for regions that commit_sparse_noflush() did not consume.
+ *   Linked sparse regions are owned by vmm and removed by unmap_sparse.
+ *
+ * Threading:
+ *   No vmm token is required because the region is not linked in vmm.
+ */
+void
+nvkm_gsp_vmm_abort_sparse_region(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_region *region)
+{
+	(void)vmm;
+
+	if (region != NULL)
+		kfree(region, M_NVKM_VMM);
+}
+
 int
 nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t size)
@@ -1380,23 +4292,14 @@ nvkm_gsp_vmm_map_sparse_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
 	struct nvkm_gsp_vmm_sparse_region *region;
 	int err;
 
-	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
-		return (EINVAL);
-
-	region = kmalloc(sizeof(*region), M_NVKM_VMM, M_WAITOK | M_ZERO);
-	region->addr = va;
-	region->size = size;
-
-	lwkt_gettoken(&vmm->tok);
-	LIST_INSERT_HEAD(&vmm->sparse_regions, region, link);
-	err = nvkm_gsp_vmm_write_sparse(vmm, va, size);
+	err = nvkm_gsp_vmm_prepare_sparse_region(vmm, va, size, &region);
+	if (err != 0)
+		return (err);
+	err = nvkm_gsp_vmm_commit_sparse_noflush(vmm, region);
 	if (err != 0) {
-		LIST_REMOVE(region, link);
-		kfree(region, M_NVKM_VMM);
-		lwkt_reltoken(&vmm->tok);
+		nvkm_gsp_vmm_abort_sparse_region(vmm, region);
 		return (err);
 	}
-	lwkt_reltoken(&vmm->tok);
 	return (0);
 }
 
@@ -1414,34 +4317,1448 @@ int
 nvkm_gsp_vmm_unmap_sparse_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
     uint64_t size)
 {
-	struct nvkm_gsp_vmm_sparse_region *region;
-	uint64_t off;
+	return (nvkm_gsp_vmm_unmap_sparse_range_noflush(vmm, va, size));
+}
 
-	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+/*
+ * nvkm_gsp_vmm_sparse_region_page_size()
+ *
+ * Ownership:
+ *   Borrows a sparse-region page_shift by value and returns the semantic leaf
+ *   size used by the sparse backend writer.
+ *
+ * Lifetime:
+ *   The computed size is a scalar and has no lifetime dependency on the
+ *   region object.
+ *
+ * Threading:
+ *   Pure helper.  It does not read or mutate VMM state.
+ */
+static int
+nvkm_gsp_vmm_sparse_region_page_size(uint8_t page_shift, uint64_t *page_size)
+{
+	if (page_shift == NVKM_GMMU_SPT_SHIFT) {
+		*page_size = NVKM_GMMU_PT_PAGE_SIZE;
+		return (0);
+	}
+	if (page_shift == NVKM_GMMU_LPT_SHIFT) {
+		*page_size = NVKM_GMMU_LPT_PAGE_SIZE;
+		return (0);
+	}
+	if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+		*page_size = 1ULL << NVKM_GMMU_PD0_SHIFT;
+		return (0);
+	}
+	return (EINVAL);
+}
+
+static int
+nvkm_gsp_vmm_sparse_region_end(
+    const struct nvkm_gsp_vmm_sparse_region *region, uint64_t *pend)
+{
+	uint64_t page_size;
+	int err;
+
+	if (region == NULL || region->size == 0 ||
+	    region->addr > UINT64_MAX - region->size)
 		return (EINVAL);
+	err = nvkm_gsp_vmm_sparse_region_page_size(region->page_shift,
+	    &page_size);
+	if (err != 0)
+		return (err);
+	if (((region->addr | region->size) & (page_size - 1)) != 0)
+		return (EINVAL);
+	*pend = region->addr + region->size;
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_region_insert_preflight_locked()
+ *
+ * Ownership:
+ *   Borrows a caller-owned, unlinked sparse region and the VMM sparse-region
+ *   list.  It does not take ownership of the new region and does not mutate
+ *   the live list.
+ *
+ * Lifetime:
+ *   The check is valid while VM remap serialization and vmm->tok remain held
+ *   until commit links the region.  Adjacent regions are allowed because the
+ *   later metadata-only normalize pass may merge them.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.  This is a read-only preflight; it performs no
+ *   allocation, BAR1 writes, sparse-list mutation, or GPU waits.
+ */
+static int
+nvkm_gsp_vmm_sparse_region_insert_preflight_locked(
+    struct nvkm_gsp_vmm *vmm, const struct nvkm_gsp_vmm_sparse_region *region)
+{
+	const struct nvkm_gsp_vmm_sparse_region *old;
+	uint64_t end;
+	int err;
+
+	err = nvkm_gsp_vmm_sparse_region_end(region, &end);
+	if (err != 0)
+		return (err);
+	LIST_FOREACH(old, &vmm->sparse_regions, link) {
+		uint64_t old_end;
+
+		err = nvkm_gsp_vmm_sparse_region_end(old, &old_end);
+		if (err != 0)
+			return (err);
+		if (old_end <= region->addr || old->addr >= end)
+			continue;
+		return (EBUSY);
+	}
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_region_writer_preflight_locked(
+    struct nvkm_gsp_vmm *vmm, const struct nvkm_gsp_vmm_sparse_region *region)
+{
+	uint64_t end;
+	int err;
+
+	err = nvkm_gsp_vmm_sparse_region_end(region, &end);
+	if (err != 0)
+		return (err);
+	return (nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm,
+	    region->addr, end - region->addr, region->page_shift));
+}
+
+/*
+ * nvkm_gsp_vmm_check_sparse_regions_commit()
+ *
+ * Ownership:
+ *   Borrows a caller-owned array of prepared, unlinked sparse regions.  It
+ *   does not consume region ownership, link records, mutate sparse metadata,
+ *   or write PTE/PDE contents.
+ *
+ * Lifetime:
+ *   The result is valid while VM remap serialization is held until the caller
+ *   commits the paired sparse clear and sparse insert operations.  replace_*,
+ *   when non-empty, names the VM_BIND range whose old sparse regions are
+ *   already covered by the caller's prepared sparse-clear plan, so live sparse
+ *   overlap inside that range is allowed during this preflight.
+ *
+ * Threading:
+ *   Acquires vmm->tok and performs a read-only validation pass.  It checks
+ *   live sparse overlap, overlap among new regions, and prepared backend writer
+ *   targets before the first sparse region is linked or sparse PTE is written.
+ */
+int
+nvkm_gsp_vmm_check_sparse_regions_commit(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_region **regions, uint32_t region_count,
+    uint64_t replace_addr, uint64_t replace_size)
+{
+	uint64_t replace_end = 0;
+	int has_replace = replace_size != 0;
+	int err = 0;
+
+	if (region_count == 0)
+		return (0);
+	if (regions == NULL)
+		return (EINVAL);
+	if (has_replace) {
+		if (replace_addr > UINT64_MAX - replace_size)
+			return (EINVAL);
+		replace_end = replace_addr + replace_size;
+	}
 
 	lwkt_gettoken(&vmm->tok);
-	LIST_FOREACH(region, &vmm->sparse_regions, link) {
-		if (region->addr == va && region->size == size)
+	for (uint32_t i = 0; i < region_count; i++) {
+		const struct nvkm_gsp_vmm_sparse_region *region = regions[i];
+		const struct nvkm_gsp_vmm_sparse_region *old;
+		uint64_t end;
+
+		err = nvkm_gsp_vmm_sparse_region_end(region, &end);
+		if (err != 0)
+			break;
+		if (has_replace &&
+		    (region->addr < replace_addr || end > replace_end)) {
+			err = EINVAL;
+			break;
+		}
+		err = nvkm_gsp_vmm_sparse_region_writer_preflight_locked(vmm,
+		    region);
+		if (err != 0)
+			break;
+
+		LIST_FOREACH(old, &vmm->sparse_regions, link) {
+			uint64_t old_end;
+
+			err = nvkm_gsp_vmm_sparse_region_end(old, &old_end);
+			if (err != 0)
+				break;
+			if (old_end <= region->addr || old->addr >= end)
+				continue;
+			if (has_replace)
+				continue;
+			err = EBUSY;
+			break;
+		}
+		if (err != 0)
+			break;
+
+		for (uint32_t j = 0; j < i; j++) {
+			const struct nvkm_gsp_vmm_sparse_region *other =
+			    regions[j];
+			uint64_t other_end;
+
+			err = nvkm_gsp_vmm_sparse_region_end(other,
+			    &other_end);
+			if (err != 0)
+				break;
+			if (other_end <= region->addr || other->addr >= end)
+				continue;
+			err = EBUSY;
+			break;
+		}
+		if (err != 0)
 			break;
 	}
-	if (region == NULL) {
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_regions_merge_locked()
+ *
+ * Ownership:
+ *   Borrows one already-linked sparse region and may consume adjacent linked
+ *   sparse-region records with the same page_shift.  The kept region remains
+ *   owned by vmm; merged neighbor records are unlinked and freed.
+ *
+ * Lifetime:
+ *   This is metadata-only normalize.  Hardware sparse PTE/PDE contents already
+ *   describe the same sparse state on both sides of the boundary, so merging
+ *   records does not require additional PTE writes or invalidate work.
+ *
+ * Threading:
+ *   Caller holds vmm->tok after a no-fail sparse commit.  The helper performs
+ *   no allocation, user lookup, BO work, BAR1 writes, or GPU waits.
+ */
+static void
+nvkm_gsp_vmm_sparse_regions_merge_locked(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_region *region)
+{
+	struct nvkm_gsp_vmm_sparse_region *other, *other_next;
+	uint64_t region_end;
+	int err;
+
+restart:
+	err = nvkm_gsp_vmm_sparse_region_end(region, &region_end);
+	if (err != 0)
+		return;
+	LIST_FOREACH_MUTABLE(other, &vmm->sparse_regions, link,
+	    other_next) {
+		uint64_t other_end;
+
+		if (other == region || other->page_shift != region->page_shift)
+			continue;
+		err = nvkm_gsp_vmm_sparse_region_end(other, &other_end);
+		if (err != 0)
+			continue;
+		if (region_end == other->addr) {
+			region->size = other_end - region->addr;
+			LIST_REMOVE(other, link);
+			kfree(other, M_NVKM_VMM);
+			goto restart;
+		}
+		if (other_end == region->addr) {
+			region->addr = other->addr;
+			region->size = region_end - other->addr;
+			LIST_REMOVE(other, link);
+			kfree(other, M_NVKM_VMM);
+			goto restart;
+		}
+	}
+}
+
+struct nvkm_gsp_vmm_sparse_unmap_entry {
+	struct nvkm_gsp_vmm_sparse_region *old_region;
+	uint64_t cut_addr;
+	uint64_t cut_size;
+	uint8_t page_shift;
+	LIST_HEAD(, nvkm_gsp_vmm_sparse_unmap_keep) keep_regions;
+	LIST_HEAD(, nvkm_gsp_vmm_sparse_unmap_clear) clear_ranges;
+	LIST_HEAD(, nvkm_gsp_vmm_sparse_unmap_split) split_pts;
+};
+
+struct nvkm_gsp_vmm_sparse_unmap_keep {
+	LIST_ENTRY(nvkm_gsp_vmm_sparse_unmap_keep) link;
+	struct nvkm_gsp_vmm_sparse_region *region;
+	int write_pte;
+};
+
+struct nvkm_gsp_vmm_sparse_unmap_clear {
+	LIST_ENTRY(nvkm_gsp_vmm_sparse_unmap_clear) link;
+	uint64_t addr;
+	uint64_t size;
+	uint8_t page_shift;
+	int preserve_target_pts;
+};
+
+struct nvkm_gsp_vmm_sparse_unmap_split {
+	LIST_ENTRY(nvkm_gsp_vmm_sparse_unmap_split) link;
+	uint64_t va;
+	struct nvkm_gsp_vmm_user_pt *pt;
+};
+
+struct nvkm_gsp_vmm_sparse_unmap_plan {
+	struct nvkm_gsp_vmm_sparse_unmap_entry *entries;
+	uint32_t entry_count;
+	uint64_t addr;
+	uint64_t size;
+};
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_plan_for_each_clear()
+ *
+ * Ownership:
+ *   Borrows a prepared sparse-unmap plan and reports each clear range by value.
+ *   The caller keeps ownership of the plan; this helper never consumes,
+ *   publishes, or frees VMM sparse-region state.
+ *
+ * Lifetime:
+ *   The callback receives scalar copies of addr, size, and page_shift.  It must
+ *   not retain pointers into the plan.  Clear descriptors remain available
+ *   until nvkm_gsp_vmm_fini_unmap_sparse_range() releases the plan, so callers
+ *   may use this helper before or after commit.
+ *
+ * Threading:
+ *   Does not take vmm->tok and does not mutate VMM state.  The caller must
+ *   serialize against plan fini and against any commit path that owns the same
+ *   plan.
+ */
+void
+nvkm_gsp_vmm_sparse_unmap_plan_for_each_clear(
+    const struct nvkm_gsp_vmm_sparse_unmap_plan *plan,
+    nvkm_gsp_vmm_sparse_unmap_clear_fn fn, void *arg)
+{
+	if (plan == NULL || fn == NULL)
+		return;
+
+	for (uint32_t i = 0; i < plan->entry_count; i++) {
+		struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+
+		LIST_FOREACH(clear, &plan->entries[i].clear_ranges, link) {
+			fn(arg, clear->addr, clear->size, clear->page_shift);
+		}
+	}
+}
+
+static uint64_t
+nvkm_gsp_vmm_sparse_unmap_round_down(uint64_t value, uint64_t align)
+{
+	return (value & ~(align - 1));
+}
+
+static uint64_t
+nvkm_gsp_vmm_sparse_unmap_next_boundary(uint64_t addr, uint64_t align)
+{
+	uint64_t mask = align - 1;
+
+	return ((addr + mask) & ~mask);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_add_split()
+ *
+ * Ownership:
+ *   Allocates a caller-owned split-plan node for one 2 MiB PD0 sparse leaf.
+ *   The node later owns an unlinked child PT after prepare succeeds.
+ *
+ * Lifetime:
+ *   The split node lives inside the unmap entry until commit consumes its PT or
+ *   fini aborts it.  Duplicate windows share one split node.
+ *
+ * Threading:
+ *   Runs in prepare/build context before the no-fail commit section.  It does
+ *   not mutate the live VMM page tables.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_add_split(
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t va)
+{
+	struct nvkm_gsp_vmm_sparse_unmap_split *split;
+	uint64_t base = nvkm_gsp_vmm_sparse_unmap_round_down(va,
+	    1ULL << NVKM_GMMU_PD0_SHIFT);
+
+	LIST_FOREACH(split, &entry->split_pts, link) {
+		if (split->va == base)
+			return (0);
+	}
+	split = kmalloc(sizeof(*split), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	if (split == NULL)
+		return (ENOMEM);
+	split->va = base;
+	split->pt = NULL;
+	LIST_INSERT_HEAD(&entry->split_pts, split, link);
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_add_splits_for_range(
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t va, uint64_t size)
+{
+	uint64_t cur, end;
+	int err;
+
+	if (entry->page_shift != NVKM_GMMU_PD0_SHIFT)
+		return (0);
+	end = va + size;
+	for (cur = nvkm_gsp_vmm_sparse_unmap_round_down(va,
+	    1ULL << NVKM_GMMU_PD0_SHIFT); cur < end;
+	    cur += 1ULL << NVKM_GMMU_PD0_SHIFT) {
+		err = nvkm_gsp_vmm_sparse_unmap_add_split(entry, cur);
+		if (err != 0)
+			return (err);
+	}
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_append_keep(
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t addr,
+    uint64_t size, uint8_t page_shift)
+{
+	struct nvkm_gsp_vmm_sparse_unmap_keep *keep;
+	int err;
+
+	keep = kmalloc(sizeof(*keep), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	if (keep == NULL)
+		return (ENOMEM);
+	keep->write_pte = page_shift != entry->page_shift;
+	err = nvkm_gsp_vmm_alloc_sparse_region_page(NULL, addr, size,
+	    page_shift, &keep->region);
+	if (err != 0) {
+		kfree(keep, M_NVKM_VMM);
+		return (err);
+	}
+	if (keep->write_pte) {
+		err = nvkm_gsp_vmm_sparse_unmap_add_splits_for_range(entry,
+		    addr, size);
+		if (err != 0) {
+			nvkm_gsp_vmm_abort_sparse_region(NULL, keep->region);
+			kfree(keep, M_NVKM_VMM);
+			return (err);
+		}
+	}
+	LIST_INSERT_HEAD(&entry->keep_regions, keep, link);
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_append_clear(
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t addr,
+    uint64_t size, uint8_t page_shift, int preserve_target_pts)
+{
+	struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+	int err;
+
+	clear = kmalloc(sizeof(*clear), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	if (clear == NULL)
+		return (ENOMEM);
+	clear->addr = addr;
+	clear->size = size;
+	clear->page_shift = page_shift;
+	clear->preserve_target_pts =
+	    preserve_target_pts || page_shift < entry->page_shift;
+	if (clear->preserve_target_pts) {
+		err = nvkm_gsp_vmm_sparse_unmap_add_splits_for_range(entry,
+		    addr, size);
+		if (err != 0) {
+			kfree(clear, M_NVKM_VMM);
+			return (err);
+		}
+	}
+	LIST_INSERT_HEAD(&entry->clear_ranges, clear, link);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_append_segments()
+ *
+ * Ownership:
+ *   Allocates caller-owned keep or clear plan nodes for [addr, addr+size).
+ *   Keep nodes own unlinked sparse-region records; clear nodes own only scalar
+ *   range data.  No live VMM state is mutated.
+ *
+ * Lifetime:
+ *   The generated segments use the largest page size allowed by the old sparse
+ *   leaf, max_page_shift, and the current alignment.  Segments below an old
+ *   PD0 sparse leaf add a split plan so commit has child PT storage before
+ *   lower sparse/invalid writes.
+ *
+ * Threading:
+ *   Runs in prepare/build context and may sleep for allocation.  Commit later
+ *   consumes the prepared segment lists without allocating.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_append_segments(
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t addr,
+    uint64_t size, int keep, uint8_t max_page_shift, int preserve_target_pts)
+{
+	uint64_t cur = addr;
+	uint64_t end = addr + size;
+	int err;
+
+	if (max_page_shift > entry->page_shift)
+		max_page_shift = entry->page_shift;
+	while (cur < end) {
+		uint64_t remaining = end - cur;
+		uint64_t chunk, next;
+		uint8_t shift;
+
+		if (max_page_shift >= NVKM_GMMU_PD0_SHIFT &&
+		    (cur & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1)) == 0 &&
+		    remaining >= (1ULL << NVKM_GMMU_PD0_SHIFT)) {
+			shift = NVKM_GMMU_PD0_SHIFT;
+			chunk = nvkm_gsp_vmm_sparse_unmap_round_down(
+			    remaining, 1ULL << NVKM_GMMU_PD0_SHIFT);
+		} else if (max_page_shift >= NVKM_GMMU_LPT_SHIFT &&
+		    (cur & (NVKM_GMMU_LPT_PAGE_SIZE - 1)) == 0 &&
+		    remaining >= NVKM_GMMU_LPT_PAGE_SIZE) {
+			shift = NVKM_GMMU_LPT_SHIFT;
+			chunk = nvkm_gsp_vmm_sparse_unmap_round_down(
+			    remaining, NVKM_GMMU_LPT_PAGE_SIZE);
+			if (entry->page_shift >= NVKM_GMMU_PD0_SHIFT) {
+				next = nvkm_gsp_vmm_sparse_unmap_next_boundary(
+				    cur, 1ULL << NVKM_GMMU_PD0_SHIFT);
+				if (next > cur && chunk > next - cur)
+					chunk = next - cur;
+			}
+		} else {
+			shift = NVKM_GMMU_SPT_SHIFT;
+			next = nvkm_gsp_vmm_sparse_unmap_next_boundary(cur,
+			    NVKM_GMMU_LPT_PAGE_SIZE);
+			chunk = remaining;
+			if (next > cur && chunk > next - cur)
+				chunk = next - cur;
+			chunk = nvkm_gsp_vmm_sparse_unmap_round_down(chunk,
+			    NVKM_GMMU_PT_PAGE_SIZE);
+			if (chunk == 0)
+				chunk = NVKM_GMMU_PT_PAGE_SIZE;
+		}
+		if (cur > UINT64_MAX - chunk || cur + chunk > end)
+			return (EINVAL);
+			err = keep ?
+			    nvkm_gsp_vmm_sparse_unmap_append_keep(entry, cur, chunk,
+			    shift) :
+			    nvkm_gsp_vmm_sparse_unmap_append_clear(entry, cur, chunk,
+			    shift, preserve_target_pts);
+		if (err != 0)
+			return (err);
+		cur += chunk;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_prepare_split_sparse_2m()
+ *
+ * Ownership:
+ *   Allocates an unlinked child PT for one existing PD0 sparse leaf.  The
+ *   caller owns *ppt until commit_split_sparse_2m_locked() consumes it or fini
+ *   aborts it.
+ *
+ * Lifetime:
+ *   The old PD0 sparse leaf remains installed throughout prepare.  The child
+ *   PT is private and prefilled with equivalent 64 KiB sparse leaves, so
+ *   prepare failure leaves the live page table unchanged.
+ *
+ * Threading:
+ *   May allocate and therefore runs before the no-fail commit section.  It
+ *   only borrows vmm->tok while checking that the target PD0 slot is still a
+ *   sparse 2 MiB leaf.
+ */
+static int
+nvkm_gsp_vmm_prepare_split_sparse_2m(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    struct nvkm_gsp_vmm_user_pt **ppt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_user_pt *pt;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+	int err;
+
+	*ppt = NULL;
+	if (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	lwkt_gettoken(&vmm->tok);
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (existing != NULL) {
+		lwkt_reltoken(&vmm->tok);
+		return (0);
+	}
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M) {
 		lwkt_reltoken(&vmm->tok);
 		return (ENOENT);
 	}
-	LIST_REMOVE(region, link);
-	kfree(region, M_NVKM_VMM);
-
-	for (off = 0; off < size; off += NVKM_GMMU_PT_PAGE_SIZE)
-		nvkm_gsp_vmm_unmap_existing_pte(vmm, va + off, 0, 0);
 	lwkt_reltoken(&vmm->tok);
+
+	pt = kmalloc(sizeof(*pt), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	if (pt == NULL)
+		return (ENOMEM);
+	pt->pd0 = pd0;
+	pt->pd2_idx = pd2_idx;
+	pt->pd1_idx = pd1_idx;
+	pt->pd0_idx = pd0_idx;
+
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->lpt,
+	    NVKM_VRAM_VMM_PT, pt);
+	if (err != 0)
+		goto fail;
+	err = nvkm_gsp_bar1_alloc_page_kind(sc, &pt->spt,
+	    NVKM_VRAM_VMM_PT, pt);
+	if (err != 0)
+		goto fail;
+
+	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->lpt);
+	nvkm_gsp_vmm_zero_bar1_page(sc, &pt->spt);
+	*ppt = pt;
 	return (0);
+
+fail:
+	nvkm_gsp_vmm_abort_split_vram_2m(vmm, pt);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_commit_split_sparse_2m_locked()
+ *
+ * Ownership:
+ *   Consumes pt on success and links it as the child table for va's old PD0
+ *   sparse leaf.  If pt is NULL, the slot must already be materialized.
+ *
+ * Lifetime:
+ *   The old PD0 sparse leaf stops being the hardware owner of this 2 MiB
+ *   window.  Lower sparse/invalid writers in the same commit can then project
+ *   the kept sparse regions and cut invalid leaves into the child table.
+ *
+ * Threading:
+ *   Caller holds vmm->tok and is in the no-fail commit section.  This helper
+ *   only writes the PD0 child slot, links the prepared PT, and flushes BAR1 so
+ *   following lower-leaf writes can use the child tables immediately.
+ */
+static int
+nvkm_gsp_vmm_commit_split_sparse_2m_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, struct nvkm_gsp_vmm_user_pt *pt)
+{
+	struct nvkm_softc *sc = vmm->sc;
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+
+	if (va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+
+	pd2_idx = (uint32_t)((va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (existing != NULL)
+		return (pt == NULL ? 0 : EEXIST);
+	if (pt == NULL || pt->pd2_idx != pd2_idx || pt->pd1_idx != pd1_idx ||
+	    pt->pd0_idx != pd0_idx)
+		return (EINVAL);
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL || pd0 != pt->pd0 ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M)
+		return (EIO);
+
+	nvkm_gsp_vmm_pd0_write_child_slot(sc, pd0, pd0_idx,
+	    nvkm_pde_to_vram(pt->lpt.vram_paddr),
+	    nvkm_pde_to_vram(pt->spt.vram_paddr));
+	nvkm_gsp_bar1_flush(sc);
+	LIST_INSERT_HEAD(&vmm->user_pt_pages, pt, link);
+	nvkm_gsp_vmm_user_pt_lookup_insert(vmm, pt);
+	sc->vmm_pte_fast_clear_count += NVKM_GMMU_LPT_ENTRIES;
+	sc->vmm_pte_fast_sparse_clear_count += NVKM_GMMU_LPT_ENTRIES;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_LPT_SHIFT,
+	    NVKM_GMMU_LPT_ENTRIES);
+	sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_LPT_SHIFT)] +=
+	    NVKM_GMMU_LPT_ENTRIES;
+	sc->vmm_pte_leaf_clear_count[
+	    nvkm_gsp_vmm_page_shift_bucket(NVKM_GMMU_PD0_SHIFT)]++;
+	nvkm_gsp_vmm_note_bulk_clear(vmm, NVKM_GMMU_PD0_SHIFT, 1);
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_count_locked()
+ *
+ * Ownership:
+ *   Borrows sparse-region records and validates which records overlap the
+ *   target range.  It does not allocate or mutate the VMM.
+ *
+ * Lifetime:
+ *   *pcount is a scalar count used to size the caller-owned prepare plan.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.  The caller must also hold the higher-level VM
+ *   remap serialization so the sparse-region list stays stable between count,
+ *   build, and commit.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_count_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t end, uint32_t *pcount)
+{
+	struct nvkm_gsp_vmm_sparse_region *region;
+	uint32_t count = 0;
+
+	LIST_FOREACH(region, &vmm->sparse_regions, link) {
+		uint64_t region_end, cut_start, cut_end, page_size;
+		int err;
+
+		if (region->size == 0 ||
+		    region->addr > UINT64_MAX - region->size)
+			return (EINVAL);
+		region_end = region->addr + region->size;
+		if (region_end <= va || region->addr >= end)
+			continue;
+
+		err = nvkm_gsp_vmm_sparse_region_page_size(
+		    region->page_shift, &page_size);
+		if (err != 0)
+			return (err);
+		if (((region->addr | region->size) & (page_size - 1)) != 0)
+			return (EINVAL);
+
+		cut_start = region->addr > va ? region->addr : va;
+		cut_end = region_end < end ? region_end : end;
+		if (cut_start >= cut_end)
+			continue;
+		if (count == UINT32_MAX)
+			return (ENOMEM);
+		count++;
+	}
+	if (count == 0)
+		return (ENOENT);
+	*pcount = count;
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_build_locked()
+ *
+ * Ownership:
+ *   Fills caller-owned entries with borrowed old-region pointers and scalar
+ *   cut ranges.  Keep/clear/split lists are initialized but not populated; the
+ *   later prepare step owns all allocations.
+ *
+ * Lifetime:
+ *   Borrowed old-region pointers remain valid until commit because the caller
+ *   holds VM remap serialization.  Keep-region ownership is attached by the
+ *   later allocation step.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_build_locked(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t end, struct nvkm_gsp_vmm_sparse_unmap_entry *entries,
+    uint32_t entry_count)
+{
+	struct nvkm_gsp_vmm_sparse_region *region;
+	uint32_t idx = 0;
+
+	LIST_FOREACH(region, &vmm->sparse_regions, link) {
+		struct nvkm_gsp_vmm_sparse_unmap_entry *entry;
+		uint64_t region_end, cut_start, cut_end, page_size;
+		int err;
+
+		region_end = region->addr + region->size;
+		if (region_end <= va || region->addr >= end)
+			continue;
+		if (idx >= entry_count)
+			return (EIO);
+
+		err = nvkm_gsp_vmm_sparse_region_page_size(
+		    region->page_shift, &page_size);
+		if (err != 0)
+			return (err);
+		cut_start = region->addr > va ? region->addr : va;
+		cut_end = region_end < end ? region_end : end;
+		if (cut_start >= cut_end)
+			return (EIO);
+
+		entry = &entries[idx++];
+		entry->old_region = region;
+		entry->cut_addr = cut_start;
+		entry->cut_size = cut_end - cut_start;
+		entry->page_shift = region->page_shift;
+		LIST_INIT(&entry->keep_regions);
+		LIST_INIT(&entry->clear_ranges);
+		LIST_INIT(&entry->split_pts);
+	}
+	return (idx == entry_count ? 0 : EIO);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_entries_fini()
+ *
+ * Ownership:
+ *   Releases any prepared keep regions, clear nodes, and split PTs that were
+ *   not consumed by a successful commit.  Old linked sparse regions are never
+ *   freed here.
+ *
+ * Lifetime:
+ *   Called on abort or after commit; consumed region/PT pointers are NULL.
+ *
+ * Threading:
+ *   No VMM token is required because only unlinked prepared regions are freed.
+ */
+static void
+nvkm_gsp_vmm_sparse_unmap_entries_fini(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entries, uint32_t entry_count)
+{
+	for (uint32_t i = 0; i < entry_count; i++) {
+		struct nvkm_gsp_vmm_sparse_unmap_keep *keep;
+		struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+		struct nvkm_gsp_vmm_sparse_unmap_split *split;
+
+		while ((keep = LIST_FIRST(&entries[i].keep_regions)) != NULL) {
+			LIST_REMOVE(keep, link);
+			nvkm_gsp_vmm_abort_sparse_region(vmm, keep->region);
+			kfree(keep, M_NVKM_VMM);
+		}
+		while ((clear = LIST_FIRST(&entries[i].clear_ranges)) != NULL) {
+			LIST_REMOVE(clear, link);
+			kfree(clear, M_NVKM_VMM);
+		}
+		while ((split = LIST_FIRST(&entries[i].split_pts)) != NULL) {
+			LIST_REMOVE(split, link);
+			nvkm_gsp_vmm_abort_split_vram_2m(vmm, split->pt);
+			kfree(split, M_NVKM_VMM);
+		}
+	}
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_entries_prepare()
+ *
+ * Ownership:
+ *   Allocates unlinked keep-region records, clear nodes, and any child PTs
+ *   needed to materialize old PD0 sparse leaves into lower sparse leaves.
+ *   Ownership stays in entries until commit links/consumes them or fini aborts
+ *   them.
+ *
+ * Lifetime:
+ *   Prepared keep records mirror old sparse leaves outside the cut range.  If
+ *   their page_shift is smaller than the old region's page_shift, commit will
+ *   write matching lower sparse PTEs before publishing the new region record.
+ *   clear_page_shift caps the cut range so a following lower-page valid or
+ *   sparse writer can consume prepared child PT storage in the same remap plan.
+ *
+ * Threading:
+ *   May sleep while allocating.  It deliberately runs before commit mutates the
+ *   sparse-region list or writes invalid PTEs.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_entries_prepare(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entries, uint32_t entry_count,
+    uint8_t clear_page_shift, int preserve_target_pts)
+{
+	int err;
+
+	for (uint32_t i = 0; i < entry_count; i++) {
+		struct nvkm_gsp_vmm_sparse_unmap_entry *entry = &entries[i];
+		struct nvkm_gsp_vmm_sparse_unmap_split *split;
+		uint64_t old_end, head_size, tail_addr, tail_size;
+
+		old_end = entry->old_region->addr + entry->old_region->size;
+		head_size = entry->cut_addr - entry->old_region->addr;
+		tail_addr = entry->cut_addr + entry->cut_size;
+		tail_size = old_end - tail_addr;
+		if (head_size != 0) {
+				err = nvkm_gsp_vmm_sparse_unmap_append_segments(entry,
+				    entry->old_region->addr, head_size, 1,
+				    entry->page_shift, 0);
+			if (err != 0)
+				return (err);
+		}
+			err = nvkm_gsp_vmm_sparse_unmap_append_segments(entry,
+			    entry->cut_addr, entry->cut_size, 0, clear_page_shift,
+			    preserve_target_pts);
+		if (err != 0)
+			return (err);
+		if (tail_size != 0) {
+				err = nvkm_gsp_vmm_sparse_unmap_append_segments(entry,
+				    tail_addr, tail_size, 1, entry->page_shift, 0);
+			if (err != 0)
+				return (err);
+		}
+		LIST_FOREACH(split, &entry->split_pts, link) {
+			err = nvkm_gsp_vmm_prepare_split_sparse_2m(vmm,
+			    split->va, &split->pt);
+			if (err != 0)
+				return (err);
+		}
+	}
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_old_linked_locked(struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_sparse_unmap_entry *entry)
+{
+	struct nvkm_gsp_vmm_sparse_region *region;
+	uint64_t cut_end;
+
+	LIST_FOREACH(region, &vmm->sparse_regions, link) {
+		if (region == entry->old_region) {
+			uint64_t page_size, region_end;
+			int err;
+
+			if (region->size == 0 ||
+			    region->addr > UINT64_MAX - region->size ||
+			    entry->cut_size == 0 ||
+			    entry->cut_addr > UINT64_MAX - entry->cut_size)
+				return (EIO);
+			err = nvkm_gsp_vmm_sparse_region_page_size(
+			    region->page_shift, &page_size);
+			if (err != 0)
+				return (err);
+			region_end = region->addr + region->size;
+			cut_end = entry->cut_addr + entry->cut_size;
+			if (region->page_shift != entry->page_shift ||
+			    ((region->addr | region->size) &
+			    (page_size - 1)) != 0 ||
+			    entry->cut_addr < region->addr ||
+			    cut_end > region_end)
+				return (EIO);
+			return (0);
+		}
+	}
+	return (ENOENT);
+}
+
+static const struct nvkm_gsp_vmm_sparse_unmap_split *
+nvkm_gsp_vmm_sparse_unmap_find_split(
+    const struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t va)
+{
+	const struct nvkm_gsp_vmm_sparse_unmap_split *split;
+	uint64_t base = nvkm_gsp_vmm_sparse_unmap_round_down(va,
+	    1ULL << NVKM_GMMU_PD0_SHIFT);
+
+	LIST_FOREACH(split, &entry->split_pts, link) {
+		if (split->va == base)
+			return (split);
+	}
+	return (NULL);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_split_preflight_locked(
+    struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_sparse_unmap_split *split)
+{
+	struct nvkm_gsp_vmm_user_pt *existing;
+	struct nvkm_gsp_vmm_pd0 *pd0;
+	uint32_t pd2_idx, pd1_idx, pd0_idx;
+
+	if (split->va & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+		return (EINVAL);
+	pd2_idx = (uint32_t)((split->va >> NVKM_GMMU_PD2_SHIFT) &
+	    (NVKM_GMMU_PD2_ENTRIES - 1));
+	pd1_idx = (uint32_t)((split->va >> NVKM_GMMU_PD1_SHIFT) &
+	    (NVKM_GMMU_PD1_ENTRIES - 1));
+	pd0_idx = (uint32_t)((split->va >> NVKM_GMMU_PD0_SHIFT) &
+	    (NVKM_GMMU_PD0_ENTRIES - 1));
+
+	existing = nvkm_gsp_vmm_user_pt_find(vmm, pd2_idx, pd1_idx,
+	    pd0_idx);
+	if (split->pt == NULL)
+		return (existing != NULL ? 0 : ENOENT);
+	if (existing != NULL)
+		return (EEXIST);
+	if (split->pt->pd2_idx != pd2_idx ||
+	    split->pt->pd1_idx != pd1_idx ||
+	    split->pt->pd0_idx != pd0_idx)
+		return (EINVAL);
+	pd0 = nvkm_gsp_vmm_pd0_find(vmm, pd2_idx, pd1_idx);
+	if (pd0 == NULL || pd0 != split->pt->pd0 ||
+	    pd0->slot_state[pd0_idx] != NVKM_GSP_VMM_PD0_SLOT_SPARSE_2M)
+		return (EIO);
+	return (0);
+}
+
+static int
+nvkm_gsp_vmm_sparse_unmap_check_lower_prepared_locked(
+    struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_sparse_unmap_entry *entry, uint64_t va,
+    uint64_t size, uint8_t page_shift)
+{
+	uint64_t cur, end;
+
+	if (entry->page_shift == NVKM_GMMU_PD0_SHIFT &&
+	    page_shift < NVKM_GMMU_PD0_SHIFT) {
+		end = va + size;
+		for (cur = nvkm_gsp_vmm_sparse_unmap_round_down(va,
+		    1ULL << NVKM_GMMU_PD0_SHIFT); cur < end;
+		    cur += 1ULL << NVKM_GMMU_PD0_SHIFT) {
+			if (nvkm_gsp_vmm_sparse_unmap_find_split(entry,
+			    cur) == NULL)
+				return (ENOENT);
+		}
+		return (0);
+	}
+	if (page_shift == NVKM_GMMU_PD0_SHIFT) {
+		if ((va | size) & ((1ULL << NVKM_GMMU_PD0_SHIFT) - 1))
+			return (EINVAL);
+		return (0);
+	}
+	return (nvkm_gsp_vmm_check_prepared_pt_range_locked(vmm, va,
+	    size, page_shift));
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_entries_preflight_locked()
+ *
+ * Ownership:
+ *   Borrows a fully prepared sparse-unmap plan and validates every live
+ *   sparse-region pointer, planned PD0 split, and lower-table writer target
+ *   before commit mutates the sparse list or page tables.
+ *
+ * Lifetime:
+ *   The check is valid while VM remap serialization is held until commit.
+ *   It intentionally mirrors commit's plan consumption so an invariant break
+ *   is reported before the first live region is removed.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.  This helper is read-only and performs no
+ *   allocation, BAR1 writes, sparse-list mutation, or GPU waits.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_entries_preflight_locked(
+    struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_sparse_unmap_entry *entries,
+    uint32_t entry_count)
+{
+	for (uint32_t i = 0; i < entry_count; i++) {
+		const struct nvkm_gsp_vmm_sparse_unmap_entry *entry =
+		    &entries[i];
+		const struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+		const struct nvkm_gsp_vmm_sparse_unmap_keep *keep;
+		const struct nvkm_gsp_vmm_sparse_unmap_split *split;
+		int err;
+
+		if (entry->old_region == NULL)
+			return (EIO);
+		err = nvkm_gsp_vmm_sparse_unmap_old_linked_locked(vmm,
+		    entry);
+		if (err != 0)
+			return (err);
+		LIST_FOREACH(split, &entry->split_pts, link) {
+			err = nvkm_gsp_vmm_sparse_unmap_split_preflight_locked(
+			    vmm, split);
+			if (err != 0)
+				return (err);
+		}
+		LIST_FOREACH(clear, &entry->clear_ranges, link) {
+			err =
+			    nvkm_gsp_vmm_sparse_unmap_check_lower_prepared_locked(
+			    vmm, entry, clear->addr, clear->size,
+			    clear->page_shift);
+			if (err != 0)
+				return (err);
+		}
+		LIST_FOREACH(keep, &entry->keep_regions, link) {
+			if (!keep->write_pte)
+				continue;
+			err =
+			    nvkm_gsp_vmm_sparse_unmap_check_lower_prepared_locked(
+			    vmm, entry, keep->region->addr,
+			    keep->region->size, keep->region->page_shift);
+			if (err != 0)
+				return (err);
+		}
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_check_unmap_sparse_range_prepared()
+ *
+ * Ownership:
+ *   Borrows vmm, a caller-owned sparse-unmap plan, and the scalar target
+ *   range.  It does not consume the plan, mutate sparse-region ownership, or
+ *   write PTE/PDE state.
+ *
+ * Lifetime:
+ *   The result is valid only while VM remap serialization keeps the live
+ *   sparse-region tree paired with the prepared plan.  A successful result
+ *   proves that committing the plan will clear the requested target range and
+ *   provide the lower-table storage needed by a following prepared writer.
+ *
+ * Threading:
+ *   Acquires vmm->tok for a read-only plan/live-state validation.  No memory
+ *   allocation, BAR1 write, sparse-list mutation, BO lookup, or GPU wait occurs.
+ */
+int
+nvkm_gsp_vmm_check_unmap_sparse_range_prepared(struct nvkm_gsp_vmm *vmm,
+    const struct nvkm_gsp_vmm_sparse_unmap_plan *plan, uint64_t va,
+    uint64_t size, uint8_t page_shift)
+{
+	uint64_t end, plan_end, page_size, cur;
+	int err;
+
+	if (plan == NULL)
+		return (ENOENT);
+	if (size == 0 || va > UINT64_MAX - size)
+		return (EINVAL);
+	if (plan->size == 0 || plan->addr > UINT64_MAX - plan->size)
+		return (EINVAL);
+	err = nvkm_gsp_vmm_sparse_region_page_size(page_shift, &page_size);
+	if (err != 0)
+		return (err);
+	if (((va | size) & (page_size - 1)) != 0)
+		return (EINVAL);
+
+	end = va + size;
+	plan_end = plan->addr + plan->size;
+	if (va < plan->addr || end > plan_end)
+		return (ENOENT);
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_sparse_unmap_entries_preflight_locked(vmm,
+	    plan->entries, plan->entry_count);
+	if (err != 0)
+		goto out;
+
+	cur = va;
+	while (cur < end) {
+		const struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+		const struct nvkm_gsp_vmm_sparse_unmap_entry *entry;
+		uint64_t next = cur;
+
+		for (uint32_t i = 0; i < plan->entry_count; i++) {
+			entry = &plan->entries[i];
+			LIST_FOREACH(clear, &entry->clear_ranges, link) {
+				uint64_t clear_end;
+
+				if (clear->addr > UINT64_MAX - clear->size) {
+					err = EINVAL;
+					goto out;
+				}
+				clear_end = clear->addr + clear->size;
+				if (clear->addr > cur || clear_end <= cur)
+					continue;
+				if (clear->page_shift > page_shift)
+					continue;
+				if (clear_end > next)
+					next = clear_end;
+			}
+		}
+		if (next == cur) {
+			err = ENOENT;
+			goto out;
+		}
+		cur = next < end ? next : end;
+	}
+
+out:
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_sparse_unmap_entries_commit_locked()
+ *
+ * Ownership:
+ *   Consumes old sparse-region records covered by the target range, prepared
+ *   split PTs, clear ranges, and prepared keep regions.  On success old
+ *   records are freed and keep regions are linked into vmm.
+ *
+ * Lifetime:
+ *   Invalid PTE/PDE writes become visible only after the caller's final VMM
+ *   flush.  The sparse-region tree is kept semantically aligned with those
+ *   writes throughout the no-fail commit.
+ *
+ * Threading:
+ *   Caller holds vmm->tok.  The function performs no allocation, user lookup,
+ *   BO pinning, or GPU waits.
+ */
+static int
+nvkm_gsp_vmm_sparse_unmap_entries_commit_locked(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_unmap_entry *entries, uint32_t entry_count)
+{
+	int err;
+
+	err = nvkm_gsp_vmm_sparse_unmap_entries_preflight_locked(vmm,
+	    entries, entry_count);
+	if (err != 0)
+		return (err);
+
+	for (uint32_t i = 0; i < entry_count; i++) {
+		struct nvkm_gsp_vmm_sparse_unmap_entry *entry = &entries[i];
+		struct nvkm_gsp_vmm_sparse_region *old = entry->old_region;
+		struct nvkm_gsp_vmm_sparse_unmap_clear *clear;
+		struct nvkm_gsp_vmm_sparse_unmap_keep *keep;
+		struct nvkm_gsp_vmm_sparse_unmap_split *split;
+
+		LIST_FOREACH(split, &entry->split_pts, link) {
+			err = nvkm_gsp_vmm_commit_split_sparse_2m_locked(vmm,
+			    split->va, split->pt);
+			if (err != 0)
+				return (err);
+			split->pt = NULL;
+		}
+		LIST_REMOVE(old, link);
+		LIST_FOREACH(clear, &entry->clear_ranges, link) {
+			err = nvkm_gsp_vmm_write_invalid_prepared_locked(vmm,
+			    clear->addr, clear->size, clear->page_shift,
+			    clear->preserve_target_pts);
+			if (err != 0)
+				return (err);
+		}
+		LIST_FOREACH(keep, &entry->keep_regions, link) {
+			if (keep->write_pte) {
+				err = nvkm_gsp_vmm_write_sparse_prepared(vmm,
+				    keep->region->addr, keep->region->size,
+				    keep->region->page_shift);
+				if (err != 0)
+					return (err);
+			}
+			LIST_INSERT_HEAD(&vmm->sparse_regions,
+			    keep->region, link);
+			nvkm_gsp_vmm_sparse_regions_merge_locked(vmm,
+			    keep->region);
+			keep->region = NULL;
+		}
+		kfree(old, M_NVKM_VMM);
+		entry->old_region = NULL;
+	}
+	return (0);
+}
+
+/*
+ * nvkm_gsp_vmm_prepare_unmap_sparse_range_page()
+ *
+ * Ownership:
+ *   Allocates a caller-owned sparse-unmap plan for every linked sparse-region
+ *   record overlapped by [va, va+size).  The plan owns prepared keep-region
+ *   records and any child PTs needed to materialize old PD0 sparse leaves.  It
+ *   does not mutate live sparse-region ownership or hardware PTEs.
+ *
+ * Lifetime:
+ *   The caller must keep VM remap serialization until commit or fini because
+ *   the plan borrows old linked sparse-region pointers.  A range with no
+ *   sparse regions returns success with *pplan == NULL.  clear_page_shift caps
+	 *   the page size used for the cleared cut range; this lets a later lower-page
+	 *   target writer rely on this plan for child PT storage even when the old
+	 *   sparse region is fully covered.  preserve_target_pts keeps the target
+	 *   PD0/PT storage for a following prepared valid/sparse writer instead of
+	 *   reclaiming it as part of the sparse clear.
+ *
+ * Threading:
+ *   May allocate and may briefly take vmm->tok for count/build checks.  Use it
+ *   before any no-fail VM_BIND commit step that writes PTEs or splices mapping
+ *   state.
+ */
+int
+nvkm_gsp_vmm_prepare_unmap_sparse_range_page(struct nvkm_gsp_vmm *vmm,
+    uint64_t va, uint64_t size, uint8_t clear_page_shift,
+    int preserve_target_pts,
+    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan)
+{
+	struct nvkm_gsp_vmm_sparse_unmap_plan *plan;
+	struct nvkm_gsp_vmm_sparse_unmap_entry *entries;
+	uint64_t end;
+	uint64_t page_size;
+	uint32_t entry_count = 0;
+	int err;
+
+	*pplan = NULL;
+	err = nvkm_gsp_vmm_sparse_region_page_size(clear_page_shift,
+	    &page_size);
+	if (err != 0)
+		return (err);
+	if ((va | size) & (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (EINVAL);
+	if (size == 0 || va > UINT64_MAX - size)
+		return (EINVAL);
+	end = va + size;
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_sparse_unmap_count_locked(vmm, va, end,
+	    &entry_count);
+	lwkt_reltoken(&vmm->tok);
+	if (err == ENOENT)
+		return (0);
+	if (err != 0)
+		return (err);
+
+	if (entry_count > SIZE_MAX / sizeof(*entries))
+		return (ENOMEM);
+	plan = kmalloc(sizeof(*plan), M_NVKM_VMM, M_WAITOK | M_ZERO);
+	if (plan == NULL)
+		return (ENOMEM);
+	entries = kmalloc(entry_count * sizeof(*entries), M_NVKM_VMM,
+	    M_WAITOK | M_ZERO);
+	if (entries == NULL) {
+		kfree(plan, M_NVKM_VMM);
+		return (ENOMEM);
+	}
+	for (uint32_t i = 0; i < entry_count; i++) {
+		LIST_INIT(&entries[i].keep_regions);
+		LIST_INIT(&entries[i].clear_ranges);
+		LIST_INIT(&entries[i].split_pts);
+	}
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_sparse_unmap_build_locked(vmm, va, end, entries,
+	    entry_count);
+	lwkt_reltoken(&vmm->tok);
+	if (err != 0)
+		goto out;
+
+	err = nvkm_gsp_vmm_sparse_unmap_entries_prepare(vmm, entries,
+	    entry_count, clear_page_shift, preserve_target_pts);
+	if (err != 0)
+		goto out;
+
+	plan->entries = entries;
+	plan->entry_count = entry_count;
+	plan->addr = va;
+	plan->size = size;
+	*pplan = plan;
+	return (0);
+
+out:
+	nvkm_gsp_vmm_sparse_unmap_entries_fini(vmm, entries, entry_count);
+	kfree(entries, M_NVKM_VMM);
+	kfree(plan, M_NVKM_VMM);
+	return (err);
+}
+
+int
+nvkm_gsp_vmm_prepare_unmap_sparse_range(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size, struct nvkm_gsp_vmm_sparse_unmap_plan **pplan)
+{
+	return (nvkm_gsp_vmm_prepare_unmap_sparse_range_page(vmm, va, size,
+	    NVKM_GMMU_PD0_SHIFT, 0, pplan));
+}
+
+/*
+ * nvkm_gsp_vmm_commit_unmap_sparse_range_noflush()
+ *
+ * Ownership:
+ *   Consumes the live sparse-region records described by plan and publishes
+ *   prepared keep-regions.  The caller still owns plan storage and must call
+ *   fini_unmap_sparse_range() after commit returns.
+ *
+ * Lifetime:
+ *   Hardware visibility of invalid/sparse writes belongs to the caller's final
+ *   VMM flush/TLB invalidate.  Passing NULL is a no-op prepared by a sparse
+ *   range that had no linked regions.
+ *
+ * Threading:
+ *   Takes vmm->tok and performs no allocation, GEM lookup, BO pinning, or GPU
+ *   waits.  This is the no-fail commit half for DRM VM_BIND sparse replace.
+ */
+int
+nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_unmap_plan *plan)
+{
+	int err;
+
+	if (plan == NULL)
+		return (0);
+
+	lwkt_gettoken(&vmm->tok);
+	err = nvkm_gsp_vmm_sparse_unmap_entries_commit_locked(vmm,
+	    plan->entries, plan->entry_count);
+	lwkt_reltoken(&vmm->tok);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_vmm_fini_unmap_sparse_range()
+ *
+ * Ownership:
+ *   Releases a sparse-unmap plan created by prepare_unmap_sparse_range().
+ *   Unconsumed keep-regions and split PTs are aborted; already committed
+ *   entries have NULL ownership fields and are skipped.
+ *
+ * Lifetime:
+ *   Safe after either prepare failure cleanup by the caller, successful commit,
+ *   or abort before commit.  Passing NULL is allowed.
+ *
+ * Threading:
+ *   Does not require vmm->tok because only unlinked prepared objects remain in
+ *   the plan.  It never mutates live sparse-region lists.
+ */
+void
+nvkm_gsp_vmm_fini_unmap_sparse_range(struct nvkm_gsp_vmm *vmm,
+    struct nvkm_gsp_vmm_sparse_unmap_plan *plan)
+{
+	if (plan == NULL)
+		return;
+	nvkm_gsp_vmm_sparse_unmap_entries_fini(vmm, plan->entries,
+	    plan->entry_count);
+	kfree(plan->entries, M_NVKM_VMM);
+	kfree(plan, M_NVKM_VMM);
+}
+
+/*
+ * nvkm_gsp_vmm_unmap_sparse_range_noflush()
+ *
+ * Ownership:
+ *   Compatibility wrapper that prepares, commits, and releases one sparse
+ *   range in a single call.  New VM_BIND paths should call the split
+ *   prepare/commit API so allocation failures happen before other PTE writes.
+ *
+ * Lifetime:
+ *   Returns ENOENT when no sparse region overlaps the range, preserving the
+ *   historical helper contract for callers that distinguish no-op clears.
+ *
+ * Threading:
+ *   May allocate during prepare and takes vmm->tok during commit.  It performs
+ *   no final VMM flush; callers own the enclosing invalidate boundary.
+ */
+int
+nvkm_gsp_vmm_unmap_sparse_range_noflush(struct nvkm_gsp_vmm *vmm, uint64_t va,
+    uint64_t size)
+{
+	struct nvkm_gsp_vmm_sparse_unmap_plan *plan;
+	int err;
+
+	err = nvkm_gsp_vmm_prepare_unmap_sparse_range(vmm, va, size, &plan);
+	if (err != 0)
+		return (err);
+	if (plan == NULL)
+		return (ENOENT);
+	err = nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(vmm, plan);
+	nvkm_gsp_vmm_fini_unmap_sparse_range(vmm, plan);
+	return (err);
 }
 
 int
 nvkm_gsp_vmm_unmap_sparse(struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size)
 {
-	int err = nvkm_gsp_vmm_unmap_sparse_noflush(vmm, va, size);
+	int err = nvkm_gsp_vmm_unmap_sparse_range_noflush(vmm, va, size);
 
 	if (err == 0)
 		nvkm_gsp_vmm_flush(vmm);

@@ -347,7 +347,46 @@ struct nvkm_drm_vm_trace {
 
 #define NVKM_DRM_VM_BIND_PTE_KIND_COUNT	256
 #define NVKM_DRM_VM_BIND_SIZE_BUCKET_COUNT	16
+#define NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT	3
+#define NVKM_DRM_VM_BIND_DOMAIN_COUNT	2
+#define NVKM_DRM_VM_BIND_REJECT_REASON_COUNT	9
 #define NVKM_BO_GEM_NEW_TRACE_COUNT	64
+
+enum nvkm_drm_vm_bind_page_shift_bucket {
+	NVKM_DRM_VM_BIND_PAGE_SHIFT_4K = 0,
+	NVKM_DRM_VM_BIND_PAGE_SHIFT_64K,
+	NVKM_DRM_VM_BIND_PAGE_SHIFT_2M,
+};
+
+enum nvkm_drm_vm_bind_domain_bucket {
+	NVKM_DRM_VM_BIND_DOMAIN_VRAM = 0,
+	NVKM_DRM_VM_BIND_DOMAIN_HOST,
+};
+
+enum nvkm_drm_vm_bind_reject_reason {
+	NVKM_DRM_VM_BIND_REJECT_DOMAIN = 0,
+	NVKM_DRM_VM_BIND_REJECT_CAPABILITY_GATE,
+	NVKM_DRM_VM_BIND_REJECT_VA_ALIGN,
+	NVKM_DRM_VM_BIND_REJECT_RANGE_ALIGN,
+	NVKM_DRM_VM_BIND_REJECT_BO_OFFSET_ALIGN,
+	NVKM_DRM_VM_BIND_REJECT_PADDR_ALIGN,
+	NVKM_DRM_VM_BIND_REJECT_PADDR_RUN,
+	NVKM_DRM_VM_BIND_REJECT_KIND_FLAGS,
+	NVKM_DRM_VM_BIND_REJECT_SPARSE_STATE,
+};
+
+enum nvkm_drm_ttm_rebind_error_stage {
+	NVKM_DRM_TTM_REBIND_ERROR_NONE = 0,
+	NVKM_DRM_TTM_REBIND_ERROR_ALLOC,
+	NVKM_DRM_TTM_REBIND_ERROR_ENTRY_PREPARE,
+	NVKM_DRM_TTM_REBIND_ERROR_UNMAP_PREFLIGHT,
+	NVKM_DRM_TTM_REBIND_ERROR_TARGET_PREFLIGHT,
+	NVKM_DRM_TTM_REBIND_ERROR_SPLIT_PREFLIGHT,
+	NVKM_DRM_TTM_REBIND_ERROR_COMMIT_LIVE,
+	NVKM_DRM_TTM_REBIND_ERROR_COMMIT_SPLIT,
+	NVKM_DRM_TTM_REBIND_ERROR_COMMIT_UNMAP,
+	NVKM_DRM_TTM_REBIND_ERROR_COMMIT_MAP,
+};
 
 struct nvkm_bo_gem_new_trace {
 	uint64_t	seq;
@@ -611,6 +650,9 @@ struct nvkm_softc {
 	uint64_t		exec_resv_attach_bos;
 	uint64_t		exec_resv_attach_signaled_count;
 	uint64_t		exec_resv_attach_pending_count;
+	uint64_t		exec_runtime_resv_attach_calls;
+	uint64_t		exec_runtime_resv_attach_signaled_count;
+	uint64_t		exec_runtime_resv_attach_pending_count;
 	uint64_t		vm_bind_resv_attach_signaled_count;
 	uint64_t		vm_bind_resv_attach_pending_count;
 	uint64_t		exec_async_pending_count;
@@ -656,8 +698,48 @@ struct nvkm_softc {
 	uint32_t		job_diag_active_wait_count;
 	uint32_t		job_diag_active_dep_pending;
 	uint32_t		job_diag_active_sig_count;
+	uint32_t		job_diag_active_dep_index;
+	uint32_t		job_diag_active_dep_type;
+	uint32_t		job_diag_active_dep_signaled;
+	uint32_t		job_diag_active_dep_hw_ready;
+	uint64_t		job_diag_active_dep_context;
+	uint64_t		job_diag_active_dep_seqno;
+	uint64_t		job_diag_active_dep_flags;
+	int			job_diag_active_dep_error;
+	uint64_t		job_diag_active_dep_chain_point;
+	uint64_t		job_diag_active_dep_chain_prev_seqno;
+	uint32_t		job_diag_active_dep_array_count;
+	uint32_t		job_diag_active_dep_array_pending;
+	uint32_t		job_diag_active_dep_producer_type;
+	uint32_t		job_diag_active_dep_producer_channel;
+	int32_t			job_diag_active_dep_producer_chid;
+	uint32_t		job_diag_active_dep_producer_post_slot;
+	uint32_t		job_diag_active_dep_producer_payload;
+	uint64_t		job_diag_active_dep_producer_submit_count;
+	uint32_t		job_diag_active_dep_signal_source;
+	uint32_t		job_diag_active_dep_signal_count;
+	int			job_diag_active_dep_signal_error;
+	uint64_t		fence_wait_count;
+	uint32_t		fence_wait_active;
+	uint32_t		fence_wait_last_intr;
+	int64_t			fence_wait_last_timeout;
+	int64_t			fence_wait_last_ret;
+	uint64_t		fence_wait_last_context;
+	uint64_t		fence_wait_last_seqno;
+	uint64_t		fence_wait_last_flags;
+	int			fence_wait_last_error;
+	uint32_t		fence_wait_last_producer_type;
+	uint32_t		fence_wait_last_producer_channel;
+	int32_t			fence_wait_last_producer_chid;
+	uint32_t		fence_wait_last_producer_post_slot;
+	uint32_t		fence_wait_last_producer_payload;
+	uint64_t		fence_wait_last_producer_submit_count;
+	uint32_t		fence_wait_last_signal_source;
+	uint32_t		fence_wait_last_signal_count;
+	int			fence_wait_last_signal_error;
 	uint32_t		job_diag_last_stage;
 	int			job_diag_last_ret;
+	int			vm_bind_job_delay_ms;
 	uint64_t		exec_diag_enter_count;
 	uint64_t		exec_diag_leave_count;
 	uint64_t		exec_diag_active_seq;
@@ -810,11 +892,47 @@ struct nvkm_softc {
 	int			bo_alloc_fail_error;
 	uint64_t		bo_resv_wait_count;
 	uint64_t		bo_resv_wait_error_count;
+	uint64_t		bo_resv_wait_no_share_vm_count;
+	uint64_t		bo_resv_wait_ttm_count;
+	uint64_t		bo_resv_wait_local_count;
+	uint64_t		bo_resv_wait_nowait_count;
+	uint64_t		bo_resv_wait_intr_count;
+	int			bo_resv_wait_last_error;
+	uint32_t		bo_resv_wait_last_write;
+	uint32_t		bo_resv_wait_last_nowait;
+	uint32_t		bo_resv_wait_last_no_share;
+	uint32_t		bo_resv_wait_last_resv_kind;
 	uint64_t		vm_init_kernel_addr;
 	uint64_t		vm_init_kernel_size;
 	uint64_t		vm_bind_ioctl_count;
 	uint64_t		vm_bind_op_count;
 	uint32_t		vm_bind_max_op_count;
+	uint64_t		vm_bind_batch_count;
+	uint64_t		vm_bind_batch_multi_op_count;
+	uint64_t		vm_bind_batch_committed_op_count;
+	uint64_t		vm_bind_batch_prepare_error_count;
+	uint64_t		vm_bind_batch_commit_error_count;
+	uint64_t		vm_bind_prepare_fail_count;
+	uint32_t		vm_bind_prepare_fail_last_index;
+	uint64_t		vm_bind_pt_alloc_fail_count;
+	uint64_t		vm_bind_pt_alloc_fail_last_va;
+	uint64_t		vm_bind_commit_pt_fail_count;
+	uint32_t		vm_bind_commit_pt_fail_last_index;
+	uint64_t		vm_bind_commit_pt_fail_last_va;
+	uint64_t		vm_bind_parent_child_fail_count;
+	uint32_t		vm_bind_parent_child_fail_last_index;
+	uint64_t		vm_bind_parent_child_fail_last_va;
+	uint64_t		vm_bind_release_count;
+	uint64_t		vm_bind_release_binding_count;
+	uint64_t		vm_bind_release_channel_count;
+	uint64_t		vm_bind_release_reclaim_error_count;
+	uint64_t		vm_bind_retire_schedule_count;
+	uint64_t		vm_bind_retire_empty_count;
+	uint64_t		vm_bind_retire_queue_error_count;
+	uint64_t		vm_bind_retire_work_count;
+	uint64_t		vm_bind_retire_work_binding_count;
+	uint64_t		vm_bind_retire_free_count;
+	uint64_t		vm_bind_retire_free_binding_count;
 	uint64_t		vm_bind_async_count;
 	uint64_t		vm_bind_sync_count;
 	uint64_t		vm_bind_fast_count;
@@ -839,6 +957,8 @@ struct nvkm_softc {
 	uint64_t		vm_bind_empty_clear_skip_pages;
 	uint64_t		vm_bind_replace_clear_skip_count;
 	uint64_t		vm_bind_replace_clear_skip_pages;
+	uint64_t		vm_bind_noop_count;
+	uint64_t		vm_bind_noop_fast_count;
 	uint64_t		vm_bind_map_count;
 	uint64_t		vm_bind_map_pages;
 	uint64_t		vm_bind_unmap_count;
@@ -857,6 +977,141 @@ struct nvkm_softc {
 	uint64_t		vm_bind_clear_map_sparse_pages;
 	uint64_t		vm_bind_clear_unmap_sparse_count;
 	uint64_t		vm_bind_clear_unmap_sparse_pages;
+	uint64_t		vm_bind_map_segment_count;
+	uint64_t		vm_bind_map_segment_pages;
+	uint64_t		vm_bind_map_split_count;
+	uint64_t		vm_bind_map_split_pages;
+	uint64_t		vm_bind_paddr_run_split_count;
+	uint64_t		vm_bind_paddr_run_split_pages;
+	uint64_t		vm_bind_dirty_range_count;
+	uint64_t		vm_bind_dirty_range_pages;
+	uint64_t		vm_bind_dirty_set_count;
+	uint64_t		vm_bind_dirty_set_range_count;
+	uint64_t		vm_bind_dirty_set_pages;
+	uint64_t		vm_bind_dirty_set_merged_count;
+	uint64_t		vm_bind_dirty_set_overflow_count;
+	uint64_t		vm_bind_flush_count;
+	uint64_t		vm_bind_clean_batch_count;
+	uint64_t		vm_bind_materialize_count;
+	uint64_t		vm_bind_materialize_pages;
+	uint64_t		vm_bind_mapping_merge_count;
+	uint64_t		vm_bind_mapping_merge_pages;
+	uint64_t		vm_bind_bo_reverse_link_count;
+	uint64_t		vm_bind_bo_reverse_unlink_count;
+	uint64_t		vm_bind_bo_reverse_live_count;
+	uint64_t		vm_bind_bo_reverse_max_live_count;
+	uint64_t		vm_bind_bo_reverse_free_nonempty_count;
+	uint64_t		ttm_move_bound_attempt_count;
+	uint64_t		ttm_move_bound_reject_count;
+	uint64_t		ttm_move_bo_wait_count;
+	uint64_t		ttm_move_bo_wait_error_count;
+	int			ttm_move_bo_wait_last_error;
+	uint32_t		ttm_move_bo_wait_last_interruptible;
+	uint32_t		ttm_move_bo_wait_last_no_wait;
+	uint32_t		ttm_move_bo_wait_last_no_share;
+	uint32_t		ttm_move_bo_wait_last_resv_is_ttm;
+	uint64_t		ttm_rebind_prepare_count;
+	uint64_t		ttm_rebind_prepare_error_count;
+	uint64_t		ttm_rebind_abort_count;
+	uint64_t		ttm_rebind_vm_count;
+	uint64_t		ttm_rebind_unmap_count;
+	uint64_t		ttm_rebind_unmap_pages;
+	uint64_t		ttm_rebind_map_count;
+	uint64_t		ttm_rebind_map_error_count;
+	uint64_t		ttm_rebind_rollback_count;
+	uint64_t		ttm_rebind_rollback_error_count;
+	uint64_t		ttm_rebind_binding_count;
+	uint64_t		ttm_rebind_pages;
+	uint64_t		ttm_rebind_flush_count;
+	uint64_t		ttm_rebind_fence_count;
+	uint64_t		ttm_rebind_fence_error_count;
+	uint64_t		ttm_rebind_resv_attach_count;
+	uint64_t		ttm_rebind_exec_resv_wait_count;
+	uint64_t		ttm_rebind_exec_resv_wait_owner_count;
+	uint64_t		ttm_rebind_exec_resv_wait_error_count;
+	int			ttm_rebind_exec_resv_wait_last_error;
+	uint64_t		ttm_rebind_page_shift_old_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		ttm_rebind_page_shift_old_pages[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		ttm_rebind_page_shift_new_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		ttm_rebind_page_shift_new_pages[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	int			ttm_rebind_last_error;
+	uint32_t		ttm_rebind_last_error_stage;
+	uint32_t		ttm_rebind_last_error_index;
+	uint32_t		ttm_rebind_last_error_count;
+	uint8_t			ttm_rebind_last_old_shift;
+	uint8_t			ttm_rebind_last_target_shift;
+	uint8_t			ttm_rebind_last_target_vram;
+	uint64_t		ttm_rebind_last_error_addr;
+	uint64_t		ttm_rebind_last_error_size;
+	uint64_t		ttm_rebind_last_error_bo_offset;
+	uint64_t		ttm_vm_validate_mark_count;
+	uint64_t		ttm_vm_validate_clear_count;
+	uint64_t		ttm_vm_validate_live_count;
+	uint64_t		ttm_vm_validate_max_live_count;
+	uint64_t		ttm_vm_validate_exec_count;
+	uint64_t		ttm_vm_validate_empty_count;
+	uint64_t		ttm_vm_validate_candidate_count;
+	uint64_t		ttm_vm_validate_bo_count;
+	uint64_t		ttm_vm_validate_error_count;
+	int			ttm_vm_validate_last_error;
+	uint64_t		ttm_evict_vram_test_count;
+	uint64_t		ttm_evict_vram_test_error_count;
+	int			ttm_evict_vram_test_last_error;
+	uint64_t		ttm_evict_lru_sample_count;
+	uint64_t		ttm_evict_lru_before_count;
+	uint64_t		ttm_evict_lru_before_no_evict_count;
+	uint64_t		ttm_evict_lru_before_live_count;
+	uint64_t		ttm_evict_lru_before_reserve_ok_count;
+	uint64_t		ttm_evict_lru_before_reserve_busy_count;
+	uint64_t		ttm_evict_lru_after_count;
+	uint64_t		ttm_evict_lru_after_no_evict_count;
+	uint64_t		ttm_evict_lru_after_live_count;
+	uint64_t		ttm_evict_lru_after_reserve_ok_count;
+	uint64_t		ttm_evict_lru_after_reserve_busy_count;
+	int			ttm_evict_lru_last_error;
+	uint64_t		ttm_validate_vram_test_count;
+	uint64_t		ttm_validate_vram_test_error_count;
+	uint64_t		ttm_validate_vram_test_empty_count;
+	uint64_t		ttm_last_bound_move_capture_count;
+	uint64_t		ttm_last_bound_move_clear_count;
+	int			ttm_validate_vram_test_last_error;
+	uint64_t		ttm_io_reserve_count;
+	uint64_t		ttm_io_reserve_error_count;
+	uint64_t		ttm_io_reserve_bar1_retry_count;
+	uint64_t		ttm_io_free_count;
+	uint64_t		ttm_io_free_bar1_count;
+	uint64_t		ttm_io_reserve_last_size;
+	int			ttm_io_reserve_last_error;
+	uint64_t		ttm_vm_bind_no_evict_pin_count;
+	uint64_t		ttm_vm_bind_evictable_pin_count;
+	uint64_t		ttm_vram_no_evict_create_count;
+	uint64_t		ttm_vram_evictable_create_count;
+	int			ttm_bound_move_test_enable;
+	int			ttm_bound_rebind_test_enable;
+	int			vm_bind_map_2m_enable;
+	int			vm_bind_prepare_fail_after;
+	int			vm_bind_pt_alloc_fail_after;
+	int			vm_bind_commit_pt_fail_after;
+	int			vm_bind_parent_child_fail_after;
+	int			vm_bind_map_host_large_enable;
+	int			vm_bind_sparse_large_enable;
+	int			vm_bind_sparse_2m_enable;
+	int			vm_bind_promote_2m_enable;
+	uint64_t		vm_bind_promote_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_promote_pages[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_promote_error_count;
+	uint64_t		vm_bind_promote_split_count;
+	uint64_t		vm_bind_promote_split_pages;
+	uint64_t		vm_bind_page_shift_map_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_page_shift_map_pages[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_page_shift_unmap_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_page_shift_unmap_pages[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_valid_page_shift_map_count[NVKM_DRM_VM_BIND_DOMAIN_COUNT][NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_valid_page_shift_map_pages[NVKM_DRM_VM_BIND_DOMAIN_COUNT][NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_valid_page_shift_unmap_count[NVKM_DRM_VM_BIND_DOMAIN_COUNT][NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_valid_page_shift_unmap_pages[NVKM_DRM_VM_BIND_DOMAIN_COUNT][NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vm_bind_reject_reason_count[NVKM_DRM_VM_BIND_REJECT_REASON_COUNT];
+	uint64_t		vm_bind_reject_reason_pages[NVKM_DRM_VM_BIND_REJECT_REASON_COUNT];
 	uint64_t		vm_bind_map_kind_count[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
 	uint64_t		vm_bind_map_kind_pages[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
 	uint64_t		vm_bind_clear_kind_count[NVKM_DRM_VM_BIND_PTE_KIND_COUNT];
@@ -883,6 +1138,12 @@ struct nvkm_softc {
 	uint64_t		cpu_fini_flush_us;
 	uint64_t		vmm_flush_count;
 	uint64_t		vmm_flush_us;
+	uint64_t		vmm_dirty_flush_count;
+	uint64_t		vmm_dirty_flush_range_count;
+	uint64_t		vmm_dirty_flush_pages;
+	uint64_t		vmm_dirty_flush_overflow_count;
+	uint64_t		vmm_dirty_flush_all_fallback_count;
+	uint64_t		vmm_pte_backend_flush_count;
 	uint64_t		vmm_pte_fast_write_count;
 	uint64_t		vmm_pte_bulk_write_count;
 	uint64_t		vmm_pte_bulk_write_pages;
@@ -892,6 +1153,14 @@ struct nvkm_softc {
 	uint64_t		vmm_pte_bulk_clear_count;
 	uint64_t		vmm_pte_bulk_clear_pages;
 	uint64_t		vmm_pte_read_modify_write_count;
+	uint64_t		vmm_pte_leaf_write_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vmm_pte_leaf_clear_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vmm_pte_write_batch_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vmm_pte_clear_batch_count[NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT];
+	uint64_t		vmm_pt_empty_free_count;
+	uint64_t		vmm_pd0_empty_free_count;
+	uint64_t		vmm_pt_skip_clear_count;
+	uint64_t		vmm_pt_skip_clear_pages;
 	uint64_t		cpu_prep_wait_error_count;
 	uint64_t		exec_profile_token_wait_us;
 	uint64_t		exec_profile_wait_sync_us;
@@ -909,6 +1178,7 @@ struct nvkm_softc {
 	uint64_t		exec_profile_cpu_bind_flushed;
 	uint32_t		exec_trace_next;
 	struct nvkm_drm_exec_trace exec_trace[NVKM_DRM_EXEC_TRACE_COUNT];
+	uint32_t		vm_trace_enable;
 	uint64_t		vm_trace_seq;
 	uint32_t		vm_trace_next;
 	struct nvkm_drm_vm_trace vm_trace[NVKM_DRM_VM_TRACE_COUNT];
@@ -1219,6 +1489,7 @@ int	nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 #define NVKM_GMMU_LPT_SPTE_COUNT (1U << (NVKM_GMMU_LPT_SHIFT - NVKM_GMMU_SPT_SHIFT))
 #define NVKM_GMMU_PD0_ENTRY_SIZE  16   /* dual entry: small + big */
 #define NVKM_GMMU_PT_PAGE_SIZE    0x1000
+#define NVKM_GMMU_PD0_PAGE_SIZE   (1ULL << NVKM_GMMU_PD0_SHIFT)
 #define NVKM_GMMU_LPT_PAGE_SIZE   (1ULL << NVKM_GMMU_LPT_SHIFT)
 
 static __inline uint64_t

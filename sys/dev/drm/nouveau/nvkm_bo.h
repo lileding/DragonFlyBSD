@@ -8,6 +8,9 @@
 #ifndef _NVKM_BO_H_
 #define _NVKM_BO_H_
 
+#include <sys/queue.h>
+#include <sys/thread.h>
+
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
 #include <drm/ttm/ttm_bo_api.h>
@@ -50,6 +53,26 @@ struct drm_nouveau_gem_cpu_fini {
 #define NOUVEAU_GEM_DOMAIN_COHERENT	(1 << 4)
 #define NOUVEAU_GEM_DOMAIN_NO_SHARE	(1 << 5)
 
+struct nvkm_drm_file;
+struct nvkm_drm_vm_binding;
+LIST_HEAD(nvkm_bo_vm_mapping_list, nvkm_drm_vm_binding);
+
+struct nvkm_drm_bo_vm_snapshot_entry {
+	struct nvkm_drm_file *owner;
+	struct drm_gem_object *obj;
+	uint64_t addr;
+	uint64_t size;
+	uint64_t bo_offset;
+	uint8_t pte_kind;
+	uint8_t page_shift;
+};
+
+struct nvkm_drm_bo_vm_snapshot {
+	struct nvkm_drm_bo_vm_snapshot_entry *entries;
+	uint32_t count;
+	uint32_t capacity;
+};
+
 struct nvkm_bo {
 	struct drm_gem_object	base;		/* drm GEM core */
 	struct ttm_buffer_object tbo;		/* TTM BO for GEM backing */
@@ -65,19 +88,26 @@ struct nvkm_bo {
 	uint64_t		bar1_gva;	/* BAR1 GVA for CPU mmap of VRAM BOs */
 	uint64_t		bar1_size;
 	uint32_t		domain;
+	uint32_t		preferred_domain; /* immutable GEM_NEW placement mask */
 	uint32_t		tile_mode;
 	uint32_t		tile_flags;
 	bool			bar1_mappable;	/* VRAM BO can fault in a BAR1 mmap */
 	bool			no_share;	/* reject PRIME export */
 	bool			ttm_backed;	/* GEM BO owned by TTM */
+	bool			ttm_permanent_no_evict; /* placement-level pin */
 	bool			accounted;	/* active byte counters include this BO */
 	uint8_t			account_kind;	/* counter bucket charged at alloc */
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
 	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
 	uint32_t		ttm_pin_count;	/* VM_BIND + scanout no-evict pins */
 	uint32_t		vm_bind_pin_count; /* active VM_BIND records */
+	uint32_t		vm_bind_no_evict_pin_count; /* VM_BIND no-evict records */
 	uint32_t		scanout_pin_count; /* active prepare_fb records */
+	uint32_t		scanout_no_evict_pin_count; /* scanout no-evict records */
 	bool			vm_bound_mixed_kind;
+	struct lwkt_token	vm_mapping_token; /* protects vm_mappings */
+	struct nvkm_bo_vm_mapping_list vm_mappings; /* live GPUVA mappings */
+	uint32_t		vm_mapping_count;
 };
 
 static inline struct nvkm_bo *
@@ -93,37 +123,64 @@ extern struct cdev_pager_ops nvkm_gem_pager_ops;
 void nvkm_bo_gem_free(struct drm_gem_object *obj);
 bool nvkm_bo_cpu_mappable(const struct nvkm_bo *bo);
 bool nvkm_bo_has_sysmem(const struct nvkm_bo *bo);
+bool nvkm_bo_ttm_prefers_vram(const struct nvkm_bo *bo);
 uint8_t nvkm_bo_gpu_page_shift(const struct nvkm_bo *bo);
 int nvkm_bo_ensure_ttm_populated(struct nvkm_bo *bo);
 int nvkm_bo_paddr_at(const struct nvkm_bo *bo, uint64_t offset,
     vm_paddr_t *paddr);
+int nvkm_bo_paddr_at_mem(const struct nvkm_bo *bo,
+    const struct ttm_mem_reg *mem, uint64_t offset, vm_paddr_t *paddr);
+int nvkm_bo_paddr_run_at(const struct nvkm_bo *bo, uint64_t offset,
+    uint64_t max_size, vm_paddr_t *paddr, uint64_t *run_size);
+int nvkm_bo_paddr_run_at_mem(const struct nvkm_bo *bo,
+    const struct ttm_mem_reg *mem, uint64_t offset, uint64_t max_size,
+    vm_paddr_t *paddr, uint64_t *run_size);
 int nvkm_bo_read32(struct nvkm_bo *bo, uint64_t offset,
     uint32_t *value);
+uint32_t nvkm_drm_bo_live_vm_mapping_count(struct nvkm_bo *bo);
+void nvkm_drm_bo_vm_snapshot_init(struct nvkm_drm_bo_vm_snapshot *snapshot);
+void nvkm_drm_bo_vm_snapshot_fini(struct nvkm_drm_bo_vm_snapshot *snapshot);
+int nvkm_drm_bo_vm_snapshot_collect(struct nvkm_bo *bo,
+    struct nvkm_drm_bo_vm_snapshot *snapshot);
+int nvkm_drm_bo_vm_snapshot_rebind(struct nvkm_bo *bo,
+    const struct nvkm_drm_bo_vm_snapshot *snapshot,
+    const struct ttm_mem_reg *mem, bool rollback);
+int nvkm_drm_bo_vm_snapshot_wait_exec_resv(struct nvkm_softc *sc,
+    const struct nvkm_drm_bo_vm_snapshot *snapshot, bool interruptible,
+    bool no_wait);
+int nvkm_drm_bo_create_ttm_move_fence(struct nvkm_bo *bo,
+    struct dma_fence **pfence);
+int nvkm_drm_bo_publish_ttm_move_fence(struct nvkm_bo *bo,
+    struct dma_fence *fence);
 /*
  * nvkm_bo_vm_bind_pin()
  *
  * Ownership:
  *   The caller borrows bo; no GEM reference is consumed or acquired.  Each
  *   successful call creates one VM_BIND pin record that the caller owns until
- *   nvkm_bo_vm_bind_unpin().
+ *   nvkm_bo_vm_bind_unpin().  no_evict_pinned is caller-owned storage; on
+ *   success it records whether this specific pin record set TTM NO_EVICT.
  *
  * Lifetime:
  *   bo must stay alive for the whole pin/unpin pair.  For TTM-backed BOs the
- *   pin record keeps the current backing allocation non-evictable; legacy
- *   non-TTM allocations are already immobile and treat the record as a no-op.
+ *   pin record may keep the current backing allocation non-evictable.  The
+ *   debug-only bound-move gate can create an evictable VM_BIND record instead;
+ *   callers must pass the returned no_evict_pinned value back to unpin.  Legacy
+ *   non-TTM allocations are already immobile and report no_evict_pinned=false.
  *
  * Threading:
  *   May sleep while reserving the TTM BO.  Callers must not hold locks that
  *   would be acquired from TTM eviction or reservation callbacks.
  */
-int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo);
+int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo, bool *no_evict_pinned);
 
 /*
  * nvkm_bo_vm_bind_unpin()
  *
  * Ownership:
  *   Consumes one VM_BIND pin record previously returned by
- *   nvkm_bo_vm_bind_pin().
+ *   nvkm_bo_vm_bind_pin().  no_evict_pinned must be the exact value returned
+ *   for that record, not a current BO-wide policy decision.
  *
  * Lifetime:
  *   bo must remain alive until the call returns.
@@ -132,7 +189,7 @@ int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo);
  *   May sleep while reserving the TTM BO.  Balanced unpins may run from file
  *   close after GPUVM bindings have been removed from the per-file list.
  */
-int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo);
+int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo, bool no_evict_pinned);
 /*
  * nvkm_bo_scanout_pin()/nvkm_bo_scanout_unpin()
  *
