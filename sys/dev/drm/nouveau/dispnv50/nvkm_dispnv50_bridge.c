@@ -1405,6 +1405,72 @@ nvkm_dispnv50_ctxdma_drop(struct nvkm_dispnv50_dmaobj **pobject)
 	*pobject = NULL;
 }
 
+static void
+nvkm_dispnv50_dmac_destroy(struct nv50_dmac *dmac)
+{
+	struct nvkm_softc *sc;
+	int ret;
+
+	if (dmac == NULL)
+		return;
+
+	sc = dmac->dfly_sc;
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_fb_object);
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_fb_blocklinear_object);
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_vram_object);
+	nvkm_dispnv50_ctxdma_drop(&dmac->dfly_sync_object);
+
+	if (dmac->dfly_object != NULL) {
+		if (dmac->dfly_object->client != NULL &&
+		    dmac->dfly_object->handle != 0) {
+			ret = nvkm_gsp_rm_free(dmac->dfly_object);
+			if (ret != 0 && sc != NULL)
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 dmac free failed "
+				    "class=0x%x inst=%d handle=0x%x err=%d\n",
+				    dmac->dfly_oclass, dmac->dfly_inst,
+				    dmac->dfly_object->handle, ret);
+			dmac->dfly_object->handle = 0;
+		}
+		kfree(dmac->dfly_object);
+		dmac->dfly_object = NULL;
+	}
+
+	nvkm_memory_unref(&dmac->dfly_push_mem);
+	kfree(dmac->dfly_shadow);
+	dmac->dfly_shadow = NULL;
+	memset(dmac, 0, sizeof(*dmac));
+}
+
+static void
+nvkm_dispnv50_wndw_destroy(struct nv50_wndw **pwndw)
+{
+	struct nv50_wndw *wndw;
+
+	if (pwndw == NULL || *pwndw == NULL)
+		return;
+
+	wndw = *pwndw;
+	nvkm_dispnv50_dmac_destroy(&wndw->wimm);
+	nvkm_dispnv50_dmac_destroy(&wndw->wndw);
+	kfree(wndw);
+	*pwndw = NULL;
+}
+
+static void
+nvkm_dispnv50_core_destroy(struct nv50_core **pcore)
+{
+	struct nv50_core *core;
+
+	if (pcore == NULL || *pcore == NULL)
+		return;
+
+	core = *pcore;
+	nvkm_dispnv50_dmac_destroy(&core->chan);
+	kfree(core);
+	*pcore = NULL;
+}
+
 static int
 nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, s32 oclass, int inst,
     const char *name, u32 handle, u64 start, u64 limit,
@@ -2124,6 +2190,7 @@ nvkm_dispnv50_core_init(struct nvkm_softc *sc)
 	if (ret) {
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 core init failed %d\n", ret);
+		nvkm_dispnv50_core_destroy(&state->disp.core);
 		return ret;
 	}
 
@@ -2155,6 +2222,7 @@ nvkm_dispnv50_wndw_init(struct nvkm_softc *sc, uint32_t win)
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 window channel alloc failed win=%u err=%d\n",
 		    win, ret);
+		nvkm_dispnv50_wndw_destroy(&state->wndw[win]);
 		return ret;
 	}
 
@@ -2213,6 +2281,7 @@ nvkm_dispnv50_cursor_init(struct nvkm_softc *sc, uint32_t head)
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 cursor channel alloc failed head=%u err=%d\n",
 		    head, ret);
+		nvkm_dispnv50_wndw_destroy(&state->curs[head]);
 		return ret;
 	}
 
@@ -4477,6 +4546,50 @@ nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
 	    prepare->display_id, config, prepare);
 }
 
+static void
+nvkm_dispnv50_state_destroy(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	u32 i;
+
+	if (state == NULL)
+		return;
+
+	/*
+	 * Ownership:
+	 *   Consumes the bridge-owned dispnv50 state, including display DMA
+	 *   channels, push buffers, ctxdma objects, and bridge staging memory.
+	 *   DRM mode_config objects and scanout GEM BO references are owned by
+	 *   KMS helpers and are not freed here.
+	 *
+	 * Lifetime:
+	 *   Called only after KMS teardown has drained auto-KMS/HPD work and
+	 *   requested an atomic shutdown, so no new bridge programming callback
+	 *   should observe this state.
+	 *
+	 * Threading:
+	 *   Runs from device teardown context and may sleep in RM free and memory
+	 *   unref paths. It must not be called from interrupt context.
+	 */
+	for (i = 0; i < nitems(state->curs); i++)
+		nvkm_dispnv50_wndw_destroy(&state->curs[i]);
+	for (i = 0; i < nitems(state->wndw); i++)
+		nvkm_dispnv50_wndw_destroy(&state->wndw[i]);
+	nvkm_dispnv50_core_destroy(&state->disp.core);
+
+	nvkm_memory_unref(&state->ilut);
+	state->ilut_offset = 0;
+	nvkm_memory_unref(&state->olut);
+	state->olut_offset = 0;
+	nvkm_memory_unref(&state->scanout);
+	state->scanout_offset = 0;
+	nvkm_memory_unref(&state->sync_mem);
+	memset(&state->sync_bo, 0, sizeof(state->sync_bo));
+	if (sc != NULL)
+		sc->dispnv50 = NULL;
+	kfree(state);
+}
+
 void
 nvkm_dispnv50_fini(struct nvkm_softc *sc)
 {
@@ -4484,4 +4597,5 @@ nvkm_dispnv50_fini(struct nvkm_softc *sc)
 		return;
 
 	nvkm_dispnv50_console_unregister(sc->dispnv50);
+	nvkm_dispnv50_state_destroy(sc, sc->dispnv50);
 }

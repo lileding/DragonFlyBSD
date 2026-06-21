@@ -7877,10 +7877,10 @@ nvkm_drm_register(struct nvkm_softc *sc)
 void
 nvkm_drm_unregister(struct nvkm_softc *sc)
 {
-	nvkm_drm_kms_fini(sc);
-	nvkm_dispnv50_fini(sc);
 	if (sc->drm_dev != NULL) {
 		drm_dev_unregister(sc->drm_dev);
+		nvkm_drm_kms_fini(sc);
+		nvkm_dispnv50_fini(sc);
 		nvkm_ttm_fini(sc);
 		drm_dev_put(sc->drm_dev);
 		sc->drm_dev = NULL;
