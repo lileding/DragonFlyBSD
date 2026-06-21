@@ -3749,7 +3749,8 @@ nvkm_dispnv50_dp_sst_calc(const struct drm_display_mode *mode,
 static int
 nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_softc *sc,
     struct nvkm_outp *outp, struct drm_display_mode *mode, uint32_t max_rate,
-    uint8_t max_lanes, uint32_t min_rate, bool enhanced_framing)
+    uint8_t max_lanes, uint32_t min_rate, uint8_t bpc,
+    bool enhanced_framing)
 {
 	static const uint8_t rates[] = {
 		DP_LINK_BW_1_62,
@@ -3761,6 +3762,9 @@ nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_softc *sc,
 	int last_ret = -ERANGE;
 	int ret;
 	int i;
+
+	if (bpc == 0)
+		bpc = 8;
 
 	for (lanes = max_lanes; lanes != 0; lanes >>= 1) {
 		for (i = 0; i < (int)nitems(rates); i++) {
@@ -3775,7 +3779,7 @@ nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_softc *sc,
 			if (rate * lanes < min_rate)
 				continue;
 
-			ret = nvkm_dispnv50_dp_sst_calc(mode, 8, bw, lanes,
+			ret = nvkm_dispnv50_dp_sst_calc(mode, bpc, bw, lanes,
 			    enhanced_framing, outp->dp.increased_wm, &watermark,
 			    &hblank_symbols, &vblank_symbols);
 			if (ret != 0) {
@@ -3797,7 +3801,8 @@ nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_softc *sc,
 static int
 nvkm_dispnv50_dp_enable_limits(struct nvkm_softc *sc, struct nvkm_outp *outp,
     struct drm_display_mode *mode, uint32_t head, uint32_t max_rate,
-    uint8_t max_lanes, uint32_t min_rate, bool enhanced_framing)
+    uint8_t max_lanes, uint32_t min_rate, uint8_t bpc,
+    bool enhanced_framing)
 {
 	static const uint8_t rates[] = {
 		DP_LINK_BW_1_62,
@@ -3816,6 +3821,8 @@ nvkm_dispnv50_dp_enable_limits(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	if (outp->ior->func == NULL || outp->ior->func->dp == NULL ||
 	    outp->ior->func->dp->sst == NULL)
 		return -ENODEV;
+	if (bpc == 0)
+		bpc = 8;
 
 	for (lanes = max_lanes; lanes != 0; lanes >>= 1) {
 		for (i = 0; i < (int)nitems(rates); i++) {
@@ -3830,7 +3837,7 @@ nvkm_dispnv50_dp_enable_limits(struct nvkm_softc *sc, struct nvkm_outp *outp,
 			if (rate * lanes < min_rate)
 				continue;
 
-			ret = nvkm_dispnv50_dp_sst_calc(mode, 8, bw, lanes,
+			ret = nvkm_dispnv50_dp_sst_calc(mode, bpc, bw, lanes,
 			    enhanced_framing, outp->dp.increased_wm, &watermark,
 			    &hblank_symbols, &vblank_symbols);
 			if (ret != 0) {
@@ -3906,7 +3913,7 @@ nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	    !!(outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP);
 	return nvkm_dispnv50_dp_find_sst_candidate(sc, outp, mode,
 	    prepare->dp_max_rate, prepare->dp_max_lanes,
-	    prepare->dp_min_rate, prepare->dp_enhanced_framing);
+	    prepare->dp_min_rate, bpc, prepare->dp_enhanced_framing);
 }
 
 static int
@@ -3923,7 +3930,7 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 
 	return nvkm_dispnv50_dp_enable_limits(sc, outp, mode, head,
 	    prepare.dp_max_rate, prepare.dp_max_lanes, prepare.dp_min_rate,
-	    prepare.dp_enhanced_framing);
+	    8, prepare.dp_enhanced_framing);
 }
 
 static struct nvkm_outp *
@@ -4107,7 +4114,8 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
 		    (size_t)DP_RECEIVER_CAP_SIZE));
 		ret = nvkm_dispnv50_dp_enable_limits(sc, outp, mode, head,
 		    prepare->dp_max_rate, prepare->dp_max_lanes,
-		    prepare->dp_min_rate, prepare->dp_enhanced_framing);
+		    prepare->dp_min_rate, prepare->config.bpc,
+		    prepare->dp_enhanced_framing);
 		if (ret != 0)
 			return ret;
 		break;
