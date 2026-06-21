@@ -2770,7 +2770,8 @@ nvkm_dispnv50_wndw_format(u32 format)
 
 /*
  * Ownership:
- *   Borrows the nvkm-owned scalar scanout/window snapshot.
+ *   Borrows the nvkm-owned scalar scanout/window snapshot and the committed
+ *   CRTC state.
  * Lifetime:
  *   No DRM object, BO, or display pointer is retained after return.
  * Threading:
@@ -2778,16 +2779,26 @@ nvkm_dispnv50_wndw_format(u32 format)
  *   hardware programming.
  */
 static int
-nvkm_dispnv50_window_source_validate(const struct nvkm_dispnv50_state *state)
+nvkm_dispnv50_window_source_validate(const struct nvkm_dispnv50_state *state,
+    const struct drm_crtc *crtc)
 {
+	const struct drm_display_mode *mode;
 	u32 src_x;
 	u32 src_y;
 	u32 src_w;
 	u32 src_h;
 
-	if (state == NULL || state->scanout_width == 0 ||
-	    state->scanout_height == 0 || state->window_crtc_w == 0 ||
-	    state->window_crtc_h == 0)
+	if (state == NULL || crtc == NULL || crtc->state == NULL)
+		return (EINVAL);
+	mode = &crtc->state->adjusted_mode;
+	if (state->scanout_width == 0 || state->scanout_height == 0 ||
+	    state->window_crtc_w == 0 || state->window_crtc_h == 0 ||
+	    mode->hdisplay <= 0 || mode->vdisplay <= 0)
+		return (EINVAL);
+	if (state->window_crtc_x != 0 || state->window_crtc_y != 0)
+		return (EINVAL);
+	if (state->window_crtc_w != (u32)mode->hdisplay ||
+	    state->window_crtc_h != (u32)mode->vdisplay)
 		return (EINVAL);
 	if ((state->window_src_x & 0xffffu) != 0 ||
 	    (state->window_src_y & 0xffffu) != 0 ||
@@ -2832,7 +2843,7 @@ nvkm_dispnv50_select_scanout(struct nvkm_softc *sc,
 		return ret;
 	if (nvkm_dispnv50_wndw_format(state->scanout_format) == 0)
 		return (EINVAL);
-	return (nvkm_dispnv50_window_source_validate(state));
+	return (nvkm_dispnv50_window_source_validate(state, crtc));
 }
 
 static u16
