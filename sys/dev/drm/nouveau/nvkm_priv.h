@@ -705,6 +705,9 @@ struct nvkm_softc {
 	uint64_t		kms_hotplug_notify_only_count;
 	uint64_t		kms_hotplug_auto_kms_count;
 	uint64_t		kms_hotplug_enqueue_error_count;
+	uint64_t		kms_dark_down_count;
+	uint64_t		kms_dark_down_error_count;
+	int			kms_dark_down_last_error;
 	uint64_t		kms_link_status_bad_count;
 	uint64_t		kms_dp_irq_count;
 	uint64_t		kms_dp_irq_link_good_count;
