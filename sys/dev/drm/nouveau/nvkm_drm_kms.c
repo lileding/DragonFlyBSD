@@ -803,6 +803,22 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		nc = to_nvkm_crtc(state->crtc);
 		if (nc->sc->disp == NULL)
 			return;
+
+		/*
+		 * Cursor programming is head-local, but a full cursor image
+		 * update still belongs to the committed CRTC route.  Decode the
+		 * same stack atom used by check/enable/primary update before
+		 * touching the head cursor context.
+		 */
+		nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
+		err = nvkm_kms_crtc_atom_route(&atom,
+		    crtc_state->connector_mask, false);
+		if (err != 0) {
+			nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+			    "cursor route");
+			return;
+		}
+
 		nc->sc->kms_cursor_update_count++;
 		err = nvkm_dispnv50_cursor_update(nc->sc, state->crtc,
 		    nc->head);
