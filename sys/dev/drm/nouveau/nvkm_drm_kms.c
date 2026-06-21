@@ -450,50 +450,101 @@ struct nvkm_crtc {
 
 #define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
 
+/*
+ * Stack-local decoded CRTC route.
+ *
+ * Ownership: this object owns only scalar snapshots. It borrows the DRM CRTC,
+ * connector list, and connector display_info for the duration of the caller.
+ * Lifetime: callers must not store it past the current check/commit callback.
+ * Threading: no internal locking; use only while DRM atomic locks protect the
+ * state being decoded.
+ */
+struct nvkm_kms_crtc_atom {
+	struct nvkm_softc *sc;
+	struct drm_crtc *crtc;
+	struct nvkm_crtc *nc;
+	struct nvkm_dispnv50_hdmi_info hdmi;
+	uint32_t display_id;
+	uint32_t connector_count;
+};
+
+static void
+nvkm_kms_crtc_atom_init(struct nvkm_kms_crtc_atom *atom, struct nvkm_softc *sc,
+    struct drm_crtc *crtc)
+{
+	memset(atom, 0, sizeof(*atom));
+	atom->sc = sc;
+	atom->crtc = crtc;
+	atom->nc = to_nvkm_crtc(crtc);
+}
+
+static void
+nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
+    struct drm_connector *conn)
+{
+	struct nvkm_drm_connector *nvkm_conn = to_nvkm_connector(conn);
+
+	atom->display_id = nvkm_conn->display_id;
+	atom->connector_count++;
+	atom->hdmi.has_infoframe = conn->display_info.has_hdmi_infoframe;
+	atom->hdmi.scdc_supported = conn->display_info.hdmi.scdc.supported;
+	atom->hdmi.scdc_scrambling =
+	    conn->display_info.hdmi.scdc.scrambling.supported;
+	atom->hdmi.scdc_low_rates =
+	    conn->display_info.hdmi.scdc.scrambling.low_rates;
+}
+
+static int
+nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
+    uint32_t connector_mask, bool validate_output)
+{
+	struct nvkm_gsp_disp_output_info info;
+	struct drm_connector *conn;
+	int ret;
+
+	list_for_each_entry(conn, &atom->crtc->dev->mode_config.connector_list,
+	    head) {
+		if ((connector_mask & drm_connector_mask(conn)) == 0)
+			continue;
+		nvkm_kms_crtc_atom_take_connector(atom, conn);
+	}
+	if (atom->connector_count != 1 || atom->display_id == 0) {
+		nvkm_infof(atom->sc->dev,
+		    "drm: crtc route rejects head=%u connector_count=%u display=0x%x\n",
+		    atom->nc->head, atom->connector_count, atom->display_id);
+		return (-EINVAL);
+	}
+
+	if (!validate_output)
+		return (0);
+
+	ret = nvkm_gsp_disp_output_info(atom->sc, atom->display_id, &info);
+	if (ret != 0)
+		return (ret);
+	if (info.heads != 0 && (info.heads & BIT(atom->nc->head)) == 0) {
+		nvkm_infof(atom->sc->dev,
+		    "drm: crtc route rejects display=0x%x head=%u heads=0x%x\n",
+		    atom->display_id, atom->nc->head, info.heads);
+		return (-EINVAL);
+	}
+
+	return (0);
+}
+
 static int
 nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
     const struct drm_crtc_state *crtc_state)
 {
-	struct nvkm_gsp_disp_output_info info;
-	struct nvkm_crtc *nc;
-	struct drm_connector *conn;
-	uint32_t display_id = 0;
-	uint32_t connector_count = 0;
-	uint32_t head_mask;
-	int ret;
+	struct nvkm_kms_crtc_atom atom;
 
 	if (crtc_state == NULL || !crtc_state->enable)
 		return (0);
 	if (sc == NULL || sc->disp == NULL)
 		return (-ENODEV);
 
-	nc = to_nvkm_crtc(crtc);
-	list_for_each_entry(conn, &crtc->dev->mode_config.connector_list, head) {
-		if ((crtc_state->connector_mask & drm_connector_mask(conn)) == 0)
-			continue;
-		display_id = to_nvkm_connector(conn)->display_id;
-		connector_count++;
-	}
-	if (connector_count != 1 || display_id == 0) {
-		nvkm_infof(sc->dev,
-		    "drm: atomic check rejects head=%u connector_count=%u display=0x%x\n",
-		    nc->head, connector_count, display_id);
-		return (-EINVAL);
-	}
-
-	ret = nvkm_gsp_disp_output_info(sc, display_id, &info);
-	if (ret != 0)
-		return (ret);
-
-	head_mask = info.heads;
-	if (head_mask != 0 && (head_mask & BIT(nc->head)) == 0) {
-		nvkm_infof(sc->dev,
-		    "drm: atomic check rejects display=0x%x head=%u heads=0x%x\n",
-		    display_id, nc->head, head_mask);
-		return (-EINVAL);
-	}
-
-	return (0);
+	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+	return (nvkm_kms_crtc_atom_route(&atom, crtc_state->connector_mask,
+	    true));
 }
 
 static int
@@ -1077,39 +1128,24 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct nvkm_softc *sc = nc->sc;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
-	struct drm_connector *conn = NULL;
-	struct nvkm_dispnv50_hdmi_info hdmi;
-	uint32_t display_id = 0;
+	struct nvkm_kms_crtc_atom atom;
 	int err;
 
 	(void)old_state;
 	if (sc->disp == NULL)
 		return;
-	memset(&hdmi, 0, sizeof(hdmi));
 
-	/* Find the output routed to this head in the committed state. */
-	list_for_each_entry(conn, &crtc->dev->mode_config.connector_list, head) {
-		if (conn->state != NULL && conn->state->crtc == crtc) {
-			display_id = to_nvkm_connector(conn)->display_id;
-			hdmi.has_infoframe =
-			    conn->display_info.has_hdmi_infoframe;
-			hdmi.scdc_supported =
-			    conn->display_info.hdmi.scdc.supported;
-			hdmi.scdc_scrambling =
-			    conn->display_info.hdmi.scdc.scrambling.supported;
-			hdmi.scdc_low_rates =
-			    conn->display_info.hdmi.scdc.scrambling.low_rates;
-			break;
-		}
-	}
-	if (display_id == 0) {
-		nvkm_infof(sc->dev,
-		    "drm: crtc enable head=%u: no connector routed\n", nc->head);
+	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+	err = nvkm_kms_crtc_atom_route(&atom, crtc->state->connector_mask,
+	    false);
+	if (err != 0) {
+		nvkm_kms_record_result(sc, nc->head, nc->win, err,
+		    "crtc route");
 		return;
 	}
 
 	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
-	    display_id, &hdmi);
+	    atom.display_id, &atom.hdmi);
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
 	if (err == 0 && crtc->cursor != NULL && crtc->cursor->state != NULL &&
 	    crtc->cursor->state->visible && crtc->cursor->state->fb != NULL) {
@@ -1125,7 +1161,8 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	drm_crtc_vblank_on(crtc);
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
-	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);
+	    nc->head, nc->win, mode->hdisplay, mode->vdisplay,
+	    atom.display_id, err);
 }
 
 static uint32_t
