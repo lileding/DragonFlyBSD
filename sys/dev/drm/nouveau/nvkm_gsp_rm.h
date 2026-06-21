@@ -247,6 +247,15 @@ struct nvkm_dispnv50_head_config {
 
 #define NVKM_DISPNV50_DP_DPCD_SIZE	16U
 
+struct nvkm_dispnv50_dp_sst_candidate {
+	bool valid;
+	uint8_t link_bw;
+	uint8_t lanes;
+	uint32_t watermark;
+	uint32_t hblank_symbols;
+	uint32_t vblank_symbols;
+};
+
 /*
  * Prepared output route consumed by a single KMS atomic commit.
  *
@@ -285,6 +294,7 @@ struct nvkm_dispnv50_output_prepare {
 	uint32_t dp_min_rate;
 	uint8_t dp_max_lanes;
 	bool dp_enhanced_framing;
+	struct nvkm_dispnv50_dp_sst_candidate dp_sst;
 };
 
 struct drm_crtc;

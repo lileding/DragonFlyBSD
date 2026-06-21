@@ -612,6 +612,22 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->kms_dark_down_last_error);
 	sbuf_printf(sb, "link_status_bad_count = %llu\n",
 	    (unsigned long long)sc->kms_link_status_bad_count);
+	sbuf_printf(sb, "dp_sst_candidate_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_candidate_count);
+	sbuf_printf(sb, "dp_sst_train_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_train_count);
+	sbuf_printf(sb, "dp_sst_train_fail_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_train_fail_count);
+	sbuf_printf(sb, "dp_sst_program_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_program_count);
+	sbuf_printf(sb, "dp_sst_program_fail_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_program_fail_count);
+	sbuf_printf(sb, "dp_sst_fallback_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_fallback_count);
+	sbuf_printf(sb, "dp_sst_enable_success_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_sst_enable_success_count);
+	sbuf_printf(sb, "dp_sst_last_error = %d\n",
+	    sc->kms_dp_sst_last_error);
 	sbuf_printf(sb, "dp_irq_count = %llu\n",
 	    (unsigned long long)sc->kms_dp_irq_count);
 	sbuf_printf(sb, "dp_irq_link_good_count = %llu\n",
