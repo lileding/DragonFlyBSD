@@ -1911,6 +1911,11 @@ nvkm_crtc_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
 	nc->sc->kms_page_flip_count++;
 	if (event != NULL)
 		nc->sc->kms_page_flip_event_count++;
+	if ((flags & (DRM_MODE_PAGE_FLIP_ASYNC | DRM_MODE_PAGE_FLIP_TARGET)) !=
+	    0) {
+		nc->sc->kms_page_flip_error_count++;
+		return (-EINVAL);
+	}
 	ret = drm_atomic_helper_page_flip(crtc, fb, event, flags, ctx);
 	if (ret != 0)
 		nc->sc->kms_page_flip_error_count++;
