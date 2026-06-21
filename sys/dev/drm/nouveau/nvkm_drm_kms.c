@@ -307,6 +307,7 @@ nvkm_connector_reset(struct drm_connector *connector)
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (state != NULL) {
+		state->base.link_status = DRM_LINK_STATUS_GOOD;
 		state->dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
 		state->dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
 		state->max_bpc = 8;
