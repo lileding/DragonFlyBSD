@@ -14,6 +14,7 @@
 #include "nvkm_gsp_rm.h"
 #include "nvkm_bo.h"
 #include "core.h"
+#include "curs.h"
 #include "head.h"
 #include "wndw.h"
 
@@ -73,6 +74,8 @@ enum nvkm_dispnv50_audit_op {
 	NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
 	NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
 	NVKM_DISPNV50_AUDIT_PLANE_DISABLE,
+	NVKM_DISPNV50_AUDIT_CURSOR_UPDATE,
+	NVKM_DISPNV50_AUDIT_CURSOR_DISABLE,
 };
 
 /*
@@ -114,6 +117,23 @@ struct nvkm_dispnv50_audit_snapshot {
 	bool user;
 };
 
+struct nvkm_dispnv50_cursor_audit {
+	bool valid;
+	bool enabled;
+	bool async;
+	u64 seq;
+	u32 head;
+	int32_t x;
+	int32_t y;
+	u64 offset;
+	u32 width;
+	u32 height;
+	u32 pitch;
+	u32 format;
+	u64 modifier;
+	u32 bo_scanout_pin_count;
+};
+
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
@@ -121,6 +141,7 @@ struct nvkm_dispnv50_state {
 	struct nvkm_memory *sync_mem;
 	struct nv50_head head[4];
 	struct nv50_wndw *wndw[8];
+	struct nv50_wndw *curs[4];
 	struct nvkm_memory *ilut;
 	u64 ilut_offset;
 	struct nvkm_memory *olut;
@@ -154,6 +175,7 @@ struct nvkm_dispnv50_state {
 	u64 audit_seqno;
 	struct nvkm_dispnv50_audit_snapshot audit_current;
 	struct nvkm_dispnv50_audit_snapshot audit_pending;
+	struct nvkm_dispnv50_cursor_audit audit_cursor[4];
 };
 
 static void
@@ -274,9 +296,50 @@ nvkm_dispnv50_audit_op_name(enum nvkm_dispnv50_audit_op op)
 		return "plane_update";
 	case NVKM_DISPNV50_AUDIT_PLANE_DISABLE:
 		return "plane_disable";
+	case NVKM_DISPNV50_AUDIT_CURSOR_UPDATE:
+		return "cursor_update";
+	case NVKM_DISPNV50_AUDIT_CURSOR_DISABLE:
+		return "cursor_disable";
 	default:
 		return "unknown";
 	}
+}
+
+static void
+nvkm_dispnv50_cursor_audit_capture(struct nvkm_dispnv50_state *state,
+    struct drm_plane_state *plane_state, struct nvkm_bo *bo, u32 head,
+    bool enabled, bool async)
+{
+	struct nvkm_dispnv50_cursor_audit *audit;
+	struct drm_framebuffer *fb;
+
+	if (state == NULL || head >= nitems(state->audit_cursor))
+		return;
+
+	audit = &state->audit_cursor[head];
+	memset(audit, 0, sizeof(*audit));
+	audit->valid = true;
+	audit->enabled = enabled;
+	audit->async = async;
+	audit->seq = ++state->audit_seqno;
+	audit->head = head;
+	if (plane_state == NULL || !enabled)
+		return;
+
+	fb = plane_state->fb;
+	audit->x = plane_state->crtc_x;
+	audit->y = plane_state->crtc_y;
+	if (fb != NULL) {
+		audit->width = fb->width;
+		audit->height = fb->height;
+		audit->pitch = fb->pitches[0];
+		audit->format = fb->format != NULL ? fb->format->format : 0;
+		audit->modifier = fb->modifier;
+		if (bo != NULL)
+			audit->offset = bo->paddr + fb->offsets[0];
+	}
+	if (bo != NULL)
+		audit->bo_scanout_pin_count = bo->scanout_pin_count;
 }
 
 static u64
@@ -496,11 +559,18 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *crtc_state;
 	struct drm_plane *primary;
+	struct drm_plane *cursor;
 	struct drm_plane_state *plane_state;
+	struct drm_plane_state *cursor_state;
 	struct drm_framebuffer *fb;
+	struct drm_framebuffer *cursor_fb;
 	struct drm_gem_object *obj;
+	struct drm_gem_object *cursor_obj;
 	struct nvkm_bo *bo;
+	struct nvkm_bo *cursor_bo;
 	struct nv50_head *nvhead;
+	struct nv50_wndw *curs;
+	struct nvkm_dispnv50_cursor_audit *cursor_audit;
 	bool head_ready;
 	bool cursor_hooks;
 
@@ -514,10 +584,18 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	    sc->kms_crtc[head] : NULL;
 	crtc_state = crtc != NULL ? crtc->state : NULL;
 	primary = crtc != NULL ? crtc->primary : NULL;
+	cursor = crtc != NULL ? crtc->cursor : NULL;
 	plane_state = primary != NULL ? primary->state : NULL;
+	cursor_state = cursor != NULL ? cursor->state : NULL;
 	fb = plane_state != NULL ? plane_state->fb : NULL;
+	cursor_fb = cursor_state != NULL ? cursor_state->fb : NULL;
 	obj = fb != NULL ? fb->obj[0] : NULL;
+	cursor_obj = cursor_fb != NULL ? cursor_fb->obj[0] : NULL;
 	bo = obj != NULL ? to_nvkm_bo(obj) : NULL;
+	cursor_bo = cursor_obj != NULL ? to_nvkm_bo(cursor_obj) : NULL;
+	curs = head < nitems(state->curs) ? state->curs[head] : NULL;
+	cursor_audit = head < nitems(state->audit_cursor) ?
+	    &state->audit_cursor[head] : NULL;
 
 	sbuf_printf(sb, "head[%u]_ready = %d\n", head, head_ready);
 	sbuf_printf(sb, "head[%u]_crtc = %p\n", head, crtc);
@@ -531,7 +609,42 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	    sc != NULL && head < nitems(sc->gsp_disp_head_status) ?
 	    sc->gsp_disp_head_status[head] : 0);
 	sbuf_printf(sb, "head[%u]_cursor_hooks = %d\n", head, cursor_hooks);
-	sbuf_printf(sb, "head[%u]_cursor_plane_present = 0\n", head);
+	sbuf_printf(sb, "head[%u]_cursor_plane_present = %d\n", head,
+	    cursor != NULL);
+	sbuf_printf(sb, "head[%u]_cursor_channel_present = %d\n", head,
+	    curs != NULL);
+	sbuf_printf(sb, "head[%u]_cursor_enabled = %d\n", head,
+	    cursor_state != NULL && cursor_state->visible);
+	sbuf_printf(sb, "head[%u]_cursor_async_last = %d\n", head,
+	    cursor_audit != NULL && cursor_audit->valid && cursor_audit->async);
+	sbuf_printf(sb, "head[%u]_cursor_last_seq = %llu\n", head,
+	    cursor_audit != NULL && cursor_audit->valid ?
+	    (unsigned long long)cursor_audit->seq : 0ULL);
+	sbuf_printf(sb, "head[%u]_cursor_last_x = %d\n", head,
+	    cursor_audit != NULL && cursor_audit->valid ? cursor_audit->x : 0);
+	sbuf_printf(sb, "head[%u]_cursor_last_y = %d\n", head,
+	    cursor_audit != NULL && cursor_audit->valid ? cursor_audit->y : 0);
+	sbuf_printf(sb, "head[%u]_cursor_fb = %p\n", head, cursor_fb);
+	if (cursor_fb != NULL) {
+		sbuf_printf(sb, "head[%u]_cursor_fb_size = %ux%u\n",
+		    head, cursor_fb->width, cursor_fb->height);
+		sbuf_printf(sb, "head[%u]_cursor_fb_pitch = %u\n",
+		    head, cursor_fb->pitches[0]);
+		sbuf_printf(sb, "head[%u]_cursor_fb_format = 0x%08x\n",
+		    head, cursor_fb->format != NULL ?
+		    cursor_fb->format->format : 0);
+		sbuf_printf(sb, "head[%u]_cursor_fb_modifier = 0x%016llx\n",
+		    head, (unsigned long long)cursor_fb->modifier);
+	}
+	sbuf_printf(sb, "head[%u]_cursor_bo = %p\n", head, cursor_bo);
+	if (cursor_bo != NULL) {
+		sbuf_printf(sb, "head[%u]_cursor_bo_paddr = 0x%016llx\n",
+		    head, (unsigned long long)cursor_bo->paddr);
+		sbuf_printf(sb, "head[%u]_cursor_bo_scanout_pin_count = %u\n",
+		    head, cursor_bo->scanout_pin_count);
+		sbuf_printf(sb, "head[%u]_cursor_bo_ttm_pin_count = %u\n",
+		    head, cursor_bo->ttm_pin_count);
+	}
 	sbuf_printf(sb, "head[%u]_primary_plane = %p\n", head, primary);
 	sbuf_printf(sb, "head[%u]_scanout_fb = %p\n", head, fb);
 	if (fb != NULL) {
@@ -1661,7 +1774,9 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	struct nv50_disp *disp;
 	struct nvkm_softc *sc;
 	int inst = head;
+	void *bar0;
 	u32 user;
+	u64 user_size;
 	int ret;
 
 	if (drm == NULL || drm->dev == NULL || oclass == NULL || dmac == NULL)
@@ -1689,6 +1804,15 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	dmac->dfly_user = user;
 	dmac->dfly_oclass = oclass[0];
 	dmac->dfly_inst = inst;
+	bar0 = sc->bar_res[0] != NULL ? rman_get_virtual(sc->bar_res[0]) : NULL;
+	if (bar0 == NULL) {
+		ret = -ENODEV;
+		goto fail;
+	}
+	user_size = (oclass[0] & 0xff) == 0x7d ? 0x10000ULL : 0x1000ULL;
+	dmac->base.user.map.ptr = (void __iomem *)((uint8_t *)bar0 + user);
+	dmac->base.user.map.size = user_size;
+	dmac->base.user.oclass = oclass[0];
 	dmac->dfly_shadow = kzalloc(0x1000, GFP_KERNEL);
 	dmac->dfly_object = kzalloc(sizeof(*dmac->dfly_object), GFP_KERNEL);
 	if (dmac->dfly_shadow == NULL || dmac->dfly_object == NULL) {
@@ -1877,6 +2001,42 @@ nv50_wndw_new_(const struct nv50_wndw_func *func, struct drm_device *dev,
 	return 0;
 }
 
+static const struct nv50_wndw_func nvkm_dispnv50_cursor_wndw_func = {
+};
+
+int
+curs507a_new_(const struct nv50_wimm_func *func, struct nouveau_drm *drm,
+    int head, s32 oclass, u32 interlock_data, struct nv50_wndw **pwndw)
+{
+	struct nvif_disp_chan_v0 args;
+	struct nv50_wndw *wndw = NULL;
+	int ret;
+
+	if (func == NULL || drm == NULL || pwndw == NULL || head < 0)
+		return -EINVAL;
+	*pwndw = NULL;
+
+	ret = nv50_wndw_new_(&nvkm_dispnv50_cursor_wndw_func, drm->dev,
+	    DRM_PLANE_TYPE_CURSOR, "curs", head, NULL, BIT(head),
+	    NV50_DISP_INTERLOCK_CURS, interlock_data, &wndw);
+	if (ret != 0)
+		return ret;
+
+	memset(&args, 0, sizeof(args));
+	args.id = head;
+	ret = nv50_dmac_create(drm, &oclass, head, &args, sizeof(args), -1,
+	    &wndw->wimm);
+	if (ret != 0) {
+		kfree(wndw);
+		return ret;
+	}
+
+	wndw->immd = func;
+	wndw->interlock.wimm = interlock_data;
+	*pwndw = wndw;
+	return 0;
+}
+
 int
 core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
     s32 oclass, struct nv50_core **pcore)
@@ -2017,6 +2177,104 @@ nvkm_dispnv50_head_init(struct nvkm_softc *sc, uint32_t head)
 	nvhead->base.index = (int)head;
 
 	nvkm_infof(sc->dev, "drm: dispnv50 head staged head=%u\n", head);
+	return 0;
+}
+
+static int
+nvkm_dispnv50_cursor_init(struct nvkm_softc *sc, uint32_t head)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nouveau_drm drm;
+	int ret;
+
+	if (head >= nitems(((struct nvkm_dispnv50_state *)0)->curs))
+		return -EINVAL;
+	if (nvkm_dispnv50_core_init(sc) != 0)
+		return -ENODEV;
+
+	state = sc->dispnv50;
+	if (state->curs[head] != NULL)
+		return 0;
+
+	drm.dev = sc->drm_dev;
+	ret = cursc37a_new(&drm, (int)head, TU102_DISP_CURSOR,
+	    &state->curs[head]);
+	if (ret != 0) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 cursor channel alloc failed head=%u err=%d\n",
+		    head, ret);
+		return ret;
+	}
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 cursor channel staged head=%u\n", head);
+	return 0;
+}
+
+static int
+nvkm_dispnv50_cursor_atom_fill(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
+    struct nv50_core *core, struct nv50_head *head,
+    struct nv50_wndw_atom *asyw, struct nv50_head_atom *asyh,
+    struct nvkm_bo **pbo)
+{
+	struct drm_plane_state *plane_state;
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	u64 min_size;
+	u64 offset;
+	int ret;
+
+	(void)sc;
+	(void)state;
+	if (crtc == NULL || crtc->cursor == NULL ||
+	    crtc->cursor->state == NULL || core == NULL || head == NULL ||
+	    asyw == NULL || asyh == NULL || pbo == NULL)
+		return -EINVAL;
+
+	plane_state = crtc->cursor->state;
+	fb = plane_state->fb;
+	if (!plane_state->visible || fb == NULL || fb->obj[0] == NULL ||
+	    fb->format == NULL)
+		return -ENOENT;
+	if (fb->format->format != DRM_FORMAT_ARGB8888)
+		return -EINVAL;
+
+	obj = fb->obj[0];
+	bo = to_nvkm_bo(obj);
+	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->paddr == 0)
+		return -EINVAL;
+
+	min_size = (u64)(fb->height - 1) * fb->pitches[0] +
+	    (u64)fb->width * fb->format->cpp[0] + fb->offsets[0];
+	if (obj->size < min_size)
+		return -EINVAL;
+
+	offset = bo->paddr + fb->offsets[0];
+	memset(asyw, 0, sizeof(*asyw));
+	memset(asyh, 0, sizeof(*asyh));
+	asyw->state = *plane_state;
+	asyw->image.w = fb->width;
+	asyw->image.h = fb->height;
+	asyw->image.pitch[0] = fb->pitches[0];
+	asyw->image.format = NVC37D_HEAD_SET_CONTROL_CURSOR_FORMAT_A8R8G8B8;
+	asyw->image.handle[0] = core->chan.vram.handle;
+	asyw->image.offset[0] = offset;
+	asyw->point.x = (u16)plane_state->crtc_x;
+	asyw->point.y = (u16)plane_state->crtc_y;
+
+	ret = head->func->curs_layout(head, asyw, asyh);
+	if (ret != 0)
+		return ret;
+	ret = head->func->curs_format(head, asyw, asyh);
+	if (ret != 0)
+		return ret;
+
+	asyh->curs.visible = true;
+	asyh->curs.handle = core->chan.vram.handle;
+	asyh->curs.offset = offset;
+	*pbo = bo;
 	return 0;
 }
 
@@ -2887,6 +3145,177 @@ nvkm_dispnv50_route_tmds(struct nvkm_softc *sc, struct nv50_core *core,
 		    proto, head);
 	}
 	return ret;
+}
+
+int
+nvkm_dispnv50_cursor_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t head)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_wndw_atom asyw;
+	struct nv50_head_atom asyh;
+	struct nv50_wndw *curs;
+	struct nv50_head *nvhead;
+	struct nv50_core *core;
+	struct nvkm_bo *bo = NULL;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || crtc == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_head_init(sc, head);
+	if (ret != 0)
+		return ret;
+	ret = nvkm_dispnv50_cursor_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    head >= nitems(state->head) || head >= nitems(state->curs))
+		return -ENODEV;
+
+	core = state->disp.core;
+	nvhead = &state->head[head];
+	curs = state->curs[head];
+	if (nvhead->func == NULL || nvhead->func->curs_set == NULL ||
+	    nvhead->func->curs_layout == NULL ||
+	    nvhead->func->curs_format == NULL || curs == NULL ||
+	    curs->immd == NULL || curs->immd->point == NULL ||
+	    curs->immd->update == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_cursor_atom_fill(sc, state, crtc, core, nvhead,
+	    &asyw, &asyh, &bo);
+	if (ret != 0)
+		return ret;
+
+	ret = nvhead->func->curs_set(nvhead, &asyh);
+	if (ret != 0)
+		return ret;
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	interlock[NV50_DISP_INTERLOCK_CURS] |= curs->interlock.data;
+	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	if (ret != 0)
+		return ret;
+
+	ret = curs->immd->point(curs, &asyw);
+	if (ret != 0)
+		return ret;
+	ret = curs->immd->update(curs, interlock);
+	if (ret != 0)
+		return ret;
+
+	nvkm_dispnv50_cursor_audit_capture(state, crtc->cursor->state, bo,
+	    head, true, false);
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 cursor update head=%u pos=%d,%d size=%ux%u "
+	    "offset=0x%llx bo=%p\n",
+	    head, asyw.state.crtc_x, asyw.state.crtc_y,
+	    asyw.state.fb->width, asyw.state.fb->height,
+	    (unsigned long long)asyh.curs.offset, bo);
+	return 0;
+}
+
+int
+nvkm_dispnv50_cursor_async_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t head, int32_t x, int32_t y)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_wndw_atom asyw;
+	struct nv50_wndw *curs;
+	struct nvkm_bo *bo = NULL;
+	struct drm_plane_state *plane_state;
+	struct drm_framebuffer *fb;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || crtc == NULL || crtc->cursor == NULL ||
+	    crtc->cursor->state == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_cursor_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || head >= nitems(state->curs) ||
+	    state->curs[head] == NULL)
+		return -ENODEV;
+
+	curs = state->curs[head];
+	if (curs->immd == NULL || curs->immd->point == NULL ||
+	    curs->immd->update == NULL)
+		return -ENODEV;
+
+	plane_state = crtc->cursor->state;
+	fb = plane_state->fb;
+	if (fb != NULL && fb->obj[0] != NULL)
+		bo = to_nvkm_bo(fb->obj[0]);
+
+	memset(&asyw, 0, sizeof(asyw));
+	asyw.state = *plane_state;
+	asyw.state.crtc_x = x;
+	asyw.state.crtc_y = y;
+	asyw.point.x = (u16)x;
+	asyw.point.y = (u16)y;
+
+	ret = curs->immd->point(curs, &asyw);
+	if (ret != 0)
+		return ret;
+	ret = curs->immd->update(curs, interlock);
+	if (ret != 0)
+		return ret;
+
+	nvkm_dispnv50_cursor_audit_capture(state, plane_state, bo, head, true,
+	    true);
+	state->audit_cursor[head].x = x;
+	state->audit_cursor[head].y = y;
+	return 0;
+}
+
+int
+nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_head *nvhead;
+	struct nv50_core *core;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_head_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    head >= nitems(state->head))
+		return -ENODEV;
+
+	core = state->disp.core;
+	nvhead = &state->head[head];
+	if (nvhead->func == NULL || nvhead->func->curs_clr == NULL)
+		return -ENODEV;
+
+	ret = nvhead->func->curs_clr(nvhead);
+	if (ret != 0)
+		return ret;
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	interlock[NV50_DISP_INTERLOCK_CURS] |=
+	    (head < nitems(state->curs) && state->curs[head] != NULL) ?
+	    state->curs[head]->interlock.data : BIT(head);
+	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	if (ret != 0)
+		return ret;
+
+	nvkm_dispnv50_cursor_audit_capture(state, NULL, NULL, head, false,
+	    false);
+	nvkm_infof(sc->dev, "drm: dispnv50 cursor disabled head=%u\n", head);
+	return 0;
 }
 
 int

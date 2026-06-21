@@ -698,6 +698,12 @@ struct nvkm_softc {
 	uint64_t		kms_cleanup_fb_count;
 	uint64_t		kms_scanout_pin_count;
 	uint64_t		kms_scanout_unpin_count;
+	uint64_t		kms_cursor_update_count;
+	uint64_t		kms_cursor_async_update_count;
+	uint64_t		kms_cursor_disable_count;
+	uint64_t		kms_cursor_error_count;
+	uint64_t		kms_cursor_pin_count;
+	uint64_t		kms_cursor_unpin_count;
 	uint64_t		kms_commit_error_count;
 	int			kms_last_error;
 	uint32_t		kms_last_head;

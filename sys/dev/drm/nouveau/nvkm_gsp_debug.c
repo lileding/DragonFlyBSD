@@ -634,6 +634,18 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_scanout_pin_count);
 	sbuf_printf(sb, "scanout_unpin_count = %llu\n",
 	    (unsigned long long)sc->kms_scanout_unpin_count);
+	sbuf_printf(sb, "cursor_update_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_update_count);
+	sbuf_printf(sb, "cursor_async_update_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_async_update_count);
+	sbuf_printf(sb, "cursor_disable_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_disable_count);
+	sbuf_printf(sb, "cursor_error_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_error_count);
+	sbuf_printf(sb, "cursor_pin_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_pin_count);
+	sbuf_printf(sb, "cursor_unpin_count = %llu\n",
+	    (unsigned long long)sc->kms_cursor_unpin_count);
 	sbuf_printf(sb, "commit_error_count = %llu\n",
 	    (unsigned long long)sc->kms_commit_error_count);
 	sbuf_printf(sb, "last_error = %d\n", sc->kms_last_error);

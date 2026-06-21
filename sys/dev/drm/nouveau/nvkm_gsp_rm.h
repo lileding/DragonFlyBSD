@@ -184,6 +184,51 @@ int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
+/*
+ * Ownership:
+ *   Borrows the committed DRM CRTC/cursor plane state and the framebuffer BO
+ *   reference held by atomic KMS. The bridge never owns that BO; prepare_fb and
+ *   cleanup_fb own the matching scanout pin record.
+ *
+ * Lifetime:
+ *   The borrowed CRTC/plane state must remain the current committed state for
+ *   the duration of the call. The cursor channel and head state live inside
+ *   sc->dispnv50 until display teardown.
+ *
+ * Threading:
+ *   Runs from KMS commit context. It may sleep while pushing EVO/core updates
+ *   and waiting for the core notifier; it must not be called from IRQ.
+ */
+int	 nvkm_dispnv50_cursor_update(struct nvkm_softc *sc,
+	     struct drm_crtc *crtc, uint32_t head);
+/*
+ * Ownership:
+ *   Borrows the current cursor plane state and only updates hardware position.
+ *   The caller remains responsible for updating drm_plane->state after success.
+ *
+ * Lifetime:
+ *   Requires a cursor image already programmed for the same CRTC/fb lifetime;
+ *   it does not pin, unpin, or replace the cursor BO.
+ *
+ * Threading:
+ *   Runs from DRM's legacy cursor async path. It writes the cursor USER
+ *   aperture directly and must not take locks that would invert atomic commit
+ *   ordering.
+ */
+int	 nvkm_dispnv50_cursor_async_update(struct nvkm_softc *sc,
+	     struct drm_crtc *crtc, uint32_t head, int32_t x, int32_t y);
+/*
+ * Ownership:
+ *   Borrows only the head/core display objects owned by sc->dispnv50.
+ *
+ * Lifetime:
+ *   Disables the hardware cursor latch for the head; BO lifetime cleanup is
+ *   still handled by the KMS plane cleanup_fb path.
+ *
+ * Threading:
+ *   Runs from KMS commit context and may sleep waiting for the core notifier.
+ */
+int	 nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head);
 void	 nvkm_dispnv50_fini(struct nvkm_softc *sc);
 
 /* Register DRIVER_MODESET objects backed by imported GSP display discovery. */

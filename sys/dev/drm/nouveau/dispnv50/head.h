@@ -11,6 +11,7 @@
 
 #include <asm/io.h>
 #include <drm/drm_color_mgmt.h>
+#include <nvhw/class/clc37d.h>
 
 struct drm_device;
 
@@ -73,9 +74,34 @@ head917d_curs_layout(struct nv50_head *head, struct nv50_wndw_atom *asyw,
     struct nv50_head_atom *asyh)
 {
 	(void)head;
-	(void)asyw;
-	(void)asyh;
-	return -ENOSYS;
+
+	if (asyw == NULL || asyh == NULL || asyw->state.fb == NULL)
+		return -EINVAL;
+
+	switch (asyw->state.fb->width) {
+	case 32:
+		asyh->curs.layout =
+		    NVC37D_HEAD_SET_CONTROL_CURSOR_SIZE_W32_H32;
+		break;
+	case 64:
+		asyh->curs.layout =
+		    NVC37D_HEAD_SET_CONTROL_CURSOR_SIZE_W64_H64;
+		break;
+	case 128:
+		asyh->curs.layout =
+		    NVC37D_HEAD_SET_CONTROL_CURSOR_SIZE_W128_H128;
+		break;
+	case 256:
+		asyh->curs.layout =
+		    NVC37D_HEAD_SET_CONTROL_CURSOR_SIZE_W256_H256;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (asyw->state.fb->height != asyw->state.fb->width)
+		return -EINVAL;
+	return 0;
 }
 
 int headc37d_view(struct nv50_head *, struct nv50_head_atom *);

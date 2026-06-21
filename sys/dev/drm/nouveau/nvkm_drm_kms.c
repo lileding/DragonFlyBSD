@@ -354,18 +354,92 @@ static const uint32_t nvkm_plane_formats[] = {
 	DRM_FORMAT_ABGR2101010,
 };
 
+static const uint32_t nvkm_cursor_formats[] = {
+	DRM_FORMAT_ARGB8888,
+};
+
+static const uint64_t nvkm_cursor_modifiers[] = {
+	DRM_FORMAT_MOD_LINEAR,
+	DRM_FORMAT_MOD_INVALID,
+};
+
 static bool
 nvkm_plane_format_mod_supported(struct drm_plane *plane, uint32_t format,
     uint64_t modifier)
 {
 	unsigned int i;
 
-	(void)plane;
+	if (plane != NULL && plane->type == DRM_PLANE_TYPE_CURSOR) {
+		return (format == DRM_FORMAT_ARGB8888 &&
+		    nvkm_modifier_is_linear(modifier));
+	}
+
 	for (i = 0; i < nitems(nvkm_plane_formats); i++) {
 		if (nvkm_plane_formats[i] == format)
 			return (nvkm_modifier_is_supported(modifier));
 	}
 	return (false);
+}
+
+static bool
+nvkm_cursor_size_supported(uint32_t size)
+{
+	return (size == 32 || size == 64 || size == 128 || size == 256);
+}
+
+static int
+nvkm_cursor_atomic_check(struct drm_plane *plane,
+    struct drm_plane_state *state)
+{
+	struct drm_crtc_state *crtc_state;
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	uint32_t size;
+	int ret;
+
+	if (state->crtc == NULL)
+		return (state->fb == NULL ? 0 : -EINVAL);
+
+	crtc_state = drm_atomic_get_new_crtc_state(state->state, state->crtc);
+	if (crtc_state == NULL)
+		return (-EINVAL);
+
+	ret = drm_atomic_helper_check_plane_state(state, crtc_state,
+	    DRM_PLANE_HELPER_NO_SCALING, DRM_PLANE_HELPER_NO_SCALING,
+	    true, true);
+	if (ret != 0 || !state->visible)
+		return (ret);
+	if (!crtc_state->active)
+		return (-EINVAL);
+
+	fb = state->fb;
+	if (fb == NULL || fb->format == NULL)
+		return (-EINVAL);
+	if (!nvkm_plane_format_mod_supported(plane, fb->format->format,
+	    fb->modifier))
+		return (-EINVAL);
+	if (fb->width != fb->height || fb->width != (uint32_t)state->crtc_w ||
+	    fb->height != (uint32_t)state->crtc_h)
+		return (-EINVAL);
+	if (state->src_x != 0 || state->src_y != 0 ||
+	    state->src_w != ((uint32_t)state->crtc_w << 16) ||
+	    state->src_h != ((uint32_t)state->crtc_h << 16))
+		return (-EINVAL);
+
+	size = fb->width;
+	if (!nvkm_cursor_size_supported(size))
+		return (-EINVAL);
+	if (fb->pitches[0] != size * 4 || (fb->offsets[0] & 0xffu) != 0)
+		return (-EINVAL);
+
+	obj = drm_gem_fb_get_obj(fb, 0);
+	if (obj == NULL)
+		return (-EINVAL);
+	bo = to_nvkm_bo(obj);
+	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->paddr == 0)
+		return (-EINVAL);
+	return (0);
 }
 
 static int
@@ -374,6 +448,9 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 	struct drm_crtc_state *crtc_state;
 	struct drm_framebuffer *fb;
 	int ret;
+
+	if (plane->type == DRM_PLANE_TYPE_CURSOR)
+		return (nvkm_cursor_atomic_check(plane, state));
 
 	if (state->crtc == NULL)
 		return (state->fb == NULL ? 0 : -EINVAL);
@@ -412,6 +489,23 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
 	    !state->visible)
 		return;
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		crtc_state = state->crtc->state;
+		if (crtc_state == NULL || !crtc_state->active ||
+		    drm_atomic_crtc_needs_modeset(crtc_state))
+			return;
+		nc = to_nvkm_crtc(state->crtc);
+		if (nc->sc->disp == NULL)
+			return;
+		nc->sc->kms_cursor_update_count++;
+		err = nvkm_dispnv50_cursor_update(nc->sc, state->crtc,
+		    nc->head);
+		if (err != 0)
+			nc->sc->kms_cursor_error_count++;
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "cursor update");
+		return;
+	}
 	if (state->crtc->primary != plane)
 		return;
 
@@ -447,6 +541,18 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
 
 	if (old_state == NULL || old_state->crtc == NULL)
 		return;
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		nc = to_nvkm_crtc(old_state->crtc);
+		if (nc->sc->disp == NULL)
+			return;
+		nc->sc->kms_cursor_disable_count++;
+		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head);
+		if (err != 0)
+			nc->sc->kms_cursor_error_count++;
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "cursor disable");
+		return;
+	}
 	if (old_state->crtc->primary != plane)
 		return;
 
@@ -484,12 +590,14 @@ nvkm_plane_prepare_fb(struct drm_plane *plane,
 	struct nvkm_softc *sc = plane->dev->dev_private;
 	struct drm_gem_object *obj;
 	struct nvkm_bo *bo;
+	bool cursor;
 	int ret;
 
 	if (state == NULL || state->fb == NULL)
 		return (0);
 
 	sc->kms_prepare_fb_count++;
+	cursor = plane->type == DRM_PLANE_TYPE_CURSOR;
 	obj = drm_gem_fb_get_obj(state->fb, 0);
 	if (obj == NULL) {
 		/*
@@ -513,14 +621,19 @@ nvkm_plane_prepare_fb(struct drm_plane *plane,
 		return (ret < 0 ? ret : -ret);
 	}
 	sc->kms_scanout_pin_count++;
+	if (cursor)
+		sc->kms_cursor_pin_count++;
 
 	ret = drm_gem_fb_prepare_fb(plane, state);
 	if (ret != 0) {
 		int unpin_ret;
 
 		unpin_ret = nvkm_bo_scanout_unpin(bo);
-		if (unpin_ret == 0 && sc->kms_scanout_pin_count != 0)
+		if (unpin_ret == 0 && sc->kms_scanout_pin_count != 0) {
 			sc->kms_scanout_unpin_count++;
+			if (cursor)
+				sc->kms_cursor_unpin_count++;
+		}
 		sc->kms_prepare_fb_error_count++;
 		return (ret);
 	}
@@ -545,22 +658,83 @@ nvkm_plane_cleanup_fb(struct drm_plane *plane,
 {
 	struct nvkm_softc *sc = plane->dev->dev_private;
 	struct drm_gem_object *obj;
+	bool cursor;
 	int ret;
 
 	if (old_state == NULL || old_state->fb == NULL)
 		return;
 
 	sc->kms_cleanup_fb_count++;
+	cursor = plane->type == DRM_PLANE_TYPE_CURSOR;
 	obj = drm_gem_fb_get_obj(old_state->fb, 0);
 	if (obj == NULL) {
 		/* Matches the internal light_up framebuffer handled above. */
 		return;
 	}
 	ret = nvkm_bo_scanout_unpin(to_nvkm_bo(obj));
-	if (ret == 0)
+	if (ret == 0) {
 		sc->kms_scanout_unpin_count++;
-	else
+		if (cursor)
+			sc->kms_cursor_unpin_count++;
+	} else {
 		sc->kms_prepare_fb_error_count++;
+	}
+}
+
+static int
+nvkm_plane_atomic_async_check(struct drm_plane *plane,
+    struct drm_plane_state *state)
+{
+	struct drm_plane_state *old_state;
+
+	if (plane->type != DRM_PLANE_TYPE_CURSOR || state == NULL)
+		return (-EINVAL);
+
+	old_state = plane->state;
+	if (old_state == NULL || old_state->crtc != state->crtc ||
+	    old_state->fb != state->fb)
+		return (-EINVAL);
+	if (old_state->src_x != state->src_x ||
+	    old_state->src_y != state->src_y ||
+	    old_state->src_w != state->src_w ||
+	    old_state->src_h != state->src_h ||
+	    old_state->crtc_w != state->crtc_w ||
+	    old_state->crtc_h != state->crtc_h)
+		return (-EINVAL);
+
+	return (nvkm_cursor_atomic_check(plane, state));
+}
+
+static void
+nvkm_plane_atomic_async_update(struct drm_plane *plane,
+    struct drm_plane_state *new_state)
+{
+	struct drm_plane_state *state = plane->state;
+	struct nvkm_crtc *nc;
+	int err;
+
+	if (plane->type != DRM_PLANE_TYPE_CURSOR || state == NULL ||
+	    new_state == NULL || new_state->crtc == NULL)
+		return;
+
+	nc = to_nvkm_crtc(new_state->crtc);
+	if (nc->sc->disp == NULL)
+		return;
+
+	nc->sc->kms_cursor_async_update_count++;
+	err = nvkm_dispnv50_cursor_async_update(nc->sc, new_state->crtc,
+	    nc->head, new_state->crtc_x, new_state->crtc_y);
+	if (err != 0) {
+		nc->sc->kms_cursor_error_count++;
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "cursor async update");
+		return;
+	}
+
+	state->crtc_x = new_state->crtc_x;
+	state->crtc_y = new_state->crtc_y;
+	state->src_x = new_state->src_x;
+	state->src_y = new_state->src_y;
 }
 
 static const struct drm_plane_helper_funcs nvkm_plane_helper_funcs = {
@@ -569,6 +743,8 @@ static const struct drm_plane_helper_funcs nvkm_plane_helper_funcs = {
 	.cleanup_fb	= nvkm_plane_cleanup_fb,
 	.atomic_update	= nvkm_plane_atomic_update,
 	.atomic_disable	= nvkm_plane_atomic_disable,
+	.atomic_async_check = nvkm_plane_atomic_async_check,
+	.atomic_async_update = nvkm_plane_atomic_async_update,
 };
 
 static void
@@ -681,6 +857,17 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 	    display_id, &hdmi);
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
+	if (err == 0 && crtc->cursor != NULL && crtc->cursor->state != NULL &&
+	    crtc->cursor->state->visible && crtc->cursor->state->fb != NULL) {
+		int cursor_err;
+
+		sc->kms_cursor_update_count++;
+		cursor_err = nvkm_dispnv50_cursor_update(sc, crtc, nc->head);
+		if (cursor_err != 0)
+			sc->kms_cursor_error_count++;
+		nvkm_kms_record_result(sc, nc->head, nc->win, cursor_err,
+		    "cursor enable");
+	}
 	drm_crtc_vblank_on(crtc);
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
@@ -838,6 +1025,8 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	dev->mode_config.min_height = 0;
 	dev->mode_config.max_width = 8192;
 	dev->mode_config.max_height = 8192;
+	dev->mode_config.cursor_width = 256;
+	dev->mode_config.cursor_height = 256;
 	dev->mode_config.allow_fb_modifiers = true;
 	dev->mode_config.funcs = &nvkm_mode_config_funcs;
 	dev->mode_config.helper_private = &nvkm_mode_config_helper_funcs;
@@ -859,13 +1048,16 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nheads = 4;
 	for (h = 0; h < nheads; h++) {
 		struct drm_plane *plane;
+		struct drm_plane *cursor;
 		struct nvkm_crtc *ncrtc;
 		struct drm_crtc *crtc;
 
 		plane = kzalloc(sizeof(*plane), GFP_KERNEL);
+		cursor = kzalloc(sizeof(*cursor), GFP_KERNEL);
 		ncrtc = kzalloc(sizeof(*ncrtc), GFP_KERNEL);
-		if (plane == NULL || ncrtc == NULL) {
+		if (plane == NULL || cursor == NULL || ncrtc == NULL) {
 			kfree(plane);
+			kfree(cursor);
 			kfree(ncrtc);
 			break;
 		}
@@ -876,16 +1068,30 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		if (drm_universal_plane_init(dev, plane, 1u << h,
 		    &nvkm_plane_funcs, nvkm_plane_formats,
 		    nitems(nvkm_plane_formats), wndwc57e_modifiers,
-		    DRM_PLANE_TYPE_PRIMARY, NULL) != 0) {
+			    DRM_PLANE_TYPE_PRIMARY, NULL) != 0) {
 			kfree(plane);
+			kfree(cursor);
 			kfree(ncrtc);
 			continue;
 		}
 		drm_plane_helper_add(plane, &nvkm_plane_helper_funcs);
-		if (drm_crtc_init_with_planes(dev, crtc, plane, NULL,
-		    &nvkm_crtc_funcs, NULL) != 0) {
+		if (drm_universal_plane_init(dev, cursor, 1u << h,
+		    &nvkm_plane_funcs, nvkm_cursor_formats,
+		    nitems(nvkm_cursor_formats), nvkm_cursor_modifiers,
+		    DRM_PLANE_TYPE_CURSOR, NULL) != 0) {
 			drm_plane_cleanup(plane);
 			kfree(plane);
+			kfree(cursor);
+			kfree(ncrtc);
+			continue;
+		}
+		drm_plane_helper_add(cursor, &nvkm_plane_helper_funcs);
+		if (drm_crtc_init_with_planes(dev, crtc, plane, cursor,
+		    &nvkm_crtc_funcs, NULL) != 0) {
+			drm_plane_cleanup(plane);
+			drm_plane_cleanup(cursor);
+			kfree(plane);
+			kfree(cursor);
 			kfree(ncrtc);
 			continue;
 		}
