@@ -604,6 +604,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_hotplug_auto_kms_count);
 	sbuf_printf(sb, "hotplug_enqueue_error_count = %llu\n",
 	    (unsigned long long)sc->kms_hotplug_enqueue_error_count);
+	sbuf_printf(sb, "dark_down_count = %llu\n",
+	    (unsigned long long)sc->kms_dark_down_count);
+	sbuf_printf(sb, "dark_down_error_count = %llu\n",
+	    (unsigned long long)sc->kms_dark_down_error_count);
+	sbuf_printf(sb, "dark_down_last_error = %d\n",
+	    sc->kms_dark_down_last_error);
 	sbuf_printf(sb, "link_status_bad_count = %llu\n",
 	    (unsigned long long)sc->kms_link_status_bad_count);
 	sbuf_printf(sb, "dp_irq_count = %llu\n",

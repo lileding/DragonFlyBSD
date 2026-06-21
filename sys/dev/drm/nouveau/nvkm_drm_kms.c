@@ -2633,6 +2633,7 @@ nvkm_drm_kms_dark_down(struct nvkm_softc *sc)
 	if (sc == NULL || sc->drm_dev == NULL)
 		return (ENODEV);
 	dev = sc->drm_dev;
+	sc->kms_dark_down_count++;
 
 	drm_modeset_acquire_init(&ctx, 0);
 retry:
@@ -2644,6 +2645,12 @@ retry:
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
 
+	if (ret != 0) {
+		sc->kms_dark_down_error_count++;
+		sc->kms_dark_down_last_error = ret;
+	} else {
+		sc->kms_dark_down_last_error = 0;
+	}
 	nvkm_infof(sc->dev, "drm: dark_down commit -> %d\n", ret);
 	return (ret < 0 ? -ret : 0);
 }
