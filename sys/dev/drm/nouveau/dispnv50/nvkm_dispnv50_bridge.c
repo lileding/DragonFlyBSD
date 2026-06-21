@@ -3164,6 +3164,41 @@ nvkm_dispnv50_wndw_sanitize(struct nv50_wndw *wndw)
 	return 0;
 }
 
+/*
+ * Ownership: borrows wndw for the duration of a single display commit.
+ * Lifetime: emitted methods are ordered before the caller's window UPDATE;
+ * the caller keeps the window channel and its context-DMAs alive until that
+ * update has been accepted.
+ * Threading: called from the serialized KMS commit path, not from IRQ context.
+ *
+ * This is narrower than nvkm_dispnv50_wndw_sanitize(): disable still arms a
+ * notifier and waits for BEGUN, so clearing the notifier context in the same
+ * update would remove the completion source.  Full modeset enable sanitation
+ * clears notifier/semaphore before arming a fresh notifier.
+ */
+static int
+nvkm_dispnv50_wndw_disable_resources(struct nv50_wndw *wndw)
+{
+	int ret;
+
+	if (wndw->func->xlut_clr != NULL) {
+		ret = wndw->func->xlut_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	if (wndw->func->csc_clr != NULL) {
+		ret = wndw->func->csc_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	if (wndw->func->image_clr != NULL) {
+		ret = wndw->func->image_clr(wndw);
+		if (ret != 0)
+			return ret;
+	}
+	return 0;
+}
+
 static int
 nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
@@ -3375,7 +3410,7 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
-	ret = wndw->func->image_clr(wndw);
+	ret = nvkm_dispnv50_wndw_disable_resources(wndw);
 	if (ret != 0)
 		goto fail;
 
