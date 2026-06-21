@@ -656,6 +656,46 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_state_free = nvkm_atomic_state_free,
 };
 
+/*
+ * Complete an atomic CRTC event.
+ *
+ * Ownership: state->event belongs to the atomic commit until this helper
+ * consumes it and clears the pointer.  Lifetime: the event object is either
+ * queued on the CRTC vblank list or sent synchronously before the helper
+ * returns.  Threading: callers run from atomic commit context; event_lock
+ * serializes the handoff with vblank IRQ delivery.
+ */
+static void
+nvkm_crtc_complete_event(struct drm_crtc *crtc, struct drm_crtc_state *state)
+{
+	struct drm_device *dev = crtc->dev;
+	unsigned long flags;
+
+	if (state == NULL || state->event == NULL)
+		return;
+
+	spin_lock_irqsave(&dev->event_lock, flags);
+	if (state->active && drm_crtc_vblank_get(crtc) == 0)
+		drm_crtc_arm_vblank_event(crtc, state->event);
+	else
+		drm_crtc_send_vblank_event(crtc, state->event);
+	state->event = NULL;
+	spin_unlock_irqrestore(&dev->event_lock, flags);
+}
+
+static void
+nvkm_atomic_complete_modeset_events(struct drm_atomic_state *old_state)
+{
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *new_crtc_state;
+	int i;
+
+	for_each_new_crtc_in_state(old_state, crtc, new_crtc_state, i) {
+		if (drm_atomic_crtc_needs_modeset(new_crtc_state))
+			nvkm_crtc_complete_event(crtc, new_crtc_state);
+	}
+}
+
 static void
 nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 {
@@ -667,6 +707,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	drm_atomic_helper_commit_planes(dev, old_state,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+	nvkm_atomic_complete_modeset_events(old_state);
 	drm_atomic_helper_fake_vblank(old_state);
 	drm_atomic_helper_commit_hw_done(old_state);
 	sc->kms_atomic_flip_done_wait_count++;
@@ -1647,10 +1688,8 @@ color_fail:
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-	struct drm_device *dev = crtc->dev;
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	int color_err;
-	unsigned long flags;
 
 	(void)old_state;	/* UPDATE is sequenced in atomic_enable. */
 
@@ -1662,17 +1701,11 @@ nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		    "crtc color");
 	}
 
-	/* Complete the page-flip event on the next real vblank IRQ
-	 * (drm_crtc_handle_vblank sends it); send immediately if vblank off. */
 	if (crtc->state->event == NULL)
 		return;
-	spin_lock_irqsave(&dev->event_lock, flags);
-	if (drm_crtc_vblank_get(crtc) == 0)
-		drm_crtc_arm_vblank_event(crtc, crtc->state->event);
-	else
-		drm_crtc_send_vblank_event(crtc, crtc->state->event);
-	crtc->state->event = NULL;
-	spin_unlock_irqrestore(&dev->event_lock, flags);
+	if (drm_atomic_crtc_needs_modeset(crtc->state))
+		return;
+	nvkm_crtc_complete_event(crtc, crtc->state);
 }
 
 static void
@@ -1720,7 +1753,8 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		nvkm_kms_record_result(sc, nc->head, nc->win, cursor_err,
 		    "cursor enable");
 	}
-	drm_crtc_vblank_on(crtc);
+	if (err == 0)
+		drm_crtc_vblank_on(crtc);
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay,
