@@ -997,15 +997,39 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay, display_id, err);
 }
 
+static uint32_t
+nvkm_crtc_old_display_id(struct drm_crtc *crtc,
+    const struct drm_crtc_state *old_state)
+{
+	struct drm_connector *conn;
+
+	if (crtc == NULL || old_state == NULL)
+		return (0);
+
+	list_for_each_entry(conn, &crtc->dev->mode_config.connector_list, head) {
+		if ((old_state->connector_mask & drm_connector_mask(conn)) == 0)
+			continue;
+		return (to_nvkm_connector(conn)->display_id);
+	}
+
+	return (0);
+}
+
 static void
 nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	uint32_t display_id;
+	int err;
 
-	(void)old_state;
+	display_id = nvkm_crtc_old_display_id(crtc, old_state);
 	drm_crtc_vblank_off(crtc);
-	nvkm_infof(nc->sc->dev, "drm: crtc disable head=%u\n", nc->head);
-	/* Head blank lands in a later milestone; leave timing latched. */
+	err = nvkm_dispnv50_atomic_disable(nc->sc, nc->head, display_id);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "crtc disable");
+	nvkm_infof(nc->sc->dev,
+	    "drm: crtc disable head=%u display=0x%x bridge=%d\n", nc->head,
+	    display_id, err);
 }
 
 static int

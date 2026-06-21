@@ -211,6 +211,23 @@ struct drm_crtc;
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
 	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi);
+/*
+ * Ownership:
+ *   Borrows sc and the scalar display_id selected by KMS. The bridge owns no
+ *   DRM connector, CRTC, or framebuffer reference through this call.
+ *
+ * Lifetime:
+ *   The display_id must describe the output routed to head in the old committed
+ *   CRTC state, or be zero to let the bridge use its last audited route.
+ *   The output release happens only after the EVO core UPDATE is accepted.
+ *
+ * Threading:
+ *   Called from the atomic commit tail under DRM modeset serialization. The
+ *   function may block on display notifier completion and must not be called
+ *   from interrupt context.
+ */
+int	 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
+	     uint32_t display_id);
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
