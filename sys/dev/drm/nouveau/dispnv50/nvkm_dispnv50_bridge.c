@@ -3904,6 +3904,7 @@ nvkm_dispnv50_dp_program_sst_candidate(struct nvkm_softc *sc,
 		sc->kms_dp_sst_enable_success_count++;
 		sc->kms_dp_sst_last_error = 0;
 	}
+	outp->dp.enabled = true;
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 dp enabled outp=%02x sor=%d head=%u "
 	    "lanes=%u bw=0x%02x wm=%u hsym=%u vsym=%u ef=%d\n",

@@ -1158,6 +1158,7 @@ r535_dp_aux_pwr(struct nvkm_outp *outp, bool pu)
 static void
 r535_dp_release(struct nvkm_outp *outp)
 {
+	outp->dp.enabled = false;
 	if (!outp->dp.lt.bw) {
 		if (!WARN_ON(!outp->dp.rates))
 			outp->dp.lt.bw = outp->dp.rate[0].rate / 27000;
