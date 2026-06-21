@@ -693,9 +693,11 @@ struct nvkm_softc {
 	uint32_t		kms_hpd_pending_plug_mask;
 	uint32_t		kms_hpd_pending_unplug_mask;
 	uint32_t		kms_hpd_pending_link_bad_mask;
+	uint32_t		kms_hpd_pending_dp_irq_mask;
 	uint32_t		kms_hpd_last_plug_mask;
 	uint32_t		kms_hpd_last_unplug_mask;
 	uint32_t		kms_hpd_last_link_bad_mask;
+	uint32_t		kms_hpd_last_dp_irq_mask;
 	uint64_t		kms_auto_count;
 	uint64_t		kms_hotplug_count;
 	uint64_t		kms_hotplug_changed_count;
@@ -704,6 +706,10 @@ struct nvkm_softc {
 	uint64_t		kms_hotplug_auto_kms_count;
 	uint64_t		kms_hotplug_enqueue_error_count;
 	uint64_t		kms_link_status_bad_count;
+	uint64_t		kms_dp_irq_count;
+	uint64_t		kms_dp_irq_link_good_count;
+	uint64_t		kms_dp_irq_link_bad_count;
+	uint64_t		kms_dp_irq_error_count;
 	uint64_t		kms_restore_skip_primary_count;
 	uint32_t		kms_restore_last_primary_count;
 	int			kms_restore_last_open_count;
@@ -1548,6 +1554,16 @@ void	nvkm_hotproc_snapshot(struct nvkm_softc *sc,
  */
 void	nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc,
 	    uint32_t plug_mask, uint32_t unplug_mask);
+/*
+ * Ownership: borrows the dispnv50 output state for the duration of a single
+ * DPCD status read and writes only the scalar link_ok result supplied by the
+ * caller.
+ * Lifetime: no AUX, output, IOR, or DRM pointer is retained after return.
+ * Threading: must run from process context. It may sleep inside GSP/RM AUX
+ * transactions and must not be called from interrupt context.
+ */
+int	nvkm_dispnv50_dp_link_check(struct nvkm_softc *sc,
+	    uint32_t display_id, bool *link_ok);
 /*
  * Ownership: consumes the current DRM CRTC state by value only; no state
  * pointer is retained after return. The bridge keeps ownership of its LUT

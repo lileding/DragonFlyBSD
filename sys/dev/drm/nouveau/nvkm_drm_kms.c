@@ -30,8 +30,16 @@
 #include <drm/drm_property.h>
 #include <drm/drm_rect.h>
 
+#include <engine/disp.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+
+#ifdef nvkm_rd32
+#undef nvkm_rd32
+#endif
+#ifdef nvkm_wr32
+#undef nvkm_wr32
+#endif
 
 struct nvkm_bios;
 
@@ -67,6 +75,8 @@ struct nvkm_drm_connector {
 	struct drm_connector	base;
 	struct nvkm_softc	*sc;
 	uint32_t		display_id;	/* GSP displayId, e.g. 0x400 */
+	struct nvkm_event_ntfy	dp_irq_ntfy;
+	bool			dp_irq_ntfy_initialized;
 };
 
 #define to_nvkm_connector(c) container_of(c, struct nvkm_drm_connector, base)
@@ -82,6 +92,9 @@ struct nvkm_connector_state {
 	container_of(s, struct nvkm_connector_state, base)
 #define to_nvkm_connector_state_const(s) \
 	((const struct nvkm_connector_state *)(s))
+
+static void nvkm_drm_kms_dp_irq_schedule(struct nvkm_softc *sc,
+    uint32_t display_id);
 
 static const struct drm_prop_enum_list nvkm_dither_mode_enum[] = {
 	{ NVKM_DISPNV50_DITHER_MODE_OFF, "off" },
@@ -287,11 +300,79 @@ nvkm_connector_detect(struct drm_connector *connector, bool force)
 	    connector_status_connected : connector_status_disconnected;
 }
 
+static int
+nvkm_connector_dp_irq(struct nvkm_event_ntfy *ntfy, u32 bits)
+{
+	struct nvkm_drm_connector *nc;
+
+	if ((bits & NVKM_DPYID_IRQ) == 0)
+		return (NVKM_EVENT_KEEP);
+
+	nc = container_of(ntfy, struct nvkm_drm_connector, dp_irq_ntfy);
+	nvkm_drm_kms_dp_irq_schedule(nc->sc, nc->display_id);
+	return (NVKM_EVENT_KEEP);
+}
+
+static void
+nvkm_connector_dp_irq_unregister(struct nvkm_drm_connector *connector)
+{
+	if (connector == NULL || !connector->dp_irq_ntfy_initialized)
+		return;
+
+	nvkm_event_ntfy_del(&connector->dp_irq_ntfy);
+	connector->dp_irq_ntfy_initialized = false;
+}
+
+/*
+ * Subscribe a KMS connector to RM DP IRQ notifications.
+ *
+ * Ownership:
+ *   The connector owns the notification record and unregisters it before the
+ *   connector is destroyed. The nvkm display event list only borrows the
+ *   embedded nvkm_event_ntfy while it is registered.
+ *
+ * Lifetime:
+ *   The callback never dereferences DRM state after scheduling the HPD task.
+ *   KMS teardown unregisters all connector notifications before draining the
+ *   HPD task, so no new task can be queued by this event after teardown begins.
+ *
+ * Threading:
+ *   The callback may run from GSP event context. It only records a displayId
+ *   bit under sc->kms_hpd_lock and queues process-context work; AUX reads and
+ *   link-status publication happen later in the HPD task.
+ */
+static void
+nvkm_connector_dp_irq_register(struct nvkm_drm_connector *connector,
+    const struct nvkm_gsp_disp_output_info *info)
+{
+	struct nvkm_softc *sc;
+	int id;
+
+	if (connector == NULL || info == NULL ||
+	    info->output_type != DCB_OUTPUT_DP)
+		return;
+	sc = connector->sc;
+	if (sc == NULL || sc->disp == NULL || connector->display_id == 0)
+		return;
+
+	id = ffs(connector->display_id) - 1;
+	if (id < 0)
+		return;
+
+	nvkm_event_ntfy_add(&sc->disp->rm.event, id, NVKM_DPYID_IRQ, false,
+	    nvkm_connector_dp_irq, &connector->dp_irq_ntfy);
+	nvkm_event_ntfy_allow(&connector->dp_irq_ntfy);
+	connector->dp_irq_ntfy_initialized = true;
+}
+
 static void
 nvkm_connector_destroy(struct drm_connector *connector)
 {
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+
+	nvkm_connector_dp_irq_unregister(nc);
 	drm_connector_cleanup(connector);
-	kfree(to_nvkm_connector(connector));
+	kfree(nc);
 }
 
 static void
@@ -1993,6 +2074,54 @@ nvkm_drm_kms_link_status_bad_task(struct nvkm_softc *sc,
 	drm_kms_helper_hotplug_event(dev);
 }
 
+static uint32_t
+nvkm_drm_kms_dp_irq_task(struct nvkm_softc *sc, struct drm_device *dev,
+    uint32_t dp_irq_mask)
+{
+	struct drm_connector *conn;
+	uint32_t link_bad_mask = 0;
+
+	if (sc == NULL || dev == NULL || dp_irq_mask == 0)
+		return (0);
+
+	list_for_each_entry(conn, &dev->mode_config.connector_list, head) {
+		struct nvkm_drm_connector *nvkm_conn = to_nvkm_connector(conn);
+		bool link_ok = true;
+		int ret;
+
+		if ((dp_irq_mask & nvkm_conn->display_id) == 0)
+			continue;
+
+		sc->kms_dp_irq_count++;
+		ret = nvkm_dispnv50_dp_link_check(sc, nvkm_conn->display_id,
+		    &link_ok);
+		if (ret != 0) {
+			sc->kms_dp_irq_error_count++;
+			link_bad_mask |= nvkm_conn->display_id;
+			nvkm_infof(sc->dev,
+			    "drm: connector %s display=0x%x DP IRQ link check"
+			    " failed err=%d\n", conn->name,
+			    nvkm_conn->display_id, ret);
+			continue;
+		}
+		if (!link_ok) {
+			sc->kms_dp_irq_link_bad_count++;
+			link_bad_mask |= nvkm_conn->display_id;
+			nvkm_infof(sc->dev,
+			    "drm: connector %s display=0x%x DP IRQ link bad\n",
+			    conn->name, nvkm_conn->display_id);
+			continue;
+		}
+
+		sc->kms_dp_irq_link_good_count++;
+		nvkm_infof(sc->dev,
+		    "drm: connector %s display=0x%x DP IRQ link good\n",
+		    conn->name, nvkm_conn->display_id);
+	}
+
+	return (link_bad_mask);
+}
+
 static void
 nvkm_drm_kms_hpd_task(void *arg, int pending)
 {
@@ -2001,6 +2130,7 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 	uint32_t plug_mask;
 	uint32_t unplug_mask;
 	uint32_t link_bad_mask;
+	uint32_t dp_irq_mask;
 	bool changed;
 	int ret;
 
@@ -2013,14 +2143,19 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 	plug_mask = sc->kms_hpd_pending_plug_mask;
 	unplug_mask = sc->kms_hpd_pending_unplug_mask;
 	link_bad_mask = sc->kms_hpd_pending_link_bad_mask;
+	dp_irq_mask = sc->kms_hpd_pending_dp_irq_mask;
 	sc->kms_hpd_pending_plug_mask = 0;
 	sc->kms_hpd_pending_unplug_mask = 0;
 	sc->kms_hpd_pending_link_bad_mask = 0;
+	sc->kms_hpd_pending_dp_irq_mask = 0;
 	sc->kms_hpd_last_plug_mask = plug_mask;
 	sc->kms_hpd_last_unplug_mask = unplug_mask;
 	sc->kms_hpd_last_link_bad_mask = link_bad_mask;
+	sc->kms_hpd_last_dp_irq_mask = dp_irq_mask;
 	spin_unlock(&sc->kms_hpd_lock);
 
+	link_bad_mask |= nvkm_drm_kms_dp_irq_task(sc, dev, dp_irq_mask);
+	sc->kms_hpd_last_link_bad_mask = link_bad_mask;
 	nvkm_drm_kms_link_status_bad_task(sc, dev, link_bad_mask);
 
 	if ((plug_mask | unplug_mask) == 0)
@@ -2077,6 +2212,24 @@ nvkm_drm_kms_link_status_bad_schedule(struct nvkm_softc *sc,
 		sc->kms_hotplug_enqueue_error_count++;
 }
 
+static void
+nvkm_drm_kms_dp_irq_schedule(struct nvkm_softc *sc, uint32_t display_id)
+{
+	int ret;
+
+	if (sc == NULL || sc->drm_dev == NULL ||
+	    !sc->kms_hpd_task_initialized || display_id == 0)
+		return;
+
+	spin_lock(&sc->kms_hpd_lock);
+	sc->kms_hpd_pending_dp_irq_mask |= display_id;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	ret = taskqueue_enqueue(taskqueue_thread[0], &sc->kms_hpd_task);
+	if (ret != 0)
+		sc->kms_hotplug_enqueue_error_count++;
+}
+
 void
 nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc, uint32_t plug_mask,
     uint32_t unplug_mask)
@@ -2098,12 +2251,26 @@ nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc, uint32_t plug_mask,
 		sc->kms_hotplug_enqueue_error_count++;
 }
 
+static void
+nvkm_drm_kms_dp_irq_unregister_all(struct nvkm_softc *sc)
+{
+	struct drm_connector *conn;
+
+	if (sc == NULL || sc->drm_dev == NULL)
+		return;
+
+	list_for_each_entry(conn, &sc->drm_dev->mode_config.connector_list,
+	    head)
+		nvkm_connector_dp_irq_unregister(to_nvkm_connector(conn));
+}
+
 void
 nvkm_drm_kms_fini(struct nvkm_softc *sc)
 {
 	if (sc == NULL)
 		return;
 
+	nvkm_drm_kms_dp_irq_unregister_all(sc);
 	if (sc->kms_hpd_task_initialized) {
 		sc->kms_hpd_task_initialized = false;
 		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_hpd_task,
@@ -2300,6 +2467,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
 		nvkm_connector_attach_properties(nc);
+		nvkm_connector_dp_irq_register(nc, &info);
 
 		if (drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
 		    encoder_type, NULL) == 0) {
