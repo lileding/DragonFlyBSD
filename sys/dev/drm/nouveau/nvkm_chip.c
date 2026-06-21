@@ -27,6 +27,8 @@ extern const struct nvkm_rm_gpu tu1xx_gpu;
 	.gsp_riscv = NVKM_TU10X_GSP_RISCV,				\
 	.display_heads = 4,						\
 	.display_sors = 4,						\
+	.display_windows = 8,						\
+	.display_cursors = 4,						\
 	.rm_gpu = &tu1xx_gpu,						\
 	.gmmu_pd3_shift = NVKM_GMMU_PD3_SHIFT,				\
 	.gmmu_pd2_shift = NVKM_GMMU_PD2_SHIFT,				\

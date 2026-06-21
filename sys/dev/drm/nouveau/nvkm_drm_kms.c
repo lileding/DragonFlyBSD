@@ -39,6 +39,29 @@ struct nvkm_bios;
 
 extern const uint64_t wndwc57e_modifiers[];
 
+static uint32_t
+nvkm_kms_cap_min(uint32_t value, uint32_t cap)
+{
+	if (cap != 0 && value > cap)
+		return (cap);
+	return (value);
+}
+
+static uint32_t
+nvkm_kms_effective_head_count(struct nvkm_softc *sc)
+{
+	uint32_t heads;
+
+	heads = nvkm_gsp_disp_head_count(sc);
+	heads = nvkm_kms_cap_min(heads, NVKM_DISPLAY_MAX_HEADS);
+	if (sc != NULL && sc->chip != NULL) {
+		heads = nvkm_kms_cap_min(heads, sc->chip->display_heads);
+		heads = nvkm_kms_cap_min(heads, sc->chip->display_windows);
+		heads = nvkm_kms_cap_min(heads, sc->chip->display_cursors);
+	}
+	return (heads);
+}
+
 struct nvkm_drm_connector {
 	struct drm_connector	base;
 	struct nvkm_softc	*sc;
@@ -1937,9 +1960,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 
 	/* (1) One CRTC (HEAD) + primary plane (window) per head. The plane's
 	 * possible_crtcs is BIT(h) because CRTCs get index h in creation order. */
-	nheads = nvkm_gsp_disp_head_count(sc);
-	if (nheads > 4)
-		nheads = 4;
+	nheads = nvkm_kms_effective_head_count(sc);
 	for (h = 0; h < nheads; h++) {
 		struct drm_plane *plane;
 		struct drm_plane *cursor;
@@ -2002,7 +2023,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		}
 		drm_crtc_enable_color_mgmt(crtc, NVKM_KMS_COLOR_LUT_SIZE,
 		    true, NVKM_KMS_COLOR_LUT_SIZE);
-		if (h < 4)
+		if (h < NVKM_DISPLAY_MAX_HEADS)
 			sc->kms_crtc[h] = crtc;
 	}
 	crtc_mask = (1u << nheads) - 1u;
