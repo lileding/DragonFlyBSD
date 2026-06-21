@@ -4209,6 +4209,50 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
 	return ret;
 }
 
+/*
+ * Disable output-specific side channels for the currently routed output.
+ *
+ * Ownership:
+ *   Borrows outp and its currently assigned IOR for this disable operation.
+ *   The caller still owns the route and is responsible for clearing SOR
+ *   ownership and releasing outp after this helper returns.
+ *
+ * Lifetime:
+ *   No pointer is retained. This helper must run before outp->func->release(),
+ *   while outp->ior and outp->ior->asy.outp still describe the active route.
+ *
+ * Threading:
+ *   Called from the atomic commit disable path under DRM modeset
+ *   serialization. It may issue GSP/RM controls and must not run from
+ *   interrupt context.
+ */
+static void
+nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *outp, uint32_t head)
+{
+	struct nvkm_ior *ior;
+
+	if (outp == NULL || outp->ior == NULL || outp->ior->func == NULL)
+		return;
+
+	ior = outp->ior;
+	switch (outp->info.type) {
+	case DCB_OUTPUT_TMDS:
+		if (ior->func->hdmi == NULL)
+			return;
+		if (ior->func->hdmi->audio != NULL)
+			ior->func->hdmi->audio(ior, (int)head, false);
+		if (ior->func->hdmi->ctrl != NULL)
+			ior->func->hdmi->ctrl(ior, (int)head, false, 0, 0);
+		break;
+	case DCB_OUTPUT_DP:
+		if (ior->func->dp != NULL && ior->func->dp->audio != NULL)
+			ior->func->dp->audio(ior, (int)head, false);
+		break;
+	default:
+		break;
+	}
+}
+
 int
 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
     uint32_t display_id)
@@ -4264,6 +4308,7 @@ nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 			return ret;
 	}
 	if (outp != NULL && outp->ior != NULL) {
+		nvkm_dispnv50_output_disable_sideband(outp, head);
 		ret = core->func->sor->ctrl(core, outp->ior->id, 0, &asyh);
 		if (ret != 0)
 			return ret;
