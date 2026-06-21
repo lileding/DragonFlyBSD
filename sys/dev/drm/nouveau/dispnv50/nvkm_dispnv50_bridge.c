@@ -41,6 +41,10 @@
 #include <nvhw/class/clc57e.h>
 #include <subdev/bios/dcb.h>
 
+/* drm_dp_helper.h conflicts with DragonFly's imported display/drm_dp.h here. */
+bool drm_dp_channel_eq_ok(const u8 link_status[DP_LINK_STATUS_SIZE],
+    int lane_count);
+
 #ifdef nvkm_rd32
 #undef nvkm_rd32
 #endif
@@ -3949,6 +3953,37 @@ nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 	}
 
 	return NULL;
+}
+
+int
+nvkm_dispnv50_dp_link_check(struct nvkm_softc *sc, uint32_t display_id,
+    bool *link_ok)
+{
+	struct nvkm_outp *outp;
+	uint8_t status[DP_LINK_STATUS_SIZE];
+	int ret;
+
+	if (link_ok == NULL)
+		return -EINVAL;
+	*link_ok = true;
+
+	outp = nvkm_dispnv50_find_outp(sc, display_id);
+	if (outp == NULL)
+		return -ENODEV;
+	if (outp->info.type != DCB_OUTPUT_DP)
+		return -EINVAL;
+	if (outp->ior == NULL || outp->dp.lt.nr == 0)
+		return 0;
+
+	ret = nvkm_dispnv50_dp_aux_read(outp, DP_LANE0_1_STATUS, status,
+	    sizeof(status));
+	if (ret != 0) {
+		*link_ok = false;
+		return ret;
+	}
+
+	*link_ok = drm_dp_channel_eq_ok(status, outp->dp.lt.nr);
+	return 0;
 }
 
 void
