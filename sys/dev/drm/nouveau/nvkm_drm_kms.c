@@ -591,6 +591,47 @@ nvkm_modifier_kind(uint64_t modifier)
 	return ((modifier >> 12) & 0xff);
 }
 
+static uint8_t
+nvkm_modifier_sector_layout(uint64_t modifier)
+{
+	return ((modifier >> 22) & 0x1) | ((modifier >> 25) & 0x6);
+}
+
+static bool
+nvkm_format_modifier_cpp_supported(uint32_t format, uint64_t modifier)
+{
+	const struct drm_format_info *info;
+	uint8_t sector_layout;
+	unsigned int i;
+
+	if (nvkm_modifier_is_linear(modifier))
+		return (true);
+	if (!nvkm_modifier_is_supported(modifier))
+		return (false);
+
+	info = drm_format_info(format);
+	if (info == NULL)
+		return (false);
+
+	/*
+	 * Turing block-linear modifiers encode the sector layout separately
+	 * from the page kind.  The layout must match the bytes-per-pixel class
+	 * or the window hardware will interpret the scanout surface incorrectly.
+	 */
+	sector_layout = nvkm_modifier_sector_layout(modifier);
+	for (i = 0; i < info->num_planes; i++) {
+		if (info->cpp[i] == 3)
+			return (false);
+		if (info->cpp[i] == 2 && sector_layout != 3)
+			return (false);
+		if (info->cpp[i] == 1 && sector_layout != 2)
+			return (false);
+		if (info->cpp[i] >= 4 && sector_layout != 1)
+			return (false);
+	}
+	return (true);
+}
+
 static struct drm_framebuffer *
 nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
@@ -1299,7 +1340,8 @@ nvkm_plane_format_mod_supported(struct drm_plane *plane, uint32_t format,
 
 	for (i = 0; i < nitems(nvkm_plane_formats); i++) {
 		if (nvkm_plane_formats[i] == format)
-			return (nvkm_modifier_is_supported(modifier));
+			return (nvkm_format_modifier_cpp_supported(format,
+			    modifier));
 	}
 	return (false);
 }
