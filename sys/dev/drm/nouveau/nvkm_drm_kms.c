@@ -764,10 +764,12 @@ struct nvkm_crtc {
  * Stack-local decoded CRTC route.
  *
  * Ownership: this object owns only scalar snapshots. It borrows the DRM CRTC,
- * connector list, and connector display_info for the duration of the caller.
+ * connector list, atomic connector state, and connector display_info for the
+ * duration of the caller.
  * Lifetime: callers must not store it past the current check/commit callback.
- * Threading: no internal locking; use only while DRM atomic locks protect the
- * state being decoded.
+ * Threading: no internal locking; pass the current drm_atomic_state before
+ * swap_state so route decode sees new connector properties.  Pass NULL only
+ * after swap_state, when conn->state is already the committed state.
  */
 struct nvkm_kms_crtc_atom {
 	struct nvkm_softc *sc;
@@ -794,11 +796,11 @@ nvkm_kms_crtc_atom_init(struct nvkm_kms_crtc_atom *atom, struct nvkm_softc *sc,
 
 static void
 nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
-    struct drm_connector *conn)
+    struct drm_connector *conn, const struct drm_connector_state *conn_state)
 {
 	struct nvkm_drm_connector *nvkm_conn = to_nvkm_connector(conn);
-	struct nvkm_connector_state *state = conn->state != NULL ?
-	    to_nvkm_connector_state(conn->state) : NULL;
+	const struct nvkm_connector_state *state = conn_state != NULL ?
+	    to_nvkm_connector_state_const(conn_state) : NULL;
 
 	atom->display_id = nvkm_conn->display_id;
 	atom->connector_count++;
@@ -851,8 +853,10 @@ nvkm_kms_crtc_atom_validate_output(struct nvkm_kms_crtc_atom *atom)
 
 static int
 nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
-    uint32_t connector_mask, bool validate_output)
+    struct drm_atomic_state *state, uint32_t connector_mask,
+    bool validate_output)
 {
+	struct drm_connector_state *conn_state;
 	struct drm_connector *conn;
 	int ret;
 
@@ -860,7 +864,11 @@ nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
 	    head) {
 		if ((connector_mask & drm_connector_mask(conn)) == 0)
 			continue;
-		nvkm_kms_crtc_atom_take_connector(atom, conn);
+		conn_state = state != NULL ?
+		    drm_atomic_get_new_connector_state(state, conn) : NULL;
+		if (conn_state == NULL)
+			conn_state = conn->state;
+		nvkm_kms_crtc_atom_take_connector(atom, conn, conn_state);
 	}
 	if (atom->connector_count != 1 || atom->display_id == 0) {
 		nvkm_infof(atom->sc->dev,
@@ -881,7 +889,7 @@ nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
 
 static int
 nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    const struct drm_crtc_state *crtc_state)
+    struct drm_atomic_state *state, const struct drm_crtc_state *crtc_state)
 {
 	struct nvkm_kms_crtc_atom atom;
 
@@ -891,8 +899,8 @@ nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return (-ENODEV);
 
 	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-	return (nvkm_kms_crtc_atom_route(&atom, crtc_state->connector_mask,
-	    true));
+	return (nvkm_kms_crtc_atom_route(&atom, state,
+	    crtc_state->connector_mask, true));
 }
 
 static int
@@ -906,7 +914,8 @@ nvkm_atomic_check_routes(struct drm_device *dev, struct drm_atomic_state *state)
 	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 		int ret;
 
-		ret = nvkm_atomic_check_crtc_route(sc, crtc, new_crtc_state);
+		ret = nvkm_atomic_check_crtc_route(sc, crtc, state,
+		    new_crtc_state);
 		if (ret != 0)
 			return (ret);
 	}
@@ -1010,7 +1019,7 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 			continue;
 
 		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-		ret = nvkm_kms_crtc_atom_route(&atom,
+		ret = nvkm_kms_crtc_atom_route(&atom, state,
 		    new_crtc_state->connector_mask, false);
 		if (ret != 0) {
 			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
@@ -1335,7 +1344,7 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		 * touching the head cursor context.
 		 */
 		nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
-		err = nvkm_kms_crtc_atom_route(&atom,
+		err = nvkm_kms_crtc_atom_route(&atom, NULL,
 		    crtc_state->connector_mask, false);
 		if (err != 0) {
 			nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
@@ -1373,8 +1382,8 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		return;
 
 	nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
-	err = nvkm_kms_crtc_atom_route(&atom, crtc_state->connector_mask,
-	    false);
+	err = nvkm_kms_crtc_atom_route(&atom, NULL,
+	    crtc_state->connector_mask, false);
 	if (err != 0) {
 		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 		    "plane route");
@@ -1722,8 +1731,8 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		return;
 
 	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-	err = nvkm_kms_crtc_atom_route(&atom, crtc->state->connector_mask,
-	    false);
+	err = nvkm_kms_crtc_atom_route(&atom, NULL,
+	    crtc->state->connector_mask, false);
 	if (err != 0) {
 		nvkm_kms_record_result(sc, nc->head, nc->win, err,
 		    "crtc route");
