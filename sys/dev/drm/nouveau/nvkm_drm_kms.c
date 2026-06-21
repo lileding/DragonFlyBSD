@@ -2712,6 +2712,8 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	dev->mode_config.max_height = 8192;
 	dev->mode_config.cursor_width = 256;
 	dev->mode_config.cursor_height = 256;
+	dev->mode_config.preferred_depth = 24;
+	dev->mode_config.quirk_addfb_prefer_xbgr_30bpp = true;
 	dev->mode_config.allow_fb_modifiers = true;
 	dev->mode_config.funcs = &nvkm_mode_config_funcs;
 	dev->mode_config.helper_private = &nvkm_mode_config_helper_funcs;
