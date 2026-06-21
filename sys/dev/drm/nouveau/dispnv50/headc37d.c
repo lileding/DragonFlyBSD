@@ -28,6 +28,19 @@
 #include <nvhw/class/clc37d.h>
 
 static int
+headc37d_window_count(struct nv50_head *head)
+{
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	if (head != NULL && head->disp != NULL && head->disp->core != NULL &&
+	    head->disp->core->dfly_window_count != 0)
+		return head->disp->core->dfly_window_count;
+#else
+	(void)head;
+#endif
+	return 8;
+}
+
+static int
 headc37d_or(struct nv50_head *head, struct nv50_head_atom *asyh)
 {
 	struct nvif_push *push = &nv50_disp(head->base.base.dev)->core->chan.push;
@@ -274,10 +287,15 @@ headc37d_view(struct nv50_head *head, struct nv50_head_atom *asyh)
 void
 headc37d_static_wndw_map(struct nv50_head *head, struct nv50_head_atom *asyh)
 {
-	int i, end;
+	int i, end, windows;
 
+	if (head == NULL || asyh == NULL)
+		return;
+
+	windows = headc37d_window_count(head);
 	for (i = head->base.index * 2, end = i + 2; i < end; i++)
-		asyh->wndw.owned |= BIT(i);
+		if (i < windows)
+			asyh->wndw.owned |= BIT(i);
 }
 
 const struct nv50_head_func

@@ -30,13 +30,31 @@
 
 #include <nouveau_bo.h>
 
+static u32
+corec37d_window_count(struct nv50_core *core)
+{
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	if (core != NULL && core->dfly_window_count != 0)
+		return core->dfly_window_count;
+#else
+	(void)core;
+#endif
+	return 8;
+}
+
 int
 corec37d_wndw_owner(struct nv50_core *core)
 {
-	struct nvif_push *push = &core->chan.push;
-	const u32 windows = 8; /*XXX*/
-	int ret, i;
+	struct nvif_push *push;
+	u32 windows;
+	u32 i;
+	int ret;
 
+	if (core == NULL)
+		return -EINVAL;
+
+	push = &core->chan.push;
+	windows = corec37d_window_count(core);
 	if ((ret = PUSH_WAIT(push, windows * 2)))
 		return ret;
 
@@ -138,10 +156,16 @@ int corec37d_caps_init(struct nouveau_drm *drm, struct nv50_disp *disp)
 static int
 corec37d_init(struct nv50_core *core)
 {
-	struct nvif_push *push = &core->chan.push;
-	const u32 windows = 8; /*XXX*/
-	int ret, i;
+	struct nvif_push *push;
+	u32 windows;
+	u32 i;
+	int ret;
 
+	if (core == NULL)
+		return -EINVAL;
+
+	push = &core->chan.push;
+	windows = corec37d_window_count(core);
 	if ((ret = PUSH_WAIT(push, 2 + windows * 5)))
 		return ret;
 

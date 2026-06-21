@@ -2191,6 +2191,9 @@ core507d_new_(const struct nv50_core_func *func, struct nouveau_drm *drm,
 
 	core->func = func;
 	core->disp = disp;
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	core->dfly_window_count = nvkm_dispnv50_window_capacity(disp->dfly_sc);
+#endif
 
 	syncbuf = disp->sync != NULL ? (s64)disp->sync->offset : -1;
 	ret = nv50_dmac_create(drm, &oclass, 0, NULL, 0, syncbuf,
