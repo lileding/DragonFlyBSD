@@ -703,6 +703,7 @@ struct nvkm_softc {
 	uint64_t		kms_page_flip_error_count;
 	uint64_t		kms_atomic_commit_tail_count;
 	uint64_t		kms_atomic_vblank_wait_count;
+	uint64_t		kms_atomic_flip_done_wait_count;
 	uint64_t		kms_plane_update_count;
 	uint64_t		kms_plane_disable_count;
 	uint64_t		kms_prepare_fb_count;
