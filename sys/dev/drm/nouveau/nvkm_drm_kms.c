@@ -215,8 +215,9 @@ nvkm_encoder_type_from_info(const struct nvkm_gsp_disp_output_info *info)
 		return (DRM_MODE_ENCODER_VIRTUAL);
 	case DCB_OUTPUT_TMDS:
 	case DCB_OUTPUT_DP:
-	default:
 		return (DRM_MODE_ENCODER_TMDS);
+	default:
+		return (DRM_MODE_ENCODER_NONE);
 	}
 }
 
@@ -2509,12 +2510,14 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		}
 		nc->sc = sc;
 		nc->display_id = display_id;
-		if (nvkm_gsp_disp_output_info(sc, display_id, &info) != 0) {
-			memset(&info, 0, sizeof(info));
-			info.display_id = display_id;
-			info.heads = crtc_mask;
-			info.output_type = DCB_OUTPUT_TMDS;
-			info.connector_type = DCB_CONNECTOR_HDMI_1;
+		ret = nvkm_gsp_disp_output_info(sc, display_id, &info);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: missing output info err=%d\n",
+			    display_id, ret);
+			kfree(nc);
+			kfree(enc);
+			continue;
 		}
 		connector_type = nvkm_connector_type_from_info(&info);
 		encoder_type = nvkm_encoder_type_from_info(&info);
