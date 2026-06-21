@@ -4019,6 +4019,9 @@ nvkm_dispnv50_dp_retrain_current(struct nvkm_softc *sc, uint32_t display_id,
 	return nvkm_dispnv50_dp_link_check(sc, display_id, link_ok);
 }
 
+static void nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *,
+    uint32_t);
+
 void
 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
     struct nvkm_dispnv50_output_prepare *prepare)
@@ -4031,8 +4034,11 @@ nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 	if (prepare->valid && prepare->acquired && !prepare->consumed) {
 		outp = nvkm_dispnv50_find_outp(sc, prepare->display_id);
 		if (outp != NULL && outp->ior != NULL && outp->func != NULL &&
-		    outp->func->release != NULL)
+		    outp->func->release != NULL) {
+			nvkm_dispnv50_output_disable_sideband(outp,
+			    prepare->head);
 			outp->func->release(outp);
+		}
 	}
 
 	memset(prepare, 0, sizeof(*prepare));
@@ -4215,16 +4221,17 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
  * Ownership:
  *   Borrows outp and its currently assigned IOR for this disable operation.
  *   The caller still owns the route and is responsible for clearing SOR
- *   ownership and releasing outp after this helper returns.
+ *   ownership, when required, and releasing outp after this helper returns.
  *
  * Lifetime:
  *   No pointer is retained. This helper must run before outp->func->release(),
- *   while outp->ior and outp->ior->asy.outp still describe the active route.
+ *   while outp->ior and outp->ior->asy.outp still describe the active route
+ *   or the prepared route being rolled back.
  *
  * Threading:
- *   Called from the atomic commit disable path under DRM modeset
- *   serialization. It may issue GSP/RM controls and must not run from
- *   interrupt context.
+ *   Called from atomic commit disable and prepared-route rollback paths under
+ *   DRM modeset serialization. It may issue GSP/RM controls and must not run
+ *   from interrupt context.
  */
 static void
 nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *outp, uint32_t head)
