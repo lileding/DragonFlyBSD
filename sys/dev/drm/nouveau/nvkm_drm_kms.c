@@ -616,6 +616,8 @@ static int nvkm_atomic_check(struct drm_device *dev,
 static int nvkm_atomic_commit(struct drm_device *dev,
     struct drm_atomic_state *state, bool nonblock);
 static void nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state);
+static void nvkm_drm_kms_link_status_bad_schedule(struct nvkm_softc *sc,
+    uint32_t display_id);
 static struct drm_atomic_state *nvkm_atomic_state_alloc(struct drm_device *dev);
 static void nvkm_atomic_state_clear(struct drm_atomic_state *state);
 static void nvkm_atomic_state_free(struct drm_atomic_state *state);
@@ -1726,6 +1728,7 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct nvkm_kms_crtc_atom atom;
 	struct nvkm_dispnv50_output_prepare *route;
 	uint32_t display_id = 0;
+	uint8_t output_type = 0;
 	int err;
 
 	if (sc->disp == NULL)
@@ -1735,23 +1738,27 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	    nvkm_atomic_prepared_route(old_state->state, nc->head) : NULL;
 	if (route != NULL && route->valid) {
 		display_id = route->display_id;
+		output_type = route->output_type;
 		err = nvkm_dispnv50_atomic_enable_prepared(sc, crtc, nc->win,
 		    route);
 	} else {
 		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
 		err = nvkm_kms_crtc_atom_route(&atom, NULL,
-		    crtc->state->connector_mask, false);
+		    crtc->state->connector_mask, true);
 		if (err != 0) {
 			nvkm_kms_record_result(sc, nc->head, nc->win, err,
 			    "crtc route");
 			return;
 		}
 		display_id = atom.display_id;
+		output_type = atom.output.output_type;
 		err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 		    atom.display_id, &atom.head);
 	}
 
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
+	if (err != 0 && output_type == DCB_OUTPUT_DP)
+		nvkm_drm_kms_link_status_bad_schedule(sc, display_id);
 	if (err == 0 && crtc->cursor != NULL && crtc->cursor->state != NULL &&
 	    crtc->cursor->state->visible && crtc->cursor->state->fb != NULL) {
 		int cursor_err;
@@ -1936,6 +1943,56 @@ nvkm_drm_kms_has_master(struct drm_device *dev)
 	return (has_master);
 }
 
+/*
+ * Publish a failed DP link through the standard KMS link-status property.
+ *
+ * Ownership:
+ *   Borrows sc, dev, and the connector list for this task invocation. DRM owns
+ *   the connector states; this helper only updates their standard link-status
+ *   scalar through the DRM connector API.
+ *
+ * Lifetime:
+ *   Runs from the KMS HPD task after atomic_enable queued the display mask.
+ *   KMS teardown cancels and drains this same task before releasing connector
+ *   objects, so no connector pointer escapes this call.
+ *
+ * Threading:
+ *   Must run in process context with no modeset locks held. This matches
+ *   drm_kms_helper_hotplug_event() and avoids calling it from atomic_enable(),
+ *   where blocking commits may still hold modeset locks.
+ */
+static void
+nvkm_drm_kms_link_status_bad_task(struct nvkm_softc *sc,
+    struct drm_device *dev, uint32_t link_bad_mask)
+{
+	struct drm_connector *conn;
+	bool changed = false;
+
+	if (sc == NULL || dev == NULL || link_bad_mask == 0)
+		return;
+
+	list_for_each_entry(conn, &dev->mode_config.connector_list, head) {
+		struct nvkm_drm_connector *nvkm_conn = to_nvkm_connector(conn);
+
+		if ((link_bad_mask & nvkm_conn->display_id) == 0)
+			continue;
+
+		drm_connector_set_link_status_property(conn,
+		    DRM_LINK_STATUS_BAD);
+		changed = true;
+		nvkm_infof(sc->dev,
+		    "drm: connector %s display=0x%x link-status=Bad\n",
+		    conn->name, nvkm_conn->display_id);
+	}
+
+	if (!changed)
+		return;
+
+	sc->kms_link_status_bad_count++;
+	sc->kms_hotplug_count++;
+	drm_kms_helper_hotplug_event(dev);
+}
+
 static void
 nvkm_drm_kms_hpd_task(void *arg, int pending)
 {
@@ -1943,6 +2000,7 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 	struct drm_device *dev;
 	uint32_t plug_mask;
 	uint32_t unplug_mask;
+	uint32_t link_bad_mask;
 	bool changed;
 	int ret;
 
@@ -1954,11 +2012,16 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 	spin_lock(&sc->kms_hpd_lock);
 	plug_mask = sc->kms_hpd_pending_plug_mask;
 	unplug_mask = sc->kms_hpd_pending_unplug_mask;
+	link_bad_mask = sc->kms_hpd_pending_link_bad_mask;
 	sc->kms_hpd_pending_plug_mask = 0;
 	sc->kms_hpd_pending_unplug_mask = 0;
+	sc->kms_hpd_pending_link_bad_mask = 0;
 	sc->kms_hpd_last_plug_mask = plug_mask;
 	sc->kms_hpd_last_unplug_mask = unplug_mask;
+	sc->kms_hpd_last_link_bad_mask = link_bad_mask;
 	spin_unlock(&sc->kms_hpd_lock);
+
+	nvkm_drm_kms_link_status_bad_task(sc, dev, link_bad_mask);
 
 	if ((plug_mask | unplug_mask) == 0)
 		return;
@@ -1993,6 +2056,25 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 		    "drm: HPD auto KMS enqueue failed plug=0x%08x "
 		    "unplug=0x%08x err=%d\n", plug_mask, unplug_mask, ret);
 	}
+}
+
+static void
+nvkm_drm_kms_link_status_bad_schedule(struct nvkm_softc *sc,
+    uint32_t display_id)
+{
+	int ret;
+
+	if (sc == NULL || sc->drm_dev == NULL ||
+	    !sc->kms_hpd_task_initialized || display_id == 0)
+		return;
+
+	spin_lock(&sc->kms_hpd_lock);
+	sc->kms_hpd_pending_link_bad_mask |= display_id;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	ret = taskqueue_enqueue(taskqueue_thread[0], &sc->kms_hpd_task);
+	if (ret != 0)
+		sc->kms_hotplug_enqueue_error_count++;
 }
 
 void
