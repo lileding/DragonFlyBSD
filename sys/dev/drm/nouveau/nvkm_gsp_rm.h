@@ -251,18 +251,22 @@ struct nvkm_dispnv50_head_config {
  * Prepared output route consumed by a single KMS atomic commit.
  *
  * Ownership:
- *   The KMS CRTC wrapper owns this storage.  The bridge fills scalar snapshots
+ *   The KMS atomic state owns this storage.  The bridge fills scalar snapshots
  *   only; no nvkm_outp, nvkm_ior, DRM connector, CRTC, or framebuffer pointer
- *   is stored here.
+ *   is stored here.  Any SOR/IOR acquired while preparing the route is released
+ *   by abort unless the matching commit consumes it.
  *
  * Lifetime:
  *   Valid only between nvkm_dispnv50_output_prepare() and the matching
- *   atomic_enable callback in the same commit.  The KMS commit tail must abort
- *   or clear it before the atomic state is released.
+ *   atomic_enable callback in the same commit.  The refcounted atomic state
+ *   keeps it alive across nonblocking commit_work, and atomic_state_clear must
+ *   abort or clear it before the atomic state is released.
  *
  * Threading:
- *   Access is serialized by DRM modeset locks and the atomic commit sequence.
- *   It must not be shared with IRQ, HPD, or async cursor paths.
+ *   Writers run before swap_state while DRM modeset locks are held.  After
+ *   swap_state, only the commit worker owning the atomic-state reference may
+ *   consume or clear it.  It must not be shared with IRQ, HPD, or async cursor
+ *   paths.
  */
 struct nvkm_dispnv50_output_prepare {
 	bool valid;
