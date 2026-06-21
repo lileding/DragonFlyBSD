@@ -612,6 +612,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_dp_irq_link_good_count);
 	sbuf_printf(sb, "dp_irq_link_bad_count = %llu\n",
 	    (unsigned long long)sc->kms_dp_irq_link_bad_count);
+	sbuf_printf(sb, "dp_irq_retrain_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_irq_retrain_count);
+	sbuf_printf(sb, "dp_irq_retrain_ok_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_irq_retrain_ok_count);
+	sbuf_printf(sb, "dp_irq_retrain_fail_count = %llu\n",
+	    (unsigned long long)sc->kms_dp_irq_retrain_fail_count);
 	sbuf_printf(sb, "dp_irq_error_count = %llu\n",
 	    (unsigned long long)sc->kms_dp_irq_error_count);
 	sbuf_printf(sb, "hpd_last_plug_mask = 0x%08x\n",

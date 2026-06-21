@@ -26,6 +26,7 @@
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper.h>	/* drm_helper_mode_fill_fb_struct */
+#include <drm/drm_modeset_lock.h>
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_property.h>
 #include <drm/drm_rect.h>
@@ -2074,6 +2075,43 @@ nvkm_drm_kms_link_status_bad_task(struct nvkm_softc *sc,
 	drm_kms_helper_hotplug_event(dev);
 }
 
+/*
+ * Retry a live DP link after an HPD IRQ reports failed channel EQ.
+ *
+ * Ownership:
+ *   Borrows sc, dev, and the current display route for this HPD task
+ *   invocation. The bridge owns the nvkm_outp/IOR objects and the saved DP
+ *   link-training parameters; this helper only asks it to retrain the current
+ *   active route and returns a scalar link_ok result to the caller.
+ *
+ * Lifetime:
+ *   No connector, output, IOR, AUX, or DRM state pointer escapes this call.
+ *   KMS teardown unregisters DP IRQ notifications before draining HPD work, so
+ *   no new recovery task can race connector destruction.
+ *
+ * Threading:
+ *   Runs in process context from the HPD task. It takes all DRM modeset locks
+ *   to serialize runtime retraining against atomic commits, then drops them
+ *   before the caller can publish link-status=Bad or send hotplug events.
+ */
+static int
+nvkm_drm_kms_dp_retrain_task(struct nvkm_softc *sc, struct drm_device *dev,
+    uint32_t display_id, bool *link_ok)
+{
+	int ret;
+
+	if (link_ok == NULL)
+		return (-EINVAL);
+	*link_ok = false;
+	if (sc == NULL || dev == NULL || display_id == 0)
+		return (-ENODEV);
+
+	drm_modeset_lock_all(dev);
+	ret = nvkm_dispnv50_dp_retrain_current(sc, display_id, link_ok);
+	drm_modeset_unlock_all(dev);
+	return (ret);
+}
+
 static uint32_t
 nvkm_drm_kms_dp_irq_task(struct nvkm_softc *sc, struct drm_device *dev,
     uint32_t dp_irq_mask)
@@ -2106,10 +2144,31 @@ nvkm_drm_kms_dp_irq_task(struct nvkm_softc *sc, struct drm_device *dev,
 		}
 		if (!link_ok) {
 			sc->kms_dp_irq_link_bad_count++;
+			sc->kms_dp_irq_retrain_count++;
+			ret = nvkm_drm_kms_dp_retrain_task(sc, dev,
+			    nvkm_conn->display_id, &link_ok);
+			if (ret == 0 && link_ok) {
+				sc->kms_dp_irq_retrain_ok_count++;
+				nvkm_infof(sc->dev,
+				    "drm: connector %s display=0x%x DP IRQ"
+				    " retrain restored link\n", conn->name,
+				    nvkm_conn->display_id);
+				continue;
+			}
+
+			sc->kms_dp_irq_retrain_fail_count++;
 			link_bad_mask |= nvkm_conn->display_id;
-			nvkm_infof(sc->dev,
-			    "drm: connector %s display=0x%x DP IRQ link bad\n",
-			    conn->name, nvkm_conn->display_id);
+			if (ret != 0) {
+				nvkm_infof(sc->dev,
+				    "drm: connector %s display=0x%x DP IRQ"
+				    " retrain failed err=%d\n", conn->name,
+				    nvkm_conn->display_id, ret);
+			} else {
+				nvkm_infof(sc->dev,
+				    "drm: connector %s display=0x%x DP IRQ"
+				    " link still bad after retrain\n",
+				    conn->name, nvkm_conn->display_id);
+			}
 			continue;
 		}
 
