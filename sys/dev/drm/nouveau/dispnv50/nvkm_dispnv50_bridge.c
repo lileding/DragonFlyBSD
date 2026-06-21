@@ -129,6 +129,14 @@ struct nvkm_dispnv50_audit_snapshot {
 	u64 modifier;
 	u8 kind;
 	bool user;
+	int32_t crtc_x;
+	int32_t crtc_y;
+	u32 crtc_w;
+	u32 crtc_h;
+	u32 src_x;
+	u32 src_y;
+	u32 src_w;
+	u32 src_h;
 };
 
 struct nvkm_dispnv50_cursor_audit {
@@ -168,6 +176,14 @@ struct nvkm_dispnv50_state {
 	u32 scanout_format;
 	u64 scanout_modifier;
 	u8 scanout_kind;
+	int32_t window_crtc_x;
+	int32_t window_crtc_y;
+	u32 window_crtc_w;
+	u32 window_crtc_h;
+	u32 window_src_x;
+	u32 window_src_y;
+	u32 window_src_w;
+	u32 window_src_h;
 	struct fb_info console_fb;
 	void *console_shadow;
 	void *console_snapshot;
@@ -444,6 +460,14 @@ nvkm_dispnv50_audit_capture(struct nvkm_dispnv50_state *state,
 	snap->modifier = state->scanout_modifier;
 	snap->kind = state->scanout_kind;
 	snap->user = state->scanout_user;
+	snap->crtc_x = state->window_crtc_x;
+	snap->crtc_y = state->window_crtc_y;
+	snap->crtc_w = state->window_crtc_w;
+	snap->crtc_h = state->window_crtc_h;
+	snap->src_x = state->window_src_x;
+	snap->src_y = state->window_src_y;
+	snap->src_w = state->window_src_w;
+	snap->src_h = state->window_src_h;
 }
 
 static int
@@ -614,6 +638,11 @@ nvkm_dispnv50_debug_audit_snapshot_sbuf(struct sbuf *sb, const char *name,
 	    (unsigned long long)snap->modifier);
 	sbuf_printf(sb, "%s_scanout_kind = 0x%02x\n", name, snap->kind);
 	sbuf_printf(sb, "%s_scanout_user = %d\n", name, snap->user);
+	sbuf_printf(sb, "%s_crtc_rect = %d,%d %ux%u\n", name,
+	    snap->crtc_x, snap->crtc_y, snap->crtc_w, snap->crtc_h);
+	sbuf_printf(sb, "%s_source_rect = %u,%u %ux%u\n", name,
+	    snap->src_x >> 16, snap->src_y >> 16, snap->src_w >> 16,
+	    snap->src_h >> 16);
 }
 
 static void
@@ -898,6 +927,12 @@ nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
 	sbuf_printf(sb, "scanout_kind = 0x%02x\n", state->scanout_kind);
 	sbuf_printf(sb, "scanout_blocklinear = %d\n",
 	    nvkm_dispnv50_modifier_is_blocklinear(state->scanout_modifier));
+	sbuf_printf(sb, "scanout_source_rect = %u,%u %ux%u\n",
+	    state->window_src_x >> 16, state->window_src_y >> 16,
+	    state->window_src_w >> 16, state->window_src_h >> 16);
+	sbuf_printf(sb, "scanout_crtc_rect = %d,%d %ux%u\n",
+	    state->window_crtc_x, state->window_crtc_y,
+	    state->window_crtc_w, state->window_crtc_h);
 	sbuf_printf(sb, "console_registered = %d\n", state->console_fb_registered);
 	sbuf_printf(sb, "console_direct_map = %d\n", state->console_direct_map);
 	sbuf_printf(sb, "console_flush_active = %d\n", state->console_flush_active);
@@ -2573,6 +2608,14 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 		state->scanout_format = DRM_FORMAT_XRGB8888;
 		state->scanout_modifier = DRM_FORMAT_MOD_LINEAR;
 		state->scanout_kind = NVKM_DISPNV50_SCANOUT_KIND;
+		state->window_crtc_x = 0;
+		state->window_crtc_y = 0;
+		state->window_crtc_w = width;
+		state->window_crtc_h = height;
+		state->window_src_x = 0;
+		state->window_src_y = 0;
+		state->window_src_w = width << 16;
+		state->window_src_h = height << 16;
 		state->scanout_user = false;
 		return 0;
 	}
@@ -2604,6 +2647,14 @@ nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
 	state->scanout_format = DRM_FORMAT_XRGB8888;
 	state->scanout_modifier = DRM_FORMAT_MOD_LINEAR;
 	state->scanout_kind = NVKM_DISPNV50_SCANOUT_KIND;
+	state->window_crtc_x = 0;
+	state->window_crtc_y = 0;
+	state->window_crtc_w = width;
+	state->window_crtc_h = height;
+	state->window_src_x = 0;
+	state->window_src_y = 0;
+	state->window_src_w = width << 16;
+	state->window_src_h = height << 16;
 	state->scanout_user = false;
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 scanout staged %ux%u pitch=%u vram=0x%llx "
@@ -2621,6 +2672,7 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 {
 	struct drm_framebuffer *fb;
 	struct drm_gem_object *obj;
+	struct drm_plane_state *pstate;
 	struct nvkm_bo *bo;
 	u64 min_size;
 	u32 cpp;
@@ -2628,7 +2680,8 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	(void)sc;
 	if (crtc->primary == NULL || crtc->primary->state == NULL)
 		return (ENOENT);
-	fb = crtc->primary->state->fb;
+	pstate = crtc->primary->state;
+	fb = pstate->fb;
 	if (fb == NULL || fb->obj[0] == NULL || fb->format == NULL)
 		return (ENOENT);
 
@@ -2662,12 +2715,25 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	    nvkm_dispnv50_modifier_is_blocklinear(fb->modifier) ?
 	    nvkm_dispnv50_modifier_kind(fb->modifier) :
 	    NVKM_DISPNV50_SCANOUT_KIND;
+	state->window_crtc_x = pstate->crtc_x;
+	state->window_crtc_y = pstate->crtc_y;
+	state->window_crtc_w = pstate->crtc_w;
+	state->window_crtc_h = pstate->crtc_h;
+	state->window_src_x = pstate->src_x;
+	state->window_src_y = pstate->src_y;
+	state->window_src_w = pstate->src_w;
+	state->window_src_h = pstate->src_h;
 	state->scanout_user = true;
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 user scanout %ux%u pitch=%u format=0x%08x "
-	    "modifier=0x%016llx kind=0x%02x vram=0x%llx bo=%p\n",
-	    state->scanout_width, state->scanout_height, state->scanout_pitch,
-	    state->scanout_format,
+	    "drm: dispnv50 user scanout %ux%u src=%u,%u %ux%u "
+	    "dst=%d,%d %ux%u pitch=%u format=0x%08x modifier=0x%016llx "
+	    "kind=0x%02x vram=0x%llx bo=%p\n",
+	    state->scanout_width, state->scanout_height,
+	    state->window_src_x >> 16, state->window_src_y >> 16,
+	    state->window_src_w >> 16, state->window_src_h >> 16,
+	    state->window_crtc_x, state->window_crtc_y,
+	    state->window_crtc_w, state->window_crtc_h,
+	    state->scanout_pitch, state->scanout_format,
 	    (unsigned long long)state->scanout_modifier, state->scanout_kind,
 	    (unsigned long long)state->scanout_offset,
 	    bo);
@@ -2702,6 +2768,48 @@ nvkm_dispnv50_wndw_format(u32 format)
 	}
 }
 
+/*
+ * Ownership:
+ *   Borrows the nvkm-owned scalar scanout/window snapshot.
+ * Lifetime:
+ *   No DRM object, BO, or display pointer is retained after return.
+ * Threading:
+ *   Pure validation from serialized KMS commit paths. No locks, GSP RPCs, or
+ *   hardware programming.
+ */
+static int
+nvkm_dispnv50_window_source_validate(const struct nvkm_dispnv50_state *state)
+{
+	u32 src_x;
+	u32 src_y;
+	u32 src_w;
+	u32 src_h;
+
+	if (state == NULL || state->scanout_width == 0 ||
+	    state->scanout_height == 0 || state->window_crtc_w == 0 ||
+	    state->window_crtc_h == 0)
+		return (EINVAL);
+	if ((state->window_src_x & 0xffffu) != 0 ||
+	    (state->window_src_y & 0xffffu) != 0 ||
+	    (state->window_src_w & 0xffffu) != 0 ||
+	    (state->window_src_h & 0xffffu) != 0)
+		return (EINVAL);
+
+	src_x = state->window_src_x >> 16;
+	src_y = state->window_src_y >> 16;
+	src_w = state->window_src_w >> 16;
+	src_h = state->window_src_h >> 16;
+	if (src_w == 0 || src_h == 0)
+		return (EINVAL);
+	if (src_w != state->window_crtc_w || src_h != state->window_crtc_h)
+		return (EINVAL);
+	if (src_x > state->scanout_width || src_y > state->scanout_height ||
+	    src_w > state->scanout_width - src_x ||
+	    src_h > state->scanout_height - src_y)
+		return (EINVAL);
+	return (0);
+}
+
 static int
 nvkm_dispnv50_select_scanout(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
@@ -2724,7 +2832,7 @@ nvkm_dispnv50_select_scanout(struct nvkm_softc *sc,
 		return ret;
 	if (nvkm_dispnv50_wndw_format(state->scanout_format) == 0)
 		return (EINVAL);
-	return 0;
+	return (nvkm_dispnv50_window_source_validate(state));
 }
 
 static u16
@@ -2976,14 +3084,14 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 
 	memset(asyw, 0, sizeof(*asyw));
 	asyw->state.crtc = crtc;
-	asyw->state.crtc_x = 0;
-	asyw->state.crtc_y = 0;
-	asyw->state.crtc_w = width;
-	asyw->state.crtc_h = height;
-	asyw->state.src_x = 0;
-	asyw->state.src_y = 0;
-	asyw->state.src_w = width << 16;
-	asyw->state.src_h = height << 16;
+	asyw->state.crtc_x = state->window_crtc_x;
+	asyw->state.crtc_y = state->window_crtc_y;
+	asyw->state.crtc_w = state->window_crtc_w;
+	asyw->state.crtc_h = state->window_crtc_h;
+	asyw->state.src_x = state->window_src_x;
+	asyw->state.src_y = state->window_src_y;
+	asyw->state.src_w = state->window_src_w;
+	asyw->state.src_h = state->window_src_h;
 
 	asyw->image.interval = 1;
 	asyw->image.mode = NVC57E_SET_PRESENT_CONTROL_BEGIN_MODE_NON_TEARING;
@@ -3390,10 +3498,15 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 %s armed win=%d scanout=0x%llx offset=0x%llx "
-	    "user=%d\n", reason, wndw->id,
+	    "src=%u,%u %ux%u dst=%d,%d %ux%u user=%d\n", reason, wndw->id,
 	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
 	    nvkm_memory_addr(state->scanout)),
-	    (unsigned long long)state->scanout_offset, state->scanout_user);
+	    (unsigned long long)state->scanout_offset,
+	    state->window_src_x >> 16, state->window_src_y >> 16,
+	    state->window_src_w >> 16, state->window_src_h >> 16,
+	    state->window_crtc_x, state->window_crtc_y,
+	    state->window_crtc_w, state->window_crtc_h,
+	    state->scanout_user);
 	if (!state->scanout_user) {
 		ret = nvkm_dispnv50_console_register(sc, state);
 		if (ret != 0)
@@ -5012,11 +5125,16 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
-	    "scanout=0x%llx offset=0x%llx\n",
+	    "scanout=0x%llx offset=0x%llx src=%u,%u %ux%u "
+	    "dst=%d,%d %ux%u\n",
 	    head, win, display_id,
 	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
 	    nvkm_memory_addr(state->scanout)),
-	    (unsigned long long)state->scanout_offset);
+	    (unsigned long long)state->scanout_offset,
+	    state->window_src_x >> 16, state->window_src_y >> 16,
+	    state->window_src_w >> 16, state->window_src_h >> 16,
+	    state->window_crtc_x, state->window_crtc_y,
+	    state->window_crtc_w, state->window_crtc_h);
 	return 0;
 
 fail:
