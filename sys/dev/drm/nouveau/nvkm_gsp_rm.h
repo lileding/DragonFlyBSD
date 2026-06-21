@@ -231,8 +231,8 @@ enum nvkm_dispnv50_dither_depth {
  *
  * Lifetime:
  *   Valid for one display programming callback. Prepared output routes store
- *   their own HDMI snapshot; other head fields are copied from the live atomic
- *   state at commit time.
+ *   their own full head-config snapshot, so commit consume never needs to read
+ *   DRM connector state again.
  *
  * Threading:
  *   Produced while DRM atomic locks protect the connector/CRTC state and
@@ -279,7 +279,7 @@ struct nvkm_dispnv50_output_prepare {
 	int ior_id;
 	uint8_t ior_link;
 	uint32_t sor_proto;
-	struct nvkm_dispnv50_hdmi_info hdmi;
+	struct nvkm_dispnv50_head_config config;
 	uint8_t dp_dpcd[NVKM_DISPNV50_DP_DPCD_SIZE];
 	uint32_t dp_max_rate;
 	uint32_t dp_min_rate;
@@ -291,7 +291,8 @@ struct drm_crtc;
 struct drm_display_mode;
 int	 nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	     struct drm_display_mode *mode, uint32_t head,
-	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi,
+	     uint32_t display_id,
+	     const struct nvkm_dispnv50_head_config *config,
 	     struct nvkm_dispnv50_output_prepare *prepare);
 void	 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 	     struct nvkm_dispnv50_output_prepare *prepare);
@@ -301,8 +302,7 @@ int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     const struct nvkm_dispnv50_head_config *config);
 int	 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win,
-	     struct nvkm_dispnv50_output_prepare *prepare,
-	     const struct nvkm_dispnv50_head_config *config);
+	     struct nvkm_dispnv50_output_prepare *prepare);
 /*
  * Ownership:
  *   Borrows sc and the scalar display_id selected by KMS. The bridge owns no

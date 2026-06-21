@@ -3877,12 +3877,15 @@ nvkm_dispnv50_dp_enable_limits(struct nvkm_softc *sc, struct nvkm_outp *outp,
 
 static int
 nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
-    struct drm_display_mode *mode, struct nvkm_dispnv50_output_prepare *prepare)
+    struct drm_display_mode *mode, uint8_t bpc,
+    struct nvkm_dispnv50_output_prepare *prepare)
 {
 	int ret;
 
 	if (outp == NULL || prepare == NULL)
 		return -ENODEV;
+	if (bpc == 0)
+		bpc = 8;
 
 	ret = nvkm_dispnv50_dp_aux_read(outp, DP_DPCD_REV, outp->dp.dpcd,
 	    DP_RECEIVER_CAP_SIZE);
@@ -3893,7 +3896,7 @@ nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	    MIN((size_t)NVKM_DISPNV50_DP_DPCD_SIZE,
 	    (size_t)DP_RECEIVER_CAP_SIZE));
 
-	ret = nvkm_dispnv50_dp_link_limits(outp, mode, 8,
+	ret = nvkm_dispnv50_dp_link_limits(outp, mode, bpc,
 	    &prepare->dp_max_rate, &prepare->dp_max_lanes,
 	    &prepare->dp_min_rate);
 	if (ret != 0)
@@ -3914,7 +3917,7 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	int ret;
 
 	memset(&prepare, 0, sizeof(prepare));
-	ret = nvkm_dispnv50_dp_prepare(sc, outp, mode, &prepare);
+	ret = nvkm_dispnv50_dp_prepare(sc, outp, mode, 8, &prepare);
 	if (ret != 0)
 		return ret;
 
@@ -3963,7 +3966,7 @@ nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 int
 nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
     struct drm_display_mode *mode, uint32_t head, uint32_t display_id,
-    const struct nvkm_dispnv50_hdmi_info *hdmi,
+    const struct nvkm_dispnv50_head_config *config,
     struct nvkm_dispnv50_output_prepare *prepare)
 {
 	struct nvkm_dispnv50_state *state;
@@ -3991,8 +3994,11 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	prepare->head = head;
 	prepare->outp_index = outp->index;
 	prepare->output_type = outp->info.type;
-	if (hdmi != NULL)
-		prepare->hdmi = *hdmi;
+	prepare->config.bpc = 8;
+	prepare->config.dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
+	prepare->config.dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
+	if (config != NULL)
+		prepare->config = *config;
 
 	if (outp->ior == NULL) {
 		if (outp->func == NULL || outp->func->acquire == NULL) {
@@ -4037,7 +4043,8 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 			ret = -ENODEV;
 			goto fail;
 		}
-		ret = nvkm_dispnv50_dp_prepare(sc, outp, mode, prepare);
+		ret = nvkm_dispnv50_dp_prepare(sc, outp, mode,
+		    prepare->config.bpc, prepare);
 		if (ret != 0)
 			goto fail;
 		prepare->sor_proto = (outp->ior->asy.link & 1) ?
@@ -4090,7 +4097,7 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
 	switch (prepare->output_type) {
 	case DCB_OUTPUT_TMDS:
 		ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head,
-		    &prepare->hdmi);
+		    &prepare->config.hdmi);
 		if (ret != 0)
 			return ret;
 		break;
@@ -4582,7 +4589,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (route_prepare == NULL) {
 		memset(&local_prepare, 0, sizeof(local_prepare));
 		ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id,
-		    config != NULL ? &config->hdmi : NULL, &local_prepare);
+		    config, &local_prepare);
 		if (ret != 0)
 			goto fail;
 		route_prepare = &local_prepare;
@@ -4659,13 +4666,12 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 int
 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
     struct drm_crtc *crtc, uint32_t win,
-    struct nvkm_dispnv50_output_prepare *prepare,
-    const struct nvkm_dispnv50_head_config *config)
+    struct nvkm_dispnv50_output_prepare *prepare)
 {
 	if (prepare == NULL || !prepare->valid)
 		return -EINVAL;
 	return nvkm_dispnv50_atomic_enable_common(sc, crtc, prepare->head, win,
-	    prepare->display_id, config, prepare);
+	    prepare->display_id, &prepare->config, prepare);
 }
 
 static void
