@@ -1872,6 +1872,25 @@ nvkm_drm_kms_fini(struct nvkm_softc *sc)
 			taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
 		taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
 	}
+
+	/*
+	 * Ownership:
+	 *   Borrows sc->drm_dev and all mode_config objects. DRM still owns the
+	 *   CRTC/plane/connector state; this function only asks the atomic
+	 *   helper to transition them to disabled state.
+	 *
+	 * Lifetime:
+	 *   Called after drm_dev_unregister() has unpublished the device, or from
+	 *   register-error cleanup before drm_dev_put() drops the final device
+	 *   reference. No KMS task remains queued at this point.
+	 *
+	 * Threading:
+	 *   Runs from device teardown context and may sleep in atomic commit,
+	 *   fence waits, and display notifier waits.
+	 */
+	if (sc->drm_dev != NULL &&
+	    sc->drm_dev->mode_config.funcs == &nvkm_mode_config_funcs)
+		drm_atomic_helper_shutdown(sc->drm_dev);
 }
 
 int
