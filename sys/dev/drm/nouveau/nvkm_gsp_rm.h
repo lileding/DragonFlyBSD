@@ -207,10 +207,58 @@ struct nvkm_dispnv50_hdmi_info {
 	bool scdc_low_rates;
 };
 
+#define NVKM_DISPNV50_DP_DPCD_SIZE	16U
+
+/*
+ * Prepared output route consumed by a single KMS atomic commit.
+ *
+ * Ownership:
+ *   The KMS CRTC wrapper owns this storage.  The bridge fills scalar snapshots
+ *   only; no nvkm_outp, nvkm_ior, DRM connector, CRTC, or framebuffer pointer
+ *   is stored here.
+ *
+ * Lifetime:
+ *   Valid only between nvkm_dispnv50_output_prepare() and the matching
+ *   atomic_enable callback in the same commit.  The KMS commit tail must abort
+ *   or clear it before the atomic state is released.
+ *
+ * Threading:
+ *   Access is serialized by DRM modeset locks and the atomic commit sequence.
+ *   It must not be shared with IRQ, HPD, or async cursor paths.
+ */
+struct nvkm_dispnv50_output_prepare {
+	bool valid;
+	bool acquired;
+	bool consumed;
+	uint32_t display_id;
+	uint32_t head;
+	uint8_t output_type;
+	uint8_t outp_index;
+	int ior_id;
+	uint8_t ior_link;
+	uint32_t sor_proto;
+	struct nvkm_dispnv50_hdmi_info hdmi;
+	uint8_t dp_dpcd[NVKM_DISPNV50_DP_DPCD_SIZE];
+	uint32_t dp_max_rate;
+	uint32_t dp_min_rate;
+	uint8_t dp_max_lanes;
+	bool dp_enhanced_framing;
+};
+
 struct drm_crtc;
+struct drm_display_mode;
+int	 nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
+	     struct drm_display_mode *mode, uint32_t head,
+	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi,
+	     struct nvkm_dispnv50_output_prepare *prepare);
+void	 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
+	     struct nvkm_dispnv50_output_prepare *prepare);
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
 	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi);
+int	 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
+	     struct drm_crtc *crtc, uint32_t win,
+	     struct nvkm_dispnv50_output_prepare *prepare);
 /*
  * Ownership:
  *   Borrows sc and the scalar display_id selected by KMS. The bridge owns no
