@@ -421,7 +421,8 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 
 	sc->kms_atomic_commit_tail_count++;
 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
-	drm_atomic_helper_commit_planes(dev, old_state, 0);
+	drm_atomic_helper_commit_planes(dev, old_state,
+	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
 	drm_atomic_helper_fake_vblank(old_state);
 	drm_atomic_helper_commit_hw_done(old_state);
@@ -459,6 +460,56 @@ nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head, uint32_t win,
 	sc->kms_last_win = win;
 	nvkm_infof(sc->dev, "drm: %s failed head=%u win=%u err=%d\n",
 	    where, head, win, err);
+}
+
+static int
+nvkm_crtc_disable_plane(struct nvkm_crtc *nc, struct drm_plane *plane)
+{
+	int err;
+
+	if (nc == NULL || nc->sc == NULL || plane == NULL ||
+	    nc->sc->disp == NULL)
+		return (0);
+
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		nc->sc->kms_cursor_disable_count++;
+		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head);
+		if (err != 0)
+			nc->sc->kms_cursor_error_count++;
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "crtc disable cursor");
+		return (err);
+	}
+
+	if (plane != nc->base.primary)
+		return (0);
+
+	nc->sc->kms_plane_disable_count++;
+	err = nvkm_dispnv50_plane_disable(nc->sc, nc->win);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "crtc disable primary");
+	return (err);
+}
+
+static int
+nvkm_crtc_disable_planes(struct nvkm_crtc *nc,
+    const struct drm_crtc_state *old_state)
+{
+	struct drm_plane *plane;
+	int first_err = 0;
+
+	if (old_state == NULL)
+		return (0);
+
+	drm_atomic_crtc_state_for_each_plane(plane, old_state) {
+		int err;
+
+		err = nvkm_crtc_disable_plane(nc, plane);
+		if (err != 0 && first_err == 0)
+			first_err = err;
+	}
+
+	return (first_err);
 }
 
 /* ===== plane: NVC57E window validation ===== */
@@ -1020,13 +1071,17 @@ nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	uint32_t display_id;
+	int plane_err;
 	int err;
 
 	display_id = nvkm_crtc_old_display_id(crtc, old_state);
-	drm_crtc_vblank_off(crtc);
+	plane_err = nvkm_crtc_disable_planes(nc, old_state);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, plane_err,
+	    "crtc disable planes");
 	err = nvkm_dispnv50_atomic_disable(nc->sc, nc->head, display_id);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "crtc disable");
+	drm_crtc_vblank_off(crtc);
 	nvkm_infof(nc->sc->dev,
 	    "drm: crtc disable head=%u display=0x%x bridge=%d\n", nc->head,
 	    display_id, err);
