@@ -1765,11 +1765,22 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->vmm_pt_skip_clear_count);
 	sbuf_printf(sb, "pt_skip_clear_pages = %llu\n",
 	    (unsigned long long)sc->vmm_pt_skip_clear_pages);
+	sbuf_printf(sb, "pt_conflict_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pt_conflict_clear_count);
+	sbuf_printf(sb, "pt_conflict_clear_pages = %llu\n",
+	    (unsigned long long)sc->vmm_pt_conflict_clear_pages);
+	sbuf_printf(sb, "pt_final_clear_count = %llu\n",
+	    (unsigned long long)sc->vmm_pt_final_clear_count);
+	sbuf_printf(sb, "pt_final_clear_pages = %llu\n",
+	    (unsigned long long)sc->vmm_pt_final_clear_pages);
 		for (uint32_t i = 0; i < NVKM_DRM_VM_BIND_PAGE_SHIFT_COUNT; i++) {
 			if (sc->vmm_pte_leaf_write_count[i] == 0 &&
 			    sc->vmm_pte_leaf_clear_count[i] == 0 &&
 			    sc->vmm_pte_write_batch_count[i] == 0 &&
-			    sc->vmm_pte_clear_batch_count[i] == 0)
+			    sc->vmm_pte_clear_batch_count[i] == 0 &&
+			    sc->vmm_pte_skip_clear_count[i] == 0 &&
+			    sc->vmm_pte_conflict_clear_count[i] == 0 &&
+			    sc->vmm_pte_final_clear_count[i] == 0)
 				continue;
 			sbuf_printf(sb, "pte_leaf_shift[%s] write=%llu clear=%llu\n",
 			    page_shift_names[i],
@@ -1779,6 +1790,18 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 			    page_shift_names[i],
 			    (unsigned long long)sc->vmm_pte_write_batch_count[i],
 			    (unsigned long long)sc->vmm_pte_clear_batch_count[i]);
+			sbuf_printf(sb, "pte_skip_clear_shift[%s] count=%llu pages=%llu\n",
+			    page_shift_names[i],
+			    (unsigned long long)sc->vmm_pte_skip_clear_count[i],
+			    (unsigned long long)sc->vmm_pte_skip_clear_pages[i]);
+			sbuf_printf(sb, "pte_conflict_clear_shift[%s] count=%llu pages=%llu\n",
+			    page_shift_names[i],
+			    (unsigned long long)sc->vmm_pte_conflict_clear_count[i],
+			    (unsigned long long)sc->vmm_pte_conflict_clear_pages[i]);
+			sbuf_printf(sb, "pte_final_clear_shift[%s] count=%llu pages=%llu\n",
+			    page_shift_names[i],
+			    (unsigned long long)sc->vmm_pte_final_clear_count[i],
+			    (unsigned long long)sc->vmm_pte_final_clear_pages[i]);
 		}
 	sbuf_printf(sb, "user_pd0_count = %u\n", vmm_pd0_count);
 	sbuf_printf(sb, "user_pt_count = %u\n", vmm_pt_count);
