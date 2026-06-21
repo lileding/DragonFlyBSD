@@ -27,6 +27,7 @@
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_fourcc.h>
+#include <engine/disp/conn.h>
 #include <engine/disp/outp.h>
 #include <engine/disp/ior.h>
 #include <nouveau_bo.h>
@@ -67,6 +68,52 @@
 	(NVKM_DISPNV50_ILUT_TOTAL_ENTRIES * 8U)
 #define NVKM_DISPNV50_CONSOLE_FLUSH_HZ	25U
 
+enum nvkm_dispnv50_audit_op {
+	NVKM_DISPNV50_AUDIT_NONE = 0,
+	NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
+	NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
+	NVKM_DISPNV50_AUDIT_PLANE_DISABLE,
+};
+
+/*
+ * Snapshot of the bridge state visible to dev.drm.0.state.
+ *
+ * Ownership:
+ *   The parent nvkm_dispnv50_state owns these records.  They borrow no BO,
+ *   CRTC, connector, or channel references; all pointers are converted to
+ *   scalar state before publication.
+ *
+ * Lifetime:
+ *   current is the last notifier-confirmed modeset/update or disable known to
+ *   this bridge.  pending is the last async page-flip kicked to hardware; the
+ *   final latch is still proven by vblank/flip events until D7 wires display
+ *   fences as a first-class audit source.
+ *
+ * Threading:
+ *   Updated from KMS commit context and read locklessly from sysctl.  Values
+ *   are diagnostic breadcrumbs only and must not drive synchronization.
+ */
+struct nvkm_dispnv50_audit_snapshot {
+	bool valid;
+	bool async;
+	bool armed;
+	bool disabled;
+	enum nvkm_dispnv50_audit_op op;
+	u64 seq;
+	u32 head;
+	u32 win;
+	u32 display_id;
+	u64 scanout_addr;
+	u64 scanout_offset;
+	u32 width;
+	u32 height;
+	u32 pitch;
+	u32 format;
+	u64 modifier;
+	u8 kind;
+	bool user;
+};
+
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
@@ -104,6 +151,9 @@ struct nvkm_dispnv50_state {
 	u64 console_flush_count;
 	u64 console_flush_error_count;
 	bool core_ready;
+	u64 audit_seqno;
+	struct nvkm_dispnv50_audit_snapshot audit_current;
+	struct nvkm_dispnv50_audit_snapshot audit_pending;
 };
 
 static void
@@ -210,6 +260,63 @@ nvkm_dispnv50_neg_errno(int err)
 	if (err > 0)
 		return -err;
 	return err;
+}
+
+static const char *
+nvkm_dispnv50_audit_op_name(enum nvkm_dispnv50_audit_op op)
+{
+	switch (op) {
+	case NVKM_DISPNV50_AUDIT_NONE:
+		return "none";
+	case NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE:
+		return "atomic_enable";
+	case NVKM_DISPNV50_AUDIT_PLANE_UPDATE:
+		return "plane_update";
+	case NVKM_DISPNV50_AUDIT_PLANE_DISABLE:
+		return "plane_disable";
+	default:
+		return "unknown";
+	}
+}
+
+static u64
+nvkm_dispnv50_scanout_addr(struct nvkm_dispnv50_state *state)
+{
+	if (state == NULL)
+		return 0;
+	if (state->scanout_user || state->scanout == NULL)
+		return state->scanout_offset;
+	return nvkm_memory_addr(state->scanout);
+}
+
+static void
+nvkm_dispnv50_audit_capture(struct nvkm_dispnv50_state *state,
+    struct nvkm_dispnv50_audit_snapshot *snap,
+    enum nvkm_dispnv50_audit_op op, u32 head, u32 win, u32 display_id,
+    bool async, bool armed, bool disabled)
+{
+	if (state == NULL || snap == NULL)
+		return;
+
+	memset(snap, 0, sizeof(*snap));
+	snap->valid = true;
+	snap->async = async;
+	snap->armed = armed;
+	snap->disabled = disabled;
+	snap->op = op;
+	snap->seq = ++state->audit_seqno;
+	snap->head = head;
+	snap->win = win;
+	snap->display_id = display_id;
+	snap->scanout_addr = nvkm_dispnv50_scanout_addr(state);
+	snap->scanout_offset = state->scanout_offset;
+	snap->width = state->scanout_width;
+	snap->height = state->scanout_height;
+	snap->pitch = state->scanout_pitch;
+	snap->format = state->scanout_format;
+	snap->modifier = state->scanout_modifier;
+	snap->kind = state->scanout_kind;
+	snap->user = state->scanout_user;
 }
 
 static int
@@ -348,6 +455,214 @@ nvkm_dispnv50_fill_scanout(struct nvkm_softc *sc, struct nvkm_memory *memory,
 	return 0;
 }
 
+static void
+nvkm_dispnv50_debug_audit_snapshot_sbuf(struct sbuf *sb, const char *name,
+    const struct nvkm_dispnv50_audit_snapshot *snap)
+{
+	if (snap == NULL || !snap->valid) {
+		sbuf_printf(sb, "%s_valid = 0\n", name);
+		return;
+	}
+
+	sbuf_printf(sb, "%s_valid = 1\n", name);
+	sbuf_printf(sb, "%s_seq = %llu\n", name,
+	    (unsigned long long)snap->seq);
+	sbuf_printf(sb, "%s_op = %s\n", name,
+	    nvkm_dispnv50_audit_op_name(snap->op));
+	sbuf_printf(sb, "%s_head = %u\n", name, snap->head);
+	sbuf_printf(sb, "%s_win = %u\n", name, snap->win);
+	sbuf_printf(sb, "%s_display_id = 0x%08x\n", name, snap->display_id);
+	sbuf_printf(sb, "%s_async = %d\n", name, snap->async);
+	sbuf_printf(sb, "%s_armed = %d\n", name, snap->armed);
+	sbuf_printf(sb, "%s_disabled = %d\n", name, snap->disabled);
+	sbuf_printf(sb, "%s_scanout_addr = 0x%016llx\n", name,
+	    (unsigned long long)snap->scanout_addr);
+	sbuf_printf(sb, "%s_scanout_offset = 0x%016llx\n", name,
+	    (unsigned long long)snap->scanout_offset);
+	sbuf_printf(sb, "%s_scanout_size = %ux%u\n", name, snap->width,
+	    snap->height);
+	sbuf_printf(sb, "%s_scanout_pitch = %u\n", name, snap->pitch);
+	sbuf_printf(sb, "%s_scanout_format = 0x%08x\n", name, snap->format);
+	sbuf_printf(sb, "%s_scanout_modifier = 0x%016llx\n", name,
+	    (unsigned long long)snap->modifier);
+	sbuf_printf(sb, "%s_scanout_kind = 0x%02x\n", name, snap->kind);
+	sbuf_printf(sb, "%s_scanout_user = %d\n", name, snap->user);
+}
+
+static void
+nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
+    struct nvkm_dispnv50_state *state, u32 head)
+{
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *crtc_state;
+	struct drm_plane *primary;
+	struct drm_plane_state *plane_state;
+	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
+	struct nvkm_bo *bo;
+	struct nv50_head *nvhead;
+	bool head_ready;
+	bool cursor_hooks;
+
+	nvhead = head < nitems(state->head) ? &state->head[head] : NULL;
+	head_ready = nvhead != NULL && nvhead->func != NULL;
+	cursor_hooks = head_ready && nvhead->func->curs_set != NULL &&
+	    nvhead->func->curs_clr != NULL &&
+	    nvhead->func->curs_layout != NULL &&
+	    nvhead->func->curs_format != NULL;
+	crtc = (sc != NULL && head < nitems(sc->kms_crtc)) ?
+	    sc->kms_crtc[head] : NULL;
+	crtc_state = crtc != NULL ? crtc->state : NULL;
+	primary = crtc != NULL ? crtc->primary : NULL;
+	plane_state = primary != NULL ? primary->state : NULL;
+	fb = plane_state != NULL ? plane_state->fb : NULL;
+	obj = fb != NULL ? fb->obj[0] : NULL;
+	bo = obj != NULL ? to_nvkm_bo(obj) : NULL;
+
+	sbuf_printf(sb, "head[%u]_ready = %d\n", head, head_ready);
+	sbuf_printf(sb, "head[%u]_crtc = %p\n", head, crtc);
+	sbuf_printf(sb, "head[%u]_crtc_active = %d\n", head,
+	    crtc_state != NULL && crtc_state->active);
+	sbuf_printf(sb, "head[%u]_crtc_enable = %d\n", head,
+	    crtc_state != NULL && crtc_state->enable);
+	sbuf_printf(sb, "head[%u]_vblank_masked = %d\n", head,
+	    sc != NULL && (sc->gsp_disp_vblank_mask & BIT(head)) != 0);
+	sbuf_printf(sb, "head[%u]_disp_status = 0x%08x\n", head,
+	    sc != NULL && head < nitems(sc->gsp_disp_head_status) ?
+	    sc->gsp_disp_head_status[head] : 0);
+	sbuf_printf(sb, "head[%u]_cursor_hooks = %d\n", head, cursor_hooks);
+	sbuf_printf(sb, "head[%u]_cursor_plane_present = 0\n", head);
+	sbuf_printf(sb, "head[%u]_primary_plane = %p\n", head, primary);
+	sbuf_printf(sb, "head[%u]_scanout_fb = %p\n", head, fb);
+	if (fb != NULL) {
+		sbuf_printf(sb, "head[%u]_scanout_fb_size = %ux%u\n",
+		    head, fb->width, fb->height);
+		sbuf_printf(sb, "head[%u]_scanout_fb_pitch = %u\n",
+		    head, fb->pitches[0]);
+		sbuf_printf(sb, "head[%u]_scanout_fb_format = 0x%08x\n",
+		    head, fb->format != NULL ? fb->format->format : 0);
+		sbuf_printf(sb, "head[%u]_scanout_fb_modifier = 0x%016llx\n",
+		    head, (unsigned long long)fb->modifier);
+	}
+	sbuf_printf(sb, "head[%u]_scanout_bo = %p\n", head, bo);
+	if (bo != NULL) {
+		sbuf_printf(sb, "head[%u]_scanout_bo_size = %llu\n", head,
+		    (unsigned long long)obj->size);
+		sbuf_printf(sb, "head[%u]_scanout_bo_domain = 0x%08x\n",
+		    head, bo->domain);
+		sbuf_printf(sb, "head[%u]_scanout_bo_paddr = 0x%016llx\n",
+		    head, (unsigned long long)bo->paddr);
+		sbuf_printf(sb, "head[%u]_scanout_bo_ttm_pin_count = %u\n",
+		    head, bo->ttm_pin_count);
+		sbuf_printf(sb, "head[%u]_scanout_bo_scanout_pin_count = %u\n",
+		    head, bo->scanout_pin_count);
+		sbuf_printf(sb,
+		    "head[%u]_scanout_bo_scanout_no_evict_pin_count = %u\n",
+		    head, bo->scanout_no_evict_pin_count);
+		sbuf_printf(sb, "head[%u]_scanout_bo_vm_bind_pin_count = %u\n",
+		    head, bo->vm_bind_pin_count);
+		sbuf_printf(sb, "head[%u]_scanout_bo_resv = %p\n",
+		    head, bo->vm_resv != NULL ? bo->vm_resv : &bo->resv);
+	}
+}
+
+static void
+nvkm_dispnv50_debug_windows_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
+    struct nvkm_dispnv50_state *state)
+{
+	struct nv50_wndw *wndw;
+	char name[16];
+
+	for (u32 i = 0; i < nitems(state->wndw); i++) {
+		wndw = state->wndw[i];
+		sbuf_printf(sb, "wndw[%u]_present = %d\n", i,
+		    wndw != NULL);
+		if (wndw == NULL)
+			continue;
+		sbuf_printf(sb, "wndw[%u]_id = %d\n", i, wndw->id);
+		sbuf_printf(sb, "wndw[%u]_interlock = 0x%08x\n",
+		    i, wndw->interlock.data);
+		sbuf_printf(sb, "wndw[%u]_interlock_wimm = 0x%08x\n",
+		    i, wndw->interlock.wimm);
+		sbuf_printf(sb, "wndw[%u]_ntfy = 0x%04x\n", i, wndw->ntfy);
+		sbuf_printf(sb, "wndw[%u]_sema = 0x%04x\n", i, wndw->sema);
+		snprintf(name, sizeof(name), "wndw%u", i);
+		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, name, &wndw->wndw);
+		snprintf(name, sizeof(name), "wimm%u", i);
+		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, name, &wndw->wimm);
+	}
+}
+
+static void
+nvkm_dispnv50_debug_outps_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
+{
+	struct nvkm_outp *outp;
+	u32 index = 0;
+
+	if (sc == NULL || sc->disp == NULL) {
+		sbuf_cat(sb, "outp_count = 0\n");
+		return;
+	}
+
+	list_for_each_entry(outp, &sc->disp->outps, head) {
+		struct nvkm_conn *conn = outp->conn;
+		struct nvkm_ior *ior = outp->ior;
+
+		sbuf_printf(sb, "outp[%u]_index = %d\n", index, outp->index);
+		sbuf_printf(sb, "outp[%u]_type = 0x%02x\n",
+		    index, outp->info.type);
+		sbuf_printf(sb, "outp[%u]_heads = 0x%02x\n",
+		    index, outp->info.heads);
+		sbuf_printf(sb, "outp[%u]_connector = 0x%02x\n",
+		    index, outp->info.connector);
+		sbuf_printf(sb, "outp[%u]_location = 0x%02x\n",
+		    index, outp->info.location);
+		sbuf_printf(sb, "outp[%u]_or = 0x%02x\n", index,
+		    outp->info.or);
+		sbuf_printf(sb, "outp[%u]_link = 0x%02x\n", index,
+		    outp->info.link);
+		sbuf_printf(sb, "outp[%u]_acquired = %u\n",
+		    index, outp->acquired);
+		sbuf_printf(sb, "outp[%u]_conn = %p\n", index, conn);
+		if (conn != NULL) {
+			sbuf_printf(sb, "outp[%u]_conn_index = %d\n",
+			    index, conn->index);
+			sbuf_printf(sb, "outp[%u]_conn_type = 0x%02x\n",
+			    index, conn->info.type);
+			sbuf_printf(sb, "outp[%u]_conn_location = 0x%02x\n",
+			    index, conn->info.location);
+		}
+		sbuf_printf(sb, "outp[%u]_ior = %p\n", index, ior);
+		if (ior != NULL) {
+			sbuf_printf(sb, "outp[%u]_ior_type = %u\n",
+			    index, ior->type);
+			sbuf_printf(sb, "outp[%u]_ior_id = %d\n",
+			    index, ior->id);
+			sbuf_printf(sb, "outp[%u]_ior_name = %s\n",
+			    index, ior->name);
+			sbuf_printf(sb, "outp[%u]_ior_asy_head = 0x%02x\n",
+			    index, ior->asy.head);
+			sbuf_printf(sb, "outp[%u]_ior_asy_proto = %u\n",
+			    index, ior->asy.proto);
+			sbuf_printf(sb, "outp[%u]_ior_asy_link = %u\n",
+			    index, ior->asy.link);
+			sbuf_printf(sb, "outp[%u]_ior_arm_head = 0x%02x\n",
+			    index, ior->arm.head);
+			sbuf_printf(sb, "outp[%u]_ior_arm_proto = %u\n",
+			    index, ior->arm.proto);
+			sbuf_printf(sb, "outp[%u]_ior_arm_link = %u\n",
+			    index, ior->arm.link);
+		}
+		sbuf_printf(sb, "outp[%u]_dp_enabled = %d\n",
+		    index, outp->info.type == DCB_OUTPUT_DP && outp->dp.enabled);
+		sbuf_printf(sb, "outp[%u]_dp_mst = %d\n",
+		    index, outp->info.type == DCB_OUTPUT_DP && outp->dp.mst);
+		sbuf_printf(sb, "outp[%u]_dp_rates = %d\n",
+		    index, outp->info.type == DCB_OUTPUT_DP ? outp->dp.rates : 0);
+		index++;
+	}
+	sbuf_printf(sb, "outp_count = %u\n", index);
+}
 
 void
 nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
@@ -374,10 +689,15 @@ nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
 		return;
 	}
 
-	scanout_addr = state->scanout_user || state->scanout == NULL ?
-	    state->scanout_offset : nvkm_memory_addr(state->scanout);
+	scanout_addr = nvkm_dispnv50_scanout_addr(state);
 	sbuf_printf(sb, "dispnv50 = %p\n", state);
 	sbuf_printf(sb, "core_ready = %d\n", state->core_ready);
+	sbuf_printf(sb, "display_audit_version = 1\n");
+	sbuf_printf(sb, "display_audit_seqno = %llu\n",
+	    (unsigned long long)state->audit_seqno);
+	sbuf_printf(sb, "display_audit_scanout_pin_balance = %lld\n",
+	    (long long)sc->kms_scanout_pin_count -
+	    (long long)sc->kms_scanout_unpin_count);
 	sbuf_printf(sb, "scanout_user = %d\n", state->scanout_user);
 	sbuf_printf(sb, "scanout_memory = %p\n", state->scanout);
 	sbuf_printf(sb, "scanout_addr = 0x%016llx\n",
@@ -402,20 +722,19 @@ nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
 	    (unsigned long long)state->console_flush_count);
 	sbuf_printf(sb, "console_flush_error_count = %llu\n",
 	    (unsigned long long)state->console_flush_error_count);
+	nvkm_dispnv50_debug_audit_snapshot_sbuf(sb,
+	    "display_audit_current", &state->audit_current);
+	nvkm_dispnv50_debug_audit_snapshot_sbuf(sb,
+	    "display_audit_pending", &state->audit_pending);
+	for (u32 head = 0; head < nitems(state->head); head++)
+		nvkm_dispnv50_debug_head_sbuf(sc, sb, state, head);
+	nvkm_dispnv50_debug_windows_sbuf(sc, sb, state);
+	nvkm_dispnv50_debug_outps_sbuf(sc, sb);
 	if (state->disp.core != NULL)
 		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "core",
 		    &state->disp.core->chan);
 	else
 		sbuf_cat(sb, "core_dmac = unavailable\n");
-	if (state->wndw[0] != NULL) {
-		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "wndw0",
-		    &state->wndw[0]->wndw);
-		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, "wimm0",
-		    &state->wndw[0]->wimm);
-	} else {
-		sbuf_cat(sb, "wndw0_dmac = unavailable\n");
-		sbuf_cat(sb, "wimm0_dmac = unavailable\n");
-	}
 
 	if (scanout_addr == 0 || state->scanout_width == 0 ||
 	    state->scanout_height == 0 || state->scanout_pitch == 0) {
@@ -2271,7 +2590,8 @@ static int
 nvkm_dispnv50_window_program(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
     struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
-    bool sanitize, bool async, const char *reason)
+    bool sanitize, bool async, enum nvkm_dispnv50_audit_op op, u32 head,
+    u32 display_id, const char *reason)
 {
 	struct nv50_wndw_atom asyw;
 	int ret;
@@ -2324,8 +2644,11 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	 * scanout at the next vblank and the DRM flip event completes there
 	 * (real vblank). Do not block the commit thread on the notifier or
 	 * read back channel status. DRM serialises flips via the event. */
-	if (async)
+	if (async) {
+		nvkm_dispnv50_audit_capture(state, &state->audit_pending, op,
+		    head, (u32)wndw->id, display_id, true, false, false);
 		return 0;
+	}
 
 	nvkm_dispnv50_dmac_trace_status(sc, &wndw->wndw, wndw->wndw.cur);
 	if (!wndw->wndw.dfly_last_idle) {
@@ -2338,6 +2661,10 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
+
+	nvkm_dispnv50_audit_capture(state, &state->audit_current, op, head,
+	    (u32)wndw->id, display_id, false, true, false);
+	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 %s armed win=%d scanout=0x%llx offset=0x%llx "
@@ -2369,6 +2696,8 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 {
 	struct nv50_wndw_atom asyw;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	u32 head = (u32)-1;
+	u32 display_id = 0;
 	int ret;
 
 	(void)core;
@@ -2390,6 +2719,16 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
+
+	if (state->audit_current.valid &&
+	    state->audit_current.win == (u32)wndw->id) {
+		head = state->audit_current.head;
+		display_id = state->audit_current.display_id;
+	}
+	nvkm_dispnv50_audit_capture(state, &state->audit_current,
+	    NVKM_DISPNV50_AUDIT_PLANE_DISABLE, head, (u32)wndw->id, display_id,
+	    false, true, true);
+	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
 
 	nvkm_infof(sc->dev, "drm: dispnv50 window disabled win=%d\n",
 	    wndw->id);
@@ -2583,7 +2922,8 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, true, "plane update");
+	    interlock, false, true, NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
+	    (u32)drm_crtc_index(crtc), 0, "plane update");
 }
 
 int
@@ -2714,7 +3054,8 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, true, false, "bridge");
+	    interlock, true, false, NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
+	    head, display_id, "bridge");
 	if (ret != 0)
 		goto fail;
 
