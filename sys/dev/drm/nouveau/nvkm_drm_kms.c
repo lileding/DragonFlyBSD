@@ -221,6 +221,33 @@ nvkm_encoder_type_from_info(const struct nvkm_gsp_disp_output_info *info)
 	}
 }
 
+static bool
+nvkm_connector_type_supports_stereo(int connector_type)
+{
+	return (connector_type == DRM_MODE_CONNECTOR_DisplayPort ||
+	    connector_type == DRM_MODE_CONNECTOR_eDP ||
+	    connector_type == DRM_MODE_CONNECTOR_HDMIA);
+}
+
+static void
+nvkm_connector_init_mode_caps(struct drm_connector *connector,
+    const struct nvkm_gsp_disp_output_info *info, int connector_type)
+{
+	/*
+	 * Turing follows nouveau's NV50+ userspace contract: doublescan modes
+	 * are acceptable at the connector level.  Interlace is more output
+	 * specific; non-DP Turing no longer advertises it, and DP needs the
+	 * SOR dp_interlace cap wired into this scalar info before it can be
+	 * exposed safely.
+	 */
+	connector->doublescan_allowed = true;
+	connector->interlace_allowed = false;
+	connector->stereo_allowed =
+	    nvkm_connector_type_supports_stereo(connector_type);
+
+	(void)info;
+}
+
 static uint32_t
 nvkm_possible_crtcs_from_info(const struct nvkm_gsp_disp_output_info *info,
     uint32_t crtc_mask)
@@ -2589,6 +2616,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 			kfree(enc);
 			continue;
 		}
+		nvkm_connector_init_mode_caps(&nc->base, &info, connector_type);
 		ret = drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
 		    encoder_type, NULL);
 		if (ret != 0) {
