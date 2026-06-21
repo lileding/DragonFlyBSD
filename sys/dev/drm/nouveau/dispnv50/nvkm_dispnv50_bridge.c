@@ -3986,6 +3986,39 @@ nvkm_dispnv50_dp_link_check(struct nvkm_softc *sc, uint32_t display_id,
 	return 0;
 }
 
+int
+nvkm_dispnv50_dp_retrain_current(struct nvkm_softc *sc, uint32_t display_id,
+    bool *link_ok)
+{
+	struct nvkm_outp *outp;
+	int ret;
+
+	if (link_ok == NULL)
+		return -EINVAL;
+	*link_ok = true;
+
+	outp = nvkm_dispnv50_find_outp(sc, display_id);
+	if (outp == NULL)
+		return -ENODEV;
+	if (outp->info.type != DCB_OUTPUT_DP)
+		return -EINVAL;
+	if (outp->ior == NULL || outp->dp.lt.nr == 0)
+		return 0;
+	if (outp->dp.lt.bw == 0 || outp->func == NULL ||
+	    outp->func->dp.train == NULL) {
+		*link_ok = false;
+		return -ENODEV;
+	}
+
+	ret = outp->func->dp.train(outp, true);
+	if (ret != 0) {
+		*link_ok = false;
+		return ret;
+	}
+
+	return nvkm_dispnv50_dp_link_check(sc, display_id, link_ok);
+}
+
 void
 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
     struct nvkm_dispnv50_output_prepare *prepare)

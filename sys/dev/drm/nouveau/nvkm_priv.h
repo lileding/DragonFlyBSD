@@ -709,6 +709,9 @@ struct nvkm_softc {
 	uint64_t		kms_dp_irq_count;
 	uint64_t		kms_dp_irq_link_good_count;
 	uint64_t		kms_dp_irq_link_bad_count;
+	uint64_t		kms_dp_irq_retrain_count;
+	uint64_t		kms_dp_irq_retrain_ok_count;
+	uint64_t		kms_dp_irq_retrain_fail_count;
 	uint64_t		kms_dp_irq_error_count;
 	uint64_t		kms_restore_skip_primary_count;
 	uint32_t		kms_restore_last_primary_count;
@@ -1563,6 +1566,18 @@ void	nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc,
  * transactions and must not be called from interrupt context.
  */
 int	nvkm_dispnv50_dp_link_check(struct nvkm_softc *sc,
+	    uint32_t display_id, bool *link_ok);
+/*
+ * Ownership: borrows the current active dispnv50 DP output route and the
+ * caller-owned link_ok scalar. The bridge retains ownership of outp, IOR, AUX,
+ * and saved link-training state.
+ * Lifetime: no borrowed output, AUX, IOR, or DRM pointer is retained after
+ * return. The helper only observes and retrains the current route.
+ * Threading: must run from process context while DRM modeset locks serialize
+ * against atomic commits. It may sleep inside GSP/RM DP training and AUX
+ * transactions, and must not be called from interrupt context.
+ */
+int	nvkm_dispnv50_dp_retrain_current(struct nvkm_softc *sc,
 	    uint32_t display_id, bool *link_ok);
 /*
  * Ownership: consumes the current DRM CRTC state by value only; no state
