@@ -2706,8 +2706,8 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	 * when this attach exposes an empty KMS configuration.
 	 */
 	drm_mode_config_init(dev);
-	dev->mode_config.min_width = 0;
-	dev->mode_config.min_height = 0;
+	dev->mode_config.min_width = 1;
+	dev->mode_config.min_height = 1;
 	dev->mode_config.max_width = 8192;
 	dev->mode_config.max_height = 8192;
 	dev->mode_config.cursor_width = 256;
