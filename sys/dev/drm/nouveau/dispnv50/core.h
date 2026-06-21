@@ -75,6 +75,18 @@ struct nv50_core {
 #endif
 };
 
+static inline u32
+nv50_core_window_count(struct nv50_core *core)
+{
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	if (core != NULL && core->dfly_window_count != 0)
+		return core->dfly_window_count;
+#else
+	(void)core;
+#endif
+	return 8;
+}
+
 enum nv50_disp_interlock_type {
 	NV50_DISP_INTERLOCK_CORE = 0,
 	NV50_DISP_INTERLOCK_CURS,
