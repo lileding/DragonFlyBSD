@@ -17,6 +17,7 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_mode_config.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_syncobj.h>
 #include <drm/ttm/ttm_placement.h>
@@ -7855,13 +7856,26 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	/* Prepare KMS mode_config/connectors before drm_dev_register(), which
 	 * registers the objects created here.  The imported display engine owns
 	 * GSP display discovery; this layer owns DragonFly DRM object setup. */
-	(void)nvkm_drm_kms_init(ddev, sc);
+	err = nvkm_drm_kms_init(ddev, sc);
+	if (err != 0) {
+		nvkm_debugf(sc->dev,
+		    "drm: nvkm_drm_kms_init failed (%d)\n", err);
+		nvkm_drm_kms_fini(sc);
+		nvkm_dispnv50_fini(sc);
+		drm_mode_config_cleanup(ddev);
+		nvkm_ttm_fini(sc);
+		drm_dev_put(ddev);
+		sc->drm_dev = NULL;
+		return (err);
+	}
 
 	err = drm_dev_register(ddev, 0);
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
 		    "drm: drm_dev_register failed (%d)\n", err);
 		nvkm_drm_kms_fini(sc);
+		nvkm_dispnv50_fini(sc);
+		drm_mode_config_cleanup(ddev);
 		nvkm_ttm_fini(sc);
 		drm_dev_put(ddev);
 		sc->drm_dev = NULL;
@@ -7881,6 +7895,7 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 		drm_dev_unregister(sc->drm_dev);
 		nvkm_drm_kms_fini(sc);
 		nvkm_dispnv50_fini(sc);
+		drm_mode_config_cleanup(sc->drm_dev);
 		nvkm_ttm_fini(sc);
 		drm_dev_put(sc->drm_dev);
 		sc->drm_dev = NULL;
