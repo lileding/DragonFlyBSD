@@ -350,22 +350,57 @@ nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 
 /* ===== connector helper funcs ===== */
 
+#define NVKM_KMS_EDID_BUFSIZE	2048U
+
+/*
+ * Ownership:
+ *   The caller owns the EDID buffer; this helper only borrows it.
+ * Lifetime:
+ *   The EDID storage must remain valid for len bytes for this call.
+ * Threading:
+ *   Pure validation. No connector mutation, no locks, and no GSP RPCs.
+ */
+static bool
+nvkm_connector_edid_is_valid(struct edid *edid, uint32_t len)
+{
+	uint32_t blocks;
+	uint32_t block;
+
+	if (edid == NULL || len < EDID_LENGTH)
+		return (false);
+
+	blocks = (uint32_t)edid->extensions + 1U;
+	if (blocks * EDID_LENGTH > len)
+		return (false);
+
+	for (block = 0; block < blocks; block++) {
+		if (!drm_edid_block_valid((uint8_t *)edid +
+		    block * EDID_LENGTH, block, false, NULL))
+			return (false);
+	}
+
+	return (true);
+}
+
 static int
 nvkm_connector_get_modes(struct drm_connector *connector)
 {
 	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	struct edid *edid;
 	uint8_t *buf;
-	uint32_t len = 2048;
+	uint32_t len = NVKM_KMS_EDID_BUFSIZE;
 	int n = 0;
 
-	buf = kzalloc(2048, GFP_KERNEL);
+	buf = kzalloc(NVKM_KMS_EDID_BUFSIZE, GFP_KERNEL);
 	if (buf == NULL)
 		return (0);
-	if (nvkm_gsp_disp_read_edid(nc->sc, nc->display_id, buf, &len) == 0) {
-		drm_connector_update_edid_property(connector,
-		    (struct edid *)buf);
-		n = drm_add_edid_modes(connector, (struct edid *)buf);
-	}
+	edid = (struct edid *)buf;
+	if (nvkm_gsp_disp_read_edid(nc->sc, nc->display_id, buf, &len) == 0 &&
+	    nvkm_connector_edid_is_valid(edid, len)) {
+		drm_connector_update_edid_property(connector, edid);
+		n = drm_add_edid_modes(connector, edid);
+	} else
+		drm_connector_update_edid_property(connector, NULL);
 	kfree(buf);
 	return (n);
 }
