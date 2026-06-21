@@ -147,9 +147,9 @@ struct nvkm_dispnv50_state {
 	struct nvif_disp ifdisp;
 	struct nouveau_bo sync_bo;
 	struct nvkm_memory *sync_mem;
-	struct nv50_head head[4];
-	struct nv50_wndw *wndw[8];
-	struct nv50_wndw *curs[4];
+	struct nv50_head head[NVKM_DISPLAY_MAX_HEADS];
+	struct nv50_wndw *wndw[NVKM_DISPLAY_MAX_WINDOWS];
+	struct nv50_wndw *curs[NVKM_DISPLAY_MAX_CURSORS];
 	struct nvkm_memory *ilut;
 	u64 ilut_offset;
 	struct nvkm_memory *olut;
@@ -183,8 +183,56 @@ struct nvkm_dispnv50_state {
 	u64 audit_seqno;
 	struct nvkm_dispnv50_audit_snapshot audit_current;
 	struct nvkm_dispnv50_audit_snapshot audit_pending;
-	struct nvkm_dispnv50_cursor_audit audit_cursor[4];
+	struct nvkm_dispnv50_cursor_audit audit_cursor[NVKM_DISPLAY_MAX_CURSORS];
 };
+
+static uint32_t
+nvkm_dispnv50_cap_min(uint32_t value, uint32_t cap)
+{
+	if (cap != 0 && value > cap)
+		return (cap);
+	return (value);
+}
+
+static uint32_t
+nvkm_dispnv50_head_capacity(struct nvkm_softc *sc)
+{
+	uint32_t heads = NVKM_DISPLAY_MAX_HEADS;
+
+	if (sc != NULL && sc->chip != NULL)
+		heads = nvkm_dispnv50_cap_min(heads, sc->chip->display_heads);
+	return (heads);
+}
+
+static uint32_t
+nvkm_dispnv50_window_capacity(struct nvkm_softc *sc)
+{
+	uint32_t windows = NVKM_DISPLAY_MAX_WINDOWS;
+
+	if (sc != NULL && sc->chip != NULL)
+		windows = nvkm_dispnv50_cap_min(windows, sc->chip->display_windows);
+	return (windows);
+}
+
+static uint32_t
+nvkm_dispnv50_cursor_capacity(struct nvkm_softc *sc)
+{
+	uint32_t cursors = NVKM_DISPLAY_MAX_CURSORS;
+
+	if (sc != NULL && sc->chip != NULL)
+		cursors = nvkm_dispnv50_cap_min(cursors, sc->chip->display_cursors);
+	return (cursors);
+}
+
+static uint32_t
+nvkm_dispnv50_sor_capacity(struct nvkm_softc *sc)
+{
+	uint32_t sors = NVKM_DISPLAY_MAX_SORS;
+
+	if (sc != NULL && sc->chip != NULL)
+		sors = nvkm_dispnv50_cap_min(sors, sc->chip->display_sors);
+	return (sors);
+}
 
 static void
 nvkm_dispnv50_debug_dmac_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
@@ -818,6 +866,14 @@ nvkm_dispnv50_debug_sbuf(struct nvkm_softc *sc, struct sbuf *sb)
 	sbuf_printf(sb, "display_audit_version = 1\n");
 	sbuf_printf(sb, "display_audit_seqno = %llu\n",
 	    (unsigned long long)state->audit_seqno);
+	sbuf_printf(sb, "display_head_capacity = %u\n",
+	    nvkm_dispnv50_head_capacity(sc));
+	sbuf_printf(sb, "display_window_capacity = %u\n",
+	    nvkm_dispnv50_window_capacity(sc));
+	sbuf_printf(sb, "display_cursor_capacity = %u\n",
+	    nvkm_dispnv50_cursor_capacity(sc));
+	sbuf_printf(sb, "display_sor_capacity = %u\n",
+	    nvkm_dispnv50_sor_capacity(sc));
 	sbuf_printf(sb, "display_audit_scanout_pin_balance = %lld\n",
 	    (long long)sc->kms_scanout_pin_count -
 	    (long long)sc->kms_scanout_unpin_count);
@@ -2206,7 +2262,7 @@ nvkm_dispnv50_wndw_init(struct nvkm_softc *sc, uint32_t win)
 	struct nouveau_drm drm;
 	int ret;
 
-	if (win >= nitems(((struct nvkm_dispnv50_state *)0)->wndw))
+	if (win >= nvkm_dispnv50_window_capacity(sc))
 		return -EINVAL;
 	if (nvkm_dispnv50_core_init(sc) != 0)
 		return -ENODEV;
@@ -2237,7 +2293,7 @@ nvkm_dispnv50_head_init(struct nvkm_softc *sc, uint32_t head)
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head *nvhead;
 
-	if (head >= nitems(((struct nvkm_dispnv50_state *)0)->head))
+	if (head >= nvkm_dispnv50_head_capacity(sc))
 		return -EINVAL;
 	if (nvkm_dispnv50_core_init(sc) != 0)
 		return -ENODEV;
@@ -2265,7 +2321,7 @@ nvkm_dispnv50_cursor_init(struct nvkm_softc *sc, uint32_t head)
 	struct nouveau_drm drm;
 	int ret;
 
-	if (head >= nitems(((struct nvkm_dispnv50_state *)0)->curs))
+	if (head >= nvkm_dispnv50_cursor_capacity(sc))
 		return -EINVAL;
 	if (nvkm_dispnv50_core_init(sc) != 0)
 		return -ENODEV;
@@ -3904,6 +3960,11 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	}
 	prepare->ior_id = outp->ior->id;
 	prepare->ior_link = outp->ior->asy.link;
+	if (prepare->ior_id < 0 ||
+	    (uint32_t)prepare->ior_id >= nvkm_dispnv50_sor_capacity(sc)) {
+		ret = -EINVAL;
+		goto fail;
+	}
 
 	switch (outp->info.type) {
 	case DCB_OUTPUT_TMDS:

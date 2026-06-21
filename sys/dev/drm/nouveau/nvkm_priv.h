@@ -169,6 +169,11 @@ struct nvkm_rm_gpu;
 
 #define NVKM_CHIP_CLASS_COUNT	5
 
+#define NVKM_DISPLAY_MAX_HEADS		4
+#define NVKM_DISPLAY_MAX_SORS		4
+#define NVKM_DISPLAY_MAX_WINDOWS	8
+#define NVKM_DISPLAY_MAX_CURSORS	4
+
 /*
  * Static chip capability record.
  *
@@ -207,6 +212,8 @@ struct nvkm_chip_config {
 
 	uint8_t display_heads;
 	uint8_t display_sors;
+	uint8_t display_windows;
+	uint8_t display_cursors;
 	const struct nvkm_rm_gpu *rm_gpu;
 
 	uint8_t gmmu_pd3_shift;
@@ -670,7 +677,8 @@ struct nvkm_softc {
 
 	/* DRM driver registration (Phase 3). */
 	struct drm_device	*drm_dev;
-	struct drm_crtc		*kms_crtc[4];	/* head index -> crtc, for vblank IRQ */
+	struct drm_crtc		*kms_crtc[NVKM_DISPLAY_MAX_HEADS];
+					/* head index -> crtc, for vblank IRQ */
 	struct pci_dev		*drm_pdev;
 	struct drm_property	*kms_dither_mode_property;
 	struct drm_property	*kms_dither_depth_property;
@@ -907,7 +915,7 @@ struct nvkm_softc {
 	uint32_t		gsp_disp_intr_last_leaf;
 	uint32_t		gsp_disp_intr_last_mask;
 	uint32_t		gsp_disp_vblank_mask;
-	uint32_t		gsp_disp_head_status[4];
+	uint32_t		gsp_disp_head_status[NVKM_DISPLAY_MAX_HEADS];
 	uint64_t		gsp_other_stall_count;
 	uint32_t		gsp_other_stall_last_leaf;
 	uint32_t		gsp_other_stall_last_mask;
