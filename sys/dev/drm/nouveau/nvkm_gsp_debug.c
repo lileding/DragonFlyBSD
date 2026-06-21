@@ -634,6 +634,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_atomic_commit_tail_count);
 	sbuf_printf(sb, "atomic_vblank_wait_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_vblank_wait_count);
+	sbuf_printf(sb, "atomic_flip_done_wait_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_flip_done_wait_count);
 	sbuf_printf(sb, "plane_update_count = %llu\n",
 	    (unsigned long long)sc->kms_plane_update_count);
 	sbuf_printf(sb, "plane_disable_count = %llu\n",

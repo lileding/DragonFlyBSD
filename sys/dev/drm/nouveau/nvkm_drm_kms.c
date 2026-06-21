@@ -398,32 +398,11 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_commit	= nvkm_atomic_commit,
 };
 
-static bool
-nvkm_atomic_commit_needs_vblank_wait(struct drm_atomic_state *old_state)
-{
-	struct drm_plane *plane;
-	struct drm_plane_state *old_plane_state;
-	struct drm_plane_state *new_plane_state;
-	bool saw_plane = false;
-	int i;
-
-	for_each_oldnew_plane_in_state(old_state, plane, old_plane_state,
-	    new_plane_state, i) {
-		(void)plane;
-		saw_plane = true;
-		if (!drm_atomic_plane_disabling(old_plane_state, new_plane_state))
-			return (true);
-	}
-
-	return (!saw_plane);
-}
-
 static void
 nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 {
 	struct drm_device *dev = old_state->dev;
 	struct nvkm_softc *sc = dev->dev_private;
-	bool wait_vblank;
 
 	sc->kms_atomic_commit_tail_count++;
 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
@@ -432,11 +411,8 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
 	drm_atomic_helper_fake_vblank(old_state);
 	drm_atomic_helper_commit_hw_done(old_state);
-	wait_vblank = nvkm_atomic_commit_needs_vblank_wait(old_state);
-	if (wait_vblank) {
-		sc->kms_atomic_vblank_wait_count++;
-		drm_atomic_helper_wait_for_vblanks(dev, old_state);
-	}
+	sc->kms_atomic_flip_done_wait_count++;
+	drm_atomic_helper_wait_for_flip_done(dev, old_state);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 	nvkm_atomic_finish_prepared_outputs(old_state);
 }
