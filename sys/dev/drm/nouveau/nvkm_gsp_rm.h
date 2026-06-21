@@ -207,6 +207,44 @@ struct nvkm_dispnv50_hdmi_info {
 	bool scdc_low_rates;
 };
 
+enum nvkm_dispnv50_dither_mode {
+	NVKM_DISPNV50_DITHER_MODE_OFF = 0,
+	NVKM_DISPNV50_DITHER_MODE_ON = 1,
+	NVKM_DISPNV50_DITHER_MODE_DYNAMIC2X2 = 513,
+	NVKM_DISPNV50_DITHER_MODE_STATIC2X2 = 769,
+	NVKM_DISPNV50_DITHER_MODE_TEMPORAL = 1025,
+	NVKM_DISPNV50_DITHER_MODE_AUTO = 1026,
+};
+
+enum nvkm_dispnv50_dither_depth {
+	NVKM_DISPNV50_DITHER_DEPTH_6BPC = 0,
+	NVKM_DISPNV50_DITHER_DEPTH_8BPC = 16,
+	NVKM_DISPNV50_DITHER_DEPTH_AUTO = 17,
+};
+
+/*
+ * Head programming parameters decoded by KMS from connector atomic state.
+ *
+ * Ownership:
+ *   This structure owns only scalar values. Callers retain ownership of DRM
+ *   state and connector objects; the bridge must not store their pointers.
+ *
+ * Lifetime:
+ *   Valid for one display programming callback. Prepared output routes store
+ *   their own HDMI snapshot; other head fields are copied from the live atomic
+ *   state at commit time.
+ *
+ * Threading:
+ *   Produced while DRM atomic locks protect the connector/CRTC state and
+ *   consumed synchronously by the display commit path.
+ */
+struct nvkm_dispnv50_head_config {
+	struct nvkm_dispnv50_hdmi_info hdmi;
+	uint8_t bpc;
+	uint32_t dither_mode;
+	uint32_t dither_depth;
+};
+
 #define NVKM_DISPNV50_DP_DPCD_SIZE	16U
 
 /*
@@ -255,10 +293,12 @@ void	 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 	     struct nvkm_dispnv50_output_prepare *prepare);
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t head, uint32_t win,
-	     uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi);
+	     uint32_t display_id,
+	     const struct nvkm_dispnv50_head_config *config);
 int	 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win,
-	     struct nvkm_dispnv50_output_prepare *prepare);
+	     struct nvkm_dispnv50_output_prepare *prepare,
+	     const struct nvkm_dispnv50_head_config *config);
 /*
  * Ownership:
  *   Borrows sc and the scalar display_id selected by KMS. The bridge owns no

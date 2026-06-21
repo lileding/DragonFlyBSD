@@ -2346,6 +2346,81 @@ nvkm_dispnv50_head_atom_fill(struct nv50_head_atom *asyh,
 	nvkm_dispnv50_head_atom_mode(asyh, &asyh->state.adjusted_mode);
 }
 
+static uint8_t
+nvkm_dispnv50_crtc_scanout_depth(struct drm_crtc *crtc)
+{
+	struct drm_plane_state *plane_state;
+	struct drm_framebuffer *fb;
+
+	if (crtc == NULL || crtc->primary == NULL)
+		return (24);
+	plane_state = crtc->primary->state;
+	if (plane_state == NULL)
+		return (24);
+	fb = plane_state->fb;
+	if (fb == NULL || fb->format == NULL || fb->format->depth == 0)
+		return (24);
+	return (fb->format->depth);
+}
+
+static void
+nvkm_dispnv50_head_apply_config(struct nv50_head_atom *asyh,
+    struct drm_crtc *crtc, const struct nvkm_dispnv50_head_config *config)
+{
+	uint32_t mode;
+
+	if (config == NULL) {
+		asyh->or.bpc = 8;
+		return;
+	}
+
+	asyh->or.bpc = config->bpc != 0 ? config->bpc : 8;
+	mode = config->dither_mode;
+	if (mode == NVKM_DISPNV50_DITHER_MODE_AUTO) {
+		if (nvkm_dispnv50_crtc_scanout_depth(crtc) > asyh->or.bpc * 3U)
+			mode = NVKM_DISPNV50_DITHER_MODE_DYNAMIC2X2;
+		else
+			mode = NVKM_DISPNV50_DITHER_MODE_OFF;
+	}
+
+	if (mode == NVKM_DISPNV50_DITHER_MODE_OFF) {
+		asyh->dither.enable =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_ENABLE_DISABLE;
+		asyh->dither.bits = 0;
+		asyh->dither.mode = 0;
+		return;
+	}
+
+	asyh->dither.enable = NVC37D_HEAD_SET_DITHER_CONTROL_ENABLE_ENABLE;
+	switch (mode) {
+	case NVKM_DISPNV50_DITHER_MODE_STATIC2X2:
+		asyh->dither.mode =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_MODE_STATIC_2X2;
+		break;
+	case NVKM_DISPNV50_DITHER_MODE_TEMPORAL:
+		asyh->dither.mode =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_MODE_TEMPORAL;
+		break;
+	case NVKM_DISPNV50_DITHER_MODE_ON:
+	case NVKM_DISPNV50_DITHER_MODE_DYNAMIC2X2:
+	default:
+		asyh->dither.mode =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_MODE_DYNAMIC_2X2;
+		break;
+	}
+
+	if (config->dither_depth == NVKM_DISPNV50_DITHER_DEPTH_6BPC)
+		asyh->dither.bits =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_BITS_TO_6_BITS;
+	else if (config->dither_depth == NVKM_DISPNV50_DITHER_DEPTH_8BPC ||
+	    asyh->or.bpc >= 8)
+		asyh->dither.bits =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_BITS_TO_8_BITS;
+	else
+		asyh->dither.bits =
+		    NVC37D_HEAD_SET_DITHER_CONTROL_BITS_TO_6_BITS;
+}
+
 static int
 nvkm_dispnv50_scanout_ensure(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, u32 width, u32 height)
@@ -4241,7 +4316,7 @@ nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win)
 static int
 nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id,
-    const struct nvkm_dispnv50_hdmi_info *hdmi,
+    const struct nvkm_dispnv50_head_config *config,
     struct nvkm_dispnv50_output_prepare *prepare)
 {
 	struct nvkm_dispnv50_state *state;
@@ -4281,6 +4356,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+	nvkm_dispnv50_head_apply_config(&asyh, crtc, config);
 	if (nvhead->func->static_wndw_map != NULL)
 		nvhead->func->static_wndw_map(nvhead, &asyh);
 	asyh.wndw.mask |= BIT(win);
@@ -4318,7 +4394,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (route_prepare == NULL) {
 		memset(&local_prepare, 0, sizeof(local_prepare));
 		ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id,
-		    hdmi, &local_prepare);
+		    config != NULL ? &config->hdmi : NULL, &local_prepare);
 		if (ret != 0)
 			goto fail;
 		route_prepare = &local_prepare;
@@ -4383,21 +4459,22 @@ fail:
 int
 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id,
-    const struct nvkm_dispnv50_hdmi_info *hdmi)
+    const struct nvkm_dispnv50_head_config *config)
 {
 	return nvkm_dispnv50_atomic_enable_common(sc, crtc, head, win,
-	    display_id, hdmi, NULL);
+	    display_id, config, NULL);
 }
 
 int
 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
     struct drm_crtc *crtc, uint32_t win,
-    struct nvkm_dispnv50_output_prepare *prepare)
+    struct nvkm_dispnv50_output_prepare *prepare,
+    const struct nvkm_dispnv50_head_config *config)
 {
 	if (prepare == NULL || !prepare->valid)
 		return -EINVAL;
 	return nvkm_dispnv50_atomic_enable_common(sc, crtc, prepare->head, win,
-	    prepare->display_id, &prepare->hdmi, prepare);
+	    prepare->display_id, config, prepare);
 }
 
 void

@@ -27,6 +27,7 @@
 #include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper.h>	/* drm_helper_mode_fill_fb_struct */
 #include <drm/drm_plane_helper.h>
+#include <drm/drm_property.h>
 #include <drm/drm_rect.h>
 
 #include <linux/slab.h>
@@ -45,6 +46,33 @@ struct nvkm_drm_connector {
 };
 
 #define to_nvkm_connector(c) container_of(c, struct nvkm_drm_connector, base)
+
+struct nvkm_connector_state {
+	struct drm_connector_state base;
+	uint32_t dither_mode;
+	uint32_t dither_depth;
+	uint32_t max_bpc;
+};
+
+#define to_nvkm_connector_state(s) \
+	container_of(s, struct nvkm_connector_state, base)
+#define to_nvkm_connector_state_const(s) \
+	((const struct nvkm_connector_state *)(s))
+
+static const struct drm_prop_enum_list nvkm_dither_mode_enum[] = {
+	{ NVKM_DISPNV50_DITHER_MODE_OFF, "off" },
+	{ NVKM_DISPNV50_DITHER_MODE_ON, "on" },
+	{ NVKM_DISPNV50_DITHER_MODE_DYNAMIC2X2, "dynamic 2x2" },
+	{ NVKM_DISPNV50_DITHER_MODE_STATIC2X2, "static 2x2" },
+	{ NVKM_DISPNV50_DITHER_MODE_TEMPORAL, "temporal" },
+	{ NVKM_DISPNV50_DITHER_MODE_AUTO, "auto" },
+};
+
+static const struct drm_prop_enum_list nvkm_dither_depth_enum[] = {
+	{ NVKM_DISPNV50_DITHER_DEPTH_6BPC, "6 bpc" },
+	{ NVKM_DISPNV50_DITHER_DEPTH_8BPC, "8 bpc" },
+	{ NVKM_DISPNV50_DITHER_DEPTH_AUTO, "auto" },
+};
 
 static int
 nvkm_connector_type_from_output(uint8_t output_type)
@@ -186,8 +214,41 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	return (n);
 }
 
+static bool
+nvkm_connector_state_changed(const struct nvkm_connector_state *old_state,
+    const struct nvkm_connector_state *new_state)
+{
+	return (old_state == NULL ||
+	    old_state->dither_mode != new_state->dither_mode ||
+	    old_state->dither_depth != new_state->dither_depth ||
+	    old_state->max_bpc != new_state->max_bpc);
+}
+
+static int
+nvkm_connector_atomic_check(struct drm_connector *connector,
+    struct drm_connector_state *state)
+{
+	struct nvkm_connector_state *new_state = to_nvkm_connector_state(state);
+	struct nvkm_connector_state *old_state = connector->state != NULL ?
+	    to_nvkm_connector_state(connector->state) : NULL;
+	struct drm_crtc_state *crtc_state;
+
+	if (new_state->max_bpc != 8)
+		return (-EINVAL);
+	if (state->crtc == NULL ||
+	    !nvkm_connector_state_changed(old_state, new_state))
+		return (0);
+
+	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
+	if (IS_ERR(crtc_state))
+		return (PTR_ERR(crtc_state));
+	crtc_state->connectors_changed = true;
+	return (0);
+}
+
 static const struct drm_connector_helper_funcs nvkm_connector_helper_funcs = {
-	.get_modes = nvkm_connector_get_modes,
+	.get_modes	= nvkm_connector_get_modes,
+	.atomic_check	= nvkm_connector_atomic_check,
 };
 
 /* ===== connector funcs ===== */
@@ -209,14 +270,152 @@ nvkm_connector_destroy(struct drm_connector *connector)
 	kfree(to_nvkm_connector(connector));
 }
 
+static void
+nvkm_connector_reset(struct drm_connector *connector)
+{
+	struct nvkm_connector_state *state;
+
+	if (connector->state != NULL) {
+		__drm_atomic_helper_connector_destroy_state(connector->state);
+		kfree(to_nvkm_connector_state(connector->state));
+		connector->state = NULL;
+	}
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (state != NULL) {
+		state->dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
+		state->dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
+		state->max_bpc = 8;
+	}
+	__drm_atomic_helper_connector_reset(connector,
+	    state != NULL ? &state->base : NULL);
+}
+
+static struct drm_connector_state *
+nvkm_connector_atomic_duplicate_state(struct drm_connector *connector)
+{
+	struct nvkm_connector_state *old_state;
+	struct nvkm_connector_state *state;
+
+	if (WARN_ON(connector->state == NULL))
+		return (NULL);
+
+	old_state = to_nvkm_connector_state(connector->state);
+	state = kmalloc(sizeof(*state), M_DRM, GFP_KERNEL);
+	if (state == NULL)
+		return (NULL);
+
+	*state = *old_state;
+	__drm_atomic_helper_connector_duplicate_state(connector, &state->base);
+	return (&state->base);
+}
+
+static void
+nvkm_connector_atomic_destroy_state(struct drm_connector *connector,
+    struct drm_connector_state *state)
+{
+	(void)connector;
+	__drm_atomic_helper_connector_destroy_state(state);
+	kfree(to_nvkm_connector_state(state));
+}
+
+static int
+nvkm_connector_atomic_set_property(struct drm_connector *connector,
+    struct drm_connector_state *state, struct drm_property *property,
+    uint64_t value)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	struct nvkm_connector_state *nvkm_state =
+	    to_nvkm_connector_state(state);
+
+	if (property == nc->sc->kms_dither_mode_property) {
+		nvkm_state->dither_mode = (uint32_t)value;
+		return (0);
+	}
+	if (property == nc->sc->kms_dither_depth_property) {
+		nvkm_state->dither_depth = (uint32_t)value;
+		return (0);
+	}
+	if (property == nc->sc->kms_max_bpc_property) {
+		nvkm_state->max_bpc = (uint32_t)value;
+		return (0);
+	}
+	return (-EINVAL);
+}
+
+static int
+nvkm_connector_atomic_get_property(struct drm_connector *connector,
+    const struct drm_connector_state *state, struct drm_property *property,
+    uint64_t *value)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	const struct nvkm_connector_state *nvkm_state =
+	    to_nvkm_connector_state_const(state);
+
+	if (property == nc->sc->kms_dither_mode_property) {
+		*value = nvkm_state->dither_mode;
+		return (0);
+	}
+	if (property == nc->sc->kms_dither_depth_property) {
+		*value = nvkm_state->dither_depth;
+		return (0);
+	}
+	if (property == nc->sc->kms_max_bpc_property) {
+		*value = nvkm_state->max_bpc;
+		return (0);
+	}
+	return (-EINVAL);
+}
+
 static const struct drm_connector_funcs nvkm_connector_funcs = {
-	.reset			= drm_atomic_helper_connector_reset,
+	.reset			= nvkm_connector_reset,
 	.detect			= nvkm_connector_detect,
 	.fill_modes		= drm_helper_probe_single_connector_modes,
 	.destroy		= nvkm_connector_destroy,
-	.atomic_duplicate_state	= drm_atomic_helper_connector_duplicate_state,
-	.atomic_destroy_state	= drm_atomic_helper_connector_destroy_state,
+	.atomic_duplicate_state	= nvkm_connector_atomic_duplicate_state,
+	.atomic_destroy_state	= nvkm_connector_atomic_destroy_state,
+	.atomic_set_property	= nvkm_connector_atomic_set_property,
+	.atomic_get_property	= nvkm_connector_atomic_get_property,
 };
+
+static int
+nvkm_connector_properties_init(struct drm_device *dev, struct nvkm_softc *sc)
+{
+	if (sc->kms_dither_mode_property == NULL) {
+		sc->kms_dither_mode_property = drm_property_create_enum(dev, 0,
+		    "dithering mode", nvkm_dither_mode_enum,
+		    nitems(nvkm_dither_mode_enum));
+		if (sc->kms_dither_mode_property == NULL)
+			return (-ENOMEM);
+	}
+	if (sc->kms_dither_depth_property == NULL) {
+		sc->kms_dither_depth_property = drm_property_create_enum(dev, 0,
+		    "dithering depth", nvkm_dither_depth_enum,
+		    nitems(nvkm_dither_depth_enum));
+		if (sc->kms_dither_depth_property == NULL)
+			return (-ENOMEM);
+	}
+	if (sc->kms_max_bpc_property == NULL) {
+		sc->kms_max_bpc_property = drm_property_create_range(dev, 0,
+		    "max bpc", 8, 8);
+		if (sc->kms_max_bpc_property == NULL)
+			return (-ENOMEM);
+	}
+	return (0);
+}
+
+static void
+nvkm_connector_attach_properties(struct nvkm_drm_connector *connector)
+{
+	struct nvkm_softc *sc = connector->sc;
+
+	drm_object_attach_property(&connector->base.base,
+	    sc->kms_dither_mode_property, NVKM_DISPNV50_DITHER_MODE_AUTO);
+	drm_object_attach_property(&connector->base.base,
+	    sc->kms_dither_depth_property, NVKM_DISPNV50_DITHER_DEPTH_AUTO);
+	drm_object_attach_property(&connector->base.base,
+	    sc->kms_max_bpc_property, 8);
+}
 
 /* ===== mode_config funcs ===== */
 
@@ -458,7 +657,7 @@ struct nvkm_kms_crtc_atom {
 	struct nvkm_softc *sc;
 	struct drm_crtc *crtc;
 	struct nvkm_crtc *nc;
-	struct nvkm_dispnv50_hdmi_info hdmi;
+	struct nvkm_dispnv50_head_config head;
 	struct nvkm_gsp_disp_output_info output;
 	uint32_t display_id;
 	uint32_t connector_count;
@@ -472,6 +671,9 @@ nvkm_kms_crtc_atom_init(struct nvkm_kms_crtc_atom *atom, struct nvkm_softc *sc,
 	atom->sc = sc;
 	atom->crtc = crtc;
 	atom->nc = to_nvkm_crtc(crtc);
+	atom->head.bpc = 8;
+	atom->head.dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
+	atom->head.dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
 }
 
 static void
@@ -479,15 +681,23 @@ nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
     struct drm_connector *conn)
 {
 	struct nvkm_drm_connector *nvkm_conn = to_nvkm_connector(conn);
+	struct nvkm_connector_state *state = conn->state != NULL ?
+	    to_nvkm_connector_state(conn->state) : NULL;
 
 	atom->display_id = nvkm_conn->display_id;
 	atom->connector_count++;
-	atom->hdmi.has_infoframe = conn->display_info.has_hdmi_infoframe;
-	atom->hdmi.scdc_supported = conn->display_info.hdmi.scdc.supported;
-	atom->hdmi.scdc_scrambling =
+	atom->head.hdmi.has_infoframe = conn->display_info.has_hdmi_infoframe;
+	atom->head.hdmi.scdc_supported =
+	    conn->display_info.hdmi.scdc.supported;
+	atom->head.hdmi.scdc_scrambling =
 	    conn->display_info.hdmi.scdc.scrambling.supported;
-	atom->hdmi.scdc_low_rates =
+	atom->head.hdmi.scdc_low_rates =
 	    conn->display_info.hdmi.scdc.scrambling.low_rates;
+	if (state != NULL) {
+		atom->head.bpc = state->max_bpc;
+		atom->head.dither_mode = state->dither_mode;
+		atom->head.dither_depth = state->dither_depth;
+	}
 }
 
 static int
@@ -678,7 +888,7 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 
 		ret = nvkm_dispnv50_output_prepare(sc,
 		    &new_crtc_state->adjusted_mode, nc->head,
-		    atom.display_id, &atom.hdmi, &nc->prepared_route);
+		    atom.display_id, &atom.head.hdmi, &nc->prepared_route);
 		if (ret != 0) {
 			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
 			    "output prepare");
@@ -1358,21 +1568,22 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	if (sc->disp == NULL)
 		return;
 
+	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+	err = nvkm_kms_crtc_atom_route(&atom, crtc->state->connector_mask,
+	    false);
+	if (err != 0) {
+		nvkm_kms_record_result(sc, nc->head, nc->win, err,
+		    "crtc route");
+		return;
+	}
+
 	if (nc->prepared_route.valid) {
 		atom.display_id = nc->prepared_route.display_id;
 		err = nvkm_dispnv50_atomic_enable_prepared(sc, crtc, nc->win,
-		    &nc->prepared_route);
+		    &nc->prepared_route, &atom.head);
 	} else {
-		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-		err = nvkm_kms_crtc_atom_route(&atom,
-		    crtc->state->connector_mask, false);
-		if (err != 0) {
-			nvkm_kms_record_result(sc, nc->head, nc->win, err,
-			    "crtc route");
-			return;
-		}
 		err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
-		    atom.display_id, &atom.hdmi);
+		    atom.display_id, &atom.head);
 	}
 
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
@@ -1668,6 +1879,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 {
 	uint32_t crtc_mask;
 	uint32_t supported_mask;
+	int ret;
 	int id, h, nheads, count = 0;
 
 	/*
@@ -1692,6 +1904,9 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	supported_mask = nvkm_gsp_disp_supported_mask(sc);
 	if (supported_mask == 0)
 		return (0);
+	ret = nvkm_connector_properties_init(dev, sc);
+	if (ret != 0)
+		return (ret);
 	if (!sc->kms_task_initialized) {
 		TASK_INIT(&sc->kms_task, 0, nvkm_drm_kms_task, sc);
 		sc->kms_task_initialized = true;
@@ -1819,6 +2034,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nc->base.polled = DRM_CONNECTOR_POLL_HPD;
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
+		nvkm_connector_attach_properties(nc);
 
 		if (drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
 		    encoder_type, NULL) == 0) {
