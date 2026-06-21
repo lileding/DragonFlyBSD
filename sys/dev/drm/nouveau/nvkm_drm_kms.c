@@ -1802,11 +1802,67 @@ nvkm_crtc_check_lut_size(const struct drm_property_blob *blob,
 	return (0);
 }
 
+/*
+ * Validate a CRTC timing mode and fill the derived crtc_* fields.
+ *
+ * Ownership:
+ *   The caller owns @mode. This helper only borrows it for the duration of the
+ *   call and updates the derived timing fields in place.
+ *
+ * Lifetime:
+ *   No pointer is retained after return. Atomic check passes the live adjusted
+ *   mode; GETCONNECTOR mode probing passes a stack copy through
+ *   nvkm_crtc_mode_valid().
+ *
+ * Threading:
+ *   Runs under DRM modeset/probe locking and touches only caller-owned mode
+ *   storage. It does not acquire nvkm locks or program hardware.
+ */
+static enum drm_mode_status
+nvkm_crtc_validate_timing(struct drm_display_mode *mode)
+{
+	drm_mode_set_crtcinfo(mode,
+	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
+
+	if (mode->crtc_clock <= 0)
+		return (MODE_CLOCK_LOW);
+	if (mode->crtc_clock > (int)(0x7fffffffu / 1000u))
+		return (MODE_CLOCK_HIGH);
+	if (mode->crtc_hdisplay == 0 || mode->crtc_htotal == 0)
+		return (MODE_H_ILLEGAL);
+	if (mode->crtc_vdisplay == 0 || mode->crtc_vtotal == 0)
+		return (MODE_V_ILLEGAL);
+	if (mode->crtc_hsync_end <= mode->crtc_hsync_start)
+		return (MODE_H_ILLEGAL);
+	if (mode->crtc_vsync_end <= mode->crtc_vsync_start)
+		return (MODE_V_ILLEGAL);
+	if (mode->crtc_hblank_end <= mode->crtc_hsync_start)
+		return (MODE_H_ILLEGAL);
+	if (mode->crtc_vblank_end <= mode->crtc_vsync_start)
+		return (MODE_V_ILLEGAL);
+	if (mode->crtc_hdisplay > 0xffff || mode->crtc_htotal > 0xffff)
+		return (MODE_BAD_HVALUE);
+	if (mode->crtc_vdisplay > 0xffff || mode->crtc_vtotal > 0xffff)
+		return (MODE_BAD_VVALUE);
+	return (MODE_OK);
+}
+
+static enum drm_mode_status
+nvkm_crtc_mode_valid(struct drm_crtc *crtc,
+    const struct drm_display_mode *mode)
+{
+	struct drm_display_mode crtc_mode = *mode;
+
+	(void)crtc;
+	return (nvkm_crtc_validate_timing(&crtc_mode));
+}
+
 static int
 nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct drm_display_mode *mode = &state->adjusted_mode;
+	enum drm_mode_status mode_status;
 	int ret;
 
 	if (state->color_mgmt_changed) {
@@ -1823,23 +1879,8 @@ nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 	if (!state->enable)
 		return (0);
 
-	drm_mode_set_crtcinfo(mode,
-	    CRTC_INTERLACE_HALVE_V | CRTC_STEREO_DOUBLE);
-
-	if (mode->crtc_clock <= 0 ||
-	    mode->crtc_clock > (int)(0x7fffffffu / 1000u))
-		return (-EINVAL);
-	if (mode->crtc_htotal == 0 || mode->crtc_vtotal == 0 ||
-	    mode->crtc_hdisplay == 0 || mode->crtc_vdisplay == 0)
-		return (-EINVAL);
-	if (mode->crtc_hsync_end <= mode->crtc_hsync_start ||
-	    mode->crtc_vsync_end <= mode->crtc_vsync_start)
-		return (-EINVAL);
-	if (mode->crtc_hblank_end <= mode->crtc_hsync_start ||
-	    mode->crtc_vblank_end <= mode->crtc_vsync_start)
-		return (-EINVAL);
-	if (mode->crtc_htotal > 0xffff || mode->crtc_vtotal > 0xffff ||
-	    mode->crtc_hdisplay > 0xffff || mode->crtc_vdisplay > 0xffff)
+	mode_status = nvkm_crtc_validate_timing(mode);
+	if (mode_status != MODE_OK)
 		return (-EINVAL);
 	return (0);
 
@@ -1992,6 +2033,7 @@ nvkm_crtc_page_flip(struct drm_crtc *crtc, struct drm_framebuffer *fb,
 }
 
 static const struct drm_crtc_helper_funcs nvkm_crtc_helper_funcs = {
+	.mode_valid	= nvkm_crtc_mode_valid,
 	.atomic_check	= nvkm_crtc_atomic_check,
 	.atomic_flush	= nvkm_crtc_atomic_flush,
 	.atomic_enable	= nvkm_crtc_atomic_enable,
