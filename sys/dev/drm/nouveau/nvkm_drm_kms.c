@@ -1619,25 +1619,48 @@ nvkm_framebuffer_bo_size_check(const struct drm_framebuffer *fb,
 	return (0);
 }
 
+/*
+ * Ownership:
+ *   Borrows state and fb from the DRM atomic check path.
+ * Lifetime:
+ *   No pointer is retained; the bridge later snapshots the same committed
+ *   plane state into scalar window fields before programming hardware.
+ * Threading:
+ *   Pure validation under DRM atomic locks. No nvkm locks or GSP RPCs.
+ */
 static bool
-nvkm_primary_source_is_full_framebuffer(const struct drm_plane_state *state,
-    const struct drm_framebuffer *fb)
+nvkm_primary_source_is_supported(const struct drm_plane_state *state,
+    const struct drm_crtc_state *crtc_state, const struct drm_framebuffer *fb)
 {
-	uint32_t width;
-	uint32_t height;
+	uint32_t src_x;
+	uint32_t src_y;
+	uint32_t src_w;
+	uint32_t src_h;
 
-	if (state == NULL || fb == NULL || state->crtc_w <= 0 ||
-	    state->crtc_h <= 0)
+	if (state == NULL || crtc_state == NULL || fb == NULL ||
+	    state->crtc_w <= 0 || state->crtc_h <= 0)
+		return (false);
+	if (state->crtc_x != 0 || state->crtc_y != 0)
+		return (false);
+	if (state->crtc_w != crtc_state->mode.hdisplay ||
+	    state->crtc_h != crtc_state->mode.vdisplay)
+		return (false);
+	if ((state->src_x & 0xffffu) != 0 ||
+	    (state->src_y & 0xffffu) != 0 ||
+	    (state->src_w & 0xffffu) != 0 ||
+	    (state->src_h & 0xffffu) != 0)
 		return (false);
 
-	width = (uint32_t)state->crtc_w;
-	height = (uint32_t)state->crtc_h;
-	if (state->crtc_x != 0 || state->crtc_y != 0 ||
-	    fb->width != width || fb->height != height)
+	src_x = state->src_x >> 16;
+	src_y = state->src_y >> 16;
+	src_w = state->src_w >> 16;
+	src_h = state->src_h >> 16;
+	if (src_w == 0 || src_h == 0)
 		return (false);
-	if (state->src_x != 0 || state->src_y != 0 ||
-	    state->src_w != (width << 16) ||
-	    state->src_h != (height << 16))
+	if (src_w != state->crtc_w || src_h != state->crtc_h)
+		return (false);
+	if (src_x > fb->width || src_y > fb->height ||
+	    src_w > fb->width - src_x || src_h > fb->height - src_y)
 		return (false);
 	return (true);
 }
@@ -1733,7 +1756,7 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 	if (!nvkm_plane_format_mod_supported(plane, fb->format->format,
 	    fb->modifier))
 		return (-EINVAL);
-	if (!nvkm_primary_source_is_full_framebuffer(state, fb))
+	if (!nvkm_primary_source_is_supported(state, crtc_state, fb))
 		return (-EINVAL);
 	if ((fb->pitches[0] & 0x3fu) != 0)
 		return (-EINVAL);
