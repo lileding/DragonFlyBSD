@@ -709,6 +709,14 @@ struct nvkm_softc {
 	uint64_t		kms_dark_down_error_count;
 	int			kms_dark_down_last_error;
 	uint64_t		kms_link_status_bad_count;
+	uint64_t		kms_dp_sst_candidate_count;
+	uint64_t		kms_dp_sst_train_count;
+	uint64_t		kms_dp_sst_train_fail_count;
+	uint64_t		kms_dp_sst_program_count;
+	uint64_t		kms_dp_sst_program_fail_count;
+	uint64_t		kms_dp_sst_fallback_count;
+	uint64_t		kms_dp_sst_enable_success_count;
+	int			kms_dp_sst_last_error;
 	uint64_t		kms_dp_irq_count;
 	uint64_t		kms_dp_irq_link_good_count;
 	uint64_t		kms_dp_irq_link_bad_count;
