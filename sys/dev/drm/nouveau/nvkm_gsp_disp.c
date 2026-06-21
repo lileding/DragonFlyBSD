@@ -1435,11 +1435,12 @@ r535_disp_hpd(struct nvkm_gsp_event *event, void *repv, u32 repc)
 	}
 
 #ifdef __DragonFly__
-	if (hpd->plugDisplayMask) {
+	if (hpd->plugDisplayMask || hpd->unplugDisplayMask) {
 		struct nvkm_gsp *gsp = disp->engine.subdev.device->gsp;
 
 		if (gsp && gsp->sc)
-			(void)nvkm_drm_kms_schedule(gsp->sc, "hotplug");
+			nvkm_drm_kms_hpd_schedule(gsp->sc,
+			    hpd->plugDisplayMask, hpd->unplugDisplayMask);
 	}
 #endif
 }

@@ -603,6 +603,7 @@ nvkm_pci_attach(device_t dev)
 	LIST_INIT(&sc->gsp_pending);
 	LIST_INIT(&sc->exec_pending);
 	spin_init(&sc->hotproc_lock, "nvkmhp");
+	spin_init(&sc->kms_hpd_lock, "nvkmhpd");
 
 	nvkm_debugf(dev,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
@@ -1117,6 +1118,7 @@ nvkm_pci_detach(device_t dev)
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
+	spin_uninit(&sc->kms_hpd_lock);
 	spin_uninit(&sc->hotproc_lock);
 
 	kfree(sc);
