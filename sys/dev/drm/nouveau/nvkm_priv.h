@@ -676,8 +676,20 @@ struct nvkm_softc {
 	uint32_t		fence_seqno;
 	struct task		kms_task;
 	bool			kms_task_initialized;
+	struct task		kms_hpd_task;
+	bool			kms_hpd_task_initialized;
+	struct spinlock		kms_hpd_lock;
+	uint32_t		kms_hpd_pending_plug_mask;
+	uint32_t		kms_hpd_pending_unplug_mask;
+	uint32_t		kms_hpd_last_plug_mask;
+	uint32_t		kms_hpd_last_unplug_mask;
 	uint64_t		kms_auto_count;
 	uint64_t		kms_hotplug_count;
+	uint64_t		kms_hotplug_changed_count;
+	uint64_t		kms_hotplug_nochange_count;
+	uint64_t		kms_hotplug_notify_only_count;
+	uint64_t		kms_hotplug_auto_kms_count;
+	uint64_t		kms_hotplug_enqueue_error_count;
 	uint64_t		kms_restore_skip_primary_count;
 	uint32_t		kms_restore_last_primary_count;
 	int			kms_restore_last_open_count;
@@ -1506,6 +1518,16 @@ void	nvkm_hotproc_record(struct nvkm_softc *sc,
  */
 void	nvkm_hotproc_snapshot(struct nvkm_softc *sc,
 	    struct nvkm_hotproc_slot *dst, uint32_t dst_count);
+/*
+ * Ownership: records GSP HPD masks in nvkm_softc and queues the nvkm-owned
+ * KMS HPD task. The caller retains no ownership after the call returns.
+ * Lifetime: plug_mask/unplug_mask are value snapshots from one GSP event;
+ * queued masks are consumed once by the process-context HPD worker.
+ * Threading: callable from GSP event/interrupt context. It only takes
+ * sc->kms_hpd_lock briefly and never takes DRM modeset locks or gsp_tok.
+ */
+void	nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc,
+	    uint32_t plug_mask, uint32_t unplug_mask);
 
 /* Per-file VM-wide EXEC completion set; no_share BOs alias their fence-wait
  * resv to it (see nvkm_bo_resv). */

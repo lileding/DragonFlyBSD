@@ -1524,16 +1524,122 @@ nvkm_drm_kms_schedule(struct nvkm_softc *sc, const char *reason)
 	return (ret);
 }
 
+static bool
+nvkm_drm_kms_has_master(struct drm_device *dev)
+{
+	bool has_master;
+
+	if (dev == NULL)
+		return (false);
+
+	mutex_lock(&dev->master_mutex);
+	has_master = dev->master != NULL;
+	mutex_unlock(&dev->master_mutex);
+	return (has_master);
+}
+
+static void
+nvkm_drm_kms_hpd_task(void *arg, int pending)
+{
+	struct nvkm_softc *sc = arg;
+	struct drm_device *dev;
+	uint32_t plug_mask;
+	uint32_t unplug_mask;
+	bool changed;
+	int ret;
+
+	(void)pending;
+	if (sc == NULL || sc->drm_dev == NULL)
+		return;
+	dev = sc->drm_dev;
+
+	spin_lock(&sc->kms_hpd_lock);
+	plug_mask = sc->kms_hpd_pending_plug_mask;
+	unplug_mask = sc->kms_hpd_pending_unplug_mask;
+	sc->kms_hpd_pending_plug_mask = 0;
+	sc->kms_hpd_pending_unplug_mask = 0;
+	sc->kms_hpd_last_plug_mask = plug_mask;
+	sc->kms_hpd_last_unplug_mask = unplug_mask;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	if ((plug_mask | unplug_mask) == 0)
+		return;
+
+	sc->kms_hotplug_count++;
+	changed = drm_helper_hpd_irq_event(dev);
+	if (changed)
+		sc->kms_hotplug_changed_count++;
+	else
+		sc->kms_hotplug_nochange_count++;
+
+	if (nvkm_drm_kms_has_master(dev)) {
+		sc->kms_hotplug_notify_only_count++;
+		nvkm_infof(sc->dev,
+		    "drm: HPD plug=0x%08x unplug=0x%08x changed=%d master=1\n",
+		    plug_mask, unplug_mask, changed);
+		return;
+	}
+
+	if (!changed) {
+		nvkm_infof(sc->dev,
+		    "drm: HPD plug=0x%08x unplug=0x%08x changed=0 master=0\n",
+		    plug_mask, unplug_mask);
+		return;
+	}
+
+	sc->kms_hotplug_auto_kms_count++;
+	ret = nvkm_drm_kms_schedule(sc, "hotplug-auto");
+	if (ret != 0) {
+		sc->kms_hotplug_enqueue_error_count++;
+		nvkm_infof(sc->dev,
+		    "drm: HPD auto KMS enqueue failed plug=0x%08x "
+		    "unplug=0x%08x err=%d\n", plug_mask, unplug_mask, ret);
+	}
+}
+
+void
+nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc, uint32_t plug_mask,
+    uint32_t unplug_mask)
+{
+	int ret;
+
+	if (sc == NULL || sc->drm_dev == NULL ||
+	    !sc->kms_hpd_task_initialized ||
+	    (plug_mask | unplug_mask) == 0)
+		return;
+
+	spin_lock(&sc->kms_hpd_lock);
+	sc->kms_hpd_pending_plug_mask |= plug_mask;
+	sc->kms_hpd_pending_unplug_mask |= unplug_mask;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	ret = taskqueue_enqueue(taskqueue_thread[0], &sc->kms_hpd_task);
+	if (ret != 0)
+		sc->kms_hotplug_enqueue_error_count++;
+}
+
 void
 nvkm_drm_kms_fini(struct nvkm_softc *sc)
 {
-	if (sc == NULL || !sc->kms_task_initialized)
+	if (sc == NULL)
 		return;
 
-	while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_task, NULL) != 0)
+	if (sc->kms_hpd_task_initialized) {
+		sc->kms_hpd_task_initialized = false;
+		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_hpd_task,
+		    NULL) != 0)
+			taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
+		taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
+	}
+	if (sc->drm_dev != NULL && sc->drm_dev->mode_config.poll_enabled)
+		drm_kms_helper_poll_fini(sc->drm_dev);
+	if (sc->kms_task_initialized) {
+		sc->kms_task_initialized = false;
+		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_task,
+		    NULL) != 0)
+			taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
 		taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
-	taskqueue_drain(taskqueue_thread[0], &sc->kms_task);
-	sc->kms_task_initialized = false;
+	}
 }
 
 int
@@ -1568,6 +1674,10 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	if (!sc->kms_task_initialized) {
 		TASK_INIT(&sc->kms_task, 0, nvkm_drm_kms_task, sc);
 		sc->kms_task_initialized = true;
+	}
+	if (!sc->kms_hpd_task_initialized) {
+		TASK_INIT(&sc->kms_hpd_task, 0, nvkm_drm_kms_hpd_task, sc);
+		sc->kms_hpd_task_initialized = true;
 	}
 
 	/* (1) One CRTC (HEAD) + primary plane (window) per head. The plane's
@@ -1673,6 +1783,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 
 		drm_connector_init(dev, &nc->base, &nvkm_connector_funcs,
 		    connector_type);
+		nc->base.polled = DRM_CONNECTOR_POLL_HPD;
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
 
@@ -1692,6 +1803,8 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 	}
 
 	drm_mode_config_reset(dev);
+	if (count > 0 && !dev->mode_config.poll_enabled)
+		drm_kms_helper_poll_init(dev);
 	nvkm_infof(sc->dev,
 	    "drm: KMS init -- %d head(s), %d connector(s)\n", nheads, count);
 	return (0);

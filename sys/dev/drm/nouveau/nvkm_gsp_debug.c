@@ -594,6 +594,20 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_auto_count);
 	sbuf_printf(sb, "hotplug_count = %llu\n",
 	    (unsigned long long)sc->kms_hotplug_count);
+	sbuf_printf(sb, "hotplug_changed_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_changed_count);
+	sbuf_printf(sb, "hotplug_nochange_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_nochange_count);
+	sbuf_printf(sb, "hotplug_notify_only_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_notify_only_count);
+	sbuf_printf(sb, "hotplug_auto_kms_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_auto_kms_count);
+	sbuf_printf(sb, "hotplug_enqueue_error_count = %llu\n",
+	    (unsigned long long)sc->kms_hotplug_enqueue_error_count);
+	sbuf_printf(sb, "hpd_last_plug_mask = 0x%08x\n",
+	    sc->kms_hpd_last_plug_mask);
+	sbuf_printf(sb, "hpd_last_unplug_mask = 0x%08x\n",
+	    sc->kms_hpd_last_unplug_mask);
 	sbuf_printf(sb, "restore_skip_primary_count = %llu\n",
 	    (unsigned long long)sc->kms_restore_skip_primary_count);
 	sbuf_printf(sb, "restore_last_primary_count = %u\n",
