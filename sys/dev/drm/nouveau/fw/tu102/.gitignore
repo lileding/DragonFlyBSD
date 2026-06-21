@@ -19,6 +19,6 @@ opt_*.h
 
 # Firmware build artifacts
 *.fwo
-nvkm_fw_*.c
+nvgsp_*.c
 bootloader.bin
 gsp.bin

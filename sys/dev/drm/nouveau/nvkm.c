@@ -67,4 +67,4 @@ MODULE_VERSION(nvkm, 1);
 /* Pull in the GSP firmware blobs registered by the fw module so
  * firmware_get() works during device attach, regardless of which
  * .ko the kld scanner picks up first at boot. */
-MODULE_DEPEND(nvkm, nvkm_fw_tu102_570_fw, 1, 1, 1);
+MODULE_DEPEND(nvkm, nvgsp_570_fw, 1, 1, 1);

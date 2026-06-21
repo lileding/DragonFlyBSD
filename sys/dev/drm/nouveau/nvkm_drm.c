@@ -8018,16 +8018,54 @@ struct nvif_ioctl_sclass_v0 {
 };
 #define NVIF_IOCTL_V0_SCLASS	0x01
 
-/* TU102 supported object classes (low byte = engine type). */
-static const struct nvif_ioctl_sclass_oclass_v0 nvkm_tu102_classes[] = {
-	{ .oclass = 0xc597 },    /* TURING_A          — 3D */
-	{ .oclass = 0xc5c0 },    /* TURING_COMPUTE_A  — compute */
-	{ .oclass = 0xc5b5 },    /* TURING_DMA_COPY_A — copy */
-	{ .oclass = 0x902d },    /* FERMI_TWOD_A      — 2D */
-	{ .oclass = 0xa140 },    /* KEPLER_INLINE_TO_MEMORY_B — m2mf; Turing reports this, not 0x9039 (NVK queue init asserts if M2MF<=FERMI) */
-};
-#define NVKM_TU102_NUM_CLASSES \
-	(sizeof(nvkm_tu102_classes) / sizeof(nvkm_tu102_classes[0]))
+static uint32_t
+nvkm_drm_chip_classes(struct nvkm_softc *sc,
+    uint32_t classes[NVKM_CHIP_CLASS_COUNT])
+{
+	const struct nvkm_chip_config *chip = sc->chip;
+	uint32_t count = 0;
+
+	if (chip == NULL)
+		return (0);
+	if (chip->class_3d != 0)
+		classes[count++] = chip->class_3d;
+	if (chip->class_compute != 0)
+		classes[count++] = chip->class_compute;
+	if (chip->class_copy != 0)
+		classes[count++] = chip->class_copy;
+	if (chip->class_twod != 0)
+		classes[count++] = chip->class_twod;
+	if (chip->class_m2mf != 0)
+		classes[count++] = chip->class_m2mf;
+	return (count);
+}
+
+static bool
+nvkm_drm_chip_class_supported(struct nvkm_softc *sc, uint32_t oclass)
+{
+	uint32_t classes[NVKM_CHIP_CLASS_COUNT];
+	uint32_t count;
+
+	count = nvkm_drm_chip_classes(sc, classes);
+	for (uint32_t i = 0; i < count; i++) {
+		if (classes[i] == oclass)
+			return (true);
+	}
+	return (false);
+}
+
+static bool
+nvkm_drm_chip_class_needs_gr_ctx(struct nvkm_softc *sc, uint32_t oclass)
+{
+	const struct nvkm_chip_config *chip = sc->chip;
+
+	if (chip == NULL)
+		return (false);
+	return (oclass == chip->class_3d ||
+	    oclass == chip->class_compute ||
+	    oclass == chip->class_twod ||
+	    oclass == chip->class_m2mf);
+}
 
 #define NOUVEAU_FIFO_ENGINE_GR	0x01
 #define NOUVEAU_FIFO_ENGINE_CE	0x30
@@ -8285,9 +8323,7 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		gp->value = pci_get_device(sc->dev);
 		break;
 	case NOUVEAU_GETPARAM_CHIPSET_ID:
-		/* TU102 chipset id 0x162. We could query GSP-RM but it's
-		 * a known value for our hardware. */
-		gp->value = 0x162;
+		gp->value = sc->chip->chipset;
 		break;
 	case NOUVEAU_GETPARAM_BUS_TYPE:
 		/* Legacy GETPARAM bus enum (Linux nouveau_abi16): AGP=0, PCI=1,
@@ -8313,9 +8349,10 @@ nvkm_drm_ioctl_getparam(struct drm_device *ddev, void *data,
 		gp->value = NVKM_DRM_GPFIFO_ENTRIES / 2 - 1;
 		break;
 	case NOUVEAU_GETPARAM_GRAPH_UNITS:
-		/* NVK interprets low 8 bits as GPC count and bits 8..23 as TPC count.
-		 * TU102 / RTX 2080 Ti has 6 GPCs and 34 TPCs (68 SMs / 2 MPs per TPC). */
-		gp->value = (34ULL << 8) | 6ULL;
+		/* NVK interprets low 8 bits as GPC count and bits 8..23
+		 * as TPC count. Keep the per-chip value in the chip table
+		 * instead of encoding a TU102-only topology here. */
+		gp->value = sc->chip->graph_units;
 		break;
 	case NOUVEAU_GETPARAM_VRAM_USED:
 		/* NVK asserts >0 on success; force fail so NVK uses 0 fallback. */
@@ -8399,35 +8436,30 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			/* stub: accept the NV_DEVICE allocation. */
 			return (0);
 		}
-		switch (new_->oclass) {
-		case 0xc597: case 0xc5c0: case 0xc5b5:
-		case 0x902d: case 0xa140:
-			if (nfile == NULL)
-				return (-ENXIO);
-			dchan = nvkm_drm_channel_find(nfile,
-			    (uint32_t)hdr->token);
-			if (dchan == NULL || dchan->chan == NULL)
-				return (-ENOENT);
-			if (new_->oclass == 0xc597 || new_->oclass == 0xc5c0 ||
-			    new_->oclass == 0x902d || new_->oclass == 0xa140) {
-				err = nvkm_gsp_chan_promote_gr_ctx(nfile->vmm,
-				    dchan->chan, 0);
-				if (err != 0)
-					return (-err);
-			}
-			obj = nvkm_drm_channel_obj_slot(dchan);
-			if (obj == NULL)
-				return (-ENOMEM);
-			err = nvkm_gsp_chan_alloc_obj(dchan->chan, new_->handle,
-			    new_->oclass, &obj->object);
+		if (!nvkm_drm_chip_class_supported(sc, new_->oclass))
+			return (-EINVAL);
+		if (nfile == NULL)
+			return (-ENXIO);
+		dchan = nvkm_drm_channel_find(nfile, (uint32_t)hdr->token);
+		if (dchan == NULL || dchan->chan == NULL)
+			return (-ENOENT);
+		if (nvkm_drm_chip_class_needs_gr_ctx(sc, new_->oclass)) {
+			err = nvkm_gsp_chan_promote_gr_ctx(nfile->vmm,
+			    dchan->chan, 0);
 			if (err != 0)
 				return (-err);
-			obj->handle = new_->handle;
-			obj->oclass = new_->oclass;
-			obj->nvif_object = new_->object;
-			return (0);
 		}
-		return (-EINVAL);
+		obj = nvkm_drm_channel_obj_slot(dchan);
+		if (obj == NULL)
+			return (-ENOMEM);
+		err = nvkm_gsp_chan_alloc_obj(dchan->chan, new_->handle,
+		    new_->oclass, &obj->object);
+		if (err != 0)
+			return (-err);
+		obj->handle = new_->handle;
+		obj->oclass = new_->oclass;
+		obj->nvif_object = new_->object;
+		return (0);
 	}
 	case NVIF_IOCTL_V0_MTHD: {
 		struct nvif_ioctl_mthd_v0 *mthd = (void *)hdr->data;
@@ -8436,16 +8468,18 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 			memset(info, 0, sizeof(*info));
 			info->version  = 0;
 			info->platform = NV_DEVICE_INFO_V0_PCIE;
-			info->chipset  = 0x162;	/* TU102 */
+			info->chipset  = sc->chip->chipset;
 			info->revision = pci_get_revid(sc->dev);
 			info->family   = 0x0a;	/* TURING per nv_device.h family enum */
 			info->ram_size = sc->fb_usable_size;
 			info->ram_user = sc->fb_usable_size;
-			strncpy(info->chip, "TU102", sizeof(info->chip));
-			strncpy(info->name, "NVIDIA GeForce RTX 2080 Ti",
+			strncpy(info->chip, sc->chip->chip, sizeof(info->chip));
+			strncpy(info->name, sc->pci_device != NULL ?
+			    sc->pci_device->name : sc->chip->fallback_name,
 			    sizeof(info->name));
 			nvkm_debugf(sc->dev,
-			    "nvkm_drm: NVIF MTHD DEVICE_INFO -> TU102 ram=0x%llx user=0x%llx bar1=0x%llx\n",
+			    "nvkm_drm: NVIF MTHD DEVICE_INFO -> %s ram=0x%llx user=0x%llx bar1=0x%llx\n",
+			    info->chip,
 			    (unsigned long long)info->ram_size,
 			    (unsigned long long)info->ram_user,
 			    (unsigned long long)(sc->bar_res[1] != NULL ?
@@ -8456,13 +8490,18 @@ nvkm_drm_ioctl_nvif(struct drm_device *ddev, void *data,
 	}
 	case NVIF_IOCTL_V0_SCLASS: {
 		struct nvif_ioctl_sclass_v0 *sc_ = (void *)hdr->data;
+		uint32_t classes[NVKM_CHIP_CLASS_COUNT];
+		uint32_t count = nvkm_drm_chip_classes(sc, classes);
 		uint32_t want = sc_->count;
-		uint32_t fill = want < NVKM_TU102_NUM_CLASSES ?
-		    want : NVKM_TU102_NUM_CLASSES;
+		uint32_t fill = want < count ? want : count;
+
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: NVIF SCLASS want=%u fill=%u\n", want, fill);
-		for (uint32_t i = 0; i < fill; i++)
-			sc_->oclass[i] = nvkm_tu102_classes[i];
+		for (uint32_t i = 0; i < fill; i++) {
+			sc_->oclass[i].oclass = classes[i];
+			sc_->oclass[i].minver = 0;
+			sc_->oclass[i].maxver = 0;
+		}
 		sc_->count = fill;
 		return (0);
 	}

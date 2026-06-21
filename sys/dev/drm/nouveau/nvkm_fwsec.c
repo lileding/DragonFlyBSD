@@ -532,9 +532,10 @@ nvkm_fwsec_run_cmd(struct nvkm_softc *sc, uint32_t init_cmd,
 	    bl_desc.code_entry_point);
 
 	/* 5. Get the generic ACR bootloader firmware. */
-	bl_fw = firmware_get("nvidia/tu102/acr/bl");
+	bl_fw = firmware_get(sc->chip->fw_acr_bl);
 	if (bl_fw == NULL) {
-		nvkm_debugf(sc->dev, "fwsec: acr/bl firmware not loaded\n");
+		nvkm_debugf(sc->dev,
+		    "fwsec: %s firmware not loaded\n", sc->chip->fw_acr_bl);
 		nvkm_dmamem_free(sc, &fw_dma);
 		return (ENOENT);
 	}

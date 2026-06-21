@@ -410,7 +410,7 @@ nvkm_gsp_cmdq_push(struct nvkm_softc *sc, void *params)
 	 * updated write pointer is visible before the doorbell MMIO write. */
 	if (sc->gsp_running) {
 		cpu_sfence();
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0xc00, 0);
+		nvkm_wr32(sc, sc->chip->gsp_base + 0xc00, 0);
 	}
 
 #ifdef NVKM_DEBUG_RPC_TRACE

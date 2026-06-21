@@ -86,25 +86,22 @@ void	nvkm_infof(device_t dev, const char *fmt, ...) __printflike(2, 3);
 void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
 	    uint32_t chid, int error, uint64_t fault_addr);
 
-/* Initial supported device. Phase 0 targets only TU102. */
-#define NVKM_PCI_DEVICE_TU102	0x1e07
-
 /* PMC: NVIDIA Master Control. Chip identification. */
 #define NV_PMC_BOOT_0		0x00000000
 
 /*
- * TU102 SEC2 engine BAR0 offsets.
+ * TU10x SEC2 engine BAR0 offsets.
  *   NV_PSEC                 = 0x840000..0x843fff
  *   NV_PSEC_FBIF_BASE       = 0x840600
  *   NV_PSEC_FALCON_ENGINE   = 0x8403c0
  * Turing SEC2 is Falcon-only (no RISC-V), so the second register block
  * is unused. From open-rm dev_sec_pri.h / dev_sec_addendum.h.
  */
-#define NVKM_TU102_SEC2_BASE	0x00840000
-#define NVKM_TU102_SEC2_FBIF	0x00840600
+#define NVKM_TU10X_SEC2_BASE	0x00840000
+#define NVKM_TU10X_SEC2_FBIF	0x00840600
 
 /*
- * TU102 GSP-Falcon (GSP-lite) BAR0 offsets. The GSP engine on Turing
+ * TU10x GSP-Falcon (GSP-lite) BAR0 offsets. The GSP engine on Turing
  * contains both a Falcon core (used for HS firmware like FwSec) and a
  * RISC-V core (used for GSP-RM itself). FwSec-FRTS and FwSec-SB run
  * on the Falcon; the booter then resets GSP into RISC-V mode.
@@ -113,9 +110,9 @@ void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
  *   NV_FALCON2_GSP_BASE     = 0x111000 (RISC-V control regs)
  * From open-rm dev_gsp.h / dev_gsp_addendum.h / dev_riscv_pri.h.
  */
-#define NVKM_TU102_GSP_BASE	0x00110000
-#define NVKM_TU102_GSP_FBIF	0x00110600
-#define NVKM_TU102_GSP_RISCV	0x00111000
+#define NVKM_TU10X_GSP_BASE	0x00110000
+#define NVKM_TU10X_GSP_FBIF	0x00110600
+#define NVKM_TU10X_GSP_RISCV	0x00111000
 
 /*
  * PCI cfg-space mirror inside BAR0. cfg.addr is the same (0x088000) for the
@@ -168,6 +165,78 @@ void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
 
 struct firmware;
 struct nvkm_falcon;
+struct nvkm_rm_gpu;
+
+#define NVKM_CHIP_CLASS_COUNT	5
+
+/*
+ * Static chip capability record.
+ *
+ * Ownership:
+ *   The records are immutable globals owned by nvkm_chip.c. Device softc
+ *   instances borrow them through const pointers; callers must never free or
+ *   modify a record.
+ *
+ * Lifetime:
+ *   Records live for the whole kernel module lifetime. A softc stores its
+ *   selected record during attach and may read it until detach completes.
+ *
+ * Threading:
+ *   The data is read-only after module load, so it can be accessed from attach,
+ *   ioctl, interrupt, worker, and sysctl contexts without additional locking.
+ */
+struct nvkm_chip_config {
+	const char *chip;
+	const char *device_name;
+	const char *fallback_name;
+	uint32_t chipset;
+	uint32_t card_type;
+	uint32_t graph_units;
+
+	const char *fw_booter_load;
+	const char *fw_acr_bl;
+	const char *fw_gsp;
+	const char *fw_bootloader;
+	const char *fw_signature;
+
+	uint32_t sec2_base;
+	uint32_t sec2_fbif;
+	uint32_t gsp_base;
+	uint32_t gsp_fbif;
+	uint32_t gsp_riscv;
+
+	uint8_t display_heads;
+	uint8_t display_sors;
+	const struct nvkm_rm_gpu *rm_gpu;
+
+	uint8_t gmmu_pd3_shift;
+	uint8_t gmmu_pd2_shift;
+	uint8_t gmmu_pd1_shift;
+	uint8_t gmmu_pd0_shift;
+	uint8_t gmmu_big_shift;
+	uint8_t gmmu_small_shift;
+
+	uint32_t class_3d;
+	uint32_t class_compute;
+	uint32_t class_copy;
+	uint32_t class_twod;
+	uint32_t class_m2mf;
+};
+
+/*
+ * PCI-ID to chip mapping entry.
+ *
+ * Ownership/Lifetime/Threading:
+ *   Same as nvkm_chip_config: nvkm_chip.c owns immutable globals, and softc
+ *   instances only borrow them through const pointers.
+ */
+struct nvkm_pci_device {
+	uint16_t device;
+	const char *name;
+	const struct nvkm_chip_config *chip;
+};
+
+const struct nvkm_pci_device *nvkm_pci_device_lookup(uint16_t device);
 
 /*
  * A chunk of system memory that is mapped for DMA and visible to both
@@ -510,6 +579,8 @@ struct nvkm_bar1_page {
 
 struct nvkm_softc {
 	device_t		dev;
+	const struct nvkm_pci_device *pci_device;
+	const struct nvkm_chip_config *chip;
 
 	int			bar_rid[NVKM_NUM_BARS];
 	struct resource		*bar_res[NVKM_NUM_BARS];

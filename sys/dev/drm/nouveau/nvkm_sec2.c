@@ -27,9 +27,9 @@ nvkm_sec2_init(struct nvkm_softc *sc)
 
 	flcn = kmalloc(sizeof(*flcn), M_NVKM_SEC2, M_WAITOK | M_ZERO);
 	nvkm_falcon_init(flcn, sc, "sec2",
-	    NVKM_TU102_SEC2_BASE,
+	    sc->chip->sec2_base,
 	    0,				/* no RISC-V on Turing SEC2 */
-	    NVKM_TU102_SEC2_FBIF);
+	    sc->chip->sec2_fbif);
 	sc->sec2 = flcn;
 
 	hwcfg  = nvkm_falcon_rd32(flcn, NVKM_FLCN_HWCFG);

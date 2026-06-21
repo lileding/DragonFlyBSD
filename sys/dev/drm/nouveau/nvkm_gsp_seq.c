@@ -49,6 +49,9 @@ int
 nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 	struct nvkm_softc *sc = priv;
+	uint32_t gsp_base = sc->chip->gsp_base;
+	uint32_t gsp_riscv = sc->chip->gsp_riscv;
+	uint32_t sec2_base = sc->chip->sec2_base;
 	const uint8_t *payload = repv;
 	uint32_t payload_size = repc;
 	(void)fn;
@@ -144,27 +147,23 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			if (sc->gsp != NULL)
 				(void)nvkm_falcon_reset_eng(sc->gsp);
 			{
-				uint32_t v = nvkm_rd32(sc,
-				    NVKM_TU102_GSP_BASE + 0x624);
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x624,
-				    v | 0x80);
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x10c, 0);
+				uint32_t v = nvkm_rd32(sc, gsp_base + 0x624);
+				nvkm_wr32(sc, gsp_base + 0x624, v | 0x80);
+				nvkm_wr32(sc, gsp_base + 0x10c, 0);
 			}
 			break;
 		case NVKM_SEQ_OP_CORE_START: {
-			uint32_t v = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x100);
+			uint32_t v = nvkm_rd32(sc, gsp_base + 0x100);
 			if (v & 0x40)
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x130, 2);
+				nvkm_wr32(sc, gsp_base + 0x130, 2);
 			else
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x100, 2);
+				nvkm_wr32(sc, gsp_base + 0x100, 2);
 			break;
 		}
 		case NVKM_SEQ_OP_CORE_WAIT_FOR_HALT: {
 			int n;
 			for (n = 0; n < 200; n++) {
-				if (nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x100)
-				    & 0x10)
+				if (nvkm_rd32(sc, gsp_base + 0x100) & 0x10)
 					break;
 				DELAY(10000);	/* 10 ms */
 			}
@@ -189,23 +188,26 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 				(void)nvkm_falcon_reset_eng(sc->gsp);
 			{
 				uint64_t la = sc->gsp_libos.paddr;
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x040,
-				    (uint32_t)la);
-				nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
+				nvkm_wr32(sc, gsp_base + 0x040, (uint32_t)la);
+				nvkm_wr32(sc, gsp_base + 0x044,
 				    (uint32_t)(la >> 32));
 			}
 			nvkm_debugf(sc->dev,
 			    "seq: SEC2 pre-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x BOOTVEC=0x%x SCRATCH14=0x%x\n",
-			    nvkm_rd32(sc, 0x840100), nvkm_rd32(sc, 0x84010c),
-			    nvkm_rd32(sc, 0x840040), nvkm_rd32(sc, 0x840104),
+			    nvkm_rd32(sc, sec2_base + 0x100),
+			    nvkm_rd32(sc, sec2_base + 0x10c),
+			    nvkm_rd32(sc, sec2_base + 0x040),
+			    nvkm_rd32(sc, sec2_base + 0x104),
 			    nvkm_rd32(sc, 0x1180f8));
 			if (sc->sec2 != NULL)
 				nvkm_falcon_start(sc->sec2);
 			DELAY(100);
 			nvkm_debugf(sc->dev,
 			    "seq: SEC2 post-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x SCRATCH14=0x%x\n",
-			    nvkm_rd32(sc, 0x840100), nvkm_rd32(sc, 0x84010c),
-			    nvkm_rd32(sc, 0x840040), nvkm_rd32(sc, 0x1180f8));
+			    nvkm_rd32(sc, sec2_base + 0x100),
+			    nvkm_rd32(sc, sec2_base + 0x10c),
+			    nvkm_rd32(sc, sec2_base + 0x040),
+			    nvkm_rd32(sc, 0x1180f8));
 			{
 				int n;
 				for (n = 0; n < 200; n++) {
@@ -222,7 +224,7 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			}
 			{
 				uint32_t sec2_mb0 = nvkm_rd32(sc,
-				    0x840040);
+				    sec2_base + 0x040);
 				if (sec2_mb0 != 0) {
 					nvkm_debugf(sc->dev,
 					    "seq: CORE_RESUME SEC2 MB0=0x%x\n",
@@ -230,9 +232,9 @@ nvkm_gsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 					return (0);
 				}
 			}
-			nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x080, 0);
+			nvkm_wr32(sc, gsp_base + 0x080, 0);
 			{
-				uint32_t rsv = nvkm_rd32(sc, 0x111240);
+				uint32_t rsv = nvkm_rd32(sc, gsp_riscv + 0x240);
 				if (!(rsv & 1)) {
 					nvkm_debugf(sc->dev,
 					    "seq: CORE_RESUME failed (RISCV_STATUS=0x%x)\n",

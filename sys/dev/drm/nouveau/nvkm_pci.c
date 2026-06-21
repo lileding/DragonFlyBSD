@@ -30,37 +30,26 @@
 #define NVKM_CPU_INTR_TOP_EN_CLEAR	0x00b81610u
 #define NVKM_PCI_MSI_REARM	0x68
 
-struct nvkm_pci_id {
-	uint16_t	device;
-	const char	*name;
-};
-
-static const struct nvkm_pci_id nvkm_pci_ids[] = {
-	{ NVKM_PCI_DEVICE_TU102, "NVIDIA TU102 (RTX 2080 Ti family)" },
-	{ 0, NULL }
-};
-
-static const struct nvkm_pci_id *
+static const struct nvkm_pci_device *
 nvkm_pci_match(device_t dev)
 {
-	const struct nvkm_pci_id *id;
+	const struct nvkm_pci_device *id;
 
 	if (pci_get_vendor(dev) != NVKM_PCI_VENDOR_NVIDIA)
 		return (NULL);
-	for (id = nvkm_pci_ids; id->name != NULL; id++) {
-		if (id->device == pci_get_device(dev))
-			return (id);
-	}
-	return (NULL);
+	id = nvkm_pci_device_lookup(pci_get_device(dev));
+	return (id);
 }
 
 static int
 nvkm_pci_probe(device_t dev)
 {
-	const struct nvkm_pci_id *id;
+	const struct nvkm_pci_device *id;
 
 	id = nvkm_pci_match(dev);
 	if (id == NULL)
+		return (ENXIO);
+	if (id->chip == NULL)
 		return (ENXIO);
 	device_set_desc(dev, id->name);
 	return (BUS_PROBE_DEFAULT);
@@ -124,14 +113,16 @@ nvkm_gsp_drain_kthread(void *arg)
 static void
 nvkm_gsp_disp_intr_head_timing(struct nvkm_softc *sc, uint32_t head)
 {
+	uint32_t head_limit = sc->chip->display_heads;
 	uint32_t stat;
 
 	stat = nvkm_rd32(sc, 0x611c00 + head * 4u);
-	if (head < 4u)
+	if (head < head_limit && head < nitems(sc->gsp_disp_head_status))
 		sc->gsp_disp_head_status[head] = stat;
 
 	if (stat & 0x00000002u) {
-		if (head < 4u && sc->kms_crtc[head] != NULL)
+		if (head < head_limit && head < nitems(sc->kms_crtc) &&
+		    sc->kms_crtc[head] != NULL)
 			drm_crtc_handle_vblank(sc->kms_crtc[head]);
 		nvkm_wr32(sc, 0x611800 + head * 4u, 0x00000002u);
 	}
@@ -140,11 +131,13 @@ nvkm_gsp_disp_intr_head_timing(struct nvkm_softc *sc, uint32_t head)
 static void
 nvkm_gsp_falcon_intr_service(struct nvkm_softc *sc)
 {
+	uint32_t base = sc->chip->gsp_base;
+	uint32_t riscv = sc->chip->gsp_riscv;
 	uint32_t intr, inte, stat;
 
-	intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+	intr = nvkm_rd32(sc, base + 0x0008);
 	/* Falcon riscv_irqmask: addr2 (0x1000) + 0x2b4. */
-	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
+	inte = nvkm_rd32(sc, riscv + 0x2b4);
 	stat = intr & inte;
 	sc->gsp_falcon_intr_count++;
 	sc->gsp_falcon_last_stat = stat;
@@ -153,7 +146,7 @@ nvkm_gsp_falcon_intr_service(struct nvkm_softc *sc)
 		return;
 
 	if (stat & 0x00000040u) {
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, 0x00000040u);
+		nvkm_wr32(sc, base + 0x004, 0x00000040u);
 		sc->gsp_falcon_msgq_wake_count++;
 		if (sc->gsp_drain_td != NULL)
 			wakeup(&sc->gsp_drain_td);
@@ -163,8 +156,8 @@ nvkm_gsp_falcon_intr_service(struct nvkm_softc *sc)
 	if (stat != 0) {
 		sc->gsp_falcon_unexpected_count++;
 		nvkm_debugf(sc->dev, "gsp_isr: unexpected stat=0x%x\n", stat);
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x014, stat);
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x004, stat);
+		nvkm_wr32(sc, base + 0x014, stat);
+		nvkm_wr32(sc, base + 0x004, stat);
 	}
 }
 
@@ -172,14 +165,16 @@ static void
 nvkm_gsp_isr(void *arg)
 {
 	struct nvkm_softc *sc = arg;
+	uint32_t base = sc->chip->gsp_base;
+	uint32_t riscv = sc->chip->gsp_riscv;
 	uint32_t intr, inte, stat, top;
 
 	sc->irq_isr_count++;
 	nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_CLEAR, 0x0000000fu);
 	nvkm_gsp_msi_rearm(sc);
-	intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+	intr = nvkm_rd32(sc, base + 0x0008);
 	/* Falcon riscv_irqmask: addr2 (0x1000) + 0x2b4 */
-	inte = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x1000 + 0x2b4);
+	inte = nvkm_rd32(sc, riscv + 0x2b4);
 	stat = intr & inte;
 	top = nvkm_rd32(sc, NVKM_CPU_INTR_TOP);
 	sc->irq_last_stat = stat;
@@ -230,7 +225,7 @@ nvkm_gsp_isr(void *arg)
 				uint32_t head_mask = disp & 0xffu;
 
 				sc->gsp_disp_vblank_mask = disp;
-				for (uint32_t h = 0; h < 8u; h++) {
+				for (uint32_t h = 0; h < sc->chip->display_heads; h++) {
 					if (head_mask & (1u << h))
 						nvkm_gsp_disp_intr_head_timing(sc, h);
 				}
@@ -248,13 +243,13 @@ nvkm_gsp_isr(void *arg)
 	}
 
 	if (stat != 0) {
-		intr = nvkm_rd32(sc, NVKM_TU102_GSP_BASE + 0x0008);
+		intr = nvkm_rd32(sc, base + 0x0008);
 		if ((intr & inte) != 0)
 			nvkm_gsp_falcon_intr_service(sc);
 	}
 	nvkm_wr32(sc, NVKM_CPU_INTR_TOP_EN_SET, 0x0000000fu);
 	/* ga100_flcn_intr_retrigger(): NV_PFALCON_FALCON_INTR_RETRIGGER(0). */
-	nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x3e8, 0x1);
+	nvkm_wr32(sc, base + 0x3e8, 0x1);
 }
 
 static int
@@ -558,9 +553,14 @@ nvkm_gsp_on_init_done(void *priv, uint32_t fn, void *repv, uint32_t repc)
 static int
 nvkm_pci_attach(device_t dev)
 {
+	const struct nvkm_pci_device *id;
 	struct nvkm_softc *sc;
 	uint32_t boot0;
 	int i;
+
+	id = nvkm_pci_match(dev);
+	if (id == NULL)
+		return (ENXIO);
 
 	/* DragonFly amdgpu-style: device_t softc is just drm_softc (one void *).
 	 * Our state lives in a heap-alloc'd struct nvkm_softc, parked in
@@ -571,6 +571,8 @@ nvkm_pci_attach(device_t dev)
 		return (ENOMEM);
 	}
 	sc->dev = dev;
+	sc->pci_device = id;
+	sc->chip = id->chip;
 	sc->fence_context = dma_fence_context_alloc(1);
 	sc->fence_seqno = 1;
 	/*
@@ -680,11 +682,10 @@ nvkm_pci_attach(device_t dev)
 
 	if (sc->gsp != NULL && sc->gsp_libos.kva != NULL) {
 		uint64_t lp = sc->gsp_libos.paddr;
+		uint32_t base = sc->chip->gsp_base;
 		(void)nvkm_falcon_reset_eng(sc->gsp);
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x040,
-		    (uint32_t)(lp & 0xffffffffu));
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x044,
-		    (uint32_t)(lp >> 32));
+		nvkm_wr32(sc, base + 0x040, (uint32_t)(lp & 0xffffffffu));
+		nvkm_wr32(sc, base + 0x044, (uint32_t)(lp >> 32));
 		nvkm_debugf(sc->dev,
 		    "gsp: reset + libos args @0x%llx written to MB0/1\n",
 		    (unsigned long long)lp);
@@ -720,14 +721,15 @@ nvkm_pci_attach(device_t dev)
 	 *      at gspFwWprStart with verified = 0xa0a0a0a0a0a0a0a0).
 	 */
 	if (sc->gsp != NULL) {
+		uint32_t base = sc->chip->gsp_base;
+		uint32_t riscv = sc->chip->gsp_riscv;
 		uint32_t riscv_status;
 		int polls;
 
-		nvkm_wr32(sc, NVKM_TU102_GSP_BASE + 0x080, 0);
+		nvkm_wr32(sc, base + 0x080, 0);
 
 		for (polls = 0; polls < 100000; polls++) {
-			riscv_status = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_RISCV + 0x240);
+			riscv_status = nvkm_rd32(sc, riscv + 0x240);
 			if (riscv_status & 1)
 				break;
 			DELAY(10);
@@ -910,7 +912,7 @@ nvkm_pci_attach(device_t dev)
 					    &sc->irq_serialize);
 					if (err == 0) {
 						/* Arm doorbell IRQ in NV_USERMODE. */
-						nvkm_wr32(sc, 0x110004, 0x40);
+						nvkm_wr32(sc, sc->chip->gsp_base + 0x004, 0x40);
 						nvkm_gsp_msi_rearm(sc);
 						nvkm_debugf(dev,
 						    "gsp: IRQ wired (rid=%d), doorbell intr armed\n",
@@ -976,9 +978,9 @@ nvkm_pci_attach(device_t dev)
 			 */
 			{
 				uint32_t mb0_late = nvkm_rd32(sc,
-				    NVKM_TU102_GSP_BASE + 0x040);
+				    base + 0x040);
 				uint32_t mb1_late = nvkm_rd32(sc,
-				    NVKM_TU102_GSP_BASE + 0x044);
+				    base + 0x044);
 				nvkm_debugf(sc->dev,
 				    "gsp: late MB0=0x%08x MB1=0x%08x\n",
 				    mb0_late, mb1_late);
@@ -986,20 +988,13 @@ nvkm_pci_attach(device_t dev)
 		}
 
 		{
-			uint32_t cpuctl = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x100);
-			uint32_t bootvec= nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x104);
-			uint32_t irqstat= nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x008);
-			uint32_t mb0    = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x040);
-			uint32_t mb1    = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x044);
-			uint32_t exci   = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x024);
-			uint32_t sctl   = nvkm_rd32(sc,
-			    NVKM_TU102_GSP_BASE + 0x240);
+			uint32_t cpuctl = nvkm_rd32(sc, base + 0x100);
+			uint32_t bootvec= nvkm_rd32(sc, base + 0x104);
+			uint32_t irqstat= nvkm_rd32(sc, base + 0x008);
+			uint32_t mb0    = nvkm_rd32(sc, base + 0x040);
+			uint32_t mb1    = nvkm_rd32(sc, base + 0x044);
+			uint32_t exci   = nvkm_rd32(sc, base + 0x024);
+			uint32_t sctl   = nvkm_rd32(sc, base + 0x240);
 			nvkm_debugf(sc->dev,
 			    "gsp: F CPUCTL=0x%08x BOOTVEC=0x%08x SCTL=0x%08x "
 			    "EXCI=0x%08x IRQSTAT=0x%08x\n",
@@ -1079,7 +1074,7 @@ nvkm_pci_detach(device_t dev)
 	 * Disarm first so the doorbell IRQ stops firing into a handler
 	 * we are about to remove. */
 	if (sc->bar_res[0] != NULL)
-		nvkm_wr32(sc, 0x110004, 0x00);
+		nvkm_wr32(sc, sc->chip->gsp_base + 0x004, 0x00);
 
 	if (sc->irq_cookie != NULL) {
 		if (sc->gsp_test_td != NULL) {

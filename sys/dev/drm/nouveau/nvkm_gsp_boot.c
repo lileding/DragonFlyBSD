@@ -225,16 +225,17 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 		return (ENXIO);
 	}
 
-	gsp_fw = firmware_get("nvidia/tu102/gsp/gsp-570.144");
+	gsp_fw = firmware_get(sc->chip->fw_gsp);
 	if (gsp_fw == NULL) {
 		nvkm_debugf(sc->dev,
-		    "gsp_boot: GSP image firmware not loaded\n");
+		    "gsp_boot: %s firmware not loaded\n", sc->chip->fw_gsp);
 		return (ENOENT);
 	}
-	bl_fw  = firmware_get("nvidia/tu102/gsp/bootloader-570.144");
+	bl_fw  = firmware_get(sc->chip->fw_bootloader);
 	if (bl_fw == NULL) {
 		nvkm_debugf(sc->dev,
-		    "gsp_boot: GSP bootloader firmware not loaded\n");
+		    "gsp_boot: %s firmware not loaded\n",
+		    sc->chip->fw_bootloader);
 		firmware_put(gsp_fw, FIRMWARE_UNLOAD);
 		return (ENOENT);
 	}
@@ -251,17 +252,18 @@ nvkm_gsp_boot_prepare(struct nvkm_softc *sc)
 			goto out_put;
 		}
 		error = nvkm_elf_section(gsp_fw->data, gsp_fw->datasize,
-		    ".fwsignature_tu10x", &sig_off, &sig_size);
+		    sc->chip->fw_signature, &sig_off, &sig_size);
 		if (error != 0) {
 			nvkm_debugf(sc->dev,
-			    "gsp_boot: ELF has no .fwsignature_tu10x (%d)\n",
-			    error);
+			    "gsp_boot: ELF has no %s (%d)\n",
+			    sc->chip->fw_signature, error);
 			goto out_put;
 		}
 		nvkm_debugf(sc->dev,
-		    "gsp_boot: ELF .fwimage @0x%llx+%llu .fwsignature_tu10x @0x%llx+%llu\n",
+		    "gsp_boot: ELF .fwimage @0x%llx+%llu %s @0x%llx+%llu\n",
 		    (unsigned long long)fwimage_off,
 		    (unsigned long long)fwimage_size,
+		    sc->chip->fw_signature,
 		    (unsigned long long)sig_off,
 		    (unsigned long long)sig_size);
 

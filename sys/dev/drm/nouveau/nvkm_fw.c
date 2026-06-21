@@ -17,18 +17,16 @@
 
 #include <sys/firmware.h>
 
-#define NVKM_FW_BOOTER_LOAD_TU102_570 "nvidia/tu102/gsp/booter_load-570.144"
-
 int
 nvkm_fw_init(struct nvkm_softc *sc)
 {
 	const struct firmware *fw;
 
-	fw = firmware_get(NVKM_FW_BOOTER_LOAD_TU102_570);
+	fw = firmware_get(sc->chip->fw_booter_load);
 	if (fw == NULL) {
 		nvkm_debugf(sc->dev,
-		    "fw: cannot load \"%s\" (module nvkm_fw_tu102_570 absent?)\n",
-		    NVKM_FW_BOOTER_LOAD_TU102_570);
+		    "fw: cannot load \"%s\" (module nvgsp_570 absent?)\n",
+		    sc->chip->fw_booter_load);
 		return (ENOENT);
 	}
 
@@ -36,7 +34,7 @@ nvkm_fw_init(struct nvkm_softc *sc)
 	nvkm_debugf(sc->dev,
 	    "fw: %s loaded, %zu bytes, version %u, first 8: "
 	    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
-	    NVKM_FW_BOOTER_LOAD_TU102_570,
+	    sc->chip->fw_booter_load,
 	    fw->datasize, fw->version,
 	    fw->data[0], fw->data[1], fw->data[2], fw->data[3],
 	    fw->data[4], fw->data[5], fw->data[6], fw->data[7]);

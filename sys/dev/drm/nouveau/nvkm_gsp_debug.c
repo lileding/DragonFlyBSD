@@ -91,11 +91,13 @@ nvkm_gsp_sysctl_state(SYSCTL_HANDLER_ARGS)
 
 	sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN);
 
-	riscv_status = nvkm_gsp_rd32_safe(sc, 0x111240);
-	mb0          = nvkm_gsp_rd32_safe(sc, NVKM_TU102_GSP_BASE + 0x040);
-	mb1          = nvkm_gsp_rd32_safe(sc, NVKM_TU102_GSP_BASE + 0x044);
-	sctl         = nvkm_gsp_rd32_safe(sc, NVKM_TU102_GSP_BASE + 0x240);
+	riscv_status = nvkm_gsp_rd32_safe(sc, sc->chip->gsp_riscv + 0x240);
+	mb0          = nvkm_gsp_rd32_safe(sc, sc->chip->gsp_base + 0x040);
+	mb1          = nvkm_gsp_rd32_safe(sc, sc->chip->gsp_base + 0x044);
+	sctl         = nvkm_gsp_rd32_safe(sc, sc->chip->gsp_base + 0x240);
 
+	sbuf_printf(&sb, "chip        = %s  chipset=0x%03x\n",
+	    sc->chip->chip, sc->chip->chipset);
 	sbuf_printf(&sb, "RISCV_STATUS = 0x%08x  (bit0 ACTIVE_STAT)\n", riscv_status);
 	sbuf_printf(&sb, "GSP MB0      = 0x%08x\n", mb0);
 	sbuf_printf(&sb, "GSP MB1      = 0x%08x\n", mb1);
