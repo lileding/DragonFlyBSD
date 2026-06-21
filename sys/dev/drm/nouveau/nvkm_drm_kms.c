@@ -2012,6 +2012,8 @@ nvkm_plane_atomic_async_check(struct drm_plane *plane,
 	if (old_state == NULL || old_state->crtc != state->crtc ||
 	    old_state->fb != state->fb)
 		return (-EINVAL);
+	if (!old_state->visible || !state->visible)
+		return (-EINVAL);
 	if (old_state->src_x != state->src_x ||
 	    old_state->src_y != state->src_y ||
 	    old_state->src_w != state->src_w ||
