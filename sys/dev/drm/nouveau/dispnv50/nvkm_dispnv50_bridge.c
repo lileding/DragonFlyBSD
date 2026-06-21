@@ -4121,6 +4121,11 @@ nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 	}
 
 	memset(&asyh, 0, sizeof(asyh));
+	if (nvhead->func != NULL && nvhead->func->olut_clr != NULL) {
+		ret = nvhead->func->olut_clr(nvhead);
+		if (ret != 0)
+			return ret;
+	}
 	if (nvhead->func != NULL && nvhead->func->display_id != NULL) {
 		ret = nvhead->func->display_id(nvhead, 0);
 		if (ret != 0)
