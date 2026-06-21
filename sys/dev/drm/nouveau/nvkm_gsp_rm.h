@@ -154,6 +154,36 @@ int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 int	 nvkm_gsp_disp_init(struct nvkm_softc *sc);
 uint32_t nvkm_gsp_disp_supported_mask(struct nvkm_softc *sc);
 uint32_t nvkm_gsp_disp_head_count(struct nvkm_softc *sc);
+
+struct nvkm_gsp_disp_output_info {
+	uint32_t display_id;
+	uint32_t heads;
+	uint8_t output_type;
+	uint8_t connector_type;
+	uint8_t output_location;
+	uint8_t connector_location;
+	uint8_t or_mask;
+	uint8_t link;
+	bool is_dp;
+	bool is_mst;
+};
+
+/*
+ * Ownership:
+ *   Writes a scalar snapshot of the GSP/RM output that owns display_id into
+ *   caller-owned storage. No nvkm_outp or nvkm_conn pointer escapes.
+ *
+ * Lifetime:
+ *   The returned fields are valid as a point-in-time capability snapshot. A
+ *   later hotplug or display re-enumeration may require a fresh query.
+ *
+ * Threading:
+ *   Call during KMS object construction or another blockable display context
+ *   where sc->disp is stable. This function does not issue GSP RPCs.
+ */
+int	 nvkm_gsp_disp_output_info(struct nvkm_softc *sc, uint32_t display_id,
+	     struct nvkm_gsp_disp_output_info *info);
+
 /* Probe connected outputs and print their EDID. Blockable context only. */
 void	 nvkm_gsp_disp_probe_connected(struct nvkm_softc *sc);
 /* Is the given GSP displayId currently connected? 1/0, <0 on error. Blockable. */

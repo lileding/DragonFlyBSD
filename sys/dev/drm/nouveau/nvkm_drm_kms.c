@@ -30,6 +30,11 @@
 
 #include <linux/slab.h>
 
+struct nvkm_bios;
+
+#include <subdev/bios/conn.h>
+#include <subdev/bios/dcb.h>
+
 extern const uint64_t wndwc57e_modifiers[];
 
 struct nvkm_drm_connector {
@@ -39,6 +44,124 @@ struct nvkm_drm_connector {
 };
 
 #define to_nvkm_connector(c) container_of(c, struct nvkm_drm_connector, base)
+
+static int
+nvkm_connector_type_from_output(uint8_t output_type)
+{
+	switch (output_type) {
+	case DCB_OUTPUT_ANALOG:
+		return (DRM_MODE_CONNECTOR_VGA);
+	case DCB_OUTPUT_TV:
+		return (DRM_MODE_CONNECTOR_TV);
+	case DCB_OUTPUT_TMDS:
+		return (DRM_MODE_CONNECTOR_HDMIA);
+	case DCB_OUTPUT_LVDS:
+		return (DRM_MODE_CONNECTOR_LVDS);
+	case DCB_OUTPUT_DP:
+		return (DRM_MODE_CONNECTOR_DisplayPort);
+	case DCB_OUTPUT_WFD:
+		return (DRM_MODE_CONNECTOR_VIRTUAL);
+	default:
+		return (DRM_MODE_CONNECTOR_Unknown);
+	}
+}
+
+static int
+nvkm_connector_type_from_info(const struct nvkm_gsp_disp_output_info *info)
+{
+	switch (info->connector_type) {
+	case DCB_CONNECTOR_VGA:
+	case DCB_CONNECTOR_POD_VGA:
+	case DCB_CONNECTOR_DOCK_VGA_0:
+	case DCB_CONNECTOR_DOCK_VGA_1:
+		return (DRM_MODE_CONNECTOR_VGA);
+	case DCB_CONNECTOR_DVI_A:
+		return (DRM_MODE_CONNECTOR_DVIA);
+	case DCB_CONNECTOR_DVI_I_TV_0:
+	case DCB_CONNECTOR_DVI_I_TV_1:
+	case DCB_CONNECTOR_DVI_I_TV_2:
+	case DCB_CONNECTOR_DVI_I:
+	case DCB_CONNECTOR_DMS59_0:
+	case DCB_CONNECTOR_DMS59_1:
+	case DCB_CONNECTOR_DOCK_DVI_I_0:
+	case DCB_CONNECTOR_DOCK_DVI_I_1:
+		return (DRM_MODE_CONNECTOR_DVII);
+	case DCB_CONNECTOR_DVI_D:
+	case DCB_CONNECTOR_DVI_ADC:
+	case DCB_CONNECTOR_TMDS:
+	case DCB_CONNECTOR_DOCK_DVI_D_0:
+	case DCB_CONNECTOR_DOCK_DVI_D_1:
+		return (DRM_MODE_CONNECTOR_DVID);
+	case DCB_CONNECTOR_TV_0:
+	case DCB_CONNECTOR_TV_2:
+	case DCB_CONNECTOR_TV_SCART:
+	case DCB_CONNECTOR_TV_SCART_D:
+	case DCB_CONNECTOR_POD_TV_0:
+		return (DRM_MODE_CONNECTOR_Composite);
+	case DCB_CONNECTOR_TV_1:
+	case DCB_CONNECTOR_POD_TV_1:
+		return (DRM_MODE_CONNECTOR_SVIDEO);
+	case DCB_CONNECTOR_TV_3:
+	case DCB_CONNECTOR_TV_DTERM:
+	case DCB_CONNECTOR_POD_TV_3:
+		return (DRM_MODE_CONNECTOR_Component);
+	case DCB_CONNECTOR_LVDS:
+	case DCB_CONNECTOR_LVDS_SPWG:
+	case DCB_CONNECTOR_LVDS_REM:
+	case DCB_CONNECTOR_LVDS_SPWG_REM:
+		return (DRM_MODE_CONNECTOR_LVDS);
+	case DCB_CONNECTOR_DP:
+	case DCB_CONNECTOR_mDP:
+	case DCB_CONNECTOR_DOCK_DP_0:
+	case DCB_CONNECTOR_DOCK_DP_1:
+	case DCB_CONNECTOR_DOCK_mDP_0:
+	case DCB_CONNECTOR_DOCK_mDP_1:
+	case DCB_CONNECTOR_DMS59_DP0:
+	case DCB_CONNECTOR_DMS59_DP1:
+	case DCB_CONNECTOR_USB_C:
+		return (DRM_MODE_CONNECTOR_DisplayPort);
+	case DCB_CONNECTOR_eDP:
+		return (DRM_MODE_CONNECTOR_eDP);
+	case DCB_CONNECTOR_HDMI_0:
+	case DCB_CONNECTOR_HDMI_1:
+		return (DRM_MODE_CONNECTOR_HDMIA);
+	case DCB_CONNECTOR_HDMI_C:
+		return (DRM_MODE_CONNECTOR_HDMIB);
+	case DCB_CONNECTOR_WFD:
+		return (DRM_MODE_CONNECTOR_VIRTUAL);
+	default:
+		return (nvkm_connector_type_from_output(info->output_type));
+	}
+}
+
+static int
+nvkm_encoder_type_from_info(const struct nvkm_gsp_disp_output_info *info)
+{
+	switch (info->output_type) {
+	case DCB_OUTPUT_ANALOG:
+		return (DRM_MODE_ENCODER_DAC);
+	case DCB_OUTPUT_TV:
+		return (DRM_MODE_ENCODER_TVDAC);
+	case DCB_OUTPUT_LVDS:
+		return (DRM_MODE_ENCODER_LVDS);
+	case DCB_OUTPUT_WFD:
+		return (DRM_MODE_ENCODER_VIRTUAL);
+	case DCB_OUTPUT_TMDS:
+	case DCB_OUTPUT_DP:
+	default:
+		return (DRM_MODE_ENCODER_TMDS);
+	}
+}
+
+static uint32_t
+nvkm_possible_crtcs_from_info(const struct nvkm_gsp_disp_output_info *info,
+    uint32_t crtc_mask)
+{
+	uint32_t possible;
+
+	possible = info->heads & crtc_mask;
+	return (possible != 0 ? possible : crtc_mask);
+}
 
 /* ===== connector helper funcs ===== */
 
@@ -1011,8 +1134,9 @@ nvkm_drm_kms_fini(struct nvkm_softc *sc)
 int
 nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 {
+	uint32_t crtc_mask;
 	uint32_t supported_mask;
-	int id, h, nheads, crtc_mask, count = 0;
+	int id, h, nheads, count = 0;
 
 	/*
 	 * nvkm advertises DRIVER_MODESET while the imported display path is
@@ -1108,14 +1232,20 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		dev->irq_enabled = true;
 	}
 
-	/* (2) One connector + encoder per supported displayId; any head can
-	 * drive any output, so possible_crtcs is all heads. */
+	/* (2) One connector + encoder per supported displayId. Connector and
+	 * encoder type are projected from GSP/RM outp/conn capability data. */
 	for (id = 0; id < 32; id++) {
+		struct nvkm_gsp_disp_output_info info;
 		struct nvkm_drm_connector *nc;
 		struct drm_encoder *enc;
+		uint32_t display_id;
+		uint32_t possible_crtcs;
+		int connector_type;
+		int encoder_type;
 
-			if (!(supported_mask & (1u << id)))
-				continue;
+		display_id = (1u << id);
+		if (!(supported_mask & display_id))
+			continue;
 		nc = kzalloc(sizeof(*nc), GFP_KERNEL);
 		enc = kzalloc(sizeof(*enc), GFP_KERNEL);
 		if (nc == NULL || enc == NULL) {
@@ -1124,19 +1254,35 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 			continue;
 		}
 		nc->sc = sc;
-		nc->display_id = (1u << id);
+		nc->display_id = display_id;
+		if (nvkm_gsp_disp_output_info(sc, display_id, &info) != 0) {
+			memset(&info, 0, sizeof(info));
+			info.display_id = display_id;
+			info.heads = crtc_mask;
+			info.output_type = DCB_OUTPUT_TMDS;
+			info.connector_type = DCB_CONNECTOR_HDMI_1;
+		}
+		connector_type = nvkm_connector_type_from_info(&info);
+		encoder_type = nvkm_encoder_type_from_info(&info);
+		possible_crtcs = nvkm_possible_crtcs_from_info(&info, crtc_mask);
+
 		drm_connector_init(dev, &nc->base, &nvkm_connector_funcs,
-		    DRM_MODE_CONNECTOR_HDMIA);
+		    connector_type);
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
 
 		if (drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
-		    DRM_MODE_ENCODER_TMDS, NULL) == 0) {
-			enc->possible_crtcs = crtc_mask;
+		    encoder_type, NULL) == 0) {
+			enc->possible_crtcs = possible_crtcs;
 			drm_connector_attach_encoder(&nc->base, enc);
 		} else {
 			kfree(enc);
 		}
+		nvkm_infof(sc->dev,
+		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
+		    " outp=0x%02x conn=0x%02x\n",
+		    display_id, connector_type, encoder_type, possible_crtcs,
+		    info.output_type, info.connector_type);
 		count++;
 	}
 
