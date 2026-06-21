@@ -2528,21 +2528,44 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		encoder_type = nvkm_encoder_type_from_info(&info);
 		possible_crtcs = nvkm_possible_crtcs_from_info(&info, crtc_mask);
 
-		drm_connector_init(dev, &nc->base, &nvkm_connector_funcs,
+		ret = drm_connector_init(dev, &nc->base, &nvkm_connector_funcs,
 		    connector_type);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: connector init failed err=%d\n",
+			    display_id, ret);
+			kfree(nc);
+			kfree(enc);
+			continue;
+		}
+		ret = drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
+		    encoder_type, NULL);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: encoder init failed err=%d\n",
+			    display_id, ret);
+			drm_connector_cleanup(&nc->base);
+			kfree(nc);
+			kfree(enc);
+			continue;
+		}
+		enc->possible_crtcs = possible_crtcs;
+		ret = drm_connector_attach_encoder(&nc->base, enc);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: encoder attach failed err=%d\n",
+			    display_id, ret);
+			drm_encoder_cleanup(enc);
+			drm_connector_cleanup(&nc->base);
+			kfree(nc);
+			kfree(enc);
+			continue;
+		}
 		nc->base.polled = DRM_CONNECTOR_POLL_HPD;
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
 		nvkm_connector_attach_properties(nc);
 		nvkm_connector_dp_irq_register(nc, &info);
-
-		if (drm_encoder_init(dev, enc, &nvkm_encoder_funcs,
-		    encoder_type, NULL) == 0) {
-			enc->possible_crtcs = possible_crtcs;
-			drm_connector_attach_encoder(&nc->base, enc);
-		} else {
-			kfree(enc);
-		}
 		nvkm_infof(sc->dev,
 		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
 		    " outp=0x%02x conn=0x%02x\n",
