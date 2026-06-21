@@ -3664,33 +3664,12 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
 
 	ret = core->func->sor->ctrl(core, outp->ior->id, ctrl, asyh);
 	if (ret == 0) {
-		prepare->consumed = true;
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 route display=0x%x outp=%02x sor=%d link=%u proto=%u head=%u type=0x%02x\n",
 		    prepare->display_id, outp->index, outp->ior->id,
 		    outp->ior->asy.link, prepare->sor_proto, head,
 		    prepare->output_type);
 	}
-	return ret;
-}
-
-static int
-nvkm_dispnv50_route_output(struct nvkm_softc *sc, struct nv50_core *core,
-    struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
-    uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi)
-{
-	struct nvkm_dispnv50_output_prepare prepare;
-	int ret;
-
-	ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id, hdmi,
-	    &prepare);
-	if (ret != 0)
-		return ret;
-
-	ret = nvkm_dispnv50_route_output_prepared(sc, core, asyh, mode, head,
-	    &prepare);
-	if (ret != 0)
-		nvkm_dispnv50_output_prepare_abort(sc, &prepare);
 	return ret;
 }
 
@@ -4018,6 +3997,8 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	struct drm_display_mode *mode;
+	struct nvkm_dispnv50_output_prepare local_prepare;
+	struct nvkm_dispnv50_output_prepare *route_prepare = prepare;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	int ret;
 
@@ -4081,12 +4062,16 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		if (ret != 0)
 			goto fail;
 	}
-	if (prepare != NULL)
-		ret = nvkm_dispnv50_route_output_prepared(sc, core, &asyh,
-		    mode, head, prepare);
-	else
-		ret = nvkm_dispnv50_route_output(sc, core, &asyh, mode, head,
-		    display_id, hdmi);
+	if (route_prepare == NULL) {
+		memset(&local_prepare, 0, sizeof(local_prepare));
+		ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id,
+		    hdmi, &local_prepare);
+		if (ret != 0)
+			goto fail;
+		route_prepare = &local_prepare;
+	}
+	ret = nvkm_dispnv50_route_output_prepared(sc, core, &asyh, mode, head,
+	    route_prepare);
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
@@ -4104,6 +4089,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		ret = core->func->update(core, interlock, false);
 		if (ret != 0)
 			goto fail;
+		route_prepare->consumed = true;
 		core->assign_windows = false;
 		memset(interlock, 0, sizeof(interlock));
 	}
@@ -4118,6 +4104,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	    head, display_id, "bridge");
 	if (ret != 0)
 		goto fail;
+	route_prepare->consumed = true;
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "
@@ -4129,6 +4116,8 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	return 0;
 
 fail:
+	if (route_prepare != NULL)
+		nvkm_dispnv50_output_prepare_abort(sc, route_prepare);
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge failed head=%u win=%u display=0x%x err=%d\n",
 	    head, win, display_id, ret);
