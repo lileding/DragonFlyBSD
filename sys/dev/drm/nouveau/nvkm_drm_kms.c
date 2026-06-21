@@ -282,12 +282,47 @@ nvkm_kms_mode_clock_khz(const struct drm_display_mode *mode)
 	return (clock);
 }
 
+static bool
+nvkm_kms_connector_is_hdmi(const struct nvkm_gsp_disp_output_info *info)
+{
+	if (info == NULL)
+		return (false);
+
+	switch (info->connector_type) {
+	case DCB_CONNECTOR_HDMI_0:
+	case DCB_CONNECTOR_HDMI_1:
+	case DCB_CONNECTOR_HDMI_C:
+		return (true);
+	default:
+		return (false);
+	}
+}
+
+static uint32_t
+nvkm_kms_tmds_max_clock_khz(const struct nvkm_gsp_disp_output_info *info,
+    int sink_max_tmds_clock, bool hdmi_scdc_scrambling)
+{
+	uint32_t source_max;
+
+	if (nvkm_kms_connector_is_hdmi(info))
+		source_max = hdmi_scdc_scrambling ? 594000U : 340000U;
+	else
+		source_max = 165000U;
+
+	if (sink_max_tmds_clock > 0 &&
+	    (uint32_t)sink_max_tmds_clock < source_max)
+		return ((uint32_t)sink_max_tmds_clock);
+	return (source_max);
+}
+
 static enum drm_mode_status
 nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
     const struct nvkm_gsp_disp_output_info *info,
-    const struct drm_display_mode *mode, int max_tmds_clock, uint8_t bpc)
+    const struct drm_display_mode *mode, int max_tmds_clock,
+    bool hdmi_scdc_scrambling, uint8_t bpc)
 {
 	uint32_t clock;
+	uint32_t max_clock;
 
 	if (sc == NULL || info == NULL || mode == NULL)
 		return (MODE_ERROR);
@@ -300,7 +335,9 @@ nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 
 	switch (info->output_type) {
 	case DCB_OUTPUT_TMDS:
-		if (max_tmds_clock > 0 && clock > (uint32_t)max_tmds_clock)
+		max_clock = nvkm_kms_tmds_max_clock_khz(info, max_tmds_clock,
+		    hdmi_scdc_scrambling);
+		if (clock > max_clock)
 			return (MODE_CLOCK_HIGH);
 		return (MODE_OK);
 	case DCB_OUTPUT_DP:
@@ -345,7 +382,8 @@ nvkm_connector_mode_valid(struct drm_connector *connector,
 	if (ret != 0)
 		return (MODE_ERROR);
 	return (nvkm_kms_output_mode_valid(nc->sc, nc->display_id, &info,
-	    mode, connector->display_info.max_tmds_clock, 8));
+	    mode, connector->display_info.max_tmds_clock,
+	    connector->display_info.hdmi.scdc.scrambling.supported, 8));
 }
 
 static bool
@@ -1080,7 +1118,8 @@ nvkm_kms_crtc_atom_validate_mode(struct nvkm_kms_crtc_atom *atom,
     const struct drm_display_mode *mode)
 {
 	return (nvkm_kms_output_mode_valid(atom->sc, atom->display_id,
-	    &atom->output, mode, atom->max_tmds_clock, atom->head.bpc));
+	    &atom->output, mode, atom->max_tmds_clock,
+	    atom->head.hdmi.scdc_scrambling, atom->head.bpc));
 }
 
 static int
