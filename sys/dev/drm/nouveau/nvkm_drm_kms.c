@@ -2606,6 +2606,48 @@ nvkm_internal_fb(struct drm_device *dev, uint32_t w, uint32_t h)
 	return (fb);
 }
 
+/*
+ * Disable the current console/display scanout when no connected output can be
+ * selected for light_up().
+ *
+ * Ownership:
+ *   Borrows sc->drm_dev and the current mode_config state. The DRM atomic
+ *   helper owns the temporary state it creates and consumes it before return.
+ *
+ * Lifetime:
+ *   No connector, CRTC, plane, or framebuffer pointer escapes this call. Any
+ *   active scanout BO is released later by the normal atomic cleanup path.
+ *
+ * Threading:
+ *   Runs from process context, normally the no-master HPD/console worker. It
+ *   may sleep while taking modeset locks, waiting for fences, and committing
+ *   the disable state.
+ */
+static int
+nvkm_drm_kms_dark_down(struct nvkm_softc *sc)
+{
+	struct drm_modeset_acquire_ctx ctx;
+	struct drm_device *dev;
+	int ret;
+
+	if (sc == NULL || sc->drm_dev == NULL)
+		return (ENODEV);
+	dev = sc->drm_dev;
+
+	drm_modeset_acquire_init(&ctx, 0);
+retry:
+	ret = drm_atomic_helper_disable_all(dev, &ctx);
+	if (ret == -EDEADLK) {
+		drm_modeset_backoff(&ctx);
+		goto retry;
+	}
+	drm_modeset_drop_locks(&ctx);
+	drm_modeset_acquire_fini(&ctx);
+
+	nvkm_infof(sc->dev, "drm: dark_down commit -> %d\n", ret);
+	return (ret < 0 ? -ret : 0);
+}
+
 /* ===== light_up: driver-internal atomic modeset =====
  * Picks the first connected output + its preferred mode and drives a full
  * atomic commit, which fans out to nvkm_crtc_atomic_enable -> the real EVO
@@ -2644,7 +2686,7 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	mutex_unlock(&dev->mode_config.mutex);
 	if (conn == NULL || mode == NULL) {
 		nvkm_infof(sc->dev, "drm: light_up -- no connected mode\n");
-		return (ENXIO);
+		return (nvkm_drm_kms_dark_down(sc));
 	}
 
 	list_for_each_entry(cc, &dev->mode_config.crtc_list, head) {
