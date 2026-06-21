@@ -7837,6 +7837,7 @@ nvkm_drm_register(struct nvkm_softc *sc)
 	if (IS_ERR(ddev)) {
 		nvkm_debugf(sc->dev,
 		    "drm: drm_dev_alloc failed (%ld)\n", PTR_ERR(ddev));
+		drm_fini_pdev(&sc->drm_pdev);
 		return (ENOMEM);
 	}
 
@@ -7850,6 +7851,7 @@ nvkm_drm_register(struct nvkm_softc *sc)
 		    "drm: nvkm_ttm_init failed (%d)\n", err);
 		drm_dev_put(ddev);
 		sc->drm_dev = NULL;
+		drm_fini_pdev(&sc->drm_pdev);
 		return (err);
 	}
 
@@ -7866,6 +7868,7 @@ nvkm_drm_register(struct nvkm_softc *sc)
 		nvkm_ttm_fini(sc);
 		drm_dev_put(ddev);
 		sc->drm_dev = NULL;
+		drm_fini_pdev(&sc->drm_pdev);
 		return (err);
 	}
 
@@ -7879,6 +7882,7 @@ nvkm_drm_register(struct nvkm_softc *sc)
 		nvkm_ttm_fini(sc);
 		drm_dev_put(ddev);
 		sc->drm_dev = NULL;
+		drm_fini_pdev(&sc->drm_pdev);
 		return (err);
 	}
 
@@ -7900,6 +7904,7 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 		drm_dev_put(sc->drm_dev);
 		sc->drm_dev = NULL;
 	}
+	drm_fini_pdev(&sc->drm_pdev);
 }
 
 /* ============================================================
