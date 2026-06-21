@@ -386,9 +386,12 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	return (fb);
 }
 
+static int nvkm_atomic_check(struct drm_device *dev,
+    struct drm_atomic_state *state);
+
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.fb_create	= nvkm_fb_create,
-	.atomic_check	= drm_atomic_helper_check,
+	.atomic_check	= nvkm_atomic_check,
 	.atomic_commit	= drm_atomic_helper_commit,
 };
 
@@ -446,6 +449,83 @@ struct nvkm_crtc {
 };
 
 #define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
+
+static int
+nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    const struct drm_crtc_state *crtc_state)
+{
+	struct nvkm_gsp_disp_output_info info;
+	struct nvkm_crtc *nc;
+	struct drm_connector *conn;
+	uint32_t display_id = 0;
+	uint32_t connector_count = 0;
+	uint32_t head_mask;
+	int ret;
+
+	if (crtc_state == NULL || !crtc_state->enable)
+		return (0);
+	if (sc == NULL || sc->disp == NULL)
+		return (-ENODEV);
+
+	nc = to_nvkm_crtc(crtc);
+	list_for_each_entry(conn, &crtc->dev->mode_config.connector_list, head) {
+		if ((crtc_state->connector_mask & drm_connector_mask(conn)) == 0)
+			continue;
+		display_id = to_nvkm_connector(conn)->display_id;
+		connector_count++;
+	}
+	if (connector_count != 1 || display_id == 0) {
+		nvkm_infof(sc->dev,
+		    "drm: atomic check rejects head=%u connector_count=%u display=0x%x\n",
+		    nc->head, connector_count, display_id);
+		return (-EINVAL);
+	}
+
+	ret = nvkm_gsp_disp_output_info(sc, display_id, &info);
+	if (ret != 0)
+		return (ret);
+
+	head_mask = info.heads;
+	if (head_mask != 0 && (head_mask & BIT(nc->head)) == 0) {
+		nvkm_infof(sc->dev,
+		    "drm: atomic check rejects display=0x%x head=%u heads=0x%x\n",
+		    display_id, nc->head, head_mask);
+		return (-EINVAL);
+	}
+
+	return (0);
+}
+
+static int
+nvkm_atomic_check_routes(struct drm_device *dev, struct drm_atomic_state *state)
+{
+	struct nvkm_softc *sc = dev->dev_private;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc *crtc;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		int ret;
+
+		ret = nvkm_atomic_check_crtc_route(sc, crtc, new_crtc_state);
+		if (ret != 0)
+			return (ret);
+	}
+
+	return (0);
+}
+
+static int
+nvkm_atomic_check(struct drm_device *dev, struct drm_atomic_state *state)
+{
+	int ret;
+
+	ret = drm_atomic_helper_check(dev, state);
+	if (ret != 0)
+		return (ret);
+
+	return (nvkm_atomic_check_routes(dev, state));
+}
 
 static void
 nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head, uint32_t win,
