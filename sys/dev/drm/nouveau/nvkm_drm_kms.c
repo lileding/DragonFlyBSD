@@ -31,6 +31,7 @@
 #include <drm/drm_rect.h>
 
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 struct nvkm_bios;
 
@@ -614,11 +615,44 @@ static int nvkm_atomic_check(struct drm_device *dev,
 static int nvkm_atomic_commit(struct drm_device *dev,
     struct drm_atomic_state *state, bool nonblock);
 static void nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state);
+static struct drm_atomic_state *nvkm_atomic_state_alloc(struct drm_device *dev);
+static void nvkm_atomic_state_clear(struct drm_atomic_state *state);
+static void nvkm_atomic_state_free(struct drm_atomic_state *state);
+
+/*
+ * Driver-private atomic state.
+ *
+ * Ownership:
+ *   The DRM atomic core owns the base refcounted state.  nvkm owns the prepared
+ *   output route slots and releases any bridge-acquired SOR/IOR state through
+ *   nvkm_atomic_state_clear().
+ *
+ * Lifetime:
+ *   A prepared route lives in the same refcounted atomic state that crosses the
+ *   swap_state boundary.  Blocking commits consume it before returning;
+ *   nonblocking commits consume it from commit_work before the final state put.
+ *
+ * Threading:
+ *   Routes are filled before swap_state while modeset locks are held.  After
+ *   swap_state only the commit worker owning this atomic-state reference reads
+ *   or clears them.  CRTC, IRQ, HPD, and async cursor paths never share mutable
+ *   route storage.
+ */
+struct nvkm_atomic_state {
+	struct drm_atomic_state base;
+	struct nvkm_dispnv50_output_prepare prepared_route[NVKM_DISPLAY_MAX_HEADS];
+};
+
+#define to_nvkm_atomic_state(s) \
+	container_of(s, struct nvkm_atomic_state, base)
 
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.fb_create	= nvkm_fb_create,
 	.atomic_check	= nvkm_atomic_check,
 	.atomic_commit	= nvkm_atomic_commit,
+	.atomic_state_alloc = nvkm_atomic_state_alloc,
+	.atomic_state_clear = nvkm_atomic_state_clear,
+	.atomic_state_free = nvkm_atomic_state_free,
 };
 
 static void
@@ -644,25 +678,42 @@ static const struct drm_mode_config_helper_funcs nvkm_mode_config_helper_funcs =
 	.atomic_commit_tail = nvkm_atomic_commit_tail,
 };
 
+static struct drm_atomic_state *
+nvkm_atomic_state_alloc(struct drm_device *dev)
+{
+	struct nvkm_atomic_state *state;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (state == NULL)
+		return (NULL);
+	if (drm_atomic_state_init(dev, &state->base) != 0) {
+		kfree(state);
+		return (NULL);
+	}
+	return (&state->base);
+}
+
+static void
+nvkm_atomic_state_clear(struct drm_atomic_state *state)
+{
+	nvkm_atomic_finish_prepared_outputs(state);
+	drm_atomic_state_default_clear(state);
+}
+
+static void
+nvkm_atomic_state_free(struct drm_atomic_state *state)
+{
+	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
+
+	drm_atomic_state_default_release(state);
+	kfree(nv_state);
+}
+
 struct nvkm_crtc {
 	struct drm_crtc		base;
 	struct nvkm_softc	*sc;
 	uint32_t		head;	/* HEAD index */
 	uint32_t		win;	/* primary window index */
-	/*
-	 * Ownership:
-	 *   KMS owns this per-CRTC temporary route.  The bridge fills only
-	 *   scalar snapshots and no borrowed pointer escapes into this slot.
-	 *
-	 * Lifetime:
-	 *   Valid only for the active atomic commit, from output prepare before
-	 *   swap_state until atomic_enable consumes it or commit_tail aborts it.
-	 *
-	 * Threading:
-	 *   Access is serialized by DRM modeset locks and the blocking commit
-	 *   path.  Async cursor moves and IRQ handlers must not touch it.
-	 */
-	struct nvkm_dispnv50_output_prepare prepared_route;
 };
 
 #define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
@@ -865,20 +916,30 @@ nvkm_atomic_state_needs_output_prepare(struct drm_atomic_state *state)
 	return (false);
 }
 
+static struct nvkm_dispnv50_output_prepare *
+nvkm_atomic_prepared_route(struct drm_atomic_state *state, uint32_t head)
+{
+	struct nvkm_atomic_state *nv_state;
+
+	if (state == NULL || head >= NVKM_DISPLAY_MAX_HEADS)
+		return (NULL);
+	nv_state = to_nvkm_atomic_state(state);
+	return (&nv_state->prepared_route[head]);
+}
+
 static void
 nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state)
 {
-	struct drm_crtc_state *new_crtc_state;
-	struct drm_crtc *crtc;
-	int i;
+	struct nvkm_softc *sc;
+	uint32_t head;
 
-	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
-		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	if (state == NULL || state->dev == NULL)
+		return;
 
-		(void)new_crtc_state;
-		nvkm_dispnv50_output_prepare_abort(nc->sc,
-		    &nc->prepared_route);
-	}
+	sc = state->dev->dev_private;
+	for (head = 0; head < NVKM_DISPLAY_MAX_HEADS; head++)
+		nvkm_dispnv50_output_prepare_abort(sc,
+		    nvkm_atomic_prepared_route(state, head));
 }
 
 static int
@@ -894,8 +955,14 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 		struct nvkm_kms_crtc_atom atom;
+		struct nvkm_dispnv50_output_prepare *route;
 
-		nvkm_dispnv50_output_prepare_abort(sc, &nc->prepared_route);
+		route = nvkm_atomic_prepared_route(state, nc->head);
+		if (route == NULL) {
+			ret = -EINVAL;
+			goto fail;
+		}
+		nvkm_dispnv50_output_prepare_abort(sc, route);
 		if (!new_crtc_state->enable ||
 		    !drm_atomic_crtc_needs_modeset(new_crtc_state))
 			continue;
@@ -911,7 +978,7 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 
 		ret = nvkm_dispnv50_output_prepare(sc,
 		    &new_crtc_state->adjusted_mode, nc->head,
-		    atom.display_id, &atom.head.hdmi, &nc->prepared_route);
+		    atom.display_id, &atom.head.hdmi, route);
 		if (ret != 0) {
 			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
 			    "output prepare");
@@ -927,22 +994,52 @@ fail:
 }
 
 static int
+nvkm_atomic_commit_tail_run(struct drm_atomic_state *state)
+{
+	struct drm_device *dev = state->dev;
+	struct nvkm_softc *sc = dev->dev_private;
+	int ret;
+
+	ret = drm_atomic_helper_wait_for_fences(dev, state, false);
+	if (ret != 0)
+		nvkm_kms_record_result(sc, 0, 0, ret, "atomic fence wait");
+	drm_atomic_helper_wait_for_dependencies(state);
+	nvkm_atomic_commit_tail(state);
+	drm_atomic_helper_commit_cleanup_done(state);
+	drm_atomic_state_put(state);
+	return (ret);
+}
+
+static void
+nvkm_atomic_commit_work(struct work_struct *work)
+{
+	struct drm_atomic_state *state;
+
+	state = container_of(work, struct drm_atomic_state, commit_work);
+	(void)nvkm_atomic_commit_tail_run(state);
+}
+
+static int
 nvkm_atomic_commit_prepared(struct drm_device *dev,
-    struct drm_atomic_state *state)
+    struct drm_atomic_state *state, bool nonblock)
 {
 	int ret;
 
-	ret = drm_atomic_helper_setup_commit(state, false);
+	ret = drm_atomic_helper_setup_commit(state, nonblock);
 	if (ret != 0)
 		return (ret);
+
+	INIT_WORK(&state->commit_work, nvkm_atomic_commit_work);
 
 	ret = drm_atomic_helper_prepare_planes(dev, state);
 	if (ret != 0)
 		return (ret);
 
-	ret = drm_atomic_helper_wait_for_fences(dev, state, true);
-	if (ret != 0)
-		goto err;
+	if (!nonblock) {
+		ret = drm_atomic_helper_wait_for_fences(dev, state, true);
+		if (ret != 0)
+			goto err;
+	}
 
 	ret = nvkm_atomic_prepare_outputs(dev, state);
 	if (ret != 0)
@@ -953,11 +1050,12 @@ nvkm_atomic_commit_prepared(struct drm_device *dev,
 		goto err;
 
 	drm_atomic_state_get(state);
-	drm_atomic_helper_wait_for_fences(dev, state, false);
-	drm_atomic_helper_wait_for_dependencies(state);
-	nvkm_atomic_commit_tail(state);
-	drm_atomic_helper_commit_cleanup_done(state);
-	drm_atomic_state_put(state);
+	if (nonblock) {
+		if (!queue_work(system_unbound_wq, &state->commit_work))
+			(void)nvkm_atomic_commit_tail_run(state);
+	} else {
+		(void)nvkm_atomic_commit_tail_run(state);
+	}
 	return (0);
 
 err:
@@ -974,9 +1072,7 @@ nvkm_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
 		return (drm_atomic_helper_commit(dev, state, nonblock));
 	if (!nvkm_atomic_state_needs_output_prepare(state))
 		return (drm_atomic_helper_commit(dev, state, nonblock));
-	if (nonblock)
-		return (-EINVAL);
-	return (nvkm_atomic_commit_prepared(dev, state));
+	return (nvkm_atomic_commit_prepared(dev, state, nonblock));
 }
 
 static int
@@ -1585,9 +1681,9 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct nvkm_softc *sc = nc->sc;
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
 	struct nvkm_kms_crtc_atom atom;
+	struct nvkm_dispnv50_output_prepare *route;
 	int err;
 
-	(void)old_state;
 	if (sc->disp == NULL)
 		return;
 
@@ -1600,10 +1696,12 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		return;
 	}
 
-	if (nc->prepared_route.valid) {
-		atom.display_id = nc->prepared_route.display_id;
+	route = old_state != NULL ?
+	    nvkm_atomic_prepared_route(old_state->state, nc->head) : NULL;
+	if (route != NULL && route->valid) {
+		atom.display_id = route->display_id;
 		err = nvkm_dispnv50_atomic_enable_prepared(sc, crtc, nc->win,
-		    &nc->prepared_route, &atom.head);
+		    route, &atom.head);
 	} else {
 		err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 		    atom.display_id, &atom.head);
