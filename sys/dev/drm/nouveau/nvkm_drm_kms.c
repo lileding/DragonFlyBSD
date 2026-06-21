@@ -464,6 +464,7 @@ struct nvkm_kms_crtc_atom {
 	struct drm_crtc *crtc;
 	struct nvkm_crtc *nc;
 	struct nvkm_dispnv50_hdmi_info hdmi;
+	struct nvkm_gsp_disp_output_info output;
 	uint32_t display_id;
 	uint32_t connector_count;
 };
@@ -495,10 +496,42 @@ nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
 }
 
 static int
+nvkm_kms_crtc_atom_validate_output(struct nvkm_kms_crtc_atom *atom)
+{
+	const struct nvkm_gsp_disp_output_info *info = &atom->output;
+
+	if (info->heads != 0 && (info->heads & BIT(atom->nc->head)) == 0) {
+		nvkm_infof(atom->sc->dev,
+		    "drm: crtc route rejects display=0x%x head=%u heads=0x%x\n",
+		    atom->display_id, atom->nc->head, info->heads);
+		return (-EINVAL);
+	}
+
+	switch (info->output_type) {
+	case DCB_OUTPUT_TMDS:
+		break;
+	case DCB_OUTPUT_DP:
+		if (info->is_mst) {
+			nvkm_infof(atom->sc->dev,
+			    "drm: crtc route rejects MST display=0x%x head=%u\n",
+			    atom->display_id, atom->nc->head);
+			return (-ENOSYS);
+		}
+		break;
+	default:
+		nvkm_infof(atom->sc->dev,
+		    "drm: crtc route rejects display=0x%x head=%u type=0x%x\n",
+		    atom->display_id, atom->nc->head, info->output_type);
+		return (-ENOSYS);
+	}
+
+	return (0);
+}
+
+static int
 nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
     uint32_t connector_mask, bool validate_output)
 {
-	struct nvkm_gsp_disp_output_info info;
 	struct drm_connector *conn;
 	int ret;
 
@@ -518,17 +551,11 @@ nvkm_kms_crtc_atom_route(struct nvkm_kms_crtc_atom *atom,
 	if (!validate_output)
 		return (0);
 
-	ret = nvkm_gsp_disp_output_info(atom->sc, atom->display_id, &info);
+	ret = nvkm_gsp_disp_output_info(atom->sc, atom->display_id,
+	    &atom->output);
 	if (ret != 0)
 		return (ret);
-	if (info.heads != 0 && (info.heads & BIT(atom->nc->head)) == 0) {
-		nvkm_infof(atom->sc->dev,
-		    "drm: crtc route rejects display=0x%x head=%u heads=0x%x\n",
-		    atom->display_id, atom->nc->head, info.heads);
-		return (-EINVAL);
-	}
-
-	return (0);
+	return (nvkm_kms_crtc_atom_validate_output(atom));
 }
 
 static int
