@@ -1029,7 +1029,7 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 
 		ret = nvkm_dispnv50_output_prepare(sc,
 		    &new_crtc_state->adjusted_mode, nc->head,
-		    atom.display_id, &atom.head.hdmi, route);
+		    atom.display_id, &atom.head, route);
 		if (ret != 0) {
 			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
 			    "output prepare");
@@ -1725,27 +1725,28 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
 	struct nvkm_kms_crtc_atom atom;
 	struct nvkm_dispnv50_output_prepare *route;
+	uint32_t display_id = 0;
 	int err;
 
 	if (sc->disp == NULL)
 		return;
 
-	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-	err = nvkm_kms_crtc_atom_route(&atom, NULL,
-	    crtc->state->connector_mask, false);
-	if (err != 0) {
-		nvkm_kms_record_result(sc, nc->head, nc->win, err,
-		    "crtc route");
-		return;
-	}
-
 	route = old_state != NULL ?
 	    nvkm_atomic_prepared_route(old_state->state, nc->head) : NULL;
 	if (route != NULL && route->valid) {
-		atom.display_id = route->display_id;
+		display_id = route->display_id;
 		err = nvkm_dispnv50_atomic_enable_prepared(sc, crtc, nc->win,
-		    route, &atom.head);
+		    route);
 	} else {
+		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+		err = nvkm_kms_crtc_atom_route(&atom, NULL,
+		    crtc->state->connector_mask, false);
+		if (err != 0) {
+			nvkm_kms_record_result(sc, nc->head, nc->win, err,
+			    "crtc route");
+			return;
+		}
+		display_id = atom.display_id;
 		err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
 		    atom.display_id, &atom.head);
 	}
@@ -1767,7 +1768,7 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	nvkm_infof(sc->dev,
 	    "drm: crtc enable head=%u win=%u %ux%u display=0x%x bridge=%d\n",
 	    nc->head, nc->win, mode->hdisplay, mode->vdisplay,
-	    atom.display_id, err);
+	    display_id, err);
 }
 
 static uint32_t
