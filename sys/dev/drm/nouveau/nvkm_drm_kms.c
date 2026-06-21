@@ -388,11 +388,14 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 
 static int nvkm_atomic_check(struct drm_device *dev,
     struct drm_atomic_state *state);
+static int nvkm_atomic_commit(struct drm_device *dev,
+    struct drm_atomic_state *state, bool nonblock);
+static void nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state);
 
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.fb_create	= nvkm_fb_create,
 	.atomic_check	= nvkm_atomic_check,
-	.atomic_commit	= drm_atomic_helper_commit,
+	.atomic_commit	= nvkm_atomic_commit,
 };
 
 static bool
@@ -435,6 +438,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 		drm_atomic_helper_wait_for_vblanks(dev, old_state);
 	}
 	drm_atomic_helper_cleanup_planes(dev, old_state);
+	nvkm_atomic_finish_prepared_outputs(old_state);
 }
 
 static const struct drm_mode_config_helper_funcs nvkm_mode_config_helper_funcs = {
@@ -446,6 +450,20 @@ struct nvkm_crtc {
 	struct nvkm_softc	*sc;
 	uint32_t		head;	/* HEAD index */
 	uint32_t		win;	/* primary window index */
+	/*
+	 * Ownership:
+	 *   KMS owns this per-CRTC temporary route.  The bridge fills only
+	 *   scalar snapshots and no borrowed pointer escapes into this slot.
+	 *
+	 * Lifetime:
+	 *   Valid only for the active atomic commit, from output prepare before
+	 *   swap_state until atomic_enable consumes it or commit_tail aborts it.
+	 *
+	 * Threading:
+	 *   Access is serialized by DRM modeset locks and the blocking commit
+	 *   path.  Async cursor moves and IRQ handlers must not touch it.
+	 */
+	struct nvkm_dispnv50_output_prepare prepared_route;
 };
 
 #define to_nvkm_crtc(c) container_of(c, struct nvkm_crtc, base)
@@ -618,6 +636,137 @@ nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head, uint32_t win,
 	sc->kms_last_win = win;
 	nvkm_infof(sc->dev, "drm: %s failed head=%u win=%u err=%d\n",
 	    where, head, win, err);
+}
+
+static bool
+nvkm_atomic_state_needs_output_prepare(struct drm_atomic_state *state)
+{
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc *crtc;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		(void)crtc;
+		if (new_crtc_state->enable &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state))
+			return (true);
+	}
+
+	return (false);
+}
+
+static void
+nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state)
+{
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc *crtc;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+
+		(void)new_crtc_state;
+		nvkm_dispnv50_output_prepare_abort(nc->sc,
+		    &nc->prepared_route);
+	}
+}
+
+static int
+nvkm_atomic_prepare_outputs(struct drm_device *dev,
+    struct drm_atomic_state *state)
+{
+	struct nvkm_softc *sc = dev->dev_private;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc *crtc;
+	int ret = 0;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+		struct nvkm_kms_crtc_atom atom;
+
+		nvkm_dispnv50_output_prepare_abort(sc, &nc->prepared_route);
+		if (!new_crtc_state->enable ||
+		    !drm_atomic_crtc_needs_modeset(new_crtc_state))
+			continue;
+
+		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+		ret = nvkm_kms_crtc_atom_route(&atom,
+		    new_crtc_state->connector_mask, false);
+		if (ret != 0) {
+			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
+			    "output prepare route");
+			goto fail;
+		}
+
+		ret = nvkm_dispnv50_output_prepare(sc,
+		    &new_crtc_state->adjusted_mode, nc->head,
+		    atom.display_id, &atom.hdmi, &nc->prepared_route);
+		if (ret != 0) {
+			nvkm_kms_record_result(sc, nc->head, nc->win, ret,
+			    "output prepare");
+			goto fail;
+		}
+	}
+
+	return (0);
+
+fail:
+	nvkm_atomic_finish_prepared_outputs(state);
+	return (ret);
+}
+
+static int
+nvkm_atomic_commit_prepared(struct drm_device *dev,
+    struct drm_atomic_state *state)
+{
+	int ret;
+
+	ret = drm_atomic_helper_setup_commit(state, false);
+	if (ret != 0)
+		return (ret);
+
+	ret = drm_atomic_helper_prepare_planes(dev, state);
+	if (ret != 0)
+		return (ret);
+
+	ret = drm_atomic_helper_wait_for_fences(dev, state, true);
+	if (ret != 0)
+		goto err;
+
+	ret = nvkm_atomic_prepare_outputs(dev, state);
+	if (ret != 0)
+		goto err;
+
+	ret = drm_atomic_helper_swap_state(state, true);
+	if (ret != 0)
+		goto err;
+
+	drm_atomic_state_get(state);
+	drm_atomic_helper_wait_for_fences(dev, state, false);
+	drm_atomic_helper_wait_for_dependencies(state);
+	nvkm_atomic_commit_tail(state);
+	drm_atomic_helper_commit_cleanup_done(state);
+	drm_atomic_state_put(state);
+	return (0);
+
+err:
+	nvkm_atomic_finish_prepared_outputs(state);
+	drm_atomic_helper_cleanup_planes(dev, state);
+	return (ret);
+}
+
+static int
+nvkm_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
+    bool nonblock)
+{
+	if (state->async_update)
+		return (drm_atomic_helper_commit(dev, state, nonblock));
+	if (!nvkm_atomic_state_needs_output_prepare(state))
+		return (drm_atomic_helper_commit(dev, state, nonblock));
+	if (nonblock)
+		return (-EINVAL);
+	return (nvkm_atomic_commit_prepared(dev, state));
 }
 
 static int
@@ -1189,17 +1338,23 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	if (sc->disp == NULL)
 		return;
 
-	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-	err = nvkm_kms_crtc_atom_route(&atom, crtc->state->connector_mask,
-	    false);
-	if (err != 0) {
-		nvkm_kms_record_result(sc, nc->head, nc->win, err,
-		    "crtc route");
-		return;
+	if (nc->prepared_route.valid) {
+		atom.display_id = nc->prepared_route.display_id;
+		err = nvkm_dispnv50_atomic_enable_prepared(sc, crtc, nc->win,
+		    &nc->prepared_route);
+	} else {
+		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
+		err = nvkm_kms_crtc_atom_route(&atom,
+		    crtc->state->connector_mask, false);
+		if (err != 0) {
+			nvkm_kms_record_result(sc, nc->head, nc->win, err,
+			    "crtc route");
+			return;
+		}
+		err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
+		    atom.display_id, &atom.hdmi);
 	}
 
-	err = nvkm_dispnv50_atomic_enable(sc, crtc, nc->head, nc->win,
-	    atom.display_id, &atom.hdmi);
 	nvkm_kms_record_result(sc, nc->head, nc->win, err, "crtc enable");
 	if (err == 0 && crtc->cursor != NULL && crtc->cursor->state != NULL &&
 	    crtc->cursor->state->visible && crtc->cursor->state->fb != NULL) {

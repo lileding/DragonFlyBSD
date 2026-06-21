@@ -3299,8 +3299,9 @@ nvkm_dispnv50_dp_sst_calc(const struct drm_display_mode *mode,
 }
 
 static int
-nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
-    struct drm_display_mode *mode, uint32_t head)
+nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_softc *sc,
+    struct nvkm_outp *outp, struct drm_display_mode *mode, uint32_t max_rate,
+    uint8_t max_lanes, uint32_t min_rate, bool enhanced_framing)
 {
 	static const uint8_t rates[] = {
 		DP_LINK_BW_1_62,
@@ -3308,10 +3309,54 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 		DP_LINK_BW_5_4,
 		DP_LINK_BW_8_1,
 	};
-	uint32_t max_rate;
-	uint32_t min_rate;
-	bool enhanced_framing;
-	uint8_t max_lanes;
+	uint8_t lanes;
+	int last_ret = -ERANGE;
+	int ret;
+	int i;
+
+	for (lanes = max_lanes; lanes != 0; lanes >>= 1) {
+		for (i = 0; i < (int)nitems(rates); i++) {
+			uint32_t watermark = 0;
+			uint32_t hblank_symbols = 0;
+			uint32_t vblank_symbols = 0;
+			uint8_t bw = rates[i];
+			uint32_t rate = nvkm_dispnv50_dp_rate_khz(bw);
+
+			if (rate == 0 || rate > max_rate)
+				continue;
+			if (rate * lanes < min_rate)
+				continue;
+
+			ret = nvkm_dispnv50_dp_sst_calc(mode, 8, bw, lanes,
+			    enhanced_framing, outp->dp.increased_wm, &watermark,
+			    &hblank_symbols, &vblank_symbols);
+			if (ret != 0) {
+				last_ret = ret;
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 dp sst timing rejected"
+				    " outp=%02x lanes=%u bw=0x%02x err=%d\n",
+				    outp->index, lanes, bw, ret);
+				continue;
+			}
+
+			return 0;
+		}
+	}
+
+	return last_ret;
+}
+
+static int
+nvkm_dispnv50_dp_enable_limits(struct nvkm_softc *sc, struct nvkm_outp *outp,
+    struct drm_display_mode *mode, uint32_t head, uint32_t max_rate,
+    uint8_t max_lanes, uint32_t min_rate, bool enhanced_framing)
+{
+	static const uint8_t rates[] = {
+		DP_LINK_BW_1_62,
+		DP_LINK_BW_2_7,
+		DP_LINK_BW_5_4,
+		DP_LINK_BW_8_1,
+	};
 	uint8_t lanes;
 	int last_ret = -ERANGE;
 	int ret;
@@ -3324,18 +3369,6 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	    outp->ior->func->dp->sst == NULL)
 		return -ENODEV;
 
-	ret = nvkm_dispnv50_dp_aux_read(outp, DP_DPCD_REV, outp->dp.dpcd,
-	    DP_RECEIVER_CAP_SIZE);
-	if (ret != 0)
-		return ret;
-
-	ret = nvkm_dispnv50_dp_link_limits(outp, mode, 8, &max_rate,
-	    &max_lanes, &min_rate);
-	if (ret != 0)
-		return ret;
-
-	enhanced_framing = !!(outp->dp.dpcd[DP_MAX_LANE_COUNT] &
-	    DP_ENHANCED_FRAME_CAP);
 	for (lanes = max_lanes; lanes != 0; lanes >>= 1) {
 		for (i = 0; i < (int)nitems(rates); i++) {
 			uint32_t watermark = 0;
@@ -3394,6 +3427,54 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	return last_ret;
 }
 
+static int
+nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
+    struct drm_display_mode *mode, struct nvkm_dispnv50_output_prepare *prepare)
+{
+	int ret;
+
+	if (outp == NULL || prepare == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_dp_aux_read(outp, DP_DPCD_REV, outp->dp.dpcd,
+	    DP_RECEIVER_CAP_SIZE);
+	if (ret != 0)
+		return ret;
+
+	memcpy(prepare->dp_dpcd, outp->dp.dpcd,
+	    MIN((size_t)NVKM_DISPNV50_DP_DPCD_SIZE,
+	    (size_t)DP_RECEIVER_CAP_SIZE));
+
+	ret = nvkm_dispnv50_dp_link_limits(outp, mode, 8,
+	    &prepare->dp_max_rate, &prepare->dp_max_lanes,
+	    &prepare->dp_min_rate);
+	if (ret != 0)
+		return ret;
+
+	prepare->dp_enhanced_framing =
+	    !!(outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP);
+	return nvkm_dispnv50_dp_find_sst_candidate(sc, outp, mode,
+	    prepare->dp_max_rate, prepare->dp_max_lanes,
+	    prepare->dp_min_rate, prepare->dp_enhanced_framing);
+}
+
+static int
+nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
+    struct drm_display_mode *mode, uint32_t head)
+{
+	struct nvkm_dispnv50_output_prepare prepare;
+	int ret;
+
+	memset(&prepare, 0, sizeof(prepare));
+	ret = nvkm_dispnv50_dp_prepare(sc, outp, mode, &prepare);
+	if (ret != 0)
+		return ret;
+
+	return nvkm_dispnv50_dp_enable_limits(sc, outp, mode, head,
+	    prepare.dp_max_rate, prepare.dp_max_lanes, prepare.dp_min_rate,
+	    prepare.dp_enhanced_framing);
+}
+
 static struct nvkm_outp *
 nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 {
@@ -3412,66 +3493,204 @@ nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 	return NULL;
 }
 
-static int
-nvkm_dispnv50_route_output(struct nvkm_softc *sc, struct nv50_core *core,
-    struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
-    uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi)
+void
+nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_output_prepare *prepare)
 {
 	struct nvkm_outp *outp;
-	u32 proto;
-	u32 ctrl;
-	int ret;
+
+	if (prepare == NULL)
+		return;
+
+	if (prepare->valid && prepare->acquired && !prepare->consumed) {
+		outp = nvkm_dispnv50_find_outp(sc, prepare->display_id);
+		if (outp != NULL && outp->ior != NULL && outp->func != NULL &&
+		    outp->func->release != NULL)
+			outp->func->release(outp);
+	}
+
+	memset(prepare, 0, sizeof(*prepare));
+}
+
+int
+nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
+    struct drm_display_mode *mode, uint32_t head, uint32_t display_id,
+    const struct nvkm_dispnv50_hdmi_info *hdmi,
+    struct nvkm_dispnv50_output_prepare *prepare)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nvkm_outp *outp;
+	struct nv50_core *core;
+	int ret = 0;
+
+	if (prepare == NULL)
+		return -EINVAL;
+	memset(prepare, 0, sizeof(*prepare));
+	if (sc == NULL || sc->disp == NULL || mode == NULL || display_id == 0)
+		return -ENODEV;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL)
+		return -ENODEV;
+	core = state->disp.core;
 
 	outp = nvkm_dispnv50_find_outp(sc, display_id);
 	if (outp == NULL)
 		return -ENODEV;
 
+	prepare->valid = true;
+	prepare->display_id = display_id;
+	prepare->head = head;
+	prepare->outp_index = outp->index;
+	prepare->output_type = outp->info.type;
+	if (hdmi != NULL)
+		prepare->hdmi = *hdmi;
+
 	if (outp->ior == NULL) {
-		if (outp->func == NULL || outp->func->acquire == NULL)
-			return -ENODEV;
+		if (outp->func == NULL || outp->func->acquire == NULL) {
+			ret = -ENODEV;
+			goto fail;
+		}
 		ret = outp->func->acquire(outp, false);
 		if (ret != 0)
-			return ret;
+			goto fail;
+		prepare->acquired = true;
 	}
-	if (outp->ior == NULL)
-		return -ENODEV;
-	if (core->func->sor == NULL || core->func->sor->ctrl == NULL)
-		return -ENODEV;
+
+	if (outp->ior == NULL || core->func == NULL ||
+	    core->func->sor == NULL || core->func->sor->ctrl == NULL) {
+		ret = -ENODEV;
+		goto fail;
+	}
+	prepare->ior_id = outp->ior->id;
+	prepare->ior_link = outp->ior->asy.link;
 
 	switch (outp->info.type) {
 	case DCB_OUTPUT_TMDS:
-		ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head, hdmi);
-		if (ret != 0)
-			return ret;
-		proto = (outp->ior->asy.link & 1) ?
+		if (outp->ior->func == NULL ||
+		    outp->ior->func->hdmi == NULL ||
+		    outp->ior->func->hdmi->ctrl == NULL) {
+			ret = -ENODEV;
+			goto fail;
+		}
+		prepare->sor_proto = (outp->ior->asy.link & 1) ?
 		    NVC37D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_A :
 		    NVC37D_SOR_SET_CONTROL_PROTOCOL_SINGLE_TMDS_B;
 		break;
 	case DCB_OUTPUT_DP:
-		ret = nvkm_dispnv50_dp_enable(sc, outp, mode, head);
+		if (outp->func == NULL || outp->func->dp.train == NULL ||
+		    outp->ior->func == NULL || outp->ior->func->dp == NULL ||
+		    outp->ior->func->dp->sst == NULL) {
+			ret = -ENODEV;
+			goto fail;
+		}
+		ret = nvkm_dispnv50_dp_prepare(sc, outp, mode, prepare);
 		if (ret != 0)
-			return ret;
-		proto = (outp->ior->asy.link & 1) ?
+			goto fail;
+		prepare->sor_proto = (outp->ior->asy.link & 1) ?
 		    NVC37D_SOR_SET_CONTROL_PROTOCOL_DP_A :
 		    NVC37D_SOR_SET_CONTROL_PROTOCOL_DP_B;
 		break;
 	default:
 		nvkm_infof(sc->dev,
-		    "drm: dispnv50 route unsupported display=0x%x outp=%02x"
+		    "drm: dispnv50 prepare unsupported display=0x%x outp=%02x"
 		    " type=0x%02x\n", display_id, outp->index,
 		    outp->info.type);
+		ret = -ENOSYS;
+		goto fail;
+	}
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 prepared display=0x%x outp=%02x sor=%d link=%u"
+	    " type=0x%02x acquired=%d\n", display_id, outp->index,
+	    prepare->ior_id, prepare->ior_link, outp->info.type,
+	    prepare->acquired);
+	return 0;
+
+fail:
+	nvkm_dispnv50_output_prepare_abort(sc, prepare);
+	return ret;
+}
+
+static int
+nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
+    struct nv50_core *core,
+    struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
+    struct nvkm_dispnv50_output_prepare *prepare)
+{
+	struct nvkm_outp *outp;
+	u32 ctrl;
+	int ret;
+
+	if (prepare == NULL || !prepare->valid || prepare->display_id == 0)
+		return -EINVAL;
+
+	outp = nvkm_dispnv50_find_outp(sc, prepare->display_id);
+	if (outp == NULL || outp->ior == NULL)
+		return -ENODEV;
+	if (outp->ior->id != prepare->ior_id)
+		return -ESTALE;
+	if (core == NULL || core->func == NULL ||
+	    core->func->sor == NULL || core->func->sor->ctrl == NULL)
+		return -ENODEV;
+
+	switch (prepare->output_type) {
+	case DCB_OUTPUT_TMDS:
+		ret = nvkm_dispnv50_hdmi_enable(sc, outp, mode, head,
+		    &prepare->hdmi);
+		if (ret != 0)
+			return ret;
+		break;
+	case DCB_OUTPUT_DP:
+		memcpy(outp->dp.dpcd, prepare->dp_dpcd,
+		    MIN((size_t)NVKM_DISPNV50_DP_DPCD_SIZE,
+		    (size_t)DP_RECEIVER_CAP_SIZE));
+		ret = nvkm_dispnv50_dp_enable_limits(sc, outp, mode, head,
+		    prepare->dp_max_rate, prepare->dp_max_lanes,
+		    prepare->dp_min_rate, prepare->dp_enhanced_framing);
+		if (ret != 0)
+			return ret;
+		break;
+	default:
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 route unsupported display=0x%x outp=%02x"
+		    " type=0x%02x\n", prepare->display_id, outp->index,
+		    prepare->output_type);
 		return -ENOSYS;
 	}
 
-	ctrl = NVVAL(NVC37D, SOR_SET_CONTROL, PROTOCOL, proto) | BIT(head);
+	ctrl = NVVAL(NVC37D, SOR_SET_CONTROL, PROTOCOL, prepare->sor_proto) |
+	    BIT(head);
 
 	ret = core->func->sor->ctrl(core, outp->ior->id, ctrl, asyh);
 	if (ret == 0) {
+		prepare->consumed = true;
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 route display=0x%x outp=%02x sor=%d link=%u proto=%u head=%u type=0x%02x\n",
-		    display_id, outp->index, outp->ior->id, outp->ior->asy.link,
-		    proto, head, outp->info.type);
+		    prepare->display_id, outp->index, outp->ior->id,
+		    outp->ior->asy.link, prepare->sor_proto, head,
+		    prepare->output_type);
 	}
+	return ret;
+}
+
+static int
+nvkm_dispnv50_route_output(struct nvkm_softc *sc, struct nv50_core *core,
+    struct nv50_head_atom *asyh, struct drm_display_mode *mode, uint32_t head,
+    uint32_t display_id, const struct nvkm_dispnv50_hdmi_info *hdmi)
+{
+	struct nvkm_dispnv50_output_prepare prepare;
+	int ret;
+
+	ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id, hdmi,
+	    &prepare);
+	if (ret != 0)
+		return ret;
+
+	ret = nvkm_dispnv50_route_output_prepared(sc, core, asyh, mode, head,
+	    &prepare);
+	if (ret != 0)
+		nvkm_dispnv50_output_prepare_abort(sc, &prepare);
 	return ret;
 }
 
@@ -3787,10 +4006,11 @@ nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win)
 	return nvkm_dispnv50_window_disable(sc, state, core, wndw);
 }
 
-int
-nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
+static int
+nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t head, uint32_t win, uint32_t display_id,
-    const struct nvkm_dispnv50_hdmi_info *hdmi)
+    const struct nvkm_dispnv50_hdmi_info *hdmi,
+    struct nvkm_dispnv50_output_prepare *prepare)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head_atom asyh;
@@ -3861,8 +4081,12 @@ nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		if (ret != 0)
 			goto fail;
 	}
-	ret = nvkm_dispnv50_route_output(sc, core, &asyh, mode, head, display_id,
-	    hdmi);
+	if (prepare != NULL)
+		ret = nvkm_dispnv50_route_output_prepared(sc, core, &asyh,
+		    mode, head, prepare);
+	else
+		ret = nvkm_dispnv50_route_output(sc, core, &asyh, mode, head,
+		    display_id, hdmi);
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
@@ -3911,6 +4135,26 @@ fail:
 	if (ret == 0)
 		return (-ENODEV);
 	return ret;
+}
+
+int
+nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t head, uint32_t win, uint32_t display_id,
+    const struct nvkm_dispnv50_hdmi_info *hdmi)
+{
+	return nvkm_dispnv50_atomic_enable_common(sc, crtc, head, win,
+	    display_id, hdmi, NULL);
+}
+
+int
+nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
+    struct drm_crtc *crtc, uint32_t win,
+    struct nvkm_dispnv50_output_prepare *prepare)
+{
+	if (prepare == NULL || !prepare->valid)
+		return -EINVAL;
+	return nvkm_dispnv50_atomic_enable_common(sc, crtc, prepare->head, win,
+	    prepare->display_id, &prepare->hdmi, prepare);
 }
 
 void
