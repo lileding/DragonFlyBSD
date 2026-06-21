@@ -165,7 +165,7 @@ struct nvkm_gsp_disp_output_info {
 	uint8_t or_mask;
 	uint8_t link;
 	bool is_dp;
-	bool is_mst;
+	bool mst_capable;
 };
 
 /*

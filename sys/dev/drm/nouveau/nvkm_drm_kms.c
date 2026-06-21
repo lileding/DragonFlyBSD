@@ -987,12 +987,12 @@ nvkm_kms_crtc_atom_validate_output(struct nvkm_kms_crtc_atom *atom)
 	case DCB_OUTPUT_TMDS:
 		break;
 	case DCB_OUTPUT_DP:
-		if (info->is_mst) {
-			nvkm_infof(atom->sc->dev,
-			    "drm: crtc route rejects MST display=0x%x head=%u\n",
-			    atom->display_id, atom->nc->head);
-			return (-ENOSYS);
-		}
+		/*
+		 * info->mst_capable means the physical DP output can host MST,
+		 * not that this KMS connector is an MST virtual sink.  This KMS
+		 * layer currently creates only the physical SST connector and no
+		 * DPMST encoders, so MST capability must not reject SST routing.
+		 */
 		break;
 	default:
 		nvkm_infof(atom->sc->dev,
@@ -2689,9 +2689,9 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nvkm_connector_dp_irq_register(nc, &info);
 		nvkm_infof(sc->dev,
 		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
-		    " outp=0x%02x conn=0x%02x\n",
+		    " outp=0x%02x conn=0x%02x mst_capable=%d\n",
 		    display_id, connector_type, encoder_type, possible_crtcs,
-		    info.output_type, info.connector_type);
+		    info.output_type, info.connector_type, info.mst_capable);
 		count++;
 	}
 
