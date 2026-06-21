@@ -99,8 +99,6 @@ head917d_curs_layout(struct nv50_head *head, struct nv50_wndw_atom *asyw,
 		return -EINVAL;
 	}
 
-	if (asyw->state.fb->height != asyw->state.fb->width)
-		return -EINVAL;
 	return 0;
 }
 

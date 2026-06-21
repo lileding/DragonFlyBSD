@@ -1513,6 +1513,44 @@ nvkm_cursor_size_supported(uint32_t size)
 }
 
 static int
+nvkm_framebuffer_plane0_min_size(const struct drm_framebuffer *fb,
+    uint64_t *min_size)
+{
+	uint64_t line;
+
+	if (fb == NULL || fb->format == NULL || min_size == NULL)
+		return (-EINVAL);
+	if (fb->format->num_planes < 1 || fb->format->cpp[0] == 0 ||
+	    fb->width == 0 || fb->height == 0)
+		return (-EINVAL);
+
+	line = (uint64_t)fb->width * fb->format->cpp[0];
+	if (fb->pitches[0] < line)
+		return (-EINVAL);
+
+	*min_size = (uint64_t)(fb->height - 1) * fb->pitches[0] +
+	    line + fb->offsets[0];
+	return (0);
+}
+
+static int
+nvkm_framebuffer_bo_size_check(const struct drm_framebuffer *fb,
+    const struct drm_gem_object *obj, bool allow_missing_obj)
+{
+	uint64_t min_size;
+	int ret;
+
+	ret = nvkm_framebuffer_plane0_min_size(fb, &min_size);
+	if (ret != 0)
+		return (ret);
+	if (obj == NULL)
+		return (allow_missing_obj ? 0 : -EINVAL);
+	if (obj->size < min_size)
+		return (-EINVAL);
+	return (0);
+}
+
+static int
 nvkm_cursor_atomic_check(struct drm_plane *plane,
     struct drm_plane_state *state)
 {
@@ -1544,8 +1582,9 @@ nvkm_cursor_atomic_check(struct drm_plane *plane,
 	if (!nvkm_plane_format_mod_supported(plane, fb->format->format,
 	    fb->modifier))
 		return (-EINVAL);
-	if (fb->width != fb->height || fb->width != (uint32_t)state->crtc_w ||
-	    fb->height != (uint32_t)state->crtc_h)
+	if (state->crtc_w <= 0 || state->crtc_h <= 0 ||
+	    state->crtc_w != state->crtc_h ||
+	    fb->width != (uint32_t)state->crtc_w)
 		return (-EINVAL);
 	if (state->src_x != 0 || state->src_y != 0 ||
 	    state->src_w != ((uint32_t)state->crtc_w << 16) ||
@@ -1561,6 +1600,9 @@ nvkm_cursor_atomic_check(struct drm_plane *plane,
 	obj = drm_gem_fb_get_obj(fb, 0);
 	if (obj == NULL)
 		return (-EINVAL);
+	ret = nvkm_framebuffer_bo_size_check(fb, obj, false);
+	if (ret != 0)
+		return (ret);
 	bo = to_nvkm_bo(obj);
 	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) || bo->paddr == 0)
 		return (-EINVAL);
@@ -1572,6 +1614,7 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 {
 	struct drm_crtc_state *crtc_state;
 	struct drm_framebuffer *fb;
+	struct drm_gem_object *obj;
 	int ret;
 
 	if (plane->type == DRM_PLANE_TYPE_CURSOR)
@@ -1598,6 +1641,10 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 		return (-EINVAL);
 	if ((fb->pitches[0] & 0x3fu) != 0)
 		return (-EINVAL);
+	obj = drm_gem_fb_get_obj(fb, 0);
+	ret = nvkm_framebuffer_bo_size_check(fb, obj, true);
+	if (ret != 0)
+		return (ret);
 	return (0);
 }
 
