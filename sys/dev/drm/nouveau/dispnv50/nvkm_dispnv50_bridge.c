@@ -44,6 +44,8 @@
 /* drm_dp_helper.h conflicts with DragonFly's imported display/drm_dp.h here. */
 bool drm_dp_channel_eq_ok(const u8 link_status[DP_LINK_STATUS_SIZE],
     int lane_count);
+int drm_dp_downstream_max_clock(const u8 dpcd[DP_RECEIVER_CAP_SIZE],
+    const u8 port_cap[4]);
 
 #ifdef nvkm_rd32
 #undef nvkm_rd32
@@ -3663,6 +3665,34 @@ nvkm_dispnv50_dp_link_limits(struct nvkm_outp *outp,
 }
 
 static int
+nvkm_dispnv50_dp_check_downstream_clock(struct nvkm_outp *outp,
+    const uint8_t dpcd[DP_RECEIVER_CAP_SIZE],
+    const struct drm_display_mode *mode)
+{
+	uint8_t port_cap[4];
+	uint32_t clock_khz;
+	int max_clock;
+	int ret;
+
+	if (outp == NULL || dpcd == NULL || mode == NULL)
+		return -EINVAL;
+	if ((dpcd[DP_DOWNSTREAMPORT_PRESENT] & DP_DWN_STRM_PORT_PRESENT) == 0 ||
+	    (dpcd[DP_DOWNSTREAMPORT_PRESENT] & DP_DETAILED_CAP_INFO_AVAILABLE) == 0)
+		return 0;
+
+	ret = nvkm_dispnv50_dp_aux_read(outp, DP_DOWNSTREAM_PORT_0, port_cap,
+	    sizeof(port_cap));
+	if (ret != 0)
+		return ret;
+
+	max_clock = drm_dp_downstream_max_clock(dpcd, port_cap);
+	clock_khz = nvkm_dispnv50_dp_mode_clock_khz(mode);
+	if (max_clock > 0 && clock_khz > (uint32_t)max_clock)
+		return -ERANGE;
+	return 0;
+}
+
+static int
 nvkm_dispnv50_dp_sst_calc(const struct drm_display_mode *mode,
     uint8_t bpc, uint8_t link_bw, uint8_t lanes, bool enhanced_framing,
     bool increased_watermark, uint32_t *watermark, uint32_t *hblank_symbols,
@@ -4054,6 +4084,11 @@ nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	if (ret != 0)
 		return ret;
 
+	ret = nvkm_dispnv50_dp_check_downstream_clock(outp, outp->dp.dpcd,
+	    mode);
+	if (ret != 0)
+		return ret;
+
 	prepare->dp_enhanced_framing =
 	    !!(outp->dp.dpcd[DP_MAX_LANE_COUNT] & DP_ENHANCED_FRAME_CAP);
 	return nvkm_dispnv50_dp_select_sst_candidate(sc, outp, mode,
@@ -4145,6 +4180,10 @@ nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 
 	ret = nvkm_dispnv50_dp_link_limits(outp, dpcd, mode, bpc,
 	    &max_rate, &max_lanes, &min_rate);
+	if (ret != 0)
+		return nvkm_dispnv50_dp_mode_status_from_error(ret);
+
+	ret = nvkm_dispnv50_dp_check_downstream_clock(outp, dpcd, mode);
 	if (ret != 0)
 		return nvkm_dispnv50_dp_mode_status_from_error(ret);
 
