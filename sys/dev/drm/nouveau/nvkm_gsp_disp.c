@@ -2032,6 +2032,49 @@ nvkm_gsp_disp_head_count(struct nvkm_softc *sc)
 }
 
 int
+nvkm_gsp_disp_output_info(struct nvkm_softc *sc, uint32_t display_id,
+    struct nvkm_gsp_disp_output_info *info)
+{
+	struct nvkm_outp *outp;
+	int id;
+
+	if (info == NULL)
+		return -EINVAL;
+	memset(info, 0, sizeof(*info));
+
+	if (sc == NULL || sc->disp == NULL)
+		return -ENODEV;
+	if (display_id == 0 || (display_id & (display_id - 1)) != 0)
+		return -EINVAL;
+	id = ffs(display_id) - 1;
+	if (id < 0 || id >= 32)
+		return -EINVAL;
+
+	list_for_each_entry(outp, &sc->disp->outps, head) {
+		if (outp->index != id)
+			continue;
+
+		info->display_id = display_id;
+		info->heads = outp->info.heads;
+		info->output_type = outp->info.type;
+		info->output_location = outp->info.location;
+		info->or_mask = outp->info.or;
+		info->link = outp->info.link;
+		info->is_dp = outp->info.type == DCB_OUTPUT_DP;
+		info->is_mst = info->is_dp && outp->dp.mst;
+		if (outp->conn != NULL) {
+			info->connector_type = outp->conn->info.type;
+			info->connector_location = outp->conn->info.location;
+		} else {
+			info->connector_type = DCB_CONNECTOR_NONE;
+		}
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+int
 nvkm_gsp_disp_connected(struct nvkm_softc *sc, uint32_t display_id)
 {
 	int id;
