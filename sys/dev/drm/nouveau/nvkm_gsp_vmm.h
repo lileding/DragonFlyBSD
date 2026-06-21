@@ -312,7 +312,12 @@ int	 nvkm_gsp_vmm_check_unmap_valid_range_page(struct nvkm_gsp_vmm *vmm,
 	    uint8_t preserve_page_shift);
 int	 nvkm_gsp_vmm_unmap_valid_noflush(struct nvkm_gsp_vmm *vmm,
 	    uint64_t va, uint64_t size);
+int	 nvkm_gsp_vmm_unmap_valid_page_noflush(struct nvkm_gsp_vmm *vmm,
+	    uint64_t va, uint64_t size, uint8_t page_shift);
 int	 nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
+	    uint8_t preserve_page_shift);
+int	 nvkm_gsp_vmm_clear_conflict_preserve_page_noflush(
 	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
 	    uint8_t preserve_page_shift);
 int	 nvkm_gsp_vmm_unmap_valid_preserve_pt_noflush(
@@ -334,9 +339,21 @@ int	 nvkm_gsp_vmm_prepare_unmap_sparse_range_page(
 	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
 	    uint8_t clear_page_shift, int preserve_target_pts,
 	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan);
+int	 nvkm_gsp_vmm_prepare_overwrite_sparse_range_page(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
+	    uint8_t clear_page_shift,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan);
+int	 nvkm_gsp_vmm_prepare_metadata_sparse_range(
+	    struct nvkm_gsp_vmm *vmm, uint64_t va, uint64_t size,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan);
 int	 nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(
 	    struct nvkm_gsp_vmm *vmm,
 	    struct nvkm_gsp_vmm_sparse_unmap_plan *plan);
+int	 nvkm_gsp_vmm_commit_unmap_sparse_range_conflict_noflush(
+	    struct nvkm_gsp_vmm *vmm,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan *plan);
+int	 nvkm_gsp_vmm_sparse_unmap_plan_wrote_hw(
+	    const struct nvkm_gsp_vmm_sparse_unmap_plan *plan);
 /*
  * nvkm_gsp_vmm_sparse_unmap_plan_for_each_clear
  *

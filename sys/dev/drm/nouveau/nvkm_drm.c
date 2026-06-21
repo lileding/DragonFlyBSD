@@ -4811,8 +4811,8 @@ nvkm_drm_vm_binding_reclaim_noflush(struct nvkm_softc *sc,
 	nvkm_drm_vm_binding_assert(binding);
 
 	if (binding->pte_installed) {
-		err = nvkm_gsp_vmm_unmap_valid_noflush(binding->owner->vmm,
-		    binding->addr, binding->size);
+		err = nvkm_gsp_vmm_unmap_valid_page_noflush(binding->owner->vmm,
+		    binding->addr, binding->size, binding->page_shift);
 		if (err != 0) {
 			nvkm_debugf(sc->dev,
 			    "nvkm_drm: VM_BIND unmap failed addr=0x%016jx size=0x%016jx obj=%p err=%d\n",
@@ -5111,6 +5111,28 @@ nvkm_drm_vm_bind_note_clear(struct nvkm_softc *sc, uint32_t action,
 }
 
 /*
+ * nvkm_drm_vm_bind_clear_is_conflict()
+ *
+ * Ownership:
+ *   Consumes only the scalar VM trace action.  It does not inspect or retain
+ *   VM, BO, sparse-plan, or mapping ownership.
+ *
+ * Lifetime:
+ *   The returned boolean is valid for the caller's current remap operation:
+ *   MAP and MAP_SPARSE clear old state only to make room for a final target
+ *   leaf, while UNMAP, MAP_NULL, and UNMAP_SPARSE are semantic final invalid.
+ *
+ * Threading:
+ *   Pure helper; no locks, waits, or side effects.
+ */
+static bool
+nvkm_drm_vm_bind_clear_is_conflict(uint32_t action)
+{
+	return (action == NVKM_DRM_VM_TRACE_MAP ||
+	    action == NVKM_DRM_VM_TRACE_MAP_SPARSE);
+}
+
+/*
  * nvkm_drm_vm_bind_segments_min_page_shift()
  *
  * Ownership:
@@ -5138,20 +5160,28 @@ nvkm_drm_vm_bind_segments_min_page_shift(
 	return (page_shift);
 }
 
+enum nvkm_drm_vm_sparse_clear_mode {
+	NVKM_DRM_VM_SPARSE_CLEAR_FINAL,
+	NVKM_DRM_VM_SPARSE_CLEAR_TARGET_OVERWRITE,
+	NVKM_DRM_VM_SPARSE_CLEAR_METADATA_ONLY,
+};
+
 /*
  * nvkm_drm_vm_bind_prepare_sparse_clear()
  *
  * Ownership:
- *   Prepares a caller-owned sparse clear plan for the range.  The plan owns
- *   any sparse keep-regions and split PTs needed by the later nofail commit.
- *   No live VMM sparse-region ownership or BO mapping ownership is touched.
+ *   Prepares a caller-owned sparse clear/removal plan for the range.  FINAL
+ *   plans own invalid PTE writes; TARGET_OVERWRITE plans own only sparse
+ *   metadata removal plus child storage needed by the following target writer;
+ *   METADATA_ONLY plans own stale sparse metadata removal only.
  *
  * Lifetime:
  *   The caller must keep VM remap serialization until commit or fini because
  *   the plan borrows old sparse-region pointers from the VMM.  A range with no
  *   sparse regions returns success with *pplan == NULL.  clear_page_shift caps
  *   the cut range page size when a later valid/sparse target writer needs
- *   lower child PT storage from the same plan.
+ *   lower child PT storage from the same plan.  METADATA_ONLY is used only
+ *   after exact valid-map no-op proof, so it must not dirty hardware PTE/PDEs.
  *
  * Threading:
  *   Called before PTE/PDE mutation for the enclosing op.  It may allocate
@@ -5160,14 +5190,28 @@ nvkm_drm_vm_bind_segments_min_page_shift(
  */
 static int
 nvkm_drm_vm_bind_prepare_sparse_clear(struct nvkm_drm_file *nfile,
-    uint64_t addr, uint64_t size, uint8_t clear_page_shift,
-    bool preserve_target_pts,
-    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan)
+	    uint64_t addr, uint64_t size, uint8_t clear_page_shift,
+	    enum nvkm_drm_vm_sparse_clear_mode mode,
+	    struct nvkm_gsp_vmm_sparse_unmap_plan **pplan)
 {
 	int err;
 
-	err = nvkm_gsp_vmm_prepare_unmap_sparse_range_page(nfile->vmm, addr,
-	    size, clear_page_shift, preserve_target_pts, pplan);
+	switch (mode) {
+	case NVKM_DRM_VM_SPARSE_CLEAR_FINAL:
+		err = nvkm_gsp_vmm_prepare_unmap_sparse_range_page(nfile->vmm,
+		    addr, size, clear_page_shift, 0, pplan);
+		break;
+	case NVKM_DRM_VM_SPARSE_CLEAR_TARGET_OVERWRITE:
+		err = nvkm_gsp_vmm_prepare_overwrite_sparse_range_page(nfile->vmm,
+		    addr, size, clear_page_shift, pplan);
+		break;
+	case NVKM_DRM_VM_SPARSE_CLEAR_METADATA_ONLY:
+		err = nvkm_gsp_vmm_prepare_metadata_sparse_range(nfile->vmm,
+		    addr, size, pplan);
+		break;
+	default:
+		return (-EINVAL);
+	}
 	if (err != 0)
 		return (-err);
 	return (0);
@@ -5196,22 +5240,32 @@ nvkm_drm_vm_bind_commit_sparse_clear_noflush(struct nvkm_softc *sc,
     uint64_t addr, uint64_t size, struct nvkm_drm_vm_dirty_set *dirty_set)
 {
 	struct nvkm_gsp_vmm_sparse_unmap_plan *plan = *pplan;
+	bool wrote_hw;
 	int err;
 
 	if (plan == NULL)
 		return (0);
-	err = nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(nfile->vmm,
-	    plan);
+	if (nvkm_drm_vm_bind_clear_is_conflict(action)) {
+		err = nvkm_gsp_vmm_commit_unmap_sparse_range_conflict_noflush(
+		    nfile->vmm, plan);
+	} else {
+		err = nvkm_gsp_vmm_commit_unmap_sparse_range_noflush(
+		    nfile->vmm, plan);
+	}
 	if (err != 0) {
 		nvkm_gsp_vmm_fini_unmap_sparse_range(nfile->vmm, plan);
 		*pplan = NULL;
 		return (-err);
 	}
-	nvkm_drm_vm_bind_note_sparse_clear_shapes(sc, plan);
+	wrote_hw = nvkm_gsp_vmm_sparse_unmap_plan_wrote_hw(plan);
+	if (wrote_hw)
+		nvkm_drm_vm_bind_note_sparse_clear_shapes(sc, plan);
 	nvkm_gsp_vmm_fini_unmap_sparse_range(nfile->vmm, plan);
 	*pplan = NULL;
-	nvkm_drm_vm_bind_note_clear(sc, action, size);
-	nvkm_drm_vm_bind_note_dirty_range(sc, dirty_set, addr, size);
+	if (wrote_hw) {
+		nvkm_drm_vm_bind_note_clear(sc, action, size);
+		nvkm_drm_vm_bind_note_dirty_range(sc, dirty_set, addr, size);
+	}
 	return (0);
 }
 
@@ -5225,42 +5279,162 @@ nvkm_drm_vm_bind_abort_sparse_clear(struct nvkm_drm_file *nfile,
 	*pplan = NULL;
 }
 
+/*
+ * nvkm_drm_vm_materialize_entry_add_4k_keep_range()
+ *
+ * Ownership:
+ *   Borrows one live large-page binding and appends a prepared SPT segment for
+ *   a target-outside keep range.  The helper does not publish mapping ownership
+ *   or write PTEs; the enclosing materialize entry owns the segment plan.
+ *
+ * Lifetime:
+ *   Only keep ranges may be passed here.  Target-middle ranges that will become
+ *   final valid, sparse, or invalid are deliberately skipped so split and final
+ *   install/clear do not rewrite the same VA.
+ *
+ * Threading:
+ *   Runs in VM_BIND prepare under nfile->vm_token.  It may snapshot BO backing
+ *   and allocate segment storage, but performs no BAR1 writes and waits on no
+ *   GPU work.
+ */
+static int
+nvkm_drm_vm_materialize_entry_add_4k_keep_range(
+    struct nvkm_drm_vm_materialize_entry *entry, struct nvkm_bo *bo,
+    const struct nvkm_drm_vm_binding *binding, uint64_t keep_start,
+    uint64_t keep_end)
+{
+	uint64_t bo_offset, keep_size;
+	int err;
+
+	if (keep_start >= keep_end)
+		return (0);
+	if (keep_start < binding->addr)
+		return (-EINVAL);
+	keep_size = keep_end - keep_start;
+	bo_offset = binding->bo_offset + (keep_start - binding->addr);
+	if ((keep_start | keep_size | bo_offset) &
+	    (NVKM_GMMU_PT_PAGE_SIZE - 1))
+		return (-EINVAL);
+
+	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+		vm_paddr_t paddr;
+		uint64_t run_size;
+
+		err = nvkm_bo_paddr_run_at(bo, bo_offset, keep_size, &paddr,
+		    &run_size);
+		if (err != 0 || run_size < keep_size)
+			return (err != 0 ? -err : -EIO);
+		return (nvkm_drm_vm_bind_segment_add(&entry->segments,
+		    keep_start, keep_size, bo_offset, paddr,
+		    NVKM_GMMU_SPT_SHIFT));
+	}
+
+	return (nvkm_drm_vm_bind_segment_add_sysmem(&entry->segments, bo,
+	    keep_start, keep_size, bo_offset, NVKM_GMMU_SPT_SHIFT));
+}
+
 static int
 nvkm_drm_vm_materialize_entry_prepare_4k(struct nvkm_drm_file *nfile,
     struct nvkm_drm_vm_materialize_entry *entry,
-    struct nvkm_drm_vm_binding *binding)
+    struct nvkm_drm_vm_binding *binding, uint64_t target_addr,
+    uint64_t target_size)
 {
 	struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
+	uint64_t old_start, old_end, target_end, cut_start, cut_end;
 	int err;
 
 	entry->binding = binding;
 	entry->is_2m = false;
 	if (binding->page_shift <= NVKM_GMMU_SPT_SHIFT)
 		return (0);
+	if (binding->size == 0 || target_size == 0 ||
+	    binding->addr > UINT64_MAX - binding->size ||
+	    target_addr > UINT64_MAX - target_size)
+		return (-EINVAL);
 
-	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+	old_start = binding->addr;
+	old_end = old_start + binding->size;
+	target_end = target_addr + target_size;
+	cut_start = old_start > target_addr ? old_start : target_addr;
+	cut_end = old_end < target_end ? old_end : target_end;
+	if (cut_start >= cut_end)
+		return (nvkm_drm_vm_materialize_entry_add_4k_keep_range(entry,
+		    bo, binding, old_start, old_end));
+
+	err = nvkm_drm_vm_materialize_entry_add_4k_keep_range(entry, bo,
+	    binding, old_start, cut_start);
+	if (err != 0)
+		return (err);
+	err = nvkm_drm_vm_materialize_entry_add_4k_keep_range(entry, bo,
+	    binding, cut_end, old_end);
+	if (err != 0)
+		return (err);
+	(void)nfile;
+	return (0);
+}
+
+/*
+ * nvkm_drm_vm_materialize_entry_add_vram_keep_range()
+ *
+ * Ownership:
+ *   Borrows a live VRAM binding and appends prepared segment descriptors for
+ *   the old BO range that must survive a remap.  The helper does not pin,
+ *   retain, or publish mapping ownership; the enclosing materialize entry owns
+ *   the segment plan.
+ *
+ * Lifetime:
+ *   Generated segments describe only target-outside keep ranges.  Target-middle
+ *   ranges that will be overwritten by valid/sparse or cleared by final invalid
+ *   are deliberately skipped so split and install do not rewrite the same VA.
+ *
+ * Threading:
+ *   Runs in VM_BIND prepare while nfile->vm_token serializes the binding tree.
+ *   It only snapshots VRAM physical runs and may not write PTEs/PDEs.
+ */
+static int
+nvkm_drm_vm_materialize_entry_add_vram_keep_range(
+    struct nvkm_drm_vm_materialize_entry *entry, struct nvkm_bo *bo,
+    const struct nvkm_drm_vm_binding *binding, uint64_t keep_start,
+    uint64_t keep_end)
+{
+	uint64_t page_64k = NVKM_GMMU_LPT_PAGE_SIZE;
+	uint64_t old_start = binding->addr;
+	uint64_t cur;
+	int err;
+
+	for (cur = keep_start; cur < keep_end;) {
+		uint64_t bo_offset = binding->bo_offset + (cur - old_start);
+		uint64_t remaining = keep_end - cur;
+		uint64_t chunk, next_64k;
+		uint8_t page_shift;
 		vm_paddr_t paddr;
 		uint64_t run_size;
 
-		err = nvkm_bo_paddr_run_at(bo, binding->bo_offset,
-		    binding->size, &paddr, &run_size);
-		if (err != 0 || run_size < binding->size)
-			return (err != 0 ? -err : -EIO);
-		err = nvkm_drm_vm_bind_segment_add(&entry->segments,
-		    binding->addr, binding->size, binding->bo_offset, paddr,
-		    NVKM_GMMU_SPT_SHIFT);
-	} else {
-		err = nvkm_drm_vm_bind_segment_add_sysmem(&entry->segments,
-		    bo, binding->addr, binding->size, binding->bo_offset,
-		    NVKM_GMMU_SPT_SHIFT);
-	}
-	if (err != 0)
-		return (err);
+		if (((cur | bo_offset) & (page_64k - 1)) == 0 &&
+		    remaining >= page_64k) {
+			chunk = page_64k;
+			page_shift = NVKM_GMMU_LPT_SHIFT;
+		} else {
+			next_64k = (cur + page_64k) & ~(page_64k - 1);
+			if (next_64k <= cur)
+				next_64k = cur + page_64k;
+			chunk = MIN(remaining, next_64k - cur);
+			chunk &= ~(NVKM_GMMU_PT_PAGE_SIZE - 1);
+			if (chunk == 0)
+				chunk = NVKM_GMMU_PT_PAGE_SIZE;
+			page_shift = NVKM_GMMU_SPT_SHIFT;
+		}
 
-	err = nvkm_gsp_vmm_check_prepared_pt_range(nfile->vmm,
-	    binding->addr, binding->size, NVKM_GMMU_SPT_SHIFT);
-	if (err != 0)
-		return (-err);
+		err = nvkm_bo_paddr_run_at(bo, bo_offset, chunk, &paddr,
+		    &run_size);
+		if (err != 0 || run_size < chunk)
+			return (err != 0 ? -err : -EIO);
+		err = nvkm_drm_vm_bind_segment_add(&entry->segments, cur,
+		    chunk, bo_offset, paddr, page_shift);
+		if (err != 0)
+			return (err);
+		cur += chunk;
+	}
 	return (0);
 }
 
@@ -5283,10 +5457,10 @@ nvkm_drm_vm_materialize_entry_prepare_2m(struct nvkm_drm_file *nfile,
 	entry->is_2m = true;
 	if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) == 0)
 		return (nvkm_drm_vm_materialize_entry_prepare_4k(nfile,
-		    entry, binding));
+		    entry, binding, target_addr, target_size));
 	if (binding->page_shift != NVKM_GMMU_PD0_SHIFT)
 		return (nvkm_drm_vm_materialize_entry_prepare_4k(nfile,
-		    entry, binding));
+		    entry, binding, target_addr, target_size));
 	if (binding->size == 0 || target_size == 0 ||
 	    old_start > UINT64_MAX - binding->size ||
 	    target_addr > UINT64_MAX - target_size)
@@ -5296,6 +5470,7 @@ nvkm_drm_vm_materialize_entry_prepare_2m(struct nvkm_drm_file *nfile,
 	if ((old_start | binding->size | binding->bo_offset) &
 	    (page_2m - 1))
 		return (-EINVAL);
+	(void)materialize_full_cover;
 
 	for (window = old_start; window < old_end; window += page_2m) {
 		uint64_t window_end = window + page_2m;
@@ -5306,8 +5481,7 @@ nvkm_drm_vm_materialize_entry_prepare_2m(struct nvkm_drm_file *nfile,
 		uint64_t window_bo_offset = binding->bo_offset +
 		    (window - old_start);
 
-		if (cut_start >= cut_end || (!materialize_full_cover &&
-		    cut_start == window && cut_end == window_end)) {
+		if (cut_start >= cut_end) {
 			vm_paddr_t paddr;
 			uint64_t run_size;
 
@@ -5323,28 +5497,19 @@ nvkm_drm_vm_materialize_entry_prepare_2m(struct nvkm_drm_file *nfile,
 			continue;
 		}
 
-		for (uint64_t sub = window; sub < window_end;
-		    sub += page_64k) {
-			uint64_t sub_end = sub + page_64k;
-			uint64_t sub_cut_start = sub > target_addr ? sub :
-			    target_addr;
-			uint64_t sub_cut_end = sub_end < target_end ? sub_end :
-			    target_end;
-			uint64_t sub_bo_offset = binding->bo_offset +
-			    (sub - old_start);
-			uint8_t page_shift = NVKM_GMMU_LPT_SHIFT;
-			vm_paddr_t paddr;
-			uint64_t run_size;
-
-			if (sub_cut_start < sub_cut_end &&
-			    !(sub_cut_start == sub && sub_cut_end == sub_end))
-				page_shift = NVKM_GMMU_SPT_SHIFT;
-			err = nvkm_bo_paddr_run_at(bo, sub_bo_offset,
-			    page_64k, &paddr, &run_size);
-			if (err != 0 || run_size < page_64k)
-				return (err != 0 ? -err : -EIO);
-			err = nvkm_drm_vm_bind_segment_add(&entry->segments,
-			    sub, page_64k, sub_bo_offset, paddr, page_shift);
+		err = nvkm_drm_vm_bind_2m_split_plan_prepare(nfile->vmm,
+		    &entry->split_plan, window);
+		if (err != 0)
+			return (err);
+		if (window < cut_start) {
+			err = nvkm_drm_vm_materialize_entry_add_vram_keep_range(
+			    entry, bo, binding, window, cut_start);
+			if (err != 0)
+				return (err);
+		}
+		if (cut_end < window_end) {
+			err = nvkm_drm_vm_materialize_entry_add_vram_keep_range(
+			    entry, bo, binding, cut_end, window_end);
 			if (err != 0)
 				return (err);
 		}
@@ -5382,7 +5547,7 @@ nvkm_drm_vm_materialize_entry_prepare(struct nvkm_drm_file *nfile,
 		    entry, binding, target_addr, target_size,
 		    materialize_full_cover));
 	return (nvkm_drm_vm_materialize_entry_prepare_4k(nfile, entry,
-	    binding));
+	    binding, target_addr, target_size));
 }
 
 /*
@@ -5413,9 +5578,6 @@ nvkm_drm_vm_materialize_entry_preflight(struct nvkm_drm_file *nfile,
 	int err;
 
 	if (!entry->is_2m) {
-		KASSERT(entry->segments.count == 1,
-		    ("nvkm_drm: 4K materialize segment count %u",
-		    entry->segments.count));
 		return (nvkm_drm_vm_bind_map_segments_preflight(nfile,
 		    entry->segments.segments, entry->segments.count, bo));
 	}
@@ -5449,37 +5611,39 @@ nvkm_drm_vm_materialize_entry_commit(struct nvkm_softc *sc,
 	struct nvkm_bo *bo = to_nvkm_bo(binding->obj);
 	uint64_t page_2m = 1ULL << NVKM_GMMU_PD0_SHIFT;
 	uint64_t materialized = 0;
-	uint64_t last_split = UINT64_MAX;
 	int err;
 
 	if (!entry->is_2m) {
-		struct nvkm_drm_vm_bind_segment *segment;
-
-		KASSERT(entry->segments.count == 1,
-		    ("nvkm_drm: 4K materialize segment count %u",
-		    entry->segments.count));
 		err = nvkm_drm_vm_bind_map_segments_preflight(nfile,
 		    entry->segments.segments, entry->segments.count, bo);
 		if (err != 0)
 			return (err);
-		segment = &entry->segments.segments[0];
-		if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
-			err = nvkm_gsp_vmm_map_vram_flags_page_prepared_noflush(
-			    nfile->vmm, segment->addr, segment->paddr,
-			    segment->size, 0, 0, binding->pte_kind,
-			    NVKM_GMMU_SPT_SHIFT);
-		} else {
-			err =
-			    nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush(
-			    nfile->vmm, segment->addr, segment->sysmem_paddrs,
-			    segment->sysmem_page_count, binding->pte_kind,
-			    segment->page_shift);
+		for (uint32_t i = 0; i < entry->segments.count; i++) {
+			struct nvkm_drm_vm_bind_segment *segment =
+			    &entry->segments.segments[i];
+
+			if ((bo->domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+				err =
+				    nvkm_gsp_vmm_map_vram_flags_page_prepared_noflush(
+				    nfile->vmm, segment->addr, segment->paddr,
+				    segment->size, 0, 0, binding->pte_kind,
+				    NVKM_GMMU_SPT_SHIFT);
+			} else {
+				err =
+				    nvkm_gsp_vmm_map_sysmem_paddrs_page_prepared_noflush(
+				    nfile->vmm, segment->addr,
+				    segment->sysmem_paddrs,
+				    segment->sysmem_page_count, binding->pte_kind,
+				    segment->page_shift);
+			}
+			if (err != 0)
+				return (-err);
 		}
-		if (err != 0)
-			return (-err);
-		nvkm_drm_vm_bind_note_materialize(sc, dirty_set,
-		    binding->addr, binding->size);
-		binding->page_shift = NVKM_GMMU_SPT_SHIFT;
+		if (entry->segments.count != 0) {
+			nvkm_drm_vm_bind_note_materialize(sc, dirty_set,
+			    binding->addr, binding->size);
+			binding->page_shift = NVKM_GMMU_SPT_SHIFT;
+		}
 		entry->committed = true;
 		return (0);
 	}
@@ -5494,21 +5658,23 @@ nvkm_drm_vm_materialize_entry_commit(struct nvkm_softc *sc,
 		if (err != 0)
 			return (err);
 	}
+	for (uint32_t i = 0; i < entry->split_plan.count; i++) {
+		uint64_t split = entry->split_plan.splits[i].addr;
+		bool was_committed = entry->split_plan.splits[i].committed;
+
+		err = nvkm_drm_vm_bind_2m_split_plan_commit(nfile->vmm,
+		    &entry->split_plan, split);
+		if (err != 0)
+			return (err);
+		if (!was_committed)
+			materialized += page_2m;
+	}
 	for (uint32_t i = 0; i < entry->segments.count; i++) {
 		struct nvkm_drm_vm_bind_segment *segment =
 		    &entry->segments.segments[i];
-		uint64_t split = segment->addr & ~(page_2m - 1);
 
 		if (segment->page_shift == NVKM_GMMU_PD0_SHIFT)
 			continue;
-		if (last_split != split) {
-			err = nvkm_drm_vm_bind_2m_split_plan_commit(
-			    nfile->vmm, &entry->split_plan, split);
-			if (err != 0)
-				return (err);
-			last_split = split;
-			materialized += page_2m;
-		}
 		err = nvkm_gsp_vmm_map_vram_flags_page_prepared_noflush(
 		    nfile->vmm, segment->addr, segment->paddr,
 		    segment->size, 0, 0, binding->pte_kind,
@@ -6839,15 +7005,17 @@ nvkm_drm_vm_remove_plan_commit(struct nvkm_softc *sc,
 		    binding = nvkm_drm_vm_binding_next_overlap(nfile,
 		    binding, addr, size)) {
 			uint64_t old_start, old_end, cut_start, cut_end;
+			uint8_t clear_page_shift;
 
 			old_start = binding->addr;
 			old_end = binding->addr + binding->size;
 			cut_start = old_start > addr ? old_start : addr;
 			cut_end = old_end < end ? old_end : end;
+			clear_page_shift = plan->preserve_target_pts ?
+			    plan->preserve_page_shift : binding->page_shift;
 			err = nvkm_gsp_vmm_check_unmap_valid_range_page(
 			    nfile->vmm, cut_start, cut_end - cut_start,
-			    plan->preserve_target_pts,
-			    plan->preserve_page_shift);
+			    plan->preserve_target_pts, clear_page_shift);
 			if (err != 0)
 				return (-err);
 		}
@@ -6856,25 +7024,38 @@ nvkm_drm_vm_remove_plan_commit(struct nvkm_softc *sc,
 		    binding = nvkm_drm_vm_binding_next_overlap(nfile,
 		    binding, addr, size)) {
 			uint64_t old_start, old_end, cut_start, cut_end;
+			uint8_t clear_page_shift;
 
 			old_start = binding->addr;
 			old_end = binding->addr + binding->size;
 			cut_start = old_start > addr ? old_start : addr;
 			cut_end = old_end < end ? old_end : end;
+			clear_page_shift = plan->preserve_target_pts ?
+			    plan->preserve_page_shift : binding->page_shift;
 			nvkm_drm_vm_bind_note_clear_shape(sc,
 			    to_nvkm_bo(binding->obj), binding->pte_kind,
 			    binding->page_shift, cut_end - cut_start);
 			nvkm_drm_vm_bind_note_clear(sc, plan->clear_action,
 			    cut_end - cut_start);
 			if (plan->preserve_target_pts) {
-				err =
-				    nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
-				    nfile->vmm, cut_start,
-				    cut_end - cut_start,
-				    plan->preserve_page_shift);
+				if (nvkm_drm_vm_bind_clear_is_conflict(
+				    plan->clear_action)) {
+					err =
+					    nvkm_gsp_vmm_clear_conflict_preserve_page_noflush(
+					    nfile->vmm, cut_start,
+					    cut_end - cut_start,
+					    clear_page_shift);
+				} else {
+					err =
+					    nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
+					    nfile->vmm, cut_start,
+					    cut_end - cut_start,
+					    clear_page_shift);
+				}
 			} else {
-				err = nvkm_gsp_vmm_unmap_valid_noflush(nfile->vmm,
-				    cut_start, cut_end - cut_start);
+				err = nvkm_gsp_vmm_unmap_valid_page_noflush(
+				    nfile->vmm, cut_start, cut_end - cut_start,
+				    clear_page_shift);
 			}
 			if (err != 0)
 				return (-err);
@@ -6978,7 +7159,7 @@ nvkm_drm_vm_clear_plan_prepare(struct nvkm_softc *sc,
 
 	if (clear_sparse) {
 		err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, addr, size,
-		    NVKM_GMMU_PD0_SHIFT, preserve_target_pts,
+		    NVKM_GMMU_PD0_SHIFT, NVKM_DRM_VM_SPARSE_CLEAR_FINAL,
 		    &plan->sparse_clear_plan);
 		if (err != 0)
 			goto fail;
@@ -7205,10 +7386,18 @@ nvkm_drm_vm_segment_remove_plan_commit(struct nvkm_softc *sc,
 			    binding->page_shift, cut_end - cut_start);
 			nvkm_drm_vm_bind_note_clear(sc, plan->clear_action,
 			    cut_end - cut_start);
-			err =
-			    nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
-			    nfile->vmm, cut_start, cut_end - cut_start,
-			    seg->page_shift);
+			if (nvkm_drm_vm_bind_clear_is_conflict(
+			    plan->clear_action)) {
+				err =
+				    nvkm_gsp_vmm_clear_conflict_preserve_page_noflush(
+				    nfile->vmm, cut_start, cut_end - cut_start,
+				    seg->page_shift);
+			} else {
+				err =
+				    nvkm_gsp_vmm_unmap_valid_preserve_page_noflush(
+				    nfile->vmm, cut_start, cut_end - cut_start,
+				    seg->page_shift);
+			}
 			if (err != 0)
 				return (-err);
 			nvkm_drm_vm_bind_note_dirty_range(sc, dirty_set,
@@ -7342,10 +7531,11 @@ nvkm_drm_vm_sparse_map_plan_prepare(struct nvkm_softc *sc,
 		}
 	}
 
-	err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, addr, size,
-	    nvkm_drm_vm_bind_segments_min_page_shift(
-	    plan->segment_plan.segments, plan->segment_plan.count), true,
-	    &plan->sparse_clear_plan);
+		err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, addr, size,
+		    nvkm_drm_vm_bind_segments_min_page_shift(
+		    plan->segment_plan.segments, plan->segment_plan.count),
+		    NVKM_DRM_VM_SPARSE_CLEAR_TARGET_OVERWRITE,
+		    &plan->sparse_clear_plan);
 	if (err != 0)
 		goto fail;
 
@@ -8743,20 +8933,27 @@ nvkm_drm_vm_op_plan_prepare_valid_map(struct nvkm_softc *sc,
 	if (err != 0)
 		return (err);
 
-	err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, op->addr,
-	    op->range, nvkm_drm_vm_bind_segments_min_page_shift(
-	    valid->segment_plan.segments, valid->segment_plan.count), true,
-	    &valid->sparse_clear_plan);
-	if (err != 0)
-		return (err);
-
 	if (nvkm_drm_vm_bindings_match_map_range(nfile, obj,
 	    valid->segment_plan.segments, valid->segment_plan.count,
 	    valid->pte_kind)) {
+		err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, op->addr,
+		    op->range, NVKM_GMMU_PD0_SHIFT,
+		    NVKM_DRM_VM_SPARSE_CLEAR_METADATA_ONLY,
+		    &valid->sparse_clear_plan);
+		if (err != 0)
+			return (err);
 		plan->kind = NVKM_DRM_VM_OP_PLAN_MAP_NOOP;
 		valid->had_sparse_clear = valid->sparse_clear_plan != NULL;
 		return (0);
 	}
+
+	err = nvkm_drm_vm_bind_prepare_sparse_clear(nfile, op->addr,
+	    op->range, nvkm_drm_vm_bind_segments_min_page_shift(
+	    valid->segment_plan.segments, valid->segment_plan.count),
+	    NVKM_DRM_VM_SPARSE_CLEAR_TARGET_OVERWRITE,
+	    &valid->sparse_clear_plan);
+	if (err != 0)
+		return (err);
 
 	nvkm_drm_vm_bind_debug_segments(sc, valid->segment_plan.segments,
 	    valid->segment_plan.count);
