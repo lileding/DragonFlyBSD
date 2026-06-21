@@ -3595,17 +3595,28 @@ nvkm_dispnv50_dp_aux_read(struct nvkm_outp *outp, uint32_t addr, uint8_t *data,
 static uint32_t
 nvkm_dispnv50_dp_mode_clock_khz(const struct drm_display_mode *mode)
 {
+	uint32_t clock;
+
 	if (mode == NULL)
 		return 0;
 	if (mode->crtc_clock > 0)
 		return (uint32_t)mode->crtc_clock;
 	if (mode->clock > 0)
-		return (uint32_t)mode->clock;
-	return 0;
+		clock = (uint32_t)mode->clock;
+	else
+		return 0;
+	if ((mode->flags & DRM_MODE_FLAG_3D_MASK) ==
+	    DRM_MODE_FLAG_3D_FRAME_PACKING) {
+		if (clock > UINT32_MAX / 2U)
+			return 0;
+		clock *= 2U;
+	}
+	return clock;
 }
 
 static int
 nvkm_dispnv50_dp_link_limits(struct nvkm_outp *outp,
+    const uint8_t dpcd[DP_RECEIVER_CAP_SIZE],
     const struct drm_display_mode *mode, uint8_t bpc, uint32_t *max_rate,
     uint8_t *max_lanes, uint32_t *min_rate)
 {
@@ -3620,18 +3631,19 @@ nvkm_dispnv50_dp_link_limits(struct nvkm_outp *outp,
 	if (clock_khz == 0 || bpc == 0 || max_rate == NULL ||
 	    max_lanes == NULL || min_rate == NULL)
 		return -EINVAL;
-	if (outp == NULL || outp->info.type != DCB_OUTPUT_DP)
+	if (outp == NULL || outp->info.type != DCB_OUTPUT_DP ||
+	    dpcd == NULL)
 		return -EINVAL;
 
 	source_rate = nvkm_dispnv50_dp_rate_khz(outp->info.dpconf.link_bw);
-	sink_rate = nvkm_dispnv50_dp_rate_khz(outp->dp.dpcd[DP_MAX_LINK_RATE]);
+	sink_rate = nvkm_dispnv50_dp_rate_khz(dpcd[DP_MAX_LINK_RATE]);
 	if (source_rate == 0 || sink_rate == 0)
 		return -EINVAL;
 
 	source_lanes = outp->info.dpconf.link_nr;
 	if (source_lanes == 0)
 		source_lanes = 4;
-	sink_lanes = outp->dp.dpcd[DP_MAX_LANE_COUNT] &
+	sink_lanes = dpcd[DP_MAX_LANE_COUNT] &
 	    DP_MAX_LANE_COUNT_MASK;
 	if (sink_lanes == 0)
 		return -EINVAL;
@@ -3785,8 +3797,8 @@ nvkm_dispnv50_dp_candidate_same(
 }
 
 static int
-nvkm_dispnv50_dp_select_sst_candidate(struct nvkm_softc *sc,
-    struct nvkm_outp *outp, struct drm_display_mode *mode, uint32_t max_rate,
+nvkm_dispnv50_dp_find_sst_candidate(struct nvkm_outp *outp,
+    const struct drm_display_mode *mode, uint32_t max_rate,
     uint8_t max_lanes, uint32_t min_rate, uint8_t bpc,
     bool enhanced_framing, struct nvkm_dispnv50_dp_sst_candidate *candidate)
 {
@@ -3827,10 +3839,6 @@ nvkm_dispnv50_dp_select_sst_candidate(struct nvkm_softc *sc,
 			    &hblank_symbols, &vblank_symbols);
 			if (ret != 0) {
 				last_ret = ret;
-				nvkm_infof(sc->dev,
-				    "drm: dispnv50 dp sst timing rejected"
-				    " outp=%02x lanes=%u bw=0x%02x err=%d\n",
-				    outp->index, lanes, bw, ret);
 				continue;
 			}
 
@@ -3840,13 +3848,34 @@ nvkm_dispnv50_dp_select_sst_candidate(struct nvkm_softc *sc,
 			candidate->watermark = watermark;
 			candidate->hblank_symbols = hblank_symbols;
 			candidate->vblank_symbols = vblank_symbols;
-			if (sc != NULL)
-				sc->kms_dp_sst_candidate_count++;
 			return 0;
 		}
 	}
 
 	return last_ret;
+}
+
+static int
+nvkm_dispnv50_dp_select_sst_candidate(struct nvkm_softc *sc,
+    struct nvkm_outp *outp, const struct drm_display_mode *mode,
+    uint32_t max_rate, uint8_t max_lanes, uint32_t min_rate, uint8_t bpc,
+    bool enhanced_framing, struct nvkm_dispnv50_dp_sst_candidate *candidate)
+{
+	int ret;
+
+	ret = nvkm_dispnv50_dp_find_sst_candidate(outp, mode, max_rate,
+	    max_lanes, min_rate, bpc, enhanced_framing, candidate);
+	if (ret == 0) {
+		if (sc != NULL)
+			sc->kms_dp_sst_candidate_count++;
+		return 0;
+	}
+	if (sc != NULL && outp != NULL) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 dp sst timing rejected outp=%02x err=%d\n",
+		    outp->index, ret);
+	}
+	return ret;
 }
 
 static int
@@ -4019,7 +4048,7 @@ nvkm_dispnv50_dp_prepare(struct nvkm_softc *sc, struct nvkm_outp *outp,
 	    MIN((size_t)NVKM_DISPNV50_DP_DPCD_SIZE,
 	    (size_t)DP_RECEIVER_CAP_SIZE));
 
-	ret = nvkm_dispnv50_dp_link_limits(outp, mode, bpc,
+	ret = nvkm_dispnv50_dp_link_limits(outp, outp->dp.dpcd, mode, bpc,
 	    &prepare->dp_max_rate, &prepare->dp_max_lanes,
 	    &prepare->dp_min_rate);
 	if (ret != 0)
@@ -4066,6 +4095,66 @@ nvkm_dispnv50_find_outp(struct nvkm_softc *sc, uint32_t display_id)
 	}
 
 	return NULL;
+}
+
+static int
+nvkm_dispnv50_dp_mode_status_from_error(int ret)
+{
+	switch (ret) {
+	case -ERANGE:
+		return MODE_CLOCK_HIGH;
+	case -EINVAL:
+		return MODE_BAD;
+	case -EIO:
+	case -ENODEV:
+	default:
+		return MODE_ERROR;
+	}
+}
+
+int
+nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
+    const struct drm_display_mode *mode, uint8_t bpc)
+{
+	struct nvkm_dispnv50_dp_sst_candidate candidate;
+	struct nvkm_outp *outp;
+	uint8_t dpcd[DP_RECEIVER_CAP_SIZE];
+	uint32_t max_rate;
+	uint32_t min_rate;
+	uint8_t max_lanes;
+	bool enhanced_framing;
+	int ret;
+
+	if (mode == NULL)
+		return MODE_ERROR;
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+		return MODE_NO_INTERLACE;
+	if (bpc == 0)
+		bpc = 8;
+
+	outp = nvkm_dispnv50_find_outp(sc, display_id);
+	if (outp == NULL)
+		return MODE_ERROR;
+	if (outp->info.type != DCB_OUTPUT_DP)
+		return MODE_OK;
+
+	ret = nvkm_dispnv50_dp_aux_read(outp, DP_DPCD_REV, dpcd,
+	    sizeof(dpcd));
+	if (ret != 0)
+		return nvkm_dispnv50_dp_mode_status_from_error(ret);
+
+	ret = nvkm_dispnv50_dp_link_limits(outp, dpcd, mode, bpc,
+	    &max_rate, &max_lanes, &min_rate);
+	if (ret != 0)
+		return nvkm_dispnv50_dp_mode_status_from_error(ret);
+
+	enhanced_framing = !!(dpcd[DP_MAX_LANE_COUNT] &
+	    DP_ENHANCED_FRAME_CAP);
+	ret = nvkm_dispnv50_dp_find_sst_candidate(outp, mode, max_rate,
+	    max_lanes, min_rate, bpc, enhanced_framing, &candidate);
+	if (ret != 0)
+		return nvkm_dispnv50_dp_mode_status_from_error(ret);
+	return MODE_OK;
 }
 
 int

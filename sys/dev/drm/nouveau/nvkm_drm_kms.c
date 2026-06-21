@@ -49,6 +49,8 @@ struct nvkm_bios;
 
 extern const uint64_t wndwc57e_modifiers[];
 
+#define NVKM_KMS_MIN_CLOCK_KHZ	25000U
+
 static uint32_t
 nvkm_kms_cap_min(uint32_t value, uint32_t cap)
 {
@@ -258,6 +260,57 @@ nvkm_possible_crtcs_from_info(const struct nvkm_gsp_disp_output_info *info,
 	return (info->heads & crtc_mask);
 }
 
+static uint32_t
+nvkm_kms_mode_clock_khz(const struct drm_display_mode *mode)
+{
+	uint32_t clock;
+
+	if (mode == NULL)
+		return (0);
+	if (mode->crtc_clock > 0)
+		return ((uint32_t)mode->crtc_clock);
+	if (mode->clock <= 0)
+		return (0);
+
+	clock = (uint32_t)mode->clock;
+	if ((mode->flags & DRM_MODE_FLAG_3D_MASK) ==
+	    DRM_MODE_FLAG_3D_FRAME_PACKING) {
+		if (clock > UINT32_MAX / 2U)
+			return (0);
+		clock *= 2U;
+	}
+	return (clock);
+}
+
+static enum drm_mode_status
+nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
+    const struct nvkm_gsp_disp_output_info *info,
+    const struct drm_display_mode *mode, int max_tmds_clock, uint8_t bpc)
+{
+	uint32_t clock;
+
+	if (sc == NULL || info == NULL || mode == NULL)
+		return (MODE_ERROR);
+	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+		return (MODE_NO_INTERLACE);
+
+	clock = nvkm_kms_mode_clock_khz(mode);
+	if (clock == 0 || clock < NVKM_KMS_MIN_CLOCK_KHZ)
+		return (MODE_CLOCK_LOW);
+
+	switch (info->output_type) {
+	case DCB_OUTPUT_TMDS:
+		if (max_tmds_clock > 0 && clock > (uint32_t)max_tmds_clock)
+			return (MODE_CLOCK_HIGH);
+		return (MODE_OK);
+	case DCB_OUTPUT_DP:
+		return ((enum drm_mode_status)nvkm_dispnv50_output_mode_valid(sc,
+		    display_id, mode, bpc));
+	default:
+		return (MODE_BAD);
+	}
+}
+
 /* ===== connector helper funcs ===== */
 
 static int
@@ -278,6 +331,21 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	}
 	kfree(buf);
 	return (n);
+}
+
+static enum drm_mode_status
+nvkm_connector_mode_valid(struct drm_connector *connector,
+    struct drm_display_mode *mode)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	struct nvkm_gsp_disp_output_info info;
+	int ret;
+
+	ret = nvkm_gsp_disp_output_info(nc->sc, nc->display_id, &info);
+	if (ret != 0)
+		return (MODE_ERROR);
+	return (nvkm_kms_output_mode_valid(nc->sc, nc->display_id, &info,
+	    mode, connector->display_info.max_tmds_clock, 8));
 }
 
 static bool
@@ -314,6 +382,7 @@ nvkm_connector_atomic_check(struct drm_connector *connector,
 
 static const struct drm_connector_helper_funcs nvkm_connector_helper_funcs = {
 	.get_modes	= nvkm_connector_get_modes,
+	.mode_valid	= nvkm_connector_mode_valid,
 	.atomic_check	= nvkm_connector_atomic_check,
 };
 
@@ -932,6 +1001,7 @@ struct nvkm_kms_crtc_atom {
 	struct nvkm_gsp_disp_output_info output;
 	uint32_t display_id;
 	uint32_t connector_count;
+	int max_tmds_clock;
 };
 
 static void
@@ -964,6 +1034,7 @@ nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
 	    conn->display_info.hdmi.scdc.scrambling.supported;
 	atom->head.hdmi.scdc_low_rates =
 	    conn->display_info.hdmi.scdc.scrambling.low_rates;
+	atom->max_tmds_clock = conn->display_info.max_tmds_clock;
 	if (state != NULL) {
 		atom->head.bpc = state->max_bpc;
 		atom->head.dither_mode = state->dither_mode;
@@ -1002,6 +1073,14 @@ nvkm_kms_crtc_atom_validate_output(struct nvkm_kms_crtc_atom *atom)
 	}
 
 	return (0);
+}
+
+static enum drm_mode_status
+nvkm_kms_crtc_atom_validate_mode(struct nvkm_kms_crtc_atom *atom,
+    const struct drm_display_mode *mode)
+{
+	return (nvkm_kms_output_mode_valid(atom->sc, atom->display_id,
+	    &atom->output, mode, atom->max_tmds_clock, atom->head.bpc));
 }
 
 static int
@@ -1045,6 +1124,8 @@ nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
     struct drm_atomic_state *state, const struct drm_crtc_state *crtc_state)
 {
 	struct nvkm_kms_crtc_atom atom;
+	enum drm_mode_status mode_status;
+	int ret;
 
 	if (crtc_state == NULL || !crtc_state->enable)
 		return (0);
@@ -1052,8 +1133,21 @@ nvkm_atomic_check_crtc_route(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return (-ENODEV);
 
 	nvkm_kms_crtc_atom_init(&atom, sc, crtc);
-	return (nvkm_kms_crtc_atom_route(&atom, state,
-	    crtc_state->connector_mask, true));
+	ret = nvkm_kms_crtc_atom_route(&atom, state,
+	    crtc_state->connector_mask, true);
+	if (ret != 0)
+		return (ret);
+
+	mode_status = nvkm_kms_crtc_atom_validate_mode(&atom,
+	    &crtc_state->adjusted_mode);
+	if (mode_status != MODE_OK) {
+		nvkm_infof(sc->dev,
+		    "drm: crtc route rejects display=0x%x head=%u mode=%s status=%d\n",
+		    atom.display_id, atom.nc->head, crtc_state->mode.name,
+		    mode_status);
+		return (-EINVAL);
+	}
+	return (0);
 }
 
 static int

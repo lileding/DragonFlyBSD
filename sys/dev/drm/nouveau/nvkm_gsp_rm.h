@@ -304,6 +304,26 @@ int	 nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	     uint32_t display_id,
 	     const struct nvkm_dispnv50_head_config *config,
 	     struct nvkm_dispnv50_output_prepare *prepare);
+/*
+ * Validate output-specific mode capability without programming display state.
+ *
+ * Ownership:
+ *   Borrows sc, display_id, and the caller-owned mode for the duration of the
+ *   call.  No DRM object, nvkm_outp pointer, or prepared route escapes.
+ *
+ * Lifetime:
+ *   The returned value is a DRM MODE_* status integer for this point-in-time
+ *   output/sink capability snapshot.  A later hotplug or DPCD change requires
+ *   a fresh validation.
+ *
+ * Threading:
+ *   Runs in blockable KMS probe/check context.  It may issue read-only AUX
+ *   transactions for DP, but it must not acquire SORs, train links, or program
+ *   EVO/GSP display state.
+ */
+int	 nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc,
+	     uint32_t display_id, const struct drm_display_mode *mode,
+	     uint8_t bpc);
 void	 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 	     struct nvkm_dispnv50_output_prepare *prepare);
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
