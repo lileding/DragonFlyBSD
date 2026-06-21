@@ -30,13 +30,8 @@
 static int
 headc37d_window_count(struct nv50_head *head)
 {
-#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
-	if (head != NULL && head->disp != NULL && head->disp->core != NULL &&
-	    head->disp->core->dfly_window_count != 0)
-		return head->disp->core->dfly_window_count;
-#else
-	(void)head;
-#endif
+	if (head != NULL && head->disp != NULL)
+		return nv50_core_window_count(head->disp->core);
 	return 8;
 }
 

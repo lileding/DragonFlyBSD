@@ -30,10 +30,16 @@
 static int
 corec57d_init(struct nv50_core *core)
 {
-	struct nvif_push *push = &core->chan.push;
-	const u32 windows = 8; /*XXX*/
-	int ret, i;
+	struct nvif_push *push;
+	u32 windows;
+	u32 i;
+	int ret;
 
+	if (core == NULL)
+		return -EINVAL;
+
+	push = &core->chan.push;
+	windows = nv50_core_window_count(core);
 	if ((ret = PUSH_WAIT(push, 2 + windows * 5)))
 		return ret;
 

@@ -30,18 +30,6 @@
 
 #include <nouveau_bo.h>
 
-static u32
-corec37d_window_count(struct nv50_core *core)
-{
-#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
-	if (core != NULL && core->dfly_window_count != 0)
-		return core->dfly_window_count;
-#else
-	(void)core;
-#endif
-	return 8;
-}
-
 int
 corec37d_wndw_owner(struct nv50_core *core)
 {
@@ -54,7 +42,7 @@ corec37d_wndw_owner(struct nv50_core *core)
 		return -EINVAL;
 
 	push = &core->chan.push;
-	windows = corec37d_window_count(core);
+	windows = nv50_core_window_count(core);
 	if ((ret = PUSH_WAIT(push, windows * 2)))
 		return ret;
 
@@ -165,7 +153,7 @@ corec37d_init(struct nv50_core *core)
 		return -EINVAL;
 
 	push = &core->chan.push;
-	windows = corec37d_window_count(core);
+	windows = nv50_core_window_count(core);
 	if ((ret = PUSH_WAIT(push, 2 + windows * 5)))
 		return ret;
 
