@@ -3721,12 +3721,13 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head)
 
 int
 nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    uint32_t win)
+    uint32_t win, uint32_t display_id)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	u32 head;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -3743,6 +3744,11 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	core = state->disp.core;
 	wndw = state->wndw[win];
+	head = (u32)drm_crtc_index(crtc);
+	if (display_id == 0 && state->audit_current.valid &&
+	    state->audit_current.head == head)
+		display_id = state->audit_current.display_id;
+
 	ret = nvkm_dispnv50_select_scanout(sc, state, crtc, true);
 	if (ret != 0) {
 		nvkm_infof(sc->dev,
@@ -3753,7 +3759,7 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
 	    interlock, false, true, NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
-	    (u32)drm_crtc_index(crtc), 0, "plane update");
+	    head, display_id, "plane update");
 }
 
 int

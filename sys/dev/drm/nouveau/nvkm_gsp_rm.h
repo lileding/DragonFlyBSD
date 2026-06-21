@@ -228,8 +228,21 @@ int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
  */
 int	 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 	     uint32_t display_id);
+/*
+ * Ownership:
+ *   Borrows the committed DRM CRTC/primary plane state. The bridge never owns
+ *   the framebuffer BO; prepare_fb and cleanup_fb own the scanout pin record.
+ *
+ * Lifetime:
+ *   display_id must describe the output route active for this CRTC update, or
+ *   be zero only for internal rescue paths that rely on the audited route.
+ *
+ * Threading:
+ *   Called from atomic commit tail under DRM modeset serialization. The normal
+ *   page-flip path must not block on window notifier completion.
+ */
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
-	     struct drm_crtc *crtc, uint32_t win);
+	     struct drm_crtc *crtc, uint32_t win, uint32_t display_id);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
 /*
  * Ownership:

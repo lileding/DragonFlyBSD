@@ -788,6 +788,7 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 	struct drm_plane_state *state = plane->state;
 	struct drm_crtc_state *crtc_state;
 	struct nvkm_crtc *nc;
+	struct nvkm_kms_crtc_atom atom;
 	int err;
 
 	(void)old_state;
@@ -831,8 +832,18 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 	if (nc->sc->disp == NULL)
 		return;
 
+	nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
+	err = nvkm_kms_crtc_atom_route(&atom, crtc_state->connector_mask,
+	    false);
+	if (err != 0) {
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "plane route");
+		return;
+	}
+
 	nc->sc->kms_plane_update_count++;
-	err = nvkm_dispnv50_plane_update(nc->sc, state->crtc, nc->win);
+	err = nvkm_dispnv50_plane_update(nc->sc, state->crtc, nc->win,
+	    atom.display_id);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "plane update");
 }
