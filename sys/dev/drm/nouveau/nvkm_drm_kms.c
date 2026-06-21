@@ -18,6 +18,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_atomic_uapi.h>	/* drm_atomic_set_{crtc,mode,fb}_for_* */
+#include <drm/drm_color_mgmt.h>
 #include <drm/drm_crtc_helper.h>	/* drm_helper_probe_single_connector_modes */
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
@@ -1250,12 +1251,41 @@ static const struct drm_plane_funcs nvkm_plane_funcs = {
 
 /* ===== crtc (NVC57D HEAD): real atomic modeset ===== */
 
+#define NVKM_KMS_LEGACY_GAMMA_SIZE	256
+#define NVKM_KMS_COLOR_LUT_SIZE		1024
+
+static int
+nvkm_crtc_check_lut_size(const struct drm_property_blob *blob,
+    unsigned int expected_size)
+{
+	unsigned int size;
+
+	if (blob == NULL)
+		return (0);
+	size = drm_color_lut_size(blob);
+	if (size != expected_size && size != NVKM_KMS_LEGACY_GAMMA_SIZE)
+		return (-EINVAL);
+	return (0);
+}
+
 static int
 nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 {
+	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct drm_display_mode *mode = &state->adjusted_mode;
+	int ret;
 
-	(void)crtc;
+	if (state->color_mgmt_changed) {
+		nc->sc->kms_color_check_count++;
+		ret = nvkm_crtc_check_lut_size(state->degamma_lut,
+		    NVKM_KMS_COLOR_LUT_SIZE);
+		if (ret != 0)
+			goto color_fail;
+		ret = nvkm_crtc_check_lut_size(state->gamma_lut,
+		    NVKM_KMS_COLOR_LUT_SIZE);
+		if (ret != 0)
+			goto color_fail;
+	}
 	if (!state->enable)
 		return (0);
 
@@ -1278,15 +1308,29 @@ nvkm_crtc_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 	    mode->crtc_hdisplay > 0xffff || mode->crtc_vdisplay > 0xffff)
 		return (-EINVAL);
 	return (0);
+
+color_fail:
+	nc->sc->kms_color_reject_count++;
+	return (ret);
 }
 
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
 	struct drm_device *dev = crtc->dev;
+	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	int color_err;
 	unsigned long flags;
 
 	(void)old_state;	/* UPDATE is sequenced in atomic_enable. */
+
+	if (crtc->state->active && crtc->state->color_mgmt_changed &&
+	    !crtc->state->mode_changed) {
+		color_err = nvkm_dispnv50_color_update(nc->sc, crtc,
+		    nc->head, nc->win);
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, color_err,
+		    "crtc color");
+	}
 
 	/* Complete the page-flip event on the next real vblank IRQ
 	 * (drm_crtc_handle_vblank sends it); send immediately if vblank off. */
@@ -1446,6 +1490,7 @@ static const struct drm_crtc_funcs nvkm_crtc_funcs = {
 	.disable_vblank		= nvkm_crtc_disable_vblank,
 	.set_config		= drm_atomic_helper_set_config,
 	.page_flip		= nvkm_crtc_page_flip,
+	.gamma_set		= drm_atomic_helper_legacy_gamma_set,
 	.destroy		= nvkm_crtc_destroy,
 	.reset			= drm_atomic_helper_crtc_reset,
 	.atomic_duplicate_state	= drm_atomic_helper_crtc_duplicate_state,
@@ -1711,6 +1756,18 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 			continue;
 		}
 		drm_crtc_helper_add(crtc, &nvkm_crtc_helper_funcs);
+		if (drm_mode_crtc_set_gamma_size(crtc,
+		    NVKM_KMS_LEGACY_GAMMA_SIZE) != 0) {
+			drm_crtc_cleanup(crtc);
+			drm_plane_cleanup(plane);
+			drm_plane_cleanup(cursor);
+			kfree(plane);
+			kfree(cursor);
+			kfree(ncrtc);
+			continue;
+		}
+		drm_crtc_enable_color_mgmt(crtc, NVKM_KMS_COLOR_LUT_SIZE,
+		    true, NVKM_KMS_COLOR_LUT_SIZE);
 		if (h < 4)
 			sc->kms_crtc[h] = crtc;
 	}

@@ -636,6 +636,16 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_atomic_vblank_wait_count);
 	sbuf_printf(sb, "atomic_flip_done_wait_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_flip_done_wait_count);
+	sbuf_printf(sb, "color_check_count = %llu\n",
+	    (unsigned long long)sc->kms_color_check_count);
+	sbuf_printf(sb, "color_reject_count = %llu\n",
+	    (unsigned long long)sc->kms_color_reject_count);
+	sbuf_printf(sb, "color_degamma_lut_count = %llu\n",
+	    (unsigned long long)sc->kms_color_degamma_lut_count);
+	sbuf_printf(sb, "color_ctm_count = %llu\n",
+	    (unsigned long long)sc->kms_color_ctm_count);
+	sbuf_printf(sb, "color_gamma_lut_count = %llu\n",
+	    (unsigned long long)sc->kms_color_gamma_lut_count);
 	sbuf_printf(sb, "plane_update_count = %llu\n",
 	    (unsigned long long)sc->kms_plane_update_count);
 	sbuf_printf(sb, "plane_disable_count = %llu\n",

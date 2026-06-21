@@ -704,6 +704,11 @@ struct nvkm_softc {
 	uint64_t		kms_atomic_commit_tail_count;
 	uint64_t		kms_atomic_vblank_wait_count;
 	uint64_t		kms_atomic_flip_done_wait_count;
+	uint64_t		kms_color_check_count;
+	uint64_t		kms_color_reject_count;
+	uint64_t		kms_color_degamma_lut_count;
+	uint64_t		kms_color_ctm_count;
+	uint64_t		kms_color_gamma_lut_count;
 	uint64_t		kms_plane_update_count;
 	uint64_t		kms_plane_disable_count;
 	uint64_t		kms_prepare_fb_count;
@@ -1529,6 +1534,18 @@ void	nvkm_hotproc_snapshot(struct nvkm_softc *sc,
  */
 void	nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc,
 	    uint32_t plug_mask, uint32_t unplug_mask);
+/*
+ * Ownership: consumes the current DRM CRTC state by value only; no state
+ * pointer is retained after return. The bridge keeps ownership of its LUT
+ * storage and display channels.
+ * Lifetime: all temporary atom state is stack-local to this call. Programmed
+ * ILUT/OLUT memory remains owned by the live dispnv50 state until KMS fini.
+ * Threading: called from the atomic commit path while DRM modeset locks
+ * serialize CRTC state changes. It may sleep while pushing display methods
+ * and must not be called from interrupt context.
+ */
+int	nvkm_dispnv50_color_update(struct nvkm_softc *sc,
+	    struct drm_crtc *crtc, uint32_t head, uint32_t win);
 
 /* Per-file VM-wide EXEC completion set; no_share BOs alias their fence-wait
  * resv to it (see nvkm_bo_resv). */

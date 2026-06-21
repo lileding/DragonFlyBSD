@@ -2541,6 +2541,54 @@ nvkm_dispnv50_ilut_write_entry(struct nvkm_memory *memory, u64 offset,
 	nvkm_wo32(memory, offset + 4, (u32)value);
 }
 
+static void
+nvkm_dispnv50_lut_write_entry(struct nvkm_memory *memory, u64 offset,
+    u16 red, u16 green, u16 blue)
+{
+	nvkm_wo32(memory, offset + 0, (u32)red | ((u32)green << 16));
+	nvkm_wo32(memory, offset + 4, (u32)blue);
+}
+
+static u16
+nvkm_dispnv50_lut_identity_u0_16(u32 index)
+{
+	return ((u16)((index << 16) >> 10));
+}
+
+static void
+nvkm_dispnv50_ilut_load_blob(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, const struct drm_property_blob *blob)
+{
+	const struct drm_color_lut *lut = blob != NULL ? blob->data : NULL;
+	u32 size = blob != NULL ? drm_color_lut_size(blob) :
+	    NVKM_DISPNV50_ILUT_ENTRIES;
+	u64 offset;
+	u32 i;
+	u16 red = 0, green = 0, blue = 0;
+
+	for (i = 0; i < size; i++) {
+		if (lut != NULL) {
+			red = drm_color_lut_extract(lut[i].red, 16);
+			green = drm_color_lut_extract(lut[i].green, 16);
+			blue = drm_color_lut_extract(lut[i].blue, 16);
+		} else {
+			red = green = blue = nvkm_dispnv50_lut_identity_u0_16(i);
+		}
+		offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + i) * 8ULL;
+		nvkm_dispnv50_lut_write_entry(state->ilut, offset,
+		    nvkm_dispnv50_fixed_u0_16_fp16(red),
+		    nvkm_dispnv50_fixed_u0_16_fp16(green),
+		    nvkm_dispnv50_fixed_u0_16_fp16(blue));
+	}
+
+	offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + size) * 8ULL;
+	nvkm_dispnv50_lut_write_entry(state->ilut, offset,
+	    nvkm_dispnv50_fixed_u0_16_fp16(red),
+	    nvkm_dispnv50_fixed_u0_16_fp16(green),
+	    nvkm_dispnv50_fixed_u0_16_fp16(blue));
+	nvkm_gsp_bar1_flush(sc);
+}
+
 static int
 nvkm_dispnv50_ilut_ensure(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state)
@@ -2592,6 +2640,79 @@ nvkm_dispnv50_olut_write_entry(struct nvkm_memory *memory, u64 offset,
 {
 	nvkm_wo32(memory, offset + 0, (u32)value | ((u32)value << 16));
 	nvkm_wo32(memory, offset + 4, (u32)value);
+}
+
+static void
+nvkm_dispnv50_olut_load_256(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, const struct drm_color_lut *lut)
+{
+	u64 offset;
+	u32 i, step;
+	u16 red, green, blue;
+	u16 red_inc, green_inc, blue_inc;
+
+	for (i = 0; i < 256; i++) {
+		red = drm_color_lut_extract(lut[i].red, 16);
+		green = drm_color_lut_extract(lut[i].green, 16);
+		blue = drm_color_lut_extract(lut[i].blue, 16);
+		red_inc = green_inc = blue_inc = 0;
+		if (i + 1 < 256) {
+			red_inc = (drm_color_lut_extract(lut[i + 1].red, 16) -
+			    red) / 4;
+			green_inc =
+			    (drm_color_lut_extract(lut[i + 1].green, 16) -
+			    green) / 4;
+			blue_inc =
+			    (drm_color_lut_extract(lut[i + 1].blue, 16) -
+			    blue) / 4;
+		}
+		for (step = 0; step < 4; step++) {
+			offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES +
+			    (i * 4) + step) * 8ULL;
+			nvkm_dispnv50_lut_write_entry(state->olut, offset,
+			    red + red_inc * step, green + green_inc * step,
+			    blue + blue_inc * step);
+		}
+	}
+
+	offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES +
+	    NVKM_DISPNV50_ILUT_ENTRIES) * 8ULL;
+	nvkm_dispnv50_lut_write_entry(state->olut, offset, red, green, blue);
+	nvkm_gsp_bar1_flush(sc);
+}
+
+static void
+nvkm_dispnv50_olut_load_blob(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, const struct drm_property_blob *blob)
+{
+	const struct drm_color_lut *lut = blob != NULL ? blob->data : NULL;
+	u32 size = blob != NULL ? drm_color_lut_size(blob) :
+	    NVKM_DISPNV50_ILUT_ENTRIES;
+	u64 offset;
+	u32 i;
+	u16 red = 0, green = 0, blue = 0;
+
+	if (lut != NULL && size == 256) {
+		nvkm_dispnv50_olut_load_256(sc, state, lut);
+		return;
+	}
+
+	for (i = 0; i < size; i++) {
+		if (lut != NULL) {
+			red = drm_color_lut_extract(lut[i].red, 16);
+			green = drm_color_lut_extract(lut[i].green, 16);
+			blue = drm_color_lut_extract(lut[i].blue, 16);
+		} else {
+			red = green = blue = nvkm_dispnv50_lut_identity_u0_16(i);
+		}
+		offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + i) * 8ULL;
+		nvkm_dispnv50_lut_write_entry(state->olut, offset, red,
+		    green, blue);
+	}
+
+	offset = (NVKM_DISPNV50_ILUT_VSS_ENTRIES + size) * 8ULL;
+	nvkm_dispnv50_lut_write_entry(state->olut, offset, red, green, blue);
+	nvkm_gsp_bar1_flush(sc);
 }
 
 static int
@@ -2686,11 +2807,71 @@ nvkm_dispnv50_wndw_atom_fill(struct nv50_wndw_atom *asyw,
 	    NVC37E_SET_COMPOSITION_FACTOR_SELECT_DST_COLOR_FACTOR_MATCH_SELECT_NEG_K1;
 }
 
+static u32
+nvkm_dispnv50_ctm_to_csc(u64 in)
+{
+	bool sign = (in & (1ULL << 63)) != 0;
+	u32 integer = (u32)((in >> 32) & 0x7fffffffu);
+	u32 fraction = (u32)in;
+	u32 ret;
+
+	if (integer >= 4)
+		return ((1u << 18) - (sign ? 0u : 1u));
+
+	ret = (integer << 16) | (fraction >> 16);
+	if (sign)
+		ret = (u32)(-((int32_t)ret));
+	return (ret & 0x7ffffu);
+}
+
+static void
+nvkm_dispnv50_ctm_fill(struct nv50_wndw_atom *asyw,
+    const struct drm_color_ctm *ctm)
+{
+	int i, j;
+
+	for (j = 0; j < 3; j++) {
+		for (i = 0; i < 4; i++) {
+			if (i == 3)
+				asyw->csc.matrix[j * 4 + i] = 0;
+			else
+				asyw->csc.matrix[j * 4 + i] =
+				    nvkm_dispnv50_ctm_to_csc(
+					ctm->matrix[j * 3 + i]);
+		}
+	}
+	asyw->csc.valid = true;
+}
+
+static int
+nvkm_dispnv50_wndw_csc_set(struct nvkm_softc *sc, struct nv50_wndw *wndw,
+    struct nv50_wndw_atom *asyw, const struct drm_crtc_state *crtc_state)
+{
+	const struct drm_color_ctm *ctm;
+
+	if (crtc_state == NULL || crtc_state->ctm == NULL) {
+		if (wndw->func->csc_clr != NULL)
+			return (wndw->func->csc_clr(wndw));
+		return (0);
+	}
+	if (wndw->func->csc_set == NULL)
+		return (-ENOSYS);
+
+	ctm = crtc_state->ctm->data;
+	memset(&asyw->csc, 0, sizeof(asyw->csc));
+	nvkm_dispnv50_ctm_fill(asyw, ctm);
+	sc->kms_color_ctm_count++;
+	return (wndw->func->csc_set(wndw, asyw));
+}
+
 static int
 nvkm_dispnv50_wndw_ilut_set(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
-    struct nv50_wndw_atom *asyw)
+    struct nv50_wndw_atom *asyw, const struct drm_crtc_state *crtc_state)
 {
+	const struct drm_property_blob *blob =
+	    crtc_state != NULL ? crtc_state->degamma_lut : NULL;
+	u32 size = blob != NULL ? drm_color_lut_size(blob) : 0;
 	int ret;
 
 	if (wndw->func->ilut == NULL || wndw->func->xlut_set == NULL ||
@@ -2702,7 +2883,10 @@ nvkm_dispnv50_wndw_ilut_set(struct nvkm_softc *sc,
 		return ret;
 
 	memset(&asyw->xlut, 0, sizeof(asyw->xlut));
-	wndw->func->ilut(wndw, asyw, 0);
+	wndw->func->ilut(wndw, asyw, size);
+	nvkm_dispnv50_ilut_load_blob(sc, state, blob);
+	if (blob != NULL)
+		sc->kms_color_degamma_lut_count++;
 	asyw->xlut.handle = wndw->wndw.vram.handle;
 	asyw->xlut.i.offset = state->ilut_offset;
 
@@ -2718,8 +2902,12 @@ nvkm_dispnv50_wndw_ilut_set(struct nvkm_softc *sc,
 static int
 nvkm_dispnv50_head_olut_set(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_core *core,
-    struct nv50_head *head, struct nv50_head_atom *asyh)
+    struct nv50_head *head, struct nv50_head_atom *asyh,
+    const struct drm_crtc_state *crtc_state)
 {
+	const struct drm_property_blob *blob =
+	    crtc_state != NULL ? crtc_state->gamma_lut : NULL;
+	u32 size = blob != NULL ? drm_color_lut_size(blob) : 0;
 	int ret;
 
 	if (head->func->olut == NULL || head->func->olut_set == NULL ||
@@ -2729,8 +2917,11 @@ nvkm_dispnv50_head_olut_set(struct nvkm_softc *sc,
 	ret = nvkm_dispnv50_olut_ensure(sc, state);
 	if (ret != 0)
 		return ret;
-	if (!head->func->olut(head, asyh, 0))
+	if (!head->func->olut(head, asyh, size))
 		return -EINVAL;
+	nvkm_dispnv50_olut_load_blob(sc, state, blob);
+	if (blob != NULL)
+		sc->kms_color_gamma_lut_count++;
 
 	asyh->olut.handle = core->chan.vram.handle;
 	asyh->olut.offset = state->olut_offset;
@@ -2888,7 +3079,12 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	if (ret != 0)
 		goto fail;
 	if (!async) {
-		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw);
+		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw,
+		    crtc->state);
+		if (ret != 0)
+			goto fail;
+		ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw,
+		    crtc->state);
 		if (ret != 0)
 			goto fail;
 		ret = wndw->func->blend_set(wndw, &asyw);
@@ -3918,6 +4114,63 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head)
 }
 
 int
+nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t head, uint32_t win)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_head_atom asyh;
+	struct nv50_wndw_atom asyw;
+	struct nv50_head *nvhead;
+	struct nv50_wndw *wndw;
+	struct nv50_core *core;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || crtc == NULL || crtc->state == NULL ||
+	    !crtc->state->active || sc->disp == NULL)
+		return (-ENODEV);
+
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
+	ret = nvkm_dispnv50_head_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    head >= nitems(state->head) || win >= nitems(state->wndw) ||
+	    state->wndw[win] == NULL)
+		return (-ENODEV);
+
+	core = state->disp.core;
+	nvhead = &state->head[head];
+	wndw = state->wndw[win];
+	memset(&asyw, 0, sizeof(asyw));
+	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+
+	ret = nvkm_dispnv50_head_olut_set(sc, state, core, nvhead, &asyh,
+	    crtc->state);
+	if (ret != 0)
+		return ret;
+	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+
+	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw,
+	    crtc->state);
+	if (ret != 0)
+		return ret;
+	ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw, crtc->state);
+	if (ret != 0)
+		return ret;
+	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+
+	ret = wndw->func->update(wndw, interlock);
+	if (ret != 0)
+		return ret;
+	return nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+}
+
+int
 nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t win, uint32_t display_id)
 {
@@ -4094,7 +4347,8 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		memset(interlock, 0, sizeof(interlock));
 	}
 
-	ret = nvkm_dispnv50_head_olut_set(sc, state, core, nvhead, &asyh);
+	ret = nvkm_dispnv50_head_olut_set(sc, state, core, nvhead, &asyh,
+	    crtc->state);
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
