@@ -692,8 +692,10 @@ struct nvkm_softc {
 	struct spinlock		kms_hpd_lock;
 	uint32_t		kms_hpd_pending_plug_mask;
 	uint32_t		kms_hpd_pending_unplug_mask;
+	uint32_t		kms_hpd_pending_link_bad_mask;
 	uint32_t		kms_hpd_last_plug_mask;
 	uint32_t		kms_hpd_last_unplug_mask;
+	uint32_t		kms_hpd_last_link_bad_mask;
 	uint64_t		kms_auto_count;
 	uint64_t		kms_hotplug_count;
 	uint64_t		kms_hotplug_changed_count;
@@ -701,6 +703,7 @@ struct nvkm_softc {
 	uint64_t		kms_hotplug_notify_only_count;
 	uint64_t		kms_hotplug_auto_kms_count;
 	uint64_t		kms_hotplug_enqueue_error_count;
+	uint64_t		kms_link_status_bad_count;
 	uint64_t		kms_restore_skip_primary_count;
 	uint32_t		kms_restore_last_primary_count;
 	int			kms_restore_last_open_count;
