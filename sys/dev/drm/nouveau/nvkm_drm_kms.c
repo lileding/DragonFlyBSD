@@ -382,6 +382,34 @@ nvkm_connector_edid_is_valid(struct edid *edid, uint32_t len)
 	return (true);
 }
 
+/*
+ * Ownership:
+ *   Borrows connector and edid. The DRM connector owns the resulting property
+ *   blob; the caller keeps ownership of the input EDID storage.
+ * Lifetime:
+ *   edid, when non-NULL, must remain valid for this call only. No pointer is
+ *   retained by nvkm.
+ * Threading:
+ *   Call from KMS probe/hotplug context where connector state mutation is
+ *   allowed. This helper does not take GSP locks or issue RPCs.
+ */
+static int
+nvkm_connector_update_edid(struct drm_connector *connector,
+    const struct edid *edid, const char *reason)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	int ret;
+
+	ret = drm_connector_update_edid_property(connector, edid);
+	if (ret != 0) {
+		nvkm_infof(nc->sc->dev,
+		    "drm: connector %s display=0x%x EDID %s failed err=%d\n",
+		    connector->name, nc->display_id, reason, ret);
+	}
+
+	return (ret);
+}
+
 static int
 nvkm_connector_get_modes(struct drm_connector *connector)
 {
@@ -397,10 +425,11 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	edid = (struct edid *)buf;
 	if (nvkm_gsp_disp_read_edid(nc->sc, nc->display_id, buf, &len) == 0 &&
 	    nvkm_connector_edid_is_valid(edid, len)) {
-		drm_connector_update_edid_property(connector, edid);
-		n = drm_add_edid_modes(connector, edid);
+		if (nvkm_connector_update_edid(connector, edid,
+		    "publish") == 0)
+			n = drm_add_edid_modes(connector, edid);
 	} else
-		drm_connector_update_edid_property(connector, NULL);
+		nvkm_connector_update_edid(connector, NULL, "clear");
 	kfree(buf);
 	return (n);
 }
@@ -465,10 +494,15 @@ static enum drm_connector_status
 nvkm_connector_detect(struct drm_connector *connector, bool force)
 {
 	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	int connected;
 
 	(void)force;
-	return (nvkm_gsp_disp_connected(nc->sc, nc->display_id) > 0) ?
-	    connector_status_connected : connector_status_disconnected;
+	connected = nvkm_gsp_disp_connected(nc->sc, nc->display_id);
+	if (connected > 0)
+		return (connector_status_connected);
+
+	nvkm_connector_update_edid(connector, NULL, "clear-on-detect");
+	return (connector_status_disconnected);
 }
 
 static int
@@ -2583,20 +2617,32 @@ nvkm_drm_kms_hpd_task(void *arg, int pending)
 	changed = drm_helper_hpd_irq_event(dev);
 	if (changed)
 		sc->kms_hotplug_changed_count++;
-	else
+	else {
 		sc->kms_hotplug_nochange_count++;
+		/*
+		 * RM reports plug/unplug as an explicit display event.  The
+		 * generic helper only sends a userspace event when the coarse
+		 * connected/disconnected status changes, but a same-connector
+		 * sink swap can leave that status unchanged while EDID and mode
+		 * capabilities changed.  Detection has already run, so notify
+		 * userspace to re-enumerate the connector.
+		 */
+		drm_kms_helper_hotplug_event(dev);
+	}
 
 	if (nvkm_drm_kms_has_master(dev)) {
 		sc->kms_hotplug_notify_only_count++;
 		nvkm_infof(sc->dev,
-		    "drm: HPD plug=0x%08x unplug=0x%08x changed=%d master=1\n",
-		    plug_mask, unplug_mask, changed);
+		    "drm: HPD plug=0x%08x unplug=0x%08x changed=%d"
+		    " notified=1 master=1\n", plug_mask, unplug_mask,
+		    changed);
 		return;
 	}
 
 	if (!changed) {
 		nvkm_infof(sc->dev,
-		    "drm: HPD plug=0x%08x unplug=0x%08x changed=0 master=0\n",
+		    "drm: HPD plug=0x%08x unplug=0x%08x changed=0"
+		    " notified=1 master=0\n",
 		    plug_mask, unplug_mask);
 		return;
 	}
