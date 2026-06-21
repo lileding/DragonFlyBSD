@@ -3349,6 +3349,18 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 			if (rate * lanes < min_rate)
 				continue;
 
+			ret = nvkm_dispnv50_dp_sst_calc(mode, 8, bw, lanes,
+			    enhanced_framing, outp->dp.increased_wm, &watermark,
+			    &hblank_symbols, &vblank_symbols);
+			if (ret != 0) {
+				last_ret = ret;
+				nvkm_infof(sc->dev,
+				    "drm: dispnv50 dp sst timing rejected"
+				    " outp=%02x lanes=%u bw=0x%02x err=%d\n",
+				    outp->index, lanes, bw, ret);
+				continue;
+			}
+
 			outp->dp.lt.nr = lanes;
 			outp->dp.lt.bw = bw;
 			outp->dp.lt.mst = false;
@@ -3359,18 +3371,6 @@ nvkm_dispnv50_dp_enable(struct nvkm_softc *sc, struct nvkm_outp *outp,
 				nvkm_infof(sc->dev,
 				    "drm: dispnv50 dp train failed outp=%02x"
 				    " lanes=%u bw=0x%02x err=%d\n",
-				    outp->index, lanes, bw, ret);
-				continue;
-			}
-
-			ret = nvkm_dispnv50_dp_sst_calc(mode, 8, bw, lanes,
-			    enhanced_framing, outp->dp.increased_wm, &watermark,
-			    &hblank_symbols, &vblank_symbols);
-			if (ret != 0) {
-				last_ret = ret;
-				nvkm_infof(sc->dev,
-				    "drm: dispnv50 dp sst timing rejected"
-				    " outp=%02x lanes=%u bw=0x%02x err=%d\n",
 				    outp->index, lanes, bw, ret);
 				continue;
 			}
