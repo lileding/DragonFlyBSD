@@ -70,6 +70,9 @@ struct nv50_core {
 	struct nv50_disp *disp;
 	struct nv50_dmac chan;
 	bool assign_windows;
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	u32 dfly_window_count;	/* Scalar copy of the chip window capacity. */
+#endif
 };
 
 enum nv50_disp_interlock_type {
