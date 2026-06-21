@@ -5,7 +5,7 @@
  *
  * Mirror of nvkm_gsp_bar2.c but writes our PDE into GSP\'s BAR1 PDB[0]
  * via UPDATE_BAR_PDE BAR_1. GVA->VRAM read/write goes through PCIe BAR1
- * (bar_res[1] = 256 MiB) — L2-coherent like BAR2.
+ * (bar_res[1]) — L2-coherent like BAR2.
  *
  * Earlier conclusion that "GSP doesn\'t init BAR1" was wrong: GSP DOES
  * populate inst[0x200] PDB ptr from static_info bar1PdeBase, and the
@@ -56,6 +56,12 @@ b1_pramin_rd64(struct nvkm_softc *sc, uint64_t paddr)
 	lo = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 0) & 0xffffu));
 	hi = nvkm_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 4) & 0xffffu));
 	return (((uint64_t)hi << 32) | lo);
+}
+
+static uint64_t
+nvkm_gsp_bar1_limit(struct nvkm_softc *sc)
+{
+	return (sc->bar_res[1] != NULL ? rman_get_size(sc->bar_res[1]) : 0);
 }
 
 void
@@ -297,7 +303,7 @@ nvkm_gsp_bar1_map_vram_pte(struct nvkm_softc *sc, uint64_t bar1_gva,
 
 	if (!b1->ready)
 		return (ENXIO);
-	if (bar1_gva >= (512ULL << 20)) /* BAR1 is 256 MiB on TU102 */
+	if (bar1_gva >= nvkm_gsp_bar1_limit(sc))
 		return (EINVAL);
 
 	/* Our SPT is mounted at GSP PD0[127].SMALL, covering the final
@@ -358,7 +364,7 @@ nvkm_gsp_bar1_clear_gva(struct nvkm_softc *sc, uint64_t bar1_gva)
 
 	if (!b1->ready)
 		return (ENXIO);
-	if (bar1_gva >= (512ULL << 20)) /* BAR1 is 256 MiB on TU102 */
+	if (bar1_gva >= nvkm_gsp_bar1_limit(sc))
 		return (EINVAL);
 
 	pd0_idx = (uint32_t)((bar1_gva >> 21) & 0xffu);

@@ -496,9 +496,9 @@ struct NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS_dfly {
 /* NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE (0x20800a5c).
  * Mirror of nouveau r535/gsp.c:r535_gsp_intr_get_table. nouveau treats this
  * as mandatory in postinit -- the RPC registers the host as the intr
- * receiver on GSP side and is paired with a BAR0+0x110004 = 0x40 write to
- * enable hardware delivery of the GSP-managed intr line. Without it, GSP
- * does not forward channel/PBDMA events to host. */
+ * receiver on GSP side and is paired with a GSP-Falcon interrupt enable
+ * write to enable hardware delivery of the GSP-managed intr line. Without
+ * it, GSP does not forward channel/PBDMA events to host. */
 #define NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE 128
 #define NV2080_INTR_CATEGORY_ENUM_COUNT          7
 #define NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE 0x20800a5cu
@@ -645,10 +645,10 @@ nvkm_gsp_intr_get_kernel_table(struct nvkm_softc *sc)
 	nvkm_gsp_rm_ctrl_done(&tmp_subdev, q);
 
 	/* Pair with the hardware enable nouveau does immediately after
-	 * (r535/gsp.c:319). BAR0+0x110004 = 0x40 -- specific GSP intr line. */
-	nvkm_wr32(sc, 0x00110004u, 0x00000040u);
+	 * (r535/gsp.c:319). Bit 6 is the GSP-managed interrupt line. */
+	nvkm_wr32(sc, sc->chip->gsp_base + 0x004, 0x00000040u);
 	nvkm_debugf(sc->dev,
-	    "gsp_rm: enabled GSP intr (BAR0+0x110004 = 0x40)\n");
+	    "gsp_rm: enabled GSP intr (GSP+0x004 = 0x40)\n");
 	return (0);
 }
 

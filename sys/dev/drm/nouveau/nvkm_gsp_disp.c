@@ -1929,9 +1929,9 @@ nvkm_dfly_core_display_alloc(struct nvkm_softc *sc)
 	ldev->bsddev = sc->dev;
 	device->dev = ldev;
 	device->type = NVKM_DEVICE_PCIE;
-	device->name = "tu102";
-	device->card_type = TU100;
-	device->chipset = 0x162;
+	device->name = sc->chip->device_name;
+	device->card_type = sc->chip->card_type;
+	device->chipset = sc->chip->chipset;
 	device->pri = (void __iomem *)rman_get_virtual(sc->bar_res[0]);
 	INIT_LIST_HEAD(&device->head);
 	INIT_LIST_HEAD(&device->subdev);
@@ -1942,7 +1942,7 @@ nvkm_dfly_core_display_alloc(struct nvkm_softc *sc)
 	lockinit(&device->intr.lock, "nvintr", 0, LK_CANRECURSE);
 
 	rm->device = device;
-	rm->gpu = &tu1xx_gpu;
+	rm->gpu = sc->chip->rm_gpu;
 	rm->api = &nvkm_dfly_r535_api;
 
 	internal->sc = sc;

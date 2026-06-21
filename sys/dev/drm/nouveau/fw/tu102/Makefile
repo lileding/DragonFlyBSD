@@ -1,4 +1,4 @@
-# Firmware loader module for TU102 GSP-boot blobs at GSP-RM 570.144.
+# Firmware loader module for NVIDIA GSP-RM 570.144 boot blobs.
 #
 # Each entry maps a source file to a firmware imagename and version.
 # Image names follow the linux-firmware naming convention so the same
@@ -9,7 +9,7 @@
 # small ones (acr/bl, booter_load) live in this directory because
 # they are needed at every build and round-trip cleanly.
 
-KMOD=	nvkm_fw_tu102_570
+KMOD=	nvgsp_570
 
 FW_SRC?=	/lib/firmware/nvidia/tu102
 
