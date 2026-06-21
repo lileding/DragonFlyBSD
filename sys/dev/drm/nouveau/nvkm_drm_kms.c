@@ -225,10 +225,10 @@ static uint32_t
 nvkm_possible_crtcs_from_info(const struct nvkm_gsp_disp_output_info *info,
     uint32_t crtc_mask)
 {
-	uint32_t possible;
+	if (info->heads == 0)
+		return (crtc_mask);
 
-	possible = info->heads & crtc_mask;
-	return (possible != 0 ? possible : crtc_mask);
+	return (info->heads & crtc_mask);
 }
 
 /* ===== connector helper funcs ===== */
@@ -2569,6 +2569,15 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		connector_type = nvkm_connector_type_from_info(&info);
 		encoder_type = nvkm_encoder_type_from_info(&info);
 		possible_crtcs = nvkm_possible_crtcs_from_info(&info, crtc_mask);
+		if (possible_crtcs == 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: heads=0x%x outside "
+			    "crtc_mask=0x%x\n",
+			    display_id, info.heads, crtc_mask);
+			kfree(nc);
+			kfree(enc);
+			continue;
+		}
 
 		ret = drm_connector_init(dev, &nc->base, &nvkm_connector_funcs,
 		    connector_type);
