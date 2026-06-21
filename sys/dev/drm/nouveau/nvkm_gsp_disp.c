@@ -2063,7 +2063,7 @@ nvkm_gsp_disp_output_info(struct nvkm_softc *sc, uint32_t display_id,
 		info->or_mask = outp->info.or;
 		info->link = outp->info.link;
 		info->is_dp = outp->info.type == DCB_OUTPUT_DP;
-		info->is_mst = info->is_dp && outp->dp.mst;
+		info->mst_capable = info->is_dp && outp->dp.mst;
 		if (outp->conn != NULL) {
 			info->connector_type = outp->conn->info.type;
 			info->connector_location = outp->conn->info.location;
