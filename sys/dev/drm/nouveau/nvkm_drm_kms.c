@@ -1550,6 +1550,29 @@ nvkm_framebuffer_bo_size_check(const struct drm_framebuffer *fb,
 	return (0);
 }
 
+static bool
+nvkm_primary_source_is_full_framebuffer(const struct drm_plane_state *state,
+    const struct drm_framebuffer *fb)
+{
+	uint32_t width;
+	uint32_t height;
+
+	if (state == NULL || fb == NULL || state->crtc_w <= 0 ||
+	    state->crtc_h <= 0)
+		return (false);
+
+	width = (uint32_t)state->crtc_w;
+	height = (uint32_t)state->crtc_h;
+	if (state->crtc_x != 0 || state->crtc_y != 0 ||
+	    fb->width != width || fb->height != height)
+		return (false);
+	if (state->src_x != 0 || state->src_y != 0 ||
+	    state->src_w != (width << 16) ||
+	    state->src_h != (height << 16))
+		return (false);
+	return (true);
+}
+
 static int
 nvkm_cursor_atomic_check(struct drm_plane *plane,
     struct drm_plane_state *state)
@@ -1585,6 +1608,8 @@ nvkm_cursor_atomic_check(struct drm_plane *plane,
 	if (state->crtc_w <= 0 || state->crtc_h <= 0 ||
 	    state->crtc_w != state->crtc_h ||
 	    fb->width != (uint32_t)state->crtc_w)
+		return (-EINVAL);
+	if (fb->height < (uint32_t)state->crtc_h)
 		return (-EINVAL);
 	if (state->src_x != 0 || state->src_y != 0 ||
 	    state->src_w != ((uint32_t)state->crtc_w << 16) ||
@@ -1638,6 +1663,8 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 		return (-EINVAL);
 	if (!nvkm_plane_format_mod_supported(plane, fb->format->format,
 	    fb->modifier))
+		return (-EINVAL);
+	if (!nvkm_primary_source_is_full_framebuffer(state, fb))
 		return (-EINVAL);
 	if ((fb->pitches[0] & 0x3fu) != 0)
 		return (-EINVAL);
