@@ -3283,12 +3283,24 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
 	return 0;
 }
 
+/*
+ * Ownership: borrows the CRTC/window/core state for one KMS commit.  When
+ * update_submitted is non-NULL, the caller owns that bool and this helper only
+ * sets it after the window UPDATE method has been accepted.
+ *
+ * Lifetime: after update_submitted becomes true, the commit has crossed from
+ * prepare-time programming into hardware-visible update submission.  Callers
+ * must not roll back prepared output ownership as if no commit had consumed it.
+ *
+ * Threading: called from serialized atomic commit paths; it may sleep while
+ * waiting for display notifiers and must not be called from interrupt context.
+ */
 static int
 nvkm_dispnv50_window_program(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
     struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
     bool sanitize, bool async, enum nvkm_dispnv50_audit_op op, u32 head,
-    u32 display_id, const char *reason)
+    u32 display_id, const char *reason, bool *update_submitted)
 {
 	struct nv50_wndw_atom asyw;
 	int ret;
@@ -3335,6 +3347,8 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
+	if (update_submitted != NULL)
+		*update_submitted = true;
 	if (commit_core) {
 		ret = nvkm_dispnv50_core_commit_notify(sc, state, core,
 		    interlock);
@@ -4458,7 +4472,7 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
 	    interlock, false, true, NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
-	    head, display_id, "plane update");
+	    head, display_id, "plane update", NULL);
 }
 
 int
@@ -4501,6 +4515,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nvkm_dispnv50_output_prepare local_prepare;
 	struct nvkm_dispnv50_output_prepare *route_prepare = prepare;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	bool update_submitted = false;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -4604,7 +4619,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
 	    interlock, true, false, NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
-	    head, display_id, "bridge");
+	    head, display_id, "bridge", &update_submitted);
 	if (ret != 0)
 		goto fail;
 	route_prepare->consumed = true;
@@ -4619,8 +4634,11 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	return 0;
 
 fail:
-	if (route_prepare != NULL)
+	if (route_prepare != NULL) {
+		if (update_submitted)
+			route_prepare->consumed = true;
 		nvkm_dispnv50_output_prepare_abort(sc, route_prepare);
+	}
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge failed head=%u win=%u display=0x%x err=%d\n",
 	    head, win, display_id, ret);
