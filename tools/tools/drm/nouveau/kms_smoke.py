@@ -34,6 +34,10 @@ FAULT_PATTERN = (
 ZERO_KEYS = (
     "fault_pending_count",
     "commit_error_count",
+    "atomic_tail_active",
+    "atomic_tail_stage",
+    "atomic_disable_vblank_keep_count",
+    "atomic_disable_vblank_keep_error",
     "hotplug_enqueue_error_count",
     "dark_down_error_count",
     "dp_irq_error_count",
@@ -60,6 +64,20 @@ WATCH_KEYS = (
     "atomic_commit_tail_count",
     "atomic_flip_done_wait_count",
     "atomic_vblank_wait_count",
+    "atomic_tail_seq",
+    "atomic_tail_complete_count",
+    "atomic_tail_last_stage",
+    "atomic_tail_modeset_disables_count",
+    "atomic_tail_commit_planes_count",
+    "atomic_tail_modeset_enables_count",
+    "atomic_tail_modeset_events_count",
+    "atomic_tail_fake_vblank_count",
+    "atomic_tail_hw_done_count",
+    "atomic_tail_wait_flip_done_count",
+    "atomic_tail_cleanup_planes_count",
+    "atomic_tail_finish_prepared_count",
+    "atomic_disable_vblank_off_count",
+    "atomic_disable_vblank_keep_count",
     "plane_update_count",
     "plane_disable_count",
     "cursor_update_count",
@@ -283,6 +301,21 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         actual = after["display_audit_scanout_pin_balance"]
         emit(actual == expected,
              f"display_audit_scanout_pin_balance={actual} expected={expected}")
+
+    tail_keys = (
+        "atomic_tail_seq",
+        "atomic_tail_complete_count",
+        "atomic_tail_finish_prepared_count",
+    )
+    if all(key in after for key in tail_keys):
+        emit(after["atomic_tail_seq"] == after["atomic_tail_complete_count"],
+             "atomic tail has no unfinished transaction")
+        emit(after["atomic_tail_finish_prepared_count"] == after["atomic_tail_complete_count"],
+             "atomic tail finished prepared cleanup for every transaction")
+    else:
+        for key in tail_keys:
+            if key not in after:
+                emit(False, f"missing {key}")
 
     ps_after = (out_dir / "ps.after").read_text(errors="replace") if (out_dir / "ps.after").exists() else ""
     emit(not re.search(r"(^|\s)(Xorg|glxgears|firefox)(\s|$)", ps_after),
