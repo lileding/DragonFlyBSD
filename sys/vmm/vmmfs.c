@@ -126,6 +126,10 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 		return &vmm_devlink_class;
 	case VMMFS_NHOST:
 		return &vmm_host_class;
+	case VMMFS_NDEVICES:
+		return &vmm_devices_class;
+	case VMMFS_NDEVROOT:
+		return &vmm_devroot_class;
 	default:
 		return &vmm_legacy_class;
 	}

@@ -32,8 +32,6 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
 	struct vmmfs_node *child = NULL;
-	struct vnode *vp = NULL;
-	int error;
 
 	if (dnode->vn_type == VMMFS_NROOT) {
 		if (ncp->nc_nlen == 8 && bcmp(ncp->nc_name, "machines", 8) == 0)
@@ -72,39 +70,9 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 				}
 			}
 		}
-	} else if (dnode->vn_type == VMMFS_NDEVICES) {
-		struct vmmfs_device *d;
-
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		d = vmmfs_find_device(vmp, dnode->vn_owner, ncp->nc_name,
-		    ncp->nc_nlen);
-		if (d != NULL)
-			child = &d->node;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-	} else if (dnode->vn_type == VMMFS_NDEVROOT) {
-		struct vmmfs_device *d;
-
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		d = vmmfs_find_device_any(vmp, ncp->nc_name, ncp->nc_nlen);
-		if (d != NULL)
-			child = &d->link;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
 	}
 
-	if (child == NULL) {
-		cache_setvp(ap->a_nch, NULL);
-		return ENOENT;
-	}
-
-	error = vmmfs_alloc_vp(dvp->v_mount, child, LK_EXCLUSIVE | LK_RETRY,
-	    &vp);
-	if (error)
-		return error;
-
-	vn_unlock(vp);
-	cache_setvp(ap->a_nch, vp);
-	vrele(vp);
-	return 0;
+	return vmmfs_nresolve_finish(dvp, child, ap->a_nch);
 }
 
 int
@@ -260,46 +228,6 @@ vmmnode_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 }
 
 /*
- * `rm <name>/devices/<dev>` unbinds a device.  A host device returns to the
- * host pool; a user backend is deleted (unloaded).  Removing from host/devices/
- * itself is refused (the host pool is fixed).
- */
-static int
-vmmfs_nremove_device(struct vop_nremove_args *ap, struct vmmfs_node *dnode)
-{
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_dvp->v_mount);
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_device *d;
-	struct vnode *vp;
-	int error;
-
-	if (dnode->vn_owner == VMMFS_OWNER_HOST)
-		return EPERM;
-
-	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	if (error)
-		return error;
-	vn_unlock(vp);
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	d = vmmfs_find_device(vmp, dnode->vn_owner, ncp->nc_name, ncp->nc_nlen);
-	if (d == NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vrele(vp);
-		return ENOENT;
-	}
-	if (d->is_host)
-		d->owner = VMMFS_OWNER_HOST;	/* unbind: back to host pool */
-	else
-		d->in_use = 0;			/* backend: unload */
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
-	cache_unlink(ap->a_nch);
-	vrele(vp);
-	return 0;
-}
-
-/*
  * `rm machines/<name>/stopped` is an atomic request to start the machine.  The
  * config must be complete and the loader path executable; otherwise the start
  * fails and the machine stays stopped.  Only "stopped" is removable.
@@ -312,8 +240,6 @@ vmmnode_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	struct vnode *vp;
 	int error;
 
-	if (dnode->vn_type == VMMFS_NDEVICES)
-		return vmmfs_nremove_device(ap, dnode);
 	if (dnode->vn_type != VMMFS_NMACHINE)
 		return EPERM;
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
@@ -338,50 +264,6 @@ vmmnode_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	cache_unlink(ap->a_nch);
 	vrele(vp);
-	return 0;
-}
-
-/*
- * `mv <devices>/<dev> <devices>/` rebinds a device: it changes which machine
- * owns it.  Both sides must be devices/ directories; the BDF name is unchanged.
- * Desired-state semantics.  (cp is impossible: devices/ rejects file creation.)
- */
-static int
-vmmnode_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
-{
-	struct namecache *fncp = ap->a_fnch->ncp;
-	struct namecache *tncp = ap->a_tnch->ncp;
-	struct vmmfs_node *tdnode = VP_TO_VMMFS(ap->a_tdvp);
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_fdvp->v_mount);
-	struct vmmfs_device *d;
-
-	if (fdnode->vn_type != VMMFS_NDEVICES ||
-	    tdnode->vn_type != VMMFS_NDEVICES)
-		return EXDEV;
-	if (fncp->nc_nlen != tncp->nc_nlen ||
-	    bcmp(fncp->nc_name, tncp->nc_name, fncp->nc_nlen) != 0)
-		return EINVAL;	/* a device keeps its BDF name */
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	d = vmmfs_find_device(vmp, fdnode->vn_owner, fncp->nc_name,
-	    fncp->nc_nlen);
-	if (d == NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return ENOENT;
-	}
-	if (fdnode->vn_owner == tdnode->vn_owner) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return 0;	/* no-op rebind */
-	}
-	if (vmmfs_find_device(vmp, tdnode->vn_owner, tncp->nc_name,
-	    tncp->nc_nlen) != NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return EEXIST;
-	}
-	d->owner = tdnode->vn_owner;
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
-	cache_rename(ap->a_fnch, ap->a_tnch);
 	return 0;
 }
 
@@ -663,50 +545,6 @@ vmmnode_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		if (!full && off < 3 + VMMFS_MAX_MACHINES)
 			off = 3 + VMMFS_MAX_MACHINES;
-	} else if (node->vn_type == VMMFS_NDEVICES) {
-		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-		int i;
-
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
-			struct vmmfs_device *d = &vmp->vm_dev[i];
-
-			if (!d->in_use || d->owner != node->vn_owner)
-				continue;
-			r = vop_write_dirent(&error, uio, d->node.vn_ino,
-			    DT_REG, (uint16_t)strlen(d->bdf), d->bdf);
-			if (r) {
-				off = 2 + i;
-				full = 1;
-				break;
-			}
-			off = 2 + i + 1;
-		}
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		if (!full && off < 2 + VMMFS_MAX_DEVICES)
-			off = 2 + VMMFS_MAX_DEVICES;
-	} else if (node->vn_type == VMMFS_NDEVROOT) {
-		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-		int i;
-
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
-			struct vmmfs_device *d = &vmp->vm_dev[i];
-
-			if (!d->in_use)
-				continue;
-			r = vop_write_dirent(&error, uio, d->link.vn_ino,
-			    DT_LNK, (uint16_t)strlen(d->bdf), d->bdf);
-			if (r) {
-				off = 2 + i;
-				full = 1;
-				break;
-			}
-			off = 2 + i + 1;
-		}
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		if (!full && off < 2 + VMMFS_MAX_DEVICES)
-			off = 2 + VMMFS_MAX_DEVICES;
 	} else if (node->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = node->vn_machine;
 		int i;
@@ -908,7 +746,6 @@ static kobj_method_t vmm_legacy_methods[] = {
 	KOBJMETHOD(vmm_node_ncreate, vmmnode_ncreate),
 	KOBJMETHOD(vmm_node_nremove, vmmnode_nremove),
 	KOBJMETHOD(vmm_node_nrmdir, vmmnode_nrmdir),
-	KOBJMETHOD(vmm_node_nrename, vmmnode_nrename),
 	KOBJMETHOD(vmm_node_open, vmmnode_open),
 	KOBJMETHOD(vmm_node_close, vmmnode_close),
 	KOBJMETHOD(vmm_node_access, vmmnode_access),

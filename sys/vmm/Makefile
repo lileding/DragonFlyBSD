@@ -1,6 +1,6 @@
 KMOD=	vmm
 SRCS=	vmmfs.c vmmfs_vnode.c vmm_machine.c
-SRCS+=	vmm_device.c vmm_host.c
+SRCS+=	vmm_device.c vmm_host.c vmmfs_devices.c
 SRCS+=	vmm_node_if.c vmm_node_if.h
 
 # The node-operation vtable is a KOBJ interface.  makeobjops turns the local

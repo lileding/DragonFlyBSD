@@ -143,6 +143,8 @@ DECLARE_CLASS(vmm_legacy_class);
 DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
 DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
 DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
+DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */
+DECLARE_CLASS(vmm_devroot_class);	/* NDEVROOT (vmmfs_devices.c) */
 kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
 
 /* Common vops shared across node classes (vmmfs_vnode.c for now). */
