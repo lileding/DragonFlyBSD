@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -362,6 +363,41 @@ check_range_property_current(int fd, uint32_t object_id, uint32_t object_type,
 }
 
 static void
+check_signed_range_property_value(int fd, uint32_t object_id,
+    uint32_t object_type, const char *name, const char *object_name,
+    int64_t expected_min, int64_t expected_max, int64_t expected_value)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+	bool has_signed_range;
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s %s is signed range", object_name, name);
+	has_signed_range = (prop->flags & DRM_MODE_PROP_SIGNED_RANGE) != 0 &&
+	    prop->count_values >= 2;
+	check(has_signed_range, text);
+	if (has_signed_range) {
+		snprintf(text, sizeof(text), "%s %s min is %lld",
+		    object_name, name, (long long)expected_min);
+		check(prop->values[0] == (uint64_t)expected_min, text);
+		snprintf(text, sizeof(text), "%s %s max is %lld",
+		    object_name, name, (long long)expected_max);
+		check(prop->values[1] == (uint64_t)expected_max, text);
+	}
+
+	snprintf(text, sizeof(text), "%s %s value is %lld", object_name, name,
+	    (long long)expected_value);
+	check(value == (uint64_t)expected_value, text);
+	drmModeFreeProperty(prop);
+}
+
+static void
 check_blob_property_default_zero(int fd, uint32_t object_id,
     uint32_t object_type, const char *name, const char *object_name)
 {
@@ -441,6 +477,52 @@ check_crtc_color_property_contract(int fd, uint32_t crtc_id,
 	    "GAMMA_LUT", object_name);
 	check_range_property_current(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
 	    "GAMMA_LUT_SIZE", object_name, 1024);
+}
+
+/*
+ * check_crtc_sync_property_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM CRTC object ID and opens OUT_FENCE_PTR through libdrm.
+ *   The drmModePropertyPtr returned by libdrm is released before return.
+ *
+ * Lifetime:
+ *   Reads only explicit-sync property metadata and the current default value.
+ *   It does not install an out-fence pointer or trigger an atomic commit.
+ *
+ * Threading:
+ *   Single-threaded probe.  The property contract is static for the CRTC even
+ *   if another client later performs atomic commits.
+ */
+static void
+check_crtc_sync_property_contract(int fd, uint32_t crtc_id,
+    const char *object_name)
+{
+	check_range_property_value(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "OUT_FENCE_PTR", object_name, 0, UINT64_MAX, 0);
+}
+
+/*
+ * check_plane_sync_property_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM plane object ID and opens IN_FENCE_FD through libdrm.
+ *   The drmModePropertyPtr returned by libdrm is released before return.
+ *
+ * Lifetime:
+ *   Reads only explicit-sync property metadata and the current default value.
+ *   It does not pass a sync fd to the kernel or trigger an atomic commit.
+ *
+ * Threading:
+ *   Single-threaded probe.  The property contract is static for the plane even
+ *   if another client later performs atomic commits.
+ */
+static void
+check_plane_sync_property_contract(int fd, uint32_t plane_id,
+    const char *object_name)
+{
+	check_signed_range_property_value(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "IN_FENCE_FD", object_name, -1, INT_MAX, -1);
 }
 
 static bool
@@ -687,6 +769,7 @@ check_crtc(int fd, uint32_t crtc_id)
 	snprintf(name, sizeof(name), "crtc %u", crtc_id);
 	dump_properties(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name);
 	check_crtc_color_property_contract(fd, crtc_id, name);
+	check_crtc_sync_property_contract(fd, crtc_id, name);
 	check_atomic_crtc_color_contract(fd, crtc_id);
 }
 
@@ -1393,6 +1476,7 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		    name);
 		require_property(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE,
 		    "type", name);
+		check_plane_sync_property_contract(fd, plane->plane_id, name);
 		plane_type = get_plane_type(fd, plane->plane_id);
 		check(plane_type >= 0, "plane type is readable");
 		check_in_formats(fd, plane, plane_type, name);
