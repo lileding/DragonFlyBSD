@@ -98,6 +98,9 @@ struct cursor_counter_snapshot {
 	uint64_t cursor_unpin_count;
 	uint64_t atomic_last_legacy_cursor_update;
 	uint64_t atomic_last_async_update;
+	uint64_t head_cursor_enabled;
+	uint64_t head_cursor_fb;
+	uint64_t head_cursor_bo;
 };
 
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
@@ -1582,9 +1585,10 @@ state_counter_from_text(const char *text, const char *key,
 
 static bool
 read_cursor_counter_snapshot(struct cursor_counter_snapshot *snapshot,
-    const char *stage)
+    const char *stage, uint32_t head)
 {
 	char text[160];
+	char key[64];
 	char *state;
 	bool ok;
 
@@ -1613,6 +1617,13 @@ read_cursor_counter_snapshot(struct cursor_counter_snapshot *snapshot,
 	    &snapshot->atomic_last_legacy_cursor_update) &&
 	    state_counter_from_text(state, "atomic_last_async_update",
 	    &snapshot->atomic_last_async_update);
+	snprintf(key, sizeof(key), "head[%u]_cursor_enabled", head);
+	ok = ok && state_counter_from_text(state, key,
+	    &snapshot->head_cursor_enabled);
+	snprintf(key, sizeof(key), "head[%u]_cursor_fb", head);
+	ok = ok && state_counter_from_text(state, key, &snapshot->head_cursor_fb);
+	snprintf(key, sizeof(key), "head[%u]_cursor_bo", head);
+	ok = ok && state_counter_from_text(state, key, &snapshot->head_cursor_bo);
 	snprintf(text, sizeof(text), "cursor counters are present before %s",
 	    stage);
 	check(ok, text);
@@ -1931,7 +1942,8 @@ out:
  *   the driver's atomic_async_update hook rather than a primary plane update.
  */
 static void
-check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
+check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id,
+    uint32_t crtc_index)
 {
 	struct cursor_counter_snapshot before;
 	struct cursor_counter_snapshot after_enable;
@@ -1947,7 +1959,8 @@ check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
 	int saved_errno;
 	int ret;
 
-	if (!read_cursor_counter_snapshot(&before, "legacy cursor probe"))
+	if (!read_cursor_counter_snapshot(&before, "legacy cursor probe",
+	    crtc_index))
 		return;
 
 	if (!create_dumb_buffer_for(fd, 64, 64, 32, &handle, &pitch,
@@ -1969,7 +1982,7 @@ check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
 	check(true, "legacy cursor SetCursor2 enables cursor image");
 
 	if (read_cursor_counter_snapshot(&after_enable,
-	    "legacy cursor enable")) {
+	    "legacy cursor enable", crtc_index)) {
 		have_after_enable = true;
 		check(after_enable.cursor_update_count >
 		    before.cursor_update_count,
@@ -1977,6 +1990,12 @@ check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
 		check(after_enable.cursor_error_count ==
 		    before.cursor_error_count,
 		    "legacy cursor SetCursor2 does not increment cursor_error_count");
+		check(after_enable.head_cursor_enabled == 1,
+		    "legacy cursor SetCursor2 marks head cursor enabled");
+		check(after_enable.head_cursor_fb != 0,
+		    "legacy cursor SetCursor2 publishes cursor framebuffer");
+		check(after_enable.head_cursor_bo != 0,
+		    "legacy cursor SetCursor2 publishes cursor BO");
 	}
 
 	errno = 0;
@@ -1989,7 +2008,8 @@ check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
 	}
 	check(true, "legacy cursor MOVE succeeds");
 
-	if (read_cursor_counter_snapshot(&after_move, "legacy cursor move")) {
+	if (read_cursor_counter_snapshot(&after_move, "legacy cursor move",
+	    crtc_index)) {
 		have_after_move = true;
 		check(after_move.cursor_async_update_count > (have_after_enable ?
 		    after_enable.cursor_async_update_count :
@@ -2010,6 +2030,14 @@ check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
 		    "legacy cursor MOVE sets legacy cursor atomic summary bit");
 		check(after_move.atomic_last_async_update == 1,
 		    "legacy cursor MOVE sets async atomic summary bit");
+		check(after_move.head_cursor_enabled == 1,
+		    "legacy cursor MOVE keeps head cursor enabled");
+		check(!have_after_enable || after_move.head_cursor_fb ==
+		    after_enable.head_cursor_fb,
+		    "legacy cursor MOVE keeps cursor framebuffer");
+		check(!have_after_enable || after_move.head_cursor_bo ==
+		    after_enable.head_cursor_bo,
+		    "legacy cursor MOVE keeps cursor BO");
 	}
 
 hide:
@@ -2024,7 +2052,8 @@ hide:
 	cursor_visible = false;
 	check(true, "legacy cursor SetCursor2 hides cursor image");
 
-	if (read_cursor_counter_snapshot(&after_hide, "legacy cursor hide")) {
+	if (read_cursor_counter_snapshot(&after_hide, "legacy cursor hide",
+	    crtc_index)) {
 		check(after_hide.cursor_disable_count >
 		    before.cursor_disable_count,
 		    "legacy cursor hide increments cursor_disable_count");
@@ -2050,6 +2079,12 @@ hide:
 		    after_hide.cursor_async_update_count >=
 		    after_move.cursor_async_update_count,
 		    "legacy cursor async counter remains monotonic after hide");
+		check(after_hide.head_cursor_enabled == 0,
+		    "legacy cursor hide marks head cursor disabled");
+		check(after_hide.head_cursor_fb == 0,
+		    "legacy cursor hide clears cursor framebuffer");
+		check(after_hide.head_cursor_bo == 0,
+		    "legacy cursor hide clears cursor BO");
 	}
 
 out:
@@ -2337,7 +2372,7 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			check_atomic_cursor_test_only_contract(fd,
 			    plane->plane_id, active_crtc_id);
 			check_legacy_cursor_runtime_contract(fd,
-			    active_crtc_id);
+			    active_crtc_id, active_crtc_index);
 			cursor_probe_done = true;
 		}
 		drmModeFreePlane(plane);

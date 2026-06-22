@@ -1000,6 +1000,12 @@ static struct drm_atomic_state *nvkm_atomic_state_alloc(struct drm_device *dev);
 static void nvkm_atomic_state_clear(struct drm_atomic_state *state);
 static void nvkm_atomic_state_free(struct drm_atomic_state *state);
 
+static bool
+nvkm_crtc_color_needs_window(const struct drm_crtc_state *state)
+{
+	return (state != NULL && (state->degamma_lut != NULL || state->ctm != NULL));
+}
+
 /*
  * Driver-private atomic state.
  *
@@ -1665,7 +1671,20 @@ nvkm_atomic_check_routes(struct drm_device *dev, struct drm_atomic_state *state)
 static int
 nvkm_atomic_check(struct drm_device *dev, struct drm_atomic_state *state)
 {
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *crtc_state;
 	int ret;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, crtc_state, i) {
+		if (!crtc_state->color_mgmt_changed)
+			continue;
+		if (!nvkm_crtc_color_needs_window(crtc_state))
+			continue;
+		ret = drm_atomic_add_affected_planes(state, crtc);
+		if (ret != 0)
+			return (ret);
+	}
 
 	ret = drm_atomic_helper_check(dev, state);
 	if (ret != 0)
@@ -2249,7 +2268,7 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 
 	nc->sc->kms_plane_update_count++;
 	err = nvkm_dispnv50_plane_update(nc->sc, state->crtc, nc->win,
-	    atom.display_id);
+	    atom.display_id, nvkm_crtc_color_needs_window(crtc_state));
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "plane update");
 }
@@ -2601,16 +2620,22 @@ static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
+	struct drm_atomic_state *state;
 	int color_err;
 
 	(void)old_state;	/* UPDATE is sequenced in atomic_enable. */
 
 	if (crtc->state->active && crtc->state->color_mgmt_changed &&
 	    !crtc->state->mode_changed) {
-		color_err = nvkm_dispnv50_color_update(nc->sc, crtc,
-		    nc->head, nc->win);
-		nvkm_kms_record_result(nc->sc, nc->head, nc->win, color_err,
-		    "crtc color");
+		state = old_state != NULL ? old_state->state : crtc->state->state;
+		if (!nvkm_crtc_color_needs_window(crtc->state) ||
+		    state == NULL || crtc->primary == NULL ||
+		    drm_atomic_get_new_plane_state(state, crtc->primary) == NULL) {
+			color_err = nvkm_dispnv50_color_update(nc->sc, crtc,
+			    nc->head, nc->win);
+			nvkm_kms_record_result(nc->sc, nc->head, nc->win, color_err,
+			    "crtc color");
+		}
 	}
 
 	if (crtc->state->event == NULL)
@@ -3622,13 +3647,19 @@ retry:
 
 	crtc_state = drm_atomic_get_crtc_state(state, crtc);
 	if (IS_ERR(crtc_state)) { ret = PTR_ERR(crtc_state); goto out; }
-	ret = drm_atomic_set_mode_for_crtc(crtc_state, mode);
-	if (ret != 0)
-		goto out;
-	crtc_state->active = true;
-	if (force_modeset) {
-		crtc_state->mode_changed = true;
-		crtc_state->connectors_changed = true;
+		ret = drm_atomic_set_mode_for_crtc(crtc_state, mode);
+		if (ret != 0)
+			goto out;
+		crtc_state->active = true;
+		crtc_state->color_mgmt_changed =
+		    drm_property_replace_blob(&crtc_state->degamma_lut, NULL);
+		crtc_state->color_mgmt_changed |=
+		    drm_property_replace_blob(&crtc_state->ctm, NULL);
+		crtc_state->color_mgmt_changed |=
+		    drm_property_replace_blob(&crtc_state->gamma_lut, NULL);
+		if (force_modeset) {
+			crtc_state->mode_changed = true;
+			crtc_state->connectors_changed = true;
 		crtc_state->active_changed = true;
 	}
 

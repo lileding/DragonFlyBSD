@@ -364,10 +364,13 @@ int	 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
  *
  * Threading:
  *   Called from atomic commit tail under DRM modeset serialization. The normal
- *   page-flip path must not block on window notifier completion.
+ *   page-flip path must not block on window notifier completion. When
+ *   color_update is true, the call owns the whole image + color display commit
+ *   for that atomic state and may block on the notifiers needed by that commit.
  */
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
-	     struct drm_crtc *crtc, uint32_t win, uint32_t display_id);
+	     struct drm_crtc *crtc, uint32_t win, uint32_t display_id,
+	     bool color_update);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
 /*
  * Ownership:
