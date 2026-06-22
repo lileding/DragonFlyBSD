@@ -1930,7 +1930,9 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
  *
  * Threading:
  *   Runs from atomic commit preparation and may sleep while waiting on
- *   reservation fences or reserving TTM.  It must not be called from IRQ.
+ *   reservation fences or reserving TTM.  Explicit IN_FENCE_FD must override
+ *   implicit BO reservation waits, matching drm_atomic_set_fence_for_plane()
+ *   semantics.  It must not be called from IRQ.
  */
 static int
 nvkm_plane_prepare_fb(struct drm_plane *plane,
@@ -1958,10 +1960,19 @@ nvkm_plane_prepare_fb(struct drm_plane *plane,
 	}
 
 	bo = to_nvkm_bo(obj);
-	ret = nvkm_bo_resv_wait(bo, false, true, false);
+
+	ret = drm_gem_fb_prepare_fb(plane, state);
 	if (ret != 0) {
 		sc->kms_prepare_fb_error_count++;
 		return (ret);
+	}
+
+	if (state->fence == NULL) {
+		ret = nvkm_bo_resv_wait(bo, false, true, false);
+		if (ret != 0) {
+			sc->kms_prepare_fb_error_count++;
+			return (ret);
+		}
 	}
 
 	ret = nvkm_bo_scanout_pin(bo);
@@ -1973,19 +1984,6 @@ nvkm_plane_prepare_fb(struct drm_plane *plane,
 	if (cursor)
 		sc->kms_cursor_pin_count++;
 
-	ret = drm_gem_fb_prepare_fb(plane, state);
-	if (ret != 0) {
-		int unpin_ret;
-
-		unpin_ret = nvkm_bo_scanout_unpin(bo);
-		if (unpin_ret == 0 && sc->kms_scanout_pin_count != 0) {
-			sc->kms_scanout_unpin_count++;
-			if (cursor)
-				sc->kms_cursor_unpin_count++;
-		}
-		sc->kms_prepare_fb_error_count++;
-		return (ret);
-	}
 	return (0);
 }
 
