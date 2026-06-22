@@ -121,6 +121,29 @@ umount /vmm 2>/dev/null; ckfail "umount with open lease -> EBUSY" $?
 exec 7<&-
 ckeq "u1 gone after lease release" "$(ls $M | grep -c '^u1$')" "0"
 
+# --- device index + binding (D2-D4) ---
+ckeq "ls /vmm/devices index" "$(ls /vmm/devices | sort | tr '\n' ' ')" "0000:00:02.0 0000:00:03.0 0000:00:04.0 "
+ckeq "symlink -> host owner" "$(readlink /vmm/devices/0000:00:02.0)" "../machines/host/devices/0000:00:02.0"
+
+mkdir $M/dv; echo 1 > $M/dv/vcpu; echo 2M > $M/dv/mem; echo /tmp/ld.sh > $M/dv/loader
+mv $M/host/devices/0000:00:02.0 $M/dv/devices/; ckok "mv bind device to dv" $?
+ckeq "dv has device" "$(ls $M/dv/devices)" "0000:00:02.0"
+ckeq "host pool lost it" "$(ls $M/host/devices | sort | tr '\n' ' ')" "0000:00:03.0 0000:00:04.0 "
+ckeq "symlink repointed to dv" "$(readlink /vmm/devices/0000:00:02.0)" "../machines/dv/devices/0000:00:02.0"
+
+cp $M/host/devices/0000:00:03.0 $M/dv/devices/ 2>/dev/null; ckfail "cp device rejected" $?
+
+rm $M/dv/devices/0000:00:02.0; ckok "rm unbind device" $?
+ckeq "device back in host" "$(ls $M/host/devices | sort | tr '\n' ' ')" "0000:00:02.0 0000:00:03.0 0000:00:04.0 "
+ckeq "dv devices empty again" "$(ls $M/dv/devices)" ""
+ckeq "symlink back to host" "$(readlink /vmm/devices/0000:00:02.0)" "../machines/host/devices/0000:00:02.0"
+
+rm $M/host/devices/0000:00:03.0 2>/dev/null; ckfail "rm host pool device -> EPERM" $?
+
+mv $M/host/devices/0000:00:04.0 $M/dv/devices/; ckok "rebind 04 to dv" $?
+rmdir $M/dv; ckok "rmdir dv with bound device" $?
+ckeq "deleted machine returned device" "$(ls $M/host/devices | sort | tr '\n' ' ')" "0000:00:02.0 0000:00:03.0 0000:00:04.0 "
+
 # --- cleanup ---
 rmdir $M/vm0; ckok "rmdir vm0" $?
 rmdir $M/inc 2>/dev/null; rmdir $M/nx 2>/dev/null; rmdir $M/ml 2>/dev/null
