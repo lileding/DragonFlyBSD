@@ -2788,16 +2788,6 @@ nvkm_drm_kms_fini(struct nvkm_softc *sc)
 	if (sc == NULL)
 		return;
 
-	nvkm_drm_kms_dp_irq_unregister_all(sc);
-	if (sc->kms_hpd_task_initialized) {
-		sc->kms_hpd_task_initialized = false;
-		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_hpd_task,
-		    NULL) != 0)
-			taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
-		taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
-	}
-	if (sc->drm_dev != NULL && sc->drm_dev->mode_config.poll_enabled)
-		drm_kms_helper_poll_fini(sc->drm_dev);
 	if (sc->kms_task_initialized) {
 		sc->kms_task_initialized = false;
 		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_task,
@@ -2815,15 +2805,34 @@ nvkm_drm_kms_fini(struct nvkm_softc *sc)
 	 * Lifetime:
 	 *   Called after drm_dev_unregister() has unpublished the device, or from
 	 *   register-error cleanup before drm_dev_put() drops the final device
-	 *   reference. No KMS task remains queued at this point.
+	 *   reference. The DragonFly-local auto-KMS worker has been stopped so it
+	 *   cannot queue light_up while shutdown disables planes, heads, and
+	 *   outputs. HPD/DP IRQ notification and polling are still registered
+	 *   until shutdown returns, matching nouveau's display_fini ordering: the
+	 *   display hardware is first disabled through the normal atomic path,
+	 *   then event producers are blocked and drained.
 	 *
 	 * Threading:
 	 *   Runs from device teardown context and may sleep in atomic commit,
-	 *   fence waits, and display notifier waits.
+	 *   fence waits, and display notifier waits. The auto-KMS task may also
+	 *   take modeset locks, so it is cancelled before this point. HPD work is
+	 *   process-context work and is drained after shutdown, before connector
+	 *   objects are released by mode_config cleanup.
 	 */
 	if (sc->drm_dev != NULL &&
 	    sc->drm_dev->mode_config.funcs == &nvkm_mode_config_funcs)
 		drm_atomic_helper_shutdown(sc->drm_dev);
+
+	nvkm_drm_kms_dp_irq_unregister_all(sc);
+	if (sc->kms_hpd_task_initialized) {
+		sc->kms_hpd_task_initialized = false;
+		while (taskqueue_cancel(taskqueue_thread[0], &sc->kms_hpd_task,
+		    NULL) != 0)
+			taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
+		taskqueue_drain(taskqueue_thread[0], &sc->kms_hpd_task);
+	}
+	if (sc->drm_dev != NULL && sc->drm_dev->mode_config.poll_enabled)
+		drm_kms_helper_poll_fini(sc->drm_dev);
 }
 
 int
