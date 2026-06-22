@@ -31,13 +31,11 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_DEVLINK_INO_BASE	0x30000	/* device i symlink -> base + i */
 
 #define VMMFS_DIR_MODE		0555
-#define VMMFS_MAX_MACHINES	64
 #define VMMFS_NAME_MAX		63
 #define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
 
 /* PCIe device passthrough (stub): a fixed pool of host devices, each owned by
- * a machine (or the host).  Binding is `mv` between devices/ dirs. */
-#define VMMFS_OWNER_HOST	(-1)
+ * a machine (NULL owner = the host pool).  Binding is `mv` between devices/. */
 #define VMMFS_MAX_DEVICES	8
 #define VMMFS_BDF_MAX		31
 
@@ -84,7 +82,6 @@ struct vmmfs_node {
 	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
-	int			vn_owner;	/* for NDEVICES: owner id it lists */
 	struct vmmfs_node      *vn_parent;
 	struct vmmfs_machine   *vn_machine;
 	struct vnode	       *vn_vnode;
@@ -92,11 +89,11 @@ struct vmmfs_node {
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
-/* A PCIe device in the (stub) pool.  `owner` is the machine slot index it is
- * currently bound to, or VMMFS_OWNER_HOST. */
+/* A PCIe device in the (stub) pool.  `owner` is the machine it is currently
+ * bound to, or NULL for the host pool. */
 struct vmmfs_device {
 	int			in_use;
-	int			owner;
+	struct vmmfs_machine   *owner;
 	int			is_host;	/* rm returns it to host vs deletes */
 	char			bdf[VMMFS_BDF_MAX + 1];
 	struct vmmfs_node	node;		/* the NDEVICE file */
@@ -108,14 +105,25 @@ struct vmmfs_device {
 #define VMMFS_DEV_OF_LINK(n) \
 	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, link)))
 
+/*
+ * A user VM: allocated on demand and kept in the per-mount RB tree keyed by
+ * name.  vm_refs is the lifetime count: 1 while in the tree, plus one per live
+ * vnode bound to any of its nodes.  rmdir drops the tree reference; the struct
+ * is freed when vm_refs reaches 0, so a machine held by an open fd (e.g. a
+ * lease) survives rmdir until its last vnode is reclaimed.
+ */
 struct vmmfs_machine {
-	int			in_use;
+	RB_ENTRY(vmmfs_machine)	vm_link;
 	char			name[VMMFS_NAME_MAX + 1];
+	int			vm_refs;
+	int			vm_in_tree;	/* guards a single RB_REMOVE */
 	struct vmm_machine	state;		/* config + lifecycle (vmm core) */
 	struct vmmfs_node	node;
 	struct vmmfs_node	cfg[VMMFS_NCFG];
 	struct vmmfs_node	vn_devices;	/* this machine's devices/ */
 };
+
+RB_HEAD(vmmfs_machtree, vmmfs_machine);
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
@@ -125,9 +133,13 @@ struct vmmfs_mount {
 	struct vmmfs_node	vm_host_devices; /* machines/host/devices/ */
 	struct vmmfs_node	vm_devroot;	/* /dev/vmm/devices/ symlink index */
 	struct lock		vm_lock;
-	struct vmmfs_machine	vm_mach[VMMFS_MAX_MACHINES];
+	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
+	ino_t			vm_next_ino;	/* monotonic ino allocator */
 	struct vmmfs_device	vm_dev[VMMFS_MAX_DEVICES];
 };
+
+int	vmmfs_machine_cmp(struct vmmfs_machine *a, struct vmmfs_machine *b);
+RB_PROTOTYPE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
 
 #define VFS_TO_VMMFS(mp)	((struct vmmfs_mount *)((mp)->mnt_data))
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
@@ -202,6 +214,10 @@ int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
  * called by the vnode operations in vmmfs_vnode.c. */
 int	vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg);
 ino_t	vmmfs_parent_ino(struct vmmfs_node *node);
+void	vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type,
+	    ino_t ino, struct vmmfs_node *parent, struct vmmfs_machine *machine,
+	    enum vmmfs_cfg cfg);
+void	vmmfs_node_uninit(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
 int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
@@ -209,9 +225,11 @@ int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
 void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
 	    struct vmmfs_machine *m);
+void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
+void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
 int	vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred);
-struct vmmfs_device *vmmfs_find_device(struct vmmfs_mount *vmp, int owner,
-	    const char *name, int nlen);
+struct vmmfs_device *vmmfs_find_device(struct vmmfs_mount *vmp,
+	    struct vmmfs_machine *owner, const char *name, int nlen);
 struct vmmfs_device *vmmfs_find_device_any(struct vmmfs_mount *vmp,
 	    const char *name, int nlen);
 int	vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,

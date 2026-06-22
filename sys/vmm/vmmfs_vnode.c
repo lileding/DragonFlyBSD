@@ -103,6 +103,14 @@ vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap)
 	vp->v_data = NULL;
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 
+	/*
+	 * This vnode no longer references its machine.  Dropping the reference
+	 * may free the machine (and this node) if it was rmdir'd while held, so
+	 * touch nothing afterwards.
+	 */
+	if (node->vn_machine != NULL)
+		vmmfs_machine_unref(VFS_TO_VMMFS(vp->v_mount), node->vn_machine);
+
 	return 0;
 }
 

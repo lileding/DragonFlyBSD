@@ -38,6 +38,7 @@
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
+#include <sys/tree.h>
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
@@ -82,7 +83,7 @@ static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 
 /* --------------------------------------------------------------------- */
 
-static void
+void
 vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
     struct vmmfs_node *parent, struct vmmfs_machine *machine,
     enum vmmfs_cfg cfg)
@@ -98,7 +99,6 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 		node->vn_mode = 0777;
 	else
 		node->vn_mode = VMMFS_DIR_MODE;
-	node->vn_owner = VMMFS_OWNER_HOST;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
@@ -282,7 +282,7 @@ vmmfs_obuf_drain(struct vmmfs_node *node)
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 }
 
-static void
+void
 vmmfs_node_uninit(struct vmmfs_node *node)
 {
 	vmmfs_obuf_drain(node);
@@ -367,6 +367,12 @@ loop:
 	vp->v_type = vtype;
 	node->vn_vnode = vp;
 	lockmgr(&node->vn_interlock, LK_RELEASE);
+
+	/* A machine node's first live vnode counts toward the machine's
+	 * lifetime; reclaim drops it.  (vn_interlock released first to keep
+	 * vm_lock un-nested.) */
+	if (node->vn_machine != NULL)
+		vmmfs_machine_ref(VFS_TO_VMMFS(mp), node->vn_machine);
 
 	vx_downgrade(vp);
 
@@ -684,7 +690,8 @@ vmmfs_device_format(struct vmmfs_device *d, char *buf, size_t bufsize)
 }
 
 struct vmmfs_device *
-vmmfs_find_device(struct vmmfs_mount *vmp, int owner, const char *name, int nlen)
+vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machine *owner,
+    const char *name, int nlen)
 {
 	int i;
 
@@ -716,14 +723,9 @@ vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 /* Owner display name: "host" or the owning machine's name. */
 static const char *
-vmmfs_owner_name(struct vmmfs_mount *vmp, int owner)
+vmmfs_owner_name(struct vmmfs_machine *owner)
 {
-	if (owner == VMMFS_OWNER_HOST)
-		return "host";
-	if (owner >= 0 && owner < VMMFS_MAX_MACHINES &&
-	    vmp->vm_mach[owner].in_use)
-		return vmp->vm_mach[owner].name;
-	return NULL;
+	return owner != NULL ? owner->name : "host";
 }
 
 /* Relative symlink target for a device in the /vmm/devices/ index. */
@@ -731,12 +733,9 @@ int
 vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
     char *buf, size_t bufsize)
 {
-	const char *owner = vmmfs_owner_name(vmp, d->owner);
-
-	if (owner == NULL)
-		return -1;
-	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s", owner,
-	    d->bdf);
+	(void)vmp;
+	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s",
+	    vmmfs_owner_name(d->owner), d->bdf);
 }
 
 /* --------------------------------------------------------------------- */
@@ -765,30 +764,15 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    &vmp->vm_machines, NULL, 0);
 	vmmfs_node_init(&vmp->vm_host_devices, VMMFS_NDEVICES,
 	    VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL, 0);
-	vmp->vm_host_devices.vn_owner = VMMFS_OWNER_HOST;
 	vmmfs_node_init(&vmp->vm_devroot, VMMFS_NDEVROOT, VMMFS_DEVROOT_INO,
 	    &vmp->vm_root, NULL, 0);
-	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
-		struct vmmfs_machine *m = &vmp->vm_mach[i];
-		ino_t base = VMMFS_MACHINE_INO_BASE +
-		    (ino_t)i * VMMFS_MACHINE_INO_STRIDE;
-		int j;
-
-		vmmfs_node_init(&m->node, VMMFS_NMACHINE, base,
-		    &vmp->vm_machines, m, 0);
-		for (j = 0; j < VMMFS_NCFG; j++)
-			vmmfs_node_init(&m->cfg[j], VMMFS_NCONFIG, base + 1 + j,
-			    &m->node, m, j);
-		vmmfs_node_init(&m->vn_devices, VMMFS_NDEVICES,
-		    base + VMMFS_MACHINE_DEV_OFF, &m->node, m, 0);
-		m->vn_devices.vn_owner = i;
-		m->in_use = 0;
-	}
+	RB_INIT(&vmp->vm_machtree);
+	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
 	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
 		struct vmmfs_device *d = &vmp->vm_dev[i];
 
 		d->in_use = 0;
-		d->owner = VMMFS_OWNER_HOST;
+		d->owner = NULL;
 		d->is_host = 1;
 		vmmfs_node_init(&d->node, VMMFS_NDEVICE,
 		    VMMFS_DEV_INO_BASE + (ino_t)i, &vmp->vm_host_devices, NULL,
@@ -846,14 +830,18 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	if (error)
 		return error;
 
-	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
-		struct vmmfs_machine *m = &vmp->vm_mach[i];
-		int j;
+	/*
+	 * vflush reclaimed every vnode, so any rmdir'd-but-lease-held machine
+	 * has already been freed (its last unref).  Free the live ones: drop
+	 * each tree reference, which takes vm_refs to 0 and frees the struct.
+	 */
+	{
+		struct vmmfs_machine *m;
 
-		for (j = 0; j < VMMFS_NCFG; j++)
-			vmmfs_node_uninit(&m->cfg[j]);
-		vmmfs_node_uninit(&m->vn_devices);
-		vmmfs_node_uninit(&m->node);
+		while ((m = RB_ROOT(&vmp->vm_machtree)) != NULL) {
+			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+			vmmfs_machine_unref(vmp, m);
+		}
 	}
 	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
 		vmmfs_node_uninit(&vmp->vm_dev[i].node);
@@ -892,7 +880,7 @@ vmmfs_statfs(struct mount *mp, struct statfs *sbp, struct ucred *cred)
 	sbp->f_blocks = 1;
 	sbp->f_bfree = 0;
 	sbp->f_bavail = 0;
-	sbp->f_files = VMMFS_MAX_MACHINES;
+	sbp->f_files = 0;	/* machines are created dynamically */
 	sbp->f_ffree = 0;
 	return 0;
 }

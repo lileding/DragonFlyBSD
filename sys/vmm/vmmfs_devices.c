@@ -35,7 +35,7 @@ vmm_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	struct vmmfs_device *d;
 
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	d = vmmfs_find_device(vmp, dnode->vn_owner, ncp->nc_name, ncp->nc_nlen);
+	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name, ncp->nc_nlen);
 	if (d != NULL)
 		child = &d->node;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -58,7 +58,7 @@ vmm_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 	for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
 		struct vmmfs_device *d = &vmp->vm_dev[i];
 
-		if (!d->in_use || d->owner != node->vn_owner)
+		if (!d->in_use || d->owner != node->vn_machine)
 			continue;
 		if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_REG,
 		    (uint16_t)strlen(d->bdf), d->bdf)) {
@@ -88,7 +88,7 @@ vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	struct vnode *vp;
 	int error;
 
-	if (dnode->vn_owner == VMMFS_OWNER_HOST)
+	if (dnode->vn_machine == NULL)
 		return EPERM;
 
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
@@ -97,14 +97,14 @@ vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	vn_unlock(vp);
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	d = vmmfs_find_device(vmp, dnode->vn_owner, ncp->nc_name, ncp->nc_nlen);
+	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name, ncp->nc_nlen);
 	if (d == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return ENOENT;
 	}
 	if (d->is_host)
-		d->owner = VMMFS_OWNER_HOST;	/* unbind: back to host pool */
+		d->owner = NULL;	/* unbind: back to host pool */
 	else
 		d->in_use = 0;			/* backend: unload */
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -136,22 +136,22 @@ vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 		return EINVAL;	/* a device keeps its BDF name */
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	d = vmmfs_find_device(vmp, fdnode->vn_owner, fncp->nc_name,
+	d = vmmfs_find_device(vmp, fdnode->vn_machine, fncp->nc_name,
 	    fncp->nc_nlen);
 	if (d == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return ENOENT;
 	}
-	if (fdnode->vn_owner == tdnode->vn_owner) {
+	if (fdnode->vn_machine == tdnode->vn_machine) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return 0;	/* no-op rebind */
 	}
-	if (vmmfs_find_device(vmp, tdnode->vn_owner, tncp->nc_name,
+	if (vmmfs_find_device(vmp, tdnode->vn_machine, tncp->nc_name,
 	    tncp->nc_nlen) != NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EEXIST;
 	}
-	d->owner = tdnode->vn_owner;
+	d->owner = tdnode->vn_machine;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	cache_rename(ap->a_fnch, ap->a_tnch);
