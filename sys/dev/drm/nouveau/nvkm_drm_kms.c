@@ -3043,7 +3043,7 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nvkm_connector_dp_irq_register(nc, &info);
 		nvkm_infof(sc->dev,
 		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
-		    " outp=0x%02x conn=0x%02x mst_capable=%d"
+		    " type=0x%02x conn=0x%02x mst_capable=%d"
 		    " dp_interlace=%d\n",
 		    display_id, connector_type, encoder_type, possible_crtcs,
 		    info.output_type, info.connector_type, info.mst_capable,
