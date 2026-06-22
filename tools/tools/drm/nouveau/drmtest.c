@@ -275,6 +275,25 @@ find_active_crtc(int fd, const drmModeRes *resources, uint32_t *crtc_id_out,
 }
 
 static bool
+get_crtc_size(int fd, uint32_t crtc_id, uint32_t *width_out,
+    uint32_t *height_out)
+{
+	drmModeCrtcPtr crtc;
+	bool ok;
+
+	crtc = drmModeGetCrtc(fd, crtc_id);
+	if (crtc == NULL)
+		return false;
+	ok = crtc->mode_valid && crtc->width > 0 && crtc->height > 0;
+	if (ok) {
+		*width_out = (uint32_t)crtc->width;
+		*height_out = (uint32_t)crtc->height;
+	}
+	drmModeFreeCrtc(crtc);
+	return ok;
+}
+
+static bool
 range_valid(size_t offset, size_t count, size_t elem_size, size_t total)
 {
 	if (offset > total)
@@ -503,6 +522,118 @@ atomic_cursor_test_only_commit(int fd, uint32_t plane_id, uint32_t crtc_id,
 	*saved_errno = errno;
 	drmModeAtomicFree(req);
 	return ret;
+}
+
+static int
+atomic_primary_test_only_commit(int fd, uint32_t plane_id, uint32_t crtc_id,
+    uint32_t fb_id, uint32_t crtc_x, uint32_t crtc_y, uint32_t crtc_w,
+    uint32_t crtc_h, uint64_t src_x, uint64_t src_y, uint64_t src_w,
+    uint64_t src_h, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_plane_property(fd, req, plane_id, "FB_ID", fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID", crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X", crtc_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y", crtc_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W", crtc_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H", crtc_h) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X", src_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y", src_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W", src_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H", src_h)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+/*
+ * check_atomic_primary_panning_contract()
+ *
+ * Ownership:
+ *   Owns the temporary dumb BO handle and framebuffer ID.  The kernel borrows
+ *   the FB ID only for each TEST_ONLY atomic request.
+ *
+ * Lifetime:
+ *   No KMS state is committed.  The positive request proves integer source
+ *   panning is accepted on the selected primary plane; the negative requests
+ *   isolate the no-fractional-source and full-CRTC-destination gates.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The driver evaluates atomic_check under
+ *   normal modeset locks, and TEST_ONLY must not program display hardware.
+ */
+static void
+check_atomic_primary_panning_contract(int fd, uint32_t plane_id,
+    uint32_t crtc_id, uint32_t crtc_width, uint32_t crtc_height)
+{
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	uint32_t fb_id = 0;
+	uint32_t fb_width;
+	int saved_errno;
+	int ret;
+
+	fb_width = crtc_width + 64;
+	if (!create_dumb_buffer_for(fd, fb_width, crtc_height, 32, &handle,
+	    &pitch,
+	    "CREATE_DUMB succeeds for primary panning TEST_ONLY probe"))
+		goto out;
+	if (!add_linear_framebuffer(fd, fb_width, crtc_height,
+	    DRM_FORMAT_XRGB8888, handle, pitch, &fb_id,
+	    "ADDFB2 accepts XRGB8888 linear primary panning probe"))
+		goto out;
+
+	ret = atomic_primary_test_only_commit(fd, plane_id, crtc_id, fb_id,
+	    0, 0, crtc_width, crtc_height, (uint64_t)64 << 16, 0,
+	    (uint64_t)crtc_width << 16, (uint64_t)crtc_height << 16,
+	    &saved_errno);
+	check(ret == 0,
+	    "atomic TEST_ONLY accepts integer primary source panning");
+
+	ret = atomic_primary_test_only_commit(fd, plane_id, crtc_id, fb_id,
+	    0, 0, crtc_width, crtc_height, ((uint64_t)64 << 16) | 1, 0,
+	    (uint64_t)crtc_width << 16, (uint64_t)crtc_height << 16,
+	    &saved_errno);
+	if (ret == 0) {
+		check(false, "atomic TEST_ONLY rejects fractional primary source");
+	} else {
+		(void)saved_errno;
+		check(true, "atomic TEST_ONLY rejects fractional primary source");
+	}
+
+	ret = atomic_primary_test_only_commit(fd, plane_id, crtc_id, fb_id,
+	    1, 0, crtc_width, crtc_height, (uint64_t)64 << 16, 0,
+	    (uint64_t)crtc_width << 16, (uint64_t)crtc_height << 16,
+	    &saved_errno);
+	if (ret == 0) {
+		check(false,
+		    "atomic TEST_ONLY rejects shifted primary destination");
+	} else {
+		check(saved_errno == EINVAL,
+		    "atomic TEST_ONLY rejects shifted primary destination with EINVAL");
+	}
+
+out:
+	remove_framebuffer(fd, fb_id,
+	    "RMFB succeeds for primary panning TEST_ONLY probe");
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for primary panning TEST_ONLY probe");
 }
 
 /*
@@ -782,8 +913,12 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	drmModePlaneResPtr resources;
 	uint32_t active_crtc_id = 0;
 	uint32_t active_crtc_index = 0;
+	uint32_t active_crtc_width = 0;
+	uint32_t active_crtc_height = 0;
+	bool primary_panning_probe_done = false;
 	bool cursor_probe_done = false;
 	bool have_active_crtc;
+	bool have_active_crtc_size;
 
 	resources = drmModeGetPlaneResources(fd);
 	check(resources != NULL, "plane resources available");
@@ -793,6 +928,11 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	have_active_crtc = find_active_crtc(fd, mode_resources,
 	    &active_crtc_id, &active_crtc_index);
 	check(have_active_crtc, "active CRTC available for atomic TEST_ONLY probe");
+	have_active_crtc_size = have_active_crtc &&
+	    get_crtc_size(fd, active_crtc_id, &active_crtc_width,
+	    &active_crtc_height);
+	check(have_active_crtc_size,
+	    "active CRTC mode size available for primary panning probe");
 
 	printf("planes: count=%u\n", resources->count_planes);
 	check(resources->count_planes > 0, "at least one KMS plane exposed");
@@ -818,6 +958,14 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		plane_type = get_plane_type(fd, plane->plane_id);
 		check(plane_type >= 0, "plane type is readable");
 		check_in_formats(fd, plane, plane_type, name);
+		if (have_active_crtc_size && !primary_panning_probe_done &&
+		    plane_type == DRM_PLANE_TYPE_PRIMARY &&
+		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
+			check_atomic_primary_panning_contract(fd,
+			    plane->plane_id, active_crtc_id,
+			    active_crtc_width, active_crtc_height);
+			primary_panning_probe_done = true;
+		}
 		if (have_active_crtc && !cursor_probe_done &&
 		    plane_type == DRM_PLANE_TYPE_CURSOR &&
 		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
@@ -828,6 +976,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		drmModeFreePlane(plane);
 	}
 
+	check(primary_panning_probe_done,
+	    "primary plane supports active CRTC for panning TEST_ONLY probe");
 	check(cursor_probe_done,
 	    "cursor plane supports active CRTC for atomic TEST_ONLY probe");
 
