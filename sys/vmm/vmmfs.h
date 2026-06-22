@@ -147,7 +147,27 @@ DECLARE_CLASS(vmm_machines_class);	/* NMACHINES (vmmfs_machines.c) */
 DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
 DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */
 DECLARE_CLASS(vmm_devroot_class);	/* NDEVROOT (vmmfs_devices.c) */
+DECLARE_CLASS(vmm_vcpu_class);		/* NCONFIG vcpu   (vmm_vcpu.c) */
+DECLARE_CLASS(vmm_mem_class);		/* NCONFIG mem    (vmm_mem.c) */
+DECLARE_CLASS(vmm_loader_class);	/* NCONFIG loader (vmm_loader.c) */
 kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
+
+/*
+ * A config "register" file serializes one machine setting as text.  Each
+ * register object (vcpu/mem/loader) supplies its own text + commit functions
+ * to the shared register vops below; the open buffer machinery is generic.
+ */
+typedef size_t (*vmm_text_fn)(const struct vmm_machine *m, char *out, size_t cap);
+typedef int (*vmm_commit_fn)(struct vmm_machine *m, const char *buf, size_t len);
+int	vmmfs_register_getattr(struct vmmfs_node *node,
+	    struct vop_getattr_args *ap, vmm_text_fn text);
+int	vmmfs_register_read(struct vmmfs_node *node, struct vop_read_args *ap,
+	    vmm_text_fn text);
+int	vmmfs_register_write(struct vmmfs_node *node, struct vop_write_args *ap);
+int	vmmfs_register_open(struct vmmfs_node *node, struct vop_open_args *ap);
+int	vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
+	    vmm_commit_fn commit);
+int	vmmfs_zero_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap);
 
 /* Common vops shared across node classes (vmmfs_vnode.c for now). */
 int	vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap);

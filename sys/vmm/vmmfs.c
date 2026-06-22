@@ -118,7 +118,18 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 kobj_class_t
 vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 {
-	(void)cfg;
+	if (type == VMMFS_NCONFIG) {
+		switch (cfg) {
+		case VMMFS_CFG_VCPU:
+			return &vmm_vcpu_class;
+		case VMMFS_CFG_MEM:
+			return &vmm_mem_class;
+		case VMMFS_CFG_LOADER:
+			return &vmm_loader_class;
+		default:
+			return &vmm_legacy_class;
+		}
+	}
 	switch (type) {
 	case VMMFS_NDEVICE:
 		return &vmm_device_class;
@@ -500,6 +511,95 @@ vmmfs_obuf_commit_close(struct vmmfs_node *node, struct file *fp)
 		    (size_t)ob->ob_len);
 	kfree(ob->ob_data, M_VMMFS);
 	kfree(ob, M_VMMFS);
+}
+
+/*
+ * Shared register-file vops.  vcpu/mem/loader differ only in the text/commit
+ * functions they pass; the open-buffer mechanism here is generic.
+ */
+int
+vmmfs_register_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap,
+    vmm_text_fn text)
+{
+	char tmp[300];
+	off_t size;
+
+	size = text(&node->vn_machine->state, tmp, sizeof(tmp));
+	vmmfs_fill_attr(node, ap->a_vap, VREG, 1, size);
+	return 0;
+}
+
+int
+vmmfs_register_read(struct vmmfs_node *node, struct vop_read_args *ap,
+    vmm_text_fn text)
+{
+	struct uio *uio = ap->a_uio;
+	struct vmmfs_openbuf *ob;
+	char tmp[300];
+	char *data;
+	int len;
+	off_t off;
+
+	if (uio->uio_offset < 0)
+		return EINVAL;
+	ob = vmmfs_obuf_get(node, ap->a_fp, 0);
+	if (ob != NULL && ob->ob_written) {
+		data = ob->ob_data;
+		len = ob->ob_len;
+	} else {
+		len = (int)text(&node->vn_machine->state, tmp, sizeof(tmp));
+		data = tmp;
+	}
+	off = uio->uio_offset;
+	if (off >= len)
+		return 0;
+	return uiomove(data + off, (size_t)(len - off), uio);
+}
+
+int
+vmmfs_register_write(struct vmmfs_node *node, struct vop_write_args *ap)
+{
+	return vmmfs_obuf_write(node, ap->a_fp, ap->a_uio);
+}
+
+int
+vmmfs_register_open(struct vmmfs_node *node, struct vop_open_args *ap)
+{
+	(void)node;
+	return vop_stdopen(ap);
+}
+
+int
+vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
+    vmm_commit_fn commit)
+{
+	struct vmmfs_openbuf *ob = NULL, *it;
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	SLIST_FOREACH(it, &node->vn_obufs, ob_link) {
+		if (it->ob_fp == ap->a_fp) {
+			ob = it;
+			SLIST_REMOVE(&node->vn_obufs, it, vmmfs_openbuf, ob_link);
+			break;
+		}
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (ob != NULL) {
+		if (ob->ob_written)
+			(void)commit(&node->vn_machine->state, ob->ob_data,
+			    (size_t)ob->ob_len);
+		kfree(ob->ob_data, M_VMMFS);
+		kfree(ob, M_VMMFS);
+	}
+	return vop_stdclose(ap);
+}
+
+/* getattr for a config file with no inline contents (size 0). */
+int
+vmmfs_zero_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+{
+	vmmfs_fill_attr(node, ap->a_vap, VREG, 1, 0);
+	return 0;
 }
 
 /* Current desired value of a register, serialized as text. */
