@@ -752,9 +752,40 @@ nvkm_user_fb_create_handle(struct drm_framebuffer *fb, struct drm_file *file,
 	return (drm_gem_handle_create(file, fb->obj[0], handle));
 }
 
+/*
+ * Acknowledge MODE_DIRTYFB for direct-scanout GEM framebuffers.
+ *
+ * Ownership:
+ *   Borrows the framebuffer and optional clip array for this ioctl call.  The
+ *   DRM framebuffer core owns the fb reference and validates/copies clips
+ *   before calling us; nvkm does not retain either pointer.
+ *
+ * Lifetime:
+ *   The backing BO is the same object that scanout reads, so there is no
+ *   deferred shadow surface to flush and no state survives this call.
+ *
+ * Threading:
+ *   Pure no-op after DRM core validation.  It takes no nvkm locks, issues no
+ *   GSP/RM RPCs, and does not touch hardware.
+ */
+static int
+nvkm_user_fb_dirty(struct drm_framebuffer *fb, struct drm_file *file,
+    unsigned flags, unsigned color, struct drm_clip_rect *clips,
+    unsigned num_clips)
+{
+	(void)fb;
+	(void)file;
+	(void)flags;
+	(void)color;
+	(void)clips;
+	(void)num_clips;
+	return (0);
+}
+
 static const struct drm_framebuffer_funcs nvkm_user_fb_funcs = {
 	.destroy	= nvkm_user_fb_destroy,
 	.create_handle	= nvkm_user_fb_create_handle,
+	.dirty		= nvkm_user_fb_dirty,
 };
 
 static bool nvkm_plane_format_mod_supported(struct drm_plane *plane,
