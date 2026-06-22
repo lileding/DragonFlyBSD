@@ -111,7 +111,46 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 	node->vn_vnode = NULL;
 	lockinit(&node->vn_interlock, "vmmfs node", 0, 0);
 	SLIST_INIT(&node->vn_obufs);
-	kobj_init((kobj_t)node, &vmm_legacy_class);
+	kobj_init((kobj_t)node, vmmfs_class_for(type, cfg));
+}
+
+/* Map a node type (and config kind) to its KOBJ class. */
+kobj_class_t
+vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
+{
+	(void)cfg;
+	switch (type) {
+	case VMMFS_NDEVICE:
+		return &vmm_device_class;
+	case VMMFS_NDEVLINK:
+		return &vmm_devlink_class;
+	default:
+		return &vmm_legacy_class;
+	}
+}
+
+/* Fill the type-independent fields of a getattr result. */
+void
+vmmfs_fill_attr(struct vmmfs_node *node, struct vattr *vap, enum vtype type,
+    int nlink, off_t size)
+{
+	vap->va_type = type;
+	vap->va_mode = node->vn_mode;
+	vap->va_nlink = nlink;
+	vap->va_uid = 0;
+	vap->va_gid = 0;
+	vap->va_fsid = node->vn_vnode->v_mount->mnt_stat.f_fsid.val[0];
+	vap->va_fileid = node->vn_ino;
+	vap->va_size = size;
+	vap->va_blocksize = PAGE_SIZE;
+	vap->va_atime.tv_sec = 0;
+	vap->va_atime.tv_nsec = 0;
+	vap->va_mtime = vap->va_atime;
+	vap->va_ctime = vap->va_atime;
+	vap->va_gen = 1;
+	vap->va_flags = 0;
+	vap->va_bytes = 0;
+	vap->va_filerev = 0;
 }
 
 /* Free any lingering per-open buffers (teardown only; no commit). */

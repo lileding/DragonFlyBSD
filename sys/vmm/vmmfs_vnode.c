@@ -388,7 +388,7 @@ vmmnode_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 	return 0;
 }
 
-static int
+int
 vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
 
@@ -405,7 +405,7 @@ vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap)
 	return vop_stdopen(ap);
 }
 
-static int
+int
 vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
 	int error;
@@ -429,7 +429,7 @@ vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap)
 	return error;
 }
 
-static int
+int
 vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap)
 {
 
@@ -457,18 +457,6 @@ vmmnode_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
 	if (node->vn_type == VMMFS_NCONFIG &&
 	    vmmfs_cfg_is_register(node->vn_cfg)) {
 		vap->va_size = vmmfs_cfg_text(node, tmp, sizeof(tmp));
-	} else if (node->vn_type == VMMFS_NDEVICE) {
-		vap->va_size = vmmfs_device_format(VMMFS_DEV_OF_NODE(node),
-		    (char *)tmp, sizeof(tmp));
-	} else if (is_link) {
-		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-		int len;
-
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node),
-		    (char *)tmp, sizeof(tmp));
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vap->va_size = (len < 0) ? 0 : len;
 	} else {
 		vap->va_size = 0;
 	}
@@ -489,7 +477,7 @@ vmmnode_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
  * Accept no-op size changes (the O_TRUNC from `echo ... > file`) on writable
  * config files; everything else is read-only.
  */
-static int
+int
 vmmnode_setattr(struct vmmfs_node *node, struct vop_setattr_args *ap)
 {
 
@@ -506,21 +494,6 @@ vmmnode_read(struct vmmfs_node *node, struct vop_read_args *ap)
 
 	if (vp->v_type != VREG)
 		return EINVAL;
-
-	if (node->vn_type == VMMFS_NDEVICE) {
-		struct vmmfs_device *d = VMMFS_DEV_OF_NODE(node);
-		char dbuf[64];
-		int len;
-		off_t off;
-
-		if (uio->uio_offset < 0)
-			return EINVAL;
-		len = vmmfs_device_format(d, dbuf, sizeof(dbuf));
-		off = uio->uio_offset;
-		if (off >= len)
-			return 0;
-		return uiomove(dbuf + off, (size_t)(len - off), uio);
-	}
 
 	if (node->vn_type != VMMFS_NCONFIG)
 		return EINVAL;
@@ -603,26 +576,6 @@ vmmnode_write(struct vmmfs_node *node, struct vop_write_args *ap)
 
 	vmm_machine_stop(&node->vn_machine->state, force);
 	return 0;
-}
-
-/* A device-index symlink resolves to its owner's devices/ entry. */
-static int
-vmmnode_readlink(struct vmmfs_node *node, struct vop_readlink_args *ap)
-{
-	struct vnode *vp = ap->a_vp;
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-	char buf[128];
-	int len;
-
-	if (node->vn_type != VMMFS_NDEVLINK)
-		return EINVAL;
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node), buf,
-	    sizeof(buf));
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (len < 0)
-		return ENOENT;
-	return uiomove(buf, (size_t)len, ap->a_uio);
 }
 
 static int
@@ -810,13 +763,13 @@ done:
 	return error;
 }
 
-static int
+int
 vmmnode_inactive(struct vmmfs_node *node, struct vop_inactive_args *ap)
 {
 	return 0;
 }
 
-static int
+int
 vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
@@ -833,7 +786,7 @@ vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap)
 	return 0;
 }
 
-static int
+int
 vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 {
 
@@ -971,7 +924,6 @@ static kobj_method_t vmm_legacy_methods[] = {
 	KOBJMETHOD(vmm_node_nremove, vmmnode_nremove),
 	KOBJMETHOD(vmm_node_nrmdir, vmmnode_nrmdir),
 	KOBJMETHOD(vmm_node_nrename, vmmnode_nrename),
-	KOBJMETHOD(vmm_node_readlink, vmmnode_readlink),
 	KOBJMETHOD(vmm_node_open, vmmnode_open),
 	KOBJMETHOD(vmm_node_close, vmmnode_close),
 	KOBJMETHOD(vmm_node_access, vmmnode_access),

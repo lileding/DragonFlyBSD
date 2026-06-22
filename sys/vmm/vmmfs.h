@@ -135,8 +135,25 @@ struct vmmfs_mount {
 extern const char *const vmmfs_cfg_name[VMMFS_NCFG];
 extern struct vop_ops vmmfs_vnode_vops;
 
-/* Catch-all node class (step 1); split into per-object classes in step 2. */
+/*
+ * Each node binds to a KOBJ class chosen by vmmfs_class_for().  vmm_legacy is
+ * the catch-all for node types not yet split into their own object module.
+ */
 DECLARE_CLASS(vmm_legacy_class);
+DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
+DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
+kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
+
+/* Common vops shared across node classes (vmmfs_vnode.c for now). */
+int	vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap);
+int	vmmnode_setattr(struct vmmfs_node *node, struct vop_setattr_args *ap);
+int	vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap);
+int	vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap);
+int	vmmnode_inactive(struct vmmfs_node *node, struct vop_inactive_args *ap);
+int	vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap);
+int	vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap);
+void	vmmfs_fill_attr(struct vmmfs_node *node, struct vattr *vap,
+	    enum vtype type, int nlink, off_t size);
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */
