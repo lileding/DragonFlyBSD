@@ -93,7 +93,9 @@ WATCH_KEYS = (
     "cursor_unpin_count",
     "hotplug_count",
     "hotplug_changed_count",
+    "hotplug_nochange_count",
     "hotplug_notify_only_count",
+    "hotplug_auto_kms_count",
 )
 
 CAPACITY_KEYS = (
@@ -225,6 +227,17 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     if args.gears_seconds > 0:
         run(["timeout", str(args.gears_seconds), "glxgears", "-info"],
             out_dir / "glxgears.x11", env=env, timeout=args.gears_seconds + 5)
+    if args.run_hpd_inject:
+        run(["sysctl", "-n", "dev.drm.0.state"],
+            out_dir / "drm_state.x11_hpd_before")
+        run([
+            "doas",
+            "sysctl",
+            f"dev.drm.0.kms_hpd_inject={args.hpd_inject_value}",
+        ], out_dir / "kms-hpd-inject.x11")
+        run(["sleep", "1"], out_dir / "hpd-inject-wait.x11")
+        run(["sysctl", "-n", "dev.drm.0.state"],
+            out_dir / "drm_state.x11_hpd_after")
     if args.run_panning:
         panning_cmd = (
             "set -eu; out=$(xrandr --query | awk '/ connected/{print $1; exit}'); "
@@ -513,6 +526,42 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
              "glxgears produced renderer/frame output")
         emit(not has_error_text(gears_text),
              "glxgears output has no errors")
+        hpd_before = parse_state(out_dir / "drm_state.x11_hpd_before")
+        hpd_after = parse_state(out_dir / "drm_state.x11_hpd_after")
+        if hpd_before or hpd_after or (out_dir / "kms-hpd-inject.x11").exists():
+            inject_rc = command_return_code(out_dir / "kms-hpd-inject.x11")
+            emit(inject_rc == 0, f"kms-hpd-inject.x11 rc={inject_rc}")
+            for key in (
+                "hotplug_count",
+                "hotplug_notify_only_count",
+                "hotplug_nochange_count",
+            ):
+                if key in hpd_before and key in hpd_after:
+                    delta = hpd_after[key] - hpd_before[key]
+                    emit(delta > 0, f"{key} HPD delta={delta}")
+                else:
+                    emit(False, f"missing {key} HPD state")
+            if (
+                "hotplug_auto_kms_count" in hpd_before and
+                "hotplug_auto_kms_count" in hpd_after
+            ):
+                delta = (
+                    hpd_after["hotplug_auto_kms_count"] -
+                    hpd_before["hotplug_auto_kms_count"]
+                )
+                emit(delta == 0, f"hotplug_auto_kms_count HPD delta={delta}")
+            else:
+                emit(False, "missing hotplug_auto_kms_count HPD state")
+            if "scanout_user" in hpd_after:
+                emit(hpd_after["scanout_user"] == 1,
+                     f"x11 HPD kept user scanout={hpd_after['scanout_user']}")
+            else:
+                emit(False, "missing scanout_user HPD state")
+            if "hpd_last_plug_mask" in hpd_after:
+                emit(hpd_after["hpd_last_plug_mask"] != 0,
+                     f"hpd_last_plug_mask=0x{hpd_after['hpd_last_plug_mask']:08x}")
+            else:
+                emit(False, "missing hpd_last_plug_mask HPD state")
         if (out_dir / "xrandr-panning.x11").exists():
             panning_rc = command_return_code(out_dir / "xrandr-panning.x11")
             emit(panning_rc == 0, f"xrandr-panning.x11 rc={panning_rc}")
@@ -586,7 +635,14 @@ def main() -> int:
     parser.add_argument("--xauthority", default=os.environ.get("XAUTHORITY"))
     parser.add_argument("--gears-seconds", type=int, default=5)
     parser.add_argument("--run-panning", action="store_true",
-                        help="briefly set and clear xrandr panning on the first connected output")
+                        help="briefly set and clear xrandr panning on the "
+                             "first connected output")
+    parser.add_argument("--run-hpd-inject", action="store_true",
+                        help="inject a debug HPD event while X11 owns DRM "
+                             "master")
+    parser.add_argument("--hpd-inject-value", type=lambda value: int(value, 0),
+                        default=0x400,
+                        help="packed HPD mask: low16 plug, high16 unplug")
     parser.add_argument("--allow-missing-x11", action="store_true",
                         help="allow report-only console/debug runs without an x11 phase")
     args = parser.parse_args()
