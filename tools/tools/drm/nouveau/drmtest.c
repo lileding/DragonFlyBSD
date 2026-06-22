@@ -7,7 +7,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <drm.h>
 #include <drm_fourcc.h>
+#include <drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -325,6 +327,93 @@ format_has_nonlinear_modifier(const uint32_t *formats,
 }
 
 static bool
+find_first_nvidia_modifier(const struct drm_format_modifier *modifiers,
+    uint32_t count_modifiers, uint64_t *modifier_out)
+{
+	for (uint32_t i = 0; i < count_modifiers; i++) {
+		if ((modifiers[i].modifier >> 56) ==
+		    DRM_FORMAT_MOD_VENDOR_NVIDIA) {
+			*modifier_out = modifiers[i].modifier;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
+create_dumb_buffer(int fd, uint32_t width, uint32_t height, uint32_t bpp,
+    uint32_t *handle_out, uint32_t *pitch_out)
+{
+	struct drm_mode_create_dumb create;
+	bool ok;
+
+	memset(&create, 0, sizeof(create));
+	create.width = width;
+	create.height = height;
+	create.bpp = bpp;
+
+	ok = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) == 0;
+	check(ok, "CREATE_DUMB succeeds for ADDFB2 negative probe");
+	if (!ok)
+		return false;
+
+	*handle_out = create.handle;
+	*pitch_out = create.pitch;
+	return true;
+}
+
+static void
+destroy_dumb_buffer(int fd, uint32_t handle)
+{
+	struct drm_mode_destroy_dumb destroy;
+
+	if (handle == 0)
+		return;
+	memset(&destroy, 0, sizeof(destroy));
+	destroy.handle = handle;
+	check(drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) == 0,
+	    "DESTROY_DUMB succeeds for ADDFB2 negative probe");
+}
+
+static void
+check_addfb2_rejects_rgb565_nvidia(int fd,
+    const struct drm_format_modifier *modifiers, uint32_t count_modifiers)
+{
+	uint32_t handles[4] = { 0 };
+	uint32_t offsets[4] = { 0 };
+	uint32_t pitches[4] = { 0 };
+	uint64_t modifier[4] = { 0 };
+	uint32_t fb_id = 0;
+	uint64_t nvidia_modifier = 0;
+	int saved_errno;
+	int ret;
+
+	check(find_first_nvidia_modifier(modifiers, count_modifiers,
+	    &nvidia_modifier), "primary IN_FORMATS has NVIDIA modifier for ADDFB2 negative probe");
+	if (nvidia_modifier == 0)
+		return;
+
+	if (!create_dumb_buffer(fd, 64, 64, 16, &handles[0], &pitches[0]))
+		return;
+	modifier[0] = nvidia_modifier;
+
+	errno = 0;
+	ret = drmModeAddFB2WithModifiers(fd, 64, 64, DRM_FORMAT_RGB565,
+	    handles, pitches, offsets, modifier, &fb_id,
+	    DRM_MODE_FB_MODIFIERS);
+	saved_errno = errno;
+	if (ret == 0) {
+		check(false, "ADDFB2 rejects RGB565 NVIDIA blocklinear");
+		(void)drmModeRmFB(fd, fb_id);
+	} else {
+		check(saved_errno == EINVAL,
+		    "ADDFB2 rejects RGB565 NVIDIA blocklinear with EINVAL");
+	}
+
+	destroy_dumb_buffer(fd, handles[0]);
+}
+
+static bool
 check_in_formats_blob_shape(const char *name, drmModePlanePtr plane,
     const struct drm_format_modifier_blob *blob, uint32_t length,
     const uint32_t **formats_out,
@@ -468,6 +557,8 @@ check_in_formats(int fd, drmModePlanePtr plane, int plane_type,
 		    blob->count_formats, blob->count_modifiers,
 		    DRM_FORMAT_RGB565),
 		    "primary IN_FORMATS excludes RGB565 NVIDIA blocklinear");
+		check_addfb2_rejects_rgb565_nvidia(fd, modifiers,
+		    blob->count_modifiers);
 	} else if (plane_type == DRM_PLANE_TYPE_CURSOR) {
 		check(plane->count_formats == 1 &&
 		    plane->formats[0] == DRM_FORMAT_ARGB8888,

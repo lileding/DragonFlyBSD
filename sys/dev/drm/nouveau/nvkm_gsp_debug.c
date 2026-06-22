@@ -689,6 +689,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->kms_restore_last_open_count);
 	sbuf_printf(sb, "fb_create_count = %llu\n",
 	    (unsigned long long)sc->kms_fb_create_count);
+	sbuf_printf(sb, "fb_create_reject_count = %llu\n",
+	    (unsigned long long)sc->kms_fb_create_reject_count);
 	sbuf_printf(sb, "fb_create_error_count = %llu\n",
 	    (unsigned long long)sc->kms_fb_create_error_count);
 	sbuf_printf(sb, "fb_create_blocklinear_count = %llu\n",

@@ -866,6 +866,43 @@ nvkm_format_modifier_cpp_supported(uint32_t format, uint64_t modifier)
 }
 
 static struct drm_framebuffer *
+nvkm_fb_create_reject(struct nvkm_softc *sc, int error)
+{
+	/*
+	 * Ownership: this helper only updates the nvkm device counters and
+	 * returns an ERR_PTR to the caller; it never owns framebuffer, GEM, or
+	 * BO references.
+	 *
+	 * Lifetime: the counter lives with struct nvkm_softc.  The returned
+	 * ERR_PTR has no lifetime beyond the DRM fb_create call.
+	 *
+	 * Threading: fb_create runs under DRM modeset/file serialization for a
+	 * single request.  The diagnostic counter is monotonic and intentionally
+	 * lockless, matching the surrounding display counters.
+	 */
+	sc->kms_fb_create_reject_count++;
+	return (ERR_PTR(error));
+}
+
+static struct drm_framebuffer *
+nvkm_fb_create_error(struct nvkm_softc *sc, int error)
+{
+	/*
+	 * Ownership: this helper only records unexpected/internal fb_create
+	 * failures and returns an ERR_PTR.  The caller remains responsible for
+	 * releasing any GEM or framebuffer objects acquired before the failure.
+	 *
+	 * Lifetime: the counter lives with struct nvkm_softc.  No borrowed
+	 * pointer is stored here.
+	 *
+	 * Threading: the counter is diagnostic and monotonic.  It is read from
+	 * the debug sysctl and release smoke after the operation has returned.
+	 */
+	sc->kms_fb_create_error_count++;
+	return (ERR_PTR(error));
+}
+
+static struct drm_framebuffer *
 nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
     const struct drm_mode_fb_cmd2 *cmd)
 {
@@ -881,52 +918,39 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 	int ret;
 
 	sc->kms_fb_create_count++;
-	if (cmd->width == 0 || cmd->height == 0) {
-		sc->kms_fb_create_error_count++;
-		return (ERR_PTR(-EINVAL));
-	}
+	if (cmd->width == 0 || cmd->height == 0)
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 
 	info = drm_get_format_info(dev, cmd);
-	if (info == NULL || info->num_planes != 1) {
-		sc->kms_fb_create_error_count++;
-		return (ERR_PTR(-EINVAL));
-	}
+	if (info == NULL || info->num_planes != 1)
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	if (!nvkm_plane_format_mod_supported(NULL, cmd->pixel_format,
-	    cmd->modifier[0])) {
-		sc->kms_fb_create_error_count++;
-		return (ERR_PTR(-EINVAL));
-	}
+	    cmd->modifier[0]))
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	blocklinear = nvkm_modifier_is_blocklinear(cmd->modifier[0]);
 	kind = nvkm_modifier_kind(cmd->modifier[0]);
 
 	line = (uint64_t)cmd->width * info->cpp[0];
-	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0) {
-		sc->kms_fb_create_error_count++;
-		return (ERR_PTR(-EINVAL));
-	}
+	if (cmd->pitches[0] < line || (cmd->pitches[0] & 0x3fu) != 0)
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	min_size = (uint64_t)(cmd->height - 1) * cmd->pitches[0] +
 	    line + cmd->offsets[0];
 
 	obj = drm_gem_object_lookup(file, cmd->handles[0]);
-	if (obj == NULL) {
-		sc->kms_fb_create_error_count++;
-		return (ERR_PTR(-ENOENT));
-	}
+	if (obj == NULL)
+		return (nvkm_fb_create_reject(sc, -ENOENT));
 	if (obj->size < min_size) {
-		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
-		return (ERR_PTR(-EINVAL));
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	}
 	bo = to_nvkm_bo(obj);
 	if (!(bo->domain & NOUVEAU_GEM_DOMAIN_VRAM)) {
-		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
-		return (ERR_PTR(-EINVAL));
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	}
 	if (blocklinear) {
 		if (!bo->vm_bound_tiled || bo->vm_bound_mixed_kind ||
 		    bo->vm_bound_kind != kind) {
-			sc->kms_fb_create_error_count++;
 			nvkm_infof(sc->dev,
 			    "drm: reject blocklinear fb handle=%u "
 			    "modifier_kind=0x%02x bo_tiled=%d "
@@ -934,32 +958,29 @@ nvkm_fb_create(struct drm_device *dev, struct drm_file *file,
 			    cmd->handles[0], kind, bo->vm_bound_tiled,
 			    bo->vm_bound_kind, bo->vm_bound_mixed_kind);
 			drm_gem_object_put_unlocked(obj);
-			return (ERR_PTR(-EINVAL));
+			return (nvkm_fb_create_reject(sc, -EINVAL));
 		}
 	} else if (bo->vm_bound_tiled) {
-		sc->kms_fb_create_error_count++;
 		nvkm_infof(sc->dev,
 		    "drm: reject implicit-linear fb on tiled bo handle=%u\n",
 		    cmd->handles[0]);
 		drm_gem_object_put_unlocked(obj);
-		return (ERR_PTR(-EINVAL));
+		return (nvkm_fb_create_reject(sc, -EINVAL));
 	}
 
 	fb = kzalloc(sizeof(*fb), GFP_KERNEL);
 	if (fb == NULL) {
-		sc->kms_fb_create_error_count++;
 		drm_gem_object_put_unlocked(obj);
-		return (ERR_PTR(-ENOMEM));
+		return (nvkm_fb_create_error(sc, -ENOMEM));
 	}
 	drm_helper_mode_fill_fb_struct(dev, fb, cmd);
 	fb->obj[0] = obj;
 	ret = drm_framebuffer_init(dev, fb, &nvkm_user_fb_funcs);
 	if (ret != 0) {
-		sc->kms_fb_create_error_count++;
 		fb->obj[0] = NULL;
 		kfree(fb);
 		drm_gem_object_put_unlocked(obj);
-		return (ERR_PTR(ret));
+		return (nvkm_fb_create_error(sc, ret));
 	}
 	if (blocklinear)
 		sc->kms_fb_create_blocklinear_count++;
