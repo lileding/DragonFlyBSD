@@ -67,45 +67,19 @@ vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *a
 	return (*vpp == NULL) ? ENOENT : 0;
 }
 
+/* Generic open/close shared by every node that needs no per-open work. */
 int
 vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
-
-	/*
-	 * Opening the lease takes a reference; refuse once deletion has begun.
-	 * Register files need no per-open work here: the scratch buffer is
-	 * created lazily on first write, and reads fall back to the current
-	 * value, so a read-only open allocates nothing.
-	 */
-	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
-		if (vmm_machine_lease_open(&node->vn_machine->state) == 0)
-			return ENXIO;
-	}
+	(void)node;
 	return vop_stdopen(ap);
 }
 
 int
 vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
-	int error;
-
-	/* Commit a register's open buffer before the fd goes away. */
-	if (node->vn_type == VMMFS_NCONFIG &&
-	    vmmfs_cfg_is_register(node->vn_cfg))
-		vmmfs_obuf_commit_close(node, ap->a_fp);
-
-	error = vop_stdclose(ap);
-
-	/* Releasing the last lease of an armed machine destroys it (source 3). */
-	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
-		if (vmm_machine_lease_close(&node->vn_machine->state)) {
-			struct vmmfs_mount *vmp =
-			    VFS_TO_VMMFS(ap->a_vp->v_mount);
-
-			vmmfs_machine_mark_deleted(vmp, node->vn_machine);
-		}
-	}
-	return error;
+	(void)node;
+	return vop_stdclose(ap);
 }
 
 int

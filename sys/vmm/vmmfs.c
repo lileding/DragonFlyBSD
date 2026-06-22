@@ -126,6 +126,16 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 			return &vmm_mem_class;
 		case VMMFS_CFG_LOADER:
 			return &vmm_loader_class;
+		case VMMFS_CFG_CONSOLE:
+			return &vmm_console_class;
+		case VMMFS_CFG_LEASE:
+			return &vmm_lease_class;
+		case VMMFS_CFG_EVENTS:
+			return &vmm_events_class;
+		case VMMFS_CFG_STATUS:
+			return &vmm_status_class;
+		case VMMFS_CFG_STOPPED:
+			return &vmm_stopped_class;
 		default:
 			return &vmm_legacy_class;
 		}
@@ -599,6 +609,15 @@ int
 vmmfs_zero_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
 {
 	vmmfs_fill_attr(node, ap->a_vap, VREG, 1, 0);
+	return 0;
+}
+
+/* read for a config file that has no readable contents yet (immediate EOF). */
+int
+vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap)
+{
+	(void)node;
+	(void)ap;
 	return 0;
 }
 

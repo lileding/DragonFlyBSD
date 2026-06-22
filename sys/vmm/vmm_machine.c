@@ -501,4 +501,133 @@ static kobj_method_t vmm_machine_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmm_machine, vmm_machine_methods, 0);
+
+/*
+ * The machine's own config files: lease (a reference handle whose last close
+ * destroys an armed machine), events (a drained stream), status (a stub), and
+ * stopped (the lifecycle control written to stop the machine).
+ */
+static int
+vmm_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
+{
+	if (vmm_machine_lease_open(&node->vn_machine->state) == 0)
+		return ENXIO;
+	return vop_stdopen(ap);
+}
+
+static int
+vmm_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
+{
+	int error = vop_stdclose(ap);
+
+	if (vmm_machine_lease_close(&node->vn_machine->state)) {
+		struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
+
+		vmmfs_machine_mark_deleted(vmp, node->vn_machine);
+	}
+	return error;
+}
+
+static kobj_method_t vmm_lease_methods[] = {
+	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmm_node_open,	vmm_lease_open),
+	KOBJMETHOD(vmm_node_close,	vmm_lease_close),
+	KOBJMETHOD(vmm_node_access,	vmmnode_access),
+	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_lease, vmm_lease_methods, 0);
+
+static int
+vmm_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
+{
+	char ebuf[256];
+	size_t n;
+
+	n = vmm_machine_read_events(&node->vn_machine->state, ebuf, sizeof(ebuf));
+	if (n == 0)
+		return 0;
+	return uiomove(ebuf, n, ap->a_uio);
+}
+
+static kobj_method_t vmm_events_methods[] = {
+	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmm_node_read,	vmm_events_read),
+	KOBJMETHOD(vmm_node_open,	vmmnode_open),
+	KOBJMETHOD(vmm_node_close,	vmmnode_close),
+	KOBJMETHOD(vmm_node_access,	vmmnode_access),
+	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_events, vmm_events_methods, 0);
+
+static kobj_method_t vmm_status_methods[] = {
+	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmm_node_open,	vmmnode_open),
+	KOBJMETHOD(vmm_node_close,	vmmnode_close),
+	KOBJMETHOD(vmm_node_access,	vmmnode_access),
+	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_status, vmm_status_methods, 0);
+
+/*
+ * Writing the stopped control file selects the stop method (apic|force) and
+ * (re)applies the stop.  Idempotent.
+ */
+static int
+vmm_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
+{
+	struct uio *uio = ap->a_uio;
+	char buf[16];
+	size_t take;
+	int error, force;
+
+	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
+	    (size_t)uio->uio_resid : sizeof(buf) - 1;
+	error = uiomove(buf, take, uio);
+	if (error)
+		return error;
+	buf[take] = '\0';
+	force = (take >= 5 && strncmp(buf, "force", 5) == 0);
+
+	while (uio->uio_resid > 0) {
+		char dump[32];
+		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
+		    (size_t)uio->uio_resid : sizeof(dump);
+
+		error = uiomove(dump, d, uio);
+		if (error)
+			return error;
+	}
+
+	vmm_machine_stop(&node->vn_machine->state, force);
+	return 0;
+}
+
+static kobj_method_t vmm_stopped_methods[] = {
+	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmm_node_write,	vmm_stopped_write),
+	KOBJMETHOD(vmm_node_open,	vmmnode_open),
+	KOBJMETHOD(vmm_node_close,	vmmnode_close),
+	KOBJMETHOD(vmm_node_access,	vmmnode_access),
+	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_stopped, vmm_stopped_methods, 0);
 #endif /* _KERNEL */

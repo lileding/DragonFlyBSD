@@ -147,9 +147,14 @@ DECLARE_CLASS(vmm_machines_class);	/* NMACHINES (vmmfs_machines.c) */
 DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
 DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */
 DECLARE_CLASS(vmm_devroot_class);	/* NDEVROOT (vmmfs_devices.c) */
-DECLARE_CLASS(vmm_vcpu_class);		/* NCONFIG vcpu   (vmm_vcpu.c) */
-DECLARE_CLASS(vmm_mem_class);		/* NCONFIG mem    (vmm_mem.c) */
-DECLARE_CLASS(vmm_loader_class);	/* NCONFIG loader (vmm_loader.c) */
+DECLARE_CLASS(vmm_vcpu_class);		/* NCONFIG vcpu    (vmm_vcpu.c) */
+DECLARE_CLASS(vmm_mem_class);		/* NCONFIG mem     (vmm_mem.c) */
+DECLARE_CLASS(vmm_loader_class);	/* NCONFIG loader  (vmm_loader.c) */
+DECLARE_CLASS(vmm_console_class);	/* NCONFIG console (vmm_console.c) */
+DECLARE_CLASS(vmm_lease_class);		/* NCONFIG lease   (vmm_machine.c) */
+DECLARE_CLASS(vmm_events_class);	/* NCONFIG events  (vmm_machine.c) */
+DECLARE_CLASS(vmm_status_class);	/* NCONFIG status  (vmm_machine.c) */
+DECLARE_CLASS(vmm_stopped_class);	/* NCONFIG stopped (vmm_machine.c) */
 kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
 
 /*
@@ -168,6 +173,7 @@ int	vmmfs_register_open(struct vmmfs_node *node, struct vop_open_args *ap);
 int	vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
 	    vmm_commit_fn commit);
 int	vmmfs_zero_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap);
+int	vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap);
 
 /* Common vops shared across node classes (vmmfs_vnode.c for now). */
 int	vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap);
