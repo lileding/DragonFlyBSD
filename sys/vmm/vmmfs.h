@@ -142,6 +142,7 @@ extern struct vop_ops vmmfs_vnode_vops;
 DECLARE_CLASS(vmm_legacy_class);
 DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
 DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
+DECLARE_CLASS(vmm_machine_class);	/* NMACHINE  (vmm_machine.c) */
 DECLARE_CLASS(vmm_machines_class);	/* NMACHINES (vmmfs_machines.c) */
 DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
 DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */

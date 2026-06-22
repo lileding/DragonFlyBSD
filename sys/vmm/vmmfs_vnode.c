@@ -39,25 +39,6 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 		else if (ncp->nc_nlen == 7 &&
 		    bcmp(ncp->nc_name, "devices", 7) == 0)
 			child = &vmp->vm_devroot;
-	} else if (dnode->vn_type == VMMFS_NMACHINE) {
-		struct vmmfs_machine *m = dnode->vn_machine;
-		int i;
-
-		if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0) {
-			child = &m->vn_devices;
-		} else {
-			for (i = 0; i < VMMFS_NCFG; i++) {
-				if (!vmmfs_cfg_present(m, i))
-					continue;
-				if ((int)strlen(vmmfs_cfg_name[i]) ==
-				    ncp->nc_nlen &&
-				    bcmp(vmmfs_cfg_name[i], ncp->nc_name,
-				    ncp->nc_nlen) == 0) {
-					child = &m->cfg[i];
-					break;
-				}
-			}
-		}
 	}
 
 	return vmmfs_nresolve_finish(dvp, child, ap->a_nch);
@@ -84,78 +65,6 @@ vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *a
 	}
 
 	return (*vpp == NULL) ? ENOENT : 0;
-}
-
-/*
- * Create "stopped" under a machine directory: an atomic, idempotent request to
- * stop the machine.  `echo apic > stopped` opens with O_CREAT.
- */
-static int
-vmmnode_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
-{
-	struct vnode *dvp = ap->a_dvp;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_machine *m;
-	struct vnode *vp;
-	int error;
-
-	if (dnode->vn_type != VMMFS_NMACHINE)
-		return EPERM;
-	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
-		return EPERM;
-
-	m = dnode->vn_machine;
-	vmm_machine_stop(&m->state, 0);
-
-	error = vmmfs_alloc_vp(dvp->v_mount, &m->cfg[VMMFS_CFG_STOPPED],
-	    LK_EXCLUSIVE | LK_RETRY, &vp);
-	if (error)
-		return error;
-
-	*ap->a_vpp = vp;
-	cache_setunresolved(ap->a_nch);
-	cache_setvp(ap->a_nch, vp);
-	return 0;
-}
-
-/*
- * `rm machines/<name>/stopped` is an atomic request to start the machine.  The
- * config must be complete and the loader path executable; otherwise the start
- * fails and the machine stays stopped.  Only "stopped" is removable.
- */
-static int
-vmmnode_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
-{
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_machine *m;
-	struct vnode *vp;
-	int error;
-
-	if (dnode->vn_type != VMMFS_NMACHINE)
-		return EPERM;
-	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
-		return EPERM;
-
-	m = dnode->vn_machine;
-	if (!vmm_machine_is_stopped(&m->state))
-		return ENOENT;
-
-	if (!vmm_machine_config_complete(&m->state))
-		return EINVAL;
-	error = vmmfs_validate_loader(m, ap->a_cred);
-	if (error)
-		return error;
-
-	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	if (error)
-		return error;
-	vn_unlock(vp);
-
-	vmm_machine_start(&m->state);
-
-	cache_unlink(ap->a_nch);
-	vrele(vp);
-	return 0;
 }
 
 int
@@ -404,34 +313,6 @@ vmmnode_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 			}
 			off = 4;
 		}
-	} else if (node->vn_type == VMMFS_NMACHINE) {
-		struct vmmfs_machine *m = node->vn_machine;
-		int i;
-
-		for (i = (int)off - 2; i < VMMFS_NCFG; i++) {
-			if (!vmmfs_cfg_present(m, i))
-				continue;
-			r = vop_write_dirent(&error, uio, m->cfg[i].vn_ino,
-			    DT_REG, (uint16_t)strlen(vmmfs_cfg_name[i]),
-			    vmmfs_cfg_name[i]);
-			if (r) {
-				off = 2 + i;
-				full = 1;
-				break;
-			}
-			off = 2 + i + 1;
-		}
-		if (!full && off < 2 + VMMFS_NCFG)
-			off = 2 + VMMFS_NCFG;
-		/* devices/ follows the config files. */
-		if (!full && off == 2 + VMMFS_NCFG) {
-			r = vop_write_dirent(&error, uio, m->vn_devices.vn_ino,
-			    DT_DIR, 7, "devices");
-			if (r)
-				full = 1;
-			else
-				off = 2 + VMMFS_NCFG + 1;
-		}
 	}
 
 done:
@@ -601,8 +482,6 @@ vmmfs_print(struct vop_print_args *ap)
 static kobj_method_t vmm_legacy_methods[] = {
 	KOBJMETHOD(vmm_node_nresolve, vmmnode_nresolve),
 	KOBJMETHOD(vmm_node_nlookupdotdot, vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_ncreate, vmmnode_ncreate),
-	KOBJMETHOD(vmm_node_nremove, vmmnode_nremove),
 	KOBJMETHOD(vmm_node_open, vmmnode_open),
 	KOBJMETHOD(vmm_node_close, vmmnode_close),
 	KOBJMETHOD(vmm_node_access, vmmnode_access),
