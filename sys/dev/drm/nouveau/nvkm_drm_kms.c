@@ -1282,6 +1282,100 @@ nvkm_atomic_complete_modeset_events(struct drm_atomic_state *old_state)
 	}
 }
 
+/*
+ * Begin a KMS atomic commit-tail diagnostic record.
+ *
+ * Ownership:
+ *   Borrows sc and copies the already-published atomic summary scalars. It
+ *   does not own or retain the DRM atomic state, CRTCs, planes, or routes.
+ *
+ * Lifetime:
+ *   The active record describes only the currently executing commit tail. The
+ *   copied summary remains as last-tail evidence after completion.
+ *
+ * Threading:
+ *   Called by the commit-tail owner. Sysctl readers may sample partially
+ *   updated values; the fields are diagnostics and must not drive behavior.
+ */
+static void
+nvkm_atomic_tail_begin(struct nvkm_softc *sc)
+{
+	if (sc == NULL)
+		return;
+
+	sc->kms_atomic_tail_seq++;
+	sc->kms_atomic_tail_active = 1;
+	sc->kms_atomic_tail_stage = NVKM_KMS_ATOMIC_TAIL_BEGIN;
+	sc->kms_atomic_tail_last_stage = NVKM_KMS_ATOMIC_TAIL_BEGIN;
+	sc->kms_atomic_tail_last_lock_core =
+	    sc->kms_atomic_last_lock_core;
+	sc->kms_atomic_tail_last_flush_disable =
+	    sc->kms_atomic_last_flush_disable;
+	sc->kms_atomic_tail_last_modeset_heads =
+	    sc->kms_atomic_last_modeset_heads;
+	sc->kms_atomic_tail_last_disable_heads =
+	    sc->kms_atomic_last_disable_heads;
+	sc->kms_atomic_tail_last_enable_heads =
+	    sc->kms_atomic_last_enable_heads;
+	sc->kms_atomic_tail_last_plane_update_mask =
+	    sc->kms_atomic_last_plane_update_mask;
+	sc->kms_atomic_tail_last_plane_disable_mask =
+	    sc->kms_atomic_last_plane_disable_mask;
+}
+
+static void
+nvkm_atomic_tail_enter(struct nvkm_softc *sc,
+    enum nvkm_kms_atomic_tail_stage stage)
+{
+	if (sc == NULL)
+		return;
+
+	sc->kms_atomic_tail_stage = stage;
+	sc->kms_atomic_tail_last_stage = stage;
+	switch (stage) {
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES:
+		sc->kms_atomic_tail_modeset_disables_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES:
+		sc->kms_atomic_tail_commit_planes_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES:
+		sc->kms_atomic_tail_modeset_enables_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS:
+		sc->kms_atomic_tail_modeset_events_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK:
+		sc->kms_atomic_tail_fake_vblank_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_HW_DONE:
+		sc->kms_atomic_tail_hw_done_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE:
+		sc->kms_atomic_tail_wait_flip_done_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES:
+		sc->kms_atomic_tail_cleanup_planes_count++;
+		break;
+	case NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED:
+		sc->kms_atomic_tail_finish_prepared_count++;
+		break;
+	default:
+		break;
+	}
+}
+
+static void
+nvkm_atomic_tail_finish(struct nvkm_softc *sc)
+{
+	if (sc == NULL)
+		return;
+
+	sc->kms_atomic_tail_complete_count++;
+	sc->kms_atomic_tail_stage = NVKM_KMS_ATOMIC_TAIL_IDLE;
+	sc->kms_atomic_tail_active = 0;
+}
+
 static void
 nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 {
@@ -1290,17 +1384,28 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 
 	sc->kms_atomic_commit_tail_count++;
 	nvkm_atomic_publish_summary(sc, old_state);
+	nvkm_atomic_tail_begin(sc);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES);
 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES);
 	drm_atomic_helper_commit_planes(dev, old_state,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES);
 	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS);
 	nvkm_atomic_complete_modeset_events(old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK);
 	drm_atomic_helper_fake_vblank(old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_HW_DONE);
 	drm_atomic_helper_commit_hw_done(old_state);
 	sc->kms_atomic_flip_done_wait_count++;
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE);
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
+	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED);
 	nvkm_atomic_finish_prepared_outputs(old_state);
+	nvkm_atomic_tail_finish(sc);
 }
 
 static const struct drm_mode_config_helper_funcs nvkm_mode_config_helper_funcs = {

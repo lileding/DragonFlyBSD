@@ -71,6 +71,37 @@ nvkm_debug_pte_kind_name(uint8_t kind)
 	}
 }
 
+static const char *
+nvkm_debug_atomic_tail_stage_name(uint32_t stage)
+{
+	switch (stage) {
+	case NVKM_KMS_ATOMIC_TAIL_IDLE:
+		return ("idle");
+	case NVKM_KMS_ATOMIC_TAIL_BEGIN:
+		return ("begin");
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES:
+		return ("modeset_disables");
+	case NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES:
+		return ("commit_planes");
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES:
+		return ("modeset_enables");
+	case NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS:
+		return ("modeset_events");
+	case NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK:
+		return ("fake_vblank");
+	case NVKM_KMS_ATOMIC_TAIL_HW_DONE:
+		return ("hw_done");
+	case NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE:
+		return ("wait_flip_done");
+	case NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES:
+		return ("cleanup_planes");
+	case NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED:
+		return ("finish_prepared");
+	default:
+		return ("unknown");
+	}
+}
+
 static uint8_t
 nvkm_debug_pte_kind(uint64_t pte)
 {
@@ -678,6 +709,52 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_atomic_vblank_wait_count);
 	sbuf_printf(sb, "atomic_flip_done_wait_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_flip_done_wait_count);
+	sbuf_printf(sb, "atomic_tail_seq = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_seq);
+	sbuf_printf(sb, "atomic_tail_complete_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_complete_count);
+	sbuf_printf(sb, "atomic_tail_active = %u\n",
+	    sc->kms_atomic_tail_active);
+	sbuf_printf(sb, "atomic_tail_stage = %u\n",
+	    sc->kms_atomic_tail_stage);
+	sbuf_printf(sb, "atomic_tail_stage_name = %s\n",
+	    nvkm_debug_atomic_tail_stage_name(sc->kms_atomic_tail_stage));
+	sbuf_printf(sb, "atomic_tail_last_stage = %u\n",
+	    sc->kms_atomic_tail_last_stage);
+	sbuf_printf(sb, "atomic_tail_last_stage_name = %s\n",
+	    nvkm_debug_atomic_tail_stage_name(sc->kms_atomic_tail_last_stage));
+	sbuf_printf(sb, "atomic_tail_modeset_disables_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_modeset_disables_count);
+	sbuf_printf(sb, "atomic_tail_commit_planes_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_commit_planes_count);
+	sbuf_printf(sb, "atomic_tail_modeset_enables_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_modeset_enables_count);
+	sbuf_printf(sb, "atomic_tail_modeset_events_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_modeset_events_count);
+	sbuf_printf(sb, "atomic_tail_fake_vblank_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_fake_vblank_count);
+	sbuf_printf(sb, "atomic_tail_hw_done_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_hw_done_count);
+	sbuf_printf(sb, "atomic_tail_wait_flip_done_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_wait_flip_done_count);
+	sbuf_printf(sb, "atomic_tail_cleanup_planes_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_cleanup_planes_count);
+	sbuf_printf(sb, "atomic_tail_finish_prepared_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_finish_prepared_count);
+	sbuf_printf(sb, "atomic_tail_last_lock_core = %u\n",
+	    sc->kms_atomic_tail_last_lock_core);
+	sbuf_printf(sb, "atomic_tail_last_flush_disable = %u\n",
+	    sc->kms_atomic_tail_last_flush_disable);
+	sbuf_printf(sb, "atomic_tail_last_modeset_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_modeset_heads);
+	sbuf_printf(sb, "atomic_tail_last_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_disable_heads);
+	sbuf_printf(sb, "atomic_tail_last_enable_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_enable_heads);
+	sbuf_printf(sb, "atomic_tail_last_plane_update_mask = 0x%08x\n",
+	    sc->kms_atomic_tail_last_plane_update_mask);
+	sbuf_printf(sb, "atomic_tail_last_plane_disable_mask = 0x%08x\n",
+	    sc->kms_atomic_tail_last_plane_disable_mask);
 	sbuf_printf(sb, "atomic_summary_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_summary_count);
 	sbuf_printf(sb, "atomic_last_legacy_cursor_update = %u\n",
