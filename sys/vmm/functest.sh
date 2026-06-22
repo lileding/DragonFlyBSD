@@ -15,10 +15,10 @@ ckok()   { if [ "$2" = "0" ];  then echo "PASS $1"; pass=$((pass+1)); else echo 
 ckfail() { if [ "$2" != "0" ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1 (rc=0 want nonzero)"; fail=$((fail+1)); fi; }
 ckeq()   { if [ "$2" = "$3" ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1 (got [$2] want [$3])"; fail=$((fail+1)); fi; }
 
-kldload /xchg/vmmfs.ko; ckok "kldload" $?
-ln -sf /sbin/mount_std /sbin/mount_vmmfs
+kldload /xchg/vmm.ko; ckok "kldload" $?
+ln -sf /sbin/mount_std /sbin/mount_vmm
 mkdir -p /vmm
-mount -t vmmfs vmm /vmm; ckok "mount" $?
+mount -t vmm vmm /vmm; ckok "mount" $?
 ckeq "machines has host" "$(ls $M)" "host"
 
 # --- host machine + stub device pool ---
@@ -149,6 +149,6 @@ rmdir $M/vm0; ckok "rmdir vm0" $?
 rmdir $M/inc 2>/dev/null; rmdir $M/nx 2>/dev/null; rmdir $M/ml 2>/dev/null
 ckeq "machines back to just host" "$(ls $M)" "host"
 umount /vmm; ckok "umount" $?
-kldunload vmmfs; ckok "kldunload" $?
+kldunload vmm; ckok "kldunload" $?
 
 echo "VMMFS-TESTS: $pass passed $fail failed"

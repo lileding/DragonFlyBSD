@@ -1,4 +1,4 @@
-KMOD=	vmmfs
+KMOD=	vmm
 SRCS=	vmmfs.c vmmfs_vnode.c vmm_machine.c
 
 # Suppress .eh_frame: the kernel ELF object loader panics ("lost base for

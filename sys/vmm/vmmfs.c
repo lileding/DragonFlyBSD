@@ -773,5 +773,5 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_uninit =		vmmfs_vfs_uninit,
 };
 
-VFS_SET(vmmfs_vfsops, vmmfs, VFCF_MPSAFE);
-MODULE_VERSION(vmmfs, 1);
+VFS_SET(vmmfs_vfsops, vmm, VFCF_MPSAFE);
+MODULE_VERSION(vmm, 1);

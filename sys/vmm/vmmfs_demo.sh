@@ -3,10 +3,10 @@
 sep() { echo; echo "==================== $1 ===================="; }
 run() { echo "\$ $1"; eval "$1"; }
 
-kldload /xchg/vmmfs.ko
-ln -sf /sbin/mount_std /sbin/mount_vmmfs
+kldload /xchg/vmm.ko
+ln -sf /sbin/mount_std /sbin/mount_vmm
 mkdir -p /vmm
-mount -t vmmfs vmm /vmm
+mount -t vmm vmm /vmm
 
 sep "1. 挂载后的命名空间"
 run "ls /vmm"
@@ -65,5 +65,5 @@ run "rmdir /vmm/machines/vm0"
 run "ls /vmm/machines"
 
 umount /vmm
-kldunload vmmfs
+kldunload vmm
 echo; echo "==================== 导览结束 ===================="
