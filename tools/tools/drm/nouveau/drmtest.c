@@ -208,6 +208,105 @@ require_property(int fd, uint32_t object_id, uint32_t object_type,
 }
 
 static void
+check_enum_property_default(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, const char *object_name, const char *expected_enum)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+	bool found = false;
+	bool matches = false;
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s %s is enum", object_name, name);
+	check((prop->flags & DRM_MODE_PROP_ENUM) != 0, text);
+	for (int i = 0; i < prop->count_enums; i++) {
+		if (strcmp(prop->enums[i].name, expected_enum) != 0)
+			continue;
+		found = true;
+		matches = prop->enums[i].value == value;
+		break;
+	}
+
+	snprintf(text, sizeof(text), "%s %s has enum %s", object_name, name,
+	    expected_enum);
+	check(found, text);
+	snprintf(text, sizeof(text), "%s %s defaults to %s", object_name, name,
+	    expected_enum);
+	check(matches, text);
+	drmModeFreeProperty(prop);
+}
+
+static void
+check_range_property_value(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, const char *object_name, uint64_t expected_min,
+    uint64_t expected_max, uint64_t expected_value)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+	bool has_range;
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s %s is range", object_name, name);
+	has_range = (prop->flags & DRM_MODE_PROP_RANGE) != 0 &&
+	    prop->count_values >= 2;
+	check(has_range, text);
+	if (has_range) {
+		snprintf(text, sizeof(text), "%s %s min is %llu",
+		    object_name, name, (unsigned long long)expected_min);
+		check(prop->values[0] == expected_min, text);
+		snprintf(text, sizeof(text), "%s %s max is %llu",
+		    object_name, name, (unsigned long long)expected_max);
+		check(prop->values[1] == expected_max, text);
+	}
+
+	snprintf(text, sizeof(text), "%s %s value is %llu", object_name, name,
+	    (unsigned long long)expected_value);
+	check(value == expected_value, text);
+	drmModeFreeProperty(prop);
+}
+
+/*
+ * check_connector_property_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM connector object ID and opens each property through libdrm.
+ *   Every drmModePropertyPtr returned by libdrm is released before return.
+ *
+ * Lifetime:
+ *   Reads only public KMS properties.  It does not create an atomic request,
+ *   mutate connector state, or trigger hotplug/link training.
+ *
+ * Threading:
+ *   Single-threaded probe.  Values are snapshots from the DRM property UAPI;
+ *   a later hotplug may legitimately change link-status in another run.
+ */
+static void
+check_connector_property_contract(int fd, uint32_t connector_id,
+    const char *object_name)
+{
+	check_enum_property_default(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "link-status", object_name, "Good");
+	check_enum_property_default(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "dithering mode", object_name, "auto");
+	check_enum_property_default(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "dithering depth", object_name, "auto");
+	check_range_property_value(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "max bpc", object_name, 8, 8, 8);
+}
+
+static void
 dump_properties(int fd, uint32_t object_id, uint32_t object_type,
     const char *object_name)
 {
@@ -267,14 +366,7 @@ check_connector(int fd, drmModeConnector *connector)
 	}
 	dump_properties(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
 	    name);
-	require_property(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
-	    "link-status", name);
-	require_property(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
-	    "max bpc", name);
-	require_property(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
-	    "dithering mode", name);
-	require_property(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
-	    "dithering depth", name);
+	check_connector_property_contract(fd, connector->connector_id, name);
 }
 
 static void
