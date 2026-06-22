@@ -346,6 +346,11 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         for name in ("xrandr.x11", "glxinfo-B.x11"):
             rc = command_return_code(out_dir / name)
             emit(rc == 0, f"{name} rc={rc}")
+        gears_rc = command_return_code(out_dir / "glxgears.x11")
+        emit(gears_rc in (0, 124), f"glxgears.x11 rc={gears_rc}")
+        if (out_dir / "xrandr-panning.x11").exists():
+            panning_rc = command_return_code(out_dir / "xrandr-panning.x11")
+            emit(panning_rc == 0, f"xrandr-panning.x11 rc={panning_rc}")
         glxinfo = out_dir / "glxinfo-B.x11"
         if glxinfo.exists():
             text = glxinfo.read_text(errors="replace")
