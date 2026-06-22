@@ -79,6 +79,7 @@ struct vmmfs_openbuf {
 struct vmmfs_machine;
 
 struct vmmfs_node {
+	kobj_ops_t		ops;		/* KOBJ dispatch table; must be first */
 	enum vmmfs_ntype	vn_type;
 	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
 	ino_t			vn_ino;
@@ -133,6 +134,9 @@ struct vmmfs_mount {
 
 extern const char *const vmmfs_cfg_name[VMMFS_NCFG];
 extern struct vop_ops vmmfs_vnode_vops;
+
+/* Catch-all node class (step 1); split into per-object classes in step 2. */
+DECLARE_CLASS(vmm_legacy_class);
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */

@@ -38,6 +38,7 @@
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
+#include <sys/kobj.h>
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
@@ -110,6 +111,7 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 	node->vn_vnode = NULL;
 	lockinit(&node->vn_interlock, "vmmfs node", 0, 0);
 	SLIST_INIT(&node->vn_obufs);
+	kobj_init((kobj_t)node, &vmm_legacy_class);
 }
 
 /* Free any lingering per-open buffers (teardown only; no commit). */

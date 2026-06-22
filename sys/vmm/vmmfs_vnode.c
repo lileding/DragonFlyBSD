@@ -19,17 +19,18 @@
 #include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
+#include <sys/kobj.h>
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmm_node_if.h"
 
 static int
-vmmfs_nresolve(struct vop_nresolve_args *ap)
+vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_node *child = NULL;
 	struct vnode *vp = NULL;
 	int error;
@@ -110,11 +111,10 @@ vmmfs_nresolve(struct vop_nresolve_args *ap)
 }
 
 static int
-vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
+vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct vnode **vpp = ap->a_vpp;
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	int error;
 
 	*vpp = NULL;
@@ -138,12 +138,11 @@ vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
  * The user then writes vcpu/mem/loader and `rm stopped` to start.
  */
 static int
-vmmfs_nmkdir(struct vop_nmkdir_args *ap)
+vmmnode_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -192,12 +191,11 @@ vmmfs_nmkdir(struct vop_nmkdir_args *ap)
  * any still-open fds keep working until reclaimed.
  */
 static int
-vmmfs_nrmdir(struct vop_nrmdir_args *ap)
+vmmnode_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -237,11 +235,10 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
  * stop the machine.  `echo apic > stopped` opens with O_CREAT.
  */
 static int
-vmmfs_ncreate(struct vop_ncreate_args *ap)
+vmmnode_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -311,11 +308,9 @@ vmmfs_nremove_device(struct vop_nremove_args *ap, struct vmmfs_node *dnode)
  * fails and the machine stays stopped.  Only "stopped" is removable.
  */
 static int
-vmmfs_nremove(struct vop_nremove_args *ap)
+vmmnode_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 {
-	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -355,11 +350,10 @@ vmmfs_nremove(struct vop_nremove_args *ap)
  * Desired-state semantics.  (cp is impossible: devices/ rejects file creation.)
  */
 static int
-vmmfs_nrename(struct vop_nrename_args *ap)
+vmmnode_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 {
 	struct namecache *fncp = ap->a_fnch->ncp;
 	struct namecache *tncp = ap->a_tnch->ncp;
-	struct vmmfs_node *fdnode = VP_TO_VMMFS(ap->a_fdvp);
 	struct vmmfs_node *tdnode = VP_TO_VMMFS(ap->a_tdvp);
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_fdvp->v_mount);
 	struct vmmfs_device *d;
@@ -395,9 +389,8 @@ vmmfs_nrename(struct vop_nrename_args *ap)
 }
 
 static int
-vmmfs_open(struct vop_open_args *ap)
+vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
-	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
 	/*
 	 * Opening the lease takes a reference; refuse once deletion has begun.
@@ -413,9 +406,8 @@ vmmfs_open(struct vop_open_args *ap)
 }
 
 static int
-vmmfs_close(struct vop_close_args *ap)
+vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
-	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 	int error;
 
 	/* Commit a register's open buffer before the fd goes away. */
@@ -438,19 +430,17 @@ vmmfs_close(struct vop_close_args *ap)
 }
 
 static int
-vmmfs_access(struct vop_access_args *ap)
+vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap)
 {
-	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
 	return vop_helper_access(ap, 0, 0, node->vn_mode, 0);
 }
 
 static int
-vmmfs_getattr(struct vop_getattr_args *ap)
+vmmnode_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
 	struct vattr *vap = ap->a_vap;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 	int is_file = (node->vn_type == VMMFS_NCONFIG ||
 	    node->vn_type == VMMFS_NDEVICE);
 	int is_link = (node->vn_type == VMMFS_NDEVLINK);
@@ -500,9 +490,8 @@ vmmfs_getattr(struct vop_getattr_args *ap)
  * config files; everything else is read-only.
  */
 static int
-vmmfs_setattr(struct vop_setattr_args *ap)
+vmmnode_setattr(struct vmmfs_node *node, struct vop_setattr_args *ap)
 {
-	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
 	if (node->vn_type == VMMFS_NCONFIG && (node->vn_mode & 0200))
 		return 0;
@@ -510,11 +499,10 @@ vmmfs_setattr(struct vop_setattr_args *ap)
 }
 
 static int
-vmmfs_read(struct vop_read_args *ap)
+vmmnode_read(struct vmmfs_node *node, struct vop_read_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
 	struct uio *uio = ap->a_uio;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 
 	if (vp->v_type != VREG)
 		return EINVAL;
@@ -561,11 +549,9 @@ vmmfs_read(struct vop_read_args *ap)
 }
 
 static int
-vmmfs_write(struct vop_write_args *ap)
+vmmnode_write(struct vmmfs_node *node, struct vop_write_args *ap)
 {
-	struct vnode *vp = ap->a_vp;
 	struct uio *uio = ap->a_uio;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 	char buf[16];
 	size_t take;
 	int error, force;
@@ -621,10 +607,9 @@ vmmfs_write(struct vop_write_args *ap)
 
 /* A device-index symlink resolves to its owner's devices/ entry. */
 static int
-vmmfs_readlink(struct vop_readlink_args *ap)
+vmmnode_readlink(struct vmmfs_node *node, struct vop_readlink_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
 	char buf[128];
 	int len;
@@ -641,11 +626,10 @@ vmmfs_readlink(struct vop_readlink_args *ap)
 }
 
 static int
-vmmfs_readdir(struct vop_readdir_args *ap)
+vmmnode_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
 	struct uio *uio = ap->a_uio;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 	int error = 0;
 	int r;
 	int full = 0;
@@ -827,16 +811,15 @@ done:
 }
 
 static int
-vmmfs_inactive(struct vop_inactive_args *ap)
+vmmnode_inactive(struct vmmfs_node *node, struct vop_inactive_args *ap)
 {
 	return 0;
 }
 
 static int
-vmmfs_reclaim(struct vop_reclaim_args *ap)
+vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap)
 {
 	struct vnode *vp = ap->a_vp;
-	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 
 	/* No open fd can remain here, but free any stray buffers defensively. */
 	vmmfs_obuf_drain(node);
@@ -851,15 +834,158 @@ vmmfs_reclaim(struct vop_reclaim_args *ap)
 }
 
 static int
-vmmfs_print(struct vop_print_args *ap)
+vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 {
-	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
 	kprintf("\tvmmfs_node %p ino %ju type %d\n", node,
 	    (uintmax_t)(node != NULL ? node->vn_ino : 0),
 	    node != NULL ? (int)node->vn_type : -1);
 	return 0;
 }
+
+/*
+ * KOBJ dispatch.  Each vop_ops entry is a thin shim that resolves the node
+ * and forwards to its class.  For now every node uses one catch-all class
+ * (vmm_legacy) whose methods are the handlers above; step 2 splits these
+ * into per-object classes.
+ */
+static int
+vmmfs_nresolve(struct vop_nresolve_args *ap)
+{
+	return VMM_NODE_NRESOLVE(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
+{
+	return VMM_NODE_NLOOKUPDOTDOT(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_nmkdir(struct vop_nmkdir_args *ap)
+{
+	return VMM_NODE_NMKDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_ncreate(struct vop_ncreate_args *ap)
+{
+	return VMM_NODE_NCREATE(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_nremove(struct vop_nremove_args *ap)
+{
+	return VMM_NODE_NREMOVE(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_nrmdir(struct vop_nrmdir_args *ap)
+{
+	return VMM_NODE_NRMDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+}
+
+static int
+vmmfs_nrename(struct vop_nrename_args *ap)
+{
+	return VMM_NODE_NRENAME(VP_TO_VMMFS(ap->a_fdvp), ap);
+}
+
+static int
+vmmfs_readlink(struct vop_readlink_args *ap)
+{
+	return VMM_NODE_READLINK(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_open(struct vop_open_args *ap)
+{
+	return VMM_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_close(struct vop_close_args *ap)
+{
+	return VMM_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_access(struct vop_access_args *ap)
+{
+	return VMM_NODE_ACCESS(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_getattr(struct vop_getattr_args *ap)
+{
+	return VMM_NODE_GETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_setattr(struct vop_setattr_args *ap)
+{
+	return VMM_NODE_SETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_read(struct vop_read_args *ap)
+{
+	return VMM_NODE_READ(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_write(struct vop_write_args *ap)
+{
+	return VMM_NODE_WRITE(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_readdir(struct vop_readdir_args *ap)
+{
+	return VMM_NODE_READDIR(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_inactive(struct vop_inactive_args *ap)
+{
+	return VMM_NODE_INACTIVE(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_reclaim(struct vop_reclaim_args *ap)
+{
+	return VMM_NODE_RECLAIM(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static int
+vmmfs_print(struct vop_print_args *ap)
+{
+	return VMM_NODE_PRINT(VP_TO_VMMFS(ap->a_vp), ap);
+}
+
+static kobj_method_t vmm_legacy_methods[] = {
+	KOBJMETHOD(vmm_node_nresolve, vmmnode_nresolve),
+	KOBJMETHOD(vmm_node_nlookupdotdot, vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmm_node_nmkdir, vmmnode_nmkdir),
+	KOBJMETHOD(vmm_node_ncreate, vmmnode_ncreate),
+	KOBJMETHOD(vmm_node_nremove, vmmnode_nremove),
+	KOBJMETHOD(vmm_node_nrmdir, vmmnode_nrmdir),
+	KOBJMETHOD(vmm_node_nrename, vmmnode_nrename),
+	KOBJMETHOD(vmm_node_readlink, vmmnode_readlink),
+	KOBJMETHOD(vmm_node_open, vmmnode_open),
+	KOBJMETHOD(vmm_node_close, vmmnode_close),
+	KOBJMETHOD(vmm_node_access, vmmnode_access),
+	KOBJMETHOD(vmm_node_getattr, vmmnode_getattr),
+	KOBJMETHOD(vmm_node_setattr, vmmnode_setattr),
+	KOBJMETHOD(vmm_node_read, vmmnode_read),
+	KOBJMETHOD(vmm_node_write, vmmnode_write),
+	KOBJMETHOD(vmm_node_readdir, vmmnode_readdir),
+	KOBJMETHOD(vmm_node_inactive, vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim, vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print, vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_legacy, vmm_legacy_methods, 0);
 
 struct vop_ops vmmfs_vnode_vops = {
 	.vop_default =		vop_defaultop,
