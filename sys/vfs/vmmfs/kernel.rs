@@ -94,6 +94,18 @@ pub unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
+/// View a C-provided `(ptr, len)` as a mutable byte slice for a call.
+///
+/// # Safety
+/// `ptr` must point to `len` writable bytes outliving `'a` (NULL yields `&mut []`).
+pub unsafe fn bytes_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
+    if ptr.is_null() {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(ptr, len)
+    }
+}
+
 /// Write `value` through a C-provided out-pointer.
 ///
 /// # Safety

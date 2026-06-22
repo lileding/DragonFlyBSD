@@ -47,6 +47,9 @@ extern int	vmmfs_machine_is_deleting(struct vmmfs_machine_state *m);
 extern int	vmmfs_machine_lease_open(struct vmmfs_machine_state *m);
 extern int	vmmfs_machine_lease_close(struct vmmfs_machine_state *m);
 extern int	vmmfs_machine_begin_delete(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_events_pending(struct vmmfs_machine_state *m);
+extern size_t	vmmfs_machine_read_events(struct vmmfs_machine_state *m,
+		    uint8_t *buf, size_t cap);
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
@@ -96,6 +99,7 @@ enum vmmfs_cfg {
 	VMMFS_CFG_MEM,
 	VMMFS_CFG_LOADER,
 	VMMFS_CFG_LEASE,
+	VMMFS_CFG_EVENTS,
 	VMMFS_CFG_STOPPED,
 	VMMFS_NCFG,
 };
@@ -105,6 +109,7 @@ static const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
 	[VMMFS_CFG_MEM] =	"mem",
 	[VMMFS_CFG_LOADER] =	"loader",
 	[VMMFS_CFG_LEASE] =	"lease",
+	[VMMFS_CFG_EVENTS] =	"events",
 	[VMMFS_CFG_STOPPED] =	"stopped",
 };
 
@@ -840,6 +845,23 @@ vmmfs_read(struct vop_read_args *ap)
 
 	if (vp->v_type != VREG || node->vn_type != VMMFS_NCONFIG)
 		return EINVAL;
+
+	/*
+	 * events is a stream: each read drains and consumes the queued event
+	 * lines (shared one-shot cursor).  M3c-1 is non-blocking; blocking read
+	 * and kqueue arrive in M3c-2.
+	 */
+	if (node->vn_cfg == VMMFS_CFG_EVENTS) {
+		char ebuf[256];
+		size_t n;
+
+		n = vmmfs_machine_read_events(node->vn_machine->rust,
+		    (uint8_t *)ebuf, sizeof(ebuf));
+		if (n == 0)
+			return 0;
+		return uiomove(ebuf, n, uio);
+	}
+
 	if (uio->uio_offset < 0)
 		return EINVAL;
 

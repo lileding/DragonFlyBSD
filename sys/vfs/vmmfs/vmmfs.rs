@@ -1,5 +1,6 @@
 #![no_std]
 
+mod intrinsics;
 mod kernel;
 mod machine;
 mod parse;
@@ -136,6 +137,26 @@ pub unsafe extern "C" fn vmmfs_machine_lease_close(m: *mut MachineState) -> c_in
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_begin_delete(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).begin_delete() as c_int
+}
+
+/// # Safety
+/// `m` is a live handle from `vmmfs_machine_new`.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_events_pending(m: *mut MachineState) -> c_int {
+    kernel::handle_mut(m).events_pending() as c_int
+}
+
+/// Drain queued events into `(buf, cap)`, returning the number of bytes written.
+///
+/// # Safety
+/// `m` is a live handle; `buf` covers `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_read_events(
+    m: *mut MachineState,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    kernel::handle_mut(m).read_events(kernel::bytes_mut(buf, cap))
 }
 
 #[panic_handler]

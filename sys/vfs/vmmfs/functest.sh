@@ -26,7 +26,7 @@ printf '#!/bin/sh\n' > /tmp/cfg/loader; chmod 755 /tmp/cfg/loader
 
 # --- import / presentation (M2) ---
 ln -s /tmp/cfg /vmm/machines/vm0; ckok "import vm0" $?
-ckeq "ls vm0" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "lease loader mem vcpu "
+ckeq "ls vm0" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem vcpu "
 ckeq "cat vcpu" "$(cat /vmm/machines/vm0/vcpu)" "4"
 ckeq "cat mem" "$(cat /vmm/machines/vm0/mem)" "536870912"
 ckeq "cat loader" "$(cat /vmm/machines/vm0/loader)" "10 0755"
@@ -47,16 +47,28 @@ ckeq "rejects left no machines" "$(ls /vmm/machines)" "vm0"
 
 # --- lifecycle / stopped control (M3a) ---
 echo apic > /vmm/machines/vm0/stopped; ckok "stop apic" $?
-ckeq "vm0 has stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "lease loader mem stopped vcpu "
+ckeq "vm0 has stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem stopped vcpu "
 echo apic > /vmm/machines/vm0/stopped; ckok "re-stop idempotent" $?
 rm /vmm/machines/vm0/stopped; ckok "start (rm stopped)" $?
-ckeq "vm0 no stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "lease loader mem vcpu "
+ckeq "vm0 no stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem vcpu "
 rm /vmm/machines/vm0/stopped 2>/dev/null; ckfail "rm stopped while running -> ENOENT" $?
 echo force > /vmm/machines/vm0/stopped; ckok "stop force" $?
 
 # --- read-only config protection ---
 echo 9 > /vmm/machines/vm0/vcpu 2>/dev/null; ckfail "write vcpu -> EPERM" $?
 rm /vmm/machines/vm0/vcpu 2>/dev/null; ckfail "rm vcpu -> EPERM" $?
+
+# --- events stream (M3c): text lines, shared one-shot cursor ---
+ln -s /tmp/cfg /vmm/machines/ev; ckok "import ev (running)" $?
+ckeq "events on create" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "created,started,"
+ckeq "events one-shot drained" "$(cat /vmm/machines/ev/events)" ""
+echo apic > /vmm/machines/ev/stopped
+ckeq "event on stop" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "stopped,"
+rm /vmm/machines/ev/stopped
+ckeq "event on start" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "started,"
+echo apic > /vmm/machines/ev/stopped; echo apic > /vmm/machines/ev/stopped  # idempotent: one event
+ckeq "idempotent stop -> single event" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "stopped,"
+rmdir /vmm/machines/ev; ckok "rmdir ev" $?
 
 # --- rmdir requires stopped (M3b) ---
 ln -s /tmp/cfg /vmm/machines/rr; ckok "import rr (running)" $?
@@ -98,7 +110,7 @@ ckeq "u1 gone after lease release" "$(ls /vmm/machines | grep -c '^u1$')" "0"
 mkdir -p /tmp/cfg2; echo 8 > /tmp/cfg2/vcpu; echo 1G > /tmp/cfg2/mem
 cp /tmp/cfg/loader /tmp/cfg2/loader; touch /tmp/cfg2/stopped
 ln -s /tmp/cfg2 /vmm/machines/vm1; ckok "import stopped vm1" $?
-ckeq "vm1 has stopped" "$(ls /vmm/machines/vm1 | sort | tr '\n' ' ')" "lease loader mem stopped vcpu "
+ckeq "vm1 has stopped" "$(ls /vmm/machines/vm1 | sort | tr '\n' ' ')" "events lease loader mem stopped vcpu "
 rmdir /vmm/machines/vm0; ckok "rmdir vm0" $?
 rmdir /vmm/machines/vm1; ckok "rmdir vm1" $?
 ckeq "machines empty again" "$(ls /vmm/machines)" ""
