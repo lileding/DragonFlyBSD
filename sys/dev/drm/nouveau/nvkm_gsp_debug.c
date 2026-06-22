@@ -755,6 +755,14 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    sc->kms_atomic_tail_last_plane_update_mask);
 	sbuf_printf(sb, "atomic_tail_last_plane_disable_mask = 0x%08x\n",
 	    sc->kms_atomic_tail_last_plane_disable_mask);
+	sbuf_printf(sb, "atomic_disable_vblank_off_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_disable_vblank_off_count);
+	sbuf_printf(sb, "atomic_disable_vblank_keep_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_disable_vblank_keep_count);
+	sbuf_printf(sb, "atomic_disable_vblank_keep_head = %u\n",
+	    sc->kms_atomic_disable_vblank_keep_head);
+	sbuf_printf(sb, "atomic_disable_vblank_keep_error = %d\n",
+	    sc->kms_atomic_disable_vblank_keep_error);
 	sbuf_printf(sb, "atomic_summary_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_summary_count);
 	sbuf_printf(sb, "atomic_last_legacy_cursor_update = %u\n",

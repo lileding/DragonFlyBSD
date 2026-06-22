@@ -790,6 +790,10 @@ struct nvkm_softc {
 	uint32_t		kms_atomic_tail_last_enable_heads;
 	uint32_t		kms_atomic_tail_last_plane_update_mask;
 	uint32_t		kms_atomic_tail_last_plane_disable_mask;
+	uint64_t		kms_atomic_disable_vblank_off_count;
+	uint64_t		kms_atomic_disable_vblank_keep_count;
+	uint32_t		kms_atomic_disable_vblank_keep_head;
+	int			kms_atomic_disable_vblank_keep_error;
 	uint64_t		kms_atomic_summary_count;
 	uint32_t		kms_atomic_last_legacy_cursor_update;
 	uint32_t		kms_atomic_last_async_update;
