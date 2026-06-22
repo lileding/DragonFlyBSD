@@ -781,16 +781,34 @@ struct nvkm_softc {
 	uint64_t		kms_atomic_tail_wait_flip_done_count;
 	uint64_t		kms_atomic_tail_cleanup_planes_count;
 	uint64_t		kms_atomic_tail_finish_prepared_count;
+	uint64_t		kms_atomic_tail_plane_op_count;
+	uint64_t		kms_atomic_tail_disable_op_count;
+	uint64_t		kms_atomic_tail_color_op_count;
+	uint64_t		kms_atomic_tail_enable_op_count;
 	uint32_t		kms_atomic_tail_active;
 	uint32_t		kms_atomic_tail_stage;
 	uint32_t		kms_atomic_tail_last_stage;
+	uint32_t		kms_atomic_tail_last_plane_op_count;
+	uint32_t		kms_atomic_tail_last_disable_op_count;
+	uint32_t		kms_atomic_tail_last_color_op_count;
+	uint32_t		kms_atomic_tail_last_enable_op_count;
+	uint32_t		kms_atomic_tail_last_legacy_cursor_update;
+	uint32_t		kms_atomic_tail_last_async_update;
 	uint32_t		kms_atomic_tail_last_lock_core;
 	uint32_t		kms_atomic_tail_last_flush_disable;
+	uint32_t		kms_atomic_tail_last_old_active_heads;
+	uint32_t		kms_atomic_tail_last_new_active_heads;
 	uint32_t		kms_atomic_tail_last_modeset_heads;
 	uint32_t		kms_atomic_tail_last_disable_heads;
 	uint32_t		kms_atomic_tail_last_enable_heads;
+	uint32_t		kms_atomic_tail_last_primary_update_heads;
+	uint32_t		kms_atomic_tail_last_primary_disable_heads;
+	uint32_t		kms_atomic_tail_last_cursor_update_heads;
+	uint32_t		kms_atomic_tail_last_cursor_disable_heads;
 	uint32_t		kms_atomic_tail_last_plane_update_mask;
 	uint32_t		kms_atomic_tail_last_plane_disable_mask;
+	uint32_t		kms_atomic_tail_last_prepared_heads;
+	uint32_t		kms_atomic_tail_last_prepared_displays;
 	uint64_t		kms_atomic_disable_vblank_off_count;
 	uint64_t		kms_atomic_disable_vblank_keep_count;
 	uint32_t		kms_atomic_disable_vblank_keep_head;
@@ -1677,6 +1695,21 @@ int	nvkm_dispnv50_dp_retrain_current(struct nvkm_softc *sc,
  */
 int	nvkm_dispnv50_color_update(struct nvkm_softc *sc,
 	    struct drm_crtc *crtc, uint32_t head, uint32_t win);
+/*
+ * Return whether the currently armed display scanout belongs to userspace.
+ *
+ * Ownership:
+ *   Borrows the dispnv50 bridge state for one scalar read; it never takes a
+ *   framebuffer, BO, or display object reference.
+ *
+ * Lifetime:
+ *   The result is only a snapshot for the caller's current restore decision.
+ *
+ * Threading:
+ *   Use only from process-context KMS paths.  This is not a synchronization
+ *   primitive and must not replace modeset locking.
+ */
+bool	nvkm_dispnv50_scanout_is_user(struct nvkm_softc *sc);
 
 /* Per-file VM-wide EXEC completion set; no_share BOs alias their fence-wait
  * resv to it (see nvkm_bo_resv). */

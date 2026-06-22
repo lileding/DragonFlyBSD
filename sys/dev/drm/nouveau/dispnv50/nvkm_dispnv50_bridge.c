@@ -156,6 +156,59 @@ struct nvkm_dispnv50_cursor_audit {
 	u32 bo_scanout_pin_count;
 };
 
+/*
+ * Window resources that have been accepted by a window UPDATE.
+ *
+ * Ownership:
+ *   The parent nvkm_dispnv50_state owns one record per window id.  The record
+ *   stores only scalar resource state; it owns no notifier buffer, LUT memory,
+ *   fb, BO, channel, or KMS object reference.
+ *
+ * Lifetime:
+ *   A record becomes valid after nvkm submits a window transaction.  It tracks
+ *   the last hardware-visible resource set/clear that nvkm emitted, not any
+ *   firmware/GOP state imported before the first sanitize transaction.
+ *
+ * Threading:
+ *   Updated from serialized KMS commit paths and read locklessly by sysctl
+ *   diagnostics.  It is a local mirror of nouveau's armed window atom and must
+ *   not be used as a synchronization primitive.
+ */
+struct nvkm_dispnv50_wndw_armed {
+	bool valid;
+	bool ntfy;
+	bool sema;
+	bool xlut;
+	bool csc;
+	bool image;
+};
+
+/*
+ * Head resources that have been accepted by a core UPDATE.
+ *
+ * Ownership:
+ *   The parent nvkm_dispnv50_state owns one record per HEAD id.  The record
+ *   stores only scalar resource state; it owns no output, IOR, LUT memory,
+ *   cursor BO, channel, or KMS object reference.
+ *
+ * Lifetime:
+ *   A record becomes valid after nvkm submits a HEAD transaction.  It tracks
+ *   the last hardware-visible resource set/clear that nvkm emitted, mirroring
+ *   nouveau's armed head atom for clear-mask decisions.
+ *
+ * Threading:
+ *   Updated from serialized KMS commit paths and read locklessly by sysctl
+ *   diagnostics.  It is diagnostic and method-selection state, not a
+ *   synchronization primitive.
+ */
+struct nvkm_dispnv50_head_armed {
+	bool valid;
+	bool display;
+	bool output;
+	bool olut;
+	bool cursor;
+};
+
 struct nvkm_dispnv50_state {
 	struct nv50_disp disp;
 	struct nvif_disp ifdisp;
@@ -206,6 +259,8 @@ struct nvkm_dispnv50_state {
 	struct nvkm_dispnv50_audit_snapshot audit_current;
 	struct nvkm_dispnv50_audit_snapshot audit_pending;
 	struct nvkm_dispnv50_cursor_audit audit_cursor[NVKM_DISPLAY_MAX_CURSORS];
+	struct nvkm_dispnv50_head_armed head_armed[NVKM_DISPLAY_MAX_HEADS];
+	struct nvkm_dispnv50_wndw_armed wndw_armed[NVKM_DISPLAY_MAX_WINDOWS];
 };
 
 static uint32_t
@@ -289,14 +344,17 @@ nvkm_dispnv50_debug_dmac_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	case 0x7d:
 		ctrl = nvkm_rd32(sc, 0x6104e0);
 		stat = nvkm_rd32(sc, 0x610630);
-		idle = ((stat & 0x001f0000) == 0x000b0000);
+		idle = user_put == user_get &&
+		    (((stat & 0x001f0000) == 0x000b0000) ||
+		    ((stat & 0x001f0000) == 0x000c0000));
 		valid = true;
 		break;
 	case 0x7e:
 		channel = 1 + dmac->dfly_inst;
 		ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
 		stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
-		idle = ((stat & 0x000f0000) == 0x00040000);
+		idle = user_put == user_get &&
+		    ((stat & 0x000f0000) == 0x00040000);
 		valid = true;
 		break;
 	default:
@@ -711,6 +769,21 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	    curs != NULL);
 	sbuf_printf(sb, "head[%u]_cursor_enabled = %d\n", head,
 	    cursor_enabled);
+	sbuf_printf(sb, "head[%u]_armed_valid = %d\n", head,
+	    head < nitems(state->head_armed) ? state->head_armed[head].valid :
+	    false);
+	sbuf_printf(sb, "head[%u]_armed_display = %d\n", head,
+	    head < nitems(state->head_armed) ? state->head_armed[head].display :
+	    false);
+	sbuf_printf(sb, "head[%u]_armed_output = %d\n", head,
+	    head < nitems(state->head_armed) ? state->head_armed[head].output :
+	    false);
+	sbuf_printf(sb, "head[%u]_armed_olut = %d\n", head,
+	    head < nitems(state->head_armed) ? state->head_armed[head].olut :
+	    false);
+	sbuf_printf(sb, "head[%u]_armed_cursor = %d\n", head,
+	    head < nitems(state->head_armed) ? state->head_armed[head].cursor :
+	    false);
 	sbuf_printf(sb, "head[%u]_cursor_async_last = %d\n", head,
 	    cursor_audit != NULL && cursor_audit->valid && cursor_audit->async);
 	sbuf_printf(sb, "head[%u]_cursor_last_seq = %llu\n", head,
@@ -795,6 +868,18 @@ nvkm_dispnv50_debug_windows_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 		    i, wndw->interlock.wimm);
 		sbuf_printf(sb, "wndw[%u]_ntfy = 0x%04x\n", i, wndw->ntfy);
 		sbuf_printf(sb, "wndw[%u]_sema = 0x%04x\n", i, wndw->sema);
+		sbuf_printf(sb, "wndw[%u]_armed_valid = %d\n", i,
+		    state->wndw_armed[i].valid);
+		sbuf_printf(sb, "wndw[%u]_armed_ntfy = %d\n", i,
+		    state->wndw_armed[i].ntfy);
+		sbuf_printf(sb, "wndw[%u]_armed_sema = %d\n", i,
+		    state->wndw_armed[i].sema);
+		sbuf_printf(sb, "wndw[%u]_armed_xlut = %d\n", i,
+		    state->wndw_armed[i].xlut);
+		sbuf_printf(sb, "wndw[%u]_armed_csc = %d\n", i,
+		    state->wndw_armed[i].csc);
+		sbuf_printf(sb, "wndw[%u]_armed_image = %d\n", i,
+		    state->wndw_armed[i].image);
 		snprintf(name, sizeof(name), "wndw%u", i);
 		nvkm_dispnv50_debug_dmac_sbuf(sc, sb, name, &wndw->wndw);
 		snprintf(name, sizeof(name), "wimm%u", i);
@@ -1813,13 +1898,50 @@ nvkm_dispnv50_dmac_trace_push(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	}
 }
 
+static void
+nvkm_dispnv50_dmac_dump_fetch_window(struct nvkm_softc *sc,
+    struct nv50_dmac *dmac, u32 user_get, u32 user_put)
+{
+	const char *label = nvkm_dispnv50_dmac_label(dmac);
+	u32 get = user_get >> 2;
+	u32 put = user_put >> 2;
+	u32 start;
+	u32 end;
+	u32 i;
+
+	if (dmac->dfly_shadow == NULL || dmac->dfly_push_mem == NULL ||
+	    dmac->max == 0)
+		return;
+	if (get >= dmac->max)
+		return;
+
+	start = get > 4 ? get - 4 : 0;
+	end = get + 8;
+	if (end > dmac->max)
+		end = dmac->max;
+
+	nvkm_infof(sc->dev,
+	    "drm: dispnv50 %s fetch-window get=0x%08x(%u) "
+	    "put=0x%08x(%u)\n", label, user_get, get, user_put, put);
+	for (i = start; i < end; i++) {
+		u32 shadow = dmac->dfly_shadow[i];
+		u32 vram = nvkm_ro32(dmac->dfly_push_mem, i * 4);
+
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 %s fetch[%03u] shadow=0x%08x "
+		    "vram=0x%08x%s%s\n", label, i, shadow, vram,
+		    i == get ? " <GET>" : "", i == put ? " <PUT>" : "");
+	}
+}
+
 static bool
 nvkm_dispnv50_dmac_read_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
-    u32 *user_put, u32 *ctrl, u32 *stat)
+    u32 *user_put, u32 *user_get, u32 *ctrl, u32 *stat)
 {
 	switch (dmac->dfly_oclass & 0xff) {
 	case 0x7d:
 		*user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		*user_get = nvkm_rd32(sc, dmac->dfly_user + 0x04);
 		*ctrl = nvkm_rd32(sc, 0x6104e0);
 		*stat = nvkm_rd32(sc, 0x610630);
 		return true;
@@ -1827,6 +1949,7 @@ nvkm_dispnv50_dmac_read_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 		u32 channel = 1 + dmac->dfly_inst;
 
 		*user_put = nvkm_rd32(sc, dmac->dfly_user + 0x00);
+		*user_get = nvkm_rd32(sc, dmac->dfly_user + 0x04);
 		*ctrl = nvkm_rd32(sc, 0x6104e0 + channel * 4);
 		*stat = nvkm_rd32(sc, 0x610664 + (channel - 1) * 4);
 		return true;
@@ -1837,11 +1960,15 @@ nvkm_dispnv50_dmac_read_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 }
 
 static bool
-nvkm_dispnv50_dmac_status_idle(struct nv50_dmac *dmac, u32 stat)
+nvkm_dispnv50_dmac_status_idle(struct nv50_dmac *dmac, u32 user_put,
+    u32 user_get, u32 stat)
 {
+	if (user_put != user_get)
+		return false;
 	switch (dmac->dfly_oclass & 0xff) {
 	case 0x7d:
-		return ((stat & 0x001f0000) == 0x000b0000);
+		return (((stat & 0x001f0000) == 0x000b0000) ||
+		    ((stat & 0x001f0000) == 0x000c0000));
 	case 0x7e:
 		return ((stat & 0x000f0000) == 0x00040000);
 	default:
@@ -1855,6 +1982,7 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 {
 	const char *label = nvkm_dispnv50_dmac_label(dmac);
 	u32 user_put = 0;
+	u32 user_get = 0;
 	u32 ctrl = 0;
 	u32 stat = 0;
 	u32 attempt;
@@ -1862,13 +1990,14 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	bool idle = false;
 
 	for (attempt = 0; attempt < NVKM_DISPNV50_STATUS_POLL_COUNT; attempt++) {
-		if (!nvkm_dispnv50_dmac_read_status(sc, dmac, &user_put, &ctrl,
-		    &stat)) {
+		if (!nvkm_dispnv50_dmac_read_status(sc, dmac, &user_put,
+		    &user_get, &ctrl, &stat)) {
 			dmac->dfly_last_idle = false;
 			dmac->dfly_last_stat = 0;
 			return;
 		}
-		idle = nvkm_dispnv50_dmac_status_idle(dmac, stat);
+		idle = nvkm_dispnv50_dmac_status_idle(dmac, user_put, user_get,
+		    stat);
 		if (idle)
 			break;
 		DELAY(NVKM_DISPNV50_STATUS_POLL_US);
@@ -1881,9 +2010,13 @@ nvkm_dispnv50_dmac_trace_status(struct nvkm_softc *sc, struct nv50_dmac *dmac,
 	if (sc->kms_push_trace || !idle) {
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 %s status cur=%u user_put=0x%08x "
-		    "ctrl=0x%08x stat=0x%08x idle=%u attempts=%u\n",
-		    label, cur, user_put, ctrl, stat, idle, attempts);
+		    "user_get=0x%08x ctrl=0x%08x stat=0x%08x idle=%u "
+		    "attempts=%u\n",
+		    label, cur, user_put, user_get, ctrl, stat, idle, attempts);
 	}
+	if (!idle)
+		nvkm_dispnv50_dmac_dump_fetch_window(sc, dmac, user_get,
+		    user_put);
 
 	if (!idle && (dmac->dfly_oclass & 0xff) == 0x7e) {
 		u32 chid = 1 + dmac->dfly_inst;
@@ -1916,6 +2049,13 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 	for (u32 i = dmac->put; i < cur; i++)
 		nvkm_wo32(dmac->dfly_push_mem, i * 4, dmac->dfly_shadow[i]);
 
+	/*
+	 * The EVO fetcher observes the push buffer through display DMA, not
+	 * through the CPU shadow.  Order all shadow-to-pushbuf stores before
+	 * publishing PUT, matching nouveau's DMA kick contract.  The BAR1 read
+	 * keeps the existing VRAM/BAR1 flush behaviour for VRAM-backed memory.
+	 */
+	cpu_sfence();
 	nvkm_gsp_bar1_flush(sc);
 	nvkm_wr32(sc, dmac->dfly_user + 0x00, cur << 2);
 	(void)nvkm_rd32(sc, dmac->dfly_user + 0x00);
@@ -1928,6 +2068,7 @@ nvkm_dispnv50_dmac_kick(struct nvif_push *push)
 
 	dmac->put = cur;
 	dmac->cur = cur;
+	push->bgn = push->cur;
 }
 
 struct nv50_disp *
@@ -2775,6 +2916,35 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	return (0);
 }
 
+/*
+ * Return whether the currently armed scanout belongs to userspace.
+ *
+ * Ownership:
+ *   Borrows sc and the dispnv50 bridge state for one scalar read.  No display
+ *   object, framebuffer, BO, or memory reference is retained.
+ *
+ * Lifetime:
+ *   The return value is a momentary ownership snapshot.  Callers must still
+ *   hold or acquire normal KMS modeset locks before changing scanout state.
+ *
+ * Threading:
+ *   Intended for process-context KMS restore decisions.  The field is written
+ *   by serialized KMS commit paths; readers use it only to choose a
+ *   conservative full-modeset restore, never as a synchronization primitive.
+ */
+bool
+nvkm_dispnv50_scanout_is_user(struct nvkm_softc *sc)
+{
+	struct nvkm_dispnv50_state *state;
+
+	if (sc == NULL)
+		return (false);
+	state = sc->dispnv50;
+	if (state == NULL)
+		return (false);
+	return (state->scanout_user);
+}
+
 static u32
 nvkm_dispnv50_wndw_format(u32 format)
 {
@@ -3206,14 +3376,27 @@ nvkm_dispnv50_ctm_fill(struct nv50_wndw_atom *asyw,
 	asyw->csc.valid = true;
 }
 
+static struct nvkm_dispnv50_wndw_armed *
+nvkm_dispnv50_wndw_armed_state(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw);
+static bool
+nvkm_dispnv50_wndw_programs_xlut(const struct nv50_wndw *wndw);
+static bool
+nvkm_dispnv50_wndw_programs_csc(const struct nv50_wndw *wndw,
+    const struct drm_crtc_state *crtc_state);
+
 static int
-nvkm_dispnv50_wndw_csc_set(struct nvkm_softc *sc, struct nv50_wndw *wndw,
+nvkm_dispnv50_wndw_csc_set(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
     struct nv50_wndw_atom *asyw, const struct drm_crtc_state *crtc_state)
 {
+	const struct nvkm_dispnv50_wndw_armed *armed =
+	    nvkm_dispnv50_wndw_armed_state(state, wndw);
 	const struct drm_color_ctm *ctm;
 
 	if (crtc_state == NULL || crtc_state->ctm == NULL) {
-		if (wndw->func->csc_clr != NULL)
+		if (armed != NULL && armed->valid && armed->csc &&
+		    wndw->func->csc_clr != NULL)
 			return (wndw->func->csc_clr(wndw));
 		return (0);
 	}
@@ -3296,6 +3479,379 @@ nvkm_dispnv50_head_olut_set(struct nvkm_softc *sc,
 	return head->func->olut_set(head, asyh);
 }
 
+static struct nvkm_dispnv50_head_armed *
+nvkm_dispnv50_head_armed_state(struct nvkm_dispnv50_state *state, u32 head)
+{
+	if (state == NULL || head >= nitems(state->head_armed))
+		return NULL;
+	return &state->head_armed[head];
+}
+
+static bool
+nvkm_dispnv50_head_programs_olut(const struct nv50_head *head)
+{
+	return (head != NULL && head->func != NULL &&
+	    head->func->olut != NULL && head->func->olut_set != NULL &&
+	    head->func->olut_identity);
+}
+
+/*
+ * Publish the resource state produced by a successful full HEAD program.
+ *
+ * Ownership:
+ *   Mutably borrows the per-head armed record from state.  It copies only scalar
+ *   method state and keeps no reference to nvhead, output, IOR, or KMS state.
+ *
+ * Lifetime:
+ *   Call only after the matching core/window UPDATE path has succeeded.  Cursor
+ *   visibility is preserved because full modeset enable does not program a new
+ *   cursor image; cursor plane commits update it through cursor-specific helpers.
+ *
+ * Threading:
+ *   Serialized KMS commit context only; sysctl may observe intermediate values.
+ */
+static void
+nvkm_dispnv50_head_mark_programmed(struct nvkm_dispnv50_state *state, u32 head,
+    const struct nv50_head *nvhead, uint32_t display_id, bool output)
+{
+	struct nvkm_dispnv50_head_armed *armed;
+	bool cursor;
+
+	armed = nvkm_dispnv50_head_armed_state(state, head);
+	if (armed == NULL)
+		return;
+
+	cursor = armed->valid && armed->cursor;
+	armed->valid = true;
+	armed->display = display_id != 0;
+	armed->output = output;
+	armed->olut = nvkm_dispnv50_head_programs_olut(nvhead);
+	armed->cursor = cursor;
+}
+
+/*
+ * Publish a successful head-OLUT update without changing routing ownership.
+ *
+ * Ownership:
+ *   Mutably borrows only the per-head armed record.  No LUT memory or CRTC
+ *   state reference is retained.
+ *
+ * Lifetime:
+ *   Call after the core UPDATE that carries the OLUT method has succeeded.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_head_mark_olut_programmed(struct nvkm_dispnv50_state *state,
+    u32 head, const struct nv50_head *nvhead)
+{
+	struct nvkm_dispnv50_head_armed *armed;
+
+	armed = nvkm_dispnv50_head_armed_state(state, head);
+	if (armed == NULL)
+		return;
+	armed->valid = true;
+	armed->olut = nvkm_dispnv50_head_programs_olut(nvhead);
+}
+
+/*
+ * Publish the hardware cursor visibility bit for a HEAD.
+ *
+ * Ownership:
+ *   Mutably borrows only the per-head armed record; cursor BO pin ownership
+ *   remains in the KMS prepare/cleanup path.
+ *
+ * Lifetime:
+ *   Call after the core UPDATE that sets or clears the cursor context succeeds.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_head_mark_cursor(struct nvkm_dispnv50_state *state, u32 head,
+    bool enabled)
+{
+	struct nvkm_dispnv50_head_armed *armed;
+
+	armed = nvkm_dispnv50_head_armed_state(state, head);
+	if (armed == NULL)
+		return;
+	armed->valid = true;
+	armed->cursor = enabled;
+}
+
+/*
+ * Publish a fully disabled HEAD resource state.
+ *
+ * Ownership:
+ *   Mutably borrows only the per-head armed record.  No output or cursor object
+ *   is released here; callers release those resources after the UPDATE succeeds.
+ *
+ * Lifetime:
+ *   Call after the modeset-disable UPDATE has been accepted.  The record stays
+ *   valid so future clears know this HEAD has no nvkm-owned armed resources.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_head_mark_disabled(struct nvkm_dispnv50_state *state, u32 head)
+{
+	struct nvkm_dispnv50_head_armed *armed;
+
+	armed = nvkm_dispnv50_head_armed_state(state, head);
+	if (armed == NULL)
+		return;
+	memset(armed, 0, sizeof(*armed));
+	armed->valid = true;
+}
+
+/*
+ * Publish a successful window-side color update in the window armed mirror.
+ *
+ * Ownership:
+ *   Mutably borrows the per-window armed record.  It preserves notifier,
+ *   semaphore, and image state because color-only commits do not own those
+ *   resources.
+ *
+ * Lifetime:
+ *   Call after the window/core UPDATE carrying ILUT/CSC methods succeeds.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_wndw_mark_color_programmed(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw, const struct drm_crtc_state *crtc_state)
+{
+	struct nvkm_dispnv50_wndw_armed *armed;
+
+	armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+	if (armed == NULL)
+		return;
+	armed->valid = true;
+	armed->xlut = nvkm_dispnv50_wndw_programs_xlut(wndw);
+	armed->csc = nvkm_dispnv50_wndw_programs_csc(wndw, crtc_state);
+}
+
+static struct nvkm_dispnv50_wndw_armed *
+nvkm_dispnv50_wndw_armed_state(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw)
+{
+	if (state == NULL || wndw == NULL || wndw->id < 0 ||
+	    (u32)wndw->id >= nitems(state->wndw_armed))
+		return NULL;
+	return &state->wndw_armed[wndw->id];
+}
+
+static bool
+nvkm_dispnv50_wndw_programs_xlut(const struct nv50_wndw *wndw)
+{
+	return (wndw != NULL && wndw->func != NULL &&
+	    wndw->func->ilut != NULL && wndw->func->xlut_set != NULL &&
+	    wndw->func->ilut_identity);
+}
+
+static bool
+nvkm_dispnv50_wndw_programs_csc(const struct nv50_wndw *wndw,
+    const struct drm_crtc_state *crtc_state)
+{
+	return (wndw != NULL && wndw->func != NULL &&
+	    crtc_state != NULL && crtc_state->ctm != NULL &&
+	    wndw->func->csc_set != NULL);
+}
+
+/*
+ * Emit clear methods for resources that are actually armed.
+ *
+ * Ownership:
+ *   Borrows wndw and the caller-owned armed snapshot for this transaction only.
+ *   It does not retain channel, BO, LUT, or notifier ownership.
+ *
+ * Lifetime:
+ *   The emitted methods stay pending in the window push buffer until the caller
+ *   submits UPDATE.  The armed snapshot must describe the old hardware-visible
+ *   state for the same window.
+ *
+ * Threading:
+ *   Called from serialized KMS commit paths.  It may reserve push-buffer space
+ *   through the emitter callbacks and must not run from interrupt context.
+ */
+static int
+nvkm_dispnv50_wndw_clear_armed(struct nv50_wndw *wndw,
+    const struct nvkm_dispnv50_wndw_armed *armed, bool clear_ntfy,
+    bool clear_sema, bool clear_xlut, bool clear_csc, bool clear_image,
+    bool *emitted)
+{
+	int ret;
+
+	if (emitted != NULL)
+		*emitted = false;
+
+	if (wndw == NULL || wndw->func == NULL)
+		return -ENODEV;
+
+	if (armed == NULL || !armed->valid) {
+		if (!clear_image || wndw->func->image_clr == NULL)
+			return 0;
+		ret = wndw->func->image_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+		return 0;
+	}
+
+	if (clear_ntfy && armed->ntfy) {
+		if (wndw->func->ntfy_clr == NULL)
+			return -ENODEV;
+		ret = wndw->func->ntfy_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+	}
+	if (clear_sema && armed->sema) {
+		if (wndw->func->sema_clr == NULL)
+			return -ENODEV;
+		ret = wndw->func->sema_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+	}
+	if (clear_xlut && armed->xlut) {
+		if (wndw->func->xlut_clr == NULL)
+			return -ENODEV;
+		ret = wndw->func->xlut_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+	}
+	if (clear_csc && armed->csc) {
+		if (wndw->func->csc_clr == NULL)
+			return -ENODEV;
+		ret = wndw->func->csc_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+	}
+	if (clear_image && armed->image) {
+		if (wndw->func->image_clr == NULL)
+			return -ENODEV;
+		ret = wndw->func->image_clr(wndw);
+		if (ret != 0)
+			return ret;
+		if (emitted != NULL)
+			*emitted = true;
+	}
+
+	return 0;
+}
+
+/*
+ * Publish the resource state produced by a successful window set/update.
+ *
+ * Ownership:
+ *   Mutably borrows the per-window armed record from state.  It copies only
+ *   scalar booleans and keeps no reference to crtc_state or wndw.
+ *
+ * Lifetime:
+ *   Call only after the window UPDATE has been submitted and, for synchronous
+ *   commits, after the notifier proves BEGUN.  Async flips publish image=true at
+ *   submit time because the old image was already armed and a later clear must
+ *   still clear the image slot.
+ *
+ * Threading:
+ *   Serialized KMS commit context only; sysctl may observe intermediate values.
+ */
+static void
+nvkm_dispnv50_wndw_mark_programmed(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw, const struct drm_crtc_state *crtc_state,
+    bool async, bool program_color)
+{
+	struct nvkm_dispnv50_wndw_armed *armed;
+
+	armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+	if (armed == NULL)
+		return;
+
+	armed->valid = true;
+	armed->image = true;
+	if (async)
+		return;
+
+	armed->ntfy = true;
+	armed->sema = false;
+	if (program_color) {
+		armed->xlut = nvkm_dispnv50_wndw_programs_xlut(wndw);
+		armed->csc = nvkm_dispnv50_wndw_programs_csc(wndw,
+		    crtc_state);
+	}
+}
+
+/*
+ * Publish a fully disabled window resource state.
+ *
+ * Ownership:
+ *   Mutably borrows the per-window armed record and drops every scalar resource
+ *   bit.  No hardware object is owned or freed here.
+ *
+ * Lifetime:
+ *   Call after the modeset-disable UPDATE has been submitted.  The record stays
+ *   valid so future clears know this window has no nvkm-owned armed resources.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_wndw_mark_disabled(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw)
+{
+	struct nvkm_dispnv50_wndw_armed *armed;
+
+	armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+	if (armed == NULL)
+		return;
+	memset(armed, 0, sizeof(*armed));
+	armed->valid = true;
+}
+
+/*
+ * Publish a primary-plane disable that used a fresh notifier for completion.
+ *
+ * Ownership:
+ *   Mutably borrows the per-window armed record.  The notifier buffer itself
+ *   remains owned by the display sync BO.
+ *
+ * Lifetime:
+ *   The image/color resources are no longer armed after UPDATE, but the
+ *   notifier context remains the most recent nvkm-owned window notifier until a
+ *   later modeset-disable clear removes it.
+ *
+ * Threading:
+ *   Serialized KMS commit context only.
+ */
+static void
+nvkm_dispnv50_wndw_mark_plane_disabled(struct nvkm_dispnv50_state *state,
+    const struct nv50_wndw *wndw)
+{
+	struct nvkm_dispnv50_wndw_armed *armed;
+
+	armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+	if (armed == NULL)
+		return;
+	armed->valid = true;
+	armed->ntfy = true;
+	armed->sema = false;
+	armed->xlut = false;
+	armed->csc = false;
+	armed->image = false;
+}
+
 static int
 nvkm_dispnv50_wndw_sanitize(struct nv50_wndw *wndw)
 {
@@ -3337,26 +3893,52 @@ nvkm_dispnv50_wndw_sanitize(struct nv50_wndw *wndw)
  * clears notifier/semaphore before arming a fresh notifier.
  */
 static int
-nvkm_dispnv50_wndw_disable_resources(struct nv50_wndw *wndw)
+nvkm_dispnv50_wndw_disable_resources(struct nvkm_dispnv50_state *state,
+    struct nv50_wndw *wndw, bool *emitted)
 {
-	int ret;
+	const struct nvkm_dispnv50_wndw_armed *armed =
+	    nvkm_dispnv50_wndw_armed_state(state, wndw);
 
-	if (wndw->func->xlut_clr != NULL) {
-		ret = wndw->func->xlut_clr(wndw);
-		if (ret != 0)
-			return ret;
-	}
-	if (wndw->func->csc_clr != NULL) {
-		ret = wndw->func->csc_clr(wndw);
-		if (ret != 0)
-			return ret;
-	}
-	if (wndw->func->image_clr != NULL) {
-		ret = wndw->func->image_clr(wndw);
-		if (ret != 0)
-			return ret;
-	}
-	return 0;
+	return nvkm_dispnv50_wndw_clear_armed(wndw, armed, false, false, true,
+	    true, true, emitted);
+}
+
+/*
+ * Ownership:
+ *   Borrows the window channel for one modeset-disable transaction.  The
+ *   caller owns the final window/core UPDATE submission.
+ *
+ * Lifetime:
+ *   The emitted clear methods stay pending in the window push buffer until the
+ *   caller submits the window UPDATE with the matching interlock set.  No
+ *   window notifier is armed for this path; disable completion is owned by the
+ *   transaction-level core flush, matching nouveau's atomic disable rule.
+ *
+ * Threading:
+ *   Called from the serialized KMS modeset disable path.  It may sleep in push
+ *   buffer reservation, but it must not wait for a window notifier.
+ */
+static int
+nvkm_dispnv50_wndw_modeset_disable_resources(struct nvkm_dispnv50_state *state,
+    struct nv50_wndw *wndw, bool *emitted)
+{
+	const struct nvkm_dispnv50_wndw_armed *armed =
+	    nvkm_dispnv50_wndw_armed_state(state, wndw);
+	bool clear_context;
+
+	/*
+	 * Plane-only disable uses a notifier to prove the image clear.  A full
+	 * modeset-disable must still clear that remaining notifier/semaphore
+	 * context and pair the window UPDATE with the core HEAD/output detach.
+	 * This matches nouveau's flush-disable boundary: image/color may be
+	 * cleared by an earlier window-only transaction, but context ownership is
+	 * dropped by the final window/core transaction.
+	 */
+	clear_context = armed == NULL || armed->ntfy || armed->sema ||
+	    armed->image || armed->xlut || armed->csc;
+
+	return nvkm_dispnv50_wndw_clear_armed(wndw, armed, clear_context,
+	    clear_context, true, true, true, emitted);
 }
 
 static int
@@ -3382,8 +3964,26 @@ nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
 	return wndw->func->ntfy_set(wndw, asyw);
 }
 
+/*
+ * Submit one core UPDATE and sample the core notifier.
+ *
+ * Ownership:
+ *   Borrows the core channel, shared notifier buffer, and interlock array for
+ *   one UPDATE.  No references are retained after return.
+ *
+ * Lifetime:
+ *   The UPDATE submission itself is the commit boundary.  The core notifier is
+ *   useful diagnostic evidence, but nouveau treats a notifier timeout as a
+ *   logged display-engine condition rather than as a KMS commit failure.  The
+ *   caller must use the window notifier, vblank, or later channel progress as
+ *   the real latch/completion proof for scanout-visible work.
+ *
+ * Threading:
+ *   Called from serialized KMS commit paths.  It may sleep while waiting for
+ *   the notifier and must not run from interrupt context.
+ */
 static int
-nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
+nvkm_dispnv50_core_commit_notify_common(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
 {
 	u32 status;
@@ -3405,12 +4005,48 @@ nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 core notifier timeout status=0x%08x "
 		    "err=%d\n", status, ret);
-		return ret;
+		/*
+		 * The UPDATE push is the hardware-visible commit boundary.  Linux
+		 * nouveau reports a core notifier timeout as display-engine
+		 * diagnostics and continues the atomic tail; treating the wait as a
+		 * KMS commit failure leaves the DRM state half-disabled and prevents
+		 * vblank_off/release cleanup from running.
+		 */
+		return 0;
 	}
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 core notifier done status=0x%08x\n", status);
 	return 0;
+}
+
+static int
+nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
+{
+	return nvkm_dispnv50_core_commit_notify_common(sc, state, core,
+	    interlock);
+}
+
+/*
+ * Ownership:
+ *   Borrows the core channel and interlock array for a modeset-disable flush.
+ *
+ * Lifetime:
+ *   The core UPDATE must be accepted before this returns.  The shared core
+ *   notifier is diagnostic only; output release and object destruction must not
+ *   be skipped once the disable transaction has been submitted.
+ *
+ * Threading:
+ *   Called from serialized KMS teardown/disable paths and may sleep while
+ *   waiting for the notifier.
+ */
+static int
+nvkm_dispnv50_core_commit_notify_best_effort(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
+{
+	return nvkm_dispnv50_core_commit_notify_common(sc, state, core,
+	    interlock);
 }
 
 /*
@@ -3436,6 +4072,31 @@ nvkm_dispnv50_cursor_commit_core(struct nvkm_softc *sc,
 	if (legacy_cursor_update)
 		return core->func->update(core, interlock, false);
 	return nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+}
+
+/*
+ * Submit the cursor channel side of a CORE/CURS interlock pair.
+ *
+ * Ownership:
+ *   Borrows the cursor immediate channel and the caller-owned interlock array.
+ *   The helper does not retain channel, BO, or KMS state references.
+ *
+ * Lifetime:
+ *   Callers must emit any head cursor context set/clear methods before this
+ *   helper, and must submit the matching core UPDATE after it.  This mirrors
+ *   nouveau's order: cursor/window channel UPDATEs first, then the core UPDATE
+ *   that names their interlock bits.
+ *
+ * Threading:
+ *   Called only from serialized KMS commit paths.  It may sleep in the cursor
+ *   channel wait path and must not run from interrupt context.
+ */
+static int
+nvkm_dispnv50_cursor_commit_wimm(struct nv50_wndw *curs, u32 *interlock)
+{
+	if (curs == NULL || curs->immd == NULL || curs->immd->update == NULL)
+		return -ENODEV;
+	return curs->immd->update(curs, interlock);
 }
 
 static int
@@ -3469,6 +4130,126 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
 }
 
 /*
+ * Emit window methods for one KMS transaction without submitting UPDATE.
+ *
+ * Ownership:
+ *   Borrows the CRTC, bridge state, window channel, and output atom for the
+ *   duration of the call.  It stores no pointer and acquires no KMS reference.
+ *
+ * Lifetime:
+ *   The emitted methods remain pending in the window push buffer until the
+ *   caller submits the matching UPDATE.  asyw is caller-owned storage and must
+ *   remain valid until any later notifier wait that uses it.
+ *
+ * Threading:
+ *   Called from serialized KMS commit paths.  It may sleep while reserving push
+ *   buffer space and must not run from interrupt context.
+ */
+static int
+nvkm_dispnv50_window_emit_program(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
+    struct nv50_wndw *wndw, struct nv50_wndw_atom *asyw,
+    bool sanitize, bool async, bool program_color)
+{
+	int ret;
+
+	if (sc == NULL || state == NULL || crtc == NULL || wndw == NULL ||
+	    asyw == NULL || wndw->func == NULL ||
+	    wndw->func->image_set == NULL)
+		return -ENODEV;
+
+	nvkm_dispnv50_wndw_atom_fill(asyw, crtc, state);
+	if (sanitize) {
+		ret = nvkm_dispnv50_wndw_sanitize(wndw);
+		if (ret != 0)
+			return ret;
+	}
+
+	/*
+	 * A page-flip only changes the scanout buffer (the image); notifier,
+	 * ILUT, CSC and blend were programmed at modeset/color update and are
+	 * unchanged, so the async and image-only paths push image_set + UPDATE
+	 * only.  This mirrors nouveau's nv50_wndw_flush_set gating each emitter
+	 * on a dirty bit.
+	 */
+	if (!async) {
+		ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, asyw);
+		if (ret != 0)
+			return ret;
+	}
+	ret = wndw->func->image_set(wndw, asyw);
+	if (ret != 0)
+		return ret;
+	if (!async && program_color) {
+		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, asyw,
+		    crtc->state);
+		if (ret != 0)
+			return ret;
+			ret = nvkm_dispnv50_wndw_csc_set(sc, state, wndw, asyw,
+			    crtc->state);
+		if (ret != 0)
+			return ret;
+		if (wndw->func->blend_set == NULL)
+			return -ENODEV;
+		ret = wndw->func->blend_set(wndw, asyw);
+		if (ret != 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * Submit a pending window UPDATE and, when required, the matching core UPDATE.
+ *
+ * Ownership:
+ *   Borrows the core, window, and interlock array for one commit step.  The
+ *   caller owns update_submitted storage and may pass NULL when no rollback
+ *   boundary needs to be recorded.
+ *
+ * Lifetime:
+ *   Once update_submitted is set true, the transaction has crossed into
+ *   hardware-visible UPDATE submission.  Callers must then treat prepared
+ *   output ownership as consumed instead of rolling it back as prepare-only.
+ *
+ * Threading:
+ *   Called from serialized KMS commit paths.  It may sleep in push-buffer and
+ *   notifier paths and must not run from interrupt context.
+ */
+static int
+nvkm_dispnv50_window_submit_update(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core,
+    struct nv50_wndw *wndw, u32 *interlock, bool notify_core,
+    bool *update_submitted)
+{
+	bool commit_core;
+	int ret;
+
+	if (wndw == NULL || wndw->func == NULL || wndw->func->update == NULL ||
+	    interlock == NULL)
+		return -ENODEV;
+
+	commit_core = interlock[NV50_DISP_INTERLOCK_CORE] != 0;
+	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	ret = wndw->func->update(wndw, interlock);
+	if (ret != 0)
+		return ret;
+	if (update_submitted != NULL)
+		*update_submitted = true;
+	if (!commit_core)
+		return 0;
+
+	if (core == NULL || core->func == NULL)
+		return -ENODEV;
+	if (notify_core)
+		return nvkm_dispnv50_core_commit_notify(sc, state, core,
+		    interlock);
+	if (core->func->update == NULL)
+		return -ENODEV;
+	return core->func->update(core, interlock, false);
+}
+
+/*
  * Ownership: borrows the CRTC/window/core state for one KMS commit.  When
  * update_submitted is non-NULL, the caller owns that bool and this helper only
  * sets it after the window UPDATE method has been accepted.
@@ -3487,74 +4268,33 @@ static int
 nvkm_dispnv50_window_program(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
     struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
-    bool sanitize, bool async, bool notify_core, enum nvkm_dispnv50_audit_op op,
-    u32 head, u32 display_id, const char *reason, bool *update_submitted)
+    bool sanitize, bool async, bool notify_core, bool program_color,
+    enum nvkm_dispnv50_audit_op op, u32 head, u32 display_id,
+    const char *reason, bool *update_submitted)
 {
 	struct nv50_wndw_atom asyw;
 	int ret;
-	bool commit_core;
 
 	if (interlock == NULL)
 		return -EINVAL;
 
-	nvkm_dispnv50_wndw_atom_fill(&asyw, crtc, state);
-	if (sanitize) {
-		ret = nvkm_dispnv50_wndw_sanitize(wndw);
-		if (ret != 0)
-			goto fail;
-	}
-
-	/* A page-flip only changes the scanout buffer (the image); notifier,
-	 * ILUT and blend were programmed at modeset and are unchanged, so the
-	 * async path pushes image_set + UPDATE only (mirrors nouveau
-	 * nv50_wndw_flush_set gating each emitter on a dirty bit). */
-	if (!async) {
-		ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
-		if (ret != 0)
-			goto fail;
-	}
-	ret = wndw->func->image_set(wndw, &asyw);
+	ret = nvkm_dispnv50_window_emit_program(sc, state, crtc, wndw, &asyw,
+	    sanitize, async, program_color);
 	if (ret != 0)
 		goto fail;
-	if (!async) {
-		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw,
-		    crtc->state);
-		if (ret != 0)
-			goto fail;
-		ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw,
-		    crtc->state);
-		if (ret != 0)
-			goto fail;
-		ret = wndw->func->blend_set(wndw, &asyw);
-		if (ret != 0)
-			goto fail;
-	}
 
-	commit_core = interlock[NV50_DISP_INTERLOCK_CORE] != 0;
-	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
-	ret = wndw->func->update(wndw, interlock);
+	ret = nvkm_dispnv50_window_submit_update(sc, state, core, wndw,
+	    interlock, notify_core, update_submitted);
 	if (ret != 0)
 		goto fail;
-	if (update_submitted != NULL)
-		*update_submitted = true;
-	if (commit_core) {
-		if (notify_core) {
-			ret = nvkm_dispnv50_core_commit_notify(sc, state, core,
-			    interlock);
-		} else if (core->func == NULL || core->func->update == NULL) {
-			ret = -ENODEV;
-		} else {
-			ret = core->func->update(core, interlock, false);
-		}
-		if (ret != 0)
-			goto fail;
-	}
 
 	/* Async (page-flip): the UPDATE is kicked; the HW latches the new
 	 * scanout at the next vblank and the DRM flip event completes there
 	 * (real vblank). Do not block the commit thread on the notifier or
 	 * read back channel status. DRM serialises flips via the event. */
 	if (async) {
+		nvkm_dispnv50_wndw_mark_programmed(state, wndw,
+		    crtc->state, true, false);
 		nvkm_dispnv50_audit_capture(state, &state->audit_pending, op,
 		    head, (u32)wndw->id, display_id, true, false, false);
 		return 0;
@@ -3572,6 +4312,8 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	if (ret != 0)
 		goto fail;
 
+	nvkm_dispnv50_wndw_mark_programmed(state, wndw, crtc->state, false,
+	    program_color);
 	nvkm_dispnv50_audit_capture(state, &state->audit_current, op, head,
 	    (u32)wndw->id, display_id, false, true, false);
 	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
@@ -3604,6 +4346,42 @@ fail:
 	return ret;
 }
 
+/*
+ * Publish a completed async primary-plane update.
+ *
+ * Ownership:
+ *   Mutably borrows only the dispnv50 audit records owned by state.  No window
+ *   channel, notifier buffer, BO, framebuffer, or DRM event ownership changes
+ *   here; those lifetimes remain owned by KMS prepare/cleanup and the vblank
+ *   event path.
+ *
+ * Lifetime:
+ *   Call after drm_atomic_helper_wait_for_flip_done() has observed the commit's
+ *   flip completion.  The pending snapshot describes the async update that was
+ *   already submitted to hardware; this helper only moves that completed scalar
+ *   state into current and clears pending.
+ *
+ * Threading:
+ *   Serialized atomic commit-tail context only.  Sysctl readers are lockless
+ *   observers, so the audit fields must not be used as synchronization state.
+ */
+void
+nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc, bool publish)
+{
+	struct nvkm_dispnv50_state *state;
+
+	if (sc == NULL)
+		return;
+	state = sc->dispnv50;
+	if (!publish || state == NULL || !state->audit_pending.valid ||
+	    !state->audit_pending.async)
+		return;
+
+	state->audit_current = state->audit_pending;
+	state->audit_current.armed = true;
+	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
+}
+
 static int
 nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_core *core,
@@ -3613,6 +4391,7 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	u32 head = (u32)-1;
 	u32 display_id = 0;
+	bool clear_emitted = false;
 	int ret;
 
 	(void)core;
@@ -3623,11 +4402,12 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
-	ret = nvkm_dispnv50_wndw_disable_resources(wndw);
+	ret = nvkm_dispnv50_wndw_disable_resources(state, wndw, &clear_emitted);
 	if (ret != 0)
 		goto fail;
 
-	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	if (clear_emitted)
+		interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
 	ret = wndw->func->update(wndw, interlock);
 	if (ret != 0)
 		goto fail;
@@ -3640,9 +4420,17 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 		head = state->audit_current.head;
 		display_id = state->audit_current.display_id;
 	}
+	nvkm_dispnv50_wndw_mark_plane_disabled(state, wndw);
 	nvkm_dispnv50_audit_capture(state, &state->audit_current,
 	    NVKM_DISPNV50_AUDIT_PLANE_DISABLE, head, (u32)wndw->id, display_id,
 	    false, true, true);
+	/*
+	 * The audit above intentionally records which scanout was disabled.  The
+	 * live ownership snapshot must then stop advertising a user scanout:
+	 * after the window image clear has been accepted, there is no user image
+	 * left for light_up() to preserve with a full modeset.
+	 */
+	state->scanout_user = false;
 	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
 
 	nvkm_infof(sc->dev, "drm: dispnv50 window disabled win=%d\n",
@@ -4727,32 +5515,70 @@ nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *outp, uint32_t head)
 	}
 }
 
+/*
+ * Emit the clear half of a modeset transaction.
+ *
+ * Ownership:
+ *   Borrows the bridge-owned head/window/output objects for one atomic commit.
+ *   When @submit_disable is false, the emitted methods remain pending in their
+ *   push buffers and no output ownership is released.
+ *
+ * Lifetime:
+ *   @submit_disable=true crosses the hardware-visible UPDATE boundary and may
+ *   release the old output route after the core update.  @submit_disable=false
+ *   defers that boundary to the later enable/update flush in the same atomic
+ *   tail, matching nouveau's non-flush-disable path.
+ *
+ * Threading:
+ *   Called only from serialized KMS commit context.  It may sleep while
+ *   reserving push-buffer space or waiting for display notifiers when
+ *   @submit_disable is true.
+ */
 int
-nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
-    uint32_t display_id)
+nvkm_dispnv50_modeset_disable(struct nvkm_softc *sc, uint32_t head,
+    uint32_t win, uint32_t display_id, bool submit_disable)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head_atom asyh;
 	struct nv50_head *nvhead;
 	struct nv50_core *core;
+	struct nv50_wndw *wndw;
+	struct nvkm_dispnv50_head_armed *head_armed;
+	struct nvkm_dispnv50_wndw_armed *wndw_armed;
 	struct nvkm_outp *outp = NULL;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	bool clear_cursor;
+	bool clear_display;
+	bool clear_olut;
+	bool clear_output;
+	bool cursor_cleared = false;
+	bool split_window_disable = false;
+	bool window_clear_emitted = false;
 	int ret;
 
 	if (sc == NULL || sc->disp == NULL)
 		return -ENODEV;
 
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
 	ret = nvkm_dispnv50_head_init(sc, head);
 	if (ret != 0)
 		return ret;
 
 	state = sc->dispnv50;
 	if (state == NULL || state->disp.core == NULL ||
-	    head >= nitems(state->head))
+	    head >= nitems(state->head) || win >= nitems(state->wndw) ||
+	    state->wndw[win] == NULL)
 		return -ENODEV;
 
 	core = state->disp.core;
 	nvhead = &state->head[head];
+	wndw = state->wndw[win];
+	head_armed = nvkm_dispnv50_head_armed_state(state, head);
+	wndw_armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+	if (core->func == NULL || core->func->update == NULL)
+		return -ENODEV;
 	if (display_id == 0 && state->audit_current.valid &&
 	    state->audit_current.head == head)
 		display_id = state->audit_current.display_id;
@@ -4770,39 +5596,194 @@ nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 			return -ENODEV;
 	}
 
+	if (head_armed != NULL && head_armed->valid) {
+		clear_cursor = head_armed->cursor;
+		clear_display = head_armed->display;
+		clear_olut = head_armed->olut;
+		clear_output = head_armed->output;
+	} else {
+		clear_cursor = false;
+		clear_display = display_id != 0;
+		clear_olut = nvkm_dispnv50_head_programs_olut(nvhead);
+		clear_output = outp != NULL && outp->ior != NULL;
+	}
+	if (clear_output && (outp == NULL || outp->ior == NULL))
+		return -ENODEV;
+
 	memset(&asyh, 0, sizeof(asyh));
-	if (nvhead->func != NULL && nvhead->func->olut_clr != NULL) {
+	if (clear_cursor) {
+		if (nvhead->func == NULL || nvhead->func->curs_clr == NULL)
+			return -ENODEV;
+		ret = nvhead->func->curs_clr(nvhead);
+		if (ret != 0)
+			return ret;
+		/*
+		 * Cursor clear updates only HEAD cursor context.  Nouveau's
+		 * cursor clear path does not submit cursor immediate channel
+		 * state, so the following core UPDATE must not carry a CURS
+		 * interlock partner.
+		 */
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+		cursor_cleared = true;
+	}
+	if (clear_olut) {
+		if (nvhead->func == NULL || nvhead->func->olut_clr == NULL)
+			return -ENODEV;
 		ret = nvhead->func->olut_clr(nvhead);
 		if (ret != 0)
 			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	}
-	if (nvhead->func != NULL && nvhead->func->display_id != NULL) {
+
+	/*
+	 * Cross a real window-disable boundary before detaching the HEAD when
+	 * a submit-time modeset disable starts from an armed window image or
+	 * window-side color resource.
+	 *
+	 * Ownership:
+	 *   Borrows the current window/core/state objects and consumes no output
+	 *   ownership.  nvkm_dispnv50_window_disable() owns only the transient
+	 *   notifier wait for this commit boundary.
+	 *
+	 * Lifetime:
+	 *   The old window image/color resources are cleared and published in
+	 *   the armed mirror before any core HEAD/output detach is submitted.
+	 *   The following modeset-disable clear therefore only deals with
+	 *   bookkeeping resources, not with stale scanout-visible state.
+	 *
+	 * Threading:
+	 *   Serialized KMS commit context only.  This path may sleep waiting for
+	 *   the window notifier, matching the synchronous submit_disable contract.
+	 */
+	if (submit_disable && wndw_armed != NULL && wndw_armed->valid &&
+	    (wndw_armed->image || wndw_armed->xlut || wndw_armed->csc)) {
+		ret = nvkm_dispnv50_window_disable(sc, state, core, wndw);
+		if (ret != 0)
+			return ret;
+		wndw_armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
+		split_window_disable = true;
+	}
+
+	ret = nvkm_dispnv50_wndw_modeset_disable_resources(state, wndw,
+	    &window_clear_emitted);
+	if (ret != 0)
+		return ret;
+	/*
+	 * Only submit a window interlock when this transaction emitted window
+	 * methods.  A split window-disable above has already crossed the window
+	 * UPDATE boundary; forcing a no-op window partner here can leave core
+	 * waiting for a state transition that the window channel has no reason
+	 * to perform.
+	 */
+	if (window_clear_emitted)
+		interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+
+	/*
+	 * Match nouveau's atomic tail ordering: head resource clears are
+	 * emitted first, window clears second, and only then is the output path
+	 * detached.  Turing validates the core/window interlock against both
+	 * sides of that staged transaction; clearing the head display route before
+	 * the window image is cleared can leave the core channel waiting for an
+	 * impossible window state.
+	 */
+	if (clear_output && outp != NULL && outp->ior != NULL)
+		nvkm_dispnv50_output_disable_sideband(outp, head);
+	if (clear_display) {
+		if (nvhead->func == NULL || nvhead->func->display_id == NULL)
+			return -ENODEV;
 		ret = nvhead->func->display_id(nvhead, 0);
 		if (ret != 0)
 			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	}
-	if (outp != NULL && outp->ior != NULL) {
-		nvkm_dispnv50_output_disable_sideband(outp, head);
+	if (clear_output && outp != NULL && outp->ior != NULL) {
 		ret = core->func->sor->ctrl(core, outp->ior->id, 0, &asyh);
+		if (ret != 0)
+			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	}
+
+	if (sc->kms_push_trace) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 modeset disable plan head=%u win=%u "
+		    "display=0x%x submit=%d split_window=%d clear cursor=%d "
+		    "display=%d olut=%d output=%d window_clear=%d "
+		    "head_armed=%d/%d/%d/%d/%d "
+		    "wndw_armed=%d/%d/%d/%d/%d/%d interlock core=0x%x "
+		    "curs=0x%x wndw=0x%x wimm=0x%x\n",
+		    head, win, display_id, submit_disable, split_window_disable,
+		    clear_cursor, clear_display, clear_olut, clear_output,
+		    window_clear_emitted,
+		    head_armed != NULL && head_armed->valid,
+		    head_armed != NULL && head_armed->display,
+		    head_armed != NULL && head_armed->output,
+		    head_armed != NULL && head_armed->olut,
+		    head_armed != NULL && head_armed->cursor,
+		    wndw_armed != NULL && wndw_armed->valid,
+		    wndw_armed != NULL && wndw_armed->ntfy,
+		    wndw_armed != NULL && wndw_armed->sema,
+		    wndw_armed != NULL && wndw_armed->xlut,
+		    wndw_armed != NULL && wndw_armed->csc,
+		    wndw_armed != NULL && wndw_armed->image,
+		    interlock[NV50_DISP_INTERLOCK_CORE],
+		    interlock[NV50_DISP_INTERLOCK_CURS],
+		    interlock[NV50_DISP_INTERLOCK_WNDW],
+		    interlock[NV50_DISP_INTERLOCK_WIMM]);
+	}
+
+	if (!submit_disable)
+		return 0;
+
+	if ((interlock[NV50_DISP_INTERLOCK_WNDW] & wndw->interlock.data) != 0) {
+		if (wndw->func->update == NULL)
+			return -ENODEV;
+		if (sc->kms_push_trace) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 modeset disable submit window "
+			    "head=%u win=%u interlock core=0x%x curs=0x%x "
+			    "wndw=0x%x wimm=0x%x\n", head, win,
+			    interlock[NV50_DISP_INTERLOCK_CORE],
+			    interlock[NV50_DISP_INTERLOCK_CURS],
+			    interlock[NV50_DISP_INTERLOCK_WNDW],
+			    interlock[NV50_DISP_INTERLOCK_WIMM]);
+		}
+		ret = wndw->func->update(wndw, interlock);
+		if (ret != 0)
+			return ret;
+	}
+	if (interlock[NV50_DISP_INTERLOCK_CORE] != 0) {
+		if (sc->kms_push_trace) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 modeset disable submit core "
+			    "head=%u win=%u interlock core=0x%x curs=0x%x "
+			    "wndw=0x%x wimm=0x%x\n", head, win,
+			    interlock[NV50_DISP_INTERLOCK_CORE],
+			    interlock[NV50_DISP_INTERLOCK_CURS],
+			    interlock[NV50_DISP_INTERLOCK_WNDW],
+			    interlock[NV50_DISP_INTERLOCK_WIMM]);
+		}
+		ret = nvkm_dispnv50_core_commit_notify_best_effort(sc, state, core,
+		    interlock);
 		if (ret != 0)
 			return ret;
 	}
 
-	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
-	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
-	if (ret != 0)
-		return ret;
-
-	if (outp != NULL && outp->ior != NULL)
+	if (clear_output && outp != NULL && outp->ior != NULL)
 		outp->func->release(outp);
+	if (cursor_cleared)
+		nvkm_dispnv50_cursor_audit_capture(state, NULL, NULL, head,
+		    false, false);
+	nvkm_dispnv50_head_mark_disabled(state, head);
+	nvkm_dispnv50_wndw_mark_disabled(state, wndw);
 
 	nvkm_dispnv50_audit_capture(state, &state->audit_current,
-	    NVKM_DISPNV50_AUDIT_CRTC_DISABLE, head, 0, display_id, false,
+	    NVKM_DISPNV50_AUDIT_CRTC_DISABLE, head, win, display_id, false,
 	    true, true);
+	state->scanout_user = false;
 	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
 	nvkm_infof(sc->dev,
-	    "drm: dispnv50 crtc disabled head=%u display=0x%x\n", head,
-	    display_id);
+	    "drm: dispnv50 modeset disabled head=%u win=%u display=0x%x\n",
+	    head, win, display_id);
 	return 0;
 }
 
@@ -4853,22 +5834,28 @@ nvkm_dispnv50_cursor_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	ret = nvhead->func->curs_set(nvhead, &asyh);
 	if (ret != 0)
 		return ret;
+	/*
+	 * Cursor image set writes HEAD cursor context on the core channel and
+	 * cursor position on the immediate channel.  On Turing's cursor class
+	 * there is no ordinary cursor window image state to interlock with the
+	 * core UPDATE; nouveau leaves CURS out of SET_INTERLOCK_FLAGS here.
+	 */
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
-	interlock[NV50_DISP_INTERLOCK_CURS] |= curs->interlock.data;
+
+	ret = curs->immd->point(curs, &asyw);
+	if (ret != 0)
+		return ret;
+	ret = nvkm_dispnv50_cursor_commit_wimm(curs, interlock);
+	if (ret != 0)
+		return ret;
 	ret = nvkm_dispnv50_cursor_commit_core(sc, state, core, interlock,
 	    legacy_cursor_update);
 	if (ret != 0)
 		return ret;
 
-	ret = curs->immd->point(curs, &asyw);
-	if (ret != 0)
-		return ret;
-	ret = curs->immd->update(curs, interlock);
-	if (ret != 0)
-		return ret;
-
 	nvkm_dispnv50_cursor_audit_capture(state, crtc->cursor->state, bo,
 	    head, true, false);
+	nvkm_dispnv50_head_mark_cursor(state, head, true);
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 cursor update head=%u pos=%d,%d size=%ux%u "
 	    "offset=0x%llx bo=%p\n",
@@ -4930,6 +5917,7 @@ nvkm_dispnv50_cursor_async_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	nvkm_dispnv50_cursor_audit_capture(state, plane_state, bo, head, true,
 	    true);
+	nvkm_dispnv50_head_mark_cursor(state, head, true);
 	state->audit_cursor[head].x = x;
 	state->audit_cursor[head].y = y;
 	return 0;
@@ -4940,9 +5928,11 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head,
     bool legacy_cursor_update)
 {
 	struct nvkm_dispnv50_state *state;
+	struct nvkm_dispnv50_head_armed *head_armed;
 	struct nv50_head *nvhead;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	bool clear_cursor;
 	int ret;
 
 	if (sc == NULL || sc->disp == NULL)
@@ -4959,16 +5949,35 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head,
 
 	core = state->disp.core;
 	nvhead = &state->head[head];
+	head_armed = nvkm_dispnv50_head_armed_state(state, head);
+	if (head_armed != NULL && head_armed->valid)
+		clear_cursor = head_armed->cursor;
+	else
+		clear_cursor = head < nitems(state->audit_cursor) &&
+		    state->audit_cursor[head].valid &&
+		    state->audit_cursor[head].enabled;
+
+	if (!clear_cursor) {
+		nvkm_dispnv50_head_mark_cursor(state, head, false);
+		nvkm_dispnv50_cursor_audit_capture(state, NULL, NULL, head,
+		    false, false);
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 cursor already disabled head=%u\n", head);
+		return 0;
+	}
 	if (nvhead->func == NULL || nvhead->func->curs_clr == NULL)
 		return -ENODEV;
 
 	ret = nvhead->func->curs_clr(nvhead);
 	if (ret != 0)
 		return ret;
+	/*
+	 * Cursor hide clears only HEAD cursor context.  It must neither submit
+	 * a cursor immediate UPDATE nor name a CURS interlock partner, because
+	 * nouveau's clear path leaves point/update traffic to cursor set/move
+	 * commits and sends the clear through the core channel alone.
+	 */
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
-	interlock[NV50_DISP_INTERLOCK_CURS] |=
-	    (head < nitems(state->curs) && state->curs[head] != NULL) ?
-	    state->curs[head]->interlock.data : BIT(head);
 	ret = nvkm_dispnv50_cursor_commit_core(sc, state, core, interlock,
 	    legacy_cursor_update);
 	if (ret != 0)
@@ -4976,6 +5985,7 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head,
 
 	nvkm_dispnv50_cursor_audit_capture(state, NULL, NULL, head, false,
 	    false);
+	nvkm_dispnv50_head_mark_cursor(state, head, false);
 	nvkm_infof(sc->dev, "drm: dispnv50 cursor disabled head=%u\n", head);
 	return 0;
 }
@@ -5038,7 +6048,8 @@ nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		    crtc->state);
 		if (ret != 0)
 			return ret;
-		ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw, crtc->state);
+		ret = nvkm_dispnv50_wndw_csc_set(sc, state, wndw, &asyw,
+		    crtc->state);
 		if (ret != 0)
 			return ret;
 		interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
@@ -5053,13 +6064,23 @@ nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	 * completion on this path, so they follow the same non-notifying core
 	 * UPDATE rule used by legacy cursor updates.  Window-side color is only
 	 * part of this runtime commit when the CRTC state carries degamma or CTM
-	 * data.  Linux nouveau derives the exact set/clear mask from persistent
-	 * window atoms; until nvkm has the same armed-state tracking, touching
-	 * identity ILUT/CSC here would submit a bogus runtime window update.
+	 * data.  The armed mirrors are updated only after UPDATE succeeds, so a
+	 * later modeset disable clears exactly the resources that became visible.
 	 */
-	if (!window_color)
-		return core->func->update(core, interlock, false);
-	return nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	if (!window_color) {
+		ret = core->func->update(core, interlock, false);
+		if (ret == 0)
+			nvkm_dispnv50_head_mark_olut_programmed(state, head,
+			    nvhead);
+		return ret;
+	}
+	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	if (ret == 0) {
+		nvkm_dispnv50_head_mark_olut_programmed(state, head, nvhead);
+		nvkm_dispnv50_wndw_mark_color_programmed(state, wndw,
+		    crtc->state);
+	}
+	return ret;
 }
 
 int
@@ -5067,12 +6088,15 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t win, uint32_t display_id, bool color_update)
 {
 	struct nvkm_dispnv50_state *state;
+	const struct nvkm_dispnv50_wndw_armed *wndw_armed;
 	struct nv50_head_atom asyh;
 	struct nv50_head *nvhead;
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	u32 head;
+	bool async_update;
+	bool program_window_color;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -5097,6 +6121,7 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 	core = state->disp.core;
 	wndw = state->wndw[win];
+	wndw_armed = nvkm_dispnv50_wndw_armed_state(state, wndw);
 	if (display_id == 0 && state->audit_current.valid &&
 	    state->audit_current.head == head)
 		display_id = state->audit_current.display_id;
@@ -5119,10 +6144,24 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	}
 
-	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, !color_update, !color_update,
+	/*
+	 * User framebuffer flips may use the async image-only path because DRM
+	 * completes the page-flip event/out-fence at the later flip-done
+	 * barrier.  Kernel/console scanout restore has no userspace flip event
+	 * to publish that pending state, so program it synchronously with a
+	 * window notifier.
+	 */
+	async_update = !color_update && state->scanout_user;
+	program_window_color = color_update || wndw_armed == NULL ||
+	    !wndw_armed->valid || !wndw_armed->image;
+	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
+	    interlock, false, async_update, async_update, program_window_color,
 	    NVKM_DISPNV50_AUDIT_PLANE_UPDATE, head, display_id,
-	    color_update ? "plane color update" : "plane update", NULL);
+	    color_update ? "plane color update" :
+	    (async_update ? "plane update" : "console restore"), NULL);
+	if (ret == 0 && color_update)
+		nvkm_dispnv50_head_mark_olut_programmed(state, head, nvhead);
+	return ret;
 }
 
 int
@@ -5166,6 +6205,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nvkm_dispnv50_output_prepare *route_prepare = prepare;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	bool update_submitted = false;
+	bool sanitize_window;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -5249,6 +6289,17 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	    head, asyh.view.iW, asyh.view.iH, asyh.view.oW, asyh.view.oH,
 	    asyh.wndw.mask, asyh.wndw.owned);
 
+	/*
+	 * Ownership: local scalar snapshot for this enable transaction only.
+	 * Lifetime: valid until window_program() below; no state is retained.
+	 * Threading: commit-tail local, protected by the DRM modeset locks.
+	 *
+	 * Sanitize only while importing firmware/GOP window ownership.  After
+	 * nvkm has already disabled the window, restore must be a set-only
+	 * transaction: the clear phase already ran in modeset_disable(), and
+	 * mixing clear+set in the enable half violates nouveau's clr/set split.
+	 */
+	sanitize_window = core->assign_windows;
 	if (core->assign_windows) {
 		ret = core->func->wndw.owner(core);
 		if (ret != 0)
@@ -5268,11 +6319,14 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, true, false, true, NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
-	    head, display_id, "bridge", &update_submitted);
+	    interlock, sanitize_window, false, true, true,
+	    NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE, head, display_id, "bridge",
+	    &update_submitted);
 	if (ret != 0)
 		goto fail;
 	route_prepare->consumed = true;
+	nvkm_dispnv50_head_mark_programmed(state, head, nvhead, display_id,
+	    true);
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 bridge armed head=%u win=%u display=0x%x "

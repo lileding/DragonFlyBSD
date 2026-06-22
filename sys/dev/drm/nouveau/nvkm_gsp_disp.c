@@ -116,6 +116,18 @@ r535_disp_chan_set_pushbuf(struct nvkm_disp *disp, s32 oclass, int inst, struct 
 
 	ctrl->hclass = oclass;
 	ctrl->channelInstance = inst;
+	/*
+	 * Ownership: memory is borrowed only while this RM control is built;
+	 * the display channel keeps no C pointer to it.
+	 *
+	 * Lifetime: a NULL memory argument is valid only for cursor PIO
+	 * channels, where RM expects valid=false.  DMA channel callers must
+	 * provide the push-buffer memory before allocation, matching nouveau
+	 * r535/r570.
+	 *
+	 * Threading: callers are serialized by display commit or teardown
+	 * context and may sleep in the synchronous GSP control path.
+	 */
 	ctrl->valid = ((oclass & 0xff) != 0x7a) ? 1 : 0;
 #ifndef NVKM_DFLY_GSP_DISPLAY_ONLY
 	ctrl->channelPBSize = PB_SIZE_4KB;
@@ -2194,7 +2206,7 @@ int
 nvkm_gsp_disp_channel_pushbuf(struct nvkm_softc *sc, int32_t oclass,
     int inst, struct nvkm_memory *memory)
 {
-	if (sc == NULL || sc->disp == NULL || memory == NULL)
+	if (sc == NULL || sc->disp == NULL)
 		return -ENODEV;
 	return r535_disp_chan_set_pushbuf(sc->disp, oclass, inst, memory);
 }

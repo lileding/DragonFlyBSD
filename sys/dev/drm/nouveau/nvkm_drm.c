@@ -8287,10 +8287,28 @@ nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 		return;
 	}
 
-	err = nvkm_drm_kms_schedule(sc, reason);
+	/*
+	 * Restore the in-kernel console before the last close returns.
+	 *
+	 * Ownership:
+	 *   lastclose borrows the DRM device and nvkm softc; light_up() creates
+	 *   and commits its own internal framebuffer reference.
+	 *
+	 * Lifetime:
+	 *   drm_release() calls lastclose after the final userspace file has been
+	 *   closed.  Returning before console restore completes leaves a queued
+	 *   atomic commit that can race the next primary client, so this path must
+	 *   be synchronous.  Hotplug and attach still use nvkm_drm_kms_schedule().
+	 *
+	 * Threading:
+	 *   Runs from drm_lastclose() while drm_global_mutex is held.  It may sleep
+	 *   in modeset locks and display notifier waits, matching the synchronous
+	 *   restore semantics of DRM's in-kernel client restore path.
+	 */
+	err = nvkm_drm_kms_light_up(sc);
 	if (err != 0)
 		nvkm_infof(sc->dev,
-		    "drm: %s console restore schedule failed err=%d\n",
+		    "drm: %s console restore failed err=%d\n",
 		    reason, err);
 }
 

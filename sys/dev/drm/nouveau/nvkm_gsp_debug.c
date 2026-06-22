@@ -743,20 +743,56 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_atomic_tail_cleanup_planes_count);
 	sbuf_printf(sb, "atomic_tail_finish_prepared_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_tail_finish_prepared_count);
+	sbuf_printf(sb, "atomic_tail_plane_op_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_plane_op_count);
+	sbuf_printf(sb, "atomic_tail_disable_op_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_disable_op_count);
+	sbuf_printf(sb, "atomic_tail_color_op_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_color_op_count);
+	sbuf_printf(sb, "atomic_tail_enable_op_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_tail_enable_op_count);
+	sbuf_printf(sb, "atomic_tail_last_plane_op_count = %u\n",
+	    sc->kms_atomic_tail_last_plane_op_count);
+	sbuf_printf(sb, "atomic_tail_last_disable_op_count = %u\n",
+	    sc->kms_atomic_tail_last_disable_op_count);
+	sbuf_printf(sb, "atomic_tail_last_color_op_count = %u\n",
+	    sc->kms_atomic_tail_last_color_op_count);
+	sbuf_printf(sb, "atomic_tail_last_enable_op_count = %u\n",
+	    sc->kms_atomic_tail_last_enable_op_count);
+	sbuf_printf(sb, "atomic_tail_last_legacy_cursor_update = %u\n",
+	    sc->kms_atomic_tail_last_legacy_cursor_update);
+	sbuf_printf(sb, "atomic_tail_last_async_update = %u\n",
+	    sc->kms_atomic_tail_last_async_update);
 	sbuf_printf(sb, "atomic_tail_last_lock_core = %u\n",
 	    sc->kms_atomic_tail_last_lock_core);
 	sbuf_printf(sb, "atomic_tail_last_flush_disable = %u\n",
 	    sc->kms_atomic_tail_last_flush_disable);
+	sbuf_printf(sb, "atomic_tail_last_old_active_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_old_active_heads);
+	sbuf_printf(sb, "atomic_tail_last_new_active_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_new_active_heads);
 	sbuf_printf(sb, "atomic_tail_last_modeset_heads = 0x%08x\n",
 	    sc->kms_atomic_tail_last_modeset_heads);
 	sbuf_printf(sb, "atomic_tail_last_disable_heads = 0x%08x\n",
 	    sc->kms_atomic_tail_last_disable_heads);
 	sbuf_printf(sb, "atomic_tail_last_enable_heads = 0x%08x\n",
 	    sc->kms_atomic_tail_last_enable_heads);
+	sbuf_printf(sb, "atomic_tail_last_primary_update_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_primary_update_heads);
+	sbuf_printf(sb, "atomic_tail_last_primary_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_primary_disable_heads);
+	sbuf_printf(sb, "atomic_tail_last_cursor_update_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_cursor_update_heads);
+	sbuf_printf(sb, "atomic_tail_last_cursor_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_cursor_disable_heads);
 	sbuf_printf(sb, "atomic_tail_last_plane_update_mask = 0x%08x\n",
 	    sc->kms_atomic_tail_last_plane_update_mask);
 	sbuf_printf(sb, "atomic_tail_last_plane_disable_mask = 0x%08x\n",
 	    sc->kms_atomic_tail_last_plane_disable_mask);
+	sbuf_printf(sb, "atomic_tail_last_prepared_heads = 0x%08x\n",
+	    sc->kms_atomic_tail_last_prepared_heads);
+	sbuf_printf(sb, "atomic_tail_last_prepared_displays = 0x%08x\n",
+	    sc->kms_atomic_tail_last_prepared_displays);
 	sbuf_printf(sb, "atomic_disable_vblank_off_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_disable_vblank_off_count);
 	sbuf_printf(sb, "atomic_disable_vblank_keep_count = %llu\n",

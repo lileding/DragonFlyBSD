@@ -338,21 +338,26 @@ int	 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
 	     struct nvkm_dispnv50_output_prepare *prepare);
 /*
  * Ownership:
- *   Borrows sc and the scalar display_id selected by KMS. The bridge owns no
- *   DRM connector, CRTC, or framebuffer reference through this call.
+ *   Borrows sc plus scalar KMS routing state for one modeset-disable commit.
+ *   The bridge owns no DRM connector, CRTC, plane, or framebuffer reference
+ *   through this call.
  *
  * Lifetime:
- *   The display_id must describe the output routed to head in the old committed
- *   CRTC state, or be zero to let the bridge use its last audited route.
- *   The output release happens only after the EVO core UPDATE is accepted.
+ *   display_id must describe the output routed to head in the old committed
+ *   CRTC state, or be zero to let the bridge use its last audited route.  The
+ *   window/head/output clear methods are submitted as one interlocked EVO
+ *   transaction. Output release happens after the core UPDATE is accepted
+ *   and its notifier wait has been attempted; notifier timeout is reported
+ *   but does not abort the disable release path, matching nouveau atomic
+ *   tail semantics.
  *
  * Threading:
  *   Called from the atomic commit tail under DRM modeset serialization. The
  *   function may block on display notifier completion and must not be called
  *   from interrupt context.
  */
-int	 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
-	     uint32_t display_id);
+int	 nvkm_dispnv50_modeset_disable(struct nvkm_softc *sc, uint32_t head,
+	    uint32_t win, uint32_t display_id, bool submit_disable);
 /*
  * Ownership:
  *   Borrows the committed DRM CRTC/primary plane state. The bridge never owns
@@ -371,6 +376,23 @@ int	 nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win, uint32_t display_id,
 	     bool color_update);
+/*
+ * Ownership:
+ *   Borrows the dispnv50 bridge audit records inside sc. It copies only scalar
+ *   state from pending to current and owns no DRM object, BO, channel, or
+ *   notifier reference.
+ *
+ * Lifetime:
+ *   Call after the DRM commit-tail flip-done barrier has completed. At that
+ *   point an async primary-plane update has reached the same completion point
+ *   as the page-flip event/out-fence, so the pending audit may become current.
+ *
+ * Threading:
+ *   Called from the serialized atomic commit tail. Sysctl readers may sample
+ *   the transition locklessly; the audit record is diagnostic state only.
+ */
+void	 nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc,
+	     bool publish);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
 /*
  * Ownership:
