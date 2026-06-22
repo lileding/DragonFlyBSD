@@ -99,6 +99,16 @@ property_type_name(uint32_t flags)
 	return "unknown";
 }
 
+static bool
+id_in_list(const uint32_t *ids, int count, uint32_t id)
+{
+	for (int i = 0; i < count; i++) {
+		if (ids[i] == id)
+			return true;
+	}
+	return false;
+}
+
 static const char *
 fourcc_name(uint32_t format)
 {
@@ -591,7 +601,8 @@ dump_properties(int fd, uint32_t object_id, uint32_t object_type,
 }
 
 static void
-check_connector(int fd, drmModeConnector *connector)
+check_connector(int fd, drmModeConnector *connector,
+    const drmModeRes *resources)
 {
 	char name[64];
 
@@ -609,7 +620,63 @@ check_connector(int fd, drmModeConnector *connector)
 	}
 	dump_properties(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
 	    name);
+	check(connector->count_encoders > 0, "connector has at least one encoder");
+	for (int i = 0; i < connector->count_encoders; i++) {
+		check(id_in_list(resources->encoders, resources->count_encoders,
+		    connector->encoders[i]),
+		    "connector encoder id is present in resources");
+	}
+	if (connector->connection == DRM_MODE_CONNECTED) {
+		check(connector->count_modes > 0,
+		    "connected connector exposes at least one mode");
+		check(connector->encoder_id != 0,
+		    "connected connector has current encoder");
+		if (connector->encoder_id != 0) {
+			check(id_in_list(connector->encoders,
+			    connector->count_encoders, connector->encoder_id),
+			    "connected connector current encoder is attached");
+		}
+	}
 	check_connector_property_contract(fd, connector->connector_id, name);
+}
+
+static void
+check_encoder(int fd, uint32_t encoder_id, const drmModeRes *resources)
+{
+	drmModeEncoderPtr encoder;
+	uint32_t crtc_mask;
+
+	crtc_mask = resources->count_crtcs >= 32 ?
+	    UINT32_MAX : ((1u << resources->count_crtcs) - 1u);
+	encoder = drmModeGetEncoder(fd, encoder_id);
+	check(encoder != NULL, "encoder is readable");
+	if (encoder == NULL)
+		return;
+
+	printf("encoder %u type=%u crtc=%u possible_crtcs=0x%x possible_clones=0x%x\n",
+	    encoder->encoder_id, encoder->encoder_type, encoder->crtc_id,
+	    encoder->possible_crtcs, encoder->possible_clones);
+	check(encoder->encoder_type != DRM_MODE_ENCODER_NONE,
+	    "encoder type is not NONE");
+	check(encoder->possible_crtcs != 0,
+	    "encoder possible_crtcs is non-empty");
+	check((encoder->possible_crtcs & ~crtc_mask) == 0,
+	    "encoder possible_crtcs fits resources CRTC mask");
+	if (encoder->crtc_id != 0) {
+		check(id_in_list(resources->crtcs, resources->count_crtcs,
+		    encoder->crtc_id), "encoder current CRTC is present");
+	}
+
+	drmModeFreeEncoder(encoder);
+}
+
+static void
+check_encoders(int fd, const drmModeRes *resources)
+{
+	check(resources->count_crtcs > 0 && resources->count_crtcs <= 32,
+	    "CRTC count is valid for encoder masks");
+	for (int i = 0; i < resources->count_encoders; i++)
+		check_encoder(fd, resources->encoders[i], resources);
 }
 
 static void
@@ -1386,6 +1453,7 @@ main(void)
 	check(resources->count_crtcs > 0, "at least one CRTC exposed");
 	check(resources->count_encoders > 0, "at least one encoder exposed");
 	check_mode_config_contract(fd, resources);
+	check_encoders(fd, resources);
 
 	for (int i = 0; i < resources->count_connectors; i++) {
 		drmModeConnector *connector;
@@ -1397,7 +1465,7 @@ main(void)
 			failures++;
 			continue;
 		}
-		check_connector(fd, connector);
+		check_connector(fd, connector, resources);
 		drmModeFreeConnector(connector);
 	}
 
