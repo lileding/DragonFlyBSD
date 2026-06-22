@@ -97,17 +97,30 @@ vmmfs_kfree(void *ptr)
 #define VMMFS_MACHINES_INO	2
 #define VMMFS_MACHINE_INO_BASE	3
 #define VMMFS_MACHINE_INO_STRIDE 16	/* room for the machine dir + configs */
+#define VMMFS_MACHINE_DEV_OFF	9	/* devices/ ino = machine base + 9 */
+#define VMMFS_HOST_INO		0x10000
+#define VMMFS_HOST_DEV_INO	0x10001
+#define VMMFS_DEV_INO_BASE	0x20000	/* device i -> base + i */
 
 #define VMMFS_DIR_MODE		0555
 #define VMMFS_MAX_MACHINES	64
 #define VMMFS_NAME_MAX		63
 #define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
 
+/* PCIe device passthrough (stub): a fixed pool of host devices, each owned by
+ * a machine (or the host).  Binding is `mv` between devices/ dirs. */
+#define VMMFS_OWNER_HOST	(-1)
+#define VMMFS_MAX_DEVICES	8
+#define VMMFS_BDF_MAX		31
+
 enum vmmfs_ntype {
 	VMMFS_NROOT,
 	VMMFS_NMACHINES,
 	VMMFS_NMACHINE,
 	VMMFS_NCONFIG,
+	VMMFS_NHOST,		/* machines/host/ (the physical host machine) */
+	VMMFS_NDEVICES,		/* a devices/ directory */
+	VMMFS_NDEVICE,		/* a device file (one PCIe BDF) */
 };
 
 /* Config files presented under a machine directory. */
@@ -177,6 +190,7 @@ struct vmmfs_node {
 	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
+	int			vn_owner;	/* for NDEVICES: owner id it lists */
 	struct vmmfs_node      *vn_parent;
 	struct vmmfs_machine   *vn_machine;
 	struct vnode	       *vn_vnode;
@@ -184,20 +198,37 @@ struct vmmfs_node {
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
+/* A PCIe device in the (stub) pool.  `owner` is the machine slot index it is
+ * currently bound to, or VMMFS_OWNER_HOST. */
+struct vmmfs_device {
+	int			in_use;
+	int			owner;
+	int			is_host;	/* rm returns it to host vs deletes */
+	char			bdf[VMMFS_BDF_MAX + 1];
+	struct vmmfs_node	node;		/* the NDEVICE file */
+};
+
+#define VMMFS_DEV_OF_NODE(n) \
+	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, node)))
+
 struct vmmfs_machine {
 	int				in_use;
 	char				name[VMMFS_NAME_MAX + 1];
 	struct vmmfs_machine_state     *rust;	/* config + lifecycle (Rust) */
 	struct vmmfs_node		node;
 	struct vmmfs_node		cfg[VMMFS_NCFG];
+	struct vmmfs_node		vn_devices;	/* this machine's devices/ */
 };
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
 	struct vmmfs_node	vm_root;
 	struct vmmfs_node	vm_machines;
+	struct vmmfs_node	vm_host;	/* machines/host/ */
+	struct vmmfs_node	vm_host_devices; /* machines/host/devices/ */
 	struct lock		vm_lock;
 	struct vmmfs_machine	vm_mach[VMMFS_MAX_MACHINES];
+	struct vmmfs_device	vm_dev[VMMFS_MAX_DEVICES];
 };
 
 #define VFS_TO_VMMFS(mp)	((struct vmmfs_mount *)((mp)->mnt_data))
@@ -220,8 +251,13 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 	node->vn_type = type;
 	node->vn_cfg = cfg;
 	node->vn_ino = ino;
-	node->vn_mode = (type == VMMFS_NCONFIG) ? vmmfs_cfg_mode(cfg) :
-	    VMMFS_DIR_MODE;
+	if (type == VMMFS_NCONFIG)
+		node->vn_mode = vmmfs_cfg_mode(cfg);
+	else if (type == VMMFS_NDEVICE)
+		node->vn_mode = 0444;
+	else
+		node->vn_mode = VMMFS_DIR_MODE;
+	node->vn_owner = VMMFS_OWNER_HOST;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
@@ -279,7 +315,8 @@ vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	enum vtype vtype;
 	int error = 0;
 
-	vtype = (node->vn_type == VMMFS_NCONFIG) ? VREG : VDIR;
+	vtype = (node->vn_type == VMMFS_NCONFIG ||
+	    node->vn_type == VMMFS_NDEVICE) ? VREG : VDIR;
 
 loop:
 	vp = NULL;
@@ -592,7 +629,8 @@ vmmfs_alloc_slot(struct vmmfs_mount *vmp)
 		struct vmmfs_machine *m = &vmp->vm_mach[i];
 		int busy = 0;
 
-		if (m->in_use || m->node.vn_vnode != NULL)
+		if (m->in_use || m->node.vn_vnode != NULL ||
+		    m->vn_devices.vn_vnode != NULL)
 			continue;
 		for (j = 0; j < VMMFS_NCFG; j++) {
 			if (m->cfg[j].vn_vnode != NULL) {
@@ -628,6 +666,30 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 }
 
 /* --------------------------------------------------------------------- */
+/* Device pool (guarded by vm_lock).                                     */
+
+static int
+vmmfs_device_format(struct vmmfs_device *d, char *buf, size_t bufsize)
+{
+	return ksnprintf(buf, bufsize, "%s\n", d->bdf);
+}
+
+static struct vmmfs_device *
+vmmfs_find_device(struct vmmfs_mount *vmp, int owner, const char *name, int nlen)
+{
+	int i;
+
+	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
+		struct vmmfs_device *d = &vmp->vm_dev[i];
+
+		if (d->in_use && d->owner == owner &&
+		    (int)strlen(d->bdf) == nlen && bcmp(d->bdf, name, nlen) == 0)
+			return d;
+	}
+	return NULL;
+}
+
+/* --------------------------------------------------------------------- */
 
 static int
 vmmfs_nresolve(struct vop_nresolve_args *ap)
@@ -644,27 +706,48 @@ vmmfs_nresolve(struct vop_nresolve_args *ap)
 		if (ncp->nc_nlen == 8 && bcmp(ncp->nc_name, "machines", 8) == 0)
 			child = &vmp->vm_machines;
 	} else if (dnode->vn_type == VMMFS_NMACHINES) {
-		struct vmmfs_machine *m;
+		if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0) {
+			child = &vmp->vm_host;
+		} else {
+			struct vmmfs_machine *m;
 
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
-		if (m != NULL)
-			child = &m->node;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
+			lockmgr(&vmp->vm_lock, LK_SHARED);
+			m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
+			if (m != NULL)
+				child = &m->node;
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+		}
+	} else if (dnode->vn_type == VMMFS_NHOST) {
+		if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0)
+			child = &vmp->vm_host_devices;
 	} else if (dnode->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = dnode->vn_machine;
 		int i;
 
-		for (i = 0; i < VMMFS_NCFG; i++) {
-			if (!vmmfs_cfg_present(m, i))
-				continue;
-			if ((int)strlen(vmmfs_cfg_name[i]) == ncp->nc_nlen &&
-			    bcmp(vmmfs_cfg_name[i], ncp->nc_name,
-			    ncp->nc_nlen) == 0) {
-				child = &m->cfg[i];
-				break;
+		if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0) {
+			child = &m->vn_devices;
+		} else {
+			for (i = 0; i < VMMFS_NCFG; i++) {
+				if (!vmmfs_cfg_present(m, i))
+					continue;
+				if ((int)strlen(vmmfs_cfg_name[i]) ==
+				    ncp->nc_nlen &&
+				    bcmp(vmmfs_cfg_name[i], ncp->nc_name,
+				    ncp->nc_nlen) == 0) {
+					child = &m->cfg[i];
+					break;
+				}
 			}
 		}
+	} else if (dnode->vn_type == VMMFS_NDEVICES) {
+		struct vmmfs_device *d;
+
+		lockmgr(&vmp->vm_lock, LK_SHARED);
+		d = vmmfs_find_device(vmp, dnode->vn_owner, ncp->nc_name,
+		    ncp->nc_nlen);
+		if (d != NULL)
+			child = &d->node;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
 	}
 
 	if (child == NULL) {
@@ -727,6 +810,8 @@ vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 		return EPERM;
 	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
 		return ENAMETOOLONG;
+	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
+		return EEXIST;	/* host is reserved */
 
 	rust = vmmfs_machine_new();
 	if (rust == NULL)
@@ -783,6 +868,8 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 
 	if (dnode->vn_type != VMMFS_NMACHINES)
 		return EINVAL;
+	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
+		return EPERM;	/* host is not removable */
 
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
 	if (error)
@@ -941,7 +1028,8 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct vattr *vap = ap->a_vap;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
-	int is_file = (node->vn_type == VMMFS_NCONFIG);
+	int is_file = (node->vn_type == VMMFS_NCONFIG ||
+	    node->vn_type == VMMFS_NDEVICE);
 	uint8_t tmp[300];
 
 	vap->va_type = is_file ? VREG : VDIR;
@@ -952,8 +1040,14 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	vap->va_gid = 0;
 	vap->va_fsid = vp->v_mount->mnt_stat.f_fsid.val[0];
 	vap->va_fileid = node->vn_ino;
-	vap->va_size = (is_file && vmmfs_cfg_is_register(node->vn_cfg)) ?
-	    vmmfs_cfg_text(node, tmp, sizeof(tmp)) : 0;
+	if (node->vn_type == VMMFS_NCONFIG &&
+	    vmmfs_cfg_is_register(node->vn_cfg))
+		vap->va_size = vmmfs_cfg_text(node, tmp, sizeof(tmp));
+	else if (node->vn_type == VMMFS_NDEVICE)
+		vap->va_size = vmmfs_device_format(VMMFS_DEV_OF_NODE(node),
+		    (char *)tmp, sizeof(tmp));
+	else
+		vap->va_size = 0;
 	vap->va_blocksize = PAGE_SIZE;
 	vap->va_atime.tv_sec = 0;
 	vap->va_atime.tv_nsec = 0;
@@ -988,7 +1082,25 @@ vmmfs_read(struct vop_read_args *ap)
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 
-	if (vp->v_type != VREG || node->vn_type != VMMFS_NCONFIG)
+	if (vp->v_type != VREG)
+		return EINVAL;
+
+	if (node->vn_type == VMMFS_NDEVICE) {
+		struct vmmfs_device *d = VMMFS_DEV_OF_NODE(node);
+		char dbuf[64];
+		int len;
+		off_t off;
+
+		if (uio->uio_offset < 0)
+			return EINVAL;
+		len = vmmfs_device_format(d, dbuf, sizeof(dbuf));
+		off = uio->uio_offset;
+		if (off >= len)
+			return 0;
+		return uiomove(dbuf + off, (size_t)(len - off), uio);
+	}
+
+	if (node->vn_type != VMMFS_NCONFIG)
 		return EINVAL;
 
 	/*
@@ -1126,14 +1238,58 @@ vmmfs_readdir(struct vop_readdir_args *ap)
 		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
 		int i;
 
+		/* host is always the first entry. */
+		if (off == 2) {
+			r = vop_write_dirent(&error, uio, vmp->vm_host.vn_ino,
+			    DT_DIR, 4, "host");
+			if (r) {
+				full = 1;
+				goto done;
+			}
+			off = 3;
+		}
 		lockmgr(&vmp->vm_lock, LK_SHARED);
-		for (i = (int)off - 2; i < VMMFS_MAX_MACHINES; i++) {
+		for (i = (int)off - 3; i < VMMFS_MAX_MACHINES; i++) {
 			struct vmmfs_machine *m = &vmp->vm_mach[i];
 
 			if (!m->in_use)
 				continue;
 			r = vop_write_dirent(&error, uio, m->node.vn_ino,
 			    DT_DIR, (uint16_t)strlen(m->name), m->name);
+			if (r) {
+				off = 3 + i;
+				full = 1;
+				break;
+			}
+			off = 3 + i + 1;
+		}
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		if (!full && off < 3 + VMMFS_MAX_MACHINES)
+			off = 3 + VMMFS_MAX_MACHINES;
+	} else if (node->vn_type == VMMFS_NHOST) {
+		if (off == 2) {
+			struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
+
+			r = vop_write_dirent(&error, uio,
+			    vmp->vm_host_devices.vn_ino, DT_DIR, 7, "devices");
+			if (r) {
+				full = 1;
+				goto done;
+			}
+			off = 3;
+		}
+	} else if (node->vn_type == VMMFS_NDEVICES) {
+		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
+		int i;
+
+		lockmgr(&vmp->vm_lock, LK_SHARED);
+		for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
+			struct vmmfs_device *d = &vmp->vm_dev[i];
+
+			if (!d->in_use || d->owner != node->vn_owner)
+				continue;
+			r = vop_write_dirent(&error, uio, d->node.vn_ino,
+			    DT_REG, (uint16_t)strlen(d->bdf), d->bdf);
 			if (r) {
 				off = 2 + i;
 				full = 1;
@@ -1142,8 +1298,8 @@ vmmfs_readdir(struct vop_readdir_args *ap)
 			off = 2 + i + 1;
 		}
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		if (!full && off < 2 + VMMFS_MAX_MACHINES)
-			off = 2 + VMMFS_MAX_MACHINES;
+		if (!full && off < 2 + VMMFS_MAX_DEVICES)
+			off = 2 + VMMFS_MAX_DEVICES;
 	} else if (node->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = node->vn_machine;
 		int i;
@@ -1163,6 +1319,15 @@ vmmfs_readdir(struct vop_readdir_args *ap)
 		}
 		if (!full && off < 2 + VMMFS_NCFG)
 			off = 2 + VMMFS_NCFG;
+		/* devices/ follows the config files. */
+		if (!full && off == 2 + VMMFS_NCFG) {
+			r = vop_write_dirent(&error, uio, m->vn_devices.vn_ino,
+			    DT_DIR, 7, "devices");
+			if (r)
+				full = 1;
+			else
+				off = 2 + VMMFS_NCFG + 1;
+		}
 	}
 
 done:
@@ -1251,6 +1416,11 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    0);
 	vmmfs_node_init(&vmp->vm_machines, VMMFS_NMACHINES, VMMFS_MACHINES_INO,
 	    &vmp->vm_root, NULL, 0);
+	vmmfs_node_init(&vmp->vm_host, VMMFS_NHOST, VMMFS_HOST_INO,
+	    &vmp->vm_machines, NULL, 0);
+	vmmfs_node_init(&vmp->vm_host_devices, VMMFS_NDEVICES,
+	    VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL, 0);
+	vmp->vm_host_devices.vn_owner = VMMFS_OWNER_HOST;
 	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
 		struct vmmfs_machine *m = &vmp->vm_mach[i];
 		ino_t base = VMMFS_MACHINE_INO_BASE +
@@ -1262,8 +1432,35 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 		for (j = 0; j < VMMFS_NCFG; j++)
 			vmmfs_node_init(&m->cfg[j], VMMFS_NCONFIG, base + 1 + j,
 			    &m->node, m, j);
+		vmmfs_node_init(&m->vn_devices, VMMFS_NDEVICES,
+		    base + VMMFS_MACHINE_DEV_OFF, &m->node, m, 0);
+		m->vn_devices.vn_owner = i;
 		m->in_use = 0;
 		m->rust = NULL;
+	}
+	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
+		struct vmmfs_device *d = &vmp->vm_dev[i];
+
+		d->in_use = 0;
+		d->owner = VMMFS_OWNER_HOST;
+		d->is_host = 1;
+		vmmfs_node_init(&d->node, VMMFS_NDEVICE,
+		    VMMFS_DEV_INO_BASE + (ino_t)i, &vmp->vm_host_devices, NULL,
+		    0);
+	}
+	/* Stub host PCIe device pool: a few fixed BDFs, all owned by host. */
+	{
+		static const char *const stub_bdf[] = {
+			"0000:00:02.0", "0000:00:03.0", "0000:00:04.0",
+		};
+		int n = (int)(sizeof(stub_bdf) / sizeof(stub_bdf[0]));
+
+		for (i = 0; i < n && i < VMMFS_MAX_DEVICES; i++) {
+			struct vmmfs_device *d = &vmp->vm_dev[i];
+
+			d->in_use = 1;
+			strlcpy(d->bdf, stub_bdf[i], sizeof(d->bdf));
+		}
 	}
 
 	mp->mnt_flag |= MNT_LOCAL;
@@ -1308,8 +1505,13 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 			vmmfs_machine_free(m->rust);
 		for (j = 0; j < VMMFS_NCFG; j++)
 			vmmfs_node_uninit(&m->cfg[j]);
+		vmmfs_node_uninit(&m->vn_devices);
 		vmmfs_node_uninit(&m->node);
 	}
+	for (i = 0; i < VMMFS_MAX_DEVICES; i++)
+		vmmfs_node_uninit(&vmp->vm_dev[i].node);
+	vmmfs_node_uninit(&vmp->vm_host_devices);
+	vmmfs_node_uninit(&vmp->vm_host);
 	vmmfs_node_uninit(&vmp->vm_machines);
 	vmmfs_node_uninit(&vmp->vm_root);
 	lockuninit(&vmp->vm_lock);

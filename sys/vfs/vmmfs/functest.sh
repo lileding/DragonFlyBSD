@@ -19,7 +19,14 @@ kldload /xchg/vmmfs.ko; ckok "kldload" $?
 ln -sf /sbin/mount_std /sbin/mount_vmmfs
 mkdir -p /vmm
 mount -t vmmfs vmm /vmm; ckok "mount" $?
-ckeq "machines empty" "$(ls $M)" ""
+ckeq "machines has host" "$(ls $M)" "host"
+
+# --- host machine + stub device pool ---
+ckeq "ls host" "$(ls $M/host)" "devices"
+ckeq "ls host/devices" "$(ls $M/host/devices | sort | tr '\n' ' ')" "0000:00:02.0 0000:00:03.0 0000:00:04.0 "
+ckeq "cat a device" "$(cat $M/host/devices/0000:00:02.0)" "0000:00:02.0"
+mkdir $M/host 2>/dev/null; ckfail "mkdir host -> reserved" $?
+rmdir $M/host 2>/dev/null; ckfail "rmdir host -> EPERM" $?
 
 # loader fixtures: an executable script, a non-exec file
 printf '#!/bin/sh\necho hi\n' > /tmp/ld.sh; chmod 755 /tmp/ld.sh
@@ -27,7 +34,8 @@ printf 'x' > /tmp/noexec; chmod 644 /tmp/noexec
 
 # --- create via mkdir: always stopped, default files, empty config ---
 mkdir $M/vm0; ckok "mkdir vm0" $?
-ckeq "ls vm0 default" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console events lease loader mem status.tar.gz stopped vcpu "
+ckeq "ls vm0 default" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console devices events lease loader mem status.tar.gz stopped vcpu "
+ckeq "vm0 devices empty" "$(ls $M/vm0/devices)" ""
 ckeq "vcpu unset empty" "$(cat $M/vm0/vcpu)" ""
 ckeq "mem unset empty" "$(cat $M/vm0/mem)" ""
 ckeq "loader unset empty" "$(cat $M/vm0/loader)" ""
@@ -54,7 +62,7 @@ mkdir $M/ml; echo 1 > $M/ml/vcpu; echo 2M > $M/ml/mem; echo /tmp/nope > $M/ml/lo
 rm $M/ml/stopped 2>/dev/null; ckfail "rm stopped missing loader -> fail" $?
 
 rm $M/vm0/stopped; ckok "start vm0 (valid)" $?
-ckeq "vm0 running no stopped" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console events lease loader mem status.tar.gz vcpu "
+ckeq "vm0 running no stopped" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console devices events lease loader mem status.tar.gz vcpu "
 rm $M/vm0/stopped 2>/dev/null; ckfail "rm stopped while running -> ENOENT" $?
 
 # --- stop (echo apic|force > stopped), idempotent ---
@@ -116,7 +124,7 @@ ckeq "u1 gone after lease release" "$(ls $M | grep -c '^u1$')" "0"
 # --- cleanup ---
 rmdir $M/vm0; ckok "rmdir vm0" $?
 rmdir $M/inc 2>/dev/null; rmdir $M/nx 2>/dev/null; rmdir $M/ml 2>/dev/null
-ckeq "machines empty again" "$(ls $M)" ""
+ckeq "machines back to just host" "$(ls $M)" "host"
 umount /vmm; ckok "umount" $?
 kldunload vmmfs; ckok "kldunload" $?
 
