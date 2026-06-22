@@ -201,7 +201,17 @@ def parse_state(path: pathlib.Path) -> dict[str, int]:
     return values
 
 
-def report(out_dir: pathlib.Path) -> int:
+def command_return_code(path: pathlib.Path) -> int | None:
+    if not path.exists():
+        return None
+    match = re.search(
+        r"^### rc=([0-9]+)$", path.read_text(errors="replace"), re.M)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     failed = False
 
     def emit(ok: bool, text: str) -> None:
@@ -278,8 +288,19 @@ def report(out_dir: pathlib.Path) -> int:
     emit(not re.search(r"(^|\s)(Xorg|glxgears|firefox)(\s|$)", ps_after),
          "no Xorg/glxgears/firefox leftovers")
 
-    x11_ran = any((out_dir / name).exists() for name in (
-        "xrandr.x11", "glxinfo-B.x11", "glxgears.x11"))
+    x11_ran = (out_dir / "drm_state.x11").exists()
+    if not x11_ran:
+        emit(allow_missing_x11, "x11 phase optional/missing")
+    else:
+        for name in ("xrandr.x11", "glxinfo-B.x11"):
+            rc = command_return_code(out_dir / name)
+            emit(rc == 0, f"{name} rc={rc}")
+        glxinfo = out_dir / "glxinfo-B.x11"
+        if glxinfo.exists():
+            text = glxinfo.read_text(errors="replace")
+            emit(bool(re.search(r"zink|NVK|Vulkan", text, re.I)),
+                 "glxinfo shows zink/NVK/Vulkan")
+
     xlog = list(out_dir.glob("*Xorg*.after"))
     if x11_ran and xlog:
         text = xlog[0].read_text(errors="replace")
@@ -289,7 +310,7 @@ def report(out_dir: pathlib.Path) -> int:
              "Xorg terminated successfully")
     elif x11_ran:
         emit(False, "missing after Xorg log")
-    else:
+    elif allow_missing_x11:
         print("INFO x11 phase not captured; skip Xorg log checks")
 
     faults = out_dir / "dmesg_faults.after"
@@ -322,17 +343,19 @@ def main() -> int:
     parser.add_argument("--gears-seconds", type=int, default=5)
     parser.add_argument("--run-panning", action="store_true",
                         help="briefly set and clear xrandr panning on the first connected output")
+    parser.add_argument("--allow-missing-x11", action="store_true",
+                        help="allow report-only console/debug runs without an x11 phase")
     args = parser.parse_args()
 
     out_dir = choose_out_dir(args.phase, args.out_dir)
     if args.phase == "report":
         print(out_dir)
-        return report(out_dir)
+        return report(out_dir, args.allow_missing_x11)
 
     capture_phase(out_dir, args.phase, args)
     print(out_dir)
     if args.phase == "after":
-        return report(out_dir)
+        return report(out_dir, args.allow_missing_x11)
     return 0
 
 
