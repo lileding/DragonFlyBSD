@@ -678,6 +678,42 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_atomic_vblank_wait_count);
 	sbuf_printf(sb, "atomic_flip_done_wait_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_flip_done_wait_count);
+	sbuf_printf(sb, "atomic_summary_count = %llu\n",
+	    (unsigned long long)sc->kms_atomic_summary_count);
+	sbuf_printf(sb, "atomic_last_legacy_cursor_update = %u\n",
+	    sc->kms_atomic_last_legacy_cursor_update);
+	sbuf_printf(sb, "atomic_last_async_update = %u\n",
+	    sc->kms_atomic_last_async_update);
+	sbuf_printf(sb, "atomic_last_lock_core = %u\n",
+	    sc->kms_atomic_last_lock_core);
+	sbuf_printf(sb, "atomic_last_flush_disable = %u\n",
+	    sc->kms_atomic_last_flush_disable);
+	sbuf_printf(sb, "atomic_last_old_active_heads = 0x%08x\n",
+	    sc->kms_atomic_last_old_active_heads);
+	sbuf_printf(sb, "atomic_last_new_active_heads = 0x%08x\n",
+	    sc->kms_atomic_last_new_active_heads);
+	sbuf_printf(sb, "atomic_last_modeset_heads = 0x%08x\n",
+	    sc->kms_atomic_last_modeset_heads);
+	sbuf_printf(sb, "atomic_last_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_last_disable_heads);
+	sbuf_printf(sb, "atomic_last_enable_heads = 0x%08x\n",
+	    sc->kms_atomic_last_enable_heads);
+	sbuf_printf(sb, "atomic_last_primary_update_heads = 0x%08x\n",
+	    sc->kms_atomic_last_primary_update_heads);
+	sbuf_printf(sb, "atomic_last_primary_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_last_primary_disable_heads);
+	sbuf_printf(sb, "atomic_last_cursor_update_heads = 0x%08x\n",
+	    sc->kms_atomic_last_cursor_update_heads);
+	sbuf_printf(sb, "atomic_last_cursor_disable_heads = 0x%08x\n",
+	    sc->kms_atomic_last_cursor_disable_heads);
+	sbuf_printf(sb, "atomic_last_plane_update_mask = 0x%08x\n",
+	    sc->kms_atomic_last_plane_update_mask);
+	sbuf_printf(sb, "atomic_last_plane_disable_mask = 0x%08x\n",
+	    sc->kms_atomic_last_plane_disable_mask);
+	sbuf_printf(sb, "atomic_last_prepared_heads = 0x%08x\n",
+	    sc->kms_atomic_last_prepared_heads);
+	sbuf_printf(sb, "atomic_last_prepared_displays = 0x%08x\n",
+	    sc->kms_atomic_last_prepared_displays);
 	sbuf_printf(sb, "color_check_count = %llu\n",
 	    (unsigned long long)sc->kms_color_check_count);
 	sbuf_printf(sb, "color_reject_count = %llu\n",

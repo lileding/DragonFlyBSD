@@ -998,13 +998,240 @@ static void nvkm_atomic_state_free(struct drm_atomic_state *state);
  *   or clears them.  CRTC, IRQ, HPD, and async cursor paths never share mutable
  *   route storage.
  */
+struct nvkm_atomic_summary {
+	bool valid;
+	bool lock_core;
+	bool flush_disable;
+	bool legacy_cursor_update;
+	bool async_update;
+	uint32_t old_active_head_mask;
+	uint32_t new_active_head_mask;
+	uint32_t modeset_head_mask;
+	uint32_t disable_head_mask;
+	uint32_t enable_head_mask;
+	uint32_t primary_update_head_mask;
+	uint32_t primary_disable_head_mask;
+	uint32_t cursor_update_head_mask;
+	uint32_t cursor_disable_head_mask;
+	uint32_t plane_update_mask;
+	uint32_t plane_disable_mask;
+	uint32_t prepared_head_mask;
+	uint32_t prepared_display_mask;
+};
+
 struct nvkm_atomic_state {
 	struct drm_atomic_state base;
 	struct nvkm_dispnv50_output_prepare prepared_route[NVKM_DISPLAY_MAX_HEADS];
+	struct nvkm_atomic_summary summary;
 };
 
 #define to_nvkm_atomic_state(s) \
 	container_of(s, struct nvkm_atomic_state, base)
+
+/*
+ * Build the driver-private atomic transaction summary.
+ *
+ * Ownership: the summary stores only scalar masks derived from the borrowed DRM
+ * atomic state.  It does not acquire references to CRTCs, planes, framebuffers,
+ * connectors, or display routes.
+ * Lifetime: callers may rebuild the summary while the atomic state is alive;
+ * published copies in struct nvkm_softc are diagnostic snapshots of the last
+ * commit tail and do not extend the lifetime of the atomic state.
+ * Threading: atomic_check fills the summary while modeset locks protect the
+ * state graph.  commit_tail may read or rebuild it from the commit worker that
+ * owns the atomic-state reference.  Other threads only read the published softc
+ * counters through the debug sysctl.
+ */
+static uint32_t
+nvkm_atomic_head_mask(const struct drm_crtc *crtc)
+{
+	if (crtc == NULL)
+		return (0);
+	return (drm_crtc_mask(crtc));
+}
+
+static bool
+nvkm_atomic_plane_visible(const struct drm_plane_state *state)
+{
+	return (state != NULL && state->crtc != NULL && state->fb != NULL &&
+	    state->crtc_w != 0 && state->crtc_h != 0 &&
+	    state->src_w != 0 && state->src_h != 0);
+}
+
+static bool
+nvkm_atomic_plane_changed(const struct drm_plane_state *old_state,
+    const struct drm_plane_state *new_state)
+{
+	if (old_state == NULL || new_state == NULL)
+		return (old_state != new_state);
+
+	return (old_state->crtc != new_state->crtc ||
+	    old_state->fb != new_state->fb ||
+	    old_state->crtc_x != new_state->crtc_x ||
+	    old_state->crtc_y != new_state->crtc_y ||
+	    old_state->crtc_w != new_state->crtc_w ||
+	    old_state->crtc_h != new_state->crtc_h ||
+	    old_state->src_x != new_state->src_x ||
+	    old_state->src_y != new_state->src_y ||
+	    old_state->src_w != new_state->src_w ||
+	    old_state->src_h != new_state->src_h ||
+	    old_state->alpha != new_state->alpha ||
+	    old_state->pixel_blend_mode != new_state->pixel_blend_mode ||
+	    old_state->rotation != new_state->rotation ||
+	    old_state->color_encoding != new_state->color_encoding ||
+	    old_state->color_range != new_state->color_range);
+}
+
+static bool
+nvkm_atomic_crtc_modeset(struct drm_atomic_state *state,
+    struct drm_crtc *crtc)
+{
+	struct drm_crtc_state *crtc_state;
+
+	if (state == NULL || crtc == NULL)
+		return (false);
+
+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	return (crtc_state != NULL && drm_atomic_crtc_needs_modeset(crtc_state));
+}
+
+static void
+nvkm_atomic_summary_account_plane(struct drm_atomic_state *state,
+    struct nvkm_atomic_summary *summary, struct drm_plane *plane,
+    struct drm_plane_state *old_plane_state,
+    struct drm_plane_state *new_plane_state)
+{
+	bool changed, new_modeset, new_visible, old_modeset, old_visible;
+	bool crtc_changed;
+	uint32_t new_head_mask, old_head_mask, plane_mask;
+
+	old_visible = nvkm_atomic_plane_visible(old_plane_state);
+	new_visible = nvkm_atomic_plane_visible(new_plane_state);
+	changed = nvkm_atomic_plane_changed(old_plane_state, new_plane_state);
+	old_modeset = old_visible &&
+	    nvkm_atomic_crtc_modeset(state, old_plane_state->crtc);
+	new_modeset = new_visible &&
+	    nvkm_atomic_crtc_modeset(state, new_plane_state->crtc);
+	old_head_mask = old_visible ?
+	    nvkm_atomic_head_mask(old_plane_state->crtc) : 0;
+	new_head_mask = new_visible ?
+	    nvkm_atomic_head_mask(new_plane_state->crtc) : 0;
+	crtc_changed = old_visible && new_plane_state != NULL &&
+	    old_plane_state->crtc != new_plane_state->crtc;
+	plane_mask = drm_plane_mask(plane);
+
+	if (old_visible && (!new_visible || crtc_changed || old_modeset))
+		summary->plane_disable_mask |= plane_mask;
+	if (new_visible && (!old_visible || changed || new_modeset))
+		summary->plane_update_mask |= plane_mask;
+
+	if (plane->type == DRM_PLANE_TYPE_PRIMARY) {
+		if (old_visible && (!new_visible || crtc_changed ||
+		    old_modeset))
+			summary->primary_disable_head_mask |= old_head_mask;
+		if (new_visible && (!old_visible || changed || new_modeset))
+			summary->primary_update_head_mask |= new_head_mask;
+	} else if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		if (old_visible && (!new_visible || crtc_changed ||
+		    old_modeset))
+			summary->cursor_disable_head_mask |= old_head_mask;
+		if (new_visible && (!old_visible || changed || new_modeset))
+			summary->cursor_update_head_mask |= new_head_mask;
+	}
+}
+
+static void
+nvkm_atomic_build_summary(struct drm_atomic_state *state)
+{
+	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
+	struct nvkm_atomic_summary *summary = &nv_state->summary;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_plane_state *new_plane_state;
+	struct drm_plane_state *old_plane_state;
+	struct drm_crtc *crtc;
+	struct drm_plane *plane;
+	uint32_t head_mask;
+	int i;
+
+	memset(summary, 0, sizeof(*summary));
+	summary->valid = true;
+	summary->legacy_cursor_update = state->legacy_cursor_update;
+	summary->async_update = state->async_update;
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		head_mask = nvkm_atomic_head_mask(crtc);
+		if (old_crtc_state != NULL && old_crtc_state->enable)
+			summary->old_active_head_mask |= head_mask;
+		if (new_crtc_state != NULL && new_crtc_state->enable)
+			summary->new_active_head_mask |= head_mask;
+		if (new_crtc_state != NULL &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state)) {
+			summary->modeset_head_mask |= head_mask;
+			if (old_crtc_state != NULL && old_crtc_state->enable)
+				summary->disable_head_mask |= head_mask;
+			if (new_crtc_state->enable)
+				summary->enable_head_mask |= head_mask;
+		}
+	}
+
+	for_each_oldnew_plane_in_state(state, plane, old_plane_state,
+	    new_plane_state, i) {
+		nvkm_atomic_summary_account_plane(state, summary, plane,
+		    old_plane_state, new_plane_state);
+	}
+
+	summary->lock_core = summary->modeset_head_mask != 0 ||
+	    summary->primary_update_head_mask != 0 ||
+	    summary->primary_disable_head_mask != 0 ||
+	    summary->cursor_update_head_mask != 0 ||
+	    summary->cursor_disable_head_mask != 0;
+	summary->flush_disable = summary->disable_head_mask != 0 ||
+	    summary->primary_disable_head_mask != 0 ||
+	    summary->cursor_disable_head_mask != 0 ||
+	    summary->plane_disable_mask != 0;
+}
+
+static void
+nvkm_atomic_publish_summary(struct nvkm_softc *sc,
+    struct drm_atomic_state *state)
+{
+	struct nvkm_atomic_state *nv_state;
+	struct nvkm_atomic_summary *summary;
+
+	if (sc == NULL || state == NULL)
+		return;
+
+	nv_state = to_nvkm_atomic_state(state);
+	if (!nv_state->summary.valid)
+		nvkm_atomic_build_summary(state);
+	summary = &nv_state->summary;
+
+	sc->kms_atomic_summary_count++;
+	sc->kms_atomic_last_legacy_cursor_update =
+	    summary->legacy_cursor_update ? 1 : 0;
+	sc->kms_atomic_last_async_update = summary->async_update ? 1 : 0;
+	sc->kms_atomic_last_lock_core = summary->lock_core ? 1 : 0;
+	sc->kms_atomic_last_flush_disable = summary->flush_disable ? 1 : 0;
+	sc->kms_atomic_last_old_active_heads = summary->old_active_head_mask;
+	sc->kms_atomic_last_new_active_heads = summary->new_active_head_mask;
+	sc->kms_atomic_last_modeset_heads = summary->modeset_head_mask;
+	sc->kms_atomic_last_disable_heads = summary->disable_head_mask;
+	sc->kms_atomic_last_enable_heads = summary->enable_head_mask;
+	sc->kms_atomic_last_primary_update_heads =
+	    summary->primary_update_head_mask;
+	sc->kms_atomic_last_primary_disable_heads =
+	    summary->primary_disable_head_mask;
+	sc->kms_atomic_last_cursor_update_heads =
+	    summary->cursor_update_head_mask;
+	sc->kms_atomic_last_cursor_disable_heads =
+	    summary->cursor_disable_head_mask;
+	sc->kms_atomic_last_plane_update_mask = summary->plane_update_mask;
+	sc->kms_atomic_last_plane_disable_mask = summary->plane_disable_mask;
+	sc->kms_atomic_last_prepared_heads = summary->prepared_head_mask;
+	sc->kms_atomic_last_prepared_displays = summary->prepared_display_mask;
+}
 
 static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.fb_create	= nvkm_fb_create,
@@ -1062,6 +1289,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	struct nvkm_softc *sc = dev->dev_private;
 
 	sc->kms_atomic_commit_tail_count++;
+	nvkm_atomic_publish_summary(sc, old_state);
 	drm_atomic_helper_commit_modeset_disables(dev, old_state);
 	drm_atomic_helper_commit_planes(dev, old_state,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
@@ -1317,6 +1545,7 @@ nvkm_atomic_check(struct drm_device *dev, struct drm_atomic_state *state)
 	if (ret != 0)
 		return (ret);
 
+	nvkm_atomic_build_summary(state);
 	return (nvkm_atomic_check_routes(dev, state));
 }
 
@@ -1383,10 +1612,14 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
     struct drm_atomic_state *state)
 {
 	struct nvkm_softc *sc = dev->dev_private;
+	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
 	struct drm_crtc_state *new_crtc_state;
 	struct drm_crtc *crtc;
 	int ret = 0;
 	int i;
+
+	if (!nv_state->summary.valid)
+		nvkm_atomic_build_summary(state);
 
 	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
@@ -1420,6 +1653,8 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 			    "output prepare");
 			goto fail;
 		}
+		nv_state->summary.prepared_head_mask |= drm_crtc_mask(crtc);
+		nv_state->summary.prepared_display_mask |= atom.display_id;
 	}
 
 	return (0);
