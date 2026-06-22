@@ -34,6 +34,7 @@ FAULT_PATTERN = (
 ZERO_KEYS = (
     "fault_pending_count",
     "commit_error_count",
+    "scanout_user",
     "atomic_tail_active",
     "atomic_tail_stage",
     "atomic_disable_vblank_keep_count",
@@ -377,6 +378,11 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         actual = after["display_audit_scanout_pin_balance"]
         emit(actual == expected,
              f"display_audit_scanout_pin_balance={actual} expected={expected}")
+
+    after_state_text = captured_text(out_dir / "drm_state.after")
+    emit(bool(cursor_heads(after_state_text)), "after cursor audit present")
+    emit(not active_hardware_cursor_heads(after_state_text),
+         "after has no hardware cursor enabled")
 
     tail_keys = (
         "atomic_tail_seq",
