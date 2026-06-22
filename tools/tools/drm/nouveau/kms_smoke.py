@@ -158,6 +158,22 @@ def run(argv: list[str], path: pathlib.Path, env: dict[str, str] | None = None,
             return 127
 
 
+def capture_kms_property_probe(out_dir: pathlib.Path, phase: str) -> None:
+    source = pathlib.Path(__file__).with_name("drmtest.c")
+    binary = out_dir / "drmtest"
+    build_cmd = (
+        "set -eu; "
+        "cc -Wall -Wextra -Werror $(pkg-config --cflags libdrm) "
+        f"{shlex.quote(str(source))} -o {shlex.quote(str(binary))} "
+        "$(pkg-config --libs libdrm)"
+    )
+
+    if run(["/bin/sh", "-c", build_cmd],
+           out_dir / f"drmtest-build.{phase}") != 0:
+        return
+    run([str(binary)], out_dir / f"drmtest.{phase}")
+
+
 def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -> None:
     env = os.environ.copy()
     if args.display:
@@ -187,6 +203,8 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
             target.write_bytes(log_path.read_bytes())
 
     if phase != "x11":
+        if phase == "after":
+            capture_kms_property_probe(out_dir, phase)
         return
 
     run(["xrandr", "--verbose"], out_dir / "xrandr.x11", env=env)
@@ -345,6 +363,10 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         emit(False, "missing after Xorg log")
     elif allow_missing_x11:
         print("INFO x11 phase not captured; skip Xorg log checks")
+
+    for name in ("drmtest-build.after", "drmtest.after"):
+        rc = command_return_code(out_dir / name)
+        emit(rc == 0, f"{name} rc={rc}")
 
     faults = out_dir / "dmesg_faults.after"
     if faults.exists():
