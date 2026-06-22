@@ -1,3 +1,6 @@
+#include <sys/event.h>
+#include <sys/time.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -15,6 +18,22 @@
 #include <xf86drmMode.h>
 
 static int failures;
+
+struct atomic_plane_snapshot {
+	uint64_t fb_id;
+	uint64_t crtc_id;
+	uint64_t crtc_x;
+	uint64_t crtc_y;
+	uint64_t crtc_w;
+	uint64_t crtc_h;
+	uint64_t src_x;
+	uint64_t src_y;
+	uint64_t src_w;
+	uint64_t src_h;
+};
+
+static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
+    uint32_t plane_id, const char *name, uint64_t value);
 
 static void
 check(bool ok, const char *what)
@@ -268,6 +287,25 @@ require_property(int fd, uint32_t object_id, uint32_t object_type,
 
 	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
 	check(has_property(fd, object_id, object_type, name), text);
+}
+
+static bool
+get_property_value_checked(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, uint64_t *value_out, const char *object_name)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return false;
+
+	*value_out = value;
+	drmModeFreeProperty(prop);
+	return true;
 }
 
 static void
@@ -526,6 +564,36 @@ check_plane_sync_property_contract(int fd, uint32_t plane_id,
 }
 
 static bool
+get_plane_snapshot(int fd, uint32_t plane_id,
+    struct atomic_plane_snapshot *snapshot, const char *object_name)
+{
+	bool ok = true;
+
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "FB_ID", &snapshot->fb_id, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "CRTC_ID", &snapshot->crtc_id, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "CRTC_X", &snapshot->crtc_x, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "CRTC_Y", &snapshot->crtc_y, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "CRTC_W", &snapshot->crtc_w, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "CRTC_H", &snapshot->crtc_h, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "SRC_X", &snapshot->src_x, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "SRC_Y", &snapshot->src_y, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "SRC_W", &snapshot->src_w, object_name);
+	ok &= get_property_value_checked(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+	    "SRC_H", &snapshot->src_h, object_name);
+
+	return ok;
+}
+
+static bool
 atomic_add_crtc_property(int fd, drmModeAtomicReqPtr req, uint32_t crtc_id,
     const char *name, uint64_t value)
 {
@@ -537,6 +605,42 @@ atomic_add_crtc_property(int fd, drmModeAtomicReqPtr req, uint32_t crtc_id,
 		return false;
 	}
 	return drmModeAtomicAddProperty(req, crtc_id, property_id, value) >= 0;
+}
+
+static int
+wait_sync_file_readable(int fd, int timeout_ms, int *saved_errno)
+{
+	struct kevent change;
+	struct kevent event;
+	struct timespec timeout;
+	int kq;
+	int ret;
+
+	kq = kqueue();
+	if (kq < 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	EV_SET(&change, (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_ENABLE |
+	    EV_ONESHOT, 0, 0, NULL);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_nsec = (timeout_ms % 1000) * 1000000L;
+
+	errno = 0;
+	ret = kevent(kq, &change, 1, &event, 1, &timeout);
+	*saved_errno = errno;
+	if (close(kq) != 0 && ret >= 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+	if (ret != 1)
+		return ret == 0 ? 0 : -1;
+	if ((event.flags & EV_ERROR) != 0) {
+		*saved_errno = (int)event.data;
+		return -1;
+	}
+	return 1;
 }
 
 static int
@@ -569,6 +673,120 @@ atomic_crtc_color_test_only_commit(int fd, uint32_t crtc_id,
 	*saved_errno = errno;
 	drmModeAtomicFree(req);
 	return ret;
+}
+
+static int
+atomic_primary_out_fence_commit(int fd, uint32_t crtc_id, uint32_t plane_id,
+    const struct atomic_plane_snapshot *snapshot, int32_t *out_fence_fd,
+    int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	*out_fence_fd = -1;
+	if (!atomic_add_crtc_property(fd, req, crtc_id, "OUT_FENCE_PTR",
+	    (uint64_t)(uintptr_t)out_fence_fd) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "FB_ID",
+	    snapshot->fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
+	    snapshot->crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X",
+	    snapshot->crtc_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y",
+	    snapshot->crtc_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W",
+	    snapshot->crtc_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H",
+	    snapshot->crtc_h) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X",
+	    snapshot->src_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y",
+	    snapshot->src_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    snapshot->src_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    snapshot->src_h)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+/*
+ * check_atomic_out_fence_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC and primary plane IDs.  The existing framebuffer ID
+ *   remains owned by the KMS state; this probe only reuses the same value in a
+ *   no-visual-change atomic commit.  The returned sync_file fd is owned by the
+ *   probe after drmModeAtomicCommit() succeeds and is always closed before
+ *   return.
+ *
+ * Lifetime:
+ *   Commits the current primary plane tuple unchanged while installing
+ *   OUT_FENCE_PTR on the active CRTC.  The commit must produce a sync_file fd,
+ *   and that fd must become readable once the display completion point signals.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The kernel evaluates the commit under
+ *   normal modeset locks; the sync_file readiness is observed through
+ *   DragonFly's EVFILT_READ shim for sync_file.
+ */
+static void
+check_atomic_out_fence_runtime_contract(int fd, uint32_t crtc_id,
+    uint32_t plane_id, const char *object_name)
+{
+	struct atomic_plane_snapshot snapshot;
+	int32_t out_fence_fd = -1;
+	int saved_errno = 0;
+	int ret;
+
+	if (!get_plane_snapshot(fd, plane_id, &snapshot, object_name))
+		return;
+	check(snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for OUT_FENCE_PTR probe");
+	check(snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for OUT_FENCE_PTR probe");
+	if (snapshot.fb_id == 0 || snapshot.crtc_id != crtc_id)
+		return;
+
+	ret = atomic_primary_out_fence_commit(fd, crtc_id, plane_id, &snapshot,
+	    &out_fence_fd, &saved_errno);
+	if (ret != 0) {
+		printf("    OUT_FENCE_PTR commit errno=%d\n", saved_errno);
+		check(false, "atomic commit with OUT_FENCE_PTR succeeds");
+		if (out_fence_fd >= 0)
+			check(close(out_fence_fd) == 0,
+			    "close OUT_FENCE_PTR fd after failed commit");
+		return;
+	}
+
+	check(true, "atomic commit with OUT_FENCE_PTR succeeds");
+	check(out_fence_fd >= 0, "OUT_FENCE_PTR returns a sync_file fd");
+	if (out_fence_fd < 0)
+		return;
+
+	ret = wait_sync_file_readable(out_fence_fd, 2000, &saved_errno);
+	if (ret != 1) {
+		printf("    OUT_FENCE_PTR wait ret=%d errno=%d\n", ret,
+		    saved_errno);
+		check(false, "OUT_FENCE_PTR sync_file becomes readable");
+	} else {
+		check(true, "OUT_FENCE_PTR sync_file becomes readable");
+	}
+	check(close(out_fence_fd) == 0, "close OUT_FENCE_PTR sync_file fd");
 }
 
 /*
@@ -1486,6 +1704,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			check_atomic_primary_panning_contract(fd,
 			    plane->plane_id, active_crtc_id,
 			    active_crtc_width, active_crtc_height);
+			check_atomic_out_fence_runtime_contract(fd,
+			    active_crtc_id, plane->plane_id, name);
 			primary_panning_probe_done = true;
 		}
 		if (have_active_crtc && !cursor_probe_done &&
