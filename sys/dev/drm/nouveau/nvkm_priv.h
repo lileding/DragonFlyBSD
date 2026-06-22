@@ -516,6 +516,37 @@ struct nvkm_hotproc_slot {
 	uint64_t	gem_new_count;
 };
 
+/*
+ * Atomic commit-tail diagnostic stage.
+ *
+ * Ownership:
+ *   Values are plain scalar snapshots stored in struct nvkm_softc; no stage
+ *   value owns DRM state or display resources.
+ *
+ * Lifetime:
+ *   The current stage is valid only while kms_atomic_tail_active is non-zero.
+ *   The last stage remains as postmortem evidence for the most recent tail.
+ *
+ * Threading:
+ *   Written by the atomic commit-tail worker/submitter that owns the DRM
+ *   atomic-state reference. Readers may sample the values through sysctl
+ *   without synchronization; they are diagnostic breadcrumbs, not control
+ *   inputs.
+ */
+enum nvkm_kms_atomic_tail_stage {
+	NVKM_KMS_ATOMIC_TAIL_IDLE = 0,
+	NVKM_KMS_ATOMIC_TAIL_BEGIN,
+	NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES,
+	NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES,
+	NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES,
+	NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS,
+	NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK,
+	NVKM_KMS_ATOMIC_TAIL_HW_DONE,
+	NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE,
+	NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES,
+	NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED,
+};
+
 /* BAR1 GVA layout. USERD at fixed slot 0; bar1_alloc_page reuses
  * page-sized slots inside a fixed high BAR1 window owned by this driver. */
 #define BAR1_GVA_USERD		0x0ULL
@@ -738,6 +769,27 @@ struct nvkm_softc {
 	uint64_t		kms_atomic_commit_tail_count;
 	uint64_t		kms_atomic_vblank_wait_count;
 	uint64_t		kms_atomic_flip_done_wait_count;
+	uint64_t		kms_atomic_tail_seq;
+	uint64_t		kms_atomic_tail_complete_count;
+	uint64_t		kms_atomic_tail_modeset_disables_count;
+	uint64_t		kms_atomic_tail_commit_planes_count;
+	uint64_t		kms_atomic_tail_modeset_enables_count;
+	uint64_t		kms_atomic_tail_modeset_events_count;
+	uint64_t		kms_atomic_tail_fake_vblank_count;
+	uint64_t		kms_atomic_tail_hw_done_count;
+	uint64_t		kms_atomic_tail_wait_flip_done_count;
+	uint64_t		kms_atomic_tail_cleanup_planes_count;
+	uint64_t		kms_atomic_tail_finish_prepared_count;
+	uint32_t		kms_atomic_tail_active;
+	uint32_t		kms_atomic_tail_stage;
+	uint32_t		kms_atomic_tail_last_stage;
+	uint32_t		kms_atomic_tail_last_lock_core;
+	uint32_t		kms_atomic_tail_last_flush_disable;
+	uint32_t		kms_atomic_tail_last_modeset_heads;
+	uint32_t		kms_atomic_tail_last_disable_heads;
+	uint32_t		kms_atomic_tail_last_enable_heads;
+	uint32_t		kms_atomic_tail_last_plane_update_mask;
+	uint32_t		kms_atomic_tail_last_plane_disable_mask;
 	uint64_t		kms_atomic_summary_count;
 	uint32_t		kms_atomic_last_legacy_cursor_update;
 	uint32_t		kms_atomic_last_async_update;
