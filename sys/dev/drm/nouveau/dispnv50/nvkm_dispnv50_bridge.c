@@ -4428,6 +4428,27 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	if (sc == NULL || sc->disp == NULL || mode == NULL || display_id == 0)
 		return -ENODEV;
 
+	/*
+	 * Output prepare runs before drm_atomic_helper_swap_state().
+	 *
+	 * Ownership:
+	 *   The bridge owns the dispnv50 core channel created here. The prepared
+	 *   route only borrows it for synchronous validation and does not retain
+	 *   the core pointer.
+	 *
+	 * Lifetime:
+	 *   The core channel remains owned by sc->dispnv50 until KMS teardown.
+	 *   A failed prepare leaves no acquired output route behind.
+	 *
+	 * Threading:
+	 *   Called from the atomic commit path while modeset locks serialize
+	 *   display state changes. It may sleep in RM/channel allocation and must
+	 *   not be called from interrupt context.
+	 */
+	ret = nvkm_dispnv50_core_init(sc);
+	if (ret != 0)
+		return ret;
+
 	state = sc->dispnv50;
 	if (state == NULL || state->disp.core == NULL)
 		return -ENODEV;
