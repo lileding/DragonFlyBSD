@@ -208,6 +208,9 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
             capture_kms_property_probe(out_dir, phase)
         return
 
+    run(["/bin/sh", "-c", "xdotool mousemove_relative -- 17 11; sleep 0.2"],
+        out_dir / "xdotool-cursor-move.x11", env=env)
+    run(["sysctl", "-n", "dev.drm.0.state"], out_dir / "drm_state.x11_cursor")
     run(["xrandr", "--verbose"], out_dir / "xrandr.x11", env=env)
     run(["glxinfo", "-B"], out_dir / "glxinfo-B.x11", env=env)
     if args.gears_seconds > 0:
@@ -236,6 +239,37 @@ def parse_state(path: pathlib.Path) -> dict[str, int]:
         key, text = match.groups()
         values[key] = int(text, 16 if text.startswith("0x") else 10)
     return values
+
+
+def parse_state_value(text: str, key: str) -> int | None:
+    match = re.search(
+        rf"^{re.escape(key)}\s*=\s*(0x[0-9a-fA-F]+|[0-9]+)\b",
+        text,
+        re.M,
+    )
+    if match is None:
+        return None
+    value = match.group(1)
+    return int(value, 16 if value.startswith("0x") else 10)
+
+
+def cursor_heads(text: str) -> list[int]:
+    heads = {
+        int(match.group(1))
+        for match in re.finditer(r"^head\[(\d+)\]_cursor_", text, re.M)
+    }
+    return sorted(heads)
+
+
+def active_hardware_cursor_heads(text: str) -> list[int]:
+    active: list[int] = []
+    for head in cursor_heads(text):
+        enabled = parse_state_value(text, f"head[{head}]_cursor_enabled")
+        fb = parse_state_value(text, f"head[{head}]_cursor_fb")
+        bo = parse_state_value(text, f"head[{head}]_cursor_bo")
+        if enabled == 1 and fb not in (None, 0) and bo not in (None, 0):
+            active.append(head)
+    return active
 
 
 def command_return_code(path: pathlib.Path) -> int | None:
@@ -359,9 +393,60 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     if not x11_ran:
         emit(allow_missing_x11, "x11 phase optional/missing")
     else:
+        x11_state = parse_state(out_dir / "drm_state.x11")
+        x11_cursor_state = parse_state(out_dir / "drm_state.x11_cursor")
+        x11_cursor_text = captured_text(out_dir / "drm_state.x11_cursor")
         for name in ("xrandr.x11", "glxinfo-B.x11"):
             rc = command_return_code(out_dir / name)
             emit(rc == 0, f"{name} rc={rc}")
+        cursor_move_rc = command_return_code(out_dir / "xdotool-cursor-move.x11")
+        emit(cursor_move_rc == 0, f"xdotool-cursor-move.x11 rc={cursor_move_rc}")
+        emit(bool(active_hardware_cursor_heads(x11_cursor_text)),
+             "x11 hardware cursor is enabled with fb/bo")
+        if all(key in x11_state and key in x11_cursor_state for key in (
+            "cursor_async_update_count",
+            "plane_update_count",
+        )):
+            cursor_delta = (
+                x11_cursor_state["cursor_async_update_count"] -
+                x11_state["cursor_async_update_count"]
+            )
+            plane_delta = (
+                x11_cursor_state["plane_update_count"] -
+                x11_state["plane_update_count"]
+            )
+            emit(cursor_delta > 0,
+                 f"cursor move used async cursor update delta={cursor_delta}")
+            emit(plane_delta == 0,
+                 f"cursor move did not update primary plane delta={plane_delta}")
+        else:
+            emit(False, "missing cursor/plane counters around xdotool move")
+        if all(key in before and key in x11_cursor_state for key in (
+            "color_gamma_lut_count",
+            "color_degamma_lut_count",
+            "color_ctm_count",
+        )):
+            gamma_delta = (
+                x11_cursor_state["color_gamma_lut_count"] -
+                before["color_gamma_lut_count"]
+            )
+            degamma_delta = (
+                x11_cursor_state["color_degamma_lut_count"] -
+                before["color_degamma_lut_count"]
+            )
+            ctm_delta = (
+                x11_cursor_state["color_ctm_count"] -
+                before["color_ctm_count"]
+            )
+            if gamma_delta > 0 and degamma_delta == 0 and ctm_delta == 0:
+                emit(True, "x11 color path is gamma-only")
+            elif degamma_delta > 0 or ctm_delta > 0:
+                print("INFO x11 used window-side color "
+                      f"degamma_delta={degamma_delta} ctm_delta={ctm_delta}")
+            else:
+                print("INFO x11 did not change CRTC color counters")
+        else:
+            emit(False, "missing x11 color counters")
         xrandr_text = captured_text(out_dir / "xrandr.x11")
         emit(bool(re.search(r"^[A-Za-z0-9_.-]+ connected\b", xrandr_text, re.M)),
              "xrandr has connected output")
@@ -385,21 +470,35 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             emit(not re.search(r"llvmpipe|softpipe|software rasterizer", text, re.I),
                  "glxinfo is not software rasterizer")
 
-    xlog = list(out_dir.glob("*Xorg*.after"))
+    xlog = sorted(out_dir.glob("*Xorg*.x11"))
+    after_xlog = sorted(out_dir.glob("*Xorg*.after"))
     if x11_ran and xlog:
         text = xlog[0].read_text(errors="replace")
-        emit(bool(re.search(r"zink|NVK|glamor X acceleration enabled", text, re.I)),
-             "Xorg log has zink/NVK/glamor")
-        emit("Server terminated successfully" in text,
-             "Xorg terminated successfully")
+        emit(bool(re.search(r"glamor X acceleration enabled.*(zink|NVK|MESA_NVK)", text, re.I)),
+             "Xorg log has glamor acceleration on zink/NVK")
+        emit(not re.search(r"SWcursor|software cursor", text, re.I),
+             "Xorg log does not use software cursor")
+        if after_xlog:
+            after_text = after_xlog[0].read_text(errors="replace")
+            emit("Server terminated successfully" in after_text,
+                 "Xorg terminated successfully")
+        else:
+            emit(False, "missing after Xorg log")
     elif x11_ran:
-        emit(False, "missing after Xorg log")
+        emit(False, "missing x11 Xorg log")
     elif allow_missing_x11:
         print("INFO x11 phase not captured; skip Xorg log checks")
 
     for name in ("drmtest-build.after", "drmtest.after"):
         rc = command_return_code(out_dir / name)
         emit(rc == 0, f"{name} rc={rc}")
+    drmtest_after = captured_text(out_dir / "drmtest.after")
+    for text in (
+        "DEGAMMA_LUT defaults to 0",
+        "CTM defaults to 0",
+        "GAMMA_LUT defaults to 0",
+    ):
+        emit(text in drmtest_after, f"drmtest.after has {text}")
 
     faults = out_dir / "dmesg_faults.after"
     if faults.exists():
