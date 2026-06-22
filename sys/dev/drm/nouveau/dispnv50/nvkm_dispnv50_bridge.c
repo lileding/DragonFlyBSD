@@ -666,6 +666,7 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	struct nvkm_dispnv50_cursor_audit *cursor_audit;
 	bool head_ready;
 	bool cursor_hooks;
+	bool cursor_enabled;
 
 	nvhead = head < nitems(state->head) ? &state->head[head] : NULL;
 	head_ready = nvhead != NULL && nvhead->func != NULL;
@@ -689,6 +690,8 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	curs = head < nitems(state->curs) ? state->curs[head] : NULL;
 	cursor_audit = head < nitems(state->audit_cursor) ?
 	    &state->audit_cursor[head] : NULL;
+	cursor_enabled = cursor_state != NULL && cursor_state->visible &&
+	    cursor_fb != NULL;
 
 	sbuf_printf(sb, "head[%u]_ready = %d\n", head, head_ready);
 	sbuf_printf(sb, "head[%u]_crtc = %p\n", head, crtc);
@@ -707,7 +710,7 @@ nvkm_dispnv50_debug_head_sbuf(struct nvkm_softc *sc, struct sbuf *sb,
 	sbuf_printf(sb, "head[%u]_cursor_channel_present = %d\n", head,
 	    curs != NULL);
 	sbuf_printf(sb, "head[%u]_cursor_enabled = %d\n", head,
-	    cursor_state != NULL && cursor_state->visible);
+	    cursor_enabled);
 	sbuf_printf(sb, "head[%u]_cursor_async_last = %d\n", head,
 	    cursor_audit != NULL && cursor_audit->valid && cursor_audit->async);
 	sbuf_printf(sb, "head[%u]_cursor_last_seq = %llu\n", head,
@@ -3476,13 +3479,16 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
  *
  * Threading: called from serialized atomic commit paths; it may sleep while
  * waiting for display notifiers and must not be called from interrupt context.
+ * When notify_core is false, callers still submit the core UPDATE, but transfer
+ * completion ownership to the window notifier for runtime commits where the core
+ * notifier is not the reliable completion point.
  */
 static int
 nvkm_dispnv50_window_program(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct drm_crtc *crtc,
     struct nv50_core *core, struct nv50_wndw *wndw, u32 *interlock,
-    bool sanitize, bool async, enum nvkm_dispnv50_audit_op op, u32 head,
-    u32 display_id, const char *reason, bool *update_submitted)
+    bool sanitize, bool async, bool notify_core, enum nvkm_dispnv50_audit_op op,
+    u32 head, u32 display_id, const char *reason, bool *update_submitted)
 {
 	struct nv50_wndw_atom asyw;
 	int ret;
@@ -3532,8 +3538,14 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	if (update_submitted != NULL)
 		*update_submitted = true;
 	if (commit_core) {
-		ret = nvkm_dispnv50_core_commit_notify(sc, state, core,
-		    interlock);
+		if (notify_core) {
+			ret = nvkm_dispnv50_core_commit_notify(sc, state, core,
+			    interlock);
+		} else if (core->func == NULL || core->func->update == NULL) {
+			ret = -ENODEV;
+		} else {
+			ret = core->func->update(core, interlock, false);
+		}
 		if (ret != 0)
 			goto fail;
 	}
@@ -4976,31 +4988,42 @@ nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_head_atom asyh;
 	struct nv50_wndw_atom asyw;
 	struct nv50_head *nvhead;
-	struct nv50_wndw *wndw;
+	struct nv50_wndw *wndw = NULL;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	bool window_color;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL ||
 	    !crtc->state->active || sc->disp == NULL)
 		return (-ENODEV);
 
-	ret = nvkm_dispnv50_wndw_init(sc, win);
-	if (ret != 0)
-		return ret;
+	window_color = crtc->state->degamma_lut != NULL || crtc->state->ctm != NULL;
+	if (window_color) {
+		ret = nvkm_dispnv50_wndw_init(sc, win);
+		if (ret != 0)
+			return ret;
+	}
 	ret = nvkm_dispnv50_head_init(sc, head);
 	if (ret != 0)
 		return ret;
 
 	state = sc->dispnv50;
 	if (state == NULL || state->disp.core == NULL ||
-	    head >= nitems(state->head) || win >= nitems(state->wndw) ||
-	    state->wndw[win] == NULL)
+	    head >= nitems(state->head))
+		return (-ENODEV);
+	if (window_color && (win >= nitems(state->wndw) ||
+	    state->wndw[win] == NULL))
 		return (-ENODEV);
 
 	core = state->disp.core;
 	nvhead = &state->head[head];
-	wndw = state->wndw[win];
+	if (window_color)
+		wndw = state->wndw[win];
+	if (core->func == NULL || core->func->update == NULL ||
+	    (window_color && (wndw->func == NULL || wndw->func->update == NULL)))
+		return (-ENODEV);
+
 	memset(&asyw, 0, sizeof(asyw));
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
 
@@ -5010,26 +5033,42 @@ nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return ret;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
-	ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw,
-	    crtc->state);
-	if (ret != 0)
-		return ret;
-	ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw, crtc->state);
-	if (ret != 0)
-		return ret;
-	interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	if (window_color) {
+		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, &asyw,
+		    crtc->state);
+		if (ret != 0)
+			return ret;
+		ret = nvkm_dispnv50_wndw_csc_set(sc, wndw, &asyw, crtc->state);
+		if (ret != 0)
+			return ret;
+		interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
 
-	ret = wndw->func->update(wndw, interlock);
-	if (ret != 0)
-		return ret;
+		ret = wndw->func->update(wndw, interlock);
+		if (ret != 0)
+			return ret;
+	}
+	/*
+	 * Gamma-only commits update the head OLUT and must not rewrite the window
+	 * ILUT/CSC.  Runtime head-only updates do not own a reliable core notifier
+	 * completion on this path, so they follow the same non-notifying core
+	 * UPDATE rule used by legacy cursor updates.  Window-side color is only
+	 * part of this runtime commit when the CRTC state carries degamma or CTM
+	 * data.  Linux nouveau derives the exact set/clear mask from persistent
+	 * window atoms; until nvkm has the same armed-state tracking, touching
+	 * identity ILUT/CSC here would submit a bogus runtime window update.
+	 */
+	if (!window_color)
+		return core->func->update(core, interlock, false);
 	return nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
 }
 
 int
 nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    uint32_t win, uint32_t display_id)
+    uint32_t win, uint32_t display_id, bool color_update)
 {
 	struct nvkm_dispnv50_state *state;
+	struct nv50_head_atom asyh;
+	struct nv50_head *nvhead;
 	struct nv50_wndw *wndw;
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
@@ -5039,18 +5078,25 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
 		return -ENODEV;
 
+	head = (u32)drm_crtc_index(crtc);
 	ret = nvkm_dispnv50_wndw_init(sc, win);
 	if (ret != 0)
 		return ret;
+	if (color_update) {
+		ret = nvkm_dispnv50_head_init(sc, head);
+		if (ret != 0)
+			return ret;
+	}
 
 	state = sc->dispnv50;
 	if (state == NULL || state->disp.core == NULL ||
 	    win >= nitems(state->wndw) || state->wndw[win] == NULL)
 		return -ENODEV;
+	if (color_update && head >= nitems(state->head))
+		return -ENODEV;
 
 	core = state->disp.core;
 	wndw = state->wndw[win];
-	head = (u32)drm_crtc_index(crtc);
 	if (display_id == 0 && state->audit_current.valid &&
 	    state->audit_current.head == head)
 		display_id = state->audit_current.display_id;
@@ -5063,9 +5109,20 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return ret;
 	}
 
+	if (color_update) {
+		nvhead = &state->head[head];
+		nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+		ret = nvkm_dispnv50_head_olut_set(sc, state, core, nvhead, &asyh,
+		    crtc->state);
+		if (ret != 0)
+			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	}
+
 	return nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, true, NVKM_DISPNV50_AUDIT_PLANE_UPDATE,
-	    head, display_id, "plane update", NULL);
+	    interlock, false, !color_update, !color_update,
+	    NVKM_DISPNV50_AUDIT_PLANE_UPDATE, head, display_id,
+	    color_update ? "plane color update" : "plane update", NULL);
 }
 
 int
@@ -5211,7 +5268,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, true, false, NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
+	    interlock, true, false, true, NVKM_DISPNV50_AUDIT_ATOMIC_ENABLE,
 	    head, display_id, "bridge", &update_submitted);
 	if (ret != 0)
 		goto fail;
