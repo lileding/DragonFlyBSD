@@ -50,6 +50,11 @@ ZERO_KEYS = (
 )
 
 WATCH_KEYS = (
+    "display_head_capacity",
+    "display_window_capacity",
+    "display_cursor_capacity",
+    "display_sor_capacity",
+    "display_audit_scanout_pin_balance",
     "page_flip_count",
     "page_flip_event_count",
     "atomic_commit_tail_count",
@@ -64,9 +69,24 @@ WATCH_KEYS = (
     "cleanup_fb_count",
     "scanout_pin_count",
     "scanout_unpin_count",
+    "cursor_pin_count",
+    "cursor_unpin_count",
     "hotplug_count",
     "hotplug_changed_count",
     "hotplug_notify_only_count",
+)
+
+CAPACITY_KEYS = (
+    "display_head_capacity",
+    "display_window_capacity",
+    "display_cursor_capacity",
+    "display_sor_capacity",
+)
+
+COUNT_ORDER_PAIRS = (
+    ("prepare_fb_count", "cleanup_fb_count"),
+    ("scanout_pin_count", "scanout_unpin_count"),
+    ("cursor_pin_count", "cursor_unpin_count"),
 )
 
 
@@ -221,6 +241,38 @@ def report(out_dir: pathlib.Path) -> int:
         if key in after:
             delta = after[key] - before.get(key, after[key])
             print(f"INFO {key}={after[key]} delta={delta}")
+
+    for key in CAPACITY_KEYS:
+        if key not in after:
+            emit(False, f"missing {key}")
+        else:
+            emit(after[key] > 0, f"{key}={after[key]}")
+
+    if all(key in after for key in (
+        "display_head_capacity",
+        "display_window_capacity",
+        "display_cursor_capacity",
+    )):
+        heads = after["display_head_capacity"]
+        emit(after["display_window_capacity"] >= heads,
+             f"display_window_capacity covers heads ({after['display_window_capacity']}>={heads})")
+        emit(after["display_cursor_capacity"] >= heads,
+             f"display_cursor_capacity covers heads ({after['display_cursor_capacity']}>={heads})")
+
+    for produce_key, consume_key in COUNT_ORDER_PAIRS:
+        if produce_key not in after or consume_key not in after:
+            emit(False, f"missing {produce_key}/{consume_key}")
+            continue
+        balance = after[produce_key] - after[consume_key]
+        emit(balance >= 0, f"{produce_key}-{consume_key}={balance}")
+
+    if "display_audit_scanout_pin_balance" not in after:
+        emit(False, "missing display_audit_scanout_pin_balance")
+    elif "scanout_pin_count" in after and "scanout_unpin_count" in after:
+        expected = after["scanout_pin_count"] - after["scanout_unpin_count"]
+        actual = after["display_audit_scanout_pin_balance"]
+        emit(actual == expected,
+             f"display_audit_scanout_pin_balance={actual} expected={expected}")
 
     ps_after = (out_dir / "ps.after").read_text(errors="replace") if (out_dir / "ps.after").exists() else ""
     emit(not re.search(r"(^|\s)(Xorg|glxgears|firefox)(\s|$)", ps_after),
