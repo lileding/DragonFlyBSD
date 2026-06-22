@@ -4,14 +4,16 @@
  * vmmfs - DragonFlyBSD system VMM control filesystem.
  *
  * M1: mountable VFS exposing machines/.
- * M2: machine import via `ln -s <config-dir> machines/<name>` (vop_nsymlink,
- *     an atomic import that reads/validates vcpu/mem/loader in the caller's
- *     context) and removal via `rmdir machines/<name>` (vop_nrmdir).  Each
- *     machine is a directory whose vcpu/mem/loader[/stopped] files reflect the
- *     imported desired state.  The loader is not yet executed (that is M3).
+ * M2: machine import via `ln -s <config-dir> machines/<name>` and removal via
+ *     `rmdir machines/<name>`; per-machine vcpu/mem/loader[/stopped] files.
+ * M3a: the lifecycle state machine moves into Rust (MachineState, kmalloc-backed
+ *      raw object).  The control surface exposes only the stable desired state
+ *      {Running, Stopped} (no intermediate state); the loader is stubbed so
+ *      transitions are instant.  `echo apic|force > stopped` stops, `rm stopped`
+ *      starts; every operation is atomic or idempotent.
  *
- * The low-level VFS plumbing and the kernel file I/O live here in C; the Rust
- * side owns the config-value parsing/validation (vmmfs_parse_vcpu/mem).
+ * C owns the VFS/namecache plumbing, the kernel file I/O, and the fixed machine
+ * registry; Rust owns the config parsing and the machine state object.
  */
 
 #include <sys/param.h>
@@ -34,22 +36,46 @@ extern void	vmmfs_rust_fini(void);
 extern int	vmmfs_parse_vcpu(const uint8_t *buf, size_t len, uint32_t *out);
 extern int	vmmfs_parse_mem(const uint8_t *buf, size_t len, uint64_t *out);
 
+/* Rust-owned per-machine lifecycle state object. */
+struct vmmfs_machine_state;
+extern struct vmmfs_machine_state *vmmfs_machine_new(int stopped);
+extern void	vmmfs_machine_free(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_is_stopped(struct vmmfs_machine_state *m);
+extern void	vmmfs_machine_stop(struct vmmfs_machine_state *m, int force);
+extern void	vmmfs_machine_start(struct vmmfs_machine_state *m);
+
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
+
+/* kmalloc wrappers backing the Rust side's raw state objects. */
+void *vmmfs_kalloc(size_t size);
+void vmmfs_kfree(void *ptr);
+
+void *
+vmmfs_kalloc(size_t size)
+{
+	return kmalloc(size, M_VMMFS, M_WAITOK | M_ZERO);
+}
+
+void
+vmmfs_kfree(void *ptr)
+{
+	kfree(ptr, M_VMMFS);
+}
 
 /*
  * Informational vnode tag.  vmmfs has no dedicated VT_ enum slot yet; VT_UNUSED7
- * is a reserved-unused value already present in the running kernel, so it is
- * safe to use as a purely informational v_tag.
+ * is a reserved-unused value already present in the running kernel.
  */
 #define VMMFS_VTAG		VT_UNUSED7
 
 #define VMMFS_ROOT_INO		1
 #define VMMFS_MACHINES_INO	2
 #define VMMFS_MACHINE_INO_BASE	3
-#define VMMFS_MACHINE_INO_STRIDE 8	/* inos reserved per machine */
+#define VMMFS_MACHINE_INO_STRIDE 8
 
 #define VMMFS_DIR_MODE		0555
 #define VMMFS_FILE_MODE		0444
+#define VMMFS_STOPPED_MODE	0644	/* the one writable control file */
 #define VMMFS_MAX_MACHINES	64
 #define VMMFS_NAME_MAX		63
 
@@ -83,34 +109,29 @@ struct vmmfs_node {
 	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
-	struct vmmfs_node      *vn_parent;	/* NULL for the root */
-	struct vmmfs_machine   *vn_machine;	/* owning machine, or NULL */
-	struct vnode	       *vn_vnode;	/* cached vnode, NULL if unbound */
-	struct lock		vn_interlock;	/* guards vn_vnode binding */
+	struct vmmfs_node      *vn_parent;
+	struct vmmfs_machine   *vn_machine;
+	struct vnode	       *vn_vnode;
+	struct lock		vn_interlock;
 };
 
-/*
- * An imported machine.  M2 reflects only the desired state read at import.
- * Slots live in the mount and are permanent for the mount's lifetime; in_use
- * marks occupancy.
- */
 struct vmmfs_machine {
-	int			in_use;
-	char			name[VMMFS_NAME_MAX + 1];
-	uint32_t		vcpu;
-	uint64_t		mem;
-	int			stopped;
-	uint64_t		loader_size;	/* captured at import */
-	mode_t			loader_mode;
-	struct vmmfs_node	node;		/* the machine directory */
-	struct vmmfs_node	cfg[VMMFS_NCFG];/* vcpu/mem/loader/stopped files */
+	int				in_use;
+	char				name[VMMFS_NAME_MAX + 1];
+	uint32_t			vcpu;
+	uint64_t			mem;
+	uint64_t			loader_size;
+	mode_t				loader_mode;
+	struct vmmfs_machine_state     *rust;	/* lifecycle state (Rust) */
+	struct vmmfs_node		node;
+	struct vmmfs_node		cfg[VMMFS_NCFG];
 };
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
 	struct vmmfs_node	vm_root;
 	struct vmmfs_node	vm_machines;
-	struct lock		vm_lock;	/* protects the machine registry */
+	struct lock		vm_lock;
 	struct vmmfs_machine	vm_mach[VMMFS_MAX_MACHINES];
 };
 
@@ -134,8 +155,11 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 	node->vn_type = type;
 	node->vn_cfg = cfg;
 	node->vn_ino = ino;
-	node->vn_mode = (type == VMMFS_NCONFIG) ? VMMFS_FILE_MODE :
-	    VMMFS_DIR_MODE;
+	if (type == VMMFS_NCONFIG)
+		node->vn_mode = (cfg == VMMFS_CFG_STOPPED) ? VMMFS_STOPPED_MODE :
+		    VMMFS_FILE_MODE;
+	else
+		node->vn_mode = VMMFS_DIR_MODE;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
@@ -159,14 +183,14 @@ static int
 vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg)
 {
 	if (cfg == VMMFS_CFG_STOPPED)
-		return m->stopped;
+		return vmmfs_machine_is_stopped(m->rust);
 	return 1;
 }
 
 /*
  * Bind a vnode to the given node, caching it.  Mirrors the interlocked
- * tmpfs_alloc_vp() normal path; vx_downgrade() after getnewvnode() is
- * mandatory so vflush() does not trip the v_spin assertion on unmount.
+ * tmpfs_alloc_vp() normal path; vx_downgrade() after getnewvnode() is mandatory
+ * so vflush() does not trip the v_spin assertion on unmount.
  */
 static int
 vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
@@ -232,10 +256,6 @@ out:
 /* --------------------------------------------------------------------- */
 /* Reading the config directory in the caller's context.                 */
 
-/*
- * Open <dir>[/<name>] for reading in the caller's namespace/credentials and
- * return the opened, held, *unlocked* vnode (caller must vn_close()).
- */
 static int
 vmmfs_open_path(const char *dir, const char *name, struct ucred *cred,
     struct vnode **vpp)
@@ -295,11 +315,6 @@ vmmfs_read_file(const char *dir, const char *name, struct ucred *cred,
 	return 0;
 }
 
-/*
- * Read and validate the minimal config directory.  Returns 0 and fills the
- * out parameters, or an errno: ENOENT if <dir> itself is missing, EINVAL if a
- * required file is missing or malformed, EACCES if loader is not executable.
- */
 static int
 vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
     uint64_t *mem, int *stopped, uint64_t *loader_size, mode_t *loader_mode)
@@ -309,7 +324,6 @@ vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
 	size_t len;
 	int error;
 
-	/* The config directory itself must exist and be a directory. */
 	error = vmmfs_open_path(dir, NULL, cred, &vp);
 	if (error)
 		return error;
@@ -331,7 +345,6 @@ vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
 	if (vmmfs_parse_mem((const uint8_t *)buf, len, mem) != 0)
 		return EINVAL;
 
-	/* loader must exist, be a regular file, and be executable. */
 	error = vmmfs_open_path(dir, "loader", cred, &vp);
 	if (error)
 		return (error == ENOENT) ? EINVAL : error;
@@ -344,11 +357,6 @@ vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
 		struct vattr va;
 
 		error = VOP_GETATTR(vp, &va);
-		/*
-		 * Require at least one execute bit (a file with none is not
-		 * executable by anyone, including root), then the caller's own
-		 * execute permission.
-		 */
 		if (error == 0 && (va.va_mode & 0111) == 0)
 			error = EACCES;
 		if (error == 0)
@@ -363,7 +371,6 @@ vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
 	if (error)
 		return error;
 
-	/* stopped is optional: its presence means "do not auto-start". */
 	error = vmmfs_open_path(dir, "stopped", cred, &vp);
 	if (error == 0) {
 		*stopped = 1;
@@ -392,17 +399,36 @@ vmmfs_find_machine(struct vmmfs_mount *vmp, const char *name, int nlen)
 	return NULL;
 }
 
+/*
+ * Find a reusable slot: not in_use and with no lingering cached vnode (machine
+ * dir or any config file).  Frees any deferred Rust state before reuse, which
+ * is the safe point to free it: by here no vnode can still reference the
+ * machine (rmdir defers the free precisely so open fds keep working).
+ */
 static struct vmmfs_machine *
 vmmfs_alloc_slot(struct vmmfs_mount *vmp)
 {
-	int i;
+	int i, j;
 
 	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
 		struct vmmfs_machine *m = &vmp->vm_mach[i];
+		int busy = 0;
 
-		/* Free slot with no lingering cached vnode. */
-		if (!m->in_use && m->node.vn_vnode == NULL)
-			return m;
+		if (m->in_use || m->node.vn_vnode != NULL)
+			continue;
+		for (j = 0; j < VMMFS_NCFG; j++) {
+			if (m->cfg[j].vn_vnode != NULL) {
+				busy = 1;
+				break;
+			}
+		}
+		if (busy)
+			continue;
+		if (m->rust != NULL) {
+			vmmfs_machine_free(m->rust);
+			m->rust = NULL;
+		}
+		return m;
 	}
 	return NULL;
 }
@@ -488,9 +514,9 @@ vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 }
 
 /*
- * `ln -s <config-dir> machines/<name>` is an atomic machine import, not a
- * symlink creation.  We read and validate the config in the caller's context,
- * register the machine, and reflect it as a directory.
+ * `ln -s <config-dir> machines/<name>` is an atomic machine import.  Read and
+ * validate the config in the caller's context, register the machine, reflect
+ * it as a directory.  Any failure leaves no partial state.
  */
 static int
 vmmfs_nsymlink(struct vop_nsymlink_args *ap)
@@ -500,41 +526,46 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
 	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
+	struct vmmfs_machine_state *rust;
 	struct vnode *vp;
 	uint32_t vcpu;
 	uint64_t mem, loader_size;
 	mode_t loader_mode;
 	int stopped, error;
 
-	/* Machines are created only under machines/. */
 	if (dnode->vn_type != VMMFS_NMACHINES)
 		return EINVAL;
 	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
 		return ENAMETOOLONG;
 
-	/* Read + validate the config in the caller's context (no vm_lock). */
 	error = vmmfs_read_config(ap->a_target, ap->a_cred, &vcpu, &mem,
 	    &stopped, &loader_size, &loader_mode);
 	if (error)
 		return error;
 
+	rust = vmmfs_machine_new(stopped);
+	if (rust == NULL)
+		return ENOMEM;
+
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	if (vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(rust);
 		return EEXIST;
 	}
 	m = vmmfs_alloc_slot(vmp);
 	if (m == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(rust);
 		return ENOSPC;
 	}
 	bcopy(ncp->nc_name, m->name, ncp->nc_nlen);
 	m->name[ncp->nc_nlen] = '\0';
 	m->vcpu = vcpu;
 	m->mem = mem;
-	m->stopped = stopped;
 	m->loader_size = loader_size;
 	m->loader_mode = loader_mode;
+	m->rust = rust;
 	m->in_use = 1;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
@@ -554,9 +585,10 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 }
 
 /*
- * `rmdir machines/<name>` removes the machine.  M2 has no running state, so a
- * machine is always removable; the EBUSY-when-running rule arrives with the
- * lifecycle milestone.
+ * `rmdir machines/<name>` removes the machine.  M2/M3 stub: a stopped machine
+ * is removable; lease and the running-state EBUSY rule arrive in M3b.  The
+ * Rust state is freed lazily (vmmfs_alloc_slot) so any still-open fds on the
+ * machine's files keep working until reclaimed.
  */
 static int
 vmmfs_nrmdir(struct vop_nrmdir_args *ap)
@@ -572,11 +604,6 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 	if (dnode->vn_type != VMMFS_NMACHINES)
 		return EINVAL;
 
-	/*
-	 * Acquire the target vnode through the namecache so the final vrele
-	 * drives the inactive/reclaim sequence that clears node->vn_vnode
-	 * (mirrors tmpfs_nremove).
-	 */
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
 	if (error)
 		return error;
@@ -591,6 +618,75 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 	}
 	m->in_use = 0;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	cache_unlink(ap->a_nch);
+	vrele(vp);
+	return 0;
+}
+
+/*
+ * Create "stopped" under a machine directory: an atomic, idempotent request to
+ * stop the machine.  `echo apic > stopped` opens with O_CREAT; the write that
+ * follows refines the method.
+ */
+static int
+vmmfs_ncreate(struct vop_ncreate_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
+	struct vmmfs_machine *m;
+	struct vnode *vp;
+	int error;
+
+	if (dnode->vn_type != VMMFS_NMACHINE)
+		return EPERM;
+	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
+		return EPERM;
+
+	m = dnode->vn_machine;
+	vmmfs_machine_stop(m->rust, 0);
+
+	error = vmmfs_alloc_vp(dvp->v_mount, &m->cfg[VMMFS_CFG_STOPPED],
+	    LK_EXCLUSIVE | LK_RETRY, &vp);
+	if (error)
+		return error;
+
+	*ap->a_vpp = vp;
+	cache_setunresolved(ap->a_nch);
+	cache_setvp(ap->a_nch, vp);
+	return 0;
+}
+
+/*
+ * `rm machines/<name>/stopped` is an atomic request to start the machine.
+ * Only "stopped" is removable; the config files are read-only.
+ */
+static int
+vmmfs_nremove(struct vop_nremove_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
+	struct vmmfs_machine *m;
+	struct vnode *vp;
+	int error;
+
+	if (dnode->vn_type != VMMFS_NMACHINE)
+		return EPERM;
+	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
+		return EPERM;
+
+	m = dnode->vn_machine;
+	if (!vmmfs_machine_is_stopped(m->rust))
+		return ENOENT;
+
+	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
+	if (error)
+		return error;
+	vn_unlock(vp);
+
+	vmmfs_machine_start(m->rust);
 
 	cache_unlink(ap->a_nch);
 	vrele(vp);
@@ -614,7 +710,6 @@ vmmfs_access(struct vop_access_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
-	/* Writability is expressed per node via the mode (dirs 0555, files 0444). */
 	return vop_helper_access(ap, 0, 0, node->vn_mode, 0);
 }
 
@@ -650,10 +745,19 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 }
 
 /*
- * Format a config file's normalized content.  Returns the length (as
- * ksnprintf would, excluding the NUL).  stopped is an empty file whose mere
- * presence signals the stopped desired-state.
+ * Accept no-op changes to the writable stopped control file (e.g. the O_TRUNC
+ * from `echo ... > stopped`); everything else is read-only.
  */
+static int
+vmmfs_setattr(struct vop_setattr_args *ap)
+{
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_STOPPED)
+		return 0;
+	return EPERM;
+}
+
 static int
 vmmfs_cfg_format(struct vmmfs_node *node, char *buf, size_t bufsize)
 {
@@ -696,6 +800,46 @@ vmmfs_read(struct vop_read_args *ap)
 	if (off >= len)
 		return 0;
 	return uiomove(buf + off, (size_t)(len - off), uio);
+}
+
+/*
+ * Writing the stopped control file selects the stop method (apic|force) and
+ * (re)applies the stop.  Idempotent.  Only the stopped file is writable.
+ */
+static int
+vmmfs_write(struct vop_write_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct uio *uio = ap->a_uio;
+	struct vmmfs_node *node = VP_TO_VMMFS(vp);
+	char buf[16];
+	size_t take;
+	int error, force;
+
+	if (node->vn_type != VMMFS_NCONFIG || node->vn_cfg != VMMFS_CFG_STOPPED)
+		return EPERM;
+
+	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
+	    (size_t)uio->uio_resid : sizeof(buf) - 1;
+	error = uiomove(buf, take, uio);
+	if (error)
+		return error;
+	buf[take] = '\0';
+	force = (take >= 5 && strncmp(buf, "force", 5) == 0);
+
+	/* Consume and discard any remaining bytes so the write is not short. */
+	while (uio->uio_resid > 0) {
+		char dump[32];
+		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
+		    (size_t)uio->uio_resid : sizeof(dump);
+
+		error = uiomove(dump, d, uio);
+		if (error)
+			return error;
+	}
+
+	vmmfs_machine_stop(node->vn_machine->rust, force);
+	return 0;
 }
 
 static int
@@ -804,7 +948,6 @@ done:
 static int
 vmmfs_inactive(struct vop_inactive_args *ap)
 {
-	/* All nodes are permanent (registry-embedded); keep the vnode cached. */
 	return 0;
 }
 
@@ -839,12 +982,16 @@ static struct vop_ops vmmfs_vnode_vops = {
 	.vop_nresolve =		vmmfs_nresolve,
 	.vop_nlookupdotdot =	vmmfs_nlookupdotdot,
 	.vop_nsymlink =		vmmfs_nsymlink,
+	.vop_ncreate =		vmmfs_ncreate,
+	.vop_nremove =		vmmfs_nremove,
 	.vop_nrmdir =		vmmfs_nrmdir,
 	.vop_open =		vmmfs_open,
 	.vop_close =		vmmfs_close,
 	.vop_access =		vmmfs_access,
 	.vop_getattr =		vmmfs_getattr,
+	.vop_setattr =		vmmfs_setattr,
 	.vop_read =		vmmfs_read,
+	.vop_write =		vmmfs_write,
 	.vop_readdir =		vmmfs_readdir,
 	.vop_inactive =		vmmfs_inactive,
 	.vop_reclaim =		vmmfs_reclaim,
@@ -882,6 +1029,7 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 			vmmfs_node_init(&m->cfg[j], VMMFS_NCONFIG, base + 1 + j,
 			    &m->node, m, j);
 		m->in_use = 0;
+		m->rust = NULL;
 	}
 
 	mp->mnt_flag |= MNT_LOCAL;
@@ -919,11 +1067,14 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 		return error;
 
 	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
+		struct vmmfs_machine *m = &vmp->vm_mach[i];
 		int j;
 
+		if (m->rust != NULL)
+			vmmfs_machine_free(m->rust);
 		for (j = 0; j < VMMFS_NCFG; j++)
-			vmmfs_node_uninit(&vmp->vm_mach[i].cfg[j]);
-		vmmfs_node_uninit(&vmp->vm_mach[i].node);
+			vmmfs_node_uninit(&m->cfg[j]);
+		vmmfs_node_uninit(&m->node);
 	}
 	vmmfs_node_uninit(&vmp->vm_machines);
 	vmmfs_node_uninit(&vmp->vm_root);
