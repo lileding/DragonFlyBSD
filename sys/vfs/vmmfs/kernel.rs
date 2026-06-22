@@ -9,8 +9,8 @@ use core::ffi::{c_char, c_int};
 
 extern "C" {
     fn kprintf(fmt: *const c_char, ...) -> c_int;
-    fn vmmfs_kalloc(size: usize) -> *mut u8;
-    fn vmmfs_kfree(ptr: *mut u8);
+    fn vmm_kalloc(size: usize) -> *mut u8;
+    fn vmm_kfree(ptr: *mut u8);
 }
 
 /// Print a NUL-terminated message to the kernel console.  `msg` is used as the
@@ -33,9 +33,9 @@ impl<T> KBox<T> {
     /// Move `value` onto the kernel heap.  `None` only on allocation failure
     /// (kmalloc uses M_WAITOK, so that is effectively impossible).
     pub fn new(value: T) -> Option<KBox<T>> {
-        // SAFETY: vmmfs_kalloc returns a block of the requested size, aligned
+        // SAFETY: vmm_kalloc returns a block of the requested size, aligned
         // adequately for T (whose alignment is <= 16), or NULL.
-        let ptr = unsafe { vmmfs_kalloc(core::mem::size_of::<T>()) } as *mut T;
+        let ptr = unsafe { vmm_kalloc(core::mem::size_of::<T>()) } as *mut T;
         if ptr.is_null() {
             return None;
         }
@@ -51,13 +51,13 @@ impl<T> KBox<T> {
     ///
     /// This avoids moving a large `T` from the stack into the box: that move is
     /// lowered to a `memcpy` call the kernel ELF object loader cannot relocate
-    /// (R_X86_64_GOTPCREL, "unexpected relocation type 9").  `vmmfs_kalloc`
+    /// (R_X86_64_GOTPCREL, "unexpected relocation type 9").  `vmm_kalloc`
     /// zeroes the block (M_ZERO), so the result is a valid all-zero `T`.
     ///
     /// # Safety
     /// `T` must be valid when all-zero (a POD struct with no niche/refs).
     pub unsafe fn new_zeroed() -> Option<KBox<T>> {
-        let ptr = vmmfs_kalloc(core::mem::size_of::<T>()) as *mut T;
+        let ptr = vmm_kalloc(core::mem::size_of::<T>()) as *mut T;
         if ptr.is_null() {
             None
         } else {
@@ -87,7 +87,7 @@ impl<T> Drop for KBox<T> {
         // SAFETY: ptr was produced by KBox::new and is still initialized.
         unsafe {
             core::ptr::drop_in_place(self.ptr);
-            vmmfs_kfree(self.ptr as *mut u8);
+            vmm_kfree(self.ptr as *mut u8);
         }
     }
 }

@@ -9,193 +9,163 @@ use core::panic::PanicInfo;
 use kernel::KBox;
 use machine::MachineState;
 
-const LOAD_MESSAGE: &[u8] = b"vmmfs: Rust module loaded\n\0";
-const UNLOAD_MESSAGE: &[u8] = b"vmmfs: Rust module unloaded\n\0";
+const LOAD_MESSAGE: &[u8] = b"vmm: core loaded\n\0";
+const UNLOAD_MESSAGE: &[u8] = b"vmm: core unloaded\n\0";
 
 #[no_mangle]
-pub extern "C" fn vmmfs_rust_init() -> c_int {
+pub extern "C" fn vmm_init() -> c_int {
     kernel::kputs(LOAD_MESSAGE);
     0
 }
 
 #[no_mangle]
-pub extern "C" fn vmmfs_rust_fini() {
+pub extern "C" fn vmm_fini() {
     kernel::kputs(UNLOAD_MESSAGE);
 }
 
-// ---------------------------------------------------------------------------
-// C boundary shims.  These and kernel.rs are the only places that touch the C
-// ABI; they delegate to the safe logic in machine.rs and to kernel.rs.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// C ABI for the VMM core.
+//
+// These are the only entry points the vmmfs control plane (the C VFS layer)
+// calls into the vmm core.  All machine logic lives in `machine.rs` as plain
+// safe Rust; the unsafe raw-pointer primitives are confined to `kernel.rs`.
+// Each shim below is a thin adapter: it converts the C-provided handle/buffers
+// to safe Rust via one audited `kernel::` helper, then calls a safe method.
+//
+// Shared SAFETY contract for every `m: *mut MachineState` below: `m` is a live
+// handle returned by `vmm_machine_new` and not yet freed, and any `(buf, len)`
+// names readable/writable memory of that length.  The C caller upholds this.
+// ===========================================================================
 
-/// Create a machine (mkdir): stopped, no config yet.  Allocates zeroed and
-/// initializes in place to avoid moving the large MachineState (see new_zeroed).
+/// Create a machine (mkdir): stopped, no config yet.
 #[no_mangle]
-pub extern "C" fn vmmfs_machine_new() -> *mut MachineState {
-    // SAFETY: MachineState is POD (valid all-zero); init() sets it up in place.
-    match unsafe { KBox::<MachineState>::new_zeroed() } {
-        Some(b) => {
-            let ptr = b.into_raw();
-            // SAFETY: ptr is a freshly allocated, zeroed MachineState.
-            unsafe { kernel::handle_mut(ptr).init() };
-            ptr
+pub extern "C" fn vmm_machine_new() -> *mut MachineState {
+    // SAFETY: MachineState is POD (valid all-zero); we initialize it in place
+    // before handing the pointer back, so it is never observed uninitialized.
+    unsafe {
+        match KBox::<MachineState>::new_zeroed() {
+            Some(b) => {
+                let ptr = b.into_raw();
+                kernel::handle_mut(ptr).init();
+                ptr
+            }
+            None => core::ptr::null_mut(),
         }
-        None => core::ptr::null_mut(),
     }
 }
 
-/// # Safety: `m` is a handle from `vmmfs_machine_new`, not yet freed.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_free(m: *mut MachineState) {
+pub extern "C" fn vmm_machine_free(m: *mut MachineState) {
     if !m.is_null() {
-        drop(KBox::from_raw(m));
+        // SAFETY: m came from vmm_machine_new and is freed exactly once.
+        unsafe { drop(KBox::from_raw(m)) };
     }
 }
 
-// ---- desired config registers: commit (parse+update) and read-back ----
+// ---- desired-config registers: commit (parse+update) and read-back ----
 
-/// # Safety: `m` live; `buf` covers `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_commit_vcpu(
-    m: *mut MachineState,
-    buf: *const u8,
-    len: usize,
-) -> c_int {
-    kernel::handle_mut(m).commit_vcpu(kernel::bytes(buf, len)) as c_int
+pub extern "C" fn vmm_machine_commit_vcpu(m: *mut MachineState, buf: *const u8, len: usize) -> c_int {
+    // SAFETY: see the shared contract above.
+    let (st, text) = unsafe { (kernel::handle_mut(m), kernel::bytes(buf, len)) };
+    st.commit_vcpu(text) as c_int
 }
 
-/// # Safety: `m` live; `buf` covers `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_commit_mem(
-    m: *mut MachineState,
-    buf: *const u8,
-    len: usize,
-) -> c_int {
-    kernel::handle_mut(m).commit_mem(kernel::bytes(buf, len)) as c_int
+pub extern "C" fn vmm_machine_commit_mem(m: *mut MachineState, buf: *const u8, len: usize) -> c_int {
+    let (st, text) = unsafe { (kernel::handle_mut(m), kernel::bytes(buf, len)) };
+    st.commit_mem(text) as c_int
 }
 
-/// # Safety: `m` live; `buf` covers `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_commit_loader(
-    m: *mut MachineState,
-    buf: *const u8,
-    len: usize,
-) -> c_int {
-    kernel::handle_mut(m).commit_loader(kernel::bytes(buf, len)) as c_int
+pub extern "C" fn vmm_machine_commit_loader(m: *mut MachineState, buf: *const u8, len: usize) -> c_int {
+    let (st, text) = unsafe { (kernel::handle_mut(m), kernel::bytes(buf, len)) };
+    st.commit_loader(text) as c_int
 }
 
-/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_vcpu_text(
-    m: *mut MachineState,
-    buf: *mut u8,
-    cap: usize,
-) -> usize {
-    kernel::handle_mut(m).vcpu_text(kernel::bytes_mut(buf, cap))
+pub extern "C" fn vmm_machine_vcpu_text(m: *mut MachineState, buf: *mut u8, cap: usize) -> usize {
+    let (st, out) = unsafe { (kernel::handle_mut(m), kernel::bytes_mut(buf, cap)) };
+    st.vcpu_text(out)
 }
 
-/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_mem_text(
-    m: *mut MachineState,
-    buf: *mut u8,
-    cap: usize,
-) -> usize {
-    kernel::handle_mut(m).mem_text(kernel::bytes_mut(buf, cap))
+pub extern "C" fn vmm_machine_mem_text(m: *mut MachineState, buf: *mut u8, cap: usize) -> usize {
+    let (st, out) = unsafe { (kernel::handle_mut(m), kernel::bytes_mut(buf, cap)) };
+    st.mem_text(out)
 }
 
-/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_loader_text(
-    m: *mut MachineState,
-    buf: *mut u8,
-    cap: usize,
-) -> usize {
-    kernel::handle_mut(m).loader_text(kernel::bytes_mut(buf, cap))
+pub extern "C" fn vmm_machine_loader_text(m: *mut MachineState, buf: *mut u8, cap: usize) -> usize {
+    let (st, out) = unsafe { (kernel::handle_mut(m), kernel::bytes_mut(buf, cap)) };
+    st.loader_text(out)
 }
 
 /// Copy the loader path (no trailing newline) for start-time resolution.
-/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_loader_path(
-    m: *mut MachineState,
-    buf: *mut u8,
-    cap: usize,
-) -> usize {
-    kernel::handle_mut(m).loader_path(kernel::bytes_mut(buf, cap))
+pub extern "C" fn vmm_machine_loader_path(m: *mut MachineState, buf: *mut u8, cap: usize) -> usize {
+    let (st, out) = unsafe { (kernel::handle_mut(m), kernel::bytes_mut(buf, cap)) };
+    st.loader_path(out)
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_config_complete(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).config_complete() as c_int
+pub extern "C" fn vmm_machine_config_complete(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.config_complete() as c_int
 }
 
 // ---- lifecycle ----
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_is_stopped(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).is_stopped() as c_int
+pub extern "C" fn vmm_machine_is_stopped(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.is_stopped() as c_int
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_stop(m: *mut MachineState, force: c_int) {
-    kernel::handle_mut(m).stop(force != 0);
+pub extern "C" fn vmm_machine_stop(m: *mut MachineState, force: c_int) {
+    unsafe { kernel::handle_mut(m) }.stop(force != 0);
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_start(m: *mut MachineState) {
-    kernel::handle_mut(m).start();
+pub extern "C" fn vmm_machine_start(m: *mut MachineState) {
+    unsafe { kernel::handle_mut(m) }.start();
 }
 
 // ---- lease ----
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_is_deleting(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).is_deleting() as c_int
+pub extern "C" fn vmm_machine_is_deleting(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.is_deleting() as c_int
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_lease_open(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).lease_open() as c_int
+pub extern "C" fn vmm_machine_lease_open(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.lease_open() as c_int
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_lease_close(m: *mut MachineState) -> c_int {
-    match kernel::handle_mut(m).lease_close() {
+pub extern "C" fn vmm_machine_lease_close(m: *mut MachineState) -> c_int {
+    match unsafe { kernel::handle_mut(m) }.lease_close() {
         machine::CloseAction::Delete => 1,
         machine::CloseAction::None => 0,
     }
 }
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_begin_delete(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).begin_delete() as c_int
+pub extern "C" fn vmm_machine_begin_delete(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.begin_delete() as c_int
 }
 
 // ---- events ----
 
-/// # Safety: `m` is a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_events_pending(m: *mut MachineState) -> c_int {
-    kernel::handle_mut(m).events_pending() as c_int
+pub extern "C" fn vmm_machine_events_pending(m: *mut MachineState) -> c_int {
+    unsafe { kernel::handle_mut(m) }.events_pending() as c_int
 }
 
-/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_machine_read_events(
-    m: *mut MachineState,
-    buf: *mut u8,
-    cap: usize,
-) -> usize {
-    kernel::handle_mut(m).read_events(kernel::bytes_mut(buf, cap))
+pub extern "C" fn vmm_machine_read_events(m: *mut MachineState, buf: *mut u8, cap: usize) -> usize {
+    let (st, out) = unsafe { (kernel::handle_mut(m), kernel::bytes_mut(buf, cap)) };
+    st.read_events(out)
 }
 
 #[panic_handler]

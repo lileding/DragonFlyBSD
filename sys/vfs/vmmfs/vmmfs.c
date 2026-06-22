@@ -15,9 +15,11 @@
  * stopped machine.  Every operation is atomic or idempotent — no intermediate
  * state.  The loader is not yet executed (that is "vmm core").
  *
- * C owns the VFS/namecache plumbing, the per-open buffers, the loader-path
- * validation, and the fixed machine registry; Rust owns the config parsing,
- * desired-state registers, and the lifecycle/lease/event state machine.
+ * Naming: vmmfs_* is the control plane (this file) -- the VFS/namecache
+ * plumbing, per-open buffers, loader-path validation, and the machine registry.
+ * vmm_* is the VMM core (the Rust crate) and owns what a machine IS: config
+ * parsing, the desired-state registers, and the lifecycle/lease/event state
+ * machine.  The C registry slot (struct vmmfs_machine) wraps a vmm_machine_state.
  */
 
 #include <sys/param.h>
@@ -36,53 +38,53 @@
 #include <sys/uio.h>
 #include <sys/queue.h>
 
-extern int	vmmfs_rust_init(void);
-extern void	vmmfs_rust_fini(void);
+extern int	vmm_init(void);
+extern void	vmm_fini(void);
 
 /* Rust-owned per-machine state object (config registers + lifecycle). */
-struct vmmfs_machine_state;
-extern struct vmmfs_machine_state *vmmfs_machine_new(void);
-extern void	vmmfs_machine_free(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_commit_vcpu(struct vmmfs_machine_state *m,
+struct vmm_machine_state;
+extern struct vmm_machine_state *vmm_machine_new(void);
+extern void	vmm_machine_free(struct vmm_machine_state *m);
+extern int	vmm_machine_commit_vcpu(struct vmm_machine_state *m,
 		    const uint8_t *buf, size_t len);
-extern int	vmmfs_machine_commit_mem(struct vmmfs_machine_state *m,
+extern int	vmm_machine_commit_mem(struct vmm_machine_state *m,
 		    const uint8_t *buf, size_t len);
-extern int	vmmfs_machine_commit_loader(struct vmmfs_machine_state *m,
+extern int	vmm_machine_commit_loader(struct vmm_machine_state *m,
 		    const uint8_t *buf, size_t len);
-extern size_t	vmmfs_machine_vcpu_text(struct vmmfs_machine_state *m,
+extern size_t	vmm_machine_vcpu_text(struct vmm_machine_state *m,
 		    uint8_t *buf, size_t cap);
-extern size_t	vmmfs_machine_mem_text(struct vmmfs_machine_state *m,
+extern size_t	vmm_machine_mem_text(struct vmm_machine_state *m,
 		    uint8_t *buf, size_t cap);
-extern size_t	vmmfs_machine_loader_text(struct vmmfs_machine_state *m,
+extern size_t	vmm_machine_loader_text(struct vmm_machine_state *m,
 		    uint8_t *buf, size_t cap);
-extern size_t	vmmfs_machine_loader_path(struct vmmfs_machine_state *m,
+extern size_t	vmm_machine_loader_path(struct vmm_machine_state *m,
 		    uint8_t *buf, size_t cap);
-extern int	vmmfs_machine_config_complete(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_is_stopped(struct vmmfs_machine_state *m);
-extern void	vmmfs_machine_stop(struct vmmfs_machine_state *m, int force);
-extern void	vmmfs_machine_start(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_is_deleting(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_lease_open(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_lease_close(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_begin_delete(struct vmmfs_machine_state *m);
-extern int	vmmfs_machine_events_pending(struct vmmfs_machine_state *m);
-extern size_t	vmmfs_machine_read_events(struct vmmfs_machine_state *m,
+extern int	vmm_machine_config_complete(struct vmm_machine_state *m);
+extern int	vmm_machine_is_stopped(struct vmm_machine_state *m);
+extern void	vmm_machine_stop(struct vmm_machine_state *m, int force);
+extern void	vmm_machine_start(struct vmm_machine_state *m);
+extern int	vmm_machine_is_deleting(struct vmm_machine_state *m);
+extern int	vmm_machine_lease_open(struct vmm_machine_state *m);
+extern int	vmm_machine_lease_close(struct vmm_machine_state *m);
+extern int	vmm_machine_begin_delete(struct vmm_machine_state *m);
+extern int	vmm_machine_events_pending(struct vmm_machine_state *m);
+extern size_t	vmm_machine_read_events(struct vmm_machine_state *m,
 		    uint8_t *buf, size_t cap);
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
 /* kmalloc wrappers backing the Rust side's raw state objects. */
-void *vmmfs_kalloc(size_t size);
-void vmmfs_kfree(void *ptr);
+void *vmm_kalloc(size_t size);
+void vmm_kfree(void *ptr);
 
 void *
-vmmfs_kalloc(size_t size)
+vmm_kalloc(size_t size)
 {
 	return kmalloc(size, M_VMMFS, M_WAITOK | M_ZERO);
 }
 
 void
-vmmfs_kfree(void *ptr)
+vmm_kfree(void *ptr)
 {
 	kfree(ptr, M_VMMFS);
 }
@@ -221,7 +223,7 @@ struct vmmfs_device {
 struct vmmfs_machine {
 	int				in_use;
 	char				name[VMMFS_NAME_MAX + 1];
-	struct vmmfs_machine_state     *rust;	/* config + lifecycle (Rust) */
+	struct vmm_machine_state     *rust;	/* config + lifecycle (Rust) */
 	struct vmmfs_node		node;
 	struct vmmfs_node		cfg[VMMFS_NCFG];
 	struct vmmfs_node		vn_devices;	/* this machine's devices/ */
@@ -308,7 +310,7 @@ static int
 vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg)
 {
 	if (cfg == VMMFS_CFG_STOPPED)
-		return vmmfs_machine_is_stopped(m->rust);
+		return vmm_machine_is_stopped(m->rust);
 	return 1;
 }
 
@@ -534,11 +536,11 @@ vmmfs_cfg_text(struct vmmfs_node *node, uint8_t *buf, size_t cap)
 
 	switch (node->vn_cfg) {
 	case VMMFS_CFG_VCPU:
-		return vmmfs_machine_vcpu_text(m->rust, buf, cap);
+		return vmm_machine_vcpu_text(m->rust, buf, cap);
 	case VMMFS_CFG_MEM:
-		return vmmfs_machine_mem_text(m->rust, buf, cap);
+		return vmm_machine_mem_text(m->rust, buf, cap);
 	case VMMFS_CFG_LOADER:
-		return vmmfs_machine_loader_text(m->rust, buf, cap);
+		return vmm_machine_loader_text(m->rust, buf, cap);
 	default:
 		return 0;
 	}
@@ -551,13 +553,13 @@ vmmfs_cfg_commit(struct vmmfs_node *node, const uint8_t *buf, size_t len)
 
 	switch (node->vn_cfg) {
 	case VMMFS_CFG_VCPU:
-		(void)vmmfs_machine_commit_vcpu(m->rust, buf, len);
+		(void)vmm_machine_commit_vcpu(m->rust, buf, len);
 		break;
 	case VMMFS_CFG_MEM:
-		(void)vmmfs_machine_commit_mem(m->rust, buf, len);
+		(void)vmm_machine_commit_mem(m->rust, buf, len);
 		break;
 	case VMMFS_CFG_LOADER:
-		(void)vmmfs_machine_commit_loader(m->rust, buf, len);
+		(void)vmm_machine_commit_loader(m->rust, buf, len);
 		break;
 	default:
 		break;
@@ -578,7 +580,7 @@ vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred)
 	size_t n;
 	int error;
 
-	n = vmmfs_machine_loader_path(m->rust, (uint8_t *)path,
+	n = vmm_machine_loader_path(m->rust, (uint8_t *)path,
 	    sizeof(path) - 1);
 	if (n == 0)
 		return EINVAL;
@@ -655,7 +657,7 @@ vmmfs_alloc_slot(struct vmmfs_mount *vmp)
 		if (busy)
 			continue;
 		if (m->rust != NULL) {
-			vmmfs_machine_free(m->rust);
+			vmm_machine_free(m->rust);
 			m->rust = NULL;
 		}
 		return m;
@@ -676,7 +678,7 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 	int idx = (int)(m - vmp->vm_mach);
 	int i;
 
-	vmmfs_machine_begin_delete(m->rust);
+	vmm_machine_begin_delete(m->rust);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	m->in_use = 0;
 	/* Any device bound to this machine: host devices return to the host
@@ -883,7 +885,7 @@ vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
 	struct vmmfs_node *dnode = VP_TO_VMMFS(dvp);
 	struct vmmfs_machine *m;
-	struct vmmfs_machine_state *rust;
+	struct vmm_machine_state *rust;
 	struct vnode *vp;
 	int error;
 
@@ -894,20 +896,20 @@ vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
 		return EEXIST;	/* host is reserved */
 
-	rust = vmmfs_machine_new();
+	rust = vmm_machine_new();
 	if (rust == NULL)
 		return ENOMEM;
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	if (vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vmmfs_machine_free(rust);
+		vmm_machine_free(rust);
 		return EEXIST;
 	}
 	m = vmmfs_alloc_slot(vmp);
 	if (m == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vmmfs_machine_free(rust);
+		vmm_machine_free(rust);
 		return ENOSPC;
 	}
 	bcopy(ncp->nc_name, m->name, ncp->nc_nlen);
@@ -964,7 +966,7 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	if (!vmmfs_machine_is_stopped(m->rust)) {
+	if (!vmm_machine_is_stopped(m->rust)) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return EBUSY;
@@ -997,7 +999,7 @@ vmmfs_ncreate(struct vop_ncreate_args *ap)
 		return EPERM;
 
 	m = dnode->vn_machine;
-	vmmfs_machine_stop(m->rust, 0);
+	vmm_machine_stop(m->rust, 0);
 
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->cfg[VMMFS_CFG_STOPPED],
 	    LK_EXCLUSIVE | LK_RETRY, &vp);
@@ -1073,10 +1075,10 @@ vmmfs_nremove(struct vop_nremove_args *ap)
 		return EPERM;
 
 	m = dnode->vn_machine;
-	if (!vmmfs_machine_is_stopped(m->rust))
+	if (!vmm_machine_is_stopped(m->rust))
 		return ENOENT;
 
-	if (!vmmfs_machine_config_complete(m->rust))
+	if (!vmm_machine_config_complete(m->rust))
 		return EINVAL;
 	error = vmmfs_validate_loader(m, ap->a_cred);
 	if (error)
@@ -1087,7 +1089,7 @@ vmmfs_nremove(struct vop_nremove_args *ap)
 		return error;
 	vn_unlock(vp);
 
-	vmmfs_machine_start(m->rust);
+	vmm_machine_start(m->rust);
 
 	cache_unlink(ap->a_nch);
 	vrele(vp);
@@ -1151,7 +1153,7 @@ vmmfs_open(struct vop_open_args *ap)
 	 * value, so a read-only open allocates nothing.
 	 */
 	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
-		if (vmmfs_machine_lease_open(node->vn_machine->rust) == 0)
+		if (vmm_machine_lease_open(node->vn_machine->rust) == 0)
 			return ENXIO;
 	}
 	return vop_stdopen(ap);
@@ -1172,7 +1174,7 @@ vmmfs_close(struct vop_close_args *ap)
 
 	/* Releasing the last lease of an armed machine destroys it (source 3). */
 	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
-		if (vmmfs_machine_lease_close(node->vn_machine->rust)) {
+		if (vmm_machine_lease_close(node->vn_machine->rust)) {
 			struct vmmfs_mount *vmp =
 			    VFS_TO_VMMFS(ap->a_vp->v_mount);
 
@@ -1291,7 +1293,7 @@ vmmfs_read(struct vop_read_args *ap)
 		uint8_t ebuf[256];
 		size_t n;
 
-		n = vmmfs_machine_read_events(node->vn_machine->rust, ebuf,
+		n = vmm_machine_read_events(node->vn_machine->rust, ebuf,
 		    sizeof(ebuf));
 		if (n == 0)
 			return 0;
@@ -1360,7 +1362,7 @@ vmmfs_write(struct vop_write_args *ap)
 			return error;
 	}
 
-	vmmfs_machine_stop(node->vn_machine->rust, force);
+	vmm_machine_stop(node->vn_machine->rust, force);
 	return 0;
 }
 
@@ -1739,7 +1741,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 		int j;
 
 		if (m->rust != NULL)
-			vmmfs_machine_free(m->rust);
+			vmm_machine_free(m->rust);
 		for (j = 0; j < VMMFS_NCFG; j++)
 			vmmfs_node_uninit(&m->cfg[j]);
 		vmmfs_node_uninit(&m->vn_devices);
@@ -1790,13 +1792,13 @@ vmmfs_statfs(struct mount *mp, struct statfs *sbp, struct ucred *cred)
 static int
 vmmfs_vfs_init(struct vfsconf *conf)
 {
-	return vmmfs_rust_init();
+	return vmm_init();
 }
 
 static int
 vmmfs_vfs_uninit(struct vfsconf *conf)
 {
-	vmmfs_rust_fini();
+	vmm_fini();
 	return 0;
 }
 
