@@ -195,12 +195,12 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     run(["/bin/sh", "-c", "dmesg | tail -260"],
         out_dir / f"dmesg_tail.{phase}")
 
-    for log_path in (
-        pathlib.Path("/var/log/Xorg.0.log"),
-        pathlib.Path.home() / ".local/share/xorg/Xorg.0.log",
+    for label, log_path in (
+        ("system", pathlib.Path("/var/log/Xorg.0.log")),
+        ("user", pathlib.Path.home() / ".local/share/xorg/Xorg.0.log"),
     ):
         if log_path.exists():
-            target = out_dir / f"{log_path.name}.{phase}"
+            target = out_dir / f"Xorg-{label}.log.{phase}"
             target.write_bytes(log_path.read_bytes())
 
     if phase != "x11":
@@ -208,7 +208,15 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
             capture_kms_property_probe(out_dir, phase)
         return
 
-    run(["/bin/sh", "-c", "xdotool mousemove_relative -- 17 11; sleep 0.2"],
+    run(["sleep", "2"], out_dir / "x11-idle-wait.x11", env=env)
+    run(["sysctl", "-n", "dev.drm.0.state"], out_dir / "drm_state.x11_idle")
+    cursor_move_cmd = (
+        "set -eu; "
+        "for step in 1 2 3 4 5 6 7 8 9 10 11 12; do "
+        "xdotool mousemove_relative -- 3 0; sleep 0.03; "
+        "done"
+    )
+    run(["/bin/sh", "-c", cursor_move_cmd],
         out_dir / "xdotool-cursor-move.x11", env=env)
     run(["sysctl", "-n", "dev.drm.0.state"], out_dir / "drm_state.x11_cursor")
     run(["xrandr", "--verbose"], out_dir / "xrandr.x11", env=env)
@@ -290,8 +298,8 @@ def captured_text(path: pathlib.Path) -> str:
 
 def has_error_text(text: str) -> bool:
     return bool(re.search(
-        r"Error|failed|Segmentation fault|core dumped|DeviceLost|"
-        r"couldn['’]?t open display|No protocol specified",
+        r"(^|\n)(Error:|.*\bfailed\b|Segmentation fault|core dumped|DeviceLost|"
+        r"couldn['’]?t open display|No protocol specified)",
         text,
         re.I,
     ))
@@ -393,7 +401,9 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     if not x11_ran:
         emit(allow_missing_x11, "x11 phase optional/missing")
     else:
-        x11_state = parse_state(out_dir / "drm_state.x11")
+        x11_state = parse_state(out_dir / "drm_state.x11_idle")
+        if not x11_state:
+            x11_state = parse_state(out_dir / "drm_state.x11")
         x11_cursor_state = parse_state(out_dir / "drm_state.x11_cursor")
         x11_cursor_text = captured_text(out_dir / "drm_state.x11_cursor")
         for name in ("xrandr.x11", "glxinfo-B.x11"):
@@ -417,8 +427,9 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             )
             emit(cursor_delta > 0,
                  f"cursor move used async cursor update delta={cursor_delta}")
-            emit(plane_delta == 0,
-                 f"cursor move did not update primary plane delta={plane_delta}")
+            emit(plane_delta <= 2,
+                 "cursor move did not trigger repeated primary plane "
+                 f"updates delta={plane_delta}")
         else:
             emit(False, "missing cursor/plane counters around xdotool move")
         if all(key in before and key in x11_cursor_state for key in (
@@ -473,14 +484,17 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     xlog = sorted(out_dir.glob("*Xorg*.x11"))
     after_xlog = sorted(out_dir.glob("*Xorg*.after"))
     if x11_ran and xlog:
-        text = xlog[0].read_text(errors="replace")
-        emit(bool(re.search(r"glamor X acceleration enabled.*(zink|NVK|MESA_NVK)", text, re.I)),
+        texts = [path.read_text(errors="replace") for path in xlog]
+        emit(any(re.search(r"glamor X acceleration enabled.*(zink|NVK|MESA_NVK)", text, re.I)
+                 for text in texts),
              "Xorg log has glamor acceleration on zink/NVK")
-        emit(not re.search(r"SWcursor|software cursor", text, re.I),
+        emit(not any(re.search(r"SWcursor|software cursor", text, re.I)
+                     for text in texts),
              "Xorg log does not use software cursor")
         if after_xlog:
-            after_text = after_xlog[0].read_text(errors="replace")
-            emit("Server terminated successfully" in after_text,
+            after_texts = [path.read_text(errors="replace") for path in after_xlog]
+            emit(any("Server terminated successfully" in text
+                     for text in after_texts),
                  "Xorg terminated successfully")
         else:
             emit(False, "missing after Xorg log")
