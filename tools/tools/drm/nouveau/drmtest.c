@@ -17,6 +17,55 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#define DRM_NOUVEAU_CHANNEL_ALLOC	0x02
+#define DRM_NOUVEAU_CHANNEL_FREE	0x03
+#define DRM_NOUVEAU_EXEC		0x12
+
+#define NOUVEAU_FIFO_ENGINE_GR		0x01
+#define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
+
+struct drm_nouveau_channel_alloc {
+	uint32_t fb_ctxdma_handle;
+	uint32_t tt_ctxdma_handle;
+	int32_t channel;
+	uint32_t pushbuf_domains;
+	uint32_t notifier_handle;
+	struct {
+		uint32_t handle;
+		uint32_t grclass;
+	} subchan[8];
+	uint32_t nr_subchan;
+};
+
+struct drm_nouveau_channel_free {
+	int32_t channel;
+};
+
+struct drm_nouveau_sync {
+	uint32_t flags;
+	uint32_t handle;
+	uint64_t timeline_value;
+};
+
+struct drm_nouveau_exec {
+	uint32_t channel;
+	uint32_t push_count;
+	uint32_t wait_count;
+	uint32_t sig_count;
+	uint64_t wait_ptr;
+	uint64_t sig_ptr;
+	uint64_t push_ptr;
+};
+
+#define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, \
+	    struct drm_nouveau_channel_alloc)
+#define DRM_IOCTL_NOUVEAU_CHANNEL_FREE \
+	DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_FREE, \
+	    struct drm_nouveau_channel_free)
+#define DRM_IOCTL_NOUVEAU_EXEC \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
+
 static int failures;
 
 struct atomic_plane_snapshot {
@@ -30,6 +79,11 @@ struct atomic_plane_snapshot {
 	uint64_t src_y;
 	uint64_t src_w;
 	uint64_t src_h;
+};
+
+struct exec_sync_file {
+	int fd;
+	bool was_pending;
 };
 
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
@@ -643,6 +697,148 @@ wait_sync_file_readable(int fd, int timeout_ms, int *saved_errno)
 	return 1;
 }
 
+static bool
+syncobj_create_handle(int fd, uint32_t *handle_out)
+{
+	struct drm_syncobj_create req;
+
+	memset(&req, 0, sizeof(req));
+	if (drmIoctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &req) != 0)
+		return false;
+	*handle_out = req.handle;
+	return true;
+}
+
+static void
+syncobj_destroy_handle(int fd, uint32_t handle)
+{
+	struct drm_syncobj_destroy req;
+
+	if (handle == 0)
+		return;
+	memset(&req, 0, sizeof(req));
+	req.handle = handle;
+	(void)drmIoctl(fd, DRM_IOCTL_SYNCOBJ_DESTROY, &req);
+}
+
+static bool
+syncobj_export_sync_file(int fd, uint32_t handle, int *sync_fd_out)
+{
+	struct drm_syncobj_handle req;
+
+	memset(&req, 0, sizeof(req));
+	req.handle = handle;
+	req.flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE;
+	req.fd = -1;
+	if (drmIoctl(fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &req) != 0)
+		return false;
+	*sync_fd_out = req.fd;
+	return true;
+}
+
+static bool
+nouveau_channel_alloc(int fd, int32_t *channel_out)
+{
+	struct drm_nouveau_channel_alloc req;
+
+	memset(&req, 0, sizeof(req));
+	req.fb_ctxdma_handle = ~0u;
+	req.tt_ctxdma_handle = NOUVEAU_FIFO_ENGINE_GR;
+	if (drmIoctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC, &req) != 0)
+		return false;
+	*channel_out = req.channel;
+	return true;
+}
+
+static void
+nouveau_channel_free(int fd, int32_t channel)
+{
+	struct drm_nouveau_channel_free req;
+
+	if (channel < 0)
+		return;
+	memset(&req, 0, sizeof(req));
+	req.channel = channel;
+	(void)drmIoctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_FREE, &req);
+}
+
+static bool
+nouveau_exec_signal_timeline(int fd, int32_t channel, uint32_t handle,
+    uint64_t point)
+{
+	struct drm_nouveau_sync sig;
+	struct drm_nouveau_exec exec;
+
+	memset(&sig, 0, sizeof(sig));
+	sig.flags = DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ;
+	sig.handle = handle;
+	sig.timeline_value = point;
+
+	memset(&exec, 0, sizeof(exec));
+	exec.channel = (uint32_t)channel;
+	exec.sig_count = 1;
+	exec.sig_ptr = (uint64_t)(uintptr_t)&sig;
+
+	return drmIoctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) == 0;
+}
+
+static bool
+create_pending_exec_sync_file(int fd, int32_t channel,
+    struct exec_sync_file *sync_file)
+{
+	static const uint32_t batch_counts[] = { 64, 256, 1024, 4096 };
+	int saved_errno = 0;
+
+	sync_file->fd = -1;
+	sync_file->was_pending = false;
+
+	for (size_t b = 0; b < sizeof(batch_counts) / sizeof(batch_counts[0]);
+	    b++) {
+		uint32_t handle = 0;
+		int sync_fd = -1;
+		int wait_ret;
+		bool ok = true;
+
+		if (!syncobj_create_handle(fd, &handle))
+			return false;
+
+		for (uint32_t i = 1; i <= batch_counts[b]; i++) {
+			if (!nouveau_exec_signal_timeline(fd, channel, handle,
+			    i)) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok)
+			ok = syncobj_export_sync_file(fd, handle, &sync_fd);
+		syncobj_destroy_handle(fd, handle);
+		if (!ok) {
+			if (sync_fd >= 0)
+				(void)close(sync_fd);
+			return false;
+		}
+
+		wait_ret = wait_sync_file_readable(sync_fd, 0, &saved_errno);
+		if (wait_ret == 0) {
+			sync_file->fd = sync_fd;
+			sync_file->was_pending = true;
+			printf("    IN_FENCE_FD producer batch=%u pending\n",
+			    batch_counts[b]);
+			return true;
+		}
+		if (wait_ret < 0) {
+			printf("    IN_FENCE_FD producer wait errno=%d\n",
+			    saved_errno);
+			(void)close(sync_fd);
+			return false;
+		}
+
+		(void)close(sync_fd);
+	}
+
+	return false;
+}
+
 static int
 atomic_crtc_color_test_only_commit(int fd, uint32_t crtc_id,
     uint32_t degamma_blob, uint32_t ctm_blob, uint32_t gamma_blob,
@@ -692,6 +888,54 @@ atomic_primary_out_fence_commit(int fd, uint32_t crtc_id, uint32_t plane_id,
 	*out_fence_fd = -1;
 	if (!atomic_add_crtc_property(fd, req, crtc_id, "OUT_FENCE_PTR",
 	    (uint64_t)(uintptr_t)out_fence_fd) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "FB_ID",
+	    snapshot->fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
+	    snapshot->crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X",
+	    snapshot->crtc_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y",
+	    snapshot->crtc_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W",
+	    snapshot->crtc_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H",
+	    snapshot->crtc_h) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X",
+	    snapshot->src_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y",
+	    snapshot->src_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    snapshot->src_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    snapshot->src_h)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+static int
+atomic_primary_in_fence_commit(int fd, uint32_t plane_id,
+    const struct atomic_plane_snapshot *snapshot, int in_fence_fd,
+    int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_plane_property(fd, req, plane_id, "IN_FENCE_FD",
+	    (uint64_t)in_fence_fd) ||
 	    !atomic_add_plane_property(fd, req, plane_id, "FB_ID",
 	    snapshot->fb_id) ||
 	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
@@ -787,6 +1031,84 @@ check_atomic_out_fence_runtime_contract(int fd, uint32_t crtc_id,
 		check(true, "OUT_FENCE_PTR sync_file becomes readable");
 	}
 	check(close(out_fence_fd) == 0, "close OUT_FENCE_PTR sync_file fd");
+}
+
+/*
+ * check_atomic_in_fence_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC and primary plane IDs.  Owns a temporary nouveau
+ *   channel, syncobj handle, and exported sync_file fd while constructing the
+ *   incoming fence.  The syncobj is destroyed after export; the sync_file fd
+ *   remains owned by this probe and is closed before return.
+ *
+ * Lifetime:
+ *   Creates a real pending nvkm EXEC fence, exports it as sync_file, proves the
+ *   fd is pending with a zero-time EVFILT_READ probe, then submits an unchanged
+ *   primary-plane atomic commit with IN_FENCE_FD set to that fd.  The commit
+ *   must not return until the incoming fence has signaled.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The GPU completion and sync_file kqueue
+ *   notification run asynchronously in the kernel; the atomic commit itself is
+ *   the synchronization point being verified.
+ */
+static void
+check_atomic_in_fence_runtime_contract(int fd, uint32_t crtc_id,
+    uint32_t plane_id, const char *object_name)
+{
+	struct atomic_plane_snapshot snapshot;
+	struct exec_sync_file sync_file;
+	int32_t channel = -1;
+	int saved_errno = 0;
+	int wait_ret;
+	int ret;
+
+	if (!get_plane_snapshot(fd, plane_id, &snapshot, object_name))
+		return;
+	check(snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for IN_FENCE_FD probe");
+	check(snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for IN_FENCE_FD probe");
+	if (snapshot.fb_id == 0 || snapshot.crtc_id != crtc_id)
+		return;
+
+	if (!nouveau_channel_alloc(fd, &channel)) {
+		printf("    IN_FENCE_FD channel alloc errno=%d\n", errno);
+		check(false, "nouveau channel alloc succeeds for IN_FENCE_FD probe");
+		return;
+	}
+	check(true, "nouveau channel alloc succeeds for IN_FENCE_FD probe");
+
+	if (!create_pending_exec_sync_file(fd, channel, &sync_file)) {
+		check(false, "pending EXEC sync_file available for IN_FENCE_FD probe");
+		goto out_channel;
+	}
+	check(sync_file.was_pending,
+	    "IN_FENCE_FD sync_file is pending before atomic commit");
+
+	ret = atomic_primary_in_fence_commit(fd, plane_id, &snapshot,
+	    sync_file.fd, &saved_errno);
+	if (ret != 0) {
+		printf("    IN_FENCE_FD commit errno=%d\n", saved_errno);
+		check(false, "atomic commit with IN_FENCE_FD succeeds");
+		goto out_sync_file;
+	}
+	check(true, "atomic commit with IN_FENCE_FD succeeds");
+
+	wait_ret = wait_sync_file_readable(sync_file.fd, 0, &saved_errno);
+	if (wait_ret != 1) {
+		printf("    IN_FENCE_FD post-commit wait ret=%d errno=%d\n",
+		    wait_ret, saved_errno);
+		check(false, "IN_FENCE_FD sync_file is readable after commit");
+	} else {
+		check(true, "IN_FENCE_FD sync_file is readable after commit");
+	}
+
+out_sync_file:
+	check(close(sync_file.fd) == 0, "close IN_FENCE_FD sync_file fd");
+out_channel:
+	nouveau_channel_free(fd, channel);
 }
 
 /*
@@ -1705,6 +2027,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			    plane->plane_id, active_crtc_id,
 			    active_crtc_width, active_crtc_height);
 			check_atomic_out_fence_runtime_contract(fd,
+			    active_crtc_id, plane->plane_id, name);
+			check_atomic_in_fence_runtime_contract(fd,
 			    active_crtc_id, plane->plane_id, name);
 			primary_panning_probe_done = true;
 		}
