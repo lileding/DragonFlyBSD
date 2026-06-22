@@ -139,7 +139,8 @@ extern struct vop_ops vmmfs_vnode_vops;
  * Each node binds to a KOBJ class chosen by vmmfs_class_for().  vmm_legacy is
  * the catch-all for node types not yet split into their own object module.
  */
-DECLARE_CLASS(vmm_legacy_class);
+DECLARE_CLASS(vmm_base_class);		/* fallback commons (vmmfs_vnode.c) */
+DECLARE_CLASS(vmm_root_class);		/* NROOT    (vmmfs.c) */
 DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
 DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
 DECLARE_CLASS(vmm_machine_class);	/* NMACHINE  (vmm_machine.c) */

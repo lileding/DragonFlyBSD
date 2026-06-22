@@ -42,6 +42,7 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmm_node_if.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
@@ -137,10 +138,12 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 		case VMMFS_CFG_STOPPED:
 			return &vmm_stopped_class;
 		default:
-			return &vmm_legacy_class;
+			return &vmm_base_class;
 		}
 	}
 	switch (type) {
+	case VMMFS_NROOT:
+		return &vmm_root_class;
 	case VMMFS_NDEVICE:
 		return &vmm_device_class;
 	case VMMFS_NDEVLINK:
@@ -156,7 +159,7 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 	case VMMFS_NDEVROOT:
 		return &vmm_devroot_class;
 	default:
-		return &vmm_legacy_class;
+		return &vmm_base_class;
 	}
 }
 
@@ -620,6 +623,71 @@ vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	(void)ap;
 	return 0;
 }
+
+/* ---- the filesystem root (/vmm): machines/ + devices/ ---- */
+
+static int
+vmm_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_node *child = NULL;
+
+	(void)dnode;
+	if (ncp->nc_nlen == 8 && bcmp(ncp->nc_name, "machines", 8) == 0)
+		child = &vmp->vm_machines;
+	else if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0)
+		child = &vmp->vm_devroot;
+	return vmmfs_nresolve_finish(dvp, child, ap->a_nch);
+}
+
+static int
+vmm_root_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+{
+	struct uio *uio = ap->a_uio;
+	struct vmmfs_mount *vmp;
+	off_t off;
+	int full, error;
+
+	error = vmmfs_readdir_dots(ap, node, &off, &full);
+	if (error || full)
+		goto out;
+	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
+	if (off == 2) {
+		if (vop_write_dirent(&error, uio, vmp->vm_machines.vn_ino, DT_DIR,
+		    8, "machines")) {
+			full = 1;
+			goto out;
+		}
+		off = 3;
+	}
+	if (off == 3) {
+		if (vop_write_dirent(&error, uio, vmp->vm_devroot.vn_ino, DT_DIR,
+		    7, "devices")) {
+			full = 1;
+			goto out;
+		}
+		off = 4;
+	}
+out:
+	return vmmfs_readdir_end(ap, off, full, error);
+}
+
+static kobj_method_t vmm_root_methods[] = {
+	KOBJMETHOD(vmm_node_nresolve,		vmm_root_nresolve),
+	KOBJMETHOD(vmm_node_readdir,		vmm_root_readdir),
+	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmm_node_access,		vmmnode_access),
+	KOBJMETHOD(vmm_node_open,		vmmnode_open),
+	KOBJMETHOD(vmm_node_close,		vmmnode_close),
+	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_root, vmm_root_methods, 0);
 
 /* Current desired value of a register, serialized as text. */
 size_t
