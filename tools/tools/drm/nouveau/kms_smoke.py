@@ -27,15 +27,20 @@ LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
 FAULT_PATTERN = (
     "panic|BADFREE|double fault|DeviceLost|EXEC timeout|fault|CMDre|"
-    "status=0x19|RC_TRIGGERED|vblank wait timed out|commit.*failed"
+    "status=0x19|RC_TRIGGERED|vblank wait timed out|flip_done timed out|"
+    "commit.*failed"
 )
 
 ZERO_KEYS = (
     "fault_pending_count",
     "commit_error_count",
+    "hotplug_enqueue_error_count",
+    "dark_down_error_count",
+    "dp_irq_error_count",
     "fb_create_error_count",
     "page_flip_error_count",
     "prepare_fb_error_count",
+    "cursor_error_count",
     "console_flush_error_count",
     "bo_wait_error_count",
     "vm_bind_error_count",
@@ -189,11 +194,28 @@ def report(out_dir: pathlib.Path) -> int:
 
     after = parse_state(out_dir / "drm_state.after")
     before = parse_state(out_dir / "drm_state.before")
+    zero_failed = False
     for key in ZERO_KEYS:
         if key not in after:
             emit(False, f"missing {key}")
+            zero_failed = True
         else:
-            emit(after[key] == 0, f"{key}={after[key]}")
+            ok = after[key] == 0
+            emit(ok, f"{key}={after[key]}")
+            zero_failed = zero_failed or not ok
+
+    if zero_failed:
+        for key in (
+            "last_error",
+            "last_head",
+            "last_win",
+            "dark_down_last_error",
+            "dp_sst_last_error",
+            "bo_wait_last_error",
+            "vm_bind_last_error",
+        ):
+            if key in after:
+                print(f"INFO {key}={after[key]}")
 
     for key in WATCH_KEYS:
         if key in after:
