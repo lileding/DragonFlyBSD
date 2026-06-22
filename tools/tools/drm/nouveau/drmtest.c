@@ -23,6 +23,47 @@ check(bool ok, const char *what)
 		failures++;
 }
 
+static void
+check_drm_cap(int fd, uint64_t capability, uint64_t expected,
+    const char *name)
+{
+	uint64_t value = 0;
+	char text[160];
+	int ret;
+
+	errno = 0;
+	ret = drmGetCap(fd, capability, &value);
+	snprintf(text, sizeof(text), "DRM cap %s is readable", name);
+	check(ret == 0, text);
+	if (ret != 0) {
+		printf("    errno=%d\n", errno);
+		return;
+	}
+
+	printf("    %s=%llu\n", name, (unsigned long long)value);
+	snprintf(text, sizeof(text), "DRM cap %s is %llu", name,
+	    (unsigned long long)expected);
+	check(value == expected, text);
+}
+
+static void
+check_mode_config_contract(int fd, const drmModeRes *resources)
+{
+	printf("mode_config: min=%ux%u max=%ux%u\n",
+	    resources->min_width, resources->min_height,
+	    resources->max_width, resources->max_height);
+	check(resources->min_width == 1, "mode_config min_width is 1");
+	check(resources->min_height == 1, "mode_config min_height is 1");
+	check(resources->max_width == 16384, "mode_config max_width is 16384");
+	check(resources->max_height == 16384,
+	    "mode_config max_height is 16384");
+
+	check_drm_cap(fd, DRM_CAP_DUMB_PREFERRED_DEPTH, 24,
+	    "DUMB_PREFERRED_DEPTH");
+	check_drm_cap(fd, DRM_CAP_DUMB_PREFER_SHADOW, 1,
+	    "DUMB_PREFER_SHADOW");
+}
+
 static const char *
 connector_status_name(int status)
 {
@@ -1014,6 +1055,7 @@ main(void)
 	check(resources->count_connectors > 0, "at least one connector exposed");
 	check(resources->count_crtcs > 0, "at least one CRTC exposed");
 	check(resources->count_encoders > 0, "at least one encoder exposed");
+	check_mode_config_contract(fd, resources);
 
 	for (int i = 0; i < resources->count_connectors; i++) {
 		drmModeConnector *connector;
