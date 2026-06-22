@@ -3,16 +3,15 @@
  *
  * vmmfs - DragonFlyBSD system VMM control filesystem.
  *
- * M1: mountable read-only VFS exposing machines/.
+ * M1: mountable VFS exposing machines/.
  * M2: machine import via `ln -s <config-dir> machines/<name>` (vop_nsymlink,
  *     an atomic import that reads/validates vcpu/mem/loader in the caller's
- *     context) and removal via `rmdir machines/<name>` (vop_nrmdir).  The
- *     loader is not yet executed (that is M3); a machine here is a directory
- *     reflecting the imported desired state.
+ *     context) and removal via `rmdir machines/<name>` (vop_nrmdir).  Each
+ *     machine is a directory whose vcpu/mem/loader[/stopped] files reflect the
+ *     imported desired state.  The loader is not yet executed (that is M3).
  *
  * The low-level VFS plumbing and the kernel file I/O live here in C; the Rust
- * side owns the config-value parsing/validation (vmmfs_parse_vcpu/mem) and will
- * grow to own the wider machine object model.
+ * side owns the config-value parsing/validation (vmmfs_parse_vcpu/mem).
  */
 
 #include <sys/param.h>
@@ -47,8 +46,10 @@ MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 #define VMMFS_ROOT_INO		1
 #define VMMFS_MACHINES_INO	2
 #define VMMFS_MACHINE_INO_BASE	3
+#define VMMFS_MACHINE_INO_STRIDE 8	/* inos reserved per machine */
 
 #define VMMFS_DIR_MODE		0555
+#define VMMFS_FILE_MODE		0444
 #define VMMFS_MAX_MACHINES	64
 #define VMMFS_NAME_MAX		63
 
@@ -56,24 +57,42 @@ enum vmmfs_ntype {
 	VMMFS_NROOT,
 	VMMFS_NMACHINES,
 	VMMFS_NMACHINE,
+	VMMFS_NCONFIG,
+};
+
+/* Config files presented under a machine directory. */
+enum vmmfs_cfg {
+	VMMFS_CFG_VCPU,
+	VMMFS_CFG_MEM,
+	VMMFS_CFG_LOADER,
+	VMMFS_CFG_STOPPED,
+	VMMFS_NCFG,
+};
+
+static const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
+	[VMMFS_CFG_VCPU] =	"vcpu",
+	[VMMFS_CFG_MEM] =	"mem",
+	[VMMFS_CFG_LOADER] =	"loader",
+	[VMMFS_CFG_STOPPED] =	"stopped",
 };
 
 struct vmmfs_machine;
 
 struct vmmfs_node {
 	enum vmmfs_ntype	vn_type;
+	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
 	struct vmmfs_node      *vn_parent;	/* NULL for the root */
-	struct vmmfs_machine   *vn_machine;	/* set for VMMFS_NMACHINE */
+	struct vmmfs_machine   *vn_machine;	/* owning machine, or NULL */
 	struct vnode	       *vn_vnode;	/* cached vnode, NULL if unbound */
 	struct lock		vn_interlock;	/* guards vn_vnode binding */
 };
 
 /*
- * An imported machine.  M2 reflects only the desired state read at import;
- * the slots live in the mount and are permanent for the mount's lifetime
- * (in_use marks occupancy).
+ * An imported machine.  M2 reflects only the desired state read at import.
+ * Slots live in the mount and are permanent for the mount's lifetime; in_use
+ * marks occupancy.
  */
 struct vmmfs_machine {
 	int			in_use;
@@ -81,7 +100,10 @@ struct vmmfs_machine {
 	uint32_t		vcpu;
 	uint64_t		mem;
 	int			stopped;
-	struct vmmfs_node	node;
+	uint64_t		loader_size;	/* captured at import */
+	mode_t			loader_mode;
+	struct vmmfs_node	node;		/* the machine directory */
+	struct vmmfs_node	cfg[VMMFS_NCFG];/* vcpu/mem/loader/stopped files */
 };
 
 struct vmmfs_mount {
@@ -97,6 +119,8 @@ struct vmmfs_mount {
 
 static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 		    struct ucred *cred);
+static int	vmmfs_cfg_format(struct vmmfs_node *node, char *buf,
+		    size_t bufsize);
 
 static struct vop_ops vmmfs_vnode_vops;
 
@@ -104,11 +128,14 @@ static struct vop_ops vmmfs_vnode_vops;
 
 static void
 vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
-    struct vmmfs_node *parent, struct vmmfs_machine *machine)
+    struct vmmfs_node *parent, struct vmmfs_machine *machine,
+    enum vmmfs_cfg cfg)
 {
 	node->vn_type = type;
+	node->vn_cfg = cfg;
 	node->vn_ino = ino;
-	node->vn_mode = VMMFS_DIR_MODE;
+	node->vn_mode = (type == VMMFS_NCONFIG) ? VMMFS_FILE_MODE :
+	    VMMFS_DIR_MODE;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
@@ -128,18 +155,28 @@ vmmfs_parent_ino(struct vmmfs_node *node)
 	    node->vn_ino;
 }
 
+static int
+vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg)
+{
+	if (cfg == VMMFS_CFG_STOPPED)
+		return m->stopped;
+	return 1;
+}
+
 /*
  * Bind a vnode to the given node, caching it.  Mirrors the interlocked
  * tmpfs_alloc_vp() normal path; vx_downgrade() after getnewvnode() is
- * mandatory (see the commit log) so vflush() does not trip the v_spin
- * assertion on unmount.
+ * mandatory so vflush() does not trip the v_spin assertion on unmount.
  */
 static int
 vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
     struct vnode **vpp)
 {
 	struct vnode *vp;
+	enum vtype vtype;
 	int error = 0;
+
+	vtype = (node->vn_type == VMMFS_NCONFIG) ? VREG : VDIR;
 
 loop:
 	vp = NULL;
@@ -181,7 +218,7 @@ loop:
 	}
 
 	vp->v_data = node;
-	vp->v_type = VDIR;
+	vp->v_type = vtype;
 	node->vn_vnode = vp;
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 
@@ -265,7 +302,7 @@ vmmfs_read_file(const char *dir, const char *name, struct ucred *cred,
  */
 static int
 vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
-    uint64_t *mem, int *stopped)
+    uint64_t *mem, int *stopped, uint64_t *loader_size, mode_t *loader_mode)
 {
 	struct vnode *vp;
 	char buf[64];
@@ -316,6 +353,10 @@ vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
 			error = EACCES;
 		if (error == 0)
 			error = VOP_ACCESS(vp, VEXEC, cred);
+		if (error == 0) {
+			*loader_size = va.va_size;
+			*loader_mode = va.va_mode;
+		}
 	}
 	vn_unlock(vp);
 	vn_close(vp, FREAD, NULL);
@@ -390,6 +431,20 @@ vmmfs_nresolve(struct vop_nresolve_args *ap)
 		if (m != NULL)
 			child = &m->node;
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
+	} else if (dnode->vn_type == VMMFS_NMACHINE) {
+		struct vmmfs_machine *m = dnode->vn_machine;
+		int i;
+
+		for (i = 0; i < VMMFS_NCFG; i++) {
+			if (!vmmfs_cfg_present(m, i))
+				continue;
+			if ((int)strlen(vmmfs_cfg_name[i]) == ncp->nc_nlen &&
+			    bcmp(vmmfs_cfg_name[i], ncp->nc_name,
+			    ncp->nc_nlen) == 0) {
+				child = &m->cfg[i];
+				break;
+			}
+		}
 	}
 
 	if (child == NULL) {
@@ -447,7 +502,8 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	uint32_t vcpu;
-	uint64_t mem;
+	uint64_t mem, loader_size;
+	mode_t loader_mode;
 	int stopped, error;
 
 	/* Machines are created only under machines/. */
@@ -458,7 +514,7 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 
 	/* Read + validate the config in the caller's context (no vm_lock). */
 	error = vmmfs_read_config(ap->a_target, ap->a_cred, &vcpu, &mem,
-	    &stopped);
+	    &stopped, &loader_size, &loader_mode);
 	if (error)
 		return error;
 
@@ -477,6 +533,8 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 	m->vcpu = vcpu;
 	m->mem = mem;
 	m->stopped = stopped;
+	m->loader_size = loader_size;
+	m->loader_mode = loader_mode;
 	m->in_use = 1;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
@@ -556,7 +614,7 @@ vmmfs_access(struct vop_access_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
-	/* Writability is expressed per node via the mode (dirs are 0555). */
+	/* Writability is expressed per node via the mode (dirs 0555, files 0444). */
 	return vop_helper_access(ap, 0, 0, node->vn_mode, 0);
 }
 
@@ -566,15 +624,18 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct vattr *vap = ap->a_vap;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
+	int is_file = (node->vn_type == VMMFS_NCONFIG);
+	char buf[64];
 
-	vap->va_type = VDIR;
+	vap->va_type = is_file ? VREG : VDIR;
 	vap->va_mode = node->vn_mode;
-	vap->va_nlink = (node->vn_type == VMMFS_NROOT) ? 3 : 2;
+	vap->va_nlink = is_file ? 1 :
+	    ((node->vn_type == VMMFS_NROOT) ? 3 : 2);
 	vap->va_uid = 0;
 	vap->va_gid = 0;
 	vap->va_fsid = vp->v_mount->mnt_stat.f_fsid.val[0];
 	vap->va_fileid = node->vn_ino;
-	vap->va_size = 0;
+	vap->va_size = is_file ? vmmfs_cfg_format(node, buf, sizeof(buf)) : 0;
 	vap->va_blocksize = PAGE_SIZE;
 	vap->va_atime.tv_sec = 0;
 	vap->va_atime.tv_nsec = 0;
@@ -586,6 +647,55 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	vap->va_filerev = 0;
 
 	return 0;
+}
+
+/*
+ * Format a config file's normalized content.  Returns the length (as
+ * ksnprintf would, excluding the NUL).  stopped is an empty file whose mere
+ * presence signals the stopped desired-state.
+ */
+static int
+vmmfs_cfg_format(struct vmmfs_node *node, char *buf, size_t bufsize)
+{
+	struct vmmfs_machine *m = node->vn_machine;
+
+	switch (node->vn_cfg) {
+	case VMMFS_CFG_VCPU:
+		return ksnprintf(buf, bufsize, "%u\n", m->vcpu);
+	case VMMFS_CFG_MEM:
+		return ksnprintf(buf, bufsize, "%ju\n", (uintmax_t)m->mem);
+	case VMMFS_CFG_LOADER:
+		return ksnprintf(buf, bufsize, "%ju %04o\n",
+		    (uintmax_t)m->loader_size,
+		    (unsigned)(m->loader_mode & 07777));
+	case VMMFS_CFG_STOPPED:
+	default:
+		return 0;
+	}
+}
+
+static int
+vmmfs_read(struct vop_read_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct uio *uio = ap->a_uio;
+	struct vmmfs_node *node = VP_TO_VMMFS(vp);
+	char buf[64];
+	int len;
+	off_t off;
+
+	if (vp->v_type != VREG || node->vn_type != VMMFS_NCONFIG)
+		return EINVAL;
+	if (uio->uio_offset < 0)
+		return EINVAL;
+
+	len = vmmfs_cfg_format(node, buf, sizeof(buf));
+	if (len > (int)sizeof(buf))
+		len = (int)sizeof(buf);
+	off = uio->uio_offset;
+	if (off >= len)
+		return 0;
+	return uiomove(buf + off, (size_t)(len - off), uio);
 }
 
 static int
@@ -659,6 +769,25 @@ vmmfs_readdir(struct vop_readdir_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		if (!full && off < 2 + VMMFS_MAX_MACHINES)
 			off = 2 + VMMFS_MAX_MACHINES;
+	} else if (node->vn_type == VMMFS_NMACHINE) {
+		struct vmmfs_machine *m = node->vn_machine;
+		int i;
+
+		for (i = (int)off - 2; i < VMMFS_NCFG; i++) {
+			if (!vmmfs_cfg_present(m, i))
+				continue;
+			r = vop_write_dirent(&error, uio, m->cfg[i].vn_ino,
+			    DT_REG, (uint16_t)strlen(vmmfs_cfg_name[i]),
+			    vmmfs_cfg_name[i]);
+			if (r) {
+				off = 2 + i;
+				full = 1;
+				break;
+			}
+			off = 2 + i + 1;
+		}
+		if (!full && off < 2 + VMMFS_NCFG)
+			off = 2 + VMMFS_NCFG;
 	}
 
 done:
@@ -715,6 +844,7 @@ static struct vop_ops vmmfs_vnode_vops = {
 	.vop_close =		vmmfs_close,
 	.vop_access =		vmmfs_access,
 	.vop_getattr =		vmmfs_getattr,
+	.vop_read =		vmmfs_read,
 	.vop_readdir =		vmmfs_readdir,
 	.vop_inactive =		vmmfs_inactive,
 	.vop_reclaim =		vmmfs_reclaim,
@@ -736,14 +866,22 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmp = kmalloc(sizeof(*vmp), M_VMMFS, M_WAITOK | M_ZERO);
 	vmp->vm_mp = mp;
 	lockinit(&vmp->vm_lock, "vmmfs registry", 0, 0);
-	vmmfs_node_init(&vmp->vm_root, VMMFS_NROOT, VMMFS_ROOT_INO, NULL, NULL);
+	vmmfs_node_init(&vmp->vm_root, VMMFS_NROOT, VMMFS_ROOT_INO, NULL, NULL,
+	    0);
 	vmmfs_node_init(&vmp->vm_machines, VMMFS_NMACHINES, VMMFS_MACHINES_INO,
-	    &vmp->vm_root, NULL);
+	    &vmp->vm_root, NULL, 0);
 	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
-		vmmfs_node_init(&vmp->vm_mach[i].node, VMMFS_NMACHINE,
-		    VMMFS_MACHINE_INO_BASE + i, &vmp->vm_machines,
-		    &vmp->vm_mach[i]);
-		vmp->vm_mach[i].in_use = 0;
+		struct vmmfs_machine *m = &vmp->vm_mach[i];
+		ino_t base = VMMFS_MACHINE_INO_BASE +
+		    (ino_t)i * VMMFS_MACHINE_INO_STRIDE;
+		int j;
+
+		vmmfs_node_init(&m->node, VMMFS_NMACHINE, base,
+		    &vmp->vm_machines, m, 0);
+		for (j = 0; j < VMMFS_NCFG; j++)
+			vmmfs_node_init(&m->cfg[j], VMMFS_NCONFIG, base + 1 + j,
+			    &m->node, m, j);
+		m->in_use = 0;
 	}
 
 	mp->mnt_flag |= MNT_LOCAL;
@@ -780,8 +918,13 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	if (error)
 		return error;
 
-	for (i = 0; i < VMMFS_MAX_MACHINES; i++)
+	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
+		int j;
+
+		for (j = 0; j < VMMFS_NCFG; j++)
+			vmmfs_node_uninit(&vmp->vm_mach[i].cfg[j]);
 		vmmfs_node_uninit(&vmp->vm_mach[i].node);
+	}
 	vmmfs_node_uninit(&vmp->vm_machines);
 	vmmfs_node_uninit(&vmp->vm_root);
 	lockuninit(&vmp->vm_lock);
