@@ -58,14 +58,6 @@ const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
 	[VMMFS_CFG_STOPPED] =	"stopped",
 };
 
-/* The three desired-state registers use the per-open buffer + commit-on-close. */
-int
-vmmfs_cfg_is_register(enum vmmfs_cfg cfg)
-{
-	return cfg == VMMFS_CFG_VCPU || cfg == VMMFS_CFG_MEM ||
-	    cfg == VMMFS_CFG_LOADER;
-}
-
 static mode_t
 vmmfs_cfg_mode(enum vmmfs_cfg cfg)
 {
@@ -427,32 +419,6 @@ vmmfs_obuf_get(struct vmmfs_node *node, struct file *fp, int create)
 	return ob;
 }
 
-/* Read a register: the open buffer if it was written, else the current value. */
-int
-vmmfs_obuf_read(struct vmmfs_node *node, struct file *fp, struct uio *uio)
-{
-	struct vmmfs_openbuf *ob;
-	uint8_t tmp[300];
-	char *data;
-	int len;
-	off_t off;
-
-	if (uio->uio_offset < 0)
-		return EINVAL;
-	ob = vmmfs_obuf_get(node, fp, 0);
-	if (ob != NULL && ob->ob_written) {
-		data = ob->ob_data;
-		len = ob->ob_len;
-	} else {
-		len = (int)vmmfs_cfg_text(node, tmp, sizeof(tmp));
-		data = (char *)tmp;
-	}
-	off = uio->uio_offset;
-	if (off >= len)
-		return 0;
-	return uiomove(data + off, (size_t)(len - off), uio);
-}
-
 /* Write into a register's open buffer (created on demand). */
 int
 vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp, struct uio *uio)
@@ -498,33 +464,6 @@ vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp, struct uio *uio)
 	return 0;
 }
 
-/* Commit (parse + update desired) on close, then free the buffer. */
-static void
-vmmfs_cfg_commit(struct vmmfs_node *node, const uint8_t *buf, size_t len);
-
-void
-vmmfs_obuf_commit_close(struct vmmfs_node *node, struct file *fp)
-{
-	struct vmmfs_openbuf *ob = NULL, *it;
-
-	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
-	SLIST_FOREACH(it, &node->vn_obufs, ob_link) {
-		if (it->ob_fp == fp) {
-			ob = it;
-			SLIST_REMOVE(&node->vn_obufs, it, vmmfs_openbuf,
-			    ob_link);
-			break;
-		}
-	}
-	lockmgr(&node->vn_interlock, LK_RELEASE);
-	if (ob == NULL)
-		return;
-	if (ob->ob_written)
-		vmmfs_cfg_commit(node, (const uint8_t *)ob->ob_data,
-		    (size_t)ob->ob_len);
-	kfree(ob->ob_data, M_VMMFS);
-	kfree(ob, M_VMMFS);
-}
 
 /*
  * Shared register-file vops.  vcpu/mem/loader differ only in the text/commit
@@ -688,44 +627,6 @@ static kobj_method_t vmm_root_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmm_root, vmm_root_methods, 0);
-
-/* Current desired value of a register, serialized as text. */
-size_t
-vmmfs_cfg_text(struct vmmfs_node *node, uint8_t *buf, size_t cap)
-{
-	struct vmmfs_machine *m = node->vn_machine;
-
-	switch (node->vn_cfg) {
-	case VMMFS_CFG_VCPU:
-		return vmm_machine_vcpu_text(&m->state, buf, cap);
-	case VMMFS_CFG_MEM:
-		return vmm_machine_mem_text(&m->state, buf, cap);
-	case VMMFS_CFG_LOADER:
-		return vmm_machine_loader_text(&m->state, buf, cap);
-	default:
-		return 0;
-	}
-}
-
-static void
-vmmfs_cfg_commit(struct vmmfs_node *node, const uint8_t *buf, size_t len)
-{
-	struct vmmfs_machine *m = node->vn_machine;
-
-	switch (node->vn_cfg) {
-	case VMMFS_CFG_VCPU:
-		(void)vmm_machine_commit_vcpu(&m->state, buf, len);
-		break;
-	case VMMFS_CFG_MEM:
-		(void)vmm_machine_commit_mem(&m->state, buf, len);
-		break;
-	case VMMFS_CFG_LOADER:
-		(void)vmm_machine_commit_loader(&m->state, buf, len);
-		break;
-	default:
-		break;
-	}
-}
 
 /*
  * Validate the desired loader at start time: resolve the path in the caller's

@@ -200,17 +200,12 @@ int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */
-int	vmmfs_cfg_is_register(enum vmmfs_cfg cfg);
 int	vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg);
 ino_t	vmmfs_parent_ino(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
-size_t	vmmfs_cfg_text(struct vmmfs_node *node, uint8_t *buf, size_t cap);
-int	vmmfs_obuf_read(struct vmmfs_node *node, struct file *fp,
-	    struct uio *uio);
 int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
-void	vmmfs_obuf_commit_close(struct vmmfs_node *node, struct file *fp);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
 void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
 	    struct vmmfs_machine *m);
