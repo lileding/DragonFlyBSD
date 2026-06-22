@@ -124,6 +124,8 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 		return &vmm_device_class;
 	case VMMFS_NDEVLINK:
 		return &vmm_devlink_class;
+	case VMMFS_NMACHINES:
+		return &vmm_machines_class;
 	case VMMFS_NHOST:
 		return &vmm_host_class;
 	case VMMFS_NDEVICES:
@@ -580,85 +582,6 @@ vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred)
 	vn_unlock(vp);
 	vn_close(vp, FREAD, NULL);
 	return error;
-}
-
-/* --------------------------------------------------------------------- */
-/* Machine registry (guarded by vm_lock).                                */
-
-struct vmmfs_machine *
-vmmfs_find_machine(struct vmmfs_mount *vmp, const char *name, int nlen)
-{
-	int i;
-
-	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
-		struct vmmfs_machine *m = &vmp->vm_mach[i];
-
-		if (m->in_use && (int)strlen(m->name) == nlen &&
-		    bcmp(m->name, name, nlen) == 0)
-			return m;
-	}
-	return NULL;
-}
-
-/*
- * Find a reusable slot: not in_use and with no lingering cached vnode (machine
- * dir or any config file).  Frees any deferred Rust state before reuse, the
- * safe point to free it: by here no vnode can still reference the machine.
- */
-struct vmmfs_machine *
-vmmfs_alloc_slot(struct vmmfs_mount *vmp)
-{
-	int i, j;
-
-	for (i = 0; i < VMMFS_MAX_MACHINES; i++) {
-		struct vmmfs_machine *m = &vmp->vm_mach[i];
-		int busy = 0;
-
-		if (m->in_use || m->node.vn_vnode != NULL ||
-		    m->vn_devices.vn_vnode != NULL)
-			continue;
-		for (j = 0; j < VMMFS_NCFG; j++) {
-			if (m->cfg[j].vn_vnode != NULL) {
-				busy = 1;
-				break;
-			}
-		}
-		if (busy)
-			continue;
-		return m;
-	}
-	return NULL;
-}
-
-/*
- * Mark a machine deleted: enter the deletion flow (so the lease can no longer
- * be opened) and drop it from the namespace.  The Rust state and the slot are
- * reclaimed lazily (vmmfs_alloc_slot / unmount), so any still-open fds keep
- * working.  Callers that hold the machine's directory vnode additionally
- * cache_inval_vp() it for an immediate vanish.
- */
-void
-vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
-{
-	int idx = (int)(m - vmp->vm_mach);
-	int i;
-
-	vmm_machine_begin_delete(&m->state);
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	m->in_use = 0;
-	/* Any device bound to this machine: host devices return to the host
-	 * pool, user backends are unloaded. */
-	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
-
-		if (d->in_use && d->owner == idx) {
-			if (d->is_host)
-				d->owner = VMMFS_OWNER_HOST;
-			else
-				d->in_use = 0;
-		}
-	}
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
 }
 
 /* --------------------------------------------------------------------- */

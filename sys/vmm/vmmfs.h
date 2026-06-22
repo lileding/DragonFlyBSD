@@ -142,6 +142,7 @@ extern struct vop_ops vmmfs_vnode_vops;
 DECLARE_CLASS(vmm_legacy_class);
 DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
 DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
+DECLARE_CLASS(vmm_machines_class);	/* NMACHINES (vmmfs_machines.c) */
 DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
 DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */
 DECLARE_CLASS(vmm_devroot_class);	/* NDEVROOT (vmmfs_devices.c) */
@@ -183,9 +184,6 @@ int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
 void	vmmfs_obuf_commit_close(struct vmmfs_node *node, struct file *fp);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
-struct vmmfs_machine *vmmfs_find_machine(struct vmmfs_mount *vmp,
-	    const char *name, int nlen);
-struct vmmfs_machine *vmmfs_alloc_slot(struct vmmfs_mount *vmp);
 void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
 	    struct vmmfs_machine *m);
 int	vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred);

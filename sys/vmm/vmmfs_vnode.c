@@ -39,18 +39,6 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 		else if (ncp->nc_nlen == 7 &&
 		    bcmp(ncp->nc_name, "devices", 7) == 0)
 			child = &vmp->vm_devroot;
-	} else if (dnode->vn_type == VMMFS_NMACHINES) {
-		if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0) {
-			child = &vmp->vm_host;
-		} else {
-			struct vmmfs_machine *m;
-
-			lockmgr(&vmp->vm_lock, LK_SHARED);
-			m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
-			if (m != NULL)
-				child = &m->node;
-			lockmgr(&vmp->vm_lock, LK_RELEASE);
-		}
 	} else if (dnode->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = dnode->vn_machine;
 		int i;
@@ -96,103 +84,6 @@ vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *a
 	}
 
 	return (*vpp == NULL) ? ENOENT : 0;
-}
-
-/*
- * `mkdir machines/<name>` creates a machine: always stopped, empty config.
- * The user then writes vcpu/mem/loader and `rm stopped` to start.
- */
-static int
-vmmnode_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
-{
-	struct vnode *dvp = ap->a_dvp;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_machine *m;
-	struct vnode *vp;
-	int error;
-
-	if (dnode->vn_type != VMMFS_NMACHINES)
-		return EPERM;
-	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
-		return ENAMETOOLONG;
-	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
-		return EEXIST;	/* host is reserved */
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	if (vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return EEXIST;
-	}
-	m = vmmfs_alloc_slot(vmp);
-	if (m == NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return ENOSPC;
-	}
-	bcopy(ncp->nc_name, m->name, ncp->nc_nlen);
-	m->name[ncp->nc_nlen] = '\0';
-	vmm_machine_init(&m->state);
-	m->in_use = 1;
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
-	error = vmmfs_alloc_vp(dvp->v_mount, &m->node, LK_EXCLUSIVE | LK_RETRY,
-	    &vp);
-	if (error) {
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		m->in_use = 0;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return error;
-	}
-
-	*ap->a_vpp = vp;
-	cache_setunresolved(ap->a_nch);
-	cache_setvp(ap->a_nch, vp);
-	return 0;
-}
-
-/*
- * `rmdir machines/<name>` removes a stopped machine (source 1): it deletes
- * regardless of leases.  The Rust state is freed lazily (vmmfs_alloc_slot) so
- * any still-open fds keep working until reclaimed.
- */
-static int
-vmmnode_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
-{
-	struct vnode *dvp = ap->a_dvp;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_machine *m;
-	struct vnode *vp;
-	int error;
-
-	if (dnode->vn_type != VMMFS_NMACHINES)
-		return EINVAL;
-	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
-		return EPERM;	/* host is not removable */
-
-	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	if (error)
-		return error;
-	vn_unlock(vp);
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
-	if (m == NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vrele(vp);
-		return ENOENT;
-	}
-	if (!vmm_machine_is_stopped(&m->state)) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vrele(vp);
-		return EBUSY;
-	}
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
-	vmmfs_machine_mark_deleted(vmp, m);
-	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
-	vrele(vp);
-	return 0;
 }
 
 /*
@@ -513,38 +404,6 @@ vmmnode_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 			}
 			off = 4;
 		}
-	} else if (node->vn_type == VMMFS_NMACHINES) {
-		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-		int i;
-
-		/* host is always the first entry. */
-		if (off == 2) {
-			r = vop_write_dirent(&error, uio, vmp->vm_host.vn_ino,
-			    DT_DIR, 4, "host");
-			if (r) {
-				full = 1;
-				goto done;
-			}
-			off = 3;
-		}
-		lockmgr(&vmp->vm_lock, LK_SHARED);
-		for (i = (int)off - 3; i < VMMFS_MAX_MACHINES; i++) {
-			struct vmmfs_machine *m = &vmp->vm_mach[i];
-
-			if (!m->in_use)
-				continue;
-			r = vop_write_dirent(&error, uio, m->node.vn_ino,
-			    DT_DIR, (uint16_t)strlen(m->name), m->name);
-			if (r) {
-				off = 3 + i;
-				full = 1;
-				break;
-			}
-			off = 3 + i + 1;
-		}
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		if (!full && off < 3 + VMMFS_MAX_MACHINES)
-			off = 3 + VMMFS_MAX_MACHINES;
 	} else if (node->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = node->vn_machine;
 		int i;
@@ -742,10 +601,8 @@ vmmfs_print(struct vop_print_args *ap)
 static kobj_method_t vmm_legacy_methods[] = {
 	KOBJMETHOD(vmm_node_nresolve, vmmnode_nresolve),
 	KOBJMETHOD(vmm_node_nlookupdotdot, vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_nmkdir, vmmnode_nmkdir),
 	KOBJMETHOD(vmm_node_ncreate, vmmnode_ncreate),
 	KOBJMETHOD(vmm_node_nremove, vmmnode_nremove),
-	KOBJMETHOD(vmm_node_nrmdir, vmmnode_nrmdir),
 	KOBJMETHOD(vmm_node_open, vmmnode_open),
 	KOBJMETHOD(vmm_node_close, vmmnode_close),
 	KOBJMETHOD(vmm_node_access, vmmnode_access),
