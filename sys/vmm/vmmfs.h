@@ -142,6 +142,7 @@ extern struct vop_ops vmmfs_vnode_vops;
 DECLARE_CLASS(vmm_legacy_class);
 DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
 DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
+DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
 kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
 
 /* Common vops shared across node classes (vmmfs_vnode.c for now). */
@@ -152,8 +153,19 @@ int	vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap);
 int	vmmnode_inactive(struct vmmfs_node *node, struct vop_inactive_args *ap);
 int	vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap);
 int	vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap);
+int	vmmnode_nlookupdotdot(struct vmmfs_node *node,
+	    struct vop_nlookupdotdot_args *ap);
+
+/* Shared node attribute / directory helpers (vmmfs.c). */
 void	vmmfs_fill_attr(struct vmmfs_node *node, struct vattr *vap,
 	    enum vtype type, int nlink, off_t size);
+int	vmmfs_dir_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap);
+int	vmmfs_nresolve_finish(struct vnode *dvp, struct vmmfs_node *child,
+	    struct nchandle *nch);
+int	vmmfs_readdir_dots(struct vop_readdir_args *ap, struct vmmfs_node *node,
+	    off_t *offp, int *fullp);
+int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
+	    int error);
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */

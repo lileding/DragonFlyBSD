@@ -124,6 +124,8 @@ vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
 		return &vmm_device_class;
 	case VMMFS_NDEVLINK:
 		return &vmm_devlink_class;
+	case VMMFS_NHOST:
+		return &vmm_host_class;
 	default:
 		return &vmm_legacy_class;
 	}
@@ -151,6 +153,94 @@ vmmfs_fill_attr(struct vmmfs_node *node, struct vattr *vap, enum vtype type,
 	vap->va_flags = 0;
 	vap->va_bytes = 0;
 	vap->va_filerev = 0;
+}
+
+/* getattr for any directory node. */
+int
+vmmfs_dir_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+{
+	int nlink = (node->vn_type == VMMFS_NROOT) ? 3 : 2;
+
+	vmmfs_fill_attr(node, ap->a_vap, VDIR, nlink, 0);
+	return 0;
+}
+
+/*
+ * Finish an nresolve: bind a vnode to the resolved child (or record a negative
+ * cache entry).  Shared by every directory class.
+ */
+int
+vmmfs_nresolve_finish(struct vnode *dvp, struct vmmfs_node *child,
+    struct nchandle *nch)
+{
+	struct vnode *vp;
+	int error;
+
+	if (child == NULL) {
+		cache_setvp(nch, NULL);
+		return ENOENT;
+	}
+	error = vmmfs_alloc_vp(dvp->v_mount, child, LK_EXCLUSIVE | LK_RETRY, &vp);
+	if (error)
+		return error;
+	vn_unlock(vp);
+	cache_setvp(nch, vp);
+	vrele(vp);
+	return 0;
+}
+
+/*
+ * Emit "." and "..".  On return *offp is the resume offset (>= 2 once both are
+ * written) and *fullp is set if the uio filled.  Shared readdir prologue.
+ */
+int
+vmmfs_readdir_dots(struct vop_readdir_args *ap, struct vmmfs_node *node,
+    off_t *offp, int *fullp)
+{
+	struct uio *uio = ap->a_uio;
+	int error = 0;
+	off_t off;
+
+	*offp = 0;
+	*fullp = 0;
+	if (ap->a_vp->v_type != VDIR)
+		return ENOTDIR;
+	if (uio->uio_offset < 0)
+		return EINVAL;
+
+	off = uio->uio_offset;
+	if (off == 0) {
+		if (vop_write_dirent(&error, uio, node->vn_ino, DT_DIR, 1, ".")) {
+			*fullp = 1;
+			goto out;
+		}
+		off = 1;
+	}
+	if (off == 1) {
+		if (vop_write_dirent(&error, uio, vmmfs_parent_ino(node),
+		    DT_DIR, 2, "..")) {
+			*fullp = 1;
+			goto out;
+		}
+		off = 2;
+	}
+out:
+	*offp = off;
+	return error;
+}
+
+/* Record the resume offset, eof flag, and (empty) cookies; readdir epilogue. */
+int
+vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full, int error)
+{
+	ap->a_uio->uio_offset = off;
+	if (ap->a_eofflag != NULL)
+		*ap->a_eofflag = !full;
+	if (ap->a_ncookies != NULL) {
+		*ap->a_ncookies = 0;
+		*ap->a_cookies = NULL;
+	}
+	return error;
 }
 
 /* Free any lingering per-open buffers (teardown only; no commit). */

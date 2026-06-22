@@ -53,9 +53,6 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 				child = &m->node;
 			lockmgr(&vmp->vm_lock, LK_RELEASE);
 		}
-	} else if (dnode->vn_type == VMMFS_NHOST) {
-		if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0)
-			child = &vmp->vm_host_devices;
 	} else if (dnode->vn_type == VMMFS_NMACHINE) {
 		struct vmmfs_machine *m = dnode->vn_machine;
 		int i;
@@ -110,7 +107,7 @@ vmmnode_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	return 0;
 }
 
-static int
+int
 vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
@@ -666,18 +663,6 @@ vmmnode_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		if (!full && off < 3 + VMMFS_MAX_MACHINES)
 			off = 3 + VMMFS_MAX_MACHINES;
-	} else if (node->vn_type == VMMFS_NHOST) {
-		if (off == 2) {
-			struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
-
-			r = vop_write_dirent(&error, uio,
-			    vmp->vm_host_devices.vn_ino, DT_DIR, 7, "devices");
-			if (r) {
-				full = 1;
-				goto done;
-			}
-			off = 3;
-		}
 	} else if (node->vn_type == VMMFS_NDEVICES) {
 		struct vmmfs_mount *vmp = VFS_TO_VMMFS(vp->v_mount);
 		int i;
