@@ -197,6 +197,58 @@ has_property(int fd, uint32_t object_id, uint32_t object_type,
 	return true;
 }
 
+static bool
+create_identity_lut_blob(int fd, uint32_t count, uint32_t *blob_id_out,
+    const char *what)
+{
+	struct drm_color_lut *lut;
+	bool ok;
+
+	lut = calloc(count, sizeof(*lut));
+	check(lut != NULL, "allocate identity LUT buffer");
+	if (lut == NULL)
+		return false;
+
+	for (uint32_t i = 0; i < count; i++) {
+		uint16_t value;
+
+		value = count > 1 ? (uint16_t)((uint64_t)i * 0xffffu /
+		    (count - 1)) : 0;
+		lut[i].red = value;
+		lut[i].green = value;
+		lut[i].blue = value;
+	}
+
+	ok = drmModeCreatePropertyBlob(fd, lut, count * sizeof(*lut),
+	    blob_id_out) == 0;
+	check(ok, what);
+	free(lut);
+	return ok;
+}
+
+static bool
+create_identity_ctm_blob(int fd, uint32_t *blob_id_out, const char *what)
+{
+	struct drm_color_ctm ctm;
+	bool ok;
+
+	memset(&ctm, 0, sizeof(ctm));
+	ctm.matrix[0] = 1ULL << 32;
+	ctm.matrix[4] = 1ULL << 32;
+	ctm.matrix[8] = 1ULL << 32;
+	ok = drmModeCreatePropertyBlob(fd, &ctm, sizeof(ctm), blob_id_out) == 0;
+	check(ok, what);
+	return ok;
+}
+
+static void
+destroy_property_blob(int fd, uint32_t blob_id, const char *what)
+{
+	if (blob_id == 0)
+		return;
+	check(drmModeDestroyPropertyBlob(fd, blob_id) == 0, what);
+}
+
 static void
 require_property(int fd, uint32_t object_id, uint32_t object_type,
     const char *name, const char *object_name)
@@ -381,6 +433,122 @@ check_crtc_color_property_contract(int fd, uint32_t crtc_id,
 	    "GAMMA_LUT_SIZE", object_name, 1024);
 }
 
+static bool
+atomic_add_crtc_property(int fd, drmModeAtomicReqPtr req, uint32_t crtc_id,
+    const char *name, uint64_t value)
+{
+	uint32_t property_id = 0;
+
+	if (!get_property_id(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name,
+	    &property_id)) {
+		printf("crtc %u property %s unavailable\n", crtc_id, name);
+		return false;
+	}
+	return drmModeAtomicAddProperty(req, crtc_id, property_id, value) >= 0;
+}
+
+static int
+atomic_crtc_color_test_only_commit(int fd, uint32_t crtc_id,
+    uint32_t degamma_blob, uint32_t ctm_blob, uint32_t gamma_blob,
+    int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_crtc_property(fd, req, crtc_id, "DEGAMMA_LUT",
+	    degamma_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "CTM", ctm_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "GAMMA_LUT",
+	    gamma_blob)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+/*
+ * check_atomic_crtc_color_contract()
+ *
+ * Ownership:
+ *   Owns temporary KMS property blobs and destroys them before return.  The
+ *   driver borrows the blob IDs only for each TEST_ONLY atomic request.
+ *
+ * Lifetime:
+ *   No CRTC state is committed.  Positive requests prove 1024-entry native
+ *   LUTs, identity CTM, and 256-entry legacy LUTs are accepted; the negative
+ *   request isolates the unsupported LUT-size gate.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The driver evaluates atomic_check under
+ *   normal modeset locks, and TEST_ONLY must not program display hardware.
+ */
+static void
+check_atomic_crtc_color_contract(int fd, uint32_t crtc_id)
+{
+	uint32_t lut1024_blob = 0;
+	uint32_t lut256_blob = 0;
+	uint32_t invalid_lut_blob = 0;
+	uint32_t ctm_blob = 0;
+	int saved_errno;
+	int ret;
+
+	if (!create_identity_lut_blob(fd, 1024, &lut1024_blob,
+	    "CREATE_BLOB succeeds for 1024-entry identity LUT"))
+		goto out;
+	if (!create_identity_lut_blob(fd, 256, &lut256_blob,
+	    "CREATE_BLOB succeeds for legacy 256-entry identity LUT"))
+		goto out;
+	if (!create_identity_lut_blob(fd, 17, &invalid_lut_blob,
+	    "CREATE_BLOB succeeds for invalid-size identity LUT"))
+		goto out;
+	if (!create_identity_ctm_blob(fd, &ctm_blob,
+	    "CREATE_BLOB succeeds for identity CTM"))
+		goto out;
+
+	ret = atomic_crtc_color_test_only_commit(fd, crtc_id, lut1024_blob,
+	    ctm_blob, lut1024_blob, &saved_errno);
+	check(ret == 0,
+	    "atomic TEST_ONLY accepts 1024-entry CRTC color state");
+
+	ret = atomic_crtc_color_test_only_commit(fd, crtc_id, lut256_blob,
+	    ctm_blob, lut256_blob, &saved_errno);
+	check(ret == 0,
+	    "atomic TEST_ONLY accepts legacy 256-entry CRTC color state");
+
+	ret = atomic_crtc_color_test_only_commit(fd, crtc_id, invalid_lut_blob,
+	    ctm_blob, 0, &saved_errno);
+	if (ret == 0) {
+		check(false,
+		    "atomic TEST_ONLY rejects invalid CRTC LUT size");
+	} else {
+		check(saved_errno == EINVAL,
+		    "atomic TEST_ONLY rejects invalid CRTC LUT size with EINVAL");
+	}
+
+out:
+	destroy_property_blob(fd, ctm_blob,
+	    "DESTROY_BLOB succeeds for identity CTM");
+	destroy_property_blob(fd, invalid_lut_blob,
+	    "DESTROY_BLOB succeeds for invalid-size identity LUT");
+	destroy_property_blob(fd, lut256_blob,
+	    "DESTROY_BLOB succeeds for legacy 256-entry identity LUT");
+	destroy_property_blob(fd, lut1024_blob,
+	    "DESTROY_BLOB succeeds for 1024-entry identity LUT");
+}
+
 static void
 dump_properties(int fd, uint32_t object_id, uint32_t object_type,
     const char *object_name)
@@ -452,6 +620,7 @@ check_crtc(int fd, uint32_t crtc_id)
 	snprintf(name, sizeof(name), "crtc %u", crtc_id);
 	dump_properties(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name);
 	check_crtc_color_property_contract(fd, crtc_id, name);
+	check_atomic_crtc_color_contract(fd, crtc_id);
 }
 
 static bool
