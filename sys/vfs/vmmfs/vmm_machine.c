@@ -158,7 +158,7 @@ event_text(uint8_t code, size_t *len)
 }
 
 static void
-ev_push(struct vmm_machine_state *m, uint8_t code)
+ev_push(struct vmm_machine *m, uint8_t code)
 {
 	size_t slot = (m->ev_tail + m->ev_count) % VMM_EVENT_CAP;
 
@@ -173,7 +173,7 @@ ev_push(struct vmm_machine_state *m, uint8_t code)
 /* Machine model.                                                        */
 
 void
-vmm_machine_init(struct vmm_machine_state *m)
+vmm_machine_init(struct vmm_machine *m)
 {
 	memset(m, 0, sizeof(*m));
 	m->stopped = 1;
@@ -182,7 +182,7 @@ vmm_machine_init(struct vmm_machine_state *m)
 }
 
 int
-vmm_machine_commit_vcpu(struct vmm_machine_state *m, const char *buf, size_t len)
+vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len)
 {
 	uint32_t v;
 
@@ -193,7 +193,7 @@ vmm_machine_commit_vcpu(struct vmm_machine_state *m, const char *buf, size_t len
 }
 
 int
-vmm_machine_commit_mem(struct vmm_machine_state *m, const char *buf, size_t len)
+vmm_machine_commit_mem(struct vmm_machine *m, const char *buf, size_t len)
 {
 	uint64_t v;
 
@@ -204,7 +204,7 @@ vmm_machine_commit_mem(struct vmm_machine_state *m, const char *buf, size_t len)
 }
 
 int
-vmm_machine_commit_loader(struct vmm_machine_state *m, const char *buf,
+vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
     size_t len)
 {
 	size_t pl;
@@ -218,19 +218,19 @@ vmm_machine_commit_loader(struct vmm_machine_state *m, const char *buf,
 }
 
 size_t
-vmm_machine_vcpu_text(const struct vmm_machine_state *m, char *out, size_t cap)
+vmm_machine_vcpu_text(const struct vmm_machine *m, char *out, size_t cap)
 {
 	return (m->vcpu == 0) ? 0 : write_decimal(m->vcpu, out, cap);
 }
 
 size_t
-vmm_machine_mem_text(const struct vmm_machine_state *m, char *out, size_t cap)
+vmm_machine_mem_text(const struct vmm_machine *m, char *out, size_t cap)
 {
 	return (m->mem == 0) ? 0 : write_decimal(m->mem, out, cap);
 }
 
 size_t
-vmm_machine_loader_text(const struct vmm_machine_state *m, char *out, size_t cap)
+vmm_machine_loader_text(const struct vmm_machine *m, char *out, size_t cap)
 {
 	size_t need = m->loader_len + 1;
 
@@ -242,7 +242,7 @@ vmm_machine_loader_text(const struct vmm_machine_state *m, char *out, size_t cap
 }
 
 size_t
-vmm_machine_loader_path(const struct vmm_machine_state *m, char *out, size_t cap)
+vmm_machine_loader_path(const struct vmm_machine *m, char *out, size_t cap)
 {
 	if (m->loader_len == 0 || m->loader_len > cap)
 		return 0;
@@ -251,19 +251,19 @@ vmm_machine_loader_path(const struct vmm_machine_state *m, char *out, size_t cap
 }
 
 int
-vmm_machine_config_complete(const struct vmm_machine_state *m)
+vmm_machine_config_complete(const struct vmm_machine *m)
 {
 	return m->vcpu != 0 && m->mem != 0 && m->loader_len != 0;
 }
 
 int
-vmm_machine_is_stopped(const struct vmm_machine_state *m)
+vmm_machine_is_stopped(const struct vmm_machine *m)
 {
 	return m->stopped;
 }
 
 void
-vmm_machine_stop(struct vmm_machine_state *m, int force)
+vmm_machine_stop(struct vmm_machine *m, int force)
 {
 	(void)force;
 	if (!m->stopped) {
@@ -273,7 +273,7 @@ vmm_machine_stop(struct vmm_machine_state *m, int force)
 }
 
 void
-vmm_machine_start(struct vmm_machine_state *m)
+vmm_machine_start(struct vmm_machine *m)
 {
 	if (m->stopped) {
 		m->stopped = 0;
@@ -282,13 +282,13 @@ vmm_machine_start(struct vmm_machine_state *m)
 }
 
 int
-vmm_machine_is_deleting(const struct vmm_machine_state *m)
+vmm_machine_is_deleting(const struct vmm_machine *m)
 {
 	return m->deleting;
 }
 
 int
-vmm_machine_lease_open(struct vmm_machine_state *m)
+vmm_machine_lease_open(struct vmm_machine *m)
 {
 	if (m->deleting)
 		return 0;
@@ -298,7 +298,7 @@ vmm_machine_lease_open(struct vmm_machine_state *m)
 }
 
 enum vmm_close_action
-vmm_machine_lease_close(struct vmm_machine_state *m)
+vmm_machine_lease_close(struct vmm_machine *m)
 {
 	if (m->lease_count > 0)
 		m->lease_count--;
@@ -311,7 +311,7 @@ vmm_machine_lease_close(struct vmm_machine_state *m)
 }
 
 int
-vmm_machine_begin_delete(struct vmm_machine_state *m)
+vmm_machine_begin_delete(struct vmm_machine *m)
 {
 	if (m->deleting)
 		return 0;
@@ -321,13 +321,13 @@ vmm_machine_begin_delete(struct vmm_machine_state *m)
 }
 
 int
-vmm_machine_events_pending(const struct vmm_machine_state *m)
+vmm_machine_events_pending(const struct vmm_machine *m)
 {
 	return m->ev_count > 0;
 }
 
 size_t
-vmm_machine_read_events(struct vmm_machine_state *m, char *out, size_t cap)
+vmm_machine_read_events(struct vmm_machine *m, char *out, size_t cap)
 {
 	size_t n = 0;
 

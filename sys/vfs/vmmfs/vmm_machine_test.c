@@ -18,28 +18,28 @@ static int passed, failed;
 static char buf[1024];
 
 static const char *
-vcpu_s(struct vmm_machine_state *m)
+vcpu_s(struct vmm_machine *m)
 {
 	size_t n = vmm_machine_vcpu_text(m, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
 static const char *
-mem_s(struct vmm_machine_state *m)
+mem_s(struct vmm_machine *m)
 {
 	size_t n = vmm_machine_mem_text(m, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
 static const char *
-loader_s(struct vmm_machine_state *m)
+loader_s(struct vmm_machine *m)
 {
 	size_t n = vmm_machine_loader_text(m, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
 static const char *
-drain(struct vmm_machine_state *m)
+drain(struct vmm_machine *m)
 {
 	size_t n = vmm_machine_read_events(m, buf, sizeof(buf) - 1);
 	buf[n] = 0;
@@ -49,7 +49,7 @@ drain(struct vmm_machine_state *m)
 int
 main(void)
 {
-	struct vmm_machine_state m;
+	struct vmm_machine m;
 	int i;
 	size_t n, k;
 

@@ -20,7 +20,7 @@
  * vmm_* is the VMM core (vmm_machine.c) and owns what a machine IS: config
  * parsing, the desired-state registers, and the lifecycle/lease/event state
  * machine -- pure logic with no kernel deps, host-unit-tested (vmm_machine_test.c).
- * Each C registry slot (struct vmmfs_machine) embeds a vmm_machine_state.
+ * Each C registry slot (struct vmmfs_machine) embeds a vmm_machine.
  */
 
 #include <sys/param.h>
@@ -177,7 +177,7 @@ struct vmmfs_device {
 struct vmmfs_machine {
 	int				in_use;
 	char				name[VMMFS_NAME_MAX + 1];
-	struct vmm_machine_state	state;	/* config + lifecycle (vmm core) */
+	struct vmm_machine	state;	/* config + lifecycle (vmm core) */
 	struct vmmfs_node		node;
 	struct vmmfs_node		cfg[VMMFS_NCFG];
 	struct vmmfs_node		vn_devices;	/* this machine's devices/ */
