@@ -126,6 +126,21 @@ get_plane_type(int fd, uint32_t plane_id)
 }
 
 static bool
+get_property_id(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, uint32_t *property_id)
+{
+	drmModePropertyPtr prop;
+	uint64_t value;
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	if (prop == NULL)
+		return false;
+	*property_id = prop->prop_id;
+	drmModeFreeProperty(prop);
+	return true;
+}
+
+static bool
 has_property(int fd, uint32_t object_id, uint32_t object_type,
     const char *name)
 {
@@ -238,6 +253,28 @@ check_crtc(int fd, uint32_t crtc_id)
 }
 
 static bool
+find_active_crtc(int fd, const drmModeRes *resources, uint32_t *crtc_id_out,
+    uint32_t *crtc_index_out)
+{
+	for (int i = 0; i < resources->count_crtcs; i++) {
+		drmModePropertyPtr prop;
+		uint64_t active = 0;
+
+		prop = get_property_by_name(fd, resources->crtcs[i],
+		    DRM_MODE_OBJECT_CRTC, "ACTIVE", &active);
+		if (prop == NULL)
+			continue;
+		drmModeFreeProperty(prop);
+		if (active != 0) {
+			*crtc_id_out = resources->crtcs[i];
+			*crtc_index_out = (uint32_t)i;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
 range_valid(size_t offset, size_t count, size_t elem_size, size_t total)
 {
 	if (offset > total)
@@ -341,8 +378,8 @@ find_first_nvidia_modifier(const struct drm_format_modifier *modifiers,
 }
 
 static bool
-create_dumb_buffer(int fd, uint32_t width, uint32_t height, uint32_t bpp,
-    uint32_t *handle_out, uint32_t *pitch_out)
+create_dumb_buffer_for(int fd, uint32_t width, uint32_t height, uint32_t bpp,
+    uint32_t *handle_out, uint32_t *pitch_out, const char *what)
 {
 	struct drm_mode_create_dumb create;
 	bool ok;
@@ -353,7 +390,7 @@ create_dumb_buffer(int fd, uint32_t width, uint32_t height, uint32_t bpp,
 	create.bpp = bpp;
 
 	ok = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) == 0;
-	check(ok, "CREATE_DUMB succeeds for ADDFB2 negative probe");
+	check(ok, what);
 	if (!ok)
 		return false;
 
@@ -363,7 +400,7 @@ create_dumb_buffer(int fd, uint32_t width, uint32_t height, uint32_t bpp,
 }
 
 static void
-destroy_dumb_buffer(int fd, uint32_t handle)
+destroy_dumb_buffer_for(int fd, uint32_t handle, const char *what)
 {
 	struct drm_mode_destroy_dumb destroy;
 
@@ -371,8 +408,171 @@ destroy_dumb_buffer(int fd, uint32_t handle)
 		return;
 	memset(&destroy, 0, sizeof(destroy));
 	destroy.handle = handle;
-	check(drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) == 0,
+	check(drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) == 0, what);
+}
+
+static bool
+create_dumb_buffer(int fd, uint32_t width, uint32_t height, uint32_t bpp,
+    uint32_t *handle_out, uint32_t *pitch_out)
+{
+	return create_dumb_buffer_for(fd, width, height, bpp, handle_out,
+	    pitch_out, "CREATE_DUMB succeeds for ADDFB2 negative probe");
+}
+
+static void
+destroy_dumb_buffer(int fd, uint32_t handle)
+{
+	destroy_dumb_buffer_for(fd, handle,
 	    "DESTROY_DUMB succeeds for ADDFB2 negative probe");
+}
+
+static bool
+add_linear_framebuffer(int fd, uint32_t width, uint32_t height,
+    uint32_t format, uint32_t handle, uint32_t pitch, uint32_t *fb_id_out,
+    const char *what)
+{
+	uint32_t handles[4] = { 0 };
+	uint32_t offsets[4] = { 0 };
+	uint32_t pitches[4] = { 0 };
+	uint64_t modifiers[4] = { DRM_FORMAT_MOD_LINEAR };
+	bool ok;
+
+	handles[0] = handle;
+	pitches[0] = pitch;
+	ok = drmModeAddFB2WithModifiers(fd, width, height, format, handles,
+	    pitches, offsets, modifiers, fb_id_out, DRM_MODE_FB_MODIFIERS) == 0;
+	check(ok, what);
+	return ok;
+}
+
+static void
+remove_framebuffer(int fd, uint32_t fb_id, const char *what)
+{
+	if (fb_id == 0)
+		return;
+	check(drmModeRmFB(fd, fb_id) == 0, what);
+}
+
+static bool
+atomic_add_plane_property(int fd, drmModeAtomicReqPtr req, uint32_t plane_id,
+    const char *name, uint64_t value)
+{
+	uint32_t property_id = 0;
+
+	if (!get_property_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, name,
+	    &property_id)) {
+		printf("plane %u property %s unavailable\n", plane_id, name);
+		return false;
+	}
+	return drmModeAtomicAddProperty(req, plane_id, property_id, value) >= 0;
+}
+
+static int
+atomic_cursor_test_only_commit(int fd, uint32_t plane_id, uint32_t crtc_id,
+    uint32_t fb_id, uint32_t size, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_plane_property(fd, req, plane_id, "FB_ID", fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID", crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W", size) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H", size) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    (uint64_t)size << 16) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    (uint64_t)size << 16)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+/*
+ * check_atomic_cursor_test_only_contract()
+ *
+ * Ownership:
+ *   Owns the temporary dumb BO handles and framebuffer IDs it creates, and
+ *   releases both before returning.  The kernel only borrows the FB IDs for
+ *   the duration of each TEST_ONLY atomic request.
+ *
+ * Lifetime:
+ *   No KMS state is committed.  The positive ARGB8888 request proves the
+ *   selected cursor plane/CRTC/property tuple is otherwise valid; the RGB565
+ *   request then isolates the plane format/modifier rejection path.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The driver runs atomic_check under its
+ *   normal modeset locks, and TEST_ONLY must not program display hardware.
+ */
+static void
+check_atomic_cursor_test_only_contract(int fd, uint32_t plane_id,
+    uint32_t crtc_id)
+{
+	uint32_t argb_handle = 0;
+	uint32_t rgb565_handle = 0;
+	uint32_t argb_pitch = 0;
+	uint32_t rgb565_pitch = 0;
+	uint32_t argb_fb = 0;
+	uint32_t rgb565_fb = 0;
+	int saved_errno;
+	int ret;
+
+	if (!create_dumb_buffer_for(fd, 64, 64, 32, &argb_handle,
+	    &argb_pitch,
+	    "CREATE_DUMB succeeds for cursor atomic positive probe"))
+		goto out;
+	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_ARGB8888,
+	    argb_handle, argb_pitch, &argb_fb,
+	    "ADDFB2 accepts ARGB8888 linear cursor probe"))
+		goto out;
+	ret = atomic_cursor_test_only_commit(fd, plane_id, crtc_id, argb_fb,
+	    64, &saved_errno);
+	check(ret == 0, "atomic TEST_ONLY accepts ARGB8888 linear cursor");
+
+	if (!create_dumb_buffer_for(fd, 64, 64, 16, &rgb565_handle,
+	    &rgb565_pitch,
+	    "CREATE_DUMB succeeds for cursor atomic negative probe"))
+		goto out;
+	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_RGB565,
+	    rgb565_handle, rgb565_pitch, &rgb565_fb,
+	    "ADDFB2 accepts RGB565 linear atomic negative probe"))
+		goto out;
+	ret = atomic_cursor_test_only_commit(fd, plane_id, crtc_id, rgb565_fb,
+	    64, &saved_errno);
+	if (ret == 0) {
+		check(false, "atomic TEST_ONLY rejects RGB565 linear cursor");
+	} else {
+		check(saved_errno == EINVAL,
+		    "atomic TEST_ONLY rejects RGB565 linear cursor with EINVAL");
+	}
+
+out:
+	remove_framebuffer(fd, rgb565_fb,
+	    "RMFB succeeds for cursor atomic negative probe");
+	remove_framebuffer(fd, argb_fb,
+	    "RMFB succeeds for cursor atomic positive probe");
+	destroy_dumb_buffer_for(fd, rgb565_handle,
+	    "DESTROY_DUMB succeeds for cursor atomic negative probe");
+	destroy_dumb_buffer_for(fd, argb_handle,
+	    "DESTROY_DUMB succeeds for cursor atomic positive probe");
 }
 
 static void
@@ -577,14 +777,22 @@ check_in_formats(int fd, drmModePlanePtr plane, int plane_type,
 }
 
 static void
-check_planes(int fd)
+check_planes(int fd, const drmModeRes *mode_resources)
 {
 	drmModePlaneResPtr resources;
+	uint32_t active_crtc_id = 0;
+	uint32_t active_crtc_index = 0;
+	bool cursor_probe_done = false;
+	bool have_active_crtc;
 
 	resources = drmModeGetPlaneResources(fd);
 	check(resources != NULL, "plane resources available");
 	if (resources == NULL)
 		return;
+
+	have_active_crtc = find_active_crtc(fd, mode_resources,
+	    &active_crtc_id, &active_crtc_index);
+	check(have_active_crtc, "active CRTC available for atomic TEST_ONLY probe");
 
 	printf("planes: count=%u\n", resources->count_planes);
 	check(resources->count_planes > 0, "at least one KMS plane exposed");
@@ -610,8 +818,18 @@ check_planes(int fd)
 		plane_type = get_plane_type(fd, plane->plane_id);
 		check(plane_type >= 0, "plane type is readable");
 		check_in_formats(fd, plane, plane_type, name);
+		if (have_active_crtc && !cursor_probe_done &&
+		    plane_type == DRM_PLANE_TYPE_CURSOR &&
+		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
+			check_atomic_cursor_test_only_contract(fd,
+			    plane->plane_id, active_crtc_id);
+			cursor_probe_done = true;
+		}
 		drmModeFreePlane(plane);
 	}
+
+	check(cursor_probe_done,
+	    "cursor plane supports active CRTC for atomic TEST_ONLY probe");
 
 	drmModeFreePlaneResources(resources);
 }
@@ -664,7 +882,7 @@ main(void)
 	for (int i = 0; i < resources->count_crtcs; i++)
 		check_crtc(fd, resources->crtcs[i]);
 
-	check_planes(fd);
+	check_planes(fd, resources);
 	drmModeFreeResources(resources);
 	close(fd);
 
