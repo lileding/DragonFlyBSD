@@ -277,6 +277,50 @@ check_range_property_value(int fd, uint32_t object_id, uint32_t object_type,
 	drmModeFreeProperty(prop);
 }
 
+static void
+check_range_property_current(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, const char *object_name, uint64_t expected_value)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s %s is range", object_name, name);
+	check((prop->flags & DRM_MODE_PROP_RANGE) != 0, text);
+	snprintf(text, sizeof(text), "%s %s value is %llu", object_name, name,
+	    (unsigned long long)expected_value);
+	check(value == expected_value, text);
+	drmModeFreeProperty(prop);
+}
+
+static void
+check_blob_property_default_zero(int fd, uint32_t object_id,
+    uint32_t object_type, const char *name, const char *object_name)
+{
+	drmModePropertyPtr prop;
+	uint64_t value = 0;
+	char text[192];
+
+	prop = get_property_by_name(fd, object_id, object_type, name, &value);
+	snprintf(text, sizeof(text), "%s has property %s", object_name, name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s %s is blob", object_name, name);
+	check((prop->flags & DRM_MODE_PROP_BLOB) != 0, text);
+	snprintf(text, sizeof(text), "%s %s defaults to 0", object_name,
+	    name);
+	check(value == 0, text);
+	drmModeFreeProperty(prop);
+}
+
 /*
  * check_connector_property_contract()
  *
@@ -304,6 +348,37 @@ check_connector_property_contract(int fd, uint32_t connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "dithering depth", object_name, "auto");
 	check_range_property_value(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "max bpc", object_name, 8, 8, 8);
+}
+
+/*
+ * check_crtc_color_property_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM CRTC object ID and opens each property through libdrm.
+ *   Every drmModePropertyPtr returned by libdrm is released before return.
+ *
+ * Lifetime:
+ *   Reads only public KMS color properties.  It does not create blobs, mutate
+ *   CRTC state, or trigger an atomic commit.
+ *
+ * Threading:
+ *   Single-threaded probe.  Values are snapshots from the DRM property UAPI;
+ *   a compositor may set nonzero LUT/CTM blobs in a separate X11 phase.
+ */
+static void
+check_crtc_color_property_contract(int fd, uint32_t crtc_id,
+    const char *object_name)
+{
+	check_blob_property_default_zero(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "DEGAMMA_LUT", object_name);
+	check_range_property_current(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "DEGAMMA_LUT_SIZE", object_name, 1024);
+	check_blob_property_default_zero(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "CTM", object_name);
+	check_blob_property_default_zero(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "GAMMA_LUT", object_name);
+	check_range_property_current(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "GAMMA_LUT_SIZE", object_name, 1024);
 }
 
 static void
@@ -376,15 +451,7 @@ check_crtc(int fd, uint32_t crtc_id)
 
 	snprintf(name, sizeof(name), "crtc %u", crtc_id);
 	dump_properties(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name);
-	require_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "GAMMA_LUT",
-	    name);
-	require_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "GAMMA_LUT_SIZE",
-	    name);
-	require_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "DEGAMMA_LUT",
-	    name);
-	require_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
-	    "DEGAMMA_LUT_SIZE", name);
-	require_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "CTM", name);
+	check_crtc_color_property_contract(fd, crtc_id, name);
 }
 
 static bool
