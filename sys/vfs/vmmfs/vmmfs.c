@@ -43,6 +43,10 @@ extern void	vmmfs_machine_free(struct vmmfs_machine_state *m);
 extern int	vmmfs_machine_is_stopped(struct vmmfs_machine_state *m);
 extern void	vmmfs_machine_stop(struct vmmfs_machine_state *m, int force);
 extern void	vmmfs_machine_start(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_is_deleting(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_lease_open(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_lease_close(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_begin_delete(struct vmmfs_machine_state *m);
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
@@ -91,6 +95,7 @@ enum vmmfs_cfg {
 	VMMFS_CFG_VCPU,
 	VMMFS_CFG_MEM,
 	VMMFS_CFG_LOADER,
+	VMMFS_CFG_LEASE,
 	VMMFS_CFG_STOPPED,
 	VMMFS_NCFG,
 };
@@ -99,6 +104,7 @@ static const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
 	[VMMFS_CFG_VCPU] =	"vcpu",
 	[VMMFS_CFG_MEM] =	"mem",
 	[VMMFS_CFG_LOADER] =	"loader",
+	[VMMFS_CFG_LEASE] =	"lease",
 	[VMMFS_CFG_STOPPED] =	"stopped",
 };
 
@@ -433,6 +439,22 @@ vmmfs_alloc_slot(struct vmmfs_mount *vmp)
 	return NULL;
 }
 
+/*
+ * Mark a machine deleted: enter the deletion flow (so the lease can no longer
+ * be opened) and drop it from the namespace.  The Rust state and the slot are
+ * reclaimed lazily (vmmfs_alloc_slot / unmount), so any still-open fds keep
+ * working.  Callers that hold the machine's directory vnode additionally
+ * cache_inval_vp() it for an immediate vanish.
+ */
+static void
+vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
+{
+	vmmfs_machine_begin_delete(m->rust);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	m->in_use = 0;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+}
+
 /* --------------------------------------------------------------------- */
 
 static int
@@ -616,10 +638,17 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	m->in_use = 0;
+	/* A machine must be stopped before it can be removed. */
+	if (!vmmfs_machine_is_stopped(m->rust)) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vrele(vp);
+		return EBUSY;
+	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	cache_unlink(ap->a_nch);
+	/* Source 1: rmdir of a stopped machine deletes it regardless of leases. */
+	vmmfs_machine_mark_deleted(vmp, m);
+	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	return 0;
 }
@@ -696,13 +725,34 @@ vmmfs_nremove(struct vop_nremove_args *ap)
 static int
 vmmfs_open(struct vop_open_args *ap)
 {
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	/* Opening the lease takes a reference; refuse once deletion has begun. */
+	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
+		if (vmmfs_machine_lease_open(node->vn_machine->rust) == 0)
+			return ENXIO;
+	}
 	return vop_stdopen(ap);
 }
 
 static int
 vmmfs_close(struct vop_close_args *ap)
 {
-	return vop_stdclose(ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	error = vop_stdclose(ap);
+
+	/* Releasing the last lease of an armed machine destroys it (source 3). */
+	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
+		if (vmmfs_machine_lease_close(node->vn_machine->rust)) {
+			struct vmmfs_mount *vmp =
+			    VFS_TO_VMMFS(ap->a_vp->v_mount);
+
+			vmmfs_machine_mark_deleted(vmp, node->vn_machine);
+		}
+	}
+	return error;
 }
 
 static int

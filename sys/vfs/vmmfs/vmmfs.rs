@@ -101,6 +101,43 @@ pub unsafe extern "C" fn vmmfs_machine_start(m: *mut MachineState) {
     kernel::handle_mut(m).start();
 }
 
+/// # Safety
+/// `m` is a live handle from `vmmfs_machine_new`.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_is_deleting(m: *mut MachineState) -> c_int {
+    kernel::handle_mut(m).is_deleting() as c_int
+}
+
+/// Open the lease.  Returns 1 on success, 0 if the machine is being deleted.
+///
+/// # Safety
+/// `m` is a live handle from `vmmfs_machine_new`.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_lease_open(m: *mut MachineState) -> c_int {
+    kernel::handle_mut(m).lease_open() as c_int
+}
+
+/// Close the lease.  Returns 1 if the machine must now be destroyed, else 0.
+///
+/// # Safety
+/// `m` is a live handle from `vmmfs_machine_new`.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_lease_close(m: *mut MachineState) -> c_int {
+    match kernel::handle_mut(m).lease_close() {
+        machine::CloseAction::Delete => 1,
+        machine::CloseAction::None => 0,
+    }
+}
+
+/// Begin deletion (rmdir/unmount).  Returns 1 if newly started, 0 if already.
+///
+/// # Safety
+/// `m` is a live handle from `vmmfs_machine_new`.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_begin_delete(m: *mut MachineState) -> c_int {
+    kernel::handle_mut(m).begin_delete() as c_int
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
     loop {
