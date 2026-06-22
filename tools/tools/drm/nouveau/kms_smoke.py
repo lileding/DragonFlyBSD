@@ -306,6 +306,41 @@ def has_error_text(text: str) -> bool:
     ))
 
 
+LEFTOVER_BASENAMES = {
+    "Xorg",
+    "glxgears",
+    "firefox",
+    "firefox-bin",
+}
+
+
+def ps_command_lines(text: str) -> list[str]:
+    commands: list[str] = []
+    pattern = re.compile(r"^\s*-?\d+\s+\S+\s+\S+\s+\S+\s+(.*)$")
+    for line in text.splitlines():
+        if not line or line.startswith("###"):
+            continue
+        if line.lstrip().startswith("PID "):
+            continue
+        match = pattern.match(line)
+        if match:
+            commands.append(match.group(1))
+    return commands
+
+
+def command_basename(command: str) -> str:
+    first = command.split(maxsplit=1)[0] if command.split() else ""
+    return pathlib.PurePosixPath(first.strip("()")).name
+
+
+def leftover_graphics_commands(ps_text: str) -> list[str]:
+    leftovers: list[str] = []
+    for command in ps_command_lines(ps_text):
+        if command_basename(command) in LEFTOVER_BASENAMES:
+            leftovers.append(command)
+    return leftovers
+
+
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     failed = False
 
@@ -400,8 +435,10 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
                 emit(False, f"missing {key}")
 
     ps_after = (out_dir / "ps.after").read_text(errors="replace") if (out_dir / "ps.after").exists() else ""
-    emit(not re.search(r"(^|\s)(Xorg|glxgears|firefox)(\s|$)", ps_after),
-         "no Xorg/glxgears/firefox leftovers")
+    leftovers = leftover_graphics_commands(ps_after)
+    emit(not leftovers, "no Xorg/glxgears/firefox leftovers")
+    for command in leftovers:
+        print(f"INFO leftover: {command}")
 
     x11_ran = (out_dir / "drm_state.x11").exists()
     if not x11_ran:
