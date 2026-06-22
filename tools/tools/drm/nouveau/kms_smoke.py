@@ -78,6 +78,7 @@ WATCH_KEYS = (
     "atomic_tail_finish_prepared_count",
     "atomic_disable_vblank_off_count",
     "atomic_disable_vblank_keep_count",
+    "fb_create_reject_count",
     "plane_update_count",
     "plane_disable_count",
     "cursor_update_count",

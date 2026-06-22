@@ -759,6 +759,7 @@ struct nvkm_softc {
 	uint32_t		kms_restore_last_primary_count;
 	int			kms_restore_last_open_count;
 	uint64_t		kms_fb_create_count;
+	uint64_t		kms_fb_create_reject_count;
 	uint64_t		kms_fb_create_error_count;
 	uint64_t		kms_fb_create_blocklinear_count;
 	uint64_t		kms_fb_create_linear_count;
