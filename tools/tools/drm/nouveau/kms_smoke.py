@@ -247,6 +247,21 @@ def command_return_code(path: pathlib.Path) -> int | None:
     return int(match.group(1))
 
 
+def captured_text(path: pathlib.Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(errors="replace")
+
+
+def has_error_text(text: str) -> bool:
+    return bool(re.search(
+        r"Error|failed|Segmentation fault|core dumped|DeviceLost|"
+        r"couldn['’]?t open display|No protocol specified",
+        text,
+        re.I,
+    ))
+
+
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     failed = False
 
@@ -346,16 +361,28 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         for name in ("xrandr.x11", "glxinfo-B.x11"):
             rc = command_return_code(out_dir / name)
             emit(rc == 0, f"{name} rc={rc}")
+        xrandr_text = captured_text(out_dir / "xrandr.x11")
+        emit(bool(re.search(r"^[A-Za-z0-9_.-]+ connected\b", xrandr_text, re.M)),
+             "xrandr has connected output")
+        emit(bool(re.search(r"\b[0-9]+x[0-9]+\b.*\*", xrandr_text)),
+             "xrandr has active mode")
         gears_rc = command_return_code(out_dir / "glxgears.x11")
         emit(gears_rc in (0, 124), f"glxgears.x11 rc={gears_rc}")
+        gears_text = captured_text(out_dir / "glxgears.x11")
+        emit(bool(re.search(r"GL_RENDERER|GL_VERSION|frames in", gears_text, re.I)),
+             "glxgears produced renderer/frame output")
+        emit(not has_error_text(gears_text),
+             "glxgears output has no errors")
         if (out_dir / "xrandr-panning.x11").exists():
             panning_rc = command_return_code(out_dir / "xrandr-panning.x11")
             emit(panning_rc == 0, f"xrandr-panning.x11 rc={panning_rc}")
         glxinfo = out_dir / "glxinfo-B.x11"
         if glxinfo.exists():
-            text = glxinfo.read_text(errors="replace")
+            text = captured_text(glxinfo)
             emit(bool(re.search(r"zink|NVK|Vulkan", text, re.I)),
                  "glxinfo shows zink/NVK/Vulkan")
+            emit(not re.search(r"llvmpipe|softpipe|software rasterizer", text, re.I),
+                 "glxinfo is not software rasterizer")
 
     xlog = list(out_dir.glob("*Xorg*.after"))
     if x11_ran and xlog:
