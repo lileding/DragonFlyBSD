@@ -18,7 +18,7 @@ RUSTFLAGS+=	-C no-redzone=yes
 RUSTFLAGS+=	-C relocation-model=static
 RUSTFLAGS+=	-C force-unwind-tables=no
 
-vmmfs_rust.o: vmmfs.rs kernel.rs
+vmmfs_rust.o: vmmfs.rs kernel.rs parse.rs machine.rs
 	${RUSTC} ${RUSTFLAGS} -o ${.TARGET} vmmfs.rs
 
 .include <bsd.kmod.mk>
