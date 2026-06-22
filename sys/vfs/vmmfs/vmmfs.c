@@ -3,17 +3,21 @@
  *
  * vmmfs - DragonFlyBSD system VMM control filesystem.
  *
- * M1: mountable VFS exposing machines/.
- * M2: machine import via `ln -s <config-dir> machines/<name>` and removal via
- *     `rmdir machines/<name>`; per-machine vcpu/mem/loader[/stopped] files.
- * M3a: the lifecycle state machine moves into Rust (MachineState, kmalloc-backed
- *      raw object).  The control surface exposes only the stable desired state
- *      {Running, Stopped} (no intermediate state); the loader is stubbed so
- *      transitions are instant.  `echo apic|force > stopped` stops, `rm stopped`
- *      starts; every operation is atomic or idempotent.
+ * A machine is created with `mkdir machines/<name>`: it always starts stopped
+ * with empty config.  The config files vcpu/mem/loader behave like hardware
+ * registers — open() yields a per-open buffer holding the current DESIRED value
+ * as text; read/write/seek act on that buffer; only close() atomically parses
+ * the whole buffer and updates the desired value (invalid input is a no-op, the
+ * old value is kept).  A successful write does NOT mean the value updated; only
+ * reading it back is authoritative.  `rm stopped` starts the machine after
+ * validating the config is complete and the loader path is executable in the
+ * caller's context; `echo apic|force > stopped` stops it; `rmdir` deletes a
+ * stopped machine.  Every operation is atomic or idempotent — no intermediate
+ * state.  The loader is not yet executed (that is "vmm core").
  *
- * C owns the VFS/namecache plumbing, the kernel file I/O, and the fixed machine
- * registry; Rust owns the config parsing and the machine state object.
+ * C owns the VFS/namecache plumbing, the per-open buffers, the loader-path
+ * validation, and the fixed machine registry; Rust owns the config parsing,
+ * desired-state registers, and the lifecycle/lease/event state machine.
  */
 
 #include <sys/param.h>
@@ -30,16 +34,30 @@
 #include <sys/stat.h>
 #include <sys/fcntl.h>
 #include <sys/uio.h>
+#include <sys/queue.h>
 
 extern int	vmmfs_rust_init(void);
 extern void	vmmfs_rust_fini(void);
-extern int	vmmfs_parse_vcpu(const uint8_t *buf, size_t len, uint32_t *out);
-extern int	vmmfs_parse_mem(const uint8_t *buf, size_t len, uint64_t *out);
 
-/* Rust-owned per-machine lifecycle state object. */
+/* Rust-owned per-machine state object (config registers + lifecycle). */
 struct vmmfs_machine_state;
-extern struct vmmfs_machine_state *vmmfs_machine_new(int stopped);
+extern struct vmmfs_machine_state *vmmfs_machine_new(void);
 extern void	vmmfs_machine_free(struct vmmfs_machine_state *m);
+extern int	vmmfs_machine_commit_vcpu(struct vmmfs_machine_state *m,
+		    const uint8_t *buf, size_t len);
+extern int	vmmfs_machine_commit_mem(struct vmmfs_machine_state *m,
+		    const uint8_t *buf, size_t len);
+extern int	vmmfs_machine_commit_loader(struct vmmfs_machine_state *m,
+		    const uint8_t *buf, size_t len);
+extern size_t	vmmfs_machine_vcpu_text(struct vmmfs_machine_state *m,
+		    uint8_t *buf, size_t cap);
+extern size_t	vmmfs_machine_mem_text(struct vmmfs_machine_state *m,
+		    uint8_t *buf, size_t cap);
+extern size_t	vmmfs_machine_loader_text(struct vmmfs_machine_state *m,
+		    uint8_t *buf, size_t cap);
+extern size_t	vmmfs_machine_loader_path(struct vmmfs_machine_state *m,
+		    uint8_t *buf, size_t cap);
+extern int	vmmfs_machine_config_complete(struct vmmfs_machine_state *m);
 extern int	vmmfs_machine_is_stopped(struct vmmfs_machine_state *m);
 extern void	vmmfs_machine_stop(struct vmmfs_machine_state *m, int force);
 extern void	vmmfs_machine_start(struct vmmfs_machine_state *m);
@@ -78,13 +96,12 @@ vmmfs_kfree(void *ptr)
 #define VMMFS_ROOT_INO		1
 #define VMMFS_MACHINES_INO	2
 #define VMMFS_MACHINE_INO_BASE	3
-#define VMMFS_MACHINE_INO_STRIDE 8
+#define VMMFS_MACHINE_INO_STRIDE 16	/* room for the machine dir + configs */
 
 #define VMMFS_DIR_MODE		0555
-#define VMMFS_FILE_MODE		0444
-#define VMMFS_STOPPED_MODE	0644	/* the one writable control file */
 #define VMMFS_MAX_MACHINES	64
 #define VMMFS_NAME_MAX		63
+#define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
 
 enum vmmfs_ntype {
 	VMMFS_NROOT,
@@ -100,6 +117,8 @@ enum vmmfs_cfg {
 	VMMFS_CFG_LOADER,
 	VMMFS_CFG_LEASE,
 	VMMFS_CFG_EVENTS,
+	VMMFS_CFG_CONSOLE,
+	VMMFS_CFG_STATUS,
 	VMMFS_CFG_STOPPED,
 	VMMFS_NCFG,
 };
@@ -110,7 +129,45 @@ static const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
 	[VMMFS_CFG_LOADER] =	"loader",
 	[VMMFS_CFG_LEASE] =	"lease",
 	[VMMFS_CFG_EVENTS] =	"events",
+	[VMMFS_CFG_CONSOLE] =	"console",
+	[VMMFS_CFG_STATUS] =	"status.tar.gz",
 	[VMMFS_CFG_STOPPED] =	"stopped",
+};
+
+/* The three desired-state registers use the per-open buffer + commit-on-close. */
+static int
+vmmfs_cfg_is_register(enum vmmfs_cfg cfg)
+{
+	return cfg == VMMFS_CFG_VCPU || cfg == VMMFS_CFG_MEM ||
+	    cfg == VMMFS_CFG_LOADER;
+}
+
+static mode_t
+vmmfs_cfg_mode(enum vmmfs_cfg cfg)
+{
+	switch (cfg) {
+	case VMMFS_CFG_VCPU:
+	case VMMFS_CFG_MEM:
+	case VMMFS_CFG_LOADER:
+	case VMMFS_CFG_CONSOLE:
+	case VMMFS_CFG_STOPPED:
+		return 0644;
+	case VMMFS_CFG_LEASE:
+	case VMMFS_CFG_EVENTS:
+	case VMMFS_CFG_STATUS:
+	default:
+		return 0444;
+	}
+}
+
+/* A per-open scratch buffer for a config register, keyed by struct file. */
+struct vmmfs_openbuf {
+	struct file		*ob_fp;
+	char			*ob_data;
+	int			 ob_len;
+	int			 ob_cap;
+	int			 ob_written;
+	SLIST_ENTRY(vmmfs_openbuf) ob_link;
 };
 
 struct vmmfs_machine;
@@ -124,16 +181,13 @@ struct vmmfs_node {
 	struct vmmfs_machine   *vn_machine;
 	struct vnode	       *vn_vnode;
 	struct lock		vn_interlock;
+	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
 struct vmmfs_machine {
 	int				in_use;
 	char				name[VMMFS_NAME_MAX + 1];
-	uint32_t			vcpu;
-	uint64_t			mem;
-	uint64_t			loader_size;
-	mode_t				loader_mode;
-	struct vmmfs_machine_state     *rust;	/* lifecycle state (Rust) */
+	struct vmmfs_machine_state     *rust;	/* config + lifecycle (Rust) */
 	struct vmmfs_node		node;
 	struct vmmfs_node		cfg[VMMFS_NCFG];
 };
@@ -151,8 +205,8 @@ struct vmmfs_mount {
 
 static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 		    struct ucred *cred);
-static int	vmmfs_cfg_format(struct vmmfs_node *node, char *buf,
-		    size_t bufsize);
+static size_t	vmmfs_cfg_text(struct vmmfs_node *node, uint8_t *buf,
+		    size_t cap);
 
 static struct vop_ops vmmfs_vnode_vops;
 
@@ -166,20 +220,34 @@ vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
 	node->vn_type = type;
 	node->vn_cfg = cfg;
 	node->vn_ino = ino;
-	if (type == VMMFS_NCONFIG)
-		node->vn_mode = (cfg == VMMFS_CFG_STOPPED) ? VMMFS_STOPPED_MODE :
-		    VMMFS_FILE_MODE;
-	else
-		node->vn_mode = VMMFS_DIR_MODE;
+	node->vn_mode = (type == VMMFS_NCONFIG) ? vmmfs_cfg_mode(cfg) :
+	    VMMFS_DIR_MODE;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
 	lockinit(&node->vn_interlock, "vmmfs node", 0, 0);
+	SLIST_INIT(&node->vn_obufs);
+}
+
+/* Free any lingering per-open buffers (teardown only; no commit). */
+static void
+vmmfs_obuf_drain(struct vmmfs_node *node)
+{
+	struct vmmfs_openbuf *ob;
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	while ((ob = SLIST_FIRST(&node->vn_obufs)) != NULL) {
+		SLIST_REMOVE_HEAD(&node->vn_obufs, ob_link);
+		kfree(ob->ob_data, M_VMMFS);
+		kfree(ob, M_VMMFS);
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
 }
 
 static void
 vmmfs_node_uninit(struct vmmfs_node *node)
 {
+	vmmfs_obuf_drain(node);
 	lockuninit(&node->vn_interlock);
 }
 
@@ -265,131 +333,231 @@ out:
 }
 
 /* --------------------------------------------------------------------- */
-/* Reading the config directory in the caller's context.                 */
+/* Per-open config-register buffers (PCIe-register semantics).           */
 
-static int
-vmmfs_open_path(const char *dir, const char *name, struct ucred *cred,
-    struct vnode **vpp)
+static struct vmmfs_openbuf *
+vmmfs_obuf_get(struct vmmfs_node *node, struct file *fp, int create)
 {
-	struct nlookupdata nd;
-	char *path;
-	size_t dlen, nlen;
+	struct vmmfs_openbuf *ob;
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	SLIST_FOREACH(ob, &node->vn_obufs, ob_link) {
+		if (ob->ob_fp == fp) {
+			lockmgr(&node->vn_interlock, LK_RELEASE);
+			return ob;
+		}
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (!create)
+		return NULL;
+
+	ob = kmalloc(sizeof(*ob), M_VMMFS, M_WAITOK | M_ZERO);
+	ob->ob_fp = fp;
+	ob->ob_cap = 64;
+	ob->ob_data = kmalloc(ob->ob_cap, M_VMMFS, M_WAITOK);
+	ob->ob_len = 0;
+	ob->ob_written = 0;
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	{
+		struct vmmfs_openbuf *ex;
+
+		SLIST_FOREACH(ex, &node->vn_obufs, ob_link) {
+			if (ex->ob_fp == fp) {
+				lockmgr(&node->vn_interlock, LK_RELEASE);
+				kfree(ob->ob_data, M_VMMFS);
+				kfree(ob, M_VMMFS);
+				return ex;
+			}
+		}
+	}
+	SLIST_INSERT_HEAD(&node->vn_obufs, ob, ob_link);
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	return ob;
+}
+
+/* Read a register: the open buffer if it was written, else the current value. */
+static int
+vmmfs_obuf_read(struct vmmfs_node *node, struct file *fp, struct uio *uio)
+{
+	struct vmmfs_openbuf *ob;
+	uint8_t tmp[300];
+	char *data;
+	int len;
+	off_t off;
+
+	if (uio->uio_offset < 0)
+		return EINVAL;
+	ob = vmmfs_obuf_get(node, fp, 0);
+	if (ob != NULL && ob->ob_written) {
+		data = ob->ob_data;
+		len = ob->ob_len;
+	} else {
+		len = (int)vmmfs_cfg_text(node, tmp, sizeof(tmp));
+		data = (char *)tmp;
+	}
+	off = uio->uio_offset;
+	if (off >= len)
+		return 0;
+	return uiomove(data + off, (size_t)(len - off), uio);
+}
+
+/* Write into a register's open buffer (created on demand). */
+static int
+vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp, struct uio *uio)
+{
+	struct vmmfs_openbuf *ob;
+	off_t off;
+	size_t need, resid0, wrote;
 	int error;
 
-	dlen = strlen(dir);
-	if (name != NULL) {
-		nlen = strlen(name);
-		path = kmalloc(dlen + 1 + nlen + 1, M_VMMFS, M_WAITOK);
-		bcopy(dir, path, dlen);
-		path[dlen] = '/';
-		bcopy(name, path + dlen + 1, nlen);
-		path[dlen + 1 + nlen] = '\0';
-	} else {
-		path = kmalloc(dlen + 1, M_VMMFS, M_WAITOK);
-		bcopy(dir, path, dlen + 1);
+	if (uio->uio_offset < 0)
+		return EINVAL;
+	ob = vmmfs_obuf_get(node, fp, 1);
+	if (ob == NULL)
+		return ENOMEM;
+
+	off = uio->uio_offset;
+	need = (size_t)off + (size_t)uio->uio_resid;
+	if (need > VMMFS_OBUF_MAX)
+		return EFBIG;
+	if ((int)need > ob->ob_cap) {
+		int ncap = ob->ob_cap;
+		char *nd;
+
+		while (ncap < (int)need)
+			ncap *= 2;
+		nd = kmalloc(ncap, M_VMMFS, M_WAITOK);
+		bcopy(ob->ob_data, nd, ob->ob_len);
+		kfree(ob->ob_data, M_VMMFS);
+		ob->ob_data = nd;
+		ob->ob_cap = ncap;
 	}
+	if (off > ob->ob_len)
+		bzero(ob->ob_data + ob->ob_len, (size_t)(off - ob->ob_len));
+
+	resid0 = uio->uio_resid;
+	error = uiomove(ob->ob_data + off, (size_t)uio->uio_resid, uio);
+	if (error)
+		return error;
+	wrote = resid0 - uio->uio_resid;
+	ob->ob_written = 1;
+	if ((int)(off + wrote) > ob->ob_len)
+		ob->ob_len = (int)(off + wrote);
+	return 0;
+}
+
+/* Commit (parse + update desired) on close, then free the buffer. */
+static void
+vmmfs_cfg_commit(struct vmmfs_node *node, const uint8_t *buf, size_t len);
+
+static void
+vmmfs_obuf_commit_close(struct vmmfs_node *node, struct file *fp)
+{
+	struct vmmfs_openbuf *ob = NULL, *it;
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	SLIST_FOREACH(it, &node->vn_obufs, ob_link) {
+		if (it->ob_fp == fp) {
+			ob = it;
+			SLIST_REMOVE(&node->vn_obufs, it, vmmfs_openbuf,
+			    ob_link);
+			break;
+		}
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (ob == NULL)
+		return;
+	if (ob->ob_written)
+		vmmfs_cfg_commit(node, (const uint8_t *)ob->ob_data,
+		    (size_t)ob->ob_len);
+	kfree(ob->ob_data, M_VMMFS);
+	kfree(ob, M_VMMFS);
+}
+
+/* Current desired value of a register, serialized as text. */
+static size_t
+vmmfs_cfg_text(struct vmmfs_node *node, uint8_t *buf, size_t cap)
+{
+	struct vmmfs_machine *m = node->vn_machine;
+
+	switch (node->vn_cfg) {
+	case VMMFS_CFG_VCPU:
+		return vmmfs_machine_vcpu_text(m->rust, buf, cap);
+	case VMMFS_CFG_MEM:
+		return vmmfs_machine_mem_text(m->rust, buf, cap);
+	case VMMFS_CFG_LOADER:
+		return vmmfs_machine_loader_text(m->rust, buf, cap);
+	default:
+		return 0;
+	}
+}
+
+static void
+vmmfs_cfg_commit(struct vmmfs_node *node, const uint8_t *buf, size_t len)
+{
+	struct vmmfs_machine *m = node->vn_machine;
+
+	switch (node->vn_cfg) {
+	case VMMFS_CFG_VCPU:
+		(void)vmmfs_machine_commit_vcpu(m->rust, buf, len);
+		break;
+	case VMMFS_CFG_MEM:
+		(void)vmmfs_machine_commit_mem(m->rust, buf, len);
+		break;
+	case VMMFS_CFG_LOADER:
+		(void)vmmfs_machine_commit_loader(m->rust, buf, len);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * Validate the desired loader at start time: resolve the path in the caller's
+ * context and require a regular, executable file.  No execution yet (vmm core).
+ */
+static int
+vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred)
+{
+	struct nlookupdata nd;
+	struct vnode *vp = NULL;
+	struct vattr va;
+	char path[VMMFS_OBUF_MAX];
+	size_t n;
+	int error;
+
+	n = vmmfs_machine_loader_path(m->rust, (uint8_t *)path,
+	    sizeof(path) - 1);
+	if (n == 0)
+		return EINVAL;
+	path[n] = '\0';
 
 	error = nlookup_init(&nd, path, UIO_SYSSPACE, NLC_FOLLOW | NLC_LOCKVP);
 	if (error == 0)
 		error = vn_open(&nd, NULL, FREAD, 0);
 	if (error == 0) {
-		*vpp = nd.nl_open_vp;
+		vp = nd.nl_open_vp;
 		nd.nl_open_vp = NULL;
 	}
 	nlookup_done(&nd);
-	kfree(path, M_VMMFS);
-	if (error == 0)
-		vn_unlock(*vpp);
-	return error;
-}
-
-static int
-vmmfs_read_file(const char *dir, const char *name, struct ucred *cred,
-    char *buf, size_t bufsize, size_t *outlen)
-{
-	struct vnode *vp;
-	int error, resid;
-
-	error = vmmfs_open_path(dir, name, cred, &vp);
 	if (error)
 		return error;
+
+	vn_unlock(vp);
 	if (vp->v_type != VREG) {
 		vn_close(vp, FREAD, NULL);
-		return EINVAL;
-	}
-	error = vn_rdwr(UIO_READ, vp, buf, (int)bufsize, 0, UIO_SYSSPACE, 0,
-	    cred, &resid);
-	vn_close(vp, FREAD, NULL);
-	if (error)
-		return error;
-	*outlen = bufsize - resid;
-	return 0;
-}
-
-static int
-vmmfs_read_config(const char *dir, struct ucred *cred, uint32_t *vcpu,
-    uint64_t *mem, int *stopped, uint64_t *loader_size, mode_t *loader_mode)
-{
-	struct vnode *vp;
-	char buf[64];
-	size_t len;
-	int error;
-
-	error = vmmfs_open_path(dir, NULL, cred, &vp);
-	if (error)
-		return error;
-	if (vp->v_type != VDIR) {
-		vn_close(vp, FREAD, NULL);
-		return ENOTDIR;
-	}
-	vn_close(vp, FREAD, NULL);
-
-	error = vmmfs_read_file(dir, "vcpu", cred, buf, sizeof(buf), &len);
-	if (error)
-		return (error == ENOENT) ? EINVAL : error;
-	if (vmmfs_parse_vcpu((const uint8_t *)buf, len, vcpu) != 0)
-		return EINVAL;
-
-	error = vmmfs_read_file(dir, "mem", cred, buf, sizeof(buf), &len);
-	if (error)
-		return (error == ENOENT) ? EINVAL : error;
-	if (vmmfs_parse_mem((const uint8_t *)buf, len, mem) != 0)
-		return EINVAL;
-
-	error = vmmfs_open_path(dir, "loader", cred, &vp);
-	if (error)
-		return (error == ENOENT) ? EINVAL : error;
-	if (vp->v_type != VREG) {
-		vn_close(vp, FREAD, NULL);
-		return EINVAL;
+		return EACCES;
 	}
 	vn_lock(vp, LK_SHARED | LK_RETRY);
-	{
-		struct vattr va;
-
-		error = VOP_GETATTR(vp, &va);
-		if (error == 0 && (va.va_mode & 0111) == 0)
-			error = EACCES;
-		if (error == 0)
-			error = VOP_ACCESS(vp, VEXEC, cred);
-		if (error == 0) {
-			*loader_size = va.va_size;
-			*loader_mode = va.va_mode;
-		}
-	}
+	error = VOP_GETATTR(vp, &va);
+	if (error == 0 && (va.va_mode & 0111) == 0)
+		error = EACCES;
+	if (error == 0)
+		error = VOP_ACCESS(vp, VEXEC, cred);
 	vn_unlock(vp);
 	vn_close(vp, FREAD, NULL);
-	if (error)
-		return error;
-
-	error = vmmfs_open_path(dir, "stopped", cred, &vp);
-	if (error == 0) {
-		*stopped = 1;
-		vn_close(vp, FREAD, NULL);
-	} else {
-		*stopped = 0;
-	}
-	return 0;
+	return error;
 }
 
 /* --------------------------------------------------------------------- */
@@ -412,9 +580,8 @@ vmmfs_find_machine(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 /*
  * Find a reusable slot: not in_use and with no lingering cached vnode (machine
- * dir or any config file).  Frees any deferred Rust state before reuse, which
- * is the safe point to free it: by here no vnode can still reference the
- * machine (rmdir defers the free precisely so open fds keep working).
+ * dir or any config file).  Frees any deferred Rust state before reuse, the
+ * safe point to free it: by here no vnode can still reference the machine.
  */
 static struct vmmfs_machine *
 vmmfs_alloc_slot(struct vmmfs_mount *vmp)
@@ -541,12 +708,11 @@ vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 }
 
 /*
- * `ln -s <config-dir> machines/<name>` is an atomic machine import.  Read and
- * validate the config in the caller's context, register the machine, reflect
- * it as a directory.  Any failure leaves no partial state.
+ * `mkdir machines/<name>` creates a machine: always stopped, empty config.
+ * The user then writes vcpu/mem/loader and `rm stopped` to start.
  */
 static int
-vmmfs_nsymlink(struct vop_nsymlink_args *ap)
+vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -555,22 +721,14 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 	struct vmmfs_machine *m;
 	struct vmmfs_machine_state *rust;
 	struct vnode *vp;
-	uint32_t vcpu;
-	uint64_t mem, loader_size;
-	mode_t loader_mode;
-	int stopped, error;
+	int error;
 
 	if (dnode->vn_type != VMMFS_NMACHINES)
-		return EINVAL;
+		return EPERM;
 	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
 		return ENAMETOOLONG;
 
-	error = vmmfs_read_config(ap->a_target, ap->a_cred, &vcpu, &mem,
-	    &stopped, &loader_size, &loader_mode);
-	if (error)
-		return error;
-
-	rust = vmmfs_machine_new(stopped);
+	rust = vmmfs_machine_new();
 	if (rust == NULL)
 		return ENOMEM;
 
@@ -588,10 +746,6 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 	}
 	bcopy(ncp->nc_name, m->name, ncp->nc_nlen);
 	m->name[ncp->nc_nlen] = '\0';
-	m->vcpu = vcpu;
-	m->mem = mem;
-	m->loader_size = loader_size;
-	m->loader_mode = loader_mode;
 	m->rust = rust;
 	m->in_use = 1;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -612,10 +766,9 @@ vmmfs_nsymlink(struct vop_nsymlink_args *ap)
 }
 
 /*
- * `rmdir machines/<name>` removes the machine.  M2/M3 stub: a stopped machine
- * is removable; lease and the running-state EBUSY rule arrive in M3b.  The
- * Rust state is freed lazily (vmmfs_alloc_slot) so any still-open fds on the
- * machine's files keep working until reclaimed.
+ * `rmdir machines/<name>` removes a stopped machine (source 1): it deletes
+ * regardless of leases.  The Rust state is freed lazily (vmmfs_alloc_slot) so
+ * any still-open fds keep working until reclaimed.
  */
 static int
 vmmfs_nrmdir(struct vop_nrmdir_args *ap)
@@ -643,7 +796,6 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	/* A machine must be stopped before it can be removed. */
 	if (!vmmfs_machine_is_stopped(m->rust)) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
@@ -651,7 +803,6 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	/* Source 1: rmdir of a stopped machine deletes it regardless of leases. */
 	vmmfs_machine_mark_deleted(vmp, m);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
@@ -660,8 +811,7 @@ vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 
 /*
  * Create "stopped" under a machine directory: an atomic, idempotent request to
- * stop the machine.  `echo apic > stopped` opens with O_CREAT; the write that
- * follows refines the method.
+ * stop the machine.  `echo apic > stopped` opens with O_CREAT.
  */
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
@@ -693,8 +843,9 @@ vmmfs_ncreate(struct vop_ncreate_args *ap)
 }
 
 /*
- * `rm machines/<name>/stopped` is an atomic request to start the machine.
- * Only "stopped" is removable; the config files are read-only.
+ * `rm machines/<name>/stopped` is an atomic request to start the machine.  The
+ * config must be complete and the loader path executable; otherwise the start
+ * fails and the machine stays stopped.  Only "stopped" is removable.
  */
 static int
 vmmfs_nremove(struct vop_nremove_args *ap)
@@ -715,6 +866,12 @@ vmmfs_nremove(struct vop_nremove_args *ap)
 	if (!vmmfs_machine_is_stopped(m->rust))
 		return ENOENT;
 
+	if (!vmmfs_machine_config_complete(m->rust))
+		return EINVAL;
+	error = vmmfs_validate_loader(m, ap->a_cred);
+	if (error)
+		return error;
+
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
 	if (error)
 		return error;
@@ -732,7 +889,12 @@ vmmfs_open(struct vop_open_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
-	/* Opening the lease takes a reference; refuse once deletion has begun. */
+	/*
+	 * Opening the lease takes a reference; refuse once deletion has begun.
+	 * Register files need no per-open work here: the scratch buffer is
+	 * created lazily on first write, and reads fall back to the current
+	 * value, so a read-only open allocates nothing.
+	 */
 	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_LEASE) {
 		if (vmmfs_machine_lease_open(node->vn_machine->rust) == 0)
 			return ENXIO;
@@ -745,6 +907,11 @@ vmmfs_close(struct vop_close_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 	int error;
+
+	/* Commit a register's open buffer before the fd goes away. */
+	if (node->vn_type == VMMFS_NCONFIG &&
+	    vmmfs_cfg_is_register(node->vn_cfg))
+		vmmfs_obuf_commit_close(node, ap->a_fp);
 
 	error = vop_stdclose(ap);
 
@@ -775,7 +942,7 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	struct vattr *vap = ap->a_vap;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 	int is_file = (node->vn_type == VMMFS_NCONFIG);
-	char buf[64];
+	uint8_t tmp[300];
 
 	vap->va_type = is_file ? VREG : VDIR;
 	vap->va_mode = node->vn_mode;
@@ -785,7 +952,8 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 	vap->va_gid = 0;
 	vap->va_fsid = vp->v_mount->mnt_stat.f_fsid.val[0];
 	vap->va_fileid = node->vn_ino;
-	vap->va_size = is_file ? vmmfs_cfg_format(node, buf, sizeof(buf)) : 0;
+	vap->va_size = (is_file && vmmfs_cfg_is_register(node->vn_cfg)) ?
+	    vmmfs_cfg_text(node, tmp, sizeof(tmp)) : 0;
 	vap->va_blocksize = PAGE_SIZE;
 	vap->va_atime.tv_sec = 0;
 	vap->va_atime.tv_nsec = 0;
@@ -800,37 +968,17 @@ vmmfs_getattr(struct vop_getattr_args *ap)
 }
 
 /*
- * Accept no-op changes to the writable stopped control file (e.g. the O_TRUNC
- * from `echo ... > stopped`); everything else is read-only.
+ * Accept no-op size changes (the O_TRUNC from `echo ... > file`) on writable
+ * config files; everything else is read-only.
  */
 static int
 vmmfs_setattr(struct vop_setattr_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 
-	if (node->vn_type == VMMFS_NCONFIG && node->vn_cfg == VMMFS_CFG_STOPPED)
+	if (node->vn_type == VMMFS_NCONFIG && (node->vn_mode & 0200))
 		return 0;
 	return EPERM;
-}
-
-static int
-vmmfs_cfg_format(struct vmmfs_node *node, char *buf, size_t bufsize)
-{
-	struct vmmfs_machine *m = node->vn_machine;
-
-	switch (node->vn_cfg) {
-	case VMMFS_CFG_VCPU:
-		return ksnprintf(buf, bufsize, "%u\n", m->vcpu);
-	case VMMFS_CFG_MEM:
-		return ksnprintf(buf, bufsize, "%ju\n", (uintmax_t)m->mem);
-	case VMMFS_CFG_LOADER:
-		return ksnprintf(buf, bufsize, "%ju %04o\n",
-		    (uintmax_t)m->loader_size,
-		    (unsigned)(m->loader_mode & 07777));
-	case VMMFS_CFG_STOPPED:
-	default:
-		return 0;
-	}
 }
 
 static int
@@ -839,45 +987,33 @@ vmmfs_read(struct vop_read_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
-	char buf[64];
-	int len;
-	off_t off;
 
 	if (vp->v_type != VREG || node->vn_type != VMMFS_NCONFIG)
 		return EINVAL;
 
 	/*
 	 * events is a stream: each read drains and consumes the queued event
-	 * lines (shared one-shot cursor).  M3c-1 is non-blocking; blocking read
-	 * and kqueue arrive in M3c-2.
+	 * lines (shared one-shot cursor).  Non-blocking; blocking read and
+	 * kqueue are a later step.
 	 */
 	if (node->vn_cfg == VMMFS_CFG_EVENTS) {
-		char ebuf[256];
+		uint8_t ebuf[256];
 		size_t n;
 
-		n = vmmfs_machine_read_events(node->vn_machine->rust,
-		    (uint8_t *)ebuf, sizeof(ebuf));
+		n = vmmfs_machine_read_events(node->vn_machine->rust, ebuf,
+		    sizeof(ebuf));
 		if (n == 0)
 			return 0;
 		return uiomove(ebuf, n, uio);
 	}
 
-	if (uio->uio_offset < 0)
-		return EINVAL;
+	if (vmmfs_cfg_is_register(node->vn_cfg))
+		return vmmfs_obuf_read(node, ap->a_fp, uio);
 
-	len = vmmfs_cfg_format(node, buf, sizeof(buf));
-	if (len > (int)sizeof(buf))
-		len = (int)sizeof(buf);
-	off = uio->uio_offset;
-	if (off >= len)
-		return 0;
-	return uiomove(buf + off, (size_t)(len - off), uio);
+	/* console / status.tar.gz / lease / stopped: empty for now. */
+	return 0;
 }
 
-/*
- * Writing the stopped control file selects the stop method (apic|force) and
- * (re)applies the stop.  Idempotent.  Only the stopped file is writable.
- */
 static int
 vmmfs_write(struct vop_write_args *ap)
 {
@@ -888,9 +1024,33 @@ vmmfs_write(struct vop_write_args *ap)
 	size_t take;
 	int error, force;
 
-	if (node->vn_type != VMMFS_NCONFIG || node->vn_cfg != VMMFS_CFG_STOPPED)
+	if (node->vn_type != VMMFS_NCONFIG)
 		return EPERM;
 
+	if (vmmfs_cfg_is_register(node->vn_cfg))
+		return vmmfs_obuf_write(node, ap->a_fp, uio);
+
+	if (node->vn_cfg == VMMFS_CFG_CONSOLE) {
+		/* Console input is a stub: accept and discard. */
+		while (uio->uio_resid > 0) {
+			char dump[64];
+			size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
+			    (size_t)uio->uio_resid : sizeof(dump);
+
+			error = uiomove(dump, d, uio);
+			if (error)
+				return error;
+		}
+		return 0;
+	}
+
+	if (node->vn_cfg != VMMFS_CFG_STOPPED)
+		return EPERM;
+
+	/*
+	 * Writing the stopped control file selects the stop method (apic|force)
+	 * and (re)applies the stop.  Idempotent.
+	 */
 	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
 	    (size_t)uio->uio_resid : sizeof(buf) - 1;
 	error = uiomove(buf, take, uio);
@@ -899,7 +1059,6 @@ vmmfs_write(struct vop_write_args *ap)
 	buf[take] = '\0';
 	force = (take >= 5 && strncmp(buf, "force", 5) == 0);
 
-	/* Consume and discard any remaining bytes so the write is not short. */
 	while (uio->uio_resid > 0) {
 		char dump[32];
 		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
@@ -1029,6 +1188,9 @@ vmmfs_reclaim(struct vop_reclaim_args *ap)
 	struct vnode *vp = ap->a_vp;
 	struct vmmfs_node *node = VP_TO_VMMFS(vp);
 
+	/* No open fd can remain here, but free any stray buffers defensively. */
+	vmmfs_obuf_drain(node);
+
 	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
 	KKASSERT(node->vn_vnode == vp);
 	node->vn_vnode = NULL;
@@ -1053,7 +1215,7 @@ static struct vop_ops vmmfs_vnode_vops = {
 	.vop_default =		vop_defaultop,
 	.vop_nresolve =		vmmfs_nresolve,
 	.vop_nlookupdotdot =	vmmfs_nlookupdotdot,
-	.vop_nsymlink =		vmmfs_nsymlink,
+	.vop_nmkdir =		vmmfs_nmkdir,
 	.vop_ncreate =		vmmfs_ncreate,
 	.vop_nremove =		vmmfs_nremove,
 	.vop_nrmdir =		vmmfs_nrmdir,

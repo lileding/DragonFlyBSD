@@ -46,6 +46,25 @@ impl<T> KBox<T> {
         Some(KBox { ptr })
     }
 
+    /// Allocate ZEROED memory for a `T` without moving a value into it, and
+    /// wrap it.  The caller must initialize the contents before meaningful use.
+    ///
+    /// This avoids moving a large `T` from the stack into the box: that move is
+    /// lowered to a `memcpy` call the kernel ELF object loader cannot relocate
+    /// (R_X86_64_GOTPCREL, "unexpected relocation type 9").  `vmmfs_kalloc`
+    /// zeroes the block (M_ZERO), so the result is a valid all-zero `T`.
+    ///
+    /// # Safety
+    /// `T` must be valid when all-zero (a POD struct with no niche/refs).
+    pub unsafe fn new_zeroed() -> Option<KBox<T>> {
+        let ptr = vmmfs_kalloc(core::mem::size_of::<T>()) as *mut T;
+        if ptr.is_null() {
+            None
+        } else {
+            Some(KBox { ptr })
+        }
+    }
+
     /// Release ownership, yielding the raw pointer to hand to C.  The caller
     /// becomes responsible for eventually passing it back to `from_raw`.
     pub fn into_raw(self) -> *mut T {

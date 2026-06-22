@@ -1,13 +1,14 @@
 #!/bin/sh
 # vmmfs functional test (runs inside the vkernel via vkrun2).
-# Emits "PASS <name>" / "FAIL <name> ..." per check and a final summary line
-# "VMMFS-TESTS: <p> passed <f> failed" that the host runner greps.
+#
+# New model: a machine is `mkdir`-ed (always stopped, empty config); vcpu/mem/
+# loader are PCIe-like registers (write into a buffer, commit on close, read
+# back to confirm); `rm stopped` starts it after validating the config.
 #
 # NOTE: the lease file is a reference handle, not data — opening it (cat/exec)
 # acquires a handle and closing it releases one, deleting the machine on the
-# last release.  So lifecycle-tested machines never touch their lease; lease
-# behavior is tested on dedicated throwaway machines.
-
+# last release.  Lease behavior is tested on dedicated throwaway machines.
+M=/vmm/machines
 pass=0
 fail=0
 ckok()   { if [ "$2" = "0" ];  then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1 (rc=$2 want 0)"; fail=$((fail+1)); fi; }
@@ -18,103 +19,104 @@ kldload /xchg/vmmfs.ko; ckok "kldload" $?
 ln -sf /sbin/mount_std /sbin/mount_vmmfs
 mkdir -p /vmm
 mount -t vmmfs vmm /vmm; ckok "mount" $?
-ckeq "machines empty" "$(ls /vmm/machines)" ""
+ckeq "machines empty" "$(ls $M)" ""
 
-# valid config (deterministic loader: 10 bytes, mode 0755)
-mkdir -p /tmp/cfg; echo 4 > /tmp/cfg/vcpu; echo 512M > /tmp/cfg/mem
-printf '#!/bin/sh\n' > /tmp/cfg/loader; chmod 755 /tmp/cfg/loader
+# loader fixtures: an executable script, a non-exec file
+printf '#!/bin/sh\necho hi\n' > /tmp/ld.sh; chmod 755 /tmp/ld.sh
+printf 'x' > /tmp/noexec; chmod 644 /tmp/noexec
 
-# --- import / presentation (M2) ---
-ln -s /tmp/cfg /vmm/machines/vm0; ckok "import vm0" $?
-ckeq "ls vm0" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem vcpu "
-ckeq "cat vcpu" "$(cat /vmm/machines/vm0/vcpu)" "4"
-ckeq "cat mem" "$(cat /vmm/machines/vm0/mem)" "536870912"
-ckeq "cat loader" "$(cat /vmm/machines/vm0/loader)" "10 0755"
-ckeq "machines lists vm0" "$(ls /vmm/machines)" "vm0"
-ls /vmm/machines/nope >/dev/null 2>&1; ckfail "lookup nonexistent" $?
+# --- create via mkdir: always stopped, default files, empty config ---
+mkdir $M/vm0; ckok "mkdir vm0" $?
+ckeq "ls vm0 default" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console events lease loader mem status.tar.gz stopped vcpu "
+ckeq "vcpu unset empty" "$(cat $M/vm0/vcpu)" ""
+ckeq "mem unset empty" "$(cat $M/vm0/mem)" ""
+ckeq "loader unset empty" "$(cat $M/vm0/loader)" ""
 
-# --- import validation (M2) ---
-mkdir -p /tmp/b1; echo 0 > /tmp/b1/vcpu; echo 2M > /tmp/b1/mem; cp /tmp/cfg/loader /tmp/b1/loader
-ln -s /tmp/b1 /vmm/machines/b1 2>/dev/null; ckfail "reject vcpu=0" $?
-mkdir -p /tmp/b2; echo 2 > /tmp/b2/vcpu; echo 512Q > /tmp/b2/mem; cp /tmp/cfg/loader /tmp/b2/loader
-ln -s /tmp/b2 /vmm/machines/b2 2>/dev/null; ckfail "reject bad mem" $?
-mkdir -p /tmp/b3; echo 2 > /tmp/b3/vcpu; echo 2M > /tmp/b3/mem
-ln -s /tmp/b3 /vmm/machines/b3 2>/dev/null; ckfail "reject missing loader" $?
-mkdir -p /tmp/b4; echo 2 > /tmp/b4/vcpu; echo 2M > /tmp/b4/mem; echo x > /tmp/b4/loader; chmod 644 /tmp/b4/loader
-ln -s /tmp/b4 /vmm/machines/b4 2>/dev/null; ckfail "reject non-exec loader" $?
-ln -s /tmp/nope /vmm/machines/bx 2>/dev/null; ckfail "reject missing config-dir" $?
-ckeq "rejects left no machines" "$(ls /vmm/machines)" "vm0"
+# --- config registers: write, then read back (PCIe semantics) ---
+echo 4 > $M/vm0/vcpu;       ckeq "vcpu readback" "$(cat $M/vm0/vcpu)" "4"
+echo 512M > $M/vm0/mem;     ckeq "mem readback" "$(cat $M/vm0/mem)" "536870912"
+echo /tmp/ld.sh > $M/vm0/loader; ckeq "loader readback" "$(cat $M/vm0/loader)" "/tmp/ld.sh"
 
-# --- lifecycle / stopped control (M3a) ---
-echo apic > /vmm/machines/vm0/stopped; ckok "stop apic" $?
-ckeq "vm0 has stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem stopped vcpu "
-echo apic > /vmm/machines/vm0/stopped; ckok "re-stop idempotent" $?
-rm /vmm/machines/vm0/stopped; ckok "start (rm stopped)" $?
-ckeq "vm0 no stopped" "$(ls /vmm/machines/vm0 | sort | tr '\n' ' ')" "events lease loader mem vcpu "
-rm /vmm/machines/vm0/stopped 2>/dev/null; ckfail "rm stopped while running -> ENOENT" $?
-echo force > /vmm/machines/vm0/stopped; ckok "stop force" $?
+# --- an invalid write succeeds but does not update; read-back is the truth ---
+echo 0 > $M/vm0/vcpu;       ckeq "invalid vcpu kept old" "$(cat $M/vm0/vcpu)" "4"
+echo 3M > $M/vm0/mem;       ckeq "unaligned mem kept old" "$(cat $M/vm0/mem)" "536870912"
+echo 8 > $M/vm0/vcpu;       ckeq "rewrite vcpu" "$(cat $M/vm0/vcpu)" "8"
 
-# --- read-only config protection ---
-echo 9 > /vmm/machines/vm0/vcpu 2>/dev/null; ckfail "write vcpu -> EPERM" $?
-rm /vmm/machines/vm0/vcpu 2>/dev/null; ckfail "rm vcpu -> EPERM" $?
+# --- start (rm stopped) requires a complete, valid config ---
+mkdir $M/inc; echo 2 > $M/inc/vcpu
+rm $M/inc/stopped 2>/dev/null; ckfail "rm stopped incomplete -> fail" $?
+ckeq "inc still stopped" "$(ls $M/inc | grep -c '^stopped$')" "1"
 
-# --- events stream (M3c): text lines, shared one-shot cursor ---
-ln -s /tmp/cfg /vmm/machines/ev; ckok "import ev (running)" $?
-ckeq "events on create" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "created,started,"
-ckeq "events one-shot drained" "$(cat /vmm/machines/ev/events)" ""
-echo apic > /vmm/machines/ev/stopped
-ckeq "event on stop" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "stopped,"
-rm /vmm/machines/ev/stopped
-ckeq "event on start" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "started,"
-echo apic > /vmm/machines/ev/stopped; echo apic > /vmm/machines/ev/stopped  # idempotent: one event
-ckeq "idempotent stop -> single event" "$(cat /vmm/machines/ev/events | tr '\n' ',')" "stopped,"
-rmdir /vmm/machines/ev; ckok "rmdir ev" $?
+mkdir $M/nx; echo 1 > $M/nx/vcpu; echo 2M > $M/nx/mem; echo /tmp/noexec > $M/nx/loader
+rm $M/nx/stopped 2>/dev/null; ckfail "rm stopped non-exec loader -> fail" $?
+
+mkdir $M/ml; echo 1 > $M/ml/vcpu; echo 2M > $M/ml/mem; echo /tmp/nope > $M/ml/loader
+rm $M/ml/stopped 2>/dev/null; ckfail "rm stopped missing loader -> fail" $?
+
+rm $M/vm0/stopped; ckok "start vm0 (valid)" $?
+ckeq "vm0 running no stopped" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console events lease loader mem status.tar.gz vcpu "
+rm $M/vm0/stopped 2>/dev/null; ckfail "rm stopped while running -> ENOENT" $?
+
+# --- stop (echo apic|force > stopped), idempotent ---
+echo apic > $M/vm0/stopped; ckok "stop apic" $?
+ckeq "vm0 has stopped" "$(ls $M/vm0 | grep -c '^stopped$')" "1"
+echo force > $M/vm0/stopped; ckok "re-stop force idempotent" $?
+
+# --- read-only files reject writes / removal ---
+echo x > $M/vm0/events 2>/dev/null;        ckfail "write events -> fail" $?
+echo x > $M/vm0/status.tar.gz 2>/dev/null; ckfail "write status -> fail" $?
+rm $M/vm0/vcpu 2>/dev/null;                ckfail "rm vcpu -> EPERM" $?
+
+# --- events: created+stopped on mkdir, one-shot, lifecycle ---
+mkdir $M/ev
+ckeq "events on create" "$(cat $M/ev/events | tr '\n' ',')" "created,stopped,"
+ckeq "events one-shot drained" "$(cat $M/ev/events)" ""
+echo 1 > $M/ev/vcpu; echo 2M > $M/ev/mem; echo /tmp/ld.sh > $M/ev/loader
+rm $M/ev/stopped;          ckeq "event on start" "$(cat $M/ev/events | tr '\n' ',')" "started,"
+echo apic > $M/ev/stopped; ckeq "event on stop" "$(cat $M/ev/events | tr '\n' ',')" "stopped,"
+echo apic > $M/ev/stopped; ckeq "idempotent stop -> no event" "$(cat $M/ev/events)" ""
+rmdir $M/ev; ckok "rmdir ev" $?
 
 # --- rmdir requires stopped (M3b) ---
-ln -s /tmp/cfg /vmm/machines/rr; ckok "import rr (running)" $?
-rmdir /vmm/machines/rr 2>/dev/null; ckfail "rmdir running -> EBUSY" $?
-echo apic > /vmm/machines/rr/stopped
-rmdir /vmm/machines/rr; ckok "rmdir after stop" $?
+mkdir $M/rr; echo 1 > $M/rr/vcpu; echo 2M > $M/rr/mem; echo /tmp/ld.sh > $M/rr/loader
+rm $M/rr/stopped; ckok "start rr" $?
+rmdir $M/rr 2>/dev/null; ckfail "rmdir running -> EBUSY" $?
+echo apic > $M/rr/stopped
+rmdir $M/rr; ckok "rmdir after stop" $?
 
 # --- lease: open/close reference counting (M3b) ---
-ln -s /tmp/cfg /vmm/machines/lv
-exec 7< /vmm/machines/lv/lease            # acquire one handle (armed, count 1)
-ckeq "leased machine present" "$(ls /vmm/machines | grep -c '^lv$')" "1"
-exec 7<&-                                  # release last handle -> delete
-ckeq "lease release deleted machine" "$(ls /vmm/machines | grep -c '^lv$')" "0"
+mkdir $M/lv
+exec 7< $M/lv/lease
+ckeq "leased machine present" "$(ls $M | grep -c '^lv$')" "1"
+exec 7<&-
+ckeq "lease release deleted machine" "$(ls $M | grep -c '^lv$')" "0"
 
-ln -s /tmp/cfg /vmm/machines/lc
-exec 7< /vmm/machines/lc/lease
-exec 8< /vmm/machines/lc/lease            # count 2
-exec 7<&-                                  # count 1, not deleted
-ckeq "present after 1 of 2 releases" "$(ls /vmm/machines | grep -c '^lc$')" "1"
-exec 8<&-                                  # count 0 -> delete
-ckeq "deleted after last release" "$(ls /vmm/machines | grep -c '^lc$')" "0"
+mkdir $M/lc
+exec 7< $M/lc/lease
+exec 8< $M/lc/lease
+exec 7<&-
+ckeq "present after 1 of 2 releases" "$(ls $M | grep -c '^lc$')" "1"
+exec 8<&-
+ckeq "deleted after last release" "$(ls $M | grep -c '^lc$')" "0"
 
-# --- lease: rmdir(stopped) deletes despite open lease (source 1) ---
-ln -s /tmp/cfg /vmm/machines/rl
-echo apic > /vmm/machines/rl/stopped
-exec 7< /vmm/machines/rl/lease
-rmdir /vmm/machines/rl; ckok "rmdir leased+stopped" $?
-ckeq "rl gone after rmdir" "$(ls /vmm/machines | grep -c '^rl$')" "0"
-exec 7<&-                                  # stale handle close must not double-delete / panic
+# --- lease: rmdir(stopped) deletes despite an open lease (source 1) ---
+mkdir $M/rl
+exec 7< $M/rl/lease
+rmdir $M/rl; ckok "rmdir leased+stopped" $?
+ckeq "rl gone after rmdir" "$(ls $M | grep -c '^rl$')" "0"
+exec 7<&-
 
-# --- lease: an open lease blocks unmount/teardown (source 2) ---
-ln -s /tmp/cfg /vmm/machines/u1
-exec 7< /vmm/machines/u1/lease
+# --- lease: an open lease blocks unmount (source 2) ---
+mkdir $M/u1
+exec 7< $M/u1/lease
 umount /vmm 2>/dev/null; ckfail "umount with open lease -> EBUSY" $?
-exec 7<&-                                  # release -> u1 deleted, fs unmountable again
-ckeq "u1 gone after lease release" "$(ls /vmm/machines | grep -c '^u1$')" "0"
+exec 7<&-
+ckeq "u1 gone after lease release" "$(ls $M | grep -c '^u1$')" "0"
 
-# --- import stopped, then remove ---
-mkdir -p /tmp/cfg2; echo 8 > /tmp/cfg2/vcpu; echo 1G > /tmp/cfg2/mem
-cp /tmp/cfg/loader /tmp/cfg2/loader; touch /tmp/cfg2/stopped
-ln -s /tmp/cfg2 /vmm/machines/vm1; ckok "import stopped vm1" $?
-ckeq "vm1 has stopped" "$(ls /vmm/machines/vm1 | sort | tr '\n' ' ')" "events lease loader mem stopped vcpu "
-rmdir /vmm/machines/vm0; ckok "rmdir vm0" $?
-rmdir /vmm/machines/vm1; ckok "rmdir vm1" $?
-ckeq "machines empty again" "$(ls /vmm/machines)" ""
-
+# --- cleanup ---
+rmdir $M/vm0; ckok "rmdir vm0" $?
+rmdir $M/inc 2>/dev/null; rmdir $M/nx 2>/dev/null; rmdir $M/ml 2>/dev/null
+ckeq "machines empty again" "$(ls $M)" ""
 umount /vmm; ckok "umount" $?
 kldunload vmmfs; ckok "kldunload" $?
 

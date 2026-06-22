@@ -3,14 +3,11 @@
 mod intrinsics;
 mod kernel;
 mod machine;
-mod parse;
 
 use core::ffi::c_int;
 use core::panic::PanicInfo;
 use kernel::KBox;
 use machine::MachineState;
-
-const EINVAL: c_int = 22;
 
 const LOAD_MESSAGE: &[u8] = b"vmmfs: Rust module loaded\n\0";
 const UNLOAD_MESSAGE: &[u8] = b"vmmfs: Rust module unloaded\n\0";
@@ -27,53 +24,27 @@ pub extern "C" fn vmmfs_rust_fini() {
 }
 
 // ---------------------------------------------------------------------------
-// C boundary shims.  These are the only places besides kernel.rs that touch the
-// C ABI; they delegate to the safe logic in parse.rs / machine.rs and to the
-// wrappers in kernel.rs.
+// C boundary shims.  These and kernel.rs are the only places that touch the C
+// ABI; they delegate to the safe logic in machine.rs and to kernel.rs.
 // ---------------------------------------------------------------------------
 
-/// # Safety
-/// `buf` covers `len` readable bytes (or is NULL); `out` is a writable `*mut u32`.
+/// Create a machine (mkdir): stopped, no config yet.  Allocates zeroed and
+/// initializes in place to avoid moving the large MachineState (see new_zeroed).
 #[no_mangle]
-pub unsafe extern "C" fn vmmfs_parse_vcpu(buf: *const u8, len: usize, out: *mut u32) -> c_int {
-    if out.is_null() {
-        return -EINVAL;
-    }
-    match parse::parse_vcpu(kernel::bytes(buf, len)) {
-        Some(v) => {
-            kernel::write_out(out, v);
-            0
+pub extern "C" fn vmmfs_machine_new() -> *mut MachineState {
+    // SAFETY: MachineState is POD (valid all-zero); init() sets it up in place.
+    match unsafe { KBox::<MachineState>::new_zeroed() } {
+        Some(b) => {
+            let ptr = b.into_raw();
+            // SAFETY: ptr is a freshly allocated, zeroed MachineState.
+            unsafe { kernel::handle_mut(ptr).init() };
+            ptr
         }
-        None => -EINVAL,
-    }
-}
-
-/// # Safety
-/// `buf` covers `len` readable bytes (or is NULL); `out` is a writable `*mut u64`.
-#[no_mangle]
-pub unsafe extern "C" fn vmmfs_parse_mem(buf: *const u8, len: usize, out: *mut u64) -> c_int {
-    if out.is_null() {
-        return -EINVAL;
-    }
-    match parse::parse_mem(kernel::bytes(buf, len)) {
-        Some(v) => {
-            kernel::write_out(out, v);
-            0
-        }
-        None => -EINVAL,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn vmmfs_machine_new(stopped: c_int) -> *mut MachineState {
-    match KBox::new(MachineState::new(stopped != 0)) {
-        Some(b) => b.into_raw(),
         None => core::ptr::null_mut(),
     }
 }
 
-/// # Safety
-/// `m` is a handle from `vmmfs_machine_new` that has not yet been freed.
+/// # Safety: `m` is a handle from `vmmfs_machine_new`, not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_free(m: *mut MachineState) {
     if !m.is_null() {
@@ -81,47 +52,120 @@ pub unsafe extern "C" fn vmmfs_machine_free(m: *mut MachineState) {
     }
 }
 
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+// ---- desired config registers: commit (parse+update) and read-back ----
+
+/// # Safety: `m` live; `buf` covers `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_commit_vcpu(
+    m: *mut MachineState,
+    buf: *const u8,
+    len: usize,
+) -> c_int {
+    kernel::handle_mut(m).commit_vcpu(kernel::bytes(buf, len)) as c_int
+}
+
+/// # Safety: `m` live; `buf` covers `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_commit_mem(
+    m: *mut MachineState,
+    buf: *const u8,
+    len: usize,
+) -> c_int {
+    kernel::handle_mut(m).commit_mem(kernel::bytes(buf, len)) as c_int
+}
+
+/// # Safety: `m` live; `buf` covers `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_commit_loader(
+    m: *mut MachineState,
+    buf: *const u8,
+    len: usize,
+) -> c_int {
+    kernel::handle_mut(m).commit_loader(kernel::bytes(buf, len)) as c_int
+}
+
+/// # Safety: `m` live; `buf` covers `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_vcpu_text(
+    m: *mut MachineState,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    kernel::handle_mut(m).vcpu_text(kernel::bytes_mut(buf, cap))
+}
+
+/// # Safety: `m` live; `buf` covers `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_mem_text(
+    m: *mut MachineState,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    kernel::handle_mut(m).mem_text(kernel::bytes_mut(buf, cap))
+}
+
+/// # Safety: `m` live; `buf` covers `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_loader_text(
+    m: *mut MachineState,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    kernel::handle_mut(m).loader_text(kernel::bytes_mut(buf, cap))
+}
+
+/// Copy the loader path (no trailing newline) for start-time resolution.
+/// # Safety: `m` live; `buf` covers `cap` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_loader_path(
+    m: *mut MachineState,
+    buf: *mut u8,
+    cap: usize,
+) -> usize {
+    kernel::handle_mut(m).loader_path(kernel::bytes_mut(buf, cap))
+}
+
+/// # Safety: `m` is a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn vmmfs_machine_config_complete(m: *mut MachineState) -> c_int {
+    kernel::handle_mut(m).config_complete() as c_int
+}
+
+// ---- lifecycle ----
+
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_is_stopped(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).is_stopped() as c_int
 }
 
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_stop(m: *mut MachineState, force: c_int) {
     kernel::handle_mut(m).stop(force != 0);
 }
 
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_start(m: *mut MachineState) {
     kernel::handle_mut(m).start();
 }
 
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+// ---- lease ----
+
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_is_deleting(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).is_deleting() as c_int
 }
 
-/// Open the lease.  Returns 1 on success, 0 if the machine is being deleted.
-///
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_lease_open(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).lease_open() as c_int
 }
 
-/// Close the lease.  Returns 1 if the machine must now be destroyed, else 0.
-///
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_lease_close(m: *mut MachineState) -> c_int {
     match kernel::handle_mut(m).lease_close() {
@@ -130,26 +174,21 @@ pub unsafe extern "C" fn vmmfs_machine_lease_close(m: *mut MachineState) -> c_in
     }
 }
 
-/// Begin deletion (rmdir/unmount).  Returns 1 if newly started, 0 if already.
-///
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_begin_delete(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).begin_delete() as c_int
 }
 
-/// # Safety
-/// `m` is a live handle from `vmmfs_machine_new`.
+// ---- events ----
+
+/// # Safety: `m` is a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_events_pending(m: *mut MachineState) -> c_int {
     kernel::handle_mut(m).events_pending() as c_int
 }
 
-/// Drain queued events into `(buf, cap)`, returning the number of bytes written.
-///
-/// # Safety
-/// `m` is a live handle; `buf` covers `cap` writable bytes.
+/// # Safety: `m` live; `buf` covers `cap` writable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn vmmfs_machine_read_events(
     m: *mut MachineState,
