@@ -103,6 +103,24 @@ struct cursor_counter_snapshot {
 	uint64_t head_cursor_bo;
 };
 
+struct modeset_counter_snapshot {
+	uint64_t atomic_tail_disable_op_count;
+	uint64_t atomic_tail_enable_op_count;
+	uint64_t atomic_tail_last_disable_op_count;
+	uint64_t atomic_tail_last_enable_op_count;
+	uint64_t atomic_tail_last_disable_heads;
+	uint64_t atomic_tail_last_enable_heads;
+	uint64_t atomic_tail_last_new_active_heads;
+	uint64_t atomic_disable_vblank_off_count;
+	uint64_t atomic_disable_vblank_keep_count;
+	uint64_t commit_error_count;
+	uint64_t atomic_tail_active;
+	uint64_t atomic_tail_stage;
+	uint64_t display_audit_pending_valid;
+	char display_audit_current_op[32];
+	char display_audit_pending_op[32];
+};
+
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
     uint32_t plane_id, const char *name, uint64_t value);
 
@@ -1353,6 +1371,45 @@ find_active_crtc(int fd, const drmModeRes *resources, uint32_t *crtc_id_out,
 }
 
 static bool
+find_active_connector_for_crtc(int fd, const drmModeRes *resources,
+    uint32_t crtc_id, uint32_t *connector_id_out)
+{
+	for (int i = 0; i < resources->count_connectors; i++) {
+		drmModeConnectorPtr connector;
+		drmModePropertyPtr prop;
+		uint64_t connector_crtc = 0;
+		bool found = false;
+
+		connector = drmModeGetConnector(fd, resources->connectors[i]);
+		if (connector == NULL)
+			continue;
+
+		prop = get_property_by_name(fd, connector->connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &connector_crtc);
+		if (prop != NULL) {
+			drmModeFreeProperty(prop);
+			found = connector_crtc == crtc_id;
+		} else if (connector->encoder_id != 0) {
+			drmModeEncoderPtr encoder;
+
+			encoder = drmModeGetEncoder(fd, connector->encoder_id);
+			if (encoder != NULL) {
+				found = encoder->crtc_id == crtc_id;
+				drmModeFreeEncoder(encoder);
+			}
+		}
+
+		if (found) {
+			*connector_id_out = connector->connector_id;
+			drmModeFreeConnector(connector);
+			return true;
+		}
+		drmModeFreeConnector(connector);
+	}
+	return false;
+}
+
+static bool
 get_crtc_size(int fd, uint32_t crtc_id, uint32_t *width_out,
     uint32_t *height_out)
 {
@@ -1584,6 +1641,109 @@ state_counter_from_text(const char *text, const char *key,
 }
 
 static bool
+state_string_from_text(const char *text, const char *key, char *value_out,
+    size_t value_size)
+{
+	const char *line;
+	size_t key_length;
+
+	if (value_size == 0)
+		return false;
+
+	key_length = strlen(key);
+	for (line = text; line != NULL && *line != '\0';) {
+		const char *next_line;
+		const char *value;
+		size_t length;
+
+		while (*line == ' ' || *line == '\t')
+			line++;
+		next_line = strchr(line, '\n');
+		if (strncmp(line, key, key_length) == 0) {
+			value = line + key_length;
+			while (*value == ' ' || *value == '\t')
+				value++;
+			if (*value != '=')
+				return false;
+			value++;
+			while (*value == ' ' || *value == '\t')
+				value++;
+			length = next_line != NULL ?
+			    (size_t)(next_line - value) : strlen(value);
+			while (length > 0 &&
+			    (value[length - 1] == ' ' ||
+			    value[length - 1] == '\t' ||
+			    value[length - 1] == '\r'))
+				length--;
+			if (length >= value_size)
+				length = value_size - 1;
+			memcpy(value_out, value, length);
+			value_out[length] = '\0';
+			return true;
+		}
+		if (next_line == NULL)
+			break;
+		line = next_line + 1;
+	}
+	return false;
+}
+
+static bool
+read_modeset_counter_snapshot(struct modeset_counter_snapshot *snapshot,
+    const char *stage)
+{
+	char text[192];
+	char *state;
+	bool ok;
+
+	ok = read_drm_state_text(&state);
+	snprintf(text, sizeof(text), "DRM state is readable before %s", stage);
+	check(ok, text);
+	if (!ok)
+		return false;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	ok = state_counter_from_text(state, "atomic_tail_disable_op_count",
+	    &snapshot->atomic_tail_disable_op_count) &&
+	    state_counter_from_text(state, "atomic_tail_enable_op_count",
+	    &snapshot->atomic_tail_enable_op_count) &&
+	    state_counter_from_text(state, "atomic_tail_last_disable_op_count",
+	    &snapshot->atomic_tail_last_disable_op_count) &&
+	    state_counter_from_text(state, "atomic_tail_last_enable_op_count",
+	    &snapshot->atomic_tail_last_enable_op_count) &&
+	    state_counter_from_text(state, "atomic_tail_last_disable_heads",
+	    &snapshot->atomic_tail_last_disable_heads) &&
+	    state_counter_from_text(state, "atomic_tail_last_enable_heads",
+	    &snapshot->atomic_tail_last_enable_heads) &&
+	    state_counter_from_text(state, "atomic_tail_last_new_active_heads",
+	    &snapshot->atomic_tail_last_new_active_heads) &&
+	    state_counter_from_text(state, "atomic_disable_vblank_off_count",
+	    &snapshot->atomic_disable_vblank_off_count) &&
+	    state_counter_from_text(state, "atomic_disable_vblank_keep_count",
+	    &snapshot->atomic_disable_vblank_keep_count) &&
+	    state_counter_from_text(state, "commit_error_count",
+	    &snapshot->commit_error_count) &&
+	    state_counter_from_text(state, "atomic_tail_active",
+	    &snapshot->atomic_tail_active) &&
+	    state_counter_from_text(state, "atomic_tail_stage",
+	    &snapshot->atomic_tail_stage) &&
+	    state_counter_from_text(state, "display_audit_pending_valid",
+	    &snapshot->display_audit_pending_valid) &&
+	    state_string_from_text(state, "display_audit_current_op",
+	    snapshot->display_audit_current_op,
+	    sizeof(snapshot->display_audit_current_op));
+	if (ok && snapshot->display_audit_pending_valid != 0)
+		ok = state_string_from_text(state, "display_audit_pending_op",
+		    snapshot->display_audit_pending_op,
+		    sizeof(snapshot->display_audit_pending_op));
+	snprintf(text, sizeof(text), "modeset counters are present before %s",
+	    stage);
+	check(ok, text);
+	free(state);
+	return ok;
+}
+
+static bool
 read_cursor_counter_snapshot(struct cursor_counter_snapshot *snapshot,
     const char *stage, uint32_t head)
 {
@@ -1702,6 +1862,22 @@ atomic_add_plane_property(int fd, drmModeAtomicReqPtr req, uint32_t plane_id,
 	return drmModeAtomicAddProperty(req, plane_id, property_id, value) >= 0;
 }
 
+static bool
+atomic_add_connector_property(int fd, drmModeAtomicReqPtr req,
+    uint32_t connector_id, const char *name, uint64_t value)
+{
+	uint32_t property_id = 0;
+
+	if (!get_property_id(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR, name,
+	    &property_id)) {
+		printf("connector %u property %s unavailable\n",
+		    connector_id, name);
+		return false;
+	}
+	return drmModeAtomicAddProperty(req, connector_id, property_id,
+	    value) >= 0;
+}
+
 static int
 atomic_cursor_test_only_commit(int fd, uint32_t plane_id, uint32_t crtc_id,
     uint32_t fb_id, uint32_t size, int *saved_errno)
@@ -1776,6 +1952,331 @@ atomic_primary_test_only_commit(int fd, uint32_t plane_id, uint32_t crtc_id,
 	*saved_errno = errno;
 	drmModeAtomicFree(req);
 	return ret;
+}
+
+static int
+atomic_modeset_disable_commit(int fd, uint32_t crtc_id, uint32_t connector_id,
+    uint32_t plane_id, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_plane_property(fd, req, plane_id, "FB_ID", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID", 0) ||
+	    !atomic_add_connector_property(fd, req, connector_id, "CRTC_ID",
+	    0) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "ACTIVE", 0) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "MODE_ID", 0)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+static int
+atomic_modeset_restore_commit(int fd, uint32_t crtc_id,
+    uint32_t connector_id, uint32_t plane_id,
+    const struct atomic_plane_snapshot *snapshot, uint32_t mode_blob,
+    int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_crtc_property(fd, req, crtc_id, "MODE_ID",
+	    mode_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "ACTIVE", 1) ||
+	    !atomic_add_connector_property(fd, req, connector_id, "CRTC_ID",
+	    crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "FB_ID",
+	    snapshot->fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
+	    snapshot->crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X",
+	    snapshot->crtc_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y",
+	    snapshot->crtc_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W",
+	    snapshot->crtc_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H",
+	    snapshot->crtc_h) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X",
+	    snapshot->src_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y",
+	    snapshot->src_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    snapshot->src_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    snapshot->src_h)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+/*
+ * check_atomic_modeset_disable_restore_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC, connector, and primary plane IDs from KMS state.
+ *   The probe owns a temporary MODE_ID blob and a temporary dumb BO/FB used as
+ *   the restore scanout target.  The MODE_ID blob is destroyed after restore;
+ *   a successfully restored FB stays referenced by KMS until fd close.
+ *
+ * Lifetime:
+ *   Performs one real modeset-disable commit followed by one restore commit.
+ *   The display may blank briefly, but the mode and primary-plane tuple are
+ *   restored before return using the probe-owned FB.  If atomic restore fails
+ *   after a successful disable, a legacy SetCrtc call is attempted only as
+ *   cleanup fallback.
+ *
+ * Threading:
+ *   Single-threaded console probe.  It must run without an X/Wayland DRM
+ *   master.  The kernel serializes both commits with normal modeset locks.
+ */
+static void
+check_atomic_modeset_disable_restore_contract(int fd,
+    const drmModeRes *resources, uint32_t crtc_id, uint32_t crtc_index,
+    uint32_t plane_id, const char *object_name)
+{
+	struct atomic_plane_snapshot snapshot;
+	struct atomic_plane_snapshot restore_snapshot;
+	struct atomic_plane_snapshot restored_snapshot;
+	struct modeset_counter_snapshot before;
+	struct modeset_counter_snapshot after_disable;
+	struct modeset_counter_snapshot after_disable_delay;
+	struct modeset_counter_snapshot after_restore;
+	drmModeCrtcPtr crtc;
+	drmModeModeInfo saved_mode;
+	const char *delay_env;
+	uint32_t connector_id = 0;
+	uint32_t mode_blob = 0;
+	uint32_t restore_handle = 0;
+	uint32_t restore_pitch = 0;
+	uint32_t restore_fb = 0;
+	uint64_t active = 0;
+	uint64_t head_mask;
+	int saved_errno = 0;
+	int ret;
+	int crtc_x;
+	int crtc_y;
+	bool disabled = false;
+	bool restored = false;
+	bool have_after_disable = false;
+
+	head_mask = crtc_index >= 64 ? 0 : (1ULL << crtc_index);
+	check(head_mask != 0, "active CRTC index fits modeset head mask");
+	if (head_mask == 0)
+		return;
+
+	if (!find_active_connector_for_crtc(fd, resources, crtc_id,
+	    &connector_id)) {
+		check(false, "active connector is available for modeset disable probe");
+		return;
+	}
+	check(true, "active connector is available for modeset disable probe");
+
+	if (!get_plane_snapshot(fd, plane_id, &snapshot, object_name))
+		return;
+	check(snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for modeset disable probe");
+	check(snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for modeset disable probe");
+	if (snapshot.fb_id == 0 || snapshot.crtc_id != crtc_id)
+		return;
+
+	crtc = drmModeGetCrtc(fd, crtc_id);
+	check(crtc != NULL, "active CRTC is readable for modeset restore probe");
+	if (crtc == NULL)
+		return;
+	check(crtc->mode_valid, "active CRTC has a mode for restore probe");
+	if (!crtc->mode_valid) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+	saved_mode = crtc->mode;
+	crtc_x = crtc->x;
+	crtc_y = crtc->y;
+	drmModeFreeCrtc(crtc);
+
+	if (!read_modeset_counter_snapshot(&before, "modeset disable probe"))
+		return;
+
+	ret = drmModeCreatePropertyBlob(fd, &saved_mode, sizeof(saved_mode),
+	    &mode_blob);
+	check(ret == 0, "create MODE_ID blob for modeset restore probe");
+	if (ret != 0)
+		return;
+
+	if (!create_dumb_buffer_for(fd, saved_mode.hdisplay,
+	    saved_mode.vdisplay, 32, &restore_handle, &restore_pitch,
+	    "CREATE_DUMB succeeds for modeset restore probe"))
+		goto out_destroy_blob;
+	if (!clear_dumb_buffer(fd, restore_handle, restore_pitch,
+	    saved_mode.vdisplay, "clear modeset restore probe framebuffer"))
+		goto out_destroy_restore_bo;
+	if (!add_linear_framebuffer(fd, saved_mode.hdisplay,
+	    saved_mode.vdisplay, DRM_FORMAT_XRGB8888, restore_handle,
+	    restore_pitch, &restore_fb,
+	    "ADDFB2 accepts XRGB8888 linear modeset restore probe"))
+		goto out_destroy_restore_bo;
+	restore_snapshot = snapshot;
+	restore_snapshot.fb_id = restore_fb;
+
+	ret = atomic_modeset_disable_commit(fd, crtc_id, connector_id,
+	    plane_id, &saved_errno);
+	if (ret != 0) {
+		printf("    modeset disable commit errno=%d\n", saved_errno);
+		check(false, "atomic modeset disable commit succeeds");
+		goto out_remove_restore_fb;
+	}
+	disabled = true;
+	check(true, "atomic modeset disable commit succeeds");
+
+	if (get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, "disabled CRTC"))
+		check(active == 0, "atomic modeset disable marks CRTC inactive");
+	have_after_disable = read_modeset_counter_snapshot(&after_disable,
+	    "modeset restore probe");
+	if (have_after_disable) {
+		check(after_disable.atomic_tail_disable_op_count >
+		    before.atomic_tail_disable_op_count,
+		    "atomic modeset disable increments tail disable op count");
+		check(after_disable.atomic_tail_last_disable_op_count > 0,
+		    "atomic modeset disable records last disable op count");
+		check((after_disable.atomic_tail_last_disable_heads &
+		    head_mask) != 0,
+		    "atomic modeset disable records disabled head");
+		check((after_disable.atomic_tail_last_new_active_heads &
+		    head_mask) == 0,
+		    "atomic modeset disable clears active head bit");
+		check(after_disable.atomic_disable_vblank_off_count >
+		    before.atomic_disable_vblank_off_count,
+		    "atomic modeset disable turns vblank off");
+		check(after_disable.atomic_disable_vblank_keep_count ==
+		    before.atomic_disable_vblank_keep_count,
+		    "atomic modeset disable does not keep vblank active");
+		check(after_disable.commit_error_count ==
+		    before.commit_error_count,
+		    "atomic modeset disable does not increment commit_error_count");
+		check(after_disable.atomic_tail_active == 0 &&
+		    after_disable.atomic_tail_stage == 0,
+		    "atomic modeset disable leaves no active tail transaction");
+		check(after_disable.display_audit_pending_valid == 0,
+		    "atomic modeset disable leaves no pending display audit");
+	}
+
+	delay_env = getenv("NVKM_DRMTEST_MODESET_DELAY_MS");
+	if (delay_env != NULL && delay_env[0] != '\0') {
+		long delay_ms;
+
+		delay_ms = strtol(delay_env, NULL, 10);
+		if (delay_ms > 0) {
+			printf("    delaying modeset restore by %ld ms\n",
+			    delay_ms);
+			usleep((useconds_t)delay_ms * 1000);
+			(void)read_modeset_counter_snapshot(
+			    &after_disable_delay,
+			    "modeset disable delayed probe");
+		}
+	}
+
+	ret = atomic_modeset_restore_commit(fd, crtc_id, connector_id,
+	    plane_id, &restore_snapshot, mode_blob, &saved_errno);
+	if (ret != 0) {
+		printf("    modeset restore commit errno=%d\n", saved_errno);
+		check(false, "atomic modeset restore commit succeeds");
+	} else {
+		restored = true;
+		check(true, "atomic modeset restore commit succeeds");
+	}
+
+	if (!restored && disabled) {
+		printf("    attempting legacy SetCrtc cleanup restore\n");
+		ret = drmModeSetCrtc(fd, crtc_id, restore_fb,
+		    crtc_x, crtc_y, &connector_id, 1, &saved_mode);
+		check(ret == 0, "legacy SetCrtc cleanup restore succeeds");
+		restored = ret == 0;
+	}
+
+	if (restored) {
+		active = 0;
+		if (get_property_value_checked(fd, crtc_id,
+		    DRM_MODE_OBJECT_CRTC, "ACTIVE", &active,
+		    "restored CRTC"))
+			check(active != 0,
+			    "atomic modeset restore marks CRTC active");
+		if (get_plane_snapshot(fd, plane_id, &restored_snapshot,
+		    object_name)) {
+			check(restored_snapshot.fb_id == restore_fb,
+			    "atomic modeset restore restores primary FB_ID");
+			check(restored_snapshot.crtc_id == snapshot.crtc_id,
+			    "atomic modeset restore restores primary CRTC_ID");
+		}
+		if (read_modeset_counter_snapshot(&after_restore,
+		    "modeset restore completion")) {
+			if (have_after_disable) {
+				check(after_restore.atomic_tail_enable_op_count >
+				    after_disable.atomic_tail_enable_op_count,
+				    "atomic modeset restore increments tail enable op count");
+			}
+			check(after_restore.atomic_tail_last_enable_op_count > 0,
+			    "atomic modeset restore records last enable op count");
+			check((after_restore.atomic_tail_last_enable_heads &
+			    head_mask) != 0,
+			    "atomic modeset restore records enabled head");
+			check(after_restore.commit_error_count ==
+			    before.commit_error_count,
+			    "atomic modeset restore does not increment commit_error_count");
+			check(after_restore.atomic_tail_active == 0 &&
+			    after_restore.atomic_tail_stage == 0,
+			    "atomic modeset restore leaves no active tail transaction");
+			check(after_restore.display_audit_pending_valid == 0,
+			    "atomic modeset restore leaves no pending display audit");
+			check(strcmp(after_restore.display_audit_current_op,
+			    "atomic_enable") == 0,
+			    "atomic modeset restore publishes atomic_enable audit");
+		}
+	}
+
+	if (restored) {
+		printf("    restore probe fb=%u handle=%u kept until fd close\n",
+		    restore_fb, restore_handle);
+		goto out_destroy_blob;
+	}
+
+out_remove_restore_fb:
+	remove_framebuffer(fd, restore_fb,
+	    "RMFB succeeds for failed modeset restore probe");
+out_destroy_restore_bo:
+	destroy_dumb_buffer_for(fd, restore_handle,
+	    "DESTROY_DUMB succeeds for failed modeset restore probe");
+out_destroy_blob:
+	check(drmModeDestroyPropertyBlob(fd, mode_blob) == 0,
+	    "destroy MODE_ID blob for modeset restore probe");
 }
 
 /*
@@ -2314,11 +2815,13 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	bool cursor_probe_done = false;
 	bool have_active_crtc;
 	bool have_active_crtc_size;
+	bool skip_cursor;
 
 	resources = drmModeGetPlaneResources(fd);
 	check(resources != NULL, "plane resources available");
 	if (resources == NULL)
 		return;
+	skip_cursor = getenv("NVKM_DRMTEST_SKIP_CURSOR") != NULL;
 
 	have_active_crtc = find_active_crtc(fd, mode_resources,
 	    &active_crtc_id, &active_crtc_index);
@@ -2364,9 +2867,12 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			    active_crtc_id, plane->plane_id, name);
 			check_atomic_in_fence_runtime_contract(fd,
 			    active_crtc_id, plane->plane_id, name);
+			check_atomic_modeset_disable_restore_contract(fd,
+			    mode_resources, active_crtc_id,
+			    active_crtc_index, plane->plane_id, name);
 			primary_panning_probe_done = true;
 		}
-		if (have_active_crtc && !cursor_probe_done &&
+		if (!skip_cursor && have_active_crtc && !cursor_probe_done &&
 		    plane_type == DRM_PLANE_TYPE_CURSOR &&
 		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
 			check_atomic_cursor_test_only_contract(fd,
@@ -2380,8 +2886,11 @@ check_planes(int fd, const drmModeRes *mode_resources)
 
 	check(primary_panning_probe_done,
 	    "primary plane supports active CRTC for panning TEST_ONLY probe");
-	check(cursor_probe_done,
-	    "cursor plane supports active CRTC for atomic TEST_ONLY probe");
+	if (skip_cursor)
+		printf("SKIP cursor plane runtime probe by NVKM_DRMTEST_SKIP_CURSOR\n");
+	else
+		check(cursor_probe_done,
+		    "cursor plane supports active CRTC for atomic TEST_ONLY probe");
 
 	drmModeFreePlaneResources(resources);
 }

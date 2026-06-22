@@ -27,7 +27,7 @@ LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
 FAULT_PATTERN = (
     "panic|BADFREE|double fault|DeviceLost|EXEC timeout|fault|CMDre|"
-    "status=0x19|RC_TRIGGERED|vblank wait timed out|flip_done timed out|"
+    "status=0x19|RC_TRIGGERED|notifier timeout|vblank wait timed out|flip_done timed out|"
     "commit.*failed"
 )
 
@@ -77,8 +77,50 @@ WATCH_KEYS = (
     "atomic_tail_wait_flip_done_count",
     "atomic_tail_cleanup_planes_count",
     "atomic_tail_finish_prepared_count",
+    "atomic_tail_plane_op_count",
+    "atomic_tail_disable_op_count",
+    "atomic_tail_color_op_count",
+    "atomic_tail_enable_op_count",
+    "atomic_tail_last_plane_op_count",
+    "atomic_tail_last_disable_op_count",
+    "atomic_tail_last_color_op_count",
+    "atomic_tail_last_enable_op_count",
+    "atomic_tail_last_legacy_cursor_update",
+    "atomic_tail_last_async_update",
+    "atomic_tail_last_lock_core",
+    "atomic_tail_last_flush_disable",
+    "atomic_tail_last_old_active_heads",
+    "atomic_tail_last_new_active_heads",
+    "atomic_tail_last_modeset_heads",
+    "atomic_tail_last_disable_heads",
+    "atomic_tail_last_enable_heads",
+    "atomic_tail_last_primary_update_heads",
+    "atomic_tail_last_primary_disable_heads",
+    "atomic_tail_last_cursor_update_heads",
+    "atomic_tail_last_cursor_disable_heads",
+    "atomic_tail_last_plane_update_mask",
+    "atomic_tail_last_plane_disable_mask",
+    "atomic_tail_last_prepared_heads",
+    "atomic_tail_last_prepared_displays",
     "atomic_disable_vblank_off_count",
     "atomic_disable_vblank_keep_count",
+    "atomic_last_legacy_cursor_update",
+    "atomic_last_async_update",
+    "atomic_last_lock_core",
+    "atomic_last_flush_disable",
+    "atomic_last_old_active_heads",
+    "atomic_last_new_active_heads",
+    "atomic_last_modeset_heads",
+    "atomic_last_disable_heads",
+    "atomic_last_enable_heads",
+    "atomic_last_primary_update_heads",
+    "atomic_last_primary_disable_heads",
+    "atomic_last_cursor_update_heads",
+    "atomic_last_cursor_disable_heads",
+    "atomic_last_plane_update_mask",
+    "atomic_last_plane_disable_mask",
+    "atomic_last_prepared_heads",
+    "atomic_last_prepared_displays",
     "fb_create_reject_count",
     "plane_update_count",
     "plane_disable_count",
@@ -447,6 +489,59 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             if key not in after:
                 emit(False, f"missing {key}")
 
+    tail_summary_pairs = (
+        ("atomic_tail_last_legacy_cursor_update", "atomic_last_legacy_cursor_update"),
+        ("atomic_tail_last_async_update", "atomic_last_async_update"),
+        ("atomic_tail_last_lock_core", "atomic_last_lock_core"),
+        ("atomic_tail_last_flush_disable", "atomic_last_flush_disable"),
+        ("atomic_tail_last_old_active_heads", "atomic_last_old_active_heads"),
+        ("atomic_tail_last_new_active_heads", "atomic_last_new_active_heads"),
+        ("atomic_tail_last_modeset_heads", "atomic_last_modeset_heads"),
+        ("atomic_tail_last_disable_heads", "atomic_last_disable_heads"),
+        ("atomic_tail_last_enable_heads", "atomic_last_enable_heads"),
+        ("atomic_tail_last_primary_update_heads", "atomic_last_primary_update_heads"),
+        ("atomic_tail_last_primary_disable_heads", "atomic_last_primary_disable_heads"),
+        ("atomic_tail_last_cursor_update_heads", "atomic_last_cursor_update_heads"),
+        ("atomic_tail_last_cursor_disable_heads", "atomic_last_cursor_disable_heads"),
+        ("atomic_tail_last_plane_update_mask", "atomic_last_plane_update_mask"),
+        ("atomic_tail_last_plane_disable_mask", "atomic_last_plane_disable_mask"),
+        ("atomic_tail_last_prepared_heads", "atomic_last_prepared_heads"),
+        ("atomic_tail_last_prepared_displays", "atomic_last_prepared_displays"),
+    )
+    for tail_key, summary_key in tail_summary_pairs:
+        if tail_key not in after or summary_key not in after:
+            if tail_key not in after:
+                emit(False, f"missing {tail_key}")
+            if summary_key not in after:
+                emit(False, f"missing {summary_key}")
+            continue
+        emit(after[tail_key] == after[summary_key],
+             f"{tail_key} matches {summary_key}")
+
+    if all(key in after for key in (
+        "atomic_last_enable_heads",
+        "atomic_last_prepared_heads",
+        "atomic_last_prepared_displays",
+    )):
+        enable_heads = after["atomic_last_enable_heads"]
+        prepared_heads = after["atomic_last_prepared_heads"]
+        prepared_displays = after["atomic_last_prepared_displays"]
+        if enable_heads != 0:
+            emit((prepared_heads & enable_heads) == enable_heads,
+                 "atomic display transaction prepared every enabled head")
+            emit(prepared_displays != 0,
+                 "atomic display transaction prepared a display route")
+        else:
+            print("INFO atomic display transaction had no enable heads")
+    else:
+        for key in (
+            "atomic_last_enable_heads",
+            "atomic_last_prepared_heads",
+            "atomic_last_prepared_displays",
+        ):
+            if key not in after:
+                emit(False, f"missing {key}")
+
     ps_after = (out_dir / "ps.after").read_text(errors="replace") if (out_dir / "ps.after").exists() else ""
     leftovers = leftover_graphics_commands(ps_after)
     emit(not leftovers, "no Xorg/glxgears/firefox leftovers")
@@ -603,6 +698,13 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DEGAMMA_LUT defaults to 0",
         "CTM defaults to 0",
         "GAMMA_LUT defaults to 0",
+        "atomic modeset disable commit succeeds",
+        "atomic modeset disable increments tail disable op count",
+        "atomic modeset disable records disabled head",
+        "atomic modeset disable turns vblank off",
+        "atomic modeset restore commit succeeds",
+        "atomic modeset restore restores primary FB_ID",
+        "atomic modeset restore increments tail enable op count",
     ):
         emit(text in drmtest_after, f"drmtest.after has {text}")
 

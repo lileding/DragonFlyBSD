@@ -18,6 +18,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_atomic_uapi.h>	/* drm_atomic_set_{crtc,mode,fb}_for_* */
+#include <drm/drm_bridge.h>
 #include <drm/drm_color_mgmt.h>
 #include <drm/drm_crtc_helper.h>	/* drm_helper_probe_single_connector_modes */
 #include <drm/drm_edid.h>
@@ -1025,6 +1026,27 @@ nvkm_crtc_color_needs_window(const struct drm_crtc_state *state)
  *   or clears them.  CRTC, IRQ, HPD, and async cursor paths never share mutable
  *   route storage.
  */
+struct nvkm_display_txn {
+	bool valid;
+	bool lock_core;
+	bool flush_disable;
+	bool legacy_cursor_update;
+	bool async_update;
+	uint32_t old_active_head_mask;
+	uint32_t new_active_head_mask;
+	uint32_t modeset_head_mask;
+	uint32_t disable_head_mask;
+	uint32_t enable_head_mask;
+	uint32_t primary_update_head_mask;
+	uint32_t primary_disable_head_mask;
+	uint32_t cursor_update_head_mask;
+	uint32_t cursor_disable_head_mask;
+	uint32_t plane_update_mask;
+	uint32_t plane_disable_mask;
+	uint32_t prepared_head_mask;
+	uint32_t prepared_display_mask;
+};
+
 struct nvkm_atomic_summary {
 	bool valid;
 	bool lock_core;
@@ -1049,6 +1071,7 @@ struct nvkm_atomic_summary {
 struct nvkm_atomic_state {
 	struct drm_atomic_state base;
 	struct nvkm_dispnv50_output_prepare prepared_route[NVKM_DISPLAY_MAX_HEADS];
+	struct nvkm_display_txn txn;
 	struct nvkm_atomic_summary summary;
 };
 
@@ -1056,18 +1079,20 @@ struct nvkm_atomic_state {
 	container_of(s, struct nvkm_atomic_state, base)
 
 /*
- * Build the driver-private atomic transaction summary.
+ * Build the driver-private display transaction.
  *
- * Ownership: the summary stores only scalar masks derived from the borrowed DRM
- * atomic state.  It does not acquire references to CRTCs, planes, framebuffers,
- * connectors, or display routes.
- * Lifetime: callers may rebuild the summary while the atomic state is alive;
- * published copies in struct nvkm_softc are diagnostic snapshots of the last
- * commit tail and do not extend the lifetime of the atomic state.
- * Threading: atomic_check fills the summary while modeset locks protect the
- * state graph.  commit_tail may read or rebuild it from the commit worker that
- * owns the atomic-state reference.  Other threads only read the published softc
- * counters through the debug sysctl.
+ * Ownership: the transaction stores only scalar masks derived from the borrowed
+ * DRM atomic state. It does not acquire references to CRTCs, planes,
+ * framebuffers, connectors, or display routes.
+ *
+ * Lifetime: the transaction lives inside the refcounted DRM atomic state and
+ * crosses swap_state with it. Prepared output routes update the same transaction
+ * before hardware commit consumes it.
+ *
+ * Threading: atomic_check fills the transaction while modeset locks protect the
+ * state graph. commit_tail may read or rebuild it from the commit worker that
+ * owns the atomic-state reference. Other threads only read published softc
+ * counters derived from the transaction.
  */
 static uint32_t
 nvkm_atomic_head_mask(const struct drm_crtc *crtc)
@@ -1081,8 +1106,7 @@ static bool
 nvkm_atomic_plane_visible(const struct drm_plane_state *state)
 {
 	return (state != NULL && state->crtc != NULL && state->fb != NULL &&
-	    state->crtc_w != 0 && state->crtc_h != 0 &&
-	    state->src_w != 0 && state->src_h != 0);
+	    state->visible);
 }
 
 static bool
@@ -1123,8 +1147,8 @@ nvkm_atomic_crtc_modeset(struct drm_atomic_state *state,
 }
 
 static void
-nvkm_atomic_summary_account_plane(struct drm_atomic_state *state,
-    struct nvkm_atomic_summary *summary, struct drm_plane *plane,
+nvkm_display_txn_account_plane(struct drm_atomic_state *state,
+    struct nvkm_display_txn *txn, struct drm_plane *plane,
     struct drm_plane_state *old_plane_state,
     struct drm_plane_state *new_plane_state)
 {
@@ -1148,76 +1172,165 @@ nvkm_atomic_summary_account_plane(struct drm_atomic_state *state,
 	plane_mask = drm_plane_mask(plane);
 
 	if (old_visible && (!new_visible || crtc_changed || old_modeset))
-		summary->plane_disable_mask |= plane_mask;
+		txn->plane_disable_mask |= plane_mask;
 	if (new_visible && (!old_visible || changed || new_modeset))
-		summary->plane_update_mask |= plane_mask;
+		txn->plane_update_mask |= plane_mask;
 
 	if (plane->type == DRM_PLANE_TYPE_PRIMARY) {
 		if (old_visible && (!new_visible || crtc_changed ||
 		    old_modeset))
-			summary->primary_disable_head_mask |= old_head_mask;
+			txn->primary_disable_head_mask |= old_head_mask;
 		if (new_visible && (!old_visible || changed || new_modeset))
-			summary->primary_update_head_mask |= new_head_mask;
+			txn->primary_update_head_mask |= new_head_mask;
 	} else if (plane->type == DRM_PLANE_TYPE_CURSOR) {
 		if (old_visible && (!new_visible || crtc_changed ||
 		    old_modeset))
-			summary->cursor_disable_head_mask |= old_head_mask;
+			txn->cursor_disable_head_mask |= old_head_mask;
 		if (new_visible && (!old_visible || changed || new_modeset))
-			summary->cursor_update_head_mask |= new_head_mask;
+			txn->cursor_update_head_mask |= new_head_mask;
 	}
+}
+
+static bool
+nvkm_display_txn_needs_flush_disable(struct drm_atomic_state *state,
+    struct drm_connector *connector,
+    struct drm_connector_state *old_conn_state)
+{
+	struct nvkm_gsp_disp_output_info info;
+	struct nvkm_drm_connector *nvkm_conn;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc_state *new_crtc_state;
+
+	if (state == NULL || connector == NULL || old_conn_state == NULL ||
+	    old_conn_state->crtc == NULL)
+		return (false);
+
+	old_crtc_state = drm_atomic_get_old_crtc_state(state,
+	    old_conn_state->crtc);
+	new_crtc_state = drm_atomic_get_new_crtc_state(state,
+	    old_conn_state->crtc);
+	if (old_crtc_state == NULL || new_crtc_state == NULL ||
+	    !old_crtc_state->active ||
+	    !drm_atomic_crtc_needs_modeset(new_crtc_state))
+		return (false);
+
+	nvkm_conn = to_nvkm_connector(connector);
+	if (nvkm_gsp_disp_output_info(nvkm_conn->sc, nvkm_conn->display_id,
+	    &info) != 0)
+		return (true);
+
+	return (info.output_type == DCB_OUTPUT_DP);
+}
+
+static void
+nvkm_atomic_build_display_txn(struct drm_atomic_state *state)
+{
+	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
+	struct nvkm_display_txn *txn = &nv_state->txn;
+	struct drm_connector_state *new_conn_state;
+	struct drm_connector_state *old_conn_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_plane_state *new_plane_state;
+	struct drm_plane_state *old_plane_state;
+	struct drm_connector *connector;
+	struct drm_crtc *crtc;
+	struct drm_plane *plane;
+	uint32_t head_mask;
+	int i;
+
+	memset(txn, 0, sizeof(*txn));
+	txn->valid = true;
+	txn->legacy_cursor_update = state->legacy_cursor_update;
+	txn->async_update = state->async_update;
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		head_mask = nvkm_atomic_head_mask(crtc);
+		if (old_crtc_state != NULL && old_crtc_state->enable)
+			txn->old_active_head_mask |= head_mask;
+		if (new_crtc_state != NULL && new_crtc_state->enable)
+			txn->new_active_head_mask |= head_mask;
+		if (new_crtc_state != NULL &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state)) {
+			txn->modeset_head_mask |= head_mask;
+			if (old_crtc_state != NULL && old_crtc_state->enable)
+				txn->disable_head_mask |= head_mask;
+			if (new_crtc_state->enable)
+				txn->enable_head_mask |= head_mask;
+		}
+	}
+
+	for_each_oldnew_plane_in_state(state, plane, old_plane_state,
+	    new_plane_state, i) {
+		nvkm_display_txn_account_plane(state, txn, plane,
+		    old_plane_state, new_plane_state);
+	}
+
+	for_each_oldnew_connector_in_state(state, connector, old_conn_state,
+	    new_conn_state, i) {
+		(void)new_conn_state;
+		if (nvkm_display_txn_needs_flush_disable(state, connector,
+		    old_conn_state))
+			txn->flush_disable = true;
+	}
+
+	txn->lock_core = txn->modeset_head_mask != 0 ||
+	    txn->primary_update_head_mask != 0 ||
+	    txn->primary_disable_head_mask != 0 ||
+	    txn->cursor_update_head_mask != 0 ||
+	    txn->cursor_disable_head_mask != 0;
+	nv_state->summary.valid = false;
+}
+
+static struct nvkm_display_txn *
+nvkm_atomic_display_txn(struct drm_atomic_state *state)
+{
+	struct nvkm_atomic_state *nv_state;
+
+	if (state == NULL)
+		return (NULL);
+	nv_state = to_nvkm_atomic_state(state);
+	if (!nv_state->txn.valid)
+		nvkm_atomic_build_display_txn(state);
+	return (&nv_state->txn);
+}
+
+static void
+nvkm_atomic_summary_from_txn(struct nvkm_atomic_summary *summary,
+    const struct nvkm_display_txn *txn)
+{
+	memset(summary, 0, sizeof(*summary));
+	if (txn == NULL || !txn->valid)
+		return;
+
+	summary->valid = true;
+	summary->lock_core = txn->lock_core;
+	summary->flush_disable = txn->flush_disable;
+	summary->legacy_cursor_update = txn->legacy_cursor_update;
+	summary->async_update = txn->async_update;
+	summary->old_active_head_mask = txn->old_active_head_mask;
+	summary->new_active_head_mask = txn->new_active_head_mask;
+	summary->modeset_head_mask = txn->modeset_head_mask;
+	summary->disable_head_mask = txn->disable_head_mask;
+	summary->enable_head_mask = txn->enable_head_mask;
+	summary->primary_update_head_mask = txn->primary_update_head_mask;
+	summary->primary_disable_head_mask = txn->primary_disable_head_mask;
+	summary->cursor_update_head_mask = txn->cursor_update_head_mask;
+	summary->cursor_disable_head_mask = txn->cursor_disable_head_mask;
+	summary->plane_update_mask = txn->plane_update_mask;
+	summary->plane_disable_mask = txn->plane_disable_mask;
+	summary->prepared_head_mask = txn->prepared_head_mask;
+	summary->prepared_display_mask = txn->prepared_display_mask;
 }
 
 static void
 nvkm_atomic_build_summary(struct drm_atomic_state *state)
 {
 	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
-	struct nvkm_atomic_summary *summary = &nv_state->summary;
-	struct drm_crtc_state *new_crtc_state;
-	struct drm_crtc_state *old_crtc_state;
-	struct drm_plane_state *new_plane_state;
-	struct drm_plane_state *old_plane_state;
-	struct drm_crtc *crtc;
-	struct drm_plane *plane;
-	uint32_t head_mask;
-	int i;
 
-	memset(summary, 0, sizeof(*summary));
-	summary->valid = true;
-	summary->legacy_cursor_update = state->legacy_cursor_update;
-	summary->async_update = state->async_update;
-
-	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
-	    new_crtc_state, i) {
-		head_mask = nvkm_atomic_head_mask(crtc);
-		if (old_crtc_state != NULL && old_crtc_state->enable)
-			summary->old_active_head_mask |= head_mask;
-		if (new_crtc_state != NULL && new_crtc_state->enable)
-			summary->new_active_head_mask |= head_mask;
-		if (new_crtc_state != NULL &&
-		    drm_atomic_crtc_needs_modeset(new_crtc_state)) {
-			summary->modeset_head_mask |= head_mask;
-			if (old_crtc_state != NULL && old_crtc_state->enable)
-				summary->disable_head_mask |= head_mask;
-			if (new_crtc_state->enable)
-				summary->enable_head_mask |= head_mask;
-		}
-	}
-
-	for_each_oldnew_plane_in_state(state, plane, old_plane_state,
-	    new_plane_state, i) {
-		nvkm_atomic_summary_account_plane(state, summary, plane,
-		    old_plane_state, new_plane_state);
-	}
-
-	summary->lock_core = summary->modeset_head_mask != 0 ||
-	    summary->primary_update_head_mask != 0 ||
-	    summary->primary_disable_head_mask != 0 ||
-	    summary->cursor_update_head_mask != 0 ||
-	    summary->cursor_disable_head_mask != 0;
-	summary->flush_disable = summary->disable_head_mask != 0 ||
-	    summary->primary_disable_head_mask != 0 ||
-	    summary->cursor_disable_head_mask != 0 ||
-	    summary->plane_disable_mask != 0;
+	nvkm_atomic_build_display_txn(state);
+	nvkm_atomic_summary_from_txn(&nv_state->summary, &nv_state->txn);
 }
 
 static void
@@ -1226,13 +1339,14 @@ nvkm_atomic_publish_summary(struct nvkm_softc *sc,
 {
 	struct nvkm_atomic_state *nv_state;
 	struct nvkm_atomic_summary *summary;
+	struct nvkm_display_txn *txn;
 
 	if (sc == NULL || state == NULL)
 		return;
 
 	nv_state = to_nvkm_atomic_state(state);
-	if (!nv_state->summary.valid)
-		nvkm_atomic_build_summary(state);
+	txn = nvkm_atomic_display_txn(state);
+	nvkm_atomic_summary_from_txn(&nv_state->summary, txn);
 	summary = &nv_state->summary;
 
 	sc->kms_atomic_summary_count++;
@@ -1310,44 +1424,174 @@ nvkm_atomic_complete_modeset_events(struct drm_atomic_state *old_state)
 }
 
 /*
+ * Commit-tail display scheduler state.
+ *
+ * Ownership:
+ *   Borrows the refcounted DRM atomic state owned by the current commit tail.
+ *   The transaction pointer borrows storage inside struct nvkm_atomic_state and
+ *   does not extend the lifetime of any CRTC, plane, framebuffer, connector, or
+ *   prepared route.
+ *
+ * Lifetime:
+ *   Valid only while the current commit tail owns its atomic-state reference.
+ *   Plane operations queued here borrow the old/new DRM plane states owned by
+ *   the same atomic state.  They are consumed before atomic_flush runs, so
+ *   event and fence completion still follows hardware programming.
+ *
+ * Threading:
+ *   Filled and consumed by the commit-tail owner.  Async cursor and IRQ paths
+ *   do not share this object.
+ */
+#define NVKM_DISPLAY_TAIL_MAX_PLANE_OPS \
+	(NVKM_DISPLAY_MAX_WINDOWS + NVKM_DISPLAY_MAX_CURSORS)
+#define NVKM_DISPLAY_TAIL_MAX_DISABLE_OPS NVKM_DISPLAY_MAX_HEADS
+#define NVKM_DISPLAY_TAIL_MAX_COLOR_OPS NVKM_DISPLAY_MAX_HEADS
+#define NVKM_DISPLAY_TAIL_MAX_ENABLE_OPS NVKM_DISPLAY_MAX_HEADS
+
+enum nvkm_display_tail_plane_op_type {
+	NVKM_DISPLAY_TAIL_PLANE_PRIMARY_UPDATE = 0,
+	NVKM_DISPLAY_TAIL_PLANE_PRIMARY_DISABLE,
+	NVKM_DISPLAY_TAIL_PLANE_CURSOR_UPDATE,
+	NVKM_DISPLAY_TAIL_PLANE_CURSOR_DISABLE,
+};
+
+struct nvkm_display_tail_plane_op {
+	enum nvkm_display_tail_plane_op_type type;
+	struct drm_plane *plane;
+	struct drm_crtc *crtc;
+	struct drm_plane_state *old_state;
+	struct drm_plane_state *new_state;
+};
+
+struct nvkm_display_tail_disable_op {
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *old_state;
+	bool flush_disable;
+	bool turn_vblank_off;
+};
+
+struct nvkm_display_tail_color_op {
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *old_state;
+};
+
+struct nvkm_display_tail_enable_op {
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *old_state;
+};
+
+struct nvkm_display_tail_context {
+	struct drm_atomic_state *state;
+	struct nvkm_softc *sc;
+	const struct nvkm_display_txn *txn;
+	struct nvkm_display_tail_plane_op plane_ops[
+	    NVKM_DISPLAY_TAIL_MAX_PLANE_OPS];
+	struct nvkm_display_tail_disable_op disable_ops[
+	    NVKM_DISPLAY_TAIL_MAX_DISABLE_OPS];
+	struct nvkm_display_tail_color_op color_ops[
+	    NVKM_DISPLAY_TAIL_MAX_COLOR_OPS];
+	struct nvkm_display_tail_enable_op enable_ops[
+	    NVKM_DISPLAY_TAIL_MAX_ENABLE_OPS];
+	uint32_t plane_op_count;
+	uint32_t disable_op_count;
+	uint32_t color_op_count;
+	uint32_t enable_op_count;
+};
+
+static void
+nvkm_atomic_tail_context_init(struct nvkm_display_tail_context *tail,
+    struct drm_atomic_state *state)
+{
+	if (tail == NULL)
+		return;
+
+	memset(tail, 0, sizeof(*tail));
+	tail->state = state;
+	if (state != NULL && state->dev != NULL)
+		tail->sc = state->dev->dev_private;
+	tail->txn = nvkm_atomic_display_txn(state);
+}
+
+static void	nvkm_atomic_tail_commit_modeset_disables(
+		    struct nvkm_display_tail_context *tail);
+static void	nvkm_atomic_tail_commit_planes(
+		    struct nvkm_display_tail_context *tail, uint32_t flags);
+static void	nvkm_atomic_tail_commit_modeset_enables(
+		    struct nvkm_display_tail_context *tail);
+static void	nvkm_crtc_commit_disable(struct drm_crtc *crtc,
+		    struct drm_crtc_state *old_state, bool flush_disable,
+		    bool turn_vblank_off);
+static void	nvkm_crtc_commit_enable(struct drm_crtc *crtc,
+		    struct drm_crtc_state *old_state);
+
+/*
  * Begin a KMS atomic commit-tail diagnostic record.
  *
  * Ownership:
- *   Borrows sc and copies the already-published atomic summary scalars. It
- *   does not own or retain the DRM atomic state, CRTCs, planes, or routes.
+ *   Borrows sc and the commit-tail context. It copies scalar transaction fields
+ *   into softc diagnostics and does not retain the DRM atomic state, CRTCs,
+ *   planes, or prepared routes.
  *
  * Lifetime:
  *   The active record describes only the currently executing commit tail. The
- *   copied summary remains as last-tail evidence after completion.
+ *   copied transaction scalars remain as last-tail evidence after completion.
  *
  * Threading:
  *   Called by the commit-tail owner. Sysctl readers may sample partially
  *   updated values; the fields are diagnostics and must not drive behavior.
  */
 static void
-nvkm_atomic_tail_begin(struct nvkm_softc *sc)
+nvkm_atomic_tail_begin(struct nvkm_softc *sc,
+    const struct nvkm_display_tail_context *tail)
 {
+	const struct nvkm_display_txn *txn;
+
 	if (sc == NULL)
 		return;
 
+	txn = tail != NULL ? tail->txn : NULL;
 	sc->kms_atomic_tail_seq++;
 	sc->kms_atomic_tail_active = 1;
 	sc->kms_atomic_tail_stage = NVKM_KMS_ATOMIC_TAIL_BEGIN;
 	sc->kms_atomic_tail_last_stage = NVKM_KMS_ATOMIC_TAIL_BEGIN;
+	sc->kms_atomic_tail_last_plane_op_count = 0;
+	sc->kms_atomic_tail_last_disable_op_count = 0;
+	sc->kms_atomic_tail_last_color_op_count = 0;
+	sc->kms_atomic_tail_last_enable_op_count = 0;
+	sc->kms_atomic_tail_last_legacy_cursor_update =
+	    (txn != NULL && txn->legacy_cursor_update) ? 1 : 0;
+	sc->kms_atomic_tail_last_async_update =
+	    (txn != NULL && txn->async_update) ? 1 : 0;
 	sc->kms_atomic_tail_last_lock_core =
-	    sc->kms_atomic_last_lock_core;
+	    (txn != NULL && txn->lock_core) ? 1 : 0;
 	sc->kms_atomic_tail_last_flush_disable =
-	    sc->kms_atomic_last_flush_disable;
+	    (txn != NULL && txn->flush_disable) ? 1 : 0;
+	sc->kms_atomic_tail_last_old_active_heads =
+	    txn != NULL ? txn->old_active_head_mask : 0;
+	sc->kms_atomic_tail_last_new_active_heads =
+	    txn != NULL ? txn->new_active_head_mask : 0;
 	sc->kms_atomic_tail_last_modeset_heads =
-	    sc->kms_atomic_last_modeset_heads;
+	    txn != NULL ? txn->modeset_head_mask : 0;
 	sc->kms_atomic_tail_last_disable_heads =
-	    sc->kms_atomic_last_disable_heads;
+	    txn != NULL ? txn->disable_head_mask : 0;
 	sc->kms_atomic_tail_last_enable_heads =
-	    sc->kms_atomic_last_enable_heads;
+	    txn != NULL ? txn->enable_head_mask : 0;
+	sc->kms_atomic_tail_last_primary_update_heads =
+	    txn != NULL ? txn->primary_update_head_mask : 0;
+	sc->kms_atomic_tail_last_primary_disable_heads =
+	    txn != NULL ? txn->primary_disable_head_mask : 0;
+	sc->kms_atomic_tail_last_cursor_update_heads =
+	    txn != NULL ? txn->cursor_update_head_mask : 0;
+	sc->kms_atomic_tail_last_cursor_disable_heads =
+	    txn != NULL ? txn->cursor_disable_head_mask : 0;
 	sc->kms_atomic_tail_last_plane_update_mask =
-	    sc->kms_atomic_last_plane_update_mask;
+	    txn != NULL ? txn->plane_update_mask : 0;
 	sc->kms_atomic_tail_last_plane_disable_mask =
-	    sc->kms_atomic_last_plane_disable_mask;
+	    txn != NULL ? txn->plane_disable_mask : 0;
+	sc->kms_atomic_tail_last_prepared_heads =
+	    txn != NULL ? txn->prepared_head_mask : 0;
+	sc->kms_atomic_tail_last_prepared_displays =
+	    txn != NULL ? txn->prepared_display_mask : 0;
 }
 
 static void
@@ -1408,17 +1652,20 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 {
 	struct drm_device *dev = old_state->dev;
 	struct nvkm_softc *sc = dev->dev_private;
+	struct nvkm_display_tail_context tail;
 
 	sc->kms_atomic_commit_tail_count++;
+	nvkm_atomic_tail_context_init(&tail, old_state);
 	nvkm_atomic_publish_summary(sc, old_state);
-	nvkm_atomic_tail_begin(sc);
+	nvkm_atomic_tail_begin(sc, &tail);
+	drm_atomic_helper_update_legacy_modeset_state(dev, old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES);
-	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+	nvkm_atomic_tail_commit_modeset_disables(&tail);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES);
-	drm_atomic_helper_commit_planes(dev, old_state,
+	nvkm_atomic_tail_commit_planes(&tail,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES);
-	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+	nvkm_atomic_tail_commit_modeset_enables(&tail);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS);
 	nvkm_atomic_complete_modeset_events(old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK);
@@ -1428,6 +1675,8 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	sc->kms_atomic_flip_done_wait_count++;
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE);
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
+	nvkm_dispnv50_publish_pending_flip(sc,
+	    tail.txn != NULL && tail.txn->async_update);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED);
@@ -1712,18 +1961,10 @@ nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head, uint32_t win,
 static bool
 nvkm_atomic_state_needs_output_prepare(struct drm_atomic_state *state)
 {
-	struct drm_crtc_state *new_crtc_state;
-	struct drm_crtc *crtc;
-	int i;
+	struct nvkm_display_txn *txn;
 
-	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
-		(void)crtc;
-		if (new_crtc_state->enable &&
-		    drm_atomic_crtc_needs_modeset(new_crtc_state))
-			return (true);
-	}
-
-	return (false);
+	txn = nvkm_atomic_display_txn(state);
+	return (txn != NULL && txn->enable_head_mask != 0);
 }
 
 static struct nvkm_dispnv50_output_prepare *
@@ -1758,13 +1999,16 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 {
 	struct nvkm_softc *sc = dev->dev_private;
 	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
+	struct nvkm_display_txn *txn;
 	struct drm_crtc_state *new_crtc_state;
 	struct drm_crtc *crtc;
+	uint32_t head_mask;
 	int ret = 0;
 	int i;
 
-	if (!nv_state->summary.valid)
-		nvkm_atomic_build_summary(state);
+	txn = nvkm_atomic_display_txn(state);
+	if (txn == NULL)
+		return (-EINVAL);
 
 	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
 		struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
@@ -1777,8 +2021,8 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 			goto fail;
 		}
 		nvkm_dispnv50_output_prepare_abort(sc, route);
-		if (!new_crtc_state->enable ||
-		    !drm_atomic_crtc_needs_modeset(new_crtc_state))
+		head_mask = drm_crtc_mask(crtc);
+		if ((txn->enable_head_mask & head_mask) == 0)
 			continue;
 
 		nvkm_kms_crtc_atom_init(&atom, sc, crtc);
@@ -1798,8 +2042,9 @@ nvkm_atomic_prepare_outputs(struct drm_device *dev,
 			    "output prepare");
 			goto fail;
 		}
-		nv_state->summary.prepared_head_mask |= drm_crtc_mask(crtc);
-		nv_state->summary.prepared_display_mask |= atom.display_id;
+		txn->prepared_head_mask |= head_mask;
+		txn->prepared_display_mask |= atom.display_id;
+		nv_state->summary.valid = false;
 	}
 
 	return (0);
@@ -1896,57 +2141,6 @@ nvkm_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
 	if (!nvkm_atomic_state_needs_output_prepare(state))
 		return (drm_atomic_helper_commit(dev, state, nonblock));
 	return (nvkm_atomic_commit_prepared(dev, state, nonblock));
-}
-
-static int
-nvkm_crtc_disable_plane(struct nvkm_crtc *nc, struct drm_plane *plane)
-{
-	int err;
-
-	if (nc == NULL || nc->sc == NULL || plane == NULL ||
-	    nc->sc->disp == NULL)
-		return (0);
-
-	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
-		nc->sc->kms_cursor_disable_count++;
-		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head,
-		    false);
-		if (err != 0)
-			nc->sc->kms_cursor_error_count++;
-		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-		    "crtc disable cursor");
-		return (err);
-	}
-
-	if (plane != nc->base.primary)
-		return (0);
-
-	nc->sc->kms_plane_disable_count++;
-	err = nvkm_dispnv50_plane_disable(nc->sc, nc->win);
-	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-	    "crtc disable primary");
-	return (err);
-}
-
-static int
-nvkm_crtc_disable_planes(struct nvkm_crtc *nc,
-    const struct drm_crtc_state *old_state)
-{
-	struct drm_plane *plane;
-	int first_err = 0;
-
-	if (old_state == NULL)
-		return (0);
-
-	drm_atomic_crtc_state_for_each_plane(plane, old_state) {
-		int err;
-
-		err = nvkm_crtc_disable_plane(nc, plane);
-		if (err != 0 && first_err == 0)
-			first_err = err;
-	}
-
-	return (first_err);
 }
 
 /* ===== plane: NVC57E window validation ===== */
@@ -2186,57 +2380,65 @@ nvkm_plane_atomic_check(struct drm_plane *plane, struct drm_plane_state *state)
 }
 
 static void
-nvkm_plane_atomic_update(struct drm_plane *plane,
+nvkm_plane_commit_cursor_update(struct drm_plane_state *state,
     struct drm_plane_state *old_state)
 {
-	struct drm_plane_state *state = plane->state;
+	struct drm_crtc_state *crtc_state;
+	struct nvkm_crtc *nc;
+	struct nvkm_kms_crtc_atom atom;
+	bool legacy_cursor_update;
+	int err;
+
+	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
+	    !state->visible)
+		return;
+	crtc_state = state->crtc->state;
+	if (crtc_state == NULL || !crtc_state->active ||
+	    drm_atomic_crtc_needs_modeset(crtc_state))
+		return;
+
+	nc = to_nvkm_crtc(state->crtc);
+	if (nc->sc->disp == NULL)
+		return;
+
+	/*
+	 * Cursor programming is head-local, but a full cursor image update
+	 * still belongs to the committed CRTC route.  Decode the same stack
+	 * atom used by check/enable/primary update before touching the head
+	 * cursor context.
+	 */
+	nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
+	err = nvkm_kms_crtc_atom_route(&atom, NULL,
+	    crtc_state->connector_mask, false);
+	if (err != 0) {
+		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+		    "cursor route");
+		return;
+	}
+
+	nc->sc->kms_cursor_update_count++;
+	legacy_cursor_update = old_state != NULL &&
+	    old_state->state != NULL && old_state->state->legacy_cursor_update;
+	err = nvkm_dispnv50_cursor_update(nc->sc, state->crtc, nc->head,
+	    legacy_cursor_update);
+	if (err != 0)
+		nc->sc->kms_cursor_error_count++;
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "cursor update");
+}
+
+static void
+nvkm_plane_commit_primary_update(struct drm_plane *plane,
+    struct drm_plane_state *state)
+{
 	struct drm_crtc_state *crtc_state;
 	struct nvkm_crtc *nc;
 	struct nvkm_kms_crtc_atom atom;
 	int err;
 
-	(void)old_state;
 	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
 	    !state->visible)
 		return;
-	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
-		crtc_state = state->crtc->state;
-		bool legacy_cursor_update;
-
-		if (crtc_state == NULL || !crtc_state->active ||
-		    drm_atomic_crtc_needs_modeset(crtc_state))
-			return;
-		nc = to_nvkm_crtc(state->crtc);
-		if (nc->sc->disp == NULL)
-			return;
-
-		/*
-		 * Cursor programming is head-local, but a full cursor image
-		 * update still belongs to the committed CRTC route.  Decode the
-		 * same stack atom used by check/enable/primary update before
-		 * touching the head cursor context.
-		 */
-		nvkm_kms_crtc_atom_init(&atom, nc->sc, state->crtc);
-		err = nvkm_kms_crtc_atom_route(&atom, NULL,
-		    crtc_state->connector_mask, false);
-		if (err != 0) {
-			nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-			    "cursor route");
-			return;
-		}
-
-		nc->sc->kms_cursor_update_count++;
-		legacy_cursor_update = old_state != NULL &&
-		    old_state->state != NULL &&
-		    old_state->state->legacy_cursor_update;
-		err = nvkm_dispnv50_cursor_update(nc->sc, state->crtc,
-		    nc->head, legacy_cursor_update);
-		if (err != 0)
-			nc->sc->kms_cursor_error_count++;
-		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-		    "cursor update");
-		return;
-	}
 	if (state->crtc->primary != plane)
 		return;
 
@@ -2274,7 +2476,31 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 }
 
 static void
-nvkm_plane_atomic_disable(struct drm_plane *plane,
+nvkm_plane_commit_cursor_disable(struct drm_plane_state *old_state)
+{
+	struct nvkm_crtc *nc;
+	bool legacy_cursor_update;
+	int err;
+
+	if (old_state == NULL || old_state->crtc == NULL)
+		return;
+
+	nc = to_nvkm_crtc(old_state->crtc);
+	if (nc->sc->disp == NULL)
+		return;
+	nc->sc->kms_cursor_disable_count++;
+	legacy_cursor_update = old_state->state != NULL &&
+	    old_state->state->legacy_cursor_update;
+	err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head,
+	    legacy_cursor_update);
+	if (err != 0)
+		nc->sc->kms_cursor_error_count++;
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "cursor disable");
+}
+
+static void
+nvkm_plane_commit_primary_disable(struct drm_plane *plane,
     struct drm_plane_state *old_state)
 {
 	struct nvkm_crtc *nc;
@@ -2282,23 +2508,6 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
 
 	if (old_state == NULL || old_state->crtc == NULL)
 		return;
-	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
-		bool legacy_cursor_update;
-
-		nc = to_nvkm_crtc(old_state->crtc);
-		if (nc->sc->disp == NULL)
-			return;
-		nc->sc->kms_cursor_disable_count++;
-		legacy_cursor_update = old_state->state != NULL &&
-		    old_state->state->legacy_cursor_update;
-		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head,
-		    legacy_cursor_update);
-		if (err != 0)
-			nc->sc->kms_cursor_error_count++;
-		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-		    "cursor disable");
-		return;
-	}
 	if (old_state->crtc->primary != plane)
 		return;
 
@@ -2310,6 +2519,831 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
 	err = nvkm_dispnv50_plane_disable(nc->sc, nc->win);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "plane disable");
+}
+
+static void
+nvkm_plane_atomic_update(struct drm_plane *plane,
+    struct drm_plane_state *old_state)
+{
+	struct drm_plane_state *state = plane->state;
+
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		nvkm_plane_commit_cursor_update(state, old_state);
+		return;
+	}
+
+	nvkm_plane_commit_primary_update(plane, state);
+}
+
+static void
+nvkm_plane_atomic_disable(struct drm_plane *plane,
+    struct drm_plane_state *old_state)
+{
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		nvkm_plane_commit_cursor_disable(old_state);
+		return;
+	}
+
+	nvkm_plane_commit_primary_disable(plane, old_state);
+}
+
+static void
+nvkm_crtc_commit_color_update(struct drm_crtc *crtc,
+    struct drm_crtc_state *old_state)
+{
+	struct nvkm_crtc *nc;
+	struct drm_atomic_state *state;
+	int color_err;
+
+	if (crtc == NULL || crtc->state == NULL)
+		return;
+	if (!crtc->state->active || !crtc->state->color_mgmt_changed ||
+	    crtc->state->mode_changed)
+		return;
+
+	state = old_state != NULL ? old_state->state : crtc->state->state;
+	if (nvkm_crtc_color_needs_window(crtc->state) &&
+	    state != NULL && crtc->primary != NULL &&
+	    drm_atomic_get_new_plane_state(state, crtc->primary) != NULL)
+		return;
+
+	nc = to_nvkm_crtc(crtc);
+	color_err = nvkm_dispnv50_color_update(nc->sc, crtc, nc->head,
+	    nc->win);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, color_err,
+	    "crtc color");
+}
+
+static bool
+nvkm_atomic_tail_plane_crtc_active(const struct drm_plane_state *state)
+{
+	return (state != NULL && state->crtc != NULL &&
+	    state->crtc->state != NULL && state->crtc->state->active);
+}
+
+/*
+ * Decide whether a committed plane state transition needs hardware disable.
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state and its old/new plane states.  It owns no
+ *   plane, CRTC, or framebuffer references.
+ *
+ * Lifetime:
+ *   Valid only while the atomic commit tail owns @state.  The result is a
+ *   scalar scheduling decision; callers must not cache it beyond the current
+ *   tail pass.
+ *
+ * Threading:
+ *   Called only from the serialized commit-tail owner.  It performs no
+ *   hardware IO and does not mutate DRM state.
+ */
+static bool
+nvkm_atomic_tail_plane_needs_disable(struct drm_atomic_state *state,
+    const struct drm_plane_state *old_plane_state,
+    const struct drm_plane_state *new_plane_state)
+{
+	bool crtc_changed;
+	bool old_visible;
+
+	old_visible = nvkm_atomic_plane_visible(old_plane_state);
+	if (!old_visible)
+		return (false);
+
+	crtc_changed = new_plane_state != NULL &&
+	    old_plane_state->crtc != new_plane_state->crtc;
+	return (!nvkm_atomic_plane_visible(new_plane_state) || crtc_changed ||
+	    nvkm_atomic_crtc_modeset(state, old_plane_state->crtc));
+}
+
+/*
+ * Decide whether a committed plane state transition needs hardware update.
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state and its old/new plane states.  It owns no
+ *   plane, CRTC, or framebuffer references.
+ *
+ * Lifetime:
+ *   Valid only while the atomic commit tail owns @state.  No-op atomic commits
+ *   that merely carry fences, events, or unchanged property values must return
+ *   false here; their completion is handled by the DRM helper tail without
+ *   reprogramming display hardware.
+ *
+ * Threading:
+ *   Called only from the serialized commit-tail owner.  It performs no
+ *   hardware IO and does not mutate DRM state.
+ */
+static bool
+nvkm_atomic_tail_plane_needs_update(struct drm_atomic_state *state,
+    const struct drm_plane_state *old_plane_state,
+    const struct drm_plane_state *new_plane_state)
+{
+	bool new_visible;
+
+	new_visible = nvkm_atomic_plane_visible(new_plane_state);
+	if (!new_visible)
+		return (false);
+
+	return (!nvkm_atomic_plane_visible(old_plane_state) ||
+	    nvkm_atomic_plane_changed(old_plane_state, new_plane_state) ||
+	    nvkm_atomic_crtc_modeset(state, new_plane_state->crtc));
+}
+
+static void
+nvkm_atomic_tail_enqueue_plane_op(struct nvkm_display_tail_context *tail,
+    enum nvkm_display_tail_plane_op_type type, struct drm_plane *plane,
+    struct drm_crtc *crtc, struct drm_plane_state *old_state,
+    struct drm_plane_state *new_state)
+{
+	struct nvkm_display_tail_plane_op *op;
+
+	if (tail == NULL)
+		return;
+	if (tail->plane_op_count >= nitems(tail->plane_ops)) {
+		nvkm_kms_record_result(tail->sc, 0, 0, -ENOSPC,
+		    "atomic tail plane queue");
+		return;
+	}
+
+	op = &tail->plane_ops[tail->plane_op_count++];
+	memset(op, 0, sizeof(*op));
+	op->type = type;
+	op->plane = plane;
+	op->crtc = crtc;
+	op->old_state = old_state;
+	op->new_state = new_state;
+}
+
+static void
+nvkm_atomic_tail_collect_plane_update(struct nvkm_display_tail_context *tail,
+    struct drm_plane *plane, struct drm_plane_state *old_state,
+    struct drm_plane_state *new_state)
+{
+	if (plane == NULL || new_state == NULL)
+		return;
+
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		if (new_state->crtc != NULL && new_state->fb != NULL &&
+		    new_state->visible)
+			nvkm_atomic_tail_enqueue_plane_op(tail,
+			    NVKM_DISPLAY_TAIL_PLANE_CURSOR_UPDATE, plane,
+			    new_state->crtc, old_state, new_state);
+		return;
+	}
+
+	if (new_state->crtc != NULL && new_state->crtc->primary == plane &&
+	    new_state->fb != NULL && new_state->visible)
+		nvkm_atomic_tail_enqueue_plane_op(tail,
+		    NVKM_DISPLAY_TAIL_PLANE_PRIMARY_UPDATE, plane,
+		    new_state->crtc, old_state, new_state);
+}
+
+static void
+nvkm_atomic_tail_collect_plane_disable(struct nvkm_display_tail_context *tail,
+    struct drm_plane *plane, struct drm_plane_state *old_state)
+{
+	if (plane == NULL || old_state == NULL || old_state->crtc == NULL)
+		return;
+
+	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		nvkm_atomic_tail_enqueue_plane_op(tail,
+		    NVKM_DISPLAY_TAIL_PLANE_CURSOR_DISABLE, plane,
+		    old_state->crtc, old_state, NULL);
+		return;
+	}
+
+	if (old_state->crtc->primary == plane)
+		nvkm_atomic_tail_enqueue_plane_op(tail,
+		    NVKM_DISPLAY_TAIL_PLANE_PRIMARY_DISABLE, plane,
+		    old_state->crtc, old_state, NULL);
+}
+
+static void
+nvkm_atomic_tail_enqueue_color_op(struct nvkm_display_tail_context *tail,
+    struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+	struct nvkm_display_tail_color_op *op;
+
+	if (tail == NULL || crtc == NULL)
+		return;
+	if (tail->color_op_count >= nitems(tail->color_ops)) {
+		nvkm_kms_record_result(tail->sc, 0, 0, -ENOSPC,
+		    "atomic tail color queue");
+		return;
+	}
+
+	op = &tail->color_ops[tail->color_op_count++];
+	memset(op, 0, sizeof(*op));
+	op->crtc = crtc;
+	op->old_state = old_state;
+}
+
+static void
+nvkm_atomic_tail_collect_color_update(struct nvkm_display_tail_context *tail,
+    struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+	struct drm_atomic_state *state;
+
+	if (crtc == NULL || crtc->state == NULL)
+		return;
+	if (!crtc->state->active || !crtc->state->color_mgmt_changed ||
+	    crtc->state->mode_changed)
+		return;
+	state = old_state != NULL ? old_state->state : crtc->state->state;
+	if (nvkm_crtc_color_needs_window(crtc->state) &&
+	    state != NULL && crtc->primary != NULL &&
+	    drm_atomic_get_new_plane_state(state, crtc->primary) != NULL)
+		return;
+
+	nvkm_atomic_tail_enqueue_color_op(tail, crtc, old_state);
+}
+
+/*
+ * Execute plane work owned by the current atomic tail.
+ *
+ * Ownership:
+ *   Borrows the queued old/new plane states from the commit's refcounted DRM
+ *   atomic state.  The bridge functions borrow committed CRTC/plane state and
+ *   framebuffer BO references; prepare_fb/cleanup_fb still own scanout pins.
+ *
+ * Lifetime:
+ *   Runs before CRTC atomic_flush.  Therefore vblank events and out-fences are
+ *   armed only after the corresponding primary/cursor programming has been
+ *   submitted to the display channels.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner.  It may sleep in the same places the
+ *   previous plane callbacks slept.
+ */
+static void
+nvkm_atomic_tail_execute_plane_ops(struct nvkm_display_tail_context *tail)
+{
+	struct nvkm_display_tail_plane_op *op;
+	uint32_t i;
+
+	if (tail == NULL)
+		return;
+
+	if (tail->sc != NULL) {
+		tail->sc->kms_atomic_tail_last_plane_op_count =
+		    tail->plane_op_count;
+		tail->sc->kms_atomic_tail_plane_op_count +=
+		    tail->plane_op_count;
+	}
+	for (i = 0; i < tail->plane_op_count; i++) {
+		op = &tail->plane_ops[i];
+		switch (op->type) {
+		case NVKM_DISPLAY_TAIL_PLANE_PRIMARY_UPDATE:
+			nvkm_plane_commit_primary_update(op->plane,
+			    op->new_state);
+			break;
+		case NVKM_DISPLAY_TAIL_PLANE_PRIMARY_DISABLE:
+			nvkm_plane_commit_primary_disable(op->plane,
+			    op->old_state);
+			break;
+		case NVKM_DISPLAY_TAIL_PLANE_CURSOR_UPDATE:
+			nvkm_plane_commit_cursor_update(op->new_state,
+			    op->old_state);
+			break;
+		case NVKM_DISPLAY_TAIL_PLANE_CURSOR_DISABLE:
+			nvkm_plane_commit_cursor_disable(op->old_state);
+			break;
+		}
+	}
+	tail->plane_op_count = 0;
+}
+
+/*
+ * Execute CRTC color work owned by the current atomic tail.
+ *
+ * Ownership:
+ *   Borrows committed CRTC state from the current atomic commit.  It does not
+ *   retain color blobs or framebuffer references after returning.
+ *
+ * Lifetime:
+ *   Runs after plane work and before atomic_flush, so color programming is
+ *   submitted before same-mode pageflip events and out-fences can complete.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner and may sleep in dispnv50 emitters.
+ */
+static void
+nvkm_atomic_tail_execute_color_ops(struct nvkm_display_tail_context *tail)
+{
+	struct nvkm_display_tail_color_op *op;
+	uint32_t i;
+
+	if (tail == NULL)
+		return;
+
+	if (tail->sc != NULL) {
+		tail->sc->kms_atomic_tail_last_color_op_count =
+		    tail->color_op_count;
+		tail->sc->kms_atomic_tail_color_op_count +=
+		    tail->color_op_count;
+	}
+	for (i = 0; i < tail->color_op_count; i++) {
+		op = &tail->color_ops[i];
+		nvkm_crtc_commit_color_update(op->crtc, op->old_state);
+	}
+	tail->color_op_count = 0;
+}
+
+/*
+ * Local KMS plane scheduler for nvkm atomic tail.
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state owned by the current commit tail.  It does not
+ *   take new references to planes, CRTCs, or framebuffers.
+ *
+ * Lifetime:
+ *   Mirrors drm_atomic_helper_commit_planes() ordering: CRTC atomic_begin,
+ *   plane work, then CRTC atomic_flush.  The middle phase is represented as
+ *   tail-owned work items so later D5 work can merge interlocks before method
+ *   submission without changing KMS UAPI timing.
+ *
+ * Threading:
+ *   Called from commit_tail after state swap and fence wait.  It is serialized
+ *   by DRM modeset locking and may sleep through the bridge emitters.
+ */
+static void
+nvkm_atomic_tail_commit_planes(struct nvkm_display_tail_context *tail,
+    uint32_t flags)
+{
+	struct drm_atomic_state *state;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_plane_state *old_plane_state;
+	struct drm_plane_state *new_plane_state;
+	struct drm_crtc *crtc;
+	struct drm_plane *plane;
+	bool active_only;
+	bool disabling;
+	bool no_disable;
+	int i;
+
+	if (tail == NULL || tail->state == NULL)
+		return;
+
+	state = tail->state;
+	active_only = (flags & DRM_PLANE_COMMIT_ACTIVE_ONLY) != 0;
+	no_disable = (flags & DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET) != 0;
+	tail->plane_op_count = 0;
+	tail->color_op_count = 0;
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		const struct drm_crtc_helper_funcs *funcs;
+
+		funcs = crtc->helper_private;
+		if (funcs == NULL || funcs->atomic_begin == NULL)
+			continue;
+		if (active_only && !new_crtc_state->active)
+			continue;
+		funcs->atomic_begin(crtc, old_crtc_state);
+	}
+
+	for_each_oldnew_plane_in_state(state, plane, old_plane_state,
+	    new_plane_state, i) {
+		const struct drm_plane_helper_funcs *funcs;
+		struct drm_crtc_state *crtc_state;
+		bool updating;
+
+		funcs = plane->helper_private;
+		if (funcs == NULL)
+			continue;
+
+		disabling = nvkm_atomic_tail_plane_needs_disable(state,
+		    old_plane_state, new_plane_state);
+		updating = nvkm_atomic_tail_plane_needs_update(state,
+		    old_plane_state, new_plane_state);
+		if (active_only) {
+			if (!disabling &&
+			    !nvkm_atomic_tail_plane_crtc_active(new_plane_state))
+				continue;
+			if (disabling &&
+			    !nvkm_atomic_tail_plane_crtc_active(old_plane_state))
+				continue;
+		}
+
+		if (disabling && funcs->atomic_disable != NULL) {
+			crtc_state = old_plane_state != NULL &&
+			    old_plane_state->crtc != NULL ?
+			    old_plane_state->crtc->state : NULL;
+			if (no_disable && crtc_state != NULL &&
+			    drm_atomic_crtc_needs_modeset(crtc_state))
+				continue;
+			nvkm_atomic_tail_collect_plane_disable(tail, plane,
+			    old_plane_state);
+		} else if (updating) {
+			if (funcs->atomic_update != NULL)
+				nvkm_atomic_tail_collect_plane_update(tail,
+				    plane, old_plane_state, new_plane_state);
+		}
+	}
+
+	nvkm_atomic_tail_execute_plane_ops(tail);
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		if (active_only && !new_crtc_state->active)
+			continue;
+		nvkm_atomic_tail_collect_color_update(tail, crtc,
+		    old_crtc_state);
+	}
+	nvkm_atomic_tail_execute_color_ops(tail);
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		const struct drm_crtc_helper_funcs *funcs;
+
+		funcs = crtc->helper_private;
+		if (funcs == NULL || funcs->atomic_flush == NULL)
+			continue;
+		if (active_only && !new_crtc_state->active)
+			continue;
+		funcs->atomic_flush(crtc, old_crtc_state);
+	}
+}
+
+static void
+nvkm_atomic_tail_enqueue_disable_op(struct nvkm_display_tail_context *tail,
+    struct drm_crtc *crtc, struct drm_crtc_state *old_state,
+    bool flush_disable, bool turn_vblank_off)
+{
+	struct nvkm_display_tail_disable_op *op;
+
+	if (tail == NULL || crtc == NULL)
+		return;
+	if (tail->disable_op_count >= nitems(tail->disable_ops)) {
+		nvkm_kms_record_result(tail->sc, 0, 0, -ENOSPC,
+		    "atomic tail disable queue");
+		return;
+	}
+
+	op = &tail->disable_ops[tail->disable_op_count++];
+	memset(op, 0, sizeof(*op));
+	op->crtc = crtc;
+	op->old_state = old_state;
+	op->flush_disable = flush_disable;
+	op->turn_vblank_off = turn_vblank_off;
+}
+
+/*
+ * Verify that a modeset-disable CRTC op left vblank disabled.
+ *
+ * Ownership:
+ *   Borrows the DRM device and CRTC from the current atomic tail.  No
+ *   references are retained and the helper does not own the vblank reference
+ *   except for the transient probe below.
+ *
+ * Lifetime:
+ *   Runs immediately after the CRTC disable op, matching the DRM helper's
+ *   post-disable contract check.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner while modeset locks serialize display
+ *   state.  The vblank core owns its internal locking.
+ */
+static void
+nvkm_atomic_tail_check_vblank_off(struct nvkm_display_tail_context *tail,
+    struct drm_crtc *crtc)
+{
+	struct drm_device *dev;
+	int ret;
+
+	if (tail == NULL || tail->state == NULL || crtc == NULL)
+		return;
+
+	dev = tail->state->dev;
+	if (dev == NULL || !(dev->irq_enabled && dev->num_crtcs))
+		return;
+
+	ret = drm_crtc_vblank_get(crtc);
+	WARN_ONCE(ret != -EINVAL,
+	    "driver forgot to call drm_crtc_vblank_off()\n");
+	if (ret == 0)
+		drm_crtc_vblank_put(crtc);
+}
+
+/*
+ * Execute modeset-disable CRTC work owned by the current atomic tail.
+ *
+ * Ownership:
+ *   Borrows old CRTC state from the commit's refcounted DRM atomic state.  The
+ *   dispnv50 bridge only borrows that state while clearing the old scanout
+ *   route and does not retain the tail op.
+ *
+ * Lifetime:
+ *   Runs after encoder/bridge disable and before legacy modeset state update.
+ *   vblank is turned off only after bridge disable succeeds, preserving the
+ *   existing error boundary.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner and may sleep while clearing display
+ *   hardware.
+ */
+static void
+nvkm_atomic_tail_execute_disable_ops(struct nvkm_display_tail_context *tail)
+{
+	struct nvkm_display_tail_disable_op *op;
+	uint32_t i;
+
+	if (tail == NULL)
+		return;
+
+	if (tail->sc != NULL) {
+		tail->sc->kms_atomic_tail_last_disable_op_count =
+		    tail->disable_op_count;
+		tail->sc->kms_atomic_tail_disable_op_count +=
+		    tail->disable_op_count;
+	}
+	for (i = 0; i < tail->disable_op_count; i++) {
+		op = &tail->disable_ops[i];
+		nvkm_crtc_commit_disable(op->crtc, op->old_state,
+		    op->flush_disable, op->turn_vblank_off);
+		if (op->turn_vblank_off)
+			nvkm_atomic_tail_check_vblank_off(tail, op->crtc);
+	}
+	tail->disable_op_count = 0;
+}
+
+static void
+nvkm_atomic_tail_set_modes(struct drm_atomic_state *state)
+{
+	struct drm_connector_state *new_conn_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_connector *connector;
+	struct drm_crtc *crtc;
+	int i;
+
+	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+		const struct drm_crtc_helper_funcs *funcs;
+
+		if (!new_crtc_state->mode_changed)
+			continue;
+
+		funcs = crtc->helper_private;
+		if (new_crtc_state->enable && funcs != NULL &&
+		    funcs->mode_set_nofb != NULL)
+			funcs->mode_set_nofb(crtc);
+	}
+
+	for_each_new_connector_in_state(state, connector, new_conn_state, i) {
+		const struct drm_encoder_helper_funcs *funcs;
+		struct drm_display_mode *adjusted_mode;
+		struct drm_display_mode *mode;
+		struct drm_crtc_state *crtc_state;
+		struct drm_encoder *encoder;
+
+		if (new_conn_state->best_encoder == NULL ||
+		    new_conn_state->crtc == NULL ||
+		    new_conn_state->crtc->state == NULL)
+			continue;
+
+		encoder = new_conn_state->best_encoder;
+		funcs = encoder->helper_private;
+		crtc_state = new_conn_state->crtc->state;
+		if (!crtc_state->mode_changed)
+			continue;
+
+		mode = &crtc_state->mode;
+		adjusted_mode = &crtc_state->adjusted_mode;
+		if (funcs != NULL && funcs->atomic_mode_set != NULL) {
+			funcs->atomic_mode_set(encoder, crtc_state,
+			    new_conn_state);
+		} else if (funcs != NULL && funcs->mode_set != NULL) {
+			funcs->mode_set(encoder, mode, adjusted_mode);
+		}
+		drm_bridge_mode_set(encoder->bridge, mode, adjusted_mode);
+	}
+}
+
+/*
+ * Local KMS modeset-disable scheduler for nvkm atomic tail.
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state owned by the current commit tail.  It does not
+ *   retain references to connectors, encoders, bridges, CRTCs, or modes.
+ *
+ * Lifetime:
+ *   Mirrors drm_atomic_helper_commit_modeset_disables(): encoder/bridge
+ *   disable first, CRTC disable second, then legacy modeset state update and
+ *   mode_set callbacks.  The private helper crtc_set_mode() is reproduced here
+ *   because DragonFly keeps it static in drm_atomic_helper.c.
+ *
+ * Threading:
+ *   Called from commit_tail before plane work.  DRM modeset locks serialize it
+ *   with other KMS commits.
+ */
+static void
+nvkm_atomic_tail_commit_modeset_disables(
+    struct nvkm_display_tail_context *tail)
+{
+	struct drm_atomic_state *state;
+	struct drm_connector_state *old_conn_state;
+	struct drm_connector_state *new_conn_state;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_connector *connector;
+	struct drm_encoder *encoder;
+	struct drm_crtc *crtc;
+	int i;
+
+	if (tail == NULL || tail->state == NULL)
+		return;
+
+	state = tail->state;
+	tail->disable_op_count = 0;
+
+	for_each_oldnew_connector_in_state(state, connector, old_conn_state,
+	    new_conn_state, i) {
+		const struct drm_encoder_helper_funcs *funcs;
+
+		if (old_conn_state->crtc == NULL)
+			continue;
+		old_crtc_state = drm_atomic_get_old_crtc_state(state,
+		    old_conn_state->crtc);
+		if (old_crtc_state == NULL || !old_crtc_state->active ||
+		    !drm_atomic_crtc_needs_modeset(
+		    old_conn_state->crtc->state))
+			continue;
+
+		encoder = old_conn_state->best_encoder;
+		if (encoder == NULL)
+			continue;
+		funcs = encoder->helper_private;
+
+		drm_bridge_disable(encoder->bridge);
+		if (funcs != NULL) {
+			if (new_conn_state->crtc != NULL &&
+			    funcs->prepare != NULL)
+				funcs->prepare(encoder);
+			else if (funcs->disable != NULL)
+				funcs->disable(encoder);
+			else if (funcs->dpms != NULL)
+				funcs->dpms(encoder, DRM_MODE_DPMS_OFF);
+		}
+		drm_bridge_post_disable(encoder->bridge);
+	}
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		if (!drm_atomic_crtc_needs_modeset(new_crtc_state))
+			continue;
+		if (!old_crtc_state->active)
+			continue;
+		if (new_crtc_state->enable) {
+			const struct drm_crtc_helper_funcs *funcs;
+
+			funcs = crtc->helper_private;
+			if (funcs != NULL && funcs->prepare != NULL) {
+				funcs->prepare(crtc);
+				continue;
+			}
+		}
+		/*
+		 * A same-active full modeset still stages head/window/output
+		 * clear methods, but nouveau only flushes the disable half when
+		 * the transaction explicitly requires it.  Otherwise the clear
+		 * and set methods are submitted by the final window/core UPDATE.
+		 */
+		nvkm_atomic_tail_enqueue_disable_op(tail, crtc,
+		    old_crtc_state,
+		    tail->txn != NULL && tail->txn->flush_disable,
+		    !new_crtc_state->active);
+	}
+	nvkm_atomic_tail_execute_disable_ops(tail);
+
+	nvkm_atomic_tail_set_modes(state);
+}
+
+static void
+nvkm_atomic_tail_enqueue_enable_op(struct nvkm_display_tail_context *tail,
+    struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+	struct nvkm_display_tail_enable_op *op;
+
+	if (tail == NULL || crtc == NULL)
+		return;
+	if (tail->enable_op_count >= nitems(tail->enable_ops)) {
+		nvkm_kms_record_result(tail->sc, 0, 0, -ENOSPC,
+		    "atomic tail enable queue");
+		return;
+	}
+
+	op = &tail->enable_ops[tail->enable_op_count++];
+	memset(op, 0, sizeof(*op));
+	op->crtc = crtc;
+	op->old_state = old_state;
+}
+
+/*
+ * Execute modeset-enable CRTC work owned by the current atomic tail.
+ *
+ * Ownership:
+ *   Borrows old CRTC state from the commit's refcounted DRM atomic state.  The
+ *   CRTC enable helper consumes any prepared output route stored in that same
+ *   state and does not retain the tail op after returning.
+ *
+ * Lifetime:
+ *   Runs in the modeset-enable stage, after plane work for the current helper
+ *   ordering and before modeset event/fake-vblank/hw-done completion.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner and may sleep while programming the
+ *   dispnv50 bridge.
+ */
+static void
+nvkm_atomic_tail_execute_enable_ops(struct nvkm_display_tail_context *tail)
+{
+	struct nvkm_display_tail_enable_op *op;
+	uint32_t i;
+
+	if (tail == NULL)
+		return;
+
+	if (tail->sc != NULL) {
+		tail->sc->kms_atomic_tail_last_enable_op_count =
+		    tail->enable_op_count;
+		tail->sc->kms_atomic_tail_enable_op_count +=
+		    tail->enable_op_count;
+	}
+	for (i = 0; i < tail->enable_op_count; i++) {
+		op = &tail->enable_ops[i];
+		nvkm_crtc_commit_enable(op->crtc, op->old_state);
+	}
+	tail->enable_op_count = 0;
+}
+
+/*
+ * Local KMS modeset-enable scheduler for nvkm atomic tail.
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state owned by the current commit tail.  It does not
+ *   take extra references to CRTCs, connectors, encoders, or bridges.
+ *
+ * Lifetime:
+ *   Mirrors drm_atomic_helper_commit_modeset_enables() for nvkm's object set.
+ *   nvkm creates no writeback connectors today, so there is no writeback
+ *   completion work to mirror from the helper's private static function.
+ *
+ * Threading:
+ *   Called from commit_tail after the plane stage.  DRM modeset locks serialize
+ *   it with other KMS commits.
+ */
+static void
+nvkm_atomic_tail_commit_modeset_enables(
+    struct nvkm_display_tail_context *tail)
+{
+	struct drm_atomic_state *state;
+	struct drm_connector_state *new_conn_state;
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_connector *connector;
+	struct drm_crtc *crtc;
+	int i;
+
+	if (tail == NULL || tail->state == NULL)
+		return;
+
+	state = tail->state;
+	tail->enable_op_count = 0;
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		if (!drm_atomic_crtc_needs_modeset(new_crtc_state))
+			continue;
+		if (!new_crtc_state->active || !new_crtc_state->enable)
+			continue;
+		nvkm_atomic_tail_enqueue_enable_op(tail, crtc,
+		    old_crtc_state);
+	}
+	nvkm_atomic_tail_execute_enable_ops(tail);
+
+	for_each_new_connector_in_state(state, connector, new_conn_state, i) {
+		const struct drm_encoder_helper_funcs *funcs;
+		struct drm_encoder *encoder;
+
+		if (new_conn_state->best_encoder == NULL ||
+		    new_conn_state->crtc == NULL ||
+		    new_conn_state->crtc->state == NULL)
+			continue;
+		if (!new_conn_state->crtc->state->active ||
+		    !drm_atomic_crtc_needs_modeset(new_conn_state->crtc->state))
+			continue;
+
+		encoder = new_conn_state->best_encoder;
+		funcs = encoder->helper_private;
+
+		drm_bridge_pre_enable(encoder->bridge);
+		if (funcs != NULL) {
+			if (funcs->enable != NULL)
+				funcs->enable(encoder);
+			else if (funcs->commit != NULL)
+				funcs->commit(encoder);
+		}
+		drm_bridge_enable(encoder->bridge);
+	}
 }
 
 /*
@@ -2619,24 +3653,7 @@ color_fail:
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
-	struct drm_atomic_state *state;
-	int color_err;
-
-	(void)old_state;	/* UPDATE is sequenced in atomic_enable. */
-
-	if (crtc->state->active && crtc->state->color_mgmt_changed &&
-	    !crtc->state->mode_changed) {
-		state = old_state != NULL ? old_state->state : crtc->state->state;
-		if (!nvkm_crtc_color_needs_window(crtc->state) ||
-		    state == NULL || crtc->primary == NULL ||
-		    drm_atomic_get_new_plane_state(state, crtc->primary) == NULL) {
-			color_err = nvkm_dispnv50_color_update(nc->sc, crtc,
-			    nc->head, nc->win);
-			nvkm_kms_record_result(nc->sc, nc->head, nc->win, color_err,
-			    "crtc color");
-		}
-	}
+	(void)old_state;	/* Color and plane UPDATEs run in atomic tail. */
 
 	if (crtc->state->event == NULL)
 		return;
@@ -2645,8 +3662,26 @@ nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	nvkm_crtc_complete_event(crtc, crtc->state);
 }
 
+/*
+ * Program one CRTC modeset-enable operation.
+ *
+ * Ownership:
+ *   Borrows the committed DRM CRTC state and the old CRTC state owned by the
+ *   current atomic commit.  A prepared output route, when present, is owned by
+ *   old_state->state and consumed by the dispnv50 bridge during this call.
+ *
+ * Lifetime:
+ *   Runs after state swap and after prepare_fb/output_prepare have succeeded.
+ *   It may turn on vblank only after the bridge has accepted the modeset and
+ *   any full cursor image restore has been submitted.
+ *
+ * Threading:
+ *   Called by the atomic tail owner.  It may sleep while programming GSP/EVO
+ *   display state and must not run from IRQ or async cursor paths.
+ */
 static void
-nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+nvkm_crtc_commit_enable(struct drm_crtc *crtc,
+    struct drm_crtc_state *old_state)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	struct nvkm_softc *sc = nc->sc;
@@ -2705,6 +3740,12 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 	    display_id, err);
 }
 
+static void
+nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+	nvkm_crtc_commit_enable(crtc, old_state);
+}
+
 static uint32_t
 nvkm_crtc_old_display_id(struct drm_crtc *crtc,
     const struct drm_crtc_state *old_state)
@@ -2723,25 +3764,42 @@ nvkm_crtc_old_display_id(struct drm_crtc *crtc,
 	return (0);
 }
 
+/*
+ * Program one CRTC modeset-disable operation.
+ *
+ * Ownership:
+ *   Borrows the old DRM CRTC state owned by the current atomic commit.  The
+ *   dispnv50 bridge clears the old head/window/output route and releases any
+ *   display ownership it consumed; it does not retain the old state pointer.
+ *
+ * Lifetime:
+ *   Runs before legacy modeset state is updated.  vblank is turned off only
+ *   after bridge disable succeeds; on failure the old vblank state is kept so
+ *   cleanup and event paths do not observe a false disabled CRTC.
+ *
+ * Threading:
+ *   Called by the atomic tail owner.  It may sleep while clearing GSP/EVO
+ *   display state and must not run from IRQ or async cursor paths.
+ */
 static void
-nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+nvkm_crtc_commit_disable(struct drm_crtc *crtc,
+    struct drm_crtc_state *old_state, bool flush_disable,
+    bool turn_vblank_off)
 {
 	struct nvkm_crtc *nc = to_nvkm_crtc(crtc);
 	uint32_t display_id;
-	int plane_err;
 	int err;
 
 	display_id = nvkm_crtc_old_display_id(crtc, old_state);
-	plane_err = nvkm_crtc_disable_planes(nc, old_state);
-	nvkm_kms_record_result(nc->sc, nc->head, nc->win, plane_err,
-	    "crtc disable planes");
-	err = nvkm_dispnv50_atomic_disable(nc->sc, nc->head, display_id);
+	nc->sc->kms_plane_disable_count++;
+	err = nvkm_dispnv50_modeset_disable(nc->sc, nc->head, nc->win,
+	    display_id, flush_disable || turn_vblank_off);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
-	    "crtc disable");
-	if (err == 0) {
+	    "crtc modeset disable");
+	if (err == 0 && turn_vblank_off) {
 		nc->sc->kms_atomic_disable_vblank_off_count++;
 		drm_crtc_vblank_off(crtc);
-	} else {
+	} else if (err != 0 && turn_vblank_off) {
 		nc->sc->kms_atomic_disable_vblank_keep_count++;
 		nc->sc->kms_atomic_disable_vblank_keep_head = nc->head;
 		nc->sc->kms_atomic_disable_vblank_keep_error = err;
@@ -2752,6 +3810,12 @@ nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state
 	nvkm_infof(nc->sc->dev,
 	    "drm: crtc disable head=%u display=0x%x bridge=%d\n", nc->head,
 	    display_id, err);
+}
+
+static void
+nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
+{
+	nvkm_crtc_commit_disable(crtc, old_state, true, true);
 }
 
 static int
@@ -2839,15 +3903,81 @@ static const struct drm_encoder_funcs nvkm_encoder_funcs = {
 
 /* ===== init ===== */
 
+/*
+ * Count currently open primary-node clients.
+ *
+ * Ownership:
+ *   Borrows the DRM device and file list. The helper neither owns nor retains
+ *   any drm_file reference.
+ *
+ * Lifetime:
+ *   The returned value is a racing snapshot used only to decide whether an
+ *   already queued internal console-restore task should still run.
+ *
+ * Threading:
+ *   Takes filelist_mutex while walking dev->filelist. Callers must not hold the
+ *   same mutex. The result must not be used as a long-lived exclusion token.
+ */
+static unsigned int
+nvkm_drm_kms_primary_client_count(struct drm_device *dev)
+{
+	struct drm_file *file_priv;
+	unsigned int count = 0;
+
+	if (dev == NULL)
+		return (0);
+
+	mutex_lock(&dev->filelist_mutex);
+	list_for_each_entry(file_priv, &dev->filelist, lhead) {
+		if (file_priv->minor != NULL &&
+		    file_priv->minor->type == DRM_MINOR_PRIMARY)
+			count++;
+	}
+	mutex_unlock(&dev->filelist_mutex);
+
+	return (count);
+}
+
+static bool
+nvkm_drm_kms_has_master(struct drm_device *dev)
+{
+	bool has_master;
+
+	if (dev == NULL)
+		return (false);
+
+	mutex_lock(&dev->master_mutex);
+	has_master = dev->master != NULL;
+	mutex_unlock(&dev->master_mutex);
+	return (has_master);
+}
+
 static void
 nvkm_drm_kms_task(void *arg, int pending)
 {
 	struct nvkm_softc *sc = arg;
+	struct drm_device *dev;
+	unsigned int primary_clients;
+	bool has_master;
 	int ret;
 
 	(void)pending;
 	if (sc == NULL || sc->drm_dev == NULL)
 		return;
+	dev = sc->drm_dev;
+
+	primary_clients = nvkm_drm_kms_primary_client_count(dev);
+	has_master = nvkm_drm_kms_has_master(dev);
+	if (primary_clients != 0 || has_master) {
+		sc->kms_restore_skip_primary_count++;
+		sc->kms_restore_last_primary_count = primary_clients;
+		sc->kms_restore_last_open_count = dev->open_count;
+		nvkm_debugf(sc->dev,
+		    "drm: skip queued auto KMS: primary_clients=%u "
+		    "open_count=%d master=%d\n",
+		    primary_clients, dev->open_count, has_master ? 1 : 0);
+		return;
+	}
 
 	ret = nvkm_drm_kms_light_up(sc);
 	nvkm_infof(sc->dev, "drm: auto KMS commit -> %d\n", ret);
@@ -2870,20 +4000,6 @@ nvkm_drm_kms_schedule(struct nvkm_softc *sc, const char *reason)
 	    reason != NULL ? reason : "unspecified");
 	ret = taskqueue_enqueue(taskqueue_thread[0], &sc->kms_task);
 	return (ret);
-}
-
-static bool
-nvkm_drm_kms_has_master(struct drm_device *dev)
-{
-	bool has_master;
-
-	if (dev == NULL)
-		return (false);
-
-	mutex_lock(&dev->master_mutex);
-	has_master = dev->master != NULL;
-	mutex_unlock(&dev->master_mutex);
-	return (has_master);
 }
 
 /*
@@ -3522,6 +4638,42 @@ nvkm_internal_fb(struct drm_device *dev, uint32_t w, uint32_t h)
 }
 
 /*
+ * Test whether the committed primary plane already carries light_up's
+ * internal console framebuffer.
+ *
+ * Ownership:
+ *   Borrows the committed CRTC, primary plane state, and framebuffer.  It owns
+ *   no references and must not be used after the caller drops modeset
+ *   serialization.
+ *
+ * Lifetime:
+ *   The test is valid only for the current committed KMS state.  A true result
+ *   means a duplicate light_up call would not change DRM state or display
+ *   hardware; a false result requires the normal atomic restore path to attach
+ *   a fresh internal framebuffer or detach stale userspace state.
+ *
+ * Threading:
+ *   Called from the process-context light_up path before building a new atomic
+ *   state.  It reads committed state under the normal KMS serialization and
+ *   performs no hardware IO.
+ */
+static bool
+nvkm_light_up_primary_is_internal_console(struct drm_crtc *crtc)
+{
+	struct drm_plane_state *state;
+
+	if (crtc == NULL || crtc->primary == NULL)
+		return (false);
+
+	state = crtc->primary->state;
+	if (state == NULL || state->crtc != crtc || state->fb == NULL ||
+	    !state->visible)
+		return (false);
+
+	return (state->fb->funcs == &nvkm_internal_fb_funcs);
+}
+
+/*
  * Disable the current console/display scanout when no connected output can be
  * selected for light_up().
  *
@@ -3585,9 +4737,13 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	struct drm_connector_state *cstate;
 	struct drm_crtc_state *crtc_state;
 	struct drm_plane_state *pstate;
+	struct drm_plane_state *cursor_state;
 	struct drm_display_mode *mode = NULL;
 	struct drm_framebuffer *fb;
+	uint32_t connector_mask;
 	bool force_modeset;
+	bool primary_is_console;
+	bool user_scanout;
 	int ret;
 
 	nvkm_infof(sc->dev, "drm: light_up entry drm_dev=%p\n", dev);
@@ -3618,17 +4774,56 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	if (crtc == NULL)
 		return (ENXIO);
 
+	user_scanout = nvkm_dispnv50_scanout_is_user(sc);
+	primary_is_console = nvkm_light_up_primary_is_internal_console(crtc);
 	force_modeset = crtc->state == NULL || !crtc->state->active ||
-	    !drm_mode_equal(&crtc->state->mode, mode);
+	    !drm_mode_equal(&crtc->state->mode, mode) || user_scanout;
+	connector_mask = drm_connector_mask(conn);
+
+	/*
+	 * Skip a duplicate console restore that would only resubmit the already
+	 * active internal scanout.
+	 *
+	 * Ownership:
+	 *   Borrows the committed CRTC state and the selected connector.  It
+	 *   owns no framebuffer, plane state, connector state, or route
+	 *   reference; in particular it runs before creating the temporary
+	 *   internal framebuffer used by a real light_up commit.
+	 *
+	 * Lifetime:
+	 *   The fast path is valid only while the committed CRTC is already
+	 *   active with the requested mode, still routed to the selected
+	 *   connector, the primary plane already owns light_up's internal
+	 *   framebuffer, and dispnv50 audit state says scanout is not owned by
+	 *   userspace.  User scanout, mode changes, inactive CRTC state, missing
+	 *   internal primary state, and route changes still fall through to the
+	 *   normal atomic commit.
+	 *
+	 * Threading:
+	 *   light_up is serialized by the KMS modeset path and this branch
+	 *   performs no hardware IO.  It relies on the display audit as a
+	 *   diagnostic ownership mirror, not as a synchronization primitive.
+	 */
+	if (!force_modeset && !user_scanout && primary_is_console &&
+	    crtc->state != NULL && crtc->state->active &&
+	    (crtc->state->connector_mask & connector_mask) != 0 &&
+	    nvkm_light_up_primary_is_internal_console(crtc)) {
+		nvkm_infof(sc->dev,
+		    "drm: light_up skip no-op console restore crtc=%u "
+		    "connector=0x%08x\n", drm_crtc_index(crtc),
+		    connector_mask);
+		return (0);
+	}
 
 	fb = nvkm_internal_fb(dev, mode->hdisplay, mode->vdisplay);
 	if (fb == NULL)
 		return (ENOMEM);
 
 	nvkm_infof(sc->dev,
-	    "drm: light_up -- mode %ux%u on crtc %u full_modeset=%d\n",
+	    "drm: light_up -- mode %ux%u on crtc %u full_modeset=%d "
+	    "user_scanout=%d primary_console=%d\n",
 	    mode->hdisplay, mode->vdisplay, drm_crtc_index(crtc),
-	    force_modeset);
+	    force_modeset, user_scanout, primary_is_console);
 
 	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
 	state = drm_atomic_state_alloc(dev);
@@ -3678,6 +4873,34 @@ retry:
 	pstate->src_w = (uint32_t)mode->hdisplay << 16;
 	pstate->src_h = (uint32_t)mode->vdisplay << 16;
 
+	/*
+	 * Console restore owns only the internal primary framebuffer.
+	 *
+	 * Ownership:
+	 *   Any cursor BO and cursor framebuffer in the current KMS state belong
+	 *   to the userspace client that just dropped master.  light_up() does
+	 *   not inherit or retain those references.
+	 *
+	 * Lifetime:
+	 *   The atomic commit detaches the cursor plane before the old file's
+	 *   cursor framebuffer can disappear through close/RMFB cleanup.
+	 *
+	 * Threading:
+	 *   This runs while the internal atomic state owns the plane state and the
+	 *   normal modeset locks serialize it with userspace commits.
+	 */
+		if (crtc->cursor != NULL) {
+			cursor_state = drm_atomic_get_plane_state(state, crtc->cursor);
+			if (IS_ERR(cursor_state)) {
+				ret = PTR_ERR(cursor_state);
+				goto out;
+			}
+			ret = __drm_atomic_helper_disable_plane(crtc->cursor,
+			    cursor_state);
+			if (ret != 0)
+				goto out;
+		}
+
 	ret = drm_atomic_commit(state);
 out:
 	if (ret == -EDEADLK) {
@@ -3688,8 +4911,24 @@ out:
 	drm_atomic_state_put(state);
 	drm_modeset_drop_locks(&ctx);
 	drm_modeset_acquire_fini(&ctx);
-	if (ret != 0)
+	if (ret != 0) {
 		drm_framebuffer_remove(fb);
+	} else {
+		/*
+		 * Ownership: drm_atomic_set_fb_for_plane() acquired the
+		 * plane-state reference before commit.  Drop the creator
+		 * reference so the committed plane state controls the
+		 * internal framebuffer lifetime.
+		 *
+		 * Lifetime: the framebuffer remains alive until a later
+		 * atomic commit replaces or disables the plane.
+		 *
+		 * Threading: this runs after the synchronous light_up commit
+		 * has returned and may invoke the framebuffer destroy path if
+		 * the helper no longer holds a reference.
+		 */
+		drm_framebuffer_put(fb);
+	}
 	nvkm_infof(sc->dev, "drm: light_up commit -> %d\n", ret);
 	return (ret < 0 ? -ret : 0);
 }
