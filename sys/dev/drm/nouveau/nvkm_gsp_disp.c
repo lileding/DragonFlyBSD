@@ -2208,6 +2208,44 @@ nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
 	return r535_dmac_alloc(sc->disp, oclass, inst, put_offset, object);
 }
 
+/*
+ * Allocate a display PIO immediate channel.
+ *
+ * Ownership: object is caller-owned storage for the RM allocation handle.  On
+ * success, the caller owns that handle and must release it with
+ * nvkm_gsp_rm_free().  This helper borrows sc and does not retain any pointer
+ * to caller memory.
+ *
+ * Lifetime: the channel is valid until the returned RM object is freed.  The
+ * matching BAR user aperture is established by the caller from the display
+ * class and instance, just like nouveau's nvif_object_map() result.
+ *
+ * Threading: blockable display/KMS context only.  This issues synchronous GSP
+ * RPCs and must not run from IRQ or any atomic context.
+ */
+int
+nvkm_gsp_disp_pio_alloc(struct nvkm_softc *sc, uint32_t oclass, int inst,
+    struct nvkm_gsp_object *object)
+{
+	NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS *args;
+	int ret;
+
+	if (sc == NULL || sc->disp == NULL || object == NULL)
+		return -ENODEV;
+
+	ret = r535_disp_chan_set_pushbuf(sc->disp, oclass, inst, NULL);
+	if (ret != 0)
+		return ret;
+
+	args = nvkm_gsp_rm_alloc_get(&sc->disp->rm.object,
+	    (oclass << 16) | inst, oclass, sizeof(*args), object);
+	if (IS_ERR(args))
+		return PTR_ERR(args);
+
+	args->channelInstance = inst;
+	return nvkm_gsp_rm_alloc_wr(object, args);
+}
+
 int
 nvkm_gsp_disp_dmac_bind(struct nvkm_softc *sc, uint32_t oclass,
     int inst, struct nvkm_object *object, uint32_t handle)

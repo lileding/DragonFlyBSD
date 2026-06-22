@@ -1865,8 +1865,15 @@ static int
 nvkm_atomic_commit(struct drm_device *dev, struct drm_atomic_state *state,
     bool nonblock)
 {
-	if (state->async_update)
-		return (drm_atomic_helper_commit(dev, state, nonblock));
+	struct nvkm_softc *sc = dev->dev_private;
+	int ret;
+
+	if (state->async_update) {
+		ret = drm_atomic_helper_commit(dev, state, nonblock);
+		if (ret == 0)
+			nvkm_atomic_publish_summary(sc, state);
+		return (ret);
+	}
 	if (!nvkm_atomic_state_needs_output_prepare(state))
 		return (drm_atomic_helper_commit(dev, state, nonblock));
 	return (nvkm_atomic_commit_prepared(dev, state, nonblock));
@@ -1883,7 +1890,8 @@ nvkm_crtc_disable_plane(struct nvkm_crtc *nc, struct drm_plane *plane)
 
 	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
 		nc->sc->kms_cursor_disable_count++;
-		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head);
+		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head,
+		    false);
 		if (err != 0)
 			nc->sc->kms_cursor_error_count++;
 		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
@@ -2174,6 +2182,8 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		return;
 	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
 		crtc_state = state->crtc->state;
+		bool legacy_cursor_update;
+
 		if (crtc_state == NULL || !crtc_state->active ||
 		    drm_atomic_crtc_needs_modeset(crtc_state))
 			return;
@@ -2197,8 +2207,11 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		}
 
 		nc->sc->kms_cursor_update_count++;
+		legacy_cursor_update = old_state != NULL &&
+		    old_state->state != NULL &&
+		    old_state->state->legacy_cursor_update;
 		err = nvkm_dispnv50_cursor_update(nc->sc, state->crtc,
-		    nc->head);
+		    nc->head, legacy_cursor_update);
 		if (err != 0)
 			nc->sc->kms_cursor_error_count++;
 		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
@@ -2251,11 +2264,16 @@ nvkm_plane_atomic_disable(struct drm_plane *plane,
 	if (old_state == NULL || old_state->crtc == NULL)
 		return;
 	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
+		bool legacy_cursor_update;
+
 		nc = to_nvkm_crtc(old_state->crtc);
 		if (nc->sc->disp == NULL)
 			return;
 		nc->sc->kms_cursor_disable_count++;
-		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head);
+		legacy_cursor_update = old_state->state != NULL &&
+		    old_state->state->legacy_cursor_update;
+		err = nvkm_dispnv50_cursor_disable(nc->sc, nc->head,
+		    legacy_cursor_update);
 		if (err != 0)
 			nc->sc->kms_cursor_error_count++;
 		nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
@@ -2647,7 +2665,8 @@ nvkm_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 		int cursor_err;
 
 		sc->kms_cursor_update_count++;
-		cursor_err = nvkm_dispnv50_cursor_update(sc, crtc, nc->head);
+		cursor_err = nvkm_dispnv50_cursor_update(sc, crtc, nc->head,
+		    false);
 		if (cursor_err != 0)
 			sc->kms_cursor_error_count++;
 		nvkm_kms_record_result(sc, nc->head, nc->win, cursor_err,

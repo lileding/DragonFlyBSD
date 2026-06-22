@@ -196,6 +196,8 @@ int	 nvkm_gsp_disp_channel_pushbuf(struct nvkm_softc *sc, int32_t oclass,
 	     int inst, struct nvkm_memory *memory);
 int	 nvkm_gsp_disp_dmac_alloc(struct nvkm_softc *sc, uint32_t oclass,
 		     int inst, uint32_t put_offset, struct nvkm_gsp_object *object);
+int	 nvkm_gsp_disp_pio_alloc(struct nvkm_softc *sc, uint32_t oclass,
+		     int inst, struct nvkm_gsp_object *object);
 int	 nvkm_gsp_disp_dmac_bind(struct nvkm_softc *sc, uint32_t oclass,
 		     int inst, struct nvkm_object *object, uint32_t handle);
 void	 nvkm_gsp_disp_dmac_unbind(struct nvkm_softc *sc, int cookie);
@@ -380,10 +382,12 @@ int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
  *
  * Threading:
  *   Runs from KMS commit context. It may sleep while pushing EVO/core updates
- *   and waiting for the core notifier; it must not be called from IRQ.
+ *   and, for non-legacy commits, waiting for the core notifier. Legacy cursor
+ *   ioctls must use nouveau's non-notifying core update path so a cursor-only
+ *   state change does not wait on the full display completion path.
  */
 int	 nvkm_dispnv50_cursor_update(struct nvkm_softc *sc,
-	     struct drm_crtc *crtc, uint32_t head);
+	     struct drm_crtc *crtc, uint32_t head, bool legacy_cursor_update);
 /*
  * Ownership:
  *   Borrows the current cursor plane state and only updates hardware position.
@@ -409,9 +413,12 @@ int	 nvkm_dispnv50_cursor_async_update(struct nvkm_softc *sc,
  *   still handled by the KMS plane cleanup_fb path.
  *
  * Threading:
- *   Runs from KMS commit context and may sleep waiting for the core notifier.
+ *   Runs from KMS commit context and may sleep waiting for the core notifier
+ *   for non-legacy commits. Legacy cursor ioctl disables use nouveau's
+ *   non-notifying core update path.
  */
-int	 nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head);
+int	 nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head,
+	     bool legacy_cursor_update);
 void	 nvkm_dispnv50_fini(struct nvkm_softc *sc);
 
 /* Register DRIVER_MODESET objects backed by imported GSP display discovery. */

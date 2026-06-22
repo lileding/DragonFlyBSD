@@ -1,4 +1,6 @@
 #include <sys/event.h>
+#include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/time.h>
 
 #include <errno.h>
@@ -84,6 +86,18 @@ struct atomic_plane_snapshot {
 struct exec_sync_file {
 	int fd;
 	bool was_pending;
+};
+
+struct cursor_counter_snapshot {
+	uint64_t plane_update_count;
+	uint64_t cursor_update_count;
+	uint64_t cursor_async_update_count;
+	uint64_t cursor_disable_count;
+	uint64_t cursor_error_count;
+	uint64_t cursor_pin_count;
+	uint64_t cursor_unpin_count;
+	uint64_t atomic_last_legacy_cursor_update;
+	uint64_t atomic_last_async_update;
 };
 
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
@@ -1507,6 +1521,136 @@ destroy_dumb_buffer(int fd, uint32_t handle)
 }
 
 static bool
+read_drm_state_text(char **text_out)
+{
+	char *text;
+	size_t length;
+
+	*text_out = NULL;
+	length = 0;
+	if (sysctlbyname("dev.drm.0.state", NULL, &length, NULL, 0) != 0 ||
+	    length == 0)
+		return false;
+
+	text = calloc(1, length + 1);
+	if (text == NULL)
+		return false;
+	if (sysctlbyname("dev.drm.0.state", text, &length, NULL, 0) != 0) {
+		free(text);
+		return false;
+	}
+	text[length] = '\0';
+	*text_out = text;
+	return true;
+}
+
+static bool
+state_counter_from_text(const char *text, const char *key,
+    uint64_t *value_out)
+{
+	const char *line;
+	size_t key_length;
+
+	key_length = strlen(key);
+	for (line = text; line != NULL && *line != '\0';) {
+		const char *next_line;
+		const char *value;
+		char *end;
+
+		while (*line == ' ' || *line == '\t')
+			line++;
+		next_line = strchr(line, '\n');
+		if (strncmp(line, key, key_length) == 0) {
+			value = line + key_length;
+			while (*value == ' ' || *value == '\t')
+				value++;
+			if (*value == '=') {
+				value++;
+				while (*value == ' ' || *value == '\t')
+					value++;
+				errno = 0;
+				*value_out = strtoull(value, &end, 0);
+				return end != value && errno == 0;
+			}
+		}
+		if (next_line == NULL)
+			break;
+		line = next_line + 1;
+	}
+	return false;
+}
+
+static bool
+read_cursor_counter_snapshot(struct cursor_counter_snapshot *snapshot,
+    const char *stage)
+{
+	char text[160];
+	char *state;
+	bool ok;
+
+	ok = read_drm_state_text(&state);
+	snprintf(text, sizeof(text), "DRM state is readable before %s", stage);
+	check(ok, text);
+	if (!ok)
+		return false;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	ok = state_counter_from_text(state, "plane_update_count",
+	    &snapshot->plane_update_count) &&
+	    state_counter_from_text(state, "cursor_update_count",
+	    &snapshot->cursor_update_count) &&
+	    state_counter_from_text(state, "cursor_async_update_count",
+	    &snapshot->cursor_async_update_count) &&
+	    state_counter_from_text(state, "cursor_disable_count",
+	    &snapshot->cursor_disable_count) &&
+	    state_counter_from_text(state, "cursor_error_count",
+	    &snapshot->cursor_error_count) &&
+	    state_counter_from_text(state, "cursor_pin_count",
+	    &snapshot->cursor_pin_count) &&
+	    state_counter_from_text(state, "cursor_unpin_count",
+	    &snapshot->cursor_unpin_count) &&
+	    state_counter_from_text(state, "atomic_last_legacy_cursor_update",
+	    &snapshot->atomic_last_legacy_cursor_update) &&
+	    state_counter_from_text(state, "atomic_last_async_update",
+	    &snapshot->atomic_last_async_update);
+	snprintf(text, sizeof(text), "cursor counters are present before %s",
+	    stage);
+	check(ok, text);
+	free(state);
+	return ok;
+}
+
+static bool
+clear_dumb_buffer(int fd, uint32_t handle, uint32_t pitch, uint32_t height,
+    const char *what)
+{
+	struct drm_mode_map_dumb map;
+	size_t length;
+	void *data;
+	bool ok;
+
+	memset(&map, 0, sizeof(map));
+	map.handle = handle;
+	ok = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map) == 0;
+	check(ok, what);
+	if (!ok)
+		return false;
+
+	length = (size_t)pitch * height;
+	data = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+	    (off_t)map.offset);
+	ok = data != MAP_FAILED;
+	check(ok, "mmap succeeds for transparent cursor probe");
+	if (!ok)
+		return false;
+
+	memset(data, 0, length);
+	check(munmap(data, length) == 0,
+	    "munmap succeeds for transparent cursor probe");
+	return true;
+}
+
+static bool
 add_linear_framebuffer(int fd, uint32_t width, uint32_t height,
     uint32_t format, uint32_t handle, uint32_t pitch, uint32_t *fb_id_out,
     const char *what)
@@ -1765,6 +1909,161 @@ out:
 	    "DESTROY_DUMB succeeds for cursor atomic negative probe");
 	destroy_dumb_buffer_for(fd, argb_handle,
 	    "DESTROY_DUMB succeeds for cursor atomic positive probe");
+}
+
+/*
+ * check_legacy_cursor_runtime_contract()
+ *
+ * Ownership:
+ *   Owns one temporary dumb cursor BO while the legacy cursor ioctl path
+ *   borrows its handle.  The probe hides the cursor before destroying the BO,
+ *   and it never publishes a framebuffer ID to userspace.
+ *
+ * Lifetime:
+ *   Installs a transparent 64x64 ARGB cursor, moves it through the legacy
+ *   MOVE ioctl, and hides it again before returning.  The enabled interval is
+ *   intentionally short and visually transparent; KMS state must be restored
+ *   even when a later check fails.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The kernel serializes legacy cursor
+ *   update/disable through normal modeset locks; the MOVE operation must use
+ *   the driver's atomic_async_update hook rather than a primary plane update.
+ */
+static void
+check_legacy_cursor_runtime_contract(int fd, uint32_t crtc_id)
+{
+	struct cursor_counter_snapshot before;
+	struct cursor_counter_snapshot after_enable;
+	struct cursor_counter_snapshot after_move;
+	struct cursor_counter_snapshot after_hide;
+	uint64_t pin_delta;
+	uint64_t unpin_delta;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	bool cursor_visible = false;
+	bool have_after_enable = false;
+	bool have_after_move = false;
+	int saved_errno;
+	int ret;
+
+	if (!read_cursor_counter_snapshot(&before, "legacy cursor probe"))
+		return;
+
+	if (!create_dumb_buffer_for(fd, 64, 64, 32, &handle, &pitch,
+	    "CREATE_DUMB succeeds for legacy cursor runtime probe"))
+		goto out;
+	if (!clear_dumb_buffer(fd, handle, pitch, 64,
+	    "MAP_DUMB succeeds for transparent cursor probe"))
+		goto out;
+
+	errno = 0;
+	ret = drmModeSetCursor2(fd, crtc_id, handle, 64, 64, 0, 0);
+	saved_errno = errno;
+	if (ret != 0) {
+		printf("    drmModeSetCursor2 errno=%d\n", saved_errno);
+		check(false, "legacy cursor SetCursor2 enables cursor image");
+		goto out;
+	}
+	cursor_visible = true;
+	check(true, "legacy cursor SetCursor2 enables cursor image");
+
+	if (read_cursor_counter_snapshot(&after_enable,
+	    "legacy cursor enable")) {
+		have_after_enable = true;
+		check(after_enable.cursor_update_count >
+		    before.cursor_update_count,
+		    "legacy cursor SetCursor2 increments cursor_update_count");
+		check(after_enable.cursor_error_count ==
+		    before.cursor_error_count,
+		    "legacy cursor SetCursor2 does not increment cursor_error_count");
+	}
+
+	errno = 0;
+	ret = drmModeMoveCursor(fd, crtc_id, 8, 8);
+	saved_errno = errno;
+	if (ret != 0) {
+		printf("    drmModeMoveCursor errno=%d\n", saved_errno);
+		check(false, "legacy cursor MOVE succeeds");
+		goto hide;
+	}
+	check(true, "legacy cursor MOVE succeeds");
+
+	if (read_cursor_counter_snapshot(&after_move, "legacy cursor move")) {
+		have_after_move = true;
+		check(after_move.cursor_async_update_count > (have_after_enable ?
+		    after_enable.cursor_async_update_count :
+		    before.cursor_async_update_count),
+		    "legacy cursor MOVE increments cursor_async_update_count");
+		check(!have_after_enable || after_move.cursor_update_count ==
+		    after_enable.cursor_update_count,
+		    "legacy cursor MOVE does not reprogram cursor image");
+		check(!have_after_enable || after_move.cursor_disable_count ==
+		    after_enable.cursor_disable_count,
+		    "legacy cursor MOVE does not disable cursor");
+		check(after_move.cursor_error_count == before.cursor_error_count,
+		    "legacy cursor MOVE does not increment cursor_error_count");
+		check(!have_after_enable || after_move.plane_update_count ==
+		    after_enable.plane_update_count,
+		    "legacy cursor MOVE does not update primary plane");
+		check(after_move.atomic_last_legacy_cursor_update == 1,
+		    "legacy cursor MOVE sets legacy cursor atomic summary bit");
+		check(after_move.atomic_last_async_update == 1,
+		    "legacy cursor MOVE sets async atomic summary bit");
+	}
+
+hide:
+	errno = 0;
+	ret = drmModeSetCursor2(fd, crtc_id, 0, 0, 0, 0, 0);
+	saved_errno = errno;
+	if (ret != 0) {
+		printf("    hide drmModeSetCursor2 errno=%d\n", saved_errno);
+		check(false, "legacy cursor SetCursor2 hides cursor image");
+		goto out;
+	}
+	cursor_visible = false;
+	check(true, "legacy cursor SetCursor2 hides cursor image");
+
+	if (read_cursor_counter_snapshot(&after_hide, "legacy cursor hide")) {
+		check(after_hide.cursor_disable_count >
+		    before.cursor_disable_count,
+		    "legacy cursor hide increments cursor_disable_count");
+		check(after_hide.cursor_error_count == before.cursor_error_count,
+		    "legacy cursor hide does not increment cursor_error_count");
+		check(after_hide.cursor_pin_count >= before.cursor_pin_count,
+		    "legacy cursor pin counter is monotonic");
+		check(after_hide.cursor_unpin_count >= before.cursor_unpin_count,
+		    "legacy cursor unpin counter is monotonic");
+		pin_delta = after_hide.cursor_pin_count >=
+		    before.cursor_pin_count ?
+		    after_hide.cursor_pin_count - before.cursor_pin_count : 0;
+		unpin_delta = after_hide.cursor_unpin_count >=
+		    before.cursor_unpin_count ?
+		    after_hide.cursor_unpin_count - before.cursor_unpin_count :
+		    0;
+		printf("    legacy cursor pin_delta=%llu unpin_delta=%llu\n",
+		    (unsigned long long)pin_delta,
+		    (unsigned long long)unpin_delta);
+		check(pin_delta == unpin_delta,
+		    "legacy cursor probe balances cursor pin/unpin");
+		check(!have_after_move ||
+		    after_hide.cursor_async_update_count >=
+		    after_move.cursor_async_update_count,
+		    "legacy cursor async counter remains monotonic after hide");
+	}
+
+out:
+	if (cursor_visible) {
+		errno = 0;
+		ret = drmModeSetCursor2(fd, crtc_id, 0, 0, 0, 0, 0);
+		saved_errno = errno;
+		if (ret != 0)
+			printf("    cleanup hide cursor errno=%d\n",
+			    saved_errno);
+		check(ret == 0, "legacy cursor cleanup hide succeeds");
+	}
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for legacy cursor runtime probe");
 }
 
 static void
@@ -2037,6 +2336,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
 			check_atomic_cursor_test_only_contract(fd,
 			    plane->plane_id, active_crtc_id);
+			check_legacy_cursor_runtime_contract(fd,
+			    active_crtc_id);
 			cursor_probe_done = true;
 		}
 		drmModeFreePlane(plane);

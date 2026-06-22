@@ -1986,6 +1986,38 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 	dmac->base.user.map.ptr = (void __iomem *)((uint8_t *)bar0 + user);
 	dmac->base.user.map.size = user_size;
 	dmac->base.user.oclass = oclass[0];
+
+	if ((oclass[0] & 0xff) == 0x7a) {
+		/*
+		 * Cursor channels are PIO immediate channels in nouveau/r535:
+		 * RM receives a NULL pushbuf and allocates a
+		 * CHANNELPIO_ALLOCATION object.  The imported cursc37a emitter
+		 * writes the BAR user aperture directly with NVIF_WR32(), so
+		 * a shadow push buffer would be both unused and semantically
+		 * wrong.
+		 */
+		dmac->dfly_object = kzalloc(sizeof(*dmac->dfly_object),
+		    GFP_KERNEL);
+		if (dmac->dfly_object == NULL) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+
+		ret = nvkm_gsp_disp_pio_alloc(sc, oclass[0], inst,
+		    dmac->dfly_object);
+		if (ret) {
+			nvkm_infof(sc->dev,
+			    "drm: dispnv50 pio alloc failed class=0x%x "
+			    "inst=%d err=%d\n", oclass[0], inst, ret);
+			goto fail;
+		}
+
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 pio class=0x%x inst=%d user=0x%x\n",
+		    oclass[0], inst, user);
+		return 0;
+	}
+
 	dmac->dfly_shadow = kzalloc(0x1000, GFP_KERNEL);
 	dmac->dfly_object = kzalloc(sizeof(*dmac->dfly_object), GFP_KERNEL);
 	if (dmac->dfly_shadow == NULL || dmac->dfly_object == NULL) {
@@ -3378,6 +3410,31 @@ nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
 	return 0;
 }
 
+/*
+ * Commit cursor head-context changes through the nouveau core-update rules.
+ *
+ * Ownership: borrows the already-owned display core and interlock array.  The
+ * helper does not retain references and does not mutate KMS object ownership.
+ *
+ * Lifetime: the caller must have emitted cursor set/clear methods into the
+ * core push buffer.  This function only commits those pending methods.
+ *
+ * Threading: blockable KMS commit context.  Legacy cursor ioctls use the
+ * non-notifying path from Linux nouveau because a cursor-only legacy update
+ * should not wait on the full core notifier completion path.
+ */
+static int
+nvkm_dispnv50_cursor_commit_core(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock,
+    bool legacy_cursor_update)
+{
+	if (core == NULL || core->func == NULL || core->func->update == NULL)
+		return -ENODEV;
+	if (legacy_cursor_update)
+		return core->func->update(core, interlock, false);
+	return nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+}
+
 static int
 nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_wndw *wndw,
@@ -4739,7 +4796,7 @@ nvkm_dispnv50_atomic_disable(struct nvkm_softc *sc, uint32_t head,
 
 int
 nvkm_dispnv50_cursor_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    uint32_t head)
+    uint32_t head, bool legacy_cursor_update)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_wndw_atom asyw;
@@ -4786,7 +4843,8 @@ nvkm_dispnv50_cursor_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		return ret;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	interlock[NV50_DISP_INTERLOCK_CURS] |= curs->interlock.data;
-	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	ret = nvkm_dispnv50_cursor_commit_core(sc, state, core, interlock,
+	    legacy_cursor_update);
 	if (ret != 0)
 		return ret;
 
@@ -4866,7 +4924,8 @@ nvkm_dispnv50_cursor_async_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 }
 
 int
-nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head)
+nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head,
+    bool legacy_cursor_update)
 {
 	struct nvkm_dispnv50_state *state;
 	struct nv50_head *nvhead;
@@ -4898,7 +4957,8 @@ nvkm_dispnv50_cursor_disable(struct nvkm_softc *sc, uint32_t head)
 	interlock[NV50_DISP_INTERLOCK_CURS] |=
 	    (head < nitems(state->curs) && state->curs[head] != NULL) ?
 	    state->curs[head]->interlock.data : BIT(head);
-	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	ret = nvkm_dispnv50_cursor_commit_core(sc, state, core, interlock,
+	    legacy_cursor_update);
 	if (ret != 0)
 		return ret;
 
