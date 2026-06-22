@@ -1067,27 +1067,46 @@ nvkm_pci_detach(device_t dev)
 	struct drm_softc *shim = device_get_softc(dev);
 	struct drm_device *ddev = shim ? shim->drm_driver_data : NULL;
 	struct nvkm_softc *sc = ddev ? ddev->dev_private : NULL;
+	int w;
 
 	if (sc == NULL)
 		return (0);
 
-	/* Order: disarm IRQ → teardown ISR → unregister DRM → fini state.
-	 * Disarm first so the doorbell IRQ stops firing into a handler
-	 * we are about to remove. */
+	/*
+	 * Ownership:
+	 *   Detach consumes sc's DRM, KMS, GSP, IRQ, BAR, and firmware
+	 *   resources.  After nvkm_drm_unregister() returns, no public DRM
+	 *   entry point owns a reference capable of queuing new KMS work.
+	 *
+	 * Lifetime:
+	 *   KMS display shutdown must run while BAR0, the GSP doorbell IRQ, and
+	 *   the msgq drainer are still alive.  drm_atomic_helper_shutdown()
+	 *   drives the normal atomic disable path, which may wait for vblank
+	 *   completion and may send EVO/GSP display commands before releasing
+	 *   scanout state.  Only after DRM/KMS has been unpublished and drained
+	 *   is it safe to disarm the GSP interrupt path.
+	 *
+	 * Threading:
+	 *   Runs from device detach context and may sleep while joining helper
+	 *   threads, unregistering DRM, and tearing down PCI resources.
+	 */
+	if (sc->gsp_test_td != NULL) {
+		/* The optional submit-test thread is not part of KMS teardown. */
+		wakeup(&sc->gsp_test_td);
+		w = 0;
+		while (!sc->gsp_test_done && w < 50) {
+			tsleep(&sc->gsp_test_done, 0, "gsp_tjoin", hz / 10);
+			w++;
+		}
+		sc->gsp_test_td = NULL;
+	}
+	nvkm_drm_unregister(sc);
+
+	/* No KMS path remains to consume display/vblank/msgq events now. */
 	if (sc->bar_res[0] != NULL)
 		nvkm_wr32(sc, sc->chip->gsp_base + 0x004, 0x00);
 
 	if (sc->irq_cookie != NULL) {
-		if (sc->gsp_test_td != NULL) {
-			/* Wake any warmup sleep and wait up to 5s for test to finish. */
-			wakeup(&sc->gsp_test_td);
-			int w = 0;
-			while (!sc->gsp_test_done && w < 50) {
-				tsleep(&sc->gsp_test_done, 0, "gsp_tjoin", hz / 10);
-				w++;
-			}
-			sc->gsp_test_td = NULL;
-		}
 		if (sc->gsp_drain_td != NULL) {
 			sc->gsp_drain_exit = true;
 			wakeup(&sc->gsp_drain_td);
@@ -1106,8 +1125,6 @@ nvkm_pci_detach(device_t dev)
 			sc->irq_msi = false;
 		}
 	}
-
-	nvkm_drm_unregister(sc);
 
 	nvkm_booter_release(sc);
 	nvkm_gsp_libos_release(sc);
