@@ -2673,7 +2673,17 @@ nvkm_crtc_atomic_disable(struct drm_crtc *crtc, struct drm_crtc_state *old_state
 	err = nvkm_dispnv50_atomic_disable(nc->sc, nc->head, display_id);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "crtc disable");
-	drm_crtc_vblank_off(crtc);
+	if (err == 0) {
+		nc->sc->kms_atomic_disable_vblank_off_count++;
+		drm_crtc_vblank_off(crtc);
+	} else {
+		nc->sc->kms_atomic_disable_vblank_keep_count++;
+		nc->sc->kms_atomic_disable_vblank_keep_head = nc->head;
+		nc->sc->kms_atomic_disable_vblank_keep_error = err;
+		nvkm_infof(nc->sc->dev,
+		    "drm: keep vblank on after failed crtc disable "
+		    "head=%u err=%d\n", nc->head, err);
+	}
 	nvkm_infof(nc->sc->dev,
 	    "drm: crtc disable head=%u display=0x%x bridge=%d\n", nc->head,
 	    display_id, err);
