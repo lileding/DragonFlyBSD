@@ -4273,7 +4273,8 @@ nvkm_dispnv50_dp_mode_status_from_error(int ret)
 
 int
 nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
-    const struct drm_display_mode *mode, uint8_t bpc)
+    const struct drm_display_mode *mode, uint8_t bpc,
+    bool dp_interlace_capable)
 {
 	struct nvkm_dispnv50_dp_sst_candidate candidate;
 	struct nvkm_outp *outp;
@@ -4286,7 +4287,8 @@ nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 
 	if (mode == NULL)
 		return MODE_ERROR;
-	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) &&
+	    !dp_interlace_capable)
 		return MODE_NO_INTERLACE;
 	if (bpc == 0)
 		bpc = 8;

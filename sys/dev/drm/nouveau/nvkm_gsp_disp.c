@@ -43,6 +43,11 @@
 
 #include "nvkm_gsp_disp.h"
 
+#define NVKM_GSP_DISP_CAPS_BASE			0x00640000U
+#define NVKM_GSP_DISP_CAPS_SOR_OFFSET		0x00000144U
+#define NVKM_GSP_DISP_CAPS_SOR_STRIDE		0x00000008U
+#define NVKM_GSP_DISP_CAPS_SOR_DP_INTERLACE	0x04000000U
+
 #ifndef NVKM_DFLY_GSP_DISPLAY_ONLY
 static u64
 r535_chan_user(struct nvkm_disp_chan *chan, u64 *psize)
@@ -2033,6 +2038,55 @@ nvkm_gsp_disp_head_count(struct nvkm_softc *sc)
 	return (uint32_t)sc->disp->head.nr;
 }
 
+/*
+ * Read the disp caps SOR interlace bit used by nouveau's sorc37d_get_caps().
+ *
+ * Ownership:
+ *   The helper borrows `sc` and reads BAR0 synchronously. It does not retain
+ *   pointers, allocate memory, or create NVIF/user-visible display objects.
+ *
+ * Lifetime:
+ *   The returned scalar is a snapshot valid for metadata publication. The caps
+ *   block is read only after GSP display init has created `sc->disp`.
+ *
+ * Threading:
+ *   The BAR0 reads are read-only and side-effect free. Callers publish the
+ *   result while KMS object construction is still single-threaded.
+ */
+static bool
+nvkm_gsp_disp_dp_interlace_capable(struct nvkm_softc *sc, uint8_t or_mask)
+{
+	uint32_t capacity;
+	uint32_t valid_mask;
+	uint32_t sor;
+	uint32_t caps;
+	bool saw_sor = false;
+
+	if (sc == NULL || sc->bar_res[0] == NULL || or_mask == 0)
+		return (false);
+
+	capacity = NVKM_DISPLAY_MAX_SORS;
+	if (sc->chip != NULL && sc->chip->display_sors > 0 &&
+	    sc->chip->display_sors < capacity)
+		capacity = sc->chip->display_sors;
+	valid_mask = (1U << capacity) - 1U;
+	if ((or_mask & ~valid_mask) != 0)
+		return (false);
+
+	for (sor = 0; sor < capacity; sor++) {
+		if ((or_mask & (1U << sor)) == 0)
+			continue;
+		saw_sor = true;
+		caps = bus_read_4(sc->bar_res[0], NVKM_GSP_DISP_CAPS_BASE +
+		    NVKM_GSP_DISP_CAPS_SOR_OFFSET +
+		    sor * NVKM_GSP_DISP_CAPS_SOR_STRIDE);
+		if ((caps & NVKM_GSP_DISP_CAPS_SOR_DP_INTERLACE) == 0)
+			return (false);
+	}
+
+	return (saw_sor);
+}
+
 int
 nvkm_gsp_disp_output_info(struct nvkm_softc *sc, uint32_t display_id,
     struct nvkm_gsp_disp_output_info *info)
@@ -2064,6 +2118,8 @@ nvkm_gsp_disp_output_info(struct nvkm_softc *sc, uint32_t display_id,
 		info->link = outp->info.link;
 		info->is_dp = outp->info.type == DCB_OUTPUT_DP;
 		info->mst_capable = info->is_dp && outp->dp.mst;
+		info->dp_interlace_capable = info->is_dp &&
+		    nvkm_gsp_disp_dp_interlace_capable(sc, info->or_mask);
 		if (outp->conn != NULL) {
 			info->connector_type = outp->conn->info.type;
 			info->connector_location = outp->conn->info.location;

@@ -238,16 +238,14 @@ nvkm_connector_init_mode_caps(struct drm_connector *connector,
 	/*
 	 * Turing follows nouveau's NV50+ userspace contract: doublescan modes
 	 * are acceptable at the connector level.  Interlace is more output
-	 * specific; non-DP Turing no longer advertises it, and DP needs the
-	 * SOR dp_interlace cap wired into this scalar info before it can be
-	 * exposed safely.
+	 * specific: non-DP Turing no longer advertises it, while DP follows
+	 * the SOR dp_interlace capability read from the display caps block.
 	 */
 	connector->doublescan_allowed = true;
-	connector->interlace_allowed = false;
+	connector->interlace_allowed = info->is_dp &&
+	    info->dp_interlace_capable;
 	connector->stereo_allowed =
 	    nvkm_connector_type_supports_stereo(connector_type);
-
-	(void)info;
 }
 
 static uint32_t
@@ -326,7 +324,8 @@ nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 
 	if (sc == NULL || info == NULL || mode == NULL)
 		return (MODE_ERROR);
-	if (mode->flags & DRM_MODE_FLAG_INTERLACE)
+	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) &&
+	    (!info->is_dp || !info->dp_interlace_capable))
 		return (MODE_NO_INTERLACE);
 
 	clock = nvkm_kms_mode_clock_khz(mode);
@@ -342,7 +341,7 @@ nvkm_kms_output_mode_valid(struct nvkm_softc *sc, uint32_t display_id,
 		return (MODE_OK);
 	case DCB_OUTPUT_DP:
 		return ((enum drm_mode_status)nvkm_dispnv50_output_mode_valid(sc,
-		    display_id, mode, bpc));
+		    display_id, mode, bpc, info->dp_interlace_capable));
 	default:
 		return (MODE_BAD);
 	}
@@ -3044,9 +3043,11 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nvkm_connector_dp_irq_register(nc, &info);
 		nvkm_infof(sc->dev,
 		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
-		    " outp=0x%02x conn=0x%02x mst_capable=%d\n",
+		    " outp=0x%02x conn=0x%02x mst_capable=%d"
+		    " dp_interlace=%d\n",
 		    display_id, connector_type, encoder_type, possible_crtcs,
-		    info.output_type, info.connector_type, info.mst_capable);
+		    info.output_type, info.connector_type, info.mst_capable,
+		    info.dp_interlace_capable);
 		count++;
 	}
 
