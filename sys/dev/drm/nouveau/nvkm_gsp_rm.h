@@ -166,6 +166,7 @@ struct nvkm_gsp_disp_output_info {
 	uint8_t link;
 	bool is_dp;
 	bool mst_capable;
+	bool dp_interlace_capable;
 };
 
 /*
@@ -323,7 +324,7 @@ int	 nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
  */
 int	 nvkm_dispnv50_output_mode_valid(struct nvkm_softc *sc,
 	     uint32_t display_id, const struct drm_display_mode *mode,
-	     uint8_t bpc);
+	     uint8_t bpc, bool dp_interlace_capable);
 void	 nvkm_dispnv50_output_prepare_abort(struct nvkm_softc *sc,
 	     struct nvkm_dispnv50_output_prepare *prepare);
 int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
