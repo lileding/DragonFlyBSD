@@ -62,6 +62,8 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	    "DUMB_PREFERRED_DEPTH");
 	check_drm_cap(fd, DRM_CAP_DUMB_PREFER_SHADOW, 1,
 	    "DUMB_PREFER_SHADOW");
+	check_drm_cap(fd, DRM_CAP_ASYNC_PAGE_FLIP, 0,
+	    "ASYNC_PAGE_FLIP");
 }
 
 static const char *
