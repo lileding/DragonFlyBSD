@@ -266,6 +266,10 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	check_drm_cap(fd, DRM_CAP_DUMB_PREFER_SHADOW, 1,
 	    "DUMB_PREFER_SHADOW");
 	check_drm_cap(fd, DRM_CAP_DUMB_BUFFER, 1, "DUMB_BUFFER");
+	check_drm_cap(fd, DRM_CAP_TIMESTAMP_MONOTONIC, 1,
+	    "TIMESTAMP_MONOTONIC");
+	check_drm_cap(fd, DRM_CAP_VBLANK_HIGH_CRTC, 1,
+	    "VBLANK_HIGH_CRTC");
 	check_drm_cap(fd, DRM_CAP_ASYNC_PAGE_FLIP, 0,
 	    "ASYNC_PAGE_FLIP");
 	check_drm_cap(fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, 0,
