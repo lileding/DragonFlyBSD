@@ -22,7 +22,7 @@
 #include "vmm_machine.h"
 #include "vmmfs.h"
 #include "vmmfs_machines.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 /*
  * The config files presented under a machine directory.  This table is the
@@ -47,21 +47,21 @@ cfg_present_stopped(const struct vmm_machine *m)
 }
 
 static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
-	{ "vcpu",	  VREG, 0644, &vmm_vcpu_class,
+	{ "vcpu",	  VREG, 0644, &vmmfs_vcpu_class,
 	    __offsetof(struct vmmfs_machines, n_vcpu),	  NULL },
-	{ "mem",	  VREG, 0644, &vmm_mem_class,
+	{ "mem",	  VREG, 0644, &vmmfs_mem_class,
 	    __offsetof(struct vmmfs_machines, n_mem),	  NULL },
-	{ "loader",	  VREG, 0644, &vmm_loader_class,
+	{ "loader",	  VREG, 0644, &vmmfs_loader_class,
 	    __offsetof(struct vmmfs_machines, n_loader),  NULL },
-	{ "lease",	  VREG, 0444, &vmm_lease_class,
+	{ "lease",	  VREG, 0444, &vmmfs_lease_class,
 	    __offsetof(struct vmmfs_machines, n_lease),	  NULL },
-	{ "events",	  VREG, 0444, &vmm_events_class,
+	{ "events",	  VREG, 0444, &vmmfs_events_class,
 	    __offsetof(struct vmmfs_machines, n_events),  NULL },
-	{ "console",	  VREG, 0644, &vmm_console_class,
+	{ "console",	  VREG, 0644, &vmmfs_console_class,
 	    __offsetof(struct vmmfs_machines, n_console), NULL },
-	{ "status.tar.gz", VREG, 0444, &vmm_status_class,
+	{ "status.tar.gz", VREG, 0444, &vmmfs_status_class,
 	    __offsetof(struct vmmfs_machines, n_status),  NULL },
-	{ "stopped",	  VREG, 0644, &vmm_stopped_class,
+	{ "stopped",	  VREG, 0644, &vmmfs_stopped_class,
 	    __offsetof(struct vmmfs_machines, n_stopped), cfg_present_stopped },
 };
 #define VMMFS_NCFG_FILES \
@@ -123,7 +123,7 @@ vmmfs_machines_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 	base = vmp->vm_next_ino;
 	vmp->vm_next_ino += VMMFS_MACHINE_INO_STRIDE;
-	vmmfs_node_init(&m->node, &vmm_machine_class, VDIR, VMMFS_DIR_MODE,
+	vmmfs_node_init(&m->node, &vmmfs_machine_class, VDIR, VMMFS_DIR_MODE,
 	    base, &vmp->vm_machines, m);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++) {
 		const struct vmmfs_cfg_desc *d = &vmmfs_cfg_table[j];
@@ -131,7 +131,7 @@ vmmfs_machines_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 		vmmfs_node_init(cfg_node(m, d), d->class, d->vtype, d->mode,
 		    base + 1 + j, &m->node, m);
 	}
-	vmmfs_node_init(&m->vn_devices, &vmm_devices_class, VDIR, VMMFS_DIR_MODE,
+	vmmfs_node_init(&m->vn_devices, &vmmfs_devices_class, VDIR, VMMFS_DIR_MODE,
 	    base + VMMFS_MACHINE_DEV_OFF, &m->node, m);
 
 	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
@@ -221,7 +221,7 @@ vmmfs_machines_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 /* ---- machines/ directory vops ---- */
 
 static int
-vmm_machines_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+vmmfs_machines_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -244,7 +244,7 @@ vmm_machines_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 }
 
 static int
-vmm_machines_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+vmmfs_machines_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
@@ -292,7 +292,7 @@ out:
  * The user then writes vcpu/mem/loader and `rm stopped` to start.
  */
 static int
-vmm_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
+vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -334,7 +334,7 @@ vmm_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
  * working until reclaimed.
  */
 static int
-vmm_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
+vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -372,23 +372,23 @@ vmm_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	return 0;
 }
 
-static kobj_method_t vmm_machines_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmm_machines_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmm_machines_readdir),
-	KOBJMETHOD(vmm_node_nmkdir,		vmm_machines_nmkdir),
-	KOBJMETHOD(vmm_node_nrmdir,		vmm_machines_nrmdir),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_machines_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_machines_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_machines_readdir),
+	KOBJMETHOD(vmmfs_node_nmkdir,		vmmfs_machines_nmkdir),
+	KOBJMETHOD(vmmfs_node_nrmdir,		vmmfs_machines_nrmdir),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_machines, vmm_machines_methods, 0);
+DEFINE_CLASS(vmmfs_machines, vmmfs_machines_methods, 0);
 
 /* --------------------------------------------------------------------- */
 /*
@@ -397,7 +397,7 @@ DEFINE_CLASS(vmm_machines, vmm_machines_methods, 0);
  * the fs layer with the machines/ registry, not in the pure core.
  */
 static int
-vmm_machine_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+vmmfs_machine_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -424,7 +424,7 @@ vmm_machine_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 }
 
 static int
-vmm_machine_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+vmmfs_machine_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_machines *m = node->vn_machine;
@@ -466,7 +466,7 @@ out:
  * `echo apic > stopped` opens with O_CREAT.
  */
 static int
-vmm_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
+vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -493,7 +493,7 @@ vmm_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
  * loader executable, else the start fails and the machine stays stopped.
  */
 static int
-vmm_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
+vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 {
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_machines *m = dnode->vn_machine;
@@ -521,23 +521,23 @@ vmm_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	return 0;
 }
 
-static kobj_method_t vmm_machine_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmm_machine_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmm_machine_readdir),
-	KOBJMETHOD(vmm_node_ncreate,		vmm_machine_ncreate),
-	KOBJMETHOD(vmm_node_nremove,		vmm_machine_nremove),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_machine_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_machine_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_machine_readdir),
+	KOBJMETHOD(vmmfs_node_ncreate,		vmmfs_machine_ncreate),
+	KOBJMETHOD(vmmfs_node_nremove,		vmmfs_machine_nremove),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_machine, vmm_machine_methods, 0);
+DEFINE_CLASS(vmmfs_machine, vmmfs_machine_methods, 0);
 
 /*
  * The machine's own config files: lease (a reference handle whose last close
@@ -545,7 +545,7 @@ DEFINE_CLASS(vmm_machine, vmm_machine_methods, 0);
  * stopped (the lifecycle control written to stop the machine).
  */
 static int
-vmm_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
+vmmfs_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
 	if (vmm_machine_lease_open(&node->vn_machine->state) == 0)
 		return ENXIO;
@@ -553,7 +553,7 @@ vmm_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
 }
 
 static int
-vmm_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
+vmmfs_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
 	int error = vop_stdclose(ap);
 
@@ -565,22 +565,22 @@ vmm_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
 	return error;
 }
 
-static kobj_method_t vmm_lease_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
-	KOBJMETHOD(vmm_node_open,	vmm_lease_open),
-	KOBJMETHOD(vmm_node_close,	vmm_lease_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_lease_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmmfs_node_open,	vmmfs_lease_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmfs_lease_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_lease, vmm_lease_methods, 0);
+DEFINE_CLASS(vmmfs_lease, vmmfs_lease_methods, 0);
 
 static int
-vmm_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
+vmmfs_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
 {
 	char ebuf[256];
 	size_t n;
@@ -591,40 +591,40 @@ vmm_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	return uiomove(ebuf, n, ap->a_uio);
 }
 
-static kobj_method_t vmm_events_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmm_events_read),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_events_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_events_read),
+	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_events, vmm_events_methods, 0);
+DEFINE_CLASS(vmmfs_events, vmmfs_events_methods, 0);
 
-static kobj_method_t vmm_status_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_status_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_status, vmm_status_methods, 0);
+DEFINE_CLASS(vmmfs_status, vmmfs_status_methods, 0);
 
 /*
  * Writing the stopped control file selects the stop method (apic|force) and
  * (re)applies the stop.  Idempotent.
  */
 static int
-vmm_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
+vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	char buf[16];
@@ -653,17 +653,17 @@ vmm_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 	return 0;
 }
 
-static kobj_method_t vmm_stopped_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
-	KOBJMETHOD(vmm_node_write,	vmm_stopped_write),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_stopped_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmmfs_node_write,	vmmfs_stopped_write),
+	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_stopped, vmm_stopped_methods, 0);
+DEFINE_CLASS(vmmfs_stopped, vmmfs_stopped_methods, 0);

@@ -20,7 +20,7 @@
 #include "vmm_device.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 static int
 vmmfs_device_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
@@ -50,19 +50,19 @@ vmmfs_device_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	return uiomove(dbuf + off, (size_t)(len - off), uio);
 }
 
-static kobj_method_t vmm_device_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_device_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_device_read),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_device_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_device_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_device_read),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_device, vmm_device_methods, 0);
+DEFINE_CLASS(vmmfs_device, vmmfs_device_methods, 0);
 
 static int
 vmmfs_devlink_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
@@ -93,14 +93,14 @@ vmmfs_devlink_readlink(struct vmmfs_node *node, struct vop_readlink_args *ap)
 	return uiomove(buf, (size_t)len, ap->a_uio);
 }
 
-static kobj_method_t vmm_devlink_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_devlink_getattr),
-	KOBJMETHOD(vmm_node_readlink,	vmmfs_devlink_readlink),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_devlink_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_devlink_getattr),
+	KOBJMETHOD(vmmfs_node_readlink,	vmmfs_devlink_readlink),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_devlink, vmm_devlink_methods, 0);
+DEFINE_CLASS(vmmfs_devlink, vmmfs_devlink_methods, 0);

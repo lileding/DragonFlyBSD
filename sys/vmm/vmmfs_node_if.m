@@ -18,7 +18,7 @@
 #include "vmm_machine.h"
 #include "vmmfs.h"
 
-INTERFACE vmm_node;
+INTERFACE vmmfs_node;
 
 METHOD int nresolve {
 	struct vmmfs_node	*node;

@@ -140,23 +140,23 @@ extern struct vop_ops vmmfs_vnode_vops;
  * Each node binds a KOBJ class -- its behavior and vop dispatch -- chosen at
  * creation, not via a type switch.  The class IS the node's type.
  */
-DECLARE_CLASS(vmm_base_class);		/* fallback commons (vmmfs_vnode.c) */
-DECLARE_CLASS(vmm_root_class);		/* root dir       (vmmfs.c) */
-DECLARE_CLASS(vmm_device_class);	/* device file    (vmmfs_device.c) */
-DECLARE_CLASS(vmm_devlink_class);	/* device symlink (vmmfs_device.c) */
-DECLARE_CLASS(vmm_machine_class);	/* a machine dir  (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_machines_class);	/* machines/      (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_host_class);		/* machines/host/ (vmmfs_host.c) */
-DECLARE_CLASS(vmm_devices_class);	/* a devices/ dir (vmmfs_devices.c) */
-DECLARE_CLASS(vmm_devroot_class);	/* /vmm/devices/  (vmmfs_devices.c) */
-DECLARE_CLASS(vmm_vcpu_class);		/* vcpu file      (vmmfs_vcpu.c) */
-DECLARE_CLASS(vmm_mem_class);		/* mem file       (vmmfs_mem.c) */
-DECLARE_CLASS(vmm_loader_class);	/* loader file    (vmmfs_loader.c) */
-DECLARE_CLASS(vmm_console_class);	/* console file   (vmmfs_console.c) */
-DECLARE_CLASS(vmm_lease_class);		/* lease file     (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_events_class);	/* events file    (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_status_class);	/* status file    (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_stopped_class);	/* stopped file   (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_base_class);		/* fallback commons (vmmfs_vnode.c) */
+DECLARE_CLASS(vmmfs_root_class);		/* root dir       (vmmfs.c) */
+DECLARE_CLASS(vmmfs_device_class);	/* device file    (vmmfs_device.c) */
+DECLARE_CLASS(vmmfs_devlink_class);	/* device symlink (vmmfs_device.c) */
+DECLARE_CLASS(vmmfs_machine_class);	/* a machine dir  (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_machines_class);	/* machines/      (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_host_class);		/* machines/host/ (vmmfs_host.c) */
+DECLARE_CLASS(vmmfs_devices_class);	/* a devices/ dir (vmmfs_devices.c) */
+DECLARE_CLASS(vmmfs_devroot_class);	/* /vmm/devices/  (vmmfs_devices.c) */
+DECLARE_CLASS(vmmfs_vcpu_class);		/* vcpu file      (vmmfs_vcpu.c) */
+DECLARE_CLASS(vmmfs_mem_class);		/* mem file       (vmmfs_mem.c) */
+DECLARE_CLASS(vmmfs_loader_class);	/* loader file    (vmmfs_loader.c) */
+DECLARE_CLASS(vmmfs_console_class);	/* console file   (vmmfs_console.c) */
+DECLARE_CLASS(vmmfs_lease_class);		/* lease file     (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_events_class);	/* events file    (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_status_class);	/* status file    (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_stopped_class);	/* stopped file   (vmmfs_machines.c) */
 
 /* Class identity test: is this node an instance of the given class? */
 #define VMMFS_NODE_IS(node, classname)	((node)->ops == (classname).ops)
@@ -166,16 +166,16 @@ DECLARE_CLASS(vmm_stopped_class);	/* stopped file   (vmmfs_machines.c) */
  * register object (vcpu/mem/loader) supplies its own text + commit functions
  * to the shared register vops below; the open buffer machinery is generic.
  */
-typedef size_t (*vmm_text_fn)(const struct vmm_machine *m, char *out, size_t cap);
-typedef int (*vmm_commit_fn)(struct vmm_machine *m, const char *buf, size_t len);
+typedef size_t (*vmmfs_text_fn)(const struct vmm_machine *m, char *out, size_t cap);
+typedef int (*vmmfs_commit_fn)(struct vmm_machine *m, const char *buf, size_t len);
 int	vmmfs_register_getattr(struct vmmfs_node *node,
-	    struct vop_getattr_args *ap, vmm_text_fn text);
+	    struct vop_getattr_args *ap, vmmfs_text_fn text);
 int	vmmfs_register_read(struct vmmfs_node *node, struct vop_read_args *ap,
-	    vmm_text_fn text);
+	    vmmfs_text_fn text);
 int	vmmfs_register_write(struct vmmfs_node *node, struct vop_write_args *ap);
 int	vmmfs_register_open(struct vmmfs_node *node, struct vop_open_args *ap);
 int	vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
-	    vmm_commit_fn commit);
+	    vmmfs_commit_fn commit);
 int	vmmfs_zero_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap);
 int	vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap);
 

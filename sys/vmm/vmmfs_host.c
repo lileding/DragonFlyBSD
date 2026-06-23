@@ -19,7 +19,7 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 static int
 vmmfs_host_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
@@ -58,18 +58,18 @@ out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
 
-static kobj_method_t vmm_host_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmmfs_host_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmmfs_host_readdir),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_host_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_host_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_host_readdir),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_host, vmm_host_methods, 0);
+DEFINE_CLASS(vmmfs_host, vmmfs_host_methods, 0);

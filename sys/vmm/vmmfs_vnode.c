@@ -24,7 +24,7 @@
 #include "vmm_machine.h"
 #include "vmmfs.h"
 #include "vmmfs_machines.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 int
 vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *ap)
@@ -126,123 +126,122 @@ vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 }
 
 /*
- * KOBJ dispatch.  Each vop_ops entry is a thin shim that resolves the node
- * and forwards to its class.  For now every node uses one catch-all class
- * (vmm_legacy) whose methods are the handlers above; step 2 splits these
- * into per-object classes.
+ * KOBJ dispatch.  Each vop_ops entry is a thin shim that resolves the node and
+ * forwards to its class via the VMMFS_NODE_* methods; every node carries its own
+ * object class (vmmfs_vcpu, vmmfs_machine, ...) bound at creation.
  */
 static int
 vmmfs_nresolve(struct vop_nresolve_args *ap)
 {
-	return VMM_NODE_NRESOLVE(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NRESOLVE(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
-	return VMM_NODE_NLOOKUPDOTDOT(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NLOOKUPDOTDOT(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 {
-	return VMM_NODE_NMKDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NMKDIR(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
 {
-	return VMM_NODE_NCREATE(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NCREATE(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_nremove(struct vop_nremove_args *ap)
 {
-	return VMM_NODE_NREMOVE(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NREMOVE(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 {
-	return VMM_NODE_NRMDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+	return VMMFS_NODE_NRMDIR(VP_TO_VMMFS(ap->a_dvp), ap);
 }
 
 static int
 vmmfs_nrename(struct vop_nrename_args *ap)
 {
-	return VMM_NODE_NRENAME(VP_TO_VMMFS(ap->a_fdvp), ap);
+	return VMMFS_NODE_NRENAME(VP_TO_VMMFS(ap->a_fdvp), ap);
 }
 
 static int
 vmmfs_readlink(struct vop_readlink_args *ap)
 {
-	return VMM_NODE_READLINK(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_READLINK(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_open(struct vop_open_args *ap)
 {
-	return VMM_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_close(struct vop_close_args *ap)
 {
-	return VMM_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_access(struct vop_access_args *ap)
 {
-	return VMM_NODE_ACCESS(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_ACCESS(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_getattr(struct vop_getattr_args *ap)
 {
-	return VMM_NODE_GETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_GETATTR(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_setattr(struct vop_setattr_args *ap)
 {
-	return VMM_NODE_SETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_SETATTR(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_read(struct vop_read_args *ap)
 {
-	return VMM_NODE_READ(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_READ(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_write(struct vop_write_args *ap)
 {
-	return VMM_NODE_WRITE(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_WRITE(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_readdir(struct vop_readdir_args *ap)
 {
-	return VMM_NODE_READDIR(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_READDIR(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_inactive(struct vop_inactive_args *ap)
 {
-	return VMM_NODE_INACTIVE(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_INACTIVE(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_reclaim(struct vop_reclaim_args *ap)
 {
-	return VMM_NODE_RECLAIM(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_RECLAIM(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 static int
 vmmfs_print(struct vop_print_args *ap)
 {
-	return VMM_NODE_PRINT(VP_TO_VMMFS(ap->a_vp), ap);
+	return VMMFS_NODE_PRINT(VP_TO_VMMFS(ap->a_vp), ap);
 }
 
 /*
@@ -250,19 +249,19 @@ vmmfs_print(struct vop_print_args *ap)
  * with its own object class; this is only the safety net for a node created
  * without one (and the holder of the shared commons referenced above).
  */
-static kobj_method_t vmm_base_methods[] = {
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_base_methods[] = {
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_base, vmm_base_methods, 0);
+DEFINE_CLASS(vmmfs_base, vmmfs_base_methods, 0);
 
 struct vop_ops vmmfs_vnode_vops = {
 	.vop_default =		vop_defaultop,

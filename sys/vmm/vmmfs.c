@@ -45,7 +45,7 @@
 #include "vmmfs.h"
 #include "vmmfs_machines.h"
 #include "vmmfs_device.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
@@ -381,7 +381,7 @@ vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp, struct uio *uio)
  */
 int
 vmmfs_register_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap,
-    vmm_text_fn text)
+    vmmfs_text_fn text)
 {
 	char tmp[300];
 	off_t size;
@@ -393,7 +393,7 @@ vmmfs_register_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap,
 
 int
 vmmfs_register_read(struct vmmfs_node *node, struct vop_read_args *ap,
-    vmm_text_fn text)
+    vmmfs_text_fn text)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_openbuf *ob;
@@ -433,7 +433,7 @@ vmmfs_register_open(struct vmmfs_node *node, struct vop_open_args *ap)
 
 int
 vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
-    vmm_commit_fn commit)
+    vmmfs_commit_fn commit)
 {
 	struct vmmfs_openbuf *ob = NULL, *it;
 
@@ -476,7 +476,7 @@ vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap)
 /* ---- the filesystem root (/vmm): machines/ + devices/ ---- */
 
 static int
-vmm_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+vmmfs_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -492,7 +492,7 @@ vmm_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 }
 
 static int
-vmm_root_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+vmmfs_root_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
@@ -523,20 +523,20 @@ out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
 
-static kobj_method_t vmm_root_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmm_root_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmm_root_readdir),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_root_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_root_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_root_readdir),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_root, vmm_root_methods, 0);
+DEFINE_CLASS(vmmfs_root, vmmfs_root_methods, 0);
 
 /*
  * Validate the desired loader at start time: resolve the path in the caller's
@@ -626,9 +626,9 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 	vmm_device_init(&d->dev, bdf, is_host);
 	if (is_host)
 		vmm_host_add_device(&vmp->host);
-	vmmfs_node_init(&d->node, &vmm_device_class, VREG, 0444,
+	vmmfs_node_init(&d->node, &vmmfs_device_class, VREG, 0444,
 	    VMMFS_DEV_INO_BASE + idx, &vmp->vm_host_devices, NULL);
-	vmmfs_node_init(&d->link, &vmm_devlink_class, VLNK, 0777,
+	vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
 	    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
 	SLIST_INSERT_HEAD(&vmp->vm_devs, d, dv_link);
 	return d;
@@ -670,15 +670,15 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmp = kmalloc(sizeof(*vmp), M_VMMFS, M_WAITOK | M_ZERO);
 	vmp->vm_mp = mp;
 	lockinit(&vmp->vm_lock, "vmmfs registry", 0, 0);
-	vmmfs_node_init(&vmp->vm_root, &vmm_root_class, VDIR, VMMFS_DIR_MODE,
+	vmmfs_node_init(&vmp->vm_root, &vmmfs_root_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_ROOT_INO, NULL, NULL);
-	vmmfs_node_init(&vmp->vm_machines, &vmm_machines_class, VDIR,
+	vmmfs_node_init(&vmp->vm_machines, &vmmfs_machines_class, VDIR,
 	    VMMFS_DIR_MODE, VMMFS_MACHINES_INO, &vmp->vm_root, NULL);
-	vmmfs_node_init(&vmp->vm_host, &vmm_host_class, VDIR, VMMFS_DIR_MODE,
+	vmmfs_node_init(&vmp->vm_host, &vmmfs_host_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_HOST_INO, &vmp->vm_machines, NULL);
-	vmmfs_node_init(&vmp->vm_host_devices, &vmm_devices_class, VDIR,
+	vmmfs_node_init(&vmp->vm_host_devices, &vmmfs_devices_class, VDIR,
 	    VMMFS_DIR_MODE, VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL);
-	vmmfs_node_init(&vmp->vm_devroot, &vmm_devroot_class, VDIR,
+	vmmfs_node_init(&vmp->vm_devroot, &vmmfs_devroot_class, VDIR,
 	    VMMFS_DIR_MODE, VMMFS_DEVROOT_INO, &vmp->vm_root, NULL);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;

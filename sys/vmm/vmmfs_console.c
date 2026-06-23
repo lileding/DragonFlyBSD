@@ -18,7 +18,7 @@
 #include "vmm_machine.h"
 #include "vmm_console.h"
 #include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 static int
 vmmfs_console_read(struct vmmfs_node *node, struct vop_read_args *ap)
@@ -51,17 +51,17 @@ vmmfs_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
 	return 0;
 }
 
-static kobj_method_t vmm_console_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_console_read),
-	KOBJMETHOD(vmm_node_write,	vmmfs_console_write),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_console_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_console_read),
+	KOBJMETHOD(vmmfs_node_write,	vmmfs_console_write),
+	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_console, vmm_console_methods, 0);
+DEFINE_CLASS(vmmfs_console, vmmfs_console_methods, 0);

@@ -23,12 +23,12 @@
 #include "vmm_machine.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 /* ---- machines/<name>/devices/ and machines/host/devices/ (NDEVICES) ---- */
 
 static int
-vmm_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+vmmfs_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -45,7 +45,7 @@ vmm_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 }
 
 static int
-vmm_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+vmmfs_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
@@ -86,7 +86,7 @@ out:
  * pool, a user backend is unloaded.  The host pool itself is fixed.
  */
 static int
-vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
+vmmfs_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 {
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_dvp->v_mount);
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -136,7 +136,7 @@ vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
  * (devices/ rejects file creation).  Desired-state semantics.
  */
 static int
-vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
+vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 {
 	struct namecache *fncp = ap->a_fnch->ncp;
 	struct namecache *tncp = ap->a_tnch->ncp;
@@ -144,8 +144,8 @@ vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_fdvp->v_mount);
 	struct vmmfs_device *d;
 
-	if (!VMMFS_NODE_IS(fdnode, vmm_devices_class) ||
-	    !VMMFS_NODE_IS(tdnode, vmm_devices_class))
+	if (!VMMFS_NODE_IS(fdnode, vmmfs_devices_class) ||
+	    !VMMFS_NODE_IS(tdnode, vmmfs_devices_class))
 		return EXDEV;
 	if (fncp->nc_nlen != tncp->nc_nlen ||
 	    bcmp(fncp->nc_name, tncp->nc_name, fncp->nc_nlen) != 0)
@@ -174,28 +174,28 @@ vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 	return 0;
 }
 
-static kobj_method_t vmm_devices_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmm_devices_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmm_devices_readdir),
-	KOBJMETHOD(vmm_node_nremove,		vmm_devices_nremove),
-	KOBJMETHOD(vmm_node_nrename,		vmm_devices_nrename),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_devices_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_devices_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_devices_readdir),
+	KOBJMETHOD(vmmfs_node_nremove,		vmmfs_devices_nremove),
+	KOBJMETHOD(vmmfs_node_nrename,		vmmfs_devices_nrename),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_devices, vmm_devices_methods, 0);
+DEFINE_CLASS(vmmfs_devices, vmmfs_devices_methods, 0);
 
 /* ---- /vmm/devices/ symlink index (NDEVROOT) ---- */
 
 static int
-vmm_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
+vmmfs_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -213,7 +213,7 @@ vmm_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 }
 
 static int
-vmm_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
+vmmfs_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
@@ -246,18 +246,18 @@ out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
 
-static kobj_method_t vmm_devroot_methods[] = {
-	KOBJMETHOD(vmm_node_nresolve,		vmm_devroot_nresolve),
-	KOBJMETHOD(vmm_node_readdir,		vmm_devroot_readdir),
-	KOBJMETHOD(vmm_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmm_node_access,		vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,		vmmnode_open),
-	KOBJMETHOD(vmm_node_close,		vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,		vmmnode_print),
+static kobj_method_t vmmfs_devroot_methods[] = {
+	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_devroot_nresolve),
+	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_devroot_readdir),
+	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
+	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
+	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
+	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_devroot, vmm_devroot_methods, 0);
+DEFINE_CLASS(vmmfs_devroot, vmmfs_devroot_methods, 0);

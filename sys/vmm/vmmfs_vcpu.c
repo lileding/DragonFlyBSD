@@ -16,7 +16,7 @@
 #include "vmm_machine.h"
 #include "vmm_vcpu.h"
 #include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmmfs_node_if.h"
 
 /* Adapters: reach the vcpu sub-object inside the composed machine. */
 static size_t
@@ -49,17 +49,17 @@ vmmfs_vcpu_close(struct vmmfs_node *node, struct vop_close_args *ap)
 	return vmmfs_register_close(node, ap, vcpu_commit);
 }
 
-static kobj_method_t vmm_vcpu_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_vcpu_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_vcpu_read),
-	KOBJMETHOD(vmm_node_write,	vmmfs_register_write),
-	KOBJMETHOD(vmm_node_open,	vmmfs_register_open),
-	KOBJMETHOD(vmm_node_close,	vmmfs_vcpu_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+static kobj_method_t vmmfs_vcpu_methods[] = {
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_vcpu_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_vcpu_read),
+	KOBJMETHOD(vmmfs_node_write,	vmmfs_register_write),
+	KOBJMETHOD(vmmfs_node_open,	vmmfs_register_open),
+	KOBJMETHOD(vmmfs_node_close,	vmmfs_vcpu_close),
+	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
+	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
 	KOBJMETHOD_END
 };
-DEFINE_CLASS(vmm_vcpu, vmm_vcpu_methods, 0);
+DEFINE_CLASS(vmmfs_vcpu, vmmfs_vcpu_methods, 0);
