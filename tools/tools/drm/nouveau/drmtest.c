@@ -893,6 +893,51 @@ check_cursor_ioctl_flag_contract(int fd)
 	    "DRM cursor2 ioctl unknown flags fail with EINVAL");
 }
 
+/*
+ * check_cursor_ioctl_lookup_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  No GEM handle, cursor framebuffer, CRTC, or
+ *   cursor-plane reference is created or retained.
+ *
+ * Lifetime:
+ *   Uses a valid MOVE request with a bad CRTC id.  The request must fail after
+ *   common flag validation but before CRTC locking, cursor-plane locking, or
+ *   cursor programming.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates both legacy cursor ioctl
+ *   versions share the same common DRM CRTC lookup boundary.
+ */
+static void
+check_cursor_ioctl_lookup_error_contract(int fd)
+{
+	struct drm_mode_cursor cursor;
+	struct drm_mode_cursor2 cursor2_req;
+	int saved_errno;
+	int ret;
+
+	memset(&cursor, 0, sizeof(cursor));
+	cursor.crtc_id = 0;
+	cursor.flags = DRM_MODE_CURSOR_MOVE;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CURSOR, &cursor);
+	saved_errno = errno;
+	check(ret != 0, "DRM cursor ioctl rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "DRM cursor ioctl bad CRTC id fails with ENOENT");
+
+	memset(&cursor2_req, 0, sizeof(cursor2_req));
+	cursor2_req.crtc_id = 0;
+	cursor2_req.flags = DRM_MODE_CURSOR_MOVE;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CURSOR2, &cursor2_req);
+	saved_errno = errno;
+	check(ret != 0, "DRM cursor2 ioctl rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "DRM cursor2 ioctl bad CRTC id fails with ENOENT");
+}
+
 static void
 check_wait_vblank_error(int fd, unsigned int type, int expected_errno,
     const char *what, const char *errno_what)
@@ -9602,6 +9647,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);
+	check_cursor_ioctl_lookup_error_contract(fd);
 	check_wait_vblank_flag_contract(fd);
 	check_pageflip_ioctl_flag_contract(fd);
 	check_pageflip_lookup_error_contract(fd);
