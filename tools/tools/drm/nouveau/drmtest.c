@@ -2800,6 +2800,211 @@ out_restore:
 }
 
 /*
+ * check_legacy_setcrtc_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC, connector, and primary plane IDs from KMS state.
+ *   The probe owns one temporary dumb BO/FB used as the restore scanout target.
+ *   On successful restore the FB remains referenced by KMS until fd close; on
+ *   failure it is removed before the BO is destroyed.
+ *
+ * Lifetime:
+ *   Performs one legacy SetCrtc disable call followed by one legacy SetCrtc
+ *   restore call with the saved mode.  The display may blank briefly while the
+ *   disable is live.  The restore path does not reuse the old console FB, whose
+ *   lifetime is outside this probe.
+ *
+ * Threading:
+ *   Single-threaded console probe.  It must run without an X/Wayland DRM
+ *   master.  The DRM legacy modeset helper serializes the translated atomic
+ *   commits with normal modeset locks.
+ */
+static void
+check_legacy_setcrtc_runtime_contract(int fd, const drmModeRes *resources,
+    uint32_t crtc_id, uint32_t crtc_index, uint32_t plane_id,
+    const char *object_name)
+{
+	struct atomic_plane_snapshot snapshot;
+	struct atomic_plane_snapshot restored_snapshot;
+	struct modeset_counter_snapshot before;
+	struct modeset_counter_snapshot after_disable;
+	struct modeset_counter_snapshot after_restore;
+	drmModeCrtcPtr crtc;
+	drmModeModeInfo saved_mode;
+	uint32_t connector_id = 0;
+	uint32_t restore_handle = 0;
+	uint32_t restore_pitch = 0;
+	uint32_t restore_fb = 0;
+	uint64_t active = 0;
+	uint64_t connector_crtc = 0;
+	uint64_t head_mask;
+	int saved_errno = 0;
+	int ret;
+	int crtc_x;
+	int crtc_y;
+	bool disabled = false;
+	bool restored = false;
+	bool have_after_disable = false;
+
+	head_mask = crtc_index >= 64 ? 0 : (1ULL << crtc_index);
+	check(head_mask != 0, "active CRTC index fits legacy SetCrtc head mask");
+	if (head_mask == 0)
+		return;
+
+	if (!find_active_connector_for_crtc(fd, resources, crtc_id,
+	    &connector_id)) {
+		check(false,
+		    "active connector is available for legacy SetCrtc probe");
+		return;
+	}
+	check(true, "active connector is available for legacy SetCrtc probe");
+
+	if (!get_plane_snapshot(fd, plane_id, &snapshot, object_name))
+		return;
+	check(snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for legacy SetCrtc probe");
+	check(snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for legacy SetCrtc probe");
+	if (snapshot.fb_id == 0 || snapshot.crtc_id != crtc_id)
+		return;
+
+	crtc = drmModeGetCrtc(fd, crtc_id);
+	check(crtc != NULL, "active CRTC is readable for legacy SetCrtc probe");
+	if (crtc == NULL)
+		return;
+	check(crtc->mode_valid, "active CRTC has a mode for legacy SetCrtc probe");
+	if (!crtc->mode_valid) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+	saved_mode = crtc->mode;
+	crtc_x = crtc->x;
+	crtc_y = crtc->y;
+	drmModeFreeCrtc(crtc);
+
+	if (!read_modeset_counter_snapshot(&before, "legacy SetCrtc probe"))
+		return;
+
+	if (!create_dumb_buffer_for(fd, saved_mode.hdisplay,
+	    saved_mode.vdisplay, 32, &restore_handle, &restore_pitch,
+	    "CREATE_DUMB succeeds for legacy SetCrtc restore probe"))
+		return;
+	if (!clear_dumb_buffer(fd, restore_handle, restore_pitch,
+	    saved_mode.vdisplay, "clear legacy SetCrtc restore framebuffer"))
+		goto out_destroy_restore_bo;
+	if (!add_linear_framebuffer(fd, saved_mode.hdisplay,
+	    saved_mode.vdisplay, DRM_FORMAT_XRGB8888, restore_handle,
+	    restore_pitch, &restore_fb,
+	    "ADDFB2 accepts XRGB8888 linear legacy SetCrtc restore probe"))
+		goto out_destroy_restore_bo;
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, crtc_id, 0, 0, 0, NULL, 0, NULL);
+	saved_errno = errno;
+	if (ret != 0) {
+		printf("    legacy SetCrtc disable errno=%d\n", saved_errno);
+		check(false, "legacy SetCrtc disable succeeds");
+		goto out_remove_restore_fb;
+	}
+	disabled = true;
+	check(true, "legacy SetCrtc disable succeeds");
+
+	if (get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, "legacy SetCrtc disabled CRTC"))
+		check(active == 0, "legacy SetCrtc disable marks CRTC inactive");
+	if (get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &connector_crtc,
+	    "legacy SetCrtc disabled connector"))
+		check(connector_crtc == 0,
+		    "legacy SetCrtc disable detaches connector CRTC_ID");
+	have_after_disable = read_modeset_counter_snapshot(&after_disable,
+	    "legacy SetCrtc disable");
+	if (have_after_disable) {
+		check(after_disable.atomic_tail_disable_op_count >
+		    before.atomic_tail_disable_op_count,
+		    "legacy SetCrtc disable increments tail disable op count");
+		check((after_disable.atomic_tail_last_disable_heads &
+		    head_mask) != 0,
+		    "legacy SetCrtc disable records disabled head");
+		check(after_disable.commit_error_count == before.commit_error_count,
+		    "legacy SetCrtc disable does not increment commit_error_count");
+		check(after_disable.atomic_tail_active == 0 &&
+		    after_disable.atomic_tail_stage == 0,
+		    "legacy SetCrtc disable leaves no active tail transaction");
+		check(after_disable.display_audit_pending_valid == 0,
+		    "legacy SetCrtc disable leaves no pending display audit");
+	}
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, crtc_id, restore_fb, crtc_x, crtc_y,
+	    &connector_id, 1, &saved_mode);
+	saved_errno = errno;
+	if (ret != 0) {
+		printf("    legacy SetCrtc restore errno=%d\n", saved_errno);
+		check(false, "legacy SetCrtc restore succeeds");
+		goto out_restore;
+	}
+	restored = true;
+	check(true, "legacy SetCrtc restore succeeds");
+
+	active = 0;
+	if (get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, "legacy SetCrtc restored CRTC"))
+		check(active != 0, "legacy SetCrtc restore marks CRTC active");
+	connector_crtc = 0;
+	if (get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &connector_crtc,
+	    "legacy SetCrtc restored connector"))
+		check(connector_crtc == crtc_id,
+		    "legacy SetCrtc restore attaches connector CRTC_ID");
+	if (get_plane_snapshot(fd, plane_id, &restored_snapshot, object_name)) {
+		check(restored_snapshot.fb_id == restore_fb,
+		    "legacy SetCrtc restore restores primary FB_ID");
+		check(restored_snapshot.crtc_id == snapshot.crtc_id,
+		    "legacy SetCrtc restore restores primary CRTC_ID");
+	}
+	if (read_modeset_counter_snapshot(&after_restore,
+	    "legacy SetCrtc restore")) {
+		if (have_after_disable) {
+			check(after_restore.atomic_tail_enable_op_count >
+			    after_disable.atomic_tail_enable_op_count,
+			    "legacy SetCrtc restore increments tail enable op count");
+		}
+		check((after_restore.atomic_tail_last_enable_heads &
+		    head_mask) != 0,
+		    "legacy SetCrtc restore records enabled head");
+		check(after_restore.commit_error_count == before.commit_error_count,
+		    "legacy SetCrtc restore does not increment commit_error_count");
+		check(after_restore.atomic_tail_active == 0 &&
+		    after_restore.atomic_tail_stage == 0,
+		    "legacy SetCrtc restore leaves no active tail transaction");
+		check(after_restore.display_audit_pending_valid == 0,
+		    "legacy SetCrtc restore leaves no pending display audit");
+	}
+
+out_restore:
+	if (!restored && disabled) {
+		printf("    attempting best-effort legacy SetCrtc restore\n");
+		ret = drmModeSetCrtc(fd, crtc_id, restore_fb, crtc_x, crtc_y,
+		    &connector_id, 1, &saved_mode);
+		check(ret == 0, "legacy SetCrtc cleanup restore succeeds");
+		restored = ret == 0;
+	}
+	if (restored) {
+		printf("    legacy SetCrtc restore probe fb=%u handle=%u kept until fd close\n",
+		    restore_fb, restore_handle);
+		return;
+	}
+
+out_remove_restore_fb:
+	remove_framebuffer(fd, restore_fb,
+	    "RMFB succeeds for failed legacy SetCrtc restore probe");
+out_destroy_restore_bo:
+	destroy_dumb_buffer_for(fd, restore_handle,
+	    "DESTROY_DUMB succeeds for failed legacy SetCrtc restore probe");
+}
+
+/*
  * check_atomic_connector_scaler_runtime_contract()
  *
  * Ownership:
@@ -4028,6 +4233,9 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			check_legacy_dpms_runtime_contract(fd,
 			    mode_resources, active_crtc_id,
 			    active_crtc_index);
+			check_legacy_setcrtc_runtime_contract(fd,
+			    mode_resources, active_crtc_id,
+			    active_crtc_index, plane->plane_id, name);
 			check_atomic_modeset_disable_restore_contract(fd,
 			    mode_resources, active_crtc_id,
 			    active_crtc_index, plane->plane_id, name);
