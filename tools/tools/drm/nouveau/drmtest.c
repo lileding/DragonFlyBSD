@@ -835,6 +835,141 @@ check_atomic_ioctl_flag_contract(int fd)
 }
 
 static bool
+get_property_blob_raw(int fd, uint32_t blob_id, uint8_t *buffer,
+    uint32_t length, uint32_t *actual_length_out, int *saved_errno_out)
+{
+	struct drm_mode_get_blob get_blob;
+	int saved_errno;
+	int ret;
+
+	memset(&get_blob, 0, sizeof(get_blob));
+	get_blob.blob_id = blob_id;
+	get_blob.length = length;
+	get_blob.data = (uintptr_t)buffer;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETPROPBLOB, &get_blob);
+	saved_errno = errno;
+	if (actual_length_out != NULL)
+		*actual_length_out = get_blob.length;
+	if (saved_errno_out != NULL)
+		*saved_errno_out = saved_errno;
+
+	return ret == 0;
+}
+
+/*
+ * check_property_blob_lifetime_contract()
+ *
+ * Ownership:
+ *   Creates one user property blob owned by the caller's DRM file.  A second
+ *   card fd only borrows the global blob ID for lookup and must not acquire
+ *   destroy authority.  The owner destroys the blob before return.
+ *
+ * Lifetime:
+ *   The blob is never installed into an atomic state or a KMS object property;
+ *   after owner destroy, the ID must be gone and later lookups/destroys must
+ *   fail with ENOENT.
+ *
+ * Threading:
+ *   Single-threaded UAPI probe.  The foreign fd check models cross-file access
+ *   without racing blob destroy against lookup.
+ */
+static void
+check_property_blob_lifetime_contract(int fd)
+{
+	const uint8_t payload[] = { 0x4e, 0x56, 0x4b, 0x4d, 0x2d, 0x4b, 0x4d, 0x53 };
+	uint8_t readback[sizeof(payload)];
+	uint32_t actual_length;
+	uint32_t blob_id = 0;
+	uint32_t zero_blob = 0;
+	int saved_errno;
+	int secondary_fd = -1;
+	int ret;
+
+	errno = 0;
+	ret = drmModeCreatePropertyBlob(fd, payload, 0, &zero_blob);
+	saved_errno = errno;
+	check(ret != 0, "DRM property blob rejects zero length create");
+	check(saved_errno == EINVAL,
+	    "DRM property blob zero length create fails with EINVAL");
+	if (ret == 0)
+		check(drmModeDestroyPropertyBlob(fd, zero_blob) == 0,
+		    "destroy unexpected zero-length property blob");
+
+	errno = 0;
+	ret = drmModeCreatePropertyBlob(fd, payload, sizeof(payload), &blob_id);
+	saved_errno = errno;
+	check(ret == 0, "DRM property blob create succeeds");
+	if (ret != 0) {
+		printf("    CREATEPROPBLOB errno=%d\n", saved_errno);
+		return;
+	}
+	check(blob_id != 0, "DRM property blob create returns non-zero id");
+
+	actual_length = 0;
+	saved_errno = 0;
+	check(get_property_blob_raw(fd, blob_id, NULL, 0, &actual_length,
+	    &saved_errno), "DRM property blob length query succeeds");
+	check(actual_length == sizeof(payload),
+	    "DRM property blob length query returns payload size");
+
+	memset(readback, 0, sizeof(readback));
+	actual_length = 0;
+	saved_errno = 0;
+	check(get_property_blob_raw(fd, blob_id, readback, sizeof(readback),
+	    &actual_length, &saved_errno),
+	    "DRM property blob owner read succeeds");
+	check(actual_length == sizeof(payload),
+	    "DRM property blob owner read reports payload size");
+	check(memcmp(readback, payload, sizeof(payload)) == 0,
+	    "DRM property blob owner read matches payload");
+
+	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	check(secondary_fd >= 0,
+	    "DRM property blob opens secondary card fd");
+	if (secondary_fd >= 0) {
+		memset(readback, 0, sizeof(readback));
+		actual_length = 0;
+		saved_errno = 0;
+		check(get_property_blob_raw(secondary_fd, blob_id, readback,
+		    sizeof(readback), &actual_length, &saved_errno),
+		    "DRM property blob foreign fd read succeeds");
+		check(actual_length == sizeof(payload),
+		    "DRM property blob foreign fd read reports payload size");
+		check(memcmp(readback, payload, sizeof(payload)) == 0,
+		    "DRM property blob foreign fd read matches payload");
+
+		errno = 0;
+		ret = drmModeDestroyPropertyBlob(secondary_fd, blob_id);
+		saved_errno = errno;
+		check(ret != 0,
+		    "DRM property blob foreign fd destroy is denied");
+		check(saved_errno == EPERM,
+		    "DRM property blob foreign fd destroy fails with EPERM");
+		check(close(secondary_fd) == 0,
+		    "DRM property blob closes secondary card fd");
+	}
+
+	check(drmModeDestroyPropertyBlob(fd, blob_id) == 0,
+	    "DRM property blob owner destroy succeeds");
+
+	actual_length = 0;
+	saved_errno = 0;
+	check(!get_property_blob_raw(fd, blob_id, NULL, 0, &actual_length,
+	    &saved_errno), "DRM property blob destroyed id is unreadable");
+	check(saved_errno == ENOENT,
+	    "DRM property blob destroyed id read fails with ENOENT");
+
+	errno = 0;
+	ret = drmModeDestroyPropertyBlob(fd, blob_id);
+	saved_errno = errno;
+	check(ret != 0, "DRM property blob double destroy is rejected");
+	check(saved_errno == ENOENT,
+	    "DRM property blob double destroy fails with ENOENT");
+}
+
+static bool
 create_identity_lut_blob(int fd, uint32_t count, uint32_t *blob_id_out,
     const char *what)
 {
@@ -8231,6 +8366,7 @@ main(void)
 	    EINVAL, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
+	check_property_blob_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    2, EINVAL, "WRITEBACK_CONNECTORS");
 	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
