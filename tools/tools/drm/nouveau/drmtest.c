@@ -3933,6 +3933,164 @@ destroy_dumb_buffer(int fd, uint32_t handle)
 	    "DESTROY_DUMB succeeds for ADDFB2 negative probe");
 }
 
+static void
+check_create_dumb_error(int fd, uint32_t width, uint32_t height, uint32_t bpp,
+    uint32_t flags, int expected_errno, const char *what,
+    const char *errno_what)
+{
+	struct drm_mode_create_dumb create;
+	int saved_errno;
+	int ret;
+
+	memset(&create, 0, sizeof(create));
+	create.width = width;
+	create.height = height;
+	create.bpp = bpp;
+	create.flags = flags;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0)
+		destroy_dumb_buffer_for(fd, create.handle,
+		    "destroy unexpected dumb buffer from negative create probe");
+}
+
+static void
+check_map_dumb_error(int fd, uint32_t handle, int expected_errno,
+    const char *what, const char *errno_what)
+{
+	struct drm_mode_map_dumb map;
+	int saved_errno;
+	int ret;
+
+	memset(&map, 0, sizeof(map));
+	map.handle = handle;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+}
+
+static void
+check_destroy_dumb_error(int fd, uint32_t handle, int expected_errno,
+    const char *what, const char *errno_what)
+{
+	struct drm_mode_destroy_dumb destroy;
+	int saved_errno;
+	int ret;
+
+	memset(&destroy, 0, sizeof(destroy));
+	destroy.handle = handle;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+}
+
+/*
+ * check_dumb_buffer_lifetime_contract()
+ *
+ * Ownership:
+ *   Creates one dumb GEM handle owned by the caller's DRM file.  A second card
+ *   fd only reuses the numeric handle value to prove GEM handles are per-file
+ *   and must not gain mmap or destroy authority.
+ *
+ * Lifetime:
+ *   The temporary dumb BO is never attached to an FB or plane.  Owner destroy
+ *   releases the handle before return; later map/destroy operations on the same
+ *   numeric handle must fail with ENOENT.
+ *
+ * Threading:
+ *   Single-threaded KMS/GEM UAPI probe.  No mmap pointer, framebuffer, or
+ *   display state outlives this helper.
+ */
+static void
+check_dumb_buffer_lifetime_contract(int fd)
+{
+	struct drm_mode_create_dumb create;
+	struct drm_mode_map_dumb map;
+	uint64_t min_size;
+	uint32_t handle = 0;
+	int secondary_fd = -1;
+	int saved_errno;
+	int ret;
+
+	check_create_dumb_error(fd, 0, 16, 32, 0, EINVAL,
+	    "CREATE_DUMB rejects zero width",
+	    "CREATE_DUMB zero width fails with EINVAL");
+	check_create_dumb_error(fd, 16, 0, 32, 0, EINVAL,
+	    "CREATE_DUMB rejects zero height",
+	    "CREATE_DUMB zero height fails with EINVAL");
+	check_create_dumb_error(fd, 16, 16, 0, 0, EINVAL,
+	    "CREATE_DUMB rejects zero bpp",
+	    "CREATE_DUMB zero bpp fails with EINVAL");
+	check_create_dumb_error(fd, 16, 16, 32, 1, EINVAL,
+	    "CREATE_DUMB rejects unknown flags",
+	    "CREATE_DUMB unknown flags fail with EINVAL");
+
+	memset(&create, 0, sizeof(create));
+	create.width = 17;
+	create.height = 9;
+	create.bpp = 32;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create);
+	saved_errno = errno;
+	check(ret == 0, "CREATE_DUMB lifecycle probe succeeds");
+	if (ret != 0) {
+		printf("    CREATE_DUMB lifecycle errno=%d\n", saved_errno);
+		return;
+	}
+	handle = create.handle;
+	check(create.handle != 0, "CREATE_DUMB returns non-zero handle");
+	check(create.pitch >= create.width * 4,
+	    "CREATE_DUMB pitch covers requested width");
+	min_size = (uint64_t)create.pitch * create.height;
+	check(create.size >= min_size,
+	    "CREATE_DUMB size covers requested pitch and height");
+
+	memset(&map, 0, sizeof(map));
+	map.handle = handle;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
+	saved_errno = errno;
+	check(ret == 0, "MAP_DUMB owner handle succeeds");
+	if (ret != 0)
+		printf("    MAP_DUMB owner errno=%d\n", saved_errno);
+
+	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	check(secondary_fd >= 0,
+	    "DUMB buffer lifecycle opens secondary card fd");
+	if (secondary_fd >= 0) {
+		check_map_dumb_error(secondary_fd, handle, ENOENT,
+		    "MAP_DUMB foreign fd handle is denied",
+		    "MAP_DUMB foreign fd handle fails with ENOENT");
+		check_destroy_dumb_error(secondary_fd, handle, ENOENT,
+		    "DESTROY_DUMB foreign fd handle is denied",
+		    "DESTROY_DUMB foreign fd handle fails with ENOENT");
+		check(close(secondary_fd) == 0,
+		    "DUMB buffer lifecycle closes secondary card fd");
+	}
+
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB owner handle succeeds");
+	handle = 0;
+
+	check_map_dumb_error(fd, create.handle, ENOENT,
+	    "MAP_DUMB destroyed handle is rejected",
+	    "MAP_DUMB destroyed handle fails with ENOENT");
+	check_destroy_dumb_error(fd, create.handle, ENOENT,
+	    "DESTROY_DUMB destroyed handle is rejected",
+	    "DESTROY_DUMB destroyed handle fails with ENOENT");
+}
+
 static bool
 read_drm_state_text(char **text_out)
 {
@@ -8367,6 +8525,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
 	check_property_blob_lifetime_contract(fd);
+	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    2, EINVAL, "WRITEBACK_CONNECTORS");
 	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
