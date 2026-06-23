@@ -1174,6 +1174,19 @@ syncobj_signal_handle(int fd, uint32_t handle)
 }
 
 static bool
+syncobj_wait_handle(int fd, uint32_t handle)
+{
+	struct drm_syncobj_wait req;
+	uint32_t handles[1] = { handle };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.count_handles = 1;
+	req.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &req) == 0;
+}
+
+static bool
 syncobj_timeline_signal_handle(int fd, uint32_t handle, uint64_t point)
 {
 	struct drm_syncobj_timeline_array req;
@@ -1229,10 +1242,15 @@ static void
 check_syncobj_transfer_contract(int fd)
 {
 	uint32_t binary_src = 0;
+	uint32_t binary_src_b = 0;
+	uint32_t binary_dst = 0;
 	uint32_t timeline_src = 0;
 	uint32_t timeline_dst = 0;
+	uint32_t tmp_timeline = 0;
+	uint32_t chain_dst = 0;
 	uint32_t missing_dst = 0;
 	bool ok;
+	bool chain_ok;
 
 	ok = syncobj_create_handle(fd, &binary_src);
 	check(ok, "SYNCOBJ_TRANSFER creates binary source syncobj");
@@ -1261,6 +1279,39 @@ check_syncobj_transfer_contract(int fd)
 		check(!syncobj_transfer_point(fd, timeline_dst, 11,
 		    timeline_src, 99, 0),
 		    "SYNCOBJ_TRANSFER rejects missing source point");
+
+		ok = syncobj_create_handle(fd, &binary_dst);
+		check(ok, "SYNCOBJ_TRANSFER creates binary destination syncobj");
+		if (ok) {
+			check(syncobj_transfer_point(fd, binary_dst, 0,
+			    timeline_src, 7, 0),
+			    "SYNCOBJ_TRANSFER timeline source to binary succeeds");
+			check(syncobj_wait_handle(fd, binary_dst),
+			    "SYNCOBJ_TRANSFER binary destination waits successfully");
+		}
+	}
+
+	chain_ok = syncobj_create_handle(fd, &binary_src_b);
+	check(chain_ok, "SYNCOBJ_TRANSFER creates second binary source syncobj");
+	if (chain_ok)
+		check(syncobj_signal_handle(fd, binary_src_b),
+		    "SYNCOBJ_TRANSFER second binary source signal succeeds");
+	chain_ok = chain_ok && syncobj_create_handle(fd, &tmp_timeline);
+	check(chain_ok, "SYNCOBJ_TRANSFER creates temporary timeline syncobj");
+	chain_ok = chain_ok && syncobj_create_handle(fd, &chain_dst);
+	check(chain_ok, "SYNCOBJ_TRANSFER creates chain destination syncobj");
+	if (chain_ok) {
+		check(syncobj_transfer_point(fd, tmp_timeline, 1,
+		    binary_src, 0, 0),
+		    "SYNCOBJ_TRANSFER first wait into temporary timeline");
+		check(syncobj_transfer_point(fd, tmp_timeline, 2,
+		    binary_src_b, 0, 0),
+		    "SYNCOBJ_TRANSFER second wait into temporary timeline");
+		check(syncobj_transfer_point(fd, chain_dst, 20,
+		    tmp_timeline, 0, 0),
+		    "SYNCOBJ_TRANSFER whole temporary chain to timeline succeeds");
+		check(syncobj_timeline_wait_point(fd, chain_dst, 20),
+		    "SYNCOBJ_TRANSFER copied whole chain waits successfully");
 	}
 
 	ok = syncobj_create_handle(fd, &missing_dst);
@@ -1272,8 +1323,12 @@ check_syncobj_transfer_contract(int fd)
 
 out:
 	syncobj_destroy_handle(fd, missing_dst);
+	syncobj_destroy_handle(fd, chain_dst);
+	syncobj_destroy_handle(fd, tmp_timeline);
 	syncobj_destroy_handle(fd, timeline_src);
 	syncobj_destroy_handle(fd, timeline_dst);
+	syncobj_destroy_handle(fd, binary_dst);
+	syncobj_destroy_handle(fd, binary_src_b);
 	syncobj_destroy_handle(fd, binary_src);
 }
 
