@@ -5182,6 +5182,76 @@ drm_lease_get_pad_error(int fd)
 		    saved_errno);
 }
 
+/*
+ * drm_lease_revoke_id()
+ *
+ * Ownership:
+ *   Borrows the owner DRM master fd.  The target lessee fd, if still open, is
+ *   not closed here; only the lease object set is revoked through the owner.
+ *
+ * Lifetime:
+ *   Valid while the lessee id still names a live lessee master.  Linux KMS
+ *   keeps that identity until fd close, so a second revoke of an already empty
+ *   live lessee must still find the id and succeed.
+ *
+ * Threading:
+ *   Single-threaded smoke helper.  Kernel-side lease tree mutation is
+ *   serialized by common DRM locks.
+ */
+static bool
+drm_lease_revoke_id(int fd, uint32_t lessee_id, const char *what)
+{
+	struct drm_mode_revoke_lease revoke_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&revoke_lease, 0, sizeof(revoke_lease));
+	revoke_lease.lessee_id = lessee_id;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_REVOKE_LEASE, &revoke_lease);
+	saved_errno = errno;
+	check(ret == 0, what);
+	if (ret != 0)
+		printf("    REVOKE_LEASE errno=%d\n", saved_errno);
+	return ret == 0;
+}
+
+/*
+ * drm_lease_revoke_error()
+ *
+ * Ownership:
+ *   Borrows the owner DRM master fd and does not take ownership of any lessee
+ *   fd.  It only probes whether the owner can still resolve a lessee id.
+ *
+ * Lifetime:
+ *   Used after close/destroy points where Linux KMS expects the lessee id to
+ *   have been removed from the owner idr.
+ *
+ * Threading:
+ *   Single-threaded smoke helper; the kernel serializes owner idr lookup under
+ *   the common DRM lease lock.
+ */
+static void
+drm_lease_revoke_error(int fd, uint32_t lessee_id, int expected_errno,
+    const char *what)
+{
+	struct drm_mode_revoke_lease revoke_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&revoke_lease, 0, sizeof(revoke_lease));
+	revoke_lease.lessee_id = lessee_id;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_REVOKE_LEASE, &revoke_lease);
+	saved_errno = errno;
+	check(ret != 0 && saved_errno == expected_errno, what);
+	if (ret == 0 || saved_errno != expected_errno)
+		printf("    REVOKE_LEASE ret=%d errno=%d expected=%d\n",
+		    ret, saved_errno, expected_errno);
+}
+
 static void
 check_drm_lease_atomic_unleased_connector(int owner_fd, int lease_fd,
     uint32_t unleased_connector_id, uint32_t crtc_id)
@@ -5734,20 +5804,11 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	    (uint32_t)(sizeof(bad_ids) / sizeof(bad_ids[0])), ENOENT,
 	    "DRM lease bad object id is rejected with ENOENT");
 
-	{
-		struct drm_mode_revoke_lease revoke_lease;
-		int ret;
-
-		memset(&revoke_lease, 0, sizeof(revoke_lease));
-		revoke_lease.lessee_id = lessee_id;
-		errno = 0;
-		ret = drmIoctl(fd, DRM_IOCTL_MODE_REVOKE_LEASE,
-		    &revoke_lease);
-		saved_errno = errno;
-		check(ret == 0, "DRM lease REVOKE_LEASE succeeds");
-		if (ret != 0)
-			printf("    REVOKE_LEASE errno=%d\n", saved_errno);
-	}
+	drm_lease_revoke_id(fd, lessee_id, "DRM lease REVOKE_LEASE succeeds");
+	check(!drm_lease_list_contains(fd, lessee_id),
+	    "DRM lease LIST_LESSEES hides revoked lessee");
+	drm_lease_revoke_id(fd, lessee_id,
+	    "DRM lease second REVOKE_LEASE on revoked lessee succeeds");
 
 	revoked_resources = drmModeGetResources(lease_fd);
 	check(revoked_resources != NULL,
@@ -5789,6 +5850,10 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 		    "DRM lease re-lease returns a fresh lessee id");
 		check(close(second_lease_fd) == 0,
 		    "close second DRM lease fd succeeds");
+		check(!drm_lease_list_contains(fd, second_lessee_id),
+		    "DRM lease LIST_LESSEES hides closed second lessee");
+		drm_lease_revoke_error(fd, second_lessee_id, ENOENT,
+		    "DRM lease closed second lessee revoke fails with ENOENT");
 		if (drm_lease_create(fd, lease_ids, object_count,
 		    &third_lease_fd, &third_lessee_id,
 		    "DRM lease object can be re-leased after close")) {
@@ -5796,10 +5861,16 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 			    "DRM lease close re-lease returns lessee id");
 			check(close(third_lease_fd) == 0,
 			    "close third DRM lease fd succeeds");
+			check(!drm_lease_list_contains(fd, third_lessee_id),
+			    "DRM lease LIST_LESSEES hides closed third lessee");
+			drm_lease_revoke_error(fd, third_lessee_id, ENOENT,
+			    "DRM lease closed third lessee revoke fails with ENOENT");
 		}
 	}
 
 	check(close(lease_fd) == 0, "close DRM lease fd succeeds");
+	drm_lease_revoke_error(fd, lessee_id, ENOENT,
+	    "DRM lease closed revoked lessee revoke fails with ENOENT");
 }
 
 static int

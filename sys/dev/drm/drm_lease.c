@@ -150,22 +150,40 @@ drm_lease_remove_from_owner_locked(struct drm_master *lessee)
 		list_del_init(&lessee->lessee_list);
 }
 
+/*
+ * drm_lease_clear_objects_locked()
+ *
+ * Ownership:
+ *   Borrows the lessee master and removes only its leased KMS object ids.  The
+ *   caller keeps ownership of the master, lessee id, lessor reference, and list
+ *   links.
+ *
+ * Lifetime:
+ *   Called while the master is still alive.  Revoke uses this to make the lease
+ *   empty without destroying the fd-visible lessee identity; close/destroy
+ *   performs the final owner-list removal.
+ *
+ * Threading:
+ *   dev->mode_config.idr_mutex must be held by the caller.
+ */
+static void
+drm_lease_clear_objects_locked(struct drm_master *master)
+{
+	idr_remove_all(&master->leases);
+}
+
 static void
 drm_lease_revoke_locked(struct drm_master *master)
 {
 	struct drm_master *lessee;
-	struct drm_master *tmp;
 
 	if (master->lessor != NULL) {
-		drm_lease_remove_from_owner_locked(master);
-		idr_remove_all(&master->leases);
+		drm_lease_clear_objects_locked(master);
 		return;
 	}
 
-	list_for_each_entry_safe(lessee, tmp, &master->lessees, lessee_list) {
-		drm_lease_remove_from_owner_locked(lessee);
-		idr_remove_all(&lessee->leases);
-	}
+	list_for_each_entry(lessee, &master->lessees, lessee_list)
+		drm_lease_clear_objects_locked(lessee);
 }
 
 void
@@ -194,6 +212,7 @@ drm_lease_destroy(struct drm_master *master)
 	dev = master->dev;
 	mutex_lock(&dev->mode_config.idr_mutex);
 	drm_lease_revoke_locked(master);
+	drm_lease_remove_from_owner_locked(master);
 	lessor = master->lessor;
 	master->lessor = NULL;
 	mutex_unlock(&dev->mode_config.idr_mutex);
