@@ -2641,6 +2641,164 @@ check_connector_scaler_property_value(int fd, uint32_t connector_id,
 	return value == expected;
 }
 
+static int
+legacy_connector_set_property(int fd, uint32_t connector_id, const char *name,
+    uint64_t value, int *saved_errno)
+{
+	uint32_t property_id = 0;
+	int ret;
+
+	if (!get_property_id(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR, name,
+	    &property_id)) {
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeConnectorSetProperty(fd, connector_id, property_id, value);
+	*saved_errno = errno;
+	return ret;
+}
+
+/*
+ * check_legacy_dpms_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active connector and CRTC IDs from KMS state.  The helper owns
+ *   no framebuffer, mode blob, connector state, or GEM reference.
+ *
+ * Lifetime:
+ *   Performs one legacy MODE_OBJ_SETPROPERTY(DPMS=OFF) call followed by a
+ *   DPMS=ON restore.  The display may blank briefly while OFF is live.  If the
+ *   OFF call succeeds and the normal restore fails, a best-effort second ON
+ *   restore is issued before return.
+ *
+ * Threading:
+ *   Single-threaded console probe.  It must run without an X/Wayland DRM
+ *   master.  The DRM atomic helper serializes DPMS remapping with modeset
+ *   locks; this function does not take driver-private locks.
+ */
+static void
+check_legacy_dpms_runtime_contract(int fd, const drmModeRes *resources,
+    uint32_t crtc_id, uint32_t crtc_index)
+{
+	struct modeset_counter_snapshot before;
+	struct modeset_counter_snapshot after_off;
+	struct modeset_counter_snapshot after_on;
+	uint32_t connector_id = 0;
+	uint64_t saved_crtc_id = 0;
+	uint64_t saved_dpms = 0;
+	uint64_t active = 0;
+	uint64_t head_mask;
+	char object_name[64];
+	int saved_errno = 0;
+	int ret;
+	bool dpms_off = false;
+	bool restored = false;
+
+	head_mask = crtc_index >= 64 ? 0 : (1ULL << crtc_index);
+	check(head_mask != 0, "active CRTC index fits DPMS head mask");
+	if (head_mask == 0)
+		return;
+
+	if (!find_active_connector_for_crtc(fd, resources, crtc_id,
+	    &connector_id)) {
+		check(false, "active connector is available for legacy DPMS probe");
+		return;
+	}
+	check(true, "active connector is available for legacy DPMS probe");
+	snprintf(object_name, sizeof(object_name), "connector %u",
+	    connector_id);
+
+	if (!get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &saved_crtc_id,
+	    object_name) ||
+	    !get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "DPMS", &saved_dpms, object_name))
+		return;
+	check(saved_crtc_id == crtc_id,
+	    "active connector is attached to active CRTC for legacy DPMS probe");
+	check(saved_dpms == DRM_MODE_DPMS_ON,
+	    "active connector DPMS starts On for legacy DPMS probe");
+	if (saved_crtc_id != crtc_id || saved_dpms != DRM_MODE_DPMS_ON)
+		return;
+
+	if (!read_modeset_counter_snapshot(&before, "legacy DPMS probe"))
+		return;
+
+	ret = legacy_connector_set_property(fd, connector_id, "DPMS",
+	    DRM_MODE_DPMS_OFF, &saved_errno);
+	if (ret != 0) {
+		printf("    legacy DPMS OFF errno=%d\n", saved_errno);
+		check(false, "legacy DPMS OFF commit succeeds");
+		return;
+	}
+	dpms_off = true;
+	check(true, "legacy DPMS OFF commit succeeds");
+	check_connector_scaler_property_value(fd, connector_id, "DPMS",
+	    DRM_MODE_DPMS_OFF, object_name,
+	    "legacy DPMS OFF updates connector DPMS property");
+	if (get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, "DPMS-off CRTC"))
+		check(active == 0, "legacy DPMS OFF marks CRTC inactive");
+	if (read_modeset_counter_snapshot(&after_off, "legacy DPMS OFF")) {
+		check(after_off.atomic_tail_disable_op_count >
+		    before.atomic_tail_disable_op_count,
+		    "legacy DPMS OFF increments tail disable op count");
+		check((after_off.atomic_tail_last_disable_heads &
+		    head_mask) != 0,
+		    "legacy DPMS OFF records disabled head");
+		check(after_off.commit_error_count == before.commit_error_count,
+		    "legacy DPMS OFF does not increment commit_error_count");
+		check(after_off.atomic_tail_active == 0 &&
+		    after_off.atomic_tail_stage == 0,
+		    "legacy DPMS OFF leaves no active tail transaction");
+		check(after_off.display_audit_pending_valid == 0,
+		    "legacy DPMS OFF leaves no pending display audit");
+	}
+
+	ret = legacy_connector_set_property(fd, connector_id, "DPMS",
+	    DRM_MODE_DPMS_ON, &saved_errno);
+	if (ret != 0) {
+		printf("    legacy DPMS ON restore errno=%d\n", saved_errno);
+		check(false, "legacy DPMS ON restore succeeds");
+		goto out_restore;
+	}
+	dpms_off = false;
+	restored = true;
+	check(true, "legacy DPMS ON restore succeeds");
+	check_connector_scaler_property_value(fd, connector_id, "DPMS",
+	    DRM_MODE_DPMS_ON, object_name,
+	    "legacy DPMS ON restores connector DPMS property");
+	active = 0;
+	if (get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, "DPMS-restored CRTC"))
+		check(active != 0, "legacy DPMS ON marks CRTC active");
+	if (read_modeset_counter_snapshot(&after_on, "legacy DPMS ON restore")) {
+		check(after_on.atomic_tail_enable_op_count >
+		    before.atomic_tail_enable_op_count,
+		    "legacy DPMS ON increments tail enable op count");
+		check((after_on.atomic_tail_last_enable_heads &
+		    head_mask) != 0,
+		    "legacy DPMS ON records enabled head");
+		check(after_on.commit_error_count == before.commit_error_count,
+		    "legacy DPMS ON does not increment commit_error_count");
+		check(after_on.atomic_tail_active == 0 &&
+		    after_on.atomic_tail_stage == 0,
+		    "legacy DPMS ON leaves no active tail transaction");
+		check(after_on.display_audit_pending_valid == 0,
+		    "legacy DPMS ON leaves no pending display audit");
+	}
+
+out_restore:
+	if (dpms_off && !restored) {
+		printf("    attempting best-effort legacy DPMS ON cleanup\n");
+		ret = legacy_connector_set_property(fd, connector_id, "DPMS",
+		    DRM_MODE_DPMS_ON, &saved_errno);
+		check(ret == 0, "legacy DPMS cleanup restore succeeds");
+	}
+}
+
 /*
  * check_atomic_connector_scaler_runtime_contract()
  *
@@ -3867,6 +4025,9 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			    active_crtc_width, active_crtc_height, name);
 			check_atomic_connector_scaler_runtime_contract(fd,
 			    mode_resources, active_crtc_id);
+			check_legacy_dpms_runtime_contract(fd,
+			    mode_resources, active_crtc_id,
+			    active_crtc_index);
 			check_atomic_modeset_disable_restore_contract(fd,
 			    mode_resources, active_crtc_id,
 			    active_crtc_index, plane->plane_id, name);
