@@ -5148,8 +5148,11 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	uint32_t active_crtc_index = 0;
 	uint32_t active_crtc_width = 0;
 	uint32_t active_crtc_height = 0;
+	bool primary_for_crtc[32] = { false };
+	bool cursor_for_crtc[32] = { false };
 	bool primary_panning_probe_done = false;
 	bool cursor_probe_done = false;
+	bool track_plane_topology;
 	bool have_active_crtc;
 	bool have_active_crtc_size;
 	bool skip_cursor;
@@ -5161,6 +5164,10 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		return;
 	skip_cursor = getenv("NVKM_DRMTEST_SKIP_CURSOR") != NULL;
 	metadata_only = getenv("NVKM_DRMTEST_METADATA_ONLY") != NULL;
+	track_plane_topology = mode_resources->count_crtcs > 0 &&
+	    mode_resources->count_crtcs <= 32;
+	check(track_plane_topology,
+	    "CRTC count is valid for plane topology masks");
 
 	if (metadata_only) {
 		have_active_crtc = false;
@@ -5209,6 +5216,16 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		plane_type = get_plane_type(fd, plane->plane_id);
 		check(plane_type >= 0, "plane type is readable");
 		check_in_formats(fd, plane, plane_type, name);
+		if (track_plane_topology) {
+			for (int c = 0; c < mode_resources->count_crtcs; c++) {
+				if ((plane->possible_crtcs & (1u << c)) == 0)
+					continue;
+				if (plane_type == DRM_PLANE_TYPE_PRIMARY)
+					primary_for_crtc[c] = true;
+				else if (plane_type == DRM_PLANE_TYPE_CURSOR)
+					cursor_for_crtc[c] = true;
+			}
+		}
 		if (have_active_crtc_size && !primary_panning_probe_done &&
 		    plane_type == DRM_PLANE_TYPE_PRIMARY &&
 		    (plane->possible_crtcs & (1u << active_crtc_index)) != 0) {
@@ -5245,6 +5262,18 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			cursor_probe_done = true;
 		}
 		drmModeFreePlane(plane);
+	}
+
+	if (track_plane_topology) {
+		bool all_primary = true;
+		bool all_cursor = true;
+
+		for (int c = 0; c < mode_resources->count_crtcs; c++) {
+			all_primary = all_primary && primary_for_crtc[c];
+			all_cursor = all_cursor && cursor_for_crtc[c];
+		}
+		check(all_primary, "every CRTC has a primary plane");
+		check(all_cursor, "every CRTC has a cursor plane");
 	}
 
 	if (metadata_only) {

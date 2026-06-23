@@ -1287,6 +1287,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap PRIME is 3",
         "DRM client cap UNIVERSAL_PLANES is accepted",
         "DRM client cap ATOMIC is accepted",
+        "every CRTC has a primary plane",
+        "every CRTC has a cursor plane",
         "does not expose unsupported connector property HDR_OUTPUT_METADATA",
         "does not expose unsupported connector property Colorspace",
         "does not expose unsupported connector property content type",
