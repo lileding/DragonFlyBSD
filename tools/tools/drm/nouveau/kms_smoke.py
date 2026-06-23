@@ -612,8 +612,8 @@ def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
     emit(bool(re.search(r"Commit of [0-9]+ outputs succeeded", text)),
          "Wayland log commits output successfully")
 
-    if "wl_display_terminate" in text:
-        print("INFO Wayland compositor hit wl_display_terminate assert on exit")
+    emit("wl_display_terminate" not in text,
+         "Wayland compositor exits without wl_display_terminate assert")
     if "Starting Xwayland" in text or "Xserver is ready" in text:
         emit(bool(re.search(r"Starting Xwayland on :[0-9]+", text)),
              "Xwayland server started")
