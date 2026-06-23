@@ -5230,12 +5230,12 @@ drm_lease_revoke_id(int fd, uint32_t lessee_id, const char *what)
  * drm_lease_revoke_error()
  *
  * Ownership:
- *   Borrows the owner DRM master fd and does not take ownership of any lessee
- *   fd.  It only probes whether the owner can still resolve a lessee id.
+ *   Borrows a DRM master fd and does not take ownership of any lessee fd.  It
+ *   only probes the REVOKE_LEASE lookup and permission result for a lessee id.
  *
  * Lifetime:
- *   Used after close/destroy points where Linux KMS expects the lessee id to
- *   have been removed from the owner idr.
+ *   Valid for both live lessee permission probes and post-close/destroy
+ *   lifetime probes.
  *
  * Threading:
  *   Single-threaded smoke helper; the kernel serializes owner idr lookup under
@@ -5786,6 +5786,8 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	drm_lease_get_pad_error(fd);
 	drm_lease_create_error(lease_fd, lease_ids, object_count, EINVAL,
 	    "DRM lease lessee cannot create sub-lease");
+	drm_lease_revoke_error(lease_fd, lessee_id, EACCES,
+	    "DRM lease lessee REVOKE_LEASE fails with EACCES");
 	check_drm_lease_encoder_filter(lease_fd, connector_id, active_crtc_id);
 	check_drm_lease_plane_filter(lease_fd, primary_plane_id, active_crtc_id);
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,

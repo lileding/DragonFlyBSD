@@ -68,6 +68,32 @@ drm_lease_owner(struct drm_master *master)
 	return master;
 }
 
+/*
+ * drm_lease_find_lessee_locked()
+ *
+ * Ownership:
+ *   Borrows master and the returned lessee.  The caller must not drop the
+ *   returned pointer after idr_mutex is released.
+ *
+ * Lifetime:
+ *   Valid only while dev->mode_config.idr_mutex protects the owner lessee_idr.
+ *   Lessee ids are allocated from the top-level owner, even when the caller is
+ *   itself a lessee.
+ *
+ * Threading:
+ *   Requires dev->mode_config.idr_mutex.  No additional references are taken.
+ */
+static struct drm_master *
+drm_lease_find_lessee_locked(struct drm_master *master, int lessee_id)
+{
+	struct drm_master *owner;
+
+	owner = drm_lease_owner(master);
+	if (owner == NULL)
+		return NULL;
+	return idr_find(&owner->lessee_idr, lessee_id);
+}
+
 bool
 _drm_lease_held(struct drm_file *file_priv, int id)
 {
@@ -743,10 +769,14 @@ drm_mode_revoke_lease_ioctl(struct drm_device *dev, void *data,
 	owner = file_priv->master;
 
 	mutex_lock(&dev->mode_config.idr_mutex);
-	lessee = idr_find(&owner->lessee_idr, arg->lessee_id);
+	lessee = drm_lease_find_lessee_locked(owner, arg->lessee_id);
 	if (lessee == NULL) {
 		mutex_unlock(&dev->mode_config.idr_mutex);
 		return -ENOENT;
+	}
+	if (lessee->lessor != owner) {
+		mutex_unlock(&dev->mode_config.idr_mutex);
+		return -EACCES;
 	}
 	drm_lease_revoke_locked(lessee);
 	mutex_unlock(&dev->mode_config.idr_mutex);

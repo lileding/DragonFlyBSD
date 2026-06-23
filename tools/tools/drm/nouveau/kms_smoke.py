@@ -1694,6 +1694,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM lease LIST_LESSEES rejects non-zero pad",
         "DRM lease GET_LEASE rejects non-zero pad",
         "DRM lease lessee cannot create sub-lease",
+        "DRM lease lessee REVOKE_LEASE fails with EACCES",
         "DRM lease connector is readable for encoder filter",
         "DRM lease connector exposes encoder list",
         "DRM lease connector has current encoder",
