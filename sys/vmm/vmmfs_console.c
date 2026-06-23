@@ -18,6 +18,9 @@
 #include "vmm_machine.h"
 #include "vmm_console.h"
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
 
 static int
@@ -26,7 +29,7 @@ vmmfs_console_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	char cbuf[256];
 	size_t n;
 
-	n = vmm_console_read(&node->vn_machine->state.console, cbuf, sizeof(cbuf));
+	n = vmm_console_read(&node->vn_machine->machine.console, cbuf, sizeof(cbuf));
 	if (n == 0)
 		return 0;		/* EOF */
 	return uiomove(cbuf, n, ap->a_uio);
@@ -46,7 +49,7 @@ vmmfs_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
 		error = uiomove(dump, d, uio);
 		if (error)
 			return error;
-		vmm_console_write(&node->vn_machine->state.console, dump, d);
+		vmm_console_write(&node->vn_machine->machine.console, dump, d);
 	}
 	return 0;
 }

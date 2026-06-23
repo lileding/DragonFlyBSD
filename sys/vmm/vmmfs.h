@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Internal interface shared between the vmmfs control plane (vmmfs.c -- the
- * mount, the machine/device registry, vnode allocation, per-open buffers) and
+ * mount root, shared vnode allocation, and per-open buffers) and
  * the vnode operations (vmmfs_vnode.c -- the vop_ops handlers + table).
  *
  * Include the kernel headers (sys/param.h, vnode.h, lock.h, namecache.h,
@@ -11,7 +11,6 @@
 #ifndef VMMFS_H
 #define VMMFS_H
 
-#include "vmm_device.h"		/* struct vmm_device (wrapped by vmmfs_device) */
 #include "vmm_host.h"		/* struct vmm_host (the device pool source) */
 
 MALLOC_DECLARE(M_VMMFS);
@@ -40,8 +39,7 @@ MALLOC_DECLARE(M_VMMFS);
 /*
  * Nodes carry no type tag.  Each binds a KOBJ class (its behavior), an
  * enum vtype (VDIR/VREG/VLNK), and a mode at creation time; dispatch is the
- * class, not a switch.  A machine's config files come from a descriptor table
- * in vmmfs_machines.c.
+ * class, not a switch.  A machine's files come from vmmfs_machine.c.
  */
 
 /* A per-open scratch buffer for a config register, keyed by struct file. */
@@ -54,67 +52,23 @@ struct vmmfs_openbuf {
 	SLIST_ENTRY(vmmfs_openbuf) ob_link;
 };
 
-struct vmmfs_machines;
+struct vmmfs_machine;
+struct vmmfs_device;
 
 struct vmmfs_node {
 	kobj_ops_t		ops;		/* KOBJ dispatch table; must be first */
 	enum vtype		vn_vtype;	/* VDIR / VREG / VLNK */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
-	struct vmmfs_node      *vn_parent;
-	struct vmmfs_machines   *vn_machine;
-	struct vnode	       *vn_vnode;
+	struct vmmfs_node	*vn_parent;
+	struct vmmfs_machine	*vn_machine;
+	struct vnode		*vn_vnode;
 	struct lock		vn_interlock;
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
-/*
- * A PCIe device in the (stub) pool, allocated on demand and kept in the
- * per-mount SLIST.  `owner` is the machine it is currently bound to, or NULL
- * for the host pool.  A host device is permanent (rm returns it to the pool);
- * a user backend is freed on rm.
- */
-struct vmmfs_device {
-	SLIST_ENTRY(vmmfs_device) dv_link;
-	struct vmm_device	dev;		/* core: bdf, owner (vmm_machine*), is_host */
-	struct vmmfs_node	node;		/* the NDEVICE file */
-	struct vmmfs_node	link;		/* its NDEVLINK in /vmm/devices/ */
-};
-
 SLIST_HEAD(vmmfs_devlist, vmmfs_device);
-
-#define VMMFS_DEV_OF_NODE(n) \
-	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, node)))
-#define VMMFS_DEV_OF_LINK(n) \
-	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, link)))
-
-/* Recover the fs slot from a core VM pointer (a device's owner is vmm_machine*). */
-#define VMMFS_MACHINES_OF_STATE(s) \
-	((struct vmmfs_machines *)((char *)(s) - __offsetof(struct vmmfs_machines, state)))
-/* The core VM of an fs slot, or NULL for the host pool (NULL slot). */
-#define VMMFS_STATE_OF(m)	((m) != NULL ? &(m)->state : NULL)
-
-/*
- * A user VM: allocated on demand and kept in the per-mount RB tree keyed by
- * name.  vm_refs is the lifetime count: 1 while in the tree, plus one per live
- * vnode bound to any of its nodes.  rmdir drops the tree reference; the struct
- * is freed when vm_refs reaches 0, so a machine held by an open fd (e.g. a
- * lease) survives rmdir until its last vnode is reclaimed.
- */
-struct vmmfs_machines {
-	RB_ENTRY(vmmfs_machines)	vm_link;
-	char			name[VMMFS_NAME_MAX + 1];
-	int			vm_refs;
-	int			vm_in_tree;	/* guards a single RB_REMOVE */
-	struct vmm_machine	state;		/* config + lifecycle (vmm core) */
-	struct vmmfs_node	node;		/* the machine directory */
-	/* config files (one per cfg_table row in vmmfs_machines.c) */
-	struct vmmfs_node	n_vcpu, n_mem, n_loader, n_console;
-	struct vmmfs_node	n_lease, n_events, n_status, n_stopped;
-	struct vmmfs_node	vn_devices;	/* this machine's devices/ */
-};
-
-RB_HEAD(vmmfs_machtree, vmmfs_machines);	/* ops: vmmfs_machines.h */
+RB_HEAD(vmmfs_machtree, vmmfs_machine);
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
@@ -144,7 +98,7 @@ DECLARE_CLASS(vmmfs_base_class);		/* fallback commons (vmmfs_vnode.c) */
 DECLARE_CLASS(vmmfs_root_class);		/* root dir       (vmmfs.c) */
 DECLARE_CLASS(vmmfs_device_class);	/* device file    (vmmfs_device.c) */
 DECLARE_CLASS(vmmfs_devlink_class);	/* device symlink (vmmfs_device.c) */
-DECLARE_CLASS(vmmfs_machine_class);	/* a machine dir  (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_machine_class);	/* a machine dir  (vmmfs_machine.c) */
 DECLARE_CLASS(vmmfs_machines_class);	/* machines/      (vmmfs_machines.c) */
 DECLARE_CLASS(vmmfs_host_class);		/* machines/host/ (vmmfs_host.c) */
 DECLARE_CLASS(vmmfs_devices_class);	/* a devices/ dir (vmmfs_devices.c) */
@@ -153,10 +107,10 @@ DECLARE_CLASS(vmmfs_vcpu_class);		/* vcpu file      (vmmfs_vcpu.c) */
 DECLARE_CLASS(vmmfs_mem_class);		/* mem file       (vmmfs_mem.c) */
 DECLARE_CLASS(vmmfs_loader_class);	/* loader file    (vmmfs_loader.c) */
 DECLARE_CLASS(vmmfs_console_class);	/* console file   (vmmfs_console.c) */
-DECLARE_CLASS(vmmfs_lease_class);		/* lease file     (vmmfs_machines.c) */
-DECLARE_CLASS(vmmfs_events_class);	/* events file    (vmmfs_machines.c) */
-DECLARE_CLASS(vmmfs_status_class);	/* status file    (vmmfs_machines.c) */
-DECLARE_CLASS(vmmfs_stopped_class);	/* stopped file   (vmmfs_machines.c) */
+DECLARE_CLASS(vmmfs_lease_class);		/* lease file     (vmmfs_machine.c) */
+DECLARE_CLASS(vmmfs_events_class);	/* events file    (vmmfs_machine.c) */
+DECLARE_CLASS(vmmfs_status_class);	/* status file    (vmmfs_machine.c) */
+DECLARE_CLASS(vmmfs_stopped_class);	/* stopped file   (vmmfs_machine.c) */
 
 /* Class identity test: is this node an instance of the given class? */
 #define VMMFS_NODE_IS(node, classname)	((node)->ops == (classname).ops)
@@ -206,7 +160,7 @@ int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
 ino_t	vmmfs_parent_ino(struct vmmfs_node *node);
 void	vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class,
 	    enum vtype vtype, mode_t mode, ino_t ino, struct vmmfs_node *parent,
-	    struct vmmfs_machines *machine);
+	    struct vmmfs_machine *machine);
 void	vmmfs_node_uninit(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
@@ -214,7 +168,6 @@ int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
 
-/* Per-module interfaces (the machines registry, the device pool) live in their
- * own headers: vmmfs_machines.h and vmmfs_device.h. */
+/* Object-specific interfaces live in vmmfs_machine.h and vmmfs_device.h. */
 
 #endif /* VMMFS_H */

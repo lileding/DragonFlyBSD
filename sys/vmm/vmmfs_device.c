@@ -104,3 +104,123 @@ static kobj_method_t vmmfs_devlink_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_devlink, vmmfs_devlink_methods, 0);
+
+
+/* ---- per-mount device pool helpers ---- */
+
+struct vmmfs_device *
+vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machine *owner,
+    const char *name, int nlen)
+{
+	struct vmmfs_device *d;
+
+	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+		if (vmm_device_owned_by(&d->dev, VMMFS_CORE_MACHINE_OF(owner)) &&
+		    vmm_device_bdf_eq(&d->dev, name, nlen))
+			return d;
+	}
+	return NULL;
+}
+
+struct vmmfs_device *
+vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
+{
+	struct vmmfs_device *d;
+
+	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+		if (vmm_device_bdf_eq(&d->dev, name, nlen))
+			return d;
+	}
+	return NULL;
+}
+
+static struct vmmfs_device *
+vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
+{
+	struct vmmfs_device *d;
+	ino_t idx = (ino_t)vmp->vm_next_dev++;
+
+	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
+	vmm_device_init(&d->dev, bdf, is_host);
+	if (is_host)
+		vmm_host_add_device(&vmp->host);
+	vmmfs_node_init(&d->node, &vmmfs_device_class, VREG, 0444,
+	    VMMFS_DEV_INO_BASE + idx, &vmp->vm_host_devices, NULL);
+	vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
+	    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
+	SLIST_INSERT_HEAD(&vmp->vm_devs, d, dv_link);
+	return d;
+}
+
+void
+vmmfs_device_init_host_pool(struct vmmfs_mount *vmp)
+{
+	static const char *const stub_bdf[] = {
+		"0000:00:02.0", "0000:00:03.0", "0000:00:04.0",
+	};
+	int i, n = (int)(sizeof(stub_bdf) / sizeof(stub_bdf[0]));
+
+	for (i = 0; i < n; i++)
+		(void)vmmfs_device_add(vmp, stub_bdf[i], 1);
+}
+
+void
+vmmfs_device_unbind_owner_locked(struct vmmfs_mount *vmp,
+    struct vmm_machine *owner, struct vmmfs_devlist *tofree)
+{
+	struct vmmfs_device *d, *nd;
+
+	SLIST_FOREACH_MUTABLE(d, &vmp->vm_devs, dv_link, nd) {
+		if (!vmm_device_owned_by(&d->dev, owner))
+			continue;
+		if (d->dev.is_host) {
+			vmm_device_unbind(&d->dev);
+		} else {
+			SLIST_REMOVE(&vmp->vm_devs, d, vmmfs_device, dv_link);
+			SLIST_INSERT_HEAD(tofree, d, dv_link);
+		}
+	}
+}
+
+void
+vmmfs_device_free_list(struct vmmfs_devlist *list)
+{
+	struct vmmfs_device *d;
+
+	while (!SLIST_EMPTY(list)) {
+		d = SLIST_FIRST(list);
+		SLIST_REMOVE_HEAD(list, dv_link);
+		vmmfs_node_uninit(&d->node);
+		vmmfs_node_uninit(&d->link);
+		kfree(d, M_VMMFS);
+	}
+}
+
+void
+vmmfs_device_destroy_all(struct vmmfs_mount *vmp)
+{
+	struct vmmfs_device *d;
+
+	while (!SLIST_EMPTY(&vmp->vm_devs)) {
+		d = SLIST_FIRST(&vmp->vm_devs);
+		SLIST_REMOVE_HEAD(&vmp->vm_devs, dv_link);
+		vmmfs_node_uninit(&d->node);
+		vmmfs_node_uninit(&d->link);
+		kfree(d, M_VMMFS);
+	}
+}
+
+static const char *
+vmmfs_owner_name(struct vmm_machine *owner)
+{
+	return owner != NULL ? VMMFS_MACHINE_OF_CORE(owner)->name : "host";
+}
+
+int
+vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
+    char *buf, size_t bufsize)
+{
+	(void)vmp;
+	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s",
+	    vmmfs_owner_name(d->dev.owner), d->dev.bdf);
+}

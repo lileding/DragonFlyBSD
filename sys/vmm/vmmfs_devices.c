@@ -64,7 +64,7 @@ vmmfs_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 		i = 0;
 		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
 			if (!vmm_device_owned_by(&d->dev,
-			    VMMFS_STATE_OF(node->vn_machine)))
+			    VMMFS_CORE_MACHINE_OF(node->vn_machine)))
 				continue;
 			if (i++ < skip)
 				continue;
@@ -167,7 +167,7 @@ vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EEXIST;
 	}
-	vmm_device_bind(&d->dev, VMMFS_STATE_OF(tdnode->vn_machine));
+	vmm_device_bind(&d->dev, VMMFS_CORE_MACHINE_OF(tdnode->vn_machine));
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	cache_rename(ap->a_fnch, ap->a_tnch);

@@ -15,12 +15,12 @@
  * stopped machine.  Every operation is atomic or idempotent — no intermediate
  * state.  The loader is not yet executed (that is "vmm core").
  *
- * Naming: vmmfs_* is the control plane (this file) -- the VFS/namecache
- * plumbing, per-open buffers, loader-path validation, and the machine registry.
+ * Naming: vmmfs_* is the filesystem control plane.  This file owns the
+ * filesystem root, mount/unmount, shared vnode helpers, and register buffers.
  * vmm_* is the VMM core (vmm_machine.c) and owns what a machine IS: config
  * parsing, the desired-state registers, and the lifecycle/lease/event state
  * machine -- pure logic with no kernel deps, host-unit-tested (vmm_machine_test.c).
- * Each C registry slot (struct vmmfs_machines) embeds a vmm_machine.
+ * Each filesystem machine wrapper embeds one struct vmm_machine.
  */
 
 #include <sys/param.h>
@@ -32,10 +32,7 @@
 #include <sys/mount.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
-#include <sys/nlookup.h>
 #include <sys/dirent.h>
-#include <sys/stat.h>
-#include <sys/fcntl.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
@@ -43,8 +40,8 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
-#include "vmmfs_machines.h"
 #include "vmmfs_device.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
@@ -61,7 +58,7 @@ static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 void
 vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class, enum vtype vtype,
     mode_t mode, ino_t ino, struct vmmfs_node *parent,
-    struct vmmfs_machines *machine)
+    struct vmmfs_machine *machine)
 {
 	node->vn_vtype = vtype;
 	node->vn_mode = mode;
@@ -276,7 +273,7 @@ loop:
 	 * lifetime; reclaim drops it.  (vn_interlock released first to keep
 	 * vm_lock un-nested.) */
 	if (node->vn_machine != NULL)
-		vmmfs_machines_ref(VFS_TO_VMMFS(mp), node->vn_machine);
+		vmmfs_machine_ref(VFS_TO_VMMFS(mp), node->vn_machine);
 
 	vx_downgrade(vp);
 
@@ -386,7 +383,7 @@ vmmfs_register_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap,
 	char tmp[300];
 	off_t size;
 
-	size = text(&node->vn_machine->state, tmp, sizeof(tmp));
+	size = text(&node->vn_machine->machine, tmp, sizeof(tmp));
 	vmmfs_fill_attr(node, ap->a_vap, VREG, 1, size);
 	return 0;
 }
@@ -409,7 +406,7 @@ vmmfs_register_read(struct vmmfs_node *node, struct vop_read_args *ap,
 		data = ob->ob_data;
 		len = ob->ob_len;
 	} else {
-		len = (int)text(&node->vn_machine->state, tmp, sizeof(tmp));
+		len = (int)text(&node->vn_machine->machine, tmp, sizeof(tmp));
 		data = tmp;
 	}
 	off = uio->uio_offset;
@@ -448,7 +445,7 @@ vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 	if (ob != NULL) {
 		if (ob->ob_written)
-			(void)commit(&node->vn_machine->state, ob->ob_data,
+			(void)commit(&node->vn_machine->machine, ob->ob_data,
 			    (size_t)ob->ob_len);
 		kfree(ob->ob_data, M_VMMFS);
 		kfree(ob, M_VMMFS);
@@ -538,123 +535,6 @@ static kobj_method_t vmmfs_root_methods[] = {
 };
 DEFINE_CLASS(vmmfs_root, vmmfs_root_methods, 0);
 
-/*
- * Validate the desired loader at start time: resolve the path in the caller's
- * context and require a regular, executable file.  No execution yet (vmm core).
- */
-int
-vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred)
-{
-	struct nlookupdata nd;
-	struct vnode *vp = NULL;
-	struct vattr va;
-	char path[VMMFS_OBUF_MAX];
-	size_t n;
-	int error;
-
-	n = vmm_loader_path(&m->state.loader, path, sizeof(path) - 1);
-	if (n == 0)
-		return EINVAL;
-	path[n] = '\0';
-
-	error = nlookup_init(&nd, path, UIO_SYSSPACE, NLC_FOLLOW | NLC_LOCKVP);
-	if (error == 0)
-		error = vn_open(&nd, NULL, FREAD, 0);
-	if (error == 0) {
-		vp = nd.nl_open_vp;
-		nd.nl_open_vp = NULL;
-	}
-	nlookup_done(&nd);
-	if (error)
-		return error;
-
-	vn_unlock(vp);
-	if (vp->v_type != VREG) {
-		vn_close(vp, FREAD, NULL);
-		return EACCES;
-	}
-	vn_lock(vp, LK_SHARED | LK_RETRY);
-	error = VOP_GETATTR(vp, &va);
-	if (error == 0 && (va.va_mode & 0111) == 0)
-		error = EACCES;
-	if (error == 0)
-		error = VOP_ACCESS(vp, VEXEC, cred);
-	vn_unlock(vp);
-	vn_close(vp, FREAD, NULL);
-	return error;
-}
-
-/* --------------------------------------------------------------------- */
-/* Device pool (guarded by vm_lock).  Device formatting lives in the core
- * (vmm_device_format); these helpers are the fs-side pool lookups.       */
-
-struct vmmfs_device *
-vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machines *owner,
-    const char *name, int nlen)
-{
-	struct vmmfs_device *d;
-
-	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-		if (vmm_device_owned_by(&d->dev, VMMFS_STATE_OF(owner)) &&
-		    vmm_device_bdf_eq(&d->dev, name, nlen))
-			return d;
-	}
-	return NULL;
-}
-
-/* Find any device by bdf, regardless of owner (for the index). */
-struct vmmfs_device *
-vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
-{
-	struct vmmfs_device *d;
-
-	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-		if (vmm_device_bdf_eq(&d->dev, name, nlen))
-			return d;
-	}
-	return NULL;
-}
-
-/* Allocate a device, wire up its nodes with fresh inos, and add it to the pool. */
-static struct vmmfs_device *
-vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
-{
-	struct vmmfs_device *d;
-	ino_t idx = (ino_t)vmp->vm_next_dev++;
-
-	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
-	vmm_device_init(&d->dev, bdf, is_host);
-	if (is_host)
-		vmm_host_add_device(&vmp->host);
-	vmmfs_node_init(&d->node, &vmmfs_device_class, VREG, 0444,
-	    VMMFS_DEV_INO_BASE + idx, &vmp->vm_host_devices, NULL);
-	vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
-	    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
-	SLIST_INSERT_HEAD(&vmp->vm_devs, d, dv_link);
-	return d;
-}
-
-/* Owner display name: "host" or the owning machine's name (mapped from the
- * core VM pointer back to its fs slot). */
-static const char *
-vmmfs_owner_name(struct vmm_machine *owner)
-{
-	return owner != NULL ? VMMFS_MACHINES_OF_STATE(owner)->name : "host";
-}
-
-/* Relative symlink target for a device in the /vmm/devices/ index. */
-int
-vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
-    char *buf, size_t bufsize)
-{
-	(void)vmp;
-	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s",
-	    vmmfs_owner_name(d->dev.owner), d->dev.bdf);
-}
-
-/* --------------------------------------------------------------------- */
-
-
 /* --------------------------------------------------------------------- */
 
 static int
@@ -662,7 +542,6 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 {
 	struct vmmfs_mount *vmp;
 	size_t size;
-	int i;
 
 	if (mp->mnt_flag & MNT_UPDATE)
 		return EOPNOTSUPP;
@@ -685,16 +564,7 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmm_host_init(&vmp->host);
 	SLIST_INIT(&vmp->vm_devs);
 	vmp->vm_next_dev = 0;
-	/* Stub host PCIe device pool: a few fixed BDFs, all owned by host. */
-	{
-		static const char *const stub_bdf[] = {
-			"0000:00:02.0", "0000:00:03.0", "0000:00:04.0",
-		};
-		int n = (int)(sizeof(stub_bdf) / sizeof(stub_bdf[0]));
-
-		for (i = 0; i < n; i++)
-			(void)vmmfs_device_add(vmp, stub_bdf[i], 1);
-	}
+	vmmfs_device_init_host_pool(vmp);
 
 	mp->mnt_flag |= MNT_LOCAL;
 	mp->mnt_kern_flag |= MNTK_ALL_MPSAFE;
@@ -735,21 +605,14 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	 * each tree reference, which takes vm_refs to 0 and frees the struct.
 	 */
 	{
-		struct vmmfs_machines *m;
+		struct vmmfs_machine *m;
 
 		while ((m = RB_ROOT(&vmp->vm_machtree)) != NULL) {
 			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-			vmmfs_machines_unref(vmp, m);
+			vmmfs_machine_unref(vmp, m);
 		}
 	}
-	while (!SLIST_EMPTY(&vmp->vm_devs)) {
-		struct vmmfs_device *d = SLIST_FIRST(&vmp->vm_devs);
-
-		SLIST_REMOVE_HEAD(&vmp->vm_devs, dv_link);
-		vmmfs_node_uninit(&d->node);
-		vmmfs_node_uninit(&d->link);
-		kfree(d, M_VMMFS);
-	}
+	vmmfs_device_destroy_all(vmp);
 	vmmfs_node_uninit(&vmp->vm_devroot);
 	vmmfs_node_uninit(&vmp->vm_host_devices);
 	vmmfs_node_uninit(&vmp->vm_host);
