@@ -322,6 +322,60 @@ def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
     run([str(binary)], out_dir / f"drmtest.{phase}", env=env)
 
 
+def state_is_idle(state: dict[str, int]) -> bool:
+    required = (
+        "atomic_tail_active",
+        "atomic_tail_stage",
+        "atomic_tail_seq",
+        "atomic_tail_complete_count",
+        "atomic_tail_finish_prepared_count",
+    )
+    if any(key not in state for key in required):
+        return False
+    return (
+        state["atomic_tail_active"] == 0 and
+        state["atomic_tail_stage"] == 0 and
+        state["atomic_tail_seq"] == state["atomic_tail_complete_count"] and
+        state["atomic_tail_seq"] == state["atomic_tail_finish_prepared_count"]
+    )
+
+
+def wait_for_kms_idle(out_dir: pathlib.Path, timeout_sec: float) -> None:
+    path = out_dir / "kms-idle-wait.after"
+    deadline = time.monotonic() + timeout_sec
+
+    with path.open("w") as out:
+        out.write(f"### wait_for_kms_idle timeout={timeout_sec:.1f}s\n")
+        while True:
+            result = subprocess.run(
+                ["sysctl", "-n", "dev.drm.0.state"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            state_path = out_dir / "drm_state.after_idle_last"
+            state_path.write_text(result.stdout)
+            state = parse_state(state_path)
+            if result.returncode == 0 and state_is_idle(state):
+                out.write("### idle=1\n")
+                out.write(f"### rc={result.returncode}\n")
+                return
+            if time.monotonic() >= deadline:
+                active = state.get("atomic_tail_active")
+                stage = state.get("atomic_tail_stage")
+                seq = state.get("atomic_tail_seq")
+                complete = state.get("atomic_tail_complete_count")
+                finish = state.get("atomic_tail_finish_prepared_count")
+                out.write(
+                    "### idle=0 "
+                    f"active={active} stage={stage} seq={seq} "
+                    f"complete={complete} finish={finish}\n"
+                )
+                out.write(f"### rc={result.returncode}\n")
+                return
+            time.sleep(0.1)
+
+
 def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -> None:
     env = os.environ.copy()
     if args.display:
@@ -331,6 +385,8 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
 
     if phase == "after" and args.run_console_dark_down:
         capture_console_dark_down(out_dir, args.dark_down_display_id)
+    if phase == "after":
+        wait_for_kms_idle(out_dir, args.kms_idle_timeout)
 
     run(["date"], out_dir / f"date.{phase}")
     run(["uname", "-a"], out_dir / f"uname.{phase}")
@@ -972,6 +1028,10 @@ def main() -> int:
                         help="displayId bit used by --run-console-dark-down")
     parser.add_argument("--allow-missing-x11", action="store_true",
                         help="allow report-only console/debug runs without an x11 phase")
+    parser.add_argument("--kms-idle-timeout", type=float, default=8.0,
+                        help="after phase only: wait this many seconds for "
+                             "atomic KMS tail/console restore to become idle "
+                             "before collecting the final snapshot")
     args = parser.parse_args()
 
     out_dir = choose_out_dir(args.phase, args.out_dir)
