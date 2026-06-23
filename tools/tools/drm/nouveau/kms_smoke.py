@@ -1040,6 +1040,13 @@ def report_wayland_glmark(out_dir: pathlib.Path, emit) -> None:
     emit(not re.search(r"Segmentation fault|signal 11|core dumped|DeviceLost",
                        text, re.I),
          "glmark2-wayland did not crash")
+    emit(not re.search(
+        r"QueuePresentKHR.*(-13|VK_ERROR_UNKNOWN)|"
+        r"queue-present\s+ret=-13|"
+        r"present\s+queue-present\s+ret=-13|"
+        r"VK_ERROR_UNKNOWN",
+        text, re.I),
+         "glmark2-wayland does not fail QueuePresentKHR")
     explicit_sync = "wp_linux_drm_syncobj_manager_v1" in text
     emit(bool(re.search(r"wl_surface#[0-9]+\.attach", text)),
          "glmark2-wayland attaches a Wayland buffer")
