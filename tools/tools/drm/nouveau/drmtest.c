@@ -3282,6 +3282,8 @@ check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
 {
 	struct raw_vblank_event raw_vblank;
 	struct sequence_event_state event_state;
+	struct sequence_event_state invalid_event_state;
+	struct drm_crtc_queue_sequence invalid_queue;
 	drmVBlank vblank;
 	drmVBlankSeqType vblank_type;
 	uint64_t sequence_before = 0;
@@ -3369,6 +3371,23 @@ check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
 	    "drmWaitVBlank event reaches queued sequence");
 	printf("    raw vblank event sequence=%u crtc_id=%u\n",
 	    raw_vblank.event.sequence, raw_vblank.event.crtc_id);
+
+	memset(&invalid_event_state, 0, sizeof(invalid_event_state));
+	memset(&invalid_queue, 0, sizeof(invalid_queue));
+	invalid_queue.crtc_id = crtc_id;
+	invalid_queue.flags = DRM_CRTC_SEQUENCE_RELATIVE | 0x80000000u;
+	invalid_queue.sequence = 1;
+	invalid_queue.user_data = (uint64_t)(uintptr_t)&invalid_event_state;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_CRTC_QUEUE_SEQUENCE, &invalid_queue);
+	saved_errno = errno;
+	check(ret != 0, "drmCrtcQueueSequence rejects unknown flags");
+	check(saved_errno == EINVAL,
+	    "drmCrtcQueueSequence unknown flags fail with EINVAL");
+	if (ret == 0) {
+		(void)wait_sequence_event(fd, &invalid_event_state, 1000,
+		    &saved_errno);
+	}
 
 	memset(&event_state, 0, sizeof(event_state));
 	user_data = (uint64_t)(uintptr_t)&event_state;

@@ -2278,6 +2278,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "drmWaitVBlank event preserves user_data",
         "drmWaitVBlank event reports active CRTC id",
         "drmWaitVBlank event reaches queued sequence",
+        "drmCrtcQueueSequence rejects unknown flags",
+        "drmCrtcQueueSequence unknown flags fail with EINVAL",
         "drmCrtcQueueSequence queues active CRTC event",
         "drmCrtcQueueSequence event arrives",
         "drmCrtcQueueSequence delivers exactly one event",
