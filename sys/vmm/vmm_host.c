@@ -30,3 +30,16 @@ vmm_host_device_count(const struct vmm_host *h)
 {
 	return h->device_count;
 }
+
+#ifdef _KERNEL
+int
+vmm_host_next_cpu(struct vmm_host *h)
+{
+	uint32_t n;
+
+	if (ncpus <= 1)
+		return 0;
+	n = h->next_cpu++ % (uint32_t)ncpus;
+	return (int)n;
+}
+#endif

@@ -14,10 +14,16 @@
 
 struct vmm_host {
 	uint32_t	device_count;	/* devices in the host pool */
+#ifdef _KERNEL
+	uint32_t	next_cpu;	/* round-robin vCPU placement cursor */
+#endif
 };
 
 void		vmm_host_init(struct vmm_host *h);
 void		vmm_host_add_device(struct vmm_host *h);
 uint32_t	vmm_host_device_count(const struct vmm_host *h);
+#ifdef _KERNEL
+int		vmm_host_next_cpu(struct vmm_host *h);
+#endif
 
 #endif /* VMM_HOST_H */

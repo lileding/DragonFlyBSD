@@ -84,6 +84,7 @@ vmm_machine_uninit(struct vmm_machine *m)
 		crfree(m->start_cred);
 		m->start_cred = NULL;
 	}
+	vmm_vcpu_uninit(&m->vcpu);
 	vmm_mem_release(&m->mem);
 	lockuninit(&m->lifecycle_lock);
 }
@@ -123,7 +124,8 @@ vmm_machine_start_is_cancelled(void *arg)
 }
 
 int
-vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred)
+vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
+    struct vmm_host *host)
 {
 	struct proc *worker;
 	struct lwp *worker_lwp;
@@ -145,9 +147,11 @@ vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred)
 	}
 	m->desired_stopped = 0;
 	m->start_cancel = 0;
+	vmm_vcpu_request_run(&m->vcpu);
 	if (!m->running && !m->starting) {
 		m->starting = 1;
 		m->start_cred = crhold(cred);
+		m->host = host;
 		vmm_machine_owner_hold(m);
 		fork_worker = 1;
 	}
@@ -160,6 +164,7 @@ out:
 		if (error) {
 			lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
 			m->starting = 0;
+			m->host = NULL;
 			if (m->start_cred != NULL) {
 				crfree(m->start_cred);
 				m->start_cred = NULL;
@@ -181,7 +186,7 @@ out:
 void
 vmm_machine_request_stopped(struct vmm_machine *m, int force)
 {
-	int release_mem = 0;
+	int release_now = 0;
 
 	(void)force;
 	lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
@@ -189,15 +194,16 @@ vmm_machine_request_stopped(struct vmm_machine *m, int force)
 		m->desired_stopped = 1;
 		m->start_cancel = 1;
 	}
-	if (m->running) {
+	vmm_vcpu_request_stop(&m->vcpu);
+	if (m->running && !vmm_vcpu_has_active(&m->vcpu)) {
 		m->running = 0;
-		release_mem = 1;
+		release_now = 1;
 		ev_push(m, EV_STOPPED);
 	}
 	lockmgr(&m->lifecycle_lock, LK_RELEASE);
 
 	wakeup(m);
-	if (release_mem)
+	if (release_now)
 		vmm_mem_release(&m->mem);
 }
 
@@ -206,6 +212,7 @@ vmm_machine_start_task(struct vmm_machine *m)
 {
 	struct ucred *cred;
 	int error;
+	int vcpu_owner = 0;
 	int started = 0;
 	int release_mem = 1;
 
@@ -227,20 +234,73 @@ vmm_machine_start_task(struct vmm_machine *m)
 		error = vmm_loader_run(&m->loader, &m->mem, cred,
 		    vmm_machine_start_is_cancelled, m);
 	}
+	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
+		vmm_machine_owner_hold(m);
+		vcpu_owner = 1;
+		error = vmm_vcpu_start_all(m, m->host);
+	}
 
 	lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
 	m->starting = 0;
+	m->host = NULL;
 	if (error == 0 && !vmm_machine_start_cancelled(m)) {
 		vmm_machine_start(m);
 		started = 1;
 		release_mem = 0;
+		vcpu_owner = 0;
+	} else {
+		vmm_vcpu_request_stop(&m->vcpu);
+		if (vmm_vcpu_has_active(&m->vcpu)) {
+			release_mem = 0;
+			vcpu_owner = 0;
+		}
 	}
 	lockmgr(&m->lifecycle_lock, LK_RELEASE);
 
 	if (!started && release_mem)
 		vmm_mem_release(&m->mem);
+	if (vcpu_owner)
+		vmm_machine_owner_release(m);
 	crfree(cred);
 	vmm_machine_owner_release(m);
+}
+
+int
+vmm_machine_vcpu_should_stop(struct vmm_machine *m)
+{
+	int stop;
+
+	lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
+	stop = m->desired_stopped || m->start_cancel || m->deleting ||
+	    m->vcpu.stop_requested;
+	lockmgr(&m->lifecycle_lock, LK_RELEASE);
+	return stop;
+}
+
+void
+vmm_machine_vcpu_exited(struct vmm_machine *m)
+{
+	int last;
+	int release_mem = 0;
+	int release_owner = 0;
+
+	lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
+	last = vmm_vcpu_note_exit(&m->vcpu);
+	if (last) {
+		if (m->running) {
+			m->running = 0;
+			ev_push(m, EV_STOPPED);
+		}
+		release_mem = 1;
+		release_owner = 1;
+		wakeup(m);
+	}
+	lockmgr(&m->lifecycle_lock, LK_RELEASE);
+
+	if (release_mem)
+		vmm_mem_release(&m->mem);
+	if (release_owner)
+		vmm_machine_owner_release(m);
 }
 
 static void
@@ -380,7 +440,13 @@ vmm_machine_begin_delete(struct vmm_machine *m)
 	m->deleting = 1;
 	m->desired_stopped = 1;
 	m->start_cancel = 1;
+#ifdef _KERNEL
+	vmm_vcpu_request_stop(&m->vcpu);
+	if (m->running && !vmm_vcpu_has_active(&m->vcpu))
+		m->running = 0;
+#else
 	m->running = 0;
+#endif
 	ev_push(m, EV_DELETED);
 #ifdef _KERNEL
 	lockmgr(&m->lifecycle_lock, LK_RELEASE);

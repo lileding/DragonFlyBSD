@@ -318,7 +318,8 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
-	error = vmm_machine_request_running(&m->machine, ap->a_cred);
+	error = vmm_machine_request_running(&m->machine, ap->a_cred,
+	    &VFS_TO_VMMFS(ap->a_dvp->v_mount)->host);
 	if (error)
 		return error;
 

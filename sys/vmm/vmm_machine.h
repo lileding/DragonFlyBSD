@@ -24,6 +24,7 @@
 
 #ifdef _KERNEL
 struct ucred;
+struct vmm_host;
 
 struct vmm_machine_owner_ops {
 	void	(*hold)(void *arg);
@@ -44,6 +45,7 @@ struct vmm_machine {
 #ifdef _KERNEL
 	struct lock	lifecycle_lock;
 	struct ucred	*start_cred;
+	struct vmm_host	*host;
 	const struct vmm_machine_owner_ops *owner_ops;
 	void		*owner_arg;
 #endif
@@ -86,8 +88,11 @@ void	vmm_machine_start_worker_done(struct vmm_machine *m, int started);
 void	vmm_machine_stop(struct vmm_machine *m, int force);
 void	vmm_machine_start(struct vmm_machine *m);
 #ifdef _KERNEL
-int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred);
+int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
+	    struct vmm_host *host);
 void	vmm_machine_request_stopped(struct vmm_machine *m, int force);
+int	vmm_machine_vcpu_should_stop(struct vmm_machine *m);
+void	vmm_machine_vcpu_exited(struct vmm_machine *m);
 #endif
 
 /* Lease reference counting. */

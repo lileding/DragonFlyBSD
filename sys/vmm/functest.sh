@@ -252,16 +252,19 @@ while [ $i -lt 8 ]; do
 	echo force > $M/flaprun/stopped 2>/dev/null
 	i=$((i+1))
 done
+cat $M/flaprun/events >/dev/null
 rm $M/flaprun/stopped; ckok "flap running final start request" $?
 wait_file /tmp/vmmld_dummy.probe; ckok "flap running worker produced probe" $?
 wait_event $M/flaprun started; ckok "flap running started event" $?
 ckeq "flap running no stopped" "$(ls $M/flaprun | grep -c '^stopped$')" "0"
 echo force > $M/flaprun/stopped; ckok "flap running stop" $?
+wait_event $M/flaprun stopped; ckok "flap running stopped event" $?
 rmdir $M/flaprun; ckok "rmdir flaprun" $?
 
 # --- stop (echo apic|force > stopped), idempotent ---
 echo apic > $M/vm0/stopped; ckok "stop apic" $?
 ckeq "vm0 has stopped" "$(ls $M/vm0 | grep -c '^stopped$')" "1"
+wait_event $M/vm0 stopped; ckok "vm0 stopped event" $?
 echo force > $M/vm0/stopped; ckok "re-stop force idempotent" $?
 
 # --- read-only files reject writes / removal ---
@@ -275,7 +278,7 @@ ckeq "events on create" "$(cat $M/ev/events | tr '\n' ',')" "created,stopped,"
 ckeq "events one-shot drained" "$(cat $M/ev/events)" ""
 echo 1 > $M/ev/vcpu; echo 2M > $M/ev/mem; echo /tmp/vmmld_dummy > $M/ev/loader
 rm $M/ev/stopped; wait_event $M/ev started; ckok "event on start" $?
-echo apic > $M/ev/stopped; ckeq "event on stop" "$(cat $M/ev/events | tr '\n' ',')" "stopped,"
+echo apic > $M/ev/stopped; wait_event $M/ev stopped; ckok "event on stop" $?
 echo apic > $M/ev/stopped; ckeq "idempotent stop -> no event" "$(cat $M/ev/events)" ""
 rmdir $M/ev; ckok "rmdir ev" $?
 
@@ -285,6 +288,7 @@ rm $M/rr/stopped; ckok "start rr" $?
 wait_event $M/rr started; ckok "rr started event" $?
 rmdir $M/rr 2>/dev/null; ckfail "rmdir running -> EBUSY" $?
 echo apic > $M/rr/stopped
+wait_event $M/rr stopped; ckok "rr stopped event" $?
 rmdir $M/rr; ckok "rmdir after stop" $?
 
 # --- lease: open/close reference counting (M3b) ---
