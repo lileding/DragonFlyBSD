@@ -4886,6 +4886,83 @@ remove_framebuffer(int fd, uint32_t fb_id, const char *what)
 }
 
 /*
+ * check_setplane_lookup_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  Owns one temporary dumb BO and one framebuffer
+ *   used only to force a valid-fb/bad-CRTC lookup path; both are destroyed
+ *   before return.
+ *
+ * Lifetime:
+ *   Invalid plane, framebuffer, and CRTC ids must be rejected before the DRM
+ *   core builds atomic state or calls any driver plane hooks.  The temporary
+ *   framebuffer is never attached to a plane.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM SETPLANE object
+ *   lookup ordering without changing scanout state.
+ */
+static void
+check_setplane_lookup_error_contract(int fd)
+{
+	drmModePlaneResPtr planes;
+	uint32_t fb_id = 0;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	uint32_t plane_id;
+	int saved_errno;
+	int ret;
+
+	planes = drmModeGetPlaneResources(fd);
+	check(planes != NULL, "SETPLANE lookup probe reads plane resources");
+	if (planes == NULL)
+		return;
+	check(planes->count_planes > 0,
+	    "SETPLANE lookup probe finds visible plane");
+	if (planes->count_planes == 0) {
+		drmModeFreePlaneResources(planes);
+		return;
+	}
+	plane_id = planes->planes[0];
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects bad plane id");
+	check(saved_errno == ENOENT, "SETPLANE bad plane id fails with ENOENT");
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, plane_id, 0, 0xffffffffu, 0, 0, 0, 0, 0,
+	    0, 0, 0, 0);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "SETPLANE bad framebuffer id fails with ENOENT");
+
+	if (!create_dumb_buffer_for(fd, 64, 64, 32, &handle, &pitch,
+	    "CREATE_DUMB succeeds for SETPLANE lookup probe"))
+		goto out_planes;
+	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888, handle,
+	    pitch, &fb_id, "ADDFB2 accepts SETPLANE lookup probe framebuffer"))
+		goto out_bo;
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, plane_id, 0, fb_id, 0, 0, 0, 64, 64, 0,
+	    0, 64 << 16, 64 << 16);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects bad CRTC id");
+	check(saved_errno == ENOENT, "SETPLANE bad CRTC id fails with ENOENT");
+
+out_bo:
+	remove_framebuffer(fd, fb_id,
+	    "RMFB succeeds for SETPLANE lookup probe framebuffer");
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for SETPLANE lookup probe BO");
+out_planes:
+	drmModeFreePlaneResources(planes);
+}
+
+/*
  * check_same_device_prime_framebuffer_contract()
  *
  * Ownership:
@@ -9033,6 +9110,7 @@ main(void)
 	check_property_read_error_contract(fd);
 	check_property_set_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
+	check_setplane_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
