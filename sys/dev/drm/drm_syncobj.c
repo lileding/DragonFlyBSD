@@ -1335,6 +1335,91 @@ static void drm_syncobj_array_free(struct drm_syncobj **syncobjs,
 	kfree(syncobjs);
 }
 
+#define DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT (5 * hz)
+
+static int
+drm_syncobj_find_fence_for_transfer(struct drm_file *file_private,
+				    u32 handle, u64 point, u32 flags,
+				    struct dma_fence **fence)
+{
+	struct drm_syncobj *syncobj;
+	uint64_t wait_point;
+	signed long timeout;
+	int ret;
+
+	if (flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
+		return -EINVAL;
+
+	ret = drm_syncobj_find_fence(file_private, handle, point, fence);
+	if (ret == 0 || !(flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT))
+		return ret;
+
+	syncobj = drm_syncobj_find(file_private, handle);
+	if (syncobj == NULL)
+		return -ENOENT;
+
+	wait_point = point;
+	timeout = drm_syncobj_array_wait_timeout(&syncobj, &wait_point, 1,
+	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
+	    DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT, NULL);
+	drm_syncobj_put(syncobj);
+	if (timeout < 0)
+		return (int)timeout;
+
+	return drm_syncobj_find_fence(file_private, handle, point, fence);
+}
+
+int
+drm_syncobj_transfer_ioctl(struct drm_device *dev, void *data,
+			   struct drm_file *file_private)
+{
+	struct drm_syncobj_transfer *args = data;
+	struct drm_syncobj *dst_syncobj;
+	struct dma_fence *fence = NULL;
+	struct dma_fence_chain *chain = NULL;
+	int ret;
+
+	if (!drm_core_check_feature(dev, DRIVER_SYNCOBJ))
+		return -ENODEV;
+
+	if (args->pad)
+		return -EINVAL;
+
+	if (args->dst_point != 0) {
+		chain = dma_fence_chain_alloc();
+		if (chain == NULL)
+			return -ENOMEM;
+	}
+
+	dst_syncobj = drm_syncobj_find(file_private, args->dst_handle);
+	if (dst_syncobj == NULL) {
+		dma_fence_chain_free(chain);
+		return -ENOENT;
+	}
+
+	ret = drm_syncobj_find_fence_for_transfer(file_private,
+	    args->src_handle, args->src_point, args->flags, &fence);
+	if (ret < 0)
+		goto out;
+
+	if (args->dst_point != 0) {
+		drm_syncobj_add_point(dst_syncobj, chain, fence,
+		    args->dst_point);
+		chain = NULL;
+		fence = NULL;
+	} else {
+		drm_syncobj_replace_fence(dst_syncobj, 0, fence);
+		dma_fence_put(fence);
+		fence = NULL;
+	}
+
+out:
+	dma_fence_put(fence);
+	dma_fence_chain_free(chain);
+	drm_syncobj_put(dst_syncobj);
+	return ret;
+}
+
 /*
  * Ownership:
  *   On success, transfers one syncobj reference to *syncobj_out. On failure,
