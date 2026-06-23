@@ -638,7 +638,7 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
 	struct drm_mode_list_lessees *arg = data;
 	struct drm_master *owner;
 	struct drm_master *lessee;
-	uint64_t __user *lessee_ptr;
+	uint32_t __user *lessee_ptr;
 	uint32_t count = 0;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
@@ -656,7 +656,7 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
 		if (!drm_lease_master_has_objects_locked(lessee))
 			continue;
 		if (count < arg->count_lessees &&
-		    put_user((uint64_t)lessee->lessee_id, lessee_ptr + count)) {
+		    put_user((uint32_t)lessee->lessee_id, lessee_ptr + count)) {
 			mutex_unlock(&dev->mode_config.idr_mutex);
 			return -EFAULT;
 		}

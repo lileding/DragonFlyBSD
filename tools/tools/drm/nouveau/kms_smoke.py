@@ -1687,6 +1687,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM lease lessee GET_LEASE returns CRTC",
         "DRM lease lessee GET_LEASE returns primary plane",
         "DRM lease LIST_LESSEES succeeds",
+        "DRM lease LIST_LESSEES uses u32 lessee id stride",
         "DRM lease LIST_LESSEES returns lessee",
         "DRM lease lessee LIST_LESSEES succeeds",
         "DRM lease lessee LIST_LESSEES returns empty list",
