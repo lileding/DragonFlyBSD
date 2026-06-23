@@ -912,6 +912,10 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "legacy DPMS OFF leaves no pending display audit",
         "legacy DPMS ON restore succeeds",
         "legacy DPMS ON leaves no pending display audit",
+        "legacy SetCrtc disable succeeds",
+        "legacy SetCrtc disable leaves no pending display audit",
+        "legacy SetCrtc restore succeeds",
+        "legacy SetCrtc restore leaves no pending display audit",
     ):
         emit(text in drmtest_after, f"drmtest.after has {text}")
 
