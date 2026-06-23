@@ -446,6 +446,18 @@ require_property(int fd, uint32_t object_id, uint32_t object_type,
 	check(has_property(fd, object_id, object_type, name), text);
 }
 
+static void
+check_property_absent(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, const char *object_name, const char *object_label)
+{
+	char text[192];
+
+	snprintf(text, sizeof(text),
+	    "%s does not expose unsupported %s property %s",
+	    object_name, object_label, name);
+	check(!has_property(fd, object_id, object_type, name), text);
+}
+
 static bool
 get_property_value_checked(int fd, uint32_t object_id, uint32_t object_type,
     const char *name, uint64_t *value_out, const char *object_name)
@@ -659,6 +671,14 @@ check_connector_property_contract(int fd, uint32_t connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "dithering depth", object_name, "auto");
 	check_range_property_value(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "max bpc", object_name, 8, 8, 8);
+	check_property_absent(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "HDR_OUTPUT_METADATA", object_name, "connector");
+	check_property_absent(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "Colorspace", object_name, "connector");
+	check_property_absent(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "content type", object_name, "connector");
+	check_property_absent(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "vrr_capable", object_name, "connector");
 	switch (connector_type) {
 	case DRM_MODE_CONNECTOR_DVID:
 	case DRM_MODE_CONNECTOR_DVII:
@@ -731,6 +751,29 @@ check_crtc_sync_property_contract(int fd, uint32_t crtc_id,
 {
 	check_range_property_value(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
 	    "OUT_FENCE_PTR", object_name, 0, UINT64_MAX, 0);
+}
+
+/*
+ * check_crtc_unsupported_extension_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM CRTC object ID and opens properties through libdrm.
+ *   Every drmModePropertyPtr returned by libdrm is released before return.
+ *
+ * Lifetime:
+ *   Reads only public KMS property metadata.  It does not mutate CRTC state or
+ *   trigger an atomic commit.
+ *
+ * Threading:
+ *   Single-threaded probe.  The absence contract is static for this driver
+ *   until the corresponding hardware semantics are implemented end-to-end.
+ */
+static void
+check_crtc_unsupported_extension_contract(int fd, uint32_t crtc_id,
+    const char *object_name)
+{
+	check_property_absent(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "VRR_ENABLED", object_name, "CRTC");
 }
 
 /*
@@ -2263,6 +2306,7 @@ check_crtc(int fd, uint32_t crtc_id)
 	dump_properties(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name);
 	check_crtc_color_property_contract(fd, crtc_id, name);
 	check_crtc_sync_property_contract(fd, crtc_id, name);
+	check_crtc_unsupported_extension_contract(fd, crtc_id, name);
 	check_atomic_crtc_color_contract(fd, crtc_id);
 }
 
