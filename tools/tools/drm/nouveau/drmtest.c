@@ -298,6 +298,39 @@ id_in_list(const uint32_t *ids, int count, uint32_t id)
 	return false;
 }
 
+/*
+ * check_unique_ids()
+ *
+ * Ownership:
+ *   Borrows a libdrm-owned ID array for the duration of the check.  The helper
+ *   does not take references to DRM objects and does not close or free the
+ *   array.
+ *
+ * Lifetime:
+ *   Valid only for the current libdrm resources snapshot.  Later hotplug or
+ *   modeset activity may legitimately change future snapshots.
+ *
+ * Threading:
+ *   Single-threaded read-only UAPI validation.  No driver-private locks are
+ *   held or required.
+ */
+static void
+check_unique_ids(const uint32_t *ids, int count, const char *message)
+{
+	bool unique = true;
+
+	for (int i = 0; i < count; i++) {
+		for (int j = i + 1; j < count; j++) {
+			if (ids[i] != ids[j])
+				continue;
+			printf("    duplicate id %u at indexes %d and %d\n",
+			    ids[i], i, j);
+			unique = false;
+		}
+	}
+	check(unique, message);
+}
+
 static const char *
 fourcc_name(uint32_t format)
 {
@@ -2243,6 +2276,8 @@ check_connector(int fd, drmModeConnector *connector,
 	dump_properties(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
 	    name);
 	check(connector->count_encoders > 0, "connector has at least one encoder");
+	check_unique_ids(connector->encoders, connector->count_encoders,
+	    "connector encoder ids are unique");
 	for (int i = 0; i < connector->count_encoders; i++) {
 		check(id_in_list(resources->encoders, resources->count_encoders,
 		    connector->encoders[i]),
@@ -5579,6 +5614,12 @@ check_planes(int fd, const drmModeRes *mode_resources)
 
 	printf("planes: count=%u\n", resources->count_planes);
 	check(resources->count_planes > 0, "at least one KMS plane exposed");
+	if (resources->count_planes <= INT_MAX) {
+		check_unique_ids(resources->planes, (int)resources->count_planes,
+		    "plane resource ids are unique");
+	} else {
+		check(false, "plane resource ids are unique");
+	}
 	for (uint32_t i = 0; i < resources->count_planes; i++) {
 		drmModePlanePtr plane;
 		char name[64];
@@ -5713,6 +5754,12 @@ main(void)
 	check(resources->count_connectors > 0, "at least one connector exposed");
 	check(resources->count_crtcs > 0, "at least one CRTC exposed");
 	check(resources->count_encoders > 0, "at least one encoder exposed");
+	check_unique_ids(resources->connectors, resources->count_connectors,
+	    "connector resource ids are unique");
+	check_unique_ids(resources->crtcs, resources->count_crtcs,
+	    "CRTC resource ids are unique");
+	check_unique_ids(resources->encoders, resources->count_encoders,
+	    "encoder resource ids are unique");
 	check_mode_config_contract(fd, resources);
 	check_framebuffer_uapi_contract(fd);
 	check_encoders(fd, resources);
@@ -5734,6 +5781,9 @@ main(void)
 	if (expect_no_connected)
 		check(connected_count == 0,
 		    "no connected connector exposed when requested");
+	else
+		check(connected_count > 0,
+		    "at least one connected connector exposed");
 
 	for (int i = 0; i < resources->count_crtcs; i++)
 		check_crtc(fd, resources->crtcs[i]);
