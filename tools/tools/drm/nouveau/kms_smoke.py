@@ -520,9 +520,13 @@ def has_error_text(text: str) -> bool:
 
 LEFTOVER_BASENAMES = {
     "Xorg",
+    "Xwayland",
     "glxgears",
+    "hikari",
     "firefox",
     "firefox-bin",
+    "sway",
+    "swayfx",
 }
 
 
@@ -551,6 +555,64 @@ def leftover_graphics_commands(ps_text: str) -> list[str]:
         if command_basename(command) in LEFTOVER_BASENAMES:
             leftovers.append(command)
     return leftovers
+
+
+def is_software_renderer(text: str) -> bool:
+    return bool(re.search(
+        r"llvmpipe|softpipe|software rasterizer",
+        text,
+        re.I,
+    ))
+
+
+def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
+    logs = sorted(out_dir.glob("*sway*.log"))
+    if not logs:
+        return
+
+    text = "\n".join(path.read_text(errors="replace") for path in logs)
+    emit(bool(re.search(r"Initializing DRM backend for /dev/dri/card0 \(nouveau\)", text)),
+         "Wayland log uses nouveau DRM backend")
+    emit("Using atomic DRM interface" in text,
+         "Wayland log uses atomic DRM interface")
+    emit("ADDFB2 modifiers supported" in text,
+         "Wayland log has ADDFB2 modifier support")
+    emit(bool(re.search(r"EGL driver name:\s*zink\b", text, re.I)),
+         "Wayland log uses zink EGL driver")
+    emit(bool(re.search(r"GL renderer:\s*zink .*NVK|GL renderer:.*MESA_NVK", text, re.I)),
+         "Wayland log uses zink/NVK renderer")
+    emit(not is_software_renderer(text),
+         "Wayland log is not software renderer")
+    emit(bool(re.search(r"Allocated .* GBM buffer .*BLOCK_LINEAR_2D", text)),
+         "Wayland log allocates NVIDIA block-linear GBM buffer")
+    emit(bool(re.search(r"Commit of [0-9]+ outputs succeeded", text)),
+         "Wayland log commits output successfully")
+
+    if "wl_display_terminate" in text:
+        print("INFO Wayland compositor hit wl_display_terminate assert on exit")
+    if "Starting Xwayland" in text or "Xserver is ready" in text:
+        emit(bool(re.search(r"Starting Xwayland on :[0-9]+", text)),
+             "Xwayland server started")
+        emit("Xserver is ready" in text,
+             "Xwayland server became ready")
+
+
+def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
+    path = out_dir / "glxinfo.xwayland"
+    if not path.exists():
+        return
+
+    text = path.read_text(errors="replace")
+    emit(bool(re.search(r"direct rendering:\s*Yes", text, re.I)),
+         "Xwayland glxinfo has direct rendering")
+    emit(bool(re.search(r"OpenGL renderer string:.*zink.*NVK|Device: zink .*NVK", text, re.I)),
+         "Xwayland glxinfo uses zink/NVK renderer")
+    emit(bool(re.search(r"Accelerated:\s*yes", text, re.I)),
+         "Xwayland glxinfo is accelerated")
+    emit(not is_software_renderer(text),
+         "Xwayland glxinfo is not software renderer")
+    emit(not has_error_text(text),
+         "Xwayland glxinfo output has no errors")
 
 
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
@@ -828,8 +890,11 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             text = captured_text(glxinfo)
             emit(bool(re.search(r"zink|NVK|Vulkan", text, re.I)),
                  "glxinfo shows zink/NVK/Vulkan")
-            emit(not re.search(r"llvmpipe|softpipe|software rasterizer", text, re.I),
+            emit(not is_software_renderer(text),
                  "glxinfo is not software rasterizer")
+
+    report_wayland_log(out_dir, emit)
+    report_xwayland_glxinfo(out_dir, emit)
 
     dark_before = parse_state(out_dir / "drm_state.console_dark_before")
     dark_after = parse_state(out_dir / "drm_state.console_dark_after")
