@@ -2436,16 +2436,74 @@ check_encoders(int fd, const drmModeRes *resources)
 }
 
 static void
+check_crtc_route_state_contract(int fd, uint32_t crtc_id, const char *name);
+
+static void
 check_crtc(int fd, uint32_t crtc_id)
 {
 	char name[64];
 
 	snprintf(name, sizeof(name), "crtc %u", crtc_id);
 	dump_properties(fd, crtc_id, DRM_MODE_OBJECT_CRTC, name);
+	check_crtc_route_state_contract(fd, crtc_id, name);
 	check_crtc_color_property_contract(fd, crtc_id, name);
 	check_crtc_sync_property_contract(fd, crtc_id, name);
 	check_crtc_unsupported_extension_contract(fd, crtc_id, name);
 	check_atomic_crtc_color_contract(fd, crtc_id);
+}
+
+/*
+ * check_crtc_route_state_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and CRTC object ID from the caller.  The temporary
+ *   drmModeCrtc snapshot is owned by this function and released before return.
+ *
+ * Lifetime:
+ *   Valid only for the current KMS snapshot.  A later modeset, DPMS change, or
+ *   lastclose restore may legitimately change ACTIVE, MODE_ID, buffer_id, and
+ *   mode geometry.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI validation.  It does not submit modeset
+ *   work and does not take driver-private locks.
+ */
+static void
+check_crtc_route_state_contract(int fd, uint32_t crtc_id, const char *name)
+{
+	drmModeCrtcPtr crtc;
+	uint64_t active = 0;
+	uint64_t mode_id = 0;
+	bool active_enabled;
+
+	crtc = drmModeGetCrtc(fd, crtc_id);
+	check(crtc != NULL, "CRTC state is readable");
+	if (crtc == NULL)
+		return;
+
+	if (!get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "ACTIVE", &active, name) ||
+	    !get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "MODE_ID", &mode_id, name)) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+
+	active_enabled = active != 0;
+	check(active_enabled == (mode_id != 0),
+	    "CRTC ACTIVE and MODE_ID enable state match");
+	check(active_enabled == (crtc->mode_valid != 0),
+	    "CRTC ACTIVE matches legacy mode_valid");
+
+	if (active_enabled) {
+		check(crtc->buffer_id != 0, "active CRTC has framebuffer");
+		check(crtc->width > 0 && crtc->height > 0,
+		    "active CRTC has non-zero size");
+	} else {
+		check(crtc->buffer_id == 0, "inactive CRTC has no framebuffer");
+	}
+
+	drmModeFreeCrtc(crtc);
 }
 
 static bool
