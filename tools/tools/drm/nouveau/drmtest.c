@@ -3370,6 +3370,58 @@ check_non_master_display_mutation_contract(int master_fd,
 		    "non-master legacy pageflip fails with EACCES");
 	}
 
+	{
+		drmModeAtomicReqPtr req;
+
+		req = drmModeAtomicAlloc();
+		check(req != NULL,
+		    "non-master atomic TEST_ONLY allocates request");
+		if (req != NULL) {
+			if (!atomic_add_plane_property(master_fd, req,
+			    plane_id, "FB_ID", snapshot.fb_id) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "CRTC_ID", snapshot.crtc_id) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "CRTC_X", snapshot.crtc_x) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "CRTC_Y", snapshot.crtc_y) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "CRTC_W", snapshot.crtc_w) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "CRTC_H", snapshot.crtc_h) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "SRC_X", snapshot.src_x) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "SRC_Y", snapshot.src_y) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "SRC_W", snapshot.src_w) ||
+			    !atomic_add_plane_property(master_fd, req,
+			    plane_id, "SRC_H", snapshot.src_h)) {
+				check(false,
+				    "non-master atomic TEST_ONLY request describes current primary plane");
+			} else {
+				check(true,
+				    "non-master atomic TEST_ONLY request describes current primary plane");
+				errno = 0;
+				ret = drmModeAtomicCommit(secondary_fd, req,
+				    DRM_MODE_ATOMIC_TEST_ONLY |
+				    DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+				saved_errno = errno;
+				check(ret != 0,
+				    "non-master atomic TEST_ONLY commit is denied");
+				if (ret == 0) {
+					printf("    non-master atomic TEST_ONLY unexpectedly succeeded\n");
+				} else {
+					printf("    non-master atomic TEST_ONLY errno=%d\n",
+					    saved_errno);
+					check(saved_errno == EACCES,
+					    "non-master atomic TEST_ONLY commit fails with EACCES");
+				}
+			}
+			drmModeAtomicFree(req);
+		}
+	}
+
 	check(close(secondary_fd) == 0,
 	    "non-master display mutation closes secondary card fd");
 }
