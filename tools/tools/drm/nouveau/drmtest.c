@@ -124,6 +124,13 @@ struct pageflip_event_state {
 	unsigned int tv_usec;
 };
 
+struct sequence_event_state {
+	uint32_t count;
+	uint64_t sequence;
+	uint64_t ns;
+	uint64_t user_data;
+};
+
 struct modeset_counter_snapshot {
 	uint64_t atomic_tail_disable_op_count;
 	uint64_t atomic_tail_enable_op_count;
@@ -829,6 +836,21 @@ pageflip_event_handler(int fd, unsigned int sequence, unsigned int tv_sec,
 	state->tv_usec = tv_usec;
 }
 
+static void
+sequence_event_handler(int fd, uint64_t sequence, uint64_t ns,
+    uint64_t user_data)
+{
+	struct sequence_event_state *state = (void *)(uintptr_t)user_data;
+
+	(void)fd;
+	if (state == NULL)
+		return;
+	state->count++;
+	state->sequence = sequence;
+	state->ns = ns;
+	state->user_data = user_data;
+}
+
 /*
  * wait_pageflip_event()
  *
@@ -858,6 +880,77 @@ wait_pageflip_event(int fd, struct pageflip_event_state *state,
 	memset(&context, 0, sizeof(context));
 	context.version = DRM_EVENT_CONTEXT_VERSION;
 	context.page_flip_handler = pageflip_event_handler;
+
+	kq = kqueue();
+	if (kq < 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	EV_SET(&change, (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_ENABLE |
+	    EV_ONESHOT, 0, 0, NULL);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_nsec = (timeout_ms % 1000) * 1000000L;
+
+	while (state->count == 0) {
+		errno = 0;
+		ret = kevent(kq, &change, 1, &event, 1, &timeout);
+		*saved_errno = errno;
+		if (ret != 1) {
+			if (close(kq) != 0 && ret >= 0)
+				*saved_errno = errno;
+			return ret == 0 ? 0 : -1;
+		}
+		if ((event.flags & EV_ERROR) != 0) {
+			*saved_errno = (int)event.data;
+			(void)close(kq);
+			return -1;
+		}
+		errno = 0;
+		ret = drmHandleEvent(fd, &context);
+		*saved_errno = errno;
+		if (ret != 0) {
+			(void)close(kq);
+			return -1;
+		}
+	}
+
+	if (close(kq) != 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+	return 1;
+}
+
+/*
+ * wait_sequence_event()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and caller-owned event state.  It owns one temporary
+ *   kqueue descriptor and closes it before return.
+ *
+ * Lifetime:
+ *   Waits for one DRM CRTC sequence event after drmCrtcQueueSequence() has
+ *   queued it.  The callback writes only into the caller-provided event state.
+ *
+ * Threading:
+ *   Single-threaded userspace wait.  The kernel may deliver unrelated DRM
+ *   events on the same fd; libdrm dispatches them synchronously here.
+ */
+static int
+wait_sequence_event(int fd, struct sequence_event_state *state,
+    int timeout_ms, int *saved_errno)
+{
+	drmEventContext context;
+	struct kevent change;
+	struct kevent event;
+	struct timespec timeout;
+	int kq;
+	int ret;
+
+	memset(&context, 0, sizeof(context));
+	context.version = DRM_EVENT_CONTEXT_VERSION;
+	context.sequence_handler = sequence_event_handler;
 
 	kq = kqueue();
 	if (kq < 0) {
@@ -2183,6 +2276,126 @@ find_active_crtc(int fd, const drmModeRes *resources, uint32_t *crtc_id_out,
 }
 
 static bool
+wait_vblank_type_for_crtc_index(uint32_t crtc_index,
+    drmVBlankSeqType *type_out)
+{
+	if (crtc_index >= 32)
+		return false;
+	*type_out = DRM_VBLANK_RELATIVE |
+	    (crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT);
+	return true;
+}
+
+/*
+ * check_vblank_sequence_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and active CRTC identity from the caller.  It does not
+ *   retain the CRTC object ID or any event pointer after return.
+ *
+ * Lifetime:
+ *   Runs against the currently active scanout head.  It does not change
+ *   modes, framebuffers, planes, connector routing, or cursor state.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The kernel owns vblank references and
+ *   pending event state until each ioctl or queued event completes.
+ */
+static void
+check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
+    uint32_t crtc_index)
+{
+	struct sequence_event_state event_state;
+	drmVBlank vblank;
+	drmVBlankSeqType vblank_type;
+	uint64_t sequence_before = 0;
+	uint64_t sequence_after = 0;
+	uint64_t sequence_ns = 0;
+	uint64_t queued_sequence = 0;
+	uint64_t user_data;
+	int saved_errno = 0;
+	int ret;
+
+	errno = 0;
+	ret = drmCrtcGetSequence(fd, crtc_id, &sequence_before,
+	    &sequence_ns);
+	if (ret != 0) {
+		printf("    drmCrtcGetSequence errno=%d\n", errno);
+		check(false, "drmCrtcGetSequence succeeds on active CRTC");
+		return;
+	}
+	check(true, "drmCrtcGetSequence succeeds on active CRTC");
+	printf("    active crtc %u sequence=%llu ns=%llu\n", crtc_id,
+	    (unsigned long long)sequence_before,
+	    (unsigned long long)sequence_ns);
+
+	if (!wait_vblank_type_for_crtc_index(crtc_index, &vblank_type)) {
+		check(false, "active CRTC index fits legacy WAIT_VBLANK UAPI");
+		return;
+	}
+	check(true, "active CRTC index fits legacy WAIT_VBLANK UAPI");
+
+	memset(&vblank, 0, sizeof(vblank));
+	vblank.request.type = vblank_type;
+	vblank.request.sequence = 1;
+	errno = 0;
+	ret = drmWaitVBlank(fd, &vblank);
+	if (ret != 0) {
+		printf("    drmWaitVBlank errno=%d\n", errno);
+		check(false, "drmWaitVBlank relative wait succeeds on active CRTC");
+		return;
+	}
+	check(true, "drmWaitVBlank relative wait succeeds on active CRTC");
+	printf("    wait_vblank sequence=%u time=%ld.%06ld\n",
+	    vblank.reply.sequence, vblank.reply.tval_sec,
+	    vblank.reply.tval_usec);
+
+	errno = 0;
+	ret = drmCrtcGetSequence(fd, crtc_id, &sequence_after,
+	    &sequence_ns);
+	if (ret != 0) {
+		printf("    drmCrtcGetSequence after wait errno=%d\n", errno);
+		check(false, "drmCrtcGetSequence succeeds after WAIT_VBLANK");
+		return;
+	}
+	check(true, "drmCrtcGetSequence succeeds after WAIT_VBLANK");
+	check(sequence_after != sequence_before,
+	    "WAIT_VBLANK advances active CRTC sequence");
+
+	memset(&event_state, 0, sizeof(event_state));
+	user_data = (uint64_t)(uintptr_t)&event_state;
+	errno = 0;
+	ret = drmCrtcQueueSequence(fd, crtc_id, DRM_CRTC_SEQUENCE_RELATIVE,
+	    1, &queued_sequence, user_data);
+	if (ret != 0) {
+		printf("    drmCrtcQueueSequence errno=%d\n", errno);
+		check(false, "drmCrtcQueueSequence queues active CRTC event");
+		return;
+	}
+	check(true, "drmCrtcQueueSequence queues active CRTC event");
+	printf("    queued crtc sequence=%llu\n",
+	    (unsigned long long)queued_sequence);
+
+	ret = wait_sequence_event(fd, &event_state, 2000, &saved_errno);
+	if (ret != 1) {
+		printf("    sequence event wait ret=%d errno=%d\n", ret,
+		    saved_errno);
+		check(false, "drmCrtcQueueSequence event arrives");
+		return;
+	}
+	check(true, "drmCrtcQueueSequence event arrives");
+	check(event_state.count == 1,
+	    "drmCrtcQueueSequence delivers exactly one event");
+	check(event_state.user_data == user_data,
+	    "drmCrtcQueueSequence preserves user_data");
+	check(event_state.sequence >= queued_sequence,
+	    "drmCrtcQueueSequence event reaches queued sequence");
+	printf("    sequence event sequence=%llu ns=%llu\n",
+	    (unsigned long long)event_state.sequence,
+	    (unsigned long long)event_state.ns);
+}
+
+static bool
 find_active_connector_for_crtc(int fd, const drmModeRes *resources,
     uint32_t crtc_id, uint32_t *connector_id_out)
 {
@@ -2375,6 +2588,18 @@ destroy_dumb_buffer_for(int fd, uint32_t handle, const char *what)
 	memset(&destroy, 0, sizeof(destroy));
 	destroy.handle = handle;
 	check(drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) == 0, what);
+}
+
+static void
+close_gem_handle_for(int fd, uint32_t handle, const char *what)
+{
+	struct drm_gem_close close_args;
+
+	if (handle == 0)
+		return;
+	memset(&close_args, 0, sizeof(close_args));
+	close_args.handle = handle;
+	check(drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &close_args) == 0, what);
 }
 
 static bool
@@ -2735,6 +2960,415 @@ remove_framebuffer(int fd, uint32_t fb_id, const char *what)
 	if (fb_id == 0)
 		return;
 	check(drmModeRmFB(fd, fb_id) == 0, what);
+}
+
+static void
+close_fb2_handles(int fd, const drmModeFB2 *fb2, const char *what)
+{
+	uint32_t closed[4] = { 0 };
+	uint32_t closed_count = 0;
+
+	for (uint32_t i = 0; i < 4; i++) {
+		bool duplicate = false;
+
+		if (fb2->handles[i] == 0)
+			continue;
+		for (uint32_t j = 0; j < closed_count; j++) {
+			if (closed[j] == fb2->handles[i]) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate)
+			continue;
+		close_gem_handle_for(fd, fb2->handles[i], what);
+		closed[closed_count++] = fb2->handles[i];
+	}
+}
+
+/*
+ * check_getfb_non_master_metadata_contract()
+ *
+ * Ownership:
+ *   Borrows the master-owned framebuffer ID from the caller.  Owns one
+ *   temporary non-master DRM fd and closes it before return.  The kernel must
+ *   not return GEM handles to this fd unless it is current master or root; if a
+ *   buggy kernel does return handles, this probe closes them before returning.
+ *
+ * Lifetime:
+ *   The framebuffer must stay alive on the caller's master fd for the duration
+ *   of the metadata query.  The second fd does not retain the framebuffer or any
+ *   GEM handle after return.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  It exercises only KMS metadata lookup and
+ *   must not start a display transaction.
+ */
+static void
+check_getfb_non_master_metadata_contract(uint32_t fb_id, uint32_t width,
+    uint32_t height, uint32_t format, uint32_t pitch, uint64_t modifier)
+{
+	drmModeFBPtr fb = NULL;
+	drmModeFB2Ptr fb2 = NULL;
+	int fd;
+	int saved_errno;
+
+	if (geteuid() == 0) {
+		printf("SKIP GETFB/GETFB2 non-master handle privacy probe as root\n");
+		return;
+	}
+
+	errno = 0;
+	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	saved_errno = errno;
+	check(fd >= 0, "GETFB non-master opens secondary card fd");
+	if (fd < 0) {
+		printf("    secondary card fd errno=%d\n", saved_errno);
+		return;
+	}
+
+	errno = 0;
+	fb = drmModeGetFB(fd, fb_id);
+	saved_errno = errno;
+	check(fb != NULL, "GETFB non-master reads framebuffer metadata");
+	if (fb != NULL) {
+		check(fb->fb_id == fb_id,
+		    "GETFB non-master returns requested FB_ID");
+		check(fb->width == width,
+		    "GETFB non-master reports framebuffer width");
+		check(fb->height == height,
+		    "GETFB non-master reports framebuffer height");
+		check(fb->pitch == pitch,
+		    "GETFB non-master reports framebuffer pitch");
+		check(fb->handle == 0,
+		    "GETFB non-master returns no GEM handle");
+		if (fb->handle != 0)
+			close_gem_handle_for(fd, fb->handle,
+			    "GEM_CLOSE succeeds for unexpected non-master GETFB handle");
+		drmModeFreeFB(fb);
+	} else {
+		printf("    GETFB non-master errno=%d\n", saved_errno);
+	}
+
+	errno = 0;
+	fb2 = drmModeGetFB2(fd, fb_id);
+	saved_errno = errno;
+	check(fb2 != NULL, "GETFB2 non-master reads framebuffer metadata");
+	if (fb2 != NULL) {
+		check(fb2->fb_id == fb_id,
+		    "GETFB2 non-master returns requested FB_ID");
+		check(fb2->width == width,
+		    "GETFB2 non-master reports framebuffer width");
+		check(fb2->height == height,
+		    "GETFB2 non-master reports framebuffer height");
+		check(fb2->pixel_format == format,
+		    "GETFB2 non-master reports framebuffer format");
+		check((fb2->flags & DRM_MODE_FB_MODIFIERS) != 0,
+		    "GETFB2 non-master reports modifier flag");
+		check(fb2->modifier == modifier,
+		    "GETFB2 non-master reports framebuffer modifier");
+		check(fb2->pitches[0] == pitch,
+		    "GETFB2 non-master reports framebuffer pitch");
+		check(fb2->offsets[0] == 0,
+		    "GETFB2 non-master reports zero plane offset");
+		for (uint32_t i = 0; i < 4; i++) {
+			check(fb2->handles[i] == 0,
+			    "GETFB2 non-master returns no GEM handles");
+		}
+		close_fb2_handles(fd, fb2,
+		    "GEM_CLOSE succeeds for unexpected non-master GETFB2 handle");
+		drmModeFreeFB2(fb2);
+	} else {
+		printf("    GETFB2 non-master errno=%d\n", saved_errno);
+	}
+
+	check(close(fd) == 0, "GETFB non-master closes secondary card fd");
+}
+
+/*
+ * check_framebuffer_uapi_contract()
+ *
+ * Ownership:
+ *   Owns one temporary dumb BO and framebuffer.  GETFB/GETFB2 return fresh GEM
+ *   handles owned by this drm file; the probe closes each returned handle
+ *   before removing the framebuffer and destroying the original dumb handle.
+ *
+ * Lifetime:
+ *   The temporary framebuffer is never attached to a plane.  DIRTYFB is tested
+ *   only as a KMS frontbuffer update acknowledgement on the framebuffer object.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The driver must not start an atomic
+ *   display transaction, queue a vblank event, or leave pending display audit
+ *   state for these metadata/no-op framebuffer ioctls.
+ */
+static void
+check_framebuffer_uapi_contract(int fd)
+{
+	struct pageflip_counter_snapshot before;
+	struct pageflip_counter_snapshot after;
+	struct drm_mode_fb_dirty_cmd dirty;
+	drmModeClip clip;
+	drmModeFBPtr fb = NULL;
+	drmModeFB2Ptr fb2 = NULL;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	uint32_t fb_id = 0;
+	uint32_t legacy_fb24_id = 0;
+	uint32_t legacy_fb30_id = 0;
+	uint32_t invalid_legacy_fb_id = 0;
+	int saved_errno;
+	int ret;
+
+	if (!read_pageflip_counter_snapshot(&before, "framebuffer UAPI probe"))
+		return;
+	if (!create_dumb_buffer_for(fd, 64, 64, 32, &handle, &pitch,
+	    "CREATE_DUMB succeeds for framebuffer UAPI probe"))
+		return;
+	if (!clear_dumb_buffer(fd, handle, pitch, 64,
+	    "MAP_DUMB succeeds for framebuffer UAPI probe"))
+		goto out_destroy_bo;
+	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888, handle,
+	    pitch, &fb_id,
+	    "ADDFB2 accepts XRGB8888 linear framebuffer UAPI probe"))
+		goto out_destroy_bo;
+
+	errno = 0;
+	fb = drmModeGetFB(fd, fb_id);
+	saved_errno = errno;
+	check(fb != NULL, "GETFB succeeds for owned framebuffer");
+	if (fb != NULL) {
+		check(fb->fb_id == fb_id, "GETFB returns requested FB_ID");
+		check(fb->width == 64, "GETFB reports framebuffer width");
+		check(fb->height == 64, "GETFB reports framebuffer height");
+		check(fb->pitch == pitch, "GETFB reports framebuffer pitch");
+		check(fb->bpp == 32, "GETFB reports framebuffer bpp");
+		check(fb->depth == 24, "GETFB reports XRGB8888 depth");
+		check(fb->handle != 0, "GETFB returns a GEM handle to master");
+		close_gem_handle_for(fd, fb->handle,
+		    "GEM_CLOSE succeeds for GETFB returned handle");
+		drmModeFreeFB(fb);
+	} else {
+		printf("    GETFB errno=%d\n", saved_errno);
+	}
+
+	errno = 0;
+	fb2 = drmModeGetFB2(fd, fb_id);
+	saved_errno = errno;
+	check(fb2 != NULL, "GETFB2 succeeds for owned framebuffer");
+	if (fb2 != NULL) {
+		check(fb2->fb_id == fb_id, "GETFB2 returns requested FB_ID");
+		check(fb2->width == 64, "GETFB2 reports framebuffer width");
+		check(fb2->height == 64, "GETFB2 reports framebuffer height");
+		check(fb2->pixel_format == DRM_FORMAT_XRGB8888,
+		    "GETFB2 reports XRGB8888 format");
+		check((fb2->flags & DRM_MODE_FB_MODIFIERS) != 0,
+		    "GETFB2 reports modifier flag");
+		check(fb2->modifier == DRM_FORMAT_MOD_LINEAR,
+		    "GETFB2 reports linear modifier");
+		check(fb2->handles[0] != 0,
+		    "GETFB2 returns a GEM handle to master");
+		check(fb2->pitches[0] == pitch,
+		    "GETFB2 reports framebuffer pitch");
+		check(fb2->offsets[0] == 0,
+		    "GETFB2 reports zero plane offset");
+		for (uint32_t i = 1; i < 4; i++)
+			check(fb2->handles[i] == 0,
+			    "GETFB2 has no extra plane handles for XRGB8888");
+		close_fb2_handles(fd, fb2,
+		    "GEM_CLOSE succeeds for GETFB2 returned handle");
+		drmModeFreeFB2(fb2);
+		fb2 = NULL;
+	} else {
+		printf("    GETFB2 errno=%d\n", saved_errno);
+	}
+	check_getfb_non_master_metadata_contract(fb_id, 64, 64,
+	    DRM_FORMAT_XRGB8888, pitch, DRM_FORMAT_MOD_LINEAR);
+
+	errno = 0;
+	ret = drmModeAddFB(fd, 64, 64, 24, 32, pitch, handle,
+	    &legacy_fb24_id);
+	saved_errno = errno;
+	check(ret == 0,
+	    "legacy ADDFB accepts depth 24 XRGB8888 dumb framebuffer");
+	if (ret == 0) {
+		errno = 0;
+		fb = drmModeGetFB(fd, legacy_fb24_id);
+		saved_errno = errno;
+		check(fb != NULL,
+		    "legacy ADDFB depth 24 GETFB succeeds");
+		if (fb != NULL) {
+			check(fb->fb_id == legacy_fb24_id,
+			    "legacy ADDFB depth 24 GETFB returns requested FB_ID");
+			check(fb->width == 64,
+			    "legacy ADDFB depth 24 GETFB reports framebuffer width");
+			check(fb->height == 64,
+			    "legacy ADDFB depth 24 GETFB reports framebuffer height");
+			check(fb->pitch == pitch,
+			    "legacy ADDFB depth 24 GETFB reports framebuffer pitch");
+			check(fb->bpp == 32,
+			    "legacy ADDFB depth 24 GETFB reports framebuffer bpp");
+			check(fb->depth == 24,
+			    "legacy ADDFB depth 24 GETFB reports framebuffer depth");
+			close_gem_handle_for(fd, fb->handle,
+			    "GEM_CLOSE succeeds for legacy ADDFB depth 24 GETFB handle");
+			drmModeFreeFB(fb);
+			fb = NULL;
+		} else {
+			printf("    legacy ADDFB depth 24 GETFB errno=%d\n",
+			    saved_errno);
+		}
+		errno = 0;
+		fb2 = drmModeGetFB2(fd, legacy_fb24_id);
+		saved_errno = errno;
+		check(fb2 != NULL,
+		    "legacy ADDFB depth 24 GETFB2 succeeds");
+		if (fb2 != NULL) {
+			check(fb2->pixel_format == DRM_FORMAT_XRGB8888,
+			    "legacy ADDFB depth 24 GETFB2 reports XRGB8888 format");
+			check(fb2->handles[0] != 0,
+			    "legacy ADDFB depth 24 GETFB2 returns a GEM handle");
+			close_fb2_handles(fd, fb2,
+			    "GEM_CLOSE succeeds for legacy ADDFB depth 24 GETFB2 handle");
+			drmModeFreeFB2(fb2);
+			fb2 = NULL;
+		} else {
+			printf("    legacy ADDFB depth 24 GETFB2 errno=%d\n",
+			    saved_errno);
+		}
+		remove_framebuffer(fd, legacy_fb24_id,
+		    "RMFB succeeds for legacy ADDFB depth 24 probe");
+		legacy_fb24_id = 0;
+	} else {
+		printf("    legacy ADDFB depth 24 errno=%d\n",
+		    saved_errno);
+	}
+
+	errno = 0;
+	ret = drmModeAddFB(fd, 64, 64, 30, 32, pitch, handle,
+	    &legacy_fb30_id);
+	saved_errno = errno;
+	check(ret == 0, "legacy ADDFB accepts depth 30 dumb framebuffer");
+	if (ret == 0) {
+		errno = 0;
+		fb = drmModeGetFB(fd, legacy_fb30_id);
+		saved_errno = errno;
+		check(fb != NULL,
+		    "legacy ADDFB depth 30 GETFB succeeds");
+		if (fb != NULL) {
+			check(fb->fb_id == legacy_fb30_id,
+			    "legacy ADDFB depth 30 GETFB returns requested FB_ID");
+			check(fb->width == 64,
+			    "legacy ADDFB depth 30 GETFB reports framebuffer width");
+			check(fb->height == 64,
+			    "legacy ADDFB depth 30 GETFB reports framebuffer height");
+			check(fb->pitch == pitch,
+			    "legacy ADDFB depth 30 GETFB reports framebuffer pitch");
+			check(fb->bpp == 32,
+			    "legacy ADDFB depth 30 GETFB reports framebuffer bpp");
+			check(fb->depth == 30,
+			    "legacy ADDFB depth 30 GETFB reports framebuffer depth");
+			close_gem_handle_for(fd, fb->handle,
+			    "GEM_CLOSE succeeds for legacy ADDFB depth 30 GETFB handle");
+			drmModeFreeFB(fb);
+			fb = NULL;
+		} else {
+			printf("    legacy ADDFB depth 30 GETFB errno=%d\n",
+			    saved_errno);
+		}
+		errno = 0;
+		fb2 = drmModeGetFB2(fd, legacy_fb30_id);
+		saved_errno = errno;
+		check(fb2 != NULL,
+		    "legacy ADDFB depth 30 GETFB2 succeeds");
+		if (fb2 != NULL) {
+			check(fb2->pixel_format == DRM_FORMAT_XBGR2101010,
+			    "legacy ADDFB depth 30 GETFB2 reports XBGR2101010 format");
+			check(fb2->handles[0] != 0,
+			    "legacy ADDFB depth 30 GETFB2 returns a GEM handle");
+			close_fb2_handles(fd, fb2,
+			    "GEM_CLOSE succeeds for legacy ADDFB depth 30 GETFB2 handle");
+			drmModeFreeFB2(fb2);
+			fb2 = NULL;
+		} else {
+			printf("    legacy ADDFB depth 30 GETFB2 errno=%d\n",
+			    saved_errno);
+		}
+		remove_framebuffer(fd, legacy_fb30_id,
+		    "RMFB succeeds for legacy ADDFB depth 30 probe");
+		legacy_fb30_id = 0;
+	} else {
+		printf("    legacy ADDFB depth 30 errno=%d\n",
+		    saved_errno);
+	}
+
+	errno = 0;
+	ret = drmModeAddFB(fd, 64, 64, 31, 32, pitch, handle,
+	    &invalid_legacy_fb_id);
+	saved_errno = errno;
+	check(ret != 0, "legacy ADDFB rejects invalid depth 31");
+	check(saved_errno == EINVAL,
+	    "legacy ADDFB invalid depth fails with EINVAL");
+	if (invalid_legacy_fb_id != 0) {
+		remove_framebuffer(fd, invalid_legacy_fb_id,
+		    "RMFB succeeds for unexpected legacy ADDFB invalid-depth probe");
+		invalid_legacy_fb_id = 0;
+	}
+
+	memset(&clip, 0, sizeof(clip));
+	clip.x1 = 0;
+	clip.y1 = 0;
+	clip.x2 = 64;
+	clip.y2 = 64;
+	ret = drmModeDirtyFB(fd, fb_id, &clip, 1);
+	check(ret == 0, "DIRTYFB accepts one framebuffer damage clip");
+
+	ret = drmModeDirtyFB(fd, fb_id, NULL, 0);
+	check(ret == 0, "DIRTYFB accepts full-frame no-clip damage");
+
+	memset(&dirty, 0, sizeof(dirty));
+	dirty.fb_id = fb_id;
+	dirty.num_clips = 1;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+	saved_errno = errno;
+	check(ret != 0, "DIRTYFB rejects missing clip pointer");
+	check(saved_errno == EINVAL,
+	    "DIRTYFB missing clip pointer fails with EINVAL");
+
+	memset(&dirty, 0, sizeof(dirty));
+	dirty.fb_id = fb_id;
+	dirty.flags = DRM_MODE_FB_DIRTY_ANNOTATE_COPY;
+	dirty.num_clips = 1;
+	dirty.clips_ptr = (uint64_t)(uintptr_t)&clip;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+	saved_errno = errno;
+	check(ret != 0, "DIRTYFB rejects odd COPY clip count");
+	check(saved_errno == EINVAL,
+	    "DIRTYFB odd COPY clip count fails with EINVAL");
+
+	if (read_pageflip_counter_snapshot(&after, "framebuffer UAPI probe")) {
+		check(after.commit_error_count == before.commit_error_count,
+		    "framebuffer UAPI probe does not increment commit_error_count");
+		check(after.atomic_tail_active == 0 &&
+		    after.atomic_tail_stage == 0,
+		    "framebuffer UAPI probe leaves no active tail transaction");
+		check(after.display_audit_pending_valid == 0,
+		    "framebuffer UAPI probe leaves no pending display audit");
+	}
+
+	remove_framebuffer(fd, invalid_legacy_fb_id,
+	    "RMFB succeeds for unexpected legacy ADDFB invalid-depth probe");
+	remove_framebuffer(fd, legacy_fb30_id,
+	    "RMFB succeeds for legacy ADDFB depth 30 probe");
+	remove_framebuffer(fd, legacy_fb24_id,
+	    "RMFB succeeds for legacy ADDFB depth 24 probe");
+	remove_framebuffer(fd, fb_id,
+	    "RMFB succeeds for framebuffer UAPI probe");
+out_destroy_bo:
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for framebuffer UAPI probe");
 }
 
 static bool
@@ -4361,9 +4995,12 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		    &active_crtc_height);
 		check(have_active_crtc_size,
 		    "active CRTC mode size available for primary panning probe");
-		if (have_active_crtc)
+		if (have_active_crtc) {
+			check_vblank_sequence_runtime_contract(fd,
+			    active_crtc_id, active_crtc_index);
 			check_atomic_crtc_color_runtime_contract(fd,
 			    active_crtc_id);
+		}
 	}
 
 	printf("planes: count=%u\n", resources->count_planes);
@@ -4480,6 +5117,7 @@ main(void)
 	check(resources->count_crtcs > 0, "at least one CRTC exposed");
 	check(resources->count_encoders > 0, "at least one encoder exposed");
 	check_mode_config_contract(fd, resources);
+	check_framebuffer_uapi_contract(fd);
 	check_encoders(fd, resources);
 
 	for (int i = 0; i < resources->count_connectors; i++) {

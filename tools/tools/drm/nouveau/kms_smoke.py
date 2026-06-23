@@ -30,6 +30,7 @@ import time
 
 LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
+FULL_WAYLAND_PHASES = {"wayland", "wayland_hpd_smoke", "xwayland"}
 FAULT_PATTERN = (
     "panic|BADFREE|double fault|DeviceLost|EXEC timeout|fault|CMDre|"
     "status=0x19|RC_TRIGGERED|notifier timeout|vblank wait timed out|flip_done timed out|"
@@ -53,6 +54,8 @@ ZERO_KEYS = (
     "cursor_error_count",
     "console_flush_error_count",
     "bo_wait_error_count",
+    "ttm_io_reserve_error_count",
+    "ttm_io_reserve_last_error",
     "vm_bind_error_count",
     "vm_bind_wait_error_count",
     "prime_handle_to_fd_error_count",
@@ -138,6 +141,11 @@ WATCH_KEYS = (
     "scanout_unpin_count",
     "cursor_pin_count",
     "cursor_unpin_count",
+    "ttm_io_reserve_count",
+    "ttm_io_reserve_bar1_retry_count",
+    "ttm_io_free_count",
+    "ttm_io_free_bar1_count",
+    "ttm_io_reserve_last_size",
     "hotplug_count",
     "hotplug_changed_count",
     "hotplug_nochange_count",
@@ -159,19 +167,36 @@ COUNT_ORDER_PAIRS = (
 )
 
 
+def choose_new_out_dir() -> pathlib.Path:
+    for attempt in range(100):
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        suffix = f"{stamp}-{os.getpid()}"
+        if attempt:
+            suffix = f"{suffix}-{attempt}"
+        out_dir = pathlib.Path(f"{DEFAULT_PREFIX}-{suffix}")
+        try:
+            out_dir.mkdir(parents=True, exist_ok=False)
+            return out_dir
+        except FileExistsError:
+            time.sleep(0.001)
+    raise RuntimeError("failed to allocate a unique smoke output directory")
+
+
 def choose_out_dir(phase: str, explicit: str | None) -> pathlib.Path:
+    created = False
     if explicit:
         out_dir = pathlib.Path(explicit)
     elif os.environ.get("NVKM_KMS_SMOKE_DIR"):
         out_dir = pathlib.Path(os.environ["NVKM_KMS_SMOKE_DIR"])
-    elif phase == "before" or not LATEST.is_symlink():
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        out_dir = pathlib.Path(f"{DEFAULT_PREFIX}-{stamp}")
+    elif phase == "before" or phase in FULL_WAYLAND_PHASES or not LATEST.is_symlink():
+        out_dir = choose_new_out_dir()
+        created = True
     else:
         out_dir = pathlib.Path(os.readlink(LATEST))
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if phase == "before" or not LATEST.exists():
+    if not created:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    if phase == "before" or phase in FULL_WAYLAND_PHASES or not LATEST.exists():
         tmp_link = LATEST.with_suffix(".tmp")
         try:
             tmp_link.unlink()
@@ -207,6 +232,29 @@ def run(argv: list[str], path: pathlib.Path, env: dict[str, str] | None = None,
         except FileNotFoundError as err:
             out.write(f"\n### missing={err.filename}\n")
             return 127
+
+
+def x11_env(args: argparse.Namespace) -> dict[str, str]:
+    env = os.environ.copy()
+    if args.display:
+        env["DISPLAY"] = args.display
+    if args.xauthority:
+        env["XAUTHORITY"] = args.xauthority
+    return env
+
+
+def probe_x11_display(out_dir: pathlib.Path, args: argparse.Namespace) -> int:
+    env = x11_env(args)
+    rc = run(["xrandr", "--query"], out_dir / "x11-display-probe.x11",
+             env=env)
+    if rc != 0:
+        marker = out_dir / "x11-display-missing.x11"
+        marker.write_text(
+            "x11 phase requires an already running X server on DISPLAY. "
+            "Start X from the physical console with startx, then run this "
+            "phase with DISPLAY pointing at that server.\n"
+        )
+    return rc
 
 
 def capture_hpd_inject(out_dir: pathlib.Path, inject_value: int,
@@ -316,6 +364,87 @@ def capture_wayland_hpd(out_dir: pathlib.Path, inject_value: int) -> None:
         out_dir / "drm_state.wayland_hpd_after")
 
 
+def wayland_smoke_env(out_dir: pathlib.Path) -> dict[str, str]:
+    env = os.environ.copy()
+    runtime_dir = pathlib.Path(f"/tmp/runtime-{os.getuid()}")
+    runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(runtime_dir, 0o700)
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    env["NVKM_KMS_SMOKE_DIR"] = str(out_dir)
+    env.setdefault("TERMINAL", "xfce4-terminal")
+
+    mesa_prefix = pathlib.Path("/usr/local/mesa-gl")
+    mesa_lib = mesa_prefix / "lib"
+    gcc_lib = pathlib.Path("/usr/local/lib/gcc13")
+    if mesa_lib.exists():
+        ld_parts = [str(mesa_lib)]
+        if gcc_lib.exists():
+            ld_parts.append(str(gcc_lib))
+        if env.get("LD_LIBRARY_PATH"):
+            ld_parts.append(env["LD_LIBRARY_PATH"])
+        env["LD_LIBRARY_PATH"] = ":".join(ld_parts)
+        env["VK_ICD_FILENAMES"] = str(
+            mesa_prefix / "share/vulkan/icd.d/nouveau_icd.x86_64.json"
+        )
+        env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(
+            mesa_prefix / "share/glvnd/egl_vendor.d/50_mesa.json"
+        )
+        env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
+        env["LIBGL_DRIVERS_PATH"] = str(mesa_lib / "dri")
+    return env
+
+
+def write_sway_config(out_dir: pathlib.Path, mode: str,
+                      args: argparse.Namespace) -> pathlib.Path:
+    path = out_dir / f"sway-{mode}.conf"
+    lines = ["output * bg #000000 solid_color"]
+    if mode == "wayland":
+        command = f"sleep {args.wayland_exit_delay}; swaymsg exit"
+    elif mode == "wayland_hpd_smoke":
+        phase = pathlib.Path(__file__)
+        command = (
+            f"sleep {args.wayland_hpd_delay}; "
+            f"{shlex.quote(str(phase))} wayland_hpd "
+            f"--out-dir \"$NVKM_KMS_SMOKE_DIR\" "
+            f"--hpd-inject-value {args.hpd_inject_value:#x} "
+            "> \"$NVKM_KMS_SMOKE_DIR/wayland-hpd-phase.stdout\" 2>&1; "
+            "swaymsg exit"
+        )
+    elif mode == "xwayland":
+        lines.append("xwayland enable")
+        gears_seconds = max(args.gears_seconds, 1)
+        command = (
+            "sleep 1; "
+            "{ echo GLXINFO_START; glxinfo -B; echo \"### rc=$?\"; } "
+            "> \"$NVKM_KMS_SMOKE_DIR/glxinfo.xwayland\" 2>&1; "
+            f"{{ echo GLXGEARS_START; timeout {gears_seconds} glxgears -info; "
+            "echo \"### rc=$?\"; } "
+            "> \"$NVKM_KMS_SMOKE_DIR/glxgears.xwayland\" 2>&1; "
+            "swaymsg exit"
+        )
+    else:
+        raise ValueError(f"unsupported sway smoke mode {mode}")
+    lines.append(f"exec /bin/sh -c {shlex.quote(command)}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def run_wayland_smoke(out_dir: pathlib.Path, mode: str,
+                      args: argparse.Namespace) -> int:
+    capture_phase(out_dir, "before", args)
+    env = wayland_smoke_env(out_dir)
+    config = write_sway_config(out_dir, mode, args)
+    rc = run(
+        [args.sway_command, "-d", "-c", str(config)],
+        out_dir / "sway.log",
+        env=env,
+        timeout=args.wayland_timeout,
+    )
+    (out_dir / "rc").write_text(f"{rc}\n")
+    capture_phase(out_dir, "after", args)
+    return report(out_dir, allow_missing_x11=True)
+
+
 def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
                                env_extra: dict[str, str] | None = None) -> None:
     source = pathlib.Path(__file__).with_name("drmtest.c")
@@ -391,11 +520,7 @@ def wait_for_kms_idle(out_dir: pathlib.Path, timeout_sec: float) -> None:
 
 
 def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -> None:
-    env = os.environ.copy()
-    if args.display:
-        env["DISPLAY"] = args.display
-    if args.xauthority:
-        env["XAUTHORITY"] = args.xauthority
+    env = x11_env(args)
 
     if phase == "wayland_hpd":
         capture_wayland_hpd(out_dir, args.hpd_inject_value)
@@ -1120,6 +1245,79 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "atomic CRTC color runtime commit programs gamma LUT",
         "atomic CRTC color runtime restore commit succeeds",
         "atomic CRTC color runtime restore leaves no pending display audit",
+        "GETFB succeeds for owned framebuffer",
+        "GETFB returns requested FB_ID",
+        "GETFB reports framebuffer pitch",
+        "GETFB returns a GEM handle to master",
+        "GEM_CLOSE succeeds for GETFB returned handle",
+        "GETFB2 succeeds for owned framebuffer",
+        "GETFB2 returns requested FB_ID",
+        "GETFB2 reports XRGB8888 format",
+        "GETFB2 reports modifier flag",
+        "GETFB2 reports linear modifier",
+        "GETFB2 returns a GEM handle to master",
+        "GETFB2 reports framebuffer pitch",
+        "GETFB2 reports zero plane offset",
+        "GEM_CLOSE succeeds for GETFB2 returned handle",
+        "GETFB non-master opens secondary card fd",
+        "GETFB non-master reads framebuffer metadata",
+        "GETFB non-master returns requested FB_ID",
+        "GETFB non-master reports framebuffer pitch",
+        "GETFB non-master returns no GEM handle",
+        "GETFB2 non-master reads framebuffer metadata",
+        "GETFB2 non-master returns requested FB_ID",
+        "GETFB2 non-master reports framebuffer format",
+        "GETFB2 non-master reports framebuffer modifier",
+        "GETFB2 non-master reports framebuffer pitch",
+        "GETFB2 non-master returns no GEM handles",
+        "GETFB non-master closes secondary card fd",
+        "legacy ADDFB accepts depth 24 XRGB8888 dumb framebuffer",
+        "legacy ADDFB depth 24 GETFB succeeds",
+        "legacy ADDFB depth 24 GETFB returns requested FB_ID",
+        "legacy ADDFB depth 24 GETFB reports framebuffer pitch",
+        "legacy ADDFB depth 24 GETFB reports framebuffer bpp",
+        "legacy ADDFB depth 24 GETFB reports framebuffer depth",
+        "GEM_CLOSE succeeds for legacy ADDFB depth 24 GETFB handle",
+        "legacy ADDFB depth 24 GETFB2 succeeds",
+        "legacy ADDFB depth 24 GETFB2 reports XRGB8888 format",
+        "legacy ADDFB depth 24 GETFB2 returns a GEM handle",
+        "GEM_CLOSE succeeds for legacy ADDFB depth 24 GETFB2 handle",
+        "RMFB succeeds for legacy ADDFB depth 24 probe",
+        "legacy ADDFB accepts depth 30 dumb framebuffer",
+        "legacy ADDFB depth 30 GETFB succeeds",
+        "legacy ADDFB depth 30 GETFB returns requested FB_ID",
+        "legacy ADDFB depth 30 GETFB reports framebuffer pitch",
+        "legacy ADDFB depth 30 GETFB reports framebuffer bpp",
+        "legacy ADDFB depth 30 GETFB reports framebuffer depth",
+        "GEM_CLOSE succeeds for legacy ADDFB depth 30 GETFB handle",
+        "legacy ADDFB depth 30 GETFB2 succeeds",
+        "legacy ADDFB depth 30 GETFB2 reports XBGR2101010 format",
+        "legacy ADDFB depth 30 GETFB2 returns a GEM handle",
+        "GEM_CLOSE succeeds for legacy ADDFB depth 30 GETFB2 handle",
+        "RMFB succeeds for legacy ADDFB depth 30 probe",
+        "legacy ADDFB rejects invalid depth 31",
+        "legacy ADDFB invalid depth fails with EINVAL",
+        "DIRTYFB accepts one framebuffer damage clip",
+        "DIRTYFB accepts full-frame no-clip damage",
+        "DIRTYFB rejects missing clip pointer",
+        "DIRTYFB missing clip pointer fails with EINVAL",
+        "DIRTYFB rejects odd COPY clip count",
+        "DIRTYFB odd COPY clip count fails with EINVAL",
+        "framebuffer UAPI probe does not increment commit_error_count",
+        "framebuffer UAPI probe leaves no active tail transaction",
+        "framebuffer UAPI probe leaves no pending display audit",
+        "RMFB succeeds for framebuffer UAPI probe",
+        "DESTROY_DUMB succeeds for framebuffer UAPI probe",
+        "drmCrtcGetSequence succeeds on active CRTC",
+        "active CRTC index fits legacy WAIT_VBLANK UAPI",
+        "drmWaitVBlank relative wait succeeds on active CRTC",
+        "drmCrtcGetSequence succeeds after WAIT_VBLANK",
+        "WAIT_VBLANK advances active CRTC sequence",
+        "drmCrtcQueueSequence queues active CRTC event",
+        "drmCrtcQueueSequence event arrives",
+        "drmCrtcQueueSequence delivers exactly one event",
+        "drmCrtcQueueSequence preserves user_data",
+        "drmCrtcQueueSequence event reaches queued sequence",
         "connector encoder type matches connector type",
         "atomic modeset disable commit succeeds",
         "atomic modeset disable increments tail disable op count",
@@ -1174,7 +1372,10 @@ def main() -> int:
     parser.add_argument("phase", choices=(
         "before",
         "x11",
+        "wayland",
         "wayland_hpd",
+        "wayland_hpd_smoke",
+        "xwayland",
         "after",
         "report",
     ))
@@ -1204,12 +1405,31 @@ def main() -> int:
                         help="after phase only: wait this many seconds for "
                              "atomic KMS tail/console restore to become idle "
                              "before collecting the final snapshot")
+    parser.add_argument("--sway-command", default="sway",
+                        help="Wayland compositor executable used by wayland "
+                             "and xwayland full-smoke phases")
+    parser.add_argument("--wayland-timeout", type=int, default=40,
+                        help="timeout in seconds for full Wayland/XWayland "
+                             "smoke phases")
+    parser.add_argument("--wayland-exit-delay", type=int, default=6,
+                        help="seconds before a plain Wayland smoke exits")
+    parser.add_argument("--wayland-hpd-delay", type=int, default=2,
+                        help="seconds before Wayland HPD smoke injects HPD")
     args = parser.parse_args()
 
     out_dir = choose_out_dir(args.phase, args.out_dir)
     if args.phase == "report":
         print(out_dir)
         return report(out_dir, args.allow_missing_x11)
+    if args.phase in FULL_WAYLAND_PHASES:
+        print(out_dir)
+        return run_wayland_smoke(out_dir, args.phase, args)
+
+    if args.phase == "x11":
+        probe_rc = probe_x11_display(out_dir, args)
+        if probe_rc != 0:
+            print(out_dir)
+            return probe_rc
 
     capture_phase(out_dir, args.phase, args)
     print(out_dir)
