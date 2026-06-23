@@ -3138,6 +3138,60 @@ check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
 	    (unsigned long long)event_state.ns);
 }
 
+static void
+check_drm_lease_vblank_sequence_contract(int lease_fd, uint32_t crtc_id)
+{
+	int failures_before;
+
+	failures_before = failures;
+	check_vblank_sequence_runtime_contract(lease_fd, crtc_id, 0);
+	check(failures == failures_before,
+	    "DRM lease vblank sequence accepts leased CRTC");
+}
+
+static void
+check_drm_lease_empty_vblank_rejects(int lease_fd, uint32_t crtc_id)
+{
+	drmVBlank vblank;
+	drmVBlankSeqType vblank_type;
+	uint64_t queued_sequence = 0;
+	uint64_t sequence = 0;
+	uint64_t sequence_ns = 0;
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmCrtcGetSequence(lease_fd, crtc_id, &sequence, &sequence_ns);
+	saved_errno = errno;
+	check(ret != 0, "DRM empty lease CRTC_GET_SEQUENCE is rejected");
+	check(saved_errno == ENOENT,
+	    "DRM empty lease CRTC_GET_SEQUENCE fails with ENOENT");
+
+	errno = 0;
+	ret = drmCrtcQueueSequence(lease_fd, crtc_id,
+	    DRM_CRTC_SEQUENCE_RELATIVE, 1, &queued_sequence, 0);
+	saved_errno = errno;
+	check(ret != 0, "DRM empty lease CRTC_QUEUE_SEQUENCE is rejected");
+	check(saved_errno == ENOENT,
+	    "DRM empty lease CRTC_QUEUE_SEQUENCE fails with ENOENT");
+
+	if (!wait_vblank_type_for_crtc_index(0, &vblank_type)) {
+		check(false, "DRM empty lease WAIT_VBLANK builds CRTC index 0");
+		return;
+	}
+	check(true, "DRM empty lease WAIT_VBLANK builds CRTC index 0");
+
+	memset(&vblank, 0, sizeof(vblank));
+	vblank.request.type = vblank_type;
+	vblank.request.sequence = 0;
+	errno = 0;
+	ret = drmWaitVBlank(lease_fd, &vblank);
+	saved_errno = errno;
+	check(ret != 0, "DRM empty lease WAIT_VBLANK is rejected");
+	check(saved_errno == EINVAL,
+	    "DRM empty lease WAIT_VBLANK fails with EINVAL");
+}
+
 static bool
 find_active_connector_for_crtc(int fd, const drmModeRes *resources,
     uint32_t crtc_id, uint32_t *connector_id_out)
@@ -5217,6 +5271,8 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 			check(empty_get_count == 0,
 			    "DRM empty lease GET_LEASE returns no objects");
 		}
+		check_drm_lease_empty_vblank_rejects(empty_lease_fd,
+		    active_crtc_id);
 		check(close(empty_lease_fd) == 0,
 		    "close empty DRM lease fd succeeds");
 	}
@@ -5331,6 +5387,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	    "DRM lease lessee cannot create sub-lease");
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,
 	    active_crtc_id, primary_plane_id);
+	check_drm_lease_vblank_sequence_contract(lease_fd, active_crtc_id);
 	if (unleased_connector_id != 0)
 		check_drm_lease_atomic_unleased_connector(fd, lease_fd,
 		    unleased_connector_id, active_crtc_id);
