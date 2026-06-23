@@ -5331,6 +5331,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 {
 	drmModePlaneResPtr plane_resources;
 	drmModePlaneResPtr lease_planes;
+	drmModePlaneResPtr owner_planes;
 	drmModeConnectorPtr lease_connector;
 	drmModeRes *lease_resources;
 	drmModeRes *revoked_resources;
@@ -5514,6 +5515,8 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	if (drm_lease_get_objects(fd, owner_get_ids,
 	    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0])),
 	    &owner_get_count, "DRM lease owner GET_LEASE succeeds")) {
+		uint32_t owner_expected_count;
+
 		owner_get_visible_count = owner_get_count <=
 		    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0])) ?
 		    owner_get_count :
@@ -5521,21 +5524,40 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 		check(owner_get_count <= (uint32_t)(sizeof(owner_get_ids) /
 		    sizeof(owner_get_ids[0])),
 		    "DRM lease owner GET_LEASE fits probe buffer");
-		check(owner_get_count >= (uint32_t)(resources->count_connectors +
-		    resources->count_crtcs + resources->count_encoders),
+		owner_planes = drmModeGetPlaneResources(fd);
+		check(owner_planes != NULL,
+		    "DRM lease owner plane resources are readable for GET_LEASE");
+		owner_expected_count = (uint32_t)(resources->count_connectors +
+		    resources->count_crtcs + resources->count_encoders);
+		if (owner_planes != NULL)
+			owner_expected_count += owner_planes->count_planes;
+		check(owner_get_count >= owner_expected_count,
 		    "DRM lease owner GET_LEASE returns full mode object set");
-		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
-		    connector_id), "DRM lease owner GET_LEASE returns connector");
-		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
-		    active_crtc_id), "DRM lease owner GET_LEASE returns CRTC");
-		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
-		    primary_plane_id),
-		    "DRM lease owner GET_LEASE returns primary plane");
-		if (resources->count_encoders > 0) {
+		for (int i = 0; i < resources->count_connectors; i++) {
 			check(id_in_list(owner_get_ids,
 			    (int)owner_get_visible_count,
-			    resources->encoders[0]),
-			    "DRM lease owner GET_LEASE returns encoder");
+			    resources->connectors[i]),
+			    "DRM lease owner GET_LEASE returns every connector");
+		}
+		for (int i = 0; i < resources->count_crtcs; i++) {
+			check(id_in_list(owner_get_ids,
+			    (int)owner_get_visible_count, resources->crtcs[i]),
+			    "DRM lease owner GET_LEASE returns every CRTC");
+		}
+		for (int i = 0; i < resources->count_encoders; i++) {
+			check(id_in_list(owner_get_ids,
+			    (int)owner_get_visible_count,
+			    resources->encoders[i]),
+			    "DRM lease owner GET_LEASE returns every encoder");
+		}
+		if (owner_planes != NULL) {
+			for (uint32_t i = 0; i < owner_planes->count_planes; i++) {
+				check(id_in_list(owner_get_ids,
+				    (int)owner_get_visible_count,
+				    owner_planes->planes[i]),
+				    "DRM lease owner GET_LEASE returns every plane");
+			}
+			drmModeFreePlaneResources(owner_planes);
 		}
 	}
 
