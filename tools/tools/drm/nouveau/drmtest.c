@@ -2205,6 +2205,110 @@ check_disconnected_connector_contract(int fd, drmModeConnector *connector,
 	    "disconnected connector CRTC_ID is 0");
 }
 
+/*
+ * check_connected_connector_edid_contract()
+ *
+ * Ownership:
+ *   Borrows the libdrm connector snapshot and DRM fd.  The helper owns each
+ *   temporary drmModePropertyPtr and drmModePropertyBlobPtr returned by libdrm,
+ *   and releases them before return.
+ *
+ * Lifetime:
+ *   Valid for the current MODE_GETCONNECTOR snapshot only.  The EDID blob ID is
+ *   read and consumed immediately; no pointer into the blob survives this call.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI probe.  It does not mutate connector
+ *   state or issue hotplug events, so concurrent hotplug is only reflected in a
+ *   later probe run.
+ */
+static void
+check_connected_connector_edid_contract(int fd,
+    const drmModeConnector *connector, const char *name)
+{
+	static const uint8_t edid_header[8] =
+	    { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+	drmModePropertyBlobPtr blob;
+	drmModePropertyPtr prop;
+	const uint8_t *edid;
+	uint64_t blob_id = 0;
+	size_t expected_length;
+	bool block_aligned;
+	bool checksums_ok = true;
+	bool has_base_block;
+	bool header_ok;
+	bool is_blob;
+	char text[192];
+
+	prop = get_property_by_name(fd, connector->connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "EDID", &blob_id);
+	snprintf(text, sizeof(text), "%s has property EDID", name);
+	check(prop != NULL, text);
+	if (prop == NULL)
+		return;
+
+	is_blob = (prop->flags & DRM_MODE_PROP_BLOB) != 0;
+	check(is_blob, "connected connector EDID property is blob");
+	drmModeFreeProperty(prop);
+	if (!is_blob)
+		return;
+
+	check(blob_id != 0, "connected connector EDID blob is non-zero");
+	if (blob_id == 0 || blob_id > UINT32_MAX)
+		return;
+
+	blob = drmModeGetPropertyBlob(fd, (uint32_t)blob_id);
+	check(blob != NULL, "connected connector EDID blob is readable");
+	if (blob == NULL)
+		return;
+
+	check(blob->data != NULL, "connected connector EDID blob has data");
+	if (blob->data == NULL) {
+		drmModeFreePropertyBlob(blob);
+		return;
+	}
+
+	edid = (const uint8_t *)blob->data;
+	has_base_block = blob->length >= 128;
+	block_aligned = (blob->length % 128) == 0;
+	check(has_base_block, "connected connector EDID blob has base block");
+	check(block_aligned,
+	    "connected connector EDID blob length is block aligned");
+
+	header_ok = has_base_block &&
+	    memcmp(edid, edid_header, sizeof(edid_header)) == 0;
+	check(header_ok, "connected connector EDID base header is valid");
+
+	if (has_base_block) {
+		expected_length = ((size_t)edid[126] + 1) * 128;
+		check(blob->length == expected_length,
+		    "connected connector EDID extension count matches blob length");
+	} else {
+		check(false,
+		    "connected connector EDID extension count matches blob length");
+	}
+
+	if (has_base_block && block_aligned) {
+		for (size_t offset = 0; offset < blob->length; offset += 128) {
+			uint8_t sum = 0;
+
+			for (size_t i = 0; i < 128; i++)
+				sum = (uint8_t)(sum + edid[offset + i]);
+			if (sum != 0) {
+				checksums_ok = false;
+				break;
+			}
+		}
+		check(checksums_ok,
+		    "connected connector EDID block checksums are valid");
+	} else {
+		check(false,
+		    "connected connector EDID block checksums are valid");
+	}
+
+	drmModeFreePropertyBlob(blob);
+}
+
 static bool
 connector_allows_encoder_type(uint32_t connector_type, uint32_t encoder_type)
 {
@@ -2375,6 +2479,8 @@ check_connector(int fd, drmModeConnector *connector,
 			check(id_in_list(connector->encoders,
 			    connector->count_encoders, connector->encoder_id),
 			    "connected connector current encoder is attached");
+			check_connected_connector_edid_contract(fd, connector,
+			    name);
 			check_connected_connector_route_contract(fd, connector,
 			    resources, name);
 		}
