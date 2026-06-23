@@ -4820,6 +4820,7 @@ static void
 check_same_device_prime_framebuffer_contract(int kms_fd)
 {
 	drmModeFB2Ptr fb2 = NULL;
+	struct drm_prime_handle prime_args;
 	uint32_t render_handle = 0;
 	uint32_t imported_handle = 0;
 	uint32_t pitch = 0;
@@ -4844,6 +4845,26 @@ check_same_device_prime_framebuffer_contract(int kms_fd)
 	if (!clear_dumb_buffer(render_fd, render_handle, pitch, 64,
 	    "MAP_DUMB succeeds on render fd for PRIME framebuffer probe"))
 		goto out_destroy_render_bo;
+
+	memset(&prime_args, 0, sizeof(prime_args));
+	prime_args.handle = render_handle;
+	prime_args.flags = 0x80000000u;
+	prime_args.fd = -1;
+	errno = 0;
+	ret = drmIoctl(render_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime_args);
+	saved_errno = errno;
+	check(ret != 0, "PRIME_HANDLE_TO_FD rejects unknown flags");
+	check(saved_errno == EINVAL,
+	    "PRIME_HANDLE_TO_FD unknown flags fail with EINVAL");
+	check(prime_args.fd < 0,
+	    "PRIME_HANDLE_TO_FD unknown flags return no dma-buf fd");
+	if (ret == 0 || saved_errno != EINVAL || prime_args.fd >= 0) {
+		printf("    PRIME_HANDLE_TO_FD unknown flags ret=%d errno=%d fd=%d\n",
+		    ret, saved_errno, prime_args.fd);
+		if (prime_args.fd >= 0)
+			check(close(prime_args.fd) == 0,
+			    "close succeeds for unexpected PRIME dma-buf fd");
+	}
 
 	errno = 0;
 	ret = drmPrimeHandleToFD(render_fd, render_handle, DRM_CLOEXEC, &prime_fd);
