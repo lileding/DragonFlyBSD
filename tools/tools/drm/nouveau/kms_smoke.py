@@ -986,6 +986,10 @@ def report_wayland_info(out_dir: pathlib.Path, emit) -> None:
          "wayland-info sees xdg_wm_base")
     emit(bool(re.search(r"interface:\s+'wp_presentation'", text)),
          "wayland-info sees wp_presentation")
+    has_syncobj_manager = bool(re.search(
+        r"interface:\s+'wp_linux_drm_syncobj_manager_v1'", text))
+    syncobj_status = "present" if has_syncobj_manager else "absent"
+    emit(True, f"wayland-info linux drm syncobj manager is {syncobj_status}")
     emit(bool(re.search(r"presentation clock id:\s*[0-9]+", text)),
          "wayland-info reports presentation clock")
     emit(bool(re.search(r"interface:\s+'wp_drm_lease_device_v1'", text)) and
