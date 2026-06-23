@@ -5776,6 +5776,43 @@ check_addfb2_rejects(int fd, struct drm_mode_fb_cmd2 request,
 }
 
 /*
+ * check_legacy_addfb_rejects()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and the GEM handle embedded in request.  If a buggy
+ *   kernel accepts the request and creates an FB, the helper removes that FB
+ *   before returning.
+ *
+ * Lifetime:
+ *   The request is copied by value so the caller's template remains reusable
+ *   across negative probes.
+ *
+ * Threading:
+ *   Single-threaded framebuffer UAPI probe.  These legacy ADDFB requests must
+ *   fail in common DRM conversion/validation before nvkm fb_create or display
+ *   programming runs.
+ */
+static void
+check_legacy_addfb_rejects(int fd, struct drm_mode_fb_cmd request,
+    int expected_errno, const char *what, const char *errno_what)
+{
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_ADDFB, &request);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 && request.fb_id != 0)
+		remove_framebuffer(fd, request.fb_id,
+		    "RMFB succeeds for unexpected legacy ADDFB negative probe");
+	else if (ret != 0 && saved_errno != expected_errno)
+		printf("    ADDFB ret=%d errno=%d expected=%d\n", ret,
+		    saved_errno, expected_errno);
+}
+
+/*
  * check_non_master_display_mutation_contract()
  *
  * Ownership:
@@ -6201,6 +6238,7 @@ check_framebuffer_uapi_contract(int fd)
 	struct pageflip_counter_snapshot after;
 	struct drm_mode_fb_dirty_cmd dirty;
 	struct drm_mode_fb_cmd2 addfb2;
+	struct drm_mode_fb_cmd addfb;
 	drmModeClip clip;
 	drmModeFBPtr fb = NULL;
 	drmModeFB2Ptr fb2 = NULL;
@@ -6222,6 +6260,38 @@ check_framebuffer_uapi_contract(int fd)
 	if (!clear_dumb_buffer(fd, handle, pitch, 64,
 	    "MAP_DUMB succeeds for framebuffer UAPI probe"))
 		goto out_destroy_bo;
+
+	memset(&addfb, 0, sizeof(addfb));
+	addfb.width = 64;
+	addfb.height = 64;
+	addfb.pitch = pitch;
+	addfb.bpp = 32;
+	addfb.depth = 24;
+	addfb.handle = handle;
+
+	addfb.width = 0;
+	check_legacy_addfb_rejects(fd, addfb, EINVAL,
+	    "legacy ADDFB rejects zero width",
+	    "legacy ADDFB zero width fails with EINVAL");
+	addfb.width = 64;
+
+	addfb.height = 0;
+	check_legacy_addfb_rejects(fd, addfb, EINVAL,
+	    "legacy ADDFB rejects zero height",
+	    "legacy ADDFB zero height fails with EINVAL");
+	addfb.height = 64;
+
+	addfb.handle = 0;
+	check_legacy_addfb_rejects(fd, addfb, EINVAL,
+	    "legacy ADDFB rejects missing handle",
+	    "legacy ADDFB missing handle fails with EINVAL");
+	addfb.handle = handle;
+
+	addfb.pitch = 4;
+	check_legacy_addfb_rejects(fd, addfb, EINVAL,
+	    "legacy ADDFB rejects undersized pitch",
+	    "legacy ADDFB undersized pitch fails with EINVAL");
+	addfb.pitch = pitch;
 
 	memset(&addfb2, 0, sizeof(addfb2));
 	addfb2.width = 64;
