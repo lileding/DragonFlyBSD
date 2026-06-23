@@ -17,6 +17,7 @@
 #include <sys/namecache.h>
 #include <sys/dirent.h>
 #include <sys/uio.h>
+#include <sys/queue.h>
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
@@ -55,22 +56,25 @@ vmm_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
+	{
+		struct vmmfs_device *d;
+		int skip = (int)off - 2;
 
-		if (!d->in_use || d->owner != node->vn_machine)
-			continue;
-		if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_REG,
-		    (uint16_t)strlen(d->bdf), d->bdf)) {
-			off = 2 + i;
-			full = 1;
-			break;
+		i = 0;
+		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+			if (d->owner != node->vn_machine)
+				continue;
+			if (i++ < skip)
+				continue;
+			if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_REG,
+			    (uint16_t)strlen(d->bdf), d->bdf)) {
+				full = 1;
+				break;
+			}
+			off++;
 		}
-		off = 2 + i + 1;
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (!full && off < 2 + VMMFS_MAX_DEVICES)
-		off = 2 + VMMFS_MAX_DEVICES;
 out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
@@ -103,14 +107,24 @@ vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	if (d->is_host)
+	if (d->is_host) {
 		d->owner = NULL;	/* unbind: back to host pool */
-	else
-		d->in_use = 0;			/* backend: unload */
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		cache_unlink(ap->a_nch);
+		vrele(vp);
+		return 0;
+	}
+	/*
+	 * A user backend is unloaded: drop it from the pool and free it.  (Real
+	 * backends that can be held open will need the machine-style refcount.)
+	 */
+	SLIST_REMOVE(&vmp->vm_devs, d, vmmfs_device, dv_link);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
 	cache_unlink(ap->a_nch);
 	vrele(vp);
+	vmmfs_node_uninit(&d->node);
+	vmmfs_node_uninit(&d->link);
+	kfree(d, M_VMMFS);
 	return 0;
 }
 
@@ -209,22 +223,23 @@ vmm_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	for (i = (int)off - 2; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
+	{
+		struct vmmfs_device *d;
+		int skip = (int)off - 2;
 
-		if (!d->in_use)
-			continue;
-		if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
-		    (uint16_t)strlen(d->bdf), d->bdf)) {
-			off = 2 + i;
-			full = 1;
-			break;
+		i = 0;
+		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+			if (i++ < skip)
+				continue;
+			if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
+			    (uint16_t)strlen(d->bdf), d->bdf)) {
+				full = 1;
+				break;
+			}
+			off++;
 		}
-		off = 2 + i + 1;
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (!full && off < 2 + VMMFS_MAX_DEVICES)
-		off = 2 + VMMFS_MAX_DEVICES;
 out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }

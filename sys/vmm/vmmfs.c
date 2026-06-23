@@ -693,32 +693,46 @@ struct vmmfs_device *
 vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machine *owner,
     const char *name, int nlen)
 {
-	int i;
+	struct vmmfs_device *d;
 
-	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
-
-		if (d->in_use && d->owner == owner &&
-		    (int)strlen(d->bdf) == nlen && bcmp(d->bdf, name, nlen) == 0)
+	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+		if (d->owner == owner && (int)strlen(d->bdf) == nlen &&
+		    bcmp(d->bdf, name, nlen) == 0)
 			return d;
 	}
 	return NULL;
 }
 
-/* Find any in_use device by bdf, regardless of owner (for the index). */
+/* Find any device by bdf, regardless of owner (for the index). */
 struct vmmfs_device *
 vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
 {
-	int i;
+	struct vmmfs_device *d;
 
-	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
-
-		if (d->in_use && (int)strlen(d->bdf) == nlen &&
-		    bcmp(d->bdf, name, nlen) == 0)
+	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
+		if ((int)strlen(d->bdf) == nlen && bcmp(d->bdf, name, nlen) == 0)
 			return d;
 	}
 	return NULL;
+}
+
+/* Allocate a device, wire up its nodes with fresh inos, and add it to the pool. */
+static struct vmmfs_device *
+vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
+{
+	struct vmmfs_device *d;
+	ino_t idx = (ino_t)vmp->vm_next_dev++;
+
+	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
+	d->owner = NULL;
+	d->is_host = is_host;
+	strlcpy(d->bdf, bdf, sizeof(d->bdf));
+	vmmfs_node_init(&d->node, VMMFS_NDEVICE, VMMFS_DEV_INO_BASE + idx,
+	    &vmp->vm_host_devices, NULL, 0);
+	vmmfs_node_init(&d->link, VMMFS_NDEVLINK, VMMFS_DEVLINK_INO_BASE + idx,
+	    &vmp->vm_devroot, NULL, 0);
+	SLIST_INSERT_HEAD(&vmp->vm_devs, d, dv_link);
+	return d;
 }
 
 /* Owner display name: "host" or the owning machine's name. */
@@ -768,19 +782,8 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    &vmp->vm_root, NULL, 0);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
-	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-		struct vmmfs_device *d = &vmp->vm_dev[i];
-
-		d->in_use = 0;
-		d->owner = NULL;
-		d->is_host = 1;
-		vmmfs_node_init(&d->node, VMMFS_NDEVICE,
-		    VMMFS_DEV_INO_BASE + (ino_t)i, &vmp->vm_host_devices, NULL,
-		    0);
-		vmmfs_node_init(&d->link, VMMFS_NDEVLINK,
-		    VMMFS_DEVLINK_INO_BASE + (ino_t)i, &vmp->vm_devroot, NULL,
-		    0);
-	}
+	SLIST_INIT(&vmp->vm_devs);
+	vmp->vm_next_dev = 0;
 	/* Stub host PCIe device pool: a few fixed BDFs, all owned by host. */
 	{
 		static const char *const stub_bdf[] = {
@@ -788,12 +791,8 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 		};
 		int n = (int)(sizeof(stub_bdf) / sizeof(stub_bdf[0]));
 
-		for (i = 0; i < n && i < VMMFS_MAX_DEVICES; i++) {
-			struct vmmfs_device *d = &vmp->vm_dev[i];
-
-			d->in_use = 1;
-			strlcpy(d->bdf, stub_bdf[i], sizeof(d->bdf));
-		}
+		for (i = 0; i < n; i++)
+			(void)vmmfs_device_add(vmp, stub_bdf[i], 1);
 	}
 
 	mp->mnt_flag |= MNT_LOCAL;
@@ -821,7 +820,6 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(mp);
 	int flags = 0;
 	int error;
-	int i;
 
 	if (mntflags & MNT_FORCE)
 		flags |= FORCECLOSE;
@@ -843,9 +841,13 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 			vmmfs_machine_unref(vmp, m);
 		}
 	}
-	for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-		vmmfs_node_uninit(&vmp->vm_dev[i].node);
-		vmmfs_node_uninit(&vmp->vm_dev[i].link);
+	while (!SLIST_EMPTY(&vmp->vm_devs)) {
+		struct vmmfs_device *d = SLIST_FIRST(&vmp->vm_devs);
+
+		SLIST_REMOVE_HEAD(&vmp->vm_devs, dv_link);
+		vmmfs_node_uninit(&d->node);
+		vmmfs_node_uninit(&d->link);
+		kfree(d, M_VMMFS);
 	}
 	vmmfs_node_uninit(&vmp->vm_devroot);
 	vmmfs_node_uninit(&vmp->vm_host_devices);

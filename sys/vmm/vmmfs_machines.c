@@ -119,7 +119,9 @@ vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 void
 vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 {
-	int i, first;
+	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
+	struct vmmfs_device *d, *nd;
+	int first;
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	first = m->vm_in_tree;	/* the lease path already set "deleting" */
@@ -128,19 +130,28 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 		(void)vmm_machine_begin_delete(&m->state);
 		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
 		/* This machine's devices: host devices return to the host pool,
-		 * user backends are unloaded. */
-		for (i = 0; i < VMMFS_MAX_DEVICES; i++) {
-			struct vmmfs_device *d = &vmp->vm_dev[i];
-
-			if (d->in_use && d->owner == m) {
-				if (d->is_host)
-					d->owner = NULL;
-				else
-					d->in_use = 0;
+		 * user backends are unloaded (freed outside the lock below). */
+		SLIST_FOREACH_MUTABLE(d, &vmp->vm_devs, dv_link, nd) {
+			if (d->owner != m)
+				continue;
+			if (d->is_host) {
+				d->owner = NULL;
+			} else {
+				SLIST_REMOVE(&vmp->vm_devs, d, vmmfs_device,
+				    dv_link);
+				SLIST_INSERT_HEAD(&tofree, d, dv_link);
 			}
 		}
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	while (!SLIST_EMPTY(&tofree)) {
+		d = SLIST_FIRST(&tofree);
+		SLIST_REMOVE_HEAD(&tofree, dv_link);
+		vmmfs_node_uninit(&d->node);
+		vmmfs_node_uninit(&d->link);
+		kfree(d, M_VMMFS);
+	}
 	if (first)
 		vmmfs_machine_unref(vmp, m);	/* the tree reference */
 }

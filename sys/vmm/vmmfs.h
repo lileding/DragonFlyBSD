@@ -34,9 +34,8 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_NAME_MAX		63
 #define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
 
-/* PCIe device passthrough (stub): a fixed pool of host devices, each owned by
- * a machine (NULL owner = the host pool).  Binding is `mv` between devices/. */
-#define VMMFS_MAX_DEVICES	8
+/* PCIe device passthrough (stub): a pool of host devices, each owned by a
+ * machine (NULL owner = the host pool).  Binding is `mv` between devices/. */
 #define VMMFS_BDF_MAX		31
 
 enum vmmfs_ntype {
@@ -89,16 +88,22 @@ struct vmmfs_node {
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
-/* A PCIe device in the (stub) pool.  `owner` is the machine it is currently
- * bound to, or NULL for the host pool. */
+/*
+ * A PCIe device in the (stub) pool, allocated on demand and kept in the
+ * per-mount SLIST.  `owner` is the machine it is currently bound to, or NULL
+ * for the host pool.  A host device is permanent (rm returns it to the pool);
+ * a user backend is freed on rm.
+ */
 struct vmmfs_device {
-	int			in_use;
+	SLIST_ENTRY(vmmfs_device) dv_link;
 	struct vmmfs_machine   *owner;
 	int			is_host;	/* rm returns it to host vs deletes */
 	char			bdf[VMMFS_BDF_MAX + 1];
 	struct vmmfs_node	node;		/* the NDEVICE file */
 	struct vmmfs_node	link;		/* its NDEVLINK in /vmm/devices/ */
 };
+
+SLIST_HEAD(vmmfs_devlist, vmmfs_device);
 
 #define VMMFS_DEV_OF_NODE(n) \
 	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, node)))
@@ -134,8 +139,9 @@ struct vmmfs_mount {
 	struct vmmfs_node	vm_devroot;	/* /dev/vmm/devices/ symlink index */
 	struct lock		vm_lock;
 	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
-	ino_t			vm_next_ino;	/* monotonic ino allocator */
-	struct vmmfs_device	vm_dev[VMMFS_MAX_DEVICES];
+	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
+	struct vmmfs_devlist	vm_devs;	/* PCIe device pool */
+	int			vm_next_dev;	/* monotonic device ino index */
 };
 
 int	vmmfs_machine_cmp(struct vmmfs_machine *a, struct vmmfs_machine *b);
