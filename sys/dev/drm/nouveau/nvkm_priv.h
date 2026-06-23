@@ -728,6 +728,7 @@ struct nvkm_softc {
 	uint32_t		kms_hpd_pending_unplug_mask;
 	uint32_t		kms_hpd_pending_link_bad_mask;
 	uint32_t		kms_hpd_pending_dp_irq_mask;
+	uint32_t		kms_detect_force_disconnect_mask;
 	uint32_t		kms_hpd_last_plug_mask;
 	uint32_t		kms_hpd_last_unplug_mask;
 	uint32_t		kms_hpd_last_link_bad_mask;

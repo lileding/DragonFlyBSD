@@ -262,6 +262,42 @@ def capture_hpd_inject(out_dir: pathlib.Path, inject_value: int) -> int:
             return 1
 
 
+def capture_console_dark_down(out_dir: pathlib.Path, display_id: int) -> None:
+    unplug_value = (display_id & 0x0000ffff) << 16
+
+    run(["sysctl", "-n", "dev.drm.0.state"],
+        out_dir / "drm_state.console_dark_before")
+    run([
+        "doas",
+        "sysctl",
+        f"dev.drm.0.kms_detect_force_disconnect_mask={display_id:#x}",
+    ], out_dir / "kms-detect-force-disconnect.console")
+    run([
+        "doas",
+        "sysctl",
+        f"dev.drm.0.kms_hpd_inject={unplug_value:#x}",
+    ], out_dir / "kms-hpd-unplug.console")
+    run(["sleep", "2"], out_dir / "console-dark-wait.console")
+    run(["sysctl", "-n", "dev.drm.0.state"],
+        out_dir / "drm_state.console_dark_after")
+    run([
+        "doas",
+        "sysctl",
+        "dev.drm.0.kms_detect_force_disconnect_mask=0",
+    ], out_dir / "kms-detect-force-disconnect-clear.console")
+    run([
+        "doas",
+        "sysctl",
+        f"dev.drm.0.kms_hpd_inject={display_id:#x}",
+    ], out_dir / "kms-hpd-plug-restore.console")
+    run(["sleep", "2"], out_dir / "console-restore-wait.console")
+    run(["doas", "sysctl", "dev.drm.0.kms_lightup=1"],
+        out_dir / "kms-lightup-restore.console")
+    run(["sleep", "1"], out_dir / "console-lightup-wait.console")
+    run(["sysctl", "-n", "dev.drm.0.state"],
+        out_dir / "drm_state.console_dark_restore")
+
+
 def capture_kms_property_probe(out_dir: pathlib.Path, phase: str) -> None:
     source = pathlib.Path(__file__).with_name("drmtest.c")
     binary = out_dir / "drmtest"
@@ -284,6 +320,9 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
         env["DISPLAY"] = args.display
     if args.xauthority:
         env["XAUTHORITY"] = args.xauthority
+
+    if phase == "after" and args.run_console_dark_down:
+        capture_console_dark_down(out_dir, args.dark_down_display_id)
 
     run(["date"], out_dir / f"date.{phase}")
     run(["uname", "-a"], out_dir / f"uname.{phase}")
@@ -728,6 +767,82 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             emit(not re.search(r"llvmpipe|softpipe|software rasterizer", text, re.I),
                  "glxinfo is not software rasterizer")
 
+    dark_before = parse_state(out_dir / "drm_state.console_dark_before")
+    dark_after = parse_state(out_dir / "drm_state.console_dark_after")
+    dark_restore = parse_state(out_dir / "drm_state.console_dark_restore")
+    if dark_before or dark_after or dark_restore:
+        for name in (
+            "kms-detect-force-disconnect.console",
+            "kms-hpd-unplug.console",
+            "kms-detect-force-disconnect-clear.console",
+            "kms-hpd-plug-restore.console",
+            "kms-lightup-restore.console",
+        ):
+            rc = command_return_code(out_dir / name)
+            emit(rc == 0, f"{name} rc={rc}")
+        for state_name, state in (
+            ("dark-before", dark_before),
+            ("dark-after", dark_after),
+            ("dark-restore", dark_restore),
+        ):
+            emit(bool(state), f"{state_name} state captured")
+        if dark_before and dark_after:
+            if "dark_down_count" in dark_before and "dark_down_count" in dark_after:
+                delta = dark_after["dark_down_count"] - dark_before["dark_down_count"]
+                emit(delta > 0, f"dark_down_count delta={delta}")
+            else:
+                emit(False, "missing dark_down_count around console dark-down")
+            if (
+                "dark_down_error_count" in dark_before and
+                "dark_down_error_count" in dark_after
+            ):
+                delta = (
+                    dark_after["dark_down_error_count"] -
+                    dark_before["dark_down_error_count"]
+                )
+                emit(delta == 0, f"dark_down_error_count delta={delta}")
+            else:
+                emit(False, "missing dark_down_error_count around console dark-down")
+            if (
+                "hotplug_auto_kms_count" in dark_before and
+                "hotplug_auto_kms_count" in dark_after
+            ):
+                delta = (
+                    dark_after["hotplug_auto_kms_count"] -
+                    dark_before["hotplug_auto_kms_count"]
+                )
+                emit(delta > 0, f"console unplug auto-KMS delta={delta}")
+            else:
+                emit(False, "missing hotplug_auto_kms_count around console dark-down")
+        if dark_after and dark_restore:
+            if (
+                "hotplug_auto_kms_count" in dark_after and
+                "hotplug_auto_kms_count" in dark_restore
+            ):
+                delta = (
+                    dark_restore["hotplug_auto_kms_count"] -
+                    dark_after["hotplug_auto_kms_count"]
+                )
+                emit(delta > 0, f"console restore auto-KMS delta={delta}")
+            else:
+                emit(False, "missing hotplug_auto_kms_count around console restore")
+        if dark_restore:
+            for key in (
+                "commit_error_count",
+                "dark_down_error_count",
+                "hotplug_enqueue_error_count",
+                "display_audit_pending_valid",
+            ):
+                if key in dark_restore:
+                    emit(dark_restore[key] == 0, f"restore {key}=0")
+                else:
+                    emit(False, f"missing restore {key}")
+            if "scanout_user" in dark_restore:
+                emit(dark_restore["scanout_user"] == 0,
+                     f"console restore scanout_user={dark_restore['scanout_user']}")
+            else:
+                emit(False, "missing restore scanout_user")
+
     xlog = sorted(out_dir.glob("*Xorg*.x11"))
     after_xlog = sorted(out_dir.glob("*Xorg*.after"))
     if x11_ran and xlog:
@@ -808,6 +923,13 @@ def main() -> int:
     parser.add_argument("--hpd-inject-value", type=lambda value: int(value, 0),
                         default=0x400,
                         help="packed HPD mask: low16 plug, high16 unplug")
+    parser.add_argument("--run-console-dark-down", action="store_true",
+                        help="after phase only: force one connector to look "
+                             "disconnected, verify no-master dark-down, then "
+                             "restore normal detect")
+    parser.add_argument("--dark-down-display-id",
+                        type=lambda value: int(value, 0), default=0x400,
+                        help="displayId bit used by --run-console-dark-down")
     parser.add_argument("--allow-missing-x11", action="store_true",
                         help="allow report-only console/debug runs without an x11 phase")
     args = parser.parse_args()

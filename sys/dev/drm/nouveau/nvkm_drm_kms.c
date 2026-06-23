@@ -620,6 +620,35 @@ static const struct drm_connector_helper_funcs nvkm_connector_helper_funcs = {
 
 /* ===== connector funcs ===== */
 
+/*
+ * Check whether debug-only KMS validation currently forces this display to
+ * look disconnected.
+ *
+ * Ownership:
+ *   Borrows sc and the display_id value. The HPD lock owns the debug mask;
+ *   this helper copies it and releases the lock before returning.
+ *
+ * Lifetime:
+ *   The returned bool is a snapshot. It does not keep connector, GSP, or
+ *   modeset state alive, and it must not be cached across detect calls.
+ *
+ * Threading:
+ *   May be called from connector detect/probe paths. The spinlock is held
+ *   only while copying the 32-bit mask and never across EDID/property work.
+ */
+static bool
+nvkm_connector_detect_forced_disconnected(struct nvkm_softc *sc,
+    uint32_t display_id)
+{
+	uint32_t mask;
+
+	spin_lock(&sc->kms_hpd_lock);
+	mask = sc->kms_detect_force_disconnect_mask;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	return ((mask & display_id) != 0);
+}
+
 static enum drm_connector_status
 nvkm_connector_detect(struct drm_connector *connector, bool force)
 {
@@ -627,6 +656,12 @@ nvkm_connector_detect(struct drm_connector *connector, bool force)
 	int connected;
 
 	(void)force;
+	if (nvkm_connector_detect_forced_disconnected(nc->sc, nc->display_id)) {
+		nvkm_connector_update_edid(connector, NULL,
+		    "debug-force-disconnect");
+		return (connector_status_disconnected);
+	}
+
 	connected = nvkm_gsp_disp_connected(nc->sc, nc->display_id);
 	if (connected > 0)
 		return (connector_status_connected);
