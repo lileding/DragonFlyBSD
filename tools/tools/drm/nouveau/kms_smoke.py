@@ -1601,6 +1601,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "SYNCOBJ_TRANSFER timeline source to timeline point succeeds",
         "SYNCOBJ_TRANSFER copied timeline point waits successfully",
         "SYNCOBJ_TRANSFER rejects missing source point",
+        "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT waits for source point",
+        "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination point waits successfully",
         "SYNCOBJ_TRANSFER creates binary destination syncobj",
         "SYNCOBJ_TRANSFER timeline source to binary succeeds",
         "SYNCOBJ_TRANSFER binary destination waits successfully",
