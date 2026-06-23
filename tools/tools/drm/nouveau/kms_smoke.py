@@ -2295,6 +2295,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "legacy pageflip TARGET flag leaves no pending display audit",
         "legacy pageflip to temporary FB pageflip ioctl succeeds",
         "legacy pageflip to temporary FB pageflip event arrives",
+        "legacy pageflip to temporary FB pageflip event reports CRTC id",
         "DRM state is readable before legacy pageflip temporary FB",
         "pageflip counters are present before legacy pageflip temporary FB",
         "legacy pageflip increments page_flip_count",

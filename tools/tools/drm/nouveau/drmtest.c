@@ -123,6 +123,7 @@ struct pageflip_event_state {
 	unsigned int sequence;
 	unsigned int tv_sec;
 	unsigned int tv_usec;
+	unsigned int crtc_id;
 };
 
 struct sequence_event_state {
@@ -1056,8 +1057,8 @@ wait_sync_file_readable(int fd, int timeout_ms, int *saved_errno)
 }
 
 static void
-pageflip_event_handler(int fd, unsigned int sequence, unsigned int tv_sec,
-    unsigned int tv_usec, void *user_data)
+pageflip_event_handler2(int fd, unsigned int sequence, unsigned int tv_sec,
+    unsigned int tv_usec, unsigned int crtc_id, void *user_data)
 {
 	struct pageflip_event_state *state = user_data;
 
@@ -1066,6 +1067,7 @@ pageflip_event_handler(int fd, unsigned int sequence, unsigned int tv_sec,
 	state->sequence = sequence;
 	state->tv_sec = tv_sec;
 	state->tv_usec = tv_usec;
+	state->crtc_id = crtc_id;
 }
 
 static void
@@ -1111,7 +1113,7 @@ wait_pageflip_event(int fd, struct pageflip_event_state *state,
 
 	memset(&context, 0, sizeof(context));
 	context.version = DRM_EVENT_CONTEXT_VERSION;
-	context.page_flip_handler = pageflip_event_handler;
+	context.page_flip_handler2 = pageflip_event_handler2;
 
 	kq = kqueue();
 	if (kq < 0) {
@@ -1999,9 +2001,12 @@ legacy_pageflip_with_event(int fd, uint32_t crtc_id, uint32_t fb_id,
 		check(false, text);
 		return false;
 	}
-	printf("    %s event sequence=%u time=%u.%06u\n", what,
-	    event_state.sequence, event_state.tv_sec, event_state.tv_usec);
+	printf("    %s event sequence=%u time=%u.%06u crtc_id=%u\n", what,
+	    event_state.sequence, event_state.tv_sec, event_state.tv_usec,
+	    event_state.crtc_id);
 	check(true, text);
+	snprintf(text, sizeof(text), "%s pageflip event reports CRTC id", what);
+	check(event_state.crtc_id == crtc_id, text);
 	return true;
 }
 
