@@ -1036,9 +1036,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         print(f"INFO leftover: {command}")
 
     x11_ran = (out_dir / "drm_state.x11").exists()
-    if not x11_ran:
-        emit(allow_missing_x11, "x11 phase optional/missing")
-    else:
+    wayland_ran = any(out_dir.glob("*sway*.log"))
+    if x11_ran or wayland_ran:
         if all(key in before and key in after for key in (
             "lastclose_restore_count",
             "lastclose_restore_error_count",
@@ -1052,9 +1051,9 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
                 before["lastclose_restore_error_count"]
             )
             emit(restore_delta > 0,
-                 f"lastclose restore delta={restore_delta}")
+                 f"display owner lastclose restore delta={restore_delta}")
             emit(restore_error_delta == 0,
-                 f"lastclose restore error delta={restore_error_delta}")
+                 f"display owner lastclose restore error delta={restore_error_delta}")
         else:
             emit(False, "missing lastclose restore counters")
         if "lastclose_restore_last_error" in after:
@@ -1063,6 +1062,9 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         else:
             emit(False, "missing lastclose_restore_last_error")
 
+    if not x11_ran:
+        emit(allow_missing_x11, "x11 phase optional/missing")
+    else:
         x11_state = parse_state(out_dir / "drm_state.x11_idle")
         if not x11_state:
             x11_state = parse_state(out_dir / "drm_state.x11")
