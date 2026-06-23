@@ -10,6 +10,9 @@ between steps:
     logout
     kms_smoke.py after
 
+Wayland compositor tests may call `kms_smoke.py wayland_hpd` from a compositor
+exec command while Wayland owns DRM master.
+
 All output is written under /var/tmp so it survives reboot.
 """
 
@@ -206,8 +209,9 @@ def run(argv: list[str], path: pathlib.Path, env: dict[str, str] | None = None,
             return 127
 
 
-def capture_hpd_inject(out_dir: pathlib.Path, inject_value: int) -> int:
-    path = out_dir / "kms-hpd-inject.x11"
+def capture_hpd_inject(out_dir: pathlib.Path, inject_value: int,
+                       label: str) -> int:
+    path = out_dir / f"kms-hpd-inject.{label}"
     command = ["doas", "sysctl", f"dev.drm.0.kms_hpd_inject={inject_value:#x}"]
     devd_path = "/var/run/devd.seqpacket.pipe"
 
@@ -302,6 +306,16 @@ def capture_console_dark_down(out_dir: pathlib.Path, display_id: int) -> None:
         out_dir / "drm_state.console_dark_restore")
 
 
+def capture_wayland_hpd(out_dir: pathlib.Path, inject_value: int) -> None:
+    run(["sleep", "1"], out_dir / "wayland-hpd-owner-wait.wayland")
+    run(["sysctl", "-n", "dev.drm.0.state"],
+        out_dir / "drm_state.wayland_hpd_before")
+    capture_hpd_inject(out_dir, inject_value, "wayland")
+    run(["sleep", "1"], out_dir / "hpd-inject-wait.wayland")
+    run(["sysctl", "-n", "dev.drm.0.state"],
+        out_dir / "drm_state.wayland_hpd_after")
+
+
 def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
                                env_extra: dict[str, str] | None = None) -> None:
     source = pathlib.Path(__file__).with_name("drmtest.c")
@@ -383,6 +397,10 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     if args.xauthority:
         env["XAUTHORITY"] = args.xauthority
 
+    if phase == "wayland_hpd":
+        capture_wayland_hpd(out_dir, args.hpd_inject_value)
+        return
+
     if phase == "after" and args.run_console_dark_down:
         capture_console_dark_down(out_dir, args.dark_down_display_id)
     if phase == "after":
@@ -433,7 +451,7 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     if args.run_hpd_inject:
         run(["sysctl", "-n", "dev.drm.0.state"],
             out_dir / "drm_state.x11_hpd_before")
-        capture_hpd_inject(out_dir, args.hpd_inject_value)
+        capture_hpd_inject(out_dir, args.hpd_inject_value, "x11")
         run(["sleep", "1"], out_dir / "hpd-inject-wait.x11")
         run(["sysctl", "-n", "dev.drm.0.state"],
             out_dir / "drm_state.x11_hpd_after")
@@ -654,6 +672,54 @@ def report_xwayland_glxgears(out_dir: pathlib.Path, emit) -> None:
          "Xwayland glxgears produced renderer/frame/marker output")
     emit(not has_error_text(text),
          "Xwayland glxgears output has no errors")
+
+
+def report_hpd_inject(out_dir: pathlib.Path, label: str, emit) -> None:
+    hpd_before = parse_state(out_dir / f"drm_state.{label}_hpd_before")
+    hpd_after = parse_state(out_dir / f"drm_state.{label}_hpd_after")
+    inject_path = out_dir / f"kms-hpd-inject.{label}"
+    if not (hpd_before or hpd_after or inject_path.exists()):
+        return
+
+    inject_rc = command_return_code(inject_path)
+    emit(inject_rc == 0, f"kms-hpd-inject.{label} rc={inject_rc}")
+    inject_text = captured_text(inject_path)
+    emit(bool(re.search(
+        r"!system=DRM\s+subsystem=card[0-9]+\s+type=HOTPLUG\b"
+        r".*\bHOTPLUG=1\b.*\bcard=[0-9]+\b.*\brender=-?[0-9]+\b",
+        inject_text,
+    )), f"{label} devd client received DRM HOTPLUG event")
+    for key in (
+        "hotplug_count",
+        "hotplug_notify_only_count",
+        "hotplug_nochange_count",
+    ):
+        if key in hpd_before and key in hpd_after:
+            delta = hpd_after[key] - hpd_before[key]
+            emit(delta > 0, f"{label} {key} HPD delta={delta}")
+        else:
+            emit(False, f"missing {label} {key} HPD state")
+    if (
+        "hotplug_auto_kms_count" in hpd_before and
+        "hotplug_auto_kms_count" in hpd_after
+    ):
+        delta = (
+            hpd_after["hotplug_auto_kms_count"] -
+            hpd_before["hotplug_auto_kms_count"]
+        )
+        emit(delta == 0, f"{label} hotplug_auto_kms_count HPD delta={delta}")
+    else:
+        emit(False, f"missing {label} hotplug_auto_kms_count HPD state")
+    if "scanout_user" in hpd_after:
+        emit(hpd_after["scanout_user"] == 1,
+             f"{label} HPD kept user scanout={hpd_after['scanout_user']}")
+    else:
+        emit(False, f"missing {label} scanout_user HPD state")
+    if "hpd_last_plug_mask" in hpd_after:
+        emit(hpd_after["hpd_last_plug_mask"] != 0,
+             f"{label} hpd_last_plug_mask=0x{hpd_after['hpd_last_plug_mask']:08x}")
+    else:
+        emit(False, f"missing {label} hpd_last_plug_mask HPD state")
 
 
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
@@ -902,48 +968,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
              "glxgears produced renderer/frame output")
         emit(not has_error_text(gears_text),
              "glxgears output has no errors")
-        hpd_before = parse_state(out_dir / "drm_state.x11_hpd_before")
-        hpd_after = parse_state(out_dir / "drm_state.x11_hpd_after")
-        if hpd_before or hpd_after or (out_dir / "kms-hpd-inject.x11").exists():
-            inject_rc = command_return_code(out_dir / "kms-hpd-inject.x11")
-            emit(inject_rc == 0, f"kms-hpd-inject.x11 rc={inject_rc}")
-            inject_text = captured_text(out_dir / "kms-hpd-inject.x11")
-            emit(bool(re.search(
-                r"!system=DRM\s+subsystem=card[0-9]+\s+type=HOTPLUG\b"
-                r".*\bHOTPLUG=1\b.*\bcard=[0-9]+\b.*\brender=-?[0-9]+\b",
-                inject_text,
-            )), "devd client received DRM HOTPLUG event")
-            for key in (
-                "hotplug_count",
-                "hotplug_notify_only_count",
-                "hotplug_nochange_count",
-            ):
-                if key in hpd_before and key in hpd_after:
-                    delta = hpd_after[key] - hpd_before[key]
-                    emit(delta > 0, f"{key} HPD delta={delta}")
-                else:
-                    emit(False, f"missing {key} HPD state")
-            if (
-                "hotplug_auto_kms_count" in hpd_before and
-                "hotplug_auto_kms_count" in hpd_after
-            ):
-                delta = (
-                    hpd_after["hotplug_auto_kms_count"] -
-                    hpd_before["hotplug_auto_kms_count"]
-                )
-                emit(delta == 0, f"hotplug_auto_kms_count HPD delta={delta}")
-            else:
-                emit(False, "missing hotplug_auto_kms_count HPD state")
-            if "scanout_user" in hpd_after:
-                emit(hpd_after["scanout_user"] == 1,
-                     f"x11 HPD kept user scanout={hpd_after['scanout_user']}")
-            else:
-                emit(False, "missing scanout_user HPD state")
-            if "hpd_last_plug_mask" in hpd_after:
-                emit(hpd_after["hpd_last_plug_mask"] != 0,
-                     f"hpd_last_plug_mask=0x{hpd_after['hpd_last_plug_mask']:08x}")
-            else:
-                emit(False, "missing hpd_last_plug_mask HPD state")
+        report_hpd_inject(out_dir, "x11", emit)
         if (out_dir / "xrandr-panning.x11").exists():
             panning_rc = command_return_code(out_dir / "xrandr-panning.x11")
             emit(panning_rc == 0, f"xrandr-panning.x11 rc={panning_rc}")
@@ -958,6 +983,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     report_wayland_log(out_dir, emit)
     report_xwayland_glxinfo(out_dir, emit)
     report_xwayland_glxgears(out_dir, emit)
+    report_hpd_inject(out_dir, "wayland", emit)
 
     dark_before = parse_state(out_dir / "drm_state.console_dark_before")
     dark_after = parse_state(out_dir / "drm_state.console_dark_after")
@@ -1133,7 +1159,13 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="nvkm KMS staged smoke collector")
-    parser.add_argument("phase", choices=("before", "x11", "after", "report"))
+    parser.add_argument("phase", choices=(
+        "before",
+        "x11",
+        "wayland_hpd",
+        "after",
+        "report",
+    ))
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--display", default=os.environ.get("DISPLAY", ":0"))
     parser.add_argument("--xauthority", default=os.environ.get("XAUTHORITY"))
