@@ -2560,12 +2560,84 @@ check_crtc(int fd, uint32_t crtc_id)
 	check_atomic_crtc_color_contract(fd, crtc_id);
 }
 
+static bool
+modeinfo_timings_match(const drmModeModeInfo *a, const drmModeModeInfo *b)
+{
+	return a->clock == b->clock &&
+	    a->hdisplay == b->hdisplay &&
+	    a->hsync_start == b->hsync_start &&
+	    a->hsync_end == b->hsync_end &&
+	    a->htotal == b->htotal &&
+	    a->hskew == b->hskew &&
+	    a->vdisplay == b->vdisplay &&
+	    a->vsync_start == b->vsync_start &&
+	    a->vsync_end == b->vsync_end &&
+	    a->vtotal == b->vtotal &&
+	    a->vscan == b->vscan;
+}
+
+/*
+ * check_active_crtc_mode_blob_contract()
+ *
+ * Ownership:
+ *   Borrows the CRTC object ID and legacy CRTC snapshot from the caller.  The
+ *   MODE_ID property blob is owned by this helper and freed before return.
+ *
+ * Lifetime:
+ *   Valid only while the current KMS snapshot is stable.  The blob data is
+ *   consumed immediately; no pointer into it survives this call.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI validation.  It never creates modeset
+ *   state or takes driver-private locks.
+ */
+static void
+check_active_crtc_mode_blob_contract(int fd, uint32_t mode_id,
+    const drmModeCrtc *crtc)
+{
+	drmModePropertyBlobPtr blob;
+	const drmModeModeInfo *mode;
+
+	blob = drmModeGetPropertyBlob(fd, mode_id);
+	check(blob != NULL, "active CRTC MODE_ID blob is readable");
+	if (blob == NULL)
+		return;
+
+	check(blob->data != NULL, "active CRTC MODE_ID blob has data");
+	if (blob->data == NULL) {
+		drmModeFreePropertyBlob(blob);
+		return;
+	}
+
+	check(blob->length == sizeof(*mode),
+	    "active CRTC MODE_ID blob has modeinfo size");
+	if (blob->length != sizeof(*mode)) {
+		drmModeFreePropertyBlob(blob);
+		return;
+	}
+
+	mode = (const drmModeModeInfo *)blob->data;
+	check(mode->hdisplay == crtc->width && mode->vdisplay == crtc->height,
+	    "active CRTC MODE_ID blob matches legacy mode size");
+	check(modeinfo_timings_match(mode, &crtc->mode),
+	    "active CRTC MODE_ID blob matches legacy mode timings");
+	check(mode->vrefresh == crtc->mode.vrefresh,
+	    "active CRTC MODE_ID blob matches legacy mode refresh");
+	check(mode->flags == crtc->mode.flags,
+	    "active CRTC MODE_ID blob matches legacy mode flags");
+	check(strncmp(mode->name, crtc->mode.name, DRM_DISPLAY_MODE_LEN) == 0,
+	    "active CRTC MODE_ID blob matches legacy mode name");
+
+	drmModeFreePropertyBlob(blob);
+}
+
 /*
  * check_crtc_route_state_contract()
  *
  * Ownership:
- *   Borrows the DRM fd and CRTC object ID from the caller.  The temporary
- *   drmModeCrtc snapshot is owned by this function and released before return.
+ *   Borrows the DRM fd and CRTC object ID from the caller.  The temporary CRTC
+ *   snapshot and any MODE_ID blob opened by this function are released before
+ *   return.
  *
  * Lifetime:
  *   Valid only for the current KMS snapshot.  A later modeset, DPMS change, or
@@ -2607,6 +2679,11 @@ check_crtc_route_state_contract(int fd, uint32_t crtc_id, const char *name)
 		check(crtc->buffer_id != 0, "active CRTC has framebuffer");
 		check(crtc->width > 0 && crtc->height > 0,
 		    "active CRTC has non-zero size");
+		check(mode_id <= UINT32_MAX,
+		    "active CRTC MODE_ID fits property blob id");
+		if (mode_id <= UINT32_MAX)
+			check_active_crtc_mode_blob_contract(fd,
+			    (uint32_t)mode_id, crtc);
 	} else {
 		check(crtc->buffer_id == 0, "inactive CRTC has no framebuffer");
 	}
