@@ -1345,6 +1345,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "active CRTC MODE_ID blob matches legacy mode refresh",
         "active CRTC MODE_ID blob matches legacy mode flags",
         "active CRTC MODE_ID blob matches legacy mode name",
+        "inactive CRTC has no framebuffer",
         "every CRTC has a primary plane",
         "every CRTC has a cursor plane",
         "does not expose unsupported connector property HDR_OUTPUT_METADATA",
