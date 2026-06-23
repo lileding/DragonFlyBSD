@@ -1285,6 +1285,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap CRTC_IN_VBLANK_EVENT is 1",
         "DRM cap PRIME is readable",
         "DRM cap PRIME is 3",
+        "DRM client cap UNIVERSAL_PLANES is accepted",
+        "DRM client cap ATOMIC is accepted",
         "does not expose unsupported connector property HDR_OUTPUT_METADATA",
         "does not expose unsupported connector property Colorspace",
         "does not expose unsupported connector property content type",
