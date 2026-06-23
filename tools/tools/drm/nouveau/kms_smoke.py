@@ -280,6 +280,10 @@ def capture_console_dark_down(out_dir: pathlib.Path, display_id: int) -> None:
     run(["sleep", "2"], out_dir / "console-dark-wait.console")
     run(["sysctl", "-n", "dev.drm.0.state"],
         out_dir / "drm_state.console_dark_after")
+    capture_kms_property_probe(out_dir, "console_dark", {
+        "NVKM_DRMTEST_METADATA_ONLY": "1",
+        "NVKM_DRMTEST_EXPECT_NO_CONNECTED": "1",
+    })
     run([
         "doas",
         "sysctl",
@@ -298,9 +302,11 @@ def capture_console_dark_down(out_dir: pathlib.Path, display_id: int) -> None:
         out_dir / "drm_state.console_dark_restore")
 
 
-def capture_kms_property_probe(out_dir: pathlib.Path, phase: str) -> None:
+def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
+                               env_extra: dict[str, str] | None = None) -> None:
     source = pathlib.Path(__file__).with_name("drmtest.c")
     binary = out_dir / "drmtest"
+    env = os.environ.copy()
     build_cmd = (
         "set -eu; "
         "cc -Wall -Wextra -Werror $(pkg-config --cflags libdrm) "
@@ -311,7 +317,9 @@ def capture_kms_property_probe(out_dir: pathlib.Path, phase: str) -> None:
     if run(["/bin/sh", "-c", build_cmd],
            out_dir / f"drmtest-build.{phase}") != 0:
         return
-    run([str(binary)], out_dir / f"drmtest.{phase}")
+    if env_extra:
+        env.update(env_extra)
+    run([str(binary)], out_dir / f"drmtest.{phase}", env=env)
 
 
 def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -> None:
@@ -774,6 +782,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         for name in (
             "kms-detect-force-disconnect.console",
             "kms-hpd-unplug.console",
+            "drmtest-build.console_dark",
+            "drmtest.console_dark",
             "kms-detect-force-disconnect-clear.console",
             "kms-hpd-plug-restore.console",
             "kms-lightup-restore.console",
@@ -826,6 +836,15 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
                 emit(delta > 0, f"console restore auto-KMS delta={delta}")
             else:
                 emit(False, "missing hotplug_auto_kms_count around console restore")
+        dark_drmtest = captured_text(out_dir / "drmtest.console_dark")
+        for text in (
+            "no connected connector exposed when requested",
+            "disconnected connector exposes no modes",
+            "disconnected connector EDID is 0",
+            "disconnected connector CRTC_ID is 0",
+            "SKIP active CRTC runtime probes by NVKM_DRMTEST_METADATA_ONLY",
+        ):
+            emit(text in dark_drmtest, f"drmtest.console_dark has {text}")
         if dark_restore:
             for key in (
                 "commit_error_count",
