@@ -3266,6 +3266,115 @@ check_getfb_non_master_metadata_contract(uint32_t fb_id, uint32_t width,
 }
 
 /*
+ * check_non_master_display_mutation_contract()
+ *
+ * Ownership:
+ *   Borrows the current master DRM fd, mode resource snapshot, active CRTC ID,
+ *   and active primary plane ID.  Owns one temporary secondary card fd and
+ *   closes it before return.
+ *
+ * Lifetime:
+ *   The active CRTC mode and primary FB_ID must remain valid while the helper
+ *   runs.  The rejected probes reuse the current mode and FB_ID, so even an
+ *   erroneous success would not intentionally program a new visible state.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The secondary fd must not be current
+ *   master, and mutating KMS ioctls must be rejected by the DRM_MASTER gate
+ *   before nvkm display state changes.
+ */
+static void
+check_non_master_display_mutation_contract(int master_fd,
+    const drmModeRes *resources, uint32_t crtc_id, uint32_t plane_id,
+    const char *object_name)
+{
+	struct atomic_plane_snapshot snapshot;
+	drmModeCrtcPtr crtc;
+	drmModeModeInfo saved_mode;
+	uint32_t connector_id = 0;
+	int secondary_fd;
+	int saved_errno;
+	int crtc_x;
+	int crtc_y;
+	int ret;
+
+	if (!find_active_connector_for_crtc(master_fd, resources, crtc_id,
+	    &connector_id)) {
+		check(false,
+		    "active connector is available for non-master display mutation probe");
+		return;
+	}
+	check(true,
+	    "active connector is available for non-master display mutation probe");
+
+	if (!get_plane_snapshot(master_fd, plane_id, &snapshot, object_name))
+		return;
+	check(snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for non-master display mutation probe");
+	check(snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for non-master display mutation probe");
+	if (snapshot.fb_id == 0 || snapshot.crtc_id != crtc_id)
+		return;
+
+	crtc = drmModeGetCrtc(master_fd, crtc_id);
+	check(crtc != NULL,
+	    "active CRTC is readable for non-master display mutation probe");
+	if (crtc == NULL)
+		return;
+	check(crtc->mode_valid,
+	    "active CRTC has a mode for non-master display mutation probe");
+	if (!crtc->mode_valid) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+	saved_mode = crtc->mode;
+	crtc_x = crtc->x;
+	crtc_y = crtc->y;
+	drmModeFreeCrtc(crtc);
+
+	errno = 0;
+	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	saved_errno = errno;
+	check(secondary_fd >= 0,
+	    "non-master display mutation opens secondary card fd");
+	if (secondary_fd < 0) {
+		printf("    secondary card fd errno=%d\n", saved_errno);
+		return;
+	}
+
+	errno = 0;
+	ret = drmModeSetCrtc(secondary_fd, crtc_id, snapshot.fb_id, crtc_x,
+	    crtc_y, &connector_id, 1, &saved_mode);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy SetCrtc is denied");
+	if (ret == 0) {
+		printf("    non-master legacy SetCrtc unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy SetCrtc errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy SetCrtc fails with EACCES");
+	}
+
+	errno = 0;
+	ret = drmModePageFlip(secondary_fd, crtc_id, snapshot.fb_id,
+	    DRM_MODE_PAGE_FLIP_EVENT, NULL);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy pageflip is denied");
+	if (ret == 0) {
+		printf("    non-master legacy pageflip unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy pageflip errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy pageflip fails with EACCES");
+	}
+
+	check(close(secondary_fd) == 0,
+	    "non-master display mutation closes secondary card fd");
+}
+
+/*
  * check_framebuffer_uapi_contract()
  *
  * Ownership:
@@ -5239,6 +5348,9 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			check_legacy_pageflip_runtime_contract(fd,
 			    active_crtc_id, plane->plane_id,
 			    active_crtc_width, active_crtc_height, name);
+			check_non_master_display_mutation_contract(fd,
+			    mode_resources, active_crtc_id, plane->plane_id,
+			    name);
 			check_atomic_connector_scaler_runtime_contract(fd,
 			    mode_resources, active_crtc_id);
 			check_legacy_dpms_runtime_contract(fd,
