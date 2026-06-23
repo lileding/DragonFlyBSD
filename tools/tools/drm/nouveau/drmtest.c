@@ -132,6 +132,10 @@ struct sequence_event_state {
 	uint64_t user_data;
 };
 
+struct raw_vblank_event {
+	struct drm_event_vblank event;
+};
+
 struct modeset_counter_snapshot {
 	uint64_t atomic_tail_disable_op_count;
 	uint64_t atomic_tail_enable_op_count;
@@ -1147,6 +1151,53 @@ wait_pageflip_event(int fd, struct pageflip_event_state *state,
 		*saved_errno = errno;
 		return -1;
 	}
+	return 1;
+}
+
+/*
+ * read_raw_vblank_event()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and caller-owned output storage.  It does not retain
+ *   the event after copying it into the caller's structure.
+ *
+ * Lifetime:
+ *   Waits for one queued DRM_EVENT_VBLANK and consumes exactly that userspace
+ *   event from the fd.  The caller must queue the vblank event before calling.
+ *
+ * Threading:
+ *   Single-threaded userspace wait.  No libdrm event callback is used because
+ *   the legacy vblank callback ABI does not expose drm_event_vblank.crtc_id.
+ */
+static int
+read_raw_vblank_event(int fd, struct raw_vblank_event *raw_event,
+    int timeout_ms, int *saved_errno)
+{
+	struct drm_event_vblank event;
+	ssize_t bytes;
+	int ret;
+
+	ret = wait_sync_file_readable(fd, timeout_ms, saved_errno);
+	if (ret != 1)
+		return ret;
+
+	memset(&event, 0, sizeof(event));
+	errno = 0;
+	bytes = read(fd, &event, sizeof(event));
+	*saved_errno = errno;
+	if (bytes < 0)
+		return -1;
+	if ((size_t)bytes != sizeof(event)) {
+		*saved_errno = EIO;
+		return -1;
+	}
+	if (event.base.type != DRM_EVENT_VBLANK ||
+	    event.base.length != sizeof(event)) {
+		*saved_errno = EPROTO;
+		return -1;
+	}
+
+	raw_event->event = event;
 	return 1;
 }
 
@@ -3051,6 +3102,7 @@ static void
 check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
     uint32_t crtc_index)
 {
+	struct raw_vblank_event raw_vblank;
 	struct sequence_event_state event_state;
 	drmVBlank vblank;
 	drmVBlankSeqType vblank_type;
@@ -3107,6 +3159,38 @@ check_vblank_sequence_runtime_contract(int fd, uint32_t crtc_id,
 	check(true, "drmCrtcGetSequence succeeds after WAIT_VBLANK");
 	check(sequence_after != sequence_before,
 	    "WAIT_VBLANK advances active CRTC sequence");
+
+	memset(&raw_vblank, 0, sizeof(raw_vblank));
+	user_data = 0x4e564b4d56424c4bULL;
+	memset(&vblank, 0, sizeof(vblank));
+	vblank.request.type = vblank_type | DRM_VBLANK_EVENT;
+	vblank.request.sequence = 1;
+	vblank.request.signal = (unsigned long)user_data;
+	errno = 0;
+	ret = drmWaitVBlank(fd, &vblank);
+	if (ret != 0) {
+		printf("    drmWaitVBlank event errno=%d\n", errno);
+		check(false, "drmWaitVBlank event queues active CRTC event");
+		return;
+	}
+	check(true, "drmWaitVBlank event queues active CRTC event");
+
+	ret = read_raw_vblank_event(fd, &raw_vblank, 2000, &saved_errno);
+	if (ret != 1) {
+		printf("    raw vblank event wait ret=%d errno=%d\n", ret,
+		    saved_errno);
+		check(false, "drmWaitVBlank event arrives");
+		return;
+	}
+	check(true, "drmWaitVBlank event arrives");
+	check(raw_vblank.event.user_data == user_data,
+	    "drmWaitVBlank event preserves user_data");
+	check(raw_vblank.event.crtc_id == crtc_id,
+	    "drmWaitVBlank event reports active CRTC id");
+	check(raw_vblank.event.sequence >= vblank.reply.sequence,
+	    "drmWaitVBlank event reaches queued sequence");
+	printf("    raw vblank event sequence=%u crtc_id=%u\n",
+	    raw_vblank.event.sequence, raw_vblank.event.crtc_id);
 
 	memset(&event_state, 0, sizeof(event_state));
 	user_data = (uint64_t)(uintptr_t)&event_state;
