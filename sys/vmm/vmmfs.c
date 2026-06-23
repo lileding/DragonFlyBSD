@@ -276,7 +276,7 @@ loop:
 	 * lifetime; reclaim drops it.  (vn_interlock released first to keep
 	 * vm_lock un-nested.) */
 	if (node->vn_machine != NULL)
-		vmmfs_machine_ref(VFS_TO_VMMFS(mp), node->vn_machine);
+		vmmfs_machines_ref(VFS_TO_VMMFS(mp), node->vn_machine);
 
 	vx_downgrade(vp);
 
@@ -739,7 +739,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 
 		while ((m = RB_ROOT(&vmp->vm_machtree)) != NULL) {
 			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-			vmmfs_machine_unref(vmp, m);
+			vmmfs_machines_unref(vmp, m);
 		}
 	}
 	while (!SLIST_EMPTY(&vmp->vm_devs)) {

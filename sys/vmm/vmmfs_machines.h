@@ -8,14 +8,14 @@
 #ifndef VMMFS_MACHINES_H
 #define VMMFS_MACHINES_H
 
-int	vmmfs_machine_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b);
-RB_PROTOTYPE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machine_cmp);
+int	vmmfs_machines_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b);
+RB_PROTOTYPE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machines_cmp);
 
 /* vnode lifetime: ref on bind, unref on reclaim; mark_deleted drops the tree
  * reference (rmdir / last lease close). */
-void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
-void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
-void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
+void	vmmfs_machines_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
+void	vmmfs_machines_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
+void	vmmfs_machines_mark_deleted(struct vmmfs_mount *vmp,
 	    struct vmmfs_machines *m);
 /* Resolve + check the desired loader at start time (caller's cred). */
 int	vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred);

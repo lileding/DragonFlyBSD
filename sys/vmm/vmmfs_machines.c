@@ -84,15 +84,15 @@ cfg_present(struct vmmfs_machines *m, const struct vmmfs_cfg_desc *d)
 /* ---- registry: an RB tree keyed by name (guarded by vm_lock) ---- */
 
 int
-vmmfs_machine_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b)
+vmmfs_machines_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b)
 {
 	return strcmp(a->name, b->name);
 }
-RB_GENERATE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machine_cmp);
+RB_GENERATE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machines_cmp);
 
 /* Caller holds vm_lock.  name need not be NUL-terminated. */
 static struct vmmfs_machines *
-vmmfs_find_machine(struct vmmfs_mount *vmp, const char *name, int nlen)
+vmmfs_machines_find(struct vmmfs_mount *vmp, const char *name, int nlen)
 {
 	struct vmmfs_machines key;
 
@@ -109,7 +109,7 @@ vmmfs_find_machine(struct vmmfs_mount *vmp, const char *name, int nlen)
  * tree reference.
  */
 static struct vmmfs_machines *
-vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
+vmmfs_machines_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 {
 	struct vmmfs_machines *m;
 	ino_t base;
@@ -140,7 +140,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 }
 
 void
-vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
+vmmfs_machines_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 {
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	m->vm_refs++;
@@ -148,7 +148,7 @@ vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 }
 
 static void
-vmmfs_machine_free(struct vmmfs_machines *m)
+vmmfs_machines_free(struct vmmfs_machines *m)
 {
 	int j;
 
@@ -161,7 +161,7 @@ vmmfs_machine_free(struct vmmfs_machines *m)
 
 /* Drop one reference; free once it reaches 0 (no vnode can reference it then). */
 void
-vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
+vmmfs_machines_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 {
 	int dofree;
 
@@ -169,7 +169,7 @@ vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 	dofree = (--m->vm_refs == 0);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 	if (dofree)
-		vmmfs_machine_free(m);
+		vmmfs_machines_free(m);
 }
 
 /*
@@ -179,7 +179,7 @@ vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
  * is reclaimed; dropping the tree reference here may free it immediately.
  */
 void
-vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
+vmmfs_machines_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 {
 	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
 	struct vmmfs_device *d, *nd;
@@ -215,7 +215,7 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 		kfree(d, M_VMMFS);
 	}
 	if (first)
-		vmmfs_machine_unref(vmp, m);	/* the tree reference */
+		vmmfs_machines_unref(vmp, m);	/* the tree reference */
 }
 
 /* ---- machines/ directory vops ---- */
@@ -235,7 +235,7 @@ vmm_machines_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 		struct vmmfs_machines *m;
 
 		lockmgr(&vmp->vm_lock, LK_SHARED);
-		m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
+		m = vmmfs_machines_find(vmp, ncp->nc_name, ncp->nc_nlen);
 		if (m != NULL)
 			child = &m->node;
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -308,17 +308,17 @@ vmm_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 		return EEXIST;	/* host is reserved */
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	if (vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
+	if (vmmfs_machines_find(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EEXIST;
 	}
-	m = vmmfs_machine_create(vmp, ncp->nc_name, ncp->nc_nlen);
+	m = vmmfs_machines_create(vmp, ncp->nc_name, ncp->nc_nlen);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->node, LK_EXCLUSIVE | LK_RETRY,
 	    &vp);
 	if (error) {
-		vmmfs_machine_mark_deleted(vmp, m);
+		vmmfs_machines_mark_deleted(vmp, m);
 		return error;
 	}
 
@@ -353,7 +353,7 @@ vmm_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	vn_unlock(vp);
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	m = vmmfs_find_machine(vmp, ncp->nc_name, ncp->nc_nlen);
+	m = vmmfs_machines_find(vmp, ncp->nc_name, ncp->nc_nlen);
 	if (m == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
@@ -366,7 +366,7 @@ vmm_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	vmmfs_machine_mark_deleted(vmp, m);
+	vmmfs_machines_mark_deleted(vmp, m);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	return 0;
@@ -560,7 +560,7 @@ vmm_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
 	if (vmm_machine_lease_close(&node->vn_machine->state)) {
 		struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
 
-		vmmfs_machine_mark_deleted(vmp, node->vn_machine);
+		vmmfs_machines_mark_deleted(vmp, node->vn_machine);
 	}
 	return error;
 }
