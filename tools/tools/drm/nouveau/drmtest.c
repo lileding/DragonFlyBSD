@@ -250,6 +250,31 @@ check_client_cap_error(int fd, uint64_t capability, int expected_errno,
 }
 
 static void
+check_client_cap_value_error(int fd, uint64_t capability, uint64_t value,
+    int expected_errno, const char *name)
+{
+	char text[192];
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmSetClientCap(fd, capability, value);
+	saved_errno = errno;
+	snprintf(text, sizeof(text), "DRM client cap %s value %llu is rejected",
+	    name, (unsigned long long)value);
+	check(ret != 0, text);
+	if (ret == 0)
+		return;
+
+	printf("    %s value=%llu errno=%d\n", name,
+	    (unsigned long long)value, saved_errno);
+	snprintf(text, sizeof(text),
+	    "DRM client cap %s value %llu fails with errno %d", name,
+	    (unsigned long long)value, expected_errno);
+	check(saved_errno == expected_errno, text);
+}
+
+static void
 check_mode_config_contract(int fd, const drmModeRes *resources)
 {
 	printf("mode_config: min=%ux%u max=%ux%u\n",
@@ -6690,12 +6715,22 @@ main(void)
 		perror("open card0");
 		return 1;
 	}
+	check_client_cap_value_error(fd, DRM_CLIENT_CAP_STEREO_3D, 2,
+	    EINVAL, "STEREO_3D");
 	check_client_cap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
 	    "UNIVERSAL_PLANES");
+	check_client_cap_value_error(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 2,
+	    EINVAL, "UNIVERSAL_PLANES");
 	check_client_cap(fd, DRM_CLIENT_CAP_ASPECT_RATIO, "ASPECT_RATIO");
+	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ASPECT_RATIO, 2,
+	    EINVAL, "ASPECT_RATIO");
 	check_client_cap_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    EINVAL, "WRITEBACK_CONNECTORS before ATOMIC");
+	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ATOMIC, 2,
+	    EINVAL, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
+	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
+	    2, EINVAL, "WRITEBACK_CONNECTORS");
 	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    "WRITEBACK_CONNECTORS");
 	check_client_cap_error(fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT,
