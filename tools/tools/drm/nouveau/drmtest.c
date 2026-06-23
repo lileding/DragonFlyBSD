@@ -5091,13 +5091,16 @@ static bool
 drm_lease_list_contains(int fd, uint32_t lessee_id)
 {
 	struct drm_mode_list_lessees list_lessees;
-	uint64_t lessees[16];
+	uint32_t lessees[16];
+	const uint32_t sentinel = 0xfeedbee0u;
 	bool found = false;
 	int saved_errno;
 	int ret;
 
 	memset(&list_lessees, 0, sizeof(list_lessees));
-	memset(lessees, 0, sizeof(lessees));
+	for (uint32_t i = 0; i < (uint32_t)(sizeof(lessees) /
+	    sizeof(lessees[0])); i++)
+		lessees[i] = sentinel;
 	list_lessees.count_lessees = (uint32_t)(sizeof(lessees) /
 	    sizeof(lessees[0]));
 	list_lessees.lessees_ptr = (uintptr_t)lessees;
@@ -5109,6 +5112,12 @@ drm_lease_list_contains(int fd, uint32_t lessee_id)
 	if (ret != 0) {
 		printf("    LIST_LESSEES errno=%d\n", saved_errno);
 		return false;
+	}
+
+	if (list_lessees.count_lessees < (uint32_t)(sizeof(lessees) /
+	    sizeof(lessees[0]))) {
+		check(lessees[list_lessees.count_lessees] == sentinel,
+		    "DRM lease LIST_LESSEES uses u32 lessee id stride");
 	}
 
 	for (uint32_t i = 0; i < list_lessees.count_lessees &&
@@ -5123,7 +5132,7 @@ static void
 drm_lease_list_empty(int fd, const char *what)
 {
 	struct drm_mode_list_lessees list_lessees;
-	uint64_t lessees[4];
+	uint32_t lessees[4];
 	int saved_errno;
 	int ret;
 
