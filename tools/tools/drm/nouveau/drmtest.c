@@ -3403,6 +3403,109 @@ check_active_crtc_mode_blob_contract(int fd, uint32_t mode_id,
 	drmModeFreePropertyBlob(blob);
 }
 
+static bool
+get_legacy_gamma_raw(int fd, uint32_t crtc_id, uint32_t gamma_size,
+    uint16_t *red, uint16_t *green, uint16_t *blue, int *saved_errno_out)
+{
+	struct drm_mode_crtc_lut lut;
+	int saved_errno;
+	int ret;
+
+	memset(&lut, 0, sizeof(lut));
+	lut.crtc_id = crtc_id;
+	lut.gamma_size = gamma_size;
+	lut.red = (uintptr_t)red;
+	lut.green = (uintptr_t)green;
+	lut.blue = (uintptr_t)blue;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETGAMMA, &lut);
+	saved_errno = errno;
+	if (saved_errno_out != NULL)
+		*saved_errno_out = saved_errno;
+	return ret == 0;
+}
+
+/*
+ * check_legacy_getgamma_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC ID and allocates temporary userspace gamma arrays.
+ *   No kernel object, blob, or GEM handle is created or retained.
+ *
+ * Lifetime:
+ *   The copied gamma values are consumed only to prove the ioctl copies into
+ *   caller-owned storage.  The display gamma state is never modified.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI probe.  The secondary fd check proves
+ *   GETGAMMA is readable without DRM master authority.
+ */
+static void
+check_legacy_getgamma_contract(int fd, uint32_t crtc_id,
+    const drmModeCrtc *crtc)
+{
+	uint16_t *red = NULL;
+	uint16_t *green = NULL;
+	uint16_t *blue = NULL;
+	uint32_t gamma_size = (uint32_t)crtc->gamma_size;
+	int secondary_fd = -1;
+	int saved_errno;
+
+	check(gamma_size > 0, "legacy GETGAMMA active CRTC gamma size is non-zero");
+	if (gamma_size == 0)
+		return;
+
+	red = calloc(gamma_size, sizeof(*red));
+	green = calloc(gamma_size, sizeof(*green));
+	blue = calloc(gamma_size, sizeof(*blue));
+	check(red != NULL && green != NULL && blue != NULL,
+	    "legacy GETGAMMA allocates owner readback ramps");
+	if (red == NULL || green == NULL || blue == NULL)
+		goto out;
+
+	saved_errno = 0;
+	check(get_legacy_gamma_raw(fd, crtc_id, gamma_size, red, green, blue,
+	    &saved_errno), "legacy GETGAMMA owner read succeeds");
+	if (saved_errno != 0)
+		printf("    legacy GETGAMMA owner errno=%d\n", saved_errno);
+
+	saved_errno = 0;
+	check(!get_legacy_gamma_raw(fd, crtc_id, gamma_size + 1, red, green,
+	    blue, &saved_errno), "legacy GETGAMMA rejects wrong gamma size");
+	check(saved_errno == EINVAL,
+	    "legacy GETGAMMA wrong gamma size fails with EINVAL");
+
+	errno = 0;
+	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	saved_errno = errno;
+	check(secondary_fd >= 0,
+	    "legacy GETGAMMA opens secondary card fd");
+	if (secondary_fd < 0) {
+		printf("    legacy GETGAMMA secondary open errno=%d\n",
+		    saved_errno);
+		goto out;
+	}
+
+	memset(red, 0, gamma_size * sizeof(*red));
+	memset(green, 0, gamma_size * sizeof(*green));
+	memset(blue, 0, gamma_size * sizeof(*blue));
+	saved_errno = 0;
+	check(get_legacy_gamma_raw(secondary_fd, crtc_id, gamma_size, red,
+	    green, blue, &saved_errno),
+	    "legacy GETGAMMA non-master read succeeds");
+	if (saved_errno != 0)
+		printf("    legacy GETGAMMA non-master errno=%d\n",
+		    saved_errno);
+	check(close(secondary_fd) == 0,
+	    "legacy GETGAMMA closes secondary card fd");
+
+out:
+	free(blue);
+	free(green);
+	free(red);
+}
+
 /*
  * check_crtc_route_state_contract()
  *
@@ -3456,6 +3559,7 @@ check_crtc_route_state_contract(int fd, uint32_t crtc_id, const char *name)
 		if (mode_id <= UINT32_MAX)
 			check_active_crtc_mode_blob_contract(fd,
 			    (uint32_t)mode_id, crtc);
+		check_legacy_getgamma_contract(fd, crtc_id, crtc);
 	} else {
 		check(crtc->buffer_id == 0, "inactive CRTC has no framebuffer");
 	}
