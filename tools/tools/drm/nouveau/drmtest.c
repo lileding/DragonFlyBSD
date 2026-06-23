@@ -834,6 +834,65 @@ check_atomic_ioctl_flag_contract(int fd)
 	    "DRM atomic ioctl TEST_ONLY event fails with EINVAL");
 }
 
+static void
+check_cursor_ioctl_error(int fd, bool cursor2, uint32_t flags,
+    int expected_errno, const char *what, const char *errno_what)
+{
+	struct drm_mode_cursor cursor;
+	struct drm_mode_cursor2 cursor2_req;
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	if (cursor2) {
+		memset(&cursor2_req, 0, sizeof(cursor2_req));
+		cursor2_req.flags = flags;
+		ret = drmIoctl(fd, DRM_IOCTL_MODE_CURSOR2, &cursor2_req);
+	} else {
+		memset(&cursor, 0, sizeof(cursor));
+		cursor.flags = flags;
+		ret = drmIoctl(fd, DRM_IOCTL_MODE_CURSOR, &cursor);
+	}
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 || saved_errno != expected_errno)
+		printf("    cursor2=%d flags=0x%x ret=%d errno=%d expected=%d\n",
+		    cursor2 ? 1 : 0, flags, ret, saved_errno, expected_errno);
+}
+
+/*
+ * check_cursor_ioctl_flag_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  No GEM handle, cursor framebuffer, or CRTC
+ *   state is created or retained.
+ *
+ * Lifetime:
+ *   Uses invalid flag combinations that must fail before CRTC lookup or cursor
+ *   plane programming, so no display state can change.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  Both legacy cursor ioctl versions share
+ *   the same common-DRM flag validation boundary.
+ */
+static void
+check_cursor_ioctl_flag_contract(int fd)
+{
+	check_cursor_ioctl_error(fd, false, 0, EINVAL,
+	    "DRM cursor ioctl rejects empty flags",
+	    "DRM cursor ioctl empty flags fail with EINVAL");
+	check_cursor_ioctl_error(fd, false, 0x80000000u, EINVAL,
+	    "DRM cursor ioctl rejects unknown flags",
+	    "DRM cursor ioctl unknown flags fail with EINVAL");
+	check_cursor_ioctl_error(fd, true, 0, EINVAL,
+	    "DRM cursor2 ioctl rejects empty flags",
+	    "DRM cursor2 ioctl empty flags fail with EINVAL");
+	check_cursor_ioctl_error(fd, true, 0x80000000u, EINVAL,
+	    "DRM cursor2 ioctl rejects unknown flags",
+	    "DRM cursor2 ioctl unknown flags fail with EINVAL");
+}
+
 static bool
 get_property_blob_raw(int fd, uint32_t blob_id, uint8_t *buffer,
     uint32_t length, uint32_t *actual_length_out, int *saved_errno_out)
@@ -8628,6 +8687,7 @@ main(void)
 	    EINVAL, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
+	check_cursor_ioctl_flag_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
