@@ -661,6 +661,79 @@ has_property(int fd, uint32_t object_id, uint32_t object_type,
 	return true;
 }
 
+/*
+ * check_atomic_properties_hidden_without_client_cap()
+ *
+ * Ownership:
+ *   Borrows the DRM fd.  Resource snapshots returned by libdrm are owned by
+ *   this helper and freed before return.
+ *
+ * Lifetime:
+ *   Must run before DRM_CLIENT_CAP_ATOMIC is enabled on the fd.  The fd may
+ *   already have UNIVERSAL_PLANES enabled so plane objects are visible while
+ *   atomic-only properties remain hidden.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It only reads object property lists and
+ *   does not mutate KMS state.
+ */
+static void
+check_atomic_properties_hidden_without_client_cap(int fd)
+{
+	drmModePlaneResPtr plane_resources;
+	drmModeRes *resources;
+
+	resources = drmModeGetResources(fd);
+	check(resources != NULL,
+	    "DRM atomic property visibility resources are readable before ATOMIC");
+	if (resources != NULL) {
+		if (resources->count_crtcs > 0) {
+			uint32_t crtc_id = resources->crtcs[0];
+
+			check(!has_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+			    "MODE_ID"),
+			    "CRTC MODE_ID is hidden before ATOMIC client cap");
+			check(!has_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+			    "ACTIVE"),
+			    "CRTC ACTIVE is hidden before ATOMIC client cap");
+			check(!has_property(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+			    "OUT_FENCE_PTR"),
+			    "CRTC OUT_FENCE_PTR is hidden before ATOMIC client cap");
+		}
+		if (resources->count_connectors > 0) {
+			uint32_t connector_id = resources->connectors[0];
+
+			check(!has_property(fd, connector_id,
+			    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID"),
+			    "connector CRTC_ID is hidden before ATOMIC client cap");
+		}
+		drmModeFreeResources(resources);
+	}
+
+	plane_resources = drmModeGetPlaneResources(fd);
+	check(plane_resources != NULL,
+	    "plane resources readable before ATOMIC client cap");
+	if (plane_resources != NULL) {
+		if (plane_resources->count_planes > 0) {
+			uint32_t plane_id = plane_resources->planes[0];
+
+			check(!has_property(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+			    "FB_ID"),
+			    "plane FB_ID is hidden before ATOMIC client cap");
+			check(!has_property(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+			    "CRTC_ID"),
+			    "plane CRTC_ID is hidden before ATOMIC client cap");
+			check(!has_property(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+			    "SRC_W"),
+			    "plane SRC_W is hidden before ATOMIC client cap");
+			check(!has_property(fd, plane_id, DRM_MODE_OBJECT_PLANE,
+			    "IN_FENCE_FD"),
+			    "plane IN_FENCE_FD is hidden before ATOMIC client cap");
+		}
+		drmModeFreePlaneResources(plane_resources);
+	}
+}
+
 static bool
 create_identity_lut_blob(int fd, uint32_t count, uint32_t *blob_id_out,
     const char *what)
@@ -7922,6 +7995,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ASPECT_RATIO, "ASPECT_RATIO");
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ASPECT_RATIO, 2,
 	    EINVAL, "ASPECT_RATIO");
+	check_atomic_properties_hidden_without_client_cap(fd);
 	check_client_cap_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    EINVAL, "WRITEBACK_CONNECTORS before ATOMIC");
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ATOMIC, 2,
