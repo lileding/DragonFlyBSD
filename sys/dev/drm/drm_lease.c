@@ -50,6 +50,7 @@
 #endif
 
 static struct fileops drm_lease_fileops;
+static uint64_t drm_lease_idr_object;
 
 static bool
 drm_lease_master_has_objects_locked(struct drm_master *master)
@@ -452,10 +453,29 @@ drm_lease_prepare_objects(struct drm_device *dev, struct drm_file *file_priv,
 }
 
 static int
-drm_lease_populate_master(struct drm_device *dev, struct drm_master *lessee,
-    uint32_t *object_ids, uint32_t object_count)
+drm_lease_insert_object(struct drm_device *dev, struct idr *leases,
+    uint32_t object_id)
 {
 	struct drm_mode_object *obj;
+	int ret;
+
+	obj = __drm_mode_object_find(dev, NULL, object_id,
+	    DRM_MODE_OBJECT_ANY);
+	if (obj == NULL)
+		return -ENOENT;
+
+	ret = idr_alloc(leases, &drm_lease_idr_object, object_id,
+	    object_id + 1, GFP_KERNEL);
+	drm_mode_object_put(obj);
+	return ret;
+}
+
+static int
+drm_lease_populate_master(struct drm_device *dev, struct drm_file *file_priv,
+    struct drm_master *lessee, uint32_t *object_ids, uint32_t object_count)
+{
+	struct drm_mode_object *obj;
+	struct drm_crtc *crtc;
 	uint32_t i;
 	int ret;
 
@@ -465,8 +485,18 @@ drm_lease_populate_master(struct drm_device *dev, struct drm_master *lessee,
 		if (obj == NULL)
 			return -ENOENT;
 
-		ret = idr_alloc(&lessee->leases, obj, object_ids[i],
-		    object_ids[i] + 1, GFP_KERNEL);
+		ret = idr_alloc(&lessee->leases, &drm_lease_idr_object,
+		    object_ids[i], object_ids[i] + 1, GFP_KERNEL);
+		if (ret >= 0 && !file_priv->universal_planes &&
+		    obj->type == DRM_MODE_OBJECT_CRTC) {
+			crtc = obj_to_crtc(obj);
+			ret = drm_lease_insert_object(dev, &lessee->leases,
+			    crtc->primary->base.id);
+			if (ret >= 0 && crtc->cursor != NULL) {
+				ret = drm_lease_insert_object(dev,
+				    &lessee->leases, crtc->cursor->base.id);
+			}
+		}
 		drm_mode_object_put(obj);
 		if (ret < 0)
 			return ret;
@@ -484,14 +514,15 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
 	struct drm_master *lessee;
 	struct drm_file *lease_file = NULL;
 	struct file *lease_fp = NULL;
+	void *entry;
 	uint32_t *object_ids;
 	bool has_connector = false;
 	bool has_crtc = false;
 	bool has_plane = false;
 	int fd = -1;
+	int id;
 	int lessee_id;
 	int ret;
-	uint32_t i;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EOPNOTSUPP;
@@ -531,7 +562,7 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
 	}
 	lessee->lessor = drm_master_get(owner);
 
-	ret = drm_lease_populate_master(dev, lessee, object_ids,
+	ret = drm_lease_populate_master(dev, file_priv, lessee, object_ids,
 	    arg->object_count);
 	if (ret != 0)
 		goto out_master;
@@ -542,8 +573,8 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
 		goto out_master;
 
 	mutex_lock(&dev->mode_config.idr_mutex);
-	for (i = 0; i < arg->object_count; i++) {
-		if (drm_lease_object_busy_locked(owner, object_ids[i])) {
+	idr_for_each_entry(&lessee->leases, entry, id) {
+		if (drm_lease_object_busy_locked(owner, (uint32_t)id)) {
 			mutex_unlock(&dev->mode_config.idr_mutex);
 			ret = -EBUSY;
 			goto out_file;
@@ -620,37 +651,21 @@ static int
 drm_lease_count_owner_objects(struct drm_device *dev,
     struct drm_mode_get_lease *arg)
 {
-	struct drm_connector_list_iter conn_iter;
-	struct drm_connector *connector;
-	struct drm_crtc *crtc;
-	struct drm_plane *plane;
+	struct drm_mode_object *obj;
 	uint32_t __user *object_ptr = u64_to_user_ptr(arg->objects_ptr);
 	uint32_t count = 0;
+	int id;
 
-	drm_for_each_crtc(crtc, dev) {
+	mutex_lock(&dev->mode_config.idr_mutex);
+	idr_for_each_entry(&dev->mode_config.crtc_idr, obj, id) {
 		if (count < arg->count_objects &&
-		    put_user(crtc->base.id, object_ptr + count))
-			return -EFAULT;
-		count++;
-	}
-
-	drm_connector_list_iter_begin(dev, &conn_iter);
-	drm_for_each_connector_iter(connector, &conn_iter) {
-		if (count < arg->count_objects &&
-		    put_user(connector->base.id, object_ptr + count)) {
-			drm_connector_list_iter_end(&conn_iter);
+		    put_user((uint32_t)id, object_ptr + count)) {
+			mutex_unlock(&dev->mode_config.idr_mutex);
 			return -EFAULT;
 		}
 		count++;
 	}
-	drm_connector_list_iter_end(&conn_iter);
-
-	drm_for_each_plane(plane, dev) {
-		if (count < arg->count_objects &&
-		    put_user(plane->base.id, object_ptr + count))
-			return -EFAULT;
-		count++;
-	}
+	mutex_unlock(&dev->mode_config.idr_mutex);
 
 	arg->count_objects = count;
 	return 0;
@@ -661,7 +676,7 @@ drm_mode_get_lease_ioctl(struct drm_device *dev, void *data,
     struct drm_file *file_priv)
 {
 	struct drm_mode_get_lease *arg = data;
-	struct drm_mode_object *obj;
+	void *entry;
 	uint32_t __user *object_ptr = u64_to_user_ptr(arg->objects_ptr);
 	uint32_t count = 0;
 	int id;
@@ -677,9 +692,9 @@ drm_mode_get_lease_ioctl(struct drm_device *dev, void *data,
 		return drm_lease_count_owner_objects(dev, arg);
 
 	mutex_lock(&dev->mode_config.idr_mutex);
-	idr_for_each_entry(&file_priv->master->leases, obj, id) {
+	idr_for_each_entry(&file_priv->master->leases, entry, id) {
 		if (count < arg->count_objects &&
-		    put_user(obj->id, object_ptr + count)) {
+		    put_user((uint32_t)id, object_ptr + count)) {
 			mutex_unlock(&dev->mode_config.idr_mutex);
 			return -EFAULT;
 		}

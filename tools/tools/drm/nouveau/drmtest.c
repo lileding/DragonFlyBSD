@@ -4953,6 +4953,56 @@ check_drm_lease_atomic_unleased_connector(int owner_fd, int lease_fd,
 }
 
 static void
+check_drm_lease_non_universal_planes(int fd, uint32_t connector_id,
+    uint32_t crtc_id, uint32_t primary_plane_id)
+{
+	drmModePlaneResPtr lease_planes;
+	uint32_t get_ids[32];
+	uint32_t get_count = 0;
+	uint32_t lease_ids[2];
+	uint32_t lessee_id = 0;
+	int lease_fd = -1;
+
+	check(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 0) == 0,
+	    "DRM non-universal lease owner disables ATOMIC client cap");
+	check(drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 0) == 0,
+	    "DRM non-universal lease owner disables UNIVERSAL_PLANES");
+
+	lease_ids[0] = connector_id;
+	lease_ids[1] = crtc_id;
+	if (drm_lease_create(fd, lease_ids,
+	    (uint32_t)(sizeof(lease_ids) / sizeof(lease_ids[0])), &lease_fd,
+	    &lessee_id, "DRM non-universal lease CREATE_LEASE succeeds")) {
+		check(drmSetClientCap(lease_fd,
+		    DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0,
+		    "DRM non-universal lease fd accepts UNIVERSAL_PLANES");
+		lease_planes = drmModeGetPlaneResources(lease_fd);
+		check(lease_planes != NULL,
+		    "DRM non-universal lease fd plane resources are readable");
+		if (lease_planes != NULL) {
+			check(id_in_list(lease_planes->planes,
+			    (int)lease_planes->count_planes, primary_plane_id),
+			    "DRM non-universal lease exposes implicit primary plane");
+			drmModeFreePlaneResources(lease_planes);
+		}
+		if (drm_lease_get_objects(lease_fd, get_ids,
+		    (uint32_t)(sizeof(get_ids) / sizeof(get_ids[0])),
+		    &get_count, "DRM non-universal lease GET_LEASE succeeds")) {
+			check(id_in_list(get_ids, (int)get_count,
+			    primary_plane_id),
+			    "DRM non-universal lease GET_LEASE returns implicit primary plane");
+		}
+		check(close(lease_fd) == 0,
+		    "close non-universal DRM lease fd succeeds");
+	}
+
+	check(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0,
+	    "DRM non-universal lease owner restores ATOMIC client cap");
+	check(drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0,
+	    "DRM non-universal lease owner restores UNIVERSAL_PLANES");
+}
+
+static void
 check_drm_lease_atomic_test_only(int lease_fd, uint32_t connector_id,
     uint32_t crtc_id, uint32_t plane_id)
 {
@@ -5085,8 +5135,9 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	uint32_t missing_connector_ids[2];
 	uint32_t missing_plane_ids[2];
 	uint32_t object_count = 0;
-	uint32_t owner_get_ids[64];
+	uint32_t owner_get_ids[4096];
 	uint32_t owner_get_count = 0;
+	uint32_t owner_get_visible_count = 0;
 	uint32_t primary_plane_id = 0;
 	uint32_t second_lessee_id = 0;
 	uint32_t unleased_connector_id = 0;
@@ -5170,6 +5221,9 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 		    "close empty DRM lease fd succeeds");
 	}
 
+	check_drm_lease_non_universal_planes(fd, connector_id,
+	    active_crtc_id, primary_plane_id);
+
 	lease_ids[0] = connector_id;
 	lease_ids[1] = active_crtc_id;
 	lease_ids[2] = primary_plane_id;
@@ -5228,13 +5282,29 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	if (drm_lease_get_objects(fd, owner_get_ids,
 	    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0])),
 	    &owner_get_count, "DRM lease owner GET_LEASE succeeds")) {
-		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		owner_get_visible_count = owner_get_count <=
+		    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0])) ?
+		    owner_get_count :
+		    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0]));
+		check(owner_get_count <= (uint32_t)(sizeof(owner_get_ids) /
+		    sizeof(owner_get_ids[0])),
+		    "DRM lease owner GET_LEASE fits probe buffer");
+		check(owner_get_count >= (uint32_t)(resources->count_connectors +
+		    resources->count_crtcs + resources->count_encoders),
+		    "DRM lease owner GET_LEASE returns full mode object set");
+		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
 		    connector_id), "DRM lease owner GET_LEASE returns connector");
-		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
 		    active_crtc_id), "DRM lease owner GET_LEASE returns CRTC");
-		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		check(id_in_list(owner_get_ids, (int)owner_get_visible_count,
 		    primary_plane_id),
 		    "DRM lease owner GET_LEASE returns primary plane");
+		if (resources->count_encoders > 0) {
+			check(id_in_list(owner_get_ids,
+			    (int)owner_get_visible_count,
+			    resources->encoders[0]),
+			    "DRM lease owner GET_LEASE returns encoder");
+		}
 	}
 
 	if (drm_lease_get_objects(lease_fd, lessee_get_ids,
