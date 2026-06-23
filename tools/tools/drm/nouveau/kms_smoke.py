@@ -898,6 +898,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "atomic CRTC color runtime commit programs gamma LUT",
         "atomic CRTC color runtime restore commit succeeds",
         "atomic CRTC color runtime restore leaves no pending display audit",
+        "connector encoder type matches connector type",
         "atomic modeset disable commit succeeds",
         "atomic modeset disable increments tail disable op count",
         "atomic modeset disable records disabled head",
