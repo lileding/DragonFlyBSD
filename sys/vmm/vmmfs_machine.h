@@ -13,6 +13,7 @@
 
 struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine)	vm_link;
+	struct vmmfs_mount	*vm_mount;
 	char			name[VMMFS_NAME_MAX + 1];
 	int			vm_refs;
 	int			vm_in_tree;	/* guards a single RB_REMOVE */

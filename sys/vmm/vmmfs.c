@@ -9,11 +9,10 @@
  * as text; read/write/seek act on that buffer; only close() atomically parses
  * the whole buffer and updates the desired value (invalid input is a no-op, the
  * old value is kept).  A successful write does NOT mean the value updated; only
- * reading it back is authoritative.  `rm stopped` starts the machine after
- * validating the config is complete and the loader path is executable in the
- * caller's context; `echo apic|force > stopped` stops it; `rmdir` deletes a
- * stopped machine.  Every operation is atomic or idempotent — no intermediate
- * state.  The loader is not yet executed (that is "vmm core").
+ * reading it back is authoritative.  `rm stopped` only declares desired=running
+ * and queues the vmm_machine worker; it never waits for the loader.  `echo
+ * apic|force > stopped` declares desired=stopped and may cancel that worker;
+ * `rmdir` deletes a stopped machine.
  *
  * Naming: vmmfs_* is the filesystem control plane.  This file owns the
  * filesystem root, mount/unmount, shared vnode helpers, and register buffers.

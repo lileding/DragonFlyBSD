@@ -3,8 +3,8 @@
  * this is the proof that the vmm_ core links with no VFS/KOBJ deps (so a future
  * kvm.ko can reuse it).  The config value objects (vcpu/mem/loader) are tested
  * through their own object API; lifecycle/lease/events through the machine API.
- *   cc vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_machine.c \
- *      vmm_machine_test.c -o t && ./t
+ *   cc vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_console.c \
+ *      vmm_machine.c vmm_machine_test.c -o t && ./t
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -108,18 +108,35 @@ main(void)
 	/* --- lifecycle --- */
 	vmm_machine_init(&m);
 	CK(vmm_machine_is_stopped(&m), "new is stopped");
-	vmm_machine_start(&m);
-	CK(!vmm_machine_is_stopped(&m), "started");
+	CK(vmm_machine_request_start(&m) == 1, "start requested");
+	CK(!vmm_machine_is_stopped(&m), "desired running");
+	CK(!vmm_machine_is_running(&m), "not running until worker");
+	CK(vmm_machine_start_worker_begin(&m) == 1, "worker begin");
+	vmm_machine_start_worker_done(&m, 1);
+	CK(vmm_machine_is_running(&m), "worker started");
 	vmm_machine_stop(&m, 0);
-	CK(vmm_machine_is_stopped(&m), "stopped");
+	CK(vmm_machine_is_stopped(&m), "desired stopped");
+	CK(!vmm_machine_is_running(&m), "stopped current");
 
 	vmm_machine_init(&m);
-	vmm_machine_start(&m);
-	vmm_machine_start(&m);
-	CK(!vmm_machine_is_stopped(&m), "start idempotent");
+	CK(vmm_machine_request_start(&m) == 1, "start request first");
+	CK(vmm_machine_request_start(&m) == 0, "start request idempotent");
+	vmm_machine_start_worker_begin(&m);
+	vmm_machine_start_worker_done(&m, 1);
+	CK(!vmm_machine_is_stopped(&m), "start desired idempotent");
+	CK(vmm_machine_is_running(&m), "start current idempotent");
 	vmm_machine_stop(&m, 0);
 	vmm_machine_stop(&m, 1);
 	CK(vmm_machine_is_stopped(&m), "stop idempotent");
+	CK(!vmm_machine_is_running(&m), "stop current idempotent");
+
+	vmm_machine_init(&m);
+	vmm_machine_request_start(&m);
+	vmm_machine_start_worker_begin(&m);
+	vmm_machine_stop(&m, 1);
+	vmm_machine_start_worker_done(&m, 1);
+	CK(vmm_machine_is_stopped(&m), "cancelled start desired stopped");
+	CK(!vmm_machine_is_running(&m), "cancelled start not running");
 
 	/* --- lease --- */
 	vmm_machine_init(&m);
@@ -153,7 +170,9 @@ main(void)
 	vmm_machine_init(&m);
 	drain(&m);
 	CK(!vmm_machine_events_pending(&m), "drained no pending");
-	vmm_machine_start(&m);
+	vmm_machine_request_start(&m);
+	vmm_machine_start_worker_begin(&m);
+	vmm_machine_start_worker_done(&m, 1);
 	vmm_machine_stop(&m, 0);
 	CKSTR(drain(&m), "started\nstopped\n", "events lifecycle one-shot");
 
@@ -170,7 +189,9 @@ main(void)
 	vmm_machine_init(&m);
 	drain(&m);
 	for (i = 0; i < 100; i++) {
-		vmm_machine_start(&m);
+		vmm_machine_request_start(&m);
+		vmm_machine_start_worker_begin(&m);
+		vmm_machine_start_worker_done(&m, 1);
 		vmm_machine_stop(&m, 0);
 	}
 	n = vmm_machine_read_events(&m, buf, sizeof(buf) - 1);

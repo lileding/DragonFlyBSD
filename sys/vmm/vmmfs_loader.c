@@ -11,9 +11,6 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
-#include <sys/nlookup.h>
-#include <sys/stat.h>
-#include <sys/fcntl.h>
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
@@ -67,50 +64,3 @@ static kobj_method_t vmmfs_loader_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_loader, vmmfs_loader_methods, 0);
-
-
-/*
- * Resolve the desired loader at start time in the caller's context and require
- * a regular, executable file.  Execution is still future vmm core work.
- */
-int
-vmmfs_loader_validate(struct vmmfs_machine *m, struct ucred *cred)
-{
-	struct nlookupdata nd;
-	struct vnode *vp = NULL;
-	struct vattr va;
-	char path[VMMFS_OBUF_MAX];
-	size_t n;
-	int error;
-
-	n = vmm_loader_path(&m->machine.loader, path, sizeof(path) - 1);
-	if (n == 0)
-		return EINVAL;
-	path[n] = '\0';
-
-	error = nlookup_init(&nd, path, UIO_SYSSPACE, NLC_FOLLOW | NLC_LOCKVP);
-	if (error == 0)
-		error = vn_open(&nd, NULL, FREAD, 0);
-	if (error == 0) {
-		vp = nd.nl_open_vp;
-		nd.nl_open_vp = NULL;
-	}
-	nlookup_done(&nd);
-	if (error)
-		return error;
-
-	vn_unlock(vp);
-	if (vp->v_type != VREG) {
-		vn_close(vp, FREAD, NULL);
-		return EACCES;
-	}
-	vn_lock(vp, LK_SHARED | LK_RETRY);
-	error = VOP_GETATTR(vp, &va);
-	if (error == 0 && (va.va_mode & 0111) == 0)
-		error = EACCES;
-	if (error == 0)
-		error = VOP_ACCESS(vp, VEXEC, cred);
-	vn_unlock(vp);
-	vn_close(vp, FREAD, NULL);
-	return error;
-}

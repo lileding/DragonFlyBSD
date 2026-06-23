@@ -31,12 +31,12 @@ echo "-> 规范化成字节"
 run "echo 0 > /vmm/machines/vm0/vcpu; cat /vmm/machines/vm0/vcpu"
 echo "-> 非法值(0)被丢弃，读回仍是 4：写成功 != 更新成功"
 
-sep "4. 启动 = rm stopped（先校验配置完整 + loader 可执行）"
+sep "4. 启动请求 = rm stopped（声明 desired=running，后台 worker 执行 loader）"
 printf '#!/bin/sh\necho hi\n' > /tmp/loader; chmod 755 /tmp/loader
 run "echo /tmp/loader > /vmm/machines/vm0/loader"
 run "rm /vmm/machines/vm0/stopped"
 run "ls /vmm/machines/vm0 | sort | tr '\n' ' '; echo"
-echo "-> stopped 文件消失 = 期望 running"
+echo "-> stopped 文件消失 = 期望 running；rm 返回不表示 loader 已完成"
 
 sep "5. 事件流：读 events 拿生命周期（一次性）"
 run "cat /vmm/machines/vm0/events"

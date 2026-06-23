@@ -11,6 +11,10 @@
 #ifndef VMM_MACHINE_H
 #define VMM_MACHINE_H
 
+#ifdef _KERNEL
+#include <sys/lock.h>
+#endif
+
 #include "vmm_vcpu.h"
 #include "vmm_mem.h"
 #include "vmm_loader.h"
@@ -18,13 +22,31 @@
 
 #define VMM_EVENT_CAP	32
 
+#ifdef _KERNEL
+struct ucred;
+
+struct vmm_machine_owner_ops {
+	void	(*hold)(void *arg);
+	void	(*release)(void *arg);
+};
+#endif
+
 struct vmm_machine {
 	struct vmm_vcpu		vcpu;
 	struct vmm_mem		mem;
 	struct vmm_loader	loader;
 	struct vmm_console	console;
 	/* lifecycle / lease / events -- the machine's own state */
-	int		stopped;
+	int		desired_stopped;
+	int		running;
+	int		starting;
+	int		start_cancel;
+#ifdef _KERNEL
+	struct lock	lifecycle_lock;
+	struct ucred	*start_cred;
+	const struct vmm_machine_owner_ops *owner_ops;
+	void		*owner_arg;
+#endif
 	uint32_t	lease_count;
 	int		armed;
 	int		deleting;
@@ -41,13 +63,32 @@ enum vmm_close_action {
 
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
 void	vmm_machine_init(struct vmm_machine *m);
+#ifdef _KERNEL
+void	vmm_machine_uninit(struct vmm_machine *m);
+void	vmm_machine_set_owner(struct vmm_machine *m,
+	    const struct vmm_machine_owner_ops *ops, void *arg);
+#endif
 /* All three of vcpu/mem/loader are set. */
 int	vmm_machine_config_complete(const struct vmm_machine *m);
 
-/* Lifecycle. */
+/*
+ * Lifecycle.  stopped is declarative: it means "desired stopped", which is
+ * what vmmfs presents as the stopped control file.  starting/running are
+ * current execution state, driven by an asynchronous worker.
+ */
 int	vmm_machine_is_stopped(const struct vmm_machine *m);
+int	vmm_machine_is_running(const struct vmm_machine *m);
+int	vmm_machine_starting(const struct vmm_machine *m);
+int	vmm_machine_start_cancelled(const struct vmm_machine *m);
+int	vmm_machine_request_start(struct vmm_machine *m);
+int	vmm_machine_start_worker_begin(struct vmm_machine *m);
+void	vmm_machine_start_worker_done(struct vmm_machine *m, int started);
 void	vmm_machine_stop(struct vmm_machine *m, int force);
 void	vmm_machine_start(struct vmm_machine *m);
+#ifdef _KERNEL
+int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred);
+void	vmm_machine_request_stopped(struct vmm_machine *m, int force);
+#endif
 
 /* Lease reference counting. */
 int	vmm_machine_is_deleting(const struct vmm_machine *m);

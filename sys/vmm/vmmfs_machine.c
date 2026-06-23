@@ -82,6 +82,27 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
 	return d->present == NULL || d->present(&m->machine);
 }
 
+static void
+vmmfs_machine_owner_hold(void *arg)
+{
+	struct vmmfs_machine *m = arg;
+
+	vmmfs_machine_ref(m->vm_mount, m);
+}
+
+static void
+vmmfs_machine_owner_release(void *arg)
+{
+	struct vmmfs_machine *m = arg;
+
+	vmmfs_machine_unref(m->vm_mount, m);
+}
+
+static const struct vmm_machine_owner_ops vmmfs_machine_owner_ops = {
+	.hold = vmmfs_machine_owner_hold,
+	.release = vmmfs_machine_owner_release,
+};
+
 
 /*
  * Allocate a machine, wire up its nodes with fresh inos, and insert it.  Caller
@@ -96,10 +117,12 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	int j;
 
 	m = kmalloc(sizeof(*m), M_VMMFS, M_WAITOK | M_ZERO);
+	m->vm_mount = vmp;
 	bcopy(name, m->name, nlen);
 	m->name[nlen] = '\0';
 	m->vm_refs = 1;
 	vmm_machine_init(&m->machine);
+	vmm_machine_set_owner(&m->machine, &vmmfs_machine_owner_ops, m);
 
 	base = vmp->vm_next_ino;
 	vmp->vm_next_ino += VMMFS_MACHINE_INO_STRIDE;
@@ -132,6 +155,7 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 {
 	int j;
 
+	vmm_machine_uninit(&m->machine);
 	vmmfs_node_uninit(&m->node);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++)
 		vmmfs_node_uninit(cfg_node(m, &vmmfs_cfg_table[j]));
@@ -163,6 +187,8 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 {
 	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
 	int first;
+
+	vmm_machine_request_stopped(&m->machine, 1);
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	first = m->vm_in_tree;	/* the lease path already set "deleting" */
@@ -266,7 +292,7 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
 
-	vmm_machine_stop(&m->machine, 0);
+	vmm_machine_request_stopped(&m->machine, 0);
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->n_stopped,
 	    LK_EXCLUSIVE | LK_RETRY, &vp);
 	if (error)
@@ -278,8 +304,9 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 }
 
 /*
- * `rm machines/<name>/stopped` requests start: config must be complete and the
- * loader executable, else the start fails and the machine stays stopped.
+ * `rm machines/<name>/stopped` declares that the machine should run.  The
+ * operation only updates desired state and queues the vmm worker; it never
+ * waits for loader execution.
  */
 static int
 vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
@@ -291,11 +318,7 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
-	if (!vmm_machine_is_stopped(&m->machine))
-		return ENOENT;
-	if (!vmm_machine_config_complete(&m->machine))
-		return EINVAL;
-	error = vmmfs_loader_validate(m, ap->a_cred);
+	error = vmm_machine_request_running(&m->machine, ap->a_cred);
 	if (error)
 		return error;
 
@@ -304,7 +327,6 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 		return error;
 	vn_unlock(vp);
 
-	vmm_machine_start(&m->machine);
 	cache_unlink(ap->a_nch);
 	vrele(vp);
 	return 0;
@@ -438,7 +460,7 @@ vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 			return error;
 	}
 
-	vmm_machine_stop(&node->vn_machine->machine, force);
+	vmm_machine_request_stopped(&node->vn_machine->machine, force);
 	return 0;
 }
 
