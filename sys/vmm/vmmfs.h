@@ -73,7 +73,7 @@ struct vmmfs_openbuf {
 	SLIST_ENTRY(vmmfs_openbuf) ob_link;
 };
 
-struct vmmfs_machine;
+struct vmmfs_machines;
 
 struct vmmfs_node {
 	kobj_ops_t		ops;		/* KOBJ dispatch table; must be first */
@@ -82,7 +82,7 @@ struct vmmfs_node {
 	ino_t			vn_ino;
 	mode_t			vn_mode;
 	struct vmmfs_node      *vn_parent;
-	struct vmmfs_machine   *vn_machine;
+	struct vmmfs_machines   *vn_machine;
 	struct vnode	       *vn_vnode;
 	struct lock		vn_interlock;
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
@@ -96,7 +96,7 @@ struct vmmfs_node {
  */
 struct vmmfs_device {
 	SLIST_ENTRY(vmmfs_device) dv_link;
-	struct vmmfs_machine   *owner;
+	struct vmmfs_machines   *owner;
 	int			is_host;	/* rm returns it to host vs deletes */
 	char			bdf[VMMFS_BDF_MAX + 1];
 	struct vmmfs_node	node;		/* the NDEVICE file */
@@ -117,8 +117,8 @@ SLIST_HEAD(vmmfs_devlist, vmmfs_device);
  * is freed when vm_refs reaches 0, so a machine held by an open fd (e.g. a
  * lease) survives rmdir until its last vnode is reclaimed.
  */
-struct vmmfs_machine {
-	RB_ENTRY(vmmfs_machine)	vm_link;
+struct vmmfs_machines {
+	RB_ENTRY(vmmfs_machines)	vm_link;
 	char			name[VMMFS_NAME_MAX + 1];
 	int			vm_refs;
 	int			vm_in_tree;	/* guards a single RB_REMOVE */
@@ -128,7 +128,7 @@ struct vmmfs_machine {
 	struct vmmfs_node	vn_devices;	/* this machine's devices/ */
 };
 
-RB_HEAD(vmmfs_machtree, vmmfs_machine);
+RB_HEAD(vmmfs_machtree, vmmfs_machines);
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
@@ -144,8 +144,8 @@ struct vmmfs_mount {
 	int			vm_next_dev;	/* monotonic device ino index */
 };
 
-int	vmmfs_machine_cmp(struct vmmfs_machine *a, struct vmmfs_machine *b);
-RB_PROTOTYPE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
+int	vmmfs_machine_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b);
+RB_PROTOTYPE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machine_cmp);
 
 #define VFS_TO_VMMFS(mp)	((struct vmmfs_mount *)((mp)->mnt_data))
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
@@ -218,10 +218,10 @@ int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */
-int	vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg);
+int	vmmfs_cfg_present(struct vmmfs_machines *m, enum vmmfs_cfg cfg);
 ino_t	vmmfs_parent_ino(struct vmmfs_node *node);
 void	vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type,
-	    ino_t ino, struct vmmfs_node *parent, struct vmmfs_machine *machine,
+	    ino_t ino, struct vmmfs_node *parent, struct vmmfs_machines *machine,
 	    enum vmmfs_cfg cfg);
 void	vmmfs_node_uninit(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
@@ -230,12 +230,12 @@ int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
 void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
-	    struct vmmfs_machine *m);
-void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
-void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
-int	vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred);
+	    struct vmmfs_machines *m);
+void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
+void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
+int	vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred);
 struct vmmfs_device *vmmfs_find_device(struct vmmfs_mount *vmp,
-	    struct vmmfs_machine *owner, const char *name, int nlen);
+	    struct vmmfs_machines *owner, const char *name, int nlen);
 struct vmmfs_device *vmmfs_find_device_any(struct vmmfs_mount *vmp,
 	    const char *name, int nlen);
 int	vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,

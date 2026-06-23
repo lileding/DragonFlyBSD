@@ -367,7 +367,7 @@ vmm_machine_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_machine *m = dnode->vn_machine;
+	struct vmmfs_machines *m = dnode->vn_machine;
 	struct vmmfs_node *child = NULL;
 	int i;
 
@@ -392,7 +392,7 @@ static int
 vmm_machine_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
-	struct vmmfs_machine *m = node->vn_machine;
+	struct vmmfs_machines *m = node->vn_machine;
 	off_t off;
 	int full, error, i;
 
@@ -433,7 +433,7 @@ vmm_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 {
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_machine *m = dnode->vn_machine;
+	struct vmmfs_machines *m = dnode->vn_machine;
 	struct vnode *vp;
 	int error;
 
@@ -459,7 +459,7 @@ static int
 vmm_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 {
 	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_machine *m = dnode->vn_machine;
+	struct vmmfs_machines *m = dnode->vn_machine;
 	struct vnode *vp;
 	int error;
 

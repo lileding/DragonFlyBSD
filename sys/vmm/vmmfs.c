@@ -20,7 +20,7 @@
  * vmm_* is the VMM core (vmm_machine.c) and owns what a machine IS: config
  * parsing, the desired-state registers, and the lifecycle/lease/event state
  * machine -- pure logic with no kernel deps, host-unit-tested (vmm_machine_test.c).
- * Each C registry slot (struct vmmfs_machine) embeds a vmm_machine.
+ * Each C registry slot (struct vmmfs_machines) embeds a vmm_machine.
  */
 
 #include <sys/param.h>
@@ -85,7 +85,7 @@ static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 
 void
 vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
-    struct vmmfs_node *parent, struct vmmfs_machine *machine,
+    struct vmmfs_node *parent, struct vmmfs_machines *machine,
     enum vmmfs_cfg cfg)
 {
 	node->vn_type = type;
@@ -297,7 +297,7 @@ vmmfs_parent_ino(struct vmmfs_node *node)
 }
 
 int
-vmmfs_cfg_present(struct vmmfs_machine *m, enum vmmfs_cfg cfg)
+vmmfs_cfg_present(struct vmmfs_machines *m, enum vmmfs_cfg cfg)
 {
 	if (cfg == VMMFS_CFG_STOPPED)
 		return vmm_machine_is_stopped(&m->state);
@@ -639,7 +639,7 @@ DEFINE_CLASS(vmm_root, vmm_root_methods, 0);
  * context and require a regular, executable file.  No execution yet (vmm core).
  */
 int
-vmmfs_validate_loader(struct vmmfs_machine *m, struct ucred *cred)
+vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred)
 {
 	struct nlookupdata nd;
 	struct vnode *vp = NULL;
@@ -690,7 +690,7 @@ vmmfs_device_format(struct vmmfs_device *d, char *buf, size_t bufsize)
 }
 
 struct vmmfs_device *
-vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machine *owner,
+vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machines *owner,
     const char *name, int nlen)
 {
 	struct vmmfs_device *d;
@@ -737,7 +737,7 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 
 /* Owner display name: "host" or the owning machine's name. */
 static const char *
-vmmfs_owner_name(struct vmmfs_machine *owner)
+vmmfs_owner_name(struct vmmfs_machines *owner)
 {
 	return owner != NULL ? owner->name : "host";
 }
@@ -834,7 +834,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	 * each tree reference, which takes vm_refs to 0 and frees the struct.
 	 */
 	{
-		struct vmmfs_machine *m;
+		struct vmmfs_machines *m;
 
 		while ((m = RB_ROOT(&vmp->vm_machtree)) != NULL) {
 			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
