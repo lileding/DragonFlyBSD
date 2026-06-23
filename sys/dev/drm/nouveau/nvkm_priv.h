@@ -714,6 +714,9 @@ struct nvkm_softc {
 	struct drm_property	*kms_dither_mode_property;
 	struct drm_property	*kms_dither_depth_property;
 	struct drm_property	*kms_max_bpc_property;
+	struct drm_property	*kms_underscan_property;
+	struct drm_property	*kms_underscan_hborder_property;
+	struct drm_property	*kms_underscan_vborder_property;
 	uint64_t		fence_context;
 	uint32_t		fence_seqno;
 	struct task		kms_task;

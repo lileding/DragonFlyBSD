@@ -2708,6 +2708,131 @@ nvkm_dispnv50_crtc_scanout_depth(struct drm_crtc *crtc)
 	return (fb->format->depth);
 }
 
+static uint32_t
+nvkm_dispnv50_u32_min(uint32_t a, uint32_t b)
+{
+	return (a < b ? a : b);
+}
+
+static uint32_t
+nvkm_dispnv50_view_subtract_border(uint32_t value, uint32_t border)
+{
+	uint32_t delta;
+
+	if (border > UINT32_MAX / 2U)
+		return (1);
+	delta = border * 2U;
+	if (value <= delta)
+		return (1);
+	return (value - delta);
+}
+
+static uint32_t
+nvkm_dispnv50_view_rescale(uint32_t value, uint32_t numerator,
+    uint32_t denominator)
+{
+	uint64_t ratio;
+
+	if (denominator == 0)
+		return (value);
+	ratio = ((uint64_t)numerator << 19) / denominator;
+	return ((uint32_t)((value * ratio + ratio / 2U) >> 19));
+}
+
+/*
+ * Apply connector scaler and underscan state to the head view rectangle.
+ *
+ * Ownership:
+ *   Borrows the atomic head atom and scalar head config for this commit only.
+ *   The bridge never stores connector or DRM state pointers.
+ *
+ * Lifetime:
+ *   Must run after nvkm_dispnv50_head_atom_fill() populated mode snapshots and
+ *   before the head view method is emitted.
+ *
+ * Threading:
+ *   Commit-tail local. The caller holds the modeset serialization required for
+ *   programming a display transaction.
+ */
+static void
+nvkm_dispnv50_head_apply_view(struct nv50_head_atom *asyh,
+    const struct nvkm_dispnv50_head_config *config)
+{
+	const struct drm_display_mode *user = &asyh->state.mode;
+	const struct drm_display_mode *output = &asyh->state.adjusted_mode;
+	int output_width;
+	int output_height;
+	uint32_t user_height;
+	uint32_t scaling_mode;
+	bool underscan;
+
+	user_height = user->vdisplay;
+	if ((user->flags & DRM_MODE_FLAG_3D_MASK) ==
+	    DRM_MODE_FLAG_3D_FRAME_PACKING)
+		user_height += user->vtotal;
+
+	asyh->view.iW = user->hdisplay;
+	asyh->view.iH = user_height;
+	drm_mode_get_hv_timing(output, &output_width, &output_height);
+	asyh->view.oW = output_width > 0 ? (uint32_t)output_width : 0;
+	asyh->view.oH = output_height > 0 ? (uint32_t)output_height : 0;
+
+	if (config == NULL)
+		return;
+
+	underscan = config->underscan_mode == NVKM_DISPNV50_UNDERSCAN_ON ||
+	    (config->underscan_mode == NVKM_DISPNV50_UNDERSCAN_AUTO &&
+	    config->underscan_auto_is_hdmi);
+	if (underscan && asyh->view.oW != 0 && asyh->view.oH != 0) {
+		uint32_t border_x = config->underscan_hborder;
+		uint32_t border_y = config->underscan_vborder;
+		uint32_t original_width = asyh->view.oW;
+		uint32_t original_height = asyh->view.oH;
+
+		if (border_x != 0)
+			asyh->view.oW =
+			    nvkm_dispnv50_view_subtract_border(asyh->view.oW,
+			    border_x);
+		else
+			asyh->view.oW =
+			    nvkm_dispnv50_view_subtract_border(asyh->view.oW,
+			    (asyh->view.oW >> 4) + 32U);
+
+		if (border_y != 0)
+			asyh->view.oH =
+			    nvkm_dispnv50_view_subtract_border(asyh->view.oH,
+			    border_y);
+		else
+			asyh->view.oH = nvkm_dispnv50_view_rescale(
+			    asyh->view.oW, original_height, original_width);
+	}
+
+	scaling_mode = config->scaling_mode;
+	switch (scaling_mode) {
+	case DRM_MODE_SCALE_CENTER:
+		asyh->view.oW =
+		    nvkm_dispnv50_u32_min(asyh->view.iW, asyh->view.oW);
+		asyh->view.oH =
+		    nvkm_dispnv50_u32_min(asyh->view.iH, asyh->view.oH);
+		break;
+	case DRM_MODE_SCALE_ASPECT:
+		if (asyh->view.iW == 0 || asyh->view.iH == 0 ||
+		    asyh->view.oW == 0 || asyh->view.oH == 0)
+			break;
+		if ((uint64_t)asyh->view.oW * asyh->view.iH >
+		    (uint64_t)asyh->view.iW * asyh->view.oH) {
+			asyh->view.oW = nvkm_dispnv50_view_rescale(
+			    asyh->view.oH, asyh->view.iW, asyh->view.iH);
+		} else {
+			asyh->view.oH = nvkm_dispnv50_view_rescale(
+			    asyh->view.oW, asyh->view.iH, asyh->view.iW);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
 static void
 nvkm_dispnv50_head_apply_config(struct nv50_head_atom *asyh,
     struct drm_crtc *crtc, const struct nvkm_dispnv50_head_config *config)
@@ -3972,11 +4097,10 @@ nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
  *   one UPDATE.  No references are retained after return.
  *
  * Lifetime:
- *   The UPDATE submission itself is the commit boundary.  The core notifier is
- *   useful diagnostic evidence, but nouveau treats a notifier timeout as a
- *   logged display-engine condition rather than as a KMS commit failure.  The
- *   caller must use the window notifier, vblank, or later channel progress as
- *   the real latch/completion proof for scanout-visible work.
+ *   Strict callers use the core notifier as this UPDATE's completion proof and
+ *   receive any wait error.  Best-effort callers still submit the UPDATE, log
+ *   notifier failure, and continue teardown/disable cleanup after the command
+ *   is hardware-visible.
  *
  * Threading:
  *   Called from serialized KMS commit paths.  It may sleep while waiting for
@@ -3984,7 +4108,8 @@ nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
  */
 static int
 nvkm_dispnv50_core_commit_notify_common(struct nvkm_softc *sc,
-    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
+    struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock,
+    bool best_effort)
 {
 	u32 status;
 	int ret;
@@ -4005,18 +4130,14 @@ nvkm_dispnv50_core_commit_notify_common(struct nvkm_softc *sc,
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 core notifier timeout status=0x%08x "
 		    "err=%d\n", status, ret);
-		/*
-		 * The UPDATE push is the hardware-visible commit boundary.  Linux
-		 * nouveau reports a core notifier timeout as display-engine
-		 * diagnostics and continues the atomic tail; treating the wait as a
-		 * KMS commit failure leaves the DRM state half-disabled and prevents
-		 * vblank_off/release cleanup from running.
-		 */
-		return 0;
+		return best_effort ? 0 : ret;
 	}
 
-	nvkm_infof(sc->dev,
-	    "drm: dispnv50 core notifier done status=0x%08x\n", status);
+	if (sc->kms_push_trace) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 core notifier done status=0x%08x\n",
+		    status);
+	}
 	return 0;
 }
 
@@ -4025,7 +4146,7 @@ nvkm_dispnv50_core_commit_notify(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
 {
 	return nvkm_dispnv50_core_commit_notify_common(sc, state, core,
-	    interlock);
+	    interlock, false);
 }
 
 /*
@@ -4046,7 +4167,7 @@ nvkm_dispnv50_core_commit_notify_best_effort(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state, struct nv50_core *core, u32 *interlock)
 {
 	return nvkm_dispnv50_core_commit_notify_common(sc, state, core,
-	    interlock);
+	    interlock, true);
 }
 
 /*
@@ -5323,6 +5444,8 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 	prepare->config.bpc = 8;
 	prepare->config.dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
 	prepare->config.dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
+	prepare->config.scaling_mode = DRM_MODE_SCALE_NONE;
+	prepare->config.underscan_mode = NVKM_DISPNV50_UNDERSCAN_OFF;
 	if (config != NULL)
 		prepare->config = *config;
 
@@ -6084,6 +6207,86 @@ nvkm_dispnv50_color_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 }
 
 int
+nvkm_dispnv50_head_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    uint32_t head, const struct nvkm_dispnv50_head_config *config,
+    bool update_view, bool update_dither)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_head_atom asyh;
+	struct nv50_head *nvhead;
+	struct nv50_core *core;
+	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
+	int ret;
+
+	if (sc == NULL || crtc == NULL || crtc->state == NULL ||
+	    !crtc->state->active || config == NULL || sc->disp == NULL)
+		return (-ENODEV);
+
+	ret = nvkm_dispnv50_head_init(sc, head);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.core == NULL ||
+	    head >= nitems(state->head))
+		return (-ENODEV);
+
+	core = state->disp.core;
+	nvhead = &state->head[head];
+	if (core->func == NULL || core->func->update == NULL ||
+	    nvhead->func == NULL)
+		return (-ENODEV);
+	if (!update_view && !update_dither)
+		return (0);
+
+	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+	nvkm_dispnv50_head_apply_view(&asyh, config);
+	if (update_dither)
+		nvkm_dispnv50_head_apply_config(&asyh, crtc, config);
+
+	/*
+	 * Ownership:
+	 *   HEAD-only connector updates borrow the committed CRTC mode and
+	 *   connector scalar config.  They do not own the active window image,
+	 *   output route, SOR ownership, or OLUT memory.
+	 *
+	 * Lifetime:
+	 *   This is nouveau's scaler/dither set path without a modeset.  The
+	 *   active scanout route remains armed; only HEAD methods are submitted
+	 *   before the core UPDATE boundary.
+	 *
+	 * Threading:
+	 *   Atomic-tail local.  No window or output interlock partner is named,
+	 *   because no window/output method is emitted in this transaction.
+	 */
+	if (update_view && nvhead->func->view != NULL) {
+		ret = nvhead->func->view(nvhead, &asyh);
+		if (ret != 0)
+			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	}
+	if (update_dither && nvhead->func->dither != NULL) {
+		ret = nvhead->func->dither(nvhead, &asyh);
+		if (ret != 0)
+			return ret;
+		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
+	}
+
+	if (interlock[NV50_DISP_INTERLOCK_CORE] == 0)
+		return (0);
+
+	ret = nvkm_dispnv50_core_commit_notify(sc, state, core, interlock);
+	if (ret == 0 && sc->kms_push_trace) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 head update head=%u view=%ux%u->%ux%u "
+		    "update_view=%d update_dither=%d\n",
+		    head, asyh.view.iW, asyh.view.iH, asyh.view.oW,
+		    asyh.view.oH, update_view, update_dither);
+	}
+	return ret;
+}
+
+int
 nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
     uint32_t win, uint32_t display_id, bool color_update)
 {
@@ -6234,6 +6437,7 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	nvkm_dispnv50_head_atom_fill(&asyh, crtc->state);
+	nvkm_dispnv50_head_apply_view(&asyh, config);
 	nvkm_dispnv50_head_apply_config(&asyh, crtc, config);
 	if (nvhead->func->static_wndw_map != NULL)
 		nvhead->func->static_wndw_map(nvhead, &asyh);
@@ -6283,11 +6487,13 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 
-	nvkm_infof(sc->dev,
-	    "drm: dispnv50 head state head=%u view=%ux%u->%ux%u "
-	    "wndw_mask=0x%x wndw_owned=0x%x\n",
-	    head, asyh.view.iW, asyh.view.iH, asyh.view.oW, asyh.view.oH,
-	    asyh.wndw.mask, asyh.wndw.owned);
+	if (sc->kms_push_trace) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 head state head=%u view=%ux%u->%ux%u "
+		    "wndw_mask=0x%x wndw_owned=0x%x\n",
+		    head, asyh.view.iW, asyh.view.iH, asyh.view.oW,
+		    asyh.view.oH, asyh.wndw.mask, asyh.wndw.owned);
+	}
 
 	/*
 	 * Ownership: local scalar snapshot for this enable transaction only.

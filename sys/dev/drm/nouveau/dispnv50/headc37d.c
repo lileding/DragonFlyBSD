@@ -26,6 +26,9 @@
 #include <nvif/pushc37b.h>
 
 #include <nvhw/class/clc37d.h>
+#include <nvhw/class/clc57d.h>
+
+#define NVKM_DISP_SCALE_1X 1024U
 
 static int
 headc37d_window_count(struct nv50_head *head)
@@ -33,6 +36,72 @@ headc37d_window_count(struct nv50_head *head)
 	if (head != NULL && head->disp != NULL)
 		return nv50_core_window_count(head->disp->core);
 	return 8;
+}
+
+static bool
+headc37d_is_c57d(struct nv50_head *head)
+{
+#ifdef NVKM_DFLY_GSP_DISPLAY_ONLY
+	struct nv50_core *core;
+
+	if (head == NULL || head->disp == NULL)
+		return false;
+	core = head->disp->core;
+	if (core == NULL)
+		return false;
+	return (core->chan.dfly_oclass & 0xff) == 0x7d;
+#else
+	(void)head;
+	return false;
+#endif
+}
+
+static u32
+headc37d_scale_factor(u16 in, u16 out)
+{
+	u64 factor;
+
+	if (in == 0 || out == 0 || in <= out)
+		return NVKM_DISP_SCALE_1X;
+
+	factor = ((u64)in * NVKM_DISP_SCALE_1X + out - 1) / out;
+	if (factor > 0xffff)
+		return 0xffff;
+	return (u32)factor;
+}
+
+static u32
+headc37d_max_pixels_fetched_per_line(u16 width)
+{
+	u32 pixels;
+
+	pixels = (((u32)width + 14U) * NVKM_DISP_SCALE_1X +
+	    NVKM_DISP_SCALE_1X - 1U) >> 10;
+	pixels += 8U;
+	if (pixels > 0x7fff)
+		return 0x7fff;
+	return pixels;
+}
+
+static int
+headc37d_window_first(struct nv50_head *head)
+{
+	return head->base.index * 2;
+}
+
+static int
+headc37d_window_end(struct nv50_head *head)
+{
+	int end;
+	int windows;
+
+	end = headc37d_window_first(head) + 2;
+	windows = headc37d_window_count(head);
+	if (end - 2 >= windows)
+		return end - 2;
+	if (end > windows)
+		end = windows;
+	return end;
 }
 
 static int
@@ -251,11 +320,6 @@ headc37d_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 	PUSH_MTHD(push, NVC37D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX(i),
 		  NVVAL(NVC37D, HEAD_SET_PIXEL_CLOCK_FREQUENCY_MAX, HERTZ, m->clock * 1000));
 
-	/*XXX: HEAD_USAGE_BOUNDS, doesn't belong here. */
-	PUSH_MTHD(push, NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS(i),
-		  NVDEF(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, CURSOR, USAGE_W256_H256) |
-		  NVDEF(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, OUTPUT_LUT, USAGE_1025) |
-		  NVDEF(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, UPSCALING_ALLOWED, TRUE));
 	return 0;
 }
 
@@ -264,18 +328,90 @@ headc37d_view(struct nv50_head *head, struct nv50_head_atom *asyh)
 {
 	struct nvif_push *push = &nv50_disp(head->base.base.dev)->core->chan.push;
 	const int i = head->base.index;
+	const int first = headc37d_window_first(head);
+	const int end = headc37d_window_end(head);
+	const bool c57d = headc37d_is_c57d(head);
+	const bool vupscale = asyh->view.oH > asyh->view.iH;
+	const u32 hfactor =
+	    headc37d_scale_factor(asyh->view.iW, asyh->view.oW);
+	const u32 vfactor =
+	    headc37d_scale_factor(asyh->view.iH, asyh->view.oH);
+	const u32 max_pixels =
+	    headc37d_max_pixels_fetched_per_line(asyh->view.iW);
+	int win;
 	int ret;
 
-	if ((ret = PUSH_WAIT(push, 4)))
+	if ((ret = PUSH_WAIT(push, 12 + (end - first) * 2)))
 		return ret;
 
-	PUSH_MTHD(push, NVC37D, HEAD_SET_VIEWPORT_SIZE_IN(i),
-		  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_IN, WIDTH, asyh->view.iW) |
-		  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_IN, HEIGHT, asyh->view.iH));
+	if (c57d) {
+		PUSH_MTHD(push, NVC57D, HEAD_SET_CONTROL_OUTPUT_SCALER(i),
+			  NVDEF(NVC57D, HEAD_SET_CONTROL_OUTPUT_SCALER, VERTICAL_TAPS, TAPS_2) |
+			  NVDEF(NVC57D, HEAD_SET_CONTROL_OUTPUT_SCALER, HORIZONTAL_TAPS, TAPS_2));
 
-	PUSH_MTHD(push, NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT(i),
-		  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT, WIDTH, asyh->view.oW) |
-		  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT, HEIGHT, asyh->view.oH));
+		PUSH_MTHD(push, NVC57D, HEAD_SET_VIEWPORT_SIZE_IN(i),
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_SIZE_IN, WIDTH, asyh->view.iW) |
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_SIZE_IN, HEIGHT, asyh->view.iH));
+
+		PUSH_MTHD(push, NVC57D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST(i),
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST, X, 0) |
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST, Y, 0));
+
+		PUSH_MTHD(push, NVC57D, HEAD_SET_VIEWPORT_SIZE_OUT(i),
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_SIZE_OUT, WIDTH, asyh->view.oW) |
+			  NVVAL(NVC57D, HEAD_SET_VIEWPORT_SIZE_OUT, HEIGHT, asyh->view.oH));
+
+		PUSH_MTHD(push, NVC57D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR(i),
+			  NVVAL(NVC57D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR, HORIZONTAL, hfactor) |
+			  NVVAL(NVC57D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR, VERTICAL, vfactor));
+
+		for (win = first; win < end; win++) {
+			PUSH_MTHD(push, NVC57D, WINDOW_SET_WINDOW_USAGE_BOUNDS(win),
+				  NVVAL(NVC57D, WINDOW_SET_WINDOW_USAGE_BOUNDS, MAX_PIXELS_FETCHED_PER_LINE, max_pixels) |
+				  NVDEF(NVC57D, WINDOW_SET_WINDOW_USAGE_BOUNDS, ILUT_ALLOWED, TRUE) |
+				  NVDEF(NVC57D, WINDOW_SET_WINDOW_USAGE_BOUNDS, INPUT_SCALER_TAPS, TAPS_2) |
+				  NVDEF(NVC57D, WINDOW_SET_WINDOW_USAGE_BOUNDS, UPSCALING_ALLOWED, FALSE));
+		}
+
+		PUSH_MTHD(push, NVC57D, HEAD_SET_HEAD_USAGE_BOUNDS(i),
+			  NVDEF(NVC57D, HEAD_SET_HEAD_USAGE_BOUNDS, CURSOR, USAGE_W256_H256) |
+			  NVDEF(NVC57D, HEAD_SET_HEAD_USAGE_BOUNDS, OLUT_ALLOWED, TRUE) |
+			  NVDEF(NVC57D, HEAD_SET_HEAD_USAGE_BOUNDS, OUTPUT_SCALER_TAPS, TAPS_2) |
+			  NVVAL(NVC57D, HEAD_SET_HEAD_USAGE_BOUNDS, UPSCALING_ALLOWED, vupscale));
+	} else {
+		PUSH_MTHD(push, NVC37D, HEAD_SET_CONTROL_OUTPUT_SCALER(i),
+			  NVDEF(NVC37D, HEAD_SET_CONTROL_OUTPUT_SCALER, VERTICAL_TAPS, TAPS_2) |
+			  NVDEF(NVC37D, HEAD_SET_CONTROL_OUTPUT_SCALER, HORIZONTAL_TAPS, TAPS_2));
+
+		PUSH_MTHD(push, NVC37D, HEAD_SET_VIEWPORT_SIZE_IN(i),
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_IN, WIDTH, asyh->view.iW) |
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_IN, HEIGHT, asyh->view.iH));
+
+		PUSH_MTHD(push, NVC37D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST(i),
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST, X, 0) |
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_POINT_OUT_ADJUST, Y, 0));
+
+		PUSH_MTHD(push, NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT(i),
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT, WIDTH, asyh->view.oW) |
+			  NVVAL(NVC37D, HEAD_SET_VIEWPORT_SIZE_OUT, HEIGHT, asyh->view.oH));
+
+		PUSH_MTHD(push, NVC37D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR(i),
+			  NVVAL(NVC37D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR, HORIZONTAL, hfactor) |
+			  NVVAL(NVC37D, HEAD_SET_MAX_OUTPUT_SCALE_FACTOR, VERTICAL, vfactor));
+
+		for (win = first; win < end; win++) {
+			PUSH_MTHD(push, NVC37D, WINDOW_SET_WINDOW_USAGE_BOUNDS(win),
+				  NVVAL(NVC37D, WINDOW_SET_WINDOW_USAGE_BOUNDS, MAX_PIXELS_FETCHED_PER_LINE, max_pixels) |
+				  NVDEF(NVC37D, WINDOW_SET_WINDOW_USAGE_BOUNDS, INPUT_LUT, USAGE_1025) |
+				  NVDEF(NVC37D, WINDOW_SET_WINDOW_USAGE_BOUNDS, INPUT_SCALER_TAPS, TAPS_2) |
+				  NVDEF(NVC37D, WINDOW_SET_WINDOW_USAGE_BOUNDS, UPSCALING_ALLOWED, FALSE));
+		}
+
+		PUSH_MTHD(push, NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS(i),
+			  NVDEF(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, CURSOR, USAGE_W256_H256) |
+			  NVDEF(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, OUTPUT_LUT, USAGE_1025) |
+			  NVVAL(NVC37D, HEAD_SET_HEAD_USAGE_BOUNDS, UPSCALING_ALLOWED, vupscale));
+	}
 	return 0;
 }
 
