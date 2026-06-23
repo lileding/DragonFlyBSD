@@ -922,6 +922,53 @@ check_property_read_error_contract(int fd)
 	    "DRM OBJ_GETPROPERTIES bad object id fails with ENOENT");
 }
 
+static void
+check_resource_lookup_error_contract(int fd)
+{
+	struct drm_mode_crtc crtc;
+	struct drm_mode_get_connector connector;
+	struct drm_mode_get_encoder encoder;
+	struct drm_mode_get_plane plane;
+	int saved_errno;
+	int ret;
+
+	memset(&crtc, 0, sizeof(crtc));
+	crtc.crtc_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETCRTC, &crtc);
+	saved_errno = errno;
+	check(ret != 0, "DRM GETCRTC rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "DRM GETCRTC bad CRTC id fails with ENOENT");
+
+	memset(&connector, 0, sizeof(connector));
+	connector.connector_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &connector);
+	saved_errno = errno;
+	check(ret != 0, "DRM GETCONNECTOR rejects bad connector id");
+	check(saved_errno == ENOENT,
+	    "DRM GETCONNECTOR bad connector id fails with ENOENT");
+
+	memset(&encoder, 0, sizeof(encoder));
+	encoder.encoder_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETENCODER, &encoder);
+	saved_errno = errno;
+	check(ret != 0, "DRM GETENCODER rejects bad encoder id");
+	check(saved_errno == ENOENT,
+	    "DRM GETENCODER bad encoder id fails with ENOENT");
+
+	memset(&plane, 0, sizeof(plane));
+	plane.plane_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETPLANE, &plane);
+	saved_errno = errno;
+	check(ret != 0, "DRM GETPLANE rejects bad plane id");
+	check(saved_errno == ENOENT,
+	    "DRM GETPLANE bad plane id fails with ENOENT");
+}
+
 static bool
 get_property_blob_raw(int fd, uint32_t blob_id, uint8_t *buffer,
     uint32_t length, uint32_t *actual_length_out, int *saved_errno_out)
@@ -8718,6 +8765,7 @@ main(void)
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);
 	check_property_read_error_contract(fd);
+	check_resource_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
