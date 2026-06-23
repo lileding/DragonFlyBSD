@@ -1473,6 +1473,17 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     ):
         emit(text in drmtest_after, f"drmtest.after has {text}")
 
+    if "status=disconnected" in drmtest_after:
+        for text in (
+            "disconnected connector exposes no modes",
+            "disconnected connector has no current encoder",
+            "disconnected connector EDID is 0",
+            "disconnected connector CRTC_ID is 0",
+        ):
+            emit(text in drmtest_after, f"drmtest.after has {text}")
+    else:
+        print("INFO no disconnected connector in drmtest.after")
+
     faults = out_dir / "dmesg_faults.after"
     if faults.exists():
         before_faults = out_dir / "dmesg_faults.before"
