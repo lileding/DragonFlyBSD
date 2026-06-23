@@ -228,6 +228,28 @@ check_client_cap(int fd, uint64_t capability, const char *name)
 }
 
 static void
+check_client_cap_error(int fd, uint64_t capability, int expected_errno,
+    const char *name)
+{
+	char text[160];
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmSetClientCap(fd, capability, 1);
+	saved_errno = errno;
+	snprintf(text, sizeof(text), "DRM client cap %s is rejected", name);
+	check(ret != 0, text);
+	if (ret == 0)
+		return;
+
+	printf("    %s errno=%d\n", name, saved_errno);
+	snprintf(text, sizeof(text), "DRM client cap %s fails with errno %d",
+	    name, expected_errno);
+	check(saved_errno == expected_errno, text);
+}
+
+static void
 check_mode_config_contract(int fd, const drmModeRes *resources)
 {
 	printf("mode_config: min=%ux%u max=%ux%u\n",
@@ -6669,6 +6691,8 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    "WRITEBACK_CONNECTORS");
+	check_client_cap_error(fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT,
+	    EOPNOTSUPP, "CURSOR_PLANE_HOTSPOT");
 	check_syncobj_transfer_contract(fd);
 
 	resources = drmModeGetResources(fd);

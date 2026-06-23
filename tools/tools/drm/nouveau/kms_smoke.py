@@ -1599,6 +1599,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM client cap ASPECT_RATIO is accepted",
         "DRM client cap ATOMIC is accepted",
         "DRM client cap WRITEBACK_CONNECTORS is accepted",
+        "DRM client cap CURSOR_PLANE_HOTSPOT is rejected",
+        "DRM client cap CURSOR_PLANE_HOTSPOT fails with errno 45",
         "SYNCOBJ_TRANSFER creates binary source syncobj",
         "SYNCOBJ_TRANSFER creates destination syncobj",
         "SYNCOBJ_TRANSFER binary source signal succeeds",
