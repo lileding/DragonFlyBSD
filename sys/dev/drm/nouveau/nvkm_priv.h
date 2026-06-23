@@ -68,6 +68,8 @@ struct nvkm_vram_alloc {
 	uint64_t align;
 	uint64_t bar1_gva;
 	uint64_t bar1_size;
+	uint64_t *bar1_page_gva;
+	uint32_t bar1_page_count;
 	enum nvkm_vram_kind kind;
 	void *owner;
 	bool free;
@@ -1909,6 +1911,10 @@ int	nvkm_gsp_bar1_map_existing_range(struct nvkm_softc *sc,
 	    uint64_t paddr, uint64_t size, uint64_t *pgva);
 void	nvkm_gsp_bar1_unmap_existing_range(struct nvkm_softc *sc,
 	    uint64_t gva, uint64_t size);
+int	nvkm_gsp_bar1_map_existing_scatter(struct nvkm_softc *sc,
+	    uint64_t paddr, uint64_t size, uint64_t *gvas, uint32_t count);
+void	nvkm_gsp_bar1_unmap_existing_scatter(struct nvkm_softc *sc,
+	    uint64_t *gvas, uint32_t count);
 void	nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc, uint64_t target_paddr, uint32_t target_off);
 
 void	nvkm_drm_exec_complete_intr(struct nvkm_softc *sc);

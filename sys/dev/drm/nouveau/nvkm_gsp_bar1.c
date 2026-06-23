@@ -796,6 +796,106 @@ nvkm_gsp_bar1_unmap_existing_range(struct nvkm_softc *sc, uint64_t gva,
 	nvkm_gsp_bar1_free_gva_range(&sc->bar1, gva, pages);
 }
 
+/*
+ * nvkm_gsp_bar1_map_existing_scatter()
+ *
+ * Ownership:
+ *   Borrows the caller-owned VRAM range and caller-owned gvas array.  On
+ *   success, each non-zero array entry owns one BAR1 GVA loan for the matching
+ *   VRAM page.  The caller must release those loans with
+ *   nvkm_gsp_bar1_unmap_existing_scatter().
+ *
+ * Lifetime:
+ *   The returned GVA entries remain valid until explicit unmap or BAR1 teardown.
+ *   They do not own the underlying VRAM allocation; the caller must keep that
+ *   allocation alive while any GVA entry can be used by a CPU PTE.
+ *
+ * Threading:
+ *   Mutates the shared BAR1 GVA bitmap and page tables.  Callers must serialize
+ *   against other BAR1 allocator users; TTM does this with io_reserve_mutex for
+ *   CPU mappings.  This function may sleep through GSP/BAR1 helper paths and is
+ *   not IRQ-safe.
+ */
+int
+nvkm_gsp_bar1_map_existing_scatter(struct nvkm_softc *sc, uint64_t paddr,
+    uint64_t size, uint64_t *gvas, uint32_t count)
+{
+	uint32_t pages;
+	int err;
+
+	if (!sc->bar1.ready)
+		return (ENXIO);
+	if (gvas == NULL || count == 0 || size == 0 ||
+	    (paddr & (NVKM_GMMU_PT_PAGE_SIZE - 1)) != 0)
+		return (EINVAL);
+
+	pages = (uint32_t)((size + NVKM_GMMU_PT_PAGE_SIZE - 1) /
+	    NVKM_GMMU_PT_PAGE_SIZE);
+	if (pages == 0 || pages > count)
+		return (EINVAL);
+
+	for (uint32_t page = 0; page < pages; page++) {
+		uint64_t gva;
+
+		err = nvkm_gsp_bar1_alloc_gva(&sc->bar1, &gva);
+		if (err != 0)
+			goto fail;
+
+		err = nvkm_gsp_bar1_map_vram_pte(sc, gva,
+		    paddr + (uint64_t)page * NVKM_GMMU_PT_PAGE_SIZE);
+		if (err != 0) {
+			nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+			goto fail;
+		}
+		gvas[page] = gva;
+	}
+	nvkm_gsp_bar1_invalidate(sc);
+	nvkm_gsp_bar1_flush(sc);
+	return (0);
+
+fail:
+	nvkm_gsp_bar1_unmap_existing_scatter(sc, gvas, pages);
+	return (err);
+}
+
+/*
+ * nvkm_gsp_bar1_unmap_existing_scatter()
+ *
+ * Ownership:
+ *   Consumes BAR1 GVA loans stored in gvas and clears each consumed entry to
+ *   zero.  It does not release the caller-owned array or the VRAM allocation.
+ *
+ * Lifetime:
+ *   After return, CPU mappings that still reference the old fictitious BAR1 PFNs
+ *   are invalid and must already have been removed by the VM/TTM owner.
+ *
+ * Threading:
+ *   Same BAR1 allocator serialization requirement as map_existing_scatter().
+ *   The function batches PTE invalidation for all released pages.
+ */
+void
+nvkm_gsp_bar1_unmap_existing_scatter(struct nvkm_softc *sc, uint64_t *gvas,
+    uint32_t count)
+{
+	bool cleared = false;
+
+	if (gvas == NULL || count == 0)
+		return;
+
+	for (uint32_t page = 0; page < count; page++) {
+		uint64_t gva = gvas[page];
+
+		if (gva == 0)
+			continue;
+		if (nvkm_gsp_bar1_clear_gva(sc, gva) == 0)
+			cleared = true;
+		nvkm_gsp_bar1_free_gva(&sc->bar1, gva);
+		gvas[page] = 0;
+	}
+	if (cleared)
+		nvkm_gsp_bar1_invalidate(sc);
+}
+
 void
 nvkm_gsp_bar1_dump_pt(struct nvkm_softc *sc __unused,
     uint64_t target_paddr __unused, uint32_t target_off __unused)
