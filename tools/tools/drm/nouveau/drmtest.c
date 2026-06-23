@@ -5331,6 +5331,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 {
 	drmModePlaneResPtr plane_resources;
 	drmModePlaneResPtr lease_planes;
+	drmModeConnectorPtr lease_connector;
 	drmModeRes *lease_resources;
 	drmModeRes *revoked_resources;
 	uint32_t active_crtc_id = 0;
@@ -5465,6 +5466,22 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 		check(id_in_list(lease_resources->crtcs,
 		    lease_resources->count_crtcs, active_crtc_id),
 		    "DRM lease fd exposes leased CRTC");
+		check(lease_resources->count_encoders >= 1,
+		    "DRM lease fd exposes encoder resources");
+		lease_connector = drmModeGetConnector(lease_fd, connector_id);
+		check(lease_connector != NULL,
+		    "DRM lease fd connector is readable for encoder resources");
+		if (lease_connector != NULL) {
+			check(lease_connector->encoder_id != 0,
+			    "DRM lease fd connector has current encoder for resources");
+			if (lease_connector->encoder_id != 0) {
+				check(id_in_list(lease_resources->encoders,
+				    lease_resources->count_encoders,
+				    lease_connector->encoder_id),
+				    "DRM lease fd encoder resources include current encoder");
+			}
+			drmModeFreeConnector(lease_connector);
+		}
 		drmModeFreeResources(lease_resources);
 	}
 
