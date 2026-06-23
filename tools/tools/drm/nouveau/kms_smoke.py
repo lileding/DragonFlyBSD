@@ -687,6 +687,155 @@ def captured_text(path: pathlib.Path) -> str:
     return path.read_text(errors="replace")
 
 
+def drmtest_object_suffixes(text: str, kind: str) -> dict[str, set[str]]:
+    objects: dict[str, set[str]] = {}
+    pattern = re.compile(rf"^PASS {re.escape(kind)} ([0-9]+) (.*)$", re.M)
+    for match in pattern.finditer(text):
+        object_id = match.group(1)
+        suffix = match.group(2)
+        objects.setdefault(object_id, set()).add(suffix)
+    return objects
+
+
+def report_all_object_suffixes(
+    text: str,
+    kind: str,
+    suffixes: tuple[str, ...],
+    emit,
+) -> None:
+    objects = drmtest_object_suffixes(text, kind)
+    emit(bool(objects), f"{kind} dynamic object coverage exists")
+    if not objects:
+        return
+
+    for suffix in suffixes:
+        missing = sorted(
+            object_id for object_id, seen in objects.items()
+            if suffix not in seen
+        )
+        emit(not missing, f"every {kind} {object_suffix_report(suffix)}")
+
+
+def report_any_object_suffixes(
+    text: str,
+    kind: str,
+    suffixes: tuple[str, ...],
+    label: str,
+    emit,
+) -> None:
+    objects = drmtest_object_suffixes(text, kind)
+    emit(bool(objects), f"{kind} dynamic object coverage exists for {label}")
+    if not objects:
+        return
+
+    for suffix in suffixes:
+        emit(
+            any(suffix in seen for seen in objects.values()),
+            f"{label} {object_suffix_report(suffix)}",
+        )
+
+
+def object_suffix_report(suffix: str) -> str:
+    if suffix.startswith("has property "):
+        return f"exposes property {suffix.removeprefix('has property ')}"
+    if suffix.startswith("does not expose "):
+        return suffix
+    return f"passes {suffix}"
+
+
+CONNECTOR_DYNAMIC_SUFFIXES = (
+    "has property EDID",
+    "has property CRTC_ID",
+    "has property link-status",
+    "link-status is enum",
+    "link-status has enum Good",
+    "link-status defaults to Good",
+    "has property scaling mode",
+    "scaling mode is enum",
+    "scaling mode has enum None",
+    "scaling mode defaults to None",
+    "has property dithering mode",
+    "dithering mode is enum",
+    "dithering mode has enum auto",
+    "dithering mode defaults to auto",
+    "has property dithering depth",
+    "dithering depth is enum",
+    "dithering depth has enum auto",
+    "dithering depth defaults to auto",
+    "has property max bpc",
+    "max bpc is range",
+    "max bpc min is 8",
+    "max bpc max is 8",
+    "max bpc value is 8",
+    "does not expose unsupported connector property HDR_OUTPUT_METADATA",
+    "does not expose unsupported connector property Colorspace",
+    "does not expose unsupported connector property content type",
+    "does not expose unsupported connector property vrr_capable",
+    "has property underscan",
+    "underscan is enum",
+    "underscan has enum off",
+    "underscan defaults to off",
+    "has property underscan hborder",
+    "underscan hborder is range",
+    "underscan hborder min is 0",
+    "underscan hborder max is 128",
+    "underscan hborder value is 0",
+    "has property underscan vborder",
+    "underscan vborder is range",
+    "underscan vborder min is 0",
+    "underscan vborder max is 128",
+    "underscan vborder value is 0",
+)
+
+CRTC_DYNAMIC_SUFFIXES = (
+    "has property ACTIVE",
+    "has property MODE_ID",
+    "has property DEGAMMA_LUT",
+    "DEGAMMA_LUT is blob",
+    "DEGAMMA_LUT defaults to 0",
+    "has property DEGAMMA_LUT_SIZE",
+    "DEGAMMA_LUT_SIZE is range",
+    "DEGAMMA_LUT_SIZE value is 1024",
+    "has property CTM",
+    "CTM is blob",
+    "CTM defaults to 0",
+    "has property GAMMA_LUT",
+    "GAMMA_LUT is blob",
+    "GAMMA_LUT defaults to 0",
+    "has property GAMMA_LUT_SIZE",
+    "GAMMA_LUT_SIZE is range",
+    "GAMMA_LUT_SIZE value is 1024",
+    "has property OUT_FENCE_PTR",
+    "OUT_FENCE_PTR is range",
+    "OUT_FENCE_PTR min is 0",
+    "OUT_FENCE_PTR max is 18446744073709551615",
+    "OUT_FENCE_PTR value is 0",
+    "does not expose unsupported CRTC property VRR_ENABLED",
+)
+
+PLANE_DYNAMIC_SUFFIXES = (
+    "has property type",
+    "has property IN_FENCE_FD",
+    "IN_FENCE_FD is signed range",
+    "IN_FENCE_FD min is -1",
+    "IN_FENCE_FD max is 2147483647",
+    "IN_FENCE_FD value is -1",
+    "has property CRTC_ID",
+    "has property FB_ID",
+)
+
+ACTIVE_PRIMARY_PLANE_GEOMETRY_SUFFIXES = (
+    "has property CRTC_X",
+    "has property CRTC_Y",
+    "has property CRTC_W",
+    "has property CRTC_H",
+    "has property SRC_X",
+    "has property SRC_Y",
+    "has property SRC_W",
+    "has property SRC_H",
+)
+
+
 def has_error_text(text: str) -> bool:
     return bool(re.search(
         r"(^|\n)(Error:|.*\bfailed\b|Segmentation fault|core dumped|DeviceLost|"
@@ -1264,6 +1413,19 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         rc = command_return_code(out_dir / name)
         emit(rc == 0, f"{name} rc={rc}")
     drmtest_after = captured_text(out_dir / "drmtest.after")
+    report_all_object_suffixes(
+        drmtest_after, "connector", CONNECTOR_DYNAMIC_SUFFIXES, emit)
+    report_all_object_suffixes(
+        drmtest_after, "crtc", CRTC_DYNAMIC_SUFFIXES, emit)
+    report_all_object_suffixes(
+        drmtest_after, "plane", PLANE_DYNAMIC_SUFFIXES, emit)
+    report_any_object_suffixes(
+        drmtest_after,
+        "plane",
+        ACTIVE_PRIMARY_PLANE_GEOMETRY_SUFFIXES,
+        "active primary plane geometry",
+        emit,
+    )
     for text in (
         "DRM cap DUMB_PREFERRED_DEPTH is readable",
         "DRM cap DUMB_PREFERRED_DEPTH is 24",
