@@ -213,6 +213,18 @@ check_drm_cap(int fd, uint64_t capability, uint64_t expected,
 }
 
 static void
+check_client_cap(int fd, uint64_t capability, const char *name)
+{
+	char text[160];
+
+	errno = 0;
+	snprintf(text, sizeof(text), "DRM client cap %s is accepted", name);
+	check(drmSetClientCap(fd, capability, 1) == 0, text);
+	if (errno != 0)
+		printf("    errno=%d\n", errno);
+}
+
+static void
 check_mode_config_contract(int fd, const drmModeRes *resources)
 {
 	printf("mode_config: min=%ux%u max=%ux%u\n",
@@ -5265,11 +5277,9 @@ main(void)
 		perror("open card0");
 		return 1;
 	}
-	if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0)
-		printf("WARN universal planes client cap failed errno=%d\n",
-		    errno);
-	if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0)
-		printf("WARN atomic client cap failed errno=%d\n", errno);
+	check_client_cap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+	    "UNIVERSAL_PLANES");
+	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 
 	resources = drmModeGetResources(fd);
 	if (resources == NULL) {
