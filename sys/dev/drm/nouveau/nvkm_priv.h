@@ -736,6 +736,7 @@ struct nvkm_softc {
 	uint32_t		kms_hpd_last_link_bad_mask;
 	uint32_t		kms_hpd_last_dp_irq_mask;
 	uint64_t		kms_auto_count;
+	uint64_t		kms_connector_fill_modes_count;
 	uint64_t		kms_hotplug_count;
 	uint64_t		kms_hotplug_changed_count;
 	uint64_t		kms_hotplug_nochange_count;
