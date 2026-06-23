@@ -1599,6 +1599,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap SYNCOBJ_TIMELINE is 1",
         "DRM cap PRIME is readable",
         "DRM cap PRIME is 3",
+        "DRM client cap STEREO_3D is accepted",
         "DRM client cap UNIVERSAL_PLANES is accepted",
         "DRM client cap ASPECT_RATIO is accepted",
         "DRM client cap ATOMIC is accepted",

@@ -287,6 +287,7 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	    "SYNCOBJ_TIMELINE");
 	check_drm_cap(fd, DRM_CAP_PRIME,
 	    DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT, "PRIME");
+	check_client_cap(fd, DRM_CLIENT_CAP_STEREO_3D, "STEREO_3D");
 }
 
 static const char *
