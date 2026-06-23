@@ -315,6 +315,47 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	check_client_cap(fd, DRM_CLIENT_CAP_STEREO_3D, "STEREO_3D");
 }
 
+/*
+ * check_deprecated_master_mode_ioctl_contract()
+ *
+ * Ownership:
+ *   Borrows a connected connector object ID.  No KMS object or GEM handle is
+ *   created, retained, or destroyed by this helper.
+ *
+ * Lifetime:
+ *   MODE_ATTACHMODE and MODE_DETACHMODE are deprecated no-op ioctls in this
+ *   DRM core.  This helper only proves the master-visible ABI result and does
+ *   not change the connector's mode list or active route.
+ *
+ * Threading:
+ *   Single-threaded probe.  The caller must pass the current DRM master fd so
+ *   the DRM_MASTER gate is not the result under test.
+ */
+static void
+check_deprecated_master_mode_ioctl_contract(int fd, uint32_t connector_id)
+{
+	struct drm_mode_mode_cmd mode_cmd;
+	int saved_errno;
+	int ret;
+
+	memset(&mode_cmd, 0, sizeof(mode_cmd));
+	mode_cmd.connector_id = connector_id;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_ATTACHMODE, &mode_cmd);
+	saved_errno = errno;
+	check(ret == 0, "master legacy AttachMode no-op succeeds");
+	if (ret != 0)
+		printf("    master legacy AttachMode errno=%d\n", saved_errno);
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DETACHMODE, &mode_cmd);
+	saved_errno = errno;
+	check(ret == 0, "master legacy DetachMode no-op succeeds");
+	if (ret != 0)
+		printf("    master legacy DetachMode errno=%d\n", saved_errno);
+}
+
 static const char *
 connector_status_name(int status)
 {
@@ -6703,6 +6744,7 @@ int
 main(void)
 {
 	drmModeRes *resources;
+	bool deprecated_mode_noop_done = false;
 	bool expect_no_connected;
 	int connected_count = 0;
 	int fd;
@@ -6773,14 +6815,23 @@ main(void)
 		}
 		check_connector(fd, connector, resources, expect_no_connected,
 		    &connected_count);
+		if (!deprecated_mode_noop_done &&
+		    connector->connection == DRM_MODE_CONNECTED) {
+			check_deprecated_master_mode_ioctl_contract(fd,
+			    connector->connector_id);
+			deprecated_mode_noop_done = true;
+		}
 		drmModeFreeConnector(connector);
 	}
 	if (expect_no_connected)
 		check(connected_count == 0,
 		    "no connected connector exposed when requested");
-	else
+	else {
 		check(connected_count > 0,
 		    "at least one connected connector exposed");
+		check(deprecated_mode_noop_done,
+		    "connected connector supports deprecated master mode no-op probe");
+	}
 	check_connected_mode_list_atomic_contract(fd, resources,
 	    expect_no_connected);
 
