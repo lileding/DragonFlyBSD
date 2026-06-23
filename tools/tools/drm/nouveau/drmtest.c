@@ -6308,6 +6308,12 @@ check_framebuffer_uapi_contract(int fd)
 	    "ADDFB2 zero width fails with EINVAL");
 	addfb2.width = 64;
 
+	addfb2.height = 0;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects zero height",
+	    "ADDFB2 zero height fails with EINVAL");
+	addfb2.height = 64;
+
 	addfb2.pixel_format = 0xffffffffu;
 	check_addfb2_rejects(fd, addfb2, EINVAL,
 	    "ADDFB2 rejects unknown pixel format",
