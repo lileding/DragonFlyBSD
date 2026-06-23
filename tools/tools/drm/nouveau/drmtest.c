@@ -3349,6 +3349,7 @@ check_non_master_display_mutation_contract(int master_fd,
 	drmModeModeInfo saved_mode;
 	struct drm_mode_cursor cursor;
 	struct drm_mode_cursor2 cursor2;
+	struct drm_mode_mode_cmd mode_cmd;
 	struct drm_mode_obj_set_property obj_set_property;
 	uint32_t connector_id = 0;
 	uint32_t dpms_property_id = 0;
@@ -3463,6 +3464,34 @@ check_non_master_display_mutation_contract(int master_fd,
 		    saved_errno);
 		check(saved_errno == EACCES,
 		    "non-master legacy SetPlane fails with EACCES");
+	}
+
+	memset(&mode_cmd, 0, sizeof(mode_cmd));
+	mode_cmd.connector_id = connector_id;
+	errno = 0;
+	ret = drmIoctl(secondary_fd, DRM_IOCTL_MODE_ATTACHMODE, &mode_cmd);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy AttachMode is denied");
+	if (ret == 0) {
+		printf("    non-master legacy AttachMode unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy AttachMode errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy AttachMode fails with EACCES");
+	}
+
+	errno = 0;
+	ret = drmIoctl(secondary_fd, DRM_IOCTL_MODE_DETACHMODE, &mode_cmd);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy DetachMode is denied");
+	if (ret == 0) {
+		printf("    non-master legacy DetachMode unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy DetachMode errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy DetachMode fails with EACCES");
 	}
 
 	memset(&cursor, 0, sizeof(cursor));
