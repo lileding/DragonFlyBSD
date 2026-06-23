@@ -30,7 +30,13 @@ import time
 
 LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
-FULL_WAYLAND_PHASES = {"wayland", "wayland_info", "wayland_hpd_smoke", "xwayland"}
+FULL_WAYLAND_PHASES = {
+    "wayland",
+    "wayland_egl",
+    "wayland_info",
+    "wayland_hpd_smoke",
+    "xwayland",
+}
 FAULT_PATTERN = (
     "panic|BADFREE|double fault|DeviceLost|EXEC timeout|fault|CMDre|"
     "status=0x19|RC_TRIGGERED|notifier timeout|vblank wait timed out|flip_done timed out|"
@@ -374,25 +380,6 @@ def wayland_smoke_env(out_dir: pathlib.Path) -> dict[str, str]:
     env["XDG_RUNTIME_DIR"] = str(runtime_dir)
     env["NVKM_KMS_SMOKE_DIR"] = str(out_dir)
     env.setdefault("TERMINAL", "xfce4-terminal")
-
-    mesa_prefix = pathlib.Path("/usr/local/mesa-gl")
-    mesa_lib = mesa_prefix / "lib"
-    gcc_lib = pathlib.Path("/usr/local/lib/gcc13")
-    if mesa_lib.exists():
-        ld_parts = [str(mesa_lib)]
-        if gcc_lib.exists():
-            ld_parts.append(str(gcc_lib))
-        if env.get("LD_LIBRARY_PATH"):
-            ld_parts.append(env["LD_LIBRARY_PATH"])
-        env["LD_LIBRARY_PATH"] = ":".join(ld_parts)
-        env["VK_ICD_FILENAMES"] = str(
-            mesa_prefix / "share/vulkan/icd.d/nouveau_icd.x86_64.json"
-        )
-        env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(
-            mesa_prefix / "share/glvnd/egl_vendor.d/50_mesa.json"
-        )
-        env["MESA_LOADER_DRIVER_OVERRIDE"] = "zink"
-        env["LIBGL_DRIVERS_PATH"] = str(mesa_lib / "dri")
     return env
 
 
@@ -408,6 +395,15 @@ def write_sway_config(out_dir: pathlib.Path, mode: str,
             "{ echo WAYLAND_INFO_START; wayland-info; rc=$?; "
             "echo \"### rc=$rc\"; } "
             "> \"$NVKM_KMS_SMOKE_DIR/wayland-info.wayland\" 2>&1; "
+            "swaymsg exit"
+        )
+    elif mode == "wayland_egl":
+        egl_seconds = max(args.egl_seconds, 1)
+        command = (
+            "sleep 1; "
+            f"{{ echo WAYLAND_EGL_START; timeout {egl_seconds} libdecor-egl; "
+            "rc=$?; echo \"### rc=$rc\"; } "
+            "> \"$NVKM_KMS_SMOKE_DIR/libdecor-egl.wayland\" 2>&1; "
             "swaymsg exit"
         )
     elif mode == "wayland_hpd_smoke":
@@ -968,6 +964,30 @@ def report_wayland_info(out_dir: pathlib.Path, emit) -> None:
     emit(not has_error_text(text), "wayland-info output has no errors")
 
 
+def report_wayland_egl(out_dir: pathlib.Path, emit) -> None:
+    path = out_dir / "libdecor-egl.wayland"
+    if not path.exists():
+        return
+
+    rc = command_return_code(path)
+    emit(rc in (0, 124), f"libdecor-egl rc={rc}")
+    text = captured_text(path)
+    emit("WAYLAND_EGL_START" in text, "libdecor-egl started")
+    emit(not re.search(r"Segmentation fault|signal 11|core dumped|wl_proxy_create_wrapper",
+                       text, re.I),
+         "libdecor-egl did not hit the Wayland EGL surface crash")
+    emit(not has_error_text(text), "libdecor-egl output has no errors")
+
+    logs = sorted(out_dir.glob("*sway*.log"))
+    log_text = "\n".join(path.read_text(errors="replace") for path in logs)
+    emit(bool(re.search(r"new xdg_surface", log_text, re.I)),
+         "libdecor-egl created an xdg surface")
+    emit(bool(re.search(r"New xdg_shell toplevel", log_text, re.I)),
+         "libdecor-egl created an xdg toplevel")
+    emit(bool(re.search(r"new xdg_toplevel_decoration", log_text, re.I)),
+         "libdecor-egl created an xdg decoration")
+
+
 def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
     path = out_dir / "glxinfo.xwayland"
     if not path.exists():
@@ -1336,6 +1356,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
 
     report_wayland_log(out_dir, emit)
     report_wayland_info(out_dir, emit)
+    report_wayland_egl(out_dir, emit)
     report_xwayland_glxinfo(out_dir, emit)
     report_xwayland_glxgears(out_dir, emit)
     report_hpd_inject(out_dir, "wayland", emit)
@@ -2139,6 +2160,7 @@ def main() -> int:
         "before",
         "x11",
         "wayland",
+        "wayland_egl",
         "wayland_info",
         "wayland_hpd",
         "wayland_hpd_smoke",
@@ -2150,6 +2172,7 @@ def main() -> int:
     parser.add_argument("--display", default=os.environ.get("DISPLAY", ":0"))
     parser.add_argument("--xauthority", default=os.environ.get("XAUTHORITY"))
     parser.add_argument("--gears-seconds", type=int, default=5)
+    parser.add_argument("--egl-seconds", type=int, default=6)
     parser.add_argument("--run-panning", action="store_true",
                         help="briefly set and clear xrandr panning on the "
                              "first connected output")
