@@ -893,6 +893,35 @@ check_cursor_ioctl_flag_contract(int fd)
 	    "DRM cursor2 ioctl unknown flags fail with EINVAL");
 }
 
+static void
+check_property_read_error_contract(int fd)
+{
+	struct drm_mode_get_property get_property;
+	struct drm_mode_obj_get_properties get_object_properties;
+	int saved_errno;
+	int ret;
+
+	memset(&get_property, 0, sizeof(get_property));
+	get_property.prop_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETPROPERTY, &get_property);
+	saved_errno = errno;
+	check(ret != 0, "DRM GETPROPERTY rejects bad property id");
+	check(saved_errno == ENOENT,
+	    "DRM GETPROPERTY bad property id fails with ENOENT");
+
+	memset(&get_object_properties, 0, sizeof(get_object_properties));
+	get_object_properties.obj_id = 0;
+	get_object_properties.obj_type = DRM_MODE_OBJECT_CRTC;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES,
+	    &get_object_properties);
+	saved_errno = errno;
+	check(ret != 0, "DRM OBJ_GETPROPERTIES rejects bad object id");
+	check(saved_errno == ENOENT,
+	    "DRM OBJ_GETPROPERTIES bad object id fails with ENOENT");
+}
+
 static bool
 get_property_blob_raw(int fd, uint32_t blob_id, uint8_t *buffer,
     uint32_t length, uint32_t *actual_length_out, int *saved_errno_out)
@@ -8688,6 +8717,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);
+	check_property_read_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
