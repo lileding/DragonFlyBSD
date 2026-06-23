@@ -6623,7 +6623,10 @@ main(void)
 	}
 	check_client_cap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
 	    "UNIVERSAL_PLANES");
+	check_client_cap(fd, DRM_CLIENT_CAP_ASPECT_RATIO, "ASPECT_RATIO");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
+	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
+	    "WRITEBACK_CONNECTORS");
 	check_syncobj_transfer_contract(fd);
 
 	resources = drmModeGetResources(fd);
