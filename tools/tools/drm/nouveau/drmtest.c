@@ -445,6 +445,18 @@ get_property_value_checked(int fd, uint32_t object_id, uint32_t object_type,
 }
 
 static void
+check_property_value_is_zero(int fd, uint32_t object_id, uint32_t object_type,
+    const char *name, const char *object_name, const char *what)
+{
+	uint64_t value = 0;
+
+	if (!get_property_value_checked(fd, object_id, object_type, name,
+	    &value, object_name))
+		return;
+	check(value == 0, what);
+}
+
+static void
 check_enum_property_default(int fd, uint32_t object_id, uint32_t object_type,
     const char *name, const char *object_name, const char *expected_enum)
 {
@@ -1844,9 +1856,41 @@ dump_properties(int fd, uint32_t object_id, uint32_t object_type,
 	drmModeFreeObjectProperties(props);
 }
 
+/*
+ * check_disconnected_connector_contract()
+ *
+ * Ownership:
+ *   Borrows the libdrm connector snapshot and the DRM fd.  Property lookups
+ *   allocate temporary libdrm objects and release them before return.
+ *
+ * Lifetime:
+ *   Valid for the current MODE_GETCONNECTOR snapshot only.  The helper does not
+ *   keep EDID blobs, connector properties, or modes alive after it returns.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It does not issue hotplug events or mutate
+ *   connector state.
+ */
+static void
+check_disconnected_connector_contract(int fd, drmModeConnector *connector,
+    const char *name)
+{
+	check(connector->count_modes == 0,
+	    "disconnected connector exposes no modes");
+	check(connector->encoder_id == 0,
+	    "disconnected connector has no current encoder");
+	check_property_value_is_zero(fd, connector->connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "EDID", name,
+	    "disconnected connector EDID is 0");
+	check_property_value_is_zero(fd, connector->connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", name,
+	    "disconnected connector CRTC_ID is 0");
+}
+
 static void
 check_connector(int fd, drmModeConnector *connector,
-    const drmModeRes *resources)
+    const drmModeRes *resources, bool expect_no_connected,
+    int *connected_count)
 {
 	char name[64];
 
@@ -1871,6 +1915,10 @@ check_connector(int fd, drmModeConnector *connector,
 		    "connector encoder id is present in resources");
 	}
 	if (connector->connection == DRM_MODE_CONNECTED) {
+		(*connected_count)++;
+		if (expect_no_connected)
+			check(false,
+			    "no connected connector exposed when requested");
 		check(connector->count_modes > 0,
 		    "connected connector exposes at least one mode");
 		check(connector->encoder_id != 0,
@@ -1880,6 +1928,8 @@ check_connector(int fd, drmModeConnector *connector,
 			    connector->count_encoders, connector->encoder_id),
 			    "connected connector current encoder is attached");
 		}
+	} else if (connector->connection == DRM_MODE_DISCONNECTED) {
+		check_disconnected_connector_contract(fd, connector, name);
 	}
 	check_connector_property_contract(fd, connector->connector_id,
 	    connector->connector_type, name);
@@ -3749,23 +3799,33 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	bool have_active_crtc;
 	bool have_active_crtc_size;
 	bool skip_cursor;
+	bool metadata_only;
 
 	resources = drmModeGetPlaneResources(fd);
 	check(resources != NULL, "plane resources available");
 	if (resources == NULL)
 		return;
 	skip_cursor = getenv("NVKM_DRMTEST_SKIP_CURSOR") != NULL;
+	metadata_only = getenv("NVKM_DRMTEST_METADATA_ONLY") != NULL;
 
-	have_active_crtc = find_active_crtc(fd, mode_resources,
-	    &active_crtc_id, &active_crtc_index);
-	check(have_active_crtc, "active CRTC available for atomic TEST_ONLY probe");
-	have_active_crtc_size = have_active_crtc &&
-	    get_crtc_size(fd, active_crtc_id, &active_crtc_width,
-	    &active_crtc_height);
-	check(have_active_crtc_size,
-	    "active CRTC mode size available for primary panning probe");
-	if (have_active_crtc)
-		check_atomic_crtc_color_runtime_contract(fd, active_crtc_id);
+	if (metadata_only) {
+		have_active_crtc = false;
+		have_active_crtc_size = false;
+		printf("SKIP active CRTC runtime probes by NVKM_DRMTEST_METADATA_ONLY\n");
+	} else {
+		have_active_crtc = find_active_crtc(fd, mode_resources,
+		    &active_crtc_id, &active_crtc_index);
+		check(have_active_crtc,
+		    "active CRTC available for atomic TEST_ONLY probe");
+		have_active_crtc_size = have_active_crtc &&
+		    get_crtc_size(fd, active_crtc_id, &active_crtc_width,
+		    &active_crtc_height);
+		check(have_active_crtc_size,
+		    "active CRTC mode size available for primary panning probe");
+		if (have_active_crtc)
+			check_atomic_crtc_color_runtime_contract(fd,
+			    active_crtc_id);
+	}
 
 	printf("planes: count=%u\n", resources->count_planes);
 	check(resources->count_planes > 0, "at least one KMS plane exposed");
@@ -3824,9 +3884,15 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		drmModeFreePlane(plane);
 	}
 
-	check(primary_panning_probe_done,
-	    "primary plane supports active CRTC for panning TEST_ONLY probe");
-	if (skip_cursor)
+	if (metadata_only) {
+		printf("SKIP primary/cursor runtime probes by NVKM_DRMTEST_METADATA_ONLY\n");
+	} else {
+		check(primary_panning_probe_done,
+		    "primary plane supports active CRTC for panning TEST_ONLY probe");
+	}
+	if (metadata_only) {
+		/* Cursor runtime needs an active CRTC; metadata was checked above. */
+	} else if (skip_cursor)
 		printf("SKIP cursor plane runtime probe by NVKM_DRMTEST_SKIP_CURSOR\n");
 	else
 		check(cursor_probe_done,
@@ -3839,6 +3905,8 @@ int
 main(void)
 {
 	drmModeRes *resources;
+	bool expect_no_connected;
+	int connected_count = 0;
 	int fd;
 
 	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
@@ -3858,6 +3926,7 @@ main(void)
 		close(fd);
 		return 1;
 	}
+	expect_no_connected = getenv("NVKM_DRMTEST_EXPECT_NO_CONNECTED") != NULL;
 
 	printf("resources: connectors=%d crtcs=%d encoders=%d\n",
 	    resources->count_connectors, resources->count_crtcs,
@@ -3878,9 +3947,13 @@ main(void)
 			failures++;
 			continue;
 		}
-		check_connector(fd, connector, resources);
+		check_connector(fd, connector, resources, expect_no_connected,
+		    &connected_count);
 		drmModeFreeConnector(connector);
 	}
+	if (expect_no_connected)
+		check(connected_count == 0,
+		    "no connected connector exposed when requested");
 
 	for (int i = 0; i < resources->count_crtcs; i++)
 		check_crtc(fd, resources->crtcs[i]);
