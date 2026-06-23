@@ -1298,6 +1298,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "connected connector current encoder is readable",
         "connected connector current encoder has current CRTC",
         "connected connector CRTC_ID matches current encoder CRTC",
+        "encoder current CRTC index fits possible_crtcs mask width",
+        "encoder current CRTC is allowed by possible_crtcs",
         "every CRTC has a primary plane",
         "every CRTC has a cursor plane",
         "does not expose unsupported connector property HDR_OUTPUT_METADATA",

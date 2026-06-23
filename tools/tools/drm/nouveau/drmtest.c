@@ -299,6 +299,32 @@ id_in_list(const uint32_t *ids, int count, uint32_t id)
 }
 
 /*
+ * id_index_in_list()
+ *
+ * Ownership:
+ *   Borrows a libdrm-owned ID array and writes the matching index to the
+ *   caller-owned out parameter when the ID is found.
+ *
+ * Lifetime:
+ *   The returned index is valid only for the same resources snapshot that owns
+ *   ids.  It must not be reused after a later hotplug or resources refresh.
+ *
+ * Threading:
+ *   Single-threaded read-only helper.  No driver-private locks are held.
+ */
+static bool
+id_index_in_list(const uint32_t *ids, int count, uint32_t id, int *index_out)
+{
+	for (int i = 0; i < count; i++) {
+		if (ids[i] != id)
+			continue;
+		*index_out = i;
+		return true;
+	}
+	return false;
+}
+
+/*
  * check_unique_ids()
  *
  * Ownership:
@@ -2380,8 +2406,21 @@ check_encoder(int fd, uint32_t encoder_id, const drmModeRes *resources)
 	check((encoder->possible_crtcs & ~crtc_mask) == 0,
 	    "encoder possible_crtcs fits resources CRTC mask");
 	if (encoder->crtc_id != 0) {
-		check(id_in_list(resources->crtcs, resources->count_crtcs,
-		    encoder->crtc_id), "encoder current CRTC is present");
+		int crtc_index = -1;
+		bool crtc_present;
+
+		crtc_present = id_index_in_list(resources->crtcs,
+		    resources->count_crtcs, encoder->crtc_id, &crtc_index);
+		check(crtc_present, "encoder current CRTC is present");
+		if (crtc_present) {
+			check(crtc_index >= 0 && crtc_index < 32,
+			    "encoder current CRTC index fits possible_crtcs mask width");
+			if (crtc_index >= 0 && crtc_index < 32) {
+				check((encoder->possible_crtcs &
+				    (1u << crtc_index)) != 0,
+				    "encoder current CRTC is allowed by possible_crtcs");
+			}
+		}
 	}
 
 	drmModeFreeEncoder(encoder);
