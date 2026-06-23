@@ -4336,6 +4336,42 @@ check_dirtyfb_non_master_denied(uint32_t fb_id, uint32_t width,
 }
 
 /*
+ * check_addfb2_rejects()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and the GEM handles embedded in request.  If a buggy
+ *   kernel accepts the request and creates an FB, the helper removes that FB
+ *   before returning.
+ *
+ * Lifetime:
+ *   The request is copied by value so the caller's template remains reusable
+ *   across negative probes.
+ *
+ * Threading:
+ *   Single-threaded framebuffer UAPI probe.  These requests must fail in
+ *   common DRM validation before nvkm fb_create or display programming runs.
+ */
+static void
+check_addfb2_rejects(int fd, struct drm_mode_fb_cmd2 request,
+    int expected_errno, const char *what, const char *errno_what)
+{
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_ADDFB2, &request);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 && request.fb_id != 0)
+		remove_framebuffer(fd, request.fb_id,
+		    "RMFB succeeds for unexpected ADDFB2 negative probe");
+	else if (ret != 0 && saved_errno != expected_errno)
+		printf("    ADDFB2 ret=%d errno=%d expected=%d\n", ret,
+		    saved_errno, expected_errno);
+}
+
+/*
  * check_non_master_display_mutation_contract()
  *
  * Ownership:
@@ -4688,6 +4724,7 @@ check_framebuffer_uapi_contract(int fd)
 	struct pageflip_counter_snapshot before;
 	struct pageflip_counter_snapshot after;
 	struct drm_mode_fb_dirty_cmd dirty;
+	struct drm_mode_fb_cmd2 addfb2;
 	drmModeClip clip;
 	drmModeFBPtr fb = NULL;
 	drmModeFB2Ptr fb2 = NULL;
@@ -4709,6 +4746,78 @@ check_framebuffer_uapi_contract(int fd)
 	if (!clear_dumb_buffer(fd, handle, pitch, 64,
 	    "MAP_DUMB succeeds for framebuffer UAPI probe"))
 		goto out_destroy_bo;
+
+	memset(&addfb2, 0, sizeof(addfb2));
+	addfb2.width = 64;
+	addfb2.height = 64;
+	addfb2.pixel_format = DRM_FORMAT_XRGB8888;
+	addfb2.handles[0] = handle;
+	addfb2.pitches[0] = pitch;
+	addfb2.flags = DRM_MODE_FB_MODIFIERS;
+	addfb2.modifier[0] = DRM_FORMAT_MOD_LINEAR;
+
+	addfb2.width = 0;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects zero width",
+	    "ADDFB2 zero width fails with EINVAL");
+	addfb2.width = 64;
+
+	addfb2.pixel_format = 0xffffffffu;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unknown pixel format",
+	    "ADDFB2 unknown pixel format fails with EINVAL");
+	addfb2.pixel_format = DRM_FORMAT_XRGB8888;
+
+	addfb2.flags = DRM_MODE_FB_MODIFIERS | 0x80000000u;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unknown framebuffer flags",
+	    "ADDFB2 unknown framebuffer flags fail with EINVAL");
+	addfb2.flags = DRM_MODE_FB_MODIFIERS;
+
+	addfb2.handles[0] = 0;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects missing plane handle",
+	    "ADDFB2 missing plane handle fails with EINVAL");
+	addfb2.handles[0] = handle;
+
+	addfb2.pitches[0] = 4;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects undersized pitch",
+	    "ADDFB2 undersized pitch fails with EINVAL");
+	addfb2.pitches[0] = pitch;
+
+	addfb2.flags = 0;
+	addfb2.modifier[0] = DRM_FORMAT_MOD_INVALID;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects modifier without modifier flag",
+	    "ADDFB2 modifier without flag fails with EINVAL");
+	addfb2.flags = DRM_MODE_FB_MODIFIERS;
+	addfb2.modifier[0] = DRM_FORMAT_MOD_LINEAR;
+
+	addfb2.handles[1] = handle;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unused plane handle",
+	    "ADDFB2 unused plane handle fails with EINVAL");
+	addfb2.handles[1] = 0;
+
+	addfb2.pitches[1] = pitch;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unused plane pitch",
+	    "ADDFB2 unused plane pitch fails with EINVAL");
+	addfb2.pitches[1] = 0;
+
+	addfb2.offsets[1] = 4;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unused plane offset",
+	    "ADDFB2 unused plane offset fails with EINVAL");
+	addfb2.offsets[1] = 0;
+
+	addfb2.modifier[1] = DRM_FORMAT_MOD_INVALID;
+	check_addfb2_rejects(fd, addfb2, EINVAL,
+	    "ADDFB2 rejects unused plane modifier",
+	    "ADDFB2 unused plane modifier fails with EINVAL");
+	addfb2.modifier[1] = 0;
+
 	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888, handle,
 	    pitch, &fb_id,
 	    "ADDFB2 accepts XRGB8888 linear framebuffer UAPI probe"))
