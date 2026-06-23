@@ -19,6 +19,7 @@
 #include "vmm_machine.h"
 #include "vmm_device.h"
 #include "vmmfs.h"
+#include "vmmfs_device.h"
 #include "vmm_node_if.h"
 
 static int

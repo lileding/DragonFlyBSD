@@ -114,7 +114,7 @@ struct vmmfs_machines {
 	struct vmmfs_node	vn_devices;	/* this machine's devices/ */
 };
 
-RB_HEAD(vmmfs_machtree, vmmfs_machines);
+RB_HEAD(vmmfs_machtree, vmmfs_machines);	/* ops: vmmfs_machines.h */
 
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
@@ -130,9 +130,6 @@ struct vmmfs_mount {
 	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
 	int			vm_next_dev;	/* monotonic device ino index */
 };
-
-int	vmmfs_machine_cmp(struct vmmfs_machines *a, struct vmmfs_machines *b);
-RB_PROTOTYPE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machine_cmp);
 
 #define VFS_TO_VMMFS(mp)	((struct vmmfs_mount *)((mp)->mnt_data))
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
@@ -216,16 +213,8 @@ int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);
-void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
-	    struct vmmfs_machines *m);
-void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
-void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machines *m);
-int	vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred);
-struct vmmfs_device *vmmfs_find_device(struct vmmfs_mount *vmp,
-	    struct vmmfs_machines *owner, const char *name, int nlen);
-struct vmmfs_device *vmmfs_find_device_any(struct vmmfs_mount *vmp,
-	    const char *name, int nlen);
-int	vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
-	    char *buf, size_t bufsize);
+
+/* Per-module interfaces (the machines registry, the device pool) live in their
+ * own headers: vmmfs_machines.h and vmmfs_device.h. */
 
 #endif /* VMMFS_H */

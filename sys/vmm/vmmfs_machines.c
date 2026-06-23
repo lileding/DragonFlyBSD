@@ -21,6 +21,7 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmmfs_machines.h"
 #include "vmm_node_if.h"
 
 /*

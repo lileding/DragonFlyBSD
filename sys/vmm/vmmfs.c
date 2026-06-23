@@ -43,6 +43,8 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmmfs_machines.h"
+#include "vmmfs_device.h"
 #include "vmm_node_if.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");

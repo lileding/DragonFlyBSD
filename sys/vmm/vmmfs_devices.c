@@ -22,6 +22,7 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmmfs_device.h"
 #include "vmm_node_if.h"
 
 /* ---- machines/<name>/devices/ and machines/host/devices/ (NDEVICES) ---- */
