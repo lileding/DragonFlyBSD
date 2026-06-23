@@ -106,6 +106,23 @@ struct cursor_counter_snapshot {
 	uint64_t head_cursor_bo;
 };
 
+struct pageflip_counter_snapshot {
+	uint64_t page_flip_count;
+	uint64_t page_flip_event_count;
+	uint64_t page_flip_error_count;
+	uint64_t commit_error_count;
+	uint64_t atomic_tail_active;
+	uint64_t atomic_tail_stage;
+	uint64_t display_audit_pending_valid;
+};
+
+struct pageflip_event_state {
+	uint32_t count;
+	unsigned int sequence;
+	unsigned int tv_sec;
+	unsigned int tv_usec;
+};
+
 struct modeset_counter_snapshot {
 	uint64_t atomic_tail_disable_op_count;
 	uint64_t atomic_tail_enable_op_count;
@@ -126,6 +143,19 @@ struct modeset_counter_snapshot {
 
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
     uint32_t plane_id, const char *name, uint64_t value);
+static bool create_dumb_buffer_for(int fd, uint32_t width, uint32_t height,
+    uint32_t bpp, uint32_t *handle_out, uint32_t *pitch_out,
+    const char *what);
+static void destroy_dumb_buffer_for(int fd, uint32_t handle,
+    const char *what);
+static bool clear_dumb_buffer(int fd, uint32_t handle, uint32_t pitch,
+    uint32_t height, const char *what);
+static bool add_linear_framebuffer(int fd, uint32_t width, uint32_t height,
+    uint32_t format, uint32_t handle, uint32_t pitch, uint32_t *fb_id_out,
+    const char *what);
+static void remove_framebuffer(int fd, uint32_t fb_id, const char *what);
+static bool read_pageflip_counter_snapshot(
+    struct pageflip_counter_snapshot *snapshot, const char *stage);
 
 static void
 check(bool ok, const char *what)
@@ -759,6 +789,90 @@ wait_sync_file_readable(int fd, int timeout_ms, int *saved_errno)
 	return 1;
 }
 
+static void
+pageflip_event_handler(int fd, unsigned int sequence, unsigned int tv_sec,
+    unsigned int tv_usec, void *user_data)
+{
+	struct pageflip_event_state *state = user_data;
+
+	(void)fd;
+	state->count++;
+	state->sequence = sequence;
+	state->tv_sec = tv_sec;
+	state->tv_usec = tv_usec;
+}
+
+/*
+ * wait_pageflip_event()
+ *
+ * Ownership:
+ *   Borrows the DRM fd and caller-owned event state.  It owns one temporary
+ *   kqueue descriptor and closes it before return.
+ *
+ * Lifetime:
+ *   Waits for one DRM pageflip event after drmModePageFlip() has queued it.
+ *   The callback writes only into the caller-provided event state.
+ *
+ * Threading:
+ *   Single-threaded userspace wait.  The kernel may deliver unrelated DRM
+ *   events on the same fd; libdrm dispatches them synchronously here.
+ */
+static int
+wait_pageflip_event(int fd, struct pageflip_event_state *state,
+    int timeout_ms, int *saved_errno)
+{
+	drmEventContext context;
+	struct kevent change;
+	struct kevent event;
+	struct timespec timeout;
+	int kq;
+	int ret;
+
+	memset(&context, 0, sizeof(context));
+	context.version = DRM_EVENT_CONTEXT_VERSION;
+	context.page_flip_handler = pageflip_event_handler;
+
+	kq = kqueue();
+	if (kq < 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	EV_SET(&change, (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_ENABLE |
+	    EV_ONESHOT, 0, 0, NULL);
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_nsec = (timeout_ms % 1000) * 1000000L;
+
+	while (state->count == 0) {
+		errno = 0;
+		ret = kevent(kq, &change, 1, &event, 1, &timeout);
+		*saved_errno = errno;
+		if (ret != 1) {
+			if (close(kq) != 0 && ret >= 0)
+				*saved_errno = errno;
+			return ret == 0 ? 0 : -1;
+		}
+		if ((event.flags & EV_ERROR) != 0) {
+			*saved_errno = (int)event.data;
+			(void)close(kq);
+			return -1;
+		}
+		errno = 0;
+		ret = drmHandleEvent(fd, &context);
+		*saved_errno = errno;
+		if (ret != 0) {
+			(void)close(kq);
+			return -1;
+		}
+	}
+
+	if (close(kq) != 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+	return 1;
+}
+
 static bool
 syncobj_create_handle(int fd, uint32_t *handle_out)
 {
@@ -1030,6 +1144,51 @@ atomic_primary_in_fence_commit(int fd, uint32_t plane_id,
 	return ret;
 }
 
+static int
+atomic_primary_commit(int fd, uint32_t plane_id,
+    const struct atomic_plane_snapshot *snapshot, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_plane_property(fd, req, plane_id, "FB_ID",
+	    snapshot->fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
+	    snapshot->crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X",
+	    snapshot->crtc_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y",
+	    snapshot->crtc_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W",
+	    snapshot->crtc_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H",
+	    snapshot->crtc_h) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X",
+	    snapshot->src_x) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y",
+	    snapshot->src_y) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    snapshot->src_w) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    snapshot->src_h)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
 /*
  * check_atomic_out_fence_runtime_contract()
  *
@@ -1171,6 +1330,204 @@ out_sync_file:
 	check(close(sync_file.fd) == 0, "close IN_FENCE_FD sync_file fd");
 out_channel:
 	nouveau_channel_free(fd, channel);
+}
+
+static bool
+legacy_pageflip_with_event(int fd, uint32_t crtc_id, uint32_t fb_id,
+    const char *what)
+{
+	struct pageflip_event_state event_state;
+	char text[192];
+	int saved_errno;
+	int ret;
+
+	memset(&event_state, 0, sizeof(event_state));
+	errno = 0;
+	ret = drmModePageFlip(fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT,
+	    &event_state);
+	saved_errno = errno;
+	snprintf(text, sizeof(text), "%s pageflip ioctl succeeds", what);
+	if (ret != 0) {
+		printf("    drmModePageFlip errno=%d\n", saved_errno);
+		check(false, text);
+		return false;
+	}
+	check(true, text);
+
+	ret = wait_pageflip_event(fd, &event_state, 2000, &saved_errno);
+	snprintf(text, sizeof(text), "%s pageflip event arrives", what);
+	if (ret != 1) {
+		printf("    pageflip event wait ret=%d errno=%d\n", ret,
+		    saved_errno);
+		check(false, text);
+		return false;
+	}
+	printf("    %s event sequence=%u time=%u.%06u\n", what,
+	    event_state.sequence, event_state.tv_sec, event_state.tv_usec);
+	check(true, text);
+	return true;
+}
+
+/*
+ * check_legacy_pageflip_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC and primary plane IDs.  Owns one temporary dumb BO
+ *   and framebuffer while the legacy pageflip ioctl borrows the FB ID.  The
+ *   probe restores the original FB before removing the temporary FB.
+ *
+ * Lifetime:
+ *   Performs a real legacy MODE_PAGE_FLIP with EVENT to a same-sized linear
+ *   framebuffer and waits for the DRM pageflip event.  The previous fb may be
+ *   a kernel-owned console fb that is released by old-fb cleanup after the
+ *   flip, so restore uses a fresh file-owned linear fb through an atomic
+ *   primary commit instead of reusing the stale original FB_ID.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The kernel serializes the pageflip
+ *   through normal modeset locks and signals completion through the DRM event
+ *   queue attached to this fd.
+ */
+static void
+check_legacy_pageflip_runtime_contract(int fd, uint32_t crtc_id,
+    uint32_t plane_id, uint32_t crtc_width, uint32_t crtc_height,
+    const char *object_name)
+{
+	struct atomic_plane_snapshot before_snapshot;
+	struct atomic_plane_snapshot after_snapshot;
+	struct atomic_plane_snapshot restore_snapshot;
+	struct pageflip_counter_snapshot before;
+	struct pageflip_counter_snapshot after_flip;
+	struct pageflip_counter_snapshot after_restore;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	uint32_t fb_id = 0;
+	uint32_t restore_handle = 0;
+	uint32_t restore_pitch = 0;
+	uint32_t restore_fb = 0;
+	bool flipped_to_temp = false;
+	bool restored = false;
+	bool have_after_flip = false;
+	int saved_errno;
+	int ret;
+
+	if (!get_plane_snapshot(fd, plane_id, &before_snapshot, object_name))
+		return;
+	check(before_snapshot.fb_id != 0,
+	    "active primary plane has framebuffer for legacy pageflip probe");
+	check(before_snapshot.crtc_id == crtc_id,
+	    "active primary plane is attached to active CRTC for legacy pageflip probe");
+	if (before_snapshot.fb_id == 0 || before_snapshot.crtc_id != crtc_id)
+		return;
+	if (!read_pageflip_counter_snapshot(&before, "legacy pageflip probe"))
+		return;
+
+	if (!create_dumb_buffer_for(fd, crtc_width, crtc_height, 32, &handle,
+	    &pitch, "CREATE_DUMB succeeds for legacy pageflip probe"))
+		goto out;
+	if (!clear_dumb_buffer(fd, handle, pitch, crtc_height,
+	    "MAP_DUMB succeeds for legacy pageflip probe"))
+		goto out;
+	if (!add_linear_framebuffer(fd, crtc_width, crtc_height,
+	    DRM_FORMAT_XRGB8888, handle, pitch, &fb_id,
+	    "ADDFB2 accepts XRGB8888 linear legacy pageflip probe"))
+		goto out;
+	if (!create_dumb_buffer_for(fd, crtc_width, crtc_height, 32,
+	    &restore_handle, &restore_pitch,
+	    "CREATE_DUMB succeeds for legacy pageflip restore probe"))
+		goto out;
+	if (!clear_dumb_buffer(fd, restore_handle, restore_pitch, crtc_height,
+	    "MAP_DUMB succeeds for legacy pageflip restore probe"))
+		goto out;
+	if (!add_linear_framebuffer(fd, crtc_width, crtc_height,
+	    DRM_FORMAT_XRGB8888, restore_handle, restore_pitch, &restore_fb,
+	    "ADDFB2 accepts XRGB8888 linear legacy pageflip restore probe"))
+		goto out;
+
+	flipped_to_temp = legacy_pageflip_with_event(fd, crtc_id, fb_id,
+	    "legacy pageflip to temporary FB");
+	if (read_pageflip_counter_snapshot(&after_flip,
+	    "legacy pageflip temporary FB")) {
+		have_after_flip = true;
+		check(after_flip.page_flip_count > before.page_flip_count,
+		    "legacy pageflip increments page_flip_count");
+		check(after_flip.page_flip_event_count >
+		    before.page_flip_event_count,
+		    "legacy pageflip increments page_flip_event_count");
+		check(after_flip.page_flip_error_count ==
+		    before.page_flip_error_count,
+		    "legacy pageflip does not increment page_flip_error_count");
+		check(after_flip.commit_error_count == before.commit_error_count,
+		    "legacy pageflip does not increment commit_error_count");
+		check(after_flip.atomic_tail_active == 0 &&
+		    after_flip.atomic_tail_stage == 0,
+		    "legacy pageflip leaves no active tail transaction");
+		check(after_flip.display_audit_pending_valid == 0,
+		    "legacy pageflip leaves no pending display audit");
+	}
+	if (!flipped_to_temp)
+		goto out;
+
+	restore_snapshot = before_snapshot;
+	restore_snapshot.fb_id = restore_fb;
+	ret = atomic_primary_commit(fd, plane_id, &restore_snapshot,
+	    &saved_errno);
+	if (ret != 0) {
+		printf("    atomic pageflip restore errno=%d\n", saved_errno);
+		check(false, "atomic restore after legacy pageflip succeeds");
+	} else {
+		check(true, "atomic restore after legacy pageflip succeeds");
+		restored = true;
+	}
+
+	if (restored && get_plane_snapshot(fd, plane_id, &after_snapshot,
+	    object_name)) {
+		check(after_snapshot.fb_id == restore_fb,
+		    "legacy pageflip restore installs restore FB_ID");
+		check(after_snapshot.crtc_id == before_snapshot.crtc_id,
+		    "legacy pageflip restore keeps primary CRTC_ID");
+	}
+	if (restored && read_pageflip_counter_snapshot(&after_restore,
+	    "legacy pageflip restore")) {
+		check(!have_after_flip || after_restore.page_flip_count ==
+		    after_flip.page_flip_count,
+		    "atomic pageflip restore does not increment page_flip_count");
+		check(!have_after_flip || after_restore.page_flip_event_count ==
+		    after_flip.page_flip_event_count,
+		    "atomic pageflip restore does not increment page_flip_event_count");
+		check(after_restore.page_flip_error_count ==
+		    before.page_flip_error_count,
+		    "legacy pageflip restore does not increment page_flip_error_count");
+		check(after_restore.commit_error_count == before.commit_error_count,
+		    "legacy pageflip restore does not increment commit_error_count");
+		check(after_restore.atomic_tail_active == 0 &&
+		    after_restore.atomic_tail_stage == 0,
+		    "legacy pageflip restore leaves no active tail transaction");
+		check(after_restore.display_audit_pending_valid == 0,
+		    "legacy pageflip restore leaves no pending display audit");
+	}
+
+out:
+	if (!flipped_to_temp || restored) {
+		remove_framebuffer(fd, fb_id,
+		    "RMFB succeeds for legacy pageflip probe");
+		if (!flipped_to_temp)
+			remove_framebuffer(fd, restore_fb,
+			    "RMFB succeeds for unused legacy pageflip restore probe");
+	} else {
+		printf("    legacy pageflip probe left temporary FB active; "
+		    "skip RMFB/DESTROY_DUMB\n");
+	}
+	if (!flipped_to_temp || restored) {
+		destroy_dumb_buffer_for(fd, handle,
+		    "DESTROY_DUMB succeeds for legacy pageflip probe");
+		if (!flipped_to_temp)
+			destroy_dumb_buffer_for(fd, restore_handle,
+			    "DESTROY_DUMB succeeds for unused legacy pageflip restore probe");
+	}
+	if (restored)
+		printf("    legacy pageflip restore fb=%u handle=%u kept until fd close\n",
+		    restore_fb, restore_handle);
 }
 
 /*
@@ -1820,6 +2177,42 @@ read_cursor_counter_snapshot(struct cursor_counter_snapshot *snapshot,
 }
 
 static bool
+read_pageflip_counter_snapshot(struct pageflip_counter_snapshot *snapshot,
+    const char *stage)
+{
+	char text[160];
+	char *state;
+	bool ok;
+
+	ok = read_drm_state_text(&state);
+	snprintf(text, sizeof(text), "DRM state is readable before %s", stage);
+	check(ok, text);
+	if (!ok)
+		return false;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	ok = state_counter_from_text(state, "page_flip_count",
+	    &snapshot->page_flip_count) &&
+	    state_counter_from_text(state, "page_flip_event_count",
+	    &snapshot->page_flip_event_count) &&
+	    state_counter_from_text(state, "page_flip_error_count",
+	    &snapshot->page_flip_error_count) &&
+	    state_counter_from_text(state, "commit_error_count",
+	    &snapshot->commit_error_count) &&
+	    state_counter_from_text(state, "atomic_tail_active",
+	    &snapshot->atomic_tail_active) &&
+	    state_counter_from_text(state, "atomic_tail_stage",
+	    &snapshot->atomic_tail_stage) &&
+	    state_counter_from_text(state, "display_audit_pending_valid",
+	    &snapshot->display_audit_pending_valid);
+	snprintf(text, sizeof(text), "pageflip counters are present before %s",
+	    stage);
+	check(ok, text);
+	free(state);
+	return ok;
+}
+
+static bool
 clear_dumb_buffer(int fd, uint32_t handle, uint32_t pitch, uint32_t height,
     const char *what)
 {
@@ -1839,13 +2232,12 @@ clear_dumb_buffer(int fd, uint32_t handle, uint32_t pitch, uint32_t height,
 	data = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
 	    (off_t)map.offset);
 	ok = data != MAP_FAILED;
-	check(ok, "mmap succeeds for transparent cursor probe");
+	check(ok, "mmap succeeds for dumb buffer probe");
 	if (!ok)
 		return false;
 
 	memset(data, 0, length);
-	check(munmap(data, length) == 0,
-	    "munmap succeeds for transparent cursor probe");
+	check(munmap(data, length) == 0, "munmap succeeds for dumb buffer probe");
 	return true;
 }
 
@@ -3165,6 +3557,9 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			    active_crtc_id, plane->plane_id, name);
 			check_atomic_in_fence_runtime_contract(fd,
 			    active_crtc_id, plane->plane_id, name);
+			check_legacy_pageflip_runtime_contract(fd,
+			    active_crtc_id, plane->plane_id,
+			    active_crtc_width, active_crtc_height, name);
 			check_atomic_connector_scaler_runtime_contract(fd,
 			    mode_resources, active_crtc_id);
 			check_atomic_modeset_disable_restore_contract(fd,

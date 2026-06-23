@@ -705,6 +705,9 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "atomic modeset restore commit succeeds",
         "atomic modeset restore restores primary FB_ID",
         "atomic modeset restore increments tail enable op count",
+        "legacy pageflip to temporary FB pageflip event arrives",
+        "legacy pageflip leaves no pending display audit",
+        "legacy pageflip restore leaves no pending display audit",
     ):
         emit(text in drmtest_after, f"drmtest.after has {text}")
 

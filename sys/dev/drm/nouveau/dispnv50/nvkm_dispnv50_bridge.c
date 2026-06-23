@@ -4468,7 +4468,7 @@ fail:
 }
 
 /*
- * Publish a completed async primary-plane update.
+ * Publish a completed pending primary-plane flip.
  *
  * Ownership:
  *   Mutably borrows only the dispnv50 audit records owned by state.  No window
@@ -4477,24 +4477,25 @@ fail:
  *   event path.
  *
  * Lifetime:
- *   Call after drm_atomic_helper_wait_for_flip_done() has observed the commit's
- *   flip completion.  The pending snapshot describes the async update that was
- *   already submitted to hardware; this helper only moves that completed scalar
- *   state into current and clears pending.
+ *   Call after drm_atomic_helper_wait_for_flip_done() has observed the
+ *   commit's flip completion.  The pending snapshot describes the primary
+ *   window update that was already submitted to hardware and completed at the
+ *   display flip point; this helper only moves that completed scalar state
+ *   into current and clears pending.
  *
  * Threading:
  *   Serialized atomic commit-tail context only.  Sysctl readers are lockless
  *   observers, so the audit fields must not be used as synchronization state.
  */
 void
-nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc, bool publish)
+nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc)
 {
 	struct nvkm_dispnv50_state *state;
 
 	if (sc == NULL)
 		return;
 	state = sc->dispnv50;
-	if (!publish || state == NULL || !state->audit_pending.valid ||
+	if (state == NULL || !state->audit_pending.valid ||
 	    !state->audit_pending.async)
 		return;
 
