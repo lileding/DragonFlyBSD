@@ -2250,6 +2250,46 @@ nvkm_gsp_sysctl_kms_hpd_inject(SYSCTL_HANDLER_ARGS)
 }
 
 /*
+ * nvkm_gsp_sysctl_kms_detect_force_disconnect_mask()
+ *
+ * Ownership:
+ *   Borrows sc and updates a DragonFly-local nvkm debug mask. The mask is
+ *   owned by nvkm and read by nvkm_connector_detect(); no DRM connector or
+ *   mode object is retained by this handler.
+ *
+ * Lifetime:
+ *   The mask persists until the next write or device teardown. Write 0 to
+ *   restore normal GSP/RM connect-state detection before returning the console
+ *   to a visible output.
+ *
+ * Threading:
+ *   May be called from sysctl process context. The same HPD spinlock protects
+ *   this mask and the pending HPD masks. The lock is held only while copying
+ *   the 32-bit value; HPD work and modeset commits run after the lock is
+ *   released.
+ */
+static int
+nvkm_gsp_sysctl_kms_detect_force_disconnect_mask(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	uint32_t val;
+	int err;
+
+	spin_lock(&sc->kms_hpd_lock);
+	val = sc->kms_detect_force_disconnect_mask;
+	spin_unlock(&sc->kms_hpd_lock);
+
+	err = sysctl_handle_32(oidp, &val, 0, req);
+	if (err != 0 || req->newptr == 0)
+		return (err);
+
+	spin_lock(&sc->kms_hpd_lock);
+	sc->kms_detect_force_disconnect_mask = val;
+	spin_unlock(&sc->kms_hpd_lock);
+	return (0);
+}
+
+/*
  * nvkm_gsp_sysctl_ttm_evict_vram_test()
  *
  * Ownership:
@@ -2490,4 +2530,9 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_U32 | CTLFLAG_RW, sc, 0,
 	    nvkm_gsp_sysctl_kms_hpd_inject, "IU",
 	    "debug-only one-shot HPD injection: low16 plug, high16 unplug");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO,
+	    "kms_detect_force_disconnect_mask",
+	    CTLTYPE_U32 | CTLFLAG_RW, sc, 0,
+	    nvkm_gsp_sysctl_kms_detect_force_disconnect_mask, "IU",
+	    "debug-only detect override: displayId bits forced disconnected");
 }
