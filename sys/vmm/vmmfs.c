@@ -47,112 +47,29 @@
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 
-
-const char *const vmmfs_cfg_name[VMMFS_NCFG] = {
-	[VMMFS_CFG_VCPU] =	"vcpu",
-	[VMMFS_CFG_MEM] =	"mem",
-	[VMMFS_CFG_LOADER] =	"loader",
-	[VMMFS_CFG_LEASE] =	"lease",
-	[VMMFS_CFG_EVENTS] =	"events",
-	[VMMFS_CFG_CONSOLE] =	"console",
-	[VMMFS_CFG_STATUS] =	"status.tar.gz",
-	[VMMFS_CFG_STOPPED] =	"stopped",
-};
-
-static mode_t
-vmmfs_cfg_mode(enum vmmfs_cfg cfg)
-{
-	switch (cfg) {
-	case VMMFS_CFG_VCPU:
-	case VMMFS_CFG_MEM:
-	case VMMFS_CFG_LOADER:
-	case VMMFS_CFG_CONSOLE:
-	case VMMFS_CFG_STOPPED:
-		return 0644;
-	case VMMFS_CFG_LEASE:
-	case VMMFS_CFG_EVENTS:
-	case VMMFS_CFG_STATUS:
-	default:
-		return 0444;
-	}
-}
-
-
 static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 		    struct ucred *cred);
 
 /* --------------------------------------------------------------------- */
 
+/*
+ * Initialize a node in place.  The caller supplies the KOBJ class (behavior),
+ * the vnode type, and the mode -- there is no type tag and no class lookup.
+ */
 void
-vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type, ino_t ino,
-    struct vmmfs_node *parent, struct vmmfs_machines *machine,
-    enum vmmfs_cfg cfg)
+vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class, enum vtype vtype,
+    mode_t mode, ino_t ino, struct vmmfs_node *parent,
+    struct vmmfs_machines *machine)
 {
-	node->vn_type = type;
-	node->vn_cfg = cfg;
+	node->vn_vtype = vtype;
+	node->vn_mode = mode;
 	node->vn_ino = ino;
-	if (type == VMMFS_NCONFIG)
-		node->vn_mode = vmmfs_cfg_mode(cfg);
-	else if (type == VMMFS_NDEVICE)
-		node->vn_mode = 0444;
-	else if (type == VMMFS_NDEVLINK)
-		node->vn_mode = 0777;
-	else
-		node->vn_mode = VMMFS_DIR_MODE;
 	node->vn_parent = parent;
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
 	lockinit(&node->vn_interlock, "vmmfs node", 0, 0);
 	SLIST_INIT(&node->vn_obufs);
-	kobj_init((kobj_t)node, vmmfs_class_for(type, cfg));
-}
-
-/* Map a node type (and config kind) to its KOBJ class. */
-kobj_class_t
-vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg)
-{
-	if (type == VMMFS_NCONFIG) {
-		switch (cfg) {
-		case VMMFS_CFG_VCPU:
-			return &vmm_vcpu_class;
-		case VMMFS_CFG_MEM:
-			return &vmm_mem_class;
-		case VMMFS_CFG_LOADER:
-			return &vmm_loader_class;
-		case VMMFS_CFG_CONSOLE:
-			return &vmm_console_class;
-		case VMMFS_CFG_LEASE:
-			return &vmm_lease_class;
-		case VMMFS_CFG_EVENTS:
-			return &vmm_events_class;
-		case VMMFS_CFG_STATUS:
-			return &vmm_status_class;
-		case VMMFS_CFG_STOPPED:
-			return &vmm_stopped_class;
-		default:
-			return &vmm_base_class;
-		}
-	}
-	switch (type) {
-	case VMMFS_NROOT:
-		return &vmm_root_class;
-	case VMMFS_NDEVICE:
-		return &vmm_device_class;
-	case VMMFS_NDEVLINK:
-		return &vmm_devlink_class;
-	case VMMFS_NMACHINES:
-		return &vmm_machines_class;
-	case VMMFS_NMACHINE:
-		return &vmm_machine_class;
-	case VMMFS_NHOST:
-		return &vmm_host_class;
-	case VMMFS_NDEVICES:
-		return &vmm_devices_class;
-	case VMMFS_NDEVROOT:
-		return &vmm_devroot_class;
-	default:
-		return &vmm_base_class;
-	}
+	kobj_init((kobj_t)node, class);
 }
 
 /* Fill the type-independent fields of a getattr result. */
@@ -183,7 +100,7 @@ vmmfs_fill_attr(struct vmmfs_node *node, struct vattr *vap, enum vtype type,
 int
 vmmfs_dir_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
 {
-	int nlink = (node->vn_type == VMMFS_NROOT) ? 3 : 2;
+	int nlink = (node->vn_parent == NULL) ? 3 : 2;	/* only root has no parent */
 
 	vmmfs_fill_attr(node, ap->a_vap, VDIR, nlink, 0);
 	return 0;
@@ -296,14 +213,6 @@ vmmfs_parent_ino(struct vmmfs_node *node)
 	    node->vn_ino;
 }
 
-int
-vmmfs_cfg_present(struct vmmfs_machines *m, enum vmmfs_cfg cfg)
-{
-	if (cfg == VMMFS_CFG_STOPPED)
-		return vmm_machine_is_stopped(&m->state);
-	return 1;
-}
-
 /*
  * Bind a vnode to the given node, caching it.  Mirrors the interlocked
  * tmpfs_alloc_vp() normal path; vx_downgrade() after getnewvnode() is mandatory
@@ -314,15 +223,8 @@ vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
     struct vnode **vpp)
 {
 	struct vnode *vp;
-	enum vtype vtype;
+	enum vtype vtype = node->vn_vtype;
 	int error = 0;
-
-	if (node->vn_type == VMMFS_NCONFIG || node->vn_type == VMMFS_NDEVICE)
-		vtype = VREG;
-	else if (node->vn_type == VMMFS_NDEVLINK)
-		vtype = VLNK;
-	else
-		vtype = VDIR;
 
 loop:
 	vp = NULL;
@@ -722,10 +624,10 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 	vmm_device_init(&d->dev, bdf, is_host);
 	if (is_host)
 		vmm_host_add_device(&vmp->host);
-	vmmfs_node_init(&d->node, VMMFS_NDEVICE, VMMFS_DEV_INO_BASE + idx,
-	    &vmp->vm_host_devices, NULL, 0);
-	vmmfs_node_init(&d->link, VMMFS_NDEVLINK, VMMFS_DEVLINK_INO_BASE + idx,
-	    &vmp->vm_devroot, NULL, 0);
+	vmmfs_node_init(&d->node, &vmm_device_class, VREG, 0444,
+	    VMMFS_DEV_INO_BASE + idx, &vmp->vm_host_devices, NULL);
+	vmmfs_node_init(&d->link, &vmm_devlink_class, VLNK, 0777,
+	    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
 	SLIST_INSERT_HEAD(&vmp->vm_devs, d, dv_link);
 	return d;
 }
@@ -766,16 +668,16 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmp = kmalloc(sizeof(*vmp), M_VMMFS, M_WAITOK | M_ZERO);
 	vmp->vm_mp = mp;
 	lockinit(&vmp->vm_lock, "vmmfs registry", 0, 0);
-	vmmfs_node_init(&vmp->vm_root, VMMFS_NROOT, VMMFS_ROOT_INO, NULL, NULL,
-	    0);
-	vmmfs_node_init(&vmp->vm_machines, VMMFS_NMACHINES, VMMFS_MACHINES_INO,
-	    &vmp->vm_root, NULL, 0);
-	vmmfs_node_init(&vmp->vm_host, VMMFS_NHOST, VMMFS_HOST_INO,
-	    &vmp->vm_machines, NULL, 0);
-	vmmfs_node_init(&vmp->vm_host_devices, VMMFS_NDEVICES,
-	    VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL, 0);
-	vmmfs_node_init(&vmp->vm_devroot, VMMFS_NDEVROOT, VMMFS_DEVROOT_INO,
-	    &vmp->vm_root, NULL, 0);
+	vmmfs_node_init(&vmp->vm_root, &vmm_root_class, VDIR, VMMFS_DIR_MODE,
+	    VMMFS_ROOT_INO, NULL, NULL);
+	vmmfs_node_init(&vmp->vm_machines, &vmm_machines_class, VDIR,
+	    VMMFS_DIR_MODE, VMMFS_MACHINES_INO, &vmp->vm_root, NULL);
+	vmmfs_node_init(&vmp->vm_host, &vmm_host_class, VDIR, VMMFS_DIR_MODE,
+	    VMMFS_HOST_INO, &vmp->vm_machines, NULL);
+	vmmfs_node_init(&vmp->vm_host_devices, &vmm_devices_class, VDIR,
+	    VMMFS_DIR_MODE, VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL);
+	vmmfs_node_init(&vmp->vm_devroot, &vmm_devroot_class, VDIR,
+	    VMMFS_DIR_MODE, VMMFS_DEVROOT_INO, &vmp->vm_root, NULL);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
 	vmm_host_init(&vmp->host);

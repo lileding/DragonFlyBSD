@@ -143,8 +143,8 @@ vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_fdvp->v_mount);
 	struct vmmfs_device *d;
 
-	if (fdnode->vn_type != VMMFS_NDEVICES ||
-	    tdnode->vn_type != VMMFS_NDEVICES)
+	if (!VMMFS_NODE_IS(fdnode, vmm_devices_class) ||
+	    !VMMFS_NODE_IS(tdnode, vmm_devices_class))
 		return EXDEV;
 	if (fncp->nc_nlen != tncp->nc_nlen ||
 	    bcmp(fncp->nc_name, tncp->nc_name, fncp->nc_nlen) != 0)

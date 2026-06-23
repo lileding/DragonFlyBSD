@@ -78,7 +78,7 @@ int
 vmmnode_setattr(struct vmmfs_node *node, struct vop_setattr_args *ap)
 {
 
-	if (node->vn_type == VMMFS_NCONFIG && (node->vn_mode & 0200))
+	if (node->vn_vtype == VREG && (node->vn_mode & 0200))
 		return 0;
 	return EPERM;
 }
@@ -118,9 +118,9 @@ int
 vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 {
 
-	kprintf("\tvmmfs_node %p ino %ju type %d\n", node,
+	kprintf("\tvmmfs_node %p ino %ju vtype %d\n", node,
 	    (uintmax_t)(node != NULL ? node->vn_ino : 0),
-	    node != NULL ? (int)node->vn_type : -1);
+	    node != NULL ? (int)node->vn_vtype : -1);
 	return 0;
 }
 
@@ -245,9 +245,9 @@ vmmfs_print(struct vop_print_args *ap)
 }
 
 /*
- * Fallback class: the common vops every node shares.  vmmfs_class_for() routes
- * each real node type to its own object class; this is only the safety net for
- * an unrouted type (and the holder of the shared commons referenced above).
+ * Fallback class: the common vops every node shares.  Each real node is created
+ * with its own object class; this is only the safety net for a node created
+ * without one (and the holder of the shared commons referenced above).
  */
 static kobj_method_t vmm_base_methods[] = {
 	KOBJMETHOD(vmm_node_nlookupdotdot,	vmmnode_nlookupdotdot),

@@ -23,6 +23,63 @@
 #include "vmmfs.h"
 #include "vmm_node_if.h"
 
+/*
+ * The config files presented under a machine directory.  This table is the
+ * single source of truth -- it drives node init (create), name lookup
+ * (nresolve), and listing (readdir), so there is no per-file switch.  The row
+ * order fixes both the ino offset and the readdir order; node_off locates each
+ * node within the machine slot; present() hides a file when it returns 0.
+ */
+struct vmmfs_cfg_desc {
+	const char	*name;
+	enum vtype	 vtype;
+	mode_t		 mode;
+	kobj_class_t	 class;		/* kobj_class_t is already a pointer */
+	size_t		 node_off;
+	int		(*present)(const struct vmm_machine *m);
+};
+
+static int
+cfg_present_stopped(const struct vmm_machine *m)
+{
+	return vmm_machine_is_stopped(m);
+}
+
+static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
+	{ "vcpu",	  VREG, 0644, &vmm_vcpu_class,
+	    __offsetof(struct vmmfs_machines, n_vcpu),	  NULL },
+	{ "mem",	  VREG, 0644, &vmm_mem_class,
+	    __offsetof(struct vmmfs_machines, n_mem),	  NULL },
+	{ "loader",	  VREG, 0644, &vmm_loader_class,
+	    __offsetof(struct vmmfs_machines, n_loader),  NULL },
+	{ "lease",	  VREG, 0444, &vmm_lease_class,
+	    __offsetof(struct vmmfs_machines, n_lease),	  NULL },
+	{ "events",	  VREG, 0444, &vmm_events_class,
+	    __offsetof(struct vmmfs_machines, n_events),  NULL },
+	{ "console",	  VREG, 0644, &vmm_console_class,
+	    __offsetof(struct vmmfs_machines, n_console), NULL },
+	{ "status.tar.gz", VREG, 0444, &vmm_status_class,
+	    __offsetof(struct vmmfs_machines, n_status),  NULL },
+	{ "stopped",	  VREG, 0644, &vmm_stopped_class,
+	    __offsetof(struct vmmfs_machines, n_stopped), cfg_present_stopped },
+};
+#define VMMFS_NCFG_FILES \
+	((int)(sizeof(vmmfs_cfg_table) / sizeof(vmmfs_cfg_table[0])))
+
+/* The node backing a config descriptor within a machine slot. */
+static struct vmmfs_node *
+cfg_node(struct vmmfs_machines *m, const struct vmmfs_cfg_desc *d)
+{
+	return (struct vmmfs_node *)((char *)m + d->node_off);
+}
+
+/* A config file is listed unless its predicate hides it (e.g. stopped). */
+static int
+cfg_present(struct vmmfs_machines *m, const struct vmmfs_cfg_desc *d)
+{
+	return d->present == NULL || d->present(&m->state);
+}
+
 /* ---- registry: an RB tree keyed by name (guarded by vm_lock) ---- */
 
 int
@@ -65,12 +122,16 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 	base = vmp->vm_next_ino;
 	vmp->vm_next_ino += VMMFS_MACHINE_INO_STRIDE;
-	vmmfs_node_init(&m->node, VMMFS_NMACHINE, base, &vmp->vm_machines, m, 0);
-	for (j = 0; j < VMMFS_NCFG; j++)
-		vmmfs_node_init(&m->cfg[j], VMMFS_NCONFIG, base + 1 + j,
-		    &m->node, m, j);
-	vmmfs_node_init(&m->vn_devices, VMMFS_NDEVICES,
-	    base + VMMFS_MACHINE_DEV_OFF, &m->node, m, 0);
+	vmmfs_node_init(&m->node, &vmm_machine_class, VDIR, VMMFS_DIR_MODE,
+	    base, &vmp->vm_machines, m);
+	for (j = 0; j < VMMFS_NCFG_FILES; j++) {
+		const struct vmmfs_cfg_desc *d = &vmmfs_cfg_table[j];
+
+		vmmfs_node_init(cfg_node(m, d), d->class, d->vtype, d->mode,
+		    base + 1 + j, &m->node, m);
+	}
+	vmmfs_node_init(&m->vn_devices, &vmm_devices_class, VDIR, VMMFS_DIR_MODE,
+	    base + VMMFS_MACHINE_DEV_OFF, &m->node, m);
 
 	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
 	m->vm_in_tree = 1;
@@ -91,8 +152,8 @@ vmmfs_machine_free(struct vmmfs_machines *m)
 	int j;
 
 	vmmfs_node_uninit(&m->node);
-	for (j = 0; j < VMMFS_NCFG; j++)
-		vmmfs_node_uninit(&m->cfg[j]);
+	for (j = 0; j < VMMFS_NCFG_FILES; j++)
+		vmmfs_node_uninit(cfg_node(m, &vmmfs_cfg_table[j]));
 	vmmfs_node_uninit(&m->vn_devices);
 	kfree(m, M_VMMFS);
 }
@@ -346,13 +407,14 @@ vmm_machine_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0) {
 		child = &m->vn_devices;
 	} else {
-		for (i = 0; i < VMMFS_NCFG; i++) {
-			if (!vmmfs_cfg_present(m, i))
+		for (i = 0; i < VMMFS_NCFG_FILES; i++) {
+			const struct vmmfs_cfg_desc *d = &vmmfs_cfg_table[i];
+
+			if (!cfg_present(m, d))
 				continue;
-			if ((int)strlen(vmmfs_cfg_name[i]) == ncp->nc_nlen &&
-			    bcmp(vmmfs_cfg_name[i], ncp->nc_name,
-			    ncp->nc_nlen) == 0) {
-				child = &m->cfg[i];
+			if ((int)strlen(d->name) == ncp->nc_nlen &&
+			    bcmp(d->name, ncp->nc_name, ncp->nc_nlen) == 0) {
+				child = cfg_node(m, d);
 				break;
 			}
 		}
@@ -371,26 +433,28 @@ vmm_machine_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 	error = vmmfs_readdir_dots(ap, node, &off, &full);
 	if (error || full)
 		goto out;
-	for (i = (int)off - 2; i < VMMFS_NCFG; i++) {
-		if (!vmmfs_cfg_present(m, i))
+	for (i = (int)off - 2; i < VMMFS_NCFG_FILES; i++) {
+		const struct vmmfs_cfg_desc *d = &vmmfs_cfg_table[i];
+
+		if (!cfg_present(m, d))
 			continue;
-		if (vop_write_dirent(&error, uio, m->cfg[i].vn_ino, DT_REG,
-		    (uint16_t)strlen(vmmfs_cfg_name[i]), vmmfs_cfg_name[i])) {
+		if (vop_write_dirent(&error, uio, cfg_node(m, d)->vn_ino, DT_REG,
+		    (uint16_t)strlen(d->name), d->name)) {
 			off = 2 + i;
 			full = 1;
 			break;
 		}
 		off = 2 + i + 1;
 	}
-	if (!full && off < 2 + VMMFS_NCFG)
-		off = 2 + VMMFS_NCFG;
+	if (!full && off < 2 + VMMFS_NCFG_FILES)
+		off = 2 + VMMFS_NCFG_FILES;
 	/* devices/ follows the config files. */
-	if (!full && off == 2 + VMMFS_NCFG) {
+	if (!full && off == 2 + VMMFS_NCFG_FILES) {
 		if (vop_write_dirent(&error, uio, m->vn_devices.vn_ino, DT_DIR,
 		    7, "devices"))
 			full = 1;
 		else
-			off = 2 + VMMFS_NCFG + 1;
+			off = 2 + VMMFS_NCFG_FILES + 1;
 	}
 out:
 	return vmmfs_readdir_end(ap, off, full, error);
@@ -413,7 +477,7 @@ vmm_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 		return EPERM;
 
 	vmm_machine_stop(&m->state, 0);
-	error = vmmfs_alloc_vp(dvp->v_mount, &m->cfg[VMMFS_CFG_STOPPED],
+	error = vmmfs_alloc_vp(dvp->v_mount, &m->n_stopped,
 	    LK_EXCLUSIVE | LK_RETRY, &vp);
 	if (error)
 		return error;

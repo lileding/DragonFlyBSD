@@ -37,30 +37,12 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_NAME_MAX		63
 #define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
 
-enum vmmfs_ntype {
-	VMMFS_NROOT,
-	VMMFS_NMACHINES,
-	VMMFS_NMACHINE,
-	VMMFS_NCONFIG,
-	VMMFS_NHOST,		/* machines/host/ (the physical host machine) */
-	VMMFS_NDEVICES,		/* a devices/ directory */
-	VMMFS_NDEVICE,		/* a device file (one PCIe BDF) */
-	VMMFS_NDEVROOT,		/* /dev/vmm/devices/ (symlink index) */
-	VMMFS_NDEVLINK,		/* a symlink in the index -> the owner's device */
-};
-
-/* Config files presented under a machine directory. */
-enum vmmfs_cfg {
-	VMMFS_CFG_VCPU,
-	VMMFS_CFG_MEM,
-	VMMFS_CFG_LOADER,
-	VMMFS_CFG_LEASE,
-	VMMFS_CFG_EVENTS,
-	VMMFS_CFG_CONSOLE,
-	VMMFS_CFG_STATUS,
-	VMMFS_CFG_STOPPED,
-	VMMFS_NCFG,
-};
+/*
+ * Nodes carry no type tag.  Each binds a KOBJ class (its behavior), an
+ * enum vtype (VDIR/VREG/VLNK), and a mode at creation time; dispatch is the
+ * class, not a switch.  A machine's config files come from a descriptor table
+ * in vmmfs_machines.c.
+ */
 
 /* A per-open scratch buffer for a config register, keyed by struct file. */
 struct vmmfs_openbuf {
@@ -76,8 +58,7 @@ struct vmmfs_machines;
 
 struct vmmfs_node {
 	kobj_ops_t		ops;		/* KOBJ dispatch table; must be first */
-	enum vmmfs_ntype	vn_type;
-	enum vmmfs_cfg		vn_cfg;		/* valid for VMMFS_NCONFIG */
+	enum vtype		vn_vtype;	/* VDIR / VREG / VLNK */
 	ino_t			vn_ino;
 	mode_t			vn_mode;
 	struct vmmfs_node      *vn_parent;
@@ -126,8 +107,10 @@ struct vmmfs_machines {
 	int			vm_refs;
 	int			vm_in_tree;	/* guards a single RB_REMOVE */
 	struct vmm_machine	state;		/* config + lifecycle (vmm core) */
-	struct vmmfs_node	node;
-	struct vmmfs_node	cfg[VMMFS_NCFG];
+	struct vmmfs_node	node;		/* the machine directory */
+	/* config files (one per cfg_table row in vmmfs_machines.c) */
+	struct vmmfs_node	n_vcpu, n_mem, n_loader, n_console;
+	struct vmmfs_node	n_lease, n_events, n_status, n_stopped;
 	struct vmmfs_node	vn_devices;	/* this machine's devices/ */
 };
 
@@ -154,31 +137,32 @@ RB_PROTOTYPE(vmmfs_machtree, vmmfs_machines, vm_link, vmmfs_machine_cmp);
 #define VFS_TO_VMMFS(mp)	((struct vmmfs_mount *)((mp)->mnt_data))
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
 
-extern const char *const vmmfs_cfg_name[VMMFS_NCFG];
 extern struct vop_ops vmmfs_vnode_vops;
 
 /*
- * Each node binds to a KOBJ class chosen by vmmfs_class_for().  vmm_legacy is
- * the catch-all for node types not yet split into their own object module.
+ * Each node binds a KOBJ class -- its behavior and vop dispatch -- chosen at
+ * creation, not via a type switch.  The class IS the node's type.
  */
 DECLARE_CLASS(vmm_base_class);		/* fallback commons (vmmfs_vnode.c) */
-DECLARE_CLASS(vmm_root_class);		/* NROOT    (vmmfs.c) */
-DECLARE_CLASS(vmm_device_class);	/* NDEVICE  (vmm_device.c) */
-DECLARE_CLASS(vmm_devlink_class);	/* NDEVLINK (vmm_device.c) */
-DECLARE_CLASS(vmm_machine_class);	/* NMACHINE  (vmm_machine.c) */
-DECLARE_CLASS(vmm_machines_class);	/* NMACHINES (vmmfs_machines.c) */
-DECLARE_CLASS(vmm_host_class);		/* NHOST    (vmm_host.c) */
-DECLARE_CLASS(vmm_devices_class);	/* NDEVICES (vmmfs_devices.c) */
-DECLARE_CLASS(vmm_devroot_class);	/* NDEVROOT (vmmfs_devices.c) */
-DECLARE_CLASS(vmm_vcpu_class);		/* NCONFIG vcpu    (vmm_vcpu.c) */
-DECLARE_CLASS(vmm_mem_class);		/* NCONFIG mem     (vmm_mem.c) */
-DECLARE_CLASS(vmm_loader_class);	/* NCONFIG loader  (vmm_loader.c) */
-DECLARE_CLASS(vmm_console_class);	/* NCONFIG console (vmm_console.c) */
-DECLARE_CLASS(vmm_lease_class);		/* NCONFIG lease   (vmm_machine.c) */
-DECLARE_CLASS(vmm_events_class);	/* NCONFIG events  (vmm_machine.c) */
-DECLARE_CLASS(vmm_status_class);	/* NCONFIG status  (vmm_machine.c) */
-DECLARE_CLASS(vmm_stopped_class);	/* NCONFIG stopped (vmm_machine.c) */
-kobj_class_t vmmfs_class_for(enum vmmfs_ntype type, enum vmmfs_cfg cfg);
+DECLARE_CLASS(vmm_root_class);		/* root dir       (vmmfs.c) */
+DECLARE_CLASS(vmm_device_class);	/* device file    (vmmfs_device.c) */
+DECLARE_CLASS(vmm_devlink_class);	/* device symlink (vmmfs_device.c) */
+DECLARE_CLASS(vmm_machine_class);	/* a machine dir  (vmmfs_machines.c) */
+DECLARE_CLASS(vmm_machines_class);	/* machines/      (vmmfs_machines.c) */
+DECLARE_CLASS(vmm_host_class);		/* machines/host/ (vmmfs_host.c) */
+DECLARE_CLASS(vmm_devices_class);	/* a devices/ dir (vmmfs_devices.c) */
+DECLARE_CLASS(vmm_devroot_class);	/* /vmm/devices/  (vmmfs_devices.c) */
+DECLARE_CLASS(vmm_vcpu_class);		/* vcpu file      (vmmfs_vcpu.c) */
+DECLARE_CLASS(vmm_mem_class);		/* mem file       (vmmfs_mem.c) */
+DECLARE_CLASS(vmm_loader_class);	/* loader file    (vmmfs_loader.c) */
+DECLARE_CLASS(vmm_console_class);	/* console file   (vmmfs_console.c) */
+DECLARE_CLASS(vmm_lease_class);		/* lease file     (vmmfs_machines.c) */
+DECLARE_CLASS(vmm_events_class);	/* events file    (vmmfs_machines.c) */
+DECLARE_CLASS(vmm_status_class);	/* status file    (vmmfs_machines.c) */
+DECLARE_CLASS(vmm_stopped_class);	/* stopped file   (vmmfs_machines.c) */
+
+/* Class identity test: is this node an instance of the given class? */
+#define VMMFS_NODE_IS(node, classname)	((node)->ops == (classname).ops)
 
 /*
  * A config "register" file serializes one machine setting as text.  Each
@@ -222,11 +206,10 @@ int	vmmfs_readdir_end(struct vop_readdir_args *ap, off_t off, int full,
 
 /* vmmfs.c (control plane / registry / vnode binding / per-open buffers),
  * called by the vnode operations in vmmfs_vnode.c. */
-int	vmmfs_cfg_present(struct vmmfs_machines *m, enum vmmfs_cfg cfg);
 ino_t	vmmfs_parent_ino(struct vmmfs_node *node);
-void	vmmfs_node_init(struct vmmfs_node *node, enum vmmfs_ntype type,
-	    ino_t ino, struct vmmfs_node *parent, struct vmmfs_machines *machine,
-	    enum vmmfs_cfg cfg);
+void	vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class,
+	    enum vtype vtype, mode_t mode, ino_t ino, struct vmmfs_node *parent,
+	    struct vmmfs_machines *machine);
 void	vmmfs_node_uninit(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
