@@ -30,7 +30,7 @@ import time
 
 LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
-FULL_WAYLAND_PHASES = {"wayland", "wayland_hpd_smoke", "xwayland"}
+FULL_WAYLAND_PHASES = {"wayland", "wayland_info", "wayland_hpd_smoke", "xwayland"}
 FAULT_PATTERN = (
     "panic|BADFREE|double fault|DeviceLost|EXEC timeout|fault|CMDre|"
     "status=0x19|RC_TRIGGERED|notifier timeout|vblank wait timed out|flip_done timed out|"
@@ -402,6 +402,14 @@ def write_sway_config(out_dir: pathlib.Path, mode: str,
     lines = ["output * bg #000000 solid_color"]
     if mode == "wayland":
         command = f"sleep {args.wayland_exit_delay}; swaymsg exit"
+    elif mode == "wayland_info":
+        command = (
+            "sleep 1; "
+            "{ echo WAYLAND_INFO_START; wayland-info; rc=$?; "
+            "echo \"### rc=$rc\"; } "
+            "> \"$NVKM_KMS_SMOKE_DIR/wayland-info.wayland\" 2>&1; "
+            "swaymsg exit"
+        )
     elif mode == "wayland_hpd_smoke":
         phase = pathlib.Path(__file__)
         command = (
@@ -929,6 +937,37 @@ def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
              "Xwayland created an X11 surface")
 
 
+def report_wayland_info(out_dir: pathlib.Path, emit) -> None:
+    path = out_dir / "wayland-info.wayland"
+    if not path.exists():
+        return
+
+    rc = command_return_code(path)
+    emit(rc == 0, f"wayland-info rc={rc}")
+    text = captured_text(path)
+    emit("WAYLAND_INFO_START" in text, "wayland-info started")
+    emit(bool(re.search(r"interface:\s+'wl_compositor'", text)),
+         "wayland-info sees wl_compositor")
+    emit(bool(re.search(r"interface:\s+'xdg_wm_base'", text)),
+         "wayland-info sees xdg_wm_base")
+    emit(bool(re.search(r"interface:\s+'wp_presentation'", text)),
+         "wayland-info sees wp_presentation")
+    emit(bool(re.search(r"presentation clock id:\s*[0-9]+", text)),
+         "wayland-info reports presentation clock")
+    emit(bool(re.search(r"interface:\s+'wp_drm_lease_device_v1'", text)) and
+         bool(re.search(r"path:\s+/dev/dri/card0\b", text)),
+         "wayland-info exposes DRM lease device card0")
+    emit(bool(re.search(r"interface:\s+'zwlr_export_dmabuf_manager_v1'", text)),
+         "wayland-info sees dmabuf export manager")
+    emit(bool(re.search(r"interface:\s+'wl_output'.*?name:\s+HDMI-A-1",
+                        text, re.S)),
+         "wayland-info sees HDMI-A-1 output")
+    emit(bool(re.search(r"mode:\s+width:\s+1920 px,\s+height:\s+1080 px",
+                        text, re.S)),
+         "wayland-info sees current 1920x1080 mode")
+    emit(not has_error_text(text), "wayland-info output has no errors")
+
+
 def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
     path = out_dir / "glxinfo.xwayland"
     if not path.exists():
@@ -1296,6 +1335,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
                  "glxinfo is not software rasterizer")
 
     report_wayland_log(out_dir, emit)
+    report_wayland_info(out_dir, emit)
     report_xwayland_glxinfo(out_dir, emit)
     report_xwayland_glxgears(out_dir, emit)
     report_hpd_inject(out_dir, "wayland", emit)
@@ -2099,6 +2139,7 @@ def main() -> int:
         "before",
         "x11",
         "wayland",
+        "wayland_info",
         "wayland_hpd",
         "wayland_hpd_smoke",
         "xwayland",
