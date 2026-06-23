@@ -3812,6 +3812,12 @@ check_legacy_getgamma_contract(int fd, uint32_t crtc_id,
 		goto out;
 
 	saved_errno = 0;
+	check(!get_legacy_gamma_raw(fd, 0, 0, NULL, NULL, NULL,
+	    &saved_errno), "legacy GETGAMMA rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "legacy GETGAMMA bad CRTC id fails with ENOENT");
+
+	saved_errno = 0;
 	check(get_legacy_gamma_raw(fd, crtc_id, gamma_size, red, green, blue,
 	    &saved_errno), "legacy GETGAMMA owner read succeeds");
 	if (saved_errno != 0)
@@ -3822,6 +3828,12 @@ check_legacy_getgamma_contract(int fd, uint32_t crtc_id,
 	    blue, &saved_errno), "legacy GETGAMMA rejects wrong gamma size");
 	check(saved_errno == EINVAL,
 	    "legacy GETGAMMA wrong gamma size fails with EINVAL");
+
+	saved_errno = 0;
+	check(!get_legacy_gamma_raw(fd, crtc_id, gamma_size, NULL, green,
+	    blue, &saved_errno), "legacy GETGAMMA rejects bad red pointer");
+	check(saved_errno == EFAULT,
+	    "legacy GETGAMMA bad red pointer fails with EFAULT");
 
 	errno = 0;
 	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
