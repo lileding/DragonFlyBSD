@@ -780,6 +780,60 @@ check_atomic_properties_hidden_without_client_cap(int fd)
 	}
 }
 
+static void
+check_atomic_ioctl_error(int fd, uint32_t flags, uint32_t reserved,
+    int expected_errno, const char *what, const char *errno_what)
+{
+	struct drm_mode_atomic atomic;
+	int saved_errno;
+	int ret;
+
+	memset(&atomic, 0, sizeof(atomic));
+	atomic.flags = flags;
+	atomic.reserved = reserved;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_ATOMIC, &atomic);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 || saved_errno != expected_errno)
+		printf("    MODE_ATOMIC ret=%d errno=%d expected=%d\n",
+		    ret, saved_errno, expected_errno);
+}
+
+/*
+ * check_atomic_ioctl_flag_contract()
+ *
+ * Ownership:
+ *   Borrows a DRM fd after DRM_CLIENT_CAP_ATOMIC has been enabled.
+ *
+ * Lifetime:
+ *   Uses empty atomic requests so no KMS object IDs, property arrays, fences, or
+ *   events are retained by either userspace or the kernel after each ioctl.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  Each request must fail in common DRM flag
+ *   validation before object parsing or driver atomic_check is reached.
+ */
+static void
+check_atomic_ioctl_flag_contract(int fd)
+{
+	check_atomic_ioctl_error(fd, 0x80000000u, 0, EINVAL,
+	    "DRM atomic ioctl rejects unknown flags",
+	    "DRM atomic ioctl unknown flags fail with EINVAL");
+	check_atomic_ioctl_error(fd, 0, 1, EINVAL,
+	    "DRM atomic ioctl rejects non-zero reserved field",
+	    "DRM atomic ioctl reserved field fails with EINVAL");
+	check_atomic_ioctl_error(fd, DRM_MODE_PAGE_FLIP_ASYNC, 0, EINVAL,
+	    "DRM atomic ioctl rejects unsupported ASYNC flag",
+	    "DRM atomic ioctl ASYNC flag fails with EINVAL");
+	check_atomic_ioctl_error(fd,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_PAGE_FLIP_EVENT, 0, EINVAL,
+	    "DRM atomic ioctl rejects TEST_ONLY event request",
+	    "DRM atomic ioctl TEST_ONLY event fails with EINVAL");
+}
+
 static bool
 create_identity_lut_blob(int fd, uint32_t count, uint32_t *blob_id_out,
     const char *what)
@@ -8176,6 +8230,7 @@ main(void)
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ATOMIC, 2,
 	    EINVAL, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
+	check_atomic_ioctl_flag_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    2, EINVAL, "WRITEBACK_CONNECTORS");
 	check_client_cap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
