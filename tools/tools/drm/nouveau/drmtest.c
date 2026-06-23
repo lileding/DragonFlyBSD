@@ -985,6 +985,31 @@ check_wait_vblank_flag_contract(int fd)
 	    "WAIT_VBLANK unknown type bits fail with EINVAL");
 }
 
+/*
+ * check_wait_vblank_pipe_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd only.  No vblank reference or event object is owned or
+ *   retained.
+ *
+ * Lifetime:
+ *   Uses a valid relative request type with an out-of-range high CRTC index.
+ *   The request must fail after type validation but before vblank acquire,
+ *   blocking wait, or event queueing.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM pipe selection
+ *   rejects invalid CRTC indices without touching driver vblank state.
+ */
+static void
+check_wait_vblank_pipe_contract(int fd)
+{
+	check_wait_vblank_error(fd,
+	    DRM_VBLANK_RELATIVE | DRM_VBLANK_HIGH_CRTC_MASK,
+	    EINVAL, "WAIT_VBLANK rejects invalid high CRTC index",
+	    "WAIT_VBLANK invalid high CRTC index fails with EINVAL");
+}
+
 static void
 check_pageflip_ioctl_error(int fd, uint32_t flags, uint32_t sequence,
     int expected_errno, const char *what, const char *errno_what)
@@ -9649,6 +9674,7 @@ main(void)
 	check_cursor_ioctl_flag_contract(fd);
 	check_cursor_ioctl_lookup_error_contract(fd);
 	check_wait_vblank_flag_contract(fd);
+	check_wait_vblank_pipe_contract(fd);
 	check_pageflip_ioctl_flag_contract(fd);
 	check_pageflip_lookup_error_contract(fd);
 	check_property_read_error_contract(fd);
