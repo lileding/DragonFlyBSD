@@ -786,6 +786,7 @@ def object_suffix_report(suffix: str) -> str:
 
 
 CONNECTOR_DYNAMIC_SUFFIXES = (
+    "is not writeback",
     "has property EDID",
     "has property CRTC_ID",
     "has property link-status",
