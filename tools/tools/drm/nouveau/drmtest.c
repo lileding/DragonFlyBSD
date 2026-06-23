@@ -4014,6 +4014,77 @@ find_active_crtc(int fd, const drmModeRes *resources, uint32_t *crtc_id_out,
 	return false;
 }
 
+/*
+ * check_pageflip_lookup_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  Owns short-lived KMS resource and CRTC
+ *   snapshots only; no framebuffer, event, or CRTC object reference is retained
+ *   after return.
+ *
+ * Lifetime:
+ *   Bad CRTC and framebuffer ids must be rejected before event reservation,
+ *   target vblank programming, or driver page-flip hooks.  The active CRTC's
+ *   current framebuffer is only observed to ensure the bad-fb path reaches the
+ *   framebuffer lookup boundary.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM PAGE_FLIP object
+ *   lookup ordering without submitting a flip.
+ */
+static void
+check_pageflip_lookup_error_contract(int fd)
+{
+	drmModeRes *resources;
+	drmModeCrtc *crtc = NULL;
+	uint32_t active_crtc_id = 0;
+	uint32_t active_crtc_index = UINT32_MAX;
+	bool found;
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmModePageFlip(fd, 0, 0, 0, NULL);
+	saved_errno = errno;
+	check(ret != 0, "PAGE_FLIP rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "PAGE_FLIP bad CRTC id fails with ENOENT");
+
+	resources = drmModeGetResources(fd);
+	check(resources != NULL, "PAGE_FLIP lookup probe reads resources");
+	if (resources == NULL)
+		return;
+
+	found = find_active_crtc(fd, resources, &active_crtc_id,
+	    &active_crtc_index);
+	check(found, "PAGE_FLIP lookup probe finds active CRTC");
+	check(!found || active_crtc_index < (uint32_t)resources->count_crtcs,
+	    "PAGE_FLIP lookup probe active CRTC index is valid");
+	if (!found)
+		goto out_resources;
+
+	crtc = drmModeGetCrtc(fd, active_crtc_id);
+	check(crtc != NULL, "PAGE_FLIP lookup probe reads active CRTC");
+	if (crtc == NULL)
+		goto out_resources;
+	check(crtc->buffer_id != 0,
+	    "PAGE_FLIP lookup probe active CRTC has framebuffer");
+	if (crtc->buffer_id == 0)
+		goto out_crtc;
+
+	errno = 0;
+	ret = drmModePageFlip(fd, active_crtc_id, 0xffffffffu, 0, NULL);
+	saved_errno = errno;
+	check(ret != 0, "PAGE_FLIP rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "PAGE_FLIP bad framebuffer id fails with ENOENT");
+
+out_crtc:
+	drmModeFreeCrtc(crtc);
+out_resources:
+	drmModeFreeResources(resources);
+}
+
 static bool
 wait_vblank_type_for_crtc_index(uint32_t crtc_index,
     drmVBlankSeqType *type_out)
@@ -9533,6 +9604,7 @@ main(void)
 	check_cursor_ioctl_flag_contract(fd);
 	check_wait_vblank_flag_contract(fd);
 	check_pageflip_ioctl_flag_contract(fd);
+	check_pageflip_lookup_error_contract(fd);
 	check_property_read_error_contract(fd);
 	check_property_set_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
