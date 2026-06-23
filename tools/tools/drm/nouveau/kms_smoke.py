@@ -1602,6 +1602,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap PRIME is 3",
         "DRM client cap STEREO_3D value 2 is rejected",
         "DRM client cap STEREO_3D value 2 fails with errno 22",
+        "legacy plane resources readable before UNIVERSAL_PLANES",
+        "legacy plane resources expose no primary or cursor planes",
         "DRM client cap STEREO_3D is accepted",
         "DRM client cap UNIVERSAL_PLANES is accepted",
         "DRM client cap UNIVERSAL_PLANES value 2 is rejected",

@@ -632,6 +632,52 @@ get_plane_type(int fd, uint32_t plane_id)
 	return (int)value;
 }
 
+/*
+ * check_legacy_plane_visibility_without_universal_cap()
+ *
+ * Ownership:
+ *   Borrows the DRM fd before DRM_CLIENT_CAP_UNIVERSAL_PLANES is enabled.
+ *   Plane resource snapshots are owned by this helper and freed before return.
+ *
+ * Lifetime:
+ *   Valid only before the caller toggles UNIVERSAL_PLANES on this fd.  The
+ *   probe does not retain plane IDs or property pointers after it returns.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It only reads plane resources and property
+ *   metadata; it must not mutate plane state.
+ */
+static void
+check_legacy_plane_visibility_without_universal_cap(int fd)
+{
+	drmModePlaneResPtr plane_resources;
+	bool no_primary_or_cursor = true;
+
+	plane_resources = drmModeGetPlaneResources(fd);
+	check(plane_resources != NULL,
+	    "legacy plane resources readable before UNIVERSAL_PLANES");
+	if (plane_resources == NULL)
+		return;
+
+	for (uint32_t i = 0; i < plane_resources->count_planes; i++) {
+		int type;
+
+		type = get_plane_type(fd, plane_resources->planes[i]);
+		if (type < 0) {
+			check(false,
+			    "legacy plane type property is readable before UNIVERSAL_PLANES");
+			no_primary_or_cursor = false;
+			continue;
+		}
+		if (type == DRM_PLANE_TYPE_PRIMARY || type == DRM_PLANE_TYPE_CURSOR)
+			no_primary_or_cursor = false;
+	}
+	check(no_primary_or_cursor,
+	    "legacy plane resources expose no primary or cursor planes");
+
+	drmModeFreePlaneResources(plane_resources);
+}
+
 static bool
 get_property_id(int fd, uint32_t object_id, uint32_t object_type,
     const char *name, uint32_t *property_id)
@@ -8116,6 +8162,7 @@ main(void)
 	}
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_STEREO_3D, 2,
 	    EINVAL, "STEREO_3D");
+	check_legacy_plane_visibility_without_universal_cap(fd);
 	check_client_cap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
 	    "UNIVERSAL_PLANES");
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 2,
