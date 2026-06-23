@@ -971,8 +971,8 @@ check_pageflip_ioctl_error(int fd, uint32_t flags, uint32_t sequence,
  *   is owned or retained.
  *
  * Lifetime:
- *   Uses invalid PAGE_FLIP target combinations that must fail before CRTC
- *   lookup, event reservation, vblank acquisition, or driver flip hooks.
+ *   Uses invalid PAGE_FLIP flags and target combinations that must fail before
+ *   CRTC lookup, event reservation, vblank acquisition, or driver flip hooks.
  *
  * Threading:
  *   Single-threaded KMS UAPI probe.  It validates the common DRM flag/sequence
@@ -981,6 +981,9 @@ check_pageflip_ioctl_error(int fd, uint32_t flags, uint32_t sequence,
 static void
 check_pageflip_ioctl_flag_contract(int fd)
 {
+	check_pageflip_ioctl_error(fd, 0x80000000u, 0, EINVAL,
+	    "PAGE_FLIP rejects unknown flags",
+	    "PAGE_FLIP unknown flags fail with EINVAL");
 	check_pageflip_ioctl_error(fd, 0, 1, EINVAL,
 	    "PAGE_FLIP rejects sequence without target flag",
 	    "PAGE_FLIP sequence without target flag fails with EINVAL");
