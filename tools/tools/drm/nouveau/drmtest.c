@@ -5652,6 +5652,56 @@ check_in_formats(int fd, drmModePlanePtr plane, int plane_type,
 	drmModeFreePropertyBlob(property_blob);
 }
 
+/*
+ * check_plane_route_state_contract()
+ *
+ * Ownership:
+ *   Borrows the plane and mode resources snapshots.  The helper reads plane
+ *   properties through libdrm and does not retain references after return.
+ *
+ * Lifetime:
+ *   Valid only for the current plane/resources snapshot.  A later atomic commit
+ *   may legitimately change CRTC_ID, FB_ID, or possible_crtcs.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI validation.  It never submits modeset
+ *   work or takes driver-private locks.
+ */
+static void
+check_plane_route_state_contract(int fd, const drmModePlane *plane,
+    const drmModeRes *mode_resources, const char *name)
+{
+	uint64_t crtc_id = 0;
+	uint64_t fb_id = 0;
+	int crtc_index = -1;
+	bool crtc_present;
+
+	if (!get_property_value_checked(fd, plane->plane_id,
+	    DRM_MODE_OBJECT_PLANE, "CRTC_ID", &crtc_id, name))
+		return;
+	if (!get_property_value_checked(fd, plane->plane_id,
+	    DRM_MODE_OBJECT_PLANE, "FB_ID", &fb_id, name))
+		return;
+
+	check((crtc_id == 0) == (fb_id == 0),
+	    "plane FB_ID and CRTC_ID enable state match");
+	if (crtc_id == 0)
+		return;
+
+	crtc_present = id_index_in_list(mode_resources->crtcs,
+	    mode_resources->count_crtcs, (uint32_t)crtc_id, &crtc_index);
+	check(crtc_present, "plane current CRTC is present");
+	if (!crtc_present)
+		return;
+
+	check(crtc_index >= 0 && crtc_index < 32,
+	    "plane current CRTC index fits possible_crtcs mask width");
+	if (crtc_index >= 0 && crtc_index < 32) {
+		check((plane->possible_crtcs & (1u << crtc_index)) != 0,
+		    "plane current CRTC is allowed by possible_crtcs");
+	}
+}
+
 static void
 check_planes(int fd, const drmModeRes *mode_resources)
 {
@@ -5734,6 +5784,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 		plane_type = get_plane_type(fd, plane->plane_id);
 		check(plane_type >= 0, "plane type is readable");
 		check_in_formats(fd, plane, plane_type, name);
+		check_plane_route_state_contract(fd, plane, mode_resources,
+		    name);
 		if (track_plane_topology) {
 			for (int c = 0; c < mode_resources->count_crtcs; c++) {
 				if ((plane->possible_crtcs & (1u << c)) == 0)
