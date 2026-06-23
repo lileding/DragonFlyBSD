@@ -8270,6 +8270,7 @@ nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	unsigned int primary_clients;
+	bool is_lastclose;
 	int err;
 
 	if (sc == NULL)
@@ -8286,6 +8287,8 @@ nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 		    reason, primary_clients, ddev->open_count);
 		return;
 	}
+
+	is_lastclose = reason != NULL && strcmp(reason, "lastclose") == 0;
 
 	/*
 	 * Restore the in-kernel console before the last close returns.
@@ -8305,7 +8308,14 @@ nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 	 *   in modeset locks and display notifier waits, matching the synchronous
 	 *   restore semantics of DRM's in-kernel client restore path.
 	 */
+	if (is_lastclose)
+		sc->kms_lastclose_restore_count++;
 	err = nvkm_drm_kms_light_up(sc);
+	if (is_lastclose) {
+		sc->kms_lastclose_restore_last_error = err;
+		if (err != 0)
+			sc->kms_lastclose_restore_error_count++;
+	}
 	if (err != 0)
 		nvkm_infof(sc->dev,
 		    "drm: %s console restore failed err=%d\n",

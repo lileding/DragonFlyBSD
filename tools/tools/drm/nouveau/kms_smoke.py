@@ -47,6 +47,7 @@ ZERO_KEYS = (
     "atomic_disable_vblank_keep_error",
     "hotplug_enqueue_error_count",
     "dark_down_error_count",
+    "lastclose_restore_error_count",
     "dp_irq_error_count",
     "fb_create_error_count",
     "page_flip_error_count",
@@ -151,6 +152,7 @@ WATCH_KEYS = (
     "hotplug_nochange_count",
     "hotplug_notify_only_count",
     "hotplug_auto_kms_count",
+    "lastclose_restore_count",
 )
 
 CAPACITY_KEYS = (
@@ -889,6 +891,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
             "last_head",
             "last_win",
             "dark_down_last_error",
+            "lastclose_restore_last_error",
             "dp_sst_last_error",
             "bo_wait_last_error",
             "vm_bind_last_error",
@@ -1036,6 +1039,30 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     if not x11_ran:
         emit(allow_missing_x11, "x11 phase optional/missing")
     else:
+        if all(key in before and key in after for key in (
+            "lastclose_restore_count",
+            "lastclose_restore_error_count",
+        )):
+            restore_delta = (
+                after["lastclose_restore_count"] -
+                before["lastclose_restore_count"]
+            )
+            restore_error_delta = (
+                after["lastclose_restore_error_count"] -
+                before["lastclose_restore_error_count"]
+            )
+            emit(restore_delta > 0,
+                 f"lastclose restore delta={restore_delta}")
+            emit(restore_error_delta == 0,
+                 f"lastclose restore error delta={restore_error_delta}")
+        else:
+            emit(False, "missing lastclose restore counters")
+        if "lastclose_restore_last_error" in after:
+            emit(after["lastclose_restore_last_error"] == 0,
+                 f"lastclose_restore_last_error={after['lastclose_restore_last_error']}")
+        else:
+            emit(False, "missing lastclose_restore_last_error")
+
         x11_state = parse_state(out_dir / "drm_state.x11_idle")
         if not x11_state:
             x11_state = parse_state(out_dir / "drm_state.x11")

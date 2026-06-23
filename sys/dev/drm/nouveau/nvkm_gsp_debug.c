@@ -673,6 +673,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_dp_irq_retrain_fail_count);
 	sbuf_printf(sb, "dp_irq_error_count = %llu\n",
 	    (unsigned long long)sc->kms_dp_irq_error_count);
+	sbuf_printf(sb, "lastclose_restore_count = %llu\n",
+	    (unsigned long long)sc->kms_lastclose_restore_count);
+	sbuf_printf(sb, "lastclose_restore_error_count = %llu\n",
+	    (unsigned long long)sc->kms_lastclose_restore_error_count);
+	sbuf_printf(sb, "lastclose_restore_last_error = %d\n",
+	    sc->kms_lastclose_restore_last_error);
 	sbuf_printf(sb, "hpd_last_plug_mask = 0x%08x\n",
 	    sc->kms_hpd_last_plug_mask);
 	sbuf_printf(sb, "hpd_last_unplug_mask = 0x%08x\n",

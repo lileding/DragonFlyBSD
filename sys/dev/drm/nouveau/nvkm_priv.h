@@ -761,6 +761,9 @@ struct nvkm_softc {
 	uint64_t		kms_dp_irq_retrain_ok_count;
 	uint64_t		kms_dp_irq_retrain_fail_count;
 	uint64_t		kms_dp_irq_error_count;
+	uint64_t		kms_lastclose_restore_count;
+	uint64_t		kms_lastclose_restore_error_count;
+	int			kms_lastclose_restore_last_error;
 	uint64_t		kms_restore_skip_primary_count;
 	uint32_t		kms_restore_last_primary_count;
 	int			kms_restore_last_open_count;
