@@ -9,6 +9,7 @@ between steps:
     DISPLAY=:0 kms_smoke.py x11
     logout
     kms_smoke.py after
+    kms_smoke.py syncobj_transfer
 
 Wayland compositor tests may call `kms_smoke.py wayland_hpd` from a compositor
 exec command while Wayland owns DRM master.
@@ -197,7 +198,8 @@ def choose_out_dir(phase: str, explicit: str | None) -> pathlib.Path:
         out_dir = pathlib.Path(explicit)
     elif os.environ.get("NVKM_KMS_SMOKE_DIR"):
         out_dir = pathlib.Path(os.environ["NVKM_KMS_SMOKE_DIR"])
-    elif phase == "before" or phase in FULL_WAYLAND_PHASES or not LATEST.is_symlink():
+    elif (phase == "before" or phase == "syncobj_transfer" or
+          phase in FULL_WAYLAND_PHASES or not LATEST.is_symlink()):
         out_dir = choose_new_out_dir()
         created = True
     else:
@@ -205,7 +207,8 @@ def choose_out_dir(phase: str, explicit: str | None) -> pathlib.Path:
 
     if not created:
         out_dir.mkdir(parents=True, exist_ok=True)
-    if phase == "before" or phase in FULL_WAYLAND_PHASES or not LATEST.exists():
+    if (phase == "before" or phase == "syncobj_transfer" or
+        phase in FULL_WAYLAND_PHASES or not LATEST.exists()):
         tmp_link = LATEST.with_suffix(".tmp")
         try:
             tmp_link.unlink()
@@ -497,6 +500,13 @@ def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
     if env_extra:
         env.update(env_extra)
     run([str(binary)], out_dir / f"drmtest.{phase}", env=env)
+
+
+def capture_syncobj_transfer_probe(out_dir: pathlib.Path) -> int | None:
+    capture_kms_property_probe(out_dir, "syncobj_transfer", {
+        "NVKM_DRMTEST_SYNC_ONLY": "1",
+    })
+    return command_return_code(out_dir / "drmtest.syncobj_transfer")
 
 
 def state_is_idle(state: dict[str, int]) -> bool:
@@ -2237,6 +2247,7 @@ def main() -> int:
         "wayland_info",
         "wayland_hpd",
         "wayland_hpd_smoke",
+        "syncobj_transfer",
         "xwayland",
         "after",
         "report",
@@ -2285,6 +2296,10 @@ def main() -> int:
     if args.phase == "report":
         print(out_dir)
         return report(out_dir, args.allow_missing_x11)
+    if args.phase == "syncobj_transfer":
+        rc = capture_syncobj_transfer_probe(out_dir)
+        print(out_dir)
+        return 1 if rc != 0 else 0
     if args.phase in FULL_WAYLAND_PHASES:
         print(out_dir)
         return run_wayland_smoke(out_dir, args.phase, args)

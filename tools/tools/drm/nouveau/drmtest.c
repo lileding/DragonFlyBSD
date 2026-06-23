@@ -1207,6 +1207,7 @@ syncobj_transfer_point(int fd, uint32_t dst_handle, uint64_t dst_point,
     uint32_t src_handle, uint64_t src_point, uint32_t flags)
 {
 	struct drm_syncobj_transfer req;
+	int ret;
 
 	memset(&req, 0, sizeof(req));
 	req.src_handle = src_handle;
@@ -1214,7 +1215,14 @@ syncobj_transfer_point(int fd, uint32_t dst_handle, uint64_t dst_point,
 	req.src_point = src_point;
 	req.dst_point = dst_point;
 	req.flags = flags;
-	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &req) == 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &req);
+	if (ret != 0) {
+		printf("    SYNCOBJ_TRANSFER errno=%d src=%u:%llu dst=%u:%llu flags=0x%x\n",
+		    errno, src_handle, (unsigned long long)src_point,
+		    dst_handle, (unsigned long long)dst_point, flags);
+	}
+	return ret == 0;
 }
 
 static void
@@ -6479,6 +6487,28 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	drmModeFreePlaneResources(resources);
 }
 
+static int
+run_syncobj_transfer_only(void)
+{
+	const char *path;
+	int fd;
+
+	path = getenv("NVKM_DRMTEST_SYNC_NODE");
+	if (path == NULL || path[0] == '\0')
+		path = "/dev/dri/renderD128";
+
+	fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		printf("open %s failed errno=%d\n", path, errno);
+		return 1;
+	}
+
+	printf("sync-only node=%s\n", path);
+	check_syncobj_transfer_contract(fd);
+	check(close(fd) == 0, "close succeeds for sync-only DRM fd");
+	return failures == 0 ? 0 : 1;
+}
+
 int
 main(void)
 {
@@ -6486,6 +6516,9 @@ main(void)
 	bool expect_no_connected;
 	int connected_count = 0;
 	int fd;
+
+	if (getenv("NVKM_DRMTEST_SYNC_ONLY") != NULL)
+		return run_syncobj_transfer_only();
 
 	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
