@@ -109,6 +109,7 @@ struct cursor_counter_snapshot {
 struct pageflip_counter_snapshot {
 	uint64_t page_flip_count;
 	uint64_t page_flip_event_count;
+	uint64_t page_flip_reject_count;
 	uint64_t page_flip_error_count;
 	uint64_t commit_error_count;
 	uint64_t atomic_tail_active;
@@ -1426,6 +1427,89 @@ legacy_pageflip_with_event(int fd, uint32_t crtc_id, uint32_t fb_id,
 	return true;
 }
 
+static void
+check_legacy_pageflip_reject_snapshot(
+    const struct pageflip_counter_snapshot *before,
+    const struct pageflip_counter_snapshot *after, const char *what)
+{
+	char text[192];
+
+	snprintf(text, sizeof(text), "%s keeps page_flip_reject_count monotonic",
+	    what);
+	check(after->page_flip_reject_count >= before->page_flip_reject_count,
+	    text);
+	snprintf(text, sizeof(text), "%s does not increment page_flip_count",
+	    what);
+	check(after->page_flip_count == before->page_flip_count, text);
+	snprintf(text, sizeof(text), "%s does not increment page_flip_event_count",
+	    what);
+	check(after->page_flip_event_count == before->page_flip_event_count,
+	    text);
+	snprintf(text, sizeof(text), "%s does not increment page_flip_error_count",
+	    what);
+	check(after->page_flip_error_count == before->page_flip_error_count,
+	    text);
+	snprintf(text, sizeof(text), "%s does not increment commit_error_count",
+	    what);
+	check(after->commit_error_count == before->commit_error_count, text);
+	snprintf(text, sizeof(text), "%s leaves no active tail transaction", what);
+	check(after->atomic_tail_active == 0 && after->atomic_tail_stage == 0,
+	    text);
+	snprintf(text, sizeof(text), "%s leaves no pending display audit", what);
+	check(after->display_audit_pending_valid == 0, text);
+}
+
+/*
+ * check_legacy_pageflip_reject_contract()
+ *
+ * Ownership:
+ *   Borrows the active CRTC and a caller-owned framebuffer ID.  No event object,
+ *   framebuffer, or GEM handle is owned or retained by this helper.
+ *
+ * Lifetime:
+ *   Issues one unsupported legacy pageflip request and requires immediate
+ *   EINVAL rejection.  Since the request must not queue a flip, no DRM event is
+ *   requested and no restore is required.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The kernel may inspect KMS state under
+ *   modeset locks, but this helper itself performs no synchronization beyond
+ *   the synchronous ioctl return.
+ */
+static bool
+check_legacy_pageflip_reject_contract(int fd, uint32_t crtc_id,
+    uint32_t fb_id, uint32_t flags, bool target, const char *what,
+    const struct pageflip_counter_snapshot *before,
+    struct pageflip_counter_snapshot *after)
+{
+	char text[192];
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	if (target) {
+		ret = drmModePageFlipTarget(fd, crtc_id, fb_id, flags, NULL, 1);
+	} else {
+		ret = drmModePageFlip(fd, crtc_id, fb_id, flags, NULL);
+	}
+	saved_errno = errno;
+	snprintf(text, sizeof(text), "%s is rejected", what);
+	if (ret == 0) {
+		check(false, text);
+		return false;
+	}
+	check(true, text);
+	snprintf(text, sizeof(text), "%s is rejected with EINVAL", what);
+	check(saved_errno == EINVAL, text);
+	if (saved_errno != EINVAL)
+		printf("    %s errno=%d\n", what, saved_errno);
+
+	if (!read_pageflip_counter_snapshot(after, what))
+		return false;
+	check_legacy_pageflip_reject_snapshot(before, after, what);
+	return true;
+}
+
 /*
  * check_legacy_pageflip_runtime_contract()
  *
@@ -1455,6 +1539,8 @@ check_legacy_pageflip_runtime_contract(int fd, uint32_t crtc_id,
 	struct atomic_plane_snapshot after_snapshot;
 	struct atomic_plane_snapshot restore_snapshot;
 	struct pageflip_counter_snapshot before;
+	struct pageflip_counter_snapshot after_async_reject;
+	struct pageflip_counter_snapshot after_target_reject;
 	struct pageflip_counter_snapshot after_flip;
 	struct pageflip_counter_snapshot after_restore;
 	uint32_t handle = 0;
@@ -1500,6 +1586,16 @@ check_legacy_pageflip_runtime_contract(int fd, uint32_t crtc_id,
 	if (!add_linear_framebuffer(fd, crtc_width, crtc_height,
 	    DRM_FORMAT_XRGB8888, restore_handle, restore_pitch, &restore_fb,
 	    "ADDFB2 accepts XRGB8888 linear legacy pageflip restore probe"))
+		goto out;
+
+	if (!check_legacy_pageflip_reject_contract(fd, crtc_id, fb_id,
+	    DRM_MODE_PAGE_FLIP_ASYNC, false, "legacy pageflip ASYNC flag",
+	    &before, &after_async_reject))
+		goto out;
+	if (!check_legacy_pageflip_reject_contract(fd, crtc_id, fb_id,
+	    DRM_MODE_PAGE_FLIP_TARGET_RELATIVE, true,
+	    "legacy pageflip TARGET flag", &after_async_reject,
+	    &after_target_reject))
 		goto out;
 
 	flipped_to_temp = legacy_pageflip_with_event(fd, crtc_id, fb_id,
@@ -2566,6 +2662,8 @@ read_pageflip_counter_snapshot(struct pageflip_counter_snapshot *snapshot,
 	    &snapshot->page_flip_count) &&
 	    state_counter_from_text(state, "page_flip_event_count",
 	    &snapshot->page_flip_event_count) &&
+	    state_counter_from_text(state, "page_flip_reject_count",
+	    &snapshot->page_flip_reject_count) &&
 	    state_counter_from_text(state, "page_flip_error_count",
 	    &snapshot->page_flip_error_count) &&
 	    state_counter_from_text(state, "commit_error_count",

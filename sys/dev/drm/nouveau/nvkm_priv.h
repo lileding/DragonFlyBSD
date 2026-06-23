@@ -770,6 +770,7 @@ struct nvkm_softc {
 	uint64_t		kms_fb_destroy_count;
 	uint64_t		kms_page_flip_count;
 	uint64_t		kms_page_flip_event_count;
+	uint64_t		kms_page_flip_reject_count;
 	uint64_t		kms_page_flip_error_count;
 	uint64_t		kms_atomic_commit_tail_count;
 	uint64_t		kms_atomic_vblank_wait_count;

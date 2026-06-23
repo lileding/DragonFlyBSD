@@ -703,6 +703,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_page_flip_count);
 	sbuf_printf(sb, "page_flip_event_count = %llu\n",
 	    (unsigned long long)sc->kms_page_flip_event_count);
+	sbuf_printf(sb, "page_flip_reject_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_reject_count);
 	sbuf_printf(sb, "page_flip_error_count = %llu\n",
 	    (unsigned long long)sc->kms_page_flip_error_count);
 	sbuf_printf(sb, "atomic_commit_tail_count = %llu\n",
