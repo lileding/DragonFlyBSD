@@ -5477,10 +5477,12 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	uint32_t owner_get_visible_count = 0;
 	uint32_t primary_plane_id = 0;
 	uint32_t second_lessee_id = 0;
+	uint32_t third_lessee_id = 0;
 	uint32_t unleased_connector_id = 0;
 	int lease_fd = -1;
 	int empty_lease_fd = -1;
 	int second_lease_fd = -1;
+	int third_lease_fd = -1;
 	int fd_flags;
 	int saved_errno;
 
@@ -5787,6 +5789,14 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 		    "DRM lease re-lease returns a fresh lessee id");
 		check(close(second_lease_fd) == 0,
 		    "close second DRM lease fd succeeds");
+		if (drm_lease_create(fd, lease_ids, object_count,
+		    &third_lease_fd, &third_lessee_id,
+		    "DRM lease object can be re-leased after close")) {
+			check(third_lessee_id != 0,
+			    "DRM lease close re-lease returns lessee id");
+			check(close(third_lease_fd) == 0,
+			    "close third DRM lease fd succeeds");
+		}
 	}
 
 	check(close(lease_fd) == 0, "close DRM lease fd succeeds");
