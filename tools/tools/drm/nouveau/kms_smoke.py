@@ -908,6 +908,10 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "legacy pageflip to temporary FB pageflip event arrives",
         "legacy pageflip leaves no pending display audit",
         "legacy pageflip restore leaves no pending display audit",
+        "legacy DPMS OFF commit succeeds",
+        "legacy DPMS OFF leaves no pending display audit",
+        "legacy DPMS ON restore succeeds",
+        "legacy DPMS ON leaves no pending display audit",
     ):
         emit(text in drmtest_after, f"drmtest.after has {text}")
 
