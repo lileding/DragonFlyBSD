@@ -33,6 +33,7 @@ DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
 FULL_WAYLAND_PHASES = {
     "wayland",
     "wayland_egl",
+    "wayland_glmark",
     "wayland_info",
     "wayland_hpd_smoke",
     "xwayland",
@@ -404,6 +405,33 @@ def write_sway_config(out_dir: pathlib.Path, mode: str,
             f"{{ echo WAYLAND_EGL_START; timeout {egl_seconds} libdecor-egl; "
             "rc=$?; echo \"### rc=$rc\"; } "
             "> \"$NVKM_KMS_SMOKE_DIR/libdecor-egl.wayland\" 2>&1; "
+            "swaymsg exit"
+        )
+    elif mode == "wayland_glmark":
+        glmark_seconds = max(args.glmark_seconds, 1)
+        command = (
+            "sleep 1; "
+            "echo GLMARK2_WAYLAND_START "
+            "> \"$NVKM_KMS_SMOKE_DIR/glmark2-wayland.wayland\"; "
+            "WAYLAND_DEBUG=client ZINK_KOPPER_TRACE=1 "
+            "glmark2-wayland --run-forever "
+            "--benchmark build --size 320x240 --debug "
+            ">> \"$NVKM_KMS_SMOKE_DIR/glmark2-wayland.wayland\" 2>&1 & "
+            "pid=$!; "
+            f"sleep {glmark_seconds}; "
+            "ps -p \"$pid\" -o pid,stat,command "
+            "> \"$NVKM_KMS_SMOKE_DIR/ps.wayland_glmark\" 2>&1; "
+            "sysctl -n dev.drm.0.state "
+            "> \"$NVKM_KMS_SMOKE_DIR/drm_state.wayland_glmark_live\" 2>&1; "
+            "timeout 10 gdb -batch -ex 'set pagination off' "
+            "-ex 'info threads' -ex 'bt' -p \"$pid\" "
+            "> \"$NVKM_KMS_SMOKE_DIR/gdb.wayland_glmark\" 2>&1; "
+            "kill -TERM \"$pid\" 2>/dev/null; "
+            "sleep 1; "
+            "kill -KILL \"$pid\" 2>/dev/null; "
+            "wait \"$pid\"; "
+            "rc=$?; echo \"### rc=$rc\" "
+            ">> \"$NVKM_KMS_SMOKE_DIR/glmark2-wayland.wayland\"; "
             "swaymsg exit"
         )
     elif mode == "wayland_hpd_smoke":
@@ -988,6 +1016,37 @@ def report_wayland_egl(out_dir: pathlib.Path, emit) -> None:
          "libdecor-egl created an xdg decoration")
 
 
+def report_wayland_glmark(out_dir: pathlib.Path, emit) -> None:
+    path = out_dir / "glmark2-wayland.wayland"
+    if not path.exists():
+        return
+
+    rc = command_return_code(path)
+    emit(rc in (0, 137, 143), f"glmark2-wayland controlled shutdown rc={rc}")
+    text = captured_text(path)
+    emit("GLMARK2_WAYLAND_START" in text, "glmark2-wayland started")
+    emit(bool(re.search(r"GL_RENDERER:.*zink.*NVK|zink.*NVK", text, re.I)),
+         "glmark2-wayland uses zink/NVK")
+    emit(not re.search(r"Segmentation fault|signal 11|core dumped|DeviceLost",
+                       text, re.I),
+         "glmark2-wayland did not crash")
+    explicit_sync = "wp_linux_drm_syncobj_manager_v1" in text
+    emit(bool(re.search(r"wl_surface#[0-9]+\.attach", text)),
+         "glmark2-wayland attaches a Wayland buffer")
+    emit(bool(re.search(r"wl_surface#[0-9]+\.(damage|damage_buffer)", text)),
+         "glmark2-wayland damages a Wayland surface")
+    emit(bool(re.search(r"wl_surface#[0-9]+\.commit", text)),
+         "glmark2-wayland commits a Wayland surface")
+    if explicit_sync:
+        emit("set_acquire_point" in text,
+             "glmark2-wayland sets explicit acquire point")
+        emit("set_release_point" in text,
+             "glmark2-wayland sets explicit release point")
+    else:
+        emit(bool(re.search(r"wl_buffer@[0-9]+\.release", text)),
+             "glmark2-wayland receives wl_buffer release")
+
+
 def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
     path = out_dir / "glxinfo.xwayland"
     if not path.exists():
@@ -1357,6 +1416,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     report_wayland_log(out_dir, emit)
     report_wayland_info(out_dir, emit)
     report_wayland_egl(out_dir, emit)
+    report_wayland_glmark(out_dir, emit)
     report_xwayland_glxinfo(out_dir, emit)
     report_xwayland_glxgears(out_dir, emit)
     report_hpd_inject(out_dir, "wayland", emit)
@@ -1510,6 +1570,18 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap PRIME is 3",
         "DRM client cap UNIVERSAL_PLANES is accepted",
         "DRM client cap ATOMIC is accepted",
+        "SYNCOBJ_TRANSFER creates binary source syncobj",
+        "SYNCOBJ_TRANSFER creates destination syncobj",
+        "SYNCOBJ_TRANSFER binary source signal succeeds",
+        "SYNCOBJ_TRANSFER binary source to timeline point succeeds",
+        "SYNCOBJ_TRANSFER destination timeline point waits successfully",
+        "SYNCOBJ_TRANSFER creates timeline source syncobj",
+        "SYNCOBJ_TRANSFER source timeline signal succeeds",
+        "SYNCOBJ_TRANSFER timeline source to timeline point succeeds",
+        "SYNCOBJ_TRANSFER copied timeline point waits successfully",
+        "SYNCOBJ_TRANSFER rejects missing source point",
+        "SYNCOBJ_TRANSFER creates missing-source destination syncobj",
+        "SYNCOBJ_TRANSFER rejects source with no fence",
         "at least one connector exposed",
         "at least one CRTC exposed",
         "at least one encoder exposed",
@@ -2161,6 +2233,7 @@ def main() -> int:
         "x11",
         "wayland",
         "wayland_egl",
+        "wayland_glmark",
         "wayland_info",
         "wayland_hpd",
         "wayland_hpd_smoke",
@@ -2173,6 +2246,7 @@ def main() -> int:
     parser.add_argument("--xauthority", default=os.environ.get("XAUTHORITY"))
     parser.add_argument("--gears-seconds", type=int, default=5)
     parser.add_argument("--egl-seconds", type=int, default=6)
+    parser.add_argument("--glmark-seconds", type=int, default=6)
     parser.add_argument("--run-panning", action="store_true",
                         help="briefly set and clear xrandr panning on the "
                              "first connected output")

@@ -1162,6 +1162,114 @@ syncobj_export_sync_file(int fd, uint32_t handle, int *sync_fd_out)
 }
 
 static bool
+syncobj_signal_handle(int fd, uint32_t handle)
+{
+	struct drm_syncobj_array req;
+	uint32_t handles[1] = { handle };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.count_handles = 1;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &req) == 0;
+}
+
+static bool
+syncobj_timeline_signal_handle(int fd, uint32_t handle, uint64_t point)
+{
+	struct drm_syncobj_timeline_array req;
+	uint32_t handles[1] = { handle };
+	uint64_t points[1] = { point };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.points = (uint64_t)(uintptr_t)points;
+	req.count_handles = 1;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &req) == 0;
+}
+
+static bool
+syncobj_timeline_wait_point(int fd, uint32_t handle, uint64_t point)
+{
+	struct drm_syncobj_timeline_wait req;
+	uint32_t handles[1] = { handle };
+	uint64_t points[1] = { point };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.points = (uint64_t)(uintptr_t)points;
+	req.count_handles = 1;
+	req.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &req) == 0;
+}
+
+static bool
+syncobj_transfer_point(int fd, uint32_t dst_handle, uint64_t dst_point,
+    uint32_t src_handle, uint64_t src_point, uint32_t flags)
+{
+	struct drm_syncobj_transfer req;
+
+	memset(&req, 0, sizeof(req));
+	req.src_handle = src_handle;
+	req.dst_handle = dst_handle;
+	req.src_point = src_point;
+	req.dst_point = dst_point;
+	req.flags = flags;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &req) == 0;
+}
+
+static void
+check_syncobj_transfer_contract(int fd)
+{
+	uint32_t binary_src = 0;
+	uint32_t timeline_src = 0;
+	uint32_t timeline_dst = 0;
+	uint32_t missing_dst = 0;
+	bool ok;
+
+	ok = syncobj_create_handle(fd, &binary_src);
+	check(ok, "SYNCOBJ_TRANSFER creates binary source syncobj");
+	ok = ok && syncobj_create_handle(fd, &timeline_dst);
+	check(ok, "SYNCOBJ_TRANSFER creates destination syncobj");
+	if (!ok)
+		goto out;
+
+	check(syncobj_signal_handle(fd, binary_src),
+	    "SYNCOBJ_TRANSFER binary source signal succeeds");
+	check(syncobj_transfer_point(fd, timeline_dst, 5, binary_src, 0, 0),
+	    "SYNCOBJ_TRANSFER binary source to timeline point succeeds");
+	check(syncobj_timeline_wait_point(fd, timeline_dst, 5),
+	    "SYNCOBJ_TRANSFER destination timeline point waits successfully");
+
+	ok = syncobj_create_handle(fd, &timeline_src);
+	check(ok, "SYNCOBJ_TRANSFER creates timeline source syncobj");
+	if (ok) {
+		check(syncobj_timeline_signal_handle(fd, timeline_src, 7),
+		    "SYNCOBJ_TRANSFER source timeline signal succeeds");
+		check(syncobj_transfer_point(fd, timeline_dst, 9,
+		    timeline_src, 7, 0),
+		    "SYNCOBJ_TRANSFER timeline source to timeline point succeeds");
+		check(syncobj_timeline_wait_point(fd, timeline_dst, 9),
+		    "SYNCOBJ_TRANSFER copied timeline point waits successfully");
+		check(!syncobj_transfer_point(fd, timeline_dst, 11,
+		    timeline_src, 99, 0),
+		    "SYNCOBJ_TRANSFER rejects missing source point");
+	}
+
+	ok = syncobj_create_handle(fd, &missing_dst);
+	check(ok, "SYNCOBJ_TRANSFER creates missing-source destination syncobj");
+	if (ok)
+		check(!syncobj_transfer_point(fd, missing_dst, 3,
+		    missing_dst, 0, 0),
+		    "SYNCOBJ_TRANSFER rejects source with no fence");
+
+out:
+	syncobj_destroy_handle(fd, missing_dst);
+	syncobj_destroy_handle(fd, timeline_src);
+	syncobj_destroy_handle(fd, timeline_dst);
+	syncobj_destroy_handle(fd, binary_src);
+}
+
+static bool
 nouveau_channel_alloc(int fd, int32_t *channel_out)
 {
 	struct drm_nouveau_channel_alloc req;
@@ -6387,6 +6495,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
 	    "UNIVERSAL_PLANES");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
+	check_syncobj_transfer_contract(fd);
 
 	resources = drmModeGetResources(fd);
 	if (resources == NULL) {
