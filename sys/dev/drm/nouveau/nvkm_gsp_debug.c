@@ -623,6 +623,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	sbuf_cat(sb, "\nkms\n");
 	sbuf_printf(sb, "auto_count = %llu\n",
 	    (unsigned long long)sc->kms_auto_count);
+	sbuf_printf(sb, "connector_fill_modes_count = %llu\n",
+	    (unsigned long long)sc->kms_connector_fill_modes_count);
 	sbuf_printf(sb, "hotplug_count = %llu\n",
 	    (unsigned long long)sc->kms_hotplug_count);
 	sbuf_printf(sb, "hotplug_changed_count = %llu\n",

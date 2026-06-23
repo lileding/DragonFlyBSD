@@ -487,6 +487,8 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	uint32_t len = NVKM_KMS_EDID_BUFSIZE;
 	int n = 0;
 
+	nc->sc->kms_connector_fill_modes_count++;
+
 	buf = kzalloc(NVKM_KMS_EDID_BUFSIZE, GFP_KERNEL);
 	if (buf == NULL)
 		return (0);

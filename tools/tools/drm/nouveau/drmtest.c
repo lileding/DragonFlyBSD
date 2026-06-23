@@ -188,6 +188,8 @@ static bool read_color_counter_snapshot(
     struct color_counter_snapshot *snapshot, const char *stage);
 static bool read_pageflip_counter_snapshot(
     struct pageflip_counter_snapshot *snapshot, const char *stage);
+static bool read_connector_fill_modes_count(uint64_t *count_out,
+    const char *stage);
 
 static void
 check(bool ok, const char *what)
@@ -359,6 +361,104 @@ check_deprecated_master_mode_ioctl_contract(int fd, uint32_t connector_id)
 	check(ret == 0, "master legacy DetachMode no-op succeeds");
 	if (ret != 0)
 		printf("    master legacy DetachMode errno=%d\n", saved_errno);
+}
+
+static bool
+raw_getconnector_for_reprobe(int fd, uint32_t connector_id, const char *label,
+    uint32_t *count_modes_out)
+{
+	struct drm_mode_get_connector get_connector;
+	char text[192];
+	int saved_errno;
+	int ret;
+
+	*count_modes_out = 0;
+	memset(&get_connector, 0, sizeof(get_connector));
+	get_connector.connector_id = connector_id;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &get_connector);
+	saved_errno = errno;
+	snprintf(text, sizeof(text), "%s GETCONNECTOR count_modes=0 succeeds",
+	    label);
+	check(ret == 0, text);
+	if (ret != 0) {
+		printf("    %s GETCONNECTOR errno=%d\n", label, saved_errno);
+		return false;
+	}
+
+	snprintf(text, sizeof(text), "%s GETCONNECTOR returns requested connector",
+	    label);
+	check(get_connector.connector_id == connector_id, text);
+	snprintf(text, sizeof(text), "%s GETCONNECTOR returns cached modes",
+	    label);
+	check(get_connector.count_modes > 0, text);
+	*count_modes_out = get_connector.count_modes;
+	return true;
+}
+
+/*
+ * check_getconnector_reprobe_master_contract()
+ *
+ * Ownership:
+ *   Borrows a connected connector object ID from the caller.  Opens one
+ *   secondary DRM fd and closes it before return.  The helper does not create,
+ *   retain, or destroy any KMS object.
+ *
+ * Lifetime:
+ *   The fill_modes counter is a diagnostic snapshot from dev.drm.0.state.  It
+ *   is only compared across the immediately adjacent raw GETCONNECTOR calls.
+ *   A later hotplug, modeset owner, or probe may legitimately change it.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  The caller keeps the original fd as the
+ *   current master.  The secondary fd is intentionally a non-current-master
+ *   reader and must not trigger the connector fill_modes path.
+ */
+static void
+check_getconnector_reprobe_master_contract(int master_fd,
+    uint32_t connector_id)
+{
+	uint64_t before_master;
+	uint64_t after_master;
+	uint64_t before_non_master;
+	uint64_t after_non_master;
+	uint32_t mode_count;
+	int secondary_fd;
+
+	if (!read_connector_fill_modes_count(&before_master,
+	    "master GETCONNECTOR reprobe"))
+		return;
+	if (raw_getconnector_for_reprobe(master_fd, connector_id, "master",
+	    &mode_count)) {
+		if (read_connector_fill_modes_count(&after_master,
+		    "master GETCONNECTOR reprobe result")) {
+			check(after_master > before_master,
+			    "master GETCONNECTOR count_modes=0 triggers connector fill_modes");
+		}
+	}
+
+	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	check(secondary_fd >= 0, "non-master GETCONNECTOR opens secondary card fd");
+	if (secondary_fd < 0)
+		return;
+
+	if (!read_connector_fill_modes_count(&before_non_master,
+	    "non-master GETCONNECTOR reprobe")) {
+		check(close(secondary_fd) == 0,
+		    "non-master GETCONNECTOR closes secondary card fd");
+		return;
+	}
+	if (raw_getconnector_for_reprobe(secondary_fd, connector_id,
+	    "non-master", &mode_count)) {
+		if (read_connector_fill_modes_count(&after_non_master,
+		    "non-master GETCONNECTOR reprobe result")) {
+			check(after_non_master == before_non_master,
+			    "non-master GETCONNECTOR count_modes=0 does not trigger connector fill_modes");
+		}
+	}
+	check(close(secondary_fd) == 0,
+	    "non-master GETCONNECTOR closes secondary card fd");
 }
 
 static const char *
@@ -3612,6 +3712,28 @@ state_string_from_text(const char *text, const char *key, char *value_out,
 		line = next_line + 1;
 	}
 	return false;
+}
+
+static bool
+read_connector_fill_modes_count(uint64_t *count_out, const char *stage)
+{
+	char text[192];
+	char *state;
+	bool ok;
+
+	ok = read_drm_state_text(&state);
+	snprintf(text, sizeof(text), "DRM state is readable before %s", stage);
+	check(ok, text);
+	if (!ok)
+		return false;
+
+	ok = state_counter_from_text(state, "connector_fill_modes_count",
+	    count_out);
+	snprintf(text, sizeof(text),
+	    "connector fill_modes counter is present before %s", stage);
+	check(ok, text);
+	free(state);
+	return ok;
 }
 
 static bool
@@ -7687,6 +7809,7 @@ main(void)
 	drmModeRes *resources;
 	bool deprecated_mode_noop_done = false;
 	bool expect_no_connected;
+	uint32_t connected_connector_id = 0;
 	int connected_count = 0;
 	int fd;
 
@@ -7756,6 +7879,9 @@ main(void)
 		}
 		check_connector(fd, connector, resources, expect_no_connected,
 		    &connected_count);
+		if (connector->connection == DRM_MODE_CONNECTED &&
+		    connected_connector_id == 0)
+			connected_connector_id = connector->connector_id;
 		if (!deprecated_mode_noop_done &&
 		    connector->connection == DRM_MODE_CONNECTED) {
 			check_deprecated_master_mode_ioctl_contract(fd,
@@ -7772,6 +7898,11 @@ main(void)
 		    "at least one connected connector exposed");
 		check(deprecated_mode_noop_done,
 		    "connected connector supports deprecated master mode no-op probe");
+		check(connected_connector_id != 0,
+		    "connected connector supports GETCONNECTOR reprobe probe");
+		if (connected_connector_id != 0)
+			check_getconnector_reprobe_master_contract(fd,
+			    connected_connector_id);
 	}
 	check_connected_mode_list_atomic_contract(fd, resources,
 	    expect_no_connected);
