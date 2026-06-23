@@ -141,6 +141,18 @@ struct modeset_counter_snapshot {
 	char display_audit_pending_op[32];
 };
 
+struct color_counter_snapshot {
+	uint64_t atomic_tail_color_op_count;
+	uint64_t atomic_tail_last_color_op_count;
+	uint64_t color_degamma_lut_count;
+	uint64_t color_ctm_count;
+	uint64_t color_gamma_lut_count;
+	uint64_t commit_error_count;
+	uint64_t atomic_tail_active;
+	uint64_t atomic_tail_stage;
+	uint64_t display_audit_pending_valid;
+};
+
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
     uint32_t plane_id, const char *name, uint64_t value);
 static bool create_dumb_buffer_for(int fd, uint32_t width, uint32_t height,
@@ -154,6 +166,8 @@ static bool add_linear_framebuffer(int fd, uint32_t width, uint32_t height,
     uint32_t format, uint32_t handle, uint32_t pitch, uint32_t *fb_id_out,
     const char *what);
 static void remove_framebuffer(int fd, uint32_t fb_id, const char *what);
+static bool read_color_counter_snapshot(
+    struct color_counter_snapshot *snapshot, const char *stage);
 static bool read_pageflip_counter_snapshot(
     struct pageflip_counter_snapshot *snapshot, const char *stage);
 
@@ -962,7 +976,9 @@ static bool
 create_pending_exec_sync_file(int fd, int32_t channel,
     struct exec_sync_file *sync_file)
 {
-	static const uint32_t batch_counts[] = { 64, 256, 1024, 4096 };
+	static const uint32_t batch_counts[] = {
+		64, 256, 1024, 4096, 16384, 65536
+	};
 	int saved_errno = 0;
 
 	sync_file->fd = -1;
@@ -1042,6 +1058,36 @@ atomic_crtc_color_test_only_commit(int fd, uint32_t crtc_id,
 	errno = 0;
 	ret = drmModeAtomicCommit(fd, req,
 	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+static int
+atomic_crtc_color_commit(int fd, uint32_t crtc_id, uint32_t degamma_blob,
+    uint32_t ctm_blob, uint32_t gamma_blob, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_crtc_property(fd, req, crtc_id, "DEGAMMA_LUT",
+	    degamma_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "CTM", ctm_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "GAMMA_LUT",
+	    gamma_blob)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
 	*saved_errno = errno;
 	drmModeAtomicFree(req);
 	return ret;
@@ -1600,6 +1646,163 @@ out:
 	    "DESTROY_BLOB succeeds for 1024-entry identity LUT");
 }
 
+static bool
+check_crtc_blob_property_equals(int fd, uint32_t crtc_id, const char *name,
+    uint32_t expected, const char *what)
+{
+	uint64_t value;
+
+	if (!get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    name, &value, "active CRTC color runtime probe"))
+		return false;
+	check(value == expected, what);
+	return value == expected;
+}
+
+/*
+ * check_atomic_crtc_color_runtime_contract()
+ *
+ * Ownership:
+ *   Owns temporary LUT/CTM blobs until the restore commit has been attempted.
+ *   The active CRTC state borrows blob IDs through atomic KMS; the original
+ *   blob IDs are read-only snapshots and are restored without taking ownership.
+ *
+ * Lifetime:
+ *   Mutates the active CRTC by installing identity degamma, CTM, and gamma
+ *   blobs, then restores the exact original blob IDs.  The committed identity
+ *   blobs must be visible through GETPROPERTY and must drive the display color
+ *   tail before the blobs are released.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The driver serializes both commits under
+ *   normal modeset locks; state counters are sampled only after each commit
+ *   returns and the KMS tail has reached its completion point.
+ */
+static void
+check_atomic_crtc_color_runtime_contract(int fd, uint32_t crtc_id)
+{
+	struct color_counter_snapshot before;
+	struct color_counter_snapshot after_commit;
+	struct color_counter_snapshot after_restore;
+	uint64_t old_degamma_blob;
+	uint64_t old_ctm_blob;
+	uint64_t old_gamma_blob;
+	uint32_t lut1024_blob = 0;
+	uint32_t ctm_blob = 0;
+	bool committed = false;
+	bool restored = false;
+	int saved_errno = 0;
+	int ret;
+
+	if (!get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "DEGAMMA_LUT", &old_degamma_blob,
+	    "active CRTC color runtime probe") ||
+	    !get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "CTM", &old_ctm_blob, "active CRTC color runtime probe") ||
+	    !get_property_value_checked(fd, crtc_id, DRM_MODE_OBJECT_CRTC,
+	    "GAMMA_LUT", &old_gamma_blob,
+	    "active CRTC color runtime probe"))
+		return;
+	check(old_degamma_blob <= UINT32_MAX,
+	    "active CRTC DEGAMMA_LUT blob id fits uint32_t");
+	check(old_ctm_blob <= UINT32_MAX,
+	    "active CRTC CTM blob id fits uint32_t");
+	check(old_gamma_blob <= UINT32_MAX,
+	    "active CRTC GAMMA_LUT blob id fits uint32_t");
+	if (old_degamma_blob > UINT32_MAX || old_ctm_blob > UINT32_MAX ||
+	    old_gamma_blob > UINT32_MAX)
+		return;
+
+	if (!read_color_counter_snapshot(&before, "CRTC color runtime probe"))
+		return;
+	if (!create_identity_lut_blob(fd, 1024, &lut1024_blob,
+	    "CREATE_BLOB succeeds for runtime 1024-entry identity LUT"))
+		goto out;
+	if (!create_identity_ctm_blob(fd, &ctm_blob,
+	    "CREATE_BLOB succeeds for runtime identity CTM"))
+		goto out;
+
+	ret = atomic_crtc_color_commit(fd, crtc_id, lut1024_blob, ctm_blob,
+	    lut1024_blob, &saved_errno);
+	if (ret != 0) {
+		printf("    CRTC color runtime commit errno=%d\n",
+		    saved_errno);
+		check(false, "atomic CRTC color runtime commit succeeds");
+		goto out;
+	}
+	committed = true;
+	check(true, "atomic CRTC color runtime commit succeeds");
+	check_crtc_blob_property_equals(fd, crtc_id, "DEGAMMA_LUT",
+	    lut1024_blob, "atomic CRTC color runtime DEGAMMA_LUT is applied");
+	check_crtc_blob_property_equals(fd, crtc_id, "CTM", ctm_blob,
+	    "atomic CRTC color runtime CTM is applied");
+	check_crtc_blob_property_equals(fd, crtc_id, "GAMMA_LUT",
+	    lut1024_blob, "atomic CRTC color runtime GAMMA_LUT is applied");
+
+	if (read_color_counter_snapshot(&after_commit,
+	    "CRTC color runtime commit")) {
+		check(after_commit.commit_error_count ==
+		    before.commit_error_count,
+		    "atomic CRTC color runtime commit does not increment commit_error_count");
+		check(after_commit.color_degamma_lut_count >
+		    before.color_degamma_lut_count,
+		    "atomic CRTC color runtime commit programs degamma LUT");
+		check(after_commit.color_ctm_count > before.color_ctm_count,
+		    "atomic CRTC color runtime commit programs CTM");
+		check(after_commit.color_gamma_lut_count >
+		    before.color_gamma_lut_count,
+		    "atomic CRTC color runtime commit programs gamma LUT");
+		check(after_commit.atomic_tail_active == 0 &&
+		    after_commit.atomic_tail_stage == 0,
+		    "atomic CRTC color runtime commit leaves tail idle");
+		check(after_commit.display_audit_pending_valid == 0,
+		    "atomic CRTC color runtime commit leaves no pending display audit");
+	}
+
+	ret = atomic_crtc_color_commit(fd, crtc_id,
+	    (uint32_t)old_degamma_blob, (uint32_t)old_ctm_blob,
+	    (uint32_t)old_gamma_blob, &saved_errno);
+	if (ret != 0) {
+		printf("    CRTC color runtime restore errno=%d\n",
+		    saved_errno);
+		check(false, "atomic CRTC color runtime restore commit succeeds");
+		goto out;
+	}
+	restored = true;
+	check(true, "atomic CRTC color runtime restore commit succeeds");
+	check_crtc_blob_property_equals(fd, crtc_id, "DEGAMMA_LUT",
+	    (uint32_t)old_degamma_blob,
+	    "atomic CRTC color runtime DEGAMMA_LUT is restored");
+	check_crtc_blob_property_equals(fd, crtc_id, "CTM",
+	    (uint32_t)old_ctm_blob,
+	    "atomic CRTC color runtime CTM is restored");
+	check_crtc_blob_property_equals(fd, crtc_id, "GAMMA_LUT",
+	    (uint32_t)old_gamma_blob,
+	    "atomic CRTC color runtime GAMMA_LUT is restored");
+
+	if (read_color_counter_snapshot(&after_restore,
+	    "CRTC color runtime restore")) {
+		check(after_restore.commit_error_count ==
+		    before.commit_error_count,
+		    "atomic CRTC color runtime restore does not increment commit_error_count");
+		check(after_restore.atomic_tail_active == 0 &&
+		    after_restore.atomic_tail_stage == 0,
+		    "atomic CRTC color runtime restore leaves tail idle");
+		check(after_restore.display_audit_pending_valid == 0,
+		    "atomic CRTC color runtime restore leaves no pending display audit");
+	}
+
+out:
+	if (committed && !restored) {
+		printf("    CRTC color runtime probe could not restore original "
+		    "state; leaving failure visible to caller\n");
+	}
+	destroy_property_blob(fd, ctm_blob,
+	    "DESTROY_BLOB succeeds for runtime identity CTM");
+	destroy_property_blob(fd, lut1024_blob,
+	    "DESTROY_BLOB succeeds for runtime 1024-entry identity LUT");
+}
+
 static void
 dump_properties(int fd, uint32_t object_id, uint32_t object_type,
     const char *object_name)
@@ -2122,6 +2325,46 @@ read_modeset_counter_snapshot(struct modeset_counter_snapshot *snapshot,
 		    snapshot->display_audit_pending_op,
 		    sizeof(snapshot->display_audit_pending_op));
 	snprintf(text, sizeof(text), "modeset counters are present before %s",
+	    stage);
+	check(ok, text);
+	free(state);
+	return ok;
+}
+
+static bool
+read_color_counter_snapshot(struct color_counter_snapshot *snapshot,
+    const char *stage)
+{
+	char text[160];
+	char *state;
+	bool ok;
+
+	ok = read_drm_state_text(&state);
+	snprintf(text, sizeof(text), "DRM state is readable before %s", stage);
+	check(ok, text);
+	if (!ok)
+		return false;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	ok = state_counter_from_text(state, "atomic_tail_color_op_count",
+	    &snapshot->atomic_tail_color_op_count) &&
+	    state_counter_from_text(state, "atomic_tail_last_color_op_count",
+	    &snapshot->atomic_tail_last_color_op_count) &&
+	    state_counter_from_text(state, "color_degamma_lut_count",
+	    &snapshot->color_degamma_lut_count) &&
+	    state_counter_from_text(state, "color_ctm_count",
+	    &snapshot->color_ctm_count) &&
+	    state_counter_from_text(state, "color_gamma_lut_count",
+	    &snapshot->color_gamma_lut_count) &&
+	    state_counter_from_text(state, "commit_error_count",
+	    &snapshot->commit_error_count) &&
+	    state_counter_from_text(state, "atomic_tail_active",
+	    &snapshot->atomic_tail_active) &&
+	    state_counter_from_text(state, "atomic_tail_stage",
+	    &snapshot->atomic_tail_stage) &&
+	    state_counter_from_text(state, "display_audit_pending_valid",
+	    &snapshot->display_audit_pending_valid);
+	snprintf(text, sizeof(text), "color counters are present before %s",
 	    stage);
 	check(ok, text);
 	free(state);
@@ -3521,6 +3764,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 	    &active_crtc_height);
 	check(have_active_crtc_size,
 	    "active CRTC mode size available for primary panning probe");
+	if (have_active_crtc)
+		check_atomic_crtc_color_runtime_contract(fd, active_crtc_id);
 
 	printf("planes: count=%u\n", resources->count_planes);
 	check(resources->count_planes > 0, "at least one KMS plane exposed");

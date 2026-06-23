@@ -2986,17 +2986,53 @@ nvkm_atomic_tail_plane_needs_disable(struct drm_atomic_state *state,
 }
 
 /*
- * Decide whether a committed plane state transition needs hardware update.
+ * nvkm_atomic_tail_plane_needs_color_update()
  *
  * Ownership:
- *   Borrows the DRM atomic state and its old/new plane states.  It owns no
- *   plane, CRTC, or framebuffer references.
+ *   Borrows the DRM atomic state, the KMS plane object, and the new plane
+ *   state.  It owns no plane, CRTC, color blob, or framebuffer reference.
  *
  * Lifetime:
- *   Valid only while the atomic commit tail owns @state.  No-op atomic commits
- *   that merely carry fences, events, or unchanged property values must return
- *   false here; their completion is handled by the DRM helper tail without
- *   reprogramming display hardware.
+ *   Valid only while the atomic commit tail owns @state.  This helper detects
+ *   a primary plane that was added solely because its CRTC color state needs
+ *   window ILUT/CSC programming; the plane geometry may otherwise be unchanged.
+ *
+ * Threading:
+ *   Called only from the serialized commit-tail owner.  It performs no
+ *   hardware IO and does not mutate DRM state.
+ */
+static bool
+nvkm_atomic_tail_plane_needs_color_update(struct drm_atomic_state *state,
+    struct drm_plane *plane, const struct drm_plane_state *new_plane_state)
+{
+	struct drm_crtc_state *crtc_state;
+
+	if (state == NULL || plane == NULL || new_plane_state == NULL ||
+	    new_plane_state->crtc == NULL)
+		return (false);
+	if (new_plane_state->crtc->primary != plane)
+		return (false);
+
+	crtc_state = drm_atomic_get_new_crtc_state(state, new_plane_state->crtc);
+	if (crtc_state == NULL)
+		return (false);
+
+	return (crtc_state->active && crtc_state->color_mgmt_changed &&
+	    !drm_atomic_crtc_needs_modeset(crtc_state) &&
+	    nvkm_crtc_color_needs_window(crtc_state));
+}
+
+/*
+ * nvkm_atomic_tail_plane_needs_update()
+ *
+ * Ownership:
+ *   Borrows the DRM atomic state, the KMS plane object, and old/new plane
+ *   states.  It owns no plane, CRTC, color blob, or framebuffer reference.
+ *
+ * Lifetime:
+ *   Valid only while the atomic commit tail owns @state.  Unchanged planes are
+ *   skipped unless the plane was explicitly pulled into the atomic state to
+ *   carry CRTC window-side color programming for this commit.
  *
  * Threading:
  *   Called only from the serialized commit-tail owner.  It performs no
@@ -3004,7 +3040,7 @@ nvkm_atomic_tail_plane_needs_disable(struct drm_atomic_state *state,
  */
 static bool
 nvkm_atomic_tail_plane_needs_update(struct drm_atomic_state *state,
-    const struct drm_plane_state *old_plane_state,
+    struct drm_plane *plane, const struct drm_plane_state *old_plane_state,
     const struct drm_plane_state *new_plane_state)
 {
 	bool new_visible;
@@ -3015,7 +3051,9 @@ nvkm_atomic_tail_plane_needs_update(struct drm_atomic_state *state,
 
 	return (!nvkm_atomic_plane_visible(old_plane_state) ||
 	    nvkm_atomic_plane_changed(old_plane_state, new_plane_state) ||
-	    nvkm_atomic_crtc_modeset(state, new_plane_state->crtc));
+	    nvkm_atomic_crtc_modeset(state, new_plane_state->crtc) ||
+	    nvkm_atomic_tail_plane_needs_color_update(state, plane,
+	    new_plane_state));
 }
 
 static void
@@ -3328,7 +3366,7 @@ nvkm_atomic_tail_commit_planes(struct nvkm_display_tail_context *tail,
 
 		disabling = nvkm_atomic_tail_plane_needs_disable(state,
 		    old_plane_state, new_plane_state);
-		updating = nvkm_atomic_tail_plane_needs_update(state,
+		updating = nvkm_atomic_tail_plane_needs_update(state, plane,
 		    old_plane_state, new_plane_state);
 		if (active_only) {
 			if (!disabling &&
