@@ -619,6 +619,8 @@ def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
              "Xwayland server started")
         emit("Xserver is ready" in text,
              "Xwayland server became ready")
+        emit(bool(re.search(r"New xwayland surface", text, re.I)),
+             "Xwayland created an X11 surface")
 
 
 def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
@@ -637,6 +639,21 @@ def report_xwayland_glxinfo(out_dir: pathlib.Path, emit) -> None:
          "Xwayland glxinfo is not software renderer")
     emit(not has_error_text(text),
          "Xwayland glxinfo output has no errors")
+
+
+def report_xwayland_glxgears(out_dir: pathlib.Path, emit) -> None:
+    path = out_dir / "glxgears.xwayland"
+    if not path.exists():
+        return
+
+    gears_rc = command_return_code(path)
+    emit(gears_rc in (0, 124), f"Xwayland glxgears rc={gears_rc}")
+    text = captured_text(path)
+    emit(bool(re.search(r"GL_RENDERER|GL_VERSION|frames in|GLXGEARS_START",
+                        text, re.I)),
+         "Xwayland glxgears produced renderer/frame/marker output")
+    emit(not has_error_text(text),
+         "Xwayland glxgears output has no errors")
 
 
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
@@ -940,6 +957,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
 
     report_wayland_log(out_dir, emit)
     report_xwayland_glxinfo(out_dir, emit)
+    report_xwayland_glxgears(out_dir, emit)
 
     dark_before = parse_state(out_dir / "drm_state.console_dark_before")
     dark_after = parse_state(out_dir / "drm_state.console_dark_after")
