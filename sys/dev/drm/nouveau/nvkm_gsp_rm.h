@@ -424,8 +424,7 @@ int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
  *   Called from the serialized atomic commit tail. Sysctl readers may sample
  *   the transition locklessly; the audit record is diagnostic state only.
  */
-void	 nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc,
-	     bool publish);
+void	 nvkm_dispnv50_publish_pending_flip(struct nvkm_softc *sc);
 int	 nvkm_dispnv50_plane_disable(struct nvkm_softc *sc, uint32_t win);
 /*
  * Ownership:

@@ -1981,8 +1981,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	sc->kms_atomic_flip_done_wait_count++;
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE);
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
-	nvkm_dispnv50_publish_pending_flip(sc,
-	    tail.txn != NULL && tail.txn->async_update);
+	nvkm_dispnv50_publish_pending_flip(sc);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED);
