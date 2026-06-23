@@ -1,7 +1,10 @@
 KMOD=	vmm
-SRCS=	vmmfs.c vmmfs_vnode.c vmm_machine.c
-SRCS+=	vmm_device.c vmm_host.c vmmfs_devices.c vmmfs_machines.c
-SRCS+=	vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_console.c
+# vmm_* = pure hypervisor core (no VFS/KOBJ, host-testable, kvm.ko-reusable).
+# vmmfs_* = the filesystem/path layer (VFS nodes + KOBJ classes), vmm.ko only.
+SRCS=	vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_console.c
+SRCS+=	vmm_machine.c vmm_device.c vmm_host.c
+SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machines.c vmmfs_devices.c
+SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c
 SRCS+=	vmm_node_if.c vmm_node_if.h
 
 # The node-operation vtable is a KOBJ interface.  makeobjops turns the local

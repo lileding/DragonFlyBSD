@@ -1,51 +1,43 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The vcpu config object: the machines/<name>/vcpu register file.  It wires the
- * shared register vops to the vcpu core (parse/serialize in vmm_machine.c).
+ * The vcpu config object -- see vmm_vcpu.h.  Pure; no kernel/VFS deps.
  */
-#include <sys/param.h>
+#ifdef _KERNEL
+#include <sys/types.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/mount.h>
-#include <sys/vnode.h>
-#include <sys/kobj.h>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#endif
 
-#include "vmm_machine.h"
-#include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmm_parse.h"
+#include "vmm_vcpu.h"
 
-static int
-vmm_vcpu_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+#define VMM_VCPU_MAX	256u
+
+int
+vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len)
 {
-	return vmmfs_register_getattr(node, ap, vmm_machine_vcpu_text);
+	size_t tl;
+	const char *t = vmm_trim(buf, len, &tl);
+	uint64_t n;
+
+	if (!vmm_parse_decimal(t, tl, &n) || n < 1 || n > VMM_VCPU_MAX)
+		return 0;
+	v->count = (uint32_t)n;
+	return 1;
 }
 
-static int
-vmm_vcpu_read(struct vmmfs_node *node, struct vop_read_args *ap)
+size_t
+vmm_vcpu_format(const struct vmm_vcpu *v, char *out, size_t cap)
 {
-	return vmmfs_register_read(node, ap, vmm_machine_vcpu_text);
+	return v->count == 0 ? 0 : vmm_write_decimal(v->count, out, cap);
 }
 
-static int
-vmm_vcpu_close(struct vmmfs_node *node, struct vop_close_args *ap)
+int
+vmm_vcpu_is_set(const struct vmm_vcpu *v)
 {
-	return vmmfs_register_close(node, ap, vmm_machine_commit_vcpu);
+	return v->count != 0;
 }
-
-static kobj_method_t vmm_vcpu_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmm_vcpu_getattr),
-	KOBJMETHOD(vmm_node_read,	vmm_vcpu_read),
-	KOBJMETHOD(vmm_node_write,	vmmfs_register_write),
-	KOBJMETHOD(vmm_node_open,	vmmfs_register_open),
-	KOBJMETHOD(vmm_node_close,	vmm_vcpu_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_vcpu, vmm_vcpu_methods, 0);

@@ -1,7 +1,10 @@
 /*-
- * Host unit tests for the VMM core machine model.  Builds and runs on the host
- * (no kernel) -- the C replacement for machine.rs's #[cfg(test)] tests.
- *   cc vmm_machine.c vmm_machine_test.c -o t && ./t
+ * Host unit tests for the VMM core.  Builds and runs on the host (no kernel) --
+ * this is the proof that the vmm_ core links with no VFS/KOBJ deps (so a future
+ * kvm.ko can reuse it).  The config value objects (vcpu/mem/loader) are tested
+ * through their own object API; lifecycle/lease/events through the machine API.
+ *   cc vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_machine.c \
+ *      vmm_machine_test.c -o t && ./t
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -20,21 +23,21 @@ static char buf[1024];
 static const char *
 vcpu_s(struct vmm_machine *m)
 {
-	size_t n = vmm_machine_vcpu_text(m, buf, sizeof(buf) - 1);
+	size_t n = vmm_vcpu_format(&m->vcpu, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
 static const char *
 mem_s(struct vmm_machine *m)
 {
-	size_t n = vmm_machine_mem_text(m, buf, sizeof(buf) - 1);
+	size_t n = vmm_mem_format(&m->mem, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
 static const char *
 loader_s(struct vmm_machine *m)
 {
-	size_t n = vmm_machine_loader_text(m, buf, sizeof(buf) - 1);
+	size_t n = vmm_loader_format(&m->loader, buf, sizeof(buf) - 1);
 	buf[n] = 0;
 	return buf;
 }
@@ -53,24 +56,25 @@ main(void)
 	int i;
 	size_t n, k;
 
-	/* --- parsing (via commit + read-back) --- */
+	/* --- vcpu object: parse + read-back --- */
 	vmm_machine_init(&m);
-	CK(vmm_machine_commit_vcpu(&m, "4\n", 2) == 1, "vcpu 4");
+	CK(vmm_vcpu_parse(&m.vcpu, "4\n", 2) == 1, "vcpu 4");
 	CKSTR(vcpu_s(&m), "4\n", "vcpu readback 4");
-	CK(vmm_machine_commit_vcpu(&m, "256", 3) == 1, "vcpu 256");
-	CK(vmm_machine_commit_vcpu(&m, "257", 3) == 0, "vcpu 257 reject");
-	CK(vmm_machine_commit_vcpu(&m, "0", 1) == 0, "vcpu 0 reject");
-	CK(vmm_machine_commit_vcpu(&m, "x", 1) == 0, "vcpu x reject");
+	CK(vmm_vcpu_parse(&m.vcpu, "256", 3) == 1, "vcpu 256");
+	CK(vmm_vcpu_parse(&m.vcpu, "257", 3) == 0, "vcpu 257 reject");
+	CK(vmm_vcpu_parse(&m.vcpu, "0", 1) == 0, "vcpu 0 reject");
+	CK(vmm_vcpu_parse(&m.vcpu, "x", 1) == 0, "vcpu x reject");
 
+	/* --- mem object: parse + read-back --- */
 	vmm_machine_init(&m);
-	CK(vmm_machine_commit_mem(&m, "512M\n", 5) == 1, "mem 512M");
+	CK(vmm_mem_parse(&m.mem, "512M\n", 5) == 1, "mem 512M");
 	CKSTR(mem_s(&m), "536870912\n", "mem readback");
-	CK(vmm_machine_commit_mem(&m, "1G", 2) == 1, "mem 1G");
-	CK(vmm_machine_commit_mem(&m, "1M", 2) == 0, "mem 1M unaligned reject");
-	CK(vmm_machine_commit_mem(&m, "512Q", 4) == 0, "mem 512Q reject");
-	CK(vmm_machine_commit_mem(&m, "0", 1) == 0, "mem 0 reject");
+	CK(vmm_mem_parse(&m.mem, "1G", 2) == 1, "mem 1G");
+	CK(vmm_mem_parse(&m.mem, "1M", 2) == 0, "mem 1M unaligned reject");
+	CK(vmm_mem_parse(&m.mem, "512Q", 4) == 0, "mem 512Q reject");
+	CK(vmm_mem_parse(&m.mem, "0", 1) == 0, "mem 0 reject");
 
-	/* --- config registers: unset / commit / read-back --- */
+	/* --- config registers: unset / set / read-back / completeness --- */
 	vmm_machine_init(&m);
 	CKSTR(vcpu_s(&m), "", "vcpu unset empty");
 	CKSTR(mem_s(&m), "", "mem unset empty");
@@ -78,27 +82,27 @@ main(void)
 	CK(!vmm_machine_config_complete(&m), "not complete unset");
 
 	vmm_machine_init(&m);
-	vmm_machine_commit_vcpu(&m, "4", 1);
-	vmm_machine_commit_mem(&m, "512M", 4);
-	CK(vmm_machine_commit_loader(&m, "/bin/sh\n", 8) == 1, "loader commit");
+	vmm_vcpu_parse(&m.vcpu, "4", 1);
+	vmm_mem_parse(&m.mem, "512M", 4);
+	CK(vmm_loader_parse(&m.loader, "/bin/sh\n", 8) == 1, "loader commit");
 	CKSTR(loader_s(&m), "/bin/sh\n", "loader readback");
 	CK(vmm_machine_config_complete(&m), "complete all three");
 
 	/* invalid commit keeps old */
 	vmm_machine_init(&m);
-	vmm_machine_commit_vcpu(&m, "4", 1);
-	CK(vmm_machine_commit_vcpu(&m, "0", 1) == 0, "invalid vcpu rejected");
+	vmm_vcpu_parse(&m.vcpu, "4", 1);
+	CK(vmm_vcpu_parse(&m.vcpu, "0", 1) == 0, "invalid vcpu rejected");
 	CKSTR(vcpu_s(&m), "4\n", "invalid vcpu kept old");
-	CK(vmm_machine_commit_mem(&m, "3M", 2) == 0, "unaligned mem rejected");
+	CK(vmm_mem_parse(&m.mem, "3M", 2) == 0, "unaligned mem rejected");
 	CKSTR(mem_s(&m), "", "mem never set stays empty");
-	CK(vmm_machine_commit_loader(&m, "   ", 3) == 0, "empty loader rejected");
+	CK(vmm_loader_parse(&m.loader, "   ", 3) == 0, "empty loader rejected");
 
 	vmm_machine_init(&m);
-	vmm_machine_commit_vcpu(&m, "2", 1);
+	vmm_vcpu_parse(&m.vcpu, "2", 1);
 	CK(!vmm_machine_config_complete(&m), "incomplete after vcpu");
-	vmm_machine_commit_mem(&m, "2M", 2);
+	vmm_mem_parse(&m.mem, "2M", 2);
 	CK(!vmm_machine_config_complete(&m), "incomplete after mem");
-	vmm_machine_commit_loader(&m, "/x", 2);
+	vmm_loader_parse(&m.loader, "/x", 2);
 	CK(vmm_machine_config_complete(&m), "complete after loader");
 
 	/* --- lifecycle --- */

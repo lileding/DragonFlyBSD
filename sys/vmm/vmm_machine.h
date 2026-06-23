@@ -1,28 +1,28 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * VMM core: the pure machine model -- config parsing, the desired-state
- * registers, the lifecycle state machine, lease reference counting, and the
- * event ring.  No kernel dependencies, so the same code compiles into the
- * kernel module AND into host unit tests (vmm_machine_test.c).  The caller (the
- * vmmfs control plane) owns the storage and the locking; these functions only
- * touch the state they are given.
+ * VMM core: the machine model.  It COMPOSES the config value objects
+ * (vcpu/mem/loader) and owns the lifecycle / lease / event state.  Pure -- no
+ * kernel/VFS deps -- so it builds into the kernel module AND host unit tests,
+ * and is reusable by a future kvm.ko.  The caller owns storage + locking.
+ *
+ * Types (uint32_t/uint8_t/size_t) come from the includer.
  */
 #ifndef VMM_MACHINE_H
 #define VMM_MACHINE_H
 
-/* Types (uint32_t/uint64_t/uint8_t/size_t) come from the includer:
- * <sys/types.h> in the kernel, <stdint.h>/<stddef.h> on the host. */
+#include "vmm_vcpu.h"
+#include "vmm_mem.h"
+#include "vmm_loader.h"
 
-#define VMM_LOADER_MAX	256
 #define VMM_EVENT_CAP	32
 
 struct vmm_machine {
+	struct vmm_vcpu		vcpu;
+	struct vmm_mem		mem;
+	struct vmm_loader	loader;
+	/* lifecycle / lease / events -- the machine's own state */
 	int		stopped;
-	uint32_t	vcpu;			/* 0 = unset */
-	uint64_t	mem;			/* 0 = unset */
-	char		loader[VMM_LOADER_MAX];
-	size_t		loader_len;		/* 0 = unset */
 	uint32_t	lease_count;
 	int		armed;
 	int		deleting;
@@ -39,26 +39,7 @@ enum vmm_close_action {
 
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
 void	vmm_machine_init(struct vmm_machine *m);
-
-/* Desired-config registers.  commit_* parse the whole buffer and update the
- * desired value iff valid, returning 1 if updated, 0 if rejected (old value
- * kept).  *_text serialize the current desired value, returning bytes written
- * (0 if unset). */
-int	vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf,
-	    size_t len);
-int	vmm_machine_commit_mem(struct vmm_machine *m, const char *buf,
-	    size_t len);
-int	vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
-	    size_t len);
-size_t	vmm_machine_vcpu_text(const struct vmm_machine *m, char *out,
-	    size_t cap);
-size_t	vmm_machine_mem_text(const struct vmm_machine *m, char *out,
-	    size_t cap);
-size_t	vmm_machine_loader_text(const struct vmm_machine *m, char *out,
-	    size_t cap);
-/* Loader path without trailing newline (for start-time resolution). */
-size_t	vmm_machine_loader_path(const struct vmm_machine *m, char *out,
-	    size_t cap);
+/* All three of vcpu/mem/loader are set. */
 int	vmm_machine_config_complete(const struct vmm_machine *m);
 
 /* Lifecycle. */

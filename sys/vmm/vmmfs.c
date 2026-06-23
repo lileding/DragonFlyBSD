@@ -648,7 +648,7 @@ vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred)
 	size_t n;
 	int error;
 
-	n = vmm_machine_loader_path(&m->state, path, sizeof(path) - 1);
+	n = vmm_loader_path(&m->state.loader, path, sizeof(path) - 1);
 	if (n == 0)
 		return EINVAL;
 	path[n] = '\0';

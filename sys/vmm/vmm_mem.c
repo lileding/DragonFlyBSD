@@ -1,51 +1,68 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The mem config object: the machines/<name>/mem register file.  It wires the
- * shared register vops to the mem core (parse/serialize in vmm_machine.c).
+ * The mem config object -- see vmm_mem.h.  Pure; no kernel/VFS deps.
  */
-#include <sys/param.h>
+#ifdef _KERNEL
+#include <sys/types.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/mount.h>
-#include <sys/vnode.h>
-#include <sys/kobj.h>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#endif
 
-#include "vmm_machine.h"
-#include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmm_parse.h"
+#include "vmm_mem.h"
 
-static int
-vmm_mem_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+#define VMM_MEM_ALIGN	(2ull * 1024 * 1024)	/* large-page granularity */
+
+int
+vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
 {
-	return vmmfs_register_getattr(node, ap, vmm_machine_mem_text);
+	size_t tl;
+	const char *t = vmm_trim(buf, len, &tl);
+	uint64_t mult, v;
+	size_t dlen;
+	char last;
+
+	if (tl == 0)
+		return 0;
+	last = t[tl - 1];
+	if (last == 'K' || last == 'k') {
+		mult = 1024;
+		dlen = tl - 1;
+	} else if (last == 'M' || last == 'm') {
+		mult = 1024 * 1024;
+		dlen = tl - 1;
+	} else if (last == 'G' || last == 'g') {
+		mult = 1024 * 1024 * 1024;
+		dlen = tl - 1;
+	} else if (last >= '0' && last <= '9') {
+		mult = 1;
+		dlen = tl;
+	} else {
+		return 0;
+	}
+	if (!vmm_parse_decimal(t, dlen, &v))
+		return 0;
+	if (v > ((uint64_t)-1) / mult)
+		return 0;
+	v *= mult;
+	if (v == 0 || (v % VMM_MEM_ALIGN) != 0)
+		return 0;
+	m->bytes = v;
+	return 1;
 }
 
-static int
-vmm_mem_read(struct vmmfs_node *node, struct vop_read_args *ap)
+size_t
+vmm_mem_format(const struct vmm_mem *m, char *out, size_t cap)
 {
-	return vmmfs_register_read(node, ap, vmm_machine_mem_text);
+	return m->bytes == 0 ? 0 : vmm_write_decimal(m->bytes, out, cap);
 }
 
-static int
-vmm_mem_close(struct vmmfs_node *node, struct vop_close_args *ap)
+int
+vmm_mem_is_set(const struct vmm_mem *m)
 {
-	return vmmfs_register_close(node, ap, vmm_machine_commit_mem);
+	return m->bytes != 0;
 }
-
-static kobj_method_t vmm_mem_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmm_mem_getattr),
-	KOBJMETHOD(vmm_node_read,	vmm_mem_read),
-	KOBJMETHOD(vmm_node_write,	vmmfs_register_write),
-	KOBJMETHOD(vmm_node_open,	vmmfs_register_open),
-	KOBJMETHOD(vmm_node_close,	vmm_mem_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_mem, vmm_mem_methods, 0);

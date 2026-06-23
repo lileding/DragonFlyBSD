@@ -1,52 +1,56 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The loader config object: the machines/<name>/loader register file.  Its
- * value is the path to an executable (often a sh script) run at start.  It
- * wires the shared register vops to the loader core (vmm_machine.c).
+ * The loader config object -- see vmm_loader.h.  Pure; no kernel/VFS deps.
  */
-#include <sys/param.h>
+#ifdef _KERNEL
+#include <sys/types.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/mount.h>
-#include <sys/vnode.h>
-#include <sys/kobj.h>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#endif
 
-#include "vmm_machine.h"
-#include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmm_parse.h"
+#include "vmm_loader.h"
 
-static int
-vmm_loader_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+int
+vmm_loader_parse(struct vmm_loader *l, const char *buf, size_t len)
 {
-	return vmmfs_register_getattr(node, ap, vmm_machine_loader_text);
+	size_t pl;
+	const char *p = vmm_trim(buf, len, &pl);
+
+	if (pl == 0 || pl > VMM_LOADER_MAX)
+		return 0;
+	memcpy(l->path, p, pl);
+	l->len = pl;
+	return 1;
 }
 
-static int
-vmm_loader_read(struct vmmfs_node *node, struct vop_read_args *ap)
+size_t
+vmm_loader_format(const struct vmm_loader *l, char *out, size_t cap)
 {
-	return vmmfs_register_read(node, ap, vmm_machine_loader_text);
+	size_t need = l->len + 1;
+
+	if (l->len == 0 || need > cap)
+		return 0;
+	memcpy(out, l->path, l->len);
+	out[l->len] = '\n';
+	return need;
 }
 
-static int
-vmm_loader_close(struct vmmfs_node *node, struct vop_close_args *ap)
+size_t
+vmm_loader_path(const struct vmm_loader *l, char *out, size_t cap)
 {
-	return vmmfs_register_close(node, ap, vmm_machine_commit_loader);
+	if (l->len == 0 || l->len > cap)
+		return 0;
+	memcpy(out, l->path, l->len);
+	return l->len;
 }
 
-static kobj_method_t vmm_loader_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmm_loader_getattr),
-	KOBJMETHOD(vmm_node_read,	vmm_loader_read),
-	KOBJMETHOD(vmm_node_write,	vmmfs_register_write),
-	KOBJMETHOD(vmm_node_open,	vmmfs_register_open),
-	KOBJMETHOD(vmm_node_close,	vmm_loader_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_loader, vmm_loader_methods, 0);
+int
+vmm_loader_is_set(const struct vmm_loader *l)
+{
+	return l->len != 0;
+}
