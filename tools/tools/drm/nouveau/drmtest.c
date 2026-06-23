@@ -5151,6 +5151,49 @@ check_drm_lease_atomic_test_only(int lease_fd, uint32_t connector_id,
 	drmModeFreeCrtc(crtc);
 }
 
+static void
+check_drm_lease_encoder_filter(int lease_fd, uint32_t connector_id,
+    uint32_t crtc_id)
+{
+	drmModeConnectorPtr connector;
+	drmModeEncoderPtr encoder;
+
+	connector = drmModeGetConnector(lease_fd, connector_id);
+	check(connector != NULL,
+	    "DRM lease connector is readable for encoder filter");
+	if (connector == NULL)
+		return;
+
+	check(connector->count_encoders > 0,
+	    "DRM lease connector exposes encoder list");
+	check(connector->encoder_id != 0,
+	    "DRM lease connector has current encoder");
+	if (connector->encoder_id == 0) {
+		drmModeFreeConnector(connector);
+		return;
+	}
+	check(id_in_list(connector->encoders, connector->count_encoders,
+	    connector->encoder_id),
+	    "DRM lease current encoder is attached to connector");
+
+	encoder = drmModeGetEncoder(lease_fd, connector->encoder_id);
+	check(encoder != NULL,
+	    "DRM lease current encoder is readable");
+	if (encoder != NULL) {
+		check(encoder->crtc_id == crtc_id,
+		    "DRM lease current encoder points at leased CRTC");
+		check(encoder->possible_crtcs != 0,
+		    "DRM lease current encoder possible_crtcs is non-empty");
+		check((encoder->possible_crtcs & ~1u) == 0,
+		    "DRM lease current encoder possible_crtcs is lease-relative");
+		check((encoder->possible_crtcs & 1u) != 0,
+		    "DRM lease current encoder allows leased CRTC index");
+		drmModeFreeEncoder(encoder);
+	}
+
+	drmModeFreeConnector(connector);
+}
+
 /*
  * check_drm_lease_contract()
  *
@@ -5388,6 +5431,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	drm_lease_get_pad_error(fd);
 	drm_lease_create_error(lease_fd, lease_ids, object_count, EINVAL,
 	    "DRM lease lessee cannot create sub-lease");
+	check_drm_lease_encoder_filter(lease_fd, connector_id, active_crtc_id);
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,
 	    active_crtc_id, primary_plane_id);
 	check_drm_lease_vblank_sequence_contract(lease_fd, active_crtc_id);
