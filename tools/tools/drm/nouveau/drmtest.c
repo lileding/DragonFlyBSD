@@ -3266,6 +3266,61 @@ check_getfb_non_master_metadata_contract(uint32_t fb_id, uint32_t width,
 }
 
 /*
+ * check_dirtyfb_non_master_denied()
+ *
+ * Ownership:
+ *   Borrows a master-owned framebuffer ID from the caller.  Owns one
+ *   temporary secondary DRM fd and closes it before return.
+ *
+ * Lifetime:
+ *   The framebuffer must stay alive on the caller's master fd while this probe
+ *   runs.  The secondary fd does not retain the framebuffer or any GEM handle.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  DIRTYFB is a frontbuffer update
+ *   acknowledgement and must be rejected by the DRM_MASTER gate before the
+ *   driver framebuffer dirty callback can observe the request.
+ */
+static void
+check_dirtyfb_non_master_denied(uint32_t fb_id, uint32_t width,
+    uint32_t height)
+{
+	drmModeClip clip;
+	int fd;
+	int saved_errno;
+	int ret;
+
+	memset(&clip, 0, sizeof(clip));
+	clip.x1 = 0;
+	clip.y1 = 0;
+	clip.x2 = (uint16_t)width;
+	clip.y2 = (uint16_t)height;
+
+	errno = 0;
+	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	saved_errno = errno;
+	check(fd >= 0, "DIRTYFB non-master opens secondary card fd");
+	if (fd < 0) {
+		printf("    secondary card fd errno=%d\n", saved_errno);
+		return;
+	}
+
+	errno = 0;
+	ret = drmModeDirtyFB(fd, fb_id, &clip, 1);
+	saved_errno = errno;
+	check(ret != 0, "DIRTYFB non-master is denied");
+	if (ret == 0) {
+		printf("    DIRTYFB non-master unexpectedly succeeded\n");
+	} else {
+		printf("    DIRTYFB non-master errno=%d\n", saved_errno);
+		check(saved_errno == EACCES,
+		    "DIRTYFB non-master fails with EACCES");
+	}
+
+	check(close(fd) == 0, "DIRTYFB non-master closes secondary card fd");
+}
+
+/*
  * check_non_master_display_mutation_contract()
  *
  * Ownership:
@@ -3667,6 +3722,7 @@ check_framebuffer_uapi_contract(int fd)
 
 	ret = drmModeDirtyFB(fd, fb_id, NULL, 0);
 	check(ret == 0, "DIRTYFB accepts full-frame no-clip damage");
+	check_dirtyfb_non_master_denied(fb_id, 64, 64);
 
 	memset(&dirty, 0, sizeof(dirty));
 	dirty.fb_id = fb_id;
