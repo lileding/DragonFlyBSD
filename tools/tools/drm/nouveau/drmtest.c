@@ -4843,6 +4843,65 @@ drm_lease_list_contains(int fd, uint32_t lessee_id)
 }
 
 static void
+drm_lease_list_error(int fd, int expected_errno, const char *what)
+{
+	struct drm_mode_list_lessees list_lessees;
+	int saved_errno;
+	int ret;
+
+	memset(&list_lessees, 0, sizeof(list_lessees));
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &list_lessees);
+	saved_errno = errno;
+	check(ret != 0 && saved_errno == expected_errno, what);
+	if (ret == 0) {
+		printf("    LIST_LESSEES unexpectedly succeeded\n");
+	} else if (saved_errno != expected_errno) {
+		printf("    LIST_LESSEES errno=%d expected=%d\n",
+		    saved_errno, expected_errno);
+	}
+}
+
+static void
+check_drm_lease_atomic_unleased_connector(int owner_fd, int lease_fd,
+    uint32_t unleased_connector_id, uint32_t crtc_id)
+{
+	drmModeAtomicReqPtr req;
+	int saved_errno;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	check(req != NULL,
+	    "DRM lease atomic unleased connector allocates request");
+	if (req == NULL)
+		return;
+
+	if (!atomic_add_connector_property(owner_fd, req,
+	    unleased_connector_id, "CRTC_ID", crtc_id)) {
+		check(false,
+		    "DRM lease atomic unleased connector request is constructed");
+		drmModeAtomicFree(req);
+		return;
+	}
+	check(true, "DRM lease atomic unleased connector request is constructed");
+
+	errno = 0;
+	ret = drmModeAtomicCommit(lease_fd, req,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	saved_errno = errno;
+	check(ret != 0,
+	    "DRM lease atomic TEST_ONLY with unleased connector is rejected");
+	check(saved_errno == ENOENT,
+	    "DRM lease atomic unleased connector fails with ENOENT");
+	if (ret == 0 || saved_errno != ENOENT)
+		printf("    lease atomic unleased connector ret=%d errno=%d\n",
+		    ret, saved_errno);
+
+	drmModeAtomicFree(req);
+}
+
+static void
 check_drm_lease_atomic_test_only(int lease_fd, uint32_t connector_id,
     uint32_t crtc_id, uint32_t plane_id)
 {
@@ -5099,8 +5158,15 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 
 	check(drm_lease_list_contains(fd, lessee_id),
 	    "DRM lease LIST_LESSEES returns lessee");
+	drm_lease_list_error(lease_fd, EACCES,
+	    "DRM lease lessee LIST_LESSEES is rejected with EACCES");
+	drm_lease_create_error(lease_fd, lease_ids, object_count, EACCES,
+	    "DRM lease lessee cannot create sub-lease");
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,
 	    active_crtc_id, primary_plane_id);
+	if (unleased_connector_id != 0)
+		check_drm_lease_atomic_unleased_connector(fd, lease_fd,
+		    unleased_connector_id, active_crtc_id);
 
 	drm_lease_create_error(fd, lease_ids, object_count, EBUSY,
 	    "DRM lease duplicate live object is rejected with EBUSY");
