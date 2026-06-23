@@ -1023,6 +1023,93 @@ check_property_read_error_contract(int fd)
 	    "DRM OBJ_GETPROPERTIES bad object id fails with ENOENT");
 }
 
+/*
+ * check_property_set_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd.  The temporary resource snapshot is owned by this
+ *   function and freed before return.  No property value is changed by the
+ *   invalid requests.
+ *
+ * Lifetime:
+ *   Bad object ids must fail before property lookup.  Bad property ids use a
+ *   real connector object and must fail before atomic state allocation or
+ *   driver property callbacks.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  The DRM core serializes real property
+ *   mutation paths; this function only checks common lookup error boundaries.
+ */
+static void
+check_property_set_error_contract(int fd)
+{
+	struct drm_mode_connector_set_property connector_set_property;
+	struct drm_mode_obj_set_property object_set_property;
+	drmModeResPtr resources;
+	uint32_t connector_id;
+	int saved_errno;
+	int ret;
+
+	memset(&connector_set_property, 0, sizeof(connector_set_property));
+	connector_set_property.connector_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_SETPROPERTY,
+	    &connector_set_property);
+	saved_errno = errno;
+	check(ret != 0, "DRM SETPROPERTY rejects bad connector id");
+	check(saved_errno == ENOENT,
+	    "DRM SETPROPERTY bad connector id fails with ENOENT");
+
+	memset(&object_set_property, 0, sizeof(object_set_property));
+	object_set_property.obj_id = 0;
+	object_set_property.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY,
+	    &object_set_property);
+	saved_errno = errno;
+	check(ret != 0, "DRM OBJ_SETPROPERTY rejects bad object id");
+	check(saved_errno == ENOENT,
+	    "DRM OBJ_SETPROPERTY bad object id fails with ENOENT");
+
+	resources = drmModeGetResources(fd);
+	check(resources != NULL,
+	    "DRM property set bad-property probe reads resources");
+	if (resources == NULL)
+		return;
+	check(resources->count_connectors > 0,
+	    "DRM property set bad-property probe finds connector");
+	if (resources->count_connectors == 0) {
+		drmModeFreeResources(resources);
+		return;
+	}
+	connector_id = resources->connectors[0];
+
+	memset(&connector_set_property, 0, sizeof(connector_set_property));
+	connector_set_property.connector_id = connector_id;
+	connector_set_property.prop_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_SETPROPERTY,
+	    &connector_set_property);
+	saved_errno = errno;
+	check(ret != 0, "DRM SETPROPERTY rejects bad property id");
+	check(saved_errno == EINVAL,
+	    "DRM SETPROPERTY bad property id fails with EINVAL");
+
+	memset(&object_set_property, 0, sizeof(object_set_property));
+	object_set_property.obj_id = connector_id;
+	object_set_property.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+	object_set_property.prop_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY,
+	    &object_set_property);
+	saved_errno = errno;
+	check(ret != 0, "DRM OBJ_SETPROPERTY rejects bad property id");
+	check(saved_errno == EINVAL,
+	    "DRM OBJ_SETPROPERTY bad property id fails with EINVAL");
+
+	drmModeFreeResources(resources);
+}
+
 static void
 check_resource_lookup_error_contract(int fd)
 {
@@ -8889,6 +8976,7 @@ main(void)
 	check_wait_vblank_flag_contract(fd);
 	check_pageflip_ioctl_flag_contract(fd);
 	check_property_read_error_contract(fd);
+	check_property_set_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
