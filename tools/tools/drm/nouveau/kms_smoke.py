@@ -2380,6 +2380,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "GETFB non-master closes secondary card fd",
         "ADDFB2 rejects zero width",
         "ADDFB2 zero width fails with EINVAL",
+        "ADDFB2 rejects zero height",
+        "ADDFB2 zero height fails with EINVAL",
         "ADDFB2 rejects unknown pixel format",
         "ADDFB2 unknown pixel format fails with EINVAL",
         "ADDFB2 rejects unknown framebuffer flags",
