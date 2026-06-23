@@ -5066,6 +5066,127 @@ out_resources:
 }
 
 /*
+ * check_setcrtc_argument_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  Owns one resource snapshot, one active CRTC
+ *   snapshot, one temporary dumb BO, and one framebuffer used only to supply a
+ *   valid FB for argument-combination rejection paths; all owned objects are
+ *   released before return.
+ *
+ * Lifetime:
+ *   Invalid legacy SETCRTC argument combinations must be rejected before the
+ *   legacy set_config path can change display state.  The temporary framebuffer
+ *   is never attached to a CRTC.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM SETCRTC argument
+ *   ordering without changing scanout state.
+ */
+static void
+check_setcrtc_argument_error_contract(int fd)
+{
+	drmModeRes *resources;
+	drmModeCrtc *crtc = NULL;
+	uint32_t active_crtc_id = 0;
+	uint32_t active_crtc_index = UINT32_MAX;
+	uint32_t connector_id = 0;
+	uint32_t fb_id = 0;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	uint32_t width;
+	uint32_t height;
+	int excessive_count;
+	bool found;
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, 0, 0, 0x10000u, 0, NULL, 0, NULL);
+	saved_errno = errno;
+	check(ret != 0, "SETCRTC rejects high x source offset");
+	check(saved_errno == ERANGE,
+	    "SETCRTC high x source offset fails with ERANGE");
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, 0, 0, 0, 0x10000u, NULL, 0, NULL);
+	saved_errno = errno;
+	check(ret != 0, "SETCRTC rejects high y source offset");
+	check(saved_errno == ERANGE,
+	    "SETCRTC high y source offset fails with ERANGE");
+
+	resources = drmModeGetResources(fd);
+	check(resources != NULL, "SETCRTC argument probe reads resources");
+	if (resources == NULL)
+		return;
+
+	found = find_active_crtc(fd, resources, &active_crtc_id,
+	    &active_crtc_index);
+	check(found, "SETCRTC argument probe finds active CRTC");
+	check(!found || active_crtc_index < (uint32_t)resources->count_crtcs,
+	    "SETCRTC argument probe active CRTC index is valid");
+	if (!found)
+		goto out_resources;
+
+	crtc = drmModeGetCrtc(fd, active_crtc_id);
+	check(crtc != NULL, "SETCRTC argument probe reads active CRTC");
+	if (crtc == NULL)
+		goto out_resources;
+	check(crtc->mode_valid != 0, "SETCRTC argument probe finds active mode");
+	if (crtc->mode_valid == 0)
+		goto out_crtc;
+	width = crtc->mode.hdisplay;
+	height = crtc->mode.vdisplay;
+	check(width > 0 && height > 0,
+	    "SETCRTC argument probe active mode has size");
+	if (width == 0 || height == 0)
+		goto out_crtc;
+
+	if (!create_dumb_buffer_for(fd, width, height, 32, &handle, &pitch,
+	    "CREATE_DUMB succeeds for SETCRTC argument probe"))
+		goto out_crtc;
+	if (!add_linear_framebuffer(fd, width, height, DRM_FORMAT_XRGB8888,
+	    handle, pitch, &fb_id,
+	    "ADDFB2 accepts SETCRTC argument probe framebuffer"))
+		goto out_bo;
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, active_crtc_id, fb_id, 0, 0, NULL, 0,
+	    &crtc->mode);
+	saved_errno = errno;
+	check(ret != 0, "SETCRTC rejects mode without connectors");
+	check(saved_errno == EINVAL,
+	    "SETCRTC mode without connectors fails with EINVAL");
+
+	errno = 0;
+	ret = drmModeSetCrtc(fd, active_crtc_id, 0, 0, 0, &connector_id, 1,
+	    NULL);
+	saved_errno = errno;
+	check(ret != 0, "SETCRTC rejects connectors without mode or fb");
+	check(saved_errno == EINVAL,
+	    "SETCRTC connectors without mode or fb fail with EINVAL");
+
+	excessive_count = resources->count_connectors + 1;
+	errno = 0;
+	ret = drmModeSetCrtc(fd, active_crtc_id, fb_id, 0, 0, NULL,
+	    excessive_count, &crtc->mode);
+	saved_errno = errno;
+	check(ret != 0, "SETCRTC rejects excessive connector count");
+	check(saved_errno == EINVAL,
+	    "SETCRTC excessive connector count fails with EINVAL");
+
+out_bo:
+	remove_framebuffer(fd, fb_id,
+	    "RMFB succeeds for SETCRTC argument probe framebuffer");
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for SETCRTC argument probe BO");
+out_crtc:
+	drmModeFreeCrtc(crtc);
+out_resources:
+	drmModeFreeResources(resources);
+}
+
+/*
  * check_same_device_prime_framebuffer_contract()
  *
  * Ownership:
@@ -9214,6 +9335,7 @@ main(void)
 	check_property_set_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
 	check_setcrtc_lookup_error_contract(fd);
+	check_setcrtc_argument_error_contract(fd);
 	check_setplane_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
