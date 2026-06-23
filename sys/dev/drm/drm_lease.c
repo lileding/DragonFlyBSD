@@ -121,13 +121,15 @@ drm_lease_filter_crtcs(struct drm_file *file_priv, uint32_t crtcs)
 		return crtcs;
 
 	dev = file_priv->minor->dev;
+	mutex_lock(&dev->mode_config.idr_mutex);
 	drm_for_each_crtc(crtc, dev) {
-		if (drm_lease_held(file_priv, crtc->base.id)) {
+		if (_drm_lease_held(file_priv, crtc->base.id)) {
 			if (crtcs & drm_crtc_mask(crtc))
 				visible |= out_bit;
 			out_bit <<= 1;
 		}
 	}
+	mutex_unlock(&dev->mode_config.idr_mutex);
 
 	return visible;
 }
