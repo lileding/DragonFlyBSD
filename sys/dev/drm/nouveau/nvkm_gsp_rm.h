@@ -225,6 +225,12 @@ enum nvkm_dispnv50_dither_depth {
 	NVKM_DISPNV50_DITHER_DEPTH_AUTO = 17,
 };
 
+enum nvkm_dispnv50_underscan_mode {
+	NVKM_DISPNV50_UNDERSCAN_OFF = 0,
+	NVKM_DISPNV50_UNDERSCAN_ON = 1,
+	NVKM_DISPNV50_UNDERSCAN_AUTO = 2,
+};
+
 /*
  * Head programming parameters decoded by KMS from connector atomic state.
  *
@@ -246,6 +252,11 @@ struct nvkm_dispnv50_head_config {
 	uint8_t bpc;
 	uint32_t dither_mode;
 	uint32_t dither_depth;
+	uint32_t scaling_mode;
+	uint32_t underscan_mode;
+	uint32_t underscan_hborder;
+	uint32_t underscan_vborder;
+	bool underscan_auto_is_hdmi;
 };
 
 #define NVKM_DISPNV50_DP_DPCD_SIZE	16U
@@ -336,6 +347,28 @@ int	 nvkm_dispnv50_atomic_enable(struct nvkm_softc *sc,
 int	 nvkm_dispnv50_atomic_enable_prepared(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win,
 	     struct nvkm_dispnv50_output_prepare *prepare);
+/*
+ * Ownership:
+ *   Borrows the committed DRM CRTC state and the connector-derived HEAD
+ *   configuration for one core-channel update.  No framebuffer, connector, or
+ *   output route ownership is transferred.
+ *
+ * Lifetime:
+ *   Used for active connector private-property commits that do not require a
+ *   full modeset.  The caller supplies the nouveau-style change mask: scaler
+ *   and underscan changes emit only VIEW, while dither/bpc changes emit only
+ *   DITHER.  The function submits the same notifying core UPDATE boundary that
+ *   nouveau uses for normal HEAD set commits; notifier timeout is diagnostic
+ *   and is handled by the bridge commit helper.
+ *
+ * Threading:
+ *   Called from the serialized atomic commit tail and may sleep.  It must not
+ *   be called from interrupt context or async cursor paths.
+ */
+int	 nvkm_dispnv50_head_update(struct nvkm_softc *sc,
+	     struct drm_crtc *crtc, uint32_t head,
+	     const struct nvkm_dispnv50_head_config *config, bool update_view,
+	     bool update_dither);
 /*
  * Ownership:
  *   Borrows sc plus scalar KMS routing state for one modeset-disable commit.

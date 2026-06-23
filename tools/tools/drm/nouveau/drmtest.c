@@ -26,6 +26,9 @@
 #define NOUVEAU_FIFO_ENGINE_GR		0x01
 #define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
 
+#define NVKM_DRMTEST_UNDERSCAN_OFF	0
+#define NVKM_DRMTEST_UNDERSCAN_ON	1
+
 struct drm_nouveau_channel_alloc {
 	uint32_t fb_ctxdma_handle;
 	uint32_t tt_ctxdma_handle;
@@ -552,6 +555,7 @@ check_blob_property_default_zero(int fd, uint32_t object_id,
  * Ownership:
  *   Borrows the DRM connector object ID and opens each property through libdrm.
  *   Every drmModePropertyPtr returned by libdrm is released before return.
+ *   connector_type is the libdrm snapshot for the same connector.
  *
  * Lifetime:
  *   Reads only public KMS properties.  It does not create an atomic request,
@@ -563,16 +567,39 @@ check_blob_property_default_zero(int fd, uint32_t object_id,
  */
 static void
 check_connector_property_contract(int fd, uint32_t connector_id,
-    const char *object_name)
+    uint32_t connector_type, const char *object_name)
 {
 	check_enum_property_default(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "link-status", object_name, "Good");
+	if (connector_type != DRM_MODE_CONNECTOR_TV) {
+		check_enum_property_default(fd, connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR, "scaling mode", object_name,
+		    "None");
+	}
 	check_enum_property_default(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "dithering mode", object_name, "auto");
 	check_enum_property_default(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "dithering depth", object_name, "auto");
 	check_range_property_value(fd, connector_id,
 	    DRM_MODE_OBJECT_CONNECTOR, "max bpc", object_name, 8, 8, 8);
+	switch (connector_type) {
+	case DRM_MODE_CONNECTOR_DVID:
+	case DRM_MODE_CONNECTOR_DVII:
+	case DRM_MODE_CONNECTOR_HDMIA:
+	case DRM_MODE_CONNECTOR_DisplayPort:
+		check_enum_property_default(fd, connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR, "underscan", object_name,
+		    "off");
+		check_range_property_value(fd, connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR, "underscan hborder",
+		    object_name, 0, 128, 0);
+		check_range_property_value(fd, connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR, "underscan vborder",
+		    object_name, 0, 128, 0);
+		break;
+	default:
+		break;
+	}
 }
 
 /*
@@ -1294,7 +1321,8 @@ check_connector(int fd, drmModeConnector *connector,
 			    "connected connector current encoder is attached");
 		}
 	}
-	check_connector_property_contract(fd, connector->connector_id, name);
+	check_connector_property_contract(fd, connector->connector_id,
+	    connector->connector_type, name);
 }
 
 static void
@@ -1876,6 +1904,276 @@ atomic_add_connector_property(int fd, drmModeAtomicReqPtr req,
 	}
 	return drmModeAtomicAddProperty(req, connector_id, property_id,
 	    value) >= 0;
+}
+
+static int
+atomic_connector_scaler_commit(int fd, uint32_t connector_id,
+    uint32_t crtc_id, uint64_t scaling_mode, uint64_t underscan,
+    uint64_t underscan_hborder, uint64_t underscan_vborder, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	int ret;
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	if (!atomic_add_connector_property(fd, req, connector_id, "CRTC_ID",
+	    crtc_id) ||
+	    !atomic_add_connector_property(fd, req, connector_id,
+	    "scaling mode", scaling_mode) ||
+	    !atomic_add_connector_property(fd, req, connector_id, "underscan",
+	    underscan) ||
+	    !atomic_add_connector_property(fd, req, connector_id,
+	    "underscan hborder", underscan_hborder) ||
+	    !atomic_add_connector_property(fd, req, connector_id,
+	    "underscan vborder", underscan_vborder)) {
+		drmModeAtomicFree(req);
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	return ret;
+}
+
+static bool
+check_connector_scaler_property_value(int fd, uint32_t connector_id,
+    const char *name, uint64_t expected, const char *object_name,
+    const char *label)
+{
+	uint64_t value = 0;
+
+	if (!get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, name, &value, object_name))
+		return false;
+	check(value == expected, label);
+	return value == expected;
+}
+
+/*
+ * check_atomic_connector_scaler_runtime_contract()
+ *
+ * Ownership:
+ *   Borrows the active connector and CRTC IDs from KMS state.  No framebuffer,
+ *   blob, or GEM object ownership is transferred.
+ *
+ * Lifetime:
+ *   Performs one real connector-property atomic commit with underscan enabled,
+ *   then restores the exact property values observed before the probe.  The
+ *   visible console may shrink briefly while the test commit is live.
+ *
+ * Threading:
+ *   Single-threaded console probe.  It must run without an X/Wayland DRM
+ *   master.  The kernel serializes connector state changes with the normal
+ *   atomic modeset locks.
+ */
+static void
+check_atomic_connector_scaler_runtime_contract(int fd,
+    const drmModeRes *resources, uint32_t crtc_id)
+{
+	struct modeset_counter_snapshot before;
+	struct modeset_counter_snapshot after_scaling;
+	struct modeset_counter_snapshot after_scaling_restore;
+	struct modeset_counter_snapshot after_underscan;
+	struct modeset_counter_snapshot after_restore;
+	uint32_t connector_id = 0;
+	uint64_t saved_crtc_id = 0;
+	uint64_t saved_scaling = 0;
+	uint64_t saved_underscan = 0;
+	uint64_t saved_hborder = 0;
+	uint64_t saved_vborder = 0;
+	uint64_t probe_scaling = DRM_MODE_SCALE_CENTER;
+	char object_name[64];
+	int saved_errno = 0;
+	int ret;
+	bool committed = false;
+	bool restored = false;
+
+	if (!find_active_connector_for_crtc(fd, resources, crtc_id,
+	    &connector_id)) {
+		check(false, "active connector is available for scaler runtime probe");
+		return;
+	}
+	check(true, "active connector is available for scaler runtime probe");
+	snprintf(object_name, sizeof(object_name), "connector %u",
+	    connector_id);
+
+	if (!has_property(fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "underscan")) {
+		printf("SKIP %s underscan runtime probe: property unavailable\n",
+		    object_name);
+		return;
+	}
+
+	if (!get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &saved_crtc_id,
+	    object_name) ||
+	    !get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "scaling mode", &saved_scaling,
+	    object_name) ||
+	    !get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "underscan", &saved_underscan,
+	    object_name) ||
+	    !get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "underscan hborder", &saved_hborder,
+	    object_name) ||
+	    !get_property_value_checked(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "underscan vborder", &saved_vborder,
+	    object_name))
+		return;
+
+	check(saved_crtc_id == crtc_id,
+	    "active connector is attached to active CRTC for scaler runtime probe");
+	if (saved_crtc_id != crtc_id)
+		return;
+	if (saved_scaling == DRM_MODE_SCALE_CENTER)
+		probe_scaling = DRM_MODE_SCALE_ASPECT;
+
+	if (!read_modeset_counter_snapshot(&before,
+	    "connector scaler runtime probe"))
+		return;
+
+	ret = atomic_connector_scaler_commit(fd, connector_id, crtc_id,
+	    probe_scaling, saved_underscan, saved_hborder, saved_vborder,
+	    &saved_errno);
+	if (ret != 0) {
+		printf("    connector scaler probe commit errno=%d\n",
+		    saved_errno);
+		check(false, "atomic connector scaling-only probe commit succeeds");
+		return;
+	}
+	committed = true;
+	check(true, "atomic connector scaling-only probe commit succeeds");
+
+	check_connector_scaler_property_value(fd, connector_id,
+	    "scaling mode", probe_scaling, object_name,
+	    "atomic connector scaling-only probe updates scaling mode");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan", saved_underscan, object_name,
+	    "atomic connector scaling-only probe preserves underscan");
+
+	if (read_modeset_counter_snapshot(&after_scaling,
+	    "connector scaling-only probe")) {
+		check(after_scaling.commit_error_count == before.commit_error_count,
+		    "atomic connector scaling-only probe does not increment commit_error_count");
+		check(after_scaling.atomic_tail_active == 0 &&
+		    after_scaling.atomic_tail_stage == 0,
+		    "atomic connector scaling-only probe leaves no active tail transaction");
+		check(after_scaling.display_audit_pending_valid == 0,
+		    "atomic connector scaling-only probe leaves no pending display audit");
+	}
+
+	ret = atomic_connector_scaler_commit(fd, connector_id, crtc_id,
+	    saved_scaling, saved_underscan, saved_hborder, saved_vborder,
+	    &saved_errno);
+	if (ret != 0) {
+		printf("    connector scaling-only restore commit errno=%d\n",
+		    saved_errno);
+		check(false, "atomic connector scaling-only restore commit succeeds");
+		goto out_cleanup;
+	}
+	committed = false;
+	check(true, "atomic connector scaling-only restore commit succeeds");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "scaling mode", saved_scaling, object_name,
+	    "atomic connector scaling-only restore restores scaling mode");
+
+	if (read_modeset_counter_snapshot(&after_scaling_restore,
+	    "connector scaling-only restore")) {
+		check(after_scaling_restore.commit_error_count ==
+		    before.commit_error_count,
+		    "atomic connector scaling-only restore does not increment commit_error_count");
+		check(after_scaling_restore.atomic_tail_active == 0 &&
+		    after_scaling_restore.atomic_tail_stage == 0,
+		    "atomic connector scaling-only restore leaves no active tail transaction");
+		check(after_scaling_restore.display_audit_pending_valid == 0,
+		    "atomic connector scaling-only restore leaves no pending display audit");
+	}
+
+	ret = atomic_connector_scaler_commit(fd, connector_id, crtc_id,
+	    saved_scaling, NVKM_DRMTEST_UNDERSCAN_ON, 64, 36,
+	    &saved_errno);
+	if (ret != 0) {
+		printf("    connector underscan-only probe commit errno=%d\n",
+		    saved_errno);
+		check(false, "atomic connector underscan-only probe commit succeeds");
+		return;
+	}
+	committed = true;
+	check(true, "atomic connector underscan-only probe commit succeeds");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "scaling mode", saved_scaling, object_name,
+	    "atomic connector underscan-only probe preserves scaling mode");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan", NVKM_DRMTEST_UNDERSCAN_ON, object_name,
+	    "atomic connector underscan-only probe updates underscan");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan hborder", 64, object_name,
+	    "atomic connector underscan-only probe updates underscan hborder");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan vborder", 36, object_name,
+	    "atomic connector underscan-only probe updates underscan vborder");
+
+	if (read_modeset_counter_snapshot(&after_underscan,
+	    "connector underscan-only probe")) {
+		check(after_underscan.commit_error_count == before.commit_error_count,
+		    "atomic connector underscan-only probe does not increment commit_error_count");
+		check(after_underscan.atomic_tail_active == 0 &&
+		    after_underscan.atomic_tail_stage == 0,
+		    "atomic connector underscan-only probe leaves no active tail transaction");
+		check(after_underscan.display_audit_pending_valid == 0,
+		    "atomic connector underscan-only probe leaves no pending display audit");
+	}
+
+	ret = atomic_connector_scaler_commit(fd, connector_id, crtc_id,
+	    saved_scaling, saved_underscan, saved_hborder, saved_vborder,
+	    &saved_errno);
+	if (ret != 0) {
+		printf("    connector underscan restore commit errno=%d\n",
+		    saved_errno);
+		check(false, "atomic connector scaler restore commit succeeds");
+		goto out_cleanup;
+	}
+	check(true, "atomic connector scaler restore commit succeeds");
+	committed = false;
+	restored = true;
+
+	check_connector_scaler_property_value(fd, connector_id,
+	    "scaling mode", saved_scaling, object_name,
+	    "atomic connector scaler restore restores scaling mode");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan", saved_underscan, object_name,
+	    "atomic connector scaler restore restores underscan");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan hborder", saved_hborder, object_name,
+	    "atomic connector scaler restore restores underscan hborder");
+	check_connector_scaler_property_value(fd, connector_id,
+	    "underscan vborder", saved_vborder, object_name,
+	    "atomic connector scaler restore restores underscan vborder");
+
+	if (restored && read_modeset_counter_snapshot(&after_restore,
+	    "connector scaler restore completion")) {
+		check(after_restore.commit_error_count == before.commit_error_count,
+		    "atomic connector scaler restore does not increment commit_error_count");
+		check(after_restore.atomic_tail_active == 0 &&
+		    after_restore.atomic_tail_stage == 0,
+		    "atomic connector scaler restore leaves no active tail transaction");
+		check(after_restore.display_audit_pending_valid == 0,
+		    "atomic connector scaler restore leaves no pending display audit");
+	}
+
+out_cleanup:
+	if (committed) {
+		(void)atomic_connector_scaler_commit(fd, connector_id, crtc_id,
+		    saved_scaling, saved_underscan, saved_hborder,
+		    saved_vborder, &saved_errno);
+	}
 }
 
 static int
@@ -2867,6 +3165,8 @@ check_planes(int fd, const drmModeRes *mode_resources)
 			    active_crtc_id, plane->plane_id, name);
 			check_atomic_in_fence_runtime_contract(fd,
 			    active_crtc_id, plane->plane_id, name);
+			check_atomic_connector_scaler_runtime_contract(fd,
+			    mode_resources, active_crtc_id);
 			check_atomic_modeset_disable_restore_contract(fd,
 			    mode_resources, active_crtc_id,
 			    active_crtc_index, plane->plane_id, name);

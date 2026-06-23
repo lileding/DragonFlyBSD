@@ -81,6 +81,7 @@ struct nvkm_drm_connector {
 	uint32_t		display_id;	/* GSP displayId, e.g. 0x400 */
 	struct nvkm_event_ntfy	dp_irq_ntfy;
 	bool			dp_irq_ntfy_initialized;
+	struct drm_display_mode	*native_mode;
 };
 
 #define to_nvkm_connector(c) container_of(c, struct nvkm_drm_connector, base)
@@ -90,6 +91,9 @@ struct nvkm_connector_state {
 	uint32_t dither_mode;
 	uint32_t dither_depth;
 	uint32_t max_bpc;
+	uint32_t underscan_mode;
+	uint32_t underscan_hborder;
+	uint32_t underscan_vborder;
 };
 
 #define to_nvkm_connector_state(s) \
@@ -113,6 +117,12 @@ static const struct drm_prop_enum_list nvkm_dither_depth_enum[] = {
 	{ NVKM_DISPNV50_DITHER_DEPTH_6BPC, "6 bpc" },
 	{ NVKM_DISPNV50_DITHER_DEPTH_8BPC, "8 bpc" },
 	{ NVKM_DISPNV50_DITHER_DEPTH_AUTO, "auto" },
+};
+
+static const struct drm_prop_enum_list nvkm_underscan_enum[] = {
+	{ NVKM_DISPNV50_UNDERSCAN_OFF, "off" },
+	{ NVKM_DISPNV50_UNDERSCAN_ON, "on" },
+	{ NVKM_DISPNV50_UNDERSCAN_AUTO, "auto" },
 };
 
 static int
@@ -410,6 +420,64 @@ nvkm_connector_update_edid(struct drm_connector *connector,
 	return (ret);
 }
 
+/*
+ * Replace the connector-owned native mode snapshot.
+ *
+ * Ownership:
+ *   The connector owns nc->native_mode. The input mode is borrowed from the
+ *   current probe list and is duplicated before this helper returns.
+ *
+ * Lifetime:
+ *   The snapshot survives the probed_modes list being moved or freed by the
+ *   DRM probe helper. A later successful probe replaces it; a failed probe or
+ *   connector destroy clears it.
+ *
+ * Threading:
+ *   Call only from connector probe/destroy paths where connector mutation is
+ *   already serialized by the KMS helper.
+ */
+static void
+nvkm_connector_set_native_mode(struct nvkm_drm_connector *connector,
+    const struct drm_display_mode *mode)
+{
+	struct drm_display_mode *copy = NULL;
+
+	if (connector->native_mode != NULL) {
+		drm_mode_destroy(connector->base.dev, connector->native_mode);
+		connector->native_mode = NULL;
+	}
+
+	if (mode == NULL)
+		return;
+
+	copy = drm_mode_duplicate(connector->base.dev, mode);
+	if (copy == NULL) {
+		nvkm_infof(connector->sc->dev,
+		    "drm: connector %s display=0x%x native mode copy failed\n",
+		    connector->base.name, connector->display_id);
+		return;
+	}
+	connector->native_mode = copy;
+}
+
+static void
+nvkm_connector_snapshot_native_mode(struct drm_connector *connector)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	struct drm_display_mode *mode;
+	struct drm_display_mode *native = NULL;
+
+	list_for_each_entry(mode, &connector->probed_modes, head) {
+		if (native == NULL)
+			native = mode;
+		if ((mode->type & DRM_MODE_TYPE_PREFERRED) != 0) {
+			native = mode;
+			break;
+		}
+	}
+	nvkm_connector_set_native_mode(nc, native);
+}
+
 static int
 nvkm_connector_get_modes(struct drm_connector *connector)
 {
@@ -426,10 +494,15 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	if (nvkm_gsp_disp_read_edid(nc->sc, nc->display_id, buf, &len) == 0 &&
 	    nvkm_connector_edid_is_valid(edid, len)) {
 		if (nvkm_connector_update_edid(connector, edid,
-		    "publish") == 0)
+		    "publish") == 0) {
 			n = drm_add_edid_modes(connector, edid);
-	} else
+			nvkm_connector_snapshot_native_mode(connector);
+		} else
+			nvkm_connector_set_native_mode(nc, NULL);
+	} else {
 		nvkm_connector_update_edid(connector, NULL, "clear");
+		nvkm_connector_set_native_mode(nc, NULL);
+	}
 	kfree(buf);
 	return (n);
 }
@@ -451,13 +524,70 @@ nvkm_connector_mode_valid(struct drm_connector *connector,
 }
 
 static bool
+nvkm_connector_supports_underscan(const struct drm_connector *connector)
+{
+	switch (connector->connector_type) {
+	case DRM_MODE_CONNECTOR_DVID:
+	case DRM_MODE_CONNECTOR_DVII:
+	case DRM_MODE_CONNECTOR_HDMIA:
+	case DRM_MODE_CONNECTOR_DisplayPort:
+		return (true);
+	default:
+		return (false);
+	}
+}
+
+static bool
+nvkm_connector_supports_scaling(const struct drm_connector *connector)
+{
+	return (connector->connector_type != DRM_MODE_CONNECTOR_TV);
+}
+
+/*
+ * Adjust the hardware output timing selected for connector scaling.
+ *
+ * Ownership:
+ *   Borrows the connector native-mode snapshot and the in-flight atomic CRTC
+ *   state. No pointer is retained.
+ *
+ * Lifetime:
+ *   Only mutates the current atomic state's adjusted_mode. The native mode is
+ *   owned by the connector and may be replaced by a later EDID probe.
+ *
+ * Threading:
+ *   Runs from connector atomic_check under DRM modeset locks. It is the last
+ *   point before common mode validation where connector properties may still
+ *   reshape the pending CRTC timing.
+ */
+static void
+nvkm_connector_atomic_fix_scaling(struct drm_connector *connector,
+    const struct drm_connector_state *state, struct drm_crtc_state *crtc_state)
+{
+	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
+	const struct drm_display_mode *target = &crtc_state->mode;
+
+	if (state->scaling_mode != DRM_MODE_SCALE_NONE &&
+	    nc->native_mode != NULL)
+		target = nc->native_mode;
+
+	if (!drm_mode_equal(&crtc_state->adjusted_mode, target)) {
+		drm_mode_copy(&crtc_state->adjusted_mode, target);
+		crtc_state->mode_changed = true;
+	}
+}
+
+static bool
 nvkm_connector_state_changed(const struct nvkm_connector_state *old_state,
     const struct nvkm_connector_state *new_state)
 {
 	return (old_state == NULL ||
+	    old_state->base.scaling_mode != new_state->base.scaling_mode ||
 	    old_state->dither_mode != new_state->dither_mode ||
 	    old_state->dither_depth != new_state->dither_depth ||
-	    old_state->max_bpc != new_state->max_bpc);
+	    old_state->max_bpc != new_state->max_bpc ||
+	    old_state->underscan_mode != new_state->underscan_mode ||
+	    old_state->underscan_hborder != new_state->underscan_hborder ||
+	    old_state->underscan_vborder != new_state->underscan_vborder);
 }
 
 static int
@@ -471,14 +601,14 @@ nvkm_connector_atomic_check(struct drm_connector *connector,
 
 	if (new_state->max_bpc != 8)
 		return (-EINVAL);
-	if (state->crtc == NULL ||
-	    !nvkm_connector_state_changed(old_state, new_state))
+	if (state->crtc == NULL)
 		return (0);
 
 	crtc_state = drm_atomic_get_crtc_state(state->state, state->crtc);
 	if (IS_ERR(crtc_state))
 		return (PTR_ERR(crtc_state));
-	crtc_state->connectors_changed = true;
+	if (crtc_state->enable)
+		nvkm_connector_atomic_fix_scaling(connector, state, crtc_state);
 	return (0);
 }
 
@@ -576,6 +706,7 @@ nvkm_connector_destroy(struct drm_connector *connector)
 	struct nvkm_drm_connector *nc = to_nvkm_connector(connector);
 
 	nvkm_connector_dp_irq_unregister(nc);
+	nvkm_connector_set_native_mode(nc, NULL);
 	drm_connector_cleanup(connector);
 	kfree(nc);
 }
@@ -594,9 +725,13 @@ nvkm_connector_reset(struct drm_connector *connector)
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (state != NULL) {
 		state->base.link_status = DRM_LINK_STATUS_GOOD;
+		state->base.scaling_mode = DRM_MODE_SCALE_NONE;
 		state->dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
 		state->dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
 		state->max_bpc = 8;
+		state->underscan_mode = NVKM_DISPNV50_UNDERSCAN_OFF;
+		state->underscan_hborder = 0;
+		state->underscan_vborder = 0;
 	}
 	__drm_atomic_helper_connector_reset(connector,
 	    state != NULL ? &state->base : NULL);
@@ -651,6 +786,18 @@ nvkm_connector_atomic_set_property(struct drm_connector *connector,
 		nvkm_state->max_bpc = (uint32_t)value;
 		return (0);
 	}
+	if (property == nc->sc->kms_underscan_property) {
+		nvkm_state->underscan_mode = (uint32_t)value;
+		return (0);
+	}
+	if (property == nc->sc->kms_underscan_hborder_property) {
+		nvkm_state->underscan_hborder = (uint32_t)value;
+		return (0);
+	}
+	if (property == nc->sc->kms_underscan_vborder_property) {
+		nvkm_state->underscan_vborder = (uint32_t)value;
+		return (0);
+	}
 	return (-EINVAL);
 }
 
@@ -673,6 +820,18 @@ nvkm_connector_atomic_get_property(struct drm_connector *connector,
 	}
 	if (property == nc->sc->kms_max_bpc_property) {
 		*value = nvkm_state->max_bpc;
+		return (0);
+	}
+	if (property == nc->sc->kms_underscan_property) {
+		*value = nvkm_state->underscan_mode;
+		return (0);
+	}
+	if (property == nc->sc->kms_underscan_hborder_property) {
+		*value = nvkm_state->underscan_hborder;
+		return (0);
+	}
+	if (property == nc->sc->kms_underscan_vborder_property) {
+		*value = nvkm_state->underscan_vborder;
 		return (0);
 	}
 	return (-EINVAL);
@@ -712,13 +871,46 @@ nvkm_connector_properties_init(struct drm_device *dev, struct nvkm_softc *sc)
 		if (sc->kms_max_bpc_property == NULL)
 			return (-ENOMEM);
 	}
+	if (sc->kms_underscan_property == NULL) {
+		sc->kms_underscan_property = drm_property_create_enum(dev, 0,
+		    "underscan", nvkm_underscan_enum,
+		    nitems(nvkm_underscan_enum));
+		if (sc->kms_underscan_property == NULL)
+			return (-ENOMEM);
+	}
+	if (sc->kms_underscan_hborder_property == NULL) {
+		sc->kms_underscan_hborder_property =
+		    drm_property_create_range(dev, 0, "underscan hborder",
+		    0, 128);
+		if (sc->kms_underscan_hborder_property == NULL)
+			return (-ENOMEM);
+	}
+	if (sc->kms_underscan_vborder_property == NULL) {
+		sc->kms_underscan_vborder_property =
+		    drm_property_create_range(dev, 0, "underscan vborder",
+		    0, 128);
+		if (sc->kms_underscan_vborder_property == NULL)
+			return (-ENOMEM);
+	}
 	return (0);
 }
 
-static void
+static int
 nvkm_connector_attach_properties(struct nvkm_drm_connector *connector)
 {
 	struct nvkm_softc *sc = connector->sc;
+	int ret;
+
+	if (nvkm_connector_supports_scaling(&connector->base)) {
+		ret = drm_connector_attach_scaling_mode_property(
+		    &connector->base,
+		    BIT(DRM_MODE_SCALE_NONE) |
+		    BIT(DRM_MODE_SCALE_FULLSCREEN) |
+		    BIT(DRM_MODE_SCALE_CENTER) |
+		    BIT(DRM_MODE_SCALE_ASPECT));
+		if (ret != 0)
+			return (ret);
+	}
 
 	drm_object_attach_property(&connector->base.base,
 	    sc->kms_dither_mode_property, NVKM_DISPNV50_DITHER_MODE_AUTO);
@@ -726,6 +918,16 @@ nvkm_connector_attach_properties(struct nvkm_drm_connector *connector)
 	    sc->kms_dither_depth_property, NVKM_DISPNV50_DITHER_DEPTH_AUTO);
 	drm_object_attach_property(&connector->base.base,
 	    sc->kms_max_bpc_property, 8);
+	if (nvkm_connector_supports_underscan(&connector->base)) {
+		drm_object_attach_property(&connector->base.base,
+		    sc->kms_underscan_property,
+		    NVKM_DISPNV50_UNDERSCAN_OFF);
+		drm_object_attach_property(&connector->base.base,
+		    sc->kms_underscan_hborder_property, 0);
+		drm_object_attach_property(&connector->base.base,
+		    sc->kms_underscan_vborder_property, 0);
+	}
+	return (0);
 }
 
 /* ===== mode_config funcs ===== */
@@ -1037,6 +1239,9 @@ struct nvkm_display_txn {
 	uint32_t modeset_head_mask;
 	uint32_t disable_head_mask;
 	uint32_t enable_head_mask;
+	uint32_t head_update_head_mask;
+	uint32_t head_update_view_mask;
+	uint32_t head_update_dither_mask;
 	uint32_t primary_update_head_mask;
 	uint32_t primary_disable_head_mask;
 	uint32_t cursor_update_head_mask;
@@ -1058,6 +1263,9 @@ struct nvkm_atomic_summary {
 	uint32_t modeset_head_mask;
 	uint32_t disable_head_mask;
 	uint32_t enable_head_mask;
+	uint32_t head_update_head_mask;
+	uint32_t head_update_view_mask;
+	uint32_t head_update_dither_mask;
 	uint32_t primary_update_head_mask;
 	uint32_t primary_disable_head_mask;
 	uint32_t cursor_update_head_mask;
@@ -1222,11 +1430,62 @@ nvkm_display_txn_needs_flush_disable(struct drm_atomic_state *state,
 	return (info.output_type == DCB_OUTPUT_DP);
 }
 
+enum {
+	NVKM_DISPLAY_HEAD_UPDATE_VIEW	= 1U << 0,
+	NVKM_DISPLAY_HEAD_UPDATE_DITHER	= 1U << 1,
+};
+
+static uint32_t
+nvkm_display_txn_head_update_flags(struct drm_atomic_state *state,
+    struct drm_connector_state *old_conn_state,
+    struct drm_connector_state *new_conn_state)
+{
+	const struct nvkm_connector_state *old_nv_state;
+	const struct nvkm_connector_state *new_nv_state;
+	struct drm_crtc_state *crtc_state;
+	uint32_t flags = 0;
+
+	if (state == NULL || new_conn_state == NULL ||
+	    new_conn_state->crtc == NULL)
+		return (0);
+
+	old_nv_state = old_conn_state != NULL ?
+	    to_nvkm_connector_state_const(old_conn_state) : NULL;
+	new_nv_state = to_nvkm_connector_state_const(new_conn_state);
+	if (!nvkm_connector_state_changed(old_nv_state, new_nv_state))
+		return (0);
+
+	crtc_state = drm_atomic_get_new_crtc_state(state, new_conn_state->crtc);
+	if (crtc_state == NULL || !crtc_state->active || !crtc_state->enable)
+		return (0);
+	if (drm_atomic_crtc_needs_modeset(crtc_state))
+		return (0);
+
+	if (old_nv_state == NULL ||
+	    old_nv_state->base.scaling_mode !=
+	    new_nv_state->base.scaling_mode ||
+	    old_nv_state->underscan_mode != new_nv_state->underscan_mode ||
+	    old_nv_state->underscan_hborder !=
+	    new_nv_state->underscan_hborder ||
+	    old_nv_state->underscan_vborder !=
+	    new_nv_state->underscan_vborder)
+		flags |= NVKM_DISPLAY_HEAD_UPDATE_VIEW;
+
+	if (old_nv_state == NULL ||
+	    old_nv_state->dither_mode != new_nv_state->dither_mode ||
+	    old_nv_state->dither_depth != new_nv_state->dither_depth ||
+	    old_nv_state->max_bpc != new_nv_state->max_bpc)
+		flags |= NVKM_DISPLAY_HEAD_UPDATE_DITHER;
+
+	return (flags);
+}
+
 static void
 nvkm_atomic_build_display_txn(struct drm_atomic_state *state)
 {
 	struct nvkm_atomic_state *nv_state = to_nvkm_atomic_state(state);
 	struct nvkm_display_txn *txn = &nv_state->txn;
+	struct nvkm_softc *sc = state->dev->dev_private;
 	struct drm_connector_state *new_conn_state;
 	struct drm_connector_state *old_conn_state;
 	struct drm_crtc_state *new_crtc_state;
@@ -1237,6 +1496,7 @@ nvkm_atomic_build_display_txn(struct drm_atomic_state *state)
 	struct drm_crtc *crtc;
 	struct drm_plane *plane;
 	uint32_t head_mask;
+	uint32_t head_update_flags;
 	int i;
 
 	memset(txn, 0, sizeof(*txn));
@@ -1269,13 +1529,56 @@ nvkm_atomic_build_display_txn(struct drm_atomic_state *state)
 
 	for_each_oldnew_connector_in_state(state, connector, old_conn_state,
 	    new_conn_state, i) {
-		(void)new_conn_state;
 		if (nvkm_display_txn_needs_flush_disable(state, connector,
 		    old_conn_state))
 			txn->flush_disable = true;
+		head_update_flags = nvkm_display_txn_head_update_flags(state,
+		    old_conn_state, new_conn_state);
+		if (head_update_flags != 0 && new_conn_state->crtc != NULL) {
+			const struct nvkm_connector_state *old_nv_state =
+			    old_conn_state != NULL ?
+			    to_nvkm_connector_state_const(old_conn_state) :
+			    NULL;
+			const struct nvkm_connector_state *new_nv_state =
+			    to_nvkm_connector_state_const(new_conn_state);
+
+			head_mask = drm_crtc_mask(new_conn_state->crtc);
+			txn->head_update_head_mask |= head_mask;
+			if ((head_update_flags &
+			    NVKM_DISPLAY_HEAD_UPDATE_VIEW) != 0)
+				txn->head_update_view_mask |= head_mask;
+			if ((head_update_flags &
+			    NVKM_DISPLAY_HEAD_UPDATE_DITHER) != 0)
+				txn->head_update_dither_mask |= head_mask;
+			if (sc->kms_push_trace) {
+				nvkm_infof(sc->dev,
+				    "drm: head update txn connector=%u "
+				    "head_mask=0x%x flags=0x%x scaling %u->%u "
+				    "underscan %u/%u/%u->%u/%u/%u\n",
+				    connector->base.id, head_mask,
+				    head_update_flags,
+				    old_nv_state != NULL ?
+				    old_nv_state->base.scaling_mode :
+				    UINT32_MAX,
+				    new_nv_state->base.scaling_mode,
+				    old_nv_state != NULL ?
+				    old_nv_state->underscan_mode :
+				    UINT32_MAX,
+				    old_nv_state != NULL ?
+				    old_nv_state->underscan_hborder :
+				    UINT32_MAX,
+				    old_nv_state != NULL ?
+				    old_nv_state->underscan_vborder :
+				    UINT32_MAX,
+				    new_nv_state->underscan_mode,
+				    new_nv_state->underscan_hborder,
+				    new_nv_state->underscan_vborder);
+			}
+		}
 	}
 
 	txn->lock_core = txn->modeset_head_mask != 0 ||
+	    txn->head_update_head_mask != 0 ||
 	    txn->primary_update_head_mask != 0 ||
 	    txn->primary_disable_head_mask != 0 ||
 	    txn->cursor_update_head_mask != 0 ||
@@ -1314,6 +1617,9 @@ nvkm_atomic_summary_from_txn(struct nvkm_atomic_summary *summary,
 	summary->modeset_head_mask = txn->modeset_head_mask;
 	summary->disable_head_mask = txn->disable_head_mask;
 	summary->enable_head_mask = txn->enable_head_mask;
+	summary->head_update_head_mask = txn->head_update_head_mask;
+	summary->head_update_view_mask = txn->head_update_view_mask;
+	summary->head_update_dither_mask = txn->head_update_dither_mask;
 	summary->primary_update_head_mask = txn->primary_update_head_mask;
 	summary->primary_disable_head_mask = txn->primary_disable_head_mask;
 	summary->cursor_update_head_mask = txn->cursor_update_head_mask;
@@ -1761,6 +2067,8 @@ nvkm_kms_crtc_atom_init(struct nvkm_kms_crtc_atom *atom, struct nvkm_softc *sc,
 	atom->head.bpc = 8;
 	atom->head.dither_mode = NVKM_DISPNV50_DITHER_MODE_AUTO;
 	atom->head.dither_depth = NVKM_DISPNV50_DITHER_DEPTH_AUTO;
+	atom->head.scaling_mode = DRM_MODE_SCALE_NONE;
+	atom->head.underscan_mode = NVKM_DISPNV50_UNDERSCAN_OFF;
 }
 
 static void
@@ -1785,6 +2093,12 @@ nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
 		atom->head.bpc = state->max_bpc;
 		atom->head.dither_mode = state->dither_mode;
 		atom->head.dither_depth = state->dither_depth;
+		atom->head.scaling_mode = state->base.scaling_mode;
+		atom->head.underscan_mode = state->underscan_mode;
+		atom->head.underscan_hborder = state->underscan_hborder;
+		atom->head.underscan_vborder = state->underscan_vborder;
+		atom->head.underscan_auto_is_hdmi =
+		    conn->display_info.has_hdmi_infoframe;
 	}
 }
 
@@ -2574,6 +2888,28 @@ nvkm_crtc_commit_color_update(struct drm_crtc *crtc,
 	    "crtc color");
 }
 
+static void
+nvkm_crtc_commit_head_update(struct drm_atomic_state *state,
+    struct drm_crtc *crtc, bool update_view, bool update_dither)
+{
+	struct nvkm_crtc *nc;
+	struct nvkm_kms_crtc_atom atom;
+	int err;
+
+	if (crtc == NULL || crtc->state == NULL || !crtc->state->active)
+		return;
+
+	nc = to_nvkm_crtc(crtc);
+	nvkm_kms_crtc_atom_init(&atom, nc->sc, crtc);
+	err = nvkm_kms_crtc_atom_route(&atom, state,
+	    crtc->state->connector_mask, true);
+	if (err == 0)
+		err = nvkm_dispnv50_head_update(nc->sc, crtc, nc->head,
+		    &atom.head, update_view, update_dither);
+	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+	    "crtc head update");
+}
+
 static bool
 nvkm_atomic_tail_plane_crtc_active(const struct drm_plane_state *state)
 {
@@ -2849,6 +3185,50 @@ nvkm_atomic_tail_execute_color_ops(struct nvkm_display_tail_context *tail)
 }
 
 /*
+ * Execute connector-owned HEAD state updates for active CRTCs.
+ *
+ * Ownership:
+ *   Borrows committed CRTC and connector state from the current atomic state.
+ *   It does not retain any KMS object or output route reference.
+ *
+ * Lifetime:
+ *   Runs in the same serialized tail section as plane/color work.  It is used
+ *   only when connector private properties changed without a real modeset; a
+ *   full modeset reprograms the same HEAD fields through atomic_enable.
+ *
+ * Threading:
+ *   Called only by the commit-tail owner and may sleep while the core channel
+ *   submits the HEAD update.
+ */
+static void
+nvkm_atomic_tail_execute_head_updates(struct nvkm_display_tail_context *tail)
+{
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc_state *new_crtc_state;
+	struct drm_crtc *crtc;
+	uint32_t head_mask;
+	int i;
+
+	if (tail == NULL || tail->state == NULL || tail->txn == NULL)
+		return;
+	if (tail->txn->head_update_head_mask == 0)
+		return;
+
+	for_each_oldnew_crtc_in_state(tail->state, crtc, old_crtc_state,
+	    new_crtc_state, i) {
+		(void)old_crtc_state;
+		if (new_crtc_state == NULL || !new_crtc_state->active)
+			continue;
+		head_mask = drm_crtc_mask(crtc);
+		if ((tail->txn->head_update_head_mask & head_mask) == 0)
+			continue;
+		nvkm_crtc_commit_head_update(tail->state, crtc,
+		    (tail->txn->head_update_view_mask & head_mask) != 0,
+		    (tail->txn->head_update_dither_mask & head_mask) != 0);
+	}
+}
+
+/*
  * Local KMS plane scheduler for nvkm atomic tail.
  *
  * Ownership:
@@ -2951,6 +3331,7 @@ nvkm_atomic_tail_commit_planes(struct nvkm_display_tail_context *tail,
 		    old_crtc_state);
 	}
 	nvkm_atomic_tail_execute_color_ops(tail);
+	nvkm_atomic_tail_execute_head_updates(tail);
 
 	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state,
 	    new_crtc_state, i) {
@@ -4570,7 +4951,17 @@ nvkm_drm_kms_init(struct drm_device *dev, struct nvkm_softc *sc)
 		nc->base.polled = DRM_CONNECTOR_POLL_HPD;
 		drm_connector_helper_add(&nc->base,
 		    &nvkm_connector_helper_funcs);
-		nvkm_connector_attach_properties(nc);
+		ret = nvkm_connector_attach_properties(nc);
+		if (ret != 0) {
+			nvkm_infof(sc->dev,
+			    "drm: skip display=0x%x: connector property attach "
+			    "failed err=%d\n", display_id, ret);
+			drm_encoder_cleanup(enc);
+			drm_connector_cleanup(&nc->base);
+			kfree(nc);
+			kfree(enc);
+			continue;
+		}
 		nvkm_connector_dp_irq_register(nc, &info);
 		nvkm_infof(sc->dev,
 		    "drm: display=0x%x connector=%d encoder=%d heads=0x%x"
