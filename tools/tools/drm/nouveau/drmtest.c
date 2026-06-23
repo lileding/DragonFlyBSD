@@ -6340,6 +6340,106 @@ find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
 	return found;
 }
 
+/*
+ * check_setplane_argument_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  Owns one resource snapshot, one plane-resource
+ *   snapshot, one temporary dumb BO, and one framebuffer used only to supply a
+ *   valid FB for legacy SETPLANE argument rejection paths; all owned objects
+ *   are released before return.
+ *
+ * Lifetime:
+ *   Invalid CRTC rectangles and source rectangles must be rejected before the
+ *   legacy plane update hook can change display state.  The temporary
+ *   framebuffer is never attached to a plane.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM SETPLANE argument
+ *   ordering without changing scanout state.
+ */
+static void
+check_setplane_argument_error_contract(int fd)
+{
+	drmModeRes *resources;
+	drmModePlaneResPtr planes = NULL;
+	uint32_t active_crtc_id = 0;
+	uint32_t active_crtc_index = UINT32_MAX;
+	uint32_t primary_plane_id = 0;
+	uint32_t fb_id = 0;
+	uint32_t handle = 0;
+	uint32_t pitch = 0;
+	bool found;
+	int saved_errno;
+	int ret;
+
+	resources = drmModeGetResources(fd);
+	check(resources != NULL, "SETPLANE argument probe reads resources");
+	if (resources == NULL)
+		return;
+
+	found = find_active_crtc(fd, resources, &active_crtc_id,
+	    &active_crtc_index);
+	check(found, "SETPLANE argument probe finds active CRTC");
+	check(!found || active_crtc_index < (uint32_t)resources->count_crtcs,
+	    "SETPLANE argument probe active CRTC index is valid");
+	if (!found)
+		goto out_resources;
+
+	planes = drmModeGetPlaneResources(fd);
+	check(planes != NULL, "SETPLANE argument probe reads plane resources");
+	if (planes == NULL)
+		goto out_resources;
+
+	found = find_primary_plane_for_crtc_index(planes, fd,
+	    (int)active_crtc_index, &primary_plane_id);
+	check(found, "SETPLANE argument probe finds active primary plane");
+	if (!found)
+		goto out_planes;
+
+	if (!create_dumb_buffer_for(fd, 64, 64, 32, &handle, &pitch,
+	    "CREATE_DUMB succeeds for SETPLANE argument probe"))
+		goto out_planes;
+	if (!add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888, handle,
+	    pitch, &fb_id,
+	    "ADDFB2 accepts SETPLANE argument probe framebuffer"))
+		goto out_bo;
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, primary_plane_id, active_crtc_id, fb_id,
+	    0, INT_MAX, 0, 1, 1, 0, 0, 1u << 16, 1u << 16);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects overflowing CRTC x+w");
+	check(saved_errno == ERANGE,
+	    "SETPLANE overflowing CRTC x+w fails with ERANGE");
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, primary_plane_id, active_crtc_id, fb_id,
+	    0, 0, 0, 0x80000000u, 1, 0, 0, 1u << 16, 1u << 16);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects overflowing CRTC width");
+	check(saved_errno == ERANGE,
+	    "SETPLANE overflowing CRTC width fails with ERANGE");
+
+	errno = 0;
+	ret = drmModeSetPlane(fd, primary_plane_id, active_crtc_id, fb_id,
+	    0, 0, 0, 1, 1, 64u << 16, 0, 1u << 16, 1u << 16);
+	saved_errno = errno;
+	check(ret != 0, "SETPLANE rejects source rect outside framebuffer");
+	check(saved_errno == ENOSPC,
+	    "SETPLANE source rect outside framebuffer fails with ENOSPC");
+
+out_bo:
+	remove_framebuffer(fd, fb_id,
+	    "RMFB succeeds for SETPLANE argument probe framebuffer");
+	destroy_dumb_buffer_for(fd, handle,
+	    "DESTROY_DUMB succeeds for SETPLANE argument probe BO");
+out_planes:
+	drmModeFreePlaneResources(planes);
+out_resources:
+	drmModeFreeResources(resources);
+}
+
 static bool
 drm_lease_get_objects(int fd, uint32_t *objects, uint32_t object_capacity,
     uint32_t *object_count_out, const char *what)
@@ -9337,6 +9437,7 @@ main(void)
 	check_setcrtc_lookup_error_contract(fd);
 	check_setcrtc_argument_error_contract(fd);
 	check_setplane_lookup_error_contract(fd);
+	check_setplane_argument_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
