@@ -3749,6 +3749,30 @@ get_legacy_gamma_raw(int fd, uint32_t crtc_id, uint32_t gamma_size,
 	return ret == 0;
 }
 
+static bool
+set_legacy_gamma_raw(int fd, uint32_t crtc_id, uint32_t gamma_size,
+    const uint16_t *red, const uint16_t *green, const uint16_t *blue,
+    int *saved_errno_out)
+{
+	struct drm_mode_crtc_lut lut;
+	int saved_errno;
+	int ret;
+
+	memset(&lut, 0, sizeof(lut));
+	lut.crtc_id = crtc_id;
+	lut.gamma_size = gamma_size;
+	lut.red = (uintptr_t)red;
+	lut.green = (uintptr_t)green;
+	lut.blue = (uintptr_t)blue;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_SETGAMMA, &lut);
+	saved_errno = errno;
+	if (saved_errno_out != NULL)
+		*saved_errno_out = saved_errno;
+	return ret == 0;
+}
+
 /*
  * check_legacy_getgamma_contract()
  *
@@ -3830,6 +3854,71 @@ out:
 }
 
 /*
+ * check_legacy_setgamma_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd and active CRTC ID.  Allocates temporary
+ *   userspace gamma arrays only to reach common SETGAMMA error paths; no kernel
+ *   object, blob, or GEM handle is created or retained.
+ *
+ * Lifetime:
+ *   Bad CRTC, bad size, and bad userspace pointers must be rejected before the
+ *   driver's gamma_set hook can consume a new gamma ramp.  The active CRTC
+ *   color state is never modified by this probe.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates common DRM SETGAMMA error
+ *   ordering on the current DRM master.
+ */
+static void
+check_legacy_setgamma_error_contract(int fd, uint32_t crtc_id,
+    const drmModeCrtc *crtc)
+{
+	uint16_t *red = NULL;
+	uint16_t *green = NULL;
+	uint16_t *blue = NULL;
+	uint32_t gamma_size = (uint32_t)crtc->gamma_size;
+	int saved_errno;
+
+	check(gamma_size > 0, "legacy SETGAMMA active CRTC gamma size is non-zero");
+	if (gamma_size == 0)
+		return;
+
+	red = calloc(gamma_size, sizeof(*red));
+	green = calloc(gamma_size, sizeof(*green));
+	blue = calloc(gamma_size, sizeof(*blue));
+	check(red != NULL && green != NULL && blue != NULL,
+	    "legacy SETGAMMA allocates error probe ramps");
+	if (red == NULL || green == NULL || blue == NULL)
+		goto out;
+
+	saved_errno = 0;
+	check(!set_legacy_gamma_raw(fd, 0, 0, NULL, NULL, NULL,
+	    &saved_errno), "legacy SETGAMMA rejects bad CRTC id");
+	check(saved_errno == ENOENT,
+	    "legacy SETGAMMA bad CRTC id fails with ENOENT");
+
+	saved_errno = 0;
+	check(!set_legacy_gamma_raw(fd, crtc_id, gamma_size + 1, red,
+	    green, blue, &saved_errno),
+	    "legacy SETGAMMA rejects wrong gamma size");
+	check(saved_errno == EINVAL,
+	    "legacy SETGAMMA wrong gamma size fails with EINVAL");
+
+	saved_errno = 0;
+	check(!set_legacy_gamma_raw(fd, crtc_id, gamma_size, NULL, green,
+	    blue, &saved_errno),
+	    "legacy SETGAMMA rejects bad red pointer");
+	check(saved_errno == EFAULT,
+	    "legacy SETGAMMA bad red pointer fails with EFAULT");
+
+out:
+	free(blue);
+	free(green);
+	free(red);
+}
+
+/*
  * check_crtc_route_state_contract()
  *
  * Ownership:
@@ -3883,6 +3972,7 @@ check_crtc_route_state_contract(int fd, uint32_t crtc_id, const char *name)
 			check_active_crtc_mode_blob_contract(fd,
 			    (uint32_t)mode_id, crtc);
 		check_legacy_getgamma_contract(fd, crtc_id, crtc);
+		check_legacy_setgamma_error_contract(fd, crtc_id, crtc);
 	} else {
 		check(crtc->buffer_id == 0, "inactive CRTC has no framebuffer");
 	}
