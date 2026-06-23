@@ -1650,6 +1650,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "WAIT_VBLANK SIGNAL requests fail with EINVAL",
         "WAIT_VBLANK rejects unknown type bits",
         "WAIT_VBLANK unknown type bits fail with EINVAL",
+        "WAIT_VBLANK rejects invalid high CRTC index",
+        "WAIT_VBLANK invalid high CRTC index fails with EINVAL",
         "PAGE_FLIP rejects unknown flags",
         "PAGE_FLIP unknown flags fail with EINVAL",
         "PAGE_FLIP rejects sequence without target flag",
