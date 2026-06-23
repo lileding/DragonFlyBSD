@@ -421,6 +421,46 @@ static void drm_mode_rmfb_work_fn(struct work_struct *w)
 	}
 }
 
+/*
+ * Ownership:
+ *   Consumes only the framebuffer reference stored in file_priv->fbs. The
+ *   caller keeps ownership of any lookup reference it already holds.
+ *
+ * Lifetime:
+ *   Detaches the framebuffer ID from this drm_file so close/release will not
+ *   reap it again. Plane, CRTC, or other driver references continue to keep
+ *   the framebuffer alive and scanout is not disabled.
+ *
+ * Threading:
+ *   Serializes with other per-file framebuffer list operations using
+ *   file_priv->fbs_lock. It does not take modeset locks or submit display
+ *   work, so it is safe for CLOSEFB-style metadata lifetime changes.
+ */
+static int
+drm_mode_closefb(struct drm_framebuffer *fb, struct drm_file *file_priv)
+{
+	struct drm_framebuffer *iter;
+	bool found = false;
+
+	mutex_lock(&file_priv->fbs_lock);
+	list_for_each_entry(iter, &file_priv->fbs, filp_head) {
+		if (iter == fb) {
+			found = true;
+			break;
+		}
+	}
+	if (!found) {
+		mutex_unlock(&file_priv->fbs_lock);
+		return -ENOENT;
+	}
+
+	list_del_init(&fb->filp_head);
+	mutex_unlock(&file_priv->fbs_lock);
+
+	drm_framebuffer_put(fb);
+	return 0;
+}
+
 /**
  * drm_mode_rmfb - remove an FB from the configuration
  * @dev: drm device
@@ -438,8 +478,7 @@ int drm_mode_rmfb(struct drm_device *dev, u32 fb_id,
 		  struct drm_file *file_priv)
 {
 	struct drm_framebuffer *fb = NULL;
-	struct drm_framebuffer *fbl = NULL;
-	int found = 0;
+	int ret;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EOPNOTSUPP;
@@ -448,23 +487,13 @@ int drm_mode_rmfb(struct drm_device *dev, u32 fb_id,
 	if (!fb)
 		return -ENOENT;
 
-	mutex_lock(&file_priv->fbs_lock);
-	list_for_each_entry(fbl, &file_priv->fbs, filp_head)
-		if (fb == fbl)
-			found = 1;
-	if (!found) {
-		mutex_unlock(&file_priv->fbs_lock);
+	ret = drm_mode_closefb(fb, file_priv);
+	if (ret != 0)
 		goto fail_unref;
-	}
-
-	list_del_init(&fb->filp_head);
-	mutex_unlock(&file_priv->fbs_lock);
-
-	/* drop the reference we picked up in framebuffer lookup */
-	drm_framebuffer_put(fb);
 
 	/*
-	 * we now own the reference that was stored in the fbs list
+	 * The file-list reference has been dropped by drm_mode_closefb(); this
+	 * path still owns the lookup reference and uses it for RMFB removal.
 	 *
 	 * drm_framebuffer_remove may fail with -EINTR on pending signals,
 	 * so run this in a separate stack as there's no way to correctly
@@ -487,7 +516,7 @@ int drm_mode_rmfb(struct drm_device *dev, u32 fb_id,
 
 fail_unref:
 	drm_framebuffer_put(fb);
-	return -ENOENT;
+	return ret;
 }
 
 int drm_mode_rmfb_ioctl(struct drm_device *dev,
@@ -496,6 +525,27 @@ int drm_mode_rmfb_ioctl(struct drm_device *dev,
 	uint32_t *fb_id = data;
 
 	return drm_mode_rmfb(dev, *fb_id, file_priv);
+}
+
+int drm_mode_closefb_ioctl(struct drm_device *dev,
+			   void *data, struct drm_file *file_priv)
+{
+	struct drm_mode_closefb *r = data;
+	struct drm_framebuffer *fb;
+	int ret;
+
+	if (!drm_core_check_feature(dev, DRIVER_MODESET))
+		return -EOPNOTSUPP;
+	if (r->pad != 0)
+		return -EINVAL;
+
+	fb = drm_framebuffer_lookup(dev, file_priv, r->fb_id);
+	if (!fb)
+		return -ENOENT;
+
+	ret = drm_mode_closefb(fb, file_priv);
+	drm_framebuffer_put(fb);
+	return ret;
 }
 
 /**

@@ -4260,6 +4260,7 @@ check_framebuffer_uapi_contract(int fd)
 	uint32_t handle = 0;
 	uint32_t pitch = 0;
 	uint32_t fb_id = 0;
+	uint32_t closefb_id = 0;
 	uint32_t legacy_fb24_id = 0;
 	uint32_t legacy_fb30_id = 0;
 	uint32_t invalid_legacy_fb_id = 0;
@@ -4331,6 +4332,45 @@ check_framebuffer_uapi_contract(int fd)
 	}
 	check_getfb_non_master_metadata_contract(fb_id, 64, 64,
 	    DRM_FORMAT_XRGB8888, pitch, DRM_FORMAT_MOD_LINEAR);
+
+	if (add_linear_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888, handle,
+	    pitch, &closefb_id,
+	    "ADDFB2 accepts XRGB8888 linear CLOSEFB probe")) {
+		struct drm_mode_closefb closefb;
+
+		memset(&closefb, 0, sizeof(closefb));
+		closefb.fb_id = closefb_id;
+		closefb.pad = 1;
+		errno = 0;
+		ret = drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &closefb);
+		saved_errno = errno;
+		check(ret != 0, "CLOSEFB rejects non-zero pad");
+		check(saved_errno == EINVAL,
+		    "CLOSEFB non-zero pad fails with EINVAL");
+
+		errno = 0;
+		ret = drmModeCloseFB(fd, closefb_id);
+		saved_errno = errno;
+		check(ret == 0, "CLOSEFB succeeds for framebuffer UAPI probe");
+		if (ret == 0) {
+			errno = 0;
+			ret = drmModeCloseFB(fd, closefb_id);
+			saved_errno = errno;
+			check(ret != 0, "CLOSEFB second close fails");
+			check(saved_errno == ENOENT,
+			    "CLOSEFB second close fails with ENOENT");
+
+			errno = 0;
+			ret = drmModeRmFB(fd, closefb_id);
+			saved_errno = errno;
+			check(ret != 0, "RMFB after CLOSEFB fails");
+			check(saved_errno == ENOENT,
+			    "RMFB after CLOSEFB fails with ENOENT");
+			closefb_id = 0;
+		} else {
+			printf("    CLOSEFB errno=%d\n", saved_errno);
+		}
+	}
 
 	errno = 0;
 	ret = drmModeAddFB(fd, 64, 64, 24, 32, pitch, handle,
@@ -4512,6 +4552,8 @@ check_framebuffer_uapi_contract(int fd)
 	    "RMFB succeeds for legacy ADDFB depth 30 probe");
 	remove_framebuffer(fd, legacy_fb24_id,
 	    "RMFB succeeds for legacy ADDFB depth 24 probe");
+	remove_framebuffer(fd, closefb_id,
+	    "RMFB succeeds for leftover CLOSEFB probe");
 	remove_framebuffer(fd, fb_id,
 	    "RMFB succeeds for framebuffer UAPI probe");
 out_destroy_bo:
