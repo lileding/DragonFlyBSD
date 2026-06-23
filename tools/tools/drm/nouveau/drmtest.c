@@ -4755,8 +4755,9 @@ drm_lease_get_objects(int fd, uint32_t *objects, uint32_t object_capacity,
 }
 
 static bool
-drm_lease_create(int fd, const uint32_t *object_ids, uint32_t object_count,
-    int *lease_fd_out, uint32_t *lessee_id_out, const char *what)
+drm_lease_create_flags(int fd, const uint32_t *object_ids,
+    uint32_t object_count, uint32_t flags, int *lease_fd_out,
+    uint32_t *lessee_id_out, const char *what)
 {
 	struct drm_mode_create_lease create_lease;
 	int saved_errno;
@@ -4765,7 +4766,7 @@ drm_lease_create(int fd, const uint32_t *object_ids, uint32_t object_count,
 	memset(&create_lease, 0, sizeof(create_lease));
 	create_lease.object_ids = (uintptr_t)object_ids;
 	create_lease.object_count = object_count;
-	create_lease.flags = O_CLOEXEC;
+	create_lease.flags = flags;
 
 	errno = 0;
 	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_LEASE, &create_lease);
@@ -4781,6 +4782,14 @@ drm_lease_create(int fd, const uint32_t *object_ids, uint32_t object_count,
 	*lease_fd_out = (int)create_lease.fd;
 	*lessee_id_out = create_lease.lessee_id;
 	return true;
+}
+
+static bool
+drm_lease_create(int fd, const uint32_t *object_ids, uint32_t object_count,
+    int *lease_fd_out, uint32_t *lessee_id_out, const char *what)
+{
+	return drm_lease_create_flags(fd, object_ids, object_count, O_CLOEXEC,
+	    lease_fd_out, lessee_id_out, what);
 }
 
 static void
@@ -4843,24 +4852,66 @@ drm_lease_list_contains(int fd, uint32_t lessee_id)
 }
 
 static void
-drm_lease_list_error(int fd, int expected_errno, const char *what)
+drm_lease_list_empty(int fd, const char *what)
+{
+	struct drm_mode_list_lessees list_lessees;
+	uint64_t lessees[4];
+	int saved_errno;
+	int ret;
+
+	memset(&list_lessees, 0, sizeof(list_lessees));
+	memset(lessees, 0, sizeof(lessees));
+	list_lessees.count_lessees = (uint32_t)(sizeof(lessees) /
+	    sizeof(lessees[0]));
+	list_lessees.lessees_ptr = (uintptr_t)lessees;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &list_lessees);
+	saved_errno = errno;
+	check(ret == 0, "DRM lease lessee LIST_LESSEES succeeds");
+	if (ret != 0)
+		printf("    LIST_LESSEES errno=%d\n", saved_errno);
+	check(ret == 0 && list_lessees.count_lessees == 0, what);
+}
+
+static void
+drm_lease_list_pad_error(int fd)
 {
 	struct drm_mode_list_lessees list_lessees;
 	int saved_errno;
 	int ret;
 
 	memset(&list_lessees, 0, sizeof(list_lessees));
+	list_lessees.pad = 1;
 
 	errno = 0;
 	ret = drmIoctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &list_lessees);
 	saved_errno = errno;
-	check(ret != 0 && saved_errno == expected_errno, what);
-	if (ret == 0) {
-		printf("    LIST_LESSEES unexpectedly succeeded\n");
-	} else if (saved_errno != expected_errno) {
-		printf("    LIST_LESSEES errno=%d expected=%d\n",
-		    saved_errno, expected_errno);
-	}
+	check(ret != 0 && saved_errno == EINVAL,
+	    "DRM lease LIST_LESSEES rejects non-zero pad");
+	if (ret == 0 || saved_errno != EINVAL)
+		printf("    LIST_LESSEES pad ret=%d errno=%d\n", ret,
+		    saved_errno);
+}
+
+static void
+drm_lease_get_pad_error(int fd)
+{
+	struct drm_mode_get_lease get_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&get_lease, 0, sizeof(get_lease));
+	get_lease.pad = 1;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GET_LEASE, &get_lease);
+	saved_errno = errno;
+	check(ret != 0 && saved_errno == EINVAL,
+	    "DRM lease GET_LEASE rejects non-zero pad");
+	if (ret == 0 || saved_errno != EINVAL)
+		printf("    GET_LEASE pad ret=%d errno=%d\n", ret,
+		    saved_errno);
 }
 
 static void
@@ -5025,8 +5076,11 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	uint32_t connector_id = 0;
 	uint32_t duplicate_ids[4];
 	uint32_t lease_ids[3];
+	uint32_t empty_get_ids[4];
+	uint32_t empty_get_count = 0;
 	uint32_t lessee_get_ids[32];
 	uint32_t lessee_get_count = 0;
+	uint32_t empty_lessee_id = 0;
 	uint32_t lessee_id = 0;
 	uint32_t missing_connector_ids[2];
 	uint32_t missing_plane_ids[2];
@@ -5037,7 +5091,9 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	uint32_t second_lessee_id = 0;
 	uint32_t unleased_connector_id = 0;
 	int lease_fd = -1;
+	int empty_lease_fd = -1;
 	int second_lease_fd = -1;
+	int fd_flags;
 	int saved_errno;
 
 	if (expect_no_connected) {
@@ -5074,6 +5130,45 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	}
 	check(unleased_connector_id != 0,
 	    "DRM lease has unleased connector for visibility probe");
+
+	if (drm_lease_create_flags(fd, NULL, 0, O_CLOEXEC | O_NONBLOCK,
+	    &empty_lease_fd, &empty_lessee_id,
+	    "DRM empty lease CREATE_LEASE with O_NONBLOCK succeeds")) {
+		check(empty_lessee_id != 0,
+		    "DRM empty lease returns lessee id");
+		fd_flags = fcntl(empty_lease_fd, F_GETFL);
+		check(fd_flags >= 0,
+		    "DRM empty lease fd flags are readable");
+		check((fd_flags & O_NONBLOCK) != 0,
+		    "DRM empty lease fd preserves O_NONBLOCK");
+		lease_resources = drmModeGetResources(empty_lease_fd);
+		check(lease_resources != NULL,
+		    "DRM empty lease fd resources are readable");
+		if (lease_resources != NULL) {
+			check(lease_resources->count_connectors == 0,
+			    "DRM empty lease fd exposes no connector");
+			check(lease_resources->count_crtcs == 0,
+			    "DRM empty lease fd exposes no CRTC");
+			drmModeFreeResources(lease_resources);
+		}
+		lease_planes = drmModeGetPlaneResources(empty_lease_fd);
+		check(lease_planes != NULL,
+		    "DRM empty lease fd plane resources are readable");
+		if (lease_planes != NULL) {
+			check(lease_planes->count_planes == 0,
+			    "DRM empty lease fd exposes no plane");
+			drmModeFreePlaneResources(lease_planes);
+		}
+		if (drm_lease_get_objects(empty_lease_fd, empty_get_ids,
+		    (uint32_t)(sizeof(empty_get_ids) /
+		    sizeof(empty_get_ids[0])), &empty_get_count,
+		    "DRM empty lease GET_LEASE succeeds")) {
+			check(empty_get_count == 0,
+			    "DRM empty lease GET_LEASE returns no objects");
+		}
+		check(close(empty_lease_fd) == 0,
+		    "close empty DRM lease fd succeeds");
+	}
 
 	lease_ids[0] = connector_id;
 	lease_ids[1] = active_crtc_id;
@@ -5158,9 +5253,11 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 
 	check(drm_lease_list_contains(fd, lessee_id),
 	    "DRM lease LIST_LESSEES returns lessee");
-	drm_lease_list_error(lease_fd, EACCES,
-	    "DRM lease lessee LIST_LESSEES is rejected with EACCES");
-	drm_lease_create_error(lease_fd, lease_ids, object_count, EACCES,
+	drm_lease_list_empty(lease_fd,
+	    "DRM lease lessee LIST_LESSEES returns empty list");
+	drm_lease_list_pad_error(fd);
+	drm_lease_get_pad_error(fd);
+	drm_lease_create_error(lease_fd, lease_ids, object_count, EINVAL,
 	    "DRM lease lessee cannot create sub-lease");
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,
 	    active_crtc_id, primary_plane_id);
