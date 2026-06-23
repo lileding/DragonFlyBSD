@@ -4729,6 +4729,457 @@ find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
 	return found;
 }
 
+static bool
+drm_lease_get_objects(int fd, uint32_t *objects, uint32_t object_capacity,
+    uint32_t *object_count_out, const char *what)
+{
+	struct drm_mode_get_lease get_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&get_lease, 0, sizeof(get_lease));
+	get_lease.count_objects = object_capacity;
+	get_lease.objects_ptr = (uintptr_t)objects;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GET_LEASE, &get_lease);
+	saved_errno = errno;
+	check(ret == 0, what);
+	if (ret != 0) {
+		printf("    GET_LEASE errno=%d\n", saved_errno);
+		return false;
+	}
+
+	*object_count_out = get_lease.count_objects;
+	return true;
+}
+
+static bool
+drm_lease_create(int fd, const uint32_t *object_ids, uint32_t object_count,
+    int *lease_fd_out, uint32_t *lessee_id_out, const char *what)
+{
+	struct drm_mode_create_lease create_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&create_lease, 0, sizeof(create_lease));
+	create_lease.object_ids = (uintptr_t)object_ids;
+	create_lease.object_count = object_count;
+	create_lease.flags = O_CLOEXEC;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_LEASE, &create_lease);
+	saved_errno = errno;
+	check(ret == 0, what);
+	if (ret != 0) {
+		printf("    CREATE_LEASE errno=%d\n", saved_errno);
+		return false;
+	}
+
+	check(create_lease.lessee_id != 0, "DRM lease returns lessee id");
+	check(create_lease.fd > 0, "DRM lease returns lease fd");
+	*lease_fd_out = (int)create_lease.fd;
+	*lessee_id_out = create_lease.lessee_id;
+	return true;
+}
+
+static void
+drm_lease_create_error(int fd, const uint32_t *object_ids,
+    uint32_t object_count, int expected_errno, const char *what)
+{
+	struct drm_mode_create_lease create_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&create_lease, 0, sizeof(create_lease));
+	create_lease.object_ids = (uintptr_t)object_ids;
+	create_lease.object_count = object_count;
+	create_lease.flags = O_CLOEXEC;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_LEASE, &create_lease);
+	saved_errno = errno;
+	check(ret != 0 && saved_errno == expected_errno, what);
+	if (ret == 0) {
+		printf("    CREATE_LEASE unexpectedly returned fd=%u lessee=%u\n",
+		    create_lease.fd, create_lease.lessee_id);
+		close((int)create_lease.fd);
+	} else if (saved_errno != expected_errno) {
+		printf("    CREATE_LEASE errno=%d expected=%d\n", saved_errno,
+		    expected_errno);
+	}
+}
+
+static bool
+drm_lease_list_contains(int fd, uint32_t lessee_id)
+{
+	struct drm_mode_list_lessees list_lessees;
+	uint64_t lessees[16];
+	bool found = false;
+	int saved_errno;
+	int ret;
+
+	memset(&list_lessees, 0, sizeof(list_lessees));
+	memset(lessees, 0, sizeof(lessees));
+	list_lessees.count_lessees = (uint32_t)(sizeof(lessees) /
+	    sizeof(lessees[0]));
+	list_lessees.lessees_ptr = (uintptr_t)lessees;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &list_lessees);
+	saved_errno = errno;
+	check(ret == 0, "DRM lease LIST_LESSEES succeeds");
+	if (ret != 0) {
+		printf("    LIST_LESSEES errno=%d\n", saved_errno);
+		return false;
+	}
+
+	for (uint32_t i = 0; i < list_lessees.count_lessees &&
+	    i < (uint32_t)(sizeof(lessees) / sizeof(lessees[0])); i++) {
+		if (lessees[i] == lessee_id)
+			found = true;
+	}
+	return found;
+}
+
+static void
+check_drm_lease_atomic_test_only(int lease_fd, uint32_t connector_id,
+    uint32_t crtc_id, uint32_t plane_id)
+{
+	struct atomic_plane_snapshot snapshot;
+	drmModeAtomicReqPtr req;
+	drmModeCrtcPtr crtc;
+	uint32_t mode_blob = 0;
+	int saved_errno;
+	int ret;
+
+	crtc = drmModeGetCrtc(lease_fd, crtc_id);
+	check(crtc != NULL, "DRM lease active CRTC is readable for atomic TEST_ONLY");
+	if (crtc == NULL)
+		return;
+	check(crtc->mode_valid, "DRM lease active CRTC has mode for atomic TEST_ONLY");
+	if (!crtc->mode_valid) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+
+	if (!get_plane_snapshot(lease_fd, plane_id, &snapshot,
+	    "DRM lease primary plane")) {
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+	check(snapshot.fb_id != 0, "DRM lease primary plane has framebuffer");
+	check(snapshot.crtc_id == crtc_id,
+	    "DRM lease primary plane is attached to leased CRTC");
+
+	ret = drmModeCreatePropertyBlob(lease_fd, &crtc->mode,
+	    sizeof(crtc->mode), &mode_blob);
+	check(ret == 0, "DRM lease creates MODE_ID blob for atomic TEST_ONLY");
+	if (ret != 0) {
+		printf("    CREATE_BLOB errno=%d\n", errno);
+		drmModeFreeCrtc(crtc);
+		return;
+	}
+
+	req = drmModeAtomicAlloc();
+	check(req != NULL, "DRM lease atomic TEST_ONLY allocates request");
+	if (req != NULL) {
+		if (!atomic_add_crtc_property(lease_fd, req, crtc_id,
+		    "MODE_ID", mode_blob) ||
+		    !atomic_add_crtc_property(lease_fd, req, crtc_id,
+		    "ACTIVE", 1) ||
+		    !atomic_add_connector_property(lease_fd, req,
+		    connector_id, "CRTC_ID", crtc_id) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "FB_ID", snapshot.fb_id) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "CRTC_ID", snapshot.crtc_id) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "CRTC_X", snapshot.crtc_x) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "CRTC_Y", snapshot.crtc_y) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "CRTC_W", snapshot.crtc_w) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "CRTC_H", snapshot.crtc_h) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "SRC_X", snapshot.src_x) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "SRC_Y", snapshot.src_y) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "SRC_W", snapshot.src_w) ||
+		    !atomic_add_plane_property(lease_fd, req, plane_id,
+		    "SRC_H", snapshot.src_h)) {
+			check(false,
+			    "DRM lease atomic TEST_ONLY request describes leased state");
+		} else {
+			check(true,
+			    "DRM lease atomic TEST_ONLY request describes leased state");
+			errno = 0;
+			ret = drmModeAtomicCommit(lease_fd, req,
+			    DRM_MODE_ATOMIC_TEST_ONLY |
+			    DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+			saved_errno = errno;
+			check(ret == 0,
+			    "DRM lease atomic TEST_ONLY on leased objects succeeds");
+			if (ret != 0)
+				printf("    lease atomic TEST_ONLY errno=%d\n",
+				    saved_errno);
+		}
+		drmModeAtomicFree(req);
+	}
+
+	check(drmModeDestroyPropertyBlob(lease_fd, mode_blob) == 0,
+	    "DRM lease destroys MODE_ID blob for atomic TEST_ONLY");
+	drmModeFreeCrtc(crtc);
+}
+
+/*
+ * check_drm_lease_contract()
+ *
+ * Ownership:
+ *   Borrows the owner DRM master fd and the current resources snapshot.  Any
+ *   lease fd, libdrm resource snapshot, plane snapshot, and temporary property
+ *   blob created here is closed or released before return.
+ *
+ * Lifetime:
+ *   The probe is valid only while the current active connector/CRTC/primary
+ *   plane route remains stable.  It revokes its own lease before returning so
+ *   later display probes keep the same owner-visible object graph.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  Kernel-side lease tree updates are
+ *   serialized by common DRM locks; this userspace test does not share fds
+ *   with another thread.
+ */
+static void
+check_drm_lease_contract(int fd, const drmModeRes *resources,
+    bool expect_no_connected)
+{
+	drmModePlaneResPtr plane_resources;
+	drmModePlaneResPtr lease_planes;
+	drmModeRes *lease_resources;
+	drmModeRes *revoked_resources;
+	uint32_t active_crtc_id = 0;
+	uint32_t active_crtc_index = 0;
+	uint32_t bad_ids[3];
+	uint32_t connector_id = 0;
+	uint32_t duplicate_ids[4];
+	uint32_t lease_ids[3];
+	uint32_t lessee_get_ids[32];
+	uint32_t lessee_get_count = 0;
+	uint32_t lessee_id = 0;
+	uint32_t missing_connector_ids[2];
+	uint32_t missing_plane_ids[2];
+	uint32_t object_count = 0;
+	uint32_t owner_get_ids[64];
+	uint32_t owner_get_count = 0;
+	uint32_t primary_plane_id = 0;
+	uint32_t second_lessee_id = 0;
+	uint32_t unleased_connector_id = 0;
+	int lease_fd = -1;
+	int second_lease_fd = -1;
+	int saved_errno;
+
+	if (expect_no_connected) {
+		check(true,
+		    "DRM lease skipped because no connected connector is expected");
+		return;
+	}
+
+	check(find_active_crtc(fd, resources, &active_crtc_id,
+	    &active_crtc_index), "DRM lease found active CRTC");
+	if (active_crtc_id == 0)
+		return;
+	check(find_active_connector_for_crtc(fd, resources, active_crtc_id,
+	    &connector_id), "DRM lease found active connector");
+	if (connector_id == 0)
+		return;
+
+	plane_resources = drmModeGetPlaneResources(fd);
+	check(plane_resources != NULL, "DRM lease reads owner plane resources");
+	if (plane_resources == NULL)
+		return;
+	check(find_primary_plane_for_crtc_index(plane_resources, fd,
+	    (int)active_crtc_index, &primary_plane_id),
+	    "DRM lease found primary plane for active CRTC");
+	drmModeFreePlaneResources(plane_resources);
+	if (primary_plane_id == 0)
+		return;
+
+	for (int i = 0; i < resources->count_connectors; i++) {
+		if (resources->connectors[i] != connector_id) {
+			unleased_connector_id = resources->connectors[i];
+			break;
+		}
+	}
+	check(unleased_connector_id != 0,
+	    "DRM lease has unleased connector for visibility probe");
+
+	lease_ids[0] = connector_id;
+	lease_ids[1] = active_crtc_id;
+	lease_ids[2] = primary_plane_id;
+	object_count = (uint32_t)(sizeof(lease_ids) / sizeof(lease_ids[0]));
+
+	if (!drm_lease_create(fd, lease_ids, object_count, &lease_fd,
+	    &lessee_id, "DRM lease CREATE_LEASE succeeds"))
+		return;
+	check(drmSetClientCap(lease_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) == 0,
+	    "DRM lease fd accepts UNIVERSAL_PLANES");
+	check(drmSetClientCap(lease_fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0,
+	    "DRM lease fd accepts ATOMIC");
+
+	lease_resources = drmModeGetResources(lease_fd);
+	check(lease_resources != NULL, "DRM lease fd resources are readable");
+	if (lease_resources != NULL) {
+		check(lease_resources->count_connectors == 1,
+		    "DRM lease fd exposes one connector");
+		check(lease_resources->count_crtcs == 1,
+		    "DRM lease fd exposes one CRTC");
+		check(id_in_list(lease_resources->connectors,
+		    lease_resources->count_connectors, connector_id),
+		    "DRM lease fd exposes leased connector");
+		check(id_in_list(lease_resources->crtcs,
+		    lease_resources->count_crtcs, active_crtc_id),
+		    "DRM lease fd exposes leased CRTC");
+		drmModeFreeResources(lease_resources);
+	}
+
+	lease_planes = drmModeGetPlaneResources(lease_fd);
+	check(lease_planes != NULL, "DRM lease fd plane resources are readable");
+	if (lease_planes != NULL) {
+		check(lease_planes->count_planes == 1,
+		    "DRM lease fd exposes one plane");
+		check(id_in_list(lease_planes->planes,
+		    (int)lease_planes->count_planes, primary_plane_id),
+		    "DRM lease fd exposes leased primary plane");
+		drmModeFreePlaneResources(lease_planes);
+	}
+
+	if (unleased_connector_id != 0) {
+		drmModeConnector *connector;
+
+		errno = 0;
+		connector = drmModeGetConnector(lease_fd,
+		    unleased_connector_id);
+		saved_errno = errno;
+		check(connector == NULL,
+		    "DRM lease hides unleased connector");
+		check(saved_errno == ENOENT,
+		    "DRM lease unleased connector lookup fails with ENOENT");
+		if (connector != NULL)
+			drmModeFreeConnector(connector);
+	}
+
+	if (drm_lease_get_objects(fd, owner_get_ids,
+	    (uint32_t)(sizeof(owner_get_ids) / sizeof(owner_get_ids[0])),
+	    &owner_get_count, "DRM lease owner GET_LEASE succeeds")) {
+		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		    connector_id), "DRM lease owner GET_LEASE returns connector");
+		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		    active_crtc_id), "DRM lease owner GET_LEASE returns CRTC");
+		check(id_in_list(owner_get_ids, (int)owner_get_count,
+		    primary_plane_id),
+		    "DRM lease owner GET_LEASE returns primary plane");
+	}
+
+	if (drm_lease_get_objects(lease_fd, lessee_get_ids,
+	    (uint32_t)(sizeof(lessee_get_ids) / sizeof(lessee_get_ids[0])),
+	    &lessee_get_count, "DRM lease lessee GET_LEASE succeeds")) {
+		check(lessee_get_count == object_count,
+		    "DRM lease lessee GET_LEASE returns exact object count");
+		check(id_in_list(lessee_get_ids, (int)lessee_get_count,
+		    connector_id), "DRM lease lessee GET_LEASE returns connector");
+		check(id_in_list(lessee_get_ids, (int)lessee_get_count,
+		    active_crtc_id), "DRM lease lessee GET_LEASE returns CRTC");
+		check(id_in_list(lessee_get_ids, (int)lessee_get_count,
+		    primary_plane_id),
+		    "DRM lease lessee GET_LEASE returns primary plane");
+	}
+
+	check(drm_lease_list_contains(fd, lessee_id),
+	    "DRM lease LIST_LESSEES returns lessee");
+	check_drm_lease_atomic_test_only(lease_fd, connector_id,
+	    active_crtc_id, primary_plane_id);
+
+	drm_lease_create_error(fd, lease_ids, object_count, EBUSY,
+	    "DRM lease duplicate live object is rejected with EBUSY");
+
+	duplicate_ids[0] = connector_id;
+	duplicate_ids[1] = connector_id;
+	duplicate_ids[2] = active_crtc_id;
+	duplicate_ids[3] = primary_plane_id;
+	drm_lease_create_error(fd, duplicate_ids,
+	    (uint32_t)(sizeof(duplicate_ids) / sizeof(duplicate_ids[0])),
+	    EEXIST, "DRM lease duplicate request object is rejected with EEXIST");
+
+	bad_ids[0] = 0x7ffffffeu;
+	bad_ids[1] = active_crtc_id;
+	bad_ids[2] = primary_plane_id;
+	drm_lease_create_error(fd, bad_ids,
+	    (uint32_t)(sizeof(bad_ids) / sizeof(bad_ids[0])), ENOENT,
+	    "DRM lease bad object id is rejected with ENOENT");
+
+	{
+		struct drm_mode_revoke_lease revoke_lease;
+		int ret;
+
+		memset(&revoke_lease, 0, sizeof(revoke_lease));
+		revoke_lease.lessee_id = lessee_id;
+		errno = 0;
+		ret = drmIoctl(fd, DRM_IOCTL_MODE_REVOKE_LEASE,
+		    &revoke_lease);
+		saved_errno = errno;
+		check(ret == 0, "DRM lease REVOKE_LEASE succeeds");
+		if (ret != 0)
+			printf("    REVOKE_LEASE errno=%d\n", saved_errno);
+	}
+
+	revoked_resources = drmModeGetResources(lease_fd);
+	check(revoked_resources != NULL,
+	    "DRM lease revoked fd resources are readable");
+	if (revoked_resources != NULL) {
+		check(revoked_resources->count_crtcs == 0,
+		    "DRM lease fd has no CRTC after revoke");
+		check(revoked_resources->count_connectors == 0,
+		    "DRM lease fd has no connector after revoke");
+		drmModeFreeResources(revoked_resources);
+	}
+	lease_planes = drmModeGetPlaneResources(lease_fd);
+	check(lease_planes != NULL,
+	    "DRM lease revoked fd plane resources are readable");
+	if (lease_planes != NULL) {
+		check(lease_planes->count_planes == 0,
+		    "DRM lease fd has no plane after revoke");
+		drmModeFreePlaneResources(lease_planes);
+	}
+
+	missing_connector_ids[0] = active_crtc_id;
+	missing_connector_ids[1] = primary_plane_id;
+	drm_lease_create_error(fd, missing_connector_ids,
+	    (uint32_t)(sizeof(missing_connector_ids) /
+	    sizeof(missing_connector_ids[0])), EINVAL,
+	    "DRM lease missing connector is rejected with EINVAL");
+
+	missing_plane_ids[0] = connector_id;
+	missing_plane_ids[1] = active_crtc_id;
+	drm_lease_create_error(fd, missing_plane_ids,
+	    (uint32_t)(sizeof(missing_plane_ids) /
+	    sizeof(missing_plane_ids[0])), EINVAL,
+	    "DRM lease missing plane is rejected with EINVAL");
+
+	if (drm_lease_create(fd, lease_ids, object_count, &second_lease_fd,
+	    &second_lessee_id,
+	    "DRM lease object can be re-leased after revoke")) {
+		check(second_lessee_id != lessee_id,
+		    "DRM lease re-lease returns a fresh lessee id");
+		check(close(second_lease_fd) == 0,
+		    "close second DRM lease fd succeeds");
+	}
+
+	check(close(lease_fd) == 0, "close DRM lease fd succeeds");
+}
+
 static int
 atomic_connected_mode_test_only_commit(int fd, uint32_t connector_id,
     uint32_t crtc_id, uint32_t plane_id, uint32_t fb_id,
@@ -6834,6 +7285,7 @@ main(void)
 	}
 	check_connected_mode_list_atomic_contract(fd, resources,
 	    expect_no_connected);
+	check_drm_lease_contract(fd, resources, expect_no_connected);
 
 	for (int i = 0; i < resources->count_crtcs; i++)
 		check_crtc(fd, resources->crtcs[i]);

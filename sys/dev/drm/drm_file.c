@@ -305,6 +305,32 @@ void drm_file_free(struct drm_file *file)
 	kfree(file);
 }
 
+void drm_file_close_counted(struct drm_file *file)
+{
+	struct drm_device *dev;
+	struct drm_minor *minor;
+
+	if (!file)
+		return;
+
+	minor = file->minor;
+	dev = minor->dev;
+
+	mutex_lock(&drm_global_mutex);
+	mutex_lock(&dev->filelist_mutex);
+	if (!list_empty(&file->lhead))
+		list_del_init(&file->lhead);
+	mutex_unlock(&dev->filelist_mutex);
+
+	drm_file_free(file);
+
+	if (!--dev->open_count)
+		drm_lastclose(dev);
+	mutex_unlock(&drm_global_mutex);
+
+	drm_minor_release(minor);
+}
+
 static int drm_setup(struct drm_device * dev)
 {
 	int ret;
