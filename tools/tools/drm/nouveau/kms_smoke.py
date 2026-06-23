@@ -474,6 +474,30 @@ def parse_state_value(text: str, key: str) -> int | None:
     return int(value, 16 if value.startswith("0x") else 10)
 
 
+def indexed_state_values(text: str, prefix: str, field: str) -> list[tuple[int, int]]:
+    values: list[tuple[int, int]] = []
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}\[(\d+)\]_{re.escape(field)}\s*=\s*"
+        r"(0x[0-9a-fA-F]+|[0-9]+)\b",
+        re.M,
+    )
+    for match in pattern.finditer(text):
+        index_text, value_text = match.groups()
+        values.append((
+            int(index_text),
+            int(value_text, 16 if value_text.startswith("0x") else 10),
+        ))
+    return values
+
+
+def nonzero_indices(text: str, prefix: str, field: str) -> list[int]:
+    return [
+        index
+        for index, value in indexed_state_values(text, prefix, field)
+        if value != 0
+    ]
+
+
 def cursor_heads(text: str) -> list[int]:
     heads = {
         int(match.group(1))
@@ -628,6 +652,7 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
 
     after = parse_state(out_dir / "drm_state.after")
     before = parse_state(out_dir / "drm_state.before")
+    after_state_text = captured_text(out_dir / "drm_state.after")
     zero_failed = False
     for key in ZERO_KEYS:
         if key not in after:
@@ -673,6 +698,27 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         emit(after["display_cursor_capacity"] >= heads,
              f"display_cursor_capacity covers heads ({after['display_cursor_capacity']}>={heads})")
 
+    capacity_checks = (
+        ("ready head index", nonzero_indices(after_state_text, "head", "ready"),
+         "display_head_capacity"),
+        ("present window index", nonzero_indices(after_state_text, "wndw", "present"),
+         "display_window_capacity"),
+        ("cursor channel index",
+         nonzero_indices(after_state_text, "head", "cursor_channel_present"),
+         "display_cursor_capacity"),
+        ("output IOR id",
+         [ior_id for _, ior_id in indexed_state_values(after_state_text, "outp", "ior_id")],
+         "display_sor_capacity"),
+    )
+    for label, indices, capacity_key in capacity_checks:
+        if capacity_key not in after:
+            continue
+        capacity = after[capacity_key]
+        bad = [index for index in indices if index >= capacity]
+        emit(not bad, f"{label} fits {capacity_key}={capacity}")
+        for index in bad:
+            print(f"INFO {label} {index} exceeds {capacity_key}={capacity}")
+
     for produce_key, consume_key in COUNT_ORDER_PAIRS:
         if produce_key not in after or consume_key not in after:
             emit(False, f"missing {produce_key}/{consume_key}")
@@ -688,7 +734,6 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         emit(actual == expected,
              f"display_audit_scanout_pin_balance={actual} expected={expected}")
 
-    after_state_text = captured_text(out_dir / "drm_state.after")
     emit(bool(cursor_heads(after_state_text)), "after cursor audit present")
     emit(not active_hardware_cursor_heads(after_state_text),
          "after has no hardware cursor enabled")
