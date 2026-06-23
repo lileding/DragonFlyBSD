@@ -6106,6 +6106,78 @@ check_non_master_display_mutation_contract(int master_fd,
 }
 
 /*
+ * check_framebuffer_lookup_error_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd.  No framebuffer, GEM handle, clip array, or
+ *   display object reference is created or retained.
+ *
+ * Lifetime:
+ *   Bad framebuffer ids must be rejected at the common DRM lookup boundary
+ *   before metadata handle creation, file-owned framebuffer close/remove,
+ *   dirty callbacks, or display transactions.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates framebuffer ioctl lookup
+ *   ordering without touching scanout state.
+ */
+static void
+check_framebuffer_lookup_error_contract(int fd)
+{
+	struct drm_mode_fb_cmd getfb;
+	struct drm_mode_fb_cmd2 getfb2;
+	struct drm_mode_closefb closefb;
+	struct drm_mode_fb_dirty_cmd dirty;
+	uint32_t fb_id;
+	int saved_errno;
+	int ret;
+
+	memset(&getfb, 0, sizeof(getfb));
+	getfb.fb_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETFB, &getfb);
+	saved_errno = errno;
+	check(ret != 0, "GETFB rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "GETFB bad framebuffer id fails with ENOENT");
+
+	memset(&getfb2, 0, sizeof(getfb2));
+	getfb2.fb_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_GETFB2, &getfb2);
+	saved_errno = errno;
+	check(ret != 0, "GETFB2 rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "GETFB2 bad framebuffer id fails with ENOENT");
+
+	fb_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_RMFB, &fb_id);
+	saved_errno = errno;
+	check(ret != 0, "RMFB rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "RMFB bad framebuffer id fails with ENOENT");
+
+	memset(&closefb, 0, sizeof(closefb));
+	closefb.fb_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &closefb);
+	saved_errno = errno;
+	check(ret != 0, "CLOSEFB rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "CLOSEFB bad framebuffer id fails with ENOENT");
+
+	memset(&dirty, 0, sizeof(dirty));
+	dirty.fb_id = 0;
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+	saved_errno = errno;
+	check(ret != 0, "DIRTYFB rejects bad framebuffer id");
+	check(saved_errno == ENOENT,
+	    "DIRTYFB bad framebuffer id fails with ENOENT");
+}
+
+/*
  * check_framebuffer_uapi_contract()
  *
  * Ownership:
@@ -9715,6 +9787,7 @@ main(void)
 	check_unique_ids(resources->encoders, resources->count_encoders,
 	    "encoder resource ids are unique");
 	check_mode_config_contract(fd, resources);
+	check_framebuffer_lookup_error_contract(fd);
 	check_framebuffer_uapi_contract(fd);
 	check_encoders(fd, resources);
 
