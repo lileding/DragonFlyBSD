@@ -2,6 +2,7 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1238,6 +1239,36 @@ syncobj_transfer_point(int fd, uint32_t dst_handle, uint64_t dst_point,
 	return ret == 0;
 }
 
+static bool
+syncobj_transfer_wait_for_submit_point(int fd, uint32_t dst_handle,
+    uint64_t dst_point, uint32_t src_handle, uint64_t src_point)
+{
+	int status;
+	pid_t child;
+	pid_t waited;
+	bool transfer_ok;
+	bool child_ok;
+
+	child = fork();
+	if (child < 0)
+		return false;
+	if (child == 0) {
+		usleep(100000);
+		_exit(syncobj_timeline_signal_handle(fd, src_handle, src_point) ?
+		    0 : 1);
+	}
+
+	transfer_ok = syncobj_transfer_point(fd, dst_handle, dst_point,
+	    src_handle, src_point, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT);
+	do {
+		waited = waitpid(child, &status, 0);
+	} while (waited < 0 && errno == EINTR);
+
+	child_ok = waited == child && WIFEXITED(status) &&
+	    WEXITSTATUS(status) == 0;
+	return transfer_ok && child_ok;
+}
+
 static void
 check_syncobj_transfer_contract(int fd)
 {
@@ -1279,6 +1310,11 @@ check_syncobj_transfer_contract(int fd)
 		check(!syncobj_transfer_point(fd, timeline_dst, 11,
 		    timeline_src, 99, 0),
 		    "SYNCOBJ_TRANSFER rejects missing source point");
+		check(syncobj_transfer_wait_for_submit_point(fd, timeline_dst,
+		    13, timeline_src, 13),
+		    "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT waits for source point");
+		check(syncobj_timeline_wait_point(fd, timeline_dst, 13),
+		    "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination point waits successfully");
 
 		ok = syncobj_create_handle(fd, &binary_dst);
 		check(ok, "SYNCOBJ_TRANSFER creates binary destination syncobj");
