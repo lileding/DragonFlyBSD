@@ -163,6 +163,8 @@ struct color_counter_snapshot {
 
 static bool atomic_add_plane_property(int fd, drmModeAtomicReqPtr req,
     uint32_t plane_id, const char *name, uint64_t value);
+static bool atomic_add_connector_property(int fd, drmModeAtomicReqPtr req,
+    uint32_t connector_id, const char *name, uint64_t value);
 static bool create_dumb_buffer_for(int fd, uint32_t width, uint32_t height,
     uint32_t bpp, uint32_t *handle_out, uint32_t *pitch_out,
     const char *what);
@@ -4152,6 +4154,268 @@ atomic_add_connector_property(int fd, drmModeAtomicReqPtr req,
 	    value) >= 0;
 }
 
+static bool
+mode_timing_is_sane(const drmModeModeInfo *mode)
+{
+	return mode->clock > 0 &&
+	    mode->hdisplay > 0 &&
+	    mode->hsync_start >= mode->hdisplay &&
+	    mode->hsync_end >= mode->hsync_start &&
+	    mode->htotal >= mode->hsync_end &&
+	    mode->vdisplay > 0 &&
+	    mode->vsync_start >= mode->vdisplay &&
+	    mode->vsync_end >= mode->vsync_start &&
+	    mode->vtotal >= mode->vsync_end &&
+	    mode->name[0] != '\0';
+}
+
+static bool
+find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
+    int fd, int crtc_index, uint32_t *plane_id_out)
+{
+	drmModePlanePtr plane;
+	uint32_t crtc_bit;
+	bool found = false;
+
+	if (crtc_index < 0 || crtc_index >= 32)
+		return false;
+	crtc_bit = 1u << crtc_index;
+
+	for (uint32_t i = 0; i < plane_resources->count_planes; i++) {
+		plane = drmModeGetPlane(fd, plane_resources->planes[i]);
+		if (plane == NULL)
+			continue;
+		if (get_plane_type(fd, plane->plane_id) ==
+		    DRM_PLANE_TYPE_PRIMARY &&
+		    (plane->possible_crtcs & crtc_bit) != 0) {
+			*plane_id_out = plane->plane_id;
+			found = true;
+			drmModeFreePlane(plane);
+			break;
+		}
+		drmModeFreePlane(plane);
+	}
+
+	return found;
+}
+
+static int
+atomic_connected_mode_test_only_commit(int fd, uint32_t connector_id,
+    uint32_t crtc_id, uint32_t plane_id, uint32_t fb_id,
+    const drmModeModeInfo *mode, int *saved_errno)
+{
+	drmModeAtomicReqPtr req;
+	uint32_t mode_blob = 0;
+	int ret;
+
+	ret = drmModeCreatePropertyBlob(fd, mode, sizeof(*mode), &mode_blob);
+	if (ret != 0) {
+		*saved_errno = errno;
+		return -1;
+	}
+
+	req = drmModeAtomicAlloc();
+	if (req == NULL) {
+		*saved_errno = errno;
+		destroy_property_blob(fd, mode_blob,
+		    "destroy MODE_ID blob for failed connected mode TEST_ONLY probe");
+		return -1;
+	}
+
+	if (!atomic_add_crtc_property(fd, req, crtc_id, "MODE_ID",
+	    mode_blob) ||
+	    !atomic_add_crtc_property(fd, req, crtc_id, "ACTIVE", 1) ||
+	    !atomic_add_connector_property(fd, req, connector_id, "CRTC_ID",
+	    crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "FB_ID", fb_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_ID",
+	    crtc_id) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_X", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_Y", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_W",
+	    mode->hdisplay) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "CRTC_H",
+	    mode->vdisplay) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_X", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_Y", 0) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_W",
+	    (uint64_t)mode->hdisplay << 16) ||
+	    !atomic_add_plane_property(fd, req, plane_id, "SRC_H",
+	    (uint64_t)mode->vdisplay << 16)) {
+		drmModeAtomicFree(req);
+		destroy_property_blob(fd, mode_blob,
+		    "destroy MODE_ID blob for failed connected mode TEST_ONLY probe");
+		*saved_errno = EINVAL;
+		return -1;
+	}
+
+	errno = 0;
+	ret = drmModeAtomicCommit(fd, req,
+	    DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+	*saved_errno = errno;
+	drmModeAtomicFree(req);
+	destroy_property_blob(fd, mode_blob,
+	    "destroy MODE_ID blob for connected mode TEST_ONLY probe");
+	return ret;
+}
+
+/*
+ * check_connected_mode_list_atomic_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM resource snapshot and reads connector, encoder, and plane
+ *   snapshots through libdrm.  The probe owns one temporary dumb BO/FB per
+ *   connected connector and one MODE_ID blob per mode; every temporary object
+ *   is destroyed before return.
+ *
+ * Lifetime:
+ *   Uses TEST_ONLY atomic commits only.  It must not program display hardware,
+ *   change the visible framebuffer, or retain connector/plane state after the
+ *   current probe.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI validation.  The kernel evaluates each TEST_ONLY
+ *   request under normal modeset locks while userspace owns no driver-private
+ *   lock.
+ */
+static void
+check_connected_mode_list_atomic_contract(int fd, const drmModeRes *resources,
+    bool expect_no_connected)
+{
+	drmModePlaneResPtr plane_resources;
+
+	if (expect_no_connected) {
+		printf("SKIP connected mode TEST_ONLY probe by NVKM_DRMTEST_EXPECT_NO_CONNECTED\n");
+		return;
+	}
+
+	plane_resources = drmModeGetPlaneResources(fd);
+	check(plane_resources != NULL,
+	    "plane resources readable for connected mode TEST_ONLY probe");
+	if (plane_resources == NULL)
+		return;
+
+	for (int i = 0; i < resources->count_connectors; i++) {
+		drmModeConnectorPtr connector;
+		drmModeEncoderPtr encoder;
+		uint32_t max_width = 0;
+		uint32_t max_height = 0;
+		uint32_t handle = 0;
+		uint32_t pitch = 0;
+		uint32_t fb_id = 0;
+		uint32_t plane_id = 0;
+		int crtc_index = -1;
+		bool all_modes_sane = true;
+		bool all_modes_passed = true;
+
+		connector = drmModeGetConnector(fd, resources->connectors[i]);
+		if (connector == NULL)
+			continue;
+		if (connector->connection != DRM_MODE_CONNECTED) {
+			drmModeFreeConnector(connector);
+			continue;
+		}
+		check(connector->count_modes > 0,
+		    "connected connector exposes TEST_ONLY-checkable modes");
+		if (connector->count_modes <= 0 || connector->encoder_id == 0) {
+			drmModeFreeConnector(connector);
+			continue;
+		}
+
+		for (int m = 0; m < connector->count_modes; m++) {
+			const drmModeModeInfo *mode = &connector->modes[m];
+
+			if (!mode_timing_is_sane(mode))
+				all_modes_sane = false;
+			if (mode->hdisplay > max_width)
+				max_width = mode->hdisplay;
+			if (mode->vdisplay > max_height)
+				max_height = mode->vdisplay;
+		}
+		check(all_modes_sane,
+		    "connected connector mode list has sane timings");
+		if (!all_modes_sane || max_width == 0 || max_height == 0) {
+			drmModeFreeConnector(connector);
+			continue;
+		}
+
+		encoder = drmModeGetEncoder(fd, connector->encoder_id);
+		check(encoder != NULL,
+		    "connected connector encoder readable for mode TEST_ONLY probe");
+		if (encoder == NULL) {
+			drmModeFreeConnector(connector);
+			continue;
+		}
+		if (!id_index_in_list(resources->crtcs, resources->count_crtcs,
+		    encoder->crtc_id, &crtc_index)) {
+			check(false,
+			    "connected connector CRTC present for mode TEST_ONLY probe");
+			drmModeFreeEncoder(encoder);
+			drmModeFreeConnector(connector);
+			continue;
+		}
+		check(true,
+		    "connected connector CRTC present for mode TEST_ONLY probe");
+		if (!find_primary_plane_for_crtc_index(plane_resources, fd,
+		    crtc_index, &plane_id)) {
+			check(false,
+			    "connected connector primary plane available for mode TEST_ONLY probe");
+			drmModeFreeEncoder(encoder);
+			drmModeFreeConnector(connector);
+			continue;
+		}
+		check(true,
+		    "connected connector primary plane available for mode TEST_ONLY probe");
+
+		if (!create_dumb_buffer_for(fd, max_width, max_height, 32,
+		    &handle, &pitch,
+		    "CREATE_DUMB succeeds for connected mode TEST_ONLY framebuffer")) {
+			drmModeFreeEncoder(encoder);
+			drmModeFreeConnector(connector);
+			continue;
+		}
+		if (!add_linear_framebuffer(fd, max_width, max_height,
+		    DRM_FORMAT_XRGB8888, handle, pitch, &fb_id,
+		    "ADDFB2 accepts connected mode TEST_ONLY framebuffer")) {
+			destroy_dumb_buffer_for(fd, handle,
+			    "DESTROY_DUMB succeeds for connected mode TEST_ONLY framebuffer");
+			drmModeFreeEncoder(encoder);
+			drmModeFreeConnector(connector);
+			continue;
+		}
+
+		for (int m = 0; m < connector->count_modes; m++) {
+			int saved_errno = 0;
+			int ret;
+
+			printf("    TEST_ONLY mode %s %ux%u@%u\n",
+			    connector->modes[m].name,
+			    connector->modes[m].hdisplay,
+			    connector->modes[m].vdisplay,
+			    connector->modes[m].vrefresh);
+			ret = atomic_connected_mode_test_only_commit(fd,
+			    connector->connector_id, encoder->crtc_id, plane_id,
+			    fb_id, &connector->modes[m], &saved_errno);
+			if (ret != 0) {
+				printf("    connected mode TEST_ONLY errno=%d\n",
+				    saved_errno);
+				all_modes_passed = false;
+			}
+		}
+		check(all_modes_passed,
+		    "connected connector mode list passes atomic TEST_ONLY");
+
+		remove_framebuffer(fd, fb_id,
+		    "RMFB succeeds for connected mode TEST_ONLY framebuffer");
+		destroy_dumb_buffer_for(fd, handle,
+		    "DESTROY_DUMB succeeds for connected mode TEST_ONLY framebuffer");
+		drmModeFreeEncoder(encoder);
+		drmModeFreeConnector(connector);
+	}
+
+	drmModeFreePlaneResources(plane_resources);
+}
+
 static int
 atomic_connector_scaler_commit(int fd, uint32_t connector_id,
     uint32_t crtc_id, uint64_t scaling_mode, uint64_t underscan,
@@ -5985,6 +6249,8 @@ main(void)
 	else
 		check(connected_count > 0,
 		    "at least one connected connector exposed");
+	check_connected_mode_list_atomic_contract(fd, resources,
+	    expect_no_connected);
 
 	for (int i = 0; i < resources->count_crtcs; i++)
 		check_crtc(fd, resources->crtcs[i]);
