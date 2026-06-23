@@ -6129,6 +6129,56 @@ drm_lease_create_error(int fd, const uint32_t *object_ids,
 	}
 }
 
+/*
+ * drm_lease_create_flags_error()
+ *
+ * Ownership:
+ *   Borrows the DRM master fd and the optional object id array.  The helper
+ *   must not receive ownership of a lease fd because invalid flags are rejected
+ *   before a file descriptor or lessee id is allocated.
+ *
+ * Lifetime:
+ *   The object id array is only borrowed for the ioctl call.  The CREATE_LEASE
+ *   result fields are initialized with sentinels and must remain non-usable on
+ *   failure.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates the common DRM flags boundary
+ *   before lease object preparation or fd allocation.
+ */
+static void
+drm_lease_create_flags_error(int fd, const uint32_t *object_ids,
+    uint32_t object_count, uint32_t flags, int expected_errno,
+    const char *what, const char *errno_what, const char *no_fd_what)
+{
+	struct drm_mode_create_lease create_lease;
+	int saved_errno;
+	int ret;
+
+	memset(&create_lease, 0, sizeof(create_lease));
+	create_lease.object_ids = (uintptr_t)object_ids;
+	create_lease.object_count = object_count;
+	create_lease.flags = flags;
+	create_lease.fd = (uint32_t)-1;
+	create_lease.lessee_id = 0;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_CREATE_LEASE, &create_lease);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	check(create_lease.fd == (uint32_t)-1 && create_lease.lessee_id == 0,
+	    no_fd_what);
+	if (ret == 0 || saved_errno != expected_errno ||
+	    create_lease.fd != (uint32_t)-1 || create_lease.lessee_id != 0) {
+		printf("    CREATE_LEASE flags=0x%x ret=%d errno=%d fd=%u lessee=%u expected=%d\n",
+		    flags, ret, saved_errno, create_lease.fd,
+		    create_lease.lessee_id, expected_errno);
+		if (ret == 0 && create_lease.fd != (uint32_t)-1)
+			close((int)create_lease.fd);
+	}
+}
+
 static bool
 drm_lease_list_contains(int fd, uint32_t lessee_id)
 {
@@ -6641,6 +6691,11 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	}
 	check(unleased_connector_id != 0,
 	    "DRM lease has unleased connector for visibility probe");
+
+	drm_lease_create_flags_error(fd, NULL, 0, 0x80000000u, EINVAL,
+	    "DRM lease CREATE_LEASE rejects unknown flags",
+	    "DRM lease CREATE_LEASE unknown flags fail with EINVAL",
+	    "DRM lease CREATE_LEASE unknown flags return no lease fd");
 
 	if (drm_lease_create_flags(fd, NULL, 0, O_CLOEXEC | O_NONBLOCK,
 	    &empty_lease_fd, &empty_lessee_id,
