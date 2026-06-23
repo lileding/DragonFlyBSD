@@ -2747,6 +2747,7 @@ check_connector(int fd, drmModeConnector *connector,
     int *connected_count)
 {
 	char name[64];
+	char text[128];
 
 	snprintf(name, sizeof(name), "connector %u", connector->connector_id);
 	printf("%s type=%u status=%s modes=%d encoders=%d\n", name,
@@ -2762,6 +2763,8 @@ check_connector(int fd, drmModeConnector *connector,
 	}
 	dump_properties(fd, connector->connector_id, DRM_MODE_OBJECT_CONNECTOR,
 	    name);
+	snprintf(text, sizeof(text), "%s is not writeback", name);
+	check(connector->connector_type != DRM_MODE_CONNECTOR_WRITEBACK, text);
 	check(connector->count_encoders > 0, "connector has at least one encoder");
 	check_unique_ids(connector->encoders, connector->count_encoders,
 	    "connector encoder ids are unique");
