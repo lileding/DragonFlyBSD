@@ -692,6 +692,15 @@ struct drm_get_cap {
  */
 #define DRM_CLIENT_CAP_WRITEBACK_CONNECTORS	5
 
+/**
+ * DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT
+ *
+ * If set to 1, the DRM core will expose virtualized cursor-plane hotspot
+ * semantics. Non-virtualized drivers which do not special-case cursor planes
+ * must reject this with EOPNOTSUPP.
+ */
+#define DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT	6
+
 /** DRM_IOCTL_SET_CLIENT_CAP ioctl argument type */
 struct drm_set_client_cap {
 	__u64 capability;
