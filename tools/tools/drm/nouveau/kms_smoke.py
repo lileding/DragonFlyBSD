@@ -545,6 +545,15 @@ def command_return_code(path: pathlib.Path) -> int | None:
     return int(match.group(1))
 
 
+def plain_return_code(path: pathlib.Path) -> int | None:
+    if not path.exists():
+        return None
+    text = path.read_text(errors="replace").strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        return None
+    return int(text)
+
+
 def captured_text(path: pathlib.Path) -> str:
     if not path.exists():
         return ""
@@ -611,6 +620,9 @@ def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
     logs = sorted(out_dir.glob("*sway*.log"))
     if not logs:
         return
+
+    compositor_rc = plain_return_code(out_dir / "rc")
+    emit(compositor_rc == 0, f"Wayland compositor rc={compositor_rc}")
 
     text = "\n".join(path.read_text(errors="replace") for path in logs)
     emit(bool(re.search(r"Initializing DRM backend for /dev/dri/card0 \(nouveau\)", text)),
