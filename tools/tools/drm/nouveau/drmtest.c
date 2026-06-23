@@ -5194,6 +5194,30 @@ check_drm_lease_encoder_filter(int lease_fd, uint32_t connector_id,
 	drmModeFreeConnector(connector);
 }
 
+static void
+check_drm_lease_plane_filter(int lease_fd, uint32_t plane_id,
+    uint32_t crtc_id)
+{
+	drmModePlanePtr plane;
+
+	plane = drmModeGetPlane(lease_fd, plane_id);
+	check(plane != NULL,
+	    "DRM lease primary plane is readable for CRTC filter");
+	if (plane == NULL)
+		return;
+
+	check(plane->crtc_id == crtc_id,
+	    "DRM lease primary plane GETPLANE points at leased CRTC");
+	check(plane->possible_crtcs != 0,
+	    "DRM lease primary plane possible_crtcs is non-empty");
+	check((plane->possible_crtcs & ~1u) == 0,
+	    "DRM lease primary plane possible_crtcs is lease-relative");
+	check((plane->possible_crtcs & 1u) != 0,
+	    "DRM lease primary plane allows leased CRTC index");
+
+	drmModeFreePlane(plane);
+}
+
 /*
  * check_drm_lease_contract()
  *
@@ -5432,6 +5456,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	drm_lease_create_error(lease_fd, lease_ids, object_count, EINVAL,
 	    "DRM lease lessee cannot create sub-lease");
 	check_drm_lease_encoder_filter(lease_fd, connector_id, active_crtc_id);
+	check_drm_lease_plane_filter(lease_fd, primary_plane_id, active_crtc_id);
 	check_drm_lease_atomic_test_only(lease_fd, connector_id,
 	    active_crtc_id, primary_plane_id);
 	check_drm_lease_vblank_sequence_contract(lease_fd, active_crtc_id);
