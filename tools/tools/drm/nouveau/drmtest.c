@@ -3329,9 +3329,10 @@ check_dirtyfb_non_master_denied(uint32_t fb_id, uint32_t width,
  *   closes it before return.
  *
  * Lifetime:
- *   The active CRTC mode and primary FB_ID must remain valid while the helper
- *   runs.  The rejected probes reuse the current mode and FB_ID, so even an
- *   erroneous success would not intentionally program a new visible state.
+ *   The active CRTC mode, connector properties, and primary plane state must
+ *   remain valid while the helper runs.  The rejected probes reuse current
+ *   state or no-op values, so even an erroneous success would not
+ *   intentionally program a new visible state.
  *
  * Threading:
  *   Single-threaded userspace probe.  The secondary fd must not be current
@@ -3346,9 +3347,18 @@ check_non_master_display_mutation_contract(int master_fd,
 	struct atomic_plane_snapshot snapshot;
 	drmModeCrtcPtr crtc;
 	drmModeModeInfo saved_mode;
+	struct drm_mode_cursor cursor;
+	struct drm_mode_cursor2 cursor2;
+	struct drm_mode_obj_set_property obj_set_property;
 	uint32_t connector_id = 0;
+	uint32_t dpms_property_id = 0;
+	uint64_t connector_dpms = 0;
+	uint16_t *gamma_red = NULL;
+	uint16_t *gamma_green = NULL;
+	uint16_t *gamma_blue = NULL;
 	int secondary_fd;
 	int saved_errno;
+	int gamma_size;
 	int crtc_x;
 	int crtc_y;
 	int ret;
@@ -3383,9 +3393,21 @@ check_non_master_display_mutation_contract(int master_fd,
 		return;
 	}
 	saved_mode = crtc->mode;
+	gamma_size = crtc->gamma_size;
 	crtc_x = crtc->x;
 	crtc_y = crtc->y;
 	drmModeFreeCrtc(crtc);
+	check(gamma_size > 0,
+	    "active CRTC has gamma ramp for non-master display mutation probe");
+	if (gamma_size <= 0)
+		return;
+
+	if (!get_property_id(master_fd, connector_id, DRM_MODE_OBJECT_CONNECTOR,
+	    "DPMS", &dpms_property_id) ||
+	    !get_property_value_checked(master_fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "DPMS", &connector_dpms,
+	    "non-master display mutation connector"))
+		return;
 
 	errno = 0;
 	secondary_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
@@ -3423,6 +3445,121 @@ check_non_master_display_mutation_contract(int master_fd,
 		    saved_errno);
 		check(saved_errno == EACCES,
 		    "non-master legacy pageflip fails with EACCES");
+	}
+
+	errno = 0;
+	ret = drmModeSetPlane(secondary_fd, plane_id, crtc_id,
+	    (uint32_t)snapshot.fb_id, 0, (int32_t)snapshot.crtc_x,
+	    (int32_t)snapshot.crtc_y, (uint32_t)snapshot.crtc_w,
+	    (uint32_t)snapshot.crtc_h, (uint32_t)snapshot.src_x,
+	    (uint32_t)snapshot.src_y, (uint32_t)snapshot.src_w,
+	    (uint32_t)snapshot.src_h);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy SetPlane is denied");
+	if (ret == 0) {
+		printf("    non-master legacy SetPlane unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy SetPlane errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy SetPlane fails with EACCES");
+	}
+
+	memset(&cursor, 0, sizeof(cursor));
+	cursor.flags = DRM_MODE_CURSOR_MOVE;
+	cursor.crtc_id = crtc_id;
+	errno = 0;
+	ret = drmIoctl(secondary_fd, DRM_IOCTL_MODE_CURSOR, &cursor);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy cursor MOVE is denied");
+	if (ret == 0) {
+		printf("    non-master legacy cursor MOVE unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy cursor MOVE errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy cursor MOVE fails with EACCES");
+	}
+
+	memset(&cursor2, 0, sizeof(cursor2));
+	cursor2.flags = DRM_MODE_CURSOR_MOVE;
+	cursor2.crtc_id = crtc_id;
+	errno = 0;
+	ret = drmIoctl(secondary_fd, DRM_IOCTL_MODE_CURSOR2, &cursor2);
+	saved_errno = errno;
+	check(ret != 0, "non-master legacy cursor2 MOVE is denied");
+	if (ret == 0) {
+		printf("    non-master legacy cursor2 MOVE unexpectedly succeeded\n");
+	} else {
+		printf("    non-master legacy cursor2 MOVE errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master legacy cursor2 MOVE fails with EACCES");
+	}
+
+	gamma_red = calloc((size_t)gamma_size, sizeof(*gamma_red));
+	gamma_green = calloc((size_t)gamma_size, sizeof(*gamma_green));
+	gamma_blue = calloc((size_t)gamma_size, sizeof(*gamma_blue));
+	check(gamma_red != NULL && gamma_green != NULL && gamma_blue != NULL,
+	    "non-master legacy SetGamma allocates identity ramp");
+	if (gamma_red != NULL && gamma_green != NULL && gamma_blue != NULL) {
+		for (int i = 0; i < gamma_size; i++) {
+			uint16_t value;
+
+			value = gamma_size == 1 ? 0 :
+			    (uint16_t)((uint64_t)i * 65535u /
+			    (uint64_t)(gamma_size - 1));
+			gamma_red[i] = value;
+			gamma_green[i] = value;
+			gamma_blue[i] = value;
+		}
+
+		errno = 0;
+		ret = drmModeCrtcSetGamma(secondary_fd, crtc_id,
+		    (uint32_t)gamma_size, gamma_red, gamma_green, gamma_blue);
+		saved_errno = errno;
+		check(ret != 0, "non-master legacy SetGamma is denied");
+		if (ret == 0) {
+			printf("    non-master legacy SetGamma unexpectedly succeeded\n");
+		} else {
+			printf("    non-master legacy SetGamma errno=%d\n",
+			    saved_errno);
+			check(saved_errno == EACCES,
+			    "non-master legacy SetGamma fails with EACCES");
+		}
+	}
+
+	errno = 0;
+	ret = drmModeConnectorSetProperty(secondary_fd, connector_id,
+	    dpms_property_id, connector_dpms);
+	saved_errno = errno;
+	check(ret != 0, "non-master connector SetProperty is denied");
+	if (ret == 0) {
+		printf("    non-master connector SetProperty unexpectedly succeeded\n");
+	} else {
+		printf("    non-master connector SetProperty errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master connector SetProperty fails with EACCES");
+	}
+
+	memset(&obj_set_property, 0, sizeof(obj_set_property));
+	obj_set_property.value = connector_dpms;
+	obj_set_property.prop_id = dpms_property_id;
+	obj_set_property.obj_id = connector_id;
+	obj_set_property.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+	errno = 0;
+	ret = drmIoctl(secondary_fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY,
+	    &obj_set_property);
+	saved_errno = errno;
+	check(ret != 0, "non-master object SetProperty is denied");
+	if (ret == 0) {
+		printf("    non-master object SetProperty unexpectedly succeeded\n");
+	} else {
+		printf("    non-master object SetProperty errno=%d\n",
+		    saved_errno);
+		check(saved_errno == EACCES,
+		    "non-master object SetProperty fails with EACCES");
 	}
 
 	{
@@ -3477,6 +3614,9 @@ check_non_master_display_mutation_contract(int master_fd,
 		}
 	}
 
+	free(gamma_blue);
+	free(gamma_green);
+	free(gamma_red);
 	check(close(secondary_fd) == 0,
 	    "non-master display mutation closes secondary card fd");
 }
