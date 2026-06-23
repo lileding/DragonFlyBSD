@@ -254,6 +254,9 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	    "ADDFB2_MODIFIERS");
 	check_drm_cap(fd, DRM_CAP_CRTC_IN_VBLANK_EVENT, 1,
 	    "CRTC_IN_VBLANK_EVENT");
+	check_drm_cap(fd, DRM_CAP_SYNCOBJ, 1, "SYNCOBJ");
+	check_drm_cap(fd, DRM_CAP_SYNCOBJ_TIMELINE, 1,
+	    "SYNCOBJ_TIMELINE");
 	check_drm_cap(fd, DRM_CAP_PRIME,
 	    DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT, "PRIME");
 }
