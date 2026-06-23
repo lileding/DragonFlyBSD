@@ -226,8 +226,17 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	    "DUMB_PREFERRED_DEPTH");
 	check_drm_cap(fd, DRM_CAP_DUMB_PREFER_SHADOW, 1,
 	    "DUMB_PREFER_SHADOW");
+	check_drm_cap(fd, DRM_CAP_DUMB_BUFFER, 1, "DUMB_BUFFER");
 	check_drm_cap(fd, DRM_CAP_ASYNC_PAGE_FLIP, 0,
 	    "ASYNC_PAGE_FLIP");
+	check_drm_cap(fd, DRM_CAP_PAGE_FLIP_TARGET, 0,
+	    "PAGE_FLIP_TARGET");
+	check_drm_cap(fd, DRM_CAP_CURSOR_WIDTH, 256, "CURSOR_WIDTH");
+	check_drm_cap(fd, DRM_CAP_CURSOR_HEIGHT, 256, "CURSOR_HEIGHT");
+	check_drm_cap(fd, DRM_CAP_ADDFB2_MODIFIERS, 1,
+	    "ADDFB2_MODIFIERS");
+	check_drm_cap(fd, DRM_CAP_CRTC_IN_VBLANK_EVENT, 1,
+	    "CRTC_IN_VBLANK_EVENT");
 }
 
 static const char *
