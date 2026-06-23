@@ -2254,6 +2254,56 @@ check_connector_encoder_type_contract(int fd, const drmModeConnector *connector)
 	}
 }
 
+/*
+ * check_connected_connector_route_contract()
+ *
+ * Ownership:
+ *   Borrows the connector snapshot and DRM resource snapshot.  The helper
+ *   reads the current encoder snapshot and connector properties through libdrm,
+ *   releasing every temporary object before return.
+ *
+ * Lifetime:
+ *   Valid only for the current MODE_GETCONNECTOR/MODE_GETENCODER snapshot.
+ *   A later modeset or hotplug may legitimately change the active route.
+ *
+ * Threading:
+ *   Single-threaded read-only KMS UAPI validation.  It never issues an atomic
+ *   commit or takes driver-private locks.
+ */
+static void
+check_connected_connector_route_contract(int fd,
+    const drmModeConnector *connector, const drmModeRes *resources,
+    const char *name)
+{
+	drmModeEncoderPtr encoder;
+	uint64_t connector_crtc_id = 0;
+
+	if (connector->encoder_id == 0)
+		return;
+
+	if (!get_property_value_checked(fd, connector->connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &connector_crtc_id, name))
+		return;
+
+	check(connector_crtc_id != 0,
+	    "connected connector CRTC_ID is non-zero");
+	check(id_in_list(resources->crtcs, resources->count_crtcs,
+	    (uint32_t)connector_crtc_id),
+	    "connected connector CRTC_ID is present in resources");
+
+	encoder = drmModeGetEncoder(fd, connector->encoder_id);
+	check(encoder != NULL,
+	    "connected connector current encoder is readable");
+	if (encoder == NULL)
+		return;
+
+	check(encoder->crtc_id != 0,
+	    "connected connector current encoder has current CRTC");
+	check(connector_crtc_id == encoder->crtc_id,
+	    "connected connector CRTC_ID matches current encoder CRTC");
+	drmModeFreeEncoder(encoder);
+}
+
 static void
 check_connector(int fd, drmModeConnector *connector,
     const drmModeRes *resources, bool expect_no_connected,
@@ -2297,6 +2347,8 @@ check_connector(int fd, drmModeConnector *connector,
 			check(id_in_list(connector->encoders,
 			    connector->count_encoders, connector->encoder_id),
 			    "connected connector current encoder is attached");
+			check_connected_connector_route_contract(fd, connector,
+			    resources, name);
 		}
 	} else if (connector->connection == DRM_MODE_DISCONNECTED) {
 		check_disconnected_connector_contract(fd, connector, name);
