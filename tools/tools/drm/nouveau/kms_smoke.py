@@ -1602,6 +1602,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM client cap STEREO_3D is accepted",
         "DRM client cap UNIVERSAL_PLANES is accepted",
         "DRM client cap ASPECT_RATIO is accepted",
+        "DRM client cap WRITEBACK_CONNECTORS before ATOMIC is rejected",
+        "DRM client cap WRITEBACK_CONNECTORS before ATOMIC fails with errno 22",
         "DRM client cap ATOMIC is accepted",
         "DRM client cap WRITEBACK_CONNECTORS is accepted",
         "DRM client cap CURSOR_PLANE_HOTSPOT is rejected",
