@@ -1887,6 +1887,83 @@ check_disconnected_connector_contract(int fd, drmModeConnector *connector,
 	    "disconnected connector CRTC_ID is 0");
 }
 
+static bool
+connector_allows_encoder_type(uint32_t connector_type, uint32_t encoder_type)
+{
+	switch (connector_type) {
+	case DRM_MODE_CONNECTOR_VGA:
+		return encoder_type == DRM_MODE_ENCODER_DAC;
+	case DRM_MODE_CONNECTOR_DVII:
+	case DRM_MODE_CONNECTOR_DVID:
+	case DRM_MODE_CONNECTOR_HDMIA:
+	case DRM_MODE_CONNECTOR_HDMIB:
+		return encoder_type == DRM_MODE_ENCODER_TMDS;
+	case DRM_MODE_CONNECTOR_DisplayPort:
+		/*
+		 * DRM has no separate physical SST DP encoder type.  Nouveau and
+		 * drm_encoder.h expose SOR-backed DVI/HDMI/SST-DP as TMDS; only
+		 * MST virtual connectors use the special DPMST encoder type.
+		 */
+		return encoder_type == DRM_MODE_ENCODER_TMDS ||
+		    encoder_type == DRM_MODE_ENCODER_DPMST;
+	case DRM_MODE_CONNECTOR_eDP:
+		return encoder_type == DRM_MODE_ENCODER_TMDS;
+	case DRM_MODE_CONNECTOR_LVDS:
+		return encoder_type == DRM_MODE_ENCODER_LVDS;
+	case DRM_MODE_CONNECTOR_TV:
+	case DRM_MODE_CONNECTOR_Composite:
+	case DRM_MODE_CONNECTOR_SVIDEO:
+	case DRM_MODE_CONNECTOR_Component:
+	case DRM_MODE_CONNECTOR_9PinDIN:
+		return encoder_type == DRM_MODE_ENCODER_TVDAC;
+	case DRM_MODE_CONNECTOR_VIRTUAL:
+		return encoder_type == DRM_MODE_ENCODER_VIRTUAL;
+	default:
+		return encoder_type != DRM_MODE_ENCODER_NONE;
+	}
+}
+
+/*
+ * check_connector_encoder_type_contract()
+ *
+ * Ownership:
+ *   Borrows connector encoder IDs from libdrm's connector snapshot and reads
+ *   matching encoder snapshots.  It owns no DRM object references beyond each
+ *   temporary drmModeEncoderPtr, which is freed before return.
+ *
+ * Lifetime:
+ *   Performs read-only KMS UAPI validation.  It must not create modeset state,
+ *   blobs, framebuffers, or connector references.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  The KMS objects are read without driver
+ *   private locks; hotplug races may change future snapshots but not this one.
+ */
+static void
+check_connector_encoder_type_contract(int fd, const drmModeConnector *connector)
+{
+	drmModeEncoderPtr encoder;
+
+	for (int i = 0; i < connector->count_encoders; i++) {
+		encoder = drmModeGetEncoder(fd, connector->encoders[i]);
+		check(encoder != NULL,
+		    "connector attached encoder is readable for type contract");
+		if (encoder == NULL)
+			continue;
+		printf("    connector encoder %u type=%u\n",
+		    encoder->encoder_id, encoder->encoder_type);
+		check(connector_allows_encoder_type(connector->connector_type,
+		    encoder->encoder_type),
+		    "connector encoder type matches connector type");
+		if (connector->encoder_id == encoder->encoder_id) {
+			check(connector_allows_encoder_type(
+			    connector->connector_type, encoder->encoder_type),
+			    "connector current encoder type matches connector type");
+		}
+		drmModeFreeEncoder(encoder);
+	}
+}
+
 static void
 check_connector(int fd, drmModeConnector *connector,
     const drmModeRes *resources, bool expect_no_connected,
@@ -1914,6 +1991,7 @@ check_connector(int fd, drmModeConnector *connector,
 		    connector->encoders[i]),
 		    "connector encoder id is present in resources");
 	}
+	check_connector_encoder_type_contract(fd, connector);
 	if (connector->connection == DRM_MODE_CONNECTED) {
 		(*connected_count)++;
 		if (expect_no_connected)
