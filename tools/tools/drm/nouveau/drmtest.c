@@ -174,6 +174,8 @@ static bool add_linear_framebuffer(int fd, uint32_t width, uint32_t height,
     uint32_t format, uint32_t handle, uint32_t pitch, uint32_t *fb_id_out,
     const char *what);
 static void remove_framebuffer(int fd, uint32_t fb_id, const char *what);
+static void close_fb2_handles(int fd, const drmModeFB2 *fb2,
+    const char *what);
 static bool read_color_counter_snapshot(
     struct color_counter_snapshot *snapshot, const char *stage);
 static bool read_pageflip_counter_snapshot(
@@ -237,6 +239,8 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	    "ADDFB2_MODIFIERS");
 	check_drm_cap(fd, DRM_CAP_CRTC_IN_VBLANK_EVENT, 1,
 	    "CRTC_IN_VBLANK_EVENT");
+	check_drm_cap(fd, DRM_CAP_PRIME,
+	    DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT, "PRIME");
 }
 
 static const char *
@@ -2971,6 +2975,117 @@ remove_framebuffer(int fd, uint32_t fb_id, const char *what)
 	check(drmModeRmFB(fd, fb_id) == 0, what);
 }
 
+/*
+ * check_same_device_prime_framebuffer_contract()
+ *
+ * Ownership:
+ *   Owns one temporary render-node dumb BO, one dma-buf fd exported from that
+ *   BO, one imported GEM handle on the master KMS fd, and one framebuffer made
+ *   from the imported handle.  All handles and fds are released before return.
+ *
+ * Lifetime:
+ *   The imported KMS handle must remain valid while the framebuffer exists, even
+ *   if the exporting render fd is a different DRM file.  The framebuffer is
+ *   metadata-only: it is never attached to a plane or scanned out by this probe.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  It exercises PRIME same-device
+ *   export/import, GEM handle installation, ADDFB2 metadata, and cleanup paths
+ *   without starting a display transaction.
+ */
+static void
+check_same_device_prime_framebuffer_contract(int kms_fd)
+{
+	drmModeFB2Ptr fb2 = NULL;
+	uint32_t render_handle = 0;
+	uint32_t imported_handle = 0;
+	uint32_t pitch = 0;
+	uint32_t fb_id = 0;
+	int render_fd = -1;
+	int prime_fd = -1;
+	int saved_errno;
+	int ret;
+
+	errno = 0;
+	render_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+	saved_errno = errno;
+	check(render_fd >= 0, "PRIME render node opens for framebuffer roundtrip");
+	if (render_fd < 0) {
+		printf("    render node errno=%d\n", saved_errno);
+		return;
+	}
+
+	if (!create_dumb_buffer_for(render_fd, 64, 64, 32, &render_handle,
+	    &pitch, "CREATE_DUMB succeeds on render fd for PRIME framebuffer probe"))
+		goto out_close_render;
+	if (!clear_dumb_buffer(render_fd, render_handle, pitch, 64,
+	    "MAP_DUMB succeeds on render fd for PRIME framebuffer probe"))
+		goto out_destroy_render_bo;
+
+	errno = 0;
+	ret = drmPrimeHandleToFD(render_fd, render_handle, DRM_CLOEXEC, &prime_fd);
+	saved_errno = errno;
+	check(ret == 0 && prime_fd >= 0,
+	    "PRIME_HANDLE_TO_FD exports render dumb BO");
+	if (ret != 0 || prime_fd < 0) {
+		printf("    PRIME_HANDLE_TO_FD errno=%d\n", saved_errno);
+		goto out_destroy_render_bo;
+	}
+
+	errno = 0;
+	ret = drmPrimeFDToHandle(kms_fd, prime_fd, &imported_handle);
+	saved_errno = errno;
+	check(ret == 0 && imported_handle != 0,
+	    "PRIME_FD_TO_HANDLE imports render BO on KMS fd");
+	if (ret != 0 || imported_handle == 0) {
+		printf("    PRIME_FD_TO_HANDLE errno=%d\n", saved_errno);
+		goto out_close_prime_fd;
+	}
+
+	if (!add_linear_framebuffer(kms_fd, 64, 64, DRM_FORMAT_XRGB8888,
+	    imported_handle, pitch, &fb_id,
+	    "ADDFB2 accepts PRIME-imported XRGB8888 framebuffer"))
+		goto out_close_imported;
+
+	errno = 0;
+	fb2 = drmModeGetFB2(kms_fd, fb_id);
+	saved_errno = errno;
+	check(fb2 != NULL, "GETFB2 succeeds for PRIME-imported framebuffer");
+	if (fb2 != NULL) {
+		check(fb2->pixel_format == DRM_FORMAT_XRGB8888,
+		    "PRIME-imported framebuffer reports XRGB8888 format");
+		check((fb2->flags & DRM_MODE_FB_MODIFIERS) != 0,
+		    "PRIME-imported framebuffer reports modifier flag");
+		check(fb2->modifier == DRM_FORMAT_MOD_LINEAR,
+		    "PRIME-imported framebuffer reports linear modifier");
+		check(fb2->pitches[0] == pitch,
+		    "PRIME-imported framebuffer reports exported pitch");
+		check(fb2->handles[0] != 0,
+		    "PRIME-imported framebuffer returns a GEM handle to master");
+		close_fb2_handles(kms_fd, fb2,
+		    "GEM_CLOSE succeeds for PRIME-imported GETFB2 handle");
+		drmModeFreeFB2(fb2);
+	} else {
+		printf("    PRIME-imported GETFB2 errno=%d\n", saved_errno);
+	}
+
+out_close_imported:
+	remove_framebuffer(kms_fd, fb_id,
+	    "RMFB succeeds for PRIME-imported framebuffer probe");
+	close_gem_handle_for(kms_fd, imported_handle,
+	    "GEM_CLOSE succeeds for PRIME-imported KMS handle");
+out_close_prime_fd:
+	if (prime_fd >= 0)
+		check(close(prime_fd) == 0,
+		    "close succeeds for PRIME framebuffer dma-buf fd");
+out_destroy_render_bo:
+	destroy_dumb_buffer_for(render_fd, render_handle,
+	    "DESTROY_DUMB succeeds for PRIME framebuffer render BO");
+out_close_render:
+	check(close(render_fd) == 0,
+	    "close succeeds for PRIME framebuffer render fd");
+}
+
 static void
 close_fb2_handles(int fd, const drmModeFB2 *fb2, const char *what)
 {
@@ -3141,6 +3256,7 @@ check_framebuffer_uapi_contract(int fd)
 	    pitch, &fb_id,
 	    "ADDFB2 accepts XRGB8888 linear framebuffer UAPI probe"))
 		goto out_destroy_bo;
+	check_same_device_prime_framebuffer_contract(fd);
 
 	errno = 0;
 	fb = drmModeGetFB(fd, fb_id);
