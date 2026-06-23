@@ -19,8 +19,10 @@ import os
 import pathlib
 import re
 import shlex
+import socket
 import subprocess
 import sys
+import time
 
 
 LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
@@ -204,6 +206,62 @@ def run(argv: list[str], path: pathlib.Path, env: dict[str, str] | None = None,
             return 127
 
 
+def capture_hpd_inject(out_dir: pathlib.Path, inject_value: int) -> int:
+    path = out_dir / "kms-hpd-inject.x11"
+    command = ["doas", "sysctl", f"dev.drm.0.kms_hpd_inject={inject_value:#x}"]
+    devd_path = "/var/run/devd.seqpacket.pipe"
+
+    with path.open("w") as out:
+        out.write(f"### devd socket {devd_path}\n")
+        out.write(f"### {command_text(command)}\n")
+        out.flush()
+
+        try:
+            devd = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            devd.settimeout(8.0)
+            devd.connect(devd_path)
+        except OSError as err:
+            out.write(f"\n### devd-connect-error={err}\n")
+            out.write("\n### rc=1\n")
+            return 1
+
+        with devd:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            out.write(result.stdout)
+            out.flush()
+            if result.returncode != 0:
+                out.write(f"\n### rc={result.returncode}\n")
+                return result.returncode
+
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                try:
+                    data = devd.recv(4096)
+                except socket.timeout:
+                    break
+                if not data:
+                    break
+                text = data.decode("utf-8", "replace").strip()
+                out.write(f"### devd-event {text}\n")
+                out.flush()
+                if (
+                    "system=DRM" in text and
+                    "type=HOTPLUG" in text and
+                    "HOTPLUG=1" in text
+                ):
+                    out.write("\n### rc=0\n")
+                    return 0
+
+            out.write("\n### devd-hotplug-missing\n")
+            out.write("\n### rc=1\n")
+            return 1
+
+
 def capture_kms_property_probe(out_dir: pathlib.Path, phase: str) -> None:
     source = pathlib.Path(__file__).with_name("drmtest.c")
     binary = out_dir / "drmtest"
@@ -272,11 +330,7 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     if args.run_hpd_inject:
         run(["sysctl", "-n", "dev.drm.0.state"],
             out_dir / "drm_state.x11_hpd_before")
-        run([
-            "doas",
-            "sysctl",
-            f"dev.drm.0.kms_hpd_inject={args.hpd_inject_value}",
-        ], out_dir / "kms-hpd-inject.x11")
+        capture_hpd_inject(out_dir, args.hpd_inject_value)
         run(["sleep", "1"], out_dir / "hpd-inject-wait.x11")
         run(["sysctl", "-n", "dev.drm.0.state"],
             out_dir / "drm_state.x11_hpd_after")
@@ -626,6 +680,12 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         if hpd_before or hpd_after or (out_dir / "kms-hpd-inject.x11").exists():
             inject_rc = command_return_code(out_dir / "kms-hpd-inject.x11")
             emit(inject_rc == 0, f"kms-hpd-inject.x11 rc={inject_rc}")
+            inject_text = captured_text(out_dir / "kms-hpd-inject.x11")
+            emit(bool(re.search(
+                r"!system=DRM\s+subsystem=card[0-9]+\s+type=HOTPLUG\b"
+                r".*\bHOTPLUG=1\b.*\bcard=[0-9]+\b.*\brender=-?[0-9]+\b",
+                inject_text,
+            )), "devd client received DRM HOTPLUG event")
             for key in (
                 "hotplug_count",
                 "hotplug_notify_only_count",
