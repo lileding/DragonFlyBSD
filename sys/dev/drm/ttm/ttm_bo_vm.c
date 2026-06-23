@@ -48,6 +48,30 @@
 
 #define TTM_BO_VM_NUM_PREFAULT 16
 
+/*
+ * ttm_bo_io_mem_pfn()
+ *
+ * Ownership:
+ *   Borrows the BO and its already-reserved io memory state.  The returned PFN
+ *   is a translation result, not a new reference to the backing memory.
+ *
+ * Lifetime:
+ *   Driver-provided PFNs are valid for the current io_mem_reserve lifetime.
+ *   Drivers without a callback keep the historical linear bus mapping.
+ *
+ * Threading:
+ *   Called from the TTM fault path while the BO is reserved and the memory
+ *   manager io_reserve_mutex is held.
+ */
+static unsigned long
+ttm_bo_io_mem_pfn(struct ttm_buffer_object *bo, unsigned long page_offset)
+{
+	if (bo->bdev->driver->io_mem_pfn != NULL)
+		return (bo->bdev->driver->io_mem_pfn(bo, page_offset));
+	return (((bo->mem.bus.base + bo->mem.bus.offset) >> PAGE_SHIFT) +
+	    page_offset);
+}
+
 static int ttm_bo_vm_fault_idle(struct ttm_buffer_object *bo,
 				struct vm_fault *vmf)
 {
@@ -509,6 +533,8 @@ ttm_bo_vm_fault_dfly(vm_object_t vm_obj, vm_ooffset_t offset,
 	struct ttm_mem_type_manager *man =
 		&bdev->man[bo->mem.mem_type];
 	struct vm_area_struct cvma;
+	unsigned long page_offset;
+	unsigned long pfn;
 
 /*
    The Linux code expects to receive these arguments:
@@ -664,8 +690,17 @@ retry:
 
 	if (bo->mem.bus.is_iomem) {
 #ifdef __DragonFly__
-		m = vm_phys_fictitious_to_vm_page(bo->mem.bus.base +
-						  bo->mem.bus.offset + offset);
+		page_offset = OFF_TO_IDX(offset);
+		pfn = ttm_bo_io_mem_pfn(bo, page_offset);
+		if (pfn == 0) {
+			retval = VM_PAGER_ERROR;
+			goto out_io_unlock1;
+		}
+		m = vm_phys_fictitious_to_vm_page((vm_paddr_t)pfn << PAGE_SHIFT);
+		if (m == NULL) {
+			retval = VM_PAGER_ERROR;
+			goto out_io_unlock1;
+		}
 		pmap_page_set_memattr(m, ttm_io_prot(bo->mem.placement, 0));
 #endif
 		cvma.vm_page_prot = ttm_io_prot(bo->mem.placement,

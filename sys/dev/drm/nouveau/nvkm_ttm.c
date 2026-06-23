@@ -939,6 +939,7 @@ nvkm_ttm_io_mem_reserve(struct ttm_bo_device *bdev,
 	struct nvkm_softc *sc = ttm->sc;
 	struct ttm_mem_type_manager *man = &bdev->man[mem->mem_type];
 	struct nvkm_vram_alloc *alloc;
+	uint32_t pages;
 	int err;
 
 	mem->bus.addr = NULL;
@@ -960,11 +961,45 @@ nvkm_ttm_io_mem_reserve(struct ttm_bo_device *bdev,
 		if (mem->mm_node == NULL || sc->bar_res[1] == NULL)
 			return (-EINVAL);
 		alloc = container_of(mem->mm_node, struct nvkm_vram_alloc, node);
-		if (alloc->bar1_gva == 0) {
-			err = nvkm_gsp_bar1_map_existing_range(sc, alloc->paddr,
-			    mem->bus.size, &alloc->bar1_gva);
+		pages = (uint32_t)mem->num_pages;
+		if (pages == 0 || (uint64_t)pages != mem->num_pages)
+			return (-EINVAL);
+		if (alloc->bar1_page_gva == NULL) {
+			/*
+			 * Ownership:
+			 *   TTM owns the CPU mapping lifetime through io_mem_reserve/free.
+			 *   The nvkm_vram_alloc owns the scatter BAR1 GVA table while that
+			 *   lifetime is active; each entry is a stable loan for one user
+			 *   PTE returned by nvkm_ttm_io_mem_pfn().
+			 *
+			 * Lifetime:
+			 *   The table survives until TTM drops the io reserve or the VRAM
+			 *   allocation is freed.  It deliberately does not require a
+			 *   contiguous BAR1 range, because user mmap PTEs only need stable
+			 *   per-page PFNs, not adjacent BAR1 addresses.
+			 *
+			 * Threading:
+			 *   The TTM io_reserve_mutex serializes reserve/free and fault-time
+			 *   PFN lookup for this memory manager.  The table is not touched
+			 *   from interrupt context.
+			 */
+			alloc->bar1_page_gva = kzalloc(
+			    (size_t)pages * sizeof(*alloc->bar1_page_gva),
+			    GFP_KERNEL);
+			if (alloc->bar1_page_gva == NULL) {
+				sc->ttm_io_reserve_error_count++;
+				sc->ttm_io_reserve_last_error = -ENOMEM;
+				return (-ENOMEM);
+			}
+			alloc->bar1_page_count = pages;
+			err = nvkm_gsp_bar1_map_existing_scatter(sc,
+			    alloc->paddr, mem->bus.size, alloc->bar1_page_gva,
+			    alloc->bar1_page_count);
 			if (err != 0) {
 				err = err < 0 ? err : -err;
+				kfree(alloc->bar1_page_gva);
+				alloc->bar1_page_gva = NULL;
+				alloc->bar1_page_count = 0;
 				sc->ttm_io_reserve_error_count++;
 				sc->ttm_io_reserve_last_error = err;
 				if (err == -ENOSPC) {
@@ -974,8 +1009,13 @@ nvkm_ttm_io_mem_reserve(struct ttm_bo_device *bdev,
 				return (err);
 			}
 			alloc->bar1_size = mem->bus.size;
+		} else if (alloc->bar1_page_count != pages ||
+		    alloc->bar1_size != mem->bus.size) {
+			sc->ttm_io_reserve_error_count++;
+			sc->ttm_io_reserve_last_error = -EINVAL;
+			return (-EINVAL);
 		}
-		mem->bus.offset = alloc->bar1_gva;
+		mem->bus.offset = alloc->bar1_page_gva[0];
 		mem->bus.base = rman_get_start(sc->bar_res[1]);
 		mem->bus.is_iomem = true;
 		return (0);
@@ -996,6 +1036,16 @@ nvkm_ttm_io_mem_free(struct ttm_bo_device *bdev, struct ttm_mem_reg *mem)
 		return;
 
 	alloc = container_of(mem->mm_node, struct nvkm_vram_alloc, node);
+	if (alloc->bar1_page_gva != NULL) {
+		nvkm_gsp_bar1_unmap_existing_scatter(sc, alloc->bar1_page_gva,
+		    alloc->bar1_page_count);
+		kfree(alloc->bar1_page_gva);
+		alloc->bar1_page_gva = NULL;
+		alloc->bar1_page_count = 0;
+		alloc->bar1_size = 0;
+		sc->ttm_io_free_bar1_count++;
+		return;
+	}
 	if (alloc->bar1_gva == 0)
 		return;
 
@@ -1021,6 +1071,45 @@ nvkm_ttm_io_mem_free(struct ttm_bo_device *bdev, struct ttm_mem_reg *mem)
 	sc->ttm_io_free_bar1_count++;
 }
 
+/*
+ * nvkm_ttm_io_mem_pfn()
+ *
+ * Ownership:
+ *   Borrows the reserved TTM BO and the active nvkm_vram_alloc scatter BAR1
+ *   table.  It returns a PFN snapshot and does not acquire a new BAR1 loan.
+ *
+ * Lifetime:
+ *   The returned PFN is valid only while TTM keeps the io_mem_reserve lifetime
+ *   active and the user VM mapping owns the corresponding PTE.
+ *
+ * Threading:
+ *   Called from the TTM fault path while the BO is reserved and the VRAM memory
+ *   manager io_reserve_mutex is held.  It must not sleep or mutate the table.
+ */
+static unsigned long
+nvkm_ttm_io_mem_pfn(struct ttm_buffer_object *tbo, unsigned long page_offset)
+{
+	struct nvkm_bo *bo = container_of(tbo, struct nvkm_bo, tbo);
+	struct nvkm_softc *sc = bo->base.dev->dev_private;
+	struct nvkm_vram_alloc *alloc;
+	uint64_t gva;
+
+	if (tbo->mem.mem_type != TTM_PL_VRAM || tbo->mem.mm_node == NULL ||
+	    sc->bar_res[1] == NULL)
+		return (0);
+
+	alloc = container_of(tbo->mem.mm_node, struct nvkm_vram_alloc, node);
+	if (alloc->bar1_page_gva == NULL ||
+	    page_offset >= alloc->bar1_page_count)
+		return (0);
+
+	gva = alloc->bar1_page_gva[page_offset];
+	if (gva == 0)
+		return (0);
+	return ((unsigned long)((rman_get_start(sc->bar_res[1]) + gva) >>
+	    PAGE_SHIFT));
+}
+
 static struct ttm_bo_driver nvkm_ttm_bo_driver = {
 	.ttm_tt_create = nvkm_ttm_tt_create,
 	.ttm_tt_populate = nvkm_ttm_tt_populate,
@@ -1033,6 +1122,7 @@ static struct ttm_bo_driver nvkm_ttm_bo_driver = {
 	.verify_access = nvkm_ttm_verify_access,
 	.io_mem_reserve = nvkm_ttm_io_mem_reserve,
 	.io_mem_free = nvkm_ttm_io_mem_free,
+	.io_mem_pfn = nvkm_ttm_io_mem_pfn,
 };
 
 int

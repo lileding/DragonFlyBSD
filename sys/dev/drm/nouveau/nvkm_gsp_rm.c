@@ -1116,6 +1116,8 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 {
 	uint64_t bar1_gva;
 	uint64_t bar1_size;
+	uint64_t *bar1_page_gva;
+	uint32_t bar1_page_count;
 
 	if (alloc == NULL)
 		return;
@@ -1140,8 +1142,12 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 
 	bar1_gva = alloc->bar1_gva;
 	bar1_size = alloc->bar1_size;
+	bar1_page_gva = alloc->bar1_page_gva;
+	bar1_page_count = alloc->bar1_page_count;
 	alloc->bar1_gva = 0;
 	alloc->bar1_size = 0;
+	alloc->bar1_page_gva = NULL;
+	alloc->bar1_page_count = 0;
 	alloc->owner = NULL;
 	alloc->free = true;
 	drm_mm_remove_node(&alloc->node);
@@ -1151,6 +1157,11 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	lockmgr(&sc->vram_lock, LK_RELEASE);
 	if (bar1_gva != 0)
 		nvkm_gsp_bar1_unmap_existing_range(sc, bar1_gva, bar1_size);
+	if (bar1_page_gva != NULL) {
+		nvkm_gsp_bar1_unmap_existing_scatter(sc, bar1_page_gva,
+		    bar1_page_count);
+		kfree(bar1_page_gva);
+	}
 	nvkm_debugf(sc->dev,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
