@@ -246,6 +246,8 @@ check_mode_config_contract(int fd, const drmModeRes *resources)
 	check_drm_cap(fd, DRM_CAP_DUMB_BUFFER, 1, "DUMB_BUFFER");
 	check_drm_cap(fd, DRM_CAP_ASYNC_PAGE_FLIP, 0,
 	    "ASYNC_PAGE_FLIP");
+	check_drm_cap(fd, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP, 0,
+	    "ATOMIC_ASYNC_PAGE_FLIP");
 	check_drm_cap(fd, DRM_CAP_PAGE_FLIP_TARGET, 0,
 	    "PAGE_FLIP_TARGET");
 	check_drm_cap(fd, DRM_CAP_CURSOR_WIDTH, 256, "CURSOR_WIDTH");

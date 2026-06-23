@@ -644,6 +644,7 @@ struct drm_gem_open {
 #define DRM_CAP_CRTC_IN_VBLANK_EVENT	0x12
 #define DRM_CAP_SYNCOBJ		0x13
 #define DRM_CAP_SYNCOBJ_TIMELINE	0x14
+#define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP	0x15
 
 /** DRM_IOCTL_GET_CAP ioctl argument type */
 struct drm_get_cap {

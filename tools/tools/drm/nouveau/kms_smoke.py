@@ -1577,6 +1577,8 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "DRM cap DUMB_BUFFER is 1",
         "DRM cap ASYNC_PAGE_FLIP is readable",
         "DRM cap ASYNC_PAGE_FLIP is 0",
+        "DRM cap ATOMIC_ASYNC_PAGE_FLIP is readable",
+        "DRM cap ATOMIC_ASYNC_PAGE_FLIP is 0",
         "DRM cap PAGE_FLIP_TARGET is readable",
         "DRM cap PAGE_FLIP_TARGET is 0",
         "DRM cap CURSOR_WIDTH is readable",
