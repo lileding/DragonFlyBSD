@@ -941,6 +941,57 @@ check_wait_vblank_flag_contract(int fd)
 }
 
 static void
+check_pageflip_ioctl_error(int fd, uint32_t flags, uint32_t sequence,
+    int expected_errno, const char *what, const char *errno_what)
+{
+	struct drm_mode_crtc_page_flip_target page_flip;
+	int saved_errno;
+	int ret;
+
+	memset(&page_flip, 0, sizeof(page_flip));
+	page_flip.flags = flags;
+	page_flip.sequence = sequence;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &page_flip);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 || saved_errno != expected_errno) {
+		printf("    PAGE_FLIP flags=0x%x sequence=%u ret=%d errno=%d expected=%d\n",
+		    flags, sequence, ret, saved_errno, expected_errno);
+	}
+}
+
+/*
+ * check_pageflip_ioctl_flag_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd only.  No framebuffer, event, or CRTC object reference
+ *   is owned or retained.
+ *
+ * Lifetime:
+ *   Uses invalid PAGE_FLIP target combinations that must fail before CRTC
+ *   lookup, event reservation, vblank acquisition, or driver flip hooks.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It validates the common DRM flag/sequence
+ *   boundary without submitting a flip.
+ */
+static void
+check_pageflip_ioctl_flag_contract(int fd)
+{
+	check_pageflip_ioctl_error(fd, 0, 1, EINVAL,
+	    "PAGE_FLIP rejects sequence without target flag",
+	    "PAGE_FLIP sequence without target flag fails with EINVAL");
+	check_pageflip_ioctl_error(fd,
+	    DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE |
+	    DRM_MODE_PAGE_FLIP_TARGET_RELATIVE,
+	    0, EINVAL, "PAGE_FLIP rejects both target flags",
+	    "PAGE_FLIP both target flags fail with EINVAL");
+}
+
+static void
 check_property_read_error_contract(int fd)
 {
 	struct drm_mode_get_property get_property;
@@ -8812,6 +8863,7 @@ main(void)
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);
 	check_wait_vblank_flag_contract(fd);
+	check_pageflip_ioctl_flag_contract(fd);
 	check_property_read_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
