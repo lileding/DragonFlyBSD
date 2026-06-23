@@ -681,13 +681,8 @@ vmmfs_validate_loader(struct vmmfs_machines *m, struct ucred *cred)
 }
 
 /* --------------------------------------------------------------------- */
-/* Device pool (guarded by vm_lock).                                     */
-
-int
-vmmfs_device_format(struct vmmfs_device *d, char *buf, size_t bufsize)
-{
-	return ksnprintf(buf, bufsize, "%s\n", d->bdf);
-}
+/* Device pool (guarded by vm_lock).  Device formatting lives in the core
+ * (vmm_device_format); these helpers are the fs-side pool lookups.       */
 
 struct vmmfs_device *
 vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machines *owner,
@@ -696,8 +691,8 @@ vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machines *owner,
 	struct vmmfs_device *d;
 
 	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-		if (d->owner == owner && (int)strlen(d->bdf) == nlen &&
-		    bcmp(d->bdf, name, nlen) == 0)
+		if (vmm_device_owned_by(&d->dev, VMMFS_STATE_OF(owner)) &&
+		    vmm_device_bdf_eq(&d->dev, name, nlen))
 			return d;
 	}
 	return NULL;
@@ -710,7 +705,7 @@ vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
 	struct vmmfs_device *d;
 
 	SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-		if ((int)strlen(d->bdf) == nlen && bcmp(d->bdf, name, nlen) == 0)
+		if (vmm_device_bdf_eq(&d->dev, name, nlen))
 			return d;
 	}
 	return NULL;
@@ -724,9 +719,9 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 	ino_t idx = (ino_t)vmp->vm_next_dev++;
 
 	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
-	d->owner = NULL;
-	d->is_host = is_host;
-	strlcpy(d->bdf, bdf, sizeof(d->bdf));
+	vmm_device_init(&d->dev, bdf, is_host);
+	if (is_host)
+		vmm_host_add_device(&vmp->host);
 	vmmfs_node_init(&d->node, VMMFS_NDEVICE, VMMFS_DEV_INO_BASE + idx,
 	    &vmp->vm_host_devices, NULL, 0);
 	vmmfs_node_init(&d->link, VMMFS_NDEVLINK, VMMFS_DEVLINK_INO_BASE + idx,
@@ -735,11 +730,12 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 	return d;
 }
 
-/* Owner display name: "host" or the owning machine's name. */
+/* Owner display name: "host" or the owning machine's name (mapped from the
+ * core VM pointer back to its fs slot). */
 static const char *
-vmmfs_owner_name(struct vmmfs_machines *owner)
+vmmfs_owner_name(struct vmm_machine *owner)
 {
-	return owner != NULL ? owner->name : "host";
+	return owner != NULL ? VMMFS_MACHINES_OF_STATE(owner)->name : "host";
 }
 
 /* Relative symlink target for a device in the /vmm/devices/ index. */
@@ -749,7 +745,7 @@ vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
 {
 	(void)vmp;
 	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s",
-	    vmmfs_owner_name(d->owner), d->bdf);
+	    vmmfs_owner_name(d->dev.owner), d->dev.bdf);
 }
 
 /* --------------------------------------------------------------------- */
@@ -782,6 +778,7 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    &vmp->vm_root, NULL, 0);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
+	vmm_host_init(&vmp->host);
 	SLIST_INIT(&vmp->vm_devs);
 	vmp->vm_next_dev = 0;
 	/* Stub host PCIe device pool: a few fixed BDFs, all owned by host. */

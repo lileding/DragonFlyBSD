@@ -14,6 +14,7 @@
 #include "vmm_vcpu.h"
 #include "vmm_mem.h"
 #include "vmm_loader.h"
+#include "vmm_console.h"
 
 #define VMM_EVENT_CAP	32
 
@@ -21,6 +22,7 @@ struct vmm_machine {
 	struct vmm_vcpu		vcpu;
 	struct vmm_mem		mem;
 	struct vmm_loader	loader;
+	struct vmm_console	console;
 	/* lifecycle / lease / events -- the machine's own state */
 	int		stopped;
 	uint32_t	lease_count;

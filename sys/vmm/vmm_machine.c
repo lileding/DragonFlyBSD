@@ -55,6 +55,7 @@ void
 vmm_machine_init(struct vmm_machine *m)
 {
 	memset(m, 0, sizeof(*m));
+	vmm_console_init(&m->console);
 	m->stopped = 1;
 	ev_push(m, EV_CREATED);
 	ev_push(m, EV_STOPPED);

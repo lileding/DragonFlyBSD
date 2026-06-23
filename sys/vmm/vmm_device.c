@@ -1,103 +1,76 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * A PCIe device object: the NDEVICE file (a read-only "<bdf>\n" line under a
- * machine's or the host's devices/) and the NDEVLINK symlink that indexes it
- * under /vmm/devices/.  Common vops are shared from vmmfs.c.
+ * PCIe passthrough device core -- see vmm_device.h.  Pure; no kernel/VFS deps.
  */
-#include <sys/param.h>
+#ifdef _KERNEL
+#include <sys/types.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/mount.h>
-#include <sys/vnode.h>
-#include <sys/uio.h>
-#include <sys/kobj.h>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#endif
 
-#include "vmm_machine.h"
-#include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmm_device.h"
 
-static int
-vmm_device_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+void
+vmm_device_init(struct vmm_device *d, const char *bdf, int is_host)
 {
-	char tmp[64];
-	off_t size;
+	size_t i = 0;
 
-	size = vmmfs_device_format(VMMFS_DEV_OF_NODE(node), tmp, sizeof(tmp));
-	vmmfs_fill_attr(node, ap->a_vap, VREG, 1, size);
-	return 0;
+	while (bdf[i] != '\0' && i < VMM_BDF_MAX) {
+		d->bdf[i] = bdf[i];
+		i++;
+	}
+	d->bdf[i] = '\0';
+	d->owner = NULL;
+	d->is_host = is_host;
 }
 
-static int
-vmm_device_read(struct vmmfs_node *node, struct vop_read_args *ap)
+void
+vmm_device_bind(struct vmm_device *d, struct vmm_machine *owner)
 {
-	struct uio *uio = ap->a_uio;
-	char dbuf[64];
-	int len;
-	off_t off;
+	d->owner = owner;
+}
 
-	if (uio->uio_offset < 0)
-		return EINVAL;
-	len = vmmfs_device_format(VMMFS_DEV_OF_NODE(node), dbuf, sizeof(dbuf));
-	off = uio->uio_offset;
-	if (off >= len)
+void
+vmm_device_unbind(struct vmm_device *d)
+{
+	d->owner = NULL;
+}
+
+int
+vmm_device_owned_by(const struct vmm_device *d, const struct vmm_machine *m)
+{
+	return d->owner == m;
+}
+
+int
+vmm_device_bdf_eq(const struct vmm_device *d, const char *name, size_t nlen)
+{
+	size_t i;
+
+	for (i = 0; i < nlen; i++) {
+		if (d->bdf[i] == '\0' || d->bdf[i] != name[i])
+			return 0;
+	}
+	return d->bdf[nlen] == '\0';
+}
+
+size_t
+vmm_device_format(const struct vmm_device *d, char *out, size_t cap)
+{
+	size_t i = 0;
+
+	while (d->bdf[i] != '\0') {
+		if (i + 1 >= cap)	/* leave room for '\n' */
+			return 0;
+		out[i] = d->bdf[i];
+		i++;
+	}
+	if (i + 1 > cap)
 		return 0;
-	return uiomove(dbuf + off, (size_t)(len - off), uio);
+	out[i++] = '\n';
+	return i;
 }
-
-static kobj_method_t vmm_device_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmm_device_getattr),
-	KOBJMETHOD(vmm_node_read,	vmm_device_read),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_device, vmm_device_methods, 0);
-
-static int
-vmm_devlink_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
-{
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(node->vn_vnode->v_mount);
-	char tmp[128];
-	int len;
-
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node), tmp, sizeof(tmp));
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	vmmfs_fill_attr(node, ap->a_vap, VLNK, 1, (len < 0) ? 0 : len);
-	return 0;
-}
-
-static int
-vmm_devlink_readlink(struct vmmfs_node *node, struct vop_readlink_args *ap)
-{
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(node->vn_vnode->v_mount);
-	char buf[128];
-	int len;
-
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node), buf, sizeof(buf));
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (len < 0)
-		return ENOENT;
-	return uiomove(buf, (size_t)len, ap->a_uio);
-}
-
-static kobj_method_t vmm_devlink_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmm_devlink_getattr),
-	KOBJMETHOD(vmm_node_readlink,	vmm_devlink_readlink),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_devlink, vmm_devlink_methods, 0);

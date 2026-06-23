@@ -1,0 +1,67 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Filesystem presentation of the console file: machines/<name>/console, wired
+ * to the vmm_console core.  Reads drain guest output (EOF for now); writes feed
+ * host input to the guest (discarded for now).  vmm.ko only.
+ */
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/kernel.h>
+#include <sys/lock.h>
+#include <sys/malloc.h>
+#include <sys/mount.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/kobj.h>
+
+#include "vmm_machine.h"
+#include "vmm_console.h"
+#include "vmmfs.h"
+#include "vmm_node_if.h"
+
+static int
+vmmfs_console_read(struct vmmfs_node *node, struct vop_read_args *ap)
+{
+	char cbuf[256];
+	size_t n;
+
+	n = vmm_console_read(&node->vn_machine->state.console, cbuf, sizeof(cbuf));
+	if (n == 0)
+		return 0;		/* EOF */
+	return uiomove(cbuf, n, ap->a_uio);
+}
+
+static int
+vmmfs_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
+{
+	struct uio *uio = ap->a_uio;
+	int error;
+
+	while (uio->uio_resid > 0) {
+		char dump[64];
+		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
+		    (size_t)uio->uio_resid : sizeof(dump);
+
+		error = uiomove(dump, d, uio);
+		if (error)
+			return error;
+		vmm_console_write(&node->vn_machine->state.console, dump, d);
+	}
+	return 0;
+}
+
+static kobj_method_t vmm_console_methods[] = {
+	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
+	KOBJMETHOD(vmm_node_read,	vmmfs_console_read),
+	KOBJMETHOD(vmm_node_write,	vmmfs_console_write),
+	KOBJMETHOD(vmm_node_open,	vmmnode_open),
+	KOBJMETHOD(vmm_node_close,	vmmnode_close),
+	KOBJMETHOD(vmm_node_access,	vmmnode_access),
+	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
+	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
+	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
+	KOBJMETHOD(vmm_node_print,	vmmnode_print),
+	KOBJMETHOD_END
+};
+DEFINE_CLASS(vmm_console, vmm_console_methods, 0);

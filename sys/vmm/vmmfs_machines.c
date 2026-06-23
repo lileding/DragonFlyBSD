@@ -132,10 +132,10 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machines *m)
 		/* This machine's devices: host devices return to the host pool,
 		 * user backends are unloaded (freed outside the lock below). */
 		SLIST_FOREACH_MUTABLE(d, &vmp->vm_devs, dv_link, nd) {
-			if (d->owner != m)
+			if (!vmm_device_owned_by(&d->dev, &m->state))
 				continue;
-			if (d->is_host) {
-				d->owner = NULL;
+			if (d->dev.is_host) {
+				vmm_device_unbind(&d->dev);
 			} else {
 				SLIST_REMOVE(&vmp->vm_devs, d, vmmfs_device,
 				    dv_link);

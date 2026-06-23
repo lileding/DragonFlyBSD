@@ -62,12 +62,13 @@ vmm_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 
 		i = 0;
 		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-			if (d->owner != node->vn_machine)
+			if (!vmm_device_owned_by(&d->dev,
+			    VMMFS_STATE_OF(node->vn_machine)))
 				continue;
 			if (i++ < skip)
 				continue;
 			if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_REG,
-			    (uint16_t)strlen(d->bdf), d->bdf)) {
+			    (uint16_t)strlen(d->dev.bdf), d->dev.bdf)) {
 				full = 1;
 				break;
 			}
@@ -107,8 +108,8 @@ vmm_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	if (d->is_host) {
-		d->owner = NULL;	/* unbind: back to host pool */
+	if (d->dev.is_host) {
+		vmm_device_unbind(&d->dev);	/* back to host pool */
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		cache_unlink(ap->a_nch);
 		vrele(vp);
@@ -165,7 +166,7 @@ vmm_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EEXIST;
 	}
-	d->owner = tdnode->vn_machine;
+	vmm_device_bind(&d->dev, VMMFS_STATE_OF(tdnode->vn_machine));
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	cache_rename(ap->a_fnch, ap->a_tnch);
@@ -232,7 +233,7 @@ vmm_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 			if (i++ < skip)
 				continue;
 			if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
-			    (uint16_t)strlen(d->bdf), d->bdf)) {
+			    (uint16_t)strlen(d->dev.bdf), d->dev.bdf)) {
 				full = 1;
 				break;
 			}

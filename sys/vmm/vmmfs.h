@@ -11,6 +11,9 @@
 #ifndef VMMFS_H
 #define VMMFS_H
 
+#include "vmm_device.h"		/* struct vmm_device (wrapped by vmmfs_device) */
+#include "vmm_host.h"		/* struct vmm_host (the device pool source) */
+
 MALLOC_DECLARE(M_VMMFS);
 
 /*
@@ -33,10 +36,6 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_DIR_MODE		0555
 #define VMMFS_NAME_MAX		63
 #define VMMFS_OBUF_MAX		4096	/* a config register can't exceed this */
-
-/* PCIe device passthrough (stub): a pool of host devices, each owned by a
- * machine (NULL owner = the host pool).  Binding is `mv` between devices/. */
-#define VMMFS_BDF_MAX		31
 
 enum vmmfs_ntype {
 	VMMFS_NROOT,
@@ -96,9 +95,7 @@ struct vmmfs_node {
  */
 struct vmmfs_device {
 	SLIST_ENTRY(vmmfs_device) dv_link;
-	struct vmmfs_machines   *owner;
-	int			is_host;	/* rm returns it to host vs deletes */
-	char			bdf[VMMFS_BDF_MAX + 1];
+	struct vmm_device	dev;		/* core: bdf, owner (vmm_machine*), is_host */
 	struct vmmfs_node	node;		/* the NDEVICE file */
 	struct vmmfs_node	link;		/* its NDEVLINK in /vmm/devices/ */
 };
@@ -109,6 +106,12 @@ SLIST_HEAD(vmmfs_devlist, vmmfs_device);
 	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, node)))
 #define VMMFS_DEV_OF_LINK(n) \
 	((struct vmmfs_device *)((char *)(n) - __offsetof(struct vmmfs_device, link)))
+
+/* Recover the fs slot from a core VM pointer (a device's owner is vmm_machine*). */
+#define VMMFS_MACHINES_OF_STATE(s) \
+	((struct vmmfs_machines *)((char *)(s) - __offsetof(struct vmmfs_machines, state)))
+/* The core VM of an fs slot, or NULL for the host pool (NULL slot). */
+#define VMMFS_STATE_OF(m)	((m) != NULL ? &(m)->state : NULL)
 
 /*
  * A user VM: allocated on demand and kept in the per-mount RB tree keyed by
@@ -140,7 +143,8 @@ struct vmmfs_mount {
 	struct lock		vm_lock;
 	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
-	struct vmmfs_devlist	vm_devs;	/* PCIe device pool */
+	struct vmm_host		host;		/* the physical host (device pool source) */
+	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
 	int			vm_next_dev;	/* monotonic device ino index */
 };
 
@@ -240,6 +244,5 @@ struct vmmfs_device *vmmfs_find_device_any(struct vmmfs_mount *vmp,
 	    const char *name, int nlen);
 int	vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
 	    char *buf, size_t bufsize);
-int	vmmfs_device_format(struct vmmfs_device *d, char *buf, size_t bufsize);
 
 #endif /* VMMFS_H */

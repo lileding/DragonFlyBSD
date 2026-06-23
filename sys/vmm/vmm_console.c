@@ -1,54 +1,37 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The console config object: machines/<name>/console.  A stub for now -- reads
- * return EOF and writes are accepted and discarded.  It will become the guest
- * serial console.
+ * Guest serial console core -- see vmm_console.h.  Pure; no kernel/VFS deps.
  */
-#include <sys/param.h>
+#ifdef _KERNEL
+#include <sys/types.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
-#include <sys/malloc.h>
-#include <sys/mount.h>
-#include <sys/vnode.h>
-#include <sys/uio.h>
-#include <sys/kobj.h>
+#else
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#endif
 
-#include "vmm_machine.h"
-#include "vmmfs.h"
-#include "vmm_node_if.h"
+#include "vmm_console.h"
 
-static int
-vmm_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
+void
+vmm_console_init(struct vmm_console *c)
 {
-	struct uio *uio = ap->a_uio;
-	int error;
-
-	(void)node;
-	while (uio->uio_resid > 0) {
-		char dump[64];
-		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
-		    (size_t)uio->uio_resid : sizeof(dump);
-
-		error = uiomove(dump, d, uio);
-		if (error)
-			return error;
-	}
-	return 0;
+	c->tx_bytes = 0;
 }
 
-static kobj_method_t vmm_console_methods[] = {
-	KOBJMETHOD(vmm_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmm_node_read,	vmmfs_zero_read),
-	KOBJMETHOD(vmm_node_write,	vmm_console_write),
-	KOBJMETHOD(vmm_node_open,	vmmnode_open),
-	KOBJMETHOD(vmm_node_close,	vmmnode_close),
-	KOBJMETHOD(vmm_node_access,	vmmnode_access),
-	KOBJMETHOD(vmm_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmm_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmm_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmm_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmm_console, vmm_console_methods, 0);
+size_t
+vmm_console_read(struct vmm_console *c, char *out, size_t cap)
+{
+	(void)c;
+	(void)out;
+	(void)cap;
+	return 0;		/* no serial ring yet: EOF */
+}
+
+void
+vmm_console_write(struct vmm_console *c, const char *buf, size_t len)
+{
+	(void)buf;
+	c->tx_bytes += len;	/* discarded, but accounted */
+}
