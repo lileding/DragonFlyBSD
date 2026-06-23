@@ -894,6 +894,53 @@ check_cursor_ioctl_flag_contract(int fd)
 }
 
 static void
+check_wait_vblank_error(int fd, unsigned int type, int expected_errno,
+    const char *what, const char *errno_what)
+{
+	union drm_wait_vblank vblank;
+	int saved_errno;
+	int ret;
+
+	memset(&vblank, 0, sizeof(vblank));
+	vblank.request.type = type;
+
+	errno = 0;
+	ret = drmIoctl(fd, DRM_IOCTL_WAIT_VBLANK, &vblank);
+	saved_errno = errno;
+	check(ret != 0, what);
+	check(saved_errno == expected_errno, errno_what);
+	if (ret == 0 || saved_errno != expected_errno)
+		printf("    WAIT_VBLANK type=0x%x ret=%d errno=%d expected=%d\n",
+		    type, ret, saved_errno, expected_errno);
+}
+
+/*
+ * check_wait_vblank_flag_contract()
+ *
+ * Ownership:
+ *   Borrows the DRM fd only.  No event is reserved and no CRTC object reference
+ *   is retained.
+ *
+ * Lifetime:
+ *   Uses invalid request types that must fail before pipe lookup, vblank
+ *   acquire, blocking wait, or event queueing.
+ *
+ * Threading:
+ *   Single-threaded KMS UAPI probe.  It verifies common DRM validation before
+ *   any driver vblank state can be touched.
+ */
+static void
+check_wait_vblank_flag_contract(int fd)
+{
+	check_wait_vblank_error(fd, DRM_VBLANK_RELATIVE | DRM_VBLANK_SIGNAL,
+	    EINVAL, "WAIT_VBLANK rejects SIGNAL requests",
+	    "WAIT_VBLANK SIGNAL requests fail with EINVAL");
+	check_wait_vblank_error(fd, DRM_VBLANK_RELATIVE | 0x80000000u,
+	    EINVAL, "WAIT_VBLANK rejects unknown type bits",
+	    "WAIT_VBLANK unknown type bits fail with EINVAL");
+}
+
+static void
 check_property_read_error_contract(int fd)
 {
 	struct drm_mode_get_property get_property;
@@ -8764,6 +8811,7 @@ main(void)
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);
+	check_wait_vblank_flag_contract(fd);
 	check_property_read_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
