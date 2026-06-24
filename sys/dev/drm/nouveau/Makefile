@@ -33,3 +33,7 @@ KCFLAGS+= -DNVKM_DFLY_GSP_DISPLAY_ONLY
 CWARNFLAGS+= -Wno-error=cast-qual
 
 .include <bsd.kmod.mk>
+
+# A clean parallel module build may otherwise start compiling objects while
+# kern.fwd.mk is still creating <machine/*.h> forwarding headers.
+${OBJS}: ${FORWARD_HEADERS_COOKIE}
