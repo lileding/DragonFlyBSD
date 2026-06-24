@@ -27,6 +27,7 @@
 #define _DRM_LEASE_H
 
 struct drm_file;
+struct drm_device;
 struct drm_master;
 
 bool _drm_lease_held(struct drm_file *file_priv, int id);
