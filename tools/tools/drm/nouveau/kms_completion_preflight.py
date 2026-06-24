@@ -149,7 +149,7 @@ def shell_commands(root: pathlib.Path) -> dict:
             "startx",
             f"DISPLAY=:0 {smoke} x11 --run-panning --run-hpd-inject",
             "logout from X11",
-            f"{smoke} after",
+            f"{smoke} after --run-console-dark-down --dark-down-display-id 0x400",
             f"{smoke} report",
         ],
         "standalone_reports": [
