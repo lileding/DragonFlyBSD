@@ -1,16 +1,10 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * PCIe passthrough device core -- see vmm_device.h.  Pure; no kernel/VFS deps.
+ * PCIe passthrough device core -- see vmm_device.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_device.h"
 

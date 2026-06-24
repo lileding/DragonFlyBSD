@@ -3,7 +3,7 @@
  *
  * The guest serial console object.  Stub for now: there is no serial ring yet,
  * so output reads return EOF and host input writes are accepted and discarded
- * (but counted).  Pure value + logic, no kernel/VFS deps -- reusable vmm_ core.
+ * (but counted).  FS presentation: vmmfs_console.c.
  * FS presentation: vmmfs_console.c.  When the ring lands it goes here, not in
  * the fs layer.
  *

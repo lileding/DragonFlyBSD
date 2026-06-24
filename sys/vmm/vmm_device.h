@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * A PCIe passthrough device: a bus/device/function identity that is either in
- * the host pool (owner == NULL) or bound to a guest VM.  Pure value + logic, no
- * kernel/VFS deps -- reusable vmm_ core.  FS presentation: vmmfs_device.c.
+ * the host pool (owner == NULL) or bound to a guest VM.
+ * FS presentation: vmmfs_device.c.
  *
  * owner is a pointer to the core VM (struct vmm_machine), never the fs slot --
  * that one-way dependency is what keeps this header reusable by kvm.ko.

@@ -1,17 +1,10 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Pure text scanners -- see vmm_parse.h.  No kernel/VFS deps; builds for the
- * kernel module and for host unit tests.
+ * Text scanners shared by the kernel config value objects.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_parse.h"
 

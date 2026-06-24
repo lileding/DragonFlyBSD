@@ -1,5 +1,5 @@
 KMOD=	vmm
-# vmm_* = pure hypervisor core (no VFS/KOBJ, host-testable, kvm.ko-reusable).
+# vmm_* = kernel hypervisor core (no VFS/KOBJ, kvm.ko-reusable).
 # vmmfs_* = the filesystem/path layer (VFS nodes + KOBJ classes), vmm.ko only.
 SRCS=	vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_console.c
 SRCS+=	vmm_machine.c vmm_device.c vmm_host.c

@@ -1,9 +1,8 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The vcpu config object -- see vmm_vcpu.h.  Pure; no kernel/VFS deps.
+ * The vcpu object -- see vmm_vcpu.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
@@ -11,17 +10,10 @@
 #include <sys/malloc.h>
 #include <sys/thread.h>
 #include <sys/thread2.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_parse.h"
-#ifdef _KERNEL
 #include "vmm_host.h"
 #include "vmm_machine.h"
-#endif
 #include "vmm_vcpu.h"
 
 #define VMM_VCPU_MAX	256u
@@ -33,10 +25,8 @@ vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len)
 	const char *t = vmm_trim(buf, len, &tl);
 	uint64_t n;
 
-#ifdef _KERNEL
 	if (v->threads != NULL || v->active_count != 0)
 		return 0;
-#endif
 	if (!vmm_parse_decimal(t, tl, &n) || n < 1 || n > VMM_VCPU_MAX)
 		return 0;
 	v->count = (uint32_t)n;
@@ -55,7 +45,6 @@ vmm_vcpu_is_set(const struct vmm_vcpu *v)
 	return v->count != 0;
 }
 
-#ifdef _KERNEL
 static void
 vmm_vcpu_thread_main(void *arg)
 {
@@ -187,4 +176,3 @@ vmm_vcpu_uninit(struct vmm_vcpu *v)
 	}
 	v->stop_requested = 0;
 }
-#endif

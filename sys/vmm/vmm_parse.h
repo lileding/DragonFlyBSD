@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Pure text scanners shared by the config value objects (vcpu/mem/loader).
+ * Text scanners shared by the config value objects (vcpu/mem/loader).
  * No kernel or VFS dependencies -- part of the reusable vmm_ core.
  *
  * Types (uint64_t/size_t) come from the includer (<sys/types.h> in the kernel,

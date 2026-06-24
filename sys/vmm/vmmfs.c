@@ -18,8 +18,7 @@
  * filesystem root, mount/unmount, shared vnode helpers, and register buffers.
  * vmm_* is the VMM core (vmm_machine.c) and owns what a machine IS: config
  * parsing, the desired-state registers, and the lifecycle/lease/event state
- * machine -- pure logic with no kernel deps, host-unit-tested (vmm_machine_test.c).
- * Each filesystem machine wrapper embeds one struct vmm_machine.
+ * machine.  Each filesystem machine wrapper embeds one struct vmm_machine.
  */
 
 #include <sys/param.h>

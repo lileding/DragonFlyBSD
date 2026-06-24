@@ -1,15 +1,10 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Physical host core -- see vmm_host.h.  Pure; no kernel/VFS deps.
+ * Physical host core -- see vmm_host.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#endif
 
 #include "vmm_host.h"
 
@@ -31,7 +26,6 @@ vmm_host_device_count(const struct vmm_host *h)
 	return h->device_count;
 }
 
-#ifdef _KERNEL
 int
 vmm_host_next_cpu(struct vmm_host *h)
 {
@@ -42,4 +36,3 @@ vmm_host_next_cpu(struct vmm_host *h)
 	n = h->next_cpu++ % (uint32_t)ncpus;
 	return (int)n;
 }
-#endif

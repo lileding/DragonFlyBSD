@@ -1,16 +1,10 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Guest serial console core -- see vmm_console.h.  Pure; no kernel/VFS deps.
+ * Guest serial console core -- see vmm_console.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_console.h"
 

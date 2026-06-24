@@ -1,10 +1,8 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The loader object -- see vmm_loader.h.  The value API stays pure and
- * host-testable; kernel builds also own the loader execution epoch.
+ * The loader object -- see vmm_loader.h.
  */
-#ifdef _KERNEL
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -34,16 +32,9 @@
 #include <vm/vm_object.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_extern.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif /* _KERNEL */
 
 #include "vmm_parse.h"
-#ifdef _KERNEL
 #include "vmm_mem.h"
-#endif
 #include "vmm_loader.h"
 
 int
@@ -86,7 +77,6 @@ vmm_loader_is_set(const struct vmm_loader *l)
 	return l->len != 0;
 }
 
-#ifdef _KERNEL
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_SIZE	PAGE_SIZE
 #define VMM_MANIFEST_ABI	0
@@ -899,4 +889,3 @@ out:
 	kfree(ep, M_TEMP);
 	return error;
 }
-#endif /* _KERNEL */

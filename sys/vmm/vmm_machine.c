@@ -1,11 +1,8 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * VMM core machine model -- see vmm_machine.h.  Pure C, no kernel calls beyond
- * memcpy/memset (which libkern and the host C library both provide), so it
- * builds for the kernel module and for host unit tests.
+ * VMM core machine model -- see vmm_machine.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
@@ -14,11 +11,6 @@
 #include <sys/ucred.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_machine.h"
 
@@ -27,10 +19,8 @@
 #define EV_STOPPED	3
 #define EV_DELETED	4
 
-#ifdef _KERNEL
 static void	vmm_machine_start_child(void *arg, struct trapframe *frame);
 static void	vmm_machine_start_task(struct vmm_machine *m);
-#endif
 
 /* --------------------------------------------------------------------- */
 /* Event ring.                                                           */
@@ -67,15 +57,12 @@ vmm_machine_init(struct vmm_machine *m)
 {
 	memset(m, 0, sizeof(*m));
 	vmm_console_init(&m->console);
-#ifdef _KERNEL
 	lockinit(&m->lifecycle_lock, "vmmmach", 0, 0);
-#endif
 	m->desired_stopped = 1;
 	ev_push(m, EV_CREATED);
 	ev_push(m, EV_STOPPED);
 }
 
-#ifdef _KERNEL
 void
 vmm_machine_uninit(struct vmm_machine *m)
 {
@@ -310,7 +297,6 @@ vmm_machine_start_child(void *arg, struct trapframe *frame)
 	vmm_machine_start_task(arg);
 	exit1(W_EXITCODE(0, 0));
 }
-#endif
 
 int
 vmm_machine_config_complete(const struct vmm_machine *m)
@@ -425,33 +411,20 @@ vmm_machine_lease_close(struct vmm_machine *m)
 int
 vmm_machine_begin_delete(struct vmm_machine *m)
 {
-#ifdef _KERNEL
 	lockmgr(&m->lifecycle_lock, LK_EXCLUSIVE);
-#endif
-	if (m->deleting)
-#ifdef _KERNEL
-	{
+	if (m->deleting) {
 		lockmgr(&m->lifecycle_lock, LK_RELEASE);
 		return 0;
 	}
-#else
-		return 0;
-#endif
 	m->deleting = 1;
 	m->desired_stopped = 1;
 	m->start_cancel = 1;
-#ifdef _KERNEL
 	vmm_vcpu_request_stop(&m->vcpu);
 	if (m->running && !vmm_vcpu_has_active(&m->vcpu))
 		m->running = 0;
-#else
-	m->running = 0;
-#endif
 	ev_push(m, EV_DELETED);
-#ifdef _KERNEL
 	lockmgr(&m->lifecycle_lock, LK_RELEASE);
 	wakeup(m);
-#endif
 	return 1;
 }
 

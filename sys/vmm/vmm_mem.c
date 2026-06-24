@@ -1,33 +1,25 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The mem config object -- see vmm_mem.h.  Pure; no kernel/VFS deps.
+ * The mem object -- see vmm_mem.h.
  */
-#ifdef _KERNEL
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <vm/vm.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
-#else
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#endif
 
 #include "vmm_parse.h"
 #include "vmm_mem.h"
 
 #define VMM_MEM_ALIGN	(2ull * 1024 * 1024)	/* large-page granularity */
 
-#ifdef _KERNEL
 struct vmm_mem_backing {
 	struct vm_object *object;
 	uint64_t bytes;
 	vm_pindex_t wired_pages;
 };
-#endif
 
 int
 vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
@@ -38,10 +30,8 @@ vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
 	size_t dlen;
 	char last;
 
-#ifdef _KERNEL
 	if (m->backing != NULL)
 		return 0;
-#endif
 	if (tl == 0)
 		return 0;
 	last = t[tl - 1];
@@ -83,7 +73,6 @@ vmm_mem_is_set(const struct vmm_mem *m)
 	return m->bytes != 0;
 }
 
-#ifdef _KERNEL
 static void
 vmm_mem_unwire(struct vmm_mem_backing *b)
 {
@@ -172,4 +161,3 @@ vmm_mem_object(struct vmm_mem *m)
 		return NULL;
 	return m->backing->object;
 }
-#endif
