@@ -21,6 +21,7 @@ All output is written under /var/tmp so it survives reboot.
 import argparse
 import datetime as dt
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -1268,6 +1269,29 @@ def report_module_files(out_dir: pathlib.Path, phase: str, emit) -> None:
              f"module_files.{phase} records {name} project module")
 
 
+def parse_module_file_entries(out_dir: pathlib.Path,
+                              phase: str) -> list[dict[str, str | int]]:
+    path = out_dir / f"module_files.{phase}"
+    entries: list[dict[str, str | int]] = []
+    if not path.exists():
+        return entries
+
+    pattern = re.compile(
+        r"^(?P<name>\S+)\s+(?P<path>\S+)\s+size=(?P<size>[0-9]+)\s+"
+        r"mtime_utc=(?P<mtime>\S+)\s+sha256=(?P<sha256>[0-9a-f]{64})$",
+        re.M,
+    )
+    for match in pattern.finditer(path.read_text(errors="replace")):
+        entries.append({
+            "name": match.group("name"),
+            "path": match.group("path"),
+            "size": int(match.group("size")),
+            "mtime_utc": match.group("mtime"),
+            "sha256": match.group("sha256"),
+        })
+    return entries
+
+
 def report_module_snapshot(out_dir: pathlib.Path, phase: str, emit) -> None:
     for name in ("date", "uname", "kldstat", "kldstat_v",
                  "kern_module_path"):
@@ -1277,10 +1301,12 @@ def report_module_snapshot(out_dir: pathlib.Path, phase: str, emit) -> None:
 
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     failed = False
+    checks: list[dict[str, str | bool]] = []
 
     def emit(ok: bool, text: str) -> None:
         nonlocal failed
         print(("PASS " if ok else "FAIL ") + text)
+        checks.append({"ok": ok, "text": text})
         failed = failed or not ok
 
     for name in ("drm_state.before", "drm_state.after", "ps.after"):
@@ -2843,6 +2869,31 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         emit(len(new_lines) == 0, "no new dmesg fault lines")
         for line in new_lines[:20]:
             print(f"INFO new_fault {line}")
+
+    summary = {
+        "out_dir": str(out_dir),
+        "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "allow_missing_x11": allow_missing_x11,
+        "passed": not failed,
+        "pass_count": sum(1 for check in checks if check["ok"]),
+        "fail_count": sum(1 for check in checks if not check["ok"]),
+        "failures": [check["text"] for check in checks if not check["ok"]],
+        "checks": checks,
+        "modules": {
+            phase: parse_module_file_entries(out_dir, phase)
+            for phase in ("before", "x11", "after",
+                          "syncobj_transfer", "syncobj_pending_exec")
+            if (out_dir / f"module_files.{phase}").exists()
+        },
+    }
+    summary_path = out_dir / "report_summary.json"
+    try:
+        tmp_path = summary_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        tmp_path.replace(summary_path)
+        print(f"INFO wrote {summary_path}")
+    except OSError as err:
+        print(f"INFO failed to write {summary_path}: {err}")
 
     return 1 if failed else 0
 
