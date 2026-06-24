@@ -1222,6 +1222,44 @@ def report_hpd_inject(out_dir: pathlib.Path, label: str, emit) -> None:
         emit(False, f"missing {label} hpd_last_plug_mask HPD state")
 
 
+def report_captured_command(out_dir: pathlib.Path, phase: str, name: str,
+                            emit) -> None:
+    path = out_dir / f"{name}.{phase}"
+    emit(path.exists(), f"found {name}.{phase}")
+    if not path.exists():
+        return
+    rc = command_return_code(path)
+    emit(rc == 0, f"{name}.{phase} rc={rc}")
+
+
+def report_module_files(out_dir: pathlib.Path, phase: str, emit) -> None:
+    path = out_dir / f"module_files.{phase}"
+    emit(path.exists(), f"found module_files.{phase}")
+    if not path.exists():
+        return
+
+    text = path.read_text(errors="replace")
+    emit("MISSING " not in text and "ERROR " not in text,
+         f"module_files.{phase} has no missing project modules")
+    emit(f"### source_tree={source_tree_root()}" in text,
+         f"module_files.{phase} records source tree")
+    for name, relative_path in SOURCE_TREE_MODULES:
+        pattern = (
+            rf"^{re.escape(name)}\s+"
+            rf"{re.escape(str(source_tree_root() / relative_path))}\s+"
+            r"size=[1-9][0-9]*\s+mtime_utc="
+        )
+        emit(bool(re.search(pattern, text, re.M)),
+             f"module_files.{phase} records {name} project module")
+
+
+def report_module_snapshot(out_dir: pathlib.Path, phase: str, emit) -> None:
+    for name in ("date", "uname", "kldstat", "kldstat_v",
+                 "kern_module_path"):
+        report_captured_command(out_dir, phase, name, emit)
+    report_module_files(out_dir, phase, emit)
+
+
 def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
     failed = False
 
@@ -1232,6 +1270,10 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
 
     for name in ("drm_state.before", "drm_state.after", "ps.after"):
         emit((out_dir / name).exists(), f"found {name}")
+    report_module_snapshot(out_dir, "before", emit)
+    report_module_snapshot(out_dir, "after", emit)
+    if (out_dir / "drm_state.x11").exists():
+        report_module_snapshot(out_dir, "x11", emit)
 
     after = parse_state(out_dir / "drm_state.after")
     before = parse_state(out_dir / "drm_state.before")
