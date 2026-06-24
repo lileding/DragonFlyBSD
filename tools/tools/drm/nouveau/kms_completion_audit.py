@@ -181,6 +181,14 @@ def check_static_audit(path: pathlib.Path, checks: list[dict]) -> dict:
     check(summary.get("passed") is True, "static audit passed", checks)
     check(summary.get("fail_count") == 0,
           "static audit fail_count is zero", checks)
+    git = summary.get("git")
+    check(isinstance(git, dict), "static audit has git identity", checks)
+    if isinstance(git, dict):
+        head = git.get("head")
+        check(isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)),
+              "static audit git head is a full SHA1", checks)
+        check(git.get("tracked_dirty") is False,
+              "static audit git tracked worktree is clean", checks)
 
     files = summary.get("files")
     check(isinstance(files, list) and bool(files),
