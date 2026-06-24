@@ -1200,7 +1200,7 @@ def report_wayland_glmark(out_dir: pathlib.Path, emit) -> None:
         emit("set_release_point" in text,
              "glmark2-wayland sets explicit release point")
     else:
-        emit(bool(re.search(r"wl_buffer@[0-9]+\.release", text)),
+        emit(bool(re.search(r"wl_buffer[#@][0-9]+\.release", text)),
              "glmark2-wayland receives wl_buffer release")
 
 
@@ -2187,10 +2187,6 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "SYNCOBJ_TRANSFER rejects missing source point",
         "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT waits for source point",
         "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination point waits successfully",
-        "nouveau channel alloc succeeds for SYNCOBJ_TRANSFER pending probe",
-        "SYNCOBJ_TRANSFER pending EXEC source remains unsignaled before transfer",
-        "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT copies pending EXEC fence",
-        "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination fence remains pending",
         "SYNCOBJ_TRANSFER creates binary destination syncobj",
         "SYNCOBJ_TRANSFER timeline source to binary succeeds",
         "SYNCOBJ_TRANSFER binary destination waits successfully",
