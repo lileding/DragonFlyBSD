@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import pathlib
 import re
+import subprocess
 
 
 MODULES = ("drm", "nvgsp_570", "nvkm")
@@ -357,6 +358,67 @@ def check_static_audit(path: pathlib.Path, checks: list[dict]) -> dict:
     }
 
 
+def run_git(source_tree: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(source_tree), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def check_current_source_tree(static_summary: dict, checks: list[dict]) -> dict:
+    summary = static_summary.get("summary")
+    if not isinstance(summary, dict):
+        check(False, "current source tree has static audit summary", checks)
+        return {}
+
+    source_tree_text = summary.get("source_tree")
+    check(isinstance(source_tree_text, str) and bool(source_tree_text),
+          "static audit records source tree path", checks)
+    if not isinstance(source_tree_text, str) or not source_tree_text:
+        return {}
+
+    source_tree = pathlib.Path(source_tree_text)
+    check(source_tree.exists(), "static audit source tree path exists", checks)
+
+    head_result = run_git(source_tree, ["rev-parse", "HEAD"])
+    check(head_result.returncode == 0, "current source tree git HEAD is readable",
+          checks)
+    head = head_result.stdout.strip()
+    check(bool(re.fullmatch(r"[0-9a-f]{40}", head)),
+          "current source tree git head is a full SHA1", checks)
+
+    status_result = run_git(
+        source_tree,
+        ["status", "--short", "--untracked-files=no"],
+    )
+    check(status_result.returncode == 0,
+          "current source tree git tracked status is readable", checks)
+    status_lines = [
+        line
+        for line in status_result.stdout.splitlines()
+        if line.strip()
+    ]
+    check(not status_lines, "current source tree tracked worktree is clean",
+          checks)
+
+    static_git = summary.get("git")
+    static_head = static_git.get("head") if isinstance(static_git, dict) else None
+    check(isinstance(static_head, str) and head == static_head,
+          "current source tree git head matches static audit", checks)
+
+    return {
+        "source_tree": str(source_tree),
+        "git": {
+            "head": head,
+            "head_short": head[:10] if re.fullmatch(r"[0-9a-f]{40}", head) else "",
+            "tracked_dirty": bool(status_lines),
+            "status_short": status_lines,
+        },
+    }
+
+
 def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
                                  pending_summary: dict,
                                  wayland_summaries: dict[str, dict]
@@ -534,6 +596,7 @@ def main() -> int:
 
     checks: list[dict] = []
     static_audit_summary = check_static_audit(static_audit_path, checks)
+    current_source_tree = check_current_source_tree(static_audit_summary, checks)
     full_summary = check_full_report(full_dir, checks)
     transfer_summary = check_sync_gate(transfer_dir, "syncobj_transfer", checks)
     pending_summary = check_sync_gate(pending_dir, "syncobj_pending_exec", checks)
@@ -570,6 +633,7 @@ def main() -> int:
         "failures": [item["text"] for item in checks if not item["ok"]],
         "checks": checks,
         "static_audit": static_audit_summary,
+        "current_source_tree": current_source_tree,
         "full_report": {
             "out_dir": str(full_dir),
             "report_summary": full_summary,
