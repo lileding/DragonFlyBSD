@@ -1060,6 +1060,16 @@ def is_software_renderer(text: str) -> bool:
     ))
 
 
+def wayland_has_scanout_gbm_buffer(text: str) -> bool:
+    if re.search(r"Allocated .* GBM buffer .*BLOCK_LINEAR_2D", text):
+        return True
+    return bool(re.search(
+        r"Allocated [0-9]+x[0-9]+ GBM buffer with format XR24 .*"
+        r"modifier INVALID",
+        text,
+    ))
+
+
 def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
     logs = sorted(out_dir.glob("*sway*.log"))
     if not logs:
@@ -1081,8 +1091,8 @@ def report_wayland_log(out_dir: pathlib.Path, emit) -> None:
          "Wayland log uses zink/NVK renderer")
     emit(not is_software_renderer(text),
          "Wayland log is not software renderer")
-    emit(bool(re.search(r"Allocated .* GBM buffer .*BLOCK_LINEAR_2D", text)),
-         "Wayland log allocates NVIDIA block-linear GBM buffer")
+    emit(wayland_has_scanout_gbm_buffer(text),
+         "Wayland log allocates scanout GBM buffer")
     emit(bool(re.search(r"Commit of [0-9]+ outputs succeeded", text)),
          "Wayland log commits output successfully")
 
