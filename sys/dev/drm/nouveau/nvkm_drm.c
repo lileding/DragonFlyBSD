@@ -335,7 +335,8 @@ nvkm_drm_gem_prime_res_obj(struct drm_gem_object *obj)
 
 static struct drm_driver nvkm_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
-	    DRIVER_PRIME | DRIVER_MODESET | DRIVER_ATOMIC,
+	    DRIVER_SYNCOBJ_TIMELINE | DRIVER_PRIME | DRIVER_MODESET |
+	    DRIVER_ATOMIC,
 	.fops    = &nvkm_drm_fops,
 	.get_scanout_position = nvkm_drm_get_scanout_position,
 	.get_vblank_timestamp = drm_calc_vbltimestamp_from_scanoutpos,

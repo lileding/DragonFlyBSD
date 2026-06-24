@@ -246,7 +246,7 @@ static int drm_getcap(struct drm_device *dev, void *data, struct drm_file *file_
 		req->value = drm_core_check_feature(dev, DRIVER_SYNCOBJ);
 		return 0;
 	case DRM_CAP_SYNCOBJ_TIMELINE:
-		req->value = drm_core_check_feature(dev, DRIVER_SYNCOBJ);
+		req->value = drm_core_check_feature(dev, DRIVER_SYNCOBJ_TIMELINE);
 		return 0;
 	}
 
