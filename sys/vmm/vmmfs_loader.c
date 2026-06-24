@@ -23,13 +23,13 @@
 static size_t
 loader_text(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_loader_format(&m->loader, out, cap);
+	return vmm_machine_format_loader(m, out, cap);
 }
 
 static int
 loader_commit(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_loader_parse(&m->loader, buf, len);
+	return vmm_machine_commit_loader(m, buf, len);
 }
 
 static int

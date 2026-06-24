@@ -10,8 +10,8 @@
 #define VMM_MEM_H
 
 struct vmm_mem {
-	uint64_t	bytes;		/* 0 = unset */
-	struct vmm_mem_backing *backing;
+	uint64_t	mut_bytes;		/* 0 = unset */
+	struct vmm_mem_backing *own_mut_backing;
 };
 
 /* Parse number[KkMmGg], > 0, large-page aligned.  1 = updated, 0 = reject. */
@@ -22,6 +22,8 @@ int	vmm_mem_is_set(const struct vmm_mem *m);
 struct vm_object;
 int	vmm_mem_prepare(struct vmm_mem *m);
 void	vmm_mem_release(struct vmm_mem *m);
+struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
+void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 struct vm_object *vmm_mem_object(struct vmm_mem *m);
 
 #endif /* VMM_MEM_H */

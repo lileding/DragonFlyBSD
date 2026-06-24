@@ -202,6 +202,12 @@ ckeq "vm0 dummy loader probe" "$(hexdump -v -e '1/1 "%02x"' /tmp/vmmld_dummy.pro
 wait_event $M/vm0 started; ckok "vm0 started event after worker" $?
 ckeq "vm0 running no stopped" "$(ls $M/vm0 | sort | tr '\n' ' ')" "console devices events lease loader mem status.tar.gz vcpu "
 rm $M/vm0/stopped 2>/dev/null; ckfail "rm stopped while running -> ENOENT" $?
+echo 2 > $M/vm0/vcpu
+ckeq "running vcpu write kept old" "$(cat $M/vm0/vcpu)" "8"
+echo 2M > $M/vm0/mem
+ckeq "running mem write kept old" "$(cat $M/vm0/mem)" "536870912"
+echo /tmp/no_manifest > $M/vm0/loader
+ckeq "running loader write kept old" "$(cat $M/vm0/loader)" "/tmp/vmmld_dummy"
 
 # --- a stop request can cancel a loader that is still executing ---
 mkdir $M/cancel; echo 1 > $M/cancel/vcpu; echo 2M > $M/cancel/mem; echo /tmp/vmmld_sleep > $M/cancel/loader

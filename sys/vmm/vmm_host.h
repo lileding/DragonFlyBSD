@@ -13,8 +13,8 @@
 #define VMM_HOST_H
 
 struct vmm_host {
-	uint32_t	device_count;	/* devices in the host pool */
-	uint32_t	next_cpu;	/* round-robin vCPU placement cursor */
+	uint32_t	mut_device_count;	/* devices in the host pool */
+	uint32_t	atomic_mut_next_cpu;	/* vCPU placement cursor */
 };
 
 void		vmm_host_init(struct vmm_host *h);

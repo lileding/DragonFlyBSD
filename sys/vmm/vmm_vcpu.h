@@ -10,10 +10,10 @@
 #define VMM_VCPU_H
 
 struct vmm_vcpu {
-	uint32_t	count;		/* 0 = unset */
-	struct vmm_vcpu_thread *threads;
-	uint32_t	active_count;
-	int		stop_requested;
+	uint32_t	mut_count;		/* 0 = unset */
+	struct vmm_vcpu_thread *own_mut_threads;
+	uint32_t	mut_active_count;
+	int		mut_stop_requested;
 };
 
 struct thread;
@@ -21,10 +21,10 @@ struct vmm_host;
 struct vmm_machine;
 
 struct vmm_vcpu_thread {
-	struct vmm_machine	*machine;
-	struct thread		*thread;
-	uint32_t		 id;
-	int			 cpu;
+	struct vmm_machine	*borrow_imm_machine;
+	struct thread		*borrow_mut_thread;
+	uint32_t		 imm_id;
+	int			 imm_cpu;
 };
 
 /* Parse the whole buffer; update iff valid (1..256).  1 = updated, 0 = reject. */

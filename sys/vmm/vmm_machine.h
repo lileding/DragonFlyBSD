@@ -10,7 +10,7 @@
 #ifndef VMM_MACHINE_H
 #define VMM_MACHINE_H
 
-#include <sys/lock.h>
+#include <sys/thread.h>
 
 #include "vmm_vcpu.h"
 #include "vmm_mem.h"
@@ -28,26 +28,33 @@ struct vmm_machine_owner_ops {
 };
 
 struct vmm_machine {
-	struct vmm_vcpu		vcpu;
-	struct vmm_mem		mem;
-	struct vmm_loader	loader;
-	struct vmm_console	console;
-	/* lifecycle / lease / events -- the machine's own state */
-	int		desired_stopped;
-	int		running;
-	int		starting;
-	int		start_cancel;
-	struct lock	lifecycle_lock;
-	struct ucred	*start_cred;
-	struct vmm_host	*host;
-	const struct vmm_machine_owner_ops *owner_ops;
-	void		*owner_arg;
-	uint32_t	lease_count;
-	int		armed;
-	int		deleting;
-	uint8_t		ev_codes[VMM_EVENT_CAP];	/* lossy ring of event codes */
-	size_t		ev_tail;
-	size_t		ev_count;
+	struct vmm_vcpu		own_mut_vcpu;
+	struct vmm_mem		own_mut_mem;
+	struct vmm_loader	own_mut_loader;
+	struct vmm_console	own_mut_console;
+
+	/*
+	 * Lock map:
+	 * token_lifecycle protects all mut_ fields below and the mutable
+	 * fields of own_mut_vcpu/own_mut_mem/own_mut_loader while they are
+	 * reached through vmm_machine_* APIs.  It is not held across fork,
+	 * exec, memory preparation/release, vCPU thread creation, or uiomove.
+	 */
+	struct lwkt_token	token_lifecycle;
+	int		mut_desired_stopped;
+	int		mut_running;
+	int		mut_starting;
+	int		mut_start_cancel;
+	struct ucred	*ref_mut_start_cred;
+	struct vmm_host	*borrow_mut_host;
+	const struct vmm_machine_owner_ops *borrow_imm_owner_ops;
+	void		*borrow_imm_owner_arg;
+	uint32_t	mut_lease_count;
+	int		mut_lease_armed;
+	int		mut_deleting;
+	uint8_t		mut_ev_codes[VMM_EVENT_CAP];	/* lossy ring */
+	size_t		mut_ev_tail;
+	size_t		mut_ev_count;
 };
 
 /* Result of lease_close. */
@@ -61,8 +68,23 @@ void	vmm_machine_init(struct vmm_machine *m);
 void	vmm_machine_uninit(struct vmm_machine *m);
 void	vmm_machine_set_owner(struct vmm_machine *m,
 	    const struct vmm_machine_owner_ops *ops, void *arg);
+void	vmm_machine_lock(struct vmm_machine *m);
+void	vmm_machine_unlock(struct vmm_machine *m);
+int	vmm_machine_start_cancelled_locked(const struct vmm_machine *m);
 /* All three of vcpu/mem/loader are set. */
 int	vmm_machine_config_complete(const struct vmm_machine *m);
+size_t	vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
+	    size_t cap);
+int	vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf,
+	    size_t len);
+size_t	vmm_machine_format_mem(const struct vmm_machine *m, char *out,
+	    size_t cap);
+int	vmm_machine_commit_mem(struct vmm_machine *m, const char *buf,
+	    size_t len);
+size_t	vmm_machine_format_loader(const struct vmm_machine *m, char *out,
+	    size_t cap);
+int	vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
+	    size_t len);
 
 /*
  * Lifecycle.  stopped is declarative: it means "desired stopped", which is
@@ -72,12 +94,6 @@ int	vmm_machine_config_complete(const struct vmm_machine *m);
 int	vmm_machine_is_stopped(const struct vmm_machine *m);
 int	vmm_machine_is_running(const struct vmm_machine *m);
 int	vmm_machine_starting(const struct vmm_machine *m);
-int	vmm_machine_start_cancelled(const struct vmm_machine *m);
-int	vmm_machine_request_start(struct vmm_machine *m);
-int	vmm_machine_start_worker_begin(struct vmm_machine *m);
-void	vmm_machine_start_worker_done(struct vmm_machine *m, int started);
-void	vmm_machine_stop(struct vmm_machine *m, int force);
-void	vmm_machine_start(struct vmm_machine *m);
 int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	    struct vmm_host *host);
 void	vmm_machine_request_stopped(struct vmm_machine *m, int force);

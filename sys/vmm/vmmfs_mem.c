@@ -21,13 +21,13 @@
 static size_t
 mem_text(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_mem_format(&m->mem, out, cap);
+	return vmm_machine_format_mem(m, out, cap);
 }
 
 static int
 mem_commit(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_mem_parse(&m->mem, buf, len);
+	return vmm_machine_commit_mem(m, buf, len);
 }
 
 static int

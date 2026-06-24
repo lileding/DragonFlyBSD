@@ -5,25 +5,26 @@
  */
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <machine/atomic.h>
 
 #include "vmm_host.h"
 
 void
 vmm_host_init(struct vmm_host *h)
 {
-	h->device_count = 0;
+	h->mut_device_count = 0;
 }
 
 void
 vmm_host_add_device(struct vmm_host *h)
 {
-	h->device_count++;
+	h->mut_device_count++;
 }
 
 uint32_t
 vmm_host_device_count(const struct vmm_host *h)
 {
-	return h->device_count;
+	return h->mut_device_count;
 }
 
 int
@@ -33,6 +34,6 @@ vmm_host_next_cpu(struct vmm_host *h)
 
 	if (ncpus <= 1)
 		return 0;
-	n = h->next_cpu++ % (uint32_t)ncpus;
+	n = atomic_fetchadd_int(&h->atomic_mut_next_cpu, 1) % (uint32_t)ncpus;
 	return (int)n;
 }

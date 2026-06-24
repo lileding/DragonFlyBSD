@@ -22,13 +22,13 @@
 static size_t
 vcpu_text(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_vcpu_format(&m->vcpu, out, cap);
+	return vmm_machine_format_vcpu(m, out, cap);
 }
 
 static int
 vcpu_commit(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_vcpu_parse(&m->vcpu, buf, len);
+	return vmm_machine_commit_vcpu(m, buf, len);
 }
 
 static int

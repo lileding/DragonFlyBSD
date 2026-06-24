@@ -16,9 +16,9 @@
 #define VMM_MEM_ALIGN	(2ull * 1024 * 1024)	/* large-page granularity */
 
 struct vmm_mem_backing {
-	struct vm_object *object;
-	uint64_t bytes;
-	vm_pindex_t wired_pages;
+	struct vm_object *own_mut_object;
+	uint64_t imm_bytes;
+	vm_pindex_t mut_wired_pages;
 };
 
 int
@@ -30,7 +30,7 @@ vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
 	size_t dlen;
 	char last;
 
-	if (m->backing != NULL)
+	if (m->own_mut_backing != NULL)
 		return 0;
 	if (tl == 0)
 		return 0;
@@ -57,20 +57,20 @@ vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
 	v *= mult;
 	if (v == 0 || (v % VMM_MEM_ALIGN) != 0)
 		return 0;
-	m->bytes = v;
+	m->mut_bytes = v;
 	return 1;
 }
 
 size_t
 vmm_mem_format(const struct vmm_mem *m, char *out, size_t cap)
 {
-	return m->bytes == 0 ? 0 : vmm_write_decimal(m->bytes, out, cap);
+	return m->mut_bytes == 0 ? 0 : vmm_write_decimal(m->mut_bytes, out, cap);
 }
 
 int
 vmm_mem_is_set(const struct vmm_mem *m)
 {
-	return m->bytes != 0;
+	return m->mut_bytes != 0;
 }
 
 static void
@@ -79,19 +79,20 @@ vmm_mem_unwire(struct vmm_mem_backing *b)
 	vm_page_t pg;
 	vm_pindex_t i;
 
-	if (b->object == NULL || b->wired_pages == 0)
+	if (b->own_mut_object == NULL || b->mut_wired_pages == 0)
 		return;
 
-	vm_object_hold(b->object);
-	for (i = 0; i < b->wired_pages; i++) {
-		pg = vm_page_lookup_busy_wait(b->object, i, FALSE, "vmmmem");
+	vm_object_hold(b->own_mut_object);
+	for (i = 0; i < b->mut_wired_pages; i++) {
+		pg = vm_page_lookup_busy_wait(b->own_mut_object, i, FALSE,
+		    "vmmmem");
 		if (pg == NULL)
 			continue;
 		vm_page_unwire(pg, 0);
 		vm_page_wakeup(pg);
 	}
-	vm_object_drop(b->object);
-	b->wired_pages = 0;
+	vm_object_drop(b->own_mut_object);
+	b->mut_wired_pages = 0;
 }
 
 int
@@ -104,21 +105,21 @@ vmm_mem_prepare(struct vmm_mem *m)
 
 	if (!vmm_mem_is_set(m))
 		return EINVAL;
-	if (m->backing != NULL)
+	if (m->own_mut_backing != NULL)
 		return 0;
 
 	b = kmalloc(sizeof(*b), M_TEMP, M_WAITOK | M_ZERO);
-	b->bytes = m->bytes;
-	pages = OFF_TO_IDX(round_page64(b->bytes));
-	b->object = vm_object_allocate(OBJT_DEFAULT, pages);
-	if (b->object == NULL) {
+	b->imm_bytes = m->mut_bytes;
+	pages = OFF_TO_IDX(round_page64(b->imm_bytes));
+	b->own_mut_object = vm_object_allocate(OBJT_DEFAULT, pages);
+	if (b->own_mut_object == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
-	vm_object_set_flag(b->object, OBJ_NOSPLIT);
+	vm_object_set_flag(b->own_mut_object, OBJ_NOSPLIT);
 
 	for (i = 0; i < pages; i++) {
-		pg = vm_page_grab(b->object, i,
+		pg = vm_page_grab(b->own_mut_object, i,
 		    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO |
 		    VM_ALLOC_NULL_OK);
 		if (pg == NULL) {
@@ -127,16 +128,16 @@ vmm_mem_prepare(struct vmm_mem *m)
 		}
 		vm_page_wire(pg);
 		vm_page_wakeup(pg);
-		b->wired_pages++;
+		b->mut_wired_pages++;
 	}
 
-	m->backing = b;
+	m->own_mut_backing = b;
 	return 0;
 
 fail:
 	vmm_mem_unwire(b);
-	if (b->object != NULL)
-		vm_object_deallocate(b->object);
+	if (b->own_mut_object != NULL)
+		vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
 	return error;
 }
@@ -144,20 +145,32 @@ fail:
 void
 vmm_mem_release(struct vmm_mem *m)
 {
-	struct vmm_mem_backing *b = m->backing;
+	vmm_mem_release_backing(vmm_mem_detach(m));
+}
 
+struct vmm_mem_backing *
+vmm_mem_detach(struct vmm_mem *m)
+{
+	struct vmm_mem_backing *b = m->own_mut_backing;
+
+	m->own_mut_backing = NULL;
+	return b;
+}
+
+void
+vmm_mem_release_backing(struct vmm_mem_backing *b)
+{
 	if (b == NULL)
 		return;
-	m->backing = NULL;
 	vmm_mem_unwire(b);
-	vm_object_deallocate(b->object);
+	vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
 }
 
 struct vm_object *
 vmm_mem_object(struct vmm_mem *m)
 {
-	if (m->backing == NULL)
+	if (m->own_mut_backing == NULL)
 		return NULL;
-	return m->backing->object;
+	return m->own_mut_backing->own_mut_object;
 }

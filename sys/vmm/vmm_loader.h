@@ -12,8 +12,8 @@
 #define VMM_LOADER_MAX	256
 
 struct vmm_loader {
-	char		path[VMM_LOADER_MAX];
-	size_t		len;		/* 0 = unset */
+	char		mut_path[VMM_LOADER_MAX];
+	size_t		mut_len;		/* 0 = unset */
 };
 
 /* Parse + store the trimmed path.  1 = updated, 0 = reject. */
