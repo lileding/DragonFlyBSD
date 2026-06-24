@@ -1,5 +1,14 @@
 #!/bin/sh
-# vmmfs functional test (runs inside the vkernel via vkrun2).
+# Legacy vkernel-only vmmfs functional test.
+#
+# This script predates the real pc64 SVM execution path and the removal of
+# the fake vCPU backend. It is not a current validation gate: control-plane
+# coverage now has to run through pc64 true-hardware harnesses that can reach
+# running state with the real backend.
+if [ "${DFVMM_ALLOW_LEGACY_VKERNEL_FUNCTEST:-}" != "1" ]; then
+	echo "functest.sh is legacy vkernel-only; use the pc64 true-hardware harness documented in AGENTS.md" >&2
+	exit 1
+fi
 #
 # Declarative model: a machine is `mkdir`-ed (always stopped, empty config);
 # vcpu/mem/loader are PCIe-like registers (write into a buffer, commit on

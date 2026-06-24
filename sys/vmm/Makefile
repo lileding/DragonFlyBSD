@@ -3,7 +3,11 @@ KMOD=	vmm
 # vmmfs_* = the filesystem/path layer (VFS nodes + KOBJ classes), vmm.ko only.
 SRCS=	vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_loader_x86.c vmm_console.c
 SRCS+=	vmm_machine.c vmm_device.c vmm_host.c
-.if ${MACHINE_PLATFORM} == "pc64"
+
+.if ${MACHINE_PLATFORM} != "pc64"
+.error "vmm.ko currently supports only MACHINE_PLATFORM=pc64"
+.endif
+
 # x86 VM execution backends are selected by runtime CPU probing, not by
 # compile-time SVM/VMX feature switches.
 SRCS+=	vmm_svm.c vmm_svm_entry.S
@@ -14,7 +18,6 @@ vmm_svm_entry.o: assym.s
 .endif
 vmm_svm_entry.o:
 	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS:N-flto} ${.IMPSRC}
-.endif
 SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machines.c vmmfs_machine.c vmmfs_devices.c
 SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c vmmfs_console.c
 SRCS+=	vmmfs_device.c vmmfs_host.c

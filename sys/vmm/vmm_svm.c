@@ -242,6 +242,9 @@ struct vmm_svm_backend {
 	uint64_t mut_host_lstar;
 	uint64_t mut_host_cstar;
 	uint64_t mut_host_sfmask;
+	uint64_t mut_host_sysenter_cs;
+	uint64_t mut_host_sysenter_esp;
+	uint64_t mut_host_sysenter_eip;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 };
 
@@ -651,11 +654,17 @@ vmm_svm_guest_misc_enter(struct vmm_svm_backend *svm)
 	svm->mut_host_lstar = rdmsr(MSR_LSTAR);
 	svm->mut_host_cstar = rdmsr(MSR_CSTAR);
 	svm->mut_host_sfmask = rdmsr(MSR_SF_MASK);
+	svm->mut_host_sysenter_cs = rdmsr(MSR_SYSENTER_CS);
+	svm->mut_host_sysenter_esp = rdmsr(MSR_SYSENTER_ESP);
+	svm->mut_host_sysenter_eip = rdmsr(MSR_SYSENTER_EIP);
 }
 
 static void
 vmm_svm_guest_misc_leave(struct vmm_svm_backend *svm)
 {
+	wrmsr(MSR_SYSENTER_CS, svm->mut_host_sysenter_cs);
+	wrmsr(MSR_SYSENTER_ESP, svm->mut_host_sysenter_esp);
+	wrmsr(MSR_SYSENTER_EIP, svm->mut_host_sysenter_eip);
 	wrmsr(MSR_STAR, svm->mut_host_star);
 	wrmsr(MSR_LSTAR, svm->mut_host_lstar);
 	wrmsr(MSR_CSTAR, svm->mut_host_cstar);
@@ -702,8 +711,8 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		return;
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_machine_vcpu_should_stop(m)) {
-		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
+		vmm_svm_enable_cpu(svm);
 		vmm_svm_host_tlb_catchup();
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
