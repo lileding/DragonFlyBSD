@@ -258,9 +258,10 @@ def source_tree_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[4]
 
 
-def write_source_module_files(out_dir: pathlib.Path, phase: str) -> None:
+def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
     root = source_tree_root()
     path = out_dir / f"module_files.{phase}"
+    ok = True
 
     with path.open("w") as out:
         out.write(f"### source_tree={root}\n")
@@ -270,9 +271,11 @@ def write_source_module_files(out_dir: pathlib.Path, phase: str) -> None:
                 stat = module_path.stat()
             except FileNotFoundError:
                 out.write(f"MISSING {name} {module_path}\n")
+                ok = False
                 continue
             except OSError as err:
                 out.write(f"ERROR {name} {module_path}: {err}\n")
+                ok = False
                 continue
 
             mtime = dt.datetime.fromtimestamp(
@@ -283,16 +286,29 @@ def write_source_module_files(out_dir: pathlib.Path, phase: str) -> None:
                 f"{name} {module_path} size={stat.st_size} "
                 f"mtime_utc={mtime}\n"
             )
+    return ok
 
 
-def capture_module_snapshot(out_dir: pathlib.Path, phase: str) -> None:
-    run(["date"], out_dir / f"date.{phase}")
-    run(["uname", "-a"], out_dir / f"uname.{phase}")
-    run(["kldstat"], out_dir / f"kldstat.{phase}")
-    run(["kldstat", "-v"], out_dir / f"kldstat_v.{phase}")
-    run(["sysctl", "-n", "kern.module_path"],
-        out_dir / f"kern_module_path.{phase}")
-    write_source_module_files(out_dir, phase)
+def capture_module_snapshot(out_dir: pathlib.Path, phase: str) -> bool:
+    ok = True
+    ok = run(["date"], out_dir / f"date.{phase}") == 0 and ok
+    ok = run(["uname", "-a"], out_dir / f"uname.{phase}") == 0 and ok
+    ok = run(["kldstat"], out_dir / f"kldstat.{phase}") == 0 and ok
+    ok = run(["kldstat", "-v"], out_dir / f"kldstat_v.{phase}") == 0 and ok
+    ok = run(["sysctl", "-n", "kern.module_path"],
+             out_dir / f"kern_module_path.{phase}") == 0 and ok
+    ok = write_source_module_files(out_dir, phase) and ok
+    return ok
+
+
+def sync_probe_return_code(out_dir: pathlib.Path, phase: str,
+                           snapshot_ok: bool) -> int:
+    probe_rc = command_return_code(out_dir / f"drmtest.{phase}")
+    if probe_rc is None:
+        return 1
+    if not snapshot_ok:
+        return 1
+    return probe_rc
 
 
 def x11_env(args: argparse.Namespace) -> dict[str, str]:
@@ -552,19 +568,19 @@ def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
 
 
 def capture_syncobj_transfer_probe(out_dir: pathlib.Path) -> int | None:
-    capture_module_snapshot(out_dir, "syncobj_transfer")
+    snapshot_ok = capture_module_snapshot(out_dir, "syncobj_transfer")
     capture_kms_property_probe(out_dir, "syncobj_transfer", {
         "NVKM_DRMTEST_SYNC_ONLY": "1",
     })
-    return command_return_code(out_dir / "drmtest.syncobj_transfer")
+    return sync_probe_return_code(out_dir, "syncobj_transfer", snapshot_ok)
 
 
 def capture_syncobj_pending_exec_probe(out_dir: pathlib.Path) -> int | None:
-    capture_module_snapshot(out_dir, "syncobj_pending_exec")
+    snapshot_ok = capture_module_snapshot(out_dir, "syncobj_pending_exec")
     capture_kms_property_probe(out_dir, "syncobj_pending_exec", {
         "NVKM_DRMTEST_SYNC_PENDING_EXEC_ONLY": "1",
     })
-    return command_return_code(out_dir / "drmtest.syncobj_pending_exec")
+    return sync_probe_return_code(out_dir, "syncobj_pending_exec", snapshot_ok)
 
 
 def state_is_idle(state: dict[str, int]) -> bool:
