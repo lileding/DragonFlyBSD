@@ -114,6 +114,28 @@ def run_git_ls_files(root: pathlib.Path) -> list[str]:
     return sorted(paths)
 
 
+def run_git_text(root: pathlib.Path, args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def git_identity(root: pathlib.Path) -> dict:
+    status = run_git_text(root, ["status", "--short", "--untracked-files=no"])
+    head = run_git_text(root, ["rev-parse", "HEAD"])
+    return {
+        "head": head,
+        "head_short": head[:10],
+        "status_short": status.splitlines(),
+        "tracked_dirty": bool(status),
+    }
+
+
 def has_allowed_license(text: str) -> bool:
     spdx = SPDX_RE.search(text)
     if spdx is not None:
@@ -211,6 +233,8 @@ def main() -> int:
 
     root = source_tree_root()
     checks: list[dict] = []
+    git = git_identity(root)
+    check(not git["tracked_dirty"], "git tracked worktree is clean", checks)
     files = run_git_ls_files(root)
     check(bool(files), "tracked KMS static audit file set is non-empty", checks)
 
@@ -219,6 +243,7 @@ def main() -> int:
     summary = {
         "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "source_tree": str(root),
+        "git": git,
         "passed": passed,
         "pass_count": sum(1 for item in checks if item["ok"]),
         "fail_count": sum(1 for item in checks if not item["ok"]),
