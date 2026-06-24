@@ -517,6 +517,58 @@ WAYLAND_REPORT_REQUIRED_FILES = {
         "glxgears.xwayland",
     ),
 }
+FULL_REPORT_REQUIRED_COMMAND_RCS = (
+    ("x11-idle-wait.x11", (0,)),
+    ("xdotool-cursor-move.x11", (0,)),
+    ("xrandr.x11", (0,)),
+    ("glxinfo-B.x11", (0,)),
+    ("glxgears.x11", (0, 124)),
+    ("kms-hpd-inject.x11", (0,)),
+    ("hpd-inject-wait.x11", (0,)),
+    ("xrandr-panning.x11", (0,)),
+    ("kms-detect-force-disconnect.console", (0,)),
+    ("kms-hpd-unplug.console", (0,)),
+    ("console-dark-wait.console", (0,)),
+    ("drmtest-build.console_dark", (0,)),
+    ("drmtest.console_dark", (0,)),
+    ("kms-detect-force-disconnect-clear.console", (0,)),
+    ("kms-hpd-plug-restore.console", (0,)),
+    ("console-restore-wait.console", (0,)),
+    ("kms-lightup-restore.console", (0,)),
+    ("console-lightup-wait.console", (0,)),
+    ("kms-idle-wait.after", (0,)),
+    ("drmtest-build.after", (0,)),
+    ("drmtest.after", (0,)),
+)
+WAYLAND_REPORT_REQUIRED_COMMAND_RCS = {
+    "wayland_info": (
+        ("wayland-info.wayland", (0,)),
+        ("kms-idle-wait.after", (0,)),
+        ("drmtest-build.after", (0,)),
+        ("drmtest.after", (0,)),
+    ),
+    "wayland_hpd_smoke": (
+        ("wayland-hpd-owner-wait.wayland", (0,)),
+        ("kms-hpd-inject.wayland", (0,)),
+        ("hpd-inject-wait.wayland", (0,)),
+        ("kms-idle-wait.after", (0,)),
+        ("drmtest-build.after", (0,)),
+        ("drmtest.after", (0,)),
+    ),
+    "wayland_glmark": (
+        ("glmark2-wayland.wayland", (0, 137, 143)),
+        ("kms-idle-wait.after", (0,)),
+        ("drmtest-build.after", (0,)),
+        ("drmtest.after", (0,)),
+    ),
+    "xwayland": (
+        ("glxinfo.xwayland", (0,)),
+        ("glxgears.xwayland", (0, 124)),
+        ("kms-idle-wait.after", (0,)),
+        ("drmtest-build.after", (0,)),
+        ("drmtest.after", (0,)),
+    ),
+}
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -548,6 +600,13 @@ def command_return_code(path: pathlib.Path) -> int | None:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def plain_return_code(path: pathlib.Path) -> int | None:
+    try:
+        return int(read_text(path).strip())
+    except ValueError:
+        return None
 
 
 def load_json(path: pathlib.Path) -> dict:
@@ -669,6 +728,31 @@ def check_required_globs(out_dir: pathlib.Path, label: str,
               checks)
 
 
+def rc_description(expected: tuple[int, ...]) -> str:
+    if len(expected) == 1:
+        return f"rc={expected[0]}"
+    return "rc in " + "/".join(str(value) for value in expected)
+
+
+def check_required_command_rcs(out_dir: pathlib.Path, label: str,
+                               commands: tuple[tuple[str, tuple[int, ...]], ...],
+                               checks: list[dict]) -> None:
+    for filename, expected in commands:
+        rc = command_return_code(out_dir / filename)
+        check(rc in expected,
+              f"{label} raw evidence {filename} has {rc_description(expected)}",
+              checks)
+
+
+def check_required_plain_rc(out_dir: pathlib.Path, label: str, filename: str,
+                            expected: tuple[int, ...],
+                            checks: list[dict]) -> None:
+    rc = plain_return_code(out_dir / filename)
+    check(rc in expected,
+          f"{label} raw evidence {filename} has {rc_description(expected)}",
+          checks)
+
+
 def check_module_set(out_dir: pathlib.Path, phase: str,
                      checks: list[dict]) -> list[dict]:
     entries = module_entries(out_dir, phase)
@@ -691,6 +775,8 @@ def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
                          FULL_REPORT_REQUIRED_FILES, checks)
     check_required_globs(out_dir, "full report",
                          FULL_REPORT_REQUIRED_GLOBS, checks)
+    check_required_command_rcs(out_dir, "full report",
+                               FULL_REPORT_REQUIRED_COMMAND_RCS, checks)
     if not summary_path.exists():
         return {}
 
@@ -745,6 +831,13 @@ def check_standalone_report(out_dir: pathlib.Path, label: str,
     check_required_files(out_dir, label,
                          WAYLAND_REPORT_REQUIRED_FILES.get(label, ()),
                          checks)
+    check_required_plain_rc(out_dir, label, "rc", (0,), checks)
+    check_required_command_rcs(
+        out_dir,
+        label,
+        WAYLAND_REPORT_REQUIRED_COMMAND_RCS.get(label, ()),
+        checks,
+    )
     if not summary_path.exists():
         return {}
 
