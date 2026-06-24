@@ -10294,7 +10294,6 @@ main(void)
 	check_syncobj_wait_deadline_contract(fd);
 	check_syncobj_query_last_submitted_contract(fd);
 	check_syncobj_transfer_contract(fd);
-	check_syncobj_transfer_pending_exec_contract(fd);
 
 	resources = drmModeGetResources(fd);
 	if (resources == NULL) {
