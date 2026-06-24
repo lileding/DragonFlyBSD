@@ -33,6 +33,7 @@ TARGET_PATTERNS = (
     "sys/dev/drm/nouveau/subdev/bios/*.h",
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
+    "tools/tools/drm/nouveau/drmtest.c",
     "tools/tools/drm/nouveau/kms_smoke.py",
     "tools/tools/drm/nouveau/kms_completion_audit.py",
     "tools/tools/drm/nouveau/kms_completion_preflight.py",
