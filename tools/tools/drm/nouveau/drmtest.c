@@ -235,6 +235,20 @@ check_client_cap(int fd, uint64_t capability, const char *name)
 }
 
 static void
+check_client_cap_value(int fd, uint64_t capability, uint64_t value,
+    const char *name)
+{
+	char text[192];
+
+	errno = 0;
+	snprintf(text, sizeof(text), "DRM client cap %s value %llu is accepted",
+	    name, (unsigned long long)value);
+	check(drmSetClientCap(fd, capability, value) == 0, text);
+	if (errno != 0)
+		printf("    errno=%d\n", errno);
+}
+
+static void
 check_client_cap_error(int fd, uint64_t capability, int expected_errno,
     const char *name)
 {
@@ -9918,8 +9932,7 @@ main(void)
 	check_atomic_properties_hidden_without_client_cap(fd);
 	check_client_cap_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
 	    EINVAL, "WRITEBACK_CONNECTORS before ATOMIC");
-	check_client_cap_value_error(fd, DRM_CLIENT_CAP_ATOMIC, 2,
-	    EINVAL, "ATOMIC");
+	check_client_cap_value(fd, DRM_CLIENT_CAP_ATOMIC, 2, "ATOMIC");
 	check_client_cap(fd, DRM_CLIENT_CAP_ATOMIC, "ATOMIC");
 	check_atomic_ioctl_flag_contract(fd);
 	check_cursor_ioctl_flag_contract(fd);

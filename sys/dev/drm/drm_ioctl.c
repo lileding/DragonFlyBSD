@@ -334,14 +334,16 @@ drm_setclientcap(struct drm_device *dev, void *data, struct drm_file *file_priv)
 	case DRM_CLIENT_CAP_ATOMIC:
 		if (!drm_core_check_feature(dev, DRIVER_ATOMIC))
 			return -EOPNOTSUPP;
-		if (req->value > 1)
+		if (req->value > 2)
 			return -EINVAL;
-		file_priv->atomic = req->value;
-		file_priv->universal_planes = req->value;
+		file_priv->atomic = req->value != 0;
+		file_priv->universal_planes = req->value != 0;
 		/*
 		 * No atomic user-space blows up on aspect ratio mode bits.
+		 * Linux accepts value 2 for Xorg/modesetting compatibility;
+		 * drm_file stores the resulting state as a boolean.
 		 */
-		file_priv->aspect_ratio_allowed = req->value;
+		file_priv->aspect_ratio_allowed = req->value != 0;
 		break;
 	case DRM_CLIENT_CAP_ASPECT_RATIO:
 		if (req->value > 1)
