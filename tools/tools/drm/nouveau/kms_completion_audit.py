@@ -19,6 +19,44 @@ WAYLAND_REPORTS = (
     ("wayland_hpd_smoke", "Wayland HPD smoke"),
     ("xwayland", "XWayland"),
 )
+WAYLAND_REQUIRED_CHECKS = {
+    "wayland_info": (
+        ("nouveau DRM backend", r"^Wayland log uses nouveau DRM backend$"),
+        ("atomic DRM", r"^Wayland log uses atomic DRM interface$"),
+        ("zink/NVK renderer", r"^Wayland log uses zink/NVK renderer$"),
+        ("wayland-info command", r"^wayland-info rc=0$"),
+        ("wl_compositor global", r"^wayland-info sees wl_compositor$"),
+        ("xdg_wm_base global", r"^wayland-info sees xdg_wm_base$"),
+        ("presentation clock", r"^wayland-info reports presentation clock$"),
+        ("DRM lease device", r"^wayland-info exposes DRM lease device card0$"),
+        ("HDMI output", r"^wayland-info sees HDMI-A-1 output$"),
+        ("wayland-info clean output", r"^wayland-info output has no errors$"),
+    ),
+    "wayland_hpd_smoke": (
+        ("nouveau DRM backend", r"^Wayland log uses nouveau DRM backend$"),
+        ("atomic DRM", r"^Wayland log uses atomic DRM interface$"),
+        ("Wayland compositor clean exit", r"^Wayland compositor rc=0$"),
+        ("HPD inject command", r"^kms-hpd-inject\.wayland rc=0$"),
+        ("devd hotplug event", r"^wayland devd client received DRM HOTPLUG event$"),
+        ("notify-only HPD", r"^wayland hotplug_notify_only_count HPD delta=[1-9][0-9]*$"),
+        ("no auto-KMS while Wayland owns master",
+         r"^wayland hotplug_auto_kms_count HPD delta=0$"),
+        ("user scanout preserved", r"^wayland HPD kept user scanout=1$"),
+    ),
+    "xwayland": (
+        ("nouveau DRM backend", r"^Wayland log uses nouveau DRM backend$"),
+        ("atomic DRM", r"^Wayland log uses atomic DRM interface$"),
+        ("Wayland compositor clean exit", r"^Wayland compositor rc=0$"),
+        ("Xwayland server started", r"^Xwayland server started$"),
+        ("Xwayland server ready", r"^Xwayland server became ready$"),
+        ("X11 surface", r"^Xwayland created an X11 surface$"),
+        ("GLX direct rendering", r"^Xwayland glxinfo has direct rendering$"),
+        ("GLX zink/NVK renderer", r"^Xwayland glxinfo uses zink/NVK renderer$"),
+        ("GLX accelerated", r"^Xwayland glxinfo is accelerated$"),
+        ("glxgears output",
+         r"^Xwayland glxgears produced renderer/frame/marker output$"),
+    ),
+}
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -200,6 +238,21 @@ def check_standalone_report(out_dir: pathlib.Path, label: str,
                 for name in MODULES:
                     check(name in by_name,
                           f"{label} report summary {phase} has {name}", checks)
+
+    report_checks = summary.get("checks")
+    check(isinstance(report_checks, list), f"{label} report has check list", checks)
+    if isinstance(report_checks, list):
+        for check_name, pattern in WAYLAND_REQUIRED_CHECKS.get(label, ()):
+            found = any(
+                isinstance(item, dict) and
+                item.get("ok") is True and
+                isinstance(item.get("text"), str) and
+                re.search(pattern, item["text"])
+                for item in report_checks
+            )
+            check(found,
+                  f"{label} report proves {check_name}",
+                  checks)
 
     return summary
 
