@@ -2140,6 +2140,21 @@ syncobj_wait_handle(int fd, uint32_t handle)
 }
 
 static bool
+syncobj_wait_handle_deadline(int fd, uint32_t handle)
+{
+	struct drm_syncobj_wait req;
+	uint32_t handles[1] = { handle };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.count_handles = 1;
+	req.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
+	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE;
+	req.deadline_nsec = 1;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &req) == 0;
+}
+
+static bool
 syncobj_timeline_signal_handle(int fd, uint32_t handle, uint64_t point)
 {
 	struct drm_syncobj_timeline_array req;
@@ -2165,6 +2180,23 @@ syncobj_timeline_wait_point(int fd, uint32_t handle, uint64_t point)
 	req.points = (uint64_t)(uintptr_t)points;
 	req.count_handles = 1;
 	req.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &req) == 0;
+}
+
+static bool
+syncobj_timeline_wait_point_deadline(int fd, uint32_t handle, uint64_t point)
+{
+	struct drm_syncobj_timeline_wait req;
+	uint32_t handles[1] = { handle };
+	uint64_t points[1] = { point };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.points = (uint64_t)(uintptr_t)points;
+	req.count_handles = 1;
+	req.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
+	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE;
+	req.deadline_nsec = 1;
 	return drmIoctl(fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &req) == 0;
 }
 
@@ -2219,6 +2251,50 @@ syncobj_transfer_wait_for_submit_point(int fd, uint32_t dst_handle,
 	child_ok = waited == child && WIFEXITED(status) &&
 	    WEXITSTATUS(status) == 0;
 	return transfer_ok && child_ok;
+}
+
+/*
+ * check_syncobj_wait_deadline_contract()
+ *
+ * Ownership:
+ *   Creates one binary syncobj and one timeline syncobj owned by the caller's
+ *   DRM file.  Both handles are destroyed before return.
+ *
+ * Lifetime:
+ *   The waits run only after their backing fences have been signaled, so the
+ *   deadline is a scheduling hint and must not change completion semantics.
+ *
+ * Threading:
+ *   Single-threaded UAPI layout probe.  It validates that the kernel accepts
+ *   the libdrm/Linux wait structs with the trailing deadline_nsec field.
+ */
+static void
+check_syncobj_wait_deadline_contract(int fd)
+{
+	uint32_t binary = 0;
+	uint32_t timeline = 0;
+	bool ok;
+
+	ok = syncobj_create_handle(fd, &binary);
+	check(ok, "SYNCOBJ_WAIT deadline creates binary syncobj");
+	if (ok) {
+		check(syncobj_signal_handle(fd, binary),
+		    "SYNCOBJ_WAIT deadline signals binary syncobj");
+		check(syncobj_wait_handle_deadline(fd, binary),
+		    "SYNCOBJ_WAIT accepts WAIT_DEADLINE");
+	}
+
+	ok = syncobj_create_handle(fd, &timeline);
+	check(ok, "SYNCOBJ_TIMELINE_WAIT deadline creates syncobj");
+	if (ok) {
+		check(syncobj_timeline_signal_handle(fd, timeline, 1),
+		    "SYNCOBJ_TIMELINE_WAIT deadline signals point");
+		check(syncobj_timeline_wait_point_deadline(fd, timeline, 1),
+		    "SYNCOBJ_TIMELINE_WAIT accepts WAIT_DEADLINE");
+	}
+
+	syncobj_destroy_handle(fd, timeline);
+	syncobj_destroy_handle(fd, binary);
 }
 
 static void
@@ -9805,6 +9881,7 @@ run_syncobj_transfer_only(void)
 	}
 
 	printf("sync-only node=%s\n", path);
+	check_syncobj_wait_deadline_contract(fd);
 	check_syncobj_transfer_contract(fd);
 	check(close(fd) == 0, "close succeeds for sync-only DRM fd");
 	return failures == 0 ? 0 : 1;
@@ -9866,6 +9943,7 @@ main(void)
 	    "WRITEBACK_CONNECTORS");
 	check_client_cap_error(fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT,
 	    EOPNOTSUPP, "CURSOR_PLANE_HOTSPOT");
+	check_syncobj_wait_deadline_contract(fd);
 	check_syncobj_transfer_contract(fd);
 
 	resources = drmModeGetResources(fd);

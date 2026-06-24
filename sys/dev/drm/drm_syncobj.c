@@ -1462,7 +1462,8 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 		return -EOPNOTSUPP;
 
 	if (args->flags & ~(DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
-			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT))
+			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE))
 		return -EINVAL;
 
 	if (args->count_handles == 0)
@@ -1541,7 +1542,8 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 
 	if (args->flags & ~(DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
 			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
-			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE))
+			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE |
+			    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE))
 		return -EINVAL;
 
 	if (args->count_handles == 0)
