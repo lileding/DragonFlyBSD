@@ -70,6 +70,20 @@ def module_entries(out_dir: pathlib.Path, phase: str) -> list[dict]:
     return entries
 
 
+def module_git(out_dir: pathlib.Path, phase: str) -> dict:
+    text = read_text(out_dir / f"module_files.{phase}")
+    git: dict[str, object] = {}
+    head = re.search(r"^### git_head=([0-9a-f]{40})$", text, re.M)
+    if head is not None:
+        git["head"] = head.group(1)
+        git["head_short"] = head.group(1)[:10]
+    dirty = re.search(r"^### git_tracked_dirty=([01])$", text, re.M)
+    if dirty is not None:
+        git["tracked_dirty"] = dirty.group(1) == "1"
+    git["status_short"] = re.findall(r"^### git_status_short=(.*)$", text, re.M)
+    return git
+
+
 def module_entry_map(entries: list[dict]) -> dict[str, dict]:
     return {
         entry["name"]: entry
@@ -164,6 +178,7 @@ def check_sync_gate(out_dir: pathlib.Path, phase: str,
         "phase": phase,
         "drmtest_rc": rc,
         "modules": module_entries(out_dir, phase),
+        "module_git": module_git(out_dir, phase),
     }
 
 
@@ -255,6 +270,57 @@ def check_module_identity_consistency(identity_sets: dict[str, dict],
                   checks)
 
 
+def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
+                            pending_summary: dict) -> dict[str, dict]:
+    git_sets: dict[str, dict] = {}
+    full_git = full_summary.get("module_git")
+    if isinstance(full_git, dict):
+        for phase in ("before", "x11", "after"):
+            git = full_git.get(phase)
+            if isinstance(git, dict):
+                git_sets[f"full:{phase}"] = git
+
+    for label, summary in (
+        ("syncobj_transfer", transfer_summary),
+        ("syncobj_pending_exec", pending_summary),
+    ):
+        git = summary.get("module_git")
+        if isinstance(git, dict):
+            git_sets[label] = git
+
+    return git_sets
+
+
+def check_module_git_consistency(static_summary: dict, git_sets: dict[str, dict],
+                                 checks: list[dict]) -> None:
+    static_git = static_summary.get("summary", {}).get("git")
+    static_head = None
+    if isinstance(static_git, dict):
+        static_head = static_git.get("head")
+    check(isinstance(static_head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", static_head)),
+          "static audit git head is available for runtime comparison", checks)
+
+    for label in (
+        "full:before",
+        "full:x11",
+        "full:after",
+        "syncobj_transfer",
+        "syncobj_pending_exec",
+    ):
+        git = git_sets.get(label)
+        check(isinstance(git, dict), f"module git set {label} exists", checks)
+        if not isinstance(git, dict):
+            continue
+        head = git.get("head")
+        check(isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)),
+              f"{label} module git head is a full SHA1", checks)
+        check(git.get("tracked_dirty") is False,
+              f"{label} module git tracked tree is clean", checks)
+        if isinstance(static_head, str):
+            check(head == static_head,
+                  f"{label} module git head matches static audit", checks)
+
+
 def write_summary(path: pathlib.Path, summary: dict) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -298,6 +364,12 @@ def main() -> int:
         pending_summary,
     )
     check_module_identity_consistency(identity_sets, checks)
+    git_sets = collect_module_git_sets(
+        full_summary,
+        transfer_summary,
+        pending_summary,
+    )
+    check_module_git_consistency(static_audit_summary, git_sets, checks)
 
     passed = all(bool(item["ok"]) for item in checks)
     summary = {
@@ -315,6 +387,7 @@ def main() -> int:
         "syncobj_transfer": transfer_summary,
         "syncobj_pending_exec": pending_summary,
         "module_identity_sets": identity_sets,
+        "module_git_sets": git_sets,
     }
 
     try:
