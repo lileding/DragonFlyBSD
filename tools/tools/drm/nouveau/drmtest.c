@@ -2519,6 +2519,53 @@ nouveau_exec_signal_timeline(int fd, int32_t channel, uint32_t handle,
 	return drmIoctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) == 0;
 }
 
+/*
+ * nouveau_exec_wait_signal_timeline()
+ *
+ * Ownership:
+ *   Borrows the DRM fd, channel id, and userspace syncobj handles.  The kernel
+ *   owns any fence references published by DRM_NOUVEAU_EXEC; this helper owns
+ *   no handles and does not destroy them.
+ *
+ * Lifetime:
+ *   The wait point must already have a materialized fence.  The signal point is
+ *   published by the ioctl and remains owned by the signal syncobj until
+ *   userspace replaces or destroys it.
+ *
+ * Threading:
+ *   Single-threaded test helper.  The dependency may signal concurrently while
+ *   the ioctl is publishing the output fence; callers must still verify the
+ *   exported fence state they need.
+ */
+static bool
+nouveau_exec_wait_signal_timeline(int fd, int32_t channel,
+    uint32_t wait_handle, uint64_t wait_point, uint32_t sig_handle,
+    uint64_t sig_point)
+{
+	struct drm_nouveau_sync wait;
+	struct drm_nouveau_sync sig;
+	struct drm_nouveau_exec exec;
+
+	memset(&wait, 0, sizeof(wait));
+	wait.flags = DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ;
+	wait.handle = wait_handle;
+	wait.timeline_value = wait_point;
+
+	memset(&sig, 0, sizeof(sig));
+	sig.flags = DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ;
+	sig.handle = sig_handle;
+	sig.timeline_value = sig_point;
+
+	memset(&exec, 0, sizeof(exec));
+	exec.channel = (uint32_t)channel;
+	exec.wait_count = 1;
+	exec.wait_ptr = (uint64_t)(uintptr_t)&wait;
+	exec.sig_count = 1;
+	exec.sig_ptr = (uint64_t)(uintptr_t)&sig;
+
+	return drmIoctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) == 0;
+}
+
 static bool
 create_pending_exec_sync_file(int fd, int32_t channel,
     struct exec_sync_file *sync_file)
@@ -2620,24 +2667,32 @@ check_syncobj_transfer_pending_exec_contract(int fd)
 
 	for (size_t b = 0; b < sizeof(batch_counts) / sizeof(batch_counts[0]);
 	    b++) {
+		uint32_t blocker = 0;
 		uint32_t source = 0;
 		uint32_t dst = 0;
+		int blocker_fd = -1;
 		int source_fd = -1;
 		int dst_fd = -1;
 		int saved_errno = 0;
 		int wait_ret;
 		bool ok = true;
 
+		if (!syncobj_create_handle(fd, &blocker)) {
+			printf("    SYNCOBJ_TRANSFER pending blocker create errno=%d\n",
+			    errno);
+			break;
+		}
 		if (!syncobj_create_handle(fd, &source)) {
 			printf("    SYNCOBJ_TRANSFER pending source create errno=%d\n",
 			    errno);
+			syncobj_destroy_handle(fd, blocker);
 			break;
 		}
 
 		for (uint32_t i = 1; i <= batch_counts[b]; i++) {
-			if (!nouveau_exec_signal_timeline(fd, channel, source,
+			if (!nouveau_exec_signal_timeline(fd, channel, blocker,
 			    i)) {
-				printf("    SYNCOBJ_TRANSFER pending EXEC errno=%d batch=%u point=%u\n",
+				printf("    SYNCOBJ_TRANSFER pending blocker EXEC errno=%d batch=%u point=%u\n",
 				    errno, batch_counts[b], i);
 				ok = false;
 				break;
@@ -2645,11 +2700,46 @@ check_syncobj_transfer_pending_exec_contract(int fd)
 		}
 
 		if (ok)
-			ok = syncobj_export_sync_file(fd, source, &source_fd);
+			ok = syncobj_export_sync_file(fd, blocker, &blocker_fd);
+		if (!ok) {
+			if (blocker_fd >= 0)
+				(void)close(blocker_fd);
+			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
+			break;
+		}
+
+		wait_ret = wait_sync_file_readable(blocker_fd, 0,
+		    &saved_errno);
+		(void)close(blocker_fd);
+		if (wait_ret == 1) {
+			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
+			continue;
+		}
+		if (wait_ret < 0) {
+			printf("    SYNCOBJ_TRANSFER pending blocker wait errno=%d\n",
+			    saved_errno);
+			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
+			break;
+		}
+
+		if (!nouveau_exec_wait_signal_timeline(fd, channel, blocker,
+		    batch_counts[b], source, 1)) {
+			printf("    SYNCOBJ_TRANSFER pending dependent EXEC errno=%d batch=%u\n",
+			    errno, batch_counts[b]);
+			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
+			break;
+		}
+
+		ok = syncobj_export_sync_file(fd, source, &source_fd);
 		if (!ok) {
 			if (source_fd >= 0)
 				(void)close(source_fd);
 			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
 			break;
 		}
 
@@ -2657,12 +2747,14 @@ check_syncobj_transfer_pending_exec_contract(int fd)
 		(void)close(source_fd);
 		if (wait_ret == 1) {
 			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
 			continue;
 		}
 		if (wait_ret < 0) {
 			printf("    SYNCOBJ_TRANSFER pending source wait errno=%d\n",
 			    saved_errno);
 			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
 			break;
 		}
 		source_pending_seen = true;
@@ -2671,10 +2763,11 @@ check_syncobj_transfer_pending_exec_contract(int fd)
 			printf("    SYNCOBJ_TRANSFER pending destination create errno=%d\n",
 			    errno);
 			syncobj_destroy_handle(fd, source);
+			syncobj_destroy_handle(fd, blocker);
 			break;
 		}
 
-		if (syncobj_transfer_point(fd, dst, 1, source, batch_counts[b],
+		if (syncobj_transfer_point(fd, dst, 1, source, 1,
 		    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)) {
 			transfer_seen = true;
 			if (!syncobj_export_sync_file(fd, dst, &dst_fd)) {
@@ -2697,6 +2790,7 @@ check_syncobj_transfer_pending_exec_contract(int fd)
 
 		syncobj_destroy_handle(fd, dst);
 		syncobj_destroy_handle(fd, source);
+		syncobj_destroy_handle(fd, blocker);
 		if (dst_pending_seen)
 			break;
 	}
