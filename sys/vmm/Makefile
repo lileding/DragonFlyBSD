@@ -19,6 +19,9 @@ SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c vmmfs_console.c
 SRCS+=	vmmfs_device.c vmmfs_host.c
 SRCS+=	vmmfs_node_if.c vmmfs_node_if.h
 
+CLEANFILES+=	vmm_svm.o vmm_svm_entry.o assym.o assym.s
+CLEANFILES+=	bus_if.h device_if.h opt_nfs.h
+
 # The node-operation vtable is a KOBJ interface.  makeobjops turns the local
 # vmmfs_node_if.m into the dispatch glue (vmmfs_node_if.{c,h}); the MFILES machinery
 # only resolves interface files under the kernel source tree, so drive it here.

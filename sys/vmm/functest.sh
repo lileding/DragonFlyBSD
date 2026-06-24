@@ -116,7 +116,7 @@ int main(void) {
 	memcpy((uint8_t *)mem + ENTRY, "\x90\x90\x90\xf4", 4);
 	memset(&v, 0, sizeof(v));
 	v.runnable = 1; v.gpr[4] = STACK; v.gpr[16] = ENTRY; v.gpr[17] = 2;
-	v.cr[0] = CR0_PE | CR0_NE | CR0_PG; v.cr[3] = PML4; v.cr[4] = CR4_PAE; v.cr[5] = XCR0_X87;
+	v.cr[0] = CR0_PE | CR0_NE | CR0_PG; v.cr[2] = PML4; v.cr[3] = CR4_PAE; v.cr[5] = XCR0_X87;
 	v.msr[0] = EFER_LME | EFER_LMA; v.msr[9] = 0x0007040600070406ULL;
 	seg(&v.seg[0], 0, SEG_UNUSABLE, 0, 0);
 	seg(&v.seg[1], 0x08, 0xb | SEG_S | SEG_P | SEG_L | SEG_G, 0xffffffffU, 0);

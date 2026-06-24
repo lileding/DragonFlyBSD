@@ -35,8 +35,9 @@
 
 #define VMM_X64_CR_CR0		0
 #define VMM_X64_CR_CR2		1
-#define VMM_X64_CR_CR3		3
-#define VMM_X64_CR_CR4		4
+#define VMM_X64_CR_CR3		2
+#define VMM_X64_CR_CR4		3
+#define VMM_X64_CR_CR8		4
 #define VMM_X64_CR_XCR0	5
 
 #define VMM_X64_MSR_EFER	0

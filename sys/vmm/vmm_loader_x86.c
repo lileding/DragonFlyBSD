@@ -39,7 +39,7 @@
  *   +0x004 uint32_t flags                currently 0
  *   +0x008 uint64_t runnable             must be 1
  *   +0x010 uint64_t gpr[18]              RAX..RFLAGS
- *   +0x0a0 uint64_t cr[6]                CR0,CR2,unused,CR3,CR4,XCR0
+ *   +0x0a0 uint64_t cr[6]                CR0,CR2,CR3,CR4,CR8,XCR0
  *   +0x0d0 uint64_t msr[11]              EFER..TSC
  *   +0x128 struct vmm_x64_seg_state[10]  ES,CS,SS,DS,FS,GS,GDT,IDT,LDT,TR
  *   +0x228 uint64_t intr_flags           currently 0

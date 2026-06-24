@@ -11,7 +11,10 @@
 #include <sys/malloc.h>
 #include <sys/thread.h>
 #include <sys/thread2.h>
+#include <sys/ucontext.h>
 #include <machine/cpufunc.h>
+#include <machine/md_var.h>
+#include <machine/npx.h>
 #include <machine/specialreg.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -57,6 +60,14 @@
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
 #define VMM_SVM_ASID			1
+
+#define VMM_X64_NDR			6
+#define VMM_X64_DR_DR0			0
+#define VMM_X64_DR_DR1			1
+#define VMM_X64_DR_DR2			2
+#define VMM_X64_DR_DR3			3
+#define VMM_X64_DR_DR6			4
+#define VMM_X64_DR_DR7			5
 
 struct vmm_svm_segment {
 	uint16_t selector;
@@ -177,6 +188,11 @@ struct vmm_svm_backend {
 	struct vmm_svm_page *own_mut_npt_pages;
 	uint32_t imm_npt_page_count;
 	uint64_t imm_npt_root_pa;
+	uint64_t imm_guest_xcr0;
+	union savefpu mut_guest_fpu __aligned(64);
+	mcontext_t mut_host_fpu_ctx;
+	uint64_t mut_host_drs[VMM_X64_NDR];
+	uint64_t mut_guest_drs[VMM_X64_NDR];
 	uint64_t mut_gprs[VMM_X64_NGPR];
 };
 
@@ -318,6 +334,7 @@ vmm_svm_load_state(struct vmm_svm_backend *svm,
 	vmcb->state.cr2 = v->cr[VMM_X64_CR_CR2];
 	vmcb->state.cr3 = v->cr[VMM_X64_CR_CR3];
 	vmcb->state.cr4 = v->cr[VMM_X64_CR_CR4];
+	svm->imm_guest_xcr0 = v->cr[VMM_X64_CR_XCR0];
 	vmcb->state.efer = v->msr[VMM_X64_MSR_EFER] | EFER_SVME;
 	vmcb->state.g_pat = v->msr[VMM_X64_MSR_PAT];
 	vmcb->state.star = v->msr[VMM_X64_MSR_STAR];
@@ -342,6 +359,19 @@ vmm_svm_load_state(struct vmm_svm_backend *svm,
 	vmcb->state.cpl = (vmcb->state.ss.attrib >> 5) & 3;
 }
 
+static void
+vmm_svm_fpu_init(struct vmm_svm_backend *svm)
+{
+	union savefpu *fpu = &svm->mut_guest_fpu;
+
+	bzero(fpu, sizeof(*fpu));
+	fpu->sv_xmm64.sv_env.en_cw = __INITIAL_FPUCW__;
+	fpu->sv_xmm64.sv_env.en_mxcsr = __INITIAL_MXCSR__;
+	fpu->sv_xmm64.sv_env.en_mxcsr_mask = npx_mxcsr_mask;
+	fpu->sv_ymm64.sv_xstate.sx_hd.xstate_bv = npx_xcr0_mask;
+	fpu->sv_ymm64.sv_xstate.sx_hd.xstate_xcomp_bv = 0;
+}
+
 int
 vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
     void **backendp)
@@ -352,9 +382,13 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
 		return EINVAL;
+	if (launch->imm_vcpu0.cr[VMM_X64_CR_XCR0] == 0 ||
+	    (launch->imm_vcpu0.cr[VMM_X64_CR_XCR0] & ~npx_xcr0_mask) != 0)
+		return EINVAL;
 	*backendp = NULL;
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
 	svm->borrow_imm_machine = m;
+	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
 	svm->own_mut_iobm = vmm_svm_contig_alloc(&svm->imm_iobm_pa,
@@ -450,6 +484,60 @@ vmm_svm_stgi(void)
 }
 
 static void
+vmm_svm_guest_fpu_enter(struct vmm_svm_backend *svm)
+{
+	npxpush(&svm->mut_host_fpu_ctx);
+	clts();
+	fpurstor(&svm->mut_guest_fpu, npx_xcr0_mask);
+	if (npx_xcr0_mask != 0)
+		load_xcr(0, svm->imm_guest_xcr0);
+}
+
+static void
+vmm_svm_guest_fpu_leave(struct vmm_svm_backend *svm)
+{
+	if (npx_xcr0_mask != 0)
+		load_xcr(0, npx_xcr0_mask);
+	fpusave(&svm->mut_guest_fpu, npx_xcr0_mask);
+	load_cr0(rcr0() | CR0_TS);
+	npxpop(&svm->mut_host_fpu_ctx);
+}
+
+static void
+vmm_svm_guest_dbregs_enter(struct vmm_svm_backend *svm)
+{
+	svm->mut_host_drs[VMM_X64_DR_DR0] = rdr0();
+	svm->mut_host_drs[VMM_X64_DR_DR1] = rdr1();
+	svm->mut_host_drs[VMM_X64_DR_DR2] = rdr2();
+	svm->mut_host_drs[VMM_X64_DR_DR3] = rdr3();
+	svm->mut_host_drs[VMM_X64_DR_DR6] = rdr6();
+	svm->mut_host_drs[VMM_X64_DR_DR7] = rdr7();
+
+	load_dr7(0);
+	load_dr0(svm->mut_guest_drs[VMM_X64_DR_DR0]);
+	load_dr1(svm->mut_guest_drs[VMM_X64_DR_DR1]);
+	load_dr2(svm->mut_guest_drs[VMM_X64_DR_DR2]);
+	load_dr3(svm->mut_guest_drs[VMM_X64_DR_DR3]);
+}
+
+static void
+vmm_svm_guest_dbregs_leave(struct vmm_svm_backend *svm)
+{
+	svm->mut_guest_drs[VMM_X64_DR_DR0] = rdr0();
+	svm->mut_guest_drs[VMM_X64_DR_DR1] = rdr1();
+	svm->mut_guest_drs[VMM_X64_DR_DR2] = rdr2();
+	svm->mut_guest_drs[VMM_X64_DR_DR3] = rdr3();
+
+	load_dr7(0);
+	load_dr0(svm->mut_host_drs[VMM_X64_DR_DR0]);
+	load_dr1(svm->mut_host_drs[VMM_X64_DR_DR1]);
+	load_dr2(svm->mut_host_drs[VMM_X64_DR_DR2]);
+	load_dr3(svm->mut_host_drs[VMM_X64_DR_DR3]);
+	load_dr6(svm->mut_host_drs[VMM_X64_DR_DR6]);
+	load_dr7(svm->mut_host_drs[VMM_X64_DR_DR7]);
+}
+
+static void
 vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -474,11 +562,14 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
+	vmm_svm_guest_dbregs_enter(svm);
 	while (!vmm_machine_vcpu_should_stop(m)) {
 		crit_enter();
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
+		vmm_svm_guest_fpu_enter(svm);
 		vmm_svm_vmrun(svm->imm_vmcb_pa, svm->mut_gprs);
+		vmm_svm_guest_fpu_leave(svm);
 		vmm_svm_stgi();
 		crit_exit();
 		switch (vmcb->ctrl.exitcode) {
@@ -489,7 +580,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_handle_cpuid(svm);
 			break;
 		case VMM_SVM_EXIT_HLT:
-			return;
+			goto out;
 		case VMM_SVM_EXIT_SHUTDOWN:
 		case VMM_SVM_EXIT_NPF:
 		case VMM_SVM_EXIT_IOIO:
@@ -502,8 +593,10 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)vmcb->ctrl.exitinfo1,
 			    (uintmax_t)vmcb->ctrl.exitinfo2,
 			    (uintmax_t)vmcb->state.rip);
-			return;
+			goto out;
 		}
 		lwkt_user_yield();
 	}
+out:
+	vmm_svm_guest_dbregs_leave(svm);
 }
