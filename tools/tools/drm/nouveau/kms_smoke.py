@@ -269,6 +269,28 @@ def file_sha256(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def git_text(root: pathlib.Path, args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def git_identity(root: pathlib.Path) -> dict[str, str | bool | list[str]]:
+    status = git_text(root, ["status", "--short", "--untracked-files=no"])
+    head = git_text(root, ["rev-parse", "HEAD"])
+    return {
+        "head": head,
+        "head_short": head[:10],
+        "tracked_dirty": bool(status),
+        "status_short": status.splitlines(),
+    }
+
+
 def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
     root = source_tree_root()
     path = out_dir / f"module_files.{phase}"
@@ -276,6 +298,20 @@ def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
 
     with path.open("w") as out:
         out.write(f"### source_tree={root}\n")
+        try:
+            git = git_identity(root)
+        except (OSError, subprocess.CalledProcessError) as err:
+            out.write(f"ERROR git_identity {root}: {err}\n")
+            ok = False
+        else:
+            out.write(f"### git_head={git['head']}\n")
+            out.write(f"### git_head_short={git['head_short']}\n")
+            out.write(
+                "### git_tracked_dirty="
+                f"{1 if git['tracked_dirty'] else 0}\n"
+            )
+            for line in git["status_short"]:
+                out.write(f"### git_status_short={line}\n")
         for name, relative_path in SOURCE_TREE_MODULES:
             module_path = root / relative_path
             try:
@@ -1260,6 +1296,13 @@ def report_module_files(out_dir: pathlib.Path, phase: str, emit) -> None:
          f"module_files.{phase} has no missing project modules")
     emit(f"### source_tree={source_tree_root()}" in text,
          f"module_files.{phase} records source tree")
+    head = re.search(r"^### git_head=([0-9a-f]{40})$", text, re.M)
+    emit(head is not None, f"module_files.{phase} records git head")
+    dirty = re.search(r"^### git_tracked_dirty=([01])$", text, re.M)
+    emit(dirty is not None, f"module_files.{phase} records git dirty state")
+    if dirty is not None:
+        emit(dirty.group(1) == "0",
+             f"module_files.{phase} git tracked tree is clean")
     for name, relative_path in SOURCE_TREE_MODULES:
         pattern = (
             rf"^{re.escape(name)}\s+"
@@ -1291,6 +1334,24 @@ def parse_module_file_entries(out_dir: pathlib.Path,
             "sha256": match.group("sha256"),
         })
     return entries
+
+
+def parse_module_file_git(out_dir: pathlib.Path, phase: str) -> dict[str, object]:
+    path = out_dir / f"module_files.{phase}"
+    if not path.exists():
+        return {}
+
+    text = path.read_text(errors="replace")
+    git: dict[str, object] = {}
+    head = re.search(r"^### git_head=([0-9a-f]{40})$", text, re.M)
+    if head is not None:
+        git["head"] = head.group(1)
+        git["head_short"] = head.group(1)[:10]
+    dirty = re.search(r"^### git_tracked_dirty=([01])$", text, re.M)
+    if dirty is not None:
+        git["tracked_dirty"] = dirty.group(1) == "1"
+    git["status_short"] = re.findall(r"^### git_status_short=(.*)$", text, re.M)
+    return git
 
 
 def report_module_snapshot(out_dir: pathlib.Path, phase: str, emit) -> None:
@@ -2882,6 +2943,12 @@ def report(out_dir: pathlib.Path, allow_missing_x11: bool) -> int:
         "checks": checks,
         "modules": {
             phase: parse_module_file_entries(out_dir, phase)
+            for phase in ("before", "x11", "after",
+                          "syncobj_transfer", "syncobj_pending_exec")
+            if (out_dir / f"module_files.{phase}").exists()
+        },
+        "module_git": {
+            phase: parse_module_file_git(out_dir, phase)
             for phase in ("before", "x11", "after",
                           "syncobj_transfer", "syncobj_pending_exec")
             if (out_dir / f"module_files.{phase}").exists()
