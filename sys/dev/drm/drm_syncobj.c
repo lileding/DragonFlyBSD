@@ -1359,8 +1359,15 @@ drm_syncobj_find_fence_for_transfer(struct drm_file *file_private,
 		return -ENOENT;
 
 	wait_point = point;
+	/*
+	 * A transfer needs a referenced source fence; it does not wait for that
+	 * fence to signal.  When WAIT_FOR_SUBMIT is set and the source point has
+	 * not materialized yet, wait only until the point becomes available, then
+	 * resolve it below.  Plain SYNCOBJ_WAIT keeps its stronger "wait until
+	 * signaled after submit" behavior in drm_syncobj_array_wait_timeout().
+	 */
 	timeout = drm_syncobj_array_wait_timeout(&syncobj, &wait_point, 1,
-	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
+	    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
 	    DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT, NULL);
 	drm_syncobj_put(syncobj);
 	if (timeout < 0)
