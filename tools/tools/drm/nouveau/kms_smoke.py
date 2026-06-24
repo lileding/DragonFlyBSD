@@ -32,6 +32,11 @@ import time
 
 LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
+SOURCE_TREE_MODULES = (
+    ("drm", pathlib.Path("sys/dev/drm/drm/drm.ko")),
+    ("nvgsp_570", pathlib.Path("sys/dev/drm/nouveau/fw/tu102/nvgsp_570.ko")),
+    ("nvkm", pathlib.Path("sys/dev/drm/nouveau/nvkm.ko")),
+)
 FULL_WAYLAND_PHASES = {
     "wayland",
     "wayland_egl",
@@ -247,6 +252,47 @@ def run(argv: list[str], path: pathlib.Path, env: dict[str, str] | None = None,
         except FileNotFoundError as err:
             out.write(f"\n### missing={err.filename}\n")
             return 127
+
+
+def source_tree_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[4]
+
+
+def write_source_module_files(out_dir: pathlib.Path, phase: str) -> None:
+    root = source_tree_root()
+    path = out_dir / f"module_files.{phase}"
+
+    with path.open("w") as out:
+        out.write(f"### source_tree={root}\n")
+        for name, relative_path in SOURCE_TREE_MODULES:
+            module_path = root / relative_path
+            try:
+                stat = module_path.stat()
+            except FileNotFoundError:
+                out.write(f"MISSING {name} {module_path}\n")
+                continue
+            except OSError as err:
+                out.write(f"ERROR {name} {module_path}: {err}\n")
+                continue
+
+            mtime = dt.datetime.fromtimestamp(
+                stat.st_mtime,
+                dt.timezone.utc,
+            ).isoformat()
+            out.write(
+                f"{name} {module_path} size={stat.st_size} "
+                f"mtime_utc={mtime}\n"
+            )
+
+
+def capture_module_snapshot(out_dir: pathlib.Path, phase: str) -> None:
+    run(["date"], out_dir / f"date.{phase}")
+    run(["uname", "-a"], out_dir / f"uname.{phase}")
+    run(["kldstat"], out_dir / f"kldstat.{phase}")
+    run(["kldstat", "-v"], out_dir / f"kldstat_v.{phase}")
+    run(["sysctl", "-n", "kern.module_path"],
+        out_dir / f"kern_module_path.{phase}")
+    write_source_module_files(out_dir, phase)
 
 
 def x11_env(args: argparse.Namespace) -> dict[str, str]:
@@ -506,6 +552,7 @@ def capture_kms_property_probe(out_dir: pathlib.Path, phase: str,
 
 
 def capture_syncobj_transfer_probe(out_dir: pathlib.Path) -> int | None:
+    capture_module_snapshot(out_dir, "syncobj_transfer")
     capture_kms_property_probe(out_dir, "syncobj_transfer", {
         "NVKM_DRMTEST_SYNC_ONLY": "1",
     })
@@ -513,6 +560,7 @@ def capture_syncobj_transfer_probe(out_dir: pathlib.Path) -> int | None:
 
 
 def capture_syncobj_pending_exec_probe(out_dir: pathlib.Path) -> int | None:
+    capture_module_snapshot(out_dir, "syncobj_pending_exec")
     capture_kms_property_probe(out_dir, "syncobj_pending_exec", {
         "NVKM_DRMTEST_SYNC_PENDING_EXEC_ONLY": "1",
     })
@@ -585,9 +633,7 @@ def capture_phase(out_dir: pathlib.Path, phase: str, args: argparse.Namespace) -
     if phase == "after":
         wait_for_kms_idle(out_dir, args.kms_idle_timeout)
 
-    run(["date"], out_dir / f"date.{phase}")
-    run(["uname", "-a"], out_dir / f"uname.{phase}")
-    run(["kldstat"], out_dir / f"kldstat.{phase}")
+    capture_module_snapshot(out_dir, phase)
     run(["sysctl", "-n", "dev.drm.0.state"], out_dir / f"drm_state.{phase}")
     run(["sysctl", "-n", "dev.drm.0.vram_state"], out_dir / f"vram_state.{phase}")
     run(["ps", "axww"], out_dir / f"ps.{phase}")
