@@ -148,6 +148,31 @@ def module_entries(out_dir: pathlib.Path, phase: str) -> list[dict]:
     return entries
 
 
+def loaded_module_entries(out_dir: pathlib.Path, phase: str) -> dict[str, dict]:
+    text = read_text(out_dir / f"kldstat.{phase}")
+    pattern = re.compile(
+        r"^\s*(?P<id>[0-9]+)\s+(?P<refs>[0-9]+)\s+"
+        r"(?P<address>0x[0-9a-fA-F]+)\s+"
+        r"(?P<size>[0-9a-fA-F]+)\s+"
+        r"(?P<name>\S+)\.ko$",
+        re.M,
+    )
+    entries: dict[str, dict] = {}
+    for match in pattern.finditer(text):
+        name = match.group("name")
+        if name not in MODULES:
+            continue
+        size_hex = match.group("size")
+        entries[name] = {
+            "id": int(match.group("id")),
+            "refs": int(match.group("refs")),
+            "address": match.group("address"),
+            "size_hex": size_hex,
+            "size_bytes": int(size_hex, 16),
+        }
+    return entries
+
+
 def module_git(out_dir: pathlib.Path, phase: str) -> dict:
     text = read_text(out_dir / f"module_files.{phase}")
     git: dict[str, object] = {}
@@ -514,6 +539,33 @@ def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
     return git_sets
 
 
+def collect_loaded_module_sets(full_dir: pathlib.Path, transfer_dir: pathlib.Path,
+                               pending_dir: pathlib.Path,
+                               wayland_dirs: dict[str, pathlib.Path]
+                               ) -> dict[str, dict]:
+    loaded_sets: dict[str, dict] = {}
+    for phase in ("before", "x11", "after"):
+        entries = loaded_module_entries(full_dir, phase)
+        if entries:
+            loaded_sets[f"full:{phase}"] = entries
+
+    for label, out_dir, phase in (
+        ("syncobj_transfer", transfer_dir, "syncobj_transfer"),
+        ("syncobj_pending_exec", pending_dir, "syncobj_pending_exec"),
+    ):
+        entries = loaded_module_entries(out_dir, phase)
+        if entries:
+            loaded_sets[label] = entries
+
+    for label, out_dir in wayland_dirs.items():
+        for phase in ("before", "after"):
+            entries = loaded_module_entries(out_dir, phase)
+            if entries:
+                loaded_sets[f"{label}:{phase}"] = entries
+
+    return loaded_sets
+
+
 def check_module_git_consistency(static_summary: dict, git_sets: dict[str, dict],
                                  checks: list[dict]) -> None:
     static_git = static_summary.get("summary", {}).get("git")
@@ -623,6 +675,12 @@ def main() -> int:
         wayland_summaries,
     )
     check_module_git_consistency(static_audit_summary, git_sets, checks)
+    loaded_sets = collect_loaded_module_sets(
+        full_dir,
+        transfer_dir,
+        pending_dir,
+        wayland_dirs,
+    )
 
     passed = all(bool(item["ok"]) for item in checks)
     summary = {
@@ -649,6 +707,7 @@ def main() -> int:
         },
         "module_identity_sets": identity_sets,
         "module_git_sets": git_sets,
+        "loaded_module_sets": loaded_sets,
     }
 
     try:
