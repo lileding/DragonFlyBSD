@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-2-Clause
+
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>

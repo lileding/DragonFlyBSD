@@ -329,6 +329,7 @@ STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/nouveau/nvif/class.h",
     "sys/dev/drm/nouveau/rm/rm.h",
     "sys/dev/drm/nouveau/subdev/gsp.h",
+    "tools/tools/drm/nouveau/drmtest.c",
     "tools/tools/drm/nouveau/kms_smoke.py",
     "tools/tools/drm/nouveau/kms_completion_audit.py",
     "tools/tools/drm/nouveau/kms_completion_preflight.py",
