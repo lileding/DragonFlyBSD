@@ -62,6 +62,23 @@ def module_entry_map(entries: list[dict]) -> dict[str, dict]:
     }
 
 
+def module_identity(entry: dict) -> dict:
+    return {
+        "path": entry.get("path"),
+        "size": entry.get("size"),
+        "sha256": entry.get("sha256"),
+    }
+
+
+def module_identity_map(entries: list[dict]) -> dict[str, dict]:
+    by_name = module_entry_map(entries)
+    return {
+        name: module_identity(by_name[name])
+        for name in MODULES
+        if name in by_name
+    }
+
+
 def check(ok: bool, text: str, checks: list[dict]) -> None:
     checks.append({"ok": ok, "text": text})
     print(("PASS " if ok else "FAIL ") + text)
@@ -134,6 +151,52 @@ def check_sync_gate(out_dir: pathlib.Path, phase: str,
     }
 
 
+def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
+                                 pending_summary: dict) -> dict[str, dict]:
+    identity_sets: dict[str, dict] = {}
+    full_modules = full_summary.get("modules")
+    if isinstance(full_modules, dict):
+        for phase in ("before", "x11", "after"):
+            entries = full_modules.get(phase)
+            if isinstance(entries, list):
+                identity_sets[f"full:{phase}"] = module_identity_map(entries)
+
+    for label, summary in (
+        ("syncobj_transfer", transfer_summary),
+        ("syncobj_pending_exec", pending_summary),
+    ):
+        entries = summary.get("modules")
+        if isinstance(entries, list):
+            identity_sets[label] = module_identity_map(entries)
+
+    return identity_sets
+
+
+def check_module_identity_consistency(identity_sets: dict[str, dict],
+                                      checks: list[dict]) -> None:
+    baseline = identity_sets.get("full:before")
+    check(isinstance(baseline, dict) and len(baseline) == len(MODULES),
+          "module identity baseline full:before exists", checks)
+    if not isinstance(baseline, dict):
+        return
+
+    for label in (
+        "full:x11",
+        "full:after",
+        "syncobj_transfer",
+        "syncobj_pending_exec",
+    ):
+        current = identity_sets.get(label)
+        check(isinstance(current, dict) and len(current) == len(MODULES),
+              f"module identity set {label} exists", checks)
+        if not isinstance(current, dict):
+            continue
+        for name in MODULES:
+            check(current.get(name) == baseline.get(name),
+                  f"{label} {name} module identity matches full:before",
+                  checks)
+
+
 def write_summary(path: pathlib.Path, summary: dict) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -167,6 +230,12 @@ def main() -> int:
     full_summary = check_full_report(full_dir, checks)
     transfer_summary = check_sync_gate(transfer_dir, "syncobj_transfer", checks)
     pending_summary = check_sync_gate(pending_dir, "syncobj_pending_exec", checks)
+    identity_sets = collect_module_identity_sets(
+        full_summary,
+        transfer_summary,
+        pending_summary,
+    )
+    check_module_identity_consistency(identity_sets, checks)
 
     passed = all(bool(item["ok"]) for item in checks)
     summary = {
@@ -182,6 +251,7 @@ def main() -> int:
         },
         "syncobj_transfer": transfer_summary,
         "syncobj_pending_exec": pending_summary,
+        "module_identity_sets": identity_sets,
     }
 
     try:
