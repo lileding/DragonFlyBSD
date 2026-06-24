@@ -16,6 +16,34 @@ import subprocess
 
 
 MODULES = ("drm", "nvgsp_570", "nvkm")
+PREFLIGHT_LOAD_MODULE_MARKERS = (
+    "sys/dev/drm/drm/drm.ko",
+    "sys/dev/drm/nouveau/fw/tu102/nvgsp_570.ko",
+    "sys/dev/drm/nouveau/nvkm.ko",
+)
+PREFLIGHT_STANDALONE_REPORT_MARKERS = (
+    ("preflight", "kms_completion_preflight.py", "--output",
+     "/var/tmp/nvkm-kms-completion-preflight.json"),
+    ("static audit", "kms_static_audit.py", "--output",
+     "/var/tmp/nvkm-kms-static-audit.json"),
+    ("syncobj_transfer", "kms_smoke.py syncobj_transfer"),
+    ("syncobj_pending_exec", "kms_smoke.py syncobj_pending_exec"),
+    ("wayland_info", "kms_smoke.py wayland_info"),
+    ("wayland_hpd_smoke", "kms_smoke.py wayland_hpd_smoke"),
+    ("wayland_glmark", "kms_smoke.py wayland_glmark"),
+    ("xwayland", "kms_smoke.py xwayland"),
+)
+PREFLIGHT_COMPLETION_TEMPLATE_ARGS = (
+    "--static-audit /var/tmp/nvkm-kms-static-audit.json",
+    "--preflight /var/tmp/nvkm-kms-completion-preflight.json",
+    "--full-report <full-report-dir>",
+    "--syncobj-transfer <syncobj-transfer-dir>",
+    "--syncobj-pending-exec <syncobj-pending-exec-dir>",
+    "--wayland-info <wayland-info-dir>",
+    "--wayland-hpd-smoke <wayland-hpd-smoke-dir>",
+    "--wayland-glmark <wayland-glmark-dir>",
+    "--xwayland <xwayland-dir>",
+)
 WAYLAND_REPORTS = (
     ("wayland_info", "wayland-info"),
     ("wayland_hpd_smoke", "Wayland HPD smoke"),
@@ -751,6 +779,75 @@ def check_current_source_tree(static_summary: dict, checks: list[dict]) -> dict:
     }
 
 
+def command_contains(command: object, *markers: str) -> bool:
+    return isinstance(command, str) and all(marker in command for marker in markers)
+
+
+def check_preflight_command_templates(commands: dict,
+                                      checks: list[dict]) -> None:
+    load_modules = commands.get("load_modules_after_reboot")
+    check(isinstance(load_modules, list),
+          "preflight has load module command list", checks)
+    if isinstance(load_modules, list):
+        check(len(load_modules) == len(PREFLIGHT_LOAD_MODULE_MARKERS),
+              "preflight load module command count matches module set", checks)
+        for marker in PREFLIGHT_LOAD_MODULE_MARKERS:
+            check(
+                any(command_contains(command, "doas kldload", marker)
+                    for command in load_modules),
+                f"preflight load command uses project module {marker}",
+                checks,
+            )
+
+    full_x11 = commands.get("full_x11_report")
+    check(isinstance(full_x11, list),
+          "preflight has full X11 report command list", checks)
+    if isinstance(full_x11, list):
+        check(len(full_x11) == 6,
+              "preflight full X11 report has six steps", checks)
+        full_x11_steps = (
+            ("before phase", ("kms_smoke.py before",)),
+            ("startx", ("startx",)),
+            ("X11 panning and HPD phase",
+             ("DISPLAY=:0", "kms_smoke.py x11", "--run-panning",
+              "--run-hpd-inject")),
+            ("manual logout", ("logout from X11",)),
+            ("after phase with console dark-down",
+             ("kms_smoke.py after", "--run-console-dark-down",
+              "--dark-down-display-id 0x400")),
+            ("report phase", ("kms_smoke.py report",)),
+        )
+        for index, (label, markers) in enumerate(full_x11_steps):
+            command = full_x11[index] if index < len(full_x11) else None
+            check(command_contains(command, *markers),
+                  f"preflight full X11 step {index + 1} is {label}",
+                  checks)
+
+    standalone = commands.get("standalone_reports")
+    check(isinstance(standalone, list),
+          "preflight has standalone report command list", checks)
+    if isinstance(standalone, list):
+        check(len(standalone) == len(PREFLIGHT_STANDALONE_REPORT_MARKERS),
+              "preflight standalone report command count matches required set",
+              checks)
+        for label, *markers in PREFLIGHT_STANDALONE_REPORT_MARKERS:
+            check(
+                any(command_contains(command, *markers)
+                    for command in standalone),
+                f"preflight standalone command includes {label}",
+                checks,
+            )
+
+    template = commands.get("completion_template")
+    check(isinstance(template, str),
+          "preflight has completion command template", checks)
+    if isinstance(template, str):
+        for marker in PREFLIGHT_COMPLETION_TEMPLATE_ARGS:
+            check(marker in template,
+                  f"preflight completion template includes {marker}",
+                  checks)
+
+
 def check_preflight_manifest(path: pathlib.Path, static_summary: dict,
                              current_source_tree: dict,
                              checks: list[dict]) -> dict:
@@ -830,9 +927,7 @@ def check_preflight_manifest(path: pathlib.Path, static_summary: dict,
     check(isinstance(commands, dict),
           "preflight manifest has command templates", checks)
     if isinstance(commands, dict):
-        template = commands.get("completion_template")
-        check(isinstance(template, str) and "--preflight " in template,
-              "preflight completion template includes --preflight", checks)
+        check_preflight_command_templates(commands, checks)
 
     return {
         "path": str(path),
