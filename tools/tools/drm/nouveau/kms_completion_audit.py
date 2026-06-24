@@ -1,4 +1,5 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
 """Aggregate nvkm KMS completion evidence.
 
 This script is intentionally read-only.  It consumes evidence already collected
