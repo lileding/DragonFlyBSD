@@ -5655,7 +5655,7 @@ check_setcrtc_lookup_error_contract(int fd)
 	check(saved_errno == ENOENT, "SETCRTC bad CRTC id fails with ENOENT");
 
 	errno = 0;
-	ret = drmModeSetCrtc(fd, active_crtc_id, 0xffffffffu, 0, 0, NULL,
+	ret = drmModeSetCrtc(fd, active_crtc_id, 0x7ffffffeu, 0, 0, NULL,
 	    0, &crtc->mode);
 	saved_errno = errno;
 	check(ret != 0, "SETCRTC rejects bad framebuffer id");
@@ -7944,6 +7944,14 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	lease_ids[2] = primary_plane_id;
 	object_count = (uint32_t)(sizeof(lease_ids) / sizeof(lease_ids[0]));
 
+	duplicate_ids[0] = connector_id;
+	duplicate_ids[1] = connector_id;
+	duplicate_ids[2] = active_crtc_id;
+	duplicate_ids[3] = primary_plane_id;
+	drm_lease_create_error(fd, duplicate_ids,
+	    (uint32_t)(sizeof(duplicate_ids) / sizeof(duplicate_ids[0])),
+	    EEXIST, "DRM lease duplicate request object is rejected with EEXIST");
+
 	if (!drm_lease_create(fd, lease_ids, object_count, &lease_fd,
 	    &lessee_id, "DRM lease CREATE_LEASE succeeds"))
 		return;
@@ -8094,14 +8102,6 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 
 	drm_lease_create_error(fd, lease_ids, object_count, EBUSY,
 	    "DRM lease duplicate live object is rejected with EBUSY");
-
-	duplicate_ids[0] = connector_id;
-	duplicate_ids[1] = connector_id;
-	duplicate_ids[2] = active_crtc_id;
-	duplicate_ids[3] = primary_plane_id;
-	drm_lease_create_error(fd, duplicate_ids,
-	    (uint32_t)(sizeof(duplicate_ids) / sizeof(duplicate_ids[0])),
-	    EEXIST, "DRM lease duplicate request object is rejected with EEXIST");
 
 	bad_ids[0] = 0x7ffffffeu;
 	bad_ids[1] = active_crtc_id;
@@ -10234,6 +10234,7 @@ main(void)
 	drmModeRes *resources;
 	bool deprecated_mode_noop_done = false;
 	bool expect_no_connected;
+	bool metadata_only;
 	uint32_t connected_connector_id = 0;
 	int connected_count = 0;
 	int fd;
@@ -10269,14 +10270,19 @@ main(void)
 	check_wait_vblank_flag_contract(fd);
 	check_wait_vblank_pipe_contract(fd);
 	check_pageflip_ioctl_flag_contract(fd);
-	check_pageflip_lookup_error_contract(fd);
+	metadata_only = getenv("NVKM_DRMTEST_METADATA_ONLY") != NULL;
+	if (metadata_only) {
+		printf("SKIP active CRTC lookup probes by NVKM_DRMTEST_METADATA_ONLY\n");
+	} else {
+		check_pageflip_lookup_error_contract(fd);
+		check_setcrtc_lookup_error_contract(fd);
+		check_setcrtc_argument_error_contract(fd);
+		check_setplane_argument_error_contract(fd);
+	}
 	check_property_read_error_contract(fd);
 	check_property_set_error_contract(fd);
 	check_resource_lookup_error_contract(fd);
-	check_setcrtc_lookup_error_contract(fd);
-	check_setcrtc_argument_error_contract(fd);
 	check_setplane_lookup_error_contract(fd);
-	check_setplane_argument_error_contract(fd);
 	check_property_blob_lifetime_contract(fd);
 	check_dumb_buffer_lifetime_contract(fd);
 	check_client_cap_value_error(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
