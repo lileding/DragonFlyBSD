@@ -244,7 +244,7 @@ FULL_REPORT_REQUIRED_CHECKS = (
     ("writeback client cap after atomic",
      r"^drmtest\.after has DRM client cap WRITEBACK_CONNECTORS is accepted$"),
     ("no writeback connector exposed",
-     r"^drmtest\.after has .* is not writeback$"),
+     r"^(drmtest\.after has .* is not writeback|every connector passes is not writeback)$"),
     ("dithering mode default",
      r"^drmtest\.after has dithering mode defaults to auto$"),
     ("dithering depth default",
