@@ -2215,6 +2215,25 @@ syncobj_timeline_wait_point_deadline(int fd, uint32_t handle, uint64_t point)
 }
 
 static bool
+syncobj_query_point(int fd, uint32_t handle, uint32_t flags,
+    uint64_t *point_out)
+{
+	struct drm_syncobj_timeline_array req;
+	uint32_t handles[1] = { handle };
+	uint64_t points[1] = { 0 };
+
+	memset(&req, 0, sizeof(req));
+	req.handles = (uint64_t)(uintptr_t)handles;
+	req.points = (uint64_t)(uintptr_t)points;
+	req.count_handles = 1;
+	req.flags = flags;
+	if (drmIoctl(fd, DRM_IOCTL_SYNCOBJ_QUERY, &req) != 0)
+		return false;
+	*point_out = points[0];
+	return true;
+}
+
+static bool
 syncobj_transfer_point(int fd, uint32_t dst_handle, uint64_t dst_point,
     uint32_t src_handle, uint64_t src_point, uint32_t flags)
 {
@@ -2309,6 +2328,48 @@ check_syncobj_wait_deadline_contract(int fd)
 
 	syncobj_destroy_handle(fd, timeline);
 	syncobj_destroy_handle(fd, binary);
+}
+
+/*
+ * check_syncobj_query_last_submitted_contract()
+ *
+ * Ownership:
+ *   Creates one timeline syncobj owned by the caller's DRM file.  The handle
+ *   is destroyed before return.
+ *
+ * Lifetime:
+ *   The queried timeline point is signaled before either query.  This isolates
+ *   the UAPI flag and struct layout from asynchronous completion timing.
+ *
+ * Threading:
+ *   Single-threaded UAPI probe.  The kernel only borrows the user handle and
+ *   points arrays for the duration of DRM_IOCTL_SYNCOBJ_QUERY.
+ */
+static void
+check_syncobj_query_last_submitted_contract(int fd)
+{
+	uint64_t point = 0;
+	uint32_t timeline = 0;
+	bool ok;
+
+	ok = syncobj_create_handle(fd, &timeline);
+	check(ok, "SYNCOBJ_QUERY creates timeline syncobj");
+	if (!ok)
+		goto out;
+
+	check(syncobj_timeline_signal_handle(fd, timeline, 3),
+	    "SYNCOBJ_QUERY signals timeline point");
+	check(syncobj_query_point(fd, timeline, 0, &point),
+	    "SYNCOBJ_QUERY default query succeeds");
+	check(point == 3, "SYNCOBJ_QUERY default query returns signaled point");
+	point = 0;
+	check(syncobj_query_point(fd, timeline,
+	    DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED, &point),
+	    "SYNCOBJ_QUERY accepts LAST_SUBMITTED flag");
+	check(point == 3, "SYNCOBJ_QUERY LAST_SUBMITTED returns submitted point");
+
+out:
+	syncobj_destroy_handle(fd, timeline);
 }
 
 static void
@@ -9896,6 +9957,7 @@ run_syncobj_transfer_only(void)
 
 	printf("sync-only node=%s\n", path);
 	check_syncobj_wait_deadline_contract(fd);
+	check_syncobj_query_last_submitted_contract(fd);
 	check_syncobj_transfer_contract(fd);
 	check(close(fd) == 0, "close succeeds for sync-only DRM fd");
 	return failures == 0 ? 0 : 1;
@@ -9957,6 +10019,7 @@ main(void)
 	check_client_cap_error(fd, DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT,
 	    EOPNOTSUPP, "CURSOR_PLANE_HOTSPOT");
 	check_syncobj_wait_deadline_contract(fd);
+	check_syncobj_query_last_submitted_contract(fd);
 	check_syncobj_transfer_contract(fd);
 
 	resources = drmModeGetResources(fd);

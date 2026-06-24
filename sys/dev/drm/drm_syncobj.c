@@ -1774,7 +1774,7 @@ drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 	if (!drm_core_check_feature(dev, DRIVER_SYNCOBJ_TIMELINE))
 		return -EOPNOTSUPP;
 
-	if (args->flags != 0)
+	if (args->flags & ~DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED)
 		return -EINVAL;
 
 	if (args->count_handles == 0)
@@ -1811,24 +1811,29 @@ drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
 			if (syncobj_query_head_point_max < head_point)
 				syncobj_query_head_point_max = head_point;
 
-			for (iter = dma_fence_get(fence); iter != NULL;
-			    iter = dma_fence_chain_walk(iter)) {
-				if (iter->context != fence->context) {
-					dma_fence_put(iter);
-					break;
-				}
-				dma_fence_put(last);
-				last = dma_fence_get(iter);
-			}
-
-			if (dma_fence_is_signaled(last)) {
-				points[i] = last->seqno;
+			if (args->flags &
+			    DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED) {
+				points[i] = head_point;
 			} else {
-				struct dma_fence_chain *last_chain =
-				    to_dma_fence_chain(last);
+				for (iter = dma_fence_get(fence); iter != NULL;
+				    iter = dma_fence_chain_walk(iter)) {
+					if (iter->context != fence->context) {
+						dma_fence_put(iter);
+						break;
+					}
+					dma_fence_put(last);
+					last = dma_fence_get(iter);
+				}
 
-				if (last_chain != NULL)
-					points[i] = last_chain->prev_seqno;
+				if (dma_fence_is_signaled(last)) {
+					points[i] = last->seqno;
+				} else {
+					struct dma_fence_chain *last_chain =
+					    to_dma_fence_chain(last);
+
+					if (last_chain != NULL)
+						points[i] = last_chain->prev_seqno;
+				}
 			}
 			dma_fence_put(last);
 		} else if (fence != NULL && dma_fence_is_signaled(fence)) {
