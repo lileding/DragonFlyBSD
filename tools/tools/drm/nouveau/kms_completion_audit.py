@@ -277,7 +277,7 @@ def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
     if isinstance(full_git, dict):
         for phase in ("before", "x11", "after"):
             git = full_git.get(phase)
-            if isinstance(git, dict):
+            if isinstance(git, dict) and git:
                 git_sets[f"full:{phase}"] = git
 
     for label, summary in (
@@ -285,7 +285,7 @@ def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
         ("syncobj_pending_exec", pending_summary),
     ):
         git = summary.get("module_git")
-        if isinstance(git, dict):
+        if isinstance(git, dict) and git:
             git_sets[label] = git
 
     return git_sets
@@ -308,8 +308,9 @@ def check_module_git_consistency(static_summary: dict, git_sets: dict[str, dict]
         "syncobj_pending_exec",
     ):
         git = git_sets.get(label)
-        check(isinstance(git, dict), f"module git set {label} exists", checks)
-        if not isinstance(git, dict):
+        check(isinstance(git, dict) and bool(git),
+              f"module git set {label} exists", checks)
+        if not isinstance(git, dict) or not git:
             continue
         head = git.get("head")
         check(isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)),
