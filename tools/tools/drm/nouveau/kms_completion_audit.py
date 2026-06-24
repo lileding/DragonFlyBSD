@@ -57,6 +57,40 @@ WAYLAND_REQUIRED_CHECKS = {
          r"^Xwayland glxgears produced renderer/frame/marker output$"),
     ),
 }
+SYNC_REQUIRED_CHECKS = {
+    "syncobj_transfer": (
+        ("binary WAIT_DEADLINE",
+         r"^PASS SYNCOBJ_WAIT accepts WAIT_DEADLINE$"),
+        ("timeline WAIT_DEADLINE",
+         r"^PASS SYNCOBJ_TIMELINE_WAIT accepts WAIT_DEADLINE$"),
+        ("LAST_SUBMITTED query flag",
+         r"^PASS SYNCOBJ_QUERY accepts LAST_SUBMITTED flag$"),
+        ("LAST_SUBMITTED point",
+         r"^PASS SYNCOBJ_QUERY LAST_SUBMITTED returns submitted point$"),
+        ("binary source to timeline",
+         r"^PASS SYNCOBJ_TRANSFER binary source to timeline point succeeds$"),
+        ("WAIT_FOR_SUBMIT source wait",
+         r"^PASS SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT waits for source point$"),
+        ("timeline source to binary",
+         r"^PASS SYNCOBJ_TRANSFER timeline source to binary succeeds$"),
+        ("temporary chain transfer",
+         r"^PASS SYNCOBJ_TRANSFER whole temporary chain to timeline succeeds$"),
+        ("missing source rejection",
+         r"^PASS SYNCOBJ_TRANSFER rejects source with no fence$"),
+    ),
+    "syncobj_pending_exec": (
+        ("nvkm channel allocation",
+         r"^PASS nouveau channel alloc succeeds for SYNCOBJ_TRANSFER pending probe$"),
+        ("pending source remains unsignaled",
+         r"^PASS SYNCOBJ_TRANSFER pending EXEC source remains unsignaled before transfer$"),
+        ("WAIT_FOR_SUBMIT copies pending fence",
+         r"^PASS SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT copies pending EXEC fence$"),
+        ("destination remains pending",
+         r"^PASS SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination fence remains pending$"),
+        ("pending probe fd closes",
+         r"^PASS close succeeds for pending EXEC syncobj transfer DRM fd$"),
+    ),
+}
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -266,6 +300,11 @@ def check_sync_gate(out_dir: pathlib.Path, phase: str,
     check(drmtest_path.exists(), f"{phase} drmtest output exists", checks)
     rc = command_return_code(drmtest_path)
     check(rc == 0, f"{phase} drmtest rc={rc}", checks)
+    drmtest_text = read_text(drmtest_path)
+    for check_name, pattern in SYNC_REQUIRED_CHECKS.get(phase, ()):
+        check(bool(re.search(pattern, drmtest_text, re.M)),
+              f"{phase} proves {check_name}",
+              checks)
 
     return {
         "out_dir": str(out_dir),
