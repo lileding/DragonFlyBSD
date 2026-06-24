@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import pathlib
 import re
+import shlex
 import subprocess
 
 
@@ -609,6 +610,47 @@ def write_summary(path: pathlib.Path, summary: dict) -> None:
     tmp_path.replace(path)
 
 
+def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path,
+                      full_dir: pathlib.Path, transfer_dir: pathlib.Path,
+                      pending_dir: pathlib.Path,
+                      wayland_dirs: dict[str, pathlib.Path],
+                      output: pathlib.Path) -> dict:
+    argv = [
+        str(script_path),
+        "--static-audit", str(static_audit_path),
+        "--full-report", str(full_dir),
+        "--syncobj-transfer", str(transfer_dir),
+        "--syncobj-pending-exec", str(pending_dir),
+        "--wayland-info", str(wayland_dirs["wayland_info"]),
+        "--wayland-hpd-smoke", str(wayland_dirs["wayland_hpd_smoke"]),
+        "--xwayland", str(wayland_dirs["xwayland"]),
+        "--output", str(output),
+    ]
+    return {
+        "required_evidence": [
+            "static_audit",
+            "full_report",
+            "syncobj_transfer",
+            "syncobj_pending_exec",
+            "wayland_info",
+            "wayland_hpd_smoke",
+            "xwayland",
+        ],
+        "paths": {
+            "static_audit": str(static_audit_path),
+            "full_report": str(full_dir),
+            "syncobj_transfer": str(transfer_dir),
+            "syncobj_pending_exec": str(pending_dir),
+            "wayland_info": str(wayland_dirs["wayland_info"]),
+            "wayland_hpd_smoke": str(wayland_dirs["wayland_hpd_smoke"]),
+            "xwayland": str(wayland_dirs["xwayland"]),
+            "output": str(output),
+        },
+        "argv": argv,
+        "shell_command": " ".join(shlex.quote(item) for item in argv),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Aggregate nvkm KMS completion evidence",
@@ -690,6 +732,15 @@ def main() -> int:
         "fail_count": sum(1 for item in checks if not item["ok"]),
         "failures": [item["text"] for item in checks if not item["ok"]],
         "checks": checks,
+        "completion_inputs": completion_inputs(
+            pathlib.Path(__file__),
+            static_audit_path,
+            full_dir,
+            transfer_dir,
+            pending_dir,
+            wayland_dirs,
+            output,
+        ),
         "static_audit": static_audit_summary,
         "current_source_tree": current_source_tree,
         "full_report": {
