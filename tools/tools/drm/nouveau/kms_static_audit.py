@@ -27,9 +27,11 @@ TARGET_PATTERNS = (
     "sys/dev/drm/include/drm/drm_lease.h",
     "tools/tools/drm/nouveau/kms_smoke.py",
     "tools/tools/drm/nouveau/kms_completion_audit.py",
+    "tools/tools/drm/nouveau/kms_static_audit.py",
 )
 
 SOURCE_SUFFIXES = (".c", ".h", ".py")
+STATIC_AUDIT_PATH = "tools/tools/drm/nouveau/kms_static_audit.py"
 
 ALLOWED_LINUX_INCLUDES = {
     "sys/dev/drm/drm_lease.c": {
@@ -98,6 +100,26 @@ def linux_includes(text: str) -> list[str]:
     return [f"linux/{match.group(1)}" for match in LINUX_INCLUDE_RE.finditer(text)]
 
 
+def is_self_audit_pattern_line(relative_path: str, line: str) -> bool:
+    return relative_path == STATIC_AUDIT_PATH and (
+        "re.compile(" in line
+        or '"GPL" not in expression' in line
+        or "has no GPL-only markers" in line
+    )
+
+
+def forbidden_matches(relative_path: str, text: str) -> list[str]:
+    matches: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if is_self_audit_pattern_line(relative_path, line):
+            continue
+        for pattern in FORBIDDEN_PATTERNS:
+            match = pattern.search(line)
+            if match is not None:
+                matches.append(f"{line_number}:{match.group(0)}")
+    return matches
+
+
 def check(ok: bool, text: str, checks: list[dict]) -> None:
     checks.append({"ok": ok, "text": text})
     print(("PASS " if ok else "FAIL ") + text)
@@ -126,10 +148,7 @@ def audit_file(root: pathlib.Path, relative_path: str,
     check(result["has_allowed_license"],
           f"{relative_path} has BSD/MIT-compatible license text", checks)
 
-    for pattern in FORBIDDEN_PATTERNS:
-        match = pattern.search(text)
-        if match is not None:
-            result["forbidden_matches"].append(match.group(0))
+    result["forbidden_matches"] = forbidden_matches(relative_path, text)
     check(not result["forbidden_matches"],
           f"{relative_path} has no GPL-only markers", checks)
 
