@@ -93,6 +93,96 @@ SYNC_REQUIRED_CHECKS = {
          r"^PASS close succeeds for pending EXEC syncobj transfer DRM fd$"),
     ),
 }
+FULL_REPORT_REQUIRED_CHECKS = (
+    ("X11 xrandr", r"^xrandr\.x11 rc=0$"),
+    ("X11 glxinfo", r"^glxinfo-B\.x11 rc=0$"),
+    ("X11 glxgears",
+     r"^glxgears\.x11 rc=(0|124)$"),
+    ("X11 zink/NVK renderer",
+     r"^glxinfo shows zink/NVK/Vulkan$"),
+    ("X11 hardware renderer",
+     r"^glxinfo is not software rasterizer$"),
+    ("X11 hardware cursor",
+     r"^x11 hardware cursor is enabled with fb/bo$"),
+    ("X11 async cursor move",
+     r"^cursor move used async cursor update delta=[1-9][0-9]*$"),
+    ("X11 cursor move avoids primary updates",
+     r"^cursor move did not trigger repeated primary plane updates delta=[0-2]$"),
+    ("X11 no software cursor",
+     r"^Xorg log does not use software cursor$"),
+    ("X11 glamor zink/NVK",
+     r"^Xorg log has glamor acceleration on zink/NVK$"),
+    ("X11 clean exit",
+     r"^Xorg terminated successfully$"),
+    ("X11 HPD command",
+     r"^kms-hpd-inject\.x11 rc=0$"),
+    ("X11 devd hotplug event",
+     r"^x11 devd client received DRM HOTPLUG event$"),
+    ("X11 notify-only HPD",
+     r"^x11 hotplug_notify_only_count HPD delta=[1-9][0-9]*$"),
+    ("X11 no auto-KMS while master owns display",
+     r"^x11 hotplug_auto_kms_count HPD delta=0$"),
+    ("X11 panning",
+     r"^xrandr-panning\.x11 rc=0$"),
+    ("display owner lastclose restore",
+     r"^display owner lastclose restore delta=[1-9][0-9]*$"),
+    ("display owner lastclose restore clean",
+     r"^display owner lastclose restore error delta=0$"),
+    ("lastclose last error clean",
+     r"^lastclose_restore_last_error=0$"),
+    ("DRM lease creates lease",
+     r"^drmtest\.after has DRM lease CREATE_LEASE succeeds$"),
+    ("DRM lease leased atomic test",
+     r"^drmtest\.after has DRM lease atomic TEST_ONLY on leased objects succeeds$"),
+    ("DRM lease revoke",
+     r"^drmtest\.after has DRM lease REVOKE_LEASE succeeds$"),
+    ("connected modes are atomic-checkable",
+     r"^drmtest\.after has connected connector mode list passes atomic TEST_ONLY$"),
+    ("IN_FORMATS blocklinear",
+     r"^drmtest\.after has primary IN_FORMATS has XRGB8888 NVIDIA blocklinear$"),
+    ("IN_FORMATS rejects unsupported blocklinear",
+     r"^drmtest\.after has primary IN_FORMATS excludes RGB565 NVIDIA blocklinear$"),
+    ("modifier negative probe",
+     r"^drmtest\.after has ADDFB2 modifier without flag fails with EINVAL$"),
+    ("vblank wait sequence",
+     r"^drmtest\.after has WAIT_VBLANK advances active CRTC sequence$"),
+    ("vblank event CRTC id",
+     r"^drmtest\.after has drmWaitVBlank event reports active CRTC id$"),
+    ("legacy pageflip event",
+     r"^drmtest\.after has legacy pageflip to temporary FB pageflip event arrives$"),
+    ("legacy pageflip CRTC id",
+     r"^drmtest\.after has legacy pageflip to temporary FB pageflip event reports CRTC id$"),
+    ("OUT_FENCE_PTR returns sync_file",
+     r"^drmtest\.after has OUT_FENCE_PTR returns a sync_file fd$"),
+    ("OUT_FENCE_PTR signals",
+     r"^drmtest\.after has OUT_FENCE_PTR sync_file becomes readable$"),
+    ("IN_FENCE_FD pending source",
+     r"^drmtest\.after has IN_FENCE_FD sync_file is pending before atomic commit$"),
+    ("IN_FENCE_FD waits",
+     r"^drmtest\.after has IN_FENCE_FD sync_file is readable after commit$"),
+    ("framebuffer PRIME import",
+     r"^drmtest\.after has ADDFB2 accepts PRIME-imported XRGB8888 framebuffer$"),
+    ("GETFB2 modifier",
+     r"^drmtest\.after has GETFB2 reports linear modifier$"),
+    ("non-master mutation denied",
+     r"^drmtest\.after has non-master atomic TEST_ONLY commit fails with EACCES$"),
+    ("legacy DPMS off",
+     r"^drmtest\.after has legacy DPMS OFF commit succeeds$"),
+    ("legacy DPMS restore",
+     r"^drmtest\.after has legacy DPMS ON restore succeeds$"),
+    ("legacy SetCrtc disable",
+     r"^drmtest\.after has legacy SetCrtc disable succeeds$"),
+    ("legacy SetCrtc restore",
+     r"^drmtest\.after has legacy SetCrtc restore succeeds$"),
+    ("CRTC color apply",
+     r"^drmtest\.after has atomic CRTC color runtime commit succeeds$"),
+    ("CRTC color restore",
+     r"^drmtest\.after has atomic CRTC color runtime restore commit succeeds$"),
+    ("no new dmesg faults",
+     r"^no new dmesg fault lines$"),
+    ("after drmtest passed",
+     r"^drmtest\.after rc=0$"),
+)
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -250,6 +340,21 @@ def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
           checks)
     check(summary.get("allow_missing_x11") is False,
           "full KMS report required X11 phase", checks)
+
+    report_checks = summary.get("checks")
+    check(isinstance(report_checks, list), "full report has check list", checks)
+    if isinstance(report_checks, list):
+        for check_name, pattern in FULL_REPORT_REQUIRED_CHECKS:
+            found = any(
+                isinstance(item, dict) and
+                item.get("ok") is True and
+                isinstance(item.get("text"), str) and
+                re.search(pattern, item["text"])
+                for item in report_checks
+            )
+            check(found,
+                  f"full report proves {check_name}",
+                  checks)
 
     modules = summary.get("modules")
     check(isinstance(modules, dict), "full report has module summary", checks)
