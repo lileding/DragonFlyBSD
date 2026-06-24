@@ -1,4 +1,6 @@
-/*
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
  * nvkm_drm_kms.c -- DragonFly DRM/KMS setup for nvkm.
  *
  * Register the driver as a KMS (DRIVER_MODESET) device, init mode_config, and
