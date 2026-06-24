@@ -10,6 +10,13 @@
 #define VMM_VCPU_H
 
 struct vmm_vcpu {
+	/*
+	 * Lock map:
+	 * All mut_ fields are protected by the parent vmm_machine's
+	 * token_lifecycle.  vmm_vcpu helpers that inspect or mutate them are
+	 * called with that token held, except vmm_vcpu_start_all(), which
+	 * acquires the parent token around each short state transition.
+	 */
 	uint32_t	mut_count;		/* 0 = unset */
 	struct vmm_vcpu_thread *own_mut_threads;
 	uint32_t	mut_active_count;

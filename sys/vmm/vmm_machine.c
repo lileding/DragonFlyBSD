@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
+#include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/thread2.h>
 #include <sys/ucred.h>
@@ -23,6 +24,7 @@ static void	vmm_machine_start_child(void *arg, struct trapframe *frame);
 static void	vmm_machine_start_task(struct vmm_machine *m);
 static int	vmm_machine_config_complete_locked(const struct vmm_machine *m);
 static void	vmm_machine_start_locked(struct vmm_machine *m);
+static int	vmm_machine_wait_for_vcpu_drain(struct vmm_machine *m);
 static struct vmm_mem_backing *vmm_machine_detach_mem_locked(
 		    struct vmm_machine *m);
 
@@ -140,6 +142,7 @@ vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	struct lwp *worker_lwp;
 	int error = 0;
 	int fork_worker = 0;
+	int vcpu_active;
 
 	vmm_machine_lock(m);
 	if (m->mut_deleting) {
@@ -156,8 +159,10 @@ vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	}
 	m->mut_desired_stopped = 0;
 	m->mut_start_cancel = 0;
-	vmm_vcpu_request_run(&m->own_mut_vcpu);
-	if (!m->mut_running && !m->mut_starting) {
+	vcpu_active = vmm_vcpu_has_active(&m->own_mut_vcpu);
+	if (!vcpu_active)
+		vmm_vcpu_request_run(&m->own_mut_vcpu);
+	if (!m->mut_starting && (!m->mut_running || vcpu_active)) {
 		m->mut_starting = 1;
 		m->ref_mut_start_cred = crhold(cred);
 		m->borrow_mut_host = host;
@@ -244,7 +249,9 @@ vmm_machine_start_task(struct vmm_machine *m)
 	}
 	vmm_machine_unlock(m);
 
-	error = vmm_mem_prepare(&m->own_mut_mem);
+	error = vmm_machine_wait_for_vcpu_drain(m);
+	if (error == 0)
+		error = vmm_mem_prepare(&m->own_mut_mem);
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
 		error = vmm_loader_run(&m->own_mut_loader, &m->own_mut_mem, cred,
 		    vmm_machine_start_is_cancelled, m);
@@ -478,6 +485,23 @@ vmm_machine_start_locked(struct vmm_machine *m)
 	if (!m->mut_running && !vmm_machine_start_cancelled_locked(m)) {
 		m->mut_running = 1;
 		ev_push(m, EV_STARTED);
+	}
+}
+
+static int
+vmm_machine_wait_for_vcpu_drain(struct vmm_machine *m)
+{
+	int cancelled;
+
+	for (;;) {
+		vmm_machine_lock(m);
+		cancelled = vmm_machine_start_cancelled_locked(m);
+		if (cancelled || !vmm_vcpu_has_active(&m->own_mut_vcpu)) {
+			vmm_machine_unlock(m);
+			return cancelled ? ECANCELED : 0;
+		}
+		vmm_machine_unlock(m);
+		tsleep(m, 0, "vmmdrn", hz / 20 + 1);
 	}
 }
 

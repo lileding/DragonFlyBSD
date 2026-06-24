@@ -13,6 +13,12 @@
 #define VMM_HOST_H
 
 struct vmm_host {
+	/*
+	 * Lock map:
+	 * mut_device_count is changed during filesystem-side device pool setup
+	 * under the vmmfs mount registry lock.  atomic_mut_next_cpu is updated
+	 * locklessly by vCPU start workers for round-robin placement.
+	 */
 	uint32_t	mut_device_count;	/* devices in the host pool */
 	uint32_t	atomic_mut_next_cpu;	/* vCPU placement cursor */
 };

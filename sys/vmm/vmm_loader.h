@@ -12,6 +12,12 @@
 #define VMM_LOADER_MAX	256
 
 struct vmm_loader {
+	/*
+	 * Lock map:
+	 * mut_path and mut_len are protected by the parent vmm_machine's
+	 * token_lifecycle.  vmm_loader_run() receives a stable start-time
+	 * snapshot only after vmm_machine has accepted a start worker.
+	 */
 	char		mut_path[VMM_LOADER_MAX];
 	size_t		mut_len;		/* 0 = unset */
 };

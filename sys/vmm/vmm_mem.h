@@ -10,6 +10,14 @@
 #define VMM_MEM_H
 
 struct vmm_mem {
+	/*
+	 * Lock map:
+	 * mut_bytes is protected by the parent vmm_machine's token_lifecycle.
+	 * own_mut_backing is published/detached while holding that token, but
+	 * vmm_mem_prepare() allocates and wires pages outside the token before
+	 * publication, and vmm_mem_release_backing() unwires/deallocates after
+	 * detach outside the token.
+	 */
 	uint64_t	mut_bytes;		/* 0 = unset */
 	struct vmm_mem_backing *own_mut_backing;
 };

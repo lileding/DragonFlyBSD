@@ -209,6 +209,23 @@ ckeq "running mem write kept old" "$(cat $M/vm0/mem)" "536870912"
 echo /tmp/no_manifest > $M/vm0/loader
 ckeq "running loader write kept old" "$(cat $M/vm0/loader)" "/tmp/vmmld_dummy"
 
+# --- quick stop -> start during vCPU drain must converge to full running ---
+rm -f /tmp/vmmld_dummy.probe
+mkdir $M/drain; echo 64 > $M/drain/vcpu; echo 2M > $M/drain/mem; echo /tmp/vmmld_dummy > $M/drain/loader
+cat $M/drain/events >/dev/null
+rm $M/drain/stopped; ckok "drain initial start" $?
+wait_event $M/drain started; ckok "drain initial started event" $?
+cat $M/drain/events >/dev/null
+rm -f /tmp/vmmld_dummy.probe
+echo force > $M/drain/stopped; ckok "drain stop request" $?
+rm $M/drain/stopped; ckok "drain immediate restart request accepted" $?
+wait_file /tmp/vmmld_dummy.probe; ckok "drain restart worker produced probe" $?
+wait_event $M/drain started; ckok "drain restarted after old vcpus exited" $?
+ckeq "drain final desired running" "$(ls $M/drain | grep -c '^stopped$')" "0"
+echo force > $M/drain/stopped; ckok "drain final stop" $?
+wait_event $M/drain stopped; ckok "drain final stopped event" $?
+rmdir $M/drain; ckok "rmdir drain" $?
+
 # --- a stop request can cancel a loader that is still executing ---
 mkdir $M/cancel; echo 1 > $M/cancel/vcpu; echo 2M > $M/cancel/mem; echo /tmp/vmmld_sleep > $M/cancel/loader
 cat $M/cancel/events >/dev/null
