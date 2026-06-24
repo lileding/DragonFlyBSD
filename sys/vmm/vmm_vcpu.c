@@ -15,12 +15,44 @@
 #include "vmm_host.h"
 #include "vmm_loader.h"
 #include "vmm_machine.h"
-#ifdef VMM_WITH_SVM
 #include "vmm_svm.h"
-#endif
 #include "vmm_vcpu.h"
 
 #define VMM_VCPU_MAX	256u
+
+struct vmm_vcpu_backend_ops {
+	const char *imm_name;
+	int (*available)(void);
+	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
+	    void **backendp);
+	void (*destroy)(void *backend);
+	void (*run)(void *backend, struct vmm_vcpu_thread *vc);
+};
+
+static const struct vmm_vcpu_backend_ops vmm_vcpu_svm_ops = {
+	.imm_name = "svm",
+	.available = vmm_svm_available,
+	.create = vmm_svm_vcpu_create,
+	.destroy = vmm_svm_vcpu_destroy,
+	.run = vmm_svm_vcpu_run,
+};
+
+static const struct vmm_vcpu_backend_ops * const vmm_vcpu_backends[] = {
+	&vmm_vcpu_svm_ops,
+	NULL
+};
+
+static const struct vmm_vcpu_backend_ops *
+vmm_vcpu_select_backend(void)
+{
+	uint32_t i;
+
+	for (i = 0; vmm_vcpu_backends[i] != NULL; i++) {
+		if (vmm_vcpu_backends[i]->available())
+			return vmm_vcpu_backends[i];
+	}
+	return NULL;
+}
 
 int
 vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len)
@@ -56,14 +88,11 @@ vmm_vcpu_thread_main(void *arg)
 	struct vmm_machine *m = vc->borrow_imm_machine;
 
 	lwkt_setpri_self(TDPRI_USER_NORM);
-#ifdef VMM_WITH_SVM
-	vmm_svm_vcpu_run(vc->own_mut_backend, vc);
-#else
-	while (!vmm_machine_vcpu_should_stop(m)) {
-		lwkt_user_yield();
-		tsleep(vc, 0, "vmmvcpu", 1);
-	}
-#endif
+	if (!vmm_machine_vcpu_wait_start(m, vc))
+		goto out;
+	if (vc->borrow_imm_backend_ops != NULL)
+		vc->borrow_imm_backend_ops->run(vc->own_mut_backend, vc);
+out:
 	vmm_machine_vcpu_exited(m);
 }
 
@@ -73,6 +102,7 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 {
 	struct vmm_vcpu *v = &m->own_mut_vcpu;
 	struct vmm_vcpu_thread *threads;
+	const struct vmm_vcpu_backend_ops *backend_ops;
 	uint32_t count;
 	uint32_t i;
 	int error = 0;
@@ -84,12 +114,11 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 	vmm_machine_unlock(m);
 	if (count == 0)
 		return EINVAL;
-#ifdef VMM_WITH_SVM
-	if (count != 1 || launch == NULL || !vmm_svm_available())
+	if (count != 1 || launch == NULL)
 		return EOPNOTSUPP;
-#else
-	(void)launch;
-#endif
+	backend_ops = vmm_vcpu_select_backend();
+	if (backend_ops == NULL)
+		return EOPNOTSUPP;
 	threads = kmalloc(sizeof(*threads) * count, M_TEMP, M_WAITOK | M_ZERO);
 
 	vmm_machine_lock(m);
@@ -115,22 +144,19 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 		int cpu = vmm_host_next_cpu(host);
 
 		vc->borrow_imm_machine = m;
+		vc->borrow_imm_backend_ops = backend_ops;
 		vc->imm_id = i;
 		vc->imm_cpu = cpu;
-#ifdef VMM_WITH_SVM
-		error = vmm_svm_vcpu_create(m, launch, &vc->own_mut_backend);
+		error = backend_ops->create(m, launch, &vc->own_mut_backend);
 		if (error)
 			break;
-#endif
 		vmm_machine_lock(m);
 		if (vmm_machine_start_cancelled_locked(m) ||
 		    v->mut_stop_requested) {
 			error = ECANCELED;
 			vmm_machine_unlock(m);
-#ifdef VMM_WITH_SVM
-			vmm_svm_vcpu_destroy(vc->own_mut_backend);
+			backend_ops->destroy(vc->own_mut_backend);
 			vc->own_mut_backend = NULL;
-#endif
 			break;
 		}
 		v->mut_active_count++;
@@ -146,10 +172,8 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 			}
 			v->mut_stop_requested = 1;
 			vmm_machine_unlock(m);
-#ifdef VMM_WITH_SVM
-			vmm_svm_vcpu_destroy(vc->own_mut_backend);
+			backend_ops->destroy(vc->own_mut_backend);
 			vc->own_mut_backend = NULL;
-#endif
 			break;
 		}
 	}
@@ -189,6 +213,17 @@ vmm_vcpu_request_run(struct vmm_vcpu *v)
 	v->mut_stop_requested = 0;
 }
 
+void
+vmm_vcpu_wakeup_all(struct vmm_vcpu *v)
+{
+	uint32_t i;
+
+	if (v->own_mut_threads == NULL)
+		return;
+	for (i = 0; i < v->mut_count; i++)
+		wakeup(&v->own_mut_threads[i]);
+}
+
 int
 vmm_vcpu_has_active(const struct vmm_vcpu *v)
 {
@@ -209,20 +244,18 @@ vmm_vcpu_detach_threads_locked(struct vmm_vcpu *v)
 void
 vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads, uint32_t count)
 {
-#ifdef VMM_WITH_SVM
 	uint32_t i;
-#endif
 
 	if (threads == NULL)
 		return;
-#ifdef VMM_WITH_SVM
 	for (i = 0; i < count; i++) {
-		vmm_svm_vcpu_destroy(threads[i].own_mut_backend);
+		if (threads[i].borrow_imm_backend_ops != NULL) {
+			threads[i].borrow_imm_backend_ops->destroy(
+			    threads[i].own_mut_backend);
+		}
 		threads[i].own_mut_backend = NULL;
+		threads[i].borrow_imm_backend_ops = NULL;
 	}
-#else
-	(void)count;
-#endif
 	kfree(threads, M_TEMP);
 }
 

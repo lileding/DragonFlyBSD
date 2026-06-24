@@ -127,6 +127,24 @@ ENTRY(vmm_svm_vmrun)
 
 	popq	%rax
 	vmload	%rax
+
+	/*
+	 * AMD SVM defines two separate gates here:
+	 *
+	 * - CLGI keeps GIF clear while host state is half-swapped.
+	 * - With V_INTR_MASKING set, VMRUN samples host RFLAGS.IF and uses
+	 *   that sampled value for physical INTR delivery while the guest runs.
+	 *
+	 * Set IF before VMRUN and leave it set after #VMEXIT.  Hardware sets
+	 * GIF to 1 when guest execution starts and clears GIF again on #VMEXIT,
+	 * so this does not deliver host interrupts in the half-swapped host
+	 * window.  Keeping IF set lets the pending physical interrupt that
+	 * caused VMEXIT run as soon as the C side restores host state and STGI
+	 * opens GIF.
+	 */
+	pushfq
+	orq	$0x200,(%rsp)
+	popfq
 	vmrun	%rax
 	vmsave	%rax
 

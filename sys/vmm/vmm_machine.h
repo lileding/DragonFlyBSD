@@ -98,6 +98,8 @@ int	vmm_machine_starting(const struct vmm_machine *m);
 int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	    struct vmm_host *host);
 void	vmm_machine_request_stopped(struct vmm_machine *m, int force);
+int	vmm_machine_vcpu_wait_start(struct vmm_machine *m,
+	    struct vmm_vcpu_thread *vc);
 int	vmm_machine_vcpu_should_stop(struct vmm_machine *m);
 void	vmm_machine_vcpu_exited(struct vmm_machine *m);
 

@@ -30,9 +30,11 @@ struct thread;
 struct vmm_host;
 struct vmm_launch;
 struct vmm_machine;
+struct vmm_vcpu_backend_ops;
 
 struct vmm_vcpu_thread {
 	struct vmm_machine	*borrow_imm_machine;
+	const struct vmm_vcpu_backend_ops *borrow_imm_backend_ops;
 	struct thread		*borrow_mut_thread;
 	void			*own_mut_backend;
 	uint32_t		 imm_id;
@@ -49,6 +51,7 @@ int	vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 	    const struct vmm_launch *launch);
 void	vmm_vcpu_request_stop(struct vmm_vcpu *v);
 void	vmm_vcpu_request_run(struct vmm_vcpu *v);
+void	vmm_vcpu_wakeup_all(struct vmm_vcpu *v);
 int	vmm_vcpu_has_active(const struct vmm_vcpu *v);
 int	vmm_vcpu_note_exit(struct vmm_vcpu *v,
 	    struct vmm_vcpu_thread **threadsp);

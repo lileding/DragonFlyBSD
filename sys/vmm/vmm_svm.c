@@ -13,6 +13,7 @@
 #include <sys/thread2.h>
 #include <sys/ucontext.h>
 #include <machine/cpufunc.h>
+#include <machine/cpu.h>
 #include <machine/md_var.h>
 #include <machine/npx.h>
 #include <machine/specialreg.h>
@@ -32,15 +33,57 @@
 
 #define VMM_SVM_CTRL_INTERCEPT_INTR	(1U << 0)
 #define VMM_SVM_CTRL_INTERCEPT_NMI	(1U << 1)
+#define VMM_SVM_CTRL_INTERCEPT_SMI	(1U << 2)
 #define VMM_SVM_CTRL_INTERCEPT_INIT	(1U << 3)
+#define VMM_SVM_CTRL_INTERCEPT_VINTR	(1U << 4)
+#define VMM_SVM_CTRL_INTERCEPT_CR0_SEL	(1U << 5)
+#define VMM_SVM_CTRL_INTERCEPT_RIDTR	(1U << 6)
+#define VMM_SVM_CTRL_INTERCEPT_RGDTR	(1U << 7)
+#define VMM_SVM_CTRL_INTERCEPT_RLDTR	(1U << 8)
+#define VMM_SVM_CTRL_INTERCEPT_RTR	(1U << 9)
+#define VMM_SVM_CTRL_INTERCEPT_WIDTR	(1U << 10)
+#define VMM_SVM_CTRL_INTERCEPT_WGDTR	(1U << 11)
+#define VMM_SVM_CTRL_INTERCEPT_WLDTR	(1U << 12)
+#define VMM_SVM_CTRL_INTERCEPT_WTR	(1U << 13)
+#define VMM_SVM_CTRL_INTERCEPT_RDTSC	(1U << 14)
+#define VMM_SVM_CTRL_INTERCEPT_RDPMC	(1U << 15)
+#define VMM_SVM_CTRL_INTERCEPT_PUSHF	(1U << 16)
+#define VMM_SVM_CTRL_INTERCEPT_POPF	(1U << 17)
 #define VMM_SVM_CTRL_INTERCEPT_CPUID	(1U << 18)
+#define VMM_SVM_CTRL_INTERCEPT_RSM	(1U << 19)
+#define VMM_SVM_CTRL_INTERCEPT_IRET	(1U << 20)
+#define VMM_SVM_CTRL_INTERCEPT_INTN	(1U << 21)
+#define VMM_SVM_CTRL_INTERCEPT_INVD	(1U << 22)
+#define VMM_SVM_CTRL_INTERCEPT_PAUSE	(1U << 23)
 #define VMM_SVM_CTRL_INTERCEPT_HLT	(1U << 24)
+#define VMM_SVM_CTRL_INTERCEPT_INVLPG	(1U << 25)
+#define VMM_SVM_CTRL_INTERCEPT_INVLPGA	(1U << 26)
 #define VMM_SVM_CTRL_INTERCEPT_IOIO	(1U << 27)
 #define VMM_SVM_CTRL_INTERCEPT_MSR	(1U << 28)
+#define VMM_SVM_CTRL_INTERCEPT_TASKSW	(1U << 29)
+#define VMM_SVM_CTRL_INTERCEPT_FERR	(1U << 30)
 #define VMM_SVM_CTRL_INTERCEPT_SHUTDOWN	(1U << 31)
 
+#define VMM_SVM_CTRL_INTERCEPT_VMRUN	(1U << 0)
 #define VMM_SVM_CTRL_INTERCEPT_VMMCALL	(1U << 1)
+#define VMM_SVM_CTRL_INTERCEPT_VMLOAD	(1U << 2)
+#define VMM_SVM_CTRL_INTERCEPT_VMSAVE	(1U << 3)
+#define VMM_SVM_CTRL_INTERCEPT_STGI	(1U << 4)
+#define VMM_SVM_CTRL_INTERCEPT_CLGI	(1U << 5)
+#define VMM_SVM_CTRL_INTERCEPT_SKINIT	(1U << 6)
+#define VMM_SVM_CTRL_INTERCEPT_RDTSCP	(1U << 7)
+#define VMM_SVM_CTRL_INTERCEPT_MONITOR	(1U << 10)
+#define VMM_SVM_CTRL_INTERCEPT_MWAIT	(1U << 11)
+#define VMM_SVM_CTRL_INTERCEPT_MWAIT_ARMED (1U << 12)
 #define VMM_SVM_CTRL_INTERCEPT_XSETBV	(1U << 13)
+#define VMM_SVM_CTRL_INTERCEPT_RDPRU	(1U << 14)
+#define VMM_SVM_CTRL_INTERCEPT_EFER	(1U << 15)
+
+#define VMM_SVM_CTRL_INTERCEPT_INVLPGB	(1U << 0)
+#define VMM_SVM_CTRL_INTERCEPT_INVLPGB_ILL (1U << 1)
+#define VMM_SVM_CTRL_INTERCEPT_PCID	(1U << 2)
+#define VMM_SVM_CTRL_INTERCEPT_MCOMMIT	(1U << 3)
+#define VMM_SVM_CTRL_INTERCEPT_TLBSYNC	(1U << 4)
 
 #define VMM_SVM_CTRL_ENABLE_NP		0x001ULL
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
@@ -193,6 +236,12 @@ struct vmm_svm_backend {
 	mcontext_t mut_host_fpu_ctx;
 	uint64_t mut_host_drs[VMM_X64_NDR];
 	uint64_t mut_guest_drs[VMM_X64_NDR];
+	uint64_t mut_host_fsbase;
+	uint64_t mut_host_kernelgsbase;
+	uint64_t mut_host_star;
+	uint64_t mut_host_lstar;
+	uint64_t mut_host_cstar;
+	uint64_t mut_host_sfmask;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 };
 
@@ -412,15 +461,58 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	vmcb->ctrl.intercept_misc1 =
 	    VMM_SVM_CTRL_INTERCEPT_INTR |
 	    VMM_SVM_CTRL_INTERCEPT_NMI |
+	    VMM_SVM_CTRL_INTERCEPT_SMI |
 	    VMM_SVM_CTRL_INTERCEPT_INIT |
+	    VMM_SVM_CTRL_INTERCEPT_VINTR |
+	    VMM_SVM_CTRL_INTERCEPT_CR0_SEL |
+	    VMM_SVM_CTRL_INTERCEPT_RIDTR |
+	    VMM_SVM_CTRL_INTERCEPT_RGDTR |
+	    VMM_SVM_CTRL_INTERCEPT_RLDTR |
+	    VMM_SVM_CTRL_INTERCEPT_RTR |
+	    VMM_SVM_CTRL_INTERCEPT_WIDTR |
+	    VMM_SVM_CTRL_INTERCEPT_WGDTR |
+	    VMM_SVM_CTRL_INTERCEPT_WLDTR |
+	    VMM_SVM_CTRL_INTERCEPT_WTR |
+	    VMM_SVM_CTRL_INTERCEPT_RDTSC |
+	    VMM_SVM_CTRL_INTERCEPT_RDPMC |
+	    VMM_SVM_CTRL_INTERCEPT_PUSHF |
+	    VMM_SVM_CTRL_INTERCEPT_POPF |
 	    VMM_SVM_CTRL_INTERCEPT_CPUID |
+	    VMM_SVM_CTRL_INTERCEPT_RSM |
+	    VMM_SVM_CTRL_INTERCEPT_IRET |
+	    VMM_SVM_CTRL_INTERCEPT_INTN |
+	    VMM_SVM_CTRL_INTERCEPT_INVD |
+	    VMM_SVM_CTRL_INTERCEPT_PAUSE |
 	    VMM_SVM_CTRL_INTERCEPT_HLT |
+	    VMM_SVM_CTRL_INTERCEPT_INVLPG |
+	    VMM_SVM_CTRL_INTERCEPT_INVLPGA |
 	    VMM_SVM_CTRL_INTERCEPT_IOIO |
 	    VMM_SVM_CTRL_INTERCEPT_MSR |
+	    VMM_SVM_CTRL_INTERCEPT_TASKSW |
+	    VMM_SVM_CTRL_INTERCEPT_FERR |
 	    VMM_SVM_CTRL_INTERCEPT_SHUTDOWN;
 	vmcb->ctrl.intercept_misc2 =
+	    VMM_SVM_CTRL_INTERCEPT_VMRUN |
 	    VMM_SVM_CTRL_INTERCEPT_VMMCALL |
-	    VMM_SVM_CTRL_INTERCEPT_XSETBV;
+	    VMM_SVM_CTRL_INTERCEPT_VMLOAD |
+	    VMM_SVM_CTRL_INTERCEPT_VMSAVE |
+	    VMM_SVM_CTRL_INTERCEPT_STGI |
+	    VMM_SVM_CTRL_INTERCEPT_CLGI |
+	    VMM_SVM_CTRL_INTERCEPT_SKINIT |
+	    VMM_SVM_CTRL_INTERCEPT_RDTSCP |
+	    VMM_SVM_CTRL_INTERCEPT_MONITOR |
+	    VMM_SVM_CTRL_INTERCEPT_MWAIT |
+	    VMM_SVM_CTRL_INTERCEPT_MWAIT_ARMED |
+	    VMM_SVM_CTRL_INTERCEPT_XSETBV |
+	    VMM_SVM_CTRL_INTERCEPT_RDPRU |
+	    VMM_SVM_CTRL_INTERCEPT_EFER;
+	vmcb->ctrl.intercept_misc3 =
+	    VMM_SVM_CTRL_INTERCEPT_INVLPGB |
+	    VMM_SVM_CTRL_INTERCEPT_INVLPGB_ILL |
+	    VMM_SVM_CTRL_INTERCEPT_PCID |
+	    VMM_SVM_CTRL_INTERCEPT_MCOMMIT |
+	    VMM_SVM_CTRL_INTERCEPT_TLBSYNC;
+	vmcb->ctrl.intercept_vec = 0xffffffffU;
 	vmcb->ctrl.iopm_base_pa = svm->imm_iobm_pa;
 	vmcb->ctrl.msrpm_base_pa = svm->imm_msrbm_pa;
 	vmcb->ctrl.guest_asid = VMM_SVM_ASID;
@@ -485,6 +577,18 @@ vmm_svm_stgi(void)
 }
 
 static void
+vmm_svm_host_tlb_catchup(void)
+{
+	clear_xinvltlb();
+}
+
+static int
+vmm_svm_host_entry_blocked(void)
+{
+	return hvm_break_wanted();
+}
+
+static void
 vmm_svm_guest_fpu_enter(struct vmm_svm_backend *svm)
 {
 	npxpush(&svm->mut_host_fpu_ctx);
@@ -539,6 +643,28 @@ vmm_svm_guest_dbregs_leave(struct vmm_svm_backend *svm)
 }
 
 static void
+vmm_svm_guest_misc_enter(struct vmm_svm_backend *svm)
+{
+	svm->mut_host_fsbase = rdmsr(MSR_FSBASE);
+	svm->mut_host_kernelgsbase = rdmsr(MSR_KGSBASE);
+	svm->mut_host_star = rdmsr(MSR_STAR);
+	svm->mut_host_lstar = rdmsr(MSR_LSTAR);
+	svm->mut_host_cstar = rdmsr(MSR_CSTAR);
+	svm->mut_host_sfmask = rdmsr(MSR_SF_MASK);
+}
+
+static void
+vmm_svm_guest_misc_leave(struct vmm_svm_backend *svm)
+{
+	wrmsr(MSR_STAR, svm->mut_host_star);
+	wrmsr(MSR_LSTAR, svm->mut_host_lstar);
+	wrmsr(MSR_CSTAR, svm->mut_host_cstar);
+	wrmsr(MSR_SF_MASK, svm->mut_host_sfmask);
+	wrmsr(MSR_FSBASE, svm->mut_host_fsbase);
+	wrmsr(MSR_KGSBASE, svm->mut_host_kernelgsbase);
+}
+
+static void
 vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -553,6 +679,18 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 	vmcb->state.rip = vmcb->ctrl.nrip;
 }
 
+static void
+vmm_svm_yield_after_host_interrupt(void)
+{
+	/*
+	 * A host interrupt VMEXIT is the cooperative scheduling point for a
+	 * CPU-bound guest.  Host CPU state has already been restored and STGI
+	 * has opened GIF, so let DragonFly process pending root work and
+	 * decide whether this vCPU should keep the CPU.
+	 */
+	lwkt_user_yield();
+}
+
 void
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
@@ -563,19 +701,27 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
-	vmm_svm_guest_dbregs_enter(svm);
 	while (!vmm_machine_vcpu_should_stop(m)) {
-		crit_enter();
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
+		vmm_svm_host_tlb_catchup();
+		if (__predict_false(vmm_svm_host_entry_blocked())) {
+			vmm_svm_stgi();
+			lwkt_user_yield();
+			continue;
+		}
+		vmm_svm_guest_dbregs_enter(svm);
+		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
 		vmm_svm_vmrun(svm->imm_vmcb_pa, svm->mut_gprs);
 		vmm_svm_guest_fpu_leave(svm);
+		vmm_svm_guest_misc_leave(svm);
+		vmm_svm_guest_dbregs_leave(svm);
 		vmm_svm_stgi();
-		crit_exit();
 		switch (vmcb->ctrl.exitcode) {
 		case VMM_SVM_EXIT_INTR:
 		case VMM_SVM_EXIT_NMI:
+			vmm_svm_yield_after_host_interrupt();
 			break;
 		case VMM_SVM_EXIT_CPUID:
 			vmm_svm_handle_cpuid(svm);
@@ -599,5 +745,5 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		lwkt_user_yield();
 	}
 out:
-	vmm_svm_guest_dbregs_leave(svm);
+	return;
 }

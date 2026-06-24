@@ -307,6 +307,25 @@ vmm_machine_vcpu_should_stop(struct vmm_machine *m)
 	return stop;
 }
 
+int
+vmm_machine_vcpu_wait_start(struct vmm_machine *m, struct vmm_vcpu_thread *vc)
+{
+	int run;
+
+	for (;;) {
+		vmm_machine_lock(m);
+		run = m->mut_running && !vmm_machine_start_cancelled_locked(m) &&
+		    !m->own_mut_vcpu.mut_stop_requested;
+		if (run || vmm_machine_start_cancelled_locked(m) ||
+		    m->own_mut_vcpu.mut_stop_requested) {
+			vmm_machine_unlock(m);
+			return run;
+		}
+		vmm_machine_unlock(m);
+		tsleep(vc, 0, "vmmstrt", hz / 20 + 1);
+	}
+}
+
 void
 vmm_machine_vcpu_exited(struct vmm_machine *m)
 {
@@ -495,6 +514,7 @@ vmm_machine_start_locked(struct vmm_machine *m)
 	if (!m->mut_running && !vmm_machine_start_cancelled_locked(m)) {
 		m->mut_running = 1;
 		ev_push(m, EV_STARTED);
+		vmm_vcpu_wakeup_all(&m->own_mut_vcpu);
 	}
 }
 

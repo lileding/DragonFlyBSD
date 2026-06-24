@@ -4,8 +4,9 @@ KMOD=	vmm
 SRCS=	vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_loader_x86.c vmm_console.c
 SRCS+=	vmm_machine.c vmm_device.c vmm_host.c
 .if ${MACHINE_PLATFORM} == "pc64"
+# x86 VM execution backends are selected by runtime CPU probing, not by
+# compile-time SVM/VMX feature switches.
 SRCS+=	vmm_svm.c vmm_svm_entry.S
-COPTS+=	-DVMM_WITH_SVM
 .if !defined(KERNBUILDDIR)
 SRCS+=	bus_if.h device_if.h opt_nfs.h
 SRCS+=	assym.s

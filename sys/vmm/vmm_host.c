@@ -13,6 +13,7 @@ void
 vmm_host_init(struct vmm_host *h)
 {
 	h->mut_device_count = 0;
+	h->atomic_mut_next_cpu = 0;
 }
 
 void
