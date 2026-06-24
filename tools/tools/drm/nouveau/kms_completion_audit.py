@@ -410,6 +410,113 @@ FULL_REPORT_REQUIRED_CHECKS = (
     ("after drmtest passed",
      r"^drmtest\.after rc=0$"),
 )
+FULL_REPORT_REQUIRED_FILES = (
+    "module_files.before",
+    "kldstat.before",
+    "drm_state.before",
+    "vram_state.before",
+    "ps.before",
+    "dri_fstat.before",
+    "dmesg_faults.before",
+    "module_files.x11",
+    "kldstat.x11",
+    "drm_state.x11",
+    "vram_state.x11",
+    "ps.x11",
+    "dri_fstat.x11",
+    "dmesg_faults.x11",
+    "x11-idle-wait.x11",
+    "drm_state.x11_idle",
+    "xdotool-cursor-move.x11",
+    "drm_state.x11_cursor",
+    "xrandr.x11",
+    "glxinfo-B.x11",
+    "glxgears.x11",
+    "drm_state.x11_hpd_before",
+    "kms-hpd-inject.x11",
+    "hpd-inject-wait.x11",
+    "drm_state.x11_hpd_after",
+    "xrandr-panning.x11",
+    "drm_state.console_dark_before",
+    "kms-detect-force-disconnect.console",
+    "kms-hpd-unplug.console",
+    "console-dark-wait.console",
+    "drm_state.console_dark_after",
+    "drmtest-build.console_dark",
+    "drmtest.console_dark",
+    "kms-detect-force-disconnect-clear.console",
+    "kms-hpd-plug-restore.console",
+    "console-restore-wait.console",
+    "kms-lightup-restore.console",
+    "console-lightup-wait.console",
+    "drm_state.console_dark_restore",
+    "kms-idle-wait.after",
+    "module_files.after",
+    "kldstat.after",
+    "drm_state.after",
+    "vram_state.after",
+    "ps.after",
+    "dri_fstat.after",
+    "dmesg_faults.after",
+    "drmtest-build.after",
+    "drmtest.after",
+)
+FULL_REPORT_REQUIRED_GLOBS = (
+    ("Xorg x11 log", "*Xorg*.x11"),
+    ("Xorg after log", "*Xorg*.after"),
+)
+WAYLAND_COMMON_REQUIRED_FILES = (
+    "module_files.before",
+    "kldstat.before",
+    "drm_state.before",
+    "vram_state.before",
+    "ps.before",
+    "dri_fstat.before",
+    "dmesg_faults.before",
+    "sway.log",
+    "rc",
+    "kms-idle-wait.after",
+    "module_files.after",
+    "kldstat.after",
+    "drm_state.after",
+    "vram_state.after",
+    "ps.after",
+    "dri_fstat.after",
+    "dmesg_faults.after",
+    "drmtest-build.after",
+    "drmtest.after",
+)
+WAYLAND_REPORT_REQUIRED_FILES = {
+    "wayland_info": (
+        *WAYLAND_COMMON_REQUIRED_FILES,
+        "sway-wayland_info.conf",
+        "wayland-info.wayland",
+    ),
+    "wayland_hpd_smoke": (
+        *WAYLAND_COMMON_REQUIRED_FILES,
+        "sway-wayland_hpd_smoke.conf",
+        "wayland-hpd-phase.stdout",
+        "wayland-hpd-owner-wait.wayland",
+        "drm_state.wayland_hpd_before",
+        "kms-hpd-inject.wayland",
+        "hpd-inject-wait.wayland",
+        "drm_state.wayland_hpd_after",
+    ),
+    "wayland_glmark": (
+        *WAYLAND_COMMON_REQUIRED_FILES,
+        "sway-wayland_glmark.conf",
+        "glmark2-wayland.wayland",
+        "ps.wayland_glmark",
+        "drm_state.wayland_glmark_live",
+        "gdb.wayland_glmark",
+    ),
+    "xwayland": (
+        *WAYLAND_COMMON_REQUIRED_FILES,
+        "sway-xwayland.conf",
+        "glxinfo.xwayland",
+        "glxgears.xwayland",
+    ),
+}
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -537,6 +644,24 @@ def check(ok: bool, text: str, checks: list[dict]) -> None:
     print(("PASS " if ok else "FAIL ") + text)
 
 
+def check_required_files(out_dir: pathlib.Path, label: str,
+                         filenames: tuple[str, ...],
+                         checks: list[dict]) -> None:
+    for filename in filenames:
+        check((out_dir / filename).exists(),
+              f"{label} raw evidence has {filename}",
+              checks)
+
+
+def check_required_globs(out_dir: pathlib.Path, label: str,
+                         patterns: tuple[tuple[str, str], ...],
+                         checks: list[dict]) -> None:
+    for description, pattern in patterns:
+        check(any(out_dir.glob(pattern)),
+              f"{label} raw evidence has {description}",
+              checks)
+
+
 def check_module_set(out_dir: pathlib.Path, phase: str,
                      checks: list[dict]) -> list[dict]:
     entries = module_entries(out_dir, phase)
@@ -555,6 +680,10 @@ def check_module_set(out_dir: pathlib.Path, phase: str,
 def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
     summary_path = out_dir / "report_summary.json"
     check(summary_path.exists(), "full report_summary.json exists", checks)
+    check_required_files(out_dir, "full report",
+                         FULL_REPORT_REQUIRED_FILES, checks)
+    check_required_globs(out_dir, "full report",
+                         FULL_REPORT_REQUIRED_GLOBS, checks)
     if not summary_path.exists():
         return {}
 
@@ -606,6 +735,9 @@ def check_standalone_report(out_dir: pathlib.Path, label: str,
     check(out_dir.exists(), f"{label} evidence directory exists", checks)
     summary_path = out_dir / "report_summary.json"
     check(summary_path.exists(), f"{label} report_summary.json exists", checks)
+    check_required_files(out_dir, label,
+                         WAYLAND_REPORT_REQUIRED_FILES.get(label, ()),
+                         checks)
     if not summary_path.exists():
         return {}
 
