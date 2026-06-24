@@ -33,5 +33,7 @@ void	vmm_mem_release(struct vmm_mem *m);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 struct vm_object *vmm_mem_object(struct vmm_mem *m);
+uint64_t vmm_mem_size(struct vmm_mem *m);
+int	vmm_mem_gpa_pa(struct vmm_mem *m, uint64_t gpa, uint64_t *pa);
 
 #endif /* VMM_MEM_H */

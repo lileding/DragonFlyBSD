@@ -86,12 +86,6 @@ vmm_loader_is_set(const struct vmm_loader *l)
 #define VMM_REC_GPA_RANGE	2
 #define VMM_REC_F_MANDATORY	1
 
-#define VMM_GPR_RSP		4
-#define VMM_GPR_RIP		16
-#define VMM_CR_CR3		3
-#define VMM_SEG_GDTR		6
-#define VMM_SEG_IDTR		7
-
 struct vmm_manifest_header {
 	char		magic[8];
 	uint16_t	abi_version;
@@ -108,31 +102,6 @@ struct vmm_manifest_record {
 	uint16_t	type;
 	uint16_t	flags;
 	uint32_t	size;
-} __packed;
-
-struct vmm_x64_seg_state {
-	uint16_t	selector;
-	uint16_t	attrib;
-	uint32_t	limit;
-	uint64_t	base;
-} __packed;
-
-struct vmm_x64_vcpu_state {
-	uint32_t	vcpu_id;
-	uint32_t	flags;
-	uint64_t	runnable;
-	uint64_t	gpr[18];
-	uint64_t	cr[6];
-	uint64_t	msr[11];
-	struct vmm_x64_seg_state seg[10];
-	uint64_t	intr_flags;
-} __packed;
-
-struct vmm_gpa_range {
-	uint64_t	start;
-	uint64_t	size;
-	uint32_t	type;
-	uint32_t	flags;
 } __packed;
 
 struct vmm_loader_epoch {
@@ -703,18 +672,18 @@ vmm_loader_validate_vcpu(uint64_t mem_size,
 {
 	if (vcpu->vcpu_id != 0 || vcpu->runnable != 1)
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_GPR_RIP]))
+	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RIP]))
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_GPR_RSP]))
+	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RSP]))
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->cr[VMM_CR_CR3]))
+	if (!vmm_gpa_addr(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
 		return EINVAL;
-	if ((vcpu->cr[VMM_CR_CR3] & PAGE_MASK) != 0)
+	if ((vcpu->cr[VMM_X64_CR_CR3] & PAGE_MASK) != 0)
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->seg[VMM_SEG_GDTR].base))
+	if (!vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base))
 		return EINVAL;
-	if (vcpu->seg[VMM_SEG_IDTR].limit != 0 &&
-	    !vmm_gpa_addr(mem_size, vcpu->seg[VMM_SEG_IDTR].base))
+	if (vcpu->seg[VMM_X64_SEG_IDT].limit != 0 &&
+	    !vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_IDT].base))
 		return EINVAL;
 	if (vcpu->intr_flags != 0)
 		return EINVAL;
@@ -723,7 +692,7 @@ vmm_loader_validate_vcpu(uint64_t mem_size,
 
 static int
 vmm_loader_validate_ranges(uint64_t mem_size, const uint8_t *payload,
-    uint32_t size)
+    uint32_t size, struct vmm_launch *launch)
 {
 	const struct vmm_gpa_range *range;
 	uint32_t i, count;
@@ -732,16 +701,22 @@ vmm_loader_validate_ranges(uint64_t mem_size, const uint8_t *payload,
 		return EINVAL;
 	range = (const struct vmm_gpa_range *)payload;
 	count = size / sizeof(*range);
+	if (count > VMM_GPA_RANGE_MAX)
+		return EINVAL;
 	for (i = 0; i < count; i++) {
 		if (!vmm_gpa_inside(mem_size, range[i].start, range[i].size))
 			return EINVAL;
+	}
+	if (launch != NULL) {
+		bcopy(range, launch->imm_ranges, sizeof(*range) * count);
+		launch->imm_range_count = count;
 	}
 	return 0;
 }
 
 static int
 vmm_loader_validate_manifest(uint64_t mem_size, const uint8_t *buf,
-    size_t cap)
+    size_t cap, struct vmm_launch *launch)
 {
 	struct vmm_manifest_header hdr;
 	struct vmm_manifest_record rec;
@@ -751,6 +726,8 @@ vmm_loader_validate_manifest(uint64_t mem_size, const uint8_t *buf,
 	int have_range = 0;
 	int error;
 
+	if (launch != NULL)
+		bzero(launch, sizeof(*launch));
 	if (cap < sizeof(hdr))
 		return EINVAL;
 	bcopy(buf, &hdr, sizeof(hdr));
@@ -794,6 +771,10 @@ vmm_loader_validate_manifest(uint64_t mem_size, const uint8_t *buf,
 			    (const struct vmm_x64_vcpu_state *)payload);
 			if (error)
 				return error;
+			if (launch != NULL) {
+				bcopy(payload, &launch->imm_vcpu0,
+				    sizeof(launch->imm_vcpu0));
+			}
 			have_vcpu = 1;
 			break;
 		case VMM_REC_GPA_RANGE:
@@ -802,7 +783,7 @@ vmm_loader_validate_manifest(uint64_t mem_size, const uint8_t *buf,
 				return error;
 			}
 			error = vmm_loader_validate_ranges(mem_size, payload,
-			    rec.size);
+			    rec.size, launch);
 			if (error)
 				return error;
 			have_range = 1;
@@ -817,13 +798,17 @@ vmm_loader_validate_manifest(uint64_t mem_size, const uint8_t *buf,
 		records++;
 		off = next;
 	}
-	return (records == hdr.record_count && have_vcpu && have_range) ?
-	    0 : EINVAL;
+	if (records != hdr.record_count || !have_vcpu || !have_range)
+		return EINVAL;
+	if (launch != NULL)
+		launch->imm_mem_size = mem_size;
+	return 0;
 }
 
 int
 vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
-    struct ucred *cred, vmm_loader_cancel_fn *cancel, void *cancel_arg)
+    struct ucred *cred, struct vmm_launch *launch,
+    vmm_loader_cancel_fn *cancel, void *cancel_arg)
 {
 	struct vmm_loader_epoch *ep;
 	size_t path_len;
@@ -877,7 +862,7 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 		goto out;
 	}
 	error = vmm_loader_validate_manifest(ep->imm_mem_size,
-	    ep->own_mut_manifest_data, VMM_MANIFEST_SIZE);
+	    ep->own_mut_manifest_data, VMM_MANIFEST_SIZE, launch);
 
 out:
 	if (ep->own_mut_manifest_fp != NULL)

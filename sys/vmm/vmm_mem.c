@@ -5,6 +5,7 @@
  */
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <sys/errno.h>
 #include <sys/malloc.h>
 #include <vm/vm.h>
 #include <vm/vm_object.h>
@@ -173,4 +174,34 @@ vmm_mem_object(struct vmm_mem *m)
 	if (m->own_mut_backing == NULL)
 		return NULL;
 	return m->own_mut_backing->own_mut_object;
+}
+
+uint64_t
+vmm_mem_size(struct vmm_mem *m)
+{
+	if (m->own_mut_backing == NULL)
+		return 0;
+	return m->own_mut_backing->imm_bytes;
+}
+
+int
+vmm_mem_gpa_pa(struct vmm_mem *m, uint64_t gpa, uint64_t *pa)
+{
+	struct vmm_mem_backing *b = m->own_mut_backing;
+	vm_page_t pg;
+
+	if (b == NULL || b->own_mut_object == NULL || pa == NULL)
+		return EINVAL;
+	if (gpa >= b->imm_bytes)
+		return EINVAL;
+
+	vm_object_hold(b->own_mut_object);
+	pg = vm_page_lookup(b->own_mut_object, OFF_TO_IDX(gpa));
+	if (pg == NULL) {
+		vm_object_drop(b->own_mut_object);
+		return ENOENT;
+	}
+	*pa = VM_PAGE_TO_PHYS(pg) + (gpa & PAGE_MASK);
+	vm_object_drop(b->own_mut_object);
+	return 0;
 }

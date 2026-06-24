@@ -25,11 +25,14 @@ struct vmm_vcpu {
 
 struct thread;
 struct vmm_host;
+struct vmm_launch;
 struct vmm_machine;
 
 struct vmm_vcpu_thread {
 	struct vmm_machine	*borrow_imm_machine;
 	struct thread		*borrow_mut_thread;
+	void			*own_mut_backend;
+	const struct vmm_launch *borrow_imm_launch;
 	uint32_t		 imm_id;
 	int			 imm_cpu;
 };
@@ -40,7 +43,8 @@ int	vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len);
 size_t	vmm_vcpu_format(const struct vmm_vcpu *v, char *out, size_t cap);
 int	vmm_vcpu_is_set(const struct vmm_vcpu *v);
 
-int	vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host);
+int	vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
+	    const struct vmm_launch *launch);
 void	vmm_vcpu_request_stop(struct vmm_vcpu *v);
 void	vmm_vcpu_request_run(struct vmm_vcpu *v);
 int	vmm_vcpu_has_active(const struct vmm_vcpu *v);

@@ -230,6 +230,7 @@ vmm_machine_start_task(struct vmm_machine *m)
 	struct ucred *cred;
 	struct vmm_host *host;
 	struct vmm_mem_backing *backing = NULL;
+	struct vmm_launch launch;
 	int error;
 	int vcpu_owner = 0;
 	int started = 0;
@@ -254,12 +255,12 @@ vmm_machine_start_task(struct vmm_machine *m)
 		error = vmm_mem_prepare(&m->own_mut_mem);
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
 		error = vmm_loader_run(&m->own_mut_loader, &m->own_mut_mem, cred,
-		    vmm_machine_start_is_cancelled, m);
+		    &launch, vmm_machine_start_is_cancelled, m);
 	}
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
 		vmm_machine_owner_hold(m);
 		vcpu_owner = 1;
-		error = vmm_vcpu_start_all(m, host);
+		error = vmm_vcpu_start_all(m, host, &launch);
 	}
 
 	vmm_machine_lock(m);

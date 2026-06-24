@@ -3,6 +3,17 @@ KMOD=	vmm
 # vmmfs_* = the filesystem/path layer (VFS nodes + KOBJ classes), vmm.ko only.
 SRCS=	vmm_parse.c vmm_vcpu.c vmm_mem.c vmm_loader.c vmm_console.c
 SRCS+=	vmm_machine.c vmm_device.c vmm_host.c
+.if ${MACHINE_PLATFORM} == "pc64"
+SRCS+=	vmm_svm.c vmm_svm_entry.S
+COPTS+=	-DVMM_WITH_SVM
+.if !defined(KERNBUILDDIR)
+SRCS+=	bus_if.h device_if.h opt_nfs.h
+SRCS+=	assym.s
+vmm_svm_entry.o: assym.s
+.endif
+vmm_svm_entry.o:
+	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS:N-flto} ${.IMPSRC}
+.endif
 SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machines.c vmmfs_machine.c vmmfs_devices.c
 SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c vmmfs_console.c
 SRCS+=	vmmfs_device.c vmmfs_host.c
