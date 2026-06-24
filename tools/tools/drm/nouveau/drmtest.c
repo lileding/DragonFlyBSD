@@ -4674,8 +4674,9 @@ check_destroy_dumb_error(int fd, uint32_t handle, int expected_errno,
  *
  * Lifetime:
  *   The temporary dumb BO is never attached to an FB or plane.  Owner destroy
- *   releases the handle before return; later map/destroy operations on the same
- *   numeric handle must fail with ENOENT.
+ *   releases the handle before return.  Later map operations on the same
+ *   numeric handle must fail with ENOENT, while destroy follows
+ *   drm_gem_handle_delete() and reports a missing per-file handle as EINVAL.
  *
  * Threading:
  *   Single-threaded KMS/GEM UAPI probe.  No mmap pointer, framebuffer, or
@@ -4742,9 +4743,9 @@ check_dumb_buffer_lifetime_contract(int fd)
 		check_map_dumb_error(secondary_fd, handle, ENOENT,
 		    "MAP_DUMB foreign fd handle is denied",
 		    "MAP_DUMB foreign fd handle fails with ENOENT");
-		check_destroy_dumb_error(secondary_fd, handle, ENOENT,
+		check_destroy_dumb_error(secondary_fd, handle, EINVAL,
 		    "DESTROY_DUMB foreign fd handle is denied",
-		    "DESTROY_DUMB foreign fd handle fails with ENOENT");
+		    "DESTROY_DUMB foreign fd handle fails with EINVAL");
 		check(close(secondary_fd) == 0,
 		    "DUMB buffer lifecycle closes secondary card fd");
 	}
@@ -4756,9 +4757,9 @@ check_dumb_buffer_lifetime_contract(int fd)
 	check_map_dumb_error(fd, create.handle, ENOENT,
 	    "MAP_DUMB destroyed handle is rejected",
 	    "MAP_DUMB destroyed handle fails with ENOENT");
-	check_destroy_dumb_error(fd, create.handle, ENOENT,
+	check_destroy_dumb_error(fd, create.handle, EINVAL,
 	    "DESTROY_DUMB destroyed handle is rejected",
-	    "DESTROY_DUMB destroyed handle fails with ENOENT");
+	    "DESTROY_DUMB destroyed handle fails with EINVAL");
 }
 
 static bool
