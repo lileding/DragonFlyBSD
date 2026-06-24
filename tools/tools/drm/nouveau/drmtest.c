@@ -2576,6 +2576,139 @@ create_pending_exec_sync_file(int fd, int32_t channel,
 	return false;
 }
 
+/*
+ * check_syncobj_transfer_pending_exec_contract()
+ *
+ * Ownership:
+ *   Creates one nouveau channel, temporary source/destination syncobjs, and
+ *   temporary exported sync_file fds.  Every handle and fd is destroyed or
+ *   closed before return.
+ *
+ * Lifetime:
+ *   The source timeline point is materialized by nvkm EXEC before transfer, but
+ *   the backing fence is intentionally still pending.  The destination timeline
+ *   only borrows that fence through DRM_IOCTL_SYNCOBJ_TRANSFER for the duration
+ *   of the probe and is then destroyed.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  GPU completion races with the zero-time
+ *   sync_file readiness checks, so the probe grows the submitted batch until it
+ *   observes a pending source and pending transferred destination fence.
+ */
+static void
+check_syncobj_transfer_pending_exec_contract(int fd)
+{
+	static const uint32_t batch_counts[] = {
+		64, 256, 1024, 4096, 16384, 65536
+	};
+	bool source_pending_seen = false;
+	bool transfer_seen = false;
+	bool dst_pending_seen = false;
+	int32_t channel = -1;
+
+	if (!nouveau_channel_alloc(fd, &channel)) {
+		printf("    SYNCOBJ_TRANSFER pending channel alloc errno=%d\n",
+		    errno);
+		check(false,
+		    "nouveau channel alloc succeeds for SYNCOBJ_TRANSFER pending probe");
+		return;
+	}
+	check(true,
+	    "nouveau channel alloc succeeds for SYNCOBJ_TRANSFER pending probe");
+
+	for (size_t b = 0; b < sizeof(batch_counts) / sizeof(batch_counts[0]);
+	    b++) {
+		uint32_t source = 0;
+		uint32_t dst = 0;
+		int source_fd = -1;
+		int dst_fd = -1;
+		int saved_errno = 0;
+		int wait_ret;
+		bool ok = true;
+
+		if (!syncobj_create_handle(fd, &source)) {
+			printf("    SYNCOBJ_TRANSFER pending source create errno=%d\n",
+			    errno);
+			break;
+		}
+
+		for (uint32_t i = 1; i <= batch_counts[b]; i++) {
+			if (!nouveau_exec_signal_timeline(fd, channel, source,
+			    i)) {
+				printf("    SYNCOBJ_TRANSFER pending EXEC errno=%d batch=%u point=%u\n",
+				    errno, batch_counts[b], i);
+				ok = false;
+				break;
+			}
+		}
+
+		if (ok)
+			ok = syncobj_export_sync_file(fd, source, &source_fd);
+		if (!ok) {
+			if (source_fd >= 0)
+				(void)close(source_fd);
+			syncobj_destroy_handle(fd, source);
+			break;
+		}
+
+		wait_ret = wait_sync_file_readable(source_fd, 0, &saved_errno);
+		(void)close(source_fd);
+		if (wait_ret == 1) {
+			syncobj_destroy_handle(fd, source);
+			continue;
+		}
+		if (wait_ret < 0) {
+			printf("    SYNCOBJ_TRANSFER pending source wait errno=%d\n",
+			    saved_errno);
+			syncobj_destroy_handle(fd, source);
+			break;
+		}
+		source_pending_seen = true;
+
+		if (!syncobj_create_handle(fd, &dst)) {
+			printf("    SYNCOBJ_TRANSFER pending destination create errno=%d\n",
+			    errno);
+			syncobj_destroy_handle(fd, source);
+			break;
+		}
+
+		if (syncobj_transfer_point(fd, dst, 1, source, batch_counts[b],
+		    DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)) {
+			transfer_seen = true;
+			if (!syncobj_export_sync_file(fd, dst, &dst_fd)) {
+				printf("    SYNCOBJ_TRANSFER pending destination export errno=%d\n",
+				    errno);
+			} else {
+				wait_ret = wait_sync_file_readable(dst_fd, 0,
+				    &saved_errno);
+				(void)close(dst_fd);
+				if (wait_ret == 0) {
+					dst_pending_seen = true;
+					printf("    SYNCOBJ_TRANSFER pending batch=%u\n",
+					    batch_counts[b]);
+				} else if (wait_ret < 0) {
+					printf("    SYNCOBJ_TRANSFER pending destination wait errno=%d\n",
+					    saved_errno);
+				}
+			}
+		}
+
+		syncobj_destroy_handle(fd, dst);
+		syncobj_destroy_handle(fd, source);
+		if (dst_pending_seen)
+			break;
+	}
+
+	check(source_pending_seen,
+	    "SYNCOBJ_TRANSFER pending EXEC source remains unsignaled before transfer");
+	check(transfer_seen,
+	    "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT copies pending EXEC fence");
+	check(dst_pending_seen,
+	    "SYNCOBJ_TRANSFER WAIT_FOR_SUBMIT destination fence remains pending");
+
+	nouveau_channel_free(fd, channel);
+}
+
 static int
 atomic_crtc_color_test_only_commit(int fd, uint32_t crtc_id,
     uint32_t degamma_blob, uint32_t ctm_blob, uint32_t gamma_blob,
@@ -10021,6 +10154,7 @@ main(void)
 	check_syncobj_wait_deadline_contract(fd);
 	check_syncobj_query_last_submitted_contract(fd);
 	check_syncobj_transfer_contract(fd);
+	check_syncobj_transfer_pending_exec_contract(fd);
 
 	resources = drmModeGetResources(fd);
 	if (resources == NULL) {
