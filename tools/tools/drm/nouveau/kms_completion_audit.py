@@ -685,11 +685,109 @@ def check_current_source_tree(static_summary: dict, checks: list[dict]) -> dict:
     }
 
 
+def check_preflight_manifest(path: pathlib.Path, static_summary: dict,
+                             current_source_tree: dict,
+                             checks: list[dict]) -> dict:
+    check(path.exists(), "preflight manifest exists", checks)
+    if not path.exists():
+        return {"path": str(path)}
+
+    try:
+        manifest = load_json(path)
+    except (OSError, json.JSONDecodeError) as err:
+        check(False, f"preflight manifest is readable: {err}", checks)
+        return {"path": str(path)}
+
+    check(manifest.get("passed") is True, "preflight manifest passed", checks)
+    check(manifest.get("fail_count") == 0,
+          "preflight manifest fail_count is zero", checks)
+
+    source_tree = manifest.get("source_tree")
+    static_source_tree = static_summary.get("summary", {}).get("source_tree")
+    current_source_tree_path = current_source_tree.get("source_tree")
+    check(isinstance(source_tree, str) and bool(source_tree),
+          "preflight manifest records source tree", checks)
+    if isinstance(static_source_tree, str):
+        check(source_tree == static_source_tree,
+              "preflight source tree matches static audit", checks)
+    if isinstance(current_source_tree_path, str):
+        check(source_tree == current_source_tree_path,
+              "preflight source tree matches current source tree", checks)
+
+    git = manifest.get("git")
+    check(isinstance(git, dict), "preflight manifest has git identity", checks)
+    if isinstance(git, dict):
+        head = git.get("head")
+        check(isinstance(head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", head)),
+              "preflight git head is a full SHA1", checks)
+        check(git.get("tracked_dirty") is False,
+              "preflight git tracked worktree is clean", checks)
+        static_git = static_summary.get("summary", {}).get("git")
+        static_head = static_git.get("head") if isinstance(static_git, dict) else None
+        if isinstance(static_head, str):
+            check(head == static_head,
+                  "preflight git head matches static audit", checks)
+        current_git = current_source_tree.get("git")
+        current_head = (
+            current_git.get("head") if isinstance(current_git, dict) else None
+        )
+        if isinstance(current_head, str):
+            check(head == current_head,
+                  "preflight git head matches current source tree", checks)
+
+    project_modules = manifest.get("project_modules")
+    check(isinstance(project_modules, list),
+          "preflight manifest has project module list", checks)
+    if isinstance(project_modules, list):
+        by_name = module_entry_map(project_modules)
+        for name in MODULES:
+            entry = by_name.get(name)
+            check(entry is not None,
+                  f"preflight records project module {name}", checks)
+            if entry is not None:
+                check(bool(entry.get("path")),
+                      f"preflight {name} module has path", checks)
+                check(entry.get("size", 0) > 0,
+                      f"preflight {name} module has size", checks)
+                check(bool(re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256", ""))),
+                      f"preflight {name} module has sha256", checks)
+
+    loaded_modules = manifest.get("loaded_modules")
+    check(isinstance(loaded_modules, dict),
+          "preflight manifest has loaded module diagnostics", checks)
+    if isinstance(loaded_modules, dict):
+        for name in MODULES:
+            check(name in loaded_modules,
+                  f"preflight sees loaded module by name {name}", checks)
+
+    commands = manifest.get("commands")
+    check(isinstance(commands, dict),
+          "preflight manifest has command templates", checks)
+    if isinstance(commands, dict):
+        template = commands.get("completion_template")
+        check(isinstance(template, str) and "--preflight " in template,
+              "preflight completion template includes --preflight", checks)
+
+    return {
+        "path": str(path),
+        "manifest": manifest,
+    }
+
+
 def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
                                  pending_summary: dict,
-                                 wayland_summaries: dict[str, dict]
+                                 wayland_summaries: dict[str, dict],
+                                 preflight_summary: dict
                                  ) -> dict[str, dict]:
     identity_sets: dict[str, dict] = {}
+    preflight_manifest = preflight_summary.get("manifest")
+    if isinstance(preflight_manifest, dict):
+        project_modules = preflight_manifest.get("project_modules")
+        if isinstance(project_modules, list):
+            identity_sets["preflight:project"] = module_identity_map(
+                project_modules,
+            )
+
     full_modules = full_summary.get("modules")
     if isinstance(full_modules, dict):
         for phase in ("before", "x11", "after"):
@@ -726,6 +824,7 @@ def check_module_identity_consistency(identity_sets: dict[str, dict],
         return
 
     required_labels = (
+        "preflight:project",
         "full:x11",
         "full:after",
         "syncobj_transfer",
@@ -851,6 +950,7 @@ def write_summary(path: pathlib.Path, summary: dict) -> None:
 
 
 def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path,
+                      preflight_path: pathlib.Path,
                       full_dir: pathlib.Path, transfer_dir: pathlib.Path,
                       pending_dir: pathlib.Path,
                       wayland_dirs: dict[str, pathlib.Path],
@@ -858,6 +958,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
     argv = [
         str(script_path),
         "--static-audit", str(static_audit_path),
+        "--preflight", str(preflight_path),
         "--full-report", str(full_dir),
         "--syncobj-transfer", str(transfer_dir),
         "--syncobj-pending-exec", str(pending_dir),
@@ -869,6 +970,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
     return {
         "required_evidence": [
             "static_audit",
+            "preflight",
             "full_report",
             "syncobj_transfer",
             "syncobj_pending_exec",
@@ -878,6 +980,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
         ],
         "paths": {
             "static_audit": str(static_audit_path),
+            "preflight": str(preflight_path),
             "full_report": str(full_dir),
             "syncobj_transfer": str(transfer_dir),
             "syncobj_pending_exec": str(pending_dir),
@@ -909,6 +1012,8 @@ def main() -> int:
                         help="Directory from kms_smoke.py xwayland")
     parser.add_argument("--static-audit", required=True,
                         help="JSON summary from kms_static_audit.py --output")
+    parser.add_argument("--preflight", required=True,
+                        help="JSON manifest from kms_completion_preflight.py --output")
     parser.add_argument("--output", default=None,
                         help="Output JSON path; defaults to completion_summary.json in the full report directory")
     args = parser.parse_args()
@@ -922,6 +1027,7 @@ def main() -> int:
         "xwayland": pathlib.Path(args.xwayland),
     }
     static_audit_path = pathlib.Path(args.static_audit)
+    preflight_path = pathlib.Path(args.preflight)
     output = (
         pathlib.Path(args.output)
         if args.output
@@ -931,6 +1037,12 @@ def main() -> int:
     checks: list[dict] = []
     static_audit_summary = check_static_audit(static_audit_path, checks)
     current_source_tree = check_current_source_tree(static_audit_summary, checks)
+    preflight_summary = check_preflight_manifest(
+        preflight_path,
+        static_audit_summary,
+        current_source_tree,
+        checks,
+    )
     full_summary = check_full_report(full_dir, checks)
     transfer_summary = check_sync_gate(transfer_dir, "syncobj_transfer", checks)
     pending_summary = check_sync_gate(pending_dir, "syncobj_pending_exec", checks)
@@ -948,6 +1060,7 @@ def main() -> int:
         transfer_summary,
         pending_summary,
         wayland_summaries,
+        preflight_summary,
     )
     check_module_identity_consistency(identity_sets, checks)
     git_sets = collect_module_git_sets(
@@ -975,6 +1088,7 @@ def main() -> int:
         "completion_inputs": completion_inputs(
             pathlib.Path(__file__),
             static_audit_path,
+            preflight_path,
             full_dir,
             transfer_dir,
             pending_dir,
@@ -982,6 +1096,7 @@ def main() -> int:
             output,
         ),
         "static_audit": static_audit_summary,
+        "preflight": preflight_summary,
         "current_source_tree": current_source_tree,
         "full_report": {
             "out_dir": str(full_dir),

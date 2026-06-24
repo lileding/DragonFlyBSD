@@ -134,6 +134,7 @@ def command_paths() -> dict[str, dict]:
 
 def shell_commands(root: pathlib.Path) -> dict:
     smoke = root / "tools/tools/drm/nouveau/kms_smoke.py"
+    preflight = root / "tools/tools/drm/nouveau/kms_completion_preflight.py"
     static_audit = root / "tools/tools/drm/nouveau/kms_static_audit.py"
     completion = root / "tools/tools/drm/nouveau/kms_completion_audit.py"
     return {
@@ -151,6 +152,7 @@ def shell_commands(root: pathlib.Path) -> dict:
             f"{smoke} report",
         ],
         "standalone_reports": [
+            f"{preflight} --output /var/tmp/nvkm-kms-completion-preflight.json",
             f"{static_audit} --output /var/tmp/nvkm-kms-static-audit.json",
             f"{smoke} syncobj_transfer",
             f"{smoke} syncobj_pending_exec",
@@ -161,6 +163,7 @@ def shell_commands(root: pathlib.Path) -> dict:
         "completion_template": (
             f"{completion} "
             "--static-audit /var/tmp/nvkm-kms-static-audit.json "
+            "--preflight /var/tmp/nvkm-kms-completion-preflight.json "
             "--full-report <full-report-dir> "
             "--syncobj-transfer <syncobj-transfer-dir> "
             "--syncobj-pending-exec <syncobj-pending-exec-dir> "
