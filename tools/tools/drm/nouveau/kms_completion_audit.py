@@ -331,6 +331,7 @@ STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/nouveau/subdev/gsp.h",
     "tools/tools/drm/nouveau/kms_smoke.py",
     "tools/tools/drm/nouveau/kms_completion_audit.py",
+    "tools/tools/drm/nouveau/kms_completion_preflight.py",
     "tools/tools/drm/nouveau/kms_static_audit.py",
 )
 

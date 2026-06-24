@@ -35,6 +35,7 @@ TARGET_PATTERNS = (
     "sys/dev/drm/include/drm/drm_lease.h",
     "tools/tools/drm/nouveau/kms_smoke.py",
     "tools/tools/drm/nouveau/kms_completion_audit.py",
+    "tools/tools/drm/nouveau/kms_completion_preflight.py",
     "tools/tools/drm/nouveau/kms_static_audit.py",
 )
 
