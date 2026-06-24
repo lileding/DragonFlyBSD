@@ -16,6 +16,9 @@ struct vmm_vcpu {
 	 * token_lifecycle.  vmm_vcpu helpers that inspect or mutate them are
 	 * called with that token held, except vmm_vcpu_start_all(), which
 	 * acquires the parent token around each short state transition.
+	 * Backend teardown follows the memory backing pattern: detach
+	 * own_mut_threads with the token held, then destroy backend state and
+	 * free the array after dropping the token.
 	 */
 	uint32_t	mut_count;		/* 0 = unset */
 	struct vmm_vcpu_thread *own_mut_threads;
@@ -32,7 +35,6 @@ struct vmm_vcpu_thread {
 	struct vmm_machine	*borrow_imm_machine;
 	struct thread		*borrow_mut_thread;
 	void			*own_mut_backend;
-	const struct vmm_launch *borrow_imm_launch;
 	uint32_t		 imm_id;
 	int			 imm_cpu;
 };
@@ -48,7 +50,11 @@ int	vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 void	vmm_vcpu_request_stop(struct vmm_vcpu *v);
 void	vmm_vcpu_request_run(struct vmm_vcpu *v);
 int	vmm_vcpu_has_active(const struct vmm_vcpu *v);
-int	vmm_vcpu_note_exit(struct vmm_vcpu *v);
-void	vmm_vcpu_uninit(struct vmm_vcpu *v);
+int	vmm_vcpu_note_exit(struct vmm_vcpu *v,
+	    struct vmm_vcpu_thread **threadsp);
+void	vmm_vcpu_uninit(struct vmm_vcpu *v,
+	    struct vmm_vcpu_thread **threadsp);
+void	vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads,
+	    uint32_t count);
 
 #endif /* VMM_VCPU_H */

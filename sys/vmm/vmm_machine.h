@@ -38,7 +38,8 @@ struct vmm_machine {
 	 * token_lifecycle protects all mut_ fields below and the mutable
 	 * fields of own_mut_vcpu/own_mut_mem/own_mut_loader while they are
 	 * reached through vmm_machine_* APIs.  It is not held across fork,
-	 * exec, memory preparation/release, vCPU thread creation, or uiomove.
+	 * exec, memory preparation/release, vCPU backend teardown, vCPU thread
+	 * creation, or uiomove.
 	 */
 	struct lwkt_token	token_lifecycle;
 	int		mut_desired_stopped;

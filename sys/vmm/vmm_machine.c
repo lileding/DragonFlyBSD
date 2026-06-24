@@ -86,16 +86,20 @@ void
 vmm_machine_uninit(struct vmm_machine *m)
 {
 	struct vmm_mem_backing *backing;
+	struct vmm_vcpu_thread *threads = NULL;
+	uint32_t thread_count;
 
 	vmm_machine_request_stopped(m, 1);
 	vmm_machine_lock(m);
+	thread_count = m->own_mut_vcpu.mut_count;
 	if (m->ref_mut_start_cred != NULL) {
 		crfree(m->ref_mut_start_cred);
 		m->ref_mut_start_cred = NULL;
 	}
-	vmm_vcpu_uninit(&m->own_mut_vcpu);
+	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 	backing = vmm_machine_detach_mem_locked(m);
 	vmm_machine_unlock(m);
+	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
 }
 
@@ -308,11 +312,14 @@ vmm_machine_vcpu_exited(struct vmm_machine *m)
 {
 	int last;
 	struct vmm_mem_backing *backing = NULL;
+	struct vmm_vcpu_thread *threads = NULL;
+	uint32_t thread_count;
 	int release_mem = 0;
 	int release_owner = 0;
 
 	vmm_machine_lock(m);
-	last = vmm_vcpu_note_exit(&m->own_mut_vcpu);
+	thread_count = m->own_mut_vcpu.mut_count;
+	last = vmm_vcpu_note_exit(&m->own_mut_vcpu, &threads);
 	if (last) {
 		if (m->mut_running) {
 			m->mut_running = 0;
@@ -326,6 +333,7 @@ vmm_machine_vcpu_exited(struct vmm_machine *m)
 		backing = vmm_machine_detach_mem_locked(m);
 	vmm_machine_unlock(m);
 
+	vmm_vcpu_release_threads(threads, thread_count);
 	if (release_mem)
 		vmm_mem_release_backing(backing);
 	if (release_owner)
