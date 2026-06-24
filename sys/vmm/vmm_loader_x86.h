@@ -14,6 +14,25 @@
 #define VMM_X64_NSEG	10
 #define VMM_GPA_RANGE_MAX 32
 
+#define VMM_X64_XCR0_X87		(1ULL << 0)
+#define VMM_X64_XCR0_SSE		(1ULL << 1)
+#define VMM_X64_XCR0_AVX		(1ULL << 2)
+#define VMM_X64_XCR0_BNDREGS		(1ULL << 3)
+#define VMM_X64_XCR0_BNDCSR		(1ULL << 4)
+#define VMM_X64_XCR0_OPMASK		(1ULL << 5)
+#define VMM_X64_XCR0_ZMM_HI256		(1ULL << 6)
+#define VMM_X64_XCR0_HI16_ZMM		(1ULL << 7)
+#define VMM_X64_XCR0_PKRU		(1ULL << 9)
+#define VMM_X64_XCR0_XTILE_CFG		(1ULL << 17)
+#define VMM_X64_XCR0_XTILE_DATA		(1ULL << 18)
+#define VMM_X64_XCR0_MPX		(VMM_X64_XCR0_BNDREGS | \
+					    VMM_X64_XCR0_BNDCSR)
+#define VMM_X64_XCR0_AVX512		(VMM_X64_XCR0_OPMASK | \
+					    VMM_X64_XCR0_ZMM_HI256 | \
+					    VMM_X64_XCR0_HI16_ZMM)
+#define VMM_X64_XCR0_XTILE		(VMM_X64_XCR0_XTILE_CFG | \
+					    VMM_X64_XCR0_XTILE_DATA)
+
 #define VMM_X64_GPR_RAX	0
 #define VMM_X64_GPR_RCX	1
 #define VMM_X64_GPR_RDX	2
@@ -97,5 +116,6 @@ struct vmm_launch {
 
 int	vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	    size_t cap, struct vmm_launch *launch);
+int	vmm_loader_x86_xcr0_valid(uint64_t xcr0);
 
 #endif /* VMM_LOADER_X86_H */

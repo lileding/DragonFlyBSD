@@ -382,7 +382,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
 		return EINVAL;
-	if (launch->imm_vcpu0.cr[VMM_X64_CR_XCR0] == 0 ||
+	if (!vmm_loader_x86_xcr0_valid(
+	    launch->imm_vcpu0.cr[VMM_X64_CR_XCR0]) ||
 	    (launch->imm_vcpu0.cr[VMM_X64_CR_XCR0] & ~npx_xcr0_mask) != 0)
 		return EINVAL;
 	*backendp = NULL;

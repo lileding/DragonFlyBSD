@@ -103,6 +103,33 @@ vmm_gpa_addr(uint64_t mem_size, uint64_t addr)
 	return addr < mem_size;
 }
 
+int
+vmm_loader_x86_xcr0_valid(uint64_t xcr0)
+{
+	uint64_t avx512;
+	uint64_t mpx;
+	uint64_t xtile;
+
+	if ((xcr0 & VMM_X64_XCR0_X87) == 0)
+		return 0;
+	if ((xcr0 & VMM_X64_XCR0_AVX) != 0 &&
+	    (xcr0 & VMM_X64_XCR0_SSE) == 0)
+		return 0;
+	mpx = xcr0 & VMM_X64_XCR0_MPX;
+	if (mpx != 0 && mpx != VMM_X64_XCR0_MPX)
+		return 0;
+	avx512 = xcr0 & VMM_X64_XCR0_AVX512;
+	if (avx512 != 0 &&
+	    (avx512 != VMM_X64_XCR0_AVX512 ||
+	     (xcr0 & VMM_X64_XCR0_AVX) == 0)) {
+		return 0;
+	}
+	xtile = xcr0 & VMM_X64_XCR0_XTILE;
+	if (xtile != 0 && xtile != VMM_X64_XCR0_XTILE)
+		return 0;
+	return 1;
+}
+
 static int
 vmm_loader_x86_validate_vcpu(uint64_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu)
@@ -116,6 +143,8 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 	if (!vmm_gpa_addr(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
 		return EINVAL;
 	if ((vcpu->cr[VMM_X64_CR_CR3] & PAGE_MASK) != 0)
+		return EINVAL;
+	if (!vmm_loader_x86_xcr0_valid(vcpu->cr[VMM_X64_CR_XCR0]))
 		return EINVAL;
 	if (!vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base))
 		return EINVAL;

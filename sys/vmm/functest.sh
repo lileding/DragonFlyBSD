@@ -62,6 +62,13 @@ cat > /tmp/vmmld_dummy.c <<'EOF_DUMMY'
 #define EFER_LME 0x100ULL
 #define EFER_LMA 0x400ULL
 #define XCR0_X87 1ULL
+#define XCR0_SSE 2ULL
+#define XCR0_AVX 4ULL
+#define XCR0_BNDREGS 8ULL
+#define XCR0_OPMASK 0x20ULL
+#define XCR0_ZMM_HI256 0x40ULL
+#define XCR0_HI16_ZMM 0x80ULL
+#define XCR0_XTILE_CFG 0x20000ULL
 #define SEG_S 0x10
 #define SEG_P 0x80
 #define SEG_L 0x200
@@ -94,7 +101,7 @@ static uint8_t *add(uint8_t *p, uint16_t type, uint16_t flags, const void *paylo
 	return p + total;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
 	struct stat ms, xs;
 	void *mem;
 	uint8_t *man, *p;
@@ -117,6 +124,12 @@ int main(void) {
 	memset(&v, 0, sizeof(v));
 	v.runnable = 1; v.gpr[4] = STACK; v.gpr[16] = ENTRY; v.gpr[17] = 2;
 	v.cr[0] = CR0_PE | CR0_NE | CR0_PG; v.cr[2] = PML4; v.cr[3] = CR4_PAE; v.cr[5] = XCR0_X87;
+	if (argc > 0 && strstr(argv[0], "badxcr0-no-x87") != NULL) v.cr[5] = XCR0_AVX;
+	if (argc > 0 && strstr(argv[0], "badxcr0-avx-no-sse") != NULL) v.cr[5] = XCR0_X87 | XCR0_AVX;
+	if (argc > 0 && strstr(argv[0], "badxcr0-mpx-half") != NULL) v.cr[5] = XCR0_X87 | XCR0_BNDREGS;
+	if (argc > 0 && strstr(argv[0], "badxcr0-avx512-half") != NULL) v.cr[5] = XCR0_X87 | XCR0_SSE | XCR0_AVX | XCR0_OPMASK;
+	if (argc > 0 && strstr(argv[0], "badxcr0-avx512-no-avx") != NULL) v.cr[5] = XCR0_X87 | XCR0_SSE | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+	if (argc > 0 && strstr(argv[0], "badxcr0-xtile-half") != NULL) v.cr[5] = XCR0_X87 | XCR0_XTILE_CFG;
 	v.msr[0] = EFER_LME | EFER_LMA; v.msr[9] = 0x0007040600070406ULL;
 	seg(&v.seg[0], 0, SEG_UNUSABLE, 0, 0);
 	seg(&v.seg[1], 0x08, 0xb | SEG_S | SEG_P | SEG_L | SEG_G, 0xffffffffU, 0);
@@ -142,6 +155,9 @@ int main(void) {
 }
 EOF_DUMMY
 cc -Wall -Wextra -Werror -std=c11 -O2 /tmp/vmmld_dummy.c -o /tmp/vmmld_dummy
+for xcr0case in no-x87 avx-no-sse mpx-half avx512-half avx512-no-avx xtile-half; do
+	cp /tmp/vmmld_dummy /tmp/vmmld_badxcr0-$xcr0case
+done
 printf 'x' > /tmp/noexec; chmod 644 /tmp/noexec
 printf '#!/bin/sh\nexit 0\n' > /tmp/no_manifest; chmod 755 /tmp/no_manifest
 printf '#!/bin/sh\necho start > /tmp/vmmld_sleep.probe\nsleep 30\necho done >> /tmp/vmmld_sleep.probe\n' > /tmp/vmmld_sleep; chmod 755 /tmp/vmmld_sleep
@@ -194,7 +210,23 @@ sleep 1
 ckeq "badld no started event" "$(cat $M/badld/events | grep -c '^started$')" "0"
 echo force > $M/badld/stopped
 
+for xcr0case in no-x87 avx-no-sse mpx-half avx512-half avx512-no-avx xtile-half; do
+	rm -f /tmp/vmmld_dummy.probe
+	mkdir $M/badxcr0-$xcr0case
+	echo 1 > $M/badxcr0-$xcr0case/vcpu
+	echo 2M > $M/badxcr0-$xcr0case/mem
+	echo /tmp/vmmld_badxcr0-$xcr0case > $M/badxcr0-$xcr0case/loader
+	cat $M/badxcr0-$xcr0case/events >/dev/null
+	rm $M/badxcr0-$xcr0case/stopped; ckok "rm stopped invalid xcr0 $xcr0case is declarative" $?
+	wait_file /tmp/vmmld_dummy.probe; ckok "badxcr0 $xcr0case loader ran" $?
+	sleep 1
+	ckeq "badxcr0 $xcr0case no started event" "$(cat $M/badxcr0-$xcr0case/events | grep -c '^started$')" "0"
+	echo force > $M/badxcr0-$xcr0case/stopped
+	rmdir $M/badxcr0-$xcr0case; ckok "rmdir badxcr0 $xcr0case" $?
+done
+
 cat $M/vm0/events >/dev/null
+rm -f /tmp/vmmld_dummy.probe
 rm $M/vm0/stopped; ckok "start vm0 (valid)" $?
 ckeq "rm returns with desired running" "$(ls $M/vm0 | grep -c '^stopped$')" "0"
 wait_file /tmp/vmmld_dummy.probe; ckok "vm0 worker produced probe" $?
