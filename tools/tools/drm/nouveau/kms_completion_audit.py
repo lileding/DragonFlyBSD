@@ -14,6 +14,11 @@ import re
 
 
 MODULES = ("drm", "nvgsp_570", "nvkm")
+WAYLAND_REPORTS = (
+    ("wayland_info", "wayland-info"),
+    ("wayland_hpd_smoke", "Wayland HPD smoke"),
+    ("xwayland", "XWayland"),
+)
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
@@ -163,6 +168,42 @@ def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
     return summary
 
 
+def check_standalone_report(out_dir: pathlib.Path, label: str,
+                            description: str, checks: list[dict]) -> dict:
+    check(out_dir.exists(), f"{label} evidence directory exists", checks)
+    summary_path = out_dir / "report_summary.json"
+    check(summary_path.exists(), f"{label} report_summary.json exists", checks)
+    if not summary_path.exists():
+        return {}
+
+    try:
+        summary = load_json(summary_path)
+    except (OSError, json.JSONDecodeError) as err:
+        check(False, f"{label} report_summary.json is readable: {err}", checks)
+        return {}
+
+    check(summary.get("passed") is True, f"{description} report passed", checks)
+    check(summary.get("fail_count") == 0,
+          f"{description} report fail_count is zero", checks)
+    check(summary.get("allow_missing_x11") is True,
+          f"{description} report is standalone", checks)
+
+    modules = summary.get("modules")
+    check(isinstance(modules, dict), f"{label} report has module summary", checks)
+    if isinstance(modules, dict):
+        for phase in ("before", "after"):
+            entries = modules.get(phase)
+            check(isinstance(entries, list),
+                  f"{label} report summary has {phase} modules", checks)
+            if isinstance(entries, list):
+                by_name = module_entry_map(entries)
+                for name in MODULES:
+                    check(name in by_name,
+                          f"{label} report summary {phase} has {name}", checks)
+
+    return summary
+
+
 def check_sync_gate(out_dir: pathlib.Path, phase: str,
                     checks: list[dict]) -> dict:
     check(out_dir.exists(), f"{phase} evidence directory exists", checks)
@@ -225,7 +266,9 @@ def check_static_audit(path: pathlib.Path, checks: list[dict]) -> dict:
 
 
 def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
-                                 pending_summary: dict) -> dict[str, dict]:
+                                 pending_summary: dict,
+                                 wayland_summaries: dict[str, dict]
+                                 ) -> dict[str, dict]:
     identity_sets: dict[str, dict] = {}
     full_modules = full_summary.get("modules")
     if isinstance(full_modules, dict):
@@ -242,6 +285,15 @@ def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
         if isinstance(entries, list):
             identity_sets[label] = module_identity_map(entries)
 
+    for label, summary in wayland_summaries.items():
+        modules = summary.get("modules")
+        if not isinstance(modules, dict):
+            continue
+        for phase in ("before", "after"):
+            entries = modules.get(phase)
+            if isinstance(entries, list):
+                identity_sets[f"{label}:{phase}"] = module_identity_map(entries)
+
     return identity_sets
 
 
@@ -253,12 +305,18 @@ def check_module_identity_consistency(identity_sets: dict[str, dict],
     if not isinstance(baseline, dict):
         return
 
-    for label in (
+    required_labels = (
         "full:x11",
         "full:after",
         "syncobj_transfer",
         "syncobj_pending_exec",
-    ):
+    ) + tuple(
+        f"{label}:{phase}"
+        for label, _description in WAYLAND_REPORTS
+        for phase in ("before", "after")
+    )
+
+    for label in required_labels:
         current = identity_sets.get(label)
         check(isinstance(current, dict) and len(current) == len(MODULES),
               f"module identity set {label} exists", checks)
@@ -271,7 +329,9 @@ def check_module_identity_consistency(identity_sets: dict[str, dict],
 
 
 def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
-                            pending_summary: dict) -> dict[str, dict]:
+                            pending_summary: dict,
+                            wayland_summaries: dict[str, dict]
+                            ) -> dict[str, dict]:
     git_sets: dict[str, dict] = {}
     full_git = full_summary.get("module_git")
     if isinstance(full_git, dict):
@@ -288,6 +348,15 @@ def collect_module_git_sets(full_summary: dict, transfer_summary: dict,
         if isinstance(git, dict) and git:
             git_sets[label] = git
 
+    for label, summary in wayland_summaries.items():
+        module_git_sets = summary.get("module_git")
+        if not isinstance(module_git_sets, dict):
+            continue
+        for phase in ("before", "after"):
+            git = module_git_sets.get(phase)
+            if isinstance(git, dict) and git:
+                git_sets[f"{label}:{phase}"] = git
+
     return git_sets
 
 
@@ -300,13 +369,19 @@ def check_module_git_consistency(static_summary: dict, git_sets: dict[str, dict]
     check(isinstance(static_head, str) and bool(re.fullmatch(r"[0-9a-f]{40}", static_head)),
           "static audit git head is available for runtime comparison", checks)
 
-    for label in (
+    required_labels = (
         "full:before",
         "full:x11",
         "full:after",
         "syncobj_transfer",
         "syncobj_pending_exec",
-    ):
+    ) + tuple(
+        f"{label}:{phase}"
+        for label, _description in WAYLAND_REPORTS
+        for phase in ("before", "after")
+    )
+
+    for label in required_labels:
         git = git_sets.get(label)
         check(isinstance(git, dict) and bool(git),
               f"module git set {label} exists", checks)
@@ -338,6 +413,12 @@ def main() -> int:
                         help="Directory from kms_smoke.py syncobj_transfer")
     parser.add_argument("--syncobj-pending-exec", required=True,
                         help="Directory from kms_smoke.py syncobj_pending_exec")
+    parser.add_argument("--wayland-info", required=True,
+                        help="Directory from kms_smoke.py wayland_info")
+    parser.add_argument("--wayland-hpd-smoke", required=True,
+                        help="Directory from kms_smoke.py wayland_hpd_smoke")
+    parser.add_argument("--xwayland", required=True,
+                        help="Directory from kms_smoke.py xwayland")
     parser.add_argument("--static-audit", required=True,
                         help="JSON summary from kms_static_audit.py --output")
     parser.add_argument("--output", default=None,
@@ -347,6 +428,11 @@ def main() -> int:
     full_dir = pathlib.Path(args.full_report)
     transfer_dir = pathlib.Path(args.syncobj_transfer)
     pending_dir = pathlib.Path(args.syncobj_pending_exec)
+    wayland_dirs = {
+        "wayland_info": pathlib.Path(args.wayland_info),
+        "wayland_hpd_smoke": pathlib.Path(args.wayland_hpd_smoke),
+        "xwayland": pathlib.Path(args.xwayland),
+    }
     static_audit_path = pathlib.Path(args.static_audit)
     output = (
         pathlib.Path(args.output)
@@ -359,16 +445,27 @@ def main() -> int:
     full_summary = check_full_report(full_dir, checks)
     transfer_summary = check_sync_gate(transfer_dir, "syncobj_transfer", checks)
     pending_summary = check_sync_gate(pending_dir, "syncobj_pending_exec", checks)
+    wayland_summaries = {
+        label: check_standalone_report(
+            wayland_dirs[label],
+            label,
+            description,
+            checks,
+        )
+        for label, description in WAYLAND_REPORTS
+    }
     identity_sets = collect_module_identity_sets(
         full_summary,
         transfer_summary,
         pending_summary,
+        wayland_summaries,
     )
     check_module_identity_consistency(identity_sets, checks)
     git_sets = collect_module_git_sets(
         full_summary,
         transfer_summary,
         pending_summary,
+        wayland_summaries,
     )
     check_module_git_consistency(static_audit_summary, git_sets, checks)
 
@@ -387,6 +484,13 @@ def main() -> int:
         },
         "syncobj_transfer": transfer_summary,
         "syncobj_pending_exec": pending_summary,
+        "wayland_reports": {
+            label: {
+                "out_dir": str(wayland_dirs[label]),
+                "report_summary": wayland_summaries[label],
+            }
+            for label, _description in WAYLAND_REPORTS
+        },
         "module_identity_sets": identity_sets,
         "module_git_sets": git_sets,
     }
