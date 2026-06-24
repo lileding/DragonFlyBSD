@@ -20,6 +20,7 @@ All output is written under /var/tmp so it survives reboot.
 
 import argparse
 import datetime as dt
+import hashlib
 import os
 import pathlib
 import re
@@ -258,6 +259,14 @@ def source_tree_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[4]
 
 
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as module_file:
+        for chunk in iter(lambda: module_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
     root = source_tree_root()
     path = out_dir / f"module_files.{phase}"
@@ -277,6 +286,12 @@ def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
                 out.write(f"ERROR {name} {module_path}: {err}\n")
                 ok = False
                 continue
+            try:
+                sha256 = file_sha256(module_path)
+            except OSError as err:
+                out.write(f"ERROR {name} {module_path}: sha256 {err}\n")
+                ok = False
+                continue
 
             mtime = dt.datetime.fromtimestamp(
                 stat.st_mtime,
@@ -284,7 +299,7 @@ def write_source_module_files(out_dir: pathlib.Path, phase: str) -> bool:
             ).isoformat()
             out.write(
                 f"{name} {module_path} size={stat.st_size} "
-                f"mtime_utc={mtime}\n"
+                f"mtime_utc={mtime} sha256={sha256}\n"
             )
     return ok
 
@@ -1247,7 +1262,7 @@ def report_module_files(out_dir: pathlib.Path, phase: str, emit) -> None:
         pattern = (
             rf"^{re.escape(name)}\s+"
             rf"{re.escape(str(source_tree_root() / relative_path))}\s+"
-            r"size=[1-9][0-9]*\s+mtime_utc="
+            r"size=[1-9][0-9]*\s+mtime_utc=\S+\s+sha256=[0-9a-f]{64}$"
         )
         emit(bool(re.search(pattern, text, re.M)),
              f"module_files.{phase} records {name} project module")
