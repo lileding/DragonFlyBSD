@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 
 #include "vmm_machine.h"
+#include "vmm_loader_x86.h"
 
 #define EV_CREATED	1
 #define EV_STARTED	2

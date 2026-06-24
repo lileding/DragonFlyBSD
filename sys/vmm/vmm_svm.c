@@ -16,7 +16,7 @@
 #include <vm/vm.h>
 #include <vm/pmap.h>
 
-#include "vmm_loader.h"
+#include "vmm_loader_x86.h"
 #include "vmm_machine.h"
 #include "vmm_mem.h"
 #include "vmm_svm.h"

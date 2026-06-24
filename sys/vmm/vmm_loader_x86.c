@@ -1,0 +1,243 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * x86 launch-manifest loader support.
+ *
+ * fd4 contains one page.  Multi-byte fields are little-endian native integer
+ * fields because the producer and consumer are both x86 DragonFly processes.
+ *
+ * Manifest page:
+ *
+ *   +0x00  struct vmm_manifest_header
+ *          +0x00 char     magic[8]       "VMMLD0\0\0"
+ *          +0x08 uint16_t abi_version    0
+ *          +0x0a uint16_t arch           1 = x64
+ *          +0x0c uint32_t header_size    sizeof(header)
+ *          +0x10 uint32_t total_size     header + records, <= PAGE_SIZE
+ *          +0x14 uint32_t record_count
+ *          +0x18 uint64_t mem_size       fd3 size
+ *          +0x20 uint32_t flags          0
+ *          +0x24 uint32_t reserved       0
+ *
+ *   +header_size
+ *          record[0]
+ *          record[1]
+ *          ...
+ *
+ * Record layout, repeated until total_size:
+ *
+ *   +0x00  struct vmm_manifest_record
+ *          +0x00 uint16_t type
+ *          +0x02 uint16_t flags          bit0 = mandatory
+ *          +0x04 uint32_t size           payload bytes
+ *   +0x08  uint8_t payload[size]
+ *          uint8_t zero_padding[]        record total is 8-byte aligned
+ *
+ * Mandatory type 1 payload, struct vmm_x64_vcpu_state:
+ *
+ *   +0x000 uint32_t vcpu_id              must be 0
+ *   +0x004 uint32_t flags                currently 0
+ *   +0x008 uint64_t runnable             must be 1
+ *   +0x010 uint64_t gpr[18]              RAX..RFLAGS
+ *   +0x0a0 uint64_t cr[6]                CR0,CR2,unused,CR3,CR4,XCR0
+ *   +0x0d0 uint64_t msr[11]              EFER..TSC
+ *   +0x128 struct vmm_x64_seg_state[10]  ES,CS,SS,DS,FS,GS,GDT,IDT,LDT,TR
+ *   +0x228 uint64_t intr_flags           currently 0
+ *
+ * Mandatory type 2 payload, struct vmm_gpa_range[]:
+ *
+ *   +0x00 uint64_t start
+ *   +0x08 uint64_t size
+ *   +0x10 uint32_t type
+ *   +0x14 uint32_t flags
+ */
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/systm.h>
+#include <sys/errno.h>
+#include <vm/vm.h>
+
+#include "vmm_loader_x86.h"
+
+#define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
+#define VMM_MANIFEST_ABI	0
+#define VMM_MANIFEST_ARCH_X64	1
+
+#define VMM_REC_X64_VCPU_STATE	1
+#define VMM_REC_GPA_RANGE	2
+#define VMM_REC_F_MANDATORY	1
+
+struct vmm_manifest_header {
+	char		magic[8];
+	uint16_t	abi_version;
+	uint16_t	arch;
+	uint32_t	header_size;
+	uint32_t	total_size;
+	uint32_t	record_count;
+	uint64_t	mem_size;
+	uint32_t	flags;
+	uint32_t	reserved;
+} __packed;
+
+struct vmm_manifest_record {
+	uint16_t	type;
+	uint16_t	flags;
+	uint32_t	size;
+} __packed;
+
+static size_t
+vmm_align8(size_t v)
+{
+	return (v + 7) & ~(size_t)7;
+}
+
+static int
+vmm_gpa_inside(uint64_t mem_size, uint64_t start, uint64_t size)
+{
+	return size != 0 && start < mem_size && size <= mem_size - start;
+}
+
+static int
+vmm_gpa_addr(uint64_t mem_size, uint64_t addr)
+{
+	return addr < mem_size;
+}
+
+static int
+vmm_loader_x86_validate_vcpu(uint64_t mem_size,
+    const struct vmm_x64_vcpu_state *vcpu)
+{
+	if (vcpu->vcpu_id != 0 || vcpu->runnable != 1)
+		return EINVAL;
+	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RIP]))
+		return EINVAL;
+	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RSP]))
+		return EINVAL;
+	if (!vmm_gpa_addr(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
+		return EINVAL;
+	if ((vcpu->cr[VMM_X64_CR_CR3] & PAGE_MASK) != 0)
+		return EINVAL;
+	if (!vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base))
+		return EINVAL;
+	if (vcpu->seg[VMM_X64_SEG_IDT].limit != 0 &&
+	    !vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_IDT].base))
+		return EINVAL;
+	if (vcpu->intr_flags != 0)
+		return EINVAL;
+	return 0;
+}
+
+static int
+vmm_loader_x86_validate_ranges(uint64_t mem_size, const uint8_t *payload,
+    uint32_t size, struct vmm_launch *launch)
+{
+	const struct vmm_gpa_range *range;
+	uint32_t i, count;
+
+	if (size == 0 || (size % sizeof(*range)) != 0)
+		return EINVAL;
+	range = (const struct vmm_gpa_range *)payload;
+	count = size / sizeof(*range);
+	if (count > VMM_GPA_RANGE_MAX)
+		return EINVAL;
+	for (i = 0; i < count; i++) {
+		if (!vmm_gpa_inside(mem_size, range[i].start, range[i].size))
+			return EINVAL;
+	}
+	if (launch != NULL) {
+		bcopy(range, launch->imm_ranges, sizeof(*range) * count);
+		launch->imm_range_count = count;
+	}
+	return 0;
+}
+
+int
+vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
+    size_t cap, struct vmm_launch *launch)
+{
+	struct vmm_manifest_header hdr;
+	struct vmm_manifest_record rec;
+	size_t off;
+	uint32_t records = 0;
+	int have_vcpu = 0;
+	int have_range = 0;
+	int error;
+
+	if (launch != NULL)
+		bzero(launch, sizeof(*launch));
+	if (cap < sizeof(hdr))
+		return EINVAL;
+	bcopy(buf, &hdr, sizeof(hdr));
+	if (bcmp(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic)) != 0 ||
+	    hdr.abi_version != VMM_MANIFEST_ABI ||
+	    hdr.arch != VMM_MANIFEST_ARCH_X64 ||
+	    hdr.header_size != sizeof(hdr) ||
+	    hdr.total_size < hdr.header_size ||
+	    hdr.total_size > cap ||
+	    hdr.mem_size != mem_size ||
+	    hdr.flags != 0 ||
+	    hdr.reserved != 0)
+		return EINVAL;
+
+	off = hdr.header_size;
+	while (off < hdr.total_size) {
+		const uint8_t *payload;
+		size_t next;
+
+		if (hdr.total_size - off < sizeof(rec)) {
+			error = EINVAL;
+			return error;
+		}
+		bcopy(buf + off, &rec, sizeof(rec));
+		next = off + vmm_align8(sizeof(rec) + rec.size);
+		if (next < off || next > hdr.total_size ||
+		    off + sizeof(rec) + rec.size > hdr.total_size) {
+			error = EINVAL;
+			return error;
+		}
+		payload = buf + off + sizeof(rec);
+		switch (rec.type) {
+		case VMM_REC_X64_VCPU_STATE:
+			if ((rec.flags & VMM_REC_F_MANDATORY) == 0 ||
+			    rec.size != sizeof(struct vmm_x64_vcpu_state) ||
+			    have_vcpu) {
+				error = EINVAL;
+				return error;
+			}
+			error = vmm_loader_x86_validate_vcpu(mem_size,
+			    (const struct vmm_x64_vcpu_state *)payload);
+			if (error)
+				return error;
+			if (launch != NULL) {
+				bcopy(payload, &launch->imm_vcpu0,
+				    sizeof(launch->imm_vcpu0));
+			}
+			have_vcpu = 1;
+			break;
+		case VMM_REC_GPA_RANGE:
+			if ((rec.flags & VMM_REC_F_MANDATORY) == 0) {
+				error = EINVAL;
+				return error;
+			}
+			error = vmm_loader_x86_validate_ranges(mem_size,
+			    payload, rec.size, launch);
+			if (error)
+				return error;
+			have_range = 1;
+			break;
+		default:
+			if (rec.flags & VMM_REC_F_MANDATORY) {
+				error = EINVAL;
+				return error;
+			}
+			break;
+		}
+		records++;
+		off = next;
+	}
+	if (records != hdr.record_count || !have_vcpu || !have_range)
+		return EINVAL;
+	if (launch != NULL)
+		launch->imm_mem_size = mem_size;
+	return 0;
+}
