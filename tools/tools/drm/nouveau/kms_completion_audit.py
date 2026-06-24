@@ -14,6 +14,16 @@ import re
 
 
 MODULES = ("drm", "nvgsp_570", "nvkm")
+STATIC_AUDIT_REQUIRED_FILES = (
+    "sys/dev/drm/drm_lease.c",
+    "sys/dev/drm/include/drm/drm_lease.h",
+    "sys/dev/drm/nouveau/nvkm_drm_kms.c",
+    "sys/dev/drm/nouveau/nvkm_gsp_disp.c",
+    "sys/dev/drm/nouveau/dispnv50/nvkm_dispnv50_bridge.c",
+    "tools/tools/drm/nouveau/kms_smoke.py",
+    "tools/tools/drm/nouveau/kms_completion_audit.py",
+    "tools/tools/drm/nouveau/kms_static_audit.py",
+)
 
 
 def read_text(path: pathlib.Path) -> str:
@@ -151,6 +161,40 @@ def check_sync_gate(out_dir: pathlib.Path, phase: str,
     }
 
 
+def check_static_audit(path: pathlib.Path, checks: list[dict]) -> dict:
+    check(path.exists(), "static audit summary exists", checks)
+    if not path.exists():
+        return {"path": str(path)}
+
+    try:
+        summary = load_json(path)
+    except (OSError, json.JSONDecodeError) as err:
+        check(False, f"static audit summary is readable: {err}", checks)
+        return {"path": str(path)}
+
+    check(summary.get("passed") is True, "static audit passed", checks)
+    check(summary.get("fail_count") == 0,
+          "static audit fail_count is zero", checks)
+
+    files = summary.get("files")
+    check(isinstance(files, list) and bool(files),
+          "static audit file summary is non-empty", checks)
+    if isinstance(files, list):
+        by_path = {
+            item.get("path"): item
+            for item in files
+            if isinstance(item, dict)
+        }
+        for required_path in STATIC_AUDIT_REQUIRED_FILES:
+            check(required_path in by_path,
+                  f"static audit covers {required_path}", checks)
+
+    return {
+        "path": str(path),
+        "summary": summary,
+    }
+
+
 def collect_module_identity_sets(full_summary: dict, transfer_summary: dict,
                                  pending_summary: dict) -> dict[str, dict]:
     identity_sets: dict[str, dict] = {}
@@ -213,6 +257,8 @@ def main() -> int:
                         help="Directory from kms_smoke.py syncobj_transfer")
     parser.add_argument("--syncobj-pending-exec", required=True,
                         help="Directory from kms_smoke.py syncobj_pending_exec")
+    parser.add_argument("--static-audit", required=True,
+                        help="JSON summary from kms_static_audit.py --output")
     parser.add_argument("--output", default=None,
                         help="Output JSON path; defaults to completion_summary.json in the full report directory")
     args = parser.parse_args()
@@ -220,6 +266,7 @@ def main() -> int:
     full_dir = pathlib.Path(args.full_report)
     transfer_dir = pathlib.Path(args.syncobj_transfer)
     pending_dir = pathlib.Path(args.syncobj_pending_exec)
+    static_audit_path = pathlib.Path(args.static_audit)
     output = (
         pathlib.Path(args.output)
         if args.output
@@ -227,6 +274,7 @@ def main() -> int:
     )
 
     checks: list[dict] = []
+    static_audit_summary = check_static_audit(static_audit_path, checks)
     full_summary = check_full_report(full_dir, checks)
     transfer_summary = check_sync_gate(transfer_dir, "syncobj_transfer", checks)
     pending_summary = check_sync_gate(pending_dir, "syncobj_pending_exec", checks)
@@ -245,6 +293,7 @@ def main() -> int:
         "fail_count": sum(1 for item in checks if not item["ok"]),
         "failures": [item["text"] for item in checks if not item["ok"]],
         "checks": checks,
+        "static_audit": static_audit_summary,
         "full_report": {
             "out_dir": str(full_dir),
             "report_summary": full_summary,
