@@ -768,6 +768,33 @@ def check_module_set(out_dir: pathlib.Path, phase: str,
     return entries
 
 
+def check_report_module_files(out_dir: pathlib.Path, phase: str, label: str,
+                              summary_modules: object,
+                              summary_module_git: object,
+                              checks: list[dict]) -> None:
+    raw_entries = check_module_set(out_dir, phase, checks)
+    raw_identity = module_identity_map(raw_entries)
+
+    check(isinstance(summary_modules, list),
+          f"{label} summary has {phase} module list", checks)
+    if isinstance(summary_modules, list):
+        summary_identity = module_identity_map(summary_modules)
+        for name in MODULES:
+            check(raw_identity.get(name) == summary_identity.get(name),
+                  f"{label} raw {phase} {name} module identity matches summary",
+                  checks)
+
+    raw_git = module_git(out_dir, phase)
+    check(bool(raw_git),
+          f"{label} raw {phase} module git identity exists", checks)
+    check(isinstance(summary_module_git, dict),
+          f"{label} summary has {phase} module git identity", checks)
+    if raw_git and isinstance(summary_module_git, dict):
+        check(raw_git == summary_module_git,
+              f"{label} raw {phase} module git identity matches summary",
+              checks)
+
+
 def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
     summary_path = out_dir / "report_summary.json"
     check(summary_path.exists(), "full report_summary.json exists", checks)
@@ -809,6 +836,9 @@ def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
 
     modules = summary.get("modules")
     check(isinstance(modules, dict), "full report has module summary", checks)
+    module_git_summary = summary.get("module_git")
+    check(isinstance(module_git_summary, dict),
+          "full report has module git summary", checks)
     if isinstance(modules, dict):
         for phase in ("before", "x11", "after"):
             entries = modules.get(phase)
@@ -819,6 +849,18 @@ def check_full_report(out_dir: pathlib.Path, checks: list[dict]) -> dict:
                 for name in MODULES:
                     check(name in by_name,
                           f"full report summary {phase} has {name}", checks)
+            check_report_module_files(
+                out_dir,
+                phase,
+                "full report",
+                entries,
+                (
+                    module_git_summary.get(phase)
+                    if isinstance(module_git_summary, dict)
+                    else None
+                ),
+                checks,
+            )
 
     return summary
 
@@ -855,6 +897,9 @@ def check_standalone_report(out_dir: pathlib.Path, label: str,
 
     modules = summary.get("modules")
     check(isinstance(modules, dict), f"{label} report has module summary", checks)
+    module_git_summary = summary.get("module_git")
+    check(isinstance(module_git_summary, dict),
+          f"{label} report has module git summary", checks)
     if isinstance(modules, dict):
         for phase in ("before", "after"):
             entries = modules.get(phase)
@@ -865,6 +910,18 @@ def check_standalone_report(out_dir: pathlib.Path, label: str,
                 for name in MODULES:
                     check(name in by_name,
                           f"{label} report summary {phase} has {name}", checks)
+            check_report_module_files(
+                out_dir,
+                phase,
+                label,
+                entries,
+                (
+                    module_git_summary.get(phase)
+                    if isinstance(module_git_summary, dict)
+                    else None
+                ),
+                checks,
+            )
 
     report_checks = summary.get("checks")
     check(isinstance(report_checks, list), f"{label} report has check list", checks)
