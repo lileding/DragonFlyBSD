@@ -799,6 +799,7 @@ struct drm_syncobj_timeline_wait {
 	__u64 deadline_nsec;
 };
 
+#define DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED (1 << 0)
 struct drm_syncobj_timeline_array {
 	__u64 handles;
 	__u64 points;
