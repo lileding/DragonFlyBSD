@@ -644,12 +644,19 @@ def check(ok: bool, text: str, checks: list[dict]) -> None:
     print(("PASS " if ok else "FAIL ") + text)
 
 
+def non_empty_file(path: pathlib.Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def check_required_files(out_dir: pathlib.Path, label: str,
                          filenames: tuple[str, ...],
                          checks: list[dict]) -> None:
     for filename in filenames:
-        check((out_dir / filename).exists(),
-              f"{label} raw evidence has {filename}",
+        check(non_empty_file(out_dir / filename),
+              f"{label} raw evidence has non-empty {filename}",
               checks)
 
 
@@ -657,8 +664,8 @@ def check_required_globs(out_dir: pathlib.Path, label: str,
                          patterns: tuple[tuple[str, str], ...],
                          checks: list[dict]) -> None:
     for description, pattern in patterns:
-        check(any(out_dir.glob(pattern)),
-              f"{label} raw evidence has {description}",
+        check(any(non_empty_file(path) for path in out_dir.glob(pattern)),
+              f"{label} raw evidence has non-empty {description}",
               checks)
 
 
