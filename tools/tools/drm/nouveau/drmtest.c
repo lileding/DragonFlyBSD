@@ -10096,6 +10096,42 @@ run_syncobj_transfer_only(void)
 	return failures == 0 ? 0 : 1;
 }
 
+/*
+ * run_syncobj_pending_exec_only()
+ *
+ * Ownership:
+ *   Owns a temporary card0 DRM fd and closes it before returning.  The pending
+ *   EXEC probe owns and releases all syncobj, channel, and sync_file handles it
+ *   creates.
+ *
+ * Lifetime:
+ *   The card0 fd stays open for the whole pending EXEC transfer probe so the
+ *   channel and its timeline fence remain valid while the transfer destination
+ *   is exported and polled.
+ *
+ * Threading:
+ *   Single-threaded userspace probe.  It submits one nvkm EXEC chain and checks
+ *   that transfer WAIT_FOR_SUBMIT copies the pending fence without waiting for
+ *   the GPU to signal it.
+ */
+static int
+run_syncobj_pending_exec_only(void)
+{
+	int fd;
+
+	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		perror("open card0 for pending EXEC syncobj transfer");
+		return 1;
+	}
+
+	printf("sync-pending-exec node=/dev/dri/card0\n");
+	check_syncobj_transfer_pending_exec_contract(fd);
+	check(close(fd) == 0,
+	    "close succeeds for pending EXEC syncobj transfer DRM fd");
+	return failures == 0 ? 0 : 1;
+}
+
 int
 main(void)
 {
@@ -10108,6 +10144,8 @@ main(void)
 
 	if (getenv("NVKM_DRMTEST_SYNC_ONLY") != NULL)
 		return run_syncobj_transfer_only();
+	if (getenv("NVKM_DRMTEST_SYNC_PENDING_EXEC_ONLY") != NULL)
+		return run_syncobj_pending_exec_only();
 
 	fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
