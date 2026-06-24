@@ -6702,8 +6702,8 @@ mode_timing_is_sane(const drmModeModeInfo *mode)
 }
 
 static bool
-find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
-    int fd, int crtc_index, uint32_t *plane_id_out)
+find_plane_for_crtc_index(drmModePlaneResPtr plane_resources, int fd,
+    int crtc_index, int plane_type, uint32_t *plane_id_out)
 {
 	drmModePlanePtr plane;
 	uint32_t crtc_bit;
@@ -6717,8 +6717,7 @@ find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
 		plane = drmModeGetPlane(fd, plane_resources->planes[i]);
 		if (plane == NULL)
 			continue;
-		if (get_plane_type(fd, plane->plane_id) ==
-		    DRM_PLANE_TYPE_PRIMARY &&
+		if (get_plane_type(fd, plane->plane_id) == plane_type &&
 		    (plane->possible_crtcs & crtc_bit) != 0) {
 			*plane_id_out = plane->plane_id;
 			found = true;
@@ -6729,6 +6728,22 @@ find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
 	}
 
 	return found;
+}
+
+static bool
+find_primary_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
+    int fd, int crtc_index, uint32_t *plane_id_out)
+{
+	return find_plane_for_crtc_index(plane_resources, fd, crtc_index,
+	    DRM_PLANE_TYPE_PRIMARY, plane_id_out);
+}
+
+static bool
+find_cursor_plane_for_crtc_index(drmModePlaneResPtr plane_resources,
+    int fd, int crtc_index, uint32_t *plane_id_out)
+{
+	return find_plane_for_crtc_index(plane_resources, fd, crtc_index,
+	    DRM_PLANE_TYPE_CURSOR, plane_id_out);
 }
 
 /*
@@ -7185,7 +7200,7 @@ check_drm_lease_atomic_unleased_connector(int owner_fd, int lease_fd,
 
 static void
 check_drm_lease_non_universal_planes(int fd, uint32_t connector_id,
-    uint32_t crtc_id, uint32_t primary_plane_id)
+    uint32_t crtc_id, uint32_t primary_plane_id, uint32_t cursor_plane_id)
 {
 	drmModePlaneResPtr lease_planes;
 	uint32_t get_ids[32];
@@ -7214,6 +7229,9 @@ check_drm_lease_non_universal_planes(int fd, uint32_t connector_id,
 			check(id_in_list(lease_planes->planes,
 			    (int)lease_planes->count_planes, primary_plane_id),
 			    "DRM non-universal lease exposes implicit primary plane");
+			check(id_in_list(lease_planes->planes,
+			    (int)lease_planes->count_planes, cursor_plane_id),
+			    "DRM non-universal lease exposes implicit cursor plane");
 			drmModeFreePlaneResources(lease_planes);
 		}
 		if (drm_lease_get_objects(lease_fd, get_ids,
@@ -7222,6 +7240,9 @@ check_drm_lease_non_universal_planes(int fd, uint32_t connector_id,
 			check(id_in_list(get_ids, (int)get_count,
 			    primary_plane_id),
 			    "DRM non-universal lease GET_LEASE returns implicit primary plane");
+			check(id_in_list(get_ids, (int)get_count,
+			    cursor_plane_id),
+			    "DRM non-universal lease GET_LEASE returns implicit cursor plane");
 		}
 		check(close(lease_fd) == 0,
 		    "close non-universal DRM lease fd succeeds");
@@ -7401,9 +7422,9 @@ check_drm_lease_plane_filter(int lease_fd, uint32_t plane_id,
  *   blob created here is closed or released before return.
  *
  * Lifetime:
- *   The probe is valid only while the current active connector/CRTC/primary
- *   plane route remains stable.  It revokes its own lease before returning so
- *   later display probes keep the same owner-visible object graph.
+ *   The probe is valid only while the current active connector/CRTC and
+ *   primary/cursor plane route remain stable.  It revokes its own lease before
+ *   returning so later display probes keep the same owner-visible object graph.
  *
  * Threading:
  *   Single-threaded KMS UAPI probe.  Kernel-side lease tree updates are
@@ -7438,6 +7459,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	uint32_t owner_get_ids[4096];
 	uint32_t owner_get_count = 0;
 	uint32_t owner_get_visible_count = 0;
+	uint32_t cursor_plane_id = 0;
 	uint32_t primary_plane_id = 0;
 	uint32_t second_lessee_id = 0;
 	uint32_t third_lessee_id = 0;
@@ -7471,8 +7493,11 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	check(find_primary_plane_for_crtc_index(plane_resources, fd,
 	    (int)active_crtc_index, &primary_plane_id),
 	    "DRM lease found primary plane for active CRTC");
+	check(find_cursor_plane_for_crtc_index(plane_resources, fd,
+	    (int)active_crtc_index, &cursor_plane_id),
+	    "DRM lease found cursor plane for active CRTC");
 	drmModeFreePlaneResources(plane_resources);
-	if (primary_plane_id == 0)
+	if (primary_plane_id == 0 || cursor_plane_id == 0)
 		return;
 
 	for (int i = 0; i < resources->count_connectors; i++) {
@@ -7531,7 +7556,7 @@ check_drm_lease_contract(int fd, const drmModeRes *resources,
 	}
 
 	check_drm_lease_non_universal_planes(fd, connector_id,
-	    active_crtc_id, primary_plane_id);
+	    active_crtc_id, primary_plane_id, cursor_plane_id);
 
 	lease_ids[0] = connector_id;
 	lease_ids[1] = active_crtc_id;
