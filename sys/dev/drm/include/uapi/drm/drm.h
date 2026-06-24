@@ -766,6 +766,7 @@ struct drm_syncobj_transfer {
 #define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL (1 << 0)
 #define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT (1 << 1)
 #define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE (1 << 2)
+#define DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE (1 << 3)
 struct drm_syncobj_wait {
 	__u64 handles;
 	/* absolute timeout */
@@ -774,6 +775,8 @@ struct drm_syncobj_wait {
 	__u32 flags;
 	__u32 first_signaled; /* only valid when not waiting all */
 	__u32 pad;
+	/* absolute CLOCK_MONOTONIC deadline hint */
+	__u64 deadline_nsec;
 };
 
 struct drm_syncobj_array {
@@ -792,6 +795,8 @@ struct drm_syncobj_timeline_wait {
 	__u32 flags;
 	__u32 first_signaled; /* only valid when not waiting all */
 	__u32 pad;
+	/* absolute CLOCK_MONOTONIC deadline hint */
+	__u64 deadline_nsec;
 };
 
 struct drm_syncobj_timeline_array {
