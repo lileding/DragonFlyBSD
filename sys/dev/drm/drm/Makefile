@@ -129,3 +129,7 @@ KCFLAGS+= -DKBUILD_MODNAME=\"${KMOD}\"
 # KCFLAGS+= -DDRM_DEBUG=2
 
 .include <bsd.kmod.mk>
+
+# A clean parallel module build may otherwise start compiling objects while
+# kern.fwd.mk is still creating <machine/*.h> forwarding headers.
+${OBJS}: ${FORWARD_HEADERS_COOKIE}
