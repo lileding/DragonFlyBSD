@@ -22,6 +22,7 @@ COMMANDS = (
     "doas",
     "glxgears",
     "glxinfo",
+    "glmark2-wayland",
     "pkg-config",
     "startx",
     "sway",
@@ -158,6 +159,7 @@ def shell_commands(root: pathlib.Path) -> dict:
             f"{smoke} syncobj_pending_exec",
             f"{smoke} wayland_info",
             f"{smoke} wayland_hpd_smoke",
+            f"{smoke} wayland_glmark",
             f"{smoke} xwayland",
         ],
         "completion_template": (
@@ -169,6 +171,7 @@ def shell_commands(root: pathlib.Path) -> dict:
             "--syncobj-pending-exec <syncobj-pending-exec-dir> "
             "--wayland-info <wayland-info-dir> "
             "--wayland-hpd-smoke <wayland-hpd-smoke-dir> "
+            "--wayland-glmark <wayland-glmark-dir> "
             "--xwayland <xwayland-dir>"
         ),
     }

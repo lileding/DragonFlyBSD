@@ -19,6 +19,7 @@ MODULES = ("drm", "nvgsp_570", "nvkm")
 WAYLAND_REPORTS = (
     ("wayland_info", "wayland-info"),
     ("wayland_hpd_smoke", "Wayland HPD smoke"),
+    ("wayland_glmark", "Wayland glmark2"),
     ("xwayland", "XWayland"),
 )
 WAYLAND_REQUIRED_CHECKS = {
@@ -44,6 +45,26 @@ WAYLAND_REQUIRED_CHECKS = {
         ("no auto-KMS while Wayland owns master",
          r"^wayland hotplug_auto_kms_count HPD delta=0$"),
         ("user scanout preserved", r"^wayland HPD kept user scanout=1$"),
+    ),
+    "wayland_glmark": (
+        ("nouveau DRM backend", r"^Wayland log uses nouveau DRM backend$"),
+        ("atomic DRM", r"^Wayland log uses atomic DRM interface$"),
+        ("Wayland compositor clean exit", r"^Wayland compositor rc=0$"),
+        ("glmark2 command",
+         r"^glmark2-wayland controlled shutdown rc=(0|137|143)$"),
+        ("glmark2 started", r"^glmark2-wayland started$"),
+        ("glmark2 zink/NVK renderer", r"^glmark2-wayland uses zink/NVK$"),
+        ("glmark2 did not crash", r"^glmark2-wayland did not crash$"),
+        ("glmark2 present succeeds",
+         r"^glmark2-wayland does not fail QueuePresentKHR$"),
+        ("Wayland buffer attach",
+         r"^glmark2-wayland attaches a Wayland buffer$"),
+        ("Wayland damage", r"^glmark2-wayland damages a Wayland surface$"),
+        ("Wayland commit", r"^glmark2-wayland commits a Wayland surface$"),
+        ("Wayland acquire or implicit release",
+         r"^(glmark2-wayland sets explicit acquire point|glmark2-wayland receives wl_buffer release)$"),
+        ("Wayland release or implicit release",
+         r"^(glmark2-wayland sets explicit release point|glmark2-wayland receives wl_buffer release)$"),
     ),
     "xwayland": (
         ("nouveau DRM backend", r"^Wayland log uses nouveau DRM backend$"),
@@ -965,6 +986,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
         "--syncobj-pending-exec", str(pending_dir),
         "--wayland-info", str(wayland_dirs["wayland_info"]),
         "--wayland-hpd-smoke", str(wayland_dirs["wayland_hpd_smoke"]),
+        "--wayland-glmark", str(wayland_dirs["wayland_glmark"]),
         "--xwayland", str(wayland_dirs["xwayland"]),
         "--output", str(output),
     ]
@@ -977,6 +999,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
             "syncobj_pending_exec",
             "wayland_info",
             "wayland_hpd_smoke",
+            "wayland_glmark",
             "xwayland",
         ],
         "paths": {
@@ -987,6 +1010,7 @@ def completion_inputs(script_path: pathlib.Path, static_audit_path: pathlib.Path
             "syncobj_pending_exec": str(pending_dir),
             "wayland_info": str(wayland_dirs["wayland_info"]),
             "wayland_hpd_smoke": str(wayland_dirs["wayland_hpd_smoke"]),
+            "wayland_glmark": str(wayland_dirs["wayland_glmark"]),
             "xwayland": str(wayland_dirs["xwayland"]),
             "output": str(output),
         },
@@ -1009,6 +1033,8 @@ def main() -> int:
                         help="Directory from kms_smoke.py wayland_info")
     parser.add_argument("--wayland-hpd-smoke", required=True,
                         help="Directory from kms_smoke.py wayland_hpd_smoke")
+    parser.add_argument("--wayland-glmark", required=True,
+                        help="Directory from kms_smoke.py wayland_glmark")
     parser.add_argument("--xwayland", required=True,
                         help="Directory from kms_smoke.py xwayland")
     parser.add_argument("--static-audit", required=True,
@@ -1025,6 +1051,7 @@ def main() -> int:
     wayland_dirs = {
         "wayland_info": pathlib.Path(args.wayland_info),
         "wayland_hpd_smoke": pathlib.Path(args.wayland_hpd_smoke),
+        "wayland_glmark": pathlib.Path(args.wayland_glmark),
         "xwayland": pathlib.Path(args.xwayland),
     }
     static_audit_path = pathlib.Path(args.static_audit)
