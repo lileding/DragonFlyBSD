@@ -21,8 +21,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic pm64 hlt loop"
-SELF_EXIT_MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic pm64"
+MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 hlt loop"
+SELF_EXIT_MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64"
 
 LOADED=0
 MOUNTED=0
@@ -314,6 +314,10 @@ check_console()
 		;;
 	x2apic)
 		wait_console "$(mach "$mode")/console" 'dfvmm-x2apic-ok' ||
+		    fail "$mode console output"
+		;;
+	cachetlb)
+		wait_console "$(mach "$mode")/console" 'dfvmm-cachetlb-ok' ||
 		    fail "$mode console output"
 		;;
 	pm64)

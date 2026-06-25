@@ -499,6 +499,27 @@ guest_x2apic_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_cachetlb_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t setup[] = {
+	    0x0f, 0x08,		/* invd */
+	    0x0f, 0x09,		/* wbinvd */
+	    0x31, 0xc0,		/* xor eax,eax */
+	    0x0f, 0x01, 0x38	/* invlpg (%rax) */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-cachetlb-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, setup, sizeof(setup));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_pm64_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t bootstrap[] = {
@@ -598,6 +619,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_ioapic_code(code, cap);
 	} else if (strcmp(mode, "x2apic") == 0) {
 		return guest_x2apic_code(code, cap);
+	} else if (strcmp(mode, "cachetlb") == 0) {
+		return guest_cachetlb_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
 		return guest_pm64_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
@@ -766,7 +789,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|pm64|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

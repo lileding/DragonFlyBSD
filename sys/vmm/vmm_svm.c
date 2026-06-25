@@ -69,6 +69,7 @@
 #define VMM_SVM_CTRL_INTERCEPT_CLGI	(1U << 5)
 #define VMM_SVM_CTRL_INTERCEPT_SKINIT	(1U << 6)
 #define VMM_SVM_CTRL_INTERCEPT_RDTSCP	(1U << 7)
+#define VMM_SVM_CTRL_INTERCEPT_WBINVD	(1U << 9)
 #define VMM_SVM_CTRL_INTERCEPT_MONITOR	(1U << 10)
 #define VMM_SVM_CTRL_INTERCEPT_MWAIT	(1U << 11)
 #define VMM_SVM_CTRL_INTERCEPT_MWAIT_ARMED (1U << 12)
@@ -91,21 +92,26 @@
 #define VMM_SVM_EVENTINJ_TYPE_SHIFT	8
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
 
-#define VMM_SVM_EXIT_RDTSC		0x06eULL
-#define VMM_SVM_EXIT_PAUSE		0x077ULL
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
+#define VMM_SVM_EXIT_RDTSC		0x06eULL
 #define VMM_SVM_EXIT_CPUID		0x072ULL
+#define VMM_SVM_EXIT_INVD		0x076ULL
+#define VMM_SVM_EXIT_PAUSE		0x077ULL
 #define VMM_SVM_EXIT_HLT		0x078ULL
+#define VMM_SVM_EXIT_INVLPG		0x079ULL
+#define VMM_SVM_EXIT_INVLPGA		0x07aULL
 #define VMM_SVM_EXIT_IOIO		0x07bULL
 #define VMM_SVM_EXIT_MSR		0x07cULL
 #define VMM_SVM_EXIT_SHUTDOWN		0x07fULL
 #define VMM_SVM_EXIT_VMMCALL		0x081ULL
 #define VMM_SVM_EXIT_RDTSCP		0x087ULL
+#define VMM_SVM_EXIT_WBINVD		0x089ULL
 #define VMM_SVM_EXIT_MONITOR		0x08aULL
 #define VMM_SVM_EXIT_MWAIT		0x08bULL
 #define VMM_SVM_EXIT_MWAIT_COND	0x08cULL
 #define VMM_SVM_EXIT_XSETBV		0x08dULL
+#define VMM_SVM_EXIT_INVLPGB		0x0a0ULL
 #define VMM_SVM_EXIT_NPF		0x400ULL
 
 #define VMM_SVM_IOIO_IN		(1ULL << 0)
@@ -521,6 +527,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_CLGI |
 	    VMM_SVM_CTRL_INTERCEPT_SKINIT |
 	    VMM_SVM_CTRL_INTERCEPT_RDTSCP |
+	    VMM_SVM_CTRL_INTERCEPT_WBINVD |
 	    VMM_SVM_CTRL_INTERCEPT_MONITOR |
 	    VMM_SVM_CTRL_INTERCEPT_MWAIT |
 	    VMM_SVM_CTRL_INTERCEPT_MWAIT_ARMED |
@@ -1348,6 +1355,25 @@ vmm_svm_handle_rdtsc(struct vmm_svm_backend *svm, int with_aux)
 	vmm_svm_advance_rip(svm->own_mut_vmcb);
 }
 
+static void
+vmm_svm_handle_guest_cache_op(struct vmm_svm_backend *svm)
+{
+	/*
+	 * The guest has no visible cache model yet.  Do not let cache
+	 * maintenance instructions disturb host caches.
+	 */
+	vmm_svm_advance_rip(svm->own_mut_vmcb);
+}
+
+static void
+vmm_svm_handle_guest_tlb_op(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	vmm_svm_advance_rip(vmcb);
+}
+
 static int
 vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
 {
@@ -1544,6 +1570,10 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_NMI:
 			vmm_svm_yield_after_host_interrupt();
 			break;
+		case VMM_SVM_EXIT_INVD:
+		case VMM_SVM_EXIT_WBINVD:
+			vmm_svm_handle_guest_cache_op(svm);
+			break;
 		case VMM_SVM_EXIT_RDTSC:
 			vmm_svm_handle_rdtsc(svm, 0);
 			break;
@@ -1555,6 +1585,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			break;
 		case VMM_SVM_EXIT_HLT:
 			vmm_svm_handle_idle_wait(m, vc, vmcb);
+			break;
+		case VMM_SVM_EXIT_INVLPG:
+		case VMM_SVM_EXIT_INVLPGA:
+		case VMM_SVM_EXIT_INVLPGB:
+			vmm_svm_handle_guest_tlb_op(svm);
 			break;
 		case VMM_SVM_EXIT_IOIO:
 			if (vmm_svm_handle_ioio(svm))
