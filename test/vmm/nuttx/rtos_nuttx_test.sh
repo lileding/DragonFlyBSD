@@ -6,6 +6,7 @@ REPO=$(cd "$ROOT/../../.." && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko} MNT=${VMM_MOUNT:-/var/tmp/dfvmm-nuttx-vmm}
 VM=${VMM_MACHINE:-nuttx0} LOG=${VMM_LOG:-/var/tmp/dfvmm-nuttx-test.log}
 ELF=${NUTTX_ELF:-/var/tmp/nuttx.elf} LOADER=${NUTTX_LOADER:-/var/tmp/vmmld_nuttx_elf}
+WRAPPER=${NUTTX_LOADER_WRAPPER:-/var/tmp/vmmld_nuttx}
 MEM=${NUTTX_MEM:-64M} PAT=${NUTTX_BOOT_PATTERN:-NuttShell}
 TIMEOUT=${VMM_TIMEOUT:-20}
 LOADED=0 MOUNTED=0
@@ -31,6 +32,7 @@ cleanup()
 		done
 	fi
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] && kldunload vmm >>"$LOG" 2>&1
+	rm -f "$WRAPPER"
 }
 wait_for()
 {
@@ -49,12 +51,14 @@ trap cleanup EXIT INT TERM
 [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 [ -f "$ELF" ] || fail "missing NUTTX_ELF=$ELF"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/rtos_nuttx_loader.c" -o "$LOADER"
+printf '#!/bin/sh\nexec %s %s\n' "$LOADER" "$ELF" >"$WRAPPER" || fail "write $WRAPPER"
+chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 kldstat -n vmm >/dev/null 2>&1 || { run kldload "$VMM_KO"; LOADED=1; }
 [ -x /sbin/mount_vmm ] || run ln -sf /sbin/mount_std /sbin/mount_vmm
 run mkdir -p "$MNT"; run mount -t vmm vmm "$MNT"; MOUNTED=1
 run mkdir "$(mach)"
 printf '1\n' >"$(mach)/vcpu"; printf '%s\n' "$MEM" >"$(mach)/mem"
-printf '%s\n' "$LOADER" >"$(mach)/loader"; cat "$(mach)/events" >>"$LOG"
+printf '%s\n' "$WRAPPER" >"$(mach)/loader"; cat "$(mach)/events" >>"$LOG"
 run rm "$(mach)/stopped"
 wait_for "$(mach)/events" '^started$' || fail "started event not observed"
 wait_for "$(mach)/console" "$PAT" || fail "console pattern not observed: $PAT"

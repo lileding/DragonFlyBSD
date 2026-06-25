@@ -6,7 +6,7 @@
  * Contract:
  *   fd 3 = guest memory mmap object
  *   fd 4 = vmm launch manifest mmap object
- *   /var/tmp/nuttx.elf = Apache NuttX qemu-intel64 ELF image
+ *   argv[1] or /var/tmp/nuttx.elf = Apache NuttX qemu-intel64 ELF image
  *
  * The qemu-intel64 board is booted through QEMU's x86 PVH -kernel path.
  * This loader accepts only an x86_64 ELF with XEN_ELFNOTE_PHYS32_ENTRY,
@@ -596,7 +596,7 @@ fill_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	struct stat mem_st;
 	struct stat manifest_st;
@@ -609,6 +609,7 @@ main(void)
 	struct guest_alloc ga;
 	struct vmm_x64_vcpu_state vcpu;
 	uint64_t pvh_entry;
+	const char *elf_path = argc >= 2 ? argv[1] : NUTTX_ELF_PATH;
 
 	if (fstat(3, &mem_st) != 0)
 		err(1, "fstat fd3");
@@ -629,17 +630,17 @@ main(void)
 	if (manifest == MAP_FAILED)
 		err(1, "mmap fd4");
 
-	elf_fd = open(NUTTX_ELF_PATH, O_RDONLY);
+	elf_fd = open(elf_path, O_RDONLY);
 	if (elf_fd < 0)
-		err(1, "open %s", NUTTX_ELF_PATH);
+		err(1, "open %s", elf_path);
 	if (fstat(elf_fd, &elf_st) != 0)
-		err(1, "fstat %s", NUTTX_ELF_PATH);
+		err(1, "fstat %s", elf_path);
 	if (elf_st.st_size <= (off_t)sizeof(Elf64_Ehdr))
-		errx(1, "%s is too small", NUTTX_ELF_PATH);
+		errx(1, "%s is too small", elf_path);
 	elf = mmap(NULL, (size_t)elf_st.st_size, PROT_READ, MAP_PRIVATE,
 	    elf_fd, 0);
 	if (elf == MAP_FAILED)
-		err(1, "mmap %s", NUTTX_ELF_PATH);
+		err(1, "mmap %s", elf_path);
 
 	eh = (const Elf64_Ehdr *)(const void *)elf;
 	validate_elf_header(eh, (uint64_t)elf_st.st_size);
