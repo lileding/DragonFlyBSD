@@ -14,9 +14,11 @@ struct vmm_mem {
 	 * Lock map:
 	 * mut_bytes is protected by the parent vmm_machine's token_lifecycle.
 	 * own_mut_backing is published/detached while holding that token, but
-	 * vmm_mem_prepare() allocates and wires pages outside the token before
-	 * publication, and vmm_mem_release_backing() unwires/deallocates after
-	 * detach outside the token.
+	 * vmm_mem_prepare() creates the guest RAM vm_object and machine
+	 * vmspace outside the token before publication, and
+	 * vmm_mem_release_backing() tears them down after detach outside the
+	 * token.  Guest pages are allocated lazily by loader mmap faults or
+	 * by vCPU nested-page-fault handling.
 	 */
 	uint64_t	mut_bytes;		/* 0 = unset */
 	struct vmm_mem_backing *own_mut_backing;
@@ -28,12 +30,15 @@ size_t	vmm_mem_format(const struct vmm_mem *m, char *out, size_t cap);
 int	vmm_mem_is_set(const struct vmm_mem *m);
 
 struct vm_object;
+struct vmspace;
 int	vmm_mem_prepare(struct vmm_mem *m);
 void	vmm_mem_release(struct vmm_mem *m);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 struct vm_object *vmm_mem_object(struct vmm_mem *m);
+struct vmspace *vmm_mem_vmspace(struct vmm_mem *m);
 uint64_t vmm_mem_size(struct vmm_mem *m);
+int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
 int	vmm_mem_gpa_pa(struct vmm_mem *m, uint64_t gpa, uint64_t *pa);
 
 #endif /* VMM_MEM_H */

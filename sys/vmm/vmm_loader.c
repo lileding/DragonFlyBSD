@@ -7,7 +7,6 @@
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
-#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/conf.h>
 #include <sys/devfs.h>
@@ -27,12 +26,10 @@
 #include <sys/vnode.h>
 #include <sys/wait.h>
 #include <machine/atomic.h>
+#include <machine/vmparam.h>
 #include <vm/vm.h>
-#include <vm/pmap.h>
-#include <vm/vm_map.h>
 #include <vm/vm_object.h>
-#include <vm/vm_kern.h>
-#include <vm/vm_extern.h>
+#include <vm/vm_page.h>
 
 #include "vmm_parse.h"
 #include "vmm_mem.h"
@@ -84,31 +81,27 @@ vmm_loader_is_set(const struct vmm_loader *l)
 struct vmm_loader_epoch {
 	struct file	*own_mut_mem_fp;
 	struct file	*own_mut_manifest_fp;
-	void		*borrow_mut_manifest_data;
+	struct vm_object *borrow_mut_mem_object;
+	struct vm_object *own_mut_manifest_object;
 	uint64_t	 imm_mem_size;
 	struct ucred	*borrow_imm_cred;
 	vmm_loader_cancel_fn *borrow_imm_cancel;
 	void		*borrow_imm_cancel_arg;
+	int		 mut_revoked;
 	char		 imm_loader_path[VMM_LOADER_MAX + 1];
 };
 
 struct vmm_loader_fd {
 	cdev_t		own_mut_dev;
 	struct vm_object *own_mut_object;
-	void		*own_mut_data;
 	vm_size_t	imm_size;
-	int		imm_buffer;
 };
 
-static struct lock vmm_loader_fd_lock;
-static int vmm_loader_mut_active_fds;
 static uint32_t vmm_loader_fd_serial;
 
 static d_open_t		vmm_loader_fd_open;
 static d_close_t	vmm_loader_fd_close;
 static d_mmap_single_t	vmm_loader_fd_mmap_single;
-static int		vmm_loader_fd_uksmap(struct vm_map_backing *ba,
-			    int op, cdev_t dev, vm_page_t fake);
 static int		vmm_loader_vop_getattr(struct vop_getattr_args *ap);
 static int		vmm_loader_fo_readwrite(struct file *fp,
 			    struct uio *uio, struct ucred *cred, int flags);
@@ -122,19 +115,13 @@ static int		vmm_loader_fo_stat(struct file *fp, struct stat *sb,
 static int		vmm_loader_fo_close(struct file *fp);
 static int		vmm_loader_fo_seek(struct file *fp, off_t offset,
 			    int whence, off_t *res);
+static void		vmm_loader_disarm_fp(struct file *fp);
 
 static struct dev_ops vmm_loader_object_fd_ops = {
 	{ "vmm_loader_object_fd", 0, D_MPSAFE },
 	.d_open = vmm_loader_fd_open,
 	.d_close = vmm_loader_fd_close,
 	.d_mmap_single = vmm_loader_fd_mmap_single,
-};
-
-static struct dev_ops vmm_loader_buffer_fd_ops = {
-	{ "vmm_loader_buffer_fd", 0, D_MPSAFE },
-	.d_open = vmm_loader_fd_open,
-	.d_close = vmm_loader_fd_close,
-	.d_uksmap = vmm_loader_fd_uksmap,
 };
 
 static struct vop_ops vmm_loader_vnode_vops = {
@@ -156,44 +143,6 @@ static struct fileops vmm_loader_fileops = {
 	.fo_shutdown =		nofo_shutdown,
 	.fo_seek =		vmm_loader_fo_seek,
 };
-
-void
-vmm_loader_init(void)
-{
-	lockinit(&vmm_loader_fd_lock, "vmmldfd", 0, 0);
-	vmm_loader_mut_active_fds = 0;
-}
-
-int
-vmm_loader_uninit(void)
-{
-	int busy;
-
-	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
-	busy = (vmm_loader_mut_active_fds != 0);
-	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
-	if (busy)
-		return EBUSY;
-	lockuninit(&vmm_loader_fd_lock);
-	return 0;
-}
-
-static void
-vmm_loader_fd_hold(void)
-{
-	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
-	vmm_loader_mut_active_fds++;
-	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
-}
-
-static void
-vmm_loader_fd_release(void)
-{
-	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
-	KKASSERT(vmm_loader_mut_active_fds > 0);
-	vmm_loader_mut_active_fds--;
-	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
-}
 
 static int
 vmm_loader_fd_open(struct dev_open_args *ap)
@@ -301,17 +250,25 @@ vmm_loader_fo_stat(struct file *fp, struct stat *sb, struct ucred *cred)
 	return 0;
 }
 
+static void
+vmm_loader_disarm_fp(struct file *fp)
+{
+	struct vnode *vp;
+
+	if (fp == NULL || fp->f_ops == &badfileops)
+		return;
+	vp = fp->f_data;
+	fp->f_ops = &badfileops;
+	if (vp != NULL)
+		(void)vn_close(vp, fp->f_flag, fp);
+	devfs_clear_cdevpriv(fp);
+}
+
 static int
 vmm_loader_fo_close(struct file *fp)
 {
-	struct vnode *vp = fp->f_data;
-	int error = 0;
-
-	fp->f_ops = &badfileops;
-	if (vp != NULL)
-		error = vn_close(vp, fp->f_flag, fp);
-	devfs_clear_cdevpriv(fp);
-	return error;
+	vmm_loader_disarm_fp(fp);
+	return 0;
 }
 
 static int
@@ -335,10 +292,6 @@ vmm_loader_fd_free(void *arg)
 	}
 	if (lfd->own_mut_object != NULL)
 		vm_object_deallocate(lfd->own_mut_object);
-	if (lfd->own_mut_data != NULL)
-		kmem_free(kernel_map, (vm_offset_t)lfd->own_mut_data,
-		    lfd->imm_size);
-	vmm_loader_fd_release();
 	kfree(lfd, M_TEMP);
 }
 
@@ -352,7 +305,7 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	error = devfs_get_cdevpriv(ap->a_fp, (void **)&lfd);
 	if (error)
 		return error;
-	if (lfd->imm_buffer || lfd->own_mut_object == NULL)
+	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL)
 		return EINVAL;
 	off = *ap->a_offset;
 	if (off < 0 || off > lfd->imm_size || ap->a_size > lfd->imm_size - off)
@@ -360,31 +313,6 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	vm_object_reference_quick(lfd->own_mut_object);
 	*ap->a_object = lfd->own_mut_object;
 	return 0;
-}
-
-static int
-vmm_loader_fd_uksmap(struct vm_map_backing *ba, int op, cdev_t dev,
-    vm_page_t fake)
-{
-	struct vmm_loader_fd *lfd = dev->si_drv1;
-	vm_ooffset_t off;
-
-	if (lfd == NULL || !lfd->imm_buffer || lfd->own_mut_data == NULL)
-		return EINVAL;
-	switch (op) {
-	case UKSMAPOP_ADD:
-	case UKSMAPOP_REM:
-		return 0;
-	case UKSMAPOP_FAULT:
-		off = IDX_TO_OFF(fake->pindex);
-		if (off < 0 || off >= lfd->imm_size)
-			return EINVAL;
-		fake->phys_addr = vtophys((char *)lfd->own_mut_data + off);
-		return 0;
-	default:
-		(void)ba;
-		return EINVAL;
-	}
 }
 
 static int
@@ -468,7 +396,6 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 		return EINVAL;
 
 	lfd = kmalloc(sizeof(*lfd), M_TEMP, M_WAITOK | M_ZERO);
-	vmm_loader_fd_hold();
 	vm_object_reference_quick(object);
 	lfd->own_mut_object = object;
 	lfd->imm_size = round_page(size);
@@ -484,28 +411,27 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 }
 
 static int
-vmm_loader_open_buffer_fd(void *data, vm_size_t size, struct file **fpp)
+vmm_loader_manifest_object(struct vm_object **objectp)
 {
-	struct vmm_loader_fd *lfd;
-	uint32_t serial;
+	struct vm_object *object;
+	vm_page_t pg;
 
-	if (data == NULL || size == 0)
-		return EINVAL;
-
-	lfd = kmalloc(sizeof(*lfd), M_TEMP, M_WAITOK | M_ZERO);
-	vmm_loader_fd_hold();
-	lfd->own_mut_data = data;
-	lfd->imm_size = round_page(size);
-	lfd->imm_buffer = 1;
-	serial = atomic_fetchadd_int(&vmm_loader_fd_serial, 1);
-	lfd->own_mut_dev = make_only_dev(&vmm_loader_buffer_fd_ops, serial, UID_ROOT,
-	    GID_WHEEL, 0600, "vmmld%d", serial);
-	if (lfd->own_mut_dev == NULL) {
-		vmm_loader_fd_free(lfd);
-		return ENXIO;
+	object = vm_object_allocate(OBJT_DEFAULT, OFF_TO_IDX(VMM_MANIFEST_SIZE));
+	if (object == NULL)
+		return ENOMEM;
+	vm_object_set_flag(object, OBJ_NOSPLIT);
+	vm_object_hold(object);
+	pg = vm_page_grab(object, 0, VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM |
+	    VM_ALLOC_ZERO | VM_ALLOC_RETRY);
+	if (pg == NULL) {
+		vm_object_drop(object);
+		vm_object_deallocate(object);
+		return ENOMEM;
 	}
-	lfd->own_mut_dev->si_drv1 = lfd;
-	return vmm_loader_open_fd(lfd, fpp);
+	vm_page_wakeup(pg);
+	vm_object_drop(object);
+	*objectp = object;
+	return 0;
 }
 
 static int
@@ -580,6 +506,66 @@ vmm_loader_cancelled(struct vmm_loader_epoch *ep)
 }
 
 static void
+vmm_loader_revoke_fp(struct file *fp, struct vm_object *object)
+{
+	if (fp != NULL && fp->f_type == DTYPE_VNODE && fp->f_data != NULL)
+		(void)fdrevoke(fp->f_data, DTYPE_VNODE, proc0.p_ucred);
+	if (object != NULL)
+		vm_object_mmap_revoke(object);
+}
+
+static void
+vmm_loader_epoch_revoke(struct vmm_loader_epoch *ep)
+{
+	if (ep->mut_revoked)
+		return;
+	ep->mut_revoked = 1;
+	vmm_loader_revoke_fp(ep->own_mut_mem_fp, ep->borrow_mut_mem_object);
+	vmm_loader_revoke_fp(ep->own_mut_manifest_fp,
+	    ep->own_mut_manifest_object);
+}
+
+static void
+vmm_loader_epoch_close_fds(struct vmm_loader_epoch *ep)
+{
+	if (ep->own_mut_manifest_fp != NULL) {
+		vmm_loader_disarm_fp(ep->own_mut_manifest_fp);
+		fp_close(ep->own_mut_manifest_fp);
+		ep->own_mut_manifest_fp = NULL;
+	}
+	if (ep->own_mut_mem_fp != NULL) {
+		vmm_loader_disarm_fp(ep->own_mut_mem_fp);
+		fp_close(ep->own_mut_mem_fp);
+		ep->own_mut_mem_fp = NULL;
+	}
+}
+
+static int
+vmm_loader_manifest_load(struct vmm_loader_epoch *ep,
+    struct vmm_launch *launch)
+{
+	vm_page_t pg;
+	void *data;
+	int error;
+
+	if (ep->own_mut_manifest_object == NULL)
+		return EINVAL;
+	vm_object_hold(ep->own_mut_manifest_object);
+	pg = vm_page_lookup_busy_wait(ep->own_mut_manifest_object, 0, FALSE,
+	    "vmmmf");
+	if (pg == NULL) {
+		vm_object_drop(ep->own_mut_manifest_object);
+		return ENOEXEC;
+	}
+	data = (void *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(pg));
+	error = vmm_loader_x86_manifest_load(ep->imm_mem_size, data,
+	    VMM_MANIFEST_SIZE, launch);
+	vm_page_wakeup(pg);
+	vm_object_drop(ep->own_mut_manifest_object);
+	return error;
+}
+
+static void
 vmm_loader_child(void *arg, struct trapframe *frame)
 {
 	struct vmm_loader_epoch *ep = arg;
@@ -635,7 +621,6 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 	pid_t pid;
 	int status = 0;
 	int result = 0;
-	int killed = 0;
 	int error;
 
 	error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK, &child);
@@ -660,15 +645,14 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 			return error;
 		if (result != 0)
 			break;
-		if (vmm_loader_cancelled(ep) && !killed) {
+		if (vmm_loader_cancelled(ep)) {
+			vmm_loader_epoch_revoke(ep);
 			(void)kern_kill(SIGKILL, pid, -1);
-			killed = 1;
+			return EINTR;
 		}
 		tsleep(ep->borrow_imm_cancel_arg != NULL ?
 		    ep->borrow_imm_cancel_arg : ep, 0, "vmmld", hz / 20 + 1);
 	}
-	if (killed)
-		return EINTR;
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 		return ENOEXEC;
 	return 0;
@@ -681,7 +665,6 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 {
 	struct vmm_loader_epoch *ep;
 	size_t path_len;
-	void *manifest_data = NULL;
 	int error;
 
 	if (!vmm_mem_is_set(mem) || vmm_mem_object(mem) == NULL ||
@@ -690,6 +673,7 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
 	ep->imm_mem_size = mem->mut_bytes;
+	ep->borrow_mut_mem_object = vmm_mem_object(mem);
 	ep->borrow_imm_cred = cred;
 	ep->borrow_imm_cancel = cancel;
 	ep->borrow_imm_cancel_arg = cancel_arg;
@@ -709,19 +693,13 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 	    (vm_size_t)ep->imm_mem_size, &ep->own_mut_mem_fp);
 	if (error)
 		goto out;
-	manifest_data = (void *)kmem_alloc(kernel_map, VMM_MANIFEST_SIZE,
-	    VM_SUBSYS_MMAP);
-	if (manifest_data == NULL) {
-		error = ENOMEM;
+	error = vmm_loader_manifest_object(&ep->own_mut_manifest_object);
+	if (error)
 		goto out;
-	}
-	bzero(manifest_data, VMM_MANIFEST_SIZE);
-	error = vmm_loader_open_buffer_fd(manifest_data,
+	error = vmm_loader_open_object_fd(ep->own_mut_manifest_object,
 	    VMM_MANIFEST_SIZE, &ep->own_mut_manifest_fp);
 	if (error)
 		goto out;
-	ep->borrow_mut_manifest_data = manifest_data;
-	manifest_data = NULL;
 	if (vmm_loader_cancelled(ep)) {
 		error = EINTR;
 		goto out;
@@ -729,21 +707,19 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 	error = vmm_loader_wait(ep);
 	if (error)
 		goto out;
+	vmm_loader_epoch_revoke(ep);
+	vmm_loader_epoch_close_fds(ep);
 	if (vmm_loader_cancelled(ep)) {
 		error = EINTR;
 		goto out;
 	}
-	error = vmm_loader_x86_manifest_load(ep->imm_mem_size,
-	    ep->borrow_mut_manifest_data, VMM_MANIFEST_SIZE, launch);
+	error = vmm_loader_manifest_load(ep, launch);
 
 out:
-	if (ep->own_mut_manifest_fp != NULL)
-		fp_close(ep->own_mut_manifest_fp);
-	if (ep->own_mut_mem_fp != NULL)
-		fp_close(ep->own_mut_mem_fp);
-	if (manifest_data != NULL)
-		kmem_free(kernel_map, (vm_offset_t)manifest_data,
-		    VMM_MANIFEST_SIZE);
+	vmm_loader_epoch_revoke(ep);
+	vmm_loader_epoch_close_fds(ep);
+	if (ep->own_mut_manifest_object != NULL)
+		vm_object_deallocate(ep->own_mut_manifest_object);
 	kfree(ep, M_TEMP);
 	return error;
 }

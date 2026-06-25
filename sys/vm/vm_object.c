@@ -1237,6 +1237,98 @@ vm_object_page_collect_flush(vm_object_t object, vm_page_t p, int pagerflags)
 		vm_page_unhold(ma[i]);
 }
 
+struct vm_object_mmap_revoke_info {
+	vm_object_t object;
+};
+
+static int
+vm_object_mmap_entry_matches(vm_map_entry_t entry, vm_object_t object)
+{
+	vm_map_backing_t ba;
+
+	switch(entry->maptype) {
+	case VM_MAPTYPE_NORMAL:
+	case VM_MAPTYPE_VPAGETABLE:
+		for (ba = &entry->ba; ba != NULL; ba = ba->backing_ba) {
+			if (ba->object == object)
+				return 1;
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
+static void
+vm_object_mmap_revoke_map(vm_map_t map, vm_object_t object)
+{
+	vm_map_entry_t entry;
+	vm_offset_t start, end;
+	int count;
+	int entcount;
+	int found;
+
+	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+	vm_map_lock(map);
+	do {
+		found = 0;
+		entry = RB_MIN(vm_map_rb_tree, &map->rb_root);
+		entcount = map->nentries;
+		while (entcount-- && entry != NULL) {
+			if (vm_object_mmap_entry_matches(entry, object)) {
+				start = entry->ba.start;
+				end = entry->ba.end;
+				(void)vm_map_delete(map, start, end, &count);
+				found = 1;
+				break;
+			}
+			entry = vm_map_rb_tree_RB_NEXT(entry);
+		}
+	} while (found);
+	vm_map_unlock(map);
+	vm_map_entry_release(count);
+}
+
+static int
+vm_object_mmap_revoke_callback(struct proc *p, void *data)
+{
+	struct vm_object_mmap_revoke_info *info = data;
+	struct vmspace *vm;
+
+	lwkt_gettoken(&p->p_token);
+	if (p->p_stat != SACTIVE && p->p_stat != SSTOP && p->p_stat != SCORE) {
+		lwkt_reltoken(&p->p_token);
+		return 0;
+	}
+	vm = p->p_vmspace;
+	if (vm == NULL) {
+		lwkt_reltoken(&p->p_token);
+		return 0;
+	}
+	vmspace_hold(vm);
+	lwkt_reltoken(&p->p_token);
+	vm_object_mmap_revoke_map(&vm->vm_map, info->object);
+	vmspace_drop(vm);
+	return 0;
+}
+
+/*
+ * Remove all userspace mappings of a referenced object.  This is used by
+ * revocable mmap capabilities: fdrevoke() prevents new descriptor use, while
+ * this removes mappings that were already established or inherited.
+ */
+void
+vm_object_mmap_revoke(vm_object_t object)
+{
+	struct vm_object_mmap_revoke_info info;
+
+	if (object == NULL)
+		return;
+	info.object = object;
+	allproc_scan(vm_object_mmap_revoke_callback, &info, 0);
+}
+
 /*
  * Implements the madvise function at the object/page level.
  *

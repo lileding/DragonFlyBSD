@@ -19,17 +19,13 @@
 #include <machine/specialreg.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
+#include <vm/vm_map.h>
 
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
 #include "vmm_mem.h"
 #include "vmm_svm.h"
 #include "vmm_vcpu.h"
-
-#define VMM_SVM_PTE_P		0x001ULL
-#define VMM_SVM_PTE_RW		0x002ULL
-#define VMM_SVM_PTE_U		0x004ULL
-#define VMM_SVM_PTE_FLAGS	(VMM_SVM_PTE_P | VMM_SVM_PTE_RW | VMM_SVM_PTE_U)
 
 #define VMM_SVM_CTRL_INTERCEPT_INTR	(1U << 0)
 #define VMM_SVM_CTRL_INTERCEPT_NMI	(1U << 1)
@@ -219,13 +215,9 @@ struct vmm_svm_vmcb {
 	struct vmm_svm_state state;
 } __packed;
 
-struct vmm_svm_page {
-	void *va;
-	uint64_t pa;
-};
-
 struct vmm_svm_backend {
 	struct vmm_machine *borrow_imm_machine;
+	struct vmspace *borrow_mut_vmspace;
 	struct vmm_svm_vmcb *own_mut_vmcb;
 	uint64_t imm_vmcb_pa;
 	uint8_t *own_mut_iobm;
@@ -234,9 +226,6 @@ struct vmm_svm_backend {
 	uint64_t imm_msrbm_pa;
 	void *own_mut_hsave;
 	uint64_t imm_hsave_pa;
-	struct vmm_svm_page *own_mut_npt_pages;
-	uint32_t imm_npt_page_count;
-	uint64_t imm_npt_root_pa;
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -313,69 +302,6 @@ vmm_svm_seg_load(const struct vmm_x64_seg_state *src,
 	dst->base = src->base;
 }
 
-static int
-vmm_svm_npt_alloc_page(struct vmm_svm_backend *svm, uint32_t idx)
-{
-	svm->own_mut_npt_pages[idx].va =
-	    vmm_svm_contig_alloc(&svm->own_mut_npt_pages[idx].pa, 1);
-	return svm->own_mut_npt_pages[idx].va == NULL ? ENOMEM : 0;
-}
-
-static int
-vmm_svm_build_npt(struct vmm_svm_backend *svm, struct vmm_machine *m)
-{
-	struct vmm_mem *mem = &m->own_mut_mem;
-	uint64_t mem_size = vmm_mem_size(mem);
-	uint64_t gpa, hpa;
-	uint64_t *pml4, *pdpt, *pd, *pt;
-	uint32_t pd_pages, pt_pages, page_count;
-	uint32_t i, pdp_i, pd_i, pt_i;
-	int error;
-
-	if (mem_size == 0 || mem_size > (512ULL << 30))
-		return EOPNOTSUPP;
-	pd_pages = (uint32_t)((mem_size + ((1ULL << 30) - 1)) >> 30);
-	pt_pages = (uint32_t)((mem_size + ((2ULL << 20) - 1)) >> 21);
-	page_count = 2 + pd_pages + pt_pages;
-
-	svm->own_mut_npt_pages = kmalloc(sizeof(*svm->own_mut_npt_pages) *
-	    page_count, M_TEMP, M_WAITOK | M_ZERO);
-	svm->imm_npt_page_count = page_count;
-	for (i = 0; i < page_count; i++) {
-		error = vmm_svm_npt_alloc_page(svm, i);
-		if (error)
-			return error;
-	}
-
-	pml4 = svm->own_mut_npt_pages[0].va;
-	pdpt = svm->own_mut_npt_pages[1].va;
-	pml4[0] = svm->own_mut_npt_pages[1].pa | VMM_SVM_PTE_FLAGS;
-	for (i = 0; i < pd_pages; i++) {
-		pdpt[i] = svm->own_mut_npt_pages[2 + i].pa | VMM_SVM_PTE_FLAGS;
-	}
-	for (gpa = 0; gpa < mem_size; gpa += PAGE_SIZE) {
-		error = vmm_mem_gpa_pa(mem, gpa, &hpa);
-		if (error)
-			return error;
-		pdp_i = (uint32_t)(gpa >> 30);
-		pd_i = (uint32_t)((gpa >> 21) & 0x1ff);
-		pt_i = (uint32_t)((gpa >> 12) & 0x1ff);
-		pd = svm->own_mut_npt_pages[2 + pdp_i].va;
-		if (pd[pd_i] == 0) {
-			uint32_t pt_page = 2 + pd_pages +
-			    (uint32_t)(gpa >> 21);
-			pd[pd_i] = svm->own_mut_npt_pages[pt_page].pa |
-			    VMM_SVM_PTE_FLAGS;
-		}
-		pt = (uint64_t *)(uintptr_t)
-		    svm->own_mut_npt_pages[2 + pd_pages +
-		    (uint32_t)(gpa >> 21)].va;
-		pt[pt_i] = (hpa & ~PAGE_MASK) | VMM_SVM_PTE_FLAGS;
-	}
-	svm->imm_npt_root_pa = svm->own_mut_npt_pages[0].pa;
-	return 0;
-}
-
 static void
 vmm_svm_load_state(struct vmm_svm_backend *svm,
     const struct vmm_x64_vcpu_state *v)
@@ -449,6 +375,12 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	*backendp = NULL;
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
 	svm->borrow_imm_machine = m;
+	svm->borrow_mut_vmspace = vmm_mem_vmspace(&m->own_mut_mem);
+	if (svm->borrow_mut_vmspace == NULL) {
+		error = EINVAL;
+		goto fail;
+	}
+	pmap_npt_transform(vmspace_pmap(svm->borrow_mut_vmspace), 0);
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	vmm_svm_fpu_init(svm);
 
@@ -463,9 +395,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		error = ENOMEM;
 		goto fail;
 	}
-	error = vmm_svm_build_npt(svm, m);
-	if (error)
-		goto fail;
 
 	vmcb = svm->own_mut_vmcb;
 	memset(svm->own_mut_iobm, 0xff, VMM_SVM_IOBM_PAGES * PAGE_SIZE);
@@ -522,7 +451,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 	vmcb->ctrl.v = VMM_SVM_CTRL_V_INTR_MASKING;
 	vmcb->ctrl.enable1 = VMM_SVM_CTRL_ENABLE_NP;
-	vmcb->ctrl.n_cr3 = svm->imm_npt_root_pa;
+	vmcb->ctrl.n_cr3 = vtophys(vmspace_pmap(svm->borrow_mut_vmspace)->pm_pml4);
 	vmm_svm_load_state(svm, &launch->imm_vcpu0);
 
 	*backendp = svm;
@@ -537,15 +466,9 @@ void
 vmm_svm_vcpu_destroy(void *backend)
 {
 	struct vmm_svm_backend *svm = backend;
-	uint32_t i;
 
 	if (svm == NULL)
 		return;
-	if (svm->own_mut_npt_pages != NULL) {
-		for (i = 0; i < svm->imm_npt_page_count; i++)
-			vmm_svm_contig_free(svm->own_mut_npt_pages[i].va, 1);
-		kfree(svm->own_mut_npt_pages, M_TEMP);
-	}
 	vmm_svm_contig_free(svm->own_mut_hsave, 1);
 	vmm_svm_contig_free(svm->own_mut_msrbm, VMM_SVM_MSRBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_iobm, VMM_SVM_IOBM_PAGES);
@@ -580,8 +503,10 @@ vmm_svm_stgi(void)
 }
 
 static void
-vmm_svm_host_tlb_catchup(void)
+vmm_svm_host_tlb_catchup(struct vmm_svm_backend *svm)
 {
+	if (svm->borrow_mut_vmspace != NULL)
+		pmap_add_cpu(svm->borrow_mut_vmspace, mycpu->gd_cpuid);
 	clear_xinvltlb();
 }
 
@@ -870,6 +795,28 @@ vmm_svm_handle_hlt(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
 		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
 }
 
+static int
+vmm_svm_handle_npf(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	struct vmm_machine *m = svm->borrow_imm_machine;
+	uint64_t gpa = vmcb->ctrl.exitinfo2;
+	int prot;
+	int error;
+
+	if (vmcb->ctrl.exitinfo1 & PGEX_W)
+		prot = VM_PROT_WRITE;
+	else if (vmcb->ctrl.exitinfo1 & PGEX_I)
+		prot = VM_PROT_EXECUTE;
+	else
+		prot = VM_PROT_READ;
+	error = vmm_mem_fault_gpa(&m->own_mut_mem, gpa, prot);
+	if (error)
+		return 0;
+	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	return 1;
+}
+
 
 void
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
@@ -884,12 +831,13 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	while (!vmm_machine_vcpu_should_stop(m)) {
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
-		vmm_svm_host_tlb_catchup();
+		vmm_svm_host_tlb_catchup(svm);
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
 			lwkt_user_yield();
 			continue;
 		}
+		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
@@ -897,21 +845,24 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_fpu_leave(svm);
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
-			vmm_svm_stgi();
-			switch (vmcb->ctrl.exitcode) {
-			case VMM_SVM_EXIT_INTR:
-			case VMM_SVM_EXIT_NMI:
-				vmm_svm_yield_after_host_interrupt();
-				break;
-			case VMM_SVM_EXIT_CPUID:
-				vmm_svm_handle_cpuid(svm);
-				break;
-			case VMM_SVM_EXIT_HLT:
-				vmm_svm_handle_hlt(m, vc, vmcb);
-				break;
+		vmm_svm_stgi();
+		switch (vmcb->ctrl.exitcode) {
+		case VMM_SVM_EXIT_INTR:
+		case VMM_SVM_EXIT_NMI:
+			vmm_svm_yield_after_host_interrupt();
+			break;
+		case VMM_SVM_EXIT_CPUID:
+			vmm_svm_handle_cpuid(svm);
+			break;
+		case VMM_SVM_EXIT_HLT:
+			vmm_svm_handle_hlt(m, vc, vmcb);
+			break;
 		case VMM_SVM_EXIT_SHUTDOWN:
-		case VMM_SVM_EXIT_NPF:
 		case VMM_SVM_EXIT_IOIO:
+			goto unhandled;
+		case VMM_SVM_EXIT_NPF:
+			if (vmm_svm_handle_npf(svm))
+				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_MSR:
 			if (vmm_svm_handle_msr(svm))

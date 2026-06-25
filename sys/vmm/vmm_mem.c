@@ -8,8 +8,12 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 #include <vm/vm.h>
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_pager.h>
 
 #include "vmm_parse.h"
 #include "vmm_mem.h"
@@ -18,8 +22,8 @@
 
 struct vmm_mem_backing {
 	struct vm_object *own_mut_object;
+	struct vmspace *own_mut_vmspace;
 	uint64_t imm_bytes;
-	vm_pindex_t mut_wired_pages;
 };
 
 int
@@ -75,33 +79,45 @@ vmm_mem_is_set(const struct vmm_mem *m)
 }
 
 static void
-vmm_mem_unwire(struct vmm_mem_backing *b)
+vmm_mem_object_ref(struct vm_object *object)
 {
-	vm_page_t pg;
-	vm_pindex_t i;
+	vm_object_hold(object);
+	vm_object_reference_locked(object);
+	vm_object_drop(object);
+}
 
-	if (b->own_mut_object == NULL || b->mut_wired_pages == 0)
-		return;
+static int
+vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
+    uint64_t bytes)
+{
+	vm_map_t map = &vm->vm_map;
+	vm_offset_t start = 0;
+	vm_size_t size = round_page64(bytes);
+	vm_prot_t prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+	int count;
+	int rv;
 
-	vm_object_hold(b->own_mut_object);
-	for (i = 0; i < b->mut_wired_pages; i++) {
-		pg = vm_page_lookup_busy_wait(b->own_mut_object, i, FALSE,
-		    "vmmmem");
-		if (pg == NULL)
-			continue;
-		vm_page_unwire(pg, 0);
-		vm_page_wakeup(pg);
+	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+	vm_map_lock(map);
+	vmm_mem_object_ref(object);
+	vm_object_hold(object);
+	rv = vm_map_insert(map, &count, object, NULL, 0, NULL, start,
+	    start + size, VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot, 0);
+	vm_object_drop(object);
+	vm_map_unlock(map);
+	vm_map_entry_release(count);
+	if (rv != 0) {
+		vm_object_deallocate(object);
+		return ENOMEM;
 	}
-	vm_object_drop(b->own_mut_object);
-	b->mut_wired_pages = 0;
+	return 0;
 }
 
 int
 vmm_mem_prepare(struct vmm_mem *m)
 {
 	struct vmm_mem_backing *b;
-	vm_page_t pg;
-	vm_pindex_t i, pages;
+	uint64_t size;
 	int error = 0;
 
 	if (!vmm_mem_is_set(m))
@@ -111,32 +127,31 @@ vmm_mem_prepare(struct vmm_mem *m)
 
 	b = kmalloc(sizeof(*b), M_TEMP, M_WAITOK | M_ZERO);
 	b->imm_bytes = m->mut_bytes;
-	pages = OFF_TO_IDX(round_page64(b->imm_bytes));
-	b->own_mut_object = vm_object_allocate(OBJT_DEFAULT, pages);
+	size = round_page64(b->imm_bytes);
+	b->own_mut_object = default_pager_alloc(NULL, size, VM_PROT_DEFAULT, 0);
 	if (b->own_mut_object == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
 	vm_object_set_flag(b->own_mut_object, OBJ_NOSPLIT);
-
-	for (i = 0; i < pages; i++) {
-		pg = vm_page_grab(b->own_mut_object, i,
-		    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO |
-		    VM_ALLOC_NULL_OK);
-		if (pg == NULL) {
-			error = ENOMEM;
-			goto fail;
-		}
-		vm_page_wire(pg);
-		vm_page_wakeup(pg);
-		b->mut_wired_pages++;
+	b->own_mut_vmspace = vmspace_alloc(0, size);
+	if (b->own_mut_vmspace == NULL) {
+		error = ENOMEM;
+		goto fail;
 	}
+	pmap_maybethreaded(vmspace_pmap(b->own_mut_vmspace));
+	error = vmm_mem_map_object(b->own_mut_vmspace, b->own_mut_object, size);
+	if (error)
+		goto fail;
 
 	m->own_mut_backing = b;
 	return 0;
 
 fail:
-	vmm_mem_unwire(b);
+	if (b->own_mut_vmspace != NULL) {
+		pmap_del_all_cpus(b->own_mut_vmspace);
+		vmspace_rel(b->own_mut_vmspace);
+	}
 	if (b->own_mut_object != NULL)
 		vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
@@ -163,7 +178,10 @@ vmm_mem_release_backing(struct vmm_mem_backing *b)
 {
 	if (b == NULL)
 		return;
-	vmm_mem_unwire(b);
+	if (b->own_mut_vmspace != NULL) {
+		pmap_del_all_cpus(b->own_mut_vmspace);
+		vmspace_rel(b->own_mut_vmspace);
+	}
 	vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
 }
@@ -176,12 +194,35 @@ vmm_mem_object(struct vmm_mem *m)
 	return m->own_mut_backing->own_mut_object;
 }
 
+struct vmspace *
+vmm_mem_vmspace(struct vmm_mem *m)
+{
+	if (m->own_mut_backing == NULL)
+		return NULL;
+	return m->own_mut_backing->own_mut_vmspace;
+}
+
 uint64_t
 vmm_mem_size(struct vmm_mem *m)
 {
 	if (m->own_mut_backing == NULL)
 		return 0;
 	return m->own_mut_backing->imm_bytes;
+}
+
+int
+vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
+{
+	struct vmm_mem_backing *b = m->own_mut_backing;
+	int flags;
+
+	if (b == NULL || b->own_mut_vmspace == NULL)
+		return EINVAL;
+	if (gpa >= b->imm_bytes)
+		return EINVAL;
+	flags = (prot & VM_PROT_WRITE) ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
+	return vm_fault(&b->own_mut_vmspace->vm_map, trunc_page(gpa),
+	    (vm_prot_t)prot, flags);
 }
 
 int

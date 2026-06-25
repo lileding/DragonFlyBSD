@@ -37,7 +37,6 @@
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
-#include "vmm_loader.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
 #include "vmmfs_machine.h"
@@ -766,7 +765,6 @@ vmmfs_vfs_init(struct vfsconf *conf)
 	(void)conf;
 	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
 	vmmfs_mount_count = 0;
-	vmm_loader_init();
 	kprintf("vmm: loaded\n");
 	return 0;
 }
@@ -774,14 +772,9 @@ vmmfs_vfs_init(struct vfsconf *conf)
 static int
 vmmfs_vfs_uninit(struct vfsconf *conf)
 {
-	int error;
-
 	(void)conf;
 	if (vmmfs_mount_count_busy())
 		return EBUSY;
-	error = vmm_loader_uninit();
-	if (error)
-		return error;
 	lockuninit(&vmmfs_mount_lock);
 	kprintf("vmm: unloaded\n");
 	return 0;

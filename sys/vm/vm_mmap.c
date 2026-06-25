@@ -1523,6 +1523,16 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 		}
 	}
 
+	/*
+	 * fdrevoke() can race an in-flight mmap() that already held the file.
+	 * If the fd was revoked after the device mmap callback accepted it,
+	 * remove the just-created mapping before returning to userland.
+	 */
+	if (fp != NULL && (fp->f_flag & FREVOKED)) {
+		vm_map_remove(map, *addr, *addr + size);
+		lwkt_reltoken(&map->token);
+		return (EBADF);
+	}
 
 	/* If a process has marked all future mappings for wiring, do so */
 	if ((rv == KERN_SUCCESS) && (map->flags & MAP_WIREFUTURE))
