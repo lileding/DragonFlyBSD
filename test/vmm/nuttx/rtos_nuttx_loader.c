@@ -8,10 +8,10 @@
  *   fd 4 = vmm launch manifest mmap object
  *   argv[1] or /var/tmp/nuttx.elf = Apache NuttX qemu-intel64 ELF image
  *
- * The qemu-intel64 board is booted through QEMU's x86 PVH -kernel path.
- * This loader accepts only an x86_64 ELF with XEN_ELFNOTE_PHYS32_ENTRY,
- * loads PT_LOAD segments at their physical addresses, builds a minimal PVH
- * hvm_start_info block, and starts the guest in 32-bit protected mode.
+ * The qemu-intel64 image carries a PVH note that points at its 32-bit entry,
+ * but the entry still consumes Multiboot2 %eax/%ebx boot parameters.  This
+ * loader therefore uses the PVH note only to find start32, then provides a
+ * minimal Multiboot2 info block and ACPI RSDP/RSDT/MADT tables.
  */
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -46,17 +46,26 @@
 #define PT_NOTE		4
 #define XEN_ELFNOTE_PHYS32_ENTRY 18
 
-#define XEN_HVM_START_MAGIC_VALUE 0x336ec578U
-#define E820_RAM	1
+#define MULTIBOOT2_BOOTLOADER_MAGIC	0x36d76289U
+#define MULTIBOOT_TAG_TYPE_END		0U
+#define MULTIBOOT_TAG_TYPE_ACPI_NEW	15U
 
 #define PAGE_SIZE_GUEST	4096ULL
 #define BOOT_STACK_SIZE	(16ULL * 1024ULL)
+#define ACPI_RSDP_GPA	0x000f0000ULL
+#define ACPI_RSDT_GPA	0x000f1000ULL
+#define ACPI_MADT_GPA	0x000f2000ULL
+#define ACPI_REGION_GPA	ACPI_RSDP_GPA
+#define ACPI_REGION_SIZE	(3ULL * PAGE_SIZE_GUEST)
+#define ACPI_LAPIC_BASE	0xfee00000U
+#define ACPI_IOAPIC_BASE	0xfec00000U
 
 #define VMM_X64_NGPR	18
 #define VMM_X64_NCR	6
 #define VMM_X64_NMSR	11
 #define VMM_X64_NSEG	10
 
+#define VMM_X64_GPR_RAX	0
 #define VMM_X64_GPR_RBX	3
 #define VMM_X64_GPR_RSP	4
 #define VMM_X64_GPR_RIP	16
@@ -174,24 +183,67 @@ struct vmm_gpa_range {
 	uint32_t	flags;
 } __attribute__((packed));
 
-struct hvm_start_info {
-	uint32_t	magic;
-	uint32_t	version;
-	uint32_t	flags;
-	uint32_t	nr_modules;
-	uint64_t	modlist_paddr;
-	uint64_t	cmdline_paddr;
-	uint64_t	rsdp_paddr;
-	uint64_t	memmap_paddr;
-	uint32_t	memmap_entries;
+struct multiboot_info_header {
+	uint32_t	total_size;
 	uint32_t	reserved;
 } __attribute__((packed));
 
-struct hvm_memmap_table_entry {
-	uint64_t	addr;
-	uint64_t	size;
+struct multiboot_tag_header {
 	uint32_t	type;
-	uint32_t	reserved;
+	uint32_t	size;
+} __attribute__((packed));
+
+struct acpi_rsdp {
+	char		signature[8];
+	uint8_t		checksum;
+	char		oem_id[6];
+	uint8_t		revision;
+	uint32_t	rsdt_addr;
+	uint32_t	length;
+	uint64_t	xsdt_addr;
+	uint8_t		ext_checksum;
+	uint8_t		reserved[3];
+} __attribute__((packed));
+
+struct acpi_sdt {
+	char		signature[4];
+	uint32_t	length;
+	uint8_t		revision;
+	uint8_t		checksum;
+	char		oem_id[6];
+	char		oem_table_id[8];
+	uint32_t	oem_revision;
+	uint32_t	creator_id;
+	uint32_t	creator_revision;
+} __attribute__((packed));
+
+struct acpi_rsdt {
+	struct acpi_sdt	sdt;
+	uint32_t	table_ptrs[1];
+} __attribute__((packed));
+
+struct acpi_madt {
+	struct acpi_sdt	sdt;
+	uint32_t	lapic_addr;
+	uint32_t	flags;
+	uint8_t		entries[];
+} __attribute__((packed));
+
+struct acpi_lapic_entry {
+	uint8_t		type;
+	uint8_t		length;
+	uint8_t		acpi_id;
+	uint8_t		apic_id;
+	uint32_t	flags;
+} __attribute__((packed));
+
+struct acpi_ioapic_entry {
+	uint8_t		type;
+	uint8_t		length;
+	uint8_t		ioapic_id;
+	uint8_t		reserved;
+	uint32_t	ioapic_addr;
+	uint32_t	gsi_base;
 } __attribute__((packed));
 
 struct gpa_span {
@@ -453,29 +505,144 @@ set_seg(struct vmm_x64_seg_state *seg, uint16_t selector, uint16_t attrib,
 	seg->base = base;
 }
 
+static uint8_t
+checksum_bytes(const void *ptr, size_t len)
+{
+	const uint8_t *p = ptr;
+	uint8_t sum = 0;
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		sum += p[i];
+	return (uint8_t)(0U - sum);
+}
+
+static void
+fill_sdt_header(struct acpi_sdt *sdt, const char *sig, uint32_t len,
+    uint8_t revision)
+{
+	memset(sdt, 0, sizeof(*sdt));
+	memcpy(sdt->signature, sig, 4);
+	sdt->length = len;
+	sdt->revision = revision;
+	memcpy(sdt->oem_id, "DFVMM ", 6);
+	memcpy(sdt->oem_table_id, "DFVMM   ", 8);
+	sdt->oem_revision = 1;
+	sdt->creator_id = 0x4d4d5644U;		/* DVMM */
+	sdt->creator_revision = 1;
+}
+
+static void
+finish_sdt(void *table)
+{
+	struct acpi_sdt *sdt = table;
+
+	sdt->checksum = 0;
+	sdt->checksum = checksum_bytes(table, sdt->length);
+}
+
+static void
+build_acpi_tables(uint8_t *mem, struct guest_alloc *ga)
+{
+	struct acpi_rsdp *rsdp;
+	struct acpi_rsdt *rsdt;
+	struct acpi_madt *madt;
+	struct acpi_lapic_entry *lapic;
+	struct acpi_ioapic_entry *ioapic;
+	uint8_t *entry;
+	uint32_t madt_len;
+
+	check_guest_range(ga->mem_size, ACPI_REGION_GPA, ACPI_REGION_SIZE);
+	memset(mem + ACPI_REGION_GPA, 0, ACPI_REGION_SIZE);
+	add_span(ga, ACPI_REGION_GPA, ACPI_REGION_SIZE, GPA_RANGE_BOOT);
+
+	rsdp = (struct acpi_rsdp *)(void *)(mem + ACPI_RSDP_GPA);
+	memset(rsdp, 0, sizeof(*rsdp));
+	memcpy(rsdp->signature, "RSD PTR ", 8);
+	memcpy(rsdp->oem_id, "DFVMM ", 6);
+	rsdp->revision = 2;
+	rsdp->rsdt_addr = ACPI_RSDT_GPA;
+	rsdp->length = sizeof(*rsdp);
+	rsdp->checksum = checksum_bytes(rsdp, 20);
+	rsdp->ext_checksum = checksum_bytes(rsdp, sizeof(*rsdp));
+
+	rsdt = (struct acpi_rsdt *)(void *)(mem + ACPI_RSDT_GPA);
+	fill_sdt_header(&rsdt->sdt, "RSDT", sizeof(*rsdt), 1);
+	rsdt->table_ptrs[0] = ACPI_MADT_GPA;
+	finish_sdt(rsdt);
+
+	madt = (struct acpi_madt *)(void *)(mem + ACPI_MADT_GPA);
+	madt_len = sizeof(*madt) + sizeof(*lapic) + sizeof(*ioapic);
+	fill_sdt_header(&madt->sdt, "APIC", madt_len, 1);
+	madt->lapic_addr = ACPI_LAPIC_BASE;
+	madt->flags = 1;
+	entry = madt->entries;
+	lapic = (struct acpi_lapic_entry *)(void *)entry;
+	lapic->type = 0;
+	lapic->length = sizeof(*lapic);
+	lapic->acpi_id = 0;
+	lapic->apic_id = 0;
+	lapic->flags = 1;
+	entry += sizeof(*lapic);
+	ioapic = (struct acpi_ioapic_entry *)(void *)entry;
+	ioapic->type = 1;
+	ioapic->length = sizeof(*ioapic);
+	ioapic->ioapic_id = 1;
+	ioapic->ioapic_addr = ACPI_IOAPIC_BASE;
+	ioapic->gsi_base = 0;
+	finish_sdt(madt);
+}
+
+static uint64_t
+build_multiboot2_info(uint8_t *mem, struct guest_alloc *ga)
+{
+	struct multiboot_info_header *mb;
+	struct multiboot_tag_header *tag;
+	uint64_t gpa;
+	size_t off;
+
+	gpa = guest_alloc_down(ga, PAGE_SIZE_GUEST, PAGE_SIZE_GUEST,
+	    GPA_RANGE_BOOT);
+	memset(mem + gpa, 0, PAGE_SIZE_GUEST);
+
+	mb = (struct multiboot_info_header *)(void *)(mem + gpa);
+	off = sizeof(*mb);
+
+	tag = (struct multiboot_tag_header *)(void *)(mem + gpa + off);
+	tag->type = MULTIBOOT_TAG_TYPE_ACPI_NEW;
+	tag->size = sizeof(*tag) + sizeof(struct acpi_rsdp);
+	memcpy((uint8_t *)tag + sizeof(*tag), mem + ACPI_RSDP_GPA,
+	    sizeof(struct acpi_rsdp));
+	off = align_up(off + tag->size, 8);
+
+	tag = (struct multiboot_tag_header *)(void *)(mem + gpa + off);
+	tag->type = MULTIBOOT_TAG_TYPE_END;
+	tag->size = sizeof(*tag);
+	off = align_up(off + tag->size, 8);
+
+	mb->total_size = off;
+	mb->reserved = 0;
+	return gpa;
+}
+
 static void
 build_boot_data(uint8_t *mem, struct guest_alloc *ga, uint64_t pvh_entry,
     struct vmm_x64_vcpu_state *vcpu)
 {
-	struct hvm_start_info start_info;
-	struct hvm_memmap_table_entry memmap;
 	uint64_t stack_base;
 	uint64_t stack_top;
 	uint64_t gdt;
 	uint64_t tss;
-	uint64_t start_info_gpa;
-	uint64_t memmap_gpa;
+	uint64_t multiboot_gpa;
 
+	build_acpi_tables(mem, ga);
 	stack_base = guest_alloc_down(ga, BOOT_STACK_SIZE, PAGE_SIZE_GUEST,
 	    GPA_RANGE_STACK);
 	gdt = guest_alloc_down(ga, PAGE_SIZE_GUEST, PAGE_SIZE_GUEST,
 	    GPA_RANGE_BOOT);
 	tss = guest_alloc_down(ga, PAGE_SIZE_GUEST, PAGE_SIZE_GUEST,
 	    GPA_RANGE_BOOT);
-	start_info_gpa = guest_alloc_down(ga, PAGE_SIZE_GUEST, PAGE_SIZE_GUEST,
-	    GPA_RANGE_BOOT);
-	memmap_gpa = guest_alloc_down(ga, PAGE_SIZE_GUEST, PAGE_SIZE_GUEST,
-	    GPA_RANGE_BOOT);
+	multiboot_gpa = build_multiboot2_info(mem, ga);
 	stack_top = stack_base + BOOT_STACK_SIZE;
 
 	memset(mem + gdt, 0, PAGE_SIZE_GUEST);
@@ -485,22 +652,10 @@ build_boot_data(uint8_t *mem, struct guest_alloc *ga, uint64_t pvh_entry,
 
 	memset(mem + tss, 0, PAGE_SIZE_GUEST);
 
-	memset(&memmap, 0, sizeof(memmap));
-	memmap.addr = 0;
-	memmap.size = ga->mem_size;
-	memmap.type = E820_RAM;
-	memcpy(mem + memmap_gpa, &memmap, sizeof(memmap));
-
-	memset(&start_info, 0, sizeof(start_info));
-	start_info.magic = XEN_HVM_START_MAGIC_VALUE;
-	start_info.version = 1;
-	start_info.memmap_paddr = memmap_gpa;
-	start_info.memmap_entries = 1;
-	memcpy(mem + start_info_gpa, &start_info, sizeof(start_info));
-
 	memset(vcpu, 0, sizeof(*vcpu));
 	vcpu->runnable = 1;
-	vcpu->gpr[VMM_X64_GPR_RBX] = start_info_gpa;
+	vcpu->gpr[VMM_X64_GPR_RBX] = multiboot_gpa;
+	vcpu->gpr[VMM_X64_GPR_RAX] = MULTIBOOT2_BOOTLOADER_MAGIC;
 	vcpu->gpr[VMM_X64_GPR_RSP] = stack_top - sizeof(uint64_t);
 	vcpu->gpr[VMM_X64_GPR_RIP] = pvh_entry;
 	vcpu->gpr[VMM_X64_GPR_RFLAGS] = 2;
