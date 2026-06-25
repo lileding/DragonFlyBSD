@@ -525,10 +525,10 @@ fill_sdt_header(struct acpi_sdt *sdt, const char *sig, uint32_t len,
 	memcpy(sdt->signature, sig, 4);
 	sdt->length = len;
 	sdt->revision = revision;
-	memcpy(sdt->oem_id, "DFVMM ", 6);
-	memcpy(sdt->oem_table_id, "DFVMM   ", 8);
+	memcpy(sdt->oem_id, "VMM   ", 6);
+	memcpy(sdt->oem_table_id, "VMM     ", 8);
 	sdt->oem_revision = 1;
-	sdt->creator_id = 0x4d4d5644U;		/* DVMM */
+	sdt->creator_id = 0x204d4d56U;		/* VMM */
 	sdt->creator_revision = 1;
 }
 
@@ -559,7 +559,7 @@ build_acpi_tables(uint8_t *mem, struct guest_alloc *ga)
 	rsdp = (struct acpi_rsdp *)(void *)(mem + ACPI_RSDP_GPA);
 	memset(rsdp, 0, sizeof(*rsdp));
 	memcpy(rsdp->signature, "RSD PTR ", 8);
-	memcpy(rsdp->oem_id, "DFVMM ", 6);
+	memcpy(rsdp->oem_id, "VMM   ", 6);
 	rsdp->revision = 2;
 	rsdp->rsdt_addr = ACPI_RSDT_GPA;
 	rsdp->length = sizeof(*rsdp);
