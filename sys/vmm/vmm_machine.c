@@ -250,6 +250,7 @@ vmm_machine_start_task(struct vmm_machine *m)
 	if (cred == NULL || vmm_machine_start_cancelled_locked(m)) {
 		m->mut_starting = 0;
 		vmm_machine_unlock(m);
+		wakeup(m);
 		if (cred != NULL)
 			crfree(cred);
 		vmm_machine_owner_release(m);
@@ -297,6 +298,7 @@ vmm_machine_start_task(struct vmm_machine *m)
 	if (!started && release_mem)
 		backing = vmm_machine_detach_mem_locked(m);
 	vmm_machine_unlock(m);
+	wakeup(m);
 
 	if (!started && release_mem)
 		vmm_mem_release_backing(backing);
@@ -524,6 +526,15 @@ vmm_machine_quiesced(const struct vmm_machine *m)
 	    !vmm_vcpu_has_active(&m->own_mut_vcpu);
 	vmm_machine_unlock(mm);
 	return quiesced;
+}
+
+void
+vmm_machine_wait_quiesced(struct vmm_machine *m)
+{
+	while (!vmm_machine_quiesced(m)) {
+		vmm_machine_request_stopped(m, 1);
+		tsleep(m, 0, "vmmqsc", hz / 20 + 1);
+	}
 }
 
 int

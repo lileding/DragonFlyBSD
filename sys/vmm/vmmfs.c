@@ -669,6 +669,9 @@ vmmfs_force_stop_all(struct vmmfs_mount *vmp)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		if (m == NULL)
 			break;
+		vmm_machine_request_stopped(&m->machine, 1);
+		(void)vmm_machine_begin_delete(&m->machine);
+		vmm_machine_wait_quiesced(&m->machine);
 		vmmfs_machine_mark_deleted(vmp, m);
 		vmmfs_machine_unref(vmp, m);
 	}

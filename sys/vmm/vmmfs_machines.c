@@ -156,9 +156,9 @@ vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 }
 
 /*
- * `rmdir machines/<name>` removes a stopped machine (source 1): it deletes
- * regardless of leases.  The slot is freed lazily so still-open fds keep
- * working until reclaimed.
+ * `rmdir machines/<name>` removes a fully quiesced machine (source 1): it
+ * deletes regardless of leases.  The slot is freed lazily so still-open fds
+ * keep working until reclaimed.
  */
 static int
 vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
@@ -186,7 +186,7 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	if (!vmm_machine_is_stopped(&m->machine)) {
+	if (!vmm_machine_quiesced(&m->machine)) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return EBUSY;
