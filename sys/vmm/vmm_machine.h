@@ -95,6 +95,7 @@ int	vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
 int	vmm_machine_is_stopped(const struct vmm_machine *m);
 int	vmm_machine_is_running(const struct vmm_machine *m);
 int	vmm_machine_starting(const struct vmm_machine *m);
+int	vmm_machine_quiesced(const struct vmm_machine *m);
 int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	    struct vmm_host *host);
 void	vmm_machine_request_stopped(struct vmm_machine *m, int force);

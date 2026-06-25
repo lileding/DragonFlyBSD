@@ -82,6 +82,7 @@ struct vmmfs_mount {
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
 	struct vmm_host		host;		/* the physical host (device pool source) */
 	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
+	int			vm_async_refs;	/* workers/vCPUs executing module code */
 	int			vm_next_dev;	/* monotonic device ino index */
 };
 

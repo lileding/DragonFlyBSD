@@ -67,6 +67,8 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 };
 #define VMMFS_NCFG_FILES \
 	((int)(sizeof(vmmfs_cfg_table) / sizeof(vmmfs_cfg_table[0])))
+static void	vmmfs_machine_free(struct vmmfs_machine *m);
+
 
 /* The node backing a config descriptor within a machine slot. */
 static struct vmmfs_node *
@@ -86,16 +88,32 @@ static void
 vmmfs_machine_owner_hold(void *arg)
 {
 	struct vmmfs_machine *m = arg;
+	struct vmmfs_mount *vmp = m->vm_mount;
 
-	vmmfs_machine_ref(m->vm_mount, m);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	m->vm_refs++;
+	vmp->vm_async_refs++;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
 }
 
 static void
 vmmfs_machine_owner_release(void *arg)
 {
 	struct vmmfs_machine *m = arg;
+	struct vmmfs_mount *vmp = m->vm_mount;
+	int dofree;
+	int wake;
 
-	vmmfs_machine_unref(m->vm_mount, m);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	KKASSERT(vmp->vm_async_refs > 0);
+	vmp->vm_async_refs--;
+	dofree = (--m->vm_refs == 0);
+	wake = (vmp->vm_async_refs == 0);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	if (wake)
+		wakeup(&vmp->vm_async_refs);
+	if (dofree)
+		vmmfs_machine_free(m);
 }
 
 static const struct vmm_machine_owner_ops vmmfs_machine_owner_ops = {

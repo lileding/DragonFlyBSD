@@ -103,6 +103,12 @@
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
 #define VMM_SVM_ASID			1
+#define VMM_SVM_EFER_VALID		(EFER_SCE | EFER_LME | EFER_LMA | \
+					 EFER_NXE | EFER_SVME | EFER_FFXSR | \
+					 EFER_TCE)
+#define VMM_SVM_MTRR_DEF_VALID		(MTRR_DEF_ENABLE | \
+					 MTRR_DEF_FIXED_ENABLE | MTRR_DEF_TYPE)
+
 
 #define VMM_X64_NDR			6
 #define VMM_X64_DR_DR0			0
@@ -245,6 +251,8 @@ struct vmm_svm_backend {
 	uint64_t mut_host_sysenter_cs;
 	uint64_t mut_host_sysenter_esp;
 	uint64_t mut_host_sysenter_eip;
+	uint64_t mut_guest_mtrr_def_type;
+	uint64_t mut_guest_tsc_aux;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 };
 
@@ -441,6 +449,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	*backendp = NULL;
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
 	svm->borrow_imm_machine = m;
+	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
@@ -467,15 +476,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_SMI |
 	    VMM_SVM_CTRL_INTERCEPT_INIT |
 	    VMM_SVM_CTRL_INTERCEPT_VINTR |
-	    VMM_SVM_CTRL_INTERCEPT_CR0_SEL |
-	    VMM_SVM_CTRL_INTERCEPT_RIDTR |
-	    VMM_SVM_CTRL_INTERCEPT_RGDTR |
-	    VMM_SVM_CTRL_INTERCEPT_RLDTR |
-	    VMM_SVM_CTRL_INTERCEPT_RTR |
-	    VMM_SVM_CTRL_INTERCEPT_WIDTR |
-	    VMM_SVM_CTRL_INTERCEPT_WGDTR |
-	    VMM_SVM_CTRL_INTERCEPT_WLDTR |
-	    VMM_SVM_CTRL_INTERCEPT_WTR |
 	    VMM_SVM_CTRL_INTERCEPT_RDTSC |
 	    VMM_SVM_CTRL_INTERCEPT_RDPMC |
 	    VMM_SVM_CTRL_INTERCEPT_PUSHF |
@@ -689,6 +689,167 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 }
 
 static void
+vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb)
+{
+	if (vmcb->ctrl.nrip != 0)
+		vmcb->state.rip = vmcb->ctrl.nrip;
+	else if (vmcb->ctrl.inst_len != 0)
+		vmcb->state.rip += vmcb->ctrl.inst_len;
+	else
+		vmcb->state.rip += 2;
+}
+
+static void
+vmm_svm_rdmsr_value(struct vmm_svm_backend *svm, uint64_t val)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	vmcb->state.rax = val & 0xffffffffULL;
+	svm->mut_gprs[VMM_X64_GPR_RDX] = val >> 32;
+	vmm_svm_advance_rip(vmcb);
+}
+
+static uint64_t
+vmm_svm_wrmsr_value(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	return (svm->mut_gprs[VMM_X64_GPR_RDX] << 32) |
+	    (vmcb->state.rax & 0xffffffffULL);
+}
+
+static int
+vmm_svm_handle_msr(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint32_t msr = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
+	uint64_t val;
+
+	if (vmcb->ctrl.exitinfo1 == 0) {
+		switch (msr) {
+		case MSR_EFER:
+			vmm_svm_rdmsr_value(svm, vmcb->state.efer & ~EFER_SVME);
+			return 1;
+		case MSR_PAT:
+			vmm_svm_rdmsr_value(svm, vmcb->state.g_pat);
+			return 1;
+		case MSR_TSC:
+			vmm_svm_rdmsr_value(svm, rdtsc() + vmcb->ctrl.tsc_offset);
+			return 1;
+		case MSR_TSC_AUX:
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_tsc_aux);
+			return 1;
+		case MSR_MTRRdefType:
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_mtrr_def_type);
+			return 1;
+		case MSR_STAR:
+			vmm_svm_rdmsr_value(svm, vmcb->state.star);
+			return 1;
+		case MSR_LSTAR:
+			vmm_svm_rdmsr_value(svm, vmcb->state.lstar);
+			return 1;
+		case MSR_CSTAR:
+			vmm_svm_rdmsr_value(svm, vmcb->state.cstar);
+			return 1;
+		case MSR_SF_MASK:
+			vmm_svm_rdmsr_value(svm, vmcb->state.sfmask);
+			return 1;
+		case MSR_FSBASE:
+			vmm_svm_rdmsr_value(svm, vmcb->state.fs.base);
+			return 1;
+		case MSR_GSBASE:
+			vmm_svm_rdmsr_value(svm, vmcb->state.gs.base);
+			return 1;
+		case MSR_KGSBASE:
+			vmm_svm_rdmsr_value(svm, vmcb->state.kernelgsbase);
+			return 1;
+		case MSR_SYSENTER_CS:
+			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_cs);
+			return 1;
+		case MSR_SYSENTER_ESP:
+			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_esp);
+			return 1;
+		case MSR_SYSENTER_EIP:
+			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_eip);
+			return 1;
+		default:
+			return 0;
+		}
+	}
+
+	val = vmm_svm_wrmsr_value(svm);
+	switch (msr) {
+	case MSR_EFER:
+		if ((val & ~VMM_SVM_EFER_VALID) != 0)
+			return 0;
+		vmcb->state.efer = (val & ~EFER_SVME) | EFER_SVME;
+		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_PAT:
+		vmcb->state.g_pat = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_TSC:
+		vmcb->ctrl.tsc_offset = val - rdtsc();
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_TSC_AUX:
+		svm->mut_guest_tsc_aux = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_MTRRdefType:
+		if ((val & ~VMM_SVM_MTRR_DEF_VALID) != 0)
+			return 0;
+		svm->mut_guest_mtrr_def_type = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_STAR:
+		vmcb->state.star = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_LSTAR:
+		vmcb->state.lstar = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_CSTAR:
+		vmcb->state.cstar = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_SF_MASK:
+		vmcb->state.sfmask = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_FSBASE:
+		vmcb->state.fs.base = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_GSBASE:
+		vmcb->state.gs.base = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_KGSBASE:
+		vmcb->state.kernelgsbase = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_SYSENTER_CS:
+		vmcb->state.sysenter_cs = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_SYSENTER_ESP:
+		vmcb->state.sysenter_esp = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_SYSENTER_EIP:
+		vmcb->state.sysenter_eip = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static void
 vmm_svm_yield_after_host_interrupt(void)
 {
 	/*
@@ -699,6 +860,16 @@ vmm_svm_yield_after_host_interrupt(void)
 	 */
 	lwkt_user_yield();
 }
+
+static void
+vmm_svm_handle_hlt(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
+    struct vmm_svm_vmcb *vmcb)
+{
+	vmm_svm_advance_rip(vmcb);
+	if (!vmm_machine_vcpu_should_stop(m))
+		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
+}
+
 
 void
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
@@ -711,8 +882,8 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		return;
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_machine_vcpu_should_stop(m)) {
-		vmm_svm_clgi();
 		vmm_svm_enable_cpu(svm);
+		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup();
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
@@ -726,29 +897,38 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_fpu_leave(svm);
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
-		vmm_svm_stgi();
-		switch (vmcb->ctrl.exitcode) {
-		case VMM_SVM_EXIT_INTR:
-		case VMM_SVM_EXIT_NMI:
-			vmm_svm_yield_after_host_interrupt();
-			break;
-		case VMM_SVM_EXIT_CPUID:
-			vmm_svm_handle_cpuid(svm);
-			break;
-		case VMM_SVM_EXIT_HLT:
-			goto out;
+			vmm_svm_stgi();
+			switch (vmcb->ctrl.exitcode) {
+			case VMM_SVM_EXIT_INTR:
+			case VMM_SVM_EXIT_NMI:
+				vmm_svm_yield_after_host_interrupt();
+				break;
+			case VMM_SVM_EXIT_CPUID:
+				vmm_svm_handle_cpuid(svm);
+				break;
+			case VMM_SVM_EXIT_HLT:
+				vmm_svm_handle_hlt(m, vc, vmcb);
+				break;
 		case VMM_SVM_EXIT_SHUTDOWN:
 		case VMM_SVM_EXIT_NPF:
 		case VMM_SVM_EXIT_IOIO:
+			goto unhandled;
 		case VMM_SVM_EXIT_MSR:
+			if (vmm_svm_handle_msr(svm))
+				break;
+			goto unhandled;
 		case VMM_SVM_EXIT_VMMCALL:
 		case VMM_SVM_EXIT_XSETBV:
 		default:
-			kprintf("vmm_svm: vmexit 0x%jx info1=0x%jx info2=0x%jx rip=0x%jx\n",
+	unhandled:
+			kprintf("vmm_svm: vmexit 0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx\n",
 			    (uintmax_t)vmcb->ctrl.exitcode,
 			    (uintmax_t)vmcb->ctrl.exitinfo1,
 			    (uintmax_t)vmcb->ctrl.exitinfo2,
-			    (uintmax_t)vmcb->state.rip);
+			    (uintmax_t)vmcb->state.rip,
+			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RCX],
+			    (uintmax_t)vmcb->state.rax,
+			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
 			goto out;
 		}
 		lwkt_user_yield();

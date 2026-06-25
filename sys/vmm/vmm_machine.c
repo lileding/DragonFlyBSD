@@ -503,6 +503,19 @@ vmm_machine_starting(const struct vmm_machine *m)
 }
 
 int
+vmm_machine_quiesced(const struct vmm_machine *m)
+{
+	struct vmm_machine *mm = __DECONST(struct vmm_machine *, m);
+	int quiesced;
+
+	vmm_machine_lock(mm);
+	quiesced = !m->mut_starting && !m->mut_running &&
+	    !vmm_vcpu_has_active(&m->own_mut_vcpu);
+	vmm_machine_unlock(mm);
+	return quiesced;
+}
+
+int
 vmm_machine_start_cancelled_locked(const struct vmm_machine *m)
 {
 	return m->mut_start_cancel || m->mut_desired_stopped || m->mut_deleting;

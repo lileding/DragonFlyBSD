@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/conf.h>
 #include <sys/devfs.h>
@@ -83,7 +84,7 @@ vmm_loader_is_set(const struct vmm_loader *l)
 struct vmm_loader_epoch {
 	struct file	*own_mut_mem_fp;
 	struct file	*own_mut_manifest_fp;
-	void		*own_mut_manifest_data;
+	void		*borrow_mut_manifest_data;
 	uint64_t	 imm_mem_size;
 	struct ucred	*borrow_imm_cred;
 	vmm_loader_cancel_fn *borrow_imm_cancel;
@@ -93,12 +94,14 @@ struct vmm_loader_epoch {
 
 struct vmm_loader_fd {
 	cdev_t		own_mut_dev;
-	struct vm_object *borrow_imm_object;
-	void		*borrow_mut_data;
+	struct vm_object *own_mut_object;
+	void		*own_mut_data;
 	vm_size_t	imm_size;
 	int		imm_buffer;
 };
 
+static struct lock vmm_loader_fd_lock;
+static int vmm_loader_mut_active_fds;
 static uint32_t vmm_loader_fd_serial;
 
 static d_open_t		vmm_loader_fd_open;
@@ -153,6 +156,44 @@ static struct fileops vmm_loader_fileops = {
 	.fo_shutdown =		nofo_shutdown,
 	.fo_seek =		vmm_loader_fo_seek,
 };
+
+void
+vmm_loader_init(void)
+{
+	lockinit(&vmm_loader_fd_lock, "vmmldfd", 0, 0);
+	vmm_loader_mut_active_fds = 0;
+}
+
+int
+vmm_loader_uninit(void)
+{
+	int busy;
+
+	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
+	busy = (vmm_loader_mut_active_fds != 0);
+	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
+	if (busy)
+		return EBUSY;
+	lockuninit(&vmm_loader_fd_lock);
+	return 0;
+}
+
+static void
+vmm_loader_fd_hold(void)
+{
+	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
+	vmm_loader_mut_active_fds++;
+	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
+}
+
+static void
+vmm_loader_fd_release(void)
+{
+	lockmgr(&vmm_loader_fd_lock, LK_EXCLUSIVE);
+	KKASSERT(vmm_loader_mut_active_fds > 0);
+	vmm_loader_mut_active_fds--;
+	lockmgr(&vmm_loader_fd_lock, LK_RELEASE);
+}
 
 static int
 vmm_loader_fd_open(struct dev_open_args *ap)
@@ -292,6 +333,12 @@ vmm_loader_fd_free(void *arg)
 		lfd->own_mut_dev->si_drv1 = NULL;
 		destroy_only_dev(lfd->own_mut_dev);
 	}
+	if (lfd->own_mut_object != NULL)
+		vm_object_deallocate(lfd->own_mut_object);
+	if (lfd->own_mut_data != NULL)
+		kmem_free(kernel_map, (vm_offset_t)lfd->own_mut_data,
+		    lfd->imm_size);
+	vmm_loader_fd_release();
 	kfree(lfd, M_TEMP);
 }
 
@@ -305,13 +352,13 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	error = devfs_get_cdevpriv(ap->a_fp, (void **)&lfd);
 	if (error)
 		return error;
-	if (lfd->imm_buffer || lfd->borrow_imm_object == NULL)
+	if (lfd->imm_buffer || lfd->own_mut_object == NULL)
 		return EINVAL;
 	off = *ap->a_offset;
 	if (off < 0 || off > lfd->imm_size || ap->a_size > lfd->imm_size - off)
 		return EINVAL;
-	vm_object_reference_quick(lfd->borrow_imm_object);
-	*ap->a_object = lfd->borrow_imm_object;
+	vm_object_reference_quick(lfd->own_mut_object);
+	*ap->a_object = lfd->own_mut_object;
 	return 0;
 }
 
@@ -322,7 +369,7 @@ vmm_loader_fd_uksmap(struct vm_map_backing *ba, int op, cdev_t dev,
 	struct vmm_loader_fd *lfd = dev->si_drv1;
 	vm_ooffset_t off;
 
-	if (lfd == NULL || !lfd->imm_buffer || lfd->borrow_mut_data == NULL)
+	if (lfd == NULL || !lfd->imm_buffer || lfd->own_mut_data == NULL)
 		return EINVAL;
 	switch (op) {
 	case UKSMAPOP_ADD:
@@ -332,7 +379,7 @@ vmm_loader_fd_uksmap(struct vm_map_backing *ba, int op, cdev_t dev,
 		off = IDX_TO_OFF(fake->pindex);
 		if (off < 0 || off >= lfd->imm_size)
 			return EINVAL;
-		fake->phys_addr = vtophys((char *)lfd->borrow_mut_data + off);
+		fake->phys_addr = vtophys((char *)lfd->own_mut_data + off);
 		return 0;
 	default:
 		(void)ba;
@@ -421,13 +468,15 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 		return EINVAL;
 
 	lfd = kmalloc(sizeof(*lfd), M_TEMP, M_WAITOK | M_ZERO);
-	lfd->borrow_imm_object = object;
+	vmm_loader_fd_hold();
+	vm_object_reference_quick(object);
+	lfd->own_mut_object = object;
 	lfd->imm_size = round_page(size);
 	serial = atomic_fetchadd_int(&vmm_loader_fd_serial, 1);
 	lfd->own_mut_dev = make_only_dev(&vmm_loader_object_fd_ops, serial, UID_ROOT,
 	    GID_WHEEL, 0600, "vmmld%d", serial);
 	if (lfd->own_mut_dev == NULL) {
-		kfree(lfd, M_TEMP);
+		vmm_loader_fd_free(lfd);
 		return ENXIO;
 	}
 	lfd->own_mut_dev->si_drv1 = lfd;
@@ -444,14 +493,15 @@ vmm_loader_open_buffer_fd(void *data, vm_size_t size, struct file **fpp)
 		return EINVAL;
 
 	lfd = kmalloc(sizeof(*lfd), M_TEMP, M_WAITOK | M_ZERO);
-	lfd->borrow_mut_data = data;
+	vmm_loader_fd_hold();
+	lfd->own_mut_data = data;
 	lfd->imm_size = round_page(size);
 	lfd->imm_buffer = 1;
 	serial = atomic_fetchadd_int(&vmm_loader_fd_serial, 1);
 	lfd->own_mut_dev = make_only_dev(&vmm_loader_buffer_fd_ops, serial, UID_ROOT,
 	    GID_WHEEL, 0600, "vmmld%d", serial);
 	if (lfd->own_mut_dev == NULL) {
-		kfree(lfd, M_TEMP);
+		vmm_loader_fd_free(lfd);
 		return ENXIO;
 	}
 	lfd->own_mut_dev->si_drv1 = lfd;
@@ -631,6 +681,7 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 {
 	struct vmm_loader_epoch *ep;
 	size_t path_len;
+	void *manifest_data = NULL;
 	int error;
 
 	if (!vmm_mem_is_set(mem) || vmm_mem_object(mem) == NULL ||
@@ -658,17 +709,19 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 	    (vm_size_t)ep->imm_mem_size, &ep->own_mut_mem_fp);
 	if (error)
 		goto out;
-	ep->own_mut_manifest_data = (void *)kmem_alloc(kernel_map,
-	    VMM_MANIFEST_SIZE, VM_SUBSYS_MMAP);
-	if (ep->own_mut_manifest_data == NULL) {
+	manifest_data = (void *)kmem_alloc(kernel_map, VMM_MANIFEST_SIZE,
+	    VM_SUBSYS_MMAP);
+	if (manifest_data == NULL) {
 		error = ENOMEM;
 		goto out;
 	}
-	bzero(ep->own_mut_manifest_data, VMM_MANIFEST_SIZE);
-	error = vmm_loader_open_buffer_fd(ep->own_mut_manifest_data,
+	bzero(manifest_data, VMM_MANIFEST_SIZE);
+	error = vmm_loader_open_buffer_fd(manifest_data,
 	    VMM_MANIFEST_SIZE, &ep->own_mut_manifest_fp);
 	if (error)
 		goto out;
+	ep->borrow_mut_manifest_data = manifest_data;
+	manifest_data = NULL;
 	if (vmm_loader_cancelled(ep)) {
 		error = EINTR;
 		goto out;
@@ -681,15 +734,15 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 		goto out;
 	}
 	error = vmm_loader_x86_manifest_load(ep->imm_mem_size,
-	    ep->own_mut_manifest_data, VMM_MANIFEST_SIZE, launch);
+	    ep->borrow_mut_manifest_data, VMM_MANIFEST_SIZE, launch);
 
 out:
 	if (ep->own_mut_manifest_fp != NULL)
 		fp_close(ep->own_mut_manifest_fp);
 	if (ep->own_mut_mem_fp != NULL)
 		fp_close(ep->own_mut_mem_fp);
-	if (ep->own_mut_manifest_data != NULL)
-		kmem_free(kernel_map, (vm_offset_t)ep->own_mut_manifest_data,
+	if (manifest_data != NULL)
+		kmem_free(kernel_map, (vm_offset_t)manifest_data,
 		    VMM_MANIFEST_SIZE);
 	kfree(ep, M_TEMP);
 	return error;

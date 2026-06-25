@@ -37,12 +37,44 @@
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
+#include "vmm_loader.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
+static struct lock vmmfs_mount_lock;
+static int vmmfs_mount_count;
+
+static void
+vmmfs_mount_count_hold(void)
+{
+	lockmgr(&vmmfs_mount_lock, LK_EXCLUSIVE);
+	vmmfs_mount_count++;
+	lockmgr(&vmmfs_mount_lock, LK_RELEASE);
+}
+
+static void
+vmmfs_mount_count_release(void)
+{
+	lockmgr(&vmmfs_mount_lock, LK_EXCLUSIVE);
+	KKASSERT(vmmfs_mount_count > 0);
+	vmmfs_mount_count--;
+	lockmgr(&vmmfs_mount_lock, LK_RELEASE);
+}
+
+static int
+vmmfs_mount_count_busy(void)
+{
+	int busy;
+
+	lockmgr(&vmmfs_mount_lock, LK_SHARED);
+	busy = (vmmfs_mount_count != 0);
+	lockmgr(&vmmfs_mount_lock, LK_RELEASE);
+	return busy;
+}
+
 
 static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 		    struct ucred *cred);
@@ -599,8 +631,62 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    sizeof(mp->mnt_stat.f_mntonname) - 1, &size);
 
 	vmmfs_statfs(mp, &mp->mnt_stat, cred);
+	vmmfs_mount_count_hold();
 	return 0;
 }
+
+static int
+vmmfs_unmount_busy(struct vmmfs_mount *vmp)
+{
+	struct vmmfs_machine *m;
+	int busy = 0;
+
+	lockmgr(&vmp->vm_lock, LK_SHARED);
+	if (vmp->vm_async_refs != 0) {
+		busy = 1;
+		goto out;
+	}
+	RB_FOREACH(m, vmmfs_machtree, &vmp->vm_machtree) {
+		if (!vmm_machine_quiesced(&m->machine)) {
+			busy = 1;
+			break;
+		}
+	}
+out:
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	return busy;
+}
+
+static void
+vmmfs_force_stop_all(struct vmmfs_mount *vmp)
+{
+	struct vmmfs_machine *m;
+
+	for (;;) {
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m = RB_ROOT(&vmp->vm_machtree);
+		if (m != NULL)
+			m->vm_refs++;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		if (m == NULL)
+			break;
+		vmmfs_machine_mark_deleted(vmp, m);
+		vmmfs_machine_unref(vmp, m);
+	}
+}
+
+static void
+vmmfs_wait_async_drained(struct vmmfs_mount *vmp)
+{
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	while (vmp->vm_async_refs != 0) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		tsleep(&vmp->vm_async_refs, 0, "vmmfsu", hz / 20 + 1);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	}
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+}
+
 
 static int
 vmmfs_unmount(struct mount *mp, int mntflags)
@@ -609,8 +695,13 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	int flags = 0;
 	int error;
 
-	if (mntflags & MNT_FORCE)
+	if (mntflags & MNT_FORCE) {
 		flags |= FORCECLOSE;
+		vmmfs_force_stop_all(vmp);
+		vmmfs_wait_async_drained(vmp);
+	} else if (vmmfs_unmount_busy(vmp)) {
+		return EBUSY;
+	}
 
 	error = vflush(mp, 0, flags);
 	if (error)
@@ -635,6 +726,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	vmmfs_node_uninit(&vmp->vm_host);
 	vmmfs_node_uninit(&vmp->vm_machines);
 	vmmfs_node_uninit(&vmp->vm_root);
+	vmmfs_mount_count_release();
 	lockuninit(&vmp->vm_lock);
 	mp->mnt_data = NULL;
 	kfree(vmp, M_VMMFS);
@@ -671,6 +763,10 @@ vmmfs_statfs(struct mount *mp, struct statfs *sbp, struct ucred *cred)
 static int
 vmmfs_vfs_init(struct vfsconf *conf)
 {
+	(void)conf;
+	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
+	vmmfs_mount_count = 0;
+	vmm_loader_init();
 	kprintf("vmm: loaded\n");
 	return 0;
 }
@@ -678,6 +774,15 @@ vmmfs_vfs_init(struct vfsconf *conf)
 static int
 vmmfs_vfs_uninit(struct vfsconf *conf)
 {
+	int error;
+
+	(void)conf;
+	if (vmmfs_mount_count_busy())
+		return EBUSY;
+	error = vmm_loader_uninit();
+	if (error)
+		return error;
+	lockuninit(&vmmfs_mount_lock);
 	kprintf("vmm: unloaded\n");
 	return 0;
 }

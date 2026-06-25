@@ -22,6 +22,10 @@ struct vmm_loader {
 	size_t		mut_len;		/* 0 = unset */
 };
 
+/* Global loader-fd lifetime gate for module unload safety. */
+void	vmm_loader_init(void);
+int	vmm_loader_uninit(void);
+
 /* Parse + store the trimmed path.  1 = updated, 0 = reject. */
 int	vmm_loader_parse(struct vmm_loader *l, const char *buf, size_t len);
 /* Path + trailing newline (file contents). */
