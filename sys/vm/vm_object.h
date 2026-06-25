@@ -206,11 +206,8 @@ struct vm_object {
  *		    that the objects aren't intended to have any vm_page's,
  *		    only swap blocks.  vn and tmpfs don't know how to deal
  *		    with any actual pages.
- *
- * OBJ_MMAP_REVOKED - transient mmap capability has been revoked.  New
- *		      mappings, fork inheritance, and user faults must fail.
  */
-#define OBJ_MMAP_REVOKED	0x0001
+#define OBJ_UNUSED0001	0x0001
 #define OBJ_UNUSED0002	0x0002
 #define OBJ_ACTIVE	0x0004		/* active objects */
 #define OBJ_DEAD	0x0008		/* dead objects (during rundown) */
@@ -325,7 +322,6 @@ void vm_object_page_clean (vm_object_t, vm_pindex_t, vm_pindex_t, int);
 void vm_object_page_remove (vm_object_t, vm_pindex_t, vm_pindex_t, boolean_t);
 void vm_object_pmap_copy (vm_object_t, vm_pindex_t, vm_pindex_t);
 void vm_object_madvise (vm_object_t, vm_pindex_t, vm_pindex_t, int);
-void vm_object_mmap_revoke (vm_object_t);
 void vm_object_init2 (void);
 vm_page_t vm_fault_object_page(vm_object_t, vm_ooffset_t,
 				vm_prot_t, int, int *, int *);

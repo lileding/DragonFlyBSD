@@ -297,17 +297,6 @@ unlock_things(struct faultstate *fs)
 	}
 }
 
-static int
-vm_fault_mmap_revoked(vm_map_backing_t ba)
-{
-	for (; ba != NULL; ba = ba->backing_ba) {
-		if (ba->object != NULL &&
-		    (ba->object->flags & OBJ_MMAP_REVOKED) != 0)
-			return 1;
-	}
-	return 0;
-}
-
 #if 0
 /*
  * Virtual copy tests.   Used by the fault code to determine if a
@@ -550,14 +539,6 @@ RetryFault:
 	fs.first_m = NULL;
 	fs.ba = fs.first_ba;		/* so unlock_things() works */
 	fs.prot = fs.first_prot;	/* default (used by uksmap) */
-
-	if (curproc != NULL && curproc->p_vmspace != NULL &&
-	    map == &curproc->p_vmspace->vm_map &&
-	    vm_fault_mmap_revoked(fs.first_ba)) {
-		result = KERN_PROTECTION_FAILURE;
-		unlock_things(&fs);
-		goto done2;
-	}
 
 	if (fs.entry->eflags & (MAP_ENTRY_NOFAULT | MAP_ENTRY_KSTACK)) {
 		if (fs.entry->eflags & MAP_ENTRY_NOFAULT) {

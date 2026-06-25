@@ -3693,19 +3693,6 @@ static void vmspace_fork_uksmap_entry(struct proc *p2, struct lwp *lp2,
 			  vm_map_t old_map, vm_map_t new_map,
 			  vm_map_entry_t old_entry, int *countp);
 
-static int
-vm_map_entry_mmap_revoked(vm_map_entry_t entry)
-{
-	vm_map_backing_t ba;
-
-	for (ba = &entry->ba; ba != NULL; ba = ba->backing_ba) {
-		if (ba->object != NULL &&
-		    (ba->object->flags & OBJ_MMAP_REVOKED) != 0)
-			return 1;
-	}
-	return 0;
-}
-
 struct vmspace *
 vmspace_fork(struct vmspace *vm1, struct proc *p2, struct lwp *lp2)
 {
@@ -3775,9 +3762,6 @@ vmspace_fork_normal_entry(vm_map_t old_map, vm_map_t new_map,
 	vm_map_entry_t new_entry;
 	vm_map_backing_t ba;
 	vm_object_t object;
-
-	if (vm_map_entry_mmap_revoked(old_entry))
-		return;
 
 	/*
 	 * If the backing_ba link list gets too long then fault it

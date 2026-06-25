@@ -309,8 +309,6 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 		return error;
 	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL)
 		return EINVAL;
-	if (lfd->own_mut_object->flags & OBJ_MMAP_REVOKED)
-		return EACCES;
 	if (ap->a_nprot & VM_PROT_EXECUTE)
 		return EACCES;
 	off = *ap->a_offset;
@@ -514,10 +512,10 @@ vmm_loader_cancelled(struct vmm_loader_epoch *ep)
 static void
 vmm_loader_revoke_fp(struct file *fp, struct vm_object *object)
 {
+	(void)object;
+
 	if (fp != NULL && fp->f_type == DTYPE_VNODE && fp->f_data != NULL)
 		(void)fdrevoke(fp->f_data, DTYPE_VNODE, proc0.p_ucred);
-	if (object != NULL)
-		vm_object_mmap_revoke(object);
 }
 
 static void
