@@ -237,6 +237,25 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	    0x0f, 0x01, 0xd1,	/* xsetbv */
 	    0x0f, 0x01, 0xd9	/* vmmcall */
 	};
+	static const uint8_t apicmsr_vmmcall[] = {
+	    0xb9, 0x1b, 0x00, 0x00, 0x00, /* mov ecx,MSR_APICBASE */
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0d, 0x00, 0x0d, 0x00, 0x00, /* or eax,BSP|X2APIC|EN */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0xe0, 0x06, 0x00, 0x00, /* mov ecx,MSR_TSC_DEADLINE */
+	    0xb8, 0xff, 0xff, 0xff, 0xff, /* mov eax,0xffffffff */
+	    0xba, 0xff, 0xff, 0xff, 0xff, /* mov edx,0xffffffff */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0x32, 0x08, 0x00, 0x00, /* mov ecx,x2APIC LVT timer */
+	    0xb8, 0x2e, 0x00, 0x04, 0x00, /* mov eax,0x4002e */
+	    0x31, 0xd2,		/* xor edx,edx */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0x02, 0x08, 0x00, 0x00, /* mov ecx,x2APIC ID */
+	    0x0f, 0x32,		/* rdmsr */
+	    0xb9, 0x03, 0x08, 0x00, 0x00, /* mov ecx,x2APIC VERSION */
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0f, 0x01, 0xd9	/* vmmcall */
+	};
 	static const uint8_t hlt[] = { 0xf4 };
 	static const uint8_t loop[] = { 0xeb, 0xfe };
 	const uint8_t *src;
@@ -256,6 +275,9 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	} else if (strcmp(mode, "xsetbv") == 0) {
 		src = xsetbv_vmmcall;
 		len = sizeof(xsetbv_vmmcall);
+	} else if (strcmp(mode, "apicmsr") == 0) {
+		src = apicmsr_vmmcall;
+		len = sizeof(apicmsr_vmmcall);
 	} else if (strcmp(mode, "hlt") == 0) {
 		src = hlt;
 		len = sizeof(hlt);
@@ -365,7 +387,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

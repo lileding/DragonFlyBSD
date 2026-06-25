@@ -120,6 +120,7 @@
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
 #define VMM_COM1_LCR_DLAB	0x80U
+#define VMM_CPUID_APIC_ID_MASK	0xff000000U
 
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
@@ -129,6 +130,19 @@
 					 EFER_TCE)
 #define VMM_SVM_MTRR_DEF_VALID		(MTRR_DEF_ENABLE | \
 					 MTRR_DEF_FIXED_ENABLE | MTRR_DEF_TYPE)
+#define VMM_SVM_APICBASE_ADDR		0xfee00000ULL
+#define VMM_SVM_APICBASE_VALID		(APICBASE_BSP | APICBASE_X2APIC | \
+					 APICBASE_ENABLED | APICBASE_ADDRESS)
+#define VMM_SVM_X2APIC_MSR_BASE	0x800U
+#define VMM_SVM_X2APIC_MSR_ID		0x802U
+#define VMM_SVM_X2APIC_MSR_VERSION	0x803U
+#define VMM_SVM_X2APIC_MSR_EOI		0x80bU
+#define VMM_SVM_X2APIC_MSR_ICR		0x830U
+#define VMM_SVM_X2APIC_MSR_SELFIPI	0x83fU
+#define VMM_SVM_X2APIC_MSR_LAST	0x83fU
+#define VMM_SVM_X2APIC_MSR_COUNT	(VMM_SVM_X2APIC_MSR_LAST - \
+					 VMM_SVM_X2APIC_MSR_BASE + 1)
+#define VMM_SVM_X2APIC_VERSION		0x00060014ULL
 
 
 #define VMM_X64_NDR			6
@@ -267,6 +281,9 @@ struct vmm_svm_backend {
 	uint64_t mut_host_sysenter_eip;
 	uint64_t mut_guest_mtrr_def_type;
 	uint64_t mut_guest_tsc_aux;
+	uint64_t mut_guest_tsc_deadline;
+	uint64_t mut_guest_apicbase;
+	uint64_t mut_guest_x2apic[VMM_SVM_X2APIC_MSR_COUNT];
 	uint64_t mut_gprs[VMM_X64_NGPR];
 	uint8_t mut_com1_ier;
 	uint8_t mut_com1_lcr;
@@ -411,6 +428,12 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	}
 	pmap_npt_transform(vmspace_pmap(svm->borrow_mut_vmspace), 0);
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
+	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
+	    APICBASE_BSP | APICBASE_ENABLED;
+	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_ID -
+	    VMM_SVM_X2APIC_MSR_BASE] = 0;
+	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_VERSION -
+	    VMM_SVM_X2APIC_MSR_BASE] = VMM_SVM_X2APIC_VERSION;
 	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
@@ -632,9 +655,13 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t regs[4];
+	uint32_t leaf;
 
-	cpuid_count((uint32_t)vmcb->state.rax,
+	leaf = (uint32_t)vmcb->state.rax;
+	cpuid_count(leaf,
 	    (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX], regs);
+	if (leaf == 1)
+		regs[1] &= ~VMM_CPUID_APIC_ID_MASK;
 	vmcb->state.rax = regs[0];
 	svm->mut_gprs[VMM_X64_GPR_RBX] = regs[1];
 	svm->mut_gprs[VMM_X64_GPR_RCX] = regs[2];
@@ -673,6 +700,48 @@ vmm_svm_wrmsr_value(struct vmm_svm_backend *svm)
 }
 
 static int
+vmm_svm_x2apic_msr(uint32_t msr)
+{
+	return msr >= VMM_SVM_X2APIC_MSR_BASE &&
+	    msr <= VMM_SVM_X2APIC_MSR_LAST;
+}
+
+static int
+vmm_svm_rdmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr)
+{
+	uint64_t val;
+
+	if (!vmm_svm_x2apic_msr(msr))
+		return 0;
+	val = svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE];
+	vmm_svm_rdmsr_value(svm, val);
+	return 1;
+}
+
+static int
+vmm_svm_wrmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr, uint64_t val)
+{
+	if (!vmm_svm_x2apic_msr(msr))
+		return 0;
+	switch (msr) {
+	case VMM_SVM_X2APIC_MSR_ID:
+	case VMM_SVM_X2APIC_MSR_VERSION:
+		return 0;
+	case VMM_SVM_X2APIC_MSR_EOI:
+		break;
+	case VMM_SVM_X2APIC_MSR_SELFIPI:
+		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] =
+		    val & 0xff;
+		break;
+	default:
+		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] = val;
+		break;
+	}
+	vmm_svm_advance_rip(svm->own_mut_vmcb);
+	return 1;
+}
+
+static int
 vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -692,6 +761,14 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 			return 1;
 		case MSR_TSC_AUX:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_tsc_aux);
+			return 1;
+		case MSR_TSC_DEADLINE:
+			vmm_svm_rdmsr_value(svm,
+			    svm->mut_guest_tsc_deadline);
+			return 1;
+		case MSR_APICBASE:
+			vmm_svm_rdmsr_value(svm,
+			    svm->mut_guest_apicbase);
 			return 1;
 		case MSR_MTRRdefType:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_mtrr_def_type);
@@ -727,6 +804,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_eip);
 			return 1;
 		default:
+			if (vmm_svm_rdmsr_x2apic(svm, msr))
+				return 1;
 			return 0;
 		}
 	}
@@ -750,6 +829,18 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		return 1;
 	case MSR_TSC_AUX:
 		svm->mut_guest_tsc_aux = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_TSC_DEADLINE:
+		svm->mut_guest_tsc_deadline = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_APICBASE:
+		if ((val & ~VMM_SVM_APICBASE_VALID) != 0 ||
+		    (val & APICBASE_ADDRESS) != VMM_SVM_APICBASE_ADDR) {
+			return 0;
+		}
+		svm->mut_guest_apicbase = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_MTRRdefType:
@@ -799,6 +890,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	default:
+		if (vmm_svm_wrmsr_x2apic(svm, msr, val))
+			return 1;
 		return 0;
 	}
 }
