@@ -93,6 +93,12 @@ exec_mmap_fails(int fd, size_t page_size)
 	return mmap_fails(fd, page_size, PROT_READ | PROT_EXEC, MAP_SHARED);
 }
 
+static int
+exec_mprotect_fails(void *addr, size_t page_size)
+{
+	return mprotect(addr, page_size, PROT_READ | PROT_EXEC) != 0;
+}
+
 static void
 write_ready(const char *result_path)
 {
@@ -120,13 +126,15 @@ write_ready(const char *result_path)
 
 static int
 write_result(const char *path, const char *mode, int new3, int new4,
-    int old3, int old4, int private3, int private4, int exec3, int exec4)
+    int old3, int old4, int private3, int private4, int exec3, int exec4,
+    int mprotect3, int mprotect4)
 {
 	FILE *fp;
 	int pass;
 
 	pass = new3 && new4 && old3 && old4 &&
-	    private3 && private4 && exec3 && exec4;
+	    private3 && private4 && exec3 && exec4 &&
+	    mprotect3 && mprotect4;
 	fp = fopen(path, "w");
 	if (fp == NULL)
 		return -1;
@@ -139,6 +147,8 @@ write_result(const char *path, const char *mode, int new3, int new4,
 	fprintf(fp, "private_mmap4_failed=%d\n", private4);
 	fprintf(fp, "exec_mmap3_failed=%d\n", exec3);
 	fprintf(fp, "exec_mmap4_failed=%d\n", exec4);
+	fprintf(fp, "exec_mprotect3_failed=%d\n", mprotect3);
+	fprintf(fp, "exec_mprotect4_failed=%d\n", mprotect4);
 	fprintf(fp, "pass=%d\n", pass);
 	fclose(fp);
 	return pass ? 0 : 1;
@@ -197,6 +207,8 @@ main(int argc, char **argv)
 	int private4;
 	int exec3;
 	int exec4;
+	int mprotect3;
+	int mprotect4;
 
 	if (argc < 3) {
 		fprintf(stderr, "usage: %s exit|hang result-path [delay]\n",
@@ -228,6 +240,8 @@ main(int argc, char **argv)
 	private4 = private_mmap_fails(4, page);
 	exec3 = exec_mmap_fails(3, page);
 	exec4 = exec_mmap_fails(4, page);
+	mprotect3 = exec_mprotect_fails(mem_map, page);
+	mprotect4 = exec_mprotect_fails(manifest_map, page);
 
 	child = fork();
 	if (child < 0) {
@@ -249,5 +263,6 @@ main(int argc, char **argv)
 	old3 = expect_fault(mem_map);
 	old4 = expect_fault(manifest_map);
 	return write_result(result_path, mode, new3, new4, old3, old4,
-	    private3, private4, exec3, exec4) == 0 ? 0 : 1;
+	    private3, private4, exec3, exec4, mprotect3, mprotect4) == 0 ?
+	    0 : 1;
 }

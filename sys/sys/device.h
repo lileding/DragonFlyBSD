@@ -45,6 +45,9 @@
 #ifndef _SYS_SYSLINK_RPC_H_
 #include <sys/syslink_rpc.h>
 #endif
+#ifndef _VM_VM_H_
+#include <vm/vm.h>
+#endif
 
 struct cdev;
 struct ucred;
@@ -131,7 +134,7 @@ struct dev_mmap_args {
 
 /*
  * int d_mmap_single(cdev_t dev, vm_ooffset_t *offset, vm_size_t size,
- *                   struct vm_object **object, int nprot)
+ *                   struct vm_object **object, int nprot, vm_prot_t *maxprotp)
  */
 struct dev_mmap_single_args {
 	struct dev_generic_args a_head;
@@ -139,6 +142,7 @@ struct dev_mmap_single_args {
 	vm_size_t		a_size;
 	struct vm_object **a_object;
 	int		a_nprot;
+	vm_prot_t	*a_maxprotp;
 	struct file	*a_fp;
 };
 
@@ -349,7 +353,8 @@ int dev_dwrite(cdev_t dev, struct uio *uio, int ioflag, struct file *fp);
 int dev_dkqfilter(cdev_t dev, struct knote *kn, struct file *fp);
 int64_t dev_dmmap(cdev_t dev, vm_offset_t offset, int nprot, struct file *fp);
 int dev_dmmap_single(cdev_t dev, vm_ooffset_t *offset, vm_size_t size,
-			struct vm_object **object, int nprot, struct file *fp);
+			struct vm_object **object, int nprot,
+			vm_prot_t *maxprotp, struct file *fp);
 int dev_dclone(cdev_t dev);
 int dev_drevoke(cdev_t dev);
 
@@ -407,4 +412,3 @@ void sync_devs(void);
 #endif
 
 #endif
-

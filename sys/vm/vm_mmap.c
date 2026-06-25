@@ -1393,7 +1393,7 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 			 * Force them to be shared.
 			 */
 			error = dev_dmmap_single(vp->v_rdev, &foff, objsize,
-						&object, prot, fp);
+						&object, prot, &maxprot, fp);
 
 			if (error == ENODEV) {
 				handle = (void *)(intptr_t)vp->v_rdev;

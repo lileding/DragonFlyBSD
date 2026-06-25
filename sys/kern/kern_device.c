@@ -284,7 +284,8 @@ dev_dmmap(cdev_t dev, vm_offset_t offset, int nprot, struct file *fp)
 
 int
 dev_dmmap_single(cdev_t dev, vm_ooffset_t *offset, vm_size_t size,
-                 struct vm_object **object, int nprot, struct file *fp)
+                 struct vm_object **object, int nprot, vm_prot_t *maxprotp,
+		 struct file *fp)
 {
 	struct dev_mmap_single_args ap;
 	int needmplock = dev_needmplock(dev);
@@ -296,6 +297,7 @@ dev_dmmap_single(cdev_t dev, vm_ooffset_t *offset, vm_size_t size,
 	ap.a_size = size;
 	ap.a_object = object;
 	ap.a_nprot = nprot;
+	ap.a_maxprotp = maxprotp;
 	ap.a_fp = fp;
 
 	if (needmplock)

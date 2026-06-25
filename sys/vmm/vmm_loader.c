@@ -450,6 +450,8 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	}
 	vm_object_reference_locked(object);
 	VM_OBJECT_UNLOCK(object);
+	if (ap->a_maxprotp != NULL)
+		*ap->a_maxprotp &= ~VM_PROT_EXECUTE;
 	*ap->a_object = object;
 	return 0;
 }
