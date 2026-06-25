@@ -30,6 +30,7 @@
 #include <vm/vm.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_pager.h>
 
 #include "vmm_parse.h"
 #include "vmm_mem.h"
@@ -81,7 +82,6 @@ vmm_loader_is_set(const struct vmm_loader *l)
 struct vmm_loader_epoch {
 	struct file	*own_mut_mem_fp;
 	struct file	*own_mut_manifest_fp;
-	struct vm_object *borrow_mut_mem_object;
 	struct vm_object *own_mut_manifest_object;
 	uint64_t	 imm_mem_size;
 	struct ucred	*borrow_imm_cred;
@@ -93,8 +93,11 @@ struct vmm_loader_epoch {
 
 struct vmm_loader_fd {
 	cdev_t		own_mut_dev;
-	struct vm_object *own_mut_object;
+	struct vm_object *own_mut_object;		/* mmap capability */
+	struct vm_object *own_mut_backing_object;	/* guest RAM/manifest */
 	vm_size_t	imm_size;
+	int		atomic_mut_refs;
+	int		mut_revoked;		/* own_mut_object token */
 };
 
 static uint32_t vmm_loader_fd_serial;
@@ -116,12 +119,26 @@ static int		vmm_loader_fo_close(struct file *fp);
 static int		vmm_loader_fo_seek(struct file *fp, off_t offset,
 			    int whence, off_t *res);
 static void		vmm_loader_disarm_fp(struct file *fp);
+static void		vmm_loader_fd_revoke(struct vmm_loader_fd *lfd);
+static int		vmm_loader_pager_fault(vm_object_t object,
+			    vm_ooffset_t offset, int prot, vm_page_t *mres);
+static int		vmm_loader_pager_ctor(void *handle,
+			    vm_ooffset_t size, vm_prot_t prot,
+			    vm_ooffset_t foff, struct ucred *cred,
+			    u_short *color);
+static void		vmm_loader_pager_dtor(void *handle);
 
 static struct dev_ops vmm_loader_object_fd_ops = {
 	{ "vmm_loader_object_fd", 0, D_MPSAFE },
 	.d_open = vmm_loader_fd_open,
 	.d_close = vmm_loader_fd_close,
 	.d_mmap_single = vmm_loader_fd_mmap_single,
+};
+
+static struct cdev_pager_ops vmm_loader_pager_ops = {
+	.cdev_pg_fault =	vmm_loader_pager_fault,
+	.cdev_pg_ctor =		vmm_loader_pager_ctor,
+	.cdev_pg_dtor =		vmm_loader_pager_dtor,
 };
 
 static struct vop_ops vmm_loader_vnode_vops = {
@@ -284,17 +301,126 @@ vmm_loader_fo_seek(struct file *fp, off_t offset, int whence, off_t *res)
 }
 
 static void
+vmm_loader_fd_ref(struct vmm_loader_fd *lfd)
+{
+	atomic_add_int(&lfd->atomic_mut_refs, 1);
+}
+
+static void
+vmm_loader_fd_put(struct vmm_loader_fd *lfd)
+{
+	if (atomic_fetchadd_int(&lfd->atomic_mut_refs, -1) == 1)
+		kfree(lfd, M_TEMP);
+}
+
+static int
+vmm_loader_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
+    vm_ooffset_t foff, struct ucred *cred, u_short *color)
+{
+	struct vmm_loader_fd *lfd = handle;
+
+	(void)cred;
+	if (lfd == NULL || color == NULL)
+		return EINVAL;
+	if (prot & VM_PROT_EXECUTE)
+		return EACCES;
+	if (foff < 0 || foff > lfd->imm_size || size > lfd->imm_size - foff)
+		return EINVAL;
+	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL)
+		return EINVAL;
+
+	*color = 0;
+	vmm_loader_fd_ref(lfd);
+	return 0;
+}
+
+static void
+vmm_loader_pager_dtor(void *handle)
+{
+	struct vmm_loader_fd *lfd = handle;
+
+	if (lfd != NULL)
+		vmm_loader_fd_put(lfd);
+}
+
+static int
+vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
+    vm_page_t *mres)
+{
+	struct vmm_loader_fd *lfd;
+	struct vm_object *backing;
+	vm_page_t pg;
+
+	lfd = object->handle;
+	if (lfd == NULL || mres == NULL)
+		return VM_PAGER_ERROR;
+	if (offset < 0 || offset >= lfd->imm_size)
+		return VM_PAGER_ERROR;
+	if (prot & VM_PROT_EXECUTE)
+		return VM_PAGER_ERROR;
+	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL)
+		return VM_PAGER_ERROR;
+
+	/*
+	 * The caller holds the mmap capability object's token until after
+	 * pmap_enter().  Revoke takes the same token before clearing PTEs,
+	 * so an old fault cannot re-enter a mapping after revoke completes.
+	 */
+	backing = lfd->own_mut_backing_object;
+	vm_object_reference_quick(backing);
+	pg = vm_page_grab(backing, OFF_TO_IDX(offset),
+	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO |
+	    VM_ALLOC_RETRY);
+	vm_object_deallocate(backing);
+	if (pg == NULL)
+		return VM_PAGER_ERROR;
+	if (pg->valid != VM_PAGE_BITS_ALL)
+		vm_page_zero_invalid(pg, TRUE);
+	*mres = pg;
+	return VM_PAGER_OK;
+}
+
+static void
+vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
+{
+	struct vm_object *backing = NULL;
+	struct vm_object *object;
+
+	object = lfd->own_mut_object;
+	if (object != NULL) {
+		VM_OBJECT_LOCK(object);
+		if (!lfd->mut_revoked) {
+			lfd->mut_revoked = 1;
+			backing = lfd->own_mut_backing_object;
+			lfd->own_mut_backing_object = NULL;
+			vm_object_page_remove(object, 0, 0, FALSE);
+		}
+		VM_OBJECT_UNLOCK(object);
+	} else if (!lfd->mut_revoked) {
+		lfd->mut_revoked = 1;
+		backing = lfd->own_mut_backing_object;
+		lfd->own_mut_backing_object = NULL;
+	}
+	if (backing != NULL)
+		vm_object_deallocate(backing);
+}
+
+static void
 vmm_loader_fd_free(void *arg)
 {
 	struct vmm_loader_fd *lfd = arg;
 
+	vmm_loader_fd_revoke(lfd);
 	if (lfd->own_mut_dev != NULL) {
 		lfd->own_mut_dev->si_drv1 = NULL;
 		destroy_only_dev(lfd->own_mut_dev);
+		lfd->own_mut_dev = NULL;
 	}
-	if (lfd->own_mut_object != NULL)
+	if (lfd->own_mut_object != NULL) {
 		vm_object_deallocate(lfd->own_mut_object);
-	kfree(lfd, M_TEMP);
+		lfd->own_mut_object = NULL;
+	}
+	vmm_loader_fd_put(lfd);
 }
 
 static int
@@ -307,7 +433,8 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	error = devfs_get_cdevpriv(ap->a_fp, (void **)&lfd);
 	if (error)
 		return error;
-	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL)
+	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL ||
+	    lfd->mut_revoked)
 		return EINVAL;
 	if (ap->a_nprot & VM_PROT_EXECUTE)
 		return EACCES;
@@ -401,8 +528,16 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 
 	lfd = kmalloc(sizeof(*lfd), M_TEMP, M_WAITOK | M_ZERO);
 	vm_object_reference_quick(object);
-	lfd->own_mut_object = object;
+	lfd->own_mut_backing_object = object;
 	lfd->imm_size = round_page(size);
+	lfd->atomic_mut_refs = 1;
+	lfd->own_mut_object = cdev_pager_allocate(lfd, OBJT_MGTDEVICE,
+	    &vmm_loader_pager_ops, lfd->imm_size,
+	    VM_PROT_READ | VM_PROT_WRITE, 0, proc0.p_ucred);
+	if (lfd->own_mut_object == NULL) {
+		vmm_loader_fd_free(lfd);
+		return EINVAL;
+	}
 	serial = atomic_fetchadd_int(&vmm_loader_fd_serial, 1);
 	lfd->own_mut_dev = make_only_dev(&vmm_loader_object_fd_ops, serial, UID_ROOT,
 	    GID_WHEEL, 0600, "vmmld%d", serial);
@@ -510,12 +645,15 @@ vmm_loader_cancelled(struct vmm_loader_epoch *ep)
 }
 
 static void
-vmm_loader_revoke_fp(struct file *fp, struct vm_object *object)
+vmm_loader_revoke_fp(struct file *fp)
 {
-	(void)object;
+	struct vmm_loader_fd *lfd;
 
-	if (fp != NULL && fp->f_type == DTYPE_VNODE && fp->f_data != NULL)
+	if (fp != NULL && fp->f_type == DTYPE_VNODE && fp->f_data != NULL) {
+		if (devfs_get_cdevpriv(fp, (void **)&lfd) == 0)
+			vmm_loader_fd_revoke(lfd);
 		(void)fdrevoke(fp->f_data, DTYPE_VNODE, proc0.p_ucred);
+	}
 }
 
 static void
@@ -524,9 +662,8 @@ vmm_loader_epoch_revoke(struct vmm_loader_epoch *ep)
 	if (ep->mut_revoked)
 		return;
 	ep->mut_revoked = 1;
-	vmm_loader_revoke_fp(ep->own_mut_mem_fp, ep->borrow_mut_mem_object);
-	vmm_loader_revoke_fp(ep->own_mut_manifest_fp,
-	    ep->own_mut_manifest_object);
+	vmm_loader_revoke_fp(ep->own_mut_mem_fp);
+	vmm_loader_revoke_fp(ep->own_mut_manifest_fp);
 }
 
 static void
@@ -681,7 +818,6 @@ vmm_loader_run(const char *path, struct vmm_mem *mem,
 		error = EINVAL;
 		goto out;
 	}
-	ep->borrow_mut_mem_object = vmm_mem_object(mem);
 	ep->borrow_imm_cred = cred;
 	ep->borrow_imm_cancel = cancel;
 	ep->borrow_imm_cancel_arg = cancel_arg;
