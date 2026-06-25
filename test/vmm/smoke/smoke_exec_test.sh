@@ -8,9 +8,9 @@ say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
 mach() { echo "$MNT/machines/$1"; }
-wait_event() { f=$1; p=$2; i=0; seen=; while [ "$i" -lt "$TIMEOUT" ]; do
+wait_event() { f=$1; p=$2; q=${3:-}; i=0; seen=; while [ "$i" -lt "$TIMEOUT" ]; do
 	out=$(cat "$f" 2>>"$LOG"); [ -n "$out" ] && seen="$seen
-$out"; printf "%s\n" "$seen" | grep -qx "$p" && return 0
+$out"; printf "%s\n" "$seen" | grep -qx "$p" && { [ -z "$q" ] || printf "%s\n" "$seen" | grep -qx "$q"; } && return 0
 	sleep 1; i=$((i + 1)); done; printf "%s\n" "$seen" >>"$LOG"; return 1; }
 cleanup_machine()
 {
@@ -32,9 +32,9 @@ run_case()
 {
 	mode=$1; vm=$1; w=$(wrapper "$mode"); run mkdir "$(mach "$vm")"
 	printf '1\n' >"$(mach "$vm")/vcpu"; printf '%s\n' "$MEM" >"$(mach "$vm")/mem"; printf '%s\n' "$w" >"$(mach "$vm")/loader"
-	cat "$(mach "$vm")/events" >>"$LOG"; run rm "$(mach "$vm")/stopped"; wait_event "$(mach "$vm")/events" '^started$' || fail "$vm started"
-	if [ "$mode" = loop ]; then echo force >"$(mach "$vm")/stopped"; wait_event "$(mach "$vm")/events" '^stopped$' || fail "$vm stopped"; [ -e "$(mach "$vm")/stopped" ] || fail "$vm stopped file"
-	else wait_event "$(mach "$vm")/events" '^stopped$' || fail "$vm self exit"; [ ! -e "$(mach "$vm")/stopped" ] || fail "$vm desired changed"; echo force >"$(mach "$vm")/stopped"; fi
+	cat "$(mach "$vm")/events" >>"$LOG"; run rm "$(mach "$vm")/stopped"
+	if [ "$mode" = loop ]; then wait_event "$(mach "$vm")/events" '^started$' || fail "$vm started"; echo force >"$(mach "$vm")/stopped"; wait_event "$(mach "$vm")/events" '^stopped$' || fail "$vm stopped"; [ -e "$(mach "$vm")/stopped" ] || fail "$vm stopped file"
+	else wait_event "$(mach "$vm")/events" '^started$' '^stopped$' || fail "$vm self exit"; [ ! -e "$(mach "$vm")/stopped" ] || fail "$vm desired changed"; echo force >"$(mach "$vm")/stopped"; fi
 	cleanup_machine "$vm" || fail "$vm cleanup"; say "PASS: $vm"
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
