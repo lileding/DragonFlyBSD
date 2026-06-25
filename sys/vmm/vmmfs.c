@@ -215,6 +215,19 @@ vmmfs_parent_ino(struct vmmfs_node *node)
  * tmpfs_alloc_vp() normal path; vx_downgrade() after getnewvnode() is mandatory
  * so vflush() does not trip the v_spin assertion on unmount.
  */
+static void
+vmmfs_discard_new_vp(struct vnode *vp)
+{
+
+	/*
+	 * getnewvnode() returned this vnode VX-locked and ref'd.
+	 * Reclaim it now so a loadable vmmfs module never leaves cached
+	 * vnodes pointing at a mount-local v_ops indirection after kldunload.
+	 */
+	vgone_vxlocked(vp);
+	vx_put(vp);
+}
+
 int
 vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
     struct vnode **vpp)
@@ -230,6 +243,13 @@ loop:
 		    LK_CANRECURSE);
 		if (error)
 			goto out;
+		/*
+		 * The vnode is already visible on mp's vnode list.  VFS mount
+		 * scans skip VNON, so mark the not-yet-bound vnode VBAD until
+		 * v_data and the real type are installed.  The inactive/reclaim
+		 * shims tolerate v_data == NULL for this half-initialized window.
+		 */
+		vp->v_type = VBAD;
 	}
 
 	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
@@ -239,8 +259,7 @@ loop:
 		vhold(ovp);
 		lockmgr(&node->vn_interlock, LK_RELEASE);
 		if (vp != NULL) {
-			vp->v_type = VBAD;
-			vx_put(vp);
+			vmmfs_discard_new_vp(vp);
 			vp = NULL;
 		}
 		if (vget(ovp, (lkflag & ~LK_RETRY) | LK_EXCLUSIVE) != 0) {

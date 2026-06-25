@@ -231,19 +231,31 @@ vmmfs_readdir(struct vop_readdir_args *ap)
 static int
 vmmfs_inactive(struct vop_inactive_args *ap)
 {
-	return VMMFS_NODE_INACTIVE(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (node == NULL)
+		return 0;
+	return VMMFS_NODE_INACTIVE(node, ap);
 }
 
 static int
 vmmfs_reclaim(struct vop_reclaim_args *ap)
 {
-	return VMMFS_NODE_RECLAIM(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (node == NULL)
+		return 0;
+	return VMMFS_NODE_RECLAIM(node, ap);
 }
 
 static int
 vmmfs_print(struct vop_print_args *ap)
 {
-	return VMMFS_NODE_PRINT(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (node == NULL)
+		return 0;
+	return VMMFS_NODE_PRINT(node, ap);
 }
 
 /*
