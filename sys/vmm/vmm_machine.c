@@ -236,6 +236,8 @@ vmm_machine_start_task(struct vmm_machine *m)
 	struct vmm_host *host;
 	struct vmm_mem_backing *backing = NULL;
 	struct vmm_launch launch;
+	char loader_path[VMM_LOADER_MAX + 1];
+	size_t loader_path_len;
 	int error;
 	int vcpu_owner = 0;
 	int started = 0;
@@ -253,13 +255,22 @@ vmm_machine_start_task(struct vmm_machine *m)
 		vmm_machine_owner_release(m);
 		return;
 	}
+	loader_path_len = vmm_loader_path(&m->own_mut_loader, loader_path,
+	    VMM_LOADER_MAX);
+	if (loader_path_len == 0)
+		error = EINVAL;
+	else {
+		loader_path[loader_path_len] = '\0';
+		error = 0;
+	}
 	vmm_machine_unlock(m);
 
-	error = vmm_machine_wait_for_vcpu_drain(m);
+	if (error == 0)
+		error = vmm_machine_wait_for_vcpu_drain(m);
 	if (error == 0)
 		error = vmm_mem_prepare(&m->own_mut_mem);
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
-		error = vmm_loader_run(&m->own_mut_loader, &m->own_mut_mem, cred,
+		error = vmm_loader_run(loader_path, &m->own_mut_mem, cred,
 		    &launch, vmm_machine_start_is_cancelled, m);
 	}
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {

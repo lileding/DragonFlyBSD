@@ -659,7 +659,7 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 }
 
 int
-vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
+vmm_loader_run(const char *path, struct vmm_mem *mem,
     struct ucred *cred, struct vmm_launch *launch,
     vmm_loader_cancel_fn *cancel, void *cancel_arg)
 {
@@ -668,7 +668,7 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 	int error;
 
 	if (!vmm_mem_is_set(mem) || vmm_mem_object(mem) == NULL ||
-	    !vmm_loader_is_set(loader) || cred == NULL)
+	    path == NULL || path[0] == '\0' || cred == NULL)
 		return EINVAL;
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
@@ -677,13 +677,13 @@ vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
 	ep->borrow_imm_cred = cred;
 	ep->borrow_imm_cancel = cancel;
 	ep->borrow_imm_cancel_arg = cancel_arg;
-	path_len = vmm_loader_path(loader, ep->imm_loader_path,
-	    sizeof(ep->imm_loader_path));
-	if (path_len == 0) {
+	error = copystr(path, ep->imm_loader_path, sizeof(ep->imm_loader_path),
+	    &path_len);
+	(void)path_len;
+	if (error) {
 		error = EINVAL;
 		goto out;
 	}
-	ep->imm_loader_path[path_len] = '\0';
 
 	if (vmm_loader_cancelled(ep)) {
 		error = EINTR;

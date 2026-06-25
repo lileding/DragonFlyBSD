@@ -15,8 +15,8 @@ struct vmm_loader {
 	/*
 	 * Lock map:
 	 * mut_path and mut_len are protected by the parent vmm_machine's
-	 * token_lifecycle.  vmm_loader_run() receives a stable start-time
-	 * snapshot only after vmm_machine has accepted a start worker.
+	 * token_lifecycle.  vmm_machine copies a stable start-time path
+	 * snapshot before calling vmm_loader_run().
 	 */
 	char		mut_path[VMM_LOADER_MAX];
 	size_t		mut_len;		/* 0 = unset */
@@ -34,7 +34,7 @@ struct ucred;
 struct vmm_mem;
 struct vmm_launch;
 typedef int vmm_loader_cancel_fn(void *arg);
-int	vmm_loader_run(struct vmm_loader *loader, struct vmm_mem *mem,
+int	vmm_loader_run(const char *path, struct vmm_mem *mem,
 	    struct ucred *cred, struct vmm_launch *launch,
 	    vmm_loader_cancel_fn *cancel, void *cancel_arg);
 
