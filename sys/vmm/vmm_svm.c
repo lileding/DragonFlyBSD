@@ -85,6 +85,8 @@
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
 
+#define VMM_SVM_EXIT_RDTSC		0x06eULL
+#define VMM_SVM_EXIT_PAUSE		0x077ULL
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
 #define VMM_SVM_EXIT_CPUID		0x072ULL
@@ -93,6 +95,10 @@
 #define VMM_SVM_EXIT_MSR		0x07cULL
 #define VMM_SVM_EXIT_SHUTDOWN		0x07fULL
 #define VMM_SVM_EXIT_VMMCALL		0x081ULL
+#define VMM_SVM_EXIT_RDTSCP		0x087ULL
+#define VMM_SVM_EXIT_MONITOR		0x08aULL
+#define VMM_SVM_EXIT_MWAIT		0x08bULL
+#define VMM_SVM_EXIT_MWAIT_COND	0x08cULL
 #define VMM_SVM_EXIT_XSETBV		0x08dULL
 #define VMM_SVM_EXIT_NPF		0x400ULL
 
@@ -810,6 +816,15 @@ vmm_svm_yield_after_host_interrupt(void)
 }
 
 static void
+vmm_svm_set_rax_rdx(struct vmm_svm_backend *svm, uint64_t val)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	vmcb->state.rax = val & 0xffffffffULL;
+	svm->mut_gprs[VMM_X64_GPR_RDX] = val >> 32;
+}
+
+static void
 vmm_svm_advance_ioio(struct vmm_svm_vmcb *vmcb)
 {
 	if (vmcb->ctrl.exitinfo2 != 0)
@@ -951,7 +966,18 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm)
 }
 
 static void
-vmm_svm_handle_hlt(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
+vmm_svm_handle_rdtsc(struct vmm_svm_backend *svm, int with_aux)
+{
+	uint64_t tsc = rdtsc() + svm->own_mut_vmcb->ctrl.tsc_offset;
+
+	vmm_svm_set_rax_rdx(svm, tsc);
+	if (with_aux)
+		svm->mut_gprs[VMM_X64_GPR_RCX] = svm->mut_guest_tsc_aux;
+	vmm_svm_advance_rip(svm->own_mut_vmcb);
+}
+
+static void
+vmm_svm_handle_idle_wait(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
     struct vmm_svm_vmcb *vmcb)
 {
 	vmm_svm_advance_rip(vmcb);
@@ -1015,11 +1041,17 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_NMI:
 			vmm_svm_yield_after_host_interrupt();
 			break;
+		case VMM_SVM_EXIT_RDTSC:
+			vmm_svm_handle_rdtsc(svm, 0);
+			break;
 		case VMM_SVM_EXIT_CPUID:
 			vmm_svm_handle_cpuid(svm);
 			break;
+		case VMM_SVM_EXIT_PAUSE:
+			vmm_svm_advance_rip(vmcb);
+			break;
 		case VMM_SVM_EXIT_HLT:
-			vmm_svm_handle_hlt(m, vc, vmcb);
+			vmm_svm_handle_idle_wait(m, vc, vmcb);
 			break;
 		case VMM_SVM_EXIT_IOIO:
 			if (vmm_svm_handle_ioio(svm))
@@ -1027,6 +1059,16 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
 			goto unhandled;
+		case VMM_SVM_EXIT_RDTSCP:
+			vmm_svm_handle_rdtsc(svm, 1);
+			break;
+		case VMM_SVM_EXIT_MONITOR:
+			vmm_svm_advance_rip(vmcb);
+			break;
+		case VMM_SVM_EXIT_MWAIT:
+		case VMM_SVM_EXIT_MWAIT_COND:
+			vmm_svm_handle_idle_wait(m, vc, vmcb);
+			break;
 		case VMM_SVM_EXIT_NPF:
 			if (vmm_svm_handle_npf(svm))
 				break;
