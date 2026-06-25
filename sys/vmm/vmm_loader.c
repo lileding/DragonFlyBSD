@@ -258,6 +258,8 @@ vmm_loader_disarm_fp(struct file *fp)
 	if (fp == NULL || fp->f_ops == &badfileops)
 		return;
 	vp = fp->f_data;
+	fp->f_data = NULL;
+	atomic_clear_int(&fp->f_flag, FHASLOCK);
 	fp->f_ops = &badfileops;
 	if (vp != NULL)
 		(void)vn_close(vp, fp->f_flag, fp);
