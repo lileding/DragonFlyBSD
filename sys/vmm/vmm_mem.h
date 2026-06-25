@@ -39,6 +39,5 @@ struct vm_object *vmm_mem_object(struct vmm_mem *m);
 struct vmspace *vmm_mem_vmspace(struct vmm_mem *m);
 uint64_t vmm_mem_size(struct vmm_mem *m);
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
-int	vmm_mem_gpa_pa(struct vmm_mem *m, uint64_t gpa, uint64_t *pa);
 
 #endif /* VMM_MEM_H */

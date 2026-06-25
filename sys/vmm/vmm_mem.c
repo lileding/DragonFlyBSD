@@ -224,25 +224,3 @@ vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 	return vm_fault(&b->own_mut_vmspace->vm_map, trunc_page(gpa),
 	    (vm_prot_t)prot, flags);
 }
-
-int
-vmm_mem_gpa_pa(struct vmm_mem *m, uint64_t gpa, uint64_t *pa)
-{
-	struct vmm_mem_backing *b = m->own_mut_backing;
-	vm_page_t pg;
-
-	if (b == NULL || b->own_mut_object == NULL || pa == NULL)
-		return EINVAL;
-	if (gpa >= b->imm_bytes)
-		return EINVAL;
-
-	vm_object_hold(b->own_mut_object);
-	pg = vm_page_lookup(b->own_mut_object, OFF_TO_IDX(gpa));
-	if (pg == NULL) {
-		vm_object_drop(b->own_mut_object);
-		return ENOENT;
-	}
-	*pa = VM_PAGE_TO_PHYS(pg) + (gpa & PAGE_MASK);
-	vm_object_drop(b->own_mut_object);
-	return 0;
-}
