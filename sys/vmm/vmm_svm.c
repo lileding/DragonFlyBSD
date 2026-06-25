@@ -134,6 +134,19 @@
 #define VMM_PIC2_DATA_NUTTX	0xa2U
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
 
+#define VMM_IOAPIC_BASE		0xfec00000ULL
+#define VMM_IOAPIC_SIZE		PAGE_SIZE
+#define VMM_IOAPIC_INDEX	0x00U
+#define VMM_IOAPIC_DATA		0x10U
+#define VMM_IOAPIC_PINS		24U
+#define VMM_IOAPIC_REG_ID	0x00U
+#define VMM_IOAPIC_REG_VER	0x01U
+#define VMM_IOAPIC_REG_ARB	0x02U
+#define VMM_IOAPIC_REDTBL_BASE	0x10U
+#define VMM_IOAPIC_REDTBL_COUNT	(VMM_IOAPIC_PINS * 2U)
+#define VMM_IOAPIC_VERSION	(((VMM_IOAPIC_PINS - 1U) << 16) | 0x11U)
+#define VMM_IOAPIC_REDTBL_MASKED	0x00010000U
+
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
 #define VMM_SVM_ASID			1
@@ -308,6 +321,8 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_scr;
 	uint8_t mut_pic1_imr;
 	uint8_t mut_pic2_imr;
+	uint32_t mut_ioapic_sel;
+	uint32_t mut_ioapic_redtbl[VMM_IOAPIC_REDTBL_COUNT];
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
@@ -349,7 +364,8 @@ vmm_svm_available(void)
 		return 0;
 	do_cpuid(0x8000000a, descs);
 	if ((descs[3] & CPUID_AMD_SVM_NP) == 0 ||
-	    (descs[3] & CPUID_AMD_SVM_NRIPS) == 0)
+	    (descs[3] & CPUID_AMD_SVM_NRIPS) == 0 ||
+	    (descs[3] & CPUID_AMD_SVM_DecodeAssist) == 0)
 		return 0;
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if ((msr & VM_CR_SVMDIS) && (msr & VM_CR_LOCK))
@@ -429,6 +445,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 {
 	struct vmm_svm_backend *svm;
 	struct vmm_svm_vmcb *vmcb;
+	unsigned int i;
 	int error;
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
@@ -451,6 +468,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    APICBASE_BSP | APICBASE_ENABLED;
 	svm->mut_pic1_imr = 0xff;
 	svm->mut_pic2_imr = 0xff;
+	for (i = 0; i < VMM_IOAPIC_PINS; i++)
+		svm->mut_ioapic_redtbl[i * 2] = VMM_IOAPIC_REDTBL_MASKED;
 	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_ID -
 	    VMM_SVM_X2APIC_MSR_BASE] = 0;
 	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_VERSION -
@@ -1049,6 +1068,113 @@ vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
 	vmcb->state.rax = (vmcb->state.rax & ~mask) | (val & mask);
 }
 
+static uint64_t
+vmm_svm_gpr_read(struct vmm_svm_backend *svm, unsigned int reg)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	switch (reg) {
+	case VMM_X64_GPR_RAX:
+		return vmcb->state.rax;
+	case VMM_X64_GPR_RSP:
+		return vmcb->state.rsp;
+	default:
+		if (reg < VMM_X64_GPR_RIP)
+			return svm->mut_gprs[reg];
+		return 0;
+	}
+}
+
+static void
+vmm_svm_gpr_write32(struct vmm_svm_backend *svm, unsigned int reg,
+    uint32_t val)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	switch (reg) {
+	case VMM_X64_GPR_RAX:
+		vmcb->state.rax = val;
+		break;
+	case VMM_X64_GPR_RSP:
+		vmcb->state.rsp = val;
+		break;
+	default:
+		if (reg < VMM_X64_GPR_RIP)
+			svm->mut_gprs[reg] = val;
+		break;
+	}
+}
+
+static uint32_t
+vmm_svm_ioapic_read_reg(struct vmm_svm_backend *svm, uint32_t reg)
+{
+	if (reg >= VMM_IOAPIC_REDTBL_BASE &&
+	    reg < VMM_IOAPIC_REDTBL_BASE + VMM_IOAPIC_REDTBL_COUNT) {
+		return svm->mut_ioapic_redtbl[reg - VMM_IOAPIC_REDTBL_BASE];
+	}
+	switch (reg) {
+	case VMM_IOAPIC_REG_ID:
+	case VMM_IOAPIC_REG_ARB:
+		return 0;
+	case VMM_IOAPIC_REG_VER:
+		return VMM_IOAPIC_VERSION;
+	default:
+		return 0;
+	}
+}
+
+static void
+vmm_svm_ioapic_write_reg(struct vmm_svm_backend *svm, uint32_t reg,
+    uint32_t val)
+{
+	if (reg >= VMM_IOAPIC_REDTBL_BASE &&
+	    reg < VMM_IOAPIC_REDTBL_BASE + VMM_IOAPIC_REDTBL_COUNT) {
+		svm->mut_ioapic_redtbl[reg - VMM_IOAPIC_REDTBL_BASE] = val;
+	}
+}
+
+static int
+vmm_svm_ioapic_read(struct vmm_svm_backend *svm, uint64_t gpa,
+    uint32_t *valp)
+{
+	uint64_t off;
+
+	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
+		return 0;
+	off = gpa - VMM_IOAPIC_BASE;
+	switch (off) {
+	case VMM_IOAPIC_INDEX:
+		*valp = svm->mut_ioapic_sel;
+		return 1;
+	case VMM_IOAPIC_DATA:
+		*valp = vmm_svm_ioapic_read_reg(svm, svm->mut_ioapic_sel);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_ioapic_write(struct vmm_svm_backend *svm, uint64_t gpa,
+    uint32_t val)
+{
+	uint64_t off;
+
+	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
+		return 0;
+	off = gpa - VMM_IOAPIC_BASE;
+	switch (off) {
+	case VMM_IOAPIC_INDEX:
+		svm->mut_ioapic_sel = val & 0xffU;
+		return 1;
+	case VMM_IOAPIC_DATA:
+		vmm_svm_ioapic_write_reg(svm, svm->mut_ioapic_sel, val);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static int
 vmm_svm_pic_read(struct vmm_svm_backend *svm, unsigned int port, int size,
     uint32_t *valp)
@@ -1245,6 +1371,112 @@ vmm_svm_handle_idle_wait(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
 		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
 }
 
+struct vmm_svm_mmio32 {
+	uint8_t mut_write;
+	uint8_t mut_reg;
+	uint8_t mut_imm;
+	uint32_t mut_imm_val;
+};
+
+static int
+vmm_svm_decode_mmio32(struct vmm_svm_vmcb *vmcb,
+    struct vmm_svm_mmio32 *op)
+{
+	const uint8_t *insn = vmcb->ctrl.inst_bytes;
+	uint8_t rex = 0;
+	uint8_t opcode;
+	uint8_t modrm;
+	uint8_t mod;
+	uint8_t reg;
+	uint8_t rm;
+	size_t len = vmcb->ctrl.inst_len;
+	size_t i = 0;
+
+	if (len == 0 || len > sizeof(vmcb->ctrl.inst_bytes) || op == NULL)
+		return 0;
+	while (i < len && insn[i] >= 0x40 && insn[i] <= 0x4f)
+		rex = insn[i++];
+	if ((rex & 0x08) != 0 || i + 2 > len)
+		return 0;
+	opcode = insn[i++];
+	modrm = insn[i++];
+	mod = modrm >> 6;
+	reg = ((modrm >> 3) & 7U) | ((rex & 0x04) ? 8U : 0U);
+	rm = modrm & 7U;
+	if (mod == 3)
+		return 0;
+	if (rm == 4) {
+		uint8_t sib;
+		uint8_t base;
+
+		if (i >= len)
+			return 0;
+		sib = insn[i++];
+		base = sib & 7U;
+		if (mod == 0 && base == 5)
+			i += 4;
+	} else if (mod == 0 && rm == 5) {
+		i += 4;
+	}
+	if (mod == 1)
+		i += 1;
+	else if (mod == 2)
+		i += 4;
+	if (i > len)
+		return 0;
+
+	switch (opcode) {
+	case 0x89:		/* mov r/m32,r32 */
+		op->mut_write = 1;
+		op->mut_reg = reg;
+		op->mut_imm = 0;
+		return 1;
+	case 0x8b:		/* mov r32,r/m32 */
+		op->mut_write = 0;
+		op->mut_reg = reg;
+		op->mut_imm = 0;
+		return 1;
+	case 0xc7:		/* mov r/m32,imm32 */
+		if (reg != 0 || i + 4 > len)
+			return 0;
+		op->mut_write = 1;
+		op->mut_reg = 0;
+		op->mut_imm = 1;
+		op->mut_imm_val = (uint32_t)insn[i] |
+		    ((uint32_t)insn[i + 1] << 8) |
+		    ((uint32_t)insn[i + 2] << 16) |
+		    ((uint32_t)insn[i + 3] << 24);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm, uint64_t gpa)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	struct vmm_svm_mmio32 op;
+	uint32_t val;
+
+	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
+		return 0;
+	if (!vmm_svm_decode_mmio32(vmcb, &op))
+		return 0;
+	if (op.mut_write) {
+		val = op.mut_imm ? op.mut_imm_val :
+		    (uint32_t)vmm_svm_gpr_read(svm, op.mut_reg);
+		if (!vmm_svm_ioapic_write(svm, gpa, val))
+			return 0;
+	} else {
+		if (!vmm_svm_ioapic_read(svm, gpa, &val))
+			return 0;
+		vmm_svm_gpr_write32(svm, op.mut_reg, val);
+	}
+	vmm_svm_advance_rip(vmcb);
+	return 1;
+}
+
 static int
 vmm_svm_handle_npf(struct vmm_svm_backend *svm)
 {
@@ -1254,6 +1486,10 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm)
 	int prot;
 	int error;
 
+	if ((vmcb->ctrl.exitinfo1 & PGEX_I) == 0 &&
+	    vmm_svm_handle_ioapic_mmio(svm, gpa)) {
+		return 1;
+	}
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
 		prot = VM_PROT_WRITE;
 	else if (vmcb->ctrl.exitinfo1 & PGEX_I)

@@ -19,10 +19,16 @@
 #define GDT_GPA		0x5000ULL
 #define TSS_GPA		0x6000ULL
 #define IDT_GPA		0x6800ULL
+#define IOAPIC_PD_GPA	0x7000ULL
 #define ENTRY_GPA	0x100000ULL
 #define TIMER_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
 #define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
 #define STACK_GPA	0x180000ULL
+#define IOAPIC_GPA	0xfec00000ULL
+#define IOAPIC_PDPT_INDEX	((IOAPIC_GPA >> 30) & 0x1ffULL)
+#define IOAPIC_PD_INDEX	((IOAPIC_GPA >> 21) & 0x1ffULL)
+#define IOAPIC_VERSION	0x00170011U
+#define IOAPIC_MASKED_VECTOR32	0x00010020U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ARCH_X64	1
@@ -216,6 +222,56 @@ emit_outb(uint8_t *code, size_t *len, size_t cap, uint16_t port, uint8_t val)
 	emit_out_dx_al(code, len, cap);
 }
 
+static size_t
+emit_jne8(uint8_t *code, size_t *len, size_t cap)
+{
+	static const uint8_t bytes[] = { 0x75, 0x00 };
+	size_t disp;
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+	disp = *len - 1;
+	return disp;
+}
+
+static void
+patch_rel8(uint8_t *code, size_t disp, size_t target)
+{
+	int64_t rel = (int64_t)target - (int64_t)(disp + 1);
+
+	if (rel < -128 || rel > 127)
+		errx(1, "guest branch target is out of rel8 range");
+	code[disp] = (uint8_t)rel;
+}
+
+static void
+emit_u32(uint8_t *code, size_t *len, size_t cap, uint32_t val)
+{
+	uint8_t bytes[] = {
+	    val & 0xffU, (val >> 8) & 0xffU, (val >> 16) & 0xffU,
+	    (val >> 24) & 0xffU
+	};
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+}
+
+static void
+emit_mov_eax(uint8_t *code, size_t *len, size_t cap, uint32_t val)
+{
+	static const uint8_t op[] = { 0xb8 };
+
+	emit(code, len, cap, op, sizeof(op));
+	emit_u32(code, len, cap, val);
+}
+
+static void
+emit_cmp_eax(uint8_t *code, size_t *len, size_t cap, uint32_t val)
+{
+	static const uint8_t op[] = { 0x3d };
+
+	emit(code, len, cap, op, sizeof(op));
+	emit_u32(code, len, cap, val);
+}
+
 static void
 emit_serial_char(uint8_t *code, size_t *len, size_t cap, uint8_t ch)
 {
@@ -344,6 +400,51 @@ guest_pic_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_ioapic_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_rdi_10_to_eax[] = { 0x8b, 0x47, 0x10 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-ioapic-ok\n";
+	size_t len = 0;
+	size_t fail_label;
+	size_t jver;
+	size_t jredir;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 1);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit(code, &len, cap, mov_rdi_10_to_eax, sizeof(mov_rdi_10_to_eax));
+	emit_cmp_eax(code, &len, cap, IOAPIC_VERSION);
+	jver = emit_jne8(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x10);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, IOAPIC_MASKED_VECTOR32);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x10);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit(code, &len, cap, mov_rdi_10_to_eax, sizeof(mov_rdi_10_to_eax));
+	emit_cmp_eax(code, &len, cap, IOAPIC_MASKED_VECTOR32);
+	jredir = emit_jne8(code, &len, cap);
+
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel8(code, jver, fail_label);
+	patch_rel8(code, jredir, fail_label);
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -397,6 +498,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_ud_code(code, cap);
 	} else if (strcmp(mode, "pic") == 0) {
 		return guest_pic_code(code, cap);
+	} else if (strcmp(mode, "ioapic") == 0) {
+		return guest_ioapic_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -429,9 +532,12 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	if (mem_size < 2 * 1024 * 1024)
 		errx(1, "fd3 is smaller than 2M");
 	memset(mem + PML4_GPA, 0, PAGE_SIZE_GUEST * 3);
+	memset(mem + IOAPIC_PD_GPA, 0, PAGE_SIZE_GUEST);
 	write64(mem, PML4_GPA, PDPT_GPA | 3);
 	write64(mem, PDPT_GPA, PD_GPA | 3);
+	write64(mem, PDPT_GPA + IOAPIC_PDPT_INDEX * 8, IOAPIC_PD_GPA | 3);
 	write64(mem, PD_GPA, 0x83);
+	write64(mem, IOAPIC_PD_GPA + IOAPIC_PD_INDEX * 8, IOAPIC_GPA | 0x83);
 
 	memset(mem + GDT_GPA, 0, PAGE_SIZE_GUEST);
 	write64(mem, GDT_GPA + 8, 0x00209a0000000000ULL);
@@ -493,7 +599,7 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu, size_t code_len)
 {
 	struct vmm_manifest_header hdr;
-	struct vmm_gpa_range ranges[4];
+	struct vmm_gpa_range ranges[5];
 	uint8_t *ptr;
 
 	if (manifest_size < PAGE_SIZE_GUEST)
@@ -503,6 +609,8 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	ranges[2] = (struct vmm_gpa_range){ GDT_GPA, PAGE_SIZE_GUEST * 2, 6, 0 };
 	ranges[3] = (struct vmm_gpa_range){ STACK_GPA - PAGE_SIZE_GUEST,
 	    PAGE_SIZE_GUEST, 7, 0 };
+	ranges[4] = (struct vmm_gpa_range){ IOAPIC_PD_GPA, PAGE_SIZE_GUEST,
+	    8, 0 };
 
 	memset(manifest, 0, manifest_size);
 	ptr = manifest + sizeof(hdr);
@@ -530,7 +638,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
