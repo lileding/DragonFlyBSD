@@ -775,6 +775,8 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	(void)conf;
 	if (vmmfs_mount_count_busy())
 		return EBUSY;
+	if (vmm_loader_busy())
+		return EBUSY;
 	lockuninit(&vmmfs_mount_lock);
 	kprintf("vmm: unloaded\n");
 	return 0;

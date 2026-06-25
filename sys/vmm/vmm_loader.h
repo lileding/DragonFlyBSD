@@ -29,6 +29,8 @@ size_t	vmm_loader_format(const struct vmm_loader *l, char *out, size_t cap);
 /* Path without trailing newline (for start-time resolution). */
 size_t	vmm_loader_path(const struct vmm_loader *l, char *out, size_t cap);
 int	vmm_loader_is_set(const struct vmm_loader *l);
+/* Loader fd/mmap capability objects still hold vmm.ko pager callbacks. */
+int	vmm_loader_busy(void);
 
 struct ucred;
 struct vmm_mem;

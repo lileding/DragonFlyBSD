@@ -101,6 +101,14 @@ struct vmm_loader_fd {
 };
 
 static uint32_t vmm_loader_fd_serial;
+static int vmm_loader_fd_active;
+
+int
+vmm_loader_busy(void)
+{
+	return atomic_fetchadd_int(&vmm_loader_fd_active, 0) != 0;
+}
+
 
 static d_open_t		vmm_loader_fd_open;
 static d_close_t	vmm_loader_fd_close;
@@ -309,8 +317,11 @@ vmm_loader_fd_ref(struct vmm_loader_fd *lfd)
 static void
 vmm_loader_fd_put(struct vmm_loader_fd *lfd)
 {
-	if (atomic_fetchadd_int(&lfd->atomic_mut_refs, -1) == 1)
+	if (atomic_fetchadd_int(&lfd->atomic_mut_refs, -1) == 1) {
+		atomic_add_int(&vmm_loader_fd_active, -1);
+		wakeup(&vmm_loader_fd_active);
 		kfree(lfd, M_TEMP);
+	}
 }
 
 static int
@@ -541,6 +552,7 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 	lfd->own_mut_backing_object = object;
 	lfd->imm_size = round_page(size);
 	lfd->atomic_mut_refs = 1;
+	atomic_add_int(&vmm_loader_fd_active, 1);
 	lfd->own_mut_object = cdev_pager_allocate(lfd, OBJT_MGTDEVICE,
 	    &vmm_loader_pager_ops, lfd->imm_size,
 	    VM_PROT_READ | VM_PROT_WRITE, 0, proc0.p_ucred);
@@ -776,6 +788,7 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 	int status = 0;
 	int result = 0;
 	int error;
+	int cancelled = 0;
 
 	error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK, &child);
 	if (error)
@@ -799,14 +812,16 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 			return error;
 		if (result != 0)
 			break;
-		if (vmm_loader_cancelled(ep)) {
+		if (!cancelled && vmm_loader_cancelled(ep)) {
+			cancelled = 1;
 			vmm_loader_epoch_revoke(ep);
 			(void)kern_kill(SIGKILL, pid, -1);
-			return EINTR;
 		}
 		tsleep(ep->borrow_imm_cancel_arg != NULL ?
 		    ep->borrow_imm_cancel_arg : ep, 0, "vmmld", hz / 20 + 1);
 	}
+	if (cancelled)
+		return EINTR;
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 		return ENOEXEC;
 	return 0;
