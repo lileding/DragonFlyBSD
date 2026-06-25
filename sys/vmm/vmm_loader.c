@@ -660,6 +660,11 @@ vmm_loader_install_fd(struct file *fp, int target_fd)
 		fsetfd(curproc->p_fd, NULL, fd);
 		return EBUSY;
 	}
+	/*
+	 * fsetfd() takes a descriptor-table reference with fhold().  The
+	 * epoch keeps its original reference so fdrevoke() can close loader
+	 * descriptors without freeing fp before vmm_loader_epoch_close_fds().
+	 */
 	fsetfd(curproc->p_fd, fp, target_fd);
 	return 0;
 }
