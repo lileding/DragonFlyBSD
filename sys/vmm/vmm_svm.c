@@ -126,6 +126,12 @@
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
 #define VMM_COM1_LCR_DLAB	0x80U
+#define VMM_PIC1_CMD		0x20U
+#define VMM_PIC1_DATA		0x21U
+#define VMM_PIC2_CMD		0xa0U
+#define VMM_PIC2_DATA		0xa1U
+/* NuttX qemu-intel64 currently uses PIC2_CMD + 2 for the slave data port. */
+#define VMM_PIC2_DATA_NUTTX	0xa2U
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
 
 #define VMM_SVM_MSRBM_PAGES		2
@@ -300,6 +306,8 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
 	uint8_t mut_com1_scr;
+	uint8_t mut_pic1_imr;
+	uint8_t mut_pic2_imr;
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
@@ -441,6 +449,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
+	svm->mut_pic1_imr = 0xff;
+	svm->mut_pic2_imr = 0xff;
 	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_ID -
 	    VMM_SVM_X2APIC_MSR_BASE] = 0;
 	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_VERSION -
@@ -1040,6 +1050,51 @@ vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
 }
 
 static int
+vmm_svm_pic_read(struct vmm_svm_backend *svm, unsigned int port, int size,
+    uint32_t *valp)
+{
+	if (size != 1)
+		return 0;
+	switch (port) {
+	case VMM_PIC1_CMD:
+	case VMM_PIC2_CMD:
+		*valp = 0;
+		return 1;
+	case VMM_PIC1_DATA:
+		*valp = svm->mut_pic1_imr;
+		return 1;
+	case VMM_PIC2_DATA:
+	case VMM_PIC2_DATA_NUTTX:
+		*valp = svm->mut_pic2_imr;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_pic_write(struct vmm_svm_backend *svm, unsigned int port, int size,
+    uint32_t val)
+{
+	if (size != 1)
+		return 0;
+	switch (port) {
+	case VMM_PIC1_CMD:
+	case VMM_PIC2_CMD:
+		return 1;
+	case VMM_PIC1_DATA:
+		svm->mut_pic1_imr = val & 0xffU;
+		return 1;
+	case VMM_PIC2_DATA:
+	case VMM_PIC2_DATA_NUTTX:
+		svm->mut_pic2_imr = val & 0xffU;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
 vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
     uint32_t *valp)
 {
@@ -1123,6 +1178,19 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm)
 
 	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0)
 		return 0;
+	if (info & VMM_SVM_IOIO_IN) {
+		if (vmm_svm_pic_read(svm, port, size, &val)) {
+			vmm_svm_set_rax_low(vmcb, val, size);
+			vmm_svm_advance_ioio(vmcb);
+			return 1;
+		}
+	} else {
+		val = vmcb->state.rax & 0xffffffffU;
+		if (vmm_svm_pic_write(svm, port, size, val)) {
+			vmm_svm_advance_ioio(vmcb);
+			return 1;
+		}
+	}
 	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR)
 		return 0;
 	if (info & VMM_SVM_IOIO_IN) {

@@ -316,6 +316,34 @@ guest_ud_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_pic_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-pic-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit_outb(code, &len, cap, 0x20, 0x11);
+	emit_outb(code, &len, cap, 0xa0, 0x11);
+	emit_outb(code, &len, cap, 0x21, 0x20);
+	emit_outb(code, &len, cap, 0xa1, 0x28);
+	emit_outb(code, &len, cap, 0xa2, 0x28);
+	emit_outb(code, &len, cap, 0x21, 0x04);
+	emit_outb(code, &len, cap, 0xa1, 0x02);
+	emit_outb(code, &len, cap, 0xa2, 0x02);
+	emit_outb(code, &len, cap, 0x21, 0x01);
+	emit_outb(code, &len, cap, 0xa1, 0x01);
+	emit_outb(code, &len, cap, 0xa2, 0x01);
+	emit_outb(code, &len, cap, 0x21, 0xff);
+	emit_outb(code, &len, cap, 0xa1, 0xff);
+	emit_outb(code, &len, cap, 0xa2, 0xff);
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -367,6 +395,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
 		return guest_ud_code(code, cap);
+	} else if (strcmp(mode, "pic") == 0) {
+		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -500,7 +530,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
