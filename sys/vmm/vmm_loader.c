@@ -427,22 +427,30 @@ static int
 vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 {
 	struct vmm_loader_fd *lfd;
+	struct vm_object *object;
 	vm_ooffset_t off;
 	int error;
 
 	error = devfs_get_cdevpriv(ap->a_fp, (void **)&lfd);
 	if (error)
 		return error;
-	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL ||
-	    lfd->mut_revoked)
+	object = lfd->own_mut_object;
+	if ((ap->a_fp->f_flag & FREVOKED) || object == NULL)
 		return EINVAL;
 	if (ap->a_nprot & VM_PROT_EXECUTE)
 		return EACCES;
 	off = *ap->a_offset;
 	if (off < 0 || off > lfd->imm_size || ap->a_size > lfd->imm_size - off)
 		return EINVAL;
-	vm_object_reference_quick(lfd->own_mut_object);
-	*ap->a_object = lfd->own_mut_object;
+
+	VM_OBJECT_LOCK(object);
+	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL) {
+		VM_OBJECT_UNLOCK(object);
+		return EINVAL;
+	}
+	vm_object_reference_locked(object);
+	VM_OBJECT_UNLOCK(object);
+	*ap->a_object = object;
 	return 0;
 }
 
@@ -669,13 +677,16 @@ vmm_loader_epoch_revoke(struct vmm_loader_epoch *ep)
 static void
 vmm_loader_epoch_close_fds(struct vmm_loader_epoch *ep)
 {
+	/*
+	 * The loader process may have forked or dup'd these file pointers.
+	 * Epoch revoke already invalidated the capability; here we only drop
+	 * the worker's references so cdevpriv remains valid until final close.
+	 */
 	if (ep->own_mut_manifest_fp != NULL) {
-		vmm_loader_disarm_fp(ep->own_mut_manifest_fp);
 		fp_close(ep->own_mut_manifest_fp);
 		ep->own_mut_manifest_fp = NULL;
 	}
 	if (ep->own_mut_mem_fp != NULL) {
-		vmm_loader_disarm_fp(ep->own_mut_mem_fp);
 		fp_close(ep->own_mut_mem_fp);
 		ep->own_mut_mem_fp = NULL;
 	}
