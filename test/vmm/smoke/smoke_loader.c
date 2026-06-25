@@ -23,6 +23,7 @@
 #define ENTRY_GPA	0x100000ULL
 #define TIMER_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
 #define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
+#define PM64_LONG_GPA	(ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
 #define IOAPIC_GPA	0xfec00000ULL
 #define IOAPIC_PDPT_INDEX	((IOAPIC_GPA >> 30) & 0x1ffULL)
@@ -255,6 +256,14 @@ emit_u32(uint8_t *code, size_t *len, size_t cap, uint32_t val)
 }
 
 static void
+emit_u16(uint8_t *code, size_t *len, size_t cap, uint16_t val)
+{
+	uint8_t bytes[] = { val & 0xffU, (val >> 8) & 0xffU };
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+}
+
+static void
 emit_mov_eax(uint8_t *code, size_t *len, size_t cap, uint32_t val)
 {
 	static const uint8_t op[] = { 0xb8 };
@@ -445,6 +454,48 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_pm64_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t bootstrap[] = {
+	    0xfa,				/* cli */
+	    0x0f, 0x20, 0xe0,			/* mov eax,cr4 */
+	    0x83, 0xc8, 0x20,			/* or eax,CR4.PAE */
+	    0x0f, 0x22, 0xe0,			/* mov cr4,eax */
+	    0xb9, 0x80, 0x00, 0x00, 0xc0,	/* mov ecx,MSR_EFER */
+	    0x0f, 0x32,				/* rdmsr */
+	    0x0d, 0x00, 0x01, 0x00, 0x00,	/* or eax,EFER.LME */
+	    0x0f, 0x30,				/* wrmsr */
+	    0xb8				/* mov eax,PML4_GPA */
+	};
+	static const uint8_t set_cr3_cr0_ljmp[] = {
+	    0x0f, 0x22, 0xd8,			/* mov cr3,eax */
+	    0x0f, 0x20, 0xc0,			/* mov eax,cr0 */
+	    0x0d, 0x00, 0x00, 0x00, 0x80,	/* or eax,CR0.PG */
+	    0x0f, 0x22, 0xc0,			/* mov cr0,eax */
+	    0xea				/* ljmp $0x20,$PM64_LONG_GPA */
+	};
+	static const char msg[] = "dfvmm-pm64-ok\n";
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, bootstrap, sizeof(bootstrap));
+	emit_u32(code, &len, cap, PML4_GPA);
+	emit(code, &len, cap, set_cr3_cr0_ljmp, sizeof(set_cr3_cr0_ljmp));
+	emit_u32(code, &len, cap, PM64_LONG_GPA);
+	emit_u16(code, &len, cap, 0x20);
+	while (len < PM64_LONG_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -500,6 +551,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "ioapic") == 0) {
 		return guest_ioapic_code(code, cap);
+	} else if (strcmp(mode, "pm64") == 0) {
+		return guest_pm64_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -540,8 +593,14 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	write64(mem, IOAPIC_PD_GPA + IOAPIC_PD_INDEX * 8, IOAPIC_GPA | 0x83);
 
 	memset(mem + GDT_GPA, 0, PAGE_SIZE_GUEST);
-	write64(mem, GDT_GPA + 8, 0x00209a0000000000ULL);
-	write64(mem, GDT_GPA + 16, 0x0000920000000000ULL);
+	if (strcmp(mode, "pm64") == 0) {
+		write64(mem, GDT_GPA + 8, 0x00cf9a000000ffffULL);
+		write64(mem, GDT_GPA + 16, 0x00cf92000000ffffULL);
+		write64(mem, GDT_GPA + 32, 0x00209a0000000000ULL);
+	} else {
+		write64(mem, GDT_GPA + 8, 0x00209a0000000000ULL);
+		write64(mem, GDT_GPA + 16, 0x0000920000000000ULL);
+	}
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
 	if (strcmp(mode, "timerint") == 0 || strcmp(mode, "ud") == 0) {
@@ -564,22 +623,44 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	vcpu->gpr[VMM_X64_GPR_RSP] = STACK_GPA;
 	vcpu->gpr[VMM_X64_GPR_RIP] = ENTRY_GPA;
 	vcpu->gpr[VMM_X64_GPR_RFLAGS] = 2;
-	vcpu->cr[VMM_X64_CR_CR0] = CR0_PE | CR0_NE | CR0_PG;
-	vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA;
-	vcpu->cr[VMM_X64_CR_CR4] = CR4_PAE;
+	if (strcmp(mode, "pm64") == 0) {
+		vcpu->cr[VMM_X64_CR_CR0] = CR0_PE | CR0_NE;
+		vcpu->cr[VMM_X64_CR_CR3] = 0;
+		vcpu->cr[VMM_X64_CR_CR4] = 0;
+	} else {
+		vcpu->cr[VMM_X64_CR_CR0] = CR0_PE | CR0_NE | CR0_PG;
+		vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA;
+		vcpu->cr[VMM_X64_CR_CR4] = CR4_PAE;
+	}
 	vcpu->cr[VMM_X64_CR_XCR0] = XCR0_X87;
-	vcpu->msr[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
+	if (strcmp(mode, "pm64") != 0)
+		vcpu->msr[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
 	vcpu->msr[VMM_X64_MSR_PAT] = 0x0007040600070406ULL;
-	set_segment(&vcpu->seg[VMM_X64_SEG_ES], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_CS], 0x08,
-	    0xb | SEG_S | SEG_P | SEG_L | SEG_G, 0xffffffffU, 0);
+	if (strcmp(mode, "pm64") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_ES], 0x10,
+		    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_CS], 0x08,
+		    0xb | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
+	} else {
+		set_segment(&vcpu->seg[VMM_X64_SEG_ES], 0, SEG_UNUSABLE, 0, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_CS], 0x08,
+		    0xb | SEG_S | SEG_P | SEG_L | SEG_G, 0xffffffffU, 0);
+	}
 	set_segment(&vcpu->seg[VMM_X64_SEG_SS], 0x10,
 	    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
 	set_segment(&vcpu->seg[VMM_X64_SEG_DS], 0x10,
 	    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_FS], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
+	if (strcmp(mode, "pm64") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_FS], 0x10,
+		    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0x10,
+		    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 47, GDT_GPA);
+	} else {
+		set_segment(&vcpu->seg[VMM_X64_SEG_FS], 0, SEG_UNUSABLE, 0, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
+		set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
+	}
 	if (strcmp(mode, "timerint") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    TIMER_VECTOR * 16 + 15, IDT_GPA);
@@ -638,7 +719,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|pm64|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
