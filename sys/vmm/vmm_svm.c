@@ -169,6 +169,7 @@
 #define VMM_SVM_X2APIC_MSR_COUNT	(VMM_SVM_X2APIC_MSR_LAST - \
 					 VMM_SVM_X2APIC_MSR_BASE + 1)
 #define VMM_SVM_X2APIC_VERSION		0x00060014ULL
+#define VMM_SVM_X2APIC_ICR_DELIVERY_STATUS	0x00001000ULL
 #define VMM_SVM_LVT_VECTOR		0x000000ffULL
 #define VMM_SVM_LVT_MASKED		0x00010000ULL
 #define VMM_SVM_LVT_TIMER_TSCDLT	0x00040000ULL
@@ -778,6 +779,10 @@ vmm_svm_wrmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr, uint64_t val)
 	case VMM_SVM_X2APIC_MSR_SELFIPI:
 		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] =
 		    val & 0xff;
+		break;
+	case VMM_SVM_X2APIC_MSR_ICR:
+		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] =
+		    val & ~VMM_SVM_X2APIC_ICR_DELIVERY_STATUS;
 		break;
 	default:
 		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] = val;

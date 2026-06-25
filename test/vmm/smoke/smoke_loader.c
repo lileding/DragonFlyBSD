@@ -234,6 +234,17 @@ emit_jne8(uint8_t *code, size_t *len, size_t cap)
 	return disp;
 }
 
+static size_t
+emit_je8(uint8_t *code, size_t *len, size_t cap)
+{
+	static const uint8_t bytes[] = { 0x74, 0x00 };
+	size_t disp;
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+	disp = *len - 1;
+	return disp;
+}
+
 static void
 patch_rel8(uint8_t *code, size_t disp, size_t target)
 {
@@ -454,6 +465,40 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_x2apic_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t setup[] = {
+	    0xb9, 0x1b, 0x00, 0x00, 0x00, /* mov ecx,MSR_APICBASE */
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0d, 0x00, 0x0d, 0x00, 0x00, /* or eax,BSP|X2APIC|EN */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0x30, 0x08, 0x00, 0x00, /* mov ecx,x2APIC ICR */
+	    0xb8, 0x00, 0x85, 0x08, 0x00, /* mov eax,0x88500 */
+	    0x31, 0xd2,		/* xor edx,edx */
+	    0x0f, 0x30,		/* wrmsr */
+	    0x0f, 0x32,		/* rdmsr */
+	    0xa9, 0x00, 0x10, 0x00, 0x00	/* test eax,0x1000 */
+	};
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-x2apic-ok\n";
+	size_t len = 0;
+	size_t jok;
+	size_t ok_label;
+	size_t i;
+
+	emit(code, &len, cap, setup, sizeof(setup));
+	jok = emit_je8(code, &len, cap);
+	emit(code, &len, cap, fail, sizeof(fail));
+	ok_label = len;
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	patch_rel8(code, jok, ok_label);
+	return len;
+}
+
+static size_t
 guest_pm64_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t bootstrap[] = {
@@ -551,6 +596,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "ioapic") == 0) {
 		return guest_ioapic_code(code, cap);
+	} else if (strcmp(mode, "x2apic") == 0) {
+		return guest_x2apic_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
 		return guest_pm64_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
@@ -719,7 +766,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|pm64|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|pm64|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
