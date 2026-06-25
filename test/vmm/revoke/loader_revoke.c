@@ -64,15 +64,33 @@ expect_fault(volatile uint8_t *addr)
 }
 
 static int
-new_mmap_fails(int fd, size_t page_size)
+mmap_fails(int fd, size_t page_size, int prot, int flags)
 {
 	void *addr;
 
-	addr = mmap(NULL, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	addr = mmap(NULL, page_size, prot, flags, fd, 0);
 	if (addr == MAP_FAILED)
 		return 1;
 	munmap(addr, page_size);
 	return 0;
+}
+
+static int
+new_mmap_fails(int fd, size_t page_size)
+{
+	return mmap_fails(fd, page_size, PROT_READ | PROT_WRITE, MAP_SHARED);
+}
+
+static int
+private_mmap_fails(int fd, size_t page_size)
+{
+	return mmap_fails(fd, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE);
+}
+
+static int
+exec_mmap_fails(int fd, size_t page_size)
+{
+	return mmap_fails(fd, page_size, PROT_READ | PROT_EXEC, MAP_SHARED);
 }
 
 static void
@@ -102,12 +120,13 @@ write_ready(const char *result_path)
 
 static int
 write_result(const char *path, const char *mode, int new3, int new4,
-    int old3, int old4)
+    int old3, int old4, int private3, int private4, int exec3, int exec4)
 {
 	FILE *fp;
 	int pass;
 
-	pass = new3 && new4 && old3 && old4;
+	pass = new3 && new4 && old3 && old4 &&
+	    private3 && private4 && exec3 && exec4;
 	fp = fopen(path, "w");
 	if (fp == NULL)
 		return -1;
@@ -116,6 +135,10 @@ write_result(const char *path, const char *mode, int new3, int new4,
 	fprintf(fp, "new_mmap4_failed=%d\n", new4);
 	fprintf(fp, "old_mmap3_faulted=%d\n", old3);
 	fprintf(fp, "old_mmap4_faulted=%d\n", old4);
+	fprintf(fp, "private_mmap3_failed=%d\n", private3);
+	fprintf(fp, "private_mmap4_failed=%d\n", private4);
+	fprintf(fp, "exec_mmap3_failed=%d\n", exec3);
+	fprintf(fp, "exec_mmap4_failed=%d\n", exec4);
 	fprintf(fp, "pass=%d\n", pass);
 	fclose(fp);
 	return pass ? 0 : 1;
@@ -170,6 +193,10 @@ main(int argc, char **argv)
 	int new4;
 	int old3;
 	int old4;
+	int private3;
+	int private4;
+	int exec3;
+	int exec4;
 
 	if (argc < 3) {
 		fprintf(stderr, "usage: %s exit|hang result-path [delay]\n",
@@ -197,6 +224,10 @@ main(int argc, char **argv)
 		perror("dup");
 		return 2;
 	}
+	private3 = private_mmap_fails(3, page);
+	private4 = private_mmap_fails(4, page);
+	exec3 = exec_mmap_fails(3, page);
+	exec4 = exec_mmap_fails(4, page);
 
 	child = fork();
 	if (child < 0) {
@@ -217,6 +248,6 @@ main(int argc, char **argv)
 	new4 = new_mmap_fails(fd4, page);
 	old3 = expect_fault(mem_map);
 	old4 = expect_fault(manifest_map);
-	return write_result(result_path, mode, new3, new4, old3, old4) == 0 ?
-	    0 : 1;
+	return write_result(result_path, mode, new3, new4, old3, old4,
+	    private3, private4, exec3, exec4) == 0 ? 0 : 1;
 }

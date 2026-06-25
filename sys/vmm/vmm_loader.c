@@ -307,6 +307,8 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 		return error;
 	if ((ap->a_fp->f_flag & FREVOKED) || lfd->own_mut_object == NULL)
 		return EINVAL;
+	if (ap->a_nprot & VM_PROT_EXECUTE)
+		return EACCES;
 	off = *ap->a_offset;
 	if (off < 0 || off > lfd->imm_size || ap->a_size > lfd->imm_size - off)
 		return EINVAL;
