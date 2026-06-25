@@ -1325,6 +1325,7 @@ vm_object_mmap_revoke(vm_object_t object)
 
 	if (object == NULL)
 		return;
+	atomic_set_short(&object->flags, OBJ_MMAP_REVOKED);
 	info.object = object;
 	allproc_scan(vm_object_mmap_revoke_callback, &info, 0);
 }

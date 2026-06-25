@@ -1528,6 +1528,11 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 	 * If the fd was revoked after the device mmap callback accepted it,
 	 * remove the just-created mapping before returning to userland.
 	 */
+	if (object != NULL && (object->flags & OBJ_MMAP_REVOKED)) {
+		vm_map_remove(map, *addr, *addr + size);
+		lwkt_reltoken(&map->token);
+		return (EACCES);
+	}
 	if (fp != NULL && (fp->f_flag & FREVOKED)) {
 		vm_map_remove(map, *addr, *addr + size);
 		lwkt_reltoken(&map->token);
