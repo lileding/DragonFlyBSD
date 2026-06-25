@@ -470,12 +470,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_VINTR |
 	    VMM_SVM_CTRL_INTERCEPT_RDTSC |
 	    VMM_SVM_CTRL_INTERCEPT_RDPMC |
-	    VMM_SVM_CTRL_INTERCEPT_PUSHF |
-	    VMM_SVM_CTRL_INTERCEPT_POPF |
 	    VMM_SVM_CTRL_INTERCEPT_CPUID |
 	    VMM_SVM_CTRL_INTERCEPT_RSM |
-	    VMM_SVM_CTRL_INTERCEPT_IRET |
-	    VMM_SVM_CTRL_INTERCEPT_INTN |
 	    VMM_SVM_CTRL_INTERCEPT_INVD |
 	    VMM_SVM_CTRL_INTERCEPT_PAUSE |
 	    VMM_SVM_CTRL_INTERCEPT_HLT |
@@ -507,7 +503,11 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_PCID |
 	    VMM_SVM_CTRL_INTERCEPT_MCOMMIT |
 	    VMM_SVM_CTRL_INTERCEPT_TLBSYNC;
-	vmcb->ctrl.intercept_vec = 0xffffffffU;
+	/*
+	 * CPU exceptions belong to the guest IDT.  Root scheduling and forced
+	 * stop still use the separate external INTR/NMI intercepts above.
+	 */
+	vmcb->ctrl.intercept_vec = 0;
 	vmcb->ctrl.iopm_base_pa = svm->imm_iobm_pa;
 	vmcb->ctrl.msrpm_base_pa = svm->imm_msrbm_pa;
 	vmcb->ctrl.guest_asid = VMM_SVM_ASID;

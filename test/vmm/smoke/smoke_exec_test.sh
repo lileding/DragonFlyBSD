@@ -25,10 +25,10 @@ cleanup_machine()
 }
 cleanup()
 {
-	set +e; cleanup_machine vmmcall; cleanup_machine cpuid; cleanup_machine serial; cleanup_machine time; cleanup_machine xsetbv; cleanup_machine apicmsr; cleanup_machine timerint; cleanup_machine hlt; cleanup_machine loop
+	set +e; cleanup_machine vmmcall; cleanup_machine cpuid; cleanup_machine serial; cleanup_machine time; cleanup_machine xsetbv; cleanup_machine apicmsr; cleanup_machine timerint; cleanup_machine ud; cleanup_machine hlt; cleanup_machine loop
 	[ "$MOUNTED" -eq 1 ] && umount "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] && kldunload vmm >>"$LOG" 2>&1
-	rm -f /var/tmp/vmmld_smoke_vmmcall /var/tmp/vmmld_smoke_cpuid /var/tmp/vmmld_smoke_serial /var/tmp/vmmld_smoke_time /var/tmp/vmmld_smoke_xsetbv /var/tmp/vmmld_smoke_apicmsr /var/tmp/vmmld_smoke_timerint /var/tmp/vmmld_smoke_hlt /var/tmp/vmmld_smoke_loop
+	rm -f /var/tmp/vmmld_smoke_vmmcall /var/tmp/vmmld_smoke_cpuid /var/tmp/vmmld_smoke_serial /var/tmp/vmmld_smoke_time /var/tmp/vmmld_smoke_xsetbv /var/tmp/vmmld_smoke_apicmsr /var/tmp/vmmld_smoke_timerint /var/tmp/vmmld_smoke_ud /var/tmp/vmmld_smoke_hlt /var/tmp/vmmld_smoke_loop
 }
 wrapper() { w=/var/tmp/vmmld_smoke_$1; printf '#!/bin/sh\nexec %s %s\n' "$LOADER" "$1" >"$w"; chmod +x "$w"; echo "$w"; }
 run_case()
@@ -39,6 +39,8 @@ run_case()
 	if [ "$mode" = loop ] || [ "$mode" = hlt ]; then wait_event "$(mach "$vm")/events" '^started$' || fail "$vm started"; echo force >"$(mach "$vm")/stopped"; wait_event "$(mach "$vm")/events" '^stopped$' || fail "$vm stopped"; [ -e "$(mach "$vm")/stopped" ] || fail "$vm stopped file"
 	else wait_event "$(mach "$vm")/events" '^started$' '^stopped$' || fail "$vm self exit"; [ ! -e "$(mach "$vm")/stopped" ] || fail "$vm desired changed"; echo force >"$(mach "$vm")/stopped"; fi
 	[ "$mode" != serial ] || wait_console "$(mach "$vm")/console" 'dfvmm-serial-ok' || fail "$vm console output"
+	[ "$mode" != ud ] || wait_console "$(mach "$vm")/console" 'dfvmm-ud-ok' || fail "$vm console output"
+	[ "$mode" != ud ] || wait_console "$(mach "$vm")/console" 'dfvmm-iret-ok' || fail "$vm iret output"
 	cleanup_machine "$vm" || fail "$vm cleanup"; say "PASS: $vm"
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
@@ -47,4 +49,4 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/smoke_loader.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 || { run kldload "$VMM_KO"; LOADED=1; }
 [ -x /sbin/mount_vmm ] || run ln -sf /sbin/mount_std /sbin/mount_vmm
 run mkdir -p "$MNT"; run mount -t vmm vmm "$MNT"; MOUNTED=1
-run_case vmmcall; run_case cpuid; run_case serial; run_case time; run_case xsetbv; run_case apicmsr; run_case timerint; run_case hlt; run_case loop; say "PASS"
+run_case vmmcall; run_case cpuid; run_case serial; run_case time; run_case xsetbv; run_case apicmsr; run_case timerint; run_case ud; run_case hlt; run_case loop; say "PASS"

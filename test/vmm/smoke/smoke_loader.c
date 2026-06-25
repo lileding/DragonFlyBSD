@@ -21,6 +21,7 @@
 #define IDT_GPA		0x6800ULL
 #define ENTRY_GPA	0x100000ULL
 #define TIMER_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
+#define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
 #define STACK_GPA	0x180000ULL
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
@@ -67,6 +68,7 @@
 #define SEG_G		0x0800U
 #define SEG_UNUSABLE	0x1000U
 #define TIMER_VECTOR	0x2eU
+#define UD_VECTOR	6U
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -282,6 +284,38 @@ guest_timer_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_ud_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t setup[] = {
+	    0x0f, 0x0b		/* ud2 */
+	};
+	static const uint8_t fixup[] = {
+	    0x48, 0x83, 0x04, 0x24, 0x02 /* addq $2,(%rsp) */
+	};
+	static const char handler_msg[] = "dfvmm-ud-ok\n";
+	static const char return_msg[] = "dfvmm-iret-ok\n";
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t iretq[] = { 0x48, 0xcf };
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, setup, sizeof(setup));
+	for (i = 0; i < sizeof(return_msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)return_msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	while (len < UD_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, fixup, sizeof(fixup));
+	for (i = 0; i < sizeof(handler_msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
+	emit(code, &len, cap, iretq, sizeof(iretq));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -331,6 +365,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_serial_code(code, cap);
 	} else if (strcmp(mode, "timerint") == 0) {
 		return guest_timer_code(code, cap);
+	} else if (strcmp(mode, "ud") == 0) {
+		return guest_ud_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -358,7 +394,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 static void
 build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 {
-	uint8_t code[256];
+	uint8_t code[1024];
 
 	if (mem_size < 2 * 1024 * 1024)
 		errx(1, "fd3 is smaller than 2M");
@@ -372,9 +408,12 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	write64(mem, GDT_GPA + 16, 0x0000920000000000ULL);
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
-	if (strcmp(mode, "timerint") == 0) {
+	if (strcmp(mode, "timerint") == 0 || strcmp(mode, "ud") == 0) {
 		memset(mem + IDT_GPA, 0, 0x400);
-		write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
+		if (strcmp(mode, "timerint") == 0)
+			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
+		else
+			write_idt_gate(mem, UD_VECTOR, UD_HANDLER_GPA);
 	}
 
 	*code_len = guest_code(mode, code, sizeof(code));
@@ -408,6 +447,9 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	if (strcmp(mode, "timerint") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    TIMER_VECTOR * 16 + 15, IDT_GPA);
+	} else if (strcmp(mode, "ud") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    UD_VECTOR * 16 + 15, IDT_GPA);
 	} else {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0, 0, 0);
 	}
@@ -458,7 +500,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
