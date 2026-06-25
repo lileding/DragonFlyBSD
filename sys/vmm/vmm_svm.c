@@ -976,6 +976,25 @@ vmm_svm_handle_rdtsc(struct vmm_svm_backend *svm, int with_aux)
 	vmm_svm_advance_rip(svm->own_mut_vmcb);
 }
 
+static int
+vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint64_t xcr0;
+
+	if ((uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX] != 0)
+		return 0;
+	xcr0 = (svm->mut_gprs[VMM_X64_GPR_RDX] << 32) |
+	    (vmcb->state.rax & 0xffffffffULL);
+	if (!vmm_loader_x86_xcr0_valid(xcr0) ||
+	    (xcr0 & ~npx_xcr0_mask) != 0) {
+		return 0;
+	}
+	svm->imm_guest_xcr0 = xcr0;
+	vmm_svm_advance_rip(vmcb);
+	return 1;
+}
+
 static void
 vmm_svm_handle_idle_wait(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
     struct vmm_svm_vmcb *vmcb)
@@ -1077,8 +1096,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			if (vmm_svm_handle_msr(svm))
 				break;
 			goto unhandled;
-		case VMM_SVM_EXIT_VMMCALL:
 		case VMM_SVM_EXIT_XSETBV:
+			if (vmm_svm_handle_xsetbv(svm))
+				break;
+			goto unhandled;
+		case VMM_SVM_EXIT_VMMCALL:
 		default:
 	unhandled:
 			kprintf("vmm_svm: vmexit 0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx\n",

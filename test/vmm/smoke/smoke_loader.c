@@ -230,6 +230,13 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	static const uint8_t time_vmmcall[] = {
 	    0x0f, 0x31, 0xf3, 0x90, 0x0f, 0x01, 0xf9, 0x0f, 0x01, 0xd9
 	};
+	static const uint8_t xsetbv_vmmcall[] = {
+	    0x31, 0xc9,		/* xor ecx,ecx */
+	    0x31, 0xd2,		/* xor edx,edx */
+	    0xb8, 0x01, 0x00, 0x00, 0x00, /* mov eax,1 */
+	    0x0f, 0x01, 0xd1,	/* xsetbv */
+	    0x0f, 0x01, 0xd9	/* vmmcall */
+	};
 	static const uint8_t hlt[] = { 0xf4 };
 	static const uint8_t loop[] = { 0xeb, 0xfe };
 	const uint8_t *src;
@@ -246,6 +253,9 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
+	} else if (strcmp(mode, "xsetbv") == 0) {
+		src = xsetbv_vmmcall;
+		len = sizeof(xsetbv_vmmcall);
 	} else if (strcmp(mode, "hlt") == 0) {
 		src = hlt;
 		len = sizeof(hlt);
@@ -355,7 +365,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
