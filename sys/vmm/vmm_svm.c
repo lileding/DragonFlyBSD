@@ -16,6 +16,7 @@
 #include <machine/cpu.h>
 #include <machine/md_var.h>
 #include <machine/npx.h>
+#include <machine/psl.h>
 #include <machine/specialreg.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -84,6 +85,11 @@
 #define VMM_SVM_CTRL_ENABLE_NP		0x001ULL
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
+#define VMM_SVM_CTRL_INTR_SHADOW	(1ULL << 0)
+#define VMM_SVM_EVENTINJ_VECTOR_MASK	0x000000ffULL
+#define VMM_SVM_EVENTINJ_TYPE_HW_INT	0ULL
+#define VMM_SVM_EVENTINJ_TYPE_SHIFT	8
+#define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
 
 #define VMM_SVM_EXIT_RDTSC		0x06eULL
 #define VMM_SVM_EXIT_PAUSE		0x077ULL
@@ -138,11 +144,15 @@
 #define VMM_SVM_X2APIC_MSR_VERSION	0x803U
 #define VMM_SVM_X2APIC_MSR_EOI		0x80bU
 #define VMM_SVM_X2APIC_MSR_ICR		0x830U
+#define VMM_SVM_X2APIC_MSR_LVT_TIMER	0x832U
 #define VMM_SVM_X2APIC_MSR_SELFIPI	0x83fU
 #define VMM_SVM_X2APIC_MSR_LAST	0x83fU
 #define VMM_SVM_X2APIC_MSR_COUNT	(VMM_SVM_X2APIC_MSR_LAST - \
 					 VMM_SVM_X2APIC_MSR_BASE + 1)
 #define VMM_SVM_X2APIC_VERSION		0x00060014ULL
+#define VMM_SVM_LVT_VECTOR		0x000000ffULL
+#define VMM_SVM_LVT_MASKED		0x00010000ULL
+#define VMM_SVM_LVT_TIMER_TSCDLT	0x00040000ULL
 
 
 #define VMM_X64_NDR			6
@@ -284,6 +294,7 @@ struct vmm_svm_backend {
 	uint64_t mut_guest_tsc_deadline;
 	uint64_t mut_guest_apicbase;
 	uint64_t mut_guest_x2apic[VMM_SVM_X2APIC_MSR_COUNT];
+	uint8_t mut_guest_tsc_deadline_fired;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 	uint8_t mut_com1_ier;
 	uint8_t mut_com1_lcr;
@@ -691,6 +702,12 @@ vmm_svm_rdmsr_value(struct vmm_svm_backend *svm, uint64_t val)
 }
 
 static uint64_t
+vmm_svm_guest_tsc(struct vmm_svm_backend *svm)
+{
+	return rdtsc() + svm->own_mut_vmcb->ctrl.tsc_offset;
+}
+
+static uint64_t
 vmm_svm_wrmsr_value(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -742,6 +759,68 @@ vmm_svm_wrmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr, uint64_t val)
 }
 
 static int
+vmm_svm_timer_ready(struct vmm_svm_backend *svm, uint8_t *vectorp)
+{
+	uint64_t lvt;
+	uint8_t vector;
+
+	if (svm->mut_guest_tsc_deadline == 0 ||
+	    svm->mut_guest_tsc_deadline_fired) {
+		return 0;
+	}
+	lvt = svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_LVT_TIMER -
+	    VMM_SVM_X2APIC_MSR_BASE];
+	if ((lvt & VMM_SVM_LVT_MASKED) != 0 ||
+	    (lvt & VMM_SVM_LVT_TIMER_TSCDLT) == 0) {
+		return 0;
+	}
+	vector = lvt & VMM_SVM_LVT_VECTOR;
+	if (vector < 16)
+		return 0;
+	if (vmm_svm_guest_tsc(svm) < svm->mut_guest_tsc_deadline)
+		return 0;
+	*vectorp = vector;
+	return 1;
+}
+
+static void
+vmm_svm_inject_hwint(struct vmm_svm_backend *svm, uint8_t vector)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	vmcb->ctrl.eventinj =
+	    ((uint64_t)vector & VMM_SVM_EVENTINJ_VECTOR_MASK) |
+	    (VMM_SVM_EVENTINJ_TYPE_HW_INT << VMM_SVM_EVENTINJ_TYPE_SHIFT) |
+	    VMM_SVM_EVENTINJ_VALID;
+}
+
+static void
+vmm_svm_inject_pending_timer(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint8_t vector;
+
+	if ((vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
+	    (vmcb->ctrl.intr & VMM_SVM_CTRL_INTR_SHADOW) != 0 ||
+	    (vmcb->state.rflags & PSL_I) == 0) {
+		return;
+	}
+	if (!vmm_svm_timer_ready(svm, &vector))
+		return;
+	vmm_svm_inject_hwint(svm, vector);
+	svm->mut_guest_tsc_deadline_fired = 1;
+}
+
+static void
+vmm_svm_requeue_exit_event(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	if ((vmcb->ctrl.exitintinfo & VMM_SVM_EVENTINJ_VALID) != 0)
+		vmcb->ctrl.eventinj = vmcb->ctrl.exitintinfo;
+}
+
+static int
 vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -757,7 +836,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 			vmm_svm_rdmsr_value(svm, vmcb->state.g_pat);
 			return 1;
 		case MSR_TSC:
-			vmm_svm_rdmsr_value(svm, rdtsc() + vmcb->ctrl.tsc_offset);
+			vmm_svm_rdmsr_value(svm, vmm_svm_guest_tsc(svm));
 			return 1;
 		case MSR_TSC_AUX:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_tsc_aux);
@@ -833,6 +912,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		return 1;
 	case MSR_TSC_DEADLINE:
 		svm->mut_guest_tsc_deadline = val;
+		svm->mut_guest_tsc_deadline_fired = 0;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_APICBASE:
@@ -1140,6 +1220,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			continue;
 		}
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		vmm_svm_inject_pending_timer(svm);
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
@@ -1148,6 +1229,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
 		vmm_svm_stgi();
+		vmm_svm_requeue_exit_event(svm);
 		switch (vmcb->ctrl.exitcode) {
 		case VMM_SVM_EXIT_INTR:
 		case VMM_SVM_EXIT_NMI:

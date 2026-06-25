@@ -18,7 +18,9 @@
 #define PD_GPA		0x4000ULL
 #define GDT_GPA		0x5000ULL
 #define TSS_GPA		0x6000ULL
+#define IDT_GPA		0x6800ULL
 #define ENTRY_GPA	0x100000ULL
+#define TIMER_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
@@ -64,6 +66,7 @@
 #define SEG_DB		0x0400U
 #define SEG_G		0x0800U
 #define SEG_UNUSABLE	0x1000U
+#define TIMER_VECTOR	0x2eU
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -108,6 +111,16 @@ struct vmm_gpa_range {
 	uint32_t	flags;
 } __attribute__((packed));
 
+struct x64_idt_gate {
+	uint16_t	offset_low;
+	uint16_t	selector;
+	uint8_t		ist;
+	uint8_t		type_attr;
+	uint16_t	offset_mid;
+	uint32_t	offset_high;
+	uint32_t	zero;
+} __attribute__((packed));
+
 static size_t
 align8(size_t value)
 {
@@ -118,6 +131,20 @@ static void
 write64(uint8_t *mem, uint64_t offset, uint64_t value)
 {
 	memcpy(mem + offset, &value, sizeof(value));
+}
+
+static void
+write_idt_gate(uint8_t *mem, unsigned int vector, uint64_t target)
+{
+	struct x64_idt_gate gate;
+
+	memset(&gate, 0, sizeof(gate));
+	gate.offset_low = target & 0xffffU;
+	gate.selector = 0x08;
+	gate.type_attr = 0x8e;
+	gate.offset_mid = (target >> 16) & 0xffffU;
+	gate.offset_high = (target >> 32) & 0xffffffffU;
+	memcpy(mem + IDT_GPA + vector * sizeof(gate), &gate, sizeof(gate));
 }
 
 static void
@@ -222,6 +249,39 @@ guest_serial_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_timer_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t setup[] = {
+	    0xfb,		/* sti */
+	    0xb9, 0x1b, 0x00, 0x00, 0x00, /* mov ecx,MSR_APICBASE */
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0d, 0x00, 0x0d, 0x00, 0x00, /* or eax,BSP|X2APIC|EN */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0x32, 0x08, 0x00, 0x00, /* mov ecx,x2APIC LVT timer */
+	    0xb8, 0x2e, 0x00, 0x04, 0x00, /* mov eax,0x4002e */
+	    0x31, 0xd2,		/* xor edx,edx */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xb9, 0xe0, 0x06, 0x00, 0x00, /* mov ecx,MSR_TSC_DEADLINE */
+	    0xb8, 0x01, 0x00, 0x00, 0x00, /* mov eax,1 */
+	    0x31, 0xd2,		/* xor edx,edx */
+	    0x0f, 0x30,		/* wrmsr */
+	    0xf4,		/* hlt */
+	    0xeb, 0xfe		/* jmp . */
+	};
+	static const uint8_t handler[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+
+	emit(code, &len, cap, setup, sizeof(setup));
+	while (len < TIMER_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, handler, sizeof(handler));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -269,6 +329,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		len = sizeof(cpuid_vmmcall);
 	} else if (strcmp(mode, "serial") == 0) {
 		return guest_serial_code(code, cap);
+	} else if (strcmp(mode, "timerint") == 0) {
+		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -310,13 +372,17 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	write64(mem, GDT_GPA + 16, 0x0000920000000000ULL);
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
+	if (strcmp(mode, "timerint") == 0) {
+		memset(mem + IDT_GPA, 0, 0x400);
+		write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
+	}
 
 	*code_len = guest_code(mode, code, sizeof(code));
 	memcpy(mem + ENTRY_GPA, code, *code_len);
 }
 
 static void
-build_vcpu(struct vmm_x64_vcpu_state *vcpu)
+build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 {
 	memset(vcpu, 0, sizeof(*vcpu));
 	vcpu->runnable = 1;
@@ -339,7 +405,12 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu)
 	set_segment(&vcpu->seg[VMM_X64_SEG_FS], 0, SEG_UNUSABLE, 0, 0);
 	set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
 	set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
-	set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0, 0, 0);
+	if (strcmp(mode, "timerint") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    TIMER_VECTOR * 16 + 15, IDT_GPA);
+	} else {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0, 0, 0);
+	}
 	set_segment(&vcpu->seg[VMM_X64_SEG_LDT], 0, SEG_UNUSABLE, 0, 0);
 	set_segment(&vcpu->seg[VMM_X64_SEG_TR], 0x18, 0x9 | SEG_P, 0x67,
 	    TSS_GPA);
@@ -387,7 +458,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
@@ -402,7 +473,7 @@ main(int argc, char **argv)
 		err(1, "mmap fd4");
 
 	build_guest(mem, (size_t)mem_stat.st_size, argv[1], &code_len);
-	build_vcpu(&vcpu);
+	build_vcpu(&vcpu, argv[1]);
 	build_manifest(manifest, (size_t)manifest_stat.st_size,
 	    (size_t)mem_stat.st_size, &vcpu, code_len);
 	return 0;
