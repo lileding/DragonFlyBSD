@@ -139,6 +139,7 @@ write_result(const char *path, const char *mode, int new3, int new4,
 	if (fp == NULL)
 		return -1;
 	fprintf(fp, "mode=%s\n", mode);
+	fprintf(fp, "pid=%ld\n", (long)getpid());
 	fprintf(fp, "new_mmap3_failed=%d\n", new3);
 	fprintf(fp, "new_mmap4_failed=%d\n", new4);
 	fprintf(fp, "old_mmap3_faulted=%d\n", old3);
@@ -211,7 +212,7 @@ main(int argc, char **argv)
 	int mprotect4;
 
 	if (argc < 3) {
-		fprintf(stderr, "usage: %s exit|hang result-path [delay]\n",
+		fprintf(stderr, "usage: %s exit|hang|hold result-path [delay]\n",
 		    argv[0]);
 		return 2;
 	}
@@ -220,7 +221,8 @@ main(int argc, char **argv)
 	delay = argc >= 4 ? atoi(argv[3]) : 3;
 	if (delay < 1)
 		delay = 1;
-	if (strcmp(mode, "exit") != 0 && strcmp(mode, "hang") != 0) {
+	if (strcmp(mode, "exit") != 0 && strcmp(mode, "hang") != 0 &&
+	    strcmp(mode, "hold") != 0) {
 		fprintf(stderr, "invalid mode: %s\n", mode);
 		return 2;
 	}
@@ -249,7 +251,7 @@ main(int argc, char **argv)
 		return 2;
 	}
 	if (child != 0) {
-		if (strcmp(mode, "exit") == 0)
+		if (strcmp(mode, "exit") == 0 || strcmp(mode, "hold") == 0)
 			return 0;
 		for (;;)
 			pause();
@@ -262,7 +264,10 @@ main(int argc, char **argv)
 	new4 = new_mmap_fails(fd4, page);
 	old3 = expect_fault(mem_map);
 	old4 = expect_fault(manifest_map);
-	return write_result(result_path, mode, new3, new4, old3, old4,
-	    private3, private4, exec3, exec4, mprotect3, mprotect4) == 0 ?
-	    0 : 1;
+	if (write_result(result_path, mode, new3, new4, old3, old4, private3,
+	    private4, exec3, exec4, mprotect3, mprotect4) != 0)
+		return 1;
+	while (strcmp(mode, "hold") == 0)
+		pause();
+	return 0;
 }
