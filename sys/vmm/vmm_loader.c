@@ -373,9 +373,14 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 		return VM_PAGER_ERROR;
 
 	/*
-	 * The caller holds the mmap capability object's token until after
-	 * pmap_enter().  Revoke takes the same token before clearing PTEs,
-	 * so an old fault cannot re-enter a mapping after revoke completes.
+	 * The fd object is only a revocable mmap capability.  The returned
+	 * page belongs to the real backing object: fd3's guest RAM or fd4's
+	 * manifest page.  DragonFly's OBJT_MGTDEVICE fault path allows this
+	 * direct page return without inserting it into the fd object, while
+	 * vm_object_page_remove() on the fd object still invalidates existing
+	 * user mappings by scanning the object's backing_list.  This keeps
+	 * loader-to-vCPU handoff zero-copy and lets revoke cut off userland
+	 * without releasing fd3 guest RAM.
 	 */
 	backing = lfd->own_mut_backing_object;
 	vm_object_reference_quick(backing);
