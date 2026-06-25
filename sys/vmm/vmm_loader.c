@@ -672,7 +672,11 @@ vmm_loader_run(const char *path, struct vmm_mem *mem,
 		return EINVAL;
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
-	ep->imm_mem_size = mem->mut_bytes;
+	ep->imm_mem_size = vmm_mem_size(mem);
+	if (ep->imm_mem_size == 0) {
+		error = EINVAL;
+		goto out;
+	}
 	ep->borrow_mut_mem_object = vmm_mem_object(mem);
 	ep->borrow_imm_cred = cred;
 	ep->borrow_imm_cancel = cancel;
