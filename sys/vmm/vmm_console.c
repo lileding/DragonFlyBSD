@@ -29,8 +29,12 @@ vmm_console_reset(struct vmm_console *c)
 	lwkt_gettoken(&c->token_console);
 	c->mut_guest_rx_bytes = 0;
 	c->mut_guest_drop_bytes = 0;
+	c->mut_host_tx_bytes = 0;
+	c->mut_host_drop_bytes = 0;
 	c->mut_ring_start = 0;
 	c->mut_ring_len = 0;
+	c->mut_input_start = 0;
+	c->mut_input_len = 0;
 	lwkt_reltoken(&c->token_console);
 }
 
@@ -88,8 +92,57 @@ vmm_console_guest_write(struct vmm_console *c, const char *buf, size_t len)
 void
 vmm_console_write(struct vmm_console *c, const char *buf, size_t len)
 {
-	(void)buf;
+	size_t i;
+
+	if (len == 0)
+		return;
 	lwkt_gettoken(&c->token_console);
-	c->mut_host_tx_bytes += len;
+	for (i = 0; i < len; i++) {
+		size_t pos;
+
+		if (c->mut_input_len < VMM_CONSOLE_INPUT_SIZE) {
+			pos = (c->mut_input_start + c->mut_input_len) %
+			    VMM_CONSOLE_INPUT_SIZE;
+			c->mut_input_len++;
+		} else {
+			pos = c->mut_input_start;
+			c->mut_input_start = (c->mut_input_start + 1) %
+			    VMM_CONSOLE_INPUT_SIZE;
+			c->mut_host_drop_bytes++;
+		}
+		c->mut_input[pos] = buf[i];
+		c->mut_host_tx_bytes++;
+	}
 	lwkt_reltoken(&c->token_console);
+	wakeup(c);
+}
+
+size_t
+vmm_console_guest_pending(struct vmm_console *c)
+{
+	size_t pending;
+
+	lwkt_gettoken(&c->token_console);
+	pending = c->mut_input_len;
+	lwkt_reltoken(&c->token_console);
+	return pending;
+}
+
+int
+vmm_console_guest_read(struct vmm_console *c, char *out)
+{
+	int available = 0;
+
+	if (out == NULL)
+		return 0;
+	lwkt_gettoken(&c->token_console);
+	if (c->mut_input_len != 0) {
+		*out = c->mut_input[c->mut_input_start];
+		c->mut_input_start = (c->mut_input_start + 1) %
+		    VMM_CONSOLE_INPUT_SIZE;
+		c->mut_input_len--;
+		available = 1;
+	}
+	lwkt_reltoken(&c->token_console);
+	return available;
 }

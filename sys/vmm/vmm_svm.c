@@ -132,6 +132,9 @@
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
 #define VMM_COM1_LCR_DLAB	0x80U
+#define VMM_COM1_LSR_DR		0x01U
+#define VMM_COM1_LSR_THRE	0x20U
+#define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
 #define VMM_PIC2_CMD		0xa0U
@@ -1236,11 +1239,21 @@ static int
 vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
     uint32_t *valp)
 {
+	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
+	char ch;
+	uint32_t lsr;
+
 	if (size != 1)
 		return 0;
 	switch (reg) {
 	case VMM_COM1_RBR_THR_DLL:
-		*valp = 0;
+		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) != 0) {
+			*valp = 0;
+		} else if (vmm_console_guest_read(console, &ch)) {
+			*valp = (uint8_t)ch;
+		} else {
+			*valp = 0;
+		}
 		return 1;
 	case VMM_COM1_IER_DLM:
 		*valp = (svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) ?
@@ -1256,7 +1269,10 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		*valp = svm->mut_com1_mcr;
 		return 1;
 	case VMM_COM1_LSR:
-		*valp = 0x60;		/* THR empty, transmitter empty */
+		lsr = VMM_COM1_LSR_THRE | VMM_COM1_LSR_TEMT;
+		if (vmm_console_guest_pending(console) != 0)
+			lsr |= VMM_COM1_LSR_DR;
+		*valp = lsr;
 		return 1;
 	case VMM_COM1_MSR:
 		*valp = 0;

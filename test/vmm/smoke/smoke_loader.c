@@ -327,6 +327,33 @@ guest_serial_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_serialin_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t setup[] = {
+	    0xba, 0xfd, 0x03,	/* mov dx,0x3fd */
+	    0xec,		/* in al,dx */
+	    0xa8, 0x01,		/* test al,0x01 */
+	    0x74, 0xfb,		/* jz in */
+	    0xba, 0xf8, 0x03,	/* mov dx,0x3f8 */
+	    0xec,		/* in al,dx */
+	    0x3c, 0x5a,		/* cmp al,'Z' */
+	    0x74, 0x03,		/* je ok */
+	    0xf4,		/* hlt */
+	    0xeb, 0xfe		/* jmp . */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-serialin-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, setup, sizeof(setup));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_timer_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t setup[] = {
@@ -609,6 +636,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		len = sizeof(cpuid_vmmcall);
 	} else if (strcmp(mode, "serial") == 0) {
 		return guest_serial_code(code, cap);
+	} else if (strcmp(mode, "serialin") == 0) {
+		return guest_serialin_code(code, cap);
 	} else if (strcmp(mode, "timerint") == 0) {
 		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
@@ -789,7 +818,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

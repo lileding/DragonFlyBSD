@@ -21,8 +21,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 hlt loop"
-SELF_EXIT_MODES="vmmcall cpuid serial time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64"
+MODES="vmmcall cpuid serial serialin time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 hlt loop"
+SELF_EXIT_MODES="vmmcall cpuid serial serialin time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64"
 
 LOADED=0
 MOUNTED=0
@@ -298,6 +298,10 @@ check_console()
 		wait_console "$(mach "$mode")/console" 'dfvmm-serial-ok' ||
 		    fail "$mode console output"
 		;;
+	serialin)
+		wait_console "$(mach "$mode")/console" 'dfvmm-serialin-ok' ||
+		    fail "$mode console input output"
+		;;
 	ud)
 		wait_console "$(mach "$mode")/console" 'dfvmm-ud-ok' ||
 		    fail "$mode console output"
@@ -335,8 +339,17 @@ run_case()
 	configure_machine "$mode" "$w"
 	run rm "$(mach "$mode")/stopped"
 	if mode_self_exits "$mode"; then
-		wait_event "$(mach "$mode")/events" '^started$' '^stopped$' ||
-		    fail "$mode self exit"
+		if [ "$mode" = serialin ]; then
+			wait_event "$(mach "$mode")/events" '^started$' ||
+			    fail "$mode started"
+			printf Z >"$(mach "$mode")/console" ||
+			    fail "$mode console input"
+			wait_event "$(mach "$mode")/events" '^stopped$' ||
+			    fail "$mode self exit"
+		else
+			wait_event "$(mach "$mode")/events" '^started$' '^stopped$' ||
+			    fail "$mode self exit"
+		fi
 		[ ! -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode desired changed"
 		echo force >"$(mach "$mode")/stopped" ||
