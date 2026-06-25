@@ -22,6 +22,7 @@
 #define IOAPIC_PD_GPA	0x7000ULL
 #define ENTRY_GPA	0x100000ULL
 #define TIMER_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
+#define SERIAL_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
 #define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
 #define PM64_LONG_GPA	(ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
@@ -74,6 +75,7 @@
 #define SEG_DB		0x0400U
 #define SEG_G		0x0800U
 #define SEG_UNUSABLE	0x1000U
+#define SERIAL_VECTOR	0x24U
 #define TIMER_VECTOR	0x2eU
 #define UD_VECTOR	6U
 
@@ -347,6 +349,62 @@ guest_serialin_code(uint8_t *code, size_t cap)
 	size_t i;
 
 	emit(code, &len, cap, setup, sizeof(setup));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
+guest_serialirq_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] = {
+	    0xbf, 0x00, 0x00, 0xc0, 0xfe /* mov edi,0xfec00000 */
+	};
+	static const uint8_t mov_eax_to_rdi[] = {
+	    0x89, 0x07		/* mov [rdi],eax */
+	};
+	static const uint8_t mov_eax_to_rdi_10[] = {
+	    0x89, 0x47, 0x10	/* mov [rdi+0x10],eax */
+	};
+	static const uint8_t wait_irq[] = {
+	    0xfb,		/* sti */
+	    0xf4,		/* hlt */
+	    0xeb, 0xfe		/* jmp . */
+	};
+	static const uint8_t handler[] = {
+	    0xba, 0xf8, 0x03,	/* mov dx,0x3f8 */
+	    0xec,		/* in al,dx */
+	    0x3c, 0x51,		/* cmp al,'Q' */
+	    0x74, 0x03,		/* je ok */
+	    0xf4,		/* hlt */
+	    0xeb, 0xfe		/* jmp . */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-serialirq-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x19);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10,
+	    sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x18);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, SERIAL_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10,
+	    sizeof(mov_eax_to_rdi_10));
+	emit_outb(code, &len, cap, 0x3fc, 0x0b);
+	emit_outb(code, &len, cap, 0x3f9, 0x01);
+	emit(code, &len, cap, wait_irq, sizeof(wait_irq));
+	while (len < SERIAL_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, handler, sizeof(handler));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
 	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
@@ -638,6 +696,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_serial_code(code, cap);
 	} else if (strcmp(mode, "serialin") == 0) {
 		return guest_serialin_code(code, cap);
+	} else if (strcmp(mode, "serialirq") == 0) {
+		return guest_serialirq_code(code, cap);
 	} else if (strcmp(mode, "timerint") == 0) {
 		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
@@ -702,10 +762,13 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	}
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
-	if (strcmp(mode, "timerint") == 0 || strcmp(mode, "ud") == 0) {
+	if (strcmp(mode, "timerint") == 0 ||
+	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0) {
 		memset(mem + IDT_GPA, 0, 0x400);
 		if (strcmp(mode, "timerint") == 0)
 			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
+		else if (strcmp(mode, "serialirq") == 0)
+			write_idt_gate(mem, SERIAL_VECTOR, SERIAL_HANDLER_GPA);
 		else
 			write_idt_gate(mem, UD_VECTOR, UD_HANDLER_GPA);
 	}
@@ -763,6 +826,9 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	if (strcmp(mode, "timerint") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    TIMER_VECTOR * 16 + 15, IDT_GPA);
+	} else if (strcmp(mode, "serialirq") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    SERIAL_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "ud") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    UD_VECTOR * 16 + 15, IDT_GPA);
@@ -818,7 +884,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

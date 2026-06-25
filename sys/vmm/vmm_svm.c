@@ -131,10 +131,14 @@
 #define VMM_COM1_LSR		5U
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
+#define VMM_COM1_IER_RXRDY	0x01U
+#define VMM_COM1_IIR_NOPEND	0x01U
+#define VMM_COM1_IIR_RXRDY	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
 #define VMM_COM1_LSR_DR		0x01U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
+#define VMM_COM1_IOAPIC_PIN	4U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
 #define VMM_PIC2_CMD		0xa0U
@@ -803,6 +807,25 @@ vmm_svm_wrmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr, uint64_t val)
 }
 
 static int
+vmm_svm_ioapic_pin_vector(struct vmm_svm_backend *svm, unsigned int pin,
+    uint8_t *vectorp)
+{
+	uint32_t low;
+	uint8_t vector;
+
+	if (pin >= VMM_IOAPIC_PINS || vectorp == NULL)
+		return 0;
+	low = svm->mut_ioapic_redtbl[pin * 2];
+	if ((low & VMM_IOAPIC_REDTBL_MASKED) != 0)
+		return 0;
+	vector = low & 0xffU;
+	if (vector < 16)
+		return 0;
+	*vectorp = vector;
+	return 1;
+}
+
+static int
 vmm_svm_timer_ready(struct vmm_svm_backend *svm, uint8_t *vectorp)
 {
 	uint64_t lvt;
@@ -827,6 +850,16 @@ vmm_svm_timer_ready(struct vmm_svm_backend *svm, uint8_t *vectorp)
 	return 1;
 }
 
+static int
+vmm_svm_interrupts_blocked(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	return (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
+	    (vmcb->ctrl.intr & VMM_SVM_CTRL_INTR_SHADOW) != 0 ||
+	    (vmcb->state.rflags & PSL_I) == 0;
+}
+
 static void
 vmm_svm_inject_hwint(struct vmm_svm_backend *svm, uint8_t vector)
 {
@@ -838,15 +871,35 @@ vmm_svm_inject_hwint(struct vmm_svm_backend *svm, uint8_t vector)
 	    VMM_SVM_EVENTINJ_VALID;
 }
 
-static void
-vmm_svm_inject_pending_timer(struct vmm_svm_backend *svm)
+static int
+vmm_svm_com1_rx_pending(struct vmm_svm_backend *svm)
 {
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
+
+	if ((svm->mut_com1_ier & VMM_COM1_IER_RXRDY) == 0)
+		return 0;
+	return vmm_console_guest_pending(console) != 0;
+}
+
+static int
+vmm_svm_com1_rx_ready(struct vmm_svm_backend *svm, int rx_pending,
+    uint8_t *vectorp)
+{
+	if (!rx_pending)
+		return 0;
+	return vmm_svm_ioapic_pin_vector(svm, VMM_COM1_IOAPIC_PIN, vectorp);
+}
+
+static void
+vmm_svm_inject_pending_interrupts(struct vmm_svm_backend *svm,
+    int com1_rx_pending)
+{
 	uint8_t vector;
 
-	if ((vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
-	    (vmcb->ctrl.intr & VMM_SVM_CTRL_INTR_SHADOW) != 0 ||
-	    (vmcb->state.rflags & PSL_I) == 0) {
+	if (vmm_svm_interrupts_blocked(svm))
+		return;
+	if (vmm_svm_com1_rx_ready(svm, com1_rx_pending, &vector)) {
+		vmm_svm_inject_hwint(svm, vector);
 		return;
 	}
 	if (!vmm_svm_timer_ready(svm, &vector))
@@ -1260,7 +1313,12 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		    0 : svm->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		*valp = 0x01;		/* no interrupt pending */
+		if ((svm->mut_com1_ier & VMM_COM1_IER_RXRDY) != 0 &&
+		    vmm_console_guest_pending(console) != 0) {
+			*valp = VMM_COM1_IIR_RXRDY;
+		} else {
+			*valp = VMM_COM1_IIR_NOPEND;
+		}
 		return 1;
 	case VMM_COM1_LCR:
 		*valp = svm->mut_com1_lcr;
@@ -1557,11 +1615,13 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
 	struct vmm_machine *m = vc->borrow_imm_machine;
+	int com1_rx_pending;
 
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_machine_vcpu_should_stop(m)) {
+		com1_rx_pending = vmm_svm_com1_rx_pending(svm);
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup(svm);
@@ -1571,7 +1631,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			continue;
 		}
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
-		vmm_svm_inject_pending_timer(svm);
+		vmm_svm_inject_pending_interrupts(svm, com1_rx_pending);
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
