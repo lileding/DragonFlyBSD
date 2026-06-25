@@ -195,9 +195,9 @@ vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 }
 
 /*
- * Mark a machine deleted (rmdir source 1, or the last lease close) and drop it
- * from the tree.  Idempotent via vmm_machine_begin_delete, so the two sources
- * can both fire.  The struct lives on (out of the tree) until its last vnode
+ * Mark a machine deleting, wait for execution to quiesce, and drop it from the
+ * tree.  Idempotent via vmm_machine_begin_delete, so rmdir, force-unmount, and
+ * last lease close can all fire.  The struct lives on until its last vnode
  * is reclaimed; dropping the tree reference here may free it immediately.
  */
 void
@@ -206,13 +206,13 @@ vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
 	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
 	int first;
 
-	vmm_machine_request_stopped(&m->machine, 1);
+	(void)vmm_machine_begin_delete(&m->machine);
+	vmm_machine_wait_quiesced(&m->machine);
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	first = m->vm_in_tree;	/* the lease path already set "deleting" */
+	first = m->vm_in_tree;
 	if (first) {
 		m->vm_in_tree = 0;
-		(void)vmm_machine_begin_delete(&m->machine);
 		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
 		vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
 	}

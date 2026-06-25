@@ -28,6 +28,7 @@ static void	vmm_machine_start_locked(struct vmm_machine *m);
 static int	vmm_machine_wait_for_vcpu_drain(struct vmm_machine *m);
 static struct vmm_mem_backing *vmm_machine_detach_mem_locked(
 		    struct vmm_machine *m);
+static int	vmm_machine_begin_delete_locked(struct vmm_machine *m);
 
 void
 vmm_machine_lock(struct vmm_machine *m)
@@ -604,6 +605,21 @@ out:
 	return ok;
 }
 
+static int
+vmm_machine_begin_delete_locked(struct vmm_machine *m)
+{
+	if (m->mut_deleting)
+		return 0;
+	m->mut_deleting = 1;
+	m->mut_desired_stopped = 1;
+	m->mut_start_cancel = 1;
+	vmm_vcpu_request_stop(&m->own_mut_vcpu);
+	if (m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu))
+		m->mut_running = 0;
+	ev_push(m, EV_DELETED);
+	return 1;
+}
+
 enum vmm_close_action
 vmm_machine_lease_close(struct vmm_machine *m)
 {
@@ -612,33 +628,26 @@ vmm_machine_lease_close(struct vmm_machine *m)
 	vmm_machine_lock(m);
 	if (m->mut_lease_count > 0)
 		m->mut_lease_count--;
-	if (m->mut_lease_armed && m->mut_lease_count == 0 && !m->mut_deleting) {
-		m->mut_deleting = 1;
-		ev_push(m, EV_DELETED);
+	if (m->mut_lease_armed && m->mut_lease_count == 0 &&
+	    vmm_machine_begin_delete_locked(m))
 		action = VMM_CLOSE_DELETE;
-	}
 	vmm_machine_unlock(m);
+	if (action == VMM_CLOSE_DELETE)
+		wakeup(m);
 	return action;
 }
 
 int
 vmm_machine_begin_delete(struct vmm_machine *m)
 {
+	int first;
+
 	vmm_machine_lock(m);
-	if (m->mut_deleting) {
-		vmm_machine_unlock(m);
-		return 0;
-	}
-	m->mut_deleting = 1;
-	m->mut_desired_stopped = 1;
-	m->mut_start_cancel = 1;
-	vmm_vcpu_request_stop(&m->own_mut_vcpu);
-	if (m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu))
-		m->mut_running = 0;
-	ev_push(m, EV_DELETED);
+	first = vmm_machine_begin_delete_locked(m);
 	vmm_machine_unlock(m);
-	wakeup(m);
-	return 1;
+	if (first)
+		wakeup(m);
+	return first;
 }
 
 int
