@@ -146,6 +146,81 @@ add_record(uint8_t *ptr, uint16_t type, const void *payload, uint32_t size)
 	return ptr + total;
 }
 
+static void
+emit(uint8_t *code, size_t *len, size_t cap, const uint8_t *bytes, size_t n)
+{
+	if (*len + n > cap)
+		errx(1, "guest code buffer too small");
+	memcpy(code + *len, bytes, n);
+	*len += n;
+}
+
+static void
+emit_mov_dx(uint8_t *code, size_t *len, size_t cap, uint16_t port)
+{
+	uint8_t bytes[] = { 0xba, port & 0xffU, port >> 8 };
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+}
+
+static void
+emit_mov_al(uint8_t *code, size_t *len, size_t cap, uint8_t val)
+{
+	uint8_t bytes[] = { 0xb0, val };
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+}
+
+static void
+emit_out_dx_al(uint8_t *code, size_t *len, size_t cap)
+{
+	static const uint8_t bytes[] = { 0xee };
+
+	emit(code, len, cap, bytes, sizeof(bytes));
+}
+
+static void
+emit_outb(uint8_t *code, size_t *len, size_t cap, uint16_t port, uint8_t val)
+{
+	emit_mov_dx(code, len, cap, port);
+	emit_mov_al(code, len, cap, val);
+	emit_out_dx_al(code, len, cap);
+}
+
+static void
+emit_serial_char(uint8_t *code, size_t *len, size_t cap, uint8_t ch)
+{
+	static const uint8_t wait_lsr[] = {
+		0xba, 0xfd, 0x03,	/* mov dx,0x3fd */
+		0xec,			/* in al,dx */
+		0xa8, 0x20,		/* test al,0x20 */
+		0x74, 0xfb		/* jz in */
+	};
+
+	emit(code, len, cap, wait_lsr, sizeof(wait_lsr));
+	emit_outb(code, len, cap, 0x3f8, ch);
+}
+
+static size_t
+guest_serial_code(uint8_t *code, size_t cap)
+{
+	static const char msg[] = "dfvmm-serial-ok\n";
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+	size_t i;
+
+	emit_outb(code, &len, cap, 0x3f9, 0x00);	/* IER: interrupts off */
+	emit_outb(code, &len, cap, 0x3fb, 0x80);	/* LCR: DLAB on */
+	emit_outb(code, &len, cap, 0x3f8, 0x03);	/* DLL: 38400 */
+	emit_outb(code, &len, cap, 0x3f9, 0x00);	/* DLM */
+	emit_outb(code, &len, cap, 0x3fb, 0x03);	/* LCR: 8N1, DLAB off */
+	emit_outb(code, &len, cap, 0x3fc, 0x03);	/* MCR: DTR + RTS */
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
 static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
@@ -162,6 +237,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	} else if (strcmp(mode, "cpuid") == 0) {
 		src = cpuid_vmmcall;
 		len = sizeof(cpuid_vmmcall);
+	} else if (strcmp(mode, "serial") == 0) {
+		return guest_serial_code(code, cap);
 	} else if (strcmp(mode, "loop") == 0) {
 		src = loop;
 		len = sizeof(loop);
@@ -177,7 +254,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 static void
 build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 {
-	uint8_t code[16];
+	uint8_t code[256];
 
 	if (mem_size < 2 * 1024 * 1024)
 		errx(1, "fd3 is smaller than 2M");
@@ -268,7 +345,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|loop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

@@ -96,6 +96,25 @@
 #define VMM_SVM_EXIT_XSETBV		0x08dULL
 #define VMM_SVM_EXIT_NPF		0x400ULL
 
+#define VMM_SVM_IOIO_IN		(1ULL << 0)
+#define VMM_SVM_IOIO_STR	(1ULL << 2)
+#define VMM_SVM_IOIO_REP	(1ULL << 3)
+#define VMM_SVM_IOIO_SZ8	(1ULL << 4)
+#define VMM_SVM_IOIO_SZ16	(1ULL << 5)
+#define VMM_SVM_IOIO_SZ32	(1ULL << 6)
+#define VMM_SVM_IOIO_PORT(info)	(((info) >> 16) & 0xffffULL)
+
+#define VMM_COM1_BASE		0x3f8U
+#define VMM_COM1_RBR_THR_DLL	0U
+#define VMM_COM1_IER_DLM	1U
+#define VMM_COM1_IIR_FCR	2U
+#define VMM_COM1_LCR		3U
+#define VMM_COM1_MCR		4U
+#define VMM_COM1_LSR		5U
+#define VMM_COM1_MSR		6U
+#define VMM_COM1_SCR		7U
+#define VMM_COM1_LCR_DLAB	0x80U
+
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
 #define VMM_SVM_ASID			1
@@ -243,6 +262,10 @@ struct vmm_svm_backend {
 	uint64_t mut_guest_mtrr_def_type;
 	uint64_t mut_guest_tsc_aux;
 	uint64_t mut_gprs[VMM_X64_NGPR];
+	uint8_t mut_com1_ier;
+	uint8_t mut_com1_lcr;
+	uint8_t mut_com1_mcr;
+	uint8_t mut_com1_scr;
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
@@ -787,6 +810,147 @@ vmm_svm_yield_after_host_interrupt(void)
 }
 
 static void
+vmm_svm_advance_ioio(struct vmm_svm_vmcb *vmcb)
+{
+	if (vmcb->ctrl.exitinfo2 != 0)
+		vmcb->state.rip = vmcb->ctrl.exitinfo2;
+	else
+		vmm_svm_advance_rip(vmcb);
+}
+
+static int
+vmm_svm_ioio_size(uint64_t info)
+{
+	if (info & VMM_SVM_IOIO_SZ8)
+		return 1;
+	if (info & VMM_SVM_IOIO_SZ16)
+		return 2;
+	if (info & VMM_SVM_IOIO_SZ32)
+		return 4;
+	return 0;
+}
+
+static void
+vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
+{
+	uint64_t mask;
+
+	switch (size) {
+	case 1:
+		mask = 0xffULL;
+		break;
+	case 2:
+		mask = 0xffffULL;
+		break;
+	case 4:
+		mask = 0xffffffffULL;
+		break;
+	default:
+		return;
+	}
+	vmcb->state.rax = (vmcb->state.rax & ~mask) | (val & mask);
+}
+
+static int
+vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
+    uint32_t *valp)
+{
+	if (size != 1)
+		return 0;
+	switch (reg) {
+	case VMM_COM1_RBR_THR_DLL:
+		*valp = 0;
+		return 1;
+	case VMM_COM1_IER_DLM:
+		*valp = (svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) ?
+		    0 : svm->mut_com1_ier;
+		return 1;
+	case VMM_COM1_IIR_FCR:
+		*valp = 0x01;		/* no interrupt pending */
+		return 1;
+	case VMM_COM1_LCR:
+		*valp = svm->mut_com1_lcr;
+		return 1;
+	case VMM_COM1_MCR:
+		*valp = svm->mut_com1_mcr;
+		return 1;
+	case VMM_COM1_LSR:
+		*valp = 0x60;		/* THR empty, transmitter empty */
+		return 1;
+	case VMM_COM1_MSR:
+		*valp = 0;
+		return 1;
+	case VMM_COM1_SCR:
+		*valp = svm->mut_com1_scr;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
+    uint32_t val)
+{
+	char ch;
+
+	if (size != 1)
+		return 0;
+	switch (reg) {
+	case VMM_COM1_RBR_THR_DLL:
+		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
+			ch = (char)(val & 0xffU);
+			vmm_console_guest_write(
+			    &svm->borrow_imm_machine->own_mut_console, &ch, 1);
+		}
+		return 1;
+	case VMM_COM1_IER_DLM:
+		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0)
+			svm->mut_com1_ier = val & 0x0fU;
+		return 1;
+	case VMM_COM1_IIR_FCR:
+		return 1;
+	case VMM_COM1_LCR:
+		svm->mut_com1_lcr = val & 0xffU;
+		return 1;
+	case VMM_COM1_MCR:
+		svm->mut_com1_mcr = val & 0xffU;
+		return 1;
+	case VMM_COM1_SCR:
+		svm->mut_com1_scr = val & 0xffU;
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_handle_ioio(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint64_t info = vmcb->ctrl.exitinfo1;
+	unsigned int port = (unsigned int)VMM_SVM_IOIO_PORT(info);
+	int size = vmm_svm_ioio_size(info);
+	uint32_t val;
+
+	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0)
+		return 0;
+	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR)
+		return 0;
+	if (info & VMM_SVM_IOIO_IN) {
+		if (!vmm_svm_com1_read(svm, port - VMM_COM1_BASE, size, &val))
+			return 0;
+		vmm_svm_set_rax_low(vmcb, val, size);
+	} else {
+		val = vmcb->state.rax & 0xffffffffU;
+		if (!vmm_svm_com1_write(svm, port - VMM_COM1_BASE, size, val))
+			return 0;
+	}
+	vmm_svm_advance_ioio(vmcb);
+	return 1;
+}
+
+static void
 vmm_svm_handle_hlt(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
     struct vmm_svm_vmcb *vmcb)
 {
@@ -857,8 +1021,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_HLT:
 			vmm_svm_handle_hlt(m, vc, vmcb);
 			break;
-		case VMM_SVM_EXIT_SHUTDOWN:
 		case VMM_SVM_EXIT_IOIO:
+			if (vmm_svm_handle_ioio(svm))
+				break;
+			goto unhandled;
+		case VMM_SVM_EXIT_SHUTDOWN:
 			goto unhandled;
 		case VMM_SVM_EXIT_NPF:
 			if (vmm_svm_handle_npf(svm))

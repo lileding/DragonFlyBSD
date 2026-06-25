@@ -548,6 +548,7 @@ static void
 vmm_machine_start_locked(struct vmm_machine *m)
 {
 	if (!m->mut_running && !vmm_machine_start_cancelled_locked(m)) {
+		vmm_console_reset(&m->own_mut_console);
 		m->mut_running = 1;
 		ev_push(m, EV_STARTED);
 		vmm_vcpu_wakeup_all(&m->own_mut_vcpu);

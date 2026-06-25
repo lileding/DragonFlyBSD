@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Filesystem presentation of the console file: machines/<name>/console, wired
- * to the vmm_console core.  Reads drain guest output (EOF for now); writes feed
- * host input to the guest (discarded for now).  vmm.ko only.
+ * to the vmm_console core.  Reads expose retained guest output; writes feed
+ * host input to the guest (currently counted only).  vmm.ko only.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -27,8 +27,12 @@ vmmfs_console_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	char cbuf[256];
 	size_t n;
 
-	n = vmm_console_read(&node->vn_machine->machine.own_mut_console, cbuf,
-	    sizeof(cbuf));
+	if (ap->a_uio->uio_resid <= 0)
+		return 0;
+	n = vmm_console_read(&node->vn_machine->machine.own_mut_console,
+	    ap->a_uio->uio_offset, cbuf,
+	    (size_t)ap->a_uio->uio_resid < sizeof(cbuf) ?
+	    (size_t)ap->a_uio->uio_resid : sizeof(cbuf));
 	if (n == 0)
 		return 0;		/* EOF */
 	return uiomove(cbuf, n, ap->a_uio);
