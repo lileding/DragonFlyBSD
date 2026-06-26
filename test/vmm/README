@@ -1,0 +1,31 @@
+# vmm test entry points
+
+`test/vmm/offline_check.sh` is the default non-destructive gate for the
+loader and memory ABI.  It compiles userland helpers and uses ordinary files as
+fd3/fd4 stand-ins.  It never loads `vmm.ko`, mounts vmmfs, or enters a guest.
+
+The offline gate covers:
+
+- `manifest/manifest_parser_check.sh`: kernel x86 manifest parser boundaries.
+- `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health.
+- `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
+  including one-page fd4 parsing by the kernel manifest parser.
+- `nuttx/rtos_nuttx_loader_check.sh`: NuttX loader fd3/fd4 output, sparse fd3
+  writes, one-page fd4, kernel manifest parser acceptance, and NuttX boot-data
+  layout.  It requires `NUTTX_ELF` or `/var/tmp/nuttx.elf`.
+
+Run it from the repository root:
+
+```sh
+test/vmm/offline_check.sh
+```
+
+The following scripts are pc64 true-hardware harnesses.  They load `vmm.ko`,
+mount vmmfs, and may enter real guests; run them only as explicit controlled
+validation steps with a current pc64 build:
+
+- `smoke/smoke_exec_test.sh`
+- `revoke/loader_revoke_test.sh`
+- `revoke/loader_unload_busy_test.sh`
+- `lifecycle/stop_delete_test.sh`
+- `nuttx/rtos_nuttx_test.sh`
