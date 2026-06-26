@@ -241,6 +241,8 @@ expect_backing_lifecycle(void)
 	    VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault write", PAGE_SIZE, VM_PROT_WRITE, 0,
 	    1, PAGE_SIZE, VM_FAULT_DIRTY);
+	expect_fault_result(&mem, "fault read write", PAGE_SIZE,
+	    VM_PROT_READ | VM_PROT_WRITE, 0, 1, PAGE_SIZE, VM_FAULT_DIRTY);
 	expect_fault_result(&mem, "fault exec", VMM_MEM_ALIGN - 1,
 	    VM_PROT_EXECUTE, 0, 1, VMM_MEM_ALIGN - PAGE_SIZE,
 	    VM_FAULT_NORMAL);
@@ -259,6 +261,8 @@ expect_backing_lifecycle(void)
 		fail("snapshot detached");
 	if (vmm_mem_fault_gpa(&mem, 0, VM_PROT_READ) != EINVAL)
 		fail("fault detached");
+	if (vmm_mem_fault_gpa(NULL, 0, VM_PROT_READ) != EINVAL)
+		fail("fault null");
 	vmm_mem_release_backing(detached);
 	vmm_mem_release_backing(NULL);
 }

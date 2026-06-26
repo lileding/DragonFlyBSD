@@ -242,10 +242,13 @@ vmm_mem_borrow_vmspace(struct vmm_mem *m)
 int
 vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 {
-	struct vmm_mem_backing *b = m->own_mut_backing;
+	struct vmm_mem_backing *b;
 	const int valid_prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
 	int flags;
 
+	if (m == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
 	if (b == NULL || b->own_mut_vmspace == NULL)
 		return EINVAL;
 	if ((prot & valid_prot) == 0 || (prot & ~valid_prot) != 0)
