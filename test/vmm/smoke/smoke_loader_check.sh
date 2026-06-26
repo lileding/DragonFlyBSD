@@ -5,7 +5,9 @@
 set -eu
 
 ROOT=$(dirname "$0")
+REPO=$(cd "$ROOT/../../.." && pwd)
 LOADER=${VMM_SMOKE_LOADER_CHECK_BIN:-/var/tmp/vmm_smoke_loader_check}
+CHECKER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_SIZE=${VMM_SMOKE_MEM:-2M}
 MANIFEST_SIZE=${VMM_SMOKE_MANIFEST_SIZE:-4096}
 MODES=${VMM_SMOKE_LOADER_MODES:-"vmmcall cpuid serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 hlt loop"}
@@ -13,12 +15,16 @@ PREFIX=/var/tmp/dfvmm-smoke-loader-check-$$
 
 cleanup()
 {
-	rm -f "$LOADER" "$PREFIX"-*
+	rm -f "$LOADER" "$CHECKER" "$PREFIX"-*
 }
 
 trap cleanup EXIT INT TERM
 
 cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/smoke_loader.c" -o "$LOADER"
+cc -Wall -Wextra -Werror -std=c11 -O2 \
+	-I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/vmm" \
+	"$REPO/sys/vmm/vmm_loader_x86.c" \
+	"$REPO/test/vmm/manifest/manifest_file_check.c" -o "$CHECKER"
 for mode in $MODES; do
 	mem=$PREFIX-$mode.mem
 	manifest=$PREFIX-$mode.manifest
@@ -35,6 +41,7 @@ for mode in $MODES; do
 		echo "FAIL: fd3 sentinel changed for $mode: $byte"
 		exit 1
 	}
+	"$CHECKER" "$mem" "$manifest"
 	rm -f "$mem" "$manifest"
 done
 echo "PASS: smoke loader offline check"
