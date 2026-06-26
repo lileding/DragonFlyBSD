@@ -29,6 +29,7 @@ static int vmm_debug_trace_enabled;
 int vmm_debug_allow_machine_taskqueue = 1;
 int vmm_debug_allow_nmkdir_vnode = 1;
 int vmm_debug_allow_start_execute = 1;
+int vmm_debug_allow_machine_task_run = 1;
 int vmm_debug_allow_loader_fork = 1;
 int vmm_debug_allow_loader_run = 1;
 int vmm_debug_allow_vcpu_start = 1;
@@ -45,6 +46,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, allow_nmkdir_vnode, CTLFLAG_RW,
 SYSCTL_INT(_debug_vmm, OID_AUTO, allow_start_execute, CTLFLAG_RW,
     &vmm_debug_allow_start_execute, 0,
     "allow start/reset commands that require loader context");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_machine_task_run, CTLFLAG_RW,
+    &vmm_debug_allow_machine_task_run, 0,
+    "allow queued per-machine tasks to run their command handler");
 SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_fork, CTLFLAG_RW,
     &vmm_debug_allow_loader_fork, 0,
     "allow vmm_machine_execute to fork the paused loader");
@@ -286,7 +290,18 @@ vmm_machine_task_run(void *arg, int pending)
 	struct vmm_machine_task *task = arg;
 
 	(void)pending;
+	vmm_debug_trace("task_run begin task=%p m=%p handler=%p pending=%d",
+	    task, task->borrow_mut_machine, task->fnonce_handler, pending);
+	if (!vmm_debug_allow_machine_task_run) {
+		vmm_debug_trace("task_run gated task=%p m=%p handler=%p",
+		    task, task->borrow_mut_machine, task->fnonce_handler);
+		vmm_loader_fini(&task->own_loader);
+		kfree(task, M_TEMP);
+		return;
+	}
 	task->fnonce_handler(task);
+	vmm_debug_trace("task_run done task=%p m=%p handler=%p",
+	    task, task->borrow_mut_machine, task->fnonce_handler);
 
 	kfree(task, M_TEMP);
 }

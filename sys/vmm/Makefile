@@ -5,10 +5,7 @@ SRCS=	vmm_parse.c vmm_domain.c vmm_vcpu.c vmm_mem.c vmm_loader.c
 SRCS+=	vmm_loader_x86.c vmm_console.c
 SRCS+=	vmm_machine.c vmm_device.c vmm_host.c
 
-.if ${MACHINE_PLATFORM} != "pc64"
-.error "vmm.ko currently supports only MACHINE_PLATFORM=pc64"
-.endif
-
+.if ${MACHINE_PLATFORM} == "pc64"
 # x86 VM execution backends are selected by runtime CPU probing, not by
 # compile-time SVM/VMX feature switches.
 SRCS+=	vmm_svm.c vmm_svm_entry.S
@@ -19,6 +16,14 @@ vmm_svm_entry.o: assym.s
 .endif
 vmm_svm_entry.o:
 	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS:N-flto} ${.IMPSRC}
+.elif ${MACHINE_PLATFORM} == "vkernel64"
+# vkernel64 is a no-hardware control-plane target.  It can exercise vmmfs,
+# taskqueue, loader, and memory handoff paths when tests stop before vCPU
+# execution; real SVM/VMX backends remain pc64-only.
+SRCS+=	vmm_svm_unavailable.c
+.else
+.error "vmm.ko currently supports only MACHINE_PLATFORM=pc64 or vkernel64"
+.endif
 SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machines.c vmmfs_machine.c vmmfs_devices.c
 SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c vmmfs_console.c
 SRCS+=	vmmfs_device.c vmmfs_host.c

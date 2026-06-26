@@ -65,6 +65,7 @@ void vmm_debug_trace(const char *fmt, ...);
 extern int vmm_debug_allow_machine_taskqueue;
 extern int vmm_debug_allow_nmkdir_vnode;
 extern int vmm_debug_allow_start_execute;
+extern int vmm_debug_allow_machine_task_run;
 extern int vmm_debug_allow_loader_fork;
 extern int vmm_debug_allow_loader_run;
 extern int vmm_debug_allow_vcpu_start;

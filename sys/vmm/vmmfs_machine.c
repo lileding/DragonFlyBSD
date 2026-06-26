@@ -274,20 +274,37 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
+	vmm_debug_trace("nremove stopped begin m=%p machine=%p ncp=%p",
+	    m, &m->machine, ncp);
 	lwkt_gettoken(&m->machine.token_config);
 	m->machine.mut_desired_stopped = 0;
 	lwkt_reltoken(&m->machine.token_config);
+	vmm_debug_trace("nremove stopped execute begin m=%p machine=%p",
+	    m, &m->machine);
 	error = vmm_machine_execute(&m->machine, vmm_machine_start, ap->a_cred);
-	if (error)
+	vmm_debug_trace("nremove stopped execute done m=%p machine=%p error=%d",
+	    m, &m->machine, error);
+	if (error) {
+		vmm_debug_trace("nremove stopped return execute error=%d", error);
 		return error;
+	}
 
+	vmm_debug_trace("nremove stopped cache_vget begin m=%p ncp=%p",
+	    m, ncp);
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	if (error)
+	vmm_debug_trace("nremove stopped cache_vget done m=%p error=%d vp=%p",
+	    m, error, error ? NULL : vp);
+	if (error) {
+		vmm_debug_trace("nremove stopped return cache_vget error=%d",
+		    error);
 		return error;
+	}
 	vn_unlock(vp);
 
 	cache_unlink(ap->a_nch);
 	vrele(vp);
+	vmm_debug_trace("nremove stopped return ok m=%p machine=%p",
+	    m, &m->machine);
 	return 0;
 }
 

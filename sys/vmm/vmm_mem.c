@@ -24,6 +24,16 @@ struct vmm_mem_backing {
 	uint64_t imm_bytes;
 };
 
+static void
+vmm_mem_pmap_del_all_cpus(struct vmspace *vmspace)
+{
+#ifdef _KERNEL_VIRTUAL
+	(void)vmspace;
+#else
+	pmap_del_all_cpus(vmspace);
+#endif
+}
+
 int
 vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len)
 {
@@ -168,7 +178,7 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 
 fail:
 	if (b->own_mut_vmspace != NULL) {
-		pmap_del_all_cpus(b->own_mut_vmspace);
+		vmm_mem_pmap_del_all_cpus(b->own_mut_vmspace);
 		vmspace_rel(b->own_mut_vmspace);
 	}
 	if (b->own_mut_object != NULL)
@@ -208,7 +218,7 @@ vmm_mem_release_backing(struct vmm_mem_backing *b)
 	if (b == NULL)
 		return;
 	if (b->own_mut_vmspace != NULL) {
-		pmap_del_all_cpus(b->own_mut_vmspace);
+		vmm_mem_pmap_del_all_cpus(b->own_mut_vmspace);
 		vmspace_rel(b->own_mut_vmspace);
 	}
 	vm_object_deallocate(b->own_mut_object);

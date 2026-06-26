@@ -457,19 +457,23 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	struct vmm_loader_fd *lfd;
 	struct vm_object *object;
 	vm_ooffset_t off;
-	int error;
 
-	error = devfs_get_cdevpriv(ap->a_fp, (void **)&lfd);
-	if (error)
-		return error;
+	if (ap == NULL || ap->a_head.a_dev == NULL)
+		return EINVAL;
+	lfd = ap->a_head.a_dev->si_drv1;
+	if (lfd == NULL)
+		return EINVAL;
 	object = lfd->own_mut_object;
-	if ((ap->a_fp->f_flag & FREVOKED) || object == NULL)
+	if (object == NULL)
 		return EINVAL;
 	/*
 	 * DragonFly rejects MAP_PRIVATE/MAP_COPY for non-/dev/zero VCHR
 	 * mappings in fp_mmap() before this d_mmap_single hook is called.
 	 * This layer only needs to enforce the vmm-specific executable and
-	 * revoke checks.
+	 * revoke checks.  Do not read ap->a_fp here: d_mmap_single's tail
+	 * arguments changed across DragonFly KBI revisions, while a_head and
+	 * the offset/size/object/prot fields are stable for the kernels this
+	 * module must run against.
 	 */
 	if (ap->a_nprot & VM_PROT_EXECUTE)
 		return EACCES;
@@ -484,8 +488,6 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	}
 	vm_object_reference_locked(object);
 	VM_OBJECT_UNLOCK(object);
-	if (ap->a_maxprotp != NULL)
-		*ap->a_maxprotp &= ~VM_PROT_EXECUTE;
 	*ap->a_object = object;
 	return 0;
 }
