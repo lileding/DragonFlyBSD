@@ -426,6 +426,12 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 			lfd->mut_revoked = 1;
 			backing = lfd->own_mut_backing_object;
 			lfd->own_mut_backing_object = NULL;
+			/*
+			 * vm_fault() enters OBJT_MGTDEVICE pages while holding
+			 * this object token.  Keep revoke under the same token
+			 * so no in-flight fault can pass the revoked check and
+			 * install a fresh pmap entry after this removal pass.
+			 */
 			vm_object_page_remove(object, 0, 0, FALSE);
 		}
 		VM_OBJECT_UNLOCK(object);
