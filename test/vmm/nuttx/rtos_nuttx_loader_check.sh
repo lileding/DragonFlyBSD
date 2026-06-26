@@ -7,6 +7,7 @@ set -u
 ROOT=$(dirname "$0")
 ELF=${NUTTX_ELF:-/var/tmp/nuttx.elf}
 MEM_SIZE=${NUTTX_MEM:-64M}
+MANIFEST_SIZE=${NUTTX_MANIFEST_SIZE:-4096}
 LOADER=${NUTTX_LOADER_CHECK_BIN:-/var/tmp/vmmld_nuttx_check}
 CHECKER=${NUTTX_MANIFEST_CHECK_BIN:-/var/tmp/vmmld_nuttx_manifest_check}
 MEM_FILE=${NUTTX_CHECK_MEM_FILE:-/var/tmp/dfvmm-nuttx-loader-$$.mem}
@@ -63,7 +64,7 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$ROOT/rtos_nuttx_manifest_check.c" -o "$CHECKER"
 rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 run truncate -s "$MEM_SIZE" "$MEM_FILE"
-run truncate -s 65536 "$MANIFEST_FILE"
+run truncate -s "$MANIFEST_SIZE" "$MANIFEST_FILE"
 write_sentinel
 run "$LOADER" "$ELF" 3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
 check_sentinel
