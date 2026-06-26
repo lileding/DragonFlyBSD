@@ -202,6 +202,7 @@ expect_backing_lifecycle(void)
 	struct vmspace *vmspace;
 	uint64_t bytes;
 
+	reset_vm_trace();
 	memset(&mem, 0, sizeof(mem));
 	mem.mut_bytes = VMM_MEM_ALIGN;
 	backing = NULL;
@@ -209,6 +210,8 @@ expect_backing_lifecycle(void)
 		fail("prepare backing");
 		return;
 	}
+	if (vmm_test_vm_map_insert_calls != 1)
+		fail("prepare maps object once");
 	if (vmm_mem_publish(&mem, backing) != 0) {
 		fail("publish backing");
 		vmm_mem_release_backing(backing);
@@ -234,8 +237,13 @@ expect_backing_lifecycle(void)
 	    object == NULL || bytes != VMM_MEM_ALIGN) {
 		fail("snapshot backing");
 	}
-	if (object != NULL)
+	if (object != NULL && object->refs != 3)
+		fail("snapshot owns temporary object reference");
+	if (object != NULL) {
 		vm_object_deallocate(object);
+		if (object->refs != 2)
+			fail("snapshot drops only temporary object reference");
+	}
 
 	expect_fault_result(&mem, "fault read", 0, VM_PROT_READ, 0, 1, 0,
 	    VM_FAULT_NORMAL);
@@ -264,6 +272,9 @@ expect_backing_lifecycle(void)
 	if (vmm_mem_fault_gpa(NULL, 0, VM_PROT_READ) != EINVAL)
 		fail("fault null");
 	vmm_mem_release_backing(detached);
+	if (vmm_test_vm_object_free_count != 1 ||
+	    vmm_test_vmspace_free_count != 1)
+		fail("release frees backing exactly once");
 	vmm_mem_release_backing(NULL);
 }
 
