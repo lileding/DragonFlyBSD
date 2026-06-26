@@ -9,6 +9,14 @@
 #ifndef VMM_MEM_H
 #define VMM_MEM_H
 
+/*
+ * The current pc64 backend maps guest RAM through a DragonFly machine
+ * vmspace, matching NVMM's address capacity.  Keep the cap at the config
+ * boundary so start workers never accept a memory size the backend cannot map.
+ */
+#define VMM_MEM_ALIGN	(2ull * 1024 * 1024)
+#define VMM_MEM_MAX	(127ull * 1024 * (1ull << 30))
+
 struct vmm_mem {
 	/*
 	 * Lock map:
@@ -24,7 +32,10 @@ struct vmm_mem {
 	struct vmm_mem_backing *own_mut_backing;
 };
 
-/* Parse number[KkMmGg], > 0, large-page aligned.  1 = updated, 0 = reject. */
+/*
+ * Parse number[KkMmGg], > 0, <= VMM_MEM_MAX, VMM_MEM_ALIGN aligned.
+ * 1 = updated, 0 = reject.
+ */
 int	vmm_mem_parse(struct vmm_mem *m, const char *buf, size_t len);
 size_t	vmm_mem_format(const struct vmm_mem *m, char *out, size_t cap);
 int	vmm_mem_is_set(const struct vmm_mem *m);

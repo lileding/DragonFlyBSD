@@ -18,14 +18,6 @@
 #include "vmm_parse.h"
 #include "vmm_mem.h"
 
-#define VMM_MEM_ALIGN	(2ull * 1024 * 1024)	/* large-page granularity */
-/*
- * Match DragonFly NVMM's current machine-vmspace cap.  pc64 leaves the
- * top of the canonical user/NPT address range unused, so do not accept a
- * guest RAM size that cannot fit in the backing vmspace.
- */
-#define VMM_MEM_MAX	(127ull * 1024 * (1ull << 30))
-
 struct vmm_mem_backing {
 	struct vm_object *own_mut_object;
 	struct vmspace *own_mut_vmspace;
