@@ -22,6 +22,9 @@ vm_prot_t vmm_test_vm_fault_prot;
 int vmm_test_vm_fault_flags;
 int vmm_test_vm_fault_result;
 int vmm_test_default_pager_alloc_fail;
+vm_size_t vmm_test_default_pager_alloc_size;
+vm_prot_t vmm_test_default_pager_alloc_prot;
+int vmm_test_default_pager_alloc_flags;
 int vmm_test_vmspace_alloc_fail;
 int vmm_test_vm_map_insert_result;
 int vmm_test_vm_map_insert_calls;
@@ -117,6 +120,9 @@ static void
 reset_vm_trace(void)
 {
 	vmm_test_default_pager_alloc_fail = 0;
+	vmm_test_default_pager_alloc_size = 0;
+	vmm_test_default_pager_alloc_prot = 0;
+	vmm_test_default_pager_alloc_flags = 0;
 	vmm_test_vmspace_alloc_fail = 0;
 	vmm_test_vm_map_insert_result = 0;
 	vmm_test_vm_map_insert_calls = 0;
@@ -224,6 +230,10 @@ expect_backing_lifecycle(void)
 	}
 	if (vmm_test_vm_map_insert_calls != 1)
 		fail("prepare maps object once");
+	if (vmm_test_default_pager_alloc_size != VMM_MEM_ALIGN ||
+	    vmm_test_default_pager_alloc_prot != VM_PROT_DEFAULT ||
+	    vmm_test_default_pager_alloc_flags != 0)
+		fail("prepare allocates default-pager RAM object");
 	if (vmm_mem_publish(&mem, backing) != 0) {
 		fail("publish backing");
 		vmm_mem_release_backing(backing);
@@ -260,6 +270,8 @@ expect_backing_lifecycle(void)
 	}
 	if (vmspace != NULL && object != vmspace->vm_map.mapped_object)
 		fail("snapshot returns mapped backing object");
+	if (object != NULL && (object->flags & OBJ_NOSPLIT) == 0)
+		fail("backing object is nosplit");
 	if (object != NULL && object->refs != 3)
 		fail("snapshot owns temporary object reference");
 	if (object != NULL) {
