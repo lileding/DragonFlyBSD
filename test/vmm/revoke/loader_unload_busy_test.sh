@@ -25,7 +25,9 @@ make_wrapper()
 	chmod +x "$w" || fail "chmod $w"; echo "$w"
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
-[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"; [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
+case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be an absolute path" ;; esac
+[ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
     fail "$VMM_KO contains .eh_frame"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded; unload_busy needs script-owned module"

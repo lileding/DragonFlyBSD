@@ -42,7 +42,9 @@ run_case()
 	cleanup_machine "$vm" || fail "$mode cleanup"; say "PASS: $mode"
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
-[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"; [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
+case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be an absolute path" ;; esac
+[ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
     fail "$VMM_KO contains .eh_frame"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/loader_revoke.c" -o "$LOADER"

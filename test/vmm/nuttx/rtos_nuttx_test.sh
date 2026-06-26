@@ -173,6 +173,10 @@ preflight()
 	say "mem=$MEM mount=$MNT machine=$VM pattern=$PAT"
 
 	[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
+	case "$VMM_KO" in
+	/*) ;;
+	*) fail "VMM_KO must be an absolute path" ;;
+	esac
 	[ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 	[ -f "$ELF" ] || fail "missing NUTTX_ELF=$ELF"
 	case "$MOUNT_HELPER" in

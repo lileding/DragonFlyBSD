@@ -226,6 +226,10 @@ preflight()
 	say "vmm_ko=$VMM_KO"
 	say "mem=$MEM mount=$MNT"
 	[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
+	case "$VMM_KO" in
+	/*) ;;
+	*) fail "VMM_KO must be an absolute path" ;;
+	esac
 	[ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 	case "$MOUNT_HELPER" in
 	*_vmm) ;;
