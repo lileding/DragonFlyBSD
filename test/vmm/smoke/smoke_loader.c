@@ -226,13 +226,13 @@ emit_outb(uint8_t *code, size_t *len, size_t cap, uint16_t port, uint8_t val)
 }
 
 static size_t
-emit_jne8(uint8_t *code, size_t *len, size_t cap)
+emit_jne32(uint8_t *code, size_t *len, size_t cap)
 {
-	static const uint8_t bytes[] = { 0x75, 0x00 };
+	static const uint8_t bytes[] = { 0x0f, 0x85, 0x00, 0x00, 0x00, 0x00 };
 	size_t disp;
 
 	emit(code, len, cap, bytes, sizeof(bytes));
-	disp = *len - 1;
+	disp = *len - 4;
 	return disp;
 }
 
@@ -255,6 +255,21 @@ patch_rel8(uint8_t *code, size_t disp, size_t target)
 	if (rel < -128 || rel > 127)
 		errx(1, "guest branch target is out of rel8 range");
 	code[disp] = (uint8_t)rel;
+}
+
+static void
+patch_rel32(uint8_t *code, size_t disp, size_t target)
+{
+	int64_t rel = (int64_t)target - (int64_t)(disp + 4);
+	uint32_t urel;
+
+	if (rel < -2147483648LL || rel > 2147483647LL)
+		errx(1, "guest branch target is out of rel32 range");
+	urel = (uint32_t)rel;
+	code[disp] = urel & 0xffU;
+	code[disp + 1] = (urel >> 8) & 0xffU;
+	code[disp + 2] = (urel >> 16) & 0xffU;
+	code[disp + 3] = (urel >> 24) & 0xffU;
 }
 
 static void
@@ -526,7 +541,7 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
 	emit(code, &len, cap, mov_rdi_10_to_eax, sizeof(mov_rdi_10_to_eax));
 	emit_cmp_eax(code, &len, cap, IOAPIC_VERSION);
-	jver = emit_jne8(code, &len, cap);
+	jver = emit_jne32(code, &len, cap);
 
 	emit_mov_eax(code, &len, cap, 0x10);
 	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
@@ -536,7 +551,7 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
 	emit(code, &len, cap, mov_rdi_10_to_eax, sizeof(mov_rdi_10_to_eax));
 	emit_cmp_eax(code, &len, cap, IOAPIC_MASKED_VECTOR32);
-	jredir = emit_jne8(code, &len, cap);
+	jredir = emit_jne32(code, &len, cap);
 
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
@@ -544,8 +559,8 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
-	patch_rel8(code, jver, fail_label);
-	patch_rel8(code, jredir, fail_label);
+	patch_rel32(code, jver, fail_label);
+	patch_rel32(code, jredir, fail_label);
 	return len;
 }
 
@@ -862,6 +877,8 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	ptr = manifest + sizeof(hdr);
 	ptr = add_record(ptr, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
 	ptr = add_record(ptr, VMM_REC_GPA_RANGE, ranges, sizeof(ranges));
+	if ((size_t)(ptr - manifest) > manifest_size)
+		errx(1, "manifest does not fit fd4");
 
 	memset(&hdr, 0, sizeof(hdr));
 	memcpy(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic));
