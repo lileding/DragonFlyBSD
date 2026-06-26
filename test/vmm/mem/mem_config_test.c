@@ -34,6 +34,9 @@ vm_offset_t vmm_test_vmspace_alloc_min;
 vm_offset_t vmm_test_vmspace_alloc_max;
 int vmm_test_pmap_maybethreaded_calls;
 struct pmap *vmm_test_pmap_maybethreaded_pmap;
+int vmm_test_pmap_del_all_cpus_calls;
+struct vmspace *vmm_test_pmap_del_all_cpus_vmspace;
+int vmm_test_pmap_del_all_cpus_before_vmspace_rel;
 
 static void
 fail(const char *name)
@@ -132,6 +135,9 @@ reset_vm_trace(void)
 	vmm_test_vmspace_alloc_max = 0;
 	vmm_test_pmap_maybethreaded_calls = 0;
 	vmm_test_pmap_maybethreaded_pmap = NULL;
+	vmm_test_pmap_del_all_cpus_calls = 0;
+	vmm_test_pmap_del_all_cpus_vmspace = NULL;
+	vmm_test_pmap_del_all_cpus_before_vmspace_rel = 0;
 }
 
 static void
@@ -167,7 +173,7 @@ expect_publish_mismatch(void)
 static void
 expect_prepare_failure_cleanup(const char *name, int pager_fail,
     int vmspace_fail, int map_insert_result, int want_object_frees,
-    int want_vmspace_frees, int want_map_calls)
+    int want_vmspace_frees, int want_map_calls, int want_pmap_del_calls)
 {
 	struct vmm_mem_backing *backing;
 	int error;
@@ -182,9 +188,13 @@ expect_prepare_failure_cleanup(const char *name, int pager_fail,
 		fail(name);
 	if (vmm_test_vm_object_free_count != want_object_frees ||
 	    vmm_test_vmspace_free_count != want_vmspace_frees ||
-	    vmm_test_vm_map_insert_calls != want_map_calls) {
+	    vmm_test_vm_map_insert_calls != want_map_calls ||
+	    vmm_test_pmap_del_all_cpus_calls != want_pmap_del_calls) {
 		fail(name);
 	}
+	if (want_pmap_del_calls != 0 &&
+	    !vmm_test_pmap_del_all_cpus_before_vmspace_rel)
+		fail(name);
 	reset_vm_trace();
 }
 
@@ -311,6 +321,10 @@ expect_backing_lifecycle(void)
 	if (vmm_test_vm_object_free_count != 1 ||
 	    vmm_test_vmspace_free_count != 1)
 		fail("release frees backing exactly once");
+	if (vmm_test_pmap_del_all_cpus_calls != 1 ||
+	    vmm_test_pmap_del_all_cpus_vmspace != vmspace ||
+	    !vmm_test_pmap_del_all_cpus_before_vmspace_rel)
+		fail("release removes pmap cpus before vmspace release");
 	vmm_mem_release_backing(NULL);
 }
 
@@ -350,11 +364,11 @@ main(void)
 	if (vmm_mem_prepare(VMM_MEM_ALIGN, NULL) != EINVAL)
 		fail("prepare null backing pointer");
 	expect_prepare_failure_cleanup("prepare pager failure cleanup", 1, 0,
-	    0, 0, 0, 0);
+	    0, 0, 0, 0, 0);
 	expect_prepare_failure_cleanup("prepare vmspace failure cleanup", 0, 1,
-	    0, 1, 0, 0);
+	    0, 1, 0, 0, 0);
 	expect_prepare_failure_cleanup("prepare map failure cleanup", 0, 0, 1,
-	    1, 1, 1);
+	    1, 1, 1, 1);
 	expect_publish_mismatch();
 
 	expect_format("format 2M", 2ull * 1024 * 1024, "2097152\n");
