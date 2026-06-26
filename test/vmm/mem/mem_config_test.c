@@ -227,6 +227,8 @@ expect_backing_lifecycle(void)
 	     vmspace->vm_map.mapped_end != VMM_MEM_ALIGN ||
 	     vmspace->vm_map.mapped_offset != 0 ||
 	     vmspace->vm_map.mapped_prot !=
+	     (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE) ||
+	     vmspace->vm_map.mapped_maxprot !=
 	     (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))) {
 		fail("mapped vmspace range");
 	}
@@ -237,6 +239,8 @@ expect_backing_lifecycle(void)
 	    object == NULL || bytes != VMM_MEM_ALIGN) {
 		fail("snapshot backing");
 	}
+	if (vmspace != NULL && object != vmspace->vm_map.mapped_object)
+		fail("snapshot returns mapped backing object");
 	if (object != NULL && object->refs != 3)
 		fail("snapshot owns temporary object reference");
 	if (object != NULL) {
