@@ -91,6 +91,12 @@ vmm_machine_uninit(struct vmm_machine *m)
 	struct vmm_vcpu_thread *threads = NULL;
 	uint32_t thread_count;
 
+	/*
+	 * Callers must have removed the machine from new control-plane reach
+	 * and waited for quiescence.  This routine only performs final object
+	 * teardown; it must not be the path that races active vCPUs against
+	 * guest RAM detach.
+	 */
 	vmm_machine_request_stopped(m, 1);
 	vmm_machine_lock(m);
 	thread_count = m->own_mut_vcpu.mut_count;
