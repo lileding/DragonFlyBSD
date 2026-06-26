@@ -68,19 +68,27 @@ align8(size_t v)
 }
 
 static uint8_t *
-add_record(uint8_t *p, uint16_t type, const void *payload, uint32_t size)
+add_record_flags(uint8_t *p, uint16_t type, uint16_t flags,
+    const void *payload, uint32_t size)
 {
 	struct vmm_manifest_record rec;
 	size_t total;
 
 	rec.type = type;
-	rec.flags = VMM_REC_F_MANDATORY;
+	rec.flags = flags;
 	rec.size = size;
 	total = align8(sizeof(rec) + size);
 	memcpy(p, &rec, sizeof(rec));
-	memcpy(p + sizeof(rec), payload, size);
+	if (size != 0)
+		memcpy(p + sizeof(rec), payload, size);
 	memset(p + sizeof(rec) + size, 0, total - sizeof(rec) - size);
 	return p + total;
+}
+
+static uint8_t *
+add_record(uint8_t *p, uint16_t type, const void *payload, uint32_t size)
+{
+	return add_record_flags(p, type, VMM_REC_F_MANDATORY, payload, size);
 }
 
 static void
@@ -154,6 +162,19 @@ manifest_vcpu(uint8_t *manifest)
 	    sizeof(struct vmm_manifest_record));
 }
 
+static struct vmm_manifest_header *
+manifest_header(uint8_t *manifest)
+{
+	return (struct vmm_manifest_header *)(void *)manifest;
+}
+
+static struct vmm_manifest_record *
+manifest_first_record(uint8_t *manifest)
+{
+	return (struct vmm_manifest_record *)(void *)(manifest +
+	    sizeof(struct vmm_manifest_header));
+}
+
 static struct vmm_gpa_range *
 manifest_ranges(uint8_t *manifest)
 {
@@ -165,16 +186,35 @@ manifest_ranges(uint8_t *manifest)
 }
 
 static void
-expect_result(const char *name, uint8_t *manifest, int want)
+append_optional_unknown(uint8_t *manifest)
+{
+	struct vmm_manifest_header *hdr = manifest_header(manifest);
+	const uint8_t payload[3] = { 1, 2, 3 };
+	uint8_t *p;
+
+	p = manifest + hdr->total_size;
+	p = add_record_flags(p, 0x7fff, 0, payload, sizeof(payload));
+	hdr->total_size = (uint32_t)(p - manifest);
+	hdr->record_count++;
+}
+
+static void
+expect_load_result(const char *name, uint64_t mem_size, const uint8_t *manifest,
+    size_t cap, int want)
 {
 	struct vmm_launch launch;
 	int error;
 
-	error = vmm_loader_x86_manifest_load(MEM_SIZE, manifest,
-	    MANIFEST_SIZE, &launch);
+	error = vmm_loader_x86_manifest_load(mem_size, manifest, cap, &launch);
 	if (error != want) {
 		errx(1, "%s: got %d want %d", name, error, want);
 	}
+}
+
+static void
+expect_result(const char *name, uint8_t *manifest, int want)
+{
+	expect_load_result(name, MEM_SIZE, manifest, MANIFEST_SIZE, want);
 }
 
 int
@@ -186,6 +226,25 @@ main(void)
 
 	build_valid_state(manifest);
 	expect_result("valid", manifest, 0);
+
+	expect_load_result("null manifest", MEM_SIZE, NULL, MANIFEST_SIZE,
+	    EINVAL);
+
+	build_valid_state(manifest);
+	expect_load_result("zero mem size", 0, manifest, MANIFEST_SIZE,
+	    EINVAL);
+
+	build_valid_state(manifest);
+	expect_load_result("short cap", MEM_SIZE, manifest,
+	    sizeof(struct vmm_manifest_header) - 1, EINVAL);
+
+	build_valid_state(manifest);
+	append_optional_unknown(manifest);
+	expect_result("optional unknown record", manifest, 0);
+
+	build_valid_state(manifest);
+	manifest_first_record(manifest)->flags = VMM_REC_F_MANDATORY | 0x2;
+	expect_result("reserved record flags", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	vcpu = manifest_vcpu(manifest);

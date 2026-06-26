@@ -212,6 +212,8 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 
 	if (launch != NULL)
 		bzero(launch, sizeof(*launch));
+	if (buf == NULL || mem_size == 0)
+		return EINVAL;
 	if (cap < sizeof(hdr))
 		return EINVAL;
 	bcopy(buf, &hdr, sizeof(hdr));
@@ -236,6 +238,10 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 			return error;
 		}
 		bcopy(buf + off, &rec, sizeof(rec));
+		if ((rec.flags & ~VMM_REC_F_MANDATORY) != 0) {
+			error = EINVAL;
+			return error;
+		}
 		next = off + vmm_align8(sizeof(rec) + rec.size);
 		if (next < off || next > hdr.total_size ||
 		    off + sizeof(rec) + rec.size > hdr.total_size) {
