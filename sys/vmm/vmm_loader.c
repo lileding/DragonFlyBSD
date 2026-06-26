@@ -92,6 +92,21 @@ struct vmm_loader_epoch {
 };
 
 struct vmm_loader_fd {
+	/*
+	 * Ref map:
+	 * atomic_mut_refs keeps this heap object alive while either the devfs
+	 * file private data or the cdev pager object can call back into vmm.  The
+	 * initial ref belongs to devfs cdevpriv; the pager ctor/dtor pair owns a
+	 * second ref.  vmm_loader_fd_active mirrors this heap-object lifetime so
+	 * module unload refuses while any loader fd or mmap can still reach these
+	 * callbacks.
+	 *
+	 * Lock map:
+	 * after cdev_pager_allocate() publishes own_mut_object, its token protects
+	 * mut_revoked and own_mut_backing_object.  The pager ctor runs before
+	 * own_mut_object is assigned, so it only observes the construction-time
+	 * state; mmap and fault paths recheck under the object token.
+	 */
 	cdev_t		own_mut_dev;
 	struct vm_object *own_mut_object;		/* mmap capability */
 	struct vm_object *own_mut_backing_object;	/* guest RAM/manifest */
