@@ -282,12 +282,12 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 
 	vmmfs_device_free_list(&tofree);
 	(void)vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
+	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
+	vrele(vp);
 	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,
 	    "vmmfsreap");
 	if (error)
 		vmmfs_machine_reaper(m);
-	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
-	vrele(vp);
 	return 0;
 }
 

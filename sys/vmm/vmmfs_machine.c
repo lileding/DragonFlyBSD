@@ -11,6 +11,7 @@
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
+#include <sys/proc.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
 #include <sys/dirent.h>
@@ -89,6 +90,8 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
 	return d->present == NULL || d->present(&m->machine);
 }
 
+static void vmmfs_machine_revoke_node(struct vmmfs_node *node);
+
 /*
  * Allocate a machine and wire up its nodes with fresh inos.  Only the inode
  * range reservation runs under vm_lock; vmm_machine_init() starts a taskqueue
@@ -147,6 +150,10 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 
 	kprintf("vmm klog: machine_free begin m=%p machine=%p\n", m,
 	    &m->machine);
+	for (j = 0; j < VMMFS_NCFG_FILES; j++)
+		vmmfs_machine_revoke_node(cfg_node(m, &vmmfs_cfg_table[j]));
+	vmmfs_machine_revoke_node(&m->vn_devices);
+	vmmfs_machine_revoke_node(&m->node);
 	vmm_machine_uninit(&m->machine);
 	kprintf("vmm klog: machine_free machine_uninit done m=%p\n", m);
 	vmmfs_node_uninit(&m->node);
@@ -155,6 +162,28 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 	vmmfs_node_uninit(&m->vn_devices);
 	kprintf("vmm klog: machine_free kfree m=%p\n", m);
 	kfree(m, M_VMMFS);
+}
+
+static void
+vmmfs_machine_revoke_node(struct vmmfs_node *node)
+{
+	struct vnode *vp;
+
+	vmmfs_obuf_drain(node);
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	vp = node->vn_vnode;
+	if (vp != NULL)
+		vhold(vp);
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (vp == NULL)
+		return;
+
+	(void)vrevoke(vp, proc0.p_ucred);
+	vx_get(vp);
+	vgone_vxlocked(vp);
+	vx_put(vp);
+	vdrop(vp);
 }
 
 /* --------------------------------------------------------------------- */
