@@ -847,7 +847,8 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 		return EINVAL;
 	loader->imm_path = path;
 	loader->atomic_mut_state = VMM_LOADER_RUNNING;
-	error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK, &child);
+	error = fork1(curthread->td_lwp,
+	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
 	if (error)
 		return error;
 
@@ -860,6 +861,8 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 
 	error = vmm_domain_proc_register(&loader->own_handler);
 	if (error) {
+		ksignal(child, SIGKILL);
+		wakeup(loader);
 		PRELE(child);
 		loader->ref_mut_proc = NULL;
 		return error;
