@@ -30,6 +30,22 @@ run()
 	"$@" || fail "$*"
 }
 
+write_sentinel()
+{
+	MEM_BYTES=$(stat -f %z "$MEM_FILE") || fail "stat $MEM_FILE"
+	[ "$MEM_BYTES" -gt 0 ] || fail "empty guest RAM file"
+	SENTINEL_OFFSET=$((MEM_BYTES - 1))
+	printf '\245' | dd of="$MEM_FILE" bs=1 seek="$SENTINEL_OFFSET" \
+	    count=1 conv=notrunc >/dev/null 2>&1 || fail "write sentinel"
+}
+
+check_sentinel()
+{
+	byte=$(od -An -tx1 -j "$SENTINEL_OFFSET" -N 1 "$MEM_FILE" |
+	    tr -d ' \n')
+	[ "$byte" = "a5" ] || fail "fd3 sentinel changed: $byte"
+}
+
 cleanup()
 {
 	set +e
@@ -48,6 +64,8 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 run truncate -s "$MEM_SIZE" "$MEM_FILE"
 run truncate -s 65536 "$MANIFEST_FILE"
+write_sentinel
 run "$LOADER" "$ELF" 3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
+check_sentinel
 run "$CHECKER" "$MEM_FILE" "$MANIFEST_FILE"
 say "PASS: NuttX loader offline check"
