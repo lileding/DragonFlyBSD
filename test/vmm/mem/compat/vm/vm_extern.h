@@ -15,16 +15,18 @@ extern int vmm_test_vm_fault_flags;
 extern int vmm_test_vm_fault_result;
 extern int vmm_test_vmspace_alloc_fail;
 extern int vmm_test_vmspace_free_count;
+extern vm_offset_t vmm_test_vmspace_alloc_min;
+extern vm_offset_t vmm_test_vmspace_alloc_max;
 
 static inline struct vmspace *
 vmspace_alloc(vm_offset_t min, vm_offset_t max)
 {
 	struct vmspace *vmspace;
 
-	(void)min;
-	(void)max;
 	if (vmm_test_vmspace_alloc_fail)
 		return NULL;
+	vmm_test_vmspace_alloc_min = min;
+	vmm_test_vmspace_alloc_max = max;
 	vmspace = calloc(1, sizeof(*vmspace));
 	if (vmspace != NULL)
 		vmspace->vm_map.pmap = &vmspace->vm_pmap;

@@ -27,6 +27,10 @@ int vmm_test_vm_map_insert_result;
 int vmm_test_vm_map_insert_calls;
 int vmm_test_vm_object_free_count;
 int vmm_test_vmspace_free_count;
+vm_offset_t vmm_test_vmspace_alloc_min;
+vm_offset_t vmm_test_vmspace_alloc_max;
+int vmm_test_pmap_maybethreaded_calls;
+struct pmap *vmm_test_pmap_maybethreaded_pmap;
 
 static void
 fail(const char *name)
@@ -118,6 +122,10 @@ reset_vm_trace(void)
 	vmm_test_vm_map_insert_calls = 0;
 	vmm_test_vm_object_free_count = 0;
 	vmm_test_vmspace_free_count = 0;
+	vmm_test_vmspace_alloc_min = 0;
+	vmm_test_vmspace_alloc_max = 0;
+	vmm_test_pmap_maybethreaded_calls = 0;
+	vmm_test_pmap_maybethreaded_pmap = NULL;
 }
 
 static void
@@ -226,6 +234,13 @@ expect_backing_lifecycle(void)
 	vmspace = vmm_mem_borrow_vmspace(&mem);
 	if (vmspace == NULL)
 		fail("borrow vmspace");
+	if (vmm_test_vmspace_alloc_min != 0 ||
+	    vmm_test_vmspace_alloc_max != VMM_MEM_ALIGN)
+		fail("prepare allocates machine vmspace over GPA range");
+	if (vmm_test_pmap_maybethreaded_calls != 1 ||
+	    (vmspace != NULL &&
+	     vmm_test_pmap_maybethreaded_pmap != &vmspace->vm_pmap))
+		fail("prepare marks machine pmap threaded");
 	if (vmspace != NULL &&
 	    (vmspace->vm_map.mapped_start != 0 ||
 	     vmspace->vm_map.mapped_end != VMM_MEM_ALIGN ||

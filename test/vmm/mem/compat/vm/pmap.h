@@ -7,10 +7,14 @@ struct pmap {
 
 struct vmspace;
 
+extern int vmm_test_pmap_maybethreaded_calls;
+extern struct pmap *vmm_test_pmap_maybethreaded_pmap;
+
 static inline void
 pmap_maybethreaded(struct pmap *pmap)
 {
-	(void)pmap;
+	vmm_test_pmap_maybethreaded_calls++;
+	vmm_test_pmap_maybethreaded_pmap = pmap;
 }
 
 static inline void
