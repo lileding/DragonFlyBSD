@@ -33,6 +33,8 @@ enum vmm_machine_status {
 };
 
 struct vmm_machine {
+	struct lwkt_token token_config;
+	struct lwkt_token token_events;
 	struct vmm_vcpu own_mut_vcpu;
 	struct vmm_mem own_mut_mem;
 	struct vmm_console own_mut_console;
@@ -44,7 +46,7 @@ struct vmm_machine {
 	size_t mut_loader_len;
 	uint32_t mut_lease_count;
 	int mut_lease_armed;
-	uint8_t mut_ev_codes[VMM_EVENT_CAP]; /* lossy ring */
+	uint8_t mut_ev_codes[VMM_EVENT_CAP]; /* token_events; lossy ring */
 	size_t mut_ev_tail;
 	size_t mut_ev_count;
 };

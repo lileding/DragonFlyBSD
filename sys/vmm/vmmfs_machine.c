@@ -43,7 +43,13 @@ struct vmmfs_cfg_desc {
 static int
 cfg_present_stopped(const struct vmm_machine *m)
 {
-	return m->mut_desired_stopped;
+	struct vmm_machine *machine = __DECONST(struct vmm_machine *, m);
+	int stopped;
+
+	lwkt_gettoken(&machine->token_config);
+	stopped = machine->mut_desired_stopped;
+	lwkt_reltoken(&machine->token_config);
+	return stopped;
 }
 
 static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
@@ -219,7 +225,9 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
 
+	lwkt_gettoken(&m->machine.token_config);
 	m->machine.mut_desired_stopped = 1;
+	lwkt_reltoken(&m->machine.token_config);
 	error = vmm_machine_execute(&m->machine, vmm_machine_stop_apic, NULL);
 	if (error)
 		return error;
@@ -248,7 +256,9 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
+	lwkt_gettoken(&m->machine.token_config);
 	m->machine.mut_desired_stopped = 0;
+	lwkt_reltoken(&m->machine.token_config);
 	error = vmm_machine_execute(&m->machine, vmm_machine_start, ap->a_cred);
 	if (error)
 		return error;
@@ -360,7 +370,9 @@ vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
 		return EINVAL;
 	force = (take >= 11 && strncmp(buf, "reset force", 11) == 0);
 	if (force) {
+		lwkt_gettoken(&node->vn_machine->machine.token_config);
 		node->vn_machine->machine.mut_desired_stopped = 0;
+		lwkt_reltoken(&node->vn_machine->machine.token_config);
 		return vmm_machine_execute(&node->vn_machine->machine,
 		    vmm_machine_reset_force, ap->a_cred);
 	}
@@ -383,9 +395,33 @@ static kobj_method_t vmmfs_events_methods[] = {
 };
 DEFINE_CLASS(vmmfs_events, vmmfs_events_methods, 0);
 
+static int
+vmmfs_status_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
+{
+	struct vmm_machine *m = &node->vn_machine->machine;
+	int error;
+
+	lwkt_gettoken(&m->token_config);
+	error = vmmfs_zero_getattr(node, ap);
+	lwkt_reltoken(&m->token_config);
+	return error;
+}
+
+static int
+vmmfs_status_read(struct vmmfs_node *node, struct vop_read_args *ap)
+{
+	struct vmm_machine *m = &node->vn_machine->machine;
+	int error;
+
+	lwkt_gettoken(&m->token_config);
+	error = vmmfs_zero_read(node, ap);
+	lwkt_reltoken(&m->token_config);
+	return error;
+}
+
 static kobj_method_t vmmfs_status_methods[] = {
-	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
-	KOBJMETHOD(vmmfs_node_read,	vmmfs_zero_read),
+	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_status_getattr),
+	KOBJMETHOD(vmmfs_node_read,	vmmfs_status_read),
 	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
 	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
 	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
@@ -427,7 +463,9 @@ vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 			return error;
 	}
 
+	lwkt_gettoken(&node->vn_machine->machine.token_config);
 	node->vn_machine->machine.mut_desired_stopped = 1;
+	lwkt_reltoken(&node->vn_machine->machine.token_config);
 	return vmm_machine_execute(&node->vn_machine->machine,
 	    force ? vmm_machine_stop_force : vmm_machine_stop_apic, NULL);
 }

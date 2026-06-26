@@ -30,12 +30,17 @@ struct vmm_machine_task {
 	struct vmm_loader own_loader;
 	uint32_t imm_vcpu_count;
 	uint64_t imm_mem_bytes;
+	char imm_loader_path[VMM_LOADER_MAX + 1];
+	size_t imm_loader_len;
 };
 
 static void	vmm_machine_task_run(void *arg, int pending);
 static void	vmm_machine_drain_task(void *arg, int pending);
 static int	vmm_machine_task_config_complete(
 		    const struct vmm_machine_task *task);
+static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
+static void	vmm_machine_set_status(struct vmm_machine *m,
+		    enum vmm_machine_status status);
 
 /* --------------------------------------------------------------------- */
 /* Event ring.                                                           */
@@ -62,13 +67,16 @@ event_text(uint8_t code, size_t *len)
 static void
 ev_push(struct vmm_machine *m, uint8_t code)
 {
-	size_t slot = (m->mut_ev_tail + m->mut_ev_count) % VMM_EVENT_CAP;
+	size_t slot;
 
+	lwkt_gettoken(&m->token_events);
+	slot = (m->mut_ev_tail + m->mut_ev_count) % VMM_EVENT_CAP;
 	m->mut_ev_codes[slot] = code;
 	if (m->mut_ev_count < VMM_EVENT_CAP)
 		m->mut_ev_count++;
 	else
 		m->mut_ev_tail = (m->mut_ev_tail + 1) % VMM_EVENT_CAP;
+	lwkt_reltoken(&m->token_events);
 }
 
 /* --------------------------------------------------------------------- */
@@ -78,6 +86,8 @@ void
 vmm_machine_init(struct vmm_machine *m)
 {
 	memset(m, 0, sizeof(*m));
+	lwkt_token_init(&m->token_config, "vmmcfg");
+	lwkt_token_init(&m->token_events, "vmmev");
 	vmm_console_init(&m->own_mut_console);
 	m->own_mut_taskqueue = taskqueue_create("vmm_machine", M_WAITOK,
 										 taskqueue_thread_enqueue, &m->own_mut_taskqueue);
@@ -145,16 +155,22 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 	TASK_INIT(&task->task, 0, vmm_machine_task_run, task);
 	task->borrow_mut_machine = m;
 	task->fnonce_handler = fnonce_handler;
+
+	lwkt_gettoken(&m->token_config);
 	task->imm_vcpu_count = m->own_mut_vcpu.mut_count;
 	task->imm_mem_bytes = m->own_mut_mem.mut_bytes;
+	task->imm_loader_len = m->mut_loader_len;
+	memcpy(task->imm_loader_path, m->mut_loader_path,
+	    task->imm_loader_len + 1);
+	lwkt_reltoken(&m->token_config);
 
 	if (cred != NULL) {
 		if (!vmm_machine_task_config_complete(task) ||
-		    !vmm_loader_path_is_set(m->mut_loader_len)) {
+		    !vmm_loader_path_is_set(task->imm_loader_len)) {
 			error = EINVAL;
 			goto fail;
 		}
-		error = vmm_loader_init(&task->own_loader, m->mut_loader_path,
+		error = vmm_loader_init(&task->own_loader, task->imm_loader_path,
 		    cred);
 		if (error)
 			goto fail;
@@ -206,10 +222,10 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	uint32_t thread_count;
 	int error;
 
-	if (m->mut_status == VMM_MACHINE_RUNNING)
+	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
 		return;
 
-	m->mut_status = VMM_MACHINE_STARTING;
+	vmm_machine_set_status(m, VMM_MACHINE_STARTING);
 
 	error = vmm_mem_prepare(task->imm_mem_bytes, &prepared_backing);
 	if (error != 0)
@@ -239,12 +255,12 @@ vmm_machine_start(const struct vmm_machine_task *task)
 		goto fail_after_loader;
 
 	vmm_console_reset(&m->own_mut_console);
-	m->mut_status = VMM_MACHINE_RUNNING;
+	vmm_machine_set_status(m, VMM_MACHINE_RUNNING);
 	ev_push(m, EV_STARTED);
 	return;
 
 fail:
-	m->mut_status = VMM_MACHINE_STOPPED;
+	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	if (prepared_backing != NULL)
 		vmm_mem_release_backing(prepared_backing);
 	if (mem_object != NULL)
@@ -254,7 +270,7 @@ fail_after_loader:
 	vmm_vcpu_stop(m);
 	thread_count = m->own_mut_vcpu.mut_count;
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-	m->mut_status = VMM_MACHINE_STOPPED;
+	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
@@ -274,13 +290,13 @@ vmm_machine_stop_force(const struct vmm_machine_task *task)
 	struct vmm_vcpu_thread *threads = NULL;
 	uint32_t thread_count;
 
-	if (m->mut_status == VMM_MACHINE_STOPPED)
+	if (vmm_machine_status(m) == VMM_MACHINE_STOPPED)
 		return;
-	m->mut_status = VMM_MACHINE_STOPPING;
+	vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
 	vmm_vcpu_stop(m);
 	thread_count = m->own_mut_vcpu.mut_count;
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-	m->mut_status = VMM_MACHINE_STOPPED;
+	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	ev_push(m, EV_STOPPED);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
@@ -306,6 +322,25 @@ vmm_machine_task_config_complete(const struct vmm_machine_task *task)
 	return task->imm_vcpu_count != 0 && task->imm_mem_bytes != 0;
 }
 
+static enum vmm_machine_status
+vmm_machine_status(struct vmm_machine *m)
+{
+	enum vmm_machine_status status;
+
+	lwkt_gettoken(&m->token_config);
+	status = m->mut_status;
+	lwkt_reltoken(&m->token_config);
+	return status;
+}
+
+static void
+vmm_machine_set_status(struct vmm_machine *m, enum vmm_machine_status status)
+{
+	lwkt_gettoken(&m->token_config);
+	m->mut_status = status;
+	lwkt_reltoken(&m->token_config);
+}
+
 static int
 vmm_machine_config_writable(const struct vmm_machine *m)
 {
@@ -315,42 +350,72 @@ vmm_machine_config_writable(const struct vmm_machine *m)
 size_t
 vmm_machine_format_vcpu(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_vcpu_format(&m->own_mut_vcpu, out, cap);
+	size_t n;
+
+	lwkt_gettoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	n = vmm_vcpu_format(&m->own_mut_vcpu, out, cap);
+	lwkt_reltoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	return n;
 }
 
 int
 vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_machine_config_writable(m) &&
-		vmm_vcpu_parse(&m->own_mut_vcpu, buf, len);
+	int ok;
+
+	lwkt_gettoken(&m->token_config);
+	ok = vmm_machine_config_writable(m) &&
+	    vmm_vcpu_parse(&m->own_mut_vcpu, buf, len);
+	lwkt_reltoken(&m->token_config);
+	return ok;
 }
 
 size_t
 vmm_machine_format_mem(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_mem_format(&m->own_mut_mem, out, cap);
+	size_t n;
+
+	lwkt_gettoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	n = vmm_mem_format(&m->own_mut_mem, out, cap);
+	lwkt_reltoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	return n;
 }
 
 int
 vmm_machine_commit_mem(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_machine_config_writable(m) &&
-		vmm_mem_parse(&m->own_mut_mem, buf, len);
+	int ok;
+
+	lwkt_gettoken(&m->token_config);
+	ok = vmm_machine_config_writable(m) &&
+	    vmm_mem_parse(&m->own_mut_mem, buf, len);
+	lwkt_reltoken(&m->token_config);
+	return ok;
 }
 
 size_t
 vmm_machine_format_loader(const struct vmm_machine *m, char *out, size_t cap)
 {
-	return vmm_loader_path_format(m->mut_loader_path, m->mut_loader_len,
+	size_t n;
+
+	lwkt_gettoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	n = vmm_loader_path_format(m->mut_loader_path, m->mut_loader_len,
 	    out, cap);
+	lwkt_reltoken(&__DECONST(struct vmm_machine *, m)->token_config);
+	return n;
 }
 
 int
 vmm_machine_commit_loader(struct vmm_machine *m, const char *buf, size_t len)
 {
-	return vmm_machine_config_writable(m) &&
-		vmm_loader_path_parse(m->mut_loader_path, &m->mut_loader_len,
-		    buf, len);
+	int ok;
+
+	lwkt_gettoken(&m->token_config);
+	ok = vmm_machine_config_writable(m) &&
+	    vmm_loader_path_parse(m->mut_loader_path, &m->mut_loader_len,
+		buf, len);
+	lwkt_reltoken(&m->token_config);
+	return ok;
 }
 
 int
@@ -378,7 +443,13 @@ vmm_machine_lease_close(struct vmm_machine *m)
 int
 vmm_machine_events_pending(const struct vmm_machine *m)
 {
-	return m->mut_ev_count > 0;
+	struct vmm_machine *machine = __DECONST(struct vmm_machine *, m);
+	int pending;
+
+	lwkt_gettoken(&machine->token_events);
+	pending = m->mut_ev_count > 0;
+	lwkt_reltoken(&machine->token_events);
+	return pending;
 }
 
 size_t
@@ -386,6 +457,7 @@ vmm_machine_read_events(struct vmm_machine *m, char *out, size_t cap)
 {
 	size_t n = 0;
 
+	lwkt_gettoken(&m->token_events);
 	while (m->mut_ev_count > 0) {
 		size_t tlen;
 		const char *t = event_text(m->mut_ev_codes[m->mut_ev_tail], &tlen);
@@ -397,5 +469,6 @@ vmm_machine_read_events(struct vmm_machine *m, char *out, size_t cap)
 		m->mut_ev_tail = (m->mut_ev_tail + 1) % VMM_EVENT_CAP;
 		m->mut_ev_count--;
 	}
+	lwkt_reltoken(&m->token_events);
 	return n;
 }

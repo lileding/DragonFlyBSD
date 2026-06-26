@@ -197,11 +197,14 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
+	lwkt_gettoken(&m->machine.token_config);
 	if (!m->machine.mut_desired_stopped) {
+		lwkt_reltoken(&m->machine.token_config);
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return EBUSY;
 	}
+	lwkt_reltoken(&m->machine.token_config);
 	m->vm_in_tree = 0;
 	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
 	vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
