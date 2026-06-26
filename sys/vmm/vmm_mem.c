@@ -112,19 +112,21 @@ vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
 }
 
 int
-vmm_mem_prepare(struct vmm_mem *m)
+vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 {
 	struct vmm_mem_backing *b;
 	uint64_t size;
 	int error = 0;
 
-	if (!vmm_mem_is_set(m))
+	if (backingp == NULL)
 		return EINVAL;
-	if (m->own_mut_backing != NULL)
-		return 0;
+	*backingp = NULL;
+	if (bytes == 0 || bytes > VMM_MEM_MAX ||
+	    (bytes % VMM_MEM_ALIGN) != 0)
+		return EINVAL;
 
 	b = kmalloc(sizeof(*b), M_TEMP, M_WAITOK | M_ZERO);
-	b->imm_bytes = m->mut_bytes;
+	b->imm_bytes = bytes;
 	size = round_page64(b->imm_bytes);
 	b->own_mut_object = default_pager_alloc(NULL, size, VM_PROT_DEFAULT, 0);
 	if (b->own_mut_object == NULL) {
@@ -142,7 +144,7 @@ vmm_mem_prepare(struct vmm_mem *m)
 	if (error)
 		goto fail;
 
-	m->own_mut_backing = b;
+	*backingp = b;
 	return 0;
 
 fail:
@@ -154,6 +156,19 @@ fail:
 		vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
 	return error;
+}
+
+int
+vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing)
+{
+	if (m == NULL || backing == NULL)
+		return EINVAL;
+	if (m->own_mut_backing != NULL)
+		return EBUSY;
+	if (m->mut_bytes != backing->imm_bytes)
+		return EINVAL;
+	m->own_mut_backing = backing;
+	return 0;
 }
 
 void
