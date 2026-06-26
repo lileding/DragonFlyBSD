@@ -36,6 +36,10 @@ struct ucred;
 struct vm_object;
 struct vmm_launch;
 typedef int vmm_loader_cancel_fn(void *arg);
+/*
+ * On entry, *launch is cleared.  On success, it contains the validated launch
+ * state produced by fd4; on failure, it remains empty.
+ */
 int	vmm_loader_run(const char *path, struct vm_object *mem_object,
 	    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
 	    vmm_loader_cancel_fn *cancel, void *cancel_arg);

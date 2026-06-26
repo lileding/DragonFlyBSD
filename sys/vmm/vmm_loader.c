@@ -883,8 +883,10 @@ vmm_loader_run(const char *path, struct vm_object *mem_object,
 	size_t path_len;
 	int error;
 
+	if (launch != NULL)
+		bzero(launch, sizeof(*launch));
 	if (mem_object == NULL || mem_size == 0 ||
-	    path == NULL || path[0] == '\0' || cred == NULL)
+	    path == NULL || path[0] == '\0' || cred == NULL || launch == NULL)
 		return EINVAL;
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
