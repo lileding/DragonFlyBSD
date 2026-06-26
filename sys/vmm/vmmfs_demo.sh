@@ -1,12 +1,24 @@
 #!/bin/sh
-# vmmfs 体验导览（在 vkernel 内由 vkrun2 跑）。把每个特性走一遍，打印命令 + 真实输出。
+# Legacy vkernel-only vmmfs demo.
+#
+# This predates the real pc64 SVM execution path.  It is not a current
+# validation path and is disabled by default so it cannot mask true-hardware
+# failures.
+if [ "${VMM_ALLOW_LEGACY_VKERNEL_DEMO:-}" != "1" ]; then
+	echo "vmmfs_demo.sh is legacy vkernel-only; use test/vmm true-hardware harnesses" >&2
+	exit 1
+fi
+
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/tmp/vmmfs-demo-$$-mount_vmm}
 sep() { echo; echo "==================== $1 ===================="; }
 run() { echo "\$ $1"; eval "$1"; }
 
+trap 'rm -f "$MOUNT_HELPER"' EXIT INT TERM
+
 kldload /xchg/vmm.ko
-ln -sf /sbin/mount_std /sbin/mount_vmm
+ln -sf /sbin/mount_std "$MOUNT_HELPER"
 mkdir -p /vmm
-mount -t vmm vmm /vmm
+"$MOUNT_HELPER" vmm /vmm
 
 sep "1. 挂载后的命名空间"
 run "ls /vmm"

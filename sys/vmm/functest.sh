@@ -9,6 +9,8 @@ if [ "${VMM_ALLOW_LEGACY_VKERNEL_FUNCTEST:-}" != "1" ]; then
 	echo "functest.sh is legacy vkernel-only; use the pc64 true-hardware harness documented in AGENTS.md" >&2
 	exit 1
 fi
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/tmp/vmmfs-functest-$$-mount_vmm}
+trap 'rm -f "$MOUNT_HELPER"' EXIT INT TERM
 #
 # Declarative model: a machine is `mkdir`-ed (always stopped, empty config);
 # vcpu/mem/loader are PCIe-like registers (write into a buffer, commit on
@@ -28,9 +30,9 @@ wait_file() { i=0; while [ $i -lt 10 ]; do [ -f "$1" ] && return 0; i=$((i+1)); 
 wait_event() { i=0; while [ $i -lt 10 ]; do cat "$1/events" | grep -q "^$2$" && return 0; i=$((i+1)); sleep 1; done; return 1; }
 
 kldload /xchg/vmm.ko; ckok "kldload" $?
-ln -sf /sbin/mount_std /sbin/mount_vmm
+ln -sf /sbin/mount_std "$MOUNT_HELPER"; ckok "mount helper" $?
 mkdir -p /vmm
-mount -t vmm vmm /vmm; ckok "mount" $?
+"$MOUNT_HELPER" vmm /vmm; ckok "mount" $?
 ckeq "machines has host" "$(ls $M)" "host"
 
 # --- host machine + stub device pool ---
