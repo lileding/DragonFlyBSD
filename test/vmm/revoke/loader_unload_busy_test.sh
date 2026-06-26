@@ -26,6 +26,8 @@ make_wrapper()
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"; [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
+    fail "$VMM_KO contains .eh_frame"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded; unload_busy needs script-owned module"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/loader_revoke.c" -o "$LOADER"
 run kldload "$VMM_KO"; LOADED=1

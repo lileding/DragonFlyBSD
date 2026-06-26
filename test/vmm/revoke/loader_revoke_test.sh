@@ -43,6 +43,8 @@ run_case()
 }
 : >"$LOG" || exit 1; trap cleanup EXIT INT TERM
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"; [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
+    fail "$VMM_KO contains .eh_frame"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/loader_revoke.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 || { run kldload "$VMM_KO"; LOADED=1; }
 case "$MOUNT_HELPER" in *_vmm) ;; *) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;; esac
