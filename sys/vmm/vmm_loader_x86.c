@@ -71,6 +71,13 @@
 #define VMM_X64_RFLAGS_RESERVED ((1ULL << 3) | (1ULL << 5) | \
 				 (1ULL << 15) | (~0ULL << 22))
 
+#define VMM_X64_PAT_UC		0x00U
+#define VMM_X64_PAT_WC		0x01U
+#define VMM_X64_PAT_WT		0x04U
+#define VMM_X64_PAT_WP		0x05U
+#define VMM_X64_PAT_WB		0x06U
+#define VMM_X64_PAT_UCMINUS	0x07U
+
 struct vmm_manifest_header {
 	char		magic[8];
 	uint16_t	abi_version;
@@ -173,6 +180,34 @@ vmm_loader_x86_xcr0_valid(uint64_t xcr0)
 }
 
 static int
+vmm_loader_x86_pat_entry_valid(uint8_t entry)
+{
+	switch (entry) {
+	case VMM_X64_PAT_UC:
+	case VMM_X64_PAT_WC:
+	case VMM_X64_PAT_WT:
+	case VMM_X64_PAT_WP:
+	case VMM_X64_PAT_WB:
+	case VMM_X64_PAT_UCMINUS:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+int
+vmm_loader_x86_pat_valid(uint64_t pat)
+{
+	unsigned int i;
+
+	for (i = 0; i < 8; i++) {
+		if (!vmm_loader_x86_pat_entry_valid((pat >> (i * 8)) & 0xff))
+			return 0;
+	}
+	return 1;
+}
+
+static int
 vmm_loader_x86_validate_vcpu(uint64_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu)
 {
@@ -187,6 +222,8 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 	if (!vmm_gpa_page(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
 		return EINVAL;
 	if (!vmm_loader_x86_xcr0_valid(vcpu->cr[VMM_X64_CR_XCR0]))
+		return EINVAL;
+	if (!vmm_loader_x86_pat_valid(vcpu->msr[VMM_X64_MSR_PAT]))
 		return EINVAL;
 	if (!vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base,
 	    vcpu->seg[VMM_X64_SEG_GDT].limit))

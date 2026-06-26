@@ -996,6 +996,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_PAT:
+		if (!vmm_loader_x86_pat_valid(val))
+			return 0;
 		vmcb->state.g_pat = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;

@@ -35,6 +35,7 @@
 #define CR0_PG			0x80000000ULL
 #define CR4_PAE			0x00000020ULL
 #define RFLAGS_FIXED		0x00000002ULL
+#define PAT_DEFAULT		0x0007040600070406ULL
 
 #define SEG_S			0x0010U
 #define SEG_P			0x0080U
@@ -140,6 +141,7 @@ build_valid_state(uint8_t *manifest)
 	vcpu.cr[VMM_X64_CR_CR3] = PML4_GPA;
 	vcpu.cr[VMM_X64_CR_CR4] = CR4_PAE;
 	vcpu.cr[VMM_X64_CR_XCR0] = VMM_X64_XCR0_X87;
+	vcpu.msr[VMM_X64_MSR_PAT] = PAT_DEFAULT;
 	set_segment(&vcpu.seg[VMM_X64_SEG_GDT], 0, 0, 0x27, GDT_GPA);
 	set_segment(&vcpu.seg[VMM_X64_SEG_IDT], 0, 0, 0x0f, IDT_GPA);
 	set_segment(&vcpu.seg[VMM_X64_SEG_LDT], 0, SEG_UNUSABLE, 0, 0);
@@ -281,6 +283,16 @@ main(void)
 	vcpu = manifest_vcpu(manifest);
 	vcpu->gpr[VMM_X64_GPR_RFLAGS] = RFLAGS_FIXED | (1ULL << 63);
 	expect_result("bad rflags reserved bit", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->msr[VMM_X64_MSR_PAT] = 0x02;
+	expect_result("bad pat memory type", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->msr[VMM_X64_MSR_PAT] = PAT_DEFAULT | (0x08ULL << 56);
+	expect_result("bad pat reserved bits", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	vcpu = manifest_vcpu(manifest);

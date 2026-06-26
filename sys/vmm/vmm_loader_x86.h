@@ -127,5 +127,6 @@ struct vmm_launch {
 int	vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	    size_t cap, struct vmm_launch *launch);
 int	vmm_loader_x86_xcr0_valid(uint64_t xcr0);
+int	vmm_loader_x86_pat_valid(uint64_t pat);
 
 #endif /* VMM_LOADER_X86_H */
