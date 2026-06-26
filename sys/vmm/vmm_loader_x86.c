@@ -78,6 +78,9 @@
 #define VMM_X64_PAT_WB		0x06U
 #define VMM_X64_PAT_UCMINUS	0x07U
 
+#define VMM_X64_SEG_ATTR_UNUSABLE 0x1000U
+#define VMM_X64_SEG_ATTR_RESERVED 0xe000U
+
 struct vmm_manifest_header {
 	char		magic[8];
 	uint16_t	abi_version;
@@ -208,6 +211,18 @@ vmm_loader_x86_pat_valid(uint64_t pat)
 }
 
 static int
+vmm_loader_x86_segments_valid(const struct vmm_x64_vcpu_state *vcpu)
+{
+	unsigned int i;
+
+	for (i = 0; i < VMM_X64_NSEG; i++) {
+		if ((vcpu->seg[i].attrib & VMM_X64_SEG_ATTR_RESERVED) != 0)
+			return 0;
+	}
+	return 1;
+}
+
+static int
 vmm_loader_x86_validate_vcpu(uint64_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu)
 {
@@ -226,13 +241,16 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 		return EINVAL;
 	if (!vmm_loader_x86_pat_valid(vcpu->msr[VMM_X64_MSR_PAT]))
 		return EINVAL;
+	if (!vmm_loader_x86_segments_valid(vcpu))
+		return EINVAL;
 	if (!vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base,
 	    vcpu->seg[VMM_X64_SEG_GDT].limit))
 		return EINVAL;
 	if (!vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_IDT].base,
 	    vcpu->seg[VMM_X64_SEG_IDT].limit))
 		return EINVAL;
-	if ((vcpu->seg[VMM_X64_SEG_TR].attrib & 0x1000) == 0 &&
+	if ((vcpu->seg[VMM_X64_SEG_TR].attrib &
+	    VMM_X64_SEG_ATTR_UNUSABLE) == 0 &&
 	    !vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_TR].base,
 	    vcpu->seg[VMM_X64_SEG_TR].limit))
 		return EINVAL;

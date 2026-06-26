@@ -43,6 +43,7 @@
 #define SEG_DB			0x0400U
 #define SEG_G			0x0800U
 #define SEG_UNUSABLE		0x1000U
+#define SEG_RESERVED		0x2000U
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -335,6 +336,11 @@ main(void)
 	vcpu = manifest_vcpu(manifest);
 	vcpu->msr[VMM_X64_MSR_PAT] = PAT_DEFAULT | (0x08ULL << 56);
 	expect_result("bad pat reserved bits", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->seg[VMM_X64_SEG_CS].attrib = SEG_RESERVED;
+	expect_result("bad segment reserved bits", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	vcpu = manifest_vcpu(manifest);
