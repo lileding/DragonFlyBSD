@@ -15,6 +15,7 @@ run()
 }
 
 run sh "$ROOT/test/vmm/manifest/manifest_parser_check.sh"
+run sh "$ROOT/test/vmm/mem/mem_config_check.sh"
 run sh "$ROOT/test/vmm/revoke/loader_revoke_compile_check.sh"
 run sh "$ROOT/test/vmm/smoke/smoke_loader_check.sh"
 run sh "$ROOT/test/vmm/nuttx/rtos_nuttx_loader_check.sh"
