@@ -9,10 +9,17 @@ The offline gate covers:
 - `manifest/manifest_parser_check.sh`: kernel x86 manifest parser boundaries.
 - `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health.
 - `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
-  including one-page fd4 parsing by the kernel manifest parser.
+  including sparse fd3 writes, one-page fd4 parsing by the kernel manifest
+  parser, and a last-byte sentinel that catches accidental whole-RAM sweeps.
 - `nuttx/rtos_nuttx_loader_check.sh`: NuttX loader fd3/fd4 output, sparse fd3
   writes, one-page fd4, kernel manifest parser acceptance, and NuttX boot-data
   layout.  It requires `NUTTX_ELF` or `/var/tmp/nuttx.elf`.
+
+The offline gate proves loader-facing ABI shape only: fd3/fd4 sizing,
+sparse-file writes, manifest layout, and parser acceptance.  It does not prove
+kernel revoke, machine `vmspace` handoff, nested-page-fault population, or
+module-unload safety because those require the real kernel pager, pmap, vmmfs,
+and SVM paths.
 
 Run it from the repository root:
 
