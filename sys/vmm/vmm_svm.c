@@ -471,7 +471,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	*backendp = NULL;
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
 	svm->borrow_imm_machine = m;
-	svm->borrow_mut_vmspace = vmm_mem_vmspace(&m->own_mut_mem);
+	svm->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
 	if (svm->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
 		goto fail;

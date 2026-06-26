@@ -52,7 +52,15 @@ void	vmm_mem_release_backing(struct vmm_mem_backing *b);
  */
 int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
 	    uint64_t *bytesp);
-struct vmspace *vmm_mem_vmspace(struct vmm_mem *m);
+/*
+ * Borrowed for vCPU backend lifetime only.  The parent machine keeps backing
+ * alive until all active vCPUs have exited.
+ */
+struct vmspace *vmm_mem_borrow_vmspace(struct vmm_mem *m);
+/*
+ * Called only by an active vCPU backend; memory detach waits for all vCPUs to
+ * exit before releasing the backing.
+ */
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
 
 #endif /* VMM_MEM_H */

@@ -213,7 +213,7 @@ vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
 }
 
 struct vmspace *
-vmm_mem_vmspace(struct vmm_mem *m)
+vmm_mem_borrow_vmspace(struct vmm_mem *m)
 {
 	if (m->own_mut_backing == NULL)
 		return NULL;
