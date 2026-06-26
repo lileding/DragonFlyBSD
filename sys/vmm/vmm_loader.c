@@ -482,6 +482,12 @@ vmm_loader_fd_mmap_single(struct dev_mmap_single_args *ap)
 	object = lfd->own_mut_object;
 	if ((ap->a_fp->f_flag & FREVOKED) || object == NULL)
 		return EINVAL;
+	/*
+	 * DragonFly rejects MAP_PRIVATE/MAP_COPY for non-/dev/zero VCHR
+	 * mappings in fp_mmap() before this d_mmap_single hook is called.
+	 * This layer only needs to enforce the vmm-specific executable and
+	 * revoke checks.
+	 */
 	if (ap->a_nprot & VM_PROT_EXECUTE)
 		return EACCES;
 	off = *ap->a_offset;
