@@ -12,7 +12,8 @@ The offline gate covers:
   default-pager backing shape, machine `vmspace` setup, backing object identity,
   snapshot reference lifetime, GPA fault dispatch through the machine
   `vmspace`, and machine pmap CPU cleanup before `vmspace` release.
-- `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health.
+- `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health
+  and ordinary-file no-revoke output-field smoke.
 - `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
   including sparse fd3 writes, one-page fd4 parsing by the kernel manifest
   parser, and a last-byte sentinel that catches accidental whole-RAM sweeps.
