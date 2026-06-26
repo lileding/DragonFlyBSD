@@ -211,6 +211,14 @@ poison_last_record_padding(uint8_t *manifest)
 	manifest[hdr->total_size - 1] = 0xa5;
 }
 
+static int
+launch_is_zero(const struct vmm_launch *launch)
+{
+	static const struct vmm_launch zero;
+
+	return memcmp(launch, &zero, sizeof(*launch)) == 0;
+}
+
 static void
 expect_load_result(const char *name, uint64_t mem_size, const uint8_t *manifest,
     size_t cap, int want)
@@ -218,9 +226,20 @@ expect_load_result(const char *name, uint64_t mem_size, const uint8_t *manifest,
 	struct vmm_launch launch;
 	int error;
 
+	memset(&launch, 0xa5, sizeof(launch));
 	error = vmm_loader_x86_manifest_load(mem_size, manifest, cap, &launch);
 	if (error != want) {
 		errx(1, "%s: got %d want %d", name, error, want);
+	}
+	if (want == 0) {
+		if (launch.imm_mem_size != mem_size ||
+		    launch.imm_range_count == 0 ||
+		    launch.imm_vcpu0.gpr[VMM_X64_GPR_RIP] != ENTRY_GPA) {
+			errx(1, "%s: successful load produced bad launch state",
+			    name);
+		}
+	} else if (!launch_is_zero(&launch)) {
+		errx(1, "%s: failed load left launch output", name);
 	}
 }
 

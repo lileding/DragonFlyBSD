@@ -274,14 +274,19 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 {
 	struct vmm_manifest_header hdr;
 	struct vmm_manifest_record rec;
+	struct vmm_launch tmp;
+	struct vmm_launch *out = NULL;
 	size_t off;
 	uint32_t records = 0;
 	int have_vcpu = 0;
 	int have_range = 0;
 	int error;
 
-	if (launch != NULL)
+	if (launch != NULL) {
 		bzero(launch, sizeof(*launch));
+		bzero(&tmp, sizeof(tmp));
+		out = &tmp;
+	}
 	if (buf == NULL || mem_size == 0)
 		return EINVAL;
 	if (cap < sizeof(hdr))
@@ -337,9 +342,9 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 			    (const struct vmm_x64_vcpu_state *)payload);
 			if (error)
 				return error;
-			if (launch != NULL) {
-				bcopy(payload, &launch->imm_vcpu0,
-				    sizeof(launch->imm_vcpu0));
+			if (out != NULL) {
+				bcopy(payload, &out->imm_vcpu0,
+				    sizeof(out->imm_vcpu0));
 			}
 			have_vcpu = 1;
 			break;
@@ -349,7 +354,7 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 				return error;
 			}
 			error = vmm_loader_x86_validate_ranges(mem_size,
-			    payload, rec.size, launch);
+			    payload, rec.size, out);
 			if (error)
 				return error;
 			have_range = 1;
@@ -366,7 +371,9 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	}
 	if (records != hdr.record_count || !have_vcpu || !have_range)
 		return EINVAL;
-	if (launch != NULL)
-		launch->imm_mem_size = mem_size;
+	if (out != NULL) {
+		out->imm_mem_size = mem_size;
+		bcopy(out, launch, sizeof(*launch));
+	}
 	return 0;
 }
