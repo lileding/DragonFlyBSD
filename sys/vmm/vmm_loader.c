@@ -369,9 +369,6 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 		return VM_PAGER_ERROR;
 	if (prot & VM_PROT_EXECUTE)
 		return VM_PAGER_ERROR;
-	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL)
-		return VM_PAGER_ERROR;
-
 	/*
 	 * The fd object is only a revocable mmap capability.  The returned
 	 * page belongs to the real backing object: fd3's guest RAM or fd4's
@@ -382,8 +379,14 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	 * loader-to-vCPU handoff zero-copy and lets revoke cut off userland
 	 * without releasing fd3 guest RAM.
 	 */
+	VM_OBJECT_LOCK(object);
+	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL) {
+		VM_OBJECT_UNLOCK(object);
+		return VM_PAGER_ERROR;
+	}
 	backing = lfd->own_mut_backing_object;
 	vm_object_reference_quick(backing);
+	VM_OBJECT_UNLOCK(object);
 	pg = vm_page_grab(backing, OFF_TO_IDX(offset),
 	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO |
 	    VM_ALLOC_RETRY);
