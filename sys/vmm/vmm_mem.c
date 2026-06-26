@@ -147,6 +147,12 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 		goto fail;
 	}
 	vm_object_set_flag(b->own_mut_object, OBJ_NOSPLIT);
+	/*
+	 * GPA is the VA in this machine vmspace.  We map the declared RAM
+	 * object once at GPA 0 and let loader mmap faults or guest NPFs
+	 * populate pages on demand; this is not an eager reservation of every
+	 * guest page.
+	 */
 	b->own_mut_vmspace = vmspace_alloc(0, size);
 	if (b->own_mut_vmspace == NULL) {
 		error = ENOMEM;

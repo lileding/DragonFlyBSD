@@ -10,9 +10,13 @@
 #define VMM_MEM_H
 
 /*
- * The current pc64 backend maps guest RAM through a DragonFly machine
- * vmspace, matching NVMM's address capacity.  Keep the cap at the config
- * boundary so start workers never accept a memory size the backend cannot map.
+ * The current pc64 backend maps one guest-RAM vm_object at GPA 0 in a
+ * DragonFly machine vmspace.  This follows NVMM's VM/pmap mechanism, but the
+ * dfvmm control model has no user-provided hmapping table: fd3 writes the same
+ * object that the vCPU backend later faults through the machine vmspace.
+ *
+ * Keep the cap at the config boundary so start workers never accept a memory
+ * size the backend cannot map.
  */
 #define VMM_MEM_ALIGN	(2ull * 1024 * 1024)
 #define VMM_MEM_MAX	(127ull * 1024 * (1ull << 30))
