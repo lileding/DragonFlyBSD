@@ -12,6 +12,8 @@
 #include <sys/mount.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
+#include <sys/taskqueue.h>
+#include <sys/thread2.h>
 #include <sys/dirent.h>
 #include <sys/uio.h>
 #include <sys/tree.h>
@@ -19,10 +21,13 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
+#include "vmmfs_device.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
 
 /* ---- registry: an RB tree keyed by name (guarded by vm_lock) ---- */
+
+static void	vmmfs_machine_reaper(void *arg);
 
 int
 vmmfs_machine_cmp(struct vmmfs_machine *a, struct vmmfs_machine *b)
@@ -145,7 +150,13 @@ vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->node, LK_EXCLUSIVE | LK_RETRY,
 	    &vp);
 	if (error) {
-		vmmfs_machine_mark_deleted(vmp, m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
 		return error;
 	}
 
@@ -156,9 +167,9 @@ vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 }
 
 /*
- * `rmdir machines/<name>` removes a fully quiesced machine (source 1): it
- * deletes regardless of leases.  The slot is freed lazily so still-open fds
- * keep working until reclaimed.
+ * `rmdir machines/<name>` is allowed only after the control plane already says
+ * desired stopped.  Deletion removes the name immediately, appends a force-stop
+ * command, and lets the reaper free the machine after the command queue drains.
  */
 static int
 vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
@@ -166,6 +177,7 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -186,14 +198,22 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
-	if (!vmm_machine_quiesced(&m->machine)) {
+	if (!m->machine.mut_desired_stopped) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return EBUSY;
 	}
+	m->vm_in_tree = 0;
+	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+	vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	vmmfs_machine_mark_deleted(vmp, m);
+	vmmfs_device_free_list(&tofree);
+	(void)vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
+	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,
+	    "vmmfsreap");
+	if (error)
+		vmmfs_machine_reaper(m);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	return 0;
@@ -216,3 +236,19 @@ static kobj_method_t vmmfs_machines_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_machines, vmmfs_machines_methods, 0);
+
+static void
+vmmfs_machine_reaper(void *arg)
+{
+	struct vmmfs_machine *m = arg;
+	struct vmmfs_mount *vmp = m->vm_mount;
+
+	taskqueue_drain(m->machine.own_mut_taskqueue, NULL);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	KKASSERT(vmp->vm_machine_count > 0);
+	vmp->vm_machine_count--;
+	if (vmp->vm_machine_count == 0)
+		wakeup(&vmp->vm_machine_count);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	vmmfs_machine_free(m);
+}

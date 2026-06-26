@@ -15,7 +15,6 @@ struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine)	vm_link;
 	struct vmmfs_mount	*vm_mount;
 	char			name[VMMFS_NAME_MAX + 1];
-	int			vm_refs;
 	int			vm_in_tree;	/* guards a single RB_REMOVE */
 	struct vmm_machine	machine;	/* executable VM core object */
 	struct vmmfs_node	node;		/* the machine directory */
@@ -33,9 +32,6 @@ RB_PROTOTYPE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
 
 struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_mount *vmp,
 	    const char *name, int nlen);
-void	vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
-void	vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m);
-void	vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp,
-	    struct vmmfs_machine *m);
+void	vmmfs_machine_free(struct vmmfs_machine *m);
 
 #endif /* VMMFS_MACHINE_H */

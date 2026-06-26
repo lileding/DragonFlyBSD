@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Filesystem presentation of one machine: its directory, config-file table,
- * lifetime references, and lifecycle files (lease, events, status.tar.gz,
- * stopped).  The executable VM state is the embedded struct vmm_machine.
+ * and lifecycle files (lease, events, status.tar.gz, stopped).  The executable
+ * VM state is the embedded struct vmm_machine.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -20,7 +20,6 @@
 
 #include "vmm_machine.h"
 #include "vmmfs.h"
-#include "vmmfs_device.h"
 #include "vmmfs_loader.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
@@ -44,7 +43,7 @@ struct vmmfs_cfg_desc {
 static int
 cfg_present_stopped(const struct vmm_machine *m)
 {
-	return vmm_machine_is_stopped(m);
+	return m->mut_desired_stopped;
 }
 
 static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
@@ -54,8 +53,10 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 	    __offsetof(struct vmmfs_machine, n_mem),	  NULL },
 	{ "loader",	  VREG, 0644, &vmmfs_loader_class,
 	    __offsetof(struct vmmfs_machine, n_loader),  NULL },
+#if 0
 	{ "lease",	  VREG, 0444, &vmmfs_lease_class,
 	    __offsetof(struct vmmfs_machine, n_lease),	  NULL },
+#endif
 	{ "events",	  VREG, 0444, &vmmfs_events_class,
 	    __offsetof(struct vmmfs_machine, n_events),  NULL },
 	{ "console",	  VREG, 0644, &vmmfs_console_class,
@@ -67,8 +68,6 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 };
 #define VMMFS_NCFG_FILES \
 	((int)(sizeof(vmmfs_cfg_table) / sizeof(vmmfs_cfg_table[0])))
-static void	vmmfs_machine_free(struct vmmfs_machine *m);
-
 
 /* The node backing a config descriptor within a machine slot. */
 static struct vmmfs_node *
@@ -84,48 +83,10 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
 	return d->present == NULL || d->present(&m->machine);
 }
 
-static void
-vmmfs_machine_owner_hold(void *arg)
-{
-	struct vmmfs_machine *m = arg;
-	struct vmmfs_mount *vmp = m->vm_mount;
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	m->vm_refs++;
-	vmp->vm_async_refs++;
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-}
-
-static void
-vmmfs_machine_owner_release(void *arg)
-{
-	struct vmmfs_machine *m = arg;
-	struct vmmfs_mount *vmp = m->vm_mount;
-	int dofree;
-	int wake;
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	KKASSERT(vmp->vm_async_refs > 0);
-	vmp->vm_async_refs--;
-	dofree = (--m->vm_refs == 0);
-	wake = (vmp->vm_async_refs == 0);
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (wake)
-		wakeup(&vmp->vm_async_refs);
-	if (dofree)
-		vmmfs_machine_free(m);
-}
-
-static const struct vmm_machine_owner_ops vmmfs_machine_owner_ops = {
-	.hold = vmmfs_machine_owner_hold,
-	.release = vmmfs_machine_owner_release,
-};
-
-
 /*
  * Allocate a machine, wire up its nodes with fresh inos, and insert it.  Caller
- * holds vm_lock and has checked the name is free.  vm_refs starts at 1 for the
- * tree reference.
+ * holds vm_lock and has checked the name is free.  The RB tree owns the
+ * machine until deletion moves ownership to the reaper lwkt.
  */
 struct vmmfs_machine *
 vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
@@ -138,9 +99,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	m->vm_mount = vmp;
 	bcopy(name, m->name, nlen);
 	m->name[nlen] = '\0';
-	m->vm_refs = 1;
 	vmm_machine_init(&m->machine);
-	vmm_machine_set_owner(&m->machine, &vmmfs_machine_owner_ops, m);
 
 	base = vmp->vm_next_ino;
 	vmp->vm_next_ino += VMMFS_MACHINE_INO_STRIDE;
@@ -157,18 +116,11 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
 	m->vm_in_tree = 1;
+	vmp->vm_machine_count++;
 	return m;
 }
 
 void
-vmmfs_machine_ref(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
-{
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	m->vm_refs++;
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-}
-
-static void
 vmmfs_machine_free(struct vmmfs_machine *m)
 {
 	int j;
@@ -180,49 +132,6 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 	vmmfs_node_uninit(&m->vn_devices);
 	kfree(m, M_VMMFS);
 }
-
-/* Drop one reference; free once it reaches 0 (no vnode can reference it then). */
-void
-vmmfs_machine_unref(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
-{
-	int dofree;
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	dofree = (--m->vm_refs == 0);
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (dofree)
-		vmmfs_machine_free(m);
-}
-
-/*
- * Mark a machine deleting, wait for execution to quiesce, and drop it from the
- * tree.  Idempotent via vmm_machine_begin_delete, so rmdir, force-unmount, and
- * last lease close can all fire.  The struct lives on until its last vnode
- * is reclaimed; dropping the tree reference here may free it immediately.
- */
-void
-vmmfs_machine_mark_deleted(struct vmmfs_mount *vmp, struct vmmfs_machine *m)
-{
-	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
-	int first;
-
-	(void)vmm_machine_begin_delete(&m->machine);
-	vmm_machine_wait_quiesced(&m->machine);
-
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	first = m->vm_in_tree;
-	if (first) {
-		m->vm_in_tree = 0;
-		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-		vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
-	}
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
-	vmmfs_device_free_list(&tofree);
-	if (first)
-		vmmfs_machine_unref(vmp, m);	/* the tree reference */
-}
-
 
 /* --------------------------------------------------------------------- */
 /*
@@ -310,8 +219,8 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
 
-	error = vmm_machine_on_event(&m->machine, VMM_MACHINE_EVENT_STOP,
-	    VMM_MACHINE_EVENT_APIC, NULL, NULL);
+	m->machine.mut_desired_stopped = 1;
+	error = vmm_machine_execute(&m->machine, vmm_machine_stop_apic, NULL);
 	if (error)
 		return error;
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->n_stopped,
@@ -339,9 +248,8 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
-	error = vmm_machine_on_event(&m->machine, VMM_MACHINE_EVENT_START,
-	    VMM_MACHINE_EVENT_FORCE, ap->a_cred,
-	    &VFS_TO_VMMFS(ap->a_dvp->v_mount)->host);
+	m->machine.mut_desired_stopped = 0;
+	error = vmm_machine_execute(&m->machine, vmm_machine_start, ap->a_cred);
 	if (error)
 		return error;
 
@@ -378,6 +286,7 @@ DEFINE_CLASS(vmmfs_machine, vmmfs_machine_methods, 0);
  * destroys an armed machine), events (a drained stream), status (a stub), and
  * stopped (the lifecycle control written to stop the machine).
  */
+#if 0
 static int
 vmmfs_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
@@ -391,11 +300,7 @@ vmmfs_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
 	int error = vop_stdclose(ap);
 
-	if (vmm_machine_lease_close(&node->vn_machine->machine)) {
-		struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
-
-		vmmfs_machine_mark_deleted(vmp, node->vn_machine);
-	}
+	(void)vmm_machine_lease_close(&node->vn_machine->machine);
 	return error;
 }
 
@@ -412,6 +317,7 @@ static kobj_method_t vmmfs_lease_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_lease, vmmfs_lease_methods, 0);
+#endif
 
 static int
 vmmfs_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
@@ -453,10 +359,13 @@ vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
 	if (take < 5 || strncmp(buf, "reset", 5) != 0)
 		return EINVAL;
 	force = (take >= 11 && strncmp(buf, "reset force", 11) == 0);
-	return vmm_machine_on_event(&node->vn_machine->machine,
-	    VMM_MACHINE_EVENT_RESET,
-	    force ? VMM_MACHINE_EVENT_FORCE : VMM_MACHINE_EVENT_APIC,
-	    ap->a_cred, &VFS_TO_VMMFS(ap->a_vp->v_mount)->host);
+	if (force) {
+		node->vn_machine->machine.mut_desired_stopped = 0;
+		return vmm_machine_execute(&node->vn_machine->machine,
+		    vmm_machine_reset_force, ap->a_cred);
+	}
+	return vmm_machine_execute(&node->vn_machine->machine,
+	    vmm_machine_reset_apic, NULL);
 }
 
 static kobj_method_t vmmfs_events_methods[] = {
@@ -518,10 +427,9 @@ vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 			return error;
 	}
 
-	return vmm_machine_on_event(&node->vn_machine->machine,
-	    VMM_MACHINE_EVENT_STOP,
-	    force ? VMM_MACHINE_EVENT_FORCE : VMM_MACHINE_EVENT_APIC,
-	    NULL, NULL);
+	node->vn_machine->machine.mut_desired_stopped = 1;
+	return vmm_machine_execute(&node->vn_machine->machine,
+	    force ? vmm_machine_stop_force : vmm_machine_stop_apic, NULL);
 }
 
 static kobj_method_t vmmfs_stopped_methods[] = {

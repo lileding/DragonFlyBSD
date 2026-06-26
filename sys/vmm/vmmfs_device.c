@@ -142,8 +142,6 @@ vmmfs_device_add(struct vmmfs_mount *vmp, const char *bdf, int is_host)
 
 	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
 	vmm_device_init(&d->dev, bdf, is_host);
-	if (is_host)
-		vmm_host_add_device(&vmp->host);
 	vmmfs_node_init(&d->node, &vmmfs_device_class, VREG, 0444,
 	    VMMFS_DEV_INO_BASE + idx, &vmp->vm_host_devices, NULL);
 	vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,

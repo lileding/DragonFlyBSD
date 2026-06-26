@@ -88,30 +88,24 @@ vmm_vcpu_thread_main(void *arg)
 	struct vmm_machine *m = vc->borrow_imm_machine;
 
 	lwkt_setpri_self(TDPRI_USER_NORM);
-	if (!vmm_machine_vcpu_wait_start(m, vc))
-		goto out;
 	if (vc->borrow_imm_backend_ops != NULL)
 		vc->borrow_imm_backend_ops->run(vc->own_mut_backend, vc);
-out:
-	vmm_machine_vcpu_exited(m);
+
+	if (m->own_mut_vcpu.mut_active_count > 0)
+		m->own_mut_vcpu.mut_active_count--;
+	wakeup(m);
 }
 
 int
-vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
+vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
     const struct vmm_launch *launch)
 {
 	struct vmm_vcpu *v = &m->own_mut_vcpu;
 	struct vmm_vcpu_thread *threads;
 	const struct vmm_vcpu_backend_ops *backend_ops;
-	uint32_t count;
 	uint32_t i;
 	int error = 0;
 
-	if (host == NULL)
-		return EINVAL;
-	vmm_machine_lock(m);
-	count = v->mut_count;
-	vmm_machine_unlock(m);
 	if (count == 0)
 		return EINVAL;
 	if (count != 1 || launch == NULL)
@@ -121,19 +115,16 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 		return EOPNOTSUPP;
 	threads = kmalloc(sizeof(*threads) * count, M_TEMP, M_WAITOK | M_ZERO);
 
-	vmm_machine_lock(m);
 	if (v->own_mut_threads != NULL || v->mut_active_count != 0) {
 		error = EBUSY;
-	} else if (vmm_machine_start_cancelled_locked(m)) {
+	} else if (m->mut_status != VMM_MACHINE_STARTING) {
 		error = ECANCELED;
-	} else if (v->mut_count != count) {
-		error = EBUSY;
 	} else {
 		v->own_mut_threads = threads;
+		v->mut_count = count;
 		v->mut_stop_requested = 0;
 		threads = NULL;
 	}
-	vmm_machine_unlock(m);
 	if (threads != NULL) {
 		kfree(threads, M_TEMP);
 		return error;
@@ -141,7 +132,7 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 
 	for (i = 0; i < count; i++) {
 		struct vmm_vcpu_thread *vc = &v->own_mut_threads[i];
-		int cpu = vmm_host_next_cpu(host);
+		int cpu = vmm_host_next_cpu();
 
 		vc->borrow_imm_machine = m;
 		vc->borrow_imm_backend_ops = backend_ops;
@@ -150,28 +141,22 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 		error = backend_ops->create(m, launch, &vc->own_mut_backend);
 		if (error)
 			break;
-		vmm_machine_lock(m);
-		if (vmm_machine_start_cancelled_locked(m) ||
+		if (m->mut_status != VMM_MACHINE_STARTING ||
 		    v->mut_stop_requested) {
 			error = ECANCELED;
-			vmm_machine_unlock(m);
 			backend_ops->destroy(vc->own_mut_backend);
 			vc->own_mut_backend = NULL;
 			break;
 		}
 		v->mut_active_count++;
-		vmm_machine_unlock(m);
 
 		error = lwkt_create(vmm_vcpu_thread_main, vc,
 		    &vc->borrow_mut_thread, NULL, 0, vc->imm_cpu,
 		    "vmmvcpu%u", i);
 		if (error) {
-			vmm_machine_lock(m);
-			if (v->mut_active_count > 0) {
+			if (v->mut_active_count > 0)
 				v->mut_active_count--;
-			}
 			v->mut_stop_requested = 1;
-			vmm_machine_unlock(m);
 			backend_ops->destroy(vc->own_mut_backend);
 			vc->own_mut_backend = NULL;
 			break;
@@ -182,46 +167,31 @@ vmm_vcpu_start_all(struct vmm_machine *m, struct vmm_host *host,
 		struct vmm_vcpu_thread *release_threads = NULL;
 		uint32_t release_count = count;
 
-		vmm_machine_lock(m);
-		vmm_vcpu_request_stop(v);
+		vmm_vcpu_stop(m);
 		if (v->mut_active_count == 0) {
 			release_threads = v->own_mut_threads;
 			v->own_mut_threads = NULL;
 			v->mut_stop_requested = 0;
 		}
-		vmm_machine_unlock(m);
 		vmm_vcpu_release_threads(release_threads, release_count);
 	}
 	return error;
 }
 
 void
-vmm_vcpu_request_stop(struct vmm_vcpu *v)
+vmm_vcpu_stop(struct vmm_machine *m)
 {
+	struct vmm_vcpu *v = &m->own_mut_vcpu;
 	uint32_t i;
 
 	v->mut_stop_requested = 1;
-	if (v->own_mut_threads == NULL)
-		return;
-	for (i = 0; i < v->mut_count; i++)
-		wakeup(&v->own_mut_threads[i]);
-}
-
-void
-vmm_vcpu_request_run(struct vmm_vcpu *v)
-{
-	v->mut_stop_requested = 0;
-}
-
-void
-vmm_vcpu_wakeup_all(struct vmm_vcpu *v)
-{
-	uint32_t i;
-
-	if (v->own_mut_threads == NULL)
-		return;
-	for (i = 0; i < v->mut_count; i++)
-		wakeup(&v->own_mut_threads[i]);
+	while (v->mut_active_count != 0) {
+		if (v->own_mut_threads != NULL) {
+			for (i = 0; i < v->mut_count; i++)
+				wakeup(&v->own_mut_threads[i]);
+		}
+		tsleep(m, 0, "vmmstp", hz / 20 + 1);
+	}
 }
 
 int
@@ -260,15 +230,9 @@ vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads, uint32_t count)
 }
 
 int
-vmm_vcpu_note_exit(struct vmm_vcpu *v, struct vmm_vcpu_thread **threadsp)
+vmm_vcpu_should_stop(const struct vmm_vcpu_thread *vc)
 {
-	*threadsp = NULL;
-	if (v->mut_active_count > 0)
-		v->mut_active_count--;
-	if (v->mut_active_count != 0)
-		return 0;
-	*threadsp = vmm_vcpu_detach_threads_locked(v);
-	return 1;
+	return vc->borrow_imm_machine->own_mut_vcpu.mut_stop_requested;
 }
 
 void

@@ -12,64 +12,41 @@
 
 #include <sys/thread.h>
 
-#include "vmm_vcpu.h"
-#include "vmm_mem.h"
-#include "vmm_loader.h"
 #include "vmm_console.h"
+#include "vmm_loader.h"
+#include "vmm_mem.h"
+#include "vmm_vcpu.h"
 
-#define VMM_EVENT_CAP	32
+#define VMM_EVENT_CAP 32
 
 struct ucred;
 struct taskqueue;
-struct vmm_host;
-struct vmm_loader_epoch;
+struct vmm_machine_task;
 
-struct vmm_machine_owner_ops {
-	void	(*hold)(void *arg);
-	void	(*release)(void *arg);
-};
+typedef void (*vmm_machine_func)(const struct vmm_machine_task *task);
 
-enum vmm_machine_event {
-	VMM_MACHINE_EVENT_START,
-	VMM_MACHINE_EVENT_STOP,
-	VMM_MACHINE_EVENT_RESET,
-};
-
-enum vmm_machine_event_mode {
-	VMM_MACHINE_EVENT_APIC,
-	VMM_MACHINE_EVENT_FORCE,
+enum vmm_machine_status {
+	VMM_MACHINE_STARTING,
+	VMM_MACHINE_RUNNING,
+	VMM_MACHINE_STOPPING,
+	VMM_MACHINE_STOPPED,
 };
 
 struct vmm_machine {
-	struct vmm_vcpu		own_mut_vcpu;
-	struct vmm_mem		own_mut_mem;
-	struct vmm_loader	own_mut_loader;
-	struct vmm_console	own_mut_console;
-	struct taskqueue	*own_mut_taskqueue;
+	struct vmm_vcpu own_mut_vcpu;
+	struct vmm_mem own_mut_mem;
+	struct vmm_console own_mut_console;
+	struct taskqueue *own_mut_taskqueue;
+	enum vmm_machine_status mut_status;
 
-	/*
-	 * Lock map:
-	 * token_lifecycle protects all mut_ fields below and the mutable
-	 * fields of own_mut_vcpu/own_mut_mem/own_mut_loader while they are
-	 * reached through vmm_machine_* APIs.  It is not held across fork,
-	 * exec, memory preparation/release, vCPU backend teardown, vCPU thread
-	 * creation, or uiomove.
-	 */
-	struct lwkt_token	token_lifecycle;
-	int		mut_desired_stopped;
-	int		mut_running;
-	int		mut_starting;
-	int		mut_start_cancel;
-	uint32_t	mut_cmd_count;
-	struct vmm_host	*borrow_mut_host;
-	const struct vmm_machine_owner_ops *borrow_imm_owner_ops;
-	void		*borrow_imm_owner_arg;
-	uint32_t	mut_lease_count;
-	int		mut_lease_armed;
-	int		mut_deleting;
-	uint8_t		mut_ev_codes[VMM_EVENT_CAP];	/* lossy ring */
-	size_t		mut_ev_tail;
-	size_t		mut_ev_count;
+	int mut_desired_stopped;
+	char mut_loader_path[VMM_LOADER_MAX + 1];
+	size_t mut_loader_len;
+	uint32_t mut_lease_count;
+	int mut_lease_armed;
+	uint8_t mut_ev_codes[VMM_EVENT_CAP]; /* lossy ring */
+	size_t mut_ev_tail;
+	size_t mut_ev_count;
 };
 
 /* Result of lease_close. */
@@ -79,62 +56,42 @@ enum vmm_close_action {
 };
 
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
-void	vmm_machine_init(struct vmm_machine *m);
-void	vmm_machine_uninit(struct vmm_machine *m);
-void	vmm_machine_set_owner(struct vmm_machine *m,
-	    const struct vmm_machine_owner_ops *ops, void *arg);
-void	vmm_machine_lock(struct vmm_machine *m);
-void	vmm_machine_unlock(struct vmm_machine *m);
-int	vmm_machine_start_cancelled_locked(const struct vmm_machine *m);
-/* All three of vcpu/mem/loader are set. */
-int	vmm_machine_config_complete(const struct vmm_machine *m);
-size_t	vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
-	    size_t cap);
-int	vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf,
-	    size_t len);
-size_t	vmm_machine_format_mem(const struct vmm_machine *m, char *out,
-	    size_t cap);
-int	vmm_machine_commit_mem(struct vmm_machine *m, const char *buf,
-	    size_t len);
-size_t	vmm_machine_format_loader(const struct vmm_machine *m, char *out,
-	    size_t cap);
-int	vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
-	    size_t len);
+void vmm_machine_init(struct vmm_machine *m);
+void vmm_machine_uninit(struct vmm_machine *m);
+size_t vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
+    size_t cap);
+int vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len);
+size_t vmm_machine_format_mem(const struct vmm_machine *m, char *out,
+    size_t cap);
+int vmm_machine_commit_mem(struct vmm_machine *m, const char *buf, size_t len);
+size_t vmm_machine_format_loader(const struct vmm_machine *m, char *out,
+    size_t cap);
+int vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
+    size_t len);
 
 /*
  * Lifecycle.  stopped is declarative: it means "desired stopped", which is
  * what vmmfs presents as the stopped control file.  vmmfs translates file
- * operations into ordered START/STOP/RESET events; vmm_machine_on_event()
- * snapshots any syscall-context-only state (currently the paused loader
+ * operations into ordered command handlers; vmm_machine_execute() snapshots
+ * config and any syscall-context-only state (currently the paused loader
  * process) and queues a serialized command.  starting/running are current
  * execution state, not proof that a just-returned vmmfs operation already
  * completed.
  */
-int	vmm_machine_is_stopped(const struct vmm_machine *m);
-int	vmm_machine_is_running(const struct vmm_machine *m);
-int	vmm_machine_starting(const struct vmm_machine *m);
-int	vmm_machine_quiesced(const struct vmm_machine *m);
-void	vmm_machine_wait_quiesced(struct vmm_machine *m);
-int	vmm_machine_on_event(struct vmm_machine *m,
-	    enum vmm_machine_event event, enum vmm_machine_event_mode mode,
-	    struct ucred *cred, struct vmm_host *host);
-int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
-	    struct vmm_host *host);
-void	vmm_machine_request_stopped(struct vmm_machine *m, int force);
-int	vmm_machine_vcpu_wait_start(struct vmm_machine *m,
-	    struct vmm_vcpu_thread *vc);
-int	vmm_machine_vcpu_should_stop(struct vmm_machine *m);
-void	vmm_machine_vcpu_exited(struct vmm_machine *m);
+int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
+    struct ucred *cred);
+void vmm_machine_start(const struct vmm_machine_task *task);
+void vmm_machine_stop_apic(const struct vmm_machine_task *task);
+void vmm_machine_stop_force(const struct vmm_machine_task *task);
+void vmm_machine_reset_apic(const struct vmm_machine_task *task);
+void vmm_machine_reset_force(const struct vmm_machine_task *task);
 
 /* Lease reference counting. */
-int	vmm_machine_is_deleting(const struct vmm_machine *m);
-int	vmm_machine_lease_open(struct vmm_machine *m);
+int vmm_machine_lease_open(struct vmm_machine *m);
 enum vmm_close_action vmm_machine_lease_close(struct vmm_machine *m);
-int	vmm_machine_begin_delete(struct vmm_machine *m);
 
 /* Events: read drains queued event text lines (shared one-shot cursor). */
-int	vmm_machine_events_pending(const struct vmm_machine *m);
-size_t	vmm_machine_read_events(struct vmm_machine *m, char *out,
-	    size_t cap);
+int vmm_machine_events_pending(const struct vmm_machine *m);
+size_t vmm_machine_read_events(struct vmm_machine *m, char *out, size_t cap);
 
 #endif /* VMM_MACHINE_H */

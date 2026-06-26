@@ -11,8 +11,6 @@
 #ifndef VMMFS_H
 #define VMMFS_H
 
-#include "vmm_host.h"		/* struct vmm_host (the device pool source) */
-
 MALLOC_DECLARE(M_VMMFS);
 
 /*
@@ -80,9 +78,8 @@ struct vmmfs_mount {
 	struct lock		vm_lock;
 	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
-	struct vmm_host		host;		/* the physical host (device pool source) */
 	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
-	int			vm_async_refs;	/* workers/vCPUs executing module code */
+	int			vm_machine_count; /* machines pending final cleanup */
 	int			vm_next_dev;	/* monotonic device ino index */
 };
 

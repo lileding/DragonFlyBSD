@@ -1470,11 +1470,10 @@ vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
 }
 
 static void
-vmm_svm_handle_idle_wait(struct vmm_machine *m, struct vmm_vcpu_thread *vc,
-    struct vmm_svm_vmcb *vmcb)
+vmm_svm_handle_idle_wait(struct vmm_vcpu_thread *vc, struct vmm_svm_vmcb *vmcb)
 {
 	vmm_svm_advance_rip(vmcb);
-	if (!vmm_machine_vcpu_should_stop(m))
+	if (!vmm_vcpu_should_stop(vc))
 		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
 }
 
@@ -1616,13 +1615,12 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
-	struct vmm_machine *m = vc->borrow_imm_machine;
 	int com1_rx_pending;
 
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
-	while (!vmm_machine_vcpu_should_stop(m)) {
+	while (!vmm_vcpu_should_stop(vc)) {
 		com1_rx_pending = vmm_svm_com1_rx_pending(svm);
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
@@ -1662,7 +1660,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_advance_rip(vmcb);
 			break;
 		case VMM_SVM_EXIT_HLT:
-			vmm_svm_handle_idle_wait(m, vc, vmcb);
+			vmm_svm_handle_idle_wait(vc, vmcb);
 			break;
 		case VMM_SVM_EXIT_INVLPG:
 		case VMM_SVM_EXIT_INVLPGA:
@@ -1683,7 +1681,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			break;
 		case VMM_SVM_EXIT_MWAIT:
 		case VMM_SVM_EXIT_MWAIT_COND:
-			vmm_svm_handle_idle_wait(m, vc, vmcb);
+			vmm_svm_handle_idle_wait(vc, vmcb);
 			break;
 		case VMM_SVM_EXIT_NPF:
 			if (vmm_svm_handle_npf(svm))

@@ -1,61 +1,58 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The loader object: the desired path to an executable run at start.
- * FS presentation: vmmfs_loader.c.
+ * VMM core: one loader process run.
  *
- * Types (uint64_t/size_t) come from the includer.
+ * The machine object owns the configured path as plain text.  struct
+ * vmm_loader is the short-lived execution object used by vmm_machine_start().
  */
 #ifndef VMM_LOADER_H
 #define VMM_LOADER_H
 
+#include <sys/types.h>
+
+#include "vmm_domain.h"
+
 #define VMM_LOADER_MAX	256
 
-struct vmm_loader {
-	/*
-	 * Lock map:
-	 * mut_path and mut_len are protected by the parent vmm_machine's
-	 * token_lifecycle.  vmm_machine copies a stable start-time path
-	 * snapshot before calling vmm_loader_run().
-	 */
-	char		mut_path[VMM_LOADER_MAX];
-	size_t		mut_len;		/* 0 = unset */
-};
+#define VMM_LOADER_RUNNING	-1
+#define VMM_LOADER_OK		 0
+#define VMM_LOADER_FAILED	 1
 
-/* Parse + store the trimmed path.  1 = updated, 0 = reject. */
-int	vmm_loader_parse(struct vmm_loader *l, const char *buf, size_t len);
-/* Path + trailing newline (file contents). */
-size_t	vmm_loader_format(const struct vmm_loader *l, char *out, size_t cap);
-/* Path without trailing newline (for start-time resolution). */
-size_t	vmm_loader_path(const struct vmm_loader *l, char *out, size_t cap);
-int	vmm_loader_is_set(const struct vmm_loader *l);
-/* Loader fd/mmap capability objects still hold vmm.ko pager callbacks. */
-int	vmm_loader_busy(void);
-
+struct file;
+struct proc;
 struct ucred;
 struct vm_object;
 struct vmm_launch;
-struct vmm_loader_epoch;
-typedef int vmm_loader_cancel_fn(void *arg);
-/*
- * A paused loader epoch owns a child process created from vmmfs syscall
- * context.  It has not installed fd3/fd4 and has not execed user code until
- * vmm_loader_start() resumes it from the serialized machine workqueue.
- */
-int	vmm_loader_fork_paused(const char *path, struct ucred *cred,
-	    struct vmm_loader_epoch **epochp);
-int	vmm_loader_start(struct vmm_loader_epoch *ep,
-	    struct vm_object *mem_object, uint64_t mem_size,
-	    struct vmm_launch *launch);
-void	vmm_loader_kill(struct vmm_loader_epoch *ep);
-void	vmm_loader_free(struct vmm_loader_epoch *ep);
 
-/*
- * Compatibility helper for one-shot callers: fork paused, start, wait, verify,
- * and free the epoch.  On success, *launch contains the validated launch state.
- */
-int	vmm_loader_run(const char *path, struct vm_object *mem_object,
-	    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
-	    vmm_loader_cancel_fn *cancel, void *cancel_arg);
+struct vmm_loader {
+	const char	*imm_path;
+	struct proc	*ref_mut_proc;
+	struct vmm_domain_proc_handler own_handler;
+	struct file	*own_mut_mem_fp;
+	struct file	*own_mut_manifest_fp;
+	struct vm_object *own_mut_manifest_object;
+	uint64_t	 imm_mem_size;
+	int		 atomic_mut_state;
+};
+
+int	vmm_loader_path_parse(char *path, size_t *len, const char *buf,
+	    size_t buflen);
+size_t	vmm_loader_path_format(const char *path, size_t len, char *out,
+	    size_t cap);
+int	vmm_loader_path_is_set(size_t len);
+
+/* Loader fd/mmap capability objects still hold vmm.ko pager callbacks. */
+int	vmm_loader_busy(void);
+
+int	vmm_loader_init(struct vmm_loader *loader, const char *path,
+	    struct ucred *cred);
+int	vmm_loader_install(struct vmm_loader *loader,
+	    struct vm_object *mem_object, uint64_t mem_size);
+void	vmm_loader_resume(struct vmm_loader *loader);
+int	vmm_loader_wait(struct vmm_loader *loader);
+int	vmm_loader_manifest_load(struct vmm_loader *loader,
+	    struct vmm_launch *launch);
+void	vmm_loader_fini(struct vmm_loader *loader);
 
 #endif /* VMM_LOADER_H */

@@ -36,6 +36,7 @@
 #include <sys/tree.h>
 #include <sys/kobj.h>
 
+#include "vmm_domain.h"
 #include "vmm_machine.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
@@ -316,12 +317,6 @@ loop:
 	vp->v_type = vtype;
 	node->vn_vnode = vp;
 	lockmgr(&node->vn_interlock, LK_RELEASE);
-
-	/* A machine node's first live vnode counts toward the machine's
-	 * lifetime; reclaim drops it.  (vn_interlock released first to keep
-	 * vm_lock un-nested.) */
-	if (node->vn_machine != NULL)
-		vmmfs_machine_ref(VFS_TO_VMMFS(mp), node->vn_machine);
 
 	vx_downgrade(vp);
 
@@ -609,7 +604,6 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    VMMFS_DIR_MODE, VMMFS_DEVROOT_INO, &vmp->vm_root, NULL);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
-	vmm_host_init(&vmp->host);
 	SLIST_INIT(&vmp->vm_devs);
 	vmp->vm_next_dev = 0;
 	vmmfs_device_init_host_pool(vmp);
@@ -637,88 +631,28 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 static int
 vmmfs_unmount_busy(struct vmmfs_mount *vmp)
 {
-	struct vmmfs_machine *m;
 	int busy = 0;
 
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	if (vmp->vm_async_refs != 0) {
-		busy = 1;
-		goto out;
-	}
-	RB_FOREACH(m, vmmfs_machtree, &vmp->vm_machtree) {
-		if (!vmm_machine_quiesced(&m->machine)) {
-			busy = 1;
-			break;
-		}
-	}
-out:
+	busy = (vmp->vm_machine_count != 0);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 	return busy;
 }
-
-static void
-vmmfs_force_stop_all(struct vmmfs_mount *vmp)
-{
-	struct vmmfs_machine *m;
-
-	for (;;) {
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		m = RB_ROOT(&vmp->vm_machtree);
-		if (m != NULL)
-			m->vm_refs++;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		if (m == NULL)
-			break;
-		vmmfs_machine_mark_deleted(vmp, m);
-		vmmfs_machine_unref(vmp, m);
-	}
-}
-
-static void
-vmmfs_wait_async_drained(struct vmmfs_mount *vmp)
-{
-	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	while (vmp->vm_async_refs != 0) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		tsleep(&vmp->vm_async_refs, 0, "vmmfsu", hz / 20 + 1);
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	}
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-}
-
 
 static int
 vmmfs_unmount(struct mount *mp, int mntflags)
 {
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(mp);
-	int flags = 0;
 	int error;
 
-	if (mntflags & MNT_FORCE) {
-		flags |= FORCECLOSE;
-		vmmfs_force_stop_all(vmp);
-		vmmfs_wait_async_drained(vmp);
-	} else if (vmmfs_unmount_busy(vmp)) {
+	(void)mntflags;
+	if (vmmfs_unmount_busy(vmp))
 		return EBUSY;
-	}
 
-	error = vflush(mp, 0, flags);
+	error = vflush(mp, 0, 0);
 	if (error)
 		return error;
 
-	/*
-	 * vflush reclaimed every vnode, so any rmdir'd-but-lease-held machine
-	 * has already been freed (its last unref).  Free the live ones: drop
-	 * each tree reference, which takes vm_refs to 0 and frees the struct.
-	 */
-	{
-		struct vmmfs_machine *m;
-
-		while ((m = RB_ROOT(&vmp->vm_machtree)) != NULL) {
-			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-			vmmfs_machine_unref(vmp, m);
-		}
-	}
 	vmmfs_device_destroy_all(vmp);
 	vmmfs_node_uninit(&vmp->vm_devroot);
 	vmmfs_node_uninit(&vmp->vm_host_devices);
@@ -762,9 +696,16 @@ vmmfs_statfs(struct mount *mp, struct statfs *sbp, struct ucred *cred)
 static int
 vmmfs_vfs_init(struct vfsconf *conf)
 {
+	int error;
+
 	(void)conf;
 	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
 	vmmfs_mount_count = 0;
+	error = vmm_domain_init();
+	if (error) {
+		lockuninit(&vmmfs_mount_lock);
+		return error;
+	}
 	kprintf("vmm: loaded\n");
 	return 0;
 }
@@ -775,8 +716,7 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	(void)conf;
 	if (vmmfs_mount_count_busy())
 		return EBUSY;
-	if (vmm_loader_busy())
-		return EBUSY;
+	vmm_domain_uninit();
 	lockuninit(&vmmfs_mount_lock);
 	kprintf("vmm: unloaded\n");
 	return 0;

@@ -23,13 +23,10 @@
 
 struct vmm_mem {
 	/*
-	 * Lock map:
-	 * mut_bytes is protected by the parent vmm_machine's token_lifecycle.
-	 * own_mut_backing is published by vmm_mem_publish() and detached by
-	 * vmm_mem_detach() while holding that token.  vmm_mem_prepare()
-	 * creates the guest RAM vm_object and machine vmspace outside the
-	 * token, and vmm_mem_release_backing() tears them down after detach
-	 * outside the token.  Guest pages are allocated lazily by loader mmap
+	 * Lifecycle:
+	 * vmmfs serializes config writes before start.  vmm_machine's command
+	 * queue publishes/detaches own_mut_backing and releases it only after
+	 * all vCPUs stop.  Guest pages are allocated lazily by loader mmap
 	 * faults or by vCPU nested-page-fault handling.
 	 */
 	uint64_t	mut_bytes;		/* 0 = unset */
@@ -51,8 +48,8 @@ int	vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 /*
- * Caller holds the parent machine token.  On success, *objectp owns one
- * vm_object reference and must later call vm_object_deallocate().
+ * On success, *objectp owns one vm_object reference and must later call
+ * vm_object_deallocate().
  */
 int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
 	    uint64_t *bytesp);
