@@ -8,10 +8,16 @@
 #define VM_MAPTYPE_NORMAL	0
 #define VM_SUBSYS_MMAP		0
 
-struct vm_object;
+#include "vm/vm_object.h"
 
 struct vm_map {
 	struct pmap *pmap;
+	struct vm_object *mapped_object;
+	vm_offset_t mapped_start;
+	vm_offset_t mapped_end;
+	vm_ooffset_t mapped_offset;
+	vm_prot_t mapped_prot;
+	vm_prot_t mapped_maxprot;
 };
 
 typedef struct vm_map *vm_map_t;
@@ -61,15 +67,16 @@ vm_map_insert(vm_map_t map, int *count, struct vm_object *object,
 	(void)count;
 	(void)object;
 	(void)unused1;
-	(void)offset;
 	(void)unused2;
-	(void)start;
-	(void)end;
 	(void)maptype;
 	(void)subsystem;
-	(void)prot;
-	(void)maxprot;
 	(void)cow;
+	map->mapped_object = object;
+	map->mapped_start = start;
+	map->mapped_end = end;
+	map->mapped_offset = offset;
+	map->mapped_prot = prot;
+	map->mapped_maxprot = maxprot;
 	return 0;
 }
 

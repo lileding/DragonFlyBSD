@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# Offline mem config verifier.  It compiles the kernel mem config object with
-# small userland compatibility headers, then exercises parser boundaries without
+# Offline mem verifier.  It compiles the kernel mem object with small userland
+# compatibility headers, then exercises config and backing boundaries without
 # loading vmm.ko.
 set -eu
 

@@ -5,6 +5,13 @@
 
 #include "vm/vm.h"
 #include "vm/vm_map.h"
+#include "vm/vm_object.h"
+
+extern int vmm_test_vm_fault_calls;
+extern vm_offset_t vmm_test_vm_fault_addr;
+extern vm_prot_t vmm_test_vm_fault_prot;
+extern int vmm_test_vm_fault_flags;
+extern int vmm_test_vm_fault_result;
 
 static inline struct vmspace *
 vmspace_alloc(vm_offset_t min, vm_offset_t max)
@@ -22,6 +29,8 @@ vmspace_alloc(vm_offset_t min, vm_offset_t max)
 static inline void
 vmspace_rel(struct vmspace *vmspace)
 {
+	if (vmspace != NULL && vmspace->vm_map.mapped_object != NULL)
+		vm_object_deallocate(vmspace->vm_map.mapped_object);
 	free(vmspace);
 }
 
@@ -29,10 +38,11 @@ static inline int
 vm_fault(vm_map_t map, vm_offset_t addr, vm_prot_t prot, int flags)
 {
 	(void)map;
-	(void)addr;
-	(void)prot;
-	(void)flags;
-	return 0;
+	vmm_test_vm_fault_calls++;
+	vmm_test_vm_fault_addr = addr;
+	vmm_test_vm_fault_prot = prot;
+	vmm_test_vm_fault_flags = flags;
+	return vmm_test_vm_fault_result;
 }
 
 #endif /* VMM_TEST_MEM_COMPAT_VM_VM_EXTERN_H */

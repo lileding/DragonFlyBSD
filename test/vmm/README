@@ -7,9 +7,9 @@ fd3/fd4 stand-ins.  It never loads `vmm.ko`, mounts vmmfs, or enters a guest.
 The offline gate covers:
 
 - `manifest/manifest_parser_check.sh`: kernel x86 manifest parser boundaries.
-- `mem/mem_config_check.sh`: kernel mem config parser boundaries, including
-  two-megabyte alignment, maximum size, formatting, and rejection while backing
-  is attached.
+- `mem/mem_config_check.sh`: kernel mem config and backing boundaries,
+  including two-megabyte alignment, maximum size, formatting, publish/detach,
+  snapshot, and GPA fault validation.
 - `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health.
 - `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
   including sparse fd3 writes, one-page fd4 parsing by the kernel manifest

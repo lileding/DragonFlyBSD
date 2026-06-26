@@ -1,16 +1,25 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Userland boundary tests for the kernel mem config object.
+ * Userland boundary tests for the kernel mem config and backing object.
  */
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "vm/vm.h"
+#include "vm/vm_map.h"
+#include "vm/vm_object.h"
 #include "vmm_mem.h"
 
 static int failures;
+int vmm_test_vm_fault_calls;
+vm_offset_t vmm_test_vm_fault_addr;
+vm_prot_t vmm_test_vm_fault_prot;
+int vmm_test_vm_fault_flags;
+int vmm_test_vm_fault_result;
 
 static void
 fail(const char *name)
@@ -82,6 +91,137 @@ expect_backing_reject(void)
 		fail("backing preserves config");
 }
 
+static void
+reset_fault_trace(int result)
+{
+	vmm_test_vm_fault_calls = 0;
+	vmm_test_vm_fault_addr = 0;
+	vmm_test_vm_fault_prot = 0;
+	vmm_test_vm_fault_flags = 0;
+	vmm_test_vm_fault_result = result;
+}
+
+static void
+expect_prepare_reject(const char *name, uint64_t bytes)
+{
+	struct vmm_mem_backing *backing;
+
+	backing = (struct vmm_mem_backing *)(uintptr_t)1;
+	if (vmm_mem_prepare(bytes, &backing) != EINVAL || backing != NULL)
+		fail(name);
+}
+
+static void
+expect_publish_mismatch(void)
+{
+	struct vmm_mem mem;
+	struct vmm_mem_backing *backing;
+
+	memset(&mem, 0, sizeof(mem));
+	mem.mut_bytes = VMM_MEM_ALIGN * 2;
+	backing = NULL;
+	if (vmm_mem_prepare(VMM_MEM_ALIGN, &backing) != 0 || backing == NULL) {
+		fail("prepare mismatch backing");
+		return;
+	}
+	if (vmm_mem_publish(&mem, backing) != EINVAL ||
+	    mem.own_mut_backing != NULL) {
+		fail("publish mismatch");
+	}
+	vmm_mem_release_backing(backing);
+}
+
+static void
+expect_fault_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
+    int prot, int want, int want_calls, vm_offset_t want_addr, int want_flags)
+{
+	int got;
+
+	reset_fault_trace(want);
+	got = vmm_mem_fault_gpa(mem, gpa, prot);
+	if (got != want)
+		fail(name);
+	if (vmm_test_vm_fault_calls != want_calls)
+		fail(name);
+	if (want_calls != 0 &&
+	    (vmm_test_vm_fault_addr != want_addr ||
+	     vmm_test_vm_fault_prot != prot ||
+	     vmm_test_vm_fault_flags != want_flags)) {
+		fail(name);
+	}
+}
+
+static void
+expect_backing_lifecycle(void)
+{
+	struct vmm_mem mem;
+	struct vmm_mem_backing *backing;
+	struct vmm_mem_backing *detached;
+	struct vm_object *object;
+	struct vmspace *vmspace;
+	uint64_t bytes;
+
+	memset(&mem, 0, sizeof(mem));
+	mem.mut_bytes = VMM_MEM_ALIGN;
+	backing = NULL;
+	if (vmm_mem_prepare(mem.mut_bytes, &backing) != 0 || backing == NULL) {
+		fail("prepare backing");
+		return;
+	}
+	if (vmm_mem_publish(&mem, backing) != 0) {
+		fail("publish backing");
+		vmm_mem_release_backing(backing);
+		return;
+	}
+	if (vmm_mem_publish(&mem, backing) != EBUSY)
+		fail("publish busy");
+	vmspace = vmm_mem_borrow_vmspace(&mem);
+	if (vmspace == NULL)
+		fail("borrow vmspace");
+	if (vmspace != NULL &&
+	    (vmspace->vm_map.mapped_start != 0 ||
+	     vmspace->vm_map.mapped_end != VMM_MEM_ALIGN ||
+	     vmspace->vm_map.mapped_offset != 0 ||
+	     vmspace->vm_map.mapped_prot !=
+	     (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))) {
+		fail("mapped vmspace range");
+	}
+
+	object = NULL;
+	bytes = 0;
+	if (vmm_mem_snapshot(&mem, &object, &bytes) != 0 ||
+	    object == NULL || bytes != VMM_MEM_ALIGN) {
+		fail("snapshot backing");
+	}
+	if (object != NULL)
+		vm_object_deallocate(object);
+
+	expect_fault_result(&mem, "fault read", 0, VM_PROT_READ, 0, 1, 0,
+	    VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault write", PAGE_SIZE, VM_PROT_WRITE, 0,
+	    1, PAGE_SIZE, VM_FAULT_DIRTY);
+	expect_fault_result(&mem, "fault exec", VMM_MEM_ALIGN - 1,
+	    VM_PROT_EXECUTE, 0, 1, VMM_MEM_ALIGN - PAGE_SIZE,
+	    VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault propagates vm fault", 0,
+	    VM_PROT_READ, ENOMEM, 1, 0, VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault bad prot", 0, 0, EINVAL, 0, 0, 0);
+	expect_fault_result(&mem, "fault invalid prot bit", 0,
+	    VM_PROT_READ | 0x80, EINVAL, 0, 0, 0);
+	expect_fault_result(&mem, "fault past end", VMM_MEM_ALIGN,
+	    VM_PROT_READ, EINVAL, 0, 0, 0);
+
+	detached = vmm_mem_detach(&mem);
+	if (detached != backing || vmm_mem_borrow_vmspace(&mem) != NULL)
+		fail("detach backing");
+	if (vmm_mem_snapshot(&mem, &object, &bytes) != EINVAL)
+		fail("snapshot detached");
+	if (vmm_mem_fault_gpa(&mem, 0, VM_PROT_READ) != EINVAL)
+		fail("fault detached");
+	vmm_mem_release_backing(detached);
+	vmm_mem_release_backing(NULL);
+}
+
 int
 main(void)
 {
@@ -111,14 +251,22 @@ main(void)
 	    "18446744073709551616", VMM_MEM_ALIGN, VMM_MEM_ALIGN, 0);
 	expect_parse("over max rejected", over_max_bytes, VMM_MEM_ALIGN,
 	    VMM_MEM_ALIGN, 0);
+	expect_prepare_reject("prepare zero rejected", 0);
+	expect_prepare_reject("prepare unaligned rejected", VMM_MEM_ALIGN - 1);
+	expect_prepare_reject("prepare over max rejected",
+	    VMM_MEM_MAX + VMM_MEM_ALIGN);
+	if (vmm_mem_prepare(VMM_MEM_ALIGN, NULL) != EINVAL)
+		fail("prepare null backing pointer");
+	expect_publish_mismatch();
 
 	expect_format("format 2M", 2ull * 1024 * 1024, "2097152\n");
 	expect_format_reject("format unset", 0, sizeof(max_bytes));
 	expect_format_reject("format small buffer", 2ull * 1024 * 1024, 4);
 	expect_backing_reject();
+	expect_backing_lifecycle();
 
 	if (failures != 0)
 		return 1;
-	printf("PASS: mem config parser\n");
+	printf("PASS: mem config and backing\n");
 	return 0;
 }
