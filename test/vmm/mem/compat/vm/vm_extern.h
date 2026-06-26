@@ -12,6 +12,8 @@ extern vm_offset_t vmm_test_vm_fault_addr;
 extern vm_prot_t vmm_test_vm_fault_prot;
 extern int vmm_test_vm_fault_flags;
 extern int vmm_test_vm_fault_result;
+extern int vmm_test_vmspace_alloc_fail;
+extern int vmm_test_vmspace_free_count;
 
 static inline struct vmspace *
 vmspace_alloc(vm_offset_t min, vm_offset_t max)
@@ -20,6 +22,8 @@ vmspace_alloc(vm_offset_t min, vm_offset_t max)
 
 	(void)min;
 	(void)max;
+	if (vmm_test_vmspace_alloc_fail)
+		return NULL;
 	vmspace = calloc(1, sizeof(*vmspace));
 	if (vmspace != NULL)
 		vmspace->vm_map.pmap = &vmspace->vm_pmap;
@@ -31,6 +35,8 @@ vmspace_rel(struct vmspace *vmspace)
 {
 	if (vmspace != NULL && vmspace->vm_map.mapped_object != NULL)
 		vm_object_deallocate(vmspace->vm_map.mapped_object);
+	if (vmspace != NULL)
+		vmm_test_vmspace_free_count++;
 	free(vmspace);
 }
 

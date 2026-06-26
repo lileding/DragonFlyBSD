@@ -20,6 +20,12 @@ vm_offset_t vmm_test_vm_fault_addr;
 vm_prot_t vmm_test_vm_fault_prot;
 int vmm_test_vm_fault_flags;
 int vmm_test_vm_fault_result;
+int vmm_test_default_pager_alloc_fail;
+int vmm_test_vmspace_alloc_fail;
+int vmm_test_vm_map_insert_result;
+int vmm_test_vm_map_insert_calls;
+int vmm_test_vm_object_free_count;
+int vmm_test_vmspace_free_count;
 
 static void
 fail(const char *name)
@@ -102,6 +108,17 @@ reset_fault_trace(int result)
 }
 
 static void
+reset_vm_trace(void)
+{
+	vmm_test_default_pager_alloc_fail = 0;
+	vmm_test_vmspace_alloc_fail = 0;
+	vmm_test_vm_map_insert_result = 0;
+	vmm_test_vm_map_insert_calls = 0;
+	vmm_test_vm_object_free_count = 0;
+	vmm_test_vmspace_free_count = 0;
+}
+
+static void
 expect_prepare_reject(const char *name, uint64_t bytes)
 {
 	struct vmm_mem_backing *backing;
@@ -129,6 +146,30 @@ expect_publish_mismatch(void)
 		fail("publish mismatch");
 	}
 	vmm_mem_release_backing(backing);
+}
+
+static void
+expect_prepare_failure_cleanup(const char *name, int pager_fail,
+    int vmspace_fail, int map_insert_result, int want_object_frees,
+    int want_vmspace_frees, int want_map_calls)
+{
+	struct vmm_mem_backing *backing;
+	int error;
+
+	reset_vm_trace();
+	vmm_test_default_pager_alloc_fail = pager_fail;
+	vmm_test_vmspace_alloc_fail = vmspace_fail;
+	vmm_test_vm_map_insert_result = map_insert_result;
+	backing = (struct vmm_mem_backing *)(uintptr_t)1;
+	error = vmm_mem_prepare(VMM_MEM_ALIGN, &backing);
+	if (error != ENOMEM || backing != NULL)
+		fail(name);
+	if (vmm_test_vm_object_free_count != want_object_frees ||
+	    vmm_test_vmspace_free_count != want_vmspace_frees ||
+	    vmm_test_vm_map_insert_calls != want_map_calls) {
+		fail(name);
+	}
+	reset_vm_trace();
 }
 
 static void
@@ -257,6 +298,12 @@ main(void)
 	    VMM_MEM_MAX + VMM_MEM_ALIGN);
 	if (vmm_mem_prepare(VMM_MEM_ALIGN, NULL) != EINVAL)
 		fail("prepare null backing pointer");
+	expect_prepare_failure_cleanup("prepare pager failure cleanup", 1, 0,
+	    0, 0, 0, 0);
+	expect_prepare_failure_cleanup("prepare vmspace failure cleanup", 0, 1,
+	    0, 1, 0, 0);
+	expect_prepare_failure_cleanup("prepare map failure cleanup", 0, 0, 1,
+	    1, 1, 1);
 	expect_publish_mismatch();
 
 	expect_format("format 2M", 2ull * 1024 * 1024, "2097152\n");

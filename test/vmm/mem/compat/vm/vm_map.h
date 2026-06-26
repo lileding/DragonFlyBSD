@@ -22,6 +22,9 @@ struct vm_map {
 
 typedef struct vm_map *vm_map_t;
 
+extern int vmm_test_vm_map_insert_result;
+extern int vmm_test_vm_map_insert_calls;
+
 struct vmspace {
 	struct vm_map vm_map;
 	struct pmap vm_pmap;
@@ -71,6 +74,9 @@ vm_map_insert(vm_map_t map, int *count, struct vm_object *object,
 	(void)maptype;
 	(void)subsystem;
 	(void)cow;
+	vmm_test_vm_map_insert_calls++;
+	if (vmm_test_vm_map_insert_result != 0)
+		return vmm_test_vm_map_insert_result;
 	map->mapped_object = object;
 	map->mapped_start = start;
 	map->mapped_end = end;

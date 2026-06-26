@@ -10,6 +10,8 @@ struct vm_object {
 	int flags;
 };
 
+extern int vmm_test_vm_object_free_count;
+
 static inline void
 vm_object_hold(struct vm_object *object)
 {
@@ -39,8 +41,10 @@ vm_object_drop(struct vm_object *object)
 static inline void
 vm_object_deallocate(struct vm_object *object)
 {
-	if (object != NULL && --object->refs == 0)
+	if (object != NULL && --object->refs == 0) {
+		vmm_test_vm_object_free_count++;
 		free(object);
+	}
 }
 
 static inline void
