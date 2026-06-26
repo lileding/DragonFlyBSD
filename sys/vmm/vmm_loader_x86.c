@@ -116,6 +116,17 @@ vmm_gpa_limit(uint64_t mem_size, uint64_t base, uint32_t limit)
 	return vmm_gpa_inside(mem_size, base, (uint64_t)limit + 1);
 }
 
+static int
+vmm_padding_zero(const uint8_t *buf, size_t off, size_t end)
+{
+	while (off < end) {
+		if (buf[off] != 0)
+			return 0;
+		off++;
+	}
+	return 1;
+}
+
 int
 vmm_loader_x86_xcr0_valid(uint64_t xcr0)
 {
@@ -231,6 +242,7 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	off = hdr.header_size;
 	while (off < hdr.total_size) {
 		const uint8_t *payload;
+		size_t payload_end;
 		size_t next;
 
 		if (hdr.total_size - off < sizeof(rec)) {
@@ -243,8 +255,13 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 			return error;
 		}
 		next = off + vmm_align8(sizeof(rec) + rec.size);
+		payload_end = off + sizeof(rec) + rec.size;
 		if (next < off || next > hdr.total_size ||
-		    off + sizeof(rec) + rec.size > hdr.total_size) {
+		    payload_end > hdr.total_size) {
+			error = EINVAL;
+			return error;
+		}
+		if (!vmm_padding_zero(buf, payload_end, next)) {
 			error = EINVAL;
 			return error;
 		}

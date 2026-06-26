@@ -199,6 +199,14 @@ append_optional_unknown(uint8_t *manifest)
 }
 
 static void
+poison_last_record_padding(uint8_t *manifest)
+{
+	struct vmm_manifest_header *hdr = manifest_header(manifest);
+
+	manifest[hdr->total_size - 1] = 0xa5;
+}
+
+static void
 expect_load_result(const char *name, uint64_t mem_size, const uint8_t *manifest,
     size_t cap, int want)
 {
@@ -241,6 +249,11 @@ main(void)
 	build_valid_state(manifest);
 	append_optional_unknown(manifest);
 	expect_result("optional unknown record", manifest, 0);
+
+	build_valid_state(manifest);
+	append_optional_unknown(manifest);
+	poison_last_record_padding(manifest);
+	expect_result("nonzero record padding", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	manifest_first_record(manifest)->flags = VMM_REC_F_MANDATORY | 0x2;
