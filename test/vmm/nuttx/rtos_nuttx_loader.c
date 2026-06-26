@@ -804,7 +804,10 @@ main(int argc, char **argv)
 
 	memset(&ga, 0, sizeof(ga));
 	ga.mem_size = (uint64_t)mem_st.st_size;
-	memset(mem, 0, (size_t)mem_st.st_size);
+	/*
+	 * Do not sweep fd3.  Real guest RAM is lazily populated by vmm_mem
+	 * faults, so the loader must only touch the ranges it actually owns.
+	 */
 	load_elf_segments(mem, ga.mem_size, elf, (uint64_t)elf_st.st_size, eh,
 	    &ga);
 	build_boot_data(mem, &ga, pvh_entry, &vcpu);
