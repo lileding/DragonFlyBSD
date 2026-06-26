@@ -218,10 +218,12 @@ vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
 {
 	struct vmm_mem_backing *b;
 
+	if (objectp != NULL)
+		*objectp = NULL;
+	if (bytesp != NULL)
+		*bytesp = 0;
 	if (m == NULL || objectp == NULL || bytesp == NULL)
 		return EINVAL;
-	*objectp = NULL;
-	*bytesp = 0;
 	b = m->own_mut_backing;
 	if (b == NULL || b->own_mut_object == NULL || b->imm_bytes == 0)
 		return EINVAL;
