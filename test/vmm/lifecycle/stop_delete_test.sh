@@ -18,6 +18,13 @@ say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
 mach() { echo "$MNT/machines/$1"; }
+check_module_image()
+{
+	sections=$(readelf -SW "$VMM_KO" 2>>"$LOG") ||
+	    fail "readelf failed for $VMM_KO"
+	printf '%s\n' "$sections" | grep -qi eh_frame &&
+	    fail "$VMM_KO contains .eh_frame"
+}
 
 wait_event()
 {
@@ -109,8 +116,7 @@ trap cleanup EXIT INT TERM
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
 case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be an absolute path" ;; esac
 [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
-readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
-    fail "$VMM_KO contains .eh_frame"
+check_module_image
 case "$MOUNT_HELPER" in *_vmm) ;; *) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;; esac
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$REPO/test/vmm/smoke/smoke_loader.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded; unload it before running this harness"

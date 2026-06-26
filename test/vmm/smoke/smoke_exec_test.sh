@@ -46,6 +46,14 @@ run()
 	"$@" >>"$LOG" 2>&1 || fail "$*"
 }
 
+check_module_image()
+{
+	sections=$(readelf -SW "$VMM_KO" 2>>"$LOG") ||
+	    fail "readelf failed for $VMM_KO"
+	printf '%s\n' "$sections" | grep -qi eh_frame &&
+	    fail "$VMM_KO contains .eh_frame"
+}
+
 mach()
 {
 	printf '%s/machines/%s\n' "$MNT" "$1"
@@ -235,8 +243,7 @@ preflight()
 	*_vmm) ;;
 	*) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;;
 	esac
-	readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
-	    fail "$VMM_KO contains .eh_frame"
+	check_module_image
 }
 
 prepare_loader()

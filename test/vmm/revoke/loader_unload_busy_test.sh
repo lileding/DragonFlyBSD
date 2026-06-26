@@ -9,6 +9,13 @@ say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
 mach() { echo "$MNT/machines/$1"; }
+check_module_image()
+{
+	sections=$(readelf -SW "$VMM_KO" 2>>"$LOG") ||
+	    fail "readelf failed for $VMM_KO"
+	printf '%s\n' "$sections" | grep -qi eh_frame &&
+	    fail "$VMM_KO contains .eh_frame"
+}
 wait_path() { p=$1; i=0; while [ "$i" -lt "$TIMEOUT" ]; do [ -e "$p" ] && return 0; sleep 1; i=$((i + 1)); done; return 1; }
 cleanup_machine() { vm=$1; [ -d "$(mach "$vm")" ] || return 0; echo force >"$(mach "$vm")/stopped" 2>>"$LOG"; rmdir "$(mach "$vm")" >>"$LOG" 2>&1 || true; }
 cleanup()
@@ -28,8 +35,7 @@ make_wrapper()
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
 case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be an absolute path" ;; esac
 [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
-readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
-    fail "$VMM_KO contains .eh_frame"
+check_module_image
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded; unload_busy needs script-owned module"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/loader_revoke.c" -o "$LOADER"
 run kldload "$VMM_KO"; LOADED=1
