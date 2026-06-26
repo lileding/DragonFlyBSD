@@ -103,6 +103,19 @@ vmm_gpa_addr(uint64_t mem_size, uint64_t addr)
 	return addr < mem_size;
 }
 
+static int
+vmm_gpa_page(uint64_t mem_size, uint64_t addr)
+{
+	return (addr & PAGE_MASK) == 0 &&
+	    vmm_gpa_inside(mem_size, addr, PAGE_SIZE);
+}
+
+static int
+vmm_gpa_limit(uint64_t mem_size, uint64_t base, uint32_t limit)
+{
+	return vmm_gpa_inside(mem_size, base, (uint64_t)limit + 1);
+}
+
 int
 vmm_loader_x86_xcr0_valid(uint64_t xcr0)
 {
@@ -134,22 +147,25 @@ static int
 vmm_loader_x86_validate_vcpu(uint64_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu)
 {
-	if (vcpu->vcpu_id != 0 || vcpu->runnable != 1)
+	if (vcpu->vcpu_id != 0 || vcpu->flags != 0 || vcpu->runnable != 1)
 		return EINVAL;
 	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RIP]))
 		return EINVAL;
 	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RSP]))
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
-		return EINVAL;
-	if ((vcpu->cr[VMM_X64_CR_CR3] & PAGE_MASK) != 0)
+	if (!vmm_gpa_page(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
 		return EINVAL;
 	if (!vmm_loader_x86_xcr0_valid(vcpu->cr[VMM_X64_CR_XCR0]))
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base))
+	if (!vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_GDT].base,
+	    vcpu->seg[VMM_X64_SEG_GDT].limit))
 		return EINVAL;
-	if (vcpu->seg[VMM_X64_SEG_IDT].limit != 0 &&
-	    !vmm_gpa_addr(mem_size, vcpu->seg[VMM_X64_SEG_IDT].base))
+	if (!vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_IDT].base,
+	    vcpu->seg[VMM_X64_SEG_IDT].limit))
+		return EINVAL;
+	if ((vcpu->seg[VMM_X64_SEG_TR].attrib & 0x1000) == 0 &&
+	    !vmm_gpa_limit(mem_size, vcpu->seg[VMM_X64_SEG_TR].base,
+	    vcpu->seg[VMM_X64_SEG_TR].limit))
 		return EINVAL;
 	if (vcpu->intr_flags != 0)
 		return EINVAL;
@@ -171,6 +187,8 @@ vmm_loader_x86_validate_ranges(uint64_t mem_size, const uint8_t *payload,
 		return EINVAL;
 	for (i = 0; i < count; i++) {
 		if (!vmm_gpa_inside(mem_size, range[i].start, range[i].size))
+			return EINVAL;
+		if (range[i].flags != 0)
 			return EINVAL;
 	}
 	if (launch != NULL) {

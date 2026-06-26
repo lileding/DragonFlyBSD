@@ -1,0 +1,225 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Userland smoke tests for the kernel x86 manifest parser.
+ */
+#include <sys/types.h>
+
+#include <err.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "vmm_loader_x86.h"
+
+#define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
+#define VMM_MANIFEST_ABI	0
+#define VMM_MANIFEST_ARCH_X64	1
+#define VMM_REC_X64_VCPU_STATE	1
+#define VMM_REC_GPA_RANGE	2
+#define VMM_REC_F_MANDATORY	1
+
+#define MEM_SIZE		(2ULL * 1024ULL * 1024ULL)
+#define MANIFEST_SIZE		4096U
+#define PAGE_SIZE_GUEST		4096ULL
+#define PML4_GPA		0x1000ULL
+#define GDT_GPA			0x5000ULL
+#define IDT_GPA			0x6000ULL
+#define TSS_GPA			0x7000ULL
+#define ENTRY_GPA		0x100000ULL
+#define STACK_GPA		0x180000ULL
+
+#define CR0_PE			0x00000001ULL
+#define CR0_NE			0x00000020ULL
+#define CR0_PG			0x80000000ULL
+#define CR4_PAE			0x00000020ULL
+#define RFLAGS_FIXED		0x00000002ULL
+
+#define SEG_S			0x0010U
+#define SEG_P			0x0080U
+#define SEG_L			0x0200U
+#define SEG_DB			0x0400U
+#define SEG_G			0x0800U
+#define SEG_UNUSABLE		0x1000U
+
+struct vmm_manifest_header {
+	char		magic[8];
+	uint16_t	abi_version;
+	uint16_t	arch;
+	uint32_t	header_size;
+	uint32_t	total_size;
+	uint32_t	record_count;
+	uint64_t	mem_size;
+	uint32_t	flags;
+	uint32_t	reserved;
+} __attribute__((packed));
+
+struct vmm_manifest_record {
+	uint16_t	type;
+	uint16_t	flags;
+	uint32_t	size;
+} __attribute__((packed));
+
+static size_t
+align8(size_t v)
+{
+	return (v + 7U) & ~(size_t)7U;
+}
+
+static uint8_t *
+add_record(uint8_t *p, uint16_t type, const void *payload, uint32_t size)
+{
+	struct vmm_manifest_record rec;
+	size_t total;
+
+	rec.type = type;
+	rec.flags = VMM_REC_F_MANDATORY;
+	rec.size = size;
+	total = align8(sizeof(rec) + size);
+	memcpy(p, &rec, sizeof(rec));
+	memcpy(p + sizeof(rec), payload, size);
+	memset(p + sizeof(rec) + size, 0, total - sizeof(rec) - size);
+	return p + total;
+}
+
+static void
+set_segment(struct vmm_x64_seg_state *seg, uint16_t selector,
+    uint16_t attrib, uint32_t limit, uint64_t base)
+{
+	seg->selector = selector;
+	seg->attrib = attrib;
+	seg->limit = limit;
+	seg->base = base;
+}
+
+static void
+build_manifest(uint8_t *manifest, struct vmm_x64_vcpu_state *vcpu,
+    struct vmm_gpa_range *range, size_t range_count)
+{
+	struct vmm_manifest_header hdr;
+	uint8_t *p;
+
+	memset(manifest, 0, MANIFEST_SIZE);
+	memset(&hdr, 0, sizeof(hdr));
+	p = manifest + sizeof(hdr);
+	p = add_record(p, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
+	p = add_record(p, VMM_REC_GPA_RANGE, range,
+	    (uint32_t)(sizeof(*range) * range_count));
+
+	memcpy(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic));
+	hdr.abi_version = VMM_MANIFEST_ABI;
+	hdr.arch = VMM_MANIFEST_ARCH_X64;
+	hdr.header_size = sizeof(hdr);
+	hdr.total_size = (uint32_t)(p - manifest);
+	hdr.record_count = 2;
+	hdr.mem_size = MEM_SIZE;
+	memcpy(manifest, &hdr, sizeof(hdr));
+}
+
+static void
+build_valid_state(uint8_t *manifest)
+{
+	struct vmm_x64_vcpu_state vcpu;
+	struct vmm_gpa_range range[4];
+
+	memset(&vcpu, 0, sizeof(vcpu));
+	vcpu.runnable = 1;
+	vcpu.gpr[VMM_X64_GPR_RIP] = ENTRY_GPA;
+	vcpu.gpr[VMM_X64_GPR_RSP] = STACK_GPA;
+	vcpu.gpr[VMM_X64_GPR_RFLAGS] = RFLAGS_FIXED;
+	vcpu.cr[VMM_X64_CR_CR0] = CR0_PE | CR0_NE | CR0_PG;
+	vcpu.cr[VMM_X64_CR_CR3] = PML4_GPA;
+	vcpu.cr[VMM_X64_CR_CR4] = CR4_PAE;
+	vcpu.cr[VMM_X64_CR_XCR0] = VMM_X64_XCR0_X87;
+	set_segment(&vcpu.seg[VMM_X64_SEG_GDT], 0, 0, 0x27, GDT_GPA);
+	set_segment(&vcpu.seg[VMM_X64_SEG_IDT], 0, 0, 0x0f, IDT_GPA);
+	set_segment(&vcpu.seg[VMM_X64_SEG_LDT], 0, SEG_UNUSABLE, 0, 0);
+	set_segment(&vcpu.seg[VMM_X64_SEG_TR], 0x18, 0x9 | SEG_P, 0x67,
+	    TSS_GPA);
+
+	range[0] = (struct vmm_gpa_range){ ENTRY_GPA, 4, 1, 0 };
+	range[1] = (struct vmm_gpa_range){ PML4_GPA, PAGE_SIZE_GUEST, 5, 0 };
+	range[2] = (struct vmm_gpa_range){ GDT_GPA, PAGE_SIZE_GUEST, 6, 0 };
+	range[3] = (struct vmm_gpa_range){ STACK_GPA - PAGE_SIZE_GUEST,
+	    PAGE_SIZE_GUEST, 7, 0 };
+	build_manifest(manifest, &vcpu, range, 4);
+}
+
+static struct vmm_x64_vcpu_state *
+manifest_vcpu(uint8_t *manifest)
+{
+	return (struct vmm_x64_vcpu_state *)(void *)(manifest +
+	    sizeof(struct vmm_manifest_header) +
+	    sizeof(struct vmm_manifest_record));
+}
+
+static struct vmm_gpa_range *
+manifest_ranges(uint8_t *manifest)
+{
+	return (struct vmm_gpa_range *)(void *)(manifest +
+	    sizeof(struct vmm_manifest_header) +
+	    align8(sizeof(struct vmm_manifest_record) +
+	    sizeof(struct vmm_x64_vcpu_state)) +
+	    sizeof(struct vmm_manifest_record));
+}
+
+static void
+expect_result(const char *name, uint8_t *manifest, int want)
+{
+	struct vmm_launch launch;
+	int error;
+
+	error = vmm_loader_x86_manifest_load(MEM_SIZE, manifest,
+	    MANIFEST_SIZE, &launch);
+	if (error != want) {
+		errx(1, "%s: got %d want %d", name, error, want);
+	}
+}
+
+int
+main(void)
+{
+	uint8_t manifest[MANIFEST_SIZE];
+	struct vmm_x64_vcpu_state *vcpu;
+	struct vmm_gpa_range *ranges;
+
+	build_valid_state(manifest);
+	expect_result("valid", manifest, 0);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->flags = 1;
+	expect_result("bad vcpu flags", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA + 1;
+	expect_result("bad cr3 alignment", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->seg[VMM_X64_SEG_GDT].base = MEM_SIZE - 8;
+	vcpu->seg[VMM_X64_SEG_GDT].limit = 0x27;
+	expect_result("bad gdt range", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->seg[VMM_X64_SEG_IDT].base = MEM_SIZE - 8;
+	vcpu->seg[VMM_X64_SEG_IDT].limit = 0x0f;
+	expect_result("bad idt range", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->seg[VMM_X64_SEG_TR].base = MEM_SIZE - 8;
+	vcpu->seg[VMM_X64_SEG_TR].limit = 0x67;
+	expect_result("bad tr range", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	ranges = manifest_ranges(manifest);
+	ranges[0].flags = 1;
+	expect_result("bad range flags", manifest, EINVAL);
+
+	printf("PASS: x86 manifest parser\n");
+	return 0;
+}
