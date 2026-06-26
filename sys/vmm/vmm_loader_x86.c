@@ -117,6 +117,13 @@ vmm_gpa_limit(uint64_t mem_size, uint64_t base, uint32_t limit)
 }
 
 static int
+vmm_gpa_range_type_valid(uint32_t type)
+{
+	return type >= VMM_GPA_RANGE_LOAD &&
+	    type <= VMM_GPA_RANGE_GUEST_STACK;
+}
+
+static int
 vmm_padding_zero(const uint8_t *buf, size_t off, size_t end)
 {
 	while (off < end) {
@@ -198,6 +205,8 @@ vmm_loader_x86_validate_ranges(uint64_t mem_size, const uint8_t *payload,
 		return EINVAL;
 	for (i = 0; i < count; i++) {
 		if (!vmm_gpa_inside(mem_size, range[i].start, range[i].size))
+			return EINVAL;
+		if (!vmm_gpa_range_type_valid(range[i].type))
 			return EINVAL;
 		if (range[i].flags != 0)
 			return EINVAL;

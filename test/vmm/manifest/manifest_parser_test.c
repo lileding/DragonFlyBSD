@@ -146,11 +146,14 @@ build_valid_state(uint8_t *manifest)
 	set_segment(&vcpu.seg[VMM_X64_SEG_TR], 0x18, 0x9 | SEG_P, 0x67,
 	    TSS_GPA);
 
-	range[0] = (struct vmm_gpa_range){ ENTRY_GPA, 4, 1, 0 };
-	range[1] = (struct vmm_gpa_range){ PML4_GPA, PAGE_SIZE_GUEST, 5, 0 };
-	range[2] = (struct vmm_gpa_range){ GDT_GPA, PAGE_SIZE_GUEST, 6, 0 };
+	range[0] = (struct vmm_gpa_range){ ENTRY_GPA, 4,
+	    VMM_GPA_RANGE_LOAD, 0 };
+	range[1] = (struct vmm_gpa_range){ PML4_GPA, PAGE_SIZE_GUEST,
+	    VMM_GPA_RANGE_PAGE_TABLE, 0 };
+	range[2] = (struct vmm_gpa_range){ GDT_GPA, PAGE_SIZE_GUEST,
+	    VMM_GPA_RANGE_DESC_TABLE, 0 };
 	range[3] = (struct vmm_gpa_range){ STACK_GPA - PAGE_SIZE_GUEST,
-	    PAGE_SIZE_GUEST, 7, 0 };
+	    PAGE_SIZE_GUEST, VMM_GPA_RANGE_STACK, 0 };
 	build_manifest(manifest, &vcpu, range, 4);
 }
 
@@ -291,6 +294,16 @@ main(void)
 	ranges = manifest_ranges(manifest);
 	ranges[0].flags = 1;
 	expect_result("bad range flags", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	ranges = manifest_ranges(manifest);
+	ranges[0].type = 0;
+	expect_result("bad range type zero", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	ranges = manifest_ranges(manifest);
+	ranges[0].type = VMM_GPA_RANGE_GUEST_STACK + 1;
+	expect_result("bad range type high", manifest, EINVAL);
 
 	printf("PASS: x86 manifest parser\n");
 	return 0;
