@@ -340,6 +340,33 @@ expect_backing_lifecycle(void)
 	vmm_mem_release_backing(NULL);
 }
 
+static void
+expect_large_prepare_is_lazy(void)
+{
+	struct vmm_mem_backing *backing;
+
+	reset_vm_trace();
+	reset_fault_trace(0);
+	backing = NULL;
+	if (vmm_mem_prepare(VMM_MEM_MAX, &backing) != 0 || backing == NULL) {
+		fail("prepare max backing");
+		return;
+	}
+	if (vmm_test_default_pager_alloc_size != VMM_MEM_MAX ||
+	    vmm_test_vmspace_alloc_min != 0 ||
+	    vmm_test_vmspace_alloc_max != VMM_MEM_MAX ||
+	    vmm_test_vm_map_insert_calls != 1 ||
+	    vmm_test_vm_fault_calls != 0) {
+		fail("prepare max backing is lazy");
+	}
+	vmm_mem_release_backing(backing);
+	if (vmm_test_vm_object_free_count != 1 ||
+	    vmm_test_vmspace_free_count != 1 ||
+	    vmm_test_pmap_del_all_cpus_calls != 1) {
+		fail("release max backing");
+	}
+}
+
 int
 main(void)
 {
@@ -388,6 +415,7 @@ main(void)
 	expect_format_reject("format small buffer", 2ull * 1024 * 1024, 4);
 	expect_backing_reject();
 	expect_backing_lifecycle();
+	expect_large_prepare_is_lazy();
 
 	if (failures != 0)
 		return 1;
