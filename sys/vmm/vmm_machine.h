@@ -58,6 +58,7 @@ enum vmm_close_action {
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
 void vmm_machine_init(struct vmm_machine *m);
 void vmm_machine_uninit(struct vmm_machine *m);
+void vmm_machine_drain(struct vmm_machine *m);
 size_t vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
     size_t cap);
 int vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len);

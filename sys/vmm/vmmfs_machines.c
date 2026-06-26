@@ -12,7 +12,6 @@
 #include <sys/mount.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
-#include <sys/taskqueue.h>
 #include <sys/thread2.h>
 #include <sys/dirent.h>
 #include <sys/uio.h>
@@ -243,7 +242,7 @@ vmmfs_machine_reaper(void *arg)
 	struct vmmfs_machine *m = arg;
 	struct vmmfs_mount *vmp = m->vm_mount;
 
-	taskqueue_drain(m->machine.own_mut_taskqueue, NULL);
+	vmm_machine_drain(&m->machine);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	KKASSERT(vmp->vm_machine_count > 0);
 	vmp->vm_machine_count--;

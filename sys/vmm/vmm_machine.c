@@ -33,6 +33,7 @@ struct vmm_machine_task {
 };
 
 static void	vmm_machine_task_run(void *arg, int pending);
+static void	vmm_machine_drain_task(void *arg, int pending);
 static int	vmm_machine_task_config_complete(
 		    const struct vmm_machine_task *task);
 
@@ -113,6 +114,19 @@ vmm_machine_uninit(struct vmm_machine *m)
 	}
 }
 
+void
+vmm_machine_drain(struct vmm_machine *m)
+{
+	struct task task;
+	int error;
+
+	TASK_INIT(&task, 0, vmm_machine_drain_task, NULL);
+	error = taskqueue_enqueue(m->own_mut_taskqueue, &task);
+	if (error)
+		return;
+	taskqueue_drain(m->own_mut_taskqueue, &task);
+}
+
 /*
  * Called in vmmfs syscall context.  This is the boundary where declarative
  * file operations become serialized machine commands.  vmmfs selects the
@@ -168,6 +182,13 @@ vmm_machine_task_run(void *arg, int pending)
 	task->fnonce_handler(task);
 
 	kfree(task, M_TEMP);
+}
+
+static void
+vmm_machine_drain_task(void *arg, int pending)
+{
+	(void)arg;
+	(void)pending;
 }
 
 void
