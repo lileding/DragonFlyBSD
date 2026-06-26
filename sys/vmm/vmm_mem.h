@@ -46,9 +46,13 @@ int	vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp);
 int	vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
-struct vm_object *vmm_mem_object(struct vmm_mem *m);
+/*
+ * Caller holds the parent machine token.  On success, *objectp owns one
+ * vm_object reference and must later call vm_object_deallocate().
+ */
+int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
+	    uint64_t *bytesp);
 struct vmspace *vmm_mem_vmspace(struct vmm_mem *m);
-uint64_t vmm_mem_size(struct vmm_mem *m);
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
 
 #endif /* VMM_MEM_H */

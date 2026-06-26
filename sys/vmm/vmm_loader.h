@@ -4,7 +4,7 @@
  * The loader object: the desired path to an executable run at start.
  * FS presentation: vmmfs_loader.c.
  *
- * Types (size_t) come from the includer.
+ * Types (uint64_t/size_t) come from the includer.
  */
 #ifndef VMM_LOADER_H
 #define VMM_LOADER_H
@@ -33,11 +33,11 @@ int	vmm_loader_is_set(const struct vmm_loader *l);
 int	vmm_loader_busy(void);
 
 struct ucred;
-struct vmm_mem;
+struct vm_object;
 struct vmm_launch;
 typedef int vmm_loader_cancel_fn(void *arg);
-int	vmm_loader_run(const char *path, struct vmm_mem *mem,
-	    struct ucred *cred, struct vmm_launch *launch,
+int	vmm_loader_run(const char *path, struct vm_object *mem_object,
+	    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
 	    vmm_loader_cancel_fn *cancel, void *cancel_arg);
 
 #endif /* VMM_LOADER_H */

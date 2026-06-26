@@ -193,12 +193,23 @@ vmm_mem_release_backing(struct vmm_mem_backing *b)
 	kfree(b, M_TEMP);
 }
 
-struct vm_object *
-vmm_mem_object(struct vmm_mem *m)
+int
+vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
+    uint64_t *bytesp)
 {
-	if (m->own_mut_backing == NULL)
-		return NULL;
-	return m->own_mut_backing->own_mut_object;
+	struct vmm_mem_backing *b;
+
+	if (m == NULL || objectp == NULL || bytesp == NULL)
+		return EINVAL;
+	*objectp = NULL;
+	*bytesp = 0;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_object == NULL || b->imm_bytes == 0)
+		return EINVAL;
+	vmm_mem_object_ref(b->own_mut_object);
+	*objectp = b->own_mut_object;
+	*bytesp = b->imm_bytes;
+	return 0;
 }
 
 struct vmspace *
@@ -207,14 +218,6 @@ vmm_mem_vmspace(struct vmm_mem *m)
 	if (m->own_mut_backing == NULL)
 		return NULL;
 	return m->own_mut_backing->own_mut_vmspace;
-}
-
-uint64_t
-vmm_mem_size(struct vmm_mem *m)
-{
-	if (m->own_mut_backing == NULL)
-		return 0;
-	return m->own_mut_backing->imm_bytes;
 }
 
 int

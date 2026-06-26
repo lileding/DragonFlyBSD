@@ -33,7 +33,6 @@
 #include <vm/vm_pager.h>
 
 #include "vmm_parse.h"
-#include "vmm_mem.h"
 #include "vmm_loader.h"
 #include "vmm_loader_x86.h"
 
@@ -856,24 +855,20 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 }
 
 int
-vmm_loader_run(const char *path, struct vmm_mem *mem,
-    struct ucred *cred, struct vmm_launch *launch,
+vmm_loader_run(const char *path, struct vm_object *mem_object,
+    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
     vmm_loader_cancel_fn *cancel, void *cancel_arg)
 {
 	struct vmm_loader_epoch *ep;
 	size_t path_len;
 	int error;
 
-	if (!vmm_mem_is_set(mem) || vmm_mem_object(mem) == NULL ||
+	if (mem_object == NULL || mem_size == 0 ||
 	    path == NULL || path[0] == '\0' || cred == NULL)
 		return EINVAL;
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
-	ep->imm_mem_size = vmm_mem_size(mem);
-	if (ep->imm_mem_size == 0) {
-		error = EINVAL;
-		goto out;
-	}
+	ep->imm_mem_size = mem_size;
 	ep->borrow_imm_cred = cred;
 	ep->borrow_imm_cancel = cancel;
 	ep->borrow_imm_cancel_arg = cancel_arg;
@@ -889,8 +884,8 @@ vmm_loader_run(const char *path, struct vmm_mem *mem,
 		error = EINTR;
 		goto out;
 	}
-	error = vmm_loader_open_object_fd(vmm_mem_object(mem),
-	    (vm_size_t)ep->imm_mem_size, &ep->own_mut_mem_fp);
+	error = vmm_loader_open_object_fd(mem_object, (vm_size_t)ep->imm_mem_size,
+	    &ep->own_mut_mem_fp);
 	if (error)
 		goto out;
 	error = vmm_loader_manifest_object(&ep->own_mut_manifest_object);

@@ -12,6 +12,7 @@
 #include <sys/ucred.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
+#include <vm/vm_object.h>
 
 #include "vmm_machine.h"
 #include "vmm_loader_x86.h"
@@ -238,8 +239,10 @@ vmm_machine_start_task(struct vmm_machine *m)
 	struct vmm_mem_backing *backing = NULL;
 	struct vmm_mem_backing *prepared_backing = NULL;
 	struct vmm_launch launch;
+	struct vm_object *mem_object = NULL;
 	char loader_path[VMM_LOADER_MAX + 1];
 	uint64_t mem_bytes;
+	uint64_t mem_size = 0;
 	size_t loader_path_len;
 	int error;
 	int vcpu_owner = 0;
@@ -290,9 +293,20 @@ vmm_machine_start_task(struct vmm_machine *m)
 		vmm_mem_release_backing(prepared_backing);
 		prepared_backing = NULL;
 	}
-	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
-		error = vmm_loader_run(loader_path, &m->own_mut_mem, cred,
+	if (error == 0) {
+		vmm_machine_lock(m);
+		if (vmm_machine_start_cancelled_locked(m))
+			error = ECANCELED;
+		else
+			error = vmm_mem_snapshot(&m->own_mut_mem, &mem_object,
+			    &mem_size);
+		vmm_machine_unlock(m);
+	}
+	if (error == 0) {
+		error = vmm_loader_run(loader_path, mem_object, mem_size, cred,
 		    &launch, vmm_machine_start_is_cancelled, m);
+		vm_object_deallocate(mem_object);
+		mem_object = NULL;
 	}
 	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
 		vmm_machine_owner_hold(m);
