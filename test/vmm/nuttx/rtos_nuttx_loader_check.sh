@@ -5,11 +5,13 @@
 set -u
 
 ROOT=$(dirname "$0")
+REPO=$(cd "$ROOT/../../.." && pwd)
 ELF=${NUTTX_ELF:-/var/tmp/nuttx.elf}
 MEM_SIZE=${NUTTX_MEM:-64M}
 MANIFEST_SIZE=${NUTTX_MANIFEST_SIZE:-4096}
 LOADER=${NUTTX_LOADER_CHECK_BIN:-/var/tmp/vmmld_nuttx_check}
 CHECKER=${NUTTX_MANIFEST_CHECK_BIN:-/var/tmp/vmmld_nuttx_manifest_check}
+PARSER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_FILE=${NUTTX_CHECK_MEM_FILE:-/var/tmp/dfvmm-nuttx-loader-$$.mem}
 MANIFEST_FILE=${NUTTX_CHECK_MANIFEST_FILE:-/var/tmp/dfvmm-nuttx-loader-$$.manifest}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
@@ -51,7 +53,8 @@ cleanup()
 {
 	set +e
 	if [ "$KEEP_ARTIFACTS" -eq 0 ]; then
-		rm -f "$MEM_FILE" "$MANIFEST_FILE" "$LOADER" "$CHECKER"
+		rm -f "$MEM_FILE" "$MANIFEST_FILE" "$LOADER" "$CHECKER" \
+		    "$PARSER"
 	fi
 }
 
@@ -62,11 +65,16 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$ROOT/rtos_nuttx_loader.c" -o "$LOADER"
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$ROOT/rtos_nuttx_manifest_check.c" -o "$CHECKER"
+run cc -Wall -Wextra -Werror -std=c11 -O2 \
+    -I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/vmm" \
+    "$REPO/sys/vmm/vmm_loader_x86.c" \
+    "$REPO/test/vmm/manifest/manifest_file_check.c" -o "$PARSER"
 rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 run truncate -s "$MEM_SIZE" "$MEM_FILE"
 run truncate -s "$MANIFEST_SIZE" "$MANIFEST_FILE"
 write_sentinel
 run "$LOADER" "$ELF" 3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
 check_sentinel
+run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
 run "$CHECKER" "$MEM_FILE" "$MANIFEST_FILE"
 say "PASS: NuttX loader offline check"
