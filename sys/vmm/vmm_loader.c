@@ -392,6 +392,11 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	 * user mappings by scanning the object's backing_list.  This keeps
 	 * loader-to-vCPU handoff zero-copy and lets revoke cut off userland
 	 * without releasing fd3 guest RAM.
+	 *
+	 * vm_fault_object() calls this pager with the fd object token held.
+	 * VM_OBJECT_LOCK() is a recursive token hold here; the matching
+	 * VM_OBJECT_UNLOCK() below drops only the inner hold, so the outer
+	 * fault path still serializes through its later pmap_enter().
 	 */
 	VM_OBJECT_LOCK(object);
 	if (lfd->mut_revoked || lfd->own_mut_backing_object == NULL) {
@@ -428,9 +433,10 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 			lfd->own_mut_backing_object = NULL;
 			/*
 			 * vm_fault() enters OBJT_MGTDEVICE pages while holding
-			 * this object token.  Keep revoke under the same token
-			 * so no in-flight fault can pass the revoked check and
-			 * install a fresh pmap entry after this removal pass.
+			 * this object token through pmap_enter().  Keep revoke
+			 * under the same token so no in-flight fault can pass
+			 * the revoked check and install a fresh pmap entry
+			 * after this removal pass.
 			 */
 			vm_object_page_remove(object, 0, 0, FALSE);
 		}
