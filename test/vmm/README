@@ -10,8 +10,8 @@ The offline gate covers:
 - `mem/mem_config_check.sh`: kernel mem config and backing boundaries,
   including two-megabyte alignment, maximum size, formatting, publish/detach,
   default-pager backing shape, machine `vmspace` setup, backing object identity,
-  snapshot reference lifetime, and GPA fault dispatch through the machine
-  `vmspace`.
+  snapshot reference lifetime, GPA fault dispatch through the machine
+  `vmspace`, and machine pmap CPU cleanup before `vmspace` release.
 - `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health.
 - `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
   including sparse fd3 writes, one-page fd4 parsing by the kernel manifest
