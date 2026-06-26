@@ -350,7 +350,8 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 			have_vcpu = 1;
 			break;
 		case VMM_REC_GPA_RANGE:
-			if ((rec.flags & VMM_REC_F_MANDATORY) == 0) {
+			if ((rec.flags & VMM_REC_F_MANDATORY) == 0 ||
+			    have_range) {
 				error = EINVAL;
 				return error;
 			}

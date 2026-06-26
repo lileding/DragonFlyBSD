@@ -204,6 +204,20 @@ append_optional_unknown(uint8_t *manifest)
 }
 
 static void
+append_duplicate_ranges(uint8_t *manifest)
+{
+	struct vmm_manifest_header *hdr = manifest_header(manifest);
+	struct vmm_gpa_range *ranges = manifest_ranges(manifest);
+	uint8_t *p;
+
+	p = manifest + hdr->total_size;
+	p = add_record(p, VMM_REC_GPA_RANGE, ranges,
+	    4 * sizeof(struct vmm_gpa_range));
+	hdr->total_size = (uint32_t)(p - manifest);
+	hdr->record_count++;
+}
+
+static void
 poison_last_record_padding(uint8_t *manifest)
 {
 	struct vmm_manifest_header *hdr = manifest_header(manifest);
@@ -273,6 +287,10 @@ main(void)
 	build_valid_state(manifest);
 	append_optional_unknown(manifest);
 	expect_result("optional unknown record", manifest, 0);
+
+	build_valid_state(manifest);
+	append_duplicate_ranges(manifest);
+	expect_result("duplicate gpa range record", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_optional_unknown(manifest);
