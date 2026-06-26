@@ -106,6 +106,10 @@ vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
 
 	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
 	vm_map_lock(map);
+	/*
+	 * vm_map_insert() consumes this reference on success.  On failure the
+	 * caller remains responsible for dropping it.
+	 */
 	vmm_mem_object_ref(object);
 	vm_object_hold(object);
 	rv = vm_map_insert(map, &count, object, NULL, 0, NULL, start,
