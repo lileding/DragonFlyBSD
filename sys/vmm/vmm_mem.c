@@ -193,8 +193,11 @@ vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing)
 struct vmm_mem_backing *
 vmm_mem_detach(struct vmm_mem *m)
 {
-	struct vmm_mem_backing *b = m->own_mut_backing;
+	struct vmm_mem_backing *b;
 
+	if (m == NULL)
+		return NULL;
+	b = m->own_mut_backing;
 	m->own_mut_backing = NULL;
 	return b;
 }

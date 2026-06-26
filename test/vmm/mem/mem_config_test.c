@@ -311,6 +311,8 @@ expect_backing_lifecycle(void)
 	detached = vmm_mem_detach(&mem);
 	if (detached != backing || vmm_mem_borrow_vmspace(&mem) != NULL)
 		fail("detach backing");
+	if (vmm_mem_detach(NULL) != NULL)
+		fail("detach null");
 	object = (struct vm_object *)(uintptr_t)1;
 	bytes = 1;
 	if (vmm_mem_snapshot(&mem, &object, &bytes) != EINVAL)
