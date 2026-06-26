@@ -201,7 +201,7 @@ prepare_mount_helper()
 load_module()
 {
 	if kldstat -n vmm >/dev/null 2>&1; then
-		say "vmm module already loaded; leaving it loaded on exit"
+		fail "vmm already loaded; unload it before running this harness"
 	else
 		run kldload "$VMM_KO"
 		LOADED=1

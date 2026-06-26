@@ -39,7 +39,8 @@ test/vmm/offline_check.sh
 
 The following scripts are pc64 true-hardware harnesses.  They load `vmm.ko`,
 mount vmmfs, and may enter real guests; run them only as explicit controlled
-validation steps with a current pc64 build:
+validation steps with a current pc64 build.  They require `vmm` to be unloaded
+on entry so each run proves the exact `VMM_KO` path selected by the harness:
 
 - `smoke/smoke_exec_test.sh`
 - `revoke/loader_revoke_test.sh`
