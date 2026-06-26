@@ -16,6 +16,7 @@
 
 static int failures;
 int vmm_test_vm_fault_calls;
+vm_map_t vmm_test_vm_fault_map;
 vm_offset_t vmm_test_vm_fault_addr;
 vm_prot_t vmm_test_vm_fault_prot;
 int vmm_test_vm_fault_flags;
@@ -101,6 +102,7 @@ static void
 reset_fault_trace(int result)
 {
 	vmm_test_vm_fault_calls = 0;
+	vmm_test_vm_fault_map = NULL;
 	vmm_test_vm_fault_addr = 0;
 	vmm_test_vm_fault_prot = 0;
 	vmm_test_vm_fault_flags = 0;
@@ -174,7 +176,8 @@ expect_prepare_failure_cleanup(const char *name, int pager_fail,
 
 static void
 expect_fault_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
-    int prot, int want, int want_calls, vm_offset_t want_addr, int want_flags)
+    int prot, int want, int want_calls, vm_map_t want_map,
+    vm_offset_t want_addr, int want_flags)
 {
 	int got;
 
@@ -185,7 +188,8 @@ expect_fault_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
 	if (vmm_test_vm_fault_calls != want_calls)
 		fail(name);
 	if (want_calls != 0 &&
-	    (vmm_test_vm_fault_addr != want_addr ||
+	    (vmm_test_vm_fault_map != want_map ||
+	     vmm_test_vm_fault_addr != want_addr ||
 	     vmm_test_vm_fault_prot != prot ||
 	     vmm_test_vm_fault_flags != want_flags)) {
 		fail(name);
@@ -249,22 +253,23 @@ expect_backing_lifecycle(void)
 			fail("snapshot drops only temporary object reference");
 	}
 
-	expect_fault_result(&mem, "fault read", 0, VM_PROT_READ, 0, 1, 0,
-	    VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault read", 0, VM_PROT_READ, 0, 1,
+	    &vmspace->vm_map, 0, VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault write", PAGE_SIZE, VM_PROT_WRITE, 0,
-	    1, PAGE_SIZE, VM_FAULT_DIRTY);
+	    1, &vmspace->vm_map, PAGE_SIZE, VM_FAULT_DIRTY);
 	expect_fault_result(&mem, "fault read write", PAGE_SIZE,
-	    VM_PROT_READ | VM_PROT_WRITE, 0, 1, PAGE_SIZE, VM_FAULT_DIRTY);
+	    VM_PROT_READ | VM_PROT_WRITE, 0, 1, &vmspace->vm_map, PAGE_SIZE,
+	    VM_FAULT_DIRTY);
 	expect_fault_result(&mem, "fault exec", VMM_MEM_ALIGN - 1,
-	    VM_PROT_EXECUTE, 0, 1, VMM_MEM_ALIGN - PAGE_SIZE,
+	    VM_PROT_EXECUTE, 0, 1, &vmspace->vm_map, VMM_MEM_ALIGN - PAGE_SIZE,
 	    VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault propagates vm fault", 0,
-	    VM_PROT_READ, ENOMEM, 1, 0, VM_FAULT_NORMAL);
-	expect_fault_result(&mem, "fault bad prot", 0, 0, EINVAL, 0, 0, 0);
+	    VM_PROT_READ, ENOMEM, 1, &vmspace->vm_map, 0, VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault bad prot", 0, 0, EINVAL, 0, NULL, 0, 0);
 	expect_fault_result(&mem, "fault invalid prot bit", 0,
-	    VM_PROT_READ | 0x80, EINVAL, 0, 0, 0);
+	    VM_PROT_READ | 0x80, EINVAL, 0, NULL, 0, 0);
 	expect_fault_result(&mem, "fault past end", VMM_MEM_ALIGN,
-	    VM_PROT_READ, EINVAL, 0, 0, 0);
+	    VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
 
 	detached = vmm_mem_detach(&mem);
 	if (detached != backing || vmm_mem_borrow_vmspace(&mem) != NULL)

@@ -8,6 +8,7 @@
 #include "vm/vm_object.h"
 
 extern int vmm_test_vm_fault_calls;
+extern vm_map_t vmm_test_vm_fault_map;
 extern vm_offset_t vmm_test_vm_fault_addr;
 extern vm_prot_t vmm_test_vm_fault_prot;
 extern int vmm_test_vm_fault_flags;
@@ -43,8 +44,8 @@ vmspace_rel(struct vmspace *vmspace)
 static inline int
 vm_fault(vm_map_t map, vm_offset_t addr, vm_prot_t prot, int flags)
 {
-	(void)map;
 	vmm_test_vm_fault_calls++;
+	vmm_test_vm_fault_map = map;
 	vmm_test_vm_fault_addr = addr;
 	vmm_test_vm_fault_prot = prot;
 	vmm_test_vm_fault_flags = flags;
