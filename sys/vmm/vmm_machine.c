@@ -8,12 +8,14 @@
 #include <sys/malloc.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 #include <sys/thread2.h>
 #include <sys/types.h>
 #include <sys/ucred.h>
 #include <sys/unistd.h>
 #include <sys/wait.h>
+#include <machine/stdarg.h>
 #include <vm/vm_object.h>
 
 #include "vmm_loader_x86.h"
@@ -22,6 +24,36 @@
 #define EV_CREATED	1
 #define EV_STARTED	2
 #define EV_STOPPED	3
+
+static int vmm_debug_trace_enabled;
+int vmm_debug_allow_machine_taskqueue = 1;
+int vmm_debug_allow_nmkdir_vnode = 1;
+int vmm_debug_allow_start_execute = 1;
+int vmm_debug_allow_loader_fork = 1;
+int vmm_debug_allow_loader_run = 1;
+int vmm_debug_allow_vcpu_start = 1;
+
+SYSCTL_NODE(_debug, OID_AUTO, vmm, CTLFLAG_RW, 0, "vmm debug controls");
+SYSCTL_INT(_debug_vmm, OID_AUTO, trace, CTLFLAG_RW,
+    &vmm_debug_trace_enabled, 0, "print vmm execution-stage trace messages");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_machine_taskqueue, CTLFLAG_RW,
+    &vmm_debug_allow_machine_taskqueue, 0,
+    "allow per-machine taskqueue creation during machine init");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_nmkdir_vnode, CTLFLAG_RW,
+    &vmm_debug_allow_nmkdir_vnode, 0,
+    "allow mkdir(machine) to bind the created machine vnode");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_start_execute, CTLFLAG_RW,
+    &vmm_debug_allow_start_execute, 0,
+    "allow start/reset commands that require loader context");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_fork, CTLFLAG_RW,
+    &vmm_debug_allow_loader_fork, 0,
+    "allow vmm_machine_execute to fork the paused loader");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_run, CTLFLAG_RW,
+    &vmm_debug_allow_loader_run, 0,
+    "allow vmm_machine_start to install, resume, and wait for loader");
+SYSCTL_INT(_debug_vmm, OID_AUTO, allow_vcpu_start, CTLFLAG_RW,
+    &vmm_debug_allow_vcpu_start, 0,
+    "allow vmm_machine_start to enter vCPU execution");
 
 struct vmm_machine_task {
 	struct task task;
@@ -40,7 +72,7 @@ static int	vmm_machine_task_config_complete(
 		    const struct vmm_machine_task *task);
 static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
 static void	vmm_machine_set_status(struct vmm_machine *m,
-		    enum vmm_machine_status status);
+			    enum vmm_machine_status status);
 
 /* --------------------------------------------------------------------- */
 /* Event ring.                                                           */
@@ -83,21 +115,59 @@ ev_push(struct vmm_machine *m, uint8_t code)
 /* Machine model.                                                        */
 
 void
+vmm_debug_trace(const char *fmt, ...)
+{
+	__va_list ap;
+
+	if (!vmm_debug_trace_enabled)
+		return;
+	kprintf("vmm: ");
+	__va_start(ap, fmt);
+	kvprintf(fmt, ap);
+	__va_end(ap);
+	kprintf("\n");
+}
+
+void
 vmm_machine_init(struct vmm_machine *m)
 {
+	kprintf("vmm klog: core_machine_init memset begin m=%p\n", m);
 	memset(m, 0, sizeof(*m));
+	kprintf("vmm klog: core_machine_init token_config begin m=%p\n", m);
 	lwkt_token_init(&m->token_config, "vmmcfg");
+	kprintf("vmm klog: core_machine_init token_events begin m=%p\n", m);
 	lwkt_token_init(&m->token_events, "vmmev");
+	kprintf("vmm klog: core_machine_init console begin m=%p\n", m);
 	vmm_console_init(&m->own_mut_console);
-	m->own_mut_taskqueue = taskqueue_create("vmm_machine", M_WAITOK,
-										 taskqueue_thread_enqueue, &m->own_mut_taskqueue);
-	KKASSERT(m->own_mut_taskqueue != NULL);
-	(void)taskqueue_start_threads(&m->own_mut_taskqueue, 1,
-							   TDPRI_KERN_DAEMON, -1, "vmm machine");
+	kprintf("vmm klog: core_machine_init taskqueue gate m=%p allow=%d\n", m,
+	    vmm_debug_allow_machine_taskqueue);
+	vmm_debug_trace("machine_init begin m=%p allow_taskqueue=%d", m,
+	    vmm_debug_allow_machine_taskqueue);
+	if (vmm_debug_allow_machine_taskqueue) {
+		kprintf("vmm klog: core_machine_init taskqueue_create begin m=%p\n",
+		    m);
+		m->own_mut_taskqueue = taskqueue_create("vmm_machine", M_WAITOK,
+		    taskqueue_thread_enqueue, &m->own_mut_taskqueue);
+		kprintf("vmm klog: core_machine_init taskqueue_create done m=%p tq=%p\n",
+		    m, m->own_mut_taskqueue);
+		KKASSERT(m->own_mut_taskqueue != NULL);
+		kprintf("vmm klog: core_machine_init taskqueue_start begin m=%p tq=%p\n",
+		    m, m->own_mut_taskqueue);
+		(void)taskqueue_start_threads(&m->own_mut_taskqueue, 1,
+		    TDPRI_KERN_DAEMON, -1, "vmm machine");
+		kprintf("vmm klog: core_machine_init taskqueue_start done m=%p tq=%p\n",
+		    m, m->own_mut_taskqueue);
+	}
 	m->mut_desired_stopped = 1;
 	m->mut_status = VMM_MACHINE_STOPPED;
+	kprintf("vmm klog: core_machine_init ev_created begin m=%p\n", m);
 	ev_push(m, EV_CREATED);
+	kprintf("vmm klog: core_machine_init ev_stopped begin m=%p\n", m);
 	ev_push(m, EV_STOPPED);
+	vmm_debug_trace("machine_init done m=%p tq=%p", m,
+	    m->own_mut_taskqueue);
+	kprintf("vmm klog: core_machine_init done m=%p tq=%p\n", m,
+	    m->own_mut_taskqueue);
 }
 
 void
@@ -107,6 +177,8 @@ vmm_machine_uninit(struct vmm_machine *m)
 	struct vmm_vcpu_thread *threads = NULL;
 	uint32_t thread_count;
 
+	kprintf("vmm klog: core_machine_uninit begin m=%p tq=%p\n", m,
+	    m->own_mut_taskqueue);
 	/*
 	 * Callers must have removed the machine from new control-plane reach
 	 * and waited for quiescence.  This routine only performs final object
@@ -119,9 +191,14 @@ vmm_machine_uninit(struct vmm_machine *m)
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_taskqueue != NULL) {
+		kprintf("vmm klog: core_machine_uninit taskqueue_free begin m=%p tq=%p\n",
+		    m, m->own_mut_taskqueue);
 		taskqueue_free(m->own_mut_taskqueue);
 		m->own_mut_taskqueue = NULL;
+		kprintf("vmm klog: core_machine_uninit taskqueue_free done m=%p\n",
+		    m);
 	}
+	kprintf("vmm klog: core_machine_uninit done m=%p\n", m);
 }
 
 void
@@ -130,6 +207,8 @@ vmm_machine_drain(struct vmm_machine *m)
 	struct task task;
 	int error;
 
+	if (m->own_mut_taskqueue == NULL)
+		return;
 	TASK_INIT(&task, 0, vmm_machine_drain_task, NULL);
 	error = taskqueue_enqueue(m->own_mut_taskqueue, &task);
 	if (error)
@@ -151,6 +230,13 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 	struct vmm_machine_task *task;
 	int error = 0;
 
+	vmm_debug_trace("execute begin m=%p handler=%p cred=%p tq=%p", m,
+	    fnonce_handler, cred, m->own_mut_taskqueue);
+	if (m->own_mut_taskqueue == NULL)
+		return EBUSY;
+	if (cred != NULL && !vmm_debug_allow_start_execute)
+		return EBUSY;
+
 	task = kmalloc(sizeof(*task), M_TEMP, M_WAITOK | M_ZERO);
 	TASK_INIT(&task->task, 0, vmm_machine_task_run, task);
 	task->borrow_mut_machine = m;
@@ -170,6 +256,10 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 			error = EINVAL;
 			goto fail;
 		}
+		if (!vmm_debug_allow_loader_fork) {
+			error = EBUSY;
+			goto fail;
+		}
 		error = vmm_loader_init(&task->own_loader, task->imm_loader_path,
 		    cred);
 		if (error)
@@ -182,6 +272,7 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 			vmm_loader_fini(&task->own_loader);
 		goto fail;
 	}
+	vmm_debug_trace("execute queued m=%p handler=%p", m, fnonce_handler);
 	return 0;
 
 fail:
@@ -222,6 +313,9 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	uint32_t thread_count;
 	int error;
 
+	vmm_debug_trace("start begin m=%p vcpu=%u mem=%ju loader=%s", m,
+	    task->imm_vcpu_count, (uintmax_t)task->imm_mem_bytes,
+	    task->imm_loader_path);
 	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
 		return;
 
@@ -237,10 +331,16 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	error = vmm_mem_snapshot(&m->own_mut_mem, &mem_object, &mem_size);
 	if (error != 0)
 		goto fail;
+	if (!vmm_debug_allow_loader_run) {
+		error = EBUSY;
+		goto fail;
+	}
 	error = vmm_loader_install(loader, mem_object, mem_size);
 	if (error != 0)
 		goto fail;
-	vmm_loader_resume(loader);
+	error = vmm_loader_resume(loader);
+	if (error != 0)
+		goto fail;
 	error = vmm_loader_wait(loader);
 	if (error != 0)
 		goto fail;
@@ -250,6 +350,10 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	vm_object_deallocate(mem_object);
 	mem_object = NULL;
 	vmm_loader_fini(loader);
+	if (!vmm_debug_allow_vcpu_start) {
+		error = EBUSY;
+		goto fail_after_loader;
+	}
 	error = vmm_vcpu_start(m, task->imm_vcpu_count, &launch);
 	if (error != 0)
 		goto fail_after_loader;
@@ -257,6 +361,7 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	vmm_console_reset(&m->own_mut_console);
 	vmm_machine_set_status(m, VMM_MACHINE_RUNNING);
 	ev_push(m, EV_STARTED);
+	vmm_debug_trace("start running m=%p", m);
 	return;
 
 fail:

@@ -15,19 +15,20 @@
 
 #define VMM_LOADER_MAX	256
 
+#define VMM_LOADER_INITING	-3
+#define VMM_LOADER_PAUSED	-2
 #define VMM_LOADER_RUNNING	-1
-#define VMM_LOADER_OK		 0
+#define VMM_LOADER_OK		0
 #define VMM_LOADER_FAILED	 1
 
 struct file;
-struct proc;
 struct ucred;
 struct vm_object;
 struct vmm_launch;
 
 struct vmm_loader {
 	const char	*imm_path;
-	struct proc	*ref_mut_proc;
+	pid_t		 imm_pid;
 	struct vmm_domain_proc_handler own_handler;
 	struct file	*own_mut_mem_fp;
 	struct file	*own_mut_manifest_fp;
@@ -49,7 +50,7 @@ int	vmm_loader_init(struct vmm_loader *loader, const char *path,
 	    struct ucred *cred);
 int	vmm_loader_install(struct vmm_loader *loader,
 	    struct vm_object *mem_object, uint64_t mem_size);
-void	vmm_loader_resume(struct vmm_loader *loader);
+int	vmm_loader_resume(struct vmm_loader *loader);
 int	vmm_loader_wait(struct vmm_loader *loader);
 int	vmm_loader_manifest_load(struct vmm_loader *loader,
 	    struct vmm_launch *launch);

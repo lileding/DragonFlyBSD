@@ -756,17 +756,36 @@ vmm_loader_child(void *arg, struct trapframe *frame)
 	struct nlookupdata nd;
 	struct image_args args;
 	int error;
+	int state;
 
 	(void)frame;
-	error = tsleep(loader, PCATCH, "vmmldp", 0);
-	if (error)
+	/*
+	 * State is the condition, wakeup is only the notification.  Publish
+	 * PAUSED before sleeping so vmm_loader_init() can return only after
+	 * the child is ready for a later resume.
+	 */
+	if (!atomic_cmpset_int(&loader->atomic_mut_state, VMM_LOADER_INITING,
+	    VMM_LOADER_PAUSED))
 		exit1(W_EXITCODE(127, SIGKILL));
-	if (atomic_fetchadd_int(&loader->atomic_mut_state, 0) !=
-	    VMM_LOADER_RUNNING)
-		exit1(W_EXITCODE(127, SIGKILL));
+	wakeup(&loader->own_handler);
+	for (;;) {
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_RUNNING)
+			break;
+		if (state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
+			exit1(W_EXITCODE(127, SIGKILL));
+		tsleep_interlock(loader, PCATCH);
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_RUNNING ||
+		    state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
+			continue;
+		error = tsleep(loader, PINTERLOCKED | PCATCH, "vmmldp", 0);
+		if (error)
+			exit1(W_EXITCODE(127, SIGKILL));
+	}
 
 	/*
-	 * wakeup(loader) is the resume channel for this paused child.  The
+	 * wakeup(loader) is the resume notification for this paused child.  The
 	 * machine task only calls it after vmm_loader_install() has prepared
 	 * fd3/fd4, so no separate "installed" state is needed here.
 	 */
@@ -812,21 +831,33 @@ static void
 vmm_loader_exit_cb(void *arg, int exit_code)
 {
 	struct vmm_loader *loader = arg;
-	int state;
+	int old, state;
 
 	state = (WIFEXITED(exit_code) && WEXITSTATUS(exit_code) == 0) ?
 	    VMM_LOADER_OK : VMM_LOADER_FAILED;
-	atomic_cmpset_int(&loader->atomic_mut_state, VMM_LOADER_RUNNING,
-	    state);
+	for (;;) {
+		old = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (old == VMM_LOADER_OK || old == VMM_LOADER_FAILED)
+			return;
+		if (atomic_cmpset_int(&loader->atomic_mut_state, old, state))
+			return;
+	}
 }
 
 static void
 vmm_loader_kill(struct vmm_loader *loader)
 {
+	struct proc *p;
+
 	if (loader == NULL)
 		return;
-	if (loader->ref_mut_proc != NULL)
-		ksignal(loader->ref_mut_proc, SIGKILL);
+	if (loader->imm_pid > 0) {
+		p = pfind(loader->imm_pid);
+		if (p != NULL) {
+			ksignal(p, SIGKILL);
+			PRELE(p);
+		}
+	}
 	/* wakeup(loader) is the paused-child resume/kill channel. */
 	wakeup(loader);
 	vmm_loader_revoke(loader);
@@ -839,6 +870,7 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 	struct proc *child;
 	struct lwp *child_lwp;
 	int error;
+	int state;
 
 	if (loader == NULL)
 		return EINVAL;
@@ -846,15 +878,14 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 	if (path == NULL || path[0] == '\0' || cred == NULL)
 		return EINVAL;
 	loader->imm_path = path;
-	loader->atomic_mut_state = VMM_LOADER_RUNNING;
+	loader->atomic_mut_state = VMM_LOADER_INITING;
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
 	if (error)
 		return error;
 
-	PHOLD(child);
-	loader->ref_mut_proc = child;
-	loader->own_handler.imm_pid = child->p_pid;
+	loader->imm_pid = child->p_pid;
+	loader->own_handler.imm_pid = loader->imm_pid;
 	loader->own_handler.fnonce_exit_cb = vmm_loader_exit_cb;
 	loader->own_handler.borrow_mut_arg = loader;
 	loader->own_handler.optional_borrow_wait_chan = &loader->own_handler;
@@ -863,16 +894,56 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 	if (error) {
 		ksignal(child, SIGKILL);
 		wakeup(loader);
-		PRELE(child);
-		loader->ref_mut_proc = NULL;
+		loader->imm_pid = 0;
 		return error;
 	}
 
 	child_lwp = ONLY_LWP_IN_PROC(child);
 	vmm_loader_set_proc_cred(child, cred);
 	cpu_set_fork_handler(child_lwp, vmm_loader_child, loader);
+	PHOLD(child);
 	start_forked_proc(curthread->td_lwp, child);
-	return 0;
+	PRELE(child);
+	for (;;) {
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_PAUSED)
+			return 0;
+		if (state == VMM_LOADER_OK || state == VMM_LOADER_FAILED) {
+			error = ENOEXEC;
+			break;
+		}
+		tsleep_interlock(&loader->own_handler, 0);
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_PAUSED ||
+		    state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
+			continue;
+		error = tsleep(&loader->own_handler, PINTERLOCKED, "vmmldi",
+		    hz * 10);
+		if (error == EWOULDBLOCK) {
+			vmm_loader_kill(loader);
+			for (;;) {
+				state = atomic_fetchadd_int(
+				    &loader->atomic_mut_state, 0);
+				if (state == VMM_LOADER_OK ||
+				    state == VMM_LOADER_FAILED)
+					break;
+				tsleep_interlock(&loader->own_handler, 0);
+				state = atomic_fetchadd_int(
+				    &loader->atomic_mut_state, 0);
+				if (state == VMM_LOADER_OK ||
+				    state == VMM_LOADER_FAILED)
+					continue;
+				(void)tsleep(&loader->own_handler, PINTERLOCKED,
+				    "vmmldix", hz * 10);
+				vmm_loader_kill(loader);
+			}
+			error = ENOEXEC;
+			break;
+		}
+	}
+	vmm_domain_proc_unregister(&loader->own_handler);
+	loader->imm_pid = 0;
+	return error;
 }
 
 int
@@ -883,6 +954,9 @@ vmm_loader_install(struct vmm_loader *loader, struct vm_object *mem_object,
 
 	if (loader == NULL || mem_object == NULL || mem_size == 0)
 		return EINVAL;
+	if (atomic_fetchadd_int(&loader->atomic_mut_state, 0) !=
+	    VMM_LOADER_PAUSED)
+		return ECANCELED;
 
 	loader->imm_mem_size = mem_size;
 	error = vmm_loader_open_object_fd(mem_object,
@@ -897,11 +971,16 @@ vmm_loader_install(struct vmm_loader *loader, struct vm_object *mem_object,
 	return error;
 }
 
-void
+int
 vmm_loader_resume(struct vmm_loader *loader)
 {
-	if (loader != NULL)
-		wakeup(loader);
+	if (loader == NULL)
+		return EINVAL;
+	if (!atomic_cmpset_int(&loader->atomic_mut_state, VMM_LOADER_PAUSED,
+	    VMM_LOADER_RUNNING))
+		return ECANCELED;
+	wakeup(loader);
+	return 0;
 }
 
 int
@@ -912,35 +991,49 @@ vmm_loader_wait(struct vmm_loader *loader)
 
 	if (loader == NULL)
 		return EINVAL;
-	state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
-	if (state == VMM_LOADER_RUNNING) {
-		/*
-		 * wakeup(&loader->own_handler) is the task wait channel.  The
-		 * global at_exit hook uses it after publishing the process
-		 * result through fnonce_exit_cb.
-		 */
-		error = tsleep(&loader->own_handler, 0, "vmmld", hz * 10);
+	for (;;) {
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_OK)
+			return 0;
+		if (state != VMM_LOADER_RUNNING)
+			return ENOEXEC;
+		tsleep_interlock(&loader->own_handler, 0);
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state != VMM_LOADER_RUNNING)
+			continue;
+		error = tsleep(&loader->own_handler, PINTERLOCKED, "vmmld",
+		    hz * 10);
 		if (error == EWOULDBLOCK) {
 			vmm_loader_kill(loader);
 			return ENOEXEC;
 		}
-		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
 	}
-	return state == VMM_LOADER_OK ? 0 : ENOEXEC;
 }
 
 void
 vmm_loader_fini(struct vmm_loader *loader)
 {
+	int error;
+	int state;
+
 	if (loader == NULL)
 		return;
 
-	if (atomic_fetchadd_int(&loader->atomic_mut_state, 0) ==
-	    VMM_LOADER_RUNNING) {
+	state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+	if (state != VMM_LOADER_OK && state != VMM_LOADER_FAILED)
 		vmm_loader_kill(loader);
-		(void)tsleep(&loader->own_handler, 0, "vmmldx", hz * 10);
-		KKASSERT(atomic_fetchadd_int(&loader->atomic_mut_state, 0) !=
-		    VMM_LOADER_RUNNING);
+	for (;;) {
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
+			break;
+		tsleep_interlock(&loader->own_handler, 0);
+		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
+		if (state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
+			continue;
+		error = tsleep(&loader->own_handler, PINTERLOCKED, "vmmldx",
+		    hz * 10);
+		if (error == EWOULDBLOCK)
+			vmm_loader_kill(loader);
 	}
 	vmm_domain_proc_unregister(&loader->own_handler);
 	vmm_loader_revoke(loader);
@@ -949,8 +1042,5 @@ vmm_loader_fini(struct vmm_loader *loader)
 		vm_object_deallocate(loader->own_mut_manifest_object);
 		loader->own_mut_manifest_object = NULL;
 	}
-	if (loader->ref_mut_proc != NULL) {
-		PRELE(loader->ref_mut_proc);
-		loader->ref_mut_proc = NULL;
-	}
+	loader->imm_pid = 0;
 }

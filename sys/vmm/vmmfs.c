@@ -268,13 +268,20 @@ vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	enum vtype vtype = node->vn_vtype;
 	int error = 0;
 
+	kprintf("vmm klog: alloc_vp begin node=%p ino=%ju type=%d vnode=%p\n",
+	    node, (uintmax_t)node->vn_ino, vtype, node->vn_vnode);
 loop:
 	vp = NULL;
 	if (node->vn_vnode == NULL) {
+		kprintf("vmm klog: alloc_vp getnewvnode node=%p ino=%ju\n",
+		    node, (uintmax_t)node->vn_ino);
 		error = getnewvnode(VMMFS_VTAG, mp, &vp, VLKTIMEOUT,
 		    LK_CANRECURSE);
-		if (error)
+		if (error) {
+			kprintf("vmm klog: alloc_vp getnewvnode error=%d node=%p\n",
+			    error, node);
 			goto out;
+		}
 		/*
 		 * The vnode is already visible on mp's vnode list.  VFS mount
 		 * scans skip VNON, so mark the not-yet-bound vnode VBAD until
@@ -288,6 +295,8 @@ loop:
 	if (node->vn_vnode != NULL) {
 		struct vnode *ovp = node->vn_vnode;
 
+		kprintf("vmm klog: alloc_vp existing node=%p ovp=%p\n",
+		    node, ovp);
 		vhold(ovp);
 		lockmgr(&node->vn_interlock, LK_RELEASE);
 		if (vp != NULL) {
@@ -316,12 +325,17 @@ loop:
 	vp->v_data = node;
 	vp->v_type = vtype;
 	node->vn_vnode = vp;
+	kprintf("vmm klog: alloc_vp bound node=%p vp=%p ino=%ju\n",
+	    node, vp, (uintmax_t)node->vn_ino);
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 
 	vx_downgrade(vp);
+	kprintf("vmm klog: alloc_vp downgraded node=%p vp=%p\n", node, vp);
 
 out:
 	*vpp = vp;
+	kprintf("vmm klog: alloc_vp end node=%p vp=%p error=%d\n",
+	    node, vp, error);
 	return error;
 }
 
@@ -586,11 +600,14 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	struct vmmfs_mount *vmp;
 	size_t size;
 
+	kprintf("vmm klog: mount begin mp=%p path=%p\n", mp, path);
 	if (mp->mnt_flag & MNT_UPDATE)
 		return EOPNOTSUPP;
 
+	kprintf("vmm klog: mount kmalloc\n");
 	vmp = kmalloc(sizeof(*vmp), M_VMMFS, M_WAITOK | M_ZERO);
 	vmp->vm_mp = mp;
+	kprintf("vmm klog: mount node init vmp=%p\n", vmp);
 	lockinit(&vmp->vm_lock, "vmmfs registry", 0, 0);
 	vmmfs_node_init(&vmp->vm_root, &vmmfs_root_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_ROOT_INO, NULL, NULL);
@@ -606,7 +623,9 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
 	SLIST_INIT(&vmp->vm_devs);
 	vmp->vm_next_dev = 0;
+	kprintf("vmm klog: mount host pool begin vmp=%p\n", vmp);
 	vmmfs_device_init_host_pool(vmp);
+	kprintf("vmm klog: mount host pool done vmp=%p\n", vmp);
 
 	mp->mnt_flag |= MNT_LOCAL;
 	mp->mnt_kern_flag |= MNTK_ALL_MPSAFE;
@@ -625,19 +644,10 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 
 	vmmfs_statfs(mp, &mp->mnt_stat, cred);
 	vmmfs_mount_count_hold();
+	kprintf("vmm klog: mount done mp=%p vmp=%p\n", mp, vmp);
 	return 0;
 }
 
-static int
-vmmfs_unmount_busy(struct vmmfs_mount *vmp)
-{
-	int busy = 0;
-
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	busy = (vmp->vm_machine_count != 0);
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	return busy;
-}
 
 static int
 vmmfs_unmount(struct mount *mp, int mntflags)
@@ -645,13 +655,28 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(mp);
 	int error;
 
+	kprintf("vmm klog: unmount begin mp=%p vmp=%p flags=%d\n", mp, vmp,
+	    mntflags);
 	(void)mntflags;
-	if (vmmfs_unmount_busy(vmp))
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	if (vmp->vm_machine_count != 0) {
+		kprintf("vmm klog: unmount busy vmp=%p count=%d\n", vmp,
+		    vmp->vm_machine_count);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EBUSY;
+	}
+	vmp->vm_closing = 1;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	error = vflush(mp, 0, 0);
-	if (error)
+	if (error) {
+		kprintf("vmm klog: unmount vflush error=%d vmp=%p\n", error,
+		    vmp);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		vmp->vm_closing = 0;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return error;
+	}
 
 	vmmfs_device_destroy_all(vmp);
 	vmmfs_node_uninit(&vmp->vm_devroot);
@@ -663,6 +688,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	lockuninit(&vmp->vm_lock);
 	mp->mnt_data = NULL;
 	kfree(vmp, M_VMMFS);
+	kprintf("vmm klog: unmount done mp=%p\n", mp);
 	return 0;
 }
 
@@ -699,13 +725,17 @@ vmmfs_vfs_init(struct vfsconf *conf)
 	int error;
 
 	(void)conf;
+	kprintf("vmm klog: vfs_init begin\n");
 	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
 	vmmfs_mount_count = 0;
+	kprintf("vmm klog: domain init begin\n");
 	error = vmm_domain_init();
 	if (error) {
+		kprintf("vmm klog: domain init error=%d\n", error);
 		lockuninit(&vmmfs_mount_lock);
 		return error;
 	}
+	kprintf("vmm klog: domain init done\n");
 	kprintf("vmm: loaded\n");
 	return 0;
 }
@@ -714,8 +744,11 @@ static int
 vmmfs_vfs_uninit(struct vfsconf *conf)
 {
 	(void)conf;
-	if (vmmfs_mount_count_busy())
+	kprintf("vmm klog: vfs_uninit begin\n");
+	if (vmmfs_mount_count_busy()) {
+		kprintf("vmm klog: vfs_uninit busy\n");
 		return EBUSY;
+	}
 	vmm_domain_uninit();
 	lockuninit(&vmmfs_mount_lock);
 	kprintf("vmm: unloaded\n");

@@ -39,15 +39,32 @@ RB_GENERATE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
 static struct vmmfs_machine *
 vmmfs_machines_find(struct vmmfs_mount *vmp, const char *name, int nlen)
 {
-	struct vmmfs_machine key;
+	struct vmmfs_machine *m;
 
-	if (nlen > VMMFS_NAME_MAX)
+	if (nlen < 0 || nlen > VMMFS_NAME_MAX)
 		return NULL;
-	bcopy(name, key.name, nlen);
-	key.name[nlen] = '\0';
-	return RB_FIND(vmmfs_machtree, &vmp->vm_machtree, &key);
-}
+	m = RB_ROOT(&vmp->vm_machtree);
+	while (m != NULL) {
+		const char *mname = m->name;
+		int mlen = strlen(mname);
+		int cmp;
 
+		cmp = strncmp(name, mname, (nlen < mlen) ? nlen : mlen);
+		if (cmp == 0) {
+			if (nlen < mlen)
+				cmp = -1;
+			else if (nlen > mlen)
+				cmp = 1;
+		}
+		if (cmp < 0)
+			m = RB_LEFT(m, vm_link);
+		else if (cmp > 0)
+			m = RB_RIGHT(m, vm_link);
+		else
+			return m;
+	}
+	return NULL;
+}
 
 /* ---- machines/ directory vops ---- */
 
@@ -138,30 +155,83 @@ vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	if (ncp->nc_nlen == 4 && bcmp(ncp->nc_name, "host", 4) == 0)
 		return EEXIST;	/* host is reserved */
 
+	kprintf("vmm klog: nmkdir begin vmp=%p name=%.*s\n", vmp,
+	    ncp->nc_nlen, ncp->nc_name);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	if (vmmfs_machines_find(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
+	if (vmp->vm_closing) {
+		kprintf("vmm klog: nmkdir closing vmp=%p\n", vmp);
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return EEXIST;
+		return EBUSY;
 	}
-	m = vmmfs_machine_create(vmp, ncp->nc_name, ncp->nc_nlen);
+	vmp->vm_machine_count++;
+	kprintf("vmm klog: nmkdir count hold vmp=%p count=%d\n", vmp,
+	    vmp->vm_machine_count);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	error = vmmfs_alloc_vp(dvp->v_mount, &m->node, LK_EXCLUSIVE | LK_RETRY,
-	    &vp);
-	if (error) {
+	m = vmmfs_machine_create(vmp, ncp->nc_name, ncp->nc_nlen);
+	kprintf("vmm klog: nmkdir created m=%p machine=%p\n", m,
+	    &m->machine);
+
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	kprintf("vmm klog: nmkdir locked vmp=%p m=%p\n", vmp, m);
+	if (vmmfs_machines_find(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
+		kprintf("vmm klog: nmkdir duplicate m=%p\n", m);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
 		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		m->vm_in_tree = 0;
-		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
 		KKASSERT(vmp->vm_machine_count > 0);
 		vmp->vm_machine_count--;
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return EEXIST;
+	}
+	kprintf("vmm klog: nmkdir rb_insert begin m=%p\n", m);
+	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
+	m->vm_in_tree = 1;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	kprintf("vmm klog: nmkdir vnode gate m=%p allow=%d\n", m,
+	    vmm_debug_allow_nmkdir_vnode);
+	vmm_debug_trace("nmkdir inserted name=%s m=%p allow_vnode=%d", m->name,
+	    &m->machine, vmm_debug_allow_nmkdir_vnode);
+	if (!vmm_debug_allow_nmkdir_vnode) {
+		kprintf("vmm klog: nmkdir gated cleanup begin m=%p\n", m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vmmfs_machine_free(m);
-		return error;
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		kprintf("vmm klog: nmkdir gated cleanup done m=%p\n", m);
+		return EBUSY;
 	}
 
+	kprintf("vmm klog: nmkdir alloc_vp begin m=%p node=%p\n", m,
+	    &m->node);
+	error = vmmfs_alloc_vp(dvp->v_mount, &m->node, LK_EXCLUSIVE | LK_RETRY,
+	    &vp);
+	if (error) {
+		kprintf("vmm klog: nmkdir alloc_vp error=%d m=%p\n", error, m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return error;
+	}
+	kprintf("vmm klog: nmkdir alloc_vp done m=%p vp=%p\n", m, vp);
+
 	*ap->a_vpp = vp;
+	kprintf("vmm klog: nmkdir cache begin m=%p vp=%p\n", m, vp);
 	cache_setunresolved(ap->a_nch);
 	cache_setvp(ap->a_nch, vp);
+	kprintf("vmm klog: nmkdir done m=%p vp=%p\n", m, vp);
 	return 0;
 }
 
@@ -246,11 +316,9 @@ vmmfs_machine_reaper(void *arg)
 	struct vmmfs_mount *vmp = m->vm_mount;
 
 	vmm_machine_drain(&m->machine);
+	vmmfs_machine_free(m);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	KKASSERT(vmp->vm_machine_count > 0);
 	vmp->vm_machine_count--;
-	if (vmp->vm_machine_count == 0)
-		wakeup(&vmp->vm_machine_count);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	vmmfs_machine_free(m);
 }

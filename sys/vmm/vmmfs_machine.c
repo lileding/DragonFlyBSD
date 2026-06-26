@@ -90,9 +90,10 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
 }
 
 /*
- * Allocate a machine, wire up its nodes with fresh inos, and insert it.  Caller
- * holds vm_lock and has checked the name is free.  The RB tree owns the
- * machine until deletion moves ownership to the reaper lwkt.
+ * Allocate a machine and wire up its nodes with fresh inos.  Only the inode
+ * range reservation runs under vm_lock; vmm_machine_init() starts a taskqueue
+ * thread and must not run there.  The caller later inserts the fully
+ * initialized object into machines/ or releases it.
  */
 struct vmmfs_machine *
 vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
@@ -101,14 +102,29 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	ino_t base;
 	int j;
 
+	kprintf("vmm klog: machine_create kmalloc begin vmp=%p name=%.*s\n",
+	    vmp, nlen, name);
 	m = kmalloc(sizeof(*m), M_VMMFS, M_WAITOK | M_ZERO);
+	kprintf("vmm klog: machine_create kmalloc done m=%p\n", m);
 	m->vm_mount = vmp;
 	bcopy(name, m->name, nlen);
 	m->name[nlen] = '\0';
-	vmm_machine_init(&m->machine);
 
+	kprintf("vmm klog: machine_create ino lock begin m=%p\n", m);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	base = vmp->vm_next_ino;
 	vmp->vm_next_ino += VMMFS_MACHINE_INO_STRIDE;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	kprintf("vmm klog: machine_create ino base=%ju m=%p\n",
+	    (uintmax_t)base, m);
+
+	kprintf("vmm klog: machine_create machine_init begin m=%p machine=%p\n",
+	    m, &m->machine);
+	vmm_machine_init(&m->machine);
+	kprintf("vmm klog: machine_create machine_init done m=%p machine=%p\n",
+	    m, &m->machine);
+
+	kprintf("vmm klog: machine_create node_init begin m=%p\n", m);
 	vmmfs_node_init(&m->node, &vmmfs_machine_class, VDIR, VMMFS_DIR_MODE,
 	    base, &vmp->vm_machines, m);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++) {
@@ -119,10 +135,8 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	}
 	vmmfs_node_init(&m->vn_devices, &vmmfs_devices_class, VDIR, VMMFS_DIR_MODE,
 	    base + VMMFS_MACHINE_DEV_OFF, &m->node, m);
+	kprintf("vmm klog: machine_create node_init done m=%p\n", m);
 
-	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
-	m->vm_in_tree = 1;
-	vmp->vm_machine_count++;
 	return m;
 }
 
@@ -131,11 +145,15 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 {
 	int j;
 
+	kprintf("vmm klog: machine_free begin m=%p machine=%p\n", m,
+	    &m->machine);
 	vmm_machine_uninit(&m->machine);
+	kprintf("vmm klog: machine_free machine_uninit done m=%p\n", m);
 	vmmfs_node_uninit(&m->node);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++)
 		vmmfs_node_uninit(cfg_node(m, &vmmfs_cfg_table[j]));
 	vmmfs_node_uninit(&m->vn_devices);
+	kprintf("vmm klog: machine_free kfree m=%p\n", m);
 	kfree(m, M_VMMFS);
 }
 

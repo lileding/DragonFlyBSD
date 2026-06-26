@@ -61,6 +61,13 @@ enum vmm_close_action {
 void vmm_machine_init(struct vmm_machine *m);
 void vmm_machine_uninit(struct vmm_machine *m);
 void vmm_machine_drain(struct vmm_machine *m);
+void vmm_debug_trace(const char *fmt, ...);
+extern int vmm_debug_allow_machine_taskqueue;
+extern int vmm_debug_allow_nmkdir_vnode;
+extern int vmm_debug_allow_start_execute;
+extern int vmm_debug_allow_loader_fork;
+extern int vmm_debug_allow_loader_run;
+extern int vmm_debug_allow_vcpu_start;
 size_t vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
     size_t cap);
 int vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len);

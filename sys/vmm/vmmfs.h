@@ -80,6 +80,7 @@ struct vmmfs_mount {
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
 	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
 	int			vm_machine_count; /* machines pending final cleanup */
+	int			vm_closing;	/* unmount has blocked new machines */
 	int			vm_next_dev;	/* monotonic device ino index */
 };
 
