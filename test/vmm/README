@@ -10,8 +10,9 @@ The offline gate covers:
 - `mem/mem_config_check.sh`: kernel mem config and backing boundaries,
   including two-megabyte alignment, maximum size, formatting, publish/detach,
   default-pager backing shape, machine `vmspace` setup, backing object identity,
-  snapshot reference lifetime, GPA fault dispatch through the machine
-  `vmspace`, and machine pmap CPU cleanup before `vmspace` release.
+  snapshot reference lifetime, max-size lazy prepare without VM faults, GPA
+  fault dispatch through the machine `vmspace`, and machine pmap CPU cleanup
+  before `vmspace` release.
 - `revoke/loader_revoke_compile_check.sh`: fd3/fd4 revoke probe build health
   and ordinary-file no-revoke output-field smoke.
 - `smoke/smoke_loader_check.sh`: smoke loader fd3/fd4 output for every mode,
@@ -24,9 +25,11 @@ The offline gate covers:
 The offline gate proves loader-facing ABI shape and pure kernel-object backing
 contracts: fd3/fd4 sizing, sparse-file writes, manifest layout, parser
 acceptance, guest RAM object identity, and the expected machine-`vmspace` fault
-call shape.  It does not prove kernel revoke, real pmap/NPT population, TLB
-shootdown behavior, or module-unload safety because those require the real
-kernel pager, vmmfs, and SVM paths.
+call shape.  It also proves that `vmm_mem_prepare(VMM_MEM_MAX)` stays at the
+object/mapping layer and does not regress into an eager per-page setup loop.  It
+does not prove kernel revoke, real pmap/NPT population, TLB shootdown behavior,
+or module-unload safety because those require the real kernel pager, vmmfs, and
+SVM paths.
 
 Run it from the repository root:
 
