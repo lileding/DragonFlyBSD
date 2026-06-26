@@ -295,6 +295,11 @@ main(void)
 
 	build_valid_state(manifest);
 	vcpu = manifest_vcpu(manifest);
+	vcpu->gpr[VMM_X64_GPR_RSP] = MEM_SIZE - 4;
+	expect_result("bad rsp range", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
 	vcpu->gpr[VMM_X64_GPR_RFLAGS] = 0;
 	expect_result("bad rflags fixed bit", manifest, EINVAL);
 

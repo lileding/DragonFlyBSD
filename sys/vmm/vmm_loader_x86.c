@@ -215,7 +215,8 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 		return EINVAL;
 	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RIP]))
 		return EINVAL;
-	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RSP]))
+	if (!vmm_gpa_inside(mem_size, vcpu->gpr[VMM_X64_GPR_RSP],
+	    sizeof(uint64_t)))
 		return EINVAL;
 	if (!vmm_loader_x86_rflags_valid(vcpu->gpr[VMM_X64_GPR_RFLAGS]))
 		return EINVAL;
