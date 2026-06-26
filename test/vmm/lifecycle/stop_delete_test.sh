@@ -8,6 +8,7 @@ VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-lifecycle-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-lifecycle-test.log}
 LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_lifecycle_smoke_loader}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-lifecycle-$$-mount_vmm}
 MEM=${VMM_LIFECYCLE_MEM:-2M}
 TIMEOUT=${VMM_TIMEOUT:-20}
 LOADED=0
@@ -61,7 +62,7 @@ ensure_mount()
 {
 	[ "$MOUNTED" -eq 1 ] && return 0
 	run mkdir -p "$MNT"
-	run mount -t vmm vmm "$MNT"
+	run "$MOUNT_HELPER" vmm "$MNT"
 	MOUNTED=1
 }
 
@@ -87,7 +88,7 @@ cleanup()
 	cleanup_machine lease_loop
 	[ "$MOUNTED" -eq 1 ] && umount -f "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] && kldunload vmm >>"$LOG" 2>&1
-	rm -f /var/tmp/vmmld_lifecycle_force_loop /var/tmp/vmmld_lifecycle_lease_loop
+	rm -f /var/tmp/vmmld_lifecycle_force_loop /var/tmp/vmmld_lifecycle_lease_loop "$MOUNT_HELPER"
 }
 
 start_loop()
@@ -107,9 +108,10 @@ start_loop()
 trap cleanup EXIT INT TERM
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
 [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+case "$MOUNT_HELPER" in *_vmm) ;; *) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;; esac
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$REPO/test/vmm/smoke/smoke_loader.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 || { run kldload "$VMM_KO"; LOADED=1; }
-[ -x /sbin/mount_vmm ] || run ln -sf /sbin/mount_std /sbin/mount_vmm
+run rm -f "$MOUNT_HELPER"; run ln -s /sbin/mount_std "$MOUNT_HELPER"
 
 ensure_mount
 start_loop force_loop

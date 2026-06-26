@@ -3,6 +3,7 @@ set -u
 ROOT=$(dirname "$0"); REPO=$(cd "$ROOT/../../.." && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}; MNT=${VMM_MOUNT:-/var/tmp/dfvmm-revoke-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-revoke-test.log}; LOADER=${VMM_REVOKE_LOADER:-/var/tmp/vmm_revoke_loader}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-revoke-$$-mount_vmm}
 MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:-5}; LOADED=0; MOUNTED=0
 say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
@@ -21,7 +22,7 @@ cleanup()
 	set +e; cleanup_machine revoke_exit; cleanup_machine revoke_hang
 	[ "$MOUNTED" -eq 1 ] && umount "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] && kldunload vmm >>"$LOG" 2>&1
-	rm -f /var/tmp/vmmld_revoke_exit /var/tmp/vmmld_revoke_hang
+	rm -f /var/tmp/vmmld_revoke_exit /var/tmp/vmmld_revoke_hang "$MOUNT_HELPER"
 }
 make_wrapper()
 {
@@ -44,6 +45,7 @@ run_case()
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"; [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/loader_revoke.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 || { run kldload "$VMM_KO"; LOADED=1; }
-[ -x /sbin/mount_vmm ] || run ln -sf /sbin/mount_std /sbin/mount_vmm
-run mkdir -p "$MNT"; run mount -t vmm vmm "$MNT"; MOUNTED=1
+case "$MOUNT_HELPER" in *_vmm) ;; *) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;; esac
+run rm -f "$MOUNT_HELPER"; run ln -s /sbin/mount_std "$MOUNT_HELPER"
+run mkdir -p "$MNT"; run "$MOUNT_HELPER" vmm "$MNT"; MOUNTED=1
 run_case exit; run_case hang; say "PASS"
