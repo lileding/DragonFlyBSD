@@ -384,14 +384,16 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	if (prot & VM_PROT_EXECUTE)
 		return VM_PAGER_ERROR;
 	/*
-	 * The fd object is only a revocable mmap capability.  The returned
-	 * page belongs to the real backing object: fd3's guest RAM or fd4's
-	 * manifest page.  DragonFly's OBJT_MGTDEVICE fault path allows this
-	 * direct page return without inserting it into the fd object, while
-	 * vm_object_page_remove() on the fd object still invalidates existing
-	 * user mappings by scanning the object's backing_list.  This keeps
-	 * loader-to-vCPU handoff zero-copy and lets revoke cut off userland
-	 * without releasing fd3 guest RAM.
+	 * The fd object is only a revocable mmap capability.  It is not the
+	 * storage object.  The returned page belongs to the real backing
+	 * object: fd3's guest RAM or fd4's manifest page.
+	 *
+	 * DragonFly's OBJT_MGTDEVICE fault path allows this direct page return
+	 * without inserting the page into the fd object.  The fd object still
+	 * owns the map backing list for user mappings, so revoke can remove
+	 * those pmap entries by calling vm_object_page_remove() on the fd
+	 * object itself.  This keeps loader-to-vCPU handoff zero-copy and lets
+	 * revoke cut off userland without releasing fd3 guest RAM.
 	 *
 	 * vm_fault_object() calls this pager with the fd object token held.
 	 * VM_OBJECT_LOCK() is a recursive token hold here; the matching
@@ -433,9 +435,9 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 			lfd->own_mut_backing_object = NULL;
 			/*
 			 * vm_fault() enters OBJT_MGTDEVICE pages while holding
-			 * this object token through pmap_enter().  Keep revoke
-			 * under the same token so no in-flight fault can pass
-			 * the revoked check and install a fresh pmap entry
+			 * this fd object token through pmap_enter().  Keep
+			 * revoke under the same token so no in-flight fault can
+			 * pass the revoked check and install a fresh pmap entry
 			 * after this removal pass.
 			 */
 			vm_object_page_remove(object, 0, 0, FALSE);
