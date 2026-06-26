@@ -20,11 +20,24 @@
 #define VMM_EVENT_CAP	32
 
 struct ucred;
+struct taskqueue;
 struct vmm_host;
+struct vmm_loader_epoch;
 
 struct vmm_machine_owner_ops {
 	void	(*hold)(void *arg);
 	void	(*release)(void *arg);
+};
+
+enum vmm_machine_event {
+	VMM_MACHINE_EVENT_START,
+	VMM_MACHINE_EVENT_STOP,
+	VMM_MACHINE_EVENT_RESET,
+};
+
+enum vmm_machine_event_mode {
+	VMM_MACHINE_EVENT_APIC,
+	VMM_MACHINE_EVENT_FORCE,
 };
 
 struct vmm_machine {
@@ -32,6 +45,7 @@ struct vmm_machine {
 	struct vmm_mem		own_mut_mem;
 	struct vmm_loader	own_mut_loader;
 	struct vmm_console	own_mut_console;
+	struct taskqueue	*own_mut_taskqueue;
 
 	/*
 	 * Lock map:
@@ -46,7 +60,7 @@ struct vmm_machine {
 	int		mut_running;
 	int		mut_starting;
 	int		mut_start_cancel;
-	struct ucred	*ref_mut_start_cred;
+	uint32_t	mut_cmd_count;
 	struct vmm_host	*borrow_mut_host;
 	const struct vmm_machine_owner_ops *borrow_imm_owner_ops;
 	void		*borrow_imm_owner_arg;
@@ -89,14 +103,21 @@ int	vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
 
 /*
  * Lifecycle.  stopped is declarative: it means "desired stopped", which is
- * what vmmfs presents as the stopped control file.  starting/running are
- * current execution state, driven by an asynchronous worker.
+ * what vmmfs presents as the stopped control file.  vmmfs translates file
+ * operations into ordered START/STOP/RESET events; vmm_machine_on_event()
+ * snapshots any syscall-context-only state (currently the paused loader
+ * process) and queues a serialized command.  starting/running are current
+ * execution state, not proof that a just-returned vmmfs operation already
+ * completed.
  */
 int	vmm_machine_is_stopped(const struct vmm_machine *m);
 int	vmm_machine_is_running(const struct vmm_machine *m);
 int	vmm_machine_starting(const struct vmm_machine *m);
 int	vmm_machine_quiesced(const struct vmm_machine *m);
 void	vmm_machine_wait_quiesced(struct vmm_machine *m);
+int	vmm_machine_on_event(struct vmm_machine *m,
+	    enum vmm_machine_event event, enum vmm_machine_event_mode mode,
+	    struct ucred *cred, struct vmm_host *host);
 int	vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
 	    struct vmm_host *host);
 void	vmm_machine_request_stopped(struct vmm_machine *m, int force);

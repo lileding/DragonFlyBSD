@@ -7,6 +7,8 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/malloc.h>
+#include <sys/taskqueue.h>
 #include <sys/proc.h>
 #include <sys/thread2.h>
 #include <sys/ucred.h>
@@ -22,11 +24,26 @@
 #define EV_STOPPED	3
 #define EV_DELETED	4
 
-static void	vmm_machine_start_child(void *arg, struct trapframe *frame);
-static void	vmm_machine_start_task(struct vmm_machine *m);
+
+struct vmm_machine_cmd {
+	struct task task;
+	struct vmm_machine *borrow_imm_machine;
+	enum vmm_machine_event imm_event;
+	enum vmm_machine_event_mode imm_mode;
+	struct vmm_loader_epoch *own_loader;
+};
+
+static void	vmm_machine_cmd_task(void *arg, int pending);
+static void	vmm_machine_start(struct vmm_machine *m,
+		    struct vmm_loader_epoch *loader);
+static void	vmm_machine_stop(struct vmm_machine *m, int apic);
+static void	vmm_machine_reset(struct vmm_machine *m, int apic,
+		    struct vmm_loader_epoch *loader);
 static int	vmm_machine_config_complete_locked(const struct vmm_machine *m);
 static void	vmm_machine_start_locked(struct vmm_machine *m);
 static int	vmm_machine_wait_for_vcpu_drain(struct vmm_machine *m);
+static void	vmm_machine_wait_execution_stopped(struct vmm_machine *m);
+static void	vmm_machine_request_stop_locked(struct vmm_machine *m);
 static struct vmm_mem_backing *vmm_machine_detach_mem_locked(
 		    struct vmm_machine *m);
 static int	vmm_machine_begin_delete_locked(struct vmm_machine *m);
@@ -79,6 +96,11 @@ vmm_machine_init(struct vmm_machine *m)
 	memset(m, 0, sizeof(*m));
 	vmm_console_init(&m->own_mut_console);
 	lwkt_token_init(&m->token_lifecycle, "vmmmach");
+	m->own_mut_taskqueue = taskqueue_create("vmm_machine", M_WAITOK,
+	    taskqueue_thread_enqueue, &m->own_mut_taskqueue);
+	KKASSERT(m->own_mut_taskqueue != NULL);
+	(void)taskqueue_start_threads(&m->own_mut_taskqueue, 1,
+	    TDPRI_KERN_DAEMON, -1, "vmm machine");
 	m->mut_desired_stopped = 1;
 	ev_push(m, EV_CREATED);
 	ev_push(m, EV_STOPPED);
@@ -97,18 +119,18 @@ vmm_machine_uninit(struct vmm_machine *m)
 	 * teardown; it must not be the path that races active vCPUs against
 	 * guest RAM detach.
 	 */
-	vmm_machine_request_stopped(m, 1);
 	vmm_machine_lock(m);
+	vmm_machine_request_stop_locked(m);
 	thread_count = m->own_mut_vcpu.mut_count;
-	if (m->ref_mut_start_cred != NULL) {
-		crfree(m->ref_mut_start_cred);
-		m->ref_mut_start_cred = NULL;
-	}
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 	backing = vmm_machine_detach_mem_locked(m);
 	vmm_machine_unlock(m);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	if (m->own_mut_taskqueue != NULL) {
+		taskqueue_free(m->own_mut_taskqueue);
+		m->own_mut_taskqueue = NULL;
+	}
 }
 
 void
@@ -135,152 +157,175 @@ vmm_machine_owner_release(struct vmm_machine *m)
 		m->borrow_imm_owner_ops->release(m->borrow_imm_owner_arg);
 }
 
-static int
-vmm_machine_start_is_cancelled(void *arg)
+int
+vmm_machine_on_event(struct vmm_machine *m, enum vmm_machine_event event,
+    enum vmm_machine_event_mode mode, struct ucred *cred, struct vmm_host *host)
 {
-	struct vmm_machine *m = arg;
-	int cancelled;
+	struct vmm_machine_cmd *cmd;
+	struct vmm_loader_epoch *loader = NULL;
+	char loader_path[VMM_LOADER_MAX + 1];
+	size_t loader_path_len = 0;
+	int need_loader;
+	int error = 0;
+
+	need_loader = (event == VMM_MACHINE_EVENT_START ||
+	    (event == VMM_MACHINE_EVENT_RESET && mode == VMM_MACHINE_EVENT_FORCE));
+	if (need_loader) {
+		vmm_machine_lock(m);
+		if (m->mut_deleting)
+			error = ENXIO;
+		else if (!vmm_machine_config_complete_locked(m))
+			error = EINVAL;
+		else {
+			loader_path_len = vmm_loader_path(&m->own_mut_loader,
+			    loader_path, VMM_LOADER_MAX);
+			if (loader_path_len == 0)
+				error = EINVAL;
+			else
+				loader_path[loader_path_len] = '\0';
+		}
+		vmm_machine_unlock(m);
+		if (error)
+			return error;
+
+		/*
+		 * The syscall that produced this event supplies the proc/lwp context
+		 * needed to fork.  The child remains paused; fd3/fd4 are installed only
+		 * when the serialized START/RESET command actually executes.
+		 */
+		error = vmm_loader_fork_paused(loader_path, cred, &loader);
+		if (error)
+			return error;
+	}
+
+	cmd = kmalloc(sizeof(*cmd), M_TEMP, M_WAITOK | M_ZERO);
+	TASK_INIT(&cmd->task, 0, vmm_machine_cmd_task, cmd);
+	cmd->borrow_imm_machine = m;
+	cmd->imm_event = event;
+	cmd->imm_mode = mode;
+	cmd->own_loader = loader;
+	loader = NULL;
 
 	vmm_machine_lock(m);
-	cancelled = vmm_machine_start_cancelled_locked(m);
+	if (m->mut_deleting) {
+		error = ENXIO;
+	} else if (m->own_mut_taskqueue == NULL) {
+		error = ENXIO;
+	} else {
+		if (event == VMM_MACHINE_EVENT_STOP) {
+			m->mut_desired_stopped = 1;
+			m->mut_start_cancel = 1;
+		} else {
+			m->mut_desired_stopped = 0;
+			m->mut_start_cancel = 0;
+			m->borrow_mut_host = host;
+		}
+		m->mut_cmd_count++;
+	}
 	vmm_machine_unlock(m);
-	return cancelled;
+	if (error) {
+		if (cmd->own_loader != NULL)
+			vmm_loader_free(cmd->own_loader);
+		kfree(cmd, M_TEMP);
+		return error;
+	}
+
+	vmm_machine_owner_hold(m);
+	error = taskqueue_enqueue(m->own_mut_taskqueue, &cmd->task);
+	if (error) {
+		vmm_machine_lock(m);
+		KKASSERT(m->mut_cmd_count > 0);
+		m->mut_cmd_count--;
+		vmm_machine_unlock(m);
+		if (cmd->own_loader != NULL)
+			vmm_loader_free(cmd->own_loader);
+		kfree(cmd, M_TEMP);
+		vmm_machine_owner_release(m);
+	}
+	return error;
 }
 
 int
 vmm_machine_request_running(struct vmm_machine *m, struct ucred *cred,
     struct vmm_host *host)
 {
-	struct proc *worker;
-	struct lwp *worker_lwp;
-	int error = 0;
-	int fork_worker = 0;
-	int vcpu_active;
-
-	vmm_machine_lock(m);
-	if (m->mut_deleting) {
-		error = ENXIO;
-		goto out;
-	}
-	if (!m->mut_desired_stopped) {
-		error = ENOENT;
-		goto out;
-	}
-	if (!vmm_machine_config_complete_locked(m)) {
-		error = EINVAL;
-		goto out;
-	}
-	m->mut_desired_stopped = 0;
-	m->mut_start_cancel = 0;
-	vcpu_active = vmm_vcpu_has_active(&m->own_mut_vcpu);
-	if (!vcpu_active)
-		vmm_vcpu_request_run(&m->own_mut_vcpu);
-	if (!m->mut_starting && (!m->mut_running || vcpu_active)) {
-		m->mut_starting = 1;
-		m->ref_mut_start_cred = crhold(cred);
-		m->borrow_mut_host = host;
-		fork_worker = 1;
-	}
-out:
-	vmm_machine_unlock(m);
-
-	if (fork_worker) {
-		vmm_machine_owner_hold(m);
-		error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK,
-		    &worker);
-		if (error) {
-			vmm_machine_lock(m);
-			m->mut_starting = 0;
-			m->borrow_mut_host = NULL;
-			if (m->ref_mut_start_cred != NULL) {
-				crfree(m->ref_mut_start_cred);
-				m->ref_mut_start_cred = NULL;
-			}
-			vmm_machine_unlock(m);
-			vmm_machine_owner_release(m);
-		} else {
-			PHOLD(worker);
-			worker_lwp = ONLY_LWP_IN_PROC(worker);
-			cpu_set_fork_handler(worker_lwp,
-			    vmm_machine_start_child, m);
-			start_forked_proc(curthread->td_lwp, worker);
-			PRELE(worker);
-		}
-	}
-	return error;
+	return vmm_machine_on_event(m, VMM_MACHINE_EVENT_START,
+	    VMM_MACHINE_EVENT_FORCE, cred, host);
 }
 
 void
 vmm_machine_request_stopped(struct vmm_machine *m, int force)
 {
-	struct vmm_mem_backing *backing = NULL;
-	int release_now = 0;
-
-	(void)force;
-	vmm_machine_lock(m);
-	if (!m->mut_desired_stopped) {
-		m->mut_desired_stopped = 1;
-		m->mut_start_cancel = 1;
-	}
-	vmm_vcpu_request_stop(&m->own_mut_vcpu);
-	if (m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu)) {
-		m->mut_running = 0;
-		release_now = 1;
-		ev_push(m, EV_STOPPED);
-	}
-	if (release_now)
-		backing = vmm_machine_detach_mem_locked(m);
-	vmm_machine_unlock(m);
-
-	wakeup(m);
-	if (release_now)
-		vmm_mem_release_backing(backing);
+	(void)vmm_machine_on_event(m, VMM_MACHINE_EVENT_STOP,
+	    force ? VMM_MACHINE_EVENT_FORCE : VMM_MACHINE_EVENT_APIC, NULL, NULL);
 }
 
 static void
-vmm_machine_start_task(struct vmm_machine *m)
+vmm_machine_cmd_task(void *arg, int pending)
 {
-	struct ucred *cred;
-	struct vmm_host *host;
+	struct vmm_machine_cmd *cmd = arg;
+	struct vmm_machine *m = cmd->borrow_imm_machine;
+
+	(void)pending;
+	switch (cmd->imm_event) {
+	case VMM_MACHINE_EVENT_START:
+		vmm_machine_start(m, cmd->own_loader);
+		cmd->own_loader = NULL;
+		break;
+	case VMM_MACHINE_EVENT_STOP:
+		vmm_machine_stop(m, cmd->imm_mode == VMM_MACHINE_EVENT_APIC);
+		break;
+	case VMM_MACHINE_EVENT_RESET:
+		vmm_machine_reset(m, cmd->imm_mode == VMM_MACHINE_EVENT_APIC,
+		    cmd->own_loader);
+		cmd->own_loader = NULL;
+		break;
+	}
+	if (cmd->own_loader != NULL)
+		vmm_loader_free(cmd->own_loader);
+
+	vmm_machine_lock(m);
+	KKASSERT(m->mut_cmd_count > 0);
+	m->mut_cmd_count--;
+	vmm_machine_unlock(m);
+	wakeup(m);
+	kfree(cmd, M_TEMP);
+	vmm_machine_owner_release(m);
+}
+
+static void
+vmm_machine_start(struct vmm_machine *m, struct vmm_loader_epoch *loader)
+{
 	struct vmm_mem_backing *backing = NULL;
 	struct vmm_mem_backing *prepared_backing = NULL;
 	struct vmm_launch launch;
 	struct vm_object *mem_object = NULL;
-	char loader_path[VMM_LOADER_MAX + 1];
+	struct vmm_host *host;
 	uint64_t mem_bytes;
 	uint64_t mem_size = 0;
-	size_t loader_path_len;
 	int error;
-	int vcpu_owner = 0;
-	int started = 0;
 	int release_mem = 1;
+	int vcpu_owner = 0;
 
+	if (loader == NULL)
+		return;
 	vmm_machine_lock(m);
-	cred = m->ref_mut_start_cred;
-	m->ref_mut_start_cred = NULL;
-	host = m->borrow_mut_host;
-	if (cred == NULL || vmm_machine_start_cancelled_locked(m)) {
-		m->mut_starting = 0;
+	if (m->mut_running) {
 		vmm_machine_unlock(m);
-		wakeup(m);
-		if (cred != NULL)
-			crfree(cred);
-		vmm_machine_owner_release(m);
+		vmm_loader_free(loader);
 		return;
 	}
-	loader_path_len = vmm_loader_path(&m->own_mut_loader, loader_path,
-	    VMM_LOADER_MAX);
-	mem_bytes = m->own_mut_mem.mut_bytes;
-	if (loader_path_len == 0)
-		error = EINVAL;
-	else {
-		loader_path[loader_path_len] = '\0';
-		error = 0;
+	if (m->mut_deleting || m->mut_desired_stopped) {
+		vmm_machine_unlock(m);
+		vmm_loader_free(loader);
+		return;
 	}
+	m->mut_starting = 1;
+	mem_bytes = m->own_mut_mem.mut_bytes;
+	host = m->borrow_mut_host;
 	vmm_machine_unlock(m);
 
-	if (error == 0)
-		error = vmm_machine_wait_for_vcpu_drain(m);
+	error = vmm_machine_wait_for_vcpu_drain(m);
 	if (error == 0)
 		error = vmm_mem_prepare(mem_bytes, &prepared_backing);
 	if (error == 0) {
@@ -288,8 +333,7 @@ vmm_machine_start_task(struct vmm_machine *m)
 		if (vmm_machine_start_cancelled_locked(m))
 			error = ECANCELED;
 		else {
-			error = vmm_mem_publish(&m->own_mut_mem,
-			    prepared_backing);
+			error = vmm_mem_publish(&m->own_mut_mem, prepared_backing);
 			if (error == 0)
 				prepared_backing = NULL;
 		}
@@ -309,12 +353,13 @@ vmm_machine_start_task(struct vmm_machine *m)
 		vmm_machine_unlock(m);
 	}
 	if (error == 0) {
-		error = vmm_loader_run(loader_path, mem_object, mem_size, cred,
-		    &launch, vmm_machine_start_is_cancelled, m);
+		error = vmm_loader_start(loader, mem_object, mem_size, &launch);
 		vm_object_deallocate(mem_object);
 		mem_object = NULL;
 	}
-	if (error == 0 && !vmm_machine_start_is_cancelled(m)) {
+	vmm_loader_free(loader);
+	loader = NULL;
+	if (error == 0) {
 		vmm_machine_owner_hold(m);
 		vcpu_owner = 1;
 		error = vmm_vcpu_start_all(m, host, &launch);
@@ -322,10 +367,8 @@ vmm_machine_start_task(struct vmm_machine *m)
 
 	vmm_machine_lock(m);
 	m->mut_starting = 0;
-	m->borrow_mut_host = NULL;
 	if (error == 0 && !vmm_machine_start_cancelled_locked(m)) {
 		vmm_machine_start_locked(m);
-		started = 1;
 		release_mem = 0;
 		vcpu_owner = 0;
 	} else {
@@ -335,17 +378,71 @@ vmm_machine_start_task(struct vmm_machine *m)
 			vcpu_owner = 0;
 		}
 	}
-	if (!started && release_mem)
+	if (release_mem)
 		backing = vmm_machine_detach_mem_locked(m);
 	vmm_machine_unlock(m);
 	wakeup(m);
 
-	if (!started && release_mem)
+	if (release_mem)
 		vmm_mem_release_backing(backing);
 	if (vcpu_owner)
 		vmm_machine_owner_release(m);
-	crfree(cred);
-	vmm_machine_owner_release(m);
+}
+
+static void
+vmm_machine_stop(struct vmm_machine *m, int apic)
+{
+	struct vmm_mem_backing *backing = NULL;
+	int release_now = 0;
+
+	vmm_machine_lock(m);
+	if (!m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu)) {
+		vmm_machine_unlock(m);
+		return;
+	}
+	vmm_machine_request_stop_locked(m);
+	if (m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu)) {
+		m->mut_running = 0;
+		release_now = 1;
+		ev_push(m, EV_STOPPED);
+	}
+	if (release_now)
+		backing = vmm_machine_detach_mem_locked(m);
+	vmm_machine_unlock(m);
+
+	wakeup(m);
+	if (release_now)
+		vmm_mem_release_backing(backing);
+	if (!apic)
+		vmm_machine_wait_execution_stopped(m);
+}
+
+static void
+vmm_machine_reset(struct vmm_machine *m, int apic,
+    struct vmm_loader_epoch *loader)
+{
+	int running;
+
+	vmm_machine_lock(m);
+	running = m->mut_running;
+	vmm_machine_unlock(m);
+	if (running) {
+		if (apic) {
+			vmm_machine_stop(m, 1);
+			if (loader != NULL)
+				vmm_loader_free(loader);
+			return;
+		}
+		vmm_machine_stop(m, 0);
+		vmm_machine_start(m, loader);
+		return;
+	}
+	if (apic) {
+		if (loader != NULL)
+			vmm_loader_free(loader);
+		return;
+	}
+	vmm_machine_start(m, loader);
 }
 
 int
@@ -410,14 +507,6 @@ vmm_machine_vcpu_exited(struct vmm_machine *m)
 		vmm_mem_release_backing(backing);
 	if (release_owner)
 		vmm_machine_owner_release(m);
-}
-
-static void
-vmm_machine_start_child(void *arg, struct trapframe *frame)
-{
-	(void)frame;
-	vmm_machine_start_task(arg);
-	exit1(W_EXITCODE(0, 0));
 }
 
 static int
@@ -562,8 +651,8 @@ vmm_machine_quiesced(const struct vmm_machine *m)
 	int quiesced;
 
 	vmm_machine_lock(mm);
-	quiesced = !m->mut_starting && !m->mut_running &&
-	    !vmm_vcpu_has_active(&m->own_mut_vcpu);
+	quiesced = m->mut_cmd_count == 0 && !m->mut_starting &&
+	    !m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu);
 	vmm_machine_unlock(mm);
 	return quiesced;
 }
@@ -572,7 +661,14 @@ void
 vmm_machine_wait_quiesced(struct vmm_machine *m)
 {
 	while (!vmm_machine_quiesced(m)) {
-		vmm_machine_request_stopped(m, 1);
+		/*
+		 * This is an internal teardown wait, not a vmmfs event.  Do not
+		 * enqueue STOP here: delete/force-unmount/kldunload must wait for
+		 * the current serialized command stream to drain, not append to it.
+		 */
+		vmm_machine_lock(m);
+		vmm_machine_request_stop_locked(m);
+		vmm_machine_unlock(m);
 		tsleep(m, 0, "vmmqsc", hz / 20 + 1);
 	}
 }
@@ -609,6 +705,29 @@ vmm_machine_wait_for_vcpu_drain(struct vmm_machine *m)
 		vmm_machine_unlock(m);
 		tsleep(m, 0, "vmmdrn", hz / 20 + 1);
 	}
+}
+
+static void
+vmm_machine_wait_execution_stopped(struct vmm_machine *m)
+{
+	for (;;) {
+		vmm_machine_lock(m);
+		if (!m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu)) {
+			vmm_machine_unlock(m);
+			return;
+		}
+		vmm_vcpu_request_stop(&m->own_mut_vcpu);
+		vmm_machine_unlock(m);
+		tsleep(m, 0, "vmmstp", hz / 20 + 1);
+	}
+}
+
+static void
+vmm_machine_request_stop_locked(struct vmm_machine *m)
+{
+	m->mut_desired_stopped = 1;
+	m->mut_start_cancel = 1;
+	vmm_vcpu_request_stop(&m->own_mut_vcpu);
 }
 
 static struct vmm_mem_backing *
@@ -651,9 +770,7 @@ vmm_machine_begin_delete_locked(struct vmm_machine *m)
 	if (m->mut_deleting)
 		return 0;
 	m->mut_deleting = 1;
-	m->mut_desired_stopped = 1;
-	m->mut_start_cancel = 1;
-	vmm_vcpu_request_stop(&m->own_mut_vcpu);
+	vmm_machine_request_stop_locked(m);
 	if (m->mut_running && !vmm_vcpu_has_active(&m->own_mut_vcpu))
 		m->mut_running = 0;
 	ev_push(m, EV_DELETED);

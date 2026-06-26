@@ -310,7 +310,10 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
 
-	vmm_machine_request_stopped(&m->machine, 0);
+	error = vmm_machine_on_event(&m->machine, VMM_MACHINE_EVENT_STOP,
+	    VMM_MACHINE_EVENT_APIC, NULL, NULL);
+	if (error)
+		return error;
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->n_stopped,
 	    LK_EXCLUSIVE | LK_RETRY, &vp);
 	if (error)
@@ -336,7 +339,8 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 
 	if (!(ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "stopped", 7) == 0))
 		return EPERM;
-	error = vmm_machine_request_running(&m->machine, ap->a_cred,
+	error = vmm_machine_on_event(&m->machine, VMM_MACHINE_EVENT_START,
+	    VMM_MACHINE_EVENT_FORCE, ap->a_cred,
 	    &VFS_TO_VMMFS(ap->a_dvp->v_mount)->host);
 	if (error)
 		return error;
@@ -421,9 +425,44 @@ vmmfs_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	return uiomove(ebuf, n, ap->a_uio);
 }
 
+
+static int
+vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
+{
+	struct uio *uio = ap->a_uio;
+	char buf[32];
+	size_t take;
+	int error;
+	int force;
+
+	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
+	    (size_t)uio->uio_resid : sizeof(buf) - 1;
+	error = uiomove(buf, take, uio);
+	if (error)
+		return error;
+	buf[take] = '\0';
+	while (uio->uio_resid > 0) {
+		char dump[32];
+		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
+		    (size_t)uio->uio_resid : sizeof(dump);
+
+		error = uiomove(dump, d, uio);
+		if (error)
+			return error;
+	}
+	if (take < 5 || strncmp(buf, "reset", 5) != 0)
+		return EINVAL;
+	force = (take >= 11 && strncmp(buf, "reset force", 11) == 0);
+	return vmm_machine_on_event(&node->vn_machine->machine,
+	    VMM_MACHINE_EVENT_RESET,
+	    force ? VMM_MACHINE_EVENT_FORCE : VMM_MACHINE_EVENT_APIC,
+	    ap->a_cred, &VFS_TO_VMMFS(ap->a_vp->v_mount)->host);
+}
+
 static kobj_method_t vmmfs_events_methods[] = {
 	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_zero_getattr),
 	KOBJMETHOD(vmmfs_node_read,	vmmfs_events_read),
+	KOBJMETHOD(vmmfs_node_write,	vmmfs_events_write),
 	KOBJMETHOD(vmmfs_node_open,	vmmnode_open),
 	KOBJMETHOD(vmmfs_node_close,	vmmnode_close),
 	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
@@ -479,8 +518,10 @@ vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 			return error;
 	}
 
-	vmm_machine_request_stopped(&node->vn_machine->machine, force);
-	return 0;
+	return vmm_machine_on_event(&node->vn_machine->machine,
+	    VMM_MACHINE_EVENT_STOP,
+	    force ? VMM_MACHINE_EVENT_FORCE : VMM_MACHINE_EVENT_APIC,
+	    NULL, NULL);
 }
 
 static kobj_method_t vmmfs_stopped_methods[] = {

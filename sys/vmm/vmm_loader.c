@@ -84,6 +84,9 @@ struct vmm_loader_epoch {
 	struct vm_object *own_mut_manifest_object;
 	uint64_t	 imm_mem_size;
 	struct ucred	*borrow_imm_cred;
+	pid_t		 imm_pid;
+	int		 mut_resume;
+	int		 mut_kill;
 	vmm_loader_cancel_fn *borrow_imm_cancel;
 	void		*borrow_imm_cancel_arg;
 	int		 mut_revoked;
@@ -706,13 +709,6 @@ vmm_loader_install_fd(struct file *fp, int target_fd)
 	return 0;
 }
 
-static int
-vmm_loader_cancelled(struct vmm_loader_epoch *ep)
-{
-	return ep->borrow_imm_cancel != NULL &&
-	    ep->borrow_imm_cancel(ep->borrow_imm_cancel_arg);
-}
-
 static void
 vmm_loader_revoke_fp(struct file *fp)
 {
@@ -787,6 +783,16 @@ vmm_loader_child(void *arg, struct trapframe *frame)
 	int error;
 
 	(void)frame;
+	while (!ep->mut_resume && !ep->mut_kill)
+		tsleep(ep, 0, "vmmldp", 0);
+	if (ep->mut_kill)
+		exit1(W_EXITCODE(127, SIGKILL));
+
+	/*
+	 * fd3/fd4 are deliberately installed here, not when the paused process is
+	 * forked.  The machine start command owns the memory/manifest epoch and
+	 * binds those objects only when this queued START actually executes.
+	 */
 	error = vmm_loader_install_fd(ep->own_mut_mem_fp, 3);
 	if (error == 0)
 		error = vmm_loader_install_fd(ep->own_mut_manifest_fp, 4);
@@ -826,34 +832,26 @@ vmm_loader_set_proc_cred(struct proc *p, struct ucred *cred)
 }
 
 static int
+vmm_loader_cancelled(struct vmm_loader_epoch *ep)
+{
+	return ep->borrow_imm_cancel != NULL &&
+	    ep->borrow_imm_cancel(ep->borrow_imm_cancel_arg);
+}
+
+static int
 vmm_loader_wait(struct vmm_loader_epoch *ep)
 {
 	struct __wrusage wrusage;
-	struct proc *child;
-	struct lwp *child_lwp;
-	pid_t pid;
 	int status = 0;
 	int result = 0;
 	int error;
 	int cancelled = 0;
 
-	error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK, &child);
-	if (error)
-		return error;
-
-	PHOLD(child);
-	pid = child->p_pid;
-	child_lwp = ONLY_LWP_IN_PROC(child);
-	vmm_loader_set_proc_cred(child, ep->borrow_imm_cred);
-	cpu_set_fork_handler(child_lwp, vmm_loader_child, ep);
-	start_forked_proc(curthread->td_lwp, child);
-	PRELE(child);
-
 	for (;;) {
 		bzero(&wrusage, sizeof(wrusage));
 		status = 0;
 		result = 0;
-		error = kern_wait(P_PID, pid, &status, WEXITED | WNOHANG,
+		error = kern_wait(P_PID, ep->imm_pid, &status, WEXITED | WNOHANG,
 		    &wrusage, NULL, &result);
 		if (error)
 			return error;
@@ -862,10 +860,10 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 		if (!cancelled && vmm_loader_cancelled(ep)) {
 			cancelled = 1;
 			vmm_loader_epoch_revoke(ep);
-			(void)kern_kill(SIGKILL, pid, -1);
+			(void)kern_kill(SIGKILL, ep->imm_pid, -1);
+			wakeup(ep);
 		}
-		tsleep(ep->borrow_imm_cancel_arg != NULL ?
-		    ep->borrow_imm_cancel_arg : ep, 0, "vmmld", hz / 20 + 1);
+		tsleep(ep, 0, "vmmld", hz / 20 + 1);
 	}
 	if (cancelled)
 		return EINTR;
@@ -875,37 +873,60 @@ vmm_loader_wait(struct vmm_loader_epoch *ep)
 }
 
 int
-vmm_loader_run(const char *path, struct vm_object *mem_object,
-    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
-    vmm_loader_cancel_fn *cancel, void *cancel_arg)
+vmm_loader_fork_paused(const char *path, struct ucred *cred,
+    struct vmm_loader_epoch **epochp)
 {
 	struct vmm_loader_epoch *ep;
+	struct proc *child;
+	struct lwp *child_lwp;
 	size_t path_len;
 	int error;
 
-	if (launch != NULL)
-		bzero(launch, sizeof(*launch));
-	if (mem_object == NULL || mem_size == 0 ||
-	    path == NULL || path[0] == '\0' || cred == NULL || launch == NULL)
+	if (epochp == NULL)
+		return EINVAL;
+	*epochp = NULL;
+	if (path == NULL || path[0] == '\0' || cred == NULL)
 		return EINVAL;
 
 	ep = kmalloc(sizeof(*ep), M_TEMP, M_WAITOK | M_ZERO);
-	ep->imm_mem_size = mem_size;
 	ep->borrow_imm_cred = cred;
-	ep->borrow_imm_cancel = cancel;
-	ep->borrow_imm_cancel_arg = cancel_arg;
 	error = copystr(path, ep->imm_loader_path, sizeof(ep->imm_loader_path),
 	    &path_len);
 	(void)path_len;
 	if (error) {
-		error = EINVAL;
-		goto out;
+		kfree(ep, M_TEMP);
+		return EINVAL;
 	}
 
-	if (vmm_loader_cancelled(ep)) {
-		error = EINTR;
-		goto out;
+	error = fork1(curthread->td_lwp, RFFDG | RFPROC | RFPGLOCK, &child);
+	if (error) {
+		kfree(ep, M_TEMP);
+		return error;
 	}
+	PHOLD(child);
+	ep->imm_pid = child->p_pid;
+	child_lwp = ONLY_LWP_IN_PROC(child);
+	vmm_loader_set_proc_cred(child, cred);
+	cpu_set_fork_handler(child_lwp, vmm_loader_child, ep);
+	start_forked_proc(curthread->td_lwp, child);
+	PRELE(child);
+
+	*epochp = ep;
+	return 0;
+}
+
+int
+vmm_loader_start(struct vmm_loader_epoch *ep, struct vm_object *mem_object,
+    uint64_t mem_size, struct vmm_launch *launch)
+{
+	int error;
+
+	if (launch != NULL)
+		bzero(launch, sizeof(*launch));
+	if (ep == NULL || mem_object == NULL || mem_size == 0 || launch == NULL)
+		return EINVAL;
+
+	ep->imm_mem_size = mem_size;
 	error = vmm_loader_open_object_fd(mem_object, (vm_size_t)ep->imm_mem_size,
 	    &ep->own_mut_mem_fp);
 	if (error)
@@ -917,26 +938,68 @@ vmm_loader_run(const char *path, struct vm_object *mem_object,
 	    VMM_MANIFEST_SIZE, &ep->own_mut_manifest_fp);
 	if (error)
 		goto out;
-	if (vmm_loader_cancelled(ep)) {
-		error = EINTR;
-		goto out;
-	}
+
+	ep->mut_resume = 1;
+	wakeup(ep);
 	error = vmm_loader_wait(ep);
 	if (error)
 		goto out;
 	vmm_loader_epoch_revoke(ep);
 	vmm_loader_epoch_close_fds(ep);
-	if (vmm_loader_cancelled(ep)) {
-		error = EINTR;
-		goto out;
-	}
 	error = vmm_loader_manifest_load(ep, launch);
 
 out:
 	vmm_loader_epoch_revoke(ep);
 	vmm_loader_epoch_close_fds(ep);
+	if (ep->own_mut_manifest_object != NULL) {
+		vm_object_deallocate(ep->own_mut_manifest_object);
+		ep->own_mut_manifest_object = NULL;
+	}
+	return error;
+}
+
+void
+vmm_loader_kill(struct vmm_loader_epoch *ep)
+{
+	if (ep == NULL)
+		return;
+	ep->mut_kill = 1;
+	wakeup(ep);
+	if (ep->imm_pid != 0)
+		(void)kern_kill(SIGKILL, ep->imm_pid, -1);
+	vmm_loader_epoch_revoke(ep);
+}
+
+void
+vmm_loader_free(struct vmm_loader_epoch *ep)
+{
+	if (ep == NULL)
+		return;
+	if (!ep->mut_resume)
+		vmm_loader_kill(ep);
+	if (ep->imm_pid != 0)
+		(void)vmm_loader_wait(ep);
+	vmm_loader_epoch_revoke(ep);
+	vmm_loader_epoch_close_fds(ep);
 	if (ep->own_mut_manifest_object != NULL)
 		vm_object_deallocate(ep->own_mut_manifest_object);
 	kfree(ep, M_TEMP);
+}
+
+int
+vmm_loader_run(const char *path, struct vm_object *mem_object,
+    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
+    vmm_loader_cancel_fn *cancel, void *cancel_arg)
+{
+	struct vmm_loader_epoch *ep = NULL;
+	int error;
+
+	error = vmm_loader_fork_paused(path, cred, &ep);
+	if (error)
+		return error;
+	ep->borrow_imm_cancel = cancel;
+	ep->borrow_imm_cancel_arg = cancel_arg;
+	error = vmm_loader_start(ep, mem_object, mem_size, launch);
+	vmm_loader_free(ep);
 	return error;
 }

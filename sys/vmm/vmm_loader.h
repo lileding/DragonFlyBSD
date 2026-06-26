@@ -35,10 +35,24 @@ int	vmm_loader_busy(void);
 struct ucred;
 struct vm_object;
 struct vmm_launch;
+struct vmm_loader_epoch;
 typedef int vmm_loader_cancel_fn(void *arg);
 /*
- * On entry, *launch is cleared.  On success, it contains the validated launch
- * state produced by fd4; on failure, it remains empty.
+ * A paused loader epoch owns a child process created from vmmfs syscall
+ * context.  It has not installed fd3/fd4 and has not execed user code until
+ * vmm_loader_start() resumes it from the serialized machine workqueue.
+ */
+int	vmm_loader_fork_paused(const char *path, struct ucred *cred,
+	    struct vmm_loader_epoch **epochp);
+int	vmm_loader_start(struct vmm_loader_epoch *ep,
+	    struct vm_object *mem_object, uint64_t mem_size,
+	    struct vmm_launch *launch);
+void	vmm_loader_kill(struct vmm_loader_epoch *ep);
+void	vmm_loader_free(struct vmm_loader_epoch *ep);
+
+/*
+ * Compatibility helper for one-shot callers: fork paused, start, wait, verify,
+ * and free the epoch.  On success, *launch contains the validated launch state.
  */
 int	vmm_loader_run(const char *path, struct vm_object *mem_object,
 	    uint64_t mem_size, struct ucred *cred, struct vmm_launch *launch,
