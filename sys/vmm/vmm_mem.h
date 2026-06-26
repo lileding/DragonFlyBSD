@@ -44,7 +44,6 @@ struct vm_object;
 struct vmspace;
 int	vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp);
 int	vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing);
-void	vmm_mem_release(struct vmm_mem *m);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 struct vm_object *vmm_mem_object(struct vmm_mem *m);

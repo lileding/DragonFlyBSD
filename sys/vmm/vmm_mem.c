@@ -171,12 +171,6 @@ vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing)
 	return 0;
 }
 
-void
-vmm_mem_release(struct vmm_mem *m)
-{
-	vmm_mem_release_backing(vmm_mem_detach(m));
-}
-
 struct vmm_mem_backing *
 vmm_mem_detach(struct vmm_mem *m)
 {
