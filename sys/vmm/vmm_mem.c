@@ -85,6 +85,15 @@ vmm_mem_object_ref(struct vm_object *object)
 }
 
 static int
+vmm_mem_gpa_page_inside(uint64_t bytes, uint64_t gpa)
+{
+	uint64_t page;
+
+	page = trunc_page(gpa);
+	return page < bytes && bytes - page >= PAGE_SIZE;
+}
+
+static int
 vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
     uint64_t bytes)
 {
@@ -231,7 +240,7 @@ vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 		return EINVAL;
 	if ((prot & valid_prot) == 0 || (prot & ~valid_prot) != 0)
 		return EINVAL;
-	if (gpa >= b->imm_bytes)
+	if (!vmm_mem_gpa_page_inside(b->imm_bytes, gpa))
 		return EINVAL;
 	flags = (prot & VM_PROT_WRITE) ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
 	return vm_fault(&b->own_mut_vmspace->vm_map, trunc_page(gpa),
