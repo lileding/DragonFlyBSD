@@ -67,6 +67,10 @@
 #define VMM_REC_GPA_RANGE	2
 #define VMM_REC_F_MANDATORY	1
 
+#define VMM_X64_RFLAGS_FIXED	(1ULL << 1)
+#define VMM_X64_RFLAGS_RESERVED ((1ULL << 3) | (1ULL << 5) | \
+				 (1ULL << 15) | (~0ULL << 22))
+
 struct vmm_manifest_header {
 	char		magic[8];
 	uint16_t	abi_version;
@@ -134,6 +138,13 @@ vmm_padding_zero(const uint8_t *buf, size_t off, size_t end)
 	return 1;
 }
 
+static int
+vmm_loader_x86_rflags_valid(uint64_t rflags)
+{
+	return (rflags & VMM_X64_RFLAGS_FIXED) != 0 &&
+	    (rflags & VMM_X64_RFLAGS_RESERVED) == 0;
+}
+
 int
 vmm_loader_x86_xcr0_valid(uint64_t xcr0)
 {
@@ -170,6 +181,8 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RIP]))
 		return EINVAL;
 	if (!vmm_gpa_addr(mem_size, vcpu->gpr[VMM_X64_GPR_RSP]))
+		return EINVAL;
+	if (!vmm_loader_x86_rflags_valid(vcpu->gpr[VMM_X64_GPR_RFLAGS]))
 		return EINVAL;
 	if (!vmm_gpa_page(mem_size, vcpu->cr[VMM_X64_CR_CR3]))
 		return EINVAL;

@@ -274,6 +274,16 @@ main(void)
 
 	build_valid_state(manifest);
 	vcpu = manifest_vcpu(manifest);
+	vcpu->gpr[VMM_X64_GPR_RFLAGS] = 0;
+	expect_result("bad rflags fixed bit", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
+	vcpu->gpr[VMM_X64_GPR_RFLAGS] = RFLAGS_FIXED | (1ULL << 63);
+	expect_result("bad rflags reserved bit", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	vcpu = manifest_vcpu(manifest);
 	vcpu->seg[VMM_X64_SEG_GDT].base = MEM_SIZE - 8;
 	vcpu->seg[VMM_X64_SEG_GDT].limit = 0x27;
 	expect_result("bad gdt range", manifest, EINVAL);
