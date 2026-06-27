@@ -53,6 +53,7 @@ on entry and `VMM_KO` to be an absolute path so each run proves the exact module
 image selected by the harness:
 
 - `smoke/smoke_exec_test.sh`
+- `avic/avic_interrupt_test.sh`
 - `revoke/loader_revoke_test.sh`
 - `revoke/loader_unload_busy_test.sh`
 - `lifecycle/stop_delete_test.sh`

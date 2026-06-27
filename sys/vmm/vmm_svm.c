@@ -17,10 +17,13 @@
 #include <machine/md_var.h>
 #include <machine/npx.h>
 #include <machine/psl.h>
+#include <machine/smp.h>
 #include <machine/specialreg.h>
 #include <vm/vm.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
+#include <vm/vm_page.h>
+#include <vm/vm_page2.h>
 
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
@@ -85,8 +88,25 @@
 
 #define VMM_SVM_CTRL_ENABLE_NP		0x001ULL
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
+#define VMM_SVM_CTRL_V_IRQ		(1ULL << 8)
+#define VMM_SVM_CTRL_V_IGN_TPR		(1ULL << 20)
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
+#define VMM_SVM_CTRL_V_AVIC_EN		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
+#define VMM_SVM_AVIC_PHYS_VALID		(1ULL << 63)
+#define VMM_SVM_AVIC_PHYS_RUNNING	(1ULL << 62)
+#define VMM_SVM_AVIC_PHYS_HOST_ID_MASK	0xfffULL
+#define VMM_SVM_AVIC_PHYS_MAX_INDEX_MASK 0xffULL
+#define VMM_SVM_AVIC_MAX_PHYS_ID	0U
+#define VMM_SVM_AVIC_APIC_ID		0U
+#define VMM_SVM_APIC_REG_ID		0x020U
+#define VMM_SVM_APIC_REG_VERSION	0x030U
+#define VMM_SVM_APIC_REG_TPR		0x080U
+#define VMM_SVM_APIC_REG_SVR		0x0f0U
+#define VMM_SVM_APIC_REG_IRR_BASE	0x200U
+#define VMM_SVM_APIC_VERSION		0x00140014U
+#define VMM_SVM_APIC_SVR_ENABLE		0x100U
+#define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
@@ -112,6 +132,8 @@
 #define VMM_SVM_EXIT_XSETBV		0x08dULL
 #define VMM_SVM_EXIT_INVLPGB		0x0a0ULL
 #define VMM_SVM_EXIT_NPF		0x400ULL
+#define VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI 0x401ULL
+#define VMM_SVM_EXIT_AVIC_NOACCEL	0x402ULL
 
 #define VMM_SVM_IOIO_IN		(1ULL << 0)
 #define VMM_SVM_IOIO_STR	(1ULL << 2)
@@ -159,6 +181,9 @@
 					 APICBASE_ENABLED | APICBASE_ADDRESS)
 #define VMM_SVM_X2APIC_MSR_BASE	0x800U
 #define VMM_SVM_X2APIC_MSR_LAST	0x83fU
+#define VMM_SVM_SMOKE_AVIC_MAGIC	0x43495641U
+#define VMM_SVM_SMOKE_AVIC_DELIVER	1U
+#define VMM_SVM_SMOKE_AVIC_MARKER	2U
 
 
 #define VMM_X64_NDR			6
@@ -281,6 +306,18 @@ struct vmm_svm_backend {
 	uint64_t imm_msrbm_pa;
 	void *own_mut_hsave;
 	uint64_t imm_hsave_pa;
+	void *own_mut_avic_apic_page;
+	uint64_t imm_avic_apic_page_pa;
+	vm_page_t own_mut_avic_access_page;
+	uint64_t imm_avic_access_page_pa;
+	uint64_t *own_mut_avic_phys_table;
+	uint64_t imm_avic_phys_table_pa;
+	uint32_t *own_mut_avic_log_table;
+	uint64_t imm_avic_log_table_pa;
+	uint32_t imm_avic_apic_id;
+	uint32_t mut_avic_host_apic_id;
+	uint32_t mut_avic_host_cpuid;
+	int mut_avic_bound;
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -311,6 +348,8 @@ CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
 
 void	vmm_svm_vmrun(uint64_t vmcb_pa, uint64_t *gprs);
 static void vmm_svm_vcpu_destroy(void *backend);
+static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
+static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
 
 static void *
 vmm_svm_contig_alloc(uint64_t *pa, size_t pages)
@@ -331,6 +370,193 @@ vmm_svm_contig_free(void *va, size_t pages)
 		contigfree(va, pages * PAGE_SIZE, M_TEMP);
 }
 
+static void
+vmm_svm_avic_apic_write32(struct vmm_svm_backend *svm, uint32_t reg,
+    uint32_t val)
+{
+	volatile uint32_t *ptr;
+
+	ptr = (volatile uint32_t *)((uint8_t *)svm->own_mut_avic_apic_page + reg);
+	*ptr = val;
+}
+
+static vm_page_t
+vmm_svm_avic_access_page_alloc(uint64_t *pap)
+{
+	vm_page_t m;
+
+	m = vm_page_alloc(NULL, (vm_pindex_t)ticks,
+	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_FORCE_ZERO);
+	if (m == NULL)
+		return NULL;
+	m->valid = VM_PAGE_BITS_ALL;
+	vm_page_wire(m);
+	vm_page_wakeup(m);
+	*pap = VM_PAGE_TO_PHYS(m);
+	return m;
+}
+
+static void
+vmm_svm_avic_access_page_free(vm_page_t m)
+{
+	if (m == NULL)
+		return;
+	vm_page_busy_wait(m, FALSE, "vmmavp");
+	vm_page_unwire(m, 0);
+	vm_page_free(m);
+}
+
+static int
+vmm_svm_avic_map_access_page(struct vmm_svm_backend *svm)
+{
+	pmap_t pmap;
+
+	if (svm->borrow_mut_vmspace == NULL ||
+	    svm->own_mut_avic_access_page == NULL)
+		return EINVAL;
+	pmap = vmspace_pmap(svm->borrow_mut_vmspace);
+	pmap_enter(pmap, VMM_SVM_APICBASE_ADDR, svm->own_mut_avic_access_page,
+	    VM_PROT_READ | VM_PROT_WRITE, 0, NULL);
+	return 0;
+}
+
+static void
+vmm_svm_avic_unmap_access_page(struct vmm_svm_backend *svm)
+{
+	if (svm == NULL || svm->borrow_mut_vmspace == NULL)
+		return;
+	pmap_remove(vmspace_pmap(svm->borrow_mut_vmspace),
+	    VMM_SVM_APICBASE_ADDR, VMM_SVM_APICBASE_ADDR + PAGE_SIZE);
+}
+
+static int
+vmm_svm_avic_init(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint64_t entry;
+	int error;
+
+	svm->imm_avic_apic_id = VMM_SVM_AVIC_APIC_ID;
+	svm->mut_avic_host_cpuid = (uint32_t)-1;
+	svm->mut_avic_host_apic_id = (uint32_t)-1;
+	svm->own_mut_avic_apic_page =
+	    vmm_svm_contig_alloc(&svm->imm_avic_apic_page_pa, 1);
+	svm->own_mut_avic_phys_table =
+	    vmm_svm_contig_alloc(&svm->imm_avic_phys_table_pa, 1);
+	svm->own_mut_avic_log_table =
+	    vmm_svm_contig_alloc(&svm->imm_avic_log_table_pa, 1);
+	svm->own_mut_avic_access_page =
+	    vmm_svm_avic_access_page_alloc(&svm->imm_avic_access_page_pa);
+	if (svm->own_mut_avic_apic_page == NULL ||
+	    svm->own_mut_avic_phys_table == NULL ||
+	    svm->own_mut_avic_log_table == NULL ||
+	    svm->own_mut_avic_access_page == NULL)
+		return ENOMEM;
+
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ID,
+	    svm->imm_avic_apic_id << 24);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_VERSION,
+	    VMM_SVM_APIC_VERSION);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TPR, 0);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR,
+	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
+
+	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID;
+	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+
+	error = vmm_svm_avic_map_access_page(svm);
+	if (error)
+		return error;
+
+	vmcb->ctrl.v |= VMM_SVM_CTRL_V_INTR_MASKING | VMM_SVM_CTRL_V_AVIC_EN;
+	vmcb->ctrl.avic = VMM_SVM_APICBASE_ADDR;
+	vmcb->ctrl.avic_abpp = svm->imm_avic_apic_page_pa;
+	vmcb->ctrl.avic_ltp = svm->imm_avic_log_table_pa;
+	vmcb->ctrl.avic_phys = svm->imm_avic_phys_table_pa |
+	    VMM_SVM_AVIC_MAX_PHYS_ID;
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm avic enabled apic_id=%u apic_pa=0x%jx access_pa=0x%jx",
+	    svm->imm_avic_apic_id, (uintmax_t)svm->imm_avic_apic_page_pa,
+	    (uintmax_t)svm->imm_avic_access_page_pa);
+	return 0;
+}
+
+static void
+vmm_svm_avic_uninit(struct vmm_svm_backend *svm)
+{
+	if (svm == NULL)
+		return;
+	vmm_svm_avic_unmap_access_page(svm);
+	vmm_svm_avic_access_page_free(svm->own_mut_avic_access_page);
+	svm->own_mut_avic_access_page = NULL;
+	vmm_svm_contig_free(svm->own_mut_avic_log_table, 1);
+	vmm_svm_contig_free(svm->own_mut_avic_phys_table, 1);
+	vmm_svm_contig_free(svm->own_mut_avic_apic_page, 1);
+	svm->own_mut_avic_log_table = NULL;
+	svm->own_mut_avic_phys_table = NULL;
+	svm->own_mut_avic_apic_page = NULL;
+}
+
+
+static void
+vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
+{
+	uint64_t entry;
+	uint32_t cpuid;
+	uint32_t apicid;
+
+	if (svm == NULL || svm->own_mut_avic_phys_table == NULL)
+		return;
+	cpuid = mycpu->gd_cpuid;
+	apicid = (uint32_t)CPUID_TO_APICID(cpuid);
+	if (svm->mut_avic_bound && svm->mut_avic_host_cpuid == cpuid)
+		return;
+	if (apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm avic host apic id too large cpuid=%u apicid=%u",
+		    cpuid, apicid);
+		return;
+	}
+	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
+	    VMM_SVM_AVIC_PHYS_RUNNING | apicid;
+	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+	svm->mut_avic_host_cpuid = cpuid;
+	svm->mut_avic_host_apic_id = apicid;
+	svm->mut_avic_bound = 1;
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
+	    svm->imm_avic_apic_id, cpuid, apicid);
+}
+
+static void
+vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+    uint8_t vector, const char *source)
+{
+	volatile uint32_t *irr;
+	uint32_t bit;
+
+	if (vector < 32) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic reject source=%s vector=0x%x reason=low_vector",
+		    vc->imm_id, source, vector);
+		return;
+	}
+	irr = (volatile uint32_t *)((uint8_t *)svm->own_mut_avic_apic_page +
+	    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
+	bit = 1U << (vector & 31);
+	atomic_set_int((volatile u_int *)irr, bit);
+	cpu_mfence();
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u avic deliver source=%s vector=0x%x irr=0x%x",
+	    vc->imm_id, source, vector, *irr);
+	if (svm->mut_avic_bound && mycpu->gd_cpuid != svm->mut_avic_host_cpuid) {
+		wrmsr(MSR_AMD64_SVM_AVIC_DOORBELL, svm->mut_avic_host_apic_id);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic doorbell host_apic_id=%u",
+		    vc->imm_id, svm->mut_avic_host_apic_id);
+	}
+}
+
 static int
 vmm_svm_available(void)
 {
@@ -346,7 +572,8 @@ vmm_svm_available(void)
 	do_cpuid(0x8000000a, descs);
 	if ((descs[3] & CPUID_AMD_SVM_NP) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_NRIPS) == 0 ||
-	    (descs[3] & CPUID_AMD_SVM_DecodeAssist) == 0)
+	    (descs[3] & CPUID_AMD_SVM_DecodeAssist) == 0 ||
+	    (descs[3] & CPUID_AMD_SVM_AVIC) == 0)
 		return 0;
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if ((msr & VM_CR_SVMDIS) && (msr & VM_CR_LOCK))
@@ -468,7 +695,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_NMI |
 	    VMM_SVM_CTRL_INTERCEPT_SMI |
 	    VMM_SVM_CTRL_INTERCEPT_INIT |
-	    VMM_SVM_CTRL_INTERCEPT_VINTR |
 	    VMM_SVM_CTRL_INTERCEPT_RDTSC |
 	    VMM_SVM_CTRL_INTERCEPT_RDPMC |
 	    VMM_SVM_CTRL_INTERCEPT_CPUID |
@@ -517,6 +743,9 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	vmcb->ctrl.v = VMM_SVM_CTRL_V_INTR_MASKING;
 	vmcb->ctrl.enable1 = VMM_SVM_CTRL_ENABLE_NP;
 	vmcb->ctrl.n_cr3 = vtophys(vmspace_pmap(svm->borrow_mut_vmspace)->pm_pml4);
+	error = vmm_svm_avic_init(svm);
+	if (error)
+		goto fail;
 	vmm_svm_load_state(svm, &launch->imm_vcpu0);
 
 	*backendp = svm;
@@ -534,6 +763,7 @@ vmm_svm_vcpu_destroy(void *backend)
 
 	if (svm == NULL)
 		return;
+	vmm_svm_avic_uninit(svm);
 	vmm_svm_contig_free(svm->own_mut_hsave, 1);
 	vmm_svm_contig_free(svm->own_mut_msrbm, VMM_SVM_MSRBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_iobm, VMM_SVM_IOBM_PAGES);
@@ -1206,6 +1436,58 @@ vmm_svm_handle_idle_wait(struct vmm_vcpu_thread *vc, struct vmm_svm_vmcb *vmcb)
 		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
 }
 
+
+static int
+vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint32_t magic = (uint32_t)vmcb->state.rax;
+	uint32_t op = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RBX];
+	uint32_t arg = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
+
+	if (magic != VMM_SVM_SMOKE_AVIC_MAGIC)
+		return 0;
+	switch (op) {
+	case VMM_SVM_SMOKE_AVIC_DELIVER:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke avic request vector=0x%x", arg & 0xffU);
+		vmm_svm_advance_rip(vmcb);
+		vmm_svm_avic_deliver(svm, vc, (uint8_t)arg, "smoke");
+		return 1;
+	case VMM_SVM_SMOKE_AVIC_MARKER:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke avic marker=0x%x", arg);
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	default:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke avic unknown op=%u arg=0x%x", op, arg);
+		return 0;
+	}
+}
+
+static int
+vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic incomplete_ipi info1=0x%jx info2=0x%jx rip=0x%jx",
+		    vc->imm_id, (uintmax_t)vmcb->ctrl.exitinfo1,
+		    (uintmax_t)vmcb->ctrl.exitinfo2,
+		    (uintmax_t)vmcb->state.rip);
+		return 0;
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u avic noaccel info1=0x%jx info2=0x%jx rip=0x%jx",
+	    vc->imm_id, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    (uintmax_t)vmcb->ctrl.exitinfo2, (uintmax_t)vmcb->state.rip);
+	return 0;
+}
+
 static int
 vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
@@ -1247,6 +1529,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
+	vmm_svm_avic_bind_cpu(svm);
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
@@ -1317,6 +1600,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			if (vmm_svm_handle_npf(svm, vc))
 				break;
 			goto unhandled;
+		case VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI:
+		case VMM_SVM_EXIT_AVIC_NOACCEL:
+			if (vmm_svm_handle_avic_exit(svm, vc))
+				break;
+			goto unhandled;
 		case VMM_SVM_EXIT_MSR:
 			if (vmm_svm_handle_msr(svm, vc))
 				break;
@@ -1326,6 +1614,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_VMMCALL:
+			if (vmm_svm_handle_vmmcall(svm, vc))
+				break;
+			goto unhandled;
 		default:
 	unhandled:
 			vmm_machine_logf(svm->borrow_imm_machine,
