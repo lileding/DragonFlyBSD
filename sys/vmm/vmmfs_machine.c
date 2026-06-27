@@ -414,7 +414,12 @@ vmmfs_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	char ebuf[256];
 	size_t n;
 
-	n = vmm_machine_read_events(&node->vn_machine->machine, ebuf, sizeof(ebuf));
+	if (ap->a_uio->uio_resid <= 0)
+		return 0;
+	n = vmm_machine_read_events(&node->vn_machine->machine,
+	    ap->a_uio->uio_offset, ebuf,
+	    (size_t)ap->a_uio->uio_resid < sizeof(ebuf) ?
+	    (size_t)ap->a_uio->uio_resid : sizeof(ebuf));
 	if (n == 0)
 		return 0;
 	return uiomove(ebuf, n, ap->a_uio);

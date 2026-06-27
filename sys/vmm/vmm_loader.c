@@ -837,6 +837,7 @@ vmm_loader_exit_cb(void *arg, int exit_code)
 
 	state = (WIFEXITED(exit_code) && WEXITSTATUS(exit_code) == 0) ?
 	    VMM_LOADER_OK : VMM_LOADER_FAILED;
+	loader->mut_exit_code = exit_code;
 	for (;;) {
 		old = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
 		if (old == VMM_LOADER_OK || old == VMM_LOADER_FAILED)
@@ -922,6 +923,7 @@ vmm_loader_init(struct vmm_loader *loader, const char *path,
 		error = tsleep(&loader->own_handler, PINTERLOCKED, "vmmldi",
 		    hz * 10);
 		if (error == EWOULDBLOCK) {
+			loader->mut_exit_code = -1;
 			vmm_loader_kill(loader);
 			for (;;) {
 				state = atomic_fetchadd_int(
@@ -1006,6 +1008,7 @@ vmm_loader_wait(struct vmm_loader *loader)
 		error = tsleep(&loader->own_handler, PINTERLOCKED, "vmmld",
 		    hz * 10);
 		if (error == EWOULDBLOCK) {
+			loader->mut_exit_code = -1;
 			vmm_loader_kill(loader);
 			return ENOEXEC;
 		}

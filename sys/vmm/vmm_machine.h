@@ -17,7 +17,7 @@
 #include "vmm_mem.h"
 #include "vmm_vcpu.h"
 
-#define VMM_EVENT_CAP 32
+#define VMM_EVENT_LOG_SIZE (64 * 1024)
 
 struct ucred;
 struct taskqueue;
@@ -46,9 +46,12 @@ struct vmm_machine {
 	size_t mut_loader_len;
 	uint32_t mut_lease_count;
 	int mut_lease_armed;
-	uint8_t mut_ev_codes[VMM_EVENT_CAP]; /* token_events; lossy ring */
-	size_t mut_ev_tail;
-	size_t mut_ev_count;
+	char *own_mut_events_buf;
+	size_t imm_events_cap;
+	size_t mut_events_start;
+	size_t mut_events_len;
+	uint64_t mut_events_seq;
+	uint64_t mut_events_drop_bytes;
 };
 
 /* Result of lease_close. */
@@ -101,8 +104,10 @@ void vmm_machine_reset_force(const struct vmm_machine_task *task);
 int vmm_machine_lease_open(struct vmm_machine *m);
 enum vmm_close_action vmm_machine_lease_close(struct vmm_machine *m);
 
-/* Events: read drains queued event text lines (shared one-shot cursor). */
+/* Events: retained per-machine textual log, one line per record. */
 int vmm_machine_events_pending(const struct vmm_machine *m);
-size_t vmm_machine_read_events(struct vmm_machine *m, char *out, size_t cap);
+size_t vmm_machine_read_events(struct vmm_machine *m, off_t off, char *out,
+    size_t cap);
+void vmm_machine_logf(struct vmm_machine *m, const char *fmt, ...);
 
 #endif /* VMM_MACHINE_H */

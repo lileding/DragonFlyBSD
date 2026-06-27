@@ -36,7 +36,7 @@ wait_event()
 		out=$(cat "$file" 2>>"$LOG")
 		[ -n "$out" ] && seen="$seen
 $out"
-		printf "%s\n" "$seen" | grep -qx "$pattern" && return 0
+		printf "%s\n" "$seen" | grep -q "$pattern" && return 0
 		sleep 1
 		i=$((i + 1))
 	done
@@ -108,7 +108,7 @@ start_loop()
 	printf '%s\n' "$w" >"$(mach "$vm")/loader" || fail "$vm loader"
 	cat "$(mach "$vm")/events" >>"$LOG"
 	run rm "$(mach "$vm")/stopped"
-	wait_event "$(mach "$vm")/events" '^started$' || fail "$vm started"
+	wait_event "$(mach "$vm")/events" 'state running' || fail "$vm started"
 }
 
 : >"$LOG" || exit 1

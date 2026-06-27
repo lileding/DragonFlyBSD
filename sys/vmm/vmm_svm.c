@@ -1698,6 +1698,16 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_VMMCALL:
 		default:
 	unhandled:
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unhandled exit=0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx",
+			    vc->imm_id,
+			    (uintmax_t)vmcb->ctrl.exitcode,
+			    (uintmax_t)vmcb->ctrl.exitinfo1,
+			    (uintmax_t)vmcb->ctrl.exitinfo2,
+			    (uintmax_t)vmcb->state.rip,
+			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RCX],
+			    (uintmax_t)vmcb->state.rax,
+			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
 			kprintf("vmm_svm: vmexit 0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx\n",
 			    (uintmax_t)vmcb->ctrl.exitcode,
 			    (uintmax_t)vmcb->ctrl.exitinfo1,

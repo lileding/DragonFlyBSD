@@ -35,6 +35,11 @@ struct vmm_loader {
 	struct vm_object *own_mut_manifest_object;
 	uint64_t	 imm_mem_size;
 	int		 atomic_mut_state;
+	/*
+	 * Written by the at_exit callback before atomic_mut_state is published
+	 * as OK/FAILED.  Read only after the terminal state is observed.
+	 */
+	int		 mut_exit_code;
 };
 
 int	vmm_loader_path_parse(char *path, size_t *len, const char *buf,

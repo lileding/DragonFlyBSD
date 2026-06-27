@@ -119,7 +119,7 @@ stop_machine()
 	[ -d "$dir" ] || return 0
 	say "requesting force stop for $VM"
 	echo force >"$dir/stopped" 2>>"$LOG" || true
-	wait_for_file_pattern "$dir/events" '^stopped$' "$STOP_TIMEOUT" stopped \
+	wait_for_file_pattern "$dir/events" 'state stopped' "$STOP_TIMEOUT" stopped \
 	    >/dev/null 2>&1 || say "stopped event not observed during cleanup"
 
 	while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$dir" ]; do
@@ -239,13 +239,13 @@ configure_machine()
 run_guest()
 {
 	run rm "$(mach)/stopped"
-	wait_for_file_pattern "$(mach)/events" '^started$' "$TIMEOUT" started ||
+	wait_for_file_pattern "$(mach)/events" 'state running' "$TIMEOUT" started ||
 	    fail "started event not observed"
 	wait_for_file_pattern "$(mach)/console" "$PAT" "$TIMEOUT" console ||
 	    fail "console pattern not observed: $PAT"
 	say "console pattern observed: $PAT"
 	echo force >"$(mach)/stopped" || fail "request force stop"
-	wait_for_file_pattern "$(mach)/events" '^stopped$' "$STOP_TIMEOUT" stopped ||
+	wait_for_file_pattern "$(mach)/events" 'state stopped' "$STOP_TIMEOUT" stopped ||
 	    fail "stopped event not observed"
 	say "PASS"
 }

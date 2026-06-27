@@ -21,6 +21,10 @@ The offline gate covers:
 - `nuttx/rtos_nuttx_loader_check.sh`: NuttX loader fd3/fd4 output, sparse fd3
   writes, one-page fd4, kernel manifest parser acceptance, and NuttX boot-data
   layout.  It requires `NUTTX_ELF` or `/var/tmp/nuttx.elf`.
+- `linux/linux_kexec_loader_check.sh`: Linux x86_64 kexec-style loader fd3/fd4
+  output and manifest parser acceptance using a synthetic bzImage header.  If
+  `LINUX_KERNEL` or `/var/tmp/bzImage` is present, it also runs a real-image
+  case with optional `LINUX_INITRAMFS`.
 
 The offline gate proves loader-facing ABI shape and pure kernel-object backing
 contracts: fd3/fd4 sizing, sparse-file writes, manifest layout, parser
@@ -36,6 +40,11 @@ Run it from the repository root:
 ```sh
 test/vmm/offline_check.sh
 ```
+
+`events/events_log_vkernel_test.sh` is a vkernel-only control-plane regression
+for the per-machine textual event log.  It does not enter real vCPU execution:
+it checks retained reads plus loader-exit and manifest-reject failure messages.
+Run it through `~/vkrun2.sh` with a vkernel64 `vmm.ko`.
 
 The following scripts are pc64 true-hardware harnesses.  They load `vmm.ko`,
 mount vmmfs, and may enter real guests; run them only as explicit controlled

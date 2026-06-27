@@ -124,9 +124,9 @@ $out"
 				printf '--- end poll events ---\n'
 			} >>"$LOG"
 		fi
-		if printf '%s\n' "$seen" | grep -qx "$first"; then
+		if printf '%s\n' "$seen" | grep -q "$first"; then
 			if [ -z "$second" ] ||
-			    printf '%s\n' "$seen" | grep -qx "$second"; then
+			    printf '%s\n' "$seen" | grep -q "$second"; then
 				return 0
 			fi
 		fi
@@ -167,7 +167,7 @@ cleanup_machine()
 	[ -d "$dir" ] || return 0
 	say "requesting force stop for $vm"
 	echo force >"$dir/stopped" 2>>"$LOG" || true
-	wait_event "$dir/events" '^stopped$' >/dev/null 2>&1 ||
+	wait_event "$dir/events" 'state stopped' >/dev/null 2>&1 ||
 	    say "$vm stopped event not observed during cleanup"
 	while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$dir" ]; do
 		rmdir "$dir" >>"$LOG" 2>&1 && return 0
@@ -366,14 +366,14 @@ run_case()
 			;;
 		esac
 		if [ -n "$console_input" ]; then
-			wait_event "$(mach "$mode")/events" '^started$' ||
+			wait_event "$(mach "$mode")/events" 'state running' ||
 			    fail "$mode started"
 			printf '%s' "$console_input" >"$(mach "$mode")/console" ||
 			    fail "$mode console input"
-			wait_event "$(mach "$mode")/events" '^stopped$' ||
+			wait_event "$(mach "$mode")/events" 'state stopped' ||
 			    fail "$mode self exit"
 		else
-			wait_event "$(mach "$mode")/events" '^started$' '^stopped$' ||
+			wait_event "$(mach "$mode")/events" 'state running' 'state stopped' ||
 			    fail "$mode self exit"
 		fi
 		[ ! -e "$(mach "$mode")/stopped" ] ||
@@ -381,11 +381,11 @@ run_case()
 		echo force >"$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 	else
-		wait_event "$(mach "$mode")/events" '^started$' ||
+		wait_event "$(mach "$mode")/events" 'state running' ||
 		    fail "$mode started"
 		echo force >"$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
-		wait_event "$(mach "$mode")/events" '^stopped$' ||
+		wait_event "$(mach "$mode")/events" 'state stopped' ||
 		    fail "$mode stopped"
 		[ -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode stopped file"
