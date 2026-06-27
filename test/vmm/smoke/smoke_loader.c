@@ -698,6 +698,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	};
 	static const uint8_t hlt[] = { 0xf4 };
 	static const uint8_t loop[] = { 0xeb, 0xfe };
+	static const uint8_t cliloop[] = { 0xfa, 0xeb, 0xfe };
 	const uint8_t *src;
 	size_t len;
 
@@ -742,6 +743,9 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	} else if (strcmp(mode, "loop") == 0) {
 		src = loop;
 		len = sizeof(loop);
+	} else if (strcmp(mode, "cliloop") == 0) {
+		src = cliloop;
+		len = sizeof(cliloop);
 	} else {
 		errx(1, "unknown smoke mode: %s", mode);
 	}
@@ -901,7 +905,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop|cliloop", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

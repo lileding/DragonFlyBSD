@@ -90,6 +90,9 @@
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
+#define VMM_SVM_EXIT_SMI		0x062ULL
+#define VMM_SVM_EXIT_INIT		0x063ULL
+#define VMM_SVM_EXIT_VINTR		0x064ULL
 #define VMM_SVM_EXIT_RDTSC		0x06eULL
 #define VMM_SVM_EXIT_CPUID		0x072ULL
 #define VMM_SVM_EXIT_INVD		0x076ULL
@@ -575,7 +578,7 @@ vmm_svm_host_tlb_catchup(struct vmm_svm_backend *svm)
 static int
 vmm_svm_host_entry_blocked(void)
 {
-	return hvm_break_wanted();
+	return (mycpu->gd_reqflags & RQF_HVM_MASK) != 0;
 }
 
 static void
@@ -911,14 +914,50 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 }
 
 static void
-vmm_svm_yield_after_host_interrupt(void)
+vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint32_t reqflags)
 {
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const char *name;
+	uint32_t hvmflags = reqflags & RQF_HVM_MASK;
+
 	/*
-	 * A host interrupt VMEXIT is the cooperative scheduling point for a
-	 * CPU-bound guest.  Host CPU state has already been restored and STGI
-	 * has opened GIF, so let DragonFly process pending root work and
-	 * decide whether this vCPU should keep the CPU.
+	 * SVM does not report the physical INTR vector in EXITINFO1.  After
+	 * STGI, DragonFly's root vector path marks pending work in gd_reqflags;
+	 * only log physical INTR when it corresponds to non-timer HVM work.
 	 */
+	splz_check();
+	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_INTR &&
+	    (hvmflags & RQF_TIMER) != 0 &&
+	    (hvmflags & ~RQF_TIMER) == 0) {
+		lwkt_user_yield();
+		return;
+	}
+	switch (vmcb->ctrl.exitcode) {
+	case VMM_SVM_EXIT_INTR:
+		name = "intr";
+		break;
+	case VMM_SVM_EXIT_NMI:
+		name = "nmi";
+		break;
+	case VMM_SVM_EXIT_SMI:
+		name = "smi";
+		break;
+	case VMM_SVM_EXIT_INIT:
+		name = "init";
+		break;
+	case VMM_SVM_EXIT_VINTR:
+		name = "vintr";
+		break;
+	default:
+		name = "unknown";
+		break;
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u root %s exit info1=0x%jx info2=0x%jx hvmflags=0x%x reqflags=0x%x rip=0x%jx",
+	    vc->imm_id, name, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    (uintmax_t)vmcb->ctrl.exitinfo2, hvmflags, reqflags,
+	    (uintmax_t)vmcb->state.rip);
 	lwkt_user_yield();
 }
 
@@ -1203,6 +1242,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
+	uint32_t reqflags;
 
 	if (svm == NULL)
 		return;
@@ -1213,6 +1253,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_host_tlb_catchup(svm);
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
+			splz_check();
 			lwkt_user_yield();
 			continue;
 		}
@@ -1225,11 +1266,15 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
 		vmm_svm_stgi();
+		reqflags = mycpu->gd_reqflags;
 		vmm_svm_requeue_exit_event(svm);
 		switch (vmcb->ctrl.exitcode) {
 		case VMM_SVM_EXIT_INTR:
 		case VMM_SVM_EXIT_NMI:
-			vmm_svm_yield_after_host_interrupt();
+		case VMM_SVM_EXIT_SMI:
+		case VMM_SVM_EXIT_INIT:
+		case VMM_SVM_EXIT_VINTR:
+			vmm_svm_handle_root_event(svm, vc, reqflags);
 			break;
 		case VMM_SVM_EXIT_INVD:
 		case VMM_SVM_EXIT_WBINVD:
