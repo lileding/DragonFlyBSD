@@ -344,6 +344,7 @@ CTASSERT(sizeof(struct vmm_svm_state) == 0xc00);
 CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
 
 void	vmm_svm_vmrun(uint64_t vmcb_pa, uint64_t *gprs);
+static void vmm_svm_vcpu_destroy(void *backend);
 
 static void *
 vmm_svm_contig_alloc(uint64_t *pa, size_t pages)
@@ -364,7 +365,7 @@ vmm_svm_contig_free(void *va, size_t pages)
 		contigfree(va, pages * PAGE_SIZE, M_TEMP);
 }
 
-int
+static int
 vmm_svm_available(void)
 {
 	uint32_t descs[4];
@@ -453,7 +454,7 @@ vmm_svm_fpu_init(struct vmm_svm_backend *svm)
 	fpu->sv_ymm64.sv_xstate.sx_hd.xstate_xcomp_bv = 0;
 }
 
-int
+static int
 vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
     void **backendp)
 {
@@ -569,7 +570,7 @@ fail:
 	return error;
 }
 
-void
+static void
 vmm_svm_vcpu_destroy(void *backend)
 {
 	struct vmm_svm_backend *svm = backend;
@@ -1610,7 +1611,7 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm)
 }
 
 
-void
+static void
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
@@ -1723,3 +1724,13 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 out:
 	return;
 }
+
+const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
+	.imm_name = "svm",
+	.available = vmm_svm_available,
+	.create = vmm_svm_vcpu_create,
+	.destroy = vmm_svm_vcpu_destroy,
+	.run = vmm_svm_vcpu_run,
+};
+
+VMM_VCPU_BACKEND_SET(vmm_svm_backend_ops);

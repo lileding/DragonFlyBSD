@@ -15,41 +15,20 @@
 #include "vmm_host.h"
 #include "vmm_loader.h"
 #include "vmm_machine.h"
-#include "vmm_svm.h"
 #include "vmm_vcpu.h"
 
 #define VMM_VCPU_MAX	256u
 
-struct vmm_vcpu_backend_ops {
-	const char *imm_name;
-	int (*available)(void);
-	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
-	    void **backendp);
-	void (*destroy)(void *backend);
-	void (*run)(void *backend, struct vmm_vcpu_thread *vc);
-};
-
-static const struct vmm_vcpu_backend_ops vmm_vcpu_svm_ops = {
-	.imm_name = "svm",
-	.available = vmm_svm_available,
-	.create = vmm_svm_vcpu_create,
-	.destroy = vmm_svm_vcpu_destroy,
-	.run = vmm_svm_vcpu_run,
-};
-
-static const struct vmm_vcpu_backend_ops * const vmm_vcpu_backends[] = {
-	&vmm_vcpu_svm_ops,
-	NULL
-};
+SET_DECLARE(vmm_vcpu_backend_set, const struct vmm_vcpu_backend_ops);
 
 static const struct vmm_vcpu_backend_ops *
 vmm_vcpu_select_backend(void)
 {
-	uint32_t i;
+	const struct vmm_vcpu_backend_ops **ops;
 
-	for (i = 0; vmm_vcpu_backends[i] != NULL; i++) {
-		if (vmm_vcpu_backends[i]->available())
-			return vmm_vcpu_backends[i];
+	SET_FOREACH(ops, vmm_vcpu_backend_set) {
+		if ((*ops)->available())
+			return *ops;
 	}
 	return NULL;
 }

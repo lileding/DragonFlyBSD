@@ -9,6 +9,8 @@
 #ifndef VMM_VCPU_H
 #define VMM_VCPU_H
 
+#include <sys/linker_set.h>
+
 struct vmm_vcpu {
 	/*
 	 * Lifecycle:
@@ -28,7 +30,6 @@ struct vmm_vcpu {
 struct thread;
 struct vmm_launch;
 struct vmm_machine;
-struct vmm_vcpu_backend_ops;
 
 struct vmm_vcpu_thread {
 	struct vmm_machine	*borrow_imm_machine;
@@ -38,6 +39,17 @@ struct vmm_vcpu_thread {
 	uint32_t		 imm_id;
 	int			 imm_cpu;
 };
+
+struct vmm_vcpu_backend_ops {
+	const char *imm_name;
+	int (*available)(void);
+	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
+	    void **backendp);
+	void (*destroy)(void *backend);
+	void (*run)(void *backend, struct vmm_vcpu_thread *vc);
+};
+
+#define VMM_VCPU_BACKEND_SET(ops)	DATA_SET(vmm_vcpu_backend_set, ops)
 
 /* Parse the whole buffer; update iff valid (1..256).  1 = updated, 0 = reject. */
 int	vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len);
