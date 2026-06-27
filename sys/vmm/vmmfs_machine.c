@@ -179,10 +179,25 @@ vmmfs_machine_revoke_node(struct vmmfs_node *node)
 	if (vp == NULL)
 		return;
 
+	if (vget(vp, LK_EXCLUSIVE | LK_RETRY) != 0) {
+		vdrop(vp);
+		return;
+	}
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	if (node->vn_vnode != vp) {
+		lockmgr(&node->vn_interlock, LK_RELEASE);
+		vput(vp);
+		vdrop(vp);
+		return;
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	vn_unlock(vp);
+
 	(void)vrevoke(vp, proc0.p_ucred);
 	vx_get(vp);
 	vgone_vxlocked(vp);
 	vx_put(vp);
+	vrele(vp);
 	vdrop(vp);
 }
 

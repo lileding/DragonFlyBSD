@@ -22,7 +22,14 @@ cleanup()
 {
 	set +e; [ -n "$HOLD_PID" ] && kill "$HOLD_PID" >>"$LOG" 2>&1
 	cleanup_machine revoke_hold
-	[ "$MOUNTED" -eq 1 ] && umount "$MNT" >>"$LOG" 2>&1
+	if [ "$MOUNTED" -eq 1 ]; then
+		i=0
+		while [ "$i" -lt "$TIMEOUT" ]; do
+			umount "$MNT" >>"$LOG" 2>&1 && { MOUNTED=0; break; }
+			sleep 1
+			i=$((i + 1))
+		done
+	fi
 	[ "$LOADED" -eq 1 ] && kldunload vmm >>"$LOG" 2>&1
 	rm -f /var/tmp/vmmld_revoke_hold "$MOUNT_HELPER"
 }
@@ -48,7 +55,17 @@ printf '1\n' >"$(mach revoke_hold)/vcpu" || fail vcpu; printf '%s\n' "$MEM" >"$(
 printf '%s\n' "$WRAPPER" >"$(mach revoke_hold)/loader" || fail loader; cat "$(mach revoke_hold)/events" >>"$LOG"
 run rm "$(mach revoke_hold)/stopped"; wait_path "$RESULT.ready" || fail "hold child did not inherit fds"
 wait_path "$RESULT" || fail "hold revoke result not observed"; cat "$RESULT" >>"$LOG"; grep -q '^pass=1$' "$RESULT" || fail "hold revoke"
-HOLD_PID=$(awk -F= '/^pid=/{print $2}' "$RESULT"); cleanup_machine revoke_hold; run umount "$MNT"; MOUNTED=0
+HOLD_PID=$(awk -F= '/^pid=/{print $2}' "$RESULT"); cleanup_machine revoke_hold
+i=0
+while [ "$i" -lt "$TIMEOUT" ]; do
+	if umount "$MNT" >>"$LOG" 2>&1; then
+		MOUNTED=0
+		break
+	fi
+	sleep 1
+	i=$((i + 1))
+done
+[ "$MOUNTED" -eq 0 ] || fail "umount $MNT"
 kldunload vmm >>"$LOG" 2>&1 && fail "kldunload succeeded while loader mapping was held"
 kill "$HOLD_PID" >>"$LOG" 2>&1 || true; HOLD_PID=
 i=0; while [ "$i" -lt "$TIMEOUT" ]; do kldunload vmm >>"$LOG" 2>&1 && { LOADED=0; say "PASS"; exit 0; }; sleep 1; i=$((i + 1)); done

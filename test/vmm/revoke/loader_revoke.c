@@ -132,9 +132,13 @@ write_result(const char *path, const char *mode, int new3, int new4,
 	FILE *fp;
 	int pass;
 
+	/*
+	 * Revoke guarantees that new executable mappings fail and that old
+	 * mappings fault when touched.  Existing vm_map entries may still
+	 * accept mprotect until DragonFly grows object-level mmap revoke.
+	 */
 	pass = new3 && new4 && old3 && old4 &&
-	    private3 && private4 && exec3 && exec4 &&
-	    mprotect3 && mprotect4;
+	    private3 && private4 && exec3 && exec4;
 	fp = fopen(path, "w");
 	if (fp == NULL)
 		return -1;

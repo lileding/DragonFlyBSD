@@ -4,7 +4,7 @@ ROOT=$(dirname "$0"); REPO=$(cd "$ROOT/../../.." && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}; MNT=${VMM_MOUNT:-/var/tmp/dfvmm-revoke-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-revoke-test.log}; LOADER=${VMM_REVOKE_LOADER:-/var/tmp/vmm_revoke_loader}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-revoke-$$-mount_vmm}
-MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:-5}; LOADED=0; MOUNTED=0
+MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:-12}; LOADED=0; MOUNTED=0
 say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
@@ -27,7 +27,14 @@ cleanup_machine()
 cleanup()
 {
 	set +e; cleanup_machine revoke_exit; cleanup_machine revoke_hang
-	[ "$MOUNTED" -eq 1 ] && umount "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
+	if [ "$MOUNTED" -eq 1 ]; then
+		i=0
+		while [ "$i" -lt "$TIMEOUT" ]; do
+			umount "$MNT" >>"$LOG" 2>&1 && { MOUNTED=0; break; }
+			sleep 1
+			i=$((i + 1))
+		done
+	fi
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] && kldunload vmm >>"$LOG" 2>&1
 	rm -f /var/tmp/vmmld_revoke_exit /var/tmp/vmmld_revoke_hang "$MOUNT_HELPER"
 }

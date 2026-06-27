@@ -37,6 +37,7 @@
 #include <sys/kobj.h>
 
 #include "vmm_domain.h"
+#include "vmm_loader.h"
 #include "vmm_machine.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
@@ -747,6 +748,10 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	kprintf("vmm klog: vfs_uninit begin\n");
 	if (vmmfs_mount_count_busy()) {
 		kprintf("vmm klog: vfs_uninit busy\n");
+		return EBUSY;
+	}
+	if (vmm_loader_busy()) {
+		kprintf("vmm klog: vfs_uninit loader busy\n");
 		return EBUSY;
 	}
 	vmm_domain_uninit();
