@@ -86,10 +86,6 @@
 #define VMM_SVM_CTRL_ENABLE_NP		0x001ULL
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
-#define VMM_SVM_CTRL_INTR_SHADOW	(1ULL << 0)
-#define VMM_SVM_EVENTINJ_VECTOR_MASK	0x000000ffULL
-#define VMM_SVM_EVENTINJ_TYPE_HW_INT	0ULL
-#define VMM_SVM_EVENTINJ_TYPE_SHIFT	8
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
@@ -131,34 +127,21 @@
 #define VMM_COM1_LSR		5U
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
-#define VMM_COM1_IER_RXRDY	0x01U
 #define VMM_COM1_IIR_NOPEND	0x01U
-#define VMM_COM1_IIR_RXRDY	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
 #define VMM_COM1_LSR_DR		0x01U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
-#define VMM_COM1_IOAPIC_PIN	4U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
 #define VMM_PIC2_CMD		0xa0U
 #define VMM_PIC2_DATA		0xa1U
-/* NuttX qemu-intel64 currently uses PIC2_CMD + 2 for the slave data port. */
-#define VMM_PIC2_DATA_NUTTX	0xa2U
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
+#define VMM_CPUID1_ECX_X2APIC	(1U << 21)
+#define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
 
 #define VMM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_IOAPIC_SIZE		PAGE_SIZE
-#define VMM_IOAPIC_INDEX	0x00U
-#define VMM_IOAPIC_DATA		0x10U
-#define VMM_IOAPIC_PINS		24U
-#define VMM_IOAPIC_REG_ID	0x00U
-#define VMM_IOAPIC_REG_VER	0x01U
-#define VMM_IOAPIC_REG_ARB	0x02U
-#define VMM_IOAPIC_REDTBL_BASE	0x10U
-#define VMM_IOAPIC_REDTBL_COUNT	(VMM_IOAPIC_PINS * 2U)
-#define VMM_IOAPIC_VERSION	(((VMM_IOAPIC_PINS - 1U) << 16) | 0x11U)
-#define VMM_IOAPIC_REDTBL_MASKED	0x00010000U
 
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
@@ -169,23 +152,10 @@
 #define VMM_SVM_MTRR_DEF_VALID		(MTRR_DEF_ENABLE | \
 					 MTRR_DEF_FIXED_ENABLE | MTRR_DEF_TYPE)
 #define VMM_SVM_APICBASE_ADDR		0xfee00000ULL
-#define VMM_SVM_APICBASE_VALID		(APICBASE_BSP | APICBASE_X2APIC | \
+#define VMM_SVM_APICBASE_VALID		(APICBASE_BSP | \
 					 APICBASE_ENABLED | APICBASE_ADDRESS)
 #define VMM_SVM_X2APIC_MSR_BASE	0x800U
-#define VMM_SVM_X2APIC_MSR_ID		0x802U
-#define VMM_SVM_X2APIC_MSR_VERSION	0x803U
-#define VMM_SVM_X2APIC_MSR_EOI		0x80bU
-#define VMM_SVM_X2APIC_MSR_ICR		0x830U
-#define VMM_SVM_X2APIC_MSR_LVT_TIMER	0x832U
-#define VMM_SVM_X2APIC_MSR_SELFIPI	0x83fU
 #define VMM_SVM_X2APIC_MSR_LAST	0x83fU
-#define VMM_SVM_X2APIC_MSR_COUNT	(VMM_SVM_X2APIC_MSR_LAST - \
-					 VMM_SVM_X2APIC_MSR_BASE + 1)
-#define VMM_SVM_X2APIC_VERSION		0x00060014ULL
-#define VMM_SVM_X2APIC_ICR_DELIVERY_STATUS	0x00001000ULL
-#define VMM_SVM_LVT_VECTOR		0x000000ffULL
-#define VMM_SVM_LVT_MASKED		0x00010000ULL
-#define VMM_SVM_LVT_TIMER_TSCDLT	0x00040000ULL
 
 
 #define VMM_X64_NDR			6
@@ -324,19 +294,12 @@ struct vmm_svm_backend {
 	uint64_t mut_host_sysenter_eip;
 	uint64_t mut_guest_mtrr_def_type;
 	uint64_t mut_guest_tsc_aux;
-	uint64_t mut_guest_tsc_deadline;
 	uint64_t mut_guest_apicbase;
-	uint64_t mut_guest_x2apic[VMM_SVM_X2APIC_MSR_COUNT];
-	uint8_t mut_guest_tsc_deadline_fired;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 	uint8_t mut_com1_ier;
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
 	uint8_t mut_com1_scr;
-	uint8_t mut_pic1_imr;
-	uint8_t mut_pic2_imr;
-	uint32_t mut_ioapic_sel;
-	uint32_t mut_ioapic_redtbl[VMM_IOAPIC_REDTBL_COUNT];
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
@@ -460,7 +423,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 {
 	struct vmm_svm_backend *svm;
 	struct vmm_svm_vmcb *vmcb;
-	unsigned int i;
 	int error;
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
@@ -481,14 +443,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
-	svm->mut_pic1_imr = 0xff;
-	svm->mut_pic2_imr = 0xff;
-	for (i = 0; i < VMM_IOAPIC_PINS; i++)
-		svm->mut_ioapic_redtbl[i * 2] = VMM_IOAPIC_REDTBL_MASKED;
-	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_ID -
-	    VMM_SVM_X2APIC_MSR_BASE] = 0;
-	svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_VERSION -
-	    VMM_SVM_X2APIC_MSR_BASE] = VMM_SVM_X2APIC_VERSION;
 	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
@@ -716,8 +670,11 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 	leaf = (uint32_t)vmcb->state.rax;
 	cpuid_count(leaf,
 	    (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX], regs);
-	if (leaf == 1)
+	if (leaf == 1) {
 		regs[1] &= ~VMM_CPUID_APIC_ID_MASK;
+		regs[2] &= ~(VMM_CPUID1_ECX_X2APIC |
+		    VMM_CPUID1_ECX_TSC_DEADLINE);
+	}
 	vmcb->state.rax = regs[0];
 	svm->mut_gprs[VMM_X64_GPR_RBX] = regs[1];
 	svm->mut_gprs[VMM_X64_GPR_RCX] = regs[2];
@@ -768,147 +725,6 @@ vmm_svm_x2apic_msr(uint32_t msr)
 	    msr <= VMM_SVM_X2APIC_MSR_LAST;
 }
 
-static int
-vmm_svm_rdmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr)
-{
-	uint64_t val;
-
-	if (!vmm_svm_x2apic_msr(msr))
-		return 0;
-	val = svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE];
-	vmm_svm_rdmsr_value(svm, val);
-	return 1;
-}
-
-static int
-vmm_svm_wrmsr_x2apic(struct vmm_svm_backend *svm, uint32_t msr, uint64_t val)
-{
-	if (!vmm_svm_x2apic_msr(msr))
-		return 0;
-	switch (msr) {
-	case VMM_SVM_X2APIC_MSR_ID:
-	case VMM_SVM_X2APIC_MSR_VERSION:
-		return 0;
-	case VMM_SVM_X2APIC_MSR_EOI:
-		break;
-	case VMM_SVM_X2APIC_MSR_SELFIPI:
-		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] =
-		    val & 0xff;
-		break;
-	case VMM_SVM_X2APIC_MSR_ICR:
-		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] =
-		    val & ~VMM_SVM_X2APIC_ICR_DELIVERY_STATUS;
-		break;
-	default:
-		svm->mut_guest_x2apic[msr - VMM_SVM_X2APIC_MSR_BASE] = val;
-		break;
-	}
-	vmm_svm_advance_rip(svm->own_mut_vmcb);
-	return 1;
-}
-
-static int
-vmm_svm_ioapic_pin_vector(struct vmm_svm_backend *svm, unsigned int pin,
-    uint8_t *vectorp)
-{
-	uint32_t low;
-	uint8_t vector;
-
-	if (pin >= VMM_IOAPIC_PINS || vectorp == NULL)
-		return 0;
-	low = svm->mut_ioapic_redtbl[pin * 2];
-	if ((low & VMM_IOAPIC_REDTBL_MASKED) != 0)
-		return 0;
-	vector = low & 0xffU;
-	if (vector < 16)
-		return 0;
-	*vectorp = vector;
-	return 1;
-}
-
-static int
-vmm_svm_timer_ready(struct vmm_svm_backend *svm, uint8_t *vectorp)
-{
-	uint64_t lvt;
-	uint8_t vector;
-
-	if (svm->mut_guest_tsc_deadline == 0 ||
-	    svm->mut_guest_tsc_deadline_fired) {
-		return 0;
-	}
-	lvt = svm->mut_guest_x2apic[VMM_SVM_X2APIC_MSR_LVT_TIMER -
-	    VMM_SVM_X2APIC_MSR_BASE];
-	if ((lvt & VMM_SVM_LVT_MASKED) != 0 ||
-	    (lvt & VMM_SVM_LVT_TIMER_TSCDLT) == 0) {
-		return 0;
-	}
-	vector = lvt & VMM_SVM_LVT_VECTOR;
-	if (vector < 16)
-		return 0;
-	if (vmm_svm_guest_tsc(svm) < svm->mut_guest_tsc_deadline)
-		return 0;
-	*vectorp = vector;
-	return 1;
-}
-
-static int
-vmm_svm_interrupts_blocked(struct vmm_svm_backend *svm)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-
-	return (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
-	    (vmcb->ctrl.intr & VMM_SVM_CTRL_INTR_SHADOW) != 0 ||
-	    (vmcb->state.rflags & PSL_I) == 0;
-}
-
-static void
-vmm_svm_inject_hwint(struct vmm_svm_backend *svm, uint8_t vector)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-
-	vmcb->ctrl.eventinj =
-	    ((uint64_t)vector & VMM_SVM_EVENTINJ_VECTOR_MASK) |
-	    (VMM_SVM_EVENTINJ_TYPE_HW_INT << VMM_SVM_EVENTINJ_TYPE_SHIFT) |
-	    VMM_SVM_EVENTINJ_VALID;
-}
-
-static int
-vmm_svm_com1_rx_pending(struct vmm_svm_backend *svm)
-{
-	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
-
-	if ((svm->mut_com1_ier & VMM_COM1_IER_RXRDY) == 0)
-		return 0;
-	return vmm_console_guest_pending(console) != 0;
-}
-
-static int
-vmm_svm_com1_rx_ready(struct vmm_svm_backend *svm, int rx_pending,
-    uint8_t *vectorp)
-{
-	if (!rx_pending)
-		return 0;
-	return vmm_svm_ioapic_pin_vector(svm, VMM_COM1_IOAPIC_PIN, vectorp);
-}
-
-static void
-vmm_svm_inject_pending_interrupts(struct vmm_svm_backend *svm,
-    int com1_rx_pending)
-{
-	uint8_t vector;
-
-	if (vmm_svm_interrupts_blocked(svm))
-		return;
-	if (vmm_svm_com1_rx_ready(svm, com1_rx_pending, &vector)) {
-		vmm_svm_inject_hwint(svm, vector);
-		return;
-	}
-	if (!vmm_svm_timer_ready(svm, &vector))
-		return;
-	vmm_svm_inject_hwint(svm, vector);
-	svm->mut_guest_tsc_deadline_fired = 1;
-}
-
 static void
 vmm_svm_requeue_exit_event(struct vmm_svm_backend *svm)
 {
@@ -919,7 +735,7 @@ vmm_svm_requeue_exit_event(struct vmm_svm_backend *svm)
 }
 
 static int
-vmm_svm_handle_msr(struct vmm_svm_backend *svm)
+vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t msr = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
@@ -940,9 +756,11 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_tsc_aux);
 			return 1;
 		case MSR_TSC_DEADLINE:
-			vmm_svm_rdmsr_value(svm,
-			    svm->mut_guest_tsc_deadline);
-			return 1;
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported tsc deadline msr op=rd msr=0x%jx rip=0x%jx",
+			    vc->imm_id, (uintmax_t)msr,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
 		case MSR_APICBASE:
 			vmm_svm_rdmsr_value(svm,
 			    svm->mut_guest_apicbase);
@@ -981,8 +799,12 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_eip);
 			return 1;
 		default:
-			if (vmm_svm_rdmsr_x2apic(svm, msr))
-				return 1;
+			if (vmm_svm_x2apic_msr(msr)) {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u unsupported x2apic msr op=rd msr=0x%jx rip=0x%jx",
+				    vc->imm_id, (uintmax_t)msr,
+				    (uintmax_t)vmcb->state.rip);
+			}
 			return 0;
 		}
 	}
@@ -1011,11 +833,19 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC_DEADLINE:
-		svm->mut_guest_tsc_deadline = val;
-		svm->mut_guest_tsc_deadline_fired = 0;
-		vmm_svm_advance_rip(vmcb);
-		return 1;
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported tsc deadline msr op=wr msr=0x%jx val=0x%jx rip=0x%jx",
+		    vc->imm_id, (uintmax_t)msr, (uintmax_t)val,
+		    (uintmax_t)vmcb->state.rip);
+		return 0;
 	case MSR_APICBASE:
+		if ((val & APICBASE_X2APIC) != 0) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported x2apic apicbase val=0x%jx rip=0x%jx",
+			    vc->imm_id, (uintmax_t)val,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
 		if ((val & ~VMM_SVM_APICBASE_VALID) != 0 ||
 		    (val & APICBASE_ADDRESS) != VMM_SVM_APICBASE_ADDR) {
 			return 0;
@@ -1070,8 +900,12 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	default:
-		if (vmm_svm_wrmsr_x2apic(svm, msr, val))
-			return 1;
+		if (vmm_svm_x2apic_msr(msr)) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported x2apic msr op=wr msr=0x%jx val=0x%jx rip=0x%jx",
+			    vc->imm_id, (uintmax_t)msr, (uintmax_t)val,
+			    (uintmax_t)vmcb->state.rip);
+		}
 		return 0;
 	}
 }
@@ -1139,158 +973,6 @@ vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
 	vmcb->state.rax = (vmcb->state.rax & ~mask) | (val & mask);
 }
 
-static uint64_t
-vmm_svm_gpr_read(struct vmm_svm_backend *svm, unsigned int reg)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-
-	switch (reg) {
-	case VMM_X64_GPR_RAX:
-		return vmcb->state.rax;
-	case VMM_X64_GPR_RSP:
-		return vmcb->state.rsp;
-	default:
-		if (reg < VMM_X64_GPR_RIP)
-			return svm->mut_gprs[reg];
-		return 0;
-	}
-}
-
-static void
-vmm_svm_gpr_write32(struct vmm_svm_backend *svm, unsigned int reg,
-    uint32_t val)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-
-	switch (reg) {
-	case VMM_X64_GPR_RAX:
-		vmcb->state.rax = val;
-		break;
-	case VMM_X64_GPR_RSP:
-		vmcb->state.rsp = val;
-		break;
-	default:
-		if (reg < VMM_X64_GPR_RIP)
-			svm->mut_gprs[reg] = val;
-		break;
-	}
-}
-
-static uint32_t
-vmm_svm_ioapic_read_reg(struct vmm_svm_backend *svm, uint32_t reg)
-{
-	if (reg >= VMM_IOAPIC_REDTBL_BASE &&
-	    reg < VMM_IOAPIC_REDTBL_BASE + VMM_IOAPIC_REDTBL_COUNT) {
-		return svm->mut_ioapic_redtbl[reg - VMM_IOAPIC_REDTBL_BASE];
-	}
-	switch (reg) {
-	case VMM_IOAPIC_REG_ID:
-	case VMM_IOAPIC_REG_ARB:
-		return 0;
-	case VMM_IOAPIC_REG_VER:
-		return VMM_IOAPIC_VERSION;
-	default:
-		return 0;
-	}
-}
-
-static void
-vmm_svm_ioapic_write_reg(struct vmm_svm_backend *svm, uint32_t reg,
-    uint32_t val)
-{
-	if (reg >= VMM_IOAPIC_REDTBL_BASE &&
-	    reg < VMM_IOAPIC_REDTBL_BASE + VMM_IOAPIC_REDTBL_COUNT) {
-		svm->mut_ioapic_redtbl[reg - VMM_IOAPIC_REDTBL_BASE] = val;
-	}
-}
-
-static int
-vmm_svm_ioapic_read(struct vmm_svm_backend *svm, uint64_t gpa,
-    uint32_t *valp)
-{
-	uint64_t off;
-
-	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
-		return 0;
-	off = gpa - VMM_IOAPIC_BASE;
-	switch (off) {
-	case VMM_IOAPIC_INDEX:
-		*valp = svm->mut_ioapic_sel;
-		return 1;
-	case VMM_IOAPIC_DATA:
-		*valp = vmm_svm_ioapic_read_reg(svm, svm->mut_ioapic_sel);
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-static int
-vmm_svm_ioapic_write(struct vmm_svm_backend *svm, uint64_t gpa,
-    uint32_t val)
-{
-	uint64_t off;
-
-	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
-		return 0;
-	off = gpa - VMM_IOAPIC_BASE;
-	switch (off) {
-	case VMM_IOAPIC_INDEX:
-		svm->mut_ioapic_sel = val & 0xffU;
-		return 1;
-	case VMM_IOAPIC_DATA:
-		vmm_svm_ioapic_write_reg(svm, svm->mut_ioapic_sel, val);
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-static int
-vmm_svm_pic_read(struct vmm_svm_backend *svm, unsigned int port, int size,
-    uint32_t *valp)
-{
-	if (size != 1)
-		return 0;
-	switch (port) {
-	case VMM_PIC1_CMD:
-	case VMM_PIC2_CMD:
-		*valp = 0;
-		return 1;
-	case VMM_PIC1_DATA:
-		*valp = svm->mut_pic1_imr;
-		return 1;
-	case VMM_PIC2_DATA:
-	case VMM_PIC2_DATA_NUTTX:
-		*valp = svm->mut_pic2_imr;
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-static int
-vmm_svm_pic_write(struct vmm_svm_backend *svm, unsigned int port, int size,
-    uint32_t val)
-{
-	if (size != 1)
-		return 0;
-	switch (port) {
-	case VMM_PIC1_CMD:
-	case VMM_PIC2_CMD:
-		return 1;
-	case VMM_PIC1_DATA:
-		svm->mut_pic1_imr = val & 0xffU;
-		return 1;
-	case VMM_PIC2_DATA:
-	case VMM_PIC2_DATA_NUTTX:
-		svm->mut_pic2_imr = val & 0xffU;
-		return 1;
-	default:
-		return 0;
-	}
-}
-
 static int
 vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
     uint32_t *valp)
@@ -1316,12 +998,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		    0 : svm->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		if ((svm->mut_com1_ier & VMM_COM1_IER_RXRDY) != 0 &&
-		    vmm_console_guest_pending(console) != 0) {
-			*valp = VMM_COM1_IIR_RXRDY;
-		} else {
-			*valp = VMM_COM1_IIR_NOPEND;
-		}
+		*valp = VMM_COM1_IIR_NOPEND;
 		return 1;
 	case VMM_COM1_LCR:
 		*valp = svm->mut_com1_lcr;
@@ -1383,31 +1060,43 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
 }
 
 static int
-vmm_svm_handle_ioio(struct vmm_svm_backend *svm)
+vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint64_t info = vmcb->ctrl.exitinfo1;
 	unsigned int port = (unsigned int)VMM_SVM_IOIO_PORT(info);
+	const char *op = (info & VMM_SVM_IOIO_IN) ? "in" : "out";
 	int size = vmm_svm_ioio_size(info);
 	uint32_t val;
 
-	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0)
+	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d info=0x%jx rip=0x%jx",
+		    vc->imm_id, op, port, size, (uintmax_t)info,
+		    (uintmax_t)vmcb->state.rip);
 		return 0;
-	if (info & VMM_SVM_IOIO_IN) {
-		if (vmm_svm_pic_read(svm, port, size, &val)) {
-			vmm_svm_set_rax_low(vmcb, val, size);
-			vmm_svm_advance_ioio(vmcb);
-			return 1;
-		}
-	} else {
-		val = vmcb->state.rax & 0xffffffffU;
-		if (vmm_svm_pic_write(svm, port, size, val)) {
-			vmm_svm_advance_ioio(vmcb);
-			return 1;
-		}
 	}
-	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR)
+
+	switch (port) {
+	case VMM_PIC1_CMD:
+	case VMM_PIC1_DATA:
+	case VMM_PIC2_CMD:
+	case VMM_PIC2_DATA:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported pic io op=%s port=0x%x size=%d rip=0x%jx",
+		    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
 		return 0;
+	default:
+		break;
+	}
+
+	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d rip=0x%jx",
+		    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
+		return 0;
+	}
+
 	if (info & VMM_SVM_IOIO_IN) {
 		if (!vmm_svm_com1_read(svm, port - VMM_COM1_BASE, size, &val))
 			return 0;
@@ -1478,114 +1167,8 @@ vmm_svm_handle_idle_wait(struct vmm_vcpu_thread *vc, struct vmm_svm_vmcb *vmcb)
 		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
 }
 
-struct vmm_svm_mmio32 {
-	uint8_t mut_write;
-	uint8_t mut_reg;
-	uint8_t mut_imm;
-	uint32_t mut_imm_val;
-};
-
 static int
-vmm_svm_decode_mmio32(struct vmm_svm_vmcb *vmcb,
-    struct vmm_svm_mmio32 *op)
-{
-	const uint8_t *insn = vmcb->ctrl.inst_bytes;
-	uint8_t rex = 0;
-	uint8_t opcode;
-	uint8_t modrm;
-	uint8_t mod;
-	uint8_t reg;
-	uint8_t rm;
-	size_t len = vmcb->ctrl.inst_len;
-	size_t i = 0;
-
-	if (len == 0 || len > sizeof(vmcb->ctrl.inst_bytes) || op == NULL)
-		return 0;
-	while (i < len && insn[i] >= 0x40 && insn[i] <= 0x4f)
-		rex = insn[i++];
-	if ((rex & 0x08) != 0 || i + 2 > len)
-		return 0;
-	opcode = insn[i++];
-	modrm = insn[i++];
-	mod = modrm >> 6;
-	reg = ((modrm >> 3) & 7U) | ((rex & 0x04) ? 8U : 0U);
-	rm = modrm & 7U;
-	if (mod == 3)
-		return 0;
-	if (rm == 4) {
-		uint8_t sib;
-		uint8_t base;
-
-		if (i >= len)
-			return 0;
-		sib = insn[i++];
-		base = sib & 7U;
-		if (mod == 0 && base == 5)
-			i += 4;
-	} else if (mod == 0 && rm == 5) {
-		i += 4;
-	}
-	if (mod == 1)
-		i += 1;
-	else if (mod == 2)
-		i += 4;
-	if (i > len)
-		return 0;
-
-	switch (opcode) {
-	case 0x89:		/* mov r/m32,r32 */
-		op->mut_write = 1;
-		op->mut_reg = reg;
-		op->mut_imm = 0;
-		return 1;
-	case 0x8b:		/* mov r32,r/m32 */
-		op->mut_write = 0;
-		op->mut_reg = reg;
-		op->mut_imm = 0;
-		return 1;
-	case 0xc7:		/* mov r/m32,imm32 */
-		if (reg != 0 || i + 4 > len)
-			return 0;
-		op->mut_write = 1;
-		op->mut_reg = 0;
-		op->mut_imm = 1;
-		op->mut_imm_val = (uint32_t)insn[i] |
-		    ((uint32_t)insn[i + 1] << 8) |
-		    ((uint32_t)insn[i + 2] << 16) |
-		    ((uint32_t)insn[i + 3] << 24);
-		return 1;
-	default:
-		return 0;
-	}
-}
-
-static int
-vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm, uint64_t gpa)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	struct vmm_svm_mmio32 op;
-	uint32_t val;
-
-	if (gpa < VMM_IOAPIC_BASE || gpa >= VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
-		return 0;
-	if (!vmm_svm_decode_mmio32(vmcb, &op))
-		return 0;
-	if (op.mut_write) {
-		val = op.mut_imm ? op.mut_imm_val :
-		    (uint32_t)vmm_svm_gpr_read(svm, op.mut_reg);
-		if (!vmm_svm_ioapic_write(svm, gpa, val))
-			return 0;
-	} else {
-		if (!vmm_svm_ioapic_read(svm, gpa, &val))
-			return 0;
-		vmm_svm_gpr_write32(svm, op.mut_reg, val);
-	}
-	vmm_svm_advance_rip(vmcb);
-	return 1;
-}
-
-static int
-vmm_svm_handle_npf(struct vmm_svm_backend *svm)
+vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_machine *m = svm->borrow_imm_machine;
@@ -1593,9 +1176,13 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm)
 	int prot;
 	int error;
 
-	if ((vmcb->ctrl.exitinfo1 & PGEX_I) == 0 &&
-	    vmm_svm_handle_ioapic_mmio(svm, gpa)) {
-		return 1;
+	if (gpa >= VMM_IOAPIC_BASE && gpa < VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported ioapic mmio gpa=0x%jx info=0x%jx rip=0x%jx",
+		    vc->imm_id, (uintmax_t)gpa,
+		    (uintmax_t)vmcb->ctrl.exitinfo1,
+		    (uintmax_t)vmcb->state.rip);
+		return 0;
 	}
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
 		prot = VM_PROT_WRITE;
@@ -1616,13 +1203,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
-	int com1_rx_pending;
 
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_vcpu_should_stop(vc)) {
-		com1_rx_pending = vmm_svm_com1_rx_pending(svm);
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup(svm);
@@ -1632,7 +1217,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			continue;
 		}
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
-		vmm_svm_inject_pending_interrupts(svm, com1_rx_pending);
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
@@ -1669,7 +1253,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_handle_guest_tlb_op(svm);
 			break;
 		case VMM_SVM_EXIT_IOIO:
-			if (vmm_svm_handle_ioio(svm))
+			if (vmm_svm_handle_ioio(svm, vc))
 				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
@@ -1685,11 +1269,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_handle_idle_wait(vc, vmcb);
 			break;
 		case VMM_SVM_EXIT_NPF:
-			if (vmm_svm_handle_npf(svm))
+			if (vmm_svm_handle_npf(svm, vc))
 				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_MSR:
-			if (vmm_svm_handle_msr(svm))
+			if (vmm_svm_handle_msr(svm, vc))
 				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_XSETBV:
