@@ -13,6 +13,7 @@
 #include "vm/vm_map.h"
 #include "vm/vm_object.h"
 #include "vmm_mem.h"
+#include "vmm_loader_x86.h"
 
 static int failures;
 int vmm_test_vm_fault_calls;
@@ -221,6 +222,52 @@ expect_fault_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
 }
 
 static void
+expect_lapic_hole_fault_reject(void)
+{
+	struct vmm_mem mem;
+	struct vmm_mem_backing *backing;
+	struct vmm_mem_backing *detached;
+	struct vmspace *vmspace;
+	uint64_t bytes = VMM_X86_LAPIC_MMIO_GPA + VMM_MEM_ALIGN;
+
+	reset_vm_trace();
+	memset(&mem, 0, sizeof(mem));
+	mem.mut_bytes = bytes;
+	backing = NULL;
+	if (vmm_mem_prepare(mem.mut_bytes, &backing) != 0 || backing == NULL) {
+		fail("prepare lapic-hole backing");
+		return;
+	}
+	if (vmm_test_vm_map_insert_calls != 2)
+		fail("prepare maps RAM around lapic hole");
+	if (vmm_mem_publish(&mem, backing) != 0) {
+		fail("publish lapic-hole backing");
+		vmm_mem_release_backing(backing);
+		return;
+	}
+	vmspace = vmm_mem_borrow_vmspace(&mem);
+	if (vmspace == NULL) {
+		fail("borrow lapic-hole vmspace");
+		detached = vmm_mem_detach(&mem);
+		vmm_mem_release_backing(detached);
+		return;
+	}
+	expect_fault_result(&mem, "fault before lapic hole",
+	    VMM_X86_LAPIC_MMIO_GPA - PAGE_SIZE, VM_PROT_READ, 0, 1,
+	    &vmspace->vm_map, VMM_X86_LAPIC_MMIO_GPA - PAGE_SIZE,
+	    VM_FAULT_NORMAL);
+	expect_fault_result(&mem, "fault lapic hole", VMM_X86_LAPIC_MMIO_GPA,
+	    VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
+	expect_fault_result(&mem, "fault after lapic hole",
+	    VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE,
+	    VM_PROT_READ, 0, 1, &vmspace->vm_map,
+	    VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE,
+	    VM_FAULT_NORMAL);
+	detached = vmm_mem_detach(&mem);
+	vmm_mem_release_backing(detached);
+}
+
+static void
 expect_backing_lifecycle(void)
 {
 	struct vmm_mem mem;
@@ -357,7 +404,7 @@ expect_large_prepare_is_lazy(void)
 	if (vmm_test_default_pager_alloc_size != VMM_MEM_MAX ||
 	    vmm_test_vmspace_alloc_min != 0 ||
 	    vmm_test_vmspace_alloc_max != VMM_MEM_MAX ||
-	    vmm_test_vm_map_insert_calls != 1 ||
+	    vmm_test_vm_map_insert_calls != 2 ||
 	    vmm_test_vm_fault_calls != 0) {
 		fail("prepare max backing is lazy");
 	}
@@ -417,6 +464,7 @@ main(void)
 	expect_format_reject("format small buffer", 2ull * 1024 * 1024, 4);
 	expect_backing_reject();
 	expect_backing_lifecycle();
+	expect_lapic_hole_fault_reject();
 	expect_large_prepare_is_lazy();
 
 	if (failures != 0)

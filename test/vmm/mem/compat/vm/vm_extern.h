@@ -36,10 +36,16 @@ vmspace_alloc(vm_offset_t min, vm_offset_t max)
 static inline void
 vmspace_rel(struct vmspace *vmspace)
 {
-	if (vmspace != NULL && vmspace->vm_map.mapped_object != NULL)
-		vm_object_deallocate(vmspace->vm_map.mapped_object);
-	if (vmspace != NULL)
+	if (vmspace != NULL) {
+		int i;
+		int n = vmspace->vm_map.mapped_count;
+
+		if (n > VMM_TEST_VM_MAP_INSERT_MAX)
+			n = VMM_TEST_VM_MAP_INSERT_MAX;
+		for (i = 0; i < n; i++)
+			vm_object_deallocate(vmspace->vm_map.mapped_objects[i]);
 		vmm_test_vmspace_free_count++;
+	}
 	free(vmspace);
 }
 

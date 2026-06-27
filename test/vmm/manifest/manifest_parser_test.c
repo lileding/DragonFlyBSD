@@ -21,6 +21,8 @@
 #define VMM_REC_F_MANDATORY	1
 
 #define MEM_SIZE		(2ULL * 1024ULL * 1024ULL)
+#define LARGE_MEM_SIZE		(VMM_X86_LAPIC_MMIO_GPA + \
+				 (2ULL * 1024ULL * 1024ULL))
 #define MANIFEST_SIZE		4096U
 #define PAGE_SIZE_GUEST		4096ULL
 #define PML4_GPA		0x1000ULL
@@ -374,6 +376,28 @@ main(void)
 	ranges = manifest_ranges(manifest);
 	ranges[0].type = VMM_GPA_RANGE_GUEST_STACK + 1;
 	expect_result("bad range type high", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	manifest_header(manifest)->mem_size = LARGE_MEM_SIZE;
+	vcpu = manifest_vcpu(manifest);
+	vcpu->gpr[VMM_X64_GPR_RIP] = VMM_X86_LAPIC_MMIO_GPA;
+	expect_load_result("bad rip lapic hole", LARGE_MEM_SIZE, manifest,
+	    MANIFEST_SIZE, EINVAL);
+
+	build_valid_state(manifest);
+	manifest_header(manifest)->mem_size = LARGE_MEM_SIZE;
+	vcpu = manifest_vcpu(manifest);
+	vcpu->cr[VMM_X64_CR_CR3] = VMM_X86_LAPIC_MMIO_GPA;
+	expect_load_result("bad cr3 lapic hole", LARGE_MEM_SIZE, manifest,
+	    MANIFEST_SIZE, EINVAL);
+
+	build_valid_state(manifest);
+	manifest_header(manifest)->mem_size = LARGE_MEM_SIZE;
+	ranges = manifest_ranges(manifest);
+	ranges[0].start = VMM_X86_LAPIC_MMIO_GPA - PAGE_SIZE_GUEST;
+	ranges[0].size = PAGE_SIZE_GUEST * 2;
+	expect_load_result("bad range overlaps lapic hole", LARGE_MEM_SIZE,
+	    manifest, MANIFEST_SIZE, EINVAL);
 
 	printf("PASS: x86 manifest parser\n");
 	return 0;

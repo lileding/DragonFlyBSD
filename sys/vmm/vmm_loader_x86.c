@@ -50,6 +50,13 @@
  *   +0x08 uint64_t size
  *   +0x10 uint32_t type
  *   +0x14 uint32_t flags
+ *
+ * x86 memory topology visible to loaders:
+ *
+ *   [0xfee00000, 0xfee01000) is the architectural local-APIC MMIO page.
+ *   fd3 is still a mem_size-sized mmap object, but this GPA page is not guest
+ *   RAM.  Manifest ranges and launch state pointers must not overlap it; an
+ *   OS memory map emitted by a loader must mark it reserved.
  */
 #include <sys/param.h>
 #include <sys/types.h>
@@ -112,22 +119,35 @@ vmm_gpa_inside(uint64_t mem_size, uint64_t start, uint64_t size)
 }
 
 static int
+vmm_gpa_ram_inside(uint64_t mem_size, uint64_t start, uint64_t size)
+{
+	uint64_t end;
+	uint64_t lapic_end;
+
+	if (!vmm_gpa_inside(mem_size, start, size))
+		return 0;
+	end = start + size;
+	lapic_end = VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE;
+	return start >= lapic_end || VMM_X86_LAPIC_MMIO_GPA >= end;
+}
+
+static int
 vmm_gpa_addr(uint64_t mem_size, uint64_t addr)
 {
-	return addr < mem_size;
+	return vmm_gpa_ram_inside(mem_size, addr, 1);
 }
 
 static int
 vmm_gpa_page(uint64_t mem_size, uint64_t addr)
 {
 	return (addr & PAGE_MASK) == 0 &&
-	    vmm_gpa_inside(mem_size, addr, PAGE_SIZE);
+	    vmm_gpa_ram_inside(mem_size, addr, PAGE_SIZE);
 }
 
 static int
 vmm_gpa_limit(uint64_t mem_size, uint64_t base, uint32_t limit)
 {
-	return vmm_gpa_inside(mem_size, base, (uint64_t)limit + 1);
+	return vmm_gpa_ram_inside(mem_size, base, (uint64_t)limit + 1);
 }
 
 static int
@@ -273,7 +293,7 @@ vmm_loader_x86_validate_ranges(uint64_t mem_size, const uint8_t *payload,
 	if (count > VMM_GPA_RANGE_MAX)
 		return EINVAL;
 	for (i = 0; i < count; i++) {
-		if (!vmm_gpa_inside(mem_size, range[i].start, range[i].size))
+		if (!vmm_gpa_ram_inside(mem_size, range[i].start, range[i].size))
 			return EINVAL;
 		if (!vmm_gpa_range_type_valid(range[i].type))
 			return EINVAL;

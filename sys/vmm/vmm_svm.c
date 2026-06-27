@@ -176,7 +176,7 @@
 					 EFER_TCE)
 #define VMM_SVM_MTRR_DEF_VALID		(MTRR_DEF_ENABLE | \
 					 MTRR_DEF_FIXED_ENABLE | MTRR_DEF_TYPE)
-#define VMM_SVM_APICBASE_ADDR		0xfee00000ULL
+#define VMM_SVM_APICBASE_ADDR		VMM_X86_LAPIC_MMIO_GPA
 #define VMM_SVM_APICBASE_VALID		(APICBASE_BSP | \
 					 APICBASE_ENABLED | APICBASE_ADDRESS)
 #define VMM_SVM_X2APIC_MSR_BASE	0x800U
@@ -343,8 +343,23 @@ struct vmm_svm_backend {
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, v) == 0x060);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, intr) == 0x068);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, exitcode) == 0x070);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, exitinfo1) == 0x078);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, exitinfo2) == 0x080);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, enable1) == 0x090);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, avic) == 0x098);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, eventinj) == 0x0a8);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, n_cr3) == 0x0b0);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, nrip) == 0x0c8);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, inst_len) == 0x0d0);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_abpp) == 0x0e0);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_ltp) == 0x0f0);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_phys) == 0x0f8);
 CTASSERT(sizeof(struct vmm_svm_state) == 0xc00);
 CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
+CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
 
 void	vmm_svm_vmrun(uint64_t vmcb_pa, uint64_t *gprs);
 static void vmm_svm_vcpu_destroy(void *backend);

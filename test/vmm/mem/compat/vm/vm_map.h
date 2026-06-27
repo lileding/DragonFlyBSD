@@ -7,6 +7,7 @@
 #define MAP_RESERVE_COUNT	1
 #define VM_MAPTYPE_NORMAL	0
 #define VM_SUBSYS_MMAP		0
+#define VMM_TEST_VM_MAP_INSERT_MAX 4
 
 #include "vm/vm_object.h"
 
@@ -18,6 +19,11 @@ struct vm_map {
 	vm_ooffset_t mapped_offset;
 	vm_prot_t mapped_prot;
 	vm_prot_t mapped_maxprot;
+	int mapped_count;
+	struct vm_object *mapped_objects[VMM_TEST_VM_MAP_INSERT_MAX];
+	vm_offset_t mapped_starts[VMM_TEST_VM_MAP_INSERT_MAX];
+	vm_offset_t mapped_ends[VMM_TEST_VM_MAP_INSERT_MAX];
+	vm_ooffset_t mapped_offsets[VMM_TEST_VM_MAP_INSERT_MAX];
 };
 
 typedef struct vm_map *vm_map_t;
@@ -83,6 +89,15 @@ vm_map_insert(vm_map_t map, int *count, struct vm_object *object,
 	map->mapped_offset = offset;
 	map->mapped_prot = prot;
 	map->mapped_maxprot = maxprot;
+	if (map->mapped_count < VMM_TEST_VM_MAP_INSERT_MAX) {
+		int idx = map->mapped_count;
+
+		map->mapped_objects[idx] = object;
+		map->mapped_starts[idx] = start;
+		map->mapped_ends[idx] = end;
+		map->mapped_offsets[idx] = offset;
+	}
+	map->mapped_count++;
 	return 0;
 }
 

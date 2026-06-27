@@ -14,6 +14,17 @@
 #define VMM_X64_NSEG	10
 #define VMM_GPA_RANGE_MAX 32
 
+/*
+ * x86 architectural local-APIC MMIO hole.  This is loader ABI, not just an
+ * SVM implementation detail: fd3 is sized as mem_size, but this GPA page is
+ * platform MMIO rather than guest RAM.  Loaders must not place manifest GPA
+ * ranges, page tables, descriptors, stacks, kernels, initramfs, or boot data
+ * here.  OS loaders that publish a memory map, such as Linux E820, must mark
+ * this page reserved whenever mem_size covers it.
+ */
+#define VMM_X86_LAPIC_MMIO_GPA	0xfee00000ULL
+#define VMM_X86_LAPIC_MMIO_SIZE	0x1000ULL
+
 #define VMM_GPA_RANGE_LOAD		1
 #define VMM_GPA_RANGE_BOOT_PARAMS	2
 #define VMM_GPA_RANGE_CMDLINE		3

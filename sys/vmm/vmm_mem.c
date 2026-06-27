@@ -16,6 +16,7 @@
 #include <vm/vm_pager.h>
 
 #include "vmm_parse.h"
+#include "vmm_loader_x86.h"
 #include "vmm_mem.h"
 
 struct vmm_mem_backing {
@@ -100,36 +101,68 @@ vmm_mem_gpa_page_inside(uint64_t bytes, uint64_t gpa)
 	uint64_t page;
 
 	page = trunc_page(gpa);
-	return page < bytes && bytes - page >= PAGE_SIZE;
+	return page < bytes && bytes - page >= PAGE_SIZE &&
+	    (page < VMM_X86_LAPIC_MMIO_GPA ||
+	     page >= VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE);
 }
 
 static int
 vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
     uint64_t bytes)
 {
+	struct vmm_mem_map_segment {
+		vm_offset_t start;
+		vm_offset_t end;
+		vm_ooffset_t offset;
+	} seg[2];
 	vm_map_t map = &vm->vm_map;
-	vm_offset_t start = 0;
 	vm_size_t size = round_page64(bytes);
 	vm_prot_t prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
-	int count;
-	int rv;
+	unsigned int i;
+	unsigned int nseg = 0;
 
-	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
-	vm_map_lock(map);
-	/*
-	 * vm_map_insert() consumes this reference on success.  On failure the
-	 * caller remains responsible for dropping it.
-	 */
-	vmm_mem_object_ref(object);
-	vm_object_hold(object);
-	rv = vm_map_insert(map, &count, object, NULL, 0, NULL, start,
-	    start + size, VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot, 0);
-	vm_object_drop(object);
-	vm_map_unlock(map);
-	vm_map_entry_release(count);
-	if (rv != 0) {
-		vm_object_deallocate(object);
-		return ENOMEM;
+	if (size <= VMM_X86_LAPIC_MMIO_GPA) {
+		seg[nseg].start = 0;
+		seg[nseg].end = size;
+		seg[nseg].offset = 0;
+		nseg++;
+	} else {
+		seg[nseg].start = 0;
+		seg[nseg].end = VMM_X86_LAPIC_MMIO_GPA;
+		seg[nseg].offset = 0;
+		nseg++;
+		if (size > VMM_X86_LAPIC_MMIO_GPA +
+		    VMM_X86_LAPIC_MMIO_SIZE) {
+			seg[nseg].start = VMM_X86_LAPIC_MMIO_GPA +
+			    VMM_X86_LAPIC_MMIO_SIZE;
+			seg[nseg].end = size;
+			seg[nseg].offset = VMM_X86_LAPIC_MMIO_GPA +
+			    VMM_X86_LAPIC_MMIO_SIZE;
+			nseg++;
+		}
+	}
+	for (i = 0; i < nseg; i++) {
+		int count;
+		int rv;
+
+		count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+		vm_map_lock(map);
+		/*
+		 * vm_map_insert() consumes this reference on success.  On failure
+		 * the caller remains responsible for dropping it.
+		 */
+		vmm_mem_object_ref(object);
+		vm_object_hold(object);
+		rv = vm_map_insert(map, &count, object, NULL, seg[i].offset,
+		    NULL, seg[i].start, seg[i].end, VM_MAPTYPE_NORMAL,
+		    VM_SUBSYS_MMAP, prot, prot, 0);
+		vm_object_drop(object);
+		vm_map_unlock(map);
+		vm_map_entry_release(count);
+		if (rv != 0) {
+			vm_object_deallocate(object);
+			return ENOMEM;
+		}
 	}
 	return 0;
 }
