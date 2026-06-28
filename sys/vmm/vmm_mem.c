@@ -106,6 +106,7 @@ vmm_mem_gpa_page_inside(uint64_t bytes, uint64_t gpa)
 	     page >= VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE);
 }
 
+#ifndef _KERNEL_VIRTUAL
 static int
 vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
     uint64_t bytes)
@@ -166,6 +167,7 @@ vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
 	}
 	return 0;
 }
+#endif
 
 int
 vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
@@ -196,6 +198,7 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 	 * populate pages on demand; this is not an eager reservation of every
 	 * guest page.
 	 */
+#ifndef _KERNEL_VIRTUAL
 	b->own_mut_vmspace = vmspace_alloc(0, size);
 	if (b->own_mut_vmspace == NULL) {
 		error = ENOMEM;
@@ -205,6 +208,7 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 	error = vmm_mem_map_object(b->own_mut_vmspace, b->own_mut_object, size);
 	if (error)
 		goto fail;
+#endif
 
 	*backingp = b;
 	return 0;

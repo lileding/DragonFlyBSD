@@ -13,14 +13,14 @@
 #include <sys/file.h>
 #include <sys/filedesc.h>
 #include <sys/fcntl.h>
-#include <sys/imgact.h>
 #include <sys/kern_syscall.h>
-#include <sys/nlookup.h>
 #include <sys/proc.h>
 #include <sys/resource.h>
 #include <sys/signal.h>
 #include <sys/signalvar.h>
 #include <sys/stat.h>
+#include <sys/sysmsg.h>
+#include <sys/sysproto.h>
 #include <sys/uio.h>
 #include <sys/ucred.h>
 #include <sys/unistd.h>
@@ -77,9 +77,10 @@ struct vmm_loader_fd {
 	 * atomic_mut_refs keeps this heap object alive while either the devfs
 	 * file private data or the cdev pager object can call back into vmm.  The
 	 * initial ref belongs to devfs cdevpriv; the pager ctor/dtor pair owns a
-	 * second ref.  vmm_loader_fd_active mirrors this heap-object lifetime so
-	 * module unload refuses while any loader fd or mmap can still reach these
-	 * callbacks.
+	 * second ref.  The pathless VCHR vnode has its own ref, held here until
+	 * vmm_loader_fd_free() turns it into deadfs.  vmm_loader_fd_active mirrors
+	 * this whole callback lifetime so module unload refuses while any loader
+	 * fd, vnode, or mmap can still reach vmm code.
 	 *
 	 * Lock map:
 	 * after cdev_pager_allocate() publishes own_mut_object, its token protects
@@ -88,6 +89,7 @@ struct vmm_loader_fd {
 	 * state; mmap and fault paths recheck under the object token.
 	 */
 	cdev_t		own_mut_dev;
+	struct vnode	*own_mut_vnode;		/* pathless fd vnode */
 	struct vm_object *own_mut_object;		/* mmap capability */
 	struct vm_object *own_mut_backing_object;	/* guest RAM/manifest */
 	vm_size_t	imm_size;
@@ -148,6 +150,9 @@ static struct vop_ops vmm_loader_vnode_vops = {
 	.vop_default =		vop_defaultop,
 	.vop_close =		vop_stdclose,
 	.vop_getattr =		vmm_loader_vop_getattr,
+	.vop_advlock =		(void *)vop_null,
+	.vop_inactive =		(void *)vop_null,
+	.vop_reclaim =		(void *)vop_null,
 	.vop_pathconf =		vop_stdpathconf,
 };
 
@@ -437,8 +442,17 @@ static void
 vmm_loader_fd_free(void *arg)
 {
 	struct vmm_loader_fd *lfd = arg;
+	struct vnode *vp;
 
 	vmm_loader_fd_revoke(lfd);
+	vp = lfd->own_mut_vnode;
+	if (vp != NULL) {
+		lfd->own_mut_vnode = NULL;
+		vx_get(vp);
+		vgone_vxlocked(vp);
+		vx_put(vp);
+		vrele(vp);
+	}
 	if (lfd->own_mut_dev != NULL) {
 		lfd->own_mut_dev->si_drv1 = NULL;
 		destroy_only_dev(lfd->own_mut_dev);
@@ -507,8 +521,8 @@ vmm_loader_make_vnode(cdev_t dev, struct vnode **vpp)
 	vp->v_type = VCHR;
 	error = v_associate_rdev(vp, dev);
 	if (error) {
-		vx_unlock(vp);
-		vrele(vp);
+		vgone_vxlocked(vp);
+		vx_put(vp);
 		*vpp = NULL;
 		return error;
 	}
@@ -529,11 +543,10 @@ vmm_loader_open_fd(struct vmm_loader_fd *lfd, struct file **fpp)
 	error = vmm_loader_make_vnode(lfd->own_mut_dev, &vp);
 	if (error)
 		goto fail;
+	lfd->own_mut_vnode = vp;
 	error = falloc(NULL, &fp, NULL);
-	if (error) {
-		vrele(vp);
+	if (error)
 		goto fail;
-	}
 	/*
 	 * This is an internal mmap capability, not a normal devfs path.  Build
 	 * the file directly so the worker does not need to resolve a devfs
@@ -547,7 +560,6 @@ vmm_loader_open_fd(struct vmm_loader_fd *lfd, struct file **fpp)
 	vref(vp);
 	atomic_add_int(&vp->v_opencount, 1);
 	atomic_add_int(&vp->v_writecount, 1);
-	vrele(vp);
 	error = devfs_set_cdevpriv(fp, lfd, vmm_loader_fd_free);
 	if (error) {
 		fp_close(fp);
@@ -621,48 +633,51 @@ vmm_loader_manifest_object(struct vm_object **objectp)
 }
 
 static int
-vmm_loader_make_args(const char *path, struct image_args *args)
+vmm_loader_exec_path(const char *path)
 {
-	char *buf;
+	struct sysmsg sysmsg;
+	struct execve_args args;
+	char *arg0;
+	char *ucp;
+	char **uap;
 	size_t len;
-	int error;
+	size_t i;
 
-	bzero(args, sizeof(*args));
-	buf = kmalloc(ARG_MAX + PATH_MAX, M_TEMP, M_WAITOK | M_ZERO);
-	args->buf = buf;
-	args->begin_argv = buf;
-	args->endp = buf;
-	args->space = ARG_MAX;
-	args->fname = buf + ARG_MAX;
+	if (path == NULL)
+		return EINVAL;
+	len = strlen(path);
+	if (len == 0 || len >= PATH_MAX)
+		return EINVAL;
 
-	error = copystr(path, args->fname, PATH_MAX, &len);
-	if (error)
-		goto fail;
-	if (len > (size_t)args->space) {
-		error = E2BIG;
-		goto fail;
+	ucp = (char *)USRSTACK;
+	if (subyte(--ucp, 0) != 0)
+		return EFAULT;
+	for (i = len; i > 0; i--) {
+		if (subyte(--ucp, path[i - 1]) != 0)
+			return EFAULT;
 	}
-	bcopy(args->fname, args->endp, len);
-	args->endp += len;
-	args->space -= (int)len;
-	args->argc = 1;
-	args->begin_envv = args->endp;
-	args->envc = 0;
-	return 0;
+	arg0 = ucp;
+	uap = (char **)(rounddown2((intptr_t)ucp, sizeof(intptr_t)));
+	if (suword64((uint64_t *)(caddr_t)--uap, 0) != 0)
+		return EFAULT;
+	if (suword64((uint64_t *)(caddr_t)--uap,
+	    (uint64_t)(intptr_t)arg0) != 0)
+		return EFAULT;
 
-fail:
-	kfree(args->buf, M_TEMP);
-	args->buf = NULL;
-	return error;
+	bzero(&sysmsg, sizeof(sysmsg));
+	args.fname = arg0;
+	args.argv = uap;
+	args.envv = NULL;
+	return sys_execve(&sysmsg, &args);
 }
 
 static void
-vmm_loader_free_args(struct image_args *args)
+vmm_loader_child_exit(int code)
 {
-	if (args->buf != NULL) {
-		kfree(args->buf, M_TEMP);
-		args->buf = NULL;
-	}
+	struct lwp *lp = curthread->td_lwp;
+
+	lp->lwp_proc->p_usched->acquire_curproc(lp);
+	exit1(code);
 }
 
 static int
@@ -755,8 +770,7 @@ static void
 vmm_loader_child(void *arg, struct trapframe *frame)
 {
 	struct vmm_loader *loader = arg;
-	struct nlookupdata nd;
-	struct image_args args;
+	struct lwp *lp;
 	int error;
 	int state;
 
@@ -768,14 +782,14 @@ vmm_loader_child(void *arg, struct trapframe *frame)
 	 */
 	if (!atomic_cmpset_int(&loader->atomic_mut_state, VMM_LOADER_INITING,
 	    VMM_LOADER_PAUSED))
-		exit1(W_EXITCODE(127, SIGKILL));
+		vmm_loader_child_exit(W_EXITCODE(127, SIGKILL));
 	wakeup(&loader->own_handler);
 	for (;;) {
 		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
 		if (state == VMM_LOADER_RUNNING)
 			break;
 		if (state == VMM_LOADER_OK || state == VMM_LOADER_FAILED)
-			exit1(W_EXITCODE(127, SIGKILL));
+			vmm_loader_child_exit(W_EXITCODE(127, SIGKILL));
 		tsleep_interlock(loader, PCATCH);
 		state = atomic_fetchadd_int(&loader->atomic_mut_state, 0);
 		if (state == VMM_LOADER_RUNNING ||
@@ -783,7 +797,7 @@ vmm_loader_child(void *arg, struct trapframe *frame)
 			continue;
 		error = tsleep(loader, PINTERLOCKED | PCATCH, "vmmldp", 0);
 		if (error)
-			exit1(W_EXITCODE(127, SIGKILL));
+			vmm_loader_child_exit(W_EXITCODE(127, SIGKILL));
 	}
 
 	/*
@@ -795,22 +809,17 @@ vmm_loader_child(void *arg, struct trapframe *frame)
 	if (error == 0)
 		error = vmm_loader_install_fd(loader->own_mut_manifest_fp, 4);
 	if (error == 0)
-		error = vmm_loader_make_args(loader->imm_path, &args);
+		error = vmm_loader_exec_path(loader->imm_path);
 	if (error == 0) {
-		error = nlookup_init(&nd, loader->imm_path, UIO_SYSSPACE,
-		    NLC_FOLLOW);
-		if (error == 0) {
-			error = kern_execve(&nd, NULL, 0, &args);
-			nlookup_done(&nd);
-		}
-		vmm_loader_free_args(&args);
+		lp = curthread->td_lwp;
+		lp->lwp_proc->p_usched->acquire_curproc(lp);
+		return;
 	}
 
 	if (error < 0)
-		exit1(W_EXITCODE(127, SIGABRT));
+		vmm_loader_child_exit(W_EXITCODE(127, SIGABRT));
 	if (error != 0)
-		exit1(W_EXITCODE(127, 0));
-	/* kern_execve() succeeded; return through fork_trampoline to userland. */
+		vmm_loader_child_exit(W_EXITCODE(127, 0));
 }
 
 static void
