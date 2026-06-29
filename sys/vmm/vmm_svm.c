@@ -117,6 +117,7 @@
 #define VMM_SVM_APIC_REG_TMCCT		0x390U
 #define VMM_SVM_APIC_REG_TDCR		0x3e0U
 #define VMM_SVM_APIC_VERSION		0x00140014U
+#define VMM_SVM_APIC_SVR_VALID		0x000003ffU
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
 #define VMM_SVM_APIC_LVT_DELIVERY_MODE_MASK 0x00000700U
@@ -2050,6 +2051,30 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		vmm_svm_lapic_eoi(svm);
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic eoi accepted", vc->imm_id);
+		return 1;
+	case VMM_SVM_APIC_REG_SVR:
+		value = *ptr & VMM_SVM_APIC_SVR_VALID;
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR, value);
+		if ((value & VMM_SVM_APIC_SVR_ENABLE) == 0) {
+			svm->mut_lapic_timer_active = 0;
+			svm->mut_lapic_timer_lvtt |= VMM_SVM_APIC_LVT_MASKED;
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
+			    svm->mut_lapic_timer_lvtt);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT0,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT1,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_ERROR,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_LVT_THERMAL,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_PC,
+			    VMM_SVM_APIC_LVT_MASKED);
+		}
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic svr accepted value=0x%x",
+		    vc->imm_id, value);
 		return 1;
 	case VMM_SVM_APIC_REG_ESR:
 		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ESR, 0);
