@@ -585,6 +585,50 @@ guest_aviclvt_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_avictimercfg_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	size_t len = 0;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0x0001002eU);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, 0x00000100U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
+guest_aviclint_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_lvt0[] =
+	    { 0x89, 0x87, 0x50, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvt1[] =
+	    { 0x89, 0x87, 0x60, 0x03, 0x00, 0x00 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	size_t len = 0;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0x00018720U);
+	emit(code, &len, cap, mov_eax_to_lvt0, sizeof(mov_eax_to_lvt0));
+	emit_mov_eax(code, &len, cap, 0x00010400U);
+	emit(code, &len, cap, mov_eax_to_lvt1, sizeof(mov_eax_to_lvt1));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
 guest_avicnoaccel_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
@@ -968,6 +1012,10 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_avicipi_code(code, cap);
 	} else if (strcmp(mode, "aviclvt") == 0) {
 		return guest_aviclvt_code(code, cap);
+	} else if (strcmp(mode, "avictimercfg") == 0) {
+		return guest_avictimercfg_code(code, cap);
+	} else if (strcmp(mode, "aviclint") == 0) {
+		return guest_aviclint_code(code, cap);
 	} else if (strcmp(mode, "avicnoaccel") == 0) {
 		return guest_avicnoaccel_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
@@ -1168,7 +1216,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

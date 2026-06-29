@@ -104,13 +104,37 @@
 #define VMM_SVM_APIC_REG_TPR		0x080U
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
+#define VMM_SVM_APIC_REG_LVTT		0x320U
+#define VMM_SVM_APIC_REG_LVT0		0x350U
+#define VMM_SVM_APIC_REG_LVT1		0x360U
 #define VMM_SVM_APIC_REG_LVT_ERROR	0x370U
+#define VMM_SVM_APIC_REG_TMICT		0x380U
+#define VMM_SVM_APIC_REG_TMCCT		0x390U
+#define VMM_SVM_APIC_REG_TDCR		0x3e0U
 #define VMM_SVM_APIC_VERSION		0x00140014U
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
+#define VMM_SVM_APIC_LVT_DELIVERY_MODE_MASK 0x00000700U
+#define VMM_SVM_APIC_LVT_SEND_PENDING	0x00001000U
+#define VMM_SVM_APIC_LVT_INPUT_POLARITY	0x00002000U
+#define VMM_SVM_APIC_LVT_REMOTE_IRR	0x00004000U
+#define VMM_SVM_APIC_LVT_LEVEL_TRIGGER	0x00008000U
 #define VMM_SVM_APIC_LVT_MASKED		0x00010000U
+#define VMM_SVM_APIC_LVT_TIMER_MODE_MASK 0x00060000U
+#define VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE 0x00040000U
+#define VMM_SVM_APIC_LVT_COMMON_VALID	\
+	(VMM_SVM_APIC_LVT_VECTOR_MASK | VMM_SVM_APIC_LVT_SEND_PENDING | \
+	 VMM_SVM_APIC_LVT_MASKED)
 #define VMM_SVM_APIC_LVT_ERROR_VALID	\
-	(VMM_SVM_APIC_LVT_VECTOR_MASK | VMM_SVM_APIC_LVT_MASKED)
+	VMM_SVM_APIC_LVT_COMMON_VALID
+#define VMM_SVM_APIC_LVT_TIMER_VALID	\
+	(VMM_SVM_APIC_LVT_COMMON_VALID | VMM_SVM_APIC_LVT_TIMER_MODE_MASK)
+#define VMM_SVM_APIC_LVT_LINT_VALID	\
+	(VMM_SVM_APIC_LVT_COMMON_VALID | \
+	 VMM_SVM_APIC_LVT_DELIVERY_MODE_MASK | \
+	 VMM_SVM_APIC_LVT_INPUT_POLARITY | VMM_SVM_APIC_LVT_REMOTE_IRR | \
+	 VMM_SVM_APIC_LVT_LEVEL_TRIGGER)
+#define VMM_SVM_APIC_TIMER_DIVIDE_VALID	0x0000000bU
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
@@ -347,6 +371,10 @@ struct vmm_svm_backend {
 	uint32_t mut_avic_host_apic_id;
 	uint32_t mut_avic_host_cpuid;
 	int mut_avic_bound;
+	uint32_t mut_lapic_timer_lvtt;
+	uint32_t mut_lapic_timer_tmict;
+	uint32_t mut_lapic_timer_tdcr;
+	uint32_t mut_lapic_timer_divisor;
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -754,6 +782,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
+	svm->mut_lapic_timer_divisor = 2;
 	svm->mut_pic1_mask = 0xffU;
 	svm->mut_pic2_mask = 0xffU;
 	vmm_svm_fpu_init(svm);
@@ -1728,6 +1757,8 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	volatile uint32_t *ptr;
 	uint32_t value;
 	uint32_t extra;
+	uint32_t tmp1;
+	uint32_t tmp2;
 
 	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI) {
 		value = (uint32_t)(vmcb->ctrl.exitinfo2 >> 32);
@@ -1792,7 +1823,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case 0x300:
 		name = "icr";
 		break;
-	case 0x320:
+	case VMM_SVM_APIC_REG_LVTT:
 		name = "lvtt";
 		break;
 	case 0x330:
@@ -1801,19 +1832,22 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case 0x340:
 		name = "lvt_pc";
 		break;
-	case 0x350:
+	case VMM_SVM_APIC_REG_LVT0:
 		name = "lvt0";
 		break;
-	case 0x360:
+	case VMM_SVM_APIC_REG_LVT1:
 		name = "lvt1";
 		break;
 	case VMM_SVM_APIC_REG_LVT_ERROR:
 		name = "lvt_error";
 		break;
-	case 0x380:
+	case VMM_SVM_APIC_REG_TMICT:
 		name = "tmict";
 		break;
-	case 0x3e0:
+	case VMM_SVM_APIC_REG_TMCCT:
+		name = "tmcct";
+		break;
+	case VMM_SVM_APIC_REG_TDCR:
 		name = "tdcr";
 		break;
 	default:
@@ -1827,10 +1861,12 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	    VMM_SVM_AVIC_UNACCEL_ACCESS_VECTOR_MASK),
 	    (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, (uintmax_t)vmcb->state.rip);
-	if (value == VMM_SVM_APIC_REG_LVT_ERROR && extra != 0) {
-		ptr = (volatile uint32_t *)
-		    ((uint8_t *)svm->own_mut_avic_apic_page +
-		    VMM_SVM_APIC_REG_LVT_ERROR);
+	if (extra == 0)
+		return 0;
+	ptr = (volatile uint32_t *)
+	    ((uint8_t *)svm->own_mut_avic_apic_page + value);
+	switch (value) {
+	case VMM_SVM_APIC_REG_LVT_ERROR:
 		value = *ptr;
 		value &= VMM_SVM_APIC_LVT_ERROR_VALID;
 		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_ERROR,
@@ -1839,6 +1875,62 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		    "svm vcpu%u avic lvt_error accepted value=0x%x",
 		    vc->imm_id, value);
 		return 1;
+	case VMM_SVM_APIC_REG_LVTT:
+		value = *ptr;
+		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
+		svm->mut_lapic_timer_lvtt = value;
+		if ((value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
+			svm->mut_lapic_timer_tmict = 0;
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
+		    value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic lvtt accepted value=0x%x",
+		    vc->imm_id, value);
+		return 1;
+	case VMM_SVM_APIC_REG_TMICT:
+		value = *ptr;
+		if ((svm->mut_lapic_timer_lvtt &
+		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
+			value = svm->mut_lapic_timer_tmict;
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_TMICT, value);
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u avic tmict ignored tscdeadline value=0x%x",
+			    vc->imm_id, value);
+			return 1;
+		}
+		svm->mut_lapic_timer_tmict = value;
+		vmm_svm_avic_apic_write32(svm,
+		    VMM_SVM_APIC_REG_TMICT, value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic tmict accepted value=0x%x",
+		    vc->imm_id, value);
+		return 1;
+	case VMM_SVM_APIC_REG_TDCR:
+		value = *ptr & VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+		svm->mut_lapic_timer_tdcr = value;
+		tmp1 = value & 0xfU;
+		tmp2 = ((tmp1 & 0x3U) | ((tmp1 & 0x8U) >> 1)) + 1;
+		svm->mut_lapic_timer_divisor = 1U << (tmp2 & 0x7U);
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TDCR,
+		    value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic tdcr accepted value=0x%x divisor=%u",
+		    vc->imm_id, value, svm->mut_lapic_timer_divisor);
+		return 1;
+	case VMM_SVM_APIC_REG_LVT0:
+	case VMM_SVM_APIC_REG_LVT1:
+		tmp1 = value;
+		value = *ptr & VMM_SVM_APIC_LVT_LINT_VALID;
+		vmm_svm_avic_apic_write32(svm, tmp1, value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic %s accepted value=0x%x",
+		    vc->imm_id, name, value);
+		return 1;
+	default:
+		break;
 	}
 	return 0;
 }
