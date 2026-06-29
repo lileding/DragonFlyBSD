@@ -37,6 +37,33 @@ run()
 	"$@" || fail "$*"
 }
 
+hex_at()
+{
+	file=$1
+	offset=$2
+	count=$3
+
+	hexdump -v -e '1/1 "%02x"' -s "$offset" -n "$count" "$file"
+}
+
+check_zero_sum()
+{
+	file=$1
+	offset=$2
+	count=$3
+	sum_label=$4
+
+	hexdump -v -e '1/1 "%u\n"' -s "$offset" -n "$count" "$file" |
+	    awk '
+	    {
+		    for (i = 1; i <= NF; i++)
+			    sum += $i;
+	    }
+	    END {
+		    exit (sum % 256 == 0) ? 0 : 1;
+	    }' || fail "$sum_label checksum"
+}
+
 cleanup()
 {
 	set +e
@@ -70,6 +97,34 @@ make_synth_kernel()
 	write_synth_bytes 608 '\000\040\000\000'	# init_size 8192
 }
 
+check_linux_boot_data()
+{
+	case_label=$1
+
+	[ "$(hex_at "$MEM_FILE" $((0x70000)) 8)" = "5253442050545220" ] ||
+	    fail "missing RSDP signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70100)) 4)" = "58534454" ] ||
+	    fail "missing XSDT signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70200)) 4)" = "46414350" ] ||
+	    fail "missing FADT signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70400)) 4)" = "41504943" ] ||
+	    fail "missing MADT signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70500)) 4)" = "48504554" ] ||
+	    fail "missing HPET signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600)) 4)" = "44534454" ] ||
+	    fail "missing DSDT signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
+	    "0000070000000000" ] ||
+	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
+	check_zero_sum "$MEM_FILE" $((0x70000)) 20 "$case_label RSDP"
+	check_zero_sum "$MEM_FILE" $((0x70000)) 36 "$case_label extended RSDP"
+	check_zero_sum "$MEM_FILE" $((0x70100)) 60 "$case_label XSDT"
+	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
+	check_zero_sum "$MEM_FILE" $((0x70400)) 52 "$case_label MADT"
+	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
+	check_zero_sum "$MEM_FILE" $((0x70600)) 36 "$case_label DSDT"
+}
+
 run_loader_case()
 {
 	kernel=$1
@@ -89,6 +144,7 @@ run_loader_case()
 		    4<>"$MANIFEST_FILE"
 	fi
 	run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
+	check_linux_boot_data "$label"
 	say "PASS: Linux kexec loader $label case"
 }
 

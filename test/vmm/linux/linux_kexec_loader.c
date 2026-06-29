@@ -24,13 +24,24 @@
 #define PD_GPA			0x4000ULL
 #define GDT_GPA			0x5000ULL
 #define TSS_GPA			0x6000ULL
+#define ACPI_GPA		0x70000ULL
 #define BOOT_PARAMS_GPA		0x90000ULL
 #define CMDLINE_GPA		0x98000ULL
 #define STACK_TOP_GPA		0x80000ULL
 #define KERNEL_LOAD_GPA		0x100000ULL
 #define KERNEL_64_ENTRY_DELTA	0x200ULL
+#define ACPI_SIZE		PAGE_SIZE_GUEST
+#define ACPI_RSDP_GPA		(ACPI_GPA + 0x000ULL)
+#define ACPI_XSDT_GPA		(ACPI_GPA + 0x100ULL)
+#define ACPI_FADT_GPA		(ACPI_GPA + 0x200ULL)
+#define ACPI_MADT_GPA		(ACPI_GPA + 0x400ULL)
+#define ACPI_HPET_GPA		(ACPI_GPA + 0x500ULL)
+#define ACPI_DSDT_GPA		(ACPI_GPA + 0x600ULL)
+#define ACPI_HPET_MMIO_GPA	0xfed00000ULL
+#define ACPI_LAPIC_GPA		0xfee00000ULL
 #define CMDLINE_CAP		PAGE_SIZE_GUEST
 
+#define LINUX_ACPI_RSDP_ADDR	0x070U
 #define LINUX_SETUP_SECTS	0x1f1U
 #define LINUX_SETUP_HEADER_COPY	(0x290U - LINUX_SETUP_SECTS)
 #define LINUX_HDR_MAGIC		0x202U
@@ -58,6 +69,19 @@
 #define LINUX_CAN_USE_HEAP	0x80U
 #define LINUX_LOADER_KEXEC	0xd0U
 #define LINUX_XLF_KERNEL_64	0x0001U
+#define LINUX_E820_RAM		1U
+#define LINUX_E820_RESERVED	2U
+#define LINUX_E820_ACPI		3U
+
+#define ACPI_TABLE_HEADER_SIZE	36U
+#define ACPI_RSDP_SIZE		36U
+#define ACPI_FADT_SIZE		276U
+#define ACPI_MADT_LOCAL_APIC_SIZE	8U
+#define ACPI_FADT_WBINVD	0x00000001U
+#define ACPI_FADT_HW_REDUCED	0x00100000U
+#define ACPI_FADT_NO_VGA	0x0004U
+#define ACPI_SPACE_SYSTEM_MEMORY	0U
+#define ACPI_MADT_LOCAL_APIC_ENABLED	0x00000001U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ARCH_X64	1
@@ -78,6 +102,7 @@
 #define VMM_GPA_RANGE_PAGE_TABLE	5
 #define VMM_GPA_RANGE_DESC_TABLE	6
 #define VMM_GPA_RANGE_STACK		7
+#define VMM_GPA_RANGE_BOOT_DATA		8
 
 #define VMM_X64_GPR_RSP		4
 #define VMM_X64_GPR_RSI		6
@@ -495,6 +520,117 @@ write_e820_entry(uint8_t *boot_params, unsigned int index, uint64_t addr,
 	write32(boot_params, off + 16, type);
 }
 
+static uint8_t
+checksum8(const uint8_t *buf, uint32_t len)
+{
+	uint8_t sum;
+	uint32_t i;
+
+	sum = 0;
+	for (i = 0; i < len; i++)
+		sum += buf[i];
+	return sum;
+}
+
+static void
+write_acpi_checksum(uint8_t *table, uint32_t len, uint32_t off)
+{
+	table[off] = 0;
+	table[off] = (uint8_t)(0U - checksum8(table, len));
+}
+
+static void
+write_acpi_header(uint8_t *table, const char signature[4], uint32_t len,
+    uint8_t revision)
+{
+	memset(table, 0, len);
+	memcpy(table, signature, 4);
+	write32(table, 4, len);
+	write8(table, 8, revision);
+	memcpy(table + 10, "DFVMM ", 6);
+	memcpy(table + 16, "DFVMM   ", 8);
+	write32(table, 24, 1);
+	memcpy(table + 28, "VMM ", 4);
+	write32(table, 32, 1);
+}
+
+static void
+build_acpi_tables(uint8_t *mem)
+{
+	uint8_t *rsdp;
+	uint8_t *xsdt;
+	uint8_t *fadt;
+	uint8_t *madt;
+	uint8_t *hpet;
+	uint8_t *dsdt;
+	uint8_t *lapic;
+	uint32_t xsdt_len;
+	uint32_t madt_len;
+
+	memset(mem + ACPI_GPA, 0, ACPI_SIZE);
+
+	rsdp = mem + ACPI_RSDP_GPA;
+	memcpy(rsdp, "RSD PTR ", 8);
+	memcpy(rsdp + 9, "DFVMM ", 6);
+	write8(rsdp, 15, 2);
+	write32(rsdp, 16, 0);
+	write32(rsdp, 20, ACPI_RSDP_SIZE);
+	write64(rsdp, 24, ACPI_XSDT_GPA);
+	write_acpi_checksum(rsdp, 20, 8);
+	write_acpi_checksum(rsdp, ACPI_RSDP_SIZE, 32);
+
+	xsdt = mem + ACPI_XSDT_GPA;
+	xsdt_len = ACPI_TABLE_HEADER_SIZE + 3 * sizeof(uint64_t);
+	write_acpi_header(xsdt, "XSDT", xsdt_len, 1);
+	write64(xsdt, ACPI_TABLE_HEADER_SIZE, ACPI_FADT_GPA);
+	write64(xsdt, ACPI_TABLE_HEADER_SIZE + sizeof(uint64_t),
+	    ACPI_MADT_GPA);
+	write64(xsdt, ACPI_TABLE_HEADER_SIZE + 2 * sizeof(uint64_t),
+	    ACPI_HPET_GPA);
+	write_acpi_checksum(xsdt, xsdt_len, 9);
+
+	dsdt = mem + ACPI_DSDT_GPA;
+	write_acpi_header(dsdt, "DSDT", ACPI_TABLE_HEADER_SIZE, 2);
+	write_acpi_checksum(dsdt, ACPI_TABLE_HEADER_SIZE, 9);
+
+	fadt = mem + ACPI_FADT_GPA;
+	write_acpi_header(fadt, "FACP", ACPI_FADT_SIZE, 6);
+	write32(fadt, 40, (uint32_t)ACPI_DSDT_GPA);
+	write8(fadt, 45, 7);
+	write16(fadt, 46, 0);
+	write16(fadt, 109, ACPI_FADT_NO_VGA);
+	write32(fadt, 112, ACPI_FADT_WBINVD | ACPI_FADT_HW_REDUCED);
+	write8(fadt, 131, 5);
+	write64(fadt, 140, ACPI_DSDT_GPA);
+	write_acpi_checksum(fadt, ACPI_FADT_SIZE, 9);
+
+	madt = mem + ACPI_MADT_GPA;
+	madt_len = ACPI_TABLE_HEADER_SIZE + 8 + ACPI_MADT_LOCAL_APIC_SIZE;
+	write_acpi_header(madt, "APIC", madt_len, 3);
+	write32(madt, 36, (uint32_t)ACPI_LAPIC_GPA);
+	write32(madt, 40, 0);
+	lapic = madt + 44;
+	write8(lapic, 0, 0);
+	write8(lapic, 1, ACPI_MADT_LOCAL_APIC_SIZE);
+	write8(lapic, 2, 0);
+	write8(lapic, 3, 0);
+	write32(lapic, 4, ACPI_MADT_LOCAL_APIC_ENABLED);
+	write_acpi_checksum(madt, madt_len, 9);
+
+	hpet = mem + ACPI_HPET_GPA;
+	write_acpi_header(hpet, "HPET", 56, 1);
+	write32(hpet, 36, 0x8086a201U);
+	write8(hpet, 40, ACPI_SPACE_SYSTEM_MEMORY);
+	write8(hpet, 41, 64);
+	write8(hpet, 42, 0);
+	write8(hpet, 43, 4);
+	write64(hpet, 44, ACPI_HPET_MMIO_GPA);
+	write8(hpet, 52, 0);
+	write16(hpet, 53, 0x80);
+	write8(hpet, 55, 0);
+	write_acpi_checksum(hpet, 56, 9);
+}
+
 static void
 build_boot_params(uint8_t *mem, uint64_t mem_size,
     const struct loader_options *opts, const struct linux_kernel *kernel,
@@ -523,6 +659,7 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	write32(boot_params, LINUX_CODE32_START, (uint32_t)KERNEL_LOAD_GPA);
 
 	cmdline_addr = CMDLINE_GPA;
+	write64(boot_params, LINUX_ACPI_RSDP_ADDR, ACPI_RSDP_GPA);
 	write32(boot_params, LINUX_CMD_LINE_PTR, (uint32_t)cmdline_addr);
 	write32(boot_params, LINUX_EXT_CMD_LINE_PTR,
 	    (uint32_t)(cmdline_addr >> 32));
@@ -542,12 +679,17 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	}
 
 	e820_count = 0;
-	write_e820_entry(boot_params, e820_count++, 0, 0x9f000, 1);
+	write_e820_entry(boot_params, e820_count++, 0, ACPI_GPA,
+	    LINUX_E820_RAM);
+	write_e820_entry(boot_params, e820_count++, ACPI_GPA, ACPI_SIZE,
+	    LINUX_E820_ACPI);
+	write_e820_entry(boot_params, e820_count++, ACPI_GPA + ACPI_SIZE,
+	    0x9f000 - (ACPI_GPA + ACPI_SIZE), LINUX_E820_RAM);
 	write_e820_entry(boot_params, e820_count++, 0x9f000,
-	    ONE_MIB - 0x9f000, 2);
+	    ONE_MIB - 0x9f000, LINUX_E820_RESERVED);
 	if (mem_size > ONE_MIB) {
 		write_e820_entry(boot_params, e820_count++, ONE_MIB,
-		    mem_size - ONE_MIB, 1);
+		    mem_size - ONE_MIB, LINUX_E820_RAM);
 	}
 	write8(boot_params, LINUX_E820_ENTRIES, (uint8_t)e820_count);
 }
@@ -613,9 +755,11 @@ build_linux_guest(uint8_t *mem, uint64_t mem_size,
 	check_guest_range(mem_size, BOOT_PARAMS_GPA, PAGE_SIZE_GUEST,
 	    "boot params");
 	check_guest_range(mem_size, CMDLINE_GPA, CMDLINE_CAP, "cmdline");
+	check_guest_range(mem_size, ACPI_GPA, ACPI_SIZE, "ACPI tables");
 
 	build_identity_page_tables(mem);
 	build_descriptor_tables(mem);
+	build_acpi_tables(mem);
 	load_kernel_payload(mem, mem_size, kernel);
 	load_initramfs(mem, mem_size, opts, kernel, initramfs);
 	build_boot_params(mem, mem_size, opts, kernel, initramfs);
@@ -637,6 +781,8 @@ build_linux_guest(uint8_t *mem, uint64_t mem_size,
 	    VMM_GPA_RANGE_DESC_TABLE);
 	add_range(ranges, range_count, STACK_TOP_GPA - PAGE_SIZE_GUEST,
 	    PAGE_SIZE_GUEST, VMM_GPA_RANGE_STACK);
+	add_range(ranges, range_count, ACPI_GPA, ACPI_SIZE,
+	    VMM_GPA_RANGE_BOOT_DATA);
 }
 
 static void
