@@ -104,8 +104,13 @@
 #define VMM_SVM_APIC_REG_TPR		0x080U
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
+#define VMM_SVM_APIC_REG_LVT_ERROR	0x370U
 #define VMM_SVM_APIC_VERSION		0x00140014U
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
+#define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
+#define VMM_SVM_APIC_LVT_MASKED		0x00010000U
+#define VMM_SVM_APIC_LVT_ERROR_VALID	\
+	(VMM_SVM_APIC_LVT_VECTOR_MASK | VMM_SVM_APIC_LVT_MASKED)
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
@@ -1720,6 +1725,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const char *name;
+	volatile uint32_t *ptr;
 	uint32_t value;
 	uint32_t extra;
 
@@ -1801,7 +1807,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case 0x360:
 		name = "lvt1";
 		break;
-	case 0x370:
+	case VMM_SVM_APIC_REG_LVT_ERROR:
 		name = "lvt_error";
 		break;
 	case 0x380:
@@ -1821,6 +1827,19 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	    VMM_SVM_AVIC_UNACCEL_ACCESS_VECTOR_MASK),
 	    (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, (uintmax_t)vmcb->state.rip);
+	if (value == VMM_SVM_APIC_REG_LVT_ERROR && extra != 0) {
+		ptr = (volatile uint32_t *)
+		    ((uint8_t *)svm->own_mut_avic_apic_page +
+		    VMM_SVM_APIC_REG_LVT_ERROR);
+		value = *ptr;
+		value &= VMM_SVM_APIC_LVT_ERROR_VALID;
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_ERROR,
+		    value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic lvt_error accepted value=0x%x",
+		    vc->imm_id, value);
+		return 1;
+	}
 	return 0;
 }
 
