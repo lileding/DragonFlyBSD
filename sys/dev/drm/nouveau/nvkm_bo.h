@@ -94,12 +94,12 @@ struct nvkm_bo {
 	bool			bar1_mappable;	/* VRAM BO can fault in a BAR1 mmap */
 	bool			no_share;	/* reject PRIME export */
 	bool			ttm_backed;	/* GEM BO owned by TTM */
-	bool			ttm_permanent_no_evict; /* placement-level pin */
+	bool			ttm_permanent_no_evict; /* VRAM-preferred creation policy */
 	bool			accounted;	/* active byte counters include this BO */
 	uint8_t			account_kind;	/* counter bucket charged at alloc */
 	bool			vm_bound_tiled;	/* ever VM_BINDed with kind!=0 */
 	uint8_t			vm_bound_kind;	/* single non-zero VM_BIND kind */
-	uint32_t		ttm_pin_count;	/* VM_BIND + scanout no-evict pins */
+	uint32_t		ttm_pin_count;	/* active TTM NO_EVICT records */
 	uint32_t		vm_bind_pin_count; /* active VM_BIND records */
 	uint32_t		vm_bind_no_evict_pin_count; /* VM_BIND no-evict records */
 	uint32_t		scanout_pin_count; /* active prepare_fb records */
@@ -162,10 +162,12 @@ int nvkm_drm_bo_publish_ttm_move_fence(struct nvkm_bo *bo,
  *   success it records whether this specific pin record set TTM NO_EVICT.
  *
  * Lifetime:
- *   bo must stay alive for the whole pin/unpin pair.  For TTM-backed BOs the
- *   pin record may keep the current backing allocation non-evictable.  The
- *   debug-only bound-move gate can create an evictable VM_BIND record instead;
- *   callers must pass the returned no_evict_pinned value back to unpin.  Legacy
+ *   bo must stay alive for the whole pin/unpin pair.  The default VM_BIND
+ *   contract is no-evict-first: a live GPUVA binding must not observe TTM
+ *   moving its backing behind the installed PTEs.  The debug-only bound-move
+ *   gate can create an evictable VM_BIND record instead, but that decision is
+ *   per-record and applies only to pins created while the gate is enabled.
+ *   Callers must pass the returned no_evict_pinned value back to unpin.  Legacy
  *   non-TTM allocations are already immobile and report no_evict_pinned=false.
  *
  * Threading:
@@ -180,10 +182,13 @@ int nvkm_bo_vm_bind_pin(struct nvkm_bo *bo, bool *no_evict_pinned);
  * Ownership:
  *   Consumes one VM_BIND pin record previously returned by
  *   nvkm_bo_vm_bind_pin().  no_evict_pinned must be the exact value returned
- *   for that record, not a current BO-wide policy decision.
+ *   for that record, not a current BO-wide policy decision and not the current
+ *   value of any debug gate.
  *
  * Lifetime:
- *   bo must remain alive until the call returns.
+ *   bo must remain alive until the call returns.  Releasing a VM_BIND record
+ *   clears TTM NO_EVICT only when this record owned one, no other active record
+ *   owns one, and the BO does not carry permanent VRAM-preferred no-evict.
  *
  * Threading:
  *   May sleep while reserving the TTM BO.  Balanced unpins may run from file
@@ -198,7 +203,9 @@ int nvkm_bo_vm_bind_unpin(struct nvkm_bo *bo, bool no_evict_pinned);
  *   plane state until cleanup_fb consumes it with nvkm_bo_scanout_unpin().
  *
  * Lifetime:
- *   bo must outlive the plane state holding the framebuffer reference.
+ *   bo must outlive the plane state holding the framebuffer reference.  Scanout
+ *   pins are always no-evict and are not affected by the TTM bound-move debug
+ *   gates; display scanout rebind/flip requires a separate atomic KMS plan.
  *
  * Threading:
  *   May sleep while reserving TTM.  The pair must be called from atomic helper
