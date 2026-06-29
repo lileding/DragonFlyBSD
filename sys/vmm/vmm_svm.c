@@ -191,6 +191,7 @@
 					 APICBASE_ENABLED | APICBASE_ADDRESS)
 #define VMM_SVM_X2APIC_MSR_BASE	0x800U
 #define VMM_SVM_X2APIC_MSR_LAST	0x83fU
+#define VMM_SVM_AMD_PATCH_LEVEL	0ULL
 #define VMM_SVM_SMOKE_AVIC_MAGIC	0x43495641U
 #define VMM_SVM_SMOKE_AVIC_DELIVER	1U
 #define VMM_SVM_SMOKE_AVIC_MARKER	2U
@@ -352,6 +353,12 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_scr;
 };
 
+struct vmm_svm_msr_policy {
+	uint32_t imm_msr;
+	const char *imm_name;
+	const char *imm_category;
+};
+
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, v) == 0x060);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, intr) == 0x068);
@@ -375,6 +382,29 @@ void	vmm_svm_vmrun(uint64_t vmcb_pa, uint64_t *gprs);
 static void vmm_svm_vcpu_destroy(void *backend);
 static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
 static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
+
+static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
+	{ MSR_EFER, "efer", "cpu-state" },
+	{ MSR_PAT, "pat", "memory-type" },
+	{ MSR_TSC, "tsc", "time" },
+	{ MSR_TSC_AUX, "tsc_aux", "time" },
+	{ MSR_TSC_DEADLINE, "tsc_deadline", "time" },
+	{ MSR_APICBASE, "apicbase", "apic" },
+	{ MSR_MTRRdefType, "mtrr_def_type", "memory-type" },
+	{ MSR_SYSCFG, "amd_syscfg", "platform-config" },
+	{ MSR_AMD_PATCH_LEVEL, "amd_patch_level", "microcode" },
+	{ MSR_AMD_PATCH_LOADER, "amd_patch_loader", "microcode" },
+	{ MSR_STAR, "star", "syscall" },
+	{ MSR_LSTAR, "lstar", "syscall" },
+	{ MSR_CSTAR, "cstar", "syscall" },
+	{ MSR_SF_MASK, "sfmask", "syscall" },
+	{ MSR_FSBASE, "fsbase", "segment-base" },
+	{ MSR_GSBASE, "gsbase", "segment-base" },
+	{ MSR_KGSBASE, "kernelgsbase", "segment-base" },
+	{ MSR_SYSENTER_CS, "sysenter_cs", "sysenter" },
+	{ MSR_SYSENTER_ESP, "sysenter_esp", "sysenter" },
+	{ MSR_SYSENTER_EIP, "sysenter_eip", "sysenter" },
+};
 
 static void *
 vmm_svm_contig_alloc(uint64_t *pa, size_t pages)
@@ -976,11 +1006,59 @@ vmm_svm_wrmsr_value(struct vmm_svm_backend *svm)
 	    (vmcb->state.rax & 0xffffffffULL);
 }
 
+static const struct vmm_svm_msr_policy *
+vmm_svm_msr_lookup(uint32_t msr)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(vmm_svm_msr_policies) /
+	    sizeof(vmm_svm_msr_policies[0]); i++) {
+		if (vmm_svm_msr_policies[i].imm_msr == msr)
+			return &vmm_svm_msr_policies[i];
+	}
+	return NULL;
+}
+
 static int
 vmm_svm_x2apic_msr(uint32_t msr)
 {
 	return msr >= VMM_SVM_X2APIC_MSR_BASE &&
 	    msr <= VMM_SVM_X2APIC_MSR_LAST;
+}
+
+static void
+vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
+    const struct vmm_vcpu_thread *vc, const char *op, uint32_t msr,
+    uint64_t val, int has_val, const char *reason)
+{
+	const struct vmm_svm_msr_policy *policy;
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const char *category;
+	const char *name;
+
+	policy = vmm_svm_msr_lookup(msr);
+	if (policy != NULL) {
+		name = policy->imm_name;
+		category = policy->imm_category;
+	} else if (vmm_svm_x2apic_msr(msr)) {
+		name = "x2apic";
+		category = "apic";
+	} else {
+		name = "unknown";
+		category = "unknown";
+	}
+
+	if (has_val) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported msr op=%s msr=0x%jx name=%s category=%s val=0x%jx reason=%s rip=0x%jx",
+		    vc->imm_id, op, (uintmax_t)msr, name, category,
+		    (uintmax_t)val, reason, (uintmax_t)vmcb->state.rip);
+	} else {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported msr op=%s msr=0x%jx name=%s category=%s reason=%s rip=0x%jx",
+		    vc->imm_id, op, (uintmax_t)msr, name, category,
+		    reason, (uintmax_t)vmcb->state.rip);
+	}
 }
 
 static void
@@ -1014,10 +1092,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_tsc_aux);
 			return 1;
 		case MSR_TSC_DEADLINE:
-			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm vcpu%u unsupported tsc deadline msr op=rd msr=0x%jx rip=0x%jx",
-			    vc->imm_id, (uintmax_t)msr,
-			    (uintmax_t)vmcb->state.rip);
+			vmm_svm_log_unsupported_msr(svm, vc, "rd", msr, 0, 0,
+			    "not-implemented");
 			return 0;
 		case MSR_APICBASE:
 			vmm_svm_rdmsr_value(svm,
@@ -1025,6 +1101,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			return 1;
 		case MSR_MTRRdefType:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_mtrr_def_type);
+			return 1;
+		case MSR_AMD_PATCH_LEVEL:
+			vmm_svm_rdmsr_value(svm, VMM_SVM_AMD_PATCH_LEVEL);
 			return 1;
 		case MSR_STAR:
 			vmm_svm_rdmsr_value(svm, vmcb->state.star);
@@ -1057,12 +1136,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_rdmsr_value(svm, vmcb->state.sysenter_eip);
 			return 1;
 		default:
-			if (vmm_svm_x2apic_msr(msr)) {
-				vmm_machine_logf(svm->borrow_imm_machine,
-				    "svm vcpu%u unsupported x2apic msr op=rd msr=0x%jx rip=0x%jx",
-				    vc->imm_id, (uintmax_t)msr,
-				    (uintmax_t)vmcb->state.rip);
-			}
+			vmm_svm_log_unsupported_msr(svm, vc, "rd", msr, 0, 0,
+			    vmm_svm_x2apic_msr(msr) ? "x2apic-hidden" :
+			    "not-in-template");
 			return 0;
 		}
 	}
@@ -1070,15 +1146,21 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	val = vmm_svm_wrmsr_value(svm);
 	switch (msr) {
 	case MSR_EFER:
-		if ((val & ~VMM_SVM_EFER_VALID) != 0)
+		if ((val & ~VMM_SVM_EFER_VALID) != 0) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
 			return 0;
+		}
 		vmcb->state.efer = (val & ~EFER_SVME) | EFER_SVME;
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_PAT:
-		if (!vmm_loader_x86_pat_valid(val))
+		if (!vmm_loader_x86_pat_valid(val)) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
 			return 0;
+		}
 		vmcb->state.g_pat = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
@@ -1091,32 +1173,41 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC_DEADLINE:
-		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm vcpu%u unsupported tsc deadline msr op=wr msr=0x%jx val=0x%jx rip=0x%jx",
-		    vc->imm_id, (uintmax_t)msr, (uintmax_t)val,
-		    (uintmax_t)vmcb->state.rip);
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    "not-implemented");
 		return 0;
 	case MSR_APICBASE:
 		if ((val & APICBASE_X2APIC) != 0) {
-			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm vcpu%u unsupported x2apic apicbase val=0x%jx rip=0x%jx",
-			    vc->imm_id, (uintmax_t)val,
-			    (uintmax_t)vmcb->state.rip);
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "x2apic-hidden");
 			return 0;
 		}
 		if ((val & ~VMM_SVM_APICBASE_VALID) != 0 ||
 		    (val & APICBASE_ADDRESS) != VMM_SVM_APICBASE_ADDR) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
 			return 0;
 		}
 		svm->mut_guest_apicbase = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_MTRRdefType:
-		if ((val & ~VMM_SVM_MTRR_DEF_VALID) != 0)
+		if ((val & ~VMM_SVM_MTRR_DEF_VALID) != 0) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
 			return 0;
+		}
 		svm->mut_guest_mtrr_def_type = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
+	case MSR_AMD_PATCH_LEVEL:
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    "read-only");
+		return 0;
+	case MSR_AMD_PATCH_LOADER:
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    "microcode-update");
+		return 0;
 	case MSR_STAR:
 		vmcb->state.star = val;
 		vmm_svm_advance_rip(vmcb);
@@ -1158,12 +1249,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	default:
-		if (vmm_svm_x2apic_msr(msr)) {
-			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm vcpu%u unsupported x2apic msr op=wr msr=0x%jx val=0x%jx rip=0x%jx",
-			    vc->imm_id, (uintmax_t)msr, (uintmax_t)val,
-			    (uintmax_t)vmcb->state.rip);
-		}
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    vmm_svm_x2apic_msr(msr) ? "x2apic-hidden" :
+		    "not-in-template");
 		return 0;
 	}
 }

@@ -21,8 +21,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES="vmmcall cpuid serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 hlt loop"
-SELF_EXIT_MODES="vmmcall cpuid serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64"
+MODES="vmmcall cpuid serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 msrpatch hlt loop"
+SELF_EXIT_MODES="vmmcall cpuid serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 msrpatch"
 
 LOADED=0
 MOUNTED=0

@@ -89,6 +89,7 @@
 #define AVIC_OP_DELIVER	1U
 #define AVIC_OP_MARKER	2U
 #define AVIC_MARKER	0xa51c0040U
+#define MSR_AMD_PATCH_LEVEL	0x0000008bU
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -744,6 +745,23 @@ guest_pm64_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_msrpatch_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t rdmsr[] = {
+	    0xb9, MSR_AMD_PATCH_LEVEL & 0xffU,
+	    (MSR_AMD_PATCH_LEVEL >> 8) & 0xffU,
+	    (MSR_AMD_PATCH_LEVEL >> 16) & 0xffU,
+	    (MSR_AMD_PATCH_LEVEL >> 24) & 0xffU,
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0f, 0x01, 0xd9	/* vmmcall */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -816,6 +834,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_avicnoaccel_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
 		return guest_pm64_code(code, cap);
+	} else if (strcmp(mode, "msrpatch") == 0) {
+		return guest_msrpatch_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -1000,7 +1020,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
