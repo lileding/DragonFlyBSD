@@ -105,6 +105,8 @@
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
 #define VMM_SVM_APIC_REG_LVTT		0x320U
+#define VMM_SVM_APIC_REG_LVT_THERMAL	0x330U
+#define VMM_SVM_APIC_REG_LVT_PC		0x340U
 #define VMM_SVM_APIC_REG_LVT0		0x350U
 #define VMM_SVM_APIC_REG_LVT1		0x360U
 #define VMM_SVM_APIC_REG_LVT_ERROR	0x370U
@@ -129,6 +131,8 @@
 	VMM_SVM_APIC_LVT_COMMON_VALID
 #define VMM_SVM_APIC_LVT_TIMER_VALID	\
 	(VMM_SVM_APIC_LVT_COMMON_VALID | VMM_SVM_APIC_LVT_TIMER_MODE_MASK)
+#define VMM_SVM_APIC_LVT_DELIVERY_VALID	\
+	(VMM_SVM_APIC_LVT_COMMON_VALID | VMM_SVM_APIC_LVT_DELIVERY_MODE_MASK)
 #define VMM_SVM_APIC_LVT_LINT_VALID	\
 	(VMM_SVM_APIC_LVT_COMMON_VALID | \
 	 VMM_SVM_APIC_LVT_DELIVERY_MODE_MASK | \
@@ -1826,10 +1830,10 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case VMM_SVM_APIC_REG_LVTT:
 		name = "lvtt";
 		break;
-	case 0x330:
+	case VMM_SVM_APIC_REG_LVT_THERMAL:
 		name = "lvt_thermal";
 		break;
-	case 0x340:
+	case VMM_SVM_APIC_REG_LVT_PC:
 		name = "lvt_pc";
 		break;
 	case VMM_SVM_APIC_REG_LVT0:
@@ -1924,6 +1928,15 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case VMM_SVM_APIC_REG_LVT1:
 		tmp1 = value;
 		value = *ptr & VMM_SVM_APIC_LVT_LINT_VALID;
+		vmm_svm_avic_apic_write32(svm, tmp1, value);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic %s accepted value=0x%x",
+		    vc->imm_id, name, value);
+		return 1;
+	case VMM_SVM_APIC_REG_LVT_THERMAL:
+	case VMM_SVM_APIC_REG_LVT_PC:
+		tmp1 = value;
+		value = *ptr & VMM_SVM_APIC_LVT_DELIVERY_VALID;
 		vmm_svm_avic_apic_write32(svm, tmp1, value);
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic %s accepted value=0x%x",
