@@ -169,8 +169,15 @@
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
+#define VMM_PIT_CH2		0x42U
+#define VMM_PIT_CMD		0x43U
+#define VMM_PIT_PORTB		0x61U
+#define VMM_PIT_PORTB_OUT2	0x20U
 #define VMM_PIC2_CMD		0xa0U
 #define VMM_PIC2_DATA		0xa1U
+#define VMM_PCI_CFG_ADDR	0xcf8U
+#define VMM_PCI_CFG_DATA	0xcfcU
+#define VMM_PCI_CFG_DATA_LAST	0xcffU
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
 #define VMM_CPUID1_ECX_X2APIC	(1U << 21)
 #define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
@@ -359,6 +366,10 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
 	uint8_t mut_com1_scr;
+	uint32_t mut_pci_cfg_addr;
+	uint8_t mut_pit_portb;
+	uint8_t mut_pic1_mask;
+	uint8_t mut_pic2_mask;
 };
 
 struct vmm_svm_msr_policy {
@@ -398,6 +409,7 @@ static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_TSC_AUX, "tsc_aux", "time" },
 	{ MSR_TSC_DEADLINE, "tsc_deadline", "time" },
 	{ MSR_APICBASE, "apicbase", "apic" },
+	{ MSR_MTRRcap, "mtrr_cap", "memory-type" },
 	{ MSR_MTRRdefType, "mtrr_def_type", "memory-type" },
 	{ MSR_SYSCFG, "amd_syscfg", "platform-config" },
 	{ VMM_SVM_MSR_K7_HWCR, "amd_hwcr", "platform-config" },
@@ -737,6 +749,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
+	svm->mut_pic1_mask = 0xffU;
+	svm->mut_pic2_mask = 0xffU;
 	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
@@ -1108,6 +1122,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_rdmsr_value(svm,
 			    svm->mut_guest_apicbase);
 			return 1;
+		case MSR_MTRRcap:
+			vmm_svm_rdmsr_value(svm, 0);
+			return 1;
 		case MSR_MTRRdefType:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_mtrr_def_type);
 			return 1;
@@ -1206,6 +1223,10 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		svm->mut_guest_apicbase = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
+	case MSR_MTRRcap:
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    "read-only");
+		return 0;
 	case MSR_MTRRdefType:
 		if ((val & ~VMM_SVM_MTRR_DEF_VALID) != 0) {
 			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
@@ -1490,15 +1511,99 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	switch (port) {
 	case VMM_PIC1_CMD:
-	case VMM_PIC1_DATA:
 	case VMM_PIC2_CMD:
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pic cmd io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	case VMM_PIC1_DATA:
 	case VMM_PIC2_DATA:
-		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm vcpu%u unsupported pic io op=%s port=0x%x size=%d rip=0x%jx",
-		    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
-		return 0;
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pic data io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			vmm_svm_set_rax_low(vmcb,
+			    port == VMM_PIC1_DATA ? svm->mut_pic1_mask :
+			    svm->mut_pic2_mask, size);
+		} else if (port == VMM_PIC1_DATA) {
+			svm->mut_pic1_mask = vmcb->state.rax & 0xffU;
+		} else {
+			svm->mut_pic2_mask = vmcb->state.rax & 0xffU;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
 	default:
 		break;
+	}
+
+	if (port == VMM_PIT_PORTB) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pit portb io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			vmm_svm_set_rax_low(vmcb,
+			    svm->mut_pit_portb | VMM_PIT_PORTB_OUT2, size);
+		} else {
+			svm->mut_pit_portb = vmcb->state.rax & 0x03U;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+	if (port == VMM_PIT_CH2 || port == VMM_PIT_CMD) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0xffU, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+
+	if (port == VMM_PCI_CFG_ADDR) {
+		if (size != 4) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pci cfg addr io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			vmm_svm_set_rax_low(vmcb, svm->mut_pci_cfg_addr, size);
+		} else {
+			svm->mut_pci_cfg_addr = vmcb->state.rax &
+			    0xffffffffU;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+	if (port >= VMM_PCI_CFG_DATA && port <= VMM_PCI_CFG_DATA_LAST) {
+		if (port + (unsigned int)size - 1 > VMM_PCI_CFG_DATA_LAST) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pci cfg data io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0xffffffffU, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
 	}
 
 	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR) {

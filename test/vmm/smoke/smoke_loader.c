@@ -90,9 +90,15 @@
 #define AVIC_OP_MARKER	2U
 #define AVIC_MARKER	0xa51c0040U
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
+#define MSR_MTRR_CAP	0x000000feU
 #define MSR_SYSCFG	0xc0010010U
 #define MSR_K7_HWCR	0xc0010015U
 #define HWCR_SMOKE_VALUE ((1U << 24) | (1U << 18) | 0x148U)
+#define PCI_CFG_ADDR_PORT	0x0cf8U
+#define PCI_CFG_DATA_PORT	0x0cfcU
+#define PIT_CH2_PORT		0x0042U
+#define PIT_CMD_PORT		0x0043U
+#define PIT_PORTB		0x0061U
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -589,16 +595,12 @@ guest_pic_code(uint8_t *code, size_t cap)
 	emit_outb(code, &len, cap, 0xa0, 0x11);
 	emit_outb(code, &len, cap, 0x21, 0x20);
 	emit_outb(code, &len, cap, 0xa1, 0x28);
-	emit_outb(code, &len, cap, 0xa2, 0x28);
 	emit_outb(code, &len, cap, 0x21, 0x04);
 	emit_outb(code, &len, cap, 0xa1, 0x02);
-	emit_outb(code, &len, cap, 0xa2, 0x02);
 	emit_outb(code, &len, cap, 0x21, 0x01);
 	emit_outb(code, &len, cap, 0xa1, 0x01);
-	emit_outb(code, &len, cap, 0xa2, 0x01);
 	emit_outb(code, &len, cap, 0x21, 0xff);
 	emit_outb(code, &len, cap, 0xa1, 0xff);
-	emit_outb(code, &len, cap, 0xa2, 0xff);
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
 	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
@@ -782,6 +784,23 @@ guest_msrsyscfg_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_mtrrcap_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t rdmsr[] = {
+	    0xb9, MSR_MTRR_CAP & 0xffU,
+	    (MSR_MTRR_CAP >> 8) & 0xffU,
+	    (MSR_MTRR_CAP >> 16) & 0xffU,
+	    (MSR_MTRR_CAP >> 24) & 0xffU,
+	    0x0f, 0x32,		/* rdmsr */
+	    0x0f, 0x01, 0xd9	/* vmmcall */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
+	return len;
+}
+
+static size_t
 guest_msrhwcr_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t rdmsr[] = {
@@ -810,6 +829,54 @@ guest_msrhwcr_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, wrmsr, sizeof(wrmsr));
 	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
 	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
+guest_pcicfg_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t seq[] = {
+	    0xba, PCI_CFG_ADDR_PORT & 0xffU,
+	    (PCI_CFG_ADDR_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb8, 0x00, 0x00, 0x00, 0x80,	/* mov eax,0x80000000 */
+	    0xef,				/* out dx,eax */
+	    0xba, PCI_CFG_DATA_PORT & 0xffU,
+	    (PCI_CFG_DATA_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xed,				/* in eax,dx */
+	    0x31, 0xc0,				/* xor eax,eax */
+	    0xef,				/* out dx,eax */
+	    0x0f, 0x01, 0xd9			/* vmmcall */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, seq, sizeof(seq));
+	return len;
+}
+
+static size_t
+guest_pitfallback_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t seq[] = {
+	    0xba, PIT_PORTB & 0xffU, (PIT_PORTB >> 8) & 0xffU, 0x00, 0x00,
+	    0xec,				/* in al,dx */
+	    0x24, 0xfd,				/* and al,~0x02 */
+	    0x0c, 0x01,				/* or al,0x01 */
+	    0xee,				/* out dx,al */
+	    0xba, PIT_CMD_PORT & 0xffU,
+	    (PIT_CMD_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0xb0,				/* mov al,0xb0 */
+	    0xee,				/* out dx,al */
+	    0xba, PIT_CH2_PORT & 0xffU,
+	    (PIT_CH2_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0xff,				/* mov al,0xff */
+	    0xee,				/* out dx,al */
+	    0xee,				/* out dx,al */
+	    0xec,				/* in al,dx */
+	    0x0f, 0x01, 0xd9			/* vmmcall */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, seq, sizeof(seq));
 	return len;
 }
 
@@ -890,8 +957,14 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_msrpatch_code(code, cap);
 	} else if (strcmp(mode, "msrsyscfg") == 0) {
 		return guest_msrsyscfg_code(code, cap);
+	} else if (strcmp(mode, "mtrrcap") == 0) {
+		return guest_mtrrcap_code(code, cap);
 	} else if (strcmp(mode, "msrhwcr") == 0) {
 		return guest_msrhwcr_code(code, cap);
+	} else if (strcmp(mode, "pcicfg") == 0) {
+		return guest_pcicfg_code(code, cap);
+	} else if (strcmp(mode, "pitfallback") == 0) {
+		return guest_pitfallback_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -1076,7 +1149,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|msrhwcr|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

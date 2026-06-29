@@ -10,7 +10,7 @@ LOADER=${VMM_SMOKE_LOADER_CHECK_BIN:-/var/tmp/vmm_smoke_loader_check}
 CHECKER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_SIZE=${VMM_SMOKE_MEM:-2M}
 MANIFEST_SIZE=${VMM_SMOKE_MANIFEST_SIZE:-4096}
-MODES=${VMM_SMOKE_LOADER_MODES:-"vmmcall cpuid msrpatch msrsyscfg msrhwcr serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 avicirq avicipi avicnoaccel hlt loop cliloop"}
+MODES=${VMM_SMOKE_LOADER_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback serial serialin serialirq time xsetbv apicmsr timerint ud pic ioapic x2apic cachetlb pm64 avicirq avicipi avicnoaccel hlt loop cliloop"}
 PREFIX=/var/tmp/dfvmm-smoke-loader-check-$$
 
 cleanup()
