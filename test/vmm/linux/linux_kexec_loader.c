@@ -81,7 +81,10 @@
 #define ACPI_FADT_HW_REDUCED	0x00100000U
 #define ACPI_FADT_NO_VGA	0x0004U
 #define ACPI_SPACE_SYSTEM_MEMORY	0U
+#define ACPI_SPACE_SYSTEM_IO	1U
+#define ACPI_ACCESS_DWORD	3U
 #define ACPI_MADT_LOCAL_APIC_ENABLED	0x00000001U
+#define ACPI_PM_TIMER_PORT	0x408U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ARCH_X64	1
@@ -598,10 +601,17 @@ build_acpi_tables(uint8_t *mem)
 	write32(fadt, 40, (uint32_t)ACPI_DSDT_GPA);
 	write8(fadt, 45, 7);
 	write16(fadt, 46, 0);
+	write32(fadt, 76, ACPI_PM_TIMER_PORT);
+	write8(fadt, 91, 4);
 	write16(fadt, 109, ACPI_FADT_NO_VGA);
 	write32(fadt, 112, ACPI_FADT_WBINVD | ACPI_FADT_HW_REDUCED);
 	write8(fadt, 131, 5);
 	write64(fadt, 140, ACPI_DSDT_GPA);
+	write8(fadt, 208, ACPI_SPACE_SYSTEM_IO);
+	write8(fadt, 209, 32);
+	write8(fadt, 210, 0);
+	write8(fadt, 211, ACPI_ACCESS_DWORD);
+	write64(fadt, 212, ACPI_PM_TIMER_PORT);
 	write_acpi_checksum(fadt, ACPI_FADT_SIZE, 9);
 
 	madt = mem + ACPI_MADT_GPA;
