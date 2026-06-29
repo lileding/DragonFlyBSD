@@ -3025,7 +3025,7 @@ nvkm_dispnv50_scanout_from_fb(struct nvkm_softc *sc,
 	state->window_src_w = pstate->src_w;
 	state->window_src_h = pstate->src_h;
 	state->scanout_user = true;
-	nvkm_infof(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "drm: dispnv50 user scanout %ux%u src=%u,%u %ux%u "
 	    "dst=%d,%d %ux%u pitch=%u format=0x%08x modifier=0x%016llx "
 	    "kind=0x%02x vram=0x%llx bo=%p\n",
@@ -4081,7 +4081,7 @@ nvkm_dispnv50_wndw_ntfy_enable(struct nvkm_softc *sc,
 	wndw->func->ntfy_reset(state->disp.sync, wndw->ntfy);
 	wndw->ntfy ^= 0x10;
 
-	nvkm_infof(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "drm: dispnv50 window notifier armed win=%d handle=0x%x "
 	    "offset=0x%llx next=0x%x\n",
 	    wndw->id, asyw->ntfy.handle,
@@ -4243,7 +4243,7 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
 		return ret;
 	}
 
-	nvkm_infof(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "drm: dispnv50 window notifier begun win=%d offset=0x%llx "
 	    "status=0x%08x\n",
 	    wndw->id, (unsigned long long)asyw->ntfy.offset, status);
@@ -4439,7 +4439,7 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	    (u32)wndw->id, display_id, false, true, false);
 	memset(&state->audit_pending, 0, sizeof(state->audit_pending));
 
-	nvkm_infof(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "drm: dispnv50 %s armed win=%d scanout=0x%llx offset=0x%llx "
 	    "src=%u,%u %ux%u dst=%d,%d %ux%u user=%d\n", reason, wndw->id,
 	    (unsigned long long)(state->scanout_user ? state->scanout_offset :
@@ -6037,7 +6037,7 @@ nvkm_dispnv50_cursor_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	nvkm_dispnv50_cursor_audit_capture(state, crtc->cursor->state, bo,
 	    head, true, false);
 	nvkm_dispnv50_head_mark_cursor(state, head, true);
-	nvkm_infof(sc->dev,
+	nvkm_debugf(sc->dev,
 	    "drm: dispnv50 cursor update head=%u pos=%d,%d size=%ux%u "
 	    "offset=0x%llx bo=%p\n",
 	    head, asyw.state.crtc_x, asyw.state.crtc_y,
@@ -6406,20 +6406,21 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 
 	/*
-	 * User framebuffer flips may use the async image-only path because DRM
-	 * completes the page-flip event/out-fence at the later flip-done
-	 * barrier.  Kernel/console scanout restore has no userspace flip event
-	 * to publish that pending state, so program it synchronously with a
-	 * window notifier.
+	 * Keep user framebuffer flips on the synchronous window-notifier path
+	 * until nvkm has a complete vblank-driven async pageflip path.  Ownership:
+	 * the DRM event remains with the atomic tail; this helper only proves
+	 * that the window UPDATE was accepted by hardware.  Lifetime: no notifier
+	 * or framebuffer reference is retained after the wait returns.  Threading:
+	 * serialized KMS commit context only.
 	 */
-	async_update = !color_update && state->scanout_user;
+	async_update = false;
 	program_window_color = color_update || wndw_armed == NULL ||
 	    !wndw_armed->valid || !wndw_armed->image;
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
 	    interlock, false, async_update, async_update, program_window_color,
 	    NVKM_DISPNV50_AUDIT_PLANE_UPDATE, head, display_id,
 	    color_update ? "plane color update" :
-	    (async_update ? "plane update" : "console restore"), NULL);
+	    (state->scanout_user ? "plane update" : "console restore"), NULL);
 	if (ret == 0 && color_update)
 		nvkm_dispnv50_head_mark_olut_programmed(state, head, nvhead);
 	return ret;
