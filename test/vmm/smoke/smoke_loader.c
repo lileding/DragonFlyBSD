@@ -91,6 +91,8 @@
 #define AVIC_MARKER	0xa51c0040U
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
 #define MSR_SYSCFG	0xc0010010U
+#define MSR_K7_HWCR	0xc0010015U
+#define HWCR_SMOKE_VALUE ((1U << 24) | (1U << 18) | 0x148U)
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -780,6 +782,38 @@ guest_msrsyscfg_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_msrhwcr_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t rdmsr[] = {
+	    0xb9, MSR_K7_HWCR & 0xffU,
+	    (MSR_K7_HWCR >> 8) & 0xffU,
+	    (MSR_K7_HWCR >> 16) & 0xffU,
+	    (MSR_K7_HWCR >> 24) & 0xffU,
+	    0x0f, 0x32		/* rdmsr */
+	};
+	static const uint8_t wrmsr[] = {
+	    0xb9, MSR_K7_HWCR & 0xffU,
+	    (MSR_K7_HWCR >> 8) & 0xffU,
+	    (MSR_K7_HWCR >> 16) & 0xffU,
+	    (MSR_K7_HWCR >> 24) & 0xffU,
+	    0xba, 0x00, 0x00, 0x00, 0x00, /* mov edx,0 */
+	    0xb8, HWCR_SMOKE_VALUE & 0xffU,
+	    (HWCR_SMOKE_VALUE >> 8) & 0xffU,
+	    (HWCR_SMOKE_VALUE >> 16) & 0xffU,
+	    (HWCR_SMOKE_VALUE >> 24) & 0xffU,
+	    0x0f, 0x30		/* wrmsr */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+
+	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
+	emit(code, &len, cap, wrmsr, sizeof(wrmsr));
+	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -856,6 +890,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_msrpatch_code(code, cap);
 	} else if (strcmp(mode, "msrsyscfg") == 0) {
 		return guest_msrsyscfg_code(code, cap);
+	} else if (strcmp(mode, "msrhwcr") == 0) {
+		return guest_msrhwcr_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -1040,7 +1076,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|msrhwcr|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

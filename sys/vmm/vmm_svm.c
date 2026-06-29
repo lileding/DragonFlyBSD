@@ -192,6 +192,11 @@
 #define VMM_SVM_X2APIC_MSR_BASE	0x800U
 #define VMM_SVM_X2APIC_MSR_LAST	0x83fU
 #define VMM_SVM_MSR_K7_HWCR		0xc0010015U
+#define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL)
+#define VMM_SVM_HWCR_MC_STATUS_WR_EN	(1ULL << 18)
+#define VMM_SVM_HWCR_TSC_FREQ_SEL	(1ULL << 24)
+#define VMM_SVM_HWCR_VALID		(VMM_SVM_HWCR_MC_STATUS_WR_EN | \
+					 VMM_SVM_HWCR_TSC_FREQ_SEL)
 #define VMM_SVM_AMD_PATCH_LEVEL	0ULL
 #define VMM_SVM_SMOKE_AVIC_MAGIC	0x43495641U
 #define VMM_SVM_SMOKE_AVIC_DELIVER	1U
@@ -346,6 +351,7 @@ struct vmm_svm_backend {
 	uint64_t mut_host_sysenter_eip;
 	uint64_t mut_guest_mtrr_def_type;
 	uint64_t mut_guest_syscfg;
+	uint64_t mut_guest_hwcr;
 	uint64_t mut_guest_tsc_aux;
 	uint64_t mut_guest_apicbase;
 	uint64_t mut_gprs[VMM_X64_NGPR];
@@ -1108,6 +1114,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		case MSR_SYSCFG:
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_syscfg);
 			return 1;
+		case VMM_SVM_MSR_K7_HWCR:
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_hwcr);
+			return 1;
 		case MSR_AMD_PATCH_LEVEL:
 			vmm_svm_rdmsr_value(svm, VMM_SVM_AMD_PATCH_LEVEL);
 			return 1;
@@ -1210,6 +1219,16 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
 		    "read-only");
 		return 0;
+	case VMM_SVM_MSR_K7_HWCR:
+		val &= ~VMM_SVM_HWCR_IGNORE;
+		if ((val & ~VMM_SVM_HWCR_VALID) != 0) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
+			return 0;
+		}
+		svm->mut_guest_hwcr = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
 	case MSR_AMD_PATCH_LEVEL:
 		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
 		    "read-only");
