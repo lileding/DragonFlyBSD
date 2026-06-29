@@ -106,6 +106,7 @@
 #define VMM_SVM_APIC_REG_ISR_BASE	0x100U
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
+#define VMM_SVM_APIC_REG_ESR		0x280U
 #define VMM_SVM_APIC_REG_LVTT		0x320U
 #define VMM_SVM_APIC_REG_LVT_THERMAL	0x330U
 #define VMM_SVM_APIC_REG_LVT_PC		0x340U
@@ -1933,7 +1934,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case VMM_SVM_APIC_REG_SVR:
 		name = "svr";
 		break;
-	case 0x280:
+	case VMM_SVM_APIC_REG_ESR:
 		name = "esr";
 		break;
 	case 0x300:
@@ -2049,6 +2050,11 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		vmm_svm_lapic_eoi(svm);
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic eoi accepted", vc->imm_id);
+		return 1;
+	case VMM_SVM_APIC_REG_ESR:
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ESR, 0);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic esr cleared", vc->imm_id);
 		return 1;
 	case VMM_SVM_APIC_REG_LVT0:
 	case VMM_SVM_APIC_REG_LVT1:

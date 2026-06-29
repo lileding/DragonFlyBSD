@@ -695,6 +695,22 @@ guest_aviclvtpc_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_avicesr_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_esr[] =
+	    { 0x89, 0x87, 0x80, 0x02, 0x00, 0x00 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	size_t len = 0;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_esr, sizeof(mov_eax_to_esr));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
 guest_avicnoaccel_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
@@ -1086,6 +1102,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_aviclint_code(code, cap);
 	} else if (strcmp(mode, "aviclvtpc") == 0) {
 		return guest_aviclvtpc_code(code, cap);
+	} else if (strcmp(mode, "avicesr") == 0) {
+		return guest_avicesr_code(code, cap);
 	} else if (strcmp(mode, "avicnoaccel") == 0) {
 		return guest_avicnoaccel_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
@@ -1289,7 +1307,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
