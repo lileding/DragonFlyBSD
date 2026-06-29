@@ -100,6 +100,7 @@
 #define HWCR_SMOKE_VALUE ((1U << 24) | (1U << 18) | 0x148U)
 #define PCI_CFG_ADDR_PORT	0x0cf8U
 #define PCI_CFG_DATA_PORT	0x0cfcU
+#define PIT_CH0_PORT		0x0040U
 #define PIT_CH2_PORT		0x0042U
 #define PIT_CMD_PORT		0x0043U
 #define PIT_PORTB		0x0061U
@@ -1043,6 +1044,55 @@ guest_pitfallback_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_pit0_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t seq[] = {
+	    0xba, PIT_CMD_PORT & 0xffU,
+	    (PIT_CMD_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x34,				/* ch0, lsb/msb, mode 2 */
+	    0xee,				/* out dx,al */
+	    0xba, PIT_CH0_PORT & 0xffU,
+	    (PIT_CH0_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x9b,				/* PIT_LATCH low byte */
+	    0xee,
+	    0xb0, 0x2e,				/* PIT_LATCH high byte */
+	    0xee,
+	    0xba, PIT_CMD_PORT & 0xffU,
+	    (PIT_CMD_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x00,				/* latch ch0 count */
+	    0xee,
+	    0xba, PIT_CH0_PORT & 0xffU,
+	    (PIT_CH0_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xec,				/* read latched LSB */
+	    0xec,				/* read latched MSB */
+	    0xba, PIT_CMD_PORT & 0xffU,
+	    (PIT_CMD_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x38,				/* ch0, lsb/msb, mode 4 */
+	    0xee,
+	    0xba, PIT_CH0_PORT & 0xffU,
+	    (PIT_CH0_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x01,
+	    0xee,
+	    0xb0, 0x00,
+	    0xee,
+	    0xba, PIT_CMD_PORT & 0xffU,
+	    (PIT_CMD_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x30,				/* disable-style mode set */
+	    0xee,
+	    0xba, PIT_CH0_PORT & 0xffU,
+	    (PIT_CH0_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0x00,
+	    0xee,
+	    0xee,
+	    0x0f, 0x01, 0xd9			/* vmmcall */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, seq, sizeof(seq));
+	return len;
+}
+
+static size_t
 guest_rtccmos_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t seq[] = {
@@ -1205,6 +1255,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_pcicfg_code(code, cap);
 	} else if (strcmp(mode, "pitfallback") == 0) {
 		return guest_pitfallback_code(code, cap);
+	} else if (strcmp(mode, "pit0") == 0) {
+		return guest_pit0_code(code, cap);
 	} else if (strcmp(mode, "rtccmos") == 0) {
 		return guest_rtccmos_code(code, cap);
 	} else if (strcmp(mode, "iodelay") == 0) {
@@ -1396,7 +1448,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|rtccmos|iodelay|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

@@ -210,6 +210,7 @@
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
+#define VMM_PIT_CH0		0x40U
 #define VMM_PIT_CH2		0x42U
 #define VMM_PIT_CMD		0x43U
 #define VMM_PIT_PORTB		0x61U
@@ -441,6 +442,10 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_scr;
 	uint32_t mut_pci_cfg_addr;
 	uint8_t mut_pit_portb;
+	uint8_t mut_pit_ch0_read_state;
+	uint8_t mut_pit_ch0_write_state;
+	uint16_t mut_pit_ch0_reload;
+	uint16_t mut_pit_ch0_count;
 	uint8_t mut_pic1_mask;
 	uint8_t mut_pic2_mask;
 	uint8_t mut_cmos_index;
@@ -1836,7 +1841,69 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
 	}
-	if (port == VMM_PIT_CH2 || port == VMM_PIT_CMD) {
+	if (port == VMM_PIT_CH0) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pit ch0 io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			if (svm->mut_pit_ch0_read_state == 0) {
+				val = svm->mut_pit_ch0_count & 0xffU;
+				svm->mut_pit_ch0_read_state = 1;
+			} else {
+				val = (svm->mut_pit_ch0_count >> 8) & 0xffU;
+				svm->mut_pit_ch0_read_state = 0;
+			}
+			vmm_svm_set_rax_low(vmcb, val, size);
+		} else if (svm->mut_pit_ch0_write_state == 0) {
+			svm->mut_pit_ch0_reload &= 0xff00U;
+			svm->mut_pit_ch0_reload |= vmcb->state.rax & 0xffU;
+			svm->mut_pit_ch0_write_state = 1;
+		} else {
+			svm->mut_pit_ch0_reload &= 0x00ffU;
+			svm->mut_pit_ch0_reload |=
+			    (vmcb->state.rax & 0xffU) << 8;
+			svm->mut_pit_ch0_count = svm->mut_pit_ch0_reload;
+			svm->mut_pit_ch0_write_state = 0;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+	if (port == VMM_PIT_CMD) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0xffU, size);
+		else {
+			val = vmcb->state.rax & 0xffU;
+			if ((val & 0xc0U) == 0) {
+				if ((val & 0x30U) != 0 && (val & 0x30U) != 0x30U) {
+					vmm_machine_logf(svm->borrow_imm_machine,
+					    "svm vcpu%u unsupported pit ch0 cmd=0x%x rip=0x%jx",
+					    vc->imm_id, val,
+					    (uintmax_t)vmcb->state.rip);
+					return 0;
+				}
+				svm->mut_pit_ch0_read_state = 0;
+				svm->mut_pit_ch0_write_state = 0;
+			} else if ((val & 0xc0U) != 0x80U) {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u unsupported pit cmd=0x%x rip=0x%jx",
+				    vc->imm_id, val,
+				    (uintmax_t)vmcb->state.rip);
+				return 0;
+			}
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+	if (port == VMM_PIT_CH2) {
 		if (size != 1) {
 			vmm_machine_logf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
