@@ -1734,43 +1734,85 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 };
 
 /*
- * Complete an atomic CRTC event.
+ * Complete an atomic CRTC event after display programming has reached the
+ * hardware boundary.
  *
  * Ownership: state->event belongs to the atomic commit until this helper
- * consumes it and clears the pointer.  Lifetime: the event object is either
- * queued on the CRTC vblank list or sent synchronously before the helper
- * returns.  Threading: callers run from atomic commit context; event_lock
- * serializes the handoff with vblank IRQ delivery.
+ * consumes it and clears the pointer.  Lifetime: the event object is sent
+ * synchronously before the helper returns.  Threading: callers run from atomic
+ * commit context after the relevant EVO update/notifier wait has completed;
+ * event_lock serializes the handoff with userspace event delivery.
  */
 static void
-nvkm_crtc_complete_event(struct drm_crtc *crtc, struct drm_crtc_state *state)
+nvkm_crtc_complete_event(struct drm_crtc *crtc, struct drm_crtc_state *state,
+    uint32_t vblank_ref_mask)
 {
 	struct drm_device *dev = crtc->dev;
+	bool put_vblank;
 	unsigned long flags;
 
 	if (state == NULL || state->event == NULL)
 		return;
 
+	put_vblank = state->active &&
+	    (vblank_ref_mask & drm_crtc_mask(crtc)) != 0;
+	if (state->active)
+		drm_crtc_accurate_vblank_count(crtc);
 	spin_lock_irqsave(&dev->event_lock, flags);
-	if (state->active && drm_crtc_vblank_get(crtc) == 0)
-		drm_crtc_arm_vblank_event(crtc, state->event);
-	else
-		drm_crtc_send_vblank_event(crtc, state->event);
+	drm_crtc_send_vblank_event(crtc, state->event);
 	state->event = NULL;
 	spin_unlock_irqrestore(&dev->event_lock, flags);
+	if (put_vblank)
+		drm_crtc_vblank_put(crtc);
+}
+
+/*
+ * Keep vblank delivery enabled while an atomic event is pending.
+ *
+ * Ownership: the returned bitmask owns one vblank reference for each CRTC bit
+ * that is set.  The matching put happens in nvkm_crtc_complete_event() after
+ * the event has been sent.  Lifetime: references are held only across this
+ * commit tail, from before display UPDATE submission until event completion.
+ * Threading: called by the serialized atomic commit-tail owner; the DRM vblank
+ * core owns its internal locking.
+ */
+static uint32_t
+nvkm_atomic_get_event_vblank_refs(struct drm_atomic_state *old_state,
+    uint32_t ref_mask, bool include_modesets)
+{
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *new_crtc_state;
+	uint32_t crtc_mask;
+	int i, ret;
+
+	for_each_new_crtc_in_state(old_state, crtc, new_crtc_state, i) {
+		if (new_crtc_state == NULL || new_crtc_state->event == NULL ||
+		    !new_crtc_state->active)
+			continue;
+		if (!include_modesets &&
+		    drm_atomic_crtc_needs_modeset(new_crtc_state))
+			continue;
+		crtc_mask = drm_crtc_mask(crtc);
+		if ((ref_mask & crtc_mask) != 0)
+			continue;
+		ret = drm_crtc_vblank_get(crtc);
+		if (ret == 0)
+			ref_mask |= crtc_mask;
+	}
+	return (ref_mask);
 }
 
 static void
-nvkm_atomic_complete_modeset_events(struct drm_atomic_state *old_state)
+nvkm_atomic_complete_events(struct drm_atomic_state *old_state,
+    uint32_t vblank_ref_mask)
 {
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *new_crtc_state;
 	int i;
 
-	for_each_new_crtc_in_state(old_state, crtc, new_crtc_state, i) {
-		if (drm_atomic_crtc_needs_modeset(new_crtc_state))
-			nvkm_crtc_complete_event(crtc, new_crtc_state);
-	}
+	for_each_new_crtc_in_state(old_state, crtc, new_crtc_state, i)
+		nvkm_crtc_complete_event(crtc, new_crtc_state,
+		    vblank_ref_mask);
 }
 
 /*
@@ -2003,6 +2045,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	struct drm_device *dev = old_state->dev;
 	struct nvkm_softc *sc = dev->dev_private;
 	struct nvkm_display_tail_context tail;
+	uint32_t event_vblank_ref_mask;
 
 	sc->kms_atomic_commit_tail_count++;
 	nvkm_atomic_tail_context_init(&tail, old_state);
@@ -2011,13 +2054,18 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	drm_atomic_helper_update_legacy_modeset_state(dev, old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_DISABLES);
 	nvkm_atomic_tail_commit_modeset_disables(&tail);
+	event_vblank_ref_mask =
+	    nvkm_atomic_get_event_vblank_refs(old_state, 0, false);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES);
 	nvkm_atomic_tail_commit_planes(&tail,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_ENABLES);
 	nvkm_atomic_tail_commit_modeset_enables(&tail);
+	event_vblank_ref_mask =
+	    nvkm_atomic_get_event_vblank_refs(old_state,
+	    event_vblank_ref_mask, true);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_MODESET_EVENTS);
-	nvkm_atomic_complete_modeset_events(old_state);
+	nvkm_atomic_complete_events(old_state, event_vblank_ref_mask);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FAKE_VBLANK);
 	drm_atomic_helper_fake_vblank(old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_HW_DONE);
@@ -4132,13 +4180,17 @@ color_fail:
 static void
 nvkm_crtc_atomic_flush(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
-	(void)old_state;	/* Color and plane UPDATEs run in atomic tail. */
-
-	if (crtc->state->event == NULL)
-		return;
-	if (drm_atomic_crtc_needs_modeset(crtc->state))
-		return;
-	nvkm_crtc_complete_event(crtc, crtc->state);
+	/*
+	 * Color, plane UPDATEs, and CRTC event delivery run in the custom
+	 * atomic tail.  Ownership: crtc->state->event remains with the atomic
+	 * commit until nvkm_atomic_complete_events() consumes it after the EVO
+	 * update/notifier boundary.  Lifetime: this callback must not retain
+	 * old_state or crtc->state pointers beyond the call.  Threading: the
+	 * caller holds the atomic commit context; the tail provides the single
+	 * ordered completion point that matches Linux nouveau.
+	 */
+	(void)crtc;
+	(void)old_state;
 }
 
 /*
