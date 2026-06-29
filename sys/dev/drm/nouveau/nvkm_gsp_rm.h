@@ -231,12 +231,15 @@ enum nvkm_dispnv50_underscan_mode {
 	NVKM_DISPNV50_UNDERSCAN_AUTO = 2,
 };
 
+#define NVKM_DISPNV50_ELD_BUFSIZE	96U
+
 /*
  * Head programming parameters decoded by KMS from connector atomic state.
  *
  * Ownership:
- *   This structure owns only scalar values. Callers retain ownership of DRM
- *   state and connector objects; the bridge must not store their pointers.
+ *   This structure owns scalar values and an ELD byte snapshot. Callers retain
+ *   ownership of DRM state and connector objects; the bridge must not store
+ *   their pointers.
  *
  * Lifetime:
  *   Valid for one display programming callback. Prepared output routes store
@@ -249,6 +252,8 @@ enum nvkm_dispnv50_underscan_mode {
  */
 struct nvkm_dispnv50_head_config {
 	struct nvkm_dispnv50_hdmi_info hdmi;
+	uint8_t eld_size;
+	uint8_t eld[NVKM_DISPNV50_ELD_BUFSIZE];
 	uint8_t bpc;
 	uint32_t dither_mode;
 	uint32_t dither_depth;
@@ -256,6 +261,7 @@ struct nvkm_dispnv50_head_config {
 	uint32_t underscan_mode;
 	uint32_t underscan_hborder;
 	uint32_t underscan_vborder;
+	bool audio_enabled;
 	bool underscan_auto_is_hdmi;
 };
 

@@ -5455,7 +5455,7 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 			ret = -ENODEV;
 			goto fail;
 		}
-		ret = outp->func->acquire(outp, false);
+		ret = outp->func->acquire(outp, prepare->config.audio_enabled);
 		if (ret != 0)
 			goto fail;
 		prepare->acquired = true;
@@ -5512,9 +5512,10 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 prepared display=0x%x outp=%02x sor=%d link=%u"
-	    " type=0x%02x acquired=%d\n", display_id, outp->index,
+	    " type=0x%02x acquired=%d audio=%d eld=%u\n", display_id, outp->index,
 	    prepare->ior_id, prepare->ior_link, outp->info.type,
-	    prepare->acquired);
+	    prepare->acquired, prepare->config.audio_enabled,
+	    (unsigned int)prepare->config.eld_size);
 	if (prepare->output_type == DCB_OUTPUT_DP && prepare->dp_sst.valid) {
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 prepared dp outp=%02x lanes=%u "
@@ -5530,6 +5531,61 @@ nvkm_dispnv50_output_prepare(struct nvkm_softc *sc,
 fail:
 	nvkm_dispnv50_output_prepare_abort(sc, prepare);
 	return ret;
+}
+
+/*
+ * Enable output audio side channels for the routed output.
+ *
+ * Ownership:
+ *   Borrows outp, its assigned IOR, and the prepared ELD snapshot. The helper
+ *   does not retain any pointer and does not take ownership of ELD bytes.
+ *
+ * Lifetime:
+ *   Must run after the SOR route has been accepted and before the prepared
+ *   commit is consumed. The prepared ELD remains valid for this synchronous
+ *   call because nvkm_dispnv50_output_prepare copied it from DRM connector
+ *   state.
+ *
+ * Threading:
+ *   Called from serialized KMS atomic commit context. It may issue GSP/RM
+ *   controls and must not run from interrupt context.
+ */
+static void
+nvkm_dispnv50_output_enable_audio(struct nvkm_softc *sc, struct nvkm_outp *outp,
+    uint32_t head, const struct nvkm_dispnv50_output_prepare *prepare)
+{
+	struct nvkm_ior *ior;
+
+	if (prepare == NULL || !prepare->config.audio_enabled ||
+	    prepare->config.eld_size == 0)
+		return;
+	if (outp == NULL || outp->ior == NULL || outp->ior->func == NULL)
+		return;
+
+	ior = outp->ior;
+	if (ior->func->hda == NULL || ior->func->hda->eld == NULL)
+		return;
+	ior->func->hda->eld(ior, (int)head,
+	    (uint8_t *)prepare->config.eld, prepare->config.eld_size);
+
+	switch (outp->info.type) {
+	case DCB_OUTPUT_TMDS:
+		if (ior->func->hdmi != NULL && ior->func->hdmi->audio != NULL)
+			ior->func->hdmi->audio(ior, (int)head, true);
+		break;
+	case DCB_OUTPUT_DP:
+		if (ior->func->dp != NULL && ior->func->dp->audio != NULL)
+			ior->func->dp->audio(ior, (int)head, true);
+		break;
+	default:
+		break;
+	}
+
+	if (sc != NULL && sc->kms_push_trace) {
+		nvkm_infof(sc->dev,
+		    "drm: dispnv50 audio enabled outp=%02x head=%u eld=%u\n",
+		    outp->index, head, (unsigned int)prepare->config.eld_size);
+	}
 }
 
 static int
@@ -5585,6 +5641,7 @@ nvkm_dispnv50_route_output_prepared(struct nvkm_softc *sc,
 
 	ret = core->func->sor->ctrl(core, outp->ior->id, ctrl, asyh);
 	if (ret == 0) {
+		nvkm_dispnv50_output_enable_audio(sc, outp, head, prepare);
 		nvkm_infof(sc->dev,
 		    "drm: dispnv50 route display=0x%x outp=%02x sor=%d link=%u proto=%u head=%u type=0x%02x\n",
 		    prepare->display_id, outp->index, outp->ior->id,
@@ -5623,11 +5680,9 @@ nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *outp, uint32_t head)
 	ior = outp->ior;
 	switch (outp->info.type) {
 	case DCB_OUTPUT_TMDS:
-		if (ior->func->hdmi == NULL)
-			return;
-		if (ior->func->hdmi->audio != NULL)
+		if (ior->func->hdmi != NULL && ior->func->hdmi->audio != NULL)
 			ior->func->hdmi->audio(ior, (int)head, false);
-		if (ior->func->hdmi->ctrl != NULL)
+		if (ior->func->hdmi != NULL && ior->func->hdmi->ctrl != NULL)
 			ior->func->hdmi->ctrl(ior, (int)head, false, 0, 0);
 		break;
 	case DCB_OUTPUT_DP:
@@ -5637,6 +5692,8 @@ nvkm_dispnv50_output_disable_sideband(struct nvkm_outp *outp, uint32_t head)
 	default:
 		break;
 	}
+	if (ior->func->hda != NULL && ior->func->hda->hpd != NULL)
+		ior->func->hda->hpd(ior, (int)head, false);
 }
 
 /*

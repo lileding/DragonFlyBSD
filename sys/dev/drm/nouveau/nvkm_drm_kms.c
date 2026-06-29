@@ -83,6 +83,7 @@ struct nvkm_drm_connector {
 	uint32_t		display_id;	/* GSP displayId, e.g. 0x400 */
 	struct nvkm_event_ntfy	dp_irq_ntfy;
 	bool			dp_irq_ntfy_initialized;
+	bool			has_audio;
 	struct drm_display_mode	*native_mode;
 };
 
@@ -495,11 +496,13 @@ nvkm_connector_get_modes(struct drm_connector *connector)
 	if (buf == NULL)
 		return (0);
 	edid = (struct edid *)buf;
+	nc->has_audio = false;
 	if (nvkm_gsp_disp_read_edid(nc->sc, nc->display_id, buf, &len) == 0 &&
 	    nvkm_connector_edid_is_valid(edid, len)) {
 		if (nvkm_connector_update_edid(connector, edid,
 		    "publish") == 0) {
 			n = drm_add_edid_modes(connector, edid);
+			nc->has_audio = drm_detect_monitor_audio(edid);
 			nvkm_connector_snapshot_native_mode(connector);
 		} else
 			nvkm_connector_set_native_mode(nc, NULL);
@@ -661,6 +664,7 @@ nvkm_connector_detect(struct drm_connector *connector, bool force)
 
 	(void)force;
 	if (nvkm_connector_detect_forced_disconnected(nc->sc, nc->display_id)) {
+		nc->has_audio = false;
 		nvkm_connector_update_edid(connector, NULL,
 		    "debug-force-disconnect");
 		return (connector_status_disconnected);
@@ -670,6 +674,7 @@ nvkm_connector_detect(struct drm_connector *connector, bool force)
 	if (connected > 0)
 		return (connector_status_connected);
 
+	nc->has_audio = false;
 	nvkm_connector_update_edid(connector, NULL, "clear-on-detect");
 	return (connector_status_disconnected);
 }
@@ -2127,6 +2132,23 @@ nvkm_kms_crtc_atom_take_connector(struct nvkm_kms_crtc_atom *atom,
 	atom->head.hdmi.scdc_low_rates =
 	    conn->display_info.hdmi.scdc.scrambling.low_rates;
 	atom->max_tmds_clock = conn->display_info.max_tmds_clock;
+	if (nvkm_conn->has_audio &&
+	    (conn->eld[DRM_ELD_VER] & DRM_ELD_VER_MASK) != 0) {
+		int eld_size = drm_eld_size(conn->eld);
+
+		if (eld_size > 0 &&
+		    eld_size <= (int)NVKM_DISPNV50_ELD_BUFSIZE) {
+			atom->head.audio_enabled = true;
+			atom->head.eld_size = (uint8_t)eld_size;
+			memcpy(atom->head.eld, conn->eld, eld_size);
+		} else {
+			nvkm_infof(atom->sc->dev,
+			    "drm: connector display=0x%x ELD size %d exceeds "
+			    "GSP buffer %u; audio disabled\n",
+			    nvkm_conn->display_id, eld_size,
+			    NVKM_DISPNV50_ELD_BUFSIZE);
+		}
+	}
 	if (state != NULL) {
 		atom->head.bpc = state->max_bpc;
 		atom->head.dither_mode = state->dither_mode;
