@@ -102,6 +102,8 @@
 #define VMM_SVM_APIC_REG_ID		0x020U
 #define VMM_SVM_APIC_REG_VERSION	0x030U
 #define VMM_SVM_APIC_REG_TPR		0x080U
+#define VMM_SVM_APIC_REG_EOI		0x0b0U
+#define VMM_SVM_APIC_REG_ISR_BASE	0x100U
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
 #define VMM_SVM_APIC_REG_LVTT		0x320U
@@ -123,6 +125,7 @@
 #define VMM_SVM_APIC_LVT_LEVEL_TRIGGER	0x00008000U
 #define VMM_SVM_APIC_LVT_MASKED		0x00010000U
 #define VMM_SVM_APIC_LVT_TIMER_MODE_MASK 0x00060000U
+#define VMM_SVM_APIC_LVT_TIMER_PERIODIC	0x00020000U
 #define VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE 0x00040000U
 #define VMM_SVM_APIC_LVT_COMMON_VALID	\
 	(VMM_SVM_APIC_LVT_VECTOR_MASK | VMM_SVM_APIC_LVT_SEND_PENDING | \
@@ -139,6 +142,7 @@
 	 VMM_SVM_APIC_LVT_INPUT_POLARITY | VMM_SVM_APIC_LVT_REMOTE_IRR | \
 	 VMM_SVM_APIC_LVT_LEVEL_TRIGGER)
 #define VMM_SVM_APIC_TIMER_DIVIDE_VALID	0x0000000bU
+#define VMM_SVM_LAPIC_TIMER_COUNT_PER_TICK 1000000U
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
@@ -379,6 +383,11 @@ struct vmm_svm_backend {
 	uint32_t mut_lapic_timer_tmict;
 	uint32_t mut_lapic_timer_tdcr;
 	uint32_t mut_lapic_timer_divisor;
+	uint32_t mut_lapic_timer_interval_ticks;
+	uint32_t mut_lapic_timer_fire_count;
+	uint32_t mut_lapic_timer_idle_count;
+	int mut_lapic_timer_active;
+	int mut_lapic_timer_deadline;
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -667,6 +676,89 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic doorbell host_apic_id=%u",
 		    vc->imm_id, svm->mut_avic_host_apic_id);
+	}
+}
+
+static void
+vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
+{
+	uint64_t delta;
+
+	svm->mut_lapic_timer_tmict = count;
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMICT, count);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, count);
+	if (count == 0 ||
+	    (svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_MASKED) != 0 ||
+	    (svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
+		svm->mut_lapic_timer_active = 0;
+		return;
+	}
+	delta = ((uint64_t)count * svm->mut_lapic_timer_divisor) /
+	    VMM_SVM_LAPIC_TIMER_COUNT_PER_TICK;
+	if (delta == 0)
+		delta = 1;
+	if (delta > (uint64_t)hz / 10 + 1)
+		delta = (uint64_t)hz / 10 + 1;
+	svm->mut_lapic_timer_interval_ticks = (uint32_t)delta;
+	svm->mut_lapic_timer_deadline = ticks + (int)delta;
+	svm->mut_lapic_timer_active = 1;
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm lapic timer armed count=%u ticks=%u lvtt=0x%x",
+	    count, svm->mut_lapic_timer_interval_ticks,
+	    svm->mut_lapic_timer_lvtt);
+}
+
+static void
+vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc)
+{
+	uint8_t vector;
+
+	if (!svm->mut_lapic_timer_active ||
+	    (int)(ticks - svm->mut_lapic_timer_deadline) < 0)
+		return;
+	vector = svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, 0);
+	svm->mut_lapic_timer_fire_count++;
+	if (svm->mut_lapic_timer_fire_count <= 8 ||
+	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u lapic timer fire vector=0x%x count=%u",
+		    vc->imm_id, vector, svm->mut_lapic_timer_fire_count);
+	}
+	vmm_svm_avic_deliver(svm, vc, vector, "lapic_timer");
+	if ((svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+	    VMM_SVM_APIC_LVT_TIMER_PERIODIC &&
+	    svm->mut_lapic_timer_tmict != 0) {
+		svm->mut_lapic_timer_deadline = ticks +
+		    (int)svm->mut_lapic_timer_interval_ticks;
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT,
+		    svm->mut_lapic_timer_tmict);
+	} else {
+		svm->mut_lapic_timer_active = 0;
+	}
+}
+
+static void
+vmm_svm_lapic_eoi(struct vmm_svm_backend *svm)
+{
+	volatile u_int *isr;
+	int i;
+	int bit;
+
+	for (i = 7; i >= 0; --i) {
+		isr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
+		    VMM_SVM_APIC_REG_ISR_BASE + i * 0x10);
+		if (*isr == 0)
+			continue;
+		for (bit = 31; bit >= 0; --bit) {
+			if ((*isr & (1U << bit)) != 0) {
+				atomic_clear_int(isr, 1U << bit);
+				break;
+			}
+		}
+		return;
 	}
 }
 
@@ -1714,11 +1806,31 @@ vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
 }
 
 static void
-vmm_svm_handle_idle_wait(struct vmm_vcpu_thread *vc, struct vmm_svm_vmcb *vmcb)
+vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	int sleep_ticks;
+	int remaining;
+
 	vmm_svm_advance_rip(vmcb);
-	if (!vmm_vcpu_should_stop(vc))
-		tsleep(vc, 0, "vmmhlt", hz / 20 + 1);
+	if (vmm_vcpu_should_stop(vc))
+		return;
+	sleep_ticks = hz / 20 + 1;
+	if (svm->mut_lapic_timer_active) {
+		remaining = svm->mut_lapic_timer_deadline - ticks;
+		if (remaining <= 0)
+			remaining = 1;
+		if (remaining < sleep_ticks)
+			sleep_ticks = remaining;
+	}
+	svm->mut_lapic_timer_idle_count++;
+	if (svm->mut_lapic_timer_idle_count <= 8 ||
+	    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u idle wait ticks=%d timer_active=%d",
+		    vc->imm_id, sleep_ticks, svm->mut_lapic_timer_active);
+	}
+	tsleep(vc, 0, "vmmhlt", sleep_ticks);
 }
 
 
@@ -1806,7 +1918,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	case VMM_SVM_APIC_REG_ID:
 		name = "id";
 		break;
-	case 0x0b0:
+	case VMM_SVM_APIC_REG_EOI:
 		name = "eoi";
 		break;
 	case 0x0c0:
@@ -1884,8 +1996,15 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
 		svm->mut_lapic_timer_lvtt = value;
 		if ((value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 			svm->mut_lapic_timer_tmict = 0;
+			svm->mut_lapic_timer_active = 0;
+		}
+		if ((value & VMM_SVM_APIC_LVT_MASKED) != 0)
+			svm->mut_lapic_timer_active = 0;
+		else if (svm->mut_lapic_timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(svm,
+			    svm->mut_lapic_timer_tmict);
 		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
 		    value);
 		vmm_machine_logf(svm->borrow_imm_machine,
@@ -1905,9 +2024,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 			    vc->imm_id, value);
 			return 1;
 		}
-		svm->mut_lapic_timer_tmict = value;
-		vmm_svm_avic_apic_write32(svm,
-		    VMM_SVM_APIC_REG_TMICT, value);
+		vmm_svm_lapic_timer_arm(svm, value);
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic tmict accepted value=0x%x",
 		    vc->imm_id, value);
@@ -1923,6 +2040,15 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic tdcr accepted value=0x%x divisor=%u",
 		    vc->imm_id, value, svm->mut_lapic_timer_divisor);
+		if (svm->mut_lapic_timer_active &&
+		    svm->mut_lapic_timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(svm,
+			    svm->mut_lapic_timer_tmict);
+		return 1;
+	case VMM_SVM_APIC_REG_EOI:
+		vmm_svm_lapic_eoi(svm);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u avic eoi accepted", vc->imm_id);
 		return 1;
 	case VMM_SVM_APIC_REG_LVT0:
 	case VMM_SVM_APIC_REG_LVT1:
@@ -1991,6 +2117,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	vmcb = svm->own_mut_vmcb;
 	vmm_svm_avic_bind_cpu(svm);
 	while (!vmm_vcpu_should_stop(vc)) {
+		vmm_svm_lapic_timer_check(svm, vc);
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup(svm);
@@ -2033,7 +2160,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_advance_rip(vmcb);
 			break;
 		case VMM_SVM_EXIT_HLT:
-			vmm_svm_handle_idle_wait(vc, vmcb);
+			vmm_svm_handle_idle_wait(svm, vc);
 			break;
 		case VMM_SVM_EXIT_INVLPG:
 		case VMM_SVM_EXIT_INVLPGA:
@@ -2054,7 +2181,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			break;
 		case VMM_SVM_EXIT_MWAIT:
 		case VMM_SVM_EXIT_MWAIT_COND:
-			vmm_svm_handle_idle_wait(vc, vmcb);
+			vmm_svm_handle_idle_wait(svm, vc);
 			break;
 		case VMM_SVM_EXIT_NPF:
 			if (vmm_svm_handle_npf(svm, vc))

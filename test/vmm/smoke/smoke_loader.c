@@ -32,7 +32,11 @@
 #define IOAPIC_PDPT_INDEX	((IOAPIC_GPA >> 30) & 0x1ffULL)
 #define IOAPIC_PD_INDEX	((IOAPIC_GPA >> 21) & 0x1ffULL)
 #define APIC_PD_INDEX	((APIC_GPA >> 21) & 0x1ffULL)
+#define APIC_REG_EOI	0x0b0U
+#define APIC_REG_LVTT	0x320U
 #define APIC_REG_LDR	0x0d0U
+#define APIC_REG_TMICT	0x380U
+#define APIC_REG_TDCR	0x3e0U
 #define APIC_REG_ICR_LOW 0x300U
 #define APIC_REG_ICR_HIGH 0x310U
 #define IOAPIC_VERSION	0x00170011U
@@ -477,6 +481,46 @@ guest_timer_code(uint8_t *code, size_t cap)
 		emit(code, &len, cap, nop, sizeof(nop));
 	}
 	emit(code, &len, cap, handler, sizeof(handler));
+	return len;
+}
+
+static size_t
+guest_lapictimer_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-lapic-timer-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, TIMER_VECTOR);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 0x00000100U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < TIMER_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
 	return len;
 }
 
@@ -1018,6 +1062,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_serialirq_code(code, cap);
 	} else if (strcmp(mode, "timerint") == 0) {
 		return guest_timer_code(code, cap);
+	} else if (strcmp(mode, "lapictimer") == 0) {
+		return guest_lapictimer_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
 		return guest_ud_code(code, cap);
 	} else if (strcmp(mode, "pic") == 0) {
@@ -1111,10 +1157,12 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
 	if (strcmp(mode, "timerint") == 0 ||
+	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0 ||
 	    strcmp(mode, "avicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
-		if (strcmp(mode, "timerint") == 0)
+		if (strcmp(mode, "timerint") == 0 ||
+		    strcmp(mode, "lapictimer") == 0)
 			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
 		else if (strcmp(mode, "serialirq") == 0)
 			write_idt_gate(mem, SERIAL_VECTOR, SERIAL_HANDLER_GPA);
@@ -1174,7 +1222,8 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 		set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
 		set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
 	}
-	if (strcmp(mode, "timerint") == 0) {
+	if (strcmp(mode, "timerint") == 0 ||
+	    strcmp(mode, "lapictimer") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    TIMER_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "serialirq") == 0) {
@@ -1240,7 +1289,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
