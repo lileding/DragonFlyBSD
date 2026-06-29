@@ -214,6 +214,7 @@
 #define VMM_PIT_CMD		0x43U
 #define VMM_PIT_PORTB		0x61U
 #define VMM_PIT_PORTB_OUT2	0x20U
+#define VMM_IO_DELAY_PORT	0x80U
 #define VMM_PIC2_CMD		0xa0U
 #define VMM_PIC2_DATA		0xa1U
 #define VMM_PCI_CFG_ADDR	0xcf8U
@@ -1871,6 +1872,18 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    size);
 		} else {
 			vmm_svm_cmos_write(svm, vmcb->state.rax & 0xffU);
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+
+	if (port == VMM_IO_DELAY_PORT) {
+		if (size != 1 || (info & VMM_SVM_IOIO_IN) != 0) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported iodelay io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
