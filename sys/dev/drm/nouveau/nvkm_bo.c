@@ -734,12 +734,16 @@ nvkm_bo_resv(struct nvkm_bo *bo)
  *
  * Ownership:
  *   Adds one caller-owned logical pin record.  When set_no_evict is true it
- *   also adds one TTM no-evict record owned by the same caller.
+ *   also adds one TTM no-evict record owned by the same caller.  Permanent
+ *   VRAM-preferred no-evict is not owned by this helper; it is creation policy
+ *   stored in bo->ttm_permanent_no_evict.
  *
  * Lifetime:
  *   Logical pin records are balanced by nvkm_bo_ttm_unpin_record().  The
  *   no-evict record protects the current TTM backing only while its matching
- *   logical record is live.
+ *   logical record is live.  VM_BIND callers must persist the returned
+ *   no_evict_pinned value because debug gates can change while a binding is
+ *   live; scanout callers always request no-evict.
  *
  * Threading:
  *   Reserves the TTM BO to serialize placement flag and per-BO pin counters.
@@ -813,6 +817,11 @@ nvkm_bo_ttm_unpin_record(struct nvkm_bo *bo, uint32_t *record_count,
 		}
 		(*no_evict_record_count)--;
 		bo->ttm_pin_count--;
+		/*
+		 * Clear TTM NO_EVICT only after the last active no-evict
+		 * record is gone and only for BOs that do not carry the
+		 * permanent VRAM-preferred creation policy.
+		 */
 		if (bo->ttm_pin_count == 0 &&
 		    !bo->ttm_permanent_no_evict)
 			tbo->mem.placement &= ~TTM_PL_FLAG_NO_EVICT;
