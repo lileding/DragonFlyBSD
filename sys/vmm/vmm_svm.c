@@ -135,6 +135,16 @@
 #define VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI 0x401ULL
 #define VMM_SVM_EXIT_AVIC_NOACCEL	0x402ULL
 
+#define VMM_SVM_AVIC_UNACCEL_ACCESS_WRITE_MASK	0x1U
+#define VMM_SVM_AVIC_UNACCEL_ACCESS_OFFSET_MASK	0xff0U
+#define VMM_SVM_AVIC_UNACCEL_ACCESS_VECTOR_MASK	0xffffffffU
+
+#define VMM_SVM_AVIC_IPI_INVALID_INT_TYPE	0U
+#define VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING	1U
+#define VMM_SVM_AVIC_IPI_INVALID_TARGET		2U
+#define VMM_SVM_AVIC_IPI_INVALID_BACKING_PAGE	3U
+#define VMM_SVM_AVIC_IPI_INVALID_IPI_VECTOR	4U
+
 #define VMM_SVM_IOIO_IN		(1ULL << 0)
 #define VMM_SVM_IOIO_STR	(1ULL << 2)
 #define VMM_SVM_IOIO_REP	(1ULL << 3)
@@ -1487,18 +1497,107 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
     struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const char *name;
+	uint32_t value;
+	uint32_t extra;
 
 	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI) {
+		value = (uint32_t)(vmcb->ctrl.exitinfo2 >> 32);
+		extra = (uint32_t)(vmcb->ctrl.exitinfo2 &
+		    VMM_SVM_AVIC_PHYS_MAX_INDEX_MASK);
+		switch (value) {
+		case VMM_SVM_AVIC_IPI_INVALID_INT_TYPE:
+			name = "invalid_int_type";
+			break;
+		case VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING:
+			name = "target_not_running";
+			break;
+		case VMM_SVM_AVIC_IPI_INVALID_TARGET:
+			name = "invalid_target";
+			break;
+		case VMM_SVM_AVIC_IPI_INVALID_BACKING_PAGE:
+			name = "invalid_backing_page";
+			break;
+		case VMM_SVM_AVIC_IPI_INVALID_IPI_VECTOR:
+			name = "invalid_ipi_vector";
+			break;
+		default:
+			name = "unknown";
+			break;
+		}
 		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm vcpu%u avic incomplete_ipi info1=0x%jx info2=0x%jx rip=0x%jx",
-		    vc->imm_id, (uintmax_t)vmcb->ctrl.exitinfo1,
+		    "svm vcpu%u avic incomplete_ipi reason=%s id=%u index=%u icrl=0x%08x icrh=0x%08x info1=0x%jx info2=0x%jx rip=0x%jx",
+		    vc->imm_id, name, value, extra,
+		    (uint32_t)vmcb->ctrl.exitinfo1,
+		    (uint32_t)(vmcb->ctrl.exitinfo1 >> 32),
+		    (uintmax_t)vmcb->ctrl.exitinfo1,
 		    (uintmax_t)vmcb->ctrl.exitinfo2,
 		    (uintmax_t)vmcb->state.rip);
 		return 0;
 	}
+	value = (uint32_t)(vmcb->ctrl.exitinfo1 &
+	    VMM_SVM_AVIC_UNACCEL_ACCESS_OFFSET_MASK);
+	extra = (uint32_t)((vmcb->ctrl.exitinfo1 >> 32) &
+	    VMM_SVM_AVIC_UNACCEL_ACCESS_WRITE_MASK);
+	switch (value) {
+	case VMM_SVM_APIC_REG_ID:
+		name = "id";
+		break;
+	case 0x0b0:
+		name = "eoi";
+		break;
+	case 0x0c0:
+		name = "rrr";
+		break;
+	case 0x0d0:
+		name = "ldr";
+		break;
+	case 0x0e0:
+		name = "dfr";
+		break;
+	case VMM_SVM_APIC_REG_SVR:
+		name = "svr";
+		break;
+	case 0x280:
+		name = "esr";
+		break;
+	case 0x300:
+		name = "icr";
+		break;
+	case 0x320:
+		name = "lvtt";
+		break;
+	case 0x330:
+		name = "lvt_thermal";
+		break;
+	case 0x340:
+		name = "lvt_pc";
+		break;
+	case 0x350:
+		name = "lvt0";
+		break;
+	case 0x360:
+		name = "lvt1";
+		break;
+	case 0x370:
+		name = "lvt_error";
+		break;
+	case 0x380:
+		name = "tmict";
+		break;
+	case 0x3e0:
+		name = "tdcr";
+		break;
+	default:
+		name = "unknown";
+		break;
+	}
 	vmm_machine_logf(svm->borrow_imm_machine,
-	    "svm vcpu%u avic noaccel info1=0x%jx info2=0x%jx rip=0x%jx",
-	    vc->imm_id, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    "svm vcpu%u avic noaccel reg=%s offset=0x%x write=%u vector=0x%x info1=0x%jx info2=0x%jx rip=0x%jx",
+	    vc->imm_id, name, value, extra,
+	    (uint32_t)(vmcb->ctrl.exitinfo2 &
+	    VMM_SVM_AVIC_UNACCEL_ACCESS_VECTOR_MASK),
+	    (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, (uintmax_t)vmcb->state.rip);
 	return 0;
 }

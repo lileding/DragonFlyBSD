@@ -32,6 +32,9 @@
 #define IOAPIC_PDPT_INDEX	((IOAPIC_GPA >> 30) & 0x1ffULL)
 #define IOAPIC_PD_INDEX	((IOAPIC_GPA >> 21) & 0x1ffULL)
 #define APIC_PD_INDEX	((APIC_GPA >> 21) & 0x1ffULL)
+#define APIC_REG_LDR	0x0d0U
+#define APIC_REG_ICR_LOW 0x300U
+#define APIC_REG_ICR_HIGH 0x310U
 #define IOAPIC_VERSION	0x00170011U
 #define IOAPIC_MASKED_VECTOR32	0x00010020U
 
@@ -534,6 +537,43 @@ guest_avicirq_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_avicipi_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_icr_high[] =
+	    { 0x89, 0x87, 0x10, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_icr_low[] =
+	    { 0x89, 0x87, 0x00, 0x03, 0x00, 0x00 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	size_t len = 0;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 1U << 24);
+	emit(code, &len, cap, mov_eax_to_icr_high,
+	    sizeof(mov_eax_to_icr_high));
+	emit_mov_eax(code, &len, cap, 0x00004041U);
+	emit(code, &len, cap, mov_eax_to_icr_low, sizeof(mov_eax_to_icr_low));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
+guest_avicnoaccel_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_ldr[] =
+	    { 0x89, 0x87, 0xd0, 0x00, 0x00, 0x00 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	size_t len = 0;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 1U << 24);
+	emit(code, &len, cap, mov_eax_to_ldr, sizeof(mov_eax_to_ldr));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
 guest_pic_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -770,6 +810,10 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_cachetlb_code(code, cap);
 	} else if (strcmp(mode, "avicirq") == 0) {
 		return guest_avicirq_code(code, cap);
+	} else if (strcmp(mode, "avicipi") == 0) {
+		return guest_avicipi_code(code, cap);
+	} else if (strcmp(mode, "avicnoaccel") == 0) {
+		return guest_avicnoaccel_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
 		return guest_pm64_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
@@ -956,7 +1000,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop|cliloop|avicirq", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|ud|pic|ioapic|x2apic|cachetlb|pm64|hlt|loop|cliloop|avicirq|avicipi|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
