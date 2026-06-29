@@ -8,9 +8,11 @@
 #include <sys/systm.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/libkern.h>
 #include <sys/malloc.h>
 #include <sys/thread.h>
 #include <sys/thread2.h>
+#include <sys/time.h>
 #include <sys/ucontext.h>
 #include <machine/cpufunc.h>
 #include <machine/cpu.h>
@@ -217,6 +219,28 @@
 #define VMM_PCI_CFG_ADDR	0xcf8U
 #define VMM_PCI_CFG_DATA	0xcfcU
 #define VMM_PCI_CFG_DATA_LAST	0xcffU
+#define VMM_CMOS_INDEX		0x70U
+#define VMM_CMOS_DATA		0x71U
+#define VMM_RTC_SECONDS		0x00U
+#define VMM_RTC_SECONDS_ALARM	0x01U
+#define VMM_RTC_MINUTES		0x02U
+#define VMM_RTC_MINUTES_ALARM	0x03U
+#define VMM_RTC_HOURS		0x04U
+#define VMM_RTC_HOURS_ALARM	0x05U
+#define VMM_RTC_DAY_OF_WEEK	0x06U
+#define VMM_RTC_DAY_OF_MONTH	0x07U
+#define VMM_RTC_MONTH		0x08U
+#define VMM_RTC_YEAR		0x09U
+#define VMM_RTC_REG_A		0x0aU
+#define VMM_RTC_REG_B		0x0bU
+#define VMM_RTC_REG_C		0x0cU
+#define VMM_RTC_REG_D		0x0dU
+#define VMM_RTC_ALARM_DONT_CARE 0xc0U
+#define VMM_RTC_REG_A_DEFAULT	0x26U
+#define VMM_RTC_REG_B_24H	0x02U
+#define VMM_RTC_REG_D_VALID	0x80U
+#define VMM_RTC_LEAP_YEAR(year) \
+	((((year) % 4) == 0 && ((year) % 100) != 0) || ((year) % 400) == 0)
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
 #define VMM_CPUID1_ECX_X2APIC	(1U << 21)
 #define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
@@ -418,6 +442,14 @@ struct vmm_svm_backend {
 	uint8_t mut_pit_portb;
 	uint8_t mut_pic1_mask;
 	uint8_t mut_pic2_mask;
+	uint8_t mut_cmos_index;
+	uint8_t mut_cmos_nmi_disabled;
+	uint8_t mut_cmos_reg_a;
+	uint8_t mut_cmos_reg_b;
+	uint8_t mut_cmos_reg_c;
+	uint8_t mut_cmos_ram[128];
+	uint8_t mut_cmos_time[10];
+	int mut_cmos_time_expires;
 };
 
 struct vmm_svm_msr_policy {
@@ -883,6 +915,11 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_lapic_timer_divisor = 2;
 	svm->mut_pic1_mask = 0xffU;
 	svm->mut_pic2_mask = 0xffU;
+	svm->mut_cmos_reg_a = VMM_RTC_REG_A_DEFAULT;
+	svm->mut_cmos_reg_b = VMM_RTC_REG_B_24H;
+	svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] = VMM_RTC_ALARM_DONT_CARE;
+	svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] = VMM_RTC_ALARM_DONT_CARE;
+	svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] = VMM_RTC_ALARM_DONT_CARE;
 	vmm_svm_fpu_init(svm);
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
@@ -1623,6 +1660,109 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
 	}
 }
 
+static void
+vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
+{
+	static const int days_in_month[12] =
+	    { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+	time_t now = time_second;
+	long days;
+	long epoch_days;
+	int seconds;
+	int year;
+	int month;
+	int dim;
+
+	if (svm->mut_cmos_time_expires != 0 &&
+	    (int)(ticks - svm->mut_cmos_time_expires) < 0)
+		return;
+	if (now < 0)
+		now = 0;
+	days = now / 86400;
+	epoch_days = days;
+	seconds = now % 86400;
+	year = 1970;
+	while (days >= 365 + VMM_RTC_LEAP_YEAR(year)) {
+		days -= 365 + VMM_RTC_LEAP_YEAR(year);
+		year++;
+	}
+	for (month = 0; month < 12; month++) {
+		dim = days_in_month[month];
+		if (month == 1 && VMM_RTC_LEAP_YEAR(year))
+			dim++;
+		if (days < dim)
+			break;
+		days -= dim;
+	}
+	svm->mut_cmos_time[VMM_RTC_SECONDS] = bin2bcd(seconds % 60);
+	svm->mut_cmos_time[VMM_RTC_MINUTES] = bin2bcd((seconds / 60) % 60);
+	svm->mut_cmos_time[VMM_RTC_HOURS] = bin2bcd(seconds / 3600);
+	svm->mut_cmos_time[VMM_RTC_DAY_OF_WEEK] =
+	    bin2bcd(((epoch_days + 4) % 7) + 1);
+	svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH] = bin2bcd(days + 1);
+	svm->mut_cmos_time[VMM_RTC_MONTH] = bin2bcd(month + 1);
+	svm->mut_cmos_time[VMM_RTC_YEAR] = bin2bcd(year % 100);
+	svm->mut_cmos_time_expires = ticks + hz;
+}
+
+static uint8_t
+vmm_svm_cmos_read(struct vmm_svm_backend *svm)
+{
+	uint8_t reg = svm->mut_cmos_index & 0x7fU;
+	uint8_t value;
+
+	switch (reg) {
+	case VMM_RTC_SECONDS:
+	case VMM_RTC_MINUTES:
+	case VMM_RTC_HOURS:
+	case VMM_RTC_DAY_OF_WEEK:
+	case VMM_RTC_DAY_OF_MONTH:
+	case VMM_RTC_MONTH:
+	case VMM_RTC_YEAR:
+		vmm_svm_cmos_refresh_time(svm);
+		value = svm->mut_cmos_time[reg];
+		break;
+	case VMM_RTC_REG_A:
+		value = svm->mut_cmos_reg_a & ~0x80U;
+		break;
+	case VMM_RTC_REG_B:
+		value = svm->mut_cmos_reg_b;
+		break;
+	case VMM_RTC_REG_C:
+		value = svm->mut_cmos_reg_c;
+		svm->mut_cmos_reg_c = 0;
+		break;
+	case VMM_RTC_REG_D:
+		value = VMM_RTC_REG_D_VALID;
+		break;
+	default:
+		value = svm->mut_cmos_ram[reg];
+		break;
+	}
+	return value;
+}
+
+static void
+vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
+{
+	uint8_t reg = svm->mut_cmos_index & 0x7fU;
+
+	switch (reg) {
+	case VMM_RTC_REG_A:
+		svm->mut_cmos_reg_a = value & ~0x80U;
+		break;
+	case VMM_RTC_REG_B:
+		svm->mut_cmos_reg_b = value;
+		break;
+	case VMM_RTC_REG_C:
+	case VMM_RTC_REG_D:
+		break;
+	default:
+		svm->mut_cmos_ram[reg] = value;
+		break;
+	}
+}
+
 static int
 vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
@@ -1704,6 +1844,34 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0xffU, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+
+	if (port == VMM_CMOS_INDEX || port == VMM_CMOS_DATA) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported cmos io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (port == VMM_CMOS_INDEX) {
+			if (info & VMM_SVM_IOIO_IN) {
+				val = svm->mut_cmos_index |
+				    svm->mut_cmos_nmi_disabled;
+				vmm_svm_set_rax_low(vmcb, val, size);
+			} else {
+				val = vmcb->state.rax & 0xffU;
+				svm->mut_cmos_index = val & 0x7fU;
+				svm->mut_cmos_nmi_disabled = val & 0x80U;
+			}
+		} else if (info & VMM_SVM_IOIO_IN) {
+			vmm_svm_set_rax_low(vmcb, vmm_svm_cmos_read(svm),
+			    size);
+		} else {
+			vmm_svm_cmos_write(svm, vmcb->state.rax & 0xffU);
+		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
 	}
