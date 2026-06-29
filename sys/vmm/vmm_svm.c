@@ -210,6 +210,10 @@
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
+#define VMM_PIC_ELCR1		0x4d0U
+#define VMM_PIC_ELCR2		0x4d1U
+#define VMM_PIC_ELCR1_MASK	0xf8U
+#define VMM_PIC_ELCR2_MASK	0xdeU
 #define VMM_PIT_CH0		0x40U
 #define VMM_PIT_CH2		0x42U
 #define VMM_PIT_CMD		0x43U
@@ -448,6 +452,8 @@ struct vmm_svm_backend {
 	uint16_t mut_pit_ch0_count;
 	uint8_t mut_pic1_mask;
 	uint8_t mut_pic2_mask;
+	uint8_t mut_pic_elcr1;
+	uint8_t mut_pic_elcr2;
 	uint8_t mut_cmos_index;
 	uint8_t mut_cmos_nmi_disabled;
 	uint8_t mut_cmos_reg_a;
@@ -1818,6 +1824,28 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			svm->mut_pic1_mask = vmcb->state.rax & 0xffU;
 		} else {
 			svm->mut_pic2_mask = vmcb->state.rax & 0xffU;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	case VMM_PIC_ELCR1:
+	case VMM_PIC_ELCR2:
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pic elcr io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			vmm_svm_set_rax_low(vmcb,
+			    port == VMM_PIC_ELCR1 ? svm->mut_pic_elcr1 :
+			    svm->mut_pic_elcr2, size);
+		} else if (port == VMM_PIC_ELCR1) {
+			svm->mut_pic_elcr1 = vmcb->state.rax &
+			    VMM_PIC_ELCR1_MASK;
+		} else {
+			svm->mut_pic_elcr2 = vmcb->state.rax &
+			    VMM_PIC_ELCR2_MASK;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;

@@ -107,6 +107,8 @@
 #define CMOS_INDEX_PORT		0x0070U
 #define CMOS_DATA_PORT		0x0071U
 #define IO_DELAY_PORT		0x0080U
+#define PIC_ELCR1_PORT		0x04d0U
+#define PIC_ELCR2_PORT		0x04d1U
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -1157,6 +1159,33 @@ guest_iodelay_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_elcr_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t seq[] = {
+	    0xba, PIC_ELCR1_PORT & 0xffU,
+	    (PIC_ELCR1_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0xff,			/* mov al,0xff */
+	    0xee,			/* out dx,al */
+	    0xec,			/* in al,dx */
+	    0x3c, 0xf8,			/* cmp al,0xf8 */
+	    0x75, 0x10,			/* jne fail */
+	    0xba, PIC_ELCR2_PORT & 0xffU,
+	    (PIC_ELCR2_PORT >> 8) & 0xffU, 0x00, 0x00,
+	    0xb0, 0xff,			/* mov al,0xff */
+	    0xee,			/* out dx,al */
+	    0xec,			/* in al,dx */
+	    0x3c, 0xde,			/* cmp al,0xde */
+	    0x75, 0x03,			/* jne fail */
+	    0x0f, 0x01, 0xd9,		/* vmmcall */
+	    0xeb, 0xfe			/* fail: jmp fail */
+	};
+	size_t len = 0;
+
+	emit(code, &len, cap, seq, sizeof(seq));
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -1261,6 +1290,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_rtccmos_code(code, cap);
 	} else if (strcmp(mode, "iodelay") == 0) {
 		return guest_iodelay_code(code, cap);
+	} else if (strcmp(mode, "elcr") == 0) {
+		return guest_elcr_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -1448,7 +1479,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
