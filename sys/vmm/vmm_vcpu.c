@@ -250,8 +250,8 @@ vmm_vcpu_console_input_locked(struct vmm_machine *m)
 		    vc->own_mut_backend != NULL) {
 			vc->borrow_imm_backend_ops->console_input(
 			    vc->own_mut_backend, vc);
+			wakeup(vc);
 		}
-		wakeup(vc);
 	}
 }
 

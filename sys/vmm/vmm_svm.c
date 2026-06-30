@@ -915,6 +915,8 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 	    VMM_SVM_LAPIC_TIMER_COUNT_PER_TICK;
 	if (delta == 0)
 		delta = 1;
+	if (delta > INT_MAX / 2)
+		delta = INT_MAX / 2;
 	svm->mut_lapic_timer_interval_ticks = (uint32_t)delta;
 	svm->mut_lapic_timer_deadline = ticks + (int)delta;
 	svm->mut_lapic_timer_active = 1;
@@ -2040,6 +2042,11 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	}
 	vector = low & 0xffU;
 	dest = high >> 24;
+	/*
+	 * Initial IOAPIC delivery is intentionally narrow: fixed delivery,
+	 * physical destination, active-high, edge-triggered.  Other modes need
+	 * level/remote-IRR/polarity state before they can be delivered safely.
+	 */
 	if ((low & VMM_IOAPIC_REDIR_DELIVERY_MASK) !=
 	    VMM_IOAPIC_REDIR_DELIVERY_FIXED ||
 	    (low & VMM_IOAPIC_REDIR_DEST_LOGICAL) != 0 ||
@@ -3387,9 +3394,8 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc
 				    svm->mut_lapic_timer_active);
 			}
 			if (sleep_ticks <= 1)
-				lwkt_user_yield();
-			else
-				tsleep(vc, 0, "vmmhlt", sleep_ticks);
+				sleep_ticks = 1;
+			tsleep(vc, 0, "vmmhlt", sleep_ticks);
 		}
 		vmm_svm_lapic_timer_check(svm, vc);
 		return;
