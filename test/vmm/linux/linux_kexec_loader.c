@@ -38,6 +38,7 @@
 #define ACPI_HPET_GPA		(ACPI_GPA + 0x500ULL)
 #define ACPI_DSDT_GPA		(ACPI_GPA + 0x600ULL)
 #define ACPI_HPET_MMIO_GPA	0xfed00000ULL
+#define ACPI_IOAPIC_GPA		0xfec00000ULL
 #define ACPI_LAPIC_GPA		0xfee00000ULL
 #define CMDLINE_CAP		PAGE_SIZE_GUEST
 
@@ -77,6 +78,7 @@
 #define ACPI_RSDP_SIZE		36U
 #define ACPI_FADT_SIZE		276U
 #define ACPI_MADT_LOCAL_APIC_SIZE	8U
+#define ACPI_MADT_IOAPIC_SIZE		12U
 #define ACPI_FADT_WBINVD	0x00000001U
 #define ACPI_FADT_HW_REDUCED	0x00100000U
 #define ACPI_FADT_NO_VGA	0x0004U
@@ -567,6 +569,7 @@ build_acpi_tables(uint8_t *mem)
 	uint8_t *hpet;
 	uint8_t *dsdt;
 	uint8_t *lapic;
+	uint8_t *ioapic;
 	uint32_t xsdt_len;
 	uint32_t madt_len;
 
@@ -615,7 +618,8 @@ build_acpi_tables(uint8_t *mem)
 	write_acpi_checksum(fadt, ACPI_FADT_SIZE, 9);
 
 	madt = mem + ACPI_MADT_GPA;
-	madt_len = ACPI_TABLE_HEADER_SIZE + 8 + ACPI_MADT_LOCAL_APIC_SIZE;
+	madt_len = ACPI_TABLE_HEADER_SIZE + 8 + ACPI_MADT_LOCAL_APIC_SIZE +
+	    ACPI_MADT_IOAPIC_SIZE;
 	write_acpi_header(madt, "APIC", madt_len, 3);
 	write32(madt, 36, (uint32_t)ACPI_LAPIC_GPA);
 	write32(madt, 40, 0);
@@ -625,6 +629,13 @@ build_acpi_tables(uint8_t *mem)
 	write8(lapic, 2, 0);
 	write8(lapic, 3, 0);
 	write32(lapic, 4, ACPI_MADT_LOCAL_APIC_ENABLED);
+	ioapic = lapic + ACPI_MADT_LOCAL_APIC_SIZE;
+	write8(ioapic, 0, 1);
+	write8(ioapic, 1, ACPI_MADT_IOAPIC_SIZE);
+	write8(ioapic, 2, 1);
+	write8(ioapic, 3, 0);
+	write32(ioapic, 4, ACPI_IOAPIC_GPA);
+	write32(ioapic, 8, 0);
 	write_acpi_checksum(madt, madt_len, 9);
 
 	hpet = mem + ACPI_HPET_GPA;

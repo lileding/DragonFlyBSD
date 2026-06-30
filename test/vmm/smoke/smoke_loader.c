@@ -90,10 +90,12 @@
 #define SERIAL_VECTOR	0x24U
 #define TIMER_VECTOR	0x2eU
 #define AVIC_VECTOR	0x40U
+#define IOAPIC_VECTOR	0x41U
 #define UD_VECTOR	6U
 #define AVIC_MAGIC	0x43495641U
 #define AVIC_OP_DELIVER	1U
 #define AVIC_OP_MARKER	2U
+#define IOAPIC_OP_RAISE	3U
 #define AVIC_MARKER	0xa51c0040U
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
 #define MSR_MTRR_CAP	0x000000feU
@@ -231,7 +233,7 @@ emit(uint8_t *code, size_t *len, size_t cap, const uint8_t *bytes, size_t n)
 static void
 emit_mov_dx(uint8_t *code, size_t *len, size_t cap, uint16_t port)
 {
-	uint8_t bytes[] = { 0xba, port & 0xffU, port >> 8 };
+	uint8_t bytes[] = { 0x66, 0xba, port & 0xffU, port >> 8 };
 
 	emit(code, len, cap, bytes, sizeof(bytes));
 }
@@ -348,7 +350,7 @@ static void
 emit_serial_char(uint8_t *code, size_t *len, size_t cap, uint8_t ch)
 {
 	static const uint8_t wait_lsr[] = {
-		0xba, 0xfd, 0x03,	/* mov dx,0x3fd */
+		0x66, 0xba, 0xfd, 0x03, /* mov dx,0x3fd */
 		0xec,			/* in al,dx */
 		0xa8, 0x20,		/* test al,0x20 */
 		0x74, 0xfb		/* jz in */
@@ -382,11 +384,11 @@ static size_t
 guest_serialin_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t setup[] = {
-	    0xba, 0xfd, 0x03,	/* mov dx,0x3fd */
+	    0x66, 0xba, 0xfd, 0x03, /* mov dx,0x3fd */
 	    0xec,		/* in al,dx */
 	    0xa8, 0x01,		/* test al,0x01 */
 	    0x74, 0xfb,		/* jz in */
-	    0xba, 0xf8, 0x03,	/* mov dx,0x3f8 */
+	    0x66, 0xba, 0xf8, 0x03, /* mov dx,0x3f8 */
 	    0xec,		/* in al,dx */
 	    0x3c, 0x5a,		/* cmp al,'Z' */
 	    0x74, 0x03,		/* je ok */
@@ -423,7 +425,7 @@ guest_serialirq_code(uint8_t *code, size_t cap)
 	    0xeb, 0xfe		/* jmp . */
 	};
 	static const uint8_t handler[] = {
-	    0xba, 0xf8, 0x03,	/* mov dx,0x3f8 */
+	    0x66, 0xba, 0xf8, 0x03, /* mov dx,0x3f8 */
 	    0xec,		/* in al,dx */
 	    0x3c, 0x51,		/* cmp al,'Q' */
 	    0x74, 0x03,		/* je ok */
@@ -818,6 +820,59 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jver, fail_label);
 	patch_rel32(code, jredir, fail_label);
+	return len;
+}
+
+static size_t
+guest_ioapicirq_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_edi_apic[] =
+	    { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t eoi[] = {
+	    0x31, 0xc0,				/* xor eax,eax */
+	    0x89, 0x87, 0xb0, 0x00, 0x00, 0x00	/* mov [rdi+0xb0],eax */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	static const char msg[] = "dfvmm-ioapicirq-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, (const uint8_t[]){ 0xfa }, 1);
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x19);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10,
+	    sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x18);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, IOAPIC_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10,
+	    sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, IOAPIC_OP_RAISE);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 4);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < AVIC_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit(code, &len, cap, eoi, sizeof(eoi));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
 	return len;
 }
 
@@ -1342,6 +1397,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "ioapic") == 0) {
 		return guest_ioapic_code(code, cap);
+	} else if (strcmp(mode, "ioapicirq") == 0) {
+		return guest_ioapicirq_code(code, cap);
 	} else if (strcmp(mode, "x2apic") == 0) {
 		return guest_x2apic_code(code, cap);
 	} else if (strcmp(mode, "cachetlb") == 0) {
@@ -1420,7 +1477,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 static void
 build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 {
-	uint8_t code[1024];
+	uint8_t code[2048];
 
 	if (mem_size < 2 * 1024 * 1024)
 		errx(1, "fd3 is smaller than 2M");
@@ -1447,13 +1504,16 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	if (strcmp(mode, "timerint") == 0 ||
 	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0 ||
-	    strcmp(mode, "avicirq") == 0) {
+	    strcmp(mode, "avicirq") == 0 ||
+	    strcmp(mode, "ioapicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
 		if (strcmp(mode, "timerint") == 0 ||
 		    strcmp(mode, "lapictimer") == 0)
 			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
 		else if (strcmp(mode, "serialirq") == 0)
 			write_idt_gate(mem, SERIAL_VECTOR, SERIAL_HANDLER_GPA);
+		else if (strcmp(mode, "ioapicirq") == 0)
+			write_idt_gate(mem, IOAPIC_VECTOR, AVIC_HANDLER_GPA);
 		else if (strcmp(mode, "avicirq") == 0)
 			write_idt_gate(mem, AVIC_VECTOR, AVIC_HANDLER_GPA);
 		else
@@ -1517,6 +1577,9 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	} else if (strcmp(mode, "serialirq") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    SERIAL_VECTOR * 16 + 15, IDT_GPA);
+	} else if (strcmp(mode, "ioapicirq") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    IOAPIC_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "ud") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    UD_VECTOR * 16 + 15, IDT_GPA);
@@ -1577,7 +1640,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

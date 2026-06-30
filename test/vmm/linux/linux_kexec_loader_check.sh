@@ -116,11 +116,14 @@ check_linux_boot_data()
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
 	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70400 + 52)) 12)" = \
+	    "010c01000000c0fe00000000" ] ||
+	    fail "MADT IOAPIC entry missing in $case_label case"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 20 "$case_label RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 36 "$case_label extended RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70100)) 60 "$case_label XSDT"
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
-	check_zero_sum "$MEM_FILE" $((0x70400)) 52 "$case_label MADT"
+	check_zero_sum "$MEM_FILE" $((0x70400)) 64 "$case_label MADT"
 	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
 	check_zero_sum "$MEM_FILE" $((0x70600)) 36 "$case_label DSDT"
 }

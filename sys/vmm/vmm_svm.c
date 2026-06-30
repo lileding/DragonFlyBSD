@@ -259,6 +259,22 @@
 
 #define VMM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_IOAPIC_SIZE		PAGE_SIZE
+#define VMM_IOAPIC_ID			1U
+#define VMM_IOAPIC_PINS		24U
+#define VMM_IOAPIC_REG_ID		0x00U
+#define VMM_IOAPIC_REG_VERSION		0x01U
+#define VMM_IOAPIC_REG_ARB		0x02U
+#define VMM_IOAPIC_REDIR_BASE		0x10U
+#define VMM_IOAPIC_VERSION		(((VMM_IOAPIC_PINS - 1U) << 16) | \
+					 0x11U)
+#define VMM_IOAPIC_REDIR_LOW_VALID	0x0001afffU
+#define VMM_IOAPIC_REDIR_HIGH_VALID	0xff000000U
+#define VMM_IOAPIC_REDIR_MASKED	0x00010000U
+#define VMM_IOAPIC_REDIR_DELIVERY_FIXED 0x00000000U
+#define VMM_IOAPIC_REDIR_DELIVERY_MASK	0x00000700U
+#define VMM_IOAPIC_REDIR_DEST_LOGICAL	0x00000800U
+#define VMM_IOAPIC_REDIR_POLARITY_LOW	0x00002000U
+#define VMM_IOAPIC_REDIR_TRIGGER_LEVEL	0x00008000U
 #define VMM_HPET_BASE		0xfed00000ULL
 #define VMM_HPET_SIZE		PAGE_SIZE
 #define VMM_HPET_FREQ		10000000ULL
@@ -332,6 +348,7 @@
 #define VMM_SVM_SMOKE_AVIC_MAGIC	0x43495641U
 #define VMM_SVM_SMOKE_AVIC_DELIVER	1U
 #define VMM_SVM_SMOKE_AVIC_MARKER	2U
+#define VMM_SVM_SMOKE_IOAPIC_RAISE	3U
 
 
 #define VMM_X64_NDR			6
@@ -475,6 +492,9 @@ struct vmm_svm_backend {
 	uint32_t mut_lapic_timer_idle_count;
 	int mut_lapic_timer_active;
 	int mut_lapic_timer_deadline;
+	uint32_t mut_ioapic_select;
+	uint32_t mut_ioapic_id;
+	uint64_t mut_ioapic_redir[VMM_IOAPIC_PINS];
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -553,6 +573,9 @@ CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_abpp) == 0x0e0);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_ltp) == 0x0f0);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_phys) == 0x0f8);
 CTASSERT(sizeof(struct vmm_svm_state) == 0xc00);
+CTASSERT(__offsetof(struct vmm_svm_state, rsp) == 0x1d8);
+CTASSERT(__offsetof(struct vmm_svm_state, rax) == 0x1f8);
+CTASSERT(__offsetof(struct vmm_svm_state, star) == 0x200);
 CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
 CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
 
@@ -982,6 +1005,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 {
 	struct vmm_svm_backend *svm;
 	struct vmm_svm_vmcb *vmcb;
+	uint32_t i;
 	int error;
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
@@ -1013,6 +1037,9 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
 	svm->mut_lapic_timer_divisor = 2;
+	svm->mut_ioapic_id = VMM_IOAPIC_ID;
+	for (i = 0; i < VMM_IOAPIC_PINS; i++)
+		svm->mut_ioapic_redir[i] = VMM_IOAPIC_REDIR_MASKED;
 	svm->mut_pic1_mask = 0xffU;
 	svm->mut_pic2_mask = 0xffU;
 	svm->mut_cmos_reg_a = VMM_RTC_REG_A_DEFAULT;
@@ -1625,6 +1652,223 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 fail:
 	vmm_machine_logf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported hpet mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
+	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
+	return 0;
+}
+
+static uint32_t
+vmm_svm_ioapic_read(struct vmm_svm_backend *svm)
+{
+	uint32_t reg = svm->mut_ioapic_select;
+	uint32_t pin;
+
+	switch (reg) {
+	case VMM_IOAPIC_REG_ID:
+		return svm->mut_ioapic_id << 24;
+	case VMM_IOAPIC_REG_VERSION:
+		return VMM_IOAPIC_VERSION;
+	case VMM_IOAPIC_REG_ARB:
+		return svm->mut_ioapic_id << 24;
+	default:
+		break;
+	}
+	if (reg < VMM_IOAPIC_REDIR_BASE ||
+	    reg >= VMM_IOAPIC_REDIR_BASE + VMM_IOAPIC_PINS * 2)
+		return 0;
+	pin = (reg - VMM_IOAPIC_REDIR_BASE) / 2;
+	if ((reg & 1) == 0)
+		return (uint32_t)svm->mut_ioapic_redir[pin];
+	return (uint32_t)(svm->mut_ioapic_redir[pin] >> 32);
+}
+
+static void
+vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+    uint32_t val)
+{
+	uint32_t reg = svm->mut_ioapic_select;
+	uint32_t pin;
+	uint64_t old;
+
+	if (reg == VMM_IOAPIC_REG_ID) {
+		svm->mut_ioapic_id = (val >> 24) & 0x0fU;
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ioapic id=0x%x", vc->imm_id,
+		    svm->mut_ioapic_id);
+		return;
+	}
+	if (reg == VMM_IOAPIC_REG_VERSION || reg == VMM_IOAPIC_REG_ARB) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ignored ioapic readonly reg=0x%x val=0x%x",
+		    vc->imm_id, reg, val);
+		return;
+	}
+	if (reg < VMM_IOAPIC_REDIR_BASE ||
+	    reg >= VMM_IOAPIC_REDIR_BASE + VMM_IOAPIC_PINS * 2) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ignored ioapic write reg=0x%x val=0x%x",
+		    vc->imm_id, reg, val);
+		return;
+	}
+	pin = (reg - VMM_IOAPIC_REDIR_BASE) / 2;
+	old = svm->mut_ioapic_redir[pin];
+	if ((reg & 1) == 0) {
+		svm->mut_ioapic_redir[pin] =
+		    (old & 0xffffffff00000000ULL) |
+		    (val & VMM_IOAPIC_REDIR_LOW_VALID);
+	} else {
+		svm->mut_ioapic_redir[pin] =
+		    (old & 0x00000000ffffffffULL) |
+		    ((uint64_t)(val & VMM_IOAPIC_REDIR_HIGH_VALID) << 32);
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u ioapic redir pin=%u value=0x%jx",
+	    vc->imm_id, pin, (uintmax_t)svm->mut_ioapic_redir[pin]);
+}
+
+static void
+vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+    uint32_t pin, const char *source)
+{
+	uint64_t entry;
+	uint32_t low;
+	uint32_t high;
+	uint32_t vector;
+	uint32_t dest;
+
+	if (pin >= VMM_IOAPIC_PINS) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ioapic reject source=%s pin=%u reason=bad_pin",
+		    vc->imm_id, source, pin);
+		return;
+	}
+	entry = svm->mut_ioapic_redir[pin];
+	low = (uint32_t)entry;
+	high = (uint32_t)(entry >> 32);
+	if ((low & VMM_IOAPIC_REDIR_MASKED) != 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ioapic drop source=%s pin=%u reason=masked",
+		    vc->imm_id, source, pin);
+		return;
+	}
+	vector = low & 0xffU;
+	dest = high >> 24;
+	if ((low & VMM_IOAPIC_REDIR_DELIVERY_MASK) !=
+	    VMM_IOAPIC_REDIR_DELIVERY_FIXED ||
+	    (low & VMM_IOAPIC_REDIR_DEST_LOGICAL) != 0 ||
+	    (low & VMM_IOAPIC_REDIR_POLARITY_LOW) != 0 ||
+	    (low & VMM_IOAPIC_REDIR_TRIGGER_LEVEL) != 0 ||
+	    dest != VMM_SVM_AVIC_APIC_ID) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u ioapic reject source=%s pin=%u vector=0x%x low=0x%x high=0x%x",
+		    vc->imm_id, source, pin, vector, low, high);
+		return;
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x",
+	    vc->imm_id, source, pin, vector);
+	vmm_svm_avic_deliver(svm, vc, (uint8_t)vector, source);
+}
+
+static int
+vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint64_t gpa)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint64_t val;
+	uint8_t modrm;
+	uint8_t opcode;
+	unsigned int reg;
+	int data16 = 0;
+	int off = 0;
+	int rex = 0;
+	int modsz;
+	int size;
+
+	while (off < vmcb->ctrl.inst_len) {
+		if (bytes[off] == 0x66) {
+			data16 = 1;
+			off++;
+			continue;
+		}
+		if (bytes[off] >= 0x40 && bytes[off] <= 0x4f) {
+			rex = bytes[off++];
+			continue;
+		}
+		break;
+	}
+	if (off >= vmcb->ctrl.inst_len)
+		goto fail;
+	opcode = bytes[off++];
+	size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+	if (size != 4)
+		goto fail;
+	switch (opcode) {
+	case 0x8b:
+		if (off >= vmcb->ctrl.inst_len)
+			goto fail;
+		modrm = bytes[off];
+		modsz = vmm_svm_modrm_size(bytes, vmcb->ctrl.inst_len, off);
+		if (modsz == 0)
+			goto fail;
+		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+		if (gpa == VMM_IOAPIC_BASE) {
+			val = svm->mut_ioapic_select;
+		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
+			val = vmm_svm_ioapic_read(svm);
+		} else {
+			goto fail;
+		}
+		vmm_svm_gpr_write(svm, reg, val, size);
+		vmcb->state.rip += off + modsz;
+		return 1;
+	case 0x89:
+		if (off >= vmcb->ctrl.inst_len)
+			goto fail;
+		modrm = bytes[off];
+		modsz = vmm_svm_modrm_size(bytes, vmcb->ctrl.inst_len, off);
+		if (modsz == 0)
+			goto fail;
+		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+		val = vmm_svm_gpr_read(svm, reg);
+		if (gpa == VMM_IOAPIC_BASE) {
+			svm->mut_ioapic_select = val & 0xffU;
+		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
+			vmm_svm_ioapic_write(svm, vc, (uint32_t)val);
+		} else {
+			goto fail;
+		}
+		vmcb->state.rip += off + modsz;
+		return 1;
+	case 0xc7:
+		if (off >= vmcb->ctrl.inst_len)
+			goto fail;
+		modrm = bytes[off];
+		if (((modrm >> 3) & 7) != 0)
+			goto fail;
+		modsz = vmm_svm_modrm_size(bytes, vmcb->ctrl.inst_len, off);
+		if (modsz == 0 || off + modsz + 4 > vmcb->ctrl.inst_len)
+			goto fail;
+		off += modsz;
+		val = bytes[off] | ((uint64_t)bytes[off + 1] << 8) |
+		    ((uint64_t)bytes[off + 2] << 16) |
+		    ((uint64_t)bytes[off + 3] << 24);
+		if (gpa == VMM_IOAPIC_BASE) {
+			svm->mut_ioapic_select = val & 0xffU;
+		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
+			vmm_svm_ioapic_write(svm, vc, (uint32_t)val);
+		} else {
+			goto fail;
+		}
+		vmcb->state.rip += off + 4;
+		return 1;
+	default:
+		break;
+	}
+fail:
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u unsupported ioapic mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
 	return 0;
@@ -2650,6 +2894,12 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 	if (magic != VMM_SVM_SMOKE_AVIC_MAGIC)
 		return 0;
 	switch (op) {
+	case VMM_SVM_SMOKE_IOAPIC_RAISE:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke ioapic request pin=%u", arg);
+		vmm_svm_advance_rip(vmcb);
+		vmm_svm_ioapic_raise(svm, vc, arg, "ioapic_smoke");
+		return 1;
 	case VMM_SVM_SMOKE_AVIC_DELIVER:
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke avic request vector=0x%x", arg & 0xffU);
@@ -2950,14 +3200,8 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (gpa >= VMM_HPET_BASE && gpa < VMM_HPET_BASE + VMM_HPET_SIZE)
 		return vmm_svm_handle_hpet_mmio(svm, vc, gpa);
-	if (gpa >= VMM_IOAPIC_BASE && gpa < VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE) {
-		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm vcpu%u unsupported ioapic mmio gpa=0x%jx info=0x%jx rip=0x%jx",
-		    vc->imm_id, (uintmax_t)gpa,
-		    (uintmax_t)vmcb->ctrl.exitinfo1,
-		    (uintmax_t)vmcb->state.rip);
-		return 0;
-	}
+	if (gpa >= VMM_IOAPIC_BASE && gpa < VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
+		return vmm_svm_handle_ioapic_mmio(svm, vc, gpa);
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
 		prot = VM_PROT_WRITE;
 	else if (vmcb->ctrl.exitinfo1 & PGEX_I)

@@ -21,8 +21,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic x2apic cachetlb pm64 hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic x2apic cachetlb pm64"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic ioapicirq x2apic cachetlb pm64 hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic ioapicirq x2apic cachetlb pm64"}
 
 LOADED=0
 MOUNTED=0
@@ -329,6 +329,10 @@ check_console()
 		;;
 	ioapic)
 		wait_console "$(mach "$mode")/console" 'dfvmm-ioapic-ok' ||
+		    fail "$mode console output"
+		;;
+	ioapicirq)
+		wait_console "$(mach "$mode")/console" 'dfvmm-ioapicirq-ok' ||
 		    fail "$mode console output"
 		;;
 	x2apic)
