@@ -463,6 +463,7 @@ vmm_machine_start(const struct vmm_machine_task *task)
 		vmm_machine_logf(m, "vcpu start gated error=%d", error);
 		goto fail_after_loader;
 	}
+	vmm_console_reset(&m->own_mut_console);
 	error = vmm_vcpu_start(m, task->imm_vcpu_count, &launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "vcpu start failed error=%d count=%u",
@@ -470,7 +471,6 @@ vmm_machine_start(const struct vmm_machine_task *task)
 		goto fail_after_loader;
 	}
 
-	vmm_console_reset(&m->own_mut_console);
 	vmm_machine_set_status(m, VMM_MACHINE_RUNNING);
 	vmm_machine_logf(m, "state running");
 	vmm_debug_trace("start running m=%p", m);

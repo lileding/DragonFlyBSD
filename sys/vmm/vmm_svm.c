@@ -883,6 +883,12 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 			    vc->imm_id, vector, svm->mut_lapic_timer_fire_count);
 		}
 		vmm_svm_avic_deliver(svm, vc, vector, "lapic_timer");
+	} else if ((svm->mut_lapic_timer_lvtt &
+	    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) !=
+	    VMM_SVM_APIC_LVT_TIMER_PERIODIC) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u lapic timer masked vector=0x%x",
+		    vc->imm_id, vector);
 	}
 	if ((svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
 	    VMM_SVM_APIC_LVT_TIMER_PERIODIC &&
@@ -2880,11 +2886,30 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc
 		return;
 	sleep_ticks = hz / 20 + 1;
 	if (svm->mut_lapic_timer_active) {
-		remaining = svm->mut_lapic_timer_deadline - ticks;
-		if (remaining <= 0)
-			remaining = 1;
-		if (remaining < sleep_ticks)
+		for (;;) {
+			if (vmm_vcpu_should_stop(vc))
+				return;
+			remaining = svm->mut_lapic_timer_deadline - ticks;
+			if (remaining <= 0)
+				break;
 			sleep_ticks = remaining;
+			if (sleep_ticks > hz / 20 + 1)
+				sleep_ticks = hz / 20 + 1;
+			svm->mut_lapic_timer_idle_count++;
+			if (svm->mut_lapic_timer_idle_count <= 8 ||
+			    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u idle wait ticks=%d timer_active=%d",
+				    vc->imm_id, sleep_ticks,
+				    svm->mut_lapic_timer_active);
+			}
+			if (sleep_ticks <= 1)
+				lwkt_user_yield();
+			else
+				tsleep(vc, 0, "vmmhlt", sleep_ticks);
+		}
+		vmm_svm_lapic_timer_check(svm, vc);
+		return;
 	}
 	svm->mut_lapic_timer_idle_count++;
 	if (svm->mut_lapic_timer_idle_count <= 8 ||
@@ -2929,7 +2954,7 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 	default:
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke avic unknown op=%u arg=0x%x", op, arg);
-		return 0;
+		return -1;
 	}
 }
 
@@ -3294,6 +3319,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
 	uint32_t reqflags;
+	int handled;
 
 	if (svm == NULL)
 		return;
@@ -3384,8 +3410,15 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 				break;
 			goto unhandled;
 		case VMM_SVM_EXIT_VMMCALL:
-			if (vmm_svm_handle_vmmcall(svm, vc))
+			handled = vmm_svm_handle_vmmcall(svm, vc);
+			if (handled > 0)
 				break;
+			if (handled == 0) {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u vmmcall exit rip=0x%jx",
+				    vc->imm_id, (uintmax_t)vmcb->state.rip);
+				goto out;
+			}
 			goto unhandled;
 		default:
 	unhandled:

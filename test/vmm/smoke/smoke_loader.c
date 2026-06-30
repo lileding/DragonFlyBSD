@@ -539,6 +539,57 @@ guest_lapictimer_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_lapictimer_masked_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_tmcct_to_eax[] =
+	    { 0x8b, 0x87, 0x90, 0x03, 0x00, 0x00 };
+	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
+	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
+	static const uint8_t pause_op[] = { 0xf3, 0x90 };
+	static const uint8_t jmp8[] = { 0xeb, 0x00 };
+	static const uint8_t sti_nop_cli[] = { 0xfb, 0x90, 0xfa };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-lapic-masked-ok\n";
+	size_t len = 0;
+	size_t loop_label;
+	size_t jzero;
+	size_t jmp_back;
+	size_t ok_label;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, 0x00010000U | TIMER_VECTOR);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 0x00000100U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	loop_label = len;
+	emit(code, &len, cap, cpuid_zero, sizeof(cpuid_zero));
+	emit(code, &len, cap, mov_tmcct_to_eax, sizeof(mov_tmcct_to_eax));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	jzero = emit_je8(code, &len, cap);
+	emit(code, &len, cap, pause_op, sizeof(pause_op));
+	emit(code, &len, cap, jmp8, sizeof(jmp8));
+	jmp_back = len - 1;
+	ok_label = len;
+	emit(code, &len, cap, sti_nop_cli, sizeof(sti_nop_cli));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	patch_rel8(code, jzero, ok_label);
+	patch_rel8(code, jmp_back, loop_label);
+	return len;
+}
+
+static size_t
 guest_ud_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t setup[] = {
@@ -1445,6 +1496,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "lapictimer") == 0) {
 		return guest_lapictimer_code(code, cap);
+	} else if (strcmp(mode, "lapictimer_masked") == 0) {
+		return guest_lapictimer_masked_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
 		return guest_ud_code(code, cap);
 	} else if (strcmp(mode, "pic") == 0) {
@@ -1696,7 +1749,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_masked|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

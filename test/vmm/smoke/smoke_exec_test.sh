@@ -21,7 +21,7 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_masked ud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
 SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
@@ -351,6 +351,8 @@ check_console()
 		wait_console "$(mach "$mode")/console" 'dfvmm-lapic-timer-ok' ||
 		    fail "$mode console output"
 		;;
+	lapictimer_masked)
+		;;
 	avicread)
 		wait_console "$(mach "$mode")/console" 'dfvmm-avicread-ok' ||
 		    fail "$mode console output"
@@ -395,6 +397,10 @@ run_case()
 	else
 		wait_event "$(mach "$mode")/events" 'state running' ||
 		    fail "$mode started"
+		if [ "$mode" = "lapictimer_masked" ]; then
+			wait_event "$(mach "$mode")/events" 'lapic timer masked' ||
+			    fail "$mode masked timer"
+		fi
 		echo force >"$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 		wait_event "$(mach "$mode")/events" 'state stopped' ||
