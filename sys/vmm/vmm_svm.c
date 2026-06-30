@@ -204,11 +204,15 @@
 #define VMM_COM1_LSR		5U
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
+#define VMM_COM1_IER_RDI	0x01U
 #define VMM_COM1_IIR_NOPEND	0x01U
+#define VMM_COM1_IIR_RDI	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
+#define VMM_COM1_MCR_OUT2	0x08U
 #define VMM_COM1_LSR_DR		0x01U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
+#define VMM_COM1_IOAPIC_PIN	4U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
 #define VMM_PIC_ELCR1		0x4d0U
@@ -2354,9 +2358,29 @@ vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
 	vmcb->state.rax = (vmcb->state.rax & ~mask) | (val & mask);
 }
 
+static void
+vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, const char *source)
+{
+	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
+
+	if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0 ||
+	    vmm_console_guest_pending(console) == 0)
+		return;
+	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u com1 rx irq held source=%s reason=out2_disabled",
+		    vc->imm_id, source);
+		return;
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u com1 rx irq source=%s", vc->imm_id, source);
+	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
+}
+
 static int
-vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
-    uint32_t *valp)
+vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+    unsigned int reg, int size, uint32_t *valp)
 {
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 	char ch;
@@ -2370,6 +2394,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 			*valp = 0;
 		} else if (vmm_console_guest_read(console, &ch)) {
 			*valp = (uint8_t)ch;
+			vmm_svm_com1_rx_notify(svm, vc, "com1_rbr");
 		} else {
 			*valp = 0;
 		}
@@ -2379,7 +2404,9 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		    0 : svm->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		*valp = VMM_COM1_IIR_NOPEND;
+		*valp = ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+		    vmm_console_guest_pending(console) != 0) ?
+		    VMM_COM1_IIR_RDI : VMM_COM1_IIR_NOPEND;
 		return 1;
 	case VMM_COM1_LCR:
 		*valp = svm->mut_com1_lcr;
@@ -2405,8 +2432,8 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, unsigned int reg, int size,
 }
 
 static int
-vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
-    uint32_t val)
+vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+    unsigned int reg, int size, uint32_t val)
 {
 	char ch;
 
@@ -2421,8 +2448,10 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
-		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0)
+		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
 			svm->mut_com1_ier = val & 0x0fU;
+			vmm_svm_com1_rx_notify(svm, vc, "com1_ier");
+		}
 		return 1;
 	case VMM_COM1_IIR_FCR:
 		return 1;
@@ -2431,6 +2460,7 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, unsigned int reg, int size,
 		return 1;
 	case VMM_COM1_MCR:
 		svm->mut_com1_mcr = val & 0xffU;
+		vmm_svm_com1_rx_notify(svm, vc, "com1_mcr");
 		return 1;
 	case VMM_COM1_SCR:
 		svm->mut_com1_scr = val & 0xffU;
@@ -2813,16 +2843,27 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	if (info & VMM_SVM_IOIO_IN) {
-		if (!vmm_svm_com1_read(svm, port - VMM_COM1_BASE, size, &val))
+		if (!vmm_svm_com1_read(svm, vc, port - VMM_COM1_BASE, size,
+		    &val))
 			return 0;
 		vmm_svm_set_rax_low(vmcb, val, size);
 	} else {
 		val = vmcb->state.rax & 0xffffffffU;
-		if (!vmm_svm_com1_write(svm, port - VMM_COM1_BASE, size, val))
+		if (!vmm_svm_com1_write(svm, vc, port - VMM_COM1_BASE, size,
+		    val))
 			return 0;
 	}
 	vmm_svm_advance_ioio(vmcb);
 	return 1;
+}
+
+static void
+vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_backend *svm = backend;
+
+	if (svm != NULL)
+		vmm_svm_com1_rx_notify(svm, vc, "console_input");
 }
 
 static void
@@ -3454,6 +3495,7 @@ const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
 	.create = vmm_svm_vcpu_create,
 	.destroy = vmm_svm_vcpu_destroy,
 	.run = vmm_svm_vcpu_run,
+	.console_input = vmm_svm_console_input,
 };
 
 VMM_VCPU_BACKEND_SET(vmm_svm_backend_ops);

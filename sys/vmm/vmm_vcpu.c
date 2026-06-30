@@ -235,6 +235,27 @@ vmm_vcpu_should_stop(const struct vmm_vcpu_thread *vc)
 }
 
 void
+vmm_vcpu_console_input_locked(struct vmm_machine *m)
+{
+	struct vmm_vcpu *v = &m->own_mut_vcpu;
+	uint32_t i;
+
+	if (v->own_mut_threads == NULL || v->mut_active_count == 0)
+		return;
+	for (i = 0; i < v->mut_count; i++) {
+		struct vmm_vcpu_thread *vc = &v->own_mut_threads[i];
+
+		if (vc->borrow_imm_backend_ops != NULL &&
+		    vc->borrow_imm_backend_ops->console_input != NULL &&
+		    vc->own_mut_backend != NULL) {
+			vc->borrow_imm_backend_ops->console_input(
+			    vc->own_mut_backend, vc);
+		}
+		wakeup(vc);
+	}
+}
+
+void
 vmm_vcpu_uninit(struct vmm_vcpu *v, struct vmm_vcpu_thread **threadsp)
 {
 	*threadsp = NULL;

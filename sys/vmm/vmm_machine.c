@@ -546,6 +546,15 @@ vmm_machine_reset_force(const struct vmm_machine_task *task)
 	vmm_machine_logf(task->borrow_mut_machine, "reset force done");
 }
 
+void
+vmm_machine_console_input(struct vmm_machine *m)
+{
+	lwkt_gettoken(&m->token_config);
+	if (m->mut_status == VMM_MACHINE_RUNNING)
+		vmm_vcpu_console_input_locked(m);
+	lwkt_reltoken(&m->token_config);
+}
+
 static int
 vmm_machine_task_config_complete(const struct vmm_machine_task *task)
 {

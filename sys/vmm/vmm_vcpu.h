@@ -47,6 +47,7 @@ struct vmm_vcpu_backend_ops {
 	    void **backendp);
 	void (*destroy)(void *backend);
 	void (*run)(void *backend, struct vmm_vcpu_thread *vc);
+	void (*console_input)(void *backend, struct vmm_vcpu_thread *vc);
 };
 
 #define VMM_VCPU_BACKEND_SET(ops)	DATA_SET(vmm_vcpu_backend_set, ops)
@@ -66,5 +67,6 @@ void	vmm_vcpu_uninit(struct vmm_vcpu *v,
 void	vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads,
 	    uint32_t count);
 int	vmm_vcpu_should_stop(const struct vmm_vcpu_thread *vc);
+void	vmm_vcpu_console_input_locked(struct vmm_machine *m);
 
 #endif /* VMM_VCPU_H */

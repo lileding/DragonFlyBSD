@@ -54,6 +54,7 @@ vmmfs_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
 			return error;
 		vmm_console_write(&node->vn_machine->machine.own_mut_console,
 		    dump, d);
+		vmm_machine_console_input(&node->vn_machine->machine);
 	}
 	return 0;
 }
