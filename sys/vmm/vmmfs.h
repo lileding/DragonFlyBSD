@@ -137,6 +137,9 @@ int	vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap);
 int	vmmnode_setattr(struct vmmfs_node *node, struct vop_setattr_args *ap);
 int	vmmnode_open(struct vmmfs_node *node, struct vop_open_args *ap);
 int	vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap);
+int	vmmnode_ioctl(struct vmmfs_node *node, struct vop_ioctl_args *ap);
+int	vmmnode_kqfilter(struct vmmfs_node *node,
+	    struct vop_kqfilter_args *ap);
 int	vmmnode_inactive(struct vmmfs_node *node, struct vop_inactive_args *ap);
 int	vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap);
 int	vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap);

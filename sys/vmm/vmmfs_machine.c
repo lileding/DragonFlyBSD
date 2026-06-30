@@ -66,7 +66,7 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 #endif
 	{ "events",	  VREG, 0444, &vmmfs_events_class,
 	    __offsetof(struct vmmfs_machine, n_events),  NULL },
-	{ "console",	  VREG, 0644, &vmmfs_console_class,
+	{ "console",	  VCHR, 0600, &vmmfs_console_class,
 	    __offsetof(struct vmmfs_machine, n_console), NULL },
 	{ "status.tar.gz", VREG, 0444, &vmmfs_status_class,
 	    __offsetof(struct vmmfs_machine, n_status),  NULL },
@@ -126,6 +126,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	vmm_machine_init(&m->machine);
 	kprintf("vmm klog: machine_create machine_init done m=%p machine=%p\n",
 	    m, &m->machine);
+	vmm_console_attach(&m->machine.own_mut_console, m->name, &m->machine);
 
 	kprintf("vmm klog: machine_create node_init begin m=%p\n", m);
 	vmmfs_node_init(&m->node, &vmmfs_machine_class, VDIR, VMMFS_DIR_MODE,
@@ -249,7 +250,8 @@ vmmfs_machine_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 
 		if (!cfg_present(m, d))
 			continue;
-		if (vop_write_dirent(&error, uio, cfg_node(m, d)->vn_ino, DT_REG,
+		if (vop_write_dirent(&error, uio, cfg_node(m, d)->vn_ino,
+		    d->vtype == VCHR ? DT_CHR : DT_REG,
 		    (uint16_t)strlen(d->name), d->name)) {
 			off = 2 + i;
 			full = 1;

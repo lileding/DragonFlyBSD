@@ -65,6 +65,21 @@ vmmnode_close(struct vmmfs_node *node, struct vop_close_args *ap)
 }
 
 int
+vmmnode_ioctl(struct vmmfs_node *node, struct vop_ioctl_args *ap)
+{
+	(void)node;
+	return vop_stdioctl(ap);
+}
+
+int
+vmmnode_kqfilter(struct vmmfs_node *node, struct vop_kqfilter_args *ap)
+{
+	(void)node;
+	(void)ap;
+	return EOPNOTSUPP;
+}
+
+int
 vmmnode_access(struct vmmfs_node *node, struct vop_access_args *ap)
 {
 
@@ -103,6 +118,8 @@ vmmnode_reclaim(struct vmmfs_node *node, struct vop_reclaim_args *ap)
 	node->vn_vnode = NULL;
 	vp->v_data = NULL;
 	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (vp->v_type == VCHR)
+		v_release_rdev(vp);
 
 	return 0;
 }
@@ -213,6 +230,26 @@ vmmfs_write(struct vop_write_args *ap)
 }
 
 static int
+vmmfs_ioctl(struct vop_ioctl_args *ap)
+{
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (!VMMFS_NODE_IS(node, vmmfs_console_class))
+		return vop_stdioctl(ap);
+	return VMMFS_NODE_IOCTL(node, ap);
+}
+
+static int
+vmmfs_kqfilter(struct vop_kqfilter_args *ap)
+{
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+
+	if (!VMMFS_NODE_IS(node, vmmfs_console_class))
+		return EOPNOTSUPP;
+	return VMMFS_NODE_KQFILTER(node, ap);
+}
+
+static int
 vmmfs_readdir(struct vop_readdir_args *ap)
 {
 	return VMMFS_NODE_READDIR(VP_TO_VMMFS(ap->a_vp), ap);
@@ -257,6 +294,8 @@ static kobj_method_t vmmfs_base_methods[] = {
 	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
 	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
 	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
+	KOBJMETHOD(vmmfs_node_ioctl,		vmmnode_ioctl),
+	KOBJMETHOD(vmmfs_node_kqfilter,		vmmnode_kqfilter),
 	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
 	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
 	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
@@ -284,6 +323,8 @@ struct vop_ops vmmfs_vnode_vops = {
 	.vop_setattr =		vmmfs_setattr,
 	.vop_read =		vmmfs_read,
 	.vop_write =		vmmfs_write,
+	.vop_ioctl =		vmmfs_ioctl,
+	.vop_kqfilter =		vmmfs_kqfilter,
 	.vop_readdir =		vmmfs_readdir,
 	.vop_inactive =		vmmfs_inactive,
 	.vop_reclaim =		vmmfs_reclaim,

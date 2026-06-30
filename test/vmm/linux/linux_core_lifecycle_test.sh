@@ -193,7 +193,6 @@ create_machine()
 	printf '%s\n' "$MEM" >"$(mach "$vm")/mem" || fail "$vm mem"
 	printf '%s\n' "$WRAPPER" >"$(mach "$vm")/loader" || fail "$vm loader"
 	append_file "$vm-created-events" "$(mach "$vm")/events"
-	start_console_reader "$vm"
 }
 
 run_guest_smoke()
@@ -354,6 +353,7 @@ start_round()
 	while [ "$start_i" -lt "$VM_COUNT" ]; do
 		vm=$(machine_name "$start_i")
 		say "start $vm round=$round"
+		start_console_reader "$vm"
 		run rm "$(mach "$vm")/stopped"
 		start_i=$((start_i + 1))
 	done
@@ -386,6 +386,7 @@ stop_round()
 		stop_machine "$(machine_name "$stop_round_i")" "round-$round"
 		stop_round_i=$((stop_round_i + 1))
 	done
+	stop_console_readers
 }
 
 remove_all_machines()

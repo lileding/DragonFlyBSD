@@ -95,6 +95,16 @@ METHOD int write {
 	struct vop_write_args	*ap;
 };
 
+METHOD int ioctl {
+	struct vmmfs_node	*node;
+	struct vop_ioctl_args	*ap;
+};
+
+METHOD int kqfilter {
+	struct vmmfs_node	*node;
+	struct vop_kqfilter_args *ap;
+};
+
 METHOD int readdir {
 	struct vmmfs_node	*node;
 	struct vop_readdir_args	*ap;

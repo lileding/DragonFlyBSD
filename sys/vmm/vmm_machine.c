@@ -208,6 +208,7 @@ vmm_machine_uninit(struct vmm_machine *m)
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	vmm_console_detach(&m->own_mut_console);
 	if (m->own_mut_taskqueue != NULL) {
 		kprintf("vmm klog: core_machine_uninit taskqueue_free begin m=%p tq=%p\n",
 		    m, m->own_mut_taskqueue);
