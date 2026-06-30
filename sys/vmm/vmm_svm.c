@@ -96,6 +96,9 @@
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
 #define VMM_SVM_CTRL_V_AVIC_EN		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
+#define VMM_SVM_EVENTINJ_ERROR_VALID	(1ULL << 11)
+#define VMM_SVM_EVENTINJ_TYPE_EXCEPTION	(3ULL << 8)
+#define VMM_X86_EXCEPTION_GP		13U
 #define VMM_SVM_AVIC_PHYS_VALID		(1ULL << 63)
 #define VMM_SVM_AVIC_PHYS_RUNNING	(1ULL << 62)
 #define VMM_SVM_AVIC_PHYS_HOST_ID_MASK	0xfffULL
@@ -213,6 +216,9 @@
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_COM1_IOAPIC_PIN	4U
+#define VMM_COM2_BASE		0x2f8U
+#define VMM_COM3_BASE		0x3e8U
+#define VMM_COM4_BASE		0x2e8U
 #define VMM_PIC1_CMD		0x20U
 #define VMM_PIC1_DATA		0x21U
 #define VMM_PIC_ELCR1		0x4d0U
@@ -228,10 +234,14 @@
 #define VMM_PM_TIMER_LAST	0x40bU
 #define VMM_PM_TIMER_FREQ	3579545ULL
 #define VMM_PM_TIMER_MASK	0x00ffffffU
-#define VMM_IO_DELAY_PORT	0x80U
+#define VMM_ISA_MISC_PORT	0x80U
+#define VMM_ISA_MISC_LAST	0x8fU
 #define VMM_PIC2_CMD		0xa0U
 #define VMM_PIC2_DATA		0xa1U
+#define VMM_PCI_CFG_CTRL	0xcfbU
 #define VMM_PCI_CFG_ADDR	0xcf8U
+#define VMM_PCI_CFG_ADDR_LAST	0xcfbU
+#define VMM_PCI_CFG_TYPE2_FORWARD	0xcfaU
 #define VMM_PCI_CFG_DATA	0xcfcU
 #define VMM_PCI_CFG_DATA_LAST	0xcffU
 #define VMM_CMOS_INDEX		0x70U
@@ -341,6 +351,16 @@
 					 VMM_SVM_ZEN2_BP_CFG_BUG_FIX)
 #define VMM_SVM_MSR_ZEN2_SPECTRAL_CHICKEN 0xc00110e3U
 #define VMM_SVM_ZEN2_SPECTRAL_CHICKEN_VALID (1ULL << 1)
+#define VMM_SVM_MSR_IA32_MPERF		0x000000e7U
+#define VMM_SVM_MSR_IA32_APERF		0x000000e8U
+#define VMM_SVM_MSR_AMD64_IRPERF	0xc00000e9U
+#define VMM_SVM_MSR_AMD64_IBSCTL	0xc001103aU
+#define VMM_SVM_NB_CFG_ENABLE_CF8_EXT_CFG (1ULL << 46)
+#define VMM_SVM_NB_CFG_VALID		(VMM_SVM_NB_CFG_ENABLE_CF8_EXT_CFG | \
+					 NB_CFG_INITAPICCPUIDLO)
+#define VMM_SVM_MSR_F15H_PERF_CTL	0xc0010200U
+#define VMM_SVM_MSR_F15H_PERF_CTR	0xc0010201U
+#define VMM_SVM_PMU_COUNTERS		6U
 #define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL)
 #define VMM_SVM_HWCR_MC_STATUS_WR_EN	(1ULL << 18)
 #define VMM_SVM_HWCR_TSC_FREQ_SEL	(1ULL << 24)
@@ -520,6 +540,11 @@ struct vmm_svm_backend {
 	uint64_t mut_guest_de_cfg;
 	uint64_t mut_guest_zen4_bp_cfg;
 	uint64_t mut_guest_zen2_spectral_chicken;
+	uint64_t mut_guest_mperf_offset;
+	uint64_t mut_guest_aperf_offset;
+	uint64_t mut_guest_nb_cfg;
+	uint64_t mut_guest_pmu_ctl[VMM_SVM_PMU_COUNTERS];
+	uint64_t mut_guest_pmu_ctr[VMM_SVM_PMU_COUNTERS];
 	uint64_t mut_guest_tsc_aux;
 	uint64_t mut_guest_apicbase;
 	uint64_t imm_tsc_hz;
@@ -609,6 +634,11 @@ static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ VMM_SVM_MSR_ZEN4_BP_CFG, "zen4_bp_cfg", "platform-config" },
 	{ VMM_SVM_MSR_ZEN2_SPECTRAL_CHICKEN, "zen2_spectral_chicken",
 	    "platform-config" },
+	{ VMM_SVM_MSR_AMD64_IRPERF, "irperf", "cpu-frequency" },
+	{ VMM_SVM_MSR_IA32_MPERF, "mperf", "cpu-frequency" },
+	{ VMM_SVM_MSR_IA32_APERF, "aperf", "cpu-frequency" },
+	{ VMM_SVM_MSR_AMD64_IBSCTL, "amd_ibsctl", "perf" },
+	{ MSR_AMD_NB_CFG, "amd_nb_cfg", "platform-config" },
 	{ MSR_AMD_PATCH_LEVEL, "amd_patch_level", "microcode" },
 	{ MSR_AMD_PATCH_LOADER, "amd_patch_loader", "microcode" },
 	{ MSR_STAR, "star", "syscall" },
@@ -856,8 +886,6 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 	    VMM_SVM_LAPIC_TIMER_COUNT_PER_TICK;
 	if (delta == 0)
 		delta = 1;
-	if (delta > (uint64_t)hz / 10 + 1)
-		delta = (uint64_t)hz / 10 + 1;
 	svm->mut_lapic_timer_interval_ticks = (uint32_t)delta;
 	svm->mut_lapic_timer_deadline = ticks + (int)delta;
 	svm->mut_lapic_timer_active = 1;
@@ -871,11 +899,24 @@ static void
 vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
     struct vmm_vcpu_thread *vc)
 {
+	uint32_t current;
 	uint8_t vector;
+	int remaining;
 
-	if (!svm->mut_lapic_timer_active ||
-	    (int)(ticks - svm->mut_lapic_timer_deadline) < 0)
+	if (!svm->mut_lapic_timer_active)
 		return;
+	remaining = svm->mut_lapic_timer_deadline - ticks;
+	if (remaining > 0) {
+		if (svm->mut_lapic_timer_interval_ticks == 0) {
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT,
+			    svm->mut_lapic_timer_tmict);
+			return;
+		}
+		current = (uint32_t)(((uint64_t)svm->mut_lapic_timer_tmict *
+		    (uint64_t)remaining) / svm->mut_lapic_timer_interval_ticks);
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, current);
+		return;
+	}
 	vector = svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, 0);
 	if ((svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_MASKED) == 0) {
@@ -1053,6 +1094,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_hpet_counter_tsc = rdtsc();
 	svm->mut_pm_timer_tsc = svm->mut_hpet_counter_tsc;
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
+	svm->mut_guest_nb_cfg = NB_CFG_INITAPICCPUIDLO;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
 	svm->mut_lapic_timer_divisor = 2;
@@ -1412,6 +1454,105 @@ vmm_svm_modrm_size(const uint8_t *bytes, int len, int off)
 	if (off + size > len)
 		return 0;
 	return size;
+}
+
+static int
+vmm_svm_guest_va_canonical(uint64_t va)
+{
+	uint64_t high = va >> 48;
+
+	return high == 0 || high == 0xffffULL;
+}
+
+static int
+vmm_svm_guest_read_gpa(struct vmm_svm_backend *svm, uint64_t gpa, void *buf,
+    size_t len)
+{
+	struct vmm_machine *m = svm->borrow_imm_machine;
+
+	return vmm_mem_read_gpa(&m->own_mut_mem, gpa, buf, len);
+}
+
+static int
+vmm_svm_guest_translate(struct vmm_svm_backend *svm, uint64_t va,
+    uint64_t *gpap)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint64_t entry;
+	uint64_t table;
+	int error;
+
+	if (gpap == NULL)
+		return EINVAL;
+	if (!vmm_svm_guest_va_canonical(va))
+		return EFAULT;
+	if ((vmcb->state.cr4 & CR4_LA57) != 0)
+		return EOPNOTSUPP;
+	table = vmcb->state.cr3 & PG_FRAME;
+
+	error = vmm_svm_guest_read_gpa(svm,
+	    table + (((va >> 39) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error || (entry & X86_PG_V) == 0)
+		return error ? error : EFAULT;
+	table = entry & PG_FRAME;
+
+	error = vmm_svm_guest_read_gpa(svm,
+	    table + (((va >> 30) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error || (entry & X86_PG_V) == 0)
+		return error ? error : EFAULT;
+	if ((entry & X86_PG_PS) != 0) {
+		*gpap = (entry & 0x000fffffc0000000ULL) |
+		    (va & ((1ULL << 30) - 1));
+		return 0;
+	}
+	table = entry & PG_FRAME;
+
+	error = vmm_svm_guest_read_gpa(svm,
+	    table + (((va >> 21) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error || (entry & X86_PG_V) == 0)
+		return error ? error : EFAULT;
+	if ((entry & X86_PG_PS) != 0) {
+		*gpap = (entry & PG_PS_FRAME) | (va & ((1ULL << 21) - 1));
+		return 0;
+	}
+	table = entry & PG_FRAME;
+
+	error = vmm_svm_guest_read_gpa(svm,
+	    table + (((va >> 12) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error || (entry & X86_PG_V) == 0)
+		return error ? error : EFAULT;
+	*gpap = (entry & PG_FRAME) | (va & PAGE_MASK);
+	return 0;
+}
+
+static int
+vmm_svm_guest_read_va(struct vmm_svm_backend *svm, uint64_t va, void *buf,
+    size_t len)
+{
+	uint8_t *dst = buf;
+	uint64_t gpa;
+	size_t chunk;
+	int error;
+
+	while (len != 0) {
+		error = vmm_svm_guest_translate(svm, va, &gpa);
+		if (error)
+			return error;
+		chunk = PAGE_SIZE - (size_t)(gpa & PAGE_MASK);
+		if (chunk > len)
+			chunk = len;
+		error = vmm_svm_guest_read_gpa(svm, gpa, dst, chunk);
+		if (error)
+			return error;
+		va += chunk;
+		dst += chunk;
+		len -= chunk;
+	}
+	return 0;
 }
 
 static uint64_t
@@ -1928,6 +2069,17 @@ vmm_svm_x2apic_msr(uint32_t msr)
 	    msr <= VMM_SVM_X2APIC_MSR_LAST;
 }
 
+static int
+vmm_svm_amd_pmu_msr_index(uint32_t msr, uint32_t base, unsigned int *idxp)
+{
+	uint32_t off = msr - base;
+
+	if (off >= VMM_SVM_PMU_COUNTERS * 2 || (off & 1U) != 0)
+		return 0;
+	*idxp = off / 2;
+	return 1;
+}
+
 static void
 vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
     const struct vmm_vcpu_thread *vc, const char *op, uint32_t msr,
@@ -1977,9 +2129,20 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t msr = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
+	unsigned int idx;
 	uint64_t val;
 
 	if (vmcb->ctrl.exitinfo1 == 0) {
+		if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTL,
+		    &idx)) {
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_pmu_ctl[idx]);
+			return 1;
+		}
+		if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTR,
+		    &idx)) {
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_pmu_ctr[idx]);
+			return 1;
+		}
 		switch (msr) {
 		case MSR_EFER:
 			vmm_svm_rdmsr_value(svm, vmcb->state.efer & ~EFER_SVME);
@@ -2035,6 +2198,23 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_rdmsr_value(svm,
 			    svm->mut_guest_zen2_spectral_chicken);
 			return 1;
+		case VMM_SVM_MSR_AMD64_IRPERF:
+			vmm_svm_rdmsr_value(svm, vmm_svm_guest_tsc(svm));
+			return 1;
+		case VMM_SVM_MSR_IA32_MPERF:
+			vmm_svm_rdmsr_value(svm, vmm_svm_guest_tsc(svm) +
+			    svm->mut_guest_mperf_offset);
+			return 1;
+		case VMM_SVM_MSR_IA32_APERF:
+			vmm_svm_rdmsr_value(svm, vmm_svm_guest_tsc(svm) +
+			    svm->mut_guest_aperf_offset);
+			return 1;
+		case VMM_SVM_MSR_AMD64_IBSCTL:
+			vmm_svm_rdmsr_value(svm, 0);
+			return 1;
+		case MSR_AMD_NB_CFG:
+			vmm_svm_rdmsr_value(svm, svm->mut_guest_nb_cfg);
+			return 1;
 		case MSR_AMD_PATCH_LEVEL:
 			vmm_svm_rdmsr_value(svm, VMM_SVM_AMD_PATCH_LEVEL);
 			return 1;
@@ -2072,11 +2252,27 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_log_unsupported_msr(svm, vc, "rd", msr, 0, 0,
 			    vmm_svm_x2apic_msr(msr) ? "x2apic-hidden" :
 			    "not-in-template");
-			return 0;
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_ERROR_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION |
+			    VMM_X86_EXCEPTION_GP;
+			return 1;
 		}
 	}
 
 	val = vmm_svm_wrmsr_value(svm);
+	if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTL,
+	    &idx)) {
+		svm->mut_guest_pmu_ctl[idx] = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	}
+	if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTR,
+	    &idx)) {
+		svm->mut_guest_pmu_ctr[idx] = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	}
 	switch (msr) {
 	case MSR_EFER:
 		if ((val & ~VMM_SVM_EFER_VALID) != 0) {
@@ -2203,6 +2399,35 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		svm->mut_guest_zen2_spectral_chicken = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
+	case VMM_SVM_MSR_AMD64_IRPERF:
+		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+		    "read-only");
+		return 0;
+	case VMM_SVM_MSR_IA32_MPERF:
+		svm->mut_guest_mperf_offset = val - vmm_svm_guest_tsc(svm);
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case VMM_SVM_MSR_IA32_APERF:
+		svm->mut_guest_aperf_offset = val - vmm_svm_guest_tsc(svm);
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case VMM_SVM_MSR_AMD64_IBSCTL:
+		if (val != 0) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "ibs-hidden");
+			return 0;
+		}
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	case MSR_AMD_NB_CFG:
+		if ((val & ~VMM_SVM_NB_CFG_VALID) != 0) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
+			return 0;
+		}
+		svm->mut_guest_nb_cfg = val;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
 	case MSR_AMD_PATCH_LEVEL:
 		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
 		    "read-only");
@@ -2255,7 +2480,10 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
 		    vmm_svm_x2apic_msr(msr) ? "x2apic-hidden" :
 		    "not-in-template");
-		return 0;
+		vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+		    VMM_SVM_EVENTINJ_ERROR_VALID |
+		    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_GP;
+		return 1;
 	}
 }
 
@@ -2300,7 +2528,8 @@ vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
 		break;
 	}
 	vmm_machine_logf(svm->borrow_imm_machine,
-	    "svm vcpu%u root %s exit info1=0x%jx info2=0x%jx hvmflags=0x%x reqflags=0x%x rip=0x%jx",
+	    "svm vcpu%u root %s exit info1=0x%jx info2=0x%jx "
+	    "hvmflags=0x%x reqflags=0x%x rip=0x%jx",
 	    vc->imm_id, name, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, hvmflags, reqflags,
 	    (uintmax_t)vmcb->state.rip);
@@ -2793,30 +3022,55 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		return 1;
 	}
 
-	if (port == VMM_IO_DELAY_PORT) {
-		if (size != 1 || (info & VMM_SVM_IOIO_IN) != 0) {
+	if (port >= VMM_ISA_MISC_PORT && port <= VMM_ISA_MISC_LAST) {
+		if (size != 1) {
 			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm vcpu%u unsupported iodelay io op=%s port=0x%x size=%d rip=0x%jx",
+			    "svm vcpu%u unsupported isa misc io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0, size);
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
 	}
 
-	if (port == VMM_PCI_CFG_ADDR) {
-		if (size != 4) {
+	if (port == VMM_PCI_CFG_CTRL) {
+		if (size != 1) {
 			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm vcpu%u unsupported pci cfg addr io op=%s size=%d rip=0x%jx",
+			    "svm vcpu%u unsupported pci cfg ctrl io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+	if (port >= VMM_PCI_CFG_ADDR && port <= VMM_PCI_CFG_ADDR_LAST) {
+		unsigned int shift;
+		uint32_t mask;
+
+		if (port + (unsigned int)size - 1 > VMM_PCI_CFG_ADDR_LAST) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported pci cfg addr io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		shift = (port - VMM_PCI_CFG_ADDR) * 8U;
+		mask = size == 4 ? 0xffffffffU : ((1U << (size * 8)) - 1U);
 		if (info & VMM_SVM_IOIO_IN) {
-			vmm_svm_set_rax_low(vmcb, svm->mut_pci_cfg_addr, size);
+			if (port == VMM_PCI_CFG_TYPE2_FORWARD && size == 1)
+				vmm_svm_set_rax_low(vmcb, 0xffU, size);
+			else
+				vmm_svm_set_rax_low(vmcb,
+				    svm->mut_pci_cfg_addr >> shift, size);
 		} else {
-			svm->mut_pci_cfg_addr = vmcb->state.rax &
-			    0xffffffffU;
+			svm->mut_pci_cfg_addr &= ~(mask << shift);
+			svm->mut_pci_cfg_addr |=
+			    ((uint32_t)vmcb->state.rax & mask) << shift;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
@@ -2831,6 +3085,22 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0xffffffffU, size);
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
+	}
+
+	if ((port >= VMM_COM2_BASE && port <= VMM_COM2_BASE + VMM_COM1_SCR) ||
+	    (port >= VMM_COM3_BASE && port <= VMM_COM3_BASE + VMM_COM1_SCR) ||
+	    (port >= VMM_COM4_BASE && port <= VMM_COM4_BASE + VMM_COM1_SCR)) {
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported absent serial io op=%s port=0x%x size=%d rip=0x%jx",
+			    vc->imm_id, op, port, size,
+			    (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN)
+			vmm_svm_set_rax_low(vmcb, 0xffU, size);
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
 	}
@@ -3005,13 +3275,17 @@ vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint8_t fetched[15];
 	uint32_t value;
 	uint8_t modrm;
 	uint8_t opcode;
 	unsigned int reg;
 	int data16 = 0;
+	int fetched_inst = 0;
+	int inst_len;
 	int off = 0;
 	int rex = 0;
+	int insn_len;
 	int modsz;
 	int size;
 
@@ -3031,11 +3305,16 @@ vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
 	} else {
 		value = vmm_svm_avic_apic_read32(svm, apic_reg);
 	}
-	if (vmcb->ctrl.inst_len == 0)
-		return 1;
-	if (vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
-		goto fail;
-	while (off < vmcb->ctrl.inst_len) {
+	inst_len = vmcb->ctrl.inst_len;
+	if (inst_len == 0 || inst_len > (int)sizeof(vmcb->ctrl.inst_bytes)) {
+		if (vmm_svm_guest_read_va(svm, vmcb->state.rip, fetched,
+		    sizeof(fetched)) != 0)
+			goto fail;
+		bytes = fetched;
+		inst_len = (int)sizeof(fetched);
+		fetched_inst = 1;
+	}
+	while (off < inst_len) {
 		if (bytes[off] == 0x66) {
 			data16 = 1;
 			off++;
@@ -3047,25 +3326,29 @@ vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
 		}
 		break;
 	}
-	if (off >= vmcb->ctrl.inst_len)
+	if (off >= inst_len)
 		goto fail;
 	opcode = bytes[off++];
 	size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
-	if (opcode != 0x8b || size != 4 || off >= vmcb->ctrl.inst_len)
+	if (opcode != 0x8b || size != 4 || off >= inst_len)
 		goto fail;
 	modrm = bytes[off];
-	modsz = vmm_svm_modrm_size(bytes, vmcb->ctrl.inst_len, off);
+	modsz = vmm_svm_modrm_size(bytes, inst_len, off);
 	if (modsz == 0)
 		goto fail;
 	reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
 	vmm_svm_gpr_write(svm, reg, value, size);
-	vmm_svm_advance_rip(vmcb);
+	insn_len = off + modsz;
+	if (fetched_inst && vmcb->ctrl.nrip == 0)
+		vmcb->state.rip += insn_len;
+	else
+		vmm_svm_advance_rip(vmcb);
 	return 1;
 fail:
 	vmm_machine_logf(svm->borrow_imm_machine,
-	    "svm vcpu%u unsupported avic read offset=0x%x rip=0x%jx inst_len=%u inst0=0x%x",
+	    "svm vcpu%u unsupported avic read offset=0x%x rip=0x%jx inst_len=%u inst0=0x%x fetched=%d",
 	    vc->imm_id, apic_reg, (uintmax_t)vmcb->state.rip,
-	    vmcb->ctrl.inst_len, bytes[0]);
+	    vmcb->ctrl.inst_len, bytes[0], fetched_inst);
 	return 0;
 }
 

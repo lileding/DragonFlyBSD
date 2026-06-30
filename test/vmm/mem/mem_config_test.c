@@ -222,6 +222,30 @@ expect_fault_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
 }
 
 static void
+expect_read_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
+    int want, int want_calls, vm_map_t want_map, vm_offset_t want_addr)
+{
+	uint8_t byte = 0xa5;
+	int got;
+
+	reset_fault_trace(0);
+	got = vmm_mem_read_gpa(mem, gpa, &byte, sizeof(byte));
+	if (got != want)
+		fail(name);
+	if (vmm_test_vm_fault_calls != want_calls)
+		fail(name);
+	if (want_calls != 0 &&
+	    (vmm_test_vm_fault_map != want_map ||
+	     vmm_test_vm_fault_addr != want_addr ||
+	     vmm_test_vm_fault_prot != VM_PROT_READ ||
+	     vmm_test_vm_fault_flags != VM_FAULT_NORMAL)) {
+		fail(name);
+	}
+	if (got != 0 && byte != 0xa5)
+		fail(name);
+}
+
+static void
 expect_lapic_hole_fault_reject(void)
 {
 	struct vmm_mem mem;
@@ -258,6 +282,8 @@ expect_lapic_hole_fault_reject(void)
 	    VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault lapic hole", VMM_X86_LAPIC_MMIO_GPA,
 	    VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
+	expect_read_result(&mem, "read lapic hole",
+	    VMM_X86_LAPIC_MMIO_GPA, EINVAL, 0, NULL, 0);
 	expect_fault_result(&mem, "fault after lapic hole",
 	    VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE,
 	    VM_PROT_READ, 0, 1, &vmspace->vm_map,
@@ -349,6 +375,8 @@ expect_backing_lifecycle(void)
 	    VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault propagates vm fault", 0,
 	    VM_PROT_READ, ENOMEM, 1, &vmspace->vm_map, 0, VM_FAULT_NORMAL);
+	expect_read_result(&mem, "read missing page", 0, EFAULT, 1,
+	    &vmspace->vm_map, 0);
 	expect_fault_result(&mem, "fault bad prot", 0, 0, EINVAL, 0, NULL, 0, 0);
 	expect_fault_result(&mem, "fault invalid prot bit", 0,
 	    VM_PROT_READ | 0x80, EINVAL, 0, NULL, 0, 0);
@@ -378,6 +406,8 @@ expect_backing_lifecycle(void)
 		fail("fault detached");
 	if (vmm_mem_fault_gpa(NULL, 0, VM_PROT_READ) != EINVAL)
 		fail("fault null");
+	expect_read_result(&mem, "read detached", 0, EINVAL, 0, NULL, 0);
+	expect_read_result(NULL, "read null mem", 0, EINVAL, 0, NULL, 0);
 	vmm_mem_release_backing(detached);
 	if (vmm_test_vm_object_free_count != 1 ||
 	    vmm_test_vmspace_free_count != 1)

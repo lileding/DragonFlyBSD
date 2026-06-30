@@ -63,5 +63,7 @@ struct vmspace *vmm_mem_borrow_vmspace(struct vmm_mem *m);
  * exit before releasing the backing.
  */
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
+int	vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf,
+	    size_t len);
 
 #endif /* VMM_MEM_H */

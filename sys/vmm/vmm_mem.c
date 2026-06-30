@@ -311,3 +311,50 @@ vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 	return vm_fault(&b->own_mut_vmspace->vm_map, trunc_page(gpa),
 	    (vm_prot_t)prot, flags);
 }
+
+int
+vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
+{
+	struct vmm_mem_backing *b;
+	uint8_t *dst = buf;
+	vm_page_t page;
+	vm_pindex_t pindex;
+	uint64_t page_gpa;
+	size_t chunk;
+	size_t off;
+	int error;
+
+	if (m == NULL || buf == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_object == NULL ||
+	    b->own_mut_vmspace == NULL)
+		return EINVAL;
+	while (len != 0) {
+		page_gpa = trunc_page(gpa);
+		if (!vmm_mem_gpa_page_inside(b->imm_bytes, page_gpa))
+			return EINVAL;
+		off = (size_t)(gpa - page_gpa);
+		chunk = PAGE_SIZE - off;
+		if (chunk > len)
+			chunk = len;
+		error = vm_fault(&b->own_mut_vmspace->vm_map, page_gpa,
+		    VM_PROT_READ, VM_FAULT_NORMAL);
+		if (error)
+			return error;
+		pindex = OFF_TO_IDX(page_gpa);
+		vm_object_hold(b->own_mut_object);
+		page = vm_page_lookup(b->own_mut_object, pindex);
+		if (page == NULL) {
+			vm_object_drop(b->own_mut_object);
+			return EFAULT;
+		}
+		bcopy((const void *)(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(page)) +
+		    off), dst, chunk);
+		vm_object_drop(b->own_mut_object);
+		gpa += chunk;
+		dst += chunk;
+		len -= chunk;
+	}
+	return 0;
+}
