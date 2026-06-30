@@ -315,6 +315,8 @@
 #define VMM_HPET_TIMER_CAP	(VMM_HPET_TIMER_PERIODIC_CAP | \
 				 VMM_HPET_TIMER_SIZE_CAP | \
 				 VMM_HPET_TIMER_ROUTE_CAP)
+#define VMM_FCH_PM_BASE		0xfed80300ULL
+#define VMM_FCH_PM_S5_RESET_STATUS 0x0c0ULL
 
 #define VMM_SVM_MSRBM_PAGES		2
 #define VMM_SVM_IOBM_PAGES		3
@@ -1817,6 +1819,101 @@ fail:
 	    "svm vcpu%u unsupported hpet mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
+	return 0;
+}
+
+static int
+vmm_svm_handle_fch_pm_mmio(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint64_t gpa)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint8_t fetched[15];
+	uint8_t modrm;
+	uint8_t opcode;
+	unsigned int reg;
+	int data16 = 0;
+	int fetched_inst = 0;
+	int inst_len;
+	int off = 0;
+	int rex = 0;
+	int modsz;
+	int size;
+
+	if (gpa != VMM_FCH_PM_BASE + VMM_FCH_PM_S5_RESET_STATUS)
+		return 0;
+
+	inst_len = vmcb->ctrl.inst_len;
+	if (inst_len == 0 || inst_len > (int)sizeof(vmcb->ctrl.inst_bytes)) {
+		if (vmm_svm_guest_read_va(svm, vmcb->state.rip, fetched,
+		    sizeof(fetched)) != 0)
+			goto fail;
+		bytes = fetched;
+		inst_len = (int)sizeof(fetched);
+		fetched_inst = 1;
+	}
+	while (off < inst_len) {
+		if (bytes[off] == 0x66) {
+			data16 = 1;
+			off++;
+			continue;
+		}
+		if (bytes[off] >= 0x40 && bytes[off] <= 0x4f) {
+			rex = bytes[off++];
+			continue;
+		}
+		break;
+	}
+	if (off >= inst_len)
+		goto fail;
+	opcode = bytes[off++];
+	size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+	if (size != 4)
+		goto fail;
+	switch (opcode) {
+	case 0x8b:
+		if (off >= inst_len)
+			goto fail;
+		modrm = bytes[off];
+		modsz = vmm_svm_modrm_size(bytes, inst_len, off);
+		if (modsz == 0)
+			goto fail;
+		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+		vmm_svm_gpr_write(svm, reg, 0xffffffffU, size);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u fch pm s5 reset status read val=0xffffffff rip=0x%jx",
+		    vc->imm_id, (uintmax_t)vmcb->state.rip);
+		vmcb->state.rip += off + modsz;
+		return 1;
+	case 0x89:
+		if (off >= inst_len)
+			goto fail;
+		modrm = bytes[off];
+		modsz = vmm_svm_modrm_size(bytes, inst_len, off);
+		if (modsz == 0)
+			goto fail;
+		vmcb->state.rip += off + modsz;
+		return 1;
+	case 0xc7:
+		if (off >= inst_len)
+			goto fail;
+		modrm = bytes[off];
+		if (((modrm >> 3) & 7) != 0)
+			goto fail;
+		modsz = vmm_svm_modrm_size(bytes, inst_len, off);
+		if (modsz == 0 || off + modsz + 4 > inst_len)
+			goto fail;
+		vmcb->state.rip += off + modsz + 4;
+		return 1;
+	default:
+		break;
+	}
+fail:
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u unsupported fch pm mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x fetched=%d",
+	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0],
+	    fetched_inst);
 	return 0;
 }
 
@@ -3621,6 +3718,8 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (gpa >= VMM_HPET_BASE && gpa < VMM_HPET_BASE + VMM_HPET_SIZE)
 		return vmm_svm_handle_hpet_mmio(svm, vc, gpa);
+	if (gpa == VMM_FCH_PM_BASE + VMM_FCH_PM_S5_RESET_STATUS)
+		return vmm_svm_handle_fch_pm_mmio(svm, vc, gpa);
 	if (gpa >= VMM_IOAPIC_BASE && gpa < VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
 		return vmm_svm_handle_ioapic_mmio(svm, vc, gpa);
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
