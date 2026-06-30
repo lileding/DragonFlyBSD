@@ -2,11 +2,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Filesystem presentation of the console file: machines/<name>/console, wired
- * to the vmm_console core.  Reads expose retained guest output; writes feed
- * host input to the guest (currently counted only).  vmm.ko only.
+ * to the vmm_console core.  Reads expose a blocking guest-output terminal
+ * stream; writes feed host input to the guest.  vmm.ko only.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -25,17 +26,38 @@ static int
 vmmfs_console_read(struct vmmfs_node *node, struct vop_read_args *ap)
 {
 	char cbuf[256];
+	struct uio *uio = ap->a_uio;
+	struct vmm_console *console;
+	struct vnode *vp = ap->a_vp;
+	int error;
+	int lock_error;
+	int nonblock;
 	size_t n;
 
-	if (ap->a_uio->uio_resid <= 0)
+	if (uio->uio_resid <= 0)
 		return 0;
-	n = vmm_console_read(&node->vn_machine->machine.own_mut_console,
-	    ap->a_uio->uio_offset, cbuf,
-	    (size_t)ap->a_uio->uio_resid < sizeof(cbuf) ?
-	    (size_t)ap->a_uio->uio_resid : sizeof(cbuf));
-	if (n == 0)
-		return 0;		/* EOF */
-	return uiomove(cbuf, n, ap->a_uio);
+	console = &node->vn_machine->machine.own_mut_console;
+	nonblock = (ap->a_ioflag & IO_NDELAY) != 0;
+	for (;;) {
+		error = vmm_console_read(console, &uio->uio_offset, cbuf,
+		    (size_t)uio->uio_resid < sizeof(cbuf) ?
+		    (size_t)uio->uio_resid : sizeof(cbuf), 1, &n);
+		if (error != EWOULDBLOCK || nonblock)
+			break;
+		vhold(vp);
+		vn_unlock(vp);
+		error = vmm_console_wait_output(console, uio->uio_offset);
+		lock_error = vn_lock(vp, LK_EXCLUSIVE | LK_RETRY |
+		    LK_FAILRECLAIM);
+		vdrop(vp);
+		if (lock_error)
+			return lock_error;
+		if (error)
+			return error;
+	}
+	if (error)
+		return error;
+	return uiomove(cbuf, n, uio);
 }
 
 static int
@@ -52,8 +74,11 @@ vmmfs_console_write(struct vmmfs_node *node, struct vop_write_args *ap)
 		error = uiomove(dump, d, uio);
 		if (error)
 			return error;
-		vmm_console_write(&node->vn_machine->machine.own_mut_console,
-		    dump, d);
+		error = vmm_console_write(
+		    &node->vn_machine->machine.own_mut_console, dump, d,
+		    (ap->a_ioflag & IO_NDELAY) != 0, &d);
+		if (error)
+			return error;
 		vmm_machine_console_input(&node->vn_machine->machine);
 	}
 	return 0;

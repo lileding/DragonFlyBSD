@@ -15,6 +15,7 @@ MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-core-vmm}
 VM_PREFIX=${VMM_MACHINE_PREFIX:-linuxcore}
 VM_COUNT=${VMM_LINUX_INSTANCES:-2}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-core-lifecycle-test.log}
+CONSOLE_LOG_DIR=${VMM_CONSOLE_LOG_DIR:-/var/tmp/dfvmm-linux-core-console}
 LOADER=${LINUX_LOADER:-/var/tmp/vmmld_linux_kexec}
 WRAPPER=${LINUX_WRAPPER:-/var/tmp/vmmld_linux_core_lifecycle}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-linux-core-$$-mount_vmm}
@@ -28,6 +29,7 @@ IDLE_SECONDS=${VMM_LINUX_IDLE_SECONDS:-5}
 LOADED=0
 MOUNTED=0
 CREATED_MACHINES=
+CONSOLE_READER_PIDS=
 
 say()
 {
@@ -65,6 +67,11 @@ machine_name()
 	printf '%s%d\n' "$VM_PREFIX" "$1"
 }
 
+console_log()
+{
+	printf '%s/%s.console\n' "$CONSOLE_LOG_DIR" "$1"
+}
+
 append_file()
 {
 	label=$1
@@ -96,10 +103,31 @@ dump_state()
 		for vm in $CREATED_MACHINES; do
 			if [ -d "$(mach "$vm")" ]; then
 				append_file "$vm-events" "$(mach "$vm")/events"
-				append_file "$vm-console" "$(mach "$vm")/console"
+				append_file "$vm-console" "$(console_log "$vm")"
 			fi
 		done
 	fi
+}
+
+start_console_reader()
+{
+	vm=$1
+
+	mkdir -p "$CONSOLE_LOG_DIR" || fail "mkdir $CONSOLE_LOG_DIR"
+	: >"$(console_log "$vm")" || fail "$vm console log"
+	cat "$(mach "$vm")/console" >>"$(console_log "$vm")" 2>>"$LOG" &
+	CONSOLE_READER_PIDS="$CONSOLE_READER_PIDS $!"
+}
+
+stop_console_readers()
+{
+	for pid in $CONSOLE_READER_PIDS; do
+		kill "$pid" >/dev/null 2>&1 || true
+	done
+	for pid in $CONSOLE_READER_PIDS; do
+		wait "$pid" >/dev/null 2>&1 || true
+	done
+	CONSOLE_READER_PIDS=
 }
 
 wait_file_pattern()
@@ -126,12 +154,32 @@ wait_file_pattern()
 	return 1
 }
 
+wait_console_pattern()
+{
+	vm=$1
+	pattern=$2
+	label=$3
+	wait_i=0
+
+	while [ "$wait_i" -lt "$TIMEOUT" ]; do
+		grep -q "$pattern" "$(console_log "$vm")" && return 0
+		sleep 1
+		wait_i=$((wait_i + 1))
+	done
+	{
+		printf -- '--- final %s: %s ---\n' "$label" "$(console_log "$vm")"
+		cat "$(console_log "$vm")" 2>&1
+		printf -- '--- end final %s ---\n' "$label"
+	} >>"$LOG"
+	return 1
+}
+
 write_console()
 {
 	vm=$1
 	line=$2
 
-	printf '%s\n' "$line" >"$(mach "$vm")/console" ||
+	printf '\033[1;1R%s\n' "$line" >"$(mach "$vm")/console" ||
 	    fail "$vm console write failed"
 }
 
@@ -145,6 +193,7 @@ create_machine()
 	printf '%s\n' "$MEM" >"$(mach "$vm")/mem" || fail "$vm mem"
 	printf '%s\n' "$WRAPPER" >"$(mach "$vm")/loader" || fail "$vm loader"
 	append_file "$vm-created-events" "$(mach "$vm")/events"
+	start_console_reader "$vm"
 }
 
 run_guest_smoke()
@@ -156,7 +205,7 @@ run_guest_smoke()
 
 	write_console "$vm" \
 	    "a=$base; echo \${a}_SMOKE_BEGIN; dfvmm-core-smoke; echo \${a}_SMOKE_END"
-	wait_file_pattern "$(mach "$vm")/console" "$marker" "$vm console" ||
+	wait_console_pattern "$vm" "$marker" "$vm console" ||
 	    fail "$vm smoke marker missing in round $round"
 }
 
@@ -171,7 +220,7 @@ wait_guest_shell()
 	while [ "$probe_i" -lt "$TIMEOUT" ]; do
 		write_console "$vm" "a=$base; echo \${a}_READY"
 		sleep 1
-		if cat "$(mach "$vm")/console" 2>>"$LOG" | grep -q "$marker"; then
+		if grep -q "$marker" "$(console_log "$vm")"; then
 			return 0
 		fi
 		probe_i=$((probe_i + 1))
@@ -188,7 +237,7 @@ run_guest_idle()
 
 	write_console "$vm" \
 	    "a=$base; echo \${a}_IDLE_BEGIN; sleep $IDLE_SECONDS; cat /proc/uptime; echo \${a}_IDLE_END"
-	wait_file_pattern "$(mach "$vm")/console" "$marker" "$vm console" ||
+	wait_console_pattern "$vm" "$marker" "$vm console" ||
 	    fail "$vm idle marker missing in round $round"
 }
 
@@ -244,6 +293,7 @@ unmount_vmmfs()
 cleanup()
 {
 	set +e
+	stop_console_readers
 	if [ "$MOUNTED" -eq 1 ]; then
 		for vm in $CREATED_MACHINES; do
 			if [ -d "$(mach "$vm")" ]; then
@@ -257,6 +307,7 @@ cleanup()
 		kldunload vmm >>"$LOG" 2>&1 || say "kldunload vmm failed"
 	fi
 	rm -f "$MOUNT_HELPER" "$WRAPPER"
+	rm -rf "$CONSOLE_LOG_DIR"
 }
 
 preflight()
@@ -309,7 +360,7 @@ start_round()
 	start_i=0
 	while [ "$start_i" -lt "$VM_COUNT" ]; do
 		vm=$(machine_name "$start_i")
-		wait_file_pattern "$(mach "$vm")/console" 'DFVMM_LINUX_SERIAL_OK' \
+		wait_console_pattern "$vm" 'DFVMM_LINUX_SERIAL_OK' \
 		    "$vm console" || fail "$vm serial console marker missing in round $round"
 		wait_guest_shell "$vm" "$round"
 		start_i=$((start_i + 1))

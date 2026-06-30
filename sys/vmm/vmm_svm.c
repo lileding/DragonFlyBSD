@@ -226,6 +226,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_COM1_IIR_NOPEND	0x01U
 #define VMM_COM1_IIR_THRI	0x02U
 #define VMM_COM1_IIR_RDI	0x04U
+#define VMM_COM1_FCR_ENABLE	0x01U
+#define VMM_COM1_FCR_RX_RESET	0x02U
+#define VMM_COM1_FCR_TX_RESET	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
 #define VMM_COM1_MCR_DTR	0x01U
 #define VMM_COM1_MCR_RTS	0x02U
@@ -233,6 +236,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_COM1_MCR_OUT2	0x08U
 #define VMM_COM1_MCR_LOOP	0x10U
 #define VMM_COM1_LSR_DR		0x01U
+#define VMM_COM1_LSR_OE		0x02U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_COM1_MSR_CTS	0x10U
@@ -585,10 +589,13 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_dll;
 	uint8_t mut_com1_dlm;
 	uint8_t mut_com1_ier;
+	uint8_t mut_com1_fcr;
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
 	uint8_t mut_com1_scr;
+	int mut_com1_rx_irq_pending;
 	int mut_com1_thr_irq_pending;
+	int mut_com1_lsr_overrun;
 	uint32_t mut_pci_cfg_addr;
 	uint8_t mut_pit_portb;
 	uint8_t mut_pit_ch0_read_state;
@@ -2058,7 +2065,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		    vc->imm_id, source, pin, vector, low, high);
 		return;
 	}
-	vmm_machine_logf(svm->borrow_imm_machine,
+	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x",
 	    vc->imm_id, source, pin, vector);
 	vmm_svm_avic_deliver(svm, vc, (uint8_t)vector, source);
@@ -2727,13 +2734,16 @@ vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 	if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0 ||
 	    vmm_console_guest_pending(console) == 0)
 		return;
+	if (svm->mut_com1_rx_irq_pending)
+		return;
 	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 rx irq held source=%s reason=out2_disabled",
 		    vc->imm_id, source);
 		return;
 	}
-	vmm_machine_logf(svm->borrow_imm_machine,
+	svm->mut_com1_rx_irq_pending = 1;
+	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u com1 rx irq source=%s", vc->imm_id, source);
 	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
 }
@@ -2746,12 +2756,12 @@ vmm_svm_com1_tx_notify(struct vmm_svm_backend *svm,
 	    svm->mut_com1_thr_irq_pending == 0)
 		return;
 	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 tx irq held source=%s reason=out2_disabled",
 		    vc->imm_id, source);
 		return;
 	}
-	vmm_machine_logf(svm->borrow_imm_machine,
+	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u com1 tx irq source=%s", vc->imm_id, source);
 	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
 }
@@ -2772,6 +2782,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			*valp = svm->mut_com1_dll;
 		} else if (vmm_console_guest_read(console, &ch)) {
 			*valp = (uint8_t)ch;
+			svm->mut_com1_rx_irq_pending = 0;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_rbr");
 		} else {
 			*valp = 0;
@@ -2803,6 +2814,10 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		lsr = VMM_COM1_LSR_THRE | VMM_COM1_LSR_TEMT;
 		if (vmm_console_guest_pending(console) != 0)
 			lsr |= VMM_COM1_LSR_DR;
+		if (svm->mut_com1_lsr_overrun) {
+			lsr |= VMM_COM1_LSR_OE;
+			svm->mut_com1_lsr_overrun = 0;
+		}
 		*valp = lsr;
 		return 1;
 	case VMM_COM1_MSR:
@@ -2852,6 +2867,8 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	case VMM_COM1_IER_DLM:
 		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
 			svm->mut_com1_ier = val & 0x0fU;
+			if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0)
+				svm->mut_com1_rx_irq_pending = 0;
 			if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0)
 				svm->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_ier");
@@ -2861,12 +2878,24 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		}
 		return 1;
 	case VMM_COM1_IIR_FCR:
+		svm->mut_com1_fcr = val & VMM_COM1_FCR_ENABLE;
+		if ((val & VMM_COM1_FCR_RX_RESET) != 0) {
+			vmm_console_guest_reset_input(
+			    &svm->borrow_imm_machine->own_mut_console);
+			svm->mut_com1_rx_irq_pending = 0;
+			svm->mut_com1_lsr_overrun = 0;
+		}
+		if ((val & VMM_COM1_FCR_TX_RESET) != 0)
+			svm->mut_com1_thr_irq_pending = 0;
+		vmm_svm_com1_rx_notify(svm, vc, "com1_fcr");
 		return 1;
 	case VMM_COM1_LCR:
 		svm->mut_com1_lcr = val & 0xffU;
 		return 1;
 	case VMM_COM1_MCR:
 		svm->mut_com1_mcr = val & 0xffU;
+		if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0)
+			svm->mut_com1_rx_irq_pending = 0;
 		vmm_svm_com1_rx_notify(svm, vc, "com1_mcr");
 		vmm_svm_com1_tx_notify(svm, vc, "com1_mcr");
 		return 1;

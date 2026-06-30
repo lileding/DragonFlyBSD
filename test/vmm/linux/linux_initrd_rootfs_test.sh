@@ -11,12 +11,14 @@ MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-linux-initrd-$$-mount_vmm}
 KERNEL=${LINUX_KERNEL:-/var/tmp/alpine-vmlinuz-virt}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-initrd-rootfs-test.log}
+CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-initrd-rootfs-console.log}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-30}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 
 LOADED=0
 MOUNTED=0
+CONSOLE_READER_PID=
 
 say()
 {
@@ -52,10 +54,26 @@ dump_state()
 			printf '%s\n' '--- events ---'
 			cat "$(mach)/events" 2>&1
 			printf '%s\n' '--- console ---'
-			cat "$(mach)/console" 2>&1
+			cat "$CONSOLE_LOG" 2>&1
 		fi
 		printf '%s\n' '--- end state ---'
 	} >>"$LOG"
+}
+
+start_console_reader()
+{
+	: >"$CONSOLE_LOG" || fail "create console log"
+	cat "$(mach)/console" >>"$CONSOLE_LOG" 2>>"$LOG" &
+	CONSOLE_READER_PID=$!
+}
+
+stop_console_reader()
+{
+	if [ -n "$CONSOLE_READER_PID" ]; then
+		kill "$CONSOLE_READER_PID" >/dev/null 2>&1 || true
+		wait "$CONSOLE_READER_PID" >/dev/null 2>&1 || true
+		CONSOLE_READER_PID=
+	fi
 }
 
 wait_console_pattern()
@@ -65,22 +83,22 @@ wait_console_pattern()
 	i=0
 
 	while [ "$i" -lt "$TIMEOUT" ]; do
-		out=$(cat "$(mach)/console" 2>>"$LOG")
-		{
-			printf '%s\n' "--- poll $label ---"
-			printf '%s\n' "$out"
-			printf '%s\n' "--- end poll $label ---"
-		} >>"$LOG"
-		printf '%s\n' "$out" | grep -q "$pattern" && return 0
+		grep -q "$pattern" "$CONSOLE_LOG" && return 0
 		sleep 1
 		i=$((i + 1))
 	done
+	{
+		printf '%s\n' "--- final console $label ---"
+		cat "$CONSOLE_LOG" 2>&1
+		printf '%s\n' "--- end final console $label ---"
+	} >>"$LOG"
 	return 1
 }
 
 cleanup()
 {
 	set +e
+	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
 		say "cleanup: force stop $VM"
 		echo force >"$(mach)/stopped" 2>>"$LOG"
@@ -142,6 +160,7 @@ run mkdir "$(mach)"
 printf '1\n' >"$(mach)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(mach)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
+start_console_reader
 run rm "$(mach)/stopped"
 
 wait_console_pattern 'DFVMM_LINUX_INITRD_ROOTFS_OK' initrd ||
