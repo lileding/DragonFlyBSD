@@ -208,13 +208,18 @@
 #define VMM_COM1_MSR		6U
 #define VMM_COM1_SCR		7U
 #define VMM_COM1_IER_RDI	0x01U
+#define VMM_COM1_IER_THRI	0x02U
 #define VMM_COM1_IIR_NOPEND	0x01U
+#define VMM_COM1_IIR_THRI	0x02U
 #define VMM_COM1_IIR_RDI	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
 #define VMM_COM1_MCR_OUT2	0x08U
 #define VMM_COM1_LSR_DR		0x01U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
+#define VMM_COM1_MSR_CTS	0x10U
+#define VMM_COM1_MSR_DSR	0x20U
+#define VMM_COM1_MSR_DCD	0x80U
 #define VMM_COM1_IOAPIC_PIN	4U
 #define VMM_COM2_BASE		0x2f8U
 #define VMM_COM3_BASE		0x3e8U
@@ -562,6 +567,7 @@ struct vmm_svm_backend {
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
 	uint8_t mut_com1_scr;
+	int mut_com1_thr_irq_pending;
 	uint32_t mut_pci_cfg_addr;
 	uint8_t mut_pit_portb;
 	uint8_t mut_pit_ch0_read_state;
@@ -2704,6 +2710,24 @@ vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
 }
 
+static void
+vmm_svm_com1_tx_notify(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, const char *source)
+{
+	if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) == 0 ||
+	    svm->mut_com1_thr_irq_pending == 0)
+		return;
+	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u com1 tx irq held source=%s reason=out2_disabled",
+		    vc->imm_id, source);
+		return;
+	}
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u com1 tx irq source=%s", vc->imm_id, source);
+	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
+}
+
 static int
 vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
     unsigned int reg, int size, uint32_t *valp)
@@ -2730,9 +2754,16 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		    0 : svm->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		*valp = ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
-		    vmm_console_guest_pending(console) != 0) ?
-		    VMM_COM1_IIR_RDI : VMM_COM1_IIR_NOPEND;
+		if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+		    vmm_console_guest_pending(console) != 0) {
+			*valp = VMM_COM1_IIR_RDI;
+		} else if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0 &&
+		    svm->mut_com1_thr_irq_pending != 0) {
+			*valp = VMM_COM1_IIR_THRI;
+			svm->mut_com1_thr_irq_pending = 0;
+		} else {
+			*valp = VMM_COM1_IIR_NOPEND;
+		}
 		return 1;
 	case VMM_COM1_LCR:
 		*valp = svm->mut_com1_lcr;
@@ -2747,7 +2778,8 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		*valp = lsr;
 		return 1;
 	case VMM_COM1_MSR:
-		*valp = 0;
+		*valp = VMM_COM1_MSR_CTS | VMM_COM1_MSR_DSR |
+		    VMM_COM1_MSR_DCD;
 		return 1;
 	case VMM_COM1_SCR:
 		*valp = svm->mut_com1_scr;
@@ -2771,12 +2803,17 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			ch = (char)(val & 0xffU);
 			vmm_console_guest_write(
 			    &svm->borrow_imm_machine->own_mut_console, &ch, 1);
+			svm->mut_com1_thr_irq_pending = 1;
+			vmm_svm_com1_tx_notify(svm, vc, "com1_thr");
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
 		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
 			svm->mut_com1_ier = val & 0x0fU;
+			if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0)
+				svm->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_ier");
+			vmm_svm_com1_tx_notify(svm, vc, "com1_ier");
 		}
 		return 1;
 	case VMM_COM1_IIR_FCR:
@@ -2787,6 +2824,7 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	case VMM_COM1_MCR:
 		svm->mut_com1_mcr = val & 0xffU;
 		vmm_svm_com1_rx_notify(svm, vc, "com1_mcr");
+		vmm_svm_com1_tx_notify(svm, vc, "com1_mcr");
 		return 1;
 	case VMM_COM1_SCR:
 		svm->mut_com1_scr = val & 0xffU;
