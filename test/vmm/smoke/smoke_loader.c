@@ -34,7 +34,9 @@
 #define IOAPIC_PDPT_INDEX	((IOAPIC_GPA >> 30) & 0x1ffULL)
 #define IOAPIC_PD_INDEX	((IOAPIC_GPA >> 21) & 0x1ffULL)
 #define APIC_PD_INDEX	((APIC_GPA >> 21) & 0x1ffULL)
+#define APIC_REG_ID	0x020U
 #define APIC_REG_EOI	0x0b0U
+#define APIC_REG_SVR	0x0f0U
 #define APIC_REG_LVTT	0x320U
 #define APIC_REG_LDR	0x0d0U
 #define APIC_REG_TMICT	0x380U
@@ -755,6 +757,58 @@ guest_avicnoaccel_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_avicread_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_id_to_eax[] =
+	    { 0x8b, 0x87, 0x20, 0x00, 0x00, 0x00 };
+	static const uint8_t mov_svr_to_eax[] =
+	    { 0x8b, 0x87, 0xf0, 0x00, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_lvtt_to_eax[] =
+	    { 0x8b, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-avicread-ok\n";
+	size_t len = 0;
+	size_t fail_label;
+	size_t jid;
+	size_t jsvr;
+	size_t jlvtt;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0xdeadbeefU);
+	emit(code, &len, cap, mov_id_to_eax, sizeof(mov_id_to_eax));
+	emit_cmp_eax(code, &len, cap, 0);
+	jid = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0xdeadbeefU);
+	emit(code, &len, cap, mov_svr_to_eax, sizeof(mov_svr_to_eax));
+	emit_cmp_eax(code, &len, cap, 0x000001ffU);
+	jsvr = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x0001002eU);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 0xdeadbeefU);
+	emit(code, &len, cap, mov_lvtt_to_eax, sizeof(mov_lvtt_to_eax));
+	emit_cmp_eax(code, &len, cap, 0x0001002eU);
+	jlvtt = emit_jne32(code, &len, cap);
+
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, jid, fail_label);
+	patch_rel32(code, jsvr, fail_label);
+	patch_rel32(code, jlvtt, fail_label);
+	return len;
+}
+
+static size_t
 guest_pic_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -1421,6 +1475,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_avicsvr_code(code, cap);
 	} else if (strcmp(mode, "avicnoaccel") == 0) {
 		return guest_avicnoaccel_code(code, cap);
+	} else if (strcmp(mode, "avicread") == 0) {
+		return guest_avicread_code(code, cap);
 	} else if (strcmp(mode, "pm64") == 0) {
 		return guest_pm64_code(code, cap);
 	} else if (strcmp(mode, "msrpatch") == 0) {
@@ -1640,7 +1696,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

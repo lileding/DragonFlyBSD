@@ -648,6 +648,15 @@ vmm_svm_avic_apic_write32(struct vmm_svm_backend *svm, uint32_t reg,
 	*ptr = val;
 }
 
+static uint32_t
+vmm_svm_avic_apic_read32(struct vmm_svm_backend *svm, uint32_t reg)
+{
+	volatile uint32_t *ptr;
+
+	ptr = (volatile uint32_t *)((uint8_t *)svm->own_mut_avic_apic_page + reg);
+	return *ptr;
+}
+
 static vm_page_t
 vmm_svm_avic_access_page_alloc(uint64_t *pap)
 {
@@ -1569,6 +1578,9 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 	int modsz;
 	int size;
 
+	if (vmcb->ctrl.inst_len == 0 ||
+	    vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
+		goto fail;
 	while (off < vmcb->ctrl.inst_len) {
 		if (bytes[off] == 0x66) {
 			data16 = 1;
@@ -1786,6 +1798,9 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 	int modsz;
 	int size;
 
+	if (vmcb->ctrl.inst_len == 0 ||
+	    vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
+		goto fail;
 	while (off < vmcb->ctrl.inst_len) {
 		if (bytes[off] == 0x66) {
 			data16 = 1;
@@ -2919,6 +2934,76 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 }
 
 static int
+vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint32_t apic_reg)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint32_t value;
+	uint8_t modrm;
+	uint8_t opcode;
+	unsigned int reg;
+	int data16 = 0;
+	int off = 0;
+	int rex = 0;
+	int modsz;
+	int size;
+
+	if (apic_reg == VMM_SVM_APIC_REG_TMCCT) {
+		if (!svm->mut_lapic_timer_active ||
+		    svm->mut_lapic_timer_interval_ticks == 0 ||
+		    (int)(svm->mut_lapic_timer_deadline - ticks) <= 0) {
+			value = 0;
+		} else {
+			value = (uint32_t)
+			    (((uint64_t)svm->mut_lapic_timer_tmict *
+			    (uint64_t)(svm->mut_lapic_timer_deadline - ticks)) /
+			    svm->mut_lapic_timer_interval_ticks);
+		}
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT,
+		    value);
+	} else {
+		value = vmm_svm_avic_apic_read32(svm, apic_reg);
+	}
+	if (vmcb->ctrl.inst_len == 0)
+		return 1;
+	if (vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
+		goto fail;
+	while (off < vmcb->ctrl.inst_len) {
+		if (bytes[off] == 0x66) {
+			data16 = 1;
+			off++;
+			continue;
+		}
+		if (bytes[off] >= 0x40 && bytes[off] <= 0x4f) {
+			rex = bytes[off++];
+			continue;
+		}
+		break;
+	}
+	if (off >= vmcb->ctrl.inst_len)
+		goto fail;
+	opcode = bytes[off++];
+	size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+	if (opcode != 0x8b || size != 4 || off >= vmcb->ctrl.inst_len)
+		goto fail;
+	modrm = bytes[off];
+	modsz = vmm_svm_modrm_size(bytes, vmcb->ctrl.inst_len, off);
+	if (modsz == 0)
+		goto fail;
+	reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+	vmm_svm_gpr_write(svm, reg, value, size);
+	vmm_svm_advance_rip(vmcb);
+	return 1;
+fail:
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u unsupported avic read offset=0x%x rip=0x%jx inst_len=%u inst0=0x%x",
+	    vc->imm_id, apic_reg, (uintmax_t)vmcb->state.rip,
+	    vmcb->ctrl.inst_len, bytes[0]);
+	return 0;
+}
+
+static int
 vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
     struct vmm_vcpu_thread *vc)
 {
@@ -3040,6 +3125,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		switch (value) {
 		case VMM_SVM_APIC_REG_ID:
 		case VMM_SVM_APIC_REG_SVR:
+		case VMM_SVM_APIC_REG_ESR:
 		case VMM_SVM_APIC_REG_LVTT:
 		case VMM_SVM_APIC_REG_LVT_THERMAL:
 		case VMM_SVM_APIC_REG_LVT_PC:
@@ -3047,23 +3133,9 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		case VMM_SVM_APIC_REG_LVT1:
 		case VMM_SVM_APIC_REG_LVT_ERROR:
 		case VMM_SVM_APIC_REG_TMICT:
-		case VMM_SVM_APIC_REG_TDCR:
-			return 1;
 		case VMM_SVM_APIC_REG_TMCCT:
-			if (!svm->mut_lapic_timer_active ||
-			    svm->mut_lapic_timer_interval_ticks == 0 ||
-			    (int)(svm->mut_lapic_timer_deadline - ticks) <= 0) {
-				value = 0;
-			} else {
-				value = (uint32_t)
-				    (((uint64_t)svm->mut_lapic_timer_tmict *
-				    (uint64_t)(svm->mut_lapic_timer_deadline -
-				    ticks)) /
-				    svm->mut_lapic_timer_interval_ticks);
-			}
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT,
-			    value);
-			return 1;
+		case VMM_SVM_APIC_REG_TDCR:
+			return vmm_svm_handle_avic_read(svm, vc, value);
 		default:
 			break;
 		}
