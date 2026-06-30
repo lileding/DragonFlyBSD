@@ -113,19 +113,26 @@ check_linux_boot_data()
 	    fail "missing HPET signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600)) 4)" = "44534454" ] ||
 	    fail "missing DSDT signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "61000000" ] ||
+	    fail "DSDT COM1 table length missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 45)) 4)" = "434f4d31" ] ||
+	    fail "DSDT COM1 device missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
 	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70400 + 52)) 12)" = \
 	    "010c01000000c0fe00000000" ] ||
 	    fail "MADT IOAPIC entry missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70400 + 64)) 10)" = \
+	    "020a0004040000000500" ] ||
+	    fail "MADT COM1 interrupt override missing in $case_label case"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 20 "$case_label RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 36 "$case_label extended RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70100)) 60 "$case_label XSDT"
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
-	check_zero_sum "$MEM_FILE" $((0x70400)) 64 "$case_label MADT"
+	check_zero_sum "$MEM_FILE" $((0x70400)) 74 "$case_label MADT"
 	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
-	check_zero_sum "$MEM_FILE" $((0x70600)) 36 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x70600)) 97 "$case_label DSDT"
 }
 
 run_loader_case()

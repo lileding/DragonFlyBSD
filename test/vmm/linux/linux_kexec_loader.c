@@ -79,6 +79,7 @@
 #define ACPI_FADT_SIZE		276U
 #define ACPI_MADT_LOCAL_APIC_SIZE	8U
 #define ACPI_MADT_IOAPIC_SIZE		12U
+#define ACPI_MADT_INTERRUPT_OVERRIDE_SIZE	10U
 #define ACPI_FADT_WBINVD	0x00000001U
 #define ACPI_FADT_HW_REDUCED	0x00100000U
 #define ACPI_FADT_NO_VGA	0x0004U
@@ -86,7 +87,27 @@
 #define ACPI_SPACE_SYSTEM_IO	1U
 #define ACPI_ACCESS_DWORD	3U
 #define ACPI_MADT_LOCAL_APIC_ENABLED	0x00000001U
+#define ACPI_MADT_POLARITY_ACTIVE_HIGH	0x0001U
+#define ACPI_MADT_TRIGGER_EDGE		0x0004U
+#define ACPI_ISA_BUS			0U
+#define ACPI_COM1_IRQ			4U
 #define ACPI_PM_TIMER_PORT	0x408U
+
+static const uint8_t vmm_linux_dsdt[] = {
+	0x44, 0x53, 0x44, 0x54, 0x61, 0x00, 0x00, 0x00,
+	0x02, 0xd5, 0x44, 0x46, 0x56, 0x4d, 0x4d, 0x00,
+	0x44, 0x46, 0x56, 0x4d, 0x4d, 0x00, 0x00, 0x00,
+	0x01, 0x00, 0x00, 0x00, 0x49, 0x4e, 0x54, 0x4c,
+	0x12, 0x12, 0x25, 0x20, 0x10, 0x3c, 0x5f, 0x53,
+	0x42, 0x5f, 0x5b, 0x82, 0x35, 0x43, 0x4f, 0x4d,
+	0x31, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41,
+	0xd0, 0x05, 0x01, 0x08, 0x5f, 0x55, 0x49, 0x44,
+	0x01, 0x14, 0x09, 0x5f, 0x53, 0x54, 0x41, 0x00,
+	0xa4, 0x0a, 0x0f, 0x08, 0x5f, 0x43, 0x52, 0x53,
+	0x11, 0x10, 0x0a, 0x0d, 0x47, 0x01, 0xf8, 0x03,
+	0xf8, 0x03, 0x01, 0x08, 0x22, 0x10, 0x00, 0x79,
+	0x00,
+};
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ARCH_X64	1
@@ -570,6 +591,7 @@ build_acpi_tables(uint8_t *mem)
 	uint8_t *dsdt;
 	uint8_t *lapic;
 	uint8_t *ioapic;
+	uint8_t *iso;
 	uint32_t xsdt_len;
 	uint32_t madt_len;
 
@@ -596,8 +618,7 @@ build_acpi_tables(uint8_t *mem)
 	write_acpi_checksum(xsdt, xsdt_len, 9);
 
 	dsdt = mem + ACPI_DSDT_GPA;
-	write_acpi_header(dsdt, "DSDT", ACPI_TABLE_HEADER_SIZE, 2);
-	write_acpi_checksum(dsdt, ACPI_TABLE_HEADER_SIZE, 9);
+	memcpy(dsdt, vmm_linux_dsdt, sizeof(vmm_linux_dsdt));
 
 	fadt = mem + ACPI_FADT_GPA;
 	write_acpi_header(fadt, "FACP", ACPI_FADT_SIZE, 6);
@@ -619,7 +640,7 @@ build_acpi_tables(uint8_t *mem)
 
 	madt = mem + ACPI_MADT_GPA;
 	madt_len = ACPI_TABLE_HEADER_SIZE + 8 + ACPI_MADT_LOCAL_APIC_SIZE +
-	    ACPI_MADT_IOAPIC_SIZE;
+	    ACPI_MADT_IOAPIC_SIZE + ACPI_MADT_INTERRUPT_OVERRIDE_SIZE;
 	write_acpi_header(madt, "APIC", madt_len, 3);
 	write32(madt, 36, (uint32_t)ACPI_LAPIC_GPA);
 	write32(madt, 40, 0);
@@ -636,6 +657,14 @@ build_acpi_tables(uint8_t *mem)
 	write8(ioapic, 3, 0);
 	write32(ioapic, 4, ACPI_IOAPIC_GPA);
 	write32(ioapic, 8, 0);
+	iso = ioapic + ACPI_MADT_IOAPIC_SIZE;
+	write8(iso, 0, 2);
+	write8(iso, 1, ACPI_MADT_INTERRUPT_OVERRIDE_SIZE);
+	write8(iso, 2, ACPI_ISA_BUS);
+	write8(iso, 3, ACPI_COM1_IRQ);
+	write32(iso, 4, ACPI_COM1_IRQ);
+	write16(iso, 8, ACPI_MADT_POLARITY_ACTIVE_HIGH |
+	    ACPI_MADT_TRIGGER_EDGE);
 	write_acpi_checksum(madt, madt_len, 9);
 
 	hpet = mem + ACPI_HPET_GPA;

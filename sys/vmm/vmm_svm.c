@@ -213,12 +213,17 @@
 #define VMM_COM1_IIR_THRI	0x02U
 #define VMM_COM1_IIR_RDI	0x04U
 #define VMM_COM1_LCR_DLAB	0x80U
+#define VMM_COM1_MCR_DTR	0x01U
+#define VMM_COM1_MCR_RTS	0x02U
+#define VMM_COM1_MCR_OUT1	0x04U
 #define VMM_COM1_MCR_OUT2	0x08U
+#define VMM_COM1_MCR_LOOP	0x10U
 #define VMM_COM1_LSR_DR		0x01U
 #define VMM_COM1_LSR_THRE	0x20U
 #define VMM_COM1_LSR_TEMT	0x40U
 #define VMM_COM1_MSR_CTS	0x10U
 #define VMM_COM1_MSR_DSR	0x20U
+#define VMM_COM1_MSR_RI		0x40U
 #define VMM_COM1_MSR_DCD	0x80U
 #define VMM_COM1_IOAPIC_PIN	4U
 #define VMM_COM2_BASE		0x2f8U
@@ -563,6 +568,8 @@ struct vmm_svm_backend {
 	uint64_t mut_hpet_timer_fsb[VMM_HPET_TIMER_COUNT];
 	uint64_t mut_pm_timer_tsc;
 	uint64_t mut_gprs[VMM_X64_NGPR];
+	uint8_t mut_com1_dll;
+	uint8_t mut_com1_dlm;
 	uint8_t mut_com1_ier;
 	uint8_t mut_com1_lcr;
 	uint8_t mut_com1_mcr;
@@ -2741,7 +2748,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	switch (reg) {
 	case VMM_COM1_RBR_THR_DLL:
 		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) != 0) {
-			*valp = 0;
+			*valp = svm->mut_com1_dll;
 		} else if (vmm_console_guest_read(console, &ch)) {
 			*valp = (uint8_t)ch;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_rbr");
@@ -2751,7 +2758,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		return 1;
 	case VMM_COM1_IER_DLM:
 		*valp = (svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) ?
-		    0 : svm->mut_com1_ier;
+		    svm->mut_com1_dlm : svm->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
 		if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
@@ -2778,8 +2785,20 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		*valp = lsr;
 		return 1;
 	case VMM_COM1_MSR:
-		*valp = VMM_COM1_MSR_CTS | VMM_COM1_MSR_DSR |
-		    VMM_COM1_MSR_DCD;
+		if ((svm->mut_com1_mcr & VMM_COM1_MCR_LOOP) != 0) {
+			*valp = 0;
+			if ((svm->mut_com1_mcr & VMM_COM1_MCR_RTS) != 0)
+				*valp |= VMM_COM1_MSR_CTS;
+			if ((svm->mut_com1_mcr & VMM_COM1_MCR_DTR) != 0)
+				*valp |= VMM_COM1_MSR_DSR;
+			if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT1) != 0)
+				*valp |= VMM_COM1_MSR_RI;
+			if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0)
+				*valp |= VMM_COM1_MSR_DCD;
+		} else {
+			*valp = VMM_COM1_MSR_CTS | VMM_COM1_MSR_DSR |
+			    VMM_COM1_MSR_DCD;
+		}
 		return 1;
 	case VMM_COM1_SCR:
 		*valp = svm->mut_com1_scr;
@@ -2805,6 +2824,8 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			    &svm->borrow_imm_machine->own_mut_console, &ch, 1);
 			svm->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_tx_notify(svm, vc, "com1_thr");
+		} else {
+			svm->mut_com1_dll = val & 0xffU;
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
@@ -2814,6 +2835,8 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 				svm->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_ier");
 			vmm_svm_com1_tx_notify(svm, vc, "com1_ier");
+		} else {
+			svm->mut_com1_dlm = val & 0xffU;
 		}
 		return 1;
 	case VMM_COM1_IIR_FCR:
