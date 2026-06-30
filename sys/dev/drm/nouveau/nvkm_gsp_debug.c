@@ -715,6 +715,18 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->kms_page_flip_reject_count);
 	sbuf_printf(sb, "page_flip_error_count = %llu\n",
 	    (unsigned long long)sc->kms_page_flip_error_count);
+	sbuf_printf(sb, "page_flip_pending_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_pending_count);
+	sbuf_printf(sb, "page_flip_pending_complete_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_pending_complete_count);
+	sbuf_printf(sb, "page_flip_pending_cancel_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_pending_cancel_count);
+	sbuf_printf(sb, "page_flip_pending_busy_count = %llu\n",
+	    (unsigned long long)sc->kms_page_flip_pending_busy_count);
+	sbuf_printf(sb, "page_flip_pending_head_mask = 0x%08x\n",
+	    sc->kms_page_flip_pending_head_mask);
+	sbuf_printf(sb, "page_flip_pending_last_status = 0x%08x\n",
+	    sc->kms_page_flip_pending_last_status);
 	sbuf_printf(sb, "atomic_commit_tail_count = %llu\n",
 	    (unsigned long long)sc->kms_atomic_commit_tail_count);
 	sbuf_printf(sb, "atomic_vblank_wait_count = %llu\n",

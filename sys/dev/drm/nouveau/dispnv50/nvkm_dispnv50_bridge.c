@@ -1695,6 +1695,68 @@ nvkm_dispnv50_ctxdma_new(struct nv50_dmac *dmac, s32 oclass, int inst,
 	return 0;
 }
 
+/*
+ * Map the shared display notifier BO into a stable BAR1 window.
+ *
+ * Ownership:
+ *   The dispnv50 state owns the BAR1 mapping recorded in sync_bo.  The mapping
+ *   aliases the existing sync_mem VRAM allocation; this helper does not take
+ *   ownership of sync_mem itself.
+ *
+ * Lifetime:
+ *   The mapping lives until nvkm_dispnv50_sync_unmap() during display teardown.
+ *   Once installed, nouveau_bo_rd32()/wr32() use the fixed GVA instead of
+ *   allocating transient BAR1 mappings.
+ *
+ * Threading:
+ *   Process context only.  The map operation may allocate BAR1 GVA state and
+ *   invalidate BAR1 page tables.  The fixed mapping it creates may later be read
+ *   from vblank interrupt context.
+ */
+static int
+nvkm_dispnv50_sync_map(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	uint64_t gva;
+	uint64_t size;
+	int ret;
+
+	if (sc == NULL || state == NULL || state->sync_mem == NULL)
+		return -ENODEV;
+	if (state->sync_bo.bar1_size != 0)
+		return 0;
+
+	size = nvkm_memory_size(state->sync_mem);
+	ret = nvkm_gsp_bar1_map_existing_range(sc,
+	    nvkm_memory_addr(state->sync_mem), size, &gva);
+	if (ret != 0)
+		return ret;
+
+	state->sync_bo.bar1_gva = gva;
+	state->sync_bo.bar1_size = size;
+	return 0;
+}
+
+/*
+ * Unmap the fixed display notifier BAR1 window.
+ *
+ * Ownership: consumes the BAR1 mapping stored in sync_bo.
+ * Lifetime: called before sync_mem is released.
+ * Threading: teardown/process context only; may update BAR1 page tables.
+ */
+static void
+nvkm_dispnv50_sync_unmap(struct nvkm_softc *sc,
+    struct nvkm_dispnv50_state *state)
+{
+	if (sc == NULL || state == NULL || state->sync_bo.bar1_size == 0)
+		return;
+
+	nvkm_gsp_bar1_unmap_existing_range(sc, state->sync_bo.bar1_gva,
+	    state->sync_bo.bar1_size);
+	state->sync_bo.bar1_gva = 0;
+	state->sync_bo.bar1_size = 0;
+}
+
 static int
 nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
     struct nvkm_dispnv50_state *state)
@@ -1704,7 +1766,7 @@ nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
 
 	state->sync_bo.sc = sc;
 	if (state->sync_mem != NULL)
-		return 0;
+		return nvkm_dispnv50_sync_map(sc, state);
 
 	ret = nvkm_memory_new(sc->core_device, NVKM_MEM_TARGET_VRAM, 0x1000,
 	    0x1000, false, &state->sync_mem);
@@ -1719,6 +1781,13 @@ nvkm_dispnv50_sync_ensure(struct nvkm_softc *sc,
 	}
 
 	state->sync_bo.offset = nvkm_memory_addr(state->sync_mem);
+	ret = nvkm_dispnv50_sync_map(sc, state);
+	if (ret != 0) {
+		nvkm_memory_unref(&state->sync_mem);
+		memset(&state->sync_bo, 0, sizeof(state->sync_bo));
+		return ret;
+	}
+
 	nvkm_infof(sc->dev,
 	    "drm: dispnv50 sync buffer staged vram=0x%llx offset=0x%llx "
 	    "relative=0x%llx\n",
@@ -4251,6 +4320,87 @@ nvkm_dispnv50_wndw_wait_armed(struct nvkm_softc *sc,
 }
 
 /*
+ * Return the next notifier offset that a primary-window UPDATE will use.
+ *
+ * Ownership:
+ *   Borrows the display state and window object.  The returned offset is a
+ *   scalar snapshot; the caller owns no notifier BO reference through it.
+ *
+ * Lifetime:
+ *   Valid for the next serialized window notifier enable on this window.  The
+ *   caller must register any pending flip before submitting the matching UPDATE,
+ *   because wndw_ntfy_enable() toggles the window's next offset.
+ *
+ * Threading:
+ *   Commit-worker context only.  It may initialize the window object and must
+ *   not run from interrupt context.
+ */
+int
+nvkm_dispnv50_plane_next_notifier(struct nvkm_softc *sc, uint32_t win,
+    uint32_t *offset)
+{
+	struct nvkm_dispnv50_state *state;
+	struct nv50_wndw *wndw;
+	int ret;
+
+	if (sc == NULL || offset == NULL || sc->disp == NULL)
+		return -ENODEV;
+
+	ret = nvkm_dispnv50_wndw_init(sc, win);
+	if (ret != 0)
+		return ret;
+
+	state = sc->dispnv50;
+	if (state == NULL || win >= nitems(state->wndw) ||
+	    state->wndw[win] == NULL)
+		return -ENODEV;
+
+	wndw = state->wndw[win];
+	*offset = wndw->ntfy;
+	return 0;
+}
+
+/*
+ * Test a display window notifier from vblank interrupt context.
+ *
+ * Ownership:
+ *   Borrows the fixed BAR1 mapping owned by the dispnv50 sync BO.  The caller
+ *   owns the optional status output storage.
+ *
+ * Lifetime:
+ *   The display state and its fixed sync BO mapping must outlive the interrupt
+ *   call.  KMS teardown drains commits before destroying that mapping.
+ *
+ * Threading:
+ *   IRQ-safe.  This function only performs bounds checks and one BAR1 MMIO read
+ *   through the pre-installed mapping; it must not allocate, sleep, or take GSP
+ *   or modeset locks.
+ */
+bool
+nvkm_dispnv50_window_notifier_begun_irq(struct nvkm_softc *sc,
+    uint32_t offset, uint32_t *status)
+{
+	struct nvkm_dispnv50_state *state;
+	u32 value;
+
+	if (status != NULL)
+		*status = 0;
+	if (sc == NULL)
+		return false;
+	state = sc->dispnv50;
+	if (state == NULL || state->disp.sync == NULL ||
+	    state->sync_bo.bar1_size == 0 ||
+	    offset + sizeof(u32) > state->sync_bo.bar1_size)
+		return false;
+
+	value = nouveau_bo_rd32(state->disp.sync, offset / sizeof(u32));
+	if (status != NULL)
+		*status = value;
+	return NVBO_TD32(state->disp.sync, offset, NV_DISP_NOTIFIER, _0,
+	    STATUS, ==, BEGUN);
+}
+
+/*
  * Emit window methods for one KMS transaction without submitting UPDATE.
  *
  * Ownership:
@@ -4287,17 +4437,14 @@ nvkm_dispnv50_window_emit_program(struct nvkm_softc *sc,
 	}
 
 	/*
-	 * A page-flip only changes the scanout buffer (the image); notifier,
-	 * ILUT, CSC and blend were programmed at modeset/color update and are
-	 * unchanged, so the async and image-only paths push image_set + UPDATE
-	 * only.  This mirrors nouveau's nv50_wndw_flush_set gating each emitter
-	 * on a dirty bit.
+	 * A page-flip only changes the scanout buffer (the image), but it still
+	 * arms a fresh window notifier so vblank IRQ can prove the UPDATE was
+	 * accepted before completing the DRM pageflip event.  ILUT, CSC and blend
+	 * stay on the dirty-bit path and are only emitted when needed.
 	 */
-	if (!async) {
-		ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, asyw);
-		if (ret != 0)
-			return ret;
-	}
+	ret = nvkm_dispnv50_wndw_ntfy_enable(sc, state, wndw, asyw);
+	if (ret != 0)
+		return ret;
 	ret = wndw->func->image_set(wndw, asyw);
 	if (ret != 0)
 		return ret;
@@ -6346,7 +6493,7 @@ nvkm_dispnv50_head_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 
 int
 nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
-    uint32_t win, uint32_t display_id, bool color_update)
+    uint32_t win, uint32_t display_id, bool async_update, bool color_update)
 {
 	struct nvkm_dispnv50_state *state;
 	const struct nvkm_dispnv50_wndw_armed *wndw_armed;
@@ -6356,7 +6503,6 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	struct nv50_core *core;
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	u32 head;
-	bool async_update;
 	bool program_window_color;
 	int ret;
 
@@ -6405,15 +6551,6 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	}
 
-	/*
-	 * Keep user framebuffer flips on the synchronous window-notifier path
-	 * until nvkm has a complete vblank-driven async pageflip path.  Ownership:
-	 * the DRM event remains with the atomic tail; this helper only proves
-	 * that the window UPDATE was accepted by hardware.  Lifetime: no notifier
-	 * or framebuffer reference is retained after the wait returns.  Threading:
-	 * serialized KMS commit context only.
-	 */
-	async_update = false;
 	program_window_color = color_update || wndw_armed == NULL ||
 	    !wndw_armed->valid || !wndw_armed->image;
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
@@ -6678,6 +6815,7 @@ nvkm_dispnv50_state_destroy(struct nvkm_softc *sc,
 	state->olut_offset = 0;
 	nvkm_memory_unref(&state->scanout);
 	state->scanout_offset = 0;
+	nvkm_dispnv50_sync_unmap(sc, state);
 	nvkm_memory_unref(&state->sync_mem);
 	memset(&state->sync_bo, 0, sizeof(state->sync_bo));
 	if (sc != NULL)

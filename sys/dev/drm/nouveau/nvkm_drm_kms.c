@@ -1733,6 +1733,198 @@ static const struct drm_mode_config_funcs nvkm_mode_config_funcs = {
 	.atomic_state_free = nvkm_atomic_state_free,
 };
 
+static void
+nvkm_kms_pending_flip_clear_locked(struct nvkm_softc *sc, uint32_t head)
+{
+	if (head >= nitems(sc->kms_pending_flip))
+		return;
+
+	memset(&sc->kms_pending_flip[head], 0,
+	    sizeof(sc->kms_pending_flip[head]));
+	sc->kms_page_flip_pending_head_mask &= ~BIT(head);
+}
+
+/*
+ * Move one atomic event into the vblank-driven pending flip slot.
+ *
+ * Ownership:
+ *   On success, consumes crtc_state->event and the vblank reference represented
+ *   by vblank_ref_mask.  The pending slot owns both until vblank completion or
+ *   timeout cancellation.  On failure, crtc_state keeps the event and the caller
+ *   remains responsible for the vblank reference through the normal event path.
+ *
+ * Lifetime:
+ *   state and crtc are borrowed until the commit worker reaches flip_done or
+ *   device teardown drains the worker.  The slot stores only those borrowed
+ *   pointers plus the event pointer it owns.
+ *
+ * Threading:
+ *   Called by the commit worker after vblank_get and before the window UPDATE.
+ *   Uses kms_flip_lock to serialize with vblank IRQ completion.
+ */
+static int
+nvkm_kms_pending_flip_begin(struct nvkm_softc *sc, struct drm_atomic_state *state,
+    struct drm_crtc *crtc, struct drm_crtc_state *crtc_state, uint32_t head,
+    uint32_t notifier_offset, uint32_t vblank_ref_mask)
+{
+	struct nvkm_kms_pending_flip *pending;
+
+	if (sc == NULL || state == NULL || crtc == NULL || crtc_state == NULL ||
+	    crtc_state->event == NULL)
+		return -EINVAL;
+	if (head >= nitems(sc->kms_pending_flip))
+		return -EINVAL;
+	if ((vblank_ref_mask & drm_crtc_mask(crtc)) == 0)
+		return -ENODEV;
+
+	spin_lock(&sc->kms_flip_lock);
+	pending = &sc->kms_pending_flip[head];
+	if (pending->active) {
+		sc->kms_page_flip_pending_busy_count++;
+		spin_unlock(&sc->kms_flip_lock);
+		return -EBUSY;
+	}
+
+	pending->active = true;
+	pending->state = state;
+	pending->crtc = crtc;
+	pending->event = crtc_state->event;
+	pending->head = head;
+	pending->notifier_offset = notifier_offset;
+	crtc_state->event = NULL;
+	sc->kms_page_flip_pending_count++;
+	sc->kms_page_flip_pending_head_mask |= BIT(head);
+	spin_unlock(&sc->kms_flip_lock);
+	return 0;
+}
+
+static void
+nvkm_kms_send_pending_flip_event(struct nvkm_softc *sc, struct drm_crtc *crtc,
+    struct drm_pending_vblank_event *event)
+{
+	struct drm_device *dev;
+	unsigned long flags;
+
+	if (sc == NULL || crtc == NULL)
+		return;
+
+	if (event != NULL) {
+		dev = crtc->dev;
+		drm_crtc_accurate_vblank_count(crtc);
+		spin_lock_irqsave(&dev->event_lock, flags);
+		drm_crtc_send_vblank_event(crtc, event);
+		spin_unlock_irqrestore(&dev->event_lock, flags);
+	}
+	drm_crtc_vblank_put(crtc);
+}
+
+static bool
+nvkm_kms_pending_flip_take_state(struct nvkm_softc *sc,
+    struct drm_atomic_state *state, uint32_t head, struct drm_crtc **pcrtc,
+    struct drm_pending_vblank_event **pevent)
+{
+	struct nvkm_kms_pending_flip *pending;
+
+	if (sc == NULL || head >= nitems(sc->kms_pending_flip) ||
+	    pcrtc == NULL || pevent == NULL)
+		return false;
+
+	*pcrtc = NULL;
+	*pevent = NULL;
+	spin_lock(&sc->kms_flip_lock);
+	pending = &sc->kms_pending_flip[head];
+	if (pending->active && pending->state == state) {
+		*pcrtc = pending->crtc;
+		*pevent = pending->event;
+		nvkm_kms_pending_flip_clear_locked(sc, head);
+		spin_unlock(&sc->kms_flip_lock);
+		return true;
+	}
+	spin_unlock(&sc->kms_flip_lock);
+	return false;
+}
+
+/*
+ * Cancel pending flips that still belong to a commit after flip_done wait.
+ *
+ * Ownership: consumes any matching pending event and vblank reference, then
+ * completes the DRM event so the atomic commit cannot retain dead state.
+ * Lifetime: called before drm_atomic_state_put(state).
+ * Threading: commit-worker context; may take DRM event_lock but no modeset locks.
+ */
+static bool
+nvkm_kms_pending_flip_cancel_head(struct nvkm_softc *sc,
+    struct drm_atomic_state *state, uint32_t head)
+{
+	struct drm_pending_vblank_event *event;
+	struct drm_crtc *crtc;
+
+	if (!nvkm_kms_pending_flip_take_state(sc, state, head, &crtc, &event))
+		return false;
+
+	sc->kms_page_flip_pending_cancel_count++;
+	nvkm_kms_send_pending_flip_event(sc, crtc, event);
+	return true;
+}
+
+static bool
+nvkm_kms_pending_flip_cancel_state(struct nvkm_softc *sc,
+    struct drm_atomic_state *state)
+{
+	bool canceled = false;
+	uint32_t head;
+
+	if (sc == NULL || state == NULL)
+		return false;
+
+	for (head = 0; head < nitems(sc->kms_pending_flip); head++) {
+		if (nvkm_kms_pending_flip_cancel_head(sc, state, head))
+			canceled = true;
+	}
+	return canceled;
+}
+
+void
+nvkm_drm_kms_handle_vblank(struct nvkm_softc *sc, uint32_t head)
+{
+	struct drm_pending_vblank_event *event;
+	struct drm_crtc *crtc;
+	uint32_t notifier_offset;
+	uint32_t status = 0;
+
+	if (sc == NULL || head >= nitems(sc->kms_pending_flip))
+		return;
+
+	spin_lock(&sc->kms_flip_lock);
+	if (!sc->kms_pending_flip[head].active) {
+		spin_unlock(&sc->kms_flip_lock);
+		return;
+	}
+	notifier_offset = sc->kms_pending_flip[head].notifier_offset;
+	spin_unlock(&sc->kms_flip_lock);
+
+	if (!nvkm_dispnv50_window_notifier_begun_irq(sc, notifier_offset,
+	    &status)) {
+		sc->kms_page_flip_pending_last_status = status;
+		return;
+	}
+
+	spin_lock(&sc->kms_flip_lock);
+	if (!sc->kms_pending_flip[head].active ||
+	    sc->kms_pending_flip[head].notifier_offset != notifier_offset) {
+		spin_unlock(&sc->kms_flip_lock);
+		return;
+	}
+	crtc = sc->kms_pending_flip[head].crtc;
+	event = sc->kms_pending_flip[head].event;
+	nvkm_kms_pending_flip_clear_locked(sc, head);
+	sc->kms_page_flip_pending_complete_count++;
+	sc->kms_page_flip_pending_last_status = status;
+	spin_unlock(&sc->kms_flip_lock);
+
+	nvkm_kms_send_pending_flip_event(sc, crtc, event);
+}
+
 /*
  * Complete an atomic CRTC event after display programming has reached the
  * hardware boundary.
@@ -1888,6 +2080,7 @@ struct nvkm_display_tail_context {
 	uint32_t disable_op_count;
 	uint32_t color_op_count;
 	uint32_t enable_op_count;
+	uint32_t event_vblank_ref_mask;
 };
 
 static void
@@ -2056,6 +2249,7 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	nvkm_atomic_tail_commit_modeset_disables(&tail);
 	event_vblank_ref_mask =
 	    nvkm_atomic_get_event_vblank_refs(old_state, 0, false);
+	tail.event_vblank_ref_mask = event_vblank_ref_mask;
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_COMMIT_PLANES);
 	nvkm_atomic_tail_commit_planes(&tail,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
@@ -2073,7 +2267,8 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	sc->kms_atomic_flip_done_wait_count++;
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE);
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
-	nvkm_dispnv50_publish_pending_flip(sc);
+	if (!nvkm_kms_pending_flip_cancel_state(sc, old_state))
+		nvkm_dispnv50_publish_pending_flip(sc);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_FINISH_PREPARED);
@@ -2850,12 +3045,16 @@ nvkm_plane_commit_cursor_update(struct drm_plane_state *state,
 }
 
 static void
-nvkm_plane_commit_primary_update(struct drm_plane *plane,
-    struct drm_plane_state *state)
+nvkm_plane_commit_primary_update(struct nvkm_display_tail_context *tail,
+    struct drm_plane *plane, struct drm_plane_state *state)
 {
 	struct drm_crtc_state *crtc_state;
 	struct nvkm_crtc *nc;
 	struct nvkm_kms_crtc_atom atom;
+	uint32_t notifier_offset = 0;
+	bool async_update = false;
+	bool color_update;
+	bool pending_flip = false;
 	int err;
 
 	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
@@ -2891,8 +3090,29 @@ nvkm_plane_commit_primary_update(struct drm_plane *plane,
 	}
 
 	nc->sc->kms_plane_update_count++;
+	color_update = nvkm_crtc_color_needs_window(crtc_state);
+	if (tail != NULL && crtc_state->event != NULL && !color_update) {
+		err = nvkm_dispnv50_plane_next_notifier(nc->sc, nc->win,
+		    &notifier_offset);
+		if (err == 0) {
+			err = nvkm_kms_pending_flip_begin(nc->sc, tail->state,
+			    state->crtc, crtc_state, nc->head, notifier_offset,
+			    tail->event_vblank_ref_mask);
+			if (err == 0) {
+				async_update = true;
+				pending_flip = true;
+			}
+		}
+		if (err != 0)
+			nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
+			    "pageflip pending");
+	}
+
 	err = nvkm_dispnv50_plane_update(nc->sc, state->crtc, nc->win,
-	    atom.display_id, nvkm_crtc_color_needs_window(crtc_state));
+	    atom.display_id, async_update, color_update);
+	if (err != 0 && pending_flip)
+		(void)nvkm_kms_pending_flip_cancel_head(nc->sc, tail->state,
+		    nc->head);
 	nvkm_kms_record_result(nc->sc, nc->head, nc->win, err,
 	    "plane update");
 }
@@ -2954,7 +3174,7 @@ nvkm_plane_atomic_update(struct drm_plane *plane,
 		return;
 	}
 
-	nvkm_plane_commit_primary_update(plane, state);
+	nvkm_plane_commit_primary_update(NULL, plane, state);
 }
 
 static void
@@ -3273,11 +3493,11 @@ nvkm_atomic_tail_execute_plane_ops(struct nvkm_display_tail_context *tail)
 	}
 	for (i = 0; i < tail->plane_op_count; i++) {
 		op = &tail->plane_ops[i];
-		switch (op->type) {
-		case NVKM_DISPLAY_TAIL_PLANE_PRIMARY_UPDATE:
-			nvkm_plane_commit_primary_update(op->plane,
-			    op->new_state);
-			break;
+			switch (op->type) {
+			case NVKM_DISPLAY_TAIL_PLANE_PRIMARY_UPDATE:
+				nvkm_plane_commit_primary_update(tail,
+				    op->plane, op->new_state);
+				break;
 		case NVKM_DISPLAY_TAIL_PLANE_PRIMARY_DISABLE:
 			nvkm_plane_commit_primary_disable(op->plane,
 			    op->old_state);
