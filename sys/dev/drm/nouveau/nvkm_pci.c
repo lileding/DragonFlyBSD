@@ -120,13 +120,15 @@ nvkm_gsp_disp_intr_head_timing(struct nvkm_softc *sc, uint32_t head)
 	if (head < head_limit && head < nitems(sc->gsp_disp_head_status))
 		sc->gsp_disp_head_status[head] = stat;
 
-	if (stat & 0x00000002u) {
-		if (head < head_limit && head < nitems(sc->kms_crtc) &&
-		    sc->kms_crtc[head] != NULL)
-			drm_crtc_handle_vblank(sc->kms_crtc[head]);
-		nvkm_wr32(sc, 0x611800 + head * 4u, 0x00000002u);
+		if (stat & 0x00000002u) {
+			if (head < head_limit && head < nitems(sc->kms_crtc) &&
+			    sc->kms_crtc[head] != NULL) {
+				drm_crtc_handle_vblank(sc->kms_crtc[head]);
+				nvkm_drm_kms_handle_vblank(sc, head);
+			}
+			nvkm_wr32(sc, 0x611800 + head * 4u, 0x00000002u);
+		}
 	}
-}
 
 static void
 nvkm_gsp_falcon_intr_service(struct nvkm_softc *sc)
@@ -604,6 +606,7 @@ nvkm_pci_attach(device_t dev)
 	LIST_INIT(&sc->exec_pending);
 	spin_init(&sc->hotproc_lock, "nvkmhp");
 	spin_init(&sc->kms_hpd_lock, "nvkmhpd");
+	spin_init(&sc->kms_flip_lock, "nvkmflp");
 
 	nvkm_debugf(dev,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
@@ -1135,6 +1138,7 @@ nvkm_pci_detach(device_t dev)
 	nvkm_fw_fini(sc);
 	nvkm_bios_fini(sc);
 	nvkm_pci_release_bars(sc);
+	spin_uninit(&sc->kms_flip_lock);
 	spin_uninit(&sc->kms_hpd_lock);
 	spin_uninit(&sc->hotproc_lock);
 

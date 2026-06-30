@@ -22,6 +22,17 @@ void nvkm_gsp_bar1_flush(struct nvkm_softc *sc);
 
 struct nouveau_bo {
 	u64 offset;
+	/*
+	 * Optional fixed BAR1 mapping for IRQ-safe reads.
+	 *
+	 * Ownership: the creator owns bar1_gva/bar1_size and must unmap them.
+	 * Lifetime: readers may use the fixed mapping only while the creator keeps
+	 * the underlying VRAM allocation and BAR1 mapping alive.
+	 * Threading: read/write helpers perform plain BAR1 MMIO when this range is
+	 * present; the fallback transient mapping path is process-context only.
+	 */
+	u64 bar1_gva;
+	u64 bar1_size;
 	struct nvkm_softc *sc;
 };
 
@@ -29,6 +40,7 @@ static inline u32
 nouveau_bo_rd32(struct nouveau_bo *bo, unsigned int index)
 {
 	uint64_t addr;
+	uint64_t byte;
 	uint64_t page;
 	uint64_t page_off;
 	uint64_t gva;
@@ -37,7 +49,11 @@ nouveau_bo_rd32(struct nouveau_bo *bo, unsigned int index)
 	if (bo == NULL || bo->sc == NULL)
 		return 0;
 
-	addr = bo->offset + (uint64_t)index * sizeof(u32);
+	byte = (uint64_t)index * sizeof(u32);
+	if (bo->bar1_size != 0 && byte + sizeof(u32) <= bo->bar1_size)
+		return nvkm_gsp_bar1_rd32(bo->sc, bo->bar1_gva + byte);
+
+	addr = bo->offset + byte;
 	page = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	page_off = addr - page;
 	if (nvkm_gsp_bar1_map_existing(bo->sc, page, &gva) == 0) {
@@ -51,6 +67,7 @@ static inline void
 nouveau_bo_wr32(struct nouveau_bo *bo, unsigned int index, u32 data)
 {
 	uint64_t addr;
+	uint64_t byte;
 	uint64_t page;
 	uint64_t page_off;
 	uint64_t gva;
@@ -58,7 +75,14 @@ nouveau_bo_wr32(struct nouveau_bo *bo, unsigned int index, u32 data)
 	if (bo == NULL || bo->sc == NULL)
 		return;
 
-	addr = bo->offset + (uint64_t)index * sizeof(u32);
+	byte = (uint64_t)index * sizeof(u32);
+	if (bo->bar1_size != 0 && byte + sizeof(u32) <= bo->bar1_size) {
+		nvkm_gsp_bar1_wr32(bo->sc, bo->bar1_gva + byte, data);
+		nvkm_gsp_bar1_flush(bo->sc);
+		return;
+	}
+
+	addr = bo->offset + byte;
 	page = addr & ~(uint64_t)(PAGE_SIZE - 1);
 	page_off = addr - page;
 	if (nvkm_gsp_bar1_map_existing(bo->sc, page, &gva) == 0) {

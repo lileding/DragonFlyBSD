@@ -404,17 +404,36 @@ int	 nvkm_dispnv50_modeset_disable(struct nvkm_softc *sc, uint32_t head,
  *
  * Lifetime:
  *   display_id must describe the output route active for this CRTC update, or
- *   be zero only for internal rescue paths that rely on the audited route.
+ *   be zero only for internal rescue paths that rely on the audited route.  If
+ *   async_update is true, the caller must have registered a pending flip for
+ *   the next window notifier before calling this function.
  *
  * Threading:
  *   Called from atomic commit tail under DRM modeset serialization. The normal
- *   page-flip path must not block on window notifier completion. When
+ *   async page-flip path submits UPDATE and returns without waiting. When
  *   color_update is true, the call owns the whole image + color display commit
  *   for that atomic state and may block on the notifiers needed by that commit.
  */
 int	 nvkm_dispnv50_plane_update(struct nvkm_softc *sc,
 	     struct drm_crtc *crtc, uint32_t win, uint32_t display_id,
-	     bool color_update);
+	     bool async_update, bool color_update);
+/*
+ * Ownership: borrows the dispnv50 window state and writes one scalar notifier
+ * offset to caller-owned storage.
+ * Lifetime: the returned offset is valid for the next serialized notifier arm
+ * on this window only.
+ * Threading: commit-worker context only; may initialize display window state.
+ */
+int	 nvkm_dispnv50_plane_next_notifier(struct nvkm_softc *sc,
+	     uint32_t win, uint32_t *offset);
+/*
+ * Ownership: borrows the fixed BAR1 mapping for the display sync BO and writes
+ * an optional status snapshot to caller-owned storage.
+ * Lifetime: valid while dispnv50 state is alive and KMS teardown has not begun.
+ * Threading: IRQ-safe; performs one fixed BAR1 MMIO read and does not sleep.
+ */
+bool	 nvkm_dispnv50_window_notifier_begun_irq(struct nvkm_softc *sc,
+	     uint32_t offset, uint32_t *status);
 /*
  * Ownership:
  *   Borrows the dispnv50 bridge audit records inside sc. It copies only scalar

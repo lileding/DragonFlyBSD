@@ -166,6 +166,9 @@ void	nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc,
 #define NVKM_NUM_BARS		6
 
 struct firmware;
+struct drm_atomic_state;
+struct drm_crtc;
+struct drm_pending_vblank_event;
 struct nvkm_falcon;
 struct nvkm_rm_gpu;
 
@@ -175,6 +178,35 @@ struct nvkm_rm_gpu;
 #define NVKM_DISPLAY_MAX_SORS		4
 #define NVKM_DISPLAY_MAX_WINDOWS	8
 #define NVKM_DISPLAY_MAX_CURSORS	4
+
+/*
+ * Pending display flip owned by the KMS page-flip completion path.
+ *
+ * Ownership:
+ *   The commit worker moves one drm_pending_vblank_event out of the committed
+ *   CRTC state and into this record after taking the matching vblank reference.
+ *   The vblank IRQ path consumes the event with drm_crtc_send_vblank_event()
+ *   and releases that vblank reference.  The record borrows crtc and state; it
+ *   never owns framebuffer, GEM BO, plane, or connector references.
+ *
+ * Lifetime:
+ *   A record is valid from before the window UPDATE is submitted until either a
+ *   later vblank observes the matching window notifier as BEGUN or the commit
+ *   worker times out and cancels it.  KMS teardown drains commit work before
+ *   display state is destroyed.
+ *
+ * Threading:
+ *   Protected by nvkm_softc::kms_flip_lock.  The vblank IRQ path may only read
+ *   IRQ-safe notifier state and must not sleep or take modeset/GSP locks.
+ */
+struct nvkm_kms_pending_flip {
+	bool active;
+	struct drm_atomic_state *state;
+	struct drm_crtc *crtc;
+	struct drm_pending_vblank_event *event;
+	uint32_t head;
+	uint32_t notifier_offset;
+};
 
 /*
  * Static chip capability record.
@@ -726,6 +758,8 @@ struct nvkm_softc {
 	struct task		kms_hpd_task;
 	bool			kms_hpd_task_initialized;
 	struct spinlock		kms_hpd_lock;
+	struct spinlock		kms_flip_lock;
+	struct nvkm_kms_pending_flip kms_pending_flip[NVKM_DISPLAY_MAX_HEADS];
 	uint32_t		kms_hpd_pending_plug_mask;
 	uint32_t		kms_hpd_pending_unplug_mask;
 	uint32_t		kms_hpd_pending_link_bad_mask;
@@ -778,6 +812,12 @@ struct nvkm_softc {
 	uint64_t		kms_page_flip_event_count;
 	uint64_t		kms_page_flip_reject_count;
 	uint64_t		kms_page_flip_error_count;
+	uint64_t		kms_page_flip_pending_count;
+	uint64_t		kms_page_flip_pending_complete_count;
+	uint64_t		kms_page_flip_pending_cancel_count;
+	uint64_t		kms_page_flip_pending_busy_count;
+	uint32_t		kms_page_flip_pending_head_mask;
+	uint32_t		kms_page_flip_pending_last_status;
 	uint64_t		kms_atomic_commit_tail_count;
 	uint64_t		kms_atomic_vblank_wait_count;
 	uint64_t		kms_atomic_flip_done_wait_count;
@@ -1672,6 +1712,16 @@ void	nvkm_hotproc_snapshot(struct nvkm_softc *sc,
  */
 void	nvkm_drm_kms_hpd_schedule(struct nvkm_softc *sc,
 	    uint32_t plug_mask, uint32_t unplug_mask);
+/*
+ * Ownership: borrows sc and the CRTC registered for head.  If a pending flip
+ * owns an event for this head and the window notifier is complete, this consumes
+ * that event and the matching vblank reference.
+ * Lifetime: callable for each vblank IRQ while the KMS device is registered.
+ * It retains no pointer after returning.
+ * Threading: interrupt context only. It must not sleep, allocate, or take DRM
+ * modeset/GSP locks.
+ */
+void	nvkm_drm_kms_handle_vblank(struct nvkm_softc *sc, uint32_t head);
 /*
  * Ownership: borrows the dispnv50 output state for the duration of a single
  * DPCD status read and writes only the scalar link_ok result supplied by the
