@@ -25,6 +25,9 @@ The offline gate covers:
   output and manifest parser acceptance using a synthetic bzImage header.  If
   `LINUX_KERNEL` or `/var/tmp/bzImage` is present, it also runs a real-image
   case with optional `LINUX_INITRAMFS`.
+- `linux/linux_initrd_rootfs_build.sh`: builds `/var/tmp/dfvmm-linux-initrd-rootfs.gz`
+  from an Alpine initramfs base.  This is the in-memory Linux rootfs used before
+  vPCIe exists; it does not require or probe any boot media.
 
 The offline gate proves loader-facing ABI shape and pure kernel-object backing
 contracts: fd3/fd4 sizing, sparse-file writes, manifest layout, parser
@@ -58,3 +61,4 @@ image selected by the harness:
 - `revoke/loader_unload_busy_test.sh`
 - `lifecycle/stop_delete_test.sh`
 - `nuttx/rtos_nuttx_test.sh`
+- `linux/linux_initrd_rootfs_test.sh`
