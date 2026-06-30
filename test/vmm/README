@@ -62,3 +62,4 @@ image selected by the harness:
 - `lifecycle/stop_delete_test.sh`
 - `nuttx/rtos_nuttx_test.sh`
 - `linux/linux_initrd_rootfs_test.sh`
+- `linux/linux_core_lifecycle_test.sh`
