@@ -63,3 +63,9 @@ image selected by the harness:
 - `nuttx/rtos_nuttx_test.sh`
 - `linux/linux_initrd_rootfs_test.sh`
 - `linux/linux_core_lifecycle_test.sh`
+- `linux/linux_console_terminal_test.sh`
+
+`linux/linux_console_interactive.sh` is the manual terminal harness.  It boots
+the in-memory Linux guest and attaches a small stdio terminal bridge to
+`machines/<name>/console`; press Ctrl-] to exit, or set `VMM_CONNECTOR=cu` to
+try `cu`.

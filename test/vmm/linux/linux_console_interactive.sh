@@ -1,31 +1,32 @@
 #!/bin/sh
-# pc64 true-hardware serial terminal harness.
+# pc64 manual Linux serial-console harness.
 #
-# The console file is exercised like a terminal: one long-lived reader keeps the
-# file open while independent writes feed the guest serial shell.
+# This starts one in-memory Linux guest and attaches cu to
+# machines/<name>/console.  Press Ctrl-] to exit; the script then force-stops
+# and removes the guest.
 set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
-MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-console-vmm}
-VM=${VMM_MACHINE:-linuxterm0}
-LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-console-terminal-test.log}
-CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-console-terminal.log}
+MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-console-live-vmm}
+VM=${VMM_MACHINE:-linuxlive0}
+LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-console-interactive.log}
+CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-console-interactive-boot.log}
 LOADER=${LINUX_LOADER:-/var/tmp/vmmld_linux_kexec}
-WRAPPER=${LINUX_WRAPPER:-/var/tmp/vmmld_linux_console_terminal}
-MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-linux-console-$$-mount_vmm}
+WRAPPER=${LINUX_WRAPPER:-/var/tmp/vmmld_linux_console_interactive}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-linux-console-live-$$-mount_vmm}
 KERNEL=${LINUX_KERNEL:-/var/tmp/alpine-vmlinuz-virt}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-45}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
+CONNECTOR=${VMM_CONNECTOR:-stdio}
 
 LOADED=0
 MOUNTED=0
 CONSOLE_READER_PID=
-CONSOLE_WRITER_OPEN=0
 
 say()
 {
@@ -66,7 +67,7 @@ dump_state()
 			printf '%s\n' '--- events ---'
 			cat "$(mach)/events" 2>&1 || true
 		fi
-		printf '%s\n' '--- console log ---'
+		printf '%s\n' '--- boot console ---'
 		cat "$CONSOLE_LOG" 2>&1 || true
 		printf '%s\n' '--- end state ---'
 	} >>"$LOG"
@@ -75,7 +76,7 @@ dump_state()
 start_console_reader()
 {
 	: >"$CONSOLE_LOG" || fail "create console log"
-	cat "$(mach)/console" >>"$CONSOLE_LOG" 2>>"$LOG" &
+	cat "$(console_path)" >>"$CONSOLE_LOG" 2>>"$LOG" &
 	CONSOLE_READER_PID=$!
 }
 
@@ -92,12 +93,12 @@ wait_console_pattern()
 {
 	pattern=$1
 	label=$2
-	wait_i=0
+	i=0
 
-	while [ "$wait_i" -lt "$TIMEOUT" ]; do
+	while [ "$i" -lt "$TIMEOUT" ]; do
 		grep -q "$pattern" "$CONSOLE_LOG" && return 0
 		sleep 1
-		wait_i=$((wait_i + 1))
+		i=$((i + 1))
 	done
 	{
 		printf '%s\n' "--- final console $label ---"
@@ -107,40 +108,12 @@ wait_console_pattern()
 	return 1
 }
 
-check_console_tty()
-{
-	console=$(console_path)
-
-	[ -c "$console" ] || fail "$console is not a character device"
-	run stty -f "$console" -a
-}
-
-configure_console_tty()
-{
-	console=$(console_path)
-
-	run stty -f "$console" raw -echo cs8 -parenb -cstopb 115200
-	run stty -f "$console" -a
-}
-
-write_console()
-{
-	say "console write: $1"
-	printf '\033[1;1R' >&3 ||
-	    fail "console terminal response failed"
-	printf '%s\n' "$1" >&3 ||
-	    fail "console write failed"
-}
-
 cleanup()
 {
 	set +e
-	if [ "$CONSOLE_WRITER_OPEN" -eq 1 ]; then
-		exec 3>&-
-		CONSOLE_WRITER_OPEN=0
-	fi
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
+		say "cleanup: force stop $VM"
 		echo force >"$(mach)/stopped" 2>>"$LOG"
 		i=0
 		while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$(mach)" ]; do
@@ -161,7 +134,12 @@ cleanup()
 		done
 	fi
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
-		kldunload vmm >>"$LOG" 2>&1 || true
+		i=0
+		while [ "$i" -lt "$STOP_TIMEOUT" ]; do
+			kldunload vmm >>"$LOG" 2>&1 && break
+			sleep 1
+			i=$((i + 1))
+		done
 	fi
 	rm -f "$MOUNT_HELPER" "$WRAPPER"
 }
@@ -188,6 +166,31 @@ check_module_image()
 	    fail "$VMM_KO contains .eh_frame"
 }
 
+attach_console()
+{
+	console=$(console_path)
+
+	say "Linux guest is running."
+	say "console: $console"
+	say "log: $LOG"
+	say "escape: press Ctrl-] to exit."
+	case "$CONNECTOR" in
+	stdio)
+		"$REPO/test/vmm/linux/linux_console_attach.py" "$console"
+		;;
+	cu)
+		cu -l "$console" -s 115200
+		;;
+	none)
+		printf '%s\n' "Press Enter to stop $VM and clean up."
+		read _answer
+		;;
+	*)
+		"$CONNECTOR" "$console"
+		;;
+	esac
+}
+
 : >"$LOG" || exit 1
 trap cleanup EXIT INT TERM
 
@@ -195,6 +198,7 @@ trap cleanup EXIT INT TERM
 ensure_module_image
 [ -f "$KERNEL" ] || fail "missing $KERNEL"
 [ -f "$INITRD" ] || fail "missing $INITRD"
+[ "$CONNECTOR" = none ] || [ -t 0 ] || fail "interactive terminal required"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
 check_module_image
 
@@ -218,73 +222,19 @@ run mkdir "$(mach)"
 printf '1\n' >"$(mach)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(mach)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
-check_console_tty
+[ -c "$(console_path)" ] || fail "$(console_path) is not a character device"
+
 start_console_reader
 run rm "$(mach)/stopped"
 
-wait_console_pattern 'DFVMM_LINUX_SERIAL_OK' boot ||
-	fail "serial shell marker not observed"
-
-exec 3>"$(mach)/console" || fail "open console writer"
-CONSOLE_WRITER_OPEN=1
-configure_console_tty
-
-write_console 'echo DFVMM_TERM_READY'
-wait_console_pattern 'DFVMM_TERM_READY' ready ||
-	fail "terminal ready marker missing"
-
-i=0
-while [ "$i" -lt 40 ]; do
-	write_console "echo DFVMM_TERM_LINE_$i"
-	wait_console_pattern "DFVMM_TERM_LINE_$i" "line-$i" ||
-	    fail "terminal line $i missing"
-	i=$((i + 1))
-done
-
-{
-	printf '\033[1;1R'
-	printf 'i=0\n'
-	printf 'while [ "$i" -lt 140 ]; do\n'
-	printf '  echo DFVMM_TERM_BURST_$i\n'
-	printf '  i=$((i + 1))\n'
-	printf 'done\n'
-	printf 'echo DFVMM_TERM_BURST_END\n'
-} >&3 || fail "burst console write failed"
-wait_console_pattern 'DFVMM_TERM_BURST_END' burst ||
-	fail "terminal burst marker missing"
-
-events=$(cat "$(mach)/events" 2>>"$LOG" || true)
-printf '%s\n' "$events" >>"$LOG"
-printf '%s\n' "$events" | grep -E 'com1 rx irq|ioapic raise source=com1' &&
-	fail "serial hot path leaked into default events"
-
-echo force >"$(mach)/stopped" 2>>"$LOG" ||
-	fail "force stop request failed"
-i=0
-while [ "$i" -lt "$STOP_TIMEOUT" ]; do
-	grep -q 'state stopped reason=force' "$(mach)/events" 2>>"$LOG" &&
-	    break
-	sleep 1
-	i=$((i + 1))
-done
-[ "$i" -lt "$STOP_TIMEOUT" ] || fail "force stop event missing"
+wait_console_pattern 'DFVMM_LINUX_INITRD_ROOTFS_OK' initrd ||
+    fail "initrd rootfs marker not observed"
+wait_console_pattern 'DFVMM_LINUX_SERIAL_OK' serial ||
+    fail "serial marker not observed"
 stop_console_reader
-exec 3>&-
-CONSOLE_WRITER_OPEN=0
-run rmdir "$(mach)"
-say "+ umount $MNT"
-umount_i=0
-while [ "$umount_i" -lt "$STOP_TIMEOUT" ]; do
-	umount "$MNT" >>"$LOG" 2>&1 && {
-		MOUNTED=0
-		break
-	}
-	sleep 1
-	umount_i=$((umount_i + 1))
-done
-[ "$MOUNTED" -eq 0 ] || fail "umount $MNT"
-run kldunload vmm
-LOADED=0
-rm -f "$MOUNT_HELPER" "$WRAPPER"
 
-say "PASS: Linux serial terminal test"
+run stty -f "$(console_path)" raw -echo cs8 -parenb -cstopb 115200
+attach_console
+say "console session ended"
+
+exit 0
