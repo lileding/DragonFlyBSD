@@ -154,12 +154,14 @@ vmm_console_guest_write(struct vmm_console *c, const char *buf, size_t len)
 		lwkt_reltoken(&c->token_console);
 		return;
 	}
-	for (i = 0; i < len; i++) {
-		if (ttyinput((unsigned char)buf[i], tp) == 0)
-			accepted++;
-		else
-			dropped++;
+	for (i = 0; i < len;) {
+		if (tp->t_rawq.c_cc + tp->t_canq.c_cc >= TTYHOG - 3)
+			break;
+		ttyinput((unsigned char)buf[i], tp);
+		accepted++;
+		i++;
 	}
+	dropped = len - accepted;
 	lwkt_reltoken(&tp->t_token);
 	lwkt_gettoken(&c->token_console);
 	c->mut_guest_rx_bytes += accepted;

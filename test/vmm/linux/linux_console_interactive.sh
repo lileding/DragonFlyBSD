@@ -206,7 +206,7 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	"$REPO/test/vmm/linux/linux_kexec_loader.c" -o "$LOADER"
 cat >"$WRAPPER" <<EOF_WRAP
 #!/bin/sh
-exec "$LOADER" "$KERNEL" "initramfs=$INITRD" "console=ttyS0,115200" "earlycon=uart,io,0x3f8,115200" "loglevel=7" "rdinit=/init"
+exec "$LOADER" "$KERNEL" "initramfs=$INITRD" "console=ttyS0,115200" "loglevel=3" "rdinit=/init"
 EOF_WRAP
 chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 

@@ -42,6 +42,7 @@ mkdir -p "$WORK"
 
 	cat >etc/profile <<'EOF'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+export TERM=dumb
 export PS1='dfvmm-linux:\w# '
 EOF
 
@@ -69,7 +70,8 @@ EOF
 
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
 bb=/bin/busybox
-tty=/dev/ttyS0
+console=/dev/console
+serial=/dev/ttyS0
 
 $bb mount -t proc proc /proc 2>/dev/null || true
 $bb mount -t sysfs sysfs /sys 2>/dev/null || true
@@ -80,9 +82,9 @@ $bb mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 
 [ -c /dev/null ] || $bb mknod /dev/null c 1 3 2>/dev/null || true
 [ -c /dev/kmsg ] || $bb mknod /dev/kmsg c 1 11 2>/dev/null || true
-[ -c /dev/console ] || $bb mknod /dev/console c 5 1 2>/dev/null || true
-[ -c "$tty" ] || $bb mknod "$tty" c 4 64 2>/dev/null || true
-$bb chmod 666 /dev/null /dev/kmsg /dev/console "$tty" 2>/dev/null || true
+[ -c "$console" ] || $bb mknod "$console" c 5 1 2>/dev/null || true
+[ -c "$serial" ] || $bb mknod "$serial" c 4 64 2>/dev/null || true
+$bb chmod 666 /dev/null /dev/kmsg "$console" "$serial" 2>/dev/null || true
 
 if [ -x /sbin/mdev ]; then
 	echo /sbin/mdev >/proc/sys/kernel/hotplug 2>/dev/null || true
@@ -90,15 +92,40 @@ if [ -x /sbin/mdev ]; then
 fi
 
 echo DFVMM_LINUX_INITRD_ROOTFS_OK >/dev/kmsg
-echo DFVMM_LINUX_INITRD_ROOTFS_OK >/dev/console
-echo DFVMM_LINUX_SERIAL_OK >"$tty"
-echo "dfvmm in-memory Linux initrd rootfs is ready." >"$tty"
-echo "Run dfvmm-core-smoke for the baseline vmm core check." >"$tty"
-
+echo DFVMM_LINUX_INITRD_ROOTFS_OK >"$console"
+exec <>"$console"
+exec >&0 2>&1
+echo DFVMM_LINUX_SERIAL_OK
+echo "dfvmm in-memory Linux initrd rootfs is ready."
+echo "Run dfvmm-core-smoke for the baseline vmm core check."
+echo DFVMM_LINUX_CONSOLE_READY
+cd /root 2>/dev/null || cd /
 while :; do
-	$bb sh -l -i <"$tty" >"$tty" 2>&1
-	echo DFVMM_LINUX_SHELL_EXITED >"$tty"
-	$bb sleep 1
+	printf 'dfvmm-linux:%s# ' "$PWD"
+	if ! IFS= read -r line; then
+		echo DFVMM_LINUX_CONSOLE_READ_FAILED
+		$bb sleep 1
+		continue
+	fi
+	case "$line" in
+	"")
+		;;
+	exit|logout)
+		echo DFVMM_LINUX_CONSOLE_EXIT_IGNORED
+		;;
+	cd)
+		cd /root || cd / || true
+		;;
+	cd\ *)
+		dir=${line#cd }
+		if ! cd "$dir"; then
+			echo "cd: $dir: failed"
+		fi
+		;;
+	*)
+		$bb sh -c "$line"
+		;;
+	esac
 done
 EOF
 	chmod +x init

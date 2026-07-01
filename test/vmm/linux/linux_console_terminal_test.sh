@@ -20,12 +20,16 @@ KERNEL=${LINUX_KERNEL:-/var/tmp/alpine-vmlinuz-virt}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-45}
+READY_TIMEOUT=${VMM_READY_TIMEOUT:-$TIMEOUT}
+PROMPT_TIMEOUT=${VMM_PROMPT_TIMEOUT:-3}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
+SVM_TRACE=${VMM_SVM_TRACE:-0}
 
 LOADED=0
 MOUNTED=0
 CONSOLE_READER_PID=
 CONSOLE_WRITER_OPEN=0
+CONSOLE_CPR_REPLIED=0
 
 say()
 {
@@ -125,11 +129,31 @@ configure_console_tty()
 
 write_console()
 {
+	answer_console_cpr
 	say "console write: $1"
-	printf '\033[1;1R' >&3 ||
-	    fail "console terminal response failed"
 	printf '%s\n' "$1" >&3 ||
 	    fail "console write failed"
+}
+
+answer_console_cpr()
+{
+	cpr_count=$(awk -v pat="$(printf '\033[6n')" '
+		{
+			line = $0
+			while ((pos = index(line, pat)) != 0) {
+				count++
+				line = substr(line, pos + length(pat))
+			}
+		}
+		END { print count + 0 }
+	' "$CONSOLE_LOG" 2>>"$LOG")
+
+	while [ "$CONSOLE_CPR_REPLIED" -lt "$cpr_count" ]; do
+		say "console write: CPR response"
+		printf '\033[1;1R' >&3 ||
+		    fail "console CPR response failed"
+		CONSOLE_CPR_REPLIED=$((CONSOLE_CPR_REPLIED + 1))
+	done
 }
 
 cleanup()
@@ -202,12 +226,15 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	"$REPO/test/vmm/linux/linux_kexec_loader.c" -o "$LOADER"
 cat >"$WRAPPER" <<EOF_WRAP
 #!/bin/sh
-exec "$LOADER" "$KERNEL" "initramfs=$INITRD" "console=ttyS0,115200" "earlycon=uart,io,0x3f8,115200" "loglevel=7" "rdinit=/init"
+exec "$LOADER" "$KERNEL" "initramfs=$INITRD" "console=ttyS0,115200" "loglevel=3" "rdinit=/init"
 EOF_WRAP
 chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 
 run kldload "$VMM_KO"
 LOADED=1
+if [ "$SVM_TRACE" -eq 1 ]; then
+	run sysctl debug.vmm.svm_trace=1
+fi
 run mkdir -p "$MNT"
 run rm -f "$MOUNT_HELPER"
 run ln -s /sbin/mount_std "$MOUNT_HELPER"
@@ -228,10 +255,18 @@ wait_console_pattern 'DFVMM_LINUX_SERIAL_OK' boot ||
 exec 3>"$(mach)/console" || fail "open console writer"
 CONSOLE_WRITER_OPEN=1
 configure_console_tty
+saved_timeout=$TIMEOUT
+TIMEOUT=$PROMPT_TIMEOUT
+wait_console_pattern "$(printf '\033\\[6n')" cpr || true
+TIMEOUT=$saved_timeout
+answer_console_cpr
 
 write_console 'echo DFVMM_TERM_READY'
+saved_timeout=$TIMEOUT
+TIMEOUT=$READY_TIMEOUT
 wait_console_pattern 'DFVMM_TERM_READY' ready ||
 	fail "terminal ready marker missing"
+TIMEOUT=$saved_timeout
 
 i=0
 while [ "$i" -lt 40 ]; do
@@ -242,7 +277,6 @@ while [ "$i" -lt 40 ]; do
 done
 
 {
-	printf '\033[1;1R'
 	printf 'i=0\n'
 	printf 'while [ "$i" -lt 140 ]; do\n'
 	printf '  echo DFVMM_TERM_BURST_$i\n'
@@ -253,10 +287,12 @@ done
 wait_console_pattern 'DFVMM_TERM_BURST_END' burst ||
 	fail "terminal burst marker missing"
 
-events=$(cat "$(mach)/events" 2>>"$LOG" || true)
-printf '%s\n' "$events" >>"$LOG"
-printf '%s\n' "$events" | grep -E 'com1 rx irq|ioapic raise source=com1' &&
-	fail "serial hot path leaked into default events"
+if [ "$SVM_TRACE" -eq 0 ]; then
+	events=$(cat "$(mach)/events" 2>>"$LOG" || true)
+	printf '%s\n' "$events" >>"$LOG"
+	printf '%s\n' "$events" | grep -E 'com1 rx irq|ioapic raise source=com1' &&
+		fail "serial hot path leaked into default events"
+fi
 
 echo force >"$(mach)/stopped" 2>>"$LOG" ||
 	fail "force stop request failed"

@@ -107,6 +107,11 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_CTRL_TLB_FLUSH_ALL	0x001U
 #define VMM_SVM_CTRL_V_IRQ		(1ULL << 8)
 #define VMM_SVM_CTRL_V_IGN_TPR		(1ULL << 20)
+#define VMM_SVM_CTRL_INTR_SHADOW	(1ULL << 0)
+#define VMM_SVM_CTRL_V_INTR_PRIO_SHIFT	16
+#define VMM_SVM_CTRL_V_INTR_PRIO_MASK	(0xfULL << VMM_SVM_CTRL_V_INTR_PRIO_SHIFT)
+#define VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT 32
+#define VMM_SVM_CTRL_V_INTR_VECTOR_MASK	(0xffULL << VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT)
 #define VMM_SVM_CTRL_V_INTR_MASKING	(1ULL << 24)
 #define VMM_SVM_CTRL_V_AVIC_EN		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
@@ -295,9 +300,11 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_RTC_LEAP_YEAR(year) \
 	((((year) % 4) == 0 && ((year) % 100) != 0) || ((year) % 400) == 0)
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
+#define VMM_CPUID1_ECX_MONITOR	(1U << 3)
 #define VMM_CPUID1_ECX_X2APIC	(1U << 21)
 #define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
 #define VMM_CPUID80000001_ECX_SVM CPUID_SVM
+#define VMM_CPUID80000008_ECX_CORES_MASK 0xffU
 
 #define VMM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_IOAPIC_SIZE		PAGE_SIZE
@@ -537,6 +544,8 @@ struct vmm_svm_backend {
 	uint32_t mut_avic_host_apic_id;
 	uint32_t mut_avic_host_cpuid;
 	int mut_avic_bound;
+	int mut_vintr_active;
+	uint8_t mut_vintr_vector;
 	uint32_t mut_lapic_timer_lvtt;
 	uint32_t mut_lapic_timer_tmict;
 	uint32_t mut_lapic_timer_tdcr;
@@ -544,7 +553,9 @@ struct vmm_svm_backend {
 	uint32_t mut_lapic_timer_interval_ticks;
 	uint32_t mut_lapic_timer_fire_count;
 	uint32_t mut_lapic_timer_idle_count;
+	uint32_t mut_pause_exit_count;
 	int mut_lapic_timer_active;
+	int mut_lapic_timer_irq_pending;
 	int mut_lapic_timer_deadline;
 	uint32_t mut_ioapic_select;
 	uint32_t mut_ioapic_id;
@@ -649,6 +660,8 @@ static void vmm_svm_vcpu_destroy(void *backend);
 static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
 static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
 static void vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb);
+static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
+		    struct vmm_vcpu_thread *vc, const char *source);
 
 static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_EFER, "efer", "cpu-state" },
@@ -896,11 +909,142 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u avic deliver source=%s vector=0x%x irr=0x%x",
 	    vc->imm_id, source, vector, *irr);
-	if (svm->mut_avic_bound && mycpu->gd_cpuid != svm->mut_avic_host_cpuid) {
+	if (svm->mut_avic_bound) {
 		wrmsr(MSR_AMD64_SVM_AVIC_DOORBELL, svm->mut_avic_host_apic_id);
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u avic doorbell host_apic_id=%u",
 		    vc->imm_id, svm->mut_avic_host_apic_id);
+	}
+}
+
+static int
+vmm_svm_avic_isr_prio(struct vmm_svm_backend *svm)
+{
+	volatile u_int *isr;
+	uint32_t bits;
+	int i;
+	int bit;
+
+	for (i = 7; i >= 1; --i) {
+		isr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
+		    VMM_SVM_APIC_REG_ISR_BASE + i * 0x10);
+		bits = *isr;
+		if (bits == 0)
+			continue;
+		for (bit = 31; bit >= 0; --bit) {
+			if ((bits & (1U << bit)) != 0)
+				return (i * 32 + bit) >> 4;
+		}
+	}
+	return -1;
+}
+
+static int
+vmm_svm_avic_next_irr(struct vmm_svm_backend *svm, uint8_t *vectorp)
+{
+	volatile u_int *irr;
+	uint64_t entry;
+	uint32_t bits;
+	uint32_t vector32;
+	int i;
+	int isr_prio;
+	int bit;
+	int vector;
+
+	isr_prio = vmm_svm_avic_isr_prio(svm);
+	if (svm->mut_com1_rx_irq_pending || svm->mut_com1_thr_irq_pending) {
+		entry = svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+		vector32 = (uint32_t)entry & 0xffU;
+		if (vector32 >= 32 && (int)(vector32 >> 4) > isr_prio) {
+			irr = (volatile u_int *)
+			    ((uint8_t *)svm->own_mut_avic_apic_page +
+			    VMM_SVM_APIC_REG_IRR_BASE +
+			    (vector32 / 32) * 0x10);
+			if ((*irr & (1U << (vector32 & 31))) != 0) {
+				*vectorp = (uint8_t)vector32;
+				return 1;
+			}
+		}
+	}
+	for (i = 7; i >= 1; --i) {
+		irr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
+		    VMM_SVM_APIC_REG_IRR_BASE + i * 0x10);
+		bits = *irr;
+		if (bits == 0)
+			continue;
+		for (bit = 31; bit >= 0; --bit) {
+			if ((bits & (1U << bit)) != 0) {
+				vector = i * 32 + bit;
+				if ((vector >> 4) <= isr_prio)
+					continue;
+				*vectorp = (uint8_t)vector;
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+static void
+vmm_svm_vintr_prepare(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint8_t vector;
+
+	vmm_svm_com1_rx_notify(svm, vc, "vintr_prepare");
+	if (svm->mut_vintr_active ||
+	    (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
+	    !vmm_svm_avic_next_irr(svm, &vector))
+		return;
+	vmcb->ctrl.v &= ~(VMM_SVM_CTRL_V_IRQ | VMM_SVM_CTRL_V_IGN_TPR |
+	    VMM_SVM_CTRL_V_INTR_PRIO_MASK |
+	    VMM_SVM_CTRL_V_INTR_VECTOR_MASK);
+	vmcb->ctrl.v |= VMM_SVM_CTRL_V_IRQ |
+	    ((uint64_t)(vector >> 4) << VMM_SVM_CTRL_V_INTR_PRIO_SHIFT) |
+	    ((uint64_t)vector << VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT);
+	svm->mut_vintr_active = 1;
+	svm->mut_vintr_vector = vector;
+	if (vector != (svm->mut_lapic_timer_lvtt &
+	    VMM_SVM_APIC_LVT_VECTOR_MASK)) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u vintr prepare vector=0x%x v=0x%jx",
+		    vc->imm_id, vector, (uintmax_t)vmcb->ctrl.v);
+	} else if (svm->mut_lapic_timer_fire_count <= 8 ||
+	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u vintr prepare vector=0x%x v=0x%jx",
+		    vc->imm_id, vector, (uintmax_t)vmcb->ctrl.v);
+	}
+}
+
+static void
+vmm_svm_vintr_complete(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	volatile u_int *irr;
+	uint8_t vector;
+	uint32_t bit;
+
+	if (!svm->mut_vintr_active ||
+	    (vmcb->ctrl.v & VMM_SVM_CTRL_V_IRQ) != 0)
+		return;
+	vector = svm->mut_vintr_vector;
+	bit = 1U << (vector & 31);
+	irr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
+	    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
+	atomic_clear_int(irr, bit);
+	cpu_mfence();
+	svm->mut_vintr_active = 0;
+	if (vector != (svm->mut_lapic_timer_lvtt &
+	    VMM_SVM_APIC_LVT_VECTOR_MASK)) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u vintr accepted vector=0x%x irr=0x%x",
+		    vc->imm_id, vector, *irr);
+	} else if (svm->mut_lapic_timer_fire_count <= 8 ||
+	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u vintr accepted vector=0x%x irr=0x%x",
+		    vc->imm_id, vector, *irr);
 	}
 }
 
@@ -916,6 +1060,7 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 	    (svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
 	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 		svm->mut_lapic_timer_active = 0;
+		svm->mut_lapic_timer_irq_pending = 0;
 		return;
 	}
 	delta = ((uint64_t)count * svm->mut_lapic_timer_divisor) /
@@ -931,6 +1076,53 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 	    "svm lapic timer armed count=%u ticks=%u lvtt=0x%x",
 	    count, svm->mut_lapic_timer_interval_ticks,
 	    svm->mut_lapic_timer_lvtt);
+}
+
+static void
+vmm_svm_lapic_timer_sync(struct vmm_svm_backend *svm)
+{
+	uint32_t lvtt;
+	uint32_t tdcr;
+	uint32_t tmict;
+	uint32_t tmp1;
+	uint32_t tmp2;
+	int rearm;
+
+	rearm = 0;
+	tdcr = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_TDCR) &
+	    VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+	if (tdcr != svm->mut_lapic_timer_tdcr) {
+		svm->mut_lapic_timer_tdcr = tdcr;
+		tmp1 = tdcr & 0xfU;
+		tmp2 = ((tmp1 & 0x3U) | ((tmp1 & 0x8U) >> 1)) + 1;
+		svm->mut_lapic_timer_divisor = 1U << (tmp2 & 0x7U);
+		VMM_SVM_TRACE(svm,
+		    "svm avic tdcr synced value=0x%x divisor=%u",
+		    tdcr, svm->mut_lapic_timer_divisor);
+		rearm = 1;
+	}
+	lvtt = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_LVTT) &
+	    VMM_SVM_APIC_LVT_TIMER_VALID;
+	if (lvtt != svm->mut_lapic_timer_lvtt) {
+		svm->mut_lapic_timer_lvtt = lvtt;
+		VMM_SVM_TRACE(svm, "svm avic lvtt synced value=0x%x", lvtt);
+		rearm = 1;
+		if ((lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
+			svm->mut_lapic_timer_active = 0;
+		if ((lvtt & VMM_SVM_APIC_LVT_MASKED) != 0)
+			svm->mut_lapic_timer_irq_pending = 0;
+	}
+	tmict = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_TMICT);
+	if (tmict != svm->mut_lapic_timer_tmict) {
+		VMM_SVM_TRACE(svm, "svm avic tmict synced value=0x%x", tmict);
+		vmm_svm_lapic_timer_arm(svm, tmict);
+		return;
+	}
+	if (rearm && tmict != 0 &&
+	    (svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) !=
+	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
+		vmm_svm_lapic_timer_arm(svm, tmict);
 }
 
 static void
@@ -959,13 +1151,13 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, 0);
 	if ((svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_MASKED) == 0) {
 		svm->mut_lapic_timer_fire_count++;
+		svm->mut_lapic_timer_irq_pending = 1;
 		if (svm->mut_lapic_timer_fire_count <= 8 ||
 		    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
 			VMM_SVM_TRACE(svm,
 			    "svm vcpu%u lapic timer fire vector=0x%x count=%u",
 			    vc->imm_id, vector, svm->mut_lapic_timer_fire_count);
 		}
-		vmm_svm_avic_deliver(svm, vc, vector, "lapic_timer");
 	} else if ((svm->mut_lapic_timer_lvtt &
 	    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) !=
 	    VMM_SVM_APIC_LVT_TIMER_PERIODIC) {
@@ -982,6 +1174,36 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 		    svm->mut_lapic_timer_tmict);
 	} else {
 		svm->mut_lapic_timer_active = 0;
+	}
+}
+
+static void
+vmm_svm_lapic_timer_prepare(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint8_t vector;
+
+	if (!svm->mut_lapic_timer_irq_pending ||
+	    svm->mut_vintr_active ||
+	    (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0)
+		return;
+	vector = svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
+	vmcb->ctrl.v &= ~(VMM_SVM_CTRL_V_IRQ | VMM_SVM_CTRL_V_IGN_TPR |
+	    VMM_SVM_CTRL_V_INTR_PRIO_MASK |
+	    VMM_SVM_CTRL_V_INTR_VECTOR_MASK);
+	vmcb->ctrl.v |= VMM_SVM_CTRL_V_IRQ |
+	    ((uint64_t)(vector >> 4) << VMM_SVM_CTRL_V_INTR_PRIO_SHIFT) |
+	    ((uint64_t)vector << VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT);
+	svm->mut_vintr_active = 1;
+	svm->mut_vintr_vector = vector;
+	svm->mut_lapic_timer_irq_pending = 0;
+	if (svm->mut_lapic_timer_fire_count <= 8 ||
+	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u vintr lapic timer vector=0x%x count=%u v=0x%jx",
+		    vc->imm_id, vector, svm->mut_lapic_timer_fire_count,
+		    (uintmax_t)vmcb->ctrl.v);
 	}
 }
 
@@ -1378,16 +1600,34 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 	    (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX], regs);
 	if (leaf == 1) {
 		regs[1] &= ~VMM_CPUID_APIC_ID_MASK;
-		regs[2] &= ~(VMM_CPUID1_ECX_X2APIC |
+		regs[2] &= ~(VMM_CPUID1_ECX_MONITOR |
+		    VMM_CPUID1_ECX_X2APIC |
 		    VMM_CPUID1_ECX_TSC_DEADLINE);
+	} else if (leaf == 0xb || leaf == 0x1f) {
+		regs[0] = 0;
+		regs[1] = 0;
+		regs[2] = 0;
+		regs[3] = 0;
+	} else if (leaf == 5) {
+		regs[0] = 0;
+		regs[1] = 0;
+		regs[2] = 0;
+		regs[3] = 0;
 	} else if (leaf == 0x80000001U) {
 		regs[2] &= ~VMM_CPUID80000001_ECX_SVM;
+	} else if (leaf == 0x80000008U) {
+		regs[2] &= ~VMM_CPUID80000008_ECX_CORES_MASK;
+	} else if (leaf == 0x8000001eU) {
+		regs[0] = 0;
+		regs[1] = 0;
+		regs[2] = 0;
+		regs[3] = 0;
 	}
 	vmcb->state.rax = regs[0];
 	svm->mut_gprs[VMM_X64_GPR_RBX] = regs[1];
 	svm->mut_gprs[VMM_X64_GPR_RCX] = regs[2];
 	svm->mut_gprs[VMM_X64_GPR_RDX] = regs[3];
-	vmcb->state.rip = vmcb->ctrl.nrip;
+	vmm_svm_advance_rip(vmcb);
 }
 
 static void
@@ -1399,6 +1639,7 @@ vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb)
 		vmcb->state.rip += vmcb->ctrl.inst_len;
 	else
 		vmcb->state.rip += 2;
+	vmcb->ctrl.intr &= ~VMM_SVM_CTRL_INTR_SHADOW;
 }
 
 static void
@@ -2734,17 +2975,17 @@ vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 	if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0 ||
 	    vmm_console_guest_pending(console) == 0)
 		return;
-	if (svm->mut_com1_rx_irq_pending)
-		return;
 	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 rx irq held source=%s reason=out2_disabled",
 		    vc->imm_id, source);
 		return;
 	}
-	svm->mut_com1_rx_irq_pending = 1;
-	VMM_SVM_TRACE(svm,
-	    "svm vcpu%u com1 rx irq source=%s", vc->imm_id, source);
+	if (svm->mut_com1_rx_irq_pending == 0) {
+		svm->mut_com1_rx_irq_pending = 1;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u com1 rx irq source=%s", vc->imm_id, source);
+	}
 	vmm_svm_ioapic_raise(svm, vc, VMM_COM1_IOAPIC_PIN, source);
 }
 
@@ -2781,11 +3022,25 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) != 0) {
 			*valp = svm->mut_com1_dll;
 		} else if (vmm_console_guest_read(console, &ch)) {
+			volatile u_int *irr;
+			uint8_t vector;
+
 			*valp = (uint8_t)ch;
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u com1 read rbr val=0x%x pending=%zu",
+			    vc->imm_id, *valp, vmm_console_guest_pending(console));
+			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			irr = (volatile u_int *)
+			    ((uint8_t *)svm->own_mut_avic_apic_page +
+			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
+			atomic_clear_int(irr, 1U << (vector & 31));
+			cpu_mfence();
 			svm->mut_com1_rx_irq_pending = 0;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_rbr");
 		} else {
 			*valp = 0;
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u com1 read rbr empty", vc->imm_id);
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
@@ -2798,11 +3053,25 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			*valp = VMM_COM1_IIR_RDI;
 		} else if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0 &&
 		    svm->mut_com1_thr_irq_pending != 0) {
+			volatile u_int *irr;
+			uint8_t vector;
+
 			*valp = VMM_COM1_IIR_THRI;
 			svm->mut_com1_thr_irq_pending = 0;
+			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			irr = (volatile u_int *)
+			    ((uint8_t *)svm->own_mut_avic_apic_page +
+			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
+			atomic_clear_int(irr, 1U << (vector & 31));
+			cpu_mfence();
 		} else {
 			*valp = VMM_COM1_IIR_NOPEND;
 		}
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u com1 read iir val=0x%x pending=%zu ier=0x%x rx_pending=%d thr_pending=%d",
+		    vc->imm_id, *valp, vmm_console_guest_pending(console),
+		    svm->mut_com1_ier, svm->mut_com1_rx_irq_pending,
+		    svm->mut_com1_thr_irq_pending);
 		return 1;
 	case VMM_COM1_LCR:
 		*valp = svm->mut_com1_lcr;
@@ -2835,6 +3104,9 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			*valp = VMM_COM1_MSR_CTS | VMM_COM1_MSR_DSR |
 			    VMM_COM1_MSR_DCD;
 		}
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u com1 read msr val=0x%x mcr=0x%x",
+		    vc->imm_id, *valp, svm->mut_com1_mcr);
 		return 1;
 	case VMM_COM1_SCR:
 		*valp = svm->mut_com1_scr;
@@ -2867,6 +3139,11 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	case VMM_COM1_IER_DLM:
 		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
 			svm->mut_com1_ier = val & 0x0fU;
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u com1 write ier val=0x%x pending=%zu",
+			    vc->imm_id, svm->mut_com1_ier,
+			    vmm_console_guest_pending(
+			    &svm->borrow_imm_machine->own_mut_console));
 			if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0)
 				svm->mut_com1_rx_irq_pending = 0;
 			if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0)
@@ -2880,8 +3157,17 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	case VMM_COM1_IIR_FCR:
 		svm->mut_com1_fcr = val & VMM_COM1_FCR_ENABLE;
 		if ((val & VMM_COM1_FCR_RX_RESET) != 0) {
+			volatile u_int *irr;
+			uint8_t vector;
+
 			vmm_console_guest_reset_input(
 			    &svm->borrow_imm_machine->own_mut_console);
+			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			irr = (volatile u_int *)
+			    ((uint8_t *)svm->own_mut_avic_apic_page +
+			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
+			atomic_clear_int(irr, 1U << (vector & 31));
+			cpu_mfence();
 			svm->mut_com1_rx_irq_pending = 0;
 			svm->mut_com1_lsr_overrun = 0;
 		}
@@ -2894,6 +3180,11 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		return 1;
 	case VMM_COM1_MCR:
 		svm->mut_com1_mcr = val & 0xffU;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u com1 write mcr val=0x%x pending=%zu",
+		    vc->imm_id, svm->mut_com1_mcr,
+		    vmm_console_guest_pending(
+		    &svm->borrow_imm_machine->own_mut_console));
 		if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0)
 			svm->mut_com1_rx_irq_pending = 0;
 		vmm_svm_com1_rx_notify(svm, vc, "com1_mcr");
@@ -3339,9 +3630,17 @@ static void
 vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
+	struct vmm_console *console;
 
-	if (svm != NULL)
+	if (svm != NULL) {
+		console = &svm->borrow_imm_machine->own_mut_console;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u com1 console input pending=%zu ier=0x%x mcr=0x%x rx_pending=%d",
+		    vc->imm_id, vmm_console_guest_pending(console),
+		    svm->mut_com1_ier, svm->mut_com1_mcr,
+		    svm->mut_com1_rx_irq_pending);
 		vmm_svm_com1_rx_notify(svm, vc, "console_input");
+	}
 }
 
 static void
@@ -3715,7 +4014,10 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 			svm->mut_lapic_timer_tmict = 0;
 			svm->mut_lapic_timer_active = 0;
+			svm->mut_lapic_timer_irq_pending = 0;
 		}
+		if ((value & VMM_SVM_APIC_LVT_MASKED) != 0)
+			svm->mut_lapic_timer_irq_pending = 0;
 		if (svm->mut_lapic_timer_tmict != 0)
 			vmm_svm_lapic_timer_arm(svm,
 			    svm->mut_lapic_timer_tmict);
@@ -3769,6 +4071,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR, value);
 		if ((value & VMM_SVM_APIC_SVR_ENABLE) == 0) {
 			svm->mut_lapic_timer_active = 0;
+			svm->mut_lapic_timer_irq_pending = 0;
 			svm->mut_lapic_timer_lvtt |= VMM_SVM_APIC_LVT_MASKED;
 			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
 			    svm->mut_lapic_timer_lvtt);
@@ -3859,6 +4162,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	vmcb = svm->own_mut_vmcb;
 	vmm_svm_avic_bind_cpu(svm);
 	while (!vmm_vcpu_should_stop(vc)) {
+		vmm_svm_lapic_timer_sync(svm);
 		vmm_svm_lapic_timer_check(svm, vc);
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
@@ -3869,6 +4173,8 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			lwkt_user_yield();
 			continue;
 		}
+		vmm_svm_vintr_prepare(svm, vc);
+		vmm_svm_lapic_timer_prepare(svm, vc);
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
@@ -3878,6 +4184,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
 		vmm_svm_stgi();
+		vmm_svm_vintr_complete(svm, vc);
 		reqflags = mycpu->gd_reqflags;
 		vmm_svm_requeue_exit_event(svm);
 		switch (vmcb->ctrl.exitcode) {
@@ -3900,6 +4207,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			break;
 		case VMM_SVM_EXIT_PAUSE:
 			vmm_svm_advance_rip(vmcb);
+			svm->mut_pause_exit_count++;
+			if ((svm->mut_pause_exit_count & 63U) == 0)
+				lwkt_user_yield();
 			break;
 		case VMM_SVM_EXIT_HLT:
 			vmm_svm_handle_idle_wait(svm, vc);
