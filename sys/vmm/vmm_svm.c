@@ -557,6 +557,12 @@ struct vmm_svm_backend {
 	int mut_lapic_timer_active;
 	int mut_lapic_timer_irq_pending;
 	int mut_lapic_timer_deadline;
+	/*
+	 * IOAPIC and COM1 device state is owned by the vCPU thread.  Host
+	 * console writers may append to vmm_console's input FIFO and wake the
+	 * vCPU, but they must not update these fields directly.  The vCPU
+	 * thread re-evaluates the level-style RX condition before VM entry.
+	 */
 	uint32_t mut_ioapic_select;
 	uint32_t mut_ioapic_id;
 	uint64_t mut_ioapic_redir[VMM_IOAPIC_PINS];
@@ -3632,15 +3638,17 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_console *console;
 
-	if (svm != NULL) {
-		console = &svm->borrow_imm_machine->own_mut_console;
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u com1 console input pending=%zu ier=0x%x mcr=0x%x rx_pending=%d",
-		    vc->imm_id, vmm_console_guest_pending(console),
-		    svm->mut_com1_ier, svm->mut_com1_mcr,
-		    svm->mut_com1_rx_irq_pending);
-		vmm_svm_com1_rx_notify(svm, vc, "console_input");
-	}
+	if (svm == NULL)
+		return;
+
+	/*
+	 * This callback runs in the host tty writer's thread.  It is only a
+	 * poke path; COM1/IOAPIC state is owned by the vCPU thread and is
+	 * converted into AVIC delivery from vintr_prepare or after idle wakeup.
+	 */
+	console = &svm->borrow_imm_machine->own_mut_console;
+	VMM_SVM_TRACE(svm, "svm vcpu%u console input poke pending=%zu",
+	    vc->imm_id, vmm_console_guest_pending(console));
 }
 
 static void
@@ -3696,6 +3704,7 @@ static void
 vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 	int sleep_ticks;
 	int remaining;
 
@@ -3707,6 +3716,10 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc
 		for (;;) {
 			if (vmm_vcpu_should_stop(vc))
 				return;
+			if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+			    (svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0 &&
+			    vmm_console_guest_pending(console) != 0)
+				break;
 			remaining = svm->mut_lapic_timer_deadline - ticks;
 			if (remaining <= 0)
 				break;
