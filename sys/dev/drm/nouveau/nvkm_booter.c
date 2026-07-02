@@ -198,9 +198,9 @@ struct nvkm_bl_dmem_desc_v2 {
 #define NVKM_FBIF_TRANSCFG_NCOH_PHYS	0x00000005u
 
 int
-nvkm_booter_load_and_start(struct nvkm_softc *sc)
+nvkm_booter_run(struct nvkm_softc *sc, const struct nvkm_booter_info *bi,
+    uint32_t mb0_in, uint32_t mb1_in)
 {
-	const struct nvkm_booter_info *bi = &sc->booter;
 	struct nvkm_falcon *sec2 = sc->sec2;
 	uint32_t mb0, mb1, cpuctl, dmactl;
 	uint8_t *data;
@@ -211,6 +211,11 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 		    "booter: cannot start (booter info or sec2 missing)\n");
 		return (ENXIO);
 	}
+
+	/* A previous run (booter_load at attach) may still own the staging
+	 * buffer; this run replaces it. */
+	if (sc->booter_dma.kva != NULL)
+		nvkm_dmamem_free(sc, &sc->booter_dma);
 
 	/*
 	 * 1. Stage the booter's data section in our own buffer so we can
@@ -336,21 +341,10 @@ nvkm_booter_load_and_start(struct nvkm_softc *sc)
 	 * booter halts with mb0 = 0x31 ("no wpr_meta provided").
 	 */
 	nvkm_falcon_set_bootvec(sec2, bi->boot_addr);
-	if (sc->wpr_meta.kva != NULL) {
-		uint64_t mp = sc->wpr_meta.paddr;
-		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0,
-		    (uint32_t)(mp & 0xffffffffu));
-		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1,
-		    (uint32_t)(mp >> 32));
-		nvkm_debugf(sc->dev,
-		    "booter: passing wpr_meta sysmem=0x%llx (mb0=0x%08x mb1=0x%08x)\n",
-		    (unsigned long long)mp,
-		    (uint32_t)(mp & 0xffffffffu),
-		    (uint32_t)(mp >> 32));
-	} else {
-		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, 0);
-		nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, 0);
-	}
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX0, mb0_in);
+	nvkm_falcon_wr32(sec2, NVKM_FLCN_MAILBOX1, mb1_in);
+	nvkm_debugf(sc->dev,
+	    "booter: mailbox inputs mb0=0x%08x mb1=0x%08x\n", mb0_in, mb1_in);
 
 	nvkm_debugf(sc->dev,
 	    "booter: starting SEC2 (bootvec=0x%x)\n",
@@ -414,4 +408,79 @@ nvkm_booter_release(struct nvkm_softc *sc)
 {
 	if (sc->booter_dma.kva != NULL)
 		nvkm_dmamem_free(sc, &sc->booter_dma);
+}
+
+#define NVKM_WPR2_ADDR_LO	0x1fa824
+#define NVKM_WPR2_ADDR_HI	0x1fa828
+#define NVKM_GSP_MB0_SHUTDOWN	0x80000000u
+
+void
+nvkm_gsp_shutdown(struct nvkm_softc *sc)
+{
+	struct nvkm_booter_info bi;
+	uint32_t base = sc->chip->gsp_base;
+	uint32_t mb0, wpr2_hi;
+	int err, polls;
+
+	if (!sc->gsp_running)
+		return;
+
+	/* 1. Ask GSP-RM to shut down (reply is polled from the msgq; no
+	 * IRQ or drain thread required). */
+	lwkt_gettoken(&sc->gsp_tok);
+	err = nvkm_gsp_rpc_unloading_guest_driver(sc);
+	lwkt_reltoken(&sc->gsp_tok);
+	if (err != 0)
+		nvkm_infof(sc->dev,
+		    "gsp: UNLOADING_GUEST_DRIVER rpc err=%d\n", err);
+
+	/* 2. Wait up to 2s for GSP-RM to report halt in its MAILBOX0. */
+	mb0 = 0;
+	for (polls = 0; polls < 2000; polls++) {
+		mb0 = nvkm_rd32(sc, base + 0x040);
+		if (mb0 == NVKM_GSP_MB0_SHUTDOWN)
+			break;
+		DELAY(1000);
+	}
+	nvkm_infof(sc->dev, "gsp: shutdown MB0=0x%08x after %d ms%s\n",
+	    mb0, polls,
+	    mb0 == NVKM_GSP_MB0_SHUTDOWN ? "" : " (halt not confirmed)");
+	sc->gsp_running = false;
+
+	/* 3. Reset the GSP falcon out of RISC-V mode. */
+	if (sc->gsp != NULL) {
+		err = nvkm_falcon_reset_eng(sc->gsp);
+		if (err != 0)
+			nvkm_infof(sc->dev,
+			    "gsp: shutdown falcon reset err=%d\n", err);
+	}
+
+	/* 4. FWSEC-SB (driver shutdown counterpart of attach-time FRTS). */
+	err = nvkm_fwsec_run_cmd(sc, NVKM_FWSEC_CMD_SB, 0, 0);
+	if (err != 0)
+		nvkm_infof(sc->dev, "gsp: FWSEC-SB err=%d\n", err);
+
+	/* 5. Tear down WPR2 so the next attach can boot GSP-RM again. */
+	wpr2_hi = nvkm_rd32(sc, NVKM_WPR2_ADDR_HI);
+	if (wpr2_hi == 0) {
+		nvkm_infof(sc->dev,
+		    "gsp: WPR2 already clear, booter_unload skipped\n");
+		return;
+	}
+	if (sc->fw_booter_unload == NULL) {
+		nvkm_infof(sc->dev,
+		    "gsp: no booter_unload blob; WPR2 stays set (0x%08x)\n",
+		    wpr2_hi);
+		return;
+	}
+	if (nvkm_booter_parse(sc, sc->fw_booter_unload, &bi) != 0) {
+		nvkm_infof(sc->dev, "gsp: booter_unload parse failed\n");
+		return;
+	}
+	err = nvkm_booter_run(sc, &bi, 0xff, 0xff);
+	wpr2_hi = nvkm_rd32(sc, NVKM_WPR2_ADDR_HI);
+	nvkm_infof(sc->dev,
+	    "gsp: booter_unload %s, WPR2_HI=0x%08x%s\n",
+	    err == 0 ? "halted" : "error",
+	    wpr2_hi, wpr2_hi == 0 ? " (torn down)" : " (still set!)");
 }

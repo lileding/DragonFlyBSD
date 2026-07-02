@@ -39,12 +39,25 @@ nvkm_fw_init(struct nvkm_softc *sc)
 	    fw->data[0], fw->data[1], fw->data[2], fw->data[3],
 	    fw->data[4], fw->data[5], fw->data[6], fw->data[7]);
 
+	/* Shutdown blob: without it kldunload cannot tear down WPR2, so a
+	 * later attach would fail; attach itself works fine, so this is a
+	 * warning, not an error. */
+	sc->fw_booter_unload = firmware_get(sc->chip->fw_booter_unload);
+	if (sc->fw_booter_unload == NULL)
+		nvkm_infof(sc->dev,
+		    "fw: \"%s\" missing; kldunload will leave WPR2 set\n",
+		    sc->chip->fw_booter_unload);
+
 	return (0);
 }
 
 void
 nvkm_fw_fini(struct nvkm_softc *sc)
 {
+	if (sc->fw_booter_unload != NULL) {
+		firmware_put(sc->fw_booter_unload, FIRMWARE_UNLOAD);
+		sc->fw_booter_unload = NULL;
+	}
 	if (sc->fw_booter_load != NULL) {
 		firmware_put(sc->fw_booter_load, FIRMWARE_UNLOAD);
 		sc->fw_booter_load = NULL;

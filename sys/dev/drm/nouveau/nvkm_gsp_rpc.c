@@ -866,6 +866,37 @@ nvkm_gsp_rpc_set_system_info(struct nvkm_softc *sc)
 	return (nvkm_gsp_rpc_wr(sc, info, NVKM_GSP_RPC_REPLY_NOSEQ));
 }
 
+/* rpc_unloading_guest_driver_v1F_07 (layout per nouveau-vendored r570). */
+struct nvkm_rpc_unloading_guest_driver {
+	uint8_t  bInPMTransition;
+	uint8_t  bGc6Entering;
+	uint8_t  pad02[2];
+	uint32_t newLevel;
+};
+
+int
+nvkm_gsp_rpc_unloading_guest_driver(struct nvkm_softc *sc)
+{
+	struct nvkm_rpc_unloading_guest_driver *rpc;
+
+	rpc = nvkm_gsp_rpc_get(sc,
+	    NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER, sizeof(*rpc));
+	if (rpc == NULL)
+		return (ENOMEM);
+	rpc->bInPMTransition = 0;	/* driver unload, not suspend */
+	rpc->bGc6Entering = 0;
+	rpc->pad02[0] = 0;
+	rpc->pad02[1] = 0;
+	rpc->newLevel = 0;	/* NV2080_..._SET_POWER_STATE_GPU_LEVEL_0 */
+	/*
+	 * Fire-and-forget: r570 GSP-RM acts on this RPC and halts without
+	 * writing a reply (a REPLY_RECV wait just burns its full timeout
+	 * while MAILBOX0 already reads 0x80000000).  The authoritative
+	 * completion barrier is the MB0 halt poll in nvkm_gsp_shutdown().
+	 */
+	return (nvkm_gsp_rpc_wr(sc, rpc, NVKM_GSP_RPC_REPLY_NOSEQ));
+}
+
 int
 nvkm_gsp_rpc_set_registry(struct nvkm_softc *sc)
 {

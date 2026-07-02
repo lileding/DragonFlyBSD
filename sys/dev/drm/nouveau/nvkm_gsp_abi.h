@@ -145,7 +145,8 @@ typedef struct {
 	/* PACKED_REGISTRY_ENTRY entries[] -- empty for first-boot */
 } PACKED_REGISTRY_TABLE;
 
-/* RPC function codes (NV_VGPU_MSG_FUNCTION_*) used at first boot. */
+/* RPC function codes (NV_VGPU_MSG_FUNCTION_*) used at boot/shutdown. */
+#define NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER 47
 #define NV_VGPU_MSG_FUNCTION_GSP_SET_SYSTEM_INFO  72
 #define NV_VGPU_MSG_FUNCTION_SET_REGISTRY         73
 

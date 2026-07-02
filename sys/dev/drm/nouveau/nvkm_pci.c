@@ -713,13 +713,16 @@ nvkm_pci_attach(device_t dev)
 		(void)nvkm_gsp_rpc_set_registry(sc);
 	}
 
-	/* Run the booter — this is what actually stages GSP-RM in VRAM. */
+	/* Run the booter — this is what actually stages GSP-RM in VRAM.
+	 * It expects the GspFwWprMeta sysmem address in MAILBOX0/1. */
 	if (sc->fw_booter_load != NULL) {
 		struct nvkm_booter_info bi;
+		uint64_t mp = sc->wpr_meta.kva != NULL ? sc->wpr_meta.paddr : 0;
 
 		if (nvkm_booter_parse(sc, sc->fw_booter_load, &bi) == 0) {
 			sc->booter = bi;
-			(void)nvkm_booter_load_and_start(sc);
+			(void)nvkm_booter_run(sc, &sc->booter,
+			    (uint32_t)(mp & 0xffffffffu), (uint32_t)(mp >> 32));
 		}
 	}
 
@@ -1212,6 +1215,11 @@ nvkm_pci_detach(device_t dev)
 	nvkm_gsp_bar1_fini(sc);
 	nvkm_gsp_bar2_fini(sc);
 	nvkm_gsp_vram_fini(sc);
+
+	/* Stop GSP-RM and tear down WPR2 while the RPC queues, VBIOS,
+	 * FWSEC state, falcons, and the booter_unload blob are all still
+	 * alive; without this a later attach cannot boot GSP-RM again. */
+	nvkm_gsp_shutdown(sc);
 
 	nvkm_booter_release(sc);
 	nvkm_gsp_libos_release(sc);
