@@ -2214,6 +2214,37 @@ out:
 	return (err);
 }
 
+/* kldunload gate diagnostics (see nvkm-unload.md). */
+static int
+nvkm_gsp_sysctl_unload_state(SYSCTL_HANDLER_ARGS)
+{
+	struct nvkm_softc *sc = arg1;
+	struct sbuf *sb;
+	int err;
+
+	sb = sbuf_new_auto();
+	if (sb == NULL)
+		return (ENOMEM);
+
+	sbuf_printf(sb, "unloading = %d\n", sc->unloading);
+	sbuf_printf(sb, "unload_attempt_count = %llu\n",
+	    (unsigned long long)sc->unload_attempt_count);
+	sbuf_printf(sb, "unload_fail_count = %llu\n",
+	    (unsigned long long)sc->unload_fail_count);
+	sbuf_printf(sb, "unload_busy_open_count = %llu\n",
+	    (unsigned long long)sc->unload_busy_open_count);
+	sbuf_printf(sb, "unload_last_open_count = %d\n",
+	    sc->unload_last_open_count);
+	sbuf_printf(sb, "unload_last_file_count = %u\n",
+	    sc->unload_last_file_count);
+
+	err = sbuf_finish(sb);
+	if (err == 0)
+		err = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (err);
+}
+
 /* Provided by nvkm_drm_kms.c. */
 int nvkm_drm_kms_light_up(struct nvkm_softc *sc);
 
@@ -2544,6 +2575,10 @@ nvkm_gsp_debug_publish_sysctl(struct nvkm_softc *sc,
 	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
 	    nvkm_gsp_sysctl_perf_state, "A",
 	    "GSP RM current performance pstate");
+	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "unload_state",
+	    CTLTYPE_STRING | CTLFLAG_RD, sc, 0,
+	    nvkm_gsp_sysctl_unload_state, "A",
+	    "kldunload gate state and counters");
 	SYSCTL_ADD_PROC(ctx, children, OID_AUTO, "kms_lightup",
 	    CTLTYPE_INT | CTLFLAG_RW, sc, 0,
 	    nvkm_gsp_sysctl_kms_lightup, "I",
