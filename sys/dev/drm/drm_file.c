@@ -426,10 +426,16 @@ drm_close(struct dev_close_args *ap)
 {
 #ifdef __DragonFly__
 	struct file *filp = ap->a_fp;
-	struct inode *inode = filp->f_data;	/* A Linux inode is a Unix vnode */
 #endif
 	struct drm_file *file_priv = filp->private_data;
-	struct drm_minor *minor = drm_minor_acquire(iminor(inode));
+	/*
+	 * Use the minor reference the file has held since drm_open();
+	 * re-acquiring here leaked one drm_device reference per
+	 * open/close cycle, so drm_dev_release() could never run.  The
+	 * drm_minor_release() at the end returns the open's reference,
+	 * matching Linux drm_release() semantics.
+	 */
+	struct drm_minor *minor = file_priv->minor;
 	struct drm_device *dev = minor->dev;
 
 	mutex_lock(&drm_global_mutex);
