@@ -575,7 +575,7 @@ STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/nouveau/nvkm_drm_kms.c",
     "sys/dev/drm/nouveau/nvkm_gsp_disp.c",
     "sys/dev/drm/nouveau/core/object.c",
-    "sys/dev/drm/nouveau/dispnv50/nvkm_dispnv50_bridge.c",
+    "sys/dev/drm/nouveau/nvkm_dispnv50_bridge.c",
     "sys/dev/drm/nouveau/nvhw/drf.h",
     "sys/dev/drm/nouveau/nvhw/class/clc57d.h",
     "sys/dev/drm/nouveau/nvif/class.h",
