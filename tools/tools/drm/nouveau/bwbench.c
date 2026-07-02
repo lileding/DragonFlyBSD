@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * bwbench - standalone NVK/Vulkan memory-read-bandwidth microbenchmark.
  *
