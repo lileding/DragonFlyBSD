@@ -13,6 +13,7 @@
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
 #include <linux/dma-fence.h>
+#include <linux/workqueue.h>
 #include "nvkm_falcon.h"
 
 #include <drm/drmP.h>            /* struct drm_softc, kzalloc, GFP_KERNEL */
@@ -107,6 +108,9 @@ nvkm_gsp_drain_kthread(void *arg)
 		tsleep(&sc->gsp_drain_td, 0, "gsp_drain", hz / 10);
 	}
 	nvkm_debugf(sc->dev, "gsp: msgq drain kthread exiting\n");
+	/* Detach joins on this flag; sc stays alive until it is set. */
+	sc->gsp_drain_done = true;
+	wakeup(&sc->gsp_drain_done);
 	kthread_exit();
 }
 
@@ -645,12 +649,16 @@ nvkm_pci_attach(device_t dev)
 	(void)nvkm_sec2_init(sc);
 	(void)nvkm_gsp_init(sc);
 
-	/* Publish VBIOS via sysctl so userspace can dump it for romfile. */
+	/* Publish VBIOS + debug sysctls.  They live in nvkm's own sysctl
+	 * context (parented under the newbus device tree) so detach can
+	 * remove every handler that dereferences sc before teardown runs. */
 	{
-		struct sysctl_ctx_list *ctx = device_get_sysctl_ctx(dev);
 		struct sysctl_oid *oid = device_get_sysctl_tree(dev);
-		nvkm_bios_publish_sysctl(sc, ctx, oid);
-		nvkm_gsp_debug_publish_sysctl(sc, ctx, oid);
+
+		sysctl_ctx_init(&sc->sysctl_ctx);
+		sc->sysctl_ctx_ready = true;
+		nvkm_bios_publish_sysctl(sc, &sc->sysctl_ctx, oid);
+		nvkm_gsp_debug_publish_sysctl(sc, &sc->sysctl_ctx, oid);
 	}
 
 	/*
@@ -1090,6 +1098,32 @@ nvkm_pci_detach(device_t dev)
 	}
 
 	/*
+	 * Remove the nvkm sysctl handlers first: after this no sysctl can
+	 * dereference sc while the rest of teardown dismantles it.  On
+	 * failure the device is still fully operational, so abort cleanly.
+	 */
+	if (sc->sysctl_ctx_ready) {
+		err = sysctl_ctx_free(&sc->sysctl_ctx);
+		if (err != 0) {
+			sc->unloading = false;
+			nvkm_infof(dev,
+			    "unload busy: sysctl ctx free err=%d\n", err);
+			return (EBUSY);
+		}
+		sc->sysctl_ctx_ready = false;
+	}
+
+	/*
+	 * Drain nvkm-owned work still queued on the shared workqueues
+	 * (VM_BIND retire records, nonblocking commit work).  Their work
+	 * functions live in this module's text and may touch TTM, so they
+	 * must be gone before nvkm_drm_unregister() tears TTM down.  The
+	 * gate guarantees no file exists to queue new ones.
+	 */
+	flush_workqueue(system_unbound_wq);
+	flush_workqueue(system_wq);
+
+	/*
 	 * Ownership:
 	 *   Detach consumes sc's DRM, KMS, GSP, IRQ, BAR, and firmware
 	 *   resources.  After nvkm_drm_unregister() returns, no public DRM
@@ -1119,15 +1153,45 @@ nvkm_pci_detach(device_t dev)
 	}
 	nvkm_drm_unregister(sc);
 
+	/*
+	 * Free the GSP-side objects while the RPC path still works: RM
+	 * object frees are synchronous RPCs.  The display engine goes
+	 * first (its channels were already freed by dispnv50 teardown
+	 * inside nvkm_drm_unregister), then the attach-time channel and
+	 * the device-global VMM.
+	 */
+	nvkm_gsp_disp_fini(sc);
+	if (sc->gsp_chan != NULL) {
+		(void)nvkm_gsp_chan_dtor(sc->gsp_chan);
+		kfree(sc->gsp_chan);
+		sc->gsp_chan = NULL;
+	}
+	if (sc->gsp_vmm != NULL) {
+		nvkm_gsp_vmm_dtor(sc->gsp_vmm);
+		kfree(sc->gsp_vmm);
+		sc->gsp_vmm = NULL;
+	}
+
 	/* No KMS path remains to consume display/vblank/msgq events now. */
 	if (sc->bar_res[0] != NULL)
 		nvkm_wr32(sc, sc->chip->gsp_base + 0x004, 0x00);
 
 	if (sc->irq_cookie != NULL) {
 		if (sc->gsp_drain_td != NULL) {
+			int join_wait = 0;
+
 			sc->gsp_drain_exit = true;
 			wakeup(&sc->gsp_drain_td);
-			tsleep(&sc->gsp_drain_td, 0, "gsp_join", hz);
+			/* Real join: sc must stay alive until the drain
+			 * thread has left its loop for good. */
+			while (!sc->gsp_drain_done && join_wait < 100) {
+				tsleep(&sc->gsp_drain_done, 0, "gsp_join",
+				    hz / 10);
+				join_wait++;
+			}
+			if (!sc->gsp_drain_done)
+				nvkm_infof(dev,
+				    "gsp: msgq drain thread join timed out\n");
 			sc->gsp_drain_td = NULL;
 		}
 		bus_teardown_intr(dev, sc->irq_res, sc->irq_cookie);
@@ -1143,6 +1207,12 @@ nvkm_pci_detach(device_t dev)
 		}
 	}
 
+	/* Host-side BAR window state and the VRAM allocator go after every
+	 * consumer (TTM, display, channel, VMMs) has been torn down. */
+	nvkm_gsp_bar1_fini(sc);
+	nvkm_gsp_bar2_fini(sc);
+	nvkm_gsp_vram_fini(sc);
+
 	nvkm_booter_release(sc);
 	nvkm_gsp_libos_release(sc);
 	nvkm_gsp_boot_release(sc);
@@ -1156,6 +1226,7 @@ nvkm_pci_detach(device_t dev)
 	spin_uninit(&sc->kms_hpd_lock);
 	spin_uninit(&sc->hotproc_lock);
 
+	nvkm_infof(dev, "unloaded cleanly\n");
 	kfree(sc);
 	return (0);
 }

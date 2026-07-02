@@ -15,10 +15,13 @@ and that a refused unload does not damage the running driver:
        munmap must return the count to its baseline.
     4. After all references are gone, the nodes must still open.
 
-This tool does NOT attempt a successful unload: teardown completion and
-GSP-RM shutdown land in later phases (see nvkm-unload.md).  Run from an
-SSH shell, not from inside an X11/Wayland session (a compositor holds
-its own DRM fds and would make the "close" step meaningless).
+With --try-unload the tool finishes by attempting a REAL unload with no
+DRM users left (phase-3 acceptance): kldunload must succeed, nvkm must
+disappear from kldstat, and the /dev/dri nodes must be gone.  The GPU
+is unusable afterwards until reboot (GSP-RM shutdown and reload land in
+phase 4), so this flag is opt-in.  Run from an SSH shell, not from
+inside an X11/Wayland session (a compositor holds its own DRM fds and
+would make the "close" step meaningless).
 
 Output goes to stdout; exit code 0 = all PASS.
 """
@@ -138,7 +141,22 @@ def phase2_mmap_outlives_fd():
           str(state_unmapped))
 
 
+def phase3_real_unload():
+    """Attempt a real unload with no DRM users left (phase-3 gate)."""
+    rc, out = run(["doas", "kldunload", "nvkm"])
+    check("kldunload succeeds with no users", rc == 0, out)
+    check("nvkm gone from kldstat", not nvkm_loaded())
+    check("render node removed after unload",
+          not os.path.exists(RENDER_NODE))
+    check("card node removed after unload", not os.path.exists(CARD_NODE))
+    rc, out = run(["dmesg"])
+    tail = "\n".join(out.splitlines()[-30:])
+    check("dmesg reports clean unload", "unloaded cleanly" in tail, tail[-200:])
+
+
 def main():
+    try_unload = "--try-unload" in sys.argv[1:]
+
     if not check("nvkm loaded before test", nvkm_loaded()):
         return 1
     if not check("render node exists", os.path.exists(RENDER_NODE)):
@@ -158,6 +176,9 @@ def main():
     card_fd = os.open(CARD_NODE, os.O_RDWR)
     os.close(card_fd)
     check("card node opens after refused unload", True)
+
+    if try_unload:
+        phase3_real_unload()
 
     failed = [name for name, ok, _ in results if not ok]
     print("%d checks, %d failed" % (len(results), len(failed)))
