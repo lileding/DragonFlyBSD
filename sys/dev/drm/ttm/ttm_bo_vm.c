@@ -519,12 +519,15 @@ EXPORT_SYMBOL(ttm_fbdev_mmap);
 /*
  * NOTE: This code is fragile.  This code can only be entered with *mres
  *	 not NULL when *mres is a placeholder page allocated by the kernel.
+ *
+ * The BO is passed explicitly so a driver pager (nvkm) can guard the
+ * fault without duplicating this algorithm; the generic pager wrapper
+ * below keeps reading it from the VM object handle.
  */
-static int
-ttm_bo_vm_fault_dfly(vm_object_t vm_obj, vm_ooffset_t offset,
-		     int prot, vm_page_t *mres)
+int
+ttm_bo_vm_fault_bo_dfly(struct ttm_buffer_object *bo, vm_object_t vm_obj,
+			vm_ooffset_t offset, int prot, vm_page_t *mres)
 {
-	struct ttm_buffer_object *bo = vm_obj->handle;
 	struct ttm_bo_device *bdev = bo->bdev;
 	struct ttm_tt *ttm = NULL;
 	vm_page_t m;
@@ -757,6 +760,14 @@ out_unlock2:
 	up_read(&vma->vm_mm->mmap_sem);
 
 	return (retval);
+}
+
+static int
+ttm_bo_vm_fault_dfly(vm_object_t vm_obj, vm_ooffset_t offset,
+		     int prot, vm_page_t *mres)
+{
+	return (ttm_bo_vm_fault_bo_dfly(vm_obj->handle, vm_obj, offset,
+					prot, mres));
 }
 
 static int
