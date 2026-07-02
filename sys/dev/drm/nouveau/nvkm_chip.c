@@ -16,6 +16,7 @@ extern const struct nvkm_rm_gpu tu1xx_gpu;
 #define NVKM_TU10X_COMMON_FIELDS					\
 	.card_type = NVKM_CARD_TU100,					\
 	.fw_booter_load = "nvidia/tu102/gsp/booter_load-570.144",	\
+	.fw_booter_unload = "nvidia/tu102/gsp/booter_unload-570.144",	\
 	.fw_acr_bl = "nvidia/tu102/acr/bl",				\
 	.fw_gsp = "nvidia/tu102/gsp/gsp-570.144",			\
 	.fw_bootloader = "nvidia/tu102/gsp/bootloader-570.144",		\

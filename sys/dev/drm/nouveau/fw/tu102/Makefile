@@ -14,9 +14,13 @@ KMOD=	nvgsp_570
 FW_SRC?=	/lib/firmware/nvidia/tu102
 
 FIRMWS=	booter_load.bin:nvidia/tu102/gsp/booter_load-570.144:570144 \
+	booter_unload.bin:nvidia/tu102/gsp/booter_unload-570.144:570144 \
 	acr_bl.bin:nvidia/tu102/acr/bl:1 \
 	bootloader.bin:nvidia/tu102/gsp/bootloader-570.144:570144 \
 	gsp.bin:nvidia/tu102/gsp/gsp-570.144:570144
+
+booter_unload.bin: ${FW_SRC}/gsp/booter_unload-570.144.bin.xz
+	unxz -k -c ${.ALLSRC} > ${.TARGET}
 
 bootloader.bin: ${FW_SRC}/gsp/bootloader-570.144.bin.xz
 	unxz -k -c ${.ALLSRC} > ${.TARGET}
@@ -24,6 +28,6 @@ bootloader.bin: ${FW_SRC}/gsp/bootloader-570.144.bin.xz
 gsp.bin: ${FW_SRC}/gsp/gsp-570.144.bin.xz
 	unxz -k -c ${.ALLSRC} > ${.TARGET}
 
-CLEANFILES+=	bootloader.bin gsp.bin
+CLEANFILES+=	booter_unload.bin bootloader.bin gsp.bin
 
 .include <bsd.kmod.mk>

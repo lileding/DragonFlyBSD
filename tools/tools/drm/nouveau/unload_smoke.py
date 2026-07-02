@@ -17,11 +17,16 @@ and that a refused unload does not damage the running driver:
 
 With --try-unload the tool finishes by attempting a REAL unload with no
 DRM users left (phase-3 acceptance): kldunload must succeed, nvkm must
-disappear from kldstat, and the /dev/dri nodes must be gone.  The GPU
-is unusable afterwards until reboot (GSP-RM shutdown and reload land in
-phase 4), so this flag is opt-in.  Run from an SSH shell, not from
-inside an X11/Wayland session (a compositor holds its own DRM fds and
-would make the "close" step meaningless).
+disappear from kldstat, and the /dev/dri nodes must be gone.
+
+With --reload-loop N (phase-4 acceptance) it then runs N unload/reload
+cycles: each cycle unloads, kldloads the project-tree nvkm.ko again
+(drm.ko and nvgsp_570.ko stay loaded), and verifies the nodes come
+back and DUMB mmap works.  nvkm is left loaded after the last cycle.
+
+Run from an SSH shell, not from inside an X11/Wayland session (a
+compositor holds its own DRM fds and would make the "close" step
+meaningless).
 
 Output goes to stdout; exit code 0 = all PASS.
 """
@@ -141,21 +146,68 @@ def phase2_mmap_outlives_fd():
           str(state_unmapped))
 
 
-def phase3_real_unload():
+def phase3_real_unload(tag=""):
     """Attempt a real unload with no DRM users left (phase-3 gate)."""
     rc, out = run(["doas", "kldunload", "nvkm"])
-    check("kldunload succeeds with no users", rc == 0, out)
-    check("nvkm gone from kldstat", not nvkm_loaded())
-    check("render node removed after unload",
+    check("kldunload succeeds with no users%s" % tag, rc == 0, out)
+    check("nvkm gone from kldstat%s" % tag, not nvkm_loaded())
+    check("render node removed after unload%s" % tag,
           not os.path.exists(RENDER_NODE))
-    check("card node removed after unload", not os.path.exists(CARD_NODE))
+    check("card node removed after unload%s" % tag,
+          not os.path.exists(CARD_NODE))
     rc, out = run(["dmesg"])
-    tail = "\n".join(out.splitlines()[-30:])
-    check("dmesg reports clean unload", "unloaded cleanly" in tail, tail[-200:])
+    tail = "\n".join(out.splitlines()[-40:])
+    check("dmesg reports clean unload%s" % tag,
+          "unloaded cleanly" in tail, tail[-200:])
+
+
+def phase4_reload_loop(cycles):
+    """Unload/reload N times (phase-4 gate); leaves nvkm loaded."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    src_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..",
+                                            ".."))
+    nvkm_ko = os.path.join(src_root, "sys", "dev", "drm", "nouveau",
+                           "nvkm.ko")
+    if not check("project nvkm.ko found for reload", os.path.exists(nvkm_ko),
+                 nvkm_ko):
+        return
+
+    for i in range(1, cycles + 1):
+        tag = " [cycle %d]" % i
+        phase3_real_unload(tag)
+
+        rc, out = run(["dmesg"])
+        tail = "\n".join(out.splitlines()[-40:])
+        check("WPR2 torn down%s" % tag, "torn down" in tail, tail[-300:])
+
+        rc, out = run(["doas", "kldload", nvkm_ko])
+        check("kldload succeeds%s" % tag, rc == 0, out)
+        check("nvkm loaded%s" % tag, nvkm_loaded())
+        check("nodes back%s" % tag,
+              os.path.exists(RENDER_NODE) and os.path.exists(CARD_NODE))
+
+        fd = os.open(RENDER_NODE, os.O_RDWR)
+        os.close(fd)
+        fd = os.open(CARD_NODE, os.O_RDWR)
+        mem = dumb_create_and_mmap(fd)
+        os.close(fd)
+        mem[16:20] = b"loop"
+        mem.close()
+        check("dumb mmap works after reload%s" % tag, True)
+
+        state = read_unload_state()
+        check("fresh unload_state%s" % tag,
+              state.get("unloading", 1) == 0 and
+              state.get("mmap_active_count", -1) == 0, str(state))
 
 
 def main():
     try_unload = "--try-unload" in sys.argv[1:]
+    reload_cycles = 0
+    if "--reload-loop" in sys.argv[1:]:
+        idx = sys.argv.index("--reload-loop")
+        reload_cycles = int(sys.argv[idx + 1]) if idx + 1 < len(
+            sys.argv) else 3
 
     if not check("nvkm loaded before test", nvkm_loaded()):
         return 1
@@ -177,7 +229,9 @@ def main():
     os.close(card_fd)
     check("card node opens after refused unload", True)
 
-    if try_unload:
+    if reload_cycles > 0:
+        phase4_reload_loop(reload_cycles)
+    elif try_unload:
         phase3_real_unload()
 
     failed = [name for name, ok, _ in results if not ok]

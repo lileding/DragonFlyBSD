@@ -234,6 +234,7 @@ struct nvkm_chip_config {
 	uint32_t graph_units;
 
 	const char *fw_booter_load;
+	const char *fw_booter_unload;
 	const char *fw_acr_bl;
 	const char *fw_gsp;
 	const char *fw_bootloader;
@@ -662,6 +663,7 @@ struct nvkm_softc {
 	uint32_t		vbios_size;
 
 	const struct firmware	*fw_booter_load;
+	const struct firmware	*fw_booter_unload;	/* NULL if blob absent */
 
 	struct nvkm_falcon	*sec2;
 	struct nvkm_falcon	*gsp;	/* GSP-Falcon (HS host) */
@@ -1607,8 +1609,23 @@ void	nvkm_dmamem_free(struct nvkm_softc *sc, struct nvkm_dmamem *mem);
 struct firmware;
 int	nvkm_booter_parse(struct nvkm_softc *sc, const struct firmware *fw,
 	    struct nvkm_booter_info *info);
-int	nvkm_booter_load_and_start(struct nvkm_softc *sc);
+/* Run a parsed HS booter image on SEC2 with the given mailbox inputs
+ * (booter_load: GspFwWprMeta sysmem address; booter_unload: 0xff/0xff). */
+int	nvkm_booter_run(struct nvkm_softc *sc,
+	    const struct nvkm_booter_info *bi, uint32_t mb0, uint32_t mb1);
 void	nvkm_booter_release(struct nvkm_softc *sc);
+/*
+ * Ownership: borrows sc; consumes the running GSP-RM instance.
+ * Lifetime: detach-time only, after every RPC-based teardown step and
+ * before firmware/BIOS/BAR resources are released.  Best-effort: each
+ * stage logs and continues so unload never wedges half way.
+ * Threading: detach context; sleeps in RPC reply wait, falcon polls,
+ * and FWSEC/booter runs.  Sequence per nouveau tu102_gsp_fini:
+ * UNLOADING_GUEST_DRIVER RPC -> poll GSP MB0 halt -> falcon reset ->
+ * FWSEC-SB -> booter_unload (tears down WPR2 so a later attach can
+ * boot GSP-RM again).
+ */
+void	nvkm_gsp_shutdown(struct nvkm_softc *sc);
 
 /* nvkm_gsp_meta.c */
 #define NVKM_GSP_FW_WPR_META_MAGIC    0xdc3aae21371a60b3ULL
@@ -1674,6 +1691,8 @@ void	nvkm_gsp_boot_release(struct nvkm_softc *sc);
 int	nvkm_gsp_libos_prepare(struct nvkm_softc *sc);
 int	nvkm_gsp_rpc_set_system_info(struct nvkm_softc *sc);
 int	nvkm_gsp_rpc_set_registry(struct nvkm_softc *sc);
+/* Ask GSP-RM to shut down (fn 47, non-suspend, power level 0). */
+int	nvkm_gsp_rpc_unloading_guest_driver(struct nvkm_softc *sc);
 
 enum {
 	NVKM_GSP_RPC_REPLY_NOWAIT = 0,
