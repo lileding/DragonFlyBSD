@@ -1,8 +1,19 @@
 /*
- * Symbols that were previously only exported by libthread_xu and
- * are new to libc with the thread merge.  They are all internal
- * contract symbols (cancellation entry points, debugger hooks,
- * static lock objects), hence the private namespace.
+ * Symbols that are new to libc with the thread merge.
+ *
+ * pthread_create and pthread_cancel were historically not exported by
+ * libc at all (link time was satisfied by weak abort stubs in the
+ * libpthread shim), so they enter the current public version node.
+ */
+DF606.0 {
+    pthread_cancel;
+    pthread_create;
+};
+
+/*
+ * The rest were previously only exported by libthread_xu and are all
+ * internal contract symbols (cancellation entry points, debugger
+ * hooks, static lock objects), hence the private namespace.
  */
 DFprivate_1.0 {
     ___creat;
@@ -155,6 +166,4 @@ DFprivate_1.0 {
     _umtx_sleep_err;
     _umtx_wakeup_err;
     _usrstack;
-    pthread_cancel;
-    pthread_create;
 };
