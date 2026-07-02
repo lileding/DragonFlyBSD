@@ -1520,8 +1520,13 @@ struct nvkm_softc {
 	uint64_t		unload_attempt_count;
 	uint64_t		unload_fail_count;
 	uint64_t		unload_busy_open_count;
+	uint64_t		unload_busy_mmap_count;
 	int			unload_last_open_count;
 	uint32_t		unload_last_file_count;
+	uint32_t		unload_last_mmap_count;
+	/* Live deduped MGTDEVICE pager objects; each also holds one
+	 * device-busy reference (see nvkm_ttm_pager_ctor/_dtor). */
+	u_int			mmap_active_count;
 };
 
 #ifndef nvkm_rd32

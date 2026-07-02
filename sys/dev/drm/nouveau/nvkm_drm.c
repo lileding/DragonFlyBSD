@@ -352,6 +352,8 @@ static struct drm_driver nvkm_drm_driver = {
 	.postclose = nvkm_drm_postclose,
 	.lastclose = nvkm_drm_lastclose,
 	.gem_vm_ops = &nvkm_gem_pager_ops,
+	/* TTM mmap with nvkm-owned pager lifetime (unload busy tracking). */
+	.mmap_single = nvkm_drm_mmap_single,
 	.gem_free_object_unlocked = nvkm_bo_gem_free,
 	/*
 	 * PRIME self-import only (wlroots requires DRM_PRIME_CAP_IMPORT even
@@ -7950,11 +7952,16 @@ nvkm_unload_begin(struct nvkm_softc *sc)
 	list_for_each_entry(file_priv, &ddev->filelist, lhead)
 		file_count++;
 	mutex_unlock(&ddev->filelist_mutex);
-	if (ddev->open_count != 0 || file_count != 0) {
+	if (ddev->open_count != 0 || file_count != 0 ||
+	    sc->mmap_active_count != 0) {
 		sc->unload_fail_count++;
-		sc->unload_busy_open_count++;
+		if (ddev->open_count != 0 || file_count != 0)
+			sc->unload_busy_open_count++;
+		if (sc->mmap_active_count != 0)
+			sc->unload_busy_mmap_count++;
 		sc->unload_last_open_count = ddev->open_count;
 		sc->unload_last_file_count = file_count;
+		sc->unload_last_mmap_count = sc->mmap_active_count;
 		mutex_unlock(&drm_global_mutex);
 		return (EBUSY);
 	}
