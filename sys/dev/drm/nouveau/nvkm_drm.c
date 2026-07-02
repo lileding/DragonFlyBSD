@@ -7908,6 +7908,61 @@ nvkm_drm_unregister(struct nvkm_softc *sc)
 	drm_fini_pdev(&sc->drm_pdev);
 }
 
+/* Owned by drm.ko (drm_file.c); serializes DRM open/close/lastclose. */
+extern struct lock drm_global_mutex;
+
+int
+nvkm_unload_begin(struct nvkm_softc *sc)
+{
+	struct drm_device *ddev = sc->drm_dev;
+	struct drm_file *file_priv;
+	uint32_t file_count = 0;
+
+	sc->unload_attempt_count++;
+	if (ddev == NULL) {
+		/* DRM registration failed at attach; nothing is public. */
+		sc->unloading = true;
+		return (0);
+	}
+
+	/*
+	 * Ownership:
+	 *   On success this commits the softc to teardown: sc->unloading is
+	 *   set and never cleared, and nvkm_drm_open() refuses new files.
+	 *
+	 * Lifetime:
+	 *   Runs once at the start of device detach, before any teardown
+	 *   step, while every subsystem is still fully operational.
+	 *
+	 * Threading:
+	 *   drm_global_mutex serializes this decision against drm_close()
+	 *   (which holds it across the whole release) and lastclose console
+	 *   restore.  drm_open() increments open_count before calling the
+	 *   driver open hook, so any open racing this gate either bumps
+	 *   open_count in time to be counted here or reaches
+	 *   nvkm_drm_open() after unloading is visible and is refused.
+	 *   The residual open-vs-detach window matches the bus-level
+	 *   DS_BUSY check and is closed for good by destroy_dev() in the
+	 *   later minor-teardown phase (see nvkm-unload.md).
+	 */
+	mutex_lock(&drm_global_mutex);
+	mutex_lock(&ddev->filelist_mutex);
+	list_for_each_entry(file_priv, &ddev->filelist, lhead)
+		file_count++;
+	mutex_unlock(&ddev->filelist_mutex);
+	if (ddev->open_count != 0 || file_count != 0) {
+		sc->unload_fail_count++;
+		sc->unload_busy_open_count++;
+		sc->unload_last_open_count = ddev->open_count;
+		sc->unload_last_file_count = file_count;
+		mutex_unlock(&drm_global_mutex);
+		return (EBUSY);
+	}
+	sc->unloading = true;
+	mutex_unlock(&drm_global_mutex);
+	return (0);
+}
+
 /* ============================================================
  * Nouveau-uAPI ioctl handlers (Phase 3 Step 2).
  * Mirrors Linux include/uapi/drm/nouveau_drm.h subset that Mesa
@@ -8235,13 +8290,18 @@ nvkm_drm_file_ensure_vmm(struct nvkm_softc *sc, struct nvkm_drm_file *nfile)
 static int
 nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 {
+	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct nvkm_drm_file *nfile;
+
+	/* Unload has been committed; refuse to create new user state. */
+	if (sc->unloading)
+		return (-ENODEV);
 
 	nfile = kzalloc(sizeof(*nfile), GFP_KERNEL);
 	if (nfile == NULL)
 		return (-ENOMEM);
 	kref_init(&nfile->refcount);
-	nfile->sc = nvkm_drm_sc(ddev);
+	nfile->sc = sc;
 	LIST_INIT(&nfile->vm_bindings);
 	LIST_INIT(&nfile->vm_validate_bindings);
 	RB_INIT(&nfile->vm_binding_tree);

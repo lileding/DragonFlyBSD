@@ -1498,6 +1498,30 @@ struct nvkm_softc {
 
 	struct nvkm_gsp_gr_ctxbuf *gr_ctxbuf_mem;
 	uint8_t			gr_ctxbuf_nr;
+
+	/*
+	 * kldunload gate (see nvkm-unload.md).
+	 *
+	 * Ownership:
+	 *   Owned by nvkm_unload_begin(); read by public entry points that
+	 *   must refuse work once teardown has been committed.
+	 *
+	 * Lifetime:
+	 *   unloading is set at most once, under drm_global_mutex, after the
+	 *   gate has proven no DRM file is left.  It stays set for the
+	 *   remaining life of the softc.
+	 *
+	 * Threading:
+	 *   The writer holds drm_global_mutex; nvkm_drm_open() reads it while
+	 *   drm_open() still holds no file reference, see the gate comment.
+	 *   The counters are plain diagnostics.
+	 */
+	bool			unloading;
+	uint64_t		unload_attempt_count;
+	uint64_t		unload_fail_count;
+	uint64_t		unload_busy_open_count;
+	int			unload_last_open_count;
+	uint32_t		unload_last_file_count;
 };
 
 #ifndef nvkm_rd32
@@ -1678,6 +1702,15 @@ int	nvkm_gsp_msg_dispatch_all(struct nvkm_softc *sc);
 /* DRM driver registration. */
 int	nvkm_drm_register(struct nvkm_softc *sc);
 void	nvkm_drm_unregister(struct nvkm_softc *sc);
+/*
+ * Ownership: borrows sc; on success commits sc to teardown by setting
+ * sc->unloading, after which public entry points refuse new work.
+ * Lifetime: called once from device detach before any teardown step.
+ * Threading: takes drm_global_mutex to serialize against drm_open()/
+ * drm_close(); may sleep; returns EBUSY and leaves the device fully
+ * operational when any DRM file is still open.
+ */
+int	nvkm_unload_begin(struct nvkm_softc *sc);
 /*
  * Ownership: borrows curproc only long enough to copy pid/comm by value.
  * Lifetime: the returned identity is detached from proc/lwp/lwkt lifetime;

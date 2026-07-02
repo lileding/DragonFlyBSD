@@ -1070,10 +1070,23 @@ nvkm_pci_detach(device_t dev)
 	struct drm_softc *shim = device_get_softc(dev);
 	struct drm_device *ddev = shim ? shim->drm_driver_data : NULL;
 	struct nvkm_softc *sc = ddev ? ddev->dev_private : NULL;
-	int w;
+	int err, w;
 
 	if (sc == NULL)
 		return (0);
+
+	/*
+	 * Refuse to tear down live user state.  The bus already rejects
+	 * detach while DRM fds hold the device DS_BUSY; this gate closes
+	 * the remaining races, refuses new opens from here on, and records
+	 * precise diagnostics.
+	 */
+	err = nvkm_unload_begin(sc);
+	if (err != 0) {
+		nvkm_infof(dev, "unload busy: open=%d files=%u\n",
+		    sc->unload_last_open_count, sc->unload_last_file_count);
+		return (err);
+	}
 
 	/*
 	 * Ownership:
