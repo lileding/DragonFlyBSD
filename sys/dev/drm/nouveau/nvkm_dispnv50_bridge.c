@@ -4112,6 +4112,39 @@ nvkm_dispnv50_wndw_disable_resources(struct nvkm_dispnv50_state *state,
  *   Called from the serialized KMS modeset disable path.  It may sleep in push
  *   buffer reservation, but it must not wait for a window notifier.
  */
+/*
+ * Report whether a modeset disable of @win would emit window clear methods.
+ *
+ * Ownership:
+ *   Borrows the bridge state and armed mirror; retains nothing.
+ *
+ * Lifetime:
+ *   The answer is a snapshot for the KMS transaction being built; the armed
+ *   mirror only changes inside serialized commit paths.
+ *
+ * Threading:
+ *   Serialized KMS commit/check context only.
+ */
+bool
+nvkm_dispnv50_window_disable_would_emit(struct nvkm_softc *sc, uint32_t win)
+{
+	struct nvkm_dispnv50_state *state;
+	const struct nvkm_dispnv50_wndw_armed *armed;
+
+	if (sc == NULL)
+		return true;
+	state = sc->dispnv50;
+	if (state == NULL || win >= nitems(state->wndw) ||
+	    state->wndw[win] == NULL)
+		return true;	/* unknown window state: be safe, flush */
+
+	armed = nvkm_dispnv50_wndw_armed_state(state, state->wndw[win]);
+	/* Mirror of the clear_context gate in
+	 * nvkm_dispnv50_wndw_modeset_disable_resources(). */
+	return armed == NULL || armed->ntfy || armed->sema || armed->image ||
+	    armed->xlut || armed->csc;
+}
+
 static int
 nvkm_dispnv50_wndw_modeset_disable_resources(struct nvkm_dispnv50_state *state,
     struct nv50_wndw *wndw, bool *emitted)
@@ -4448,7 +4481,15 @@ nvkm_dispnv50_window_emit_program(struct nvkm_softc *sc,
 	ret = wndw->func->image_set(wndw, asyw);
 	if (ret != 0)
 		return ret;
-	if (!async && program_color) {
+	/*
+	 * Callers gate program_color: sync commits pass their full color
+	 * decision, async flips pass it only when the armed mirror says the
+	 * window lost its ILUT (a C57E-class window must carry an ILUT
+	 * whenever it scans out an image; an image UPDATE into a window
+	 * whose ILUT context DMA was cleared by a preceding disable is
+	 * rejected by GSP as INVALID_STATE, CMDre mthd 0x200 code 0x2d).
+	 */
+	if (program_color) {
 		ret = nvkm_dispnv50_wndw_ilut_set(sc, state, wndw, asyw,
 		    crtc->state);
 		if (ret != 0)
@@ -4563,6 +4604,9 @@ nvkm_dispnv50_window_program(struct nvkm_softc *sc,
 	if (async) {
 		nvkm_dispnv50_wndw_mark_programmed(state, wndw,
 		    crtc->state, true, false);
+		if (program_color)
+			nvkm_dispnv50_wndw_mark_color_programmed(state, wndw,
+			    crtc->state);
 		nvkm_dispnv50_audit_capture(state, &state->audit_pending, op,
 		    head, (u32)wndw->id, display_id, true, false, false);
 		return 0;
@@ -4677,10 +4721,17 @@ nvkm_dispnv50_window_disable(struct nvkm_softc *sc,
 
 	if (clear_emitted)
 		interlock[NV50_DISP_INTERLOCK_WNDW] |= wndw->interlock.data;
+	/*
+	 * Submit the clear transaction but do NOT wait for the window
+	 * notifier: GSP never writes a window notifier for a clr-only
+	 * UPDATE (there is no image), so waiting here can only time out
+	 * (err=-60).  The notifier methods themselves must stay in the
+	 * transaction, though -- GSP's window state machine accepts the
+	 * clr UPDATE in this shape, while a clr UPDATE without them
+	 * poisons the window and the next image UPDATE is rejected
+	 * (CMDre on method 0x200).
+	 */
 	ret = wndw->func->update(wndw, interlock);
-	if (ret != 0)
-		goto fail;
-	ret = nvkm_dispnv50_wndw_wait_armed(sc, state, wndw, &asyw);
 	if (ret != 0)
 		goto fail;
 
@@ -6103,6 +6154,16 @@ nvkm_dispnv50_modeset_disable(struct nvkm_softc *sc, uint32_t head,
 		    false, false);
 	nvkm_dispnv50_head_mark_disabled(state, head);
 	nvkm_dispnv50_wndw_mark_disabled(state, wndw);
+	/*
+	 * A submitted head detach makes GSP drop the core-side window
+	 * ownership (WINDOW_SET_CONTROL) for the head's windows: the next
+	 * image UPDATE on an ownerless window is rejected (CMDre on method
+	 * 0x200).  Nouveau never detaches heads this way at runtime, so its
+	 * one-shot assign_windows suffices; ours must re-arm it so the next
+	 * enable re-issues the owner assignment through the same sanitize
+	 * path every first modeset already exercises.
+	 */
+	core->assign_windows = true;
 
 	nvkm_dispnv50_audit_capture(state, &state->audit_current,
 	    NVKM_DISPNV50_AUDIT_CRTC_DISABLE, head, win, display_id, false,
@@ -6504,6 +6565,7 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	u32 interlock[NV50_DISP_INTERLOCK__SIZE] = {};
 	u32 head;
 	bool program_window_color;
+	bool color_required;
 	int ret;
 
 	if (sc == NULL || crtc == NULL || crtc->state == NULL || sc->disp == NULL)
@@ -6551,10 +6613,19 @@ nvkm_dispnv50_plane_update(struct nvkm_softc *sc, struct drm_crtc *crtc,
 		interlock[NV50_DISP_INTERLOCK_CORE] = 1;
 	}
 
+	/*
+	 * A C57E-class window must have an ILUT armed whenever it carries an
+	 * image (ilut_identity).  After a window disable cleared the ILUT
+	 * context DMA, the next image UPDATE must restore color state even on
+	 * the async flip path, or GSP rejects it as INVALID_STATE (CMDre).
+	 */
+	color_required = nvkm_dispnv50_wndw_programs_xlut(wndw) &&
+	    (wndw_armed == NULL || !wndw_armed->valid || !wndw_armed->xlut);
 	program_window_color = color_update || wndw_armed == NULL ||
-	    !wndw_armed->valid || !wndw_armed->image;
+	    !wndw_armed->valid || !wndw_armed->image || color_required;
 	ret = nvkm_dispnv50_window_program(sc, state, crtc, core, wndw,
-	    interlock, false, async_update, async_update, program_window_color,
+	    interlock, false, async_update, async_update,
+	    async_update ? color_required : program_window_color,
 	    NVKM_DISPNV50_AUDIT_PLANE_UPDATE, head, display_id,
 	    color_update ? "plane color update" :
 	    (state->scanout_user ? "plane update" : "console restore"), NULL);
@@ -6679,6 +6750,28 @@ nvkm_dispnv50_atomic_enable_common(struct nvkm_softc *sc, struct drm_crtc *crtc,
 	}
 	ret = nvkm_dispnv50_route_output_prepared(sc, core, &asyh, mode, head,
 	    route_prepare);
+	if ((ret == -ENODEV || ret == -ESTALE) &&
+	    route_prepare != &local_prepare && !route_prepare->acquired) {
+		/*
+		 * The pre-swap prepared route went stale: a full
+		 * flush-disable earlier in this commit released the output
+		 * and dropped its IOR (the armed-context flush that keeps
+		 * clr/set window transactions separate makes this the
+		 * common re-enable shape).  The stale prepare held no
+		 * acquired route, so just mark it consumed and re-prepare on
+		 * the spot; the fresh prepare re-acquires the output,
+		 * matching nouveau's disable-then-acquire tail ordering.
+		 */
+		route_prepare->consumed = true;
+		memset(&local_prepare, 0, sizeof(local_prepare));
+		ret = nvkm_dispnv50_output_prepare(sc, mode, head, display_id,
+		    config, &local_prepare);
+		if (ret != 0)
+			goto fail;
+		route_prepare = &local_prepare;
+		ret = nvkm_dispnv50_route_output_prepared(sc, core, &asyh,
+		    mode, head, route_prepare);
+	}
 	if (ret != 0)
 		goto fail;
 	interlock[NV50_DISP_INTERLOCK_CORE] = 1;
