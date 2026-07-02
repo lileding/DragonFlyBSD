@@ -952,6 +952,137 @@ struct cdev_pager_ops nvkm_gem_pager_ops = {
 	.cdev_pg_fault	= nvkm_gem_pager_fault,
 };
 
+/* ============================================================
+ * TTM mmap with nvkm-owned pager lifetime (drm_driver.mmap_single).
+ *
+ * The pager handle stays the TTM BO so ttm_bo_release_mmap()'s
+ * cdev_pager_lookup(bo) keeps invalidating live mappings on BO moves;
+ * only the ops differ from the generic TTM pager.  See nvkm-unload.md.
+ * ============================================================ */
+
+static struct nvkm_softc *
+nvkm_bo_tbo_softc(struct ttm_buffer_object *tbo)
+{
+	struct nvkm_bo *bo = container_of(tbo, struct nvkm_bo, tbo);
+
+	return (bo->base.dev->dev_private);
+}
+
+static int
+nvkm_ttm_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
+    vm_ooffset_t foff, struct ucred *cred, u_short *color)
+{
+	struct ttm_buffer_object *tbo = handle;
+	struct nvkm_bo *bo = container_of(tbo, struct nvkm_bo, tbo);
+	struct nvkm_softc *sc = nvkm_bo_tbo_softc(tbo);
+
+	/*
+	 * Ownership:
+	 *   The winning transition gives the pager object its own BO
+	 *   reference and one device-busy reference; both are released by
+	 *   nvkm_ttm_pager_dtor() when the object dies.
+	 *
+	 * Lifetime:
+	 *   DragonFly's dev pager calls this ctor on every
+	 *   cdev_pager_allocate() but calls the dtor only once when the
+	 *   deduped per-handle VM object is destroyed, so the transition
+	 *   must fire exactly once per live object.
+	 *
+	 * Threading:
+	 *   Runs before the dev-pager mutex lookup, so two concurrent
+	 *   mmaps of one BO can race here; atomic_cmpset picks the single
+	 *   winner.  The caller holds its own ttm_bo_mmap() reference, so
+	 *   the BO cannot be freed while ttm_bo_get() runs.
+	 */
+	if (atomic_cmpset_int(&bo->mmap_pager_live, 0, 1)) {
+		ttm_bo_get(tbo);
+		device_busy(sc->dev);
+		atomic_add_int(&sc->mmap_active_count, 1);
+	}
+	*color = 0;
+	return (0);
+}
+
+static void
+nvkm_ttm_pager_dtor(void *handle)
+{
+	struct ttm_buffer_object *tbo = handle;
+	struct nvkm_bo *bo = container_of(tbo, struct nvkm_bo, tbo);
+	struct nvkm_softc *sc = nvkm_bo_tbo_softc(tbo);
+	device_t dev = sc->dev;
+
+	/* Clear before the unref: the BO may be freed by the put. */
+	atomic_store_rel_int(&bo->mmap_pager_live, 0);
+	ttm_bo_put(tbo);
+	atomic_subtract_int(&sc->mmap_active_count, 1);
+	wakeup(&sc->mmap_active_count);
+	/*
+	 * Drop busy last: once the device leaves DS_BUSY a pending detach
+	 * may proceed and free sc, so nothing may touch sc after this.
+	 */
+	device_unbusy(dev);
+}
+
+static int
+nvkm_ttm_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
+    vm_page_t *mres)
+{
+	struct ttm_buffer_object *tbo = vm_obj->handle;
+
+	if (nvkm_bo_tbo_softc(tbo)->unloading)
+		return (VM_PAGER_ERROR);
+	return (ttm_bo_vm_fault_bo_dfly(tbo, vm_obj, offset, prot, mres));
+}
+
+static struct cdev_pager_ops nvkm_ttm_pager_ops = {
+	.cdev_pg_ctor	= nvkm_ttm_pager_ctor,
+	.cdev_pg_dtor	= nvkm_ttm_pager_dtor,
+	.cdev_pg_fault	= nvkm_ttm_pager_fault,
+};
+
+int
+nvkm_drm_mmap_single(struct file *fp, struct drm_device *dev,
+    vm_ooffset_t *offset, vm_size_t size, struct vm_object **obj_res,
+    int nprot)
+{
+	struct nvkm_softc *sc = dev->dev_private;
+	struct ttm_buffer_object *tbo;
+	struct vm_area_struct vma;
+	struct vm_object *vm_obj;
+	int ret;
+
+	*obj_res = NULL;
+	if (sc->unloading)
+		return (ENODEV);
+	if (dev->drm_ttm_bdev == NULL)
+		return (ENODEV);
+
+	/* Resolve and validate the BO like ttm_bo_mmap_single() does. */
+	bzero(&vma, sizeof(vma));
+	vma.vm_start = *offset;
+	vma.vm_end = vma.vm_start + size;
+	vma.vm_pgoff = vma.vm_start >> PAGE_SHIFT;
+	ret = ttm_bo_mmap(fp, &vma, dev->drm_ttm_bdev);
+	if (ret != 0)
+		return (ret);
+
+	tbo = vma.vm_private_data;
+	vm_obj = cdev_pager_allocate(tbo, OBJT_MGTDEVICE,
+	    &nvkm_ttm_pager_ops, size, nprot, 0, curthread->td_ucred);
+	/*
+	 * The pager object owns its own BO reference, taken by the
+	 * flag-winning ctor above; this call's ttm_bo_mmap() reference is
+	 * temporary either way, so duplicate mmaps of one BO do not leak
+	 * BO references the single dtor can never return.
+	 */
+	ttm_bo_put(tbo);
+	if (vm_obj == NULL)
+		return (EINVAL);
+	*obj_res = vm_obj;
+	*offset = 0;
+	return (0);
+}
+
 static int
 nvkm_bo_bar1_map(struct nvkm_softc *sc, struct nvkm_bo *bo)
 {

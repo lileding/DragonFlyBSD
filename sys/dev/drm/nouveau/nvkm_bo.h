@@ -108,6 +108,15 @@ struct nvkm_bo {
 	struct lwkt_token	vm_mapping_token; /* protects vm_mappings */
 	struct nvkm_bo_vm_mapping_list vm_mappings; /* live GPUVA mappings */
 	uint32_t		vm_mapping_count;
+	/*
+	 * 1 while this BO's deduped MGTDEVICE pager object is alive.
+	 * DragonFly's dev pager runs the ctor on every mmap of the same
+	 * handle but the dtor only once at object death; atomic_cmpset on
+	 * this flag makes the device-busy/mmap-count transition (and the
+	 * pager object's own BO reference) fire exactly once per live
+	 * pager object.  See nvkm-unload.md.
+	 */
+	uint32_t		mmap_pager_live;
 };
 
 static inline struct nvkm_bo *
@@ -118,6 +127,11 @@ to_nvkm_bo(struct drm_gem_object *obj)
 
 /* gem_vm_ops vtable for the DRM driver registration. */
 extern struct cdev_pager_ops nvkm_gem_pager_ops;
+
+/* drm_driver.mmap_single hook: TTM mmap with nvkm-owned pager lifetime. */
+int nvkm_drm_mmap_single(struct file *fp, struct drm_device *dev,
+    vm_ooffset_t *offset, vm_size_t size, struct vm_object **obj_res,
+    int nprot);
 
 /* drm_driver.gem_free_object_unlocked callback. */
 void nvkm_bo_gem_free(struct drm_gem_object *obj);

@@ -2233,10 +2233,16 @@ nvkm_gsp_sysctl_unload_state(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->unload_fail_count);
 	sbuf_printf(sb, "unload_busy_open_count = %llu\n",
 	    (unsigned long long)sc->unload_busy_open_count);
+	sbuf_printf(sb, "unload_busy_mmap_count = %llu\n",
+	    (unsigned long long)sc->unload_busy_mmap_count);
 	sbuf_printf(sb, "unload_last_open_count = %d\n",
 	    sc->unload_last_open_count);
 	sbuf_printf(sb, "unload_last_file_count = %u\n",
 	    sc->unload_last_file_count);
+	sbuf_printf(sb, "unload_last_mmap_count = %u\n",
+	    sc->unload_last_mmap_count);
+	sbuf_printf(sb, "mmap_active_count = %u\n",
+	    sc->mmap_active_count);
 
 	err = sbuf_finish(sb);
 	if (err == 0)
