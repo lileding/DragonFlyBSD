@@ -492,6 +492,15 @@ drm_close(struct dev_close_args *ap)
 	 * End inline drm_release
 	 */
 
+#ifdef __DragonFly__
+	/*
+	 * Pair the device_busy() taken by drm_open().  Without this the
+	 * bus-level busy count only ever grows, the device stays DS_BUSY
+	 * forever after the first open, and device_detach() can never
+	 * distinguish "has live users" from "ever had users".
+	 */
+	device_unbusy(dev->dev->bsddev);
+#endif
 	if (!--dev->open_count) {
 		drm_lastclose(dev);
 #if 0	/* XXX: drm_put_dev() not implemented */
