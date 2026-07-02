@@ -137,6 +137,16 @@ _thr_cancel_enter(pthread_t curthread)
 {
 	int oldval;
 
+	/*
+	 * In a single-threaded process there is nobody to deliver a
+	 * cancellation request; skip the two atomic ops per syscall.
+	 * The decision is captured in the return value so that the
+	 * matching _thr_cancel_leave() stays coherent even if the
+	 * process goes multi-threaded between the two calls.
+	 */
+	if (!__isthreaded)
+		return (THR_CANCEL_FASTPATH);
+
 	oldval = curthread->cancelflags;
 	if (!(oldval & THR_CANCEL_AT_POINT)) {
 		atomic_set_int(&curthread->cancelflags, THR_CANCEL_AT_POINT);
@@ -148,6 +158,8 @@ _thr_cancel_enter(pthread_t curthread)
 void
 _thr_cancel_leave(pthread_t curthread, int previous)
 {
+	if (previous == THR_CANCEL_FASTPATH)
+		return;
 	if (!(previous & THR_CANCEL_AT_POINT))
 		atomic_clear_int(&curthread->cancelflags, THR_CANCEL_AT_POINT);
 }

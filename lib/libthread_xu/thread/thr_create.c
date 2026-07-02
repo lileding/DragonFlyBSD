@@ -62,6 +62,13 @@ _pthread_create(pthread_t * __restrict thread,
 	_thr_check_init();
 
 	/*
+	 * First thread of this process: turn on the machinery that only
+	 * multi-threaded processes pay for (signal handlers, main-stack
+	 * red zone, rtld locks).
+	 */
+	_thr_activate();
+
+	/*
 	 * Tell libc and others now they need lock to protect their data.
 	 */
 	if (_thr_isthreaded() == 0 && _thr_setthreaded(1))

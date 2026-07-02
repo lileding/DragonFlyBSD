@@ -685,6 +685,14 @@ void	_thr_malloc_init(void);
 void	_rtld_setthreaded(int);
 void	_thr_rtld_init(void);
 void	_thr_rtld_fini(void);
+void	_thr_activate(void);
+
+/*
+ * Sentinel returned by _thr_cancel_enter() when the single-threaded
+ * fast path was taken; never a valid cancelflags value.
+ */
+#define THR_CANCEL_FASTPATH	(-1)
+extern int _thr_activated;
 int	_thr_stack_alloc(pthread_attr_t);
 void	_thr_stack_free(pthread_attr_t);
 void	_thr_stack_cleanup(void);
