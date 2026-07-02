@@ -152,6 +152,10 @@ int	 nvkm_gsp_device_dtor(struct nvkm_gsp_device *device);
 /* Bring up imported nouveau core/r535 GSP display.
  * Runs on the attach thread (blockable; synchronous GSP RPCs). */
 int	 nvkm_gsp_disp_init(struct nvkm_softc *sc);
+/* Tear down the imported display engine and the core wrapper objects.
+ * Runs from detach after KMS/dispnv50 teardown, while RPC still works;
+ * the engine fini/dtor path may issue synchronous GSP RPCs and sleep. */
+void	 nvkm_gsp_disp_fini(struct nvkm_softc *sc);
 uint32_t nvkm_gsp_disp_supported_mask(struct nvkm_softc *sc);
 uint32_t nvkm_gsp_disp_head_count(struct nvkm_softc *sc);
 
@@ -561,6 +565,11 @@ int	 nvkm_gsp_vaspace_dtor(struct nvkm_gsp_vaspace *vas);
  * typed GEM path after owner validation.
  */
 int	  nvkm_gsp_vram_init(struct nvkm_softc *sc);
+/* Detach-time takedown: warns about and reclaims any leaked records. */
+void	  nvkm_gsp_vram_fini(struct nvkm_softc *sc);
+/* Detach-time bulk free of every record charged to `owner`; returns the
+ * number of records released (BAR1/BAR2 page-table pages). */
+uint32_t  nvkm_gsp_vram_free_owner(struct nvkm_softc *sc, void *owner);
 uint64_t nvkm_gsp_vram_alloc_kind(struct nvkm_softc *sc, uint64_t size,
 	    uint64_t align, enum nvkm_vram_kind kind, void *owner);
 uint64_t nvkm_gsp_vram_alloc(struct nvkm_softc *sc, uint64_t size,

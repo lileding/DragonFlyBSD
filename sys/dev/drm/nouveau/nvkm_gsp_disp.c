@@ -2030,6 +2030,54 @@ nvkm_gsp_disp_init(struct nvkm_softc *sc)
 	return 0;
 }
 
+void
+nvkm_gsp_disp_fini(struct nvkm_softc *sc)
+{
+	/*
+	 * Ownership:
+	 *   Consumes sc->disp and the core wrapper objects built by
+	 *   nvkm_dfly_core_display_alloc().  The imported engine dtor owns
+	 *   the conns/outps/iors/heads lists and the RM display objects.
+	 *
+	 * Lifetime:
+	 *   Runs from detach after KMS and dispnv50 teardown, while the GSP
+	 *   RPC path is still alive: the subdev fini/dtor chain issues
+	 *   synchronous RM frees.
+	 *
+	 * Threading:
+	 *   Detach context; may sleep in RPC waits and in the engine's own
+	 *   mutex teardown.  No display worker can run anymore: KMS fini
+	 *   drained the auto-KMS/HPD tasks and DP IRQ notify handlers.
+	 */
+	if (sc == NULL)
+		return;
+
+	if (sc->disp != NULL) {
+		struct nvkm_subdev *subdev = &sc->disp->engine.subdev;
+
+		/* Drop the nvkm_subdev_ref() taken at init: fini(POWEROFF). */
+		nvkm_subdev_unref(subdev);
+		/* Engine dtor frees the disp object and unlinks the subdev. */
+		nvkm_subdev_del(&subdev);
+		sc->disp = NULL;
+	}
+
+	if (sc->core_device != NULL) {
+		sc->core_device->disp = NULL;
+		kfree(sc->core_device->dev);	/* struct device shim */
+		lockuninit(&sc->core_device->intr.lock);
+		lockuninit(&sc->core_device->mutex);
+		kfree(sc->core_device);
+		sc->core_device = NULL;
+	}
+	kfree(sc->core_gsp);
+	sc->core_gsp = NULL;
+	kfree(sc->core_rm);
+	sc->core_rm = NULL;
+	kfree(sc->core_internal_client);
+	sc->core_internal_client = NULL;
+}
+
 uint32_t
 nvkm_gsp_disp_supported_mask(struct nvkm_softc *sc)
 {

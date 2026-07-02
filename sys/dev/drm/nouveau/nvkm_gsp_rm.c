@@ -1051,6 +1051,97 @@ nvkm_gsp_vram_init(struct nvkm_softc *sc)
 	return (0);
 }
 
+uint32_t
+nvkm_gsp_vram_free_owner(struct nvkm_softc *sc, void *owner)
+{
+	struct nvkm_vram_alloc *alloc, *next;
+	uint32_t count = 0;
+
+	/*
+	 * Ownership:
+	 *   Releases every VRAM record charged to `owner`.  Used by
+	 *   infrastructure finis (BAR1/BAR2 page tables) whose pages are
+	 *   only reachable through hardware PTE content, so the allocator
+	 *   bookkeeping is their canonical free list.
+	 *
+	 * Lifetime:
+	 *   Detach-time only, after the owner has stopped using the pages.
+	 *
+	 * Threading:
+	 *   Takes vram_lock like the regular free paths; no BAR1 side
+	 *   mappings exist for these records (bar1_gva/page_gva unset).
+	 */
+	if (sc->vram_bump_limit == 0 || owner == NULL)
+		return (0);
+
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	TAILQ_FOREACH_MUTABLE(alloc, &sc->vram_allocs, alloc_link, next) {
+		if (alloc->owner != owner)
+			continue;
+		TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
+		sc->vram_alloc_bytes[alloc->kind] -= alloc->size;
+		sc->vram_alloc_count[alloc->kind]--;
+		if (drm_mm_node_allocated(&alloc->node))
+			drm_mm_remove_node(&alloc->node);
+		_kfree(alloc, M_NVKM_VRAM_META);
+		count++;
+	}
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+	return (count);
+}
+
+void
+nvkm_gsp_vram_fini(struct nvkm_softc *sc)
+{
+	struct nvkm_vram_alloc *alloc;
+	uint32_t leaked = 0;
+
+	/*
+	 * Ownership:
+	 *   Consumes the VRAM allocator: the drm_mm range, the lock, and any
+	 *   record still linked in vram_allocs.  Freed records were already
+	 *   unlinked and released on their free path, so every remaining
+	 *   entry is a leak from a teardown step that should have run first
+	 *   (BAR1/BAR2 PTs, channel inst/USERD, display staging).
+	 *
+	 * Lifetime:
+	 *   Runs once from detach after every VRAM consumer has been torn
+	 *   down.  Guarded on vram_bump_limit so an attach that never
+	 *   reached vram_init (no GSP) skips cleanly.
+	 *
+	 * Threading:
+	 *   Detach context, no concurrent allocators left; the lock is taken
+	 *   only to keep the walk shape identical to the free path.
+	 */
+	if (sc->vram_bump_limit == 0)
+		return;
+
+	lockmgr(&sc->vram_lock, LK_EXCLUSIVE);
+	while ((alloc = TAILQ_FIRST(&sc->vram_allocs)) != NULL) {
+		TAILQ_REMOVE(&sc->vram_allocs, alloc, alloc_link);
+		leaked++;
+		nvkm_infof(sc->dev,
+		    "gsp_rm: VRAM fini leak kind=%s paddr=0x%llx size=0x%llx "
+		    "owner=%p\n",
+		    nvkm_vram_kind_name(alloc->kind),
+		    (unsigned long long)alloc->paddr,
+		    (unsigned long long)alloc->size, alloc->owner);
+		if (drm_mm_node_allocated(&alloc->node))
+			drm_mm_remove_node(&alloc->node);
+		_kfree(alloc, M_NVKM_VRAM_META);
+	}
+	lockmgr(&sc->vram_lock, LK_RELEASE);
+	if (leaked != 0)
+		nvkm_infof(sc->dev,
+		    "gsp_rm: VRAM fini reclaimed %u leaked records\n", leaked);
+
+	drm_mm_takedown(&sc->vram_mm);
+	lockuninit(&sc->vram_lock);
+	sc->vram_bump_base = 0;
+	sc->vram_bump_next = 0;
+	sc->vram_bump_limit = 0;
+}
+
 struct nvkm_vram_alloc *
 nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
     enum nvkm_vram_kind kind, void *owner)
@@ -1076,7 +1167,7 @@ nvkm_gsp_vram_alloc_ref(struct nvkm_softc *sc, uint64_t size, uint64_t align,
 		    "gsp_rm: VRAM drm_mm alloc exhausted kind=%s need=0x%llx align=0x%llx err=%d\n",
 		    nvkm_vram_kind_name(kind), (unsigned long long)size,
 		    (unsigned long long)align, err);
-		kfree(alloc);
+		_kfree(alloc, M_NVKM_VRAM_META);
 		return (NULL);
 	}
 	alloc->paddr = alloc->node.start;
@@ -1166,7 +1257,7 @@ nvkm_gsp_vram_free_gem(struct nvkm_softc *sc, struct nvkm_vram_alloc *alloc,
 	    "gsp_rm: VRAM free kind=gem paddr=0x%llx size=0x%llx owner=%p\n",
 	    (unsigned long long)alloc->paddr,
 	    (unsigned long long)alloc->size, owner);
-	kfree(alloc);
+	_kfree(alloc, M_NVKM_VRAM_META);
 }
 
 void
@@ -1212,7 +1303,7 @@ nvkm_gsp_vram_free_kind(struct nvkm_softc *sc, uint64_t paddr,
 	    "gsp_rm: VRAM free kind=%s paddr=0x%llx size=0x%llx owner=%p\n",
 	    kind_name, (unsigned long long)paddr, (unsigned long long)size,
 	    owner);
-	kfree(alloc);
+	_kfree(alloc, M_NVKM_VRAM_META);
 }
 
 uint64_t

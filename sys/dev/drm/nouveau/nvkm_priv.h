@@ -24,6 +24,7 @@
 #include <sys/thread2.h>
 #include <machine/atomic.h>
 #include <sys/proc.h>
+#include <sys/sysctl.h>
 #include <sys/taskqueue.h>
 
 #include <drm/drm_mm.h>
@@ -1527,6 +1528,17 @@ struct nvkm_softc {
 	/* Live deduped MGTDEVICE pager objects; each also holds one
 	 * device-busy reference (see nvkm_ttm_pager_ctor/_dtor). */
 	u_int			mmap_active_count;
+	/*
+	 * nvkm-owned sysctl context.  All nvkm debug sysctls register here
+	 * (parented under the newbus device tree) so detach can free every
+	 * handler that dereferences sc before any teardown step runs,
+	 * instead of relying on the bus's device_sysctl_fini() which only
+	 * happens after DEVICE_DETACH has already freed sc.
+	 */
+	struct sysctl_ctx_list	sysctl_ctx;
+	bool			sysctl_ctx_ready;
+	/* Set by the msgq drain kthread on exit; detach joins on it. */
+	bool			gsp_drain_done;
 };
 
 #ifndef nvkm_rd32

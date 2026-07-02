@@ -282,12 +282,20 @@ nvkm_gsp_bar1_init(struct nvkm_softc *sc)
 void
 nvkm_gsp_bar1_fini(struct nvkm_softc *sc)
 {
+	uint32_t freed;
+
 	if (sc->bar1.fictitious_registered) {
 		vm_phys_fictitious_unreg_range(sc->bar1.fictitious_start,
 		    sc->bar1.fictitious_end);
 		sc->bar1.fictitious_registered = false;
 	}
 	sc->bar1.ready = false;
+	/* SPT/PT pages are only reachable through PTE content; the VRAM
+	 * allocator records charged to &sc->bar1 are their free list. */
+	freed = nvkm_gsp_vram_free_owner(sc, &sc->bar1);
+	if (freed != 0)
+		nvkm_debugf(sc->dev, "bar1: fini released %u PT pages\n",
+		    freed);
 }
 
 static int

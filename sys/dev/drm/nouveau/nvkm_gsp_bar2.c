@@ -445,12 +445,19 @@ void
 nvkm_gsp_bar2_fini(struct nvkm_softc *sc)
 {
 	struct nvkm_gsp_bar2_pt *pt;
+	uint32_t freed;
 
 	sc->bar2.ready = false;
 	while ((pt = LIST_FIRST(&sc->bar2.pt_pages)) != NULL) {
 		LIST_REMOVE(pt, link);
 		kfree(pt, M_NVKM_BAR2_PT);
 	}
+	/* Root/PT/flush/test pages live only in the VRAM allocator records
+	 * charged to &sc->bar2; release them the same way as BAR1. */
+	freed = nvkm_gsp_vram_free_owner(sc, &sc->bar2);
+	if (freed != 0)
+		nvkm_debugf(sc->dev, "bar2: fini released %u VRAM pages\n",
+		    freed);
 }
 
 int
