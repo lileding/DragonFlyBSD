@@ -50,7 +50,7 @@ ALLOWED_LINUX_INCLUDES = {
         "linux/slab.h",
         "linux/uaccess.h",
     },
-    "sys/dev/drm/nouveau/dispnv50/nvkm_dispnv50_bridge.c": {
+    "sys/dev/drm/nouveau/nvkm_dispnv50_bridge.c": {
         "linux/math64.h",
     },
     "sys/dev/drm/nouveau/nvkm_drm_kms.c": {
