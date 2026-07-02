@@ -399,6 +399,10 @@ int	 nvkm_dispnv50_head_update(struct nvkm_softc *sc,
  *   function may block on display notifier completion and must not be called
  *   from interrupt context.
  */
+/* True when a modeset disable of this window would emit window clear
+ * methods (armed image/color/notifier context, or unknown state). */
+bool	 nvkm_dispnv50_window_disable_would_emit(struct nvkm_softc *sc,
+	    uint32_t win);
 int	 nvkm_dispnv50_modeset_disable(struct nvkm_softc *sc, uint32_t head,
 	    uint32_t win, uint32_t display_id, bool submit_disable);
 /*

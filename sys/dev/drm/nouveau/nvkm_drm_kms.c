@@ -1241,6 +1241,8 @@ static int nvkm_atomic_check(struct drm_device *dev,
 static int nvkm_atomic_commit(struct drm_device *dev,
     struct drm_atomic_state *state, bool nonblock);
 static void nvkm_atomic_finish_prepared_outputs(struct drm_atomic_state *state);
+static void nvkm_kms_record_result(struct nvkm_softc *sc, uint32_t head,
+    uint32_t win, int err, const char *where);
 static void nvkm_drm_kms_link_status_bad_schedule(struct nvkm_softc *sc,
     uint32_t display_id);
 static struct drm_atomic_state *nvkm_atomic_state_alloc(struct drm_device *dev);
@@ -1467,6 +1469,22 @@ nvkm_display_txn_needs_flush_disable(struct drm_atomic_state *state,
 		return (false);
 
 	nvkm_conn = to_nvkm_connector(connector);
+
+	/*
+	 * Re-enabling a head whose window still holds armed context must
+	 * cross a full flush-disable boundary.  A deferred disable stages
+	 * the window clear methods into the enable transaction, and GSP
+	 * refuses a merged clr+set window UPDATE now that every UPDATE
+	 * arms a notifier: it either rejects the UPDATE (CMDre on method
+	 * 0x200) or executes it without writing the notifier, leaving the
+	 * screen dark while flip_done times out.  A disable-only commit
+	 * must flush too: with no enable in the same tail the deferred
+	 * clears would leak into whatever commit runs next.
+	 */
+	if (nvkm_dispnv50_window_disable_would_emit(nvkm_conn->sc,
+	    drm_crtc_index(old_conn_state->crtc)))
+		return (true);
+
 	if (nvkm_gsp_disp_output_info(nvkm_conn->sc, nvkm_conn->display_id,
 	    &info) != 0)
 		return (true);
@@ -2267,7 +2285,16 @@ nvkm_atomic_commit_tail(struct drm_atomic_state *old_state)
 	sc->kms_atomic_flip_done_wait_count++;
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_WAIT_FLIP_DONE);
 	drm_atomic_helper_wait_for_flip_done(dev, old_state);
-	if (!nvkm_kms_pending_flip_cancel_state(sc, old_state))
+	if (nvkm_kms_pending_flip_cancel_state(sc, old_state))
+		/*
+		 * A pending flip that survives the flip_done wait means the
+		 * window notifier never reported the UPDATE: the frame did
+		 * not reach the screen.  Record it so callers (light_up,
+		 * counters, smoke gates) can see the failure.
+		 */
+		nvkm_kms_record_result(sc, 0, 0, -ETIMEDOUT,
+		    "pageflip flip_done");
+	else
 		nvkm_dispnv50_publish_pending_flip(sc);
 	nvkm_atomic_tail_enter(sc, NVKM_KMS_ATOMIC_TAIL_CLEANUP_PLANES);
 	drm_atomic_helper_cleanup_planes(dev, old_state);
@@ -5504,11 +5531,13 @@ nvkm_drm_kms_light_up(struct nvkm_softc *sc)
 	struct drm_display_mode *mode = NULL;
 	struct drm_framebuffer *fb;
 	uint32_t connector_mask;
+	uint64_t commit_errors_before;
 	bool force_modeset;
 	bool primary_is_console;
 	bool user_scanout;
 	int ret;
 
+	commit_errors_before = sc->kms_commit_error_count;
 	nvkm_infof(sc->dev, "drm: light_up entry drm_dev=%p\n", dev);
 	if (dev == NULL)
 		return (ENODEV);
@@ -5691,6 +5720,19 @@ out:
 		 * the helper no longer holds a reference.
 		 */
 		drm_framebuffer_put(fb);
+	}
+	if (ret == 0 && sc->kms_commit_error_count != commit_errors_before) {
+		/*
+		 * The atomic helpers cannot fail a commit after the state
+		 * swap, so display-programming failures (rejected UPDATE,
+		 * window notifier timeout, pageflip flip_done timeout) only
+		 * surface in the recorded per-commit results.  A console
+		 * restore that left the screen dark must not report success.
+		 */
+		ret = sc->kms_last_error != 0 ? sc->kms_last_error : -EIO;
+		nvkm_infof(sc->dev,
+		    "drm: light_up commit recorded display errors err=%d\n",
+		    ret);
 	}
 	nvkm_infof(sc->dev, "drm: light_up commit -> %d\n", ret);
 	return (ret < 0 ? -ret : 0);
