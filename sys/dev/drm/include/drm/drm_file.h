@@ -84,6 +84,12 @@ struct drm_minor {
 
 	struct list_head debugfs_list;
 	struct lock debugfs_lock; /* Protects debugfs_list. */
+
+#ifdef __DragonFly__
+	/* devfs node created by drm_sysfs_minor_alloc(); destroyed by
+	 * drm_minor_free() so unload leaves no stale /dev/dri entry. */
+	struct cdev *devnode;
+#endif
 };
 
 /**
