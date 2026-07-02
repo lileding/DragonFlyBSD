@@ -1,4 +1,5 @@
 #!/usr/local/bin/python3
+# SPDX-License-Identifier: BSD-2-Clause
 import argparse
 import datetime as dt
 import glob

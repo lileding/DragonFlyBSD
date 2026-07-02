@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * prime_no_share - validate nouveau NO_SHARE PRIME export semantics.
  *

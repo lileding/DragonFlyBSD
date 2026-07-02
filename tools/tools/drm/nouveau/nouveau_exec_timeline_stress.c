@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * nouveau_exec_timeline_stress - stress EXEC timeline signal teardown.
  *
