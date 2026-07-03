@@ -8378,6 +8378,21 @@ nvkm_drm_restore_console(struct drm_device *ddev, const char *reason)
 	 */
 	if (is_lastclose)
 		sc->kms_lastclose_restore_count++;
+	/*
+	 * No primary client is left, so no userspace owner remains for a
+	 * user scanout.  A compositor that exits with windows still mapped
+	 * never reaches the plane-disable path, leaving the dispnv50
+	 * user-scanout flag set; light_up() would then preserve the dead
+	 * frame instead of restoring the console.  Retire the primary
+	 * window through the regular disable path, which also clears that
+	 * flag.  Best effort: light_up() below performs a full modeset
+	 * either way.
+	 */
+	err = nvkm_dispnv50_plane_disable(sc, 0);
+	if (err != 0)
+		nvkm_debugf(sc->dev,
+		    "drm: %s plane retire before restore err=%d\n",
+		    reason, err);
 	err = nvkm_drm_kms_light_up(sc);
 	if (is_lastclose) {
 		sc->kms_lastclose_restore_last_error = err;
