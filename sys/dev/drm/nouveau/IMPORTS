@@ -58,13 +58,13 @@ review.
    example core/object.c, core/object.h, core/enum.c, nvhw/drf.h,
    nvif/class.h, and nvrm/nvtypes.h.
 
-3. Firmware (fw/tu102/)
+3. Firmware (fw/)
 
    NVIDIA GSP-RM 570.144 boot blobs, packaged from linux-firmware
    under the linux-firmware NVIDIA firmware license.  Image names keep
    the linux-firmware paths (nvidia/tu102/...).  The larger blobs are
    extracted at build time from the local /lib/firmware install; see
-   fw/tu102/Makefile.
+   fw/Makefile.
 
 Rules
 -----
