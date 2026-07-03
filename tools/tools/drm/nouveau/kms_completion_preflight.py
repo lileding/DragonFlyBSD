@@ -13,7 +13,7 @@ import subprocess
 
 MODULES = (
     ("drm", "sys/dev/drm/drm/drm.ko"),
-    ("nvgsp_570", "sys/dev/drm/nouveau/fw/tu102/nvgsp_570.ko"),
+    ("nvgsp_570", "sys/dev/drm/nouveau/fw/nvgsp_570.ko"),
     ("nvkm", "sys/dev/drm/nouveau/nvkm.ko"),
 )
 

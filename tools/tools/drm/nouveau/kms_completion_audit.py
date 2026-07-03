@@ -18,7 +18,7 @@ import subprocess
 MODULES = ("drm", "nvgsp_570", "nvkm")
 PREFLIGHT_LOAD_MODULE_MARKERS = (
     "sys/dev/drm/drm/drm.ko",
-    "sys/dev/drm/nouveau/fw/tu102/nvgsp_570.ko",
+    "sys/dev/drm/nouveau/fw/nvgsp_570.ko",
     "sys/dev/drm/nouveau/nvkm.ko",
 )
 PREFLIGHT_STANDALONE_REPORT_MARKERS = (

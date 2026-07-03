@@ -37,7 +37,7 @@ LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
 SOURCE_TREE_MODULES = (
     ("drm", pathlib.Path("sys/dev/drm/drm/drm.ko")),
-    ("nvgsp_570", pathlib.Path("sys/dev/drm/nouveau/fw/tu102/nvgsp_570.ko")),
+    ("nvgsp_570", pathlib.Path("sys/dev/drm/nouveau/fw/nvgsp_570.ko")),
     ("nvkm", pathlib.Path("sys/dev/drm/nouveau/nvkm.ko")),
 )
 FULL_WAYLAND_PHASES = {
