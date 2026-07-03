@@ -133,6 +133,10 @@ struct drm_syncobj *drm_syncobj_find(struct drm_file *file_private,
 				     u32 handle);
 void drm_syncobj_replace_fence(struct drm_syncobj *syncobj, u64 point,
 			       struct dma_fence *fence);
+struct dma_fence_chain;
+void drm_syncobj_add_point(struct drm_syncobj *syncobj,
+			   struct dma_fence_chain *chain,
+			   struct dma_fence *fence, uint64_t point);
 int drm_syncobj_find_fence(struct drm_file *file_private,
 			   u32 handle, u64 point,
 			   struct dma_fence **fence);

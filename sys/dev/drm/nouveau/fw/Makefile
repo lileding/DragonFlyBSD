@@ -1,0 +1,33 @@
+# Firmware loader module for NVIDIA GSP-RM 570.144 boot blobs.
+#
+# Each entry maps a source file to a firmware imagename and version.
+# Image names follow the linux-firmware naming convention so the same
+# blobs can be sourced from /lib/firmware/nvidia/tu102/ unchanged.
+#
+# The bigger blobs (gsp, bootloader) are auto-extracted from the
+# system linux-firmware install rather than checked into git; the
+# small ones (acr/bl, booter_load) live in this directory because
+# they are needed at every build and round-trip cleanly.
+
+KMOD=	nvgsp_570
+
+FW_SRC?=	/lib/firmware/nvidia/tu102
+
+FIRMWS=	booter_load.bin:nvidia/tu102/gsp/booter_load-570.144:570144 \
+	booter_unload.bin:nvidia/tu102/gsp/booter_unload-570.144:570144 \
+	acr_bl.bin:nvidia/tu102/acr/bl:1 \
+	bootloader.bin:nvidia/tu102/gsp/bootloader-570.144:570144 \
+	gsp.bin:nvidia/tu102/gsp/gsp-570.144:570144
+
+booter_unload.bin: ${FW_SRC}/gsp/booter_unload-570.144.bin.xz
+	unxz -k -c ${.ALLSRC} > ${.TARGET}
+
+bootloader.bin: ${FW_SRC}/gsp/bootloader-570.144.bin.xz
+	unxz -k -c ${.ALLSRC} > ${.TARGET}
+
+gsp.bin: ${FW_SRC}/gsp/gsp-570.144.bin.xz
+	unxz -k -c ${.ALLSRC} > ${.TARGET}
+
+CLEANFILES+=	booter_unload.bin bootloader.bin gsp.bin
+
+.include <bsd.kmod.mk>

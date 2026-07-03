@@ -84,6 +84,10 @@ struct drm_minor {
 
 	struct list_head debugfs_list;
 	struct lock debugfs_lock; /* Protects debugfs_list. */
+
+	/* devfs node created by drm_sysfs_minor_alloc(); destroyed by
+	 * drm_minor_free() so unload leaves no stale /dev/dri entry. */
+	struct cdev *devnode;
 };
 
 /**
@@ -331,9 +335,18 @@ struct drm_file {
 	 */
 	int event_space;
 
+	/**
+	 * @event_bytes:
+	 *
+	 * Bytes currently ready in @event_list for DragonFly kqueue readiness.
+	 * Protected by &drm_device.event_lock for updates. Readers in kqueue
+	 * filters use this as a best-effort readiness hint and must not take
+	 * event_lock because KNOTE can run while drm_send_event_locked() holds it.
+	 */
+	int event_bytes;
+
 	/** @event_read_lock: Serializes drm_read(). */
 	struct lock event_read_lock;
-
 	/**
 	 * @prime:
 	 *

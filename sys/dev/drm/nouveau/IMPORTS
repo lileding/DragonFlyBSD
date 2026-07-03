@@ -1,0 +1,81 @@
+Provenance and license map for sys/dev/drm/nouveau
+==================================================
+
+This directory implements nvkm, the DragonFly-native NVIDIA GSP driver.
+It exposes the Linux nouveau userspace ABI (Mesa/NVK sees a standard
+nouveau device) but it is not a port of the GPL nouveau driver.  Two
+kinds of code live here, and the boundary matters for licensing and
+review.
+
+1. DragonFly-native code (SPDX-License-Identifier: BSD-2-Clause)
+
+   Every nvkm_*.c and nvkm_*.h file at the top of this directory, plus
+   nouveau_bo.h (a small DragonFly-local shim, despite the name) and
+   nvkm.c.  These are original implementations.  Where they follow the
+   algorithms or object-model semantics of Linux nouveau, they were
+   rewritten natively from the algorithm, never copied from GPL text;
+   comments cite the reference (for example "matches nouveau
+   tu102_gsp_fini") as attribution, not as provenance.
+
+   The DragonFly bridge that drives the imported display classes lives
+   here as well (nvkm_dispnv50_bridge.c), so the import directories
+   below contain only imported files.
+
+2. Imported MIT code from the Linux kernel nouveau tree
+
+   Imported files keep their upstream MIT license text and their
+   upstream layout so they stay directly diffable against the source
+   tree.  The import baseline is the Linux v7.0 nouveau tree
+   (drivers/gpu/drm/nouveau); interface definitions were cross-checked
+   against NVIDIA open-gpu-kernel-modules tag 570.144 (MIT), the exact
+   match for the GSP-RM 570.144 firmware this driver boots.
+
+   Directory map (local path  <-  upstream path):
+
+   core/*.c        <-  nvkm/core/*.c
+   core/*.h        <-  include/nvkm/core/*.h
+   engine/disp.h   <-  include/nvkm/engine/disp.h
+   engine/disp/    <-  nvkm/engine/disp/
+   dispnv50/       <-  dispnv50/             EVO core/window/head/
+                                             cursor/wimm/sor classes
+   nvhw/           <-  include/nvhw/         hardware definition headers
+   nvif/           <-  include/nvif/         nouveau interface classes
+   nvrm/           <-  include/nvrm/         GSP-RM base types
+   rm/             <-  nvkm/subdev/gsp/rm/   RM API and handle
+                                             definitions
+   subdev/         <-  include/nvkm/subdev/  subdev interface headers
+
+   Upstream's include/ headers are flattened next to their consumers,
+   which keeps the upstream spelling of #include <nvif/...>,
+   <nvhw/...>, <nvrm/...>, <core/...>, <engine/...>, and <subdev/...>
+   lines intact.
+
+   Modification policy for imported files: keep the upstream text
+   intact.  DragonFly adaptations are compile-gated with
+   NVKM_DFLY_GSP_DISPLAY_ONLY so a diff against the upstream file
+   shows exactly what changed and why; this tree builds only for
+   DragonFly, so no __DragonFly__ preprocessor conditionals are used.
+   Several files are still byte-identical to upstream, for
+   example core/object.c, core/object.h, core/enum.c, nvhw/drf.h,
+   nvif/class.h, and nvrm/nvtypes.h.
+
+3. Firmware (fw/)
+
+   NVIDIA GSP-RM 570.144 boot blobs, packaged from linux-firmware
+   under the linux-firmware NVIDIA firmware license.  Image names keep
+   the linux-firmware paths (nvidia/tu102/...).  The larger blobs are
+   extracted at build time from the local /lib/firmware install; see
+   fw/Makefile.
+
+Rules
+-----
+
+   - MIT/BSD-licensed headers and files may be copied verbatim.
+   - GPL logic is never copied; it may only be reimplemented natively
+     from the algorithm.
+   - No file in this tree may carry MODULE_LICENSE("GPL"),
+     EXPORT_SYMBOL_GPL, or GPL-only license text.
+
+   tools/tools/drm/nouveau/kms_static_audit.py scans the display/KMS
+   file set and the evidence tools for these invariants and records
+   the result in /var/tmp/nvkm-kms-static-audit.json.
