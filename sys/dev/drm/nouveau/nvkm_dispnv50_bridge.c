@@ -61,10 +61,26 @@ int drm_dp_downstream_max_clock(const u8 dpcd[DP_RECEIVER_CAP_SIZE],
 #define NVKM_DISPNV50_SCANOUT_BPP	4U
 #define NVKM_DISPNV50_SCANOUT_KIND	0U
 #define NVKM_DISPNV50_BLOCKLINEAR_KIND	0x06U
-#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP	0x00000045U
-#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP	0x00000005U
-#define NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(kind) \
-	(NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP | ((uint32_t)(kind) << 20))
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM		0x00000001U
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_RW		0x00000004U
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_PAGE_LP	0x00000040U
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_BLOCKLINEAR	0x00100000U
+
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM_RW \
+	(NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM | \
+	 NVKM_DISPNV50_DMAOBJ_FLAGS0_RW | \
+	 NVKM_DISPNV50_DMAOBJ_FLAGS0_PAGE_LP)
+/*
+ * gv100+ DMA object flags0 (see Linux nvkm/engine/dma/usergv100.c):
+ *   bits [1:0] target (1 = VRAM), bit 2 rw, bit 6 page size (1 = LP),
+ *   bit 20 kind (boolean: 1 = block-linear, 0 = pitch).
+ * The kind is NOT an 8-bit field at bit 20 on Volta+; passing the GMMU
+ * kind value (e.g. 0x06) shifted by 20 leaves bit 20 clear and the
+ * display fetches block-linear surfaces as pitch, scrambling scanout.
+ */
+#define NVKM_DISPNV50_DMAOBJ_FLAGS0_KIND(kind) \
+	(NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM_RW | \
+	 ((kind) != 0 ? NVKM_DISPNV50_DMAOBJ_FLAGS0_BLOCKLINEAR : 0U))
 #define NVKM_DISPNV50_STATUS_POLL_COUNT	50U
 #define NVKM_DISPNV50_WIND_POLL_COUNT	2000U	/* 2s, matches nouveau */
 #define NVKM_DISPNV50_STATUS_POLL_US	1000U
@@ -2270,7 +2286,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 
 		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
 		    "kmsSyncCtxDma", NV50_DISP_HANDLE_SYNCBUF, (u64)syncbuf,
-		    (u64)syncbuf + 0x0fff, NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP,
+		    (u64)syncbuf + 0x0fff, NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM_RW,
 		    &dmac->sync, &dmac->dfly_sync_object);
 		if (ret) {
 			nvkm_infof(sc->dev,
@@ -2295,7 +2311,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 		vram_limit = sc->fb_usable_base + sc->fb_usable_size - 1;
 		ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0], inst,
 		    "kmsVramCtxDma", NV50_DISP_HANDLE_VRAM, 0, vram_limit,
-		    NVKM_DISPNV50_DMAOBJ_VRAM_RW_SP, &dmac->vram,
+		    NVKM_DISPNV50_DMAOBJ_FLAGS0_VRAM_RW, &dmac->vram,
 		    &dmac->dfly_vram_object);
 		if (ret) {
 			nvkm_infof(sc->dev,
@@ -2319,7 +2335,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 			 */
 			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
 			    inst, "kmsWndwFbCtxDma", fb_handle, 0, vram_limit,
-			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(
+			    NVKM_DISPNV50_DMAOBJ_FLAGS0_KIND(
 				NVKM_DISPNV50_SCANOUT_KIND),
 			    &dmac->dfly_fb, &dmac->dfly_fb_object);
 			if (ret) {
@@ -2334,7 +2350,7 @@ nv50_dmac_create(struct nouveau_drm *drm, s32 *oclass, int head,
 			ret = nvkm_dispnv50_ctxdma_new(dmac, oclass[0],
 			    inst, "kmsWndwFbBlocklinearCtxDma",
 			    fb_blocklinear_handle, 0, vram_limit,
-			    NVKM_DISPNV50_DMAOBJ_VRAM_RW_LP_KIND(
+			    NVKM_DISPNV50_DMAOBJ_FLAGS0_KIND(
 				NVKM_DISPNV50_BLOCKLINEAR_KIND),
 			    &dmac->dfly_fb_blocklinear,
 			    &dmac->dfly_fb_blocklinear_object);
