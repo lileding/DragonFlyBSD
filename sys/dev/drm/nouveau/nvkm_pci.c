@@ -1094,9 +1094,10 @@ nvkm_pci_detach(device_t dev)
 	 */
 	err = nvkm_unload_begin(sc);
 	if (err != 0) {
-		nvkm_infof(dev, "unload busy: open=%d files=%u mmap=%u\n",
+		nvkm_infof(dev, "unload busy: open=%d files=%u mmap=%u sched=%u\n",
 		    sc->unload_last_open_count, sc->unload_last_file_count,
-		    sc->unload_last_mmap_count);
+		    sc->unload_last_mmap_count,
+		    sc->unload_last_sched_count);
 		return (err);
 	}
 
