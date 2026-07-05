@@ -9879,6 +9879,8 @@ struct nvkm_drm_exec_signal {
 	uint32_t type;
 };
 
+static uint32_t nvkm_drm_exec_harvest_completed(struct nvkm_softc *sc);
+
 static const char *
 nvkm_drm_fence_name(struct dma_fence *fence __unused)
 {
@@ -9891,11 +9893,31 @@ nvkm_drm_fence_is_signaled(struct dma_fence *fence)
 	struct nvkm_drm_exec_fence *f =
 	    container_of(fence, struct nvkm_drm_exec_fence, base);
 	volatile uint32_t *sema = f->sema;
+	struct nvkm_softc *sc = f->sc;
 
 	if (sema == NULL)
 		return (false);
 	cpu_lfence();
-	return (*sema == f->payload);
+	if (*sema != f->payload)
+		return (false);
+
+	/*
+	 * Ownership:
+	 *   Borrows the fence and device softc.  Completion ownership remains
+	 *   with the EXEC pending record, which owns the slot and fence refs.
+	 *
+	 * Lifetime:
+	 *   A true hardware semaphore sample is not enough by itself: the
+	 *   pending record must still be retired so submit slots, callbacks,
+	 *   and waiters make the same progress as the interrupt path.
+	 *
+	 * Threading:
+	 *   May take gsp_tok and signal fences.  Callers must not hold
+	 *   nfile->job_token when invoking dma_fence_is_signaled() on an nvkm
+	 *   fence, because callbacks may need that token.
+	 */
+	(void)nvkm_drm_exec_harvest_completed(sc);
+	return (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags));
 }
 
 /*
@@ -9919,6 +9941,7 @@ nvkm_drm_fence_wait(struct dma_fence *fence, bool intr, signed long timeout)
 	struct nvkm_drm_exec_fence *f =
 	    container_of(fence, struct nvkm_drm_exec_fence, base);
 	struct nvkm_softc *sc = f->sc;
+	signed long remaining, step;
 	signed long ret;
 
 	if (sc != NULL) {
@@ -9942,8 +9965,45 @@ nvkm_drm_fence_wait(struct dma_fence *fence, bool intr, signed long timeout)
 		sc->fence_wait_last_signal_error = f->signal_error;
 	}
 
-	ret = dma_fence_default_wait(fence, intr, timeout);
+	if (timeout == 0) {
+		ret = dma_fence_is_signaled(fence) ? 1 : 0;
+		goto out_diag;
+	}
 
+	/*
+	 * The DragonFly fence shim does not call ops->signaled from
+	 * dma_fence_default_wait().  Wait in small chunks so a missed non-stall
+	 * interrupt still lets the semaphore poll retire the pending EXEC and
+	 * wake all dependent jobs.
+	 */
+	remaining = timeout;
+	for (;;) {
+		if (dma_fence_is_signaled(fence)) {
+			ret = remaining > 0 ? remaining : 1;
+			break;
+		}
+		step = hz / 10;
+		if (step < 1)
+			step = 1;
+		if (timeout != MAX_SCHEDULE_TIMEOUT && step > remaining)
+			step = remaining;
+		ret = dma_fence_default_wait(fence, intr, step);
+		if (ret < 0)
+			break;
+		if (dma_fence_is_signaled(fence)) {
+			ret = remaining > 0 ? remaining : 1;
+			break;
+		}
+		if (timeout != MAX_SCHEDULE_TIMEOUT) {
+			remaining -= step;
+			if (remaining <= 0) {
+				ret = 0;
+				break;
+			}
+		}
+	}
+
+out_diag:
 	if (sc != NULL) {
 		sc->fence_wait_last_ret = ret;
 		sc->fence_wait_last_flags = fence->flags;
@@ -10746,12 +10806,31 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 	}
 }
 
-void
-nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
+/*
+ * nvkm_drm_exec_harvest_completed_locked()
+ *
+ * Ownership:
+ *   Borrows sc and each list entry while sc->gsp_tok is held.  Completed
+ *   entries are consumed: the helper removes them from exec_pending, signals
+ *   their owned fence references, releases the submit slot, and drops the
+ *   pending reference package.
+ *
+ * Lifetime:
+ *   The GPU owns the semaphore write.  Once the payload is visible, the
+ *   pending record has reached the same terminal state whether this helper was
+ *   called from the interrupt path, fence polling, or a dependency recheck.
+ *
+ * Threading:
+ *   Caller must hold sc->gsp_tok.  dma_fence_signal() runs callbacks after the
+ *   list entry has been removed, so callbacks may safely queue dependent jobs
+ *   without observing the pending record twice.
+ */
+static uint32_t
+nvkm_drm_exec_harvest_completed_locked(struct nvkm_softc *sc)
 {
 	struct nvkm_drm_exec_pending *pending, *next;
+	uint32_t completed = 0;
 
-	lwkt_gettoken(&sc->gsp_tok);
 	for (pending = LIST_FIRST(&sc->exec_pending); pending != NULL;
 	    pending = next) {
 		next = LIST_NEXT(pending, link);
@@ -10763,11 +10842,37 @@ nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
 		nvkm_drm_probe_pending_signal(sc, pending, 0);
 		nvkm_drm_exec_pending_signal(pending, 0);
 		sc->exec_async_complete_count++;
+		completed++;
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
-		nvkm_drm_submit_slot_release(pending->chan, pending->post_slot);
+		if (pending->chan != NULL)
+			nvkm_drm_submit_slot_release(pending->chan,
+			    pending->post_slot);
 		nvkm_drm_exec_pending_put(sc, pending);
 	}
+	return (completed);
+}
+
+static uint32_t
+nvkm_drm_exec_harvest_completed(struct nvkm_softc *sc)
+{
+	uint32_t completed;
+
+	if (sc == NULL)
+		return (0);
+	lwkt_gettoken(&sc->gsp_tok);
+	completed = nvkm_drm_exec_harvest_completed_locked(sc);
+	lwkt_reltoken(&sc->gsp_tok);
+	if (completed != 0)
+		sc->exec_async_poll_complete_count += completed;
+	return (completed);
+}
+
+void
+nvkm_drm_exec_complete_intr(struct nvkm_softc *sc)
+{
+	lwkt_gettoken(&sc->gsp_tok);
+	(void)nvkm_drm_exec_harvest_completed_locked(sc);
 	lwkt_reltoken(&sc->gsp_tok);
 }
 
@@ -11422,7 +11527,7 @@ nvkm_drm_job_arm_deps_locked(struct nvkm_drm_job *job)
 		struct nvkm_drm_job_dep *dep = &job->wait_deps[i];
 		struct dma_fence *fence = dep->fence;
 
-		if (fence == NULL || dma_fence_is_signaled(fence))
+		if (fence == NULL || nvkm_drm_fence_flag_signaled(fence))
 			continue;
 		sc->sync_wait_blocking_count++;
 		dep->armed = true;
@@ -11465,6 +11570,54 @@ nvkm_drm_job_disarm_deps_locked(struct nvkm_drm_job *job)
 	}
 }
 
+/*
+ * nvkm_drm_job_recheck_armed_deps()
+ *
+ * Ownership:
+ *   Borrows job and temporarily takes fence references for armed dependencies.
+ *   The helper does not complete the job directly; it only gives fence ops a
+ *   chance to publish completion, after which the normal callback owns
+ *   dep_pending and workqueue progress.
+ *
+ * Lifetime:
+ *   Called while the caller owns a live job reference.  Fence references are
+ *   copied under job_token and dropped before returning, so callbacks can race
+ *   without leaving dangling dep pointers.
+ *
+ * Threading:
+ *   Never calls dma_fence_is_signaled() while holding job_token.  nvkm fences
+ *   may harvest EXEC completion and run dependency callbacks that need the same
+ *   token.
+ */
+static void
+nvkm_drm_job_recheck_armed_deps(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile = job->nfile;
+	struct nvkm_softc *sc = job->sc;
+	struct dma_fence *fences[64];
+	uint32_t count = 0, signaled = 0;
+
+	lwkt_gettoken(&nfile->job_token);
+	for (uint32_t i = 0; i < job->wait_count &&
+	    count < sizeof(fences) / sizeof(fences[0]); i++) {
+		if (!job->wait_deps[i].armed || job->wait_deps[i].fence == NULL)
+			continue;
+		fences[count++] = dma_fence_get(job->wait_deps[i].fence);
+	}
+	lwkt_reltoken(&nfile->job_token);
+
+	if (count == 0)
+		return;
+	sc->sync_job_dep_recheck_count++;
+	sc->sync_job_dep_recheck_fence_count += count;
+	for (uint32_t i = 0; i < count; i++) {
+		if (dma_fence_is_signaled(fences[i]))
+			signaled++;
+		dma_fence_put(fences[i]);
+	}
+	sc->sync_job_dep_recheck_signaled_count += signaled;
+}
+
 static bool
 nvkm_drm_job_has_armed_deps_locked(struct nvkm_drm_job *job)
 {
@@ -11487,6 +11640,7 @@ nvkm_drm_job_wait_deps_disarmed(struct nvkm_drm_job *job)
 			break;
 		}
 		lwkt_reltoken(&nfile->job_token);
+		nvkm_drm_job_recheck_armed_deps(job);
 		(void)tsleep(job, 0, "nvkjcb", hz / 10);
 	}
 }
@@ -11537,6 +11691,7 @@ nvkm_drm_job_wait_complete(struct nvkm_drm_job *job)
 {
 	struct nvkm_drm_file *nfile = job->nfile;
 	int result;
+	bool need_recheck;
 	int sleep_error;
 
 	for (;;) {
@@ -11546,10 +11701,13 @@ nvkm_drm_job_wait_complete(struct nvkm_drm_job *job)
 			lwkt_reltoken(&nfile->job_token);
 			return (result);
 		}
+		need_recheck = job->dep_pending != 0;
 		if (!job->running && !nfile->job_work_queued &&
 			    (!job->queued || job->dep_pending == 0))
 				(void)nvkm_drm_job_queue_work_locked(nfile);
 		lwkt_reltoken(&nfile->job_token);
+		if (need_recheck)
+			nvkm_drm_job_recheck_armed_deps(job);
 		sleep_error = tsleep(job, PCATCH, "nvkjsy", hz / 10);
 		if (sleep_error == EINTR || sleep_error == ERESTART)
 			return (-EINTR);
@@ -11630,10 +11788,14 @@ nvkm_drm_job_work(struct work_struct *work)
 		if (job->dep_pending != 0) {
 			nvkm_drm_job_diag_stage(job->sc, diag_seq, job,
 			    NVKM_DRM_JOB_DIAG_WAIT_DEPS);
-			nvkm_drm_job_diag_finish(job->sc, diag_seq, 0,
-			    diag_start);
 			nfile->job_work_queued = false;
 			nvkm_drm_job_wakeup_locked(nfile);
+			lwkt_reltoken(&nfile->job_token);
+			nvkm_drm_job_recheck_armed_deps(job);
+			lwkt_gettoken(&nfile->job_token);
+			if (job->dep_pending == 0 && job->queued &&
+			    !nfile->job_closing)
+				(void)nvkm_drm_job_queue_work_locked(nfile);
 			lwkt_reltoken(&nfile->job_token);
 			break;
 		}
@@ -11665,6 +11827,7 @@ static void
 nvkm_drm_jobs_flush(struct nvkm_drm_file *nfile)
 {
 	struct nvkm_drm_job *job;
+	struct nvkm_drm_job *recheck_job;
 
 	if (nfile == NULL)
 		return;
@@ -11675,11 +11838,20 @@ nvkm_drm_jobs_flush(struct nvkm_drm_file *nfile)
 			lwkt_reltoken(&nfile->job_token);
 			break;
 		}
+		recheck_job = NULL;
 		job = TAILQ_FIRST(&nfile->job_queue);
 		if (job != NULL &&
 		    (!job->deps_armed || job->dep_pending == 0))
 			(void)nvkm_drm_job_queue_work_locked(nfile);
+		else if (job != NULL && job->dep_pending != 0) {
+			nvkm_drm_job_get(job);
+			recheck_job = job;
+		}
 		lwkt_reltoken(&nfile->job_token);
+		if (recheck_job != NULL) {
+			nvkm_drm_job_recheck_armed_deps(recheck_job);
+			nvkm_drm_job_put(recheck_job);
+		}
 		(void)tsleep(&nfile->job_epoch, 0, "nvkjfl", hz / 10);
 	}
 }
