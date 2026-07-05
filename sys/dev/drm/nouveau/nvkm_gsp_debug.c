@@ -445,6 +445,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->sync_job_dep_queue_count);
 	sbuf_printf(sb, "job_dep_queue_error_count = %llu\n",
 	    (unsigned long long)sc->sync_job_dep_queue_error_count);
+	sbuf_printf(sb, "job_queue_request_count = %llu\n",
+	    (unsigned long long)sc->sync_job_queue_request_count);
+	sbuf_printf(sb, "job_queue_already_count = %llu\n",
+	    (unsigned long long)sc->sync_job_queue_already_count);
+	sbuf_printf(sb, "job_wait_requeue_count = %llu\n",
+	    (unsigned long long)sc->sync_job_wait_requeue_count);
 	sbuf_printf(sb, "job_dep_recheck_count = %llu\n",
 	    (unsigned long long)sc->sync_job_dep_recheck_count);
 	sbuf_printf(sb, "job_dep_recheck_fence_count = %llu\n",
@@ -2243,14 +2249,20 @@ nvkm_gsp_sysctl_unload_state(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->unload_busy_open_count);
 	sbuf_printf(sb, "unload_busy_mmap_count = %llu\n",
 	    (unsigned long long)sc->unload_busy_mmap_count);
+	sbuf_printf(sb, "unload_busy_sched_count = %llu\n",
+	    (unsigned long long)sc->unload_busy_sched_count);
 	sbuf_printf(sb, "unload_last_open_count = %d\n",
 	    sc->unload_last_open_count);
 	sbuf_printf(sb, "unload_last_file_count = %u\n",
 	    sc->unload_last_file_count);
 	sbuf_printf(sb, "unload_last_mmap_count = %u\n",
 	    sc->unload_last_mmap_count);
+	sbuf_printf(sb, "unload_last_sched_count = %u\n",
+	    sc->unload_last_sched_count);
 	sbuf_printf(sb, "mmap_active_count = %u\n",
 	    sc->mmap_active_count);
+	sbuf_printf(sb, "sched_active_count = %u\n",
+	    sc->sched_active_count);
 
 	err = sbuf_finish(sb);
 	if (err == 0)

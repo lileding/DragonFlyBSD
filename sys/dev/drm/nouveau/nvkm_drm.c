@@ -71,6 +71,8 @@ static void nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 static void nvkm_drm_job_work(struct work_struct *work);
 static void nvkm_drm_jobs_flush(struct nvkm_drm_file *nfile);
 static void nvkm_drm_jobs_close(struct nvkm_drm_file *nfile);
+static void nvkm_vm_stop(struct nvkm_drm_file *nfile);
+static void nvkm_vm_sched_run(void *arg);
 
 /* NVIF ioctl is variable-size; encode with size=0 since dispatch
  * matches by NR only and the actual copy size comes from userspace. */
@@ -639,6 +641,8 @@ struct nvkm_drm_file {
 	 * that ordering, and synchronous VM_BIND only waits for its own bind job.
 	 * Order is always vm_token -> gsp_tok. */
 	struct lwkt_token vm_token;
+	struct dma_fence *last_bind_fence;
+	struct nvkm_drm_job_list live_execs;
 
 		/* Private GPUVM reservation object.
 		 *
@@ -693,6 +697,7 @@ struct nvkm_drm_file {
 	 * work.  A synchronous VM_BIND ioctl waits for this job to complete; EXEC
 	 * ioctls never execute inline. */
 	struct work_struct job_work;
+	struct nvkm_sched sched;
 	struct lwkt_token job_token;
 	struct nvkm_drm_job_list job_queue;
 	bool job_work_queued;
@@ -7919,6 +7924,7 @@ nvkm_unload_begin(struct nvkm_softc *sc)
 	struct drm_device *ddev = sc->drm_dev;
 	struct drm_file *file_priv;
 	uint32_t file_count = 0;
+	uint32_t sched_count;
 
 	sc->unload_attempt_count++;
 	if (ddev == NULL) {
@@ -7952,16 +7958,20 @@ nvkm_unload_begin(struct nvkm_softc *sc)
 	list_for_each_entry(file_priv, &ddev->filelist, lhead)
 		file_count++;
 	mutex_unlock(&ddev->filelist_mutex);
+	sched_count = sc->sched_active_count;
 	if (ddev->open_count != 0 || file_count != 0 ||
-	    sc->mmap_active_count != 0) {
+	    sc->mmap_active_count != 0 || sched_count != 0) {
 		sc->unload_fail_count++;
 		if (ddev->open_count != 0 || file_count != 0)
 			sc->unload_busy_open_count++;
 		if (sc->mmap_active_count != 0)
 			sc->unload_busy_mmap_count++;
+		if (sched_count != 0)
+			sc->unload_busy_sched_count++;
 		sc->unload_last_open_count = ddev->open_count;
 		sc->unload_last_file_count = file_count;
 		sc->unload_last_mmap_count = sc->mmap_active_count;
+		sc->unload_last_sched_count = sched_count;
 		mutex_unlock(&drm_global_mutex);
 		return (EBUSY);
 	}
@@ -8193,10 +8203,9 @@ nvkm_drm_channel_clear(struct nvkm_softc *sc, struct nvkm_drm_chan *dchan)
 }
 
 static void
-nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
+nvkm_vm_destroy(struct nvkm_drm_file *nfile)
 {
-	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
-	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+	struct nvkm_softc *sc;
 	struct nvkm_drm_vm_binding *binding, *binding_next;
 	struct nvkm_drm_chan *dchan, *dchan_next;
 	struct nvkm_drm_vm_dirty_set dirty_set;
@@ -8205,9 +8214,13 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 
 	if (nfile == NULL)
 		return;
+	sc = nfile->sc;
 
 	sc->vm_bind_release_count++;
-	nvkm_drm_jobs_close(nfile);
+	lwkt_gettoken(&nfile->vm_token);
+	dma_fence_put(nfile->last_bind_fence);
+	nfile->last_bind_fence = NULL;
+	lwkt_reltoken(&nfile->vm_token);
 
 	LIST_FOREACH_MUTABLE(dchan, &nfile->channels, link, dchan_next) {
 		LIST_REMOVE(dchan, link);
@@ -8242,7 +8255,52 @@ nvkm_drm_file_release(struct drm_device *ddev, struct drm_file *file_priv)
 	nvkm_debugf(sc->dev,
 	    "nvkm_drm: postclose released bindings=%u channels=%u\n",
 	    binding_count, channel_count);
+	atomic_subtract_int(&sc->sched_active_count, 1);
+	nvkm_drm_file_put(nfile);
+}
+
+static void
+nvkm_vm_sched_run(void *arg)
+{
+	struct nvkm_drm_file *nfile = arg;
+
+	nvkm_sched_run(&nfile->sched);
+	nvkm_vm_destroy(nfile);
+	lwkt_exit();
+}
+
+/*
+ * nvkm_vm_stop()
+ *
+ * Ownership:
+ *   Borrows the VM object owned by the closing drm_file and by the scheduler
+ *   lifetime reference taken at open.
+ *
+ * Lifetime:
+ *   Called from drm postclose after the userspace file has been disconnected.
+ *   It only requests scheduler shutdown.  Final VM teardown runs later on the
+ *   scheduler LWKT, after jobs are drained and doorbelled EXEC work has either
+ *   completed or faulted.
+ *
+ * Threading:
+ *   Does not wait.  nvkm_sched_stop() only atomically publishes the stop
+ *   request and wakes the scheduler sleep channel.
+ */
+static void
+nvkm_vm_stop(struct nvkm_drm_file *nfile)
+{
+	if (nfile != NULL)
+		nvkm_sched_stop(&nfile->sched);
+}
+
+static void
+nvkm_drm_file_release(struct drm_device *ddev __unused,
+    struct drm_file *file_priv)
+{
+	struct nvkm_drm_file *nfile = nvkm_drm_file_priv(file_priv);
+
 	file_priv->driver_priv = NULL;
+	nvkm_vm_stop(nfile);
 	nvkm_drm_file_put(nfile);
 }
 
@@ -8299,6 +8357,7 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 {
 	struct nvkm_softc *sc = nvkm_drm_sc(ddev);
 	struct nvkm_drm_file *nfile;
+	int err;
 
 	/* Unload has been committed; refuse to create new user state. */
 	if (sc->unloading)
@@ -8314,12 +8373,43 @@ nvkm_drm_open(struct drm_device *ddev, struct drm_file *file_priv)
 	RB_INIT(&nfile->vm_binding_tree);
 	LIST_INIT(&nfile->channels);
 	TAILQ_INIT(&nfile->job_queue);
+	TAILQ_INIT(&nfile->live_execs);
 	lwkt_token_init(&nfile->vm_token, "nvkm-vm");
 	lwkt_token_init(&nfile->job_token, "nvkm-job");
-		lockinit(&nfile->job_submit_lock, "nvkjsb", 0, 0);
-		reservation_object_init(&nfile->vm_resv);
-		reservation_object_init(&nfile->vm_exec_resv);
-		INIT_WORK(&nfile->job_work, nvkm_drm_job_work);
+	lockinit(&nfile->job_submit_lock, "nvkjsb", 0, 0);
+	reservation_object_init(&nfile->vm_resv);
+	reservation_object_init(&nfile->vm_exec_resv);
+	INIT_WORK(&nfile->job_work, nvkm_drm_job_work);
+	nvkm_drm_file_get(nfile);
+	atomic_add_int(&sc->sched_active_count, 1);
+	err = nvkm_sched_start(&nfile->sched);
+	if (err != 0) {
+		atomic_subtract_int(&sc->sched_active_count, 1);
+		nvkm_drm_file_put(nfile);
+		reservation_object_fini(&nfile->vm_exec_resv);
+		reservation_object_fini(&nfile->vm_resv);
+		lockuninit(&nfile->job_submit_lock);
+		lwkt_token_uninit(&nfile->job_token);
+		lwkt_token_uninit(&nfile->vm_token);
+		kfree(nfile);
+		return (err);
+	}
+	err = lwkt_create(nvkm_vm_sched_run, nfile, &nfile->sched.thread, NULL,
+	    TDF_NOSTART, -1, "nvkm_sched");
+	if (err != 0) {
+		lwkt_token_uninit(&nfile->sched.token);
+		atomic_subtract_int(&sc->sched_active_count, 1);
+		nvkm_drm_file_put(nfile);
+		reservation_object_fini(&nfile->vm_exec_resv);
+		reservation_object_fini(&nfile->vm_resv);
+		lockuninit(&nfile->job_submit_lock);
+		lwkt_token_uninit(&nfile->job_token);
+		lwkt_token_uninit(&nfile->vm_token);
+		kfree(nfile);
+		return (-err);
+	}
+	lwkt_setpri_initial(nfile->sched.thread, TDPRI_KERN_USER);
+	lwkt_schedule(nfile->sched.thread);
 
 	/* nfile->vmm stays NULL; nvkm_drm_file_ensure_vmm builds it on the
 	 * first GPU use so probe-only opens stay cheap (see that helper). */
@@ -10470,6 +10560,16 @@ nvkm_drm_exec_pending_signal(struct nvkm_drm_exec_pending *pending, int error)
 }
 
 static void
+nvkm_drm_exec_pending_wake_sched(struct nvkm_drm_exec_pending *pending,
+    int error)
+{
+	if (pending == NULL || pending->sched == NULL ||
+	    pending->sched_fence == NULL)
+		return;
+	nvkm_sched_wake_job(pending->sched, pending->sched_fence, error);
+}
+
+static void
 nvkm_drm_exec_fence_arm(struct dma_fence *fence, volatile uint32_t *sema,
     uint32_t payload, const struct nvkm_drm_exec_pending *pending)
 {
@@ -10659,6 +10759,7 @@ nvkm_drm_exec_pending_put(struct nvkm_softc *sc,
 		return;
 	for (uint32_t i = 0; i < pending->fence_count; i++)
 		dma_fence_put(pending->fences[i]);
+	dma_fence_put(pending->sched_fence);
 	kfree(pending);
 }
 
@@ -10678,6 +10779,7 @@ nvkm_drm_exec_pending_cancel_channel(struct nvkm_softc *sc,
 		nvkm_drm_exec_trace_complete(sc, pending, error);
 		nvkm_drm_probe_pending_signal(sc, pending, error);
 		nvkm_drm_exec_pending_signal(pending, error);
+		nvkm_drm_exec_pending_wake_sched(pending, error);
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
 		nvkm_drm_submit_slot_release(chan, pending->post_slot);
@@ -10798,6 +10900,7 @@ nvkm_drm_exec_fault_channel_locked(struct nvkm_softc *sc, uint32_t chid,
 		nvkm_drm_exec_trace_complete(sc, pending, error);
 		nvkm_drm_probe_pending_signal(sc, pending, error);
 		nvkm_drm_exec_pending_signal(pending, error);
+		nvkm_drm_exec_pending_wake_sched(pending, error);
 		sc->exec_async_wait_error_count++;
 		atomic_store_rel_int(&pending->done, 1);
 		wakeup(pending);
@@ -10841,6 +10944,7 @@ nvkm_drm_exec_harvest_completed_locked(struct nvkm_softc *sc)
 		nvkm_drm_exec_trace_complete(sc, pending, 0);
 		nvkm_drm_probe_pending_signal(sc, pending, 0);
 		nvkm_drm_exec_pending_signal(pending, 0);
+		nvkm_drm_exec_pending_wake_sched(pending, 0);
 		sc->exec_async_complete_count++;
 		completed++;
 		atomic_store_rel_int(&pending->done, 1);
@@ -10978,6 +11082,7 @@ struct nvkm_drm_job_dep {
 };
 
 struct nvkm_drm_job {
+	struct nvkm_job sched_job;
 	TAILQ_ENTRY(nvkm_drm_job) link;
 	struct kref refcount;
 	enum nvkm_drm_job_type type;
@@ -10994,6 +11099,10 @@ struct nvkm_drm_job {
 	bool deps_armed;
 	bool queued;
 	bool running;
+	bool sched_submitted;
+	bool vm_exec_live;
+	bool vm_bind_last;
+	TAILQ_ENTRY(nvkm_drm_job) vm_exec_link;
 	union {
 		struct {
 			uint32_t channel;
@@ -11371,16 +11480,35 @@ nvkm_drm_exec_diag_finish(struct nvkm_softc *sc, uint64_t seq, int ret,
 		sc->exec_diag_active_stage = 0;
 }
 
+/*
+ * nvkm_drm_job_queue_work_locked()
+ *
+ * Ownership:
+ *   Borrows nfile while the caller holds nfile->job_token.
+ *
+ * Lifetime:
+ *   The work item is owned by nfile and remains valid until postclose drains
+ *   and cancels the per-file queue.
+ *
+ * Threading:
+ *   DragonFly's queue_work() returns false when the work is already queued or
+ *   already running; that is normal Linux workqueue semantics, not a submit
+ *   failure.  The cached job_work_queued bit is only an idle hint, so callers
+ *   may safely request work again when a synchronous waiter needs progress.
+ */
 static int
 nvkm_drm_job_queue_work_locked(struct nvkm_drm_file *nfile)
 {
-	if (nfile->job_work_queued)
-		return (0);
+	struct nvkm_softc *sc = nfile->sc;
+	bool queued;
+
+	if (sc != NULL)
+		sc->sync_job_queue_request_count++;
 	nfile->job_work_queued = true;
-	if (!queue_work(system_wq, &nfile->job_work)) {
-		nfile->job_work_queued = false;
-		return (-EIO);
-	}
+	queued = queue_work(system_wq, &nfile->job_work);
+	if (!queued && sc != NULL)
+		sc->sync_job_queue_already_count++;
+
 	return (0);
 }
 
@@ -11430,6 +11558,7 @@ nvkm_drm_job_release(struct kref *kref)
 
 	if (job == NULL)
 		return;
+	nvkm_job_fini(&job->sched_job);
 	dma_fence_put(job->done_fence);
 	nvkm_drm_wait_fences_put(job->wait_fences, job->wait_count);
 	kfree(job->wait_deps);
@@ -11462,6 +11591,191 @@ nvkm_drm_job_put(struct nvkm_drm_job *job)
 {
 	if (job != NULL)
 		kref_put(&job->refcount, nvkm_drm_job_release);
+}
+
+static int
+nvkm_drm_job_add_wait_deps(struct nvkm_drm_job *job)
+{
+	int err;
+
+	for (uint32_t i = 0; i < job->wait_count; i++) {
+		err = nvkm_job_add_dep(&job->sched_job, job->wait_fences[i]);
+		if (err != 0)
+			return (err);
+	}
+	return (0);
+}
+
+static int
+nvkm_drm_job_add_vm_ordering(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile;
+	struct nvkm_drm_job *exec_job;
+	int err = 0;
+
+	if (job == NULL || job->nfile == NULL)
+		return (-EINVAL);
+	nfile = job->nfile;
+
+	lwkt_gettoken(&nfile->vm_token);
+	if (nfile->last_bind_fence != NULL) {
+		err = nvkm_job_add_dep(&job->sched_job, nfile->last_bind_fence);
+		if (err != 0)
+			goto out;
+	}
+
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		TAILQ_INSERT_TAIL(&nfile->live_execs, job, vm_exec_link);
+		job->vm_exec_live = true;
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		TAILQ_FOREACH(exec_job, &nfile->live_execs, vm_exec_link) {
+			err = nvkm_job_add_dep(&job->sched_job, exec_job->done_fence);
+			if (err != 0)
+				goto out;
+		}
+		dma_fence_put(nfile->last_bind_fence);
+		nfile->last_bind_fence = dma_fence_get(job->done_fence);
+		job->vm_bind_last = true;
+		break;
+	}
+
+out:
+	lwkt_reltoken(&nfile->vm_token);
+	return (err);
+}
+
+static void
+nvkm_drm_job_clear_vm_ordering(struct nvkm_drm_job *job)
+{
+	struct nvkm_drm_file *nfile;
+
+	if (job == NULL || job->nfile == NULL)
+		return;
+	nfile = job->nfile;
+
+	lwkt_gettoken(&nfile->vm_token);
+	if (job->vm_exec_live) {
+		TAILQ_REMOVE(&nfile->live_execs, job, vm_exec_link);
+		job->vm_exec_live = false;
+	}
+	if (job->vm_bind_last) {
+		if (nfile->last_bind_fence == job->done_fence) {
+			dma_fence_put(nfile->last_bind_fence);
+			nfile->last_bind_fence = NULL;
+		}
+		job->vm_bind_last = false;
+	}
+	lwkt_reltoken(&nfile->vm_token);
+}
+
+static void
+nvkm_drm_job_cleanup_payload(struct nvkm_drm_job *job)
+{
+	dma_fence_put(job->done_fence);
+	job->done_fence = NULL;
+	nvkm_drm_wait_fences_put(job->wait_fences, job->wait_count);
+	job->wait_fences = NULL;
+	job->wait_count = 0;
+	kfree(job->wait_deps);
+	job->wait_deps = NULL;
+
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		nvkm_drm_exec_signals_put(job->exec.signals, job->exec.sig_count);
+		job->exec.signals = NULL;
+		job->exec.sig_count = 0;
+		kfree(job->exec.pushes);
+		job->exec.pushes = NULL;
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		nvkm_drm_exec_signals_put(job->vm_bind.signals, job->vm_bind.sig_count);
+		job->vm_bind.signals = NULL;
+		job->vm_bind.sig_count = 0;
+		nvkm_drm_vm_bind_retire_free(job->vm_bind.retire);
+		job->vm_bind.retire = NULL;
+		nvkm_drm_vm_bind_objects_put(job->vm_bind.objects,
+		    job->vm_bind.op_count);
+		job->vm_bind.objects = NULL;
+		kfree(job->vm_bind.ops);
+		job->vm_bind.ops = NULL;
+		break;
+	}
+}
+
+static struct nvkm_job_future
+nvkm_drm_sched_job_poll(struct nvkm_sched *sched, struct nvkm_job *base)
+{
+	struct nvkm_drm_job *job = container_of(base, struct nvkm_drm_job,
+	    sched_job);
+	struct nvkm_job_future future = { .ready = false, .result = 0 };
+	int err;
+
+	(void)sched;
+	if (base->result != 0) {
+		err = base->result;
+		if (job->type == NVKM_DRM_JOB_EXEC && job->sched_submitted &&
+		    job->done_fence != NULL) {
+			if (!dma_fence_is_signaled(job->done_fence))
+				return (future);
+			err = job->done_fence->error;
+		}
+		nvkm_drm_job_clear_vm_ordering(job);
+		nvkm_drm_job_cleanup_payload(job);
+		future.ready = true;
+		future.result = err;
+		return (future);
+	}
+
+	switch (job->type) {
+	case NVKM_DRM_JOB_EXEC:
+		if (!job->sched_submitted) {
+			err = nvkm_drm_exec_submit(job->sc, job->file_priv, job->nfile,
+			    job->exec.channel, job->exec.pushes, job->exec.push_count,
+			    job->done_fence, job->exec.signals, job->exec.sig_count);
+			if (err != 0) {
+				nvkm_drm_job_clear_vm_ordering(job);
+				nvkm_drm_job_cleanup_payload(job);
+				future.ready = true;
+				future.result = err;
+				return (future);
+			}
+			job->sched_submitted = true;
+			if (job->done_fence != NULL && dma_fence_is_signaled(job->done_fence)) {
+				err = job->done_fence->error;
+				nvkm_drm_job_clear_vm_ordering(job);
+				nvkm_drm_job_cleanup_payload(job);
+				future.ready = true;
+				future.result = err;
+				return (future);
+			}
+			return (future);
+		}
+		if (job->done_fence != NULL && dma_fence_is_signaled(job->done_fence)) {
+			err = job->done_fence->error;
+			nvkm_drm_job_clear_vm_ordering(job);
+			nvkm_drm_job_cleanup_payload(job);
+			future.ready = true;
+			future.result = err;
+		}
+		break;
+	case NVKM_DRM_JOB_VM_BIND:
+		if (job->vm_bind.op_count != 0) {
+			err = nvkm_drm_vm_bind_apply(job->sc, job->file_priv, job->nfile,
+			    job->vm_bind.ops, job->vm_bind.op_count,
+			    job->vm_bind.objects, &job->vm_bind.retire->bindings);
+		} else {
+			err = 0;
+		}
+		nvkm_drm_vm_bind_retire_schedule(&job->vm_bind.retire);
+		nvkm_drm_job_clear_vm_ordering(job);
+		nvkm_drm_job_cleanup_payload(job);
+		future.ready = true;
+		future.result = err;
+		break;
+	}
+	return (future);
 }
 
 static int
@@ -11702,9 +12016,10 @@ nvkm_drm_job_wait_complete(struct nvkm_drm_job *job)
 			return (result);
 		}
 		need_recheck = job->dep_pending != 0;
-		if (!job->running && !nfile->job_work_queued &&
-			    (!job->queued || job->dep_pending == 0))
-				(void)nvkm_drm_job_queue_work_locked(nfile);
+		if (!job->running && (!job->queued || job->dep_pending == 0)) {
+			(void)nvkm_drm_job_queue_work_locked(nfile);
+			job->sc->sync_job_wait_requeue_count++;
+		}
 		lwkt_reltoken(&nfile->job_token);
 		if (need_recheck)
 			nvkm_drm_job_recheck_armed_deps(job);
@@ -11996,13 +12311,8 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 {
 	struct nvkm_drm_job *job;
 	bool published = false;
-	bool sync_ref_taken = false;
+	struct dma_fence *sync_fence = NULL;
 	int err;
-
-	err = nvkm_drm_try_vm_bind_sync_fast(sc, file_priv, nfile, req,
-	    ops, sync);
-	if (err != -EAGAIN)
-		return (err);
 
 	job = kzalloc(sizeof(*job), GFP_KERNEL);
 	if (job == NULL) {
@@ -12010,6 +12320,7 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 		return (-ENOMEM);
 	}
 	kref_init(&job->refcount);
+	nvkm_job_init(&job->sched_job, nvkm_drm_sched_job_poll, NULL);
 	job->type = NVKM_DRM_JOB_VM_BIND;
 	job->sc = sc;
 	job->file_priv = file_priv;
@@ -12034,6 +12345,8 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 		err = -ENOMEM;
 		goto fail;
 	}
+	dma_fence_put(job->sched_job.done_fence);
+	job->sched_job.done_fence = dma_fence_get(job->done_fence);
 	nvkm_drm_exec_fence_set_producer(job->done_fence,
 	    NVKM_DRM_FENCE_PRODUCER_VM_BIND_JOB, 0, -1, 0, 0, 0);
 
@@ -12046,7 +12359,7 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 	    req->wait_ptr, &job->wait_fences, &job->wait_count);
 	if (err != 0)
 		goto fail;
-	err = nvkm_drm_job_prepare_deps(job);
+	err = nvkm_drm_job_add_wait_deps(job);
 	if (err != 0)
 		goto fail;
 
@@ -12056,18 +12369,18 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 		goto fail;
 
 	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
-	err = nvkm_drm_vm_bind_attach_resv_fence(sc, nfile, ops,
-	    req->op_count, job->vm_bind.objects, job->done_fence);
+	err = nvkm_drm_job_add_vm_ordering(job);
+	if (err == 0)
+		err = nvkm_drm_vm_bind_attach_resv_fence(sc, nfile, ops,
+		    req->op_count, job->vm_bind.objects, job->done_fence);
 	if (err == 0) {
 		nvkm_drm_exec_signals_publish(job->vm_bind.signals,
 		    job->vm_bind.sig_count);
 		published = true;
 		nvkm_drm_vm_bind_debug_delay(sc);
-		if (sync) {
-			nvkm_drm_job_get(job);
-			sync_ref_taken = true;
-		}
-		err = nvkm_drm_job_enqueue(job);
+		if (sync)
+			sync_fence = dma_fence_get(job->done_fence);
+		err = nvkm_sched_enqueue(&nfile->sched, &job->sched_job);
 	}
 	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
 	if (err != 0) {
@@ -12076,16 +12389,18 @@ nvkm_drm_queue_vm_bind_job(struct nvkm_softc *sc,
 		goto fail;
 	}
 	if (sync) {
-		err = nvkm_drm_job_wait_complete(job);
-		nvkm_drm_job_put(job);
+		err = dma_fence_wait(sync_fence, true);
+		if (err == 0 && sync_fence->error != 0)
+			err = sync_fence->error;
+		dma_fence_put(sync_fence);
 	}
 	return (err);
 
 fail_signal:
 	nvkm_drm_job_signal(job, err);
-	if (sync_ref_taken)
-		nvkm_drm_job_put(job);
+	dma_fence_put(sync_fence);
 fail:
+	nvkm_drm_job_clear_vm_ordering(job);
 	nvkm_drm_job_put(job);
 	return (err);
 }
@@ -12810,6 +13125,8 @@ nvkm_drm_exec_submit(struct nvkm_softc *sc, struct drm_file *file_priv,
 		err = -ENOMEM;
 		goto out_unlock;
 	}
+	pending->sched = &nfile->sched;
+	pending->sched_fence = dma_fence_get(exec_fence);
 	nvkm_drm_exec_pending_arm_fences(pending);
 	/*
 	 * TTM live-bound rebind waits on vm_exec_resv before rewriting PTEs.
@@ -12985,6 +13302,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	if (job == NULL)
 		return (-ENOMEM);
 	kref_init(&job->refcount);
+	nvkm_job_init(&job->sched_job, nvkm_drm_sched_job_poll, NULL);
 	job->type = NVKM_DRM_JOB_EXEC;
 	job->sc = sc;
 	job->file_priv = file_priv;
@@ -12997,6 +13315,8 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		err = -ENOMEM;
 		goto fail;
 	}
+	dma_fence_put(job->sched_job.done_fence);
+	job->sched_job.done_fence = dma_fence_get(job->done_fence);
 	nvkm_drm_exec_fence_set_producer(job->done_fence,
 	    NVKM_DRM_FENCE_PRODUCER_EXEC_JOB, req->channel, chan->chid,
 	    0, 0, 0);
@@ -13027,7 +13347,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	    profile_start);
 	if (err != 0)
 		goto fail;
-	err = nvkm_drm_job_prepare_deps(job);
+	err = nvkm_drm_job_add_wait_deps(job);
 	if (err != 0)
 		goto fail;
 
@@ -13040,8 +13360,10 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 		goto fail;
 
 	lockmgr(&nfile->job_submit_lock, LK_EXCLUSIVE);
-	err = nvkm_drm_exec_attach_public_resv_fence(sc, nfile,
-	    job->done_fence);
+	err = nvkm_drm_job_add_vm_ordering(job);
+	if (err == 0)
+		err = nvkm_drm_exec_attach_public_resv_fence(sc, nfile,
+		    job->done_fence);
 	if (err != 0) {
 		nvkm_debugf(sc->dev,
 		    "nvkm_drm: EXEC attach reservation fence failed err=%d\n",
@@ -13049,7 +13371,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 	} else {
 		nvkm_drm_exec_signals_publish(job->exec.signals,
 		    job->exec.sig_count);
-		err = nvkm_drm_job_enqueue(job);
+		err = nvkm_sched_enqueue(&nfile->sched, &job->sched_job);
 	}
 	lockmgr(&nfile->job_submit_lock, LK_RELEASE);
 	if (err != 0)
@@ -13059,6 +13381,7 @@ nvkm_drm_ioctl_exec(struct drm_device *ddev, void *data,
 fail_signal:
 	nvkm_drm_job_signal(job, err);
 fail:
+	nvkm_drm_job_clear_vm_ordering(job);
 	nvkm_drm_job_put(job);
 	return (err);
 }

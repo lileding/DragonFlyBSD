@@ -28,6 +28,7 @@
 #include <sys/taskqueue.h>
 
 #include <drm/drm_mm.h>
+#include "nvkm_sched.h"
 
 #define NVKM_PCI_VENDOR_NVIDIA	0x10de
 
@@ -401,6 +402,8 @@ struct nvkm_drm_exec_pending {
 	uint64_t push_va_lo;
 	uint64_t push_va_hi;
 	volatile u_int done;
+	struct nvkm_sched *sched;
+	struct dma_fence *sched_fence;
 };
 LIST_HEAD(nvkm_drm_exec_pending_list, nvkm_drm_exec_pending);
 
@@ -956,6 +959,9 @@ struct nvkm_softc {
 	uint64_t		sync_job_dep_cb_count;
 	uint64_t		sync_job_dep_queue_count;
 	uint64_t		sync_job_dep_queue_error_count;
+	uint64_t		sync_job_queue_request_count;
+	uint64_t		sync_job_queue_already_count;
+	uint64_t		sync_job_wait_requeue_count;
 	uint64_t		sync_job_dep_recheck_count;
 	uint64_t		sync_job_dep_recheck_fence_count;
 	uint64_t		sync_job_dep_recheck_signaled_count;
@@ -1528,9 +1534,12 @@ struct nvkm_softc {
 	uint64_t		unload_fail_count;
 	uint64_t		unload_busy_open_count;
 	uint64_t		unload_busy_mmap_count;
+	uint64_t		unload_busy_sched_count;
 	int			unload_last_open_count;
 	uint32_t		unload_last_file_count;
 	uint32_t		unload_last_mmap_count;
+	uint32_t		unload_last_sched_count;
+	u_int			sched_active_count;
 	/* Live deduped MGTDEVICE pager objects; each also holds one
 	 * device-busy reference (see nvkm_ttm_pager_ctor/_dtor). */
 	u_int			mmap_active_count;
