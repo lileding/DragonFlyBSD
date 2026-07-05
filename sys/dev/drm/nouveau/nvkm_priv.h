@@ -933,6 +933,7 @@ struct nvkm_softc {
 	uint64_t		vm_bind_resv_attach_pending_count;
 	uint64_t		exec_async_pending_count;
 	uint64_t		exec_async_complete_count;
+	uint64_t		exec_async_poll_complete_count;
 	uint64_t		exec_async_wait_count;
 	uint64_t		exec_async_wait_error_count;
 	uint64_t		exec_pending_signal_count;
@@ -955,6 +956,9 @@ struct nvkm_softc {
 	uint64_t		sync_job_dep_cb_count;
 	uint64_t		sync_job_dep_queue_count;
 	uint64_t		sync_job_dep_queue_error_count;
+	uint64_t		sync_job_dep_recheck_count;
+	uint64_t		sync_job_dep_recheck_fence_count;
+	uint64_t		sync_job_dep_recheck_signaled_count;
 	uint64_t		sync_job_ready_count;
 	uint64_t		sync_job_cancel_count;
 	uint64_t		sync_signal_count;

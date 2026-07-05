@@ -340,6 +340,8 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->exec_async_pending_count);
 	sbuf_printf(sb, "async_complete_count = %llu\n",
 	    (unsigned long long)sc->exec_async_complete_count);
+	sbuf_printf(sb, "async_poll_complete_count = %llu\n",
+	    (unsigned long long)sc->exec_async_poll_complete_count);
 	sbuf_printf(sb, "async_wait_count = %llu\n",
 	    (unsigned long long)sc->exec_async_wait_count);
 	sbuf_printf(sb, "async_wait_error_count = %llu\n",
@@ -443,6 +445,12 @@ nvkm_gsp_sysctl_state_summary(SYSCTL_HANDLER_ARGS)
 	    (unsigned long long)sc->sync_job_dep_queue_count);
 	sbuf_printf(sb, "job_dep_queue_error_count = %llu\n",
 	    (unsigned long long)sc->sync_job_dep_queue_error_count);
+	sbuf_printf(sb, "job_dep_recheck_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_recheck_count);
+	sbuf_printf(sb, "job_dep_recheck_fence_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_recheck_fence_count);
+	sbuf_printf(sb, "job_dep_recheck_signaled_count = %llu\n",
+	    (unsigned long long)sc->sync_job_dep_recheck_signaled_count);
 	sbuf_printf(sb, "job_ready_count = %llu\n",
 	    (unsigned long long)sc->sync_job_ready_count);
 	sbuf_printf(sb, "job_cancel_count = %llu\n",
