@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""Aggregate nvkm KMS completion evidence.
+"""Aggregate nvgpu KMS completion evidence.
 
 This script is intentionally read-only.  It consumes evidence already collected
 by kms_smoke.py and writes one machine-readable completion summary.
@@ -15,17 +15,17 @@ import shlex
 import subprocess
 
 
-MODULES = ("drm", "nvgsp_570", "nvkm")
+MODULES = ("drm", "nvgsp_570", "nvgpu")
 PREFLIGHT_LOAD_MODULE_MARKERS = (
     "sys/dev/drm/drm/drm.ko",
     "sys/dev/drm/nouveau/fw/nvgsp_570.ko",
-    "sys/dev/drm/nouveau/nvkm.ko",
+    "sys/dev/drm/nouveau/nvgpu.ko",
 )
 PREFLIGHT_STANDALONE_REPORT_MARKERS = (
     ("preflight", "kms_completion_preflight.py", "--output",
-     "/var/tmp/nvkm-kms-completion-preflight.json"),
+     "/var/tmp/nvgpu-kms-completion-preflight.json"),
     ("static audit", "kms_static_audit.py", "--output",
-     "/var/tmp/nvkm-kms-static-audit.json"),
+     "/var/tmp/nvgpu-kms-static-audit.json"),
     ("syncobj_transfer", "kms_smoke.py syncobj_transfer"),
     ("syncobj_pending_exec", "kms_smoke.py syncobj_pending_exec"),
     ("wayland_info", "kms_smoke.py wayland_info"),
@@ -34,8 +34,8 @@ PREFLIGHT_STANDALONE_REPORT_MARKERS = (
     ("xwayland", "kms_smoke.py xwayland"),
 )
 PREFLIGHT_COMPLETION_TEMPLATE_ARGS = (
-    "--static-audit /var/tmp/nvkm-kms-static-audit.json",
-    "--preflight /var/tmp/nvkm-kms-completion-preflight.json",
+    "--static-audit /var/tmp/nvgpu-kms-static-audit.json",
+    "--preflight /var/tmp/nvgpu-kms-completion-preflight.json",
     "--full-report <full-report-dir>",
     "--syncobj-transfer <syncobj-transfer-dir>",
     "--syncobj-pending-exec <syncobj-pending-exec-dir>",

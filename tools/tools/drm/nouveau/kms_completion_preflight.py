@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""Emit a read-only nvkm KMS completion preflight manifest."""
+"""Emit a read-only nvgpu KMS completion preflight manifest."""
 
 import argparse
 import datetime as dt
@@ -14,7 +14,7 @@ import subprocess
 MODULES = (
     ("drm", "sys/dev/drm/drm/drm.ko"),
     ("nvgsp_570", "sys/dev/drm/nouveau/fw/nvgsp_570.ko"),
-    ("nvkm", "sys/dev/drm/nouveau/nvkm.ko"),
+    ("nvgpu", "sys/dev/drm/nouveau/nvgpu.ko"),
 )
 
 COMMANDS = (
