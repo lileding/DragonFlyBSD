@@ -68,18 +68,7 @@ struct nvgpu_pci_device {
 	const struct nvgpu_chip_config *chip;
 };
 
-/*
- * nvgpu_chip_pci_lookup()
- *
- * Ownership:
- *   Returns a borrowed pointer to static driver-owned chip metadata.
- *
- * Lifetime:
- *   The returned pointer is valid for the module lifetime.
- *
- * Threading:
- *   Lock-free; the table is immutable after module load.
- */
+/* Return borrowed static chip metadata for device, or NULL.  Lock-free. */
 const struct nvgpu_pci_device *nvgpu_chip_pci_lookup(uint16_t device);
 
 #endif /* _NVGPU_CHIP_H_ */

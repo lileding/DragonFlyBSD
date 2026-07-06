@@ -37,8 +37,8 @@ LATEST = pathlib.Path("/var/tmp/nvgpu-kms-smoke.latest")
 DEFAULT_PREFIX = "/var/tmp/nvgpu-kms-smoke"
 SOURCE_TREE_MODULES = (
     ("drm", pathlib.Path("sys/dev/drm/drm/drm.ko")),
-    ("nvgsp_570", pathlib.Path("sys/dev/drm/nouveau/fw/nvgsp_570.ko")),
-    ("nvgpu", pathlib.Path("sys/dev/drm/nouveau/nvgpu.ko")),
+    ("nvgsp_570", pathlib.Path("sys/dev/drm/nvgpu/fw/nvgsp_570.ko")),
+    ("nvgpu", pathlib.Path("sys/dev/drm/nvgpu/nvgpu.ko")),
 )
 FULL_WAYLAND_PHASES = {
     "wayland",

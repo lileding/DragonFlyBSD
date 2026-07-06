@@ -115,6 +115,8 @@ static const struct nvgpu_pci_device nvgpu_pci_devices[] = {
 	{ 0, NULL, NULL }
 };
 
+/* Find immutable chip metadata for a PCI device ID. */
+/* Return borrowed static chip metadata for device, or NULL.  Lock-free. */
 const struct nvgpu_pci_device *
 nvgpu_chip_pci_lookup(uint16_t device)
 {

@@ -13,8 +13,8 @@ import subprocess
 
 MODULES = (
     ("drm", "sys/dev/drm/drm/drm.ko"),
-    ("nvgsp_570", "sys/dev/drm/nouveau/fw/nvgsp_570.ko"),
-    ("nvgpu", "sys/dev/drm/nouveau/nvgpu.ko"),
+    ("nvgsp_570", "sys/dev/drm/nvgpu/fw/nvgsp_570.ko"),
+    ("nvgpu", "sys/dev/drm/nvgpu/nvgpu.ko"),
 )
 
 COMMANDS = (
@@ -134,10 +134,10 @@ def command_paths() -> dict[str, dict]:
 
 
 def shell_commands(root: pathlib.Path) -> dict:
-    smoke = root / "tools/tools/drm/nouveau/kms_smoke.py"
-    preflight = root / "tools/tools/drm/nouveau/kms_completion_preflight.py"
-    static_audit = root / "tools/tools/drm/nouveau/kms_static_audit.py"
-    completion = root / "tools/tools/drm/nouveau/kms_completion_audit.py"
+    smoke = root / "tools/tools/drm/nvgpu/kms_smoke.py"
+    preflight = root / "tools/tools/drm/nvgpu/kms_completion_preflight.py"
+    static_audit = root / "tools/tools/drm/nvgpu/kms_static_audit.py"
+    completion = root / "tools/tools/drm/nvgpu/kms_completion_audit.py"
     return {
         "load_modules_after_reboot": [
             f"doas kldload {root / MODULES[0][1]}",
