@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""Collect a staged nvkm KMS runtime smoke-test report.
+"""Collect a staged nvgpu KMS runtime smoke-test report.
 
 The runner is intentionally split into phases so physical testing can pause
 between steps:
@@ -33,12 +33,12 @@ import sys
 import time
 
 
-LATEST = pathlib.Path("/var/tmp/nvkm-kms-smoke.latest")
-DEFAULT_PREFIX = "/var/tmp/nvkm-kms-smoke"
+LATEST = pathlib.Path("/var/tmp/nvgpu-kms-smoke.latest")
+DEFAULT_PREFIX = "/var/tmp/nvgpu-kms-smoke"
 SOURCE_TREE_MODULES = (
     ("drm", pathlib.Path("sys/dev/drm/drm/drm.ko")),
     ("nvgsp_570", pathlib.Path("sys/dev/drm/nouveau/fw/nvgsp_570.ko")),
-    ("nvkm", pathlib.Path("sys/dev/drm/nouveau/nvkm.ko")),
+    ("nvgpu", pathlib.Path("sys/dev/drm/nouveau/nvgpu.ko")),
 )
 FULL_WAYLAND_PHASES = {
     "wayland",

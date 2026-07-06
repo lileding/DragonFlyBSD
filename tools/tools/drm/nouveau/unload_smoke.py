@@ -1,13 +1,13 @@
 #!/usr/local/bin/python3
 # SPDX-License-Identifier: BSD-2-Clause
-"""nvkm kldunload gate smoke test (phases 1+2: negative tests only).
+"""nvgpu kldunload gate smoke test (phases 1+2: negative tests only).
 
 Verifies that unload is refused with busy semantics while DRM users exist,
 and that a refused unload does not damage the running driver:
 
-    1. nvkm must be loaded.
-    2. With a render-node fd held open, `kldunload nvkm` must fail,
-       nvkm must stay loaded, and dev.drm.X.unload_state counters must
+    1. nvgpu must be loaded.
+    2. With a render-node fd held open, `kldunload nvgpu` must fail,
+       nvgpu must stay loaded, and dev.drm.X.unload_state counters must
        not report a committed unload (unloading stays 0).
     3. mmap outliving its fd must also block unload: create a DUMB
        buffer on card0, mmap it, close the fd, and verify kldunload
@@ -16,13 +16,13 @@ and that a refused unload does not damage the running driver:
     4. After all references are gone, the nodes must still open.
 
 With --try-unload the tool finishes by attempting a REAL unload with no
-DRM users left (phase-3 acceptance): kldunload must succeed, nvkm must
+DRM users left (phase-3 acceptance): kldunload must succeed, nvgpu must
 disappear from kldstat, and the /dev/dri nodes must be gone.
 
 With --reload-loop N (phase-4 acceptance) it then runs N unload/reload
-cycles: each cycle unloads, kldloads the project-tree nvkm.ko again
+cycles: each cycle unloads, kldloads the project-tree nvgpu.ko again
 (drm.ko and nvgsp_570.ko stay loaded), and verifies the nodes come
-back and DUMB mmap works.  nvkm is left loaded after the last cycle.
+back and DUMB mmap works.  nvgpu is left loaded after the last cycle.
 
 Run from an SSH shell, not from inside an X11/Wayland session (a
 compositor holds its own DRM fds and would make the "close" step
@@ -58,9 +58,9 @@ def run(argv):
     return proc.returncode, proc.stdout.strip()
 
 
-def nvkm_loaded():
+def nvgpu_loaded():
     _, out = run(["kldstat"])
-    return re.search(r"\bnvkm\.ko\b", out) is not None
+    return re.search(r"\bnvgpu\.ko\b", out) is not None
 
 
 def read_unload_state():
@@ -104,9 +104,9 @@ def dumb_create_and_mmap(fd):
 def phase1_fd_blocks_unload():
     fd = os.open(RENDER_NODE, os.O_RDWR)
     try:
-        rc, out = run(["doas", "kldunload", "nvkm"])
+        rc, out = run(["doas", "kldunload", "nvgpu"])
         check("kldunload refused while fd open", rc != 0, out)
-        check("nvkm still loaded after refusal", nvkm_loaded())
+        check("nvgpu still loaded after refusal", nvgpu_loaded())
 
         state_busy = read_unload_state()
         check("gate did not commit unload",
@@ -130,9 +130,9 @@ def phase2_mmap_outlives_fd():
           state_mapped.get("mmap_active_count", -1) == baseline + 1,
           str(state_mapped))
 
-    rc, out = run(["doas", "kldunload", "nvkm"])
+    rc, out = run(["doas", "kldunload", "nvgpu"])
     check("kldunload refused while mmap alive", rc != 0, out)
-    check("nvkm still loaded after mmap refusal", nvkm_loaded())
+    check("nvgpu still loaded after mmap refusal", nvgpu_loaded())
     check("gate did not commit unload with mmap",
           read_unload_state().get("unloading", 1) == 0)
 
@@ -148,9 +148,9 @@ def phase2_mmap_outlives_fd():
 
 def phase3_real_unload(tag=""):
     """Attempt a real unload with no DRM users left (phase-3 gate)."""
-    rc, out = run(["doas", "kldunload", "nvkm"])
+    rc, out = run(["doas", "kldunload", "nvgpu"])
     check("kldunload succeeds with no users%s" % tag, rc == 0, out)
-    check("nvkm gone from kldstat%s" % tag, not nvkm_loaded())
+    check("nvgpu gone from kldstat%s" % tag, not nvgpu_loaded())
     check("render node removed after unload%s" % tag,
           not os.path.exists(RENDER_NODE))
     check("card node removed after unload%s" % tag,
@@ -162,14 +162,14 @@ def phase3_real_unload(tag=""):
 
 
 def phase4_reload_loop(cycles):
-    """Unload/reload N times (phase-4 gate); leaves nvkm loaded."""
+    """Unload/reload N times (phase-4 gate); leaves nvgpu loaded."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     src_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..",
                                             ".."))
-    nvkm_ko = os.path.join(src_root, "sys", "dev", "drm", "nouveau",
-                           "nvkm.ko")
-    if not check("project nvkm.ko found for reload", os.path.exists(nvkm_ko),
-                 nvkm_ko):
+    nvgpu_ko = os.path.join(src_root, "sys", "dev", "drm", "nouveau",
+                            "nvgpu.ko")
+    if not check("project nvgpu.ko found for reload", os.path.exists(nvgpu_ko),
+                 nvgpu_ko):
         return
 
     for i in range(1, cycles + 1):
@@ -180,9 +180,9 @@ def phase4_reload_loop(cycles):
         tail = "\n".join(out.splitlines()[-40:])
         check("WPR2 torn down%s" % tag, "torn down" in tail, tail[-300:])
 
-        rc, out = run(["doas", "kldload", nvkm_ko])
+        rc, out = run(["doas", "kldload", nvgpu_ko])
         check("kldload succeeds%s" % tag, rc == 0, out)
-        check("nvkm loaded%s" % tag, nvkm_loaded())
+        check("nvgpu loaded%s" % tag, nvgpu_loaded())
         check("nodes back%s" % tag,
               os.path.exists(RENDER_NODE) and os.path.exists(CARD_NODE))
 
@@ -209,7 +209,7 @@ def main():
         reload_cycles = int(sys.argv[idx + 1]) if idx + 1 < len(
             sys.argv) else 3
 
-    if not check("nvkm loaded before test", nvkm_loaded()):
+    if not check("nvgpu loaded before test", nvgpu_loaded()):
         return 1
     if not check("render node exists", os.path.exists(RENDER_NODE)):
         return 1

@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * PCI bus attachment for nvkm.
+ * Legacy PCI attach implementation for nvgpu.
  *
  * Phase 0.0: identify the GPU, map its BARs, and confirm MMIO works by
  * reading PMC_BOOT_0 (the chip identification register).
@@ -10,6 +10,7 @@
  */
 
 #include "nvkm_priv.h"
+#include "nvgpu_device.h"
 #include "nvkm_gsp_rm.h"
 #include "nvkm_gsp_vmm.h"
 #include <linux/dma-fence.h>
@@ -42,8 +43,8 @@ nvkm_pci_match(device_t dev)
 	return (id);
 }
 
-static int
-nvkm_pci_probe(device_t dev)
+int
+nvgpu_device_pci_probe(device_t dev)
 {
 	const struct nvkm_pci_device *id;
 
@@ -556,8 +557,8 @@ nvkm_gsp_on_init_done(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	return (0);
 }
 
-static int
-nvkm_pci_attach(device_t dev)
+int
+nvgpu_device_pci_attach(device_t dev)
 {
 	const struct nvkm_pci_device *id;
 	struct nvkm_softc *sc;
@@ -1073,8 +1074,8 @@ nvkm_pci_attach(device_t dev)
 	return (0);
 }
 
-static int
-nvkm_pci_detach(device_t dev)
+int
+nvgpu_device_pci_detach(device_t dev)
 {
 	/* device_get_softc returns the small drm_softc shim, not our
 	 * nvkm_softc. The real state lives in drm_device->dev_private. */
@@ -1239,35 +1240,3 @@ nvkm_pci_detach(device_t dev)
 	kfree(sc);
 	return (0);
 }
-
-static device_method_t nvkm_pci_methods[] = {
-	DEVMETHOD(device_probe,		nvkm_pci_probe),
-	DEVMETHOD(device_attach,	nvkm_pci_attach),
-	DEVMETHOD(device_detach,	nvkm_pci_detach),
-	DEVMETHOD_END
-};
-
-/*
- * driver_t.name must be "drm" to match the child device that vga_pci_attach()
- * pre-creates via device_add_child(dev, "drm", -1). This is DFly's convention
- * for GPU drivers attaching to vgapci — see amdgpu/i915/radeon, all of which
- * use the same driver name.
- */
-static driver_t nvkm_pci_driver = {
-	"drm",
-	nvkm_pci_methods,
-	sizeof(struct drm_softc),     /* amdgpu/i915 convention: drm core writes
-	                                 softc->drm_driver_data; real state in
-	                                 heap-alloc'd nvkm_softc */
-};
-
-static devclass_t nvkm_devclass;
-
-/*
- * Attach on the vgapci bus, not pci directly. DFly's vga_pci driver claims
- * any VGA-class PCI device and exposes it through a pre-allocated "drm"
- * child slot. GPU-specific drivers (amdgpu/i915/radeon/us) bind to that
- * child via the vgapci bus.
- */
-DRIVER_MODULE(nvkm, vgapci, nvkm_pci_driver, nvkm_devclass, NULL, NULL);
-MODULE_DEPEND(nvkm, drm, 1, 1, 1);
