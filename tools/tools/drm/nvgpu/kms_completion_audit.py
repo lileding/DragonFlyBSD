@@ -18,8 +18,8 @@ import subprocess
 MODULES = ("drm", "nvgsp_570", "nvgpu")
 PREFLIGHT_LOAD_MODULE_MARKERS = (
     "sys/dev/drm/drm/drm.ko",
-    "sys/dev/drm/nouveau/fw/nvgsp_570.ko",
-    "sys/dev/drm/nouveau/nvgpu.ko",
+    "sys/dev/drm/nvgpu/fw/nvgsp_570.ko",
+    "sys/dev/drm/nvgpu/nvgpu.ko",
 )
 PREFLIGHT_STANDALONE_REPORT_MARKERS = (
     ("preflight", "kms_completion_preflight.py", "--output",
@@ -572,20 +572,20 @@ WAYLAND_REPORT_REQUIRED_COMMAND_RCS = {
 STATIC_AUDIT_REQUIRED_FILES = (
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
-    "sys/dev/drm/nouveau/nvkm_drm_kms.c",
-    "sys/dev/drm/nouveau/nvkm_gsp_disp.c",
-    "sys/dev/drm/nouveau/core/object.c",
-    "sys/dev/drm/nouveau/nvkm_dispnv50_bridge.c",
-    "sys/dev/drm/nouveau/nvhw/drf.h",
-    "sys/dev/drm/nouveau/nvhw/class/clc57d.h",
-    "sys/dev/drm/nouveau/nvif/class.h",
-    "sys/dev/drm/nouveau/rm/rm.h",
-    "sys/dev/drm/nouveau/subdev/gsp.h",
-    "tools/tools/drm/nouveau/drmtest.c",
-    "tools/tools/drm/nouveau/kms_smoke.py",
-    "tools/tools/drm/nouveau/kms_completion_audit.py",
-    "tools/tools/drm/nouveau/kms_completion_preflight.py",
-    "tools/tools/drm/nouveau/kms_static_audit.py",
+    "sys/dev/drm/nvgpu/legacy/nvkm_drm_kms.c",
+    "sys/dev/drm/nvgpu/legacy/nvkm_gsp_disp.c",
+    "sys/dev/drm/nvgpu/legacy/core/object.c",
+    "sys/dev/drm/nvgpu/legacy/nvkm_dispnv50_bridge.c",
+    "sys/dev/drm/nvgpu/legacy/nvhw/drf.h",
+    "sys/dev/drm/nvgpu/legacy/nvhw/class/clc57d.h",
+    "sys/dev/drm/nvgpu/legacy/nvif/class.h",
+    "sys/dev/drm/nvgpu/legacy/rm/rm.h",
+    "sys/dev/drm/nvgpu/legacy/subdev/gsp.h",
+    "tools/tools/drm/nvgpu/drmtest.c",
+    "tools/tools/drm/nvgpu/kms_smoke.py",
+    "tools/tools/drm/nvgpu/kms_completion_audit.py",
+    "tools/tools/drm/nvgpu/kms_completion_preflight.py",
+    "tools/tools/drm/nvgpu/kms_static_audit.py",
 )
 
 

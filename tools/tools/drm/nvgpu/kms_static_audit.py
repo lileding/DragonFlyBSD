@@ -16,32 +16,32 @@ import subprocess
 
 
 TARGET_PATTERNS = (
-    "sys/dev/drm/nouveau/nvkm_drm_kms.c",
-    "sys/dev/drm/nouveau/nvkm_gsp_disp.c",
-    "sys/dev/drm/nouveau/nvkm_gsp_disp.h",
-    "sys/dev/drm/nouveau/nvkm_disp_tu102.c",
-    "sys/dev/drm/nouveau/core/*",
-    "sys/dev/drm/nouveau/dispnv50/*",
-    "sys/dev/drm/nouveau/engine/disp.h",
-    "sys/dev/drm/nouveau/engine/disp/*",
-    "sys/dev/drm/nouveau/nvhw/drf.h",
-    "sys/dev/drm/nouveau/nvhw/class/*",
-    "sys/dev/drm/nouveau/nvif/*",
-    "sys/dev/drm/nouveau/nvrm/*.h",
-    "sys/dev/drm/nouveau/rm/*.h",
-    "sys/dev/drm/nouveau/subdev/*.h",
-    "sys/dev/drm/nouveau/subdev/bios/*.h",
+    "sys/dev/drm/nvgpu/legacy/nvkm_drm_kms.c",
+    "sys/dev/drm/nvgpu/legacy/nvkm_gsp_disp.c",
+    "sys/dev/drm/nvgpu/legacy/nvkm_gsp_disp.h",
+    "sys/dev/drm/nvgpu/legacy/nvkm_disp_tu102.c",
+    "sys/dev/drm/nvgpu/legacy/core/*",
+    "sys/dev/drm/nvgpu/legacy/dispnv50/*",
+    "sys/dev/drm/nvgpu/legacy/engine/disp.h",
+    "sys/dev/drm/nvgpu/legacy/engine/disp/*",
+    "sys/dev/drm/nvgpu/legacy/nvhw/drf.h",
+    "sys/dev/drm/nvgpu/legacy/nvhw/class/*",
+    "sys/dev/drm/nvgpu/legacy/nvif/*",
+    "sys/dev/drm/nvgpu/legacy/nvrm/*.h",
+    "sys/dev/drm/nvgpu/legacy/rm/*.h",
+    "sys/dev/drm/nvgpu/legacy/subdev/*.h",
+    "sys/dev/drm/nvgpu/legacy/subdev/bios/*.h",
     "sys/dev/drm/drm_lease.c",
     "sys/dev/drm/include/drm/drm_lease.h",
-    "tools/tools/drm/nouveau/drmtest.c",
-    "tools/tools/drm/nouveau/kms_smoke.py",
-    "tools/tools/drm/nouveau/kms_completion_audit.py",
-    "tools/tools/drm/nouveau/kms_completion_preflight.py",
-    "tools/tools/drm/nouveau/kms_static_audit.py",
+    "tools/tools/drm/nvgpu/drmtest.c",
+    "tools/tools/drm/nvgpu/kms_smoke.py",
+    "tools/tools/drm/nvgpu/kms_completion_audit.py",
+    "tools/tools/drm/nvgpu/kms_completion_preflight.py",
+    "tools/tools/drm/nvgpu/kms_static_audit.py",
 )
 
 SOURCE_SUFFIXES = (".c", ".h", ".py")
-STATIC_AUDIT_PATH = "tools/tools/drm/nouveau/kms_static_audit.py"
+STATIC_AUDIT_PATH = "tools/tools/drm/nvgpu/kms_static_audit.py"
 
 ALLOWED_LINUX_INCLUDES = {
     "sys/dev/drm/drm_lease.c": {
@@ -50,14 +50,14 @@ ALLOWED_LINUX_INCLUDES = {
         "linux/slab.h",
         "linux/uaccess.h",
     },
-    "sys/dev/drm/nouveau/nvkm_dispnv50_bridge.c": {
+    "sys/dev/drm/nvgpu/legacy/nvkm_dispnv50_bridge.c": {
         "linux/math64.h",
     },
-    "sys/dev/drm/nouveau/nvkm_drm_kms.c": {
+    "sys/dev/drm/nvgpu/legacy/nvkm_drm_kms.c": {
         "linux/slab.h",
         "linux/workqueue.h",
     },
-    "sys/dev/drm/nouveau/nvif/os.h": {
+    "sys/dev/drm/nvgpu/legacy/nvif/os.h": {
         "linux/bitops.h",
         "linux/bug.h",
         "linux/device.h",
@@ -75,11 +75,11 @@ ALLOWED_LINUX_INCLUDES = {
         "linux/types.h",
         "linux/vmalloc.h",
     },
-    "sys/dev/drm/nouveau/nvif/timer.h": {
+    "sys/dev/drm/nvgpu/legacy/nvif/timer.h": {
         "linux/delay.h",
         "linux/ktime.h",
     },
-    "sys/dev/drm/nouveau/subdev/gsp.h": {
+    "sys/dev/drm/nvgpu/legacy/subdev/gsp.h": {
         "linux/err.h",
     },
 }
