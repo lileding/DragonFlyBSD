@@ -4,8 +4,7 @@
  * DRM file boundary for one userspace open of the nouveau-compatible ABI.
  *
  * This file will translate DRM open, postclose, and ioctl entry points into
- * nvgpu_proc and nvgpu_sched operations.  The active implementation still
- * lives in nvkm_drm.c until the refactor moves one entry point at a time.
+ * nvgpu_proc and nvgpu_sched operations once DRM registration is reattached.
  */
 
 #include "nvdrm_file.h"
