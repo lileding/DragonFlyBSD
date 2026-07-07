@@ -15,13 +15,16 @@
 #define NVGPU_CLASS_TURING_DMA_COPY_A		0x0000c5b5u
 #define NVGPU_CLASS_TURING_COMPUTE_A		0x0000c5c0u
 
-#define NVGPU_TU10X_COMMON_FIELDS \
+#define NVGPU_GSP_FW(chip, name) "nvidia/" chip "/gsp/" name "-570.144"
+#define NVGPU_ACR_FW(chip) "nvidia/" chip "/acr/bl"
+
+#define NVGPU_TU10X_COMMON_FIELDS(fw_chip) \
 	.card_type = NVGPU_CARD_TU100, \
-	.fw_booter_load = "nvidia/tu102/gsp/booter_load-570.144", \
-	.fw_booter_unload = "nvidia/tu102/gsp/booter_unload-570.144", \
-	.fw_acr_bl = "nvidia/tu102/acr/bl", \
-	.fw_gsp = "nvidia/tu102/gsp/gsp-570.144", \
-	.fw_bootloader = "nvidia/tu102/gsp/bootloader-570.144", \
+	.fw_booter_load = NVGPU_GSP_FW(fw_chip, "booter_load"), \
+	.fw_booter_unload = NVGPU_GSP_FW(fw_chip, "booter_unload"), \
+	.fw_acr_bl = NVGPU_ACR_FW(fw_chip), \
+	.fw_gsp = NVGPU_GSP_FW(fw_chip, "gsp"), \
+	.fw_bootloader = NVGPU_GSP_FW(fw_chip, "bootloader"), \
 	.fw_signature = ".fwsignature_tu10x", \
 	.sec2_base = NVGPU_TU10X_SEC2_BASE, \
 	.sec2_fbif = NVGPU_TU10X_SEC2_FBIF, \
@@ -50,7 +53,7 @@ static const struct nvgpu_chip_config nvgpu_chip_tu102 = {
 	.fallback_name = "NVIDIA TU102",
 	.chipset = 0x162,
 	.graph_units = NVGPU_GRAPH_UNITS(6, 34),
-	NVGPU_TU10X_COMMON_FIELDS,
+	NVGPU_TU10X_COMMON_FIELDS("tu102"),
 };
 
 static const struct nvgpu_chip_config nvgpu_chip_tu104 = {
@@ -59,7 +62,7 @@ static const struct nvgpu_chip_config nvgpu_chip_tu104 = {
 	.fallback_name = "NVIDIA TU104",
 	.chipset = 0x164,
 	.graph_units = NVGPU_GRAPH_UNITS(6, 24),
-	NVGPU_TU10X_COMMON_FIELDS,
+	NVGPU_TU10X_COMMON_FIELDS("tu104"),
 };
 
 static const struct nvgpu_chip_config nvgpu_chip_tu106 = {
@@ -68,7 +71,7 @@ static const struct nvgpu_chip_config nvgpu_chip_tu106 = {
 	.fallback_name = "NVIDIA TU106",
 	.chipset = 0x166,
 	.graph_units = NVGPU_GRAPH_UNITS(3, 18),
-	NVGPU_TU10X_COMMON_FIELDS,
+	NVGPU_TU10X_COMMON_FIELDS("tu106"),
 };
 
 static const struct nvgpu_pci_device nvgpu_pci_devices[] = {
