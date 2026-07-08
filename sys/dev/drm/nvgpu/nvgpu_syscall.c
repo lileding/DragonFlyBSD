@@ -10,6 +10,7 @@
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_info.h"
+#include "nvgpu_nvif.h"
 #include "nvgpu_vm.h"
 
 #include <sys/errno.h>
@@ -33,14 +34,11 @@ nvgpu_syscall_vm_init(struct nvgpu_proc *proc, struct drm_file *file __unused,
 	    req->kernel_managed_size));
 }
 
-/* Log NVIF until the real syscall implementation is moved in. */
 int
 nvgpu_syscall_nvif(struct nvgpu_proc *proc, struct drm_file *file __unused,
     void *data)
 {
-	nvgpu_log(NVGPU_LOG_DEBUG, "syscall nvif proc=%p data=%p\n",
-	    proc, data);
-	return (EOPNOTSUPP);
+	return (nvgpu_nvif_ioctl(proc, data));
 }
 
 int

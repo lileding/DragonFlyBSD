@@ -281,6 +281,14 @@ nvgpu_device_get_chip(struct nvgpu_device *gpu)
 	return (gpu->chip);
 }
 
+const char *
+nvgpu_device_get_name(struct nvgpu_device *gpu)
+{
+	if (gpu == NULL || gpu->pci_device == NULL)
+		return (NULL);
+	return (gpu->pci_device->name);
+}
+
 struct resource *
 nvgpu_device_get_bar(struct nvgpu_device *gpu, unsigned int bar)
 {
