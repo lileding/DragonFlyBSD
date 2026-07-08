@@ -11,6 +11,7 @@
 #include <drm/drmP.h>
 
 #include <sys/kernel.h>
+#include <sys/malloc.h>
 #include <sys/thread.h>
 
 static MALLOC_DEFINE(M_NVGPU_UNLOAD, "nvgpu_unload", "nvgpu unload gate");
@@ -23,6 +24,7 @@ struct nvgpu_unload_state {
 	uint32_t last_file_count;
 	uint32_t last_mmap_count;
 	uint32_t last_sched_count;
+	uint32_t last_drm_ref_count;
 	uint32_t busy_count;
 };
 
@@ -34,9 +36,7 @@ nvgpu_unload_init(struct nvgpu_device *gpu)
 {
 	struct nvgpu_unload_state *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
-	if (state == NULL)
-		return (ENOMEM);
+	state = kmalloc(sizeof(*state), M_NVGPU_UNLOAD, M_WAITOK | M_ZERO);
 	lwkt_token_init(&state->token, "nvgpuunl");
 	nvgpu_device_set_unload_state(gpu, state);
 	nvgpu_log(NVGPU_LOG_DEBUG, "unload init\n");
@@ -56,7 +56,7 @@ nvgpu_unload_fini(struct nvgpu_device *gpu)
 		nvgpu_log(NVGPU_LOG_INFO,
 		    "unload fini with %u DRM refs\n", state->drm_refs);
 	nvgpu_device_set_unload_state(gpu, NULL);
-	kfree(state);
+	_kfree(state, M_NVGPU_UNLOAD);
 }
 
 /* Hold unload against one DRM open lifetime unless unload has started. */
@@ -75,7 +75,7 @@ nvgpu_unload_hold_by_drm(struct nvgpu_device *gpu)
 	} else {
 		state->drm_refs++;
 		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "DRM hold count=%u\n", state->drm_refs);
+		    "DRM hold gpu=%p state=%p count=%u\n", gpu, state, state->drm_refs);
 	}
 	lwkt_reltoken(&state->token);
 	return (error);
@@ -96,7 +96,7 @@ nvgpu_unload_release_by_drm(struct nvgpu_device *gpu)
 	} else {
 		state->drm_refs--;
 		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "DRM release count=%u\n", state->drm_refs);
+		    "DRM release gpu=%p state=%p count=%u\n", gpu, state, state->drm_refs);
 	}
 	lwkt_reltoken(&state->token);
 }
@@ -137,12 +137,13 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 
 	lwkt_gettoken(&state->token);
 	if (ddev->open_count != 0 || file_count != 0 || mmap_count != 0 ||
-	    sched_count != 0) {
+	    sched_count != 0 || state->drm_refs != 0) {
 		state->busy_count++;
 		state->last_open_count = ddev->open_count;
 		state->last_file_count = file_count;
 		state->last_mmap_count = mmap_count;
 		state->last_sched_count = sched_count;
+		state->last_drm_ref_count = state->drm_refs;
 		error = EBUSY;
 	} else {
 		state->unloading = true;
@@ -150,11 +151,17 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 	lwkt_reltoken(&state->token);
 	mutex_unlock(&drm_global_mutex);
 
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "unload gate observed: gpu=%p state=%p open=%u files=%u mmap=%u sched=%u drm_refs=%u\n",
+	    gpu, state, ddev->open_count, file_count, mmap_count, sched_count,
+	    state->drm_refs);
+
 	if (error != 0) {
 		nvgpu_log(NVGPU_LOG_INFO,
-		    "unload busy: open=%u files=%u mmap=%u sched=%u\n",
+		    "unload busy: open=%u files=%u mmap=%u sched=%u drm_refs=%u\n",
 		    state->last_open_count, state->last_file_count,
-		    state->last_mmap_count, state->last_sched_count);
+		    state->last_mmap_count, state->last_sched_count,
+		    state->last_drm_ref_count);
 	} else {
 		nvgpu_log(NVGPU_LOG_DEBUG, "unload admitted\n");
 	}
