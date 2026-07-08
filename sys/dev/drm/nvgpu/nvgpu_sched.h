@@ -12,8 +12,6 @@
 
 struct nvgpu_device;
 struct nvgpu_proc;
-struct nvgpu_sched;
-struct nvgpu_future;
 
 struct nvgpu_future_result {
 	bool ready;
@@ -26,19 +24,12 @@ struct nvgpu_future {
 	    struct nvgpu_future *future);
 };
 
-TAILQ_HEAD(nvgpu_future_queue, nvgpu_future);
-
-struct nvgpu_sched {
-	struct nvgpu_future_queue active_futures;
-};
-
-/* Initialize scheduler state embedded in one nvgpu_proc. */
-void nvgpu_sched_init(struct nvgpu_sched *sched);
+TAILQ_HEAD(nvgpu_task_queue, nvgpu_future);
 
 /* Poll every active future once from the owning proc LWKT. */
 void nvgpu_sched_run(struct nvgpu_proc *proc);
 
-/* Post an event to scheduler state.  Must be MPSAFE. */
+/* Wake scheduler work from external GPU events.  The proc fanout is not wired yet. */
 void nvgpu_sched_post_event(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_SCHED_H_ */
