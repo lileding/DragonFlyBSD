@@ -18,7 +18,7 @@ static MALLOC_DEFINE(M_NVGPU_UNLOAD, "nvgpu_unload", "nvgpu unload gate");
 struct nvgpu_unload_state {
 	struct lwkt_token token;
 	bool unloading;
-	uint32_t open_count;
+	uint32_t drm_refs;
 	uint32_t last_open_count;
 	uint32_t last_file_count;
 	uint32_t last_mmap_count;
@@ -49,61 +49,61 @@ nvgpu_unload_fini(struct nvgpu_device *gpu)
 {
 	struct nvgpu_unload_state *state;
 
-	state = nvgpu_device_unload_state(gpu);
+	state = nvgpu_device_get_unload_state(gpu);
 	if (state == NULL)
 		return;
-	if (state->open_count != 0)
+	if (state->drm_refs != 0)
 		nvgpu_log(NVGPU_LOG_INFO,
-		    "unload fini with %u open files\n", state->open_count);
+		    "unload fini with %u DRM refs\n", state->drm_refs);
 	nvgpu_device_set_unload_state(gpu, NULL);
 	kfree(state);
 }
 
-/* Admit one DRM file open unless unload has started. */
+/* Hold unload against one DRM open lifetime unless unload has started. */
 int
-nvgpu_unload_file_open(struct nvgpu_device *gpu)
+nvgpu_unload_hold_by_drm(struct nvgpu_device *gpu)
 {
 	struct nvgpu_unload_state *state;
 	int error = 0;
 
-	state = nvgpu_device_unload_state(gpu);
+	state = nvgpu_device_get_unload_state(gpu);
 	if (state == NULL)
 		return (ENXIO);
 	lwkt_gettoken(&state->token);
 	if (state->unloading) {
 		error = EBUSY;
 	} else {
-		state->open_count++;
+		state->drm_refs++;
 		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "file open count=%u\n", state->open_count);
+		    "DRM hold count=%u\n", state->drm_refs);
 	}
 	lwkt_reltoken(&state->token);
 	return (error);
 }
 
-/* Drop one DRM file reference previously admitted by nvgpu_unload_file_open(). */
+/* Release one DRM unload hold previously acquired by nvgpu_unload_hold_by_drm(). */
 void
-nvgpu_unload_file_close(struct nvgpu_device *gpu)
+nvgpu_unload_release_by_drm(struct nvgpu_device *gpu)
 {
 	struct nvgpu_unload_state *state;
 
-	state = nvgpu_device_unload_state(gpu);
+	state = nvgpu_device_get_unload_state(gpu);
 	if (state == NULL)
 		return;
 	lwkt_gettoken(&state->token);
-	if (state->open_count == 0) {
-		nvgpu_log(NVGPU_LOG_INFO, "file close without open\n");
+	if (state->drm_refs == 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "DRM release without hold\n");
 	} else {
-		state->open_count--;
+		state->drm_refs--;
 		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "file close count=%u\n", state->open_count);
+		    "DRM release count=%u\n", state->drm_refs);
 	}
 	lwkt_reltoken(&state->token);
 }
 
-/* Start unload admission after proving the DRM core has no live users. */
+/* Try to start unload after proving the DRM core has no live users. */
 int
-nvgpu_unload_begin(struct nvgpu_device *gpu)
+nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 {
 	struct nvgpu_unload_state *state;
 	struct drm_device *ddev;
@@ -113,10 +113,10 @@ nvgpu_unload_begin(struct nvgpu_device *gpu)
 	uint32_t sched_count = 0;
 	int error = 0;
 
-	state = nvgpu_device_unload_state(gpu);
+	state = nvgpu_device_get_unload_state(gpu);
 	if (state == NULL)
 		return (0);
-	ddev = nvgpu_device_drm_dev(gpu);
+	ddev = nvgpu_device_get_drm_dev(gpu);
 	if (ddev == NULL) {
 		lwkt_gettoken(&state->token);
 		state->unloading = true;

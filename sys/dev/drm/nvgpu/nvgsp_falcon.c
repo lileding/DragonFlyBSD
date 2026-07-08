@@ -15,7 +15,7 @@
 #define NVGSP_FALCON_WAIT_STEP_US	10
 
 void
-nvgsp_falcon_core_init(struct nvgsp_falcon *flcn, struct nvgsp_state *sc,
+nvgsp_falcon_init_core(struct nvgsp_falcon *flcn, struct nvgsp_state *sc,
     const char *name, uint32_t addr, uint32_t addr2, uint32_t fbif)
 {
 	flcn->sc = sc;
@@ -34,7 +34,7 @@ nvgsp_falcon_has_riscv(struct nvgsp_falcon *flcn)
 }
 
 bool
-nvgsp_falcon_riscv_active(struct nvgsp_falcon *flcn)
+nvgsp_falcon_is_riscv_active(struct nvgsp_falcon *flcn)
 {
 	/*
 	 * Per nouveau falcon/tu102.c, the RISC-V "active" indicator on
@@ -156,7 +156,7 @@ nvgsp_falcon_disable_ctx_req(struct nvgsp_falcon *flcn)
  * been set by the caller; AINCW makes each IMEMD write advance OFFS.
  */
 static void
-nvgsp_falcon_imem_wr_block(struct nvgsp_falcon *flcn, uint8_t port,
+nvgsp_falcon_write_imem_block(struct nvgsp_falcon *flcn, uint8_t port,
     const uint8_t *src, uint32_t bytes, uint16_t tag)
 {
 	uint32_t i;
@@ -201,7 +201,7 @@ nvgsp_falcon_load_imem(struct nvgsp_falcon *flcn, const void *data,
 	while (remaining > 0) {
 		block_bytes = remaining > NVGSP_FLCN_IMEM_BLKSIZE ?
 		    NVGSP_FLCN_IMEM_BLKSIZE : remaining;
-		nvgsp_falcon_imem_wr_block(flcn, port, src, block_bytes, tag);
+		nvgsp_falcon_write_imem_block(flcn, port, src, block_bytes, tag);
 		src += block_bytes;
 		remaining -= block_bytes;
 		tag++;
@@ -245,7 +245,7 @@ nvgsp_falcon_load_dmem(struct nvgsp_falcon *flcn, const void *data,
 static MALLOC_DEFINE(M_NVGSP_FALCON, "nvgsp_falcon", "nvgsp Falcon state");
 
 int
-nvgsp_falcon_state_init(struct nvgsp_state *gsp)
+nvgsp_falcon_init_state(struct nvgsp_state *gsp)
 {
 	struct nvgsp_falcon *sec2;
 	struct nvgsp_falcon *gsp_falcon;
@@ -254,7 +254,7 @@ nvgsp_falcon_state_init(struct nvgsp_state *gsp)
 	int error;
 
 	sec2 = kmalloc(sizeof(*sec2), M_NVGSP_FALCON, M_WAITOK | M_ZERO);
-	nvgsp_falcon_core_init(sec2, gsp, "sec2", gsp->chip->sec2_base, 0,
+	nvgsp_falcon_init_core(sec2, gsp, "sec2", gsp->chip->sec2_base, 0,
 	    gsp->chip->sec2_fbif);
 	gsp->sec2 = sec2;
 
@@ -276,7 +276,7 @@ nvgsp_falcon_state_init(struct nvgsp_state *gsp)
 
 	gsp_falcon = kmalloc(sizeof(*gsp_falcon), M_NVGSP_FALCON,
 	    M_WAITOK | M_ZERO);
-	nvgsp_falcon_core_init(gsp_falcon, gsp, "gsp",
+	nvgsp_falcon_init_core(gsp_falcon, gsp, "gsp",
 	    gsp->chip->gsp_base, gsp->chip->gsp_riscv, gsp->chip->gsp_fbif);
 	gsp->gsp = gsp_falcon;
 	nvgpu_log(NVGPU_LOG_DEBUG,
@@ -286,7 +286,7 @@ nvgsp_falcon_state_init(struct nvgsp_state *gsp)
 }
 
 void
-nvgsp_falcon_state_fini(struct nvgsp_state *gsp)
+nvgsp_falcon_fini_state(struct nvgsp_state *gsp)
 {
 	if (gsp->gsp != NULL) {
 		kfree(gsp->gsp, M_NVGSP_FALCON);

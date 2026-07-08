@@ -15,7 +15,7 @@ nvgsp_state_get(struct nvgpu_device *gpu)
 {
 	if (gpu == NULL)
 		return (NULL);
-	return (nvgpu_device_gsp(gpu));
+	return (nvgpu_device_get_gsp(gpu));
 }
 
 /* Allocate CPU-side GSP state.  The GPU owns the returned object until state_fini. */
@@ -24,13 +24,13 @@ nvgsp_state_init(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp;
 
-	if (nvgpu_device_gsp(gpu) != NULL)
+	if (nvgpu_device_get_gsp(gpu) != NULL)
 		return (0);
 
 	gsp = kmalloc(sizeof(*gsp), M_NVGSP_STATE, M_WAITOK | M_ZERO);
 	gsp->gpu = gpu;
-	gsp->dev = nvgpu_device_dev(gpu);
-	gsp->chip = nvgpu_device_chip(gpu);
+	gsp->dev = nvgpu_device_get_newbus_dev(gpu);
+	gsp->chip = nvgpu_device_get_chip(gpu);
 	lwkt_token_init(&gsp->gsp_tok, "nvgsp");
 	LIST_INIT(&gsp->gsp_pending);
 	nvgpu_device_set_gsp(gpu, gsp);

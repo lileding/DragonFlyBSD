@@ -121,6 +121,6 @@ nvgsp_static_query_info(struct nvgsp_state *sc)
 		    (unsigned long long)best_size);
 	}
 
-	nvgsp_rpc_done(sc, r);
+	nvgsp_rpc_complete(sc, r);
 	return (0);
 }

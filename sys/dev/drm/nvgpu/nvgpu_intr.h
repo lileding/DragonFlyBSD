@@ -18,6 +18,6 @@ void nvgpu_intr_disable(struct nvgpu_device *gpu);
 /* Release interrupt state after delivery has been disabled. */
 void nvgpu_intr_fini(struct nvgpu_device *gpu);
 /* Top-level interrupt entry.  Must stay short and hand slow work to subsystem workers. */
-void nvgpu_intr_handler(struct nvgpu_device *gpu);
+void nvgpu_intr_handle(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_INTR_H_ */

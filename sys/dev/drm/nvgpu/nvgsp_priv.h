@@ -540,16 +540,16 @@ nvgsp_le24(const uint8_t *p)
 #define nvgsp_infof(dev, fmt, ...) nvgpu_log(NVGPU_LOG_INFO, fmt, ##__VA_ARGS__)
 
 struct nvgsp_state *nvgsp_state_get(struct nvgpu_device *gpu);
-int nvgsp_dmamem_alloc(struct nvgsp_state *gsp, bus_size_t size,
+int nvgsp_dma_alloc_dmamem(struct nvgsp_state *gsp, bus_size_t size,
     bus_size_t alignment, struct nvgsp_dmamem *out);
-void nvgsp_dmamem_free(struct nvgsp_state *gsp, struct nvgsp_dmamem *mem);
+void nvgsp_dma_free_dmamem(struct nvgsp_state *gsp, struct nvgsp_dmamem *mem);
 
 int nvgsp_bios_init(struct nvgsp_state *gsp);
 void nvgsp_bios_fini(struct nvgsp_state *gsp);
 int nvgsp_fw_init(struct nvgsp_state *gsp);
 void nvgsp_fw_fini(struct nvgsp_state *gsp);
-int nvgsp_falcon_state_init(struct nvgsp_state *gsp);
-void nvgsp_falcon_state_fini(struct nvgsp_state *gsp);
+int nvgsp_falcon_init_state(struct nvgsp_state *gsp);
+void nvgsp_falcon_fini_state(struct nvgsp_state *gsp);
 int nvgsp_fwsec_run_cmd(struct nvgsp_state *gsp, uint32_t init_cmd,
     uint64_t frts_addr, uint32_t frts_size);
 int nvgsp_meta_init(struct nvgsp_state *gsp);
@@ -566,55 +566,55 @@ void nvgsp_booter_release(struct nvgsp_state *gsp);
 void nvgsp_shutdown_backend(struct nvgsp_state *gsp);
 int nvgsp_static_query_info(struct nvgsp_state *gsp);
 
-void *nvgsp_rm_alloc_get(struct nvgsp_object *parent, uint32_t handle,
+void *nvgsp_rm_get_alloc(struct nvgsp_object *parent, uint32_t handle,
     uint32_t oclass, uint32_t params_size, struct nvgsp_object *new_obj);
-int nvgsp_rm_alloc_wr(struct nvgsp_object *obj, void *params);
-int nvgsp_rm_alloc_rd(struct nvgsp_object *obj, void **params, uint32_t repc);
-void nvgsp_rm_alloc_done(struct nvgsp_object *obj, void *params);
-void *nvgsp_rm_ctrl_get(struct nvgsp_object *obj, uint32_t cmd,
+int nvgsp_rm_write_alloc(struct nvgsp_object *obj, void *params);
+int nvgsp_rm_read_alloc(struct nvgsp_object *obj, void **params, uint32_t repc);
+void nvgsp_rm_complete_alloc(struct nvgsp_object *obj, void *params);
+void *nvgsp_rm_get_ctrl(struct nvgsp_object *obj, uint32_t cmd,
     uint32_t params_size);
-int nvgsp_rm_ctrl_rd(struct nvgsp_object *obj, void **params, uint32_t repc);
-int nvgsp_rm_ctrl_wr(struct nvgsp_object *obj, void *params);
-void nvgsp_rm_ctrl_done(struct nvgsp_object *obj, void *params);
+int nvgsp_rm_read_ctrl(struct nvgsp_object *obj, void **params, uint32_t repc);
+int nvgsp_rm_write_ctrl(struct nvgsp_object *obj, void *params);
+void nvgsp_rm_complete_ctrl(struct nvgsp_object *obj, void *params);
 int nvgsp_rm_free(struct nvgsp_object *obj);
-int nvgsp_client_ctor(struct nvgsp_state *gsp, uint32_t handle,
+int nvgsp_rm_construct_client(struct nvgsp_state *gsp, uint32_t handle,
     struct nvgsp_client *client);
-int nvgsp_client_dtor(struct nvgsp_client *client);
-int nvgsp_device_ctor(struct nvgsp_client *client, struct nvgsp_device *device);
-int nvgsp_device_dtor(struct nvgsp_device *device);
-int nvgsp_vaspace_ctor(struct nvgsp_device *device, struct nvgsp_object *vaspace);
+int nvgsp_rm_destroy_client(struct nvgsp_client *client);
+int nvgsp_rm_construct_device(struct nvgsp_client *client, struct nvgsp_device *device);
+int nvgsp_rm_destroy_device(struct nvgsp_device *device);
+int nvgsp_rm_construct_vaspace(struct nvgsp_device *device, struct nvgsp_object *vaspace);
 uint64_t nvgsp_vram_alloc_kind(struct nvgsp_state *gsp, uint64_t size,
     uint64_t align, enum nvgsp_vram_kind kind, void *owner);
 void nvgsp_vram_free_kind(struct nvgsp_state *gsp, uint64_t paddr,
     enum nvgsp_vram_kind kind, void *owner);
 uint32_t nvgsp_vram_free_owner(struct nvgsp_state *gsp, void *owner);
-int nvgsp_chid_alloc(struct nvgsp_state *gsp);
-void nvgsp_chid_free(struct nvgsp_state *gsp, int chid);
-void nvgsp_bar1_flush(struct nvgsp_state *gsp);
-void nvgsp_bar1_invalidate(struct nvgsp_state *gsp);
-void nvgsp_bar1_wr32(struct nvgsp_state *gsp, uint64_t gva, uint32_t val);
-uint32_t nvgsp_bar1_rd32(struct nvgsp_state *gsp, uint64_t gva);
-void nvgsp_bar1_wr64(struct nvgsp_state *gsp, uint64_t gva, uint64_t val);
-uint64_t nvgsp_bar1_rd64(struct nvgsp_state *gsp, uint64_t gva);
-void nvgsp_bar1_set_region64(struct nvgsp_state *gsp, uint64_t gva,
+int nvgsp_channel_alloc_chid(struct nvgsp_state *gsp);
+void nvgsp_channel_free_chid(struct nvgsp_state *gsp, int chid);
+void nvgsp_bar_flush_bar1(struct nvgsp_state *gsp);
+void nvgsp_bar_invalidate_bar1(struct nvgsp_state *gsp);
+void nvgsp_bar_wr32_bar1(struct nvgsp_state *gsp, uint64_t gva, uint32_t val);
+uint32_t nvgsp_bar_rd32_bar1(struct nvgsp_state *gsp, uint64_t gva);
+void nvgsp_bar_wr64_bar1(struct nvgsp_state *gsp, uint64_t gva, uint64_t val);
+uint64_t nvgsp_bar_rd64_bar1(struct nvgsp_state *gsp, uint64_t gva);
+void nvgsp_bar_set_bar1_region64(struct nvgsp_state *gsp, uint64_t gva,
     uint64_t val, uint32_t count);
-void nvgsp_bar1_write_linear_region64(struct nvgsp_state *gsp, uint64_t gva,
+void nvgsp_bar_write_bar1_linear_region64(struct nvgsp_state *gsp, uint64_t gva,
     uint64_t first, uint64_t step, uint32_t count);
-int nvgsp_bar1_alloc_page_kind(struct nvgsp_state *gsp,
+int nvgsp_bar_alloc_bar1_page_kind(struct nvgsp_state *gsp,
     struct nvgsp_bar1_page *page, enum nvgsp_vram_kind kind, void *owner);
-void nvgsp_bar1_free_page(struct nvgsp_state *gsp, struct nvgsp_bar1_page *page);
-int nvgsp_bar1_map_existing(struct nvgsp_state *gsp, uint64_t paddr,
+void nvgsp_bar_free_bar1_page(struct nvgsp_state *gsp, struct nvgsp_bar1_page *page);
+int nvgsp_bar_map_bar1_existing(struct nvgsp_state *gsp, uint64_t paddr,
     uint64_t *pgva);
-void nvgsp_bar1_unmap_existing(struct nvgsp_state *gsp, uint64_t gva);
-int nvgsp_bar1_map_existing_range(struct nvgsp_state *gsp, uint64_t paddr,
+void nvgsp_bar_unmap_bar1_existing(struct nvgsp_state *gsp, uint64_t gva);
+int nvgsp_bar_map_bar1_existing_range(struct nvgsp_state *gsp, uint64_t paddr,
     uint64_t size, uint64_t *pgva);
-void nvgsp_bar1_unmap_existing_range(struct nvgsp_state *gsp, uint64_t gva,
+void nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *gsp, uint64_t gva,
     uint64_t size);
-int nvgsp_bar2_map_vram(struct nvgsp_state *gsp, uint64_t gva, uint64_t paddr);
-void nvgsp_bar2_flush(struct nvgsp_state *gsp);
-void nvgsp_bar2_invalidate(struct nvgsp_state *gsp);
-void nvgsp_bar2_wr32(struct nvgsp_state *gsp, uint64_t gva, uint32_t val);
-uint32_t nvgsp_bar2_rd32(struct nvgsp_state *gsp, uint64_t gva);
+int nvgsp_bar_map_bar2_vram(struct nvgsp_state *gsp, uint64_t gva, uint64_t paddr);
+void nvgsp_bar_flush_bar2(struct nvgsp_state *gsp);
+void nvgsp_bar_invalidate_bar2(struct nvgsp_state *gsp);
+void nvgsp_bar_wr32_bar2(struct nvgsp_state *gsp, uint64_t gva, uint32_t val);
+uint32_t nvgsp_bar_rd32_bar2(struct nvgsp_state *gsp, uint64_t gva);
 int nvgsp_vmm_map_sysmem_noflush(struct nvgsp_vmm *vmm, uint64_t va,
     vm_paddr_t paddr, uint64_t size);
 int nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm, uint64_t va,
@@ -622,18 +622,18 @@ int nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm, uint64_t va,
 int nvgsp_vmm_unmap(struct nvgsp_vmm *vmm, uint64_t va, uint64_t size);
 void nvgsp_vmm_flush(struct nvgsp_vmm *vmm);
 
-void nvgsp_msg_ntfy_init(struct nvgsp_state *gsp);
-int nvgsp_msg_ntfy_add(struct nvgsp_state *gsp, uint32_t fn,
+void nvgsp_rpc_init_msg_ntfy(struct nvgsp_state *gsp);
+int nvgsp_rpc_add_msg_ntfy(struct nvgsp_state *gsp, uint32_t fn,
     nvgsp_msg_ntfy_func handler, void *priv);
-int nvgsp_msg_dispatch_all(struct nvgsp_state *gsp);
-int nvgsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc);
+int nvgsp_rpc_dispatch_all_msgs(struct nvgsp_state *gsp);
+int nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc);
 void *nvgsp_rpc_get(struct nvgsp_state *gsp, uint32_t fn, uint32_t argc);
 void *nvgsp_rpc_push(struct nvgsp_state *gsp, void *params, int policy,
     uint32_t repc);
-void nvgsp_rpc_done(struct nvgsp_state *gsp, void *params);
+void nvgsp_rpc_complete(struct nvgsp_state *gsp, void *params);
 int nvgsp_rpc_set_system_info(struct nvgsp_state *gsp);
 int nvgsp_rpc_set_registry(struct nvgsp_state *gsp);
-int nvgsp_rpc_unloading_guest_driver_state(struct nvgsp_state *gsp);
+int nvgsp_rpc_get_unloading_guest_driver_state(struct nvgsp_state *gsp);
 
 enum {
 	NVGSP_RPC_REPLY_NOWAIT = 0,

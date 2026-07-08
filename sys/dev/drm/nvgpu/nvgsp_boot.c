@@ -81,7 +81,7 @@ nvgsp_boot_release_resources(struct nvgsp_state *gsp)
 	nvgsp_libos_release(gsp);
 	nvgsp_boot_release_image(gsp);
 	nvgsp_meta_fini(gsp);
-	nvgsp_falcon_state_fini(gsp);
+	nvgsp_falcon_fini_state(gsp);
 	nvgsp_fw_fini(gsp);
 	nvgsp_bios_fini(gsp);
 }
@@ -103,7 +103,7 @@ nvgsp_boot(struct nvgpu_device *gpu)
 	error = nvgsp_fw_init(gsp);
 	if (error != 0)
 		goto fail;
-	error = nvgsp_falcon_state_init(gsp);
+	error = nvgsp_falcon_init_state(gsp);
 	if (error != 0)
 		goto fail;
 	error = nvgsp_fwsec_run_cmd(gsp, NVGSP_FWSEC_CMD_FRTS, 0, 0);

@@ -46,7 +46,7 @@ nvgsp_meta_init(struct nvgsp_state *sc)
 	if (sc->wpr_meta.kva != NULL)
 		return (0);
 
-	error = nvgsp_dmamem_alloc(sc, NVGSP_FW_WPR_META_SIZE, 4096,
+	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_FW_WPR_META_SIZE, 4096,
 	    &sc->wpr_meta);
 	if (error != 0) {
 		nvgsp_debugf(sc->dev,
@@ -77,5 +77,5 @@ void
 nvgsp_meta_fini(struct nvgsp_state *sc)
 {
 	if (sc->wpr_meta.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->wpr_meta);
+		nvgsp_dma_free_dmamem(sc, &sc->wpr_meta);
 }

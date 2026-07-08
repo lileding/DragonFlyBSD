@@ -69,6 +69,6 @@ struct nvgpu_pci_device {
 };
 
 /* Return borrowed static chip metadata for device, or NULL.  Lock-free. */
-const struct nvgpu_pci_device *nvgpu_chip_pci_lookup(uint16_t device);
+const struct nvgpu_pci_device *nvgpu_chip_lookup_pci(uint16_t device);
 
 #endif /* _NVGPU_CHIP_H_ */

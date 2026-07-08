@@ -12,7 +12,7 @@
 /* Dispatch one EXEC completion interrupt event. */
 /* Handle one EXEC completion event.  gpu is borrowed; wake scheduler state, do not free jobs inline. */
 void
-nvgpu_exec_intr_complete(struct nvgpu_device *gpu)
+nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu)
 {
 	nvgpu_log(NVGPU_LOG_DEBUG, "exec intr complete\n");
 }

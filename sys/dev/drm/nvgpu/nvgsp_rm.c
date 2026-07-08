@@ -87,13 +87,13 @@ struct nvgsp_vaspace_alloc_params {
 #define NV_VASPACE_ALLOCATION_INDEX_GPU_NEW	0u
 
 static uint32_t
-nvgsp_client_child_handle(struct nvgsp_client *client, uint32_t base)
+nvgsp_rm_get_client_child_handle(struct nvgsp_client *client, uint32_t base)
 {
 	return (base | (client->object.handle & 0x00000fffu));
 }
 
 void *
-nvgsp_rm_alloc_get(struct nvgsp_object *parent, uint32_t handle,
+nvgsp_rm_get_alloc(struct nvgsp_object *parent, uint32_t handle,
     uint32_t oclass, uint32_t params_size, struct nvgsp_object *new_obj)
 {
 	struct nvgsp_client *client;
@@ -141,24 +141,24 @@ nvgsp_rm_alloc_get(struct nvgsp_object *parent, uint32_t handle,
 }
 
 static struct nvgsp_rm_alloc_rpc *
-nvgsp_rm_alloc_hdr(void *params)
+nvgsp_rm_get_alloc_hdr(void *params)
 {
 	return ((struct nvgsp_rm_alloc_rpc *)((uint8_t *)params -
 	    offsetof(struct nvgsp_rm_alloc_rpc, params)));
 }
 
 static struct nvgsp_rm_control_rpc *
-nvgsp_rm_ctrl_hdr(void *params)
+nvgsp_rm_get_ctrl_hdr(void *params)
 {
 	return ((struct nvgsp_rm_control_rpc *)((uint8_t *)params -
 	    offsetof(struct nvgsp_rm_control_rpc, params)));
 }
 
 int
-nvgsp_rm_alloc_wr(struct nvgsp_object *obj, void *params)
+nvgsp_rm_write_alloc(struct nvgsp_object *obj, void *params)
 {
 	struct nvgsp_state *gsp = obj->client->gsp;
-	struct nvgsp_rm_alloc_rpc *rpc = nvgsp_rm_alloc_hdr(params);
+	struct nvgsp_rm_alloc_rpc *rpc = nvgsp_rm_get_alloc_hdr(params);
 	struct nvgsp_rm_alloc_rpc *rep;
 	uint32_t hclass = rpc->hClass;
 	uint32_t hobject = rpc->hObject;
@@ -179,7 +179,7 @@ nvgsp_rm_alloc_wr(struct nvgsp_object *obj, void *params)
 		    hclass, hobject, hparent, rep->status);
 		error = EIO;
 	}
-	nvgsp_rpc_done(gsp, rep);
+	nvgsp_rpc_complete(gsp, rep);
 	nvgpu_log(NVGPU_LOG_DEBUG,
 	    "rm alloc done cls=0x%x obj=0x%x parent=0x%x error=%d\n",
 	    hclass, hobject, hparent, error);
@@ -187,10 +187,10 @@ nvgsp_rm_alloc_wr(struct nvgsp_object *obj, void *params)
 }
 
 int
-nvgsp_rm_alloc_rd(struct nvgsp_object *obj, void **params, uint32_t repc)
+nvgsp_rm_read_alloc(struct nvgsp_object *obj, void **params, uint32_t repc)
 {
 	struct nvgsp_state *gsp = obj->client->gsp;
-	struct nvgsp_rm_alloc_rpc *rpc = nvgsp_rm_alloc_hdr(*params);
+	struct nvgsp_rm_alloc_rpc *rpc = nvgsp_rm_get_alloc_hdr(*params);
 	struct nvgsp_rm_alloc_rpc *rep;
 	int error = 0;
 
@@ -204,16 +204,16 @@ nvgsp_rm_alloc_rd(struct nvgsp_object *obj, void **params, uint32_t repc)
 	if (repc != 0)
 		*params = rep->params;
 	else {
-		nvgsp_rpc_done(gsp, rep);
+		nvgsp_rpc_complete(gsp, rep);
 		*params = NULL;
 	}
 	return (error);
 }
 
 void
-nvgsp_rm_alloc_done(struct nvgsp_object *obj, void *params)
+nvgsp_rm_complete_alloc(struct nvgsp_object *obj, void *params)
 {
-	nvgsp_rpc_done(obj->client->gsp, nvgsp_rm_alloc_hdr(params));
+	nvgsp_rpc_complete(obj->client->gsp, nvgsp_rm_get_alloc_hdr(params));
 }
 
 int
@@ -235,7 +235,7 @@ nvgsp_rm_free(struct nvgsp_object *obj)
 }
 
 void *
-nvgsp_rm_ctrl_get(struct nvgsp_object *obj, uint32_t cmd, uint32_t params_size)
+nvgsp_rm_get_ctrl(struct nvgsp_object *obj, uint32_t cmd, uint32_t params_size)
 {
 	struct nvgsp_rm_control_rpc *rpc;
 
@@ -253,10 +253,10 @@ nvgsp_rm_ctrl_get(struct nvgsp_object *obj, uint32_t cmd, uint32_t params_size)
 }
 
 int
-nvgsp_rm_ctrl_rd(struct nvgsp_object *obj, void **params, uint32_t repc)
+nvgsp_rm_read_ctrl(struct nvgsp_object *obj, void **params, uint32_t repc)
 {
 	struct nvgsp_state *gsp = obj->client->gsp;
-	struct nvgsp_rm_control_rpc *rpc = nvgsp_rm_ctrl_hdr(*params);
+	struct nvgsp_rm_control_rpc *rpc = nvgsp_rm_get_ctrl_hdr(*params);
 	struct nvgsp_rm_control_rpc *rep;
 	uint32_t hclient = rpc->hClient;
 	uint32_t hobject = rpc->hObject;
@@ -287,27 +287,27 @@ nvgsp_rm_ctrl_rd(struct nvgsp_object *obj, void **params, uint32_t repc)
 	if (repc != 0)
 		*params = rep->params;
 	else {
-		nvgsp_rpc_done(gsp, rep);
+		nvgsp_rpc_complete(gsp, rep);
 		*params = NULL;
 	}
 	return (error);
 }
 
 int
-nvgsp_rm_ctrl_wr(struct nvgsp_object *obj, void *params)
+nvgsp_rm_write_ctrl(struct nvgsp_object *obj, void *params)
 {
 	void *reply = params;
-	return (nvgsp_rm_ctrl_rd(obj, &reply, 0));
+	return (nvgsp_rm_read_ctrl(obj, &reply, 0));
 }
 
 void
-nvgsp_rm_ctrl_done(struct nvgsp_object *obj, void *params)
+nvgsp_rm_complete_ctrl(struct nvgsp_object *obj, void *params)
 {
-	nvgsp_rpc_done(obj->client->gsp, nvgsp_rm_ctrl_hdr(params));
+	nvgsp_rpc_complete(obj->client->gsp, nvgsp_rm_get_ctrl_hdr(params));
 }
 
 int
-nvgsp_client_ctor(struct nvgsp_state *gsp, uint32_t handle, struct nvgsp_client *client)
+nvgsp_rm_construct_client(struct nvgsp_state *gsp, uint32_t handle, struct nvgsp_client *client)
 {
 	struct nvgsp_root_alloc_params *args;
 	int error;
@@ -317,7 +317,7 @@ nvgsp_client_ctor(struct nvgsp_state *gsp, uint32_t handle, struct nvgsp_client 
 	client->object.client = client;
 	client->object.handle = handle;
 
-	args = nvgsp_rm_alloc_get(&client->object, handle, NV01_ROOT,
+	args = nvgsp_rm_get_alloc(&client->object, handle, NV01_ROOT,
 	    sizeof(*args), &client->object);
 	if (args == NULL)
 		return (ENOMEM);
@@ -325,45 +325,45 @@ nvgsp_client_ctor(struct nvgsp_state *gsp, uint32_t handle, struct nvgsp_client 
 	args->processID = (uint32_t)~0u;
 	strncpy(args->processName, "dfly-nvgpu", sizeof(args->processName));
 	args->pOsPidInfo = 0;
-	error = nvgsp_rm_alloc_wr(&client->object, args);
+	error = nvgsp_rm_write_alloc(&client->object, args);
 	if (error != 0)
 		memset(client, 0, sizeof(*client));
 	return (error);
 }
 
 int
-nvgsp_client_dtor(struct nvgsp_client *client)
+nvgsp_rm_destroy_client(struct nvgsp_client *client)
 {
 	return (nvgsp_rm_free(&client->object));
 }
 
 int
-nvgsp_device_ctor(struct nvgsp_client *client, struct nvgsp_device *device)
+nvgsp_rm_construct_device(struct nvgsp_client *client, struct nvgsp_device *device)
 {
 	struct nvgsp_device_alloc_params *dargs;
 	struct nvgsp_subdevice_alloc_params *sargs;
 	int error;
 
 	memset(device, 0, sizeof(*device));
-	dargs = nvgsp_rm_alloc_get(&client->object,
-	    nvgsp_client_child_handle(client, NVGSP_RM_DEVICE), NV01_DEVICE_0,
+	dargs = nvgsp_rm_get_alloc(&client->object,
+	    nvgsp_rm_get_client_child_handle(client, NVGSP_RM_DEVICE), NV01_DEVICE_0,
 	    sizeof(*dargs), &device->object);
 	if (dargs == NULL)
 		return (ENOMEM);
 	dargs->hClientShare = client->object.handle;
-	error = nvgsp_rm_alloc_wr(&device->object, dargs);
+	error = nvgsp_rm_write_alloc(&device->object, dargs);
 	if (error != 0)
 		return (error);
 
-	sargs = nvgsp_rm_alloc_get(&device->object,
-	    nvgsp_client_child_handle(client, NVGSP_RM_SUBDEVICE), NV20_SUBDEVICE_0,
+	sargs = nvgsp_rm_get_alloc(&device->object,
+	    nvgsp_rm_get_client_child_handle(client, NVGSP_RM_SUBDEVICE), NV20_SUBDEVICE_0,
 	    sizeof(*sargs), &device->subdevice);
 	if (sargs == NULL) {
 		nvgsp_rm_free(&device->object);
 		return (ENOMEM);
 	}
 	sargs->subDeviceId = 0;
-	error = nvgsp_rm_alloc_wr(&device->subdevice, sargs);
+	error = nvgsp_rm_write_alloc(&device->subdevice, sargs);
 	if (error != 0) {
 		nvgsp_rm_free(&device->object);
 		return (error);
@@ -372,7 +372,7 @@ nvgsp_device_ctor(struct nvgsp_client *client, struct nvgsp_device *device)
 }
 
 int
-nvgsp_device_dtor(struct nvgsp_device *device)
+nvgsp_rm_destroy_device(struct nvgsp_device *device)
 {
 	nvgsp_rm_free(&device->subdevice);
 	nvgsp_rm_free(&device->object);
@@ -380,26 +380,26 @@ nvgsp_device_dtor(struct nvgsp_device *device)
 }
 
 int
-nvgsp_vaspace_ctor(struct nvgsp_device *device, struct nvgsp_object *vaspace)
+nvgsp_rm_construct_vaspace(struct nvgsp_device *device, struct nvgsp_object *vaspace)
 {
 	struct nvgsp_vaspace_alloc_params *args;
 	int error;
 
 	memset(vaspace, 0, sizeof(*vaspace));
-	args = nvgsp_rm_alloc_get(&device->object,
-	    nvgsp_client_child_handle(device->object.client, NVGSP_RM_VASPACE),
+	args = nvgsp_rm_get_alloc(&device->object,
+	    nvgsp_rm_get_client_child_handle(device->object.client, NVGSP_RM_VASPACE),
 	    FERMI_VASPACE_A, sizeof(*args), vaspace);
 	if (args == NULL)
 		return (ENOMEM);
 	args->index = NV_VASPACE_ALLOCATION_INDEX_GPU_NEW;
-	error = nvgsp_rm_alloc_wr(vaspace, args);
+	error = nvgsp_rm_write_alloc(vaspace, args);
 	if (error != 0)
 		memset(vaspace, 0, sizeof(*vaspace));
 	return (error);
 }
 
 int
-nvgsp_rm_client_create(struct nvgpu_device *gpu)
+nvgsp_rm_create_client(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
@@ -407,21 +407,21 @@ nvgsp_rm_client_create(struct nvgpu_device *gpu)
 		return (ENXIO);
 	if (gsp->kernel_vmm == NULL)
 		return (ENXIO);
-	return (nvgsp_client_ctor(gsp, 0xc1d00001u, &gsp->kernel_vmm->client));
+	return (nvgsp_rm_construct_client(gsp, 0xc1d00001u, &gsp->kernel_vmm->client));
 }
 
 int
-nvgsp_rm_device_create(struct nvgpu_device *gpu)
+nvgsp_rm_create_device(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp == NULL || gsp->kernel_vmm == NULL)
 		return (ENXIO);
-	return (nvgsp_device_ctor(&gsp->kernel_vmm->client, &gsp->kernel_vmm->device));
+	return (nvgsp_rm_construct_device(&gsp->kernel_vmm->client, &gsp->kernel_vmm->device));
 }
 
 int
-nvgsp_rm_subdevice_create(struct nvgpu_device *gpu)
+nvgsp_rm_create_subdevice(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
@@ -441,12 +441,12 @@ nvgsp_rm_create_usermode_object(struct nvgpu_device *gpu)
 	if (gsp == NULL || gsp->kernel_vmm == NULL)
 		return (ENXIO);
 	vmm = gsp->kernel_vmm;
-	args = nvgsp_rm_alloc_get(&vmm->device.subdevice,
-	    nvgsp_client_child_handle(&vmm->client, NVGSP_RM_USERMODE),
+	args = nvgsp_rm_get_alloc(&vmm->device.subdevice,
+	    nvgsp_rm_get_client_child_handle(&vmm->client, NVGSP_RM_USERMODE),
 	    TURING_USERMODE_A, 0, &vmm->usermode);
 	if (args == NULL)
 		return (ENOMEM);
-	error = nvgsp_rm_alloc_wr(&vmm->usermode, args);
+	error = nvgsp_rm_write_alloc(&vmm->usermode, args);
 	if (error == 0 && nvgpu_device_rd32(gpu, 0x00bb0000) == 0)
 		nvgpu_device_wr32(gpu, 0x00bb0000, TURING_USERMODE_A);
 	return (error);

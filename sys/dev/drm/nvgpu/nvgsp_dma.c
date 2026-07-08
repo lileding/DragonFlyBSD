@@ -26,7 +26,7 @@ _nvgsp_dmamem_cb(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 }
 
 int
-nvgsp_dmamem_alloc(struct nvgsp_state *sc, bus_size_t size,
+nvgsp_dma_alloc_dmamem(struct nvgsp_state *sc, bus_size_t size,
     bus_size_t alignment, struct nvgsp_dmamem *out)
 {
 	void *kva;
@@ -69,7 +69,7 @@ nvgsp_dmamem_alloc(struct nvgsp_state *sc, bus_size_t size,
 }
 
 void
-nvgsp_dmamem_free(struct nvgsp_state *sc __unused, struct nvgsp_dmamem *mem)
+nvgsp_dma_free_dmamem(struct nvgsp_state *sc __unused, struct nvgsp_dmamem *mem)
 {
 	if (mem->kva == NULL)
 		return;

@@ -126,7 +126,7 @@ struct nvgsp_libos_region {
 #define NVGSP_LIBOS_LOC_SYSMEM		1u
 
 static uint64_t
-nvgsp_libos_id8(const char *name)
+nvgsp_libos_get_id8(const char *name)
 {
 	uint64_t id = 0;
 	int i;
@@ -142,7 +142,7 @@ nvgsp_libos_id8(const char *name)
  * uses these to MMU-map the buffer through libos.
  */
 static void
-nvgsp_libos_pte_array(uint64_t *ptes, uint64_t paddr, uint32_t size)
+nvgsp_libos_get_pte_array(uint64_t *ptes, uint64_t paddr, uint32_t size)
 {
 	uint32_t i, npages = (size + NVGSP_PAGE_SIZE - 1) >>
 	    NVGSP_PAGE_SHIFT;
@@ -173,7 +173,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	    NVGSP_PAGE_SHIFT;
 	ptes_size = roundup(ptes_nr * sizeof(uint64_t), NVGSP_PAGE_SIZE);
 
-	error = nvgsp_dmamem_alloc(sc,
+	error = nvgsp_dma_alloc_dmamem(sc,
 	    ptes_size + NVGSP_CMDQ_SIZE + NVGSP_MSGQ_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_shm);
 	if (error != 0) {
@@ -187,7 +187,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	sc->gsp_shm_msgq_off  = ptes_size + NVGSP_CMDQ_SIZE;
 
 	/* Fill PTE array at offset 0. */
-	nvgsp_libos_pte_array((uint64_t *)sc->gsp_shm.kva,
+	nvgsp_libos_get_pte_array((uint64_t *)sc->gsp_shm.kva,
 	    sc->gsp_shm.paddr,
 	    ptes_size + NVGSP_CMDQ_SIZE + NVGSP_MSGQ_SIZE);
 
@@ -225,7 +225,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	    sc->gsp_shm_cmdq_off, sc->gsp_shm_msgq_off);
 
 	/* 2. RMARGS — 4 KiB sysmem holding GSP_ARGUMENTS_CACHED. */
-	error = nvgsp_dmamem_alloc(sc, NVGSP_RMARGS_SIZE,
+	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_RMARGS_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_rmargs);
 	if (error != 0) {
 		nvgsp_debugf(sc->dev,
@@ -244,27 +244,27 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	rma->bDmemStack = 1;
 
 	/* 3. Log buffers (64 KiB each). First u64 = "put" pointer = 0. */
-	error = nvgsp_dmamem_alloc(sc, NVGSP_LOG_BUF_SIZE,
+	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_LOG_BUF_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_loginit);
 	if (error != 0) goto err_rmargs;
 	memset(sc->gsp_loginit.kva, 0, NVGSP_LOG_BUF_SIZE);
-	nvgsp_libos_pte_array(
+	nvgsp_libos_get_pte_array(
 	    (uint64_t *)((uint8_t *)sc->gsp_loginit.kva + sizeof(uint64_t)),
 	    sc->gsp_loginit.paddr, NVGSP_LOG_BUF_SIZE);
 
-	error = nvgsp_dmamem_alloc(sc, NVGSP_LOG_BUF_SIZE,
+	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_LOG_BUF_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_logintr);
 	if (error != 0) goto err_loginit;
 	memset(sc->gsp_logintr.kva, 0, NVGSP_LOG_BUF_SIZE);
-	nvgsp_libos_pte_array(
+	nvgsp_libos_get_pte_array(
 	    (uint64_t *)((uint8_t *)sc->gsp_logintr.kva + sizeof(uint64_t)),
 	    sc->gsp_logintr.paddr, NVGSP_LOG_BUF_SIZE);
 
-	error = nvgsp_dmamem_alloc(sc, NVGSP_LOG_BUF_SIZE,
+	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_LOG_BUF_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_logrm);
 	if (error != 0) goto err_logintr;
 	memset(sc->gsp_logrm.kva, 0, NVGSP_LOG_BUF_SIZE);
-	nvgsp_libos_pte_array(
+	nvgsp_libos_get_pte_array(
 	    (uint64_t *)((uint8_t *)sc->gsp_logrm.kva + sizeof(uint64_t)),
 	    sc->gsp_logrm.paddr, NVGSP_LOG_BUF_SIZE);
 
@@ -274,32 +274,32 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	 *    id8 tag at startup.
 	 */
 	if (sc->gsp_libos.kva == NULL) {
-		error = nvgsp_dmamem_alloc(sc, NVGSP_LIBOS_SIZE,
+		error = nvgsp_dma_alloc_dmamem(sc, NVGSP_LIBOS_SIZE,
 		    NVGSP_PAGE_SIZE, &sc->gsp_libos);
 		if (error != 0) goto err_logrm;
 	}
 	args = (struct nvgsp_libos_region *)sc->gsp_libos.kva;
 	memset(args, 0, NVGSP_LIBOS_SIZE);
 
-	args[0].id8  = nvgsp_libos_id8("LOGINIT");
+	args[0].id8  = nvgsp_libos_get_id8("LOGINIT");
 	args[0].pa   = sc->gsp_loginit.paddr;
 	args[0].size = NVGSP_LOG_BUF_SIZE;
 	args[0].kind = NVGSP_LIBOS_KIND_CONTIGUOUS;
 	args[0].loc  = NVGSP_LIBOS_LOC_SYSMEM;
 
-	args[1].id8  = nvgsp_libos_id8("LOGINTR");
+	args[1].id8  = nvgsp_libos_get_id8("LOGINTR");
 	args[1].pa   = sc->gsp_logintr.paddr;
 	args[1].size = NVGSP_LOG_BUF_SIZE;
 	args[1].kind = NVGSP_LIBOS_KIND_CONTIGUOUS;
 	args[1].loc  = NVGSP_LIBOS_LOC_SYSMEM;
 
-	args[2].id8  = nvgsp_libos_id8("LOGRM");
+	args[2].id8  = nvgsp_libos_get_id8("LOGRM");
 	args[2].pa   = sc->gsp_logrm.paddr;
 	args[2].size = NVGSP_LOG_BUF_SIZE;
 	args[2].kind = NVGSP_LIBOS_KIND_CONTIGUOUS;
 	args[2].loc  = NVGSP_LIBOS_LOC_SYSMEM;
 
-	args[3].id8  = nvgsp_libos_id8("RMARGS");
+	args[3].id8  = nvgsp_libos_get_id8("RMARGS");
 	args[3].pa   = sc->gsp_rmargs.paddr;
 	args[3].size = NVGSP_RMARGS_SIZE;
 	args[3].kind = NVGSP_LIBOS_KIND_CONTIGUOUS;
@@ -320,24 +320,24 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	return (0);
 
 err_logrm:
-	nvgsp_dmamem_free(sc, &sc->gsp_logrm);
+	nvgsp_dma_free_dmamem(sc, &sc->gsp_logrm);
 err_logintr:
-	nvgsp_dmamem_free(sc, &sc->gsp_logintr);
+	nvgsp_dma_free_dmamem(sc, &sc->gsp_logintr);
 err_loginit:
-	nvgsp_dmamem_free(sc, &sc->gsp_loginit);
+	nvgsp_dma_free_dmamem(sc, &sc->gsp_loginit);
 err_rmargs:
-	nvgsp_dmamem_free(sc, &sc->gsp_rmargs);
+	nvgsp_dma_free_dmamem(sc, &sc->gsp_rmargs);
 err_shm:
-	nvgsp_dmamem_free(sc, &sc->gsp_shm);
+	nvgsp_dma_free_dmamem(sc, &sc->gsp_shm);
 	return (error);
 }
 
 void
 nvgsp_libos_release(struct nvgsp_state *sc)
 {
-	if (sc->gsp_logrm.kva   != NULL) nvgsp_dmamem_free(sc, &sc->gsp_logrm);
-	if (sc->gsp_logintr.kva != NULL) nvgsp_dmamem_free(sc, &sc->gsp_logintr);
-	if (sc->gsp_loginit.kva != NULL) nvgsp_dmamem_free(sc, &sc->gsp_loginit);
-	if (sc->gsp_rmargs.kva  != NULL) nvgsp_dmamem_free(sc, &sc->gsp_rmargs);
-	if (sc->gsp_shm.kva     != NULL) nvgsp_dmamem_free(sc, &sc->gsp_shm);
+	if (sc->gsp_logrm.kva   != NULL) nvgsp_dma_free_dmamem(sc, &sc->gsp_logrm);
+	if (sc->gsp_logintr.kva != NULL) nvgsp_dma_free_dmamem(sc, &sc->gsp_logintr);
+	if (sc->gsp_loginit.kva != NULL) nvgsp_dma_free_dmamem(sc, &sc->gsp_loginit);
+	if (sc->gsp_rmargs.kva  != NULL) nvgsp_dma_free_dmamem(sc, &sc->gsp_rmargs);
+	if (sc->gsp_shm.kva     != NULL) nvgsp_dma_free_dmamem(sc, &sc->gsp_shm);
 }

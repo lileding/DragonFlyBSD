@@ -215,7 +215,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	/* A previous run (booter_load at attach) may still own the staging
 	 * buffer; this run replaces it. */
 	if (sc->booter_dma.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->booter_dma);
+		nvgsp_dma_free_dmamem(sc, &sc->booter_dma);
 
 	/*
 	 * 1. Stage the booter's data section in our own buffer so we can
@@ -225,7 +225,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	 * fw->boot == NULL. We are not using sc->booter_dma for DMA; it
 	 * is just our editable copy of the signed image.
 	 */
-	error = nvgsp_dmamem_alloc(sc, bi->data_size, 4096, &sc->booter_dma);
+	error = nvgsp_dma_alloc_dmamem(sc, bi->data_size, 4096, &sc->booter_dma);
 	if (error != 0) {
 		nvgsp_debugf(sc->dev, "booter: dma alloc failed (%d)\n", error);
 		return (error);
@@ -399,7 +399,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	return (error);
 
 out_free:
-	nvgsp_dmamem_free(sc, &sc->booter_dma);
+	nvgsp_dma_free_dmamem(sc, &sc->booter_dma);
 	return (error);
 }
 
@@ -407,7 +407,7 @@ void
 nvgsp_booter_release(struct nvgsp_state *sc)
 {
 	if (sc->booter_dma.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->booter_dma);
+		nvgsp_dma_free_dmamem(sc, &sc->booter_dma);
 }
 
 #define NVGSP_WPR2_ADDR_LO	0x1fa824
@@ -428,7 +428,7 @@ nvgsp_shutdown_backend(struct nvgsp_state *sc)
 	/* 1. Ask GSP-RM to shut down (reply is polled from the msgq; no
 	 * IRQ or drain thread required). */
 	lwkt_gettoken(&sc->gsp_tok);
-	err = nvgsp_rpc_unloading_guest_driver_state(sc);
+	err = nvgsp_rpc_get_unloading_guest_driver_state(sc);
 	lwkt_reltoken(&sc->gsp_tok);
 	if (err != 0)
 		nvgsp_infof(sc->dev,

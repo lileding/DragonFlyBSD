@@ -13,11 +13,11 @@ struct nvgpu_device;
 int nvgpu_unload_init(struct nvgpu_device *gpu);
 /* Release unload admission state after DRM is unpublished and all users are gone. */
 void nvgpu_unload_fini(struct nvgpu_device *gpu);
-/* Admit one DRM file open unless unload has started. */
-int nvgpu_unload_file_open(struct nvgpu_device *gpu);
-/* Drop one DRM file reference previously admitted by nvgpu_unload_file_open(). */
-void nvgpu_unload_file_close(struct nvgpu_device *gpu);
-/* Start unload admission after proving the DRM core has no live users. */
-int nvgpu_unload_begin(struct nvgpu_device *gpu);
+/* Hold unload against one DRM open lifetime unless unload has started. */
+int nvgpu_unload_hold_by_drm(struct nvgpu_device *gpu);
+/* Release one DRM unload hold previously acquired by nvgpu_unload_hold_by_drm(). */
+void nvgpu_unload_release_by_drm(struct nvgpu_device *gpu);
+/* Try to start unload after proving the DRM core has no live users. */
+int nvgpu_unload_try_begin(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_UNLOAD_H_ */
