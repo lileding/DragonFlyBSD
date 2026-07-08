@@ -160,3 +160,18 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 	}
 	return (error);
 }
+
+/* Cancel unload admission when detach is interrupted before teardown starts. */
+void
+nvgpu_unload_abort(struct nvgpu_device *gpu)
+{
+	struct nvgpu_unload_state *state;
+
+	state = nvgpu_device_get_unload_state(gpu);
+	if (state == NULL)
+		return;
+	lwkt_gettoken(&state->token);
+	state->unloading = false;
+	lwkt_reltoken(&state->token);
+	nvgpu_log(NVGPU_LOG_DEBUG, "unload aborted\n");
+}

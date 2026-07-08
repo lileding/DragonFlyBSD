@@ -29,11 +29,15 @@
 #include <sys/kthread.h>
 #include <sys/module.h>
 #include <sys/rman.h>
+#include <sys/thread.h>
 
 #define NVGPU_PMC_BOOT_0	0x00000000u
 
 enum nvgpu_boot_phase {
-	NVGPU_BOOT_NONE = 0,
+	NVGPU_BOOT_BEGIN = 0,
+	NVGPU_BOOT_BARS,
+	NVGPU_BOOT_UNLOAD,
+	NVGPU_BOOT_THREADED,
 	NVGPU_BOOT_STATE,
 	NVGPU_BOOT_RPC,
 	NVGPU_BOOT_EVENT,
@@ -48,7 +52,12 @@ enum nvgpu_boot_phase {
 	NVGPU_BOOT_INTR_INIT,
 	NVGPU_BOOT_INTR_ENABLED,
 	NVGPU_BOOT_DRM,
+	NVGPU_BOOT_COMPLETE,
 };
+
+#define NVGPU_BOOT_THREAD_ACTIVE(gpu) \
+	((gpu)->boot_phase >= NVGPU_BOOT_THREADED && \
+	 (gpu)->boot_phase < NVGPU_BOOT_COMPLETE)
 
 /*
  * Physical GPU root.  Owned by PCI attach and borrowed by DRM, GSP, display,
@@ -61,10 +70,10 @@ struct nvgpu_device {
 	int bar_rid[NVGPU_NUM_BARS];
 	struct resource *bar_res[NVGPU_NUM_BARS];
 	struct thread *boot_td;
+	struct lwkt_token boot_token;
 	bool boot_stop_requested;
-	bool boot_done;
 	int boot_result;
-	enum nvgpu_boot_phase boot_phase;
+	uint32_t boot_phase;
 	uint32_t boot0;
 	struct nvgsp_state *gsp;
 	void *intr;
@@ -92,12 +101,10 @@ static void nvgpu_device_store_newbus(device_t dev, struct nvgpu_device *gpu);
 static int nvgpu_device_alloc_bars(struct nvgpu_device *gpu);
 static void nvgpu_device_release_bars(struct nvgpu_device *gpu);
 static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
-static void nvgpu_device_stop_boot(struct nvgpu_device *gpu);
 static void nvgpu_device_run_boot(void *arg);
 static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
 static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
-static void nvgpu_device_complete_boot(struct nvgpu_device *gpu);
-static int nvgpu_device_stop(struct nvgpu_device *gpu);
+static void nvgpu_device_teardown(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
 
 /* Handle module load and unload notifications. */
@@ -348,32 +355,13 @@ nvgpu_device_start_boot(struct nvgpu_device *gpu)
 {
 	int error;
 
-	gpu->boot_stop_requested = false;
-	gpu->boot_done = false;
-	gpu->boot_result = 0;
-	gpu->boot_phase = NVGPU_BOOT_NONE;
 	error = kthread_create(nvgpu_device_run_boot, gpu, &gpu->boot_td,
 	    "nvgpu-boot");
-	if (error != 0) {
+	if (error == 0)
+		gpu->boot_phase = NVGPU_BOOT_THREADED;
+	else
 		gpu->boot_td = NULL;
-		gpu->boot_done = true;
-		gpu->boot_result = error;
-	}
 	return (error);
-}
-
-/* Request boot LWKT stop and wait for its exit. */
-static void
-nvgpu_device_stop_boot(struct nvgpu_device *gpu)
-{
-	if (gpu->boot_td == NULL)
-		return;
-
-	gpu->boot_stop_requested = true;
-	wakeup(&gpu->boot_stop_requested);
-	while (!gpu->boot_done)
-		tsleep(&gpu->boot_done, 0, "nvgpubt", hz);
-	gpu->boot_td = NULL;
 }
 
 /* Run the device boot sequence inside the boot LWKT. */
@@ -383,10 +371,25 @@ nvgpu_device_run_boot(void *arg)
 	struct nvgpu_device *gpu = arg;
 	int error;
 
+	lwkt_gettoken(&gpu->boot_token);
+	if (gpu->boot_stop_requested) {
+		error = EINTR;
+		goto finish_locked;
+	}
+	lwkt_reltoken(&gpu->boot_token);
+
 	error = nvgpu_device_run_boot_sequence(gpu);
+
+	lwkt_gettoken(&gpu->boot_token);
+finish_locked:
 	gpu->boot_result = error;
-	gpu->boot_done = true;
-	wakeup(&gpu->boot_done);
+	if (error != 0)
+		nvgpu_device_teardown(gpu);
+	else
+		gpu->boot_phase = NVGPU_BOOT_COMPLETE;
+	if (gpu->boot_stop_requested)
+		wakeup(&gpu->boot_phase);
+	lwkt_reltoken(&gpu->boot_token);
 	kthread_exit();
 }
 
@@ -394,9 +397,6 @@ nvgpu_device_run_boot(void *arg)
 static int
 nvgpu_device_identify_boot(struct nvgpu_device *gpu)
 {
-	if (gpu->boot_stop_requested)
-		return (EINTR);
-
 	gpu->boot0 = nvgpu_device_rd32(gpu, NVGPU_PMC_BOOT_0);
 	nvgpu_log(NVGPU_LOG_INFO, "%s attached, PMC_BOOT_0=0x%08x\n",
 	    gpu->pci_device->name, gpu->boot0);
@@ -468,25 +468,18 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_DRM;
-	nvgpu_device_complete_boot(gpu);
+	nvgpu_log(NVGPU_LOG_DEBUG, "boot completed\n");
 	return (0);
 }
 
+/* Release initialized resources in reverse boot order. */
 static void
-nvgpu_device_complete_boot(struct nvgpu_device *gpu)
+nvgpu_device_teardown(struct nvgpu_device *gpu)
 {
-	nvgpu_log(NVGPU_LOG_DEBUG, "boot completed\n");
-}
+	uint32_t phase;
 
-/* Run the reverse device teardown chain. */
-static int
-nvgpu_device_stop(struct nvgpu_device *gpu)
-{
-	enum nvgpu_boot_phase phase;
-
-	nvgpu_log(NVGPU_LOG_DEBUG, "stop device phase=%d\n", gpu->boot_phase);
-	nvgpu_device_stop_boot(gpu);
 	phase = gpu->boot_phase;
+	nvgpu_log(NVGPU_LOG_DEBUG, "teardown device phase=%u\n", phase);
 
 	if (phase >= NVGPU_BOOT_DRM)
 		nvdrm_unregister(gpu);
@@ -516,9 +509,12 @@ nvgpu_device_stop(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
+	if (phase >= NVGPU_BOOT_UNLOAD)
+		nvgpu_unload_fini(gpu);
+	if (phase >= NVGPU_BOOT_BARS)
+		nvgpu_device_release_bars(gpu);
 
-	gpu->boot_phase = NVGPU_BOOT_NONE;
-	return (0);
+	gpu->boot_phase = NVGPU_BOOT_BEGIN;
 }
 
 /* Release final device resources and free the GPU object. */
@@ -526,8 +522,6 @@ static void
 nvgpu_device_fini(struct nvgpu_device *gpu)
 {
 	nvgpu_log(NVGPU_LOG_DEBUG, "finish device\n");
-	nvgpu_unload_fini(gpu);
-	nvgpu_device_release_bars(gpu);
 	nvgpu_log(NVGPU_LOG_INFO, "detached\n");
 	if (nvgpu_default_gpu == gpu)
 		nvgpu_default_gpu = NULL;
@@ -556,6 +550,9 @@ nvgpu_device_attach_pci(device_t dev)
 	nvgpu_default_gpu = gpu;
 	gpu->pci_device = id;
 	gpu->chip = id->chip;
+	gpu->boot_phase = NVGPU_BOOT_BEGIN;
+	gpu->boot_stop_requested = false;
+	lwkt_token_init(&gpu->boot_token, "nvgpubt");
 	nvgpu_device_store_newbus(dev, gpu);
 
 	nvgpu_log(NVGPU_LOG_DEBUG,
@@ -563,25 +560,27 @@ nvgpu_device_attach_pci(device_t dev)
 	    pci_get_vendor(dev), pci_get_device(dev), pci_get_revid(dev),
 	    pci_get_subvendor(dev), pci_get_subdevice(dev));
 
+	lwkt_gettoken(&gpu->boot_token);
 	error = nvgpu_device_alloc_bars(gpu);
 	if (error != 0)
-		goto fail;
+		goto fail_locked;
+	gpu->boot_phase = NVGPU_BOOT_BARS;
 
 	error = nvgpu_unload_init(gpu);
 	if (error != 0)
-		goto fail_bars;
+		goto fail_locked;
+	gpu->boot_phase = NVGPU_BOOT_UNLOAD;
 
 	error = nvgpu_device_start_boot(gpu);
 	if (error != 0)
-		goto fail_unload;
+		goto fail_locked;
 
+	lwkt_reltoken(&gpu->boot_token);
 	return (0);
 
-fail_unload:
-	nvgpu_unload_fini(gpu);
-fail_bars:
-	nvgpu_device_release_bars(gpu);
-fail:
+fail_locked:
+	nvgpu_device_teardown(gpu);
+	lwkt_reltoken(&gpu->boot_token);
 	nvgpu_device_store_newbus(dev, NULL);
 	if (nvgpu_default_gpu == gpu)
 		nvgpu_default_gpu = NULL;
@@ -607,12 +606,21 @@ nvgpu_device_detach_pci(device_t dev)
 	if (error != 0)
 		return (error);
 
-	nvgpu_device_store_newbus(dev, NULL);
-	error = nvgpu_device_stop(gpu);
-	if (error != 0) {
-		nvgpu_device_store_newbus(dev, gpu);
-		return (error);
+	lwkt_gettoken(&gpu->boot_token);
+	gpu->boot_stop_requested = true;
+	while (NVGPU_BOOT_THREAD_ACTIVE(gpu)) {
+		error = tsleep(&gpu->boot_phase, PCATCH, "nvgpubt", 0);
+		if (error != 0) {
+			gpu->boot_stop_requested = false;
+			nvgpu_unload_abort(gpu);
+			lwkt_reltoken(&gpu->boot_token);
+			return (error);
+		}
 	}
+	nvgpu_device_teardown(gpu);
+	lwkt_reltoken(&gpu->boot_token);
+
+	nvgpu_device_store_newbus(dev, NULL);
 	nvgpu_device_fini(gpu);
 	return (0);
 }
