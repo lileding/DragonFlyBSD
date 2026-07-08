@@ -31,7 +31,7 @@
 static MALLOC_DEFINE(M_NVGSP_VBIOS, "nvgsp_vbios", "nvgsp VBIOS image cache");
 
 static void
-nvgsp_rom_shadow(struct nvgsp_state *sc, bool enable)
+nvgsp_bios_shadow_rom(struct nvgsp_state *sc, bool enable)
 {
 	uint32_t v = nvgsp_rd32(sc, NV_PMC_ROM_SHADOW);
 
@@ -43,7 +43,7 @@ nvgsp_rom_shadow(struct nvgsp_state *sc, bool enable)
 }
 
 static void
-nvgsp_prom_read(struct nvgsp_state *sc, uint8_t *buf, uint32_t offset,
+nvgsp_bios_read_prom(struct nvgsp_state *sc, uint8_t *buf, uint32_t offset,
     uint32_t length)
 {
 	uint32_t i, word;
@@ -70,7 +70,7 @@ nvgsp_prom_read(struct nvgsp_state *sc, uint8_t *buf, uint32_t offset,
  * unavailable (display block off, aperture pointing elsewhere, etc).
  */
 static int
-nvgsp_pramin_read(struct nvgsp_state *sc, uint8_t *buf, uint32_t length)
+nvgsp_bios_read_pramin(struct nvgsp_state *sc, uint8_t *buf, uint32_t length)
 {
 	uint32_t vga_cr, dctl, saved_window;
 	uint64_t vram_addr;
@@ -252,9 +252,9 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 	    M_WAITOK | M_ZERO);
 	sc->vbios_size = NVGSP_VBIOS_MAX_SIZE;
 
-	nvgsp_rom_shadow(sc, false);
-	nvgsp_prom_read(sc, sc->vbios, 0, NVGSP_VBIOS_MAX_SIZE);
-	nvgsp_rom_shadow(sc, true);
+	nvgsp_bios_shadow_rom(sc, false);
+	nvgsp_bios_read_prom(sc, sc->vbios, 0, NVGSP_VBIOS_MAX_SIZE);
+	nvgsp_bios_shadow_rom(sc, true);
 
 	/*
 	 * Phase 0.2.3d follow-up diagnostics: with OVMF's GOP driver actually
@@ -273,7 +273,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 	 */
 	{
 		uint8_t probe[64];
-		(void)nvgsp_pramin_read(sc, probe, sizeof(probe));
+		(void)nvgsp_bios_read_pramin(sc, probe, sizeof(probe));
 	}
 	{
 		uint32_t orig_lo, orig_hi, after_lo;
@@ -367,7 +367,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 }
 
 static int
-nvgsp_bios_sysctl_dump(SYSCTL_HANDLER_ARGS)
+nvgsp_bios_dump_sysctl(SYSCTL_HANDLER_ARGS)
 {
 	struct nvgsp_state *sc = arg1;
 
@@ -387,7 +387,7 @@ nvgsp_bios_publish_sysctl(struct nvgsp_state *sc, struct sysctl_ctx_list *ctx,
 	    &sc->vbios_size, 0, "VBIOS image size in bytes");
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(parent),
 	    OID_AUTO, "vbios", CTLTYPE_OPAQUE | CTLFLAG_RD,
-	    sc, 0, nvgsp_bios_sysctl_dump, "S",
+	    sc, 0, nvgsp_bios_dump_sysctl, "S",
 	    "Full VBIOS image dump");
 }
 

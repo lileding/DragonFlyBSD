@@ -74,7 +74,7 @@ struct nvgsp_elf64_shdr {
 } __packed;
 
 static int
-nvgsp_elf_section(const uint8_t *data, uint32_t data_size, const char *name,
+nvgsp_boot_image_find_elf_section(const uint8_t *data, uint32_t data_size, const char *name,
     uint64_t *out_off, uint64_t *out_size)
 {
 	const struct nvgsp_elf64_hdr *eh;
@@ -167,7 +167,7 @@ struct nvgsp_wpr_meta;	/* defined in nvgsp_meta.c */
  * Returns the sysmem bus address of L0 (= sysmemAddrOfRadix3Elf).
  */
 static uint64_t
-nvgsp_radix3_build(struct nvgsp_state *sc, uint64_t data_pa,
+nvgsp_boot_image_build_radix3(struct nvgsp_state *sc, uint64_t data_pa,
     uint32_t data_size)
 {
 	uint32_t n_data_pg = (data_size + NVGSP_PAGE_SIZE - 1) /
@@ -244,14 +244,14 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 		uint64_t fwimage_off, fwimage_size;
 		uint64_t sig_off, sig_size;
 
-		error = nvgsp_elf_section(gsp_fw->data, gsp_fw->datasize,
+		error = nvgsp_boot_image_find_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    ".fwimage", &fwimage_off, &fwimage_size);
 		if (error != 0) {
 			nvgsp_debugf(sc->dev,
 			    "gsp_boot: ELF has no .fwimage (%d)\n", error);
 			goto out_put;
 		}
-		error = nvgsp_elf_section(gsp_fw->data, gsp_fw->datasize,
+		error = nvgsp_boot_image_find_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    sc->chip->fw_signature, &sig_off, &sig_size);
 		if (error != 0) {
 			nvgsp_debugf(sc->dev,
@@ -268,7 +268,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 		    (unsigned long long)sig_size);
 
 		/* Stage signature: allocate sysmem, copy. */
-		error = nvgsp_dmamem_alloc(sc, roundup(sig_size,
+		error = nvgsp_dma_alloc_dmamem(sc, roundup(sig_size,
 		    NVGSP_PAGE_SIZE), NVGSP_PAGE_SIZE, &sc->gsp_sig);
 		if (error != 0) {
 			nvgsp_debugf(sc->dev,
@@ -322,7 +322,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	    bl_desc->manifestOffset, bl_desc->manifestSize);
 
 	/* 1. Allocate GSP image buffer (contig, page-aligned). */
-	error = nvgsp_dmamem_alloc(sc,
+	error = nvgsp_dma_alloc_dmamem(sc,
 	    (bus_size_t)img_pages * NVGSP_PAGE_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_image);
 	if (error != 0) {
@@ -334,28 +334,28 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	memcpy(sc->gsp_image.kva, gsp_fw->data + sc->gsp_fwimage_off, img_size);
 
 	/* 2. Allocate radix3 page-table buffer. */
-	error = nvgsp_dmamem_alloc(sc, radix3_alloc_size,
+	error = nvgsp_dma_alloc_dmamem(sc, radix3_alloc_size,
 	    NVGSP_PAGE_SIZE, &sc->gsp_radix3);
 	if (error != 0) {
 		nvgsp_debugf(sc->dev,
 		    "gsp_boot: radix3 dma alloc failed (%d) for %u B\n",
 		    error, radix3_alloc_size);
-		nvgsp_dmamem_free(sc, &sc->gsp_image);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_image);
 		goto out_put;
 	}
 
-	l0_pa = nvgsp_radix3_build(sc, sc->gsp_image.paddr,
+	l0_pa = nvgsp_boot_image_build_radix3(sc, sc->gsp_image.paddr,
 	    img_pages * NVGSP_PAGE_SIZE);
 
 	/* 3. Allocate BL buffer and copy the data section. */
-	error = nvgsp_dmamem_alloc(sc,
+	error = nvgsp_dma_alloc_dmamem(sc,
 	    roundup(bl_payload_size, NVGSP_PAGE_SIZE),
 	    NVGSP_PAGE_SIZE, &sc->gsp_bl);
 	if (error != 0) {
 		nvgsp_debugf(sc->dev,
 		    "gsp_boot: BL dma alloc failed (%d)\n", error);
-		nvgsp_dmamem_free(sc, &sc->gsp_radix3);
-		nvgsp_dmamem_free(sc, &sc->gsp_image);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_radix3);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_image);
 		goto out_put;
 	}
 	memcpy(sc->gsp_bl.kva, bl_fw->data + bl_payload_off,
@@ -500,11 +500,11 @@ void
 nvgsp_boot_release_image(struct nvgsp_state *sc)
 {
 	if (sc->gsp_sig.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->gsp_sig);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_sig);
 	if (sc->gsp_bl.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->gsp_bl);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_bl);
 	if (sc->gsp_radix3.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->gsp_radix3);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_radix3);
 	if (sc->gsp_image.kva != NULL)
-		nvgsp_dmamem_free(sc, &sc->gsp_image);
+		nvgsp_dma_free_dmamem(sc, &sc->gsp_image);
 }

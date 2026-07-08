@@ -17,6 +17,6 @@ int nvdrm_register(struct nvgpu_device *gpu);
 void nvdrm_unregister(struct nvgpu_device *gpu);
 
 /* Return the borrowed drm_device for gpu.  Caller must already pin the GPU/DRM lifetime. */
-struct drm_device *nvdrm_device(struct nvgpu_device *gpu);
+struct drm_device *nvdrm_get_device(struct nvgpu_device *gpu);
 
 #endif /* _NVDRM_DRV_H_ */

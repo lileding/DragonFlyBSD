@@ -83,26 +83,26 @@ struct nvgpu_pci_softc {
 	struct nvgpu_device *gpu;
 };
 
-static int nvgpu_device_pci_probe(device_t dev);
-static int nvgpu_device_pci_attach(device_t dev);
-static int nvgpu_device_pci_detach(device_t dev);
-static const struct nvgpu_pci_device *nvgpu_device_pci_match(device_t dev);
+static int nvgpu_device_probe_pci(device_t dev);
+static int nvgpu_device_attach_pci(device_t dev);
+static int nvgpu_device_detach_pci(device_t dev);
+static const struct nvgpu_pci_device *nvgpu_device_match_pci(device_t dev);
 static struct nvgpu_device *nvgpu_device_from_newbus(device_t dev);
 static void nvgpu_device_store_newbus(device_t dev, struct nvgpu_device *gpu);
 static int nvgpu_device_alloc_bars(struct nvgpu_device *gpu);
 static void nvgpu_device_release_bars(struct nvgpu_device *gpu);
-static int nvgpu_device_boot_start(struct nvgpu_device *gpu);
-static void nvgpu_device_boot_stop(struct nvgpu_device *gpu);
-static void nvgpu_device_boot_run(void *arg);
-static int nvgpu_device_boot(struct nvgpu_device *gpu);
-static int nvgpu_device_boot_identify(struct nvgpu_device *gpu);
-static void nvgpu_device_boot_done(struct nvgpu_device *gpu);
+static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
+static void nvgpu_device_stop_boot(struct nvgpu_device *gpu);
+static void nvgpu_device_run_boot(void *arg);
+static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
+static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
+static void nvgpu_device_complete_boot(struct nvgpu_device *gpu);
 static int nvgpu_device_stop(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
 
 /* Handle module load and unload notifications. */
 static int
-nvgpu_device_modevent(module_t mod __unused, int type, void *data __unused)
+nvgpu_device_handle_modevent(module_t mod __unused, int type, void *data __unused)
 {
 	int error;
 
@@ -125,7 +125,7 @@ nvgpu_device_modevent(module_t mod __unused, int type, void *data __unused)
 
 static moduledata_t nvgpu_device_moddata = {
 	"nvgpu",
-	nvgpu_device_modevent,
+	nvgpu_device_handle_modevent,
 	NULL
 };
 
@@ -133,9 +133,9 @@ DECLARE_MODULE(nvgpu, nvgpu_device_moddata, SI_SUB_DRIVERS, SI_ORDER_ANY);
 MODULE_VERSION(nvgpu, 1);
 
 static device_method_t nvgpu_device_pci_methods[] = {
-	DEVMETHOD(device_probe,	nvgpu_device_pci_probe),
-	DEVMETHOD(device_attach,	nvgpu_device_pci_attach),
-	DEVMETHOD(device_detach,	nvgpu_device_pci_detach),
+	DEVMETHOD(device_probe,	nvgpu_device_probe_pci),
+	DEVMETHOD(device_attach,	nvgpu_device_attach_pci),
+	DEVMETHOD(device_detach,	nvgpu_device_detach_pci),
 	DEVMETHOD_END
 };
 
@@ -159,20 +159,20 @@ MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
 
 /* Look up static chip metadata for a PCI device. */
 static const struct nvgpu_pci_device *
-nvgpu_device_pci_match(device_t dev)
+nvgpu_device_match_pci(device_t dev)
 {
 	if (pci_get_vendor(dev) != NVGPU_PCI_VENDOR_NVIDIA)
 		return (NULL);
-	return (nvgpu_chip_pci_lookup(pci_get_device(dev)));
+	return (nvgpu_chip_lookup_pci(pci_get_device(dev)));
 }
 
 /* Tell newbus whether this NVIDIA PCI function is supported. */
 static int
-nvgpu_device_pci_probe(device_t dev)
+nvgpu_device_probe_pci(device_t dev)
 {
 	const struct nvgpu_pci_device *id;
 
-	id = nvgpu_device_pci_match(dev);
+	id = nvgpu_device_match_pci(dev);
 	if (id == NULL || id->chip == NULL)
 		return (ENXIO);
 
@@ -249,7 +249,7 @@ nvgpu_device_release_bars(struct nvgpu_device *gpu)
 /* Return the DragonFly device for a GPU or the default GPU. */
 /* Return gpu's borrowed device_t.  NULL gpu means the current default GPU, if any. */
 device_t
-nvgpu_device_dev(struct nvgpu_device *gpu)
+nvgpu_device_get_newbus_dev(struct nvgpu_device *gpu)
 {
 	if (gpu == NULL)
 		gpu = nvgpu_default_gpu;
@@ -266,13 +266,13 @@ nvgpu_device_rd32(struct nvgpu_device *gpu, uint32_t offset)
 
 
 const struct nvgpu_chip_config *
-nvgpu_device_chip(struct nvgpu_device *gpu)
+nvgpu_device_get_chip(struct nvgpu_device *gpu)
 {
 	return (gpu->chip);
 }
 
 struct resource *
-nvgpu_device_bar(struct nvgpu_device *gpu, unsigned int bar)
+nvgpu_device_get_bar(struct nvgpu_device *gpu, unsigned int bar)
 {
 	if (bar >= NVGPU_NUM_BARS)
 		return (NULL);
@@ -286,13 +286,13 @@ nvgpu_device_wr32(struct nvgpu_device *gpu, uint32_t offset, uint32_t val)
 }
 
 struct drm_device *
-nvgpu_device_drm_dev(struct nvgpu_device *gpu)
+nvgpu_device_get_drm_dev(struct nvgpu_device *gpu)
 {
 	return (gpu->drm_dev);
 }
 
 struct pci_dev *
-nvgpu_device_drm_pdev(struct nvgpu_device *gpu)
+nvgpu_device_get_drm_pdev(struct nvgpu_device *gpu)
 {
 	return (gpu->drm_pdev);
 }
@@ -306,7 +306,7 @@ nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
 }
 
 void *
-nvgpu_device_unload_state(struct nvgpu_device *gpu)
+nvgpu_device_get_unload_state(struct nvgpu_device *gpu)
 {
 	return (gpu->unload);
 }
@@ -318,7 +318,7 @@ nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state)
 }
 
 struct nvgsp_state *
-nvgpu_device_gsp(struct nvgpu_device *gpu)
+nvgpu_device_get_gsp(struct nvgpu_device *gpu)
 {
 	return (gpu->gsp);
 }
@@ -330,7 +330,7 @@ nvgpu_device_set_gsp(struct nvgpu_device *gpu, struct nvgsp_state *gsp)
 }
 
 void *
-nvgpu_device_intr(struct nvgpu_device *gpu)
+nvgpu_device_get_intr(struct nvgpu_device *gpu)
 {
 	return (gpu->intr);
 }
@@ -344,7 +344,7 @@ nvgpu_device_set_intr(struct nvgpu_device *gpu, void *intr)
 
 /* Create the boot LWKT that performs long GSP bring-up. */
 static int
-nvgpu_device_boot_start(struct nvgpu_device *gpu)
+nvgpu_device_start_boot(struct nvgpu_device *gpu)
 {
 	int error;
 
@@ -352,7 +352,7 @@ nvgpu_device_boot_start(struct nvgpu_device *gpu)
 	gpu->boot_done = false;
 	gpu->boot_result = 0;
 	gpu->boot_phase = NVGPU_BOOT_NONE;
-	error = kthread_create(nvgpu_device_boot_run, gpu, &gpu->boot_td,
+	error = kthread_create(nvgpu_device_run_boot, gpu, &gpu->boot_td,
 	    "nvgpu-boot");
 	if (error != 0) {
 		gpu->boot_td = NULL;
@@ -364,7 +364,7 @@ nvgpu_device_boot_start(struct nvgpu_device *gpu)
 
 /* Request boot LWKT stop and wait for its exit. */
 static void
-nvgpu_device_boot_stop(struct nvgpu_device *gpu)
+nvgpu_device_stop_boot(struct nvgpu_device *gpu)
 {
 	if (gpu->boot_td == NULL)
 		return;
@@ -378,12 +378,12 @@ nvgpu_device_boot_stop(struct nvgpu_device *gpu)
 
 /* Run the device boot sequence inside the boot LWKT. */
 static void
-nvgpu_device_boot_run(void *arg)
+nvgpu_device_run_boot(void *arg)
 {
 	struct nvgpu_device *gpu = arg;
 	int error;
 
-	error = nvgpu_device_boot(gpu);
+	error = nvgpu_device_run_boot_sequence(gpu);
 	gpu->boot_result = error;
 	gpu->boot_done = true;
 	wakeup(&gpu->boot_done);
@@ -392,7 +392,7 @@ nvgpu_device_boot_run(void *arg)
 
 /* Read basic GPU identity registers and log the attachment. */
 static int
-nvgpu_device_boot_identify(struct nvgpu_device *gpu)
+nvgpu_device_identify_boot(struct nvgpu_device *gpu)
 {
 	if (gpu->boot_stop_requested)
 		return (EINTR);
@@ -405,11 +405,11 @@ nvgpu_device_boot_identify(struct nvgpu_device *gpu)
 
 /* Execute the ordered device boot chain before DRM publication. */
 static int
-nvgpu_device_boot(struct nvgpu_device *gpu)
+nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 {
 	int error;
 
-	error = nvgpu_device_boot_identify(gpu);
+	error = nvgpu_device_identify_boot(gpu);
 	if (error != 0)
 		return (error);
 	error = nvgsp_state_init(gpu);
@@ -432,11 +432,11 @@ nvgpu_device_boot(struct nvgpu_device *gpu)
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_VRAM;
-	error = nvgsp_bar2_init(gpu);
+	error = nvgsp_bar_init_bar2(gpu);
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_BAR2;
-	error = nvgsp_bar1_init(gpu);
+	error = nvgsp_bar_init_bar1(gpu);
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_BAR1;
@@ -468,12 +468,12 @@ nvgpu_device_boot(struct nvgpu_device *gpu)
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_DRM;
-	nvgpu_device_boot_done(gpu);
+	nvgpu_device_complete_boot(gpu);
 	return (0);
 }
 
 static void
-nvgpu_device_boot_done(struct nvgpu_device *gpu)
+nvgpu_device_complete_boot(struct nvgpu_device *gpu)
 {
 	nvgpu_log(NVGPU_LOG_DEBUG, "boot completed\n");
 }
@@ -485,7 +485,7 @@ nvgpu_device_stop(struct nvgpu_device *gpu)
 	enum nvgpu_boot_phase phase;
 
 	nvgpu_log(NVGPU_LOG_DEBUG, "stop device phase=%d\n", gpu->boot_phase);
-	nvgpu_device_boot_stop(gpu);
+	nvgpu_device_stop_boot(gpu);
 	phase = gpu->boot_phase;
 
 	if (phase >= NVGPU_BOOT_DRM)
@@ -507,9 +507,9 @@ nvgpu_device_stop(struct nvgpu_device *gpu)
 		nvgpu_intr_fini(gpu);
 
 	if (phase >= NVGPU_BOOT_BAR1)
-		nvgsp_bar1_fini(gpu);
+		nvgsp_bar_fini_bar1(gpu);
 	if (phase >= NVGPU_BOOT_BAR2)
-		nvgsp_bar2_fini(gpu);
+		nvgsp_bar_fini_bar2(gpu);
 	if (phase >= NVGPU_BOOT_VRAM)
 		nvgsp_vram_fini(gpu);
 	if (phase >= NVGPU_BOOT_GSP)
@@ -536,13 +536,13 @@ nvgpu_device_fini(struct nvgpu_device *gpu)
 
 /* Allocate the GPU object and start asynchronous device boot. */
 static int
-nvgpu_device_pci_attach(device_t dev)
+nvgpu_device_attach_pci(device_t dev)
 {
 	const struct nvgpu_pci_device *id;
 	struct nvgpu_device *gpu;
 	int error;
 
-	id = nvgpu_device_pci_match(dev);
+	id = nvgpu_device_match_pci(dev);
 	if (id == NULL || id->chip == NULL)
 		return (ENXIO);
 
@@ -571,7 +571,7 @@ nvgpu_device_pci_attach(device_t dev)
 	if (error != 0)
 		goto fail_bars;
 
-	error = nvgpu_device_boot_start(gpu);
+	error = nvgpu_device_start_boot(gpu);
 	if (error != 0)
 		goto fail_unload;
 
@@ -591,7 +591,7 @@ fail:
 
 /* Admit unload and tear down the GPU object if idle. */
 static int
-nvgpu_device_pci_detach(device_t dev)
+nvgpu_device_detach_pci(device_t dev)
 {
 	struct nvgpu_device *gpu;
 	int error;
@@ -601,9 +601,9 @@ nvgpu_device_pci_detach(device_t dev)
 	if (gpu == NULL)
 		return (0);
 
-	nvgpu_log(NVGPU_LOG_DEBUG, "unload begin gpu=%p ddev=%p\n", gpu,
-	    nvgpu_device_drm_dev(gpu));
-	error = nvgpu_unload_begin(gpu);
+	nvgpu_log(NVGPU_LOG_DEBUG, "unload try begin gpu=%p ddev=%p\n", gpu,
+	    nvgpu_device_get_drm_dev(gpu));
+	error = nvgpu_unload_try_begin(gpu);
 	if (error != 0)
 		return (error);
 

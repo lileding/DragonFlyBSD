@@ -51,7 +51,7 @@ nvgsp_seq_poll_reg(struct nvgsp_state *gsp, uint32_t addr, uint32_t mask,
 }
 
 static int
-nvgsp_seq_core_resume(struct nvgsp_state *gsp)
+nvgsp_seq_resume_core(struct nvgsp_state *gsp)
 {
 	uint32_t gsp_base = gsp->chip->gsp_base;
 	uint32_t gsp_riscv = gsp->chip->gsp_riscv;
@@ -114,7 +114,7 @@ nvgsp_seq_core_resume(struct nvgsp_state *gsp)
 }
 
 int
-nvgsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
+nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 	struct nvgsp_state *gsp = priv;
 	const uint32_t *payload = repv;
@@ -204,7 +204,7 @@ nvgsp_seq_msg_handler(void *priv, uint32_t fn, void *repv, uint32_t repc)
 			}
 			break;
 		case NVGSP_SEQ_OP_CORE_RESUME:
-			(void)nvgsp_seq_core_resume(gsp);
+			(void)nvgsp_seq_resume_core(gsp);
 			break;
 		}
 

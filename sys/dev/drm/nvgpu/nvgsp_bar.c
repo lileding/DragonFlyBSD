@@ -30,7 +30,7 @@ struct rpc_update_bar_pde_v15_00_b2 {
 int vm_phys_fictitious_reg_range(vm_paddr_t start, vm_paddr_t end,
     vm_memattr_t memattr);
 void vm_phys_fictitious_unreg_range(vm_paddr_t start, vm_paddr_t end);
-static void nvgsp_bar1_unmap_existing_scatter(struct nvgsp_state *sc,
+static void nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc,
     uint64_t *gvas, uint32_t count);
 
 static __inline void
@@ -53,7 +53,7 @@ b2_pramin_wr64(struct nvgsp_state *sc, uint64_t paddr, uint64_t val)
 }
 
 static void
-nvgsp_bar2_zero_vram_page_locked(struct nvgsp_state *sc, uint64_t paddr)
+nvgsp_bar_zero_bar2_vram_page_locked(struct nvgsp_state *sc, uint64_t paddr)
 {
 	uint32_t saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 
@@ -65,7 +65,7 @@ nvgsp_bar2_zero_vram_page_locked(struct nvgsp_state *sc, uint64_t paddr)
 }
 
 static struct nvgsp_bar2_pt *
-nvgsp_bar2_pt_find(struct nvgsp_bar2 *b2, uint8_t level,
+nvgsp_bar_find_bar2_pt(struct nvgsp_bar2 *b2, uint8_t level,
     uint32_t pd2_idx, uint32_t pd1_idx, uint32_t pd0_idx)
 {
 	struct nvgsp_bar2_pt *pt;
@@ -82,7 +82,7 @@ nvgsp_bar2_pt_find(struct nvgsp_bar2 *b2, uint8_t level,
 }
 
 static int
-nvgsp_bar2_pt_alloc(struct nvgsp_state *sc, uint8_t level,
+nvgsp_bar_alloc_bar2_pt(struct nvgsp_state *sc, uint8_t level,
     uint32_t pd2_idx, uint32_t pd1_idx, uint32_t pd0_idx,
     struct nvgsp_bar2_pt **ppt)
 {
@@ -90,7 +90,7 @@ nvgsp_bar2_pt_alloc(struct nvgsp_state *sc, uint8_t level,
 	struct nvgsp_bar2_pt *pt;
 	uint64_t paddr;
 
-	pt = nvgsp_bar2_pt_find(b2, level, pd2_idx, pd1_idx, pd0_idx);
+	pt = nvgsp_bar_find_bar2_pt(b2, level, pd2_idx, pd1_idx, pd0_idx);
 	if (pt != NULL) {
 		*ppt = pt;
 		return (0);
@@ -110,7 +110,7 @@ nvgsp_bar2_pt_alloc(struct nvgsp_state *sc, uint8_t level,
 	LIST_INSERT_HEAD(&b2->pt_pages, pt, link);
 
 	lwkt_gettoken(&sc->gsp_tok);
-	nvgsp_bar2_zero_vram_page_locked(sc, paddr);
+	nvgsp_bar_zero_bar2_vram_page_locked(sc, paddr);
 	lwkt_reltoken(&sc->gsp_tok);
 
 	*ppt = pt;
@@ -118,7 +118,7 @@ nvgsp_bar2_pt_alloc(struct nvgsp_state *sc, uint8_t level,
 }
 
 static int
-nvgsp_bar2_get_spt(struct nvgsp_state *sc, uint64_t bar2_gva,
+nvgsp_bar_get_bar2_spt(struct nvgsp_state *sc, uint64_t bar2_gva,
     struct nvgsp_bar2_pt **pspt)
 {
 	struct nvgsp_bar2 *b2 = &sc->bar2;
@@ -134,16 +134,16 @@ nvgsp_bar2_get_spt(struct nvgsp_state *sc, uint64_t bar2_gva,
 	pd0_idx = (uint32_t)((bar2_gva >> NVGSP_GMMU_PD0_SHIFT) &
 	    (NVGSP_GMMU_PD0_ENTRIES - 1));
 
-	err = nvgsp_bar2_pt_alloc(sc, BAR2_PT_PD1, pd2_idx, 0, 0, &pd1_pt);
+	err = nvgsp_bar_alloc_bar2_pt(sc, BAR2_PT_PD1, pd2_idx, 0, 0, &pd1_pt);
 	if (err != 0)
 		return (err);
 
-	err = nvgsp_bar2_pt_alloc(sc, BAR2_PT_PD0, pd2_idx, pd1_idx, 0,
+	err = nvgsp_bar_alloc_bar2_pt(sc, BAR2_PT_PD0, pd2_idx, pd1_idx, 0,
 	    &pd0_pt);
 	if (err != 0)
 		return (err);
 
-	err = nvgsp_bar2_pt_alloc(sc, BAR2_PT_SPT, pd2_idx, pd1_idx,
+	err = nvgsp_bar_alloc_bar2_pt(sc, BAR2_PT_SPT, pd2_idx, pd1_idx,
 	    pd0_idx, &spt_pt);
 	if (err != 0)
 		return (err);
@@ -180,7 +180,7 @@ nvgsp_bar2_get_spt(struct nvgsp_state *sc, uint64_t bar2_gva,
 }
 
 static int
-nvgsp_bar2_bootstrap(struct nvgsp_state *sc)
+nvgsp_bar_bootstrap_bar2(struct nvgsp_state *sc)
 {
 	struct nvgsp_bar2 *b2 = &sc->bar2;
 	uint64_t gva;
@@ -196,7 +196,7 @@ nvgsp_bar2_bootstrap(struct nvgsp_state *sc)
 	    (1ULL << NVGSP_GMMU_PD0_SHIFT)) {
 		struct nvgsp_bar2_pt *spt_pt __unused;
 
-		err = nvgsp_bar2_get_spt(sc, gva, &spt_pt);
+		err = nvgsp_bar_get_bar2_spt(sc, gva, &spt_pt);
 		if (err != 0)
 			return (err);
 	}
@@ -205,7 +205,7 @@ nvgsp_bar2_bootstrap(struct nvgsp_state *sc)
 }
 
 void
-nvgsp_bar2_invalidate(struct nvgsp_state *sc)
+nvgsp_bar_invalidate_bar2(struct nvgsp_state *sc)
 {
 	uint32_t trig_rb = 0xffffffffu;
 
@@ -232,7 +232,7 @@ nvgsp_bar2_invalidate(struct nvgsp_state *sc)
 }
 
 static int
-nvgsp_bar2_start(struct nvgsp_state *sc)
+nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 {
 	struct nvgsp_bar2 *b2 = &sc->bar2;
 	uint64_t pd2;
@@ -241,7 +241,7 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 	int err;
 	uint32_t saved;
 
-	if (nvgpu_device_bar(sc->gpu, 3) == NULL) {
+	if (nvgpu_device_get_bar(sc->gpu, 3) == NULL) {
 		nvgsp_debugf(sc->dev, "bar2: PCIe BAR3 (BAR2) not mapped\n");
 		return (ENXIO);
 	}
@@ -262,17 +262,17 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 	b2->pd1_paddr = 0;
 	b2->pd0_paddr = 0;
 	b2->spt_paddr = 0;
-	b2->aperture_size = rman_get_size(nvgpu_device_bar(sc->gpu, 3)) >> 1;
+	b2->aperture_size = rman_get_size(nvgpu_device_get_bar(sc->gpu, 3)) >> 1;
 	b2->next_gva  = NVGSP_GMMU_PT_PAGE_SIZE;
 	LIST_INIT(&b2->pt_pages);
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-	nvgsp_bar2_zero_vram_page_locked(sc, pd2);
+	nvgsp_bar_zero_bar2_vram_page_locked(sc, pd2);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
 
-	err = nvgsp_bar2_bootstrap(sc);
+	err = nvgsp_bar_bootstrap_bar2(sc);
 	if (err != 0) {
 		nvgsp_debugf(sc->dev, "bar2: bootstrap failed err=%d\n", err);
 		return (err);
@@ -328,7 +328,7 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 	(void)pdb0_post_hi;
 #endif
 
-	nvgsp_bar2_invalidate(sc);
+	nvgsp_bar_invalidate_bar2(sc);
 
 	/* Read BAR2 inst reg (0xb80f48) -- the address walker uses as root. */
 	uint32_t bar2_inst = nvgsp_rd32(sc, 0xb80f48);
@@ -397,9 +397,9 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 		    0x1000, NVGSP_VRAM_BAR2_FLUSH, b2);
 		if (flush_vram != 0) {
 			b2->flush_vram_paddr = flush_vram;
-			(void)nvgsp_bar2_map_vram(sc, NVGSP_BAR2_GVA_FLUSH, flush_vram);
+			(void)nvgsp_bar_map_bar2_vram(sc, NVGSP_BAR2_GVA_FLUSH, flush_vram);
 			/* First flush: forces walker to walk our chain end-to-end. */
-			nvgsp_bar2_flush(sc);
+			nvgsp_bar_flush_bar2(sc);
 		}
 	}
 
@@ -408,11 +408,11 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 		uint64_t tv = nvgsp_vram_alloc_kind(sc, 0x1000, 0x1000,
 		    NVGSP_VRAM_BAR2_TEST, b2);
 		if (tv != 0) {
-			(void)nvgsp_bar2_map_vram(sc, 0x2000, tv);
-			nvgsp_bar2_flush(sc);
-			nvgsp_bar2_wr32(sc, 0x2000 + 0x10, 0xC0FFEE12u);
-			nvgsp_bar2_flush(sc);
-			uint32_t rb = nvgsp_bar2_rd32(sc, 0x2000 + 0x10);
+			(void)nvgsp_bar_map_bar2_vram(sc, 0x2000, tv);
+			nvgsp_bar_flush_bar2(sc);
+			nvgsp_bar_wr32_bar2(sc, 0x2000 + 0x10, 0xC0FFEE12u);
+			nvgsp_bar_flush_bar2(sc);
+			uint32_t rb = nvgsp_bar_rd32_bar2(sc, 0x2000 + 0x10);
 #ifdef NVGSP_DEBUG_BAR2
 			nvgsp_debugf(sc->dev,
 			    "bar2_diag: post-flush test wr C0FFEE12, readback = 0x%08x (target VRAM 0x%llx)\n",
@@ -441,7 +441,7 @@ nvgsp_bar2_start(struct nvgsp_state *sc)
 }
 
 static void
-nvgsp_bar2_stop(struct nvgsp_state *sc)
+nvgsp_bar_stop_bar2(struct nvgsp_state *sc)
 {
 	struct nvgsp_bar2_pt *pt;
 	uint32_t freed;
@@ -460,7 +460,7 @@ nvgsp_bar2_stop(struct nvgsp_state *sc)
 }
 
 int
-nvgsp_bar2_map_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
+nvgsp_bar_map_bar2_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
     uint64_t vram_paddr)
 {
 	struct nvgsp_bar2 *b2 = &sc->bar2;
@@ -478,7 +478,7 @@ nvgsp_bar2_map_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
 	if (bar2_gva >= b2->aperture_size)
 		return (ERANGE);
 
-	err = nvgsp_bar2_get_spt(sc, bar2_gva, &spt_pt);
+	err = nvgsp_bar_get_bar2_spt(sc, bar2_gva, &spt_pt);
 	if (err != 0)
 		return (err);
 
@@ -505,15 +505,15 @@ nvgsp_bar2_map_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
 }
 
 void
-nvgsp_bar2_wr32(struct nvgsp_state *sc, uint64_t bar2_gva, uint32_t val)
+nvgsp_bar_wr32_bar2(struct nvgsp_state *sc, uint64_t bar2_gva, uint32_t val)
 {
-	bus_write_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)bar2_gva, val);
+	bus_write_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)bar2_gva, val);
 }
 
 uint32_t
-nvgsp_bar2_rd32(struct nvgsp_state *sc, uint64_t bar2_gva)
+nvgsp_bar_rd32_bar2(struct nvgsp_state *sc, uint64_t bar2_gva)
 {
-	return bus_read_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)bar2_gva);
+	return bus_read_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)bar2_gva);
 }
 
 
@@ -522,33 +522,33 @@ nvgsp_bar2_rd32(struct nvgsp_state *sc, uint64_t bar2_gva)
  * and returns data from the flush_vram page. The read itself serves as
  * the "flush" -- it forces walker to walk the chain and refresh TLB. */
 void
-nvgsp_bar2_flush(struct nvgsp_state *sc)
+nvgsp_bar_flush_bar2(struct nvgsp_state *sc)
 {
 	if (!sc->bar2.ready)
 		return;
-	(void)bus_read_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)NVGSP_BAR2_GVA_FLUSH);
+	(void)bus_read_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)NVGSP_BAR2_GVA_FLUSH);
 }
 
 void
-nvgsp_bar2_wr64(struct nvgsp_state *sc, uint64_t bar2_gva, uint64_t val)
+nvgsp_bar_wr64_bar2(struct nvgsp_state *sc, uint64_t bar2_gva, uint64_t val)
 {
-	bus_write_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 0),
+	bus_write_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 0),
 	    (uint32_t)(val & 0xffffffffu));
-	bus_write_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 4),
+	bus_write_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 4),
 	    (uint32_t)(val >> 32));
 }
 
 uint64_t
-nvgsp_bar2_rd64(struct nvgsp_state *sc, uint64_t bar2_gva)
+nvgsp_bar_rd64_bar2(struct nvgsp_state *sc, uint64_t bar2_gva)
 {
-	uint32_t lo = bus_read_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 0));
-	uint32_t hi = bus_read_4(nvgpu_device_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 4));
+	uint32_t lo = bus_read_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 0));
+	uint32_t hi = bus_read_4(nvgpu_device_get_bar(sc->gpu, 3), (bus_size_t)(bar2_gva + 4));
 	return ((uint64_t)hi << 32) | lo;
 }
 
 
 int
-nvgsp_pramin_rd64(struct nvgsp_state *sc, uint64_t paddr, uint64_t *out)
+nvgsp_bar_rd64_pramin(struct nvgsp_state *sc, uint64_t paddr, uint64_t *out)
 {
 	uint32_t saved;
 	lwkt_gettoken(&sc->gsp_tok);
@@ -602,13 +602,13 @@ b1_pramin_rd64(struct nvgsp_state *sc, uint64_t paddr)
 }
 
 static uint64_t
-nvgsp_bar1_limit(struct nvgsp_state *sc)
+nvgsp_bar_get_bar1_limit(struct nvgsp_state *sc)
 {
-	return (nvgpu_device_bar(sc->gpu, 1) != NULL ? rman_get_size(nvgpu_device_bar(sc->gpu, 1)) : 0);
+	return (nvgpu_device_get_bar(sc->gpu, 1) != NULL ? rman_get_size(nvgpu_device_get_bar(sc->gpu, 1)) : 0);
 }
 
 void
-nvgsp_bar1_invalidate(struct nvgsp_state *sc)
+nvgsp_bar_invalidate_bar1(struct nvgsp_state *sc)
 {
 	uint32_t trig_rb = 0xffffffffu;
 
@@ -636,7 +636,7 @@ nvgsp_bar1_invalidate(struct nvgsp_state *sc)
 }
 
 static int
-nvgsp_bar1_start(struct nvgsp_state *sc)
+nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 {
 	struct nvgsp_bar1 *b1 = &sc->bar1;
 	uint64_t spt;
@@ -647,7 +647,7 @@ nvgsp_bar1_start(struct nvgsp_state *sc)
 	uint64_t pd0_big_post, pd0_small_post;
 	uint32_t saved;
 
-	if (nvgpu_device_bar(sc->gpu, 1) == NULL) {
+	if (nvgpu_device_get_bar(sc->gpu, 1) == NULL) {
 		nvgsp_debugf(sc->dev, "bar1: PCIe BAR1 not mapped\n");
 		return (ENXIO);
 	}
@@ -773,7 +773,7 @@ nvgsp_bar1_start(struct nvgsp_state *sc)
 	b1->pd0_paddr = gsp_pd0;
 	b1->next_gva  = NVGSP_BAR1_GVA_ALLOC_BASE;
 	memset(b1->gva_used, 0, sizeof(b1->gva_used));
-	b1->fictitious_start = rman_get_start(nvgpu_device_bar(sc->gpu, 1)) +
+	b1->fictitious_start = rman_get_start(nvgpu_device_get_bar(sc->gpu, 1)) +
 	    NVGSP_BAR1_GVA_ALLOC_BASE;
 	b1->fictitious_end = b1->fictitious_start +
 	    (vm_paddr_t)NVGSP_BAR1_GVA_ALLOC_PAGES * NVGSP_GMMU_PT_PAGE_SIZE;
@@ -799,7 +799,7 @@ nvgsp_bar1_start(struct nvgsp_state *sc)
 	    (unsigned long long)b1->next_gva);
 #endif
 
-	nvgsp_bar1_invalidate(sc);
+	nvgsp_bar_invalidate_bar1(sc);
 
 #ifdef NVGSP_DEBUG_BAR1
 	nvgsp_debugf(sc->dev,
@@ -824,7 +824,7 @@ nvgsp_bar1_start(struct nvgsp_state *sc)
 }
 
 static void
-nvgsp_bar1_stop(struct nvgsp_state *sc)
+nvgsp_bar_stop_bar1(struct nvgsp_state *sc)
 {
 	uint32_t freed;
 
@@ -843,7 +843,7 @@ nvgsp_bar1_stop(struct nvgsp_state *sc)
 }
 
 static int
-nvgsp_bar1_map_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
+nvgsp_bar_map_bar1_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
     uint64_t vram_paddr)
 {
 	struct nvgsp_bar1 *b1 = &sc->bar1;
@@ -855,7 +855,7 @@ nvgsp_bar1_map_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
 
 	if (!b1->ready)
 		return (ENXIO);
-	if (bar1_gva >= nvgsp_bar1_limit(sc))
+	if (bar1_gva >= nvgsp_bar_get_bar1_limit(sc))
 		return (EINVAL);
 
 	/* Our SPT is mounted at GSP PD0[127].SMALL, covering the final
@@ -894,19 +894,19 @@ nvgsp_bar1_map_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
 
 /* Map a 4 KiB VRAM page at a specific BAR1 GVA by writing the SPT entry. */
 int
-nvgsp_bar1_map_vram(struct nvgsp_state *sc, uint64_t bar1_gva,
+nvgsp_bar_map_bar1_vram(struct nvgsp_state *sc, uint64_t bar1_gva,
     uint64_t vram_paddr)
 {
 	int err;
 
-	err = nvgsp_bar1_map_vram_pte(sc, bar1_gva, vram_paddr);
+	err = nvgsp_bar_map_bar1_vram_pte(sc, bar1_gva, vram_paddr);
 	if (err == 0)
-		nvgsp_bar1_invalidate(sc);
+		nvgsp_bar_invalidate_bar1(sc);
 	return (err);
 }
 
 static int
-nvgsp_bar1_clear_gva(struct nvgsp_state *sc, uint64_t bar1_gva)
+nvgsp_bar_clear_bar1_gva(struct nvgsp_state *sc, uint64_t bar1_gva)
 {
 	struct nvgsp_bar1 *b1 = &sc->bar1;
 	uint32_t saved;
@@ -916,7 +916,7 @@ nvgsp_bar1_clear_gva(struct nvgsp_state *sc, uint64_t bar1_gva)
 
 	if (!b1->ready)
 		return (ENXIO);
-	if (bar1_gva >= nvgsp_bar1_limit(sc))
+	if (bar1_gva >= nvgsp_bar_get_bar1_limit(sc))
 		return (EINVAL);
 
 	pd0_idx = (uint32_t)((bar1_gva >> 21) & 0xffu);
@@ -940,35 +940,35 @@ nvgsp_bar1_clear_gva(struct nvgsp_state *sc, uint64_t bar1_gva)
 
 /* Flush: read from BAR1 to force walker re-walk + L2 sync. */
 void
-nvgsp_bar1_flush(struct nvgsp_state *sc)
+nvgsp_bar_flush_bar1(struct nvgsp_state *sc)
 {
-	if (!sc->bar1.ready || nvgpu_device_bar(sc->gpu, 1) == NULL)
+	if (!sc->bar1.ready || nvgpu_device_get_bar(sc->gpu, 1) == NULL)
 		return;
-	(void)bus_read_4(nvgpu_device_bar(sc->gpu, 1), 0);
+	(void)bus_read_4(nvgpu_device_get_bar(sc->gpu, 1), 0);
 }
 
 void
-nvgsp_bar1_wr32(struct nvgsp_state *sc, uint64_t gva, uint32_t val)
+nvgsp_bar_wr32_bar1(struct nvgsp_state *sc, uint64_t gva, uint32_t val)
 {
 	if (!sc->bar1.ready)
 		return;
-	bus_write_4(nvgpu_device_bar(sc->gpu, 1), gva, val);
+	bus_write_4(nvgpu_device_get_bar(sc->gpu, 1), gva, val);
 }
 
 uint32_t
-nvgsp_bar1_rd32(struct nvgsp_state *sc, uint64_t gva)
+nvgsp_bar_rd32_bar1(struct nvgsp_state *sc, uint64_t gva)
 {
 	if (!sc->bar1.ready)
 		return (0xdeadbeef);
-	return (bus_read_4(nvgpu_device_bar(sc->gpu, 1), gva));
+	return (bus_read_4(nvgpu_device_get_bar(sc->gpu, 1), gva));
 }
 
 void
-nvgsp_bar1_wr64(struct nvgsp_state *sc, uint64_t gva, uint64_t val)
+nvgsp_bar_wr64_bar1(struct nvgsp_state *sc, uint64_t gva, uint64_t val)
 {
 	if (!sc->bar1.ready)
 		return;
-	bus_write_8(nvgpu_device_bar(sc->gpu, 1), gva, val);
+	bus_write_8(nvgpu_device_get_bar(sc->gpu, 1), gva, val);
 }
 
 /*
@@ -987,7 +987,7 @@ nvgsp_bar1_wr64(struct nvgsp_state *sc, uint64_t gva, uint64_t val)
  *   serialization for the page table or object being updated.
  */
 void
-nvgsp_bar1_set_region64(struct nvgsp_state *sc, uint64_t gva, uint64_t val,
+nvgsp_bar_set_bar1_region64(struct nvgsp_state *sc, uint64_t gva, uint64_t val,
     uint32_t count)
 {
 	uint32_t i;
@@ -995,7 +995,7 @@ nvgsp_bar1_set_region64(struct nvgsp_state *sc, uint64_t gva, uint64_t val,
 	if (!sc->bar1.ready || count == 0)
 		return;
 	for (i = 0; i < count; i++)
-		bus_write_8(nvgpu_device_bar(sc->gpu, 1), gva + (uint64_t)i * 8, val);
+		bus_write_8(nvgpu_device_get_bar(sc->gpu, 1), gva + (uint64_t)i * 8, val);
 }
 
 /*
@@ -1016,7 +1016,7 @@ nvgsp_bar1_set_region64(struct nvgsp_state *sc, uint64_t gva, uint64_t val,
  *   required flush/TLB invalidate after the write batch.
  */
 void
-nvgsp_bar1_write_linear_region64(struct nvgsp_state *sc, uint64_t gva,
+nvgsp_bar_write_bar1_linear_region64(struct nvgsp_state *sc, uint64_t gva,
     uint64_t first, uint64_t step, uint32_t count)
 {
 	uint32_t i;
@@ -1024,26 +1024,26 @@ nvgsp_bar1_write_linear_region64(struct nvgsp_state *sc, uint64_t gva,
 	if (!sc->bar1.ready || count == 0)
 		return;
 	for (i = 0; i < count; i++)
-		bus_write_8(nvgpu_device_bar(sc->gpu, 1), gva + (uint64_t)i * 8,
+		bus_write_8(nvgpu_device_get_bar(sc->gpu, 1), gva + (uint64_t)i * 8,
 		    first + (uint64_t)i * step);
 }
 
 uint64_t
-nvgsp_bar1_rd64(struct nvgsp_state *sc, uint64_t gva)
+nvgsp_bar_rd64_bar1(struct nvgsp_state *sc, uint64_t gva)
 {
 	if (!sc->bar1.ready)
 		return (0xdeadbeefdeadbeefULL);
-	return (bus_read_8(nvgpu_device_bar(sc->gpu, 1), gva));
+	return (bus_read_8(nvgpu_device_get_bar(sc->gpu, 1), gva));
 }
 
 static bool
-nvgsp_bar1_gva_used(struct nvgsp_bar1 *b1, uint32_t idx)
+nvgsp_bar_is_bar1_gva_used(struct nvgsp_bar1 *b1, uint32_t idx)
 {
 	return ((b1->gva_used[idx / 8] & (1u << (idx % 8))) != 0);
 }
 
 static void
-nvgsp_bar1_gva_set(struct nvgsp_bar1 *b1, uint32_t idx,
+nvgsp_bar_set_bar1_gva(struct nvgsp_bar1 *b1, uint32_t idx,
     bool used)
 {
 	uint8_t bit = 1u << (idx % 8);
@@ -1055,7 +1055,7 @@ nvgsp_bar1_gva_set(struct nvgsp_bar1 *b1, uint32_t idx,
 }
 
 static int
-nvgsp_bar1_alloc_gva(struct nvgsp_bar1 *b1, uint64_t *pgva)
+nvgsp_bar_alloc_bar1_gva(struct nvgsp_bar1 *b1, uint64_t *pgva)
 {
 	uint32_t start, idx;
 
@@ -1066,10 +1066,10 @@ nvgsp_bar1_alloc_gva(struct nvgsp_bar1 *b1, uint64_t *pgva)
 
 	for (uint32_t i = 0; i < NVGSP_BAR1_GVA_ALLOC_PAGES; i++) {
 		idx = (start + i) % NVGSP_BAR1_GVA_ALLOC_PAGES;
-		if (nvgsp_bar1_gva_used(b1, idx))
+		if (nvgsp_bar_is_bar1_gva_used(b1, idx))
 			continue;
 
-		nvgsp_bar1_gva_set(b1, idx, true);
+		nvgsp_bar_set_bar1_gva(b1, idx, true);
 		*pgva = NVGSP_BAR1_GVA_ALLOC_BASE +
 		    (uint64_t)idx * NVGSP_GMMU_PT_PAGE_SIZE;
 		b1->next_gva = NVGSP_BAR1_GVA_ALLOC_BASE +
@@ -1082,7 +1082,7 @@ nvgsp_bar1_alloc_gva(struct nvgsp_bar1 *b1, uint64_t *pgva)
 }
 
 static int
-nvgsp_bar1_alloc_gva_range(struct nvgsp_bar1 *b1, uint32_t pages,
+nvgsp_bar_alloc_bar1_gva_range(struct nvgsp_bar1 *b1, uint32_t pages,
     uint64_t *pgva)
 {
 	uint32_t start;
@@ -1103,7 +1103,7 @@ nvgsp_bar1_alloc_gva_range(struct nvgsp_bar1 *b1, uint32_t pages,
 			continue;
 
 		for (uint32_t page = 0; page < pages; page++) {
-			if (nvgsp_bar1_gva_used(b1, idx + page)) {
+			if (nvgsp_bar_is_bar1_gva_used(b1, idx + page)) {
 				used = true;
 				break;
 			}
@@ -1112,7 +1112,7 @@ nvgsp_bar1_alloc_gva_range(struct nvgsp_bar1 *b1, uint32_t pages,
 			continue;
 
 		for (uint32_t page = 0; page < pages; page++)
-			nvgsp_bar1_gva_set(b1, idx + page, true);
+			nvgsp_bar_set_bar1_gva(b1, idx + page, true);
 
 		*pgva = NVGSP_BAR1_GVA_ALLOC_BASE +
 		    (uint64_t)idx * NVGSP_GMMU_PT_PAGE_SIZE;
@@ -1126,7 +1126,7 @@ nvgsp_bar1_alloc_gva_range(struct nvgsp_bar1 *b1, uint32_t pages,
 }
 
 static void
-nvgsp_bar1_free_gva(struct nvgsp_bar1 *b1, uint64_t gva)
+nvgsp_bar_free_bar1_gva(struct nvgsp_bar1 *b1, uint64_t gva)
 {
 	uint32_t idx;
 
@@ -1138,11 +1138,11 @@ nvgsp_bar1_free_gva(struct nvgsp_bar1 *b1, uint64_t gva)
 
 	idx = (uint32_t)((gva - NVGSP_BAR1_GVA_ALLOC_BASE) /
 	    NVGSP_GMMU_PT_PAGE_SIZE);
-	nvgsp_bar1_gva_set(b1, idx, false);
+	nvgsp_bar_set_bar1_gva(b1, idx, false);
 }
 
 static void
-nvgsp_bar1_free_gva_range(struct nvgsp_bar1 *b1, uint64_t gva,
+nvgsp_bar_free_bar1_gva_range(struct nvgsp_bar1 *b1, uint64_t gva,
     uint32_t pages)
 {
 	uint32_t idx;
@@ -1160,19 +1160,19 @@ nvgsp_bar1_free_gva_range(struct nvgsp_bar1 *b1, uint64_t gva,
 		return;
 
 	for (uint32_t page = 0; page < pages; page++)
-		nvgsp_bar1_gva_set(b1, idx + page, false);
+		nvgsp_bar_set_bar1_gva(b1, idx + page, false);
 }
 
 
 void
-nvgsp_bar1_count_gva(struct nvgsp_state *sc, uint32_t *used,
+nvgsp_bar_count_bar1_gva(struct nvgsp_state *sc, uint32_t *used,
     uint32_t *total)
 {
 	struct nvgsp_bar1 *b1 = &sc->bar1;
 	uint32_t count = 0;
 
 	for (uint32_t i = 0; i < NVGSP_BAR1_GVA_ALLOC_PAGES; i++) {
-		if (nvgsp_bar1_gva_used(b1, i))
+		if (nvgsp_bar_is_bar1_gva_used(b1, i))
 			count++;
 	}
 	*used = count;
@@ -1180,7 +1180,7 @@ nvgsp_bar1_count_gva(struct nvgsp_state *sc, uint32_t *used,
 }
 
 int
-nvgsp_bar1_alloc_page_kind(struct nvgsp_state *sc,
+nvgsp_bar_alloc_bar1_page_kind(struct nvgsp_state *sc,
     struct nvgsp_bar1_page *page, enum nvgsp_vram_kind kind, void *owner)
 {
 	uint64_t paddr, gva;
@@ -1189,24 +1189,24 @@ nvgsp_bar1_alloc_page_kind(struct nvgsp_state *sc,
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
-	err = nvgsp_bar1_alloc_gva(&sc->bar1, &gva);
+	err = nvgsp_bar_alloc_bar1_gva(&sc->bar1, &gva);
 	if (err != 0)
 		return (err);
 
 	paddr = nvgsp_vram_alloc_kind(sc, NVGSP_GMMU_PT_PAGE_SIZE,
 	    NVGSP_GMMU_PT_PAGE_SIZE, kind, owner);
 	if (paddr == 0) {
-		nvgsp_bar1_free_gva(&sc->bar1, gva);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 		return (ENOMEM);
 	}
 
-	err = nvgsp_bar1_map_vram(sc, gva, paddr);
+	err = nvgsp_bar_map_bar1_vram(sc, gva, paddr);
 	if (err != 0) {
 		nvgsp_vram_free_kind(sc, paddr, kind, owner);
-		nvgsp_bar1_free_gva(&sc->bar1, gva);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 		return (err);
 	}
-	nvgsp_bar1_flush(sc);
+	nvgsp_bar_flush_bar1(sc);
 
 	page->vram_paddr = paddr;
 	page->bar1_gva   = gva;
@@ -1216,19 +1216,19 @@ nvgsp_bar1_alloc_page_kind(struct nvgsp_state *sc,
 }
 
 int
-nvgsp_bar1_alloc_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
+nvgsp_bar_alloc_bar1_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
 {
-	return (nvgsp_bar1_alloc_page_kind(sc, page, NVGSP_VRAM_BAR1_PAGE,
+	return (nvgsp_bar_alloc_bar1_page_kind(sc, page, NVGSP_VRAM_BAR1_PAGE,
 	    &sc->bar1));
 }
 
 void
-nvgsp_bar1_free_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
+nvgsp_bar_free_bar1_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
 {
 	if (page->bar1_gva != 0) {
-		if (nvgsp_bar1_clear_gva(sc, page->bar1_gva) == 0)
-			nvgsp_bar1_invalidate(sc);
-		nvgsp_bar1_free_gva(&sc->bar1, page->bar1_gva);
+		if (nvgsp_bar_clear_bar1_gva(sc, page->bar1_gva) == 0)
+			nvgsp_bar_invalidate_bar1(sc);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, page->bar1_gva);
 	}
 	if (page->vram_paddr != 0)
 		nvgsp_vram_free_kind(sc, page->vram_paddr, page->kind,
@@ -1247,7 +1247,7 @@ nvgsp_bar1_free_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
  * aligned. Release the GVA with nvgsp_bar1_unmap_existing.
  */
 int
-nvgsp_bar1_map_existing(struct nvgsp_state *sc, uint64_t paddr, uint64_t *pgva)
+nvgsp_bar_map_bar1_existing(struct nvgsp_state *sc, uint64_t paddr, uint64_t *pgva)
 {
 	uint64_t gva;
 	int err;
@@ -1255,23 +1255,23 @@ nvgsp_bar1_map_existing(struct nvgsp_state *sc, uint64_t paddr, uint64_t *pgva)
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
-	err = nvgsp_bar1_alloc_gva(&sc->bar1, &gva);
+	err = nvgsp_bar_alloc_bar1_gva(&sc->bar1, &gva);
 	if (err != 0)
 		return (err);
 
-	err = nvgsp_bar1_map_vram(sc, gva, paddr);
+	err = nvgsp_bar_map_bar1_vram(sc, gva, paddr);
 	if (err != 0) {
-		nvgsp_bar1_free_gva(&sc->bar1, gva);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 		return (err);
 	}
-	nvgsp_bar1_flush(sc);
+	nvgsp_bar_flush_bar1(sc);
 
 	*pgva = gva;
 	return (0);
 }
 
 int
-nvgsp_bar1_map_existing_range(struct nvgsp_state *sc, uint64_t paddr,
+nvgsp_bar_map_bar1_existing_range(struct nvgsp_state *sc, uint64_t paddr,
     uint64_t size, uint64_t *pgva)
 {
 	uint64_t gva;
@@ -1289,45 +1289,45 @@ nvgsp_bar1_map_existing_range(struct nvgsp_state *sc, uint64_t paddr,
 	if (pages == 0 || pages > NVGSP_BAR1_GVA_ALLOC_PAGES)
 		return (EINVAL);
 
-	err = nvgsp_bar1_alloc_gva_range(&sc->bar1, pages, &gva);
+	err = nvgsp_bar_alloc_bar1_gva_range(&sc->bar1, pages, &gva);
 	if (err != 0)
 		return (err);
 
 	for (uint32_t page = 0; page < pages; page++) {
-		err = nvgsp_bar1_map_vram_pte(sc,
+		err = nvgsp_bar_map_bar1_vram_pte(sc,
 		    gva + (uint64_t)page * NVGSP_GMMU_PT_PAGE_SIZE,
 		    paddr + (uint64_t)page * NVGSP_GMMU_PT_PAGE_SIZE);
 		if (err != 0) {
 			for (uint32_t clear = 0; clear < page; clear++) {
-				(void)nvgsp_bar1_clear_gva(sc,
+				(void)nvgsp_bar_clear_bar1_gva(sc,
 				    gva + (uint64_t)clear *
 				    NVGSP_GMMU_PT_PAGE_SIZE);
 			}
 			if (page != 0)
-				nvgsp_bar1_invalidate(sc);
-			nvgsp_bar1_free_gva_range(&sc->bar1, gva, pages);
+				nvgsp_bar_invalidate_bar1(sc);
+			nvgsp_bar_free_bar1_gva_range(&sc->bar1, gva, pages);
 			return (err);
 		}
 	}
-	nvgsp_bar1_invalidate(sc);
-	nvgsp_bar1_flush(sc);
+	nvgsp_bar_invalidate_bar1(sc);
+	nvgsp_bar_flush_bar1(sc);
 
 	*pgva = gva;
 	return (0);
 }
 
 void
-nvgsp_bar1_unmap_existing(struct nvgsp_state *sc, uint64_t gva)
+nvgsp_bar_unmap_bar1_existing(struct nvgsp_state *sc, uint64_t gva)
 {
 	if (gva != 0) {
-		if (nvgsp_bar1_clear_gva(sc, gva) == 0)
-			nvgsp_bar1_invalidate(sc);
-		nvgsp_bar1_free_gva(&sc->bar1, gva);
+		if (nvgsp_bar_clear_bar1_gva(sc, gva) == 0)
+			nvgsp_bar_invalidate_bar1(sc);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 	}
 }
 
 void
-nvgsp_bar1_unmap_existing_range(struct nvgsp_state *sc, uint64_t gva,
+nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *sc, uint64_t gva,
     uint64_t size)
 {
 	uint32_t pages;
@@ -1339,13 +1339,13 @@ nvgsp_bar1_unmap_existing_range(struct nvgsp_state *sc, uint64_t gva,
 	pages = (uint32_t)((size + NVGSP_GMMU_PT_PAGE_SIZE - 1) /
 	    NVGSP_GMMU_PT_PAGE_SIZE);
 	for (uint32_t page = 0; page < pages; page++) {
-		if (nvgsp_bar1_clear_gva(sc,
+		if (nvgsp_bar_clear_bar1_gva(sc,
 		    gva + (uint64_t)page * NVGSP_GMMU_PT_PAGE_SIZE) == 0)
 			cleared = true;
 	}
 	if (cleared)
-		nvgsp_bar1_invalidate(sc);
-	nvgsp_bar1_free_gva_range(&sc->bar1, gva, pages);
+		nvgsp_bar_invalidate_bar1(sc);
+	nvgsp_bar_free_bar1_gva_range(&sc->bar1, gva, pages);
 }
 
 /*
@@ -1369,7 +1369,7 @@ nvgsp_bar1_unmap_existing_range(struct nvgsp_state *sc, uint64_t gva,
  *   not IRQ-safe.
  */
 int
-nvgsp_bar1_map_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
+nvgsp_bar_map_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
     uint64_t size, uint64_t *gvas, uint32_t count)
 {
 	uint32_t pages;
@@ -1389,24 +1389,24 @@ nvgsp_bar1_map_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
 	for (uint32_t page = 0; page < pages; page++) {
 		uint64_t gva;
 
-		err = nvgsp_bar1_alloc_gva(&sc->bar1, &gva);
+		err = nvgsp_bar_alloc_bar1_gva(&sc->bar1, &gva);
 		if (err != 0)
 			goto fail;
 
-		err = nvgsp_bar1_map_vram_pte(sc, gva,
+		err = nvgsp_bar_map_bar1_vram_pte(sc, gva,
 		    paddr + (uint64_t)page * NVGSP_GMMU_PT_PAGE_SIZE);
 		if (err != 0) {
-			nvgsp_bar1_free_gva(&sc->bar1, gva);
+			nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 			goto fail;
 		}
 		gvas[page] = gva;
 	}
-	nvgsp_bar1_invalidate(sc);
-	nvgsp_bar1_flush(sc);
+	nvgsp_bar_invalidate_bar1(sc);
+	nvgsp_bar_flush_bar1(sc);
 	return (0);
 
 fail:
-	nvgsp_bar1_unmap_existing_scatter(sc, gvas, pages);
+	nvgsp_bar_unmap_bar1_existing_scatter(sc, gvas, pages);
 	return (err);
 }
 
@@ -1426,7 +1426,7 @@ fail:
  *   The function batches PTE invalidation for all released pages.
  */
 static void
-nvgsp_bar1_unmap_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
+nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
     uint32_t count)
 {
 	bool cleared = false;
@@ -1439,68 +1439,68 @@ nvgsp_bar1_unmap_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
 
 		if (gva == 0)
 			continue;
-		if (nvgsp_bar1_clear_gva(sc, gva) == 0)
+		if (nvgsp_bar_clear_bar1_gva(sc, gva) == 0)
 			cleared = true;
-		nvgsp_bar1_free_gva(&sc->bar1, gva);
+		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 		gvas[page] = 0;
 	}
 	if (cleared)
-		nvgsp_bar1_invalidate(sc);
+		nvgsp_bar_invalidate_bar1(sc);
 }
 
 void
-nvgsp_bar1_dump_pt(struct nvgsp_state *sc __unused,
+nvgsp_bar_dump_bar1_pt(struct nvgsp_state *sc __unused,
     uint64_t target_paddr __unused, uint32_t target_off __unused)
 {
 }
 
 int
-nvgsp_bar2_init(struct nvgpu_device *gpu)
+nvgsp_bar_init_bar2(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp == NULL)
 		return (ENXIO);
-	return (nvgsp_bar2_start(gsp));
+	return (nvgsp_bar_start_bar2(gsp));
 }
 
 void
-nvgsp_bar2_fini(struct nvgpu_device *gpu)
+nvgsp_bar_fini_bar2(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp != NULL)
-		nvgsp_bar2_stop(gsp);
+		nvgsp_bar_stop_bar2(gsp);
 }
 
 int
-nvgsp_bar1_init(struct nvgpu_device *gpu)
+nvgsp_bar_init_bar1(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp == NULL)
 		return (ENXIO);
-	return (nvgsp_bar1_start(gsp));
+	return (nvgsp_bar_start_bar1(gsp));
 }
 
 void
-nvgsp_bar1_fini(struct nvgpu_device *gpu)
+nvgsp_bar_fini_bar1(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp != NULL)
-		nvgsp_bar1_stop(gsp);
+		nvgsp_bar_stop_bar1(gsp);
 }
 
 int
-nvgsp_bar1_map_inst(struct nvgpu_device *gpu)
+nvgsp_bar_map_bar1_inst(struct nvgpu_device *gpu)
 {
 	(void)gpu;
 	return (0);
 }
 
 int
-nvgsp_bar1_map_userd(struct nvgpu_device *gpu)
+nvgsp_bar_map_bar1_userd(struct nvgpu_device *gpu)
 {
 	(void)gpu;
 	return (0);

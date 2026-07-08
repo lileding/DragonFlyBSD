@@ -88,7 +88,7 @@ rpc_to_msg(struct nvgsp_nvfw_gsp_rpc *rpc)
 }
 
 static void
-nvgsp_rpc_diag_queues(struct nvgsp_state *sc, const char *tag,
+nvgsp_rpc_dump_diag_queues(struct nvgsp_state *sc, const char *tag,
     uint32_t fn, uint32_t seq)
 {
 #if NVGSP_RPC_DEBUG_QUEUES
@@ -123,13 +123,13 @@ nvgsp_rpc_diag_queues(struct nvgsp_state *sc, const char *tag,
  * =================================================================== */
 
 void
-nvgsp_msg_ntfy_init(struct nvgsp_state *sc)
+nvgsp_rpc_init_msg_ntfy(struct nvgsp_state *sc)
 {
 	sc->gsp_ntfy.cnt = 0;
 }
 
 int
-nvgsp_msg_ntfy_add(struct nvgsp_state *sc, uint32_t fn,
+nvgsp_rpc_add_msg_ntfy(struct nvgsp_state *sc, uint32_t fn,
     nvgsp_msg_ntfy_func handler, void *priv)
 {
 	uint32_t i;
@@ -148,7 +148,7 @@ nvgsp_msg_ntfy_add(struct nvgsp_state *sc, uint32_t fn,
 }
 
 static int
-nvgsp_msg_handle(struct nvgsp_state *sc, uint32_t fn,
+nvgsp_rpc_handle_msg(struct nvgsp_state *sc, uint32_t fn,
     void *repv, uint32_t repc)
 {
 	uint32_t i;
@@ -167,7 +167,7 @@ nvgsp_msg_handle(struct nvgsp_state *sc, uint32_t fn,
 }
 
 static bool
-nvgsp_msg_is_null_event(struct nvgsp_state *sc, uint32_t fn)
+nvgsp_rpc_is_null_event_msg(struct nvgsp_state *sc, uint32_t fn)
 {
 	uint32_t i;
 
@@ -179,7 +179,7 @@ nvgsp_msg_is_null_event(struct nvgsp_state *sc, uint32_t fn)
 }
 
 static uint64_t
-nvgsp_rpc_time_us(void)
+nvgsp_rpc_read_time_us(void)
 {
 	struct timeval tv;
 
@@ -188,7 +188,7 @@ nvgsp_rpc_time_us(void)
 }
 
 static void
-nvgsp_rpc_trace_aux(struct nvgsp_nvfw_gsp_rpc *rpc, uint32_t *aux,
+nvgsp_rpc_get_trace_aux(struct nvgsp_nvfw_gsp_rpc *rpc, uint32_t *aux,
     uint32_t *aux2)
 {
 	const uint32_t *d = (const uint32_t *)rpc->data;
@@ -224,7 +224,7 @@ nvgsp_rpc_trace_aux(struct nvgsp_nvfw_gsp_rpc *rpc, uint32_t *aux,
  * gsp_rpc_trace_on; lock-free circular write (single producer per dir under
  * gsp_tok / ithread, head races are benign for a debug ring). */
 static void
-nvgsp_rpc_trace_add(struct nvgsp_state *sc, uint8_t dir, uint32_t fn,
+nvgsp_rpc_add_trace(struct nvgsp_state *sc, uint8_t dir, uint32_t fn,
     uint32_t seq, uint32_t aux, uint32_t aux2, uint32_t latency_us)
 {
 	uint32_t i;
@@ -232,7 +232,7 @@ nvgsp_rpc_trace_add(struct nvgsp_state *sc, uint8_t dir, uint32_t fn,
 	if (!sc->gsp_rpc_trace_on)
 		return;
 	i = sc->gsp_rpc_trace_head++ % NVGSP_RPC_TRACE_N;
-	sc->gsp_rpc_trace[i].time_us = nvgsp_rpc_time_us();
+	sc->gsp_rpc_trace[i].time_us = nvgsp_rpc_read_time_us();
 	sc->gsp_rpc_trace[i].dir = dir;
 	sc->gsp_rpc_trace[i].fn = fn;
 	sc->gsp_rpc_trace[i].seq = seq;
@@ -246,7 +246,7 @@ nvgsp_rpc_trace_add(struct nvgsp_state *sc, uint8_t dir, uint32_t fn,
  * =================================================================== */
 
 static uint32_t
-nvgsp_msgq_pages(uint32_t len)
+nvgsp_rpc_get_msgq_pages(uint32_t len)
 {
 	uint32_t total_bytes = NVGSP_MSG_HDR_SIZE + len;
 	uint32_t pages = (total_bytes + NVGSP_PAGE_SIZE - 1) /
@@ -260,7 +260,7 @@ nvgsp_msgq_pages(uint32_t len)
 }
 
 static void
-nvgsp_msgq_publish_rptr(struct nvgsp_state *sc)
+nvgsp_rpc_publish_msgq_rptr(struct nvgsp_state *sc)
 {
 	uint8_t *cmdq;
 
@@ -270,7 +270,7 @@ nvgsp_msgq_publish_rptr(struct nvgsp_state *sc)
 }
 
 static bool
-nvgsp_msgq_peek_meta(struct nvgsp_state *sc, uint32_t *out_fn,
+nvgsp_rpc_peek_msgq_meta(struct nvgsp_state *sc, uint32_t *out_fn,
     uint32_t *out_len, uint32_t *out_pages)
 {
 	uint8_t *msgq, *slot;
@@ -295,20 +295,20 @@ nvgsp_msgq_peek_meta(struct nvgsp_state *sc, uint32_t *out_fn,
 	if (out_len != NULL)
 		*out_len = len;
 	if (out_pages != NULL)
-		*out_pages = nvgsp_msgq_pages(len);
+		*out_pages = nvgsp_rpc_get_msgq_pages(len);
 	return (true);
 }
 
 static void
-nvgsp_msgq_skip_pages(struct nvgsp_state *sc, uint32_t pages)
+nvgsp_rpc_skip_msgq_pages(struct nvgsp_state *sc, uint32_t pages)
 {
 	sc->gsp_msgq_rptr = (sc->gsp_msgq_rptr + pages) %
 	    NVGSP_MSGCOUNT;
-	nvgsp_msgq_publish_rptr(sc);
+	nvgsp_rpc_publish_msgq_rptr(sc);
 }
 
 static int
-nvgsp_cmdq_push(struct nvgsp_state *sc, void *params)
+nvgsp_rpc_push_cmdq(struct nvgsp_state *sc, void *params)
 {
 	struct nvgsp_nvfw_gsp_rpc *rpc = params_to_rpc(params);
 	struct nvgsp_msg_env *msg = rpc_to_msg(rpc);
@@ -316,8 +316,8 @@ nvgsp_cmdq_push(struct nvgsp_state *sc, void *params)
 	if (sc->gsp_rpc_trace_on) {
 		uint32_t aux, aux2;
 
-		nvgsp_rpc_trace_aux(rpc, &aux, &aux2);
-		nvgsp_rpc_trace_add(sc, NVGSP_RPC_TX, rpc->function,
+		nvgsp_rpc_get_trace_aux(rpc, &aux, &aux2);
+		nvgsp_rpc_add_trace(sc, NVGSP_RPC_TX, rpc->function,
 		    rpc->sequence, aux, aux2, 0);
 	}
 	uint8_t *cmdq, *msgq;
@@ -433,7 +433,7 @@ nvgsp_cmdq_push(struct nvgsp_state *sc, void *params)
  * extend later.
  */
 static void *
-nvgsp_msgq_recv_one_elem(struct nvgsp_state *sc, uint32_t want_len,
+nvgsp_rpc_recv_msgq_elem(struct nvgsp_state *sc, uint32_t want_len,
     uint32_t *out_fn, uint32_t *out_len)
 {
 	uint8_t *msgq, *slot;
@@ -489,7 +489,7 @@ nvgsp_msgq_recv_one_elem(struct nvgsp_state *sc, uint32_t want_len,
 		nvgsp_debugf(sc->dev,
 		    "msgq[%u]: invalid rpc length %u fn=0x%x sig=0x%08x - skipping one page\n",
 		    sc->gsp_msgq_rptr, len, fn, sig);
-		nvgsp_msgq_skip_pages(sc, 1);
+		nvgsp_rpc_skip_msgq_pages(sc, 1);
 		return (NULL);
 	}
 
@@ -521,7 +521,7 @@ nvgsp_msgq_recv_one_elem(struct nvgsp_state *sc, uint32_t want_len,
 	 * DIV_ROUND_UP(GSP_MSG_HDR_SIZE + rpc->length, GSP_PAGE_SIZE),
 	 * not from elemCount header field.
 	 */
-	nvgsp_msgq_skip_pages(sc, nvgsp_msgq_pages(len));
+	nvgsp_rpc_skip_msgq_pages(sc, nvgsp_rpc_get_msgq_pages(len));
 
 	if (out_fn)  *out_fn = fn;
 	if (out_len) *out_len = len;
@@ -536,28 +536,28 @@ nvgsp_msgq_recv_one_elem(struct nvgsp_state *sc, uint32_t want_len,
  * by nvgsp_msgq_recv_one_elem.
  */
 static void
-nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
+nvgsp_rpc_drain_msgq_locked(struct nvgsp_state *sc)
 {
 	for (;;) {
 		uint32_t fn = 0, len = 0;
 		uint32_t pages = 0;
 		void *buf;
 
-		if (nvgsp_msgq_peek_meta(sc, &fn, &len, &pages) &&
-		    fn >= 0x1000 && nvgsp_msg_is_null_event(sc, fn)) {
+		if (nvgsp_rpc_peek_msgq_meta(sc, &fn, &len, &pages) &&
+		    fn >= 0x1000 && nvgsp_rpc_is_null_event_msg(sc, fn)) {
 			uint32_t plen = (len > NVGSP_RPC_HDR_SIZE) ?
 			    len - NVGSP_RPC_HDR_SIZE : 0;
 
-			nvgsp_rpc_trace_add(sc, NVGSP_RPC_EVENT, fn, 0,
+			nvgsp_rpc_add_trace(sc, NVGSP_RPC_EVENT, fn, 0,
 			    plen, 0, 0);
 			sc->gsp_msgq_null_event_drop_count++;
 			sc->gsp_msgq_null_event_drop_bytes += plen;
 			sc->gsp_msgq_null_event_last_fn = fn;
-			nvgsp_msgq_skip_pages(sc, pages);
+			nvgsp_rpc_skip_msgq_pages(sc, pages);
 			continue;
 		}
 
-		buf = nvgsp_msgq_recv_one_elem(sc, 0, &fn, &len);
+		buf = nvgsp_rpc_recv_msgq_elem(sc, 0, &fn, &len);
 		if (buf == NULL)
 			return;
 
@@ -579,7 +579,7 @@ nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
 				if (p->seq == r->sequence) {
 					if (sc->gsp_rpc_trace_on) {
 						uint64_t now_us =
-						    nvgsp_rpc_time_us();
+						    nvgsp_rpc_read_time_us();
 						uint32_t latency_us = 0;
 
 						if (p->tx_us != 0 &&
@@ -591,7 +591,7 @@ nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
 							    UINT32_MAX :
 							    (uint32_t)delta;
 						}
-						nvgsp_rpc_trace_add(sc,
+						nvgsp_rpc_add_trace(sc,
 						    NVGSP_RPC_RX, fn,
 						    r->sequence, len, 0,
 						    latency_us);
@@ -610,7 +610,7 @@ nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
 				}
 			}
 			if (!matched) {
-				nvgsp_rpc_trace_add(sc, NVGSP_RPC_STALE,
+				nvgsp_rpc_add_trace(sc, NVGSP_RPC_STALE,
 				    fn, r->sequence, len, 0, 0);
 				nvgsp_debugf(sc->dev,
 				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
@@ -625,9 +625,9 @@ nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
 			uint32_t plen = (len > NVGSP_RPC_HDR_SIZE) ?
 			    len - NVGSP_RPC_HDR_SIZE : 0;
 			uint8_t *params = (uint8_t *)buf + NVGSP_RPC_HDR_SIZE;
-			nvgsp_rpc_trace_add(sc, NVGSP_RPC_EVENT, fn, 0,
+			nvgsp_rpc_add_trace(sc, NVGSP_RPC_EVENT, fn, 0,
 			    plen, 0, 0);
-			(void)nvgsp_msg_handle(sc, fn, params, plen);
+			(void)nvgsp_rpc_handle_msg(sc, fn, params, plen);
 		}
 		kfree(buf, M_TEMP);
 	}
@@ -636,10 +636,10 @@ nvgsp_msgq_drain_locked(struct nvgsp_state *sc)
 /* Public drain entry: takes gsp_tok and runs msgq_drain_locked. Safe to
  * call from any lwkt (ISR or ioctl). */
 int
-nvgsp_msg_dispatch_all(struct nvgsp_state *sc)
+nvgsp_rpc_dispatch_all_msgs(struct nvgsp_state *sc)
 {
 	lwkt_gettoken(&sc->gsp_tok);
-	nvgsp_msgq_drain_locked(sc);
+	nvgsp_rpc_drain_msgq_locked(sc);
 	lwkt_reltoken(&sc->gsp_tok);
 	return (0);
 }
@@ -705,10 +705,10 @@ nvgsp_rpc_push(struct nvgsp_state *sc, void *params, int policy,
 			rpc->sequence = seq;
 		}
 		if (!sc->gsp_running || (fn == 103 || fn == 76))
-			nvgsp_rpc_diag_queues(sc, "before-push", fn, seq);
-		err = nvgsp_cmdq_push(sc, params);	/* frees the buffer */
+			nvgsp_rpc_dump_diag_queues(sc, "before-push", fn, seq);
+		err = nvgsp_rpc_push_cmdq(sc, params);	/* frees the buffer */
 		if (!sc->gsp_running || (fn == 103 || fn == 76))
-			nvgsp_rpc_diag_queues(sc, "after-push", fn, seq);
+			nvgsp_rpc_dump_diag_queues(sc, "after-push", fn, seq);
 		lwkt_reltoken(&sc->gsp_tok);
 		if (err != 0)
 			return (NULL);
@@ -737,13 +737,13 @@ nvgsp_rpc_push(struct nvgsp_state *sc, void *params, int policy,
 		rpc->sequence = seq;
 		p.seq = seq;
 		if (sc->gsp_rpc_trace_on)
-			p.tx_us = nvgsp_rpc_time_us();
+			p.tx_us = nvgsp_rpc_read_time_us();
 		LIST_INSERT_HEAD(&sc->gsp_pending, &p, link);
 		if (!sc->gsp_running || (fn == 103 || fn == 76))
-			nvgsp_rpc_diag_queues(sc, "before-push", fn, seq);
-		err = nvgsp_cmdq_push(sc, params);	/* frees the buffer */
+			nvgsp_rpc_dump_diag_queues(sc, "before-push", fn, seq);
+		err = nvgsp_rpc_push_cmdq(sc, params);	/* frees the buffer */
 		if (!sc->gsp_running || (fn == 103 || fn == 76))
-			nvgsp_rpc_diag_queues(sc, "after-push", fn, seq);
+			nvgsp_rpc_dump_diag_queues(sc, "after-push", fn, seq);
 		if (err != 0) {
 			LIST_REMOVE(&p, link);
 			lwkt_reltoken(&sc->gsp_tok);
@@ -771,48 +771,48 @@ nvgsp_rpc_push(struct nvgsp_state *sc, void *params, int policy,
 		 *   avoids quantizing every RM RPC to hz/10.
 		 */
 		if ((fn == 103 || fn == 76))
-			nvgsp_rpc_diag_queues(sc, "await-start", fn, p.seq);
+			nvgsp_rpc_dump_diag_queues(sc, "await-start", fn, p.seq);
 		while (!atomic_load_acq_int(&p.done) && timeout_ticks > 0) {
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "drain-before", fn, p.seq);
-			nvgsp_msgq_drain_locked(sc);
+				nvgsp_rpc_dump_diag_queues(sc, "drain-before", fn, p.seq);
+			nvgsp_rpc_drain_msgq_locked(sc);
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "drain-after", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "drain-after", fn, p.seq);
 			if (atomic_load_acq_int(&p.done))
 				break;
 
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "fast-start", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "fast-start", fn, p.seq);
 			for (fast_poll_us = 0;
 			    fast_poll_us < NVGSP_RPC_FAST_POLL_US;
 			    fast_poll_us += NVGSP_RPC_FAST_POLL_STEP_US) {
 				DELAY(NVGSP_RPC_FAST_POLL_STEP_US);
-				nvgsp_msgq_drain_locked(sc);
+				nvgsp_rpc_drain_msgq_locked(sc);
 				if (atomic_load_acq_int(&p.done))
 					break;
 			}
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "fast-end", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "fast-end", fn, p.seq);
 			if (atomic_load_acq_int(&p.done))
 				break;
 
 			ticks_to_wait = (timeout_ticks > 1) ? 1 : timeout_ticks;
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "sleep-before", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "sleep-before", fn, p.seq);
 			(void)tsleep(&p, 0, "gsprpc", ticks_to_wait);
 			if ((fn == 103 || fn == 76))
-				nvgsp_rpc_diag_queues(sc, "sleep-after", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "sleep-after", fn, p.seq);
 			waited_ticks += ticks_to_wait;
 			timeout_ticks -= ticks_to_wait;
 			if (hz > 0 && waited_ticks % hz == 0)
-				nvgsp_rpc_diag_queues(sc, "wait", fn, p.seq);
+				nvgsp_rpc_dump_diag_queues(sc, "wait", fn, p.seq);
 		}
 
 		LIST_REMOVE(&p, link);
 		lwkt_reltoken(&sc->gsp_tok);
 
 		if (!atomic_load_acq_int(&p.done)) {
-			nvgsp_rpc_diag_queues(sc, "timeout", fn, p.seq);
+			nvgsp_rpc_dump_diag_queues(sc, "timeout", fn, p.seq);
 			nvgsp_debugf(sc->dev,
 			    "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
 			    fn, p.seq);
@@ -826,7 +826,7 @@ nvgsp_rpc_push(struct nvgsp_state *sc, void *params, int policy,
 }
 
 void
-nvgsp_rpc_done(struct nvgsp_state *sc, void *params)
+nvgsp_rpc_complete(struct nvgsp_state *sc, void *params)
 {
 	(void)sc;
 	if (params == NULL || params == (void *)(uintptr_t)1)
@@ -845,9 +845,9 @@ nvgsp_rpc_set_system_info(struct nvgsp_state *sc)
 {
 	GspSystemInfo *info;
 
-	if (nvgpu_device_bar(sc->gpu, 0) == NULL ||
-	    nvgpu_device_bar(sc->gpu, 1) == NULL ||
-	    nvgpu_device_bar(sc->gpu, 3) == NULL) {
+	if (nvgpu_device_get_bar(sc->gpu, 0) == NULL ||
+	    nvgpu_device_get_bar(sc->gpu, 1) == NULL ||
+	    nvgpu_device_get_bar(sc->gpu, 3) == NULL) {
 		nvgsp_debugf(sc->dev,
 		    "set_system_info: skipped (BARs not allocated)\n");
 		return (ENXIO);
@@ -858,9 +858,9 @@ nvgsp_rpc_set_system_info(struct nvgsp_state *sc)
 	if (info == NULL)
 		return (ENOMEM);
 
-	info->gpuPhysAddr     = rman_get_start(nvgpu_device_bar(sc->gpu, 0));
-	info->gpuPhysFbAddr   = rman_get_start(nvgpu_device_bar(sc->gpu, 1));
-	info->gpuPhysInstAddr = rman_get_start(nvgpu_device_bar(sc->gpu, 3));
+	info->gpuPhysAddr     = rman_get_start(nvgpu_device_get_bar(sc->gpu, 0));
+	info->gpuPhysFbAddr   = rman_get_start(nvgpu_device_get_bar(sc->gpu, 1));
+	info->gpuPhysInstAddr = rman_get_start(nvgpu_device_get_bar(sc->gpu, 3));
 	info->gpuPhysIoAddr   = 0;
 	{
 		/* Open-rm encoding (g_gpu_nvoc.h:476-478):
@@ -898,7 +898,7 @@ struct nvgsp_rpc_unloading_guest_driver {
 };
 
 int
-nvgsp_rpc_unloading_guest_driver_state(struct nvgsp_state *sc)
+nvgsp_rpc_get_unloading_guest_driver_state(struct nvgsp_state *sc)
 {
 	struct nvgsp_rpc_unloading_guest_driver *rpc;
 
@@ -950,7 +950,7 @@ nvgsp_rpc_init(struct nvgpu_device *gpu)
 
 /* Queue early system-info RPC during GSP boot. */
 int
-nvgsp_rpc_prequeue_system_info(struct nvgpu_device *gpu)
+nvgsp_rpc_enqueue_system_info_preinit(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
@@ -961,7 +961,7 @@ nvgsp_rpc_prequeue_system_info(struct nvgpu_device *gpu)
 
 /* Queue early registry RPC during GSP boot. */
 int
-nvgsp_rpc_prequeue_registry(struct nvgpu_device *gpu)
+nvgsp_rpc_enqueue_registry_preinit(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
@@ -972,11 +972,11 @@ nvgsp_rpc_prequeue_registry(struct nvgpu_device *gpu)
 
 /* Notify GSP that the driver is unloading; may wait for RPC completion. */
 int
-nvgsp_rpc_unloading_guest_driver(struct nvgpu_device *gpu)
+nvgsp_rpc_send_unloading_guest_driver(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp == NULL)
 		return (ENXIO);
-	return (nvgsp_rpc_unloading_guest_driver_state(gsp));
+	return (nvgsp_rpc_get_unloading_guest_driver_state(gsp));
 }

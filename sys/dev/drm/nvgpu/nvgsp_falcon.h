@@ -39,7 +39,7 @@ struct nvgsp_falcon {
 	uint32_t		fbif;
 };
 
-void	nvgsp_falcon_core_init(struct nvgsp_falcon *flcn, struct nvgsp_state *sc,
+void	nvgsp_falcon_init_core(struct nvgsp_falcon *flcn, struct nvgsp_state *sc,
 	    const char *name, uint32_t addr, uint32_t addr2, uint32_t fbif);
 
 static __inline uint32_t
@@ -82,7 +82,7 @@ nvgsp_falcon_fbif_rd32(struct nvgsp_falcon *flcn, uint32_t off)
 }
 
 bool	nvgsp_falcon_has_riscv(struct nvgsp_falcon *flcn);
-bool	nvgsp_falcon_riscv_active(struct nvgsp_falcon *flcn);
+bool	nvgsp_falcon_is_riscv_active(struct nvgsp_falcon *flcn);
 
 int	nvgsp_falcon_wait_for_scrub(struct nvgsp_falcon *flcn, int timeout_us);
 int	nvgsp_falcon_wait_for_halt(struct nvgsp_falcon *flcn, int timeout_us);

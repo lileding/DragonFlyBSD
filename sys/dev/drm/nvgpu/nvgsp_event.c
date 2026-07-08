@@ -86,20 +86,20 @@ nvgsp_event_init(struct nvgpu_device *gpu)
 
 	if (gsp == NULL)
 		return (ENXIO);
-	nvgsp_msg_ntfy_init(gsp);
-	error = nvgsp_msg_ntfy_add(gsp, NV_VGPU_MSG_EVENT_GSP_INIT_DONE,
+	nvgsp_rpc_init_msg_ntfy(gsp);
+	error = nvgsp_rpc_add_msg_ntfy(gsp, NV_VGPU_MSG_EVENT_GSP_INIT_DONE,
 	    nvgsp_event_on_init_done, gsp);
 	if (error != 0)
 		return (error);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1002, nvgsp_seq_msg_handler, gsp);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1020, NULL, NULL);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x101c, NULL, NULL);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1003, nvgsp_event_log_only, gsp);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1004, nvgsp_event_log_only, gsp);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1005, nvgsp_event_log_only, gsp);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x1006, nvgsp_event_log_only, gsp);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x100c, NULL, NULL);
-	(void)nvgsp_msg_ntfy_add(gsp, 0x100f, NULL, NULL);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1002, nvgsp_seq_handle_msg, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1020, NULL, NULL);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x101c, NULL, NULL);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1003, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1004, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1005, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1006, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x100c, NULL, NULL);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x100f, NULL, NULL);
 	return (0);
 }
 
@@ -113,7 +113,7 @@ nvgsp_event_poll_init_done(struct nvgpu_device *gpu)
 	if (gsp == NULL)
 		return (ENXIO);
 	for (spin = 0; spin < 5000 && !gsp->gsp_running; spin++) {
-		(void)nvgsp_msg_dispatch_all(gsp);
+		(void)nvgsp_rpc_dispatch_all_msgs(gsp);
 		if (gsp->gsp_running)
 			break;
 		DELAY(1000);
@@ -132,7 +132,7 @@ nvgsp_event_dispatch(struct nvgpu_device *gpu)
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 
 	if (gsp != NULL)
-		(void)nvgsp_msg_dispatch_all(gsp);
+		(void)nvgsp_rpc_dispatch_all_msgs(gsp);
 }
 
 /* Wake GSP message-queue waiters. */

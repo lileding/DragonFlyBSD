@@ -10,6 +10,6 @@
 struct nvgpu_device;
 
 /* Handle one EXEC completion event.  gpu is borrowed; wake scheduler state, do not free jobs inline. */
-void nvgpu_exec_intr_complete(struct nvgpu_device *gpu);
+void nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_EXEC_H_ */

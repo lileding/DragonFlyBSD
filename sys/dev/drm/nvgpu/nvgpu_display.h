@@ -10,6 +10,6 @@
 struct nvgpu_device;
 
 /* Handle one vblank event.  gpu is borrowed; called from display/interrupt fanout. */
-void nvgpu_display_vblank(struct nvgpu_device *gpu);
+void nvgpu_display_handle_vblank(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_DISPLAY_H_ */

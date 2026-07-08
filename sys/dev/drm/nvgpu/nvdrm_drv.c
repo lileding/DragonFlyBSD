@@ -21,8 +21,8 @@
 #define NVDRM_DRM_PATCH		1
 
 static int nvdrm_open(struct drm_device *ddev, struct drm_file *file_priv);
-static void nvdrm_postclose(struct drm_device *ddev, struct drm_file *file_priv);
-static void nvdrm_lastclose(struct drm_device *ddev);
+static void nvdrm_handle_postclose(struct drm_device *ddev, struct drm_file *file_priv);
+static void nvdrm_handle_lastclose(struct drm_device *ddev);
 
 static const struct file_operations nvdrm_fops = {
 	.owner = THIS_MODULE,
@@ -39,26 +39,26 @@ static struct drm_driver nvdrm_driver = {
 	.minor = NVDRM_DRM_MINOR,
 	.patchlevel = NVDRM_DRM_PATCH,
 	.open = nvdrm_open,
-	.postclose = nvdrm_postclose,
-	.lastclose = nvdrm_lastclose,
+	.postclose = nvdrm_handle_postclose,
+	.lastclose = nvdrm_handle_lastclose,
 };
 
 static int
 nvdrm_open(struct drm_device *ddev, struct drm_file *file_priv)
 {
 	(void)file_priv;
-	return (nvgpu_unload_file_open(ddev->dev_private));
+	return (nvgpu_unload_hold_by_drm(ddev->dev_private));
 }
 
 static void
-nvdrm_postclose(struct drm_device *ddev, struct drm_file *file_priv)
+nvdrm_handle_postclose(struct drm_device *ddev, struct drm_file *file_priv)
 {
 	(void)file_priv;
-	nvgpu_unload_file_close(ddev->dev_private);
+	nvgpu_unload_release_by_drm(ddev->dev_private);
 }
 
 static void
-nvdrm_lastclose(struct drm_device *ddev)
+nvdrm_handle_lastclose(struct drm_device *ddev)
 {
 	(void)ddev;
 	nvgpu_log(NVGPU_LOG_DEBUG, "lastclose\n");
@@ -72,7 +72,7 @@ nvdrm_register(struct nvgpu_device *gpu)
 	struct drm_device *ddev;
 	int error;
 
-	drm_init_pdev(nvgpu_device_dev(gpu), &pdev);
+	drm_init_pdev(nvgpu_device_get_newbus_dev(gpu), &pdev);
 	if (pdev == NULL) {
 		nvgpu_log(NVGPU_LOG_INFO, "drm_init_pdev failed\n");
 		return (ENOMEM);
@@ -112,8 +112,8 @@ nvdrm_unregister(struct nvgpu_device *gpu)
 	struct drm_device *ddev;
 	struct pci_dev *pdev;
 
-	ddev = nvgpu_device_drm_dev(gpu);
-	pdev = nvgpu_device_drm_pdev(gpu);
+	ddev = nvgpu_device_get_drm_dev(gpu);
+	pdev = nvgpu_device_get_drm_pdev(gpu);
 	if (ddev != NULL) {
 		drm_dev_unregister(ddev);
 		/* drm_dev_fini() does not run DragonFly's per-device sysctl cleanup. */
@@ -127,7 +127,7 @@ nvdrm_unregister(struct nvgpu_device *gpu)
 }
 
 struct drm_device *
-nvdrm_device(struct nvgpu_device *gpu)
+nvdrm_get_device(struct nvgpu_device *gpu)
 {
-	return (nvgpu_device_drm_dev(gpu));
+	return (nvgpu_device_get_drm_dev(gpu));
 }

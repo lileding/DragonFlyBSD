@@ -481,7 +481,7 @@ nvgsp_fwsec_run_cmd(struct nvgsp_state *sc, uint32_t init_cmd,
 	/* 2. Allocate DMA-coherent staging: imem block + dmem block.
 	 * Open-rm aligns code and data sections to 256 bytes individually. */
 	ucode_size = roundup(imem_total, 256) + roundup(dmem_size, 256);
-	error = nvgsp_dmamem_alloc(sc, ucode_size, 4096, &fw_dma);
+	error = nvgsp_dma_alloc_dmamem(sc, ucode_size, 4096, &fw_dma);
 	if (error != 0)
 		return (error);
 
@@ -536,13 +536,13 @@ nvgsp_fwsec_run_cmd(struct nvgsp_state *sc, uint32_t init_cmd,
 	if (bl_fw == NULL) {
 		nvgsp_debugf(sc->dev,
 		    "fwsec: %s firmware not loaded\n", sc->chip->fw_acr_bl);
-		nvgsp_dmamem_free(sc, &fw_dma);
+		nvgsp_dma_free_dmamem(sc, &fw_dma);
 		return (ENOENT);
 	}
 	if (bl_fw->datasize < sizeof(*bl_bh) + sizeof(*bl_bd)) {
 		nvgsp_debugf(sc->dev, "fwsec: acr/bl too small\n");
 		firmware_put(bl_fw, FIRMWARE_UNLOAD);
-		nvgsp_dmamem_free(sc, &fw_dma);
+		nvgsp_dma_free_dmamem(sc, &fw_dma);
 		return (EIO);
 	}
 	bl_bh = (const struct nvgsp_bin_hdr *)bl_fw->data;
@@ -719,6 +719,6 @@ nvgsp_fwsec_run_cmd(struct nvgsp_state *sc, uint32_t init_cmd,
 
 out:
 	firmware_put(bl_fw, FIRMWARE_UNLOAD);
-	nvgsp_dmamem_free(sc, &fw_dma);
+	nvgsp_dma_free_dmamem(sc, &fw_dma);
 	return (error);
 }

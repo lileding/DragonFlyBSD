@@ -157,7 +157,7 @@ struct nvgsp_gr_zcull_info_params {
 };
 
 static uint64_t
-nvgsp_order_base_2_u64(uint64_t value)
+nvgsp_channel_calc_order_base_2_u64(uint64_t value)
 {
 	uint64_t order = 0;
 	uint64_t size = 1;
@@ -170,7 +170,7 @@ nvgsp_order_base_2_u64(uint64_t value)
 }
 
 int
-nvgsp_chid_alloc(struct nvgsp_state *gsp)
+nvgsp_channel_alloc_chid(struct nvgsp_state *gsp)
 {
 	int chid = -1;
 	int w, b;
@@ -194,7 +194,7 @@ nvgsp_chid_alloc(struct nvgsp_state *gsp)
 }
 
 void
-nvgsp_chid_free(struct nvgsp_state *gsp, int chid)
+nvgsp_channel_free_chid(struct nvgsp_state *gsp, int chid)
 {
 	if (gsp == NULL || chid < 0 || chid >= 2048)
 		return;
@@ -206,7 +206,7 @@ nvgsp_chid_free(struct nvgsp_state *gsp, int chid)
 }
 
 static int
-nvgsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id, uint8_t *global,
+nvgsp_channel_map_gr_ctxbuf(uint32_t engine_id, uint32_t *buffer_id, uint8_t *global,
     uint8_t *init, uint8_t *ro, uint8_t *nonmapped)
 {
 	*global = 1;
@@ -253,7 +253,7 @@ nvgsp_gr_ctxbuf_map(uint32_t engine_id, uint32_t *buffer_id, uint8_t *global,
 }
 
 static struct nvgsp_gr_ctxbuf *
-nvgsp_gr_global_ctxbuf(struct nvgsp_state *gsp, uint32_t buffer_id)
+nvgsp_channel_get_gr_global_ctxbuf(struct nvgsp_state *gsp, uint32_t buffer_id)
 {
 	for (uint32_t i = 0; i < gsp->gr_ctxbuf_global_nr; i++) {
 		if (gsp->gr_ctxbuf_global[i].buffer_id == buffer_id)
@@ -263,7 +263,7 @@ nvgsp_gr_global_ctxbuf(struct nvgsp_state *gsp, uint32_t buffer_id)
 }
 
 static int
-nvgsp_gr_save_global_ctxbuf(struct nvgsp_state *gsp,
+nvgsp_channel_save_gr_global_ctxbuf(struct nvgsp_state *gsp,
     const struct nvgsp_gr_ctxbuf *buf)
 {
 	if (gsp->gr_ctxbuf_global_nr >= NVGSP_GR_MAX_CTXBUFS)
@@ -276,9 +276,9 @@ static void
 nvgsp_channel_submit_dmamem_free(struct nvgsp_state *gsp,
     struct nvgsp_channel *chan)
 {
-	nvgsp_dmamem_free(gsp, &chan->submit_sema);
-	nvgsp_dmamem_free(gsp, &chan->submit_gpf);
-	nvgsp_dmamem_free(gsp, &chan->submit_push);
+	nvgsp_dma_free_dmamem(gsp, &chan->submit_sema);
+	nvgsp_dma_free_dmamem(gsp, &chan->submit_gpf);
+	nvgsp_dma_free_dmamem(gsp, &chan->submit_push);
 }
 
 static int
@@ -287,15 +287,15 @@ nvgsp_channel_submit_dmamem_alloc(struct nvgsp_state *gsp,
 {
 	int error;
 
-	error = nvgsp_dmamem_alloc(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
+	error = nvgsp_dma_alloc_dmamem(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
 	    NVGSP_GMMU_PT_PAGE_SIZE, &chan->submit_push);
 	if (error != 0)
 		return (error);
-	error = nvgsp_dmamem_alloc(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
+	error = nvgsp_dma_alloc_dmamem(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
 	    NVGSP_GMMU_PT_PAGE_SIZE, &chan->submit_gpf);
 	if (error != 0)
 		goto fail;
-	error = nvgsp_dmamem_alloc(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
+	error = nvgsp_dma_alloc_dmamem(gsp, NVGSP_GMMU_PT_PAGE_SIZE,
 	    NVGSP_GMMU_PT_PAGE_SIZE, &chan->submit_sema);
 	if (error != 0)
 		goto fail;
@@ -313,13 +313,13 @@ nvgsp_channel_zero_vram(struct nvgsp_state *gsp, uint64_t paddr, uint64_t size)
 	int error;
 
 	for (off = 0; off < size; off += NVGSP_GMMU_PT_PAGE_SIZE) {
-		error = nvgsp_bar2_map_vram(gsp, NVGSP_BAR2_ZERO_GVA, paddr + off);
+		error = nvgsp_bar_map_bar2_vram(gsp, NVGSP_BAR2_ZERO_GVA, paddr + off);
 		if (error != 0)
 			return (error);
-		nvgsp_bar2_flush(gsp);
+		nvgsp_bar_flush_bar2(gsp);
 		for (uint32_t i = 0; i < NVGSP_GMMU_PT_PAGE_SIZE; i += 4)
-			nvgsp_bar2_wr32(gsp, NVGSP_BAR2_ZERO_GVA + i, 0);
-		nvgsp_bar2_flush(gsp);
+			nvgsp_bar_wr32_bar2(gsp, NVGSP_BAR2_ZERO_GVA + i, 0);
+		nvgsp_bar_flush_bar2(gsp);
 	}
 	return (0);
 }
@@ -328,8 +328,8 @@ static void
 nvgsp_channel_zero_inst(struct nvgsp_state *gsp, struct nvgsp_channel *chan)
 {
 	for (uint32_t off = 0; off < NV_CHANNEL_INST_SIZE; off += 4)
-		nvgsp_bar1_wr32(gsp, chan->inst_bar1_gva + off, 0);
-	nvgsp_bar1_flush(gsp);
+		nvgsp_bar_wr32_bar1(gsp, chan->inst_bar1_gva + off, 0);
+	nvgsp_bar_flush_bar1(gsp);
 }
 
 static void
@@ -340,9 +340,9 @@ nvgsp_channel_write_inst_pdb(struct nvgsp_state *gsp, struct nvgsp_channel *chan
 	uint32_t pdb_lo = (uint32_t)((pdb >> 12) << 12) | (1u << 10) | (1u << 11);
 	uint32_t pdb_hi = (uint32_t)(pdb >> 32);
 
-	nvgsp_bar1_wr32(gsp, chan->inst_bar1_gva + 0x200, pdb_lo);
-	nvgsp_bar1_wr32(gsp, chan->inst_bar1_gva + 0x204, pdb_hi);
-	nvgsp_bar1_flush(gsp);
+	nvgsp_bar_wr32_bar1(gsp, chan->inst_bar1_gva + 0x200, pdb_lo);
+	nvgsp_bar_wr32_bar1(gsp, chan->inst_bar1_gva + 0x204, pdb_hi);
+	nvgsp_bar_flush_bar1(gsp);
 }
 
 static void
@@ -358,8 +358,8 @@ nvgsp_channel_clear_userd(struct nvgsp_state *gsp,
 	slot_gva = chan->userd_bar1_gva +
 	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
 	for (uint32_t i = 0; i < nitems(clear_offsets); i++)
-		nvgsp_bar1_wr32(gsp, slot_gva + clear_offsets[i], 0);
-	nvgsp_bar1_flush(gsp);
+		nvgsp_bar_wr32_bar1(gsp, slot_gva + clear_offsets[i], 0);
+	nvgsp_bar_flush_bar1(gsp);
 }
 
 static int
@@ -383,7 +383,7 @@ nvgsp_channel_map_submit_pages(struct nvgsp_vmm *vmm, struct nvgsp_channel *chan
 }
 
 static int
-nvgsp_channel_rm_alloc_common(struct nvgsp_vmm *vmm, struct nvgsp_channel *chan,
+nvgsp_channel_alloc_rm_common(struct nvgsp_vmm *vmm, struct nvgsp_channel *chan,
     uint32_t handle, uint32_t engine_type, uint8_t priv, uint64_t inst_addr,
     uint64_t userd_addr, uint64_t mthdbuf_addr, uint32_t mthdbuf_size,
     uint64_t gpfifo_offset, uint32_t gpfifo_length)
@@ -394,7 +394,7 @@ nvgsp_channel_rm_alloc_common(struct nvgsp_vmm *vmm, struct nvgsp_channel *chan,
 	if (vmm == NULL || chan == NULL || vmm->device.object.client == NULL)
 		return (ENXIO);
 
-	args = nvgsp_rm_alloc_get(&vmm->device.object, handle,
+	args = nvgsp_rm_get_alloc(&vmm->device.object, handle,
 	    TURING_CHANNEL_GPFIFO_A, sizeof(*args), &chan->object);
 	if (args == NULL)
 		return (ENOMEM);
@@ -439,7 +439,7 @@ nvgsp_channel_rm_alloc_common(struct nvgsp_vmm *vmm, struct nvgsp_channel *chan,
 	    (unsigned long long)inst_addr, (unsigned long long)userd_addr,
 	    (unsigned long long)mthdbuf_addr, mthdbuf_size,
 	    (unsigned long long)gpfifo_offset, gpfifo_length);
-	return (nvgsp_rm_alloc_wr(&chan->object, args));
+	return (nvgsp_rm_write_alloc(&chan->object, args));
 }
 
 static int
@@ -447,11 +447,11 @@ nvgsp_channel_bind_engine(struct nvgsp_channel *chan, uint32_t engine_type)
 {
 	struct { uint32_t engineType; } *bind;
 
-	bind = nvgsp_rm_ctrl_get(&chan->object, 0xa06f0104u, sizeof(*bind));
+	bind = nvgsp_rm_get_ctrl(&chan->object, 0xa06f0104u, sizeof(*bind));
 	if (bind == NULL)
 		return (ENOMEM);
 	bind->engineType = engine_type;
-	return (nvgsp_rm_ctrl_wr(&chan->object, bind));
+	return (nvgsp_rm_write_ctrl(&chan->object, bind));
 }
 
 static int
@@ -459,12 +459,12 @@ nvgsp_channel_schedule(struct nvgsp_channel *chan)
 {
 	struct { uint8_t bEnable; uint8_t bSkipSubmit; } *sched;
 
-	sched = nvgsp_rm_ctrl_get(&chan->object, 0xa06f0103u, sizeof(*sched));
+	sched = nvgsp_rm_get_ctrl(&chan->object, 0xa06f0103u, sizeof(*sched));
 	if (sched == NULL)
 		return (ENOMEM);
 	sched->bEnable = 1;
 	sched->bSkipSubmit = 0;
-	return (nvgsp_rm_ctrl_wr(&chan->object, sched));
+	return (nvgsp_rm_write_ctrl(&chan->object, sched));
 }
 
 static int
@@ -478,13 +478,13 @@ nvgsp_channel_alloc_ce_object(struct nvgsp_channel *chan, uint32_t engine_type)
 
 	if (engine_type < NV2080_ENGINE_TYPE_COPY0 || engine_type > NV2080_ENGINE_TYPE_COPY2)
 		return (0);
-	args = nvgsp_rm_alloc_get(&chan->object, NVGSP_RM_CE_OBJECT,
+	args = nvgsp_rm_get_alloc(&chan->object, NVGSP_RM_CE_OBJECT,
 	    TURING_DMA_COPY_A, sizeof(*args), &chan->ce_obj);
 	if (args == NULL)
 		return (ENOMEM);
 	args->version = 1;
 	args->engineType = engine_type;
-	error = nvgsp_rm_alloc_wr(&chan->ce_obj, args);
+	error = nvgsp_rm_write_alloc(&chan->ce_obj, args);
 	if (error != 0)
 		memset(&chan->ce_obj, 0, sizeof(chan->ce_obj));
 	return (error);
@@ -497,16 +497,16 @@ nvgsp_channel_get_work_submit_token(struct nvgsp_channel *chan)
 	void *reply;
 	int error;
 
-	token = nvgsp_rm_ctrl_get(&chan->object, 0xc36f0108u, sizeof(*token));
+	token = nvgsp_rm_get_ctrl(&chan->object, 0xc36f0108u, sizeof(*token));
 	if (token == NULL)
 		return (ENOMEM);
 	token->workSubmitToken = 0;
 	reply = token;
-	error = nvgsp_rm_ctrl_rd(&chan->object, &reply, sizeof(*token));
+	error = nvgsp_rm_read_ctrl(&chan->object, &reply, sizeof(*token));
 	if (error == 0 && reply != NULL) {
 		token = reply;
 		chan->gsp_token = token->workSubmitToken;
-		nvgsp_rm_ctrl_done(&chan->object, token);
+		nvgsp_rm_complete_ctrl(&chan->object, token);
 	}
 	return (error);
 }
@@ -523,11 +523,11 @@ nvgsp_channel_alloc_graphics_object(struct nvgpu_device *gpu)
 	if (chan == NULL)
 		return (ENXIO);
 	memset(&threed, 0, sizeof(threed));
-	args = nvgsp_rm_alloc_get(&chan->object, NVGSP_RM_THREED_OBJECT,
-	    nvgpu_device_chip(gpu)->class_3d, 0, &threed);
+	args = nvgsp_rm_get_alloc(&chan->object, NVGSP_RM_THREED_OBJECT,
+	    nvgpu_device_get_chip(gpu)->class_3d, 0, &threed);
 	if (args == NULL)
 		return (ENOMEM);
-	error = nvgsp_rm_alloc_wr(&threed, args);
+	error = nvgsp_rm_write_alloc(&threed, args);
 	if (error == 0)
 		nvgsp_rm_free(&threed);
 	return (error);
@@ -580,13 +580,13 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 	tmp_subdev.parent = NULL;
 	tmp_subdev.handle = gsp->gsp_internal_subdevice;
 
-	info = nvgsp_rm_ctrl_get(&tmp_subdev,
+	info = nvgsp_rm_get_ctrl(&tmp_subdev,
 	    NV2080_CTRL_CMD_INTERNAL_STATIC_KGR_GET_CONTEXT_BUFFERS_INFO,
 	    sizeof(*info));
 	if (info == NULL)
 		return (ENOMEM);
 	reply = info;
-	error = nvgsp_rm_ctrl_rd(&tmp_subdev, &reply, sizeof(*info));
+	error = nvgsp_rm_read_ctrl(&tmp_subdev, &reply, sizeof(*info));
 	if (error != 0 || reply == NULL)
 		return (error != 0 ? error : EIO);
 	info = reply;
@@ -594,16 +594,16 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 	{
 		struct nvgsp_gr_zcull_info_params *zcull;
 
-		zcull = nvgsp_rm_ctrl_get(&tmp_subdev,
+		zcull = nvgsp_rm_get_ctrl(&tmp_subdev,
 		    NV2080_CTRL_CMD_GR_GET_ZCULL_INFO, sizeof(*zcull));
 		if (zcull == NULL) {
-			nvgsp_rm_ctrl_done(&tmp_subdev, info);
+			nvgsp_rm_complete_ctrl(&tmp_subdev, info);
 			return (ENOMEM);
 		}
 		reply = zcull;
-		error = nvgsp_rm_ctrl_rd(&tmp_subdev, &reply, sizeof(*zcull));
+		error = nvgsp_rm_read_ctrl(&tmp_subdev, &reply, sizeof(*zcull));
 		if (error != 0 || reply == NULL) {
-			nvgsp_rm_ctrl_done(&tmp_subdev, info);
+			nvgsp_rm_complete_ctrl(&tmp_subdev, info);
 			return (error != 0 ? error : EIO);
 		}
 		zcull = reply;
@@ -611,13 +611,13 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 		    "gr zcull widthAlign=%u heightAlign=%u subregions=%u\n",
 		    zcull->widthAlignPixels, zcull->heightAlignPixels,
 		    zcull->subregionCount);
-		nvgsp_rm_ctrl_done(&tmp_subdev, zcull);
+		nvgsp_rm_complete_ctrl(&tmp_subdev, zcull);
 	}
 
-	ctrl = nvgsp_rm_ctrl_get(&chan->vmm->device.subdevice,
+	ctrl = nvgsp_rm_get_ctrl(&chan->vmm->device.subdevice,
 	    NV2080_CTRL_CMD_GPU_PROMOTE_CTX, sizeof(*ctrl));
 	if (ctrl == NULL) {
-		nvgsp_rm_ctrl_done(&tmp_subdev, info);
+		nvgsp_rm_complete_ctrl(&tmp_subdev, info);
 		return (ENOMEM);
 	}
 	memset(ctrl, 0, sizeof(*ctrl));
@@ -642,7 +642,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 
 		if (bi->size == 0)
 			continue;
-		if (nvgsp_gr_ctxbuf_map(i, &buffer_id, &global, &init, &ro,
+		if (nvgsp_channel_map_gr_ctxbuf(i, &buffer_id, &global, &init, &ro,
 		    &nonmapped) != 0)
 			continue;
 		if (ctrl->entryCount >= NV2080_CTRL_GPU_PROMOTE_CONTEXT_MAX_ENTRIES ||
@@ -663,7 +663,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 		else
 			page_shift = 12;
 		if (buffer_id == NV2080_CTXBUF_ID_ATTRIBUTE_CB)
-			gva_align_shift = nvgsp_order_base_2_u64(size);
+			gva_align_shift = nvgsp_channel_calc_order_base_2_u64(size);
 		else
 			gva_align_shift = page_shift;
 
@@ -693,7 +693,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 		} else {
 			struct nvgsp_gr_ctxbuf *global_buf;
 
-			global_buf = nvgsp_gr_global_ctxbuf(gsp, buffer_id);
+			global_buf = nvgsp_channel_get_gr_global_ctxbuf(gsp, buffer_id);
 			if (global_buf == NULL) {
 				nvgpu_log(NVGPU_LOG_INFO,
 				    "missing global ctxbuf id=%u\n", buffer_id);
@@ -726,7 +726,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 			ctx_map_dirty = true;
 		}
 		if (golden && global) {
-			error = nvgsp_gr_save_global_ctxbuf(gsp, buf);
+			error = nvgsp_channel_save_gr_global_ctxbuf(gsp, buf);
 			if (error != 0)
 				goto out_done;
 		}
@@ -772,7 +772,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 			} else {
 				struct nvgsp_gr_ctxbuf *global_buf;
 
-				global_buf = nvgsp_gr_global_ctxbuf(gsp,
+				global_buf = nvgsp_channel_get_gr_global_ctxbuf(gsp,
 				    NV2080_CTXBUF_ID_UNRESTRICTED_PRIV_ACCESS_MAP);
 				if (global_buf == NULL) {
 					nvgpu_log(NVGPU_LOG_INFO,
@@ -806,7 +806,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 				goto out_done;
 			ctx_map_dirty = true;
 			if (golden && global) {
-				error = nvgsp_gr_save_global_ctxbuf(gsp, buf);
+				error = nvgsp_channel_save_gr_global_ctxbuf(gsp, buf);
 				if (error != 0)
 					goto out_done;
 			}
@@ -839,7 +839,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 	}
 
 	uint32_t entry_count = ctrl->entryCount;
-	error = nvgsp_rm_ctrl_wr(&chan->vmm->device.subdevice, ctrl);
+	error = nvgsp_rm_write_ctrl(&chan->vmm->device.subdevice, ctrl);
 	nvgpu_log(NVGPU_LOG_DEBUG,
 	    "GPU_PROMOTE_CTX chan=0x%x chid=%d golden=%u entries=%u err=%d\n",
 	    chan->object.handle, chan->chid, golden, entry_count, error);
@@ -849,7 +849,7 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 out_done:
 	if (error != 0 && ctx_map_dirty && !ctx_map_flushed)
 		nvgsp_vmm_flush(chan->vmm);
-	nvgsp_rm_ctrl_done(&tmp_subdev, info);
+	nvgsp_rm_complete_ctrl(&tmp_subdev, info);
 	return (error);
 }
 
@@ -876,7 +876,7 @@ nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu)
 	vmm->submit_gva_slot++;
 	gsp->bootstrap_channel = chan;
 
-	chan->chid = nvgsp_chid_alloc(gsp);
+	chan->chid = nvgsp_channel_alloc_chid(gsp);
 	if (chan->chid < 0) {
 		error = ENOMEM;
 		goto fail;
@@ -896,10 +896,10 @@ nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu)
 		goto fail;
 	}
 
-	error = nvgsp_bar1_map_existing(gsp, chan->inst_vram, &chan->inst_bar1_gva);
+	error = nvgsp_bar_map_bar1_existing(gsp, chan->inst_vram, &chan->inst_bar1_gva);
 	if (error != 0)
 		goto fail;
-	nvgsp_bar1_invalidate(gsp);
+	nvgsp_bar_invalidate_bar1(gsp);
 	nvgsp_channel_zero_inst(gsp, chan);
 	nvgsp_channel_write_inst_pdb(gsp, chan, vmm);
 
@@ -920,15 +920,15 @@ nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu)
 	if (error != 0)
 		goto fail;
 
-	error = nvgsp_bar1_map_existing(gsp,
+	error = nvgsp_bar_map_bar1_existing(gsp,
 	    chan->userd_vram + (uint64_t)userd_page * 0x1000,
 	    &chan->userd_bar1_gva);
 	if (error != 0)
 		goto fail;
-	nvgsp_bar1_invalidate(gsp);
+	nvgsp_bar_invalidate_bar1(gsp);
 	nvgsp_channel_clear_userd(gsp, chan);
 
-	error = nvgsp_channel_rm_alloc_common(vmm, chan,
+	error = nvgsp_channel_alloc_rm_common(vmm, chan,
 	    NVGSP_RM_CHANNEL | (uint32_t)chan->chid, NV2080_ENGINE_TYPE_COPY2, 1,
 	    chan->inst_vram,
 	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
@@ -973,9 +973,9 @@ nvgsp_channel_destroy_bootstrap(struct nvgpu_device *gpu)
 	if (chan->object.handle != 0)
 		nvgsp_rm_free(&chan->object);
 	if (chan->userd_bar1_gva != 0)
-		nvgsp_bar1_unmap_existing(gsp, chan->userd_bar1_gva);
+		nvgsp_bar_unmap_bar1_existing(gsp, chan->userd_bar1_gva);
 	if (chan->inst_bar1_gva != 0)
-		nvgsp_bar1_unmap_existing(gsp, chan->inst_bar1_gva);
+		nvgsp_bar_unmap_bar1_existing(gsp, chan->inst_bar1_gva);
 	if (chan->submit_gva_push != 0 && chan->vmm != NULL)
 		(void)nvgsp_vmm_unmap(chan->vmm, chan->submit_gva_push, 0x3000);
 	if (chan->mthdbuf_kva != NULL)
@@ -983,7 +983,7 @@ nvgsp_channel_destroy_bootstrap(struct nvgpu_device *gpu)
 	nvgsp_channel_submit_dmamem_free(gsp, chan);
 	nvgsp_vram_free_kind(gsp, chan->inst_vram, NVGSP_VRAM_CHANNEL_INST, chan);
 	nvgsp_vram_free_kind(gsp, chan->userd_vram, NVGSP_VRAM_CHANNEL_USERD, chan);
-	nvgsp_chid_free(gsp, chan->chid);
+	nvgsp_channel_free_chid(gsp, chan->chid);
 	kfree(chan, M_NVGSP_CHANNEL);
 	gsp->bootstrap_channel = NULL;
 }
@@ -1021,7 +1021,7 @@ nvgsp_channel_create_golden(struct nvgpu_device *gpu)
 	error = nvgsp_channel_zero_vram(gsp, chan->inst_vram, NV_CHANNEL_GOLDEN_SIZE);
 	if (error != 0)
 		goto fail;
-	error = nvgsp_channel_rm_alloc_common(gsp->golden_vmm, chan,
+	error = nvgsp_channel_alloc_rm_common(gsp->golden_vmm, chan,
 	    NVGSP_RM_CHANNEL, NV2080_ENGINE_TYPE_GRAPHICS, 1, chan->inst_vram,
 	    chan->userd_vram, chan->mthdbuf_paddr, mthdbuf_size, 0, 0x1000);
 	if (error != 0)
