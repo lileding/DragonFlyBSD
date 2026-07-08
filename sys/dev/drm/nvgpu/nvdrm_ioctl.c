@@ -127,7 +127,7 @@ nvdrm_ioctl_getparam(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_getparam(proc, data));
@@ -141,7 +141,7 @@ nvdrm_ioctl_vm_init(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_vm_init(proc, data));
@@ -155,7 +155,7 @@ nvdrm_ioctl_nvif(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_nvif(proc, data));
@@ -169,7 +169,7 @@ nvdrm_ioctl_channel_alloc(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_channel_alloc(proc, data));
@@ -183,7 +183,7 @@ nvdrm_ioctl_channel_free(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_channel_free(proc, data));
@@ -197,7 +197,7 @@ nvdrm_ioctl_gem_new(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_gem_new(proc, data));
@@ -211,7 +211,7 @@ nvdrm_ioctl_gem_info(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_gem_info(proc, data));
@@ -225,7 +225,7 @@ nvdrm_ioctl_gem_cpu_prep(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_gem_cpu_prep(proc, data));
@@ -239,7 +239,7 @@ nvdrm_ioctl_gem_cpu_fini(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_gem_cpu_fini(proc, data));
@@ -253,7 +253,7 @@ nvdrm_ioctl_vm_bind(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_vm_bind(proc, data));
@@ -267,7 +267,7 @@ nvdrm_ioctl_exec(struct drm_device *ddev __unused, void *data,
 	struct nvgpu_proc *proc;
 
 	file = nvdrm_file_from_drm(file_priv);
-	proc = nvdrm_file_proc(file);
+	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
 	return (nvgpu_syscall_exec(proc, data));

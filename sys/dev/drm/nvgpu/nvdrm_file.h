@@ -29,9 +29,9 @@ void nvdrm_file_lastclose(struct drm_device *ddev);
 struct nvdrm_file *nvdrm_file_from_drm(struct drm_file *file);
 
 /* Return the borrowed nvgpu_proc for a live nvdrm_file; no internal locking. */
-struct nvgpu_proc *nvdrm_file_proc(struct nvdrm_file *file);
+struct nvgpu_proc *nvdrm_file_get_proc(struct nvdrm_file *file);
 
 /* Return the borrowed physical GPU for a live nvdrm_file; no internal locking. */
-struct nvgpu_device *nvdrm_file_gpu(struct nvdrm_file *file);
+struct nvgpu_device *nvdrm_file_get_gpu(struct nvdrm_file *file);
 
 #endif /* _NVDRM_FILE_H_ */

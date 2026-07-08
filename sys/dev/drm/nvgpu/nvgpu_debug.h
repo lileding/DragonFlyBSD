@@ -22,12 +22,12 @@ int nvgpu_debug_init(void);
 void nvgpu_debug_fini(void);
 
 /* Backend for nvgpu_log(); use the macro so call-site location is preserved. */
-void nvgpu_emit_log(enum nvgpu_log_level level, const char *file,
+void nvgpu_debug_emit_log(enum nvgpu_log_level level, const char *file,
 	const char *func, int line, const char *fmt, ...) __printflike(5, 6);
 
 /* Log with call-site file/function/line.  The logging backend uses the default GPU if one is published. */
 #define nvgpu_log(level, fmt, ...) \
-	nvgpu_emit_log((level), __FILE__, __func__, __LINE__, (fmt), \
+	nvgpu_debug_emit_log((level), __FILE__, __func__, __LINE__, (fmt), \
 	    ##__VA_ARGS__)
 
 #endif /* _NVGPU_DEBUG_H_ */

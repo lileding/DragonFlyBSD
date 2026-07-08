@@ -15,7 +15,7 @@
 #include "nvgsp_priv.h"
 
 static void
-_nvgsp_dmamem_cb(void *arg, bus_dma_segment_t *segs, int nseg, int error)
+nvgsp_dma_capture_paddr(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 {
 	bus_addr_t *paddr = arg;
 
@@ -51,7 +51,7 @@ nvgsp_dma_alloc_dmamem(struct nvgsp_state *sc, bus_size_t size,
 		bus_dma_tag_destroy(tag);
 		return (ENOMEM);
 	}
-	if (bus_dmamap_load(tag, map, kva, size, _nvgsp_dmamem_cb,
+	if (bus_dmamap_load(tag, map, kva, size, nvgsp_dma_capture_paddr,
 	    &paddr, BUS_DMA_WAITOK) != 0) {
 		bus_dmamem_free(tag, kva, map);
 		bus_dma_tag_destroy(tag);

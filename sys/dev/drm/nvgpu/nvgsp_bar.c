@@ -34,22 +34,22 @@ static void nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc,
     uint64_t *gvas, uint32_t count);
 
 static __inline void
-b2_pramin_set_base(struct nvgsp_state *sc, uint64_t paddr)
+nvgsp_bar2_pramin_set_base(struct nvgsp_state *sc, uint64_t paddr)
 {
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(paddr >> 16));
 }
 
 static __inline void
-b2_pramin_wr32(struct nvgsp_state *sc, uint64_t paddr, uint32_t val)
+nvgsp_bar2_pramin_wr32(struct nvgsp_state *sc, uint64_t paddr, uint32_t val)
 {
 	nvgsp_wr32(sc, NV_PRAMIN + (uint32_t)(paddr & 0xffffu), val);
 }
 
 static __inline void
-b2_pramin_wr64(struct nvgsp_state *sc, uint64_t paddr, uint64_t val)
+nvgsp_bar2_pramin_wr64(struct nvgsp_state *sc, uint64_t paddr, uint64_t val)
 {
-	b2_pramin_wr32(sc, paddr + 0, (uint32_t)(val & 0xffffffffu));
-	b2_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
+	nvgsp_bar2_pramin_wr32(sc, paddr + 0, (uint32_t)(val & 0xffffffffu));
+	nvgsp_bar2_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
 }
 
 static void
@@ -57,9 +57,9 @@ nvgsp_bar_zero_bar2_vram_page_locked(struct nvgsp_state *sc, uint64_t paddr)
 {
 	uint32_t saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 
-	b2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
 	for (uint32_t off = 0; off < NVGSP_GMMU_PT_PAGE_SIZE; off += 4)
-		b2_pramin_wr32(sc, paddr + off, 0);
+		nvgsp_bar2_pramin_wr32(sc, paddr + off, 0);
 	(void)nvgsp_rd32(sc, NV_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 }
@@ -151,18 +151,18 @@ nvgsp_bar_get_bar2_spt(struct nvgsp_state *sc, uint64_t bar2_gva,
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 
-	b2_pramin_set_base(sc, b2->pd2_paddr & ~(uint64_t)0xffffu);
-	b2_pramin_wr64(sc, b2->pd2_paddr + pd2_idx * 8,
+	nvgsp_bar2_pramin_set_base(sc, b2->pd2_paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_wr64(sc, b2->pd2_paddr + pd2_idx * 8,
 	    nvgsp_pde_to_vram(pd1_pt->paddr));
 
-	b2_pramin_set_base(sc, pd1_pt->paddr & ~(uint64_t)0xffffu);
-	b2_pramin_wr64(sc, pd1_pt->paddr + pd1_idx * 8,
+	nvgsp_bar2_pramin_set_base(sc, pd1_pt->paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_wr64(sc, pd1_pt->paddr + pd1_idx * 8,
 	    nvgsp_pde_to_vram(pd0_pt->paddr));
 
-	b2_pramin_set_base(sc, pd0_pt->paddr & ~(uint64_t)0xffffu);
-	b2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16,
+	nvgsp_bar2_pramin_set_base(sc, pd0_pt->paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16,
 	    nvgsp_pde_to_vram(spt_pt->paddr));
-	b2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16 + 8, 0);
+	nvgsp_bar2_pramin_wr64(sc, pd0_pt->paddr + pd0_idx * 16 + 8, 0);
 
 	(void)nvgsp_rd32(sc, NV_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
@@ -284,7 +284,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	uint64_t pdb_paddr = sc->gsp_bar2_pdb;
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
 	uint32_t pdb0_pre_lo = nvgsp_rd32(sc, NV_PRAMIN +
 	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
 	uint32_t pdb0_pre_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -308,7 +308,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
 	uint32_t pdb0_post_lo = nvgsp_rd32(sc, NV_PRAMIN +
 	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
 	uint32_t pdb0_post_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -347,7 +347,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	if (bar1_inst_paddr != 0) {
 		lwkt_gettoken(&sc->gsp_tok);
 		saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-		b2_pramin_set_base(sc, bar1_inst_paddr & ~(uint64_t)0xffffu);
+		nvgsp_bar2_pramin_set_base(sc, bar1_inst_paddr & ~(uint64_t)0xffffu);
 		uint32_t b1_lo = nvgsp_rd32(sc, NV_PRAMIN +
 		    (uint32_t)((bar1_inst_paddr + 0x200) & 0xffffu));
 		uint32_t b1_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -369,7 +369,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	if (bar2_inst_paddr != 0) {
 		lwkt_gettoken(&sc->gsp_tok);
 		saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-		b2_pramin_set_base(sc, bar2_inst_paddr & ~(uint64_t)0xffffu);
+		nvgsp_bar2_pramin_set_base(sc, bar2_inst_paddr & ~(uint64_t)0xffffu);
 		uint32_t inst_lo = nvgsp_rd32(sc, NV_PRAMIN +
 		    (uint32_t)((bar2_inst_paddr + 0x200) & 0xffffu));
 		uint32_t inst_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -488,8 +488,8 @@ nvgsp_bar_map_bar2_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
 
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, spt_pt->paddr & ~(uint64_t)0xffffu);
-	b2_pramin_wr64(sc, spt_pt->paddr + spt_idx * 8, pte);
+	nvgsp_bar2_pramin_set_base(sc, spt_pt->paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_wr64(sc, spt_pt->paddr + spt_idx * 8, pte);
 	(void)nvgsp_rd32(sc, NV_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
@@ -553,7 +553,7 @@ nvgsp_bar_rd64_pramin(struct nvgsp_state *sc, uint64_t paddr, uint64_t *out)
 	uint32_t saved;
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
-	b2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar2_pramin_set_base(sc, paddr & ~(uint64_t)0xffffu);
 	uint32_t lo = nvgsp_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 0) & 0xffffu));
 	uint32_t hi = nvgsp_rd32(sc, NV_PRAMIN + (uint32_t)((paddr + 4) & 0xffffu));
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
@@ -573,26 +573,26 @@ struct rpc_update_bar_pde_v15_00_b1 {
 };
 
 static __inline void
-b1_pramin_set_base(struct nvgsp_state *sc, uint64_t paddr)
+nvgsp_bar1_pramin_set_base(struct nvgsp_state *sc, uint64_t paddr)
 {
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(paddr >> 16));
 }
 
 static __inline void
-b1_pramin_wr32(struct nvgsp_state *sc, uint64_t paddr, uint32_t val)
+nvgsp_bar1_pramin_wr32(struct nvgsp_state *sc, uint64_t paddr, uint32_t val)
 {
 	nvgsp_wr32(sc, NV_PRAMIN + (uint32_t)(paddr & 0xffffu), val);
 }
 
 static __inline void
-b1_pramin_wr64(struct nvgsp_state *sc, uint64_t paddr, uint64_t val)
+nvgsp_bar1_pramin_wr64(struct nvgsp_state *sc, uint64_t paddr, uint64_t val)
 {
-	b1_pramin_wr32(sc, paddr + 0, (uint32_t)(val & 0xffffffffu));
-	b1_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
+	nvgsp_bar1_pramin_wr32(sc, paddr + 0, (uint32_t)(val & 0xffffffffu));
+	nvgsp_bar1_pramin_wr32(sc, paddr + 4, (uint32_t)(val >> 32));
 }
 
 static __inline uint64_t
-b1_pramin_rd64(struct nvgsp_state *sc, uint64_t paddr)
+nvgsp_bar1_pramin_rd64(struct nvgsp_state *sc, uint64_t paddr)
 {
 	uint32_t lo, hi;
 
@@ -678,7 +678,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 
 	/* Read GSP PD3[0] = first 8 bytes of GSP PD3 page. */
-	b1_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
+	nvgsp_bar1_pramin_set_base(sc, pdb_paddr & ~(uint64_t)0xffffu);
 	uint32_t pd3_lo = nvgsp_rd32(sc, NV_PRAMIN +
 	    (uint32_t)((pdb_paddr + 0) & 0xffffu));
 	uint32_t pd3_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -687,7 +687,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	gsp_pd2 = (pd3_0 & ~(uint64_t)0xffull) << 4;
 
 	/* Read GSP PD2[0]. */
-	b1_pramin_set_base(sc, gsp_pd2 & ~(uint64_t)0xffffu);
+	nvgsp_bar1_pramin_set_base(sc, gsp_pd2 & ~(uint64_t)0xffffu);
 	uint32_t pd2_lo = nvgsp_rd32(sc, NV_PRAMIN +
 	    (uint32_t)((gsp_pd2 + 0) & 0xffffu));
 	uint32_t pd2_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -696,7 +696,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	gsp_pd1 = (pd2_0 & ~(uint64_t)0xffull) << 4;
 
 	/* Read GSP PD1[0]. */
-	b1_pramin_set_base(sc, gsp_pd1 & ~(uint64_t)0xffffu);
+	nvgsp_bar1_pramin_set_base(sc, gsp_pd1 & ~(uint64_t)0xffffu);
 	uint32_t pd1_lo = nvgsp_rd32(sc, NV_PRAMIN +
 	    (uint32_t)((gsp_pd1 + 0) & 0xffffu));
 	uint32_t pd1_hi = nvgsp_rd32(sc, NV_PRAMIN +
@@ -732,9 +732,9 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 		}
 
 		/* Zero our SPT via PRAMIN. */
-		b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+		nvgsp_bar1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
 		for (uint32_t off = 0; off < 0x1000; off += 4)
-			b1_pramin_wr32(sc, spt + off, 0);
+			nvgsp_bar1_pramin_wr32(sc, spt + off, 0);
 
 		/* Write GSP PD0[slot] as a full dual PDE, like nouveau's
 		 * gp100_vmm_pd0_pde() VMM_WO128() path.  We only install a
@@ -744,14 +744,14 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 		    NVGSP_PDE_APERTURE_VRAM;
 		pd0_big = gsp_pd0 + slot * 16 + 0;
 		pd0_small = gsp_pd0 + slot * 16 + 8;
-		b1_pramin_set_base(sc, pd0_big & ~(uint64_t)0xffffu);
-		pd0_big_pre = b1_pramin_rd64(sc, pd0_big);
-		pd0_small_pre = b1_pramin_rd64(sc, pd0_small);
-		b1_pramin_wr64(sc, pd0_big, 0);
-		b1_pramin_wr64(sc, pd0_small, spt_pde);
+		nvgsp_bar1_pramin_set_base(sc, pd0_big & ~(uint64_t)0xffffu);
+		pd0_big_pre = nvgsp_bar1_pramin_rd64(sc, pd0_big);
+		pd0_small_pre = nvgsp_bar1_pramin_rd64(sc, pd0_small);
+		nvgsp_bar1_pramin_wr64(sc, pd0_big, 0);
+		nvgsp_bar1_pramin_wr64(sc, pd0_small, spt_pde);
 		(void)nvgsp_rd32(sc, NV_PRAMIN);
-		pd0_big_post = b1_pramin_rd64(sc, pd0_big);
-		pd0_small_post = b1_pramin_rd64(sc, pd0_small);
+		pd0_big_post = nvgsp_bar1_pramin_rd64(sc, pd0_big);
+		pd0_small_post = nvgsp_bar1_pramin_rd64(sc, pd0_small);
 		b1->spt_paddr[idx] = spt;
 
 #ifdef NVGSP_DEBUG_BAR1
@@ -877,8 +877,8 @@ nvgsp_bar_map_bar1_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 	spt = b1->spt_paddr[pd0_idx - NVGSP_BAR1_PD0_MANAGED_FIRST];
-	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
-	b1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, pte);
+	nvgsp_bar1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+	nvgsp_bar1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, pte);
 	(void)nvgsp_rd32(sc, NV_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
@@ -929,8 +929,8 @@ nvgsp_bar_clear_bar1_gva(struct nvgsp_state *sc, uint64_t bar1_gva)
 	lwkt_gettoken(&sc->gsp_tok);
 	saved = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 	spt = b1->spt_paddr[pd0_idx - NVGSP_BAR1_PD0_MANAGED_FIRST];
-	b1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
-	b1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, 0);
+	nvgsp_bar1_pramin_set_base(sc, spt & ~(uint64_t)0xffffu);
+	nvgsp_bar1_pramin_wr64(sc, spt + (uint64_t)spt_idx * 8, 0);
 	(void)nvgsp_rd32(sc, NV_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 	lwkt_reltoken(&sc->gsp_tok);
