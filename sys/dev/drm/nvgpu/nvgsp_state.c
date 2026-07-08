@@ -18,6 +18,16 @@ nvgsp_state_get(struct nvgpu_device *gpu)
 	return (nvgpu_device_get_gsp(gpu));
 }
 
+/* Return usable VRAM bytes parsed from static GSP info. */
+uint64_t
+nvgsp_state_get_fb_usable_size(struct nvgpu_device *gpu)
+{
+	struct nvgsp_state *gsp;
+
+	gsp = nvgsp_state_get(gpu);
+	return (gsp != NULL ? gsp->fb_usable_size : 0);
+}
+
 /* Allocate CPU-side GSP state.  The GPU owns the returned object until state_fini. */
 int
 nvgsp_state_init(struct nvgpu_device *gpu)

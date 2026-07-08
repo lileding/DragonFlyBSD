@@ -7,8 +7,16 @@
 #ifndef _NVGSP_STATE_H_
 #define _NVGSP_STATE_H_
 
+#include <sys/stdint.h>
+
 struct nvgpu_device;
 
+struct nvgsp_state;
+
+/* Return the borrowed GSP state stored on the physical GPU object. */
+struct nvgsp_state *nvgsp_state_get(struct nvgpu_device *gpu);
+/* Return usable VRAM bytes parsed from static GSP info. */
+uint64_t nvgsp_state_get_fb_usable_size(struct nvgpu_device *gpu);
 /* Initialize CPU-side GSP backend state. */
 int nvgsp_state_init(struct nvgpu_device *gpu);
 /* Release CPU-side GSP state after GSP shutdown. */

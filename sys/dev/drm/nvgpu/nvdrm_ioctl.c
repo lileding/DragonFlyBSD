@@ -6,118 +6,12 @@
 
 #include "nvdrm_ioctl.h"
 #include "nvdrm_file.h"
+#include "nvdrm_nouveau_abi.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_syscall.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_ioctl.h>
-
-#define DRM_NOUVEAU_GETPARAM		0x00
-#define DRM_NOUVEAU_CHANNEL_ALLOC	0x02
-#define DRM_NOUVEAU_CHANNEL_FREE	0x03
-#define DRM_NOUVEAU_NVIF		0x07
-#define DRM_NOUVEAU_VM_INIT		0x10
-#define DRM_NOUVEAU_VM_BIND		0x11
-#define DRM_NOUVEAU_EXEC		0x12
-#define DRM_NOUVEAU_GEM_NEW		0x40
-#define DRM_NOUVEAU_GEM_CPU_PREP	0x42
-#define DRM_NOUVEAU_GEM_CPU_FINI	0x43
-#define DRM_NOUVEAU_GEM_INFO		0x44
-
-struct drm_nouveau_getparam {
-	uint64_t param;
-	uint64_t value;
-};
-
-struct drm_nouveau_vm_init {
-	uint64_t kernel_managed_addr;
-	uint64_t kernel_managed_size;
-};
-
-struct drm_nouveau_channel_alloc {
-	uint32_t fb_ctxdma_handle;
-	uint32_t tt_ctxdma_handle;
-	int32_t channel;
-	uint32_t pushbuf_domains;
-	uint32_t notifier_handle;
-	struct {
-		uint32_t handle;
-		uint32_t grclass;
-	} subchan[8];
-	uint32_t nr_subchan;
-};
-
-struct drm_nouveau_channel_free {
-	int32_t channel;
-};
-
-struct drm_nouveau_gem_info {
-	uint32_t handle;
-	uint32_t domain;
-	uint64_t size;
-	uint64_t offset;
-	uint64_t map_handle;
-	uint32_t tile_mode;
-	uint32_t tile_flags;
-};
-
-struct drm_nouveau_gem_new {
-	struct drm_nouveau_gem_info info;
-	uint32_t channel_hint;
-	uint32_t align;
-};
-
-struct drm_nouveau_gem_cpu_prep {
-	uint32_t handle;
-	uint32_t flags;
-};
-
-struct drm_nouveau_gem_cpu_fini {
-	uint32_t handle;
-};
-
-struct drm_nouveau_vm_bind {
-	uint32_t op_count;
-	uint32_t flags;
-	uint32_t wait_count;
-	uint32_t sig_count;
-	uint64_t wait_ptr;
-	uint64_t sig_ptr;
-	uint64_t op_ptr;
-};
-
-struct drm_nouveau_exec {
-	uint32_t channel;
-	uint32_t push_count;
-	uint32_t wait_count;
-	uint32_t sig_count;
-	uint64_t wait_ptr;
-	uint64_t sig_ptr;
-	uint64_t push_ptr;
-};
-
-#define DRM_IOCTL_NOUVEAU_GETPARAM \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, struct drm_nouveau_getparam)
-#define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, struct drm_nouveau_channel_alloc)
-#define DRM_IOCTL_NOUVEAU_CHANNEL_FREE \
-	DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_FREE, struct drm_nouveau_channel_free)
-#define DRM_IOCTL_NOUVEAU_NVIF \
-	_IOC(IOC_INOUT, DRM_IOCTL_BASE, DRM_COMMAND_BASE + DRM_NOUVEAU_NVIF, 0)
-#define DRM_IOCTL_NOUVEAU_VM_INIT \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_INIT, struct drm_nouveau_vm_init)
-#define DRM_IOCTL_NOUVEAU_VM_BIND \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_BIND, struct drm_nouveau_vm_bind)
-#define DRM_IOCTL_NOUVEAU_EXEC \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
-#define DRM_IOCTL_NOUVEAU_GEM_NEW \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_NEW, struct drm_nouveau_gem_new)
-#define DRM_IOCTL_NOUVEAU_GEM_CPU_PREP \
-	DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_CPU_PREP, struct drm_nouveau_gem_cpu_prep)
-#define DRM_IOCTL_NOUVEAU_GEM_CPU_FINI \
-	DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_CPU_FINI, struct drm_nouveau_gem_cpu_fini)
-#define DRM_IOCTL_NOUVEAU_GEM_INFO \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_INFO, struct drm_nouveau_gem_info)
 
 static int
 nvdrm_ioctl_getparam(struct drm_device *ddev __unused, void *data,
@@ -130,7 +24,7 @@ nvdrm_ioctl_getparam(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_getparam(proc, data));
+	return (nvgpu_syscall_getparam(proc, file_priv, data));
 }
 
 static int
@@ -144,7 +38,7 @@ nvdrm_ioctl_vm_init(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_vm_init(proc, data));
+	return (nvgpu_syscall_vm_init(proc, file_priv, data));
 }
 
 static int
@@ -158,7 +52,7 @@ nvdrm_ioctl_nvif(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_nvif(proc, data));
+	return (nvgpu_syscall_nvif(proc, file_priv, data));
 }
 
 static int
@@ -172,7 +66,7 @@ nvdrm_ioctl_channel_alloc(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_channel_alloc(proc, data));
+	return (nvgpu_syscall_channel_alloc(proc, file_priv, data));
 }
 
 static int
@@ -186,7 +80,7 @@ nvdrm_ioctl_channel_free(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_channel_free(proc, data));
+	return (nvgpu_syscall_channel_free(proc, file_priv, data));
 }
 
 static int
@@ -200,7 +94,7 @@ nvdrm_ioctl_gem_new(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_gem_new(proc, data));
+	return (nvgpu_syscall_gem_new(proc, file_priv, data));
 }
 
 static int
@@ -214,7 +108,7 @@ nvdrm_ioctl_gem_info(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_gem_info(proc, data));
+	return (nvgpu_syscall_gem_info(proc, file_priv, data));
 }
 
 static int
@@ -228,7 +122,7 @@ nvdrm_ioctl_gem_cpu_prep(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_gem_cpu_prep(proc, data));
+	return (nvgpu_syscall_gem_cpu_prep(proc, file_priv, data));
 }
 
 static int
@@ -242,7 +136,7 @@ nvdrm_ioctl_gem_cpu_fini(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_gem_cpu_fini(proc, data));
+	return (nvgpu_syscall_gem_cpu_fini(proc, file_priv, data));
 }
 
 static int
@@ -256,7 +150,7 @@ nvdrm_ioctl_vm_bind(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_vm_bind(proc, data));
+	return (nvgpu_syscall_vm_bind(proc, file_priv, data));
 }
 
 static int
@@ -270,7 +164,7 @@ nvdrm_ioctl_exec(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_exec(proc, data));
+	return (nvgpu_syscall_exec(proc, file_priv, data));
 }
 
 const struct drm_ioctl_desc nvdrm_ioctl_descs[NVDRM_IOCTL_COUNT] = {

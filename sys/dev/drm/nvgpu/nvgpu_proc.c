@@ -8,10 +8,12 @@
  */
 
 #include "nvgpu_proc.h"
+#include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_sched.h"
 #include "nvgpu_unload.h"
+#include "nvgpu_vm.h"
 
 #include <sys/param.h>
 #include <sys/globaldata.h>
@@ -52,6 +54,8 @@ nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
 	TAILQ_INIT(&proc->events);
 	TAILQ_INIT(&proc->parked_tasks);
 	TAILQ_INIT(&proc->active_tasks);
+	TAILQ_INIT(&proc->channels);
+	proc->vm = NULL;
 	proc->idle = false;
 	proc->shutdown = false;
 
@@ -130,6 +134,8 @@ nvgpu_proc_run(void *arg)
 
 shutdown:
 	lwkt_reltoken(&proc->token);
+	nvgpu_channel_destroy_all(proc);
+	nvgpu_vm_destroy(proc);
 	nvgpu_unload_release_by_drm(proc->gpu);
 	nvgpu_log(NVGPU_LOG_DEBUG, "proc destroy proc=%p\n", proc);
 	lwkt_token_uninit(&proc->token);

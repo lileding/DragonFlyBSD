@@ -1,0 +1,147 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * User channel lifetime for one GPU process.
+ */
+
+#include "nvdrm_nouveau_abi.h"
+#include "nvgpu_channel.h"
+#include "nvgpu_proc.h"
+#include "nvgpu_vm.h"
+#include "nvgsp_channel.h"
+#include "nvgsp_vmm.h"
+
+#include <sys/errno.h>
+#include <sys/kernel.h>
+#include <sys/malloc.h>
+#include <machine/atomic.h>
+
+static MALLOC_DEFINE(M_NVGPU_CHANNEL, "nvgpu_channel", "nvgpu user channel");
+
+#define NVGPU_MAX_CHANNELS	64u
+
+struct nvgpu_channel {
+	TAILQ_ENTRY(nvgpu_channel) link;
+	uint32_t id;
+	uint32_t engine_type;
+	struct nvgsp_channel *backend;
+};
+
+static volatile u_int nvgpu_channel_next_id = 1;
+
+static uint32_t
+nvgpu_channel_count(struct nvgpu_proc *proc)
+{
+	struct nvgpu_channel *chan;
+	uint32_t count = 0;
+
+	TAILQ_FOREACH(chan, &proc->channels, link)
+		count++;
+	return (count);
+}
+
+static struct nvgpu_channel *
+nvgpu_channel_find(struct nvgpu_proc *proc, uint32_t id)
+{
+	struct nvgpu_channel *chan;
+
+	TAILQ_FOREACH(chan, &proc->channels, link) {
+		if (chan->id == id)
+			return (chan);
+	}
+	return (NULL);
+}
+
+static int
+nvgpu_channel_select_engine(const struct nvgpu_channel_alloc_args *args,
+    uint32_t *engine_type)
+{
+	*engine_type = NVGSP_CHANNEL_ENGINE_GRAPHICS;
+	if (args->fb_ctxdma_handle != ~0u)
+		return (0);
+
+	switch (args->tt_ctxdma_handle) {
+	case NOUVEAU_FIFO_ENGINE_GR:
+		*engine_type = NVGSP_CHANNEL_ENGINE_GRAPHICS;
+		return (0);
+	case NOUVEAU_FIFO_ENGINE_CE:
+		*engine_type = NVGSP_CHANNEL_ENGINE_COPY0;
+		return (0);
+	default:
+		return (ENOSYS);
+	}
+}
+
+/* Allocate one user channel and insert it into proc's channel list. */
+int
+nvgpu_channel_alloc(struct nvgpu_proc *proc,
+    const struct nvgpu_channel_alloc_args *args,
+    struct nvgpu_channel_alloc_reply *reply)
+{
+	struct nvgpu_channel *chan;
+	struct nvgsp_vmm *vmm;
+	uint32_t engine_type;
+	int error;
+
+	if (proc == NULL || args == NULL || reply == NULL)
+		return (EINVAL);
+	if (nvgpu_channel_count(proc) >= NVGPU_MAX_CHANNELS)
+		return (ENOMEM);
+
+	error = nvgpu_channel_select_engine(args, &engine_type);
+	if (error != 0)
+		return (error);
+	error = nvgpu_vm_ensure(proc, &vmm);
+	if (error != 0)
+		return (error);
+
+	chan = kmalloc(sizeof(*chan), M_NVGPU_CHANNEL, M_WAITOK | M_ZERO);
+	chan->id = atomic_fetchadd_int(&nvgpu_channel_next_id, 1);
+	chan->engine_type = engine_type;
+	error = nvgsp_channel_create_user(vmm, engine_type, &chan->backend);
+	if (error != 0) {
+		_kfree(chan, M_NVGPU_CHANNEL);
+		return (error);
+	}
+
+	TAILQ_INSERT_TAIL(&proc->channels, chan, link);
+	reply->channel = chan->id;
+	reply->pushbuf_domains = NOUVEAU_GEM_DOMAIN_VRAM;
+	reply->notifier_handle = 0;
+	reply->nr_subchan = 0;
+	return (0);
+}
+
+/* Free one channel by userspace id. */
+int
+nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
+{
+	struct nvgpu_channel *chan;
+
+	if (proc == NULL)
+		return (EINVAL);
+	chan = nvgpu_channel_find(proc, (uint32_t)channel);
+	if (chan == NULL)
+		return (ENOENT);
+	TAILQ_REMOVE(&proc->channels, chan, link);
+	if (chan->backend != NULL)
+		nvgsp_channel_destroy_user(chan->backend);
+	_kfree(chan, M_NVGPU_CHANNEL);
+	return (0);
+}
+
+/* Destroy every remaining channel during proc teardown. */
+void
+nvgpu_channel_destroy_all(struct nvgpu_proc *proc)
+{
+	struct nvgpu_channel *chan;
+
+	if (proc == NULL)
+		return;
+	while ((chan = TAILQ_FIRST(&proc->channels)) != NULL) {
+		TAILQ_REMOVE(&proc->channels, chan, link);
+		if (chan->backend != NULL)
+			nvgsp_channel_destroy_user(chan->backend);
+		_kfree(chan, M_NVGPU_CHANNEL);
+	}
+}

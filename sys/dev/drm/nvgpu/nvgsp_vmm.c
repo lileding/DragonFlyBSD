@@ -644,6 +644,46 @@ nvgsp_vmm_destroy_golden(struct nvgpu_device *gpu)
 	gsp->golden_vmm = NULL;
 }
 
+/* Create a per-process user VMM.  out receives owned storage destroyed by destroy_user. */
+int
+nvgsp_vmm_create_user(struct nvgpu_device *gpu, uint32_t client_handle,
+    struct nvgsp_vmm **out)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+	struct nvgsp_vmm *vmm;
+	int error;
+
+	if (gsp == NULL || out == NULL)
+		return (EINVAL);
+	vmm = kmalloc(sizeof(*vmm), M_NVGSP_VMM, M_WAITOK | M_ZERO);
+	lwkt_gettoken(&gsp->gsp_tok);
+	error = nvgsp_vmm_construct(gsp, client_handle, vmm);
+	lwkt_reltoken(&gsp->gsp_tok);
+	if (error != 0) {
+		kfree(vmm, M_NVGSP_VMM);
+		return (error);
+	}
+	*out = vmm;
+	return (0);
+}
+
+/* Destroy a per-process user VMM after all channels using it are gone. */
+void
+nvgsp_vmm_destroy_user(struct nvgsp_vmm *vmm)
+{
+	struct nvgsp_state *gsp;
+
+	if (vmm == NULL)
+		return;
+	gsp = vmm->gsp;
+	if (gsp != NULL)
+		lwkt_gettoken(&gsp->gsp_tok);
+	nvgsp_vmm_destroy(vmm);
+	if (gsp != NULL)
+		lwkt_reltoken(&gsp->gsp_tok);
+	kfree(vmm, M_NVGSP_VMM);
+}
+
 int
 nvgsp_vmm_map_submit_pages(struct nvgpu_device *gpu)
 {
