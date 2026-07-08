@@ -12,8 +12,16 @@
 
 static MALLOC_DEFINE(M_NVGSP_CHANNEL, "nvgsp_channel", "nvgsp channel state");
 
+struct nvgsp_channel_object {
+	struct nvgsp_object object;
+};
+
 #define TURING_CHANNEL_GPFIFO_A		0x0000c46fu
+#define TURING_A			0x0000c597u
 #define TURING_DMA_COPY_A		0x0000c5b5u
+#define TURING_COMPUTE_A		0x0000c5c0u
+#define FERMI_TWOD_A			0x0000902du
+#define KEPLER_INLINE_TO_MEMORY_B	0x0000a140u
 #define NVGSP_RM_CHANNEL		0xf1f00000u
 #define NVGSP_RM_CE_OBJECT		0xc5b50000u
 #define NVGSP_RM_THREED_OBJECT		0x97000000u
@@ -553,10 +561,9 @@ nvgsp_channel_free_gr_ctxbufs(struct nvgsp_state *gsp, struct nvgsp_channel *cha
 }
 
 static int
-nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
+nvgsp_channel_promote_gr_context(struct nvgsp_channel *chan, int golden)
 {
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-	struct nvgsp_channel *chan = gsp != NULL ? gsp->golden_channel : NULL;
+	struct nvgsp_state *gsp;
 	struct nvgsp_client tmp_client;
 	struct nvgsp_object tmp_subdev;
 	struct nvgsp_gr_get_context_buffers_info_params *info;
@@ -567,8 +574,9 @@ nvgsp_channel_promote_gr_context(struct nvgpu_device *gpu, int golden)
 	bool ctx_map_dirty = false;
 	bool ctx_map_flushed = false;
 
-	if (gsp == NULL || chan == NULL || chan->vmm == NULL)
+	if (chan == NULL || chan->vmm == NULL || chan->vmm->gsp == NULL)
 		return (ENXIO);
+	gsp = chan->vmm->gsp;
 	if (chan->gr_ctx_promoted)
 		return (0);
 
@@ -1132,6 +1140,100 @@ nvgsp_channel_destroy_user(struct nvgsp_channel *chan)
 	kfree(chan, M_NVGSP_CHANNEL);
 }
 
+/* Promote GR context buffers for a user channel before GR-class object allocation. */
+int
+nvgsp_channel_promote_graphics_context(struct nvgsp_channel *chan)
+{
+	struct nvgsp_state *gsp;
+	int error;
+
+	if (chan == NULL || chan->vmm == NULL || chan->vmm->gsp == NULL)
+		return (ENXIO);
+	gsp = chan->vmm->gsp;
+	lwkt_gettoken(&gsp->gsp_tok);
+	error = nvgsp_channel_promote_gr_context(chan, 0);
+	lwkt_reltoken(&gsp->gsp_tok);
+	return (error);
+}
+
+/* Allocate an RM engine object under a user channel. */
+int
+nvgsp_channel_alloc_object(struct nvgsp_channel *chan, uint32_t handle,
+    uint32_t oclass, struct nvgsp_channel_object **out)
+{
+	struct nvgsp_channel_object *obj;
+	struct nvgsp_state *gsp;
+	void *args;
+	int error;
+
+	if (chan == NULL || chan->vmm == NULL || chan->vmm->gsp == NULL ||
+	    out == NULL)
+		return (EINVAL);
+	gsp = chan->vmm->gsp;
+	obj = kmalloc(sizeof(*obj), M_NVGSP_CHANNEL, M_WAITOK | M_ZERO);
+
+	lwkt_gettoken(&gsp->gsp_tok);
+	switch (oclass) {
+	case TURING_DMA_COPY_A: {
+		struct {
+			uint32_t version;
+			uint32_t engineType;
+		} *copy;
+
+		copy = nvgsp_rm_get_alloc(&chan->object, handle, oclass,
+		    sizeof(*copy), &obj->object);
+		if (copy == NULL) {
+			error = ENOMEM;
+			break;
+		}
+		copy->version = 1;
+		copy->engineType = NV2080_ENGINE_TYPE_COPY0;
+		error = nvgsp_rm_write_alloc(&obj->object, copy);
+		break;
+	}
+	case TURING_A:
+	case TURING_COMPUTE_A:
+	case FERMI_TWOD_A:
+	case KEPLER_INLINE_TO_MEMORY_B:
+		args = nvgsp_rm_get_alloc(&chan->object, handle, oclass, 0,
+		    &obj->object);
+		if (args == NULL) {
+			error = ENOMEM;
+			break;
+		}
+		error = nvgsp_rm_write_alloc(&obj->object, args);
+		break;
+	default:
+		error = EINVAL;
+		break;
+	}
+	lwkt_reltoken(&gsp->gsp_tok);
+
+	if (error != 0) {
+		kfree(obj, M_NVGSP_CHANNEL);
+		return (error);
+	}
+	*out = obj;
+	return (0);
+}
+
+/* Free an RM engine object allocated by nvgsp_channel_alloc_object(). */
+void
+nvgsp_channel_free_object(struct nvgsp_channel_object *obj)
+{
+	struct nvgsp_state *gsp;
+
+	if (obj == NULL)
+		return;
+	gsp = obj->object.client != NULL ? obj->object.client->gsp : NULL;
+	if (gsp != NULL)
+		lwkt_gettoken(&gsp->gsp_tok);
+	(void)nvgsp_rm_free(&obj->object);
+	if (gsp != NULL)
+		lwkt_reltoken(&gsp->gsp_tok);
+	kfree(obj, M_NVGSP_CHANNEL);
+}
+
 int
 nvgsp_channel_create_golden(struct nvgpu_device *gpu)
 {
@@ -1170,7 +1272,7 @@ nvgsp_channel_create_golden(struct nvgpu_device *gpu)
 	    chan->userd_vram, chan->mthdbuf_paddr, mthdbuf_size, 0, 0x1000);
 	if (error != 0)
 		goto fail;
-	error = nvgsp_channel_promote_gr_context(gpu, 1);
+	error = nvgsp_channel_promote_gr_context(chan, 1);
 	if (error != 0)
 		goto fail;
 	error = nvgsp_channel_alloc_graphics_object(gpu);

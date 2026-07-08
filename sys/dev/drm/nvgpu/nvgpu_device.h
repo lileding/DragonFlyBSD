@@ -24,6 +24,8 @@ struct nvgpu_device;
 device_t nvgpu_device_get_newbus_dev(struct nvgpu_device *gpu);
 /* Return borrowed immutable chip metadata for gpu. */
 const struct nvgpu_chip_config *nvgpu_device_get_chip(struct nvgpu_device *gpu);
+/* Return the borrowed PCI device display name chosen during probe. */
+const char *nvgpu_device_get_name(struct nvgpu_device *gpu);
 /* Return a borrowed BAR resource, or NULL when the BAR is not mapped. */
 struct resource *nvgpu_device_get_bar(struct nvgpu_device *gpu, unsigned int bar);
 uint32_t nvgpu_device_rd32(struct nvgpu_device *gpu, uint32_t offset);

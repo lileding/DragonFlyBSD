@@ -122,6 +122,78 @@ struct drm_nouveau_exec {
 	uint64_t push_ptr;
 };
 
+struct nvif_ioctl_v0 {
+	uint8_t version;
+	uint8_t type;
+#define NVIF_IOCTL_V0_SCLASS	0x01
+#define NVIF_IOCTL_V0_NEW	0x02
+#define NVIF_IOCTL_V0_DEL	0x03
+#define NVIF_IOCTL_V0_MTHD	0x04
+	uint8_t path_nr;
+	uint8_t pad03[3];
+	uint8_t owner;
+	uint8_t route;
+	uint64_t token;
+	uint64_t object;
+	uint8_t data[];
+} __packed;
+
+struct nvif_ioctl_new_v0 {
+	uint8_t version;
+	uint8_t pad01[2];
+	uint8_t route;
+	uint32_t pad04;
+	uint64_t token;
+	uint64_t object;
+	uint32_t handle;
+#define NV_DEVICE	0x0080
+	uint32_t oclass;
+	uint8_t data[];
+} __packed;
+
+struct nv_device_v0 {
+	uint8_t version;
+	uint8_t pad01[7];
+	uint64_t device;
+	uint32_t priv;
+	uint32_t pad14;
+} __packed;
+
+struct nvif_ioctl_mthd_v0 {
+	uint8_t version;
+	uint8_t method;
+#define NV_DEVICE_V0_INFO	0x00
+	uint8_t pad02[6];
+	uint8_t data[];
+} __packed;
+
+struct nv_device_info_v0 {
+	uint8_t version;
+	uint8_t platform;
+#define NV_DEVICE_INFO_V0_PCIE	0x03
+	uint16_t chipset;
+	uint8_t revision;
+	uint8_t family;
+	uint8_t pad06[2];
+	uint64_t ram_size;
+	uint64_t ram_user;
+	char chip[16];
+	char name[64];
+} __packed;
+
+struct nvif_ioctl_sclass_oclass_v0 {
+	int32_t oclass;
+	int16_t minver;
+	int16_t maxver;
+};
+
+struct nvif_ioctl_sclass_v0 {
+	uint8_t version;
+	uint8_t count;
+	uint8_t pad02[6];
+	struct nvif_ioctl_sclass_oclass_v0 oclass[];
+} __packed;
+
 #define DRM_IOCTL_NOUVEAU_GETPARAM \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GETPARAM, struct drm_nouveau_getparam)
 #define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \

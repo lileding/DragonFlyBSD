@@ -14,17 +14,27 @@
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/systm.h>
 #include <machine/atomic.h>
 
 static MALLOC_DEFINE(M_NVGPU_CHANNEL, "nvgpu_channel", "nvgpu user channel");
 
 #define NVGPU_MAX_CHANNELS	64u
+#define NVGPU_MAX_CHANNEL_OBJECTS 16u
+
+struct nvgpu_channel_object {
+	uint32_t handle;
+	uint32_t oclass;
+	uint64_t nvif_object;
+	struct nvgsp_channel_object *backend;
+};
 
 struct nvgpu_channel {
 	TAILQ_ENTRY(nvgpu_channel) link;
 	uint32_t id;
 	uint32_t engine_type;
 	struct nvgsp_channel *backend;
+	struct nvgpu_channel_object objects[NVGPU_MAX_CHANNEL_OBJECTS];
 };
 
 static volatile u_int nvgpu_channel_next_id = 1;
@@ -52,6 +62,34 @@ nvgpu_channel_find(struct nvgpu_proc *proc, uint32_t id)
 	return (NULL);
 }
 
+static struct nvgpu_channel_object *
+nvgpu_channel_object_slot(struct nvgpu_channel *chan)
+{
+	uint32_t i;
+
+	for (i = 0; i < NVGPU_MAX_CHANNEL_OBJECTS; i++) {
+		if (chan->objects[i].oclass == 0)
+			return (&chan->objects[i]);
+	}
+	return (NULL);
+}
+
+static void
+nvgpu_channel_free_objects(struct nvgpu_channel *chan)
+{
+	uint32_t i;
+
+	for (i = 0; i < NVGPU_MAX_CHANNEL_OBJECTS; i++) {
+		struct nvgpu_channel_object *obj = &chan->objects[i];
+
+		if (obj->oclass == 0)
+			continue;
+		if (obj->backend != NULL)
+			nvgsp_channel_free_object(obj->backend);
+		memset(obj, 0, sizeof(*obj));
+	}
+}
+
 static int
 nvgpu_channel_select_engine(const struct nvgpu_channel_alloc_args *args,
     uint32_t *engine_type)
@@ -70,6 +108,65 @@ nvgpu_channel_select_engine(const struct nvgpu_channel_alloc_args *args,
 	default:
 		return (ENOSYS);
 	}
+}
+
+/* Create an NVIF engine object under a channel selected by the NVIF token. */
+int
+nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
+    uint64_t nvif_object, uint32_t handle, uint32_t oclass,
+    int needs_gr_context)
+{
+	struct nvgpu_channel *chan;
+	struct nvgpu_channel_object *obj;
+	struct nvgsp_channel_object *backend;
+	int error;
+
+	if (proc == NULL)
+		return (EINVAL);
+	chan = nvgpu_channel_find(proc, (uint32_t)token);
+	if (chan == NULL || chan->backend == NULL)
+		return (ENOENT);
+	obj = nvgpu_channel_object_slot(chan);
+	if (obj == NULL)
+		return (ENOMEM);
+	if (needs_gr_context) {
+		error = nvgsp_channel_promote_graphics_context(chan->backend);
+		if (error != 0)
+			return (error);
+	}
+	error = nvgsp_channel_alloc_object(chan->backend, handle, oclass,
+	    &backend);
+	if (error != 0)
+		return (error);
+	obj->handle = handle;
+	obj->oclass = oclass;
+	obj->nvif_object = nvif_object;
+	obj->backend = backend;
+	return (0);
+}
+
+/* Delete an NVIF engine object if it is still live.  Unknown objects are ignored. */
+int
+nvgpu_channel_delete_object(struct nvgpu_proc *proc, uint64_t nvif_object)
+{
+	struct nvgpu_channel *chan;
+	uint32_t i;
+
+	if (proc == NULL)
+		return (EINVAL);
+	TAILQ_FOREACH(chan, &proc->channels, link) {
+		for (i = 0; i < NVGPU_MAX_CHANNEL_OBJECTS; i++) {
+			struct nvgpu_channel_object *obj = &chan->objects[i];
+
+			if (obj->oclass == 0 || obj->nvif_object != nvif_object)
+				continue;
+			if (obj->backend != NULL)
+				nvgsp_channel_free_object(obj->backend);
+			memset(obj, 0, sizeof(*obj));
+			return (0);
+		}
+	}
+	return (0);
 }
 
 /* Allocate one user channel and insert it into proc's channel list. */
@@ -124,6 +221,7 @@ nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
 	if (chan == NULL)
 		return (ENOENT);
 	TAILQ_REMOVE(&proc->channels, chan, link);
+	nvgpu_channel_free_objects(chan);
 	if (chan->backend != NULL)
 		nvgsp_channel_destroy_user(chan->backend);
 	_kfree(chan, M_NVGPU_CHANNEL);
@@ -140,6 +238,7 @@ nvgpu_channel_destroy_all(struct nvgpu_proc *proc)
 		return;
 	while ((chan = TAILQ_FIRST(&proc->channels)) != NULL) {
 		TAILQ_REMOVE(&proc->channels, chan, link);
+		nvgpu_channel_free_objects(chan);
 		if (chan->backend != NULL)
 			nvgsp_channel_destroy_user(chan->backend);
 		_kfree(chan, M_NVGPU_CHANNEL);
