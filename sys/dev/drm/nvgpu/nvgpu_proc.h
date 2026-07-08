@@ -34,6 +34,7 @@ struct nvgpu_proc {
 	struct nvgpu_proc_event_queue events;
 	struct nvgpu_task_queue parked_tasks;
 	struct nvgpu_task_queue active_tasks;
+	bool idle;
 	bool shutdown;
 };
 
