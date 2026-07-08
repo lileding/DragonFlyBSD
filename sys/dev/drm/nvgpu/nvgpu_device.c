@@ -27,11 +27,14 @@
 #include <sys/bus.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/rman.h>
 #include <sys/thread.h>
 
 #define NVGPU_PMC_BOOT_0	0x00000000u
+
+static MALLOC_DEFINE(M_NVGPU_DEVICE, "nvgpu_device", "nvgpu physical device");
 
 enum nvgpu_boot_phase {
 	NVGPU_BOOT_BEGIN = 0,
@@ -525,7 +528,7 @@ nvgpu_device_fini(struct nvgpu_device *gpu)
 	nvgpu_log(NVGPU_LOG_INFO, "detached\n");
 	if (nvgpu_default_gpu == gpu)
 		nvgpu_default_gpu = NULL;
-	kfree(gpu);
+	_kfree(gpu, M_NVGPU_DEVICE);
 }
 
 /* Allocate the GPU object and start asynchronous device boot. */
@@ -540,11 +543,7 @@ nvgpu_device_attach_pci(device_t dev)
 	if (id == NULL || id->chip == NULL)
 		return (ENXIO);
 
-	gpu = kzalloc(sizeof(*gpu), GFP_KERNEL);
-	if (gpu == NULL) {
-		nvgpu_log(NVGPU_LOG_INFO, "nvgpu: device allocation failed\n");
-		return (ENOMEM);
-	}
+	gpu = kmalloc(sizeof(*gpu), M_NVGPU_DEVICE, M_WAITOK | M_ZERO);
 
 	gpu->dev = dev;
 	nvgpu_default_gpu = gpu;
@@ -584,7 +583,7 @@ fail_locked:
 	nvgpu_device_store_newbus(dev, NULL);
 	if (nvgpu_default_gpu == gpu)
 		nvgpu_default_gpu = NULL;
-	kfree(gpu);
+	_kfree(gpu, M_NVGPU_DEVICE);
 	return (error);
 }
 

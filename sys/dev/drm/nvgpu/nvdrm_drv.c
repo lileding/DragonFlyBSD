@@ -5,9 +5,10 @@
  */
 
 #include "nvdrm_drv.h"
+#include "nvdrm_file.h"
+#include "nvdrm_ioctl.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
-#include "nvgpu_unload.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
@@ -19,10 +20,6 @@
 #define NVDRM_DRM_MAJOR		1
 #define NVDRM_DRM_MINOR		3
 #define NVDRM_DRM_PATCH		1
-
-static int nvdrm_open(struct drm_device *ddev, struct drm_file *file_priv);
-static void nvdrm_handle_postclose(struct drm_device *ddev, struct drm_file *file_priv);
-static void nvdrm_handle_lastclose(struct drm_device *ddev);
 
 static const struct file_operations nvdrm_fops = {
 	.owner = THIS_MODULE,
@@ -38,31 +35,12 @@ static struct drm_driver nvdrm_driver = {
 	.major = NVDRM_DRM_MAJOR,
 	.minor = NVDRM_DRM_MINOR,
 	.patchlevel = NVDRM_DRM_PATCH,
-	.open = nvdrm_open,
-	.postclose = nvdrm_handle_postclose,
-	.lastclose = nvdrm_handle_lastclose,
+	.ioctls = nvdrm_ioctl_descs,
+	.num_ioctls = NVDRM_IOCTL_COUNT,
+	.open = nvdrm_file_open,
+	.postclose = nvdrm_file_postclose,
+	.lastclose = nvdrm_file_lastclose,
 };
-
-static int
-nvdrm_open(struct drm_device *ddev, struct drm_file *file_priv)
-{
-	(void)file_priv;
-	return (nvgpu_unload_hold_by_drm(ddev->dev_private));
-}
-
-static void
-nvdrm_handle_postclose(struct drm_device *ddev, struct drm_file *file_priv)
-{
-	(void)file_priv;
-	nvgpu_unload_release_by_drm(ddev->dev_private);
-}
-
-static void
-nvdrm_handle_lastclose(struct drm_device *ddev)
-{
-	(void)ddev;
-	nvgpu_log(NVGPU_LOG_DEBUG, "lastclose\n");
-}
 
 /* Register DRM after GPU boot.  gpu is borrowed; may sleep and must not hold GSP/VM tokens. */
 int

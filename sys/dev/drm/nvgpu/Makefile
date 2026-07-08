@@ -1,7 +1,8 @@
 KMOD=	nvgpu
 SRCS=	nvgpu_device.c nvgpu_debug.c nvgpu_chip.c nvgpu_proc.c
+SRCS+=	nvgpu_syscall.c
 SRCS+=	nvgpu_unload.c nvgpu_intr.c nvgpu_exec.c nvgpu_sched.c
-SRCS+=	nvgpu_display.c nvdrm_drv.c nvdrm_file.c
+SRCS+=	nvgpu_display.c nvdrm_drv.c nvdrm_file.c nvdrm_ioctl.c
 SRCS+=	nvgsp_state.c nvgsp_boot.c nvgsp_event.c nvgsp_rpc.c
 SRCS+=	nvgsp_seq.c nvgsp_dma.c nvgsp_bios.c nvgsp_fw.c nvgsp_falcon.c
 SRCS+=	nvgsp_fwsec.c nvgsp_meta.c nvgsp_boot_image.c
