@@ -52,6 +52,7 @@ nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
 	TAILQ_INIT(&proc->events);
 	TAILQ_INIT(&proc->parked_tasks);
 	TAILQ_INIT(&proc->active_tasks);
+	proc->idle = false;
 	proc->shutdown = false;
 
 	error = lwkt_create(nvgpu_proc_run, proc, &proc->thread, NULL,
@@ -78,7 +79,7 @@ nvgpu_proc_stop(struct nvgpu_proc *proc)
 
 	lwkt_gettoken(&proc->token);
 	proc->shutdown = true;
-	if (TAILQ_EMPTY(&proc->events) && TAILQ_EMPTY(&proc->active_tasks))
+	if (proc->idle)
 		wakeup(proc);
 	lwkt_reltoken(&proc->token);
 	nvgpu_log(NVGPU_LOG_DEBUG, "proc stop posted proc=%p\n", proc);
@@ -116,8 +117,10 @@ nvgpu_proc_run(void *arg)
 				goto shutdown;
 
 			// idle now, wait for next interrupt
+			proc->idle = true;
 			tsleep_interlock(proc, 0);
 			(void)tsleep(proc, PINTERLOCKED, "nvgpup", hz / 10);
+			proc->idle = false;
 		    event = TAILQ_FIRST(&proc->events);
 		}
 		TAILQ_REMOVE(&proc->events, event, link);

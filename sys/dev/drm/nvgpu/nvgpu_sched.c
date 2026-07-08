@@ -21,11 +21,9 @@ nvgpu_sched_run(struct nvgpu_proc *proc)
 	struct nvgpu_future_result result;
 
 	for (;;) {
-		lwkt_gettoken(&proc->token);
 		future = TAILQ_FIRST(&proc->active_tasks);
 		if (future != NULL)
 			TAILQ_REMOVE(&proc->active_tasks, future, link);
-		lwkt_reltoken(&proc->token);
 		if (future == NULL)
 			break;
 
@@ -44,9 +42,7 @@ nvgpu_sched_run(struct nvgpu_proc *proc)
 			    proc, result.result);
 			_kfree(future, M_NVGPU_FUTURE);
 		} else {
-			lwkt_gettoken(&proc->token);
 			TAILQ_INSERT_TAIL(&proc->parked_tasks, future, link);
-			lwkt_reltoken(&proc->token);
 		}
 	}
 }
