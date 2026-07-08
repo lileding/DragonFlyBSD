@@ -8,15 +8,54 @@
 #include "nvgpu_device.h"
 
 #include <sys/bus.h>
+#include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 
 int nvgpu_debug = 0;
 TUNABLE_INT("hw.nvgpu.debug", &nvgpu_debug);
 
-SYSCTL_NODE(_hw, OID_AUTO, nvgpu, CTLFLAG_RW, NULL, "NVGPU driver");
-SYSCTL_INT(_hw_nvgpu, OID_AUTO, debug, CTLFLAG_RW, &nvgpu_debug, 0,
-    "Enable nvgpu debug logs");
+static struct sysctl_ctx_list nvgpu_debug_sysctl_ctx;
+static struct sysctl_oid *nvgpu_debug_sysctl_tree;
+static bool nvgpu_debug_sysctl_ready;
+
+/* Publish module sysctls.  The tunable above still controls pre-sysctl debug. */
+int
+nvgpu_debug_init(void)
+{
+	int error;
+
+	error = sysctl_ctx_init(&nvgpu_debug_sysctl_ctx);
+	if (error != 0)
+		return (error);
+	nvgpu_debug_sysctl_tree = SYSCTL_ADD_NODE(&nvgpu_debug_sysctl_ctx,
+	    SYSCTL_STATIC_CHILDREN(_hw), OID_AUTO, "nvgpu", CTLFLAG_RW,
+	    NULL, "NVGPU driver");
+	if (nvgpu_debug_sysctl_tree == NULL) {
+		sysctl_ctx_free(&nvgpu_debug_sysctl_ctx);
+		return (ENOMEM);
+	}
+	if (SYSCTL_ADD_INT(&nvgpu_debug_sysctl_ctx,
+	    SYSCTL_CHILDREN(nvgpu_debug_sysctl_tree), OID_AUTO, "debug",
+	    CTLFLAG_RW, &nvgpu_debug, 0, "Enable nvgpu debug logs") == NULL) {
+		sysctl_ctx_free(&nvgpu_debug_sysctl_ctx);
+		nvgpu_debug_sysctl_tree = NULL;
+		return (ENOMEM);
+	}
+	nvgpu_debug_sysctl_ready = true;
+	return (0);
+}
+
+/* Remove module sysctls before the KLD text is unloaded. */
+void
+nvgpu_debug_fini(void)
+{
+	if (!nvgpu_debug_sysctl_ready)
+		return;
+	sysctl_ctx_free(&nvgpu_debug_sysctl_ctx);
+	nvgpu_debug_sysctl_tree = NULL;
+	nvgpu_debug_sysctl_ready = false;
+}
 
 static const char *
 nvgpu_log_level_name(enum nvgpu_log_level level)

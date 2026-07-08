@@ -13,6 +13,8 @@
 
 struct nvgsp_state;
 struct nvgpu_chip_config;
+struct drm_device;
+struct pci_dev;
 struct resource;
 
 /* Opaque physical GPU root.  Owned by PCI attach; subsystems borrow it while detach is excluded. */
@@ -34,5 +36,7 @@ struct drm_device *nvgpu_device_drm_dev(struct nvgpu_device *gpu);
 struct pci_dev *nvgpu_device_drm_pdev(struct nvgpu_device *gpu);
 void nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
     struct pci_dev *pdev);
+void *nvgpu_device_unload_state(struct nvgpu_device *gpu);
+void nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state);
 
 #endif /* _NVGPU_DEVICE_H_ */

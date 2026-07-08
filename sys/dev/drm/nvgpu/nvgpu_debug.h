@@ -17,6 +17,10 @@ enum nvgpu_log_level {
 
 extern int nvgpu_debug;
 
+/* Create and remove the module-owned hw.nvgpu sysctl nodes. */
+int nvgpu_debug_init(void);
+void nvgpu_debug_fini(void);
+
 /* Backend for nvgpu_log(); use the macro so call-site location is preserved. */
 void nvgpu_log_impl(enum nvgpu_log_level level, const char *file,
 	const char *func, int line, const char *fmt, ...) __printflike(5, 6);
