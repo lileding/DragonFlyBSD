@@ -19,5 +19,7 @@ int nvgpu_unload_hold_by_drm(struct nvgpu_device *gpu);
 void nvgpu_unload_release_by_drm(struct nvgpu_device *gpu);
 /* Try to start unload after proving the DRM core has no live users. */
 int nvgpu_unload_try_begin(struct nvgpu_device *gpu);
+/* Cancel a previously admitted unload before teardown has started. */
+void nvgpu_unload_abort(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_UNLOAD_H_ */
