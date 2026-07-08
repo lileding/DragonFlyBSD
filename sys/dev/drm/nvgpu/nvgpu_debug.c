@@ -58,7 +58,7 @@ nvgpu_debug_fini(void)
 }
 
 static const char *
-nvgpu_get_log_level_name(enum nvgpu_log_level level)
+nvgpu_debug_get_level_name(enum nvgpu_log_level level)
 {
 	switch (level) {
 	case NVGPU_LOG_DEBUG:
@@ -71,7 +71,7 @@ nvgpu_get_log_level_name(enum nvgpu_log_level level)
 }
 
 static int
-nvgpu_should_log(enum nvgpu_log_level level)
+nvgpu_debug_should_log(enum nvgpu_log_level level)
 {
 	switch (level) {
 	case NVGPU_LOG_DEBUG:
@@ -85,7 +85,7 @@ nvgpu_should_log(enum nvgpu_log_level level)
 
 /* Format and emit one already-authorized log message. */
 static void
-nvgpu_emit_vlog(enum nvgpu_log_level level, const char *file, const char *func,
+nvgpu_debug_emit_vlog(enum nvgpu_log_level level, const char *file, const char *func,
 	int line, const char *fmt, __va_list ap)
 {
 	char buf[512];
@@ -95,21 +95,21 @@ nvgpu_emit_vlog(enum nvgpu_log_level level, const char *file, const char *func,
 	dev = nvgpu_device_get_newbus_dev(NULL);
 	name = dev != NULL ? device_get_nameunit(dev) : "nvgpu";
 	kvsnprintf(buf, sizeof(buf), fmt, ap);
-	kprintf("%s: %s: %s:%s:%d: %s", name, nvgpu_get_log_level_name(level),
+	kprintf("%s: %s: %s:%s:%d: %s", name, nvgpu_debug_get_level_name(level),
 	    file, func, line, buf);
 }
 
 /* Emit one driver log message with call-site metadata. */
 /* Backend for nvgpu_log(); use the macro so call-site location is preserved. */
 void
-nvgpu_emit_log(enum nvgpu_log_level level, const char *file, const char *func,
+nvgpu_debug_emit_log(enum nvgpu_log_level level, const char *file, const char *func,
 	int line, const char *fmt, ...)
 {
 	__va_list ap;
 
-	if (!nvgpu_should_log(level))
+	if (!nvgpu_debug_should_log(level))
 		return;
 	__va_start(ap, fmt);
-	nvgpu_emit_vlog(level, file, func, line, fmt, ap);
+	nvgpu_debug_emit_vlog(level, file, func, line, fmt, ap);
 	__va_end(ap);
 }
