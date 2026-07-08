@@ -70,6 +70,17 @@ struct nvgpu_device {
 	void *intr;
 	struct pci_dev *drm_pdev;
 	struct drm_device *drm_dev;
+	void *unload;
+};
+
+/*
+ * DragonFly DRM expects device_get_softc(dev) to start with drm_softc.
+ * Keep the GPU root in our own tail field; drm_softc::drm_driver_data is owned
+ * by DRM core and points at struct drm_device after drm_dev_alloc().
+ */
+struct nvgpu_pci_softc {
+	struct drm_softc drm;
+	struct nvgpu_device *gpu;
 };
 
 static int nvgpu_device_pci_probe(device_t dev);
@@ -93,17 +104,24 @@ static void nvgpu_device_fini(struct nvgpu_device *gpu);
 static int
 nvgpu_device_modevent(module_t mod __unused, int type, void *data __unused)
 {
+	int error;
+
 	switch (type) {
 	case MOD_LOAD:
+		error = nvgpu_debug_init();
+		if (error != 0)
+			return (error);
 		nvgpu_log(NVGPU_LOG_INFO, "loaded (target GSP firmware 570.144)\n");
 		return (0);
 	case MOD_UNLOAD:
 		nvgpu_log(NVGPU_LOG_INFO, "unloaded\n");
+		nvgpu_debug_fini();
 		return (0);
 	default:
 		return (EOPNOTSUPP);
 	}
 }
+
 
 static moduledata_t nvgpu_device_moddata = {
 	"nvgpu",
@@ -129,7 +147,7 @@ static device_method_t nvgpu_device_pci_methods[] = {
 static driver_t nvgpu_device_pci_driver = {
 	"drm",
 	nvgpu_device_pci_methods,
-	sizeof(struct drm_softc),
+	sizeof(struct nvgpu_pci_softc),
 };
 
 static devclass_t nvgpu_device_devclass;
@@ -162,27 +180,27 @@ nvgpu_device_pci_probe(device_t dev)
 	return (BUS_PROBE_DEFAULT);
 }
 
-/* Recover the GPU object stored behind the drm child softc. */
+/* Recover the GPU object stored in the PCI/newbus softc tail. */
 static struct nvgpu_device *
 nvgpu_device_from_newbus(device_t dev)
 {
-	struct drm_softc *shim;
+	struct nvgpu_pci_softc *sc;
 
-	shim = device_get_softc(dev);
-	if (shim == NULL)
+	sc = device_get_softc(dev);
+	if (sc == NULL)
 		return (NULL);
-	return (shim->drm_driver_data);
+	return (sc->gpu);
 }
 
-/* Publish or clear the GPU object in the drm child softc. */
+/* Publish or clear the GPU object in the PCI/newbus softc tail. */
 static void
 nvgpu_device_store_newbus(device_t dev, struct nvgpu_device *gpu)
 {
-	struct drm_softc *shim;
+	struct nvgpu_pci_softc *sc;
 
-	shim = device_get_softc(dev);
-	if (shim != NULL)
-		shim->drm_driver_data = (void *)gpu;
+	sc = device_get_softc(dev);
+	if (sc != NULL)
+		sc->gpu = gpu;
 }
 
 /* Map the PCI BAR resources required for early MMIO. */
@@ -285,6 +303,18 @@ nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
 {
 	gpu->drm_dev = ddev;
 	gpu->drm_pdev = pdev;
+}
+
+void *
+nvgpu_device_unload_state(struct nvgpu_device *gpu)
+{
+	return (gpu->unload);
+}
+
+void
+nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state)
+{
+	gpu->unload = state;
 }
 
 struct nvgsp_state *
@@ -452,50 +482,41 @@ nvgpu_device_boot_done(struct nvgpu_device *gpu)
 static int
 nvgpu_device_stop(struct nvgpu_device *gpu)
 {
+	enum nvgpu_boot_phase phase;
+
 	nvgpu_log(NVGPU_LOG_DEBUG, "stop device phase=%d\n", gpu->boot_phase);
 	nvgpu_device_boot_stop(gpu);
-	switch (gpu->boot_phase) {
-	case NVGPU_BOOT_DRM:
+	phase = gpu->boot_phase;
+
+	if (phase >= NVGPU_BOOT_DRM)
 		nvdrm_unregister(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_INTR_ENABLED:
-		nvgpu_intr_disable(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_INTR_INIT:
-		nvgpu_intr_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_DISPLAY:
+	/* RM object frees use synchronous RPC, so keep the interrupt path alive. */
+	if (phase >= NVGPU_BOOT_DISPLAY)
 		nvgsp_disp_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_GOLDEN_CHANNEL:
+	if (phase >= NVGPU_BOOT_GOLDEN_CHANNEL)
 		nvgsp_channel_destroy_golden(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_BOOTSTRAP_CHANNEL:
+	if (phase >= NVGPU_BOOT_BOOTSTRAP_CHANNEL)
 		nvgsp_channel_destroy_bootstrap(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_VMM:
+	if (phase >= NVGPU_BOOT_VMM)
 		nvgsp_vmm_fini_kernel(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_BAR1:
+
+	/* No display, channel, or VMM path remains to consume GSP events now. */
+	if (phase >= NVGPU_BOOT_INTR_ENABLED)
+		nvgpu_intr_disable(gpu);
+	if (phase >= NVGPU_BOOT_INTR_INIT)
+		nvgpu_intr_fini(gpu);
+
+	if (phase >= NVGPU_BOOT_BAR1)
 		nvgsp_bar1_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_BAR2:
+	if (phase >= NVGPU_BOOT_BAR2)
 		nvgsp_bar2_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_VRAM:
+	if (phase >= NVGPU_BOOT_VRAM)
 		nvgsp_vram_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_GSP:
+	if (phase >= NVGPU_BOOT_GSP)
 		nvgsp_shutdown(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_EVENT:
-	case NVGPU_BOOT_RPC:
-	case NVGPU_BOOT_STATE:
+	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
-		/* FALLTHROUGH */
-	case NVGPU_BOOT_NONE:
-		break;
-	}
+
 	gpu->boot_phase = NVGPU_BOOT_NONE;
 	return (0);
 }
@@ -505,6 +526,7 @@ static void
 nvgpu_device_fini(struct nvgpu_device *gpu)
 {
 	nvgpu_log(NVGPU_LOG_DEBUG, "finish device\n");
+	nvgpu_unload_fini(gpu);
 	nvgpu_device_release_bars(gpu);
 	nvgpu_log(NVGPU_LOG_INFO, "detached\n");
 	if (nvgpu_default_gpu == gpu)
@@ -551,10 +573,12 @@ nvgpu_device_pci_attach(device_t dev)
 
 	error = nvgpu_device_boot_start(gpu);
 	if (error != 0)
-		goto fail_bars;
+		goto fail_unload;
 
 	return (0);
 
+fail_unload:
+	nvgpu_unload_fini(gpu);
 fail_bars:
 	nvgpu_device_release_bars(gpu);
 fail:
@@ -573,9 +597,12 @@ nvgpu_device_pci_detach(device_t dev)
 	int error;
 
 	gpu = nvgpu_device_from_newbus(dev);
+	nvgpu_log(NVGPU_LOG_DEBUG, "pci detach gpu=%p\n", gpu);
 	if (gpu == NULL)
 		return (0);
 
+	nvgpu_log(NVGPU_LOG_DEBUG, "unload begin gpu=%p ddev=%p\n", gpu,
+	    nvgpu_device_drm_dev(gpu));
 	error = nvgpu_unload_begin(gpu);
 	if (error != 0)
 		return (error);
