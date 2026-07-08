@@ -988,6 +988,150 @@ nvgsp_channel_destroy_bootstrap(struct nvgpu_device *gpu)
 	gsp->bootstrap_channel = NULL;
 }
 
+/* Create a user submission channel on an existing per-process VMM. */
+int
+nvgsp_channel_create_user(struct nvgsp_vmm *vmm, uint32_t engine_type,
+    struct nvgsp_channel **out)
+{
+	struct nvgsp_state *gsp;
+	struct nvgsp_channel *chan;
+	uint32_t mthdbuf_size, userd_page;
+	int error;
+
+	if (vmm == NULL || out == NULL || vmm->gsp == NULL)
+		return (EINVAL);
+	gsp = vmm->gsp;
+	chan = kmalloc(sizeof(*chan), M_NVGSP_CHANNEL, M_WAITOK | M_ZERO);
+	chan->vmm = vmm;
+	chan->chid = -1;
+	chan->gpf_free = NV_CHANNEL_GPFIFO_ENTRIES - 1;
+	chan->submit_gva_push = NVGSP_VMM_CLIENT_BASE +
+	    (uint64_t)vmm->submit_gva_slot * NVGSP_SUBMIT_GVA_STRIDE;
+	chan->submit_gva_gpf = chan->submit_gva_push + 0x1000;
+	chan->submit_gva_sema = chan->submit_gva_push + 0x2000;
+	vmm->submit_gva_slot++;
+
+	lwkt_gettoken(&gsp->gsp_tok);
+	chan->chid = nvgsp_channel_alloc_chid(gsp);
+	if (chan->chid < 0) {
+		error = ENOMEM;
+		goto fail_locked;
+	}
+	lwkt_gettoken(&gsp->chid_tok);
+	gsp->chid_channel[chan->chid] = chan;
+	lwkt_reltoken(&gsp->chid_tok);
+
+	userd_page = (uint32_t)chan->chid / 8u;
+	chan->inst_vram = nvgsp_vram_alloc_kind(gsp, NV_CHANNEL_INST_SIZE,
+	    0x1000, NVGSP_VRAM_CHANNEL_INST, chan);
+	chan->userd_vram = nvgsp_vram_alloc_kind(gsp,
+	    (uint64_t)(userd_page + 1) * 0x1000, 0x1000,
+	    NVGSP_VRAM_CHANNEL_USERD, chan);
+	if (chan->inst_vram == 0 || chan->userd_vram == 0) {
+		error = ENOMEM;
+		goto fail_locked;
+	}
+
+	error = nvgsp_bar_map_bar1_existing(gsp, chan->inst_vram,
+	    &chan->inst_bar1_gva);
+	if (error != 0)
+		goto fail_locked;
+	nvgsp_bar_invalidate_bar1(gsp);
+	nvgsp_channel_zero_inst(gsp, chan);
+	nvgsp_channel_write_inst_pdb(gsp, chan, vmm);
+
+	mthdbuf_size = gsp->mthdbuf_size != 0 ? gsp->mthdbuf_size : 0x4000u;
+	chan->mthdbuf_kva = contigmalloc(mthdbuf_size, M_NVGSP_CHANNEL,
+	    M_WAITOK | M_ZERO, 0, ~(vm_paddr_t)0, 0x1000, 0);
+	if (chan->mthdbuf_kva == NULL) {
+		error = ENOMEM;
+		goto fail_locked;
+	}
+	chan->mthdbuf_paddr = vtophys(chan->mthdbuf_kva);
+	chan->mthdbuf_size = mthdbuf_size;
+
+	error = nvgsp_channel_submit_dmamem_alloc(gsp, chan);
+	if (error != 0)
+		goto fail_locked;
+	error = nvgsp_channel_map_submit_pages(vmm, chan);
+	if (error != 0)
+		goto fail_locked;
+
+	error = nvgsp_bar_map_bar1_existing(gsp,
+	    chan->userd_vram + (uint64_t)userd_page * 0x1000,
+	    &chan->userd_bar1_gva);
+	if (error != 0)
+		goto fail_locked;
+	nvgsp_bar_invalidate_bar1(gsp);
+	nvgsp_channel_clear_userd(gsp, chan);
+
+	error = nvgsp_channel_alloc_rm_common(vmm, chan,
+	    NVGSP_RM_CHANNEL | (uint32_t)chan->chid, engine_type, 1,
+	    chan->inst_vram,
+	    chan->userd_vram + (uint64_t)chan->chid * NV_USERD_SLOT_SIZE,
+	    chan->mthdbuf_paddr, mthdbuf_size, chan->submit_gva_gpf,
+	    NV_CHANNEL_GPFIFO_ENTRIES * 8);
+	if (error != 0)
+		goto fail_locked;
+	error = nvgsp_channel_bind_engine(chan, engine_type);
+	if (error != 0)
+		goto fail_locked;
+	error = nvgsp_channel_schedule(chan);
+	if (error != 0)
+		goto fail_locked;
+	error = nvgsp_channel_alloc_ce_object(chan, engine_type);
+	if (error != 0)
+		goto fail_locked;
+	error = nvgsp_channel_get_work_submit_token(chan);
+	if (error != 0)
+		goto fail_locked;
+	lwkt_reltoken(&gsp->gsp_tok);
+
+	*out = chan;
+	return (0);
+
+fail_locked:
+	lwkt_reltoken(&gsp->gsp_tok);
+	nvgsp_channel_destroy_user(chan);
+	return (error);
+}
+
+/* Destroy a user submission channel after scheduler work has drained. */
+void
+nvgsp_channel_destroy_user(struct nvgsp_channel *chan)
+{
+	struct nvgsp_state *gsp;
+
+	if (chan == NULL || chan->vmm == NULL)
+		return;
+	gsp = chan->vmm->gsp;
+	if (gsp != NULL)
+		lwkt_gettoken(&gsp->gsp_tok);
+	if (chan->ce_obj.handle != 0)
+		nvgsp_rm_free(&chan->ce_obj);
+	if (chan->object.handle != 0)
+		nvgsp_rm_free(&chan->object);
+	if (chan->userd_bar1_gva != 0)
+		nvgsp_bar_unmap_bar1_existing(gsp, chan->userd_bar1_gva);
+	if (chan->inst_bar1_gva != 0)
+		nvgsp_bar_unmap_bar1_existing(gsp, chan->inst_bar1_gva);
+	if (chan->submit_gva_push != 0 && chan->vmm != NULL)
+		(void)nvgsp_vmm_unmap(chan->vmm, chan->submit_gva_push, 0x3000);
+	if (chan->mthdbuf_kva != NULL)
+		contigfree(chan->mthdbuf_kva, chan->mthdbuf_size,
+		    M_NVGSP_CHANNEL);
+	if (gsp != NULL) {
+		nvgsp_channel_submit_dmamem_free(gsp, chan);
+		nvgsp_vram_free_kind(gsp, chan->inst_vram,
+		    NVGSP_VRAM_CHANNEL_INST, chan);
+		nvgsp_vram_free_kind(gsp, chan->userd_vram,
+		    NVGSP_VRAM_CHANNEL_USERD, chan);
+		nvgsp_channel_free_chid(gsp, chan->chid);
+		lwkt_reltoken(&gsp->gsp_tok);
+	}
+	kfree(chan, M_NVGSP_CHANNEL);
+}
+
 int
 nvgsp_channel_create_golden(struct nvgpu_device *gpu)
 {

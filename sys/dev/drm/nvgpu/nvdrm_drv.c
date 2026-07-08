@@ -7,6 +7,7 @@
 #include "nvdrm_drv.h"
 #include "nvdrm_file.h"
 #include "nvdrm_ioctl.h"
+#include "nvgpu_bo.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
 
@@ -40,6 +41,7 @@ static struct drm_driver nvdrm_driver = {
 	.open = nvdrm_file_open,
 	.postclose = nvdrm_file_postclose,
 	.lastclose = nvdrm_file_lastclose,
+	.gem_free_object_unlocked = nvgpu_bo_free,
 };
 
 /* Register DRM after GPU boot.  gpu is borrowed; may sleep and must not hold GSP/VM tokens. */

@@ -7,12 +7,14 @@
 #ifndef _NVGPU_PROC_H_
 #define _NVGPU_PROC_H_
 
+#include "nvgpu_channel.h"
 #include "nvgpu_sched.h"
 
 #include <sys/queue.h>
 #include <sys/thread.h>
 
 struct nvgpu_device;
+struct nvgpu_vm;
 
 /* Events are the only external control path into the proc LWKT. */
 enum nvgpu_proc_event_type {
@@ -34,6 +36,8 @@ struct nvgpu_proc {
 	struct nvgpu_proc_event_queue events;
 	struct nvgpu_task_queue parked_tasks;
 	struct nvgpu_task_queue active_tasks;
+	struct nvgpu_channel_list channels;
+	struct nvgpu_vm *vm;
 	bool idle;
 	bool shutdown;
 };
