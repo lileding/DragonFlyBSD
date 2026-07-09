@@ -6,6 +6,7 @@
 
 #include "nvdrm_nouveau_abi.h"
 #include "nvgpu_channel.h"
+#include "nvgpu_debug.h"
 #include "nvgpu_proc.h"
 #include "nvgpu_vm.h"
 #include "nvgsp_channel.h"
@@ -120,6 +121,8 @@ nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
 	struct nvgpu_channel_object *obj;
 	struct nvgsp_channel_object *backend;
 	int error;
+	uint32_t rm_handle;
+	uint32_t slot;
 
 	if (proc == NULL)
 		return (EINVAL);
@@ -129,16 +132,25 @@ nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
 	obj = nvgpu_channel_object_slot(chan);
 	if (obj == NULL)
 		return (ENOMEM);
+	slot = (uint32_t)(obj - chan->objects);
+	rm_handle = handle;
+	if (rm_handle == 0) {
+		rm_handle = ((oclass & 0xffffu) << 16) |
+		    ((chan->id + slot) & 0xffffu);
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "channel object generated RM handle=0x%x class=0x%x channel=%u slot=%u\n",
+		    rm_handle, oclass, chan->id, slot);
+	}
 	if (needs_gr_context) {
 		error = nvgsp_channel_promote_graphics_context(chan->backend);
 		if (error != 0)
 			return (error);
 	}
-	error = nvgsp_channel_alloc_object(chan->backend, handle, oclass,
+	error = nvgsp_channel_alloc_object(chan->backend, rm_handle, oclass,
 	    &backend);
 	if (error != 0)
 		return (error);
-	obj->handle = handle;
+	obj->handle = rm_handle;
 	obj->oclass = oclass;
 	obj->nvif_object = nvif_object;
 	obj->backend = backend;

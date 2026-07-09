@@ -30,7 +30,7 @@ struct rpc_update_bar_pde_v15_00_b2 {
 int vm_phys_fictitious_reg_range(vm_paddr_t start, vm_paddr_t end,
     vm_memattr_t memattr);
 void vm_phys_fictitious_unreg_range(vm_paddr_t start, vm_paddr_t end);
-static void nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc,
+void nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc,
     uint64_t *gvas, uint32_t count);
 
 static __inline void
@@ -1425,7 +1425,7 @@ fail:
  *   Same BAR1 allocator serialization requirement as map_existing_scatter().
  *   The function batches PTE invalidation for all released pages.
  */
-static void
+void
 nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
     uint32_t count)
 {

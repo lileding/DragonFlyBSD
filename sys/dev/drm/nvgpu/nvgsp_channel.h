@@ -10,9 +10,9 @@
 #include <sys/stdint.h>
 
 #define NVGSP_CHANNEL_ENGINE_GRAPHICS	1u
-#define NVGSP_CHANNEL_ENGINE_COPY0	11u
-#define NVGSP_CHANNEL_ENGINE_COPY1	12u
-#define NVGSP_CHANNEL_ENGINE_COPY2	13u
+#define NVGSP_CHANNEL_ENGINE_COPY0	9u
+#define NVGSP_CHANNEL_ENGINE_COPY1	10u
+#define NVGSP_CHANNEL_ENGINE_COPY2	11u
 
 struct nvgpu_device;
 struct nvgsp_channel;

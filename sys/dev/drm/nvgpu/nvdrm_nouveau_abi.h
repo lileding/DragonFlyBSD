@@ -50,6 +50,9 @@
 #define NOUVEAU_GEM_DOMAIN_COHERENT	(1 << 4)
 #define NOUVEAU_GEM_DOMAIN_NO_SHARE	(1 << 5)
 
+#define NOUVEAU_GEM_CPU_PREP_NOWAIT	0x00000001
+#define NOUVEAU_GEM_CPU_PREP_WRITE	0x00000004
+
 struct drm_nouveau_getparam {
 	uint64_t param;
 	uint64_t value;
@@ -102,9 +105,32 @@ struct drm_nouveau_gem_cpu_fini {
 	uint32_t handle;
 };
 
+struct drm_nouveau_sync {
+	uint32_t flags;
+#define DRM_NOUVEAU_SYNC_SYNCOBJ		0x0
+#define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ	0x1
+#define DRM_NOUVEAU_SYNC_TYPE_MASK		0xf
+	uint32_t handle;
+	uint64_t timeline_value;
+};
+
+struct drm_nouveau_vm_bind_op {
+	uint32_t op;
+#define DRM_NOUVEAU_VM_BIND_OP_MAP	0x0
+#define DRM_NOUVEAU_VM_BIND_OP_UNMAP	0x1
+	uint32_t flags;
+#define DRM_NOUVEAU_VM_BIND_SPARSE	(1 << 8)
+	uint32_t handle;
+	uint32_t pad;
+	uint64_t addr;
+	uint64_t bo_offset;
+	uint64_t range;
+};
+
 struct drm_nouveau_vm_bind {
 	uint32_t op_count;
 	uint32_t flags;
+#define DRM_NOUVEAU_VM_BIND_RUN_ASYNC	0x1
 	uint32_t wait_count;
 	uint32_t sig_count;
 	uint64_t wait_ptr;
