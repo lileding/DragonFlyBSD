@@ -8,7 +8,6 @@
 #define _NVGPU_PROC_H_
 
 #include "nvgpu_channel.h"
-#include "nvgpu_sched.h"
 
 #include <sys/queue.h>
 #include <sys/thread.h>
@@ -34,8 +33,7 @@ struct nvgpu_proc {
 	struct thread *thread;
 	struct lwkt_token token;
 	struct nvgpu_proc_event_queue events;
-	struct nvgpu_task_queue parked_tasks;
-	struct nvgpu_task_queue active_tasks;
+	uint32_t refs;
 	struct nvgpu_channel_list channels;
 	struct nvgpu_vm *vm;
 	bool idle;
@@ -47,6 +45,10 @@ int nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp);
 
 /* Request async process teardown.  Final release runs on the proc LWKT. */
 void nvgpu_proc_stop(struct nvgpu_proc *proc);
+
+/* Hold or release one asynchronous user of proc-owned state. */
+void nvgpu_proc_hold(struct nvgpu_proc *proc);
+void nvgpu_proc_release(struct nvgpu_proc *proc);
 
 /* Return the borrowed physical GPU for this proc. */
 struct nvgpu_device *nvgpu_proc_get_gpu(struct nvgpu_proc *proc);
