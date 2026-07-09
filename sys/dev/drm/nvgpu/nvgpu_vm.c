@@ -33,9 +33,9 @@ nvgpu_vm_alloc(struct nvgpu_proc *proc, struct nvgpu_vm **vmp)
 	struct nvgpu_vm *vm;
 
 	vm = kmalloc(sizeof(*vm), M_NVGPU_VM, M_WAITOK | M_ZERO);
-	vm->gpu = nvgpu_proc_get_gpu(proc);
+	vm->gpu = nvgpu_proc_get_device(proc);
 	vm->client_handle = atomic_fetchadd_int(&nvgpu_vm_next_client, 1);
-	proc->vm = vm;
+	nvgpu_proc_set_vm(proc, vm);
 	*vmp = vm;
 	return (0);
 }
@@ -50,7 +50,7 @@ nvgpu_vm_set_kernel_managed(struct nvgpu_proc *proc, uint64_t addr,
 
 	if (proc == NULL)
 		return (EINVAL);
-	vm = proc->vm;
+	vm = nvgpu_proc_get_vm(proc);
 	if (vm == NULL) {
 		error = nvgpu_vm_alloc(proc, &vm);
 		if (error != 0)
@@ -70,7 +70,7 @@ nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm)
 
 	if (proc == NULL || vmm == NULL)
 		return (EINVAL);
-	vm = proc->vm;
+	vm = nvgpu_proc_get_vm(proc);
 	if (vm == NULL) {
 		error = nvgpu_vm_alloc(proc, &vm);
 		if (error != 0)
@@ -167,10 +167,12 @@ nvgpu_vm_destroy(struct nvgpu_proc *proc)
 {
 	struct nvgpu_vm *vm;
 
-	if (proc == NULL || proc->vm == NULL)
+	if (proc == NULL)
 		return;
-	vm = proc->vm;
-	proc->vm = NULL;
+	vm = nvgpu_proc_get_vm(proc);
+	if (vm == NULL)
+		return;
+	nvgpu_proc_set_vm(proc, NULL);
 	if (vm->backend != NULL)
 		nvgsp_vmm_destroy_user(vm->backend);
 	_kfree(vm, M_NVGPU_VM);

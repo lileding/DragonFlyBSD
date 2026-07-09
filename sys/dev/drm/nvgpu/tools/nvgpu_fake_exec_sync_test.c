@@ -27,6 +27,9 @@
 #define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ 0x1
 #define DRM_NOUVEAU_SYNC_TYPE_MASK 0xf
 
+#define NVGPU_FAKE_EXEC_ERROR_CHANNEL 0xfffffff0U
+#define NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL 0xfffffff1U
+
 struct drm_nouveau_sync {
 	uint32_t flags;
 	uint32_t handle;
@@ -453,6 +456,123 @@ test_mixed_multi_wait(int fd)
 }
 
 static bool
+test_binary_wait_error_no_poll(int fd)
+{
+	uint32_t err = syncobj_create(fd, false);
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig_err = binary_sync(err);
+	struct drm_nouveau_sync wait_err = binary_sync(err);
+	struct drm_nouveau_sync sig_out = binary_sync(out);
+	bool ok;
+
+	ok = err != 0 && out != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_err, 1,
+	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
+	    exec_submit(fd, &wait_err, 1, &sig_out, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    syncobj_wait_binary(fd, &out, 1, 5);
+	syncobj_destroy(fd, err);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_binary_error_chain_no_poll(int fd)
+{
+	uint32_t err = syncobj_create(fd, false);
+	uint32_t mid = syncobj_create(fd, false);
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig_err = binary_sync(err);
+	struct drm_nouveau_sync wait_err = binary_sync(err);
+	struct drm_nouveau_sync sig_mid = binary_sync(mid);
+	struct drm_nouveau_sync wait_mid = binary_sync(mid);
+	struct drm_nouveau_sync sig_out = binary_sync(out);
+	bool ok;
+
+	ok = err != 0 && mid != 0 && out != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_err, 1,
+	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
+	    exec_submit(fd, &wait_err, 1, &sig_mid, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    exec_submit(fd, &wait_mid, 1, &sig_out, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    syncobj_wait_binary(fd, &out, 1, 5);
+	syncobj_destroy(fd, err);
+	syncobj_destroy(fd, mid);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_binary_already_signaled_error_wait(int fd)
+{
+	uint32_t err = syncobj_create(fd, false);
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig_err = binary_sync(err);
+	struct drm_nouveau_sync wait_err = binary_sync(err);
+	struct drm_nouveau_sync sig_out = binary_sync(out);
+	bool ok;
+
+	ok = err != 0 && out != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_err, 1,
+	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
+	    syncobj_wait_binary(fd, &err, 1, 5) &&
+	    exec_submit(fd, &wait_err, 1, &sig_out, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    syncobj_wait_binary(fd, &out, 1, 5);
+	syncobj_destroy(fd, err);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_timeline_wait_error_no_poll(int fd)
+{
+	uint32_t t = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig1 = timeline_sync(t, 1);
+	struct drm_nouveau_sync wait1 = timeline_sync(t, 1);
+	struct drm_nouveau_sync sig2 = timeline_sync(t, 2);
+	uint64_t point = 2;
+	bool ok;
+
+	ok = t != 0 &&
+	    exec_submit(fd, NULL, 0, &sig1, 1,
+	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
+	    exec_submit(fd, &wait1, 1, &sig2, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    syncobj_wait_timeline(fd, &t, &point, 1, 5);
+	syncobj_destroy(fd, t);
+	return ok;
+}
+
+static bool
+test_mixed_multi_wait_error_no_poll(int fd)
+{
+	uint32_t ok_in = syncobj_create(fd, false);
+	uint32_t err_in = syncobj_create(fd, false);
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig_ok = binary_sync(ok_in);
+	struct drm_nouveau_sync sig_err = binary_sync(err_in);
+	struct drm_nouveau_sync waits[2];
+	struct drm_nouveau_sync sig_out = binary_sync(out);
+	bool ok;
+
+	waits[0] = binary_sync(ok_in);
+	waits[1] = binary_sync(err_in);
+	ok = ok_in != 0 && err_in != 0 && out != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_ok, 1, 11) &&
+	    exec_submit(fd, NULL, 0, &sig_err, 1,
+	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
+	    exec_submit(fd, waits, 2, &sig_out, 1,
+	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
+	    syncobj_wait_binary(fd, &out, 1, 5);
+	syncobj_destroy(fd, ok_in);
+	syncobj_destroy(fd, err_in);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
 test_cross_file_syncobj(int fd)
 {
 	int fd2 = open_device();
@@ -557,6 +677,11 @@ static const struct test_case tests[] = {
 	{ "timeline chain", test_timeline_chain },
 	{ "timeline already-signaled wait", test_timeline_already_signaled_wait },
 	{ "mixed multi-wait", test_mixed_multi_wait },
+	{ "binary wait error no poll", test_binary_wait_error_no_poll },
+	{ "binary error chain no poll", test_binary_error_chain_no_poll },
+	{ "binary already-signaled error wait", test_binary_already_signaled_error_wait },
+	{ "timeline wait error no poll", test_timeline_wait_error_no_poll },
+	{ "mixed multi-wait error no poll", test_mixed_multi_wait_error_no_poll },
 	{ "cross-file syncobj", test_cross_file_syncobj },
 	{ "invalid wait handle", test_invalid_wait_handle },
 	{ "unsignaled wait without fence", test_unsignaled_wait_without_fence },

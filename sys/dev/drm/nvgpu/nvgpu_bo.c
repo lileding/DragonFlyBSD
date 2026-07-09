@@ -642,7 +642,7 @@ nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
 
 	if (proc == NULL || file == NULL || args == NULL || info == NULL)
 		return (EINVAL);
-	ddev = nvgpu_device_get_drm_dev(nvgpu_proc_get_gpu(proc));
+	ddev = nvgpu_device_get_drm_dev(nvgpu_proc_get_device(proc));
 	if (ddev == NULL)
 		return (ENXIO);
 

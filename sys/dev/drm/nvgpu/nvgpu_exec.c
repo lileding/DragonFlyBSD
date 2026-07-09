@@ -5,8 +5,6 @@
  */
 
 #include "nvgpu_exec.h"
-#include "nvdrm_nouveau_abi.h"
-#include "nvdrm_sync.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_fence.h"
@@ -14,8 +12,9 @@
 #include "nvgpu_proc.h"
 #include "nvgpu_sched.h"
 
-#include <linux/dma-fence.h>
 #include <sys/errno.h>
+#include <sys/kernel.h>
+#include <machine/atomic.h>
 #include <sys/malloc.h>
 
 static MALLOC_DEFINE(M_NVGPU_EXEC, "nvgpu_exec", "nvgpu exec future");
@@ -32,48 +31,44 @@ static uint64_t nvgpu_exec_fake_seqno;
 
 static struct nvgpu_future_result nvgpu_exec_fake_poll(
     struct nvgpu_future *future);
-static void nvgpu_exec_fake_release(struct nvgpu_future *future);
+static void nvgpu_exec_fake_destroy(struct nvgpu_future *future);
 
 int
-nvgpu_exec_submit_fake(struct nvgpu_proc *proc, struct drm_file *file,
-    void *data)
+nvgpu_exec_submit_fake(struct nvgpu_proc *proc,
+    struct nvgpu_exec_submit_args *args)
 {
-	struct drm_nouveau_exec *req = data;
 	struct nvgpu_exec_future *exec;
-	struct dma_fence *done_fence;
-	struct nvdrm_sync_signal_set signals;
+	struct nvgpu_fence *done_fence;
 	int error;
 
-	if (proc == NULL || file == NULL || req == NULL)
+	if (args == NULL)
 		return (EINVAL);
-	done_fence = nvgpu_fence_create(nvgpu_proc_get_gpu(proc), "exec");
-	if (done_fence == NULL)
-		return (ENOMEM);
+	done_fence = args->done_fence;
+	args->done_fence = NULL;
+	if (proc == NULL || done_fence == NULL) {
+		if (done_fence == NULL)
+			return (EINVAL);
+		nvgpu_fence_release(done_fence);
+		return (EINVAL);
+	}
 	exec = kmalloc(sizeof(*exec), M_NVGPU_EXEC, M_WAITOK | M_ZERO);
-	exec->seqno = ++nvgpu_exec_fake_seqno;
-	exec->channel = req->channel;
-	exec->push_count = req->push_count;
-	nvgpu_future_init(&exec->base, proc, done_fence, nvgpu_exec_fake_poll,
-	    nvgpu_exec_fake_release);
-	error = nvdrm_sync_collect_waits(file, &exec->base, req->wait_count,
-	    req->wait_ptr);
-	if (error != 0)
-		goto fail_future;
-	error = nvdrm_sync_prepare_signals(file, req->sig_count, req->sig_ptr,
-	    done_fence, &signals);
-	if (error != 0)
-		goto fail_future;
+	exec->seqno = atomic_fetchadd_64(&nvgpu_exec_fake_seqno, 1) + 1;
+	exec->channel = args->channel;
+	exec->push_count = args->push_count;
 	nvgpu_log(NVGPU_LOG_DEBUG,
-	    "fake exec submit seq=%ju proc=%p channel=%u pushes=%u waits=%u sigs=%u wait_count=%u\n",
-	    (uintmax_t)exec->seqno, proc, req->channel, req->push_count,
-	    req->wait_count, req->sig_count, exec->base.wait_count);
-	nvgpu_sched_submit_future(&exec->base);
-	nvdrm_sync_publish_signals(&signals);
-	nvdrm_sync_cleanup_signals(&signals);
+	    "fake exec submit seq=%ju proc=%p channel=%u pushes=%u waits=%u\n",
+	    (uintmax_t)exec->seqno, proc, args->channel, args->push_count,
+	    args->wait_count);
+	error = nvgpu_future_spawn(&exec->base, proc, done_fence,
+	    args->wait_fences, args->wait_count, nvgpu_exec_fake_poll,
+	    nvgpu_exec_fake_destroy);
+	if (error != 0)
+		goto fail_future;
 	return (0);
 
 fail_future:
-	nvgpu_future_cancel(&exec->base, error);
+	nvgpu_future_finish(&exec->base, error);
+	args->done_fence = NULL;
 	return (error);
 }
 
@@ -89,36 +84,39 @@ nvgpu_exec_fake_poll(struct nvgpu_future *future)
 	struct nvgpu_exec_future *exec;
 	struct nvgpu_future_result result;
 
-	exec = container_of(future, struct nvgpu_exec_future, base);
-	if (future->wait_error != 0) {
+	exec = (struct nvgpu_exec_future *)future;
+	if (exec->channel == NVGPU_EXEC_FAKE_ERROR_CHANNEL) {
 		nvgpu_log(NVGPU_LOG_INFO,
-		    "fake exec wait error seq=%ju error=%d\n",
-		    (uintmax_t)exec->seqno, future->wait_error);
+		    "fake exec submit error seq=%ju\n",
+		    (uintmax_t)exec->seqno);
 		result.ready = true;
-		result.result = future->wait_error;
+		result.result = EIO;
+		return (result);
+	}
+	if (exec->channel == NVGPU_EXEC_FAKE_NEVER_READY_CHANNEL) {
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "fake exec never-ready poll seq=%ju\n",
+		    (uintmax_t)exec->seqno);
+		result.ready = false;
+		result.result = 0;
 		return (result);
 	}
 	nvgpu_log(NVGPU_LOG_DEBUG,
 	    "fake exec poll seq=%ju proc=%p poll=%u channel=%u pushes=%u\n",
 	    (uintmax_t)exec->seqno, future->proc, exec->poll_count,
 	    exec->channel, exec->push_count);
-	if (exec->poll_count++ == 0) {
-		nvgpu_sched_wake_future(future);
-		result.ready = false;
-		result.result = 0;
-		return (result);
-	}
+	exec->poll_count++;
 	result.ready = true;
 	result.result = 0;
 	return (result);
 }
 
 static void
-nvgpu_exec_fake_release(struct nvgpu_future *future)
+nvgpu_exec_fake_destroy(struct nvgpu_future *future)
 {
 	struct nvgpu_exec_future *exec;
 
-	exec = container_of(future, struct nvgpu_exec_future, base);
+	exec = (struct nvgpu_exec_future *)future;
 	nvgpu_log(NVGPU_LOG_DEBUG, "fake exec release seq=%ju\n",
 	    (uintmax_t)exec->seqno);
 	_kfree(exec, M_NVGPU_EXEC);

@@ -6,13 +6,16 @@
 
 #include "nvgpu_syscall.h"
 #include "nvdrm_nouveau_abi.h"
+#include "nvdrm_sync.h"
 #include "nvgpu_bo.h"
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_fence.h"
 #include "nvgpu_exec.h"
 #include "nvgpu_info.h"
 #include "nvgpu_nvif.h"
 #include "nvgpu_vm.h"
+#include "nvgpu_proc.h"
 
 #include <sys/errno.h>
 #include <sys/malloc.h>
@@ -217,5 +220,43 @@ int
 nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
     void *data)
 {
-	return (nvgpu_exec_submit_fake(proc, file, data));
+	struct drm_nouveau_exec *req = data;
+	struct nvdrm_sync_wait_set waits;
+	struct nvdrm_sync_signal_set signals;
+	struct nvgpu_exec_submit_args args;
+	struct nvgpu_fence *done_fence;
+	int error;
+
+	if (req == NULL)
+		return (EINVAL);
+	error = nvdrm_sync_collect_wait_fences(file, req->wait_count,
+	    req->wait_ptr, &waits);
+	if (error != 0)
+		return (error);
+	done_fence = nvgpu_fence_create(nvgpu_proc_get_device(proc), "exec");
+	if (done_fence == NULL) {
+		error = ENOMEM;
+		goto cleanup_waits;
+	}
+	error = nvdrm_sync_prepare_signals(file, req->sig_count, req->sig_ptr,
+	    done_fence, &signals);
+	if (error != 0) {
+		nvgpu_fence_release(done_fence);
+		goto cleanup_waits;
+	}
+
+	args.channel = req->channel;
+	args.push_count = req->push_count;
+	args.done_fence = done_fence;
+	args.wait_fences = waits.fences;
+	args.wait_count = waits.count;
+	error = nvgpu_exec_submit_fake(proc, &args);
+	done_fence = NULL;
+	if (error == 0)
+		nvdrm_sync_publish_signals(&signals);
+	nvdrm_sync_cleanup_signals(&signals);
+
+cleanup_waits:
+	nvdrm_sync_cleanup_waits(&waits);
+	return (error);
 }
