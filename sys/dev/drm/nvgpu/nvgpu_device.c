@@ -85,8 +85,8 @@ struct nvgpu_device {
 	struct pci_dev *drm_pdev;
 	struct drm_device *drm_dev;
 	struct nvgpu_ttm *ttm;
-	void *unload;
-	void *sched;
+	struct nvgpu_unload *unload;
+	struct nvgpu_sched *sched;
 };
 
 /*
@@ -345,13 +345,6 @@ nvgpu_device_get_sched(struct nvgpu_device *gpu)
 	return (gpu != NULL ? gpu->sched : NULL);
 }
 
-void
-nvgpu_device_set_sched(struct nvgpu_device *gpu, void *sched)
-{
-	if (gpu != NULL)
-		gpu->sched = sched;
-}
-
 struct nvgpu_ttm *
 nvgpu_device_get_ttm(struct nvgpu_device *gpu)
 {
@@ -550,8 +543,10 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
-	if (phase >= NVGPU_BOOT_SCHED)
-		nvgpu_sched_stop(gpu);
+	if (phase >= NVGPU_BOOT_SCHED) {
+		nvgpu_sched_stop(gpu->sched);
+		gpu->sched = NULL;
+	}
 	if (phase >= NVGPU_BOOT_UNLOAD)
 		nvgpu_unload_fini(gpu);
 	if (phase >= NVGPU_BOOT_BARS)
@@ -610,7 +605,7 @@ nvgpu_device_attach_pci(device_t dev)
 		goto fail_locked;
 	gpu->boot_phase = NVGPU_BOOT_UNLOAD;
 
-	error = nvgpu_sched_start(gpu);
+	error = nvgpu_sched_start(gpu, &gpu->sched);
 	if (error != 0)
 		goto fail_locked;
 	gpu->boot_phase = NVGPU_BOOT_SCHED;

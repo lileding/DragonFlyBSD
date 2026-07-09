@@ -28,7 +28,7 @@ nvgpu_info_get_param(struct nvgpu_proc *proc, uint64_t param, uint64_t *value)
 
 	if (proc == NULL || value == NULL)
 		return (EINVAL);
-	gpu = nvgpu_proc_get_gpu(proc);
+	gpu = nvgpu_proc_get_device(proc);
 	if (gpu == NULL)
 		return (ENXIO);
 	dev = nvgpu_device_get_newbus_dev(gpu);

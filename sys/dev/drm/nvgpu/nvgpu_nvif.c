@@ -76,7 +76,7 @@ nvgpu_nvif_new(struct nvgpu_proc *proc, const struct nvif_ioctl_v0 *hdr)
 	req = (void *)hdr->data;
 	if (req->oclass == NV_DEVICE)
 		return (0);
-	gpu = nvgpu_proc_get_gpu(proc);
+	gpu = nvgpu_proc_get_device(proc);
 	chip = nvgpu_device_get_chip(gpu);
 	if (!nvgpu_nvif_class_supported(chip, req->oclass))
 		return (EINVAL);
@@ -96,7 +96,7 @@ nvgpu_nvif_device_info(struct nvgpu_proc *proc, struct nvif_ioctl_mthd_v0 *mthd)
 	const char *device_name;
 	device_t dev;
 
-	gpu = nvgpu_proc_get_gpu(proc);
+	gpu = nvgpu_proc_get_device(proc);
 	chip = nvgpu_device_get_chip(gpu);
 	dev = nvgpu_device_get_newbus_dev(gpu);
 	if (chip == NULL || dev == NULL)
@@ -143,7 +143,7 @@ nvgpu_nvif_sclass(struct nvgpu_proc *proc, const struct nvif_ioctl_v0 *hdr)
 	uint32_t count, fill, want;
 
 	req = (void *)hdr->data;
-	gpu = nvgpu_proc_get_gpu(proc);
+	gpu = nvgpu_proc_get_device(proc);
 	chip = nvgpu_device_get_chip(gpu);
 	count = nvgpu_nvif_chip_classes(chip, classes);
 	want = req->count;

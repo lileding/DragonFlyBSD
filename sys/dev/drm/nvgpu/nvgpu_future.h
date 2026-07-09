@@ -9,10 +9,10 @@
 
 #include <sys/queue.h>
 #include <sys/stdint.h>
+#include <sys/types.h>
 #include <stdbool.h>
 
-#include <linux/dma-fence.h>
-
+struct nvgpu_fence;
 struct nvgpu_proc;
 
 struct nvgpu_future_result {
@@ -20,41 +20,28 @@ struct nvgpu_future_result {
 	int result;
 };
 
-struct nvgpu_future_wait;
-TAILQ_HEAD(nvgpu_future_wait_list, nvgpu_future_wait);
-
 struct nvgpu_future {
 	TAILQ_ENTRY(nvgpu_future) run_link;
 	TAILQ_ENTRY(nvgpu_future) proc_link;
 	struct nvgpu_future_result (*poll)(struct nvgpu_future *future);
-	void (*release)(struct nvgpu_future *future);
+	void (*destroy)(struct nvgpu_future *future);
 	struct nvgpu_proc *proc;
-	struct dma_fence *done_fence;
-	struct nvgpu_future_wait_list waits;
+	struct nvgpu_fence *done_fence;
 	uint32_t wait_count;
-	int wait_error;
-	bool submitted;
-	bool queued;
-	bool polling;
-	bool wake_pending;
-	bool done;
+	u_int error;
 };
 
-/* Initialize a future with one caller-owned done_fence reference. */
-void nvgpu_future_init(struct nvgpu_future *future, struct nvgpu_proc *proc,
-    struct dma_fence *done_fence,
+/* Spawn a future with one caller-owned done_fence reference and borrowed wait fences. */
+int nvgpu_future_spawn(struct nvgpu_future *future, struct nvgpu_proc *proc,
+    struct nvgpu_fence *done_fence, struct nvgpu_fence **wait_fences,
+    uint32_t wait_count,
     struct nvgpu_future_result (*poll)(struct nvgpu_future *future),
-    void (*release)(struct nvgpu_future *future));
+    void (*destroy)(struct nvgpu_future *future));
 
-/* Add one wait fence callback to the future, or consume an already-signaled fence. */
-int nvgpu_future_add_wait(struct nvgpu_future *future,
-    struct dma_fence *fence);
+/* Queue or requeue a future that is ready to poll. */
+void nvgpu_future_wake(struct nvgpu_future *future);
 
 /* Complete a future and release all generic resources. */
-void nvgpu_future_finish(struct nvgpu_future *future,
-    struct nvgpu_future_result result);
-
-/* Cancel all pending waits and drop the future-owned done_fence reference. */
-void nvgpu_future_cancel(struct nvgpu_future *future, int error);
+void nvgpu_future_finish(struct nvgpu_future *future, int result);
 
 #endif /* _NVGPU_FUTURE_H_ */

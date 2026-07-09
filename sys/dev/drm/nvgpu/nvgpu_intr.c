@@ -194,7 +194,6 @@ nvgpu_intr_handle(struct nvgpu_device *gpu)
 {
 	nvgpu_intr_decode(gpu);
 	nvgpu_exec_complete_from_intr(gpu);
-	nvgpu_sched_post_event(gpu);
 	nvgpu_display_handle_vblank(gpu);
 	nvgsp_event_wake_msgq(gpu);
 }

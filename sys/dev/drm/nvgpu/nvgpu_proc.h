@@ -7,43 +7,15 @@
 #ifndef _NVGPU_PROC_H_
 #define _NVGPU_PROC_H_
 
-#include "nvgpu_channel.h"
-
-#include <sys/queue.h>
-#include <sys/thread.h>
-
+struct nvgpu_channel_list;
 struct nvgpu_device;
+struct nvgpu_proc;
 struct nvgpu_vm;
 
-/* Events are the only external control path into the proc LWKT. */
-enum nvgpu_proc_event_type {
-	NVGPU_PROC_EVENT_UNKNOWN = 1,
-};
-
-struct nvgpu_proc_event {
-	TAILQ_ENTRY(nvgpu_proc_event) link;
-	enum nvgpu_proc_event_type type;
-};
-
-TAILQ_HEAD(nvgpu_proc_event_queue, nvgpu_proc_event);
-
-/* Per-open GPU process state.  The proc LWKT owns final lifetime after create succeeds. */
-struct nvgpu_proc {
-	struct nvgpu_device *gpu;
-	struct thread *thread;
-	struct lwkt_token token;
-	struct nvgpu_proc_event_queue events;
-	uint32_t refs;
-	struct nvgpu_channel_list channels;
-	struct nvgpu_vm *vm;
-	bool idle;
-	bool shutdown;
-};
-
-/* Create per-open GPU state and start its LWKT.  procp receives a borrowed event target. */
+/* Create per-open GPU state.  procp receives one owned file reference. */
 int nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp);
 
-/* Request async process teardown.  Final release runs on the proc LWKT. */
+/* Drop the file reference; final teardown runs when all future users release proc. */
 void nvgpu_proc_stop(struct nvgpu_proc *proc);
 
 /* Hold or release one asynchronous user of proc-owned state. */
@@ -51,6 +23,11 @@ void nvgpu_proc_hold(struct nvgpu_proc *proc);
 void nvgpu_proc_release(struct nvgpu_proc *proc);
 
 /* Return the borrowed physical GPU for this proc. */
-struct nvgpu_device *nvgpu_proc_get_gpu(struct nvgpu_proc *proc);
+struct nvgpu_device *nvgpu_proc_get_device(struct nvgpu_proc *proc);
+
+/* Return borrowed proc-owned storage for modules that own the contents. */
+struct nvgpu_channel_list *nvgpu_proc_get_channels(struct nvgpu_proc *proc);
+struct nvgpu_vm *nvgpu_proc_get_vm(struct nvgpu_proc *proc);
+void nvgpu_proc_set_vm(struct nvgpu_proc *proc, struct nvgpu_vm *vm);
 
 #endif /* _NVGPU_PROC_H_ */

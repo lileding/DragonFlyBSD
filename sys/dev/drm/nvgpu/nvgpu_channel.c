@@ -43,10 +43,14 @@ static volatile u_int nvgpu_channel_next_id = 1;
 static uint32_t
 nvgpu_channel_count(struct nvgpu_proc *proc)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 	uint32_t count = 0;
 
-	TAILQ_FOREACH(chan, &proc->channels, link)
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
+		return (0);
+	TAILQ_FOREACH(chan, channels, link)
 		count++;
 	return (count);
 }
@@ -54,9 +58,13 @@ nvgpu_channel_count(struct nvgpu_proc *proc)
 static struct nvgpu_channel *
 nvgpu_channel_find(struct nvgpu_proc *proc, uint32_t id)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 
-	TAILQ_FOREACH(chan, &proc->channels, link) {
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
+		return (NULL);
+	TAILQ_FOREACH(chan, channels, link) {
 		if (chan->id == id)
 			return (chan);
 	}
@@ -161,12 +169,16 @@ nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
 int
 nvgpu_channel_delete_object(struct nvgpu_proc *proc, uint64_t nvif_object)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 	uint32_t i;
 
 	if (proc == NULL)
 		return (EINVAL);
-	TAILQ_FOREACH(chan, &proc->channels, link) {
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
+		return (EINVAL);
+	TAILQ_FOREACH(chan, channels, link) {
 		for (i = 0; i < NVGPU_MAX_CHANNEL_OBJECTS; i++) {
 			struct nvgpu_channel_object *obj = &chan->objects[i];
 
@@ -187,12 +199,16 @@ nvgpu_channel_alloc(struct nvgpu_proc *proc,
     const struct nvgpu_channel_alloc_args *args,
     struct nvgpu_channel_alloc_reply *reply)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 	struct nvgsp_vmm *vmm;
 	uint32_t engine_type;
 	int error;
 
 	if (proc == NULL || args == NULL || reply == NULL)
+		return (EINVAL);
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
 		return (EINVAL);
 	if (nvgpu_channel_count(proc) >= NVGPU_MAX_CHANNELS)
 		return (ENOMEM);
@@ -213,7 +229,7 @@ nvgpu_channel_alloc(struct nvgpu_proc *proc,
 		return (error);
 	}
 
-	TAILQ_INSERT_TAIL(&proc->channels, chan, link);
+	TAILQ_INSERT_TAIL(channels, chan, link);
 	reply->channel = chan->id;
 	reply->pushbuf_domains = NOUVEAU_GEM_DOMAIN_VRAM;
 	reply->notifier_handle = 0;
@@ -225,14 +241,18 @@ nvgpu_channel_alloc(struct nvgpu_proc *proc,
 int
 nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 
 	if (proc == NULL)
 		return (EINVAL);
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
+		return (EINVAL);
 	chan = nvgpu_channel_find(proc, (uint32_t)channel);
 	if (chan == NULL)
 		return (ENOENT);
-	TAILQ_REMOVE(&proc->channels, chan, link);
+	TAILQ_REMOVE(channels, chan, link);
 	nvgpu_channel_free_objects(chan);
 	if (chan->backend != NULL)
 		nvgsp_channel_destroy_user(chan->backend);
@@ -244,12 +264,16 @@ nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
 void
 nvgpu_channel_destroy_all(struct nvgpu_proc *proc)
 {
+	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
 
 	if (proc == NULL)
 		return;
-	while ((chan = TAILQ_FIRST(&proc->channels)) != NULL) {
-		TAILQ_REMOVE(&proc->channels, chan, link);
+	channels = nvgpu_proc_get_channels(proc);
+	if (channels == NULL)
+		return;
+	while ((chan = TAILQ_FIRST(channels)) != NULL) {
+		TAILQ_REMOVE(channels, chan, link);
 		nvgpu_channel_free_objects(chan);
 		if (chan->backend != NULL)
 			nvgsp_channel_destroy_user(chan->backend);
