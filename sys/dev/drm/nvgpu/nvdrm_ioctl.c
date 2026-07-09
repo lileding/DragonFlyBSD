@@ -5,9 +5,8 @@
  */
 
 #include "nvdrm_ioctl.h"
-#include "nvdrm_file.h"
 #include "nvdrm_nouveau_abi.h"
-#include "nvgpu_debug.h"
+#include "nvdrm_file.h"
 #include "nvgpu_syscall.h"
 
 #include <drm/drmP.h>

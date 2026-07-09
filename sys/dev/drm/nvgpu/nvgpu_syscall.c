@@ -9,6 +9,7 @@
 #include "nvgpu_bo.h"
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_exec.h"
 #include "nvgpu_info.h"
 #include "nvgpu_nvif.h"
 #include "nvgpu_vm.h"
@@ -211,12 +212,10 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file __unused,
 	return (error);
 }
 
-/* Log EXEC until the real syscall implementation is moved in. */
+/* Submit a synchronization-only EXEC future until channel submit is moved in. */
 int
-nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file __unused,
+nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
     void *data)
 {
-	nvgpu_log(NVGPU_LOG_DEBUG, "syscall exec proc=%p data=%p\n",
-	    proc, data);
-	return (EOPNOTSUPP);
+	return (nvgpu_exec_submit_fake(proc, file, data));
 }

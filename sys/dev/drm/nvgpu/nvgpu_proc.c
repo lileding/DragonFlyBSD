@@ -11,7 +11,6 @@
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
-#include "nvgpu_sched.h"
 #include "nvgpu_unload.h"
 #include "nvgpu_vm.h"
 
@@ -52,8 +51,7 @@ nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
 	proc->gpu = gpu;
 	lwkt_token_init(&proc->token, "nvgprc");
 	TAILQ_INIT(&proc->events);
-	TAILQ_INIT(&proc->parked_tasks);
-	TAILQ_INIT(&proc->active_tasks);
+	proc->refs = 1;
 	TAILQ_INIT(&proc->channels);
 	proc->vm = NULL;
 	proc->idle = false;
@@ -86,7 +84,31 @@ nvgpu_proc_stop(struct nvgpu_proc *proc)
 	if (proc->idle)
 		wakeup(proc);
 	lwkt_reltoken(&proc->token);
+	nvgpu_proc_release(proc);
 	nvgpu_log(NVGPU_LOG_DEBUG, "proc stop posted proc=%p\n", proc);
+}
+
+void
+nvgpu_proc_hold(struct nvgpu_proc *proc)
+{
+	if (proc == NULL)
+		return;
+	lwkt_gettoken(&proc->token);
+	proc->refs++;
+	lwkt_reltoken(&proc->token);
+}
+
+void
+nvgpu_proc_release(struct nvgpu_proc *proc)
+{
+	if (proc == NULL)
+		return;
+	lwkt_gettoken(&proc->token);
+	KASSERT(proc->refs > 0, ("nvgpu proc refs underflow"));
+	proc->refs--;
+	if (proc->shutdown && proc->refs == 0 && proc->idle)
+		wakeup(proc);
+	lwkt_reltoken(&proc->token);
 }
 
 /* Handle one event after it has been removed from the proc queue. */
@@ -111,21 +133,18 @@ nvgpu_proc_run(void *arg)
 	struct nvgpu_proc_event *event;
 
 	for (;;) {
-		nvgpu_sched_run(proc);
-		// no active task now
-
 		lwkt_gettoken(&proc->token);
 		event = TAILQ_FIRST(&proc->events);
 		while (event == NULL) {
-			if (proc->shutdown && TAILQ_EMPTY(&proc->parked_tasks))
+			if (proc->shutdown && proc->refs == 0)
 				goto shutdown;
 
-			// idle now, wait for next interrupt
+			/* Idle now, wait for the next event. */
 			proc->idle = true;
 			tsleep_interlock(proc, 0);
 			(void)tsleep(proc, PINTERLOCKED, "nvgpup", hz / 10);
 			proc->idle = false;
-		    event = TAILQ_FIRST(&proc->events);
+			event = TAILQ_FIRST(&proc->events);
 		}
 		TAILQ_REMOVE(&proc->events, event, link);
 		lwkt_reltoken(&proc->token);

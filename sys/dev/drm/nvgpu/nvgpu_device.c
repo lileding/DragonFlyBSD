@@ -9,6 +9,7 @@
 #include "nvgpu_debug.h"
 #include "nvdrm_drv.h"
 #include "nvgpu_intr.h"
+#include "nvgpu_sched.h"
 #include "nvgpu_unload.h"
 #include "nvgsp_bar.h"
 #include "nvgsp_boot.h"
@@ -40,6 +41,7 @@ enum nvgpu_boot_phase {
 	NVGPU_BOOT_BEGIN = 0,
 	NVGPU_BOOT_BARS,
 	NVGPU_BOOT_UNLOAD,
+	NVGPU_BOOT_SCHED,
 	NVGPU_BOOT_THREADED,
 	NVGPU_BOOT_STATE,
 	NVGPU_BOOT_RPC,
@@ -84,6 +86,7 @@ struct nvgpu_device {
 	struct drm_device *drm_dev;
 	struct nvgpu_ttm *ttm;
 	void *unload;
+	void *sched;
 };
 
 /*
@@ -336,6 +339,19 @@ nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state)
 	gpu->unload = state;
 }
 
+void *
+nvgpu_device_get_sched(struct nvgpu_device *gpu)
+{
+	return (gpu != NULL ? gpu->sched : NULL);
+}
+
+void
+nvgpu_device_set_sched(struct nvgpu_device *gpu, void *sched)
+{
+	if (gpu != NULL)
+		gpu->sched = sched;
+}
+
 struct nvgpu_ttm *
 nvgpu_device_get_ttm(struct nvgpu_device *gpu)
 {
@@ -534,6 +550,8 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
+	if (phase >= NVGPU_BOOT_SCHED)
+		nvgpu_sched_stop(gpu);
 	if (phase >= NVGPU_BOOT_UNLOAD)
 		nvgpu_unload_fini(gpu);
 	if (phase >= NVGPU_BOOT_BARS)
@@ -591,6 +609,11 @@ nvgpu_device_attach_pci(device_t dev)
 	if (error != 0)
 		goto fail_locked;
 	gpu->boot_phase = NVGPU_BOOT_UNLOAD;
+
+	error = nvgpu_sched_start(gpu);
+	if (error != 0)
+		goto fail_locked;
+	gpu->boot_phase = NVGPU_BOOT_SCHED;
 
 	error = nvgpu_device_start_boot(gpu);
 	if (error != 0)

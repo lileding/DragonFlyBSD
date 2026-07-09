@@ -1,35 +1,34 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Scheduler event boundary for the native NVIDIA GPU driver.
+ * Device-global future scheduler for the native NVIDIA GPU driver.
  */
 
 #ifndef _NVGPU_SCHED_H_
 #define _NVGPU_SCHED_H_
 
-#include <sys/queue.h>
-#include <sys/types.h>
+#include "nvgpu_future.h"
 
 struct nvgpu_device;
-struct nvgpu_proc;
 
-struct nvgpu_future_result {
-	bool ready;
-	int result;
-};
+/* Start the device-global future scheduler. */
+int nvgpu_sched_start(struct nvgpu_device *gpu);
 
-struct nvgpu_future {
-	TAILQ_ENTRY(nvgpu_future) link;
-	struct nvgpu_future_result (*poll)(struct nvgpu_proc *proc,
-	    struct nvgpu_future *future);
-};
+/* Stop the scheduler after DRM users have been rejected and drained. */
+void nvgpu_sched_stop(struct nvgpu_device *gpu);
 
-TAILQ_HEAD(nvgpu_task_queue, nvgpu_future);
+/* Submit a future after all userspace-visible signal handles are published. */
+void nvgpu_sched_submit_future(struct nvgpu_future *future);
 
-/* Poll every active future once from the owning proc LWKT. */
-void nvgpu_sched_run(struct nvgpu_proc *proc);
+/* Make a submitted future runnable; safe from callbacks and ioctl threads. */
+void nvgpu_sched_wake_future(struct nvgpu_future *future);
 
-/* Wake scheduler work from external GPU events.  The proc fanout is not wired yet. */
+/* Internal helpers for future wait callbacks that mutate wait_count. */
+void nvgpu_sched_lock_future(struct nvgpu_future *future);
+void nvgpu_sched_unlock_future(struct nvgpu_future *future);
+void nvgpu_sched_wake_future_locked(struct nvgpu_future *future);
+
+/* Wake scheduler work from external GPU events.  Real EXEC fanout is wired later. */
 void nvgpu_sched_post_event(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_SCHED_H_ */
