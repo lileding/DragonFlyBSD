@@ -192,6 +192,10 @@ struct nvgsp_vram_alloc {
 	uint64_t paddr;
 	uint64_t size;
 	uint64_t align;
+	uint64_t bar1_gva;
+	uint64_t bar1_size;
+	uint64_t *bar1_page_gva;
+	uint32_t bar1_page_count;
 	enum nvgsp_vram_kind kind;
 	void *owner;
 };
@@ -610,6 +614,10 @@ int nvgsp_bar_map_bar1_existing_range(struct nvgsp_state *gsp, uint64_t paddr,
     uint64_t size, uint64_t *pgva);
 void nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *gsp, uint64_t gva,
     uint64_t size);
+int nvgsp_bar_map_bar1_existing_scatter(struct nvgsp_state *gsp,
+    uint64_t paddr, uint64_t size, uint64_t *gvas, uint32_t count);
+void nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *gsp,
+    uint64_t *gvas, uint32_t count);
 int nvgsp_bar_map_bar2_vram(struct nvgsp_state *gsp, uint64_t gva, uint64_t paddr);
 void nvgsp_bar_flush_bar2(struct nvgsp_state *gsp);
 void nvgsp_bar_invalidate_bar2(struct nvgsp_state *gsp);

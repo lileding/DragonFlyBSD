@@ -10,6 +10,7 @@
 #include "nvgpu_bo.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_ttm.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
@@ -41,6 +42,7 @@ static struct drm_driver nvdrm_driver = {
 	.open = nvdrm_file_open,
 	.postclose = nvdrm_file_postclose,
 	.lastclose = nvdrm_file_lastclose,
+	.mmap_single = nvgpu_ttm_mmap_single,
 	.gem_free_object_unlocked = nvgpu_bo_free,
 };
 
@@ -70,9 +72,22 @@ nvdrm_register(struct nvgpu_device *gpu)
 	ddev->pdev = pdev;
 	nvgpu_device_set_drm(gpu, ddev, pdev);
 
+	error = nvgpu_ttm_init(gpu, ddev);
+	if (error != 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "nvgpu_ttm_init failed error=%d\n", error);
+		nvgpu_ttm_fini(gpu);
+		nvgpu_device_set_drm(gpu, NULL, NULL);
+		if (ddev->sysctl != NULL)
+			drm_sysctl_cleanup(ddev);
+		drm_dev_put(ddev);
+		drm_fini_pdev(&pdev);
+		return (error);
+	}
+
 	error = drm_dev_register(ddev, 0);
 	if (error != 0) {
 		nvgpu_log(NVGPU_LOG_INFO, "drm_dev_register failed error=%d\n", error);
+		nvgpu_ttm_fini(gpu);
 		nvgpu_device_set_drm(gpu, NULL, NULL);
 		if (ddev->sysctl != NULL)
 			drm_sysctl_cleanup(ddev);
@@ -96,6 +111,7 @@ nvdrm_unregister(struct nvgpu_device *gpu)
 	pdev = nvgpu_device_get_drm_pdev(gpu);
 	if (ddev != NULL) {
 		drm_dev_unregister(ddev);
+		nvgpu_ttm_fini(gpu);
 		/* drm_dev_fini() does not run DragonFly's per-device sysctl cleanup. */
 		if (ddev->sysctl != NULL)
 			drm_sysctl_cleanup(ddev);

@@ -534,6 +534,18 @@ nvgsp_vmm_map_sysmem_noflush(struct nvgsp_vmm *vmm, uint64_t va,
 }
 
 int
+nvgsp_vmm_map_sysmem(struct nvgsp_vmm *vmm, uint64_t va, uint64_t paddr,
+    uint64_t size)
+{
+	int error;
+
+	error = nvgsp_vmm_map_sysmem_noflush(vmm, va, (vm_paddr_t)paddr, size);
+	if (error == 0)
+		nvgsp_vmm_flush(vmm);
+	return (error);
+}
+
+int
 nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind)
 {
@@ -554,6 +566,19 @@ nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm, uint64_t va,
 	}
 	lwkt_reltoken(&vmm->tok);
 	return (0);
+}
+
+int
+nvgsp_vmm_map_vram(struct nvgsp_vmm *vmm, uint64_t va, uint64_t paddr,
+    uint64_t size, uint8_t kind)
+{
+	int error;
+
+	error = nvgsp_vmm_map_vram_flags_noflush(vmm, va, paddr, size, 0, 0,
+	    kind);
+	if (error == 0)
+		nvgsp_vmm_flush(vmm);
+	return (error);
 }
 
 int

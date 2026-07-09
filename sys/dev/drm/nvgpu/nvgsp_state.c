@@ -18,6 +18,16 @@ nvgsp_state_get(struct nvgpu_device *gpu)
 	return (nvgpu_device_get_gsp(gpu));
 }
 
+/* Return usable VRAM base parsed from static GSP info. */
+uint64_t
+nvgsp_state_get_fb_usable_base(struct nvgpu_device *gpu)
+{
+	struct nvgsp_state *gsp;
+
+	gsp = nvgsp_state_get(gpu);
+	return (gsp != NULL ? gsp->fb_usable_base : 0);
+}
+
 /* Return usable VRAM bytes parsed from static GSP info. */
 uint64_t
 nvgsp_state_get_fb_usable_size(struct nvgpu_device *gpu)

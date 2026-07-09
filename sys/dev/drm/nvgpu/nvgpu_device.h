@@ -13,6 +13,7 @@
 
 struct nvgsp_state;
 struct nvgpu_chip_config;
+struct nvgpu_ttm;
 struct drm_device;
 struct pci_dev;
 struct resource;
@@ -40,5 +41,7 @@ void nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
     struct pci_dev *pdev);
 void *nvgpu_device_get_unload_state(struct nvgpu_device *gpu);
 void nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state);
+struct nvgpu_ttm *nvgpu_device_get_ttm(struct nvgpu_device *gpu);
+void nvgpu_device_set_ttm(struct nvgpu_device *gpu, struct nvgpu_ttm *ttm);
 
 #endif /* _NVGPU_DEVICE_H_ */
