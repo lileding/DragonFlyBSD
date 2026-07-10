@@ -409,6 +409,31 @@ nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission)
 	_kfree(submission, M_NVGSP_CHANNEL);
 }
 
+void
+nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid, int error)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+	struct nvgsp_channel *chan;
+
+	if (gsp == NULL || chid >= 2048)
+		return;
+	lwkt_gettoken(&gsp->gsp_tok);
+	lwkt_gettoken(&gsp->chid_tok);
+	chan = gsp->chid_channel[chid];
+	if (chan != NULL) {
+		chan->faulted = 1;
+		chan->fault_error = error != 0 ? error : EIO;
+	}
+	lwkt_reltoken(&gsp->chid_tok);
+	lwkt_reltoken(&gsp->gsp_tok);
+}
+
+bool
+nvgsp_channel_is_chid(const struct nvgsp_channel *chan, uint32_t chid)
+{
+	return (chan != NULL && chid < 2048 && (uint32_t)chan->chid == chid);
+}
+
 int
 nvgsp_channel_alloc_chid(struct nvgsp_state *gsp)
 {

@@ -5,6 +5,7 @@
  */
 
 #include "nvgsp_event.h"
+#include "nvgpu_intr.h"
 #include "nvgsp_priv.h"
 
 
@@ -77,6 +78,44 @@ nvgsp_event_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	return (0);
 }
 
+static int
+nvgsp_event_on_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvgsp_state *gsp = priv;
+	struct {
+		uint32_t engine_type;
+		uint32_t chid;
+		uint32_t gfid;
+		uint32_t except_level;
+		uint32_t except_type;
+		uint32_t scope;
+		uint16_t partition_id;
+		uint8_t pad0[2];
+		uint32_t fault_addr_lo;
+		uint32_t fault_addr_hi;
+		uint32_t fault_type;
+		uint8_t callback_needed;
+		uint8_t pad1[3];
+		uint32_t journal_size;
+	} *rc = repv;
+	uint64_t fault_addr;
+
+	(void)fn;
+	if (repc < sizeof(*rc)) {
+		nvgpu_log(NVGPU_LOG_INFO, "RC_TRIGGERED short message len=%u\n",
+		    repc);
+		return (0);
+	}
+	fault_addr = ((uint64_t)rc->fault_addr_hi << 32) | rc->fault_addr_lo;
+	nvgpu_log(NVGPU_LOG_INFO,
+	    "RC_TRIGGERED engine=%u chid=%u level=%u type=0x%x scope=%u "
+	    "address=0x%jx fault=0x%x journal=%u\n", rc->engine_type,
+	    rc->chid, rc->except_level, rc->except_type, rc->scope,
+	    (uintmax_t)fault_addr, rc->fault_type, rc->journal_size);
+	nvgpu_intr_report_channel_fault(gsp->gpu, rc->chid);
+	return (0);
+}
+
 /* Register GSP event handlers before the init-done wait starts. */
 int
 nvgsp_event_init(struct nvgpu_device *gpu)
@@ -95,7 +134,8 @@ nvgsp_event_init(struct nvgpu_device *gpu)
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1020, NULL, NULL);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x101c, NULL, NULL);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1003, nvgsp_event_log_only, gsp);
-	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1004, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1004, nvgsp_event_on_rc_triggered,
+	    gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1005, nvgsp_event_log_only, gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1006, nvgsp_event_log_only, gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x100c, NULL, NULL);
@@ -133,14 +173,4 @@ nvgsp_event_dispatch(struct nvgpu_device *gpu)
 
 	if (gsp != NULL)
 		(void)nvgsp_rpc_dispatch_all_msgs(gsp);
-}
-
-/* Wake GSP message-queue waiters. */
-void
-nvgsp_event_wake_msgq(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp != NULL)
-		wakeup(&gsp->gsp_msgq_rptr);
 }

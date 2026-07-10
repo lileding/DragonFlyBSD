@@ -17,6 +17,9 @@
 #include <sys/malloc.h>
 #include <stdbool.h>
 
+#include <linux/dma-fence.h>
+#include <linux/reservation.h>
+
 static MALLOC_DEFINE(M_NVGPU_PROC, "nvgpu_proc", "nvgpu process state");
 
 struct nvgpu_proc_exec {
@@ -33,6 +36,7 @@ struct nvgpu_proc {
 	struct nvgpu_channel_list channels;
 	struct nvgpu_proc_exec_list inflight_execs;
 	struct nvgpu_fence *last_bind_fence;
+	struct reservation_object vm_resv;
 	struct nvgpu_vm *vm;
 	bool shutdown;
 };
@@ -99,12 +103,19 @@ nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
 	TAILQ_INIT(&proc->channels);
 	TAILQ_INIT(&proc->inflight_execs);
 	proc->last_bind_fence = NULL;
+	reservation_object_init(&proc->vm_resv);
 	proc->vm = NULL;
 	proc->shutdown = false;
 
 	*procp = proc;
 	nvgpu_log(NVGPU_LOG_DEBUG, "proc created proc=%p\n", proc);
 	return (0);
+}
+
+struct reservation_object *
+nvgpu_proc_get_vm_resv(struct nvgpu_proc *proc)
+{
+	return (proc != NULL ? &proc->vm_resv : NULL);
 }
 
 void
@@ -153,6 +164,7 @@ nvgpu_proc_register_exec(struct nvgpu_proc *proc,
     struct nvgpu_fence **bind_wait_fence,
     struct nvgpu_proc_exec **execp)
 {
+	struct dma_fence *dma;
 	struct nvgpu_proc_exec *exec;
 
 	if (proc == NULL || gpu_complete_fence == NULL ||
@@ -180,6 +192,12 @@ nvgpu_proc_register_exec(struct nvgpu_proc *proc,
 	}
 	TAILQ_INSERT_TAIL(&proc->inflight_execs, exec, link);
 	lwkt_reltoken(&proc->token);
+	dma = nvgpu_fence_get_dma_ref(gpu_complete_fence);
+	KASSERT(dma != NULL, ("EXEC completion fence has no dma fence"));
+	reservation_object_lock(&proc->vm_resv, NULL);
+	reservation_object_add_excl_fence(&proc->vm_resv, dma);
+	reservation_object_unlock(&proc->vm_resv);
+	dma_fence_put(dma);
 	*execp = exec;
 	return (0);
 }
@@ -274,6 +292,7 @@ nvgpu_proc_destroy(struct nvgpu_proc *proc)
 	    ("destroying proc with an unfinished VM_BIND"));
 	nvgpu_channel_destroy_all(proc);
 	nvgpu_vm_destroy(proc);
+	reservation_object_fini(&proc->vm_resv);
 	nvgpu_unload_release_by_drm(proc->gpu);
 	nvgpu_log(NVGPU_LOG_DEBUG, "proc destroy proc=%p\n", proc);
 	lwkt_token_uninit(&proc->token);

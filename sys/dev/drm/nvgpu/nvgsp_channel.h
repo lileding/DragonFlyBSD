@@ -47,6 +47,13 @@ bool nvgsp_channel_check_submit_complete(
 /* Release a completed submission and make its post/semaphore slot reusable. */
 void nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission);
 
+/* Mark the current backend channel for chid faulted; future submits fail. */
+void nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid,
+    int error);
+
+/* Return whether chan is the current backend object for chid. */
+bool nvgsp_channel_is_chid(const struct nvgsp_channel *chan, uint32_t chid);
+
 /* Create the bootstrap channel during boot. */
 int nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu);
 /* Destroy the bootstrap channel after submissions have stopped. */

@@ -7,6 +7,7 @@
 #include "nvdrm_drv.h"
 #include "nvdrm_file.h"
 #include "nvdrm_ioctl.h"
+#include "nvdrm_prime.h"
 #include "nvgpu_bo.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
@@ -44,6 +45,11 @@ static struct drm_driver nvdrm_driver = {
 	.lastclose = nvdrm_file_lastclose,
 	.mmap_single = nvgpu_ttm_mmap_single,
 	.gem_free_object_unlocked = nvgpu_bo_free,
+	.prime_handle_to_fd = nvdrm_prime_handle_to_fd,
+	.prime_fd_to_handle = nvdrm_prime_fd_to_handle,
+	.gem_prime_export = nvdrm_prime_export,
+	.gem_prime_res_obj = nvdrm_prime_get_resv,
+	.gem_prime_import = drm_gem_prime_import,
 };
 
 /* Register DRM after GPU boot.  gpu is borrowed; may sleep and must not hold GSP/VM tokens. */

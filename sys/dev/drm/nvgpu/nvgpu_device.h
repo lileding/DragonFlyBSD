@@ -13,7 +13,11 @@
 
 struct nvgsp_state;
 struct nvgpu_chip_config;
+struct nvgpu_exec_state;
+struct nvgpu_intr_state;
+struct nvgpu_sched;
 struct nvgpu_ttm;
+struct nvgpu_unload_state;
 struct drm_device;
 struct pci_dev;
 struct resource;
@@ -33,17 +37,22 @@ uint32_t nvgpu_device_rd32(struct nvgpu_device *gpu, uint32_t offset);
 void nvgpu_device_wr32(struct nvgpu_device *gpu, uint32_t offset, uint32_t val);
 struct nvgsp_state *nvgpu_device_get_gsp(struct nvgpu_device *gpu);
 void nvgpu_device_set_gsp(struct nvgpu_device *gpu, struct nvgsp_state *gsp);
-void *nvgpu_device_get_intr(struct nvgpu_device *gpu);
-void nvgpu_device_set_intr(struct nvgpu_device *gpu, void *intr);
+struct nvgpu_intr_state *nvgpu_device_get_intr(struct nvgpu_device *gpu);
+void nvgpu_device_set_intr(struct nvgpu_device *gpu,
+    struct nvgpu_intr_state *intr);
 struct drm_device *nvgpu_device_get_drm_dev(struct nvgpu_device *gpu);
 struct pci_dev *nvgpu_device_get_drm_pdev(struct nvgpu_device *gpu);
 void nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
     struct pci_dev *pdev);
-void *nvgpu_device_get_unload_state(struct nvgpu_device *gpu);
-void nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state);
-void *nvgpu_device_get_sched(struct nvgpu_device *gpu);
-void *nvgpu_device_get_exec_state(struct nvgpu_device *gpu);
-void nvgpu_device_set_exec_state(struct nvgpu_device *gpu, void *state);
+struct nvgpu_unload_state *nvgpu_device_get_unload_state(
+    struct nvgpu_device *gpu);
+void nvgpu_device_set_unload_state(struct nvgpu_device *gpu,
+    struct nvgpu_unload_state *state);
+struct nvgpu_sched *nvgpu_device_get_sched(struct nvgpu_device *gpu);
+struct nvgpu_exec_state *nvgpu_device_get_exec_state(
+    struct nvgpu_device *gpu);
+void nvgpu_device_set_exec_state(struct nvgpu_device *gpu,
+    struct nvgpu_exec_state *state);
 struct nvgpu_ttm *nvgpu_device_get_ttm(struct nvgpu_device *gpu);
 void nvgpu_device_set_ttm(struct nvgpu_device *gpu, struct nvgpu_ttm *ttm);
 

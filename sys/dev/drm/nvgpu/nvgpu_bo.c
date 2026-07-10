@@ -51,6 +51,12 @@ nvgpu_bo_is_vram(const struct nvgpu_bo *bo)
 	return (bo != NULL && bo->ttm_backed && bo->tbo.mem.mem_type == TTM_PL_VRAM);
 }
 
+bool
+nvgpu_bo_can_share(const struct nvgpu_bo *bo)
+{
+	return (bo != NULL && !bo->no_share);
+}
+
 static bool
 nvgpu_bo_is_sysmem_ttm(const struct nvgpu_bo *bo)
 {
@@ -699,6 +705,8 @@ nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
 			return (ENXIO);
 		}
 	}
+	if (bo->no_share)
+		bo->vm_resv = nvgpu_proc_get_vm_resv(proc);
 
 	error = drm_gem_handle_create(file, &bo->base, &handle);
 	drm_gem_object_put_unlocked(&bo->base);

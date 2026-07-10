@@ -7,7 +7,10 @@
 #ifndef _NVGPU_INTR_H_
 #define _NVGPU_INTR_H_
 
+#include <sys/stdint.h>
+
 struct nvgpu_device;
+struct nvgpu_intr_state;
 
 /* Prepare interrupt state for gpu.  Called from boot before interrupts are enabled. */
 int nvgpu_intr_init(struct nvgpu_device *gpu);
@@ -19,5 +22,11 @@ void nvgpu_intr_disable(struct nvgpu_device *gpu);
 void nvgpu_intr_fini(struct nvgpu_device *gpu);
 /* Top-level interrupt entry.  Must stay short and hand slow work to subsystem workers. */
 void nvgpu_intr_handle(struct nvgpu_device *gpu);
+
+/* Queue one GSP-reported channel fault for process-context completion. */
+void nvgpu_intr_report_channel_fault(struct nvgpu_device *gpu, uint32_t chid);
+
+/* Request an EXEC semaphore harvest without sleeping or taking a token. */
+void nvgpu_intr_request_exec_harvest(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_INTR_H_ */

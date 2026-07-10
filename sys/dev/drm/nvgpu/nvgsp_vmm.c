@@ -6337,7 +6337,7 @@ nvgsp_vmm_ctor(struct nvgsp_state *sc, uint32_t client_handle,
 	vmm->gsp = sc;
 	vmm->rm_va_base = NVGSP_VMM_RM_BASE;
 	vmm->rm_va_size = NVGSP_VMM_RM_SIZE;
-	lwkt_token_init(&vmm->tok, "nvkm-vmm");
+	lwkt_token_init(&vmm->tok, "nvgsp-vmm");
 	LIST_INIT(&vmm->user_pd1_pages);
 	LIST_INIT(&vmm->user_pd0_pages);
 	LIST_INIT(&vmm->user_pt_pages);

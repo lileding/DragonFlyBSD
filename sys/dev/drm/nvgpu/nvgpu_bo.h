@@ -67,7 +67,7 @@ struct nvgpu_bo {
 	uint32_t vm_bind_no_evict_pin_count;
 	uint32_t scanout_pin_count;
 	uint32_t scanout_no_evict_pin_count;
-	uint32_t mmap_pager_count;
+	u_int mmap_pager_live;
 	struct lwkt_token vm_mapping_token;
 	struct nvgpu_bo_vm_mapping_list vm_mappings;
 	uint32_t vm_mapping_count;
@@ -95,6 +95,7 @@ void nvgpu_bo_addref(struct nvgpu_bo *bo);
 void nvgpu_bo_release(struct nvgpu_bo *bo);
 uint64_t nvgpu_bo_get_size(const struct nvgpu_bo *bo);
 bool nvgpu_bo_is_vram(const struct nvgpu_bo *bo);
+bool nvgpu_bo_can_share(const struct nvgpu_bo *bo);
 bool nvgpu_bo_has_sysmem(const struct nvgpu_bo *bo);
 bool nvgpu_bo_cpu_mappable(const struct nvgpu_bo *bo);
 uint8_t nvgpu_bo_get_gpu_page_shift(const struct nvgpu_bo *bo);
