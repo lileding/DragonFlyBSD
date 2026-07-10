@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Reusable userspace smoke test for the nvgpu fake EXEC sync path.
+ * Reusable userspace test for nvgpu EXEC, sync, and VM ordering.
  */
 
 #include <sys/ioctl.h>
@@ -21,14 +21,17 @@
 #include <time.h>
 #include <unistd.h>
 
+#define DRM_NOUVEAU_CHANNEL_ALLOC 0x02
+#define DRM_NOUVEAU_CHANNEL_FREE 0x03
+#define DRM_NOUVEAU_VM_BIND 0x11
 #define DRM_NOUVEAU_EXEC 0x12
+
+#define NOUVEAU_FIFO_ENGINE_GR 0x01
+#define DRM_NOUVEAU_VM_BIND_RUN_ASYNC 0x1
 
 #define DRM_NOUVEAU_SYNC_SYNCOBJ 0x0
 #define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ 0x1
 #define DRM_NOUVEAU_SYNC_TYPE_MASK 0xf
-
-#define NVGPU_FAKE_EXEC_ERROR_CHANNEL 0xfffffff0U
-#define NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL 0xfffffff1U
 
 struct drm_nouveau_sync {
 	uint32_t flags;
@@ -46,6 +49,49 @@ struct drm_nouveau_exec {
 	uint64_t push_ptr;
 };
 
+struct drm_nouveau_channel_alloc {
+	uint32_t fb_ctxdma_handle;
+	uint32_t tt_ctxdma_handle;
+	int32_t channel;
+	uint32_t pushbuf_domains;
+	uint32_t notifier_handle;
+	struct {
+		uint32_t handle;
+		uint32_t grclass;
+	} subchan[8];
+	uint32_t nr_subchan;
+};
+
+struct drm_nouveau_channel_free {
+	int32_t channel;
+};
+
+struct drm_nouveau_vm_bind {
+	uint32_t op_count;
+	uint32_t flags;
+	uint32_t wait_count;
+	uint32_t sig_count;
+	uint64_t wait_ptr;
+	uint64_t sig_ptr;
+	uint64_t op_ptr;
+};
+
+struct drm_nouveau_exec_push {
+	uint64_t va;
+	uint32_t va_len;
+	uint32_t flags;
+};
+
+#define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, \
+	    struct drm_nouveau_channel_alloc)
+#define DRM_IOCTL_NOUVEAU_CHANNEL_FREE \
+	DRM_IOW(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_FREE, \
+	    struct drm_nouveau_channel_free)
+#define DRM_IOCTL_NOUVEAU_VM_BIND \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_VM_BIND, \
+	    struct drm_nouveau_vm_bind)
+
 #define DRM_IOCTL_NOUVEAU_EXEC \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
 
@@ -58,6 +104,50 @@ static bool current_skipped;
 static const char *current_skip_reason;
 static const char *device_path;
 static unsigned iterations = 1;
+static uint32_t real_channel;
+
+static int xioctl(int fd, unsigned long request, void *arg, const char *name);
+
+static bool
+channel_alloc_one(int fd, uint32_t *channel)
+{
+	struct drm_nouveau_channel_alloc args;
+
+	memset(&args, 0, sizeof(args));
+	args.fb_ctxdma_handle = ~0u;
+	args.tt_ctxdma_handle = NOUVEAU_FIFO_ENGINE_GR;
+	if (xioctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC, &args,
+	    "DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC") != 0)
+		return false;
+	*channel = (uint32_t)args.channel;
+	return true;
+}
+
+static void
+channel_free_one(int fd, uint32_t channel)
+{
+	struct drm_nouveau_channel_free args;
+
+	if (channel == 0)
+		return;
+	memset(&args, 0, sizeof(args));
+	args.channel = (int32_t)channel;
+	(void)xioctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_FREE, &args,
+	    "DRM_IOCTL_NOUVEAU_CHANNEL_FREE");
+}
+
+static bool
+channel_alloc(int fd)
+{
+	return channel_alloc_one(fd, &real_channel);
+}
+
+static void
+channel_free(int fd)
+{
+	channel_free_one(fd, real_channel);
+	real_channel = 0;
+}
 
 static int64_t
 abs_timeout_nsec(unsigned seconds)
@@ -229,8 +319,9 @@ syncobj_import_fd(int fd, int shared_fd)
 }
 
 static bool
-exec_submit(int fd, const struct drm_nouveau_sync *waits, uint32_t wait_count,
-    const struct drm_nouveau_sync *sigs, uint32_t sig_count, uint32_t channel)
+exec_submit_on_channel(int fd, const struct drm_nouveau_sync *waits,
+    uint32_t wait_count, const struct drm_nouveau_sync *sigs,
+    uint32_t sig_count, uint32_t channel)
 {
 	struct drm_nouveau_exec exec;
 
@@ -243,6 +334,29 @@ exec_submit(int fd, const struct drm_nouveau_sync *waits, uint32_t wait_count,
 	exec.sig_ptr = (uint64_t)(uintptr_t)sigs;
 	return xioctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec,
 	    "DRM_IOCTL_NOUVEAU_EXEC") == 0;
+}
+
+static bool
+exec_submit(int fd, const struct drm_nouveau_sync *waits, uint32_t wait_count,
+    const struct drm_nouveau_sync *sigs, uint32_t sig_count,
+    uint32_t sequence __attribute__((unused)))
+{
+	return exec_submit_on_channel(fd, waits, wait_count, sigs, sig_count,
+	    real_channel);
+}
+
+static bool
+vm_bind_empty_async(int fd, const struct drm_nouveau_sync *sigs,
+    uint32_t sig_count)
+{
+	struct drm_nouveau_vm_bind bind;
+
+	memset(&bind, 0, sizeof(bind));
+	bind.flags = DRM_NOUVEAU_VM_BIND_RUN_ASYNC;
+	bind.sig_count = sig_count;
+	bind.sig_ptr = (uint64_t)(uintptr_t)sigs;
+	return xioctl(fd, DRM_IOCTL_NOUVEAU_VM_BIND, &bind,
+	    "DRM_IOCTL_NOUVEAU_VM_BIND") == 0;
 }
 
 static bool
@@ -456,128 +570,12 @@ test_mixed_multi_wait(int fd)
 }
 
 static bool
-test_binary_wait_error_no_poll(int fd)
-{
-	uint32_t err = syncobj_create(fd, false);
-	uint32_t out = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig_err = binary_sync(err);
-	struct drm_nouveau_sync wait_err = binary_sync(err);
-	struct drm_nouveau_sync sig_out = binary_sync(out);
-	bool ok;
-
-	ok = err != 0 && out != 0 &&
-	    exec_submit(fd, NULL, 0, &sig_err, 1,
-	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
-	    exec_submit(fd, &wait_err, 1, &sig_out, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    syncobj_wait_binary(fd, &out, 1, 5);
-	syncobj_destroy(fd, err);
-	syncobj_destroy(fd, out);
-	return ok;
-}
-
-static bool
-test_binary_error_chain_no_poll(int fd)
-{
-	uint32_t err = syncobj_create(fd, false);
-	uint32_t mid = syncobj_create(fd, false);
-	uint32_t out = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig_err = binary_sync(err);
-	struct drm_nouveau_sync wait_err = binary_sync(err);
-	struct drm_nouveau_sync sig_mid = binary_sync(mid);
-	struct drm_nouveau_sync wait_mid = binary_sync(mid);
-	struct drm_nouveau_sync sig_out = binary_sync(out);
-	bool ok;
-
-	ok = err != 0 && mid != 0 && out != 0 &&
-	    exec_submit(fd, NULL, 0, &sig_err, 1,
-	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
-	    exec_submit(fd, &wait_err, 1, &sig_mid, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    exec_submit(fd, &wait_mid, 1, &sig_out, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    syncobj_wait_binary(fd, &out, 1, 5);
-	syncobj_destroy(fd, err);
-	syncobj_destroy(fd, mid);
-	syncobj_destroy(fd, out);
-	return ok;
-}
-
-static bool
-test_binary_already_signaled_error_wait(int fd)
-{
-	uint32_t err = syncobj_create(fd, false);
-	uint32_t out = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig_err = binary_sync(err);
-	struct drm_nouveau_sync wait_err = binary_sync(err);
-	struct drm_nouveau_sync sig_out = binary_sync(out);
-	bool ok;
-
-	ok = err != 0 && out != 0 &&
-	    exec_submit(fd, NULL, 0, &sig_err, 1,
-	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
-	    syncobj_wait_binary(fd, &err, 1, 5) &&
-	    exec_submit(fd, &wait_err, 1, &sig_out, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    syncobj_wait_binary(fd, &out, 1, 5);
-	syncobj_destroy(fd, err);
-	syncobj_destroy(fd, out);
-	return ok;
-}
-
-static bool
-test_timeline_wait_error_no_poll(int fd)
-{
-	uint32_t t = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig1 = timeline_sync(t, 1);
-	struct drm_nouveau_sync wait1 = timeline_sync(t, 1);
-	struct drm_nouveau_sync sig2 = timeline_sync(t, 2);
-	uint64_t point = 2;
-	bool ok;
-
-	ok = t != 0 &&
-	    exec_submit(fd, NULL, 0, &sig1, 1,
-	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
-	    exec_submit(fd, &wait1, 1, &sig2, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    syncobj_wait_timeline(fd, &t, &point, 1, 5);
-	syncobj_destroy(fd, t);
-	return ok;
-}
-
-static bool
-test_mixed_multi_wait_error_no_poll(int fd)
-{
-	uint32_t ok_in = syncobj_create(fd, false);
-	uint32_t err_in = syncobj_create(fd, false);
-	uint32_t out = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig_ok = binary_sync(ok_in);
-	struct drm_nouveau_sync sig_err = binary_sync(err_in);
-	struct drm_nouveau_sync waits[2];
-	struct drm_nouveau_sync sig_out = binary_sync(out);
-	bool ok;
-
-	waits[0] = binary_sync(ok_in);
-	waits[1] = binary_sync(err_in);
-	ok = ok_in != 0 && err_in != 0 && out != 0 &&
-	    exec_submit(fd, NULL, 0, &sig_ok, 1, 11) &&
-	    exec_submit(fd, NULL, 0, &sig_err, 1,
-	    NVGPU_FAKE_EXEC_ERROR_CHANNEL) &&
-	    exec_submit(fd, waits, 2, &sig_out, 1,
-	    NVGPU_FAKE_EXEC_NEVER_READY_CHANNEL) &&
-	    syncobj_wait_binary(fd, &out, 1, 5);
-	syncobj_destroy(fd, ok_in);
-	syncobj_destroy(fd, err_in);
-	syncobj_destroy(fd, out);
-	return ok;
-}
-
-static bool
 test_cross_file_syncobj(int fd)
 {
 	int fd2 = open_device();
 	int shared_fd = -1;
 	uint32_t shared1 = 0, shared2 = 0, out2 = 0;
+	uint32_t channel2 = 0;
 	struct drm_nouveau_sync sig_shared;
 	struct drm_nouveau_sync wait_shared;
 	struct drm_nouveau_sync sig_out;
@@ -585,6 +583,10 @@ test_cross_file_syncobj(int fd)
 
 	if (fd2 < 0)
 		return false;
+	if (!channel_alloc_one(fd2, &channel2)) {
+		close(fd2);
+		return false;
+	}
 	shared1 = syncobj_create(fd, false);
 	ok = shared1 != 0;
 	if (ok && !syncobj_export_fd(fd, shared1, &shared_fd)) {
@@ -605,12 +607,14 @@ test_cross_file_syncobj(int fd)
 	sig_out = binary_sync(out2);
 	ok = ok && shared2 != 0 && out2 != 0 &&
 	    exec_submit(fd, NULL, 0, &sig_shared, 1, 9) &&
-	    exec_submit(fd2, &wait_shared, 1, &sig_out, 1, 9) &&
+	    exec_submit_on_channel(fd2, &wait_shared, 1, &sig_out, 1,
+	    channel2) &&
 	    syncobj_wait_binary(fd2, &out2, 1, 5);
 out:
 	syncobj_destroy(fd, shared1);
 	syncobj_destroy(fd2, shared2);
 	syncobj_destroy(fd2, out2);
+	channel_free_one(fd2, channel2);
 	close(fd2);
 	return ok;
 }
@@ -648,19 +652,143 @@ static bool
 test_close_with_pending_future(int fd_unused __attribute__((unused)))
 {
 	int fd = open_device();
-	uint32_t out;
-	struct drm_nouveau_sync sig;
-	bool ok;
+	uint32_t channel = 0;
+	uint32_t out[80];
+	bool ok = true;
 
 	if (fd < 0)
 		return false;
-	out = syncobj_create(fd, false);
-	sig = binary_sync(out);
-	ok = out != 0 && exec_submit(fd, NULL, 0, &sig, 1, 10);
-	syncobj_destroy(fd, out);
+	memset(out, 0, sizeof(out));
+	ok = channel_alloc_one(fd, &channel);
+	for (size_t i = 0; ok && i < ARRAY_SIZE(out); i++) {
+		struct drm_nouveau_sync sig;
+
+		out[i] = syncobj_create(fd, false);
+		sig = binary_sync(out[i]);
+		ok = out[i] != 0 && exec_submit_on_channel(fd, NULL, 0, &sig, 1,
+		    channel);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(out); i++)
+		syncobj_destroy(fd, out[i]);
 	close(fd);
-	usleep(50000);
+	usleep(200000);
 	return ok;
+}
+
+static bool
+test_channel_free_with_pending_exec(int fd)
+{
+	uint32_t channel = 0;
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig = binary_sync(out);
+	bool ok;
+
+	ok = out != 0 && channel_alloc_one(fd, &channel) &&
+	    exec_submit_on_channel(fd, NULL, 0, &sig, 1, channel);
+	if (channel != 0)
+		channel_free_one(fd, channel);
+	if (ok)
+		ok = syncobj_wait_binary(fd, &out, 1, 5);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_exec_bind_exec_chain(int fd)
+{
+	uint32_t exec0 = syncobj_create(fd, false);
+	uint32_t bind = syncobj_create(fd, false);
+	uint32_t exec1 = syncobj_create(fd, false);
+	uint32_t handles[3] = { exec0, bind, exec1 };
+	struct drm_nouveau_sync exec0_sig = binary_sync(exec0);
+	struct drm_nouveau_sync bind_sig = binary_sync(bind);
+	struct drm_nouveau_sync exec1_sig = binary_sync(exec1);
+	bool ok;
+
+	ok = exec0 != 0 && bind != 0 && exec1 != 0 &&
+	    exec_submit(fd, NULL, 0, &exec0_sig, 1, real_channel) &&
+	    vm_bind_empty_async(fd, &bind_sig, 1) &&
+	    exec_submit(fd, NULL, 0, &exec1_sig, 1, real_channel) &&
+	    syncobj_wait_binary(fd, handles, ARRAY_SIZE(handles), 5);
+	syncobj_destroy(fd, exec0);
+	syncobj_destroy(fd, bind);
+	syncobj_destroy(fd, exec1);
+	return ok;
+}
+
+static bool
+test_invalid_channel(int fd)
+{
+	struct drm_nouveau_exec exec;
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig = binary_sync(out);
+	struct drm_syncobj_wait wait;
+	bool ok;
+
+	memset(&exec, 0, sizeof(exec));
+	exec.channel = 0x7fffffffU;
+	exec.sig_count = 1;
+	exec.sig_ptr = (uint64_t)(uintptr_t)&sig;
+	errno = 0;
+	ok = out != 0 && ioctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) != 0 &&
+	    errno == ENOENT;
+	memset(&wait, 0, sizeof(wait));
+	wait.handles = (uint64_t)(uintptr_t)&out;
+	wait.timeout_nsec = abs_timeout_nsec(0);
+	wait.count_handles = 1;
+	wait.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+	if (ok)
+		ok = ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait) != 0;
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_invalid_push_pointer(int fd)
+{
+	struct drm_nouveau_exec exec;
+	uint32_t out = syncobj_create(fd, false);
+	struct drm_nouveau_sync sig = binary_sync(out);
+	struct drm_syncobj_wait wait;
+	bool ok;
+
+	memset(&exec, 0, sizeof(exec));
+	exec.channel = real_channel;
+	exec.push_count = 1;
+	exec.push_ptr = 1;
+	exec.sig_count = 1;
+	exec.sig_ptr = (uint64_t)(uintptr_t)&sig;
+	errno = 0;
+	ok = out != 0 && ioctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) != 0 &&
+	    errno == EFAULT;
+	memset(&wait, 0, sizeof(wait));
+	wait.handles = (uint64_t)(uintptr_t)&out;
+	wait.timeout_nsec = abs_timeout_nsec(0);
+	wait.count_handles = 1;
+	wait.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+	if (ok)
+		ok = ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait) != 0;
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
+test_invalid_push_flags(int fd)
+{
+	struct drm_nouveau_exec_push push;
+	struct drm_nouveau_exec exec;
+
+	memset(&push, 0, sizeof(push));
+	push.va = 0x1000;
+	push.va_len = 4;
+	push.flags = 2;
+	memset(&exec, 0, sizeof(exec));
+	exec.channel = real_channel;
+	exec.push_count = 1;
+	exec.push_ptr = (uint64_t)(uintptr_t)&push;
+	errno = 0;
+	return ioctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &exec) != 0 &&
+	    errno == EINVAL;
 }
 
 struct test_case {
@@ -677,15 +805,15 @@ static const struct test_case tests[] = {
 	{ "timeline chain", test_timeline_chain },
 	{ "timeline already-signaled wait", test_timeline_already_signaled_wait },
 	{ "mixed multi-wait", test_mixed_multi_wait },
-	{ "binary wait error no poll", test_binary_wait_error_no_poll },
-	{ "binary error chain no poll", test_binary_error_chain_no_poll },
-	{ "binary already-signaled error wait", test_binary_already_signaled_error_wait },
-	{ "timeline wait error no poll", test_timeline_wait_error_no_poll },
-	{ "mixed multi-wait error no poll", test_mixed_multi_wait_error_no_poll },
 	{ "cross-file syncobj", test_cross_file_syncobj },
 	{ "invalid wait handle", test_invalid_wait_handle },
 	{ "unsignaled wait without fence", test_unsignaled_wait_without_fence },
 	{ "close with pending future", test_close_with_pending_future },
+	{ "channel free with pending exec", test_channel_free_with_pending_exec },
+	{ "exec bind exec chain", test_exec_bind_exec_chain },
+	{ "invalid channel", test_invalid_channel },
+	{ "invalid push pointer", test_invalid_push_pointer },
+	{ "invalid push flags", test_invalid_push_flags },
 };
 
 static void
@@ -753,6 +881,10 @@ main(int argc, char **argv)
 	fd = open_device();
 	if (fd < 0)
 		return 1;
+	if (!channel_alloc(fd)) {
+		close(fd);
+		return 1;
+	}
 	printf("device: %s\n", device_path);
 	for (unsigned iter = 0; iter < iterations; iter++) {
 		if (iterations > 1)
@@ -760,6 +892,7 @@ main(int argc, char **argv)
 		for (size_t i = 0; i < ARRAY_SIZE(tests); i++)
 			run_one(fd, &tests[i]);
 	}
+	channel_free(fd);
 	close(fd);
 	printf("summary: %u run, %u skipped, %u failed\n",
 	    tests_run, tests_skipped, tests_failed);

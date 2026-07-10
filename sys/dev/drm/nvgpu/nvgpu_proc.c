@@ -8,6 +8,7 @@
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
+#include "nvgpu_fence.h"
 #include "nvgpu_unload.h"
 #include "nvgpu_vm.h"
 
@@ -18,16 +19,37 @@
 
 static MALLOC_DEFINE(M_NVGPU_PROC, "nvgpu_proc", "nvgpu process state");
 
+struct nvgpu_proc_exec {
+	TAILQ_ENTRY(nvgpu_proc_exec) link;
+	struct nvgpu_proc *proc;
+	struct nvgpu_fence *gpu_complete_fence;
+};
+TAILQ_HEAD(nvgpu_proc_exec_list, nvgpu_proc_exec);
+
 struct nvgpu_proc {
 	struct nvgpu_device *gpu;
 	struct lwkt_token token;
 	uint32_t refs;
 	struct nvgpu_channel_list channels;
+	struct nvgpu_proc_exec_list inflight_execs;
+	struct nvgpu_fence *last_bind_fence;
 	struct nvgpu_vm *vm;
 	bool shutdown;
 };
 
 static void nvgpu_proc_destroy(struct nvgpu_proc *proc);
+
+void
+nvgpu_proc_lock(struct nvgpu_proc *proc)
+{
+	lwkt_gettoken(&proc->token);
+}
+
+void
+nvgpu_proc_unlock(struct nvgpu_proc *proc)
+{
+	lwkt_reltoken(&proc->token);
+}
 
 struct nvgpu_device *
 nvgpu_proc_get_device(struct nvgpu_proc *proc)
@@ -75,6 +97,8 @@ nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
 	lwkt_token_init(&proc->token, "nvgprc");
 	proc->refs = 1;
 	TAILQ_INIT(&proc->channels);
+	TAILQ_INIT(&proc->inflight_execs);
+	proc->last_bind_fence = NULL;
 	proc->vm = NULL;
 	proc->shutdown = false;
 
@@ -123,9 +147,131 @@ nvgpu_proc_release(struct nvgpu_proc *proc)
 		nvgpu_proc_destroy(proc);
 }
 
+int
+nvgpu_proc_register_exec(struct nvgpu_proc *proc,
+    struct nvgpu_fence *gpu_complete_fence,
+    struct nvgpu_fence **bind_wait_fence,
+    struct nvgpu_proc_exec **execp)
+{
+	struct nvgpu_proc_exec *exec;
+
+	if (proc == NULL || gpu_complete_fence == NULL ||
+	    bind_wait_fence == NULL || execp == NULL)
+		return (EINVAL);
+	*bind_wait_fence = NULL;
+	*execp = NULL;
+	exec = kmalloc(sizeof(*exec), M_NVGPU_PROC, M_WAITOK | M_ZERO);
+	exec->proc = proc;
+	exec->gpu_complete_fence = gpu_complete_fence;
+	nvgpu_fence_addref(gpu_complete_fence);
+	nvgpu_proc_hold(proc);
+
+	lwkt_gettoken(&proc->token);
+	if (proc->shutdown) {
+		lwkt_reltoken(&proc->token);
+		nvgpu_fence_release(gpu_complete_fence);
+		nvgpu_proc_release(proc);
+		_kfree(exec, M_NVGPU_PROC);
+		return (ENODEV);
+	}
+	if (proc->last_bind_fence != NULL) {
+		nvgpu_fence_addref(proc->last_bind_fence);
+		*bind_wait_fence = proc->last_bind_fence;
+	}
+	TAILQ_INSERT_TAIL(&proc->inflight_execs, exec, link);
+	lwkt_reltoken(&proc->token);
+	*execp = exec;
+	return (0);
+}
+
+void
+nvgpu_proc_complete_exec(struct nvgpu_proc_exec *exec, int error)
+{
+	struct nvgpu_proc *proc;
+	struct nvgpu_fence *fence;
+
+	if (exec == NULL)
+		return;
+	proc = exec->proc;
+	fence = exec->gpu_complete_fence;
+	lwkt_gettoken(&proc->token);
+	TAILQ_REMOVE(&proc->inflight_execs, exec, link);
+	lwkt_reltoken(&proc->token);
+	(void)nvgpu_fence_signal(fence, error);
+	nvgpu_fence_release(fence);
+	_kfree(exec, M_NVGPU_PROC);
+	nvgpu_proc_release(proc);
+}
+
+int
+nvgpu_proc_register_bind(struct nvgpu_proc *proc,
+    struct nvgpu_fence *done_fence, struct nvgpu_fence **wait_fences,
+    uint32_t capacity, uint32_t *wait_count)
+{
+	struct nvgpu_proc_exec *exec;
+	struct nvgpu_fence *previous;
+	uint32_t required;
+	uint32_t count;
+
+	if (proc == NULL || done_fence == NULL || wait_count == NULL ||
+	    (capacity != 0 && wait_fences == NULL))
+		return (EINVAL);
+	lwkt_gettoken(&proc->token);
+	if (proc->shutdown) {
+		lwkt_reltoken(&proc->token);
+		return (ENODEV);
+	}
+	required = proc->last_bind_fence != NULL ? 1 : 0;
+	TAILQ_FOREACH(exec, &proc->inflight_execs, link)
+		required++;
+	if (capacity < required) {
+		*wait_count = required;
+		lwkt_reltoken(&proc->token);
+		return (ENOSPC);
+	}
+	count = 0;
+	if (proc->last_bind_fence != NULL) {
+		nvgpu_fence_addref(proc->last_bind_fence);
+		wait_fences[count++] = proc->last_bind_fence;
+	}
+	TAILQ_FOREACH(exec, &proc->inflight_execs, link) {
+		nvgpu_fence_addref(exec->gpu_complete_fence);
+		wait_fences[count++] = exec->gpu_complete_fence;
+	}
+	previous = proc->last_bind_fence;
+	nvgpu_fence_addref(done_fence);
+	proc->last_bind_fence = done_fence;
+	*wait_count = count;
+	lwkt_reltoken(&proc->token);
+	nvgpu_fence_release(previous);
+	return (0);
+}
+
+void
+nvgpu_proc_complete_bind(struct nvgpu_proc *proc,
+    struct nvgpu_fence *done_fence)
+{
+	struct nvgpu_fence *last;
+
+	if (proc == NULL || done_fence == NULL)
+		return;
+	last = NULL;
+	lwkt_gettoken(&proc->token);
+	if (proc->last_bind_fence == done_fence) {
+		last = proc->last_bind_fence;
+		proc->last_bind_fence = NULL;
+	}
+	lwkt_reltoken(&proc->token);
+	nvgpu_fence_release(last);
+}
+
 static void
 nvgpu_proc_destroy(struct nvgpu_proc *proc)
 {
+	KASSERT(TAILQ_EMPTY(&proc->inflight_execs),
+	    ("destroying proc with inflight EXECs"));
+	KASSERT(proc->last_bind_fence == NULL,
+	    ("destroying proc with an unfinished VM_BIND"));
 	nvgpu_channel_destroy_all(proc);
 	nvgpu_vm_destroy(proc);
 	nvgpu_unload_release_by_drm(proc->gpu);

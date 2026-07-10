@@ -11,11 +11,15 @@
 #include <sys/errno.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
+#include <sys/systm.h>
 
 struct nvgpu_fence {
 	struct dma_fence base;
 	spinlock_t lock;
 	const char *timeline_name;
+	struct nvgpu_fence *exec_submit_fence;
+	uint32_t exec_channel;
+	bool exec_producer;
 };
 
 static MALLOC_DEFINE(M_NVGPU_FENCE, "nvgpu_fence", "nvgpu future fence");
@@ -60,6 +64,7 @@ nvgpu_fence_drop(struct dma_fence *fence)
 	struct nvgpu_fence *nfence;
 
 	nfence = container_of(fence, struct nvgpu_fence, base);
+	nvgpu_fence_release(nfence->exec_submit_fence);
 	lockuninit(&nfence->lock);
 	_kfree(nfence, M_NVGPU_FENCE);
 }
@@ -123,6 +128,38 @@ nvgpu_fence_release(struct nvgpu_fence *fence)
 	if (fence == NULL)
 		return;
 	dma_fence_put(&fence->base);
+}
+
+void
+nvgpu_fence_set_exec_producer(struct nvgpu_fence *gpu_complete,
+    uint32_t channel, struct nvgpu_fence *submitted)
+{
+	if (gpu_complete == NULL || submitted == NULL)
+		return;
+	KASSERT(!gpu_complete->exec_producer &&
+	    gpu_complete->exec_submit_fence == NULL,
+	    ("nvgpu fence EXEC producer already set"));
+	nvgpu_fence_addref(submitted);
+	gpu_complete->exec_submit_fence = submitted;
+	gpu_complete->exec_channel = channel;
+	gpu_complete->exec_producer = true;
+}
+
+struct nvgpu_fence *
+nvgpu_fence_hold_exec_wait(struct nvgpu_fence *gpu_complete,
+    uint32_t channel)
+{
+	struct nvgpu_fence *wait;
+
+	if (gpu_complete == NULL)
+		return (NULL);
+	wait = gpu_complete;
+	if (gpu_complete->exec_producer &&
+	    gpu_complete->exec_channel == channel &&
+	    gpu_complete->exec_submit_fence != NULL)
+		wait = gpu_complete->exec_submit_fence;
+	nvgpu_fence_addref(wait);
+	return (wait);
 }
 
 bool

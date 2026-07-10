@@ -7,17 +7,45 @@
 #ifndef _NVGSP_CHANNEL_H_
 #define _NVGSP_CHANNEL_H_
 
+#include <stdbool.h>
 #include <sys/stdint.h>
 
 #define NVGSP_CHANNEL_ENGINE_GRAPHICS	1u
 #define NVGSP_CHANNEL_ENGINE_COPY0	9u
 #define NVGSP_CHANNEL_ENGINE_COPY1	10u
 #define NVGSP_CHANNEL_ENGINE_COPY2	11u
+#define NVGSP_CHANNEL_PUSH_NO_PREFETCH	0x1u
 
 struct nvgpu_device;
 struct nvgsp_channel;
 struct nvgsp_channel_object;
+struct nvgsp_channel_submission;
 struct nvgsp_vmm;
+
+struct nvgsp_channel_push {
+	uint64_t va;
+	uint32_t va_len;
+	uint32_t flags;
+};
+
+/*
+ * Prepare one GPFIFO submission without ringing the doorbell.  Success keeps
+ * the backend submit token held; the same scheduler LWKT must immediately
+ * publish its no-fail pending record and then call commit.
+ */
+int nvgsp_channel_prepare_submit(struct nvgsp_channel *chan,
+    const struct nvgsp_channel_push *pushes, uint32_t push_count,
+    struct nvgsp_channel_submission **out);
+
+/* Publish GP_PUT and ring the doorbell, then release the submit token. */
+void nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission);
+
+/* Sample the coherent completion semaphore without sleeping or taking a lock. */
+bool nvgsp_channel_check_submit_complete(
+    const struct nvgsp_channel_submission *submission);
+
+/* Release a completed submission and make its post/semaphore slot reusable. */
+void nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission);
 
 /* Create the bootstrap channel during boot. */
 int nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu);

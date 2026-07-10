@@ -12,6 +12,7 @@
 #include "nvgpu_exec.h"
 #include "nvgpu_sched.h"
 #include "nvgsp_event.h"
+#include "nvgsp_state.h"
 
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
@@ -22,8 +23,10 @@
 #include <sys/serialize.h>
 
 #define NVGPU_PCI_MSI_REARM		0x68
-#define NVGPU_CPU_INTR_TOP		0x00000100u
-#define NVGPU_CPU_INTR_TOP_EN_CLEAR	0x00000164u
+#define NVGPU_CPU_INTR_TOP		0x00b81600u
+#define NVGPU_CPU_INTR_TOP_EN_CLEAR	0x00b81610u
+#define NVGPU_CPU_INTR_TOP_EN_SET	0x00b81608u
+#define NVGPU_CPU_INTR_LEAF(i)		(0x00b81000u + (i) * 4u)
 #define NVGPU_GSP_MSGQ_INTR		0x00000040u
 
 MALLOC_DEFINE(M_NVGPU_INTR, "nvgpu_intr", "nvgpu interrupt state");
@@ -72,7 +75,37 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 
 	if (stat == 0 && top == 0) {
 		intr->empty_count++;
-		return;
+		goto rearm;
+	}
+	for (uint32_t leaf = 0; leaf < 8; leaf++) {
+		struct nvgsp_intr_masks masks;
+		uint32_t leaf_stat, nonstall, stall, known, unhandled;
+
+		if ((top & (1u << (leaf / 2u))) == 0)
+			continue;
+		leaf_stat = nvgpu_device_rd32(gpu, NVGPU_CPU_INTR_LEAF(leaf));
+		nvgsp_state_get_intr_masks(gpu, leaf, &masks);
+		nonstall = leaf_stat & masks.nonstall;
+		stall = leaf_stat & masks.stall;
+		known = masks.nonstall | masks.stall;
+		unhandled = leaf_stat & ~known;
+		if (unhandled != 0) {
+			intr->unexpected_count++;
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "unexpected CPU intr leaf=%u mask=0x%08x\n",
+			    leaf, unhandled);
+		}
+		if (nonstall != 0) {
+			nvgpu_device_wr32(gpu, NVGPU_CPU_INTR_LEAF(leaf), nonstall);
+			nvgpu_exec_complete_from_intr(gpu);
+		}
+		if (stall != 0) {
+			if ((stall & masks.display) != 0)
+				nvgpu_display_handle_vblank(gpu);
+			if ((stall & masks.engine) != 0)
+				nvgsp_event_dispatch(gpu);
+			nvgpu_device_wr32(gpu, NVGPU_CPU_INTR_LEAF(leaf), stall);
+		}
 	}
 	if (stat & NVGPU_GSP_MSGQ_INTR) {
 		nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, NVGPU_GSP_MSGQ_INTR);
@@ -87,6 +120,10 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 		nvgpu_device_wr32(gpu, chip->gsp_base + 0x014, stat);
 		nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, stat);
 	}
+
+rearm:
+	nvgpu_device_wr32(gpu, NVGPU_CPU_INTR_TOP_EN_SET, 0x0000000fu);
+	nvgpu_device_wr32(gpu, chip->gsp_base + 0x3e8, 0x1);
 }
 
 static void
@@ -153,6 +190,8 @@ nvgpu_intr_enable(struct nvgpu_device *gpu)
 
 	if (intr == NULL)
 		return (ENXIO);
+	if (nvgsp_state_enable_intr(gpu) != 0)
+		return (ENXIO);
 	nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, NVGPU_GSP_MSGQ_INTR);
 	nvgpu_intr_rearm_msi(gpu, intr);
 	return (0);
@@ -193,7 +232,5 @@ void
 nvgpu_intr_handle(struct nvgpu_device *gpu)
 {
 	nvgpu_intr_decode(gpu);
-	nvgpu_exec_complete_from_intr(gpu);
-	nvgpu_display_handle_vblank(gpu);
 	nvgsp_event_wake_msgq(gpu);
 }

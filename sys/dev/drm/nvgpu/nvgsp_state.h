@@ -13,6 +13,13 @@ struct nvgpu_device;
 
 struct nvgsp_state;
 
+struct nvgsp_intr_masks {
+	uint32_t nonstall;
+	uint32_t stall;
+	uint32_t engine;
+	uint32_t display;
+};
+
 /* Return the borrowed GSP state stored on the physical GPU object. */
 struct nvgsp_state *nvgsp_state_get(struct nvgpu_device *gpu);
 /* Return usable VRAM base parsed from static GSP info. */
@@ -29,6 +36,11 @@ int nvgsp_state_query_static_info(struct nvgpu_device *gpu);
 int nvgsp_state_query_mthdbuf_size(struct nvgpu_device *gpu);
 /* Retrieve interrupt routing metadata before nvgpu_intr_init(). */
 int nvgsp_state_get_intr_table(struct nvgpu_device *gpu);
+/* Enable the finite CPU leaf vectors returned by GSP after the ithread is wired. */
+int nvgsp_state_enable_intr(struct nvgpu_device *gpu);
+/* Return GSP's classification for one CPU interrupt leaf. */
+void nvgsp_state_get_intr_masks(struct nvgpu_device *gpu, uint32_t leaf,
+    struct nvgsp_intr_masks *masks);
 /* Enable doorbells before channel submission. */
 int nvgsp_state_enable_doorbell(struct nvgpu_device *gpu);
 
