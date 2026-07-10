@@ -198,7 +198,7 @@ fail_fence:
 }
 
 void
-nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu)
+nvgpu_exec_harvest_completed(struct nvgpu_device *gpu)
 {
 	struct nvgpu_exec_pending_list completed;
 	struct nvgpu_exec_pending *pending, *next;
@@ -223,6 +223,39 @@ nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu)
 		TAILQ_REMOVE(&completed, pending, link);
 		nvgsp_channel_release_submit(pending->submission);
 		nvgpu_proc_complete_exec(pending->proc_exec, 0);
+		nvgpu_channel_release(pending->channel);
+		_kfree(pending, M_NVGPU_EXEC);
+	}
+}
+
+void
+nvgpu_exec_fail_channel(struct nvgpu_device *gpu, uint32_t chid, int error)
+{
+	struct nvgpu_exec_pending_list failed;
+	struct nvgpu_exec_pending *pending, *next;
+	struct nvgpu_exec_state *state;
+
+	state = nvgpu_device_get_exec_state(gpu);
+	if (state == NULL)
+		return;
+	nvgsp_channel_mark_fault(gpu, chid, error);
+	TAILQ_INIT(&failed);
+	lwkt_gettoken(&state->token);
+	for (pending = TAILQ_FIRST(&state->pending); pending != NULL;
+	    pending = next) {
+		next = TAILQ_NEXT(pending, link);
+		if (!nvgsp_channel_is_chid(
+		    nvgpu_channel_get_backend(pending->channel), chid))
+			continue;
+		TAILQ_REMOVE(&state->pending, pending, link);
+		TAILQ_INSERT_TAIL(&failed, pending, link);
+	}
+	lwkt_reltoken(&state->token);
+
+	while ((pending = TAILQ_FIRST(&failed)) != NULL) {
+		TAILQ_REMOVE(&failed, pending, link);
+		nvgsp_channel_release_submit(pending->submission);
+		nvgpu_proc_complete_exec(pending->proc_exec, error);
 		nvgpu_channel_release(pending->channel);
 		_kfree(pending, M_NVGPU_EXEC);
 	}

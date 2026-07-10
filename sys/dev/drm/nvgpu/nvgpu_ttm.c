@@ -9,6 +9,7 @@
 #include "nvgpu_bo.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
+#include "nvgpu_unload.h"
 #include "nvgsp_bar.h"
 #include "nvgsp_state.h"
 #include "nvgsp_vram.h"
@@ -866,10 +867,18 @@ nvgpu_ttm_pager_ctor(void *handle, vm_ooffset_t size __unused,
 	struct ttm_buffer_object *tbo = handle;
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 	struct nvgpu_device *gpu = nvgpu_ttm_tbo_gpu(tbo);
+	int error;
 
-	ttm_bo_get(tbo);
-	if (atomic_fetchadd_int(&bo->mmap_pager_count, 1) == 0 && gpu != NULL)
-		device_busy(nvgpu_device_get_newbus_dev(gpu));
+	if (atomic_cmpset_int(&bo->mmap_pager_live, 0, 1)) {
+		if (gpu != NULL) {
+			error = nvgpu_unload_hold_by_mmap(gpu);
+			if (error != 0) {
+				atomic_store_rel_int(&bo->mmap_pager_live, 0);
+				return (error);
+			}
+		}
+		ttm_bo_get(tbo);
+	}
 	*color = 0;
 	return (0);
 }
@@ -880,11 +889,11 @@ nvgpu_ttm_pager_dtor(void *handle)
 	struct ttm_buffer_object *tbo = handle;
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 	struct nvgpu_device *gpu = nvgpu_ttm_tbo_gpu(tbo);
-	device_t dev = gpu != NULL ? nvgpu_device_get_newbus_dev(gpu) : NULL;
 
-	if (atomic_fetchadd_int(&bo->mmap_pager_count, -1) == 1 && dev != NULL)
-		device_unbusy(dev);
+	atomic_store_rel_int(&bo->mmap_pager_live, 0);
 	ttm_bo_put(tbo);
+	if (gpu != NULL)
+		nvgpu_unload_release_by_mmap(gpu);
 }
 
 static int

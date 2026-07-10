@@ -17,6 +17,10 @@ void nvgpu_unload_fini(struct nvgpu_device *gpu);
 int nvgpu_unload_hold_by_drm(struct nvgpu_device *gpu);
 /* Release one DRM unload hold previously acquired by nvgpu_unload_hold_by_drm(). */
 void nvgpu_unload_release_by_drm(struct nvgpu_device *gpu);
+/* Hold unload while one deduplicated mmap pager object owns a BO. */
+int nvgpu_unload_hold_by_mmap(struct nvgpu_device *gpu);
+/* Release one mmap pager hold acquired by nvgpu_unload_hold_by_mmap(). */
+void nvgpu_unload_release_by_mmap(struct nvgpu_device *gpu);
 /* Try to start unload after proving the DRM core has no live users. */
 int nvgpu_unload_try_begin(struct nvgpu_device *gpu);
 /* Cancel a previously admitted unload before teardown has started. */

@@ -83,13 +83,13 @@ struct nvgpu_device {
 	uint32_t boot_phase;
 	uint32_t boot0;
 	struct nvgsp_state *gsp;
-	void *intr;
+	struct nvgpu_intr_state *intr;
 	struct pci_dev *drm_pdev;
 	struct drm_device *drm_dev;
 	struct nvgpu_ttm *ttm;
-	struct nvgpu_unload *unload;
+	struct nvgpu_unload_state *unload;
 	struct nvgpu_sched *sched;
-	void *exec;
+	struct nvgpu_exec_state *exec;
 };
 
 /*
@@ -330,32 +330,34 @@ nvgpu_device_set_drm(struct nvgpu_device *gpu, struct drm_device *ddev,
 	gpu->drm_pdev = pdev;
 }
 
-void *
+struct nvgpu_unload_state *
 nvgpu_device_get_unload_state(struct nvgpu_device *gpu)
 {
 	return (gpu->unload);
 }
 
 void
-nvgpu_device_set_unload_state(struct nvgpu_device *gpu, void *state)
+nvgpu_device_set_unload_state(struct nvgpu_device *gpu,
+    struct nvgpu_unload_state *state)
 {
 	gpu->unload = state;
 }
 
-void *
+struct nvgpu_sched *
 nvgpu_device_get_sched(struct nvgpu_device *gpu)
 {
 	return (gpu != NULL ? gpu->sched : NULL);
 }
 
-void *
+struct nvgpu_exec_state *
 nvgpu_device_get_exec_state(struct nvgpu_device *gpu)
 {
 	return (gpu != NULL ? gpu->exec : NULL);
 }
 
 void
-nvgpu_device_set_exec_state(struct nvgpu_device *gpu, void *state)
+nvgpu_device_set_exec_state(struct nvgpu_device *gpu,
+    struct nvgpu_exec_state *state)
 {
 	if (gpu != NULL)
 		gpu->exec = state;
@@ -386,14 +388,15 @@ nvgpu_device_set_gsp(struct nvgpu_device *gpu, struct nvgsp_state *gsp)
 	gpu->gsp = gsp;
 }
 
-void *
+struct nvgpu_intr_state *
 nvgpu_device_get_intr(struct nvgpu_device *gpu)
 {
 	return (gpu->intr);
 }
 
 void
-nvgpu_device_set_intr(struct nvgpu_device *gpu, void *intr)
+nvgpu_device_set_intr(struct nvgpu_device *gpu,
+    struct nvgpu_intr_state *intr)
 {
 	gpu->intr = intr;
 }

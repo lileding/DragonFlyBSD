@@ -6321,7 +6321,7 @@ nvgpu_vm_op_plan_commit_preflight(struct nvgpu_vm *vm,
 	}
 }
 
-static int
+static void
 nvgpu_vm_op_plan_commit(struct nvgpu_device *gpu,
     struct nvgpu_vm *vm, struct nvgpu_vm_op_plan *plan,
     struct nvgpu_vm_dirty_set *dirty_set,
@@ -6329,7 +6329,6 @@ nvgpu_vm_op_plan_commit(struct nvgpu_device *gpu,
 {
 	struct nvgpu_vm_valid_op_plan *valid;
 	uint32_t unmapped = 0;
-	bool promoted;
 	int err;
 
 	switch (plan->kind) {
@@ -6338,49 +6337,48 @@ nvgpu_vm_op_plan_commit(struct nvgpu_device *gpu,
 		err = nvgpu_vm_clear_plan_commit(gpu, vm,
 		    &plan->u.clear_plan, &unmapped, dirty_set,
 		    retired_bindings);
-		if (err != 0)
-			return (err);
+		KASSERT(err == 0, ("prepared VM clear commit failed: %d", err));
 		(void)nvgpu_vm_bindings_normalize(gpu, vm, plan->addr,
 		    plan->size, dirty_set, retired_bindings);
-		return (0);
+		return;
 	case NVGPU_VM_OP_PLAN_MAP_SPARSE:
 		err = nvgpu_vm_sparse_map_plan_commit(gpu, vm,
 		    &plan->u.sparse_map_plan, plan->op_flags, &unmapped,
 		    dirty_set, retired_bindings);
-		if (err != 0)
-			return (err);
+		KASSERT(err == 0,
+		    ("prepared VM sparse-map commit failed: %d", err));
 		(void)nvgpu_vm_bindings_normalize(gpu, vm, plan->addr,
 		    plan->size, dirty_set, retired_bindings);
-		return (0);
+		return;
 	case NVGPU_VM_OP_PLAN_MAP_NOOP:
 		valid = &plan->u.valid_map_plan;
 		err = nvgpu_vm_bind_commit_sparse_clear_noflush(gpu, vm,
 		    &valid->sparse_clear_plan, NVGPU_VM_TRACE_MAP, plan->addr,
 		    plan->size, dirty_set);
-		if (err != 0)
-			return (err);
-		promoted = nvgpu_vm_bindings_normalize(gpu, vm, plan->addr,
+		KASSERT(err == 0,
+		    ("prepared VM sparse-clear commit failed: %d", err));
+		(void)nvgpu_vm_bindings_normalize(gpu, vm, plan->addr,
 		    plan->size, dirty_set, retired_bindings);
-		return (0);
+		return;
 	case NVGPU_VM_OP_PLAN_MAP_VALID:
 		valid = &plan->u.valid_map_plan;
 		err = nvgpu_vm_valid_map_plan_commit(gpu, vm,
 		    &valid->valid_map_plan, valid->segment_plan.segments,
 		    valid->segment_plan.count, valid->bo, plan->op_flags,
 		    plan->addr, plan->size, dirty_set, retired_bindings);
-		if (err != 0)
-			return (err);
+		KASSERT(err == 0,
+		    ("prepared VM valid-map commit failed: %d", err));
 		nvgpu_vm_bind_mark_bo_tiled(valid->bo, valid->pte_kind);
 		nvgpu_vm_bindings_normalize(gpu, vm, plan->addr,
 		    plan->size, dirty_set, retired_bindings);
 		nvgpu_log(NVGPU_LOG_DEBUG,
 		    "nvgpu vm: VM_BIND track addr=0x%016jx size=0x%016jx bo=%p\n",
 		    (uintmax_t)plan->addr, (uintmax_t)plan->size, valid->bo);
-		return (0);
+		return;
 	case NVGPU_VM_OP_PLAN_NONE:
-		return (EINVAL);
+		break;
 	}
-	return (EINVAL);
+	KASSERT(false, ("VM op commit without a prepared plan"));
 }
 
 /*
@@ -6539,11 +6537,10 @@ nvgpu_vm_batch_plan_apply(struct nvgpu_device *gpu,
 			    nvgpu_vm_bind_inject_parent_child_failure(gpu,
 			    &plan->current_op, i))
 				err = EIO;
-			if (err == 0) {
-				err = nvgpu_vm_op_plan_commit(gpu, vm,
+			if (err == 0)
+				nvgpu_vm_op_plan_commit(gpu, vm,
 				    &plan->current_op, &plan->dirty_set,
 				    retired_bindings);
-			}
 		}
 		if (err != 0) {
 			nvgpu_log(NVGPU_LOG_DEBUG,
@@ -6832,10 +6829,10 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 	    &bind->retired_bindings);
 	failed_op = plan.failed_op;
 	nvgpu_vm_batch_plan_fini(bind->vm, &plan);
+	lwkt_reltoken(&bind->vm->vm_token);
 	nvgpu_vm_dirty_set_publish(bind->vm->gpu, &plan.dirty_set);
 	if (plan.dirty_set.dirty)
 		nvgpu_vm_dirty_set_flush(bind->vm->backend, &plan.dirty_set);
-	lwkt_reltoken(&bind->vm->vm_token);
 	if (error != 0 && failed_op != NULL)
 		nvgpu_vm_bind_record_error(bind->vm->gpu, failed_op->op,
 		    failed_op->flags, failed_op->handle, failed_op->addr,

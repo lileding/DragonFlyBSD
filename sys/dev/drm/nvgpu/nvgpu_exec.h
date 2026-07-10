@@ -46,6 +46,10 @@ int nvgpu_exec_submit(struct nvgpu_proc *proc,
     struct nvgpu_exec_submit_args *args);
 
 /* Harvest semaphore completions and signal their GPU-complete fences. */
-void nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu);
+void nvgpu_exec_harvest_completed(struct nvgpu_device *gpu);
+
+/* Fail all pending submissions for one GSP channel after an RM fault. */
+void nvgpu_exec_fail_channel(struct nvgpu_device *gpu, uint32_t chid,
+    int error);
 
 #endif /* _NVGPU_EXEC_H_ */

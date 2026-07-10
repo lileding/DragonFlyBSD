@@ -202,7 +202,9 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file,
 		}
 	}
 	for (uint32_t i = 0; i < req->op_count; i++) {
-		if (ops[i].range == 0 ||
+		if (ops[i].pad != 0 ||
+		    (ops[i].flags & ~(0xffu | DRM_NOUVEAU_VM_BIND_SPARSE)) != 0 ||
+		    ops[i].range == 0 ||
 		    ops[i].addr > UINT64_MAX - ops[i].range ||
 		    ((ops[i].addr | ops[i].bo_offset | ops[i].range) &
 		    (PAGE_SIZE - 1)) != 0 ||

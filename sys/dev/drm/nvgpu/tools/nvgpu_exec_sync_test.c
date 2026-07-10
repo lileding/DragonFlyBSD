@@ -512,6 +512,27 @@ test_binary_chain_stress(int fd)
 }
 
 static bool
+test_ring_saturation(int fd)
+{
+	uint32_t handles[256];
+	bool ok = true;
+
+	memset(handles, 0, sizeof(handles));
+	for (size_t i = 0; ok && i < ARRAY_SIZE(handles); i++) {
+		struct drm_nouveau_sync sig;
+
+		handles[i] = syncobj_create(fd, false);
+		sig = binary_sync(handles[i]);
+		ok = handles[i] != 0 && exec_submit(fd, NULL, 0, &sig, 1, 5);
+	}
+	if (ok)
+		ok = syncobj_wait_binary(fd, handles, ARRAY_SIZE(handles), 10);
+	for (size_t i = 0; i < ARRAY_SIZE(handles); i++)
+		syncobj_destroy(fd, handles[i]);
+	return ok;
+}
+
+static bool
 test_timeline_chain(int fd)
 {
 	uint32_t t = syncobj_create(fd, false);
@@ -802,6 +823,7 @@ static const struct test_case tests[] = {
 	{ "binary chain", test_binary_chain },
 	{ "binary fanout", test_binary_fanout },
 	{ "binary chain stress", test_binary_chain_stress },
+	{ "ring saturation", test_ring_saturation },
 	{ "timeline chain", test_timeline_chain },
 	{ "timeline already-signaled wait", test_timeline_already_signaled_wait },
 	{ "mixed multi-wait", test_mixed_multi_wait },

@@ -15,6 +15,7 @@ struct nvgpu_fence;
 struct nvgpu_proc;
 struct nvgpu_proc_exec;
 struct nvgpu_vm;
+struct reservation_object;
 
 /* Serialize proc-owned object tables across concurrent DRM ioctls. */
 void nvgpu_proc_lock(struct nvgpu_proc *proc);
@@ -37,6 +38,9 @@ struct nvgpu_device *nvgpu_proc_get_device(struct nvgpu_proc *proc);
 struct nvgpu_channel_list *nvgpu_proc_get_channels(struct nvgpu_proc *proc);
 struct nvgpu_vm *nvgpu_proc_get_vm(struct nvgpu_proc *proc);
 void nvgpu_proc_set_vm(struct nvgpu_proc *proc, struct nvgpu_vm *vm);
+
+/* Return the borrowed per-process reservation object used by no-share BOs. */
+struct reservation_object *nvgpu_proc_get_vm_resv(struct nvgpu_proc *proc);
 
 /* Register one accepted EXEC and return an owned last-bind dependency, if any. */
 int nvgpu_proc_register_exec(struct nvgpu_proc *proc,

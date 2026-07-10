@@ -46,7 +46,7 @@ nvgpu_future_spawn(struct nvgpu_future *future, struct nvgpu_proc *proc,
 		error = nvgpu_fence_add_callback(wait_fences[i],
 		    nvgpu_future_wait_cb, future);
 		if (error != 0) {
-			if (error == -ENOENT) {
+			if (error == ENOENT) {
 				error = nvgpu_fence_error(wait_fences[i]);
 				if (error != 0)
 					future->error = (u_int)error;
