@@ -111,6 +111,13 @@ nvgpu_fence_get_dma_ref(struct nvgpu_fence *fence)
 }
 
 void
+nvgpu_fence_addref(struct nvgpu_fence *fence)
+{
+	if (fence != NULL)
+		dma_fence_get(&fence->base);
+}
+
+void
 nvgpu_fence_release(struct nvgpu_fence *fence)
 {
 	if (fence == NULL)
@@ -162,6 +169,21 @@ nvgpu_fence_signal(struct nvgpu_fence *fence, int error)
 	if (error != 0)
 		dma_fence_set_error(&fence->base, error);
 	return (dma_fence_signal(&fence->base));
+}
+
+int
+nvgpu_fence_wait(struct nvgpu_fence *fence, bool interruptible)
+{
+	signed long result;
+	int error;
+
+	if (fence == NULL)
+		return (EINVAL);
+	result = dma_fence_wait(&fence->base, interruptible);
+	if (result < 0)
+		return ((int)-result);
+	error = nvgpu_fence_error(fence);
+	return (error < 0 ? -error : error);
 }
 
 static void

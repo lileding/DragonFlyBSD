@@ -8,6 +8,7 @@
 #include "nvgpu_bo.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
+#include "nvgpu_fence.h"
 #include "nvgpu_proc.h"
 #include "nvgpu_ttm.h"
 #include "nvgsp_state.h"
@@ -453,6 +454,23 @@ nvgpu_bo_resv_add_shared_fence(struct nvgpu_bo *bo, struct dma_fence *fence)
 	return (nvgpu_errno(error));
 }
 
+int
+nvgpu_bo_add_bookkeeping_fence(struct nvgpu_bo *bo,
+    struct nvgpu_fence *fence)
+{
+	struct dma_fence *dma;
+	int error;
+
+	if (bo == NULL || fence == NULL)
+		return (EINVAL);
+	dma = nvgpu_fence_get_dma_ref(fence);
+	if (dma == NULL)
+		return (EINVAL);
+	error = nvgpu_bo_resv_add_shared_fence(bo, dma);
+	dma_fence_put(dma);
+	return (error);
+}
+
 void
 nvgpu_bo_resv_add_excl_fence(struct nvgpu_bo *bo, struct dma_fence *fence)
 {
@@ -491,6 +509,9 @@ nvgpu_bo_ttm_destroy(struct ttm_buffer_object *tbo)
 {
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 
+	KASSERT(LIST_EMPTY(&bo->vm_mappings),
+	    ("destroying BO with live GPUVA mappings"));
+	lwkt_token_uninit(&bo->vm_mapping_token);
 	reservation_object_fini(&bo->resv);
 	drm_gem_object_release(&bo->base);
 	kfree(bo);
@@ -590,6 +611,8 @@ nvgpu_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 	if (bo == NULL)
 		return (NULL);
 	reservation_object_init(&bo->resv);
+	lwkt_token_init(&bo->vm_mapping_token, "nvgbo");
+	LIST_INIT(&bo->vm_mappings);
 	drm_gem_private_object_init(ddev, &bo->base, size);
 	bo->tile_mode = tile_mode;
 	bo->tile_flags = tile_flags;
@@ -601,6 +624,7 @@ nvgpu_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 		    "BO TTM create failed error=%d domain=0x%x size=0x%llx\n",
 		    error, domain, (unsigned long long)size);
 		if (!bo->ttm_backed) {
+			lwkt_token_uninit(&bo->vm_mapping_token);
 			reservation_object_fini(&bo->resv);
 			drm_gem_object_release(&bo->base);
 			kfree(bo);
@@ -623,6 +647,9 @@ nvgpu_bo_free(struct drm_gem_object *obj)
 		return;
 	}
 	(void)nvgpu_bo_resv_wait(bo, false, true, false);
+	KASSERT(LIST_EMPTY(&bo->vm_mappings),
+	    ("freeing BO with live GPUVA mappings"));
+	lwkt_token_uninit(&bo->vm_mapping_token);
 	reservation_object_fini(&bo->resv);
 	drm_gem_object_release(obj);
 	kfree(bo);
@@ -727,7 +754,14 @@ nvgpu_bo_lookup(struct drm_file *file, uint32_t handle, struct nvgpu_bo **out)
 }
 
 void
-nvgpu_bo_put(struct nvgpu_bo *bo)
+nvgpu_bo_addref(struct nvgpu_bo *bo)
+{
+	if (bo != NULL)
+		drm_gem_object_get(&bo->base);
+}
+
+void
+nvgpu_bo_release(struct nvgpu_bo *bo)
 {
 	if (bo != NULL)
 		drm_gem_object_put_unlocked(&bo->base);

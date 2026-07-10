@@ -203,6 +203,7 @@ TAILQ_HEAD(nvgsp_vram_alloc_list, nvgsp_vram_alloc);
 
 #define NVGSP_PT_ADDR_SHIFT          4
 #define NVGSP_PDE_APERTURE_VRAM      (1ULL << 1)
+#define NVGSP_PDE_VOL                (1ULL << 3)
 #define NVGSP_PTE_VALID              (1ULL << 0)
 #define NVGSP_PTE_APERTURE_VRAM      0ULL
 #define NVGSP_PTE_APERTURE_SYS_COH   (2ULL << 1)
@@ -293,10 +294,22 @@ nvgsp_pde_to_vram(uint64_t paddr)
 }
 
 static __inline uint64_t
+nvgsp_pde_to_sparse(void)
+{
+	return (NVGSP_PDE_VOL);
+}
+
+static __inline uint64_t
 nvgsp_pte_to_sysmem(uint64_t paddr)
 {
 	return ((paddr >> NVGSP_PT_ADDR_SHIFT) | NVGSP_PTE_APERTURE_SYS_COH |
 	    NVGSP_PTE_VOL | NVGSP_PTE_VALID);
+}
+
+static __inline uint64_t
+nvgsp_pte_to_sparse(void)
+{
+	return (NVGSP_PTE_VOL);
 }
 
 static __inline uint64_t
@@ -340,25 +353,59 @@ struct nvgsp_vmm_pd1 {
 };
 LIST_HEAD(nvgsp_vmm_pd1_list, nvgsp_vmm_pd1);
 
+enum nvgsp_vmm_pd0_slot_state {
+	NVGSP_VMM_PD0_SLOT_EMPTY = 0,
+	NVGSP_VMM_PD0_SLOT_CHILD,
+	NVGSP_VMM_PD0_SLOT_VALID_2M,
+	NVGSP_VMM_PD0_SLOT_SPARSE_2M,
+};
+
 struct nvgsp_vmm_pd0 {
 	LIST_ENTRY(nvgsp_vmm_pd0) link;
+	LIST_ENTRY(nvgsp_vmm_pd0) lookup_link;
 	struct nvgsp_bar1_page *pd1_page;
 	uint32_t pd2_idx;
 	uint32_t pd1_idx;
+	uint32_t refcount;
+	uint32_t valid_2m_count;
+	uint32_t sparse_2m_count;
+	uint8_t slot_state[NVGSP_GMMU_PD0_ENTRIES];
 	struct nvgsp_bar1_page page;
 };
 LIST_HEAD(nvgsp_vmm_pd0_list, nvgsp_vmm_pd0);
+LIST_HEAD(nvgsp_vmm_pd0_lookup_list, nvgsp_vmm_pd0);
+
+#define NVGSP_VMM_SPT_MASK_WORDS (NVGSP_GMMU_SPT_ENTRIES / 64)
 
 struct nvgsp_vmm_user_pt {
 	LIST_ENTRY(nvgsp_vmm_user_pt) link;
+	LIST_ENTRY(nvgsp_vmm_user_pt) lookup_link;
 	struct nvgsp_vmm_pd0 *pd0;
 	uint32_t pd2_idx;
 	uint32_t pd1_idx;
 	uint32_t pd0_idx;
+	uint32_t valid_pte_count;
+	uint32_t valid_lpte_count;
+	uint32_t sparse_pte_count;
+	uint32_t sparse_lpte_count;
+	uint64_t valid_spt_mask[NVGSP_VMM_SPT_MASK_WORDS];
+	uint64_t sparse_spt_mask[NVGSP_VMM_SPT_MASK_WORDS];
+	uint32_t valid_lpt_mask;
+	uint32_t sparse_lpt_mask;
 	struct nvgsp_bar1_page lpt;
 	struct nvgsp_bar1_page spt;
 };
 LIST_HEAD(nvgsp_vmm_user_pt_list, nvgsp_vmm_user_pt);
+LIST_HEAD(nvgsp_vmm_user_pt_lookup_list, nvgsp_vmm_user_pt);
+
+#define NVGSP_VMM_PD0_HASH_BITS 8
+#define NVGSP_VMM_PD0_HASH_SIZE (1U << NVGSP_VMM_PD0_HASH_BITS)
+#define NVGSP_VMM_USER_PT_HASH_BITS 10
+#define NVGSP_VMM_USER_PT_HASH_SIZE (1U << NVGSP_VMM_USER_PT_HASH_BITS)
+#define NVGSP_VMM_PAGE_SHIFT_4K 0
+#define NVGSP_VMM_PAGE_SHIFT_64K 1
+#define NVGSP_VMM_PAGE_SHIFT_2M 2
+#define NVGSP_VMM_PAGE_SHIFT_COUNT 3
 
 struct nvgsp_vmm_sparse_region {
 	LIST_ENTRY(nvgsp_vmm_sparse_region) link;
@@ -367,6 +414,44 @@ struct nvgsp_vmm_sparse_region {
 	uint8_t page_shift;
 };
 LIST_HEAD(nvgsp_vmm_sparse_region_list, nvgsp_vmm_sparse_region);
+
+struct nvgsp_vmm_stats {
+	uint64_t pte_backend_flush_count;
+	uint64_t dirty_flush_count;
+	uint64_t dirty_flush_range_count;
+	uint64_t dirty_flush_pages;
+	uint64_t dirty_flush_overflow_count;
+	uint64_t dirty_flush_all_fallback_count;
+	uint64_t flush_count;
+	uint64_t flush_us;
+	uint64_t pd0_empty_free_count;
+	uint64_t pt_empty_free_count;
+	uint64_t pt_skip_clear_count;
+	uint64_t pt_skip_clear_pages;
+	uint64_t pt_conflict_clear_count;
+	uint64_t pt_conflict_clear_pages;
+	uint64_t pt_final_clear_count;
+	uint64_t pt_final_clear_pages;
+	uint64_t pte_bulk_write_count;
+	uint64_t pte_bulk_write_pages;
+	uint64_t pte_bulk_clear_count;
+	uint64_t pte_bulk_clear_pages;
+	uint64_t pte_skip_clear_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_skip_clear_pages[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_conflict_clear_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_conflict_clear_pages[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_final_clear_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_final_clear_pages[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_leaf_write_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_leaf_clear_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_write_batch_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_clear_batch_count[NVGSP_VMM_PAGE_SHIFT_COUNT];
+	uint64_t pte_fast_write_count;
+	uint64_t pte_fast_clear_count;
+	uint64_t pte_fast_invalid_clear_count;
+	uint64_t pte_fast_sparse_clear_count;
+	uint64_t pte_read_modify_write_count;
+};
 
 struct nvgsp_vmm {
 	struct nvgsp_state *gsp;
@@ -381,8 +466,14 @@ struct nvgsp_vmm {
 	struct nvgsp_vmm_pd1_list user_pd1_pages;
 	struct nvgsp_vmm_pd0_list user_pd0_pages;
 	struct nvgsp_vmm_user_pt_list user_pt_pages;
+	struct nvgsp_vmm_pd0_lookup_list user_pd0_lookup[NVGSP_VMM_PD0_HASH_SIZE];
+	struct nvgsp_vmm_user_pt_lookup_list user_pt_lookup[NVGSP_VMM_USER_PT_HASH_SIZE];
 	struct nvgsp_vmm_sparse_region_list sparse_regions;
 	struct nvgsp_dmamem sparse_page;
+	struct nvgsp_vmm_stats stats;
+	int pt_alloc_fail_after;
+	uint64_t pt_alloc_fail_count;
+	uint64_t pt_alloc_fail_last_va;
 	uint32_t submit_gva_slot;
 };
 
