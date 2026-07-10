@@ -18,6 +18,8 @@
 #include <vm/vm_param.h>
 
 struct drm_file;
+struct nvgpu_fence;
+struct nvgpu_vm_binding;
 struct nvgpu_proc;
 struct nvgsp_vram_alloc;
 struct ttm_mem_reg;
@@ -40,6 +42,8 @@ struct nvgpu_bo_info {
 	uint32_t tile_flags;
 };
 
+LIST_HEAD(nvgpu_bo_vm_mapping_list, nvgpu_vm_binding);
+
 /* Internal BO representation shared by the BO and TTM modules. */
 struct nvgpu_bo {
 	struct drm_gem_object base;
@@ -55,12 +59,18 @@ struct nvgpu_bo {
 	bool no_share;
 	bool ttm_backed;
 	bool ttm_permanent_no_evict;
+	bool vm_bound_tiled;
+	bool vm_bound_mixed_kind;
+	uint8_t vm_bound_kind;
 	uint32_t ttm_pin_count;
 	uint32_t vm_bind_pin_count;
 	uint32_t vm_bind_no_evict_pin_count;
 	uint32_t scanout_pin_count;
 	uint32_t scanout_no_evict_pin_count;
 	uint32_t mmap_pager_count;
+	struct lwkt_token vm_mapping_token;
+	struct nvgpu_bo_vm_mapping_list vm_mappings;
+	uint32_t vm_mapping_count;
 };
 
 static __inline struct nvgpu_bo *
@@ -81,7 +91,8 @@ int nvgpu_bo_get_info(struct drm_file *file, uint32_t handle,
     struct nvgpu_bo_info *info);
 int nvgpu_bo_lookup(struct drm_file *file, uint32_t handle,
     struct nvgpu_bo **out);
-void nvgpu_bo_put(struct nvgpu_bo *bo);
+void nvgpu_bo_addref(struct nvgpu_bo *bo);
+void nvgpu_bo_release(struct nvgpu_bo *bo);
 uint64_t nvgpu_bo_get_size(const struct nvgpu_bo *bo);
 bool nvgpu_bo_is_vram(const struct nvgpu_bo *bo);
 bool nvgpu_bo_has_sysmem(const struct nvgpu_bo *bo);
@@ -105,6 +116,8 @@ int nvgpu_bo_scanout_unpin(struct nvgpu_bo *bo);
 struct reservation_object *nvgpu_bo_get_resv(struct nvgpu_bo *bo);
 int nvgpu_bo_resv_add_shared_fence(struct nvgpu_bo *bo,
     struct dma_fence *fence);
+int nvgpu_bo_add_bookkeeping_fence(struct nvgpu_bo *bo,
+    struct nvgpu_fence *fence);
 void nvgpu_bo_resv_add_excl_fence(struct nvgpu_bo *bo,
     struct dma_fence *fence);
 int nvgpu_bo_resv_wait(struct nvgpu_bo *bo, bool intr, bool write,
