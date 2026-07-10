@@ -1,0 +1,17 @@
+amdrdna — RDNA+ native AMD GPU driver (skeleton)
+
+Phase A0: loadable PCI kmod with RDNA1/2 PCI ID table and a
+catch-all for post-Navi (IP discovery / RDNA3+) devices.
+No MMIO, firmware, or DRM node bring-up yet.
+
+Build (on a DragonFly source tree):
+
+  cd sys/dev/drm/amdrdna
+  make SYSDIR=/path/to/sys
+  kldload ./amdrdna.ko
+  kldunload amdrdna
+
+Tunable: hw.amdrdna.log_level (0=error, 1=info, 2=debug)
+
+PCI IDs in amdgpu_chip.c are derived from Linux v7.1
+drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c (RDNA1/2 named ASICs).

@@ -1,0 +1,16 @@
+*.o
+*.ko
+*.kld
+*.tmp
+bus_if.h
+device_if.h
+pci_if.h
+opt_*.h
+export_syms
+@
+machine
+machine_base
+cpu
+cpu_base
+dragonfly
+forwarder_x86_64
