@@ -9,6 +9,29 @@
 
 static MALLOC_DEFINE(M_NVGSP_STATE, "nvgsp_state", "nvgsp backend state");
 
+#define NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE 128u
+#define NV2080_INTR_CATEGORY_ENUM_COUNT	7u
+#define NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE 0x20800a5cu
+#define NVGSP_CPU_INTR_LEAF_EN_SET(i)	(0x00b81200u + (i) * 4u)
+#define NVGSP_CPU_INTR_TOP_EN_SET	0x00b81608u
+#define NVGSP_ENGINE_IDX_DISP		2u
+#define NVGSP_ENGINE_IDX_GSP		50u
+
+struct nvgsp_intr_table_entry {
+	uint16_t engine_idx;
+	uint16_t pad;
+	uint32_t pmc_intr_mask;
+	uint32_t vector_stall;
+	uint32_t vector_nonstall;
+};
+
+struct nvgsp_intr_table_params {
+	uint32_t table_len;
+	struct nvgsp_intr_table_entry table[
+	    NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE];
+	uint8_t subtree_map[NV2080_INTR_CATEGORY_ENUM_COUNT * 2];
+};
+
 /* Return the borrowed GSP state stored on the physical GPU object. */
 struct nvgsp_state *
 nvgsp_state_get(struct nvgpu_device *gpu)
@@ -111,18 +134,98 @@ int
 nvgsp_state_get_intr_table(struct nvgpu_device *gpu)
 {
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+	struct nvgsp_client client;
+	struct nvgsp_object subdevice;
+	struct nvgsp_intr_table_params *params;
+	void *reply;
+	uint32_t table_len;
+	int error;
 
-	if (gsp == NULL)
+	if (gsp == NULL || gsp->gsp_internal_client == 0 ||
+	    gsp->gsp_internal_subdevice == 0)
 		return (ENXIO);
-	/*
-	 * Interrupt table parsing belongs to nvgpu_intr.  Keep the masks zeroed
-	 * until that module is moved off the skeleton.
-	 */
+	memset(&client, 0, sizeof(client));
+	client.gsp = gsp;
+	client.object.client = &client;
+	client.object.handle = gsp->gsp_internal_client;
+	memset(&subdevice, 0, sizeof(subdevice));
+	subdevice.client = &client;
+	subdevice.handle = gsp->gsp_internal_subdevice;
+	params = nvgsp_rm_get_ctrl(&subdevice,
+	    NV2080_CTRL_CMD_INTERNAL_INTR_GET_KERNEL_TABLE, sizeof(*params));
+	if (params == NULL)
+		return (ENOMEM);
+	reply = params;
+	error = nvgsp_rm_read_ctrl(&subdevice, &reply, sizeof(*params));
+	if (error != 0 || reply == NULL)
+		return (error != 0 ? error : EIO);
+	params = reply;
+	table_len = params->table_len;
+	if (table_len > NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE)
+		table_len = NV2080_CTRL_INTERNAL_INTR_MAX_TABLE_SIZE;
 	memset(gsp->gsp_nonstall_leaf_mask, 0, sizeof(gsp->gsp_nonstall_leaf_mask));
 	memset(gsp->gsp_stall_leaf_mask, 0, sizeof(gsp->gsp_stall_leaf_mask));
 	memset(gsp->gsp_engine_leaf_mask, 0, sizeof(gsp->gsp_engine_leaf_mask));
 	memset(gsp->gsp_disp_leaf_mask, 0, sizeof(gsp->gsp_disp_leaf_mask));
+	for (uint32_t i = 0; i < table_len; i++) {
+		uint32_t vector = params->table[i].vector_nonstall;
+		uint32_t stall = params->table[i].vector_stall;
+
+		if (vector != 0xffffffffu && vector / 32u < 8u)
+			gsp->gsp_nonstall_leaf_mask[vector / 32u] |=
+			    1u << (vector % 32u);
+		if (stall == 0xffffffffu || stall / 32u >= 8u)
+			continue;
+		gsp->gsp_stall_leaf_mask[stall / 32u] |= 1u << (stall % 32u);
+		if (params->table[i].engine_idx == NVGSP_ENGINE_IDX_GSP)
+			gsp->gsp_engine_leaf_mask[stall / 32u] |=
+			    1u << (stall % 32u);
+		if (params->table[i].engine_idx == NVGSP_ENGINE_IDX_DISP)
+			gsp->gsp_disp_leaf_mask[stall / 32u] |=
+			    1u << (stall % 32u);
+	}
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp interrupt table entries=%u\n",
+	    params->table_len);
+	nvgsp_rm_complete_ctrl(&subdevice, reply);
 	return (0);
+}
+
+int
+nvgsp_state_enable_intr(struct nvgpu_device *gpu)
+{
+	static const uint32_t base_mask[8] = {
+		0x00031c80u, 0, 0, 0, 0x0c000000u, 0, 0, 0,
+	};
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+
+	if (gsp == NULL)
+		return (ENXIO);
+	for (uint32_t leaf = 0; leaf < 8; leaf++) {
+		uint32_t mask = base_mask[leaf] |
+		    gsp->gsp_nonstall_leaf_mask[leaf] |
+		    gsp->gsp_stall_leaf_mask[leaf];
+
+		if (mask != 0)
+			nvgsp_wr32(gsp, NVGSP_CPU_INTR_LEAF_EN_SET(leaf), mask);
+	}
+	nvgsp_wr32(gsp, NVGSP_CPU_INTR_TOP_EN_SET, 0x0000000fu);
+	nvgsp_wr32(gsp, gsp->chip->gsp_base + 0x004, 0x00000040u);
+	return (0);
+}
+
+void
+nvgsp_state_get_intr_masks(struct nvgpu_device *gpu, uint32_t leaf,
+    struct nvgsp_intr_masks *masks)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+
+	memset(masks, 0, sizeof(*masks));
+	if (gsp == NULL || leaf >= 8)
+		return;
+	masks->nonstall = gsp->gsp_nonstall_leaf_mask[leaf];
+	masks->stall = gsp->gsp_stall_leaf_mask[leaf];
+	masks->engine = gsp->gsp_engine_leaf_mask[leaf];
+	masks->display = gsp->gsp_disp_leaf_mask[leaf];
 }
 
 /* Enable doorbells before channel submission. */

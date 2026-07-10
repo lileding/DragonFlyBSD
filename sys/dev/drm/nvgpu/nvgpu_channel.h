@@ -29,6 +29,16 @@ struct nvgpu_channel_alloc_reply {
 	uint32_t nr_subchan;
 };
 
+/* Find a live userspace channel and return one owned reference. */
+struct nvgpu_channel *nvgpu_channel_hold_by_id(struct nvgpu_proc *proc,
+    uint32_t id);
+
+/* Release one channel reference; the last reference destroys its backend. */
+void nvgpu_channel_release(struct nvgpu_channel *chan);
+
+/* Return the borrowed GSP backend while the caller holds chan. */
+struct nvgsp_channel *nvgpu_channel_get_backend(struct nvgpu_channel *chan);
+
 /* Allocate one user channel and insert it into proc's channel list. */
 int nvgpu_channel_alloc(struct nvgpu_proc *proc,
     const struct nvgpu_channel_alloc_args *args,

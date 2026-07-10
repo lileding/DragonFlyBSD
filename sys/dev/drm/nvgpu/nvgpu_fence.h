@@ -8,6 +8,7 @@
 #define _NVGPU_FENCE_H_
 
 #include <stdbool.h>
+#include <sys/stdint.h>
 
 struct dma_fence;
 struct nvgpu_device;
@@ -30,6 +31,14 @@ void nvgpu_fence_addref(struct nvgpu_fence *fence);
 
 /* Release a native dma_fence reference owned by this nvgpu fence. */
 void nvgpu_fence_release(struct nvgpu_fence *fence);
+
+/* Attach immutable EXEC producer metadata before publishing gpu_complete. */
+void nvgpu_fence_set_exec_producer(struct nvgpu_fence *gpu_complete,
+    uint32_t channel, struct nvgpu_fence *submitted);
+
+/* Return an owned same-channel submit dependency or this GPU fence. */
+struct nvgpu_fence *nvgpu_fence_hold_exec_wait(
+    struct nvgpu_fence *gpu_complete, uint32_t channel);
 
 bool nvgpu_fence_is_signaled(struct nvgpu_fence *fence);
 int nvgpu_fence_error(struct nvgpu_fence *fence);

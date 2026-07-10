@@ -505,6 +505,11 @@ struct nvgsp_channel {
 	uint32_t gsp_token;
 	uint32_t gpf_put;
 	uint32_t gpf_free;
+	uint32_t submit_post_slot;
+	uint32_t submit_payload;
+	uint64_t submit_post_slots_busy;
+	uint8_t faulted;
+	int fault_error;
 	struct nvgsp_object ce_obj;
 	struct nvgsp_object usermode_obj;
 	uint64_t submit_gva_push;

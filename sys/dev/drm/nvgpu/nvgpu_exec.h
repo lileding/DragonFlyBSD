@@ -13,27 +13,39 @@ struct nvgpu_fence;
 struct nvgpu_device;
 struct nvgpu_proc;
 
+#define NVGPU_EXEC_PUSH_NO_PREFETCH	0x1u
+
+struct nvgpu_exec_push {
+	uint64_t va;
+	uint32_t va_len;
+	uint32_t flags;
+};
+
 struct nvgpu_exec_submit_args {
 	uint32_t channel;
+	const struct nvgpu_exec_push *pushes;
 	uint32_t push_count;
-	struct nvgpu_fence *done_fence;
+	struct nvgpu_fence *gpu_complete_fence;
 	struct nvgpu_fence **wait_fences;
 	uint32_t wait_count;
 };
 
-#define NVGPU_EXEC_FAKE_ERROR_CHANNEL		0xfffffff0U
-#define NVGPU_EXEC_FAKE_NEVER_READY_CHANNEL	0xfffffff1U
+/* Allocate device-global pending completion state before scheduler startup. */
+int nvgpu_exec_init(struct nvgpu_device *gpu);
+
+/* Assert that all GPU completions drained and release global EXEC state. */
+void nvgpu_exec_fini(struct nvgpu_device *gpu);
 
 /*
- * Submit a synchronization-only fake EXEC future.
+ * Spawn one real EXEC future after the DRM shim copied userspace pushes.
  *
- * args->done_fence is consumed by this function on both success and error.
- * args->wait_fences are borrowed for the duration of the call.
+ * args->gpu_complete_fence is consumed on both success and error.
+ * args->pushes and args->wait_fences are borrowed for the duration of the call.
  */
-int nvgpu_exec_submit_fake(struct nvgpu_proc *proc,
+int nvgpu_exec_submit(struct nvgpu_proc *proc,
     struct nvgpu_exec_submit_args *args);
 
-/* Handle one EXEC completion event.  gpu is borrowed; wake scheduler state, do not free futures inline. */
+/* Harvest semaphore completions and signal their GPU-complete fences. */
 void nvgpu_exec_complete_from_intr(struct nvgpu_device *gpu);
 
 #endif /* _NVGPU_EXEC_H_ */

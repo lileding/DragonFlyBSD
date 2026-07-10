@@ -280,7 +280,7 @@ cleanup_ops:
 	return (error);
 }
 
-/* Submit a synchronization-only EXEC future until channel submit is moved in. */
+/* Copy the EXEC UAPI payload and spawn a real GPU submission future. */
 int
 nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
     void *data)
@@ -289,15 +289,32 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 	struct nvdrm_sync_wait_set waits;
 	struct nvdrm_sync_signal_set signals;
 	struct nvgpu_exec_submit_args args;
+	struct nvgpu_exec_push *pushes;
 	struct nvgpu_fence *done_fence;
 	int error;
 
 	if (req == NULL)
 		return (EINVAL);
+	if (req->push_count > NVGPU_CHANNEL_GPFIFO_ENTRIES - 2)
+		return (EINVAL);
+	pushes = NULL;
+	if (req->push_count != 0) {
+		pushes = kmalloc((size_t)req->push_count * sizeof(*pushes),
+		    M_TEMP, M_WAITOK);
+		error = copyin((const void *)(uintptr_t)req->push_ptr, pushes,
+		    (size_t)req->push_count * sizeof(*pushes));
+		if (error != 0) {
+			_kfree(pushes, M_TEMP);
+			return (error);
+		}
+	}
 	error = nvdrm_sync_collect_wait_fences(file, req->wait_count,
 	    req->wait_ptr, &waits);
-	if (error != 0)
+	if (error != 0) {
+		if (pushes != NULL)
+			_kfree(pushes, M_TEMP);
 		return (error);
+	}
 	done_fence = nvgpu_fence_create(nvgpu_proc_get_device(proc), "exec");
 	if (done_fence == NULL) {
 		error = ENOMEM;
@@ -311,11 +328,12 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 	}
 
 	args.channel = req->channel;
+	args.pushes = pushes;
 	args.push_count = req->push_count;
-	args.done_fence = done_fence;
+	args.gpu_complete_fence = done_fence;
 	args.wait_fences = waits.fences;
 	args.wait_count = waits.count;
-	error = nvgpu_exec_submit_fake(proc, &args);
+	error = nvgpu_exec_submit(proc, &args);
 	done_fence = NULL;
 	if (error == 0)
 		nvdrm_sync_publish_signals(&signals);
@@ -323,5 +341,7 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 
 cleanup_waits:
 	nvdrm_sync_cleanup_waits(&waits);
+	if (pushes != NULL)
+		_kfree(pushes, M_TEMP);
 	return (error);
 }

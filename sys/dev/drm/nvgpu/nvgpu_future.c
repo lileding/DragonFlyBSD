@@ -73,6 +73,7 @@ nvgpu_future_finish(struct nvgpu_future *future, int result)
 
 	if (future == NULL)
 		return;
+	future->error = (u_int)result;
 	done = future->done_fence;
 	future->done_fence = NULL;
 	if (done != NULL) {
