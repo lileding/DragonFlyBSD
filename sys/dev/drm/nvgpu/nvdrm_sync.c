@@ -32,7 +32,7 @@ nvdrm_sync_collect_wait_fences(struct drm_file *file, uint32_t count,
     uint64_t wait_ptr, struct nvdrm_sync_wait_set *set)
 {
 	struct drm_nouveau_sync *waits;
-	struct nvgpu_fence **fences;
+	struct dma_fence **fences;
 	size_t size;
 	uint32_t retained;
 	int error;
@@ -79,17 +79,12 @@ nvdrm_sync_collect_wait_fences(struct drm_file *file, uint32_t count,
 				continue;
 			}
 		}
-		fences[retained] = nvgpu_fence_import_dma_ref(dma);
-		if (fences[retained] == NULL) {
-			error = EINVAL;
-			break;
-		}
-		retained++;
+		fences[retained++] = dma;
 	}
 	_kfree(waits, M_NVDRM_SYNC);
 	if (error != 0) {
 		for (uint32_t i = 0; i < retained; i++)
-			nvgpu_fence_release(fences[i]);
+			dma_fence_put(fences[i]);
 		_kfree(fences, M_NVDRM_SYNC);
 		set->count = 0;
 		return (error);
@@ -144,7 +139,7 @@ nvdrm_sync_prepare_signals(struct drm_file *file, uint32_t count,
 			error = ENOENT;
 			goto fail;
 		}
-		signals[i].fence = nvgpu_fence_get_dma_ref(done_fence);
+		signals[i].fence = nvgpu_fence_addref_as_dma(done_fence);
 		if (signals[i].fence == NULL) {
 			error = EINVAL;
 			goto fail;
@@ -213,7 +208,7 @@ nvdrm_sync_cleanup_waits(struct nvdrm_sync_wait_set *set)
 	if (set == NULL || set->fences == NULL)
 		return;
 	for (uint32_t i = 0; i < set->count; i++)
-		nvgpu_fence_release(set->fences[i]);
+		dma_fence_put(set->fences[i]);
 	_kfree(set->fences, M_NVDRM_SYNC);
 	set->fences = NULL;
 	set->count = 0;

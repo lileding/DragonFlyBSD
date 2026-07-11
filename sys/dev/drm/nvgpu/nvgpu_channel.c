@@ -41,7 +41,7 @@ struct nvgpu_channel {
 
 static volatile u_int nvgpu_channel_next_id = 1;
 
-static void nvgpu_channel_free_objects(struct nvgpu_channel *chan);
+static void nvgpu_channel_finalize_objects(struct nvgpu_channel *chan);
 
 /* Caller serializes the proc channel list. */
 static uint32_t
@@ -102,7 +102,7 @@ nvgpu_channel_release(struct nvgpu_channel *chan)
 	KASSERT(refs != 0, ("nvgpu channel refs underflow"));
 	if (refs != 1)
 		return;
-	nvgpu_channel_free_objects(chan);
+	nvgpu_channel_finalize_objects(chan);
 	if (chan->backend != NULL)
 		nvgsp_channel_destroy_user(chan->backend);
 	_kfree(chan, M_NVGPU_CHANNEL);
@@ -127,7 +127,7 @@ nvgpu_channel_object_slot(struct nvgpu_channel *chan)
 }
 
 static void
-nvgpu_channel_free_objects(struct nvgpu_channel *chan)
+nvgpu_channel_finalize_objects(struct nvgpu_channel *chan)
 {
 	uint32_t i;
 
@@ -315,9 +315,9 @@ nvgpu_channel_alloc(struct nvgpu_proc *proc,
 	return (0);
 }
 
-/* Free one channel by userspace id. */
+/* Remove one channel by userspace id and release the list's reference. */
 int
-nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
+nvgpu_channel_release_by_id(struct nvgpu_proc *proc, int32_t channel)
 {
 	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;
@@ -339,9 +339,9 @@ nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel)
 	return (0);
 }
 
-/* Destroy every remaining channel during proc teardown. */
+/* Remove every remaining channel and release the list's references. */
 void
-nvgpu_channel_destroy_all(struct nvgpu_proc *proc)
+nvgpu_channel_release_all(struct nvgpu_proc *proc)
 {
 	struct nvgpu_channel_list *channels;
 	struct nvgpu_channel *chan;

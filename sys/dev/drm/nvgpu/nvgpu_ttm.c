@@ -860,7 +860,7 @@ nvgpu_ttm_tbo_gpu(struct ttm_buffer_object *tbo)
 }
 
 static int
-nvgpu_ttm_pager_ctor(void *handle, vm_ooffset_t size __unused,
+nvgpu_ttm_pager_hold(void *handle, vm_ooffset_t size __unused,
     vm_prot_t prot __unused, vm_ooffset_t foff __unused,
     struct ucred *cred __unused, u_short *color)
 {
@@ -869,29 +869,34 @@ nvgpu_ttm_pager_ctor(void *handle, vm_ooffset_t size __unused,
 	struct nvgpu_device *gpu = nvgpu_ttm_tbo_gpu(tbo);
 	int error;
 
-	if (atomic_cmpset_int(&bo->mmap_pager_live, 0, 1)) {
+	if (atomic_cmpset_int(&bo->mmap_pager_active, 0, 1)) {
 		if (gpu != NULL) {
 			error = nvgpu_unload_hold_by_mmap(gpu);
 			if (error != 0) {
-				atomic_store_rel_int(&bo->mmap_pager_live, 0);
+				atomic_store_rel_int(&bo->mmap_pager_active, 0);
 				return (error);
 			}
 		}
-		ttm_bo_get(tbo);
+		nvgpu_bo_addref(bo);
 	}
 	*color = 0;
 	return (0);
 }
 
 static void
-nvgpu_ttm_pager_dtor(void *handle)
+nvgpu_ttm_pager_release(void *handle)
 {
 	struct ttm_buffer_object *tbo = handle;
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 	struct nvgpu_device *gpu = nvgpu_ttm_tbo_gpu(tbo);
+	int error;
 
-	atomic_store_rel_int(&bo->mmap_pager_live, 0);
-	ttm_bo_put(tbo);
+	atomic_store_rel_int(&bo->mmap_pager_active, 0);
+	error = ttm_bo_reserve(tbo, false, false, NULL);
+	KASSERT(error == 0, ("reserving mmap BO for final unmap failed"));
+	ttm_bo_unmap_virtual(tbo);
+	ttm_bo_unreserve(tbo);
+	nvgpu_bo_release(bo);
 	if (gpu != NULL)
 		nvgpu_unload_release_by_mmap(gpu);
 }
@@ -906,8 +911,8 @@ nvgpu_ttm_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 }
 
 static struct cdev_pager_ops nvgpu_ttm_pager_ops = {
-	.cdev_pg_ctor = nvgpu_ttm_pager_ctor,
-	.cdev_pg_dtor = nvgpu_ttm_pager_dtor,
+	.cdev_pg_ctor = nvgpu_ttm_pager_hold,
+	.cdev_pg_dtor = nvgpu_ttm_pager_release,
 	.cdev_pg_fault = nvgpu_ttm_pager_fault,
 };
 

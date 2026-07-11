@@ -41,7 +41,7 @@ struct nvgpu_proc {
 	bool shutdown;
 };
 
-static void nvgpu_proc_destroy(struct nvgpu_proc *proc);
+static void nvgpu_proc_finalize(struct nvgpu_proc *proc);
 
 void
 nvgpu_proc_lock(struct nvgpu_proc *proc)
@@ -155,7 +155,7 @@ nvgpu_proc_release(struct nvgpu_proc *proc)
 		destroy = true;
 	lwkt_reltoken(&proc->token);
 	if (destroy)
-		nvgpu_proc_destroy(proc);
+		nvgpu_proc_finalize(proc);
 }
 
 int
@@ -192,7 +192,7 @@ nvgpu_proc_register_exec(struct nvgpu_proc *proc,
 	}
 	TAILQ_INSERT_TAIL(&proc->inflight_execs, exec, link);
 	lwkt_reltoken(&proc->token);
-	dma = nvgpu_fence_get_dma_ref(gpu_complete_fence);
+	dma = nvgpu_fence_addref_as_dma(gpu_complete_fence);
 	KASSERT(dma != NULL, ("EXEC completion fence has no dma fence"));
 	reservation_object_lock(&proc->vm_resv, NULL);
 	reservation_object_add_excl_fence(&proc->vm_resv, dma);
@@ -284,17 +284,17 @@ nvgpu_proc_complete_bind(struct nvgpu_proc *proc,
 }
 
 static void
-nvgpu_proc_destroy(struct nvgpu_proc *proc)
+nvgpu_proc_finalize(struct nvgpu_proc *proc)
 {
 	KASSERT(TAILQ_EMPTY(&proc->inflight_execs),
-	    ("destroying proc with inflight EXECs"));
+	    ("finalizing proc with inflight EXECs"));
 	KASSERT(proc->last_bind_fence == NULL,
-	    ("destroying proc with an unfinished VM_BIND"));
-	nvgpu_channel_destroy_all(proc);
+	    ("finalizing proc with an unfinished VM_BIND"));
+	nvgpu_channel_release_all(proc);
 	nvgpu_vm_destroy(proc);
 	reservation_object_fini(&proc->vm_resv);
 	nvgpu_unload_release_by_drm(proc->gpu);
-	nvgpu_log(NVGPU_LOG_DEBUG, "proc destroy proc=%p\n", proc);
+	nvgpu_log(NVGPU_LOG_DEBUG, "proc finalize proc=%p\n", proc);
 	lwkt_token_uninit(&proc->token);
 	_kfree(proc, M_NVGPU_PROC);
 }

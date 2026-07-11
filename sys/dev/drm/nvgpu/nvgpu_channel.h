@@ -44,8 +44,8 @@ int nvgpu_channel_alloc(struct nvgpu_proc *proc,
     const struct nvgpu_channel_alloc_args *args,
     struct nvgpu_channel_alloc_reply *reply);
 
-/* Free one channel by userspace id. */
-int nvgpu_channel_free(struct nvgpu_proc *proc, int32_t channel);
+/* Remove one channel by userspace id and release the list's reference. */
+int nvgpu_channel_release_by_id(struct nvgpu_proc *proc, int32_t channel);
 
 /* Create an NVIF engine object under a channel selected by the NVIF token. */
 int nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
@@ -55,7 +55,7 @@ int nvgpu_channel_new_object(struct nvgpu_proc *proc, uint64_t token,
 /* Delete an NVIF engine object if it is still live.  Unknown objects are ignored. */
 int nvgpu_channel_delete_object(struct nvgpu_proc *proc, uint64_t nvif_object);
 
-/* Destroy every remaining channel during proc teardown. */
-void nvgpu_channel_destroy_all(struct nvgpu_proc *proc);
+/* Remove every remaining channel and release the list's references. */
+void nvgpu_channel_release_all(struct nvgpu_proc *proc);
 
 #endif /* _NVGPU_CHANNEL_H_ */

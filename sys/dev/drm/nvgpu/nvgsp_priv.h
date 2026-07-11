@@ -61,6 +61,7 @@
 #define NVGSP_FWSEC_CMD_SB         0x19u
 
 struct nvgsp_falcon;
+struct nvgsp_display;
 struct firmware;
 
 struct nvgsp_dmamem {
@@ -183,6 +184,8 @@ enum nvgsp_vram_kind {
 	NVGSP_VRAM_CHANNEL_SUBMIT_PT,
 	NVGSP_VRAM_GR_CTXBUF_GLOBAL,
 	NVGSP_VRAM_GR_CTXBUF_CHANNEL,
+	NVGSP_VRAM_DISPLAY_INST,
+	NVGSP_VRAM_DISPLAY_DATA,
 	NVGSP_VRAM_KIND_COUNT
 };
 
@@ -600,6 +603,7 @@ struct nvgsp_state {
 	struct nvgsp_vmm *golden_vmm;
 	struct nvgsp_channel *bootstrap_channel;
 	struct nvgsp_channel *golden_channel;
+	struct nvgsp_display *display;
 	uint8_t gr_ctxbuf_global_nr;
 	struct nvgsp_gr_ctxbuf gr_ctxbuf_global[NVGSP_GR_MAX_CTXBUFS];
 };

@@ -25,6 +25,7 @@
 #define DRM_NOUVEAU_CHANNEL_FREE 0x03
 #define DRM_NOUVEAU_VM_BIND 0x11
 #define DRM_NOUVEAU_EXEC 0x12
+#define DRM_NOUVEAU_GEM_NEW 0x40
 
 #define NOUVEAU_FIFO_ENGINE_GR 0x01
 #define DRM_NOUVEAU_VM_BIND_RUN_ASYNC 0x1
@@ -32,6 +33,26 @@
 #define DRM_NOUVEAU_SYNC_SYNCOBJ 0x0
 #define DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ 0x1
 #define DRM_NOUVEAU_SYNC_TYPE_MASK 0xf
+#define NOUVEAU_GEM_DOMAIN_GART (1u << 2)
+
+#define DMA_BUF_SYNC_READ (1u << 0)
+#define DMA_BUF_SYNC_WRITE (2u << 0)
+#define DMA_BUF_SYNC_RW (DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
+
+struct dma_buf_export_sync_file {
+	uint32_t flags;
+	int32_t fd;
+};
+
+struct dma_buf_import_sync_file {
+	uint32_t flags;
+	int32_t fd;
+};
+
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE \
+	_IOWR('b', 2, struct dma_buf_export_sync_file)
+#define DMA_BUF_IOCTL_IMPORT_SYNC_FILE \
+	_IOW('b', 3, struct dma_buf_import_sync_file)
 
 struct drm_nouveau_sync {
 	uint32_t flags;
@@ -82,6 +103,22 @@ struct drm_nouveau_exec_push {
 	uint32_t flags;
 };
 
+struct drm_nouveau_gem_info {
+	uint32_t handle;
+	uint32_t domain;
+	uint64_t size;
+	uint64_t offset;
+	uint64_t map_handle;
+	uint32_t tile_mode;
+	uint32_t tile_flags;
+};
+
+struct drm_nouveau_gem_new {
+	struct drm_nouveau_gem_info info;
+	uint32_t channel_hint;
+	uint32_t align;
+};
+
 #define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_CHANNEL_ALLOC, \
 	    struct drm_nouveau_channel_alloc)
@@ -94,6 +131,9 @@ struct drm_nouveau_exec_push {
 
 #define DRM_IOCTL_NOUVEAU_EXEC \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_EXEC, struct drm_nouveau_exec)
+#define DRM_IOCTL_NOUVEAU_GEM_NEW \
+	DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_NEW, \
+	    struct drm_nouveau_gem_new)
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -316,6 +356,62 @@ syncobj_import_fd(int fd, int shared_fd)
 	    "DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE") != 0)
 		return 0;
 	return args.handle;
+}
+
+static bool
+syncobj_export_sync_file(int fd, uint32_t handle, int *sync_fd)
+{
+	struct drm_syncobj_handle args;
+
+	memset(&args, 0, sizeof(args));
+	args.handle = handle;
+	args.flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE;
+	args.fd = -1;
+	if (xioctl(fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &args,
+	    "DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD(sync_file)") != 0)
+		return false;
+	*sync_fd = args.fd;
+	return true;
+}
+
+static bool
+syncobj_import_sync_file(int fd, uint32_t handle, int sync_fd)
+{
+	struct drm_syncobj_handle args;
+
+	memset(&args, 0, sizeof(args));
+	args.handle = handle;
+	args.flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE;
+	args.fd = sync_fd;
+	return xioctl(fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &args,
+	    "DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE(sync_file)") == 0;
+}
+
+static uint32_t
+gem_new(int fd)
+{
+	struct drm_nouveau_gem_new args;
+
+	memset(&args, 0, sizeof(args));
+	args.info.size = 0x10000;
+	args.info.domain = NOUVEAU_GEM_DOMAIN_GART;
+	args.align = 0x1000;
+	if (xioctl(fd, DRM_IOCTL_NOUVEAU_GEM_NEW, &args,
+	    "DRM_IOCTL_NOUVEAU_GEM_NEW") != 0)
+		return 0;
+	return args.info.handle;
+}
+
+static void
+gem_close(int fd, uint32_t handle)
+{
+	struct drm_gem_close args;
+
+	if (handle == 0)
+		return;
+	memset(&args, 0, sizeof(args));
+	args.handle = handle;
+	(void)xioctl(fd, DRM_IOCTL_GEM_CLOSE, &args, "DRM_IOCTL_GEM_CLOSE");
 }
 
 static bool
@@ -641,6 +737,131 @@ out:
 }
 
 static bool
+test_cross_file_timeline_syncobj(int fd)
+{
+	int fd2 = open_device();
+	int shared_fd = -1;
+	uint32_t shared1 = 0, shared2 = 0, out2 = 0;
+	uint32_t channel2 = 0;
+	struct drm_nouveau_sync sig_shared;
+	struct drm_nouveau_sync wait_shared;
+	struct drm_nouveau_sync sig_out;
+	uint64_t point = 2;
+	bool ok;
+
+	if (fd2 < 0)
+		return false;
+	if (!channel_alloc_one(fd2, &channel2)) {
+		close(fd2);
+		return false;
+	}
+	shared1 = syncobj_create(fd, false);
+	ok = shared1 != 0;
+	if (ok && !syncobj_export_fd(fd, shared1, &shared_fd)) {
+		if (errno == ENOSYS || errno == EOPNOTSUPP) {
+			ok = test_skip("syncobj fd export unsupported");
+			goto out;
+		}
+		ok = false;
+	}
+	if (ok) {
+		shared2 = syncobj_import_fd(fd2, shared_fd);
+		out2 = syncobj_create(fd2, false);
+	}
+	sig_shared = timeline_sync(shared1, 1);
+	wait_shared = timeline_sync(shared2, 1);
+	sig_out = timeline_sync(out2, 2);
+	ok = ok && shared2 != 0 && out2 != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_shared, 1, 9) &&
+	    exec_submit_on_channel(fd2, &wait_shared, 1, &sig_out, 1,
+	    channel2) && syncobj_wait_timeline(fd2, &out2, &point, 1, 5);
+out:
+	if (shared_fd >= 0)
+		close(shared_fd);
+	syncobj_destroy(fd, shared1);
+	syncobj_destroy(fd2, shared2);
+	syncobj_destroy(fd2, out2);
+	channel_free_one(fd2, channel2);
+	close(fd2);
+	return ok;
+}
+
+static bool
+test_dmabuf_fence_array_wait(int fd)
+{
+	struct dma_buf_import_sync_file import;
+	struct dma_buf_export_sync_file export;
+	struct drm_prime_handle prime;
+	uint32_t fence_a = 0, fence_b = 0, array = 0, out = 0;
+	uint32_t bo = 0;
+	int sync_a = -1, sync_b = -1, array_fd = -1, dmabuf_fd = -1;
+	struct drm_nouveau_sync sig_a, sig_b, wait_array, sig_out;
+	bool ok = true;
+
+	for (unsigned i = 0; ok && i < 64; i++)
+		ok = vm_bind_empty_async(fd, NULL, 0);
+	fence_a = syncobj_create(fd, false);
+	fence_b = syncobj_create(fd, false);
+	array = syncobj_create(fd, false);
+	out = syncobj_create(fd, false);
+	sig_a = binary_sync(fence_a);
+	sig_b = binary_sync(fence_b);
+	wait_array = binary_sync(array);
+	sig_out = binary_sync(out);
+	ok = ok && fence_a != 0 && fence_b != 0 && array != 0 && out != 0 &&
+	    exec_submit(fd, NULL, 0, &sig_a, 1, real_channel) &&
+	    exec_submit(fd, NULL, 0, &sig_b, 1, real_channel) &&
+	    syncobj_export_sync_file(fd, fence_a, &sync_a) &&
+	    syncobj_export_sync_file(fd, fence_b, &sync_b);
+	bo = gem_new(fd);
+	memset(&prime, 0, sizeof(prime));
+	prime.handle = bo;
+	prime.flags = DRM_CLOEXEC;
+	prime.fd = -1;
+	if (ok && bo != 0 && xioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime,
+	    "DRM_IOCTL_PRIME_HANDLE_TO_FD") == 0)
+		dmabuf_fd = prime.fd;
+	else
+		ok = false;
+	memset(&import, 0, sizeof(import));
+	import.flags = DMA_BUF_SYNC_WRITE;
+	import.fd = sync_a;
+	if (ok && xioctl(dmabuf_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import,
+	    "DMA_BUF_IOCTL_IMPORT_SYNC_FILE(write)") != 0)
+		ok = false;
+	import.flags = DMA_BUF_SYNC_READ;
+	import.fd = sync_b;
+	if (ok && xioctl(dmabuf_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import,
+	    "DMA_BUF_IOCTL_IMPORT_SYNC_FILE(read)") != 0)
+		ok = false;
+	memset(&export, 0, sizeof(export));
+	export.flags = DMA_BUF_SYNC_RW;
+	export.fd = -1;
+	if (ok && xioctl(dmabuf_fd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &export,
+	    "DMA_BUF_IOCTL_EXPORT_SYNC_FILE") == 0)
+		array_fd = export.fd;
+	else
+		ok = false;
+	ok = ok && syncobj_import_sync_file(fd, array, array_fd) &&
+	    exec_submit(fd, &wait_array, 1, &sig_out, 1, real_channel) &&
+	    syncobj_wait_binary(fd, &out, 1, 10);
+	if (array_fd >= 0)
+		close(array_fd);
+	if (dmabuf_fd >= 0)
+		close(dmabuf_fd);
+	if (sync_a >= 0)
+		close(sync_a);
+	if (sync_b >= 0)
+		close(sync_b);
+	gem_close(fd, bo);
+	syncobj_destroy(fd, fence_a);
+	syncobj_destroy(fd, fence_b);
+	syncobj_destroy(fd, array);
+	syncobj_destroy(fd, out);
+	return ok;
+}
+
+static bool
 test_invalid_wait_handle(int fd)
 {
 	uint32_t out = syncobj_create(fd, false);
@@ -828,6 +1049,8 @@ static const struct test_case tests[] = {
 	{ "timeline already-signaled wait", test_timeline_already_signaled_wait },
 	{ "mixed multi-wait", test_mixed_multi_wait },
 	{ "cross-file syncobj", test_cross_file_syncobj },
+	{ "cross-file timeline syncobj", test_cross_file_timeline_syncobj },
+	{ "dma-buf fence-array wait", test_dmabuf_fence_array_wait },
 	{ "invalid wait handle", test_invalid_wait_handle },
 	{ "unsignaled wait without fence", test_unsignaled_wait_without_fence },
 	{ "close with pending future", test_close_with_pending_future },

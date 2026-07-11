@@ -13,6 +13,7 @@
 #include "nvgpu_vm.h"
 #include "nvgsp_vmm.h"
 
+#include <linux/dma-fence.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -6640,7 +6641,8 @@ nvgpu_vm_bind_spawn(struct nvgpu_proc *proc,
 	struct nvgpu_vm_bind_future *bind;
 	struct nvgpu_vm_binding *binding;
 	struct nvgpu_bo **resv_bos;
-	struct nvgpu_fence **waits;
+	struct dma_fence **waits;
+	struct nvgpu_fence **ordering_waits;
 	struct nvgpu_fence *done;
 	struct nvgsp_vmm *backend;
 	struct nvgpu_vm *vm;
@@ -6760,33 +6762,45 @@ nvgpu_vm_bind_spawn(struct nvgpu_proc *proc,
 		return (error);
 	}
 	ordering_capacity = 0;
+	ordering_waits = NULL;
 	for (;;) {
-		wait_count = args->wait_count + ordering_capacity;
-		waits = NULL;
-		if (wait_count != 0) {
-			waits = kmalloc((size_t)wait_count * sizeof(*waits),
+		if (ordering_capacity != 0) {
+			ordering_waits = kmalloc((size_t)ordering_capacity *
+			    sizeof(*ordering_waits),
 			    M_NVGPU_VM, M_WAITOK | M_ZERO);
-			for (uint32_t i = 0; i < args->wait_count; i++)
-				waits[i] = args->wait_fences[i];
 		}
 		ordering_count = 0;
-		error = nvgpu_proc_register_bind(proc, done,
-		    ordering_capacity != 0 ? &waits[args->wait_count] : NULL,
+		error = nvgpu_proc_register_bind(proc, done, ordering_waits,
 		    ordering_capacity, &ordering_count);
 		if (error != ENOSPC)
 			break;
-		if (waits != NULL)
-			_kfree(waits, M_NVGPU_VM);
+		if (ordering_waits != NULL)
+			_kfree(ordering_waits, M_NVGPU_VM);
+		ordering_waits = NULL;
 		ordering_capacity = ordering_count;
 	}
 	if (error != 0) {
-		if (waits != NULL)
-			_kfree(waits, M_NVGPU_VM);
+		if (ordering_waits != NULL)
+			_kfree(ordering_waits, M_NVGPU_VM);
 		(void)nvgpu_fence_signal(done, error);
 		nvgpu_fence_release(done);
 		return (error);
 	}
 	wait_count = args->wait_count + ordering_count;
+	waits = NULL;
+	if (wait_count != 0) {
+		waits = kmalloc((size_t)wait_count * sizeof(*waits),
+		    M_NVGPU_VM, M_WAITOK | M_ZERO);
+		for (uint32_t i = 0; i < args->wait_count; i++)
+			waits[i] = dma_fence_get(args->wait_fences[i]);
+		for (uint32_t i = 0; i < ordering_count; i++) {
+			waits[args->wait_count + i] =
+			    nvgpu_fence_addref_as_dma(ordering_waits[i]);
+			nvgpu_fence_release(ordering_waits[i]);
+		}
+	}
+	if (ordering_waits != NULL)
+		_kfree(ordering_waits, M_NVGPU_VM);
 	bind = kmalloc(sizeof(*bind), M_NVGPU_VM, M_WAITOK | M_ZERO);
 	bind->vm = vm;
 	bind->op_count = args->op_count;
@@ -6804,8 +6818,8 @@ nvgpu_vm_bind_spawn(struct nvgpu_proc *proc,
 
 	error = nvgpu_future_spawn(&bind->base, proc, done, waits, wait_count,
 	    nvgpu_vm_bind_future_poll, nvgpu_vm_bind_future_destroy);
-	for (uint32_t i = 0; i < ordering_count; i++)
-		nvgpu_fence_release(waits[args->wait_count + i]);
+	for (uint32_t i = 0; i < wait_count; i++)
+		dma_fence_put(waits[i]);
 	if (waits != NULL)
 		_kfree(waits, M_NVGPU_VM);
 	if (error != 0)

@@ -49,6 +49,11 @@ struct nvgpu_chip_config {
 	uint32_t display_sors;
 	uint32_t display_windows;
 	uint32_t display_cursors;
+	uint32_t class_display_root;
+	uint32_t class_display_core;
+	uint32_t class_display_window;
+	uint32_t class_display_window_imm;
+	uint32_t class_display_cursor;
 	uint32_t gmmu_pd3_shift;
 	uint32_t gmmu_pd2_shift;
 	uint32_t gmmu_pd1_shift;

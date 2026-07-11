@@ -18,6 +18,10 @@ int nvgpu_intr_init(struct nvgpu_device *gpu);
 int nvgpu_intr_enable(struct nvgpu_device *gpu);
 /* Disable interrupt delivery before interrupt state teardown. */
 void nvgpu_intr_disable(struct nvgpu_device *gpu);
+/* Admit display IRQ fanout after KMS callbacks are installed. */
+void nvgpu_intr_enable_display_dispatch(struct nvgpu_device *gpu);
+/* Stop new display fanout and wait for an in-progress callback to return. */
+void nvgpu_intr_disable_display_dispatch(struct nvgpu_device *gpu);
 /* Release interrupt state after delivery has been disabled. */
 void nvgpu_intr_fini(struct nvgpu_device *gpu);
 /* Top-level interrupt entry.  Must stay short and hand slow work to subsystem workers. */

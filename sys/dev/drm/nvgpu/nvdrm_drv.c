@@ -7,10 +7,12 @@
 #include "nvdrm_drv.h"
 #include "nvdrm_file.h"
 #include "nvdrm_ioctl.h"
+#include "nvdrm_kms.h"
 #include "nvdrm_prime.h"
 #include "nvgpu_bo.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_display.h"
 #include "nvgpu_ttm.h"
 
 #include <drm/drmP.h>
@@ -30,7 +32,8 @@ static const struct file_operations nvdrm_fops = {
 
 static struct drm_driver nvdrm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
-	    DRIVER_SYNCOBJ_TIMELINE | DRIVER_PRIME,
+	    DRIVER_SYNCOBJ_TIMELINE | DRIVER_PRIME | DRIVER_MODESET |
+	    DRIVER_ATOMIC,
 	.fops = &nvdrm_fops,
 	.name = NVDRM_DRM_NAME,
 	.desc = NVDRM_DRM_DESC,
@@ -44,7 +47,10 @@ static struct drm_driver nvdrm_driver = {
 	.postclose = nvdrm_file_postclose,
 	.lastclose = nvdrm_file_lastclose,
 	.mmap_single = nvgpu_ttm_mmap_single,
-	.gem_free_object_unlocked = nvgpu_bo_free,
+	.gem_free_object_unlocked = nvgpu_bo_release_by_gem,
+	.dumb_create = nvdrm_kms_create_dumb,
+	.dumb_map_offset = nvdrm_kms_get_dumb_map_offset,
+	.dumb_destroy = nvdrm_kms_destroy_dumb,
 	.prime_handle_to_fd = nvdrm_prime_handle_to_fd,
 	.prime_fd_to_handle = nvdrm_prime_fd_to_handle,
 	.gem_prime_export = nvdrm_prime_export,
@@ -89,10 +95,9 @@ nvdrm_register(struct nvgpu_device *gpu)
 		drm_fini_pdev(&pdev);
 		return (error);
 	}
-
-	error = drm_dev_register(ddev, 0);
+	error = nvgpu_display_init(gpu);
 	if (error != 0) {
-		nvgpu_log(NVGPU_LOG_INFO, "drm_dev_register failed error=%d\n", error);
+		nvgpu_log(NVGPU_LOG_INFO, "nvgpu_display_init failed error=%d\n", error);
 		nvgpu_ttm_fini(gpu);
 		nvgpu_device_set_drm(gpu, NULL, NULL);
 		if (ddev->sysctl != NULL)
@@ -101,6 +106,36 @@ nvdrm_register(struct nvgpu_device *gpu)
 		drm_fini_pdev(&pdev);
 		return (error);
 	}
+	error = nvdrm_kms_init(gpu);
+	if (error != 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "nvdrm_kms_init failed error=%d\n", error);
+		nvgpu_display_fini(gpu);
+		nvgpu_ttm_fini(gpu);
+		nvgpu_device_set_drm(gpu, NULL, NULL);
+		if (ddev->sysctl != NULL)
+			drm_sysctl_cleanup(ddev);
+		drm_dev_put(ddev);
+		drm_fini_pdev(&pdev);
+		return (error);
+	}
+
+	error = drm_dev_register(ddev, 0);
+	if (error != 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "drm_dev_register failed error=%d\n", error);
+		nvdrm_kms_fini(gpu);
+		nvgpu_display_fini(gpu);
+		nvgpu_ttm_fini(gpu);
+		nvgpu_device_set_drm(gpu, NULL, NULL);
+		if (ddev->sysctl != NULL)
+			drm_sysctl_cleanup(ddev);
+		drm_dev_put(ddev);
+		drm_fini_pdev(&pdev);
+		return (error);
+	}
+	error = nvdrm_kms_restore_console(gpu);
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "initial console modeset deferred error=%d\n", error);
 
 	nvgpu_log(NVGPU_LOG_INFO, "drm registered as %s\n", NVDRM_DRM_NAME);
 	return (0);
@@ -117,6 +152,8 @@ nvdrm_unregister(struct nvgpu_device *gpu)
 	pdev = nvgpu_device_get_drm_pdev(gpu);
 	if (ddev != NULL) {
 		drm_dev_unregister(ddev);
+		nvdrm_kms_fini(gpu);
+		nvgpu_display_fini(gpu);
 		nvgpu_ttm_fini(gpu);
 		/* drm_dev_fini() does not run DragonFly's per-device sysctl cleanup. */
 		if (ddev->sysctl != NULL)

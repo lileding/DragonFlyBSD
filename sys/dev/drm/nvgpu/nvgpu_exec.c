@@ -14,6 +14,7 @@
 #include "nvgpu_sched.h"
 #include "nvgsp_channel.h"
 
+#include <linux/dma-fence.h>
 #include <machine/atomic.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
@@ -89,7 +90,7 @@ nvgpu_exec_submit(struct nvgpu_proc *proc,
     struct nvgpu_exec_submit_args *args)
 {
 	struct nvgpu_exec_future *exec;
-	struct nvgpu_fence **waits;
+	struct dma_fence **waits;
 	struct nvgpu_fence *bind_wait;
 	struct nvgpu_fence *gpu_complete_fence;
 	struct nvgpu_fence *submitted_fence;
@@ -169,13 +170,14 @@ nvgpu_exec_submit(struct nvgpu_proc *proc,
 			waits[i] = nvgpu_fence_hold_exec_wait(args->wait_fences[i],
 			    args->channel);
 		if (bind_wait != NULL)
-			waits[args->wait_count] = bind_wait;
+			waits[args->wait_count] =
+			    nvgpu_fence_addref_as_dma(bind_wait);
 	}
 	error = nvgpu_future_spawn(&exec->base, proc, submitted_fence, waits,
 	    wait_count, nvgpu_exec_future_poll, nvgpu_exec_future_destroy);
 	if (waits != NULL) {
-		for (uint32_t i = 0; i < args->wait_count; i++)
-			nvgpu_fence_release(waits[i]);
+		for (uint32_t i = 0; i < wait_count; i++)
+			dma_fence_put(waits[i]);
 		_kfree(waits, M_NVGPU_EXEC);
 	}
 	nvgpu_fence_release(bind_wait);

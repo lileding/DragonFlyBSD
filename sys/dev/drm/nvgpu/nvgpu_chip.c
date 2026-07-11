@@ -14,6 +14,11 @@
 #define NVGPU_CLASS_TURING_A			0x0000c597u
 #define NVGPU_CLASS_TURING_DMA_COPY_A		0x0000c5b5u
 #define NVGPU_CLASS_TURING_COMPUTE_A		0x0000c5c0u
+#define NVGPU_CLASS_TURING_DISPLAY		0x0000c570u
+#define NVGPU_CLASS_TURING_DISPLAY_CURSOR	0x0000c57au
+#define NVGPU_CLASS_TURING_DISPLAY_WINDOW_IMM	0x0000c57bu
+#define NVGPU_CLASS_TURING_DISPLAY_CORE		0x0000c57du
+#define NVGPU_CLASS_TURING_DISPLAY_WINDOW	0x0000c57eu
 
 #define NVGPU_GSP_FW(chip, name) "nvidia/" chip "/gsp/" name "-570.144"
 #define NVGPU_ACR_FW(chip) "nvidia/" chip "/acr/bl"
@@ -35,6 +40,11 @@
 	.display_sors = 4, \
 	.display_windows = 8, \
 	.display_cursors = 4, \
+	.class_display_root = NVGPU_CLASS_TURING_DISPLAY, \
+	.class_display_core = NVGPU_CLASS_TURING_DISPLAY_CORE, \
+	.class_display_window = NVGPU_CLASS_TURING_DISPLAY_WINDOW, \
+	.class_display_window_imm = NVGPU_CLASS_TURING_DISPLAY_WINDOW_IMM, \
+	.class_display_cursor = NVGPU_CLASS_TURING_DISPLAY_CURSOR, \
 	.gmmu_pd3_shift = NVGPU_GMMU_PD3_SHIFT, \
 	.gmmu_pd2_shift = NVGPU_GMMU_PD2_SHIFT, \
 	.gmmu_pd1_shift = NVGPU_GMMU_PD1_SHIFT, \

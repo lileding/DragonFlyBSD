@@ -15,7 +15,7 @@ struct nvgpu_fence;
 struct nvdrm_sync_signal;
 
 struct nvdrm_sync_wait_set {
-	struct nvgpu_fence **fences;
+	struct dma_fence **fences;
 	uint32_t count;
 };
 
@@ -24,7 +24,7 @@ struct nvdrm_sync_signal_set {
 	uint32_t count;
 };
 
-/* Convert userspace wait syncobjs into nvgpu fence references owned by set. */
+/* Resolve userspace wait syncobjs into polymorphic dma_fence references. */
 int nvdrm_sync_collect_wait_fences(struct drm_file *file, uint32_t count,
     uint64_t wait_ptr, struct nvdrm_sync_wait_set *set);
 

@@ -490,6 +490,26 @@ test_repeated_map_unmap(int fd, const struct fixture *f)
 	return true;
 }
 
+static bool
+test_mapping_after_gem_close(int fd, const struct fixture *f __attribute__((unused)))
+{
+	struct drm_nouveau_vm_bind_op op;
+	uint64_t va = TEST_VA + 0x7000000ULL;
+	uint32_t handle;
+
+	handle = gem_new(fd, PAGE_64K, NOUVEAU_GEM_DOMAIN_GART, PAGE_64K);
+	if (handle == 0)
+		return false;
+	op = map_op(handle, va, 0, PAGE_64K, 0);
+	if (!vm_bind(fd, &op, 1, 0, NULL, 0, NULL, 0)) {
+		gem_close(fd, handle);
+		return false;
+	}
+	gem_close(fd, handle);
+	op = unmap_op(va, PAGE_64K, 0);
+	return vm_bind(fd, &op, 1, 0, NULL, 0, NULL, 0);
+}
+
 struct test_case {
 	const char *name;
 	bool (*run)(int fd, const struct fixture *fixture);
@@ -505,6 +525,7 @@ static const struct test_case tests[] = {
 	{ "empty async signal", test_empty_async_signal },
 	{ "validation errors", test_validation },
 	{ "repeated map/unmap", test_repeated_map_unmap },
+	{ "mapping after GEM close", test_mapping_after_gem_close },
 };
 
 static void
