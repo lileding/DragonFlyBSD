@@ -36,6 +36,10 @@
 #define NVGPU_INTR_EVENT_DISPLAY	0x00000004u
 #define NVGPU_INTR_EVENT_FAULT		0x00000008u
 #define NVGPU_INTR_CHID_COUNT		2048u
+#define NVGPU_DISPLAY_INTR_HEAD_MASK	0x00611ec0u
+#define NVGPU_DISPLAY_INTR_HEAD_STATUS(head) (0x00611c00u + (head) * 4u)
+#define NVGPU_DISPLAY_INTR_HEAD_ACK(head)	(0x00611800u + (head) * 4u)
+#define NVGPU_DISPLAY_INTR_VBLANK	0x00000002u
 
 MALLOC_DEFINE(M_NVGPU_INTR, "nvgpu_intr", "nvgpu interrupt state");
 
@@ -50,6 +54,8 @@ struct nvgpu_intr_state {
 	struct thread *worker;
 	volatile u_int events;
 	uint64_t fault_chids[NVGPU_INTR_CHID_COUNT / 64];
+	bool display_dispatch_enabled;
+	bool display_dispatch_running;
 	bool stopping;
 	uint64_t isr_count;
 	uint64_t empty_count;
@@ -109,8 +115,10 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 		if (unhandled != 0) {
 			intr->unexpected_count++;
 			nvgpu_log(NVGPU_LOG_DEBUG,
-			    "unexpected CPU intr leaf=%u mask=0x%08x\n",
-			    leaf, unhandled);
+			    "unexpected CPU intr leaf=%u stat=0x%08x "
+			    "nonstall=0x%08x stall=0x%08x known=0x%08x "
+			    "unhandled=0x%08x top=0x%08x\n", leaf, leaf_stat,
+			    nonstall, stall, known, unhandled, top);
 		}
 		if (nonstall != 0) {
 			nvgpu_device_wr32(gpu, NVGPU_CPU_INTR_LEAF(leaf), nonstall);
@@ -175,8 +183,40 @@ nvgpu_intr_run(void *arg)
 			nvgsp_event_dispatch(gpu);
 		if ((events & NVGPU_INTR_EVENT_EXEC) != 0)
 			nvgpu_exec_harvest_completed(gpu);
-		if ((events & NVGPU_INTR_EVENT_DISPLAY) != 0)
-			nvgpu_display_handle_vblank(gpu);
+		if ((events & NVGPU_INTR_EVENT_DISPLAY) != 0) {
+			const struct nvgpu_chip_config *chip = nvgpu_device_get_chip(gpu);
+			uint32_t head_mask = nvgpu_device_rd32(gpu,
+			    NVGPU_DISPLAY_INTR_HEAD_MASK) & 0xffu;
+			bool dispatch;
+
+			lwkt_gettoken(&intr->worker_token);
+			dispatch = intr->display_dispatch_enabled;
+			if (dispatch)
+				intr->display_dispatch_running = true;
+			lwkt_reltoken(&intr->worker_token);
+
+			for (uint32_t head = 0; dispatch &&
+			    head < chip->display_heads; head++) {
+				uint32_t status;
+
+				if ((head_mask & (1u << head)) == 0)
+					continue;
+				status = nvgpu_device_rd32(gpu,
+				    NVGPU_DISPLAY_INTR_HEAD_STATUS(head));
+				if ((status & NVGPU_DISPLAY_INTR_VBLANK) == 0)
+					continue;
+				nvgpu_display_handle_vblank(gpu, head);
+				nvgpu_device_wr32(gpu,
+				    NVGPU_DISPLAY_INTR_HEAD_ACK(head),
+				    NVGPU_DISPLAY_INTR_VBLANK);
+			}
+			if (dispatch) {
+				lwkt_gettoken(&intr->worker_token);
+				intr->display_dispatch_running = false;
+				wakeup(&intr->display_dispatch_running);
+				lwkt_reltoken(&intr->worker_token);
+			}
+		}
 		if ((events & NVGPU_INTR_EVENT_FAULT) != 0) {
 			for (uint32_t word = 0; word < NVGPU_INTR_CHID_COUNT / 64;
 			    word++) {
@@ -288,6 +328,33 @@ nvgpu_intr_enable(struct nvgpu_device *gpu)
 	nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, NVGPU_GSP_MSGQ_INTR);
 	nvgpu_intr_rearm_msi(gpu, intr);
 	return (0);
+}
+
+void
+nvgpu_intr_enable_display_dispatch(struct nvgpu_device *gpu)
+{
+	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
+
+	if (intr == NULL)
+		return;
+	lwkt_gettoken(&intr->worker_token);
+	intr->display_dispatch_enabled = true;
+	lwkt_reltoken(&intr->worker_token);
+}
+
+void
+nvgpu_intr_disable_display_dispatch(struct nvgpu_device *gpu)
+{
+	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
+
+	if (intr == NULL)
+		return;
+	lwkt_gettoken(&intr->worker_token);
+	intr->display_dispatch_enabled = false;
+	intr->events &= ~NVGPU_INTR_EVENT_DISPLAY;
+	while (intr->display_dispatch_running)
+		tsleep(&intr->display_dispatch_running, 0, "nvgpudq", 0);
+	lwkt_reltoken(&intr->worker_token);
 }
 
 void

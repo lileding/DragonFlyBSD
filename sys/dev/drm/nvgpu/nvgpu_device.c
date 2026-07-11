@@ -87,6 +87,8 @@ struct nvgpu_device {
 	struct pci_dev *drm_pdev;
 	struct drm_device *drm_dev;
 	struct nvgpu_ttm *ttm;
+	struct nvgpu_display *display;
+	struct nvdrm_kms *kms;
 	struct nvgpu_unload_state *unload;
 	struct nvgpu_sched *sched;
 	struct nvgpu_exec_state *exec;
@@ -374,6 +376,33 @@ nvgpu_device_set_ttm(struct nvgpu_device *gpu, struct nvgpu_ttm *ttm)
 {
 	if (gpu != NULL)
 		gpu->ttm = ttm;
+}
+
+struct nvgpu_display *
+nvgpu_device_get_display(struct nvgpu_device *gpu)
+{
+	return (gpu != NULL ? gpu->display : NULL);
+}
+
+void
+nvgpu_device_set_display(struct nvgpu_device *gpu,
+    struct nvgpu_display *display)
+{
+	if (gpu != NULL)
+		gpu->display = display;
+}
+
+struct nvdrm_kms *
+nvgpu_device_get_kms(struct nvgpu_device *gpu)
+{
+	return (gpu != NULL ? gpu->kms : NULL);
+}
+
+void
+nvgpu_device_set_kms(struct nvgpu_device *gpu, struct nvdrm_kms *kms)
+{
+	if (gpu != NULL)
+		gpu->kms = kms;
 }
 
 struct nvgsp_state *

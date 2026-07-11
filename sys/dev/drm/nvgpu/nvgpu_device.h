@@ -12,8 +12,10 @@
 
 
 struct nvgsp_state;
+struct nvdrm_kms;
 struct nvgpu_chip_config;
 struct nvgpu_exec_state;
+struct nvgpu_display;
 struct nvgpu_intr_state;
 struct nvgpu_sched;
 struct nvgpu_ttm;
@@ -55,5 +57,10 @@ void nvgpu_device_set_exec_state(struct nvgpu_device *gpu,
     struct nvgpu_exec_state *state);
 struct nvgpu_ttm *nvgpu_device_get_ttm(struct nvgpu_device *gpu);
 void nvgpu_device_set_ttm(struct nvgpu_device *gpu, struct nvgpu_ttm *ttm);
+struct nvgpu_display *nvgpu_device_get_display(struct nvgpu_device *gpu);
+void nvgpu_device_set_display(struct nvgpu_device *gpu,
+    struct nvgpu_display *display);
+struct nvdrm_kms *nvgpu_device_get_kms(struct nvgpu_device *gpu);
+void nvgpu_device_set_kms(struct nvgpu_device *gpu, struct nvdrm_kms *kms);
 
 #endif /* _NVGPU_DEVICE_H_ */

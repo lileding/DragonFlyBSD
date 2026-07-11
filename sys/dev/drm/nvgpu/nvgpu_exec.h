@@ -9,6 +9,7 @@
 
 #include <sys/stdint.h>
 
+struct dma_fence;
 struct nvgpu_fence;
 struct nvgpu_device;
 struct nvgpu_proc;
@@ -26,7 +27,7 @@ struct nvgpu_exec_submit_args {
 	const struct nvgpu_exec_push *pushes;
 	uint32_t push_count;
 	struct nvgpu_fence *gpu_complete_fence;
-	struct nvgpu_fence **wait_fences;
+	struct dma_fence **wait_fences;
 	uint32_t wait_count;
 };
 

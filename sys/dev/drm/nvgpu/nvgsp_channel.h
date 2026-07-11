@@ -42,7 +42,7 @@ void nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission);
 
 /* Sample the coherent completion semaphore without sleeping or taking a lock. */
 bool nvgsp_channel_check_submit_complete(
-    const struct nvgsp_channel_submission *submission);
+	    struct nvgsp_channel_submission *submission);
 
 /* Release a completed submission and make its post/semaphore slot reusable. */
 void nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission);

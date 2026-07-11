@@ -10,6 +10,9 @@
 #include "nvgsp_vmm.h"
 #include "nvgsp_vram.h"
 
+#include <machine/atomic.h>
+#include <sys/kernel.h>
+
 static MALLOC_DEFINE(M_NVGSP_CHANNEL, "nvgsp_channel", "nvgsp channel state");
 
 struct nvgsp_channel_object {
@@ -198,6 +201,8 @@ struct nvgsp_channel_submission {
 	uint32_t post_slot;
 	uint32_t put;
 	uint32_t gpf_required;
+	uint32_t submitted_ticks;
+	volatile u_int debug_reported;
 };
 
 static uint64_t
@@ -374,6 +379,7 @@ nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission)
 	uint64_t slot_bar1 = chan->userd_bar1_gva +
 	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
 
+	submission->submitted_ticks = ticks;
 	nvgsp_bar_wr32_bar1(gsp, slot_bar1 + NV_USERD_GP_PUT, submission->put);
 	cpu_sfence();
 	(void)nvgsp_bar_rd32_bar1(gsp, slot_bar1);
@@ -385,12 +391,37 @@ nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission)
 
 bool
 nvgsp_channel_check_submit_complete(
-    const struct nvgsp_channel_submission *submission)
+	    struct nvgsp_channel_submission *submission)
 {
+	struct nvgsp_channel *chan;
+	struct nvgsp_state *gsp;
+	uint64_t slot_bar1;
+	uint32_t get, put, value;
+
 	if (submission == NULL)
 		return (false);
 	cpu_lfence();
-	return (*submission->sema == submission->payload);
+	value = *submission->sema;
+	if (value == submission->payload)
+		return (true);
+	if ((uint32_t)(ticks - submission->submitted_ticks) < (uint32_t)hz ||
+	    !atomic_cmpset_int(&submission->debug_reported, 0, 1))
+		return (false);
+
+	chan = submission->chan;
+	gsp = chan->vmm->gsp;
+	slot_bar1 = chan->userd_bar1_gva +
+	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
+	get = nvgsp_bar_rd32_bar1(gsp, slot_bar1 + NV_USERD_GP_GET) &
+	    (NV_CHANNEL_GPFIFO_ENTRIES - 1);
+	put = nvgsp_bar_rd32_bar1(gsp, slot_bar1 + NV_USERD_GP_PUT) &
+	    (NV_CHANNEL_GPFIFO_ENTRIES - 1);
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "submit stalled chid=%d sema=0x%08x expected=0x%08x "
+	    "get=%u put=%u submit_put=%u gpf_free=%u slot=%u\n",
+	    chan->chid, value, submission->payload, get, put,
+	    submission->put, chan->gpf_free, submission->post_slot);
+	return (false);
 }
 
 void

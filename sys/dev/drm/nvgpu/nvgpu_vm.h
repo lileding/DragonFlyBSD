@@ -9,6 +9,7 @@
 
 #include <sys/stdint.h>
 
+struct dma_fence;
 struct nvgpu_bo;
 struct nvgpu_fence;
 struct nvgpu_proc;
@@ -28,7 +29,7 @@ struct nvgpu_vm_bind_args {
 	struct nvgpu_vm_bind_op *ops;
 	uint32_t op_count;
 	struct nvgpu_fence *done_fence;
-	struct nvgpu_fence **wait_fences;
+	struct dma_fence **wait_fences;
 	uint32_t wait_count;
 };
 

@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <stdbool.h>
 
+struct dma_fence;
 struct nvgpu_fence;
 struct nvgpu_proc;
 
@@ -31,9 +32,13 @@ struct nvgpu_future {
 	u_int error;
 };
 
-/* Spawn a future with one caller-owned done_fence reference and borrowed wait fences. */
+/*
+ * Spawn a future with one caller-owned done_fence reference and borrowed
+ * polymorphic dma_fence dependencies.  Callback closures retain each wait
+ * fence until it signals.
+ */
 int nvgpu_future_spawn(struct nvgpu_future *future, struct nvgpu_proc *proc,
-    struct nvgpu_fence *done_fence, struct nvgpu_fence **wait_fences,
+    struct nvgpu_fence *done_fence, struct dma_fence **wait_fences,
     uint32_t wait_count,
     struct nvgpu_future_result (*poll)(struct nvgpu_future *future),
     void (*destroy)(struct nvgpu_future *future));

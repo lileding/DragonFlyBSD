@@ -48,6 +48,8 @@ LIST_HEAD(nvgpu_bo_vm_mapping_list, nvgpu_vm_binding);
 struct nvgpu_bo {
 	struct drm_gem_object base;
 	struct ttm_buffer_object tbo;
+	/* Logical owners are GEM, one active mmap pager, and each VM mapping. */
+	volatile u_int refs;
 	struct reservation_object resv;
 	struct reservation_object *vm_resv;
 	struct nvgsp_vram_alloc *vram_alloc;
@@ -67,7 +69,7 @@ struct nvgpu_bo {
 	uint32_t vm_bind_no_evict_pin_count;
 	uint32_t scanout_pin_count;
 	uint32_t scanout_no_evict_pin_count;
-	u_int mmap_pager_live;
+	u_int mmap_pager_active;
 	struct lwkt_token vm_mapping_token;
 	struct nvgpu_bo_vm_mapping_list vm_mappings;
 	uint32_t vm_mapping_count;
@@ -91,6 +93,7 @@ int nvgpu_bo_get_info(struct drm_file *file, uint32_t handle,
     struct nvgpu_bo_info *info);
 int nvgpu_bo_lookup(struct drm_file *file, uint32_t handle,
     struct nvgpu_bo **out);
+/* Add or release one logical BO owner; the last release drops TTM ownership. */
 void nvgpu_bo_addref(struct nvgpu_bo *bo);
 void nvgpu_bo_release(struct nvgpu_bo *bo);
 uint64_t nvgpu_bo_get_size(const struct nvgpu_bo *bo);
@@ -98,6 +101,7 @@ bool nvgpu_bo_is_vram(const struct nvgpu_bo *bo);
 bool nvgpu_bo_can_share(const struct nvgpu_bo *bo);
 bool nvgpu_bo_has_sysmem(const struct nvgpu_bo *bo);
 bool nvgpu_bo_cpu_mappable(const struct nvgpu_bo *bo);
+uint64_t nvgpu_bo_get_mmap_handle(struct nvgpu_bo *bo);
 uint8_t nvgpu_bo_get_gpu_page_shift(const struct nvgpu_bo *bo);
 int nvgpu_bo_ensure_ttm_populated(struct nvgpu_bo *bo);
 int nvgpu_bo_get_paddr_at(const struct nvgpu_bo *bo, uint64_t offset,
@@ -124,6 +128,7 @@ void nvgpu_bo_resv_add_excl_fence(struct nvgpu_bo *bo,
 int nvgpu_bo_resv_wait(struct nvgpu_bo *bo, bool intr, bool write,
     bool nowait);
 void nvgpu_bo_refresh_ttm_domain(struct nvgpu_bo *bo, uint32_t req_domain);
-void nvgpu_bo_free(struct drm_gem_object *obj);
+/* Release GEM's aggregate ownership after its own refcount reaches zero. */
+void nvgpu_bo_release_by_gem(struct drm_gem_object *obj);
 
 #endif /* _NVGPU_BO_H_ */

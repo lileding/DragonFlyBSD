@@ -85,7 +85,7 @@ nvgpu_bo_cpu_mappable(const struct nvgpu_bo *bo)
 	return (false);
 }
 
-static uint64_t
+uint64_t
 nvgpu_bo_get_mmap_handle(struct nvgpu_bo *bo)
 {
 	if (bo == NULL || !bo->ttm_backed || !nvgpu_bo_cpu_mappable(bo))
@@ -469,7 +469,7 @@ nvgpu_bo_add_bookkeeping_fence(struct nvgpu_bo *bo,
 
 	if (bo == NULL || fence == NULL)
 		return (EINVAL);
-	dma = nvgpu_fence_get_dma_ref(fence);
+	dma = nvgpu_fence_addref_as_dma(fence);
 	if (dma == NULL)
 		return (EINVAL);
 	error = nvgpu_bo_resv_add_shared_fence(bo, dma);
@@ -511,10 +511,11 @@ nvgpu_bo_resv_wait(struct nvgpu_bo *bo, bool intr, bool write, bool nowait)
 }
 
 static void
-nvgpu_bo_ttm_destroy(struct ttm_buffer_object *tbo)
+nvgpu_bo_finalize_from_ttm(struct ttm_buffer_object *tbo)
 {
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 
+	KASSERT(bo->refs == 0, ("finalizing referenced BO"));
 	KASSERT(LIST_EMPTY(&bo->vm_mappings),
 	    ("destroying BO with live GPUVA mappings"));
 	lwkt_token_uninit(&bo->vm_mapping_token);
@@ -594,8 +595,9 @@ nvgpu_bo_init_ttm(struct nvgpu_device *gpu, struct nvgpu_bo *bo,
 	acc_size = ttm_bo_dma_acc_size(bdev, size, sizeof(*bo));
 	error = ttm_bo_init_reserved(bdev, &bo->tbo, size, ttm_bo_type_device,
 	    &placement, page_alignment, &ctx, acc_size, NULL, NULL,
-	    nvgpu_bo_ttm_destroy);
+	    nvgpu_bo_finalize_from_ttm);
 	if (error == 0) {
+		bo->refs = 1;
 		nvgpu_bo_refresh_ttm_domain(bo, domain);
 		ttm_bo_unreserve(&bo->tbo);
 	}
@@ -641,24 +643,11 @@ nvgpu_bo_create(struct drm_device *ddev, uint64_t size, uint32_t domain,
 }
 
 void
-nvgpu_bo_free(struct drm_gem_object *obj)
+nvgpu_bo_release_by_gem(struct drm_gem_object *obj)
 {
-	struct nvgpu_bo *bo;
-
 	if (obj == NULL)
 		return;
-	bo = nvgpu_bo_from_gem(obj);
-	if (bo->ttm_backed) {
-		ttm_bo_put(&bo->tbo);
-		return;
-	}
-	(void)nvgpu_bo_resv_wait(bo, false, true, false);
-	KASSERT(LIST_EMPTY(&bo->vm_mappings),
-	    ("freeing BO with live GPUVA mappings"));
-	lwkt_token_uninit(&bo->vm_mapping_token);
-	reservation_object_fini(&bo->resv);
-	drm_gem_object_release(obj);
-	kfree(bo);
+	nvgpu_bo_release(nvgpu_bo_from_gem(obj));
 }
 
 int
@@ -751,28 +740,53 @@ int
 nvgpu_bo_lookup(struct drm_file *file, uint32_t handle, struct nvgpu_bo **out)
 {
 	struct drm_gem_object *obj;
+	struct nvgpu_bo *bo;
 
 	if (file == NULL || out == NULL)
 		return (EINVAL);
 	obj = drm_gem_object_lookup(file, handle);
 	if (obj == NULL)
 		return (ENOENT);
-	*out = nvgpu_bo_from_gem(obj);
+	bo = nvgpu_bo_from_gem(obj);
+	nvgpu_bo_addref(bo);
+	drm_gem_object_put_unlocked(obj);
+	*out = bo;
 	return (0);
 }
 
 void
 nvgpu_bo_addref(struct nvgpu_bo *bo)
 {
-	if (bo != NULL)
-		drm_gem_object_get(&bo->base);
+	u_int refs;
+
+	if (bo == NULL)
+		return;
+	refs = atomic_fetchadd_int(&bo->refs, 1);
+	KASSERT(refs != 0, ("adding reference to released BO"));
 }
 
 void
 nvgpu_bo_release(struct nvgpu_bo *bo)
 {
-	if (bo != NULL)
-		drm_gem_object_put_unlocked(&bo->base);
+	u_int refs;
+
+	if (bo == NULL)
+		return;
+	refs = atomic_fetchadd_int(&bo->refs, -1);
+	KASSERT(refs != 0, ("nvgpu BO refs underflow"));
+	if (refs != 1)
+		return;
+	if (bo->ttm_backed) {
+		ttm_bo_put(&bo->tbo);
+		return;
+	}
+	(void)nvgpu_bo_resv_wait(bo, false, true, false);
+	KASSERT(LIST_EMPTY(&bo->vm_mappings),
+	    ("releasing BO with live GPUVA mappings"));
+	lwkt_token_uninit(&bo->vm_mapping_token);
+	reservation_object_fini(&bo->resv);
+	drm_gem_object_release(&bo->base);
+	kfree(bo);
 }
 
 uint64_t

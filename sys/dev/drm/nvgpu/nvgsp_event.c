@@ -6,6 +6,7 @@
 
 #include "nvgsp_event.h"
 #include "nvgpu_intr.h"
+#include "nvgsp_disp.h"
 #include "nvgsp_priv.h"
 
 
@@ -79,6 +80,42 @@ nvgsp_event_log_only(void *priv, uint32_t fn, void *repv, uint32_t repc)
 }
 
 static int
+nvgsp_event_on_post_event(void *priv, uint32_t fn, void *repv, uint32_t repc)
+{
+	struct nvgsp_state *gsp = priv;
+	const uint8_t *data = repv;
+	uint32_t client_handle;
+	uint32_t event_handle;
+	uint32_t status;
+	uint32_t event_size;
+	int error;
+
+	(void)fn;
+	if (repc < 32)
+		return (EINVAL);
+	client_handle = *(const uint32_t *)(const void *)(data + 0);
+	event_handle = *(const uint32_t *)(const void *)(data + 4);
+	status = *(const uint32_t *)(const void *)(data + 20);
+	event_size = *(const uint32_t *)(const void *)(data + 24);
+	if (event_size != repc - 32)
+		return (EINVAL);
+	if (status != 0) {
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "GSP display event failed client=0x%x event=0x%x status=0x%x\n",
+		    client_handle, event_handle, status);
+		return (EIO);
+	}
+	/* eventData starts at byte 29; bytes 29..31 overlap header tail padding. */
+	error = nvgsp_disp_dispatch_event(gsp->gpu, client_handle, event_handle,
+	    data + 29, event_size);
+	if (error == ENOENT)
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "unhandled GSP event client=0x%x event=0x%x size=%u\n",
+		    client_handle, event_handle, event_size);
+	return (error == ENOENT ? 0 : error);
+}
+
+static int
 nvgsp_event_on_rc_triggered(void *priv, uint32_t fn, void *repv, uint32_t repc)
 {
 	struct nvgsp_state *gsp = priv;
@@ -133,7 +170,7 @@ nvgsp_event_init(struct nvgpu_device *gpu)
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1002, nvgsp_seq_handle_msg, gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1020, NULL, NULL);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x101c, NULL, NULL);
-	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1003, nvgsp_event_log_only, gsp);
+	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1003, nvgsp_event_on_post_event, gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1004, nvgsp_event_on_rc_triggered,
 	    gsp);
 	(void)nvgsp_rpc_add_msg_ntfy(gsp, 0x1005, nvgsp_event_log_only, gsp);

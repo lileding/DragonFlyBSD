@@ -7,8 +7,10 @@
  */
 
 #include "nvdrm_file.h"
+#include "nvdrm_kms.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
+#include "nvgpu_display.h"
 #include "nvgpu_proc.h"
 #include "nvgpu_unload.h"
 
@@ -99,9 +101,21 @@ nvdrm_file_postclose(struct drm_device *ddev __unused, struct drm_file *file_pri
 	_kfree(file, M_NVDRM_FILE);
 }
 
-/* DRM lastclose callback.  Display restore policy will be reattached here. */
+/* DRM lastclose callback.  Restore the internal console before returning. */
 void
-nvdrm_file_lastclose(struct drm_device *ddev __unused)
+nvdrm_file_lastclose(struct drm_device *ddev)
 {
-	nvgpu_log(NVGPU_LOG_DEBUG, "lastclose\n");
+	struct nvgpu_device *gpu = ddev != NULL ? ddev->dev_private : NULL;
+	int error;
+
+	if (gpu == NULL)
+		return;
+	error = nvgpu_display_disable_primary(gpu, 0);
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "lastclose primary retire failed error=%d\n", error);
+	error = nvdrm_kms_restore_console(gpu);
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "lastclose console restore failed error=%d\n", error);
 }

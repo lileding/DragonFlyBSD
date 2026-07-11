@@ -9,7 +9,6 @@
 #include "nvgpu_intr.h"
 
 #include <linux/dma-fence.h>
-#include <linux/dma-fence-chain.h>
 #include <sys/errno.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -28,27 +27,19 @@ struct nvgpu_fence {
 
 static MALLOC_DEFINE(M_NVGPU_FENCE, "nvgpu_fence", "nvgpu future fence");
 
-struct nvgpu_fence_callback {
-	struct dma_fence_cb cb;
-	nvgpu_fence_callback_t func;
-	void *arg;
-};
-
 static const char *nvgpu_fence_get_driver_name(struct dma_fence *fence);
 static const char *nvgpu_fence_get_timeline_name(struct dma_fence *fence);
 static bool nvgpu_fence_dma_is_signaled(struct dma_fence *fence);
 static signed long nvgpu_fence_dma_wait(struct dma_fence *fence, bool intr,
     signed long timeout);
-static void nvgpu_fence_drop(struct dma_fence *fence);
-static void nvgpu_fence_dma_callback(struct dma_fence *fence,
-    struct dma_fence_cb *cb);
+static void nvgpu_fence_finalize(struct dma_fence *fence);
 
 static const struct dma_fence_ops nvgpu_fence_ops = {
 	.get_driver_name = nvgpu_fence_get_driver_name,
 	.get_timeline_name = nvgpu_fence_get_timeline_name,
 	.signaled = nvgpu_fence_dma_is_signaled,
 	.wait = nvgpu_fence_dma_wait,
-	.release = nvgpu_fence_drop,
+	.release = nvgpu_fence_finalize,
 };
 
 static const char *
@@ -106,7 +97,7 @@ nvgpu_fence_get_timeline_name(struct dma_fence *fence)
 }
 
 static void
-nvgpu_fence_drop(struct dma_fence *fence)
+nvgpu_fence_finalize(struct dma_fence *fence)
 {
 	struct nvgpu_fence *nfence;
 
@@ -133,30 +124,8 @@ nvgpu_fence_create(struct nvgpu_device *gpu,
 	return (fence);
 }
 
-struct nvgpu_fence *
-nvgpu_fence_import_dma_ref(struct dma_fence *dma)
-{
-	struct dma_fence_chain *chain;
-	struct nvgpu_fence *fence;
-
-	if (dma == NULL)
-		return (NULL);
-	if (dma->ops == &nvgpu_fence_ops)
-		return (container_of(dma, struct nvgpu_fence, base));
-	chain = to_dma_fence_chain(dma);
-	if (chain != NULL && chain->fence != NULL &&
-	    chain->fence->ops == &nvgpu_fence_ops) {
-		fence = container_of(chain->fence, struct nvgpu_fence, base);
-		dma_fence_get(&fence->base);
-		dma_fence_put(dma);
-		return (fence);
-	}
-	dma_fence_put(dma);
-	return (NULL);
-}
-
 struct dma_fence *
-nvgpu_fence_get_dma_ref(struct nvgpu_fence *fence)
+nvgpu_fence_addref_as_dma(struct nvgpu_fence *fence)
 {
 	if (fence == NULL)
 		return (NULL);
@@ -193,21 +162,24 @@ nvgpu_fence_set_exec_producer(struct nvgpu_fence *gpu_complete,
 	gpu_complete->exec_producer = true;
 }
 
-struct nvgpu_fence *
-nvgpu_fence_hold_exec_wait(struct nvgpu_fence *gpu_complete,
+struct dma_fence *
+nvgpu_fence_hold_exec_wait(struct dma_fence *dma,
     uint32_t channel)
 {
+	struct nvgpu_fence *gpu_complete;
 	struct nvgpu_fence *wait;
 
-	if (gpu_complete == NULL)
+	if (dma == NULL)
 		return (NULL);
+	if (dma->ops != &nvgpu_fence_ops)
+		return (dma_fence_get(dma));
+	gpu_complete = container_of(dma, struct nvgpu_fence, base);
 	wait = gpu_complete;
 	if (gpu_complete->exec_producer &&
 	    gpu_complete->exec_channel == channel &&
 	    gpu_complete->exec_submit_fence != NULL)
 		wait = gpu_complete->exec_submit_fence;
-	nvgpu_fence_addref(wait);
-	return (wait);
+	return (dma_fence_get(&wait->base));
 }
 
 bool
@@ -226,26 +198,6 @@ nvgpu_fence_error(struct nvgpu_fence *fence)
 	if (fence == NULL)
 		return (0);
 	error = fence->base.error;
-	return (error < 0 ? -error : error);
-}
-
-int
-nvgpu_fence_add_callback(struct nvgpu_fence *fence,
-    nvgpu_fence_callback_t func, void *arg)
-{
-	struct nvgpu_fence_callback *cb;
-	int error;
-
-	if (fence == NULL || func == NULL)
-		return (EINVAL);
-	cb = kmalloc(sizeof(*cb), M_NVGPU_FENCE, M_WAITOK | M_ZERO);
-	cb->func = func;
-	cb->arg = arg;
-	error = dma_fence_add_callback(&fence->base, &cb->cb,
-	    nvgpu_fence_dma_callback);
-	if (error != 0) {
-		_kfree(cb, M_NVGPU_FENCE);
-	}
 	return (error < 0 ? -error : error);
 }
 
@@ -272,17 +224,4 @@ nvgpu_fence_wait(struct nvgpu_fence *fence, bool interruptible)
 		return ((int)-result);
 	error = nvgpu_fence_error(fence);
 	return (error);
-}
-
-static void
-nvgpu_fence_dma_callback(struct dma_fence *dma __unused,
-    struct dma_fence_cb *cb)
-{
-	struct nvgpu_fence_callback *callback;
-	struct nvgpu_fence *fence;
-
-	fence = container_of(dma, struct nvgpu_fence, base);
-	callback = container_of(cb, struct nvgpu_fence_callback, cb);
-	callback->func(fence, callback->arg);
-	_kfree(callback, M_NVGPU_FENCE);
 }

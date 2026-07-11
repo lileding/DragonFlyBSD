@@ -171,6 +171,11 @@ nvgsp_state_get_intr_table(struct nvgpu_device *gpu)
 		uint32_t vector = params->table[i].vector_nonstall;
 		uint32_t stall = params->table[i].vector_stall;
 
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "gsp intr[%u] engine=%u pmc=0x%08x stall=%u nonstall=%u\n",
+		    i, params->table[i].engine_idx,
+		    params->table[i].pmc_intr_mask, stall, vector);
+
 		if (vector != 0xffffffffu && vector / 32u < 8u)
 			gsp->gsp_nonstall_leaf_mask[vector / 32u] |=
 			    1u << (vector % 32u);
@@ -186,6 +191,15 @@ nvgsp_state_get_intr_table(struct nvgpu_device *gpu)
 	}
 	nvgpu_log(NVGPU_LOG_DEBUG, "gsp interrupt table entries=%u\n",
 	    params->table_len);
+	for (uint32_t leaf = 0; leaf < 8; leaf++) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "gsp intr leaf=%u nonstall=0x%08x stall=0x%08x "
+		    "gsp=0x%08x display=0x%08x\n", leaf,
+		    gsp->gsp_nonstall_leaf_mask[leaf],
+		    gsp->gsp_stall_leaf_mask[leaf],
+		    gsp->gsp_engine_leaf_mask[leaf],
+		    gsp->gsp_disp_leaf_mask[leaf]);
+	}
 	nvgsp_rm_complete_ctrl(&subdevice, reply);
 	return (0);
 }

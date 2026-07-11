@@ -23,6 +23,10 @@ struct nvgsp_vram_alloc *nvgsp_vram_alloc_gem(struct nvgpu_device *gpu,
 /* Release a GEM VRAM allocation returned by nvgsp_vram_alloc_gem(). */
 void nvgsp_vram_free_gem(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, void *owner);
+struct nvgsp_vram_alloc *nvgsp_vram_alloc_display(struct nvgpu_device *gpu,
+    uint64_t size, uint64_t align, void *owner);
+void nvgsp_vram_free_display(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc);
 struct drm_mm_node *nvgsp_vram_alloc_get_node(struct nvgsp_vram_alloc *alloc);
 struct nvgsp_vram_alloc *nvgsp_vram_alloc_from_node(struct drm_mm_node *node);
 void *nvgsp_vram_alloc_get_owner(struct nvgsp_vram_alloc *alloc);
@@ -32,8 +36,18 @@ int nvgsp_vram_alloc_map_bar1_scatter(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, uint64_t size, uint32_t pages);
 void nvgsp_vram_alloc_unmap_bar1_scatter(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc);
+int nvgsp_vram_alloc_map_bar1_range(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t size);
+void nvgsp_vram_alloc_unmap_bar1_range(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc);
+uint64_t nvgsp_vram_alloc_get_bar1_range(
+    const struct nvgsp_vram_alloc *alloc);
 uint64_t nvgsp_vram_alloc_bar1_gva(struct nvgsp_vram_alloc *alloc,
     unsigned long page_offset);
+uint32_t nvgsp_vram_alloc_read32(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t offset);
+void nvgsp_vram_alloc_write32(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t offset, uint32_t value);
 /* Allocate VRAM for channel instance memory. */
 int nvgsp_vram_alloc_channel_inst(struct nvgpu_device *gpu);
 /* Allocate VRAM for USERD submission pages. */

@@ -75,6 +75,11 @@ nvgsp_vram_free_alloc(struct nvgsp_state *gsp, struct nvgsp_vram_alloc *alloc)
 	if (gsp == NULL || alloc == NULL)
 		return;
 	nvgsp_vram_remove_alloc(gsp, alloc);
+	if (alloc->bar1_gva != 0) {
+		nvgsp_bar_unmap_bar1_existing_range(gsp, alloc->bar1_gva,
+		    alloc->bar1_size);
+		alloc->bar1_gva = 0;
+	}
 	if (alloc->bar1_page_gva != NULL) {
 		nvgsp_bar_unmap_bar1_existing_scatter(gsp, alloc->bar1_page_gva,
 		    alloc->bar1_page_count);
@@ -154,6 +159,21 @@ nvgsp_vram_free_gem(struct nvgpu_device *gpu, struct nvgsp_vram_alloc *alloc,
 	nvgsp_vram_free_alloc(nvgsp_state_get(gpu), alloc);
 }
 
+struct nvgsp_vram_alloc *
+nvgsp_vram_alloc_display(struct nvgpu_device *gpu, uint64_t size,
+    uint64_t align, void *owner)
+{
+	return (nvgsp_vram_alloc_with_kind(nvgsp_state_get(gpu), size, align,
+	    NVGSP_VRAM_DISPLAY_DATA, owner));
+}
+
+void
+nvgsp_vram_free_display(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc)
+{
+	nvgsp_vram_free_alloc(nvgsp_state_get(gpu), alloc);
+}
+
 struct drm_mm_node *
 nvgsp_vram_alloc_get_node(struct nvgsp_vram_alloc *alloc)
 {
@@ -229,6 +249,48 @@ nvgsp_vram_alloc_unmap_bar1_scatter(struct nvgpu_device *gpu,
 	alloc->bar1_size = 0;
 }
 
+int
+nvgsp_vram_alloc_map_bar1_range(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t size)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+	uint64_t gva;
+	int error;
+
+	if (gsp == NULL || alloc == NULL || size == 0 || size > alloc->size)
+		return (EINVAL);
+	if (alloc->bar1_page_gva != NULL)
+		return (EBUSY);
+	if (alloc->bar1_gva != 0)
+		return (alloc->bar1_size == size ? 0 : EINVAL);
+	error = nvgsp_bar_map_bar1_existing_range(gsp, alloc->paddr, size, &gva);
+	if (error != 0)
+		return (error == ENOSPC ? EAGAIN : error);
+	alloc->bar1_gva = gva;
+	alloc->bar1_size = size;
+	return (0);
+}
+
+void
+nvgsp_vram_alloc_unmap_bar1_range(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+
+	if (gsp == NULL || alloc == NULL || alloc->bar1_gva == 0)
+		return;
+	nvgsp_bar_unmap_bar1_existing_range(gsp, alloc->bar1_gva,
+	    alloc->bar1_size);
+	alloc->bar1_gva = 0;
+	alloc->bar1_size = 0;
+}
+
+uint64_t
+nvgsp_vram_alloc_get_bar1_range(const struct nvgsp_vram_alloc *alloc)
+{
+	return (alloc != NULL ? alloc->bar1_gva : 0);
+}
+
 uint64_t
 nvgsp_vram_alloc_bar1_gva(struct nvgsp_vram_alloc *alloc,
     unsigned long page_offset)
@@ -237,6 +299,35 @@ nvgsp_vram_alloc_bar1_gva(struct nvgsp_vram_alloc *alloc,
 	    page_offset >= alloc->bar1_page_count)
 		return (0);
 	return (alloc->bar1_page_gva[page_offset]);
+}
+
+uint32_t
+nvgsp_vram_alloc_read32(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t offset)
+{
+	uint64_t gva;
+
+	if (alloc == NULL || offset + sizeof(uint32_t) > alloc->bar1_size)
+		return (0xffffffffu);
+	gva = nvgsp_vram_alloc_bar1_gva(alloc, offset / PAGE_SIZE);
+	if (gva == 0)
+		return (0xffffffffu);
+	return (nvgsp_bar_rd32_bar1(nvgsp_state_get(gpu),
+	    gva + offset % PAGE_SIZE));
+}
+
+void
+nvgsp_vram_alloc_write32(struct nvgpu_device *gpu,
+    struct nvgsp_vram_alloc *alloc, uint64_t offset, uint32_t value)
+{
+	uint64_t gva;
+
+	if (alloc == NULL || offset + sizeof(uint32_t) > alloc->bar1_size)
+		return;
+	gva = nvgsp_vram_alloc_bar1_gva(alloc, offset / PAGE_SIZE);
+	if (gva != 0)
+		nvgsp_bar_wr32_bar1(nvgsp_state_get(gpu),
+		    gva + offset % PAGE_SIZE, value);
 }
 
 uint64_t

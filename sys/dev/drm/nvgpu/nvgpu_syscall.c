@@ -75,7 +75,7 @@ nvgpu_syscall_channel_free(struct nvgpu_proc *proc,
 {
 	struct drm_nouveau_channel_free *req = data;
 
-	return (nvgpu_channel_free(proc, req->channel));
+	return (nvgpu_channel_release_by_id(proc, req->channel));
 }
 
 int
