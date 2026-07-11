@@ -795,7 +795,12 @@ static void
 ttm_bo_vm_dtor(void *handle)
 {
 	struct ttm_buffer_object *bo = handle;
+	int ret;
 
+	ret = ttm_bo_reserve(bo, false, false, NULL);
+	KKASSERT(ret == 0);
+	ttm_bo_unmap_virtual(bo);
+	ttm_bo_unreserve(bo);
 	ttm_bo_unref(&bo);
 }
 
@@ -863,38 +868,32 @@ EXPORT_SYMBOL(ttm_bo_mmap_single);
 #ifdef __DragonFly__
 void ttm_bo_release_mmap(struct ttm_buffer_object *bo);
 
+/* Remove CPU mappings from real TTM pages while the BO and io manager are locked. */
 void
 ttm_bo_release_mmap(struct ttm_buffer_object *bo)
 {
-	vm_object_t vm_obj;
-
-	vm_obj = cdev_pager_lookup(bo);
-	if (vm_obj == NULL)
-		return;
-
-	VM_OBJECT_LOCK(vm_obj);
-#if 1
-	vm_object_page_remove(vm_obj, 0, 0, false);
-#else
-	/*
-	 * XXX REMOVED
-	 *
-	 * We no longer manage the vm pages inside the MGTDEVICE
-	 * objects.
-	 */
 	vm_page_t m;
-	int i;
+	unsigned long pfn;
 
-	for (i = 0; i < bo->num_pages; i++) {
-		m = vm_page_lookup_busy_wait(vm_obj, i, TRUE, "ttm_unm");
-		if (m == NULL)
+	reservation_object_assert_held(bo->resv);
+	for (unsigned long i = 0; i < bo->num_pages; i++) {
+		if (bo->mem.bus.is_iomem) {
+			pfn = ttm_bo_io_mem_pfn(bo, i);
+			if (pfn == 0)
+				continue;
+			m = vm_phys_fictitious_to_vm_page((vm_paddr_t)pfn << PAGE_SHIFT);
+		} else {
+			if (bo->ttm == NULL || bo->ttm->pages == NULL)
+				return;
+			m = (vm_page_t)bo->ttm->pages[i];
+		}
+		if (m == NULL ||
+		    (pmap_mapped_sync(m) & (PG_MAPPED | PG_WRITEABLE)) == 0)
 			continue;
-		cdev_pager_free_page(vm_obj, m);
+		vm_page_busy_wait(m, TRUE, "ttmunm");
+		vm_page_protect(m, VM_PROT_NONE);
+		vm_page_wakeup(m);
 	}
-#endif
-	VM_OBJECT_UNLOCK(vm_obj);
-
-	vm_object_deallocate(vm_obj);
 }
 #endif
 
