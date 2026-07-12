@@ -6,11 +6,13 @@
 
 #include "nvdrm_nouveau_abi.h"
 #include "nvgpu_channel.h"
+#include "nvgpu_channel_internal.h"
 #include "nvgpu_chip.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_nvif.h"
 #include "nvgpu_proc.h"
+#include "nvgpu_proc_internal.h"
 #include "nvgsp_state.h"
 
 #include <sys/errno.h>

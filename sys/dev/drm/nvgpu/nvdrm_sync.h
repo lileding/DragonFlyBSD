@@ -9,13 +9,12 @@
 
 #include <sys/stdint.h>
 
-struct dma_fence;
 struct drm_file;
 struct nvgpu_fence;
 struct nvdrm_sync_signal;
 
 struct nvdrm_sync_wait_set {
-	struct dma_fence **fences;
+	struct nvgpu_fence **fences;
 	uint32_t count;
 };
 
@@ -24,22 +23,38 @@ struct nvdrm_sync_signal_set {
 	uint32_t count;
 };
 
-/* Resolve userspace wait syncobjs into polymorphic dma_fence references. */
+/*
+ * Resolve userspace wait syncobjs into owned native fence references.
+ *
+ * On success set owns every fence and must be passed to cleanup_waits().
+ * The dma-fence to native-fence cast is confined to this DRM boundary.
+ */
 int nvdrm_sync_collect_wait_fences(struct drm_file *file, uint32_t count,
     uint64_t wait_ptr, struct nvdrm_sync_wait_set *set);
 
-/* Resolve userspace signal handles and prepare timeline chain nodes. */
+/*
+ * Resolve signal handles and prepare publication of one borrowed done fence.
+ *
+ * On success set owns all prepared DRM references.  Publishing or cleanup
+ * consumes that state; neither operation consumes the caller's done reference.
+ */
 int nvdrm_sync_prepare_signals(struct drm_file *file, uint32_t count,
     uint64_t sig_ptr, struct nvgpu_fence *done_fence,
     struct nvdrm_sync_signal_set *set);
 
-/* Publish prepared signal handles after the future is ready for submission. */
+/* Publish all prepared binary/timeline syncobj points without consuming set. */
 void nvdrm_sync_publish_signals(struct nvdrm_sync_signal_set *set);
 
-/* Drop unpublished signal resources after an error. */
+/* Release every prepared signal resource and reset set to empty. */
 void nvdrm_sync_cleanup_signals(struct nvdrm_sync_signal_set *set);
 
-/* Drop wait fence references collected for a syscall. */
+/* Release every owned native wait fence and reset set to empty. */
 void nvdrm_sync_cleanup_waits(struct nvdrm_sync_wait_set *set);
+
+/*
+ * Wait interruptibly for one borrowed native fence at the DRM boundary.
+ * Returns zero after successful completion or a positive wait/producer errno.
+ */
+int nvdrm_sync_wait_fence(struct nvgpu_fence *fence);
 
 #endif /* _NVDRM_SYNC_H_ */

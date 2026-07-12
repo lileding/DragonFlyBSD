@@ -44,6 +44,17 @@ struct nvgsp_vmm_pte_info {
 	uint8_t has_pt;
 };
 
+/*
+ * VMM operation contract
+ *
+ * Public operations serialize their backend tracker with the VMM token and
+ * may sleep while allocating page tables.  Functions ending in _noflush update
+ * page-table state without a final GMMU invalidate; callers batch those calls
+ * and finish with nvgsp_vmm_flush() or nvgsp_vmm_flush_dirty().  Prepared
+ * commit functions consume state allocated by their matching prepare function;
+ * abort/fini functions consume prepared state when commit is not performed.
+ */
+
 /* Create kernel/GSP GPUVA state before channels. */
 int nvgsp_vmm_init_kernel(struct nvgpu_device *gpu);
 /* Destroy kernel/GSP GPUVA state after channels stop. */
@@ -57,6 +68,7 @@ int nvgsp_vmm_map_submit_pages(struct nvgpu_device *gpu);
 /* Map a sysmem range and flush the VMM before returning. */
 int nvgsp_vmm_map_sysmem(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size);
+/* Map already prepared sysmem PTEs without the final GMMU flush. */
 int nvgsp_vmm_map_sysmem_noflush(struct nvgsp_vmm *vmm, uint64_t va,
     vm_paddr_t paddr, uint64_t size);
 int nvgsp_vmm_map_sysmem_bo_prepared_noflush(struct nvgsp_vmm *vmm,
@@ -68,6 +80,7 @@ int nvgsp_vmm_map_sysmem_paddrs_page_prepared_noflush(
 /* Map a VRAM range and flush the VMM before returning. */
 int nvgsp_vmm_map_vram(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size, uint8_t kind);
+/* Map or promote prepared VRAM/sysmem PTEs without the final GMMU flush. */
 int nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm,
     uint64_t va, uint64_t paddr, uint64_t size, uint8_t priv,
     uint8_t ro, uint8_t kind);
@@ -85,6 +98,7 @@ int nvgsp_vmm_promote_sysmem_2m_noflush(struct nvgsp_vmm *vmm,
     uint8_t kind);
 /* Clear a GPUVA range and flush the VMM before returning. */
 int nvgsp_vmm_unmap(struct nvgsp_vmm *vmm, uint64_t va, uint64_t size);
+/* Validate or clear prepared page-table ranges without the final flush. */
 int nvgsp_vmm_unmap_valid_page_noflush(struct nvgsp_vmm *vmm,
     uint64_t va, uint64_t size, uint8_t page_shift);
 int nvgsp_vmm_unmap_valid_preserve_page_noflush(struct nvgsp_vmm *vmm,
@@ -106,6 +120,8 @@ int nvgsp_vmm_ensure_pd0_range(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t size);
 int nvgsp_vmm_check_prepared_pt_range(struct nvgsp_vmm *vmm,
     uint64_t va, uint64_t size, uint8_t page_shift);
+
+/* Prepare, validate, commit, or abort one 2 MiB VRAM split. */
 int nvgsp_vmm_prepare_split_vram_2m(struct nvgsp_vmm *vmm,
     uint64_t va, struct nvgsp_vmm_user_pt **pt);
 int nvgsp_vmm_check_split_vram_2m(struct nvgsp_vmm *vmm,
@@ -114,6 +130,8 @@ int nvgsp_vmm_commit_split_vram_2m_noflush(struct nvgsp_vmm *vmm,
     uint64_t va, struct nvgsp_vmm_user_pt *pt);
 void nvgsp_vmm_abort_split_vram_2m(struct nvgsp_vmm *vmm,
     struct nvgsp_vmm_user_pt *pt);
+
+/* Prepare and commit sparse metadata; abort consumes an uncommitted region. */
 int nvgsp_vmm_has_sparse_region(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t size);
 int nvgsp_vmm_prepare_sparse_region_page(struct nvgsp_vmm *vmm,
@@ -126,6 +144,11 @@ int nvgsp_vmm_check_sparse_regions_commit(struct nvgsp_vmm *vmm,
     uint64_t replace_addr, uint64_t replace_size);
 void nvgsp_vmm_abort_sparse_region(struct nvgsp_vmm *vmm,
     struct nvgsp_vmm_sparse_region *region);
+
+/*
+ * Build and consume sparse-unmap plans.  prepare returns an owned plan;
+ * commit updates hardware/tracker state, and fini always releases the plan.
+ */
 int nvgsp_vmm_prepare_unmap_sparse_range_page(struct nvgsp_vmm *vmm,
     uint64_t va, uint64_t size, uint8_t clear_page_shift,
     int preserve_target_pts, struct nvgsp_vmm_sparse_unmap_plan **plan);
@@ -151,6 +174,8 @@ int nvgsp_vmm_check_unmap_sparse_range_prepared(struct nvgsp_vmm *vmm,
     uint64_t size, uint8_t page_shift);
 void nvgsp_vmm_fini_unmap_sparse_range(struct nvgsp_vmm *vmm,
     struct nvgsp_vmm_sparse_unmap_plan *plan);
+
+/* Publish pending PTE writes globally or only for the supplied dirty ranges. */
 void nvgsp_vmm_flush(struct nvgsp_vmm *vmm);
 void nvgsp_vmm_flush_dirty(struct nvgsp_vmm *vmm,
     const struct nvgsp_vmm_dirty_set *dirty);

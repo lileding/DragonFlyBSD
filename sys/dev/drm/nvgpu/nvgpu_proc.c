@@ -4,63 +4,65 @@
  * Per-open GPU process boundary.
  */
 
-#include "nvgpu_proc.h"
 #include "nvgpu_channel.h"
+#include "nvgpu_channel_internal.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_fence.h"
 #include "nvgpu_future.h"
+#include "nvgpu_future_internal.h"
+#include "nvgpu_intr_internal.h"
+#include "nvgpu_proc.h"
+#include "nvgpu_proc_internal.h"
+#include "nvgpu_sched.h"
 #include "nvgpu_unload.h"
 #include "nvgpu_vm.h"
 
+#include <linux/reservation.h>
 #include <machine/atomic.h>
-#include <sys/param.h>
+#include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
-#include <stdbool.h>
-
-#include <linux/dma-fence.h>
-#include <linux/reservation.h>
+#include <sys/param.h>
+#include <sys/systm.h>
 
 static MALLOC_DEFINE(M_NVGPU_PROC, "nvgpu_proc", "nvgpu process state");
+static MALLOC_DEFINE(M_NVGPU_EXEC, "nvgpu_exec", "nvgpu exec future");
 
-struct nvgpu_proc_gpu_fence {
-	TAILQ_ENTRY(nvgpu_proc_gpu_fence) link;
-	struct nvgpu_fence *fence;
-	uint32_t channel_id;
+struct nvgpu_proc_exec_record {
+	TAILQ_ENTRY(nvgpu_proc_exec_record) link;
+	struct nvgpu_fence *done;
+	struct nvgpu_fence *submitted;
+	u_int channel_id;
 };
-TAILQ_HEAD(nvgpu_proc_gpu_fence_list, nvgpu_proc_gpu_fence);
-
-struct nvgpu_gpu_complete_future {
-	struct nvgpu_future base;
-	struct nvgpu_proc_gpu_fence *proc_fence;
-	int gpu_error;
-};
-
-struct nvgpu_gpu_complete_callback {
-	struct dma_fence_cb cb;
-	struct dma_fence *fence;
-	struct nvgpu_gpu_complete_future *complete;
-};
+TAILQ_HEAD(nvgpu_proc_exec_list, nvgpu_proc_exec_record);
 
 struct nvgpu_proc {
-	struct nvgpu_device *gpu;
+	struct nvgpu_device *device;
 	struct lwkt_token token;
-	uint32_t refs;
+	volatile u_int refs;
 	struct nvgpu_channel_list channels;
-	struct nvgpu_proc_gpu_fence_list gpu_fences;
-	struct nvgpu_fence *last_bind_fence;
+	struct nvgpu_proc_exec_list execs;
+	struct nvgpu_fence *last_bind;
 	struct reservation_object vm_resv;
 	struct nvgpu_vm *vm;
-	bool shutdown;
+};
+
+struct nvgpu_exec_future {
+	struct nvgpu_future base;
+	struct nvgpu_proc *proc;
+	struct nvgpu_channel *channel;
+	struct nvgpu_proc_exec_record record;
+	struct nvgpu_fence *done;
+	struct nvgpu_fence *submitted;
+	struct nvgpu_sema sema;
+	struct nvgpu_channel_push *pushes;
+	size_t push_count;
 };
 
 static void nvgpu_proc_finalize(struct nvgpu_proc *proc);
-static struct nvgpu_future_result nvgpu_proc_gpu_complete_poll(
-    struct nvgpu_future *future);
-static void nvgpu_proc_gpu_complete_destroy(struct nvgpu_future *future);
-static void nvgpu_proc_gpu_complete_cb(struct dma_fence *fence,
-    struct dma_fence_cb *cb);
+static struct nvgpu_future_result nvgpu_proc_poll_exec(
+	struct nvgpu_future *future);
 
 void
 nvgpu_proc_lock(struct nvgpu_proc *proc)
@@ -77,58 +79,26 @@ nvgpu_proc_unlock(struct nvgpu_proc *proc)
 struct nvgpu_device *
 nvgpu_proc_get_device(struct nvgpu_proc *proc)
 {
-	if (proc == NULL)
-		return (NULL);
-	return (proc->gpu);
+	return (proc != NULL ? proc->device : NULL);
 }
 
 struct nvgpu_channel_list *
 nvgpu_proc_get_channels(struct nvgpu_proc *proc)
 {
-	if (proc == NULL)
-		return (NULL);
-	return (&proc->channels);
+	return (proc != NULL ? &proc->channels : NULL);
 }
 
 struct nvgpu_vm *
 nvgpu_proc_get_vm(struct nvgpu_proc *proc)
 {
-	if (proc == NULL)
-		return (NULL);
-	return (proc->vm);
+	return (proc != NULL ? proc->vm : NULL);
 }
 
 void
 nvgpu_proc_set_vm(struct nvgpu_proc *proc, struct nvgpu_vm *vm)
 {
-	if (proc == NULL)
-		return;
-	proc->vm = vm;
-}
-
-int
-nvgpu_proc_create(struct nvgpu_device *gpu, struct nvgpu_proc **procp)
-{
-	struct nvgpu_proc *proc;
-
-	if (gpu == NULL || procp == NULL)
-		return (EINVAL);
-
-	proc = kmalloc(sizeof(*proc), M_NVGPU_PROC, M_WAITOK | M_ZERO);
-
-	proc->gpu = gpu;
-	lwkt_token_init(&proc->token, "nvgprc");
-	proc->refs = 1;
-	TAILQ_INIT(&proc->channels);
-	TAILQ_INIT(&proc->gpu_fences);
-	proc->last_bind_fence = NULL;
-	reservation_object_init(&proc->vm_resv);
-	proc->vm = NULL;
-	proc->shutdown = false;
-
-	*procp = proc;
-	nvgpu_log(NVGPU_LOG_DEBUG, "proc created proc=%p\n", proc);
-	return (0);
+	if (proc != NULL)
+		proc->vm = vm;
 }
 
 struct reservation_object *
@@ -137,310 +107,262 @@ nvgpu_proc_get_vm_resv(struct nvgpu_proc *proc)
 	return (proc != NULL ? &proc->vm_resv : NULL);
 }
 
-void
-nvgpu_proc_stop(struct nvgpu_proc *proc)
+int
+nvgpu_proc_create(struct nvgpu_device *device, struct nvgpu_proc **result)
 {
-	if (proc == NULL)
-		return;
+	struct nvgpu_proc *proc;
 
-	lwkt_gettoken(&proc->token);
-	proc->shutdown = true;
-	lwkt_reltoken(&proc->token);
-	nvgpu_log(NVGPU_LOG_DEBUG, "proc stop requested proc=%p\n", proc);
-	nvgpu_proc_release(proc);
+	if (device == NULL || result == NULL)
+		return (EINVAL);
+	proc = kmalloc(sizeof(*proc), M_NVGPU_PROC, M_WAITOK | M_ZERO);
+	proc->device = device;
+	proc->refs = 1;
+	lwkt_token_init(&proc->token, "nvgprc");
+	TAILQ_INIT(&proc->channels);
+	TAILQ_INIT(&proc->execs);
+	reservation_object_init(&proc->vm_resv);
+	*result = proc;
+	nvgpu_log(NVGPU_LOG_DEBUG, "proc created proc=%p\n", proc);
+	return (0);
 }
 
 void
-nvgpu_proc_hold(struct nvgpu_proc *proc)
+nvgpu_proc_addref(struct nvgpu_proc *proc)
 {
-	if (proc == NULL)
-		return;
-	lwkt_gettoken(&proc->token);
-	proc->refs++;
-	lwkt_reltoken(&proc->token);
+	if (proc != NULL)
+		atomic_fetchadd_int(&proc->refs, 1);
 }
 
 void
 nvgpu_proc_release(struct nvgpu_proc *proc)
 {
-	bool destroy = false;
+	u_int refs;
 
 	if (proc == NULL)
 		return;
-	lwkt_gettoken(&proc->token);
-	KASSERT(proc->refs > 0, ("nvgpu proc refs underflow"));
-	proc->refs--;
-	if (proc->shutdown && proc->refs == 0)
-		destroy = true;
-	lwkt_reltoken(&proc->token);
-	if (destroy)
+	refs = atomic_fetchadd_int(&proc->refs, -1);
+	KASSERT(refs != 0, ("nvgpu proc refs underflow"));
+	if (refs == 1)
 		nvgpu_proc_finalize(proc);
 }
 
 int
-nvgpu_proc_register_exec(struct nvgpu_proc *proc,
-    struct nvgpu_fence *gpu_complete_fence, uint32_t channel_id,
-    struct nvgpu_fence **bind_wait_fence, struct nvgpu_channel **channelp)
+nvgpu_proc_spawn(struct nvgpu_proc *proc, struct nvgpu_proc_exec *args)
 {
-	struct nvgpu_gpu_complete_callback *callback;
-	struct nvgpu_gpu_complete_future *complete;
-	struct dma_fence *dma;
-	struct nvgpu_proc_gpu_fence *proc_fence;
-	struct nvgpu_channel *channel;
-	struct nvgpu_fence *done_fence;
+	struct nvgpu_exec_future *exec;
+	struct nvgpu_proc_exec_record *record;
+	struct nvgpu_fence **waits;
+	struct nvgpu_fence *wait;
+	size_t wait_count;
 	int error;
 
-	if (proc == NULL || gpu_complete_fence == NULL ||
-	    bind_wait_fence == NULL || channelp == NULL)
+	if (proc == NULL || args == NULL || args->done == NULL ||
+	    (args->push_count != 0 && args->pushes == NULL) ||
+	    (args->wait_count != 0 && args->waits == NULL) ||
+	    args->push_count > NVGPU_CHANNEL_GPFIFO_ENTRIES - 2)
 		return (EINVAL);
-	*bind_wait_fence = NULL;
-	*channelp = NULL;
-	proc_fence = kmalloc(sizeof(*proc_fence), M_NVGPU_PROC,
-	    M_WAITOK | M_ZERO);
-	complete = kmalloc(sizeof(*complete), M_NVGPU_PROC,
-	    M_WAITOK | M_ZERO);
-	callback = kmalloc(sizeof(*callback), M_NVGPU_PROC,
-	    M_WAITOK | M_ZERO);
-	done_fence = nvgpu_fence_create(proc->gpu, "gpu-complete-cleanup");
-	if (done_fence == NULL) {
-		_kfree(callback, M_NVGPU_PROC);
-		_kfree(complete, M_NVGPU_PROC);
-		_kfree(proc_fence, M_NVGPU_PROC);
+	for (size_t i = 0; i < args->push_count; i++) {
+		if ((args->pushes[i].flags & ~NVGPU_CHANNEL_PUSH_NO_PREFETCH) != 0 ||
+		    ((args->pushes[i].va | args->pushes[i].va_len) & 3) != 0 ||
+		    args->pushes[i].va_len == 0 ||
+		    args->pushes[i].va_len >= (1u << 23))
+			return (EINVAL);
+	}
+	for (size_t i = 0; i < args->wait_count; i++) {
+		if (args->waits[i] == NULL)
+			return (EINVAL);
+	}
+
+	exec = kmalloc(sizeof(*exec), M_NVGPU_EXEC, M_WAITOK | M_ZERO);
+	if (args->push_count != 0) {
+		exec->pushes = kmalloc(args->push_count * sizeof(*exec->pushes),
+		    M_NVGPU_EXEC, M_WAITOK);
+		memcpy(exec->pushes, args->pushes,
+		    args->push_count * sizeof(*exec->pushes));
+	}
+	waits = kmalloc((args->wait_count + 1) * sizeof(*waits),
+	    M_NVGPU_EXEC, M_WAITOK | M_ZERO);
+	exec->base.poll = nvgpu_proc_poll_exec;
+	exec->proc = proc;
+	exec->done = args->done;
+	exec->submitted = nvgpu_fence_create();
+	if (exec->submitted == NULL) {
+		_kfree(waits, M_NVGPU_EXEC);
+		if (exec->pushes != NULL)
+			_kfree(exec->pushes, M_NVGPU_EXEC);
+		_kfree(exec, M_NVGPU_EXEC);
 		return (ENOMEM);
 	}
-	proc_fence->fence = gpu_complete_fence;
-	proc_fence->channel_id = channel_id;
-	nvgpu_fence_addref(gpu_complete_fence);
-	complete->base.poll = nvgpu_proc_gpu_complete_poll;
-	complete->base.destroy = nvgpu_proc_gpu_complete_destroy;
-	complete->base.proc = proc;
-	complete->base.done_fence = done_fence;
-	complete->proc_fence = proc_fence;
-	nvgpu_proc_hold(proc);
-	callback->fence = nvgpu_fence_addref_as_dma(gpu_complete_fence);
-	callback->complete = complete;
+	exec->push_count = args->push_count;
+	exec->record.done = exec->done;
+	exec->record.submitted = exec->submitted;
+	exec->record.channel_id = args->channel_id;
+	nvgpu_proc_addref(proc);
+	nvgpu_fence_addref(exec->done);
 
-	lwkt_gettoken(&proc->token);
-	if (proc->shutdown) {
-		lwkt_reltoken(&proc->token);
-		dma_fence_put(callback->fence);
-		_kfree(callback, M_NVGPU_PROC);
-		nvgpu_fence_release(gpu_complete_fence);
-		complete->proc_fence = NULL;
-		nvgpu_future_finish(&complete->base, ENODEV);
-		_kfree(proc_fence, M_NVGPU_PROC);
-		return (ENODEV);
+	nvgpu_proc_lock(proc);
+	exec->channel = nvgpu_channel_borrow_by_id_locked(proc, args->channel_id);
+	if (exec->channel == NULL) {
+		nvgpu_proc_unlock(proc);
+		error = ENOENT;
+		goto fail;
 	}
-	channel = nvgpu_channel_borrow_by_id_locked(proc, channel_id);
-	if (channel == NULL) {
-		lwkt_reltoken(&proc->token);
-		dma_fence_put(callback->fence);
-		_kfree(callback, M_NVGPU_PROC);
-		nvgpu_fence_release(gpu_complete_fence);
-		complete->proc_fence = NULL;
-		nvgpu_future_finish(&complete->base, ENOENT);
-		_kfree(proc_fence, M_NVGPU_PROC);
-		return (ENOENT);
+	wait_count = 0;
+	for (size_t i = 0; i < args->wait_count; i++) {
+		wait = args->waits[i];
+		TAILQ_FOREACH(record, &proc->execs, link) {
+			if (record->channel_id == args->channel_id &&
+			    record->done == wait) {
+				wait = record->submitted;
+				break;
+			}
+		}
+		waits[wait_count++] = wait;
 	}
-	if (proc->last_bind_fence != NULL) {
-		nvgpu_fence_addref(proc->last_bind_fence);
-		*bind_wait_fence = proc->last_bind_fence;
-	}
-	TAILQ_INSERT_TAIL(&proc->gpu_fences, proc_fence, link);
-	*channelp = channel;
-	lwkt_reltoken(&proc->token);
-	error = dma_fence_add_callback(callback->fence, &callback->cb,
-	    nvgpu_proc_gpu_complete_cb);
+	if (proc->last_bind != NULL)
+		waits[wait_count++] = proc->last_bind;
+	nvgpu_channel_register_exec_locked(exec->channel);
+	TAILQ_INSERT_TAIL(&proc->execs, &exec->record, link);
+	error = nvgpu_future_spawn(&exec->base, waits, wait_count);
 	if (error != 0) {
-		complete->gpu_error = callback->fence->error;
-		if (complete->gpu_error < 0)
-			complete->gpu_error = -complete->gpu_error;
-		dma_fence_put(callback->fence);
-		_kfree(callback, M_NVGPU_PROC);
-		nvgpu_future_wake(&complete->base);
+		TAILQ_REMOVE(&proc->execs, &exec->record, link);
+		KASSERT(!nvgpu_channel_complete_exec_locked(proc, exec->channel),
+		    ("failed EXEC spawn retired an active channel"));
 	}
-	dma = nvgpu_fence_addref_as_dma(gpu_complete_fence);
-	KASSERT(dma != NULL, ("EXEC completion fence has no dma fence"));
-	reservation_object_lock(&proc->vm_resv, NULL);
-	reservation_object_add_excl_fence(&proc->vm_resv, dma);
-	reservation_object_unlock(&proc->vm_resv);
-	dma_fence_put(dma);
-	return (0);
-}
+	nvgpu_proc_unlock(proc);
+	_kfree(waits, M_NVGPU_EXEC);
+	waits = NULL;
+	if (error == 0) {
+		reservation_object_lock(&proc->vm_resv, NULL);
+		reservation_object_add_excl_fence(&proc->vm_resv,
+		    &args->done->dma);
+		reservation_object_unlock(&proc->vm_resv);
+		return (0);
+	}
 
-int
-nvgpu_proc_register_channel_release(struct nvgpu_proc *proc,
-    uint32_t channel_id, struct nvgpu_channel **channelp,
-    struct nvgpu_fence **wait_fences, uint32_t capacity,
-    uint32_t *wait_count)
-{
-	struct nvgpu_proc_gpu_fence *gpu_fence;
-	struct nvgpu_channel *channel;
-	uint32_t required;
-	uint32_t count;
-
-	if (proc == NULL || channelp == NULL || wait_count == NULL ||
-	    (capacity != 0 && wait_fences == NULL))
-		return (EINVAL);
-	*channelp = NULL;
-	lwkt_gettoken(&proc->token);
-	if (proc->shutdown) {
-		lwkt_reltoken(&proc->token);
-		return (ENODEV);
-	}
-	channel = nvgpu_channel_borrow_by_id_locked(proc, channel_id);
-	if (channel == NULL) {
-		lwkt_reltoken(&proc->token);
-		return (ENOENT);
-	}
-	required = 0;
-	TAILQ_FOREACH(gpu_fence, &proc->gpu_fences, link) {
-		if (gpu_fence->channel_id == channel_id)
-			required++;
-	}
-	if (capacity < required) {
-		*wait_count = required;
-		lwkt_reltoken(&proc->token);
-		return (ENOSPC);
-	}
-	count = 0;
-	TAILQ_FOREACH(gpu_fence, &proc->gpu_fences, link) {
-		if (gpu_fence->channel_id != channel_id)
-			continue;
-		nvgpu_fence_addref(gpu_fence->fence);
-		wait_fences[count++] = gpu_fence->fence;
-	}
-	nvgpu_channel_close_locked(channel);
-	*channelp = channel;
-	*wait_count = count;
-	lwkt_reltoken(&proc->token);
-	return (0);
+fail:
+	(void)nvgpu_fence_signal(exec->submitted, error);
+	(void)nvgpu_fence_signal(exec->done, error);
+	nvgpu_fence_release(exec->submitted);
+	nvgpu_fence_release(exec->done);
+	nvgpu_proc_release(proc);
+	_kfree(waits, M_NVGPU_EXEC);
+	if (exec->pushes != NULL)
+		_kfree(exec->pushes, M_NVGPU_EXEC);
+	_kfree(exec, M_NVGPU_EXEC);
+	return (error);
 }
 
 static struct nvgpu_future_result
-nvgpu_proc_gpu_complete_poll(struct nvgpu_future *future)
+nvgpu_proc_poll_exec(struct nvgpu_future *future)
 {
-	struct nvgpu_gpu_complete_future *complete;
-	struct nvgpu_future_result result;
-	struct nvgpu_proc_gpu_fence *proc_fence;
+	struct nvgpu_channel_submit_args submit;
+	struct nvgpu_exec_future *exec;
 	struct nvgpu_proc *proc;
-
-	complete = (struct nvgpu_gpu_complete_future *)future;
-	proc = future->proc;
-	proc_fence = complete->proc_fence;
-	lwkt_gettoken(&proc->token);
-	TAILQ_REMOVE(&proc->gpu_fences, proc_fence, link);
-	lwkt_reltoken(&proc->token);
-	complete->proc_fence = NULL;
-	nvgpu_fence_release(proc_fence->fence);
-	_kfree(proc_fence, M_NVGPU_PROC);
-	result.ready = true;
-	result.result = complete->gpu_error;
-	return (result);
-}
-
-static void
-nvgpu_proc_gpu_complete_destroy(struct nvgpu_future *future)
-{
-	struct nvgpu_gpu_complete_future *complete;
-
-	complete = (struct nvgpu_gpu_complete_future *)future;
-	KASSERT(complete->proc_fence == NULL,
-	    ("destroying GPU-complete future before proc cleanup"));
-	_kfree(complete, M_NVGPU_PROC);
-}
-
-static void
-nvgpu_proc_gpu_complete_cb(struct dma_fence *fence,
-    struct dma_fence_cb *cb)
-{
-	struct nvgpu_gpu_complete_callback *callback;
-	struct nvgpu_gpu_complete_future *complete;
+	bool destroy_channel;
 	int error;
 
-	callback = container_of(cb, struct nvgpu_gpu_complete_callback, cb);
-	complete = callback->complete;
-	error = fence->error;
-	complete->gpu_error = error < 0 ? -error : error;
-	dma_fence_put(callback->fence);
-	_kfree(callback, M_NVGPU_PROC);
-	nvgpu_future_wake(&complete->base);
+	exec = (struct nvgpu_exec_future *)future;
+	error = nvgpu_future_get_wait_error(future);
+	if (error != 0) {
+		(void)nvgpu_fence_signal(exec->submitted, error);
+		goto complete;
+	}
+	if (exec->sema.address == NULL) {
+		submit.pushes = exec->pushes;
+		submit.push_count = exec->push_count;
+		submit.submitted = exec->submitted;
+		submit.sema = &exec->sema;
+		error = nvgpu_channel_submit(exec->channel, &submit, future);
+		if (error == 0)
+			return (NVGPU_FUTURE_PENDING);
+		if (error == EAGAIN) {
+			error = nvgpu_sched_put(future);
+			if (error == 0)
+				return (NVGPU_FUTURE_PENDING);
+		}
+		(void)nvgpu_fence_signal(exec->submitted, error);
+	} else {
+		error = exec->sema.error;
+	}
+
+complete:
+	proc = exec->proc;
+	nvgpu_proc_lock(proc);
+	TAILQ_REMOVE(&proc->execs, &exec->record, link);
+	destroy_channel = nvgpu_channel_complete_exec_locked(proc, exec->channel);
+	nvgpu_proc_unlock(proc);
+	(void)nvgpu_fence_signal(exec->done, error);
+	if (destroy_channel)
+		nvgpu_channel_destroy(exec->channel);
+	nvgpu_fence_release(exec->submitted);
+	nvgpu_fence_release(exec->done);
+	nvgpu_proc_release(proc);
+	if (exec->pushes != NULL)
+		_kfree(exec->pushes, M_NVGPU_EXEC);
+	_kfree(exec, M_NVGPU_EXEC);
+	return (NVGPU_FUTURE_READY(error));
 }
 
 int
-nvgpu_proc_register_bind(struct nvgpu_proc *proc,
-    struct nvgpu_fence *done_fence, struct nvgpu_fence **wait_fences,
-    uint32_t capacity, uint32_t *wait_count)
+nvgpu_proc_register_bind(struct nvgpu_proc *proc, struct nvgpu_fence *done,
+	struct nvgpu_fence **waits, uint32_t capacity, uint32_t *wait_count)
 {
-	struct nvgpu_proc_gpu_fence *gpu_fence;
 	struct nvgpu_fence *previous;
 	uint32_t required;
-	uint32_t count;
 
-	if (proc == NULL || done_fence == NULL || wait_count == NULL ||
-	    (capacity != 0 && wait_fences == NULL))
+	if (proc == NULL || done == NULL || wait_count == NULL ||
+	    (capacity != 0 && waits == NULL))
 		return (EINVAL);
-	lwkt_gettoken(&proc->token);
-	if (proc->shutdown) {
-		lwkt_reltoken(&proc->token);
-		return (ENODEV);
-	}
-	required = proc->last_bind_fence != NULL ? 1 : 0;
-	TAILQ_FOREACH(gpu_fence, &proc->gpu_fences, link)
-		required++;
+	nvgpu_proc_lock(proc);
+	required = proc->last_bind != NULL ? 1 : 0;
 	if (capacity < required) {
 		*wait_count = required;
-		lwkt_reltoken(&proc->token);
+		nvgpu_proc_unlock(proc);
 		return (ENOSPC);
 	}
-	count = 0;
-	if (proc->last_bind_fence != NULL) {
-		nvgpu_fence_addref(proc->last_bind_fence);
-		wait_fences[count++] = proc->last_bind_fence;
+	if (proc->last_bind != NULL) {
+		nvgpu_fence_addref(proc->last_bind);
+		waits[0] = proc->last_bind;
 	}
-	TAILQ_FOREACH(gpu_fence, &proc->gpu_fences, link) {
-		nvgpu_fence_addref(gpu_fence->fence);
-		wait_fences[count++] = gpu_fence->fence;
-	}
-	previous = proc->last_bind_fence;
-	nvgpu_fence_addref(done_fence);
-	proc->last_bind_fence = done_fence;
-	*wait_count = count;
-	lwkt_reltoken(&proc->token);
+	previous = proc->last_bind;
+	nvgpu_fence_addref(done);
+	proc->last_bind = done;
+	*wait_count = required;
+	nvgpu_proc_unlock(proc);
 	nvgpu_fence_release(previous);
 	return (0);
 }
 
 void
-nvgpu_proc_complete_bind(struct nvgpu_proc *proc,
-    struct nvgpu_fence *done_fence)
+nvgpu_proc_complete_bind(struct nvgpu_proc *proc, struct nvgpu_fence *done)
 {
 	struct nvgpu_fence *last;
 
-	if (proc == NULL || done_fence == NULL)
+	if (proc == NULL || done == NULL)
 		return;
 	last = NULL;
-	lwkt_gettoken(&proc->token);
-	if (proc->last_bind_fence == done_fence) {
-		last = proc->last_bind_fence;
-		proc->last_bind_fence = NULL;
+	nvgpu_proc_lock(proc);
+	if (proc->last_bind == done) {
+		last = proc->last_bind;
+		proc->last_bind = NULL;
 	}
-	lwkt_reltoken(&proc->token);
+	nvgpu_proc_unlock(proc);
 	nvgpu_fence_release(last);
 }
 
 static void
 nvgpu_proc_finalize(struct nvgpu_proc *proc)
 {
-	KASSERT(TAILQ_EMPTY(&proc->gpu_fences),
-	    ("finalizing proc with inflight EXECs"));
-	KASSERT(proc->last_bind_fence == NULL,
-	    ("finalizing proc with an unfinished VM_BIND"));
-	nvgpu_channel_release_all(proc);
+	KASSERT(TAILQ_EMPTY(&proc->execs),
+	    ("finalizing proc with active EXEC futures"));
+	KASSERT(proc->last_bind == NULL,
+	    ("finalizing proc with active remap future"));
+	nvgpu_channel_destroy_all(proc);
 	nvgpu_vm_destroy(proc);
 	reservation_object_fini(&proc->vm_resv);
-	nvgpu_unload_release_by_drm(proc->gpu);
-	nvgpu_log(NVGPU_LOG_DEBUG, "proc finalize proc=%p\n", proc);
+	nvgpu_unload_release_by_drm(proc->device);
+	nvgpu_log(NVGPU_LOG_DEBUG, "proc finalized proc=%p\n", proc);
 	lwkt_token_uninit(&proc->token);
 	_kfree(proc, M_NVGPU_PROC);
 }

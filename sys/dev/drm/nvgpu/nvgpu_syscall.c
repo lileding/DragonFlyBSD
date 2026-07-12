@@ -9,9 +9,9 @@
 #include "nvdrm_sync.h"
 #include "nvgpu_bo.h"
 #include "nvgpu_channel.h"
+#include "nvgpu_channel_internal.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_fence.h"
-#include "nvgpu_exec.h"
 #include "nvgpu_info.h"
 #include "nvgpu_nvif.h"
 #include "nvgpu_vm.h"
@@ -53,19 +53,21 @@ nvgpu_syscall_channel_alloc(struct nvgpu_proc *proc,
     struct drm_file *file __unused, void *data)
 {
 	struct drm_nouveau_channel_alloc *req = data;
-	struct nvgpu_channel_alloc_args args;
-	struct nvgpu_channel_alloc_reply reply;
+	struct nvgpu_channel_create_args args;
+	struct nvgpu_channel *channel;
 	int error;
 
+	memset(&args, 0, sizeof(args));
+	args.proc = proc;
 	args.fb_ctxdma_handle = req->fb_ctxdma_handle;
 	args.tt_ctxdma_handle = req->tt_ctxdma_handle;
-	error = nvgpu_channel_alloc(proc, &args, &reply);
+	error = nvgpu_channel_create(&args, &channel);
 	if (error != 0)
 		return (error);
-	req->channel = reply.channel;
-	req->pushbuf_domains = reply.pushbuf_domains;
-	req->notifier_handle = reply.notifier_handle;
-	req->nr_subchan = reply.nr_subchan;
+	req->channel = args.channel_id;
+	req->pushbuf_domains = args.pushbuf_domains;
+	req->notifier_handle = args.notifier_handle;
+	req->nr_subchan = args.nr_subchan;
 	return (0);
 }
 
@@ -172,7 +174,7 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file,
 	struct nvgpu_vm_bind_op *vm_ops;
 	struct nvdrm_sync_wait_set waits;
 	struct nvdrm_sync_signal_set signals;
-	struct nvgpu_vm_bind_args args;
+	struct nvgpu_proc_remap remap;
 	struct nvgpu_fence *done_fence;
 	struct nvgpu_fence *sync_fence;
 	size_t size;
@@ -238,7 +240,7 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file,
 	    req->wait_ptr, &waits);
 	if (error != 0)
 		goto cleanup_ops;
-	done_fence = nvgpu_fence_create(nvgpu_proc_get_device(proc), "vm-bind");
+	done_fence = nvgpu_fence_create();
 	if (done_fence == NULL) {
 		error = ENOMEM;
 		goto cleanup_waits;
@@ -254,18 +256,18 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file,
 		nvgpu_fence_addref(done_fence);
 		sync_fence = done_fence;
 	}
-	args.ops = vm_ops;
-	args.op_count = req->op_count;
-	args.done_fence = done_fence;
-	args.wait_fences = waits.fences;
-	args.wait_count = waits.count;
-	error = nvgpu_vm_bind_spawn(proc, &args);
-	done_fence = NULL;
+	remap.ops = vm_ops;
+	remap.op_count = req->op_count;
+	remap.done = done_fence;
+	remap.waits = waits.fences;
+	remap.wait_count = waits.count;
+	error = nvgpu_proc_remap(proc, &remap);
 	if (error == 0)
 		nvdrm_sync_publish_signals(&signals);
 	nvdrm_sync_cleanup_signals(&signals);
+	nvgpu_fence_release(done_fence);
 	if (error == 0 && sync_fence != NULL)
-		error = nvgpu_fence_wait(sync_fence, true);
+		error = nvdrm_sync_wait_fence(sync_fence);
 	nvgpu_fence_release(sync_fence);
 
 cleanup_waits:
@@ -290,9 +292,9 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 	struct drm_nouveau_exec *req = data;
 	struct nvdrm_sync_wait_set waits;
 	struct nvdrm_sync_signal_set signals;
-	struct nvgpu_exec_submit_args args;
-	struct nvgpu_exec_push *pushes;
-	struct nvgpu_fence *done_fence;
+	struct nvgpu_proc_exec exec;
+	struct nvgpu_channel_push *pushes;
+	struct nvgpu_fence *done;
 	int error;
 
 	if (req == NULL)
@@ -317,29 +319,29 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 			_kfree(pushes, M_TEMP);
 		return (error);
 	}
-	done_fence = nvgpu_fence_create(nvgpu_proc_get_device(proc), "exec");
-	if (done_fence == NULL) {
+	done = nvgpu_fence_create();
+	if (done == NULL) {
 		error = ENOMEM;
 		goto cleanup_waits;
 	}
 	error = nvdrm_sync_prepare_signals(file, req->sig_count, req->sig_ptr,
-	    done_fence, &signals);
+	    done, &signals);
 	if (error != 0) {
-		nvgpu_fence_release(done_fence);
+		nvgpu_fence_release(done);
 		goto cleanup_waits;
 	}
 
-	args.channel = req->channel;
-	args.pushes = pushes;
-	args.push_count = req->push_count;
-	args.gpu_complete_fence = done_fence;
-	args.wait_fences = waits.fences;
-	args.wait_count = waits.count;
-	error = nvgpu_exec_submit(proc, &args);
-	done_fence = NULL;
+	exec.channel_id = req->channel_id;
+	exec.pushes = pushes;
+	exec.push_count = req->push_count;
+	exec.waits = waits.fences;
+	exec.wait_count = waits.count;
+	exec.done = done;
+	error = nvgpu_proc_spawn(proc, &exec);
 	if (error == 0)
 		nvdrm_sync_publish_signals(&signals);
 	nvdrm_sync_cleanup_signals(&signals);
+	nvgpu_fence_release(done);
 
 cleanup_waits:
 	nvdrm_sync_cleanup_waits(&waits);

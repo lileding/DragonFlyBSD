@@ -23,15 +23,25 @@ struct nvgsp_vram_alloc *nvgsp_vram_alloc_gem(struct nvgpu_device *gpu,
 /* Release a GEM VRAM allocation returned by nvgsp_vram_alloc_gem(). */
 void nvgsp_vram_free_gem(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, void *owner);
+
+/* Allocate display-owned VRAM; the returned allocation is consumed by free. */
 struct nvgsp_vram_alloc *nvgsp_vram_alloc_display(struct nvgpu_device *gpu,
     uint64_t size, uint64_t align, void *owner);
 void nvgsp_vram_free_display(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc);
+
+/* Return borrowed allocation metadata valid until the allocation is freed. */
 struct drm_mm_node *nvgsp_vram_alloc_get_node(struct nvgsp_vram_alloc *alloc);
 struct nvgsp_vram_alloc *nvgsp_vram_alloc_from_node(struct drm_mm_node *node);
 void *nvgsp_vram_alloc_get_owner(struct nvgsp_vram_alloc *alloc);
 uint64_t nvgsp_vram_alloc_get_paddr(const struct nvgsp_vram_alloc *alloc);
 uint64_t nvgsp_vram_alloc_get_size(const struct nvgsp_vram_alloc *alloc);
+
+/*
+ * Create and remove temporary BAR1 mappings for an existing allocation.
+ * Mapping functions may sleep; accessors below require the matching mapping
+ * to remain live and never change allocation ownership.
+ */
 int nvgsp_vram_alloc_map_bar1_scatter(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, uint64_t size, uint32_t pages);
 void nvgsp_vram_alloc_unmap_bar1_scatter(struct nvgpu_device *gpu,

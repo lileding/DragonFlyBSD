@@ -199,6 +199,7 @@ struct nvgsp_channel_submission {
 	uint32_t payload;
 	uint32_t put;
 	uint32_t gpf_required;
+	uint32_t post_slot;
 };
 
 static uint64_t
@@ -327,6 +328,7 @@ nvgsp_channel_prepare_submit(struct nvgsp_channel *chan,
 	submission->chan = chan;
 	submission->sema = (volatile uint32_t *)chan->submit_sema.kva + post_slot;
 	submission->payload = chan->submit_payload;
+	submission->post_slot = post_slot;
 	chan->submit_post_payload[post_slot] = submission->payload;
 	submission->gpf_required = required;
 	post_gva = chan->submit_gva_push + (uint64_t)post_offset * 4;
@@ -393,6 +395,21 @@ nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission)
 	nvgsp_wr32(gsp, NV_USERMODE_DOORBELL, chan->gsp_token);
 	chan->gpf_put = submission->put;
 	chan->gpf_free -= submission->gpf_required;
+	lwkt_reltoken(&gsp->gsp_tok);
+	_kfree(submission, M_NVGSP_CHANNEL);
+}
+
+void
+nvgsp_channel_abort_submit(struct nvgsp_channel_submission *submission)
+{
+	struct nvgsp_channel *chan;
+	struct nvgsp_state *gsp;
+
+	if (submission == NULL)
+		return;
+	chan = submission->chan;
+	gsp = chan->vmm->gsp;
+	chan->submit_post_slots_busy &= ~(1ULL << submission->post_slot);
 	lwkt_reltoken(&gsp->gsp_tok);
 	_kfree(submission, M_NVGSP_CHANNEL);
 }

@@ -77,15 +77,20 @@ void nvgsp_disp_fini(struct nvgpu_device *gpu);
 /* Callbacks and arg are borrowed until replaced or display teardown. */
 void nvgsp_disp_set_event_ops(struct nvgpu_device *gpu,
 	const struct nvgsp_display_event_ops *ops, void *arg);
+
+/* Decode one GSP display event in process context and invoke borrowed callbacks. */
 int nvgsp_disp_dispatch_event(struct nvgpu_device *gpu, uint32_t client_handle,
 	uint32_t event_handle, const void *data, uint32_t size);
 
+/* Query immutable display capabilities cached during backend initialization. */
 uint32_t nvgsp_disp_get_supported_mask(struct nvgpu_device *gpu);
 uint32_t nvgsp_disp_get_head_count(struct nvgpu_device *gpu);
 uint32_t nvgsp_disp_get_head_mask(struct nvgpu_device *gpu);
 uint32_t nvgsp_disp_get_window_mask(struct nvgpu_device *gpu);
 int nvgsp_disp_get_vram_range(struct nvgpu_device *gpu, uint64_t *base,
     uint64_t *size);
+
+/* Query, detect, and communicate with one output identified by display_id. */
 int nvgsp_disp_get_output(struct nvgpu_device *gpu, uint32_t display_id,
     struct nvgsp_display_output *output);
 int nvgsp_disp_detect(struct nvgpu_device *gpu, uint32_t display_id);
@@ -94,12 +99,19 @@ int nvgsp_disp_read_edid(struct nvgpu_device *gpu, uint32_t display_id,
 int nvgsp_disp_transfer_aux(struct nvgpu_device *gpu, uint32_t display_id,
     uint8_t request, uint32_t address, uint8_t *data, uint8_t *size);
 
+/*
+ * Acquire an output route for one modeset and release it during rollback or
+ * disable.  route is caller-owned state; acquire initializes it and release
+ * consumes its acquired RM state without freeing the structure.
+ */
 int nvgsp_disp_acquire_output(struct nvgpu_device *gpu, uint32_t display_id,
 	bool audio, struct nvgsp_display_route *route);
 void nvgsp_disp_release_output(struct nvgpu_device *gpu,
 	struct nvgsp_display_route *route);
 int nvgsp_disp_get_active_output(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t *display_id);
+
+/* Program protocol, link, audio, and ELD state for a live acquired route. */
 int nvgsp_disp_enable_hdmi(struct nvgpu_device *gpu,
 	const struct nvgsp_display_route *route,
 	const struct nvgsp_display_hdmi_sink *sink);
@@ -119,6 +131,11 @@ int nvgsp_disp_set_eld(struct nvgpu_device *gpu,
 void nvgsp_disp_enable_vblank(struct nvgpu_device *gpu, uint32_t head);
 void nvgsp_disp_disable_vblank(struct nvgpu_device *gpu, uint32_t head);
 
+/*
+ * Create a display command channel and return one owned channel object.
+ * destroy consumes it after command submission and notifier users have
+ * stopped.  Creation and destruction may sleep in GSP RPC.
+ */
 int nvgsp_disp_create_dma_channel(struct nvgpu_device *gpu, uint32_t oclass,
     uint32_t instance, struct nvgsp_display_channel **channel);
 int nvgsp_disp_create_pio_channel(struct nvgpu_device *gpu, uint32_t oclass,
@@ -127,10 +144,14 @@ void nvgsp_disp_destroy_channel(struct nvgsp_display_channel *channel);
 /* Return the channel-owned coherent push ring; valid until channel destroy. */
 uint32_t *nvgsp_disp_channel_get_push(struct nvgsp_display_channel *channel,
     uint32_t *dwords);
+
+/* Access channel-owned USER registers while the channel remains live. */
 uint32_t nvgsp_disp_channel_read_user(struct nvgsp_display_channel *channel,
     uint32_t offset);
 void nvgsp_disp_channel_write_user(struct nvgsp_display_channel *channel,
     uint32_t offset, uint32_t value);
+
+/* Bind or unbind one display context; cookie is initialized only on success. */
 int nvgsp_disp_channel_bind_context(struct nvgsp_display_channel *channel,
     uint32_t handle, uint64_t start, uint64_t limit, uint32_t flags,
     int *cookie);

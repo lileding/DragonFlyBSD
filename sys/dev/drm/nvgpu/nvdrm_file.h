@@ -13,13 +13,22 @@ struct nvdrm_file;
 struct nvgpu_device;
 struct nvgpu_proc;
 
-/* DRM-private state for one open file.  Owned by drm_file::driver_priv; runtime state lives in nvgpu_proc. */
+/*
+ * DRM-private state for one open file.
+ * drm_file::driver_priv owns it; runtime GPU state lives in nvgpu_proc.
+ */
 struct nvdrm_file;
 
-/* DRM open callback.  Publishes one nvdrm_file only after proc LWKT startup. */
+/*
+ * DRM open callback.
+ * Acquires the unload hold and publishes driver_priv only after proc creation.
+ */
 int nvdrm_file_open(struct drm_device *ddev, struct drm_file *file);
 
-/* DRM postclose callback.  Disconnects the file and asks nvgpu_proc to stop. */
+/*
+ * DRM postclose callback.
+ * Clears driver_priv and releases the file's initial proc reference.
+ */
 void nvdrm_file_postclose(struct drm_device *ddev, struct drm_file *file);
 
 /* DRM lastclose callback.  Runs only DRM-visible final-close policy. */

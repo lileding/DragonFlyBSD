@@ -139,7 +139,7 @@ struct drm_nouveau_vm_bind {
 };
 
 struct drm_nouveau_exec {
-	uint32_t channel;
+	uint32_t channel_id;
 	uint32_t push_count;
 	uint32_t wait_count;
 	uint32_t sig_count;
