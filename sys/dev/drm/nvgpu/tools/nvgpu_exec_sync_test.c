@@ -920,18 +920,38 @@ test_close_with_pending_future(int fd_unused __attribute__((unused)))
 static bool
 test_channel_free_with_pending_exec(int fd)
 {
+	struct drm_nouveau_channel_free free_args;
+	struct drm_nouveau_exec rejected;
 	uint32_t channel = 0;
-	uint32_t out = syncobj_create(fd, false);
-	struct drm_nouveau_sync sig = binary_sync(out);
-	bool ok;
+	uint32_t out[80];
+	bool ok = true;
+	int ret;
 
-	ok = out != 0 && channel_alloc_one(fd, &channel) &&
-	    exec_submit_on_channel(fd, NULL, 0, &sig, 1, channel);
-	if (channel != 0)
-		channel_free_one(fd, channel);
+	memset(out, 0, sizeof(out));
+	ok = channel_alloc_one(fd, &channel);
+	for (size_t i = 0; ok && i < ARRAY_SIZE(out); i++) {
+		struct drm_nouveau_sync sig;
+
+		out[i] = syncobj_create(fd, false);
+		sig = binary_sync(out[i]);
+		ok = out[i] != 0 && exec_submit_on_channel(fd, NULL, 0, &sig, 1,
+		    channel);
+	}
+	memset(&free_args, 0, sizeof(free_args));
+	free_args.channel = (int32_t)channel;
 	if (ok)
-		ok = syncobj_wait_binary(fd, &out, 1, 5);
-	syncobj_destroy(fd, out);
+		ok = xioctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_FREE, &free_args,
+		    "DRM_IOCTL_NOUVEAU_CHANNEL_FREE") == 0;
+	memset(&rejected, 0, sizeof(rejected));
+	rejected.channel = channel;
+	errno = 0;
+	ret = ioctl(fd, DRM_IOCTL_NOUVEAU_EXEC, &rejected);
+	if (ok)
+		ok = ret != 0 && errno == ENOENT;
+	if (ok)
+		ok = syncobj_wait_binary(fd, out, ARRAY_SIZE(out), 10);
+	for (size_t i = 0; i < ARRAY_SIZE(out); i++)
+		syncobj_destroy(fd, out[i]);
 	return ok;
 }
 
@@ -955,6 +975,57 @@ test_exec_bind_exec_chain(int fd)
 	syncobj_destroy(fd, exec0);
 	syncobj_destroy(fd, bind);
 	syncobj_destroy(fd, exec1);
+	return ok;
+}
+
+static bool
+test_exec_bind_exec_bind_exec_chain(int fd)
+{
+	uint32_t handles[5];
+	struct drm_nouveau_sync signals[5];
+	bool ok = true;
+
+	memset(handles, 0, sizeof(handles));
+	for (size_t i = 0; i < ARRAY_SIZE(handles); i++) {
+		handles[i] = syncobj_create(fd, false);
+		signals[i] = binary_sync(handles[i]);
+		ok = ok && handles[i] != 0;
+	}
+	ok = ok && exec_submit(fd, NULL, 0, &signals[0], 1, real_channel) &&
+	    vm_bind_empty_async(fd, &signals[1], 1) &&
+	    exec_submit(fd, NULL, 0, &signals[2], 1, real_channel) &&
+	    vm_bind_empty_async(fd, &signals[3], 1) &&
+	    exec_submit(fd, NULL, 0, &signals[4], 1, real_channel) &&
+	    syncobj_wait_binary(fd, handles, ARRAY_SIZE(handles), 10);
+	for (size_t i = 0; i < ARRAY_SIZE(handles); i++)
+		syncobj_destroy(fd, handles[i]);
+	return ok;
+}
+
+static bool
+test_close_with_pending_exec_bind_chains(int fd_unused __attribute__((unused)))
+{
+	int fd = open_device();
+	uint32_t channel = 0;
+	bool ok = true;
+
+	if (fd < 0)
+		return false;
+	ok = channel_alloc_one(fd, &channel);
+	for (unsigned i = 0; ok && i < 32; i++) {
+		uint32_t exec = syncobj_create(fd, false);
+		uint32_t bind = syncobj_create(fd, false);
+		struct drm_nouveau_sync exec_sig = binary_sync(exec);
+		struct drm_nouveau_sync bind_sig = binary_sync(bind);
+
+		ok = exec != 0 && bind != 0 &&
+		    exec_submit_on_channel(fd, NULL, 0, &exec_sig, 1, channel) &&
+		    vm_bind_empty_async(fd, &bind_sig, 1);
+		syncobj_destroy(fd, exec);
+		syncobj_destroy(fd, bind);
+	}
+	close(fd);
+	usleep(500000);
 	return ok;
 }
 
@@ -1056,6 +1127,9 @@ static const struct test_case tests[] = {
 	{ "close with pending future", test_close_with_pending_future },
 	{ "channel free with pending exec", test_channel_free_with_pending_exec },
 	{ "exec bind exec chain", test_exec_bind_exec_chain },
+	{ "exec bind exec bind exec chain", test_exec_bind_exec_bind_exec_chain },
+	{ "close with pending exec bind chains",
+	    test_close_with_pending_exec_bind_chains },
 	{ "invalid channel", test_invalid_channel },
 	{ "invalid push pointer", test_invalid_push_pointer },
 	{ "invalid push flags", test_invalid_push_flags },

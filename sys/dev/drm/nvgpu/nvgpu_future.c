@@ -80,11 +80,7 @@ nvgpu_future_spawn(struct nvgpu_future *future, struct nvgpu_proc *proc,
 		}
 	}
 	if (atomic_fetchadd_int(&future->wait_count, -1) == 1) {
-		if (future->error != 0) {
-			nvgpu_future_finish(future, (int)future->error);
-		} else {
-			nvgpu_future_wake(future);
-		}
+		nvgpu_future_wake(future);
 	}
 	return (0);
 }
@@ -130,11 +126,6 @@ nvgpu_future_wait_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
 	dma_fence_put(callback->fence);
 	_kfree(callback, M_NVGPU_FUTURE);
 	old = atomic_fetchadd_int(&future->wait_count, -1);
-	if (old == 1) {
-		if (future->error != 0) {
-			nvgpu_future_finish(future, (int)future->error);
-		} else {
-			nvgpu_future_wake(future);
-		}
-	}
+	if (old == 1)
+		nvgpu_future_wake(future);
 }

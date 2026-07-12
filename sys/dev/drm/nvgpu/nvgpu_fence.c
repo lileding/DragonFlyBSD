@@ -20,7 +20,7 @@ struct nvgpu_fence {
 	spinlock_t lock;
 	struct nvgpu_device *gpu;
 	const char *timeline_name;
-	struct nvgpu_fence *exec_submit_fence;
+	struct nvgpu_fence *exec_future_done_fence;
 	uint32_t exec_channel;
 	bool exec_producer;
 };
@@ -62,26 +62,40 @@ static signed long
 nvgpu_fence_dma_wait(struct dma_fence *fence, bool intr, signed long timeout)
 {
 	struct nvgpu_fence *nfence;
-	signed long remaining, result, step;
+	unsigned long deadline;
+	unsigned long now;
+	signed long remaining, step;
+	int error;
 
+	/* The fence address is the native lksleep/wakeup interlock. */
 	nfence = container_of(fence, struct nvgpu_fence, base);
 	remaining = timeout;
+	deadline = timeout == MAX_SCHEDULE_TIMEOUT ? 0 :
+	    jiffies + (unsigned long)timeout;
 	for (;;) {
 		nvgpu_exec_harvest_completed(nfence->gpu);
-		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
+		lockmgr(fence->lock, LK_EXCLUSIVE);
+		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
+			lockmgr(fence->lock, LK_RELEASE);
 			return (remaining > 0 ? remaining : 1);
-		if (timeout == 0)
+		}
+		if (timeout == 0) {
+			lockmgr(fence->lock, LK_RELEASE);
 			return (0);
+		}
 		step = MAX(hz / 10, 1);
 		if (timeout != MAX_SCHEDULE_TIMEOUT && step > remaining)
 			step = remaining;
-		result = dma_fence_default_wait(fence, intr, step);
-		if (result < 0)
-			return (result);
+		error = lksleep(fence, fence->lock, intr ? PCATCH : 0,
+		    "nvgpuf", (int)step);
+		lockmgr(fence->lock, LK_RELEASE);
+		if (error == EINTR || error == ERESTART)
+			return (-ERESTARTSYS);
 		if (timeout != MAX_SCHEDULE_TIMEOUT) {
-			remaining -= step;
-			if (remaining <= 0)
+			now = jiffies;
+			if (time_after_eq(now, deadline))
 				return (0);
+			remaining = (signed long)(deadline - now);
 		}
 	}
 }
@@ -102,7 +116,7 @@ nvgpu_fence_finalize(struct dma_fence *fence)
 	struct nvgpu_fence *nfence;
 
 	nfence = container_of(fence, struct nvgpu_fence, base);
-	nvgpu_fence_release(nfence->exec_submit_fence);
+	nvgpu_fence_release(nfence->exec_future_done_fence);
 	lockuninit(&nfence->lock);
 	_kfree(nfence, M_NVGPU_FENCE);
 }
@@ -148,22 +162,22 @@ nvgpu_fence_release(struct nvgpu_fence *fence)
 }
 
 void
-nvgpu_fence_set_exec_producer(struct nvgpu_fence *gpu_complete,
-    uint32_t channel, struct nvgpu_fence *submitted)
+nvgpu_fence_set_exec_origin(struct nvgpu_fence *gpu_complete,
+    uint32_t channel, struct nvgpu_fence *future_done)
 {
-	if (gpu_complete == NULL || submitted == NULL)
+	if (gpu_complete == NULL || future_done == NULL)
 		return;
 	KASSERT(!gpu_complete->exec_producer &&
-	    gpu_complete->exec_submit_fence == NULL,
+	    gpu_complete->exec_future_done_fence == NULL,
 	    ("nvgpu fence EXEC producer already set"));
-	nvgpu_fence_addref(submitted);
-	gpu_complete->exec_submit_fence = submitted;
+	nvgpu_fence_addref(future_done);
+	gpu_complete->exec_future_done_fence = future_done;
 	gpu_complete->exec_channel = channel;
 	gpu_complete->exec_producer = true;
 }
 
 struct dma_fence *
-nvgpu_fence_hold_exec_wait(struct dma_fence *dma,
+nvgpu_fence_addref_for_exec_wait(struct dma_fence *dma,
     uint32_t channel)
 {
 	struct nvgpu_fence *gpu_complete;
@@ -177,8 +191,8 @@ nvgpu_fence_hold_exec_wait(struct dma_fence *dma,
 	wait = gpu_complete;
 	if (gpu_complete->exec_producer &&
 	    gpu_complete->exec_channel == channel &&
-	    gpu_complete->exec_submit_fence != NULL)
-		wait = gpu_complete->exec_submit_fence;
+	    gpu_complete->exec_future_done_fence != NULL)
+		wait = gpu_complete->exec_future_done_fence;
 	return (dma_fence_get(&wait->base));
 }
 
@@ -204,11 +218,15 @@ nvgpu_fence_error(struct nvgpu_fence *fence)
 int
 nvgpu_fence_signal(struct nvgpu_fence *fence, int error)
 {
+	int result;
+
 	if (fence == NULL)
 		return (EINVAL);
 	if (error != 0)
 		dma_fence_set_error(&fence->base, error > 0 ? -error : error);
-	return (dma_fence_signal(&fence->base));
+	result = dma_fence_signal(&fence->base);
+	wakeup(&fence->base);
+	return (result);
 }
 
 int

@@ -10,10 +10,10 @@
 #include <sys/stdint.h>
 
 struct nvgpu_channel_list;
+struct nvgpu_channel;
 struct nvgpu_device;
 struct nvgpu_fence;
 struct nvgpu_proc;
-struct nvgpu_proc_exec;
 struct nvgpu_vm;
 struct reservation_object;
 
@@ -44,12 +44,15 @@ struct reservation_object *nvgpu_proc_get_vm_resv(struct nvgpu_proc *proc);
 
 /* Register one accepted EXEC and return an owned last-bind dependency, if any. */
 int nvgpu_proc_register_exec(struct nvgpu_proc *proc,
-    struct nvgpu_fence *gpu_complete_fence,
+    struct nvgpu_fence *gpu_complete_fence, uint32_t channel_id,
     struct nvgpu_fence **bind_wait_fence,
-    struct nvgpu_proc_exec **execp);
+    struct nvgpu_channel **channelp);
 
-/* Remove one EXEC from the proc barrier set and signal its GPU-complete fence. */
-void nvgpu_proc_complete_exec(struct nvgpu_proc_exec *exec, int error);
+/* Close one channel and snapshot owned dependencies for its release future. */
+int nvgpu_proc_register_channel_release(struct nvgpu_proc *proc,
+    uint32_t channel_id, struct nvgpu_channel **channelp,
+    struct nvgpu_fence **wait_fences, uint32_t capacity,
+    uint32_t *wait_count);
 
 /* Atomically snapshot bind dependencies and install done_fence as last bind. */
 int nvgpu_proc_register_bind(struct nvgpu_proc *proc,

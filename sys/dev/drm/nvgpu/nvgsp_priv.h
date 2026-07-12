@@ -481,6 +481,7 @@ struct nvgsp_vmm {
 };
 
 #define NVGSP_GR_MAX_CTXBUFS 16
+#define NVGSP_CHANNEL_POST_RING_SLOTS 64u
 
 struct nvgsp_gr_ctxbuf {
 	void *kva;
@@ -511,6 +512,7 @@ struct nvgsp_channel {
 	uint32_t submit_post_slot;
 	uint32_t submit_payload;
 	uint64_t submit_post_slots_busy;
+	uint32_t submit_post_payload[NVGSP_CHANNEL_POST_RING_SLOTS];
 	uint8_t faulted;
 	int fault_error;
 	struct nvgsp_object ce_obj;
