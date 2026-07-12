@@ -27,13 +27,13 @@ void nvgpu_fence_addref(struct nvgpu_fence *fence);
 /* Release a native dma_fence reference owned by this nvgpu fence. */
 void nvgpu_fence_release(struct nvgpu_fence *fence);
 
-/* Attach immutable EXEC producer metadata before publishing gpu_complete. */
-void nvgpu_fence_set_exec_producer(struct nvgpu_fence *gpu_complete,
-    uint32_t channel, struct nvgpu_fence *submitted);
+/* Attach immutable EXEC origin metadata before publishing gpu_complete. */
+void nvgpu_fence_set_exec_origin(struct nvgpu_fence *gpu_complete,
+    uint32_t channel, struct nvgpu_fence *future_done);
 
-/* Return an owned same-channel submit dependency or the original dma fence. */
-struct dma_fence *nvgpu_fence_hold_exec_wait(struct dma_fence *gpu_complete,
-    uint32_t channel);
+/* Add a reference to the same-channel future dependency or GPU fence. */
+struct dma_fence *nvgpu_fence_addref_for_exec_wait(
+    struct dma_fence *gpu_complete, uint32_t channel);
 
 bool nvgpu_fence_is_signaled(struct nvgpu_fence *fence);
 int nvgpu_fence_error(struct nvgpu_fence *fence);

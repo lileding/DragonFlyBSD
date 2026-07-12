@@ -52,7 +52,6 @@ struct nvgsp_channel_object {
 #define NVGSP_BAR2_ZERO_GVA		0x3000ULL
 #define NVGSP_ALIGN_UP(v, a)		(((v) + (a) - 1) & ~((a) - 1))
 #define NVGSP_CHANNEL_POST_PUSH_DWORDS	13u
-#define NVGSP_CHANNEL_POST_RING_SLOTS	64u
 #define NVGSP_CHANNEL_GPFIFO_FETCH_WINDOW 0x40u
 #define NVC06F_GP_ENTRY1_LENGTH_SHIFT	10u
 #define NVC06F_GP_ENTRY1_NO_PREFETCH	(1u << 31)
@@ -198,11 +197,8 @@ struct nvgsp_channel_submission {
 	struct nvgsp_channel *chan;
 	volatile uint32_t *sema;
 	uint32_t payload;
-	uint32_t post_slot;
 	uint32_t put;
 	uint32_t gpf_required;
-	uint32_t submitted_ticks;
-	volatile u_int debug_reported;
 };
 
 static uint64_t
@@ -252,6 +248,19 @@ nvgsp_channel_prepare_submit(struct nvgsp_channel *chan,
 		lwkt_reltoken(&gsp->gsp_tok);
 		_kfree(submission, M_NVGSP_CHANNEL);
 		return (error);
+	}
+	for (uint32_t i = 0; i < NVGSP_CHANNEL_POST_RING_SLOTS; i++) {
+		uint64_t bit = 1ULL << i;
+		volatile uint32_t *sema;
+		uint32_t value;
+
+		if ((chan->submit_post_slots_busy & bit) == 0)
+			continue;
+		sema = (volatile uint32_t *)chan->submit_sema.kva + i;
+		cpu_lfence();
+		value = *sema;
+		if ((int32_t)(value - chan->submit_post_payload[i]) >= 0)
+			chan->submit_post_slots_busy &= ~bit;
 	}
 	post_slot = NVGSP_CHANNEL_POST_RING_SLOTS;
 	for (uint32_t i = 0; i < NVGSP_CHANNEL_POST_RING_SLOTS; i++) {
@@ -318,11 +327,10 @@ nvgsp_channel_prepare_submit(struct nvgsp_channel *chan,
 	submission->chan = chan;
 	submission->sema = (volatile uint32_t *)chan->submit_sema.kva + post_slot;
 	submission->payload = chan->submit_payload;
-	submission->post_slot = post_slot;
+	chan->submit_post_payload[post_slot] = submission->payload;
 	submission->gpf_required = required;
 	post_gva = chan->submit_gva_push + (uint64_t)post_offset * 4;
 	sema_gva = chan->submit_gva_sema + (uint64_t)post_slot * 4;
-	*submission->sema = 0;
 	gpf = chan->submit_gpf.kva;
 
 	for (uint32_t i = 0; i < push_count; i++) {
@@ -379,7 +387,6 @@ nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission)
 	uint64_t slot_bar1 = chan->userd_bar1_gva +
 	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
 
-	submission->submitted_ticks = ticks;
 	nvgsp_bar_wr32_bar1(gsp, slot_bar1 + NV_USERD_GP_PUT, submission->put);
 	cpu_sfence();
 	(void)nvgsp_bar_rd32_bar1(gsp, slot_bar1);
@@ -387,57 +394,18 @@ nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission)
 	chan->gpf_put = submission->put;
 	chan->gpf_free -= submission->gpf_required;
 	lwkt_reltoken(&gsp->gsp_tok);
-}
-
-bool
-nvgsp_channel_check_submit_complete(
-	    struct nvgsp_channel_submission *submission)
-{
-	struct nvgsp_channel *chan;
-	struct nvgsp_state *gsp;
-	uint64_t slot_bar1;
-	uint32_t get, put, value;
-
-	if (submission == NULL)
-		return (false);
-	cpu_lfence();
-	value = *submission->sema;
-	if (value == submission->payload)
-		return (true);
-	if ((uint32_t)(ticks - submission->submitted_ticks) < (uint32_t)hz ||
-	    !atomic_cmpset_int(&submission->debug_reported, 0, 1))
-		return (false);
-
-	chan = submission->chan;
-	gsp = chan->vmm->gsp;
-	slot_bar1 = chan->userd_bar1_gva +
-	    (uint64_t)((uint32_t)chan->chid % 8u) * NV_USERD_SLOT_SIZE;
-	get = nvgsp_bar_rd32_bar1(gsp, slot_bar1 + NV_USERD_GP_GET) &
-	    (NV_CHANNEL_GPFIFO_ENTRIES - 1);
-	put = nvgsp_bar_rd32_bar1(gsp, slot_bar1 + NV_USERD_GP_PUT) &
-	    (NV_CHANNEL_GPFIFO_ENTRIES - 1);
-	nvgpu_log(NVGPU_LOG_DEBUG,
-	    "submit stalled chid=%d sema=0x%08x expected=0x%08x "
-	    "get=%u put=%u submit_put=%u gpf_free=%u slot=%u\n",
-	    chan->chid, value, submission->payload, get, put,
-	    submission->put, chan->gpf_free, submission->post_slot);
-	return (false);
+	_kfree(submission, M_NVGSP_CHANNEL);
 }
 
 void
-nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission)
+nvgsp_channel_describe_submit(struct nvgsp_channel_submission *submission,
+    struct nvgsp_channel_completion *completion)
 {
-	struct nvgsp_channel *chan;
-	struct nvgsp_state *gsp;
-
-	if (submission == NULL)
+	if (submission == NULL || completion == NULL)
 		return;
-	chan = submission->chan;
-	gsp = chan->vmm->gsp;
-	lwkt_gettoken(&gsp->gsp_tok);
-	chan->submit_post_slots_busy &= ~(1ULL << submission->post_slot);
-	lwkt_reltoken(&gsp->gsp_tok);
-	_kfree(submission, M_NVGSP_CHANNEL);
+	completion->sema = submission->sema;
+	completion->payload = submission->payload;
+	completion->chid = (uint32_t)submission->chan->chid;
 }
 
 void
@@ -1400,6 +1368,19 @@ nvgsp_channel_destroy_user(struct nvgsp_channel *chan)
 
 	if (chan == NULL || chan->vmm == NULL)
 		return;
+	for (uint32_t i = 0; i < NVGSP_CHANNEL_POST_RING_SLOTS; i++) {
+		uint64_t bit = 1ULL << i;
+		volatile uint32_t *sema;
+		uint32_t value;
+
+		if ((chan->submit_post_slots_busy & bit) == 0)
+			continue;
+		sema = (volatile uint32_t *)chan->submit_sema.kva + i;
+		cpu_lfence();
+		value = *sema;
+		if ((int32_t)(value - chan->submit_post_payload[i]) >= 0)
+			chan->submit_post_slots_busy &= ~bit;
+	}
 	KASSERT(chan->submit_post_slots_busy == 0,
 	    ("destroying channel with active submit slots"));
 	gsp = chan->vmm->gsp;

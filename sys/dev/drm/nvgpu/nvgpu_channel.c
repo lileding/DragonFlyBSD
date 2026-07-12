@@ -7,6 +7,8 @@
 #include "nvdrm_nouveau_abi.h"
 #include "nvgpu_channel.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_fence.h"
+#include "nvgpu_future.h"
 #include "nvgpu_proc.h"
 #include "nvgpu_vm.h"
 #include "nvgsp_channel.h"
@@ -17,6 +19,7 @@
 #include <sys/malloc.h>
 #include <sys/systm.h>
 #include <machine/atomic.h>
+#include <linux/dma-fence.h>
 
 static MALLOC_DEFINE(M_NVGPU_CHANNEL, "nvgpu_channel", "nvgpu user channel");
 
@@ -35,13 +38,22 @@ struct nvgpu_channel {
 	volatile u_int refs;
 	uint32_t id;
 	uint32_t engine_type;
+	bool closing;
 	struct nvgsp_channel *backend;
 	struct nvgpu_channel_object objects[NVGPU_MAX_CHANNEL_OBJECTS];
 };
 
 static volatile u_int nvgpu_channel_next_id = 1;
 
+struct nvgpu_channel_release_future {
+	struct nvgpu_future base;
+	struct nvgpu_channel *channel;
+};
+
 static void nvgpu_channel_finalize_objects(struct nvgpu_channel *chan);
+static struct nvgpu_future_result nvgpu_channel_release_future_poll(
+    struct nvgpu_future *future);
+static void nvgpu_channel_release_future_destroy(struct nvgpu_future *future);
 
 /* Caller serializes the proc channel list. */
 static uint32_t
@@ -77,6 +89,39 @@ nvgpu_channel_find(struct nvgpu_proc *proc, uint32_t id)
 }
 
 struct nvgpu_channel *
+nvgpu_channel_borrow_by_id_locked(struct nvgpu_proc *proc, uint32_t id)
+{
+	struct nvgpu_channel *chan;
+
+	chan = nvgpu_channel_find(proc, id);
+	if (chan == NULL || chan->closing)
+		return (NULL);
+	return (chan);
+}
+
+void
+nvgpu_channel_close_locked(struct nvgpu_channel *chan)
+{
+	KASSERT(chan != NULL && !chan->closing,
+	    ("closing an inactive nvgpu channel"));
+	chan->closing = true;
+}
+
+void
+nvgpu_channel_remove_closed(struct nvgpu_proc *proc,
+    struct nvgpu_channel *chan)
+{
+	struct nvgpu_channel_list *channels;
+
+	channels = nvgpu_proc_get_channels(proc);
+	nvgpu_proc_lock(proc);
+	KASSERT(chan->closing, ("removing an active nvgpu channel"));
+	TAILQ_REMOVE(channels, chan, link);
+	nvgpu_proc_unlock(proc);
+	nvgpu_channel_release(chan);
+}
+
+struct nvgpu_channel *
 nvgpu_channel_hold_by_id(struct nvgpu_proc *proc, uint32_t id)
 {
 	struct nvgpu_channel *chan;
@@ -84,7 +129,7 @@ nvgpu_channel_hold_by_id(struct nvgpu_proc *proc, uint32_t id)
 	if (proc == NULL)
 		return (NULL);
 	nvgpu_proc_lock(proc);
-	chan = nvgpu_channel_find(proc, id);
+	chan = nvgpu_channel_borrow_by_id_locked(proc, id);
 	if (chan != NULL)
 		atomic_add_int(&chan->refs, 1);
 	nvgpu_proc_unlock(proc);
@@ -319,24 +364,95 @@ nvgpu_channel_alloc(struct nvgpu_proc *proc,
 int
 nvgpu_channel_release_by_id(struct nvgpu_proc *proc, int32_t channel)
 {
-	struct nvgpu_channel_list *channels;
+	struct nvgpu_channel_release_future *release;
+	struct nvgpu_fence **ordering_waits;
+	struct dma_fence **waits;
+	struct nvgpu_fence *done_fence;
 	struct nvgpu_channel *chan;
+	uint32_t capacity;
+	uint32_t wait_count;
+	int error;
 
 	if (proc == NULL)
 		return (EINVAL);
-	channels = nvgpu_proc_get_channels(proc);
-	if (channels == NULL)
-		return (EINVAL);
-	nvgpu_proc_lock(proc);
-	chan = nvgpu_channel_find(proc, (uint32_t)channel);
-	if (chan == NULL) {
-		nvgpu_proc_unlock(proc);
-		return (ENOENT);
+	done_fence = nvgpu_fence_create(nvgpu_proc_get_device(proc),
+	    "channel-release");
+	if (done_fence == NULL)
+		return (ENOMEM);
+	release = kmalloc(sizeof(*release), M_NVGPU_CHANNEL,
+	    M_WAITOK | M_ZERO);
+	capacity = 0;
+	ordering_waits = NULL;
+	for (;;) {
+		if (capacity != 0) {
+			ordering_waits = kmalloc((size_t)capacity *
+			    sizeof(*ordering_waits), M_NVGPU_CHANNEL,
+			    M_WAITOK | M_ZERO);
+		}
+		wait_count = 0;
+		error = nvgpu_proc_register_channel_release(proc,
+		    (uint32_t)channel, &chan, ordering_waits, capacity,
+		    &wait_count);
+		if (error != ENOSPC)
+			break;
+		if (ordering_waits != NULL)
+			_kfree(ordering_waits, M_NVGPU_CHANNEL);
+		ordering_waits = NULL;
+		capacity = wait_count;
 	}
-	TAILQ_REMOVE(channels, chan, link);
-	nvgpu_proc_unlock(proc);
-	nvgpu_channel_release(chan);
-	return (0);
+	if (error != 0) {
+		if (ordering_waits != NULL)
+			_kfree(ordering_waits, M_NVGPU_CHANNEL);
+		_kfree(release, M_NVGPU_CHANNEL);
+		nvgpu_fence_release(done_fence);
+		return (error);
+	}
+	waits = NULL;
+	if (wait_count != 0) {
+		waits = kmalloc((size_t)wait_count * sizeof(*waits),
+		    M_NVGPU_CHANNEL, M_WAITOK | M_ZERO);
+		for (uint32_t i = 0; i < wait_count; i++) {
+			waits[i] = nvgpu_fence_addref_as_dma(ordering_waits[i]);
+			nvgpu_fence_release(ordering_waits[i]);
+		}
+	}
+	if (ordering_waits != NULL)
+		_kfree(ordering_waits, M_NVGPU_CHANNEL);
+	release->channel = chan;
+	nvgpu_fence_addref(done_fence);
+	error = nvgpu_future_spawn(&release->base, proc, done_fence, waits,
+	    wait_count, nvgpu_channel_release_future_poll,
+	    nvgpu_channel_release_future_destroy);
+	for (uint32_t i = 0; i < wait_count; i++)
+		dma_fence_put(waits[i]);
+	if (waits != NULL)
+		_kfree(waits, M_NVGPU_CHANNEL);
+	if (error != 0)
+		nvgpu_future_finish(&release->base, error);
+	if (error == 0)
+		error = nvgpu_fence_wait(done_fence, true);
+	nvgpu_fence_release(done_fence);
+	return (error);
+}
+
+static struct nvgpu_future_result
+nvgpu_channel_release_future_poll(struct nvgpu_future *future __unused)
+{
+	struct nvgpu_future_result result;
+
+	result.ready = true;
+	result.result = 0;
+	return (result);
+}
+
+static void
+nvgpu_channel_release_future_destroy(struct nvgpu_future *future)
+{
+	struct nvgpu_channel_release_future *release;
+
+	release = (struct nvgpu_channel_release_future *)future;
+	nvgpu_channel_remove_closed(future->proc, release->channel);
+	_kfree(release, M_NVGPU_CHANNEL);
 }
 
 /* Remove every remaining channel and release the list's references. */

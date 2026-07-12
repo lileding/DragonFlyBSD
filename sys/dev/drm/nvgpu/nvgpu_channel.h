@@ -33,6 +33,17 @@ struct nvgpu_channel_alloc_reply {
 struct nvgpu_channel *nvgpu_channel_hold_by_id(struct nvgpu_proc *proc,
     uint32_t id);
 
+/* Return a borrowed active channel while the caller holds the proc token. */
+struct nvgpu_channel *nvgpu_channel_borrow_by_id_locked(
+    struct nvgpu_proc *proc, uint32_t id);
+
+/* Mark a borrowed channel unavailable while the caller holds the proc token. */
+void nvgpu_channel_close_locked(struct nvgpu_channel *chan);
+
+/* Remove one closed proc-owned channel and release its list reference. */
+void nvgpu_channel_remove_closed(struct nvgpu_proc *proc,
+    struct nvgpu_channel *chan);
+
 /* Release one channel reference; the last reference destroys its backend. */
 void nvgpu_channel_release(struct nvgpu_channel *chan);
 

@@ -101,14 +101,18 @@ static unsigned iterations = 1;
 static int
 xioctl(int fd, unsigned long request, void *arg, const char *name)
 {
+	int saved_errno;
 	int ret;
 
 	do {
+		errno = 0;
 		ret = ioctl(fd, request, arg);
-	} while (ret < 0 && errno == EINTR);
+		saved_errno = errno;
+	} while (ret < 0 && saved_errno == EINTR);
 	if (ret < 0)
-		fprintf(stderr, "%s failed: errno=%d (%s)\n", name, errno,
-		    strerror(errno));
+		fprintf(stderr, "%s failed: errno=%d (%s)\n", name,
+		    saved_errno, strerror(saved_errno));
+	errno = saved_errno;
 	return ret;
 }
 
@@ -379,6 +383,31 @@ test_multi_op_batch(int fd, const struct fixture *f)
 }
 
 static bool
+test_sync_cleanup_then_batch(int fd, const struct fixture *f)
+{
+	struct drm_nouveau_vm_bind_op op;
+	uint64_t va = TEST_VA + 0x8000000ULL;
+
+	for (unsigned i = 0; i < 32; i++) {
+		op = map_op(f->gart, va, 0, PAGE_64K, 0);
+		if (!vm_bind(fd, &op, 1, 0, NULL, 0, NULL, 0)) {
+			fprintf(stderr, "iteration %u map failed\n", i);
+			return false;
+		}
+		op = unmap_op(va, PAGE_64K, 0);
+		if (!vm_bind(fd, &op, 1, 0, NULL, 0, NULL, 0)) {
+			fprintf(stderr, "iteration %u unmap failed\n", i);
+			return false;
+		}
+		if (!test_multi_op_batch(fd, f)) {
+			fprintf(stderr, "iteration %u batch failed\n", i);
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
 test_async_binary_chain(int fd, const struct fixture *f)
 {
 	struct drm_nouveau_vm_bind_op first, second;
@@ -520,6 +549,7 @@ static const struct test_case tests[] = {
 	{ "overlap split/replace", test_overlap_split_replace },
 	{ "sparse replace/unmap", test_sparse_replace },
 	{ "multi-op batch", test_multi_op_batch },
+	{ "sync cleanup then batch", test_sync_cleanup_then_batch },
 	{ "async binary chain", test_async_binary_chain },
 	{ "async timeline chain", test_async_timeline_chain },
 	{ "empty async signal", test_empty_async_signal },

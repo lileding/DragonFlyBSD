@@ -22,6 +22,12 @@ struct nvgsp_channel_object;
 struct nvgsp_channel_submission;
 struct nvgsp_vmm;
 
+struct nvgsp_channel_completion {
+	volatile uint32_t *sema;
+	uint32_t payload;
+	uint32_t chid;
+};
+
 struct nvgsp_channel_push {
 	uint64_t va;
 	uint32_t va_len;
@@ -37,15 +43,12 @@ int nvgsp_channel_prepare_submit(struct nvgsp_channel *chan,
     const struct nvgsp_channel_push *pushes, uint32_t push_count,
     struct nvgsp_channel_submission **out);
 
-/* Publish GP_PUT and ring the doorbell, then release the submit token. */
+/* Copy immutable completion identity before publishing the pending fence. */
+void nvgsp_channel_describe_submit(struct nvgsp_channel_submission *submission,
+    struct nvgsp_channel_completion *completion);
+
+/* Publish GP_PUT, ring the doorbell, and consume submission. */
 void nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission);
-
-/* Sample the coherent completion semaphore without sleeping or taking a lock. */
-bool nvgsp_channel_check_submit_complete(
-	    struct nvgsp_channel_submission *submission);
-
-/* Release a completed submission and make its post/semaphore slot reusable. */
-void nvgsp_channel_release_submit(struct nvgsp_channel_submission *submission);
 
 /* Mark the current backend channel for chid faulted; future submits fail. */
 void nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid,
