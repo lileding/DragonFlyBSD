@@ -11,7 +11,7 @@
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_display.h"
-#include "nvgpu_intr.h"
+#include "nvgpu_intr_internal.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>

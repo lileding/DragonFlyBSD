@@ -207,9 +207,11 @@ struct nvgpu_display_event_ops {
 	void (*dp_irq)(void *arg, uint32_t display_id);
 };
 
+/* Initialize or release device-owned display policy around KMS registration. */
 int nvgpu_display_init(struct nvgpu_device *gpu);
 void nvgpu_display_fini(struct nvgpu_device *gpu);
 
+/* Query topology cached by display initialization; returned data is copied out. */
 uint32_t nvgpu_display_get_head_count(struct nvgpu_device *gpu);
 uint32_t nvgpu_display_get_output_mask(struct nvgpu_device *gpu);
 int nvgpu_display_get_output(struct nvgpu_device *gpu, uint32_t display_id,
@@ -219,7 +221,12 @@ int nvgpu_display_detect_output(struct nvgpu_device *gpu,
 int nvgpu_display_read_edid(struct nvgpu_device *gpu, uint32_t display_id,
 	uint8_t *data, uint32_t *size);
 
-/* The returned route is owned by the caller until enable consumes it or abort releases it. */
+/*
+ * Prepare an output route without publishing a modeset.
+ *
+ * On success prepared receives an owned route.  enable consumes it on every
+ * path; abort consumes it when the caller rolls back before enable.
+ */
 int nvgpu_display_prepare_output(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t display_id, const struct nvgpu_display_mode *mode,
 	const struct nvgpu_display_output_config *config,
@@ -227,13 +234,23 @@ int nvgpu_display_prepare_output(struct nvgpu_device *gpu, uint32_t head,
 void nvgpu_display_abort_output(struct nvgpu_device *gpu,
 	struct nvgpu_display_prepared_output *prepared);
 
-/* Consumes prepared on every return path; scanout remains borrowed and pinned by KMS. */
+/*
+ * Enable a prepared route and initial scanout.
+ *
+ * prepared is consumed on every return path.  Configuration and scanout data
+ * are borrowed for the call; KMS keeps the underlying BO pinned separately.
+ */
 int nvgpu_display_enable(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t window, const struct nvgpu_display_head_config *head_config,
 	const struct nvgpu_display_scanout *scanout,
 	struct nvgpu_display_prepared_output *prepared);
 int nvgpu_display_disable(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t window);
+
+/*
+ * Queue a primary-plane update.  pageflip_cookie remains caller-owned until a
+ * pageflip callback consumes it or cancel_pageflip returns true.
+ */
 int nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t window, const struct nvgpu_display_scanout *scanout,
 	void *pageflip_cookie);
@@ -250,6 +267,8 @@ bool nvgpu_display_cancel_pageflip(struct nvgpu_device *gpu, uint32_t head,
 	void *pageflip_cookie);
 int nvgpu_display_disable_primary(struct nvgpu_device *gpu,
 	uint32_t window);
+
+/* Program, move, or disable the hardware cursor for one active head. */
 int nvgpu_display_update_cursor(struct nvgpu_device *gpu, uint32_t head,
 	const struct nvgpu_display_cursor *cursor, bool legacy_update);
 void nvgpu_display_move_cursor(struct nvgpu_device *gpu, uint32_t head,
@@ -259,9 +278,14 @@ int nvgpu_display_disable_cursor(struct nvgpu_device *gpu, uint32_t head,
 /* Ensure a persistent pitch-linear console scanout and return borrowed scalar metadata. */
 int nvgpu_display_prepare_console(struct nvgpu_device *gpu, uint32_t width,
 	uint32_t height, struct nvgpu_display_console *console);
+
+/* Release persistent console scanout storage after KMS has stopped using it. */
 void nvgpu_display_release_console(struct nvgpu_device *gpu);
 
-/* Event callbacks are borrowed until cleared by KMS teardown. */
+/*
+ * Install borrowed KMS callbacks and their argument until replaced or cleared.
+ * Vblank handling runs in the interrupt worker's process context.
+ */
 void nvgpu_display_set_event_ops(struct nvgpu_device *gpu,
 	const struct nvgpu_display_event_ops *ops, void *arg);
 void nvgpu_display_enable_vblank(struct nvgpu_device *gpu, uint32_t head);

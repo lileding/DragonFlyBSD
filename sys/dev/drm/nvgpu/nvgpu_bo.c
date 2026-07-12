@@ -10,6 +10,7 @@
 #include "nvgpu_device.h"
 #include "nvgpu_fence.h"
 #include "nvgpu_proc.h"
+#include "nvgpu_proc_internal.h"
 #include "nvgpu_ttm.h"
 #include "nvgsp_state.h"
 #include "nvgsp_vram.h"
@@ -23,7 +24,6 @@
 #include <machine/cpufunc.h>
 #include <machine/pmap.h>
 
-#include <linux/dma-fence.h>
 #include <linux/reservation.h>
 #include <linux/slab.h>
 #include <drm/drmP.h>
@@ -447,44 +447,21 @@ nvgpu_bo_scanout_unpin(struct nvgpu_bo *bo)
 }
 
 int
-nvgpu_bo_resv_add_shared_fence(struct nvgpu_bo *bo, struct dma_fence *fence)
-{
-	struct reservation_object *resv = nvgpu_bo_get_resv(bo);
-	int error;
-
-	reservation_object_lock(resv, NULL);
-	error = reservation_object_reserve_shared(resv);
-	if (error == 0)
-		reservation_object_add_shared_fence(resv, fence);
-	reservation_object_unlock(resv);
-	return (nvgpu_errno(error));
-}
-
-int
 nvgpu_bo_add_bookkeeping_fence(struct nvgpu_bo *bo,
     struct nvgpu_fence *fence)
 {
-	struct dma_fence *dma;
+	struct reservation_object *resv;
 	int error;
 
 	if (bo == NULL || fence == NULL)
 		return (EINVAL);
-	dma = nvgpu_fence_addref_as_dma(fence);
-	if (dma == NULL)
-		return (EINVAL);
-	error = nvgpu_bo_resv_add_shared_fence(bo, dma);
-	dma_fence_put(dma);
-	return (error);
-}
-
-void
-nvgpu_bo_resv_add_excl_fence(struct nvgpu_bo *bo, struct dma_fence *fence)
-{
-	struct reservation_object *resv = nvgpu_bo_get_resv(bo);
-
+	resv = nvgpu_bo_get_resv(bo);
 	reservation_object_lock(resv, NULL);
-	reservation_object_add_excl_fence(resv, fence);
+	error = reservation_object_reserve_shared(resv);
+	if (error == 0)
+		reservation_object_add_shared_fence(resv, &fence->dma);
 	reservation_object_unlock(resv);
+	return (nvgpu_errno(error));
 }
 
 int

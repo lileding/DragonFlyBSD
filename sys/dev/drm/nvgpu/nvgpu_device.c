@@ -8,7 +8,6 @@
 #include "nvgpu_chip.h"
 #include "nvgpu_debug.h"
 #include "nvdrm_drv.h"
-#include "nvgpu_exec.h"
 #include "nvgpu_intr.h"
 #include "nvgpu_sched.h"
 #include "nvgpu_unload.h"
@@ -42,8 +41,6 @@ enum nvgpu_boot_phase {
 	NVGPU_BOOT_BEGIN = 0,
 	NVGPU_BOOT_BARS,
 	NVGPU_BOOT_UNLOAD,
-	NVGPU_BOOT_SCHED,
-	NVGPU_BOOT_EXEC,
 	NVGPU_BOOT_THREADED,
 	NVGPU_BOOT_STATE,
 	NVGPU_BOOT_RPC,
@@ -56,8 +53,7 @@ enum nvgpu_boot_phase {
 	NVGPU_BOOT_BOOTSTRAP_CHANNEL,
 	NVGPU_BOOT_GOLDEN_CHANNEL,
 	NVGPU_BOOT_DISPLAY,
-	NVGPU_BOOT_INTR_INIT,
-	NVGPU_BOOT_INTR_ENABLED,
+	NVGPU_BOOT_INTR,
 	NVGPU_BOOT_DRM,
 	NVGPU_BOOT_COMPLETE,
 };
@@ -90,8 +86,6 @@ struct nvgpu_device {
 	struct nvgpu_display *display;
 	struct nvdrm_kms *kms;
 	struct nvgpu_unload_state *unload;
-	struct nvgpu_sched *sched;
-	struct nvgpu_exec_state *exec;
 };
 
 /*
@@ -130,9 +124,15 @@ nvgpu_device_handle_modevent(module_t mod __unused, int type, void *data __unuse
 		error = nvgpu_debug_init();
 		if (error != 0)
 			return (error);
+		error = nvgpu_sched_start();
+		if (error != 0) {
+			nvgpu_debug_fini();
+			return (error);
+		}
 		nvgpu_log(NVGPU_LOG_INFO, "loaded (target GSP firmware 570.144)\n");
 		return (0);
 	case MOD_UNLOAD:
+		nvgpu_sched_stop();
 		nvgpu_log(NVGPU_LOG_INFO, "unloaded\n");
 		nvgpu_debug_fini();
 		return (0);
@@ -345,26 +345,6 @@ nvgpu_device_set_unload_state(struct nvgpu_device *gpu,
 	gpu->unload = state;
 }
 
-struct nvgpu_sched *
-nvgpu_device_get_sched(struct nvgpu_device *gpu)
-{
-	return (gpu != NULL ? gpu->sched : NULL);
-}
-
-struct nvgpu_exec_state *
-nvgpu_device_get_exec_state(struct nvgpu_device *gpu)
-{
-	return (gpu != NULL ? gpu->exec : NULL);
-}
-
-void
-nvgpu_device_set_exec_state(struct nvgpu_device *gpu,
-    struct nvgpu_exec_state *state)
-{
-	if (gpu != NULL)
-		gpu->exec = state;
-}
-
 struct nvgpu_ttm *
 nvgpu_device_get_ttm(struct nvgpu_device *gpu)
 {
@@ -538,14 +518,10 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_DISPLAY;
-	error = nvgpu_intr_init(gpu);
+	error = nvgpu_intr_start(gpu);
 	if (error != 0)
 		return (error);
-	gpu->boot_phase = NVGPU_BOOT_INTR_INIT;
-	error = nvgpu_intr_enable(gpu);
-	if (error != 0)
-		return (error);
-	gpu->boot_phase = NVGPU_BOOT_INTR_ENABLED;
+	gpu->boot_phase = NVGPU_BOOT_INTR;
 	error = nvdrm_register(gpu);
 	if (error != 0)
 		return (error);
@@ -576,10 +552,8 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_vmm_fini_kernel(gpu);
 
 	/* No display, channel, or VMM path remains to consume GSP events now. */
-	if (phase >= NVGPU_BOOT_INTR_ENABLED)
-		nvgpu_intr_disable(gpu);
-	if (phase >= NVGPU_BOOT_INTR_INIT)
-		nvgpu_intr_fini(gpu);
+	if (phase >= NVGPU_BOOT_INTR)
+		nvgpu_intr_stop(gpu);
 
 	if (phase >= NVGPU_BOOT_BAR1)
 		nvgsp_bar_fini_bar1(gpu);
@@ -591,12 +565,6 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
-	if (phase >= NVGPU_BOOT_EXEC)
-		nvgpu_exec_fini(gpu);
-	if (phase >= NVGPU_BOOT_SCHED) {
-		nvgpu_sched_stop(gpu->sched);
-		gpu->sched = NULL;
-	}
 	if (phase >= NVGPU_BOOT_UNLOAD)
 		nvgpu_unload_fini(gpu);
 	if (phase >= NVGPU_BOOT_BARS)
@@ -654,16 +622,6 @@ nvgpu_device_attach_pci(device_t dev)
 	if (error != 0)
 		goto fail_locked;
 	gpu->boot_phase = NVGPU_BOOT_UNLOAD;
-
-	error = nvgpu_sched_start(gpu, &gpu->sched);
-	if (error != 0)
-		goto fail_locked;
-	gpu->boot_phase = NVGPU_BOOT_SCHED;
-
-	error = nvgpu_exec_init(gpu);
-	if (error != 0)
-		goto fail_locked;
-	gpu->boot_phase = NVGPU_BOOT_EXEC;
 
 	error = nvgpu_device_start_boot(gpu);
 	if (error != 0)

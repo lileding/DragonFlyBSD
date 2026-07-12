@@ -82,7 +82,7 @@ nvdrm_file_open(struct drm_device *ddev, struct drm_file *file_priv)
 	return (0);
 }
 
-/* DRM postclose callback.  Disconnects the file and posts async proc stop. */
+/* DRM postclose callback.  Disconnect the file and release its proc owner. */
 void
 nvdrm_file_postclose(struct drm_device *ddev __unused, struct drm_file *file_priv)
 {
@@ -97,7 +97,7 @@ nvdrm_file_postclose(struct drm_device *ddev __unused, struct drm_file *file_pri
 	proc = file->proc;
 	file->proc = NULL;
 	nvgpu_log(NVGPU_LOG_DEBUG, "DRM file postclose gpu=%p proc=%p\n", file->gpu, proc);
-	nvgpu_proc_stop(proc);
+	nvgpu_proc_release(proc);
 	_kfree(file, M_NVDRM_FILE);
 }
 

@@ -9,14 +9,17 @@
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_display.h"
-#include "nvgpu_exec.h"
+#include "nvgpu_future.h"
+#include "nvgpu_intr_internal.h"
 #include "nvgpu_sched.h"
+#include "nvgsp_channel.h"
 #include "nvgsp_event.h"
 #include "nvgsp_state.h"
 
 #include <bus/pci/pcireg.h>
 #include <bus/pci/pcivar.h>
 #include <machine/atomic.h>
+#include <machine/cpufunc.h>
 #include <sys/bus.h>
 #include <sys/globaldata.h>
 #include <sys/kernel.h>
@@ -24,6 +27,8 @@
 #include <sys/param.h>
 #include <sys/rman.h>
 #include <sys/serialize.h>
+#include <sys/spinlock.h>
+#include <sys/spinlock2.h>
 
 #define NVGPU_PCI_MSI_REARM		0x68
 #define NVGPU_CPU_INTR_TOP		0x00b81600u
@@ -43,6 +48,8 @@
 
 MALLOC_DEFINE(M_NVGPU_INTR, "nvgpu_intr", "nvgpu interrupt state");
 
+TAILQ_HEAD(nvgpu_sema_list, nvgpu_sema);
+
 struct nvgpu_intr_state {
 	struct nvgpu_device *gpu;
 	int irq_rid;
@@ -51,6 +58,8 @@ struct nvgpu_intr_state {
 	void *irq_cookie;
 	struct lwkt_serialize irq_serialize;
 	struct lwkt_token worker_token;
+	struct spinlock parked_spin;
+	struct nvgpu_sema_list parked;
 	struct thread *worker;
 	volatile u_int events;
 	uint64_t fault_chids[NVGPU_INTR_CHID_COUNT / 64];
@@ -66,6 +75,10 @@ struct nvgpu_intr_state {
 };
 
 static void nvgpu_intr_run(void *arg);
+static int nvgpu_intr_init(struct nvgpu_device *gpu);
+static int nvgpu_intr_enable(struct nvgpu_device *gpu);
+static void nvgpu_intr_disable(struct nvgpu_device *gpu);
+static void nvgpu_intr_fini(struct nvgpu_device *gpu);
 
 static void
 nvgpu_intr_rearm_msi(struct nvgpu_device *gpu, struct nvgpu_intr_state *intr)
@@ -181,8 +194,34 @@ nvgpu_intr_run(void *arg)
 
 		if ((events & NVGPU_INTR_EVENT_GSP) != 0)
 			nvgsp_event_dispatch(gpu);
-		if ((events & NVGPU_INTR_EVENT_EXEC) != 0)
-			nvgpu_exec_harvest_completed(gpu);
+		if ((events & NVGPU_INTR_EVENT_EXEC) != 0) {
+			struct nvgpu_sema_list completed;
+			struct nvgpu_sema *sema, *next;
+
+			TAILQ_INIT(&completed);
+			spin_lock(&intr->parked_spin);
+			for (sema = TAILQ_FIRST(&intr->parked); sema != NULL;
+			    sema = next) {
+				next = TAILQ_NEXT(sema, parked_link);
+				cpu_lfence();
+				if ((int32_t)(*sema->address - sema->target) < 0)
+					continue;
+				TAILQ_REMOVE(&intr->parked, sema, parked_link);
+				sema->parked = false;
+				TAILQ_INSERT_TAIL(&completed, sema, parked_link);
+			}
+			spin_unlock(&intr->parked_spin);
+			while ((sema = TAILQ_FIRST(&completed)) != NULL) {
+				struct nvgpu_future *future = sema->future;
+				int error;
+
+				TAILQ_REMOVE(&completed, sema, parked_link);
+				sema->future = NULL;
+				error = nvgpu_sched_put(future);
+				KASSERT(error == 0,
+				    ("completion after scheduler stop: %d", error));
+			}
+		}
 		if ((events & NVGPU_INTR_EVENT_DISPLAY) != 0) {
 			const struct nvgpu_chip_config *chip = nvgpu_device_get_chip(gpu);
 			uint32_t head_mask = nvgpu_device_rd32(gpu,
@@ -221,10 +260,38 @@ nvgpu_intr_run(void *arg)
 			for (uint32_t word = 0; word < NVGPU_INTR_CHID_COUNT / 64;
 			    word++) {
 				while (fault_chids[word] != 0) {
+					struct nvgpu_sema_list failed;
+					struct nvgpu_sema *sema, *next;
 					uint32_t bit = __builtin_ctzll(fault_chids[word]);
+					uint32_t chid = word * 64 + bit;
 
 					fault_chids[word] &= ~(1ULL << bit);
-					nvgpu_exec_fail_channel(gpu, word * 64 + bit, EIO);
+					nvgsp_channel_mark_fault(gpu, chid, EIO);
+					TAILQ_INIT(&failed);
+					spin_lock(&intr->parked_spin);
+					for (sema = TAILQ_FIRST(&intr->parked);
+					    sema != NULL; sema = next) {
+						next = TAILQ_NEXT(sema, parked_link);
+						if (sema->chid != chid)
+							continue;
+						TAILQ_REMOVE(&intr->parked, sema,
+						    parked_link);
+						sema->parked = false;
+						sema->error = EIO;
+						TAILQ_INSERT_TAIL(&failed, sema,
+						    parked_link);
+					}
+					spin_unlock(&intr->parked_spin);
+					while ((sema = TAILQ_FIRST(&failed)) != NULL) {
+						struct nvgpu_future *future = sema->future;
+						int error;
+
+						TAILQ_REMOVE(&failed, sema, parked_link);
+						sema->future = NULL;
+						error = nvgpu_sched_put(future);
+						KASSERT(error == 0,
+						    ("fault after scheduler stop: %d", error));
+					}
 				}
 			}
 		}
@@ -240,10 +307,10 @@ nvgpu_intr_handle_isr(void *arg)
 {
 	struct nvgpu_device *gpu = arg;
 
-	nvgpu_intr_handle(gpu);
+	nvgpu_intr_decode(gpu);
 }
 
-int
+static int
 nvgpu_intr_init(struct nvgpu_device *gpu)
 {
 	struct nvgpu_intr_state *intr;
@@ -256,9 +323,12 @@ nvgpu_intr_init(struct nvgpu_device *gpu)
 	intr = kmalloc(sizeof(*intr), M_NVGPU_INTR, M_WAITOK | M_ZERO);
 	intr->gpu = gpu;
 	lwkt_token_init(&intr->worker_token, "nvgpui");
+	spin_init(&intr->parked_spin, "nvgpu parked futures");
+	TAILQ_INIT(&intr->parked);
 	if (lwkt_create(nvgpu_intr_run, intr, &intr->worker, NULL,
 	    TDF_NOSTART, mycpu->gd_cpuid, "nvgpu_intr") != 0) {
 		lwkt_token_uninit(&intr->worker_token);
+		spin_uninit(&intr->parked_spin);
 		kfree(intr, M_NVGPU_INTR);
 		return (ENOMEM);
 	}
@@ -289,6 +359,7 @@ nvgpu_intr_init(struct nvgpu_device *gpu)
 			tsleep(&intr->worker, 0, "nvgpuix", 0);
 		lwkt_reltoken(&intr->worker_token);
 		lwkt_token_uninit(&intr->worker_token);
+		spin_uninit(&intr->parked_spin);
 		kfree(intr, M_NVGPU_INTR);
 		return (ENXIO);
 	}
@@ -306,6 +377,7 @@ nvgpu_intr_init(struct nvgpu_device *gpu)
 			tsleep(&intr->worker, 0, "nvgpuix", 0);
 		lwkt_reltoken(&intr->worker_token);
 		lwkt_token_uninit(&intr->worker_token);
+		spin_uninit(&intr->parked_spin);
 		kfree(intr, M_NVGPU_INTR);
 		return (ENXIO);
 	}
@@ -315,7 +387,7 @@ nvgpu_intr_init(struct nvgpu_device *gpu)
 	return (0);
 }
 
-int
+static int
 nvgpu_intr_enable(struct nvgpu_device *gpu)
 {
 	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
@@ -357,7 +429,7 @@ nvgpu_intr_disable_display_dispatch(struct nvgpu_device *gpu)
 	lwkt_reltoken(&intr->worker_token);
 }
 
-void
+static void
 nvgpu_intr_disable(struct nvgpu_device *gpu)
 {
 	const struct nvgpu_chip_config *chip = nvgpu_device_get_chip(gpu);
@@ -366,7 +438,7 @@ nvgpu_intr_disable(struct nvgpu_device *gpu)
 		nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, 0);
 }
 
-void
+static void
 nvgpu_intr_fini(struct nvgpu_device *gpu)
 {
 	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
@@ -391,14 +463,13 @@ nvgpu_intr_fini(struct nvgpu_device *gpu)
 		tsleep(&intr->worker, 0, "nvgpuix", 0);
 	lwkt_reltoken(&intr->worker_token);
 	lwkt_token_uninit(&intr->worker_token);
+	spin_lock(&intr->parked_spin);
+	KASSERT(TAILQ_EMPTY(&intr->parked),
+	    ("stopping interrupt state with parked futures"));
+	spin_unlock(&intr->parked_spin);
+	spin_uninit(&intr->parked_spin);
 	nvgpu_device_set_intr(gpu, NULL);
 	kfree(intr, M_NVGPU_INTR);
-}
-
-void
-nvgpu_intr_handle(struct nvgpu_device *gpu)
-{
-	nvgpu_intr_decode(gpu);
 }
 
 void
@@ -415,13 +486,51 @@ nvgpu_intr_report_channel_fault(struct nvgpu_device *gpu, uint32_t chid)
 	lwkt_reltoken(&intr->worker_token);
 }
 
-void
-nvgpu_intr_request_exec_harvest(struct nvgpu_device *gpu)
+int
+nvgpu_intr_start(struct nvgpu_device *gpu)
 {
-	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
+	int error;
 
+	error = nvgpu_intr_init(gpu);
+	if (error != 0)
+		return (error);
+	error = nvgpu_intr_enable(gpu);
+	if (error != 0) {
+		nvgpu_intr_fini(gpu);
+		return (error);
+	}
+	return (0);
+}
+
+void
+nvgpu_intr_stop(struct nvgpu_device *gpu)
+{
+	nvgpu_intr_disable(gpu);
+	nvgpu_intr_fini(gpu);
+}
+
+int
+nvgpu_intr_park(struct nvgpu_sema *sema, struct nvgpu_future *future)
+{
+	struct nvgpu_intr_state *intr;
+
+	if (sema == NULL || future == NULL || sema->device == NULL ||
+	    sema->address == NULL || sema->target == 0)
+		return (EINVAL);
+	intr = nvgpu_device_get_intr(sema->device);
 	if (intr == NULL)
-		return;
-	atomic_set_int(&intr->events, NVGPU_INTR_EVENT_EXEC);
-	wakeup(&intr->events);
+		return (ENODEV);
+	spin_lock(&intr->parked_spin);
+	if (intr->stopping) {
+		spin_unlock(&intr->parked_spin);
+		return (ENODEV);
+	}
+	KASSERT(!sema->parked && sema->future == NULL,
+	    ("parking one GPU semaphore twice"));
+	sema->future = future;
+	sema->error = 0;
+	sema->parked = true;
+	TAILQ_INSERT_TAIL(&intr->parked, sema, parked_link);
+	spin_unlock(&intr->parked_spin);
+	return (0);
 }

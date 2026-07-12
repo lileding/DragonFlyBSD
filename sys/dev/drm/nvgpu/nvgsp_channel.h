@@ -50,6 +50,9 @@ void nvgsp_channel_describe_submit(struct nvgsp_channel_submission *submission,
 /* Publish GP_PUT, ring the doorbell, and consume submission. */
 void nvgsp_channel_commit_submit(struct nvgsp_channel_submission *submission);
 
+/* Roll back one prepared submission and consume it without ringing doorbell. */
+void nvgsp_channel_abort_submit(struct nvgsp_channel_submission *submission);
+
 /* Mark the current backend channel for chid faulted; future submits fail. */
 void nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid,
     int error);

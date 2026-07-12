@@ -10,7 +10,13 @@
 struct drm_file;
 struct nvgpu_proc;
 
-/* Nouveau syscall stubs.  data is the DRM-copied ioctl payload and is not retained. */
+/*
+ * Adapt one validated nouveau ioctl payload to native subsystem arguments.
+ *
+ * Every entry borrows proc, file, and the DRM-owned data buffer for the call.
+ * Entries may sleep for copyin, object lookup, allocation, or synchronous
+ * completion, and return positive DragonFly errno values.
+ */
 int nvgpu_syscall_getparam(struct nvgpu_proc *proc, struct drm_file *file,
     void *data);
 int nvgpu_syscall_vm_init(struct nvgpu_proc *proc, struct drm_file *file,

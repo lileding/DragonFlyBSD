@@ -5,7 +5,7 @@
  */
 
 #include "nvgsp_event.h"
-#include "nvgpu_intr.h"
+#include "nvgpu_intr_internal.h"
 #include "nvgsp_disp.h"
 #include "nvgsp_priv.h"
 

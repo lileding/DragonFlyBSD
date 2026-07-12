@@ -13,7 +13,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -918,6 +921,100 @@ test_close_with_pending_future(int fd_unused __attribute__((unused)))
 }
 
 static bool
+test_channel_reuse_after_free(int fd)
+{
+	for (unsigned i = 0; i < 128; i++) {
+		struct drm_nouveau_channel_free free_args;
+		uint32_t channel;
+
+		if (!channel_alloc_one(fd, &channel))
+			return false;
+		memset(&free_args, 0, sizeof(free_args));
+		free_args.channel = (int32_t)channel;
+		if (xioctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_FREE, &free_args,
+		    "DRM_IOCTL_NOUVEAU_CHANNEL_FREE") != 0)
+			return false;
+	}
+	return true;
+}
+
+#define CHANNEL_CREATE_THREADS 16u
+
+struct channel_create_race {
+	int fd;
+	atomic_uint ready;
+	atomic_uint allocated;
+	atomic_bool start;
+	atomic_bool release;
+};
+
+struct channel_create_thread {
+	struct channel_create_race *race;
+	uint32_t channel;
+	bool ok;
+};
+
+static void *
+channel_create_thread(void *argument)
+{
+	struct channel_create_thread *thread = argument;
+	struct channel_create_race *race = thread->race;
+
+	atomic_fetch_add_explicit(&race->ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&race->start, memory_order_acquire))
+		sched_yield();
+	thread->ok = channel_alloc_one(race->fd, &thread->channel);
+	atomic_fetch_add_explicit(&race->allocated, 1, memory_order_release);
+	while (!atomic_load_explicit(&race->release, memory_order_acquire))
+		sched_yield();
+	if (thread->ok)
+		channel_free_one(race->fd, thread->channel);
+	return NULL;
+}
+
+static bool
+test_concurrent_first_channel_create(int fd_unused __attribute__((unused)))
+{
+	struct channel_create_thread contexts[CHANNEL_CREATE_THREADS];
+	struct channel_create_race race;
+	pthread_t threads[CHANNEL_CREATE_THREADS];
+	unsigned created;
+	bool ok;
+	int fd;
+
+	fd = open_device();
+	if (fd < 0)
+		return false;
+	memset(&race, 0, sizeof(race));
+	memset(contexts, 0, sizeof(contexts));
+	race.fd = fd;
+	atomic_init(&race.ready, 0);
+	atomic_init(&race.allocated, 0);
+	atomic_init(&race.start, false);
+	atomic_init(&race.release, false);
+	created = 0;
+	for (; created < CHANNEL_CREATE_THREADS; created++) {
+		contexts[created].race = &race;
+		if (pthread_create(&threads[created], NULL,
+		    channel_create_thread, &contexts[created]) != 0)
+			break;
+	}
+	while (atomic_load_explicit(&race.ready, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&race.start, true, memory_order_release);
+	while (atomic_load_explicit(&race.allocated, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&race.release, true, memory_order_release);
+	ok = created == CHANNEL_CREATE_THREADS;
+	for (unsigned i = 0; i < created; i++) {
+		if (pthread_join(threads[i], NULL) != 0 || !contexts[i].ok)
+			ok = false;
+	}
+	close(fd);
+	return ok;
+}
+
+static bool
 test_channel_free_with_pending_exec(int fd)
 {
 	struct drm_nouveau_channel_free free_args;
@@ -1125,6 +1222,8 @@ static const struct test_case tests[] = {
 	{ "invalid wait handle", test_invalid_wait_handle },
 	{ "unsignaled wait without fence", test_unsignaled_wait_without_fence },
 	{ "close with pending future", test_close_with_pending_future },
+	{ "channel reuse after free", test_channel_reuse_after_free },
+	{ "concurrent first channel create", test_concurrent_first_channel_create },
 	{ "channel free with pending exec", test_channel_free_with_pending_exec },
 	{ "exec bind exec chain", test_exec_bind_exec_chain },
 	{ "exec bind exec bind exec chain", test_exec_bind_exec_bind_exec_chain },

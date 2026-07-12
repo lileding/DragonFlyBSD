@@ -1,15 +1,14 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Device-global future scheduler for the native NVIDIA GPU driver.
+ * Module-global future scheduler for the native NVIDIA GPU driver.
  */
 
 #include "nvgpu_future.h"
+#include "nvgpu_future_internal.h"
 #include "nvgpu_sched.h"
-#include "nvgpu_debug.h"
-#include "nvgpu_device.h"
-#include "nvgpu_proc.h"
 
+#include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/spinlock.h>
@@ -17,130 +16,154 @@
 #include <sys/systm.h>
 #include <sys/thread.h>
 
-TAILQ_HEAD(nvgpu_future_queue, nvgpu_future);
+TAILQ_HEAD(nvgpu_sched_queue, nvgpu_future_state);
 
 struct nvgpu_sched {
-	struct nvgpu_device *gpu;
 	struct thread **threads;
-	struct lwkt_token token;
+	struct lwkt_token stop_token;
 	struct spinlock queue_spin;
-	struct nvgpu_future_queue active_tasks;
-	u_int num_workers;
+	struct nvgpu_sched_queue active;
+	u_int worker_count;
 	bool stopping;
 };
 
 static MALLOC_DEFINE(M_NVGPU_SCHED, "nvgpu_sched", "nvgpu scheduler");
 
-static void nvgpu_sched_run(void *arg);
+static struct nvgpu_sched *g_sched;
+
+static void nvgpu_sched_run(void *argument);
 
 int
-nvgpu_sched_start(struct nvgpu_device *gpu, struct nvgpu_sched **out)
+nvgpu_sched_start(void)
 {
 	struct nvgpu_sched *sched;
 	int error;
-	int i;
 
-	if (gpu == NULL)
-		return (EINVAL);
+	if (g_sched != NULL)
+		return (EALREADY);
 	sched = kmalloc(sizeof(*sched), M_NVGPU_SCHED, M_WAITOK | M_ZERO);
-	sched->gpu = gpu;
-	sched->num_workers = 0;
-	lwkt_token_init(&sched->token, "nvgpsd");
-	spin_init(&sched->queue_spin, "nvgpu sched queue");
-	TAILQ_INIT(&sched->active_tasks);
 	sched->threads = kmalloc(sizeof(*sched->threads) * ncpus,
 	    M_NVGPU_SCHED, M_WAITOK | M_ZERO);
-	for (i = 0; i < ncpus; i++) {
+	lwkt_token_init(&sched->stop_token, "nvgpsd");
+	spin_init(&sched->queue_spin, "nvgpu sched queue");
+	TAILQ_INIT(&sched->active);
+
+	for (int cpu = 0; cpu < ncpus; cpu++) {
 		error = lwkt_create(nvgpu_sched_run, sched,
-		    &sched->threads[i], NULL, TDF_NOSTART, i,
-		    "nvgpu_sched/%d", i);
+		    &sched->threads[cpu], NULL, TDF_NOSTART, cpu,
+		    "nvgpu_sched/%d", cpu);
 		if (error != 0) {
-			nvgpu_sched_stop(sched);
+			lwkt_gettoken(&sched->stop_token);
+			spin_lock(&sched->queue_spin);
+			sched->stopping = true;
+			spin_unlock(&sched->queue_spin);
+			wakeup(&sched->active);
+			while (sched->worker_count != 0)
+				tsleep(&sched->worker_count, 0, "nvgpsx", 0);
+			lwkt_reltoken(&sched->stop_token);
+			spin_uninit(&sched->queue_spin);
+			lwkt_token_uninit(&sched->stop_token);
+			_kfree(sched->threads, M_NVGPU_SCHED);
+			_kfree(sched, M_NVGPU_SCHED);
 			return (error);
 		}
-		lwkt_setpri_initial(sched->threads[i], TDPRI_KERN_DAEMON);
-		lwkt_schedule(sched->threads[i]);
-		sched->num_workers++;
+		lwkt_setpri_initial(sched->threads[cpu], TDPRI_KERN_DAEMON);
+		sched->worker_count++;
+		lwkt_schedule(sched->threads[cpu]);
 	}
-	*out = sched;
+	g_sched = sched;
 	return (0);
 }
 
 void
-nvgpu_sched_stop(struct nvgpu_sched *sched)
+nvgpu_sched_stop(void)
 {
+	struct nvgpu_sched *sched;
+
+	sched = g_sched;
 	if (sched == NULL)
 		return;
-	lwkt_gettoken(&sched->token);
+	g_sched = NULL;
+	lwkt_gettoken(&sched->stop_token);
 	spin_lock(&sched->queue_spin);
-	KASSERT(TAILQ_EMPTY(&sched->active_tasks),
-	    ("stopping scheduler with active futures"));
 	sched->stopping = true;
 	spin_unlock(&sched->queue_spin);
-	for (int i = 0; i < sched->num_workers; i++)
-		wakeup(&sched->active_tasks);
-	while (sched->num_workers != 0)
-		tsleep(&sched->num_workers, 0, "nvgpsx", 0);
-	lwkt_reltoken(&sched->token);
+	wakeup(&sched->active);
+	while (sched->worker_count != 0)
+		tsleep(&sched->worker_count, 0, "nvgpsx", 0);
+	lwkt_reltoken(&sched->stop_token);
+	KASSERT(TAILQ_EMPTY(&sched->active),
+	    ("stopped scheduler with active futures"));
+	nvgpu_future_assert_empty();
 	spin_uninit(&sched->queue_spin);
-	lwkt_token_uninit(&sched->token);
+	lwkt_token_uninit(&sched->stop_token);
 	_kfree(sched->threads, M_NVGPU_SCHED);
 	_kfree(sched, M_NVGPU_SCHED);
 }
 
-void
-nvgpu_future_wake(struct nvgpu_future *future)
+int
+nvgpu_sched_put(struct nvgpu_future *future)
 {
+	struct nvgpu_future_state *state;
 	struct nvgpu_sched *sched;
 
-	if (future == NULL || future->proc == NULL)
-		return;
-	sched = nvgpu_device_get_sched(nvgpu_proc_get_device(future->proc));
+	if (future == NULL)
+		return (EINVAL);
+	sched = g_sched;
 	if (sched == NULL)
-		return;
+		return (ENODEV);
+	state = nvgpu_future_get_state(future);
+	if (state == NULL)
+		return (EINVAL);
 	spin_lock(&sched->queue_spin);
-	KASSERT(!sched->stopping, ("waking future after scheduler stop"));
-	TAILQ_INSERT_TAIL(&sched->active_tasks, future, run_link);
+	if (sched->stopping) {
+		spin_unlock(&sched->queue_spin);
+		return (ENODEV);
+	}
+	KASSERT(!state->queued, ("queueing an active nvgpu future twice"));
+	state->queued = true;
+	TAILQ_INSERT_TAIL(&sched->active, state, sched_link);
 	spin_unlock(&sched->queue_spin);
-	wakeup_one(&sched->active_tasks);
+	wakeup_one(&sched->active);
+	return (0);
 }
 
 static void
-nvgpu_sched_run(void *arg)
+nvgpu_sched_run(void *argument)
 {
-	struct nvgpu_sched *sched = arg;
+	struct nvgpu_sched *sched;
+	struct nvgpu_future_state *state;
 	struct nvgpu_future *future;
-	struct nvgpu_future_result result;
 	bool stopping;
 
+	sched = argument;
 	for (;;) {
-		tsleep_interlock(&sched->active_tasks, 0);
 		spin_lock(&sched->queue_spin);
-		future = TAILQ_FIRST(&sched->active_tasks);
-		if (future != NULL)
-			TAILQ_REMOVE(&sched->active_tasks, future, run_link);
+		state = TAILQ_FIRST(&sched->active);
+		if (state != NULL) {
+			TAILQ_REMOVE(&sched->active, state, sched_link);
+			state->queued = false;
+		}
 		stopping = sched->stopping;
+		if (state == NULL && !stopping)
+			tsleep_interlock(&sched->active, 0);
 		spin_unlock(&sched->queue_spin);
-		if (future == NULL) {
+		if (state == NULL) {
 			if (stopping)
 				break;
-			tsleep(&sched->active_tasks, PINTERLOCKED, "nvgpsd", 0);
+			tsleep(&sched->active, PINTERLOCKED, "nvgpsd", 0);
 			continue;
 		}
-
-		if (future->error != 0) {
-			nvgpu_future_finish(future, (int)future->error);
-		} else {
-			result = future->poll(future);
-			if (result.ready)
-				nvgpu_future_finish(future, result.result);
-		}
+		future = state->future;
+		future->poll(future);
 	}
 
-	lwkt_gettoken(&sched->token);
-	sched->num_workers--;
-	if (sched->num_workers == 0)
-		wakeup(&sched->num_workers);
-	lwkt_reltoken(&sched->token);
+	lwkt_gettoken(&sched->stop_token);
+	KASSERT(sched->worker_count != 0,
+	    ("nvgpu scheduler worker count underflow"));
+	sched->worker_count--;
+	if (sched->worker_count == 0)
+		wakeup(&sched->worker_count);
+	lwkt_reltoken(&sched->stop_token);
 	lwkt_exit();
 }

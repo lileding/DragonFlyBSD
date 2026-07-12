@@ -9,7 +9,6 @@
 
 #include <sys/stdint.h>
 
-struct dma_fence;
 struct nvgpu_bo;
 struct nvgpu_fence;
 struct nvgpu_proc;
@@ -25,33 +24,34 @@ struct nvgpu_vm_bind_op {
 	struct nvgpu_bo *bo;
 };
 
-struct nvgpu_vm_bind_args {
-	struct nvgpu_vm_bind_op *ops;
-	uint32_t op_count;
-	struct nvgpu_fence *done_fence;
-	struct dma_fence **wait_fences;
-	uint32_t wait_count;
-};
-
 #define NVGPU_VM_BIND_OP_MAP	0u
 #define NVGPU_VM_BIND_OP_UNMAP	1u
 #define NVGPU_VM_BIND_SPARSE	(1u << 8)
 
-/* Store Mesa's kernel-managed VA window on the process VM.  proc is borrowed. */
+/*
+ * Store Mesa's kernel-managed VA window on the proc-owned VM.
+ *
+ * proc is borrowed.  The function serializes first-VM creation and may sleep
+ * while allocating VM state.  It does not create the GSP VMM backend.
+ */
 int nvgpu_vm_set_kernel_managed(struct nvgpu_proc *proc, uint64_t addr,
     uint64_t size);
 
-/* Ensure a GSP VMM exists for channel/VM work.  Returns borrowed storage owned by proc. */
-int nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm);
 /*
- * Spawn one ordered VM_BIND future.  The op array, its BO references, and wait
- * fences are borrowed while the future copies state and installs callbacks.
- * args->done_fence is consumed on all paths.
+ * Ensure the proc-owned VM and its GSP VMM backend exist.
+ *
+ * proc is borrowed.  On success vmm receives a borrowed backend pointer valid
+ * while proc remains alive.  The function serializes first creation and may
+ * sleep during allocation and GSP RPC.
  */
-int nvgpu_vm_bind_spawn(struct nvgpu_proc *proc,
-    struct nvgpu_vm_bind_args *args);
+int nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm);
 
-/* Destroy the process VM and backend VMM after channels are gone. */
+/*
+ * Destroy the proc-owned VM after all channels and futures have drained.
+ *
+ * This finalization operation may sleep while releasing the GSP VMM.  No
+ * concurrent proc operation is permitted, and proc remains caller-owned.
+ */
 void nvgpu_vm_destroy(struct nvgpu_proc *proc);
 
 #endif /* _NVGPU_VM_H_ */
