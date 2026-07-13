@@ -1443,9 +1443,10 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 		scanout.source_height = state->src_h >> 16;
 		scanout.output_width = state->crtc_w;
 		scanout.output_height = state->crtc_h;
-		if (event != NULL && state->state != NULL &&
+		if (event != NULL && old_state != NULL &&
+		    old_state->state != NULL &&
 		    drm_crtc_vblank_get(state->crtc) == 0) {
-			atomic = to_nvdrm_atomic_state(state->state);
+			atomic = to_nvdrm_atomic_state(old_state->state);
 			pending = &atomic->flips[nvcrtc->head];
 			pending->crtc = state->crtc;
 			pending->event = event;
@@ -2153,6 +2154,32 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	uint32_t head;
 	int index;
 
+	for (index = 0; index < state->num_connector; index++) {
+		if (state->connectors[index].ptr == NULL ||
+		    (state->connectors[index].old_state != NULL &&
+		    state->connectors[index].new_state != NULL))
+			continue;
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "atomic connector state damaged index=%d ptr=%p state=%p "
+		    "old=%p new=%p current=%p\n",
+		    index, state->connectors[index].ptr,
+		    state->connectors[index].state,
+		    state->connectors[index].old_state,
+		    state->connectors[index].new_state,
+		    state->connectors[index].ptr->state);
+		if (state->connectors[index].state == NULL ||
+		    state->connectors[index].ptr->state == NULL) {
+			drm_atomic_helper_fake_vblank(state);
+			drm_atomic_helper_commit_hw_done(state);
+			return;
+		}
+		/* Recover the swapped state from the objects that own each side. */
+		state->connectors[index].old_state =
+		    state->connectors[index].state;
+		state->connectors[index].new_state =
+		    state->connectors[index].ptr->state;
+	}
+
 	drm_atomic_helper_commit_modeset_disables(state->dev, state);
 	drm_atomic_helper_commit_planes(state->dev, state,
 	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
@@ -2237,10 +2264,20 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
 	uint32_t head;
+	bool custom_commit = false;
 	int error;
 	int index;
 
 	if (state->async_update)
+		return (drm_atomic_helper_commit(ddev, state, nonblock));
+	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		if (drm_atomic_crtc_needs_modeset(crtc_state) ||
+		    crtc_state->color_mgmt_changed) {
+			custom_commit = true;
+			break;
+		}
+	}
+	if (!custom_commit)
 		return (drm_atomic_helper_commit(ddev, state, nonblock));
 	error = drm_atomic_helper_setup_commit(state, nonblock);
 	if (error != 0)
@@ -2526,12 +2563,10 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 	if (error != 0)
 		goto fail;
 	drm_atomic_state_get(state);
-	if (nonblock) {
-		if (!queue_work(system_unbound_wq, &state->commit_work))
-			nvdrm_kms_run_commit(&state->commit_work);
-	} else {
+	if (nonblock)
+		(void)queue_work(system_unbound_wq, &state->commit_work);
+	else
 		nvdrm_kms_run_commit(&state->commit_work);
-	}
 	return (0);
 
 fail:
