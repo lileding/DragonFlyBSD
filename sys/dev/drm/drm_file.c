@@ -386,6 +386,7 @@ int drm_open(struct dev_open_args *ap)
 		return PTR_ERR(minor);
 
 	dev = minor->dev;
+	mutex_lock(&drm_global_mutex);
 	if (!dev->open_count++)
 		need_setup = 1;
 
@@ -409,10 +410,12 @@ int drm_open(struct dev_open_args *ap)
 #ifdef __DragonFly__
 	device_busy(dev->dev->bsddev);
 #endif
+	mutex_unlock(&drm_global_mutex);
 	return 0;
 
 err_undo:
 	dev->open_count--;
+	mutex_unlock(&drm_global_mutex);
 	drm_minor_release(minor);
 	return retcode;
 }

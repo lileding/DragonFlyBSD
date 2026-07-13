@@ -13,7 +13,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +33,7 @@
 #define DRM_NOUVEAU_GEM_INFO 0x44
 
 #define NOUVEAU_FIFO_ENGINE_GR 0x01
+#define NOUVEAU_GEM_DOMAIN_VRAM (1u << 1)
 #define NOUVEAU_GEM_DOMAIN_GART (1u << 2)
 #define NOUVEAU_GEM_DOMAIN_NO_SHARE (1u << 5)
 #define NOUVEAU_GEM_CPU_PREP_NOWAIT 0x00000001
@@ -396,6 +400,143 @@ test_mmap_after_gem_close(int fd)
 	return ok;
 }
 
+#define CONCURRENT_MMAP_THREADS 16u
+#define CONCURRENT_MMAP_ROUNDS 32u
+
+struct concurrent_mmap_test {
+	const char *path;
+	atomic_uint ready;
+	atomic_bool launch;
+	atomic_bool abort;
+	pthread_barrier_t start;
+	pthread_barrier_t mapped;
+	pthread_barrier_t checked;
+};
+
+struct concurrent_mmap_thread {
+	struct concurrent_mmap_test *test;
+	unsigned index;
+	bool ok;
+};
+
+static void *
+concurrent_mmap_thread(void *argument)
+{
+	struct concurrent_mmap_thread *thread = argument;
+
+	thread->ok = true;
+	atomic_fetch_add_explicit(&thread->test->ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&thread->test->launch, memory_order_acquire))
+		sched_yield();
+	if (atomic_load_explicit(&thread->test->abort, memory_order_acquire))
+		return NULL;
+	for (unsigned round = 0; round < CONCURRENT_MMAP_ROUNDS; round++) {
+		struct drm_nouveau_gem_info info;
+		uint32_t handle = 0;
+		uint32_t pattern;
+		void *map = MAP_FAILED;
+		int fd = -1;
+
+		pthread_barrier_wait(&thread->test->start);
+		fd = open(thread->test->path, O_RDWR | O_CLOEXEC);
+		if (fd >= 0)
+			handle = gem_new(fd, NOUVEAU_GEM_DOMAIN_VRAM, &info);
+		else if (thread->ok)
+			fprintf(stderr, "thread %u round %u open failed: %s\n",
+			    thread->index, round, strerror(errno));
+		if (fd >= 0 && handle == 0 && thread->ok)
+			fprintf(stderr, "thread %u round %u GEM new failed: %s\n",
+			    thread->index, round, strerror(errno));
+		if (handle != 0)
+			map = mmap(NULL, info.size, PROT_READ | PROT_WRITE,
+			    MAP_SHARED, fd, (off_t)info.map_handle);
+		pattern = 0x60000000u | (thread->index << 16) | round;
+		if (map != MAP_FAILED)
+			*(volatile uint32_t *)map = pattern;
+		else {
+			if (thread->ok)
+				fprintf(stderr, "thread %u round %u mmap failed: %s\n",
+				    thread->index, round, strerror(errno));
+			thread->ok = false;
+		}
+		__sync_synchronize();
+		pthread_barrier_wait(&thread->test->mapped);
+		__sync_synchronize();
+		if (map != MAP_FAILED) {
+			uint32_t actual = *(volatile uint32_t *)map;
+
+			if (actual != pattern) {
+				if (thread->ok)
+					fprintf(stderr,
+					    "thread %u round %u data mismatch expected=0x%08x actual=0x%08x\n",
+					    thread->index, round, pattern, actual);
+				thread->ok = false;
+			}
+		}
+		pthread_barrier_wait(&thread->test->checked);
+		if (map != MAP_FAILED && munmap(map, info.size) != 0) {
+			if (thread->ok)
+				fprintf(stderr, "thread %u round %u munmap failed: %s\n",
+				    thread->index, round, strerror(errno));
+			thread->ok = false;
+		}
+		gem_close(fd, handle);
+		if (fd >= 0)
+			close(fd);
+	}
+	return NULL;
+}
+
+static bool
+test_concurrent_vram_mmap(const char *path)
+{
+	struct concurrent_mmap_thread contexts[CONCURRENT_MMAP_THREADS];
+	struct concurrent_mmap_test test;
+	pthread_t threads[CONCURRENT_MMAP_THREADS];
+	unsigned created = 0;
+	bool ok;
+
+	memset(&test, 0, sizeof(test));
+	memset(contexts, 0, sizeof(contexts));
+	test.path = path;
+	atomic_init(&test.ready, 0);
+	atomic_init(&test.launch, false);
+	atomic_init(&test.abort, false);
+	if (pthread_barrier_init(&test.start, NULL, CONCURRENT_MMAP_THREADS) != 0 ||
+	    pthread_barrier_init(&test.mapped, NULL, CONCURRENT_MMAP_THREADS) != 0 ||
+	    pthread_barrier_init(&test.checked, NULL, CONCURRENT_MMAP_THREADS) != 0)
+		return false;
+	for (; created < CONCURRENT_MMAP_THREADS; created++) {
+		contexts[created].test = &test;
+		contexts[created].index = created;
+		if (pthread_create(&threads[created], NULL, concurrent_mmap_thread,
+		    &contexts[created]) != 0)
+			break;
+	}
+	if (created != CONCURRENT_MMAP_THREADS) {
+		atomic_store_explicit(&test.abort, true, memory_order_release);
+		atomic_store_explicit(&test.launch, true, memory_order_release);
+		for (unsigned i = 0; i < created; i++)
+			pthread_join(threads[i], NULL);
+		pthread_barrier_destroy(&test.checked);
+		pthread_barrier_destroy(&test.mapped);
+		pthread_barrier_destroy(&test.start);
+		return false;
+	}
+	while (atomic_load_explicit(&test.ready, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&test.launch, true, memory_order_release);
+	ok = true;
+	for (unsigned i = 0; i < created; i++) {
+		if (pthread_join(threads[i], NULL) != 0 || !contexts[i].ok)
+			ok = false;
+	}
+	pthread_barrier_destroy(&test.checked);
+	pthread_barrier_destroy(&test.mapped);
+	pthread_barrier_destroy(&test.start);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -448,6 +589,15 @@ main(int argc, char **argv)
 		    ok ? "PASS" : "FAIL");
 		return ok ? 0 : 1;
 	}
+	if (argc > 1 && strcmp(argv[1], "--concurrent-vram-mmap") == 0) {
+		bool ok;
+
+		path = argc > 2 ? argv[2] : "/dev/dri/renderD128";
+		ok = test_concurrent_vram_mmap(path);
+		printf("TEST concurrent VRAM mmap          %s\n",
+		    ok ? "PASS" : "FAIL");
+		return ok ? 0 : 1;
+	}
 
 	fd = open(path, O_RDWR | O_CLOEXEC);
 
@@ -472,10 +622,12 @@ main(int argc, char **argv)
 	    test_repeated_mmap(fd, 64) ? "PASS" : (++failed, "FAIL"));
 	printf("TEST mmap after GEM close          %s\n",
 	    test_mmap_after_gem_close(fd) ? "PASS" : (++failed, "FAIL"));
+	printf("TEST concurrent VRAM mmap          %s\n",
+	    test_concurrent_vram_mmap(path) ? "PASS" : (++failed, "FAIL"));
 	memset(&free_args, 0, sizeof(free_args));
 	free_args.channel = alloc.channel;
 	(void)xioctl(fd, DRM_IOCTL_NOUVEAU_CHANNEL_FREE, &free_args);
 	close(fd);
-	printf("summary: 4 run, %u failed\n", failed);
+	printf("summary: 5 run, %u failed\n", failed);
 	return failed == 0 ? 0 : 1;
 }
