@@ -648,7 +648,7 @@ retry:
 		}
 	}
 
-	ret = ttm_mem_io_lock(man, true);
+	ret = ttm_mem_io_lock(man, false);
 	if (unlikely(ret != 0)) {
 		retval = VM_PAGER_ERROR;
 		goto out_unlock1;
