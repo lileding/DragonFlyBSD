@@ -255,6 +255,13 @@ scterm_scan_esc(scr_stat *scp, term_stat *tcp, u_char c)
 			tcp->num_param = 0;
 			return;
 
+		case '?':
+			if (tcp->num_param == 0) {
+				tcp->esc = 6;
+				return;
+			}
+			break;
+
 		case 'A':	/* up n rows */
 			sc_term_up(scp, tcp->param[0], 0);
 			break;
@@ -637,6 +644,10 @@ scterm_scan_esc(scr_stat *scp, term_stat *tcp, u_char c)
 		default:
 			break;
 		}
+	} else if (tcp->esc == 6) {	/* seen ESC [ ? */
+		/* Consume unsupported DEC private CSI sequences. */
+		if (c >= 0x20 && c <= 0x3f)
+			return;
 	}
 	tcp->esc = 0;
 }
