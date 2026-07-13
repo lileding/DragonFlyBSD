@@ -17,9 +17,6 @@ struct nvgsp_vmm_sparse_region;
 struct nvgsp_vmm_sparse_unmap_plan;
 struct nvgsp_vmm_user_pt;
 
-typedef void (*nvgsp_vmm_sparse_unmap_clear_fn)(void *arg,
-    uint64_t va, uint64_t size, uint8_t page_shift);
-
 struct nvgsp_vmm_dirty_range {
 	uint64_t start;
 	uint64_t end;
@@ -144,9 +141,6 @@ int nvgsp_vmm_commit_unmap_sparse_range_conflict_noflush(
     struct nvgsp_vmm *vmm, struct nvgsp_vmm_sparse_unmap_plan *plan);
 int nvgsp_vmm_sparse_unmap_plan_wrote_hw(
     const struct nvgsp_vmm_sparse_unmap_plan *plan);
-void nvgsp_vmm_sparse_unmap_plan_for_each_clear(
-    const struct nvgsp_vmm_sparse_unmap_plan *plan,
-    nvgsp_vmm_sparse_unmap_clear_fn fn, void *arg);
 int nvgsp_vmm_check_unmap_sparse_range_prepared(struct nvgsp_vmm *vmm,
     const struct nvgsp_vmm_sparse_unmap_plan *plan, uint64_t va,
     uint64_t size, uint8_t page_shift);

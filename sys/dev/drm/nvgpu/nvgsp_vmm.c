@@ -4943,44 +4943,6 @@ struct nvgsp_vmm_sparse_unmap_plan {
 };
 
 /*
- * nvgsp_vmm_sparse_unmap_plan_for_each_clear()
- *
- * Ownership:
- *   Borrows a prepared sparse-unmap plan and reports each clear range by value.
- *   The caller keeps ownership of the plan; this helper never consumes,
- *   publishes, or frees VMM sparse-region state.
- *
- * Lifetime:
- *   The callback receives scalar copies of addr, size, and page_shift.  It must
- *   not retain pointers into the plan.  Clear descriptors remain available
- *   until nvgsp_vmm_fini_unmap_sparse_range() releases the plan, so callers
- *   may use this helper before or after commit.
- *
- * Threading:
- *   Does not take vmm->tok and does not mutate VMM state.  The caller must
- *   serialize against plan fini and against any commit path that owns the same
- *   plan.
- */
-void
-nvgsp_vmm_sparse_unmap_plan_for_each_clear(
-    const struct nvgsp_vmm_sparse_unmap_plan *plan,
-    nvgsp_vmm_sparse_unmap_clear_fn fn, void *arg)
-{
-	if (plan == NULL || fn == NULL)
-		return;
-
-	for (uint32_t i = 0; i < plan->entry_count; i++) {
-		struct nvgsp_vmm_sparse_unmap_clear *clear;
-
-		LIST_FOREACH(clear, &plan->entries[i].clear_ranges, link) {
-			if (!clear->write_pte)
-				continue;
-			fn(arg, clear->addr, clear->size, clear->page_shift);
-		}
-	}
-}
-
-/*
  * nvgsp_vmm_sparse_unmap_plan_wrote_hw()
  *
  * Ownership:

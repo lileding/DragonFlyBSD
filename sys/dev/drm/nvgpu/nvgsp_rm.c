@@ -399,60 +399,6 @@ nvgsp_rm_construct_vaspace(struct nvgsp_device *device, struct nvgsp_object *vas
 }
 
 int
-nvgsp_rm_create_client(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL)
-		return (ENXIO);
-	if (gsp->kernel_vmm == NULL)
-		return (ENXIO);
-	return (nvgsp_rm_construct_client(gsp, 0xc1d00001u, &gsp->kernel_vmm->client));
-}
-
-int
-nvgsp_rm_create_device(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL || gsp->kernel_vmm == NULL)
-		return (ENXIO);
-	return (nvgsp_rm_construct_device(&gsp->kernel_vmm->client, &gsp->kernel_vmm->device));
-}
-
-int
-nvgsp_rm_create_subdevice(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL || gsp->kernel_vmm == NULL)
-		return (ENXIO);
-	return (gsp->kernel_vmm->device.subdevice.handle != 0 ? 0 : ENXIO);
-}
-
-int
-nvgsp_rm_create_usermode_object(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-	struct nvgsp_vmm *vmm;
-	void *args;
-	int error;
-
-	if (gsp == NULL || gsp->kernel_vmm == NULL)
-		return (ENXIO);
-	vmm = gsp->kernel_vmm;
-	args = nvgsp_rm_get_alloc(&vmm->device.subdevice,
-	    nvgsp_rm_get_client_child_handle(&vmm->client, NVGSP_RM_USERMODE),
-	    TURING_USERMODE_A, 0, &vmm->usermode);
-	if (args == NULL)
-		return (ENOMEM);
-	error = nvgsp_rm_write_alloc(&vmm->usermode, args);
-	if (error == 0 && nvgpu_device_rd32(gpu, 0x00bb0000) == 0)
-		nvgpu_device_wr32(gpu, 0x00bb0000, TURING_USERMODE_A);
-	return (error);
-}
-
-int
 nvgsp_rm_free_graphics_object(struct nvgpu_device *gpu)
 {
 	(void)gpu;

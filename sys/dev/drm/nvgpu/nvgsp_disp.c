@@ -546,22 +546,6 @@ nvgsp_disp_get_head_count(struct nvgpu_device *gpu)
 	return (gsp != NULL && gsp->display != NULL ? gsp->display->head_count : 0);
 }
 
-uint32_t
-nvgsp_disp_get_head_mask(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	return (gsp != NULL && gsp->display != NULL ? gsp->display->head_mask : 0);
-}
-
-uint32_t
-nvgsp_disp_get_window_mask(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	return (gsp != NULL && gsp->display != NULL ? gsp->display->window_mask : 0);
-}
-
 int
 nvgsp_disp_get_vram_range(struct nvgpu_device *gpu, uint64_t *base,
     uint64_t *size)
@@ -780,38 +764,6 @@ nvgsp_disp_release_output(struct nvgpu_device *gpu,
 	    (route->display_id & (route->display_id - 1)) == 0)
 		display->outputs[ffs(route->display_id) - 1].sor_index = UINT32_MAX;
 	memset(route, 0, sizeof(*route));
-}
-
-int
-nvgsp_disp_get_active_output(struct nvgpu_device *gpu, uint32_t head,
-    uint32_t *display_id)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-	NV0073_CTRL_SYSTEM_GET_ACTIVE_PARAMS *active;
-	void *reply;
-	int error;
-
-	if (gsp == NULL || gsp->display == NULL || display_id == NULL ||
-	    head >= gsp->display->head_count)
-		return (EINVAL);
-	active = nvgsp_rm_get_ctrl(&gsp->display->common,
-	    NV0073_CTRL_CMD_SYSTEM_GET_ACTIVE, sizeof(*active));
-	if (active == NULL)
-		return (ENOMEM);
-	active->subDeviceInstance = 0;
-	active->head = head;
-	reply = active;
-	error = nvgsp_rm_read_ctrl(&gsp->display->common, &reply,
-	    sizeof(*active));
-	if (error != 0 || reply == NULL) {
-		if (reply != NULL)
-			nvgsp_rm_complete_ctrl(&gsp->display->common, reply);
-		return (error != 0 ? error : EIO);
-	}
-	active = reply;
-	*display_id = active->displayId;
-	nvgsp_rm_complete_ctrl(&gsp->display->common, active);
-	return (0);
 }
 
 int

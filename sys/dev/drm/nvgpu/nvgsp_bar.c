@@ -1533,17 +1533,3 @@ nvgsp_bar_fini_bar1(struct nvgpu_device *gpu)
 	if (gsp != NULL)
 		nvgsp_bar_stop_bar1(gsp);
 }
-
-int
-nvgsp_bar_map_bar1_inst(struct nvgpu_device *gpu)
-{
-	(void)gpu;
-	return (0);
-}
-
-int
-nvgsp_bar_map_bar1_userd(struct nvgpu_device *gpu)
-{
-	(void)gpu;
-	return (0);
-}

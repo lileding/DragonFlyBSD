@@ -25,27 +25,6 @@ nvgsp_falcon_init_core(struct nvgsp_falcon *flcn, struct nvgsp_state *sc,
 	flcn->fbif = fbif;
 }
 
-bool
-nvgsp_falcon_has_riscv(struct nvgsp_falcon *flcn)
-{
-	uint32_t cfg = nvgsp_falcon_rd32(flcn, NVGSP_FLCN_HWCFG2);
-
-	return ((cfg & NVGSP_FLCN_HWCFG2_RISCV) != 0);
-}
-
-bool
-nvgsp_falcon_is_riscv_active(struct nvgsp_falcon *flcn)
-{
-	/*
-	 * Per nouveau falcon/tu102.c, the RISC-V "active" indicator on
-	 * Turing lives at offset 0x240 of the secondary (RISC-V) register
-	 * block.
-	 */
-	if (flcn->addr2 == 0)
-		return (false);
-	return ((nvgsp_falcon_riscv_rd32(flcn, 0x240) & 0x00000001) != 0);
-}
-
 int
 nvgsp_falcon_reset_eng(struct nvgsp_falcon *flcn)
 {

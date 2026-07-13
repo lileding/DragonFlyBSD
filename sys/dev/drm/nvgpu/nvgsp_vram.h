@@ -59,11 +59,4 @@ uint32_t nvgsp_vram_alloc_read32(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, uint64_t offset);
 void nvgsp_vram_alloc_write32(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, uint64_t offset, uint32_t value);
-/* Allocate VRAM for channel instance memory. */
-int nvgsp_vram_alloc_channel_inst(struct nvgpu_device *gpu);
-/* Allocate VRAM for USERD submission pages. */
-int nvgsp_vram_alloc_userd(struct nvgpu_device *gpu);
-/* Allocate VRAM for golden channel state. */
-int nvgsp_vram_alloc_golden(struct nvgpu_device *gpu);
-
 #endif /* _NVGSP_VRAM_H_ */

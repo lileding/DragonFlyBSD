@@ -444,12 +444,6 @@ nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid, int error)
 	lwkt_reltoken(&gsp->gsp_tok);
 }
 
-bool
-nvgsp_channel_is_chid(const struct nvgsp_channel *chan, uint32_t chid)
-{
-	return (chan != NULL && chid < 2048 && (uint32_t)chan->chid == chid);
-}
-
 int
 nvgsp_channel_alloc_chid(struct nvgsp_state *gsp)
 {
