@@ -941,7 +941,6 @@ test_channel_reuse_after_free(int fd)
 #define CHANNEL_CREATE_THREADS 16u
 
 struct channel_create_race {
-	int fd;
 	atomic_uint ready;
 	atomic_uint allocated;
 	atomic_bool start;
@@ -950,6 +949,7 @@ struct channel_create_race {
 
 struct channel_create_thread {
 	struct channel_create_race *race;
+	int fd;
 	uint32_t channel;
 	bool ok;
 };
@@ -959,16 +959,25 @@ channel_create_thread(void *argument)
 {
 	struct channel_create_thread *thread = argument;
 	struct channel_create_race *race = thread->race;
+	struct drm_nouveau_sync signal;
+	uint32_t syncobj;
 
 	atomic_fetch_add_explicit(&race->ready, 1, memory_order_release);
 	while (!atomic_load_explicit(&race->start, memory_order_acquire))
 		sched_yield();
-	thread->ok = channel_alloc_one(race->fd, &thread->channel);
+	thread->ok = channel_alloc_one(thread->fd, &thread->channel);
 	atomic_fetch_add_explicit(&race->allocated, 1, memory_order_release);
 	while (!atomic_load_explicit(&race->release, memory_order_acquire))
 		sched_yield();
-	if (thread->ok)
-		channel_free_one(race->fd, thread->channel);
+	if (thread->ok) {
+		syncobj = syncobj_create(thread->fd, false);
+		signal = binary_sync(syncobj);
+		thread->ok = syncobj != 0 && exec_submit_on_channel(thread->fd,
+		    NULL, 0, &signal, 1, thread->channel) &&
+		    syncobj_wait_binary(thread->fd, &syncobj, 1, 10);
+		syncobj_destroy(thread->fd, syncobj);
+		channel_free_one(thread->fd, thread->channel);
+	}
 	return NULL;
 }
 
@@ -987,7 +996,6 @@ test_concurrent_first_channel_create(int fd_unused __attribute__((unused)))
 		return false;
 	memset(&race, 0, sizeof(race));
 	memset(contexts, 0, sizeof(contexts));
-	race.fd = fd;
 	atomic_init(&race.ready, 0);
 	atomic_init(&race.allocated, 0);
 	atomic_init(&race.start, false);
@@ -995,6 +1003,7 @@ test_concurrent_first_channel_create(int fd_unused __attribute__((unused)))
 	created = 0;
 	for (; created < CHANNEL_CREATE_THREADS; created++) {
 		contexts[created].race = &race;
+		contexts[created].fd = fd;
 		if (pthread_create(&threads[created], NULL,
 		    channel_create_thread, &contexts[created]) != 0)
 			break;
@@ -1011,6 +1020,48 @@ test_concurrent_first_channel_create(int fd_unused __attribute__((unused)))
 			ok = false;
 	}
 	close(fd);
+	return ok;
+}
+
+static bool
+test_cross_file_concurrent_channel_submit(int fd_unused __attribute__((unused)))
+{
+	struct channel_create_thread contexts[CHANNEL_CREATE_THREADS];
+	struct channel_create_race race;
+	pthread_t threads[CHANNEL_CREATE_THREADS];
+	unsigned created;
+	bool ok;
+
+	memset(&race, 0, sizeof(race));
+	memset(contexts, 0, sizeof(contexts));
+	atomic_init(&race.ready, 0);
+	atomic_init(&race.allocated, 0);
+	atomic_init(&race.start, false);
+	atomic_init(&race.release, false);
+	created = 0;
+	for (; created < CHANNEL_CREATE_THREADS; created++) {
+		contexts[created].race = &race;
+		contexts[created].fd = open_device();
+		if (contexts[created].fd < 0)
+			break;
+		if (pthread_create(&threads[created], NULL,
+		    channel_create_thread, &contexts[created]) != 0) {
+			close(contexts[created].fd);
+			break;
+		}
+	}
+	while (atomic_load_explicit(&race.ready, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&race.start, true, memory_order_release);
+	while (atomic_load_explicit(&race.allocated, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&race.release, true, memory_order_release);
+	ok = created == CHANNEL_CREATE_THREADS;
+	for (unsigned i = 0; i < created; i++) {
+		if (pthread_join(threads[i], NULL) != 0 || !contexts[i].ok)
+			ok = false;
+		close(contexts[i].fd);
+	}
 	return ok;
 }
 
@@ -1223,7 +1274,10 @@ static const struct test_case tests[] = {
 	{ "unsignaled wait without fence", test_unsignaled_wait_without_fence },
 	{ "close with pending future", test_close_with_pending_future },
 	{ "channel reuse after free", test_channel_reuse_after_free },
-	{ "concurrent first channel create", test_concurrent_first_channel_create },
+	{ "concurrent channel create and submit",
+	    test_concurrent_first_channel_create },
+	{ "cross-file concurrent channel submit",
+	    test_cross_file_concurrent_channel_submit },
 	{ "channel free with pending exec", test_channel_free_with_pending_exec },
 	{ "exec bind exec chain", test_exec_bind_exec_chain },
 	{ "exec bind exec bind exec chain", test_exec_bind_exec_bind_exec_chain },

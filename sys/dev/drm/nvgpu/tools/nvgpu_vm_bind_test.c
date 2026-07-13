@@ -12,7 +12,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -539,6 +542,94 @@ test_mapping_after_gem_close(int fd, const struct fixture *f __attribute__((unus
 	return vm_bind(fd, &op, 1, 0, NULL, 0, NULL, 0);
 }
 
+#define CONCURRENT_VM_THREADS 16u
+#define CONCURRENT_VM_OPS 32u
+#define CONCURRENT_VM_ROUNDS 8u
+
+struct concurrent_vm_bind {
+	atomic_uint ready;
+	atomic_bool start;
+};
+
+struct concurrent_vm_thread {
+	struct concurrent_vm_bind *test;
+	int fd;
+	uint32_t handle;
+	bool ok;
+};
+
+static void *
+concurrent_vm_bind_thread(void *argument)
+{
+	struct concurrent_vm_thread *thread = argument;
+	struct drm_nouveau_vm_bind_op ops[CONCURRENT_VM_OPS];
+
+	atomic_fetch_add_explicit(&thread->test->ready, 1, memory_order_release);
+	while (!atomic_load_explicit(&thread->test->start, memory_order_acquire))
+		sched_yield();
+
+	thread->ok = true;
+	for (unsigned round = 0; round < CONCURRENT_VM_ROUNDS && thread->ok;
+	    round++) {
+		for (unsigned i = 0; i < CONCURRENT_VM_OPS; i++) {
+			uint64_t va = TEST_VA + (uint64_t)i * 0x40000000ULL;
+
+			ops[i] = map_op(thread->handle, va, 0, PAGE_64K, 0);
+		}
+		thread->ok = vm_bind(thread->fd, ops, CONCURRENT_VM_OPS, 0,
+		    NULL, 0, NULL, 0);
+		for (unsigned i = 0; i < CONCURRENT_VM_OPS; i++) {
+			uint64_t va = TEST_VA + (uint64_t)i * 0x40000000ULL;
+
+			ops[i] = unmap_op(va, PAGE_64K, 0);
+		}
+		if (thread->ok)
+			thread->ok = vm_bind(thread->fd, ops, CONCURRENT_VM_OPS, 0,
+			    NULL, 0, NULL, 0);
+	}
+	return NULL;
+}
+
+static bool
+test_cross_vmm_concurrent_map_unmap(int fd_unused __attribute__((unused)),
+    const struct fixture *f_unused __attribute__((unused)))
+{
+	struct concurrent_vm_thread contexts[CONCURRENT_VM_THREADS];
+	struct concurrent_vm_bind test;
+	pthread_t threads[CONCURRENT_VM_THREADS];
+	unsigned created = 0;
+	bool ok = true;
+
+	memset(contexts, 0, sizeof(contexts));
+	atomic_init(&test.ready, 0);
+	atomic_init(&test.start, false);
+	for (; created < CONCURRENT_VM_THREADS; created++) {
+		contexts[created].test = &test;
+		contexts[created].fd = open_device();
+		if (contexts[created].fd < 0)
+			break;
+		contexts[created].handle = gem_new(contexts[created].fd, PAGE_64K,
+		    NOUVEAU_GEM_DOMAIN_GART, PAGE_64K);
+		if (contexts[created].handle == 0 || pthread_create(&threads[created],
+		    NULL, concurrent_vm_bind_thread, &contexts[created]) != 0) {
+			gem_close(contexts[created].fd, contexts[created].handle);
+			close(contexts[created].fd);
+			break;
+		}
+	}
+	while (atomic_load_explicit(&test.ready, memory_order_acquire) != created)
+		sched_yield();
+	atomic_store_explicit(&test.start, true, memory_order_release);
+	ok = created == CONCURRENT_VM_THREADS;
+	for (unsigned i = 0; i < created; i++) {
+		if (pthread_join(threads[i], NULL) != 0 || !contexts[i].ok)
+			ok = false;
+		gem_close(contexts[i].fd, contexts[i].handle);
+		close(contexts[i].fd);
+	}
+	return ok;
+}
+
 struct test_case {
 	const char *name;
 	bool (*run)(int fd, const struct fixture *fixture);
@@ -556,6 +647,7 @@ static const struct test_case tests[] = {
 	{ "validation errors", test_validation },
 	{ "repeated map/unmap", test_repeated_map_unmap },
 	{ "mapping after GEM close", test_mapping_after_gem_close },
+	{ "cross-VMM concurrent map/unmap", test_cross_vmm_concurrent_map_unmap },
 };
 
 static void

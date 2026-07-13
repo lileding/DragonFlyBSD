@@ -60,6 +60,7 @@
 #define NVGSP_FWSEC_CMD_FRTS       0x15u
 #define NVGSP_FWSEC_CMD_SB         0x19u
 
+struct nvgpu_bo;
 struct nvgsp_falcon;
 struct nvgsp_display;
 struct firmware;
@@ -514,6 +515,7 @@ struct nvgsp_channel {
 	uint64_t submit_post_slots_busy;
 	uint32_t submit_post_payload[NVGSP_CHANNEL_POST_RING_SLOTS];
 	uint8_t faulted;
+	uint8_t fault_dumped;
 	int fault_error;
 	struct nvgsp_object ce_obj;
 	struct nvgsp_object usermode_obj;
@@ -727,10 +729,22 @@ void nvgsp_bar_wr32_bar2(struct nvgsp_state *gsp, uint64_t gva, uint32_t val);
 uint32_t nvgsp_bar_rd32_bar2(struct nvgsp_state *gsp, uint64_t gva);
 int nvgsp_vmm_map_sysmem_noflush(struct nvgsp_vmm *vmm, uint64_t va,
     vm_paddr_t paddr, uint64_t size);
+int nvgsp_vmm_map_sysmem_bo_prepared_noflush(struct nvgsp_vmm *vmm,
+    uint64_t va, const struct nvgpu_bo *bo, uint64_t bo_offset,
+    uint64_t size, uint8_t kind);
 int nvgsp_vmm_map_vram_flags_noflush(struct nvgsp_vmm *vmm, uint64_t va,
     uint64_t paddr, uint64_t size, uint8_t priv, uint8_t ro, uint8_t kind);
+int nvgsp_vmm_map_sysmem(struct nvgsp_vmm *vmm, uint64_t va,
+    uint64_t paddr, uint64_t size);
+int nvgsp_vmm_map_vram(struct nvgsp_vmm *vmm, uint64_t va,
+    uint64_t paddr, uint64_t size, uint8_t kind);
 int nvgsp_vmm_unmap(struct nvgsp_vmm *vmm, uint64_t va, uint64_t size);
+int nvgsp_vmm_unmap_sparse_range_noflush(struct nvgsp_vmm *vmm,
+    uint64_t va, uint64_t size);
 void nvgsp_vmm_flush(struct nvgsp_vmm *vmm);
+int nvgsp_vmm_create_golden(struct nvgpu_device *gpu);
+void nvgsp_vmm_destroy_golden(struct nvgpu_device *gpu);
+int nvgsp_vmm_map_submit_pages(struct nvgpu_device *gpu);
 
 void nvgsp_rpc_init_msg_ntfy(struct nvgsp_state *gsp);
 int nvgsp_rpc_add_msg_ntfy(struct nvgsp_state *gsp, uint32_t fn,

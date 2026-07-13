@@ -11,8 +11,6 @@
 
 struct nvgpu_device;
 
-struct nvgsp_state;
-
 struct nvgsp_intr_masks {
 	uint32_t nonstall;
 	uint32_t stall;
@@ -20,8 +18,6 @@ struct nvgsp_intr_masks {
 	uint32_t display;
 };
 
-/* Return the borrowed GSP state stored on the physical GPU object. */
-struct nvgsp_state *nvgsp_state_get(struct nvgpu_device *gpu);
 /* Return usable VRAM base parsed from static GSP info. */
 uint64_t nvgsp_state_get_fb_usable_base(struct nvgpu_device *gpu);
 /* Return usable VRAM bytes parsed from static GSP info. */
