@@ -1171,12 +1171,14 @@ nvgsp_bar_count_bar1_gva(struct nvgsp_state *sc, uint32_t *used,
 	struct nvgsp_bar1 *b1 = &sc->bar1;
 	uint32_t count = 0;
 
+	lwkt_gettoken(&sc->gsp_tok);
 	for (uint32_t i = 0; i < NVGSP_BAR1_GVA_ALLOC_PAGES; i++) {
 		if (nvgsp_bar_is_bar1_gva_used(b1, i))
 			count++;
 	}
 	*used = count;
 	*total = NVGSP_BAR1_GVA_ALLOC_PAGES;
+	lwkt_reltoken(&sc->gsp_tok);
 }
 
 int
@@ -1189,22 +1191,24 @@ nvgsp_bar_alloc_bar1_page_kind(struct nvgsp_state *sc,
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
+	lwkt_gettoken(&sc->gsp_tok);
 	err = nvgsp_bar_alloc_bar1_gva(&sc->bar1, &gva);
 	if (err != 0)
-		return (err);
+		goto out;
 
 	paddr = nvgsp_vram_alloc_kind(sc, NVGSP_GMMU_PT_PAGE_SIZE,
 	    NVGSP_GMMU_PT_PAGE_SIZE, kind, owner);
 	if (paddr == 0) {
 		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
-		return (ENOMEM);
+		err = ENOMEM;
+		goto out;
 	}
 
 	err = nvgsp_bar_map_bar1_vram(sc, gva, paddr);
 	if (err != 0) {
 		nvgsp_vram_free_kind(sc, paddr, kind, owner);
 		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
-		return (err);
+		goto out;
 	}
 	nvgsp_bar_flush_bar1(sc);
 
@@ -1212,7 +1216,9 @@ nvgsp_bar_alloc_bar1_page_kind(struct nvgsp_state *sc,
 	page->bar1_gva   = gva;
 	page->kind = kind;
 	page->owner = owner;
-	return (0);
+out:
+	lwkt_reltoken(&sc->gsp_tok);
+	return (err);
 }
 
 int
@@ -1225,6 +1231,7 @@ nvgsp_bar_alloc_bar1_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
 void
 nvgsp_bar_free_bar1_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
 {
+	lwkt_gettoken(&sc->gsp_tok);
 	if (page->bar1_gva != 0) {
 		if (nvgsp_bar_clear_bar1_gva(sc, page->bar1_gva) == 0)
 			nvgsp_bar_invalidate_bar1(sc);
@@ -1237,6 +1244,7 @@ nvgsp_bar_free_bar1_page(struct nvgsp_state *sc, struct nvgsp_bar1_page *page)
 	page->bar1_gva   = 0;
 	page->kind = NVGSP_VRAM_UNKNOWN;
 	page->owner = NULL;
+	lwkt_reltoken(&sc->gsp_tok);
 }
 
 /*
@@ -1255,19 +1263,22 @@ nvgsp_bar_map_bar1_existing(struct nvgsp_state *sc, uint64_t paddr, uint64_t *pg
 	if (!sc->bar1.ready)
 		return (ENXIO);
 
+	lwkt_gettoken(&sc->gsp_tok);
 	err = nvgsp_bar_alloc_bar1_gva(&sc->bar1, &gva);
 	if (err != 0)
-		return (err);
+		goto out;
 
 	err = nvgsp_bar_map_bar1_vram(sc, gva, paddr);
 	if (err != 0) {
 		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
-		return (err);
+		goto out;
 	}
 	nvgsp_bar_flush_bar1(sc);
 
 	*pgva = gva;
-	return (0);
+out:
+	lwkt_reltoken(&sc->gsp_tok);
+	return (err);
 }
 
 int
@@ -1289,9 +1300,10 @@ nvgsp_bar_map_bar1_existing_range(struct nvgsp_state *sc, uint64_t paddr,
 	if (pages == 0 || pages > NVGSP_BAR1_GVA_ALLOC_PAGES)
 		return (EINVAL);
 
+	lwkt_gettoken(&sc->gsp_tok);
 	err = nvgsp_bar_alloc_bar1_gva_range(&sc->bar1, pages, &gva);
 	if (err != 0)
-		return (err);
+		goto out;
 
 	for (uint32_t page = 0; page < pages; page++) {
 		err = nvgsp_bar_map_bar1_vram_pte(sc,
@@ -1306,24 +1318,28 @@ nvgsp_bar_map_bar1_existing_range(struct nvgsp_state *sc, uint64_t paddr,
 			if (page != 0)
 				nvgsp_bar_invalidate_bar1(sc);
 			nvgsp_bar_free_bar1_gva_range(&sc->bar1, gva, pages);
-			return (err);
+			goto out;
 		}
 	}
 	nvgsp_bar_invalidate_bar1(sc);
 	nvgsp_bar_flush_bar1(sc);
 
 	*pgva = gva;
-	return (0);
+out:
+	lwkt_reltoken(&sc->gsp_tok);
+	return (err);
 }
 
 void
 nvgsp_bar_unmap_bar1_existing(struct nvgsp_state *sc, uint64_t gva)
 {
+	lwkt_gettoken(&sc->gsp_tok);
 	if (gva != 0) {
 		if (nvgsp_bar_clear_bar1_gva(sc, gva) == 0)
 			nvgsp_bar_invalidate_bar1(sc);
 		nvgsp_bar_free_bar1_gva(&sc->bar1, gva);
 	}
+	lwkt_reltoken(&sc->gsp_tok);
 }
 
 void
@@ -1336,6 +1352,7 @@ nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *sc, uint64_t gva,
 	if (gva == 0 || size == 0)
 		return;
 
+	lwkt_gettoken(&sc->gsp_tok);
 	pages = (uint32_t)((size + NVGSP_GMMU_PT_PAGE_SIZE - 1) /
 	    NVGSP_GMMU_PT_PAGE_SIZE);
 	for (uint32_t page = 0; page < pages; page++) {
@@ -1346,6 +1363,28 @@ nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *sc, uint64_t gva,
 	if (cleared)
 		nvgsp_bar_invalidate_bar1(sc);
 	nvgsp_bar_free_bar1_gva_range(&sc->bar1, gva, pages);
+	lwkt_reltoken(&sc->gsp_tok);
+}
+
+int
+nvgsp_bar_map_vram_range(struct nvgpu_device *gpu, uint64_t paddr,
+    uint64_t size, uint64_t *pgva)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+
+	if (gsp == NULL)
+		return (ENXIO);
+	return (nvgsp_bar_map_bar1_existing_range(gsp, paddr, size, pgva));
+}
+
+void
+nvgsp_bar_unmap_vram_range(struct nvgpu_device *gpu, uint64_t gva,
+    uint64_t size)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+
+	if (gsp != NULL)
+		nvgsp_bar_unmap_bar1_existing_range(gsp, gva, size);
 }
 
 /*
@@ -1363,10 +1402,8 @@ nvgsp_bar_unmap_bar1_existing_range(struct nvgsp_state *sc, uint64_t gva,
  *   allocation alive while any GVA entry can be used by a CPU PTE.
  *
  * Threading:
- *   Mutates the shared BAR1 GVA bitmap and page tables.  Callers must serialize
- *   against other BAR1 allocator users; TTM does this with io_reserve_mutex for
- *   CPU mappings.  This function may sleep through GSP/BAR1 helper paths and is
- *   not IRQ-safe.
+ *   Serializes the device-wide BAR1 allocator with gsp_tok.  This function may
+ *   sleep through GSP/BAR1 helper paths and is not IRQ-safe.
  */
 int
 nvgsp_bar_map_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
@@ -1386,6 +1423,7 @@ nvgsp_bar_map_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
 	if (pages == 0 || pages > count)
 		return (EINVAL);
 
+	lwkt_gettoken(&sc->gsp_tok);
 	for (uint32_t page = 0; page < pages; page++) {
 		uint64_t gva;
 
@@ -1403,10 +1441,12 @@ nvgsp_bar_map_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t paddr,
 	}
 	nvgsp_bar_invalidate_bar1(sc);
 	nvgsp_bar_flush_bar1(sc);
+	lwkt_reltoken(&sc->gsp_tok);
 	return (0);
 
 fail:
 	nvgsp_bar_unmap_bar1_existing_scatter(sc, gvas, pages);
+	lwkt_reltoken(&sc->gsp_tok);
 	return (err);
 }
 
@@ -1422,8 +1462,8 @@ fail:
  *   are invalid and must already have been removed by the VM/TTM owner.
  *
  * Threading:
- *   Same BAR1 allocator serialization requirement as map_existing_scatter().
- *   The function batches PTE invalidation for all released pages.
+ *   Serializes the device-wide BAR1 allocator with gsp_tok and batches PTE
+ *   invalidation for all released pages.
  */
 void
 nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
@@ -1434,6 +1474,7 @@ nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
 	if (gvas == NULL || count == 0)
 		return;
 
+	lwkt_gettoken(&sc->gsp_tok);
 	for (uint32_t page = 0; page < count; page++) {
 		uint64_t gva = gvas[page];
 
@@ -1446,6 +1487,7 @@ nvgsp_bar_unmap_bar1_existing_scatter(struct nvgsp_state *sc, uint64_t *gvas,
 	}
 	if (cleared)
 		nvgsp_bar_invalidate_bar1(sc);
+	lwkt_reltoken(&sc->gsp_tok);
 }
 
 void

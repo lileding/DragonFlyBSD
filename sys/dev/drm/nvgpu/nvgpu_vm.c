@@ -6854,14 +6854,16 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 	if (error == 0) {
 		nvgpu_vm_batch_plan_init(&plan, bind->ops, bind->op_count);
 		lwkt_gettoken(&bind->vm->vm_token);
+		nvgsp_vmm_begin_update(bind->vm->backend);
 		error = nvgpu_vm_batch_plan_apply(bind->vm->gpu, bind->vm, &plan,
 		    &bind->retired_bindings);
 		failed_op = plan.failed_op;
 		nvgpu_vm_batch_plan_fini(bind->vm, &plan);
-		lwkt_reltoken(&bind->vm->vm_token);
 		nvgpu_vm_dirty_set_publish(bind->vm->gpu, &plan.dirty_set);
 		if (plan.dirty_set.dirty)
 			nvgpu_vm_dirty_set_flush(bind->vm->backend, &plan.dirty_set);
+		nvgsp_vmm_end_update(bind->vm->backend);
+		lwkt_reltoken(&bind->vm->vm_token);
 		if (error != 0 && failed_op != NULL)
 			nvgpu_vm_bind_record_error(bind->vm->gpu, failed_op->op,
 			    failed_op->flags, failed_op->handle, failed_op->addr,

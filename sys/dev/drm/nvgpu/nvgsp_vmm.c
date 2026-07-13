@@ -455,6 +455,18 @@ nvgsp_vmm_invalidate(struct nvgsp_vmm *vmm)
 	}
 }
 
+void
+nvgsp_vmm_begin_update(struct nvgsp_vmm *vmm)
+{
+	lwkt_gettoken(&vmm->gsp->gsp_tok);
+}
+
+void
+nvgsp_vmm_end_update(struct nvgsp_vmm *vmm)
+{
+	lwkt_reltoken(&vmm->gsp->gsp_tok);
+}
+
 static uint32_t
 nvgsp_vmm_pd0_hash(uint32_t pd2_idx, uint32_t pd1_idx)
 {

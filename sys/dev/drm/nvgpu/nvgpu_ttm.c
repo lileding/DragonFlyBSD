@@ -535,7 +535,6 @@ nvgpu_ttm_move_chunked_bar1(struct ttm_buffer_object *tbo,
 {
 	struct nvgpu_bo *bo = nvgpu_bo_from_ttm(tbo);
 	struct nvgpu_ttm *ttm = nvgpu_ttm_from_bdev(tbo->bdev);
-	struct nvgsp_state *gsp = nvgsp_state_get(ttm->gpu);
 	struct ttm_mem_reg old_copy = tbo->mem;
 	struct nvgsp_vram_alloc *vram_alloc;
 	bool vram_to_sysmem;
@@ -577,14 +576,14 @@ nvgpu_ttm_move_chunked_bar1(struct ttm_buffer_object *tbo,
 		chunk = round_page(chunk);
 		if (done + chunk > size)
 			chunk = size - done;
-		error = nvgsp_bar_map_bar1_existing_range(gsp,
+		error = nvgsp_bar_map_vram_range(ttm->gpu,
 		    nvgsp_vram_alloc_get_paddr(vram_alloc) + done, chunk, &gva);
 		if (error != 0)
 			return (error < 0 ? error : -error);
 		iomap = ioremap_wc(rman_get_start(nvgpu_device_get_bar(ttm->gpu, 1)) +
 		    gva, chunk);
 		if (iomap == NULL) {
-			nvgsp_bar_unmap_bar1_existing_range(gsp, gva, chunk);
+			nvgsp_bar_unmap_vram_range(ttm->gpu, gva, chunk);
 			return (-ENOMEM);
 		}
 
@@ -600,7 +599,7 @@ nvgpu_ttm_move_chunked_bar1(struct ttm_buffer_object *tbo,
 		}
 		mb();
 		iounmap(iomap);
-		nvgsp_bar_unmap_bar1_existing_range(gsp, gva, chunk);
+		nvgsp_bar_unmap_vram_range(ttm->gpu, gva, chunk);
 		if (error != 0)
 			return (error);
 		done += chunk;

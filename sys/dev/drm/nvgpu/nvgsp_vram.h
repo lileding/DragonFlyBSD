@@ -17,7 +17,7 @@ struct nvgsp_vram_alloc;
 int nvgsp_vram_init(struct nvgpu_device *gpu);
 /* Release backend VRAM allocation state after users stop. */
 void nvgsp_vram_fini(struct nvgpu_device *gpu);
-/* Allocate a TTM-owned VRAM range for one GEM BO. */
+/* MPSAFE allocation and release serialize the device-global VRAM allocator. */
 struct nvgsp_vram_alloc *nvgsp_vram_alloc_gem(struct nvgpu_device *gpu,
     uint64_t size, uint64_t align, void *owner);
 /* Release a GEM VRAM allocation returned by nvgsp_vram_alloc_gem(). */
@@ -40,7 +40,8 @@ uint64_t nvgsp_vram_alloc_get_size(const struct nvgsp_vram_alloc *alloc);
 /*
  * Create and remove temporary BAR1 mappings for an existing allocation.
  * Mapping functions may sleep; accessors below require the matching mapping
- * to remain live and never change allocation ownership.
+ * to remain live and never change allocation ownership.  Calls using the same
+ * allocation require external serialization; different allocations are MPSAFE.
  */
 int nvgsp_vram_alloc_map_bar1_scatter(struct nvgpu_device *gpu,
     struct nvgsp_vram_alloc *alloc, uint64_t size, uint32_t pages);
