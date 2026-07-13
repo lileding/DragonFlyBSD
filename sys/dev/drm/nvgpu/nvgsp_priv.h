@@ -647,6 +647,25 @@ nvgsp_le24(const uint8_t *p)
 #define nvgsp_debugf(dev, fmt, ...) nvgpu_log(NVGPU_LOG_DEBUG, fmt, ##__VA_ARGS__)
 #define nvgsp_infof(dev, fmt, ...) nvgpu_log(NVGPU_LOG_INFO, fmt, ##__VA_ARGS__)
 
+/* Decode one GSP display event in process context and invoke borrowed callbacks. */
+int nvgsp_disp_dispatch_event(struct nvgpu_device *gpu, uint32_t client_handle,
+	uint32_t event_handle, const void *data, uint32_t size);
+
+/* Wait for GSP init-done during boot; may sleep. */
+int nvgsp_event_poll_init_done(struct nvgpu_device *gpu);
+
+/* Enable doorbells before channel submission. */
+int nvgsp_state_enable_doorbell(struct nvgpu_device *gpu);
+
+/* Retrieve interrupt routing metadata before nvgpu_intr_init(). */
+int nvgsp_state_get_intr_table(struct nvgpu_device *gpu);
+
+/* Query method-buffer size before channel creation. */
+int nvgsp_state_query_mthdbuf_size(struct nvgpu_device *gpu);
+
+/* Query static GPU info from GSP during boot. */
+int nvgsp_state_query_static_info(struct nvgpu_device *gpu);
+
 struct nvgsp_state *nvgsp_state_get(struct nvgpu_device *gpu);
 int nvgsp_dma_alloc_dmamem(struct nvgsp_state *gsp, bus_size_t size,
     bus_size_t alignment, struct nvgsp_dmamem *out);

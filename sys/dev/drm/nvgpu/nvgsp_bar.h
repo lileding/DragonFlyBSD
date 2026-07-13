@@ -19,11 +19,6 @@ void nvgsp_bar_fini_bar2(struct nvgpu_device *gpu);
 int nvgsp_bar_init_bar1(struct nvgpu_device *gpu);
 /* Release BAR1 state after CPU mappings have drained. */
 void nvgsp_bar_fini_bar1(struct nvgpu_device *gpu);
-/* Map channel instance memory through BAR1.  Caller serializes BAR1 updates. */
-int nvgsp_bar_map_bar1_inst(struct nvgpu_device *gpu);
-/* Map USERD pages through BAR1 before channel publication. */
-int nvgsp_bar_map_bar1_userd(struct nvgpu_device *gpu);
-
 /*
  * Map one existing contiguous VRAM allocation through BAR1.
  *

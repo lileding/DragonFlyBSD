@@ -63,12 +63,6 @@ nvgsp_falcon_mask(struct nvgsp_falcon *flcn, uint32_t off,
 	nvgsp_falcon_wr32(flcn, off, (v & ~mask) | (val & mask));
 }
 
-static __inline uint32_t
-nvgsp_falcon_riscv_rd32(struct nvgsp_falcon *flcn, uint32_t off)
-{
-	return (nvgsp_rd32(flcn->sc, flcn->addr2 + off));
-}
-
 static __inline void
 nvgsp_falcon_fbif_wr32(struct nvgsp_falcon *flcn, uint32_t off, uint32_t val)
 {
@@ -80,9 +74,6 @@ nvgsp_falcon_fbif_rd32(struct nvgsp_falcon *flcn, uint32_t off)
 {
 	return (nvgsp_rd32(flcn->sc, flcn->fbif + off));
 }
-
-bool	nvgsp_falcon_has_riscv(struct nvgsp_falcon *flcn);
-bool	nvgsp_falcon_is_riscv_active(struct nvgsp_falcon *flcn);
 
 int	nvgsp_falcon_wait_for_scrub(struct nvgsp_falcon *flcn, int timeout_us);
 int	nvgsp_falcon_wait_for_halt(struct nvgsp_falcon *flcn, int timeout_us);

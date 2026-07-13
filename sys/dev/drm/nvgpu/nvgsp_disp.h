@@ -78,15 +78,9 @@ void nvgsp_disp_fini(struct nvgpu_device *gpu);
 void nvgsp_disp_set_event_ops(struct nvgpu_device *gpu,
 	const struct nvgsp_display_event_ops *ops, void *arg);
 
-/* Decode one GSP display event in process context and invoke borrowed callbacks. */
-int nvgsp_disp_dispatch_event(struct nvgpu_device *gpu, uint32_t client_handle,
-	uint32_t event_handle, const void *data, uint32_t size);
-
 /* Query immutable display capabilities cached during backend initialization. */
 uint32_t nvgsp_disp_get_supported_mask(struct nvgpu_device *gpu);
 uint32_t nvgsp_disp_get_head_count(struct nvgpu_device *gpu);
-uint32_t nvgsp_disp_get_head_mask(struct nvgpu_device *gpu);
-uint32_t nvgsp_disp_get_window_mask(struct nvgpu_device *gpu);
 int nvgsp_disp_get_vram_range(struct nvgpu_device *gpu, uint64_t *base,
     uint64_t *size);
 
@@ -108,9 +102,6 @@ int nvgsp_disp_acquire_output(struct nvgpu_device *gpu, uint32_t display_id,
 	bool audio, struct nvgsp_display_route *route);
 void nvgsp_disp_release_output(struct nvgpu_device *gpu,
 	struct nvgsp_display_route *route);
-int nvgsp_disp_get_active_output(struct nvgpu_device *gpu, uint32_t head,
-	uint32_t *display_id);
-
 /* Program protocol, link, audio, and ELD state for a live acquired route. */
 int nvgsp_disp_enable_hdmi(struct nvgpu_device *gpu,
 	const struct nvgsp_display_route *route,

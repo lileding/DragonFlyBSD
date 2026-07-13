@@ -947,36 +947,3 @@ nvgsp_rpc_init(struct nvgpu_device *gpu)
 	gsp->gsp_rpc_seq = 0;
 	return (0);
 }
-
-/* Queue early system-info RPC during GSP boot. */
-int
-nvgsp_rpc_enqueue_system_info_preinit(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL)
-		return (ENXIO);
-	return (nvgsp_rpc_set_system_info(gsp));
-}
-
-/* Queue early registry RPC during GSP boot. */
-int
-nvgsp_rpc_enqueue_registry_preinit(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL)
-		return (ENXIO);
-	return (nvgsp_rpc_set_registry(gsp));
-}
-
-/* Notify GSP that the driver is unloading; may wait for RPC completion. */
-int
-nvgsp_rpc_send_unloading_guest_driver(struct nvgpu_device *gpu)
-{
-	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
-
-	if (gsp == NULL)
-		return (ENXIO);
-	return (nvgsp_rpc_get_unloading_guest_driver_state(gsp));
-}
