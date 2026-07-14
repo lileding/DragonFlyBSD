@@ -44,21 +44,6 @@ nvgpu_channel_count(struct nvgpu_channel_list *channels)
 	return (count);
 }
 
-/* Caller serializes the proc channel list. */
-static struct nvgpu_channel *
-nvgpu_channel_find(struct nvgpu_channel_list *channels, uint32_t id)
-{
-	struct nvgpu_channel *chan;
-
-	if (channels == NULL)
-		return (NULL);
-	TAILQ_FOREACH(chan, channels, link) {
-		if (chan->id == id)
-			return (chan);
-	}
-	return (NULL);
-}
-
 int
 nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
     struct nvgpu_channel_list *channels, struct nvgpu_channel_create_args *args,

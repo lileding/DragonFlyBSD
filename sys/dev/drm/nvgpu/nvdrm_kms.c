@@ -18,6 +18,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_atomic_uapi.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_color_mgmt.h>
 #include <drm/drm_edid.h>
@@ -75,6 +76,8 @@ struct nvdrm_crtc {
 	struct nvdrm_kms *kms;
 	uint32_t head;
 	uint32_t window;
+	struct nvgpu_display_head_config current_head_config;
+	bool current_head_config_valid;
 };
 
 struct nvdrm_connector {
@@ -1224,39 +1227,86 @@ nvdrm_kms_check_plane(struct drm_plane *plane, struct drm_plane_state *state)
 	uint64_t line;
 	int error;
 
-	if (state->crtc == NULL)
+	if (state->crtc == NULL) {
+		if (state->fb != NULL)
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "plane check fail type=%u fb without crtc fb=%p\n",
+			    plane->type, state->fb);
 		return (state->fb == NULL ? 0 : -EINVAL);
+	}
 	crtc_state = drm_atomic_get_new_crtc_state(state->state, state->crtc);
-	if (crtc_state == NULL)
+	if (crtc_state == NULL) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u no crtc_state crtc=%p\n",
+		    plane->type, state->crtc);
 		return (-EINVAL);
+	}
 	error = drm_atomic_helper_check_plane_state(state, crtc_state,
 	    DRM_PLANE_HELPER_NO_SCALING, DRM_PLANE_HELPER_NO_SCALING, true,
 	    plane->type == DRM_PLANE_TYPE_CURSOR);
-	if (error != 0 || !state->visible)
+	if (error != 0 || !state->visible) {
+		if (error != 0)
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "plane check fail type=%u helper error=%d visible=%d "
+			    "crtc=%p fb=%p crtc_xy=%dx%d crtc_wh=%dx%d "
+			    "src=%ux%u+%u+%u\n",
+			    plane->type, error, state->visible, state->crtc, state->fb,
+			    state->crtc_x, state->crtc_y, state->crtc_w, state->crtc_h,
+			    state->src_w, state->src_h, state->src_x, state->src_y);
 		return (error);
-	if (!crtc_state->active)
+	}
+	if (!crtc_state->active) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u inactive crtc fb=%p\n",
+		    plane->type, state->fb);
 		return (-EINVAL);
+	}
 	fb = state->fb;
 	if (fb == NULL || fb->format == NULL ||
 	    !nvdrm_kms_plane_supports_modifier(plane, fb->format->format,
-	    fb->modifier))
+	    fb->modifier)) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u fb=%p format=0x%08x modifier=0x%016llx\n",
+		    plane->type, fb, fb != NULL && fb->format != NULL ?
+		    fb->format->format : 0, fb != NULL ?
+		    (unsigned long long)fb->modifier : 0ULL);
 		return (-EINVAL);
+	}
 	object = drm_gem_fb_get_obj(fb, 0);
 	if (fb->funcs == &nvdrm_kms_internal_fb_funcs) {
 		if (plane->type != DRM_PLANE_TYPE_PRIMARY || fb->width == 0 ||
-		    fb->height == 0 || fb->pitches[0] < fb->width * 4u)
+		    fb->height == 0 || fb->pitches[0] < fb->width * 4u) {
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "plane check fail internal fb type=%u fb=%p %ux%u pitch=%u\n",
+			    plane->type, fb, fb->width, fb->height, fb->pitches[0]);
 			return (-EINVAL);
+		}
 		object = NULL;
 	} else if (object == NULL ||
-	    !nvgpu_bo_is_vram(nvgpu_bo_from_gem(object)))
+	    !nvgpu_bo_is_vram(nvgpu_bo_from_gem(object))) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u object=%p vram=%d fb=%p\n",
+		    plane->type, object, object != NULL ?
+		    nvgpu_bo_is_vram(nvgpu_bo_from_gem(object)) : 0, fb);
 		return (-EINVAL);
+	}
 	line = (uint64_t)fb->width * fb->format->cpp[0];
-	if (fb->width == 0 || fb->height == 0 || fb->pitches[0] < line)
+	if (fb->width == 0 || fb->height == 0 || fb->pitches[0] < line) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u bad pitch fb=%p %ux%u pitch=%u line=%llu\n",
+		    plane->type, fb, fb->width, fb->height, fb->pitches[0],
+		    (unsigned long long)line);
 		return (-EINVAL);
+	}
 	min_size = (uint64_t)(fb->height - 1u) * fb->pitches[0] + line +
 	    fb->offsets[0];
-	if (object != NULL && object->size < min_size)
+	if (object != NULL && object->size < min_size) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail type=%u object too small size=0x%llx min=0x%llx\n",
+		    plane->type, (unsigned long long)object->size,
+		    (unsigned long long)min_size);
 		return (-EINVAL);
+	}
 	if (plane->type == DRM_PLANE_TYPE_CURSOR) {
 		if (state->crtc_w <= 0 || state->crtc_w != state->crtc_h ||
 		    (state->crtc_w != 32 && state->crtc_w != 64 &&
@@ -1267,18 +1317,36 @@ nvdrm_kms_check_plane(struct drm_plane *plane, struct drm_plane_state *state)
 		    (fb->offsets[0] & 0xffu) != 0 || state->src_x != 0 ||
 		    state->src_y != 0 ||
 		    state->src_w != ((uint32_t)state->crtc_w << 16) ||
-		    state->src_h != ((uint32_t)state->crtc_h << 16))
+		    state->src_h != ((uint32_t)state->crtc_h << 16)) {
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "plane check fail cursor fb=%p fb=%ux%u pitch=%u off=0x%x "
+			    "crtc=%dx%d src=%ux%u+%u+%u\n",
+			    fb, fb->width, fb->height, fb->pitches[0], fb->offsets[0],
+			    state->crtc_w, state->crtc_h, state->src_w, state->src_h,
+			    state->src_x, state->src_y);
 			return (-EINVAL);
+		}
 		return (0);
 	}
 	if (state->crtc_x != 0 || state->crtc_y != 0 ||
-	    state->crtc_w != crtc_state->mode.hdisplay ||
-	    state->crtc_h != crtc_state->mode.vdisplay ||
+	    state->crtc_w <= 0 || state->crtc_h <= 0 ||
+	    state->crtc_w > crtc_state->mode.hdisplay ||
+	    state->crtc_h > crtc_state->mode.vdisplay ||
 	    (state->src_x & 0xffffu) != 0 ||
 	    (state->src_y & 0xffffu) != 0 ||
 	    (state->src_w & 0xffffu) != 0 ||
-	    (state->src_h & 0xffffu) != 0 || (fb->pitches[0] & 0x3fu) != 0)
+	    (state->src_h & 0xffffu) != 0 || (fb->pitches[0] & 0x3fu) != 0) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "plane check fail primary geom fb=%p fb=%ux%u pitch=%u "
+		    "mode=%dx%d adjusted=%dx%d crtc=%d,%d %dx%d src=%ux%u+%u+%u\n",
+		    fb, fb->width, fb->height, fb->pitches[0],
+		    crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+		    crtc_state->adjusted_mode.hdisplay,
+		    crtc_state->adjusted_mode.vdisplay,
+		    state->crtc_x, state->crtc_y, state->crtc_w, state->crtc_h,
+		    state->src_w, state->src_h, state->src_x, state->src_y);
 		return (-EINVAL);
+	}
 	source_x = state->src_x >> 16;
 	source_y = state->src_y >> 16;
 	source_width = state->src_w >> 16;
@@ -1350,13 +1418,33 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 	if (state == NULL || state->crtc == NULL || state->fb == NULL ||
 	    !state->visible || state->crtc->state == NULL ||
 	    !state->crtc->state->active ||
-	    drm_atomic_crtc_needs_modeset(state->crtc->state))
+	    drm_atomic_crtc_needs_modeset(state->crtc->state)) {
+		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms primary skip plane=%p state=%p crtc=%p fb=%p "
+			    "visible=%d crtc_state=%p active=%d modeset=%d\n",
+			    plane, state, state != NULL ? state->crtc : NULL,
+			    state != NULL ? state->fb : NULL,
+			    state != NULL ? state->visible : 0,
+			    state != NULL && state->crtc != NULL ?
+			    state->crtc->state : NULL,
+			    state != NULL && state->crtc != NULL &&
+			    state->crtc->state != NULL ?
+			    state->crtc->state->active : 0,
+			    state != NULL && state->crtc != NULL &&
+			    state->crtc->state != NULL ?
+			    drm_atomic_crtc_needs_modeset(state->crtc->state) : 0);
 		return;
+	}
 	nvcrtc = to_nvdrm_crtc(state->crtc);
 	internal = state->fb->funcs == &nvdrm_kms_internal_fb_funcs;
 	object = internal ? NULL : drm_gem_fb_get_obj(state->fb, 0);
-	if (!internal && object == NULL)
+	if (!internal && object == NULL) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms primary skip head=%u fb=%p has no GEM object\n",
+		    nvcrtc->head, state->fb);
 		return;
+	}
 	bo = internal ? NULL : nvgpu_bo_from_gem(object);
 	legacy_update = old_state != NULL && old_state->state != NULL &&
 	    old_state->state->legacy_cursor_update;
@@ -1452,7 +1540,30 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 			pending->crtc = state->crtc;
 			pending->event = event;
 			event_ref = true;
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms primary event armed head=%u win=%u event=%p\n",
+			    nvcrtc->head, nvcrtc->window, event);
 		}
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms primary update head=%u win=%u fb=%p internal=%d "
+		    "event=%p event_ref=%d paddr=0x%llx size=0x%llx "
+		    "pitch=%u layout=%u kind=0x%x block_height=%u "
+		    "src=%ux%u dst=%ux%u mode=%dx%d adjusted=%dx%d plane=%dx%d\n",
+		    nvcrtc->head, nvcrtc->window, state->fb, internal, event,
+		    event_ref, (unsigned long long)scanout.paddr,
+		    (unsigned long long)scanout.size, scanout.pitch,
+		    scanout.layout, scanout.kind, scanout.block_height,
+		    scanout.source_width, scanout.source_height,
+		    scanout.output_width, scanout.output_height,
+		    state->crtc->state != NULL ?
+		    state->crtc->state->mode.hdisplay : 0,
+		    state->crtc->state != NULL ?
+		    state->crtc->state->mode.vdisplay : 0,
+		    state->crtc->state != NULL ?
+		    state->crtc->state->adjusted_mode.hdisplay : 0,
+		    state->crtc->state != NULL ?
+		    state->crtc->state->adjusted_mode.vdisplay : 0,
+		    state->crtc_w, state->crtc_h);
 		error = nvgpu_display_update_primary(nvcrtc->kms->gpu,
 		    nvcrtc->head, nvcrtc->window, &scanout,
 		    event_ref ? pending : NULL);
@@ -1632,14 +1743,31 @@ nvdrm_kms_enable_crtc(struct drm_crtc *crtc,
 
 	if (old_state == NULL || old_state->state == NULL ||
 	    crtc->state == NULL || crtc->primary == NULL ||
-	    crtc->primary->state == NULL || crtc->primary->state->fb == NULL)
+	    crtc->primary->state == NULL || crtc->primary->state->fb == NULL) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms enable skip head=%u old=%p old_atomic=%p crtc_state=%p "
+		    "primary=%p primary_state=%p fb=%p\n",
+		    nvcrtc->head, old_state,
+		    old_state != NULL ? old_state->state : NULL,
+		    crtc->state, crtc->primary,
+		    crtc->primary != NULL ? crtc->primary->state : NULL,
+		    crtc->primary != NULL && crtc->primary->state != NULL ?
+		    crtc->primary->state->fb : NULL);
 		return;
+	}
 	atomic = to_nvdrm_atomic_state(old_state->state);
 	prepared = atomic->prepared[nvcrtc->head];
-	if (prepared == NULL)
+	if (prepared == NULL) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms enable skip head=%u no prepared output\n",
+		    nvcrtc->head);
 		return;
+	}
 	atomic->prepared[nvcrtc->head] = NULL;
 	if (!atomic->head_config_valid[nvcrtc->head]) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms enable abort head=%u missing head config\n",
+		    nvcrtc->head);
 		nvgpu_display_abort_output(nvcrtc->kms->gpu, prepared);
 		return;
 	}
@@ -1648,6 +1776,9 @@ nvdrm_kms_enable_crtc(struct drm_crtc *crtc,
 	object = drm_gem_fb_get_obj(plane_state->fb, 0);
 	if (object == NULL &&
 	    plane_state->fb->funcs != &nvdrm_kms_internal_fb_funcs) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms enable abort head=%u fb=%p has no GEM object\n",
+		    nvcrtc->head, plane_state->fb);
 		nvgpu_display_abort_output(nvcrtc->kms->gpu, prepared);
 		return;
 	}
@@ -1699,6 +1830,16 @@ nvdrm_kms_enable_crtc(struct drm_crtc *crtc,
 	scanout.source_height = plane_state->src_h >> 16;
 	scanout.output_width = plane_state->crtc_w;
 	scanout.output_height = plane_state->crtc_h;
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "kms enable head=%u win=%u fb=%p internal=%d paddr=0x%llx "
+	    "size=0x%llx pitch=%u layout=%u kind=0x%x block_height=%u "
+	    "src=%ux%u dst=%ux%u\n",
+	    nvcrtc->head, nvcrtc->window, plane_state->fb,
+	    plane_state->fb->funcs == &nvdrm_kms_internal_fb_funcs,
+	    (unsigned long long)scanout.paddr,
+	    (unsigned long long)scanout.size, scanout.pitch, scanout.layout,
+	    scanout.kind, scanout.block_height, scanout.source_width,
+	    scanout.source_height, scanout.output_width, scanout.output_height);
 	error = nvgpu_display_enable(nvcrtc->kms->gpu, nvcrtc->head,
 	    nvcrtc->window, &head_config, &scanout, prepared);
 	if (error != 0) {
@@ -1706,6 +1847,8 @@ nvdrm_kms_enable_crtc(struct drm_crtc *crtc,
 		    nvcrtc->head, error);
 		return;
 	}
+	nvcrtc->current_head_config = head_config;
+	nvcrtc->current_head_config_valid = true;
 	if (crtc->cursor != NULL && crtc->cursor->state != NULL &&
 	    crtc->cursor->state->visible && crtc->cursor->state->fb != NULL) {
 		struct drm_plane_state *cursor_state = crtc->cursor->state;
@@ -1738,6 +1881,7 @@ nvdrm_kms_disable_crtc(struct drm_crtc *crtc,
 	int error;
 
 	(void)old_state;
+	nvcrtc->current_head_config_valid = false;
 	error = nvgpu_display_disable(nvcrtc->kms->gpu, nvcrtc->head,
 	    nvcrtc->window);
 	if (error == 0)
@@ -1927,6 +2071,13 @@ nvdrm_kms_check_connector(struct drm_connector *connector,
 	    nvconnector->native_mode != NULL)
 		target = nvconnector->native_mode;
 	if (!drm_mode_equal(&crtc_state->adjusted_mode, target)) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "connector scaling update connector=%p scaling=%u "
+		    "mode=%dx%d adjusted=%dx%d target=%dx%d\n",
+		    connector, state->scaling_mode, crtc_state->mode.hdisplay,
+		    crtc_state->mode.vdisplay, crtc_state->adjusted_mode.hdisplay,
+		    crtc_state->adjusted_mode.vdisplay, target->hdisplay,
+		    target->vdisplay);
 		drm_mode_copy(&crtc_state->adjusted_mode, target);
 		crtc_state->mode_changed = true;
 	}
@@ -2116,6 +2267,8 @@ static int
 nvdrm_kms_check_atomic(struct drm_device *ddev,
     struct drm_atomic_state *state)
 {
+	struct drm_connector_state *connector_state;
+	struct drm_connector *connector;
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
 	int error;
@@ -2129,8 +2282,37 @@ nvdrm_kms_check_atomic(struct drm_device *ddev,
 		if (error != 0)
 			return (error);
 	}
-	return (drm_atomic_helper_check(ddev, state));
+
+	error = drm_atomic_helper_check_modeset(ddev, state);
+	if (error != 0)
+		goto out;
+
+	/*
+	 * DragonFly helper calls connector atomic_check before mode_fixup(), and
+	 * mode_fixup resets adjusted_mode from mode. Reapply the local scaling fix
+	 * before plane validation so a real low mode is not rejected as a partial
+	 * primary plane update against the previous CRTC mode.
+	 */
+	for_each_new_connector_in_state(state, connector, connector_state, index) {
+		error = nvdrm_kms_check_connector(connector, connector_state);
+		if (error != 0)
+			goto out;
+	}
+
+	if (ddev->mode_config.normalize_zpos) {
+		error = drm_atomic_normalize_zpos(ddev, state);
+		if (error != 0)
+			goto out;
+	}
+
+	error = drm_atomic_helper_check_planes(ddev, state);
+out:
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "atomic check failed state=%p error=%d\n", state, error);
+	return (error);
 }
+
 
 static void
 nvdrm_kms_run_commit(struct work_struct *work)
@@ -2152,9 +2334,13 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	struct nvdrm_kms *kms = nvgpu_device_get_kms(state->dev->dev_private);
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
+	uint32_t event_vblank_ref_mask = 0;
 	uint32_t head;
 	int index;
 
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "kms commit tail start state=%p connectors=%d\n",
+	    state, state->num_connector);
 	for (index = 0; index < state->num_connector; index++) {
 		if (state->connectors[index].ptr == NULL ||
 		    (state->connectors[index].old_state != NULL &&
@@ -2181,10 +2367,8 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		    state->connectors[index].ptr->state;
 	}
 
+	drm_atomic_helper_update_legacy_modeset_state(state->dev, state);
 	drm_atomic_helper_commit_modeset_disables(state->dev, state);
-	drm_atomic_helper_commit_planes(state->dev, state,
-	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
-	drm_atomic_helper_commit_modeset_enables(state->dev, state);
 	for (head = 0; head < NVDRM_KMS_MAX_HEADS; head++) {
 		int error;
 
@@ -2195,11 +2379,21 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		error = nvgpu_display_update_head(state->dev->dev_private, head,
 		    &nvstate->head_config[head], nvstate->head_update_view[head],
 		    nvstate->head_update_dither[head]);
-		if (error != 0)
+		if (error != 0) {
 			nvgpu_log(NVGPU_LOG_INFO,
 			    "HEAD property update failed head=%u error=%d\n",
 			    head, error);
+		} else if (kms != NULL && head < kms->head_count &&
+		    kms->crtcs[head] != NULL) {
+			struct nvdrm_crtc *nvcrtc = to_nvdrm_crtc(kms->crtcs[head]);
+
+			nvcrtc->current_head_config = nvstate->head_config[head];
+			nvcrtc->current_head_config_valid = true;
+		}
 	}
+	drm_atomic_helper_commit_planes(state->dev, state,
+	    DRM_PLANE_COMMIT_NO_DISABLE_AFTER_MODESET);
+	drm_atomic_helper_commit_modeset_enables(state->dev, state);
 	for (head = 0; head < NVDRM_KMS_MAX_HEADS; head++) {
 		struct nvdrm_crtc *nvcrtc;
 		int error;
@@ -2216,16 +2410,52 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	}
 
 	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		uint32_t crtc_mask;
+		struct nvdrm_crtc *nvcrtc = to_nvdrm_crtc(crtc);
+
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms commit crtc index=%d head=%u active=%d enable=%d "
+		    "modeset=%d mode_changed=%d active_changed=%d "
+		    "connectors_changed=%d planes_changed=%d event=%p\n",
+		    index, nvcrtc->head, crtc_state->active, crtc_state->enable,
+		    drm_atomic_crtc_needs_modeset(crtc_state),
+		    crtc_state->mode_changed, crtc_state->active_changed,
+		    crtc_state->connectors_changed, crtc_state->planes_changed,
+		    crtc_state->event);
+		if (crtc_state->event == NULL || !crtc_state->active ||
+		    !drm_atomic_crtc_needs_modeset(crtc_state))
+			continue;
+		crtc_mask = drm_crtc_mask(crtc);
+		if (drm_crtc_vblank_get(crtc) == 0) {
+			event_vblank_ref_mask |= crtc_mask;
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms modeset event vblank ref head=%u event=%p\n",
+			    to_nvdrm_crtc(crtc)->head, crtc_state->event);
+		} else {
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms modeset event no vblank ref head=%u event=%p\n",
+			    to_nvdrm_crtc(crtc)->head, crtc_state->event);
+		}
+	}
+	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		uint32_t crtc_mask;
 		unsigned long flags;
 
 		if (crtc_state->event == NULL)
 			continue;
+		crtc_mask = drm_crtc_mask(crtc);
 		if (crtc_state->active)
 			drm_crtc_accurate_vblank_count(crtc);
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "kms send crtc event head=%u event=%p ref=%d\n",
+		    to_nvdrm_crtc(crtc)->head, crtc_state->event,
+		    (event_vblank_ref_mask & crtc_mask) != 0);
 		spin_lock_irqsave(&state->dev->event_lock, flags);
 		drm_crtc_send_vblank_event(crtc, crtc_state->event);
 		crtc_state->event = NULL;
 		spin_unlock_irqrestore(&state->dev->event_lock, flags);
+		if ((event_vblank_ref_mask & crtc_mask) != 0)
+			drm_crtc_vblank_put(crtc);
 	}
 	drm_atomic_helper_fake_vblank(state);
 	drm_atomic_helper_commit_hw_done(state);
@@ -2272,8 +2502,41 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 	if (state->async_update)
 		return (drm_atomic_helper_commit(ddev, state, nonblock));
 	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		struct drm_plane_state *primary_state;
+		struct drm_plane_state *old_primary_state;
+		bool primary_size_changed = false;
+
 		if (drm_atomic_crtc_needs_modeset(crtc_state) ||
 		    crtc_state->color_mgmt_changed) {
+			custom_commit = true;
+			break;
+		}
+		primary_state = drm_atomic_get_new_plane_state(state, crtc->primary);
+		old_primary_state = drm_atomic_get_old_plane_state(state,
+		    crtc->primary);
+		if (primary_state != NULL && old_primary_state != NULL &&
+		    primary_state->fb != NULL && old_primary_state->fb != NULL &&
+		    (primary_state->crtc_w != old_primary_state->crtc_w ||
+		    primary_state->crtc_h != old_primary_state->crtc_h ||
+		    primary_state->src_w != old_primary_state->src_w ||
+		    primary_state->src_h != old_primary_state->src_h))
+			primary_size_changed = true;
+		if (primary_state != NULL && primary_state->fb != NULL &&
+		    primary_state->crtc_x == 0 && primary_state->crtc_y == 0 &&
+		    primary_state->crtc_w > 0 && primary_state->crtc_h > 0 &&
+		    primary_state->src_x == 0 && primary_state->src_y == 0 &&
+		    primary_state->src_w == ((uint32_t)primary_state->crtc_w << 16) &&
+		    primary_state->src_h == ((uint32_t)primary_state->crtc_h << 16) &&
+		    primary_size_changed) {
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms custom commit for primary head view crtc=%p "
+			    "mode=%dx%d adjusted=%dx%d plane=%dx%d changed=%d\n",
+			    crtc, crtc_state->mode.hdisplay,
+			    crtc_state->mode.vdisplay,
+			    crtc_state->adjusted_mode.hdisplay,
+			    crtc_state->adjusted_mode.vdisplay,
+			    primary_state->crtc_w, primary_state->crtc_h,
+			    primary_size_changed);
 			custom_commit = true;
 			break;
 		}
@@ -2382,6 +2645,18 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 		head_config->input_height = crtc_state->mode.vdisplay;
 		head_config->output_width = crtc_state->adjusted_mode.hdisplay;
 		head_config->output_height = crtc_state->adjusted_mode.vdisplay;
+		primary_state = drm_atomic_get_new_plane_state(state, crtc->primary);
+		if (primary_state == NULL)
+			primary_state = crtc->primary->state;
+		if (primary_state != NULL && primary_state->fb != NULL &&
+		    primary_state->crtc_x == 0 && primary_state->crtc_y == 0 &&
+		    primary_state->crtc_w > 0 && primary_state->crtc_h > 0 &&
+		    primary_state->src_x == 0 && primary_state->src_y == 0 &&
+		    primary_state->src_w == ((uint32_t)primary_state->crtc_w << 16) &&
+		    primary_state->src_h == ((uint32_t)primary_state->crtc_h << 16)) {
+			head_config->input_width = primary_state->crtc_w;
+			head_config->input_height = primary_state->crtc_h;
+		}
 		underscan = nvconnector_state->underscan_mode ==
 		    NVGPU_DISPLAY_UNDERSCAN_ON ||
 		    (nvconnector_state->underscan_mode ==
@@ -2427,9 +2702,6 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 				    head_config->input_height / head_config->input_width;
 		}
 		head_config->bpc = nvconnector_state->max_bpc;
-		primary_state = drm_atomic_get_new_plane_state(state, crtc->primary);
-		if (primary_state == NULL)
-			primary_state = crtc->primary->state;
 		if (primary_state != NULL && primary_state->fb != NULL &&
 		    primary_state->fb->format != NULL &&
 		    primary_state->fb->format->depth != 0)
@@ -2495,6 +2767,19 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 		}
 		if (!drm_atomic_crtc_needs_modeset(crtc_state) &&
 		    old_nvconnector_state != NULL) {
+			struct drm_plane_state *old_primary_state;
+			bool primary_size_changed = false;
+
+			old_primary_state = drm_atomic_get_old_plane_state(state,
+			    crtc->primary);
+			if (primary_state != NULL && old_primary_state != NULL &&
+			    primary_state->fb != NULL &&
+			    old_primary_state->fb != NULL &&
+			    (primary_state->crtc_w != old_primary_state->crtc_w ||
+			    primary_state->crtc_h != old_primary_state->crtc_h ||
+			    primary_state->src_w != old_primary_state->src_w ||
+			    primary_state->src_h != old_primary_state->src_h))
+				primary_size_changed = true;
 			nvstate->head_update_view[head] =
 			    old_nvconnector_state->base.scaling_mode !=
 			    nvconnector_state->base.scaling_mode ||
@@ -2503,13 +2788,57 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 			    old_nvconnector_state->underscan_hborder !=
 			    nvconnector_state->underscan_hborder ||
 			    old_nvconnector_state->underscan_vborder !=
-			    nvconnector_state->underscan_vborder;
+			    nvconnector_state->underscan_vborder ||
+			    primary_size_changed;
 			nvstate->head_update_dither[head] =
 			    old_nvconnector_state->dither_mode !=
 			    nvconnector_state->dither_mode ||
 			    old_nvconnector_state->dither_depth !=
 			    nvconnector_state->dither_depth ||
 			    old_nvconnector_state->max_bpc != nvconnector_state->max_bpc;
+		}
+		if (!drm_atomic_crtc_needs_modeset(crtc_state) &&
+		    primary_state != NULL && primary_state->fb != NULL &&
+		    (head_config->input_width != crtc_state->mode.hdisplay ||
+		    head_config->input_height != crtc_state->mode.vdisplay)) {
+			nvstate->head_update_view[head] = true;
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "kms head view update from primary head=%u input=%ux%u output=%ux%u mode=%dx%d adjusted=%dx%d plane=%dx%d\n",
+			    head, head_config->input_width, head_config->input_height,
+			    head_config->output_width, head_config->output_height,
+			    crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+			    crtc_state->adjusted_mode.hdisplay,
+			    crtc_state->adjusted_mode.vdisplay, primary_state->crtc_w,
+			    primary_state->crtc_h);
+		}
+		if (!drm_atomic_crtc_needs_modeset(crtc_state) &&
+		    nvcrtc->current_head_config_valid) {
+			const struct nvgpu_display_head_config *submitted =
+			    &nvcrtc->current_head_config;
+
+			if (nvstate->head_update_view[head] &&
+			    submitted->input_width == head_config->input_width &&
+			    submitted->input_height == head_config->input_height &&
+			    submitted->output_width == head_config->output_width &&
+			    submitted->output_height == head_config->output_height) {
+				nvgpu_log(NVGPU_LOG_DEBUG,
+				    "kms head view unchanged head=%u input=%ux%u output=%ux%u\n",
+				    head, head_config->input_width,
+				    head_config->input_height,
+				    head_config->output_width,
+				    head_config->output_height);
+				nvstate->head_update_view[head] = false;
+			}
+			if (nvstate->head_update_dither[head] &&
+			    submitted->dither_enabled == head_config->dither_enabled &&
+			    submitted->dither_bits == head_config->dither_bits &&
+			    submitted->dither_mode == head_config->dither_mode) {
+				nvgpu_log(NVGPU_LOG_DEBUG,
+				    "kms head dither unchanged head=%u enabled=%d bits=%u mode=%u\n",
+				    head, head_config->dither_enabled,
+				    head_config->dither_bits, head_config->dither_mode);
+				nvstate->head_update_dither[head] = false;
+			}
 		}
 		if (!drm_atomic_crtc_needs_modeset(crtc_state))
 			continue;

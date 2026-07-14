@@ -827,7 +827,19 @@ nvgpu_display_enable(struct nvgpu_device *gpu, uint32_t head, uint32_t window,
 	}
 	lwkt_gettoken(&display->token);
 	current = &display->heads[head];
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display enable start head=%u win=%u active=%d route=%d "
+	    "core=%d assign=%d paddr=0x%llx size=0x%llx pitch=%u "
+	    "layout=%u kind=0x%x block_height=%u\n",
+	    head, window, current->active, current->route.acquired,
+	    display->core_initialized, display->assign_windows,
+	    (unsigned long long)scanout->paddr,
+	    (unsigned long long)scanout->size, scanout->pitch,
+	    scanout->layout, scanout->kind, scanout->block_height);
 	if (current->active || current->route.acquired) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display enable busy head=%u win=%u active=%d route=%d\n",
+		    head, window, current->active, current->route.acquired);
 		error = EBUSY;
 		goto out;
 	}
@@ -1004,6 +1016,9 @@ nvgpu_display_enable(struct nvgpu_device *gpu, uint32_t head, uint32_t window,
 	    &display->windows[window].push, window, interlock);
 	if (error != 0)
 		goto out;
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display enable window update submitted head=%u win=%u notifier=0x%x\n",
+	    head, window, notifier_offset);
 	update_submitted = true;
 	current->active = true;
 	display->window_state[window].active = true;
@@ -1035,6 +1050,9 @@ nvgpu_display_enable(struct nvgpu_device *gpu, uint32_t head, uint32_t window,
 		error = ETIMEDOUT;
 		goto out;
 	}
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display enable core notifier done head=%u value=0x%08x polls=%u\n",
+	    head, status, poll);
 	if (prepared->config.audio_enabled && prepared->config.eld_size != 0) {
 		int audio_error;
 
@@ -1065,9 +1083,20 @@ nvgpu_display_enable(struct nvgpu_device *gpu, uint32_t head, uint32_t window,
 		    nvgpu_device_rd32(gpu, 0x6104e0 + (1u + window) * 4u),
 		    nvgpu_device_rd32(gpu, 0x610664 + window * 4u));
 		error = ETIMEDOUT;
+	} else {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display enable window notifier begun head=%u win=%u "
+		    "value=0x%08x polls=%u\n",
+		    head, window, status, poll);
 	}
 
 out:
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display enable exit error head=%u win=%u error=%d "
+		    "submitted=%d active=%d route=%d\n",
+		    head, window, error, update_submitted, current->active,
+		    current->route.acquired);
 	if (error != 0 && !update_submitted && current->route.acquired) {
 		if (current->route.protocol == NVGSP_DISPLAY_PROTOCOL_TMDS)
 			nvgsp_disp_disable_hdmi(gpu, &current->route);
@@ -1115,13 +1144,29 @@ nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
 		return (EINVAL);
 
 	lwkt_gettoken(&display->token);
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display primary start head=%u win=%u active=%d core=%d "
+	    "pageflip=%p paddr=0x%llx size=0x%llx pitch=%u layout=%u "
+	    "kind=0x%x block_height=%u\n",
+	    head, window, display->heads[head].active,
+	    display->core_initialized, pageflip_cookie,
+	    (unsigned long long)scanout->paddr,
+	    (unsigned long long)scanout->size, scanout->pitch,
+	    scanout->layout, scanout->kind, scanout->block_height);
 	if (!display->heads[head].active || !display->core_initialized) {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display primary rejected head=%u win=%u active=%d core=%d\n",
+		    head, window, display->heads[head].active,
+		    display->core_initialized);
 		error = ENODEV;
 		goto out;
 	}
 	if (pageflip_cookie != NULL) {
 		spin_lock(&display->event_lock);
 		if (display->heads[head].flip_pending) {
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "display primary rejected head=%u win=%u flip already pending\n",
+			    head, window);
 			spin_unlock(&display->event_lock);
 			error = EBUSY;
 			goto out;
@@ -1194,6 +1239,10 @@ nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
 		display->heads[head].flip_notifier_offset = notifier_offset;
 		display->heads[head].flip_cookie = pageflip_cookie;
 		spin_unlock(&display->event_lock);
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display primary pageflip pending head=%u win=%u "
+		    "notifier=0x%x cookie=%p\n",
+		    head, window, notifier_offset, pageflip_cookie);
 		pending_installed = true;
 	}
 	interlock[NVGPU_DISPLAY_INTERLOCK_WINDOW] = 1u << window;
@@ -1201,6 +1250,10 @@ nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
 	    &display->windows[window].push, window, interlock);
 	if (error != 0)
 		goto out;
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display primary window update submitted head=%u win=%u "
+	    "notifier=0x%x pageflip=%p\n",
+	    head, window, notifier_offset, pageflip_cookie);
 	display->window_state[window].active = true;
 	display->window_state[window].color_active = true;
 	if (pageflip_cookie != NULL)
@@ -1213,10 +1266,23 @@ nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
 			break;
 		DELAY(NVGPU_DISPLAY_NOTIFIER_DELAY_US);
 	}
-	if (poll == NVGPU_DISPLAY_NOTIFIER_POLLS)
+	if (poll == NVGPU_DISPLAY_NOTIFIER_POLLS) {
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "display primary notifier timeout head=%u win=%u value=0x%08x\n",
+		    head, window, status);
 		error = ETIMEDOUT;
+	} else {
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display primary notifier begun head=%u win=%u "
+		    "value=0x%08x polls=%u\n",
+		    head, window, status, poll);
+	}
 
 out:
+	if (error != 0)
+		nvgpu_log(NVGPU_LOG_DEBUG,
+		    "display primary exit error head=%u win=%u error=%d pending=%d\n",
+		    head, window, error, pending_installed);
 	if (error != 0 && pending_installed) {
 		spin_lock(&display->event_lock);
 		if (display->heads[head].flip_cookie == pageflip_cookie &&
@@ -1259,6 +1325,12 @@ nvgpu_display_update_head(struct nvgpu_device *gpu, uint32_t head,
 	state.dither.enable = config->dither_enabled;
 	state.dither.bits = config->dither_bits == 8 ? 1 : 0;
 	state.dither.mode = config->dither_mode;
+	nvgpu_log(NVGPU_LOG_DEBUG,
+	    "display head update head=%u view=%d dither=%d "
+	    "input=%ux%u output=%ux%u\n",
+	    head, update_view, update_dither, state.view.input_width,
+	    state.view.input_height, state.view.output_width,
+	    state.view.output_height);
 	if (update_view)
 		error = nvgpu_display_method_set_head_view(&display->core.push,
 		    head, display->window_count, &state);
@@ -1575,9 +1647,6 @@ nvgpu_display_disable_primary(struct nvgpu_device *gpu, uint32_t window)
 		    &display->windows[window].push);
 	if (error == 0)
 		error = nvgpu_display_method_clear_window_image(
-		    &display->windows[window].push);
-	if (error == 0)
-		error = nvgpu_display_method_clear_window_notifier(
 		    &display->windows[window].push);
 	if (error == 0) {
 		interlock[NVGPU_DISPLAY_INTERLOCK_WINDOW] = 1u << window;
