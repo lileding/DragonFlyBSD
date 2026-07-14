@@ -8,6 +8,7 @@
 #define _NVGPU_FUTURE_H_
 
 #include <stdbool.h>
+#include <sys/queue.h>
 #include <sys/types.h>
 
 struct nvgpu_fence;
@@ -45,5 +46,21 @@ struct nvgpu_future {
  */
 int nvgpu_future_spawn(struct nvgpu_future *future,
 	struct nvgpu_fence **waits, size_t wait_count);
+
+/* Driver-private future state shared with the scheduler. */
+struct nvgpu_future_state {
+	LIST_ENTRY(nvgpu_future_state) registry_link;
+	TAILQ_ENTRY(nvgpu_future_state) sched_link;
+	struct nvgpu_future *future;
+	struct nvgpu_future_result (*poll)(struct nvgpu_future *future);
+	volatile u_int wait_count;
+	volatile u_int wait_error;
+	bool queued;
+};
+
+struct nvgpu_future_state *nvgpu_future_get_state(
+	struct nvgpu_future *future);
+int nvgpu_future_get_wait_error(struct nvgpu_future *future);
+void nvgpu_future_assert_empty(void);
 
 #endif /* _NVGPU_FUTURE_H_ */

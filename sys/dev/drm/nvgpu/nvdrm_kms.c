@@ -11,7 +11,8 @@
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_display.h"
-#include "nvgpu_intr_internal.h"
+#include "nvgpu_intr.h"
+#include "nvgpu_proc.h"
 
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>
@@ -266,7 +267,7 @@ nvdrm_kms_create_dumb(struct drm_file *file, struct drm_device *ddev,
 	create_args.size = size;
 	create_args.domain = NOUVEAU_GEM_DOMAIN_VRAM |
 	    NOUVEAU_GEM_DOMAIN_MAPPABLE;
-	error = nvgpu_bo_create_handle(proc, file, &create_args, &info);
+	error = nvgpu_proc_create_bo_handle(proc, file, &create_args, &info);
 	if (error != 0)
 		return (error > 0 ? -error : error);
 

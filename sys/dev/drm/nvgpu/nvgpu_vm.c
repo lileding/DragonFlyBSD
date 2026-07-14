@@ -9,9 +9,7 @@
 #include "nvgpu_device.h"
 #include "nvgpu_fence.h"
 #include "nvgpu_future.h"
-#include "nvgpu_future_internal.h"
 #include "nvgpu_proc.h"
-#include "nvgpu_proc_internal.h"
 #include "nvgpu_vm.h"
 #include "nvgsp_vmm.h"
 
@@ -198,8 +196,8 @@ struct nvgpu_vm {
 	struct nvgpu_vm_binding_list vm_validate_bindings;
 	struct nvgpu_vm_binding_tree vm_binding_tree;
 	uint32_t client_handle;
-	uint64_t kernel_managed_addr;
-	uint64_t kernel_managed_size;
+	size_t kernel_managed_addr;
+	size_t kernel_managed_size;
 	uint64_t vm_bindings_max_end;
 };
 
@@ -6566,6 +6564,7 @@ struct nvgpu_vm_bind_future {
 	struct nvgpu_fence *done;
 	struct nvgpu_vm_binding_list retired_bindings;
 	uint32_t op_count;
+	nvgpu_proc_complete_bind complete_bind;
 };
 
 static volatile u_int nvgpu_vm_next_client = 0xc1d10000u;
@@ -6573,66 +6572,50 @@ static volatile u_int nvgpu_vm_next_client = 0xc1d10000u;
 static struct nvgpu_future_result nvgpu_vm_bind_future_poll(
     struct nvgpu_future *future);
 
-static int
-nvgpu_vm_alloc(struct nvgpu_proc *proc, struct nvgpu_vm **vmp)
+int
+nvgpu_vm_init(struct nvgpu_device *device, struct nvgpu_vm **vmp,
+    size_t addr, size_t size)
 {
 	struct nvgpu_vm *vm;
 
-	/* The proc token serializes publication of the single proc-owned VM. */
+	if (device == NULL || vmp == NULL)
+		return (EINVAL);
+	vm = *vmp;
+	if (vm != NULL) {
+		lwkt_gettoken(&vm->vm_token);
+		vm->kernel_managed_addr = addr;
+		vm->kernel_managed_size = size;
+		lwkt_reltoken(&vm->vm_token);
+		return (0);
+	}
 	vm = kmalloc(sizeof(*vm), M_NVGPU_VM, M_WAITOK | M_ZERO);
-	vm->gpu = nvgpu_proc_get_device(proc);
+	vm->gpu = device;
 	vm->client_handle = atomic_fetchadd_int(&nvgpu_vm_next_client, 1);
+	vm->kernel_managed_addr = addr;
+	vm->kernel_managed_size = size;
 	lwkt_token_init(&vm->vm_token, "nvgvm");
 	LIST_INIT(&vm->vm_bindings);
 	LIST_INIT(&vm->vm_validate_bindings);
 	RB_INIT(&vm->vm_binding_tree);
-	nvgpu_proc_set_vm(proc, vm);
 	*vmp = vm;
 	return (0);
 }
 
 int
-nvgpu_vm_set_kernel_managed(struct nvgpu_proc *proc, uint64_t addr,
-    uint64_t size)
+nvgpu_vm_ensure_backend(struct nvgpu_device *device, struct nvgpu_vm **vmp,
+    struct nvgsp_vmm **vmm)
 {
 	struct nvgpu_vm *vm;
 	int error;
 
-	if (proc == NULL)
+	if (device == NULL || vmp == NULL)
 		return (EINVAL);
-	nvgpu_proc_lock(proc);
-	vm = nvgpu_proc_get_vm(proc);
+	vm = *vmp;
 	if (vm == NULL) {
-		error = nvgpu_vm_alloc(proc, &vm);
-		if (error != 0) {
-			nvgpu_proc_unlock(proc);
+		error = nvgpu_vm_init(device, vmp, 0, 0);
+		if (error != 0)
 			return (error);
-		}
-	}
-	lwkt_gettoken(&vm->vm_token);
-	vm->kernel_managed_addr = addr;
-	vm->kernel_managed_size = size;
-	lwkt_reltoken(&vm->vm_token);
-	nvgpu_proc_unlock(proc);
-	return (0);
-}
-
-int
-nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm)
-{
-	struct nvgpu_vm *vm;
-	int error;
-
-	if (proc == NULL || vmm == NULL)
-		return (EINVAL);
-	nvgpu_proc_lock(proc);
-	vm = nvgpu_proc_get_vm(proc);
-	if (vm == NULL) {
-		error = nvgpu_vm_alloc(proc, &vm);
-		if (error != 0) {
-			nvgpu_proc_unlock(proc);
-			return (error);
-		}
+		vm = *vmp;
 	}
 	lwkt_gettoken(&vm->vm_token);
 	if (vm->backend == NULL)
@@ -6640,15 +6623,14 @@ nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm)
 		    &vm->backend);
 	else
 		error = 0;
-	if (error == 0)
+	if (error == 0 && vmm != NULL)
 		*vmm = vm->backend;
 	lwkt_reltoken(&vm->vm_token);
-	nvgpu_proc_unlock(proc);
 	return (error);
 }
 
 int
-nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
+nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *args)
 {
 	struct nvgpu_vm_bind_future *bind;
 	struct nvgpu_vm_binding *binding;
@@ -6656,8 +6638,6 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 	struct nvgpu_fence **waits;
 	struct nvgpu_fence **ordering_waits;
 	struct nvgpu_fence *done;
-	struct nvgsp_vmm *backend;
-	struct nvgpu_vm *vm;
 	uint32_t wait_count;
 	uint32_t ordering_capacity;
 	uint32_t ordering_count;
@@ -6667,15 +6647,11 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 	if (args == NULL)
 		return (EINVAL);
 	done = args->done;
-	if (proc == NULL || done == NULL ||
+	if (args->proc == NULL || vm == NULL || vm->backend == NULL || done == NULL ||
 	    (args->op_count != 0 && args->ops == NULL) ||
 	    (args->wait_count != 0 && args->waits == NULL)) {
 		return (EINVAL);
 	}
-	error = nvgpu_vm_ensure(proc, &backend);
-	if (error != 0)
-		return (error);
-	vm = nvgpu_proc_get_vm(proc);
 	resv_bos = NULL;
 	resv_count = 0;
 	for (;;) {
@@ -6777,7 +6753,7 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 			    M_NVGPU_VM, M_WAITOK | M_ZERO);
 		}
 		ordering_count = 0;
-		error = nvgpu_proc_register_bind(proc, done, ordering_waits,
+		error = args->register_bind(args->proc, done, ordering_waits,
 		    ordering_capacity, &ordering_count);
 		if (error != ENOSPC)
 			break;
@@ -6803,7 +6779,7 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 			waits[args->wait_count + i] = ordering_waits[i];
 	}
 	bind = kmalloc(sizeof(*bind), M_NVGPU_VM, M_WAITOK | M_ZERO);
-	bind->proc = proc;
+	bind->proc = args->proc;
 	bind->vm = vm;
 	bind->op_count = args->op_count;
 	if (bind->op_count != 0) {
@@ -6816,7 +6792,8 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 	}
 	bind->done = done;
 	bind->base.poll = nvgpu_vm_bind_future_poll;
-	nvgpu_proc_addref(proc);
+	bind->complete_bind = args->complete_bind;
+	nvgpu_proc_addref(args->proc);
 	nvgpu_fence_addref(done);
 	LIST_INIT(&bind->retired_bindings);
 
@@ -6828,14 +6805,14 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_proc_remap *args)
 	if (waits != NULL)
 		_kfree(waits, M_NVGPU_VM);
 	if (error != 0) {
-		nvgpu_proc_complete_bind(proc, done);
+		args->complete_bind(args->proc, done);
 		(void)nvgpu_fence_signal(done, error);
 		nvgpu_fence_release(done);
 		for (uint32_t i = 0; i < bind->op_count; i++)
 			nvgpu_bo_release(bind->ops[i].bo);
 		if (bind->ops != NULL)
 			_kfree(bind->ops, M_NVGPU_VM);
-		nvgpu_proc_release(proc);
+		nvgpu_proc_release(args->proc);
 		_kfree(bind, M_NVGPU_VM);
 	}
 	return (error);
@@ -6870,7 +6847,7 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 			    failed_op->range, failed_op->bo_offset, error);
 	}
 	(void)nvgpu_fence_signal(bind->done, error);
-	nvgpu_proc_complete_bind(bind->proc, bind->done);
+	bind->complete_bind(bind->proc, bind->done);
 	nvgpu_fence_release(bind->done);
 	for (uint32_t i = 0; i < bind->op_count; i++)
 		nvgpu_bo_release(bind->ops[i].bo);
@@ -6883,17 +6860,12 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 }
 
 void
-nvgpu_vm_destroy(struct nvgpu_proc *proc)
+nvgpu_vm_destroy(struct nvgpu_vm *vm)
 {
 	struct nvgpu_vm_binding *binding;
-	struct nvgpu_vm *vm;
 
-	if (proc == NULL)
-		return;
-	vm = nvgpu_proc_get_vm(proc);
 	if (vm == NULL)
 		return;
-	nvgpu_proc_set_vm(proc, NULL);
 	while ((binding = LIST_FIRST(&vm->vm_bindings)) != NULL)
 		nvgpu_vm_binding_unlink_free(binding);
 	if (vm->backend != NULL)

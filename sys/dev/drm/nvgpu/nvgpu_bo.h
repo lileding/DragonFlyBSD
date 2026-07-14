@@ -19,8 +19,9 @@
 struct drm_file;
 struct nvgpu_fence;
 struct nvgpu_vm_binding;
-struct nvgpu_proc;
+struct nvgpu_device;
 struct nvgsp_vram_alloc;
+struct reservation_object;
 struct ttm_mem_reg;
 
 struct nvgpu_bo_create_args {
@@ -87,7 +88,8 @@ nvgpu_bo_from_ttm(struct ttm_buffer_object *tbo)
 }
 
 /* Create, describe, or look up one GEM-backed BO for a borrowed DRM file. */
-int nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
+int nvgpu_bo_create_handle(struct nvgpu_device *device,
+	struct reservation_object *vm_resv, struct drm_file *file,
     const struct nvgpu_bo_create_args *args, struct nvgpu_bo_info *info);
 int nvgpu_bo_get_info(struct drm_file *file, uint32_t handle,
     struct nvgpu_bo_info *info);

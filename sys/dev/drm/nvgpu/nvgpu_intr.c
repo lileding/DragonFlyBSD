@@ -10,7 +10,6 @@
 #include "nvgpu_debug.h"
 #include "nvgpu_display.h"
 #include "nvgpu_future.h"
-#include "nvgpu_intr_internal.h"
 #include "nvgpu_sched.h"
 #include "nvgsp_channel.h"
 #include "nvgsp_event.h"

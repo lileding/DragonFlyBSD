@@ -9,8 +9,6 @@
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_fence.h"
-#include "nvgpu_proc.h"
-#include "nvgpu_proc_internal.h"
 #include "nvgpu_ttm.h"
 #include "nvgsp_state.h"
 #include "nvgsp_vram.h"
@@ -628,7 +626,8 @@ nvgpu_bo_release_by_gem(struct drm_gem_object *obj)
 }
 
 int
-nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
+nvgpu_bo_create_handle(struct nvgpu_device *device,
+    struct reservation_object *vm_resv, struct drm_file *file,
     const struct nvgpu_bo_create_args *args, struct nvgpu_bo_info *info)
 {
 	struct drm_device *ddev;
@@ -639,9 +638,10 @@ nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
 	bool mappable_req;
 	int error;
 
-	if (proc == NULL || file == NULL || args == NULL || info == NULL)
+	if (device == NULL || vm_resv == NULL || file == NULL || args == NULL ||
+	    info == NULL)
 		return (EINVAL);
-	ddev = nvgpu_device_get_drm_dev(nvgpu_proc_get_device(proc));
+	ddev = nvgpu_device_get_drm_dev(device);
 	if (ddev == NULL)
 		return (ENXIO);
 
@@ -672,7 +672,7 @@ nvgpu_bo_create_handle(struct nvgpu_proc *proc, struct drm_file *file,
 		}
 	}
 	if (bo->no_share)
-		bo->vm_resv = nvgpu_proc_get_vm_resv(proc);
+		bo->vm_resv = vm_resv;
 
 	error = drm_gem_handle_create(file, &bo->base, &handle);
 	drm_gem_object_put_unlocked(&bo->base);
