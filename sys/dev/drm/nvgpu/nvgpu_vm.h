@@ -7,11 +7,14 @@
 #ifndef _NVGPU_VM_H_
 #define _NVGPU_VM_H_
 
-#include <sys/stdint.h>
+#include <sys/types.h>
 
+struct nvgpu_vm;
 struct nvgpu_bo;
+struct nvgpu_device;
 struct nvgpu_fence;
 struct nvgpu_proc;
+struct nvgpu_vm_remap_args;
 struct nvgsp_vmm;
 
 struct nvgpu_vm_bind_op {
@@ -24,6 +27,26 @@ struct nvgpu_vm_bind_op {
 	struct nvgpu_bo *bo;
 };
 
+typedef int (*nvgpu_proc_register_bind)(struct nvgpu_proc *proc,
+	struct nvgpu_fence *done, struct nvgpu_fence **waits,
+	uint32_t capacity, uint32_t *wait_count);
+
+typedef void (*nvgpu_proc_complete_bind)(struct nvgpu_proc *proc,
+	struct nvgpu_fence *done);
+
+/* Native VM remap request adapted by the syscall layer before entering proc. */
+struct nvgpu_vm_remap_args {
+	struct nvgpu_vm_bind_op *ops;
+	size_t op_count;
+	struct nvgpu_fence **waits;
+	size_t wait_count;
+	struct nvgpu_fence *done;
+	struct nvgpu_proc *proc;
+	int (*register_bind)(struct nvgpu_proc *proc, struct nvgpu_fence *done,
+		struct nvgpu_fence **waits, uint32_t capacity, uint32_t *wait_count);
+	void (*complete_bind)(struct nvgpu_proc *proc, struct nvgpu_fence *done);
+};
+
 #define NVGPU_VM_BIND_OP_MAP	0u
 #define NVGPU_VM_BIND_OP_UNMAP	1u
 #define NVGPU_VM_BIND_SPARSE	(1u << 8)
@@ -34,8 +57,8 @@ struct nvgpu_vm_bind_op {
  * proc is borrowed.  The function serializes first-VM creation and may sleep
  * while allocating VM state.  It does not create the GSP VMM backend.
  */
-int nvgpu_vm_set_kernel_managed(struct nvgpu_proc *proc, uint64_t addr,
-    uint64_t size);
+int nvgpu_vm_init(struct nvgpu_device *device, struct nvgpu_vm **vmp,
+	size_t addr, size_t size);
 
 /*
  * Ensure the proc-owned VM and its GSP VMM backend exist.
@@ -44,7 +67,11 @@ int nvgpu_vm_set_kernel_managed(struct nvgpu_proc *proc, uint64_t addr,
  * while proc remains alive.  The function serializes first creation and may
  * sleep during allocation and GSP RPC.
  */
-int nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm);
+int nvgpu_vm_ensure_backend(struct nvgpu_device *device,
+	struct nvgpu_vm **vmp, struct nvgsp_vmm **vmm);
+
+/* Spawn one remap future against an explicitly borrowed proc-owned VM. */
+int nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *remap);
 
 /*
  * Destroy the proc-owned VM after all channels and futures have drained.
@@ -52,6 +79,6 @@ int nvgpu_vm_ensure(struct nvgpu_proc *proc, struct nvgsp_vmm **vmm);
  * This finalization operation may sleep while releasing the GSP VMM.  No
  * concurrent proc operation is permitted, and proc remains caller-owned.
  */
-void nvgpu_vm_destroy(struct nvgpu_proc *proc);
+void nvgpu_vm_destroy(struct nvgpu_vm *vm);
 
 #endif /* _NVGPU_VM_H_ */

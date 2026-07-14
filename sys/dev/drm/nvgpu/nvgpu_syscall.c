@@ -9,7 +9,6 @@
 #include "nvdrm_sync.h"
 #include "nvgpu_bo.h"
 #include "nvgpu_channel.h"
-#include "nvgpu_channel_internal.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_fence.h"
 #include "nvgpu_info.h"
@@ -37,7 +36,7 @@ nvgpu_syscall_vm_init(struct nvgpu_proc *proc, struct drm_file *file __unused,
 {
 	struct drm_nouveau_vm_init *req = data;
 
-	return (nvgpu_vm_set_kernel_managed(proc, req->kernel_managed_addr,
+	return (nvgpu_proc_init_vm(proc, req->kernel_managed_addr,
 	    req->kernel_managed_size));
 }
 
@@ -54,14 +53,12 @@ nvgpu_syscall_channel_alloc(struct nvgpu_proc *proc,
 {
 	struct drm_nouveau_channel_alloc *req = data;
 	struct nvgpu_channel_create_args args;
-	struct nvgpu_channel *channel;
 	int error;
 
 	memset(&args, 0, sizeof(args));
-	args.proc = proc;
 	args.fb_ctxdma_handle = req->fb_ctxdma_handle;
 	args.tt_ctxdma_handle = req->tt_ctxdma_handle;
-	error = nvgpu_channel_create(&args, &channel);
+	error = nvgpu_proc_create_channel(proc, &args);
 	if (error != 0)
 		return (error);
 	req->channel = args.channel_id;
@@ -77,7 +74,7 @@ nvgpu_syscall_channel_free(struct nvgpu_proc *proc,
 {
 	struct drm_nouveau_channel_free *req = data;
 
-	return (nvgpu_channel_release_by_id(proc, req->channel));
+	return (nvgpu_proc_release_channel(proc, req->channel));
 }
 
 int
@@ -94,7 +91,7 @@ nvgpu_syscall_gem_new(struct nvgpu_proc *proc, struct drm_file *file,
 	args.align = req->align;
 	args.tile_mode = req->info.tile_mode;
 	args.tile_flags = req->info.tile_flags;
-	error = nvgpu_bo_create_handle(proc, file, &args, &info);
+	error = nvgpu_proc_create_bo_handle(proc, file, &args, &info);
 	if (error != 0)
 		return (error);
 	req->info.handle = info.handle;
@@ -174,7 +171,7 @@ nvgpu_syscall_vm_bind(struct nvgpu_proc *proc, struct drm_file *file,
 	struct nvgpu_vm_bind_op *vm_ops;
 	struct nvdrm_sync_wait_set waits;
 	struct nvdrm_sync_signal_set signals;
-	struct nvgpu_proc_remap remap;
+	struct nvgpu_vm_remap_args remap;
 	struct nvgpu_fence *done_fence;
 	struct nvgpu_fence *sync_fence;
 	size_t size;
@@ -338,8 +335,10 @@ nvgpu_syscall_exec(struct nvgpu_proc *proc, struct drm_file *file,
 	exec.wait_count = waits.count;
 	exec.done = done;
 	error = nvgpu_proc_spawn(proc, &exec);
-	if (error == 0)
+	if (error == 0) {
 		nvdrm_sync_publish_signals(&signals);
+		pushes = NULL;
+	}
 	nvdrm_sync_cleanup_signals(&signals);
 	nvgpu_fence_release(done);
 

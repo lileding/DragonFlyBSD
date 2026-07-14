@@ -7,9 +7,24 @@
 #ifndef _NVGPU_INTR_H_
 #define _NVGPU_INTR_H_
 
+#include <stdbool.h>
+#include <sys/queue.h>
+#include <sys/stdint.h>
+
 struct nvgpu_device;
 struct nvgpu_future;
-struct nvgpu_sema;
+
+/* Driver-private semaphore identity shared by channel and interrupt code. */
+struct nvgpu_sema {
+	TAILQ_ENTRY(nvgpu_sema) parked_link;
+	struct nvgpu_device *device;
+	struct nvgpu_future *future;
+	volatile uint32_t *address;
+	uint32_t target;
+	uint32_t chid;
+	int error;
+	bool parked;
+};
 
 /*
  * Start interrupt delivery and its process-context event worker for device.
@@ -31,5 +46,11 @@ void nvgpu_intr_stop(struct nvgpu_device *device);
  */
 int nvgpu_intr_park(struct nvgpu_sema *sema,
 	struct nvgpu_future *future);
+
+/* Driver-private interrupt fanout controls. */
+void nvgpu_intr_enable_display_dispatch(struct nvgpu_device *device);
+void nvgpu_intr_disable_display_dispatch(struct nvgpu_device *device);
+void nvgpu_intr_report_channel_fault(struct nvgpu_device *device,
+	uint32_t channel_id);
 
 #endif /* _NVGPU_INTR_H_ */

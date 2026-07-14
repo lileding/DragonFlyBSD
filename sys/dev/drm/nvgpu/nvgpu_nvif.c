@@ -6,13 +6,11 @@
 
 #include "nvdrm_nouveau_abi.h"
 #include "nvgpu_channel.h"
-#include "nvgpu_channel_internal.h"
 #include "nvgpu_chip.h"
 #include "nvgpu_debug.h"
 #include "nvgpu_device.h"
 #include "nvgpu_nvif.h"
 #include "nvgpu_proc.h"
-#include "nvgpu_proc_internal.h"
 #include "nvgsp_state.h"
 
 #include <sys/errno.h>
@@ -84,7 +82,7 @@ nvgpu_nvif_new(struct nvgpu_proc *proc, const struct nvif_ioctl_v0 *hdr)
 		return (EINVAL);
 	needs_gr_context = nvgpu_nvif_class_needs_gr_context(chip,
 	    req->oclass);
-	return (nvgpu_channel_new_object(proc, hdr->token, req->object,
+	return (nvgpu_proc_create_channel_object(proc, hdr->token, req->object,
 	    req->handle, req->oclass, needs_gr_context));
 }
 
@@ -178,7 +176,7 @@ nvgpu_nvif_ioctl(struct nvgpu_proc *proc, void *data)
 	case NVIF_IOCTL_V0_SCLASS:
 		return (nvgpu_nvif_sclass(proc, hdr));
 	case NVIF_IOCTL_V0_DEL:
-		return (nvgpu_channel_delete_object(proc, hdr->object));
+		return (nvgpu_proc_destroy_channel_object(proc, hdr->object));
 	default:
 		nvgpu_log(NVGPU_LOG_DEBUG, "nvif type %u unhandled\n",
 		    hdr->type);

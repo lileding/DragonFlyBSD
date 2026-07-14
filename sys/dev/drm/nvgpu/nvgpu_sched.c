@@ -5,7 +5,6 @@
  */
 
 #include "nvgpu_future.h"
-#include "nvgpu_future_internal.h"
 #include "nvgpu_sched.h"
 
 #include <sys/errno.h>

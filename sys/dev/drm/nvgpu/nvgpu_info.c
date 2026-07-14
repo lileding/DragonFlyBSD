@@ -10,7 +10,6 @@
 #include "nvgpu_device.h"
 #include "nvgpu_info.h"
 #include "nvgpu_proc.h"
-#include "nvgpu_proc_internal.h"
 #include "nvgsp_state.h"
 
 #include <sys/errno.h>
