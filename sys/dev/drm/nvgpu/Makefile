@@ -13,11 +13,13 @@ SRCS+=	nvgsp_libos.c nvgsp_booter.c nvgsp_static.c
 SRCS+=	nvgsp_vram.c nvgsp_bar.c nvgsp_vmm.c nvgsp_rm.c
 SRCS+=	nvgsp_channel.c nvgsp_disp.c
 SRCS+=	device_if.h bus_if.h pci_if.h opt_ddb.h opt_acpi.h opt_drm.h
+SRCS+=	opt_ktr.h
 
-KCFLAGS+= -I../include
-KCFLAGS+= -I../include/drm
-KCFLAGS+= -I../include/uapi
-KCFLAGS+= -I../include/uapi/drm
+KCFLAGS+= -I${SYSDIR}/dev/drm/include
+KCFLAGS+= -I${SYSDIR}/dev/drm/include/drm
+KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi
+KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi/drm
+KCFLAGS+= -DKTR -DKTR_NVGPU
 CWARNFLAGS+= -Wno-error=cast-qual
 
 .include <bsd.kmod.mk>

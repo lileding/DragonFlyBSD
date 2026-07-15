@@ -22,6 +22,7 @@
 #include <sys/bus.h>
 #include <sys/globaldata.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/param.h>
 #include <sys/rman.h>
@@ -44,6 +45,31 @@
 #define NVGPU_DISPLAY_INTR_HEAD_STATUS(head) (0x00611c00u + (head) * 4u)
 #define NVGPU_DISPLAY_INTR_HEAD_ACK(head)	(0x00611800u + (head) * 4u)
 #define NVGPU_DISPLAY_INTR_VBLANK	0x00000002u
+
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_decode, 16,
+    "intr decode stat=0x%x top=0x%x isr=%ju", uint32_t stat,
+    uint32_t top, uintmax_t isr_count);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_empty, 17,
+    "intr empty isr=%ju", uintmax_t isr_count);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_wake_worker, 18,
+    "intr wake worker events=0x%x", u_int events);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_worker_events, 19,
+    "intr worker events=0x%x", u_int events);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_exec_complete, 20,
+    "intr exec complete sema=%p future=%p chid=%u value=%u target=%u",
+    void *sema, void *future, uint32_t chid, uint32_t value,
+    uint32_t target);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_display_vblank, 21,
+    "intr display vblank head=%u status=0x%x", uint32_t head,
+    uint32_t status);
+KTR_INFO(KTR_NVGPU, nvgpu, intr_park, 22,
+    "intr park sema=%p future=%p chid=%u target=%u", void *sema,
+    void *future, uint32_t chid, uint32_t target);
 
 MALLOC_DEFINE(M_NVGPU_INTR, "nvgpu_intr", "nvgpu interrupt state");
 
@@ -69,6 +95,7 @@ struct nvgpu_intr_state {
 	uint64_t empty_count;
 	uint64_t msgq_count;
 	uint64_t unexpected_count;
+	uint32_t unexpected_seen[8];
 	uint32_t last_stat;
 	uint32_t last_top;
 };
@@ -93,6 +120,8 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 	struct nvgpu_intr_state *intr = nvgpu_device_get_intr(gpu);
 	const struct nvgpu_chip_config *chip = nvgpu_device_get_chip(gpu);
 	uint32_t intr_reg, mask, stat, top;
+	uint32_t unhandled_leaf[8] = {};
+	bool handled = false;
 	u_int events = 0;
 
 	if (intr == NULL)
@@ -107,9 +136,11 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 	top = nvgpu_device_rd32(gpu, NVGPU_CPU_INTR_TOP);
 	intr->last_stat = stat;
 	intr->last_top = top;
+	KTR_LOG(nvgpu_intr_decode, stat, top, (uintmax_t)intr->isr_count);
 
 	if (stat == 0 && top == 0) {
 		intr->empty_count++;
+		KTR_LOG(nvgpu_intr_empty, (uintmax_t)intr->isr_count);
 		goto rearm;
 	}
 	for (uint32_t leaf = 0; leaf < 8; leaf++) {
@@ -126,17 +157,15 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 		unhandled = leaf_stat & ~known;
 		if (unhandled != 0) {
 			intr->unexpected_count++;
-			nvgpu_log(NVGPU_LOG_DEBUG,
-			    "unexpected CPU intr leaf=%u stat=0x%08x "
-			    "nonstall=0x%08x stall=0x%08x known=0x%08x "
-			    "unhandled=0x%08x top=0x%08x\n", leaf, leaf_stat,
-			    nonstall, stall, known, unhandled, top);
+			unhandled_leaf[leaf] = unhandled;
 		}
 		if (nonstall != 0) {
+			handled = true;
 			nvgpu_device_wr32(gpu, NVGPU_CPU_INTR_LEAF(leaf), nonstall);
 			events |= NVGPU_INTR_EVENT_EXEC;
 		}
 		if (stall != 0) {
+			handled = true;
 			if ((stall & masks.display) != 0)
 				events |= NVGPU_INTR_EVENT_DISPLAY;
 			if ((stall & masks.engine) != 0)
@@ -145,10 +174,24 @@ nvgpu_intr_decode(struct nvgpu_device *gpu)
 		}
 	}
 	if (stat & NVGPU_GSP_MSGQ_INTR) {
+		handled = true;
 		nvgpu_device_wr32(gpu, chip->gsp_base + 0x004, NVGPU_GSP_MSGQ_INTR);
 		intr->msgq_count++;
 		events |= NVGPU_INTR_EVENT_GSP;
 		stat &= ~NVGPU_GSP_MSGQ_INTR;
+	}
+	if (!handled) {
+		for (uint32_t leaf = 0; leaf < 8; leaf++) {
+			uint32_t unhandled = unhandled_leaf[leaf];
+
+			if (unhandled == 0 ||
+			    (unhandled & ~intr->unexpected_seen[leaf]) == 0)
+				continue;
+			intr->unexpected_seen[leaf] |= unhandled;
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "unexpected CPU intr leaf=%u unhandled=0x%08x "
+			    "top=0x%08x\n", leaf, unhandled, top);
+		}
 	}
 	if (stat != 0) {
 		intr->unexpected_count++;
@@ -164,6 +207,7 @@ rearm:
 	if (events != 0) {
 		lwkt_gettoken(&intr->worker_token);
 		intr->events |= events;
+		KTR_LOG(nvgpu_intr_wake_worker, events);
 		wakeup(&intr->events);
 		lwkt_reltoken(&intr->worker_token);
 	}
@@ -191,6 +235,7 @@ nvgpu_intr_run(void *arg)
 		}
 		lwkt_reltoken(&intr->worker_token);
 
+		KTR_LOG(nvgpu_intr_worker_events, events);
 		if ((events & NVGPU_INTR_EVENT_GSP) != 0)
 			nvgsp_event_dispatch(gpu);
 		if ((events & NVGPU_INTR_EVENT_EXEC) != 0) {
@@ -216,6 +261,9 @@ nvgpu_intr_run(void *arg)
 
 				TAILQ_REMOVE(&completed, sema, parked_link);
 				sema->future = NULL;
+				KTR_LOG(nvgpu_intr_exec_complete, sema, future,
+				    sema->chid, sema->address != NULL ?
+				    *sema->address : 0u, sema->target);
 				error = nvgpu_sched_put(future);
 				KASSERT(error == 0,
 				    ("completion after scheduler stop: %d", error));
@@ -243,6 +291,7 @@ nvgpu_intr_run(void *arg)
 				    NVGPU_DISPLAY_INTR_HEAD_STATUS(head));
 				if ((status & NVGPU_DISPLAY_INTR_VBLANK) == 0)
 					continue;
+				KTR_LOG(nvgpu_intr_display_vblank, head, status);
 				nvgpu_display_handle_vblank(gpu, head);
 				nvgpu_device_wr32(gpu,
 				    NVGPU_DISPLAY_INTR_HEAD_ACK(head),
@@ -530,6 +579,7 @@ nvgpu_intr_park(struct nvgpu_sema *sema, struct nvgpu_future *future)
 	sema->error = 0;
 	sema->parked = true;
 	TAILQ_INSERT_TAIL(&intr->parked, sema, parked_link);
+	KTR_LOG(nvgpu_intr_park, sema, future, sema->chid, sema->target);
 	spin_unlock(&intr->parked_spin);
 	return (0);
 }
