@@ -255,6 +255,13 @@ scterm_scan_esc(scr_stat *scp, term_stat *tcp, u_char c)
 			tcp->num_param = 0;
 			return;
 
+		case '?':
+			if (tcp->num_param == 0) {
+				tcp->esc = 6;
+				return;
+			}
+			break;
+
 		case 'A':	/* up n rows */
 			sc_term_up(scp, tcp->param[0], 0);
 			break;
@@ -350,6 +357,7 @@ scterm_scan_esc(scr_stat *scp, term_stat *tcp, u_char c)
 				n = scp->xsize - scp->xpos;
 			sc_vtb_erase(&scp->vtb, scp->cursor_pos, n,
 				     sc->scr_map[0x20], tcp->cur_attr);
+			sc_utf8_clear(scp, scp->cursor_pos, n);
 			mark_for_update(scp, scp->cursor_pos);
 			mark_for_update(scp, scp->cursor_pos + n - 1);
 			break;
@@ -636,6 +644,10 @@ scterm_scan_esc(scr_stat *scp, term_stat *tcp, u_char c)
 		default:
 			break;
 		}
+	} else if (tcp->esc == 6) {	/* seen ESC [ ? */
+		/* Consume unsupported DEC private CSI sequences. */
+		if (c >= 0x20 && c <= 0x3f)
+			return;
 	}
 	tcp->esc = 0;
 }
@@ -662,8 +674,26 @@ outloop:
 			len--;
 			break;
 		default:
+		/*
+		 * UTF-8 path only for printable bytes. sc_term_utf8_print()
+		 * breaks on C0 controls without consuming them; if we always
+		 * call it when uside is set, newline/return hang forever.
+		 * Controls must go through sc_term_gen_print().
+		 */
+		if (sc_utf8_enable && scp->sc != NULL && scp->sc->fbi != NULL) {
+			sc_utf8_ensure(scp);
+			if (scp->uside != NULL && PRINTABLE(*buf))
+				sc_term_utf8_print(scp, &buf, &len,
+				    tcp->cur_attr);
+			else {
+				if (scp->uside != NULL && scp->utf8_rem != 0)
+					sc_utf8_reset_decoder(scp);
+				sc_term_gen_print(scp, &buf, &len,
+				    tcp->cur_attr);
+			}
+		} else
 			sc_term_gen_print(scp, &buf, &len, tcp->cur_attr);
-			break;
+		break;
 		}
 	}
 
@@ -731,8 +761,11 @@ scterm_clear(scr_stat *scp)
 
 	sc_move_cursor(scp, 0, 0);
 	sc_vtb_clear(&scp->vtb, scp->sc->scr_map[0x20], tcp->cur_attr);
+	/* UTF-8 side table must clear or KMS keeps old glyphs. */
+	sc_utf8_clear(scp, 0, scp->xsize * scp->ysize);
 	mark_all(scp);
 }
+
 
 static void
 scterm_notify(scr_stat *scp, int event)

@@ -37,6 +37,9 @@ options 	UCONSOLE		#Allow users to grab the console
 options 	KTRACE			#ktrace(1) support
 options 	_KPOSIX_PRIORITY_SCHEDULING
 options 	ICMP_BANDLIM		#Rate limit bad replies
+options 	KTR			# Kernel trace buffer support
+options 	KTR_NVGPU		# Native NVIDIA driver tracepoints
+options 	KTR_ENTRIES=65536	# Per-CPU trace entries
 options 	KBD_INSTALL_CDEV	# install a CDEV entry in /dev
 
 # ALTQ
