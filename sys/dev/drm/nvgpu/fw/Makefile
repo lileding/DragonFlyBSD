@@ -4,11 +4,12 @@
 # Image names follow the Linux nouveau convention:
 #   nvidia/<chip>/gsp/<blob>-<version>
 #
-# The module is intentionally aggregate: a single nvgsp570.ko registers
+# The module is intentionally aggregate: a single nvgsp570_fw.ko registers
 # all currently supported TU10x image names.  The payloads live in this
 # directory so official builds do not depend on /lib/firmware.
 
 KMOD=	nvgsp570
+PROG=	nvgsp570_fw.ko
 
 NVGSP_570_VERSION=	570144
 NVGSP_570_CHIPS=	tu102 tu104 tu106
