@@ -10,7 +10,10 @@
 #include <sys/bus.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/sysctl.h>
+
+KTR_INFO_MASTER(nvgpu);
 
 int nvgpu_debug = 0;
 TUNABLE_INT("hw.nvgpu.debug", &nvgpu_debug);
