@@ -5865,7 +5865,6 @@ nvgsp_vmm_sparse_unmap_entries_commit_locked(struct nvgsp_vmm *vmm,
 				return (err);
 			split->pt = NULL;
 		}
-		LIST_REMOVE(old, link);
 		LIST_FOREACH(clear, &entry->clear_ranges, link) {
 			if (!clear->write_pte)
 				continue;
@@ -5877,13 +5876,17 @@ nvgsp_vmm_sparse_unmap_entries_commit_locked(struct nvgsp_vmm *vmm,
 				return (err);
 		}
 		LIST_FOREACH(keep, &entry->keep_regions, link) {
-			if (keep->write_pte) {
-				err = nvgsp_vmm_write_sparse_prepared(vmm,
-				    keep->region->addr, keep->region->size,
-				    keep->region->page_shift);
-				if (err != 0)
-					return (err);
-			}
+			if (!keep->write_pte)
+				continue;
+			err = nvgsp_vmm_write_sparse_prepared(vmm,
+			    keep->region->addr, keep->region->size,
+			    keep->region->page_shift);
+			if (err != 0)
+				return (err);
+		}
+
+		LIST_REMOVE(old, link);
+		LIST_FOREACH(keep, &entry->keep_regions, link) {
 			LIST_INSERT_HEAD(&vmm->sparse_regions,
 			    keep->region, link);
 			nvgsp_vmm_sparse_regions_merge_locked(vmm,

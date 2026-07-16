@@ -98,34 +98,6 @@ static uint64_t syncobj_timeline_wait_timeout0_available_etime_count;
 static uint64_t syncobj_timeline_wait_timeout0_complete_count;
 static uint64_t syncobj_timeline_wait_timeout0_complete_success_count;
 static uint64_t syncobj_timeline_wait_timeout0_complete_etime_count;
-static int syncobj_diag_enable = 0;
-static uint64_t syncobj_diag_enter_count;
-static uint64_t syncobj_diag_leave_count;
-static uint64_t syncobj_diag_active_seq;
-static uint64_t syncobj_diag_active_start_us;
-static uint64_t syncobj_diag_active_flags;
-static uint64_t syncobj_diag_active_count;
-static int syncobj_diag_active_op;
-static int syncobj_diag_active_pid;
-static int syncobj_diag_active_handle;
-static int syncobj_diag_active_fd;
-static uint64_t syncobj_diag_last_seq;
-static uint64_t syncobj_diag_last_us;
-static uint64_t syncobj_diag_last_flags;
-static uint64_t syncobj_diag_last_count;
-static int syncobj_diag_last_op;
-static int syncobj_diag_last_pid;
-static int syncobj_diag_last_handle;
-static int syncobj_diag_last_fd;
-static int syncobj_diag_last_ret;
-static uint64_t syncobj_diag_slow_count;
-static uint64_t syncobj_diag_slow_us_max;
-
-#define SYNCOBJ_DIAG_IMPORT_SYNC_FILE	1
-#define SYNCOBJ_DIAG_EXPORT_SYNC_FILE	2
-#define SYNCOBJ_DIAG_WAIT		3
-#define SYNCOBJ_DIAG_TIMELINE_WAIT	4
-
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_count, CTLFLAG_RD,
     &syncobj_query_count, 0, "syncobj query ioctl count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_query_handle_count, CTLFLAG_RD,
@@ -198,129 +170,10 @@ SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_complete_success_
     &syncobj_timeline_wait_timeout0_complete_success_count, 0, "syncobj timeline wait timeout=0 completion success count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_timeline_wait_timeout0_complete_etime_count, CTLFLAG_RD,
     &syncobj_timeline_wait_timeout0_complete_etime_count, 0, "syncobj timeline wait timeout=0 completion ETIME count");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_enable, CTLFLAG_RW,
-    &syncobj_diag_enable, 0, "enable syncobj active-call diagnostics");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_enter_count, CTLFLAG_RD,
-    &syncobj_diag_enter_count, 0, "syncobj diagnostic enter count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_leave_count, CTLFLAG_RD,
-    &syncobj_diag_leave_count, 0, "syncobj diagnostic leave count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_active_seq, CTLFLAG_RD,
-    &syncobj_diag_active_seq, 0, "syncobj active sequence");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_active_start_us, CTLFLAG_RD,
-    &syncobj_diag_active_start_us, 0, "syncobj active start time");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_active_flags, CTLFLAG_RD,
-    &syncobj_diag_active_flags, 0, "syncobj active flags");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_active_count, CTLFLAG_RD,
-    &syncobj_diag_active_count, 0, "syncobj active object count");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_active_op, CTLFLAG_RD,
-    &syncobj_diag_active_op, 0, "syncobj active op");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_active_pid, CTLFLAG_RD,
-    &syncobj_diag_active_pid, 0, "syncobj active pid");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_active_handle, CTLFLAG_RD,
-    &syncobj_diag_active_handle, 0, "syncobj active handle");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_active_fd, CTLFLAG_RD,
-    &syncobj_diag_active_fd, 0, "syncobj active fd");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_last_seq, CTLFLAG_RD,
-    &syncobj_diag_last_seq, 0, "syncobj last sequence");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_last_us, CTLFLAG_RD,
-    &syncobj_diag_last_us, 0, "syncobj last duration");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_last_flags, CTLFLAG_RD,
-    &syncobj_diag_last_flags, 0, "syncobj last flags");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_last_count, CTLFLAG_RD,
-    &syncobj_diag_last_count, 0, "syncobj last object count");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_last_op, CTLFLAG_RD,
-    &syncobj_diag_last_op, 0, "syncobj last op");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_last_pid, CTLFLAG_RD,
-    &syncobj_diag_last_pid, 0, "syncobj last pid");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_last_handle, CTLFLAG_RD,
-    &syncobj_diag_last_handle, 0, "syncobj last handle");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_last_fd, CTLFLAG_RD,
-    &syncobj_diag_last_fd, 0, "syncobj last fd");
-SYSCTL_INT(_hw_dri, OID_AUTO, syncobj_diag_last_ret, CTLFLAG_RD,
-    &syncobj_diag_last_ret, 0, "syncobj last return value");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_slow_count, CTLFLAG_RD,
-    &syncobj_diag_slow_count, 0, "syncobj slow call count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, syncobj_diag_slow_us_max, CTLFLAG_RD,
-    &syncobj_diag_slow_us_max, 0, "syncobj maximum slow duration");
-
 struct drm_syncobj_stub_fence {
 	struct dma_fence base;
 	spinlock_t lock;
 };
-
-static uint64_t
-drm_syncobj_now_us(void)
-{
-	return ((uint64_t)ktime_to_us(ktime_get()));
-}
-
-/*
- * Ownership:
- *   This diagnostic state is owned by the DRM syncobj layer.  The caller lends
- *   handles, fd numbers, flags, and counts by value; no syncobj, sync_file, or
- *   fence references are retained.
- *
- * Lifetime:
- *   State lives for the module lifetime and remains readable even after the
- *   userspace client that triggered the observed ioctl has exited.
- *
- * Threading:
- *   Updates are lockless best-effort telemetry.  This avoids adding a lock or
- *   callback dependency to the exact wait/import/export paths under diagnosis.
- */
-static uint64_t
-drm_syncobj_diag_enter(int op, uint64_t flags, uint64_t count, int handle,
-    int fd, uint64_t *seq_out)
-{
-	uint64_t seq, start_us;
-
-	if (syncobj_diag_enable == 0) {
-		*seq_out = 0;
-		return (0);
-	}
-
-	start_us = drm_syncobj_now_us();
-	seq = ++syncobj_diag_enter_count;
-	syncobj_diag_active_seq = seq;
-	syncobj_diag_active_start_us = start_us;
-	syncobj_diag_active_flags = flags;
-	syncobj_diag_active_count = count;
-	syncobj_diag_active_op = op;
-	syncobj_diag_active_pid = curproc != NULL ? curproc->p_pid : -1;
-	syncobj_diag_active_handle = handle;
-	syncobj_diag_active_fd = fd;
-	*seq_out = seq;
-	return (start_us);
-}
-
-static void
-drm_syncobj_diag_leave(uint64_t seq, int op, uint64_t flags, uint64_t count,
-    int handle, int fd, int ret, uint64_t start_us)
-{
-	uint64_t end_us, elapsed_us;
-
-	if (seq == 0)
-		return;
-
-	end_us = drm_syncobj_now_us();
-	elapsed_us = end_us >= start_us ? end_us - start_us : 0;
-	syncobj_diag_leave_count++;
-	syncobj_diag_last_seq = seq;
-	syncobj_diag_last_us = elapsed_us;
-	syncobj_diag_last_flags = flags;
-	syncobj_diag_last_count = count;
-	syncobj_diag_last_op = op;
-	syncobj_diag_last_pid = curproc != NULL ? curproc->p_pid : -1;
-	syncobj_diag_last_handle = handle;
-	syncobj_diag_last_fd = fd;
-	syncobj_diag_last_ret = ret;
-	if (elapsed_us > syncobj_diag_slow_us_max)
-		syncobj_diag_slow_us_max = elapsed_us;
-	if (elapsed_us >= 10000)
-		syncobj_diag_slow_count++;
-	if (syncobj_diag_active_seq == seq)
-		syncobj_diag_active_op = 0;
-}
 
 static const char *drm_syncobj_stub_fence_get_name(struct dma_fence *fence)
 {
@@ -418,7 +271,7 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 			       struct dma_fence *fence)
 {
 	struct dma_fence *old_fence;
-	struct drm_syncobj_cb *cur, *tmp;
+	struct drm_syncobj_cb *cur;
 
 	if (fence)
 		dma_fence_get(fence);
@@ -430,10 +283,8 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 	rcu_assign_pointer(syncobj->fence, fence);
 
 	if (fence != old_fence) {
-		list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node) {
-			list_del_init(&cur->node);
+		list_for_each_entry(cur, &syncobj->cb_list, node)
 			cur->func(syncobj, cur);
-		}
 	}
 
 	lockmgr(&syncobj->lock, LK_RELEASE);
@@ -461,7 +312,7 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 {
 	struct dma_fence *prev;
 	struct dma_fence *it;
-	struct drm_syncobj_cb *cur, *tmp;
+	struct drm_syncobj_cb *cur;
 
 	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
 
@@ -472,10 +323,8 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 	dma_fence_chain_init(chain, prev, fence, point);
 	rcu_assign_pointer(syncobj->fence, &chain->base);
 
-	list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node) {
-		list_del_init(&cur->node);
+	list_for_each_entry(cur, &syncobj->cb_list, node)
 		cur->func(syncobj, cur);
-	}
 
 	lockmgr(&syncobj->lock, LK_RELEASE);
 
@@ -783,77 +632,56 @@ static int drm_syncobj_import_sync_file_fence(struct drm_file *file_private,
 {
 	struct dma_fence *fence;
 	struct drm_syncobj *syncobj;
-	uint64_t diag_seq, diag_start;
 	int ret = 0;
 
-	diag_start = drm_syncobj_diag_enter(SYNCOBJ_DIAG_IMPORT_SYNC_FILE,
-	    0, 1, handle, fd, &diag_seq);
 	fence = sync_file_get_fence(fd);
-	if (!fence) {
-		ret = -EINVAL;
-		goto out_diag;
-	}
+	if (!fence)
+		return -EINVAL;
 
 	syncobj = drm_syncobj_find(file_private, handle);
 	if (!syncobj) {
 		dma_fence_put(fence);
-		ret = -ENOENT;
-		goto out_diag;
+		return -ENOENT;
 	}
 
 	drm_syncobj_replace_fence(syncobj, 0, fence);
 	dma_fence_put(fence);
 	drm_syncobj_put(syncobj);
-out_diag:
-	drm_syncobj_diag_leave(diag_seq, SYNCOBJ_DIAG_IMPORT_SYNC_FILE,
-	    0, 1, handle, fd, ret, diag_start);
 	return ret;
 }
 
 static int drm_syncobj_export_sync_file(struct drm_file *file_private,
 					int handle, int *p_fd)
 {
-	uint64_t diag_seq, diag_start;
 	int ret;
 	struct dma_fence *fence;
 	struct sync_file *sync_file;
 	int fd;
 
-	diag_start = drm_syncobj_diag_enter(SYNCOBJ_DIAG_EXPORT_SYNC_FILE,
-	    0, 1, handle, -1, &diag_seq);
 	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0) {
-		ret = fd;
-		goto out_diag;
-	}
+	if (fd < 0)
+		return fd;
 
 	ret = drm_syncobj_find_fence(file_private, handle, 0, &fence);
 	if (ret)
 		goto err_put_fd;
 
 	sync_file = sync_file_create(fence);
-
 	dma_fence_put(fence);
-
 	if (!sync_file) {
 		ret = -EINVAL;
 		goto err_put_fd;
 	}
 
 	fd_install(fd, sync_file->file);
-
 	*p_fd = fd;
-	ret = 0;
-	drm_syncobj_diag_leave(diag_seq, SYNCOBJ_DIAG_EXPORT_SYNC_FILE,
-	    0, 1, handle, fd, ret, diag_start);
-	return ret;
+	return 0;
+
 err_put_fd:
 	put_unused_fd(fd);
-out_diag:
-	drm_syncobj_diag_leave(diag_seq, SYNCOBJ_DIAG_EXPORT_SYNC_FILE,
-	    0, 1, handle, fd, ret, diag_start);
 	return ret;
 }
+
 /**
  * drm_syncobj_open - initalizes syncobj file-private structures at devnode open time
  * @file_private: drm file-private structure to set up
@@ -1062,6 +890,9 @@ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 		container_of(cb, struct syncobj_wait_entry, syncobj_cb);
 	struct dma_fence *fence;
 
+	if (wait->fence != NULL)
+		return;
+
 	/* This happens inside the syncobj lock */
 	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
 							lockdep_is_held(&syncobj->lock)));
@@ -1075,15 +906,8 @@ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 			fence = drm_syncobj_stub_fence_create();
 		}
 	}
-	if (fence == NULL) {
-		/* This port removes callbacks before invoking them.  Keep
-		 * waiting across NULL heads and across heads that do not yet
-		 * contain the requested timeline point.
-		 */
-		drm_syncobj_add_callback_locked(syncobj, cb,
-						syncobj_wait_syncobj_func);
+	if (fence == NULL)
 		return;
-	}
 	wait->fence = fence;
 	DRM_DEBUG("wake_up\n");
 	wake_up_process(wait->task);
@@ -1462,7 +1286,6 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 	struct drm_syncobj **syncobjs;
 	struct drm_syncobj *single_syncobj = NULL;
 	struct drm_syncobj *single_syncobjs[1];
-	uint64_t diag_seq, diag_start;
 	int ret = 0;
 
 	if (!drm_core_check_feature(dev, DRIVER_SYNCOBJ))
@@ -1476,8 +1299,6 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 	if (args->count_handles == 0)
 		return -EINVAL;
 
-	diag_start = drm_syncobj_diag_enter(SYNCOBJ_DIAG_WAIT, args->flags,
-	    args->count_handles, 0, -1, &diag_seq);
 	syncobj_wait_count++;
 	syncobj_wait_handle_count += args->count_handles;
 	if (args->timeout_nsec == 0)
@@ -1491,7 +1312,7 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 		ret = drm_syncobj_find_single_user(file_private,
 		    u64_to_user_ptr(args->handles), &single_syncobj);
 		if (ret < 0)
-			goto out_diag;
+			goto out;
 		single_syncobjs[0] = single_syncobj;
 		ret = drm_syncobj_array_wait(dev, file_private, args,
 		    single_syncobjs);
@@ -1504,7 +1325,7 @@ drm_syncobj_wait_ioctl(struct drm_device *dev, void *data,
 				     args->count_handles,
 				     &syncobjs);
 	if (ret < 0)
-		goto out_diag;
+		goto out;
 
 	ret = drm_syncobj_array_wait(dev, file_private,
 				     args, syncobjs);
@@ -1523,9 +1344,7 @@ out_record:
 		syncobj_wait_error_count++;
 	}
 
-out_diag:
-	drm_syncobj_diag_leave(diag_seq, SYNCOBJ_DIAG_WAIT, args->flags,
-	    args->count_handles, 0, -1, ret, diag_start);
+out:
 	return ret;
 }
 
@@ -1539,7 +1358,6 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 	struct drm_syncobj *single_syncobjs[1];
 	uint64_t *points;
 	uint64_t single_point;
-	uint64_t diag_seq, diag_start;
 	uint32_t i, signaled = 0;
 	uint32_t first = ~0u;
 	int ret = 0;
@@ -1556,8 +1374,6 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 	if (args->count_handles == 0)
 		return -EINVAL;
 
-	diag_start = drm_syncobj_diag_enter(SYNCOBJ_DIAG_TIMELINE_WAIT,
-	    args->flags, args->count_handles, 0, -1, &diag_seq);
 	syncobj_timeline_wait_count++;
 	syncobj_timeline_wait_handle_count += args->count_handles;
 	if (args->timeout_nsec == 0) {
@@ -1578,7 +1394,7 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 		ret = drm_syncobj_find_single_user(file_private,
 		    u64_to_user_ptr(args->handles), &single_syncobj);
 		if (ret < 0)
-			goto out_diag;
+			goto out;
 		if (copy_from_user(&single_point, u64_to_user_ptr(args->points),
 		    sizeof(single_point))) {
 			ret = -EFAULT;
@@ -1630,7 +1446,7 @@ drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
 				     args->count_handles,
 				     &syncobjs);
 	if (ret < 0)
-		goto out_diag;
+		goto out;
 
 	points = kmalloc_array(args->count_handles, sizeof(*points), GFP_KERNEL);
 	if (points == NULL) {
@@ -1693,9 +1509,7 @@ out_syncobjs:
 out_single:
 	if (single_syncobj != NULL)
 		drm_syncobj_put(single_syncobj);
-out_diag:
-	drm_syncobj_diag_leave(diag_seq, SYNCOBJ_DIAG_TIMELINE_WAIT,
-	    args->flags, args->count_handles, 0, -1, ret, diag_start);
+out:
 	return ret;
 }
 

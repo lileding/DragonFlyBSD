@@ -2409,6 +2409,7 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		    state->connectors[index].ptr->state == NULL) {
 			drm_atomic_helper_fake_vblank(state);
 			drm_atomic_helper_commit_hw_done(state);
+			drm_atomic_helper_cleanup_planes(state->dev, state);
 			return;
 		}
 		/* Recover the swapped state from the objects that own each side. */

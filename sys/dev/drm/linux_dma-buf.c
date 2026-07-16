@@ -72,28 +72,6 @@ static uint64_t dmabuf_close_count;
 static uint64_t dmabuf_attach_count;
 static uint64_t dmabuf_attach_error_count;
 static uint64_t dmabuf_detach_count;
-static int dmabuf_sync_diag_enable = 0;
-static uint64_t dmabuf_sync_diag_enter_count;
-static uint64_t dmabuf_sync_diag_leave_count;
-static uint64_t dmabuf_sync_diag_active_seq;
-static uint64_t dmabuf_sync_diag_active_start_us;
-static uint64_t dmabuf_sync_diag_active_flags;
-static int dmabuf_sync_diag_active_op;
-static int dmabuf_sync_diag_active_pid;
-static int dmabuf_sync_diag_active_fd;
-static uint64_t dmabuf_sync_diag_last_seq;
-static uint64_t dmabuf_sync_diag_last_us;
-static uint64_t dmabuf_sync_diag_last_flags;
-static int dmabuf_sync_diag_last_op;
-static int dmabuf_sync_diag_last_pid;
-static int dmabuf_sync_diag_last_fd;
-static int dmabuf_sync_diag_last_ret;
-static uint64_t dmabuf_sync_diag_slow_count;
-static uint64_t dmabuf_sync_diag_slow_us_max;
-
-#define DMABUF_SYNC_DIAG_EXPORT	1
-#define DMABUF_SYNC_DIAG_IMPORT	2
-
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_count, CTLFLAG_RD,
     &dmabuf_export_sync_file_count, 0, "dma-buf export sync_file count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_export_sync_file_us, CTLFLAG_RD,
@@ -144,111 +122,10 @@ SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_attach_error_count, CTLFLAG_RD,
     &dmabuf_attach_error_count, 0, "dma-buf attach error count");
 SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_detach_count, CTLFLAG_RD,
     &dmabuf_detach_count, 0, "dma-buf detach count");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_enable, CTLFLAG_RW,
-    &dmabuf_sync_diag_enable, 0, "enable dma-buf sync_file active-call diagnostics");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_enter_count, CTLFLAG_RD,
-    &dmabuf_sync_diag_enter_count, 0, "dma-buf sync_file diagnostic enter count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_leave_count, CTLFLAG_RD,
-    &dmabuf_sync_diag_leave_count, 0, "dma-buf sync_file diagnostic leave count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_seq, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_seq, 0, "dma-buf sync_file active sequence");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_start_us, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_start_us, 0, "dma-buf sync_file active start time");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_flags, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_flags, 0, "dma-buf sync_file active flags");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_op, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_op, 0, "dma-buf sync_file active op");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_pid, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_pid, 0, "dma-buf sync_file active pid");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_active_fd, CTLFLAG_RD,
-    &dmabuf_sync_diag_active_fd, 0, "dma-buf sync_file active fd");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_seq, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_seq, 0, "dma-buf sync_file last sequence");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_us, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_us, 0, "dma-buf sync_file last duration");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_flags, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_flags, 0, "dma-buf sync_file last flags");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_op, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_op, 0, "dma-buf sync_file last op");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_pid, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_pid, 0, "dma-buf sync_file last pid");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_fd, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_fd, 0, "dma-buf sync_file last fd");
-SYSCTL_INT(_hw_dri, OID_AUTO, dmabuf_sync_diag_last_ret, CTLFLAG_RD,
-    &dmabuf_sync_diag_last_ret, 0, "dma-buf sync_file last return value");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_slow_count, CTLFLAG_RD,
-    &dmabuf_sync_diag_slow_count, 0, "dma-buf sync_file slow call count");
-SYSCTL_UQUAD(_hw_dri, OID_AUTO, dmabuf_sync_diag_slow_us_max, CTLFLAG_RD,
-    &dmabuf_sync_diag_slow_us_max, 0, "dma-buf sync_file maximum slow duration");
-
 static uint64_t
 dmabuf_now_us(void)
 {
 	return ((uint64_t)ktime_to_us(ktime_get()));
-}
-
-/*
- * Ownership:
- *   This diagnostic state is owned by the dma-buf compatibility layer.  The
- *   caller lends fd, flags, and return values by copy; no dma_buf, sync_file,
- *   or fence references are retained.
- *
- * Lifetime:
- *   State lives for the module lifetime and remains valid after the observed
- *   userspace process exits.
- *
- * Threading:
- *   Updates are lockless best-effort telemetry.  Concurrent ioctls may
- *   overwrite the single active slot, which keeps this probe from adding locks
- *   to the synchronization path being debugged.
- */
-static uint64_t
-dmabuf_sync_diag_enter(int op, uint64_t flags, int fd, uint64_t *seq_out)
-{
-	uint64_t seq, start_us;
-
-	if (dmabuf_sync_diag_enable == 0) {
-		*seq_out = 0;
-		return (0);
-	}
-
-	start_us = dmabuf_now_us();
-	seq = ++dmabuf_sync_diag_enter_count;
-	dmabuf_sync_diag_active_seq = seq;
-	dmabuf_sync_diag_active_start_us = start_us;
-	dmabuf_sync_diag_active_flags = flags;
-	dmabuf_sync_diag_active_op = op;
-	dmabuf_sync_diag_active_pid = curproc != NULL ? curproc->p_pid : -1;
-	dmabuf_sync_diag_active_fd = fd;
-	*seq_out = seq;
-	return (start_us);
-}
-
-static void
-dmabuf_sync_diag_leave(uint64_t seq, int op, uint64_t flags, int fd, int ret,
-    uint64_t start_us)
-{
-	uint64_t end_us, elapsed_us;
-
-	if (seq == 0)
-		return;
-
-	end_us = dmabuf_now_us();
-	elapsed_us = end_us >= start_us ? end_us - start_us : 0;
-	dmabuf_sync_diag_leave_count++;
-	dmabuf_sync_diag_last_seq = seq;
-	dmabuf_sync_diag_last_us = elapsed_us;
-	dmabuf_sync_diag_last_flags = flags;
-	dmabuf_sync_diag_last_op = op;
-	dmabuf_sync_diag_last_pid = curproc != NULL ? curproc->p_pid : -1;
-	dmabuf_sync_diag_last_fd = fd;
-	dmabuf_sync_diag_last_ret = ret;
-	if (elapsed_us > dmabuf_sync_diag_slow_us_max)
-		dmabuf_sync_diag_slow_us_max = elapsed_us;
-	if (elapsed_us >= 10000)
-		dmabuf_sync_diag_slow_count++;
-	if (dmabuf_sync_diag_active_seq == seq)
-		dmabuf_sync_diag_active_op = 0;
 }
 
 static void
@@ -544,32 +421,22 @@ dmabuf_ioctl(struct file *fp, u_long com, caddr_t data,
 	switch (com) {
 	case DMA_BUF_IOCTL_EXPORT_SYNC_FILE: {
 		uint64_t start = dmabuf_now_us();
-		uint64_t diag_seq, diag_start;
 		struct dma_buf_export_sync_file *args =
 		    (struct dma_buf_export_sync_file *)data;
 		int ret;
 
-		diag_start = dmabuf_sync_diag_enter(DMABUF_SYNC_DIAG_EXPORT,
-		    args->flags, -1, &diag_seq);
 		ret = dmabuf_export_sync_file(dmabuf, args);
-		dmabuf_sync_diag_leave(diag_seq, DMABUF_SYNC_DIAG_EXPORT,
-		    args->flags, args->fd, ret, diag_start);
 		dmabuf_export_sync_file_count++;
 		dmabuf_export_sync_file_us += dmabuf_now_us() - start;
 		return (ret);
 	}
 	case DMA_BUF_IOCTL_IMPORT_SYNC_FILE: {
 		uint64_t start = dmabuf_now_us();
-		uint64_t diag_seq, diag_start;
 		const struct dma_buf_import_sync_file *args =
 		    (const struct dma_buf_import_sync_file *)data;
 		int ret;
 
-		diag_start = dmabuf_sync_diag_enter(DMABUF_SYNC_DIAG_IMPORT,
-		    args->flags, args->fd, &diag_seq);
 		ret = dmabuf_import_sync_file(dmabuf, args);
-		dmabuf_sync_diag_leave(diag_seq, DMABUF_SYNC_DIAG_IMPORT,
-		    args->flags, args->fd, ret, diag_start);
 		dmabuf_import_sync_file_count++;
 		dmabuf_import_sync_file_us += dmabuf_now_us() - start;
 		return (ret);
