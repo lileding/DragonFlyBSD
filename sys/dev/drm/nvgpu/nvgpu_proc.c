@@ -329,7 +329,8 @@ fail:
 	nvgpu_fence_release(exec->submitted);
 	nvgpu_fence_release(exec->done);
 	nvgpu_proc_release(proc);
-	_kfree(waits, M_NVGPU_EXEC);
+	if (waits != NULL)
+		_kfree(waits, M_NVGPU_EXEC);
 	_kfree(exec, M_NVGPU_EXEC);
 	return (error);
 }

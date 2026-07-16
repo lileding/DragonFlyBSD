@@ -797,10 +797,11 @@ ttm_bo_vm_dtor(void *handle)
 	struct ttm_buffer_object *bo = handle;
 	int ret;
 
-	ret = ttm_bo_reserve(bo, false, false, NULL);
-	KKASSERT(ret == 0);
-	ttm_bo_unmap_virtual(bo);
-	ttm_bo_unreserve(bo);
+	ret = ttm_bo_reserve(bo, false, true, NULL);
+	if (ret == 0) {
+		ttm_bo_unmap_virtual(bo);
+		ttm_bo_unreserve(bo);
+	}
 	ttm_bo_unref(&bo);
 }
 

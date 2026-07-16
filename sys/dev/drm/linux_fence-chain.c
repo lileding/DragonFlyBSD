@@ -139,6 +139,24 @@ dma_fence_chain_blocker(struct dma_fence_chain *chain)
 static void dma_fence_chain_cb(struct dma_fence *blocker,
 	    struct dma_fence_cb *cb);
 
+static void dma_fence_chain_signal_work(struct irq_work *wrk);
+
+static void
+dma_fence_chain_queue_signal(struct dma_fence_chain *chain)
+{
+	irq_work_queue(&chain->work);
+}
+
+static void
+dma_fence_chain_signal_work(struct irq_work *wrk)
+{
+	struct dma_fence_chain *chain =
+	    container_of(wrk, struct dma_fence_chain, work);
+
+	dma_fence_signal(&chain->base);
+	dma_fence_put(&chain->base);
+}
+
 /*
  * Re-arm the callback on the next blocker; signal the node when none
  * is left.  Runs from enable_signaling (node lock held by core) and
@@ -191,10 +209,8 @@ dma_fence_chain_cb(struct dma_fence *blocker, struct dma_fence_cb *cb)
 	    container_of(cb, struct dma_fence_chain, cb);
 
 	dma_fence_put(blocker);
-	if (!dma_fence_chain_arm(chain)) {
-		dma_fence_signal(&chain->base);
-		dma_fence_put(&chain->base);
-	}
+	if (!dma_fence_chain_arm(chain))
+		dma_fence_chain_queue_signal(chain);
 }
 
 static bool
@@ -223,8 +239,8 @@ dma_fence_chain_enable_signaling(struct dma_fence *fence)
 	dma_fence_get(&chain->base);
 	if (dma_fence_chain_arm(chain))
 		return (true);
-	dma_fence_put(&chain->base);
-	return (false);
+	dma_fence_chain_queue_signal(chain);
+	return (true);
 }
 
 static bool
@@ -345,10 +361,11 @@ dma_fence_chain_init(struct dma_fence_chain *chain, struct dma_fence *prev,
 	chain->fence = fence;
 	chain->point = point;
 	INIT_LIST_HEAD(&chain->cb.node);
+	init_irq_work(&chain->work, dma_fence_chain_signal_work);
 	lockinit(&chain->lock, "dfchn", 0, 0);
 	lockinit(&chain->prev_lock, "dfchnp", 0, 0);
 	dma_fence_init(&chain->base, &dma_fence_chain_ops, &chain->lock,
-	    context, (unsigned)point);
+	    context, point);
 }
 EXPORT_SYMBOL(dma_fence_chain_init);
 

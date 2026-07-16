@@ -109,16 +109,20 @@ nvgpu_display_push_reserve(struct nvgpu_display_push *push, uint32_t dwords)
 	get = nvgsp_disp_channel_read_user(push->channel, 4) >> 2;
 	if (get > push->cur + 5)
 		free_dwords = get - push->cur - 5;
-	else
+	else if (get <= push->cur)
 		free_dwords = push->max - push->cur;
+	else
+		free_dwords = 0;
 	for (poll = 0; free_dwords < dwords &&
 	    poll < NVGPU_DISPLAY_PUSH_POLL_COUNT; poll++) {
 		DELAY(NVGPU_DISPLAY_PUSH_POLL_US);
 		get = nvgsp_disp_channel_read_user(push->channel, 4) >> 2;
 		if (get > push->cur + 5)
 			free_dwords = get - push->cur - 5;
-		else
+		else if (get <= push->cur)
 			free_dwords = push->max - push->cur;
+		else
+			free_dwords = 0;
 	}
 	if (free_dwords < dwords)
 		return (ETIMEDOUT);

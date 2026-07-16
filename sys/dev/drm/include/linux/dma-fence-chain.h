@@ -14,6 +14,7 @@
 #define _LINUX_DMA_FENCE_CHAIN_H_
 
 #include <linux/dma-fence.h>
+#include <linux/irq_work.h>
 
 struct dma_fence_chain {
 	struct dma_fence	base;
@@ -24,6 +25,7 @@ struct dma_fence_chain {
 	u64			point;		/* this node's timeline point */
 	struct dma_fence	*fence;		/* payload; ref */
 	struct dma_fence_cb	cb;		/* armed on current blocker */
+	struct irq_work		work;		/* deferred self-signal */
 };
 
 extern const struct dma_fence_ops dma_fence_chain_ops;
