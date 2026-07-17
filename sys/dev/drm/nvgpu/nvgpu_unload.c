@@ -7,6 +7,7 @@
 #include "nvgpu_unload.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
+#include "nvgpu_sched.h"
 
 #include <drm/drmP.h>
 
@@ -147,7 +148,7 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 	struct drm_file *file_priv;
 	uint32_t file_count = 0;
 	uint32_t mmap_count = 0;
-	uint32_t sched_count = 0;
+	uint32_t sched_count;
 	int error = 0;
 
 	state = nvgpu_device_get_unload_state(gpu);
@@ -172,6 +173,7 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 		file_count++;
 	mutex_unlock(&ddev->filelist_mutex);
 
+	sched_count = nvgpu_sched_busy_count();
 	lwkt_gettoken(&state->token);
 	mmap_count = state->mmap_refs;
 	if (ddev->open_count != 0 || file_count != 0 || mmap_count != 0 ||

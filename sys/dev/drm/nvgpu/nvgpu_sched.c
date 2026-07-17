@@ -6,6 +6,7 @@
 
 #include "nvgpu_future.h"
 #include "nvgpu_sched.h"
+#include "nvgpu_debug.h"
 
 #include <sys/errno.h>
 #include <sys/kernel.h>
@@ -23,6 +24,8 @@ struct nvgpu_sched {
 	struct lwkt_token stop_token;
 	struct spinlock queue_spin;
 	struct nvgpu_sched_queue active;
+	u_int queued_count;
+	u_int polling_count;
 	u_int worker_count;
 	bool stopping;
 };
@@ -39,6 +42,9 @@ KTR_INFO(KTR_NVGPU, nvgpu, sched_put, 23,
 KTR_INFO(KTR_NVGPU, nvgpu, sched_poll, 24,
     "sched poll future=%p ready=%u result=%d", void *future, u_int ready,
     int result);
+KTR_INFO(KTR_NVGPU, nvgpu, sched_stop, 27,
+    "sched stop workers=%u queued=%u polling=%u", u_int workers,
+    u_int queued, u_int polling);
 
 static struct nvgpu_sched *g_sched;
 
@@ -90,6 +96,7 @@ void
 nvgpu_sched_stop(void)
 {
 	struct nvgpu_sched *sched;
+	u_int queued, polling;
 
 	sched = g_sched;
 	if (sched == NULL)
@@ -98,17 +105,50 @@ nvgpu_sched_stop(void)
 	lwkt_gettoken(&sched->stop_token);
 	spin_lock(&sched->queue_spin);
 	sched->stopping = true;
+	queued = sched->queued_count;
+	polling = sched->polling_count;
 	spin_unlock(&sched->queue_spin);
-	wakeup(&sched->active);
-	while (sched->worker_count != 0)
-		tsleep(&sched->worker_count, 0, "nvgpsx", 0);
+	KTR_LOG(nvgpu_sched_stop, sched->worker_count, queued, polling);
+	nvgpu_log(NVGPU_LOG_INFO,
+	    "scheduler stop begin workers=%u queued=%u polling=%u\n",
+	    sched->worker_count, queued, polling);
+	while (sched->worker_count != 0) {
+		wakeup(&sched->active);
+		if (tsleep(&sched->worker_count, 0, "nvgpsx", hz) == EWOULDBLOCK) {
+			spin_lock(&sched->queue_spin);
+			queued = sched->queued_count;
+			polling = sched->polling_count;
+			spin_unlock(&sched->queue_spin);
+			KTR_LOG(nvgpu_sched_stop, sched->worker_count, queued, polling);
+			nvgpu_log(NVGPU_LOG_INFO,
+			    "scheduler stop wait workers=%u queued=%u polling=%u\n",
+			    sched->worker_count, queued, polling);
+		}
+	}
 	lwkt_reltoken(&sched->stop_token);
 	KASSERT(TAILQ_EMPTY(&sched->active),
 	    ("stopped scheduler with active futures"));
+	KASSERT(sched->queued_count == 0 && sched->polling_count == 0,
+	    ("stopped scheduler with busy futures"));
 	spin_uninit(&sched->queue_spin);
 	lwkt_token_uninit(&sched->stop_token);
 	_kfree(sched->threads, M_NVGPU_SCHED);
 	_kfree(sched, M_NVGPU_SCHED);
+}
+
+uint32_t
+nvgpu_sched_busy_count(void)
+{
+	struct nvgpu_sched *sched;
+	uint32_t count;
+
+	sched = g_sched;
+	if (sched == NULL)
+		return (0);
+	spin_lock(&sched->queue_spin);
+	count = sched->queued_count + sched->polling_count;
+	spin_unlock(&sched->queue_spin);
+	return (count);
 }
 
 int
@@ -128,6 +168,7 @@ nvgpu_sched_put(struct nvgpu_future *future)
 		return (ENODEV);
 	}
 	KTR_LOG(nvgpu_sched_put, future, 0u);
+	sched->queued_count++;
 	TAILQ_INSERT_TAIL(&sched->active, future, link);
 	spin_unlock(&sched->queue_spin);
 	wakeup_one(&sched->active);
@@ -145,8 +186,13 @@ nvgpu_sched_run(void *argument)
 	for (;;) {
 		spin_lock(&sched->queue_spin);
 		future = TAILQ_FIRST(&sched->active);
-		if (future != NULL)
+		if (future != NULL) {
 			TAILQ_REMOVE(&sched->active, future, link);
+			KASSERT(sched->queued_count != 0,
+			    ("nvgpu scheduler queued count underflow"));
+			sched->queued_count--;
+			sched->polling_count++;
+		}
 		stopping = sched->stopping;
 		if (future == NULL && !stopping)
 			tsleep_interlock(&sched->active, 0);
@@ -165,6 +211,11 @@ nvgpu_sched_run(void *argument)
 			KTR_LOG(nvgpu_sched_poll, logged_future,
 			    result.ready ? 1u : 0u, result.result);
 		}
+		spin_lock(&sched->queue_spin);
+		KASSERT(sched->polling_count != 0,
+		    ("nvgpu scheduler polling count underflow"));
+		sched->polling_count--;
+		spin_unlock(&sched->queue_spin);
 	}
 
 	lwkt_gettoken(&sched->stop_token);
