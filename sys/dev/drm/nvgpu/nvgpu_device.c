@@ -174,8 +174,8 @@ static struct nvgpu_device *nvgpu_default_gpu;
 
 DRIVER_MODULE(nvgpu, vgapci, nvgpu_device_pci_driver,
     nvgpu_device_devclass, NULL, NULL);
-MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
 MODULE_DEPEND(nvgpu, nvgsp570_fw, 1, 1, 1);
+MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
 
 /* Look up static chip metadata for a PCI device. */
 static const struct nvgpu_pci_device *
