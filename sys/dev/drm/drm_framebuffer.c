@@ -833,15 +833,12 @@ void drm_fb_release(struct drm_file *priv)
 	INIT_LIST_HEAD(&arg.fbs);
 
 	/*
-	 * When the file gets released that means no one else can access the fb
-	 * list any more, so no need to grab fpriv->fbs_lock. And we need to
-	 * avoid upsetting lockdep since the universal cursor code adds a
-	 * framebuffer while holding mutex locks.
-	 *
-	 * Note that a real deadlock between fpriv->fbs_lock and the modeset
-	 * locks is impossible here since no one else but this function can get
-	 * at it any more.
+	 * DragonFly close can race with another thread still issuing framebuffer
+	 * ioctls on the same drm_file.  Serialize the per-file framebuffer list
+	 * against RMFB/CLOSEFB/ADDFB while only moving entries to the local work
+	 * list; modeset cleanup still runs after dropping fbs_lock.
 	 */
+	mutex_lock(&priv->fbs_lock);
 	list_for_each_entry_safe(fb, tfb, &priv->fbs, filp_head) {
 		if (drm_framebuffer_read_refcount(fb) > 1) {
 			list_move_tail(&fb->filp_head, &arg.fbs);
@@ -852,6 +849,7 @@ void drm_fb_release(struct drm_file *priv)
 			drm_framebuffer_put(fb);
 		}
 	}
+	mutex_unlock(&priv->fbs_lock);
 
 	if (!list_empty(&arg.fbs)) {
 		INIT_WORK_ONSTACK(&arg.work, drm_mode_rmfb_work_fn);
