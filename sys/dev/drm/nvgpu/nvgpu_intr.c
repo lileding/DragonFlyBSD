@@ -73,7 +73,7 @@ KTR_INFO(KTR_NVGPU, nvgpu, intr_park, 22,
 
 MALLOC_DEFINE(M_NVGPU_INTR, "nvgpu_intr", "nvgpu interrupt state");
 
-TAILQ_HEAD(nvgpu_sema_list, nvgpu_sema);
+TAILQ_HEAD(nvgpu_future_list, nvgpu_future);
 
 struct nvgpu_intr_state {
 	struct nvgpu_device *gpu;
@@ -84,7 +84,7 @@ struct nvgpu_intr_state {
 	struct lwkt_serialize irq_serialize;
 	struct lwkt_token worker_token;
 	struct spinlock parked_spin;
-	struct nvgpu_sema_list parked;
+	struct nvgpu_future_list parked;
 	struct thread *worker;
 	volatile u_int events;
 	uint64_t fault_chids[NVGPU_INTR_CHID_COUNT / 64];
@@ -239,31 +239,36 @@ nvgpu_intr_run(void *arg)
 		if ((events & NVGPU_INTR_EVENT_GSP) != 0)
 			nvgsp_event_dispatch(gpu);
 		if ((events & NVGPU_INTR_EVENT_EXEC) != 0) {
-			struct nvgpu_sema_list completed;
-			struct nvgpu_sema *sema, *next;
+			struct nvgpu_future_list completed;
+			struct nvgpu_future *future, *next;
 
 			TAILQ_INIT(&completed);
 			spin_lock(&intr->parked_spin);
-			for (sema = TAILQ_FIRST(&intr->parked); sema != NULL;
-			    sema = next) {
-				next = TAILQ_NEXT(sema, parked_link);
+			for (future = TAILQ_FIRST(&intr->parked); future != NULL;
+			    future = next) {
+				struct nvgpu_sema *sema = future->parked_sema;
+
+				next = TAILQ_NEXT(future, link);
 				cpu_lfence();
-				if ((int32_t)(*sema->address - sema->target) < 0)
+				if (sema == NULL || (int32_t)(*sema->address - sema->target) < 0)
 					continue;
-				TAILQ_REMOVE(&intr->parked, sema, parked_link);
+				TAILQ_REMOVE(&intr->parked, future, link);
 				sema->parked = false;
-				TAILQ_INSERT_TAIL(&completed, sema, parked_link);
+				TAILQ_INSERT_TAIL(&completed, future, link);
 			}
 			spin_unlock(&intr->parked_spin);
-			while ((sema = TAILQ_FIRST(&completed)) != NULL) {
-				struct nvgpu_future *future = sema->future;
+			while ((future = TAILQ_FIRST(&completed)) != NULL) {
+				struct nvgpu_sema *sema = future->parked_sema;
 				int error;
 
-				TAILQ_REMOVE(&completed, sema, parked_link);
-				sema->future = NULL;
+				TAILQ_REMOVE(&completed, future, link);
+				future->parked_sema = NULL;
+				if (sema != NULL)
+					sema->future = NULL;
 				KTR_LOG(nvgpu_intr_exec_complete, sema, future,
-				    sema->chid, sema->address != NULL ?
-				    *sema->address : 0u, sema->target);
+				    sema != NULL ? sema->chid : 0u,
+				    sema != NULL && sema->address != NULL ?
+				    *sema->address : 0u, sema != NULL ? sema->target : 0u);
 				error = nvgpu_sched_put(future);
 				KASSERT(error == 0,
 				    ("completion after scheduler stop: %d", error));
@@ -308,8 +313,8 @@ nvgpu_intr_run(void *arg)
 			for (uint32_t word = 0; word < NVGPU_INTR_CHID_COUNT / 64;
 			    word++) {
 				while (fault_chids[word] != 0) {
-					struct nvgpu_sema_list failed;
-					struct nvgpu_sema *sema, *next;
+					struct nvgpu_future_list failed;
+					struct nvgpu_future *future, *next;
 					uint32_t bit = __builtin_ctzll(fault_chids[word]);
 					uint32_t chid = word * 64 + bit;
 
@@ -317,25 +322,27 @@ nvgpu_intr_run(void *arg)
 					nvgsp_channel_mark_fault(gpu, chid, EIO);
 					TAILQ_INIT(&failed);
 					spin_lock(&intr->parked_spin);
-					for (sema = TAILQ_FIRST(&intr->parked);
-					    sema != NULL; sema = next) {
-						next = TAILQ_NEXT(sema, parked_link);
-						if (sema->chid != chid)
+					for (future = TAILQ_FIRST(&intr->parked);
+					    future != NULL; future = next) {
+						struct nvgpu_sema *sema = future->parked_sema;
+
+						next = TAILQ_NEXT(future, link);
+						if (sema == NULL || sema->chid != chid)
 							continue;
-						TAILQ_REMOVE(&intr->parked, sema,
-						    parked_link);
+						TAILQ_REMOVE(&intr->parked, future, link);
 						sema->parked = false;
 						sema->error = EIO;
-						TAILQ_INSERT_TAIL(&failed, sema,
-						    parked_link);
+						TAILQ_INSERT_TAIL(&failed, future, link);
 					}
 					spin_unlock(&intr->parked_spin);
-					while ((sema = TAILQ_FIRST(&failed)) != NULL) {
-						struct nvgpu_future *future = sema->future;
+					while ((future = TAILQ_FIRST(&failed)) != NULL) {
+						struct nvgpu_sema *sema = future->parked_sema;
 						int error;
 
-						TAILQ_REMOVE(&failed, sema, parked_link);
-						sema->future = NULL;
+						TAILQ_REMOVE(&failed, future, link);
+						future->parked_sema = NULL;
+						if (sema != NULL)
+							sema->future = NULL;
 						error = nvgpu_sched_put(future);
 						KASSERT(error == 0,
 						    ("fault after scheduler stop: %d", error));
@@ -573,12 +580,14 @@ nvgpu_intr_park(struct nvgpu_sema *sema, struct nvgpu_future *future)
 		spin_unlock(&intr->parked_spin);
 		return (ENODEV);
 	}
-	KASSERT(!sema->parked && sema->future == NULL,
+	KASSERT(!sema->parked && sema->future == NULL &&
+	    future->parked_sema == NULL,
 	    ("parking one GPU semaphore twice"));
 	sema->future = future;
 	sema->error = 0;
 	sema->parked = true;
-	TAILQ_INSERT_TAIL(&intr->parked, sema, parked_link);
+	future->parked_sema = sema;
+	TAILQ_INSERT_TAIL(&intr->parked, future, link);
 	KTR_LOG(nvgpu_intr_park, sema, future, sema->chid, sema->target);
 	spin_unlock(&intr->parked_spin);
 	return (0);

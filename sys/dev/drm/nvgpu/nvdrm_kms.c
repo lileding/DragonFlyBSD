@@ -64,6 +64,28 @@ KTR_INFO(KTR_NVGPU, nvgpu, kms_pageflip, 7,
     "kms pageflip head=%u pending=%p", uint32_t head, void *pending);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_vblank, 8,
     "kms vblank head=%u", uint32_t head);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_atomic_check, 9,
+    "kms atomic check state=%p error=%d connectors=%d", void *state,
+    int error, int connectors);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_damaged_connector, 10,
+    "kms damaged connector index=%d ptr=%p state=%p old=%p new=%p current=%p",
+    int index, void *ptr, void *state, void *old_state, void *new_state,
+    void *current_state);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_head_update, 11,
+    "kms head update head=%u view=%u dither=%u input=%ux%u output=%ux%u",
+    uint32_t head, uint32_t view, uint32_t dither, uint32_t input_width,
+    uint32_t input_height, uint32_t output_width, uint32_t output_height);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_head_update_result, 12,
+    "kms head update result head=%u error=%d", uint32_t head, int error);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_color_update, 13,
+    "kms color update head=%u error=%d", uint32_t head, int error);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_commit_crtc, 14,
+    "kms commit crtc index=%d head=%u active=%u enable=%u modeset=%u event=%p",
+    int index, uint32_t head, uint32_t active, uint32_t enable,
+    uint32_t modeset, void *event);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_custom_commit, 15,
+    "kms custom commit state=%p reason=%u nonblock=%u", void *state,
+    uint32_t reason, uint32_t nonblock);
 
 #define NVDRM_KMS_MAX_HEADS 4u
 #define NVDRM_KMS_EDID_SIZE 1024u
@@ -2357,6 +2379,7 @@ nvdrm_kms_check_atomic(struct drm_device *ddev,
 
 	error = drm_atomic_helper_check_planes(ddev, state);
 out:
+	KTR_LOG(nvgpu_kms_atomic_check, state, error, state->num_connector);
 	if (error != 0)
 		nvgpu_log(NVGPU_LOG_DEBUG,
 		    "atomic check failed state=%p error=%d\n", state, error);
@@ -2405,6 +2428,11 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		    state->connectors[index].old_state,
 		    state->connectors[index].new_state,
 		    state->connectors[index].ptr->state);
+		KTR_LOG(nvgpu_kms_damaged_connector, index,
+		    state->connectors[index].ptr, state->connectors[index].state,
+		    state->connectors[index].old_state,
+		    state->connectors[index].new_state,
+		    state->connectors[index].ptr->state);
 		if (state->connectors[index].state == NULL ||
 		    state->connectors[index].ptr->state == NULL) {
 			drm_atomic_helper_fake_vblank(state);
@@ -2429,9 +2457,17 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		    (!nvstate->head_update_view[head] &&
 		    !nvstate->head_update_dither[head]))
 			continue;
+		KTR_LOG(nvgpu_kms_head_update, head,
+		    nvstate->head_update_view[head] ? 1u : 0u,
+		    nvstate->head_update_dither[head] ? 1u : 0u,
+		    nvstate->head_config[head].input_width,
+		    nvstate->head_config[head].input_height,
+		    nvstate->head_config[head].output_width,
+		    nvstate->head_config[head].output_height);
 		error = nvgpu_display_update_head(state->dev->dev_private, head,
 		    &nvstate->head_config[head], nvstate->head_update_view[head],
 		    nvstate->head_update_dither[head]);
+		KTR_LOG(nvgpu_kms_head_update_result, head, error);
 		if (error != 0) {
 			nvgpu_log(NVGPU_LOG_INFO,
 			    "HEAD property update failed head=%u error=%d\n",
@@ -2459,6 +2495,7 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		nvcrtc = to_nvdrm_crtc(kms->crtcs[head]);
 		error = nvgpu_display_update_color(state->dev->dev_private, head,
 		    nvcrtc->window, &nvstate->color[head]->base);
+		KTR_LOG(nvgpu_kms_color_update, head, error);
 		if (error != 0)
 			nvgpu_log(NVGPU_LOG_INFO,
 			    "CRTC color update failed head=%u error=%d\n", head, error);
@@ -2476,6 +2513,10 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 		    drm_atomic_crtc_needs_modeset(crtc_state),
 		    crtc_state->mode_changed, crtc_state->active_changed,
 		    crtc_state->connectors_changed, crtc_state->planes_changed,
+		    crtc_state->event);
+		KTR_LOG(nvgpu_kms_commit_crtc, index, nvcrtc->head,
+		    crtc_state->active ? 1u : 0u, crtc_state->enable ? 1u : 0u,
+		    drm_atomic_crtc_needs_modeset(crtc_state) ? 1u : 0u,
 		    crtc_state->event);
 		if (crtc_state->event == NULL || !crtc_state->active ||
 		    !drm_atomic_crtc_needs_modeset(crtc_state))
@@ -2563,6 +2604,7 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 
 		if (drm_atomic_crtc_needs_modeset(crtc_state) ||
 		    crtc_state->color_mgmt_changed) {
+			KTR_LOG(nvgpu_kms_custom_commit, state, 1u, nonblock ? 1u : 0u);
 			custom_commit = true;
 			break;
 		}
@@ -2592,6 +2634,7 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 			    crtc_state->adjusted_mode.vdisplay,
 			    primary_state->crtc_w, primary_state->crtc_h,
 			    primary_size_changed);
+			KTR_LOG(nvgpu_kms_custom_commit, state, 2u, nonblock ? 1u : 0u);
 			custom_commit = true;
 			break;
 		}

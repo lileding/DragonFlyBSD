@@ -341,15 +341,10 @@ nvgpu_proc_poll_exec(struct nvgpu_future *future)
 	struct nvgpu_channel_submit_args submit;
 	struct nvgpu_exec_future *exec;
 	struct nvgpu_proc *proc;
-	bool destroy_channel;
 	int error;
 
 	exec = (struct nvgpu_exec_future *)future;
-	error = nvgpu_future_get_wait_error(future);
-	if (error != 0) {
-		(void)nvgpu_fence_signal(exec->submitted, error);
-		goto complete;
-	}
+	error = 0;
 	if (exec->sema.address == NULL) {
 		submit.pushes = exec->pushes;
 		submit.push_count = exec->push_count;

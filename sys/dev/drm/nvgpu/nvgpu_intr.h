@@ -16,7 +16,6 @@ struct nvgpu_future;
 
 /* Driver-private semaphore identity shared by channel and interrupt code. */
 struct nvgpu_sema {
-	TAILQ_ENTRY(nvgpu_sema) parked_link;
 	struct nvgpu_device *device;
 	struct nvgpu_future *future;
 	volatile uint32_t *address;
