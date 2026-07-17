@@ -165,22 +165,47 @@ nvgpu_nvif_sclass(struct nvgpu_proc *proc, const struct nvif_ioctl_v0 *hdr)
 
 /* Handle one variable-size NVIF ioctl payload copied by the DRM shim. */
 int
-nvgpu_nvif_ioctl(struct nvgpu_proc *proc, void *data)
+nvgpu_nvif_ioctl(struct nvgpu_proc *proc, void *data, size_t size)
 {
 	struct nvif_ioctl_v0 *hdr = data;
+	size_t required;
 
 	if (proc == NULL || hdr == NULL)
+		return (EINVAL);
+	if (size < sizeof(*hdr))
 		return (EINVAL);
 	if (hdr->version != 0)
 		return (ENOSYS);
 
 	switch (hdr->type) {
 	case NVIF_IOCTL_V0_NEW:
+		required = sizeof(*hdr) + sizeof(struct nvif_ioctl_new_v0);
+		if (size < required)
+			return (EINVAL);
 		return (nvgpu_nvif_new(proc, hdr));
 	case NVIF_IOCTL_V0_MTHD:
+		required = sizeof(*hdr) + sizeof(struct nvif_ioctl_mthd_v0);
+		if (size < required)
+			return (EINVAL);
+		if (((struct nvif_ioctl_mthd_v0 *)hdr->data)->method ==
+		    NV_DEVICE_V0_INFO) {
+			required += sizeof(struct nv_device_info_v0);
+			if (size < required)
+				return (EINVAL);
+		}
 		return (nvgpu_nvif_mthd(proc, hdr));
-	case NVIF_IOCTL_V0_SCLASS:
+	case NVIF_IOCTL_V0_SCLASS: {
+		struct nvif_ioctl_sclass_v0 *req = (void *)hdr->data;
+
+		required = sizeof(*hdr) + sizeof(*req);
+		if (size < required)
+			return (EINVAL);
+		required += (req->count < 5u ? req->count : 5u) *
+		    sizeof(struct nvif_ioctl_sclass_oclass_v0);
+		if (size < required)
+			return (EINVAL);
 		return (nvgpu_nvif_sclass(proc, hdr));
+	}
 	case NVIF_IOCTL_V0_DEL:
 		return (nvgpu_proc_destroy_channel_object(proc, hdr->object));
 	default:

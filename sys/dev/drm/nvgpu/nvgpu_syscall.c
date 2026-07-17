@@ -21,6 +21,9 @@
 #include <sys/systm.h>
 #include <machine/cpufunc.h>
 
+static MALLOC_DEFINE(M_NVGPU_NVIF_IOCTL, "nvgpu_nvif_ioctl",
+    "nvgpu nvif ioctl buffer");
+
 int
 nvgpu_syscall_getparam(struct nvgpu_proc *proc, struct drm_file *file __unused,
     void *data)
@@ -44,7 +47,81 @@ int
 nvgpu_syscall_nvif(struct nvgpu_proc *proc, struct drm_file *file __unused,
     void *data)
 {
-	return (nvgpu_nvif_ioctl(proc, data));
+	const void *user;
+	struct nvif_ioctl_v0 hdr;
+	size_t size, copy_count;
+	void *buffer;
+	bool copy_back;
+	int error;
+
+	if (data == NULL)
+		return (EINVAL);
+	user = *(const void * const *)data;
+	if (user == NULL)
+		return (EINVAL);
+	error = copyin(user, &hdr, sizeof(hdr));
+	if (error != 0)
+		return (error);
+	if (hdr.version != 0)
+		return (ENOSYS);
+
+	copy_back = false;
+	switch (hdr.type) {
+	case NVIF_IOCTL_V0_NEW: {
+		struct nvif_ioctl_new_v0 req;
+
+		size = sizeof(hdr) + sizeof(req);
+		error = copyin((const char *)user + sizeof(hdr), &req, sizeof(req));
+		if (error != 0)
+			return (error);
+		if (req.version != 0)
+			return (ENOSYS);
+		break;
+	}
+	case NVIF_IOCTL_V0_MTHD: {
+		struct nvif_ioctl_mthd_v0 req;
+
+		size = sizeof(hdr) + sizeof(req);
+		error = copyin((const char *)user + sizeof(hdr), &req, sizeof(req));
+		if (error != 0)
+			return (error);
+		if (req.version != 0)
+			return (ENOSYS);
+		if (req.method == NV_DEVICE_V0_INFO) {
+			size += sizeof(struct nv_device_info_v0);
+			copy_back = true;
+		}
+		break;
+	}
+	case NVIF_IOCTL_V0_SCLASS: {
+		struct nvif_ioctl_sclass_v0 req;
+
+		size = sizeof(hdr) + sizeof(req);
+		error = copyin((const char *)user + sizeof(hdr), &req, sizeof(req));
+		if (error != 0)
+			return (error);
+		if (req.version != 0)
+			return (ENOSYS);
+		copy_count = req.count < 5u ? req.count : 5u;
+		size += copy_count * sizeof(struct nvif_ioctl_sclass_oclass_v0);
+		copy_back = true;
+		break;
+	}
+	case NVIF_IOCTL_V0_DEL:
+		size = sizeof(hdr);
+		break;
+	default:
+		return (EINVAL);
+	}
+
+	buffer = kmalloc(size, M_NVGPU_NVIF_IOCTL, M_WAITOK | M_ZERO);
+	error = copyin(user, buffer, size);
+	if (error == 0)
+		error = nvgpu_nvif_ioctl(proc, buffer, size);
+	if (error == 0 && copy_back)
+		error = copyout(buffer, __DECONST(void *, user), size);
+	_kfree(buffer, M_NVGPU_NVIF_IOCTL);
+	return (error);
 }
 
 int
