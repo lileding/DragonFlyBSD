@@ -166,6 +166,7 @@ ${KMOD:S/$/.c/}: dragonfly
 ${KMOD:S/$/.c/}: dragonfly/tools/fw_stub.awk
 .endif
 	${AWK} -f dragonfly/tools/fw_stub.awk ${FIRMWS} \
+	    ${FIRMWARE_KEEP_RESIDENT:C/.+/-k/} \
 	    -m ${KMOD} -c ${KMOD:S/$/.c/g} \
 	    ${FIRMWARE_LICENSE:C/.+/-l/}${FIRMWARE_LICENSE}
 

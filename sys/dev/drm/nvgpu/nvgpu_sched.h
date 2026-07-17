@@ -7,6 +7,8 @@
 #ifndef _NVGPU_SCHED_H_
 #define _NVGPU_SCHED_H_
 
+#include <sys/types.h>
+
 struct nvgpu_future;
 
 /*
@@ -24,6 +26,12 @@ int nvgpu_sched_start(void);
  * interrupt-owned futures.  No future may remain registered on return.
  */
 void nvgpu_sched_stop(void);
+
+/*
+ * Return the number of futures currently queued or being polled.
+ * This is a diagnostic unload gate, not a lifetime reference.
+ */
+uint32_t nvgpu_sched_busy_count(void);
 
 /*
  * Transfer one future to the scheduler's active queue without sleeping.
