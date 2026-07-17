@@ -83,12 +83,7 @@ int nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
 	struct nvgpu_channel_list *channels, struct nvgpu_channel_create_args *args,
 	struct nvgpu_channel **result);
 
-/*
- * Destroy one proc-owned channel after all futures borrowing it are gone.
- * The call consumes the channel and may sleep while releasing GSP objects.
- */
-void nvgpu_channel_release(struct nvgpu_channel *channel);
-
+/* Hold or release one channel reference.  The final release destroys the backend channel. */
 void nvgpu_channel_addref(struct nvgpu_channel *channel);
 void nvgpu_channel_release(struct nvgpu_channel *channel);
 
