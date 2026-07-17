@@ -57,6 +57,10 @@ void nvgsp_channel_abort_submit(struct nvgsp_channel_submission *submission);
 void nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid,
     int error);
 
+/* Return backend host-channel capacity and already reserved boot channels. */
+int nvgsp_channel_query_capacity(struct nvgpu_device *gpu, uint32_t *total,
+    uint32_t *reserved);
+
 /* Create the bootstrap channel during boot. */
 int nvgsp_channel_create_bootstrap(struct nvgpu_device *gpu);
 /* Destroy the bootstrap channel after submissions have stopped. */

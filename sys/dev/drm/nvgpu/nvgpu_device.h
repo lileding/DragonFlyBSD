@@ -79,4 +79,12 @@ void nvgpu_device_set_display(struct nvgpu_device *gpu,
 struct nvdrm_kms *nvgpu_device_get_kms(struct nvgpu_device *gpu);
 void nvgpu_device_set_kms(struct nvgpu_device *gpu, struct nvdrm_kms *kms);
 
+/* Reserve or release one user channel against the device-global quota. */
+int nvgpu_device_reserve_channel(struct nvgpu_device *gpu);
+void nvgpu_device_release_channel(struct nvgpu_device *gpu);
+
+/* Return boot-time backend channel capacity after subtracting reserved slots. */
+uint32_t nvgpu_device_get_channel_limit(struct nvgpu_device *gpu);
+uint32_t nvgpu_device_get_channel_used(struct nvgpu_device *gpu);
+
 #endif /* _NVGPU_DEVICE_H_ */

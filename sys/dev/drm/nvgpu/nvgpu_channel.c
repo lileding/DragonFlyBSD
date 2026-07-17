@@ -35,27 +35,11 @@ KTR_INFO(KTR_NVGPU, nvgpu, channel_doorbell, 31,
     "channel doorbell channel=%u future=%p target=%u", uint32_t channel,
     void *future, uint32_t target);
 
-#define NVGPU_MAX_CHANNELS	64u
-
 static volatile u_int nvgpu_channel_next_id = 1;
 
 static void nvgpu_channel_finalize_objects(struct nvgpu_channel *chan);
 static int nvgpu_channel_select_engine(const struct nvgpu_channel_create_args *args,
 									   uint32_t *engine_type);
-
-/* Caller serializes the proc channel list. */
-static uint32_t
-nvgpu_channel_count(struct nvgpu_channel_list *channels)
-{
-	struct nvgpu_channel *chan;
-	uint32_t count = 0;
-
-	if (channels == NULL)
-		return (0);
-	TAILQ_FOREACH(chan, channels, link)
-		count++;
-	return (count);
-}
 
 int
 nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
@@ -69,12 +53,13 @@ nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
 	if (device == NULL || vmm == NULL || channels == NULL || args == NULL ||
 	    result == NULL)
 		return (EINVAL);
-	if (nvgpu_channel_count(channels) >= NVGPU_MAX_CHANNELS)
-		return (ENOMEM);
+	error = nvgpu_device_reserve_channel(device);
+	if (error != 0)
+		return (error);
 
 	error = nvgpu_channel_select_engine(args, &engine_type);
 	if (error != 0)
-		return (error);
+		goto fail_quota;
 
 	chan = kmalloc(sizeof(*chan), M_NVGPU_CHANNEL, M_WAITOK | M_ZERO);
 	chan->device = device;
@@ -84,7 +69,7 @@ nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
 	error = nvgsp_channel_create_user(vmm, engine_type, &chan->backend);
 	if (error != 0) {
 		_kfree(chan, M_NVGPU_CHANNEL);
-		return (error);
+		goto fail_quota;
 	}
 
 	TAILQ_INSERT_TAIL(channels, chan, link);
@@ -94,6 +79,10 @@ nvgpu_channel_create(struct nvgpu_device *device, struct nvgsp_vmm *vmm,
 	args->nr_subchan = 0;
 	*result = chan;
 	return (0);
+
+fail_quota:
+	nvgpu_device_release_channel(device);
+	return (error);
 }
 
 void
@@ -117,6 +106,7 @@ nvgpu_channel_release(struct nvgpu_channel *chan)
 	nvgpu_channel_finalize_objects(chan);
 	if (chan->backend != NULL)
 		nvgsp_channel_destroy_user(chan->backend);
+	nvgpu_device_release_channel(chan->device);
 	_kfree(chan, M_NVGPU_CHANNEL);
 }
 
