@@ -16,11 +16,24 @@
 
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
 #include <machine/atomic.h>
 
 static MALLOC_DEFINE(M_NVGPU_CHANNEL, "nvgpu_channel", "nvgpu user channel");
+
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, channel_submit, 31,
+    "channel submit channel=%u future=%p push=%ju error=%d",
+    uint32_t channel, void *future, uintmax_t push_count, int error);
+KTR_INFO(KTR_NVGPU, nvgpu, channel_doorbell, 31,
+    "channel doorbell channel=%u future=%p target=%u", uint32_t channel,
+    void *future, uint32_t target);
 
 #define NVGPU_MAX_CHANNELS	64u
 
@@ -123,6 +136,8 @@ nvgpu_channel_submit(struct nvgpu_channel *channel,
 	error = nvgsp_channel_prepare_submit(channel->backend,
 	    (const struct nvgsp_channel_push *)args->pushes,
 	    (uint32_t)args->push_count, &submission);
+	KTR_LOG(nvgpu_channel_submit, channel->id, future,
+	    (uintmax_t)args->push_count, error);
 	if (error != 0)
 		return (error);
 	nvgsp_channel_describe_submit(submission, &completion);
@@ -133,12 +148,15 @@ nvgpu_channel_submit(struct nvgpu_channel *channel,
 	args->sema->error = 0;
 	error = nvgpu_intr_park(args->sema, future);
 	if (error != 0) {
+		KTR_LOG(nvgpu_channel_submit, channel->id, future,
+		    (uintmax_t)args->push_count, error);
 		nvgsp_channel_abort_submit(submission);
 		memset(args->sema, 0, sizeof(*args->sema));
 		return (error);
 	}
 	error = nvgpu_fence_signal(args->submitted, 0);
 	KASSERT(error == 0, ("signaling submitted fence failed: %d", error));
+	KTR_LOG(nvgpu_channel_doorbell, channel->id, future, args->sema->target);
 	nvgsp_channel_commit_submit(submission);
 	return (0);
 }

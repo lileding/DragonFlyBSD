@@ -10,6 +10,7 @@
 
 #include <machine/atomic.h>
 #include <sys/errno.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
 
@@ -26,6 +27,17 @@ struct nvgpu_future_wait {
 static MALLOC_DEFINE(M_NVGPU_FUTURE, "nvgpu_future",
     "nvgpu future wait callbacks");
 
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, future_spawn, 25,
+    "future spawn future=%p wait_count=%ju", void *future,
+    uintmax_t wait_count);
+KTR_INFO(KTR_NVGPU, nvgpu, future_wait_done, 26,
+    "future wait done future=%p old=%u", void *future, u_int old);
+
 static void nvgpu_future_wait_complete(void *argument);
 
 int
@@ -36,6 +48,7 @@ nvgpu_future_spawn(struct nvgpu_future *future, struct nvgpu_fence **waits,
 	struct nvgpu_future_wait *wait;
 	int error;
 
+	KTR_LOG(nvgpu_future_spawn, future, (uintmax_t)wait_count);
 	if (future == NULL || future->poll == NULL ||
 	    (wait_count != 0 && waits == NULL))
 		return (EINVAL);
@@ -85,6 +98,7 @@ nvgpu_future_wait_complete(void *argument)
 	nvgpu_fence_release(wait->fence);
 	_kfree(wait, M_NVGPU_FUTURE);
 	old = atomic_fetchadd_int(&set->pending, -1);
+	KTR_LOG(nvgpu_future_wait_done, set->future, old);
 	if (old != 1)
 		return;
 	future = set->future;

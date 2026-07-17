@@ -9,6 +9,7 @@
 
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/spinlock.h>
 #include <sys/spinlock2.h>
@@ -27,6 +28,17 @@ struct nvgpu_sched {
 };
 
 static MALLOC_DEFINE(M_NVGPU_SCHED, "nvgpu_sched", "nvgpu scheduler");
+
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, sched_put, 23,
+    "sched put future=%p stopping=%u", void *future, u_int stopping);
+KTR_INFO(KTR_NVGPU, nvgpu, sched_poll, 24,
+    "sched poll future=%p ready=%u result=%d", void *future, u_int ready,
+    int result);
 
 static struct nvgpu_sched *g_sched;
 
@@ -111,9 +123,11 @@ nvgpu_sched_put(struct nvgpu_future *future)
 		return (ENODEV);
 	spin_lock(&sched->queue_spin);
 	if (sched->stopping) {
+		KTR_LOG(nvgpu_sched_put, future, 1u);
 		spin_unlock(&sched->queue_spin);
 		return (ENODEV);
 	}
+	KTR_LOG(nvgpu_sched_put, future, 0u);
 	TAILQ_INSERT_TAIL(&sched->active, future, link);
 	spin_unlock(&sched->queue_spin);
 	wakeup_one(&sched->active);
@@ -143,7 +157,14 @@ nvgpu_sched_run(void *argument)
 			tsleep(&sched->active, PINTERLOCKED, "nvgpsd", 0);
 			continue;
 		}
-		future->poll(future);
+		{
+			void *logged_future = future;
+			struct nvgpu_future_result result;
+
+			result = future->poll(future);
+			KTR_LOG(nvgpu_sched_poll, logged_future,
+			    result.ready ? 1u : 0u, result.result);
+		}
 	}
 
 	lwkt_gettoken(&sched->stop_token);
