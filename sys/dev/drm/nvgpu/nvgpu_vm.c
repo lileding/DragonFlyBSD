@@ -16,12 +16,27 @@
 #include <linux/dma-fence.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
 #include <machine/atomic.h>
 
 static MALLOC_DEFINE(M_NVGPU_VM, "nvgpu_vm", "nvgpu process VM");
+
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_spawn, 31,
+    "vm bind spawn proc=%p vm=%p op_count=%u wait_count=%u", void *proc,
+    void *vm, uint32_t op_count, uint32_t wait_count);
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_poll, 31,
+    "vm bind poll future=%p phase=%u op_count=%u error=%d", void *future,
+    u_int phase, uint32_t op_count, int error);
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_dirty, 31,
+    "vm bind dirty future=%p dirty=%u", void *future, u_int dirty);
 
 #define NVGPU_VM_PAGE_SHIFT_4K	12
 #define NVGPU_VM_PAGE_SHIFT_64K	16
@@ -6790,6 +6805,7 @@ nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *args)
 		for (uint32_t i = 0; i < bind->op_count; i++)
 			nvgpu_bo_addref(bind->ops[i].bo);
 	}
+	KTR_LOG(nvgpu_vm_bind_spawn, args->proc, vm, args->op_count, wait_count);
 	bind->done = done;
 	bind->base.poll = nvgpu_vm_bind_future_poll;
 	bind->complete_bind = args->complete_bind;
@@ -6827,18 +6843,25 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 	int error;
 
 	bind = (struct nvgpu_vm_bind_future *)future;
+	KTR_LOG(nvgpu_vm_bind_poll, future, 0u, bind->op_count, 0);
 	nvgpu_vm_batch_plan_init(&plan, bind->ops, bind->op_count);
 	lwkt_gettoken(&bind->vm->vm_token);
 	nvgsp_vmm_begin_update(bind->vm->backend);
 	error = nvgpu_vm_batch_plan_apply(bind->vm->gpu, bind->vm, &plan,
 	    &bind->retired_bindings);
+	KTR_LOG(nvgpu_vm_bind_poll, future, 1u, bind->op_count, error);
 	failed_op = plan.failed_op;
 	nvgpu_vm_batch_plan_fini(bind->vm, &plan);
 	nvgpu_vm_dirty_set_publish(bind->vm->gpu, &plan.dirty_set);
-	if (plan.dirty_set.dirty)
+	KTR_LOG(nvgpu_vm_bind_dirty, future, plan.dirty_set.dirty ? 1u : 0u);
+	if (plan.dirty_set.dirty) {
+		KTR_LOG(nvgpu_vm_bind_poll, future, 2u, bind->op_count, error);
 		nvgpu_vm_dirty_set_flush(bind->vm->backend, &plan.dirty_set);
+		KTR_LOG(nvgpu_vm_bind_poll, future, 3u, bind->op_count, error);
+	}
 	nvgsp_vmm_end_update(bind->vm->backend);
 	lwkt_reltoken(&bind->vm->vm_token);
+	KTR_LOG(nvgpu_vm_bind_poll, future, 4u, bind->op_count, error);
 	if (error != 0 && failed_op != NULL)
 		nvgpu_vm_bind_record_error(bind->vm->gpu, failed_op->op,
 		    failed_op->flags, failed_op->handle, failed_op->addr,

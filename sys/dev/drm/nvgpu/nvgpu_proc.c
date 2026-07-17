@@ -20,12 +20,31 @@
 #include <machine/atomic.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/malloc.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 
 static MALLOC_DEFINE(M_NVGPU_PROC, "nvgpu_proc", "nvgpu process state");
 static MALLOC_DEFINE(M_NVGPU_EXEC, "nvgpu_exec", "nvgpu exec future");
+
+#ifndef KTR_NVGPU
+#define KTR_NVGPU KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(nvgpu);
+KTR_INFO(KTR_NVGPU, nvgpu, exec_spawn, 27,
+    "exec spawn proc=%p channel=%u push=%ju wait=%ju", void *proc,
+    uint32_t channel, uintmax_t push_count, uintmax_t wait_count);
+KTR_INFO(KTR_NVGPU, nvgpu, exec_poll, 28,
+    "exec poll future=%p phase=%u error=%d", void *future, u_int phase,
+    int error);
+KTR_INFO(KTR_NVGPU, nvgpu, exec_submit, 29,
+    "exec submit future=%p channel=%u push=%ju error=%d", void *future,
+    uint32_t channel, uintmax_t push_count, int error);
+KTR_INFO(KTR_NVGPU, nvgpu, exec_complete, 30,
+    "exec complete future=%p channel=%u error=%d", void *future,
+    uint32_t channel, int error);
 
 struct nvgpu_proc_exec_record {
 	TAILQ_ENTRY(nvgpu_proc_exec_record) link;
@@ -242,6 +261,9 @@ nvgpu_proc_spawn(struct nvgpu_proc *proc, struct nvgpu_proc_exec *args)
 	size_t wait_count;
 	int error;
 
+	KTR_LOG(nvgpu_exec_spawn, proc, args != NULL ? args->channel_id : 0u,
+	    args != NULL ? (uintmax_t)args->push_count : 0,
+	    args != NULL ? (uintmax_t)args->wait_count : 0);
 	if (proc == NULL || args == NULL || args->done == NULL ||
 	    (args->push_count != 0 && args->pushes == NULL) ||
 	    (args->wait_count != 0 && args->waits == NULL) ||
@@ -345,12 +367,15 @@ nvgpu_proc_poll_exec(struct nvgpu_future *future)
 
 	exec = (struct nvgpu_exec_future *)future;
 	error = 0;
+	KTR_LOG(nvgpu_exec_poll, future, exec->sema.address == NULL ? 0u : 1u, 0);
 	if (exec->sema.address == NULL) {
 		submit.pushes = exec->pushes;
 		submit.push_count = exec->push_count;
 		submit.submitted = exec->submitted;
 		submit.sema = &exec->sema;
 		error = nvgpu_channel_submit(exec->channel, &submit, future);
+		KTR_LOG(nvgpu_exec_submit, future, exec->channel != NULL ? exec->channel->id : 0u,
+		    (uintmax_t)exec->push_count, error);
 		if (error == 0)
 			return (NVGPU_FUTURE_PENDING);
 		if (error == EAGAIN) {
@@ -362,6 +387,7 @@ nvgpu_proc_poll_exec(struct nvgpu_future *future)
 	} else {
 		error = exec->sema.error;
 	}
+	KTR_LOG(nvgpu_exec_complete, future, exec->channel != NULL ? exec->channel->id : 0u, error);
 
 complete:
 	proc = exec->proc;
