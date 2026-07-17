@@ -15,7 +15,7 @@
 #include <sys/systm.h>
 #include <sys/thread.h>
 
-TAILQ_HEAD(nvgpu_sched_queue, nvgpu_future_state);
+TAILQ_HEAD(nvgpu_sched_queue, nvgpu_future);
 
 struct nvgpu_sched {
 	struct thread **threads;
@@ -93,7 +93,6 @@ nvgpu_sched_stop(void)
 	lwkt_reltoken(&sched->stop_token);
 	KASSERT(TAILQ_EMPTY(&sched->active),
 	    ("stopped scheduler with active futures"));
-	nvgpu_future_assert_empty();
 	spin_uninit(&sched->queue_spin);
 	lwkt_token_uninit(&sched->stop_token);
 	_kfree(sched->threads, M_NVGPU_SCHED);
@@ -103,7 +102,6 @@ nvgpu_sched_stop(void)
 int
 nvgpu_sched_put(struct nvgpu_future *future)
 {
-	struct nvgpu_future_state *state;
 	struct nvgpu_sched *sched;
 
 	if (future == NULL)
@@ -111,17 +109,12 @@ nvgpu_sched_put(struct nvgpu_future *future)
 	sched = g_sched;
 	if (sched == NULL)
 		return (ENODEV);
-	state = nvgpu_future_get_state(future);
-	if (state == NULL)
-		return (EINVAL);
 	spin_lock(&sched->queue_spin);
 	if (sched->stopping) {
 		spin_unlock(&sched->queue_spin);
 		return (ENODEV);
 	}
-	KASSERT(!state->queued, ("queueing an active nvgpu future twice"));
-	state->queued = true;
-	TAILQ_INSERT_TAIL(&sched->active, state, sched_link);
+	TAILQ_INSERT_TAIL(&sched->active, future, link);
 	spin_unlock(&sched->queue_spin);
 	wakeup_one(&sched->active);
 	return (0);
@@ -131,29 +124,25 @@ static void
 nvgpu_sched_run(void *argument)
 {
 	struct nvgpu_sched *sched;
-	struct nvgpu_future_state *state;
 	struct nvgpu_future *future;
 	bool stopping;
 
 	sched = argument;
 	for (;;) {
 		spin_lock(&sched->queue_spin);
-		state = TAILQ_FIRST(&sched->active);
-		if (state != NULL) {
-			TAILQ_REMOVE(&sched->active, state, sched_link);
-			state->queued = false;
-		}
+		future = TAILQ_FIRST(&sched->active);
+		if (future != NULL)
+			TAILQ_REMOVE(&sched->active, future, link);
 		stopping = sched->stopping;
-		if (state == NULL && !stopping)
+		if (future == NULL && !stopping)
 			tsleep_interlock(&sched->active, 0);
 		spin_unlock(&sched->queue_spin);
-		if (state == NULL) {
+		if (future == NULL) {
 			if (stopping)
 				break;
 			tsleep(&sched->active, PINTERLOCKED, "nvgpsd", 0);
 			continue;
 		}
-		future = state->future;
 		future->poll(future);
 	}
 

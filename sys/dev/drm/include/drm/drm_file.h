@@ -43,6 +43,7 @@
 #include <sys/event.h>
 /* for d_open_t, d_close_t, and d_read_t */
 #include <sys/device.h>
+#include <sys/spinlock.h>
 #endif
 
 struct dma_fence;
@@ -235,6 +236,7 @@ struct drm_file {
 	 * primary nodes and authentication <drm_primary_node>`.
 	 */
 	struct drm_master *master;
+	struct spinlock master_lookup_lock;
 
 	/** @pid: Process that opened this file. */
 	pid_t pid;

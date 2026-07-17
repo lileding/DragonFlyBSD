@@ -179,6 +179,7 @@ struct drm_file *drm_file_alloc(struct drm_minor *minor)
 	file->event_space = 4096; /* set aside 4k for event buffer */
 
 	lockinit(&file->event_read_lock, "dperl", 0, LK_CANRECURSE);
+	spin_init(&file->master_lookup_lock, "drmflm");
 
 	if (drm_core_check_feature(dev, DRIVER_GEM))
 		drm_gem_open(dev, file);
@@ -204,6 +205,7 @@ out_prime_destroy:
 		drm_syncobj_release(file);
 	if (drm_core_check_feature(dev, DRIVER_GEM))
 		drm_gem_release(dev, file);
+	spin_uninit(&file->master_lookup_lock);
 	put_pid(file->pid);
 	kfree(file);
 
@@ -301,6 +303,7 @@ void drm_file_free(struct drm_file *file)
 
 	WARN_ON(!list_empty(&file->event_list));
 
+	spin_uninit(&file->master_lookup_lock);
 	put_pid(file->pid);
 	kfree(file);
 }

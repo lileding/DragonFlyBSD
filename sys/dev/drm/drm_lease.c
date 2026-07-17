@@ -94,22 +94,28 @@ drm_lease_find_lessee_locked(struct drm_master *master, int lessee_id)
 	return idr_find(&owner->lessee_idr, lessee_id);
 }
 
+static bool
+_drm_lease_held_master(struct drm_master *master, int id)
+{
+	if (master == NULL || master->lessor == NULL)
+		return true;
+	return idr_find(&master->leases, id) != NULL;
+}
+
 bool
 _drm_lease_held(struct drm_file *file_priv, int id)
 {
 	struct drm_master *master;
+	bool held;
 
 	if (file_priv == NULL)
 		return true;
-
-	master = file_priv->master;
+	master = drm_file_get_master(file_priv);
 	if (master == NULL)
 		return true;
-
-	if (master->lessor == NULL)
-		return true;
-
-	return idr_find(&master->leases, id) != NULL;
+	held = _drm_lease_held_master(master, id);
+	drm_master_put(&master);
+	return held;
 }
 
 bool
@@ -122,14 +128,18 @@ drm_lease_held(struct drm_file *file_priv, int id)
 	if (file_priv == NULL)
 		return true;
 
-	master = file_priv->master;
-	if (master == NULL || master->lessor == NULL)
+	master = drm_file_get_master(file_priv);
+	if (master == NULL || master->lessor == NULL) {
+		if (master != NULL)
+			drm_master_put(&master);
 		return true;
+	}
 
 	dev = file_priv->minor->dev;
 	mutex_lock(&dev->mode_config.idr_mutex);
-	held = _drm_lease_held(file_priv, id);
+	held = _drm_lease_held_master(master, id);
 	mutex_unlock(&dev->mode_config.idr_mutex);
+	drm_master_put(&master);
 
 	return held;
 }
@@ -142,20 +152,28 @@ drm_lease_filter_crtcs(struct drm_file *file_priv, uint32_t crtcs)
 	uint32_t visible = 0;
 	uint32_t out_bit = 1;
 
-	if (file_priv == NULL || file_priv->master == NULL ||
-	    file_priv->master->lessor == NULL)
+	struct drm_master *master;
+
+	if (file_priv == NULL)
 		return crtcs;
+	master = drm_file_get_master(file_priv);
+	if (master == NULL || master->lessor == NULL) {
+		if (master != NULL)
+			drm_master_put(&master);
+		return crtcs;
+	}
 
 	dev = file_priv->minor->dev;
 	mutex_lock(&dev->mode_config.idr_mutex);
 	drm_for_each_crtc(crtc, dev) {
-		if (_drm_lease_held(file_priv, crtc->base.id)) {
+		if (_drm_lease_held_master(master, crtc->base.id)) {
 			if (crtcs & drm_crtc_mask(crtc))
 				visible |= out_bit;
 			out_bit <<= 1;
 		}
 	}
 	mutex_unlock(&dev->mode_config.idr_mutex);
+	drm_master_put(&master);
 
 	return visible;
 }
