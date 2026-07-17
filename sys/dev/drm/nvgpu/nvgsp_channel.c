@@ -19,10 +19,23 @@ struct nvgsp_channel_object {
 	struct nvgsp_object object;
 };
 
+static uint32_t
+nvgsp_channel_count_bits64(uint64_t value)
+{
+	uint32_t count = 0;
+
+	while (value != 0) {
+		value &= value - 1;
+		count++;
+	}
+	return (count);
+}
+
 #define TURING_CHANNEL_GPFIFO_A		0x0000c46fu
 #define TURING_A			0x0000c597u
 #define TURING_DMA_COPY_A		0x0000c5b5u
 #define TURING_COMPUTE_A		0x0000c5c0u
+#define NVGSP_CHANNEL_CHID_COUNT	2048u
 #define FERMI_TWOD_A			0x0000902du
 #define KEPLER_INLINE_TO_MEMORY_B	0x0000a140u
 #define NVGSP_RM_CHANNEL		0xf1f00000u
@@ -431,7 +444,7 @@ nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid, int error)
 	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
 	struct nvgsp_channel *chan;
 
-	if (gsp == NULL || chid >= 2048)
+	if (gsp == NULL || chid >= NVGSP_CHANNEL_CHID_COUNT)
 		return;
 	lwkt_gettoken(&gsp->gsp_tok);
 	lwkt_gettoken(&gsp->chid_tok);
@@ -442,6 +455,25 @@ nvgsp_channel_mark_fault(struct nvgpu_device *gpu, uint32_t chid, int error)
 	}
 	lwkt_reltoken(&gsp->chid_tok);
 	lwkt_reltoken(&gsp->gsp_tok);
+}
+
+int
+nvgsp_channel_query_capacity(struct nvgpu_device *gpu, uint32_t *total,
+    uint32_t *reserved)
+{
+	struct nvgsp_state *gsp = nvgsp_state_get(gpu);
+	uint32_t used = 0;
+	uint32_t i;
+
+	if (gsp == NULL || total == NULL || reserved == NULL)
+		return (EINVAL);
+	lwkt_gettoken(&gsp->chid_tok);
+	for (i = 0; i < nitems(gsp->chid_used); i++)
+		used += nvgsp_channel_count_bits64(gsp->chid_used[i]);
+	lwkt_reltoken(&gsp->chid_tok);
+	*total = NVGSP_CHANNEL_CHID_COUNT;
+	*reserved = used;
+	return (0);
 }
 
 int
@@ -471,7 +503,7 @@ nvgsp_channel_alloc_chid(struct nvgsp_state *gsp)
 void
 nvgsp_channel_free_chid(struct nvgsp_state *gsp, int chid)
 {
-	if (gsp == NULL || chid < 0 || chid >= 2048)
+	if (gsp == NULL || chid < 0 || chid >= NVGSP_CHANNEL_CHID_COUNT)
 		return;
 	lwkt_gettoken(&gsp->chid_tok);
 	gsp->chid_used[chid >> 6] &= ~(1ULL << (chid & 63));

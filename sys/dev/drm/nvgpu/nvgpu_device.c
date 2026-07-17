@@ -32,6 +32,7 @@
 #include <sys/module.h>
 #include <sys/rman.h>
 #include <sys/thread.h>
+#include <machine/atomic.h>
 
 #define NVGPU_PMC_BOOT_0	0x00000000u
 
@@ -52,6 +53,7 @@ enum nvgpu_boot_phase {
 	NVGPU_BOOT_VMM,
 	NVGPU_BOOT_BOOTSTRAP_CHANNEL,
 	NVGPU_BOOT_GOLDEN_CHANNEL,
+	NVGPU_BOOT_CHANNEL_CAPS,
 	NVGPU_BOOT_DISPLAY,
 	NVGPU_BOOT_INTR,
 	NVGPU_BOOT_DRM,
@@ -86,6 +88,8 @@ struct nvgpu_device {
 	struct nvgpu_display *display;
 	struct nvdrm_kms *kms;
 	struct nvgpu_unload_state *unload;
+	uint32_t channel_limit;
+	volatile u_int channel_used;
 };
 
 /*
@@ -110,6 +114,7 @@ static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
 static void nvgpu_device_run_boot(void *arg);
 static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
 static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
+static int nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu);
 static void nvgpu_device_teardown(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
 
@@ -386,6 +391,47 @@ nvgpu_device_set_kms(struct nvgpu_device *gpu, struct nvdrm_kms *kms)
 		gpu->kms = kms;
 }
 
+int
+nvgpu_device_reserve_channel(struct nvgpu_device *gpu)
+{
+	u_int old;
+	u_int next;
+
+	if (gpu == NULL || gpu->channel_limit == 0)
+		return (ENOSPC);
+	for (;;) {
+		old = gpu->channel_used;
+		if (old >= gpu->channel_limit)
+			return (ENOSPC);
+		next = old + 1;
+		if (atomic_cmpset_int(&gpu->channel_used, old, next))
+			return (0);
+	}
+}
+
+void
+nvgpu_device_release_channel(struct nvgpu_device *gpu)
+{
+	u_int old;
+
+	if (gpu == NULL)
+		return;
+	old = atomic_fetchadd_int(&gpu->channel_used, -1);
+	KASSERT(old != 0, ("nvgpu channel quota underflow"));
+}
+
+uint32_t
+nvgpu_device_get_channel_limit(struct nvgpu_device *gpu)
+{
+	return (gpu != NULL ? gpu->channel_limit : 0);
+}
+
+uint32_t
+nvgpu_device_get_channel_used(struct nvgpu_device *gpu)
+{
+	return (gpu != NULL ? gpu->channel_used : 0);
+}
+
 struct nvgsp_state *
 nvgpu_device_get_gsp(struct nvgpu_device *gpu)
 {
@@ -515,6 +561,10 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 	if (error != 0)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_GOLDEN_CHANNEL;
+	error = nvgpu_device_query_channel_capacity(gpu);
+	if (error != 0)
+		return (error);
+	gpu->boot_phase = NVGPU_BOOT_CHANNEL_CAPS;
 	error = nvgsp_disp_init(gpu);
 	if (error != 0)
 		return (error);
@@ -528,6 +578,26 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 		return (error);
 	gpu->boot_phase = NVGPU_BOOT_DRM;
 	nvgpu_log(NVGPU_LOG_DEBUG, "boot completed\n");
+	return (0);
+}
+
+static int
+nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu)
+{
+	uint32_t total;
+	uint32_t reserved;
+	int error;
+
+	error = nvgsp_channel_query_capacity(gpu, &total, &reserved);
+	if (error != 0)
+		return (error);
+	if (total <= reserved)
+		return (ENOSPC);
+	gpu->channel_limit = total - reserved;
+	gpu->channel_used = 0;
+	nvgpu_log(NVGPU_LOG_INFO,
+	    "channel capacity total=%u reserved=%u user_limit=%u\n",
+	    total, reserved, gpu->channel_limit);
 	return (0);
 }
 
