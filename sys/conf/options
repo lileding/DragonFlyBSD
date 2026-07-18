@@ -673,3 +673,4 @@ HIFN_NO_RNG		opt_dontuse.h
 SAFE_DEBUG		opt_dontuse.h
 SAFE_RNDTEST		opt_dontuse.h
 SAFE_NO_RNG		opt_dontuse.h
+TARFS		opt_dontuse.h

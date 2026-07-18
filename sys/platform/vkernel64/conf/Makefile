@@ -23,6 +23,11 @@ S=	../..
 SYSTEM_LD= @${CC} ${DEBUG} -Wl,--export-dynamic -o ${.TARGET} ${SYSTEM_OBJS} vers.o -pthread
 SYSTEM_LD+= -Wl,--hash-style=sysv
 SYSTEM_LD+= -Wl,-z,max-page-size=0x200000
+# Userland vkernel link does not use freestanding ldscript PROVIDEs for build-id.
+# Emit a note and provide absolute symbols so kern.build_id links (empty range OK).
+SYSTEM_LD+= -Wl,--build-id=sha1
+SYSTEM_LD+= -Wl,--defsym=__build_id_start=0
+SYSTEM_LD+= -Wl,--defsym=__build_id_end=0
 
 %BEFORE_DEPEND
 

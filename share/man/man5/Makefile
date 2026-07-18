@@ -56,6 +56,7 @@ MAN=	acct.5 \
 	shells.5 \
 	smbfs.5 \
 	sysctl.conf.5 \
+	tarfs.5 \
 	tmpfs.5 \
 	utmpx.5 \
 	uuids.5 \

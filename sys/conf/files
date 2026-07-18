@@ -3125,3 +3125,7 @@ OBSOLETE				optional aesni		\
 	no-obj							\
 	warning "device aesni was removed"
 
+vfs/tarfs/tarfs_io.c		optional tarfs
+vfs/tarfs/tarfs_subr.c		optional tarfs
+vfs/tarfs/tarfs_vfsops.c		optional tarfs
+vfs/tarfs/tarfs_vnops.c		optional tarfs

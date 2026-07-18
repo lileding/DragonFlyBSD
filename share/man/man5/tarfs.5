@@ -1,0 +1,197 @@
+.\"
+.\" Copyright (c) 2026 The DragonFly Project.
+.\" All rights reserved.
+.\"
+.\" This software was developed as a port of FreeBSD tarfs to DragonFly.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd July 18, 2026
+.Dt TARFS 5
+.Os
+.Sh NAME
+.Nm tarfs
+.Nd read-only tar archive file system
+.Sh SYNOPSIS
+To load the driver as a module at boot time, place the following line in
+.Xr loader.conf 5 :
+.Bd -literal -offset indent
+tarfs_load="YES"
+.Ed
+.Pp
+Alternatively, load it on demand:
+.Bd -literal -offset indent
+kldload tarfs
+.Ed
+.Pp
+To mount a tar archive:
+.Bd -literal -offset indent
+mount -t tarfs /path/to/archive.tar /mnt
+.Ed
+.Pp
+or with the helper:
+.Bd -literal -offset indent
+mount_tarfs /path/to/archive.tar /mnt
+.Ed
+.Sh DESCRIPTION
+The
+.Nm
+file system presents a POSIX ustar archive
+.Pq with optional PAX extensions
+as a read-only directory tree.
+The archive is scanned at mount time to build an in-memory directory
+index; file contents are read from the backing archive on demand.
+.Pp
+Supported member types include regular files, directories, symbolic
+links, hard links to regular files, character and block devices, and
+FIFOs.
+Device and FIFO nodes are visible in the name space and via
+.Xr stat 2
+type bits; opening them returns
+.Er EOPNOTSUPP
+.Pq design freeze: metadata display only .
+.Pp
+GNU sparse format 1.0
+.Pq PAX keys GNU.sparse.*
+is supported: the logical file size is
+.Va GNU.sparse.realsize ,
+holes read as zero, and mapped extents supply data.
+.Pp
+A subset of
+.Va SCHILY.fflags
+.Pq for example Cm nodump , Cm uchg
+is mapped into
+.Vt va_flags .
+.Sh OPTIONS
+.Nm
+accepts standard mount options that apply to read-only file systems
+.Pq see
+.Xr mount 8 .
+The file system is always mounted read-only.
+.Sh COMPRESSION
+POSIX ustar/PAX archives may be compressed with
+.Xr zstd 1 .
+gzip and xz remain unsupported
+.Pq same as FreeBSD tarfs for gzip/xz; FreeBSD also supports zstd .
+.Pp
+Example:
+.Bd -literal -offset indent
+mount_tarfs archive.tar.zst /mnt
+.Ed
+.Pp
+For best random-read performance on large zstd archives, build multi-frame
+streams
+.Pq e.g. bsdtar zstd:frame-per-file / zstd:max-frame-size .
+.Sh IMPLEMENTATION NOTES
+.Bl -bullet
+.It
+Lookup uses DragonFly namecache
+.Fn vop_nresolve
+/
+.Fn vop_nlookupdotdot ,
+not FreeBSD cached lookup.
+.It
+There is no vfs_hash index; vnodes are allocated from the per-mount node table.
+.It
+Hard-link members resolve to the target regular-file node
+.Pq FreeBSD-style follow .
+.It
+On
+.Dx ,
+.Vt st_rdev
+for character/block nodes comes from an attached cdev.
+Archive device nodes never open a real device, so
+.Xr stat 1
+.Cm %Hr / %Lr
+report NOUDEV;
+.Vt va_rmajor
+/
+.Vt va_rminor
+are still filled from the archive for VFS consumers.
+.El
+.Sh EXAMPLES
+Load the module and mount a tree fixture:
+.Bd -literal -offset indent
+kldload tarfs
+mkdir -p /mnt/tar
+mount_tarfs /data/fixtures/tree.tar /mnt/tar
+find /mnt/tar -ls
+umount /mnt/tar
+.Ed
+.Pp
+Pre-extract zstd then mount:
+.Bd -literal -offset indent
+zstd -d /data/fixtures/hello.tar.zst -o /tmp/hello.tar
+mount_tarfs /tmp/hello.tar /mnt/tar
+cat /mnt/tar/hello.txt
+umount /mnt/tar
+.Ed
+.Sh SEE ALSO
+.Xr tar 1 ,
+.Xr mount 2 ,
+.Xr stat 2 ,
+.Xr loader.conf 5 ,
+.Xr mount 8 ,
+.Xr mount_tarfs 8
+
+.Sh COMPATIBILITY
+This port aims for FreeBSD
+.Nm
+semantic parity where practical on DragonFly:
+read-only ustar/PAX, GNU sparse 1.0, SCHILY.fflags, device/FIFO metadata,
+and zstd compression.  Additional FreeBSD-aligned interfaces include
+.Xr mount 8
+options
+.Cm uid , Cm gid , Cm mode , Cm as ,
+NFS file-handle conversion
+.Pq vfs_vget / fhtovp / vptofh ,
+buffer strategy
+.Pq vop_bmap / vop_strategy ,
+and
+.Xr sysctl 8
+node
+.Va vfs.tarfs.zio .
+gzip and xz remain unsupported.
+.Sh HISTORY
+.Nm
+originated in
+.Fx
+as a read-only archive file system.
+This page documents the
+.Dx
+port under
+.Pa sys/vfs/tarfs .
+.Sh AUTHORS
+.An -nosplit
+The FreeBSD
+.Nm
+implementation was developed by Juniper Networks, Inc. and Klara, Inc.
+The DragonFly port and this manual page were written for the
+.Dx
+project.
+.Sh BUGS
+Large archives allocate metadata for every member at mount time; memory
+and mount latency scale with member count.
+.Pp
+Memory-mapped I/O
+.Pq VMIO
+and kernel zstd are not implemented.

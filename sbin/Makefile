@@ -61,6 +61,7 @@ SUBDIR=	adjkerntz \
 	mount_null \
 	mount_std \
 	mount_tmpfs \
+	mount_tarfs \
 	mount_udf \
 	mount_ufs \
 	mountctl \

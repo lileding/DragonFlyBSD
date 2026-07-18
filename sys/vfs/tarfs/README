@@ -1,0 +1,64 @@
+# tarfs (DragonFly port of FreeBSD tarfs)
+
+Read-only filesystem that mounts a POSIX ustar (optional PAX) archive.
+
+## Build
+
+```
+cd sys/vfs/tarfs && make
+cd sbin/mount_tarfs && make
+```
+
+Manual pages: `share/man/man5/tarfs.5`, `sbin/mount_tarfs/mount_tarfs.8`.
+
+## Load at boot
+
+In `/boot/loader.conf`:
+
+```
+tarfs_load="YES"
+```
+
+## Stage A coverage (vkernel, 2026-07-18)
+
+- S0/S1: kldload/mount/umount/read tree (hello, tree) — 0fb13f5c7d
+- A1/A2: fixtures without "./"; hardlink same inode + content — 672c808066
+- A3/A4/A5: readlink/follow; PAX long path/linkpath; EROFS — 29d2d20dc9
+- A6/A7: reject garbage/gzip/zstd/xz/bad checksum/truncated; reload — 036705f5d1
+
+## Stage B coverage (vkernel, 2026-07-18)
+
+- B1: GNU sparse 1.0 block map — logical size, data regions, holes (incl. edge)
+- B2: device/FIFO metadata types; open returns EOPNOTSUPP
+- B3: SCHILY.fflags (nodump, uchg/immutable) via getattr va_flags
+- Fixes: DragonFly krealloc(M_ZERO) panic; sparse read copylen overflow;
+  makeudev/umajor for device major/minor in va_* (st_rdev needs cdev)
+
+Gate-B: PASS=19 FAIL=0 (t_gate_b.sh)
+
+## Stage C coverage (vkernel, 2026-07-18)
+
+- S6 man pages: tarfs(5), mount_tarfs(8); loader.conf `tarfs_load`
+- mount_tarfs: reject non-regular archive path
+- T-HZ: userland `zstd -d` then mount plain tar (kernel zstd still unsupported)
+- REG: unload/reload + sparse/fflags smoke
+
+Gate-C: see t_gate_c.sh / docs/09-gate-c-results.md
+
+Guest harness / fixtures: project work/scripts outside this source tree.
+
+## Kernel zstd (aligned with FreeBSD tarfs)
+
+- `.tar.zst` mounts natively (contrib/zstd decompress linked into tarfs.ko)
+- gzip/xz still rejected (use zstd for installer images)
+- Frame index speeds random access; multi-frame archives recommended for large trees
+
+## FreeBSD parity extensions
+
+- vop_bmap / vop_strategy + bread-based vop_read so stdgetpages/mmap/exec work
+- vinitvmio in tarfs_alloc_vp (NFS fhtovp/read without open)
+- vfs_vget, vfs_fhtovp, vfs_vptofh, vfs_checkexp (NFS export support)
+- mount options via tarfs_args: uid, gid, mode, as= (mntfromname)
+- numeric header fields: signed octal (space-padded OK) + GNU base-256
+- header checksum: unsigned sum and signed-byte sum (FreeBSD parity)
+- sysctl vfs.tarfs.zio.{inflated,consumed,bounced}

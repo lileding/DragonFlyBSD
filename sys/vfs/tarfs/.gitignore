@@ -1,0 +1,9 @@
+*.o
+*.ko
+*.kld
+cpu
+cpu_base
+machine
+machine_base
+dragonfly
+forwarder_x86_64/
