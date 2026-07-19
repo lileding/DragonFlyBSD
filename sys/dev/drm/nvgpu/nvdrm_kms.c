@@ -2415,38 +2415,6 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	    "kms commit tail start state=%p connectors=%d\n",
 	    state, state->num_connector);
 	KTR_LOG(nvgpu_kms_commit_stage, state, 0u);
-	for (index = 0; index < state->num_connector; index++) {
-		if (state->connectors[index].ptr == NULL ||
-		    (state->connectors[index].old_state != NULL &&
-		    state->connectors[index].new_state != NULL))
-			continue;
-		nvgpu_log(NVGPU_LOG_INFO,
-		    "atomic connector state damaged index=%d ptr=%p state=%p "
-		    "old=%p new=%p current=%p\n",
-		    index, state->connectors[index].ptr,
-		    state->connectors[index].state,
-		    state->connectors[index].old_state,
-		    state->connectors[index].new_state,
-		    state->connectors[index].ptr->state);
-		KTR_LOG(nvgpu_kms_damaged_connector, index,
-		    state->connectors[index].ptr, state->connectors[index].state,
-		    state->connectors[index].old_state,
-		    state->connectors[index].new_state,
-		    state->connectors[index].ptr->state);
-		if (state->connectors[index].state == NULL ||
-		    state->connectors[index].ptr->state == NULL) {
-			drm_atomic_helper_fake_vblank(state);
-			drm_atomic_helper_commit_hw_done(state);
-			drm_atomic_helper_cleanup_planes(state->dev, state);
-			return;
-		}
-		/* Recover the swapped state from the objects that own each side. */
-		state->connectors[index].old_state =
-		    state->connectors[index].state;
-		state->connectors[index].new_state =
-		    state->connectors[index].ptr->state;
-	}
-
 	drm_atomic_helper_update_legacy_modeset_state(state->dev, state);
 	drm_atomic_helper_commit_modeset_disables(state->dev, state);
 	KTR_LOG(nvgpu_kms_commit_stage, state, 1u);
@@ -2674,6 +2642,36 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 	}
 	if (!custom_commit)
 		return (drm_atomic_helper_commit(ddev, state, nonblock));
+	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		struct drm_connector *connector = NULL;
+		struct drm_connector_state *connector_state;
+		struct drm_connector *candidate;
+		int connector_index;
+
+		if (!crtc_state->active)
+			continue;
+		for_each_new_connector_in_state(state, connector,
+		    connector_state, connector_index) {
+			if (connector_state->crtc == crtc)
+				break;
+			connector = NULL;
+		}
+		if (connector == NULL) {
+			list_for_each_entry(candidate,
+			    &ddev->mode_config.connector_list, head) {
+				if (candidate->state != NULL &&
+				    candidate->state->crtc == crtc) {
+					connector = candidate;
+					break;
+				}
+			}
+		}
+		if (connector == NULL)
+			continue;
+		connector_state = drm_atomic_get_connector_state(state, connector);
+		if (IS_ERR(connector_state))
+			return (PTR_ERR(connector_state));
+	}
 	error = drm_atomic_helper_setup_commit(state, nonblock);
 	if (error != 0)
 		return (error);
