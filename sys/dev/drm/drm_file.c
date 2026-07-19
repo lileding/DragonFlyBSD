@@ -42,11 +42,30 @@
 #include <drm/drm_file.h>
 #include <drm/drmP.h>
 
+#include <sys/ktr.h>
+
 #include "drm_legacy.h"
 #include "drm_internal.h"
 #include "drm_crtc_internal.h"
 
 static void drm_events_release(struct drm_file *file_priv);
+
+#ifndef KTR_DRM
+#define KTR_DRM KTR_ALL
+#endif
+
+KTR_INFO_MASTER(drm);
+KTR_INFO(KTR_DRM, drm, file_close, 0,
+    "file close stage=%u file=%p dev=%p open=%d fbs_empty=%u event_bytes=%d",
+    u_int stage, void *file, void *dev, int open_count, u_int fbs_empty,
+    int event_bytes);
+KTR_INFO(KTR_DRM, drm, event_send, 1,
+    "event send stage=%u file=%p event=%p len=%u event_bytes=%d pending_bytes=%ju",
+    u_int stage, void *file, void *event, u_int length, int event_bytes,
+    uintmax_t pending_bytes);
+KTR_INFO(KTR_DRM, drm, kqfilter, 2,
+    "kqfilter stage=%u file=%p kn=%p filter=%d event_bytes=%d event_space=%d",
+    u_int stage, void *file, void *kn, int filter, int event_bytes, int event_space);
 
 /* from BKL pushdown */
 DEFINE_MUTEX(drm_global_mutex);
@@ -444,6 +463,8 @@ drm_close(struct dev_close_args *ap)
 	struct drm_minor *minor = file_priv->minor;
 	struct drm_device *dev = minor->dev;
 
+	KTR_LOG(drm_file_close, 0u, file_priv, dev, dev->open_count,
+	    list_empty(&file_priv->fbs) ? 1u : 0u, file_priv->event_bytes);
 	mutex_lock(&drm_global_mutex);
 
 	DRM_DEBUG("open_count = %d\n", dev->open_count);
@@ -475,6 +496,8 @@ drm_close(struct dev_close_args *ap)
 
 	if (drm_core_check_feature(dev, DRIVER_MODESET)) {
 		drm_fb_release(file_priv);
+		KTR_LOG(drm_file_close, 1u, file_priv, dev, dev->open_count,
+		    list_empty(&file_priv->fbs) ? 1u : 0u, file_priv->event_bytes);
 		drm_property_destroy_user_blobs(dev, file_priv);
 	}
 
@@ -491,11 +514,15 @@ drm_close(struct dev_close_args *ap)
 
 	if (dev->driver->postclose)
 		dev->driver->postclose(dev, file_priv);
+	KTR_LOG(drm_file_close, 2u, file_priv, dev, dev->open_count,
+	    list_empty(&file_priv->fbs) ? 1u : 0u, file_priv->event_bytes);
 
 	if (drm_core_check_feature(dev, DRIVER_PRIME))
 		drm_prime_destroy_file_private(&file_priv->prime);
 
 	WARN_ON(!list_empty(&file_priv->event_list));
+	KTR_LOG(drm_file_close, 3u, file_priv, dev, dev->open_count,
+	    list_empty(&file_priv->fbs) ? 1u : 0u, file_priv->event_bytes);
 
 	put_pid(file_priv->pid);
 	kfree(file_priv);
@@ -514,6 +541,7 @@ drm_close(struct dev_close_args *ap)
 	device_unbusy(dev->dev->bsddev);
 #endif
 	if (!--dev->open_count) {
+		KTR_LOG(drm_file_close, 4u, file_priv, dev, dev->open_count, 1u, 0);
 		drm_lastclose(dev);
 #if 0	/* XXX: drm_put_dev() not implemented */
 		if (drm_dev_is_unplugged(dev))
@@ -885,6 +913,8 @@ drmfilt_detach(struct knote *kn)
 	struct drm_file *file_priv;
  
 	file_priv = (struct drm_file *)kn->kn_hook;
+	KTR_LOG(drm_kqfilter, 1u, file_priv, kn, kn->kn_filter,
+	    file_priv->event_bytes, file_priv->event_space);
 
 	knote_remove(&file_priv->dkq.ki_note, kn);
 }
@@ -919,6 +949,8 @@ drm_kqfilter(struct dev_kqfilter_args *ap)
 		return (0);
 	}
 
+	KTR_LOG(drm_kqfilter, 0u, file_priv, kn, kn->kn_filter,
+	    file_priv->event_bytes, file_priv->event_space);
 	klist = &file_priv->dkq.ki_note;
 	knote_insert(klist, kn);
 
@@ -1050,6 +1082,8 @@ EXPORT_SYMBOL(drm_event_cancel_free);
  */
 void drm_send_event_locked(struct drm_device *dev, struct drm_pending_event *e)
 {
+	unsigned int event_length = e->event != NULL ? e->event->length : 0;
+
 	assert_spin_locked(&dev->event_lock);
 
 	if (e->completion) {
@@ -1064,10 +1098,14 @@ void drm_send_event_locked(struct drm_device *dev, struct drm_pending_event *e)
 	}
 
 	if (!e->file_priv) {
+		KTR_LOG(drm_event_send, 0u, NULL, e, event_length, 0,
+		    (uintmax_t)drm_event_pending_bytes);
 		kfree(e);
 		return;
 	}
 
+	KTR_LOG(drm_event_send, 1u, e->file_priv, e, event_length,
+	    e->file_priv->event_bytes, (uintmax_t)drm_event_pending_bytes);
 	list_del(&e->pending_link);
 	list_add_tail(&e->link,
 		      &e->file_priv->event_list);
@@ -1076,6 +1114,8 @@ void drm_send_event_locked(struct drm_device *dev, struct drm_pending_event *e)
 	drm_event_send_count++;
 	drm_event_send_bytes += e->event->length;
 	drm_event_pending_bytes += e->event->length;
+	KTR_LOG(drm_event_send, 2u, e->file_priv, e, event_length,
+	    e->file_priv->event_bytes, (uintmax_t)drm_event_pending_bytes);
 #endif
 	wake_up_interruptible(&e->file_priv->event_wait);
 #ifdef __DragonFly__

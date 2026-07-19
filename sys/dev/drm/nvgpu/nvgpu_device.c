@@ -93,7 +93,6 @@ struct nvgpu_device {
 	struct nvgpu_display *display;
 	struct nvdrm_kms *kms;
 	struct nvgpu_unload_state *unload;
-	linker_file_t gsp_fw_file;
 	uint32_t channel_limit;
 	volatile u_int channel_used;
 };
@@ -120,8 +119,8 @@ static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
 static void nvgpu_device_run_boot(void *arg);
 static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
 static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
+static int nvgpu_device_pin_drm_module(void);
 static int nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu);
-static void nvgpu_device_release_gsp_firmware(struct nvgpu_device *gpu);
 static int nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu);
 static void nvgpu_device_teardown(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
@@ -137,6 +136,11 @@ nvgpu_device_handle_modevent(module_t mod __unused, int type, void *data __unuse
 		error = nvgpu_debug_init();
 		if (error != 0)
 			return (error);
+		error = nvgpu_device_pin_drm_module();
+		if (error != 0) {
+			nvgpu_debug_fini();
+			return (error);
+		}
 		error = nvgpu_sched_start();
 		if (error != 0) {
 			nvgpu_debug_fini();
@@ -189,6 +193,28 @@ static struct nvgpu_device *nvgpu_default_gpu;
 DRIVER_MODULE(nvgpu, vgapci, nvgpu_device_pci_driver,
     nvgpu_device_devclass, NULL, NULL);
 MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
+
+/*
+ * Keep drm.ko resident after nvgpu unload.  DragonFly recursively unloads KLD
+ * dependencies after the owning module's MOD_UNLOAD handler returns.  The old
+ * DRM/TTM module-unload path is not part of the nvgpu release boundary, so the
+ * NVIDIA driver pins drm once and lets kldunload nvgpu tear down only nvgpu.
+ */
+static int
+nvgpu_device_pin_drm_module(void)
+{
+	linker_file_t file;
+	int error;
+
+	error = linker_reference_module("drm", NULL, &file);
+	if (error != 0)
+		return (error);
+
+	if (file->refs > 2)
+		(void)linker_release_module(NULL, NULL, file);
+
+	return (0);
+}
 
 /* Look up static chip metadata for a PCI device. */
 static const struct nvgpu_pci_device *
@@ -622,22 +648,17 @@ nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu)
 		nvgpu_log(NVGPU_LOG_INFO, "failed to load %s: %d\n", modname, error);
 		return (error);
 	}
-	gpu->gsp_fw_file = file;
+	/*
+	 * Ensure the aggregate firmware module is resident, but do not keep a
+	 * per-load nvgpu reference.  Individual firmware_get() calls hold and
+	 * release their own image references during boot.
+	 */
+	if (file->refs > 1)
+		(void)linker_release_module(NULL, NULL, file);
 	nvgpu_log(NVGPU_LOG_INFO, "loaded firmware module %s\n", modname);
 	return (0);
 }
 
-static void
-nvgpu_device_release_gsp_firmware(struct nvgpu_device *gpu)
-{
-	linker_file_t file;
-
-	file = gpu->gsp_fw_file;
-	if (file == NULL)
-		return;
-	gpu->gsp_fw_file = NULL;
-	linker_release_module(NULL, NULL, file);
-}
 
 static int
 nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu)
@@ -694,8 +715,6 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
-	if (phase >= NVGPU_BOOT_FIRMWARE)
-		nvgpu_device_release_gsp_firmware(gpu);
 	if (phase >= NVGPU_BOOT_UNLOAD)
 		nvgpu_unload_fini(gpu);
 	if (phase >= NVGPU_BOOT_BARS)

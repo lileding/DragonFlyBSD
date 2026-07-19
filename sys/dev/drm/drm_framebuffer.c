@@ -29,8 +29,20 @@
 #include <drm/drm_atomic_uapi.h>
 #include <drm/drm_print.h>
 
+#include <sys/ktr.h>
+
 #include "drm_internal.h"
 #include "drm_crtc_internal.h"
+
+#ifndef KTR_DRM
+#define KTR_DRM KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(drm);
+KTR_INFO(KTR_DRM, drm, fb_release, 3,
+    "fb release stage=%u file=%p fb=%p ref=%u moved=%u dropped=%u",
+    u_int stage, void *file, void *fb, u_int refcount, u_int moved,
+    u_int dropped);
 
 /**
  * DOC: overview
@@ -829,8 +841,11 @@ void drm_fb_release(struct drm_file *priv)
 {
 	struct drm_framebuffer *fb, *tfb;
 	struct drm_mode_rmfb_work arg;
+	u_int moved = 0;
+	u_int dropped = 0;
 
 	INIT_LIST_HEAD(&arg.fbs);
+	KTR_LOG(drm_fb_release, 0u, priv, NULL, 0u, moved, dropped);
 
 	/*
 	 * DragonFly close can race with another thread still issuing framebuffer
@@ -840,9 +855,14 @@ void drm_fb_release(struct drm_file *priv)
 	 */
 	mutex_lock(&priv->fbs_lock);
 	list_for_each_entry_safe(fb, tfb, &priv->fbs, filp_head) {
-		if (drm_framebuffer_read_refcount(fb) > 1) {
+		u_int refcount = drm_framebuffer_read_refcount(fb);
+
+		KTR_LOG(drm_fb_release, 1u, priv, fb, refcount, moved, dropped);
+		if (refcount > 1) {
+			moved++;
 			list_move_tail(&fb->filp_head, &arg.fbs);
 		} else {
+			dropped++;
 			list_del_init(&fb->filp_head);
 
 			/* This drops the fpriv->fbs reference. */
@@ -851,13 +871,16 @@ void drm_fb_release(struct drm_file *priv)
 	}
 	mutex_unlock(&priv->fbs_lock);
 
+	KTR_LOG(drm_fb_release, 2u, priv, NULL, 0u, moved, dropped);
 	if (!list_empty(&arg.fbs)) {
 		INIT_WORK_ONSTACK(&arg.work, drm_mode_rmfb_work_fn);
 
+		KTR_LOG(drm_fb_release, 3u, priv, NULL, 0u, moved, dropped);
 		schedule_work(&arg.work);
 		flush_work(&arg.work);
 		destroy_work_on_stack(&arg.work);
 	}
+	KTR_LOG(drm_fb_release, 4u, priv, NULL, 0u, moved, dropped);
 }
 
 void drm_framebuffer_free(struct kref *kref)

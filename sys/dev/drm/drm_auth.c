@@ -33,6 +33,18 @@
 #include "drm_legacy.h"
 #include <drm/drm_lease.h>
 
+#include <sys/ktr.h>
+
+#ifndef KTR_DRM
+#define KTR_DRM KTR_ALL
+#endif
+
+KTR_INFO_MASTER_EXTERN(drm);
+KTR_INFO(KTR_DRM, drm, dropmaster, 4,
+    "dropmaster stage=%u file=%p dev=%p file_master=%p dev_master=%p ret=%d",
+    u_int stage, void *file, void *dev, void *file_master, void *dev_master,
+    int ret);
+
 /**
  * DOC: master and authentication
  *
@@ -289,6 +301,7 @@ int drm_dropmaster_ioctl(struct drm_device *dev, void *data,
 	int ret = -EINVAL;
 
 	kprintf("drm_dropmaster_ioctl\n");
+	KTR_LOG(drm_dropmaster, 0u, file_priv, dev, file_priv->master, dev->master, ret);
 	mutex_lock(&dev->master_mutex);
 	if (!drm_is_current_master_locked(file_priv))
 		goto out_unlock;
@@ -305,6 +318,7 @@ int drm_dropmaster_ioctl(struct drm_device *dev, void *data,
 	ret = 0;
 	drm_drop_master(dev, file_priv);
 out_unlock:
+	KTR_LOG(drm_dropmaster, 1u, file_priv, dev, file_priv->master, dev->master, ret);
 	mutex_unlock(&dev->master_mutex);
 	return ret;
 }
