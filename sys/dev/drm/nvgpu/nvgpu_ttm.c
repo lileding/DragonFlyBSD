@@ -891,10 +891,11 @@ nvgpu_ttm_pager_release(void *handle)
 	int error;
 
 	atomic_store_rel_int(&bo->mmap_pager_active, 0);
-	error = ttm_bo_reserve(tbo, false, false, NULL);
-	KASSERT(error == 0, ("reserving mmap BO for final unmap failed"));
-	ttm_bo_unmap_virtual(tbo);
-	ttm_bo_unreserve(tbo);
+	error = ttm_bo_reserve(tbo, false, true, NULL);
+	if (error == 0) {
+		ttm_bo_unmap_virtual(tbo);
+		ttm_bo_unreserve(tbo);
+	}
 	nvgpu_bo_release(bo);
 	if (gpu != NULL)
 		nvgpu_unload_release_by_mmap(gpu);
