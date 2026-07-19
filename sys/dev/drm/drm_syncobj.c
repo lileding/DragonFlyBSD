@@ -1746,7 +1746,7 @@ drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data,
 			lockinit(&stub->lock, "dsofl", 0, 0);
 			dma_fence_init(&stub->base,
 			    &drm_syncobj_stub_fence_ops, &stub->lock, 0,
-			    (unsigned)points[i]);
+			    points[i]);
 			dma_fence_signal(&stub->base);
 			drm_syncobj_add_point(syncobjs[i], chain,
 			    &stub->base, points[i]);
