@@ -42,7 +42,7 @@ nvdrm_ioctl_vm_init(struct drm_device *ddev __unused, void *data,
 
 static int
 nvdrm_ioctl_nvif(struct drm_device *ddev __unused, void *data,
-    struct drm_file *file_priv)
+    struct drm_file *file_priv, size_t data_size)
 {
 	struct nvdrm_file *file;
 	struct nvgpu_proc *proc;
@@ -51,7 +51,7 @@ nvdrm_ioctl_nvif(struct drm_device *ddev __unused, void *data,
 	proc = nvdrm_file_get_proc(file);
 	if (proc == NULL)
 		return (ENXIO);
-	return (nvgpu_syscall_nvif(proc, file_priv, data));
+	return (nvgpu_syscall_nvif(proc, file_priv, data, data_size));
 }
 
 static int
@@ -171,8 +171,12 @@ const struct drm_ioctl_desc nvdrm_ioctl_descs[NVDRM_IOCTL_COUNT] = {
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_VM_INIT, nvdrm_ioctl_vm_init,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF_DRV(NOUVEAU_NVIF, nvdrm_ioctl_nvif,
-	    DRM_AUTH | DRM_RENDER_ALLOW),
+	[DRM_IOCTL_NR(DRM_IOCTL_NOUVEAU_NVIF) - DRM_COMMAND_BASE] = {
+		.cmd = DRM_IOCTL_NOUVEAU_NVIF,
+		.func_ext = nvdrm_ioctl_nvif,
+		.flags = DRM_AUTH | DRM_RENDER_ALLOW,
+		.name = "NOUVEAU_NVIF"
+	},
 	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_ALLOC, nvdrm_ioctl_channel_alloc,
 	    DRM_AUTH | DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_CHANNEL_FREE, nvdrm_ioctl_channel_free,
