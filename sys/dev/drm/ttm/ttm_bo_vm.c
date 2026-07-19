@@ -538,6 +538,7 @@ ttm_bo_vm_fault_bo_dfly(struct ttm_buffer_object *bo, vm_object_t vm_obj,
 	struct vm_area_struct cvma;
 	unsigned long page_offset;
 	unsigned long pfn;
+	bool io_locked;
 
 /*
    The Linux code expects to receive these arguments:
@@ -571,6 +572,7 @@ retry:
 	down_read(&vma->vm_mm->mmap_sem);
 
 	m = NULL;
+	io_locked = false;
 
 	/*
 	 * Work around locking order reversal in fault / nopfn
@@ -648,15 +650,18 @@ retry:
 		}
 	}
 
-	ret = ttm_mem_io_lock(man, false);
-	if (unlikely(ret != 0)) {
-		retval = VM_PAGER_ERROR;
-		goto out_unlock1;
-	}
-	ret = ttm_mem_io_reserve_vm(bo);
-	if (unlikely(ret != 0)) {
-		retval = VM_PAGER_ERROR;
-		goto out_io_unlock1;
+	if (!bo->mem.bus.io_reserved_vm) {
+		ret = ttm_mem_io_lock(man, false);
+		if (unlikely(ret != 0)) {
+			retval = VM_PAGER_ERROR;
+			goto out_unlock1;
+		}
+		io_locked = true;
+		ret = ttm_mem_io_reserve_vm(bo);
+		if (unlikely(ret != 0)) {
+			retval = VM_PAGER_ERROR;
+			goto out_io_unlock1;
+		}
 	}
 	if (unlikely(OFF_TO_IDX(offset) >= bo->num_pages)) {
 		retval = VM_PAGER_ERROR;
@@ -736,11 +741,11 @@ retry:
 	}
 
 	if (vm_page_busy_try(m, FALSE)) {
-		kprintf("r");
-		vm_page_sleep_busy(m, FALSE, "ttmvmf");
-		ttm_mem_io_unlock(man);
+		if (io_locked)
+			ttm_mem_io_unlock(man);
 		ttm_bo_unreserve(bo);
 		up_read(&vma->vm_mm->mmap_sem);
+		vm_page_sleep_busy(m, FALSE, "ttmvmf");
 		goto retry;
 	}
 
@@ -752,7 +757,8 @@ retry:
 	*mres = m;
 
 out_io_unlock1:
-	ttm_mem_io_unlock(man);
+	if (io_locked)
+		ttm_mem_io_unlock(man);
 out_unlock1:
 	ttm_bo_unreserve(bo);
 out_unlock2:
