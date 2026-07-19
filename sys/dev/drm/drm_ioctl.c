@@ -873,7 +873,11 @@ int drm_ioctl(struct dev_ioctl_args *ap)
 	/* Do not trust userspace, use our own definition */
 	func = ioctl->func;
 
+#ifdef __DragonFly__
+	if (unlikely(!func && ioctl->func_ext == NULL)) {
+#else
 	if (unlikely(!func)) {
+#endif
 		DRM_DEBUG("no function\n");
 		retcode = EINVAL;
 		goto err_i1;
@@ -885,11 +889,23 @@ int drm_ioctl(struct dev_ioctl_args *ap)
 
 	/* Enforce sane locking for modern driver ioctls. */
 	if (!drm_core_check_feature(dev, DRIVER_LEGACY) ||
-	    (ioctl->flags & DRM_UNLOCKED))
-		retcode = -func(dev, data, file_priv);
-	else {
+	    (ioctl->flags & DRM_UNLOCKED)) {
+#ifdef __DragonFly__
+		if (ioctl->func_ext != NULL)
+			retcode = -ioctl->func_ext(dev, data, file_priv,
+			    IOCPARM_LEN(cmd));
+		else
+#endif
+			retcode = -func(dev, data, file_priv);
+	} else {
 		mutex_lock(&drm_global_mutex);
-		retcode = -func(dev, data, file_priv);
+#ifdef __DragonFly__
+		if (ioctl->func_ext != NULL)
+			retcode = -ioctl->func_ext(dev, data, file_priv,
+			    IOCPARM_LEN(cmd));
+		else
+#endif
+			retcode = -func(dev, data, file_priv);
 		mutex_unlock(&drm_global_mutex);
 	}
 

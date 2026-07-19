@@ -7,6 +7,8 @@
 #ifndef _NVGPU_SYSCALL_H_
 #define _NVGPU_SYSCALL_H_
 
+#include <sys/types.h>
+
 struct drm_file;
 struct nvgpu_proc;
 
@@ -22,7 +24,7 @@ int nvgpu_syscall_getparam(struct nvgpu_proc *proc, struct drm_file *file,
 int nvgpu_syscall_vm_init(struct nvgpu_proc *proc, struct drm_file *file,
     void *data);
 int nvgpu_syscall_nvif(struct nvgpu_proc *proc, struct drm_file *file,
-    void *data);
+    void *data, size_t data_size);
 int nvgpu_syscall_channel_alloc(struct nvgpu_proc *proc,
     struct drm_file *file, void *data);
 int nvgpu_syscall_channel_free(struct nvgpu_proc *proc, struct drm_file *file,

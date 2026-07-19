@@ -43,14 +43,9 @@ nvgpu_syscall_vm_init(struct nvgpu_proc *proc, struct drm_file *file __unused,
 
 int
 nvgpu_syscall_nvif(struct nvgpu_proc *proc, struct drm_file *file __unused,
-    void *data)
+    void *data, size_t data_size)
 {
-	/*
-	 * DRM_NOUVEAU_NVIF carries a direct variable-size nvif_ioctl_v0 payload.
-	 * DragonFly's DRM ioctl shim passes the copied payload but not _IOC_SIZE,
-	 * so length validation belongs in the nvdrm ioctl boundary, not here.
-	 */
-	return (nvgpu_nvif_ioctl(proc, data, (size_t)-1));
+	return (nvgpu_nvif_ioctl(proc, data, data_size));
 }
 int
 nvgpu_syscall_channel_alloc(struct nvgpu_proc *proc,
