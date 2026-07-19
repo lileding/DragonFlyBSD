@@ -597,17 +597,23 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 static int
 nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu)
 {
-	const char *modname;
+	char modname[32];
 	linker_file_t file;
 	int error;
+	int len;
 
-	switch (nvgpu_gsp_version) {
-	case 570:
-		modname = "nvgsp570_fw";
-		break;
-	default:
-		nvgpu_log(NVGPU_LOG_INFO, "unsupported GSP firmware version %d\n",
-	    nvgpu_gsp_version);
+	if (nvgpu_gsp_version <= 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "invalid GSP firmware version %d\n",
+		    nvgpu_gsp_version);
+		return (EINVAL);
+	}
+
+	/* Firmware modules follow nvgsp<version>_fw, e.g. nvgsp570_fw. */
+	len = ksnprintf(modname, sizeof(modname), "nvgsp%d_fw", nvgpu_gsp_version);
+	if (len < 0 || len >= (int)sizeof(modname)) {
+		nvgpu_log(NVGPU_LOG_INFO,
+		    "invalid GSP firmware module name for version %d\n",
+		    nvgpu_gsp_version);
 		return (EINVAL);
 	}
 
