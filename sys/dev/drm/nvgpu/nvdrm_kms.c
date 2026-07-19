@@ -2588,6 +2588,9 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 {
 	struct nvdrm_atomic_state *nvstate = to_nvdrm_atomic_state(state);
 	struct nvgpu_device *gpu = ddev->dev_private;
+	struct drm_connector_state *connector_state;
+	struct drm_connector_state *old_connector_state;
+	struct drm_connector *connector;
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
 	uint32_t head;
@@ -2637,6 +2640,36 @@ nvdrm_kms_commit_atomic(struct drm_device *ddev,
 			KTR_LOG(nvgpu_kms_custom_commit, state, 2u, nonblock ? 1u : 0u);
 			custom_commit = true;
 			break;
+		}
+	}
+	for_each_new_connector_in_state(state, connector, connector_state, index) {
+		const struct nvdrm_connector_state *old_nvstate;
+		const struct nvdrm_connector_state *new_nvstate;
+
+		if (custom_commit)
+			break;
+		if (connector_state->crtc == NULL)
+			continue;
+		crtc_state = drm_atomic_get_new_crtc_state(state,
+		    connector_state->crtc);
+		if (crtc_state == NULL || !crtc_state->active)
+			continue;
+		old_connector_state = drm_atomic_get_old_connector_state(state,
+		    connector);
+		if (old_connector_state == NULL)
+			continue;
+		old_nvstate = to_nvdrm_connector_state_const(old_connector_state);
+		new_nvstate = to_nvdrm_connector_state_const(connector_state);
+		if (old_connector_state->scaling_mode != connector_state->scaling_mode ||
+		    old_nvstate->dither_mode != new_nvstate->dither_mode ||
+		    old_nvstate->dither_depth != new_nvstate->dither_depth ||
+		    old_nvstate->max_bpc != new_nvstate->max_bpc ||
+		    old_nvstate->underscan_mode != new_nvstate->underscan_mode ||
+		    old_nvstate->underscan_hborder != new_nvstate->underscan_hborder ||
+		    old_nvstate->underscan_vborder != new_nvstate->underscan_vborder) {
+			KTR_LOG(nvgpu_kms_custom_commit, state, 3u,
+			    nonblock ? 1u : 0u);
+			custom_commit = true;
 		}
 	}
 	if (!custom_commit)
