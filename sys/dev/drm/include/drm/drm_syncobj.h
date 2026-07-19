@@ -110,9 +110,9 @@ drm_syncobj_put(struct drm_syncobj *obj)
  * drm_syncobj_fence_get - get a reference to a fence in a sync object
  * @syncobj: sync object.
  *
- * This acquires additional reference to &drm_syncobj.fence contained in @obj,
- * if not NULL. It is illegal to call this without already holding a reference.
- * No locks required.
+ * This acquires an additional reference to &drm_syncobj.fence contained in
+ * @obj, if not NULL.  DragonFly protects the pointer with syncobj->lock
+ * because dma_fence_get_rcu_safe() is not a real try-get RCU primitive here.
  *
  * Returns:
  * Either the fence of @obj or NULL if there's none.
@@ -122,9 +122,10 @@ drm_syncobj_fence_get(struct drm_syncobj *syncobj)
 {
 	struct dma_fence *fence;
 
-	rcu_read_lock();
-	fence = dma_fence_get_rcu_safe(&syncobj->fence);
-	rcu_read_unlock();
+	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
+	fence = dma_fence_get(rcu_dereference_protected(syncobj->fence,
+	    lockdep_is_held(&syncobj->lock)));
+	lockmgr(&syncobj->lock, LK_RELEASE);
 
 	return fence;
 }

@@ -271,7 +271,7 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 			       struct dma_fence *fence)
 {
 	struct dma_fence *old_fence;
-	struct drm_syncobj_cb *cur;
+	struct drm_syncobj_cb *cur, *tmp;
 
 	if (fence)
 		dma_fence_get(fence);
@@ -283,8 +283,10 @@ void drm_syncobj_replace_fence(struct drm_syncobj *syncobj,
 	rcu_assign_pointer(syncobj->fence, fence);
 
 	if (fence != old_fence) {
-		list_for_each_entry(cur, &syncobj->cb_list, node)
+		list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node) {
+			list_del_init(&cur->node);
 			cur->func(syncobj, cur);
+		}
 	}
 
 	lockmgr(&syncobj->lock, LK_RELEASE);
@@ -312,7 +314,7 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 {
 	struct dma_fence *prev;
 	struct dma_fence *it;
-	struct drm_syncobj_cb *cur;
+	struct drm_syncobj_cb *cur, *tmp;
 
 	lockmgr(&syncobj->lock, LK_EXCLUSIVE);
 
@@ -323,8 +325,10 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 	dma_fence_chain_init(chain, prev, fence, point);
 	rcu_assign_pointer(syncobj->fence, &chain->base);
 
-	list_for_each_entry(cur, &syncobj->cb_list, node)
+	list_for_each_entry_safe(cur, tmp, &syncobj->cb_list, node) {
+		list_del_init(&cur->node);
 		cur->func(syncobj, cur);
+	}
 
 	lockmgr(&syncobj->lock, LK_RELEASE);
 
