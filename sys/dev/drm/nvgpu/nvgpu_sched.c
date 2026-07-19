@@ -37,12 +37,12 @@ static MALLOC_DEFINE(M_NVGPU_SCHED, "nvgpu_sched", "nvgpu scheduler");
 #endif
 
 KTR_INFO_MASTER_EXTERN(nvgpu);
-KTR_INFO(KTR_NVGPU, nvgpu, sched_put, 23,
+KTR_INFO(KTR_NVGPU, nvgpu, sched_put, 24,
     "sched put future=%p stopping=%u", void *future, u_int stopping);
 KTR_INFO(KTR_NVGPU, nvgpu, sched_poll, 24,
     "sched poll future=%p ready=%u result=%d", void *future, u_int ready,
     int result);
-KTR_INFO(KTR_NVGPU, nvgpu, sched_stop, 27,
+KTR_INFO(KTR_NVGPU, nvgpu, sched_stop, 24,
     "sched stop workers=%u queued=%u polling=%u", u_int workers,
     u_int queued, u_int polling);
 

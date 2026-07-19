@@ -28,10 +28,10 @@ static MALLOC_DEFINE(M_NVGPU_CHANNEL, "nvgpu_channel", "nvgpu user channel");
 #endif
 
 KTR_INFO_MASTER_EXTERN(nvgpu);
-KTR_INFO(KTR_NVGPU, nvgpu, channel_submit, 31,
+KTR_INFO(KTR_NVGPU, nvgpu, channel_submit, 25,
     "channel submit channel=%u future=%p push=%ju error=%d",
     uint32_t channel, void *future, uintmax_t push_count, int error);
-KTR_INFO(KTR_NVGPU, nvgpu, channel_doorbell, 31,
+KTR_INFO(KTR_NVGPU, nvgpu, channel_doorbell, 25,
     "channel doorbell channel=%u future=%p target=%u", uint32_t channel,
     void *future, uint32_t target);
 

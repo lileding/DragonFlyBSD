@@ -29,13 +29,13 @@ static MALLOC_DEFINE(M_NVGPU_VM, "nvgpu_vm", "nvgpu process VM");
 #endif
 
 KTR_INFO_MASTER_EXTERN(nvgpu);
-KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_spawn, 31,
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_spawn, 27,
     "vm bind spawn proc=%p vm=%p op_count=%u wait_count=%u", void *proc,
     void *vm, uint32_t op_count, uint32_t wait_count);
-KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_poll, 31,
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_poll, 27,
     "vm bind poll future=%p phase=%u op_count=%u error=%d", void *future,
     u_int phase, uint32_t op_count, int error);
-KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_dirty, 31,
+KTR_INFO(KTR_NVGPU, nvgpu, vm_bind_dirty, 27,
     "vm bind dirty future=%p dirty=%u", void *future, u_int dirty);
 
 #define NVGPU_VM_PAGE_SHIFT_4K	12

@@ -83,8 +83,7 @@ nvgsp_booter_parse(struct nvgsp_state *sc, const struct firmware *fw,
 		return (EIO);
 	bh = (const struct nvgsp_booter_bin_hdr *)base;
 	if (bh->bin_magic != NVGSP_BOOTER_BIN_MAGIC) {
-		nvgsp_debugf(sc->dev,
-		    "booter: bad bin magic 0x%08x\n", bh->bin_magic);
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: bad bin magic 0x%08x\n", bh->bin_magic);
 		return (EIO);
 	}
 	/*
@@ -95,8 +94,7 @@ nvgsp_booter_parse(struct nvgsp_state *sc, const struct firmware *fw,
 	if (bh->header_offset >= fw->datasize ||
 	    bh->data_offset   >= fw->datasize ||
 	    bh->data_offset + bh->data_size > fw->datasize) {
-		nvgsp_debugf(sc->dev,
-		    "booter: bin_hdr offsets out of range "
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: bin_hdr offsets out of range "
 		    "(hdr=0x%x data=0x%x+%u file=%zu)\n",
 		    bh->header_offset, bh->data_offset, bh->data_size,
 		    fw->datasize);
@@ -113,8 +111,7 @@ nvgsp_booter_parse(struct nvgsp_state *sc, const struct firmware *fw,
 	lh = (const struct nvgsp_booter_hs_load_header_v2 *)
 	    (base + hs->header_offset);
 	if (lh->num_apps < 1) {
-		nvgsp_debugf(sc->dev,
-		    "booter: no apps in load header (num_apps=%u)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: no apps in load header (num_apps=%u)\n",
 		    lh->num_apps);
 		return (EIO);
 	}
@@ -147,20 +144,17 @@ nvgsp_booter_parse(struct nvgsp_state *sc, const struct firmware *fw,
 	info->patch_sig	      = patch_sig;
 	info->num_sig	      = num_sig;
 
-	nvgsp_debugf(sc->dev,
-	    "booter: bin magic=0x%x ver=%u size=%u, hs@0x%x ld@0x%x data@0x%x+%u\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: bin magic=0x%x ver=%u size=%u, hs@0x%x ld@0x%x data@0x%x+%u\n",
 	    bh->bin_magic, bh->bin_ver, bh->bin_size,
 	    bh->header_offset, hs->header_offset,
 	    bh->data_offset, bh->data_size);
-	nvgsp_debugf(sc->dev,
-	    "booter: nmem(off=0x%x sz=%u) imem(off=0x%x sz=%u) "
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: nmem(off=0x%x sz=%u) imem(off=0x%x sz=%u) "
 	    "dmem(off=0x%x sz=%u) boot_addr=0x%x apps=%u\n",
 	    info->nmem_offset, info->nmem_size,
 	    info->imem_offset, info->imem_size,
 	    info->dmem_offset, info->dmem_size,
 	    info->boot_addr, lh->num_apps);
-	nvgsp_debugf(sc->dev,
-	    "booter: sig_prod off=0x%x sz=%u, patch loc/sig/num = %u/%u/%u\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: sig_prod off=0x%x sz=%u, patch loc/sig/num = %u/%u/%u\n",
 	    info->sig_prod_offset, info->sig_prod_size,
 	    info->patch_loc, info->patch_sig, info->num_sig);
 
@@ -207,8 +201,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	int error;
 
 	if (bi->blob == NULL || sec2 == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "booter: cannot start (booter info or sec2 missing)\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: cannot start (booter info or sec2 missing)\n");
 		return (ENXIO);
 	}
 
@@ -227,13 +220,12 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	 */
 	error = nvgsp_dma_alloc_dmamem(sc, bi->data_size, 4096, &sc->booter_dma);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev, "booter: dma alloc failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: dma alloc failed (%d)\n", error);
 		return (error);
 	}
 	memcpy(sc->booter_dma.kva, bi->blob + bi->data_offset, bi->data_size);
 	data = (uint8_t *)sc->booter_dma.kva;
-	nvgsp_debugf(sc->dev,
-	    "booter: staged %u bytes (data section) to kva=%p\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: staged %u bytes (data section) to kva=%p\n",
 	    bi->data_size, data);
 
 	/*
@@ -259,12 +251,10 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 		if (src_off + sig_size <= bi->blob_size &&
 		    dst_off + sig_size <= bi->data_size) {
 			memcpy(data + dst_off, bi->blob + src_off, sig_size);
-			nvgsp_debugf(sc->dev,
-			    "booter: patched %u-byte sig idx=%u from blob+0x%x to data+0x%x\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "booter: patched %u-byte sig idx=%u from blob+0x%x to data+0x%x\n",
 			    sig_size, bi->patch_sig, src_off, dst_off);
 		} else {
-			nvgsp_debugf(sc->dev,
-			    "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u, "
+			nvgpu_log(NVGPU_LOG_DEBUG, "booter: sig patch OOB (src=0x%x+%u dst=0x%x+%u, "
 			    "blob_size=%u data_size=%u)\n",
 			    src_off, sig_size, dst_off, sig_size,
 			    bi->blob_size, bi->data_size);
@@ -277,8 +267,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	{
 		int rerr = nvgsp_falcon_reset_eng(sec2);
 		if (rerr != 0)
-			nvgsp_debugf(sc->dev,
-			    "booter: SEC2 reset_eng returned %d (continuing)\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "booter: SEC2 reset_eng returned %d (continuing)\n",
 			    rerr);
 	}
 	nvgsp_falcon_disable_ctx_req(sec2);
@@ -302,8 +291,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	    bi->nmem_offset >> 8,
 	    0, false);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "booter: load_imem(nmem) failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: load_imem(nmem) failed (%d)\n", error);
 		goto out_free;
 	}
 	error = nvgsp_falcon_load_imem(sec2,
@@ -313,8 +301,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	    bi->imem_offset >> 8,
 	    0, true);	/* secure tag */
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "booter: load_imem(sec) failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: load_imem(sec) failed (%d)\n", error);
 		goto out_free;
 	}
 	error = nvgsp_falcon_load_dmem(sec2,
@@ -323,12 +310,10 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	    bi->dmem_size,
 	    0);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "booter: load_dmem failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: load_dmem failed (%d)\n", error);
 		goto out_free;
 	}
-	nvgsp_debugf(sc->dev,
-	    "booter: PIO uploaded nmem@imem[0x%x]+%u (tag 0x%x), "
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: PIO uploaded nmem@imem[0x%x]+%u (tag 0x%x), "
 	    "imem@imem[0x%x]+%u (tag 0x%x SEC), dmem[0]+%u\n",
 	    bi->nmem_offset, bi->nmem_size, bi->nmem_offset >> 8,
 	    bi->imem_offset, bi->imem_size, bi->imem_offset >> 8,
@@ -343,11 +328,9 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	nvgsp_falcon_set_bootvec(sec2, bi->boot_addr);
 	nvgsp_falcon_wr32(sec2, NVGSP_FLCN_MAILBOX0, mb0_in);
 	nvgsp_falcon_wr32(sec2, NVGSP_FLCN_MAILBOX1, mb1_in);
-	nvgsp_debugf(sc->dev,
-	    "booter: mailbox inputs mb0=0x%08x mb1=0x%08x\n", mb0_in, mb1_in);
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: mailbox inputs mb0=0x%08x mb1=0x%08x\n", mb0_in, mb1_in);
 
-	nvgsp_debugf(sc->dev,
-	    "booter: starting SEC2 (bootvec=0x%x)\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: starting SEC2 (bootvec=0x%x)\n",
 	    bi->boot_addr);
 
 	/* 8. Start and wait. */
@@ -359,8 +342,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 	cpuctl = nvgsp_falcon_rd32(sec2, NVGSP_FLCN_CPUCTL);
 	dmactl = nvgsp_falcon_rd32(sec2, NVGSP_FLCN_DMACTL);
 
-	nvgsp_debugf(sc->dev,
-	    "booter: %s mb0=0x%08x mb1=0x%08x cpuctl=0x%08x dmactl=0x%08x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "booter: %s mb0=0x%08x mb1=0x%08x cpuctl=0x%08x dmactl=0x%08x\n",
 	    error == 0 ? "halted" : "timed out",
 	    mb0, mb1, cpuctl, dmactl);
 
@@ -377,8 +359,7 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 		uint32_t wpr2_lo = nvgsp_rd32(sc, 0x1fa824);
 		uint32_t wpr2_hi = nvgsp_rd32(sc, 0x1fa828);
 
-		nvgsp_debugf(sc->dev,
-		    "booter: SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x WPR2=0x%08x/0x%08x\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: SCTL=0x%08x EXCI=0x%08x IRQSTAT=0x%08x WPR2=0x%08x/0x%08x\n",
 		    sctl, exci, irqstat, wpr2_lo, wpr2_hi);
 
 		dmemc = 0x0u | (1u << 25);	/* DMEM[0], AINCR */
@@ -387,11 +368,9 @@ nvgsp_booter_run(struct nvgsp_state *sc, const struct nvgsp_booter_info *bi,
 		d1 = nvgsp_falcon_rd32(sec2, 0x1c4);
 		d2 = nvgsp_falcon_rd32(sec2, 0x1c4);
 		d3 = nvgsp_falcon_rd32(sec2, 0x1c4);
-		nvgsp_debugf(sc->dev,
-		    "booter: DMEM[0..0x10] = %08x %08x %08x %08x\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: DMEM[0..0x10] = %08x %08x %08x %08x\n",
 		    d0, d1, d2, d3);
-		nvgsp_debugf(sc->dev,
-		    "booter: scratch[c..f] = %08x %08x %08x %08x\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "booter: scratch[c..f] = %08x %08x %08x %08x\n",
 		    nvgsp_rd32(sc, 0x001430), nvgsp_rd32(sc, 0x001434),
 		    nvgsp_rd32(sc, 0x001438), nvgsp_rd32(sc, 0x00143c));
 	}
@@ -431,8 +410,7 @@ nvgsp_shutdown_backend(struct nvgsp_state *sc)
 	err = nvgsp_rpc_get_unloading_guest_driver_state(sc);
 	lwkt_reltoken(&sc->gsp_tok);
 	if (err != 0)
-		nvgsp_infof(sc->dev,
-		    "gsp: UNLOADING_GUEST_DRIVER rpc err=%d\n", err);
+		nvgpu_log(NVGPU_LOG_INFO, "gsp: UNLOADING_GUEST_DRIVER rpc err=%d\n", err);
 
 	/* 2. Wait up to 2s for GSP-RM to report halt in its MAILBOX0. */
 	mb0 = 0;
@@ -442,7 +420,7 @@ nvgsp_shutdown_backend(struct nvgsp_state *sc)
 			break;
 		DELAY(1000);
 	}
-	nvgsp_infof(sc->dev, "gsp: shutdown MB0=0x%08x after %d ms%s\n",
+	nvgpu_log(NVGPU_LOG_INFO, "gsp: shutdown MB0=0x%08x after %d ms%s\n",
 	    mb0, polls,
 	    mb0 == NVGSP_MB0_SHUTDOWN ? "" : " (halt not confirmed)");
 	sc->gsp_running = false;
@@ -451,36 +429,32 @@ nvgsp_shutdown_backend(struct nvgsp_state *sc)
 	if (sc->gsp != NULL) {
 		err = nvgsp_falcon_reset_eng(sc->gsp);
 		if (err != 0)
-			nvgsp_infof(sc->dev,
-			    "gsp: shutdown falcon reset err=%d\n", err);
+			nvgpu_log(NVGPU_LOG_INFO, "gsp: shutdown falcon reset err=%d\n", err);
 	}
 
 	/* 4. FWSEC-SB (driver shutdown counterpart of attach-time FRTS). */
 	err = nvgsp_fwsec_run_cmd(sc, NVGSP_FWSEC_CMD_SB, 0, 0);
 	if (err != 0)
-		nvgsp_infof(sc->dev, "gsp: FWSEC-SB err=%d\n", err);
+		nvgpu_log(NVGPU_LOG_INFO, "gsp: FWSEC-SB err=%d\n", err);
 
 	/* 5. Tear down WPR2 so the next attach can boot GSP-RM again. */
 	wpr2_hi = nvgsp_rd32(sc, NVGSP_WPR2_ADDR_HI);
 	if (wpr2_hi == 0) {
-		nvgsp_infof(sc->dev,
-		    "gsp: WPR2 already clear, booter_unload skipped\n");
+		nvgpu_log(NVGPU_LOG_INFO, "gsp: WPR2 already clear, booter_unload skipped\n");
 		return;
 	}
 	if (sc->fw_booter_unload == NULL) {
-		nvgsp_infof(sc->dev,
-		    "gsp: no booter_unload blob; WPR2 stays set (0x%08x)\n",
+		nvgpu_log(NVGPU_LOG_INFO, "gsp: no booter_unload blob; WPR2 stays set (0x%08x)\n",
 		    wpr2_hi);
 		return;
 	}
 	if (nvgsp_booter_parse(sc, sc->fw_booter_unload, &bi) != 0) {
-		nvgsp_infof(sc->dev, "gsp: booter_unload parse failed\n");
+		nvgpu_log(NVGPU_LOG_INFO, "gsp: booter_unload parse failed\n");
 		return;
 	}
 	err = nvgsp_booter_run(sc, &bi, 0xff, 0xff);
 	wpr2_hi = nvgsp_rd32(sc, NVGSP_WPR2_ADDR_HI);
-	nvgsp_infof(sc->dev,
-	    "gsp: booter_unload %s, WPR2_HI=0x%08x%s\n",
+	nvgpu_log(NVGPU_LOG_INFO, "gsp: booter_unload %s, WPR2_HI=0x%08x%s\n",
 	    err == 0 ? "halted" : "error",
 	    wpr2_hi, wpr2_hi == 0 ? " (torn down)" : " (still set!)");
 }

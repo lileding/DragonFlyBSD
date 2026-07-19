@@ -33,16 +33,16 @@ static MALLOC_DEFINE(M_NVGPU_EXEC, "nvgpu_exec", "nvgpu exec future");
 #endif
 
 KTR_INFO_MASTER_EXTERN(nvgpu);
-KTR_INFO(KTR_NVGPU, nvgpu, exec_spawn, 27,
+KTR_INFO(KTR_NVGPU, nvgpu, exec_spawn, 26,
     "exec spawn proc=%p channel=%u push=%ju wait=%ju", void *proc,
     uint32_t channel, uintmax_t push_count, uintmax_t wait_count);
-KTR_INFO(KTR_NVGPU, nvgpu, exec_poll, 28,
+KTR_INFO(KTR_NVGPU, nvgpu, exec_poll, 26,
     "exec poll future=%p phase=%u error=%d", void *future, u_int phase,
     int error);
-KTR_INFO(KTR_NVGPU, nvgpu, exec_submit, 29,
+KTR_INFO(KTR_NVGPU, nvgpu, exec_submit, 26,
     "exec submit future=%p channel=%u push=%ju error=%d", void *future,
     uint32_t channel, uintmax_t push_count, int error);
-KTR_INFO(KTR_NVGPU, nvgpu, exec_complete, 30,
+KTR_INFO(KTR_NVGPU, nvgpu, exec_complete, 26,
     "exec complete future=%p channel=%u error=%d", void *future,
     uint32_t channel, int error);
 

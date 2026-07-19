@@ -178,8 +178,7 @@ nvgsp_boot_image_build_radix3(struct nvgsp_state *sc, uint64_t data_pa,
 	uint32_t i;
 
 	if (sc->gsp_radix3.kva == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: radix3 alloc missing\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: radix3 alloc missing\n");
 		return (0);
 	}
 
@@ -197,8 +196,7 @@ nvgsp_boot_image_build_radix3(struct nvgsp_state *sc, uint64_t data_pa,
 	for (i = 0; i < n_data_pg; i++)
 		l2[i] = data_pa + (uint64_t)i * NVGSP_PAGE_SIZE;
 
-	nvgsp_debugf(sc->dev,
-	    "gsp_boot: radix3 built: data %u pages, L2 %u pages; "
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: radix3 built: data %u pages, L2 %u pages; "
 	    "L0=0x%llx L1=0x%llx L2=0x%llx\n",
 	    n_data_pg, n_l2_pg,
 	    (unsigned long long)sc->gsp_radix3.paddr,
@@ -220,21 +218,18 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	int error;
 
 	if (sc->wpr_meta.kva == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: wpr_meta not allocated\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: wpr_meta not allocated\n");
 		return (ENXIO);
 	}
 
 	gsp_fw = firmware_get(sc->chip->fw_gsp);
 	if (gsp_fw == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: %s firmware not loaded\n", sc->chip->fw_gsp);
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: %s firmware not loaded\n", sc->chip->fw_gsp);
 		return (ENOENT);
 	}
 	bl_fw  = firmware_get(sc->chip->fw_bootloader);
 	if (bl_fw == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: %s firmware not loaded\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: %s firmware not loaded\n",
 		    sc->chip->fw_bootloader);
 		firmware_put(gsp_fw, FIRMWARE_UNLOAD);
 		return (ENOENT);
@@ -247,20 +242,17 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 		error = nvgsp_boot_image_find_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    ".fwimage", &fwimage_off, &fwimage_size);
 		if (error != 0) {
-			nvgsp_debugf(sc->dev,
-			    "gsp_boot: ELF has no .fwimage (%d)\n", error);
+			nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: ELF has no .fwimage (%d)\n", error);
 			goto out_put;
 		}
 		error = nvgsp_boot_image_find_elf_section(gsp_fw->data, gsp_fw->datasize,
 		    sc->chip->fw_signature, &sig_off, &sig_size);
 		if (error != 0) {
-			nvgsp_debugf(sc->dev,
-			    "gsp_boot: ELF has no %s (%d)\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: ELF has no %s (%d)\n",
 			    sc->chip->fw_signature, error);
 			goto out_put;
 		}
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: ELF .fwimage @0x%llx+%llu %s @0x%llx+%llu\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: ELF .fwimage @0x%llx+%llu %s @0x%llx+%llu\n",
 		    (unsigned long long)fwimage_off,
 		    (unsigned long long)fwimage_size,
 		    sc->chip->fw_signature,
@@ -271,8 +263,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 		error = nvgsp_dma_alloc_dmamem(sc, roundup(sig_size,
 		    NVGSP_PAGE_SIZE), NVGSP_PAGE_SIZE, &sc->gsp_sig);
 		if (error != 0) {
-			nvgsp_debugf(sc->dev,
-			    "gsp_boot: sig dma alloc failed (%d)\n", error);
+			nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: sig dma alloc failed (%d)\n", error);
 			goto out_put;
 		}
 		memcpy(sc->gsp_sig.kva, gsp_fw->data + sig_off, sig_size);
@@ -288,7 +279,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 
 	bl_size = bl_fw->datasize;
 	if (bl_size < sizeof(*bl_hdr)) {
-		nvgsp_debugf(sc->dev, "gsp_boot: BL fw too small (%u)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: BL fw too small (%u)\n",
 		    bl_size);
 		error = EIO;
 		goto out_put;
@@ -296,8 +287,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	bl_hdr = (const struct nvgsp_bin_hdr *)bl_fw->data;
 	if (bl_hdr->header_offset + sizeof(*bl_desc) > bl_size ||
 	    bl_hdr->data_offset + bl_hdr->data_size > bl_size) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: BL bin_hdr OOB (hdr@0x%x data@0x%x+%u of %u)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: BL bin_hdr OOB (hdr@0x%x data@0x%x+%u of %u)\n",
 		    bl_hdr->header_offset, bl_hdr->data_offset,
 		    bl_hdr->data_size, bl_size);
 		error = EIO;
@@ -308,13 +298,11 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	bl_payload_off  = bl_hdr->data_offset;
 	bl_payload_size = bl_hdr->data_size;
 
-	nvgsp_debugf(sc->dev,
-	    "gsp_boot: gsp_image=%u B (%u pages, %u L2), BL=%u B "
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: gsp_image=%u B (%u pages, %u L2), BL=%u B "
 	    "(payload@0x%x size %u)\n",
 	    img_size, img_pages, l2_pages,
 	    bl_size, bl_payload_off, bl_payload_size);
-	nvgsp_debugf(sc->dev,
-	    "gsp_boot: BL desc ver=%u appVer=0x%x monitorCode@0x%x+%u "
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: BL desc ver=%u appVer=0x%x monitorCode@0x%x+%u "
 	    "monitorData@0x%x+%u manifest@0x%x+%u\n",
 	    bl_desc->version, bl_desc->appVersion,
 	    bl_desc->monitorCodeOffset, bl_desc->monitorCodeSize,
@@ -326,8 +314,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	    (bus_size_t)img_pages * NVGSP_PAGE_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_image);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: GSP image dma alloc failed (%d) for %u B\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: GSP image dma alloc failed (%d) for %u B\n",
 		    error, img_pages * NVGSP_PAGE_SIZE);
 		goto out_put;
 	}
@@ -337,8 +324,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	error = nvgsp_dma_alloc_dmamem(sc, radix3_alloc_size,
 	    NVGSP_PAGE_SIZE, &sc->gsp_radix3);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: radix3 dma alloc failed (%d) for %u B\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: radix3 dma alloc failed (%d) for %u B\n",
 		    error, radix3_alloc_size);
 		nvgsp_dma_free_dmamem(sc, &sc->gsp_image);
 		goto out_put;
@@ -352,8 +338,7 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 	    roundup(bl_payload_size, NVGSP_PAGE_SIZE),
 	    NVGSP_PAGE_SIZE, &sc->gsp_bl);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: BL dma alloc failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: BL dma alloc failed (%d)\n", error);
 		nvgsp_dma_free_dmamem(sc, &sc->gsp_radix3);
 		nvgsp_dma_free_dmamem(sc, &sc->gsp_image);
 		goto out_put;
@@ -465,21 +450,18 @@ nvgsp_boot_prepare_image(struct nvgsp_state *sc)
 		meta->bootCount = 0;
 		meta->verified = 0;
 
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: FB layout fb=0x%llx bios=0x%llx frts=0x%llx+0x%llx\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: FB layout fb=0x%llx bios=0x%llx frts=0x%llx+0x%llx\n",
 		    (unsigned long long)fb_sz,
 		    (unsigned long long)bios_addr,
 		    (unsigned long long)frts_off,
 		    (unsigned long long)frts_sz);
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: WPR2 [0x%llx..0x%llx) bootbin=0x%llx gspfw=0x%llx heap=0x%llx\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: WPR2 [0x%llx..0x%llx) bootbin=0x%llx gspfw=0x%llx heap=0x%llx\n",
 		    (unsigned long long)wpr_start,
 		    (unsigned long long)meta->gspFwWprEnd,
 		    (unsigned long long)boot_off,
 		    (unsigned long long)gsp_off,
 		    (unsigned long long)heap_off);
-		nvgsp_debugf(sc->dev,
-		    "gsp_boot: meta.radix3=0x%llx (size %u) bl=0x%llx (size %u)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_boot: meta.radix3=0x%llx (size %u) bl=0x%llx (size %u)\n",
 		    (unsigned long long)meta->sysmemAddrOfRadix3Elf,
 		    (uint32_t)meta->sizeOfRadix3Elf,
 		    (unsigned long long)meta->sysmemAddrOfBootloader,
