@@ -117,6 +117,7 @@ SRCS	= \
 SRCS	+= \
 	opt_ddb.h \
 	opt_drm.h \
+	opt_ktr.h \
 	bus_if.h \
 	device_if.h \
 	pci_if.h
@@ -126,6 +127,7 @@ KCFLAGS+= -I${SYSDIR}/dev/drm/include/drm
 KCFLAGS+= -I${SYSDIR}/dev/drm/include/uapi
 KCFLAGS+= -include ${SYSDIR}/dev/drm/kconfig.h
 KCFLAGS+= -DKBUILD_MODNAME=\"${KMOD}\"
+KCFLAGS+= -DKTR -DKTR_DRM
 # KCFLAGS+= -DDRM_DEBUG=2
 
 .include <bsd.kmod.mk>
