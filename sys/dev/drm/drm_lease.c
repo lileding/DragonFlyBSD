@@ -453,10 +453,10 @@ drm_lease_object_busy_locked(struct drm_master *owner, uint32_t object_id)
 
 static int
 drm_lease_prepare_objects(struct drm_device *dev, struct drm_file *file_priv,
-    uint32_t *object_ids, uint32_t object_count, bool *has_crtc,
-    bool *has_connector, bool *has_plane)
+    struct drm_master *master, uint32_t *object_ids, uint32_t object_count,
+    bool *has_crtc, bool *has_connector, bool *has_plane)
 {
-	struct drm_master *owner = drm_lease_owner(file_priv->master);
+	struct drm_master *owner = drm_lease_owner(master);
 	struct drm_mode_object *obj;
 	uint32_t max_objects;
 	uint32_t i;
@@ -575,6 +575,7 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
     struct drm_file *file_priv)
 {
 	struct drm_mode_create_lease *arg = data;
+	struct drm_master *master;
 	struct drm_master *owner;
 	struct drm_master *lessee;
 	struct drm_file *lease_file = NULL;
@@ -591,35 +592,44 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EOPNOTSUPP;
-	if (file_priv->master == NULL)
+	master = drm_file_get_master(file_priv);
+	if (master == NULL)
 		return -EACCES;
-	if (file_priv->master->lessor != NULL)
+	if (master->lessor != NULL) {
+		drm_master_put(&master);
 		return -EINVAL;
-	if (arg->flags & ~(O_CLOEXEC | O_NONBLOCK))
-		return -EINVAL;
+	}
+	if (arg->flags & ~(O_CLOEXEC | O_NONBLOCK)) {
+		ret = -EINVAL;
+		goto out_master_ref;
+	}
 	if (arg->object_count > dev->mode_config.num_crtc +
-	    dev->mode_config.num_connector + dev->mode_config.num_total_plane)
-		return -EINVAL;
+	    dev->mode_config.num_connector + dev->mode_config.num_total_plane) {
+		ret = -EINVAL;
+		goto out_master_ref;
+	}
 
 	object_ids = NULL;
 	if (arg->object_count != 0) {
 		object_ids = kmalloc_array(arg->object_count,
 		    sizeof(*object_ids), GFP_KERNEL);
-		if (object_ids == NULL)
-			return -ENOMEM;
+		if (object_ids == NULL) {
+			ret = -ENOMEM;
+			goto out_master_ref;
+		}
 		if (copy_from_user(object_ids, u64_to_user_ptr(arg->object_ids),
 		    arg->object_count * sizeof(*object_ids))) {
-			kfree(object_ids);
-			return -EFAULT;
+			ret = -EFAULT;
+			goto out_ids;
 		}
 	}
 
-	ret = drm_lease_prepare_objects(dev, file_priv, object_ids,
+	ret = drm_lease_prepare_objects(dev, file_priv, master, object_ids,
 	    arg->object_count, &has_crtc, &has_connector, &has_plane);
 	if (ret != 0)
 		goto out_ids;
 
-	owner = drm_lease_owner(file_priv->master);
+	owner = drm_lease_owner(master);
 	lessee = drm_master_create(dev);
 	if (lessee == NULL) {
 		ret = -ENOMEM;
@@ -661,6 +671,7 @@ drm_mode_create_lease_ioctl(struct drm_device *dev, void *data,
 	fd_install(fd, lease_fp);
 	drm_master_put(&lessee);
 	kfree(object_ids);
+	drm_master_put(&master);
 	return 0;
 
 out_file:
@@ -672,6 +683,8 @@ out_master:
 	drm_master_put(&lessee);
 out_ids:
 	kfree(object_ids);
+out_master_ref:
+	drm_master_put(&master);
 	return ret;
 }
 
@@ -680,6 +693,7 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
     struct drm_file *file_priv)
 {
 	struct drm_mode_list_lessees *arg = data;
+	struct drm_master *master;
 	struct drm_master *owner;
 	struct drm_master *lessee;
 	uint32_t __user *lessee_ptr;
@@ -689,10 +703,11 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
 		return -EOPNOTSUPP;
 	if (arg->pad)
 		return -EINVAL;
-	if (file_priv->master == NULL)
+	master = drm_file_get_master(file_priv);
+	if (master == NULL)
 		return -EACCES;
 
-	owner = file_priv->master;
+	owner = master;
 	lessee_ptr = u64_to_user_ptr(arg->lessees_ptr);
 
 	mutex_lock(&dev->mode_config.idr_mutex);
@@ -702,6 +717,7 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
 		if (count < arg->count_lessees &&
 		    put_user((uint32_t)lessee->lessee_id, lessee_ptr + count)) {
 			mutex_unlock(&dev->mode_config.idr_mutex);
+			drm_master_put(&master);
 			return -EFAULT;
 		}
 		count++;
@@ -709,6 +725,7 @@ drm_mode_list_lessees_ioctl(struct drm_device *dev, void *data,
 	mutex_unlock(&dev->mode_config.idr_mutex);
 
 	arg->count_lessees = count;
+	drm_master_put(&master);
 	return 0;
 }
 
@@ -741,6 +758,7 @@ drm_mode_get_lease_ioctl(struct drm_device *dev, void *data,
     struct drm_file *file_priv)
 {
 	struct drm_mode_get_lease *arg = data;
+	struct drm_master *master;
 	void *entry;
 	uint32_t __user *object_ptr = u64_to_user_ptr(arg->objects_ptr);
 	uint32_t count = 0;
@@ -750,17 +768,23 @@ drm_mode_get_lease_ioctl(struct drm_device *dev, void *data,
 		return -EOPNOTSUPP;
 	if (arg->pad)
 		return -EINVAL;
-	if (file_priv->master == NULL)
+	master = drm_file_get_master(file_priv);
+	if (master == NULL)
 		return -EACCES;
 
-	if (file_priv->master->lessor == NULL)
-		return drm_lease_count_owner_objects(dev, arg);
+	if (master->lessor == NULL) {
+		int ret = drm_lease_count_owner_objects(dev, arg);
+
+		drm_master_put(&master);
+		return ret;
+	}
 
 	mutex_lock(&dev->mode_config.idr_mutex);
-	idr_for_each_entry(&file_priv->master->leases, entry, id) {
+	idr_for_each_entry(&master->leases, entry, id) {
 		if (count < arg->count_objects &&
 		    put_user((uint32_t)id, object_ptr + count)) {
 			mutex_unlock(&dev->mode_config.idr_mutex);
+			drm_master_put(&master);
 			return -EFAULT;
 		}
 		count++;
@@ -768,6 +792,7 @@ drm_mode_get_lease_ioctl(struct drm_device *dev, void *data,
 	mutex_unlock(&dev->mode_config.idr_mutex);
 
 	arg->count_objects = count;
+	drm_master_put(&master);
 	return 0;
 }
 
@@ -776,28 +801,33 @@ drm_mode_revoke_lease_ioctl(struct drm_device *dev, void *data,
     struct drm_file *file_priv)
 {
 	struct drm_mode_revoke_lease *arg = data;
+	struct drm_master *master;
 	struct drm_master *owner;
 	struct drm_master *lessee;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EOPNOTSUPP;
-	if (file_priv->master == NULL)
+	master = drm_file_get_master(file_priv);
+	if (master == NULL)
 		return -EACCES;
 
-	owner = file_priv->master;
+	owner = master;
 
 	mutex_lock(&dev->mode_config.idr_mutex);
 	lessee = drm_lease_find_lessee_locked(owner, arg->lessee_id);
 	if (lessee == NULL) {
 		mutex_unlock(&dev->mode_config.idr_mutex);
+		drm_master_put(&master);
 		return -ENOENT;
 	}
 	if (lessee->lessor != owner) {
 		mutex_unlock(&dev->mode_config.idr_mutex);
+		drm_master_put(&master);
 		return -EACCES;
 	}
 	drm_lease_revoke_locked(lessee);
 	mutex_unlock(&dev->mode_config.idr_mutex);
+	drm_master_put(&master);
 
 	return 0;
 }
