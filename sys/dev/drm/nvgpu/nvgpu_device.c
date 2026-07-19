@@ -28,6 +28,7 @@
 #include <sys/bus.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/linker.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/rman.h>
@@ -38,11 +39,15 @@
 
 static MALLOC_DEFINE(M_NVGPU_DEVICE, "nvgpu_device", "nvgpu physical device");
 
+static int nvgpu_gsp_version = 570;
+TUNABLE_INT("hw.nvgpu.gsp_version", &nvgpu_gsp_version);
+
 enum nvgpu_boot_phase {
 	NVGPU_BOOT_BEGIN = 0,
 	NVGPU_BOOT_BARS,
 	NVGPU_BOOT_UNLOAD,
 	NVGPU_BOOT_THREADED,
+	NVGPU_BOOT_FIRMWARE,
 	NVGPU_BOOT_STATE,
 	NVGPU_BOOT_RPC,
 	NVGPU_BOOT_EVENT,
@@ -88,6 +93,7 @@ struct nvgpu_device {
 	struct nvgpu_display *display;
 	struct nvdrm_kms *kms;
 	struct nvgpu_unload_state *unload;
+	linker_file_t gsp_fw_file;
 	uint32_t channel_limit;
 	volatile u_int channel_used;
 };
@@ -114,6 +120,8 @@ static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
 static void nvgpu_device_run_boot(void *arg);
 static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
 static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
+static int nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu);
+static void nvgpu_device_release_gsp_firmware(struct nvgpu_device *gpu);
 static int nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu);
 static void nvgpu_device_teardown(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
@@ -134,7 +142,8 @@ nvgpu_device_handle_modevent(module_t mod __unused, int type, void *data __unuse
 			nvgpu_debug_fini();
 			return (error);
 		}
-		nvgpu_log(NVGPU_LOG_INFO, "loaded (target GSP firmware 570.144)\n");
+		nvgpu_log(NVGPU_LOG_INFO, "loaded (default GSP firmware version %d)\n",
+	    nvgpu_gsp_version);
 		return (0);
 	case MOD_UNLOAD:
 		nvgpu_sched_stop();
@@ -179,7 +188,6 @@ static struct nvgpu_device *nvgpu_default_gpu;
 
 DRIVER_MODULE(nvgpu, vgapci, nvgpu_device_pci_driver,
     nvgpu_device_devclass, NULL, NULL);
-MODULE_DEPEND(nvgpu, nvgsp570_fw, 1, 1, 1);
 MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
 
 /* Look up static chip metadata for a PCI device. */
@@ -521,6 +529,10 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 	error = nvgpu_device_identify_boot(gpu);
 	if (error != 0)
 		return (error);
+	error = nvgpu_device_load_gsp_firmware(gpu);
+	if (error != 0)
+		return (error);
+	gpu->boot_phase = NVGPU_BOOT_FIRMWARE;
 	error = nvgsp_state_init(gpu);
 	if (error != 0)
 		return (error);
@@ -581,6 +593,46 @@ nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu)
 	return (0);
 }
 
+
+static int
+nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu)
+{
+	const char *modname;
+	linker_file_t file;
+	int error;
+
+	switch (nvgpu_gsp_version) {
+	case 570:
+		modname = "nvgsp570_fw";
+		break;
+	default:
+		nvgpu_log(NVGPU_LOG_INFO, "unsupported GSP firmware version %d\n",
+	    nvgpu_gsp_version);
+		return (EINVAL);
+	}
+
+	error = linker_reference_module(modname, NULL, &file);
+	if (error != 0) {
+		nvgpu_log(NVGPU_LOG_INFO, "failed to load %s: %d\n", modname, error);
+		return (error);
+	}
+	gpu->gsp_fw_file = file;
+	nvgpu_log(NVGPU_LOG_INFO, "loaded firmware module %s\n", modname);
+	return (0);
+}
+
+static void
+nvgpu_device_release_gsp_firmware(struct nvgpu_device *gpu)
+{
+	linker_file_t file;
+
+	file = gpu->gsp_fw_file;
+	if (file == NULL)
+		return;
+	gpu->gsp_fw_file = NULL;
+	linker_release_module(NULL, NULL, file);
+}
+
 static int
 nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu)
 {
@@ -636,6 +688,8 @@ nvgpu_device_teardown(struct nvgpu_device *gpu)
 		nvgsp_shutdown(gpu);
 	if (phase >= NVGPU_BOOT_STATE)
 		nvgsp_state_fini(gpu);
+	if (phase >= NVGPU_BOOT_FIRMWARE)
+		nvgpu_device_release_gsp_firmware(gpu);
 	if (phase >= NVGPU_BOOT_UNLOAD)
 		nvgpu_unload_fini(gpu);
 	if (phase >= NVGPU_BOOT_BARS)

@@ -25,7 +25,7 @@ nvgsp_fw_init(struct nvgsp_state *sc)
 	fw = firmware_get(sc->chip->fw_booter_load);
 	if (fw == NULL) {
 		nvgsp_debugf(sc->dev,
-		    "fw: cannot load \"%s\" (module nvgsp_570 absent?)\n",
+		    "fw: cannot load \"%s\" (firmware module absent?)\n",
 		    sc->chip->fw_booter_load);
 		return (ENOENT);
 	}
