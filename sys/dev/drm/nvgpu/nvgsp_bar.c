@@ -225,8 +225,7 @@ nvgsp_bar_invalidate_bar2(struct nvgsp_state *sc)
 	}
 
 #ifdef NVGSP_DEBUG_BAR2
-	nvgsp_debugf(sc->dev,
-	    "bar2: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar2: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
 	    (unsigned long long)sc->gsp_bar2_pdb, trig_rb);
 #endif
 }
@@ -242,18 +241,18 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	uint32_t saved;
 
 	if (nvgpu_device_get_bar(sc->gpu, 3) == NULL) {
-		nvgsp_debugf(sc->dev, "bar2: PCIe BAR3 (BAR2) not mapped\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: PCIe BAR3 (BAR2) not mapped\n");
 		return (ENXIO);
 	}
 	if (sc->gsp_bar2_pdb == 0) {
-		nvgsp_debugf(sc->dev, "bar2: GSP did not publish bar2PdeBase\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: GSP did not publish bar2PdeBase\n");
 		return (ENXIO);
 	}
 
 	pd2 = nvgsp_vram_alloc_kind(sc, 0x1000, 0x1000,
 	    NVGSP_VRAM_BAR2_ROOT, b2);
 	if (!pd2) {
-		nvgsp_debugf(sc->dev, "bar2: VRAM alloc failed\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: VRAM alloc failed\n");
 		return (ENOMEM);
 	}
 
@@ -274,7 +273,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 
 	err = nvgsp_bar_bootstrap_bar2(sc);
 	if (err != 0) {
-		nvgsp_debugf(sc->dev, "bar2: bootstrap failed err=%d\n", err);
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: bootstrap failed err=%d\n", err);
 		return (err);
 	}
 
@@ -301,8 +300,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	rpc->entryLevelShift = NVGSP_GMMU_PD3_SHIFT;
 	err = nvgsp_rpc_wr(sc, rpc, NVGSP_RPC_REPLY_RECV);
 	if (err != 0) {
-		nvgsp_debugf(sc->dev,
-		    "bar2: UPDATE_BAR_PDE BAR_2 failed err=%d\n", err);
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: UPDATE_BAR_PDE BAR_2 failed err=%d\n", err);
 		return (err);
 	}
 
@@ -317,8 +315,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	lwkt_reltoken(&sc->gsp_tok);
 
 #ifdef NVGSP_DEBUG_BAR2
-	nvgsp_debugf(sc->dev,
-	    "bar2: GSP PDB[0] pre RPC = 0x%08x:%08x, post RPC = 0x%08x:%08x, expected pde = 0x%llx\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar2: GSP PDB[0] pre RPC = 0x%08x:%08x, post RPC = 0x%08x:%08x, expected pde = 0x%llx\n",
 	    pdb0_pre_hi, pdb0_pre_lo, pdb0_post_hi, pdb0_post_lo,
 	    (unsigned long long)pd2_pde);
 #else
@@ -336,8 +333,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	uint64_t bar2_inst_paddr = ((uint64_t)(bar2_inst & 0x0fffffffu)) << 12;
 	uint64_t bar1_inst_paddr = ((uint64_t)(bar1_inst & 0x0fffffffu)) << 12;
 #ifdef NVGSP_DEBUG_BAR2
-	nvgsp_debugf(sc->dev,
-	    "bar2: 0xb80f48=0x%08x (inst paddr=0x%llx), 0xb80f40=0x%08x (inst paddr=0x%llx)\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar2: 0xb80f48=0x%08x (inst paddr=0x%llx), 0xb80f40=0x%08x (inst paddr=0x%llx)\n",
 	    bar2_inst, (unsigned long long)bar2_inst_paddr,
 	    bar1_inst, (unsigned long long)bar1_inst_paddr);
 #endif
@@ -355,8 +351,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 		nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
 #ifdef NVGSP_DEBUG_BAR2
-		nvgsp_debugf(sc->dev,
-		    "bar2: BAR1_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x %s\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: BAR1_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x %s\n",
 		    b1_hi, b1_lo,
 		    (b1_lo == 0 && b1_hi == 0) ? "*** UNINITIALIZED ***" : "(populated)");
 #else
@@ -377,8 +372,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 		nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 		lwkt_reltoken(&sc->gsp_tok);
 #ifdef NVGSP_DEBUG_BAR2
-		nvgsp_debugf(sc->dev,
-		    "bar2: BAR2_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: BAR2_inst[0x200..0x208] (PDB ptr) = 0x%08x:%08x\n",
 		    inst_hi, inst_lo);
 #else
 		(void)inst_lo;
@@ -403,20 +397,23 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 		}
 	}
 
-	/* Immediate self-test (post-flush): map test VRAM page, write+read. */
+	/* Warm BAR2 after the root update.  The write/read pair is kept as a
+	 * functional GMMU/BAR2 visibility barrier for early RM RPC traffic. */
 	{
-		uint64_t tv = nvgsp_vram_alloc_kind(sc, 0x1000, 0x1000,
+		uint64_t warm_vram = nvgsp_vram_alloc_kind(sc, 0x1000, 0x1000,
 		    NVGSP_VRAM_BAR2_TEST, b2);
-		if (tv != 0) {
-			(void)nvgsp_bar_map_bar2_vram(sc, 0x2000, tv);
+		if (warm_vram != 0) {
+			uint32_t rb;
+
+			(void)nvgsp_bar_map_bar2_vram(sc, 0x2000, warm_vram);
 			nvgsp_bar_flush_bar2(sc);
 			nvgsp_bar_wr32_bar2(sc, 0x2000 + 0x10, 0xC0FFEE12u);
 			nvgsp_bar_flush_bar2(sc);
-			uint32_t rb = nvgsp_bar_rd32_bar2(sc, 0x2000 + 0x10);
+			rb = nvgsp_bar_rd32_bar2(sc, 0x2000 + 0x10);
 #ifdef NVGSP_DEBUG_BAR2
-			nvgsp_debugf(sc->dev,
-			    "bar2_diag: post-flush test wr C0FFEE12, readback = 0x%08x (target VRAM 0x%llx)\n",
-			    rb, (unsigned long long)tv);
+			nvgpu_log(NVGPU_LOG_DEBUG,
+			    "bar2: warmup readback=0x%08x target=0x%llx\n",
+			    rb, (unsigned long long)warm_vram);
 #else
 			(void)rb;
 #endif
@@ -425,8 +422,7 @@ nvgsp_bar_start_bar2(struct nvgsp_state *sc)
 	}
 
 #ifdef NVGSP_DEBUG_BAR2
-	nvgsp_debugf(sc->dev,
-	    "bar2: PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx; "
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar2: PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx SPT=0x%llx; "
 	    "GSP PDB=0x%llx; UPDATE_BAR_PDE pde=0x%llx; BAR2@%llx %lluMiB halve=%lluMiB\n",
 	    (unsigned long long)pd2, (unsigned long long)b2->pd1_paddr,
 	    (unsigned long long)b2->pd0_paddr, (unsigned long long)b2->spt_paddr,
@@ -455,7 +451,7 @@ nvgsp_bar_stop_bar2(struct nvgsp_state *sc)
 	 * charged to &sc->bar2; release them the same way as BAR1. */
 	freed = nvgsp_vram_free_owner(sc, &sc->bar2);
 	if (freed != 0)
-		nvgsp_debugf(sc->dev, "bar2: fini released %u VRAM pages\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar2: fini released %u VRAM pages\n",
 		    freed);
 }
 
@@ -495,8 +491,7 @@ nvgsp_bar_map_bar2_vram(struct nvgsp_state *sc, uint64_t bar2_gva,
 	lwkt_reltoken(&sc->gsp_tok);
 
 #ifdef NVGSP_DEBUG_BAR2
-	nvgsp_debugf(sc->dev,
-	    "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u] page=0x%llx pte=0x%016llx)\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar2: map BAR2_GVA=0x%llx -> VRAM=0x%llx (SPT[%u] page=0x%llx pte=0x%016llx)\n",
 	    (unsigned long long)bar2_gva, (unsigned long long)vram_paddr,
 	    spt_idx, (unsigned long long)spt_pt->paddr,
 	    (unsigned long long)pte);
@@ -629,8 +624,7 @@ nvgsp_bar_invalidate_bar1(struct nvgsp_state *sc)
 	}
 
 #ifdef NVGSP_DEBUG_BAR1
-	nvgsp_debugf(sc->dev,
-	    "bar1: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar1: TU102 invalidate PDB=0x%llx 0xb830b0=0x%x\n",
 	    (unsigned long long)sc->gsp_bar1_pdb, trig_rb);
 #endif
 }
@@ -648,15 +642,15 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	uint32_t saved;
 
 	if (nvgpu_device_get_bar(sc->gpu, 1) == NULL) {
-		nvgsp_debugf(sc->dev, "bar1: PCIe BAR1 not mapped\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar1: PCIe BAR1 not mapped\n");
 		return (ENXIO);
 	}
 	if (sc->gsp_bar1_pdb == 0) {
-		nvgsp_debugf(sc->dev, "bar1: GSP did not publish bar1PdeBase\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar1: GSP did not publish bar1PdeBase\n");
 		return (ENXIO);
 	}
 	if (!sc->bar2.ready) {
-		nvgsp_debugf(sc->dev, "bar1: BAR2 must be ready first (PRAMIN bootstrap)\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar1: BAR2 must be ready first (PRAMIN bootstrap)\n");
 		return (ENXIO);
 	}
 
@@ -709,8 +703,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	lwkt_reltoken(&sc->gsp_tok);
 
 #ifdef NVGSP_DEBUG_BAR1
-	nvgsp_debugf(sc->dev,
-	    "bar1: walked GSP PT chain: PD3=0x%llx -> PD2=0x%llx -> PD1=0x%llx -> PD0=0x%llx\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar1: walked GSP PT chain: PD3=0x%llx -> PD2=0x%llx -> PD1=0x%llx -> PD0=0x%llx\n",
 	    (unsigned long long)pdb_paddr, (unsigned long long)gsp_pd2,
 	    (unsigned long long)gsp_pd1, (unsigned long long)gsp_pd0);
 #endif
@@ -727,7 +720,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 		if (spt == 0) {
 			nvgsp_wr32(sc, NV_PBUS_PRAMIN, saved);
 			lwkt_reltoken(&sc->gsp_tok);
-			nvgsp_debugf(sc->dev, "bar1: SPT alloc failed slot=%u\n", slot);
+			nvgpu_log(NVGPU_LOG_DEBUG, "bar1: SPT alloc failed slot=%u\n", slot);
 			return (ENOMEM);
 		}
 
@@ -755,8 +748,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 		b1->spt_paddr[idx] = spt;
 
 #ifdef NVGSP_DEBUG_BAR1
-		nvgsp_debugf(sc->dev,
-		    "bar1: mounted OUR SPT 0x%llx at GSP PD0[%u] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar1: mounted OUR SPT 0x%llx at GSP PD0[%u] BIG 0x%llx->0x%llx SMALL 0x%llx->0x%llx\n",
 		    (unsigned long long)spt, slot,
 		    (unsigned long long)pd0_big_pre,
 		    (unsigned long long)pd0_big_post,
@@ -783,8 +775,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 		r = vm_phys_fictitious_reg_range(b1->fictitious_start,
 		    b1->fictitious_end, VM_MEMATTR_WRITE_COMBINING);
 		if (r != 0) {
-			nvgsp_debugf(sc->dev,
-			    "bar1: fictitious range 0x%llx-0x%llx failed err=%d\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "bar1: fictitious range 0x%llx-0x%llx failed err=%d\n",
 			    (unsigned long long)b1->fictitious_start,
 			    (unsigned long long)b1->fictitious_end, r);
 			return (r);
@@ -793,8 +784,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	}
 
 #ifdef NVGSP_DEBUG_BAR1
-	nvgsp_debugf(sc->dev,
-	    "bar1: mounted OUR SPT window PD0[%u..%u]; GVA base 0x%llx\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar1: mounted OUR SPT window PD0[%u..%u]; GVA base 0x%llx\n",
 	    NVGSP_BAR1_PD0_MANAGED_FIRST, NVGSP_BAR1_PD0_MANAGED_LAST,
 	    (unsigned long long)b1->next_gva);
 #endif
@@ -802,8 +792,7 @@ nvgsp_bar_start_bar1(struct nvgsp_state *sc)
 	nvgsp_bar_invalidate_bar1(sc);
 
 #ifdef NVGSP_DEBUG_BAR1
-	nvgsp_debugf(sc->dev,
-	    "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar1: inheriting GSP PT chain PD2=0x%llx PD1=0x%llx PD0=0x%llx; "
 	    "our SPT window mounted on GSP PD0[%u..%u].SMALL; "
 	    "BAR1@%llx %lluMiB\n",
 	    (unsigned long long)gsp_pd2, (unsigned long long)gsp_pd1,
@@ -838,7 +827,7 @@ nvgsp_bar_stop_bar1(struct nvgsp_state *sc)
 	 * allocator records charged to &sc->bar1 are their free list. */
 	freed = nvgsp_vram_free_owner(sc, &sc->bar1);
 	if (freed != 0)
-		nvgsp_debugf(sc->dev, "bar1: fini released %u PT pages\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "bar1: fini released %u PT pages\n",
 		    freed);
 }
 
@@ -884,8 +873,7 @@ nvgsp_bar_map_bar1_vram_pte(struct nvgsp_state *sc, uint64_t bar1_gva,
 	lwkt_reltoken(&sc->gsp_tok);
 
 #ifdef NVGSP_DEBUG_BAR1
-	nvgsp_debugf(sc->dev,
-	    "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "bar1: map BAR1_GVA=0x%llx -> VRAM=0x%llx (SPT[%u]=0x%llx)\n",
 	    (unsigned long long)bar1_gva, (unsigned long long)vram_paddr,
 	    spt_idx, (unsigned long long)pte);
 #endif

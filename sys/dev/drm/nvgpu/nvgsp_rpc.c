@@ -105,8 +105,7 @@ nvgsp_rpc_dump_diag_queues(struct nvgsp_state *sc, const char *tag,
 	msgq_tx = *(volatile uint32_t *)(msgq + 0x10);
 	msgq_rx = *(volatile uint32_t *)(msgq + 0x20);
 
-	nvgsp_debugf(sc->dev,
-	    "gsp_rpc: %s fn=%u seq=%u cmdq(tx=%u rx=%u) "
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_rpc: %s fn=%u seq=%u cmdq(tx=%u rx=%u) "
 	    "msgq(tx=%u rx=%u host_msgq_rptr=%u)\n",
 	    tag, fn, seq, cmdq_tx, cmdq_rx, msgq_tx, msgq_rx,
 	    sc->gsp_msgq_rptr);
@@ -161,7 +160,7 @@ nvgsp_rpc_handle_msg(struct nvgsp_state *sc, uint32_t fn,
 		return sc->gsp_ntfy.tab[i].func(
 		    sc->gsp_ntfy.tab[i].priv, fn, repv, repc);
 	}
-	nvgsp_debugf(sc->dev, "gsp_rpc: unhandled event fn=0x%x len=%u\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_rpc: unhandled event fn=0x%x len=%u\n",
 	    fn, repc);
 	return (0);
 }
@@ -337,15 +336,13 @@ nvgsp_rpc_push_cmdq(struct nvgsp_state *sc, void *params)
 	hdr_total = sizeof(*msg) + rpc_len;
 	padded    = roundup(hdr_total, NVGSP_PAGE_SIZE);
 	if (padded / NVGSP_PAGE_SIZE > NVGSP_MAX_MSG_PAGES) {
-		nvgsp_debugf(sc->dev,
-		    "cmdq_push: fn=%u len=%u exceeds %u pages\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "cmdq_push: fn=%u len=%u exceeds %u pages\n",
 		    rpc->function, rpc_len, NVGSP_MAX_MSG_PAGES);
 		kfree(msg, M_TEMP);
 		return (EINVAL);
 	}
 	if (padded / NVGSP_PAGE_SIZE >= NVGSP_MSGCOUNT) {
-		nvgsp_debugf(sc->dev,
-		    "cmdq_push: fn=%u len=%u too large for ring\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "cmdq_push: fn=%u len=%u too large for ring\n",
 		    rpc->function, rpc_len);
 		kfree(msg, M_TEMP);
 		return (EINVAL);
@@ -378,8 +375,7 @@ nvgsp_rpc_push_cmdq(struct nvgsp_state *sc, void *params)
 		DELAY(10);
 	}
 	if (retries == 0) {
-		nvgsp_debugf(sc->dev,
-		    "cmdq_push: timeout waiting for slot\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "cmdq_push: timeout waiting for slot\n");
 		kfree(msg, M_TEMP);
 		return (ETIMEDOUT);
 	}
@@ -414,8 +410,7 @@ nvgsp_rpc_push_cmdq(struct nvgsp_state *sc, void *params)
 	}
 
 #ifdef NVGSP_DEBUG_RPC_TRACE
-	nvgsp_debugf(sc->dev,
-	    "cmdq_push: fn=%u len=%u wptr=%u seq=%u ring=%d\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "cmdq_push: fn=%u len=%u wptr=%u seq=%u ring=%d\n",
 	    rpc->function, rpc_len, wptr, msg->sequence, sc->gsp_running);
 #endif
 	kfree(msg, M_TEMP);
@@ -461,13 +456,11 @@ nvgsp_rpc_recv_msgq_elem(struct nvgsp_state *sc, uint32_t want_len,
 	fn  = rpc->function;
 
 	if (sig != NVGSP_SIGNATURE) {
-		nvgsp_debugf(sc->dev,
-		    "msgq[%u]: bad signature 0x%08x (slot=%p) - skipping\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "msgq[%u]: bad signature 0x%08x (slot=%p) - skipping\n",
 		    sc->gsp_msgq_rptr, sig, slot);
 		/* Dump first 96 bytes of slot to identify format. */
 		for (int i = 0; i < 96; i += 16) {
-			nvgsp_debugf(sc->dev,
-			    "  slot[+%02d]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "  slot[+%02d]: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			    i,
 			    slot[i+0], slot[i+1], slot[i+2], slot[i+3],
 			    slot[i+4], slot[i+5], slot[i+6], slot[i+7],
@@ -486,8 +479,7 @@ nvgsp_rpc_recv_msgq_elem(struct nvgsp_state *sc, uint32_t want_len,
 
 	if (len < NVGSP_RPC_HDR_SIZE ||
 	    len > NVGSP_PAGE_SIZE * NVGSP_MAX_MSG_PAGES - NVGSP_MSG_HDR_SIZE) {
-		nvgsp_debugf(sc->dev,
-		    "msgq[%u]: invalid rpc length %u fn=0x%x sig=0x%08x - skipping one page\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "msgq[%u]: invalid rpc length %u fn=0x%x sig=0x%08x - skipping one page\n",
 		    sc->gsp_msgq_rptr, len, fn, sig);
 		nvgsp_rpc_skip_msgq_pages(sc, 1);
 		return (NULL);
@@ -612,8 +604,7 @@ nvgsp_rpc_drain_msgq_locked(struct nvgsp_state *sc)
 			if (!matched) {
 				nvgsp_rpc_add_trace(sc, NVGSP_RPC_STALE,
 				    fn, r->sequence, len, 0, 0);
-				nvgsp_debugf(sc->dev,
-				    "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
+				nvgpu_log(NVGPU_LOG_DEBUG, "gsp_rpc: stale reply fn=%u seq=%u (dropped)\n",
 				    fn, r->sequence);
 				kfree(buf, M_TEMP);
 			}
@@ -658,8 +649,7 @@ nvgsp_rpc_get(struct nvgsp_state *sc, uint32_t fn, uint32_t argc)
 	uint32_t alloc_sz;
 
 	if (argc > NVGSP_MAX_PAYLOAD) {
-		nvgsp_debugf(sc->dev,
-		    "rpc_get: fn=%u argc=%u exceeds max payload %u\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "rpc_get: fn=%u argc=%u exceeds max payload %u\n",
 		    fn, argc, NVGSP_MAX_PAYLOAD);
 		return (NULL);
 	}
@@ -813,8 +803,7 @@ nvgsp_rpc_push(struct nvgsp_state *sc, void *params, int policy,
 
 		if (!atomic_load_acq_int(&p.done)) {
 			nvgsp_rpc_dump_diag_queues(sc, "timeout", fn, p.seq);
-			nvgsp_debugf(sc->dev,
-			    "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "rpc_push: timeout waiting for fn=%u seq=%u reply\n",
 			    fn, p.seq);
 			return (NULL);
 		}
@@ -848,8 +837,7 @@ nvgsp_rpc_set_system_info(struct nvgsp_state *sc)
 	if (nvgpu_device_get_bar(sc->gpu, 0) == NULL ||
 	    nvgpu_device_get_bar(sc->gpu, 1) == NULL ||
 	    nvgpu_device_get_bar(sc->gpu, 3) == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "set_system_info: skipped (BARs not allocated)\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "set_system_info: skipped (BARs not allocated)\n");
 		return (ENXIO);
 	}
 

@@ -60,7 +60,7 @@ nvgsp_seq_resume_core(struct nvgsp_state *gsp)
 	uint32_t riscv_status;
 	uint64_t libos_paddr;
 
-	nvgsp_debugf(gsp->dev, "seq: CORE_RESUME\n");
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: CORE_RESUME\n");
 	if (gsp->gsp != NULL)
 		(void)nvgsp_falcon_reset_eng(gsp->gsp);
 
@@ -68,8 +68,7 @@ nvgsp_seq_resume_core(struct nvgsp_state *gsp)
 	nvgsp_wr32(gsp, gsp_base + 0x040, (uint32_t)libos_paddr);
 	nvgsp_wr32(gsp, gsp_base + 0x044, (uint32_t)(libos_paddr >> 32));
 
-	nvgsp_debugf(gsp->dev,
-	    "seq: SEC2 pre-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x BOOTVEC=0x%x SCRATCH14=0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: SEC2 pre-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x BOOTVEC=0x%x SCRATCH14=0x%x\n",
 	    nvgsp_rd32(gsp, sec2_base + 0x100),
 	    nvgsp_rd32(gsp, sec2_base + 0x10c),
 	    nvgsp_rd32(gsp, sec2_base + 0x040),
@@ -80,8 +79,7 @@ nvgsp_seq_resume_core(struct nvgsp_state *gsp)
 		nvgsp_falcon_start(gsp->sec2);
 	DELAY(100);
 
-	nvgsp_debugf(gsp->dev,
-	    "seq: SEC2 post-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x SCRATCH14=0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: SEC2 post-kick CPUCTL=0x%x DMACTL=0x%x MB0=0x%x SCRATCH14=0x%x\n",
 	    nvgsp_rd32(gsp, sec2_base + 0x100),
 	    nvgsp_rd32(gsp, sec2_base + 0x10c),
 	    nvgsp_rd32(gsp, sec2_base + 0x040),
@@ -89,27 +87,24 @@ nvgsp_seq_resume_core(struct nvgsp_state *gsp)
 
 	if (!nvgsp_seq_poll_reg(gsp, 0x1180f8, 0x04000000u, 0x04000000u,
 	    2000000u)) {
-		nvgsp_debugf(gsp->dev,
-		    "seq: CORE_RESUME timeout waiting for SEC2\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "seq: CORE_RESUME timeout waiting for SEC2\n");
 		return (ETIMEDOUT);
 	}
 
 	sec2_mb0 = nvgsp_rd32(gsp, sec2_base + 0x040);
 	if (sec2_mb0 != 0) {
-		nvgsp_debugf(gsp->dev,
-		    "seq: CORE_RESUME SEC2 MB0=0x%x\n", sec2_mb0);
+		nvgpu_log(NVGPU_LOG_DEBUG, "seq: CORE_RESUME SEC2 MB0=0x%x\n", sec2_mb0);
 		return (EIO);
 	}
 
 	nvgsp_wr32(gsp, gsp_base + 0x080, 0);
 	riscv_status = nvgsp_rd32(gsp, gsp_riscv + 0x240);
 	if ((riscv_status & 1) == 0) {
-		nvgsp_debugf(gsp->dev,
-		    "seq: CORE_RESUME failed RISCV_STATUS=0x%x\n", riscv_status);
+		nvgpu_log(NVGPU_LOG_DEBUG, "seq: CORE_RESUME failed RISCV_STATUS=0x%x\n", riscv_status);
 		return (EIO);
 	}
 
-	nvgsp_debugf(gsp->dev, "seq: CORE_RESUME ok, RISC-V active again\n");
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: CORE_RESUME ok, RISC-V active again\n");
 	return (0);
 }
 
@@ -128,7 +123,7 @@ nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	if (gsp == NULL || repv == NULL)
 		return (EINVAL);
 	if (repc < (2 + 8) * sizeof(uint32_t)) {
-		nvgsp_debugf(gsp->dev, "seq: payload too small (%u bytes)\n", repc);
+		nvgpu_log(NVGPU_LOG_DEBUG, "seq: payload too small (%u bytes)\n", repc);
 		return (EINVAL);
 	}
 
@@ -137,21 +132,19 @@ nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 	reg_save = (uint32_t *)(uintptr_t)&payload[2];
 	cmdbuf = &payload[2 + 8];
 
-	nvgsp_debugf(gsp->dev, "seq: start bufSizeDW=%u cmdIndex=%u\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: start bufSizeDW=%u cmdIndex=%u\n",
 	    buf_size_dw, cmd_index);
 	while (ptr < cmd_index) {
 		uint32_t opcode = cmdbuf[ptr++];
 		uint32_t payload_dw;
 
 		if (opcode >= nitems(nvgsp_seq_payload_dw)) {
-			nvgsp_debugf(gsp->dev,
-			    "seq: unknown opcode %u at idx %u\n", opcode, ptr - 1);
+			nvgpu_log(NVGPU_LOG_DEBUG, "seq: unknown opcode %u at idx %u\n", opcode, ptr - 1);
 			break;
 		}
 		payload_dw = nvgsp_seq_payload_dw[opcode];
 		if (ptr + payload_dw > cmd_index) {
-			nvgsp_debugf(gsp->dev,
-			    "seq: truncated opcode %u at idx %u need %u have %u\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "seq: truncated opcode %u at idx %u need %u have %u\n",
 			    opcode, ptr - 1, payload_dw, cmd_index - ptr);
 			break;
 		}
@@ -172,8 +165,7 @@ nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		case NVGSP_SEQ_OP_REG_POLL:
 			if (!nvgsp_seq_poll_reg(gsp, cmdbuf[ptr], cmdbuf[ptr + 1],
 			    cmdbuf[ptr + 2], cmdbuf[ptr + 3])) {
-				nvgsp_debugf(gsp->dev,
-				    "seq: poll timeout on 0x%06x\n", cmdbuf[ptr]);
+				nvgpu_log(NVGPU_LOG_DEBUG, "seq: poll timeout on 0x%06x\n", cmdbuf[ptr]);
 			}
 			break;
 		case NVGSP_SEQ_OP_DELAY_US:
@@ -199,8 +191,7 @@ nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		case NVGSP_SEQ_OP_CORE_WAIT_FOR_HALT:
 			if (gsp->gsp == NULL ||
 			    nvgsp_falcon_wait_for_halt(gsp->gsp, 2000000) != 0) {
-				nvgsp_debugf(gsp->dev,
-				    "seq: core wait-halt timeout\n");
+				nvgpu_log(NVGPU_LOG_DEBUG, "seq: core wait-halt timeout\n");
 			}
 			break;
 		case NVGSP_SEQ_OP_CORE_RESUME:
@@ -212,6 +203,6 @@ nvgsp_seq_handle_msg(void *priv, uint32_t fn, void *repv, uint32_t repc)
 		op_count++;
 	}
 
-	nvgsp_debugf(gsp->dev, "seq: done %u ops processed\n", op_count);
+	nvgpu_log(NVGPU_LOG_DEBUG, "seq: done %u ops processed\n", op_count);
 	return (0);
 }

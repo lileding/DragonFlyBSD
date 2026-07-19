@@ -644,8 +644,6 @@ nvgsp_le24(const uint8_t *p)
 	    ((uint32_t)p[2] << 16));
 }
 
-#define nvgsp_debugf(dev, fmt, ...) nvgpu_log(NVGPU_LOG_DEBUG, fmt, ##__VA_ARGS__)
-#define nvgsp_infof(dev, fmt, ...) nvgpu_log(NVGPU_LOG_INFO, fmt, ##__VA_ARGS__)
 
 /* Decode one GSP display event in process context and invoke borrowed callbacks. */
 int nvgsp_disp_dispatch_event(struct nvgpu_device *gpu, uint32_t client_handle,

@@ -177,8 +177,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	    ptes_size + NVGSP_CMDQ_SIZE + NVGSP_MSGQ_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_shm);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "libos: shm alloc failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "libos: shm alloc failed (%d)\n", error);
 		return (error);
 	}
 	sc->gsp_shm_ptes_nr   = ptes_nr;
@@ -218,8 +217,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	cmdq_tx->rxHdrOff = sizeof(*cmdq_tx);
 	cmdq_tx->entryOff = NVGSP_PAGE_SIZE;
 
-	nvgsp_debugf(sc->dev,
-	    "libos: shm paddr=0x%llx pteSz=%u pte#=%u cmdq@+0x%x msgq@+0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "libos: shm paddr=0x%llx pteSz=%u pte#=%u cmdq@+0x%x msgq@+0x%x\n",
 	    (unsigned long long)sc->gsp_shm.paddr,
 	    sc->gsp_shm_ptes_size, sc->gsp_shm_ptes_nr,
 	    sc->gsp_shm_cmdq_off, sc->gsp_shm_msgq_off);
@@ -228,8 +226,7 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_RMARGS_SIZE,
 	    NVGSP_PAGE_SIZE, &sc->gsp_rmargs);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "libos: rmargs alloc failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "libos: rmargs alloc failed (%d)\n", error);
 		goto err_shm;
 	}
 	rma = (struct nvgsp_arguments_cached *)sc->gsp_rmargs.kva;
@@ -305,15 +302,13 @@ nvgsp_libos_prepare(struct nvgsp_state *sc)
 	args[3].kind = NVGSP_LIBOS_KIND_CONTIGUOUS;
 	args[3].loc  = NVGSP_LIBOS_LOC_SYSMEM;
 
-	nvgsp_debugf(sc->dev,
-	    "libos: args page @0x%llx, LOGINIT=0x%llx LOGINTR=0x%llx LOGRM=0x%llx RMARGS=0x%llx\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "libos: args page @0x%llx, LOGINIT=0x%llx LOGINTR=0x%llx LOGRM=0x%llx RMARGS=0x%llx\n",
 	    (unsigned long long)sc->gsp_libos.paddr,
 	    (unsigned long long)args[0].pa,
 	    (unsigned long long)args[1].pa,
 	    (unsigned long long)args[2].pa,
 	    (unsigned long long)args[3].pa);
-	nvgsp_debugf(sc->dev,
-	    "libos: rmargs paddr=0x%llx shm=0x%llx ptes=%u cmdq+0x%x msgq+0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "libos: rmargs paddr=0x%llx shm=0x%llx ptes=%u cmdq+0x%x msgq+0x%x\n",
 	    (unsigned long long)sc->gsp_rmargs.paddr,
 	    (unsigned long long)sc->gsp_shm.paddr,
 	    ptes_nr, sc->gsp_shm_cmdq_off, sc->gsp_shm_msgq_off);

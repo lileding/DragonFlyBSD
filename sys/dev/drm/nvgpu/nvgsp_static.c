@@ -32,13 +32,13 @@ nvgsp_static_query_info(struct nvgsp_state *sc)
 	uint32_t i, j, m, scan;
 	char buf[80];
 
-	nvgsp_debugf(sc->dev, "static_info: issuing fn=65 RECV...\n");
+	nvgpu_log(NVGPU_LOG_DEBUG, "static_info: issuing fn=65 RECV...\n");
 
 	r = nvgsp_rpc_rd(sc,
 	    NV_VGPU_MSG_FUNCTION_GET_GSP_STATIC_INFO,
 	    NVGSP_STATIC_INFO_SIZE);
 	if (r == NULL) {
-		nvgsp_debugf(sc->dev, "static_info: rpc_rd failed\n");
+		nvgpu_log(NVGPU_LOG_DEBUG, "static_info: rpc_rd failed\n");
 		return (EIO);
 	}
 
@@ -63,18 +63,15 @@ nvgsp_static_query_info(struct nvgsp_state *sc)
 					buf[m++] = c;
 			}
 			buf[m] = 0;
-			nvgsp_debugf(sc->dev,
-			    "static_info: GPU = \"%s\"\n", buf);
+			nvgpu_log(NVGPU_LOG_DEBUG, "static_info: GPU = \"%s\"\n", buf);
 			break;
 		}
 	}
 
-	nvgsp_debugf(sc->dev,
-	    "static_info: hInternalClient=0x%08x device=0x%08x subdevice=0x%08x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "static_info: hInternalClient=0x%08x device=0x%08x subdevice=0x%08x\n",
 	    sc->gsp_internal_client, sc->gsp_internal_device,
 	    sc->gsp_internal_subdevice);
-	nvgsp_debugf(sc->dev,
-	    "static_info: bar1PdeBase=0x%llx bar2PdeBase=0x%llx\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "static_info: bar1PdeBase=0x%llx bar2PdeBase=0x%llx\n",
 	    (unsigned long long)sc->gsp_bar1_pdb,
 	    (unsigned long long)sc->gsp_bar2_pdb);
 
@@ -100,8 +97,7 @@ nvgsp_static_query_info(struct nvgsp_state *sc)
 			if (limit <= base)
 				continue;
 			size = (limit + 1) - base;
-			nvgsp_debugf(sc->dev,
-			    "static_info: fb_region[%u] base=0x%llx limit=0x%llx "
+			nvgpu_log(NVGPU_LOG_DEBUG, "static_info: fb_region[%u] base=0x%llx limit=0x%llx "
 			    "rsvd=0x%llx prot=%u\n", i,
 			    (unsigned long long)base,
 			    (unsigned long long)limit,
@@ -115,8 +111,7 @@ nvgsp_static_query_info(struct nvgsp_state *sc)
 		}
 		sc->fb_usable_base = best_base;
 		sc->fb_usable_size = best_size;
-		nvgsp_debugf(sc->dev,
-		    "static_info: usable VRAM region 0x%llx + 0x%llx\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "static_info: usable VRAM region 0x%llx + 0x%llx\n",
 		    (unsigned long long)best_base,
 		    (unsigned long long)best_size);
 	}

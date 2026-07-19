@@ -24,15 +24,13 @@ nvgsp_fw_init(struct nvgsp_state *sc)
 
 	fw = firmware_get(sc->chip->fw_booter_load);
 	if (fw == NULL) {
-		nvgsp_debugf(sc->dev,
-		    "fw: cannot load \"%s\" (firmware module absent?)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "fw: cannot load \"%s\" (firmware module absent?)\n",
 		    sc->chip->fw_booter_load);
 		return (ENOENT);
 	}
 
 	sc->fw_booter_load = fw;
-	nvgsp_debugf(sc->dev,
-	    "fw: %s loaded, %zu bytes, version %u, first 8: "
+	nvgpu_log(NVGPU_LOG_DEBUG, "fw: %s loaded, %zu bytes, version %u, first 8: "
 	    "%02x %02x %02x %02x %02x %02x %02x %02x\n",
 	    sc->chip->fw_booter_load,
 	    fw->datasize, fw->version,
@@ -44,8 +42,7 @@ nvgsp_fw_init(struct nvgsp_state *sc)
 	 * warning, not an error. */
 	sc->fw_booter_unload = firmware_get(sc->chip->fw_booter_unload);
 	if (sc->fw_booter_unload == NULL)
-		nvgsp_infof(sc->dev,
-		    "fw: \"%s\" missing; kldunload will leave WPR2 set\n",
+		nvgpu_log(NVGPU_LOG_INFO, "fw: \"%s\" missing; kldunload will leave WPR2 set\n",
 		    sc->chip->fw_booter_unload);
 
 	return (0);

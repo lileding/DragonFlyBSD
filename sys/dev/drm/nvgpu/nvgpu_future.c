@@ -32,10 +32,10 @@ static MALLOC_DEFINE(M_NVGPU_FUTURE, "nvgpu_future",
 #endif
 
 KTR_INFO_MASTER_EXTERN(nvgpu);
-KTR_INFO(KTR_NVGPU, nvgpu, future_spawn, 25,
+KTR_INFO(KTR_NVGPU, nvgpu, future_spawn, 23,
     "future spawn future=%p wait_count=%ju", void *future,
     uintmax_t wait_count);
-KTR_INFO(KTR_NVGPU, nvgpu, future_wait_done, 26,
+KTR_INFO(KTR_NVGPU, nvgpu, future_wait_done, 23,
     "future wait done future=%p old=%u", void *future, u_int old);
 
 static void nvgpu_future_wait_complete(void *argument);

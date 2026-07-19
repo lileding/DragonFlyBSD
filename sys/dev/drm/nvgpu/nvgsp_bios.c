@@ -83,8 +83,7 @@ nvgsp_bios_read_pramin(struct nvgsp_state *sc, uint8_t *buf, uint32_t length)
 	/* Bail out if the display engine reports itself disabled. */
 	dctl = nvgsp_rd32(sc, NV_PDISP_GENERAL_CTL);
 	if (dctl & NV_PDISP_GENERAL_CTL_DISABLED) {
-		nvgsp_debugf(sc->dev,
-		    "PRAMIN: display disabled (0x021c04=0x%x)\n", dctl);
+		nvgpu_log(NVGPU_LOG_DEBUG, "PRAMIN: display disabled (0x021c04=0x%x)\n", dctl);
 		return (ENODEV);
 	}
 
@@ -93,15 +92,13 @@ nvgsp_bios_read_pramin(struct nvgsp_state *sc, uint8_t *buf, uint32_t length)
 	if (!(vga_cr & NV_PDISP_VGA_CR_ENABLED) ||
 	    (vga_cr & NV_PDISP_VGA_CR_TARGET_MASK) !=
 	    NV_PDISP_VGA_CR_TARGET_VRAM) {
-		nvgsp_debugf(sc->dev,
-		    "PRAMIN: VGA aperture not in VRAM (0x625f04=0x%x)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "PRAMIN: VGA aperture not in VRAM (0x625f04=0x%x)\n",
 		    vga_cr);
 		return (ENODEV);
 	}
 	vram_addr = ((uint64_t)(vga_cr & 0xffffff00u)) << 8;
 	if (vram_addr == 0) {
-		nvgsp_debugf(sc->dev,
-		    "PRAMIN: vga_cr has no staged address (0x625f04=0x%x)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "PRAMIN: vga_cr has no staged address (0x625f04=0x%x)\n",
 		    vga_cr);
 		return (ENODEV);
 	}
@@ -110,8 +107,7 @@ nvgsp_bios_read_pramin(struct nvgsp_state *sc, uint8_t *buf, uint32_t length)
 	saved_window = nvgsp_rd32(sc, NV_PBUS_PRAMIN);
 	nvgsp_wr32(sc, NV_PBUS_PRAMIN, (uint32_t)(vram_addr >> 16));
 
-	nvgsp_debugf(sc->dev,
-	    "PRAMIN: vga_cr=0x%x vram_addr=%#jx window saved=0x%x\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "PRAMIN: vga_cr=0x%x vram_addr=%#jx window saved=0x%x\n",
 	    vga_cr, (uintmax_t)vram_addr, saved_window);
 
 	for (i = 0; i < length; i += 4) {
@@ -155,8 +151,7 @@ nvgsp_bios_parse_image(struct nvgsp_state *sc, uint32_t offset, int idx,
 		if (sig != NVGSP_ROM_SIG_STD &&
 		    sig != NVGSP_ROM_SIG_NV &&
 		    sig != NVGSP_ROM_SIG_NV2) {
-			nvgsp_debugf(sc->dev,
-			    "VBIOS image %d: bad ROM signature 0x%04x at 0x%05x\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS image %d: bad ROM signature 0x%04x at 0x%05x\n",
 			    idx, sig, offset);
 			return (EIO);
 		}
@@ -166,8 +161,7 @@ nvgsp_bios_parse_image(struct nvgsp_state *sc, uint32_t offset, int idx,
 	pcir = offset + pcir_rel;
 
 	if (pcir + 0x18 > sc->vbios_size) {
-		nvgsp_debugf(sc->dev,
-		    "VBIOS image %d: PCIR beyond buffer (off=0x%05x rel=0x%04x)\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS image %d: PCIR beyond buffer (off=0x%05x rel=0x%04x)\n",
 		    idx, offset, pcir_rel);
 		return (EIO);
 	}
@@ -177,8 +171,7 @@ nvgsp_bios_parse_image(struct nvgsp_state *sc, uint32_t offset, int idx,
 		if (pcir_sig != NVGSP_PCIR_SIG_PCIR &&
 		    pcir_sig != NVGSP_PCIR_SIG_NPDS &&
 		    pcir_sig != NVGSP_PCIR_SIG_RGIS) {
-			nvgsp_debugf(sc->dev,
-			    "VBIOS image %d: bad PCIR signature 0x%08x at 0x%05x\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS image %d: bad PCIR signature 0x%08x at 0x%05x\n",
 			    idx, pcir_sig, pcir);
 			return (EIO);
 		}
@@ -231,8 +224,7 @@ nvgsp_bios_parse_image(struct nvgsp_state *sc, uint32_t offset, int idx,
 		}
 	}
 
-	nvgsp_debugf(sc->dev,
-	    "VBIOS image %d at 0x%05x: %u bytes vendor=0x%04x device=0x%04x "
+	nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS image %d at 0x%05x: %u bytes vendor=0x%04x device=0x%04x "
 	    "class=0x%06x code_type=0x%02x last=%d%s\n",
 	    idx, offset, advance_bytes,
 	    vendor, device, class_code, code_type, *last,
@@ -282,8 +274,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 		nvgsp_wr32(sc, 0x001fa824, 0xdeadbe00u);
 		after_lo = nvgsp_rd32(sc, 0x001fa824);
 		nvgsp_wr32(sc, 0x001fa824, orig_lo);
-		nvgsp_debugf(sc->dev,
-		    "WPR2: lo=0x%08x hi=0x%08x, test-write -> readback=0x%08x %s\n",
+		nvgpu_log(NVGPU_LOG_DEBUG, "WPR2: lo=0x%08x hi=0x%08x, test-write -> readback=0x%08x %s\n",
 		    orig_lo, orig_hi, after_lo,
 		    after_lo == 0xdeadbe00u ? "(WRITABLE)" : "(LOCKED)");
 	}
@@ -300,8 +291,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 			if (ver != 2) continue;
 			if (sz_lo != 0x3c || sz_hi != 0x00) continue;
 
-			nvgsp_debugf(sc->dev,
-			    "FwSec desc V2 @ 0x%05x: flags=0x%02x enc=%d "
+			nvgpu_log(NVGPU_LOG_DEBUG, "FwSec desc V2 @ 0x%05x: flags=0x%02x enc=%d "
 			    "imem_phys=0x%x imem_load=%u imem_virt=0x%x "
 			    "dmem_offset=0x%x dmem_phys=0x%x dmem_load=%u "
 			    "intf=0x%x ventry=0x%x\n",
@@ -317,8 +307,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 			hits++;
 		}
 		if (hits == 0)
-			nvgsp_debugf(sc->dev,
-			    "FwSec: no V2 desc candidates in %u bytes\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "FwSec: no V2 desc candidates in %u bytes\n",
 			    sc->vbios_size);
 	}
 
@@ -328,8 +317,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 		if (sig != NVGSP_ROM_SIG_STD &&
 		    sig != NVGSP_ROM_SIG_NV &&
 		    sig != NVGSP_ROM_SIG_NV2) {
-			nvgsp_debugf(sc->dev,
-			    "VBIOS: no valid ROM signature at offset 0 (got 0x%04x)\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS: no valid ROM signature at offset 0 (got 0x%04x)\n",
 			    sig);
 			kfree(sc->vbios, M_NVGSP_VBIOS);
 			sc->vbios = NULL;
@@ -346,8 +334,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 		error = nvgsp_bios_parse_image(sc, offset, idx, &size, &last,
 		    &npde_used);
 		if (error != 0) {
-			nvgsp_debugf(sc->dev,
-			    "VBIOS: chain truncated at image %d (offset 0x%05x)\n",
+			nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS: chain truncated at image %d (offset 0x%05x)\n",
 			    idx, offset);
 			break;
 		}
@@ -360,7 +347,7 @@ nvgsp_bios_init(struct nvgsp_state *sc)
 	if (last)
 		sc->vbios_size = offset + size;
 
-	nvgsp_debugf(sc->dev, "VBIOS: %d image%s, total %u bytes\n",
+	nvgpu_log(NVGPU_LOG_DEBUG, "VBIOS: %d image%s, total %u bytes\n",
 	    idx, idx == 1 ? "" : "s", sc->vbios_size);
 
 	return (0);

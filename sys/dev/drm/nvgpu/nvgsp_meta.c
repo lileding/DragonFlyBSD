@@ -49,8 +49,7 @@ nvgsp_meta_init(struct nvgsp_state *sc)
 	error = nvgsp_dma_alloc_dmamem(sc, NVGSP_FW_WPR_META_SIZE, 4096,
 	    &sc->wpr_meta);
 	if (error != 0) {
-		nvgsp_debugf(sc->dev,
-		    "gsp_meta: alloc failed (%d)\n", error);
+		nvgpu_log(NVGPU_LOG_DEBUG, "gsp_meta: alloc failed (%d)\n", error);
 		return (error);
 	}
 
@@ -65,8 +64,7 @@ nvgsp_meta_init(struct nvgsp_state *sc)
 	 * bin, FRTS layout etc.).
 	 */
 
-	nvgsp_debugf(sc->dev,
-	    "gsp_meta: allocated 256 B @ kva=%p paddr=0x%llx "
+	nvgpu_log(NVGPU_LOG_DEBUG, "gsp_meta: allocated 256 B @ kva=%p paddr=0x%llx "
 	    "(magic=0x%llx revision=%llu)\n",
 	    m, (unsigned long long)sc->wpr_meta.paddr,
 	    (unsigned long long)m->magic, (unsigned long long)m->revision);
