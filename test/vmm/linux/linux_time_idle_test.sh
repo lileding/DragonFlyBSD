@@ -2,9 +2,9 @@
 # pc64 true-hardware Linux time/idle correctness harness.
 #
 # This test keeps the rootfs in initrd memory and focuses on vmm core time and
-# idle behavior: guest sleep must advance on guest-visible timer interrupts,
-# an idle guest must wake on serial input, and multiple Linux guests must clean
-# up through force stop, rmdir, umount, and kldunload.
+# idle behavior: guest sleep must advance on the TSC-deadline clockevent, an
+# idle guest must wake on serial input, and multiple Linux guests must clean up
+# through force stop, rmdir, umount, and kldunload.
 set -u
 
 ROOT=$(dirname "$0")
@@ -217,7 +217,7 @@ marker_value()
 	file=$1
 	marker=$2
 
-	awk -v marker="$marker" '$1 == marker { value = $2 } END { if (value != "") print value }' "$file"
+	awk -v marker="$marker" '$1 == marker { value = $2; sub(/\r$/, "", value) } END { if (value != "") print value }' "$file"
 }
 
 check_uptime_progress()
@@ -228,7 +228,15 @@ check_uptime_progress()
 	up0=$(marker_value "$file" "${base}_UP0")
 	up1=$(marker_value "$file" "${base}_UP1")
 	up2=$(marker_value "$file" "${base}_UP2")
+	clockevent=$(marker_value "$file" "${base}_CLOCKEVENT")
+	clocksource=$(marker_value "$file" "${base}_CLOCKSOURCE_FINAL")
 
+	[ "$clockevent" = "lapic-deadline" ] ||
+	    fail "$vm expected lapic-deadline clockevent, got ${clockevent:-missing}"
+	[ "$clocksource" = "tsc" ] ||
+	    fail "$vm expected stable tsc clocksource, got ${clocksource:-missing}"
+	grep -q "TSC doesn't count with P0 frequency" "$file" &&
+	    fail "$vm Linux still reports TSC/P0 frequency mismatch"
 	[ -n "$up0" ] || fail "$vm missing ${base}_UP0"
 	[ -n "$up1" ] || fail "$vm missing ${base}_UP1"
 	[ -n "$up2" ] || fail "$vm missing ${base}_UP2"
@@ -243,7 +251,7 @@ run_guest_time_idle()
 	base="DFVMM_${vm}_TIME"
 
 	write_console "$vm" \
-	    "a=$base; read ce < /sys/devices/system/clockevents/clockevent0/current_device 2>/dev/null || ce=missing; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKEVENT \$ce; echo \${a}_CLOCKSOURCE \$cs; echo \${a}_BEGIN; read u _ < /proc/uptime; echo \${a}_UP0 \$u; sleep 1; read u _ < /proc/uptime; echo \${a}_UP1 \$u; sleep 3; read u _ < /proc/uptime; echo \${a}_UP2 \$u; echo \${a}_INTERRUPTS_BEGIN; cat /proc/interrupts; echo \${a}_INTERRUPTS_END; echo \${a}_END"
+	    "a=$base; read ce < /sys/devices/system/clockevents/clockevent0/current_device 2>/dev/null || ce=missing; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKEVENT \$ce; echo \${a}_CLOCKSOURCE \$cs; echo \${a}_BEGIN; read u _ < /proc/uptime; echo \${a}_UP0 \$u; sleep 1; read u _ < /proc/uptime; echo \${a}_UP1 \$u; sleep 3; read u _ < /proc/uptime; echo \${a}_UP2 \$u; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKSOURCE_FINAL \$cs; echo \${a}_INTERRUPTS_BEGIN; cat /proc/interrupts; echo \${a}_INTERRUPTS_END; echo \${a}_END"
 	wait_console_pattern "$vm" "${base}_END" "$vm console" ||
 	    fail "$vm time marker missing"
 	check_uptime_progress "$vm"
