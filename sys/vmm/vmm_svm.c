@@ -544,8 +544,6 @@ struct vmm_svm_backend {
 	uint32_t mut_avic_host_apic_id;
 	uint32_t mut_avic_host_cpuid;
 	int mut_avic_bound;
-	int mut_vintr_active;
-	uint8_t mut_vintr_vector;
 	uint32_t mut_lapic_timer_lvtt;
 	uint32_t mut_lapic_timer_tmict;
 	uint32_t mut_lapic_timer_tdcr;
@@ -555,7 +553,6 @@ struct vmm_svm_backend {
 	uint32_t mut_lapic_timer_idle_count;
 	uint32_t mut_pause_exit_count;
 	int mut_lapic_timer_active;
-	int mut_lapic_timer_irq_pending;
 	int mut_lapic_timer_deadline;
 	/*
 	 * IOAPIC and COM1 device state is owned by the vCPU thread.  Host
@@ -923,137 +920,6 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	}
 }
 
-static int
-vmm_svm_avic_isr_prio(struct vmm_svm_backend *svm)
-{
-	volatile u_int *isr;
-	uint32_t bits;
-	int i;
-	int bit;
-
-	for (i = 7; i >= 1; --i) {
-		isr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
-		    VMM_SVM_APIC_REG_ISR_BASE + i * 0x10);
-		bits = *isr;
-		if (bits == 0)
-			continue;
-		for (bit = 31; bit >= 0; --bit) {
-			if ((bits & (1U << bit)) != 0)
-				return (i * 32 + bit) >> 4;
-		}
-	}
-	return -1;
-}
-
-static int
-vmm_svm_avic_next_irr(struct vmm_svm_backend *svm, uint8_t *vectorp)
-{
-	volatile u_int *irr;
-	uint64_t entry;
-	uint32_t bits;
-	uint32_t vector32;
-	int i;
-	int isr_prio;
-	int bit;
-	int vector;
-
-	isr_prio = vmm_svm_avic_isr_prio(svm);
-	if (svm->mut_com1_rx_irq_pending || svm->mut_com1_thr_irq_pending) {
-		entry = svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
-		vector32 = (uint32_t)entry & 0xffU;
-		if (vector32 >= 32 && (int)(vector32 >> 4) > isr_prio) {
-			irr = (volatile u_int *)
-			    ((uint8_t *)svm->own_mut_avic_apic_page +
-			    VMM_SVM_APIC_REG_IRR_BASE +
-			    (vector32 / 32) * 0x10);
-			if ((*irr & (1U << (vector32 & 31))) != 0) {
-				*vectorp = (uint8_t)vector32;
-				return 1;
-			}
-		}
-	}
-	for (i = 7; i >= 1; --i) {
-		irr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
-		    VMM_SVM_APIC_REG_IRR_BASE + i * 0x10);
-		bits = *irr;
-		if (bits == 0)
-			continue;
-		for (bit = 31; bit >= 0; --bit) {
-			if ((bits & (1U << bit)) != 0) {
-				vector = i * 32 + bit;
-				if ((vector >> 4) <= isr_prio)
-					continue;
-				*vectorp = (uint8_t)vector;
-				return 1;
-			}
-		}
-	}
-	return 0;
-}
-
-static void
-vmm_svm_vintr_prepare(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	uint8_t vector;
-
-	vmm_svm_com1_rx_notify(svm, vc, "vintr_prepare");
-	if (svm->mut_vintr_active ||
-	    (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0 ||
-	    !vmm_svm_avic_next_irr(svm, &vector))
-		return;
-	vmcb->ctrl.v &= ~(VMM_SVM_CTRL_V_IRQ | VMM_SVM_CTRL_V_IGN_TPR |
-	    VMM_SVM_CTRL_V_INTR_PRIO_MASK |
-	    VMM_SVM_CTRL_V_INTR_VECTOR_MASK);
-	vmcb->ctrl.v |= VMM_SVM_CTRL_V_IRQ |
-	    ((uint64_t)(vector >> 4) << VMM_SVM_CTRL_V_INTR_PRIO_SHIFT) |
-	    ((uint64_t)vector << VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT);
-	svm->mut_vintr_active = 1;
-	svm->mut_vintr_vector = vector;
-	if (vector != (svm->mut_lapic_timer_lvtt &
-	    VMM_SVM_APIC_LVT_VECTOR_MASK)) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u vintr prepare vector=0x%x v=0x%jx",
-		    vc->imm_id, vector, (uintmax_t)vmcb->ctrl.v);
-	} else if (svm->mut_lapic_timer_fire_count <= 8 ||
-	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u vintr prepare vector=0x%x v=0x%jx",
-		    vc->imm_id, vector, (uintmax_t)vmcb->ctrl.v);
-	}
-}
-
-static void
-vmm_svm_vintr_complete(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	volatile u_int *irr;
-	uint8_t vector;
-	uint32_t bit;
-
-	if (!svm->mut_vintr_active ||
-	    (vmcb->ctrl.v & VMM_SVM_CTRL_V_IRQ) != 0)
-		return;
-	vector = svm->mut_vintr_vector;
-	bit = 1U << (vector & 31);
-	irr = (volatile u_int *)((uint8_t *)svm->own_mut_avic_apic_page +
-	    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
-	atomic_clear_int(irr, bit);
-	cpu_mfence();
-	svm->mut_vintr_active = 0;
-	if (vector != (svm->mut_lapic_timer_lvtt &
-	    VMM_SVM_APIC_LVT_VECTOR_MASK)) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u vintr accepted vector=0x%x irr=0x%x",
-		    vc->imm_id, vector, *irr);
-	} else if (svm->mut_lapic_timer_fire_count <= 8 ||
-	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u vintr accepted vector=0x%x irr=0x%x",
-		    vc->imm_id, vector, *irr);
-	}
-}
-
 static void
 vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 {
@@ -1066,7 +932,6 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_backend *svm, uint32_t count)
 	    (svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
 	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 		svm->mut_lapic_timer_active = 0;
-		svm->mut_lapic_timer_irq_pending = 0;
 		return;
 	}
 	delta = ((uint64_t)count * svm->mut_lapic_timer_divisor) /
@@ -1116,8 +981,6 @@ vmm_svm_lapic_timer_sync(struct vmm_svm_backend *svm)
 		if ((lvtt & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
 		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
 			svm->mut_lapic_timer_active = 0;
-		if ((lvtt & VMM_SVM_APIC_LVT_MASKED) != 0)
-			svm->mut_lapic_timer_irq_pending = 0;
 	}
 	tmict = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_TMICT);
 	if (tmict != svm->mut_lapic_timer_tmict) {
@@ -1157,7 +1020,7 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT, 0);
 	if ((svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_MASKED) == 0) {
 		svm->mut_lapic_timer_fire_count++;
-		svm->mut_lapic_timer_irq_pending = 1;
+		vmm_svm_avic_deliver(svm, vc, vector, "lapic_timer");
 		if (svm->mut_lapic_timer_fire_count <= 8 ||
 		    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
 			VMM_SVM_TRACE(svm,
@@ -1180,36 +1043,6 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 		    svm->mut_lapic_timer_tmict);
 	} else {
 		svm->mut_lapic_timer_active = 0;
-	}
-}
-
-static void
-vmm_svm_lapic_timer_prepare(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	uint8_t vector;
-
-	if (!svm->mut_lapic_timer_irq_pending ||
-	    svm->mut_vintr_active ||
-	    (vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) != 0)
-		return;
-	vector = svm->mut_lapic_timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
-	vmcb->ctrl.v &= ~(VMM_SVM_CTRL_V_IRQ | VMM_SVM_CTRL_V_IGN_TPR |
-	    VMM_SVM_CTRL_V_INTR_PRIO_MASK |
-	    VMM_SVM_CTRL_V_INTR_VECTOR_MASK);
-	vmcb->ctrl.v |= VMM_SVM_CTRL_V_IRQ |
-	    ((uint64_t)(vector >> 4) << VMM_SVM_CTRL_V_INTR_PRIO_SHIFT) |
-	    ((uint64_t)vector << VMM_SVM_CTRL_V_INTR_VECTOR_SHIFT);
-	svm->mut_vintr_active = 1;
-	svm->mut_vintr_vector = vector;
-	svm->mut_lapic_timer_irq_pending = 0;
-	if (svm->mut_lapic_timer_fire_count <= 8 ||
-	    (svm->mut_lapic_timer_fire_count & 1023U) == 0) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u vintr lapic timer vector=0x%x count=%u v=0x%jx",
-		    vc->imm_id, vector, svm->mut_lapic_timer_fire_count,
-		    (uintmax_t)vmcb->ctrl.v);
 	}
 }
 
@@ -3644,7 +3477,7 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 	/*
 	 * This callback runs in the host tty writer's thread.  It is only a
 	 * poke path; COM1/IOAPIC state is owned by the vCPU thread and is
-	 * converted into AVIC delivery from vintr_prepare or after idle wakeup.
+	 * converted into AVIC IRR delivery before the next VMRUN.
 	 */
 	console = &svm->borrow_imm_machine->own_mut_console;
 	VMM_SVM_TRACE(svm, "svm vcpu%u console input poke pending=%zu",
@@ -4027,10 +3860,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 			svm->mut_lapic_timer_tmict = 0;
 			svm->mut_lapic_timer_active = 0;
-			svm->mut_lapic_timer_irq_pending = 0;
 		}
-		if ((value & VMM_SVM_APIC_LVT_MASKED) != 0)
-			svm->mut_lapic_timer_irq_pending = 0;
 		if (svm->mut_lapic_timer_tmict != 0)
 			vmm_svm_lapic_timer_arm(svm,
 			    svm->mut_lapic_timer_tmict);
@@ -4084,7 +3914,6 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR, value);
 		if ((value & VMM_SVM_APIC_SVR_ENABLE) == 0) {
 			svm->mut_lapic_timer_active = 0;
-			svm->mut_lapic_timer_irq_pending = 0;
 			svm->mut_lapic_timer_lvtt |= VMM_SVM_APIC_LVT_MASKED;
 			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
 			    svm->mut_lapic_timer_lvtt);
@@ -4177,6 +4006,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_lapic_timer_sync(svm);
 		vmm_svm_lapic_timer_check(svm, vc);
+		vmm_svm_com1_rx_notify(svm, vc, "entry");
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup(svm);
@@ -4186,8 +4016,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			lwkt_user_yield();
 			continue;
 		}
-		vmm_svm_vintr_prepare(svm, vc);
-		vmm_svm_lapic_timer_prepare(svm, vc);
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
@@ -4197,7 +4025,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
 		vmm_svm_stgi();
-		vmm_svm_vintr_complete(svm, vc);
 		reqflags = mycpu->gd_reqflags;
 		vmm_svm_requeue_exit_event(svm);
 		switch (vmcb->ctrl.exitcode) {
