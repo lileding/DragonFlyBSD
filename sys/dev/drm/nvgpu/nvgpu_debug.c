@@ -5,9 +5,7 @@
  */
 
 #include "nvgpu_debug.h"
-#include "nvgpu_device.h"
 
-#include <sys/bus.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/ktr.h>
@@ -92,11 +90,9 @@ nvgpu_debug_emit_vlog(enum nvgpu_log_level level, const char *file, const char *
 	int line, const char *fmt, __va_list ap)
 {
 	char buf[512];
-	device_t dev;
 	const char *name;
 
-	dev = nvgpu_device_get_newbus_dev(NULL);
-	name = dev != NULL ? device_get_nameunit(dev) : "nvgpu";
+	name = "nvgpu";
 	kvsnprintf(buf, sizeof(buf), fmt, ap);
 	kprintf("%s: %s: %s:%s:%d: %s", name, nvgpu_debug_get_level_name(level),
 	    file, func, line, buf);

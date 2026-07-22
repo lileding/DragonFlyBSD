@@ -25,7 +25,7 @@ void nvgpu_debug_fini(void);
 void nvgpu_debug_emit_log(enum nvgpu_log_level level, const char *file,
 	const char *func, int line, const char *fmt, ...) __printflike(5, 6);
 
-/* Log with call-site file/function/line.  The logging backend uses the default GPU if one is published. */
+/* Log with call-site file/function/line. */
 #define nvgpu_log(level, fmt, ...) \
 	nvgpu_debug_emit_log((level), __FILE__, __func__, __LINE__, (fmt), \
 	    ##__VA_ARGS__)

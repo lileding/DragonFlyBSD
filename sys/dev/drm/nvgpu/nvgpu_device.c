@@ -119,55 +119,12 @@ static int nvgpu_device_start_boot(struct nvgpu_device *gpu);
 static void nvgpu_device_run_boot(void *arg);
 static int nvgpu_device_run_boot_sequence(struct nvgpu_device *gpu);
 static int nvgpu_device_identify_boot(struct nvgpu_device *gpu);
-static int nvgpu_device_pin_drm_module(void);
 static int nvgpu_device_load_gsp_firmware(struct nvgpu_device *gpu);
 static int nvgpu_device_query_channel_capacity(struct nvgpu_device *gpu);
 static void nvgpu_device_teardown(struct nvgpu_device *gpu);
 static void nvgpu_device_fini(struct nvgpu_device *gpu);
-
-/* Handle module load and unload notifications. */
-static int
-nvgpu_device_handle_modevent(module_t mod __unused, int type, void *data __unused)
-{
-	int error;
-
-	switch (type) {
-	case MOD_LOAD:
-		error = nvgpu_debug_init();
-		if (error != 0)
-			return (error);
-		error = nvgpu_device_pin_drm_module();
-		if (error != 0) {
-			nvgpu_debug_fini();
-			return (error);
-		}
-		error = nvgpu_sched_start();
-		if (error != 0) {
-			nvgpu_debug_fini();
-			return (error);
-		}
-		nvgpu_log(NVGPU_LOG_INFO, "loaded (default GSP firmware version %d)\n",
-	    nvgpu_gsp_version);
-		return (0);
-	case MOD_UNLOAD:
-		nvgpu_sched_stop();
-		nvgpu_log(NVGPU_LOG_INFO, "unloaded\n");
-		nvgpu_debug_fini();
-		return (0);
-	default:
-		return (EOPNOTSUPP);
-	}
-}
-
-
-static moduledata_t nvgpu_device_moddata = {
-	"nvgpu",
-	nvgpu_device_handle_modevent,
-	NULL
-};
-
-DECLARE_MODULE(nvgpu, nvgpu_device_moddata, SI_SUB_DRIVERS, SI_ORDER_ANY);
-MODULE_VERSION(nvgpu, 1);
+static int nvgpu_driver_init(void);
+static void nvgpu_driver_release(void);
 
 static device_method_t nvgpu_device_pci_methods[] = {
 	DEVMETHOD(device_probe,	nvgpu_device_probe_pci),
@@ -188,32 +145,48 @@ static driver_t nvgpu_device_pci_driver = {
 };
 
 static devclass_t nvgpu_device_devclass;
-static struct nvgpu_device *nvgpu_default_gpu;
+static struct lwkt_token nvgpu_driver_token =
+    LWKT_TOKEN_INITIALIZER(nvgpu_driver_token);
+static u_int nvgpu_driver_refs;
 
 DRIVER_MODULE(nvgpu, vgapci, nvgpu_device_pci_driver,
     nvgpu_device_devclass, NULL, NULL);
 MODULE_DEPEND(nvgpu, drm, 1, 1, 1);
 
-/*
- * Keep drm.ko resident after nvgpu unload.  DragonFly recursively unloads KLD
- * dependencies after the owning module's MOD_UNLOAD handler returns.  The old
- * DRM/TTM module-unload path is not part of the nvgpu release boundary, so the
- * NVIDIA driver pins drm once and lets kldunload nvgpu tear down only nvgpu.
- */
+/* Acquire one device lifetime reference and start shared state if needed. */
 static int
-nvgpu_device_pin_drm_module(void)
+nvgpu_driver_init(void)
 {
-	linker_file_t file;
-	int error;
+	int error = 0;
 
-	error = linker_reference_module("drm", NULL, &file);
-	if (error != 0)
-		return (error);
+	lwkt_gettoken(&nvgpu_driver_token);
+	nvgpu_driver_refs++;
+	if (nvgpu_driver_refs == 1) {
+		error = nvgpu_debug_init();
+		if (error == 0)
+			error = nvgpu_sched_start();
+		if (error != 0)
+			nvgpu_driver_release();
+	}
+	lwkt_reltoken(&nvgpu_driver_token);
+	return (error);
+}
 
-	if (file->refs > 2)
-		(void)linker_release_module(NULL, NULL, file);
-
-	return (0);
+/* Release one device lifetime reference and stop shared state at zero. */
+static void
+nvgpu_driver_release(void)
+{
+	lwkt_gettoken(&nvgpu_driver_token);
+	KASSERT(nvgpu_driver_refs != 0,
+	    ("nvgpu driver references underflow"));
+	nvgpu_driver_refs--;
+	if (nvgpu_driver_refs == 0) {
+		KASSERT(nvgpu_sched_busy_count() == 0,
+		    ("final nvgpu detach with active futures"));
+		nvgpu_sched_stop();
+		nvgpu_debug_fini();
+	}
+	lwkt_reltoken(&nvgpu_driver_token);
 }
 
 /* Look up static chip metadata for a PCI device. */
@@ -305,13 +278,10 @@ nvgpu_device_release_bars(struct nvgpu_device *gpu)
 	}
 }
 
-/* Return the DragonFly device for a GPU or the default GPU. */
-/* Return gpu's borrowed device_t.  NULL gpu means the current default GPU, if any. */
+/* Return gpu's borrowed DragonFly device. */
 device_t
 nvgpu_device_get_newbus_dev(struct nvgpu_device *gpu)
 {
-	if (gpu == NULL)
-		gpu = nvgpu_default_gpu;
 	if (gpu == NULL)
 		return (NULL);
 	return (gpu->dev);
@@ -729,8 +699,7 @@ nvgpu_device_fini(struct nvgpu_device *gpu)
 {
 	nvgpu_log(NVGPU_LOG_DEBUG, "finish device\n");
 	nvgpu_log(NVGPU_LOG_INFO, "detached\n");
-	if (nvgpu_default_gpu == gpu)
-		nvgpu_default_gpu = NULL;
+	lwkt_token_uninit(&gpu->boot_token);
 	_kfree(gpu, M_NVGPU_DEVICE);
 }
 
@@ -749,13 +718,11 @@ nvgpu_device_attach_pci(device_t dev)
 	gpu = kmalloc(sizeof(*gpu), M_NVGPU_DEVICE, M_WAITOK | M_ZERO);
 
 	gpu->dev = dev;
-	nvgpu_default_gpu = gpu;
 	gpu->pci_device = id;
 	gpu->chip = id->chip;
 	gpu->boot_phase = NVGPU_BOOT_BEGIN;
 	gpu->boot_stop_requested = false;
 	lwkt_token_init(&gpu->boot_token, "nvgpubt");
-	nvgpu_device_store_newbus(dev, gpu);
 
 	nvgpu_log(NVGPU_LOG_DEBUG,
 	    "vendor=0x%04x device=0x%04x rev=0x%02x subsys=0x%04x:0x%04x\n",
@@ -773,20 +740,33 @@ nvgpu_device_attach_pci(device_t dev)
 		goto fail_locked;
 	gpu->boot_phase = NVGPU_BOOT_UNLOAD;
 
+	lwkt_reltoken(&gpu->boot_token);
+
+	error = nvgpu_driver_init();
+	if (error != 0)
+		goto fail;
+
+	nvgpu_device_store_newbus(dev, gpu);
+	lwkt_gettoken(&gpu->boot_token);
 	error = nvgpu_device_start_boot(gpu);
 	if (error != 0)
-		goto fail_locked;
+		goto fail_boot_locked;
 
 	lwkt_reltoken(&gpu->boot_token);
 	return (0);
 
+fail_boot_locked:
+	nvgpu_device_teardown(gpu);
+	lwkt_reltoken(&gpu->boot_token);
+	nvgpu_driver_release();
+	goto fail;
+
 fail_locked:
 	nvgpu_device_teardown(gpu);
 	lwkt_reltoken(&gpu->boot_token);
+fail:
 	nvgpu_device_store_newbus(dev, NULL);
-	if (nvgpu_default_gpu == gpu)
-		nvgpu_default_gpu = NULL;
-	_kfree(gpu, M_NVGPU_DEVICE);
+	nvgpu_device_fini(gpu);
 	return (error);
 }
 
@@ -824,5 +804,6 @@ nvgpu_device_detach_pci(device_t dev)
 
 	nvgpu_device_store_newbus(dev, NULL);
 	nvgpu_device_fini(gpu);
+	nvgpu_driver_release();
 	return (0);
 }
