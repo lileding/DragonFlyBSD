@@ -1142,9 +1142,20 @@ drm_modevent(module_t mod, int type, void *data)
 		linux_proc_drop_callback = linux_proc_drop;
 		break;
 	case MOD_UNLOAD:
-		linux_task_drop_callback = NULL;
-		linux_proc_drop_callback = NULL;
-		break;
+		/*
+		 * DragonFly's partial LinuxKPI stores Linux task and mm wrappers
+		 * in native thread and proc objects, then relies on callbacks from
+		 * this KLD to release them at exit.  It also lacks the Linux device
+		 * reference lifecycle used by TTM teardown.  We cannot establish a
+		 * reliable unload quiescence point while that compatibility layer
+		 * remains incomplete: clearing these callbacks can leave a native
+		 * exit calling NULL or unloaded code, while TTM can wait forever.
+		 *
+		 * Keep DRM resident until LinuxKPI is removed or made independently
+		 * lifetime-safe.  Returning EBUSY here prevents SYSUNINIT from
+		 * running and leaves the exit callbacks valid.
+		 */
+		return (EBUSY);
 	}
 	return (0);
 }
