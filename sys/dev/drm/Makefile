@@ -1,4 +1,4 @@
-SUBDIR = drm amd radeon radeonfw
+SUBDIR = drm amd radeon radeonfw nvgpu nvgpu/fw
 
 .if ${MACHINE_ARCH} == "x86_64"
 SUBDIR+= i915

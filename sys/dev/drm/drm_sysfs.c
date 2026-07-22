@@ -24,6 +24,8 @@
 
 #include <linux/device.h>
 
+#include <sys/bus.h>
+
 #include <drm/drm_sysfs.h>
 #include <drm/drmP.h>
 #include "drm_internal.h"
@@ -55,6 +57,29 @@ void drm_sysfs_connector_remove(struct drm_connector *connector)
 
 void drm_sysfs_hotplug_event(struct drm_device *dev)
 {
+	char data[96];
+	char subsystem[16];
+	int card_index;
+	int render_index;
+
+	if (dev == NULL || dev->primary == NULL)
+		return;
+
+	/*
+	 * Ownership: drm core owns dev and its minors; this function only borrows
+	 * them long enough to build one devctl payload.
+	 * Lifetime: devctl_notify() copies the formatted payload before this
+	 * function returns, so no pointer into dev or stack storage escapes.
+	 * Threading: callers must already be in process context through
+	 * drm_kms_helper_hotplug_event(); no modeset or device locks are taken
+	 * here.
+	 */
+	card_index = dev->primary->index;
+	render_index = dev->render != NULL ? dev->render->index : -1;
+	ksnprintf(subsystem, sizeof(subsystem), "card%d", card_index);
+	ksnprintf(data, sizeof(data), "HOTPLUG=1 card=%d render=%d",
+	    card_index, render_index);
+	devctl_notify("DRM", subsystem, "HOTPLUG", data);
 }
 
 int drm_class_device_register(struct device *dev)
@@ -96,6 +121,8 @@ struct device *drm_sysfs_minor_alloc(struct drm_minor *minor)
 
 	devnode = make_dev(&drm_cdevsw, minor->index,
 		DRM_DEV_UID, DRM_DEV_GID, DRM_DEV_MODE, "dri/%s", dev_str);
+	/* drm_minor_free() destroys this node at device teardown. */
+	minor->devnode = devnode;
 
 	kdev->parent = minor->dev->dev;
 	dev_set_drvdata(kdev, minor);
@@ -109,4 +136,3 @@ struct device *drm_sysfs_minor_alloc(struct drm_minor *minor)
 err_free:
 	return ERR_PTR(r);
 }
-

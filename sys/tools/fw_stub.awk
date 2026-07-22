@@ -33,7 +33,7 @@
 
 function usage ()
 {
-	print "usage: fw_stub <firmware:name[:version[:parent]]>* [-l name] [-c outfile] -m modname";
+	print "usage: fw_stub <firmware:name[:version[:parent]]>* [-k] [-l name] [-c outfile] -m modname";
 	exit 1;
 }
 
@@ -101,6 +101,8 @@ for (i = 1; i < ARGC; i++) {
 						usage();
 					}
 				}
+			} else if (o == "k") {
+				opt_k = 1;
 			} else
 				usage();
 		}
@@ -207,15 +209,22 @@ printc("\t\treturn (ENXIO);");
 
 printc("\tcase MOD_UNLOAD:");
 
-for (file_i = 1; file_i < num_files; file_i++) {
-	printc("\t\terror = firmware_unregister(\"" shortnames[file_i] "\");");
-	printc("\t\tif (error)");
-	printc("\t\t\treturn (error);");
+if (opt_k) {
+	printc("\t\t(void)error;");
+	printc("\t\treturn (EBUSY);");
+} else {
+	for (file_i = 1; file_i < num_files; file_i++) {
+		printc("\t\terror = firmware_unregister(\"" shortnames[file_i] "\");");
+		printc("\t\tif (error)");
+		printc("\t\t\treturn (error);");
+	}
+
+	printc("\t\terror = firmware_unregister(\"" shortnames[0] "\");");
+
+	printc("\t\treturn (error);");
 }
 
-printc("\t\terror = firmware_unregister(\"" shortnames[0] "\");");
-
-printc("\t\treturn (error);\n"\
+printc("\t\tbreak;\n"\
     "	}\n"\
     "	return (EINVAL);\n"\
     "}\n"\
