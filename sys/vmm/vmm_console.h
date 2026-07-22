@@ -11,7 +11,10 @@
 #ifndef VMM_CONSOLE_H
 #define VMM_CONSOLE_H
 
+#include <sys/taskqueue.h>
+
 #define VMM_CONSOLE_INPUT_SIZE	1024
+#define VMM_CONSOLE_OUTPUT_SIZE	65536
 
 struct cdev;
 struct tty;
@@ -20,21 +23,28 @@ struct vmm_machine;
 struct vmm_console {
 	/*
 	 * Lock map:
-	 * token_console protects the guest RX FIFO and byte counters.  The tty
-	 * object is protected by its own t_token.  Paths that need both locks
-	 * take the tty token first, then token_console.
+	 * token_console protects the host-to-guest input FIFO, guest-to-host
+	 * output FIFO, and byte counters.  atomic_mut_open records whether the
+	 * tty has a consumer, allowing guest I/O exits to avoid the tty token.
+	 * The drain task is the only path that calls ttyinput().
 	 */
 	struct cdev	*own_mut_dev;
 	struct tty	*own_mut_tty;
 	struct vmm_machine *borrow_mut_machine;
+	struct taskqueue *own_mut_drain_taskqueue;
+	struct task	own_mut_drain_task;
 	struct lwkt_token token_console;
+	volatile u_int	atomic_mut_open;
 	uint64_t	mut_host_tx_bytes;
 	uint64_t	mut_host_drop_bytes;
 	uint64_t	mut_guest_rx_bytes;
 	uint64_t	mut_guest_drop_bytes;
 	size_t		mut_input_start;
 	size_t		mut_input_len;
-	char		mut_input[VMM_CONSOLE_INPUT_SIZE];
+	char		own_mut_input[VMM_CONSOLE_INPUT_SIZE];
+	size_t		mut_output_start;
+	size_t		mut_output_len;
+	char		*own_mut_output;
 };
 
 void	vmm_console_init(struct vmm_console *c);

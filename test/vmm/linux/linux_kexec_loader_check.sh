@@ -13,6 +13,7 @@ KERNEL=${LINUX_KERNEL:-/var/tmp/bzImage}
 INITRAMFS=${LINUX_INITRAMFS:-}
 MEM_SIZE=${LINUX_MEM:-256M}
 MANIFEST_SIZE=${LINUX_MANIFEST_SIZE:-4096}
+TSC_RECORD_OFFSET=520
 LOADER=${LINUX_KEXEC_LOADER_CHECK_BIN:-/var/tmp/vmmld_linux_kexec_check}
 PARSER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_FILE=${LINUX_CHECK_MEM_FILE:-/var/tmp/dfvmm-linux-loader-$$.mem}
@@ -135,26 +136,49 @@ check_linux_boot_data()
 	check_zero_sum "$MEM_FILE" $((0x70600)) 97 "$case_label DSDT"
 }
 
+check_tsc_manifest()
+{
+	time_arg=$1
+
+	case "$time_arg" in
+	tsc_hz=host)
+		expected=0000000000000000
+		;;
+	tsc_hz=1000000000)
+		expected=00ca9a3b00000000
+		;;
+	*)
+		fail "unsupported test TSC argument: $time_arg"
+		;;
+	esac
+	[ "$(hex_at "$MANIFEST_FILE" "$TSC_RECORD_OFFSET" 8)" = "$expected" ] ||
+	    fail "bad TSC manifest record for $time_arg"
+	grep -aq 'tsc_hz=' "$MEM_FILE" &&
+	    fail "TSC loader argument leaked into guest command line"
+}
+
 run_loader_case()
 {
 	kernel=$1
 	label=$2
+	time_arg=$3
 
 	rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 	run truncate -s "$MEM_SIZE" "$MEM_FILE"
 	run truncate -s "$MANIFEST_SIZE" "$MANIFEST_FILE"
 	if [ -n "$INITRAMFS" ]; then
 		[ -f "$INITRAMFS" ] || fail "missing LINUX_INITRAMFS=$INITRAMFS"
-		run "$LOADER" "$kernel" "initramfs=$INITRAMFS" \
+		run "$LOADER" "$kernel" "initramfs=$INITRAMFS" "$time_arg" \
 		    "console=ttyS0" "earlyprintk=serial,ttyS0,115200" \
 		    3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
 	else
-		run "$LOADER" "$kernel" "console=ttyS0" \
+		run "$LOADER" "$kernel" "$time_arg" "console=ttyS0" \
 		    "earlyprintk=serial,ttyS0,115200" 3<>"$MEM_FILE" \
 		    4<>"$MANIFEST_FILE"
 	fi
 	run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
 	check_linux_boot_data "$label"
+	check_tsc_manifest "$time_arg"
 	say "PASS: Linux kexec loader $label case"
 }
 
@@ -166,10 +190,11 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$REPO/test/vmm/manifest/manifest_file_check.c" -o "$PARSER"
 
 make_synth_kernel
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic"
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-host" "tsc_hz=host"
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-scaled" "tsc_hz=1000000000"
 
 if [ -f "$KERNEL" ]; then
-	run_loader_case "$KERNEL" "real-image"
+	run_loader_case "$KERNEL" "real-image" "tsc_hz=host"
 else
 	say "SKIP: missing LINUX_KERNEL=$KERNEL; real-image case not run"
 fi

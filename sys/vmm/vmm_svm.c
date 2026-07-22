@@ -62,7 +62,6 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_CTRL_INTERCEPT_WGDTR	(1U << 11)
 #define VMM_SVM_CTRL_INTERCEPT_WLDTR	(1U << 12)
 #define VMM_SVM_CTRL_INTERCEPT_WTR	(1U << 13)
-#define VMM_SVM_CTRL_INTERCEPT_RDTSC	(1U << 14)
 #define VMM_SVM_CTRL_INTERCEPT_RDPMC	(1U << 15)
 #define VMM_SVM_CTRL_INTERCEPT_PUSHF	(1U << 16)
 #define VMM_SVM_CTRL_INTERCEPT_POPF	(1U << 17)
@@ -117,7 +116,10 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_ERROR_VALID	(1ULL << 11)
 #define VMM_SVM_EVENTINJ_TYPE_EXCEPTION	(3ULL << 8)
+#define VMM_X86_EXCEPTION_UD		6U
 #define VMM_X86_EXCEPTION_GP		13U
+#define VMM_SVM_PAUSE_FILTER_COUNT	4096U
+#define VMM_SVM_PAUSE_FILTER_THRESHOLD	128U
 #define VMM_SVM_AVIC_PHYS_VALID		(1ULL << 63)
 #define VMM_SVM_AVIC_PHYS_RUNNING	(1ULL << 62)
 #define VMM_SVM_AVIC_PHYS_HOST_ID_MASK	0xfffULL
@@ -171,13 +173,15 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_APIC_TIMER_DIVIDE_VALID	0x0000000bU
 #define VMM_SVM_LAPIC_TIMER_COUNT_PER_TICK 1000000U
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
+#define VMM_SVM_MSR_AMD64_TSC_RATIO	0xc0000104U
+#define VMM_SVM_TSC_RATIO_DEFAULT	(1ULL << 32)
+#define VMM_SVM_TSC_RATIO_MAX		0x000000ffffffffffULL
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
 #define VMM_SVM_EXIT_SMI		0x062ULL
 #define VMM_SVM_EXIT_INIT		0x063ULL
 #define VMM_SVM_EXIT_VINTR		0x064ULL
-#define VMM_SVM_EXIT_RDTSC		0x06eULL
 #define VMM_SVM_EXIT_CPUID		0x072ULL
 #define VMM_SVM_EXIT_INVD		0x076ULL
 #define VMM_SVM_EXIT_PAUSE		0x077ULL
@@ -304,8 +308,6 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_CPUID1_ECX_X2APIC	(1U << 21)
 #define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
 #define VMM_CPUID_MIN_BASIC	0x16U
-#define VMM_CPUID_TSC_FREQ_DENOM 1000U
-#define VMM_CPUID_TSC_FREQ_CRYSTAL 1000000U
 #define VMM_CPUID80000001_ECX_SVM CPUID_SVM
 #define VMM_CPUID80000007_EDX_INVTSC (1U << 8)
 #define VMM_CPUID80000008_ECX_CORES_MASK 0xffU
@@ -402,10 +404,11 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_MSR_F15H_PERF_CTL	0xc0010200U
 #define VMM_SVM_MSR_F15H_PERF_CTR	0xc0010201U
 #define VMM_SVM_PMU_COUNTERS		6U
-#define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL)
 #define VMM_SVM_HWCR_MC_STATUS_WR_EN	(1ULL << 18)
 #define VMM_SVM_HWCR_TSC_FREQ_SEL	(1ULL << 24)
 #define VMM_SVM_HWCR_IRPERF_EN		(1ULL << 30)
+#define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL | \
+					 VMM_SVM_HWCR_TSC_FREQ_SEL)
 #define VMM_SVM_HWCR_VALID		(VMM_SVM_HWCR_MC_STATUS_WR_EN | \
 					 VMM_SVM_HWCR_TSC_FREQ_SEL | \
 					 VMM_SVM_HWCR_IRPERF_EN)
@@ -414,6 +417,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_SMOKE_AVIC_DELIVER	1U
 #define VMM_SVM_SMOKE_AVIC_MARKER	2U
 #define VMM_SVM_SMOKE_IOAPIC_RAISE	3U
+#define VMM_SVM_SMOKE_PAUSE_FILTER	4U
 
 
 #define VMM_X64_NDR			6
@@ -548,6 +552,7 @@ struct vmm_svm_backend {
 	uint32_t mut_avic_host_apic_id;
 	uint32_t mut_avic_host_cpuid;
 	int mut_avic_bound;
+	int mut_avic_running;
 	uint32_t mut_lapic_timer_lvtt;
 	uint32_t mut_lapic_timer_tmict;
 	uint32_t mut_lapic_timer_tdcr;
@@ -596,7 +601,9 @@ struct vmm_svm_backend {
 	uint64_t mut_guest_pmu_ctr[VMM_SVM_PMU_COUNTERS];
 	uint64_t mut_guest_tsc_aux;
 	uint64_t mut_guest_apicbase;
-	uint64_t imm_tsc_hz;
+	uint64_t imm_host_tsc_hz;
+	uint64_t imm_guest_tsc_hz;
+	uint64_t imm_tsc_ratio;
 	uint64_t mut_hpet_config;
 	uint64_t mut_hpet_counter_base;
 	uint64_t mut_hpet_counter_tsc;
@@ -635,6 +642,16 @@ struct vmm_svm_backend {
 	int mut_cmos_time_expires;
 };
 
+/*
+ * A vCPU LWKT remains on one pCPU for its whole run.  Its run loop is the
+ * only writer for that pCPU's cached hardware TSC ratio.
+ */
+struct vmm_svm_cpu_state {
+	uint64_t mut_tsc_ratio;
+};
+
+static struct vmm_svm_cpu_state vmm_svm_cpu_state[MAXCPU];
+
 struct vmm_svm_msr_policy {
 	uint32_t imm_msr;
 	const char *imm_name;
@@ -642,6 +659,8 @@ struct vmm_svm_msr_policy {
 };
 
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, pause_filt_thresh) == 0x03c);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, pause_filt_cnt) == 0x03e);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, v) == 0x060);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, intr) == 0x068);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, exitcode) == 0x070);
@@ -668,6 +687,7 @@ static void vmm_svm_vcpu_destroy(void *backend);
 static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
 static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
 static void vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb);
+static uint64_t vmm_svm_guest_tsc(struct vmm_svm_backend *svm);
 static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 		    struct vmm_vcpu_thread *vc, const char *source);
 
@@ -854,6 +874,10 @@ vmm_svm_avic_uninit(struct vmm_svm_backend *svm)
 {
 	if (svm == NULL)
 		return;
+	if (svm->own_mut_avic_phys_table != NULL) {
+		svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = 0;
+		cpu_mfence();
+	}
 	vmm_svm_avic_unmap_access_page(svm);
 	vmm_svm_avic_access_page_free(svm->own_mut_avic_access_page);
 	svm->own_mut_avic_access_page = NULL;
@@ -877,23 +901,40 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 		return;
 	cpuid = mycpu->gd_cpuid;
 	apicid = (uint32_t)CPUID_TO_APICID(cpuid);
-	if (svm->mut_avic_bound && svm->mut_avic_host_cpuid == cpuid)
-		return;
-	if (apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) {
+	if (!svm->mut_avic_bound || svm->mut_avic_host_cpuid != cpuid) {
+		if (apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm avic host apic id too large cpuid=%u apicid=%u",
+			    cpuid, apicid);
+			return;
+		}
+		svm->mut_avic_host_cpuid = cpuid;
+		svm->mut_avic_host_apic_id = apicid;
+		svm->mut_avic_bound = 1;
 		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm avic host apic id too large cpuid=%u apicid=%u",
-		    cpuid, apicid);
-		return;
+		    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
+		    svm->imm_avic_apic_id, cpuid, apicid);
 	}
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
-	    VMM_SVM_AVIC_PHYS_RUNNING | apicid;
+	    VMM_SVM_AVIC_PHYS_RUNNING | svm->mut_avic_host_apic_id;
 	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
-	svm->mut_avic_host_cpuid = cpuid;
-	svm->mut_avic_host_apic_id = apicid;
-	svm->mut_avic_bound = 1;
-	vmm_machine_logf(svm->borrow_imm_machine,
-	    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
-	    svm->imm_avic_apic_id, cpuid, apicid);
+	cpu_mfence();
+	svm->mut_avic_running = 1;
+}
+
+static void
+vmm_svm_avic_unbind_cpu(struct vmm_svm_backend *svm)
+{
+	uint64_t entry;
+
+	if (svm == NULL || svm->own_mut_avic_phys_table == NULL ||
+	    !svm->mut_avic_bound || !svm->mut_avic_running)
+		return;
+	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
+	    svm->mut_avic_host_apic_id;
+	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+	cpu_mfence();
+	svm->mut_avic_running = 0;
 }
 
 static void
@@ -917,7 +958,9 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u avic deliver source=%s vector=0x%x irr=0x%x",
 	    vc->imm_id, source, vector, *irr);
-	if (svm->mut_avic_bound) {
+	/* A local producer returns to VMRUN and consumes IRR without a doorbell. */
+	if (svm->mut_avic_running &&
+	    svm->mut_avic_host_cpuid != mycpu->gd_cpuid) {
 		wrmsr(MSR_AMD64_SVM_AVIC_DOORBELL, svm->mut_avic_host_apic_id);
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u avic doorbell host_apic_id=%u",
@@ -1033,7 +1076,7 @@ vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
 			svm->mut_lapic_timer_active = 0;
 			return;
 		}
-		now = rdtsc() + svm->own_mut_vmcb->ctrl.tsc_offset;
+		now = vmm_svm_guest_tsc(svm);
 		if (now < deadline)
 			return;
 		vector = svm->mut_lapic_timer_lvtt &
@@ -1134,7 +1177,10 @@ vmm_svm_available(void)
 	if ((descs[3] & CPUID_AMD_SVM_NP) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_NRIPS) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_DecodeAssist) == 0 ||
-	    (descs[3] & CPUID_AMD_SVM_AVIC) == 0)
+	    (descs[3] & CPUID_AMD_SVM_PauseFilter) == 0 ||
+	    (descs[3] & CPUID_AMD_SVM_PFThreshold) == 0 ||
+	    (descs[3] & CPUID_AMD_SVM_AVIC) == 0 ||
+	    (descs[3] & CPUID_AMD_SVM_TSCRateCtrl) == 0)
 		return 0;
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if ((msr & VM_CR_SVMDIS) && (msr & VM_CR_LOCK))
@@ -1181,6 +1227,8 @@ vmm_svm_load_state(struct vmm_svm_backend *svm,
 	vmcb->state.sysenter_cs = v->msr[VMM_X64_MSR_SYSENTER_CS];
 	vmcb->state.sysenter_esp = v->msr[VMM_X64_MSR_SYSENTER_ESP];
 	vmcb->state.sysenter_eip = v->msr[VMM_X64_MSR_SYSENTER_EIP];
+	vmcb->ctrl.tsc_offset = v->msr[VMM_X64_MSR_TSC] -
+	    (uint64_t)(((_uint128_t)rdtsc() * svm->imm_tsc_ratio) >> 32);
 
 	vmm_svm_seg_load(&v->seg[VMM_X64_SEG_ES], &vmcb->state.es);
 	vmm_svm_seg_load(&v->seg[VMM_X64_SEG_CS], &vmcb->state.cs);
@@ -1214,6 +1262,9 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 {
 	struct vmm_svm_backend *svm;
 	struct vmm_svm_vmcb *vmcb;
+	uint64_t ratio;
+	uint64_t rate;
+	uint64_t remainder;
 	uint32_t i;
 	int error;
 
@@ -1238,14 +1289,50 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		error = ENXIO;
 		goto fail;
 	}
+	svm->imm_host_tsc_hz = tsc_frequency;
+	svm->imm_guest_tsc_hz = launch->imm_guest_tsc_hz;
+	if (svm->imm_guest_tsc_hz == 0)
+		svm->imm_guest_tsc_hz = svm->imm_host_tsc_hz;
+	rate = svm->imm_guest_tsc_hz / svm->imm_host_tsc_hz;
+	remainder = svm->imm_guest_tsc_hz % svm->imm_host_tsc_hz;
+	if (rate > (VMM_SVM_TSC_RATIO_MAX >> 32)) {
+		vmm_machine_logf(m,
+		    "svm unavailable reason=guest_tsc_rate host_hz=%ju guest_hz=%ju",
+		    (uintmax_t)svm->imm_host_tsc_hz,
+		    (uintmax_t)svm->imm_guest_tsc_hz);
+		error = EINVAL;
+		goto fail;
+	}
+	/* Build floor(guest_hz * 2^32 / host_hz) without libgcc TI division. */
+	ratio = rate << 32;
+	for (i = 0; i < 32; ++i) {
+		if (remainder >= svm->imm_host_tsc_hz - remainder) {
+			ratio |= 1ULL << (31 - i);
+			remainder -= svm->imm_host_tsc_hz - remainder;
+		} else {
+			remainder += remainder;
+		}
+	}
+	if (ratio == 0) {
+		vmm_machine_logf(m,
+		    "svm unavailable reason=guest_tsc_rate host_hz=%ju guest_hz=%ju",
+		    (uintmax_t)svm->imm_host_tsc_hz,
+		    (uintmax_t)svm->imm_guest_tsc_hz);
+		error = EINVAL;
+		goto fail;
+	}
+	svm->imm_tsc_ratio = ratio;
+	vmm_machine_logf(m,
+	    "svm tsc scale host_hz=%ju guest_hz=%ju ratio=0x%jx",
+	    (uintmax_t)svm->imm_host_tsc_hz,
+	    (uintmax_t)svm->imm_guest_tsc_hz,
+	    (uintmax_t)svm->imm_tsc_ratio);
 	pmap_npt_transform(vmspace_pmap(svm->borrow_mut_vmspace), 0);
-	svm->imm_tsc_hz = tsc_frequency;
 	svm->mut_hpet_counter_tsc = rdtsc();
 	svm->mut_pm_timer_tsc = svm->mut_hpet_counter_tsc;
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_nb_cfg = NB_CFG_INITAPICCPUIDLO;
-	svm->mut_guest_hwcr = rdmsr(VMM_SVM_MSR_K7_HWCR) &
-	    VMM_SVM_HWCR_TSC_FREQ_SEL;
+	svm->mut_guest_hwcr = 0;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
 	svm->mut_lapic_timer_divisor = 2;
@@ -1281,7 +1368,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_NMI |
 	    VMM_SVM_CTRL_INTERCEPT_SMI |
 	    VMM_SVM_CTRL_INTERCEPT_INIT |
-	    VMM_SVM_CTRL_INTERCEPT_RDTSC |
 	    VMM_SVM_CTRL_INTERCEPT_RDPMC |
 	    VMM_SVM_CTRL_INTERCEPT_CPUID |
 	    VMM_SVM_CTRL_INTERCEPT_RSM |
@@ -1322,6 +1408,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	 * stop still use the separate external INTR/NMI intercepts above.
 	 */
 	vmcb->ctrl.intercept_vec = 0;
+	vmcb->ctrl.pause_filt_thresh = VMM_SVM_PAUSE_FILTER_THRESHOLD;
+	vmcb->ctrl.pause_filt_cnt = VMM_SVM_PAUSE_FILTER_COUNT;
 	vmcb->ctrl.iopm_base_pa = svm->imm_iobm_pa;
 	vmcb->ctrl.msrpm_base_pa = svm->imm_msrbm_pa;
 	vmcb->ctrl.guest_asid = VMM_SVM_ASID;
@@ -1360,6 +1448,7 @@ vmm_svm_vcpu_destroy(void *backend)
 static void
 vmm_svm_enable_cpu(struct vmm_svm_backend *svm)
 {
+	struct vmm_svm_cpu_state *cpu_state;
 	uint64_t msr;
 
 	msr = rdmsr(MSR_AMD_VM_CR);
@@ -1369,6 +1458,11 @@ vmm_svm_enable_cpu(struct vmm_svm_backend *svm)
 	if ((msr & EFER_SVME) == 0)
 		wrmsr(MSR_EFER, msr | EFER_SVME);
 	wrmsr(MSR_AMD_VM_HSAVE_PA, svm->imm_hsave_pa);
+	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
+	if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
+		wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
+		cpu_state->mut_tsc_ratio = svm->imm_tsc_ratio;
+	}
 }
 
 static void
@@ -1509,18 +1603,25 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		regs[3] = 0;
 	} else if (leaf == 0x15) {
 		/*
-		 * Publish a virtual TSC frequency leaf that matches the VMCB
-		 * TSC offset model.  Host CPUID may expose a nominal P0 clock
-		 * instead, which makes Linux distrust TSC as a clocksource.
+		 * Publish the exact virtual TSC frequency.  Do not round this leaf:
+		 * Linux uses it to decide whether TSC is a trustworthy clocksource.
+		 * A 32-bit CPUID ratio cannot encode every possible 64-bit rate, so
+		 * leave the leaf unavailable rather than report a different rate.
 		 */
-		regs[0] = VMM_CPUID_TSC_FREQ_DENOM;
-		regs[1] = (uint32_t)(svm->imm_tsc_hz / 1000);
-		regs[2] = VMM_CPUID_TSC_FREQ_CRYSTAL;
+		if (svm->imm_guest_tsc_hz <= UINT32_MAX) {
+			regs[0] = 1;
+			regs[1] = (uint32_t)svm->imm_guest_tsc_hz;
+			regs[2] = 1;
+		} else {
+			regs[0] = 0;
+			regs[1] = 0;
+			regs[2] = 0;
+		}
 		regs[3] = 0;
 	} else if (leaf == 0x16) {
 		uint32_t tsc_mhz;
 
-		tsc_mhz = (uint32_t)((svm->imm_tsc_hz + 500000) / 1000000);
+		tsc_mhz = (uint32_t)((svm->imm_guest_tsc_hz + 500000) / 1000000);
 		regs[0] = tsc_mhz;
 		regs[1] = tsc_mhz;
 		regs[2] = 100;
@@ -1569,7 +1670,9 @@ vmm_svm_rdmsr_value(struct vmm_svm_backend *svm, uint64_t val)
 static uint64_t
 vmm_svm_guest_tsc(struct vmm_svm_backend *svm)
 {
-	return rdtsc() + svm->own_mut_vmcb->ctrl.tsc_offset;
+	/* VMCB TSC offset is expressed in the guest's scaled TSC domain. */
+	return (uint64_t)(((_uint128_t)rdtsc() * svm->imm_tsc_ratio) >> 32) +
+	    svm->own_mut_vmcb->ctrl.tsc_offset;
 }
 
 static uint64_t
@@ -1757,8 +1860,9 @@ vmm_svm_hpet_counter(struct vmm_svm_backend *svm)
 		return svm->mut_hpet_counter_base;
 	delta = rdtsc() - svm->mut_hpet_counter_tsc;
 	return svm->mut_hpet_counter_base +
-	    (delta / svm->imm_tsc_hz) * VMM_HPET_FREQ +
-	    ((delta % svm->imm_tsc_hz) * VMM_HPET_FREQ) / svm->imm_tsc_hz;
+	    (delta / svm->imm_host_tsc_hz) * VMM_HPET_FREQ +
+	    ((delta % svm->imm_host_tsc_hz) * VMM_HPET_FREQ) /
+	    svm->imm_host_tsc_hz;
 }
 
 static uint32_t
@@ -1767,9 +1871,9 @@ vmm_svm_pm_timer_counter(struct vmm_svm_backend *svm)
 	uint64_t delta = rdtsc() - svm->mut_pm_timer_tsc;
 	uint64_t ticks;
 
-	ticks = (delta / svm->imm_tsc_hz) * VMM_PM_TIMER_FREQ +
-	    ((delta % svm->imm_tsc_hz) * VMM_PM_TIMER_FREQ) /
-	    svm->imm_tsc_hz;
+	ticks = (delta / svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ +
+	    ((delta % svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ) /
+	    svm->imm_host_tsc_hz;
 	return (uint32_t)ticks & VMM_PM_TIMER_MASK;
 }
 
@@ -1832,7 +1936,7 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 			vmm_machine_logf(svm->borrow_imm_machine,
 			    "svm hpet config=0x%jx tsc_hz=%ju hpet_hz=%ju",
 			    (uintmax_t)svm->mut_hpet_config,
-			    (uintmax_t)svm->imm_tsc_hz,
+			    (uintmax_t)svm->imm_host_tsc_hz,
 			    (uintmax_t)VMM_HPET_FREQ);
 		}
 		return;
@@ -2587,7 +2691,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC:
-		vmcb->ctrl.tsc_offset = val - rdtsc();
+		vmcb->ctrl.tsc_offset = val -
+		    (uint64_t)(((_uint128_t)rdtsc() * svm->imm_tsc_ratio) >> 32);
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC_AUX:
@@ -2808,10 +2913,8 @@ vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
 	splz_check();
 	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_INTR &&
 	    (hvmflags & RQF_TIMER) != 0 &&
-	    (hvmflags & ~RQF_TIMER) == 0) {
-		lwkt_user_yield();
+	    (hvmflags & ~RQF_TIMER) == 0)
 		return;
-	}
 	switch (vmcb->ctrl.exitcode) {
 	case VMM_SVM_EXIT_INTR:
 		name = "intr";
@@ -2838,7 +2941,6 @@ vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
 	    vc->imm_id, name, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, hvmflags, reqflags,
 	    (uintmax_t)vmcb->state.rip);
-	lwkt_user_yield();
 }
 
 static void
@@ -3572,13 +3674,12 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 }
 
 static void
-vmm_svm_handle_rdtsc(struct vmm_svm_backend *svm, int with_aux)
+vmm_svm_handle_rdtscp(struct vmm_svm_backend *svm)
 {
 	uint64_t tsc = vmm_svm_guest_tsc(svm);
 
 	vmm_svm_set_rax_rdx(svm, tsc);
-	if (with_aux)
-		svm->mut_gprs[VMM_X64_GPR_RCX] = svm->mut_guest_tsc_aux;
+	svm->mut_gprs[VMM_X64_GPR_RCX] = svm->mut_guest_tsc_aux;
 	vmm_svm_advance_rip(svm->own_mut_vmcb);
 }
 
@@ -3626,36 +3727,62 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 	uint64_t deadline;
+	uint64_t seconds;
+	uint64_t fraction;
+	uint64_t fraction_ticks;
 	uint64_t now;
 	uint64_t remaining_tsc;
+	unsigned int i;
 	int sleep_ticks;
 	int remaining;
 
 	vmm_svm_advance_rip(vmcb);
-	if (vmm_vcpu_should_stop(vc))
-		return;
-	sleep_ticks = hz / 20 + 1;
-	if (svm->mut_lapic_timer_active) {
-		for (;;) {
-			if (vmm_vcpu_should_stop(vc))
-				return;
-			if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
-			    (svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0 &&
-			    vmm_console_guest_pending(console) != 0)
-				break;
+	for (;;) {
+		if (vmm_vcpu_should_stop(vc))
+			return;
+
+		/*
+		 * The FIFO producer writes while holding token_console and wakes vc
+		 * after dropping it.  Queue before the final predicate check so an
+		 * input byte cannot be lost between the check and tsleep().
+		 */
+		lwkt_gettoken(&console->token_console);
+		tsleep_interlock(vc, 0);
+		if (vmm_vcpu_should_stop(vc) ||
+		    ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+		    (svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0 &&
+		    console->mut_input_len != 0)) {
+			lwkt_reltoken(&console->token_console);
+			break;
+		}
+		lwkt_reltoken(&console->token_console);
+
+		sleep_ticks = 0;
+		if (svm->mut_lapic_timer_active) {
 			if ((svm->mut_lapic_timer_lvtt &
 			    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
 			    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
 				deadline = svm->mut_lapic_timer_tsc_deadline;
-				now = rdtsc() + svm->own_mut_vmcb->ctrl.tsc_offset;
+				now = vmm_svm_guest_tsc(svm);
 				if (deadline == 0 || now >= deadline)
 					break;
 				remaining_tsc = deadline - now;
-				if (remaining_tsc >= svm->imm_tsc_hz) {
-					sleep_ticks = hz / 20 + 1;
+				seconds = remaining_tsc / svm->imm_guest_tsc_hz;
+				fraction = remaining_tsc % svm->imm_guest_tsc_hz;
+				if (seconds >= (uint64_t)INT_MAX / (uint64_t)hz) {
+					sleep_ticks = INT_MAX;
 				} else {
-					sleep_ticks = (int)((remaining_tsc * hz +
-					    svm->imm_tsc_hz - 1) / svm->imm_tsc_hz);
+					sleep_ticks = (int)(seconds * (uint64_t)hz);
+					if (fraction != 0) {
+						fraction_ticks = (fraction * (uint64_t)hz +
+						    svm->imm_guest_tsc_hz - 1) /
+						    svm->imm_guest_tsc_hz;
+						if (fraction_ticks >=
+						    (uint64_t)(INT_MAX - sleep_ticks))
+							sleep_ticks = INT_MAX;
+						else
+							sleep_ticks += (int)fraction_ticks;
+					}
 				}
 			} else {
 				remaining = svm->mut_lapic_timer_deadline - ticks;
@@ -3663,31 +3790,30 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc
 					break;
 				sleep_ticks = remaining;
 			}
-			if (sleep_ticks > hz / 20 + 1)
-				sleep_ticks = hz / 20 + 1;
-			svm->mut_lapic_timer_idle_count++;
-			if (svm->mut_lapic_timer_idle_count <= 8 ||
-			    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
-				VMM_SVM_TRACE(svm,
-				    "svm vcpu%u idle wait ticks=%d timer_active=%d",
-				    vc->imm_id, sleep_ticks,
-				    svm->mut_lapic_timer_active);
-			}
-			if (sleep_ticks <= 1)
-				sleep_ticks = 1;
-			tsleep(vc, 0, "vmmhlt", sleep_ticks);
 		}
+		svm->mut_lapic_timer_idle_count++;
+		if (svm->mut_lapic_timer_idle_count <= 8 ||
+		    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u idle wait ticks=%d timer_active=%d",
+			    vc->imm_id, sleep_ticks, svm->mut_lapic_timer_active);
+		}
+		if (sleep_ticks <= 1 && svm->mut_lapic_timer_active)
+			sleep_ticks = 1;
+		vmm_svm_avic_unbind_cpu(svm);
+		/*
+		 * Pair IsRunning=0 with a final IRR scan.  An interrupt posted
+		 * before HLT must cause the next VMRUN, not an indefinite sleep.
+		 */
+		for (i = 0; i < 8; ++i) {
+			if (vmm_svm_avic_apic_read32(svm,
+			    VMM_SVM_APIC_REG_IRR_BASE + i * 0x10) != 0)
+				return;
+		}
+		tsleep(vc, PINTERLOCKED, "vmmhlt", sleep_ticks);
+	}
+	if (svm->mut_lapic_timer_active)
 		vmm_svm_lapic_timer_check(svm, vc);
-		return;
-	}
-	svm->mut_lapic_timer_idle_count++;
-	if (svm->mut_lapic_timer_idle_count <= 8 ||
-	    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u idle wait ticks=%d timer_active=%d",
-		    vc->imm_id, sleep_ticks, svm->mut_lapic_timer_active);
-	}
-	tsleep(vc, 0, "vmmhlt", sleep_ticks);
 }
 
 
@@ -3720,6 +3846,10 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 		    "smoke avic marker=0x%x", arg);
 		vmm_svm_advance_rip(vmcb);
 		return 1;
+	case VMM_SVM_SMOKE_PAUSE_FILTER:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke pause filter exits=%u", svm->mut_pause_exit_count);
+		return 0;
 	default:
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke avic unknown op=%u arg=0x%x", op, arg);
@@ -4123,7 +4253,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	if (svm == NULL)
 		return;
 	vmcb = svm->own_mut_vmcb;
-	vmm_svm_avic_bind_cpu(svm);
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_lapic_timer_sync(svm);
 		vmm_svm_lapic_timer_check(svm, vc);
@@ -4134,9 +4263,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
 			splz_check();
+			vmm_svm_avic_unbind_cpu(svm);
 			lwkt_user_yield();
 			continue;
 		}
+		vmm_svm_avic_bind_cpu(svm);
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
@@ -4160,18 +4291,15 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_WBINVD:
 			vmm_svm_handle_guest_cache_op(svm);
 			break;
-		case VMM_SVM_EXIT_RDTSC:
-			vmm_svm_handle_rdtsc(svm, 0);
-			break;
 		case VMM_SVM_EXIT_CPUID:
 			vmm_svm_handle_cpuid(svm);
 			break;
 		case VMM_SVM_EXIT_PAUSE:
 			vmm_svm_advance_rip(vmcb);
 			svm->mut_pause_exit_count++;
-			if ((svm->mut_pause_exit_count & 63U) == 0)
-				lwkt_user_yield();
-			break;
+			vmm_svm_avic_unbind_cpu(svm);
+			lwkt_user_yield();
+			continue;
 		case VMM_SVM_EXIT_HLT:
 			vmm_svm_handle_idle_wait(svm, vc);
 			break;
@@ -4187,14 +4315,19 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_SHUTDOWN:
 			goto unhandled;
 		case VMM_SVM_EXIT_RDTSCP:
-			vmm_svm_handle_rdtsc(svm, 1);
+			vmm_svm_handle_rdtscp(svm);
 			break;
 		case VMM_SVM_EXIT_MONITOR:
 			vmm_svm_advance_rip(vmcb);
 			break;
 		case VMM_SVM_EXIT_MWAIT:
 		case VMM_SVM_EXIT_MWAIT_COND:
-			vmm_svm_handle_idle_wait(svm, vc);
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_UD;
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u inject ud reason=mwait exit=0x%jx rip=0x%jx",
+			    vc->imm_id, (uintmax_t)vmcb->ctrl.exitcode,
+			    (uintmax_t)vmcb->state.rip);
 			break;
 		case VMM_SVM_EXIT_NPF:
 			if (vmm_svm_handle_npf(svm, vc))
@@ -4246,9 +4379,19 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
 			goto out;
 		}
+		vmm_svm_avic_unbind_cpu(svm);
 		lwkt_user_yield();
 	}
 out:
+	vmm_svm_avic_unbind_cpu(svm);
+	if (vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio != 0) {
+		if (vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio !=
+		    VMM_SVM_TSC_RATIO_DEFAULT) {
+			wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO,
+			    VMM_SVM_TSC_RATIO_DEFAULT);
+		}
+		vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio = 0;
+	}
 	return;
 }
 

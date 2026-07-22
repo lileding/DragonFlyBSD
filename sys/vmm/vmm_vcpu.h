@@ -15,16 +15,18 @@ struct vmm_vcpu {
 	/*
 	 * Lifecycle:
 	 * vmm_machine's serialized command queue calls vmm_vcpu_start() and
-	 * vmm_vcpu_stop().  Active vCPU threads only decrement
-	 * mut_active_count and wake the parent machine when they exit.
+	 * vmm_vcpu_stop().  mut_count and own_mut_threads are only accessed by
+	 * that command queue.  Active vCPU threads decrement
+	 * atomic_mut_active_count and wake the parent machine when they exit;
+	 * the stop worker reads that count and sets atomic_mut_stop_requested.
 	 * Backend teardown follows the memory backing pattern: detach
 	 * own_mut_threads after all vCPUs stop, then destroy backend state and
 	 * free the array outside the stop path.
 	 */
 	uint32_t	mut_count;		/* 0 = unset */
 	struct vmm_vcpu_thread *own_mut_threads;
-	uint32_t	mut_active_count;
-	int		mut_stop_requested;
+	u_int		atomic_mut_active_count;
+	u_int		atomic_mut_stop_requested;
 };
 
 struct thread;
@@ -61,7 +63,7 @@ int	vmm_vcpu_is_set(const struct vmm_vcpu *v);
 int	vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	    const struct vmm_launch *launch);
 void	vmm_vcpu_stop(struct vmm_machine *m);
-int	vmm_vcpu_has_active(const struct vmm_vcpu *v);
+int	vmm_vcpu_has_active(struct vmm_vcpu *v);
 void	vmm_vcpu_uninit(struct vmm_vcpu *v,
 	    struct vmm_vcpu_thread **threadsp);
 void	vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads,

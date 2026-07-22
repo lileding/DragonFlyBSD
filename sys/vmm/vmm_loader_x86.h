@@ -128,8 +128,17 @@ struct vmm_gpa_range {
 	uint32_t	flags;
 } __packed;
 
+/*
+ * Immutable guest TSC template.  A zero rate means host-native TSC frequency;
+ * a nonzero rate requests hardware SVM TSC scaling to that frequency.
+ */
+struct vmm_x64_time_state {
+	uint64_t	tsc_hz;
+} __packed;
+
 struct vmm_launch {
 	uint64_t imm_mem_size;
+	uint64_t imm_guest_tsc_hz;
 	struct vmm_x64_vcpu_state imm_vcpu0;
 	struct vmm_gpa_range imm_ranges[VMM_GPA_RANGE_MAX];
 	uint32_t imm_range_count;

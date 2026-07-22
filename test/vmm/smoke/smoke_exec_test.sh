@@ -14,6 +14,7 @@ VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-smoke-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-smoke-test.log}
 LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_smoke_loader}
+CONSOLE_CAPTURE=${VMM_SMOKE_CONSOLE_CAPTURE:-/var/tmp/vmm_smoke_console_capture}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-smoke-$$-mount_vmm}
 MEM=${VMM_SMOKE_MEM:-2M}
 TIMEOUT=${VMM_TIMEOUT:-20}
@@ -21,12 +22,16 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer tscdeadline lapictimer_masked ud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer ud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer tscdeadline tscscale pausefilter lapictimer_masked ud mwaitud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer pausefilter ud mwaitud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
 CREATED_MACHINES=
+CONSOLE_CLIENT_PID=
+CONSOLE_LOG=
+CONSOLE_READY=
+CONSOLE_INPUT=
 
 say()
 {
@@ -99,9 +104,11 @@ dump_runtime_state()
 		for vm in $CREATED_MACHINES; do
 			if [ -d "$(mach "$vm")" ]; then
 				append_file "$vm-events" "$(mach "$vm")/events"
-				append_file "$vm-console" "$(mach "$vm")/console"
 			fi
 		done
+	fi
+	if [ -n "$CONSOLE_LOG" ]; then
+		append_file "console-capture" "$CONSOLE_LOG"
 	fi
 }
 
@@ -126,7 +133,12 @@ $out"
 		fi
 		if printf '%s\n' "$seen" | grep -q "$first"; then
 			if [ -z "$second" ] ||
-			    printf '%s\n' "$seen" | grep -q "$second"; then
+			    printf '%s\n' "$seen" | awk -v first="$first" \
+			    -v second="$second" '
+				$0 ~ first { found = 1; next }
+				found && $0 ~ second { ordered = 1 }
+				END { exit !ordered }
+			'; then
 				return 0
 			fi
 		fi
@@ -137,22 +149,90 @@ $out"
 	return 1
 }
 
-wait_console()
+wait_guest_exit()
 {
 	file=$1
-	pattern=$2
 	i=0
-	out=
+	seen=
 
 	while [ "$i" -lt "$TIMEOUT" ]; do
 		out=$(cat "$file" 2>>"$LOG")
-		printf '%s\n' "$out" | grep -q "$pattern" && return 0
+		if [ -n "$out" ]; then
+			seen="$seen
+$out"
+			{
+				printf '%s\n' "--- poll events: $file ---"
+				printf '%s\n' "$out"
+				printf '%s\n' '--- end poll events ---'
+			} >>"$LOG"
+		fi
+		if printf '%s\n' "$seen" | awk '
+			/vmmcall exit/ { vmmcall = 1; next }
+			vmmcall && /vcpu0 thread exit active=0/ { exited = 1 }
+			END { exit !exited }
+		'; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	printf '%s\n' "$seen" >>"$LOG"
+	return 1
+}
+
+start_console_client()
+{
+	mode=$1
+	i=0
+
+	CONSOLE_LOG=/var/tmp/dfvmm-smoke-$mode-$$.console
+	CONSOLE_READY=$CONSOLE_LOG.ready
+	CONSOLE_INPUT=$CONSOLE_LOG.input
+	rm -f "$CONSOLE_LOG" "$CONSOLE_READY" "$CONSOLE_INPUT" || return 1
+	mkfifo -m 600 "$CONSOLE_INPUT" || return 1
+	"$CONSOLE_CAPTURE" "$(mach "$mode")/console" "$CONSOLE_LOG" \
+	    "$CONSOLE_READY" "$CONSOLE_INPUT" >>"$LOG" 2>&1 &
+	CONSOLE_CLIENT_PID=$!
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		[ -s "$CONSOLE_READY" ] && return 0
+		if ! kill -0 "$CONSOLE_CLIENT_PID" 2>/dev/null; then
+			wait "$CONSOLE_CLIENT_PID" 2>/dev/null || true
+			CONSOLE_CLIENT_PID=
+			return 1
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+stop_console_client()
+{
+	if [ -n "$CONSOLE_CLIENT_PID" ]; then
+		kill -TERM "$CONSOLE_CLIENT_PID" >/dev/null 2>&1 || true
+		wait "$CONSOLE_CLIENT_PID" >/dev/null 2>&1 || true
+		CONSOLE_CLIENT_PID=
+	fi
+}
+
+send_console_input()
+{
+	printf '%s' "$1" >"$CONSOLE_INPUT"
+}
+
+wait_console()
+{
+	pattern=$1
+	i=0
+
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		grep -q "$pattern" "$CONSOLE_LOG" && return 0
 		sleep 1
 		i=$((i + 1))
 	done
 	{
-		printf '--- final console: %s ---\n' "$file"
-		printf '%s\n' "$out"
+		printf '--- final console: %s ---\n' "$CONSOLE_LOG"
+		cat "$CONSOLE_LOG" 2>&1
 		printf '--- end final console ---\n'
 	} >>"$LOG"
 	return 1
@@ -210,6 +290,7 @@ unmount_vmmfs()
 cleanup()
 {
 	set +e
+	stop_console_client
 	if [ "$MOUNTED" -eq 1 ]; then
 		cleanup_machines
 		unmount_vmmfs || say "vmmfs unmount did not finish"
@@ -222,7 +303,8 @@ cleanup()
 	done
 	rm -f "$MOUNT_HELPER"
 	if [ "$KEEP_ARTIFACTS" -eq 0 ]; then
-		rm -f "$LOADER"
+		rm -f "$LOADER" "$CONSOLE_CAPTURE" "$CONSOLE_LOG" "$CONSOLE_READY" \
+		    "$CONSOLE_INPUT"
 	fi
 }
 
@@ -250,6 +332,8 @@ prepare_loader()
 {
 	run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	    "$ROOT/smoke_loader.c" -o "$LOADER"
+	run cc -Wall -Wextra -Werror -std=c11 -O2 \
+	    "$ROOT/console_capture.c" -o "$CONSOLE_CAPTURE"
 }
 
 prepare_mount_helper()
@@ -306,55 +390,59 @@ check_console()
 
 	case "$mode" in
 	serial)
-		wait_console "$(mach "$mode")/console" 'dfvmm-serial-ok' ||
+		wait_console 'dfvmm-serial-ok' ||
 		    fail "$mode console output"
 		;;
 	serialin)
-		wait_console "$(mach "$mode")/console" 'dfvmm-serialin-ok' ||
+		wait_console 'dfvmm-serialin-ok' ||
 		    fail "$mode console input output"
 		;;
 	serialirq)
-		wait_console "$(mach "$mode")/console" 'dfvmm-serialirq-ok' ||
+		wait_console 'dfvmm-serialirq-ok' ||
 		    fail "$mode console irq output"
 		;;
 	ud)
-		wait_console "$(mach "$mode")/console" 'dfvmm-ud-ok' ||
+		wait_console 'dfvmm-ud-ok' ||
 		    fail "$mode console output"
-		wait_console "$(mach "$mode")/console" 'dfvmm-iret-ok' ||
+		wait_console 'dfvmm-iret-ok' ||
 		    fail "$mode iret output"
 		;;
+	mwaitud)
+		wait_console 'dfvmm-mwait-ud-ok' ||
+		    fail "$mode console output"
+		;;
 	pic)
-		wait_console "$(mach "$mode")/console" 'dfvmm-pic-ok' ||
+		wait_console 'dfvmm-pic-ok' ||
 		    fail "$mode console output"
 		;;
 	ioapic)
-		wait_console "$(mach "$mode")/console" 'dfvmm-ioapic-ok' ||
+		wait_console 'dfvmm-ioapic-ok' ||
 		    fail "$mode console output"
 		;;
 	ioapicirq)
-		wait_console "$(mach "$mode")/console" 'dfvmm-ioapicirq-ok' ||
+		wait_console 'dfvmm-ioapicirq-ok' ||
 		    fail "$mode console output"
 		;;
 	x2apic)
-		wait_console "$(mach "$mode")/console" 'dfvmm-x2apic-ok' ||
+		wait_console 'dfvmm-x2apic-ok' ||
 		    fail "$mode console output"
 		;;
 	cachetlb)
-		wait_console "$(mach "$mode")/console" 'dfvmm-cachetlb-ok' ||
+		wait_console 'dfvmm-cachetlb-ok' ||
 		    fail "$mode console output"
 		;;
 	pm64)
-		wait_console "$(mach "$mode")/console" 'dfvmm-pm64-ok' ||
+		wait_console 'dfvmm-pm64-ok' ||
 		    fail "$mode console output"
 		;;
 	lapictimer)
-		wait_console "$(mach "$mode")/console" 'dfvmm-lapic-timer-ok' ||
+		wait_console 'dfvmm-lapic-timer-ok' ||
 		    fail "$mode console output"
 		;;
 	lapictimer_masked)
 		;;
 	avicread)
-		wait_console "$(mach "$mode")/console" 'dfvmm-avicread-ok' ||
+		wait_console 'dfvmm-avicread-ok' ||
 		    fail "$mode console output"
 		;;
 	esac
@@ -366,9 +454,13 @@ run_case()
 	w=$(wrapper "$mode")
 
 	configure_machine "$mode" "$w"
+	start_console_client "$mode" || fail "$mode console client"
 	run rm "$(mach "$mode")/stopped"
 	if mode_self_exits "$mode"; then
 		case "$mode" in
+		pausefilter)
+			console_input=
+			;;
 		serialin)
 			console_input=Z
 			;;
@@ -382,22 +474,42 @@ run_case()
 		if [ -n "$console_input" ]; then
 			wait_event "$(mach "$mode")/events" 'state running' ||
 			    fail "$mode started"
-			printf '%s' "$console_input" >"$(mach "$mode")/console" ||
+			send_console_input "$console_input" ||
 			    fail "$mode console input"
-			wait_event "$(mach "$mode")/events" 'state stopped' ||
-			    fail "$mode self exit"
-		else
-			wait_event "$(mach "$mode")/events" 'state running' 'state stopped' ||
-			    fail "$mode self exit"
+		fi
+		wait_guest_exit "$(mach "$mode")/events" ||
+		    fail "$mode guest self exit"
+		if [ "$mode" = "pausefilter" ]; then
+			pause_exits=$(sed -n \
+			    's/.*smoke pause filter exits=\([0-9][0-9]*\).*/\1/p' \
+			    "$LOG" | tail -n 1)
+			case "$pause_exits" in
+			''|*[!0-9]*) fail "$mode missing exit count" ;;
+			esac
+			[ "$pause_exits" -gt 0 ] && [ "$pause_exits" -lt 1024 ] ||
+			    fail "$mode exit count=$pause_exits"
 		fi
 		[ ! -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode desired changed"
 		echo force >"$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 	else
-		wait_event "$(mach "$mode")/events" 'state running' ||
-		    fail "$mode started"
-		if [ "$mode" = "tscdeadline" ]; then
+		if [ "$mode" = "tscscale" ]; then
+			wait_event "$(mach "$mode")/events" \
+			    'svm tsc scale .*guest_hz=1000000000' 'state running' ||
+			    fail "$mode tsc scaling start"
+		else
+			wait_event "$(mach "$mode")/events" 'state running' ||
+			    fail "$mode started"
+		fi
+		if [ "$mode" = "avicirq" ]; then
+			wait_event "$(mach "$mode")/events" \
+			    'smoke avic marker=0xa51c0040' ||
+			    fail "$mode guest interrupt handler"
+			[ ! -e "$(mach "$mode")/stopped" ] ||
+			    fail "$mode desired changed"
+		fi
+		if [ "$mode" = "tscdeadline" ] || [ "$mode" = "tscscale" ]; then
 			wait_event "$(mach "$mode")/events" 'vmmcall exit' ||
 			    fail "$mode deadline handler"
 		fi
@@ -413,7 +525,13 @@ run_case()
 		    fail "$mode stopped file"
 	fi
 	check_console "$mode"
+	append_file "$mode-console" "$CONSOLE_LOG"
+	stop_console_client
 	cleanup_machine "$mode" || fail "$mode cleanup"
+	rm -f "$CONSOLE_LOG" "$CONSOLE_READY" "$CONSOLE_INPUT"
+	CONSOLE_LOG=
+	CONSOLE_READY=
+	CONSOLE_INPUT=
 	say "PASS: $mode"
 }
 

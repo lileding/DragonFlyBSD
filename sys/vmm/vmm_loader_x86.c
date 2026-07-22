@@ -10,7 +10,7 @@
  *
  *   +0x00  struct vmm_manifest_header
  *          +0x00 char     magic[8]       "VMMLD0\0\0"
- *          +0x08 uint16_t abi_version    0
+ *          +0x08 uint16_t abi_version    1
  *          +0x0a uint16_t arch           1 = x64
  *          +0x0c uint32_t header_size    sizeof(header)
  *          +0x10 uint32_t total_size     header + records, <= PAGE_SIZE
@@ -51,6 +51,11 @@
  *   +0x10 uint32_t type
  *   +0x14 uint32_t flags
  *
+ * Mandatory type 3 payload, struct vmm_x64_time_state:
+ *
+ *   +0x00 uint64_t tsc_hz               0 = host-native; otherwise fixed
+ *                                        guest TSC frequency in Hz
+ *
  * x86 memory topology visible to loaders:
  *
  *   [0xfee00000, 0xfee01000) is the architectural local-APIC MMIO page.
@@ -67,11 +72,12 @@
 #include "vmm_loader_x86.h"
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
-#define VMM_MANIFEST_ABI	0
+#define VMM_MANIFEST_ABI	1
 #define VMM_MANIFEST_ARCH_X64	1
 
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
+#define VMM_REC_X64_TIME_STATE	3
 #define VMM_REC_F_MANDATORY	1
 
 #define VMM_X64_RFLAGS_FIXED	(1ULL << 1)
@@ -319,6 +325,7 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	uint32_t records = 0;
 	int have_vcpu = 0;
 	int have_range = 0;
+	int have_time = 0;
 	int error;
 
 	if (launch != NULL) {
@@ -399,6 +406,19 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 				return error;
 			have_range = 1;
 			break;
+		case VMM_REC_X64_TIME_STATE:
+			if ((rec.flags & VMM_REC_F_MANDATORY) == 0 ||
+			    rec.size != sizeof(struct vmm_x64_time_state) ||
+			    have_time) {
+				error = EINVAL;
+				return error;
+			}
+			if (out != NULL) {
+				bcopy(payload, &out->imm_guest_tsc_hz,
+				    sizeof(out->imm_guest_tsc_hz));
+			}
+			have_time = 1;
+			break;
 		default:
 			if (rec.flags & VMM_REC_F_MANDATORY) {
 				error = EINVAL;
@@ -409,7 +429,8 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 		records++;
 		off = next;
 	}
-	if (records != hdr.record_count || !have_vcpu || !have_range)
+	if (records != hdr.record_count || !have_vcpu || !have_range ||
+	    !have_time)
 		return EINVAL;
 	if (out != NULL) {
 		out->imm_mem_size = mem_size;

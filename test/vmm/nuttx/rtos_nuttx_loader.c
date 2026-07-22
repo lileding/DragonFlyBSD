@@ -26,10 +26,11 @@
 
 #define NUTTX_ELF_PATH		"/var/tmp/nuttx.elf"
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
-#define VMM_MANIFEST_ABI	0
+#define VMM_MANIFEST_ABI	1
 #define VMM_MANIFEST_ARCH_X64	1
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
+#define VMM_REC_X64_TIME_STATE	3
 #define VMM_REC_F_MANDATORY	1
 #define VMM_GPA_RANGE_MAX	32
 
@@ -174,6 +175,10 @@ struct vmm_x64_vcpu_state {
 	uint64_t	msr[VMM_X64_NMSR];
 	struct vmm_x64_seg_state seg[VMM_X64_NSEG];
 	uint64_t	intr_flags;
+} __attribute__((packed));
+
+struct vmm_x64_time_state {
+	uint64_t	tsc_hz;
 } __attribute__((packed));
 
 struct vmm_gpa_range {
@@ -713,6 +718,7 @@ fill_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
     const struct vmm_x64_vcpu_state *vcpu, const struct guest_alloc *ga)
 {
 	struct vmm_manifest_header hdr;
+	struct vmm_x64_time_state time;
 	struct vmm_gpa_range ranges[VMM_GPA_RANGE_MAX];
 	uint8_t *p;
 	size_t range_count = 0;
@@ -734,6 +740,9 @@ fill_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
 	p = manifest + sizeof(hdr);
 	p = add_record(p, VMM_REC_X64_VCPU_STATE, VMM_REC_F_MANDATORY, vcpu,
 	    sizeof(*vcpu));
+	memset(&time, 0, sizeof(time));
+	p = add_record(p, VMM_REC_X64_TIME_STATE, VMM_REC_F_MANDATORY, &time,
+	    sizeof(time));
 	p = add_record(p, VMM_REC_GPA_RANGE, VMM_REC_F_MANDATORY, ranges,
 	    (uint32_t)(range_count * sizeof(ranges[0])));
 	if ((uint64_t)(p - manifest) > manifest_size)
@@ -745,7 +754,7 @@ fill_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
 	hdr.arch = VMM_MANIFEST_ARCH_X64;
 	hdr.header_size = sizeof(hdr);
 	hdr.total_size = (uint32_t)(p - manifest);
-	hdr.record_count = 2;
+	hdr.record_count = 3;
 	hdr.mem_size = mem_size;
 	memcpy(manifest, &hdr, sizeof(hdr));
 }

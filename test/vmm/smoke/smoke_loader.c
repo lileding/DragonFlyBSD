@@ -48,9 +48,11 @@
 #define IOAPIC_MASKED_VECTOR32	0x00010020U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
+#define VMM_MANIFEST_ABI	1
 #define VMM_MANIFEST_ARCH_X64	1
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
+#define VMM_REC_X64_TIME_STATE	3
 #define VMM_REC_F_MANDATORY	1
 
 #define VMM_X64_NGPR	18
@@ -99,6 +101,7 @@
 #define AVIC_OP_DELIVER	1U
 #define AVIC_OP_MARKER	2U
 #define IOAPIC_OP_RAISE	3U
+#define AVIC_OP_PAUSE_FILTER	4U
 #define AVIC_MARKER	0xa51c0040U
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
 #define MSR_MTRR_CAP	0x000000feU
@@ -160,6 +163,10 @@ struct vmm_gpa_range {
 	uint64_t	size;
 	uint32_t	type;
 	uint32_t	flags;
+} __attribute__((packed));
+
+struct vmm_x64_time_state {
+	uint64_t	tsc_hz;
 } __attribute__((packed));
 
 struct x64_idt_gate {
@@ -670,6 +677,26 @@ guest_tscdeadline_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_pausefilter_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t pause_loop[] = {
+	    0xb9, 0x00, 0x00, 0x01, 0x00, /* mov ecx,65536 */
+	    0xf3, 0x90,			/* pause */
+	    0xff, 0xc9,			/* dec ecx */
+	    0x75, 0xfa			/* jnz pause */
+	};
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+
+	emit(code, &len, cap, pause_loop, sizeof(pause_loop));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_PAUSE_FILTER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
 guest_ud_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t setup[] = {
@@ -698,6 +725,33 @@ guest_ud_code(uint8_t *code, size_t cap)
 	for (i = 0; i < sizeof(handler_msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
 	emit(code, &len, cap, iretq, sizeof(iretq));
+	return len;
+}
+
+static size_t
+guest_mwaitud_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mwait[] = { 0x0f, 0x01, 0xc9 };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t fixup[] = {
+	    0x48, 0x83, 0x04, 0x24, 0x03 /* addq $3,(%rsp) */
+	};
+	static const char handler_msg[] = "dfvmm-mwait-ud-ok\n";
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, mwait, sizeof(mwait));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	while (len < UD_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, fixup, sizeof(fixup));
+	for (i = 0; i < sizeof(handler_msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
 	return len;
 }
 
@@ -1578,10 +1632,15 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_lapictimer_code(code, cap);
 	} else if (strcmp(mode, "lapictimer_masked") == 0) {
 		return guest_lapictimer_masked_code(code, cap);
-	} else if (strcmp(mode, "tscdeadline") == 0) {
+	} else if (strcmp(mode, "tscdeadline") == 0 ||
+	    strcmp(mode, "tscscale") == 0) {
 		return guest_tscdeadline_code(code, cap);
+	} else if (strcmp(mode, "pausefilter") == 0) {
+		return guest_pausefilter_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
 		return guest_ud_code(code, cap);
+	} else if (strcmp(mode, "mwaitud") == 0) {
+		return guest_mwaitud_code(code, cap);
 	} else if (strcmp(mode, "pic") == 0) {
 		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "ioapic") == 0) {
@@ -1694,14 +1753,15 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	memset(mem + TSS_GPA, 0, 0x68);
 	if (strcmp(mode, "timerint") == 0 ||
 	    strcmp(mode, "lapictimer") == 0 ||
-	    strcmp(mode, "tscdeadline") == 0 ||
+	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0 ||
+	    strcmp(mode, "mwaitud") == 0 ||
 	    strcmp(mode, "avicirq") == 0 ||
 	    strcmp(mode, "ioapicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
 		if (strcmp(mode, "timerint") == 0 ||
 		    strcmp(mode, "lapictimer") == 0 ||
-		    strcmp(mode, "tscdeadline") == 0)
+		    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0)
 			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
 		else if (strcmp(mode, "serialirq") == 0)
 			write_idt_gate(mem, SERIAL_VECTOR, SERIAL_HANDLER_GPA);
@@ -1765,7 +1825,7 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	}
 	if (strcmp(mode, "timerint") == 0 ||
 	    strcmp(mode, "lapictimer") == 0 ||
-	    strcmp(mode, "tscdeadline") == 0) {
+	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    TIMER_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "serialirq") == 0) {
@@ -1774,7 +1834,7 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	} else if (strcmp(mode, "ioapicirq") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    IOAPIC_VECTOR * 16 + 15, IDT_GPA);
-	} else if (strcmp(mode, "ud") == 0) {
+	} else if (strcmp(mode, "ud") == 0 || strcmp(mode, "mwaitud") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    UD_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "avicirq") == 0) {
@@ -1790,10 +1850,11 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 
 static void
 build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
-    const struct vmm_x64_vcpu_state *vcpu, size_t code_len)
+    const struct vmm_x64_vcpu_state *vcpu, const char *mode, size_t code_len)
 {
 	struct vmm_manifest_header hdr;
 	struct vmm_gpa_range ranges[5];
+	struct vmm_x64_time_state time;
 	uint8_t *ptr;
 
 	if (manifest_size < PAGE_SIZE_GUEST)
@@ -1805,20 +1866,23 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	    PAGE_SIZE_GUEST, 7, 0 };
 	ranges[4] = (struct vmm_gpa_range){ IOAPIC_PD_GPA, PAGE_SIZE_GUEST,
 	    8, 0 };
+	time.tsc_hz = strcmp(mode, "tscscale") == 0 ? 1000000000ULL : 0;
 
 	memset(manifest, 0, manifest_size);
 	ptr = manifest + sizeof(hdr);
 	ptr = add_record(ptr, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
+	ptr = add_record(ptr, VMM_REC_X64_TIME_STATE, &time, sizeof(time));
 	ptr = add_record(ptr, VMM_REC_GPA_RANGE, ranges, sizeof(ranges));
 	if ((size_t)(ptr - manifest) > manifest_size)
 		errx(1, "manifest does not fit fd4");
 
 	memset(&hdr, 0, sizeof(hdr));
 	memcpy(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic));
+	hdr.abi_version = VMM_MANIFEST_ABI;
 	hdr.arch = VMM_MANIFEST_ARCH_X64;
 	hdr.header_size = sizeof(hdr);
 	hdr.total_size = (uint32_t)(ptr - manifest);
-	hdr.record_count = 2;
+	hdr.record_count = 3;
 	hdr.mem_size = mem_size;
 	memcpy(manifest, &hdr, sizeof(hdr));
 }
@@ -1834,7 +1898,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|tscdeadline|lapictimer_masked|ud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|tscdeadline|tscscale|pausefilter|lapictimer_masked|ud|mwaitud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
@@ -1851,6 +1915,6 @@ main(int argc, char **argv)
 	build_guest(mem, (size_t)mem_stat.st_size, argv[1], &code_len);
 	build_vcpu(&vcpu, argv[1]);
 	build_manifest(manifest, (size_t)manifest_stat.st_size,
-	    (size_t)mem_stat.st_size, &vcpu, code_len);
+	    (size_t)mem_stat.st_size, &vcpu, argv[1], code_len);
 	return 0;
 }

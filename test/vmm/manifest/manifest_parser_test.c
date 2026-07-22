@@ -14,10 +14,11 @@
 #include "vmm_loader_x86.h"
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
-#define VMM_MANIFEST_ABI	0
+#define VMM_MANIFEST_ABI	1
 #define VMM_MANIFEST_ARCH_X64	1
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
+#define VMM_REC_X64_TIME_STATE	3
 #define VMM_REC_F_MANDATORY	1
 
 #define MEM_SIZE		(2ULL * 1024ULL * 1024ULL)
@@ -107,7 +108,8 @@ set_segment(struct vmm_x64_seg_state *seg, uint16_t selector,
 
 static void
 build_manifest(uint8_t *manifest, struct vmm_x64_vcpu_state *vcpu,
-    struct vmm_gpa_range *range, size_t range_count)
+    const struct vmm_x64_time_state *time, struct vmm_gpa_range *range,
+    size_t range_count)
 {
 	struct vmm_manifest_header hdr;
 	uint8_t *p;
@@ -116,6 +118,7 @@ build_manifest(uint8_t *manifest, struct vmm_x64_vcpu_state *vcpu,
 	memset(&hdr, 0, sizeof(hdr));
 	p = manifest + sizeof(hdr);
 	p = add_record(p, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
+	p = add_record(p, VMM_REC_X64_TIME_STATE, time, sizeof(*time));
 	p = add_record(p, VMM_REC_GPA_RANGE, range,
 	    (uint32_t)(sizeof(*range) * range_count));
 
@@ -124,7 +127,7 @@ build_manifest(uint8_t *manifest, struct vmm_x64_vcpu_state *vcpu,
 	hdr.arch = VMM_MANIFEST_ARCH_X64;
 	hdr.header_size = sizeof(hdr);
 	hdr.total_size = (uint32_t)(p - manifest);
-	hdr.record_count = 2;
+	hdr.record_count = 3;
 	hdr.mem_size = MEM_SIZE;
 	memcpy(manifest, &hdr, sizeof(hdr));
 }
@@ -133,6 +136,7 @@ static void
 build_valid_state(uint8_t *manifest)
 {
 	struct vmm_x64_vcpu_state vcpu;
+	struct vmm_x64_time_state time;
 	struct vmm_gpa_range range[4];
 
 	memset(&vcpu, 0, sizeof(vcpu));
@@ -159,7 +163,8 @@ build_valid_state(uint8_t *manifest)
 	    VMM_GPA_RANGE_DESC_TABLE, 0 };
 	range[3] = (struct vmm_gpa_range){ STACK_GPA - PAGE_SIZE_GUEST,
 	    PAGE_SIZE_GUEST, VMM_GPA_RANGE_STACK, 0 };
-	build_manifest(manifest, &vcpu, range, 4);
+	time.tsc_hz = 1000000000ULL;
+	build_manifest(manifest, &vcpu, &time, range, 4);
 }
 
 static struct vmm_x64_vcpu_state *
@@ -183,6 +188,25 @@ manifest_first_record(uint8_t *manifest)
 	    sizeof(struct vmm_manifest_header));
 }
 
+static struct vmm_manifest_record *
+manifest_time_record(uint8_t *manifest)
+{
+	return (struct vmm_manifest_record *)(void *)(manifest +
+	    sizeof(struct vmm_manifest_header) +
+	    align8(sizeof(struct vmm_manifest_record) +
+	    sizeof(struct vmm_x64_vcpu_state)));
+}
+
+static struct vmm_x64_time_state *
+manifest_time(uint8_t *manifest)
+{
+	return (struct vmm_x64_time_state *)(void *)(manifest +
+	    sizeof(struct vmm_manifest_header) +
+	    align8(sizeof(struct vmm_manifest_record) +
+	    sizeof(struct vmm_x64_vcpu_state)) +
+	    sizeof(struct vmm_manifest_record));
+}
+
 static struct vmm_gpa_range *
 manifest_ranges(uint8_t *manifest)
 {
@@ -190,6 +214,8 @@ manifest_ranges(uint8_t *manifest)
 	    sizeof(struct vmm_manifest_header) +
 	    align8(sizeof(struct vmm_manifest_record) +
 	    sizeof(struct vmm_x64_vcpu_state)) +
+	    align8(sizeof(struct vmm_manifest_record) +
+	    sizeof(struct vmm_x64_time_state)) +
 	    sizeof(struct vmm_manifest_record));
 }
 
@@ -216,6 +242,19 @@ append_duplicate_ranges(uint8_t *manifest)
 	p = manifest + hdr->total_size;
 	p = add_record(p, VMM_REC_GPA_RANGE, ranges,
 	    4 * sizeof(struct vmm_gpa_range));
+	hdr->total_size = (uint32_t)(p - manifest);
+	hdr->record_count++;
+}
+
+static void
+append_duplicate_time(uint8_t *manifest)
+{
+	struct vmm_manifest_header *hdr = manifest_header(manifest);
+	struct vmm_x64_time_state *time = manifest_time(manifest);
+	uint8_t *p;
+
+	p = manifest + hdr->total_size;
+	p = add_record(p, VMM_REC_X64_TIME_STATE, time, sizeof(*time));
 	hdr->total_size = (uint32_t)(p - manifest);
 	hdr->record_count++;
 }
@@ -272,9 +311,15 @@ main(void)
 	uint8_t manifest[MANIFEST_SIZE];
 	struct vmm_x64_vcpu_state *vcpu;
 	struct vmm_gpa_range *ranges;
+	struct vmm_x64_time_state *time;
+	struct vmm_launch launch;
 
 	build_valid_state(manifest);
 	expect_result("valid", manifest, 0);
+	if (vmm_loader_x86_manifest_load(MEM_SIZE, manifest, MANIFEST_SIZE,
+	    &launch) != 0 || launch.imm_guest_tsc_hz != 1000000000ULL) {
+		errx(1, "valid: missing explicit guest TSC frequency");
+	}
 
 	expect_load_result("null manifest", MEM_SIZE, NULL, MANIFEST_SIZE,
 	    EINVAL);
@@ -294,6 +339,33 @@ main(void)
 	build_valid_state(manifest);
 	append_duplicate_ranges(manifest);
 	expect_result("duplicate gpa range record", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	append_duplicate_time(manifest);
+	expect_result("duplicate x64 time record", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	manifest_time_record(manifest)->type = 0x7fff;
+	manifest_time_record(manifest)->flags = 0;
+	expect_result("missing x64 time record", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	manifest_time_record(manifest)->size =
+	    sizeof(struct vmm_x64_time_state) - 1;
+	expect_result("bad x64 time size", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	time = manifest_time(manifest);
+	time->tsc_hz = 0;
+	expect_result("host native x64 time", manifest, 0);
+	if (vmm_loader_x86_manifest_load(MEM_SIZE, manifest, MANIFEST_SIZE,
+	    &launch) != 0 || launch.imm_guest_tsc_hz != 0) {
+		errx(1, "host native x64 time: unexpected launch frequency");
+	}
+
+	build_valid_state(manifest);
+	manifest_header(manifest)->abi_version = 0;
+	expect_result("old manifest abi", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_optional_unknown(manifest);

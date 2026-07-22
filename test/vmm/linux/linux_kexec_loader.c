@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include <err.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -110,9 +111,11 @@ static const uint8_t vmm_linux_dsdt[] = {
 };
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
+#define VMM_MANIFEST_ABI	1
 #define VMM_MANIFEST_ARCH_X64	1
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
+#define VMM_REC_X64_TIME_STATE	3
 #define VMM_REC_F_MANDATORY	1
 
 #define VMM_X64_NGPR		18
@@ -168,6 +171,8 @@ static const uint8_t vmm_linux_dsdt[] = {
 struct loader_options {
 	const char	*kernel_path;
 	const char	*initramfs_path;
+	uint64_t	tsc_hz;
+	int		tsc_hz_set;
 	char		*cmdline;
 	size_t		cmdline_len;
 };
@@ -237,6 +242,10 @@ struct vmm_gpa_range {
 	uint32_t	flags;
 } __attribute__((packed));
 
+struct vmm_x64_time_state {
+	uint64_t	tsc_hz;
+} __attribute__((packed));
+
 static void parse_options(int argc, char **argv, struct loader_options *opts);
 static uint8_t *map_fd(int fd, int prot, uint64_t *sizep);
 static void map_file_readonly(const char *path, struct mapped_file *file);
@@ -250,6 +259,7 @@ static void build_linux_guest(uint8_t *mem, uint64_t mem_size,
 static void build_vcpu(struct vmm_x64_vcpu_state *vcpu);
 static void build_manifest(uint8_t *manifest, uint64_t manifest_size,
     uint64_t mem_size, const struct vmm_x64_vcpu_state *vcpu,
+    const struct vmm_x64_time_state *time,
     const struct vmm_gpa_range *ranges, uint32_t range_count);
 static void loaded_initramfs_fini(const struct loaded_initramfs *initramfs);
 
@@ -261,6 +271,7 @@ main(int argc, char **argv)
 	struct loaded_initramfs initramfs;
 	struct vmm_x64_vcpu_state vcpu;
 	struct vmm_gpa_range ranges[VMM_GPA_RANGE_MAX];
+	struct vmm_x64_time_state time;
 	uint8_t *mem;
 	uint8_t *manifest;
 	uint64_t mem_size;
@@ -276,7 +287,8 @@ main(int argc, char **argv)
 	build_linux_guest(mem, mem_size, &opts, &kernel, &initramfs, ranges,
 	    &range_count);
 	build_vcpu(&vcpu);
-	build_manifest(manifest, manifest_size, mem_size, &vcpu, ranges,
+	time.tsc_hz = opts.tsc_hz;
+	build_manifest(manifest, manifest_size, mem_size, &vcpu, &time, ranges,
 	    range_count);
 
 	loaded_initramfs_fini(&initramfs);
@@ -377,6 +389,26 @@ parse_options(int argc, char **argv, struct loader_options *opts)
 			opts->initramfs_path = argv[i] + 10;
 			continue;
 		}
+		if (strncmp(argv[i], "tsc_hz=", 7) == 0) {
+			char *end;
+			uint64_t tsc_hz;
+
+			if (opts->tsc_hz_set)
+				errx(1, "duplicate tsc_hz argument");
+			if (strcmp(argv[i] + 7, "host") == 0) {
+				tsc_hz = 0;
+			} else {
+				errno = 0;
+				tsc_hz = strtoull(argv[i] + 7, &end, 10);
+				if (errno != 0 || end == argv[i] + 7 || *end != '\0' ||
+				    tsc_hz == 0) {
+					errx(1, "invalid tsc_hz argument: %s", argv[i]);
+				}
+			}
+			opts->tsc_hz = tsc_hz;
+			opts->tsc_hz_set = 1;
+			continue;
+		}
 		cmdline_cap += strlen(argv[i]) + 1;
 	}
 	opts->cmdline = calloc(1, cmdline_cap);
@@ -384,7 +416,8 @@ parse_options(int argc, char **argv, struct loader_options *opts)
 		err(1, "calloc cmdline");
 	cmdline_len = 0;
 	for (i = 2; i < argc; i++) {
-		if (strncmp(argv[i], "initramfs=", 10) == 0)
+		if (strncmp(argv[i], "initramfs=", 10) == 0 ||
+		    strncmp(argv[i], "tsc_hz=", 7) == 0)
 			continue;
 		if (cmdline_len != 0)
 			opts->cmdline[cmdline_len++] = ' ';
@@ -897,8 +930,9 @@ add_record(uint8_t *ptr, uint16_t type, const void *payload, uint32_t size)
 
 static void
 build_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
-    const struct vmm_x64_vcpu_state *vcpu, const struct vmm_gpa_range *ranges,
-    uint32_t range_count)
+    const struct vmm_x64_vcpu_state *vcpu,
+    const struct vmm_x64_time_state *time,
+    const struct vmm_gpa_range *ranges, uint32_t range_count)
 {
 	struct vmm_manifest_header hdr;
 	uint8_t *ptr;
@@ -908,6 +942,7 @@ build_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
 	memset(manifest, 0, (size_t)manifest_size);
 	ptr = manifest + sizeof(hdr);
 	ptr = add_record(ptr, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
+	ptr = add_record(ptr, VMM_REC_X64_TIME_STATE, time, sizeof(*time));
 	ptr = add_record(ptr, VMM_REC_GPA_RANGE, ranges,
 	    range_count * sizeof(ranges[0]));
 	if ((uint64_t)(ptr - manifest) > manifest_size)
@@ -915,10 +950,11 @@ build_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
 
 	memset(&hdr, 0, sizeof(hdr));
 	memcpy(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic));
+	hdr.abi_version = VMM_MANIFEST_ABI;
 	hdr.arch = VMM_MANIFEST_ARCH_X64;
 	hdr.header_size = sizeof(hdr);
 	hdr.total_size = (uint32_t)(ptr - manifest);
-	hdr.record_count = 2;
+	hdr.record_count = 3;
 	hdr.mem_size = mem_size;
 	memcpy(manifest, &hdr, sizeof(hdr));
 }

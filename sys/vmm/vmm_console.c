@@ -10,6 +10,7 @@
 #include <sys/fcntl.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
+#include <sys/taskqueue.h>
 #include <sys/tty.h>
 #include <sys/ttydefaults.h>
 #include <sys/thread.h>
@@ -29,6 +30,7 @@ static size_t	vmm_console_input_space(struct vmm_console *c);
 static size_t	vmm_console_input_write(struct vmm_console *c, const char *buf,
 		    size_t len);
 static void	vmm_console_tty_kick(struct vmm_console *c);
+static void	vmm_console_drain_task(void *arg, int pending);
 
 static uint32_t vmm_console_dev_serial;
 
@@ -60,6 +62,13 @@ vmm_console_attach(struct vmm_console *c, const char *name,
 
 	KKASSERT(c->own_mut_dev == NULL);
 	KKASSERT(c->own_mut_tty == NULL);
+	c->own_mut_drain_taskqueue = taskqueue_create("vmm_console", M_WAITOK,
+	    taskqueue_thread_enqueue, &c->own_mut_drain_taskqueue);
+	KKASSERT(c->own_mut_drain_taskqueue != NULL);
+	TASK_INIT(&c->own_mut_drain_task, 0, vmm_console_drain_task, c);
+	taskqueue_start_threads(&c->own_mut_drain_taskqueue, 1, TDPRI_KERN_DAEMON,
+	    -1, "vmm console");
+	c->own_mut_output = kmalloc(VMM_CONSOLE_OUTPUT_SIZE, M_TTYS, M_WAITOK);
 	unit = atomic_fetchadd_int(&vmm_console_dev_serial, 1);
 	tp = kmalloc(sizeof(*tp), M_TTYS, M_WAITOK | M_ZERO);
 	ttyinit(tp);
@@ -86,6 +95,16 @@ vmm_console_detach(struct vmm_console *c)
 
 	if (dev != NULL)
 		dev_drevoke(dev);
+	atomic_store_rel_int(&c->atomic_mut_open, 0);
+	if (c->own_mut_drain_taskqueue != NULL) {
+		taskqueue_drain(c->own_mut_drain_taskqueue, &c->own_mut_drain_task);
+		taskqueue_free(c->own_mut_drain_taskqueue);
+		c->own_mut_drain_taskqueue = NULL;
+	}
+	if (c->own_mut_output != NULL) {
+		kfree(c->own_mut_output, M_TTYS);
+		c->own_mut_output = NULL;
+	}
 	if (tp != NULL) {
 		lwkt_gettoken(&tp->t_token);
 		if (tp->t_state & TS_ISOPEN) {
@@ -119,6 +138,8 @@ vmm_console_reset(struct vmm_console *c)
 	struct tty *tp = c->own_mut_tty;
 	int opened = 0;
 
+	if (c->own_mut_drain_taskqueue != NULL)
+		taskqueue_drain(c->own_mut_drain_taskqueue, &c->own_mut_drain_task);
 	lwkt_gettoken(&c->token_console);
 	c->mut_guest_rx_bytes = 0;
 	c->mut_guest_drop_bytes = 0;
@@ -126,6 +147,9 @@ vmm_console_reset(struct vmm_console *c)
 	c->mut_host_drop_bytes += c->mut_input_len;
 	c->mut_input_start = 0;
 	c->mut_input_len = 0;
+	c->mut_guest_drop_bytes += c->mut_output_len;
+	c->mut_output_start = 0;
+	c->mut_output_len = 0;
 	lwkt_reltoken(&c->token_console);
 	if (tp != NULL) {
 		lwkt_gettoken(&tp->t_token);
@@ -139,34 +163,44 @@ vmm_console_reset(struct vmm_console *c)
 void
 vmm_console_guest_write(struct vmm_console *c, const char *buf, size_t len)
 {
-	struct tty *tp = c->own_mut_tty;
-	size_t i;
+	size_t copied = 0;
+	int error;
 	uint64_t accepted = 0;
 	uint64_t dropped = 0;
 
-	if (tp == NULL || buf == NULL || len == 0)
+	if (buf == NULL || len == 0)
 		return;
-	lwkt_gettoken(&tp->t_token);
-	if ((tp->t_state & TS_ISOPEN) == 0) {
-		lwkt_reltoken(&tp->t_token);
+	if (atomic_load_acq_int(&c->atomic_mut_open) == 0) {
 		lwkt_gettoken(&c->token_console);
 		c->mut_guest_drop_bytes += len;
 		lwkt_reltoken(&c->token_console);
 		return;
 	}
-	for (i = 0; i < len;) {
-		if (tp->t_rawq.c_cc + tp->t_canq.c_cc >= TTYHOG - 3)
-			break;
-		ttyinput((unsigned char)buf[i], tp);
-		accepted++;
-		i++;
-	}
-	dropped = len - accepted;
-	lwkt_reltoken(&tp->t_token);
 	lwkt_gettoken(&c->token_console);
+	while (copied < len && c->mut_output_len < VMM_CONSOLE_OUTPUT_SIZE) {
+		size_t pos;
+
+		pos = (c->mut_output_start + c->mut_output_len) %
+		    VMM_CONSOLE_OUTPUT_SIZE;
+		c->own_mut_output[pos] = buf[copied++];
+		c->mut_output_len++;
+	}
+	accepted = copied;
+	dropped = len - copied;
 	c->mut_guest_rx_bytes += accepted;
 	c->mut_guest_drop_bytes += dropped;
 	lwkt_reltoken(&c->token_console);
+	if (accepted == 0 || c->own_mut_drain_taskqueue == NULL)
+		return;
+	error = taskqueue_enqueue(c->own_mut_drain_taskqueue,
+	    &c->own_mut_drain_task);
+	if (error != 0) {
+		lwkt_gettoken(&c->token_console);
+		c->mut_guest_drop_bytes += c->mut_output_len;
+		c->mut_output_start = 0;
+		c->mut_output_len = 0;
+		lwkt_reltoken(&c->token_console);
+	}
 }
 
 size_t
@@ -190,7 +224,7 @@ vmm_console_guest_read(struct vmm_console *c, char *out)
 		return 0;
 	lwkt_gettoken(&c->token_console);
 	if (c->mut_input_len != 0) {
-		*out = c->mut_input[c->mut_input_start];
+		*out = c->own_mut_input[c->mut_input_start];
 		c->mut_input_start = (c->mut_input_start + 1) %
 		    VMM_CONSOLE_INPUT_SIZE;
 		c->mut_input_len--;
@@ -239,6 +273,9 @@ vmm_console_dev_open(struct dev_open_args *ap)
 	}
 	error = (*linesw[tp->t_line].l_open)(dev, tp);
 	lwkt_reltoken(&tp->t_token);
+	if (error == 0)
+		atomic_store_rel_int(&((struct vmm_console *)dev->si_drv1)->
+		    atomic_mut_open, 1);
 	return error;
 }
 
@@ -256,6 +293,9 @@ vmm_console_dev_close(struct dev_close_args *ap)
 		ttyclose(tp);
 	}
 	lwkt_reltoken(&tp->t_token);
+	if (dev->si_drv1 != NULL)
+		atomic_store_rel_int(&((struct vmm_console *)dev->si_drv1)->
+		    atomic_mut_open, 0);
 	return 0;
 }
 
@@ -346,7 +386,7 @@ vmm_console_input_write(struct vmm_console *c, const char *buf, size_t len)
 
 		pos = (c->mut_input_start + c->mut_input_len) %
 		    VMM_CONSOLE_INPUT_SIZE;
-		c->mut_input[pos] = buf[copied++];
+		c->own_mut_input[pos] = buf[copied++];
 		c->mut_input_len++;
 		c->mut_host_tx_bytes++;
 	}
@@ -362,4 +402,51 @@ vmm_console_tty_kick(struct vmm_console *c)
 
 	if (m != NULL)
 		vmm_machine_console_input(m);
+}
+
+static void
+vmm_console_drain_task(void *arg, int pending)
+{
+	struct vmm_console *c = arg;
+	struct tty *tp;
+	char ch;
+	int deliver;
+
+	(void)pending;
+	for (;;) {
+		if (atomic_load_acq_int(&c->atomic_mut_open) == 0) {
+			lwkt_gettoken(&c->token_console);
+			c->mut_guest_drop_bytes += c->mut_output_len;
+			c->mut_output_start = 0;
+			c->mut_output_len = 0;
+			lwkt_reltoken(&c->token_console);
+			return;
+		}
+		lwkt_gettoken(&c->token_console);
+		if (c->mut_output_len == 0) {
+			lwkt_reltoken(&c->token_console);
+			return;
+		}
+		ch = c->own_mut_output[c->mut_output_start];
+		c->mut_output_start = (c->mut_output_start + 1) %
+		    VMM_CONSOLE_OUTPUT_SIZE;
+		c->mut_output_len--;
+		lwkt_reltoken(&c->token_console);
+		tp = c->own_mut_tty;
+		deliver = 0;
+		if (tp != NULL) {
+			lwkt_gettoken(&tp->t_token);
+			if (atomic_load_acq_int(&c->atomic_mut_open) != 0 &&
+			    (tp->t_state & TS_ISOPEN) != 0) {
+				ttyinput((unsigned char)ch, tp);
+				deliver = 1;
+			}
+			lwkt_reltoken(&tp->t_token);
+		}
+		if (!deliver) {
+			lwkt_gettoken(&c->token_console);
+			c->mut_guest_drop_bytes++;
+			lwkt_reltoken(&c->token_console);
+		}
+	}
 }
