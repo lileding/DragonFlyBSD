@@ -17,6 +17,7 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_vblank.h>
 #include <linux/err.h>
 
 #define NVDRM_DRM_NAME		"nouveau"
@@ -30,11 +31,62 @@ static const struct file_operations nvdrm_fops = {
 	.owner = THIS_MODULE,
 };
 
+/*
+ * Read TU102 head and raster state for precise DRM vblank timestamps.  This
+ * callback runs in vblank accounting and only performs BAR0 reads; it must not
+ * sleep or acquire an LWKT token.
+ */
+static bool
+nvdrm_drv_get_scanout_position(struct drm_device *ddev, unsigned int pipe,
+    bool in_vblank_irq, int *vpos, int *hpos, ktime_t *stime, ktime_t *etime,
+    const struct drm_display_mode *mode)
+{
+	struct nvgpu_device *gpu = ddev->dev_private;
+	uint32_t raster = pipe * 0x800u;
+	uint32_t head = 0x8000u + pipe * 0x400u;
+	int vtotal;
+	int vblank_start;
+	int vblank_end;
+	int line;
+
+	(void)in_vblank_irq;
+	(void)mode;
+	if (gpu == NULL)
+		return (false);
+
+	vtotal = (nvgpu_device_rd32(gpu, 0x682064u + head) >> 16) & 0xffff;
+	vblank_end = (nvgpu_device_rd32(gpu, 0x68206cu + head) >> 16) & 0xffff;
+	vblank_start = (nvgpu_device_rd32(gpu, 0x682070u + head) >> 16) & 0xffff;
+	if (vtotal == 0)
+		return (false);
+
+	if (stime != NULL)
+		*stime = ktime_get();
+	/* Reading vline latches the matching hline register. */
+	line = nvgpu_device_rd32(gpu, 0x616330u + raster) & 0xffff;
+	*hpos = nvgpu_device_rd32(gpu, 0x616334u + raster) & 0xffff;
+	if (etime != NULL)
+		*etime = ktime_get();
+
+	if (vblank_end >= vblank_start) {
+		if (line >= vblank_start)
+			line -= vtotal;
+	} else {
+		if (line >= vblank_start)
+			line -= vtotal;
+		line -= vblank_end + 1;
+	}
+	*vpos = line;
+	return (true);
+}
+
 static struct drm_driver nvdrm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
 	    DRIVER_SYNCOBJ_TIMELINE | DRIVER_PRIME | DRIVER_MODESET |
 	    DRIVER_ATOMIC,
 	.fops = &nvdrm_fops,
+	.get_scanout_position = nvdrm_drv_get_scanout_position,
+	.get_vblank_timestamp = drm_calc_vbltimestamp_from_scanoutpos,
 	.name = NVDRM_DRM_NAME,
 	.desc = NVDRM_DRM_DESC,
 	.date = NVDRM_DRM_DATE,
