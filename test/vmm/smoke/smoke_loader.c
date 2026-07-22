@@ -755,6 +755,52 @@ guest_mwaitud_code(uint8_t *code, size_t cap)
 	return len;
 }
 
+static size_t
+guest_mwaitxud_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t cpuid_mwaitx[] = {
+	    0xb8, 0x01, 0x00, 0x00, 0x80, /* mov eax,0x80000001 */
+	    0x31, 0xc9,			/* xor ecx,ecx */
+	    0x0f, 0xa2,			/* cpuid */
+	    0xf7, 0xc1, 0x00, 0x00, 0x00, 0x20 /* test ecx,1<<29 */
+	};
+	static const uint8_t mwaitx_args[] = {
+	    0x31, 0xc0,			/* xor eax,eax */
+	    0x31, 0xdb,			/* xor ebx,ebx */
+	    0x31, 0xc9			/* xor ecx,ecx */
+	};
+	static const uint8_t mwaitx[] = { 0x0f, 0x01, 0xfb };
+	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t fixup[] = {
+	    0x48, 0x83, 0x04, 0x24, 0x03 /* addq $3,(%rsp) */
+	};
+	static const char handler_msg[] = "dfvmm-mwaitx-ud-ok\n";
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t len = 0;
+	size_t jmasked;
+	size_t masked_label;
+	size_t i;
+
+	emit(code, &len, cap, cpuid_mwaitx, sizeof(cpuid_mwaitx));
+	jmasked = emit_je8(code, &len, cap);
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	masked_label = len;
+	emit(code, &len, cap, mwaitx_args, sizeof(mwaitx_args));
+	emit(code, &len, cap, mwaitx, sizeof(mwaitx));
+	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	while (len < UD_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, fixup, sizeof(fixup));
+	for (i = 0; i < sizeof(handler_msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	patch_rel8(code, jmasked, masked_label);
+	return len;
+}
+
 
 static size_t
 guest_avicirq_code(uint8_t *code, size_t cap)
@@ -1641,6 +1687,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_ud_code(code, cap);
 	} else if (strcmp(mode, "mwaitud") == 0) {
 		return guest_mwaitud_code(code, cap);
+	} else if (strcmp(mode, "mwaitxud") == 0) {
+		return guest_mwaitxud_code(code, cap);
 	} else if (strcmp(mode, "pic") == 0) {
 		return guest_pic_code(code, cap);
 	} else if (strcmp(mode, "ioapic") == 0) {
@@ -1755,7 +1803,7 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0 ||
-	    strcmp(mode, "mwaitud") == 0 ||
+	    strcmp(mode, "mwaitud") == 0 || strcmp(mode, "mwaitxud") == 0 ||
 	    strcmp(mode, "avicirq") == 0 ||
 	    strcmp(mode, "ioapicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
@@ -1834,7 +1882,8 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	} else if (strcmp(mode, "ioapicirq") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    IOAPIC_VECTOR * 16 + 15, IDT_GPA);
-	} else if (strcmp(mode, "ud") == 0 || strcmp(mode, "mwaitud") == 0) {
+	} else if (strcmp(mode, "ud") == 0 || strcmp(mode, "mwaitud") == 0 ||
+	    strcmp(mode, "mwaitxud") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    UD_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "avicirq") == 0) {
@@ -1898,7 +1947,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|tscdeadline|tscscale|pausefilter|lapictimer_masked|ud|mwaitud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|tscdeadline|tscscale|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

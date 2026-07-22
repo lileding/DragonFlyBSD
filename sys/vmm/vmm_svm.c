@@ -309,6 +309,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
 #define VMM_CPUID_MIN_BASIC	0x16U
 #define VMM_CPUID80000001_ECX_SVM CPUID_SVM
+#define VMM_CPUID80000001_ECX_MWAITX CPUID_MWAITX
 #define VMM_CPUID80000007_EDX_INVTSC (1U << 8)
 #define VMM_CPUID80000008_ECX_CORES_MASK 0xffU
 
@@ -1627,7 +1628,9 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		regs[2] = 100;
 		regs[3] = 0;
 	} else if (leaf == 0x80000001U) {
-		regs[2] &= ~VMM_CPUID80000001_ECX_SVM;
+		/* MWAITX is intercepted and deliberately faults in this CPU model. */
+		regs[2] &= ~(VMM_CPUID80000001_ECX_SVM |
+		    VMM_CPUID80000001_ECX_MWAITX);
 	} else if (leaf == 0x80000007U) {
 		regs[3] |= VMM_CPUID80000007_EDX_INVTSC;
 	} else if (leaf == 0x80000008U) {

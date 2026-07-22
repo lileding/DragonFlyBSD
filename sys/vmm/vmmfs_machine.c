@@ -64,7 +64,7 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 	{ "lease",	  VREG, 0444, &vmmfs_lease_class,
 	    __offsetof(struct vmmfs_machine, n_lease),	  NULL },
 #endif
-	{ "events",	  VREG, 0444, &vmmfs_events_class,
+	{ "events",	  VREG, 0644, &vmmfs_events_class,
 	    __offsetof(struct vmmfs_machine, n_events),  NULL },
 	{ "console",	  VCHR, 0600, &vmmfs_console_class,
 	    __offsetof(struct vmmfs_machine, n_console), NULL },
