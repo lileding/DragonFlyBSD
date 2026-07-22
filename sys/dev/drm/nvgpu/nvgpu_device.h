@@ -27,7 +27,7 @@ struct resource;
  */
 struct nvgpu_device;
 
-/* Return gpu's borrowed device_t.  NULL selects the current default GPU. */
+/* Return gpu's borrowed device_t, or NULL when gpu is NULL. */
 device_t nvgpu_device_get_newbus_dev(struct nvgpu_device *gpu);
 
 /* Return borrowed immutable chip metadata for gpu. */

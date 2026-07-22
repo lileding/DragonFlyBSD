@@ -7,7 +7,6 @@
 #include "nvgpu_unload.h"
 #include "nvgpu_device.h"
 #include "nvgpu_debug.h"
-#include "nvgpu_sched.h"
 
 #include <drm/drmP.h>
 
@@ -25,7 +24,6 @@ struct nvgpu_unload_state {
 	uint32_t last_open_count;
 	uint32_t last_file_count;
 	uint32_t last_mmap_count;
-	uint32_t last_sched_count;
 	uint32_t last_drm_ref_count;
 	uint32_t busy_count;
 };
@@ -148,7 +146,6 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 	struct drm_file *file_priv;
 	uint32_t file_count = 0;
 	uint32_t mmap_count = 0;
-	uint32_t sched_count;
 	int error = 0;
 
 	state = nvgpu_device_get_unload_state(gpu);
@@ -173,16 +170,14 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 		file_count++;
 	mutex_unlock(&ddev->filelist_mutex);
 
-	sched_count = nvgpu_sched_busy_count();
 	lwkt_gettoken(&state->token);
 	mmap_count = state->mmap_refs;
 	if (ddev->open_count != 0 || file_count != 0 || mmap_count != 0 ||
-	    sched_count != 0 || state->drm_refs != 0) {
+	    state->drm_refs != 0) {
 		state->busy_count++;
 		state->last_open_count = ddev->open_count;
 		state->last_file_count = file_count;
 		state->last_mmap_count = mmap_count;
-		state->last_sched_count = sched_count;
 		state->last_drm_ref_count = state->drm_refs;
 		error = EBUSY;
 	} else {
@@ -192,15 +187,15 @@ nvgpu_unload_try_begin(struct nvgpu_device *gpu)
 	mutex_unlock(&drm_global_mutex);
 
 	nvgpu_log(NVGPU_LOG_DEBUG,
-	    "unload gate observed: gpu=%p state=%p open=%u files=%u mmap=%u sched=%u drm_refs=%u\n",
-	    gpu, state, ddev->open_count, file_count, mmap_count, sched_count,
+	    "unload gate observed: gpu=%p state=%p open=%u files=%u mmap=%u drm_refs=%u\n",
+	    gpu, state, ddev->open_count, file_count, mmap_count,
 	    state->drm_refs);
 
 	if (error != 0) {
 		nvgpu_log(NVGPU_LOG_INFO,
-		    "unload busy: open=%u files=%u mmap=%u sched=%u drm_refs=%u\n",
+		    "unload busy: open=%u files=%u mmap=%u drm_refs=%u\n",
 		    state->last_open_count, state->last_file_count,
-		    state->last_mmap_count, state->last_sched_count,
+		    state->last_mmap_count,
 		    state->last_drm_ref_count);
 	} else {
 		nvgpu_log(NVGPU_LOG_DEBUG, "unload admitted\n");
