@@ -27,13 +27,6 @@ struct nvgpu_vm_bind_op {
 	struct nvgpu_bo *bo;
 };
 
-typedef int (*nvgpu_proc_register_bind)(struct nvgpu_proc *proc,
-	struct nvgpu_fence *done, struct nvgpu_fence **waits,
-	uint32_t capacity, uint32_t *wait_count);
-
-typedef void (*nvgpu_proc_complete_bind)(struct nvgpu_proc *proc,
-	struct nvgpu_fence *done);
-
 /* Native VM remap request adapted by the syscall layer before entering proc. */
 struct nvgpu_vm_remap_args {
 	struct nvgpu_vm_bind_op *ops;
@@ -42,9 +35,6 @@ struct nvgpu_vm_remap_args {
 	size_t wait_count;
 	struct nvgpu_fence *done;
 	struct nvgpu_proc *proc;
-	int (*register_bind)(struct nvgpu_proc *proc, struct nvgpu_fence *done,
-		struct nvgpu_fence **waits, uint32_t capacity, uint32_t *wait_count);
-	void (*complete_bind)(struct nvgpu_proc *proc, struct nvgpu_fence *done);
 };
 
 #define NVGPU_VM_BIND_OP_MAP	0u

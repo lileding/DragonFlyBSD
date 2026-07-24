@@ -128,6 +128,9 @@ int nvgpu_display_method_init_core(struct nvgpu_display_push *push,
 	uint32_t sync_handle, uint32_t windows);
 int nvgpu_display_method_assign_windows(struct nvgpu_display_push *push,
 	uint32_t windows);
+int nvgpu_display_method_emit_core_update(struct nvgpu_display_push *push,
+	const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT], bool notifier,
+	uint32_t notifier_offset);
 int nvgpu_display_method_update_core(struct nvgpu_display_push *push,
 	const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT], bool notifier,
 	uint32_t notifier_offset);
@@ -178,6 +181,9 @@ int nvgpu_display_method_set_window_semaphore(
 	const struct nvgpu_display_window_state *state);
 int nvgpu_display_method_clear_window_semaphore(
 	struct nvgpu_display_push *push);
+int nvgpu_display_method_emit_window_update(struct nvgpu_display_push *push,
+	uint32_t window,
+	const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT]);
 int nvgpu_display_method_update_window(struct nvgpu_display_push *push,
 	uint32_t window,
 	const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT]);

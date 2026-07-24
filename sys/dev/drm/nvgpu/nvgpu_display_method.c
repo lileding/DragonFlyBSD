@@ -218,7 +218,7 @@ nvgpu_display_method_assign_windows(struct nvgpu_display_push *push,
 }
 
 int
-nvgpu_display_method_update_core(struct nvgpu_display_push *push,
+nvgpu_display_method_emit_core_update(struct nvgpu_display_push *push,
     const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT], bool notifier,
     uint32_t notifier_offset)
 {
@@ -254,6 +254,20 @@ nvgpu_display_method_update_core(struct nvgpu_display_push *push,
 		if (error != 0)
 			return (error);
 	}
+	return (0);
+}
+
+int
+nvgpu_display_method_update_core(struct nvgpu_display_push *push,
+    const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT], bool notifier,
+    uint32_t notifier_offset)
+{
+	int error;
+
+	error = nvgpu_display_method_emit_core_update(push, interlock, notifier,
+	    notifier_offset);
+	if (error != 0)
+		return (error);
 	return (nvgpu_display_push_kick(push));
 }
 
@@ -811,7 +825,7 @@ nvgpu_display_method_clear_window_semaphore(struct nvgpu_display_push *push)
 }
 
 int
-nvgpu_display_method_update_window(struct nvgpu_display_push *push,
+nvgpu_display_method_emit_window_update(struct nvgpu_display_push *push,
     uint32_t window,
     const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT])
 {
@@ -829,6 +843,19 @@ nvgpu_display_method_update_window(struct nvgpu_display_push *push,
 	value = 1 | NVVAL(NVC37E, UPDATE, INTERLOCK_WITH_WIN_IMM,
 	    !!(interlock[NVGPU_DISPLAY_INTERLOCK_IMMEDIATE] & (1u << window)));
 	error = nvgpu_display_push_method(push, NVC37E_UPDATE, &value, 1);
+	if (error != 0)
+		return (error);
+	return (0);
+}
+
+int
+nvgpu_display_method_update_window(struct nvgpu_display_push *push,
+    uint32_t window,
+    const uint32_t interlock[NVGPU_DISPLAY_INTERLOCK_COUNT])
+{
+	int error;
+
+	error = nvgpu_display_method_emit_window_update(push, window, interlock);
 	if (error != 0)
 		return (error);
 	return (nvgpu_display_push_kick(push));

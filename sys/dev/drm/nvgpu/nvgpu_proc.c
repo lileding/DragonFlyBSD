@@ -60,7 +60,6 @@ struct nvgpu_proc {
 	volatile u_int refs;
 	struct nvgpu_channel_list channels;
 	struct nvgpu_proc_exec_list execs;
-	struct nvgpu_fence *last_bind;
 	struct reservation_object vm_resv;
 	struct nvgpu_vm *vm;
 };
@@ -80,10 +79,6 @@ struct nvgpu_exec_future {
 static void nvgpu_proc_finalize(struct nvgpu_proc *proc);
 static struct nvgpu_future_result nvgpu_proc_poll_exec(
 	struct nvgpu_future *future);
-static int register_bind(struct nvgpu_proc *proc,
-	struct nvgpu_fence *done, struct nvgpu_fence **waits,
-	uint32_t capacity, uint32_t *wait_count);
-static void complete_bind(struct nvgpu_proc *proc, struct nvgpu_fence *done);
 
 struct nvgpu_device *
 nvgpu_proc_get_device(struct nvgpu_proc *proc)
@@ -246,8 +241,6 @@ nvgpu_proc_remap(struct nvgpu_proc *proc, struct nvgpu_vm_remap_args *remap)
 	if (error != 0)
 		return (error);
 	remap->proc = proc;
-	remap->register_bind = register_bind;
-	remap->complete_bind = complete_bind;
 	return (nvgpu_vm_remap(vm, remap));
 }
 
@@ -286,14 +279,17 @@ nvgpu_proc_spawn(struct nvgpu_proc *proc, struct nvgpu_proc_exec *args)
 		exec->pushes = args->pushes;
 		exec->push_count = args->push_count;
 	}
-	waits = kmalloc((args->wait_count + 1) * sizeof(*waits),
-	    M_NVGPU_EXEC, M_WAITOK | M_ZERO);
+	waits = NULL;
+	if (args->wait_count != 0)
+		waits = kmalloc(args->wait_count * sizeof(*waits),
+		    M_NVGPU_EXEC, M_WAITOK | M_ZERO);
 	exec->base.poll = nvgpu_proc_poll_exec;
 	exec->proc = proc;
 	exec->done = args->done;
 	exec->submitted = nvgpu_fence_create();
 	if (exec->submitted == NULL) {
-		_kfree(waits, M_NVGPU_EXEC);
+		if (waits != NULL)
+			_kfree(waits, M_NVGPU_EXEC);
 		_kfree(exec, M_NVGPU_EXEC);
 		return (ENOMEM);
 	}
@@ -325,8 +321,6 @@ nvgpu_proc_spawn(struct nvgpu_proc *proc, struct nvgpu_proc_exec *args)
 		}
 		waits[wait_count++] = wait;
 	}
-	if (proc->last_bind != NULL)
-		waits[wait_count++] = proc->last_bind;
 	nvgpu_channel_addref(exec->channel);
 	TAILQ_INSERT_TAIL(&proc->execs, &exec->record, link);
 	error = nvgpu_future_spawn(&exec->base, waits, wait_count);
@@ -335,7 +329,8 @@ nvgpu_proc_spawn(struct nvgpu_proc *proc, struct nvgpu_proc_exec *args)
 		nvgpu_channel_release(exec->channel);
 	}
 	lwkt_reltoken(&proc->token);
-	_kfree(waits, M_NVGPU_EXEC);
+	if (waits != NULL)
+		_kfree(waits, M_NVGPU_EXEC);
 	waits = NULL;
 	if (error == 0) {
 		reservation_object_lock(&proc->vm_resv, NULL);
@@ -405,53 +400,6 @@ complete:
 	return (NVGPU_FUTURE_READY(error));
 }
 
-int
-register_bind(struct nvgpu_proc *proc, struct nvgpu_fence *done,
-	struct nvgpu_fence **waits, uint32_t capacity, uint32_t *wait_count)
-{
-	struct nvgpu_fence *previous;
-	uint32_t required;
-
-	if (proc == NULL || done == NULL || wait_count == NULL ||
-	    (capacity != 0 && waits == NULL))
-		return (EINVAL);
-	lwkt_gettoken(&proc->token);
-	required = proc->last_bind != NULL ? 1 : 0;
-	if (capacity < required) {
-		*wait_count = required;
-		lwkt_reltoken(&proc->token);
-		return (ENOSPC);
-	}
-	if (proc->last_bind != NULL) {
-		nvgpu_fence_addref(proc->last_bind);
-		waits[0] = proc->last_bind;
-	}
-	previous = proc->last_bind;
-	nvgpu_fence_addref(done);
-	proc->last_bind = done;
-	*wait_count = required;
-	lwkt_reltoken(&proc->token);
-	nvgpu_fence_release(previous);
-	return (0);
-}
-
-void
-complete_bind(struct nvgpu_proc *proc, struct nvgpu_fence *done)
-{
-	struct nvgpu_fence *last;
-
-	if (proc == NULL || done == NULL)
-		return;
-	last = NULL;
-	lwkt_gettoken(&proc->token);
-	if (proc->last_bind == done) {
-		last = proc->last_bind;
-		proc->last_bind = NULL;
-	}
-	lwkt_reltoken(&proc->token);
-	nvgpu_fence_release(last);
-}
-
 static void
 nvgpu_proc_finalize(struct nvgpu_proc *proc)
 {
@@ -459,8 +407,6 @@ nvgpu_proc_finalize(struct nvgpu_proc *proc)
 
 	KASSERT(TAILQ_EMPTY(&proc->execs),
 	    ("finalizing proc with active EXEC futures"));
-	KASSERT(proc->last_bind == NULL,
-	    ("finalizing proc with active remap future"));
 	while ((chan = TAILQ_FIRST(&proc->channels)) != NULL) {
 		TAILQ_REMOVE(&proc->channels, chan, link);
         KASSERT(chan->refs == 1,

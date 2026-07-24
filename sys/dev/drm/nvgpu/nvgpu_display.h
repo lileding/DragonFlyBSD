@@ -202,7 +202,6 @@ struct nvgpu_display_console {
 
 struct nvgpu_display_event_ops {
 	void (*vblank)(void *arg, uint32_t head);
-	void (*pageflip)(void *arg, uint32_t head, void *cookie);
 	void (*hotplug)(void *arg, uint32_t plug_mask, uint32_t unplug_mask);
 	void (*dp_irq)(void *arg, uint32_t display_id);
 };
@@ -248,12 +247,22 @@ int nvgpu_display_disable(struct nvgpu_device *gpu, uint32_t head,
 	uint32_t window);
 
 /*
- * Queue a primary-plane update.  pageflip_cookie remains caller-owned until a
- * pageflip callback consumes it or cancel_pageflip returns true.
+ * KMS owns the display token from begin through end.  While active, update
+ * calls only emit state and record changed windows; flush submits all EVO
+ * channels together and wait observes only the recorded window notifiers.
+ */
+int nvgpu_display_atomic_begin(struct nvgpu_device *gpu);
+int nvgpu_display_atomic_flush(struct nvgpu_device *gpu);
+int nvgpu_display_atomic_wait(struct nvgpu_device *gpu);
+void nvgpu_display_atomic_end(struct nvgpu_device *gpu);
+
+/*
+ * Emit a primary-plane update.  Within an atomic section, flush and notifier
+ * waiting are deferred to the KMS tail; otherwise this submits immediately.
+ * Scanout storage is borrowed for the call.
  */
 int nvgpu_display_update_primary(struct nvgpu_device *gpu, uint32_t head,
-	uint32_t window, const struct nvgpu_display_scanout *scanout,
-	void *pageflip_cookie);
+	uint32_t window, const struct nvgpu_display_scanout *scanout);
 int nvgpu_display_update_head(struct nvgpu_device *gpu, uint32_t head,
 	const struct nvgpu_display_head_config *config, bool update_view,
 	bool update_dither);
@@ -262,9 +271,6 @@ int nvgpu_display_update_color(struct nvgpu_device *gpu, uint32_t head,
 /* Check and retrain the active DP route for display_id in process context. */
 int nvgpu_display_recover_dp_link(struct nvgpu_device *gpu,
 	uint32_t display_id);
-/* Cancel pageflip_cookie only if the display IRQ path has not consumed it. */
-bool nvgpu_display_cancel_pageflip(struct nvgpu_device *gpu, uint32_t head,
-	void *pageflip_cookie);
 int nvgpu_display_disable_primary(struct nvgpu_device *gpu,
 	uint32_t window);
 

@@ -27,6 +27,7 @@
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_plane_helper.h>
 #include <linux/err.h>
+#include <linux/reservation.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <machine/framebuffer.h>
@@ -43,25 +44,17 @@ KTR_INFO_MASTER_EXTERN(nvgpu);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_commit_stage, 0,
     "kms commit stage state=%p stage=%u", void *state, uint32_t stage);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_primary_update, 1,
-    "kms primary head=%u win=%u fb=%p event=%p ref=%u layout=%u dst=%ux%u",
-    uint32_t head, uint32_t window, void *fb, void *event, uint32_t ref,
+    "kms primary head=%u win=%u fb=%p event=%p layout=%u dst=%ux%u",
+    uint32_t head, uint32_t window, void *fb, void *event,
     uint32_t layout, uint32_t width, uint32_t height);
-KTR_INFO(KTR_NVGPU, nvgpu, kms_event_arm, 2,
-    "kms event arm head=%u win=%u event=%p pending=%p", uint32_t head,
-    uint32_t window, void *event, void *pending);
-KTR_INFO(KTR_NVGPU, nvgpu, kms_event_drop, 3,
-    "kms event drop head=%u error=%d event=%p pending=%p", uint32_t head, int error,
-    void *event, void *pending);
-KTR_INFO(KTR_NVGPU, nvgpu, kms_modeset_event, 4,
-    "kms modeset event head=%u event=%p ref=%u active=%u modeset=%u",
-    uint32_t head, void *event, uint32_t ref, uint32_t active,
-    uint32_t modeset);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_event_ref, 2,
+    "kms event ref head=%u event=%p active=%u ref=%u", uint32_t head,
+    void *event, uint32_t active, uint32_t ref);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_primary_ready, 3,
+    "kms primary ready head=%u win=%u event=%p error=%d", uint32_t head,
+    uint32_t window, void *event, int error);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_send_event, 5,
     "kms send event head=%u crtc=%p event=%p", uint32_t head, void *crtc, void *event);
-KTR_INFO(KTR_NVGPU, nvgpu, kms_take_flip, 6,
-    "kms take flip pending=%p crtc=%p event=%p", void *pending, void *crtc, void *event);
-KTR_INFO(KTR_NVGPU, nvgpu, kms_pageflip, 7,
-    "kms pageflip head=%u pending=%p", uint32_t head, void *pending);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_vblank, 8,
     "kms vblank head=%u", uint32_t head);
 KTR_INFO(KTR_NVGPU, nvgpu, kms_atomic_check, 9,
@@ -86,6 +79,12 @@ KTR_INFO(KTR_NVGPU, nvgpu, kms_commit_crtc, 14,
 KTR_INFO(KTR_NVGPU, nvgpu, kms_custom_commit, 15,
     "kms custom commit state=%p reason=%u nonblock=%u", void *state,
     uint32_t reason, uint32_t nonblock);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_queue_flip, 16,
+    "kms queue flip head=%u crtc=%p event=%p", uint32_t head,
+    void *crtc, void *event);
+KTR_INFO(KTR_NVGPU, nvgpu, kms_complete_flip, 17,
+    "kms complete flip head=%u crtc=%p event=%p", uint32_t head,
+    void *crtc, void *event);
 
 #define NVDRM_KMS_MAX_HEADS 4u
 #define NVDRM_KMS_EDID_SIZE 1024u
@@ -108,7 +107,6 @@ struct nvdrm_kms {
 	struct work_struct hotplug_work;
 	struct lwkt_token console_token;
 	struct spinlock hotplug_lock;
-	struct spinlock flip_lock;
 	uint32_t hotplug_plug_mask;
 	uint32_t hotplug_unplug_mask;
 	uint32_t hotplug_dp_irq_mask;
@@ -152,11 +150,6 @@ struct nvdrm_connector_state {
 	uint32_t underscan_vborder;
 };
 
-struct nvdrm_pending_flip {
-	struct drm_crtc *crtc;
-	struct drm_pending_vblank_event *event;
-};
-
 struct nvdrm_color_config {
 	struct nvgpu_display_color_config base;
 	struct nvgpu_display_color_lut_entry degamma[NVGPU_DISPLAY_COLOR_LUT_SIZE];
@@ -166,7 +159,6 @@ struct nvdrm_color_config {
 struct nvdrm_atomic_state {
 	struct drm_atomic_state base;
 	struct nvgpu_display_prepared_output *prepared[NVDRM_KMS_MAX_HEADS];
-	struct nvdrm_pending_flip flips[NVDRM_KMS_MAX_HEADS];
 	struct nvgpu_display_head_config head_config[NVDRM_KMS_MAX_HEADS];
 	bool head_config_valid[NVDRM_KMS_MAX_HEADS];
 	bool head_update_view[NVDRM_KMS_MAX_HEADS];
@@ -200,13 +192,6 @@ static struct drm_atomic_state *nvdrm_kms_alloc_atomic_state(
 static void nvdrm_kms_clear_atomic_state(struct drm_atomic_state *state);
 static void nvdrm_kms_free_atomic_state(struct drm_atomic_state *state);
 static void nvdrm_kms_complete_vblank(void *arg, uint32_t head);
-static void nvdrm_kms_complete_pageflip(void *arg, uint32_t head,
-	void *cookie);
-static bool nvdrm_kms_take_pending_flip(struct nvdrm_kms *kms,
-	struct nvdrm_pending_flip *pending, struct drm_crtc **pcrtc,
-	struct drm_pending_vblank_event **pevent);
-static void nvdrm_kms_send_flip_event(struct nvdrm_kms *kms,
-	struct drm_crtc *crtc, struct drm_pending_vblank_event *event);
 static void nvdrm_kms_commit_tail(struct drm_atomic_state *state);
 static void nvdrm_kms_run_console_work(struct work_struct *work);
 static void nvdrm_kms_run_hotplug_work(struct work_struct *work);
@@ -288,7 +273,6 @@ static const struct drm_mode_config_funcs nvdrm_kms_mode_config_funcs = {
 
 static const struct nvgpu_display_event_ops nvdrm_kms_event_ops = {
 	.vblank = nvdrm_kms_complete_vblank,
-	.pageflip = nvdrm_kms_complete_pageflip,
 	.hotplug = nvdrm_kms_receive_hotplug,
 	.dp_irq = nvdrm_kms_receive_dp_irq,
 };
@@ -403,7 +387,6 @@ nvdrm_kms_init(struct nvgpu_device *gpu)
 	kms->ddev = ddev;
 	lwkt_token_init(&kms->console_token, "nvdrmconsole");
 	spin_init(&kms->hotplug_lock, "nvdrm hpd");
-	spin_init(&kms->flip_lock, "nvdrm flip");
 	INIT_WORK(&kms->console_work, nvdrm_kms_run_console_work);
 	INIT_WORK(&kms->hotplug_work, nvdrm_kms_run_hotplug_work);
 	kms->hotplug_enabled = true;
@@ -722,7 +705,6 @@ nvdrm_kms_fini(struct nvgpu_device *gpu)
 	kms->hotplug_unplug_mask = 0;
 	kms->hotplug_dp_irq_mask = 0;
 	spin_unlock(&kms->hotplug_lock);
-	nvgpu_display_set_event_ops(gpu, NULL, NULL);
 	cancel_work_sync(&kms->hotplug_work);
 	lwkt_gettoken(&kms->console_token);
 	kms->shutting_down = true;
@@ -731,6 +713,11 @@ nvdrm_kms_fini(struct nvgpu_device *gpu)
 	if (kms->ddev->mode_config.funcs == &nvdrm_kms_mode_config_funcs)
 		drm_atomic_helper_shutdown(kms->ddev);
 	nvgpu_intr_disable_display_dispatch(gpu);
+	/*
+	 * The interrupt worker is now joined, so no borrowed KMS callback can
+	 * still be running when the KMS object is released below.
+	 */
+	nvgpu_display_set_event_ops(gpu, NULL, NULL);
 	if (kms->polling)
 		drm_kms_helper_poll_fini(kms->ddev);
 	kms->ddev->irq_enabled = false;
@@ -741,7 +728,6 @@ nvdrm_kms_fini(struct nvgpu_device *gpu)
 	nvgpu_display_release_console(gpu);
 	drm_mode_config_cleanup(kms->ddev);
 	nvgpu_device_set_kms(gpu, NULL);
-	spin_uninit(&kms->flip_lock);
 	spin_uninit(&kms->hotplug_lock);
 	lwkt_token_uninit(&kms->console_token);
 	kfree(kms);
@@ -1425,6 +1411,7 @@ static int
 nvdrm_kms_prepare_fb(struct drm_plane *plane, struct drm_plane_state *state)
 {
 	struct drm_gem_object *object;
+	struct dma_fence *fence;
 	struct nvgpu_bo *bo;
 	int error;
 
@@ -1439,10 +1426,13 @@ nvdrm_kms_prepare_fb(struct drm_plane *plane, struct drm_plane_state *state)
 	error = drm_gem_fb_prepare_fb(plane, state);
 	if (error != 0)
 		return (error);
+	/*
+	 * Stage one only publishes native implicit rendering completion.  The
+	 * atomic helper waits for state->fence in the commit stage.
+	 */
 	if (state->fence == NULL) {
-		error = nvgpu_bo_resv_wait(bo, false, true, false);
-		if (error != 0)
-			return (error < 0 ? error : -error);
+		fence = reservation_object_get_excl_rcu(nvgpu_bo_get_resv(bo));
+		drm_atomic_set_fence_for_plane(state, fence);
 	}
 	error = nvgpu_bo_scanout_pin(bo);
 	return (error == 0 ? 0 : error < 0 ? error : -error);
@@ -1531,10 +1521,7 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 		struct nvgpu_display_scanout scanout;
 		struct drm_crtc_state *crtc_state = state->crtc->state;
 		struct drm_pending_vblank_event *event = crtc_state->event;
-		struct nvdrm_atomic_state *atomic;
-		struct nvdrm_pending_flip *pending = NULL;
 		uint64_t modifier = state->fb->modifier;
-		bool event_ref = false;
 
 		bzero(&scanout, sizeof(scanout));
 		if (internal) {
@@ -1593,29 +1580,13 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 		scanout.source_height = state->src_h >> 16;
 		scanout.output_width = state->crtc_w;
 		scanout.output_height = state->crtc_h;
-		if (event != NULL && old_state != NULL &&
-		    old_state->state != NULL &&
-		    drm_crtc_vblank_get(state->crtc) == 0) {
-			atomic = to_nvdrm_atomic_state(old_state->state);
-			pending = &atomic->flips[nvcrtc->head];
-			spin_lock(&nvcrtc->kms->flip_lock);
-			pending->crtc = state->crtc;
-			pending->event = event;
-			spin_unlock(&nvcrtc->kms->flip_lock);
-			event_ref = true;
-			KTR_LOG(nvgpu_kms_event_arm, nvcrtc->head, nvcrtc->window,
-			    event, pending);
-			nvgpu_log(NVGPU_LOG_DEBUG,
-			    "kms primary event armed head=%u win=%u event=%p\n",
-			    nvcrtc->head, nvcrtc->window, event);
-		}
 		nvgpu_log(NVGPU_LOG_DEBUG,
 		    "kms primary update head=%u win=%u fb=%p internal=%d "
-		    "event=%p event_ref=%d paddr=0x%llx size=0x%llx "
-		    "pitch=%u layout=%u kind=0x%x block_height=%u "
+		    "event=%p paddr=0x%llx size=0x%llx pitch=%u layout=%u "
+		    "kind=0x%x block_height=%u "
 		    "src=%ux%u dst=%ux%u mode=%dx%d adjusted=%dx%d plane=%dx%d\n",
 		    nvcrtc->head, nvcrtc->window, state->fb, internal, event,
-		    event_ref, (unsigned long long)scanout.paddr,
+		    (unsigned long long)scanout.paddr,
 		    (unsigned long long)scanout.size, scanout.pitch,
 		    scanout.layout, scanout.kind, scanout.block_height,
 		    scanout.source_width, scanout.source_height,
@@ -1630,22 +1601,12 @@ nvdrm_kms_update_plane(struct drm_plane *plane,
 		    state->crtc->state->adjusted_mode.vdisplay : 0,
 		    state->crtc_w, state->crtc_h);
 		KTR_LOG(nvgpu_kms_primary_update, nvcrtc->head, nvcrtc->window,
-		    state->fb, event, event_ref ? 1u : 0u, scanout.layout,
+		    state->fb, event, scanout.layout,
 		    scanout.output_width, scanout.output_height);
 		error = nvgpu_display_update_primary(nvcrtc->kms->gpu,
-		    nvcrtc->head, nvcrtc->window, &scanout,
-		    event_ref ? pending : NULL);
-		if (error == 0 && event_ref) {
-			crtc_state->event = NULL;
-		} else if (event_ref) {
-			spin_lock(&nvcrtc->kms->flip_lock);
-			pending->crtc = NULL;
-			pending->event = NULL;
-			spin_unlock(&nvcrtc->kms->flip_lock);
-			drm_crtc_vblank_put(state->crtc);
-			KTR_LOG(nvgpu_kms_event_drop, nvcrtc->head, error, event,
-			    pending);
-		}
+		    nvcrtc->head, nvcrtc->window, &scanout);
+		KTR_LOG(nvgpu_kms_primary_ready, nvcrtc->head, nvcrtc->window,
+		    event, error);
 		if (error != 0)
 			nvgpu_log(NVGPU_LOG_INFO,
 			    "primary update failed head=%u error=%d\n",
@@ -2407,7 +2368,8 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	struct nvdrm_kms *kms = nvgpu_device_get_kms(state->dev->dev_private);
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
-	uint32_t event_vblank_ref_mask = 0;
+	bool vblank_refs[NVDRM_KMS_MAX_HEADS] = { false };
+	bool display_atomic = false;
 	uint32_t head;
 	int index;
 
@@ -2418,6 +2380,28 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	drm_atomic_helper_update_legacy_modeset_state(state->dev, state);
 	drm_atomic_helper_commit_modeset_disables(state->dev, state);
 	KTR_LOG(nvgpu_kms_commit_stage, state, 1u);
+	/*
+	 * Keep vblank enabled from window submission through event delivery.
+	 * The display engine latches NON_TEARING updates at its own safe boundary;
+	 * Nouveau sends the event once the window notifier has armed the update.
+	 */
+	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
+		struct nvdrm_crtc *nvcrtc = to_nvdrm_crtc(crtc);
+		int error;
+
+		if (crtc_state->event == NULL || !crtc_state->active)
+			continue;
+		error = drm_crtc_vblank_get(crtc);
+		if (error == 0)
+			vblank_refs[nvcrtc->head] = true;
+		KTR_LOG(nvgpu_kms_event_ref, nvcrtc->head, crtc_state->event,
+		    1u, error == 0 ? 1u : 0u);
+	}
+	if (nvgpu_display_atomic_begin(state->dev->dev_private) == 0)
+		display_atomic = true;
+	else
+		nvgpu_log(NVGPU_LOG_INFO,
+	    "display atomic begin failed; using immediate display updates\n");
 	for (head = 0; head < NVDRM_KMS_MAX_HEADS; head++) {
 		int error;
 
@@ -2468,61 +2452,37 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 			nvgpu_log(NVGPU_LOG_INFO,
 			    "CRTC color update failed head=%u error=%d\n", head, error);
 	}
+	if (display_atomic) {
+		int error;
 
-	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
-		uint32_t crtc_mask;
-		struct nvdrm_crtc *nvcrtc = to_nvdrm_crtc(crtc);
-
-		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "kms commit crtc index=%d head=%u active=%d enable=%d "
-		    "modeset=%d mode_changed=%d active_changed=%d "
-		    "connectors_changed=%d planes_changed=%d event=%p\n",
-		    index, nvcrtc->head, crtc_state->active, crtc_state->enable,
-		    drm_atomic_crtc_needs_modeset(crtc_state),
-		    crtc_state->mode_changed, crtc_state->active_changed,
-		    crtc_state->connectors_changed, crtc_state->planes_changed,
-		    crtc_state->event);
-		KTR_LOG(nvgpu_kms_commit_crtc, index, nvcrtc->head,
-		    crtc_state->active ? 1u : 0u, crtc_state->enable ? 1u : 0u,
-		    drm_atomic_crtc_needs_modeset(crtc_state) ? 1u : 0u,
-		    crtc_state->event);
-		if (crtc_state->event == NULL || !crtc_state->active ||
-		    !drm_atomic_crtc_needs_modeset(crtc_state))
-			continue;
-		crtc_mask = drm_crtc_mask(crtc);
-		if (drm_crtc_vblank_get(crtc) == 0) {
-			event_vblank_ref_mask |= crtc_mask;
-			nvgpu_log(NVGPU_LOG_DEBUG,
-			    "kms modeset event vblank ref head=%u event=%p\n",
-			    to_nvdrm_crtc(crtc)->head, crtc_state->event);
-		} else {
-			nvgpu_log(NVGPU_LOG_DEBUG,
-			    "kms modeset event no vblank ref head=%u event=%p\n",
-			    to_nvdrm_crtc(crtc)->head, crtc_state->event);
-		}
-		KTR_LOG(nvgpu_kms_modeset_event, to_nvdrm_crtc(crtc)->head,
-		    crtc_state->event, (event_vblank_ref_mask & crtc_mask) != 0,
-		    crtc_state->active ? 1u : 0u,
-		    drm_atomic_crtc_needs_modeset(crtc_state) ? 1u : 0u);
+		error = nvgpu_display_atomic_flush(state->dev->dev_private);
+		KTR_LOG(nvgpu_kms_commit_stage, state, 7u);
+		if (error == 0)
+			error = nvgpu_display_atomic_wait(state->dev->dev_private);
+		KTR_LOG(nvgpu_kms_commit_stage, state, 8u);
+		if (error != 0)
+			nvgpu_log(NVGPU_LOG_INFO,
+			    "display atomic commit failed error=%d\n", error);
+		nvgpu_display_atomic_end(state->dev->dev_private);
 	}
+
 	for_each_new_crtc_in_state(state, crtc, crtc_state, index) {
-		uint32_t crtc_mask;
+		struct nvdrm_crtc *nvcrtc = to_nvdrm_crtc(crtc);
+		struct drm_pending_vblank_event *event;
 		unsigned long flags;
+		bool vblank_ref;
 
 		if (crtc_state->event == NULL)
 			continue;
-		crtc_mask = drm_crtc_mask(crtc);
-		if (crtc_state->active)
-			drm_crtc_accurate_vblank_count(crtc);
-		nvgpu_log(NVGPU_LOG_DEBUG,
-		    "kms send crtc event head=%u event=%p ref=%d\n",
-		    to_nvdrm_crtc(crtc)->head, crtc_state->event,
-		    (event_vblank_ref_mask & crtc_mask) != 0);
+		event = crtc_state->event;
+		vblank_ref = vblank_refs[nvcrtc->head];
+		if (vblank_ref)
+			(void)drm_crtc_accurate_vblank_count(crtc);
 		spin_lock_irqsave(&state->dev->event_lock, flags);
-		drm_crtc_send_vblank_event(crtc, crtc_state->event);
+		drm_crtc_send_vblank_event(crtc, event);
 		crtc_state->event = NULL;
 		spin_unlock_irqrestore(&state->dev->event_lock, flags);
-		if ((event_vblank_ref_mask & crtc_mask) != 0)
+		if (vblank_ref)
 			drm_crtc_vblank_put(crtc);
 	}
 	drm_atomic_helper_fake_vblank(state);
@@ -2530,22 +2490,6 @@ nvdrm_kms_commit_tail(struct drm_atomic_state *state)
 	KTR_LOG(nvgpu_kms_commit_stage, state, 4u);
 	drm_atomic_helper_wait_for_flip_done(state->dev, state);
 	KTR_LOG(nvgpu_kms_commit_stage, state, 5u);
-
-	for (head = 0; head < NVDRM_KMS_MAX_HEADS; head++) {
-		struct nvdrm_pending_flip *pending = &nvstate->flips[head];
-		struct drm_pending_vblank_event *event;
-		struct drm_crtc *pending_crtc;
-
-		if (!nvgpu_display_cancel_pageflip(state->dev->dev_private, head,
-		    pending))
-			continue;
-		if (!nvdrm_kms_take_pending_flip(kms, pending, &pending_crtc,
-		    &event))
-			continue;
-		nvgpu_log(NVGPU_LOG_INFO,
-		    "pageflip notifier timed out head=%u\n", head);
-		nvdrm_kms_send_flip_event(kms, pending_crtc, event);
-	}
 	drm_atomic_helper_cleanup_planes(state->dev, state);
 	KTR_LOG(nvgpu_kms_commit_stage, state, 6u);
 }
@@ -3041,70 +2985,11 @@ static void
 nvdrm_kms_complete_vblank(void *arg, uint32_t head)
 {
 	struct nvdrm_kms *kms = arg;
-
-	KTR_LOG(nvgpu_kms_vblank, head);
-	if (kms != NULL && head < kms->head_count && kms->crtcs[head] != NULL)
-		drm_crtc_handle_vblank(kms->crtcs[head]);
-}
-
-static void
-nvdrm_kms_send_flip_event(struct nvdrm_kms *kms, struct drm_crtc *crtc,
-    struct drm_pending_vblank_event *event)
-{
-	unsigned long flags;
-	uint32_t head;
-
-	if (kms == NULL || crtc == NULL)
-		return;
-	head = to_nvdrm_crtc(crtc)->head;
-	KTR_LOG(nvgpu_kms_send_event, head, crtc, event);
-	if (event != NULL) {
-		drm_crtc_accurate_vblank_count(crtc);
-		spin_lock_irqsave(&kms->ddev->event_lock, flags);
-		drm_crtc_send_vblank_event(crtc, event);
-		spin_unlock_irqrestore(&kms->ddev->event_lock, flags);
-	}
-	drm_crtc_vblank_put(crtc);
-}
-
-static bool
-nvdrm_kms_take_pending_flip(struct nvdrm_kms *kms,
-    struct nvdrm_pending_flip *pending, struct drm_crtc **pcrtc,
-    struct drm_pending_vblank_event **pevent)
-{
-	if (pcrtc != NULL)
-		*pcrtc = NULL;
-	if (pevent != NULL)
-		*pevent = NULL;
-	if (kms == NULL || pending == NULL || pcrtc == NULL || pevent == NULL)
-		return (false);
-
-	spin_lock(&kms->flip_lock);
-	if (pending->crtc != NULL && pending->event != NULL) {
-		*pcrtc = pending->crtc;
-		*pevent = pending->event;
-		pending->crtc = NULL;
-		pending->event = NULL;
-		KTR_LOG(nvgpu_kms_take_flip, pending, *pcrtc, *pevent);
-		spin_unlock(&kms->flip_lock);
-		return (true);
-	}
-	spin_unlock(&kms->flip_lock);
-	return (false);
-}
-
-static void
-nvdrm_kms_complete_pageflip(void *arg, uint32_t head, void *cookie)
-{
-	struct nvdrm_kms *kms = arg;
-	struct nvdrm_pending_flip *pending = cookie;
-	struct drm_pending_vblank_event *event;
 	struct drm_crtc *crtc;
 
-	if (kms == NULL || pending == NULL || head >= kms->head_count ||
-	    kms->crtcs[head] == NULL)
+	KTR_LOG(nvgpu_kms_vblank, head);
+	if (kms == NULL || head >= kms->head_count || kms->crtcs[head] == NULL)
 		return;
-	KTR_LOG(nvgpu_kms_pageflip, head, pending);
-	if (nvdrm_kms_take_pending_flip(kms, pending, &crtc, &event))
-		nvdrm_kms_send_flip_event(kms, crtc, event);
+	crtc = kms->crtcs[head];
+	drm_crtc_handle_vblank(crtc);
 }

@@ -6579,7 +6579,6 @@ struct nvgpu_vm_bind_future {
 	struct nvgpu_fence *done;
 	struct nvgpu_vm_binding_list retired_bindings;
 	uint32_t op_count;
-	nvgpu_proc_complete_bind complete_bind;
 };
 
 static volatile u_int nvgpu_vm_next_client = 0xc1d10000u;
@@ -6650,12 +6649,7 @@ nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *args)
 	struct nvgpu_vm_bind_future *bind;
 	struct nvgpu_vm_binding *binding;
 	struct nvgpu_bo **resv_bos;
-	struct nvgpu_fence **waits;
-	struct nvgpu_fence **ordering_waits;
 	struct nvgpu_fence *done;
-	uint32_t wait_count;
-	uint32_t ordering_capacity;
-	uint32_t ordering_count;
 	uint32_t resv_count;
 	int error;
 
@@ -6759,40 +6753,6 @@ nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *args)
 		(void)nvgpu_fence_signal(done, error);
 		return (error);
 	}
-	ordering_capacity = 0;
-	ordering_waits = NULL;
-	for (;;) {
-		if (ordering_capacity != 0) {
-			ordering_waits = kmalloc((size_t)ordering_capacity *
-			    sizeof(*ordering_waits),
-			    M_NVGPU_VM, M_WAITOK | M_ZERO);
-		}
-		ordering_count = 0;
-		error = args->register_bind(args->proc, done, ordering_waits,
-		    ordering_capacity, &ordering_count);
-		if (error != ENOSPC)
-			break;
-		if (ordering_waits != NULL)
-			_kfree(ordering_waits, M_NVGPU_VM);
-		ordering_waits = NULL;
-		ordering_capacity = ordering_count;
-	}
-	if (error != 0) {
-		if (ordering_waits != NULL)
-			_kfree(ordering_waits, M_NVGPU_VM);
-		(void)nvgpu_fence_signal(done, error);
-		return (error);
-	}
-	wait_count = args->wait_count + ordering_count;
-	waits = NULL;
-	if (wait_count != 0) {
-		waits = kmalloc((size_t)wait_count * sizeof(*waits),
-		    M_NVGPU_VM, M_WAITOK | M_ZERO);
-		for (uint32_t i = 0; i < args->wait_count; i++)
-			waits[i] = args->waits[i];
-		for (uint32_t i = 0; i < ordering_count; i++)
-			waits[args->wait_count + i] = ordering_waits[i];
-	}
 	bind = kmalloc(sizeof(*bind), M_NVGPU_VM, M_WAITOK | M_ZERO);
 	bind->proc = args->proc;
 	bind->vm = vm;
@@ -6805,23 +6765,16 @@ nvgpu_vm_remap(struct nvgpu_vm *vm, struct nvgpu_vm_remap_args *args)
 		for (uint32_t i = 0; i < bind->op_count; i++)
 			nvgpu_bo_addref(bind->ops[i].bo);
 	}
-	KTR_LOG(nvgpu_vm_bind_spawn, args->proc, vm, args->op_count, wait_count);
+	KTR_LOG(nvgpu_vm_bind_spawn, args->proc, vm, args->op_count,
+	    args->wait_count);
 	bind->done = done;
 	bind->base.poll = nvgpu_vm_bind_future_poll;
-	bind->complete_bind = args->complete_bind;
 	nvgpu_proc_addref(args->proc);
 	nvgpu_fence_addref(done);
 	LIST_INIT(&bind->retired_bindings);
 
-	error = nvgpu_future_spawn(&bind->base, waits, wait_count);
-	for (uint32_t i = 0; i < ordering_count; i++)
-		nvgpu_fence_release(ordering_waits[i]);
-	if (ordering_waits != NULL)
-		_kfree(ordering_waits, M_NVGPU_VM);
-	if (waits != NULL)
-		_kfree(waits, M_NVGPU_VM);
+	error = nvgpu_future_spawn(&bind->base, args->waits, args->wait_count);
 	if (error != 0) {
-		args->complete_bind(args->proc, done);
 		(void)nvgpu_fence_signal(done, error);
 		nvgpu_fence_release(done);
 		for (uint32_t i = 0; i < bind->op_count; i++)
@@ -6867,7 +6820,6 @@ nvgpu_vm_bind_future_poll(struct nvgpu_future *future)
 		    failed_op->flags, failed_op->handle, failed_op->addr,
 		    failed_op->range, failed_op->bo_offset, error);
 	(void)nvgpu_fence_signal(bind->done, error);
-	bind->complete_bind(bind->proc, bind->done);
 	nvgpu_fence_release(bind->done);
 	for (uint32_t i = 0; i < bind->op_count; i++)
 		nvgpu_bo_release(bind->ops[i].bo);
