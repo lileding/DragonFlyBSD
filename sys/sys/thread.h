@@ -475,7 +475,6 @@ struct thread {
 
 #ifdef _KERNEL
 
-extern void (*linux_task_drop_callback)(struct thread *);
 extern void (*linux_proc_drop_callback)(struct proc *);
 
 /*

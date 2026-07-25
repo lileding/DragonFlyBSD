@@ -33,7 +33,6 @@ struct thread;
 struct proc;
 
 struct task_struct *linux_task_alloc(struct thread *td);
-void linux_task_drop(struct thread *td);
 void linux_proc_drop(struct proc *p);
 void linux_mm_drop(struct mm_struct *mm);
 

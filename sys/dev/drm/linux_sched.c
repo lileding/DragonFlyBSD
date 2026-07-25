@@ -104,24 +104,6 @@ linux_task_alloc(struct thread *td)
 	return task;
 }
 
-/*
- * Called at thread exit
- */
-void
-linux_task_drop(struct thread *td)
-{
-	struct task_struct *task;
-	struct mm_struct *mm;
-
-	task = td->td_linux_task;
-	td->td_linux_task = NULL;
-	if ((mm = task->mm) != NULL) {
-		atomic_add_long(&mm->refs, -1);	/* proc ref always remains */
-		task->mm = NULL;
-	}
-	kfree(task);
-}
-
 void
 linux_proc_drop(struct proc *p)
 {

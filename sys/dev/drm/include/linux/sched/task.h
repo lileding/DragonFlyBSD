@@ -38,8 +38,7 @@ get_task_struct(struct task_struct *ts)
 static inline void
 put_task_struct(struct task_struct *ts)
 {
-	if (atomic_dec_and_test(&ts->usage_counter))
-		linux_task_drop(curthread);
+	atomic_dec(&ts->usage_counter);
 }
 
 #endif	/* _LINUX_SCHED_TASK_H_ */

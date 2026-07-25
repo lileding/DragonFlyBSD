@@ -96,7 +96,6 @@ static struct task *deadlwp_task[MAXCPU];
 static struct lwplist deadlwp_list[MAXCPU];
 static struct lwkt_token deadlwp_token[MAXCPU];
 
-void (*linux_task_drop_callback)(thread_t td);
 void (*linux_proc_drop_callback)(struct proc *p);
 
 /*
@@ -705,8 +704,6 @@ lwp_exit(int masterexit, void *waddr)
 	 */
 	kqueue_terminate(&lp->lwp_kqueue);
 
-	if (td->td_linux_task)
-		linux_task_drop_callback(td);
 	if (masterexit && p->p_linux_mm)
 		linux_proc_drop_callback(p);
 
