@@ -36,40 +36,38 @@
 #include <linux/atomic.h>
 #include <linux/cpumask.h>
 
+#include <sys/taskqueue.h>
+
 #define WQ_HIGHPRI	1
 #define WQ_FREEZABLE	2
 #define WQ_UNBOUND	4
 
-struct workqueue_worker;
+/*
+ * A work item is a taskqueue task, and a queue is a single-threaded
+ * taskqueue.  One thread per queue is what the semantics require: taskqueue
+ * tracks the running task in one field per queue, so drain and cancel are
+ * only meaningful while a single thread consumes it.  Nothing here wanted
+ * more — every queue drm creates is either UNBOUND or single-threaded
+ * already, and a given work item never runs concurrently with itself in any
+ * case.
+ */
+struct workqueue_struct {
+	struct taskqueue	*tq;
+};
 
 struct work_struct {
-	STAILQ_ENTRY(work_struct) ws_entries;
-	void	(*func)(struct work_struct *);
-	struct workqueue_worker *worker;
-	bool	on_queue;
-	bool	running;
-	bool	canceled;
-};
-
-struct workqueue_worker {
-	int	stop;
-	STAILQ_HEAD(ws_list, work_struct) ws_list_head;
-	struct thread *worker_thread;
-	struct lock worker_lock;
-};
-
-struct workqueue_struct {
-	bool	is_draining;
-	int	num_workers;
-	struct	workqueue_worker (*workers)[];
+	struct task		task;
+	void			(*func)(struct work_struct *);
+	struct workqueue_struct	*wq;
 };
 
 struct delayed_work {
 	struct work_struct	work;
-	struct callout		timer;
-	/* Queue this was submitted to; the timer hands it back there. */
+	struct timeout_task	ttask;
 	struct workqueue_struct	*wq;
 };
+
+void linux_work_fn(void *context, int pending);
 
 static inline struct delayed_work *
 to_delayed_work(struct work_struct *work)
@@ -78,13 +76,11 @@ to_delayed_work(struct work_struct *work)
 	return container_of(work, struct delayed_work, work);
 }
 
-#define INIT_WORK(work, _func) 		 	\
-do {						\
-	(work)->ws_entries.stqe_next = NULL;	\
-	(work)->func = (_func);			\
-	(work)->on_queue = false;		\
-	(work)->running = false;		\
-	(work)->canceled = false;		\
+#define INIT_WORK(work, _func) 		 		\
+do {							\
+	(work)->func = (_func);				\
+	(work)->wq = NULL;				\
+	TASK_INIT(&(work)->task, 0, linux_work_fn, (work));	\
 } while (0)
 
 #define INIT_WORK_ONSTACK(work, _func)	INIT_WORK(work, _func)
@@ -92,7 +88,7 @@ do {						\
 #define INIT_DELAYED_WORK(_work, _func)					\
 do {									\
 	INIT_WORK(&(_work)->work, _func);				\
-	callout_init_mp(&(_work)->timer);				\
+	(_work)->wq = NULL;						\
 } while (0)
 
 #define INIT_DELAYED_WORK_ONSTACK(work, _func)	INIT_DELAYED_WORK(work, _func)
