@@ -26,21 +26,20 @@
 #ifndef	_LINUX_COMPLETION_H_
 #define	_LINUX_COMPLETION_H_
 
-#include <linux/wait.h>
 #include <linux/errno.h>
 
 #include <sys/kernel.h>
 
 struct completion {
 	unsigned int done;
-	wait_queue_head_t wait;
+	struct lock lock;
 };
 
 static inline void
 init_completion(struct completion *c)
 {
 	c->done = 0;
-	init_waitqueue_head(&c->wait);
+	lockinit(&c->lock, "lcompl", 0, 0);
 }
 
 static inline void
@@ -59,20 +58,20 @@ reinit_completion(struct completion *c)
 static inline void
 complete(struct completion *c)
 {
-	lockmgr(&c->wait.lock, LK_EXCLUSIVE);
+	lockmgr(&c->lock, LK_EXCLUSIVE);
 	if (c->done != UINT_MAX)
 		c->done++;
-	lockmgr(&c->wait.lock, LK_RELEASE);
-	wakeup_one(&c->wait);
+	lockmgr(&c->lock, LK_RELEASE);
+	wakeup_one(c);
 }
 
 static inline void
 complete_all(struct completion *c)
 {
-	lockmgr(&c->wait.lock, LK_EXCLUSIVE);
+	lockmgr(&c->lock, LK_EXCLUSIVE);
 	c->done = UINT_MAX;
-	lockmgr(&c->wait.lock, LK_RELEASE);
-	wakeup(&c->wait);
+	lockmgr(&c->lock, LK_RELEASE);
+	wakeup(c);
 }
 
 static inline long
@@ -85,9 +84,9 @@ __wait_for_completion_generic(struct completion *c,
 
 	start_jiffies = ticks;
 
-	lockmgr(&c->wait.lock, LK_EXCLUSIVE);
+	lockmgr(&c->lock, LK_EXCLUSIVE);
 	while (c->done == 0 && !timeout_expired) {
-		ret = lksleep(&c->wait, &c->wait.lock, flags, "lwfcg", timeout);
+		ret = lksleep(c, &c->lock, flags, "lwfcg", timeout);
 		switch(ret) {
 		case EWOULDBLOCK:
 			timeout_expired = true;
@@ -103,7 +102,7 @@ __wait_for_completion_generic(struct completion *c,
 	}
 	if (c->done && c->done != UINT_MAX)
 		--c->done;
-	lockmgr(&c->wait.lock, LK_RELEASE);
+	lockmgr(&c->lock, LK_RELEASE);
 
 	if (awakened) {
 		elapsed_jiffies = ticks - start_jiffies;
@@ -147,12 +146,12 @@ try_wait_for_completion(struct completion *c)
 	if (READ_ONCE(c->done) == 0)
 		return false;
 
-	lockmgr(&c->wait.lock, LK_EXCLUSIVE);
+	lockmgr(&c->lock, LK_EXCLUSIVE);
 	if (c->done > 0) {
 		c->done--;
 		ret = true;
 	}
-	lockmgr(&c->wait.lock, LK_RELEASE);
+	lockmgr(&c->lock, LK_RELEASE);
 
 	return ret;
 }

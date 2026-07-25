@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 François Tigeot <ftigeot@wolfpond.org>
+ * Copyright (c) 2015-2020 François Tigeot <ftigeot@wolfpond.org>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,95 +30,37 @@
 #include <sys/kthread.h>
 
 /*
- * Linux tasklet constraints:
- * - tasklets that have the same type cannot be run on multiple processors at
- *   the same time
- * - tasklets always run on the processor from which they were originally
- *   submitted
- * - when a tasklet is scheduled, its state is set to TASKLET_STATE_SCHED,
- *   and the tasklet added to a queue
- * - during the execution of its function, the tasklet state is set to
- *   TASKLET_STATE_RUN and the TASKLET_STATE_SCHED state is removed
+ * Each tasklet gets its own thread.  The single shared runner this replaces
+ * serialized every engine's submission behind one thread; nothing in the
+ * callers wanted that, and i915 raises one tasklet per engine.
  */
-
-struct tasklet_entry {
-	struct tasklet_struct *ts;
-	STAILQ_ENTRY(tasklet_entry) tasklet_entries;
-};
-
-static struct lock tasklet_lock = LOCK_INITIALIZER("dltll", 0, LK_CANRECURSE);
-
-static struct thread *tasklet_td = NULL;
-STAILQ_HEAD(tasklet_list_head, tasklet_entry) tlist = STAILQ_HEAD_INITIALIZER(tlist);
-STAILQ_HEAD(tasklet_hi_list_head, tasklet_entry) tlist_hi = STAILQ_HEAD_INITIALIZER(tlist_hi);
-
-static int tasklet_pending = 0;
-
-/*
- * Linux does:
- * 1 - copy list locally
- * 2 - empty global list
- * 3 - process local list from head to tail
- *****
- * local list processing:
- * - if element cannot be run, put it at the tail
- * - last element == null
- */
-#define PROCESS_TASKLET_LIST(which_list) do { \
-	STAILQ_FOREACH_MUTABLE(te, &which_list, tasklet_entries, tmp_te) { \
-		struct tasklet_struct *t = te->ts;			\
-		/*							\
-		   This tasklet is dying, remove it from the list.	\
-		   We allow to it to run one last time if it has	\
-		   already been scheduled.				\
-		*/							\
-		if (test_bit(TASKLET_IS_DYING, &t->state)) {		\
-			STAILQ_REMOVE(&which_list, te, tasklet_entry, tasklet_entries); \
-			kfree(te);					\
-		}							\
-									\
-		/* This tasklet is not enabled, try the next one */	\
-		if (atomic_read(&t->count) != 0)			\
-			continue;					\
-									\
-		/* If tasklet is not scheduled, try the next one */	\
-		if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state)) \
-			continue;					\
-									\
-		if (!tasklet_trylock(t)) 				\
-			continue;					\
-									\
-		lockmgr(&tasklet_lock, LK_RELEASE);			\
-		if (t->func)						\
-			t->func(t->data);				\
-		lockmgr(&tasklet_lock, LK_EXCLUSIVE);			\
-									\
-		tasklet_unlock(t);					\
-	}								\
-} while (0)
-
-/* XXX runners should be CPU-specific */
 static void
-tasklet_runner(void *arg)
+tasklet_thread(void *arg)
 {
-	struct tasklet_entry *te, *tmp_te;
+	struct tasklet_struct *t = arg;
 
-	lockmgr(&tasklet_lock, LK_EXCLUSIVE);
-	while (1) {
-		/*
-		   Only sleep if we haven't been raced by a _schedule()
-		   call during an unlock window
-		*/
-		if (tasklet_pending == 0) {
-			lksleep(&tasklet_runner, &tasklet_lock, 0, "tkidle", 0);
+	lockmgr(&t->lock, LK_EXCLUSIVE);
+	for (;;) {
+		if (test_bit(TASKLET_IS_DYING, &t->state))
+			break;
+
+		if (atomic_read(&t->count) != 0 ||
+		    !test_and_clear_bit(TASKLET_STATE_SCHED, &t->state)) {
+			lksleep(t, &t->lock, 0, "tkidle", 0);
+			continue;
 		}
-		tasklet_pending = 0;
 
-		/* Process hi tasklets first */
-		PROCESS_TASKLET_LIST(tlist_hi);
-		PROCESS_TASKLET_LIST(tlist);
+		set_bit(TASKLET_STATE_RUN, &t->state);
+		lockmgr(&t->lock, LK_RELEASE);
+		if (t->func)
+			t->func(t->data);
+		lockmgr(&t->lock, LK_EXCLUSIVE);
+		clear_bit(TASKLET_STATE_RUN, &t->state);
+		wakeup(&t->state);
 	}
-	lockmgr(&tasklet_lock, LK_RELEASE);
+	t->td = NULL;
+	wakeup(&t->td);
+	lockmgr(&t->lock, LK_RELEASE);
 }
 
 void
@@ -129,49 +71,44 @@ tasklet_init(struct tasklet_struct *t,
 	t->func = func;
 	t->data = data;
 	atomic_set(&t->count, 0);
+	lockinit(&t->lock, "ltskl", 0, 0);
+	kthread_create(tasklet_thread, t, &t->td, "tasklet");
 }
 
-#define TASKLET_SCHEDULE_COMMON(t, list) do {			\
-	struct tasklet_entry *te;				\
-								\
-	lockmgr(&tasklet_lock, LK_EXCLUSIVE);			\
-	if (test_and_set_bit(TASKLET_STATE_SCHED, &t->state))	\
-		goto skip;	/* already scheduled */		\
-								\
-	STAILQ_FOREACH(te, &(list), tasklet_entries) {		\
-		if (te->ts == t)				\
-			goto found_and_done;			\
-	}							\
-								\
-	te = kmalloc(sizeof(struct tasklet_entry), M_DRM, M_CACHEALIGN | M_INTWAIT);	\
-	te->ts = t;						\
-	STAILQ_INSERT_TAIL(&(list), te, tasklet_entries);	\
-								\
-found_and_done:							\
-	tasklet_pending = 1;					\
-	wakeup(&tasklet_runner);				\
-skip:								\
-	lockmgr(&tasklet_lock, LK_RELEASE);			\
-} while (0)
+static void
+tasklet_wake(struct tasklet_struct *t)
+{
+	lockmgr(&t->lock, LK_EXCLUSIVE);
+	set_bit(TASKLET_STATE_SCHED, &t->state);
+	wakeup(t);
+	lockmgr(&t->lock, LK_RELEASE);
+}
 
 void
 tasklet_schedule(struct tasklet_struct *t)
 {
-	TASKLET_SCHEDULE_COMMON(t, tlist);
+	tasklet_wake(t);
 }
 
+/*
+ * Linux runs high-priority tasklets ahead of the rest.  With a thread per
+ * tasklet there is no shared queue to jump, so this is the same call.
+ */
 void
 tasklet_hi_schedule(struct tasklet_struct *t)
 {
-	TASKLET_SCHEDULE_COMMON(t, tlist_hi);
+	tasklet_wake(t);
 }
 
 void
 tasklet_kill(struct tasklet_struct *t)
 {
+	lockmgr(&t->lock, LK_EXCLUSIVE);
 	set_bit(TASKLET_IS_DYING, &t->state);
-	wakeup(&tasklet_runner);
-	tasklet_unlock_wait(t);
+	wakeup(t);
+	while (t->td != NULL)
+		lksleep(&t->td, &t->lock, 0, "tkkill", 0);
+	lockmgr(&t->lock, LK_RELEASE);
 }
 
 int
@@ -189,17 +126,8 @@ tasklet_unlock(struct tasklet_struct *t)
 void
 tasklet_unlock_wait(struct tasklet_struct *t)
 {
-	int ident = 0;
-	while (test_bit(TASKLET_STATE_RUN, &t->state)) {
-		tsleep(&ident, 0, "tletunlock", 1);
-	}
+	lockmgr(&t->lock, LK_EXCLUSIVE);
+	while (test_bit(TASKLET_STATE_RUN, &t->state))
+		lksleep(&t->state, &t->lock, 0, "tkwait", 0);
+	lockmgr(&t->lock, LK_RELEASE);
 }
-
-static int init_tasklets(void *arg)
-{
-	kthread_create(tasklet_runner, NULL, &tasklet_td, "tasklet_runner");
-
-	return 0;
-}
-
-SYSINIT(linux_tasklet_init, SI_SUB_DRIVERS, SI_ORDER_MIDDLE, init_tasklets, NULL);

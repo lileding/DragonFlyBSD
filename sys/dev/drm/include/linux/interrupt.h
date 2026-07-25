@@ -41,11 +41,19 @@
 
 #define IRQF_SHARED	0x00000080
 
+/*
+ * A deferred callback with its own worker thread.  Linux runs these out of
+ * softirq context on the CPU that raised them; here each one is an ordinary
+ * kernel thread, which is what DragonFly offers and what the callers actually
+ * need: serialized execution that may block.
+ */
 struct tasklet_struct {
 	unsigned long state;
 	void (*func)(unsigned long);
 	unsigned long data;
 	atomic_t count;
+	struct thread *td;
+	struct lock lock;
 };
 
 enum {
@@ -53,6 +61,8 @@ enum {
 	TASKLET_STATE_RUN,
 	TASKLET_IS_DYING
 };
+
+struct thread;
 
 typedef irqreturn_t (*irq_handler_t)(int, void *);
 
