@@ -363,7 +363,7 @@ __create_hw_context(struct drm_i915_private *dev_priv,
 	if (file_priv) {
 		ctx->pid = get_task_pid(current, PIDTYPE_PID);
 		ctx->name = kasprintf(GFP_KERNEL, "%s[%d]/%x",
-				      current->comm,
+				      curthread->td_comm,
 				      pid_nr(ctx->pid),
 				      ctx->user_handle);
 		if (!ctx->name) {
@@ -791,7 +791,7 @@ int i915_gem_context_create_ioctl(struct drm_device *dev, void *data,
 
 	if (client_is_banned(file_priv)) {
 		DRM_DEBUG("client %s[%d] banned from creating ctx\n",
-			  current->comm,
+			  curthread->td_comm,
 			  pid_nr(get_task_pid(current, PIDTYPE_PID)));
 
 		return -EIO;
