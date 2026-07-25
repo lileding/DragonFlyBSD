@@ -39,7 +39,7 @@
 struct radeon_mn {
 	/* constant after initialisation */
 	struct radeon_device	*rdev;
-	struct mm_struct	*mm;
+	struct vmspace	*mm;
 	struct mmu_notifier	mn;
 
 	/* only used on destruction */
@@ -100,7 +100,7 @@ static void radeon_mn_destroy(struct work_struct *work)
  * Shedule a work item to lazy destroy our notifier.
  */
 static void radeon_mn_release(struct mmu_notifier *mn,
-			      struct mm_struct *mm)
+			      struct vmspace *mm)
 {
 	struct radeon_mn *rmn = container_of(mn, struct radeon_mn, mn);
 	INIT_WORK(&rmn->work, radeon_mn_destroy);
@@ -119,7 +119,7 @@ static void radeon_mn_release(struct mmu_notifier *mn,
  * unmap them by move them into system domain again.
  */
 static int radeon_mn_invalidate_range_start(struct mmu_notifier *mn,
-					     struct mm_struct *mm,
+					     struct vmspace *mm,
 					     unsigned long start,
 					     unsigned long end,
 					     bool blockable)
@@ -199,7 +199,7 @@ static const struct mmu_notifier_ops radeon_mn_ops = {
  */
 static struct radeon_mn *radeon_mn_get(struct radeon_device *rdev)
 {
-	struct mm_struct *mm = current->mm;
+	struct vmspace *mm = current->mm;
 	struct radeon_mn *rmn;
 	int r;
 

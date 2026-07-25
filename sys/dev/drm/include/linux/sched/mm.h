@@ -33,13 +33,25 @@
 #include <linux/mm_types.h>
 #include <linux/gfp.h>
 
+/*
+ * Take a reference on an address space that is known to still exist.  The
+ * caller reached it through an object that holds it alive, so unlike Linux's
+ * mmget_not_zero() there is no race to lose here.
+ */
 static inline bool
-mmget_not_zero(struct mm_struct *mm)
+mmget_not_zero(struct vmspace *vms)
 {
-	return atomic_inc_not_zero(&mm->mm_users);
+	if (vms == NULL)
+		return false;
+	vmspace_ref(vms);
+	return true;
 }
 
-void mmput(struct mm_struct *);
+static inline void
+mmput(struct vmspace *vms)
+{
+	vmspace_rel(vms);
+}
 
 #define fs_reclaim_acquire(x)
 #define fs_reclaim_release(x)

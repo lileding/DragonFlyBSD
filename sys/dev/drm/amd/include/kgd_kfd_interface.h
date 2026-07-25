@@ -348,10 +348,10 @@ struct kfd2kgd_calls {
 	int (*hqd_load)(struct kgd_dev *kgd, void *mqd, uint32_t pipe_id,
 			uint32_t queue_id, uint32_t __user *wptr,
 			uint32_t wptr_shift, uint32_t wptr_mask,
-			struct mm_struct *mm);
+			struct vmspace *mm);
 
 	int (*hqd_sdma_load)(struct kgd_dev *kgd, void *mqd,
-			     uint32_t __user *wptr, struct mm_struct *mm);
+			     uint32_t __user *wptr, struct vmspace *mm);
 
 	int (*hqd_dump)(struct kgd_dev *kgd,
 			uint32_t pipe_id, uint32_t queue_id,
@@ -486,9 +486,9 @@ struct kgd2kfd_calls {
 	void (*interrupt)(struct kfd_dev *kfd, const void *ih_ring_entry);
 	void (*suspend)(struct kfd_dev *kfd);
 	int (*resume)(struct kfd_dev *kfd);
-	int (*quiesce_mm)(struct mm_struct *mm);
-	int (*resume_mm)(struct mm_struct *mm);
-	int (*schedule_evict_and_restore_process)(struct mm_struct *mm,
+	int (*quiesce_mm)(struct vmspace *mm);
+	int (*resume_mm)(struct vmspace *mm);
+	int (*schedule_evict_and_restore_process)(struct vmspace *mm,
 			struct dma_fence *fence);
 	int  (*pre_reset)(struct kfd_dev *kfd);
 	int  (*post_reset)(struct kfd_dev *kfd);

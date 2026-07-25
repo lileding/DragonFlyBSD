@@ -536,7 +536,7 @@ struct radeon_ttm_tt {
 	u64				offset;
 
 	uint64_t			userptr;
-	struct mm_struct		*usermm;
+	struct vmspace		*usermm;
 	uint32_t			userflags;
 };
 

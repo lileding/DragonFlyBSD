@@ -522,7 +522,7 @@ bool amdgpu_amdkfd_is_kfd_vmid(struct amdgpu_device *adev, u32 vmid)
 }
 
 #ifndef CONFIG_HSA_AMD
-bool amdkfd_fence_check_mm(struct dma_fence *f, struct mm_struct *mm)
+bool amdkfd_fence_check_mm(struct dma_fence *f, struct vmspace *mm)
 {
 	return false;
 }
@@ -541,7 +541,7 @@ struct amdgpu_amdkfd_fence *to_amdgpu_amdkfd_fence(struct dma_fence *f)
 	return NULL;
 }
 
-int amdgpu_amdkfd_evict_userptr(struct kgd_mem *mem, struct mm_struct *mm)
+int amdgpu_amdkfd_evict_userptr(struct kgd_mem *mem, struct vmspace *mm)
 {
 	return 0;
 }

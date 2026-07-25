@@ -46,23 +46,17 @@ struct page {
 	struct vm_page pa_vmpage;
 };
 
-struct mm_struct {
-	long	refs;
-	struct lock mmap_sem;
-	atomic_t mm_users;
-	atomic_t mm_count;
-};
+#include <sys/proc.h>		/* curproc */
+#include <vm/vm_map.h>		/* struct vmspace */
 
 /*
- * Return the calling process' mm_struct, allocating it on first use.
- * The mm is a per-process object, so reaching it needs no task_struct.
- * Kernel threads have no address space and get NULL.
+ * Return the calling process' address space.  Kernel threads have none.
  */
-struct mm_struct *linux_proc_mm(void);
-
-struct proc_struct {
-	struct mm_struct *mm;
-};
+static inline struct vmspace *
+linux_proc_mm(void)
+{
+	return curproc != NULL ? curproc->p_vmspace : NULL;
+}
 
 struct vm_area_struct {
 	vm_offset_t	vm_start;
@@ -73,7 +67,7 @@ struct vm_area_struct {
 	void		*vm_private_data;
 	int		vm_flags;
 	const struct vm_operations_struct *vm_ops;
-	struct mm_struct *vm_mm;
+	struct vmspace *vm_mm;
 };
 
 #endif	/* _LINUX_MM_TYPES_H_ */

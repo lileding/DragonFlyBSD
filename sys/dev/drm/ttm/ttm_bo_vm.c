@@ -96,11 +96,11 @@ static int ttm_bo_vm_fault_idle(struct ttm_buffer_object *bo,
 			goto out_unlock;
 
 		ttm_bo_get(bo);
-		up_read(&vmf->vma->vm_mm->mmap_sem);		/* release */
+		vm_map_unlock_read(&vmf->vma->vm_mm->vm_map);		/* release */
 		(void) dma_fence_wait(bo->moving, true);
 		ttm_bo_unreserve(bo);
 		ttm_bo_put(bo);
-		down_read(&vmf->vma->vm_mm->mmap_sem);		/* acquire */
+		vm_map_lock_read(&vmf->vma->vm_mm->vm_map);		/* acquire */
 		goto out_unlock;
 	}
 
@@ -166,7 +166,7 @@ static int ttm_bo_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		if (vmf->flags & FAULT_FLAG_ALLOW_RETRY) {
 			if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
 				ttm_bo_get(bo);
-				up_read(&vmf->vma->vm_mm->mmap_sem);
+				vm_map_unlock_read(&vmf->vma->vm_mm->vm_map);
 				(void) ttm_bo_wait_unreserved(bo);
 				ttm_bo_put(bo);
 			}
@@ -569,7 +569,7 @@ ttm_bo_vm_fault_bo_dfly(struct ttm_buffer_object *bo, vm_object_t vm_obj,
 
 retry:
 	/* The Linux page fault handler acquires mmap_sem */
-	down_read(&vma->vm_mm->mmap_sem);
+	vm_map_lock_read(&vma->vm_mm->vm_map);
 
 	m = NULL;
 	io_locked = false;
@@ -589,15 +589,15 @@ retry:
 
 		if (vmf->flags & FAULT_FLAG_ALLOW_RETRY || 1) {
 			if (!(vmf->flags & FAULT_FLAG_RETRY_NOWAIT)) {
-				up_read(&vma->vm_mm->mmap_sem);
+				vm_map_unlock_read(&vma->vm_mm->vm_map);
 				(void) ttm_bo_wait_unreserved(bo);
-				down_read(&vma->vm_mm->mmap_sem);
+				vm_map_lock_read(&vma->vm_mm->vm_map);
 			}
 
 #ifndef __DragonFly__
 			return VM_FAULT_RETRY;
 #else
-			up_read(&vma->vm_mm->mmap_sem);
+			vm_map_unlock_read(&vma->vm_mm->vm_map);
 			lwkt_yield();
 			goto retry;
 #endif
@@ -642,7 +642,7 @@ retry:
 		} else {
 			retry_count++;
 			ttm_bo_unreserve(bo);
-			up_read(&vma->vm_mm->mmap_sem);
+			vm_map_unlock_read(&vma->vm_mm->vm_map);
 			int dummy;
 			tsleep(&dummy, 0, "blah", 1);
 
@@ -744,7 +744,7 @@ retry:
 		if (io_locked)
 			ttm_mem_io_unlock(man);
 		ttm_bo_unreserve(bo);
-		up_read(&vma->vm_mm->mmap_sem);
+		vm_map_unlock_read(&vma->vm_mm->vm_map);
 		vm_page_sleep_busy(m, FALSE, "ttmvmf");
 		goto retry;
 	}
@@ -763,7 +763,7 @@ out_unlock1:
 	ttm_bo_unreserve(bo);
 out_unlock2:
 	vm_object_pip_wakeup(vm_obj);
-	up_read(&vma->vm_mm->mmap_sem);
+	vm_map_unlock_read(&vma->vm_mm->vm_map);
 
 	return (retval);
 }

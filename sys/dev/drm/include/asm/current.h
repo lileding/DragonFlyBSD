@@ -28,13 +28,9 @@
 #define _ASM_CURRENT_H_
 
 struct task_struct;
-struct mm_struct;
 struct thread;
-struct proc;
 
 struct task_struct *linux_task_alloc(struct thread *td);
-void linux_proc_drop(struct proc *p);
-void linux_mm_drop(struct mm_struct *mm);
 
 #define current	({						\
 	struct task_struct *__task;				\

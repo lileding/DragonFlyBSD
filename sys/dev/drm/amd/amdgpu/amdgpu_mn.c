@@ -72,7 +72,7 @@
 struct amdgpu_mn {
 	/* constant after initialisation */
 	struct amdgpu_device	*adev;
-	struct mm_struct	*mm;
+	struct vmspace	*mm;
 	struct mmu_notifier	mn;
 	enum amdgpu_mn_type	type;
 
@@ -142,7 +142,7 @@ static void amdgpu_mn_destroy(struct work_struct *work)
  * Shedule a work item to lazy destroy our notifier.
  */
 static void amdgpu_mn_release(struct mmu_notifier *mn,
-			      struct mm_struct *mm)
+			      struct vmspace *mm)
 {
 	struct amdgpu_mn *amn = container_of(mn, struct amdgpu_mn, mn);
 
@@ -246,7 +246,7 @@ static void amdgpu_mn_invalidate_node(struct amdgpu_mn_node *node,
  * potentially dirty.
  */
 static int amdgpu_mn_invalidate_range_start_gfx(struct mmu_notifier *mn,
-						 struct mm_struct *mm,
+						 struct vmspace *mm,
 						 unsigned long start,
 						 unsigned long end,
 						 bool blockable)
@@ -294,7 +294,7 @@ static int amdgpu_mn_invalidate_range_start_gfx(struct mmu_notifier *mn,
  * are restorted in amdgpu_mn_invalidate_range_end_hsa.
  */
 static int amdgpu_mn_invalidate_range_start_hsa(struct mmu_notifier *mn,
-						 struct mm_struct *mm,
+						 struct vmspace *mm,
 						 unsigned long start,
 						 unsigned long end,
 						 bool blockable)
@@ -344,7 +344,7 @@ static int amdgpu_mn_invalidate_range_start_hsa(struct mmu_notifier *mn,
  * Release the lock again to allow new command submissions.
  */
 static void amdgpu_mn_invalidate_range_end(struct mmu_notifier *mn,
-					   struct mm_struct *mm,
+					   struct vmspace *mm,
 					   unsigned long start,
 					   unsigned long end)
 {
@@ -383,7 +383,7 @@ static const struct mmu_notifier_ops amdgpu_mn_ops[] = {
 struct amdgpu_mn *amdgpu_mn_get(struct amdgpu_device *adev,
 				enum amdgpu_mn_type type)
 {
-	struct mm_struct *mm = current->mm;
+	struct vmspace *mm = current->mm;
 	struct amdgpu_mn *amn;
 	unsigned long key = AMDGPU_MN_KEY(mm, type);
 	int r;

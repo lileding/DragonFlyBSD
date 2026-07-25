@@ -34,7 +34,7 @@
 #include <linux/sched/mm.h>
 
 struct i915_mm_struct {
-	struct mm_struct *mm;
+	struct vmspace *mm;
 	struct drm_i915_private *i915;
 	struct i915_mmu_notifier *mn;
 	struct hlist_node node;
@@ -113,7 +113,7 @@ static void del_object(struct i915_mmu_object *mo)
 }
 
 static int i915_gem_userptr_mn_invalidate_range_start(struct mmu_notifier *_mn,
-						       struct mm_struct *mm,
+						       struct vmspace *mm,
 						       unsigned long start,
 						       unsigned long end,
 						       bool blockable)
@@ -168,7 +168,7 @@ static const struct mmu_notifier_ops i915_gem_userptr_notifier = {
 };
 
 static struct i915_mmu_notifier *
-i915_mmu_notifier_create(struct mm_struct *mm)
+i915_mmu_notifier_create(struct vmspace *mm)
 {
 	struct i915_mmu_notifier *mn;
 
@@ -221,7 +221,7 @@ i915_mmu_notifier_find(struct i915_mm_struct *mm)
 	if (IS_ERR(mn))
 		err = PTR_ERR(mn);
 
-	down_write(&mm->mm->mmap_sem);
+	vm_map_lock(&mm->mm->vm_map);
 	mutex_lock(&mm->i915->mm_lock);
 	if (mm->mn == NULL && !err) {
 		/* Protected by mmap_sem (write-lock) */
@@ -238,7 +238,7 @@ i915_mmu_notifier_find(struct i915_mm_struct *mm)
 		err = 0;
 	}
 	mutex_unlock(&mm->i915->mm_lock);
-	up_write(&mm->mm->mmap_sem);
+	vm_map_unlock(&mm->mm->vm_map);
 
 	if (mn && !IS_ERR(mn)) {
 		destroy_workqueue(mn->wq);
@@ -281,7 +281,7 @@ i915_gem_userptr_init__mmu_notifier(struct drm_i915_gem_object *obj,
 
 static void
 i915_mmu_notifier_free(struct i915_mmu_notifier *mn,
-		       struct mm_struct *mm)
+		       struct vmspace *mm)
 {
 	if (mn == NULL)
 		return;
@@ -313,14 +313,14 @@ i915_gem_userptr_init__mmu_notifier(struct drm_i915_gem_object *obj,
 
 static void
 i915_mmu_notifier_free(struct i915_mmu_notifier *mn,
-		       struct mm_struct *mm)
+		       struct vmspace *mm)
 {
 }
 
 #endif
 
 static struct i915_mm_struct *
-__i915_mm_struct_find(struct drm_i915_private *dev_priv, struct mm_struct *real)
+__i915_mm_struct_find(struct drm_i915_private *dev_priv, struct vmspace *real)
 {
 	struct i915_mm_struct *mm;
 
@@ -516,7 +516,7 @@ __i915_gem_userptr_get_pages_worker(struct work_struct *_work)
 
 	pvec = kvmalloc_array(npages, sizeof(struct page *), GFP_TEMPORARY);
 	if (pvec != NULL) {
-		struct mm_struct *mm = obj->userptr.mm->mm;
+		struct vmspace *mm = obj->userptr.mm->mm;
 		unsigned int flags = 0;
 
 		if (!i915_gem_object_is_readonly(obj))
@@ -524,7 +524,7 @@ __i915_gem_userptr_get_pages_worker(struct work_struct *_work)
 
 		ret = -EFAULT;
 		if (mmget_not_zero(mm)) {
-			down_read(&mm->mmap_sem);
+			vm_map_lock_read(&mm->vm_map);
 			while (pinned < npages) {
 				ret = get_user_pages_remote
 					(work->task, mm,
@@ -537,7 +537,7 @@ __i915_gem_userptr_get_pages_worker(struct work_struct *_work)
 
 				pinned += ret;
 			}
-			up_read(&mm->mmap_sem);
+			vm_map_unlock_read(&mm->vm_map);
 			mmput(mm);
 		}
 	}
@@ -615,7 +615,7 @@ static int i915_gem_userptr_get_pages(struct drm_i915_gem_object *obj)
 {
 #if 0
 	const int num_pages = obj->base.size >> PAGE_SHIFT;
-	struct mm_struct *mm = obj->userptr.mm->mm;
+	struct vmspace *mm = obj->userptr.mm->mm;
 	struct page **pvec;
 	struct sg_table *pages;
 	bool active;

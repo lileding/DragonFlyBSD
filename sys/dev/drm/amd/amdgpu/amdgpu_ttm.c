@@ -831,7 +831,7 @@ struct amdgpu_ttm_tt {
 int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 {
 	struct amdgpu_ttm_tt *gtt = (void *)ttm;
-	struct mm_struct *mm = gtt->usertask->mm;
+	struct vmspace *mm = linux_proc_mm();
 	unsigned int flags = 0;
 	unsigned pinned = 0;
 	int r;
@@ -842,7 +842,7 @@ int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 	if (!(gtt->userflags & AMDGPU_GEM_USERPTR_READONLY))
 		flags |= FOLL_WRITE;
 
-	down_read(&mm->mmap_sem);
+	vm_map_lock_read(&mm->vm_map);
 
 #if 0
 	if (gtt->userflags & AMDGPU_GEM_USERPTR_ANONONLY) {
@@ -855,7 +855,7 @@ int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 
 		vma = find_vma(mm, gtt->userptr);
 		if (!vma || vma->vm_file || vma->vm_end < end) {
-			up_read(&mm->mmap_sem);
+			vm_map_unlock_read(&mm->vm_map);
 			return -EPERM;
 		}
 	}
@@ -895,12 +895,12 @@ int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 
 	} while (pinned < ttm->num_pages);
 
-	up_read(&mm->mmap_sem);
+	vm_map_unlock_read(&mm->vm_map);
 	return 0;
 
 release_pages:
 	release_pages(pages, pinned);
-	up_read(&mm->mmap_sem);
+	vm_map_unlock_read(&mm->vm_map);
 	return r;
 }
 
@@ -1377,7 +1377,7 @@ kprintf("amdgpu_ttm_tt_set_userptr: gtt->usertask will not be set\n");
 /**
  * amdgpu_ttm_tt_get_usermm - Return memory manager for ttm_tt object
  */
-struct mm_struct *amdgpu_ttm_tt_get_usermm(struct ttm_tt *ttm)
+struct vmspace *amdgpu_ttm_tt_get_usermm(struct ttm_tt *ttm)
 {
 	struct amdgpu_ttm_tt *gtt = (void *)ttm;
 
@@ -1387,7 +1387,7 @@ struct mm_struct *amdgpu_ttm_tt_get_usermm(struct ttm_tt *ttm)
 	if (gtt->usertask == NULL)
 		return NULL;
 
-	return gtt->usertask->mm;
+	return linux_proc_mm();
 }
 
 /**

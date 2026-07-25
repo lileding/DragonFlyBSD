@@ -30,7 +30,7 @@
 #include "i915_drv.h"
 
 struct remap_pfn {
-	struct mm_struct *mm;
+	struct vmspace *mm;
 	unsigned long pfn;
 	pgprot_t prot;
 };

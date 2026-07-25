@@ -532,7 +532,7 @@ static int amdgpu_cs_list_validate(struct amdgpu_cs_parser *p,
 	list_for_each_entry(lobj, validated, tv.head) {
 		struct amdgpu_bo *bo = ttm_to_amdgpu_bo(lobj->tv.bo);
 		bool binding_userptr = false;
-		struct mm_struct *usermm;
+		struct vmspace *usermm;
 
 		usermm = amdgpu_ttm_tt_get_usermm(bo->tbo.ttm);
 #if 0

@@ -72,14 +72,14 @@ struct kgd_mem {
 /* KFD Memory Eviction */
 struct amdgpu_amdkfd_fence {
 	struct dma_fence base;
-	struct mm_struct *mm;
+	struct vmspace *mm;
 	spinlock_t lock;
 	char timeline_name[TASK_COMM_LEN];
 };
 
 struct amdgpu_amdkfd_fence *amdgpu_amdkfd_fence_create(u64 context,
-						       struct mm_struct *mm);
-bool amdkfd_fence_check_mm(struct dma_fence *f, struct mm_struct *mm);
+						       struct vmspace *mm);
+bool amdkfd_fence_check_mm(struct dma_fence *f, struct vmspace *mm);
 struct amdgpu_amdkfd_fence *to_amdgpu_amdkfd_fence(struct dma_fence *f);
 
 struct amdkfd_process_info {
@@ -115,7 +115,7 @@ void amdgpu_amdkfd_device_probe(struct amdgpu_device *adev);
 void amdgpu_amdkfd_device_init(struct amdgpu_device *adev);
 void amdgpu_amdkfd_device_fini(struct amdgpu_device *adev);
 
-int amdgpu_amdkfd_evict_userptr(struct kgd_mem *mem, struct mm_struct *mm);
+int amdgpu_amdkfd_evict_userptr(struct kgd_mem *mem, struct vmspace *mm);
 int amdgpu_amdkfd_submit_ib(struct kgd_dev *kgd, enum kgd_engine_type engine,
 				uint32_t vmid, uint64_t gpu_addr,
 				uint32_t *ib_cmd, uint32_t ib_len);

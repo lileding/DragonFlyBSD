@@ -2015,16 +2015,12 @@ i915_gem_mmap_ioctl(struct drm_device *dev, void *data,
 		       args->offset);
 #endif	/* __DragonFly__ */
 	if (args->flags & I915_MMAP_WC) {	/* I915_PARAM_MMAP_VERSION */
-		struct mm_struct *mm = linux_proc_mm();
+		struct vmspace *mm = linux_proc_mm();
 #if 0
 		struct vm_area_struct *vma;
 #endif
 
-		if (down_write_killable(&mm->mmap_sem)) {
-			i915_gem_object_put(obj);
-			DRM_DEBUG("down_write_killable\n");
-			return -EINTR;
-		}
+		vm_map_lock(&mm->vm_map);
 #ifdef __DragonFly__
 		vm_obj = obj->base.filp;
 		vm_object_hold(vm_obj);
@@ -2047,7 +2043,7 @@ i915_gem_mmap_ioctl(struct drm_device *dev, void *data,
 		else
 			addr = -ENOMEM;
 #endif	/* __DragonFly__ */
-		up_write(&mm->mmap_sem);
+		vm_map_unlock(&mm->vm_map);
 
 		/* This may race, but that's ok, it only gets set */
 		WRITE_ONCE(obj->frontbuffer_ggtt_origin, ORIGIN_CPU);
@@ -2251,7 +2247,7 @@ int i915_gem_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot, vm_page_t 
 	area->vm_mm = linux_proc_mm();
 	// XXX: in Linux, mmap_sem is held on entry of this function
 	// XXX: should that be an exclusive lock ?
-	down_read(&area->vm_mm->mmap_sem);
+	vm_map_lock_read(&area->vm_mm->vm_map);
 #endif
 
 	/* Sanity check that we allow writing into this object */
@@ -2499,7 +2495,7 @@ err:
 	else
 		kprintf("i915: caught bug(%d)\n", ret);
 
-	up_read(&area->vm_mm->mmap_sem);
+	vm_map_unlock_read(&area->vm_mm->vm_map);
 #endif
 
 	return ret;

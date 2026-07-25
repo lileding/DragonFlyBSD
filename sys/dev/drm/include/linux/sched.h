@@ -65,6 +65,8 @@
 #include <sys/sched.h>
 #include <sys/signal2.h>
 
+#include <vm/vm_extern.h>	/* vmspace_ref */
+
 #include <machine/cpu.h>
 
 struct seq_file;
@@ -82,7 +84,6 @@ struct seq_file;
 struct task_struct {
 	struct thread    *dfly_td;
 	volatile long     state;
-	struct mm_struct *mm;	/* mirror copy in p->p_linux_mm */
 	int               prio;
 
 	/* kthread-specific data */
@@ -323,9 +324,9 @@ pagefault_disabled(void)
 }
 
 static inline void
-mmgrab(struct mm_struct *mm)
+mmgrab(struct vmspace *vms)
 {
-	atomic_inc(&mm->mm_count);
+	vmspace_ref(vms);
 }
 
 #endif	/* _LINUX_SCHED_H_ */

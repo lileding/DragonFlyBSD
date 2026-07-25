@@ -77,8 +77,6 @@ kthread_run(int (*lfn)(void *), void *data, const char *namefmt, ...)
 	task->dfly_td = td;
 	td->td_linux_task = task;
 
-	task->mm = NULL;	/* kthreads have no userland address space */
-
 	task->kt_fn = lfn;
 	task->kt_fndata = data;
 	spin_init(&task->kt_spin, "tspin1");

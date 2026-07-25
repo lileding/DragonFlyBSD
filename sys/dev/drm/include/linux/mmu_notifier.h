@@ -39,9 +39,9 @@ struct mmu_notifier {
 
 struct mmu_notifier_ops {
 	void (*release)(struct mmu_notifier *mn,
-			struct mm_struct *mm);
+			struct vmspace *mm);
 	void (*invalidate_range_start)(struct mmu_notifier *mn,
-				       struct mm_struct *mm,
+				       struct vmspace *mm,
 				       unsigned long start, unsigned long end);
 };
 

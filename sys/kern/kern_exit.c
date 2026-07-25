@@ -96,7 +96,6 @@ static struct task *deadlwp_task[MAXCPU];
 static struct lwplist deadlwp_list[MAXCPU];
 static struct lwkt_token deadlwp_token[MAXCPU];
 
-void (*linux_proc_drop_callback)(struct proc *p);
 
 /*
  * exit --
@@ -703,9 +702,6 @@ lwp_exit(int masterexit, void *waddr)
 	 * Clean up select/poll support
 	 */
 	kqueue_terminate(&lp->lwp_kqueue);
-
-	if (masterexit && p->p_linux_mm)
-		linux_proc_drop_callback(p);
 
 	/*
 	 * Clean up any syscall-cached ucred or rlimit.
