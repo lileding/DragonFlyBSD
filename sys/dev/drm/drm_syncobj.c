@@ -813,7 +813,8 @@ drm_syncobj_fd_to_handle_ioctl(struct drm_device *dev, void *data,
 #endif
 
 struct syncobj_wait_entry {
-	struct task_struct *task;
+	/* Shared wait channel of the thread blocked on this entry array. */
+	void *waiter;
 	struct dma_fence *fence;
 	struct dma_fence_cb fence_cb;
 	struct drm_syncobj_cb syncobj_cb;
@@ -884,7 +885,7 @@ static void syncobj_wait_fence_func(struct dma_fence *fence,
 	struct syncobj_wait_entry *wait =
 		container_of(cb, struct syncobj_wait_entry, fence_cb);
 	DRM_DEBUG("wake_up\n");
-	wake_up_process(wait->task);
+	wakeup(wait->waiter);
 }
 
 static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
@@ -914,7 +915,7 @@ static void syncobj_wait_syncobj_func(struct drm_syncobj *syncobj,
 		return;
 	wait->fence = fence;
 	DRM_DEBUG("wake_up\n");
-	wake_up_process(wait->task);
+	wakeup(wait->waiter);
 }
 
 static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
@@ -928,6 +929,7 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 	struct syncobj_wait_entry stack_entry;
 	struct dma_fence *fence;
 	uint32_t signaled_count, i;
+	int error;
 
 	if (count == 1) {
 		memset(&stack_entry, 0, sizeof(stack_entry));
@@ -951,7 +953,7 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 	 */
 	signaled_count = 0;
 	for (i = 0; i < count; ++i) {
-		entries[i].task = current;
+		entries[i].waiter = entries;
 		entries[i].point = points != NULL ? points[i] : 0;
 		entries[i].fence = drm_syncobj_point_get(syncobjs[i],
 							 entries[i].point);
@@ -994,7 +996,7 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 	}
 
 	do {
-		set_current_state(TASK_INTERRUPTIBLE);
+		tsleep_interlock(entries, PCATCH);
 
 		signaled_count = 0;
 		for (i = 0; i < count; ++i) {
@@ -1027,18 +1029,36 @@ static signed long drm_syncobj_array_wait_timeout(struct drm_syncobj **syncobjs,
 			goto done_waiting;
 		}
 
-		if (signal_pending(current)) {
+		if (curthread->td_lwp != NULL && CURSIG(curthread->td_lwp)) {
 			timeout = -ERESTARTSYS;
 			goto done_waiting;
 		}
 
 		DRM_DEBUG("[before] timeout=%ld\n", timeout);
-		timeout = schedule_timeout(timeout);
+		if (timeout >= INT_MAX) {
+			/* Indefinite wait: no deadline to account for. */
+			error = tsleep(entries, PINTERLOCKED | PCATCH,
+				       "syncobj", 0);
+		} else {
+			int start = ticks;
+
+			error = tsleep(entries, PINTERLOCKED | PCATCH,
+				       "syncobj", (int)timeout);
+			timeout -= (signed long)(ticks - start);
+			if (timeout < 0)
+				timeout = 0;
+		}
 		DRM_DEBUG("[after] timeout=%ld\n", timeout);
+		if (error == EINTR || error == ERESTART) {
+			timeout = -ERESTARTSYS;
+			goto done_waiting;
+		}
 	} while (1);
 
 done_waiting:
-	__set_current_state(TASK_RUNNING);
+	crit_enter();
+	tsleep_remove(curthread);
+	crit_exit();
 
 cleanup_entries:
 	for (i = 0; i < count; ++i) {

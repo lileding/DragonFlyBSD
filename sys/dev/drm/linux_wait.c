@@ -128,7 +128,6 @@ wait_on_bit_timeout(unsigned long *word, int bit, unsigned mode,
 		return 0;
 
 	start_time = ticks;
-	set_current_state(mode);
 
 	do {
 		rv = tsleep(word, mode, "lwobt", timeout);
@@ -137,8 +136,6 @@ wait_on_bit_timeout(unsigned long *word, int bit, unsigned mode,
 		if (time_after_eq(start_time, timeout))
 			timeout_expired = 1;
 	} while (test_bit(bit, word) && !timeout_expired);
-
-	set_current_state(TASK_RUNNING);
 
 	if (awakened)
 		return 0;

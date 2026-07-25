@@ -72,7 +72,8 @@ dma_fence_context_alloc(unsigned num)
 
 struct default_wait_cb {
 	struct dma_fence_cb base;
-	struct task_struct *task;
+	/* Wait channel of the thread blocked on this callback. */
+	void *waiter;
 };
 
 static void
@@ -81,7 +82,7 @@ dma_fence_default_wait_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
 	struct default_wait_cb *wait =
 		container_of(cb, struct default_wait_cb, base);
 
-	wake_up_process(wait->task);
+	wakeup(wait->waiter);
 }
 
 long
@@ -118,7 +119,7 @@ dma_fence_default_wait(struct dma_fence *fence, bool intr, signed long timeout)
 	}
 
 	cb.base.func = dma_fence_default_wait_cb;
-	cb.task = current;
+	cb.waiter = &cb;
 	list_add(&cb.base.node, &fence->cb_list);
 
 	end = jiffies + timeout;
@@ -126,15 +127,9 @@ dma_fence_default_wait(struct dma_fence *fence, bool intr, signed long timeout)
 		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
 			break;
 		}
-		if (intr) {
-			__set_current_state(TASK_INTERRUPTIBLE);
-		}
-		else {
-			__set_current_state(TASK_UNINTERRUPTIBLE);
-		}
 		crit_exit();
-		/* wake_up_process() directly uses task_struct pointers as sleep identifiers */
-		err = lksleep(current, fence->lock, intr ? PCATCH : 0, "dmafence", ret);
+		/* The fence callback wakes this waiter on cb's address. */
+		err = lksleep(&cb, fence->lock, intr ? PCATCH : 0, "dmafence", ret);
 		crit_enter();
 		if (err == EINTR || err == ERESTART) {
 			ret = -ERESTARTSYS;
@@ -144,7 +139,6 @@ dma_fence_default_wait(struct dma_fence *fence, bool intr, signed long timeout)
 
 	if (!list_empty(&cb.base.node))
 		list_del(&cb.base.node);
-	__set_current_state(TASK_RUNNING);
 out:
 	crit_exit();
 	lockmgr(fence->lock, LK_RELEASE);
@@ -194,7 +188,7 @@ dma_fence_wait_any_timeout(struct dma_fence **fences, uint32_t count,
 
 	for (i = 0; i < count; i++) {
 		struct dma_fence *fence = fences[i];
-		cb[i].task = current;
+		cb[i].waiter = cb;
 		if (dma_fence_add_callback(fence, &cb[i].base,
 		    dma_fence_default_wait_cb)) {
 			if (idx)
@@ -207,7 +201,7 @@ dma_fence_wait_any_timeout(struct dma_fence **fences, uint32_t count,
 	for (ret = timeout; ret > 0; ret = MAX(0, end - jiffies)) {
 		if (dma_fence_test_signaled_any(fences, count, idx))
 			break;
-		err = tsleep(current, intr ? PCATCH : 0, "dfwat", ret);
+		err = tsleep(cb, intr ? PCATCH : 0, "dfwat", ret);
 		if (err == EINTR || err == ERESTART) {
 			ret = -ERESTARTSYS;
 			break;
