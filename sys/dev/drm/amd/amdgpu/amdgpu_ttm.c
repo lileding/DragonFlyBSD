@@ -805,7 +805,7 @@ static unsigned long amdgpu_ttm_io_mem_pfn(struct ttm_buffer_object *bo,
  */
 struct amdgpu_ttm_gup_task_list {
 	struct list_head	list;
-	struct task_struct	*task;
+	struct thread		*task;
 };
 
 struct amdgpu_ttm_tt {
@@ -868,7 +868,7 @@ int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 		struct page **p = pages + pinned;
 		struct amdgpu_ttm_gup_task_list guptask;
 
-		guptask.task = current;
+		guptask.task = curthread;
 		spin_lock(&gtt->guptasklock);
 		list_add(&guptask.list, &gtt->guptasks);
 		spin_unlock(&gtt->guptasklock);
@@ -876,7 +876,7 @@ int amdgpu_ttm_tt_get_user_pages(struct ttm_tt *ttm, struct page **pages)
 		r = get_user_pages(userptr, num_pages, flags, p, NULL);
 
 #if 0
-		if (mm == current->mm)
+		if (mm == linux_proc_mm())
 			r = get_user_pages(userptr, num_pages, flags, p, NULL);
 		else
 			r = get_user_pages_remote(gtt->usertask,
@@ -1417,7 +1417,7 @@ bool amdgpu_ttm_tt_affect_userptr(struct ttm_tt *ttm, unsigned long start,
 	 */
 	spin_lock(&gtt->guptasklock);
 	list_for_each_entry(entry, &gtt->guptasks, list) {
-		if (entry->task == current) {
+		if (entry->task == curthread) {
 			spin_unlock(&gtt->guptasklock);
 			return false;
 		}
@@ -1543,7 +1543,7 @@ static bool amdgpu_ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
 		for (i = 0; i < flist->shared_count; ++i) {
 			f = rcu_dereference_protected(flist->shared[i],
 				reservation_object_held(bo->resv));
-			if (amdkfd_fence_check_mm(f, current->mm))
+			if (amdkfd_fence_check_mm(f, linux_proc_mm()))
 				return false;
 		}
 	}

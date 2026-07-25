@@ -350,7 +350,7 @@ i915_gem_userptr_init__mm_struct(struct drm_i915_gem_object *obj)
 	 * up.
 	 */
 	mutex_lock(&dev_priv->mm_lock);
-	mm = __i915_mm_struct_find(dev_priv, current->mm);
+	mm = __i915_mm_struct_find(dev_priv, linux_proc_mm());
 	if (mm == NULL) {
 		mm = kmalloc(sizeof(*mm), M_DRM, GFP_KERNEL);
 		if (mm == NULL) {
@@ -361,8 +361,8 @@ i915_gem_userptr_init__mm_struct(struct drm_i915_gem_object *obj)
 		kref_init(&mm->kref);
 		mm->i915 = to_i915(obj->base.dev);
 
-		mm->mm = current->mm;
-		mmgrab(current->mm);
+		mm->mm = linux_proc_mm();
+		mmgrab(linux_proc_mm());
 
 		mm->mn = NULL;
 
@@ -649,7 +649,7 @@ static int i915_gem_userptr_get_pages(struct drm_i915_gem_object *obj)
 	pvec = NULL;
 	pinned = 0;
 
-	if (mm == current->mm) {
+	if (mm == linux_proc_mm()) {
 		pvec = kvmalloc_array(num_pages, sizeof(struct page *),
 				      GFP_KERNEL |
 				      __GFP_NORETRY |

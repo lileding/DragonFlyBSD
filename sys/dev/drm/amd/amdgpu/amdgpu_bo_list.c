@@ -105,7 +105,7 @@ int amdgpu_bo_list_create(struct amdgpu_device *adev, struct drm_file *filp,
 
 		usermm = amdgpu_ttm_tt_get_usermm(bo->tbo.ttm);
 		if (usermm) {
-			if (usermm != current->mm) {
+			if (usermm != linux_proc_mm()) {
 				amdgpu_bo_unref(&bo);
 				r = -EPERM;
 				goto error_free;

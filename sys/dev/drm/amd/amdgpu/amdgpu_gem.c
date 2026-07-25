@@ -129,7 +129,7 @@ int amdgpu_gem_object_open(struct drm_gem_object *obj,
 	int r;
 
 	mm = amdgpu_ttm_tt_get_usermm(abo->tbo.ttm);
-	if (mm && mm != current->mm)
+	if (mm && mm != linux_proc_mm())
 		return -EPERM;
 
 	if (abo->flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID &&

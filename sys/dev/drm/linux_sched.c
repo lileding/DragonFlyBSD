@@ -55,6 +55,32 @@
  * is stored as p->p_linux_mm.  This must be allocated, initialized, and
  * and installed if necessary.
  */
+struct mm_struct *
+linux_proc_mm(void)
+{
+	struct mm_struct *mm;
+	struct proc *p;
+
+	if ((p = curproc) == NULL)
+		return NULL;
+	if ((mm = p->p_linux_mm) != NULL)
+		return mm;
+
+	mm = kzalloc(sizeof(*mm), GFP_KERNEL);
+	mm->refs = 1;
+	lockinit(&mm->mmap_sem, "drmmms", 0, LK_CANRECURSE);
+	lwkt_gettoken(&p->p_token);
+	if (p->p_linux_mm == NULL) {
+		p->p_linux_mm = mm;
+	} else {
+		linux_mm_drop(mm);
+		mm = p->p_linux_mm;
+	}
+	lwkt_reltoken(&p->p_token);
+
+	return mm;
+}
+
 struct task_struct *
 linux_task_alloc(struct thread *td)
 {
@@ -69,19 +95,7 @@ linux_task_alloc(struct thread *td)
 
 	if ((p = td->td_proc) != NULL) {
 		task->pid = td->td_proc->p_pid;
-		if ((mm = p->p_linux_mm) == NULL) {
-			mm = kzalloc(sizeof(*mm), GFP_KERNEL);
-			mm->refs = 1;
-			lockinit(&mm->mmap_sem, "drmmms", 0, LK_CANRECURSE);
-			lwkt_gettoken(&p->p_token);
-			if (p->p_linux_mm == NULL) {
-				p->p_linux_mm = mm;
-			} else {
-				linux_mm_drop(mm);
-				mm = p->p_linux_mm;
-			}
-			lwkt_reltoken(&p->p_token);
-		}
+		mm = linux_proc_mm();
 		task->mm = mm;
 		atomic_add_long(&mm->refs, 1);
 	}

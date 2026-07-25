@@ -554,7 +554,7 @@ ttm_bo_vm_fault_bo_dfly(struct ttm_buffer_object *bo, vm_object_t vm_obj,
 	memset(vma, 0, sizeof(*vma));
 	memset(vmf, 0, sizeof(*vmf));
 
-	vma->vm_mm = current->mm;
+	vma->vm_mm = linux_proc_mm();
 	vmf->vma = vma;
 
 	int retry_count = 0;

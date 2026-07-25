@@ -2015,7 +2015,7 @@ i915_gem_mmap_ioctl(struct drm_device *dev, void *data,
 		       args->offset);
 #endif	/* __DragonFly__ */
 	if (args->flags & I915_MMAP_WC) {	/* I915_PARAM_MMAP_VERSION */
-		struct mm_struct *mm = current->mm;
+		struct mm_struct *mm = linux_proc_mm();
 #if 0
 		struct vm_area_struct *vma;
 #endif
@@ -2248,7 +2248,7 @@ int i915_gem_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot, vm_page_t 
 	area->vm_private_data = vm_obj->handle;
 	area->vm_start = 0;
 	area->vm_end = obj->base.size;
-	area->vm_mm = current->mm;
+	area->vm_mm = linux_proc_mm();
 	// XXX: in Linux, mmap_sem is held on entry of this function
 	// XXX: should that be an exclusive lock ?
 	down_read(&area->vm_mm->mmap_sem);

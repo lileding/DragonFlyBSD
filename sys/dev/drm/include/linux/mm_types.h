@@ -53,6 +53,13 @@ struct mm_struct {
 	atomic_t mm_count;
 };
 
+/*
+ * Return the calling process' mm_struct, allocating it on first use.
+ * The mm is a per-process object, so reaching it needs no task_struct.
+ * Kernel threads have no address space and get NULL.
+ */
+struct mm_struct *linux_proc_mm(void);
+
 struct proc_struct {
 	struct mm_struct *mm;
 };
