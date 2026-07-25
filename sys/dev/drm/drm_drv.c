@@ -1140,20 +1140,7 @@ drm_modevent(module_t mod, int type, void *data)
 		TUNABLE_INT_FETCH("drm.debug", &drm_debug);
 		break;
 	case MOD_UNLOAD:
-		/*
-		 * DragonFly's partial LinuxKPI stores Linux task and mm wrappers
-		 * in native thread and proc objects, then relies on callbacks from
-		 * this KLD to release them at exit.  It also lacks the Linux device
-		 * reference lifecycle used by TTM teardown.  We cannot establish a
-		 * reliable unload quiescence point while that compatibility layer
-		 * remains incomplete: clearing these callbacks can leave a native
-		 * exit calling NULL or unloaded code, while TTM can wait forever.
-		 *
-		 * Keep DRM resident until LinuxKPI is removed or made independently
-		 * lifetime-safe.  Returning EBUSY here prevents SYSUNINIT from
-		 * running and leaves the exit callbacks valid.
-		 */
-		return (EBUSY);
+		break;
 	}
 	return (0);
 }
