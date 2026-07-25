@@ -1254,7 +1254,6 @@ static bool __i915_wait_request_check_and_reset(struct i915_request *request)
 	if (likely(!i915_reset_handoff(error)))
 		return false;
 
-	__set_current_state(TASK_RUNNING);
 	i915_reset(request->i915, error->stalled_mask, error->reason);
 	return true;
 }
@@ -1285,9 +1284,10 @@ long i915_request_wait(struct i915_request *rq,
 	const int state = flags & I915_WAIT_INTERRUPTIBLE ?
 		TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE;
 	wait_queue_head_t *errq = &rq->i915->gpu_error.wait_queue;
-	DEFINE_WAIT_FUNC(reset, default_wake_function);
-	DEFINE_WAIT_FUNC(exec, default_wake_function);
+	const int tsflags = (state & TASK_INTERRUPTIBLE) ? PCATCH : 0;
 	struct intel_wait wait;
+	DEFINE_WAIT(reset);
+	DEFINE_WAIT(exec);
 
 	might_sleep();
 #if IS_ENABLED(CONFIG_LOCKDEP)
@@ -1305,15 +1305,17 @@ long i915_request_wait(struct i915_request *rq,
 
 	trace_i915_request_wait_begin(rq, flags);
 
+	intel_wait_init(&wait);
+	exec.private = &wait;
+	reset.private = &wait;
+
 	add_wait_queue(&rq->execute, &exec);
 	if (flags & I915_WAIT_LOCKED)
 		add_wait_queue(errq, &reset);
 
-	intel_wait_init(&wait);
-
 restart:
 	do {
-		set_current_state(state);
+		tsleep_interlock(&wait, tsflags);
 		if (intel_wait_update_request(&wait, rq))
 			break;
 
@@ -1331,7 +1333,9 @@ restart:
 			goto complete;
 		}
 
-		timeout = io_schedule_timeout(timeout);
+		wait.asleep = true;
+		timeout = wait_chan_sleep(&wait, timeout, tsflags);
+		wait.asleep = false;
 	} while (1);
 
 	GEM_BUG_ON(!intel_wait_has_seqno(&wait));
@@ -1341,7 +1345,7 @@ restart:
 	if (__i915_spin_request(rq, wait.seqno, state, 5))
 		goto complete;
 
-	set_current_state(state);
+	tsleep_interlock(&wait, tsflags);
 	if (intel_engine_add_wait(rq->engine, &wait))
 		/*
 		 * In order to check that we haven't missed the interrupt
@@ -1364,13 +1368,15 @@ restart:
 			break;
 		}
 
-		timeout = io_schedule_timeout(timeout);
+		wait.asleep = true;
+		timeout = wait_chan_sleep(&wait, timeout, tsflags);
+		wait.asleep = false;
 
 		if (intel_wait_complete(&wait) &&
 		    intel_wait_check_request(&wait, rq))
 			break;
 
-		set_current_state(state);
+		tsleep_interlock(&wait, tsflags);
 
 wakeup:
 		/*
@@ -1409,7 +1415,7 @@ wakeup:
 
 	intel_engine_remove_wait(rq->engine, &wait);
 complete:
-	__set_current_state(TASK_RUNNING);
+	wait_chan_disarm();
 	if (flags & I915_WAIT_LOCKED)
 		remove_wait_queue(errq, &reset);
 	remove_wait_queue(&rq->execute, &exec);

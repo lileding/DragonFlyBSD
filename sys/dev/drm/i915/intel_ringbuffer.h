@@ -974,13 +974,17 @@ int intel_engine_init_breadcrumbs(struct intel_engine_cs *engine);
 
 static inline void intel_wait_init(struct intel_wait *wait)
 {
-	wait->tsk = current;
+	wait->chan = wait;
+	wait->prio = 0;
+	wait->asleep = false;
 	wait->request = NULL;
 }
 
 static inline void intel_wait_init_for_seqno(struct intel_wait *wait, u32 seqno)
 {
-	wait->tsk = current;
+	wait->chan = wait;
+	wait->prio = 0;
+	wait->asleep = false;
 	wait->seqno = seqno;
 }
 

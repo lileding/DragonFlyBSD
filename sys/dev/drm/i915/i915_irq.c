@@ -1156,7 +1156,7 @@ static void notify_ring(struct intel_engine_cs *engine)
 {
 	const u32 seqno = intel_engine_get_seqno(engine);
 	struct i915_request *rq = NULL;
-	struct task_struct *tsk = NULL;
+	void *chan = NULL;
 	struct intel_wait *wait;
 
 	if (unlikely(!engine->breadcrumbs.irq_armed))
@@ -1188,13 +1188,13 @@ static void notify_ring(struct intel_engine_cs *engine)
 			    intel_wait_check_request(wait, waiter))
 				rq = i915_request_get(waiter);
 
-			tsk = wait->tsk;
+			chan = wait->chan;
 		} else {
 			if (engine->irq_seqno_barrier &&
 			    i915_seqno_passed(seqno, wait->seqno - 1)) {
 				set_bit(ENGINE_IRQ_BREADCRUMB,
 					&engine->irq_posted);
-				tsk = wait->tsk;
+				chan = wait->chan;
 			}
 		}
 
@@ -1214,8 +1214,8 @@ static void notify_ring(struct intel_engine_cs *engine)
 		i915_request_put(rq);
 	}
 
-	if (tsk && tsk->state & TASK_NORMAL)
-		wake_up_process(tsk);
+	if (chan)
+		wakeup(chan);
 
 	rcu_read_unlock();
 

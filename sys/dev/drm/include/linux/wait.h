@@ -55,6 +55,10 @@ struct wait_queue_entry {
 
 void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
 
+/* Sleep on a bare wait channel until woken or timeout; jiffies left. */
+long wait_chan_sleep(void *chan, long timeout, int flags);
+/* Drop an interlock that was armed but never slept on. */
+void wait_chan_disarm(void);
 /* Sleep on wait->private until woken or timeout; returns jiffies left. */
 long wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags);
 

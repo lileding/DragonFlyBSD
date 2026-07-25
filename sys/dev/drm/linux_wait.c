@@ -126,18 +126,17 @@ finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait)
  * timeout is reported back unchanged.
  */
 long
-wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags)
+wait_chan_sleep(void *chan, long timeout, int flags)
 {
 	int start, error;
 
 	if (timeout >= INT_MAX) {
-		tsleep(wait->private, PINTERLOCKED | flags, "lwent", 0);
+		tsleep(chan, PINTERLOCKED | flags, "lwent", 0);
 		return timeout;
 	}
 
 	start = ticks;
-	error = tsleep(wait->private, PINTERLOCKED | flags, "lwent",
-	    (int)timeout);
+	error = tsleep(chan, PINTERLOCKED | flags, "lwent", (int)timeout);
 	timeout -= (long)(ticks - start);
 	if (timeout < 0)
 		timeout = 0;
@@ -145,6 +144,20 @@ wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags)
 		timeout = 1;
 
 	return timeout;
+}
+
+void
+wait_chan_disarm(void)
+{
+	crit_enter();
+	tsleep_remove(curthread);
+	crit_exit();
+}
+
+long
+wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags)
+{
+	return wait_chan_sleep(wait->private, timeout, flags);
 }
 
 void

@@ -41,7 +41,16 @@ struct i915_timeline;
 
 struct intel_wait {
 	struct rb_node node;
-	struct task_struct *tsk;
+	/*
+	 * Wait channel: wakeup(chan) wakes whoever registered this wait.  A
+	 * client waits on its own intel_wait; the signal proxies all point at
+	 * the breadcrumbs, which is where the signaler thread sleeps.
+	 */
+	void *chan;
+	/* Bottom-half election key; the signaler outranks every client. */
+	int prio;
+	/* Set by the waiter around its sleep; a hint, races are tolerated. */
+	bool asleep;
 	struct i915_request *request;
 	u32 seqno;
 };

@@ -27,12 +27,6 @@
 
 #include "i915_drv.h"
 
-#ifdef CONFIG_SMP
-#define task_asleep(tsk) ((tsk)->state & TASK_NORMAL && !(tsk)->on_cpu)
-#else
-#define task_asleep(tsk) ((tsk)->state & TASK_NORMAL)
-#endif
-
 static unsigned int __intel_breadcrumbs_wakeup(struct intel_breadcrumbs *b)
 {
 	struct intel_wait *wait;
@@ -52,10 +46,11 @@ static unsigned int __intel_breadcrumbs_wakeup(struct intel_breadcrumbs *b)
 		 * signal should remain from genuine missed_breadcrumb()
 		 * for us to detect in CI.
 		 */
-		bool was_asleep = task_asleep(wait->tsk);
+		bool was_asleep = wait->asleep;
 
 		result = ENGINE_WAKEUP_WAITER;
-		if (wake_up_process(wait->tsk) && was_asleep)
+		wakeup(wait->chan);
+		if (was_asleep)
 			result |= ENGINE_WAKEUP_ASLEEP;
 	}
 
@@ -260,7 +255,7 @@ void intel_engine_disarm_breadcrumbs(struct intel_engine_cs *engine)
 	rbtree_postorder_for_each_entry_safe(wait, n, &b->waiters, node) {
 		GEM_BUG_ON(!intel_engine_signaled(engine, wait->seqno));
 		RB_CLEAR_NODE(&wait->node);
-		wake_up_process(wait->tsk);
+		wakeup(wait->chan);
 	}
 	b->waiters = LINUX_RB_ROOT;
 
@@ -365,8 +360,7 @@ static inline void __intel_breadcrumbs_finish(struct intel_breadcrumbs *b,
 	rb_erase(&wait->node, &b->waiters);
 	RB_CLEAR_NODE(&wait->node);
 
-	if (wait->tsk->state != TASK_RUNNING)
-		wake_up_process(wait->tsk); /* implicit smp_wmb() */
+	wakeup(wait->chan);
 }
 
 static inline void __intel_breadcrumbs_next(struct intel_engine_cs *engine,
@@ -385,7 +379,7 @@ static inline void __intel_breadcrumbs_next(struct intel_engine_cs *engine,
 	 * but also the task of waking up concurrent waiters.
 	 */
 	if (next)
-		wake_up_process(to_wait(next)->tsk);
+		wakeup(to_wait(next)->chan);
 }
 
 static bool __intel_engine_add_wait(struct intel_engine_cs *engine,
@@ -435,7 +429,7 @@ static bool __intel_engine_add_wait(struct intel_engine_cs *engine,
 			 * task->prio) to serve as the bottom-half for this
 			 * group.
 			 */
-			if (wait->tsk->prio > to_wait(parent)->tsk->prio) {
+			if (wait->prio > to_wait(parent)->prio) {
 				p = &parent->rb_right;
 				first = false;
 			} else {
@@ -514,16 +508,12 @@ bool intel_engine_add_wait(struct intel_engine_cs *engine,
 
 static inline bool chain_wakeup(struct rb_node *rb, int priority)
 {
-	return rb && to_wait(rb)->tsk->prio <= priority;
+	return rb && to_wait(rb)->prio <= priority;
 }
 
-static inline int wakeup_priority(struct intel_breadcrumbs *b,
-				  struct task_struct *tsk)
+static inline int wakeup_priority(const struct intel_wait *wait)
 {
-	if (tsk == b->signaler)
-		return INT_MIN;
-	else
-		return tsk->prio;
+	return wait->prio;
 }
 
 static void __intel_engine_remove_wait(struct intel_engine_cs *engine,
@@ -537,7 +527,7 @@ static void __intel_engine_remove_wait(struct intel_engine_cs *engine,
 		goto out;
 
 	if (b->irq_wait == wait) {
-		const int priority = wakeup_priority(b, wait->tsk);
+		const int priority = wakeup_priority(wait);
 		struct rb_node *next;
 
 		/* We are the current bottom-half. Find the next candidate,
@@ -606,28 +596,18 @@ void intel_engine_remove_wait(struct intel_engine_cs *engine,
 	spin_unlock_irq(&b->rb_lock);
 }
 
-static void signaler_set_rtpriority(void)
-{
-	 struct sched_param param = { .sched_priority = 1 };
-
-	 sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
-}
-
 static int intel_breadcrumbs_signaler(void *arg)
 {
 	struct intel_engine_cs *engine = arg;
 	struct intel_breadcrumbs *b = &engine->breadcrumbs;
 	struct i915_request *rq, *n;
 
-	/* Install ourselves with high priority to reduce signalling latency */
-	signaler_set_rtpriority();
-
 	do {
 		bool do_schedule = true;
 		LINUX_LIST_HEAD(list);
 		u32 seqno;
 
-		set_current_state(TASK_INTERRUPTIBLE);
+		tsleep_interlock(b, PCATCH);
 		if (list_empty(&b->signals))
 			goto sleep;
 
@@ -690,8 +670,7 @@ static int intel_breadcrumbs_signaler(void *arg)
 
 		if (unlikely(do_schedule)) {
 			/* Before we sleep, check for a missed seqno */
-			if (current->state & TASK_NORMAL &&
-			    !list_empty(&b->signals) &&
+			if (!list_empty(&b->signals) &&
 			    engine->irq_seqno_barrier &&
 			    test_and_clear_bit(ENGINE_IRQ_BREADCRUMB,
 					       &engine->irq_posted)) {
@@ -706,10 +685,10 @@ sleep:
 			if (unlikely(kthread_should_stop()))
 				break;
 
-			schedule();
+			tsleep(b, PINTERLOCKED | PCATCH, "i915sig", 0);
 		}
 	} while (1);
-	__set_current_state(TASK_RUNNING);
+	wait_chan_disarm();
 
 	return 0;
 }
@@ -764,7 +743,9 @@ bool intel_engine_enable_signaling(struct i915_request *request, bool wakeup)
 		return true;
 
 	GEM_BUG_ON(wait->seqno);
-	wait->tsk = b->signaler;
+	wait->chan = b;
+	wait->prio = INT_MIN;
+	wait->asleep = false;
 	wait->request = request;
 	wait->seqno = seqno;
 

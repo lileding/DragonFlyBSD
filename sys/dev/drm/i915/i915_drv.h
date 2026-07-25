@@ -3829,14 +3829,15 @@ __i915_request_irq_complete(const struct i915_request *rq)
 		 * irq_posted == false but we are still running).
 		 */
 		spin_lock_irq(&b->irq_lock);
-		if (b->irq_wait && b->irq_wait->tsk != current)
-			/* Note that if the bottom-half is changed as we
-			 * are sending the wake-up, the new bottom-half will
-			 * be woken by whomever made the change. We only have
-			 * to worry about when we steal the irq-posted for
-			 * ourself.
+		if (b->irq_wait)
+			/*
+			 * Note that if the bottom-half is changed as we are
+			 * sending the wake-up, the new bottom-half will be
+			 * woken by whomever made the change.  Waking our own
+			 * channel is harmless: it costs one extra pass around
+			 * the caller's loop.
 			 */
-			wake_up_process(b->irq_wait->tsk);
+			wakeup(b->irq_wait->chan);
 		spin_unlock_irq(&b->irq_lock);
 
 		if (__i915_request_completed(rq, seqno))
