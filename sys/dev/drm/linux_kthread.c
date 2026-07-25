@@ -35,12 +35,25 @@
    a kthread is a pure kernel thread without userland context
 */
 
+#define KTHREAD_SHOULD_STOP 1
+#define KTHREAD_SHOULD_PARK 2
+#define KTHREAD_EXITED	    3
+
 static void
 linux_ktfn_wrapper(void *arg)
 {
 	struct task_struct *task = arg;
 
 	task->kt_exitvalue = task->kt_fn(task->kt_fndata);
+
+	/*
+	 * Release the thread's reference before it leaves, so that no thread
+	 * ever exits still pointing at a task_struct.  kthread_stop() owns the
+	 * free and is waiting for this; nothing may touch task afterwards.
+	 */
+	task->dfly_td->td_linux_task = NULL;
+	set_bit(KTHREAD_EXITED, &task->kt_flags);
+	wakeup(task);
 }
 
 struct task_struct *
@@ -76,9 +89,6 @@ kthread_run(int (*lfn)(void *), void *data, const char *namefmt, ...)
 	return task;
 }
 
-#define KTHREAD_SHOULD_STOP 1
-#define KTHREAD_SHOULD_PARK 2
-
 bool
 kthread_should_stop(void)
 {
@@ -88,16 +98,37 @@ kthread_should_stop(void)
 int
 kthread_stop(struct task_struct *ts)
 {
+	int exitvalue;
+
 	set_bit(KTHREAD_SHOULD_STOP, &ts->kt_flags);
 
 	kthread_unpark(ts);
 	wake_up_process(ts);
 
-	/* XXX use a better mechanism to wait for the thread to finish running */
-	tsleep(kthread_stop, 0, "kstop", hz);
-	lwkt_free_thread(ts->dfly_td);
+	/*
+	 * Wait for the thread to run out of its function.  Arming the
+	 * interlock before each test is what keeps the wakeup from the
+	 * wrapper from being missed; the timeout is only a backstop.
+	 */
+	for (;;) {
+		tsleep_interlock(ts, 0);
+		if (test_bit(KTHREAD_EXITED, &ts->kt_flags))
+			break;
+		tsleep(ts, PINTERLOCKED, "kstop", hz);
+	}
+	crit_enter();
+	tsleep_remove(curthread);
+	crit_exit();
 
-	return ts->kt_exitvalue;
+	/*
+	 * The thread frees itself: kthread_alloc() installs kthread_exit() as
+	 * the return handler, and lwkt_exit() hands the thread back to the
+	 * object cache.  Only the task_struct is ours to release.
+	 */
+	exitvalue = ts->kt_exitvalue;
+	kfree(ts);
+
+	return exitvalue;
 }
 
 int
