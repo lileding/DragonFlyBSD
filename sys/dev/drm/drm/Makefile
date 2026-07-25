@@ -110,8 +110,6 @@ SRCS	= \
 	ttm_page_alloc_dma.c
 
 # if CONFIG_AGP is set
-#SRCS+=	drm_agpsupport.c \
-#SRCS+=	ttm_agp_backend.c \
 
 SRCS	+= \
 	opt_ddb.h \

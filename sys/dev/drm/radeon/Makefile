@@ -104,7 +104,6 @@ SRCS+=									\
 
 # CONFIG_MMU_NOTIFIER
 #SRCS+=				\
-#	radeon_mn.c
 
 # async DMA block
 SRCS	+=								\
@@ -130,7 +129,6 @@ SRCS	+=								\
 	vce_v2_0.c
 
 #radeon_ioc32.c
-#--radeon_trace_points.c
 
 SRCS	+=								\
 	opt_acpi.h							\

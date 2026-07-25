@@ -138,7 +138,6 @@ SRCS += i915_query.c \
 SRCS += i915_module.c
 
 # CONFIG_DRM_I915_GVT
-#SRCS += intel_gvt.c
 
 # LPE Audio for VLV and CHT
 SRCS += intel_lpe_audio.c
