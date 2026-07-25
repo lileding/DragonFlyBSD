@@ -181,7 +181,7 @@ long drm_sched_entity_flush(struct drm_sched_entity *entity, long timeout)
 	last_user = cmpxchg(&entity->last_user, current->group_leader, NULL);
 #endif
 	if (/*(!last_user || last_user == current->group_leader) && */
-	    (curthread->td_flags & TDF_EXITING) && fatal_signal_pending(current)) {
+	    (curthread->td_flags & TDF_EXITING) && fatal_signal_pending()) {
 		lockmgr(&entity->rq_lock, LK_EXCLUSIVE);
 		entity->stopped = true;
 		drm_sched_rq_remove_entity(entity->rq, entity);

@@ -246,38 +246,38 @@ wake_up_process(struct task_struct *tsk)
 }
 
 static inline int
-signal_pending(struct task_struct *p)
+signal_pending(void)
 {
-	struct thread *t = p->dfly_td;
+	struct lwp *lp = curthread->td_lwp;
 
-	/* Some kernel threads do not have lwp, t->td_lwp can be NULL */
-	if (t->td_lwp == NULL)
+	/* Some kernel threads have no lwp and cannot take signals. */
+	if (lp == NULL)
 		return 0;
 
-	return CURSIG(t->td_lwp);
+	return CURSIG(lp);
 }
 
 static inline int
-fatal_signal_pending(struct task_struct *p)
+fatal_signal_pending(void)
 {
-	struct thread *t = p->dfly_td;
+	struct lwp *lp = curthread->td_lwp;
 	sigset_t pending_set;
 
-	/* Some kernel threads do not have lwp, t->td_lwp can be NULL */
-	if (t->td_lwp == NULL)
+	/* Some kernel threads have no lwp and cannot take signals. */
+	if (lp == NULL)
 		return 0;
 
-	pending_set = lwp_sigpend(t->td_lwp);
+	pending_set = lwp_sigpend(lp);
 	return SIGISMEMBER(pending_set, SIGKILL);
 }
 
 static inline int
-signal_pending_state(long state, struct task_struct *p)
+signal_pending_state(long state)
 {
 	if (state & TASK_INTERRUPTIBLE)
-		return (signal_pending(p));
+		return (signal_pending());
 	else
-		return (fatal_signal_pending(p));
+		return (fatal_signal_pending());
 }
 
 /* Explicit rescheduling in order to reduce latency */

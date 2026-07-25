@@ -157,7 +157,7 @@ static ssize_t auxdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		uint8_t buf[DP_AUX_MAX_PAYLOAD_BYTES];
 		ssize_t todo = min(iov_iter_count(to), sizeof(buf));
 
-		if (signal_pending(current)) {
+		if (signal_pending()) {
 			res = -ERESTARTSYS;
 			break;
 		}
@@ -199,7 +199,7 @@ static ssize_t auxdev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		uint8_t buf[DP_AUX_MAX_PAYLOAD_BYTES];
 		ssize_t todo = min(iov_iter_count(from), sizeof(buf));
 
-		if (signal_pending(current)) {
+		if (signal_pending()) {
 			res = -ERESTARTSYS;
 			break;
 		}

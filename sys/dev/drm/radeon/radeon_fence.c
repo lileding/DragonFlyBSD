@@ -1057,7 +1057,8 @@ static inline bool radeon_test_signaled(struct radeon_fence *fence)
 
 struct radeon_wait_cb {
 	struct dma_fence_cb base;
-	struct task_struct *task;
+	/* Wait channel of the thread blocked on this callback. */
+	void *waiter;
 };
 
 static void
@@ -1066,7 +1067,7 @@ radeon_fence_wait_cb(struct dma_fence *fence, struct dma_fence_cb *cb)
 	struct radeon_wait_cb *wait =
 		container_of(cb, struct radeon_wait_cb, base);
 
-	wake_up_process(wait->task);
+	wakeup(wait->waiter);
 }
 
 static signed long radeon_fence_default_wait(struct dma_fence *f, bool intr,
@@ -1075,22 +1076,21 @@ static signed long radeon_fence_default_wait(struct dma_fence *f, bool intr,
 	struct radeon_fence *fence = to_radeon_fence(f);
 	struct radeon_device *rdev = fence->rdev;
 	struct radeon_wait_cb cb;
+	int r;
 
-	cb.task = current;
+	cb.waiter = &cb;
 
 	if (dma_fence_add_callback(f, &cb.base, radeon_fence_wait_cb))
 		return t;
 
 	while (t > 0) {
-		if (intr)
-			set_current_state(TASK_INTERRUPTIBLE);
-		else
-			set_current_state(TASK_UNINTERRUPTIBLE);
-
 		/*
-		 * radeon_test_signaled must be called after
-		 * set_current_state to prevent a race with wake_up_process
+		 * The interlock must be established before
+		 * radeon_test_signaled so that a callback firing between the
+		 * test and the sleep cannot be lost.
 		 */
+		tsleep_interlock(&cb, intr ? PCATCH : 0);
+
 		if (radeon_test_signaled(fence))
 			break;
 
@@ -1099,13 +1099,27 @@ static signed long radeon_fence_default_wait(struct dma_fence *f, bool intr,
 			break;
 		}
 
-		t = schedule_timeout(t);
+		if (t >= INT_MAX) {
+			/* Indefinite wait: no deadline to account for. */
+			r = tsleep(&cb, PINTERLOCKED | (intr ? PCATCH : 0),
+				   "radfence", 0);
+		} else {
+			int start = ticks;
 
-		if (t > 0 && intr && signal_pending(current))
+			r = tsleep(&cb, PINTERLOCKED | (intr ? PCATCH : 0),
+				   "radfence", (int)t);
+			t -= (signed long)(ticks - start);
+			if (t < 0)
+				t = 0;
+		}
+
+		if (t > 0 && (r == EINTR || r == ERESTART))
 			t = -ERESTARTSYS;
 	}
 
-	__set_current_state(TASK_RUNNING);
+	crit_enter();
+	tsleep_remove(curthread);
+	crit_exit();
 	dma_fence_remove_callback(f, &cb.base);
 
 	return t;

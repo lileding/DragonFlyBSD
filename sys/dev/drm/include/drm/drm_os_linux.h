@@ -47,26 +47,30 @@
 #define DRM_WAIT_ON( ret, queue, timeout, condition )		\
 do {								\
 	wait_queue_entry_t entry = {				\
-		.private	= current,			\
-		.func		= default_wake_function,	\
+		.func		= wait_event_wake_function,	\
 	};							\
 	unsigned long end = jiffies + (timeout);		\
+	int __err;						\
 	add_wait_queue(&(queue), &entry);			\
 								\
 	for (;;) {						\
-		__set_current_state(TASK_INTERRUPTIBLE);	\
+		tsleep_interlock(&entry, PCATCH);		\
 		if (condition)					\
 			break;					\
 		if (time_after_eq(jiffies, end)) {		\
 			ret = -EBUSY;				\
 			break;					\
 		}						\
-		schedule_timeout((HZ/100 > 1) ? HZ/100 : 1);	\
-		if (signal_pending(current)) {			\
+		__err = tsleep(&entry, PINTERLOCKED | PCATCH,	\
+			       "drmwait",			\
+			       (HZ/100 > 1) ? HZ/100 : 1);	\
+		if (__err == EINTR || __err == ERESTART) {	\
 			ret = -EINTR;				\
 			break;					\
 		}						\
 	}							\
-	__set_current_state(TASK_RUNNING);			\
+	crit_enter();						\
+	tsleep_remove(curthread);				\
+	crit_exit();						\
 	remove_wait_queue(&(queue), &entry);			\
 } while (0)

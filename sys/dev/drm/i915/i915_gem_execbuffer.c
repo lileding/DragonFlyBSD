@@ -1689,7 +1689,7 @@ static noinline int eb_relocate_slow(struct i915_execbuffer *eb)
 	int err = 0;
 
 repeat:
-	if (signal_pending(current)) {
+	if (signal_pending()) {
 		err = -ERESTARTSYS;
 		goto out;
 	}

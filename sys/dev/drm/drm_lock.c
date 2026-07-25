@@ -207,7 +207,7 @@ int drm_legacy_lock(struct drm_device *dev, void *data,
 		mutex_unlock(&drm_global_mutex);
 		schedule();
 		mutex_lock(&drm_global_mutex);
-		if (signal_pending(current)) {
+		if (signal_pending()) {
 			ret = -EINTR;
 			break;
 		}

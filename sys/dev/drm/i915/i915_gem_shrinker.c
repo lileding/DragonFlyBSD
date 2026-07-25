@@ -408,7 +408,7 @@ shrinker_lock_uninterruptible(struct drm_i915_private *i915, bool *unlock,
 			break;
 
 		schedule_timeout_killable(1);
-		if (fatal_signal_pending(current))
+		if (fatal_signal_pending())
 			return false;
 
 		if (time_after(jiffies, timeout)) {

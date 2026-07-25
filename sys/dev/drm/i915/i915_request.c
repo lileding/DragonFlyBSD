@@ -1235,7 +1235,7 @@ static bool __i915_spin_request(const struct i915_request *rq,
 		if (READ_ONCE(engine->breadcrumbs.irq_count) != irq)
 			break;
 
-		if (signal_pending_state(state, current))
+		if (signal_pending_state(state))
 			break;
 
 		if (busywait_stop(timeout_us, cpu))
@@ -1321,7 +1321,7 @@ restart:
 		    __i915_wait_request_check_and_reset(rq))
 			continue;
 
-		if (signal_pending_state(state, current)) {
+		if (signal_pending_state(state)) {
 			timeout = -ERESTARTSYS;
 			goto complete;
 		}
@@ -1354,7 +1354,7 @@ restart:
 		__i915_wait_request_check_and_reset(rq);
 
 	for (;;) {
-		if (signal_pending_state(state, current)) {
+		if (signal_pending_state(state)) {
 			timeout = -ERESTARTSYS;
 			break;
 		}
