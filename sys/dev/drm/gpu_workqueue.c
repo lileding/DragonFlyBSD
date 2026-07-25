@@ -73,9 +73,16 @@ process_all_work(struct workqueue_worker *worker)
 		STAILQ_REMOVE_HEAD(&worker->ws_list_head, ws_entries);
 		work->on_queue = false;
 
-		/* A work shouldn't be executed concurrently on a single cpu */
-		if (work->running)
-			continue;
+		/*
+		 * Already running on another worker.  Put it back rather than
+		 * dropping it; it was taken off the list above.
+		 */
+		if (work->running) {
+			STAILQ_INSERT_TAIL(&worker->ws_list_head, work,
+					   ws_entries);
+			work->on_queue = true;
+			break;
+		}
 
 		/* Do not run canceled works */
 		if (work->canceled) {
@@ -105,10 +112,15 @@ wq_worker_thread(void *arg)
 	struct workqueue_worker *worker = arg;
 
 	lockmgr(&worker->worker_lock, LK_EXCLUSIVE);
-	while (1) {
+	while (worker->stop == 0) {
 		process_all_work(worker);
+		if (worker->stop)
+			break;
+		wakeup(&worker->ws_list_head);
 		lksleep(worker, &worker->worker_lock, 0, "wqidle", 0);
 	}
+	worker->worker_thread = NULL;
+	wakeup(&worker->worker_thread);
 	lockmgr(&worker->worker_lock, LK_RELEASE);
 }
 
@@ -153,7 +165,7 @@ _delayed_work_fn(void *arg)
 {
 	struct delayed_work *dw = arg;
 
-	queue_work(system_wq, &dw->work);
+	queue_work(dw->wq != NULL ? dw->wq : system_wq, &dw->work);
 }
 
 int
@@ -161,6 +173,8 @@ queue_delayed_work(struct workqueue_struct *wq, struct delayed_work *work,
     unsigned long delay)
 {
 	int pending = work->work.on_queue; // XXX: running too ?
+
+	work->wq = wq;
 	if (delay != 0) {
 		callout_reset(&work->timer, delay, _delayed_work_fn, work);
 	} else {
@@ -243,13 +257,23 @@ _create_workqueue_common(const char *name, int flags)
 void
 destroy_workqueue(struct workqueue_struct *wq)
 {
+	struct workqueue_worker *worker;
+
 	drain_workqueue(wq);
-//	wq->is_draining = true;
-#if 0	/* XXX TODO */
-	kill_all_threads;
-	kfree(wq->wq_threads);
+
+	for (int i = 0; i < wq->num_workers; i++) {
+		worker = &(*wq->workers)[i];
+		lockmgr(&worker->worker_lock, LK_EXCLUSIVE);
+		worker->stop = 1;
+		wakeup_one(worker);
+		while (worker->worker_thread != NULL) {
+			lksleep(&worker->worker_thread, &worker->worker_lock,
+				0, "wqexit", 0);
+		}
+		lockmgr(&worker->worker_lock, LK_RELEASE);
+	}
+	kfree(wq->workers);
 	kfree(wq);
-#endif
 }
 
 SYSINIT(linux_workqueue_init, SI_SUB_DRIVERS, SI_ORDER_MIDDLE, init_workqueues, NULL);
@@ -275,8 +299,14 @@ drain_workqueue(struct workqueue_struct *wq)
 
 		lockmgr(&worker->worker_lock, LK_EXCLUSIVE);
 		while (!STAILQ_EMPTY(&worker->ws_list_head)) {
-		/* XXX: introduces latency */
-			tsleep(&drain_workqueue, 0, "wkdrain", 1);
+			/*
+			 * Sleep on the list and let go of the lock: the worker
+			 * needs it to make progress, and it wakes us once its
+			 * queue runs dry.
+			 */
+			wakeup_one(worker);
+			lksleep(&worker->ws_list_head, &worker->worker_lock,
+				0, "wkdrain", 0);
 		}
 		lockmgr(&worker->worker_lock, LK_RELEASE);
 	}

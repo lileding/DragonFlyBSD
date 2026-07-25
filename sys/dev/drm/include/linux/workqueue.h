@@ -52,6 +52,7 @@ struct work_struct {
 };
 
 struct workqueue_worker {
+	int	stop;
 	STAILQ_HEAD(ws_list, work_struct) ws_list_head;
 	struct thread *worker_thread;
 	struct lock worker_lock;
@@ -66,6 +67,8 @@ struct workqueue_struct {
 struct delayed_work {
 	struct work_struct	work;
 	struct callout		timer;
+	/* Queue this was submitted to; the timer hands it back there. */
+	struct workqueue_struct	*wq;
 };
 
 static inline struct delayed_work *

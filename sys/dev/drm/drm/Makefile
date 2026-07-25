@@ -96,7 +96,7 @@ SRCS	= \
 	linux_sync_file.c \
 	linux_vmalloc.c \
 	linux_wait.c \
-	linux_workqueue.c \
+	gpu_workqueue.c \
 	linux_wwmutex.c \
 	ttm_memory.c \
 	ttm_tt.c \
