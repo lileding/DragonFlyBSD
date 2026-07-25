@@ -65,9 +65,11 @@ SRCS	= \
 	drm_vblank.c \
 	drm_vm.c \
 	drm_vma_manager.c \
+	gpu_completion.c \
+	gpu_hrtimer.c \
+	gpu_tasklet.c \
 	linux_async.c \
 	linux_compat.c \
-	linux_completion.c \
 	linux_dma.c \
 	linux_dma-buf.c \
 	linux_dmi.c \
@@ -75,7 +77,6 @@ SRCS	= \
 	linux_fence-array.c \
 	linux_fence-chain.c \
 	linux_hdmi.c \
-	linux_hrtimer.c \
 	linux_i2c.c \
 	linux_interval_tree.c \
 	linux_iomapping.c \
@@ -86,14 +87,13 @@ SRCS	= \
 	linux_pm_qos.c \
 	linux_printf.c \
 	linux_radix.c \
-	linux_rcu.c \
+	gpu_reclaim.c \
 	linux_reservation.c \
 	linux_scatterlist.c \
 	linux_sched.c \
 	linux_shmem.c \
 	linux_sort.c \
 	linux_sync_file.c \
-	linux_tasklet.c \
 	linux_vmalloc.c \
 	linux_wait.c \
 	linux_workqueue.c \

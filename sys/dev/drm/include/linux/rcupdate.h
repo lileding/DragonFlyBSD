@@ -40,19 +40,27 @@
 #include <linux/ktime.h>
 
 #include <asm/barrier.h>
+#include <sys/thread.h>
 
 #include <linux/rcutree.h>
 
+extern struct lwkt_token gpu_reclaim_token;
+
+/*
+ * Readers hold the reclaim token shared.  Deferred frees wait for one
+ * exclusive acquisition, so an object stays alive for as long as any reader
+ * holds it.  A reader must not block: a token is released across a sleep.
+ */
 static inline void
 rcu_read_lock(void)
 {
-	preempt_disable();
+	lwkt_gettoken_shared(&gpu_reclaim_token);
 }
 
 static inline void
 rcu_read_unlock(void)
 {
-	preempt_enable();
+	lwkt_reltoken(&gpu_reclaim_token);
 }
 
 #define rcu_dereference_protected(p, condition)	\
@@ -91,8 +99,10 @@ extern void call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *));
 
 #define rcu_pointer_handoff(p)	(p)
 
-#define synchronize_rcu()
-#define cond_synchronize_rcu(x)  cpu_mfence()
+/* Wait out every reader currently holding the reclaim token. */
+void synchronize_rcu(void);
+
+#define cond_synchronize_rcu(x)		synchronize_rcu()
 #define get_state_synchronize_rcu()	0
 
 #endif  /* _LINUX_RCUPDATE_H_ */
