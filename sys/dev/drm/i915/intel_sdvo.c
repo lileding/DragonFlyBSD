@@ -2188,25 +2188,12 @@ intel_sdvo_connector_atomic_set_property(struct drm_connector *connector,
 static int
 intel_sdvo_connector_register(struct drm_connector *connector)
 {
-	struct intel_sdvo *sdvo = intel_attached_sdvo(connector);
-	int ret;
-
-	ret = intel_connector_register(connector);
-	if (ret)
-		return ret;
-
-	return sysfs_create_link(&connector->kdev->kobj,
-				 &sdvo->ddc.dev.kobj,
-				 sdvo->ddc.dev.kobj.name);
+	return intel_connector_register(connector);
 }
 
 static void
 intel_sdvo_connector_unregister(struct drm_connector *connector)
 {
-	struct intel_sdvo *sdvo = intel_attached_sdvo(connector);
-
-	sysfs_remove_link(&connector->kdev->kobj,
-			  sdvo->ddc.dev.kobj.name);
 	intel_connector_unregister(connector);
 }
 

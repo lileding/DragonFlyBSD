@@ -28,7 +28,6 @@
 #define _LINUX_DMI_H_
 
 #include <linux/list.h>
-#include <linux/kobject.h>
 #include <linux/mod_devicetable.h>
 
 enum dmi_field {

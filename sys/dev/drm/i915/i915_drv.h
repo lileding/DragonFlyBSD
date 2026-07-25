@@ -1370,9 +1370,6 @@ struct i915_oa_config {
 	const struct i915_oa_reg *flex_regs;
 	u32 flex_regs_len;
 
-	struct attribute_group sysfs_metric;
-	struct attribute *attrs[2];
-	struct device_attribute sysfs_metric_id;
 
 	atomic_t ref_count;
 };
@@ -3427,8 +3424,6 @@ extern int i915_save_state(struct drm_i915_private *dev_priv);
 extern int i915_restore_state(struct drm_i915_private *dev_priv);
 
 /* i915_sysfs.c */
-void i915_setup_sysfs(struct drm_i915_private *dev_priv);
-void i915_teardown_sysfs(struct drm_i915_private *dev_priv);
 
 /* intel_lpe_audio.c */
 int  intel_lpe_audio_init(struct drm_i915_private *dev_priv);

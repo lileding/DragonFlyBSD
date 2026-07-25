@@ -41,6 +41,7 @@ RB_GENERATE(linux_root, rb_node, __entry, panic_cmp);
 
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/device.h>
 
 void *
 kmemdup(const void *src, size_t len, gfp_t gfp)
@@ -102,4 +103,22 @@ si_meminfo(struct sysinfo *si)
         si->totalram = physmem;
         si->totalhigh = 0;
         si->mem_unit = PAGE_SIZE;
+}
+
+/*
+ * Give a device a name.  Only the drm minors and connectors use this, to label
+ * the /dev/dri nodes they create.
+ */
+int
+dev_set_name(struct device *dev, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (dev->name != NULL)
+		kfree(dev->name);
+	va_start(ap, fmt);
+	dev->name = kvasprintf(M_WAITOK, fmt, ap);
+	va_end(ap);
+
+	return 0;
 }

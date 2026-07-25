@@ -4,9 +4,9 @@
 struct drm_device;
 struct device;
 
-int drm_class_device_register(struct device *dev);
-void drm_class_device_unregister(struct device *dev);
 
 void drm_sysfs_hotplug_event(struct drm_device *dev);
+void drm_sysfs_driver_event(struct drm_device *dev, const char *event,
+    const char *data);
 
 #endif

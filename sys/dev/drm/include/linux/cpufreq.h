@@ -29,8 +29,6 @@
 
 #include <linux/cpumask.h>
 #include <linux/completion.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
 #include <linux/notifier.h>
 #include <linux/spinlock.h>
 

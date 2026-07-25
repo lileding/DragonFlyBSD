@@ -28,7 +28,6 @@
 #define	_LINUX_DEVICE_H_
 
 #include <linux/ioport.h>
-#include <linux/kobject.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/compiler.h>
@@ -44,7 +43,8 @@
 struct device {
 	struct device	*parent;
 
-	struct kobject kobj;
+	/* Set by dev_set_name(); "card0", "renderD128" and friends. */
+	char		*name;
 
 	device_t	bsddev;
 
@@ -87,7 +87,7 @@ dev_printk(const char *level, const struct device *dev, const char *fmt, ...)
 static inline const char *
 dev_name(const struct device *dev)
 {
-	return("dev_name");
+	return (dev->name != NULL ? dev->name : "unnamed");
 }
 
 static inline void
@@ -102,11 +102,7 @@ dev_get_drvdata(const struct device *dev)
 	return dev->driver_data;
 }
 
-static inline int
-dev_set_name(struct device *dev, const char *name, ...)
-{
-	return 0;
-}
+int dev_set_name(struct device *dev, const char *fmt, ...) __printf(2, 3);
 
 #define dev_pm_set_driver_flags(dev, flags)
 

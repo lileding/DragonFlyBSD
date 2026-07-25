@@ -10,7 +10,6 @@ SRCS =	i915_drv.c \
 	i915_suspend.c \
 	i915_syncmap.c \
 	i915_sw_fence.c \
-	i915_sysfs.c \
 	intel_csr.c \
 	intel_device_info.c \
 	intel_pm.c \

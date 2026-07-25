@@ -1419,8 +1419,8 @@ static void ivybridge_parity_work(struct work_struct *work)
 		parity_event[4] = kasprintf(GFP_KERNEL, "SLICE=%d", slice);
 		parity_event[5] = NULL;
 
-		kobject_uevent_env(&dev_priv->drm.primary->kdev->kobj,
-				   KOBJ_CHANGE, parity_event);
+		drm_sysfs_driver_event(&dev_priv->drm, "L3_PARITY",
+		    parity_event[1]);
 
 		DRM_DEBUG("Parity error: Slice = %d, Row = %d, Bank = %d, Sub bank = %d.\n",
 			  slice, row, bank, subbank);
@@ -3165,16 +3165,12 @@ static void i915_reset_device(struct drm_i915_private *dev_priv,
 			      const char *reason)
 {
 	struct i915_gpu_error *error = &dev_priv->gpu_error;
-	struct kobject *kobj = &dev_priv->drm.primary->kdev->kobj;
-	char *error_event[] = { I915_ERROR_UEVENT "=1", NULL };
-	char *reset_event[] = { I915_RESET_UEVENT "=1", NULL };
-	char *reset_done_event[] = { I915_ERROR_UEVENT "=0", NULL };
 	struct wedge_me w;
 
-	kobject_uevent_env(kobj, KOBJ_CHANGE, error_event);
+	drm_sysfs_driver_event(&dev_priv->drm, "ERROR", "ERROR=1");
 
 	DRM_DEBUG_DRIVER("resetting chip\n");
-	kobject_uevent_env(kobj, KOBJ_CHANGE, reset_event);
+	drm_sysfs_driver_event(&dev_priv->drm, "RESET", "RESET=1");
 
 	/* Use a watchdog to ensure that our reset completes */
 	i915_wedge_on_timeout(&w, dev_priv, 5*HZ) {
@@ -3208,7 +3204,7 @@ static void i915_reset_device(struct drm_i915_private *dev_priv,
 	}
 
 	if (!test_bit(I915_WEDGED, &error->flags))
-		kobject_uevent_env(kobj, KOBJ_CHANGE, reset_done_event);
+		drm_sysfs_driver_event(&dev_priv->drm, "ERROR", "ERROR=0");
 }
 
 void i915_clear_error_registers(struct drm_i915_private *dev_priv)

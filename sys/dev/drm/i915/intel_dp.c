@@ -5248,7 +5248,7 @@ intel_dp_connector_register(struct drm_connector *connector)
 	i915_debugfs_connector_add(connector);
 
 	DRM_DEBUG_KMS("registering %s bus for %s\n",
-		      intel_dp->aux.name, connector->kdev->kobj.name);
+		      intel_dp->aux.name, connector->kdev->name);
 
 	intel_dp->aux.dev = connector->kdev;
 	ret = drm_dp_aux_register(&intel_dp->aux);

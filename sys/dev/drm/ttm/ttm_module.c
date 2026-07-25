@@ -29,39 +29,16 @@
  * 	    Jerome Glisse
  */
 #include <linux/module.h>
-#include <linux/device.h>
 #include <linux/sched.h>
 #include <drm/ttm/ttm_module.h>
-#include <drm/drm_sysfs.h>
-
-static struct device ttm_drm_class_device = {
-#if 0
-	.type = &ttm_drm_class_type,
-	.release = &ttm_drm_class_device_release
-#endif
-};
-
-struct kobject *ttm_get_kobj(void)
-{
-	struct kobject *kobj = &ttm_drm_class_device.kobj;
-	BUG_ON(kobj == NULL);
-	return kobj;
-}
 
 static int __init ttm_init(void)
 {
-	int ret;
-
-	ret = dev_set_name(&ttm_drm_class_device, "ttm");
-	if (unlikely(ret != 0))
-		return ret;
-
-	return drm_class_device_register(&ttm_drm_class_device);
+	return 0;
 }
 
 static void __exit ttm_exit(void)
 {
-	drm_class_device_unregister(&ttm_drm_class_device);
 }
 
 module_init(ttm_init);

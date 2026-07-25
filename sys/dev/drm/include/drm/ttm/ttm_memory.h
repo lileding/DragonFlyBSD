@@ -33,7 +33,6 @@
 #include <linux/bug.h>
 #include <linux/wait.h>
 #include <linux/errno.h>
-#include <linux/kobject.h>
 #include <linux/mm.h>
 #include "ttm_bo_api.h"
 
@@ -64,7 +63,6 @@
 #define TTM_MEM_MAX_ZONES 2
 struct ttm_mem_zone;
 struct ttm_mem_global {
-	struct kobject kobj;
 	struct ttm_bo_global *bo_glob;
 	struct workqueue_struct *swap_queue;
 	struct work_struct work;

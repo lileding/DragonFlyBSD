@@ -413,7 +413,6 @@ struct ttm_bo_global {
 	 * Constant after init.
 	 */
 
-	struct kobject kobj;
 	struct ttm_mem_global *mem_glob;
 	struct page *dummy_read_page;
 	struct lock device_list_mutex;

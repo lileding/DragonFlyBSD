@@ -80,7 +80,6 @@ SRCS	= \
 	linux_interval_tree.c \
 	linux_iomapping.c \
 	linux_irq.c \
-	linux_kobject.c \
 	linux_kthread.c \
 	linux_list_sort.c \
 	linux_pci.c \

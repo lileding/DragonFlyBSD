@@ -27,7 +27,6 @@
 #ifndef _LINUX_CDEV_H_
 #define _LINUX_CDEV_H_
 
-#include <linux/kobject.h>
 #include <linux/list.h>
 
 #endif	/* _LINUX_CDEV_H_ */

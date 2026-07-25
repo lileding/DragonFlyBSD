@@ -40,7 +40,6 @@
 #define TTM_MEMORY_ALLOC_RETRIES 4
 
 struct ttm_mem_zone {
-	struct kobject kobj;
 	struct ttm_mem_global *glob;
 	const char *name;
 	uint64_t zone_mem;
@@ -50,133 +49,16 @@ struct ttm_mem_zone {
 	uint64_t used_mem;
 };
 
-static struct attribute ttm_mem_sys = {
-	.name = "zone_memory",
-	.mode = S_IRUGO
-};
-static struct attribute ttm_mem_emer = {
-	.name = "emergency_memory",
-	.mode = S_IRUGO | S_IWUSR
-};
-static struct attribute ttm_mem_max = {
-	.name = "available_memory",
-	.mode = S_IRUGO | S_IWUSR
-};
-static struct attribute ttm_mem_swap = {
-	.name = "swap_limit",
-	.mode = S_IRUGO | S_IWUSR
-};
-static struct attribute ttm_mem_used = {
-	.name = "used_memory",
-	.mode = S_IRUGO
-};
-
-static void ttm_mem_zone_kobj_release(struct kobject *kobj)
+static void ttm_mem_zone_release(struct ttm_mem_zone *zone)
 {
-	struct ttm_mem_zone *zone =
-		container_of(kobj, struct ttm_mem_zone, kobj);
-
 	pr_info("Zone %7s: Used memory at exit: %llu kiB\n",
 		zone->name, (unsigned long long)zone->used_mem >> 10);
 	kfree(zone);
 }
 
-static ssize_t ttm_mem_zone_show(struct kobject *kobj,
-				 struct attribute *attr,
-				 char *buffer)
-{
-	struct ttm_mem_zone *zone =
-		container_of(kobj, struct ttm_mem_zone, kobj);
-	uint64_t val = 0;
-
-	lockmgr(&zone->glob->lock, LK_EXCLUSIVE);
-	if (attr == &ttm_mem_sys)
-		val = zone->zone_mem;
-	else if (attr == &ttm_mem_emer)
-		val = zone->emer_mem;
-	else if (attr == &ttm_mem_max)
-		val = zone->max_mem;
-	else if (attr == &ttm_mem_swap)
-		val = zone->swap_limit;
-	else if (attr == &ttm_mem_used)
-		val = zone->used_mem;
-	lockmgr(&zone->glob->lock, LK_RELEASE);
-
-	return ksnprintf(buffer, PAGE_SIZE, "%llu\n",
-			(unsigned long long) val >> 10);
-}
-
 static void ttm_check_swapping(struct ttm_mem_global *glob);
 
-static ssize_t ttm_mem_zone_store(struct kobject *kobj,
-				  struct attribute *attr,
-				  const char *buffer,
-				  size_t size)
-{
-	struct ttm_mem_zone *zone =
-		container_of(kobj, struct ttm_mem_zone, kobj);
-	int chars;
-	unsigned long val;
-	uint64_t val64;
 
-	chars = ksscanf(buffer, "%lu", &val);
-	if (chars == 0)
-		return size;
-
-	val64 = val;
-	val64 <<= 10;
-
-	lockmgr(&zone->glob->lock, LK_EXCLUSIVE);
-	if (val64 > zone->zone_mem)
-		val64 = zone->zone_mem;
-	if (attr == &ttm_mem_emer) {
-		zone->emer_mem = val64;
-		if (zone->max_mem > val64)
-			zone->max_mem = val64;
-	} else if (attr == &ttm_mem_max) {
-		zone->max_mem = val64;
-		if (zone->emer_mem < val64)
-			zone->emer_mem = val64;
-	} else if (attr == &ttm_mem_swap)
-		zone->swap_limit = val64;
-	lockmgr(&zone->glob->lock, LK_RELEASE);
-
-	ttm_check_swapping(zone->glob);
-
-	return size;
-}
-
-static struct attribute *ttm_mem_zone_attrs[] = {
-	&ttm_mem_sys,
-	&ttm_mem_emer,
-	&ttm_mem_max,
-	&ttm_mem_swap,
-	&ttm_mem_used,
-	NULL
-};
-
-static const struct sysfs_ops ttm_mem_zone_ops = {
-	.show = &ttm_mem_zone_show,
-	.store = &ttm_mem_zone_store
-};
-
-static struct kobj_type ttm_mem_zone_kobj_type = {
-	.release = &ttm_mem_zone_kobj_release,
-	.sysfs_ops = &ttm_mem_zone_ops,
-	.default_attrs = ttm_mem_zone_attrs,
-};
-
-static void ttm_mem_global_kobj_release(struct kobject *kobj)
-{
-	struct ttm_mem_global *glob =
-		container_of(kobj, struct ttm_mem_global, kobj);
-
-	kfree(glob);
-}
-
-static struct kobj_type ttm_mem_glob_kobj_type = {
-	.release = &ttm_mem_global_kobj_release,
-};
 
 static bool ttm_zones_above_swap_target(struct ttm_mem_global *glob,
 					bool from_wq, uint64_t extra)
@@ -244,7 +126,6 @@ static int ttm_mem_init_kernel_zone(struct ttm_mem_global *glob,
     uint64_t mem)
 {
 	struct ttm_mem_zone *zone = kzalloc(sizeof(*zone), GFP_KERNEL);
-	int ret;
 
 	zone->name = "kernel";
 	zone->zone_mem = mem;
@@ -254,12 +135,6 @@ static int ttm_mem_init_kernel_zone(struct ttm_mem_global *glob,
 	zone->used_mem = 0;
 	zone->glob = glob;
 	glob->zone_kernel = zone;
-	ret = kobject_init_and_add(
-		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, zone->name);
-	if (unlikely(ret != 0)) {
-		kobject_put(&zone->kobj);
-		return ret;
-	}
 	glob->zones[glob->num_zones++] = zone;
 	return 0;
 }
@@ -270,7 +145,6 @@ static int ttm_mem_init_dma32_zone(struct ttm_mem_global *glob,
     uint64_t mem)
 {
 	struct ttm_mem_zone *zone = kzalloc(sizeof(*zone), GFP_KERNEL);
-	int ret;
 
 	/**
 	 * No special dma32 zone needed.
@@ -297,12 +171,6 @@ static int ttm_mem_init_dma32_zone(struct ttm_mem_global *glob,
 	zone->used_mem = 0;
 	zone->glob = glob;
 	glob->zone_dma32 = zone;
-	ret = kobject_init_and_add(
-		&zone->kobj, &ttm_mem_zone_kobj_type, &glob->kobj, zone->name);
-	if (unlikely(ret != 0)) {
-		kobject_put(&zone->kobj);
-		return ret;
-	}
 	glob->zones[glob->num_zones++] = zone;
 	return 0;
 }
@@ -318,12 +186,6 @@ int ttm_mem_global_init(struct ttm_mem_global *glob)
 	lockinit(&glob->lock, "ttmemglob", 0, 0);
 	glob->swap_queue = create_singlethread_workqueue("ttm_swap");
 	INIT_WORK(&glob->work, ttm_shrink_work);
-	ret = kobject_init_and_add(
-		&glob->kobj, &ttm_mem_glob_kobj_type, ttm_get_kobj(), "memory_accounting");
-	if (unlikely(ret != 0)) {
-		kobject_put(&glob->kobj);
-		return ret;
-	}
 
 	/*
 	 * TTM accounts page-granular TT allocations, not only the small
@@ -377,11 +239,9 @@ void ttm_mem_global_release(struct ttm_mem_global *glob)
 	glob->swap_queue = NULL;
 	for (i = 0; i < glob->num_zones; ++i) {
 		zone = glob->zones[i];
-		kobject_del(&zone->kobj);
-		kobject_put(&zone->kobj);
-			}
-	kobject_del(&glob->kobj);
-	kobject_put(&glob->kobj);
+		ttm_mem_zone_release(zone);
+	}
+	kfree(glob);
 }
 EXPORT_SYMBOL(ttm_mem_global_release);
 

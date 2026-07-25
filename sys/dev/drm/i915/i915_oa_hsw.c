@@ -26,7 +26,6 @@
  *
  */
 
-#include <linux/sysfs.h>
 
 #include "i915_drv.h"
 #include "i915_oa_hsw.h"

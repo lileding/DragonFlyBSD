@@ -35,7 +35,6 @@
 #include <linux/list.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
-#include <linux/kobject.h>
 #include <linux/atomic.h>
 #include <linux/device.h>
 #include <linux/io.h>

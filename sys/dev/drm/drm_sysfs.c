@@ -30,29 +30,21 @@
 #include <drm/drmP.h>
 #include "drm_internal.h"
 
-int drm_sysfs_connector_add(struct drm_connector *connector)
+/*
+ * Post a driver event to userland.  kobject_uevent_env() used to swallow
+ * these; devctl is what DragonFly listens on.
+ */
+void
+drm_sysfs_driver_event(struct drm_device *dev, const char *event,
+    const char *data)
 {
-	struct drm_device *dev = connector->dev;
+	char subsystem[16];
 
-	if (connector->kdev)
-		return 0;
+	if (dev == NULL || dev->primary == NULL)
+		return;
 
-	/* Linux uses device_create_with_groups() here */
-	connector->kdev = kzalloc(sizeof(struct device), GFP_KERNEL);
-	connector->kdev->kobj.name = kasprintf(GFP_KERNEL, "card%d-%s",
-					       dev->primary->index,
-					       connector->name);
-	DRM_DEBUG("adding \"%s\" to sysfs\n", connector->name);
-
-	return 0;
-}
-
-void drm_sysfs_connector_remove(struct drm_connector *connector)
-{
-	DRM_DEBUG("removing \"%s\" from sysfs\n", connector->name);
-
-	if (connector->kdev)
-		kfree(connector->kdev);
+	ksnprintf(subsystem, sizeof(subsystem), "card%d", dev->primary->index);
+	devctl_notify("DRM", subsystem, event, data);
 }
 
 void drm_sysfs_hotplug_event(struct drm_device *dev)
@@ -80,23 +72,6 @@ void drm_sysfs_hotplug_event(struct drm_device *dev)
 	ksnprintf(data, sizeof(data), "HOTPLUG=1 card=%d render=%d",
 	    card_index, render_index);
 	devctl_notify("DRM", subsystem, "HOTPLUG", data);
-}
-
-int drm_class_device_register(struct device *dev)
-{
-	return 0;
-}
-
-/**
- * drm_class_device_unregister - unregister device with the DRM sysfs class
- * @dev: device to unregister
- *
- * Unregisters a &struct device from the DRM sysfs class. Essentially only used
- * by ttm to have a place for its global settings. Drivers should never use
- * this.
- */
-void drm_class_device_unregister(struct device *dev)
-{
 }
 
 extern struct dev_ops drm_cdevsw;
