@@ -39,6 +39,7 @@ typedef int (*wait_queue_func_t)(wait_queue_entry_t *wait, unsigned mode, int fl
 
 int default_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags, void *key);
 int autoremove_wake_function(wait_queue_entry_t *wait, unsigned mode, int sync, void *key);
+int wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags, void *key);
 
 struct wait_queue_entry {
 	unsigned int flags;
@@ -114,12 +115,13 @@ void finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait);
 	bool timeout_expired = false;					\
 	bool interrupted = false;					\
 	long retval;							\
-	int state;							\
-	DEFINE_WAIT(tmp_wq);						\
+	wait_queue_entry_t tmp_wq = {					\
+		.entry = LIST_HEAD_INIT(tmp_wq.entry),			\
+		.func = wait_event_wake_function,			\
+	};								\
 									\
 	start_jiffies = ticks;						\
-	state = (flags & PCATCH) ? TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE; \
-	prepare_to_wait(&wq, &tmp_wq, state);				\
+	add_wait_queue(&wq, &tmp_wq);					\
 									\
 	while (1) {							\
 		__wait_event_prefix(&wq, flags);			\
@@ -127,12 +129,12 @@ void finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait);
 		if (condition)						\
 			break;						\
 									\
-		tsleep_interlock(current, flags);			\
+		tsleep_interlock(&tmp_wq, flags);			\
 									\
 		if ((timeout_jiffies) != 0) {				\
-			ret = tsleep(current, PINTERLOCKED|flags, "lwe", timeout_jiffies);	\
+			ret = tsleep(&tmp_wq, PINTERLOCKED|flags, "lwe", timeout_jiffies);	\
 		} else {						\
-			ret = tsleep(current, PINTERLOCKED|flags, "lwe", hz);\
+			ret = tsleep(&tmp_wq, PINTERLOCKED|flags, "lwe", hz);\
 			if (ret == EWOULDBLOCK) {			\
 				/*kprintf("F");*/			\
 				/*print_backtrace(-1);*/		\
@@ -164,7 +166,7 @@ void finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait);
 	else								\
 		retval = 1;						\
 									\
-	finish_wait(&wq, &tmp_wq);					\
+	remove_wait_queue(&wq, &tmp_wq);				\
 	retval;								\
 })
 

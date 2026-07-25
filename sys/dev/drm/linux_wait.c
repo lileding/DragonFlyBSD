@@ -34,6 +34,21 @@ default_wake_function(wait_queue_entry_t *q, unsigned mode, int wake_flags, void
 	return wake_up_process(q->private);
 }
 
+/*
+ * Wake a waiter that sleeps on its own queue entry.
+ *
+ * wait_event() uses the entry address as its wait channel, so no task identity
+ * is needed to wake it.  Driver-owned entries that still sleep on a task keep
+ * using default_wake_function.
+ */
+int
+wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int wake_flags,
+    void *key)
+{
+	wakeup(wait);
+	return 1;
+}
+
 int
 autoremove_wake_function(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
 {
@@ -64,12 +79,13 @@ __wake_up_core(wait_queue_head_t *q, int num_to_wake_up)
 void
 __wait_event_prefix(wait_queue_head_t *wq, int flags)
 {
+	/*
+	 * Serialize against wake_up() so that the caller observes every
+	 * condition update that preceded a wakeup.  The sleep itself is
+	 * interlocked on the caller's queue entry; no task state is
+	 * involved.
+	 */
 	lockmgr(&wq->lock, LK_EXCLUSIVE);
-	if (flags & PCATCH) {
-		set_current_state(TASK_INTERRUPTIBLE);
-	} else {
-		set_current_state(TASK_UNINTERRUPTIBLE);
-	}
 	lockmgr(&wq->lock, LK_RELEASE);
 }
 
