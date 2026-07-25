@@ -45,7 +45,7 @@ int
 wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int wake_flags,
     void *key)
 {
-	wakeup(wait);
+	wakeup(wait->private);
 	return 1;
 }
 
@@ -89,25 +89,62 @@ __wait_event_prefix(wait_queue_head_t *wq, int flags)
 	lockmgr(&wq->lock, LK_RELEASE);
 }
 
+/*
+ * Queue the waiter and arm its wait channel.  Arming before the caller
+ * re-examines its condition is what keeps a wakeup from being lost in the
+ * window between the two.  Callers waiting on several queues arm the same
+ * channel repeatedly, which is a no-op after the first.
+ */
 void
 prepare_to_wait(wait_queue_head_t *q, wait_queue_entry_t *wait, int state)
 {
 	lockmgr(&q->lock, LK_EXCLUSIVE);
 	if (list_empty(&wait->entry))
 		__add_wait_queue(q, wait);
-	set_current_state(state);
+	tsleep_interlock(wait->private,
+	    (state & TASK_INTERRUPTIBLE) ? PCATCH : 0);
 	lockmgr(&q->lock, LK_RELEASE);
 }
 
 void
 finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait)
 {
-	set_current_state(TASK_RUNNING);
+	/* Drop an interlock the caller armed but never slept on. */
+	crit_enter();
+	tsleep_remove(curthread);
+	crit_exit();
 
 	lockmgr(&q->lock, LK_EXCLUSIVE);
 	if (!list_empty(&wait->entry))
 		list_del_init(&wait->entry);
 	lockmgr(&q->lock, LK_RELEASE);
+}
+
+/*
+ * Sleep on an armed wait entry.  Returns the jiffies remaining, at least 1 if
+ * the sleep ended early, or 0 once the timeout is spent.  An indefinite
+ * timeout is reported back unchanged.
+ */
+long
+wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags)
+{
+	int start, error;
+
+	if (timeout >= INT_MAX) {
+		tsleep(wait->private, PINTERLOCKED | flags, "lwent", 0);
+		return timeout;
+	}
+
+	start = ticks;
+	error = tsleep(wait->private, PINTERLOCKED | flags, "lwent",
+	    (int)timeout);
+	timeout -= (long)(ticks - start);
+	if (timeout < 0)
+		timeout = 0;
+	if (error != EWOULDBLOCK && timeout == 0)
+		timeout = 1;
+
+	return timeout;
 }
 
 void
@@ -161,6 +198,6 @@ init_wait_entry(struct wait_queue_entry *wq_entry, int flags)
 {
 	INIT_LIST_HEAD(&wq_entry->entry);
 	wq_entry->flags = flags;
-	wq_entry->private = current;
+	wq_entry->private = wq_entry;
 	wq_entry->func = autoremove_wake_function;
 }

@@ -12754,6 +12754,8 @@ static void intel_atomic_commit_fence_wait(struct intel_atomic_state *intel_stat
 
 	init_wait_entry(&wait_fence, 0);
 	init_wait_entry(&wait_reset, 0);
+	/* One channel for both queues: either wakeup must reach this thread. */
+	wait_reset.private = wait_fence.private;
 	for (;;) {
 		prepare_to_wait(&intel_state->commit_ready.wait,
 				&wait_fence, TASK_UNINTERRUPTIBLE);
@@ -12765,7 +12767,7 @@ static void intel_atomic_commit_fence_wait(struct intel_atomic_state *intel_stat
 		    || test_bit(I915_RESET_MODESET, &dev_priv->gpu_error.flags))
 			break;
 
-		schedule();
+		wait_entry_sleep(&wait_fence, MAX_SCHEDULE_TIMEOUT, 0);
 	}
 	finish_wait(&intel_state->commit_ready.wait, &wait_fence);
 	finish_wait(&dev_priv->gpu_error.wait_queue, &wait_reset);

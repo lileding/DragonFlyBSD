@@ -43,12 +43,20 @@ int wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags,
 
 struct wait_queue_entry {
 	unsigned int flags;
+	/*
+	 * Wait channel: the address this waiter sleeps on.  Normally the entry
+	 * itself, but waiters that block on several queues at once point every
+	 * entry at one shared address so a wakeup from any queue reaches them.
+	 */
 	void *private;
 	wait_queue_func_t func;
 	struct list_head entry;
 };
 
 void init_wait_entry(struct wait_queue_entry *wq_entry, int flags);
+
+/* Sleep on wait->private until woken or timeout; returns jiffies left. */
+long wait_entry_sleep(wait_queue_entry_t *wait, long timeout, int flags);
 
 typedef struct {
 	struct lock		lock;
@@ -115,10 +123,7 @@ void finish_wait(wait_queue_head_t *q, wait_queue_entry_t *wait);
 	bool timeout_expired = false;					\
 	bool interrupted = false;					\
 	long retval;							\
-	wait_queue_entry_t tmp_wq = {					\
-		.entry = LIST_HEAD_INIT(tmp_wq.entry),			\
-		.func = wait_event_wake_function,			\
-	};								\
+	DEFINE_WAIT(tmp_wq);						\
 									\
 	start_jiffies = ticks;						\
 	add_wait_queue(&wq, &tmp_wq);					\
@@ -222,8 +227,16 @@ waitqueue_active(wait_queue_head_t *q)
 		.func = _function,				\
 	}
 
-#define DEFINE_WAIT(name)	\
-	DEFINE_WAIT_FUNC((name), autoremove_wake_function)
+/*
+ * A waiter that sleeps on its own entry.  DEFINE_WAIT_FUNC is kept for the
+ * few places that still hand their entry to a task-based wake function.
+ */
+#define DEFINE_WAIT(name)					\
+	wait_queue_entry_t name = {				\
+		.private	= &(name),			\
+		.entry		= LIST_HEAD_INIT((name).entry),	\
+		.func		= wait_event_wake_function,	\
+	}
 
 static inline void
 __add_wait_queue(wait_queue_head_t *head, wait_queue_entry_t *new)
