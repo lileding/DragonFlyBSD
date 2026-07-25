@@ -28,12 +28,6 @@
 #include <linux/wait_bit.h>
 #include <linux/sched.h>
 
-int
-default_wake_function(wait_queue_entry_t *q, unsigned mode, int wake_flags, void *key)
-{
-	return wake_up_process(q->private);
-}
-
 /*
  * Wake a waiter that sleeps on its own queue entry.
  *
@@ -49,16 +43,18 @@ wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int wake_flags
 	return 1;
 }
 
+/*
+ * Wake the waiter and take its entry off the queue, so that a waiter which
+ * does not re-arm is not woken twice.
+ */
 int
-autoremove_wake_function(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
+autoremove_wake_function(wait_queue_entry_t *wait, unsigned mode, int sync,
+    void *key)
 {
-	int ret = default_wake_function(wait, mode, sync, key);
+	wakeup(wait->private);
+	list_del_init(&wait->entry);
 
-	/* Was the process woken up ? */
-	if (ret)
-		list_del_init(&wait->entry);
-
-	return ret;
+	return 1;
 }
 
 void
@@ -76,15 +72,14 @@ __wake_up_core(wait_queue_head_t *q, int num_to_wake_up)
 	}
 }
 
+/*
+ * Order the caller's condition re-check against a concurrent wake_up(): the
+ * waker holds this lock while it walks the queue, so taking it here means
+ * every update that preceded a wakeup is visible.
+ */
 void
 __wait_event_prefix(wait_queue_head_t *wq, int flags)
 {
-	/*
-	 * Serialize against wake_up() so that the caller observes every
-	 * condition update that preceded a wakeup.  The sleep itself is
-	 * interlocked on the caller's queue entry; no task state is
-	 * involved.
-	 */
 	lockmgr(&wq->lock, LK_EXCLUSIVE);
 	lockmgr(&wq->lock, LK_RELEASE);
 }
@@ -180,7 +175,8 @@ wait_on_bit_timeout(unsigned long *word, int bit, unsigned mode,
 	start_time = ticks;
 
 	do {
-		rv = tsleep(word, mode, "lwobt", timeout);
+		rv = tsleep(word, (mode & TASK_INTERRUPTIBLE) ? PCATCH : 0,
+			    "lwobt", timeout);
 		if (rv == 0)
 			awakened = 1;
 		if (time_after_eq(start_time, timeout))

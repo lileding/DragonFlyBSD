@@ -37,7 +37,6 @@ typedef struct wait_queue_entry wait_queue_entry_t;
 
 typedef int (*wait_queue_func_t)(wait_queue_entry_t *wait, unsigned mode, int flags, void *key);
 
-int default_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags, void *key);
 int autoremove_wake_function(wait_queue_entry_t *wait, unsigned mode, int sync, void *key);
 int wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags, void *key);
 
@@ -83,7 +82,6 @@ wake_up(wait_queue_head_t *q)
 	lockmgr(&q->lock, LK_EXCLUSIVE);
 	__wake_up_core(q, 1);
 	lockmgr(&q->lock, LK_RELEASE);
-	wakeup_one(q);
 }
 
 static inline void
@@ -92,7 +90,6 @@ wake_up_all(wait_queue_head_t *q)
 	lockmgr(&q->lock, LK_EXCLUSIVE);
 	__wake_up_core(q, 0);
 	lockmgr(&q->lock, LK_RELEASE);
-	wakeup(q);
 }
 
 void wake_up_bit(void *, int);
