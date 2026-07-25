@@ -43,9 +43,17 @@ int wait_event_wake_function(wait_queue_entry_t *wait, unsigned mode, int flags,
 struct wait_queue_entry {
 	unsigned int flags;
 	/*
-	 * Wait channel: the address this waiter sleeps on.  Normally the entry
-	 * itself, but waiters that block on several queues at once point every
-	 * entry at one shared address so a wakeup from any queue reaches them.
+	 * Owned by whoever set func, and only meaningful to it.
+	 *
+	 * The generic wake functions here — wait_event_wake_function() and
+	 * autoremove_wake_function() — read it as the address to wakeup(), so
+	 * an entry using either must set it to a wait channel: normally the
+	 * entry itself, or one shared address when the waiter blocks on
+	 * several queues at once and any of them must reach it.
+	 *
+	 * Entries that install their own func may keep anything here instead;
+	 * i915_sw_fence and radeon's fence waiter both do.  Setting private
+	 * and func apart from each other is how they get mismatched.
 	 */
 	void *private;
 	wait_queue_func_t func;
@@ -221,17 +229,7 @@ waitqueue_active(wait_queue_head_t *q)
 	return !list_empty(&q->head);
 }
 
-#define DEFINE_WAIT_FUNC(name, _function)			\
-	wait_queue_entry_t name = {				\
-		.private = current,				\
-		.entry = LIST_HEAD_INIT((name).entry),	\
-		.func = _function,				\
-	}
-
-/*
- * A waiter that sleeps on its own entry.  DEFINE_WAIT_FUNC is kept for the
- * few places that still hand their entry to a task-based wake function.
- */
+/* A waiter that sleeps on its own entry. */
 #define DEFINE_WAIT(name)					\
 	wait_queue_entry_t name = {				\
 		.private	= &(name),			\
