@@ -53,6 +53,8 @@ struct amdgpu_ctx {
 	enum drm_sched_priority		override_priority;
 	struct lock			lock;
 	atomic_t			guilty;
+	/* the level in effect before this context forced one */
+	uint32_t			stable_pstate;
 };
 
 struct amdgpu_ctx_mgr {

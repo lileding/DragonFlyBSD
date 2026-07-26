@@ -2423,6 +2423,7 @@ kprintf("amdgpu_device_init: start\n");
 	atomic_set(&adev->irq.ih.lock, 0);
 	lockinit(&adev->firmware.mutex, "agfwm", 0, LK_CANRECURSE);
 	lockinit(&adev->pm.mutex, "agpmm", 0, LK_CANRECURSE);
+	lockinit(&adev->pm.stable_pstate_ctx_lock, "agpsps", 0, LK_CANRECURSE);
 	lockinit(&adev->gfx.gpu_clock_mutex, "agggcm", 0, LK_CANRECURSE);
 	lockinit(&adev->srbm_mutex, "agsm", 0, LK_CANRECURSE);
 	lockinit(&adev->gfx.pipe_reserve_mutex, "aggprm", 0, LK_CANRECURSE);

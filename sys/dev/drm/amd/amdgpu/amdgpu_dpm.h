@@ -436,6 +436,9 @@ struct amdgpu_pm {
 	uint32_t                fw_version;
 	uint32_t                pcie_gen_mask;
 	uint32_t                pcie_mlw_mask;
+	/* the context currently forcing a performance level, if any */
+	struct amdgpu_ctx       *stable_pstate_ctx;
+	struct lock             stable_pstate_ctx_lock;
 	struct amd_pp_display_configuration pm_display_cfg;/* set by dc */
 	uint32_t                smu_prv_buffer_size;
 	struct amdgpu_bo        *smu_prv_buffer;

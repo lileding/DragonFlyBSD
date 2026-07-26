@@ -191,6 +191,123 @@ error_free_fences:
 	return r;
 }
 
+static int amdgpu_ctx_get_stable_pstate(struct amdgpu_ctx *ctx,
+				       uint32_t *stable_pstate)
+{
+	struct amdgpu_device *adev = ctx->adev;
+
+	switch (amdgpu_dpm_get_performance_level(adev)) {
+	case AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
+		*stable_pstate = AMDGPU_CTX_STABLE_PSTATE_STANDARD;
+		break;
+	case AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK:
+		*stable_pstate = AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK;
+		break;
+	case AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK:
+		*stable_pstate = AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK;
+		break;
+	case AMD_DPM_FORCED_LEVEL_PROFILE_PEAK:
+		*stable_pstate = AMDGPU_CTX_STABLE_PSTATE_PEAK;
+		break;
+	default:
+		*stable_pstate = AMDGPU_CTX_STABLE_PSTATE_NONE;
+		break;
+	}
+	return 0;
+}
+
+/* Caller holds adev->pm.stable_pstate_ctx_lock. */
+static int __amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
+					  uint32_t stable_pstate)
+{
+	struct amdgpu_device *adev = ctx->adev;
+	struct amdgpu_ctx *current_ctx;
+	enum amd_dpm_forced_level level;
+	uint32_t current_stable_pstate;
+	int r;
+
+	switch (stable_pstate) {
+	case AMDGPU_CTX_STABLE_PSTATE_NONE:
+		level = AMD_DPM_FORCED_LEVEL_AUTO;
+		break;
+	case AMDGPU_CTX_STABLE_PSTATE_STANDARD:
+		level = AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD;
+		break;
+	case AMDGPU_CTX_STABLE_PSTATE_MIN_SCLK:
+		level = AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK;
+		break;
+	case AMDGPU_CTX_STABLE_PSTATE_MIN_MCLK:
+		level = AMD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK;
+		break;
+	case AMDGPU_CTX_STABLE_PSTATE_PEAK:
+		level = AMD_DPM_FORCED_LEVEL_PROFILE_PEAK;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* The level is device-wide, so only one context can own it. */
+	current_ctx = adev->pm.stable_pstate_ctx;
+	if (current_ctx && current_ctx != ctx)
+		return -EBUSY;
+
+	r = amdgpu_ctx_get_stable_pstate(ctx, &current_stable_pstate);
+	if (r || current_stable_pstate == stable_pstate)
+		return r;
+
+	r = amdgpu_dpm_force_performance_level(adev, level);
+	if (r)
+		return r;
+
+	if (!current_ctx) {
+		adev->pm.stable_pstate_ctx = ctx;
+		/* what to go back to once this context is done with it */
+		ctx->stable_pstate = current_stable_pstate;
+	}
+	return 0;
+}
+
+static int amdgpu_ctx_set_stable_pstate(struct amdgpu_ctx *ctx,
+					uint32_t stable_pstate)
+{
+	struct amdgpu_device *adev = ctx->adev;
+	int r;
+
+	mutex_lock(&adev->pm.stable_pstate_ctx_lock);
+	r = __amdgpu_ctx_set_stable_pstate(ctx, stable_pstate);
+	mutex_unlock(&adev->pm.stable_pstate_ctx_lock);
+
+	return r;
+}
+
+static int amdgpu_ctx_stable_pstate(struct amdgpu_device *adev,
+				    struct amdgpu_fpriv *fpriv, uint32_t id,
+				    bool set, uint32_t *stable_pstate)
+{
+	struct amdgpu_ctx_mgr *mgr;
+	struct amdgpu_ctx *ctx;
+	int r;
+
+	if (!fpriv)
+		return -EINVAL;
+
+	mgr = &fpriv->ctx_mgr;
+	mutex_lock(&mgr->lock);
+	ctx = idr_find(&mgr->ctx_handles, id);
+	if (!ctx) {
+		mutex_unlock(&mgr->lock);
+		return -EINVAL;
+	}
+
+	if (set)
+		r = amdgpu_ctx_set_stable_pstate(ctx, *stable_pstate);
+	else
+		r = amdgpu_ctx_get_stable_pstate(ctx, stable_pstate);
+
+	mutex_unlock(&mgr->lock);
+	return r;
+}
+
 static void amdgpu_ctx_fini(struct kref *ref)
 {
 	struct amdgpu_ctx *ctx = container_of(ref, struct amdgpu_ctx, refcount);
@@ -208,6 +325,13 @@ static void amdgpu_ctx_fini(struct kref *ref)
 	kfree(ctx->entities[0]);
 
 	mutex_destroy(&ctx->lock);
+
+	mutex_lock(&adev->pm.stable_pstate_ctx_lock);
+	if (adev->pm.stable_pstate_ctx == ctx) {
+		__amdgpu_ctx_set_stable_pstate(ctx, ctx->stable_pstate);
+		adev->pm.stable_pstate_ctx = NULL;
+	}
+	mutex_unlock(&adev->pm.stable_pstate_ctx_lock);
 
 	kfree(ctx);
 }
@@ -380,7 +504,7 @@ int amdgpu_ctx_ioctl(struct drm_device *dev, void *data,
 		     struct drm_file *filp)
 {
 	int r;
-	uint32_t id;
+	uint32_t id, stable_pstate;
 	enum drm_sched_priority priority;
 
 	union drm_amdgpu_ctx *args = data;
@@ -409,6 +533,19 @@ int amdgpu_ctx_ioctl(struct drm_device *dev, void *data,
 		break;
 	case AMDGPU_CTX_OP_QUERY_STATE2:
 		r = amdgpu_ctx_query2(adev, fpriv, id, &args->out);
+		break;
+	case AMDGPU_CTX_OP_GET_STABLE_PSTATE:
+		if (args->in.flags)
+			return -EINVAL;
+		r = amdgpu_ctx_stable_pstate(adev, fpriv, id, false, &stable_pstate);
+		if (!r)
+			args->out.pstate.flags = stable_pstate;
+		break;
+	case AMDGPU_CTX_OP_SET_STABLE_PSTATE:
+		if (args->in.flags & ~AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK)
+			return -EINVAL;
+		stable_pstate = args->in.flags & AMDGPU_CTX_STABLE_PSTATE_FLAGS_MASK;
+		r = amdgpu_ctx_stable_pstate(adev, fpriv, id, true, &stable_pstate);
 		break;
 	default:
 		return -EINVAL;
