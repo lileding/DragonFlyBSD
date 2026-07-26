@@ -2278,6 +2278,64 @@ static int get_fb_info(const struct amdgpu_framebuffer *amdgpu_fb,
 	return r;
 }
 
+static void
+fill_plane_tiling_attributes(struct amdgpu_device *adev,
+			     union dc_tiling_info *tiling_info,
+			     uint64_t tiling_flags)
+{
+	memset(tiling_info, 0, sizeof(*tiling_info));
+
+	/* Fill GFX8 params */
+	if (AMDGPU_TILING_GET(tiling_flags, ARRAY_MODE) == DC_ARRAY_2D_TILED_THIN1) {
+		unsigned int bankw, bankh, mtaspect, tile_split, num_banks;
+
+		bankw = AMDGPU_TILING_GET(tiling_flags, BANK_WIDTH);
+		bankh = AMDGPU_TILING_GET(tiling_flags, BANK_HEIGHT);
+		mtaspect = AMDGPU_TILING_GET(tiling_flags, MACRO_TILE_ASPECT);
+		tile_split = AMDGPU_TILING_GET(tiling_flags, TILE_SPLIT);
+		num_banks = AMDGPU_TILING_GET(tiling_flags, NUM_BANKS);
+
+		/* XXX fix me for VI */
+		tiling_info->gfx8.num_banks = num_banks;
+		tiling_info->gfx8.array_mode =
+				DC_ARRAY_2D_TILED_THIN1;
+		tiling_info->gfx8.tile_split = tile_split;
+		tiling_info->gfx8.bank_width = bankw;
+		tiling_info->gfx8.bank_height = bankh;
+		tiling_info->gfx8.tile_aspect = mtaspect;
+		tiling_info->gfx8.tile_mode =
+				DC_ADDR_SURF_MICRO_TILING_DISPLAY;
+	} else if (AMDGPU_TILING_GET(tiling_flags, ARRAY_MODE)
+			== DC_ARRAY_1D_TILED_THIN1) {
+		tiling_info->gfx8.array_mode = DC_ARRAY_1D_TILED_THIN1;
+	}
+
+	tiling_info->gfx8.pipe_config =
+			AMDGPU_TILING_GET(tiling_flags, PIPE_CONFIG);
+
+	if (adev->asic_type == CHIP_VEGA10 ||
+	    adev->asic_type == CHIP_VEGA12 ||
+	    adev->asic_type == CHIP_VEGA20 ||
+	    adev->asic_type == CHIP_RAVEN) {
+		/* Fill GFX9 params */
+		tiling_info->gfx9.num_pipes =
+			adev->gfx.config.gb_addr_config_fields.num_pipes;
+		tiling_info->gfx9.num_banks =
+			adev->gfx.config.gb_addr_config_fields.num_banks;
+		tiling_info->gfx9.pipe_interleave =
+			adev->gfx.config.gb_addr_config_fields.pipe_interleave_size;
+		tiling_info->gfx9.num_shader_engines =
+			adev->gfx.config.gb_addr_config_fields.num_se;
+		tiling_info->gfx9.max_compressed_frags =
+			adev->gfx.config.gb_addr_config_fields.max_compress_frags;
+		tiling_info->gfx9.num_rb_per_se =
+			adev->gfx.config.gb_addr_config_fields.num_rb_per_se;
+		tiling_info->gfx9.swizzle =
+			AMDGPU_TILING_GET(tiling_flags, SWIZZLE_MODE);
+		tiling_info->gfx9.shaderEnable = 1;
+	}
+}
+
 static int fill_plane_attributes_from_fb(struct amdgpu_device *adev,
 					 struct dc_plane_state *plane_state,
 					 const struct amdgpu_framebuffer *amdgpu_fb)
@@ -2361,57 +2419,8 @@ static int fill_plane_attributes_from_fb(struct amdgpu_device *adev,
 		plane_state->color_space = COLOR_SPACE_YCBCR709;
 	}
 
-	memset(&plane_state->tiling_info, 0, sizeof(plane_state->tiling_info));
-
-	/* Fill GFX8 params */
-	if (AMDGPU_TILING_GET(tiling_flags, ARRAY_MODE) == DC_ARRAY_2D_TILED_THIN1) {
-		unsigned int bankw, bankh, mtaspect, tile_split, num_banks;
-
-		bankw = AMDGPU_TILING_GET(tiling_flags, BANK_WIDTH);
-		bankh = AMDGPU_TILING_GET(tiling_flags, BANK_HEIGHT);
-		mtaspect = AMDGPU_TILING_GET(tiling_flags, MACRO_TILE_ASPECT);
-		tile_split = AMDGPU_TILING_GET(tiling_flags, TILE_SPLIT);
-		num_banks = AMDGPU_TILING_GET(tiling_flags, NUM_BANKS);
-
-		/* XXX fix me for VI */
-		plane_state->tiling_info.gfx8.num_banks = num_banks;
-		plane_state->tiling_info.gfx8.array_mode =
-				DC_ARRAY_2D_TILED_THIN1;
-		plane_state->tiling_info.gfx8.tile_split = tile_split;
-		plane_state->tiling_info.gfx8.bank_width = bankw;
-		plane_state->tiling_info.gfx8.bank_height = bankh;
-		plane_state->tiling_info.gfx8.tile_aspect = mtaspect;
-		plane_state->tiling_info.gfx8.tile_mode =
-				DC_ADDR_SURF_MICRO_TILING_DISPLAY;
-	} else if (AMDGPU_TILING_GET(tiling_flags, ARRAY_MODE)
-			== DC_ARRAY_1D_TILED_THIN1) {
-		plane_state->tiling_info.gfx8.array_mode = DC_ARRAY_1D_TILED_THIN1;
-	}
-
-	plane_state->tiling_info.gfx8.pipe_config =
-			AMDGPU_TILING_GET(tiling_flags, PIPE_CONFIG);
-
-	if (adev->asic_type == CHIP_VEGA10 ||
-	    adev->asic_type == CHIP_VEGA12 ||
-	    adev->asic_type == CHIP_VEGA20 ||
-	    adev->asic_type == CHIP_RAVEN) {
-		/* Fill GFX9 params */
-		plane_state->tiling_info.gfx9.num_pipes =
-			adev->gfx.config.gb_addr_config_fields.num_pipes;
-		plane_state->tiling_info.gfx9.num_banks =
-			adev->gfx.config.gb_addr_config_fields.num_banks;
-		plane_state->tiling_info.gfx9.pipe_interleave =
-			adev->gfx.config.gb_addr_config_fields.pipe_interleave_size;
-		plane_state->tiling_info.gfx9.num_shader_engines =
-			adev->gfx.config.gb_addr_config_fields.num_se;
-		plane_state->tiling_info.gfx9.max_compressed_frags =
-			adev->gfx.config.gb_addr_config_fields.max_compress_frags;
-		plane_state->tiling_info.gfx9.num_rb_per_se =
-			adev->gfx.config.gb_addr_config_fields.num_rb_per_se;
-		plane_state->tiling_info.gfx9.swizzle =
-			AMDGPU_TILING_GET(tiling_flags, SWIZZLE_MODE);
-		plane_state->tiling_info.gfx9.shaderEnable = 1;
-	}
+	fill_plane_tiling_attributes(adev, &plane_state->tiling_info,
+				     tiling_flags);
 
 	plane_state->visible = true;
 	plane_state->scaling_quality.h_taps_c = 0;
@@ -4392,8 +4401,11 @@ static void amdgpu_dm_do_flip(struct drm_crtc *crtc,
 	struct dc_flip_addrs addr = { {0} };
 	/* TODO eliminate or rename surface_update */
 	struct dc_surface_update surface_updates[1] = { {0} };
+	struct dc_plane_info plane_info;
 	struct dm_crtc_state *acrtc_state = to_dm_crtc_state(crtc->state);
 	struct dc_stream_status *stream_status;
+	struct dc_plane_state *dc_plane;
+	u64 tiling_flags;
 
 
 	/* Prepare wait for target vblank early - before the fence-waits */
@@ -4415,6 +4427,8 @@ static void amdgpu_dm_do_flip(struct drm_crtc *crtc,
 	/* Wait for all fences on this FB */
 	WARN_ON(reservation_object_wait_timeout_rcu(abo->tbo.resv, true, false,
 								    MAX_SCHEDULE_TIMEOUT) < 0);
+
+	amdgpu_bo_get_tiling_flags(abo, &tiling_flags);
 
 	amdgpu_bo_unreserve(abo);
 
@@ -4456,13 +4470,35 @@ static void amdgpu_dm_do_flip(struct drm_crtc *crtc,
 		return;
 	}
 
-	surface_updates->surface = stream_status->plane_states[0];
+	dc_plane = stream_status->plane_states[0];
+	surface_updates->surface = dc_plane;
 	if (!surface_updates->surface) {
 		DRM_ERROR("No surface for CRTC: id=%d\n",
 			acrtc->crtc_id);
 		return;
 	}
 	surface_updates->flip_addr = &addr;
+
+	/*
+	 * Tiling belongs to the framebuffer, not to the plane, so it can change
+	 * from one flip to the next.  A flip is not a modeset, so this is the
+	 * only place that notices.  Everything else is carried over from the
+	 * plane as it stands: DC reprograms whatever it is handed.
+	 */
+	memset(&plane_info, 0, sizeof(plane_info));
+	plane_info.color_space = dc_plane->color_space;
+	plane_info.format = dc_plane->format;
+	plane_info.plane_size = dc_plane->plane_size;
+	plane_info.rotation = dc_plane->rotation;
+	plane_info.horizontal_mirror = dc_plane->horizontal_mirror;
+	plane_info.stereo_format = dc_plane->stereo_format;
+	plane_info.visible = dc_plane->visible;
+	plane_info.per_pixel_alpha = dc_plane->per_pixel_alpha;
+	plane_info.dcc = dc_plane->dcc;
+
+	fill_plane_tiling_attributes(adev, &plane_info.tiling_info, tiling_flags);
+
+	surface_updates->plane_info = &plane_info;
 
 	dc_commit_updates_for_stream(adev->dm.dc,
 					     surface_updates,
