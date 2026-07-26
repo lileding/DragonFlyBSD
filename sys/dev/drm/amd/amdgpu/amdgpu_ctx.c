@@ -365,6 +365,13 @@ static int amdgpu_ctx_query2(struct amdgpu_device *adev,
 	if (atomic_read(&ctx->guilty))
 		out->state.flags |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
 
+	/*
+	 * A reset already under way is worth distinguishing from one that has
+	 * finished: userspace can wait rather than treat the context as lost.
+	 */
+	if (adev->in_gpu_reset)
+		out->state.flags |= AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS;
+
 	mutex_unlock(&mgr->lock);
 	return 0;
 }

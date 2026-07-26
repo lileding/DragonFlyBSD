@@ -38,6 +38,7 @@
 #include <linux/pm_runtime.h>
 #include "amdgpu_amdkfd.h"
 #include "amdgpu_gem.h"
+#include "amd_pcie.h"
 #include "amdgpu_display.h"
 
 static void amdgpu_unregister_gpu_instance(struct amdgpu_device *adev)
@@ -685,6 +686,7 @@ static int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file
 	}
 	case AMDGPU_INFO_DEV_INFO: {
 		struct drm_amdgpu_info_device dev_info = {};
+		uint32_t pcie_gen_mask, pcie_width_mask;
 		uint64_t vm_size;
 
 		dev_info.device_id = dev->pdev->device;
@@ -699,9 +701,15 @@ static int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file
 		if (adev->pm.dpm_enabled) {
 			dev_info.max_engine_clock = amdgpu_dpm_get_sclk(adev, false) * 10;
 			dev_info.max_memory_clock = amdgpu_dpm_get_mclk(adev, false) * 10;
+			dev_info.min_engine_clock = amdgpu_dpm_get_sclk(adev, true) * 10;
+			dev_info.min_memory_clock = amdgpu_dpm_get_mclk(adev, true) * 10;
 		} else {
-			dev_info.max_engine_clock = adev->clock.default_sclk * 10;
-			dev_info.max_memory_clock = adev->clock.default_mclk * 10;
+			dev_info.max_engine_clock =
+				dev_info.min_engine_clock =
+					adev->clock.default_sclk * 10;
+			dev_info.max_memory_clock =
+				dev_info.min_memory_clock =
+					adev->clock.default_mclk * 10;
 		}
 		dev_info.enabled_rb_pipes_mask = adev->gfx.config.backend_enable_mask;
 		dev_info.num_rb_pipes = adev->gfx.config.max_backends_per_se *
@@ -763,6 +771,25 @@ static int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file
 		dev_info.gs_vgt_table_depth = adev->gfx.config.gs_vgt_table_depth;
 		dev_info.gs_prim_buffer_depth = adev->gfx.config.gs_prim_buffer_depth;
 		dev_info.max_gs_waves_per_vgt = adev->gfx.config.max_gs_threads;
+
+		/*
+		 * What the link can actually run at is the narrower of what the
+		 * ASIC supports and what the platform supports, so combine the
+		 * two halves of each mask.  The chipset half lives in the high
+		 * bits and comes down to meet the ASIC half.
+		 */
+		pcie_gen_mask = adev->pm.pcie_gen_mask &
+			(adev->pm.pcie_gen_mask >> CAIL_PCIE_LINK_SPEED_SUPPORT_SHIFT);
+		pcie_width_mask = adev->pm.pcie_mlw_mask &
+			(adev->pm.pcie_mlw_mask >> CAIL_PCIE_LINK_WIDTH_SUPPORT_SHIFT);
+		dev_info.pcie_gen = fls(pcie_gen_mask);
+		dev_info.pcie_num_lanes =
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X32 ? 32 :
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X16 ? 16 :
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X12 ? 12 :
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X8 ? 8 :
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X4 ? 4 :
+			pcie_width_mask & CAIL_ASIC_PCIE_LINK_WIDTH_SUPPORT_X2 ? 2 : 1;
 
 		return copy_to_user(out, &dev_info,
 				    min((size_t)size, sizeof(dev_info))) ? -EFAULT : 0;
