@@ -2278,12 +2278,87 @@ static int get_fb_info(const struct amdgpu_framebuffer *amdgpu_fb,
 	return r;
 }
 
-static void
+static inline uint64_t get_dcc_address(uint64_t address, uint64_t tiling_flags)
+{
+	uint32_t offset = AMDGPU_TILING_GET(tiling_flags, DCC_OFFSET_256B);
+
+	return offset ? (address + offset * 256) : 0;
+}
+
+static int fill_plane_dcc_attributes(struct amdgpu_device *adev,
+				     const struct amdgpu_framebuffer *afb,
+				     const struct dc_plane_state *plane_state,
+				     struct dc_plane_dcc_param *dcc,
+				     struct dc_plane_address *address,
+				     uint64_t info)
+{
+	struct dc *dc = adev->dm.dc;
+	struct dc_dcc_surface_param input;
+	struct dc_surface_dcc_cap output;
+	uint32_t offset = AMDGPU_TILING_GET(info, DCC_OFFSET_256B);
+	uint32_t i64b = AMDGPU_TILING_GET(info, DCC_INDEPENDENT_64B) != 0;
+	uint64_t dcc_address;
+
+	memset(&input, 0, sizeof(input));
+	memset(&output, 0, sizeof(output));
+
+	if (!offset)
+		return 0;
+
+	if (plane_state->address.type != PLN_ADDR_TYPE_GRAPHICS)
+		return 0;
+
+	if (!dc->cap_funcs.get_dcc_compression_cap)
+		return -EINVAL;
+
+	input.format = plane_state->format;
+	input.surface_size.width =
+		plane_state->plane_size.grph.surface_size.width;
+	input.surface_size.height =
+		plane_state->plane_size.grph.surface_size.height;
+	input.swizzle_mode = plane_state->tiling_info.gfx9.swizzle;
+
+	if (plane_state->rotation == ROTATION_ANGLE_0 ||
+	    plane_state->rotation == ROTATION_ANGLE_180)
+		input.scan = SCAN_DIRECTION_HORIZONTAL;
+	else if (plane_state->rotation == ROTATION_ANGLE_90 ||
+		 plane_state->rotation == ROTATION_ANGLE_270)
+		input.scan = SCAN_DIRECTION_VERTICAL;
+
+	if (!dc->cap_funcs.get_dcc_compression_cap(dc, &input, &output))
+		return -EINVAL;
+
+	if (!output.capable)
+		return -EINVAL;
+
+	if (i64b == 0 && output.grph.rgb.independent_64b_blks != 0)
+		return -EINVAL;
+
+	dcc->enable = 1;
+	dcc->grph.meta_pitch =
+		AMDGPU_TILING_GET(info, DCC_PITCH_MAX) + 1;
+	dcc->grph.independent_64b_blks = i64b;
+
+	dcc_address = get_dcc_address(afb->address, info);
+	address->grph.meta_addr.low_part = lower_32_bits(dcc_address);
+	address->grph.meta_addr.high_part = upper_32_bits(dcc_address);
+
+	return 0;
+}
+
+static int
 fill_plane_tiling_attributes(struct amdgpu_device *adev,
+			     const struct amdgpu_framebuffer *afb,
+			     const struct dc_plane_state *plane_state,
 			     union dc_tiling_info *tiling_info,
+			     struct dc_plane_dcc_param *dcc,
+			     struct dc_plane_address *address,
 			     uint64_t tiling_flags)
 {
+	int ret;
+
 	memset(tiling_info, 0, sizeof(*tiling_info));
+	memset(dcc, 0, sizeof(*dcc));
 
 	/* Fill GFX8 params */
 	if (AMDGPU_TILING_GET(tiling_flags, ARRAY_MODE) == DC_ARRAY_2D_TILED_THIN1) {
@@ -2333,7 +2408,14 @@ fill_plane_tiling_attributes(struct amdgpu_device *adev,
 		tiling_info->gfx9.swizzle =
 			AMDGPU_TILING_GET(tiling_flags, SWIZZLE_MODE);
 		tiling_info->gfx9.shaderEnable = 1;
+
+		ret = fill_plane_dcc_attributes(adev, afb, plane_state, dcc,
+						address, tiling_flags);
+		if (ret)
+			return ret;
 	}
+
+	return 0;
 }
 
 static int fill_plane_attributes_from_fb(struct amdgpu_device *adev,
@@ -2419,8 +2501,13 @@ static int fill_plane_attributes_from_fb(struct amdgpu_device *adev,
 		plane_state->color_space = COLOR_SPACE_YCBCR709;
 	}
 
-	fill_plane_tiling_attributes(adev, &plane_state->tiling_info,
-				     tiling_flags);
+	ret = fill_plane_tiling_attributes(adev, amdgpu_fb, plane_state,
+					   &plane_state->tiling_info,
+					   &plane_state->dcc,
+					   &plane_state->address,
+					   tiling_flags);
+	if (ret)
+		return ret;
 
 	plane_state->visible = true;
 	plane_state->scaling_quality.h_taps_c = 0;
@@ -4480,10 +4567,11 @@ static void amdgpu_dm_do_flip(struct drm_crtc *crtc,
 	surface_updates->flip_addr = &addr;
 
 	/*
-	 * Tiling belongs to the framebuffer, not to the plane, so it can change
-	 * from one flip to the next.  A flip is not a modeset, so this is the
-	 * only place that notices.  Everything else is carried over from the
-	 * plane as it stands: DC reprograms whatever it is handed.
+	 * Tiling and DCC attributes belong to the framebuffer, not to the
+	 * plane, so they can change from one flip to the next.  A flip is not
+	 * a modeset, so this is the only place that notices.  Everything else
+	 * in plane_info is carried over from the plane as it stands, because
+	 * DC reprograms whatever it is handed.
 	 */
 	memset(&plane_info, 0, sizeof(plane_info));
 	plane_info.color_space = dc_plane->color_space;
@@ -4494,9 +4582,12 @@ static void amdgpu_dm_do_flip(struct drm_crtc *crtc,
 	plane_info.stereo_format = dc_plane->stereo_format;
 	plane_info.visible = dc_plane->visible;
 	plane_info.per_pixel_alpha = dc_plane->per_pixel_alpha;
-	plane_info.dcc = dc_plane->dcc;
 
-	fill_plane_tiling_attributes(adev, &plane_info.tiling_info, tiling_flags);
+	fill_plane_tiling_attributes(adev, afb, dc_plane,
+				     &plane_info.tiling_info,
+				     &plane_info.dcc,
+				     &addr.address,
+				     tiling_flags);
 
 	surface_updates->plane_info = &plane_info;
 
