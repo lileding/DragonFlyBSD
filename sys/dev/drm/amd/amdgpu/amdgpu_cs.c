@@ -1166,6 +1166,12 @@ static int amdgpu_cs_process_syncobj_out_dep(struct amdgpu_cs_parser *p,
 	num_deps = chunk->length_dw * 4 /
 		sizeof(struct drm_amdgpu_cs_chunk_sem);
 
+	/* Only one chunk may own post_deps; a second would overwrite the
+	 * pointer, leaking the array and the syncobj references in it.
+	 */
+	if (p->post_deps)
+		return -EINVAL;
+
 	p->post_deps = kmalloc_array(num_deps, sizeof(*p->post_deps),
 				     GFP_KERNEL);
 	p->num_post_deps = 0;
@@ -1218,6 +1224,12 @@ static int amdgpu_cs_process_syncobj_timeline_out_dep(struct amdgpu_cs_parser *p
 	syncobj_deps = (struct drm_amdgpu_cs_chunk_syncobj *)chunk->kdata;
 	num_deps = chunk->length_dw * 4 /
 		sizeof(struct drm_amdgpu_cs_chunk_syncobj);
+
+	/* Only one chunk may own post_deps; a second would overwrite the
+	 * pointer, leaking the array and the syncobj references in it.
+	 */
+	if (p->post_deps)
+		return -EINVAL;
 
 	p->post_deps = kmalloc_array(num_deps, sizeof(*p->post_deps),
 				     GFP_KERNEL);
