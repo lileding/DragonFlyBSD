@@ -125,7 +125,7 @@ static int amdgpu_ctx_init(struct amdgpu_device *adev,
 	for (i = 0; i < AMDGPU_HW_IP_NUM; ++i) {
 		struct amdgpu_ring *rings[AMDGPU_MAX_RINGS];
 		struct drm_sched_rq *rqs[AMDGPU_MAX_RINGS];
-		unsigned num_rings;
+		unsigned num_rings = 0;
 
 		switch (i) {
 		case AMDGPU_HW_IP_GFX:

@@ -34,6 +34,16 @@
 #define AMDGPU_BO_INVALID_OFFSET	LONG_MAX
 #define AMDGPU_BO_MAX_PLACEMENTS	3
 
+/*
+ * Shadow copies of the page tables in GTT, restored after a GPU reset.  This
+ * was spelled AMDGPU_GEM_CREATE_SHADOW in the uapi header until Linux 5.14
+ * removed it, userspace never having been allowed to pass it; upstream could
+ * drop it outright because by then the mechanism no longer needed a flag.
+ * Here it still does, so the definition moves in-tree rather than going away,
+ * and it keeps bit 4 - the bit upstream vacated and has left unused since.
+ */
+#define AMDGPU_GEM_CREATE_SHADOW		(1 << 4)
+
 struct amdgpu_bo_param {
 	unsigned long			size;
 	int				byte_align;
