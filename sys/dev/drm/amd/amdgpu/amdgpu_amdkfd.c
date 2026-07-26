@@ -287,7 +287,7 @@ int alloc_gtt_mem(struct kgd_dev *kgd, size_t size,
 	bp.resv = NULL;
 
 	if (mqd_gfx9)
-		bp.flags |= AMDGPU_GEM_CREATE_MQD_GFX9;
+		bp.flags |= AMDGPU_GEM_CREATE_CP_MQD_GFX9;
 
 	r = amdgpu_bo_create(adev, &bp, &bo);
 	if (r) {

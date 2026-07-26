@@ -127,7 +127,7 @@ extern "C" {
 /* Flag that indicates allocating MQD gart on GFX9, where the mtype
  * for the second page onward should be set to NC.
  */
-#define AMDGPU_GEM_CREATE_MQD_GFX9		(1 << 8)
+#define AMDGPU_GEM_CREATE_CP_MQD_GFX9		(1 << 8)
 
 struct drm_amdgpu_gem_create_in  {
 	/** the requested memory size */
