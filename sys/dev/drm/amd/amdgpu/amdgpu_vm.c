@@ -1899,7 +1899,7 @@ static int amdgpu_vm_bo_update_mapping(struct amdgpu_device *adev,
 		addr = 0;
 	}
 
-	r = amdgpu_sync_fence(adev, &job->sync, exclusive, false);
+	r = amdgpu_sync_fence(adev, &job->sync, exclusive);
 	if (r)
 		goto error_free;
 
