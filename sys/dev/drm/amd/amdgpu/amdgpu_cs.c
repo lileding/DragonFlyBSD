@@ -212,6 +212,7 @@ static int amdgpu_cs_parser_init(struct amdgpu_cs_parser *p, union drm_amdgpu_cs
 			break;
 
 		case AMDGPU_CHUNK_ID_DEPENDENCIES:
+		case AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES:
 		case AMDGPU_CHUNK_ID_SYNCOBJ_IN:
 		case AMDGPU_CHUNK_ID_SYNCOBJ_OUT:
 		case AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_WAIT:
@@ -1095,6 +1096,20 @@ static int amdgpu_cs_process_fence_dep(struct amdgpu_cs_parser *p,
 			amdgpu_ctx_put(ctx);
 			return r;
 		} else if (fence) {
+			if (chunk->chunk_id ==
+			    AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES) {
+				struct drm_sched_fence *s_fence =
+					to_drm_sched_fence(fence);
+				struct dma_fence *old = fence;
+
+				/* Take the new reference before dropping the
+				 * old one: the scheduled fence is embedded in
+				 * the same object.
+				 */
+				fence = dma_fence_get(&s_fence->scheduled);
+				dma_fence_put(old);
+			}
+
 			r = amdgpu_sync_fence(p->adev, &p->job->sync, fence);
 			dma_fence_put(fence);
 			amdgpu_ctx_put(ctx);
@@ -1251,6 +1266,7 @@ static int amdgpu_cs_dependencies(struct amdgpu_device *adev,
 
 		switch (chunk->chunk_id) {
 		case AMDGPU_CHUNK_ID_DEPENDENCIES:
+		case AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES:
 			r = amdgpu_cs_process_fence_dep(p, chunk);
 			if (r)
 				return r;
