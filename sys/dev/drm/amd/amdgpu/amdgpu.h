@@ -639,6 +639,28 @@ struct amdgpu_allowed_register_entry {
 /*
  * ASIC specific functions.
  */
+#define AMDGPU_VIDEO_CODEC_TYPE_MPEG2			0
+#define AMDGPU_VIDEO_CODEC_TYPE_MPEG4			1
+#define AMDGPU_VIDEO_CODEC_TYPE_VC1			2
+#define AMDGPU_VIDEO_CODEC_TYPE_MPEG4_AVC		3
+#define AMDGPU_VIDEO_CODEC_TYPE_HEVC			4
+#define AMDGPU_VIDEO_CODEC_TYPE_JPEG			5
+#define AMDGPU_VIDEO_CODEC_TYPE_VP9			6
+#define AMDGPU_VIDEO_CODEC_TYPE_AV1			7
+
+struct amdgpu_video_codec_info {
+	u32 codec_type;
+	u32 max_width;
+	u32 max_height;
+	u32 max_pixels_per_frame;
+	u32 max_level;
+};
+
+struct amdgpu_video_codecs {
+	const u32 codec_count;
+	const struct amdgpu_video_codec_info *codec_array;
+};
+
 struct amdgpu_asic_funcs {
 	bool (*read_disabled_bios)(struct amdgpu_device *adev);
 	bool (*read_bios_from_rom)(struct amdgpu_device *adev,
@@ -664,6 +686,9 @@ struct amdgpu_asic_funcs {
 			       struct amdgpu_ring *ring);
 	/* check if the asic needs a full reset of if soft reset will work */
 	bool (*need_full_reset)(struct amdgpu_device *adev);
+	/* query video codecs */
+	int (*query_video_codecs)(struct amdgpu_device *adev, bool encode,
+				  const struct amdgpu_video_codecs **codecs);
 };
 
 /*
@@ -1191,6 +1216,7 @@ int emu_soc_asic_init(struct amdgpu_device *adev);
 #define amdgpu_asic_flush_hdp(adev, r) (adev)->asic_funcs->flush_hdp((adev), (r))
 #define amdgpu_asic_invalidate_hdp(adev, r) (adev)->asic_funcs->invalidate_hdp((adev), (r))
 #define amdgpu_asic_need_full_reset(adev) (adev)->asic_funcs->need_full_reset((adev))
+#define amdgpu_asic_query_video_codecs(adev, e, c) (adev)->asic_funcs->query_video_codecs((adev), (e), (c))
 
 /* Common functions */
 bool amdgpu_device_should_recover_gpu(struct amdgpu_device *adev);

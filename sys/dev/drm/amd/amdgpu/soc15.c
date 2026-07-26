@@ -601,6 +601,169 @@ static bool soc15_need_full_reset(struct amdgpu_device *adev)
 	return true;
 }
 
+/* Vega, Raven, Arcturus */
+static const struct amdgpu_video_codec_info vega_video_codecs_encode_array[] =
+{
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG4_AVC,
+		.max_width = 4096,
+		.max_height = 2304,
+		.max_pixels_per_frame = 4096 * 2304,
+		.max_level = 0,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_HEVC,
+		.max_width = 4096,
+		.max_height = 2304,
+		.max_pixels_per_frame = 4096 * 2304,
+		.max_level = 0,
+	},
+};
+
+static const struct amdgpu_video_codecs vega_video_codecs_encode =
+{
+	.codec_count = ARRAY_SIZE(vega_video_codecs_encode_array),
+	.codec_array = vega_video_codecs_encode_array,
+};
+
+/* Vega */
+static const struct amdgpu_video_codec_info vega_video_codecs_decode_array[] =
+{
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG2,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 3,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG4,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 5,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG4_AVC,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 52,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_VC1,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 4,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_HEVC,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 186,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_JPEG,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 0,
+	},
+};
+
+static const struct amdgpu_video_codecs vega_video_codecs_decode =
+{
+	.codec_count = ARRAY_SIZE(vega_video_codecs_decode_array),
+	.codec_array = vega_video_codecs_decode_array,
+};
+
+/* Raven */
+static const struct amdgpu_video_codec_info rv_video_codecs_decode_array[] =
+{
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG2,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 3,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG4,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 5,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_MPEG4_AVC,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 52,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_VC1,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 4,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_HEVC,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 186,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_JPEG,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 0,
+	},
+	{
+		.codec_type = AMDGPU_VIDEO_CODEC_TYPE_VP9,
+		.max_width = 4096,
+		.max_height = 4096,
+		.max_pixels_per_frame = 4096 * 4096,
+		.max_level = 0,
+	},
+};
+
+static const struct amdgpu_video_codecs rv_video_codecs_decode =
+{
+	.codec_count = ARRAY_SIZE(rv_video_codecs_decode_array),
+	.codec_array = rv_video_codecs_decode_array,
+};
+
+/* Renoir, Arcturus */
+static int soc15_query_video_codecs(struct amdgpu_device *adev, bool encode,
+				    const struct amdgpu_video_codecs **codecs)
+{
+	switch (adev->asic_type) {
+	case CHIP_VEGA20:
+	case CHIP_VEGA10:
+	case CHIP_VEGA12:
+		if (encode)
+			*codecs = &vega_video_codecs_encode;
+		else
+			*codecs = &vega_video_codecs_decode;
+		return 0;
+	case CHIP_RAVEN:
+		if (encode)
+			*codecs = &vega_video_codecs_encode;
+		else
+			*codecs = &rv_video_codecs_decode;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+
 static const struct amdgpu_asic_funcs soc15_asic_funcs =
 {
 	.read_disabled_bios = &soc15_read_disabled_bios,
@@ -615,6 +778,7 @@ static const struct amdgpu_asic_funcs soc15_asic_funcs =
 	.flush_hdp = &soc15_flush_hdp,
 	.invalidate_hdp = &soc15_invalidate_hdp,
 	.need_full_reset = &soc15_need_full_reset,
+	.query_video_codecs = &soc15_query_video_codecs,
 };
 
 static int soc15_common_early_init(void *handle)
