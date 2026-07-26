@@ -251,6 +251,7 @@ static void dce_v11_0_page_flip(struct amdgpu_device *adev,
 				int crtc_id, u64 crtc_base, bool async)
 {
 	struct amdgpu_crtc *amdgpu_crtc = adev->mode_info.crtcs[crtc_id];
+	struct drm_framebuffer *fb = amdgpu_crtc->base.primary->fb;
 	u32 tmp;
 
 	/* flip immediate for async, default is vsync */
@@ -261,6 +262,15 @@ static void dce_v11_0_page_flip(struct amdgpu_device *adev,
 	/* update the scanout addresses */
 	WREG32(mmGRPH_PRIMARY_SURFACE_ADDRESS_HIGH + amdgpu_crtc->crtc_offset,
 	       upper_32_bits(crtc_base));
+	/*
+	 * Update the pitch.  A flip is not a modeset, so nothing else notices
+	 * that the framebuffer being scanned out has changed shape, and the
+	 * hardware would keep detiling at the old stride.  This has to happen
+	 * before the low address is written, since that write is what latches
+	 * the group.
+	 */
+	WREG32(mmGRPH_PITCH + amdgpu_crtc->crtc_offset,
+	       fb->pitches[0] / fb->format->cpp[0]);
 	/* writing to the low address triggers the update */
 	WREG32(mmGRPH_PRIMARY_SURFACE_ADDRESS + amdgpu_crtc->crtc_offset,
 	       lower_32_bits(crtc_base));
