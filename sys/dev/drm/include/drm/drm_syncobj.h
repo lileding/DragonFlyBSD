@@ -139,7 +139,7 @@ void drm_syncobj_add_point(struct drm_syncobj *syncobj,
 			   struct dma_fence_chain *chain,
 			   struct dma_fence *fence, uint64_t point);
 int drm_syncobj_find_fence(struct drm_file *file_private,
-			   u32 handle, u64 point,
+			   u32 handle, u64 point, u64 flags,
 			   struct dma_fence **fence);
 #if 0 /* redundant redeclaration */
 void drm_syncobj_free(struct kref *kref);

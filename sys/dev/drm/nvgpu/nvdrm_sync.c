@@ -66,7 +66,7 @@ nvdrm_sync_collect_wait_fences(struct drm_file *file, uint32_t count,
 		}
 		error = -drm_syncobj_find_fence(file, waits[i].handle,
 		    type == DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ ?
-		    waits[i].timeline_value : 0, &dma);
+		    waits[i].timeline_value : 0, 0, &dma);
 		if (error != 0)
 			break;
 		if (dma_fence_is_signaled(dma)) {

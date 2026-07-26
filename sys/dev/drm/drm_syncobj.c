@@ -368,9 +368,9 @@ static int drm_syncobj_assign_null_handle(struct drm_syncobj *syncobj)
  * contains a reference to the fence, which must be released by calling
  * dma_fence_put().
  */
-int drm_syncobj_find_fence(struct drm_file *file_private,
-			   u32 handle, u64 point,
-			   struct dma_fence **fence)
+static int drm_syncobj_lookup_fence(struct drm_file *file_private,
+				   u32 handle, u64 point,
+				   struct dma_fence **fence)
 {
 	struct drm_syncobj *syncobj = drm_syncobj_find(file_private, handle);
 	int ret = 0;
@@ -666,7 +666,7 @@ static int drm_syncobj_export_sync_file(struct drm_file *file_private,
 	if (fd < 0)
 		return fd;
 
-	ret = drm_syncobj_find_fence(file_private, handle, 0, &fence);
+	ret = drm_syncobj_find_fence(file_private, handle, 0, 0, &fence);
 	if (ret)
 		goto err_put_fd;
 
@@ -1185,10 +1185,20 @@ static void drm_syncobj_array_free(struct drm_syncobj **syncobjs,
 
 #define DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT (5 * hz)
 
-static int
-drm_syncobj_find_fence_for_transfer(struct drm_file *file_private,
-				    u32 handle, u64 point, u32 flags,
-				    struct dma_fence **fence)
+/*
+ * Resolve a syncobj handle, and a point within it if the syncobj is a timeline,
+ * to a fence.
+ *
+ * WAIT_FOR_SUBMIT is the only accepted flag.  Without it, a point that has not
+ * been submitted yet is an error.  With it, the caller sleeps until the point
+ * materializes - a timeline producer is allowed to run behind its consumer, and
+ * failing here would turn that into a userspace error rather than a wait.  Note
+ * this waits for the point to *exist*, not for it to signal; plain
+ * SYNCOBJ_WAIT keeps the stronger meaning.
+ */
+int drm_syncobj_find_fence(struct drm_file *file_private,
+			   u32 handle, u64 point, u64 flags,
+			   struct dma_fence **fence)
 {
 	struct drm_syncobj *syncobj;
 	uint64_t wait_point;
@@ -1198,7 +1208,7 @@ drm_syncobj_find_fence_for_transfer(struct drm_file *file_private,
 	if (flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
 		return -EINVAL;
 
-	ret = drm_syncobj_find_fence(file_private, handle, point, fence);
+	ret = drm_syncobj_lookup_fence(file_private, handle, point, fence);
 	if (ret == 0 || !(flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT))
 		return ret;
 
@@ -1221,7 +1231,7 @@ drm_syncobj_find_fence_for_transfer(struct drm_file *file_private,
 	if (timeout < 0)
 		return (int)timeout;
 
-	return drm_syncobj_find_fence(file_private, handle, point, fence);
+	return drm_syncobj_lookup_fence(file_private, handle, point, fence);
 }
 
 int
@@ -1252,7 +1262,7 @@ drm_syncobj_transfer_ioctl(struct drm_device *dev, void *data,
 		return -ENOENT;
 	}
 
-	ret = drm_syncobj_find_fence_for_transfer(file_private,
+	ret = drm_syncobj_find_fence(file_private,
 	    args->src_handle, args->src_point, args->flags, &fence);
 	if (ret < 0)
 		goto out;
