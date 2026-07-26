@@ -167,7 +167,7 @@ static int amdgpu_vram_mgr_new(struct ttm_mem_type_manager *man,
 	struct drm_mm_node *nodes;
 	enum drm_mm_insert_mode mode;
 	unsigned long lpfn, num_nodes, pages_per_node, pages_left;
-	uint64_t usage = 0, vis_usage = 0;
+	uint64_t vis_usage = 0;
 	unsigned i;
 	int r;
 
@@ -185,10 +185,20 @@ static int amdgpu_vram_mgr_new(struct ttm_mem_type_manager *man,
 		num_nodes = DIV_ROUND_UP(mem->num_pages, pages_per_node);
 	}
 
+	/* bail out quickly if there's likely not enough VRAM for this BO */
+	if (atomic64_add_return(mem->num_pages << PAGE_SHIFT, &mgr->usage) >
+	    adev->gmc.mc_vram_size) {
+		atomic64_sub(mem->num_pages << PAGE_SHIFT, &mgr->usage);
+		mem->mm_node = NULL;
+		return 0;
+	}
+
 	nodes = kvmalloc_array(num_nodes, sizeof(*nodes),
 			       GFP_KERNEL | __GFP_ZERO);
-	if (!nodes)
+	if (!nodes) {
+		atomic64_sub(mem->num_pages << PAGE_SHIFT, &mgr->usage);
 		return -ENOMEM;
+	}
 
 	mode = DRM_MM_INSERT_BEST;
 	if (place->flags & TTM_PL_FLAG_TOPDOWN)
@@ -208,7 +218,6 @@ static int amdgpu_vram_mgr_new(struct ttm_mem_type_manager *man,
 		if (unlikely(r))
 			break;
 
-		usage += nodes[i].size << PAGE_SHIFT;
 		vis_usage += amdgpu_vram_mgr_vis_size(adev, &nodes[i]);
 		amdgpu_vram_mgr_virt_start(mem, &nodes[i]);
 		pages_left -= pages;
@@ -228,14 +237,12 @@ static int amdgpu_vram_mgr_new(struct ttm_mem_type_manager *man,
 		if (unlikely(r))
 			goto error;
 
-		usage += nodes[i].size << PAGE_SHIFT;
 		vis_usage += amdgpu_vram_mgr_vis_size(adev, &nodes[i]);
 		amdgpu_vram_mgr_virt_start(mem, &nodes[i]);
 		pages_left -= pages;
 	}
 	spin_unlock(&mgr->lock);
 
-	atomic64_add(usage, &mgr->usage);
 	atomic64_add(vis_usage, &mgr->vis_usage);
 
 	mem->mm_node = nodes;
@@ -246,6 +253,7 @@ error:
 	while (i--)
 		drm_mm_remove_node(&nodes[i]);
 	spin_unlock(&mgr->lock);
+	atomic64_sub(mem->num_pages << PAGE_SHIFT, &mgr->usage);
 
 	kvfree(nodes);
 	return r == -ENOSPC ? 0 : r;

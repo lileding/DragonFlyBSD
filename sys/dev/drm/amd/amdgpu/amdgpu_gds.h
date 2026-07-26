@@ -34,6 +34,8 @@ struct amdgpu_gds_asic_info {
 };
 
 struct amdgpu_gds {
+	uint32_t			gds_compute_max_wave_id;
+
 	struct amdgpu_gds_asic_info	mem;
 	struct amdgpu_gds_asic_info	gws;
 	struct amdgpu_gds_asic_info	oa;
