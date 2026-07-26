@@ -1,11 +1,14 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(dirname "$0")
+ROOT=$(cd "$(dirname "$0")" && pwd)
 BASE=${LINUX_BASE_INITRAMFS:-/var/tmp/alpine-initramfs-virt}
 WORK=${LINUX_INITRD_WORK:-/var/tmp/dfvmm-linux-initrd-rootfs}
 OUT=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 PACKER=${LINUX_INITRD_PACKER:-$ROOT/linux_initrd_pack_newc.py}
+PROBE_SRC=${LINUX_TSC_PM_PROBE_SRC:-$ROOT/linux_tsc_pm_probe.c}
+PROBE_CC=${LINUX_TSC_PM_PROBE_CC:-/usr/local/bin/clang19}
+PROBE_LD=${LINUX_TSC_PM_PROBE_LD:-/usr/local/bin/ld.lld19}
 
 fail()
 {
@@ -15,6 +18,9 @@ fail()
 
 [ -f "$BASE" ] || fail "missing base initramfs: $BASE"
 [ -f "$PACKER" ] || fail "missing packer: $PACKER"
+[ -f "$PROBE_SRC" ] || fail "missing TSC/PM probe source: $PROBE_SRC"
+[ -x "$PROBE_CC" ] || fail "missing TSC/PM probe compiler: $PROBE_CC"
+[ -x "$PROBE_LD" ] || fail "missing TSC/PM probe linker: $PROBE_LD"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -27,6 +33,14 @@ mkdir -p "$WORK"
 	fi
 
 	mkdir -p dev proc sys run tmp root usr/local/bin etc
+	"$PROBE_CC" --target=x86_64-linux-gnu -std=c11 -O2 -Wall -Wextra \
+		-Werror -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone \
+		-fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -static \
+		--ld-path="$PROBE_LD" -Wl,-e,_start -Wl,-z,noexecstack \
+		-Wl,--build-id=none "$PROBE_SRC" \
+		-o usr/local/bin/dfvmm-tsc-pm-probe
+	readelf -SW usr/local/bin/dfvmm-tsc-pm-probe | grep -qi eh_frame &&
+		fail "TSC/PM probe contains unwind sections"
 	: >dev/console
 	: >dev/ttyS0
 	: >dev/null

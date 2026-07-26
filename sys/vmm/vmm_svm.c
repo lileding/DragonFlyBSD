@@ -36,17 +36,23 @@
 #include "vmm_vcpu.h"
 
 static int vmm_svm_trace_enabled;
+static int vmm_svm_timing_trace_enabled;
 
 SYSCTL_DECL(_debug_vmm);
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
     &vmm_svm_trace_enabled, 0,
     "record SVM trace events in per-machine events logs");
+SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
+    &vmm_svm_timing_trace_enabled, 0,
+    "record bounded SVM PM timer and HPET reference events");
 
 #define VMM_SVM_TRACE(svm, fmt, ...) do {				\
 	if (vmm_svm_trace_enabled)					\
 		vmm_machine_logf((svm)->borrow_imm_machine, fmt,	\
 		    __VA_ARGS__);					\
 } while (0)
+
+#define VMM_SVM_TIMING_TRACE_LIMIT	96U
 
 #define VMM_SVM_CTRL_INTERCEPT_INTR	(1U << 0)
 #define VMM_SVM_CTRL_INTERCEPT_NMI	(1U << 1)
@@ -87,7 +93,6 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_CTRL_INTERCEPT_STGI	(1U << 4)
 #define VMM_SVM_CTRL_INTERCEPT_CLGI	(1U << 5)
 #define VMM_SVM_CTRL_INTERCEPT_SKINIT	(1U << 6)
-#define VMM_SVM_CTRL_INTERCEPT_RDTSCP	(1U << 7)
 #define VMM_SVM_CTRL_INTERCEPT_WBINVD	(1U << 9)
 #define VMM_SVM_CTRL_INTERCEPT_MONITOR	(1U << 10)
 #define VMM_SVM_CTRL_INTERCEPT_MWAIT	(1U << 11)
@@ -192,7 +197,6 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_SVM_EXIT_MSR		0x07cULL
 #define VMM_SVM_EXIT_SHUTDOWN		0x07fULL
 #define VMM_SVM_EXIT_VMMCALL		0x081ULL
-#define VMM_SVM_EXIT_RDTSCP		0x087ULL
 #define VMM_SVM_EXIT_WBINVD		0x089ULL
 #define VMM_SVM_EXIT_MONITOR		0x08aULL
 #define VMM_SVM_EXIT_MWAIT		0x08bULL
@@ -266,6 +270,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 #define VMM_PIT_CH2		0x42U
 #define VMM_PIT_CMD		0x43U
 #define VMM_PIT_PORTB		0x61U
+#define VMM_PIT_FREQ		1193182ULL
+#define VMM_PIT_PORTB_GATE2	0x01U
 #define VMM_PIT_PORTB_OUT2	0x20U
 #define VMM_PM_TIMER_PORT	0x408U
 #define VMM_PM_TIMER_LAST	0x40bU
@@ -588,6 +594,7 @@ struct vmm_svm_backend {
 	uint64_t mut_host_sysenter_cs;
 	uint64_t mut_host_sysenter_esp;
 	uint64_t mut_host_sysenter_eip;
+	uint64_t mut_host_tsc_aux;
 	uint64_t mut_guest_mtrr_def_type;
 	uint64_t mut_guest_spec_ctrl;
 	uint64_t mut_guest_syscfg;
@@ -612,6 +619,7 @@ struct vmm_svm_backend {
 	uint64_t mut_hpet_timer_comparator[VMM_HPET_TIMER_COUNT];
 	uint64_t mut_hpet_timer_fsb[VMM_HPET_TIMER_COUNT];
 	uint64_t mut_pm_timer_tsc;
+	uint32_t mut_timing_trace_count;
 	uint64_t mut_gprs[VMM_X64_NGPR];
 	uint8_t mut_com1_dll;
 	uint8_t mut_com1_dlm;
@@ -624,11 +632,17 @@ struct vmm_svm_backend {
 	int mut_com1_thr_irq_pending;
 	int mut_com1_lsr_overrun;
 	uint32_t mut_pci_cfg_addr;
+	/* vCPU-thread-owned channel 2 mode-0 polling calibration state. */
 	uint8_t mut_pit_portb;
 	uint8_t mut_pit_ch0_read_state;
 	uint8_t mut_pit_ch0_write_state;
 	uint16_t mut_pit_ch0_reload;
 	uint16_t mut_pit_ch0_count;
+	uint64_t mut_pit_ch2_start_tsc;
+	uint16_t mut_pit_ch2_reload;
+	uint8_t mut_pit_ch2_read_state;
+	uint8_t mut_pit_ch2_write_state;
+	uint8_t mut_pit_ch2_armed;
 	uint8_t mut_pic1_mask;
 	uint8_t mut_pic2_mask;
 	uint8_t mut_pic_elcr1;
@@ -662,6 +676,9 @@ struct vmm_svm_msr_policy {
 CTASSERT(sizeof(struct vmm_svm_ctrl) == 1024);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, pause_filt_thresh) == 0x03c);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, pause_filt_cnt) == 0x03e);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, iopm_base_pa) == 0x040);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, msrpm_base_pa) == 0x048);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, tsc_offset) == 0x050);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, v) == 0x060);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, intr) == 0x068);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, exitcode) == 0x070);
@@ -1390,7 +1407,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_CTRL_INTERCEPT_STGI |
 	    VMM_SVM_CTRL_INTERCEPT_CLGI |
 	    VMM_SVM_CTRL_INTERCEPT_SKINIT |
-	    VMM_SVM_CTRL_INTERCEPT_RDTSCP |
 	    VMM_SVM_CTRL_INTERCEPT_WBINVD |
 	    VMM_SVM_CTRL_INTERCEPT_MONITOR |
 	    VMM_SVM_CTRL_INTERCEPT_MWAIT |
@@ -1451,6 +1467,7 @@ vmm_svm_enable_cpu(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_cpu_state *cpu_state;
 	uint64_t msr;
+	uint64_t observed_ratio;
 
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if (msr & VM_CR_SVMDIS)
@@ -1462,6 +1479,12 @@ vmm_svm_enable_cpu(struct vmm_svm_backend *svm)
 	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
 	if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
 		wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
+		observed_ratio = rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm cpu%d tsc ratio request=0x%jx observed=0x%jx match=%d",
+		    mycpu->gd_cpuid, (uintmax_t)svm->imm_tsc_ratio,
+		    (uintmax_t)observed_ratio,
+		    observed_ratio == svm->imm_tsc_ratio);
 		cpu_state->mut_tsc_ratio = svm->imm_tsc_ratio;
 	}
 }
@@ -1558,11 +1581,14 @@ vmm_svm_guest_misc_enter(struct vmm_svm_backend *svm)
 	svm->mut_host_sysenter_cs = rdmsr(MSR_SYSENTER_CS);
 	svm->mut_host_sysenter_esp = rdmsr(MSR_SYSENTER_ESP);
 	svm->mut_host_sysenter_eip = rdmsr(MSR_SYSENTER_EIP);
+	svm->mut_host_tsc_aux = rdmsr(MSR_TSC_AUX);
+	wrmsr(MSR_TSC_AUX, svm->mut_guest_tsc_aux);
 }
 
 static void
 vmm_svm_guest_misc_leave(struct vmm_svm_backend *svm)
 {
+	wrmsr(MSR_TSC_AUX, svm->mut_host_tsc_aux);
 	wrmsr(MSR_SYSENTER_CS, svm->mut_host_sysenter_cs);
 	wrmsr(MSR_SYSENTER_ESP, svm->mut_host_sysenter_esp);
 	wrmsr(MSR_SYSENTER_EIP, svm->mut_host_sysenter_eip);
@@ -1871,13 +1897,30 @@ vmm_svm_hpet_counter(struct vmm_svm_backend *svm)
 static uint32_t
 vmm_svm_pm_timer_counter(struct vmm_svm_backend *svm)
 {
-	uint64_t delta = rdtsc() - svm->mut_pm_timer_tsc;
+	uint64_t now;
+	uint64_t delta;
 	uint64_t ticks;
+	uint32_t counter;
+	uint32_t sample;
+
+	now = rdtsc();
+	delta = now - svm->mut_pm_timer_tsc;
 
 	ticks = (delta / svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ +
 	    ((delta % svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ) /
 	    svm->imm_host_tsc_hz;
-	return (uint32_t)ticks & VMM_PM_TIMER_MASK;
+	counter = (uint32_t)ticks & VMM_PM_TIMER_MASK;
+	if (vmm_svm_timing_trace_enabled &&
+	    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+		sample = svm->mut_timing_trace_count++;
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm timing pmtimer sample=%u cpu=%d root_tsc=0x%jx pm=0x%x base_tsc=0x%jx delta=0x%jx offset=0x%jx ratio=0x%jx",
+		    sample, mycpu->gd_cpuid, (uintmax_t)now, counter,
+		    (uintmax_t)svm->mut_pm_timer_tsc, (uintmax_t)delta,
+		    (uintmax_t)svm->own_mut_vmcb->ctrl.tsc_offset,
+		    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
+	}
+	return counter;
 }
 
 static uint64_t
@@ -1941,6 +1984,19 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 			    (uintmax_t)svm->mut_hpet_config,
 			    (uintmax_t)svm->imm_host_tsc_hz,
 			    (uintmax_t)VMM_HPET_FREQ);
+			if (vmm_svm_timing_trace_enabled &&
+			    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+				uint32_t sample = svm->mut_timing_trace_count++;
+
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm timing hpet config sample=%u cpu=%d root_tsc=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
+				    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
+				    (uintmax_t)svm->mut_hpet_config,
+				    (uintmax_t)svm->mut_hpet_counter_base,
+				    (uintmax_t)svm->mut_hpet_counter_tsc,
+				    (uintmax_t)svm->own_mut_vmcb->ctrl.tsc_offset,
+				    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
+			}
 		}
 		return;
 	case VMM_HPET_REG_STATUS:
@@ -2059,6 +2115,20 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
 		val = vmm_svm_hpet_read(svm, gpa - VMM_HPET_BASE, size);
 		vmm_svm_gpr_write(svm, reg, val, size);
+		if (gpa - VMM_HPET_BASE == VMM_HPET_REG_COUNTER &&
+		    vmm_svm_timing_trace_enabled &&
+		    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+			uint32_t sample = svm->mut_timing_trace_count++;
+
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm timing hpet counter sample=%u cpu=%d root_tsc=0x%jx hpet=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
+			    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
+			    (uintmax_t)val, (uintmax_t)svm->mut_hpet_config,
+			    (uintmax_t)svm->mut_hpet_counter_base,
+			    (uintmax_t)svm->mut_hpet_counter_tsc,
+			    (uintmax_t)vmcb->ctrl.tsc_offset,
+			    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
+		}
 		if (gpa - VMM_HPET_BASE < VMM_HPET_REG_COUNTER)
 			vmm_machine_logf(svm->borrow_imm_machine,
 			    "svm vcpu%u hpet read off=0x%jx size=%d val=0x%jx rip=0x%jx inst_len=%u nrip=0x%jx",
@@ -2530,6 +2600,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t msr = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
 	unsigned int idx;
+	uint64_t old_tsc;
 	uint64_t val;
 
 	if (vmcb->ctrl.exitinfo1 == 0) {
@@ -2694,11 +2765,25 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC:
+		old_tsc = vmm_svm_guest_tsc(svm);
 		vmcb->ctrl.tsc_offset = val -
 		    (uint64_t)(((_uint128_t)rdtsc() * svm->imm_tsc_ratio) >> 32);
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u tsc write old=0x%jx new=0x%jx offset=0x%jx cpu=%d",
+		    vc->imm_id, (uintmax_t)old_tsc, (uintmax_t)val,
+		    (uintmax_t)vmcb->ctrl.tsc_offset, mycpu->gd_cpuid);
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_TSC_AUX:
+		if (val > UINT32_MAX) {
+			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
+			    "invalid-value");
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_ERROR_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION |
+			    VMM_X86_EXCEPTION_GP;
+			return 1;
+		}
 		svm->mut_guest_tsc_aux = val;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
@@ -2944,15 +3029,6 @@ vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
 	    vc->imm_id, name, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->ctrl.exitinfo2, hvmflags, reqflags,
 	    (uintmax_t)vmcb->state.rip);
-}
-
-static void
-vmm_svm_set_rax_rdx(struct vmm_svm_backend *svm, uint64_t val)
-{
-	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-
-	vmcb->state.rax = val & 0xffffffffULL;
-	svm->mut_gprs[VMM_X64_GPR_RDX] = val >> 32;
 }
 
 static void
@@ -3340,6 +3416,9 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	unsigned int port = (unsigned int)VMM_SVM_IOIO_PORT(info);
 	const char *op = (info & VMM_SVM_IOIO_IN) ? "in" : "out";
 	int size = vmm_svm_ioio_size(info);
+	uint64_t elapsed;
+	uint64_t pit_ticks;
+	uint32_t pit_count;
 	uint32_t val;
 
 	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0) {
@@ -3411,6 +3490,9 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	if (port == VMM_PIT_PORTB) {
+		uint8_t old_gate;
+		uint8_t new_gate;
+
 		if (size != 1) {
 			vmm_machine_logf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit portb io op=%s size=%d rip=0x%jx",
@@ -3418,10 +3500,28 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			return 0;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
-			vmm_svm_set_rax_low(vmcb,
-			    svm->mut_pit_portb | VMM_PIT_PORTB_OUT2, size);
+			val = svm->mut_pit_portb;
+			if (svm->mut_pit_ch2_armed == 0 ||
+			    (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2) == 0) {
+				val |= VMM_PIT_PORTB_OUT2;
+			} else {
+				elapsed = rdtsc() - svm->mut_pit_ch2_start_tsc;
+				pit_ticks = (elapsed / svm->imm_host_tsc_hz) *
+				    VMM_PIT_FREQ + ((elapsed % svm->imm_host_tsc_hz) *
+				    VMM_PIT_FREQ) / svm->imm_host_tsc_hz;
+				pit_count = svm->mut_pit_ch2_reload != 0 ?
+				    svm->mut_pit_ch2_reload : 0x10000U;
+				if (pit_ticks >= pit_count)
+					val |= VMM_PIT_PORTB_OUT2;
+			}
+			vmm_svm_set_rax_low(vmcb, val, size);
 		} else {
+			old_gate = svm->mut_pit_portb & VMM_PIT_PORTB_GATE2;
 			svm->mut_pit_portb = vmcb->state.rax & 0x03U;
+			new_gate = svm->mut_pit_portb & VMM_PIT_PORTB_GATE2;
+			if (old_gate == 0 && new_gate != 0 &&
+			    svm->mut_pit_ch2_armed != 0)
+				svm->mut_pit_ch2_start_tsc = rdtsc();
 		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
@@ -3477,7 +3577,18 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 				}
 				svm->mut_pit_ch0_read_state = 0;
 				svm->mut_pit_ch0_write_state = 0;
-			} else if ((val & 0xc0U) != 0x80U) {
+			} else if ((val & 0xc0U) == 0x80U) {
+				if (val != 0xb0U) {
+					vmm_machine_logf(svm->borrow_imm_machine,
+					    "svm vcpu%u unsupported pit ch2 cmd=0x%x rip=0x%jx",
+					    vc->imm_id, val,
+					    (uintmax_t)vmcb->state.rip);
+					return 0;
+				}
+				svm->mut_pit_ch2_read_state = 0;
+				svm->mut_pit_ch2_write_state = 0;
+				svm->mut_pit_ch2_armed = 0;
+			} else {
 				vmm_machine_logf(svm->borrow_imm_machine,
 				    "svm vcpu%u unsupported pit cmd=0x%x rip=0x%jx",
 				    vc->imm_id, val,
@@ -3495,8 +3606,41 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
-		if (info & VMM_SVM_IOIO_IN)
-			vmm_svm_set_rax_low(vmcb, 0xffU, size);
+		if (info & VMM_SVM_IOIO_IN) {
+			pit_count = svm->mut_pit_ch2_reload != 0 ?
+			    svm->mut_pit_ch2_reload : 0x10000U;
+			if (svm->mut_pit_ch2_armed != 0 &&
+			    (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2) != 0) {
+				elapsed = rdtsc() - svm->mut_pit_ch2_start_tsc;
+				pit_ticks = (elapsed / svm->imm_host_tsc_hz) *
+				    VMM_PIT_FREQ + ((elapsed % svm->imm_host_tsc_hz) *
+				    VMM_PIT_FREQ) / svm->imm_host_tsc_hz;
+				if (pit_ticks >= pit_count)
+					pit_count = 0;
+				else
+					pit_count -= (uint32_t)pit_ticks;
+			}
+			if (svm->mut_pit_ch2_read_state == 0) {
+				val = pit_count & 0xffU;
+				svm->mut_pit_ch2_read_state = 1;
+			} else {
+				val = (pit_count >> 8) & 0xffU;
+				svm->mut_pit_ch2_read_state = 0;
+			}
+			vmm_svm_set_rax_low(vmcb, val, size);
+		} else if (svm->mut_pit_ch2_write_state == 0) {
+			svm->mut_pit_ch2_reload &= 0xff00U;
+			svm->mut_pit_ch2_reload |= vmcb->state.rax & 0xffU;
+			svm->mut_pit_ch2_write_state = 1;
+		} else {
+			svm->mut_pit_ch2_reload &= 0x00ffU;
+			svm->mut_pit_ch2_reload |=
+			    (vmcb->state.rax & 0xffU) << 8;
+			svm->mut_pit_ch2_write_state = 0;
+			svm->mut_pit_ch2_armed = 1;
+			if (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2)
+				svm->mut_pit_ch2_start_tsc = rdtsc();
+		}
 		vmm_svm_advance_ioio(vmcb);
 		return 1;
 	}
@@ -3674,16 +3818,6 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 	console = &svm->borrow_imm_machine->own_mut_console;
 	VMM_SVM_TRACE(svm, "svm vcpu%u console input poke pending=%zu",
 	    vc->imm_id, vmm_console_guest_pending(console));
-}
-
-static void
-vmm_svm_handle_rdtscp(struct vmm_svm_backend *svm)
-{
-	uint64_t tsc = vmm_svm_guest_tsc(svm);
-
-	vmm_svm_set_rax_rdx(svm, tsc);
-	svm->mut_gprs[VMM_X64_GPR_RCX] = svm->mut_guest_tsc_aux;
-	vmm_svm_advance_rip(svm->own_mut_vmcb);
 }
 
 static void
@@ -4289,7 +4423,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_INIT:
 		case VMM_SVM_EXIT_VINTR:
 			vmm_svm_handle_root_event(svm, vc, reqflags);
-			break;
+			vmm_svm_avic_unbind_cpu(svm);
+			lwkt_user_yield();
+			continue;
 		case VMM_SVM_EXIT_INVD:
 		case VMM_SVM_EXIT_WBINVD:
 			vmm_svm_handle_guest_cache_op(svm);
@@ -4317,9 +4453,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
 			goto unhandled;
-		case VMM_SVM_EXIT_RDTSCP:
-			vmm_svm_handle_rdtscp(svm);
-			break;
 		case VMM_SVM_EXIT_MONITOR:
 			vmm_svm_advance_rip(vmcb);
 			break;
@@ -4383,7 +4516,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto out;
 		}
 		vmm_svm_avic_unbind_cpu(svm);
-		lwkt_user_yield();
 	}
 out:
 	vmm_svm_avic_unbind_cpu(svm);
