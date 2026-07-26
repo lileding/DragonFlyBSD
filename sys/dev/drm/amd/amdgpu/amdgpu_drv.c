@@ -71,9 +71,39 @@
  * - 3.25.0 - Add support for sensor query info (stable pstate sclk/mclk).
  * - 3.26.0 - GFX9: Process AMDGPU_IB_FLAG_TC_WB_NOT_INVALIDATE.
  * - 3.27.0 - Add new chunk to to AMDGPU_CS to enable BO_LIST creation.
+ * - 3.28.0 - Add AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES
+ * - 3.29.0 - Add AMDGPU_IB_FLAG_RESET_GDS_MAX_WAVE_ID
+ * - 3.30.0 - Add AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE.
+ * - 3.31.0 - Add support for per-flip tiling attribute changes with DC
+ * - 3.32.0 - Add syncobj timeline support to AMDGPU_CS.
+ * - 3.33.0 - Fixes for GDS ENOMEM failures in AMDGPU_CS.
+ * - 3.34.0 - Non-DC can flip correctly between buffers with different pitches
+ * - 3.35.0 - Add drm_amdgpu_info_device::tcc_disabled_mask
+ * - 3.36.0 - Allow reading more status registers on si/cik
+ * - 3.37.0 - L2 is invalidated before SDMA IBs, needed for correctness
+ * - 3.38.0 - Add AMDGPU_IB_FLAG_EMIT_MEM_SYNC
+ * - 3.39.0 - DMABUF implicit sync does a full pipeline sync
+ * - 3.40.0 - Add AMDGPU_IDS_FLAGS_TMZ
+ * - 3.41.0 - Add video codec query
+ * - 3.42.0 - Add 16bpc fixed point display support
+ * - 3.43.0 - Add device hot plug/unplug support
+ * - 3.44.0 - DCN3 supports DCC independent block settings: !64B && 128B, 64B && 128B
+ * - 3.45.0 - Add context ioctl stable pstate interface
+ * - 3.46.0 - To enable hot plug amdgpu tests in libdrm
+ * - 3.47.0 - Add AMDGPU_GEM_CREATE_DISCARDABLE and AMDGPU_VM_NOALLOC flags
+ * - 3.48.0 - Add IP discovery version info to HW INFO
+ * - 3.49.0 - Add gang submit into CS IOCTL
+ * - 3.50.0 - Update AMDGPU_INFO_DEV_INFO IOCTL for minimum engine and memory clock
+ *            Update AMDGPU_INFO_SENSOR IOCTL for PEAK_PSTATE engine and memory clock
+ *   3.51.0 - Return the PCIe gen and lanes from the INFO ioctl
+ *   3.52.0 - Add AMDGPU_IDS_FLAGS_CONFORMANT_TRUNC_COORD, add device_info fields:
+ *            tcp_cache_size, num_sqc_per_wgp, sqc_data_cache_size, sqc_inst_cache_size,
+ *            gl1c_cache_size, gl2c_cache_size, mall_size, enabled_rb_pipes_mask_hi
+ *   3.53.0 - Support for GFX11 CP GFX shadowing
+ *   3.54.0 - Add AMDGPU_CTX_QUERY2_FLAGS_RESET_IN_PROGRESS support
  */
 #define KMS_DRIVER_MAJOR	3
-#define KMS_DRIVER_MINOR	27
+#define KMS_DRIVER_MINOR	54
 #define KMS_DRIVER_PATCHLEVEL	0
 
 int amdgpu_vram_limit = 0;

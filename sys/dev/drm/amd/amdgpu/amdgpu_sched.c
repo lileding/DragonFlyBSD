@@ -50,6 +50,45 @@ enum drm_sched_priority amdgpu_to_sched_priority(int amdgpu_priority)
 	}
 }
 
+static int amdgpu_sched_context_priority_override(struct amdgpu_device *adev,
+						  int fd,
+						  unsigned ctx_id,
+						  enum drm_sched_priority priority)
+{
+	/* Needs an fd-to-drm_file lookup this tree does not have; see the
+	 * comment on amdgpu_sched_process_priority_override() below.
+	 */
+	STUB();
+	return -ENOSYS;
+#if 0
+	struct file *filp = fget(fd);
+	struct amdgpu_fpriv *fpriv;
+	struct amdgpu_ctx *ctx;
+	int r;
+
+	if (!filp)
+		return -EINVAL;
+
+	r = amdgpu_file_to_fpriv(filp, &fpriv);
+	if (r) {
+		fput(filp);
+		return r;
+	}
+
+	ctx = amdgpu_ctx_get(fpriv, ctx_id);
+	if (!ctx) {
+		fput(filp);
+		return -EINVAL;
+	}
+
+	amdgpu_ctx_priority_override(ctx, priority);
+	amdgpu_ctx_put(ctx);
+	fput(filp);
+
+	return 0;
+#endif
+}
+
 static int amdgpu_sched_process_priority_override(struct amdgpu_device *adev,
 						  int fd,
 						  enum drm_sched_priority priority)
@@ -95,6 +134,12 @@ int amdgpu_sched_ioctl(struct drm_device *dev, void *data,
 	case AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE:
 		r = amdgpu_sched_process_priority_override(adev,
 							   args->in.fd,
+							   priority);
+		break;
+	case AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE:
+		r = amdgpu_sched_context_priority_override(adev,
+							   args->in.fd,
+							   args->in.ctx_id,
 							   priority);
 		break;
 	default:
