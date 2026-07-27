@@ -1009,13 +1009,8 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 		return;
 	cpuid = mycpu->gd_cpuid;
 	apicid = (uint32_t)CPUID_TO_APICID(cpuid);
+	KKASSERT((apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) == 0);
 	if (!svm->mut_avic_bound || svm->mut_avic_host_cpuid != cpuid) {
-		if (apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) {
-			vmm_machine_logf(svm->borrow_imm_machine,
-			    "svm avic host apic id too large cpuid=%u apicid=%u",
-			    cpuid, apicid);
-			return;
-		}
 		svm->mut_avic_host_cpuid = cpuid;
 		svm->mut_avic_host_apic_id = apicid;
 		svm->mut_avic_bound = 1;
@@ -1332,6 +1327,8 @@ static const char *
 vmm_svm_probe(void)
 {
 	uint32_t descs[4];
+	uint32_t apicid;
+	uint32_t i;
 	uint64_t msr;
 
 	do_cpuid(0x80000000, descs);
@@ -1349,9 +1346,21 @@ vmm_svm_probe(void)
 	    (descs[3] & CPUID_AMD_SVM_AVIC) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_TSCRateCtrl) == 0)
 		return "missing_required_feature";
+	if (descs[1] < VMM_SVM_ASID)
+		return "missing_asid";
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if ((msr & VM_CR_SVMDIS) && (msr & VM_CR_LOCK))
 		return "svm_disabled_locked";
+	if (tsc_frequency == 0 || tsc_invariant == 0)
+		return "host_tsc_not_invariant";
+	if ((npx_xcr0_mask & (CPU_XFEATURE_X87 | CPU_XFEATURE_SSE)) !=
+	    (CPU_XFEATURE_X87 | CPU_XFEATURE_SSE))
+		return "missing_x87_sse_xstate";
+	for (i = 0; i < ncpus; ++i) {
+		apicid = (uint32_t)CPUID_TO_APICID(i);
+		if (apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK)
+			return "avic_host_apic_id";
+	}
 	return NULL;
 }
 
@@ -1447,13 +1456,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
 	if (svm->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
-		goto fail;
-	}
-	if (tsc_frequency == 0 || tsc_invariant == 0) {
-		vmm_machine_logf(m,
-		    "svm unavailable reason=host_tsc_not_invariant tsc_hz=%ju invariant=%d",
-		    (uintmax_t)tsc_frequency, tsc_invariant);
-		error = ENXIO;
 		goto fail;
 	}
 	svm->imm_host_tsc_hz = tsc_frequency;
