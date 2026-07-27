@@ -90,6 +90,7 @@
 #define CR0_NE		0x00000020ULL
 #define CR0_PG		0x80000000ULL
 #define CR4_PAE		0x00000020ULL
+#define CR4_OSXSAVE	0x00040000ULL
 #define EFER_LME	0x00000100ULL
 #define EFER_LMA	0x00000400ULL
 #define XCR0_X87	0x00000001ULL
@@ -111,7 +112,10 @@
 #define AVIC_OP_MARKER	2U
 #define IOAPIC_OP_RAISE	3U
 #define AVIC_OP_PAUSE_FILTER	4U
+#define AVIC_OP_CPU_TEMPLATE_MARKER 5U
 #define AVIC_MARKER	0xa51c0040U
+#define CPU_TEMPLATE_MARKER_OK	0xc07e0001U
+#define CPU_TEMPLATE_MARKER_FAIL	0xc07effffU
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
 #define MSR_MTRR_CAP	0x000000feU
 #define MSR_SYSCFG	0xc0010010U
@@ -2526,6 +2530,143 @@ guest_acpi_s5_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_cpu_template_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t cpuid[] = { 0x0f, 0xa2 };
+	static const uint8_t xor_ecx[] = { 0x31, 0xc9 };
+	static const uint8_t mov_eax_ebx[] = { 0x89, 0xd8 };
+	static const uint8_t mov_eax_ecx[] = { 0x89, 0xc8 };
+	static const uint8_t mov_eax_edx[] = { 0x89, 0xd0 };
+	static const uint8_t or_eax_ebx[] = { 0x09, 0xd8 };
+	static const uint8_t or_eax_ecx[] = { 0x09, 0xc8 };
+	static const uint8_t or_eax_edx[] = { 0x09, 0xd0 };
+	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	size_t failed[16];
+	size_t failed_count = 0;
+	size_t failed_label;
+	size_t report_label;
+	size_t success_jump;
+	size_t len = 0;
+	size_t i;
+
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit_cmp_eax(code, &len, cap, 0x16U);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x0fU);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, or_eax_ebx, sizeof(or_eax_ebx));
+	emit(code, &len, cap, or_eax_ecx, sizeof(or_eax_ecx));
+	emit(code, &len, cap, or_eax_edx, sizeof(or_eax_edx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x0dU);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit_cmp_eax(code, &len, cap, 7U);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_eax_ebx, sizeof(mov_eax_ebx));
+	emit_cmp_eax(code, &len, cap, 0x240U);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_eax_ecx, sizeof(mov_eax_ecx));
+	emit_cmp_eax(code, &len, cap, 0x340U);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_eax_edx, sizeof(mov_eax_edx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x0dU);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9, 0x01, 0x00, 0x00, 0x00 },
+	    5);
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, (const uint8_t[]){ 0xa9, 0x08, 0x00, 0x00, 0x00 },
+	    5);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_eax_ebx, sizeof(mov_eax_ebx));
+	emit_cmp_eax(code, &len, cap, 0x240U);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 1U);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, mov_eax_ecx, sizeof(mov_eax_ecx));
+	emit(code, &len, cap, (const uint8_t[]){ 0xa9, 0x08, 0x00, 0x20, 0x08 },
+	    5);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x80000000U);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit_cmp_eax(code, &len, cap, 0x8000001dU);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x80000001U);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, mov_eax_ecx, sizeof(mov_eax_ecx));
+	emit(code, &len, cap,
+	    (const uint8_t[]){ 0xa9, 0x04, 0x84, 0xc0, 0x3d }, 5);
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x8000000aU);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, or_eax_ebx, sizeof(or_eax_ebx));
+	emit(code, &len, cap, or_eax_ecx, sizeof(or_eax_ecx));
+	emit(code, &len, cap, or_eax_edx, sizeof(or_eax_edx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x8000001fU);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, or_eax_ebx, sizeof(or_eax_ebx));
+	emit(code, &len, cap, or_eax_ecx, sizeof(or_eax_ecx));
+	emit(code, &len, cap, or_eax_edx, sizeof(or_eax_edx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit_mov_eax(code, &len, cap, 0x80000008U);
+	emit(code, &len, cap, xor_ecx, sizeof(xor_ecx));
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, mov_eax_ecx, sizeof(mov_eax_ecx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9, 0x01, 0x00, 0x00, 0x00 },
+	    5);
+	emit_mov_eax(code, &len, cap, 0x17U);
+	emit(code, &len, cap, cpuid, sizeof(cpuid));
+	emit(code, &len, cap, or_eax_ebx, sizeof(or_eax_ebx));
+	emit(code, &len, cap, or_eax_ecx, sizeof(or_eax_ecx));
+	emit(code, &len, cap, or_eax_edx, sizeof(or_eax_edx));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	failed[failed_count++] = emit_jne32(code, &len, cap);
+
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, CPU_TEMPLATE_MARKER_OK);
+	emit(code, &len, cap, (const uint8_t[]){ 0xeb, 0x00 }, 2);
+	success_jump = len - 1;
+	failed_label = len;
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, CPU_TEMPLATE_MARKER_FAIL);
+	report_label = len;
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_CPU_TEMPLATE_MARKER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	patch_rel8(code, success_jump, report_label);
+	for (i = 0; i < failed_count; i++)
+		patch_rel32(code, failed[i], failed_label);
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -2677,6 +2818,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_pmtimer_code(code, cap);
 	} else if (strcmp(mode, "acpi_s5") == 0) {
 		return guest_acpi_s5_code(code, cap);
+	} else if (strcmp(mode, "cputemplate") == 0) {
+		return guest_cpu_template_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -2792,6 +2935,8 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 		vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA;
 		vcpu->cr[VMM_X64_CR_CR4] = CR4_PAE;
 	}
+	if (strcmp(mode, "xsetbv") == 0)
+		vcpu->cr[VMM_X64_CR_CR4] |= CR4_OSXSAVE;
 	vcpu->cr[VMM_X64_CR_XCR0] = XCR0_X87;
 	if (strcmp(mode, "pm64") != 0)
 		vcpu->msr[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
@@ -2910,7 +3055,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|cputemplate|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

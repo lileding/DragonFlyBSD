@@ -332,17 +332,46 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_RTC_LEAP_YEAR(year) \
 	((((year) % 4) == 0 && ((year) % 100) != 0) || ((year) % 400) == 0)
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
-#define VMM_CPUID1_ECX_MONITOR	(1U << 3)
-#define VMM_CPUID1_ECX_X2APIC	(1U << 21)
-#define VMM_CPUID1_ECX_TSC_DEADLINE (1U << 24)
-#define VMM_CPUID_MIN_BASIC	0x16U
-#define VMM_CPUID80000001_ECX_SVM CPUID_SVM
-#define VMM_CPUID80000001_ECX_MWAITX CPUID_MWAITX
-#define VMM_CPUID80000001_ECX_PMU ((1U << 10) | (1U << 15) | \
-					 (1U << 23) | (1U << 24) | \
-					 (1U << 26) | (1U << 27) | (1U << 28))
-#define VMM_CPUID80000007_EDX_INVTSC (1U << 8)
-#define VMM_CPUID80000008_ECX_CORES_MASK 0xffU
+#define VMM_CPUID_MAX_BASIC	0x16U
+#define VMM_CPUID_MAX_EXTENDED	0x8000001dU
+#define VMM_CPUID_XSAVE_LEGACY_SIZE 0x240U
+#define VMM_CPUID1_ECX_ALLOWED	(CPUID2_SSE3 | CPUID2_PCLMULQDQ | \
+					 CPUID2_SSSE3 | CPUID2_FMA | \
+					 CPUID2_CX16 | CPUID2_SSE41 | \
+					 CPUID2_SSE42 | CPUID2_MOVBE | \
+					 CPUID2_POPCNT | CPUID2_TSCDLT | \
+					 CPUID2_AESNI | CPUID2_XSAVE | \
+					 CPUID2_OSXSAVE | CPUID2_AVX | \
+					 CPUID2_F16C | CPUID2_RDRAND)
+#define VMM_CPUID1_EDX_ALLOWED	(CPUID_FPU | CPUID_VME | CPUID_DE | \
+					 CPUID_PSE | CPUID_TSC | CPUID_MSR | \
+					 CPUID_PAE | CPUID_CX8 | CPUID_APIC | \
+					 CPUID_SEP | CPUID_MTRR | CPUID_PGE | \
+					 CPUID_CMOV | CPUID_PAT | CPUID_PSE36 | \
+					 CPUID_CLFSH | CPUID_MMX | CPUID_FXSR | \
+					 CPUID_SSE | CPUID_SSE2 | CPUID_SS)
+#define VMM_CPUID7_EBX_ALLOWED	(CPUID_STDEXT_FSGSBASE | \
+					 CPUID_STDEXT_BMI1 | CPUID_STDEXT_AVX2 | \
+					 CPUID_STDEXT_FDP_EXC | CPUID_STDEXT_SMEP | \
+					 CPUID_STDEXT_BMI2 | CPUID_STDEXT_ERMS | \
+					 CPUID_STDEXT_NFPUSG | CPUID_STDEXT_RDSEED | \
+					 CPUID_STDEXT_ADX | CPUID_STDEXT_SMAP | \
+					 CPUID_STDEXT_CLFLUSHOPT | CPUID_STDEXT_CLWB | \
+					 CPUID_STDEXT_SHA)
+#define VMM_CPUID7_ECX_ALLOWED	(CPUID_STDEXT2_UMIP | CPUID_STDEXT2_RDPID)
+#define VMM_CPUID80000001_ECX_ALLOWED (CPUID_LAHF | CPUID_ALTMOVCR0 | \
+					 CPUID_ABM | CPUID_SSE4A | \
+					 CPUID_MISALIGNSSE | CPUID_3DNOWPF | \
+					 CPUID_XOP | CPUID_FMA4 | CPUID_TCE | \
+					 CPUID_TBM)
+#define VMM_CPUID80000001_EDX_ALLOWED (CPUID_FPU | CPUID_VME | \
+					 CPUID_DE | CPUID_PSE | CPUID_TSC | \
+					 CPUID_MSR | CPUID_PAE | CPUID_CX8 | \
+					 CPUID_APIC | CPUID_SYSCALL | CPUID_MTRR | \
+					 CPUID_PGE | CPUID_CMOV | CPUID_PAT | \
+					 CPUID_PSE36 | CPUID_XD | CPUID_MMXX | \
+					 CPUID_MMX | CPUID_FXSR | CPUID_FFXSR | \
+					 CPUID_PAGE1GB | CPUID_RDTSCP | CPUID_EM64T)
 
 #define VMM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_IOAPIC_SIZE		PAGE_SIZE
@@ -459,6 +488,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_SVM_SMOKE_AVIC_MARKER	2U
 #define VMM_SVM_SMOKE_IOAPIC_RAISE	3U
 #define VMM_SVM_SMOKE_PAUSE_FILTER	4U
+#define VMM_SVM_SMOKE_CPU_TEMPLATE_MARKER 5U
 
 
 #define VMM_X64_NDR			6
@@ -1717,41 +1747,105 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t regs[4];
+	uint32_t xstate[4];
 	uint32_t leaf;
+	uint32_t subleaf;
+	uint32_t xsave_size;
+	uint32_t xsave_max_size;
 
 	leaf = (uint32_t)vmcb->state.rax;
-	cpuid_count(leaf,
-	    (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX], regs);
-	if (leaf == 0) {
-		if (regs[0] < VMM_CPUID_MIN_BASIC)
-			regs[0] = VMM_CPUID_MIN_BASIC;
-	} else if (leaf == 1) {
+	subleaf = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
+	bzero(regs, sizeof(regs));
+
+	/*
+	 * This is the dfvmm single-vCPU CPU template.  Do not let an unlisted
+	 * CPUID leaf fall through to host CPUID: every advertised feature must
+	 * have matching guest state, MSR, interrupt, and VMCB semantics.
+	 */
+	switch (leaf) {
+	case 0:
+		cpuid_count(0, 0, regs);
+		regs[0] = VMM_CPUID_MAX_BASIC;
+		break;
+	case 1:
+		cpuid_count(1, 0, regs);
+		regs[1] &= CPUID_CLFUSH_SIZE;
+		regs[1] |= 1U << CPUID_HTT_CORE_SHIFT;
 		regs[1] &= ~VMM_CPUID_APIC_ID_MASK;
-		regs[2] &= ~(VMM_CPUID1_ECX_MONITOR |
-		    VMM_CPUID1_ECX_X2APIC);
-		regs[2] |= VMM_CPUID1_ECX_TSC_DEADLINE;
-	} else if (leaf == 0xb || leaf == 0x1f) {
-		regs[0] = 0;
+		regs[2] &= VMM_CPUID1_ECX_ALLOWED;
+		regs[3] &= VMM_CPUID1_EDX_ALLOWED;
+		if (npx_xcr0_mask == 0) {
+			regs[2] &= ~(CPUID2_XSAVE | CPUID2_OSXSAVE |
+			    CPUID2_AVX | CPUID2_FMA | CPUID2_F16C);
+		} else if ((npx_xcr0_mask & CPU_XFEATURE_YMM) == 0) {
+			regs[2] &= ~(CPUID2_AVX | CPUID2_FMA | CPUID2_F16C);
+		}
+		if ((vmcb->state.cr4 & CR4_OSXSAVE) == 0)
+			regs[2] &= ~CPUID2_OSXSAVE;
+		break;
+	case 6:
+		cpuid_count(6, 0, regs);
+		regs[0] &= CPUID_THERMAL_ARAT;
 		regs[1] = 0;
 		regs[2] = 0;
 		regs[3] = 0;
-	} else if (leaf == 5) {
+		break;
+	case 7:
+		if (subleaf != 0)
+			break;
+		cpuid_count(7, 0, regs);
 		regs[0] = 0;
-		regs[1] = 0;
-		regs[2] = 0;
+		regs[1] &= VMM_CPUID7_EBX_ALLOWED;
+		regs[2] &= VMM_CPUID7_ECX_ALLOWED;
 		regs[3] = 0;
-	} else if (leaf == 0x0a || leaf == 0x8000001bU ||
-	    leaf == 0x80000022U) {
-		/*
-		 * This CPU template does not provide a virtual PMU.  Hide the
-		 * architectural, IBS, and AMD extended monitoring capability leaves.
-		 * RDPMC remains intercepted as defense for unadvertised use.
-		 */
-		regs[0] = 0;
-		regs[1] = 0;
-		regs[2] = 0;
-		regs[3] = 0;
-	} else if (leaf == 0x15) {
+		if ((npx_xcr0_mask & CPU_XFEATURE_YMM) == 0)
+			regs[1] &= ~CPUID_STDEXT_AVX2;
+		break;
+	case 0x0d:
+		if (npx_xcr0_mask == 0)
+			break;
+		switch (subleaf) {
+		case 0:
+			xsave_size = VMM_CPUID_XSAVE_LEGACY_SIZE;
+			xsave_max_size = xsave_size;
+			if ((npx_xcr0_mask & CPU_XFEATURE_YMM) != 0) {
+				cpuid_count(0x0d, 2, xstate);
+				xsave_max_size = xstate[1] + xstate[0];
+				if ((svm->imm_guest_xcr0 & CPU_XFEATURE_YMM) != 0)
+					xsave_size = xsave_max_size;
+			}
+			regs[0] = (uint32_t)npx_xcr0_mask;
+			regs[1] = xsave_size;
+			regs[2] = xsave_max_size;
+			regs[3] = (uint32_t)(npx_xcr0_mask >> 32);
+			break;
+		case 1:
+			cpuid_count(0x0d, 1, regs);
+			regs[0] &= CPUID_PES1_XSAVEOPT | CPUID_PES1_XSAVEC |
+			    CPUID_PES1_XGETBV;
+			/*
+			 * XSAVEC uses the compacted format.  With no supervisor
+			 * components, its enabled-state size is the same as XSAVE's
+			 * current XCR0 size from subleaf 0.
+			 */
+			regs[1] = VMM_CPUID_XSAVE_LEGACY_SIZE;
+			if ((npx_xcr0_mask & CPU_XFEATURE_YMM) != 0 &&
+			    (svm->imm_guest_xcr0 & CPU_XFEATURE_YMM) != 0) {
+				cpuid_count(0x0d, 2, xstate);
+				regs[1] = xstate[1] + xstate[0];
+			}
+			regs[2] = 0;
+			regs[3] = 0;
+			break;
+		case 2:
+			if ((npx_xcr0_mask & CPU_XFEATURE_YMM) != 0)
+				cpuid_count(0x0d, 2, regs);
+			break;
+		default:
+			break;
+		}
+		break;
+	case 0x15:
 		/*
 		 * Publish the exact virtual TSC frequency.  Do not round this leaf:
 		 * Linux uses it to decide whether TSC is a trustworthy clocksource.
@@ -1768,7 +1862,8 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 			regs[2] = 0;
 		}
 		regs[3] = 0;
-	} else if (leaf == 0x16) {
+		break;
+	case 0x16: {
 		uint32_t tsc_mhz;
 
 		tsc_mhz = (uint32_t)((svm->imm_guest_tsc_hz + 500000) / 1000000);
@@ -1776,20 +1871,45 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		regs[1] = tsc_mhz;
 		regs[2] = 100;
 		regs[3] = 0;
-	} else if (leaf == 0x80000001U) {
-		/* These features are intercepted and deliberately unavailable. */
-		regs[2] &= ~(VMM_CPUID80000001_ECX_SVM |
-		    VMM_CPUID80000001_ECX_MWAITX |
-		    VMM_CPUID80000001_ECX_PMU);
-	} else if (leaf == 0x80000007U) {
-		regs[3] |= VMM_CPUID80000007_EDX_INVTSC;
-	} else if (leaf == 0x80000008U) {
-		regs[2] &= ~VMM_CPUID80000008_ECX_CORES_MASK;
-	} else if (leaf == 0x8000001eU) {
-		regs[0] = 0;
+		break;
+	}
+	case 0x80000000U:
+		cpuid_count(0x80000000U, 0, regs);
+		regs[0] = VMM_CPUID_MAX_EXTENDED;
+		break;
+	case 0x80000001U:
+		cpuid_count(0x80000001U, 0, regs);
+		regs[2] &= VMM_CPUID80000001_ECX_ALLOWED;
+		regs[3] &= VMM_CPUID80000001_EDX_ALLOWED;
+		if ((npx_xcr0_mask & CPU_XFEATURE_YMM) == 0)
+			regs[2] &= ~(CPUID_XOP | CPUID_FMA4);
+		break;
+	case 0x80000002U:
+	case 0x80000003U:
+	case 0x80000004U:
+	case 0x80000005U:
+	case 0x80000006U:
+		cpuid_count(leaf, 0, regs);
+		break;
+	case 0x80000007U:
+		regs[3] = CPUID_APM_ITSC;
+		break;
+	case 0x80000008U:
+		cpuid_count(0x80000008U, 0, regs);
 		regs[1] = 0;
 		regs[2] = 0;
 		regs[3] = 0;
+		break;
+	case 0x8000001dU:
+		cpuid_count(0x8000001dU, subleaf, regs);
+		if ((regs[0] & 0x1fU) == 0) {
+			bzero(regs, sizeof(regs));
+		} else {
+			regs[0] &= ~0xffffc000U;
+		}
+		break;
+	default:
+		break;
 	}
 	vmcb->state.rax = regs[0];
 	svm->mut_gprs[VMM_X64_GPR_RBX] = regs[1];
@@ -4430,13 +4550,26 @@ vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint64_t xcr0;
 
-	if ((uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX] != 0)
-		return 0;
+	if ((vmcb->state.cr4 & CR4_OSXSAVE) == 0) {
+		vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+		    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_UD;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu0 inject ud reason=xsetbv-osxsave rip=0x%jx",
+		    (uintmax_t)vmcb->state.rip);
+		return 1;
+	}
 	xcr0 = (svm->mut_gprs[VMM_X64_GPR_RDX] << 32) |
 	    (vmcb->state.rax & 0xffffffffULL);
-	if (!vmm_loader_x86_xcr0_valid(xcr0) ||
+	if ((uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX] != 0 ||
+	    vmcb->state.cpl != 0 || !vmm_loader_x86_xcr0_valid(xcr0) ||
 	    (xcr0 & ~npx_xcr0_mask) != 0) {
-		return 0;
+		vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+		    VMM_SVM_EVENTINJ_ERROR_VALID |
+		    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_GP;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu0 inject gp reason=xsetbv-invalid rip=0x%jx",
+		    (uintmax_t)vmcb->state.rip);
+		return 1;
 	}
 	svm->imm_guest_xcr0 = xcr0;
 	vmm_svm_advance_rip(vmcb);
@@ -4568,6 +4701,10 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 	case VMM_SVM_SMOKE_PAUSE_FILTER:
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke pause filter exits=%u", svm->mut_pause_exit_count);
+		return 0;
+	case VMM_SVM_SMOKE_CPU_TEMPLATE_MARKER:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke cpu template marker=0x%x", arg);
 		return 0;
 	default:
 		vmm_machine_logf(svm->borrow_imm_machine,
