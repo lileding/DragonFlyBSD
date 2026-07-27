@@ -22,8 +22,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 SVM_TRACE=${VMM_SVM_TRACE:-0}
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid cputemplate msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer acpi_s5 serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid cputemplate msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid cputemplate fpu msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer acpi_s5 serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid cputemplate fpu msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
@@ -297,6 +297,7 @@ cleanup()
 	fi
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
 		sysctl debug.vmm.svm_trace=0 >>"$LOG" 2>&1 || true
+		sysctl debug.vmm.svm_fpu_check=0 >>"$LOG" 2>&1 || true
 		kldunload vmm >>"$LOG" 2>&1 || say "kldunload vmm failed"
 	fi
 	for mode in $MODES; do
@@ -517,6 +518,9 @@ run_case()
 
 	configure_machine "$mode" "$w"
 	start_console_client "$mode" || fail "$mode console client"
+	if [ "$mode" = "fpu" ]; then
+		run sysctl debug.vmm.svm_fpu_check=1
+	fi
 	run rm "$(mach "$mode")/stopped"
 	if [ "$mode" = "acpi_s5" ]; then
 		wait_event "$(mach "$mode")/events" \
@@ -551,6 +555,11 @@ run_case()
 		if [ "$mode" = "cputemplate" ]; then
 			wait_event "$(mach "$mode")/events" \
 			    'smoke cpu template marker=0xc07e0001' ||
+			    fail "$mode contract"
+		fi
+		if [ "$mode" = "fpu" ]; then
+			wait_event "$(mach "$mode")/events" \
+			    'smoke fpu marker=0xf0a70001' ||
 			    fail "$mode contract"
 		fi
 		if [ "$mode" = "hireslapic" ] || [ "$mode" = "hiresscale" ]; then
@@ -661,6 +670,9 @@ run_case()
 	append_file "$mode-console" "$CONSOLE_LOG"
 	stop_console_client
 	cleanup_machine "$mode" || fail "$mode cleanup"
+	if [ "$mode" = "fpu" ]; then
+		run sysctl debug.vmm.svm_fpu_check=0
+	fi
 	rm -f "$CONSOLE_LOG" "$CONSOLE_READY" "$CONSOLE_INPUT"
 	CONSOLE_LOG=
 	CONSOLE_READY=

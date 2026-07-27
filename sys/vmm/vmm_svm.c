@@ -38,6 +38,7 @@
 
 static int vmm_svm_trace_enabled;
 static int vmm_svm_timing_trace_enabled;
+static int vmm_svm_fpu_check_enabled;
 
 SYSCTL_DECL(_debug_vmm);
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
@@ -46,6 +47,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
     &vmm_svm_timing_trace_enabled, 0,
     "record bounded SVM PM timer and HPET reference events");
+SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
+    &vmm_svm_fpu_check_enabled, 0,
+    "verify root FPU state preservation across each VMRUN");
 
 #define VMM_SVM_TRACE(svm, fmt, ...) do {				\
 	if (vmm_svm_trace_enabled)					\
@@ -489,6 +493,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_SVM_SMOKE_IOAPIC_RAISE	3U
 #define VMM_SVM_SMOKE_PAUSE_FILTER	4U
 #define VMM_SVM_SMOKE_CPU_TEMPLATE_MARKER 5U
+#define VMM_SVM_SMOKE_FPU_MARKER	6U
 
 
 #define VMM_X64_NDR			6
@@ -655,6 +660,8 @@ struct vmm_svm_backend {
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
+	/* [0] is expected root state and [1] is the VMRUN return snapshot. */
+	union savefpu *own_mut_fpu_sentinel;
 	uint64_t mut_host_drs[VMM_X64_NDR];
 	uint64_t mut_guest_drs[VMM_X64_NDR];
 	uint64_t mut_host_fsbase;
@@ -1507,6 +1514,35 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] = VMM_RTC_ALARM_DONT_CARE;
 	svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] = VMM_RTC_ALARM_DONT_CARE;
 	vmm_svm_fpu_init(svm);
+	if (vmm_svm_fpu_check_enabled) {
+		if ((npx_xcr0_mask & (CPU_XFEATURE_X87 | CPU_XFEATURE_SSE |
+		    CPU_XFEATURE_YMM)) != (CPU_XFEATURE_X87 |
+		    CPU_XFEATURE_SSE | CPU_XFEATURE_YMM)) {
+			vmm_machine_logf(m,
+			    "svm unavailable reason=fpu_check_requires_avx xcr0=0x%jx",
+			    (uintmax_t)npx_xcr0_mask);
+			error = ENXIO;
+			goto fail;
+		}
+		svm->own_mut_fpu_sentinel = kmalloc(
+		    2 * sizeof(*svm->own_mut_fpu_sentinel), M_TEMP,
+		    M_WAITOK | M_ZERO | M_POWEROF2);
+		svm->own_mut_fpu_sentinel[0] = svm->mut_guest_fpu;
+		svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_env.en_tw = 1;
+		svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_fp[0].
+		    fp_acc.fp_bytes[7] = 0x80U;
+		svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_fp[0].
+		    fp_acc.fp_bytes[8] = 0xffU;
+		svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_fp[0].
+		    fp_acc.fp_bytes[9] = 0x3fU;
+		for (i = 0; i < sizeof(svm->own_mut_fpu_sentinel[0].
+		    sv_ymm64.sv_xmm[0].xmm_bytes); ++i) {
+			svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xmm[0].
+			    xmm_bytes[i] = 0x10U + i;
+			svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xstate.sx_ymm[0].
+			    ymm_bytes[i] = 0x80U + i;
+		}
+	}
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
 	svm->own_mut_iobm = vmm_svm_contig_alloc(&svm->imm_iobm_pa,
@@ -1597,6 +1633,8 @@ vmm_svm_vcpu_destroy(void *backend)
 	if (svm == NULL)
 		return;
 	vmm_svm_avic_uninit(svm);
+	if (svm->own_mut_fpu_sentinel != NULL)
+		kfree(svm->own_mut_fpu_sentinel, M_TEMP);
 	vmm_svm_contig_free(svm->own_mut_hsave, 1);
 	vmm_svm_contig_free(svm->own_mut_msrbm, VMM_SVM_MSRBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_iobm, VMM_SVM_IOBM_PAGES);
@@ -4706,6 +4744,10 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke cpu template marker=0x%x", arg);
 		return 0;
+	case VMM_SVM_SMOKE_FPU_MARKER:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "smoke fpu marker=0x%x", arg);
+		return 0;
 	default:
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke avic unknown op=%u arg=0x%x", op, arg);
@@ -5109,6 +5151,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_vmcb *vmcb;
 	uint32_t reqflags;
+	int fpu_sentinel_failed;
 	int handled;
 
 	if (svm == NULL)
@@ -5119,10 +5162,17 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_timer_check(svm, vc);
 		vmm_svm_com1_rx_notify(svm, vc, "entry");
 		vmm_svm_enable_cpu(svm);
+		fpu_sentinel_failed = 0;
+		if (svm->own_mut_fpu_sentinel != NULL) {
+			kernel_fpu_begin();
+			fpurstor(&svm->own_mut_fpu_sentinel[0], npx_xcr0_mask);
+		}
 		vmm_svm_clgi();
 		vmm_svm_host_tlb_catchup(svm);
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
+			if (svm->own_mut_fpu_sentinel != NULL)
+				kernel_fpu_end();
 			splz_check();
 			vmm_svm_avic_unbind_cpu(svm);
 			lwkt_user_yield();
@@ -5159,6 +5209,32 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_fpu_enter(svm);
 		vmm_svm_vmrun(svm->imm_vmcb_pa, svm->mut_gprs);
 		vmm_svm_guest_fpu_leave(svm);
+		if (svm->own_mut_fpu_sentinel != NULL) {
+			npxdna();
+			fpusave(&svm->own_mut_fpu_sentinel[1], npx_xcr0_mask);
+			if (bcmp(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xmm[0].
+			    xmm_bytes, svm->own_mut_fpu_sentinel[1].sv_ymm64.
+			    sv_xmm[0].xmm_bytes,
+			    sizeof(svm->own_mut_fpu_sentinel[0].sv_ymm64.
+			    sv_xmm[0].xmm_bytes)) != 0 ||
+			    svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_env.en_tw !=
+			    svm->own_mut_fpu_sentinel[1].sv_ymm64.sv_env.en_tw ||
+			    bcmp(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_fp[0].
+			    fp_acc.fp_bytes, svm->own_mut_fpu_sentinel[1].sv_ymm64.
+			    sv_fp[0].fp_acc.fp_bytes,
+			    sizeof(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_fp[0].
+			    fp_acc.fp_bytes)) != 0 ||
+			    bcmp(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xstate.
+			    sx_ymm[0].ymm_bytes, svm->own_mut_fpu_sentinel[1].
+			    sv_ymm64.sv_xstate.sx_ymm[0].ymm_bytes,
+			    sizeof(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xstate.
+			    sx_ymm[0].ymm_bytes)) != 0) {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u root fpu sentinel mismatch", vc->imm_id);
+				fpu_sentinel_failed = 1;
+			}
+			kernel_fpu_end();
+		}
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
 		if (svm->mut_root_timer_systimer_armed) {
@@ -5168,6 +5244,8 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_stgi();
 		reqflags = mycpu->gd_reqflags;
 		vmm_svm_requeue_exit_event(svm);
+		if (fpu_sentinel_failed)
+			goto out;
 		switch (vmcb->ctrl.exitcode) {
 		case VMM_SVM_EXIT_INTR:
 		case VMM_SVM_EXIT_NMI:

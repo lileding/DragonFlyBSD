@@ -94,6 +94,8 @@
 #define EFER_LME	0x00000100ULL
 #define EFER_LMA	0x00000400ULL
 #define XCR0_X87	0x00000001ULL
+#define XCR0_SSE	0x00000002ULL
+#define XCR0_YMM	0x00000004ULL
 #define SEG_S		0x0010U
 #define SEG_P		0x0080U
 #define SEG_L		0x0200U
@@ -113,9 +115,12 @@
 #define IOAPIC_OP_RAISE	3U
 #define AVIC_OP_PAUSE_FILTER	4U
 #define AVIC_OP_CPU_TEMPLATE_MARKER 5U
+#define AVIC_OP_FPU_MARKER	6U
 #define AVIC_MARKER	0xa51c0040U
 #define CPU_TEMPLATE_MARKER_OK	0xc07e0001U
 #define CPU_TEMPLATE_MARKER_FAIL	0xc07effffU
+#define FPU_MARKER_OK	0xf0a70001U
+#define FPU_MARKER_FAIL	0xf0a7ffffU
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
 #define MSR_MTRR_CAP	0x000000feU
 #define MSR_SYSCFG	0xc0010010U
@@ -2667,6 +2672,84 @@ guest_cpu_template_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_fpu_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t load_ymm0[] =
+	    { 0xc5, 0xfe, 0x6f, 0x05, 0x00, 0x00, 0x00, 0x00 };
+	static const uint8_t load_ymm1[] =
+	    { 0xc5, 0xfe, 0x6f, 0x0d, 0x00, 0x00, 0x00, 0x00 };
+	static const uint8_t fld1[] = { 0xd9, 0xe8 };
+	static const uint8_t fldz[] = { 0xd9, 0xee };
+	static const uint8_t faddp[] = { 0xde, 0xc1 };
+	static const uint8_t fcomi[] = { 0xdb, 0xf1 };
+	static const uint8_t fstp[] = { 0xdd, 0xd8 };
+	static const uint8_t cpuid[] = { 0x0f, 0xa2 };
+	static const uint8_t vpxor[] = { 0xc5, 0xfd, 0xef, 0xc1 };
+	static const uint8_t vpmovmskb[] = { 0xc5, 0xfd, 0xd7, 0xc0 };
+	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t pattern[] = {
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f
+	};
+	size_t failed[32];
+	size_t rip_disp[32];
+	size_t failed_count = 0;
+	size_t rip_disp_count = 0;
+	size_t failed_label;
+	size_t report_label;
+	size_t success_jump;
+	size_t pattern_label;
+	size_t len = 0;
+	size_t i;
+
+	for (i = 0; i < 16; ++i) {
+		emit(code, &len, cap, load_ymm0, sizeof(load_ymm0));
+		rip_disp[rip_disp_count++] = len - 4;
+		emit(code, &len, cap, fld1, sizeof(fld1));
+		emit_mov_eax(code, &len, cap, 1);
+		emit(code, &len, cap, (const uint8_t[]){ 0x31, 0xc9 }, 2);
+		emit(code, &len, cap, cpuid, sizeof(cpuid));
+		emit(code, &len, cap, load_ymm1, sizeof(load_ymm1));
+		rip_disp[rip_disp_count++] = len - 4;
+		emit(code, &len, cap, vpxor, sizeof(vpxor));
+		emit(code, &len, cap, vpmovmskb, sizeof(vpmovmskb));
+		emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+		failed[failed_count++] = emit_jne32(code, &len, cap);
+		emit(code, &len, cap, fldz, sizeof(fldz));
+		emit(code, &len, cap, faddp, sizeof(faddp));
+		emit(code, &len, cap, fld1, sizeof(fld1));
+		emit(code, &len, cap, fcomi, sizeof(fcomi));
+		failed[failed_count++] = emit_jne32(code, &len, cap);
+		emit(code, &len, cap, fstp, sizeof(fstp));
+		emit(code, &len, cap, fstp, sizeof(fstp));
+	}
+
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, FPU_MARKER_OK);
+	emit(code, &len, cap, (const uint8_t[]){ 0xeb, 0x00 }, 2);
+	success_jump = len - 1;
+	failed_label = len;
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, FPU_MARKER_FAIL);
+	report_label = len;
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_FPU_MARKER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	pattern_label = len;
+	emit(code, &len, cap, pattern, sizeof(pattern));
+	patch_rel8(code, success_jump, report_label);
+	for (i = 0; i < failed_count; ++i)
+		patch_rel32(code, failed[i], failed_label);
+	for (i = 0; i < rip_disp_count; ++i)
+		patch_rel32(code, rip_disp[i], pattern_label);
+	return len;
+}
+
+static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
 	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
@@ -2820,6 +2903,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_acpi_s5_code(code, cap);
 	} else if (strcmp(mode, "cputemplate") == 0) {
 		return guest_cpu_template_code(code, cap);
+	} else if (strcmp(mode, "fpu") == 0) {
+		return guest_fpu_code(code, cap);
 	} else if (strcmp(mode, "time") == 0) {
 		src = time_vmmcall;
 		len = sizeof(time_vmmcall);
@@ -2935,9 +3020,11 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 		vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA;
 		vcpu->cr[VMM_X64_CR_CR4] = CR4_PAE;
 	}
-	if (strcmp(mode, "xsetbv") == 0)
+	if (strcmp(mode, "xsetbv") == 0 || strcmp(mode, "fpu") == 0)
 		vcpu->cr[VMM_X64_CR_CR4] |= CR4_OSXSAVE;
 	vcpu->cr[VMM_X64_CR_XCR0] = XCR0_X87;
+	if (strcmp(mode, "fpu") == 0)
+		vcpu->cr[VMM_X64_CR_XCR0] |= XCR0_SSE | XCR0_YMM;
 	if (strcmp(mode, "pm64") != 0)
 		vcpu->msr[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
 	vcpu->msr[VMM_X64_MSR_PAT] = 0x0007040600070406ULL;
@@ -3055,7 +3142,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|cputemplate|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|cputemplate|fpu|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)
