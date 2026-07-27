@@ -95,6 +95,8 @@ int vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
 int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
     struct ucred *cred);
 void vmm_machine_console_input(struct vmm_machine *m);
+/* Called by the last vCPU thread after an explicit terminal guest exit. */
+void vmm_machine_vcpu_exited(struct vmm_machine *m);
 void vmm_machine_start(const struct vmm_machine_task *task);
 void vmm_machine_stop_apic(const struct vmm_machine_task *task);
 void vmm_machine_stop_force(const struct vmm_machine_task *task);

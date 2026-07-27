@@ -22,7 +22,7 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 SVM_TRACE=${VMM_SVM_TRACE:-0}
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer acpi_s5 serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
 SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
@@ -518,7 +518,14 @@ run_case()
 	configure_machine "$mode" "$w"
 	start_console_client "$mode" || fail "$mode console client"
 	run rm "$(mach "$mode")/stopped"
-	if mode_self_exits "$mode"; then
+	if [ "$mode" = "acpi_s5" ]; then
+		wait_event "$(mach "$mode")/events" \
+		    'guest shutdown source=acpi_s5' \
+		    'state stopped reason=guest_shutdown' ||
+		    fail "$mode guest shutdown"
+		[ ! -e "$(mach "$mode")/stopped" ] ||
+		    fail "$mode desired changed"
+	elif mode_self_exits "$mode"; then
 		case "$mode" in
 		pausefilter)
 			console_input=

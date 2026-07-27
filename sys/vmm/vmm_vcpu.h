@@ -11,6 +11,11 @@
 
 #include <sys/linker_set.h>
 
+enum vmm_vcpu_exit_reason {
+	VMM_VCPU_EXIT_NONE,
+	VMM_VCPU_EXIT_GUEST_SHUTDOWN,
+};
+
 struct vmm_vcpu {
 	/*
 	 * Lifecycle:
@@ -19,6 +24,9 @@ struct vmm_vcpu {
 	 * that command queue.  Active vCPU threads decrement
 	 * atomic_mut_active_count and wake the parent machine when they exit;
 	 * the stop worker reads that count and sets atomic_mut_stop_requested.
+	 * A backend returns an explicit terminal reason to its vCPU thread.  The
+	 * last exiting thread atomically publishes that reason and notifies the
+	 * machine, whose serialized command queue owns lifecycle cleanup.
 	 * Backend teardown follows the memory backing pattern: detach
 	 * own_mut_threads after all vCPUs stop, then destroy backend state and
 	 * free the array outside the stop path.
@@ -27,6 +35,7 @@ struct vmm_vcpu {
 	struct vmm_vcpu_thread *own_mut_threads;
 	u_int		atomic_mut_active_count;
 	u_int		atomic_mut_stop_requested;
+	u_int		atomic_mut_exit_reason;
 };
 
 struct thread;
@@ -48,7 +57,8 @@ struct vmm_vcpu_backend_ops {
 	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
 	    void **backendp);
 	void (*destroy)(void *backend);
-	void (*run)(void *backend, struct vmm_vcpu_thread *vc);
+	enum vmm_vcpu_exit_reason (*run)(void *backend,
+	    struct vmm_vcpu_thread *vc);
 	void (*console_input)(void *backend, struct vmm_vcpu_thread *vc);
 };
 

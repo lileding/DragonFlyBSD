@@ -114,17 +114,26 @@ check_linux_boot_data()
 	    fail "missing HPET signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600)) 4)" = "44534454" ] ||
 	    fail "missing DSDT signature in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "99000000" ] ||
-	    fail "DSDT COM1/RTC table length missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 46)) 4)" = "434f4d31" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70200 + 244)) 12)" = \
+	    "010800010404000000000000" ] ||
+	    fail "FADT sleep-control GAS missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70200 + 256)) 12)" = \
+	    "010800010504000000000000" ] ||
+	    fail "FADT sleep-status GAS missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "a5000000" ] ||
+	    fail "DSDT S5/COM1/RTC table length missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 36)) 12)" = \
+	    "085f53355f1206020a050a05" ] ||
+	    fail "DSDT S5 package missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 58)) 4)" = "434f4d31" ] ||
 	    fail "DSDT COM1 device missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 101)) 4)" = "52544330" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 113)) 4)" = "52544330" ] ||
 	    fail "DSDT RTC device missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 111)) 4)" = "000bd041" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 123)) 4)" = "000bd041" ] ||
 	    fail "DSDT RTC PNP0B00 HID missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 140)) 8)" = "4701700070000102" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 152)) 8)" = "4701700070000102" ] ||
 	    fail "DSDT RTC io resource missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 148)) 3)" = "220001" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 160)) 3)" = "220001" ] ||
 	    fail "DSDT RTC IRQ8 resource missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
@@ -141,7 +150,7 @@ check_linux_boot_data()
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
 	check_zero_sum "$MEM_FILE" $((0x70400)) 74 "$case_label MADT"
 	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
-	check_zero_sum "$MEM_FILE" $((0x70600)) 153 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x70600)) 165 "$case_label DSDT"
 }
 
 check_tsc_manifest()

@@ -30,11 +30,12 @@ vmm_vkernel_vcpu_destroy(void *backend)
 	(void)backend;
 }
 
-static void
+static enum vmm_vcpu_exit_reason
 vmm_vkernel_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	(void)backend;
 	(void)vc;
+	return VMM_VCPU_EXIT_NONE;
 }
 
 const struct vmm_vcpu_backend_ops vmm_vkernel_backend_ops = {

@@ -67,16 +67,27 @@ vmm_vcpu_thread_main(void *arg)
 {
 	struct vmm_vcpu_thread *vc = arg;
 	struct vmm_machine *m = vc->borrow_imm_machine;
+	enum vmm_vcpu_exit_reason exit_reason = VMM_VCPU_EXIT_NONE;
+	u_int active_count;
 
 	lwkt_setpri_self(TDPRI_USER_NORM);
 	vmm_machine_logf(m, "vcpu%u thread enter cpu=%d", vc->imm_id,
 	    vc->imm_cpu);
 	if (vc->borrow_imm_backend_ops != NULL)
-		vc->borrow_imm_backend_ops->run(vc->own_mut_backend, vc);
+		exit_reason = vc->borrow_imm_backend_ops->run(
+		    vc->own_mut_backend, vc);
+	if (exit_reason != VMM_VCPU_EXIT_NONE) {
+		atomic_cmpset_int(&m->own_mut_vcpu.atomic_mut_exit_reason,
+		    VMM_VCPU_EXIT_NONE, exit_reason);
+	}
 
-	atomic_subtract_int(&m->own_mut_vcpu.atomic_mut_active_count, 1);
+	active_count = atomic_fetchadd_int(
+	    &m->own_mut_vcpu.atomic_mut_active_count, -1) - 1;
 	vmm_machine_logf(m, "vcpu%u thread exit active=%u", vc->imm_id,
-	    atomic_load_acq_int(&m->own_mut_vcpu.atomic_mut_active_count));
+	    active_count);
+	if (active_count == 0 && atomic_load_acq_int(
+	    &m->own_mut_vcpu.atomic_mut_exit_reason) != VMM_VCPU_EXIT_NONE)
+		vmm_machine_vcpu_exited(m);
 	wakeup(m);
 }
 
@@ -112,6 +123,8 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 		v->own_mut_threads = threads;
 		v->mut_count = count;
 		atomic_store_rel_int(&v->atomic_mut_stop_requested, 0);
+		atomic_store_rel_int(&v->atomic_mut_exit_reason,
+		    VMM_VCPU_EXIT_NONE);
 		threads = NULL;
 	}
 	if (threads != NULL) {

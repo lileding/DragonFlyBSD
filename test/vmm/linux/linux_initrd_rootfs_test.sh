@@ -15,10 +15,12 @@ CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-initrd-rootfs-console.log}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-30}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
+SVM_TRACE=${VMM_SVM_TRACE:-0}
 
 LOADED=0
 MOUNTED=0
 CONSOLE_READER_PID=
+OLD_SVM_TRACE=
 
 say()
 {
@@ -120,6 +122,10 @@ cleanup()
 			i=$((i + 1))
 		done
 	fi
+	if [ "$LOADED" -eq 1 ] && [ -n "$OLD_SVM_TRACE" ]; then
+		sysctl debug.vmm.svm_trace="$OLD_SVM_TRACE" >>"$LOG" 2>&1
+		OLD_SVM_TRACE=
+	fi
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
 		i=0
 		while [ "$i" -lt "$STOP_TIMEOUT" ]; do
@@ -139,6 +145,13 @@ trap cleanup EXIT INT TERM
 [ -f "$KERNEL" ] || fail "missing $KERNEL"
 [ -f "$INITRD" ] || fail "missing $INITRD"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
+case "$SVM_TRACE" in
+0|1)
+	;;
+*)
+	fail "VMM_SVM_TRACE must be 0 or 1"
+	;;
+esac
 
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	"$REPO/test/vmm/linux/linux_kexec_loader.c" -o "$LOADER"
@@ -150,6 +163,11 @@ chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 
 run kldload "$VMM_KO"
 LOADED=1
+if [ "$SVM_TRACE" -eq 1 ]; then
+	OLD_SVM_TRACE=$(sysctl -n debug.vmm.svm_trace 2>>"$LOG") ||
+		fail "read debug.vmm.svm_trace"
+	run sysctl debug.vmm.svm_trace=1
+fi
 run mkdir -p "$MNT"
 run rm -f "$MOUNT_HELPER"
 run ln -s /sbin/mount_std "$MOUNT_HELPER"
@@ -168,9 +186,43 @@ wait_console_pattern 'DFVMM_LINUX_INITRD_ROOTFS_OK' initrd ||
 wait_console_pattern 'DFVMM_LINUX_SERIAL_OK' serial ||
 	fail "serial marker not observed"
 
+if grep -q 'Performance Events: Fam17h+ core perfctr' "$CONSOLE_LOG" ||
+	grep -q 'NMI watchdog: Enabled' "$CONSOLE_LOG" ||
+	grep -q 'invalid IBS interrupt offset' "$CONSOLE_LOG"; then
+	fail "guest CPU template exposed host PMU capability"
+fi
+
 printf 'dfvmm-core-smoke\n' >"$(mach)/console" ||
 	fail "write core smoke command"
 wait_console_pattern 'DFVMM_CORE_SMOKE_END' core-smoke ||
 	fail "core smoke marker not observed"
+
+printf 'poweroff -f\n' >"$(mach)/console" ||
+	fail "write guest poweroff command"
+shutdown_events=
+i=0
+while [ "$i" -lt "$STOP_TIMEOUT" ]; do
+	out=$(cat "$(mach)/events" 2>>"$LOG")
+	if [ -n "$out" ]; then
+		shutdown_events="$shutdown_events
+$out"
+		{
+			printf '%s\n' '--- poll guest shutdown events ---'
+			printf '%s\n' "$out"
+			printf '%s\n' '--- end poll guest shutdown events ---'
+		} >>"$LOG"
+	fi
+	if printf '%s\n' "$shutdown_events" | awk '
+		/guest shutdown source=acpi_s5/ { shutdown = 1; next }
+		shutdown && /state stopped reason=guest_shutdown/ { stopped = 1 }
+		END { exit !stopped }
+	'; then
+		break
+	fi
+	sleep 1
+	i=$((i + 1))
+done
+[ "$i" -lt "$STOP_TIMEOUT" ] || fail "guest S5 shutdown events not observed"
+[ ! -e "$(mach)/stopped" ] || fail "guest S5 shutdown recreated stopped"
 
 say "PASS: Linux in-memory initrd rootfs test"

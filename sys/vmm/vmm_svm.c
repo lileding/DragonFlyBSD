@@ -189,6 +189,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_SVM_EXIT_SMI		0x062ULL
 #define VMM_SVM_EXIT_INIT		0x063ULL
 #define VMM_SVM_EXIT_VINTR		0x064ULL
+#define VMM_SVM_EXIT_RDPMC		0x06fULL
 #define VMM_SVM_EXIT_CPUID		0x072ULL
 #define VMM_SVM_EXIT_INVD		0x076ULL
 #define VMM_SVM_EXIT_PAUSE		0x077ULL
@@ -275,6 +276,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_PIT_FREQ		1193182ULL
 #define VMM_PIT_PORTB_GATE2	0x01U
 #define VMM_PIT_PORTB_OUT2	0x20U
+#define VMM_ACPI_SLEEP_CONTROL_PORT	0x404U
+#define VMM_ACPI_SLEEP_STATUS_PORT	0x405U
+#define VMM_ACPI_SLEEP_S5_ENABLE	0x34U
 #define VMM_PM_TIMER_PORT	0x408U
 #define VMM_PM_TIMER_LAST	0x40bU
 #define VMM_PM_TIMER_FREQ	3579545ULL
@@ -334,6 +338,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_CPUID_MIN_BASIC	0x16U
 #define VMM_CPUID80000001_ECX_SVM CPUID_SVM
 #define VMM_CPUID80000001_ECX_MWAITX CPUID_MWAITX
+#define VMM_CPUID80000001_ECX_PMU ((1U << 10) | (1U << 15) | \
+					 (1U << 23) | (1U << 24) | \
+					 (1U << 26) | (1U << 27) | (1U << 28))
 #define VMM_CPUID80000007_EDX_INVTSC (1U << 8)
 #define VMM_CPUID80000008_ECX_CORES_MASK 0xffU
 
@@ -661,6 +668,8 @@ struct vmm_svm_backend {
 	uint64_t mut_pm_timer_tsc;
 	uint32_t mut_timing_trace_count;
 	uint64_t mut_gprs[VMM_X64_NGPR];
+	/* Set by this vCPU thread before returning to the core lifecycle path. */
+	enum vmm_vcpu_exit_reason mut_exit_reason;
 	uint8_t mut_com1_dll;
 	uint8_t mut_com1_dlm;
 	uint8_t mut_com1_ier;
@@ -1731,6 +1740,17 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		regs[1] = 0;
 		regs[2] = 0;
 		regs[3] = 0;
+	} else if (leaf == 0x0a || leaf == 0x8000001bU ||
+	    leaf == 0x80000022U) {
+		/*
+		 * This CPU template does not provide a virtual PMU.  Hide the
+		 * architectural, IBS, and AMD extended monitoring capability leaves.
+		 * RDPMC remains intercepted as defense for unadvertised use.
+		 */
+		regs[0] = 0;
+		regs[1] = 0;
+		regs[2] = 0;
+		regs[3] = 0;
 	} else if (leaf == 0x15) {
 		/*
 		 * Publish the exact virtual TSC frequency.  Do not round this leaf:
@@ -1757,9 +1777,10 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		regs[2] = 100;
 		regs[3] = 0;
 	} else if (leaf == 0x80000001U) {
-		/* MWAITX is intercepted and deliberately faults in this CPU model. */
+		/* These features are intercepted and deliberately unavailable. */
 		regs[2] &= ~(VMM_CPUID80000001_ECX_SVM |
-		    VMM_CPUID80000001_ECX_MWAITX);
+		    VMM_CPUID80000001_ECX_MWAITX |
+		    VMM_CPUID80000001_ECX_PMU);
 	} else if (leaf == 0x80000007U) {
 		regs[3] |= VMM_CPUID80000007_EDX_INVTSC;
 	} else if (leaf == 0x80000008U) {
@@ -3944,6 +3965,56 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	switch (port) {
+	case VMM_ACPI_SLEEP_CONTROL_PORT:
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported acpi sleep-control io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u acpi sleep-control io op=in size=%d rip=0x%jx",
+			    vc->imm_id, size, (uintmax_t)vmcb->state.rip);
+			vmm_svm_set_rax_low(vmcb, 0, size);
+			vmm_svm_advance_ioio(vmcb);
+			return 1;
+		}
+		val = vmcb->state.rax & 0xffU;
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u acpi sleep-control io op=out size=%d value=0x%x rip=0x%jx",
+		    vc->imm_id, size, val, (uintmax_t)vmcb->state.rip);
+		if (val != VMM_ACPI_SLEEP_S5_ENABLE) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported acpi sleep-control value=0x%x rip=0x%jx",
+			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_SHUTDOWN;
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "guest shutdown source=acpi_s5 vcpu=%u", vc->imm_id);
+		return 1;
+	case VMM_ACPI_SLEEP_STATUS_PORT:
+		if (size != 1) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported acpi sleep-status io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		if (info & VMM_SVM_IOIO_IN) {
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u acpi sleep-status io op=in size=%d rip=0x%jx",
+			    vc->imm_id, size, (uintmax_t)vmcb->state.rip);
+			vmm_svm_set_rax_low(vmcb, 0, size);
+		} else {
+			val = vmcb->state.rax & 0xffU;
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u acpi sleep-status io op=out size=%d value=0x%x rip=0x%jx",
+			    vc->imm_id, size, val, (uintmax_t)vmcb->state.rip);
+		}
+		vmm_svm_advance_ioio(vmcb);
+		return 1;
 	case VMM_PIC1_CMD:
 	case VMM_PIC2_CMD:
 		if (size != 1) {
@@ -4895,7 +4966,7 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 }
 
 
-static void
+static enum vmm_vcpu_exit_reason
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
@@ -4904,7 +4975,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	int handled;
 
 	if (svm == NULL)
-		return;
+		return VMM_VCPU_EXIT_NONE;
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_lapic_timer_sync(svm);
@@ -4977,6 +5048,15 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_CPUID:
 			vmm_svm_handle_cpuid(svm);
 			break;
+		case VMM_SVM_EXIT_RDPMC:
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_ERROR_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION |
+			    VMM_X86_EXCEPTION_GP;
+			VMM_SVM_TRACE(svm,
+			    "svm vcpu%u inject gp reason=rdpmc-hidden rip=0x%jx",
+			    vc->imm_id, (uintmax_t)vmcb->state.rip);
+			break;
 		case VMM_SVM_EXIT_PAUSE:
 			vmm_svm_advance_rip(vmcb);
 			svm->mut_pause_exit_count++;
@@ -4992,8 +5072,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			vmm_svm_handle_guest_tlb_op(svm);
 			break;
 		case VMM_SVM_EXIT_IOIO:
-			if (vmm_svm_handle_ioio(svm, vc))
+			if (vmm_svm_handle_ioio(svm, vc)) {
+				if (svm->mut_exit_reason != VMM_VCPU_EXIT_NONE)
+					goto out;
 				break;
+			}
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
 			goto unhandled;
@@ -5075,7 +5158,7 @@ out:
 		}
 		vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio = 0;
 	}
-	return;
+	return svm->mut_exit_reason;
 }
 
 const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
