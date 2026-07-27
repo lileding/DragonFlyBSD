@@ -27,6 +27,7 @@
 #define AVIC_HANDLER_GPA (ENTRY_GPA + 0x300ULL)
 #define PM64_LONG_GPA	(ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
+#define TIMER_COUNT_GPA	0x1a0000ULL
 #define IOAPIC_GPA	0xfec00000ULL
 #define HPET_GPA	0xfed00000ULL
 #define PM_TIMER_PORT	0x408U
@@ -702,6 +703,228 @@ guest_lapictimer_masked_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
 	patch_rel8(code, jzero, ok_label);
 	patch_rel8(code, jmp_back, loop_label);
+	return len;
+}
+
+/*
+ * Exercise periodic timer delivery while the guest repeatedly parks in HLT.
+ * The first two interrupts EOI and IRETQ back to the HLT loop.  The third
+ * reports its count through the smoke marker, then exits through VMMCALL.
+ */
+static size_t
+guest_lapictimer_periodic_hlt_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_rbx[] = { 0x89, 0x03 };
+	static const uint8_t inc_dword_rbx[] = { 0xff, 0x03 };
+	static const uint8_t cmp_dword_rbx_3[] = { 0x83, 0x3b, 0x03 };
+	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfd };
+	static const uint8_t iretq[] = { 0x48, 0xcf };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-lapic-periodic-hlt-ok\n";
+	size_t len = 0;
+	size_t i;
+	size_t jnot_last;
+	size_t return_label;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rbx, sizeof(mov_eax_to_rbx));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, 0x00020000U | TIMER_VECTOR);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 1000000U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < TIMER_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit(code, &len, cap, inc_dword_rbx, sizeof(inc_dword_rbx));
+	emit(code, &len, cap, cmp_dword_rbx_3, sizeof(cmp_dword_rbx_3));
+	jnot_last = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_dword_rbx_to_ecx,
+	    sizeof(mov_dword_rbx_to_ecx));
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return_label = len;
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit(code, &len, cap, iretq, sizeof(iretq));
+	patch_rel32(code, jnot_last, return_label);
+	return len;
+}
+
+/*
+ * Keep the guest runnable between periodic timer interrupts.  This verifies
+ * that the root systimer forces VMEXIT and delivery without relying on HLT.
+ */
+static size_t
+guest_lapictimer_periodic_busy_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_rbx[] = { 0x89, 0x03 };
+	static const uint8_t inc_dword_rbx[] = { 0xff, 0x03 };
+	static const uint8_t cmp_dword_rbx_3[] = { 0x83, 0x3b, 0x03 };
+	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
+	static const uint8_t sti_busy_loop[] = { 0xfb, 0x90, 0xeb, 0xfd };
+	static const uint8_t iretq[] = { 0x48, 0xcf };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-lapic-periodic-busy-ok\n";
+	size_t len = 0;
+	size_t i;
+	size_t jnot_last;
+	size_t return_label;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rbx, sizeof(mov_eax_to_rbx));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, 0x00020000U | TIMER_VECTOR);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 1000000U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	emit(code, &len, cap, sti_busy_loop, sizeof(sti_busy_loop));
+	while (len < TIMER_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit(code, &len, cap, inc_dword_rbx, sizeof(inc_dword_rbx));
+	emit(code, &len, cap, cmp_dword_rbx_3, sizeof(cmp_dword_rbx_3));
+	jnot_last = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_dword_rbx_to_ecx,
+	    sizeof(mov_dword_rbx_to_ecx));
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return_label = len;
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit(code, &len, cap, iretq, sizeof(iretq));
+	patch_rel32(code, jnot_last, return_label);
+	return len;
+}
+
+/*
+ * A masked periodic timer must continue counting and reloading but cannot
+ * inject.  No IDT gate is installed for this mode, so an injected vector is
+ * a test failure rather than a hidden software fallback.
+ */
+static size_t
+guest_lapictimer_periodic_masked_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_tdcr[] =
+	    { 0x89, 0x87, 0xe0, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_lvtt[] =
+	    { 0x89, 0x87, 0x20, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_tmict[] =
+	    { 0x89, 0x87, 0x80, 0x03, 0x00, 0x00 };
+	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
+	static const uint8_t mov_tmcct_to_eax[] =
+	    { 0x8b, 0x87, 0x90, 0x03, 0x00, 0x00 };
+	static const uint8_t sbb_edx_edx[] = { 0x19, 0xd2 };
+	static const uint8_t test_edx_edx[] = { 0x85, 0xd2 };
+	static const uint8_t mov_esi_one[] = { 0xbe, 0x01, 0x00, 0x00, 0x00 };
+	static const uint8_t cmp_esi_one[] = { 0x83, 0xfe, 0x01 };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-lapic-periodic-masked-ok\n";
+	size_t len = 0;
+	size_t loop_label;
+	size_t jsaw_low;
+	size_t jnot_low_seen;
+	size_t jbelow_high;
+	size_t saw_low_label;
+	size_t continue_label;
+	size_t jmp_back;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0x0000000bU);
+	emit(code, &len, cap, mov_eax_to_tdcr, sizeof(mov_eax_to_tdcr));
+	emit_mov_eax(code, &len, cap, 0x00030000U | TIMER_VECTOR);
+	emit(code, &len, cap, mov_eax_to_lvtt, sizeof(mov_eax_to_lvtt));
+	emit_mov_eax(code, &len, cap, 200000U);
+	emit(code, &len, cap, mov_eax_to_tmict, sizeof(mov_eax_to_tmict));
+	emit(code, &len, cap, (const uint8_t[]){ 0x31, 0xf6 }, 2);
+	loop_label = len;
+	emit(code, &len, cap, cpuid_zero, sizeof(cpuid_zero));
+	emit(code, &len, cap, mov_tmcct_to_eax, sizeof(mov_tmcct_to_eax));
+	emit_cmp_eax(code, &len, cap, 50000U);
+	emit(code, &len, cap, sbb_edx_edx, sizeof(sbb_edx_edx));
+	emit(code, &len, cap, test_edx_edx, sizeof(test_edx_edx));
+	jsaw_low = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, cmp_esi_one, sizeof(cmp_esi_one));
+	jnot_low_seen = emit_jne32(code, &len, cap);
+	emit_cmp_eax(code, &len, cap, 150000U);
+	emit(code, &len, cap, sbb_edx_edx, sizeof(sbb_edx_edx));
+	emit(code, &len, cap, test_edx_edx, sizeof(test_edx_edx));
+	jbelow_high = emit_jne32(code, &len, cap);
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 0x33U);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	saw_low_label = len;
+	emit(code, &len, cap, mov_esi_one, sizeof(mov_esi_one));
+	continue_label = len;
+	emit(code, &len, cap, (const uint8_t[]){ 0xe9, 0x00, 0x00, 0x00, 0x00 },
+	    5);
+	jmp_back = len - 4;
+	patch_rel32(code, jsaw_low, saw_low_label);
+	patch_rel32(code, jnot_low_seen, continue_label);
+	patch_rel32(code, jbelow_high, continue_label);
+	patch_rel32(code, jmp_back, loop_label);
 	return len;
 }
 
@@ -1784,6 +2007,12 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_timer_code(code, cap);
 	} else if (strcmp(mode, "lapictimer") == 0) {
 		return guest_lapictimer_code(code, cap);
+	} else if (strcmp(mode, "lapictimer_periodic_hlt") == 0) {
+		return guest_lapictimer_periodic_hlt_code(code, cap);
+	} else if (strcmp(mode, "lapictimer_periodic_busy") == 0) {
+		return guest_lapictimer_periodic_busy_code(code, cap);
+	} else if (strcmp(mode, "lapictimer_periodic_masked") == 0) {
+		return guest_lapictimer_periodic_masked_code(code, cap);
 	} else if (strcmp(mode, "hireslapic") == 0) {
 		return guest_hires_lapictimer_code(code, cap);
 	} else if (strcmp(mode, "lapictimer_masked") == 0) {
@@ -1912,7 +2141,10 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	write64(mem, GDT_GPA + 24, 0x0000890060000067ULL);
 	memset(mem + TSS_GPA, 0, 0x68);
 	if (strcmp(mode, "timerint") == 0 ||
-	    strcmp(mode, "lapictimer") == 0 || strcmp(mode, "hireslapic") == 0 ||
+	    strcmp(mode, "lapictimer") == 0 ||
+	    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
+	    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
+	    strcmp(mode, "hireslapic") == 0 ||
 	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "hiresscale") == 0 ||
 	    strcmp(mode, "serialirq") == 0 || strcmp(mode, "ud") == 0 ||
@@ -1921,7 +2153,10 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	    strcmp(mode, "ioapicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
 		if (strcmp(mode, "timerint") == 0 ||
-		    strcmp(mode, "lapictimer") == 0 || strcmp(mode, "hireslapic") == 0 ||
+		    strcmp(mode, "lapictimer") == 0 ||
+		    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
+		    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
+		    strcmp(mode, "hireslapic") == 0 ||
 		    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 		    strcmp(mode, "hiresscale") == 0)
 			write_idt_gate(mem, TIMER_VECTOR, TIMER_HANDLER_GPA);
@@ -1986,7 +2221,10 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 		set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
 	}
 	if (strcmp(mode, "timerint") == 0 ||
-	    strcmp(mode, "lapictimer") == 0 || strcmp(mode, "hireslapic") == 0 ||
+	    strcmp(mode, "lapictimer") == 0 ||
+	    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
+	    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
+	    strcmp(mode, "hireslapic") == 0 ||
 	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "hiresscale") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
@@ -2063,7 +2301,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|hireslapic|tscdeadline|tscscale|hiresscale|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

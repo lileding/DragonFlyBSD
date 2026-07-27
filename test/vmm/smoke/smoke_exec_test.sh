@@ -22,8 +22,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 SVM_TRACE=${VMM_SVM_TRACE:-0}
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
@@ -451,6 +451,18 @@ check_console()
 		wait_console 'dfvmm-lapic-timer-ok' ||
 		    fail "$mode console output"
 		;;
+	lapictimer_periodic_hlt)
+		wait_console 'dfvmm-lapic-periodic-hlt-ok' ||
+		    fail "$mode console output"
+		;;
+	lapictimer_periodic_busy)
+		wait_console 'dfvmm-lapic-periodic-busy-ok' ||
+		    fail "$mode console output"
+		;;
+	lapictimer_periodic_masked)
+		wait_console 'dfvmm-lapic-periodic-masked-ok' ||
+		    fail "$mode console output"
+		;;
 	lapictimer_masked)
 		wait_console 'dfvmm-lapic-masked-ok' ||
 		    fail "$mode console output"
@@ -531,6 +543,29 @@ run_case()
 			[ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] ||
 			    fail "$mode delta=$value expected=$minimum..$maximum target=$target"
 			say "$mode TSC delta=$value target=$target"
+		fi
+		case "$mode" in
+		lapictimer_periodic_hlt|lapictimer_periodic_busy)
+			periodic_marker=3
+			;;
+		lapictimer_periodic_masked)
+			periodic_marker=51
+			;;
+		*)
+			periodic_marker=
+			;;
+		esac
+		if [ -n "$periodic_marker" ]; then
+			marker=$(sed -n \
+			    's/.*smoke avic marker=0x\([0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' \
+			    "$LOG" | tail -n 1)
+			case "$marker" in
+			''|*[!0-9a-fA-F]*) fail "$mode missing periodic marker" ;;
+			esac
+			value=$((0x$marker))
+			[ "$value" -eq "$periodic_marker" ] ||
+			    fail "$mode marker=$value expected=$periodic_marker"
+			say "$mode marker=$value"
 		fi
 		if [ "$mode" = "pausefilter" ]; then
 			pause_exits=$(sed -n \
