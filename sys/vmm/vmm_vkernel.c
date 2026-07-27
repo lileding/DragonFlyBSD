@@ -8,10 +8,10 @@
 
 #include "vmm_vcpu.h"
 
-static int
-vmm_vkernel_available(void)
+static const char *
+vmm_vkernel_probe(void)
 {
-	return 1;
+	return NULL;
 }
 
 static int
@@ -40,7 +40,7 @@ vmm_vkernel_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 
 const struct vmm_vcpu_backend_ops vmm_vkernel_backend_ops = {
 	.imm_name = "vkernel",
-	.available = vmm_vkernel_available,
+	.probe = vmm_vkernel_probe,
 	.create = vmm_vkernel_vcpu_create,
 	.destroy = vmm_vkernel_vcpu_destroy,
 	.run = vmm_vkernel_vcpu_run,

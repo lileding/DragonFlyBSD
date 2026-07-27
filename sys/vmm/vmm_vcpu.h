@@ -54,7 +54,8 @@ struct vmm_vcpu_thread {
 
 struct vmm_vcpu_backend_ops {
 	const char *imm_name;
-	int (*available)(void);
+	/* NULL if usable; otherwise a stable module-load rejection reason. */
+	const char *(*probe)(void);
 	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
 	    void **backendp);
 	void (*destroy)(void *backend);
@@ -70,6 +71,8 @@ int	vmm_vcpu_parse(struct vmm_vcpu *v, const char *buf, size_t len);
 /* Serialize the value as decimal + newline; bytes written (0 if unset). */
 size_t	vmm_vcpu_format(const struct vmm_vcpu *v, char *out, size_t cap);
 int	vmm_vcpu_is_set(const struct vmm_vcpu *v);
+
+int	vmm_backend_probe(void);
 
 int	vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	    const struct vmm_launch *launch);

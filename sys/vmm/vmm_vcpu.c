@@ -22,16 +22,30 @@
 
 SET_DECLARE(vmm_vcpu_backend_set, const struct vmm_vcpu_backend_ops);
 
-static const struct vmm_vcpu_backend_ops *
-vmm_vcpu_select_backend(void)
+static const struct vmm_vcpu_backend_ops *vmm_backend;
+
+int
+vmm_backend_probe(void)
 {
 	const struct vmm_vcpu_backend_ops **ops;
+	const char *reason = "no_backend";
+	const char *name = "none";
 
+	if (vmm_backend != NULL)
+		return 0;
 	SET_FOREACH(ops, vmm_vcpu_backend_set) {
-		if ((*ops)->available())
-			return *ops;
+		reason = (*ops)->probe();
+		if (reason == NULL) {
+			vmm_backend = *ops;
+			kprintf("vmm: backend selected name=%s\n",
+			    vmm_backend->imm_name);
+			return 0;
+		}
+		name = (*ops)->imm_name;
 	}
-	return NULL;
+	kprintf("vmm: no usable vcpu backend name=%s reason=%s\n", name,
+	    reason);
+	return ENXIO;
 }
 
 int
@@ -105,12 +119,12 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 		return EINVAL;
 	if (count != 1 || launch == NULL)
 		return EOPNOTSUPP;
-	backend_ops = vmm_vcpu_select_backend();
+	backend_ops = vmm_backend;
 	if (backend_ops == NULL) {
 		vmm_machine_logf(m, "vcpu start failed reason=no_backend");
-		return EOPNOTSUPP;
+		return ENXIO;
 	}
-	vmm_machine_logf(m, "vcpu backend selected name=%s count=%u",
+	vmm_machine_logf(m, "vcpu backend name=%s count=%u",
 	    backend_ops->imm_name, count);
 	threads = kmalloc(sizeof(*threads) * count, M_TEMP, M_WAITOK | M_ZERO);
 

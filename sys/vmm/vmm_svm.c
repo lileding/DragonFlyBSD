@@ -1328,18 +1328,18 @@ vmm_svm_lapic_eoi(struct vmm_svm_backend *svm)
 	}
 }
 
-static int
-vmm_svm_available(void)
+static const char *
+vmm_svm_probe(void)
 {
 	uint32_t descs[4];
 	uint64_t msr;
 
 	do_cpuid(0x80000000, descs);
 	if (descs[0] < 0x8000000a)
-		return 0;
+		return "missing_cpuid_8000000a";
 	do_cpuid(0x80000001, descs);
 	if ((descs[2] & CPUID_SVM) == 0)
-		return 0;
+		return "missing_svm";
 	do_cpuid(0x8000000a, descs);
 	if ((descs[3] & CPUID_AMD_SVM_NP) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_NRIPS) == 0 ||
@@ -1348,11 +1348,11 @@ vmm_svm_available(void)
 	    (descs[3] & CPUID_AMD_SVM_PFThreshold) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_AVIC) == 0 ||
 	    (descs[3] & CPUID_AMD_SVM_TSCRateCtrl) == 0)
-		return 0;
+		return "missing_required_feature";
 	msr = rdmsr(MSR_AMD_VM_CR);
 	if ((msr & VM_CR_SVMDIS) && (msr & VM_CR_LOCK))
-		return 0;
-	return 1;
+		return "svm_disabled_locked";
+	return NULL;
 }
 
 static void
@@ -5388,7 +5388,7 @@ out:
 
 const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
 	.imm_name = "svm",
-	.available = vmm_svm_available,
+	.probe = vmm_svm_probe,
 	.create = vmm_svm_vcpu_create,
 	.destroy = vmm_svm_vcpu_destroy,
 	.run = vmm_svm_vcpu_run,

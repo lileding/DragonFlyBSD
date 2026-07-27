@@ -39,6 +39,7 @@
 #include "vmm_domain.h"
 #include "vmm_loader.h"
 #include "vmm_machine.h"
+#include "vmm_vcpu.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
 #include "vmmfs_machine.h"
@@ -727,6 +728,9 @@ vmmfs_vfs_init(struct vfsconf *conf)
 
 	(void)conf;
 	kprintf("vmm klog: vfs_init begin\n");
+	error = vmm_backend_probe();
+	if (error)
+		return error;
 	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
 	vmmfs_mount_count = 0;
 	kprintf("vmm klog: domain init begin\n");
