@@ -49,6 +49,9 @@
 #include <drm/drmP.h>
 #include <sys/sysctl.h>
 #include <sys/proc.h>
+#include <sys/file.h>
+#include <sys/filedesc.h>
+#include <sys/stat.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/anon_inodes.h>
@@ -525,19 +528,40 @@ static int drm_syncobj_destroy(struct drm_file *file_private,
 	return 0;
 }
 
-#if 0
-static int drm_syncobj_file_release(struct inode *inode, struct file *file)
-{
-	struct drm_syncobj *syncobj = file->private_data;
+/* One past DTYPE_SYNC_FILE, which linux_sync_file.c defines for itself. */
+#define DTYPE_SYNCOBJ		10
 
-	drm_syncobj_put(syncobj);
+static int
+drm_syncobj_file_close(struct file *fp)
+{
+	struct drm_syncobj *syncobj = fp->private_data;
+
+	if (syncobj != NULL) {
+		fp->private_data = NULL;
+		drm_syncobj_put(syncobj);
+	}
+	fp->f_ops = &badfileops;
 	return 0;
 }
 
-static const struct file_operations drm_syncobj_file_fops = {
-	.release = drm_syncobj_file_release,
+static int
+drm_syncobj_file_stat(struct file *fp, struct stat *sb, struct ucred *cred)
+{
+	bzero(sb, sizeof(*sb));
+	sb->st_mode = S_IFIFO;
+	return 0;
+}
+
+static struct fileops drm_syncobj_fileops = {
+	.fo_read = badfo_readwrite,
+	.fo_write = badfo_readwrite,
+	.fo_ioctl = badfo_ioctl,
+	.fo_kqfilter = badfo_kqfilter,
+	.fo_stat = drm_syncobj_file_stat,
+	.fo_close = drm_syncobj_file_close,
+	.fo_shutdown = nofo_shutdown,
+	.fo_seek = badfo_seek
 };
-#endif
 
 /**
  * drm_syncobj_get_fd - get a file descriptor from a syncobj
@@ -557,19 +581,18 @@ int drm_syncobj_get_fd(struct drm_syncobj *syncobj, int *p_fd)
 	if (fd < 0)
 		return fd;
 
-#if 0
-	file = anon_inode_getfile("syncobj_file",
-				  &drm_syncobj_file_fops,
-				  syncobj, 0);
-	if (IS_ERR(file)) {
+	if (falloc(curthread->td_lwp, &file, NULL) != 0) {
 		put_unused_fd(fd);
-		return PTR_ERR(file);
- 	}
-#else
-	return -ENOSYS;
-#endif
+		return -ENOMEM;
+	}
+
+	file->f_type = DTYPE_SYNCOBJ;
+	file->f_flag = FREAD | FWRITE;
+	file->f_ops = &drm_syncobj_fileops;
 
 	drm_syncobj_get(syncobj);
+	file->private_data = syncobj;
+
 	fd_install(fd, file);
 
 	*p_fd = fd;
@@ -594,30 +617,32 @@ static int drm_syncobj_handle_to_fd(struct drm_file *file_private,
 static int drm_syncobj_fd_to_handle(struct drm_file *file_private,
 				    int fd, u32 *handle)
 {
-	STUB();
-	return -ENOSYS;
-#if 0
 	struct drm_syncobj *syncobj;
 	struct file *file;
 	int ret;
 
-	file = fget(fd);
-	if (!file)
+	file = holdfp(curthread, fd, -1);
+	if (file == NULL)
 		return -EINVAL;
 
-	if (file->f_op != &drm_syncobj_file_fops) {
-		fput(file);
+	if (file->f_ops != &drm_syncobj_fileops) {
+		dropfp(curthread, fd, file);
+		return -EINVAL;
+	}
+
+	syncobj = file->private_data;
+	if (syncobj == NULL) {
+		dropfp(curthread, fd, file);
 		return -EINVAL;
 	}
 
 	/* take a reference to put in the idr */
-	syncobj = file->private_data;
 	drm_syncobj_get(syncobj);
 
 	idr_preload(GFP_KERNEL);
-	spin_lock(&file_private->syncobj_table_lock);
+	lockmgr(&file_private->syncobj_table_lock, LK_EXCLUSIVE);
 	ret = idr_alloc(&file_private->syncobj_idr, syncobj, 1, 0, GFP_NOWAIT);
-	spin_unlock(&file_private->syncobj_table_lock);
+	lockmgr(&file_private->syncobj_table_lock, LK_RELEASE);
 	idr_preload_end();
 
 	if (ret > 0) {
@@ -626,9 +651,8 @@ static int drm_syncobj_fd_to_handle(struct drm_file *file_private,
 	} else
 		drm_syncobj_put(syncobj);
 
-	fput(file);
+	dropfp(curthread, fd, file);
 	return ret;
-#endif
 }
 
 static int drm_syncobj_import_sync_file_fence(struct drm_file *file_private,
