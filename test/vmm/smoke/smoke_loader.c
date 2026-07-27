@@ -25,6 +25,7 @@
 #define SERIAL_HANDLER_GPA (ENTRY_GPA + 0x80ULL)
 #define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
 #define AVIC_HANDLER_GPA (ENTRY_GPA + 0x300ULL)
+#define HPET_HANDLER_GPA (ENTRY_GPA + 0x500ULL)
 #define PM64_LONG_GPA	(ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
 #define TIMER_COUNT_GPA	0x1a0000ULL
@@ -47,6 +48,7 @@
 #define APIC_REG_ICR_HIGH 0x310U
 #define IOAPIC_VERSION	0x00170011U
 #define IOAPIC_MASKED_VECTOR32	0x00010020U
+#define HPET_GSI	16U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ABI	1
@@ -97,6 +99,7 @@
 #define TIMER_VECTOR	0x2eU
 #define AVIC_VECTOR	0x40U
 #define IOAPIC_VECTOR	0x41U
+#define HPET_VECTOR	0x42U
 #define UD_VECTOR	6U
 #define AVIC_MAGIC	0x43495641U
 #define AVIC_OP_DELIVER	1U
@@ -120,8 +123,14 @@
 #define IO_DELAY_PORT		0x0080U
 #define PIC_ELCR1_PORT		0x04d0U
 #define PIC_ELCR2_PORT		0x04d1U
-#define HPET_CAP_LOW		0x8086a201U
+#define HPET_CAP_LOW		0x80862201U
 #define HPET_PERIOD_FS		100000000U
+#define HPET_CONFIG_ENABLE	0x001U
+#define HPET_TIMER_ENABLE	0x004U
+#define HPET_TIMER_PERIODIC	0x008U
+#define HPET_TIMER_SETVAL	0x040U
+#define HPET_TIMER_32BIT	0x100U
+#define HPET_TIMER_ROUTE	(HPET_GSI << 9)
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -1915,6 +1924,248 @@ guest_hpet_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_hpet_oneshot_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_edi_hpet[] =
+	    { 0xbf, 0x00, 0x00, 0xd0, 0xfe };
+	static const uint8_t mov_edi_apic[] =
+	    { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_counter_to_eax[] =
+	    { 0x8b, 0x87, 0xf0, 0x00, 0x00, 0x00 };
+	static const uint8_t add_eax_delay[] =
+	    { 0x05, 0xa0, 0x86, 0x01, 0x00 };
+	static const uint8_t mov_eax_to_comparator[] =
+	    { 0x89, 0x87, 0x08, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_timer_config[] =
+	    { 0x89, 0x87, 0x00, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_status[] = { 0x89, 0x47, 0x20 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-hpet-oneshot-ok\n";
+	size_t len = 0;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x10U + HPET_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, HPET_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x11U + HPET_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit(code, &len, cap, mov_edi_hpet, sizeof(mov_edi_hpet));
+	emit_mov_eax(code, &len, cap, HPET_CONFIG_ENABLE);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit(code, &len, cap, mov_counter_to_eax, sizeof(mov_counter_to_eax));
+	emit(code, &len, cap, add_eax_delay, sizeof(add_eax_delay));
+	emit(code, &len, cap, mov_eax_to_comparator,
+	    sizeof(mov_eax_to_comparator));
+	emit_mov_eax(code, &len, cap, HPET_TIMER_ROUTE | HPET_TIMER_ENABLE |
+	    HPET_TIMER_32BIT);
+	emit(code, &len, cap, mov_eax_to_timer_config,
+	    sizeof(mov_eax_to_timer_config));
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < HPET_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, mov_edi_hpet, sizeof(mov_edi_hpet));
+	emit_mov_eax(code, &len, cap, 1);
+	emit(code, &len, cap, mov_eax_to_status, sizeof(mov_eax_to_status));
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 1);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return len;
+}
+
+static size_t
+guest_hpet_periodic_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_edi_hpet[] =
+	    { 0xbf, 0x00, 0x00, 0xd0, 0xfe };
+	static const uint8_t mov_edi_apic[] =
+	    { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_counter_to_eax[] =
+	    { 0x8b, 0x87, 0xf0, 0x00, 0x00, 0x00 };
+	static const uint8_t add_eax_delay[] =
+	    { 0x05, 0xa0, 0x86, 0x01, 0x00 };
+	static const uint8_t mov_eax_to_comparator[] =
+	    { 0x89, 0x87, 0x08, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_timer_config[] =
+	    { 0x89, 0x87, 0x00, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_status[] = { 0x89, 0x47, 0x20 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_rbx[] = { 0x89, 0x03 };
+	static const uint8_t inc_dword_rbx[] = { 0xff, 0x03 };
+	static const uint8_t cmp_dword_rbx_3[] = { 0x83, 0x3b, 0x03 };
+	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfd };
+	static const uint8_t iretq[] = { 0x48, 0xcf };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-hpet-periodic-ok\n";
+	size_t len = 0;
+	size_t i;
+	size_t jnot_last;
+	size_t return_label;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x10U + HPET_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, HPET_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x11U + HPET_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit(code, &len, cap, mov_edi_hpet, sizeof(mov_edi_hpet));
+	emit_mov_eax(code, &len, cap, HPET_CONFIG_ENABLE);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap,
+	    HPET_TIMER_ROUTE | HPET_TIMER_ENABLE | HPET_TIMER_PERIODIC |
+	    HPET_TIMER_SETVAL | HPET_TIMER_32BIT);
+	emit(code, &len, cap, mov_eax_to_timer_config,
+	    sizeof(mov_eax_to_timer_config));
+	emit(code, &len, cap, mov_counter_to_eax, sizeof(mov_counter_to_eax));
+	emit(code, &len, cap, add_eax_delay, sizeof(add_eax_delay));
+	emit(code, &len, cap, mov_eax_to_comparator,
+	    sizeof(mov_eax_to_comparator));
+	emit_mov_eax(code, &len, cap, 50000U);
+	emit(code, &len, cap, mov_eax_to_comparator,
+	    sizeof(mov_eax_to_comparator));
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rbx, sizeof(mov_eax_to_rbx));
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < HPET_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, TIMER_COUNT_GPA);
+	emit(code, &len, cap, inc_dword_rbx, sizeof(inc_dword_rbx));
+	emit(code, &len, cap, mov_edi_hpet, sizeof(mov_edi_hpet));
+	emit_mov_eax(code, &len, cap, 1);
+	emit(code, &len, cap, mov_eax_to_status, sizeof(mov_eax_to_status));
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit(code, &len, cap, cmp_dword_rbx_3, sizeof(cmp_dword_rbx_3));
+	jnot_last = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_dword_rbx_to_ecx,
+	    sizeof(mov_dword_rbx_to_ecx));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	return_label = len;
+	emit(code, &len, cap, iretq, sizeof(iretq));
+	patch_rel32(code, jnot_last, return_label);
+	return len;
+}
+
+static size_t
+guest_hpet_masked_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_hpet[] =
+	    { 0xbf, 0x00, 0x00, 0xd0, 0xfe };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_counter_to_eax[] =
+	    { 0x8b, 0x87, 0xf0, 0x00, 0x00, 0x00 };
+	static const uint8_t add_eax_delay[] =
+	    { 0x05, 0xa0, 0x86, 0x01, 0x00 };
+	static const uint8_t mov_eax_to_comparator[] =
+	    { 0x89, 0x87, 0x08, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_timer_config[] =
+	    { 0x89, 0x87, 0x00, 0x01, 0x00, 0x00 };
+	static const uint8_t mov_status_to_eax[] = { 0x8b, 0x47, 0x20 };
+	static const uint8_t mov_eax_to_status[] = { 0x89, 0x47, 0x20 };
+	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
+	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-hpet-masked-ok\n";
+	size_t len = 0;
+	size_t loop_label;
+	size_t jgot_status;
+	size_t jbad_status;
+	size_t jstatus_not_clear;
+	size_t jmp_back;
+	size_t fail_label;
+	size_t got_status;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_hpet, sizeof(mov_edi_hpet));
+	emit_mov_eax(code, &len, cap, HPET_CONFIG_ENABLE);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit(code, &len, cap, mov_counter_to_eax, sizeof(mov_counter_to_eax));
+	emit(code, &len, cap, add_eax_delay, sizeof(add_eax_delay));
+	emit(code, &len, cap, mov_eax_to_comparator,
+	    sizeof(mov_eax_to_comparator));
+	emit_mov_eax(code, &len, cap, HPET_TIMER_ROUTE | HPET_TIMER_ENABLE |
+	    HPET_TIMER_32BIT);
+	emit(code, &len, cap, mov_eax_to_timer_config,
+	    sizeof(mov_eax_to_timer_config));
+	loop_label = len;
+	emit(code, &len, cap, cpuid_zero, sizeof(cpuid_zero));
+	emit(code, &len, cap, mov_status_to_eax, sizeof(mov_status_to_eax));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	jgot_status = emit_jne32(code, &len, cap);
+	emit(code, &len, cap,
+	    (const uint8_t[]){ 0xe9, 0x00, 0x00, 0x00, 0x00 }, 5);
+	jmp_back = len - 4;
+	got_status = len;
+	emit_cmp_eax(code, &len, cap, 1);
+	jbad_status = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_eax_to_status, sizeof(mov_eax_to_status));
+	emit(code, &len, cap, mov_status_to_eax, sizeof(mov_status_to_eax));
+	emit(code, &len, cap, test_eax_eax, sizeof(test_eax_eax));
+	jstatus_not_clear = emit_jne32(code, &len, cap);
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 0x33U);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, jgot_status, got_status);
+	patch_rel32(code, jbad_status, fail_label);
+	patch_rel32(code, jstatus_not_clear, fail_label);
+	patch_rel32(code, jmp_back, loop_label);
+	return len;
+}
+
+static size_t
 guest_pmtimer_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t mov_dx_pm_timer[] =
@@ -2022,6 +2273,12 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_tscdeadline_code(code, cap);
 	} else if (strcmp(mode, "hiresscale") == 0) {
 		return guest_hires_tscdeadline_code(code, cap);
+	} else if (strcmp(mode, "hpet_oneshot") == 0) {
+		return guest_hpet_oneshot_code(code, cap);
+	} else if (strcmp(mode, "hpet_periodic") == 0) {
+		return guest_hpet_periodic_code(code, cap);
+	} else if (strcmp(mode, "hpet_masked") == 0) {
+		return guest_hpet_masked_code(code, cap);
 	} else if (strcmp(mode, "pausefilter") == 0) {
 		return guest_pausefilter_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
@@ -2144,6 +2401,8 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
 	    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
+	    strcmp(mode, "hpet_oneshot") == 0 ||
+	    strcmp(mode, "hpet_periodic") == 0 ||
 	    strcmp(mode, "hireslapic") == 0 ||
 	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "hiresscale") == 0 ||
@@ -2152,7 +2411,10 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	    strcmp(mode, "avicirq") == 0 ||
 	    strcmp(mode, "ioapicirq") == 0) {
 		memset(mem + IDT_GPA, 0, PAGE_SIZE_GUEST);
-		if (strcmp(mode, "timerint") == 0 ||
+		if (strcmp(mode, "hpet_oneshot") == 0 ||
+		    strcmp(mode, "hpet_periodic") == 0)
+			write_idt_gate(mem, HPET_VECTOR, HPET_HANDLER_GPA);
+		else if (strcmp(mode, "timerint") == 0 ||
 		    strcmp(mode, "lapictimer") == 0 ||
 		    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
 		    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
@@ -2220,7 +2482,11 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 		set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
 		set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 39, GDT_GPA);
 	}
-	if (strcmp(mode, "timerint") == 0 ||
+	if (strcmp(mode, "hpet_oneshot") == 0 ||
+	    strcmp(mode, "hpet_periodic") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    HPET_VECTOR * 16 + 15, IDT_GPA);
+	} else if (strcmp(mode, "timerint") == 0 ||
 	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
 	    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
@@ -2301,7 +2567,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

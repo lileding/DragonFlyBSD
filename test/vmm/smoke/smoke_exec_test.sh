@@ -22,8 +22,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 SVM_TRACE=${VMM_SVM_TRACE:-0}
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
@@ -463,6 +463,18 @@ check_console()
 		wait_console 'dfvmm-lapic-periodic-masked-ok' ||
 		    fail "$mode console output"
 		;;
+	hpet_oneshot)
+		wait_console 'dfvmm-hpet-oneshot-ok' ||
+		    fail "$mode console output"
+		;;
+	hpet_periodic)
+		wait_console 'dfvmm-hpet-periodic-ok' ||
+		    fail "$mode console output"
+		;;
+	hpet_masked)
+		wait_console 'dfvmm-hpet-masked-ok' ||
+		    fail "$mode console output"
+		;;
 	lapictimer_masked)
 		wait_console 'dfvmm-lapic-masked-ok' ||
 		    fail "$mode console output"
@@ -545,11 +557,14 @@ run_case()
 			say "$mode TSC delta=$value target=$target"
 		fi
 		case "$mode" in
-		lapictimer_periodic_hlt|lapictimer_periodic_busy)
+		lapictimer_periodic_hlt|lapictimer_periodic_busy|hpet_periodic)
 			periodic_marker=3
 			;;
-		lapictimer_periodic_masked)
+		lapictimer_periodic_masked|hpet_masked)
 			periodic_marker=51
+			;;
+		hpet_oneshot)
+			periodic_marker=1
 			;;
 		*)
 			periodic_marker=

@@ -702,7 +702,7 @@ build_acpi_tables(uint8_t *mem)
 
 	hpet = mem + ACPI_HPET_GPA;
 	write_acpi_header(hpet, "HPET", 56, 1);
-	write32(hpet, 36, 0x8086a201U);
+	write32(hpet, 36, 0x80862201U);
 	write8(hpet, 40, ACPI_SPACE_SYSTEM_MEMORY);
 	write8(hpet, 41, 64);
 	write8(hpet, 42, 0);

@@ -178,7 +178,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 	 VMM_SVM_APIC_LVT_LEVEL_TRIGGER)
 #define VMM_SVM_APIC_TIMER_DIVIDE_VALID	0x0000000bU
 #define VMM_SVM_LAPIC_TIMER_HZ		1000000000ULL
-#define VMM_SVM_LAPIC_TIMER_MAX_US	(60LL * 1000 * 1000)
+#define VMM_SVM_ROOT_TIMER_MAX_US	(60LL * 1000 * 1000)
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 #define VMM_SVM_MSR_AMD64_TSC_RATIO	0xc0000104U
 #define VMM_SVM_TSC_RATIO_DEFAULT	(1ULL << 32)
@@ -344,6 +344,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_HPET_FREQ		10000000ULL
 #define VMM_HPET_PERIOD_FS	(1000000000000000ULL / VMM_HPET_FREQ)
 #define VMM_HPET_TIMER_COUNT	3
+#define VMM_HPET_GSI		16U
 #define VMM_HPET_REG_CAP	0x000U
 #define VMM_HPET_REG_CONFIG	0x010U
 #define VMM_HPET_REG_STATUS	0x020U
@@ -353,18 +354,26 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_HPET_TIMER_CONFIG	0x000U
 #define VMM_HPET_TIMER_COMPARATOR 0x008U
 #define VMM_HPET_TIMER_FSB	0x010U
-#define VMM_HPET_CAP_ID		((VMM_HPET_PERIOD_FS << 32) | 0x8086a201ULL)
+#define VMM_HPET_CAP_ID		((VMM_HPET_PERIOD_FS << 32) | 0x80862201ULL)
 #define VMM_HPET_CONFIG_ENABLE	0x001ULL
-#define VMM_HPET_CONFIG_LEGACY	0x002ULL
-#define VMM_HPET_CONFIG_VALID	(VMM_HPET_CONFIG_ENABLE | \
-				 VMM_HPET_CONFIG_LEGACY)
+#define VMM_HPET_CONFIG_VALID	VMM_HPET_CONFIG_ENABLE
+#define VMM_HPET_TIMER_ENABLE		0x004ULL
+#define VMM_HPET_TIMER_PERIODIC	0x008ULL
 #define VMM_HPET_TIMER_PERIODIC_CAP (1ULL << 4)
 #define VMM_HPET_TIMER_SIZE_CAP	(1ULL << 5)
-#define VMM_HPET_TIMER_FSB_CAP	(1ULL << 15)
-#define VMM_HPET_TIMER_ROUTE_CAP (1ULL << (32 + 2))
+#define VMM_HPET_TIMER_SETVAL		0x040ULL
+#define VMM_HPET_TIMER_32BIT		0x100ULL
+#define VMM_HPET_TIMER_ROUTE_MASK	0x3e00ULL
+#define VMM_HPET_TIMER_ROUTE_SHIFT	9
+#define VMM_HPET_TIMER_ROUTE_CAP (1ULL << (32 + VMM_HPET_GSI))
 #define VMM_HPET_TIMER_CAP	(VMM_HPET_TIMER_PERIODIC_CAP | \
 				 VMM_HPET_TIMER_SIZE_CAP | \
 				 VMM_HPET_TIMER_ROUTE_CAP)
+#define VMM_HPET_TIMER_CONFIG_VALID (VMM_HPET_TIMER_ENABLE | \
+					 VMM_HPET_TIMER_PERIODIC | \
+					 VMM_HPET_TIMER_SETVAL | \
+					 VMM_HPET_TIMER_32BIT | \
+					 VMM_HPET_TIMER_ROUTE_MASK)
 #define VMM_FCH_PM_BASE		0xfed80300ULL
 #define VMM_FCH_PM_S5_RESET_STATUS 0x0c0ULL
 
@@ -567,18 +576,20 @@ struct vmm_svm_backend {
 	uint32_t mut_lapic_timer_tdcr;
 	uint32_t mut_lapic_timer_divisor;
 	/*
-	 * LAPIC timer state is owned by the vCPU LWKT.  The systimer callback
-	 * only wakes that thread and never reads or mutates this state.
+	 * Root timer state is owned by the vCPU LWKT.  The systimer callback only
+	 * wakes that thread and never reads or mutates this state.  The deadline is
+	 * the earliest active LAPIC or HPET timer deadline in root TSC units.
 	 */
 	uint64_t mut_lapic_timer_interval_root_tsc;
 	uint64_t mut_lapic_timer_root_deadline;
-	struct systimer own_mut_lapic_timer_systimer;
+	uint64_t mut_root_timer_deadline;
+	struct systimer own_mut_root_timer_systimer;
 	uint32_t mut_lapic_timer_fire_count;
 	uint32_t mut_lapic_timer_idle_count;
 	uint64_t mut_lapic_timer_tsc_deadline;
 	uint32_t mut_pause_exit_count;
 	int mut_lapic_timer_active;
-	int mut_lapic_timer_systimer_armed;
+	int mut_root_timer_systimer_armed;
 	/*
 	 * IOAPIC and COM1 device state is owned by the vCPU thread.  Host
 	 * console writers may append to vmm_console's input FIFO and wake the
@@ -621,11 +632,16 @@ struct vmm_svm_backend {
 	uint64_t imm_guest_tsc_hz;
 	uint64_t imm_tsc_ratio;
 	uint64_t mut_hpet_config;
+	uint32_t mut_hpet_status;
 	uint64_t mut_hpet_counter_base;
 	uint64_t mut_hpet_counter_tsc;
 	uint64_t mut_hpet_timer_config[VMM_HPET_TIMER_COUNT];
 	uint64_t mut_hpet_timer_comparator[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_hpet_timer_fsb[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_deadline[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_period[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_root_deadline[VMM_HPET_TIMER_COUNT];
+	int mut_hpet_timer_comparator_set[VMM_HPET_TIMER_COUNT];
+	int mut_hpet_timer_active[VMM_HPET_TIMER_COUNT];
 	uint64_t mut_pm_timer_tsc;
 	uint32_t mut_timing_trace_count;
 	uint64_t mut_gprs[VMM_X64_NGPR];
@@ -995,7 +1011,7 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 }
 
 static void
-vmm_svm_lapic_timer_systimer(struct systimer *timer, int in_ipi,
+vmm_svm_root_timer_systimer(struct systimer *timer, int in_ipi,
     struct intrframe *frame)
 {
 	struct vmm_vcpu_thread *vc = timer->data;
@@ -2002,7 +2018,7 @@ vmm_svm_hpet_read64(struct vmm_svm_backend *svm, uint64_t off)
 	case VMM_HPET_REG_CONFIG:
 		return svm->mut_hpet_config;
 	case VMM_HPET_REG_STATUS:
-		return 0;
+		return svm->mut_hpet_status;
 	case VMM_HPET_REG_COUNTER:
 		return vmm_svm_hpet_counter(svm);
 	default:
@@ -2020,7 +2036,7 @@ vmm_svm_hpet_read64(struct vmm_svm_backend *svm, uint64_t off)
 		case VMM_HPET_TIMER_COMPARATOR:
 			return svm->mut_hpet_timer_comparator[idx];
 		case VMM_HPET_TIMER_FSB:
-			return svm->mut_hpet_timer_fsb[idx];
+			return 0;
 		default:
 			break;
 		}
@@ -2067,6 +2083,7 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 		}
 		return;
 	case VMM_HPET_REG_STATUS:
+		svm->mut_hpet_status &= ~(uint32_t)val;
 		return;
 	case VMM_HPET_REG_COUNTER:
 		svm->mut_hpet_counter_base = val;
@@ -2083,13 +2100,59 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 		switch (reg) {
 		case VMM_HPET_TIMER_CONFIG:
 			svm->mut_hpet_timer_config[idx] = val &
-			    ~VMM_HPET_TIMER_CAP;
+			    VMM_HPET_TIMER_CONFIG_VALID;
+			if ((svm->mut_hpet_timer_config[idx] &
+			    VMM_HPET_TIMER_ENABLE) == 0) {
+				svm->mut_hpet_timer_active[idx] = 0;
+				return;
+			}
+			if ((svm->mut_hpet_timer_config[idx] &
+			    VMM_HPET_TIMER_PERIODIC) != 0) {
+				if ((svm->mut_hpet_timer_config[idx] &
+				    VMM_HPET_TIMER_SETVAL) != 0) {
+					svm->mut_hpet_timer_period[idx] = 0;
+					svm->mut_hpet_timer_active[idx] = 0;
+				} else if (svm->mut_hpet_timer_comparator_set[idx] &&
+				    svm->mut_hpet_timer_period[idx] != 0) {
+					svm->mut_hpet_timer_active[idx] = 1;
+				}
+			} else if (svm->mut_hpet_timer_comparator_set[idx]) {
+				svm->mut_hpet_timer_deadline[idx] =
+				    svm->mut_hpet_timer_comparator[idx];
+				if ((svm->mut_hpet_timer_config[idx] &
+				    VMM_HPET_TIMER_32BIT) != 0)
+					svm->mut_hpet_timer_deadline[idx] &= 0xffffffffULL;
+				svm->mut_hpet_timer_active[idx] = 1;
+			}
 			return;
 		case VMM_HPET_TIMER_COMPARATOR:
+			if ((svm->mut_hpet_timer_config[idx] &
+			    VMM_HPET_TIMER_32BIT) != 0)
+				val &= 0xffffffffULL;
 			svm->mut_hpet_timer_comparator[idx] = val;
+			svm->mut_hpet_timer_comparator_set[idx] = 1;
+			if ((svm->mut_hpet_timer_config[idx] &
+			    VMM_HPET_TIMER_PERIODIC) != 0) {
+				if ((svm->mut_hpet_timer_config[idx] &
+				    VMM_HPET_TIMER_SETVAL) != 0) {
+					svm->mut_hpet_timer_deadline[idx] = val;
+					svm->mut_hpet_timer_period[idx] = 0;
+					svm->mut_hpet_timer_config[idx] &=
+					    ~VMM_HPET_TIMER_SETVAL;
+					svm->mut_hpet_timer_active[idx] = 0;
+				} else {
+					svm->mut_hpet_timer_period[idx] = val;
+					if ((svm->mut_hpet_timer_config[idx] &
+					    VMM_HPET_TIMER_ENABLE) != 0 && val != 0)
+						svm->mut_hpet_timer_active[idx] = 1;
+				}
+			} else if ((svm->mut_hpet_timer_config[idx] &
+			    VMM_HPET_TIMER_ENABLE) != 0) {
+				svm->mut_hpet_timer_deadline[idx] = val;
+				svm->mut_hpet_timer_active[idx] = 1;
+			}
 			return;
 		case VMM_HPET_TIMER_FSB:
-			svm->mut_hpet_timer_fsb[idx] = val;
 			return;
 		default:
 			break;
@@ -2127,6 +2190,12 @@ vmm_svm_hpet_write(struct vmm_svm_backend *svm, uint64_t off, int size,
 	reg = off & ~7ULL;
 	if (size == 8) {
 		vmm_svm_hpet_write64(svm, reg, val);
+		return;
+	}
+	if (reg == VMM_HPET_REG_STATUS) {
+		shift = (unsigned int)((off & 7ULL) * 8);
+		mask = ((1ULL << (size * 8)) - 1) << shift;
+		vmm_svm_hpet_write64(svm, reg, (val << shift) & mask);
 		return;
 	}
 	old = vmm_svm_hpet_read64(svm, reg);
@@ -2468,6 +2537,125 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x",
 	    vc->imm_id, source, pin, vector);
 	vmm_svm_avic_deliver(svm, vc, (uint8_t)vector, source);
+}
+
+static void
+vmm_svm_timer_check(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc)
+{
+	uint64_t deadline;
+	uint64_t hpet_now;
+	uint64_t now;
+	uint64_t period;
+	uint64_t periods;
+	uint64_t remaining;
+	_uint128_t root_delta;
+	uint32_t config;
+	unsigned int i;
+
+	vmm_svm_lapic_timer_check(svm, vc);
+	for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i)
+		svm->mut_hpet_timer_root_deadline[i] = 0;
+	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
+		hpet_now = vmm_svm_hpet_counter(svm);
+		for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
+			config = svm->mut_hpet_timer_config[i];
+			if (!svm->mut_hpet_timer_active[i])
+				continue;
+			if ((config & VMM_HPET_TIMER_ENABLE) == 0) {
+				svm->mut_hpet_timer_active[i] = 0;
+				continue;
+			}
+			deadline = svm->mut_hpet_timer_deadline[i];
+			if ((config & VMM_HPET_TIMER_32BIT) != 0) {
+				remaining = (uint32_t)(deadline - hpet_now);
+				if (remaining != 0 && remaining <= 0x7fffffffU)
+					continue;
+			} else if (hpet_now < deadline) {
+				continue;
+			}
+			svm->mut_hpet_status |= 1U << i;
+			if ((config & VMM_HPET_TIMER_ROUTE_MASK) ==
+			    VMM_HPET_GSI << VMM_HPET_TIMER_ROUTE_SHIFT) {
+				vmm_svm_ioapic_raise(svm, vc, VMM_HPET_GSI, "hpet");
+			} else {
+				vmm_machine_logf(svm->borrow_imm_machine,
+				    "svm vcpu%u hpet drop timer=%u route=%ju reason=unsupported_route",
+				    vc->imm_id, i, (uintmax_t)((config &
+				    VMM_HPET_TIMER_ROUTE_MASK) >>
+				    VMM_HPET_TIMER_ROUTE_SHIFT));
+			}
+			if ((config & VMM_HPET_TIMER_PERIODIC) == 0) {
+				svm->mut_hpet_timer_active[i] = 0;
+				continue;
+			}
+			period = svm->mut_hpet_timer_period[i];
+			if (period == 0) {
+				svm->mut_hpet_timer_active[i] = 0;
+				continue;
+			}
+			if ((config & VMM_HPET_TIMER_32BIT) != 0) {
+				period &= 0xffffffffULL;
+				if (period == 0) {
+					svm->mut_hpet_timer_active[i] = 0;
+					continue;
+				}
+				periods = (uint32_t)(hpet_now - deadline) / period + 1;
+				svm->mut_hpet_timer_deadline[i] = (uint32_t)(deadline +
+				    periods * period);
+			} else {
+				periods = (hpet_now - deadline) / period + 1;
+				if (periods > (UINT64_MAX - deadline) / period)
+					svm->mut_hpet_timer_deadline[i] = UINT64_MAX;
+				else
+					svm->mut_hpet_timer_deadline[i] = deadline +
+					    periods * period;
+			}
+		}
+	}
+	svm->mut_root_timer_deadline = 0;
+	if (svm->mut_lapic_timer_active &&
+	    svm->mut_lapic_timer_root_deadline != 0)
+		svm->mut_root_timer_deadline = svm->mut_lapic_timer_root_deadline;
+	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) == 0)
+		return;
+	hpet_now = vmm_svm_hpet_counter(svm);
+	now = rdtsc();
+	for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
+		config = svm->mut_hpet_timer_config[i];
+		if (!svm->mut_hpet_timer_active[i] ||
+		    (config & VMM_HPET_TIMER_ENABLE) == 0)
+			continue;
+		deadline = svm->mut_hpet_timer_deadline[i];
+		if ((config & VMM_HPET_TIMER_32BIT) != 0)
+			remaining = (uint32_t)(deadline - hpet_now);
+		else if (hpet_now < deadline)
+			remaining = deadline - hpet_now;
+		else
+			remaining = 0;
+		if (remaining == 0 ||
+		    ((config & VMM_HPET_TIMER_32BIT) != 0 &&
+		    remaining > 0x7fffffffU)) {
+			svm->mut_hpet_timer_root_deadline[i] = now;
+		} else {
+			root_delta = (_uint128_t)remaining * svm->imm_host_tsc_hz +
+			    VMM_HPET_FREQ - 1;
+			root_delta /= VMM_HPET_FREQ;
+			if (root_delta == 0)
+				root_delta = 1;
+			if (root_delta > UINT64_MAX - now)
+				svm->mut_hpet_timer_root_deadline[i] = UINT64_MAX;
+			else
+				svm->mut_hpet_timer_root_deadline[i] = now +
+				    (uint64_t)root_delta;
+		}
+		if (svm->mut_root_timer_deadline == 0 ||
+		    svm->mut_hpet_timer_root_deadline[i] <
+		    svm->mut_root_timer_deadline) {
+			svm->mut_root_timer_deadline =
+			    svm->mut_hpet_timer_root_deadline[i];
+		}
+	}
 }
 
 static int
@@ -3939,7 +4127,7 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 	vmm_svm_advance_rip(vmcb);
 	/* Guest AVIC writes are visible in the access page without a VMEXIT. */
 	vmm_svm_lapic_timer_sync(svm);
-	vmm_svm_lapic_timer_check(svm, vc);
+	vmm_svm_timer_check(svm, vc);
 	for (;;) {
 		if (vmm_vcpu_should_stop(vc))
 			return;
@@ -3960,10 +4148,10 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 		}
 		lwkt_reltoken(&console->token_console);
 
-		if (svm->mut_lapic_timer_active) {
-			deadline = svm->mut_lapic_timer_root_deadline;
+		if (svm->mut_root_timer_deadline != 0) {
+			deadline = svm->mut_root_timer_deadline;
 			now = rdtsc();
-			if (deadline == 0 || now >= deadline)
+			if (now >= deadline)
 				break;
 		}
 		svm->mut_lapic_timer_idle_count++;
@@ -3971,29 +4159,28 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 		    (svm->mut_lapic_timer_idle_count & 1023U) == 0) {
 			VMM_SVM_TRACE(svm,
 			    "svm vcpu%u idle wait timer_active=%d",
-			    vc->imm_id, svm->mut_lapic_timer_active);
+			    vc->imm_id, svm->mut_root_timer_deadline != 0);
 		}
-		if (svm->mut_lapic_timer_active &&
-		    svm->mut_lapic_timer_root_deadline != 0) {
+		if (svm->mut_root_timer_deadline != 0) {
 			uint64_t delta;
 			_uint128_t us;
 
-			KKASSERT(!svm->mut_lapic_timer_systimer_armed);
+			KKASSERT(!svm->mut_root_timer_systimer_armed);
 			now = rdtsc();
-			if (svm->mut_lapic_timer_root_deadline <= now)
+			if (svm->mut_root_timer_deadline <= now)
 				delta = 1;
 			else
-				delta = svm->mut_lapic_timer_root_deadline - now;
+				delta = svm->mut_root_timer_deadline - now;
 			us = (_uint128_t)delta * 1000000ULL +
 			    svm->imm_host_tsc_hz - 1;
 			us /= svm->imm_host_tsc_hz;
 			if (us == 0)
 				us = 1;
-			if (us > VMM_SVM_LAPIC_TIMER_MAX_US)
-				us = VMM_SVM_LAPIC_TIMER_MAX_US;
-			systimer_init_oneshot(&svm->own_mut_lapic_timer_systimer,
-			    vmm_svm_lapic_timer_systimer, vc, (int64_t)us);
-			svm->mut_lapic_timer_systimer_armed = 1;
+			if (us > VMM_SVM_ROOT_TIMER_MAX_US)
+				us = VMM_SVM_ROOT_TIMER_MAX_US;
+			systimer_init_oneshot(&svm->own_mut_root_timer_systimer,
+			    vmm_svm_root_timer_systimer, vc, (int64_t)us);
+			svm->mut_root_timer_systimer_armed = 1;
 		}
 		vmm_svm_avic_unbind_cpu(svm);
 		/*
@@ -4003,21 +4190,20 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 		for (i = 0; i < 8; ++i) {
 			if (vmm_svm_avic_apic_read32(svm,
 			    VMM_SVM_APIC_REG_IRR_BASE + i * 0x10) != 0) {
-				if (svm->mut_lapic_timer_systimer_armed) {
-					systimer_del(&svm->own_mut_lapic_timer_systimer);
-					svm->mut_lapic_timer_systimer_armed = 0;
+				if (svm->mut_root_timer_systimer_armed) {
+					systimer_del(&svm->own_mut_root_timer_systimer);
+					svm->mut_root_timer_systimer_armed = 0;
 				}
 				return;
 			}
 		}
 		tsleep(vc, PINTERLOCKED, "vmmhlt", 0);
-		if (svm->mut_lapic_timer_systimer_armed) {
-			systimer_del(&svm->own_mut_lapic_timer_systimer);
-			svm->mut_lapic_timer_systimer_armed = 0;
+		if (svm->mut_root_timer_systimer_armed) {
+			systimer_del(&svm->own_mut_root_timer_systimer);
+			svm->mut_root_timer_systimer_armed = 0;
 		}
 	}
-	if (svm->mut_lapic_timer_active)
-		vmm_svm_lapic_timer_check(svm, vc);
+	vmm_svm_timer_check(svm, vc);
 }
 
 
@@ -4464,7 +4650,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	vmcb = svm->own_mut_vmcb;
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_lapic_timer_sync(svm);
-		vmm_svm_lapic_timer_check(svm, vc);
+		vmm_svm_timer_check(svm, vc);
 		vmm_svm_com1_rx_notify(svm, vc, "entry");
 		vmm_svm_enable_cpu(svm);
 		vmm_svm_clgi();
@@ -4478,29 +4664,28 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		}
 		vmm_svm_avic_bind_cpu(svm);
 		/* Recheck immediately before entry, then let systimer own the wakeup. */
-		vmm_svm_lapic_timer_check(svm, vc);
-		if (svm->mut_lapic_timer_active &&
-		    svm->mut_lapic_timer_root_deadline != 0) {
+		vmm_svm_timer_check(svm, vc);
+		if (svm->mut_root_timer_deadline != 0) {
 			uint64_t delta;
 			uint64_t now;
 			_uint128_t us;
 
-			KKASSERT(!svm->mut_lapic_timer_systimer_armed);
+			KKASSERT(!svm->mut_root_timer_systimer_armed);
 			now = rdtsc();
-			if (svm->mut_lapic_timer_root_deadline <= now)
+			if (svm->mut_root_timer_deadline <= now)
 				delta = 1;
 			else
-				delta = svm->mut_lapic_timer_root_deadline - now;
+				delta = svm->mut_root_timer_deadline - now;
 			us = (_uint128_t)delta * 1000000ULL +
 			    svm->imm_host_tsc_hz - 1;
 			us /= svm->imm_host_tsc_hz;
 			if (us == 0)
 				us = 1;
-			if (us > VMM_SVM_LAPIC_TIMER_MAX_US)
-				us = VMM_SVM_LAPIC_TIMER_MAX_US;
-			systimer_init_oneshot(&svm->own_mut_lapic_timer_systimer,
-			    vmm_svm_lapic_timer_systimer, vc, (int64_t)us);
-			svm->mut_lapic_timer_systimer_armed = 1;
+			if (us > VMM_SVM_ROOT_TIMER_MAX_US)
+				us = VMM_SVM_ROOT_TIMER_MAX_US;
+			systimer_init_oneshot(&svm->own_mut_root_timer_systimer,
+			    vmm_svm_root_timer_systimer, vc, (int64_t)us);
+			svm->mut_root_timer_systimer_armed = 1;
 		}
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		vmm_svm_guest_dbregs_enter(svm);
@@ -4510,9 +4695,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_guest_fpu_leave(svm);
 		vmm_svm_guest_misc_leave(svm);
 		vmm_svm_guest_dbregs_leave(svm);
-		if (svm->mut_lapic_timer_systimer_armed) {
-			systimer_del(&svm->own_mut_lapic_timer_systimer);
-			svm->mut_lapic_timer_systimer_armed = 0;
+		if (svm->mut_root_timer_systimer_armed) {
+			systimer_del(&svm->own_mut_root_timer_systimer);
+			svm->mut_root_timer_systimer_armed = 0;
 		}
 		vmm_svm_stgi();
 		reqflags = mycpu->gd_reqflags;
@@ -4619,9 +4804,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		vmm_svm_avic_unbind_cpu(svm);
 	}
 out:
-	if (svm->mut_lapic_timer_systimer_armed) {
-		systimer_del(&svm->own_mut_lapic_timer_systimer);
-		svm->mut_lapic_timer_systimer_armed = 0;
+	if (svm->mut_root_timer_systimer_armed) {
+		systimer_del(&svm->own_mut_root_timer_systimer);
+		svm->mut_root_timer_systimer_armed = 0;
 	}
 	vmm_svm_avic_unbind_cpu(svm);
 	if (vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio != 0) {
