@@ -21,9 +21,9 @@ TIMEOUT=${VMM_TIMEOUT:-20}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
-
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer tscdeadline tscscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer pausefilter ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+SVM_TRACE=${VMM_SVM_TRACE:-0}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
@@ -296,6 +296,7 @@ cleanup()
 		unmount_vmmfs || say "vmmfs unmount did not finish"
 	fi
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
+		sysctl debug.vmm.svm_trace=0 >>"$LOG" 2>&1 || true
 		kldunload vmm >>"$LOG" 2>&1 || say "kldunload vmm failed"
 	fi
 	for mode in $MODES; do
@@ -344,11 +345,18 @@ prepare_mount_helper()
 
 load_module()
 {
+	case "$SVM_TRACE" in
+	0|1) ;;
+	*) fail "VMM_SVM_TRACE must be 0 or 1" ;;
+	esac
 	if kldstat -n vmm >/dev/null 2>&1; then
 		fail "vmm already loaded; unload it before running this harness"
 	else
 		run kldload "$VMM_KO"
 		LOADED=1
+		if [ "$SVM_TRACE" -eq 1 ]; then
+			run sysctl debug.vmm.svm_trace=1
+		fi
 	fi
 }
 
@@ -444,6 +452,16 @@ check_console()
 		    fail "$mode console output"
 		;;
 	lapictimer_masked)
+		wait_console 'dfvmm-lapic-masked-ok' ||
+		    fail "$mode console output"
+		;;
+	hireslapic)
+		wait_console 'dfvmm-hires-lapic-ok' ||
+		    fail "$mode console output"
+		;;
+	hiresscale)
+		wait_console 'dfvmm-hires-scale-ok' ||
+		    fail "$mode console output"
 		;;
 	avicread)
 		wait_console 'dfvmm-avicread-ok' ||
@@ -483,6 +501,37 @@ run_case()
 		fi
 		wait_guest_exit "$(mach "$mode")/events" ||
 		    fail "$mode guest self exit"
+		if [ "$mode" = "hireslapic" ] || [ "$mode" = "hiresscale" ]; then
+			case "$mode" in
+			hireslapic)
+				host_tsc_hz=$(sysctl -n kern.cputimer.freq 2>>"$LOG") ||
+				    fail "$mode read host TSC frequency"
+				case "$host_tsc_hz" in
+				''|*[!0-9]*)
+					fail "$mode invalid host TSC frequency=$host_tsc_hz"
+					;;
+				esac
+				target=$((host_tsc_hz / 5000))
+				minimum=$((target / 4))
+				maximum=$((target * 4 + 100000))
+				;;
+			hiresscale)
+				target=100000
+				minimum=25000
+				maximum=500000
+				;;
+			esac
+			marker=$(sed -n \
+			    's/.*smoke avic marker=0x\([0-9a-fA-F][0-9a-fA-F]*\).*/\1/p' \
+			    "$LOG" | tail -n 1)
+			case "$marker" in
+			''|*[!0-9a-fA-F]*) fail "$mode missing timer marker" ;;
+			esac
+			value=$((0x$marker))
+			[ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] ||
+			    fail "$mode delta=$value expected=$minimum..$maximum target=$target"
+			say "$mode TSC delta=$value target=$target"
+		fi
 		if [ "$mode" = "pausefilter" ]; then
 			pause_exits=$(sed -n \
 			    's/.*smoke pause filter exits=\([0-9][0-9]*\).*/\1/p' \
@@ -516,10 +565,6 @@ run_case()
 		if [ "$mode" = "tscdeadline" ] || [ "$mode" = "tscscale" ]; then
 			wait_event "$(mach "$mode")/events" 'vmmcall exit' ||
 			    fail "$mode deadline handler"
-		fi
-		if [ "$mode" = "lapictimer_masked" ]; then
-			wait_event "$(mach "$mode")/events" 'lapic timer masked' ||
-			    fail "$mode masked timer"
 		fi
 		echo force >"$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
