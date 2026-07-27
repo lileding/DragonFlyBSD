@@ -26,6 +26,7 @@
 #define UD_HANDLER_GPA	(ENTRY_GPA + 0x300ULL)
 #define AVIC_HANDLER_GPA (ENTRY_GPA + 0x300ULL)
 #define HPET_HANDLER_GPA (ENTRY_GPA + 0x500ULL)
+#define RTC_HANDLER_GPA	(ENTRY_GPA + 0x700ULL)
 #define PM64_LONG_GPA	(ENTRY_GPA + 0x80ULL)
 #define STACK_GPA	0x180000ULL
 #define TIMER_COUNT_GPA	0x1a0000ULL
@@ -49,6 +50,7 @@
 #define IOAPIC_VERSION	0x00170011U
 #define IOAPIC_MASKED_VECTOR32	0x00010020U
 #define HPET_GSI	16U
+#define RTC_GSI		8U
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
 #define VMM_MANIFEST_ABI	1
@@ -100,6 +102,7 @@
 #define AVIC_VECTOR	0x40U
 #define IOAPIC_VECTOR	0x41U
 #define HPET_VECTOR	0x42U
+#define RTC_VECTOR	0x43U
 #define UD_VECTOR	6U
 #define AVIC_MAGIC	0x43495641U
 #define AVIC_OP_DELIVER	1U
@@ -131,6 +134,26 @@
 #define HPET_TIMER_SETVAL	0x040U
 #define HPET_TIMER_32BIT	0x100U
 #define HPET_TIMER_ROUTE	(HPET_GSI << 9)
+#define RTC_SECONDS		0x00U
+#define RTC_MINUTES		0x02U
+#define RTC_HOURS		0x04U
+#define RTC_DAY_OF_MONTH	0x07U
+#define RTC_MONTH		0x08U
+#define RTC_YEAR		0x09U
+#define RTC_REG_A		0x0aU
+#define RTC_REG_B		0x0bU
+#define RTC_REG_C		0x0cU
+#define RTC_REG_A_32KHZ_1024HZ 0x26U
+#define RTC_REG_B_SET		0x80U
+#define RTC_REG_B_DM_BINARY	0x04U
+#define RTC_REG_B_24H		0x02U
+#define RTC_REG_B_PIE		0x40U
+#define RTC_REG_B_AIE		0x20U
+#define RTC_REG_B_UIE		0x10U
+#define RTC_REG_C_IRQF		0x80U
+#define RTC_REG_C_PF		0x40U
+#define RTC_REG_C_AF		0x20U
+#define RTC_REG_C_UF		0x10U
 
 struct vmm_manifest_header {
 	char		magic[8];
@@ -1827,6 +1850,86 @@ guest_rtccmos_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_rtc_settime_code(uint8_t *code, size_t cap)
+{
+	static const struct {
+		uint8_t reg;
+		uint8_t value;
+	} time_values[] = {
+		{ RTC_SECONDS, 1 },
+		{ RTC_MINUTES, 2 },
+		{ RTC_HOURS, 14 },
+		{ RTC_DAY_OF_MONTH, 27 },
+		{ RTC_MONTH, 7 },
+		{ RTC_YEAR, 26 },
+	};
+	static const struct {
+		uint8_t reg;
+		uint8_t value;
+	} bcd_values[] = {
+		{ RTC_MINUTES, 0x02 },
+		{ RTC_HOURS, 0x82 },
+		{ RTC_DAY_OF_MONTH, 0x27 },
+		{ RTC_MONTH, 0x07 },
+		{ RTC_YEAR, 0x26 },
+	};
+	static const uint8_t in_al_dx[] = { 0xec };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const char msg[] = "dfvmm-rtc-settime-ok\n";
+	size_t len = 0;
+	size_t bad_binary;
+	size_t bad_bcd[sizeof(bcd_values) / sizeof(bcd_values[0])];
+	size_t fail_label;
+	size_t i;
+
+	/* Write 2026-07-27 14:02:01 in binary 24-hour mode. */
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT,
+	    RTC_REG_B_SET | RTC_REG_B_DM_BINARY | RTC_REG_B_24H);
+	for (i = 0; i < sizeof(time_values) / sizeof(time_values[0]); i++) {
+		emit_outb(code, &len, cap, CMOS_INDEX_PORT, time_values[i].reg);
+		emit_outb(code, &len, cap, CMOS_DATA_PORT, time_values[i].value);
+	}
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT,
+	    RTC_REG_B_DM_BINARY | RTC_REG_B_24H);
+
+	/* Confirm the binary 24-hour representation before changing formats. */
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_HOURS);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, (const uint8_t[]){ 0x3c, 14 }, 2);
+	bad_binary = emit_jne32(code, &len, cap);
+
+	/* Read the same time in BCD 12-hour mode; 14:02 becomes 0x82:0x02. */
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT, 0);
+	for (i = 0; i < sizeof(bcd_values) / sizeof(bcd_values[0]); i++) {
+		emit_outb(code, &len, cap, CMOS_INDEX_PORT, bcd_values[i].reg);
+		emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+		emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+		emit(code, &len, cap, (const uint8_t[]){ 0x3c, bcd_values[i].value }, 2);
+		bad_bcd[i] = emit_jne32(code, &len, cap);
+	}
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 4);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, bad_binary, fail_label);
+	for (i = 0; i < sizeof(bad_bcd) / sizeof(bad_bcd[0]); i++)
+		patch_rel32(code, bad_bcd[i], fail_label);
+	return len;
+}
+
+static size_t
 guest_iodelay_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t seq[] = {
@@ -2166,6 +2269,213 @@ guest_hpet_masked_code(uint8_t *code, size_t cap)
 }
 
 static size_t
+guest_rtc_periodic_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_edi_apic[] =
+	    { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t in_al_dx[] = { 0xec };
+	static const uint8_t cmp_al_periodic[] =
+	    { 0x3c, RTC_REG_C_IRQF | RTC_REG_C_PF };
+	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const char msg[] = "dfvmm-rtc-periodic-ok\n";
+	size_t len = 0;
+	size_t bad_status;
+	size_t status_not_clear;
+	size_t fail_label;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x10U + RTC_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, RTC_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x11U + RTC_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_A);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT, RTC_REG_A_32KHZ_1024HZ);
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT, RTC_REG_B_24H | RTC_REG_B_PIE);
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < RTC_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, cmp_al_periodic, sizeof(cmp_al_periodic));
+	bad_status = emit_jne32(code, &len, cap);
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, test_al_al, sizeof(test_al_al));
+	status_not_clear = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 1);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, bad_status, fail_label);
+	patch_rel32(code, status_not_clear, fail_label);
+	return len;
+}
+
+static size_t
+guest_rtc_masked_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t in_al_dx[] = { 0xec };
+	static const uint8_t cmp_al_periodic[] =
+	    { 0x3c, RTC_REG_C_IRQF | RTC_REG_C_PF };
+	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
+	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const char msg[] = "dfvmm-rtc-masked-ok\n";
+	size_t len = 0;
+	size_t loop_label;
+	size_t jgot_status;
+	size_t got_status;
+	size_t jump_back;
+	size_t bad_status;
+	size_t status_not_clear;
+	size_t fail_label;
+	size_t i;
+
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_A);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT, RTC_REG_A_32KHZ_1024HZ);
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT, RTC_REG_B_24H | RTC_REG_B_PIE);
+	loop_label = len;
+	emit(code, &len, cap, cpuid_zero, sizeof(cpuid_zero));
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, test_al_al, sizeof(test_al_al));
+	jgot_status = emit_jne32(code, &len, cap);
+	emit(code, &len, cap,
+	    (const uint8_t[]){ 0xe9, 0x00, 0x00, 0x00, 0x00 }, 5);
+	jump_back = len - 4;
+	got_status = len;
+	emit(code, &len, cap, cmp_al_periodic, sizeof(cmp_al_periodic));
+	bad_status = emit_jne32(code, &len, cap);
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, test_al_al, sizeof(test_al_al));
+	status_not_clear = emit_jne32(code, &len, cap);
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 0x33U);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, jgot_status, got_status);
+	patch_rel32(code, bad_status, fail_label);
+	patch_rel32(code, status_not_clear, fail_label);
+	patch_rel32(code, jump_back, loop_label);
+	return len;
+}
+
+static size_t
+guest_rtc_update_alarm_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_ioapic[] =
+	    { 0xbf, 0x00, 0x00, 0xc0, 0xfe };
+	static const uint8_t mov_edi_apic[] =
+	    { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_rdi[] = { 0x89, 0x07 };
+	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
+	static const uint8_t mov_eax_to_eoi[] =
+	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
+	static const uint8_t in_al_dx[] = { 0xec };
+	static const uint8_t cmp_al_update_alarm[] =
+	    { 0x3c, RTC_REG_C_IRQF | RTC_REG_C_AF | RTC_REG_C_UF };
+	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
+	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
+	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
+	static const char msg[] = "dfvmm-rtc-update-alarm-ok\n";
+	size_t len = 0;
+	size_t bad_status;
+	size_t status_not_clear;
+	size_t fail_label;
+	size_t i;
+
+	emit(code, &len, cap, mov_edi_ioapic, sizeof(mov_edi_ioapic));
+	emit_mov_eax(code, &len, cap, 0x10U + RTC_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, RTC_VECTOR);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_mov_eax(code, &len, cap, 0x11U + RTC_GSI * 2U);
+	emit(code, &len, cap, mov_eax_to_rdi, sizeof(mov_eax_to_rdi));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_rdi_10, sizeof(mov_eax_to_rdi_10));
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_B);
+	emit_outb(code, &len, cap, CMOS_DATA_PORT,
+	    RTC_REG_B_24H | RTC_REG_B_AIE | RTC_REG_B_UIE);
+	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
+	while (len < RTC_HANDLER_GPA - ENTRY_GPA) {
+		static const uint8_t nop[] = { 0x90 };
+
+		emit(code, &len, cap, nop, sizeof(nop));
+	}
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, cmp_al_update_alarm,
+	    sizeof(cmp_al_update_alarm));
+	bad_status = emit_jne32(code, &len, cap);
+	emit_outb(code, &len, cap, CMOS_INDEX_PORT, RTC_REG_C);
+	emit_mov_dx(code, &len, cap, CMOS_DATA_PORT);
+	emit(code, &len, cap, in_al_dx, sizeof(in_al_dx));
+	emit(code, &len, cap, test_al_al, sizeof(test_al_al));
+	status_not_clear = emit_jne32(code, &len, cap);
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 0);
+	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
+	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
+	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
+	emit_u32(code, &len, cap, AVIC_OP_MARKER);
+	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
+	emit_u32(code, &len, cap, 0xb0U);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	for (i = 0; i < sizeof(msg) - 1; i++)
+		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
+	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	fail_label = len;
+	emit(code, &len, cap, fail, sizeof(fail));
+	patch_rel32(code, bad_status, fail_label);
+	patch_rel32(code, status_not_clear, fail_label);
+	return len;
+}
+
+static size_t
 guest_pmtimer_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t mov_dx_pm_timer[] =
@@ -2279,6 +2589,14 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_hpet_periodic_code(code, cap);
 	} else if (strcmp(mode, "hpet_masked") == 0) {
 		return guest_hpet_masked_code(code, cap);
+	} else if (strcmp(mode, "rtc_periodic") == 0) {
+		return guest_rtc_periodic_code(code, cap);
+	} else if (strcmp(mode, "rtc_masked") == 0) {
+		return guest_rtc_masked_code(code, cap);
+	} else if (strcmp(mode, "rtc_update_alarm") == 0) {
+		return guest_rtc_update_alarm_code(code, cap);
+	} else if (strcmp(mode, "rtc_settime") == 0) {
+		return guest_rtc_settime_code(code, cap);
 	} else if (strcmp(mode, "pausefilter") == 0) {
 		return guest_pausefilter_code(code, cap);
 	} else if (strcmp(mode, "ud") == 0) {
@@ -2373,7 +2691,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 static void
 build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 {
-	uint8_t code[2048];
+	uint8_t code[PAGE_SIZE_GUEST];
 
 	if (mem_size < 2 * 1024 * 1024)
 		errx(1, "fd3 is smaller than 2M");
@@ -2403,6 +2721,8 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 	    strcmp(mode, "lapictimer_periodic_busy") == 0 ||
 	    strcmp(mode, "hpet_oneshot") == 0 ||
 	    strcmp(mode, "hpet_periodic") == 0 ||
+	    strcmp(mode, "rtc_periodic") == 0 ||
+	    strcmp(mode, "rtc_update_alarm") == 0 ||
 	    strcmp(mode, "hireslapic") == 0 ||
 	    strcmp(mode, "tscdeadline") == 0 || strcmp(mode, "tscscale") == 0 ||
 	    strcmp(mode, "hiresscale") == 0 ||
@@ -2414,6 +2734,9 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 		if (strcmp(mode, "hpet_oneshot") == 0 ||
 		    strcmp(mode, "hpet_periodic") == 0)
 			write_idt_gate(mem, HPET_VECTOR, HPET_HANDLER_GPA);
+		else if (strcmp(mode, "rtc_periodic") == 0 ||
+		    strcmp(mode, "rtc_update_alarm") == 0)
+			write_idt_gate(mem, RTC_VECTOR, RTC_HANDLER_GPA);
 		else if (strcmp(mode, "timerint") == 0 ||
 		    strcmp(mode, "lapictimer") == 0 ||
 		    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
@@ -2486,6 +2809,10 @@ build_vcpu(struct vmm_x64_vcpu_state *vcpu, const char *mode)
 	    strcmp(mode, "hpet_periodic") == 0) {
 		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
 		    HPET_VECTOR * 16 + 15, IDT_GPA);
+	} else if (strcmp(mode, "rtc_periodic") == 0 ||
+	    strcmp(mode, "rtc_update_alarm") == 0) {
+		set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0,
+		    RTC_VECTOR * 16 + 15, IDT_GPA);
 	} else if (strcmp(mode, "timerint") == 0 ||
 	    strcmp(mode, "lapictimer") == 0 ||
 	    strcmp(mode, "lapictimer_periodic_hlt") == 0 ||
@@ -2567,7 +2894,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

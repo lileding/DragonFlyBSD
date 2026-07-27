@@ -22,8 +22,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 KEEP_ARTIFACTS=${VMM_KEEP_ARTIFACTS:-0}
 FORCE_UMOUNT_ON_CLEANUP=${VMM_FORCE_UMOUNT_ON_CLEANUP:-1}
 SVM_TRACE=${VMM_SVM_TRACE:-0}
-MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
-SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
+MODES=${VMM_SMOKE_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread hlt loop"}
+SELF_EXIT_MODES=${VMM_SMOKE_SELF_EXIT_MODES:-"vmmcall cpuid msrpatch msrsyscfg mtrrcap msrhwcr pcicfg pitfallback elcr hpet hpet_oneshot hpet_periodic hpet_masked rtc_periodic rtc_masked rtc_update_alarm rtc_settime pmtimer serial serialin serialirq time xsetbv apicmsr timerint lapictimer lapictimer_periodic_hlt lapictimer_periodic_busy lapictimer_periodic_masked hireslapic tscdeadline tscscale hiresscale pausefilter lapictimer_masked ud mwaitud mwaitxud pic ioapic ioapicirq x2apic cachetlb pm64 avicread"}
 
 LOADED=0
 MOUNTED=0
@@ -475,6 +475,22 @@ check_console()
 		wait_console 'dfvmm-hpet-masked-ok' ||
 		    fail "$mode console output"
 		;;
+	rtc_periodic)
+		wait_console 'dfvmm-rtc-periodic-ok' ||
+		    fail "$mode console output"
+		;;
+	rtc_masked)
+		wait_console 'dfvmm-rtc-masked-ok' ||
+		    fail "$mode console output"
+		;;
+	rtc_update_alarm)
+		wait_console 'dfvmm-rtc-update-alarm-ok' ||
+		    fail "$mode console output"
+		;;
+	rtc_settime)
+		wait_console 'dfvmm-rtc-settime-ok' ||
+		    fail "$mode console output"
+		;;
 	lapictimer_masked)
 		wait_console 'dfvmm-lapic-masked-ok' ||
 		    fail "$mode console output"
@@ -560,11 +576,17 @@ run_case()
 		lapictimer_periodic_hlt|lapictimer_periodic_busy|hpet_periodic)
 			periodic_marker=3
 			;;
-		lapictimer_periodic_masked|hpet_masked)
+		lapictimer_periodic_masked|hpet_masked|rtc_masked)
 			periodic_marker=51
 			;;
-		hpet_oneshot)
+		hpet_oneshot|rtc_periodic)
 			periodic_marker=1
+			;;
+	rtc_update_alarm)
+			periodic_marker=176
+			;;
+		rtc_settime)
+			periodic_marker=4
 			;;
 		*)
 			periodic_marker=

@@ -291,6 +291,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_PCI_CFG_DATA_LAST	0xcffU
 #define VMM_CMOS_INDEX		0x70U
 #define VMM_CMOS_DATA		0x71U
+#define VMM_RTC_IRQ		8U
 #define VMM_RTC_SECONDS		0x00U
 #define VMM_RTC_SECONDS_ALARM	0x01U
 #define VMM_RTC_MINUTES		0x02U
@@ -307,7 +308,22 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
 #define VMM_RTC_REG_D		0x0dU
 #define VMM_RTC_ALARM_DONT_CARE 0xc0U
 #define VMM_RTC_REG_A_DEFAULT	0x26U
+#define VMM_RTC_REG_A_UIP	0x80U
+#define VMM_RTC_REG_A_DIV_MASK	0x70U
+#define VMM_RTC_REG_A_DIV_32KHZ 0x20U
+#define VMM_RTC_REG_A_RATE_MASK	0x0fU
+#define VMM_RTC_REG_B_SET	0x80U
+#define VMM_RTC_REG_B_PIE	0x40U
+#define VMM_RTC_REG_B_AIE	0x20U
+#define VMM_RTC_REG_B_UIE	0x10U
+#define VMM_RTC_REG_B_DM_BINARY 0x04U
 #define VMM_RTC_REG_B_24H	0x02U
+#define VMM_RTC_REG_C_IRQF	0x80U
+#define VMM_RTC_REG_C_PF	0x40U
+#define VMM_RTC_REG_C_AF	0x20U
+#define VMM_RTC_REG_C_UF	0x10U
+#define VMM_RTC_REG_C_CAUSE_MASK (VMM_RTC_REG_C_PF | \
+					  VMM_RTC_REG_C_AF | VMM_RTC_REG_C_UF)
 #define VMM_RTC_REG_D_VALID	0x80U
 #define VMM_RTC_LEAP_YEAR(year) \
 	((((year) % 4) == 0 && ((year) % 100) != 0) || ((year) % 400) == 0)
@@ -578,7 +594,7 @@ struct vmm_svm_backend {
 	/*
 	 * Root timer state is owned by the vCPU LWKT.  The systimer callback only
 	 * wakes that thread and never reads or mutates this state.  The deadline is
-	 * the earliest active LAPIC or HPET timer deadline in root TSC units.
+	 * the earliest active LAPIC, HPET, or RTC deadline in root TSC units.
 	 */
 	uint64_t mut_lapic_timer_interval_root_tsc;
 	uint64_t mut_lapic_timer_root_deadline;
@@ -678,6 +694,9 @@ struct vmm_svm_backend {
 	uint8_t mut_cmos_reg_c;
 	uint8_t mut_cmos_ram[128];
 	uint8_t mut_cmos_time[10];
+	int64_t mut_cmos_time_offset;
+	uint64_t mut_cmos_periodic_root_deadline;
+	uint64_t mut_cmos_update_root_deadline;
 	int mut_cmos_time_expires;
 };
 
@@ -732,6 +751,7 @@ static void vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb);
 static uint64_t vmm_svm_guest_tsc(struct vmm_svm_backend *svm);
 static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 		    struct vmm_vcpu_thread *vc, const char *source);
+static void vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm);
 
 static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_EFER, "efer", "cpu-state" },
@@ -2551,9 +2571,14 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 	uint64_t remaining;
 	_uint128_t root_delta;
 	uint32_t config;
+	uint8_t rtc_causes;
+	uint8_t rtc_old_reg_c;
+	uint8_t rtc_rate;
 	unsigned int i;
 
 	vmm_svm_lapic_timer_check(svm, vc);
+	now = rdtsc();
+	rtc_causes = 0;
 	for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i)
 		svm->mut_hpet_timer_root_deadline[i] = 0;
 	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
@@ -2613,49 +2638,137 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 			}
 		}
 	}
+
+	/*
+	 * The MC146818 periodic output runs from the standard 32.768 kHz
+	 * divider.  A rate of n produces 32768 / 2^(n - 1) Hz.  The timer
+	 * remains in root TSC units; only the resulting IRQ travels through
+	 * the IOAPIC and AVIC.
+	 */
+	rtc_rate = svm->mut_cmos_reg_a & VMM_RTC_REG_A_RATE_MASK;
+	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
+	    (svm->mut_cmos_reg_b & VMM_RTC_REG_B_PIE) != 0 &&
+	    (svm->mut_cmos_reg_a & VMM_RTC_REG_A_DIV_MASK) ==
+	    VMM_RTC_REG_A_DIV_32KHZ && rtc_rate != 0) {
+		period = (svm->imm_host_tsc_hz +
+		    ((uint64_t)32768U >> (rtc_rate - 1)) - 1) /
+		    ((uint64_t)32768U >> (rtc_rate - 1));
+		if (svm->mut_cmos_periodic_root_deadline == 0) {
+			svm->mut_cmos_periodic_root_deadline = now + period;
+		} else if (now >= svm->mut_cmos_periodic_root_deadline) {
+			periods = (now - svm->mut_cmos_periodic_root_deadline) /
+			    period + 1;
+			if (periods >
+			    (UINT64_MAX - svm->mut_cmos_periodic_root_deadline) /
+			    period)
+				svm->mut_cmos_periodic_root_deadline = UINT64_MAX;
+			else
+				svm->mut_cmos_periodic_root_deadline += periods * period;
+			rtc_causes |= VMM_RTC_REG_C_PF;
+		}
+	} else {
+		svm->mut_cmos_periodic_root_deadline = 0;
+	}
+
+	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
+	    (svm->mut_cmos_reg_b & (VMM_RTC_REG_B_UIE | VMM_RTC_REG_B_AIE)) !=
+	    0) {
+		if (svm->mut_cmos_update_root_deadline == 0) {
+			svm->mut_cmos_update_root_deadline = now + svm->imm_host_tsc_hz;
+		} else if (now >= svm->mut_cmos_update_root_deadline) {
+			periods = (now - svm->mut_cmos_update_root_deadline) /
+			    svm->imm_host_tsc_hz + 1;
+			if (periods >
+			    (UINT64_MAX - svm->mut_cmos_update_root_deadline) /
+			    svm->imm_host_tsc_hz)
+				svm->mut_cmos_update_root_deadline = UINT64_MAX;
+			else
+				svm->mut_cmos_update_root_deadline += periods *
+				    svm->imm_host_tsc_hz;
+			svm->mut_cmos_time_expires = 0;
+			vmm_svm_cmos_refresh_time(svm);
+			if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_UIE) != 0)
+				rtc_causes |= VMM_RTC_REG_C_UF;
+			if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_AIE) != 0 &&
+			    ((svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] &
+			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
+			    svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] ==
+			    svm->mut_cmos_time[VMM_RTC_SECONDS]) &&
+			    ((svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] &
+			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
+			    svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] ==
+			    svm->mut_cmos_time[VMM_RTC_MINUTES]) &&
+			    ((svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] &
+			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
+			    svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] ==
+			    svm->mut_cmos_time[VMM_RTC_HOURS]))
+				rtc_causes |= VMM_RTC_REG_C_AF;
+		}
+	} else {
+		svm->mut_cmos_update_root_deadline = 0;
+	}
+	if (rtc_causes != 0) {
+		rtc_old_reg_c = svm->mut_cmos_reg_c;
+		svm->mut_cmos_reg_c |= rtc_causes;
+		if ((svm->mut_cmos_reg_c & VMM_RTC_REG_C_CAUSE_MASK &
+		    svm->mut_cmos_reg_b) != 0)
+			svm->mut_cmos_reg_c |= VMM_RTC_REG_C_IRQF;
+		if ((rtc_old_reg_c & VMM_RTC_REG_C_IRQF) == 0 &&
+		    (svm->mut_cmos_reg_c & VMM_RTC_REG_C_IRQF) != 0)
+			vmm_svm_ioapic_raise(svm, vc, VMM_RTC_IRQ, "rtc");
+	}
+
 	svm->mut_root_timer_deadline = 0;
 	if (svm->mut_lapic_timer_active &&
 	    svm->mut_lapic_timer_root_deadline != 0)
 		svm->mut_root_timer_deadline = svm->mut_lapic_timer_root_deadline;
-	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) == 0)
-		return;
-	hpet_now = vmm_svm_hpet_counter(svm);
-	now = rdtsc();
-	for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
-		config = svm->mut_hpet_timer_config[i];
-		if (!svm->mut_hpet_timer_active[i] ||
-		    (config & VMM_HPET_TIMER_ENABLE) == 0)
-			continue;
-		deadline = svm->mut_hpet_timer_deadline[i];
-		if ((config & VMM_HPET_TIMER_32BIT) != 0)
-			remaining = (uint32_t)(deadline - hpet_now);
-		else if (hpet_now < deadline)
-			remaining = deadline - hpet_now;
-		else
-			remaining = 0;
-		if (remaining == 0 ||
-		    ((config & VMM_HPET_TIMER_32BIT) != 0 &&
-		    remaining > 0x7fffffffU)) {
-			svm->mut_hpet_timer_root_deadline[i] = now;
-		} else {
-			root_delta = (_uint128_t)remaining * svm->imm_host_tsc_hz +
-			    VMM_HPET_FREQ - 1;
-			root_delta /= VMM_HPET_FREQ;
-			if (root_delta == 0)
-				root_delta = 1;
-			if (root_delta > UINT64_MAX - now)
-				svm->mut_hpet_timer_root_deadline[i] = UINT64_MAX;
+	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
+		hpet_now = vmm_svm_hpet_counter(svm);
+		now = rdtsc();
+		for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
+			config = svm->mut_hpet_timer_config[i];
+			if (!svm->mut_hpet_timer_active[i] ||
+			    (config & VMM_HPET_TIMER_ENABLE) == 0)
+				continue;
+			deadline = svm->mut_hpet_timer_deadline[i];
+			if ((config & VMM_HPET_TIMER_32BIT) != 0)
+				remaining = (uint32_t)(deadline - hpet_now);
+			else if (hpet_now < deadline)
+				remaining = deadline - hpet_now;
 			else
-				svm->mut_hpet_timer_root_deadline[i] = now +
-				    (uint64_t)root_delta;
-		}
-		if (svm->mut_root_timer_deadline == 0 ||
-		    svm->mut_hpet_timer_root_deadline[i] <
-		    svm->mut_root_timer_deadline) {
-			svm->mut_root_timer_deadline =
-			    svm->mut_hpet_timer_root_deadline[i];
+				remaining = 0;
+			if (remaining == 0 ||
+			    ((config & VMM_HPET_TIMER_32BIT) != 0 &&
+			    remaining > 0x7fffffffU)) {
+				svm->mut_hpet_timer_root_deadline[i] = now;
+			} else {
+				root_delta = (_uint128_t)remaining * svm->imm_host_tsc_hz +
+				    VMM_HPET_FREQ - 1;
+				root_delta /= VMM_HPET_FREQ;
+				if (root_delta == 0)
+					root_delta = 1;
+				if (root_delta > UINT64_MAX - now)
+					svm->mut_hpet_timer_root_deadline[i] = UINT64_MAX;
+				else
+					svm->mut_hpet_timer_root_deadline[i] = now +
+					    (uint64_t)root_delta;
+			}
+			if (svm->mut_root_timer_deadline == 0 ||
+			    svm->mut_hpet_timer_root_deadline[i] <
+			    svm->mut_root_timer_deadline) {
+				svm->mut_root_timer_deadline =
+				    svm->mut_hpet_timer_root_deadline[i];
+			}
 		}
 	}
+	if (svm->mut_cmos_periodic_root_deadline != 0 &&
+	    (svm->mut_root_timer_deadline == 0 ||
+	    svm->mut_cmos_periodic_root_deadline < svm->mut_root_timer_deadline))
+		svm->mut_root_timer_deadline = svm->mut_cmos_periodic_root_deadline;
+	if (svm->mut_cmos_update_root_deadline != 0 &&
+	    (svm->mut_root_timer_deadline == 0 ||
+	    svm->mut_cmos_update_root_deadline < svm->mut_root_timer_deadline))
+		svm->mut_root_timer_deadline = svm->mut_cmos_update_root_deadline;
 }
 
 static int
@@ -3566,22 +3679,30 @@ vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
 {
 	static const int days_in_month[12] =
 	    { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-	time_t now = time_second;
+	time_t now;
 	long days;
 	long epoch_days;
-	int seconds;
+	int second;
+	int minute;
+	int hours;
 	int year;
 	int month;
 	int dim;
+	int binary;
 
+	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
+		return;
 	if (svm->mut_cmos_time_expires != 0 &&
 	    (int)(ticks - svm->mut_cmos_time_expires) < 0)
 		return;
+	now = time_second + svm->mut_cmos_time_offset;
 	if (now < 0)
 		now = 0;
 	days = now / 86400;
 	epoch_days = days;
-	seconds = now % 86400;
+	second = now % 60;
+	minute = (now / 60) % 60;
+	hours = (now / 3600) % 24;
 	year = 1970;
 	while (days >= 365 + VMM_RTC_LEAP_YEAR(year)) {
 		days -= 365 + VMM_RTC_LEAP_YEAR(year);
@@ -3595,15 +3716,48 @@ vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
 			break;
 		days -= dim;
 	}
-	svm->mut_cmos_time[VMM_RTC_SECONDS] = bin2bcd(seconds % 60);
-	svm->mut_cmos_time[VMM_RTC_MINUTES] = bin2bcd((seconds / 60) % 60);
-	svm->mut_cmos_time[VMM_RTC_HOURS] = bin2bcd(seconds / 3600);
-	svm->mut_cmos_time[VMM_RTC_DAY_OF_WEEK] =
-	    bin2bcd(((epoch_days + 4) % 7) + 1);
-	svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH] = bin2bcd(days + 1);
-	svm->mut_cmos_time[VMM_RTC_MONTH] = bin2bcd(month + 1);
-	svm->mut_cmos_time[VMM_RTC_YEAR] = bin2bcd(year % 100);
+	binary = (svm->mut_cmos_reg_b & VMM_RTC_REG_B_DM_BINARY) != 0;
+	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_24H) == 0) {
+		int pm = hours >= 12;
+
+		hours %= 12;
+		if (hours == 0)
+			hours = 12;
+		if (pm)
+			hours |= 0x80;
+	}
+	svm->mut_cmos_time[VMM_RTC_SECONDS] = binary ? second : bin2bcd(second);
+	svm->mut_cmos_time[VMM_RTC_MINUTES] = binary ? minute : bin2bcd(minute);
+	svm->mut_cmos_time[VMM_RTC_HOURS] = binary ? hours :
+	    ((hours & 0x80) | bin2bcd(hours & 0x7f));
+	svm->mut_cmos_time[VMM_RTC_DAY_OF_WEEK] = binary ?
+	    ((epoch_days + 4) % 7) + 1 : bin2bcd(((epoch_days + 4) % 7) + 1);
+	svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH] = binary ? days + 1 :
+	    bin2bcd(days + 1);
+	svm->mut_cmos_time[VMM_RTC_MONTH] = binary ? month + 1 :
+	    bin2bcd(month + 1);
+	svm->mut_cmos_time[VMM_RTC_YEAR] = binary ? year % 100 :
+	    bin2bcd(year % 100);
 	svm->mut_cmos_time_expires = ticks + hz;
+}
+
+static int
+vmm_svm_cmos_value_decode(uint8_t value, int maximum, int binary,
+    int *valuep)
+{
+	int decoded;
+
+	if (binary) {
+		decoded = value;
+	} else {
+		if ((value & 0x0fU) > 9 || ((value >> 4) & 0x0fU) > 9)
+			return EINVAL;
+		decoded = bcd2bin(value);
+	}
+	if (decoded > maximum)
+		return EINVAL;
+	*valuep = decoded;
+	return 0;
 }
 
 static uint8_t
@@ -3624,7 +3778,7 @@ vmm_svm_cmos_read(struct vmm_svm_backend *svm)
 		value = svm->mut_cmos_time[reg];
 		break;
 	case VMM_RTC_REG_A:
-		value = svm->mut_cmos_reg_a & ~0x80U;
+		value = svm->mut_cmos_reg_a & ~VMM_RTC_REG_A_UIP;
 		break;
 	case VMM_RTC_REG_B:
 		value = svm->mut_cmos_reg_b;
@@ -3646,17 +3800,121 @@ vmm_svm_cmos_read(struct vmm_svm_backend *svm)
 static void
 vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 {
+	static const int days_in_month[12] =
+	    { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 	uint8_t reg = svm->mut_cmos_index & 0x7fU;
+	uint8_t old_reg_b;
+	time_t now;
+	long days;
+	int second;
+	int minute;
+	int hour;
+	int day;
+	int month;
+	int year;
+	int current_year;
+	int current_month;
+	int dim;
+	int binary;
+	int pm;
 
 	switch (reg) {
 	case VMM_RTC_REG_A:
-		svm->mut_cmos_reg_a = value & ~0x80U;
+		svm->mut_cmos_reg_a = value & ~VMM_RTC_REG_A_UIP;
+		svm->mut_cmos_periodic_root_deadline = 0;
 		break;
 	case VMM_RTC_REG_B:
+		old_reg_b = svm->mut_cmos_reg_b;
+		if ((old_reg_b & VMM_RTC_REG_B_SET) == 0 &&
+		    (value & VMM_RTC_REG_B_SET) != 0)
+			vmm_svm_cmos_refresh_time(svm);
 		svm->mut_cmos_reg_b = value;
+		if ((old_reg_b & VMM_RTC_REG_B_SET) != 0 &&
+		    (value & VMM_RTC_REG_B_SET) == 0) {
+			binary = (value & VMM_RTC_REG_B_DM_BINARY) != 0;
+			if (vmm_svm_cmos_value_decode(
+			    svm->mut_cmos_time[VMM_RTC_SECONDS], 59, binary,
+			    &second) == 0 &&
+			    vmm_svm_cmos_value_decode(
+			    svm->mut_cmos_time[VMM_RTC_MINUTES], 59, binary,
+			    &minute) == 0 &&
+			    vmm_svm_cmos_value_decode(
+			    svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH], 31, binary,
+			    &day) == 0 &&
+			    vmm_svm_cmos_value_decode(
+			    svm->mut_cmos_time[VMM_RTC_MONTH], 12, binary,
+			    &month) == 0 && month != 0 &&
+			    vmm_svm_cmos_value_decode(
+			    svm->mut_cmos_time[VMM_RTC_YEAR], 99, binary,
+			    &year) == 0) {
+				pm = svm->mut_cmos_time[VMM_RTC_HOURS] & 0x80U;
+				if ((value & VMM_RTC_REG_B_24H) == 0)
+					pm = pm != 0;
+				else
+					pm = 0;
+				if (vmm_svm_cmos_value_decode(
+				    svm->mut_cmos_time[VMM_RTC_HOURS] & 0x7fU,
+				    (value & VMM_RTC_REG_B_24H) != 0 ? 23 : 12,
+				    binary, &hour) == 0 &&
+				    ((value & VMM_RTC_REG_B_24H) != 0 || hour != 0)) {
+					if ((value & VMM_RTC_REG_B_24H) == 0) {
+						hour %= 12;
+						if (pm)
+							hour += 12;
+					}
+					now = time_second + svm->mut_cmos_time_offset;
+					if (now < 0)
+						now = 0;
+					days = now / 86400;
+					current_year = 1970;
+					while (days >= 365 +
+					    VMM_RTC_LEAP_YEAR(current_year)) {
+						days -= 365 +
+						    VMM_RTC_LEAP_YEAR(current_year);
+						current_year++;
+					}
+					year += (current_year / 100) * 100;
+					dim = days_in_month[month - 1];
+					if (month == 2 && VMM_RTC_LEAP_YEAR(year))
+						dim++;
+					if (day != 0 && day <= dim) {
+						days = 0;
+						for (current_year = 1970;
+						    current_year < year; current_year++)
+							days += 365 +
+							    VMM_RTC_LEAP_YEAR(current_year);
+						for (current_month = 1;
+						    current_month < month; current_month++) {
+							dim = days_in_month[current_month - 1];
+							if (current_month == 2 &&
+							    VMM_RTC_LEAP_YEAR(year))
+								dim++;
+							days += dim;
+						}
+						days += day - 1;
+						svm->mut_cmos_time_offset =
+						    days * 86400 + hour * 3600 +
+						    minute * 60 + second - time_second;
+					}
+				}
+			}
+		}
+		svm->mut_cmos_time_expires = 0;
+		svm->mut_cmos_periodic_root_deadline = 0;
+		svm->mut_cmos_update_root_deadline = 0;
 		break;
 	case VMM_RTC_REG_C:
 	case VMM_RTC_REG_D:
+		break;
+	case VMM_RTC_SECONDS:
+	case VMM_RTC_MINUTES:
+	case VMM_RTC_HOURS:
+	case VMM_RTC_DAY_OF_WEEK:
+	case VMM_RTC_DAY_OF_MONTH:
+	case VMM_RTC_MONTH:
+	case VMM_RTC_YEAR:
+		if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
+			svm->mut_cmos_time[reg] = value;
 		break;
 	default:
 		svm->mut_cmos_ram[reg] = value;
