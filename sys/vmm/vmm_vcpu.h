@@ -14,6 +14,7 @@
 enum vmm_vcpu_exit_reason {
 	VMM_VCPU_EXIT_NONE,
 	VMM_VCPU_EXIT_GUEST_SHUTDOWN,
+	VMM_VCPU_EXIT_GUEST_FAULT,
 };
 
 struct vmm_vcpu {

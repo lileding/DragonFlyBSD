@@ -5230,7 +5230,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    sizeof(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xstate.
 			    sx_ymm[0].ymm_bytes)) != 0) {
 				vmm_machine_logf(svm->borrow_imm_machine,
-				    "svm vcpu%u root fpu sentinel mismatch", vc->imm_id);
+				    "guest fault source=root_fpu_sentinel vcpu%u",
+				    vc->imm_id);
+				svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 				fpu_sentinel_failed = 1;
 			}
 			kernel_fpu_end();
@@ -5294,7 +5296,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			}
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
-			goto unhandled;
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "guest fault source=svm_shutdown vcpu%u rip=0x%jx",
+			    vc->imm_id, (uintmax_t)vmcb->state.rip);
+			svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
+			goto out;
 		case VMM_SVM_EXIT_MONITOR:
 			vmm_svm_advance_rip(vmcb);
 			break;
@@ -5355,6 +5361,10 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RCX],
 			    (uintmax_t)vmcb->state.rax,
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "guest fault source=unhandled_vmexit exit=0x%jx vcpu%u",
+			    (uintmax_t)vmcb->ctrl.exitcode, vc->imm_id);
+			svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 			goto out;
 		}
 		vmm_svm_avic_unbind_cpu(svm);

@@ -2787,6 +2787,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	static const uint8_t hlt[] = { 0xf4 };
 	static const uint8_t loop[] = { 0xeb, 0xfe };
 	static const uint8_t cliloop[] = { 0xfa, 0xeb, 0xfe };
+	static const uint8_t triplefault[] = { 0x0f, 0x0b };
 	const uint8_t *src;
 	size_t len;
 
@@ -2923,6 +2924,9 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	} else if (strcmp(mode, "cliloop") == 0) {
 		src = cliloop;
 		len = sizeof(cliloop);
+	} else if (strcmp(mode, "triplefault") == 0) {
+		src = triplefault;
+		len = sizeof(triplefault);
 	} else {
 		errx(1, "unknown smoke mode: %s", mode);
 	}
@@ -3142,7 +3146,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|cputemplate|fpu|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|cputemplate|fpu|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|triplefault|avicirq|avicipi|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

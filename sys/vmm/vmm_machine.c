@@ -71,7 +71,7 @@ static void	vmm_machine_task_run(void *arg, int pending);
 static void	vmm_machine_drain_task(void *arg, int pending);
 static int	vmm_machine_task_config_complete(
 		    const struct vmm_machine_task *task);
-static void	vmm_machine_guest_shutdown(
+static void	vmm_machine_guest_exit(
 		    const struct vmm_machine_task *task);
 static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
 static void	vmm_machine_set_status(struct vmm_machine *m,
@@ -511,38 +511,49 @@ vmm_machine_stop_apic(const struct vmm_machine_task *task)
 void
 vmm_machine_vcpu_exited(struct vmm_machine *m)
 {
+	u_int exit_reason;
 	int error;
 
-	if (atomic_load_acq_int(&m->own_mut_vcpu.atomic_mut_exit_reason) !=
-	    VMM_VCPU_EXIT_GUEST_SHUTDOWN)
+	exit_reason = atomic_load_acq_int(
+	    &m->own_mut_vcpu.atomic_mut_exit_reason);
+	if (exit_reason == VMM_VCPU_EXIT_NONE)
 		return;
-	error = vmm_machine_execute(m, vmm_machine_guest_shutdown, NULL);
+	error = vmm_machine_execute(m, vmm_machine_guest_exit, NULL);
 	if (error != 0) {
 		vmm_machine_logf(m,
-		    "guest shutdown cleanup enqueue failed error=%d", error);
+		    "guest exit cleanup enqueue failed reason=%u error=%d",
+		    exit_reason, error);
 	}
 }
 
 static void
-vmm_machine_guest_shutdown(const struct vmm_machine_task *task)
+vmm_machine_guest_exit(const struct vmm_machine_task *task)
 {
 	struct vmm_machine *m = task->borrow_mut_machine;
 	struct vmm_mem_backing *backing;
 	struct vmm_vcpu_thread *threads;
+	const char *reason;
 	uint32_t thread_count;
+	u_int exit_reason;
 
-	if (atomic_load_acq_int(&m->own_mut_vcpu.atomic_mut_exit_reason) !=
-	    VMM_VCPU_EXIT_GUEST_SHUTDOWN ||
-	    vmm_machine_status(m) != VMM_MACHINE_RUNNING)
+	exit_reason = atomic_load_acq_int(
+	    &m->own_mut_vcpu.atomic_mut_exit_reason);
+	if (exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN)
+		reason = "guest_shutdown";
+	else if (exit_reason == VMM_VCPU_EXIT_GUEST_FAULT)
+		reason = "guest_fault";
+	else
+		return;
+	if (vmm_machine_status(m) != VMM_MACHINE_RUNNING)
 		return;
 	KKASSERT(atomic_load_acq_int(
 	    &m->own_mut_vcpu.atomic_mut_active_count) == 0);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
-	vmm_machine_logf(m, "state stopping reason=guest_shutdown");
+	vmm_machine_logf(m, "state stopping reason=%s", reason);
 	thread_count = m->own_mut_vcpu.mut_count;
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
-	vmm_machine_logf(m, "state stopped reason=guest_shutdown");
+	vmm_machine_logf(m, "state stopped reason=%s", reason);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
