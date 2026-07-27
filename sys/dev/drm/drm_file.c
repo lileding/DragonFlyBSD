@@ -46,6 +46,12 @@
 
 #include "drm_legacy.h"
 #include "drm_internal.h"
+
+#include <sys/conf.h>
+#include <sys/file.h>
+#include <sys/vnode.h>
+
+extern struct dev_ops drm_cdevsw;
 #include "drm_crtc_internal.h"
 
 static void drm_events_release(struct drm_file *file_priv);
@@ -155,6 +161,61 @@ SYSCTL_UQUAD(_hw_dri, OID_AUTO, drm_event_kqfilter_write_count, CTLFLAG_RD,
 
 static int drm_open_helper(struct cdev *kdev, int flags,
 			   struct file *filp, struct drm_minor *minor);
+
+/**
+ * drm_file_get_by_fd - look up the drm_file behind a file descriptor
+ * @fd: descriptor to resolve, usually one passed in by another process
+ *
+ * Returns the &drm_file with a reference held on the underlying struct file,
+ * or NULL.  Release it with drm_file_put_by_fd().
+ *
+ * A file descriptor is only accepted if it really is an open drm device: the
+ * vnode has to be a character device whose operations are drm's own.  Nothing
+ * else distinguishes one, since a drm file has the generic devfs fileops.
+ */
+struct drm_file *
+drm_file_get_by_fd(int fd, struct file **fpp)
+{
+	struct file *fp;
+	struct vnode *vp;
+	struct cdev *kdev;
+
+	fp = holdfp(curthread, fd, -1);
+	if (fp == NULL)
+		return NULL;
+
+	if (fp->f_type != DTYPE_VNODE)
+		goto reject;
+
+	vp = fp->f_data;
+	if (vp == NULL || vp->v_type != VCHR)
+		goto reject;
+
+	kdev = vp->v_rdev;
+	if (kdev == NULL || kdev->si_ops != &drm_cdevsw)
+		goto reject;
+
+	if (fp->private_data == NULL)
+		goto reject;
+
+	*fpp = fp;
+	return fp->private_data;
+
+reject:
+	dropfp(curthread, fd, fp);
+	return NULL;
+}
+
+/**
+ * drm_file_put_by_fd - release what drm_file_get_by_fd() returned
+ * @fd: the same descriptor that was passed in
+ * @fp: the struct file it handed back
+ */
+void
+drm_file_put_by_fd(int fd, struct file *fp)
+{
+	dropfp(curthread, fd, fp);
+}
 
 /**
  * drm_file_alloc - allocate file context

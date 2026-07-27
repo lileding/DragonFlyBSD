@@ -55,65 +55,62 @@ static int amdgpu_sched_context_priority_override(struct amdgpu_device *adev,
 						  unsigned ctx_id,
 						  enum drm_sched_priority priority)
 {
-	/* Needs an fd-to-drm_file lookup this tree does not have; see the
-	 * comment on amdgpu_sched_process_priority_override() below.
-	 */
-	STUB();
-	return -ENOSYS;
-#if 0
-	struct file *filp = fget(fd);
+	struct drm_file *file;
+	struct file *fp;
 	struct amdgpu_fpriv *fpriv;
 	struct amdgpu_ctx *ctx;
-	int r;
 
-	if (!filp)
+	file = drm_file_get_by_fd(fd, &fp);
+	if (!file)
 		return -EINVAL;
 
-	r = amdgpu_file_to_fpriv(filp, &fpriv);
-	if (r) {
-		fput(filp);
-		return r;
+	fpriv = file->driver_priv;
+	if (!fpriv) {
+		drm_file_put_by_fd(fd, fp);
+		return -EINVAL;
 	}
 
 	ctx = amdgpu_ctx_get(fpriv, ctx_id);
 	if (!ctx) {
-		fput(filp);
+		drm_file_put_by_fd(fd, fp);
 		return -EINVAL;
 	}
 
 	amdgpu_ctx_priority_override(ctx, priority);
 	amdgpu_ctx_put(ctx);
-	fput(filp);
+	drm_file_put_by_fd(fd, fp);
 
 	return 0;
-#endif
 }
 
 static int amdgpu_sched_process_priority_override(struct amdgpu_device *adev,
 						  int fd,
 						  enum drm_sched_priority priority)
 {
-	STUB();
-	return -ENOSYS;
-#if 0
-	struct file *filp = fget(fd);
 	struct drm_file *file;
+	struct file *fp;
 	struct amdgpu_fpriv *fpriv;
 	struct amdgpu_ctx *ctx;
 	uint32_t id;
 
-	if (!filp)
+	file = drm_file_get_by_fd(fd, &fp);
+	if (!file)
 		return -EINVAL;
 
-	file = filp->private_data;
 	fpriv = file->driver_priv;
+	if (!fpriv) {
+		drm_file_put_by_fd(fd, fp);
+		return -EINVAL;
+	}
+
+	mutex_lock(&fpriv->ctx_mgr.lock);
 	idr_for_each_entry(&fpriv->ctx_mgr.ctx_handles, ctx, id)
 		amdgpu_ctx_priority_override(ctx, priority);
+	mutex_unlock(&fpriv->ctx_mgr.lock);
 
-	fput(filp);
+	drm_file_put_by_fd(fd, fp);
 
 	return 0;
-#endif
 }
 
 int amdgpu_sched_ioctl(struct drm_device *dev, void *data,

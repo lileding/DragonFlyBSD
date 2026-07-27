@@ -169,6 +169,10 @@ struct drm_pending_event {
  *
  * This structure tracks DRM state per open file descriptor.
  */
+struct file;
+struct drm_file *drm_file_get_by_fd(int fd, struct file **fpp);
+void drm_file_put_by_fd(int fd, struct file *fp);
+
 struct drm_file {
 	/**
 	 * @authenticated:
