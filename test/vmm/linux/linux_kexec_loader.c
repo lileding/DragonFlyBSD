@@ -82,6 +82,7 @@
 #define ACPI_MADT_IOAPIC_SIZE		12U
 #define ACPI_MADT_INTERRUPT_OVERRIDE_SIZE	10U
 #define ACPI_FADT_WBINVD	0x00000001U
+#define ACPI_FADT_RESET_REGISTER	0x00000400U
 #define ACPI_FADT_HW_REDUCED	0x00100000U
 #define ACPI_FADT_NO_VGA	0x0004U
 #define ACPI_SPACE_SYSTEM_MEMORY	0U
@@ -96,6 +97,8 @@
 #define ACPI_SLEEP_CONTROL_PORT	0x404U
 #define ACPI_SLEEP_STATUS_PORT	0x405U
 #define ACPI_PM_TIMER_PORT	0x408U
+#define ACPI_RESET_PORT		0x40cU
+#define ACPI_RESET_VALUE	0x01U
 
 static const uint8_t vmm_linux_dsdt[] = {
 	0x44, 0x53, 0x44, 0x54, 0xa5, 0x00, 0x00, 0x00,
@@ -675,7 +678,14 @@ build_acpi_tables(uint8_t *mem)
 	write32(fadt, 76, ACPI_PM_TIMER_PORT);
 	write8(fadt, 91, 4);
 	write16(fadt, 109, ACPI_FADT_NO_VGA);
-	write32(fadt, 112, ACPI_FADT_WBINVD | ACPI_FADT_HW_REDUCED);
+	write32(fadt, 112, ACPI_FADT_WBINVD | ACPI_FADT_RESET_REGISTER |
+	    ACPI_FADT_HW_REDUCED);
+	write8(fadt, 116, ACPI_SPACE_SYSTEM_IO);
+	write8(fadt, 117, 8);
+	write8(fadt, 118, 0);
+	write8(fadt, 119, ACPI_ACCESS_BYTE);
+	write64(fadt, 120, ACPI_RESET_PORT);
+	write8(fadt, 128, ACPI_RESET_VALUE);
 	write8(fadt, 131, 5);
 	write64(fadt, 140, ACPI_DSDT_GPA);
 	write8(fadt, 208, ACPI_SPACE_SYSTEM_IO);

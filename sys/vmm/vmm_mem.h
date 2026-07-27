@@ -26,8 +26,11 @@ struct vmm_mem {
 	 * Lifecycle:
 	 * vmmfs serializes config writes before start.  vmm_machine's command
 	 * queue publishes/detaches own_mut_backing and releases it only after
-	 * all vCPUs stop.  Guest pages are allocated lazily by loader mmap
-	 * faults or by vCPU nested-page-fault handling.
+	 * all vCPUs stop.  Each backing owns a loader-written boot vmspace and
+	 * the current vCPU runtime vmspace.  A runtime is a COW fork of boot;
+	 * guest reset discards only that runtime and forks boot again.  Guest
+	 * pages are allocated lazily by loader mmap faults or by vCPU
+	 * nested-page-fault handling.
 	 */
 	uint64_t	mut_bytes;		/* 0 = unset */
 	struct vmm_mem_backing *own_mut_backing;
@@ -45,6 +48,10 @@ struct vm_object;
 struct vmspace;
 int	vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp);
 int	vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing);
+/* Fork the loader-complete boot vmspace for the first vCPU run. */
+int	vmm_mem_start_run(struct vmm_mem *m);
+/* Replace the stopped runtime vmspace with a fresh COW fork of boot. */
+int	vmm_mem_reset_run(struct vmm_mem *m);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 /*
@@ -54,8 +61,8 @@ void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
 	    uint64_t *bytesp);
 /*
- * Borrowed for vCPU backend lifetime only.  The parent machine keeps backing
- * alive until all active vCPUs have exited.
+ * Borrowed current runtime only, for vCPU backend lifetime.  The parent
+ * machine keeps its backing alive until all active vCPUs have exited.
  */
 struct vmspace *vmm_mem_borrow_vmspace(struct vmm_mem *m);
 /*

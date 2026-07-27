@@ -21,7 +21,8 @@
 
 struct vmm_mem_backing {
 	struct vm_object *own_mut_object;
-	struct vmspace *own_mut_vmspace;
+	struct vmspace *own_mut_boot_vmspace;
+	struct vmspace *own_mut_run_vmspace;
 	uint64_t imm_bytes;
 };
 
@@ -193,19 +194,20 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 	}
 	vm_object_set_flag(b->own_mut_object, OBJ_NOSPLIT);
 	/*
-	 * GPA is the VA in this machine vmspace.  We map the declared RAM
+	 * GPA is the VA in this boot vmspace.  We map the declared RAM
 	 * object once at GPA 0 and let loader mmap faults or guest NPFs
 	 * populate pages on demand; this is not an eager reservation of every
 	 * guest page.
 	 */
 #ifndef _KERNEL_VIRTUAL
-	b->own_mut_vmspace = vmspace_alloc(0, size);
-	if (b->own_mut_vmspace == NULL) {
+	b->own_mut_boot_vmspace = vmspace_alloc(0, size);
+	if (b->own_mut_boot_vmspace == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
-	pmap_maybethreaded(vmspace_pmap(b->own_mut_vmspace));
-	error = vmm_mem_map_object(b->own_mut_vmspace, b->own_mut_object, size);
+	pmap_maybethreaded(vmspace_pmap(b->own_mut_boot_vmspace));
+	error = vmm_mem_map_object(b->own_mut_boot_vmspace,
+	    b->own_mut_object, size);
 	if (error)
 		goto fail;
 #endif
@@ -214,9 +216,9 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 	return 0;
 
 fail:
-	if (b->own_mut_vmspace != NULL) {
-		vmm_mem_pmap_del_all_cpus(b->own_mut_vmspace);
-		vmspace_rel(b->own_mut_vmspace);
+	if (b->own_mut_boot_vmspace != NULL) {
+		vmm_mem_pmap_del_all_cpus(b->own_mut_boot_vmspace);
+		vmspace_rel(b->own_mut_boot_vmspace);
 	}
 	if (b->own_mut_object != NULL)
 		vm_object_deallocate(b->own_mut_object);
@@ -237,6 +239,51 @@ vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing)
 	return 0;
 }
 
+int
+vmm_mem_start_run(struct vmm_mem *m)
+{
+	struct vmm_mem_backing *b;
+	struct vmspace *run_vmspace;
+
+	if (m == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_boot_vmspace == NULL)
+		return EINVAL;
+	if (b->own_mut_run_vmspace != NULL)
+		return EBUSY;
+	run_vmspace = vmspace_fork(b->own_mut_boot_vmspace, NULL, NULL);
+	if (run_vmspace == NULL)
+		return ENOMEM;
+	pmap_maybethreaded(vmspace_pmap(run_vmspace));
+	b->own_mut_run_vmspace = run_vmspace;
+	return 0;
+}
+
+int
+vmm_mem_reset_run(struct vmm_mem *m)
+{
+	struct vmm_mem_backing *b;
+	struct vmspace *old_vmspace;
+	struct vmspace *run_vmspace;
+
+	if (m == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_boot_vmspace == NULL ||
+	    b->own_mut_run_vmspace == NULL)
+		return EINVAL;
+	run_vmspace = vmspace_fork(b->own_mut_boot_vmspace, NULL, NULL);
+	if (run_vmspace == NULL)
+		return ENOMEM;
+	pmap_maybethreaded(vmspace_pmap(run_vmspace));
+	old_vmspace = b->own_mut_run_vmspace;
+	b->own_mut_run_vmspace = run_vmspace;
+	vmm_mem_pmap_del_all_cpus(old_vmspace);
+	vmspace_rel(old_vmspace);
+	return 0;
+}
+
 struct vmm_mem_backing *
 vmm_mem_detach(struct vmm_mem *m)
 {
@@ -254,9 +301,13 @@ vmm_mem_release_backing(struct vmm_mem_backing *b)
 {
 	if (b == NULL)
 		return;
-	if (b->own_mut_vmspace != NULL) {
-		vmm_mem_pmap_del_all_cpus(b->own_mut_vmspace);
-		vmspace_rel(b->own_mut_vmspace);
+	if (b->own_mut_run_vmspace != NULL) {
+		vmm_mem_pmap_del_all_cpus(b->own_mut_run_vmspace);
+		vmspace_rel(b->own_mut_run_vmspace);
+	}
+	if (b->own_mut_boot_vmspace != NULL) {
+		vmm_mem_pmap_del_all_cpus(b->own_mut_boot_vmspace);
+		vmspace_rel(b->own_mut_boot_vmspace);
 	}
 	vm_object_deallocate(b->own_mut_object);
 	kfree(b, M_TEMP);
@@ -288,7 +339,7 @@ vmm_mem_borrow_vmspace(struct vmm_mem *m)
 {
 	if (m == NULL || m->own_mut_backing == NULL)
 		return NULL;
-	return m->own_mut_backing->own_mut_vmspace;
+	return m->own_mut_backing->own_mut_run_vmspace;
 }
 
 int
@@ -301,14 +352,14 @@ vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 	if (m == NULL)
 		return EINVAL;
 	b = m->own_mut_backing;
-	if (b == NULL || b->own_mut_vmspace == NULL)
+	if (b == NULL || b->own_mut_run_vmspace == NULL)
 		return EINVAL;
 	if ((prot & valid_prot) == 0 || (prot & ~valid_prot) != 0)
 		return EINVAL;
 	if (!vmm_mem_gpa_page_inside(b->imm_bytes, gpa))
 		return EINVAL;
 	flags = (prot & VM_PROT_WRITE) ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
-	return vm_fault(&b->own_mut_vmspace->vm_map, trunc_page(gpa),
+	return vm_fault(&b->own_mut_run_vmspace->vm_map, trunc_page(gpa),
 	    (vm_prot_t)prot, flags);
 }
 
@@ -317,8 +368,8 @@ vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
 {
 	struct vmm_mem_backing *b;
 	uint8_t *dst = buf;
-	vm_page_t page;
-	vm_pindex_t pindex;
+	void *pmap_handle;
+	vm_paddr_t pa;
 	uint64_t page_gpa;
 	size_t chunk;
 	size_t off;
@@ -327,8 +378,7 @@ vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
 	if (m == NULL || buf == NULL)
 		return EINVAL;
 	b = m->own_mut_backing;
-	if (b == NULL || b->own_mut_object == NULL ||
-	    b->own_mut_vmspace == NULL)
+	if (b == NULL || b->own_mut_run_vmspace == NULL)
 		return EINVAL;
 	while (len != 0) {
 		page_gpa = trunc_page(gpa);
@@ -338,20 +388,19 @@ vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
 		chunk = PAGE_SIZE - off;
 		if (chunk > len)
 			chunk = len;
-		error = vm_fault(&b->own_mut_vmspace->vm_map, page_gpa,
+		error = vm_fault(&b->own_mut_run_vmspace->vm_map, page_gpa,
 		    VM_PROT_READ, VM_FAULT_NORMAL);
 		if (error)
 			return error;
-		pindex = OFF_TO_IDX(page_gpa);
-		vm_object_hold(b->own_mut_object);
-		page = vm_page_lookup(b->own_mut_object, pindex);
-		if (page == NULL) {
-			vm_object_drop(b->own_mut_object);
+		pmap_handle = NULL;
+		pa = pmap_extract(vmspace_pmap(b->own_mut_run_vmspace),
+		    page_gpa, &pmap_handle);
+		if (pa == 0) {
+			pmap_extract_done(pmap_handle);
 			return EFAULT;
 		}
-		bcopy((const void *)(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(page)) +
-		    off), dst, chunk);
-		vm_object_drop(b->own_mut_object);
+		bcopy((const void *)(PHYS_TO_DMAP(pa) + off), dst, chunk);
+		pmap_extract_done(pmap_handle);
 		gpa += chunk;
 		dst += chunk;
 		len -= chunk;

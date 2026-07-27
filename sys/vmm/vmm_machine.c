@@ -211,6 +211,10 @@ vmm_machine_uninit(struct vmm_machine *m)
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	if (m->own_mut_boot_launch != NULL) {
+		kfree(m->own_mut_boot_launch, M_TEMP);
+		m->own_mut_boot_launch = NULL;
+	}
 	vmm_console_detach(&m->own_mut_console);
 	if (m->own_mut_taskqueue != NULL) {
 		kprintf("vmm klog: core_machine_uninit taskqueue_free begin m=%p tq=%p\n",
@@ -462,13 +466,23 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	vm_object_deallocate(mem_object);
 	mem_object = NULL;
 	vmm_loader_fini(loader);
+	m->own_mut_boot_launch = kmalloc(sizeof(*m->own_mut_boot_launch),
+	    M_TEMP, M_WAITOK);
+	*m->own_mut_boot_launch = launch;
+	error = vmm_mem_start_run(&m->own_mut_mem);
+	if (error != 0) {
+		vmm_machine_logf(m, "mem runtime start failed error=%d", error);
+		goto fail_after_loader;
+	}
+	vmm_machine_logf(m, "mem runtime started source=boot_snapshot");
 	if (!vmm_debug_allow_vcpu_start) {
 		error = EBUSY;
 		vmm_machine_logf(m, "vcpu start gated error=%d", error);
 		goto fail_after_loader;
 	}
 	vmm_console_reset(&m->own_mut_console);
-	error = vmm_vcpu_start(m, task->imm_vcpu_count, &launch);
+	error = vmm_vcpu_start(m, task->imm_vcpu_count,
+	    m->own_mut_boot_launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "vcpu start failed error=%d count=%u",
 		    error, task->imm_vcpu_count);
@@ -498,6 +512,10 @@ fail_after_loader:
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	if (m->own_mut_boot_launch != NULL) {
+		kfree(m->own_mut_boot_launch, M_TEMP);
+		m->own_mut_boot_launch = NULL;
+	}
 	vmm_machine_logf(m, "start cleanup done error=%d", error);
 }
 
@@ -532,31 +550,72 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 	struct vmm_machine *m = task->borrow_mut_machine;
 	struct vmm_mem_backing *backing;
 	struct vmm_vcpu_thread *threads;
-	const char *reason;
 	uint32_t thread_count;
 	u_int exit_reason;
+	int error;
 
 	exit_reason = atomic_load_acq_int(
 	    &m->own_mut_vcpu.atomic_mut_exit_reason);
-	if (exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN)
-		reason = "guest_shutdown";
-	else if (exit_reason == VMM_VCPU_EXIT_GUEST_FAULT)
-		reason = "guest_fault";
-	else
-		return;
 	if (vmm_machine_status(m) != VMM_MACHINE_RUNNING)
 		return;
 	KKASSERT(atomic_load_acq_int(
 	    &m->own_mut_vcpu.atomic_mut_active_count) == 0);
+	if (exit_reason == VMM_VCPU_EXIT_GUEST_RESET) {
+		vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
+		vmm_machine_logf(m, "state stopping reason=guest_reset");
+		thread_count = m->own_mut_vcpu.mut_count;
+		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+		vmm_vcpu_release_threads(threads, thread_count);
+		error = vmm_mem_reset_run(&m->own_mut_mem);
+		if (error == 0 && m->own_mut_boot_launch == NULL)
+			error = EINVAL;
+		if (error == 0) {
+			vmm_console_reset(&m->own_mut_console);
+			vmm_machine_set_status(m, VMM_MACHINE_STARTING);
+			vmm_machine_logf(m, "state starting reason=guest_reset");
+			error = vmm_vcpu_start(m, thread_count,
+			    m->own_mut_boot_launch);
+		}
+		if (error == 0) {
+			vmm_machine_set_status(m, VMM_MACHINE_RUNNING);
+			vmm_machine_logf(m, "state running reason=guest_reset");
+			return;
+		}
+		vmm_machine_logf(m, "guest reset failed error=%d", error);
+		vmm_vcpu_stop(m);
+		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+		vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
+		vmm_machine_logf(m,
+		    "state stopped reason=guest_reset_failed error=%d", error);
+		backing = vmm_mem_detach(&m->own_mut_mem);
+		vmm_vcpu_release_threads(threads, thread_count);
+		vmm_mem_release_backing(backing);
+		if (m->own_mut_boot_launch != NULL) {
+			kfree(m->own_mut_boot_launch, M_TEMP);
+			m->own_mut_boot_launch = NULL;
+		}
+		return;
+	}
+	if (exit_reason != VMM_VCPU_EXIT_GUEST_SHUTDOWN &&
+	    exit_reason != VMM_VCPU_EXIT_GUEST_FAULT)
+		return;
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
-	vmm_machine_logf(m, "state stopping reason=%s", reason);
+	vmm_machine_logf(m, "state stopping reason=%s",
+	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ?
+	    "guest_shutdown" : "guest_fault");
 	thread_count = m->own_mut_vcpu.mut_count;
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
-	vmm_machine_logf(m, "state stopped reason=%s", reason);
+	vmm_machine_logf(m, "state stopped reason=%s",
+	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ?
+	    "guest_shutdown" : "guest_fault");
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	if (m->own_mut_boot_launch != NULL) {
+		kfree(m->own_mut_boot_launch, M_TEMP);
+		m->own_mut_boot_launch = NULL;
+	}
 }
 
 void
@@ -582,6 +641,10 @@ vmm_machine_stop_force(const struct vmm_machine_task *task)
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
+	if (m->own_mut_boot_launch != NULL) {
+		kfree(m->own_mut_boot_launch, M_TEMP);
+		m->own_mut_boot_launch = NULL;
+	}
 	vmm_machine_logf(m, "stop force done");
 }
 

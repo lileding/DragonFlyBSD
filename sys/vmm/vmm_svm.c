@@ -283,6 +283,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_ACPI_SLEEP_CONTROL_PORT	0x404U
 #define VMM_ACPI_SLEEP_STATUS_PORT	0x405U
 #define VMM_ACPI_SLEEP_S5_ENABLE	0x34U
+#define VMM_ACPI_RESET_PORT		0x40cU
+#define VMM_ACPI_RESET_VALUE		0x01U
 #define VMM_PM_TIMER_PORT	0x408U
 #define VMM_PM_TIMER_LAST	0x40bU
 #define VMM_PM_TIMER_FREQ	3579545ULL
@@ -481,8 +483,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_HWCR_MC_STATUS_WR_EN	(1ULL << 18)
 #define VMM_SVM_HWCR_TSC_FREQ_SEL	(1ULL << 24)
 #define VMM_SVM_HWCR_IRPERF_EN		(1ULL << 30)
-#define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL | \
-					 VMM_SVM_HWCR_TSC_FREQ_SEL)
+#define VMM_SVM_HWCR_GUEST_FIXED	VMM_SVM_HWCR_TSC_FREQ_SEL
+#define VMM_SVM_HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL)
 #define VMM_SVM_HWCR_VALID		(VMM_SVM_HWCR_MC_STATUS_WR_EN | \
 					 VMM_SVM_HWCR_TSC_FREQ_SEL | \
 					 VMM_SVM_HWCR_IRPERF_EN)
@@ -1501,7 +1503,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	svm->mut_pm_timer_tsc = svm->mut_hpet_counter_tsc;
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_nb_cfg = NB_CFG_INITAPICCPUIDLO;
-	svm->mut_guest_hwcr = 0;
+	/* Guest TSC and CPUID.15 publish one fixed P0-equivalent frequency. */
+	svm->mut_guest_hwcr = VMM_SVM_HWCR_GUEST_FIXED;
 	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
 	    APICBASE_BSP | APICBASE_ENABLED;
 	svm->mut_lapic_timer_divisor = 2;
@@ -3417,7 +3420,9 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "invalid-value");
 			return 0;
 		}
-		svm->mut_guest_hwcr = val;
+		svm->mut_guest_hwcr =
+		    (val & ~VMM_SVM_HWCR_GUEST_FIXED) |
+		    VMM_SVM_HWCR_GUEST_FIXED;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case VMM_SVM_MSR_AMD64_DE_CFG:
@@ -4125,6 +4130,25 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	switch (port) {
+	case VMM_ACPI_RESET_PORT:
+		if (size != 1 || (info & VMM_SVM_IOIO_IN) != 0) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported acpi reset io op=%s size=%d rip=0x%jx",
+			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		val = vmcb->state.rax & 0xffU;
+		if (val != VMM_ACPI_RESET_VALUE) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm vcpu%u unsupported acpi reset value=0x%x rip=0x%jx",
+			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
+			return 0;
+		}
+		vmm_svm_advance_ioio(vmcb);
+		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_RESET;
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "guest reset source=acpi_fadt vcpu=%u", vc->imm_id);
+		return 1;
 	case VMM_ACPI_SLEEP_CONTROL_PORT:
 		if (size != 1) {
 			vmm_machine_logf(svm->borrow_imm_machine,

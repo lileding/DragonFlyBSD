@@ -49,7 +49,7 @@ mkdir -p "$WORK"
 	: >dev/random
 	: >dev/urandom
 	if [ -x bin/busybox ]; then
-		for applet in cat chmod dmesg echo false grep ls mkdir mknod mount poweroff ps sed sh sleep sync true uname; do
+		for applet in cat chmod dmesg echo false grep ls mkdir mknod mount poweroff ps reboot sed sh sleep sync true uname; do
 			ln -sf busybox "bin/$applet"
 		done
 	fi

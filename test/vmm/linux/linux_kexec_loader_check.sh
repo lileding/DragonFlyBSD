@@ -120,6 +120,13 @@ check_linux_boot_data()
 	[ "$(hex_at "$MEM_FILE" $((0x70200 + 256)) 12)" = \
 	    "010800010504000000000000" ] ||
 	    fail "FADT sleep-status GAS missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70200 + 112)) 4)" = "01041000" ] ||
+	    fail "FADT reset flag missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70200 + 116)) 12)" = \
+	    "010800010c04000000000000" ] ||
+	    fail "FADT reset GAS missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70200 + 128)) 1)" = "01" ] ||
+	    fail "FADT reset value missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "a5000000" ] ||
 	    fail "DSDT S5/COM1/RTC table length missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 36)) 12)" = \

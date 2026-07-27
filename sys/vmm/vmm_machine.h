@@ -21,6 +21,7 @@
 
 struct ucred;
 struct taskqueue;
+struct vmm_launch;
 struct vmm_machine_task;
 
 typedef void (*vmm_machine_func)(const struct vmm_machine_task *task);
@@ -33,12 +34,16 @@ enum vmm_machine_status {
 };
 
 struct vmm_machine {
+	/* token_config protects control-plane config and mut_status. */
+	/* token_events protects the retained textual event ring. */
 	struct lwkt_token token_config;
 	struct lwkt_token token_events;
 	struct vmm_vcpu own_mut_vcpu;
 	struct vmm_mem own_mut_mem;
 	struct vmm_console own_mut_console;
 	struct taskqueue *own_mut_taskqueue;
+	/* Owned only by the serialized taskqueue after loader acceptance. */
+	struct vmm_launch *own_mut_boot_launch;
 	enum vmm_machine_status mut_status;
 
 	int mut_desired_stopped;

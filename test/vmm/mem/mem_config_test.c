@@ -33,11 +33,16 @@ int vmm_test_vm_object_free_count;
 int vmm_test_vmspace_free_count;
 vm_offset_t vmm_test_vmspace_alloc_min;
 vm_offset_t vmm_test_vmspace_alloc_max;
+int vmm_test_vmspace_fork_fail;
+int vmm_test_vmspace_fork_calls;
+struct vmspace *vmm_test_vmspace_fork_parent;
 int vmm_test_pmap_maybethreaded_calls;
 struct pmap *vmm_test_pmap_maybethreaded_pmap;
 int vmm_test_pmap_del_all_cpus_calls;
 struct vmspace *vmm_test_pmap_del_all_cpus_vmspace;
 int vmm_test_pmap_del_all_cpus_before_vmspace_rel;
+int vmm_test_pmap_del_all_cpus_pending;
+int vmm_test_pmap_del_all_cpus_bad_order;
 
 static void
 fail(const char *name)
@@ -134,11 +139,16 @@ reset_vm_trace(void)
 	vmm_test_vmspace_free_count = 0;
 	vmm_test_vmspace_alloc_min = 0;
 	vmm_test_vmspace_alloc_max = 0;
+	vmm_test_vmspace_fork_fail = 0;
+	vmm_test_vmspace_fork_calls = 0;
+	vmm_test_vmspace_fork_parent = NULL;
 	vmm_test_pmap_maybethreaded_calls = 0;
 	vmm_test_pmap_maybethreaded_pmap = NULL;
 	vmm_test_pmap_del_all_cpus_calls = 0;
 	vmm_test_pmap_del_all_cpus_vmspace = NULL;
 	vmm_test_pmap_del_all_cpus_before_vmspace_rel = 0;
+	vmm_test_pmap_del_all_cpus_pending = 0;
+	vmm_test_pmap_del_all_cpus_bad_order = 0;
 }
 
 static void
@@ -269,6 +279,10 @@ expect_lapic_hole_fault_reject(void)
 		vmm_mem_release_backing(backing);
 		return;
 	}
+	if (vmm_mem_borrow_vmspace(&mem) != NULL)
+		fail("backend cannot borrow boot vmspace");
+	if (vmm_mem_start_run(&mem) != 0)
+		fail("start lapic-hole runtime");
 	vmspace = vmm_mem_borrow_vmspace(&mem);
 	if (vmspace == NULL) {
 		fail("borrow lapic-hole vmspace");
@@ -324,16 +338,24 @@ expect_backing_lifecycle(void)
 	}
 	if (vmm_mem_publish(&mem, backing) != EBUSY)
 		fail("publish busy");
+	if (vmm_mem_borrow_vmspace(&mem) != NULL)
+		fail("backend cannot borrow boot backing");
+	if (vmm_mem_start_run(&mem) != 0)
+		fail("start backing runtime");
+	if (vmm_mem_start_run(&mem) != EBUSY)
+		fail("start backing runtime twice");
 	vmspace = vmm_mem_borrow_vmspace(&mem);
 	if (vmspace == NULL)
 		fail("borrow vmspace");
 	if (vmm_test_vmspace_alloc_min != 0 ||
 	    vmm_test_vmspace_alloc_max != VMM_MEM_ALIGN)
 		fail("prepare allocates machine vmspace over GPA range");
-	if (vmm_test_pmap_maybethreaded_calls != 1 ||
+	if (vmm_test_vmspace_fork_calls != 1 ||
+	    vmm_test_vmspace_fork_parent == vmspace ||
+	    vmm_test_pmap_maybethreaded_calls != 2 ||
 	    (vmspace != NULL &&
 	     vmm_test_pmap_maybethreaded_pmap != &vmspace->vm_pmap))
-		fail("prepare marks machine pmap threaded");
+		fail("start forks and marks runtime pmap threaded");
 	if (vmspace != NULL &&
 	    (vmspace->vm_map.mapped_start != 0 ||
 	     vmspace->vm_map.mapped_end != VMM_MEM_ALIGN ||
@@ -355,11 +377,11 @@ expect_backing_lifecycle(void)
 		fail("snapshot returns mapped backing object");
 	if (object != NULL && (object->flags & OBJ_NOSPLIT) == 0)
 		fail("backing object is nosplit");
-	if (object != NULL && object->refs != 3)
+	if (object != NULL && object->refs != 4)
 		fail("snapshot owns temporary object reference");
 	if (object != NULL) {
 		vm_object_deallocate(object);
-		if (object->refs != 2)
+		if (object->refs != 3)
 			fail("snapshot drops only temporary object reference");
 	}
 
@@ -410,13 +432,79 @@ expect_backing_lifecycle(void)
 	expect_read_result(NULL, "read null mem", 0, EINVAL, 0, NULL, 0);
 	vmm_mem_release_backing(detached);
 	if (vmm_test_vm_object_free_count != 1 ||
-	    vmm_test_vmspace_free_count != 1)
+	    vmm_test_vmspace_free_count != 2)
 		fail("release frees backing exactly once");
-	if (vmm_test_pmap_del_all_cpus_calls != 1 ||
-	    vmm_test_pmap_del_all_cpus_vmspace != vmspace ||
-	    !vmm_test_pmap_del_all_cpus_before_vmspace_rel)
+	if (vmm_test_pmap_del_all_cpus_calls != 2 ||
+	    !vmm_test_pmap_del_all_cpus_before_vmspace_rel ||
+	    vmm_test_pmap_del_all_cpus_bad_order != 0)
 		fail("release removes pmap cpus before vmspace release");
 	vmm_mem_release_backing(NULL);
+}
+
+static void
+expect_runtime_reset(void)
+{
+	struct vmm_mem mem;
+	struct vmm_mem_backing *backing;
+	struct vmm_mem_backing *detached;
+	struct vmspace *first;
+	struct vmspace *second;
+
+	reset_vm_trace();
+	memset(&mem, 0, sizeof(mem));
+	mem.mut_bytes = VMM_MEM_ALIGN;
+	backing = NULL;
+	if (vmm_mem_prepare(mem.mut_bytes, &backing) != 0 || backing == NULL) {
+		fail("prepare reset backing");
+		return;
+	}
+	if (vmm_mem_publish(&mem, backing) != 0) {
+		fail("publish reset backing");
+		vmm_mem_release_backing(backing);
+		return;
+	}
+	if (vmm_mem_reset_run(&mem) != EINVAL)
+		fail("reset rejects absent runtime");
+	vmm_test_vmspace_fork_fail = 1;
+	if (vmm_mem_start_run(&mem) != ENOMEM ||
+	    vmm_mem_borrow_vmspace(&mem) != NULL)
+		fail("start failure does not publish runtime");
+	vmm_test_vmspace_fork_fail = 0;
+	if (vmm_mem_start_run(&mem) != 0) {
+		fail("start reset runtime");
+		detached = vmm_mem_detach(&mem);
+		vmm_mem_release_backing(detached);
+		return;
+	}
+	first = vmm_mem_borrow_vmspace(&mem);
+	if (first == NULL)
+		fail("borrow first runtime");
+	vmm_test_vmspace_fork_fail = 1;
+	if (vmm_mem_reset_run(&mem) != ENOMEM ||
+	    vmm_mem_borrow_vmspace(&mem) != first)
+		fail("reset failure retains runtime");
+	vmm_test_vmspace_fork_fail = 0;
+	if (vmm_mem_reset_run(&mem) != 0) {
+		fail("reset runtime");
+		detached = vmm_mem_detach(&mem);
+		vmm_mem_release_backing(detached);
+		return;
+	}
+	second = vmm_mem_borrow_vmspace(&mem);
+	if (second == NULL || second == first)
+		fail("reset replaces runtime");
+	if (vmm_test_vmspace_fork_calls != 4 ||
+	    vmm_test_vmspace_fork_parent == first)
+		fail("reset forks original boot vmspace");
+	if (vmm_test_vmspace_free_count != 1 ||
+	    vmm_test_pmap_del_all_cpus_calls != 1)
+		fail("reset releases old runtime");
+	detached = vmm_mem_detach(&mem);
+	vmm_mem_release_backing(detached);
+	if (vmm_test_vmspace_free_count != 3 ||
+	    vmm_test_pmap_del_all_cpus_calls != 3 ||
+	    vmm_test_pmap_del_all_cpus_bad_order != 0)
+		fail("release frees runtime and boot vmspaces");
 }
 
 static void
@@ -496,6 +584,7 @@ main(void)
 	expect_backing_lifecycle();
 	expect_lapic_hole_fault_reject();
 	expect_large_prepare_is_lazy();
+	expect_runtime_reset();
 
 	if (failures != 0)
 		return 1;

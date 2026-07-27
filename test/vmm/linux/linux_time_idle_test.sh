@@ -230,9 +230,21 @@ check_uptime_progress()
 	up2=$(marker_value "$file" "${base}_UP2")
 	clockevent=$(marker_value "$file" "${base}_CLOCKEVENT")
 	clocksource=$(marker_value "$file" "${base}_CLOCKSOURCE_FINAL")
+	tsc_deadline=$(marker_value "$file" "${base}_TSC_DEADLINE")
 
-	[ "$clockevent" = "lapic-deadline" ] ||
-	    fail "$vm expected lapic-deadline clockevent, got ${clockevent:-missing}"
+	case "$tsc_deadline" in
+	1)
+		[ "$clockevent" = "lapic-deadline" ] ||
+		    fail "$vm exposes tsc_deadline_timer but uses ${clockevent:-missing}"
+		;;
+	0)
+		[ "$clockevent" = "lapic" ] ||
+		    fail "$vm lacks tsc_deadline_timer but uses ${clockevent:-missing}"
+		;;
+	*)
+		fail "$vm missing ${base}_TSC_DEADLINE"
+		;;
+	esac
 	[ "$clocksource" = "tsc" ] ||
 	    fail "$vm expected stable tsc clocksource, got ${clocksource:-missing}"
 	grep -q "TSC doesn't count with P0 frequency" "$file" &&
@@ -251,7 +263,7 @@ run_guest_time_idle()
 	base="DFVMM_${vm}_TIME"
 
 	write_console "$vm" \
-	    "a=$base; read ce < /sys/devices/system/clockevents/clockevent0/current_device 2>/dev/null || ce=missing; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKEVENT \$ce; echo \${a}_CLOCKSOURCE \$cs; echo \${a}_BEGIN; read u _ < /proc/uptime; echo \${a}_UP0 \$u; sleep 1; read u _ < /proc/uptime; echo \${a}_UP1 \$u; sleep 3; read u _ < /proc/uptime; echo \${a}_UP2 \$u; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKSOURCE_FINAL \$cs; echo \${a}_INTERRUPTS_BEGIN; cat /proc/interrupts; echo \${a}_INTERRUPTS_END; echo \${a}_END"
+	    "a=$base; td=0; grep -qw tsc_deadline_timer /proc/cpuinfo && td=1; read ce < /sys/devices/system/clockevents/clockevent0/current_device 2>/dev/null || ce=missing; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_TSC_DEADLINE \$td; echo \${a}_CLOCKEVENT \$ce; echo \${a}_CLOCKSOURCE \$cs; echo \${a}_BEGIN; read u _ < /proc/uptime; echo \${a}_UP0 \$u; sleep 1; read u _ < /proc/uptime; echo \${a}_UP1 \$u; sleep 3; read u _ < /proc/uptime; echo \${a}_UP2 \$u; read cs < /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || cs=missing; echo \${a}_CLOCKSOURCE_FINAL \$cs; echo \${a}_INTERRUPTS_BEGIN; cat /proc/interrupts; echo \${a}_INTERRUPTS_END; echo \${a}_END"
 	wait_console_pattern "$vm" "${base}_END" "$vm console" ||
 	    fail "$vm time marker missing"
 	check_uptime_progress "$vm"
