@@ -322,6 +322,11 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 		return EPERM;
 	vmm_debug_trace("nremove stopped begin m=%p machine=%p ncp=%p",
 	    m, &m->machine, ncp);
+	/* Acquire the vnode before committing desired running. */
+	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
+	if (error)
+		return error;
+	vn_unlock(vp);
 	lwkt_gettoken(&m->machine.token_config);
 	m->machine.mut_desired_stopped = 0;
 	lwkt_reltoken(&m->machine.token_config);
@@ -331,21 +336,13 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	vmm_debug_trace("nremove stopped execute done m=%p machine=%p error=%d",
 	    m, &m->machine, error);
 	if (error) {
+		lwkt_gettoken(&m->machine.token_config);
+		m->machine.mut_desired_stopped = 1;
+		lwkt_reltoken(&m->machine.token_config);
 		vmm_debug_trace("nremove stopped return execute error=%d", error);
+		vrele(vp);
 		return error;
 	}
-
-	vmm_debug_trace("nremove stopped cache_vget begin m=%p ncp=%p",
-	    m, ncp);
-	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	vmm_debug_trace("nremove stopped cache_vget done m=%p error=%d vp=%p",
-	    m, error, error ? NULL : vp);
-	if (error) {
-		vmm_debug_trace("nremove stopped return cache_vget error=%d",
-		    error);
-		return error;
-	}
-	vn_unlock(vp);
 
 	cache_unlink(ap->a_nch);
 	vrele(vp);
@@ -456,11 +453,20 @@ vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
 		return EINVAL;
 	force = (take >= 11 && strncmp(buf, "reset force", 11) == 0);
 	if (force) {
+		int desired_stopped;
+
 		lwkt_gettoken(&node->vn_machine->machine.token_config);
+		desired_stopped = node->vn_machine->machine.mut_desired_stopped;
 		node->vn_machine->machine.mut_desired_stopped = 0;
 		lwkt_reltoken(&node->vn_machine->machine.token_config);
-		return vmm_machine_execute(&node->vn_machine->machine,
+		error = vmm_machine_execute(&node->vn_machine->machine,
 		    vmm_machine_reset_force, ap->a_cred);
+		if (error) {
+			lwkt_gettoken(&node->vn_machine->machine.token_config);
+			node->vn_machine->machine.mut_desired_stopped = desired_stopped;
+			lwkt_reltoken(&node->vn_machine->machine.token_config);
+		}
+		return error;
 	}
 	return vmm_machine_execute(&node->vn_machine->machine,
 	    vmm_machine_reset_apic, NULL);

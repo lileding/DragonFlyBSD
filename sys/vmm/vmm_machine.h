@@ -91,11 +91,11 @@ int vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
 /*
  * Lifecycle.  stopped is declarative: it means "desired stopped", which is
  * what vmmfs presents as the stopped control file.  vmmfs translates file
- * operations into ordered command handlers; vmm_machine_execute() snapshots
- * config and any syscall-context-only state (currently the paused loader
- * process) and queues a serialized command.  starting/running are current
- * execution state, not proof that a just-returned vmmfs operation already
- * completed.
+ * operations into ordered command handlers; vmm_machine_execute() captures
+ * syscall-context-only state (currently the paused loader process) and queues
+ * a serialized command.  A start command reads frozen configuration when it
+ * executes.  starting/running are current execution state, not proof that a
+ * just-returned vmmfs operation already completed.
  */
 int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
     struct ucred *cred);

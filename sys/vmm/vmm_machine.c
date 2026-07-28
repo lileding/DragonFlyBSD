@@ -61,16 +61,10 @@ struct vmm_machine_task {
 	vmm_machine_func fnonce_handler;
 	struct vmm_machine *borrow_mut_machine;
 	struct vmm_loader own_loader;
-	uint32_t imm_vcpu_count;
-	uint64_t imm_mem_bytes;
-	char imm_loader_path[VMM_LOADER_MAX + 1];
-	size_t imm_loader_len;
 };
 
 static void	vmm_machine_task_run(void *arg, int pending);
 static void	vmm_machine_drain_task(void *arg, int pending);
-static int	vmm_machine_task_config_complete(
-		    const struct vmm_machine_task *task);
 static void	vmm_machine_guest_exit(
 		    const struct vmm_machine_task *task);
 static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
@@ -259,6 +253,11 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 					 struct ucred *cred)
 {
 	struct vmm_machine_task *task;
+	uint64_t mem_bytes;
+	uint32_t vcpu_count;
+	size_t loader_len;
+	int config_complete;
+	int loader_initialized = 0;
 	int error = 0;
 
 	vmm_debug_trace("execute begin m=%p handler=%p cred=%p tq=%p", m,
@@ -279,59 +278,66 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 	task->borrow_mut_machine = m;
 	task->fnonce_handler = fnonce_handler;
 
-	lwkt_gettoken(&m->token_config);
-	task->imm_vcpu_count = m->own_mut_vcpu.mut_count;
-	task->imm_mem_bytes = m->own_mut_mem.mut_bytes;
-	task->imm_loader_len = m->mut_loader_len;
-	memcpy(task->imm_loader_path, m->mut_loader_path,
-	    task->imm_loader_len + 1);
-	lwkt_reltoken(&m->token_config);
-
 	if (cred != NULL) {
-		if (!vmm_machine_task_config_complete(task) ||
-		    !vmm_loader_path_is_set(task->imm_loader_len)) {
-			error = EINVAL;
+		/* vmmfs froze config by clearing desired_stopped before this call. */
+		lwkt_gettoken(&m->token_config);
+		vcpu_count = m->own_mut_vcpu.mut_count;
+		mem_bytes = m->own_mut_mem.mut_bytes;
+		loader_len = m->mut_loader_len;
+		lwkt_reltoken(&m->token_config);
+		config_complete = vcpu_count != 0 && mem_bytes != 0 &&
+		    vmm_loader_path_is_set(loader_len);
+		if (!config_complete) {
+			bzero(&task->own_loader, sizeof(task->own_loader));
+			task->own_loader.atomic_mut_state = VMM_LOADER_FAILED;
+			task->own_loader.mut_exit_code = EINVAL;
 			vmm_machine_logf(m,
-			    "command enqueue failed error=%d reason=incomplete_config vcpu=%u mem=%ju loader_len=%ju",
-			    error, task->imm_vcpu_count,
-			    (uintmax_t)task->imm_mem_bytes,
-			    (uintmax_t)task->imm_loader_len);
-			goto fail;
-		}
-		if (!vmm_debug_allow_loader_fork) {
+			    "loader prepare failed error=%d reason=incomplete_config vcpu=%u mem=%ju loader_len=%ju command=queued",
+			    EINVAL, vcpu_count, (uintmax_t)mem_bytes,
+			    (uintmax_t)loader_len);
+		} else if (!vmm_debug_allow_loader_fork) {
 			error = EBUSY;
 			vmm_machine_logf(m,
 			    "command enqueue failed error=%d reason=loader_fork_gated",
 			    error);
 			goto fail;
+		} else {
+			error = vmm_loader_init(&task->own_loader,
+			    m->mut_loader_path, cred);
+			if (error != 0) {
+				if (atomic_fetchadd_int(&task->own_loader.atomic_mut_state,
+				    0) != VMM_LOADER_FAILED) {
+					vmm_machine_logf(m,
+					    "loader prepare failed error=%d reason=init_failed",
+					    error);
+					goto fail;
+				}
+				vmm_machine_logf(m,
+				    "loader prepare failed error=%d reason=early_exit exit_status=%d command=queued",
+				    error, task->own_loader.mut_exit_code);
+			} else {
+				loader_initialized = 1;
+				vmm_machine_logf(m, "loader forked path=%s",
+				    task->own_loader.imm_path);
+			}
 		}
-		error = vmm_loader_init(&task->own_loader, task->imm_loader_path,
-		    cred);
-		if (error) {
-			vmm_machine_logf(m,
-			    "loader fork failed error=%d reason=init_failed path=%s exit_status=%d",
-			    error, task->imm_loader_path,
-			    task->own_loader.mut_exit_code);
-			goto fail;
-		}
-		vmm_machine_logf(m, "loader forked path=%s",
-		    task->imm_loader_path);
 	}
 
 	error = taskqueue_enqueue(m->own_mut_taskqueue, &task->task);
 	if (error) {
 		vmm_machine_logf(m, "command enqueue failed error=%d reason=taskqueue",
 		    error);
-		if (cred != NULL)
-			vmm_loader_fini(&task->own_loader);
 		goto fail;
 	}
 	vmm_machine_logf(m, "command queued handler=%p loader=%s",
-	    fnonce_handler, cred != NULL ? task->imm_loader_path : "-");
+	    fnonce_handler, task->own_loader.imm_path != NULL ?
+	    task->own_loader.imm_path : "-");
 	vmm_debug_trace("execute queued m=%p handler=%p", m, fnonce_handler);
 	return 0;
 
 fail:
+	if (loader_initialized)
+		vmm_loader_fini(&task->own_loader);
 	kfree(task, M_TEMP);
 	return error;
 }
@@ -383,16 +389,22 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	struct vmm_launch launch;
 	struct vm_object *mem_object = NULL;
 	uint64_t mem_size = 0;
+	uint64_t mem_bytes;
+	uint32_t vcpu_count;
 	uint32_t thread_count;
 	int error;
 	int loader_exit_code;
 
+	lwkt_gettoken(&m->token_config);
+	vcpu_count = m->own_mut_vcpu.mut_count;
+	mem_bytes = m->own_mut_mem.mut_bytes;
+	lwkt_reltoken(&m->token_config);
 	vmm_debug_trace("start begin m=%p vcpu=%u mem=%ju loader=%s", m,
-	    task->imm_vcpu_count, (uintmax_t)task->imm_mem_bytes,
-	    task->imm_loader_path);
+	    vcpu_count, (uintmax_t)mem_bytes,
+	    loader->imm_path != NULL ? loader->imm_path : "-");
 	vmm_machine_logf(m, "start begin vcpu=%u mem=%ju loader=%s",
-	    task->imm_vcpu_count, (uintmax_t)task->imm_mem_bytes,
-	    task->imm_loader_path);
+	    vcpu_count, (uintmax_t)mem_bytes,
+	    loader->imm_path != NULL ? loader->imm_path : "-");
 	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING) {
 		vmm_machine_logf(m, "start ignored reason=already_running");
 		vmm_loader_fini(loader);
@@ -401,15 +413,25 @@ vmm_machine_start(const struct vmm_machine_task *task)
 
 	vmm_machine_set_status(m, VMM_MACHINE_STARTING);
 	vmm_machine_logf(m, "state starting");
+	if (atomic_fetchadd_int(&loader->atomic_mut_state, 0) !=
+	    VMM_LOADER_PAUSED) {
+		error = loader->mut_exit_code;
+		if (error == 0)
+			error = ECANCELED;
+		vmm_machine_logf(m,
+		    "loader unavailable error=%d state=%d",
+		    error, atomic_fetchadd_int(&loader->atomic_mut_state, 0));
+		goto fail;
+	}
 
-	error = vmm_mem_prepare(task->imm_mem_bytes, &prepared_backing);
+	error = vmm_mem_prepare(mem_bytes, &prepared_backing);
 	if (error != 0) {
 		vmm_machine_logf(m, "mem prepare failed error=%d bytes=%ju",
-		    error, (uintmax_t)task->imm_mem_bytes);
+		    error, (uintmax_t)mem_bytes);
 		goto fail;
 	}
 	vmm_machine_logf(m, "mem prepared bytes=%ju",
-	    (uintmax_t)task->imm_mem_bytes);
+	    (uintmax_t)mem_bytes);
 	error = vmm_mem_publish(&m->own_mut_mem, prepared_backing);
 	if (error != 0) {
 		vmm_machine_logf(m, "mem publish failed error=%d", error);
@@ -481,11 +503,11 @@ vmm_machine_start(const struct vmm_machine_task *task)
 		goto fail_after_loader;
 	}
 	vmm_console_reset(&m->own_mut_console);
-	error = vmm_vcpu_start(m, task->imm_vcpu_count,
+	error = vmm_vcpu_start(m, vcpu_count,
 	    m->own_mut_boot_launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "vcpu start failed error=%d count=%u",
-		    error, task->imm_vcpu_count);
+		    error, vcpu_count);
 		goto fail_after_loader;
 	}
 
@@ -671,12 +693,6 @@ vmm_machine_console_input(struct vmm_machine *m)
 	if (m->mut_status == VMM_MACHINE_RUNNING)
 		vmm_vcpu_console_input_locked(m);
 	lwkt_reltoken(&m->token_config);
-}
-
-static int
-vmm_machine_task_config_complete(const struct vmm_machine_task *task)
-{
-	return task->imm_vcpu_count != 0 && task->imm_mem_bytes != 0;
 }
 
 static enum vmm_machine_status

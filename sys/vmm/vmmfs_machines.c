@@ -237,8 +237,9 @@ vmmfs_machines_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 
 /*
  * `rmdir machines/<name>` is allowed only after the control plane already says
- * desired stopped.  Deletion removes the name immediately, appends a force-stop
- * command, and lets the reaper free the machine after the command queue drains.
+ * desired stopped.  Deletion first appends a force-stop command.  Only after
+ * that succeeds may it remove the name and let the reaper free the machine
+ * after the command queue drains.
  */
 static int
 vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
@@ -275,13 +276,22 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		return EBUSY;
 	}
 	lwkt_reltoken(&m->machine.token_config);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	error = vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
+	if (error != 0) {
+		vrele(vp);
+		return error;
+	}
+
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	KKASSERT(m->vm_in_tree != 0);
 	m->vm_in_tree = 0;
 	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
 	vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	vmmfs_device_free_list(&tofree);
-	(void)vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,
