@@ -37,6 +37,14 @@
 #include "vmm_loader.h"
 #include "vmm_loader_x86.h"
 
+/*
+ * This count covers the complete lifetime of a loader mmap capability.  It
+ * starts before cdev_pager_allocate() can publish the object and ends only
+ * after the final cdevpriv, vnode, and pager reference is gone.  vmmfs uses
+ * it to reject module unload while a user mapping can still enter vmm code.
+ */
+static int vmm_loader_mmap_object_count;
+
 int
 vmm_loader_path_parse(char *path, size_t *lenp, const char *buf, size_t len)
 {
@@ -69,6 +77,12 @@ vmm_loader_path_is_set(size_t len)
 	return len != 0;
 }
 
+int
+vmm_loader_mmap_active(void)
+{
+	return atomic_fetchadd_int(&vmm_loader_mmap_object_count, 0) != 0;
+}
+
 #define VMM_MANIFEST_SIZE	PAGE_SIZE
 
 struct vmm_loader_fd {
@@ -78,9 +92,10 @@ struct vmm_loader_fd {
 	 * file private data or the cdev pager object can call back into vmm.  The
 	 * initial ref belongs to devfs cdevpriv; the pager ctor/dtor pair owns a
 	 * second ref.  The pathless VCHR vnode has its own ref, held here until
-	 * vmm_loader_fd_free() turns it into deadfs.  vmm_loader_fd_active mirrors
-	 * this whole callback lifetime so module unload refuses while any loader
-	 * fd, vnode, or mmap can still reach vmm code.
+	 * vmm_loader_fd_free() turns it into deadfs.  The complete lfd lifetime
+	 * brackets vmm_loader_mmap_object_count, which is the vmm.ko unload veto.
+	 * It may cover an open loader fd before its first mmap, closing the race
+	 * between creating a mapping and beginning module unload.
 	 *
 	 * Lock map:
 	 * after cdev_pager_allocate() publishes own_mut_object, its token protects
@@ -98,15 +113,6 @@ struct vmm_loader_fd {
 };
 
 static uint32_t vmm_loader_fd_serial;
-static int vmm_loader_fd_active;
-
-int
-vmm_loader_busy(void)
-{
-	return atomic_fetchadd_int(&vmm_loader_fd_active, 0) != 0;
-}
-
-
 static d_open_t		vmm_loader_fd_open;
 static d_close_t	vmm_loader_fd_close;
 static d_mmap_single_t	vmm_loader_fd_mmap_single;
@@ -318,8 +324,7 @@ static void
 vmm_loader_fd_put(struct vmm_loader_fd *lfd)
 {
 	if (atomic_fetchadd_int(&lfd->atomic_mut_refs, -1) == 1) {
-		atomic_add_int(&vmm_loader_fd_active, -1);
-		wakeup(&vmm_loader_fd_active);
+		atomic_add_int(&vmm_loader_mmap_object_count, -1);
 		kfree(lfd, M_TEMP);
 	}
 }
@@ -375,11 +380,10 @@ vmm_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	 * object: fd3's guest RAM or fd4's manifest page.
 	 *
 	 * DragonFly's OBJT_MGTDEVICE fault path allows this direct page return
-	 * without inserting the page into the fd object.  The fd object still
-	 * owns the map backing list for user mappings, so revoke can remove
-	 * those pmap entries by calling vm_object_page_remove() on the fd
-	 * object itself.  This keeps loader-to-vCPU handoff zero-copy and lets
-	 * revoke cut off userland without releasing fd3 guest RAM.
+	 * without inserting the page into the fd object.  OBJT_MGTDEVICE has no
+	 * generic process-mapping revoke operation: loader exit only prevents
+	 * new mmap and future faults.  Revoking already installed user pmap
+	 * entries requires a future VM-core operation.
 	 *
 	 * vm_fault_object() calls this pager with the fd object token held.
 	 * VM_OBJECT_LOCK() is a recursive token hold here; the matching
@@ -420,13 +424,10 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 			backing = lfd->own_mut_backing_object;
 			lfd->own_mut_backing_object = NULL;
 			/*
-			 * vm_fault() enters OBJT_MGTDEVICE pages while holding
-			 * this fd object token through pmap_enter().  Keep
-			 * revoke under the same token so no in-flight fault can
-			 * pass the revoked check and install a fresh pmap entry
-			 * after this removal pass.
+			 * The object token serializes fault admission with this
+			 * revoked publication.  It cannot retract user pmap entries
+			 * that were already installed by earlier faults.
 			 */
-			vm_object_page_remove(object, 0, 0, FALSE);
 		}
 		VM_OBJECT_UNLOCK(object);
 	} else if (!lfd->mut_revoked) {
@@ -589,7 +590,7 @@ vmm_loader_open_object_fd(struct vm_object *object, vm_size_t size,
 	lfd->own_mut_backing_object = object;
 	lfd->imm_size = round_page(size);
 	lfd->atomic_mut_refs = 1;
-	atomic_add_int(&vmm_loader_fd_active, 1);
+	atomic_add_int(&vmm_loader_mmap_object_count, 1);
 	lfd->own_mut_object = cdev_pager_allocate(lfd, OBJT_MGTDEVICE,
 	    &vmm_loader_pager_ops, lfd->imm_size,
 	    VM_PROT_READ | VM_PROT_WRITE, 0, proc0.p_ucred);

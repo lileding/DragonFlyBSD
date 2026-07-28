@@ -47,9 +47,7 @@ int	vmm_loader_path_parse(char *path, size_t *len, const char *buf,
 size_t	vmm_loader_path_format(const char *path, size_t len, char *out,
 	    size_t cap);
 int	vmm_loader_path_is_set(size_t len);
-
-/* Loader fd/mmap capability objects still hold vmm.ko pager callbacks. */
-int	vmm_loader_busy(void);
+int	vmm_loader_mmap_active(void);
 
 int	vmm_loader_init(struct vmm_loader *loader, const char *path,
 	    struct ucred *cred);

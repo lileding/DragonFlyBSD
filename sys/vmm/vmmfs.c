@@ -48,6 +48,9 @@
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 static struct lock vmmfs_mount_lock;
 static int vmmfs_mount_count;
+/* vfs_register() ignores vfs_init() errors; mount is the real admission point. */
+static int vmmfs_backend_error;
+static int vmmfs_initialized;
 
 static void
 vmmfs_mount_count_hold(void)
@@ -602,6 +605,8 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	struct vmmfs_mount *vmp;
 	size_t size;
 
+	if (!vmmfs_initialized)
+		return vmmfs_backend_error != 0 ? vmmfs_backend_error : ENXIO;
 	kprintf("vmm klog: mount begin mp=%p path=%p\n", mp, path);
 	if (mp->mnt_flag & MNT_UPDATE)
 		return EOPNOTSUPP;
@@ -728,9 +733,14 @@ vmmfs_vfs_init(struct vfsconf *conf)
 
 	(void)conf;
 	kprintf("vmm klog: vfs_init begin\n");
+	vmmfs_backend_error = 0;
+	vmmfs_initialized = 0;
 	error = vmm_backend_probe();
-	if (error)
-		return error;
+	if (error != 0) {
+		vmmfs_backend_error = error;
+		kprintf("vmm: backend unavailable error=%d\n", error);
+		return 0;
+	}
 	lockinit(&vmmfs_mount_lock, "vmmfs mounts", 0, 0);
 	vmmfs_mount_count = 0;
 	kprintf("vmm klog: domain init begin\n");
@@ -738,8 +748,11 @@ vmmfs_vfs_init(struct vfsconf *conf)
 	if (error) {
 		kprintf("vmm klog: domain init error=%d\n", error);
 		lockuninit(&vmmfs_mount_lock);
-		return error;
+		vmm_backend_uninit();
+		vmmfs_backend_error = error;
+		return 0;
 	}
+	vmmfs_initialized = 1;
 	kprintf("vmm klog: domain init done\n");
 	kprintf("vmm: loaded\n");
 	return 0;
@@ -750,16 +763,20 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 {
 	(void)conf;
 	kprintf("vmm klog: vfs_uninit begin\n");
+	if (!vmmfs_initialized)
+		return 0;
 	if (vmmfs_mount_count_busy()) {
 		kprintf("vmm klog: vfs_uninit busy\n");
 		return EBUSY;
 	}
-	if (vmm_loader_busy()) {
-		kprintf("vmm klog: vfs_uninit loader busy\n");
+	if (vmm_loader_mmap_active()) {
+		kprintf("vmm klog: vfs_uninit loader mmap active\n");
 		return EBUSY;
 	}
 	vmm_domain_uninit();
+	vmm_backend_uninit();
 	lockuninit(&vmmfs_mount_lock);
+	vmmfs_initialized = 0;
 	kprintf("vmm: unloaded\n");
 	return 0;
 }

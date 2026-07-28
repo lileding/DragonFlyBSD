@@ -185,7 +185,6 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_ROOT_TIMER_MAX_US	(60LL * 1000 * 1000)
 #define MSR_AMD64_SVM_AVIC_DOORBELL	0xc001011bU
 #define VMM_SVM_MSR_AMD64_TSC_RATIO	0xc0000104U
-#define VMM_SVM_TSC_RATIO_DEFAULT	(1ULL << 32)
 #define VMM_SVM_TSC_RATIO_MAX		0x000000ffffffffffULL
 
 #define VMM_SVM_EXIT_INTR		0x060ULL
@@ -616,8 +615,6 @@ struct vmm_svm_backend {
 	uint64_t imm_iobm_pa;
 	uint8_t *own_mut_msrbm;
 	uint64_t imm_msrbm_pa;
-	void *own_mut_hsave;
-	uint64_t imm_hsave_pa;
 	void *own_mut_avic_apic_page;
 	uint64_t imm_avic_apic_page_pa;
 	vm_page_t own_mut_avic_access_page;
@@ -749,14 +746,31 @@ struct vmm_svm_backend {
 };
 
 /*
- * A vCPU LWKT remains on one pCPU for its whole run.  Its run loop is the
- * only writer for that pCPU's cached hardware TSC ratio.
+ * Lock map:
+ * own_mut_hsave and raw_imm_host_* are initialized and released only by the
+ * selected backend's module-lifetime init/uninit callbacks.  Those callbacks
+ * run after all mounts have gone away, so no vCPU can enter SVM concurrently.
+ * mut_tsc_ratio is written only by the fixed-pCPU vCPU LWKT and is reset by
+ * module teardown after every vCPU has stopped.
  */
 struct vmm_svm_cpu_state {
+	void		*own_mut_hsave;
+	uint64_t	 imm_hsave_pa;
+	uint64_t	 raw_imm_host_vm_cr;
+	uint64_t	 raw_imm_host_efer;
+	uint64_t	 raw_imm_host_hsave_pa;
+	uint64_t	 raw_imm_host_tsc_ratio;
 	uint64_t mut_tsc_ratio;
+	int		 mut_enabled;
+	int		 mut_restored;
 };
 
 static struct vmm_svm_cpu_state vmm_svm_cpu_state[MAXCPU];
+static int vmm_svm_initialized;
+
+static void	vmm_svm_cpu_capture(void *arg);
+static void	vmm_svm_cpu_enable(void *arg);
+static void	vmm_svm_cpu_restore(void *arg);
 
 struct vmm_svm_msr_policy {
 	uint32_t imm_msr;
@@ -1366,6 +1380,146 @@ vmm_svm_probe(void)
 	return NULL;
 }
 
+static int
+vmm_svm_init(void)
+{
+	struct vmm_svm_cpu_state *cpu_state;
+	uint32_t i;
+	int error = 0;
+
+	if (vmm_svm_initialized)
+		return EALREADY;
+	if (ncpus == 0 || ncpus > MAXCPU)
+		return E2BIG;
+	for (i = 0; i < ncpus; ++i) {
+		cpu_state = &vmm_svm_cpu_state[i];
+		cpu_state->own_mut_hsave = vmm_svm_contig_alloc(
+		    &cpu_state->imm_hsave_pa, 1);
+		if (cpu_state->own_mut_hsave == NULL) {
+			error = ENOMEM;
+			goto fail;
+		}
+	}
+	lwkt_cpusync_simple(smp_active_mask, vmm_svm_cpu_capture, &error);
+	if (error != 0)
+		goto fail;
+	lwkt_cpusync_simple(smp_active_mask, vmm_svm_cpu_enable, NULL);
+	for (i = 0; i < ncpus; ++i) {
+		cpu_state = &vmm_svm_cpu_state[i];
+		if (cpu_state->mut_enabled) {
+			kprintf("vmm: svm cpu%d enabled hsave=0x%jx\n", i,
+			    (uintmax_t)cpu_state->imm_hsave_pa);
+		}
+	}
+	vmm_svm_initialized = 1;
+	kprintf("vmm: svm initialized cpus=%d\n", ncpus);
+	return 0;
+
+fail:
+	for (i = 0; i < ncpus; ++i) {
+		cpu_state = &vmm_svm_cpu_state[i];
+		vmm_svm_contig_free(cpu_state->own_mut_hsave, 1);
+		bzero(cpu_state, sizeof(*cpu_state));
+	}
+	return error;
+}
+
+static void
+vmm_svm_uninit(void)
+{
+	struct vmm_svm_cpu_state *cpu_state;
+	uint32_t i;
+
+	if (!vmm_svm_initialized)
+		return;
+	lwkt_cpusync_simple(smp_active_mask, vmm_svm_cpu_restore, NULL);
+	for (i = 0; i < ncpus; ++i) {
+		cpu_state = &vmm_svm_cpu_state[i];
+		if (cpu_state->mut_restored)
+			kprintf("vmm: svm cpu%d restored\n", i);
+	}
+	for (i = 0; i < ncpus; ++i) {
+		cpu_state = &vmm_svm_cpu_state[i];
+		vmm_svm_contig_free(cpu_state->own_mut_hsave, 1);
+		bzero(cpu_state, sizeof(*cpu_state));
+	}
+	vmm_svm_initialized = 0;
+	kprintf("vmm: svm uninitialized cpus=%d\n", ncpus);
+}
+
+static void
+vmm_svm_cpu_capture(void *arg)
+{
+	struct vmm_svm_cpu_state *cpu_state;
+	int *error = arg;
+	uint64_t vm_cr;
+	uint64_t efer;
+	uint64_t hsave_pa;
+
+	if (mycpu->gd_cpuid >= ncpus || mycpu->gd_cpuid >= MAXCPU) {
+		atomic_cmpset_int(error, 0, EINVAL);
+		return;
+	}
+	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
+	if (cpu_state->own_mut_hsave == NULL) {
+		atomic_cmpset_int(error, 0, ENOMEM);
+		return;
+	}
+	vm_cr = rdmsr(MSR_AMD_VM_CR);
+	efer = rdmsr(MSR_EFER);
+	hsave_pa = rdmsr(MSR_AMD_VM_HSAVE_PA);
+	cpu_state->raw_imm_host_vm_cr = vm_cr;
+	cpu_state->raw_imm_host_efer = efer;
+	cpu_state->raw_imm_host_hsave_pa = hsave_pa;
+	cpu_state->raw_imm_host_tsc_ratio =
+	    rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
+	if ((vm_cr & VM_CR_SVMDIS) != 0 && (vm_cr & VM_CR_LOCK) != 0) {
+		atomic_cmpset_int(error, 0, ENXIO);
+		return;
+	}
+	if ((efer & EFER_SVME) != 0 || hsave_pa != 0)
+		atomic_cmpset_int(error, 0, EBUSY);
+}
+
+static void
+vmm_svm_cpu_enable(void *arg)
+{
+	struct vmm_svm_cpu_state *cpu_state;
+	uint64_t vm_cr;
+
+	(void)arg;
+	KKASSERT(mycpu->gd_cpuid < ncpus);
+	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
+	KKASSERT(cpu_state->own_mut_hsave != NULL);
+	vm_cr = cpu_state->raw_imm_host_vm_cr;
+	if ((vm_cr & VM_CR_SVMDIS) != 0)
+		wrmsr(MSR_AMD_VM_CR, vm_cr & ~VM_CR_SVMDIS);
+	wrmsr(MSR_EFER, cpu_state->raw_imm_host_efer | EFER_SVME);
+	wrmsr(MSR_AMD_VM_HSAVE_PA, cpu_state->imm_hsave_pa);
+	cpu_state->mut_enabled = 1;
+}
+
+static void
+vmm_svm_cpu_restore(void *arg)
+{
+	struct vmm_svm_cpu_state *cpu_state;
+
+	(void)arg;
+	KKASSERT(mycpu->gd_cpuid < ncpus);
+	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
+	if (cpu_state->own_mut_hsave == NULL)
+		return;
+	if (cpu_state->mut_tsc_ratio != 0) {
+		wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO,
+		    cpu_state->raw_imm_host_tsc_ratio);
+		cpu_state->mut_tsc_ratio = 0;
+	}
+	wrmsr(MSR_AMD_VM_HSAVE_PA, cpu_state->raw_imm_host_hsave_pa);
+	wrmsr(MSR_EFER, cpu_state->raw_imm_host_efer);
+	wrmsr(MSR_AMD_VM_CR, cpu_state->raw_imm_host_vm_cr);
+	cpu_state->mut_restored = 1;
+}
+
 static void
 vmm_svm_seg_load(const struct vmm_x64_seg_state *src,
     struct vmm_svm_segment *dst)
@@ -1448,6 +1602,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 
 	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
 		return EINVAL;
+	if (!vmm_svm_initialized)
+		return ENXIO;
 	if (!vmm_loader_x86_xcr0_valid(
 	    launch->imm_vcpu0.cr[VMM_X64_CR_XCR0]) ||
 	    (launch->imm_vcpu0.cr[VMM_X64_CR_XCR0] & ~npx_xcr0_mask) != 0)
@@ -1554,9 +1710,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    VMM_SVM_IOBM_PAGES);
 	svm->own_mut_msrbm = vmm_svm_contig_alloc(&svm->imm_msrbm_pa,
 	    VMM_SVM_MSRBM_PAGES);
-	svm->own_mut_hsave = vmm_svm_contig_alloc(&svm->imm_hsave_pa, 1);
 	if (svm->own_mut_vmcb == NULL || svm->own_mut_iobm == NULL ||
-	    svm->own_mut_msrbm == NULL || svm->own_mut_hsave == NULL) {
+	    svm->own_mut_msrbm == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
@@ -1640,38 +1795,10 @@ vmm_svm_vcpu_destroy(void *backend)
 	vmm_svm_avic_uninit(svm);
 	if (svm->own_mut_fpu_sentinel != NULL)
 		kfree(svm->own_mut_fpu_sentinel, M_TEMP);
-	vmm_svm_contig_free(svm->own_mut_hsave, 1);
 	vmm_svm_contig_free(svm->own_mut_msrbm, VMM_SVM_MSRBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_iobm, VMM_SVM_IOBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_vmcb, 1);
 	kfree(svm, M_TEMP);
-}
-
-static void
-vmm_svm_enable_cpu(struct vmm_svm_backend *svm)
-{
-	struct vmm_svm_cpu_state *cpu_state;
-	uint64_t msr;
-	uint64_t observed_ratio;
-
-	msr = rdmsr(MSR_AMD_VM_CR);
-	if (msr & VM_CR_SVMDIS)
-		wrmsr(MSR_AMD_VM_CR, msr & ~VM_CR_SVMDIS);
-	msr = rdmsr(MSR_EFER);
-	if ((msr & EFER_SVME) == 0)
-		wrmsr(MSR_EFER, msr | EFER_SVME);
-	wrmsr(MSR_AMD_VM_HSAVE_PA, svm->imm_hsave_pa);
-	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
-	if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
-		wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
-		observed_ratio = rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
-		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm cpu%d tsc ratio request=0x%jx observed=0x%jx match=%d",
-		    mycpu->gd_cpuid, (uintmax_t)svm->imm_tsc_ratio,
-		    (uintmax_t)observed_ratio,
-		    observed_ratio == svm->imm_tsc_ratio);
-		cpu_state->mut_tsc_ratio = svm->imm_tsc_ratio;
-	}
 }
 
 static void
@@ -5175,7 +5302,9 @@ static enum vmm_vcpu_exit_reason
 vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_backend *svm = backend;
+	struct vmm_svm_cpu_state *cpu_state;
 	struct vmm_svm_vmcb *vmcb;
+	uint64_t observed_ratio;
 	uint32_t reqflags;
 	int fpu_sentinel_failed;
 	int handled;
@@ -5183,11 +5312,24 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	if (svm == NULL)
 		return VMM_VCPU_EXIT_NONE;
 	vmcb = svm->own_mut_vmcb;
+	KKASSERT(vmm_svm_initialized);
+	KKASSERT(mycpu->gd_cpuid < ncpus);
+	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
+	KKASSERT(cpu_state->own_mut_hsave != NULL);
 	while (!vmm_vcpu_should_stop(vc)) {
 		vmm_svm_lapic_timer_sync(svm);
 		vmm_svm_timer_check(svm, vc);
 		vmm_svm_com1_rx_notify(svm, vc, "entry");
-		vmm_svm_enable_cpu(svm);
+		if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
+			wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
+			observed_ratio = rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "svm cpu%d tsc ratio request=0x%jx observed=0x%jx match=%d",
+			    mycpu->gd_cpuid, (uintmax_t)svm->imm_tsc_ratio,
+			    (uintmax_t)observed_ratio,
+			    observed_ratio == svm->imm_tsc_ratio);
+			cpu_state->mut_tsc_ratio = svm->imm_tsc_ratio;
+		}
 		fpu_sentinel_failed = 0;
 		if (svm->own_mut_fpu_sentinel != NULL) {
 			kernel_fpu_begin();
@@ -5401,13 +5543,10 @@ out:
 		svm->mut_root_timer_systimer_armed = 0;
 	}
 	vmm_svm_avic_unbind_cpu(svm);
-	if (vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio != 0) {
-		if (vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio !=
-		    VMM_SVM_TSC_RATIO_DEFAULT) {
-			wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO,
-			    VMM_SVM_TSC_RATIO_DEFAULT);
-		}
-		vmm_svm_cpu_state[mycpu->gd_cpuid].mut_tsc_ratio = 0;
+	if (cpu_state->mut_tsc_ratio != 0) {
+		wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO,
+		    cpu_state->raw_imm_host_tsc_ratio);
+		cpu_state->mut_tsc_ratio = 0;
 	}
 	return svm->mut_exit_reason;
 }
@@ -5415,6 +5554,8 @@ out:
 const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
 	.imm_name = "svm",
 	.probe = vmm_svm_probe,
+	.init = vmm_svm_init,
+	.uninit = vmm_svm_uninit,
 	.create = vmm_svm_vcpu_create,
 	.destroy = vmm_svm_vcpu_destroy,
 	.run = vmm_svm_vcpu_run,

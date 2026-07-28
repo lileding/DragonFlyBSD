@@ -36,6 +36,15 @@ vmm_backend_probe(void)
 	SET_FOREACH(ops, vmm_vcpu_backend_set) {
 		reason = (*ops)->probe();
 		if (reason == NULL) {
+			if ((*ops)->init != NULL) {
+				int error = (*ops)->init();
+
+				if (error != 0) {
+					kprintf("vmm: backend init failed name=%s error=%d\n",
+					    (*ops)->imm_name, error);
+					return error;
+				}
+			}
 			vmm_backend = *ops;
 			kprintf("vmm: backend selected name=%s\n",
 			    vmm_backend->imm_name);
@@ -46,6 +55,16 @@ vmm_backend_probe(void)
 	kprintf("vmm: no usable vcpu backend name=%s reason=%s\n", name,
 	    reason);
 	return ENXIO;
+}
+
+void
+vmm_backend_uninit(void)
+{
+	if (vmm_backend == NULL)
+		return;
+	if (vmm_backend->uninit != NULL)
+		vmm_backend->uninit();
+	vmm_backend = NULL;
 }
 
 int

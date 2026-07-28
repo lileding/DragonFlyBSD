@@ -57,6 +57,9 @@ struct vmm_vcpu_backend_ops {
 	const char *imm_name;
 	/* NULL if usable; otherwise a stable module-load rejection reason. */
 	const char *(*probe)(void);
+	/* Module lifetime setup/teardown; no machine or vCPU is live here. */
+	int (*init)(void);
+	void (*uninit)(void);
 	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
 	    void **backendp);
 	void (*destroy)(void *backend);
@@ -74,6 +77,7 @@ size_t	vmm_vcpu_format(const struct vmm_vcpu *v, char *out, size_t cap);
 int	vmm_vcpu_is_set(const struct vmm_vcpu *v);
 
 int	vmm_backend_probe(void);
+void	vmm_backend_uninit(void);
 
 int	vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	    const struct vmm_launch *launch);
