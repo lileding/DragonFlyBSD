@@ -141,6 +141,7 @@ check_module_image
 run cc -Wall -Wextra -Werror -std=c11 -O2 "$REPO/test/vmm/smoke/smoke_loader.c" -o "$LOADER"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
 run kldload "$VMM_KO"; LOADED=1
+[ "${VMM_TRACE:-0}" = 1 ] && run sysctl debug.vmm.trace=1
 run mkdir -p "$MNT"
 run rm -f "$MOUNT_HELPER"
 run ln -s /sbin/mount_std "$MOUNT_HELPER"

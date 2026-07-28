@@ -325,10 +325,15 @@ vmmfs_machine_reaper(void *arg)
 	struct vmmfs_machine *m = arg;
 	struct vmmfs_mount *vmp = m->vm_mount;
 
+	vmm_debug_trace("machine_reaper begin m=%p vmp=%p", m, vmp);
 	vmm_machine_drain(&m->machine);
+	vmm_debug_trace("machine_reaper drained m=%p", m);
 	vmmfs_machine_free(m);
+	vmm_debug_trace("machine_reaper freed vmp=%p", vmp);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	KKASSERT(vmp->vm_machine_count > 0);
 	vmp->vm_machine_count--;
+	vmm_debug_trace("machine_reaper decremented vmp=%p count=%d", vmp,
+	    vmp->vm_machine_count);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 }

@@ -232,13 +232,22 @@ vmm_machine_drain(struct vmm_machine *m)
 	struct task task;
 	int error;
 
-	if (m->own_mut_taskqueue == NULL)
+	vmm_debug_trace("machine_drain begin m=%p tq=%p", m,
+	    m->own_mut_taskqueue);
+	if (m->own_mut_taskqueue == NULL) {
+		vmm_debug_trace("machine_drain skipped m=%p reason=no_taskqueue", m);
 		return;
+	}
 	TASK_INIT(&task, 0, vmm_machine_drain_task, NULL);
 	error = taskqueue_enqueue(m->own_mut_taskqueue, &task);
-	if (error)
+	if (error) {
+		vmm_debug_trace("machine_drain enqueue failed m=%p error=%d", m,
+		    error);
 		return;
+	}
+	vmm_debug_trace("machine_drain queued m=%p task=%p", m, &task);
 	taskqueue_drain(m->own_mut_taskqueue, &task);
+	vmm_debug_trace("machine_drain done m=%p task=%p", m, &task);
 }
 
 /*

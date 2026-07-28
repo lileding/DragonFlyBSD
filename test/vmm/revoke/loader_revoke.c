@@ -120,6 +120,7 @@ write_ready(const char *result_path)
 		exit(2);
 	}
 	fprintf(fp, "ready=1\n");
+	fprintf(fp, "pid=%ld\n", (long)getpid());
 	fclose(fp);
 	free(ready_path);
 }
@@ -263,7 +264,15 @@ main(int argc, char **argv)
 
 	install_fault_handlers();
 	write_ready(result_path);
-	sleep((unsigned int)delay);
+	if (strcmp(mode, "hang") == 0) {
+		/* The harness resumes us only after VM stop has completed revoke. */
+		if (raise(SIGSTOP) != 0) {
+			perror("raise SIGSTOP");
+			return 2;
+		}
+	} else {
+		sleep((unsigned int)delay);
+	}
 	new3 = new_mmap_fails(fd3, page);
 	new4 = new_mmap_fails(fd4, page);
 	old3 = expect_fault(mem_map);

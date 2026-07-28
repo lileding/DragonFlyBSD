@@ -59,11 +59,21 @@ image selected by the harness:
 - `avic/avic_interrupt_test.sh`
 - `revoke/loader_revoke_test.sh`
 - `revoke/loader_unload_busy_test.sh`
+- `lifecycle/command_atomicity_test.sh`
+- `lifecycle/lifecycle_capability_soak_test.sh`
 - `lifecycle/stop_delete_test.sh`
 - `nuttx/rtos_nuttx_test.sh`
 - `linux/linux_initrd_rootfs_test.sh`
 - `linux/linux_core_lifecycle_test.sh`
 - `linux/linux_console_terminal_test.sh`
+
+`lifecycle/lifecycle_capability_soak_test.sh` is the production lifecycle/pager
+gate.  It repeats a real one-vCPU start/force-stop/delete/unmount/unload path,
+checks fd3/fd4 revoke after loader exit and VM stop, and every tenth round
+requires a surviving inherited loader mapping to veto `kldunload` until its
+holder exits.  It defaults to 60 rounds; use `VMM_SOAK_ROUNDS=2` only for a
+short bring-up check.  Run it after the Linux conformance gate, with a freshly
+built pc64 module and no pre-existing `vmm.ko`.
 
 `linux/linux_console_interactive.sh` is the manual terminal harness.  It boots
 the in-memory Linux guest and attaches a small stdio terminal bridge to
