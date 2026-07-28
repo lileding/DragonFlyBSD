@@ -99,7 +99,9 @@ struct vmm_loader_fd {
 	 *
 	 * Lock map:
 	 * after cdev_pager_allocate() publishes own_mut_object, its token protects
-	 * mut_revoked and own_mut_backing_object.  The pager ctor runs before
+	 * mut_revoked and own_mut_backing_object.  The final pager dtor owns the
+	 * one exception: it drops own_mut_backing_object after all mappings of the
+	 * capability object have gone away.  The pager ctor runs before
 	 * own_mut_object is assigned, so it only observes the construction-time
 	 * state; mmap and fault paths recheck under the object token.
 	 */
@@ -354,9 +356,22 @@ static void
 vmm_loader_pager_dtor(void *handle)
 {
 	struct vmm_loader_fd *lfd = handle;
+	struct vm_object *backing;
 
-	if (lfd != NULL)
-		vmm_loader_fd_put(lfd);
+	if (lfd == NULL)
+		return;
+	/*
+	 * A loader's at_exit callback runs before exit1() tears down its
+	 * vmspace.  Keep the backing reference through that pmap removal: an
+	 * OBJT_MGTDEVICE pager is destroyed only after its final vm_map entry is
+	 * gone, so this is the first point at which returned backing pages can
+	 * no longer be present in a user pmap.
+	 */
+	backing = lfd->own_mut_backing_object;
+	lfd->own_mut_backing_object = NULL;
+	if (backing != NULL)
+		vm_object_deallocate(backing);
+	vmm_loader_fd_put(lfd);
 }
 
 static int
@@ -421,12 +436,11 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 		VM_OBJECT_LOCK(object);
 		if (!lfd->mut_revoked) {
 			lfd->mut_revoked = 1;
-			backing = lfd->own_mut_backing_object;
-			lfd->own_mut_backing_object = NULL;
 			/*
 			 * The object token serializes fault admission with this
 			 * revoked publication.  It cannot retract user pmap entries
-			 * that were already installed by earlier faults.
+			 * that were already installed by earlier faults, so their
+			 * backing reference remains owned by the pager dtor.
 			 */
 		}
 		VM_OBJECT_UNLOCK(object);
