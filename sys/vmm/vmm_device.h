@@ -16,6 +16,7 @@
 #define VMM_DEVICE_NAME_MAX	63
 
 struct vmm_pcie;
+struct vmm_pcie_config;
 struct vmm_pcie_root;
 struct vmm_pcie_user;
 
@@ -38,6 +39,7 @@ struct vmm_device {
 	uint16_t		mut_msix_vectors;
 	uint8_t			mut_revision;
 	int			mut_registered;
+	struct vmm_pcie_config	*own_mut_config;
 	struct vmm_pcie_bar	own_mut_bars[VMM_PCIE_ABI_MAX_BARS];
 	RB_ENTRY(vmm_device)	own_mut_registry_entry;
 };

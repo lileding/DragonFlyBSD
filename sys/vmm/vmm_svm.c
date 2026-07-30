@@ -33,6 +33,7 @@
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
 #include "vmm_mem.h"
+#include "vmm_pcie_ecam.h"
 #include "vmm_svm.h"
 #include "vmm_vcpu.h"
 
@@ -2151,8 +2152,13 @@ vmm_svm_gpr_write(struct vmm_svm_backend *svm, unsigned int reg, uint64_t val,
 	default:
 		return;
 	}
-	old = vmm_svm_gpr_read(svm, reg);
-	val = (old & ~mask) | (val & mask);
+	if (size == 4) {
+		/* x86-64 writes to a 32-bit GPR clear its upper half. */
+		val &= mask;
+	} else {
+		old = vmm_svm_gpr_read(svm, reg);
+		val = (old & ~mask) | (val & mask);
+	}
 	if (reg == VMM_X64_GPR_RAX)
 		svm->own_mut_vmcb->state.rax = val;
 	else if (reg < VMM_X64_GPR_RIP)
@@ -5270,6 +5276,148 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 }
 
 static int
+vmm_svm_handle_pcie_ecam_mmio(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint64_t gpa)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint8_t fetched[15];
+	uint8_t modrm;
+	uint8_t opcode;
+	uint64_t value;
+	unsigned int reg;
+	int access_size;
+	int data16;
+	int instruction_len;
+	int off;
+	int rex;
+	int modsz;
+	int result_size;
+	int write;
+
+	instruction_len = vmcb->ctrl.inst_len;
+	if (instruction_len == 0 ||
+	    instruction_len > (int)sizeof(vmcb->ctrl.inst_bytes)) {
+		if (vmm_svm_guest_read_va(svm, vmcb->state.rip, fetched,
+		    sizeof(fetched)) != 0)
+			goto fail;
+		bytes = fetched;
+		instruction_len = (int)sizeof(fetched);
+	}
+	data16 = 0;
+	off = 0;
+	rex = 0;
+	while (off < instruction_len) {
+		if (bytes[off] == 0x66) {
+			data16 = 1;
+			off++;
+			continue;
+		}
+		if (bytes[off] >= 0x40 && bytes[off] <= 0x4f) {
+			rex = bytes[off++];
+			continue;
+		}
+		break;
+	}
+	if (off >= instruction_len)
+		goto fail;
+	opcode = bytes[off++];
+	write = 0;
+	value = 0;
+	reg = 0;
+	result_size = 0;
+	switch (opcode) {
+	case 0x8a:
+		access_size = 1;
+		break;
+	case 0x8b:
+		access_size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+		break;
+	case 0x88:
+		write = 1;
+		access_size = 1;
+		break;
+	case 0x89:
+		write = 1;
+		access_size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+		break;
+	case 0xc6:
+		write = 1;
+		access_size = 1;
+		break;
+	case 0xc7:
+		write = 1;
+		access_size = (rex & 0x08) ? 8 : (data16 ? 2 : 4);
+		break;
+	case 0x0f:
+		if (off >= instruction_len)
+			goto fail;
+		opcode = bytes[off++];
+		if (opcode == 0xb6)
+			access_size = 1;
+		else if (opcode == 0xb7)
+			access_size = 2;
+		else
+			goto fail;
+		result_size = (rex & 0x08) ? 8 : 4;
+		break;
+	default:
+		goto fail;
+	}
+	if (access_size > 4 || off >= instruction_len)
+		goto fail;
+	modrm = bytes[off];
+	modsz = vmm_svm_modrm_size(bytes, instruction_len, off);
+	if (modsz == 0)
+		goto fail;
+	reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+	if (opcode == 0xc6 || opcode == 0xc7) {
+		unsigned int immediate_size;
+
+		if (((modrm >> 3) & 7) != 0)
+			goto fail;
+		off += modsz;
+		immediate_size = opcode == 0xc6 ? 1U :
+		    (data16 ? 2U : 4U);
+		if (off + (int)immediate_size > instruction_len)
+			goto fail;
+		value = bytes[off];
+		if (immediate_size > 1)
+			value |= (uint64_t)bytes[off + 1] << 8;
+		if (immediate_size > 2) {
+			value |= (uint64_t)bytes[off + 2] << 16;
+			value |= (uint64_t)bytes[off + 3] << 24;
+		}
+		off += (int)immediate_size;
+	} else {
+		if (write)
+			value = vmm_svm_gpr_read(svm, reg);
+		off += modsz;
+	}
+	if (vmm_pcie_ecam_access(&svm->borrow_imm_machine->own_mut_pcie_root,
+	    gpa, write, access_size, &value) != 0)
+		goto fail;
+	if (!write)
+		vmm_svm_gpr_write(svm, reg, value,
+		    result_size != 0 ? result_size : access_size);
+	if (vmm_svm_trace_enabled &&
+	    ((gpa - VMM_PCIE_ECAM_BASE) & 0xfffULL) == 0) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "svm vcpu%u pcie ecam %s gpa=0x%jx size=%d val=0x%jx",
+		    vc->imm_id, write ? "write" : "read", (uintmax_t)gpa,
+		    access_size, (uintmax_t)value);
+	}
+	vmcb->state.rip += off;
+	return 1;
+fail:
+	vmm_machine_logf(svm->borrow_imm_machine,
+	    "svm vcpu%u unsupported pcie ecam mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
+	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
+	return 0;
+}
+
+static int
 vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -5284,6 +5432,9 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		return vmm_svm_handle_fch_pm_mmio(svm, vc, gpa);
 	if (gpa >= VMM_IOAPIC_BASE && gpa < VMM_IOAPIC_BASE + VMM_IOAPIC_SIZE)
 		return vmm_svm_handle_ioapic_mmio(svm, vc, gpa);
+	if (gpa >= VMM_PCIE_ECAM_BASE &&
+	    gpa < VMM_PCIE_ECAM_BASE + VMM_PCIE_ECAM_SIZE)
+		return vmm_svm_handle_pcie_ecam_mmio(svm, vc, gpa);
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
 		prot = VM_PROT_WRITE;
 	else if (vmcb->ctrl.exitinfo1 & PGEX_I)

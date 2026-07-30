@@ -38,9 +38,12 @@
 #define ACPI_MADT_GPA		(ACPI_GPA + 0x400ULL)
 #define ACPI_HPET_GPA		(ACPI_GPA + 0x500ULL)
 #define ACPI_DSDT_GPA		(ACPI_GPA + 0x600ULL)
+#define ACPI_MCFG_GPA		(ACPI_GPA + 0x800ULL)
 #define ACPI_HPET_MMIO_GPA	0xfed00000ULL
 #define ACPI_IOAPIC_GPA		0xfec00000ULL
 #define ACPI_LAPIC_GPA		0xfee00000ULL
+#define VMM_PCIE_ECAM_GPA	0xe0000000ULL
+#define VMM_PCIE_ECAM_SIZE	0x00100000ULL
 #define CMDLINE_CAP		PAGE_SIZE_GUEST
 
 #define LINUX_ACPI_RSDP_ADDR	0x070U
@@ -78,6 +81,7 @@
 #define ACPI_TABLE_HEADER_SIZE	36U
 #define ACPI_RSDP_SIZE		36U
 #define ACPI_FADT_SIZE		276U
+#define ACPI_MCFG_SIZE		60U
 #define ACPI_MADT_LOCAL_APIC_SIZE	8U
 #define ACPI_MADT_IOAPIC_SIZE		12U
 #define ACPI_MADT_INTERRUPT_OVERRIDE_SIZE	10U
@@ -125,6 +129,20 @@ static const uint8_t vmm_linux_dsdt[] = {
 	0x0f, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x10,
 	0x0a, 0x0d, 0x47, 0x01, 0x70, 0x00, 0x70, 0x00,
 	0x01, 0x02, 0x22, 0x00, 0x01, 0x79, 0x00,
+};
+
+/* PCI0 AML body, compiled and validated with ACPICA iasl/acpiexec. */
+static const uint8_t vmm_linux_pci_root_aml[] = {
+	0x10, 0x49, 0x04, 0x5f, 0x53, 0x42, 0x5f, 0x5b,
+	0x82, 0x41, 0x04, 0x50, 0x43, 0x49, 0x30, 0x08,
+	0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a,
+	0x08, 0x08, 0x5f, 0x43, 0x49, 0x44, 0x0c, 0x41,
+	0xd0, 0x0a, 0x03, 0x08, 0x5f, 0x53, 0x45, 0x47,
+	0x00, 0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00, 0x08,
+	0x5f, 0x43, 0x52, 0x53, 0x11, 0x15, 0x0a, 0x12,
+	0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+	0x79, 0x00,
 };
 
 #define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
@@ -638,11 +656,13 @@ build_acpi_tables(uint8_t *mem)
 	uint8_t *fadt;
 	uint8_t *madt;
 	uint8_t *hpet;
+	uint8_t *mcfg;
 	uint8_t *dsdt;
 	uint8_t *lapic;
 	uint8_t *ioapic;
 	uint8_t *iso;
 	uint32_t xsdt_len;
+	uint32_t dsdt_len;
 	uint32_t madt_len;
 
 	memset(mem + ACPI_GPA, 0, ACPI_SIZE);
@@ -658,17 +678,24 @@ build_acpi_tables(uint8_t *mem)
 	write_acpi_checksum(rsdp, ACPI_RSDP_SIZE, 32);
 
 	xsdt = mem + ACPI_XSDT_GPA;
-	xsdt_len = ACPI_TABLE_HEADER_SIZE + 3 * sizeof(uint64_t);
+	xsdt_len = ACPI_TABLE_HEADER_SIZE + 4 * sizeof(uint64_t);
 	write_acpi_header(xsdt, "XSDT", xsdt_len, 1);
 	write64(xsdt, ACPI_TABLE_HEADER_SIZE, ACPI_FADT_GPA);
 	write64(xsdt, ACPI_TABLE_HEADER_SIZE + sizeof(uint64_t),
 	    ACPI_MADT_GPA);
 	write64(xsdt, ACPI_TABLE_HEADER_SIZE + 2 * sizeof(uint64_t),
 	    ACPI_HPET_GPA);
+	write64(xsdt, ACPI_TABLE_HEADER_SIZE + 3 * sizeof(uint64_t),
+	    ACPI_MCFG_GPA);
 	write_acpi_checksum(xsdt, xsdt_len, 9);
 
 	dsdt = mem + ACPI_DSDT_GPA;
 	memcpy(dsdt, vmm_linux_dsdt, sizeof(vmm_linux_dsdt));
+	dsdt_len = sizeof(vmm_linux_dsdt) + sizeof(vmm_linux_pci_root_aml);
+	memcpy(dsdt + sizeof(vmm_linux_dsdt), vmm_linux_pci_root_aml,
+	    sizeof(vmm_linux_pci_root_aml));
+	write32(dsdt, 4, dsdt_len);
+	write_acpi_checksum(dsdt, dsdt_len, 9);
 
 	fadt = mem + ACPI_FADT_GPA;
 	write_acpi_header(fadt, "FACP", ACPI_FADT_SIZE, 6);
@@ -746,6 +773,15 @@ build_acpi_tables(uint8_t *mem)
 	write16(hpet, 53, 0x80);
 	write8(hpet, 55, 0);
 	write_acpi_checksum(hpet, 56, 9);
+
+	mcfg = mem + ACPI_MCFG_GPA;
+	write_acpi_header(mcfg, "MCFG", ACPI_MCFG_SIZE, 1);
+	write64(mcfg, 44, VMM_PCIE_ECAM_GPA);
+	write16(mcfg, 52, 0);
+	write8(mcfg, 54, 0);
+	write8(mcfg, 55, 0);
+	write32(mcfg, 56, 0);
+	write_acpi_checksum(mcfg, ACPI_MCFG_SIZE, 9);
 }
 
 static void
@@ -757,6 +793,8 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	uint64_t cmdline_addr;
 	uint64_t initramfs_addr;
 	uint32_t initramfs_size;
+	uint64_t ecam_end;
+	uint64_t ram_end;
 	uint8_t loadflags;
 	unsigned int e820_count;
 
@@ -805,8 +843,24 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	write_e820_entry(boot_params, e820_count++, 0x9f000,
 	    ONE_MIB - 0x9f000, LINUX_E820_RESERVED);
 	if (mem_size > ONE_MIB) {
-		write_e820_entry(boot_params, e820_count++, ONE_MIB,
-		    mem_size - ONE_MIB, LINUX_E820_RAM);
+		ram_end = mem_size < VMM_PCIE_ECAM_GPA ? mem_size :
+		    VMM_PCIE_ECAM_GPA;
+		if (ram_end > ONE_MIB) {
+			write_e820_entry(boot_params, e820_count++, ONE_MIB,
+			    ram_end - ONE_MIB, LINUX_E820_RAM);
+		}
+		if (mem_size > VMM_PCIE_ECAM_GPA) {
+			ecam_end = VMM_PCIE_ECAM_GPA + VMM_PCIE_ECAM_SIZE;
+			if (ecam_end > mem_size)
+				ecam_end = mem_size;
+			write_e820_entry(boot_params, e820_count++,
+			    VMM_PCIE_ECAM_GPA, ecam_end - VMM_PCIE_ECAM_GPA,
+			    LINUX_E820_RESERVED);
+			if (mem_size > ecam_end) {
+				write_e820_entry(boot_params, e820_count++, ecam_end,
+				    mem_size - ecam_end, LINUX_E820_RAM);
+			}
+		}
 	}
 	write8(boot_params, LINUX_E820_ENTRIES, (uint8_t)e820_count);
 }

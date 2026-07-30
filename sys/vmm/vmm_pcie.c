@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include "vmm_pcie.h"
+#include "vmm_pcie_config.h"
 
 static int	vmm_pcie_device_cmp(struct vmm_device *left,
 		    struct vmm_device *right);
@@ -15,7 +16,8 @@ static struct vmm_device *vmm_pcie_device_find_name_locked(
 		    struct vmm_pcie *pcie, const char *name, int nlen);
 static int	vmm_pcie_device_busy_locked(struct vmm_pcie *pcie);
 static void	vmm_pcie_device_clear_registered_locked(
-		    struct vmm_device *device, struct vmm_pcie_bar *bars);
+		    struct vmm_device *device, struct vmm_pcie_bar *bars,
+		    struct vmm_pcie_config **configp);
 
 RB_GENERATE(vmm_pcie_device_tree, vmm_device, own_mut_registry_entry,
     vmm_pcie_device_cmp);
@@ -327,6 +329,7 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
     unsigned int *bar_countp)
 {
 	struct vmm_pcie_bar bars[VMM_PCIE_ABI_MAX_BARS];
+	struct vmm_pcie_config *config;
 	struct vmm_pcie *pcie;
 	uint32_t bar_fd_mask;
 	unsigned int bar_count;
@@ -339,6 +342,10 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 	    vmm_pcie_abi_validate(request, sizeof(*request)) != 0)
 		return EINVAL;
 	__builtin_memset(bars, 0, sizeof(bars));
+	config = NULL;
+	error = vmm_pcie_config_create(&config, request);
+	if (error != 0)
+		return error;
 	bar_count = 0;
 	bar_fd_mask = 0;
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
@@ -373,6 +380,8 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 		device->own_mut_bars[i] = bars[i];
 		__builtin_memset(&bars[i], 0, sizeof(bars[i]));
 	}
+	device->own_mut_config = config;
+	config = NULL;
 	device->mut_vendor_id = le16toh(request->le_vendor_id);
 	device->mut_device_id = le16toh(request->le_device_id);
 	device->mut_subsystem_vendor_id = le16toh(request->le_subsystem_vendor_id);
@@ -400,6 +409,7 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 	return 0;
 
 fail:
+	vmm_pcie_config_destroy(config);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++)
 		vmm_pcie_bar_destroy(&bars[i]);
 	return error;
@@ -410,6 +420,7 @@ vmm_pcie_device_provider_detach(struct vmm_device *device,
     struct vmm_pcie_user *provider)
 {
 	struct vmm_pcie_bar bars[VMM_PCIE_ABI_MAX_BARS];
+	struct vmm_pcie_config *config;
 	struct vmm_pcie *pcie;
 	unsigned int i;
 
@@ -417,15 +428,17 @@ vmm_pcie_device_provider_detach(struct vmm_device *device,
 	    device->borrow_imm_pcie == NULL)
 		return;
 	__builtin_memset(bars, 0, sizeof(bars));
+	config = NULL;
 	pcie = device->borrow_imm_pcie;
 	lwkt_gettoken(&pcie->token_registry);
 	if (device->borrow_mut_provider == provider) {
-		vmm_pcie_device_clear_registered_locked(device, bars);
+		vmm_pcie_device_clear_registered_locked(device, bars, &config);
 		device->borrow_mut_provider = NULL;
 		if (device->mut_attachment_generation != (uint64_t)-1)
 			device->mut_attachment_generation++;
 	}
 	lwkt_reltoken(&pcie->token_registry);
+	vmm_pcie_config_destroy(config);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++)
 		vmm_pcie_bar_destroy(&bars[i]);
 }
@@ -546,7 +559,7 @@ vmm_pcie_device_busy_locked(struct vmm_pcie *pcie)
 
 static void
 vmm_pcie_device_clear_registered_locked(struct vmm_device *device,
-    struct vmm_pcie_bar *bars)
+    struct vmm_pcie_bar *bars, struct vmm_pcie_config **configp)
 {
 	unsigned int i;
 
@@ -557,6 +570,8 @@ vmm_pcie_device_clear_registered_locked(struct vmm_device *device,
 		__builtin_memset(&device->own_mut_bars[i], 0,
 		    sizeof(device->own_mut_bars[i]));
 	}
+	*configp = device->own_mut_config;
+	device->own_mut_config = NULL;
 	device->mut_vendor_id = 0;
 	device->mut_device_id = 0;
 	device->mut_subsystem_vendor_id = 0;

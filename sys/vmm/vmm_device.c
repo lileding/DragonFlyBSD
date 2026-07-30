@@ -23,6 +23,7 @@ vmm_device_init(struct vmm_device *device, const char *name, int nlen,
 	device->borrow_mut_root = consumer;
 	device->mut_bdf = bdf;
 	device->mut_attachment_generation = 1;
+	device->own_mut_config = 0;
 }
 
 void
@@ -45,6 +46,7 @@ vmm_device_uninit(struct vmm_device *device)
 	device->mut_msix_vectors = 0;
 	device->mut_revision = 0;
 	device->mut_registered = 0;
+	device->own_mut_config = 0;
 }
 
 int

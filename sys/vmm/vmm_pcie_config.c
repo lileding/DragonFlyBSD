@@ -1,0 +1,283 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * PCIe configuration header -- see vmm_pcie_config.h.
+ */
+#include <sys/errno.h>
+#include <sys/malloc.h>
+#include <sys/systm.h>
+#include <sys/types.h>
+
+#include "vmm_pcie_config.h"
+
+#define VMM_PCI_VENDOR_ID		0x00U
+#define VMM_PCI_DEVICE_ID		0x02U
+#define VMM_PCI_COMMAND		0x04U
+#define VMM_PCI_STATUS			0x06U
+#define VMM_PCI_CLASS_REVISION		0x08U
+#define VMM_PCI_HEADER_TYPE		0x0eU
+#define VMM_PCI_BAR0			0x10U
+#define VMM_PCI_SUBSYSTEM_VENDOR	0x2cU
+#define VMM_PCI_SUBSYSTEM_DEVICE	0x2eU
+#define VMM_PCI_CAP_PTR		0x34U
+#define VMM_PCI_PCIE_CAP		0x50U
+#define VMM_PCI_MSIX_CAP		0x70U
+
+#define VMM_PCI_STATUS_CAP_LIST	0x0010U
+#define VMM_PCI_COMMAND_VALID		0x0007U
+#define VMM_PCI_BAR_MEMORY_64		0x00000004U
+#define VMM_PCI_BAR_PREFETCHABLE	0x00000008U
+#define VMM_PCI_BAR_ATTRIBUTE_MASK	0x0000000fU
+#define VMM_PCI_CAP_ID_EXP		0x10U
+#define VMM_PCI_CAP_ID_MSIX		0x11U
+
+static uint32_t vmm_pcie_config_read32(const uint8_t *bytes,
+	    unsigned int offset);
+static void vmm_pcie_config_write16(uint8_t *bytes, unsigned int offset,
+	    uint16_t value);
+static void vmm_pcie_config_write32(uint8_t *bytes, unsigned int offset,
+	    uint32_t value);
+static int vmm_pcie_config_bar_index(const struct vmm_pcie_config *config,
+	    unsigned int offset, unsigned int *indexp, int *highp);
+static uint32_t vmm_pcie_config_bar_read32(const struct vmm_pcie_config *config,
+	    unsigned int index, int high);
+static void vmm_pcie_config_write_bar(struct vmm_pcie_config *config,
+	    unsigned int offset, int size, uint64_t value);
+static void vmm_pcie_config_write_command(struct vmm_pcie_config *config,
+	    unsigned int offset, int size, uint64_t value);
+
+int
+vmm_pcie_config_create(struct vmm_pcie_config **configp,
+    const struct vmm_pcie_abi_register *request)
+{
+	struct vmm_pcie_config *config;
+	uint32_t class_revision;
+	unsigned int i;
+
+	if (configp == NULL || request == NULL)
+		return EINVAL;
+	config = kmalloc(sizeof(*config), M_TEMP, M_WAITOK | M_ZERO);
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_VENDOR_ID,
+	    le16toh(request->le_vendor_id));
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_DEVICE_ID,
+	    le16toh(request->le_device_id));
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_STATUS,
+	    VMM_PCI_STATUS_CAP_LIST);
+	class_revision = (le32toh(request->le_class_code) << 8) |
+	    request->revision;
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_CLASS_REVISION,
+	    class_revision);
+	config->own_mut_bytes[VMM_PCI_HEADER_TYPE] = 0;
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_SUBSYSTEM_VENDOR,
+	    le16toh(request->le_subsystem_vendor_id));
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_SUBSYSTEM_DEVICE,
+	    le16toh(request->le_subsystem_device_id));
+	config->own_mut_bytes[VMM_PCI_CAP_PTR] = VMM_PCI_PCIE_CAP;
+	config->own_mut_bytes[VMM_PCI_PCIE_CAP] = VMM_PCI_CAP_ID_EXP;
+	config->own_mut_bytes[VMM_PCI_PCIE_CAP + 1] = VMM_PCI_MSIX_CAP;
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_PCIE_CAP + 2,
+	    0x0002U);
+	config->own_mut_bytes[VMM_PCI_MSIX_CAP] = VMM_PCI_CAP_ID_MSIX;
+	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 2,
+	    le16toh(request->le_msix_vectors) - 1U);
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 4, 0);
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 8,
+	    0x800U);
+	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
+		uint32_t attributes;
+
+		config->imm_bar_size[i] = le64toh(request->bar[i].le_size);
+		config->imm_bar_flags[i] = le32toh(request->bar[i].le_flags);
+		if (config->imm_bar_size[i] == 0)
+			continue;
+		attributes = 0;
+		if ((config->imm_bar_flags[i] & VMM_PCIE_ABI_BAR_F_64BIT) != 0)
+			attributes |= VMM_PCI_BAR_MEMORY_64;
+		if ((config->imm_bar_flags[i] &
+		    VMM_PCIE_ABI_BAR_F_PREFETCHABLE) != 0)
+			attributes |= VMM_PCI_BAR_PREFETCHABLE;
+		vmm_pcie_config_write32(config->own_mut_bytes,
+		    VMM_PCI_BAR0 + i * sizeof(uint32_t), attributes);
+	}
+	*configp = config;
+	return 0;
+}
+
+void
+vmm_pcie_config_destroy(struct vmm_pcie_config *config)
+{
+
+	if (config != NULL)
+		kfree(config, M_TEMP);
+}
+
+int
+vmm_pcie_config_access_locked(struct vmm_pcie_config *config,
+    unsigned int offset, int write, int size, uint64_t *valuep)
+{
+	unsigned int base;
+	unsigned int index;
+	uint32_t value;
+	int high;
+
+	if (config == NULL || valuep == NULL ||
+	    (size != 1 && size != 2 && size != 4) ||
+	    (offset & (unsigned int)(size - 1)) != 0 ||
+	    offset > VMM_PCIE_CONFIG_SPACE_SIZE - (unsigned int)size)
+		return EINVAL;
+	if (write) {
+		if (vmm_pcie_config_bar_index(config, offset, &index, &high)) {
+			vmm_pcie_config_write_bar(config, offset, size, *valuep);
+			return 0;
+		}
+		if (offset < VMM_PCI_COMMAND + sizeof(uint32_t) &&
+		    offset + (unsigned int)size > VMM_PCI_COMMAND) {
+			vmm_pcie_config_write_command(config, offset, size, *valuep);
+		}
+		return 0;
+	}
+	if (offset >= VMM_PCIE_CONFIG_HEADER_SIZE) {
+		*valuep = 0;
+		return 0;
+	}
+	base = offset & ~(unsigned int)(sizeof(uint32_t) - 1);
+	if (vmm_pcie_config_bar_index(config, base, &index, &high)) {
+		value = vmm_pcie_config_bar_read32(config, index, high);
+	} else {
+		value = vmm_pcie_config_read32(config->own_mut_bytes, base);
+	}
+	value >>= (offset - base) * 8U;
+	if (size == 1)
+		value &= 0xffU;
+	else if (size == 2)
+		value &= 0xffffU;
+	*valuep = value;
+	return 0;
+}
+
+static uint32_t
+vmm_pcie_config_read32(const uint8_t *bytes, unsigned int offset)
+{
+
+	return (uint32_t)bytes[offset] | ((uint32_t)bytes[offset + 1] << 8) |
+	    ((uint32_t)bytes[offset + 2] << 16) |
+	    ((uint32_t)bytes[offset + 3] << 24);
+}
+
+static void
+vmm_pcie_config_write16(uint8_t *bytes, unsigned int offset, uint16_t value)
+{
+
+	bytes[offset] = (uint8_t)value;
+	bytes[offset + 1] = (uint8_t)(value >> 8);
+}
+
+static void
+vmm_pcie_config_write32(uint8_t *bytes, unsigned int offset, uint32_t value)
+{
+
+	bytes[offset] = (uint8_t)value;
+	bytes[offset + 1] = (uint8_t)(value >> 8);
+	bytes[offset + 2] = (uint8_t)(value >> 16);
+	bytes[offset + 3] = (uint8_t)(value >> 24);
+}
+
+static int
+vmm_pcie_config_bar_index(const struct vmm_pcie_config *config,
+    unsigned int offset, unsigned int *indexp, int *highp)
+{
+	unsigned int index;
+
+	if (offset < VMM_PCI_BAR0 || offset >= VMM_PCI_BAR0 +
+	    VMM_PCIE_ABI_MAX_BARS * sizeof(uint32_t))
+		return 0;
+	index = (offset - VMM_PCI_BAR0) / sizeof(uint32_t);
+	if (config->imm_bar_size[index] != 0) {
+		*indexp = index;
+		*highp = 0;
+		return 1;
+	}
+	if (index == 0 || config->imm_bar_size[index - 1] == 0 ||
+	    (config->imm_bar_flags[index - 1] &
+	    VMM_PCIE_ABI_BAR_F_64BIT) == 0)
+		return 0;
+	*indexp = index - 1;
+	*highp = 1;
+	return 1;
+}
+
+static uint32_t
+vmm_pcie_config_bar_read32(const struct vmm_pcie_config *config,
+    unsigned int index, int high)
+{
+	uint32_t value;
+
+	value = vmm_pcie_config_read32(config->own_mut_bytes,
+	    VMM_PCI_BAR0 + index * sizeof(uint32_t));
+	if (!config->mut_bar_probe[index]) {
+		if (high)
+			return vmm_pcie_config_read32(config->own_mut_bytes,
+			    VMM_PCI_BAR0 + (index + 1) * sizeof(uint32_t));
+		return value;
+	}
+	if (high)
+		return (uint32_t)(~(config->imm_bar_size[index] - 1) >> 32);
+	return ((uint32_t)~(config->imm_bar_size[index] - 1) &
+	    ~VMM_PCI_BAR_ATTRIBUTE_MASK) |
+	    (value & VMM_PCI_BAR_ATTRIBUTE_MASK);
+}
+
+static void
+vmm_pcie_config_write_bar(struct vmm_pcie_config *config,
+    unsigned int offset, int size, uint64_t value)
+{
+	unsigned int base;
+	unsigned int index;
+	uint32_t mask;
+	uint32_t old;
+	uint32_t next;
+	int high;
+
+	base = offset & ~(unsigned int)(sizeof(uint32_t) - 1);
+	if (!vmm_pcie_config_bar_index(config, base, &index, &high))
+		return;
+	if (size == 4 && offset == base && (uint32_t)value == 0xffffffffU) {
+		config->mut_bar_probe[index] = 1;
+		return;
+	}
+	config->mut_bar_probe[index] = 0;
+	if (high) {
+		old = vmm_pcie_config_read32(config->own_mut_bytes, base);
+	} else {
+		old = vmm_pcie_config_read32(config->own_mut_bytes,
+		    VMM_PCI_BAR0 + index * sizeof(uint32_t));
+	}
+	mask = size == 4 ? 0xffffffffU :
+	    ((1U << (size * 8U)) - 1U) << ((offset - base) * 8U);
+	next = (old & ~mask) | (((uint32_t)value <<
+	    ((offset - base) * 8U)) & mask);
+	if (!high)
+		next = (next & ~VMM_PCI_BAR_ATTRIBUTE_MASK) |
+		    (old & VMM_PCI_BAR_ATTRIBUTE_MASK);
+	vmm_pcie_config_write32(config->own_mut_bytes,
+	    high ? base : VMM_PCI_BAR0 + index * sizeof(uint32_t), next);
+}
+
+static void
+vmm_pcie_config_write_command(struct vmm_pcie_config *config,
+    unsigned int offset, int size, uint64_t value)
+{
+	uint32_t mask;
+	uint32_t old;
+	uint32_t next;
+
+	old = vmm_pcie_config_read32(config->own_mut_bytes, VMM_PCI_COMMAND);
+	mask = size == 4 ? 0xffffffffU :
+	    ((1U << (size * 8U)) - 1U) << ((offset - VMM_PCI_COMMAND) * 8U);
+	next = (old & ~mask) | (((uint32_t)value <<
+	    ((offset - VMM_PCI_COMMAND) * 8U)) & mask);
+	next = (old & ~(uint32_t)VMM_PCI_COMMAND_VALID) |
+	    (next & VMM_PCI_COMMAND_VALID);
+	next |= (uint32_t)VMM_PCI_STATUS_CAP_LIST << 16;
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_COMMAND, next);
+}

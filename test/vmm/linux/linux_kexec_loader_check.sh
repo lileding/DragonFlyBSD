@@ -101,6 +101,7 @@ make_synth_kernel()
 check_linux_boot_data()
 {
 	case_label=$1
+	mem_size=$2
 
 	[ "$(hex_at "$MEM_FILE" $((0x70000)) 8)" = "5253442050545220" ] ||
 	    fail "missing RSDP signature in $case_label case"
@@ -112,6 +113,8 @@ check_linux_boot_data()
 	    fail "missing MADT signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70500)) 4)" = "48504554" ] ||
 	    fail "missing HPET signature in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70800)) 4)" = "4d434647" ] ||
+	    fail "missing MCFG signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600)) 4)" = "44534454" ] ||
 	    fail "missing DSDT signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70200 + 244)) 12)" = \
@@ -127,8 +130,17 @@ check_linux_boot_data()
 	    fail "FADT reset GAS missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70200 + 128)) 1)" = "01" ] ||
 	    fail "FADT reset value missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "a5000000" ] ||
-	    fail "DSDT S5/COM1/RTC table length missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70100 + 60)) 8)" = \
+	    "0008070000000000" ] ||
+	    fail "XSDT MCFG entry missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70800 + 44)) 8)" = \
+	    "000000e000000000" ] ||
+	    fail "MCFG ECAM base missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70800 + 52)) 8)" = \
+	    "0000000000000000" ] ||
+	    fail "MCFG segment/bus range missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "ef000000" ] ||
+	    fail "DSDT PCI root table length missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 36)) 12)" = \
 	    "085f53355f1206020a050a05" ] ||
 	    fail "DSDT S5 package missing in $case_label case"
@@ -142,6 +154,12 @@ check_linux_boot_data()
 	    fail "DSDT RTC io resource missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 160)) 3)" = "220001" ] ||
 	    fail "DSDT RTC IRQ8 resource missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 165)) 15)" = \
+	    "1049045f53425f5b82410450434930" ] ||
+	    fail "DSDT PCI0 AML scope missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 180)) 12)" = \
+	    "085f4849440c41d00a08085f" ] ||
+	    fail "DSDT PCI0 PNP0A08 HID missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
 	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
@@ -153,11 +171,25 @@ check_linux_boot_data()
 	    fail "MADT COM1 interrupt override missing in $case_label case"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 20 "$case_label RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 36 "$case_label extended RSDP"
-	check_zero_sum "$MEM_FILE" $((0x70100)) 60 "$case_label XSDT"
+	check_zero_sum "$MEM_FILE" $((0x70100)) 68 "$case_label XSDT"
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
 	check_zero_sum "$MEM_FILE" $((0x70400)) 74 "$case_label MADT"
 	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
-	check_zero_sum "$MEM_FILE" $((0x70600)) 165 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x70600)) 239 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x70800)) 60 "$case_label MCFG"
+	if [ "$mem_size" = 4G ]; then
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x1e8)) 1)" = "07" ] ||
+		    fail "e820 ECAM split count missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 4 * 20)) 20)" = \
+		    "00001000000000000000f0df0000000001000000" ] ||
+		    fail "e820 pre-ECAM RAM missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 5 * 20)) 20)" = \
+		    "000000e000000000000010000000000002000000" ] ||
+		    fail "e820 ECAM reservation missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 6 * 20)) 20)" = \
+		    "000010e0000000000000f01f0000000001000000" ] ||
+		    fail "e820 post-ECAM RAM missing in $case_label case"
+	fi
 }
 
 check_tsc_manifest()
@@ -186,9 +218,10 @@ run_loader_case()
 	kernel=$1
 	label=$2
 	time_arg=$3
+	mem_size=$4
 
 	rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
-	run truncate -s "$MEM_SIZE" "$MEM_FILE"
+	run truncate -s "$mem_size" "$MEM_FILE"
 	run truncate -s "$MANIFEST_SIZE" "$MANIFEST_FILE"
 	if [ -n "$INITRAMFS" ]; then
 		[ -f "$INITRAMFS" ] || fail "missing LINUX_INITRAMFS=$INITRAMFS"
@@ -201,7 +234,7 @@ run_loader_case()
 		    4<>"$MANIFEST_FILE"
 	fi
 	run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
-	check_linux_boot_data "$label"
+	check_linux_boot_data "$label" "$mem_size"
 	check_tsc_manifest "$time_arg"
 	say "PASS: Linux kexec loader $label case"
 }
@@ -214,11 +247,14 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$REPO/test/vmm/manifest/manifest_file_check.c" -o "$PARSER"
 
 make_synth_kernel
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-host" "tsc_hz=host"
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-scaled" "tsc_hz=1000000000"
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-host" "tsc_hz=host" \
+	"$MEM_SIZE"
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-scaled" "tsc_hz=1000000000" \
+	"$MEM_SIZE"
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-ecam-hole" "tsc_hz=host" 4G
 
 if [ -f "$KERNEL" ]; then
-	run_loader_case "$KERNEL" "real-image" "tsc_hz=host"
+	run_loader_case "$KERNEL" "real-image" "tsc_hz=host" "$MEM_SIZE"
 else
 	say "SKIP: missing LINUX_KERNEL=$KERNEL; real-image case not run"
 fi
