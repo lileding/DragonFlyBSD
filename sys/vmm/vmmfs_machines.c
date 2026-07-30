@@ -284,10 +284,15 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	}
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	error = vmmfs_device_return_owner_locked(vmp, &m->machine);
+	if (error != 0) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vrele(vp);
+		return error;
+	}
 	KKASSERT(m->vm_in_tree != 0);
 	m->vm_in_tree = 0;
 	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-	vmmfs_device_return_owner_locked(vmp, &m->machine);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);

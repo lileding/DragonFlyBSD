@@ -10,16 +10,14 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
+#include "vmm_pcie_bar.h"
+#include "vmm_pcie_abi.h"
+
 #define VMM_DEVICE_NAME_MAX	63
 
 struct vmm_pcie;
 struct vmm_pcie_root;
-
-enum vmm_device_state {
-	VMM_DEVICE_NEW,
-	VMM_DEVICE_REGISTERED,
-	VMM_DEVICE_FAILED,
-};
+struct vmm_pcie_user;
 
 struct vmm_device {
 	/* The fabric token_registry protects every mut_ field below. */
@@ -27,9 +25,20 @@ struct vmm_device {
 	size_t			imm_name_len;
 	uint64_t		imm_id;
 	struct vmm_pcie		*borrow_imm_pcie;
-	struct vmm_pcie_root	*borrow_mut_consumer;
+	struct vmm_pcie_root	*borrow_mut_root;
+	struct vmm_pcie_user	*borrow_mut_provider;
+	struct vmm_pcie_user	*borrow_mut_offload;
 	uint32_t		mut_bdf;
-	enum vmm_device_state	mut_state;
+	uint64_t		mut_attachment_generation;
+	uint16_t		mut_vendor_id;
+	uint16_t		mut_device_id;
+	uint16_t		mut_subsystem_vendor_id;
+	uint16_t		mut_subsystem_device_id;
+	uint32_t		mut_class_code;
+	uint16_t		mut_msix_vectors;
+	uint8_t			mut_revision;
+	int			mut_registered;
+	struct vmm_pcie_bar	own_mut_bars[VMM_PCIE_ABI_MAX_BARS];
 	RB_ENTRY(vmm_device)	own_mut_registry_entry;
 };
 

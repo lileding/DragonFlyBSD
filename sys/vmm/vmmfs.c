@@ -40,6 +40,7 @@
 #include "vmm_domain.h"
 #include "vmm_loader.h"
 #include "vmm_machine.h"
+#include "vmm_pcie_bar.h"
 #include "vmm_vcpu.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
@@ -709,6 +710,11 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EBUSY;
 	}
+	error = vmm_pcie_begin_shutdown(&vmp->own_mut_pcie);
+	if (error != 0) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return error;
+	}
 	vmp->vm_closing = 1;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
@@ -719,6 +725,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 		vmp->vm_closing = 0;
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmm_pcie_cancel_shutdown(&vmp->own_mut_pcie);
 		return error;
 	}
 
@@ -809,6 +816,10 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	}
 	if (vmm_loader_mmap_active()) {
 		kprintf("vmm klog: vfs_uninit loader mmap active\n");
+		return EBUSY;
+	}
+	if (vmm_pcie_bar_mmap_active()) {
+		kprintf("vmm klog: vfs_uninit vPCIe BAR capability active\n");
 		return EBUSY;
 	}
 	vmm_domain_uninit();

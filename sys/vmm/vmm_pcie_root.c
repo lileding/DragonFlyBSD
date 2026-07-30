@@ -6,6 +6,7 @@
 #include <sys/types.h>
 
 #include "vmm_pcie_abi.h"
+#include "vmm_pcie.h"
 #include "vmm_pcie_root.h"
 
 void
@@ -14,6 +15,7 @@ vmm_pcie_root_init(struct vmm_pcie_root *root, struct vmm_pcie *pcie,
 {
 	root->borrow_imm_pcie = pcie;
 	root->borrow_imm_machine = machine;
+	root->imm_id = vmm_pcie_root_id_alloc(pcie);
 	root->mut_bdf_mask = VMM_PCIE_ROOT_BDF_RESERVED;
 }
 
@@ -22,6 +24,7 @@ vmm_pcie_root_uninit(struct vmm_pcie_root *root)
 {
 	root->borrow_imm_pcie = 0;
 	root->borrow_imm_machine = 0;
+	root->imm_id = 0;
 	root->mut_bdf_mask = 0;
 }
 

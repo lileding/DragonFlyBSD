@@ -29,7 +29,8 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_HOST_INO		0x10000
 #define VMMFS_HOST_DEV_INO	0x10001
 #define VMMFS_DEVROOT_INO	0x10002
-#define VMMFS_DEV_INO_BASE	0x20000	/* device i -> base + i */
+#define VMMFS_DEV_INO_BASE	0x20000	/* device i -> base + i * stride */
+#define VMMFS_DEV_INO_STRIDE	16	/* device directory plus fixed leaf files */
 #define VMMFS_DEVLINK_INO_BASE	0x30000	/* device i symlink -> base + i */
 
 #define VMMFS_DIR_MODE		0555
@@ -99,6 +100,8 @@ DECLARE_CLASS(vmmfs_base_class);		/* fallback commons (vmmfs_vnode.c) */
 DECLARE_CLASS(vmmfs_root_class);		/* root dir       (vmmfs.c) */
 DECLARE_CLASS(vmmfs_device_class);	/* device file    (vmmfs_device.c) */
 DECLARE_CLASS(vmmfs_devlink_class);	/* device symlink (vmmfs_device.c) */
+DECLARE_CLASS(vmmfs_device_session_class); /* provider/consumer socket */
+DECLARE_CLASS(vmmfs_device_info_class); /* state/BDF snapshot */
 DECLARE_CLASS(vmmfs_machine_class);	/* a machine dir  (vmmfs_machine.c) */
 DECLARE_CLASS(vmmfs_machines_class);	/* machines/      (vmmfs_machines.c) */
 DECLARE_CLASS(vmmfs_host_class);		/* machines/host/ (vmmfs_host.c) */

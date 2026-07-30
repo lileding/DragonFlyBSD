@@ -20,9 +20,9 @@ vmm_device_init(struct vmm_device *device, const char *name, int nlen,
 	device->imm_name_len = (size_t)nlen;
 	device->imm_id = id;
 	device->borrow_imm_pcie = pcie;
-	device->borrow_mut_consumer = consumer;
+	device->borrow_mut_root = consumer;
 	device->mut_bdf = bdf;
-	device->mut_state = VMM_DEVICE_NEW;
+	device->mut_attachment_generation = 1;
 }
 
 void
@@ -32,9 +32,19 @@ vmm_device_uninit(struct vmm_device *device)
 	device->imm_name_len = 0;
 	device->imm_id = 0;
 	device->borrow_imm_pcie = 0;
-	device->borrow_mut_consumer = 0;
+	device->borrow_mut_root = 0;
+	device->borrow_mut_provider = 0;
+	device->borrow_mut_offload = 0;
 	device->mut_bdf = 0;
-	device->mut_state = VMM_DEVICE_NEW;
+	device->mut_attachment_generation = 0;
+	device->mut_vendor_id = 0;
+	device->mut_device_id = 0;
+	device->mut_subsystem_vendor_id = 0;
+	device->mut_subsystem_device_id = 0;
+	device->mut_class_code = 0;
+	device->mut_msix_vectors = 0;
+	device->mut_revision = 0;
+	device->mut_registered = 0;
 }
 
 int

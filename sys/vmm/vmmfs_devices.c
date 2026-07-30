@@ -67,7 +67,7 @@ vmmfs_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 	lockmgr(&vmp->vm_lock, LK_SHARED);
 	i = 0;
 	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
-		if (!vmm_pcie_device_attached_to(&d->own_mut_device, consumer))
+		if (!vmm_pcie_device_at_root(&d->own_mut_device, consumer))
 			continue;
 		if (i++ < (int)off - 2)
 			continue;
@@ -113,10 +113,7 @@ vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	    ncp->nc_nlen, &d->own_mut_device);
 	if (error == 0) {
 		idx = (ino_t)vmp->vm_next_dev++;
-		vmmfs_node_init(&d->node, &vmmfs_device_class, VDIR,
-		    VMMFS_DIR_MODE, VMMFS_DEV_INO_BASE + idx, dnode, NULL);
-		vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
-		    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
+		vmmfs_device_init(d, dnode, vmp, idx);
 		SLIST_INSERT_HEAD(&vmp->vm_device_views, d, dv_view_link);
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -136,8 +133,7 @@ vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 		    &d->own_mut_device);
 		KKASSERT(error == 0);
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vmmfs_node_uninit(&d->node);
-		vmmfs_node_uninit(&d->link);
+		vmmfs_device_uninit(d);
 		kfree(d, M_VMMFS);
 		return alloc_error;
 	}
@@ -183,8 +179,7 @@ vmmfs_devices_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	vmmfs_node_revoke(&d->link);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
-	vmmfs_node_uninit(&d->node);
-	vmmfs_node_uninit(&d->link);
+	vmmfs_device_uninit(d);
 	kfree(d, M_VMMFS);
 	return 0;
 }
