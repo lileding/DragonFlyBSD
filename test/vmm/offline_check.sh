@@ -20,4 +20,5 @@ run sh "$ROOT/test/vmm/revoke/loader_revoke_compile_check.sh"
 run sh "$ROOT/test/vmm/smoke/smoke_loader_check.sh"
 run sh "$ROOT/test/vmm/nuttx/rtos_nuttx_loader_check.sh"
 run sh "$ROOT/test/vmm/linux/linux_kexec_loader_check.sh"
+run sh "$ROOT/test/vmm/pcie/vmm_pcie_abi_check.sh"
 printf '%s\n' 'PASS: vmm offline checks'
