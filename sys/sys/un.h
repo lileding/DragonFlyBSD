@@ -56,6 +56,7 @@ struct sockaddr_un {
 #endif
 
 #ifdef _KERNEL
+struct file;
 struct mbuf;
 struct socket;
 union netmsg;
@@ -66,6 +67,8 @@ void	uipc_ctloutput(union netmsg *msg);
 int	unp_connect2(struct socket *so, struct socket *so2, struct ucred *cred);
 void	unp_dispose(struct mbuf *m);
 int	unp_externalize(struct mbuf *rights, int flags);
+int	kern_sendmsg_rights(struct socket *so, const void *data, size_t len,
+	    struct file *const *files, size_t nfiles, int flags);
 void	unp_init(void);
 extern	struct pr_usrreqs uipc_usrreqs;
 #else /* !_KERNEL */

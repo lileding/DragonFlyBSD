@@ -104,6 +104,9 @@
 /* For unp_internalize() and unp_externalize() */
 CTASSERT(sizeof(struct file *) >= sizeof(int));
 
+/* Internal marker for control mbufs built by kern_sendmsg_rights(). */
+#define M_UNP_KERN_RIGHTS	M_PROTO8
+
 #define UNP_ISATTACHED(unp)	\
     ((unp) != NULL && ((unp)->unp_flags & UNP_DETACHED) == 0)
 
@@ -163,6 +166,7 @@ static void    unp_scan (struct mbuf *, void (*)(struct file *, void *),
 				void *data);
 static void    unp_discard (struct file *, void *);
 static int     unp_internalize (struct mbuf *, struct thread *);
+static int     unp_internalize_kernel (struct mbuf *);
 static int     unp_listen (struct unpcb *, struct thread *);
 static void    unp_fp_externalize(struct lwp *lp, struct file *fp, int fd,
 		   int flags);
@@ -600,6 +604,63 @@ done:
 
 /* pru_rcvoob is EOPNOTSUPP */
 
+/*
+ * Send a kernel-owned payload and file capabilities through a synchronous
+ * local-domain socket.  The caller retains a valid reference to every file
+ * until this function returns.  The receiver gets new fd numbers only when
+ * it performs recvmsg(), through the normal SCM_RIGHTS externalize path.
+ */
+int
+kern_sendmsg_rights(struct socket *so, const void *data, size_t len,
+	struct file *const *files, size_t nfiles, int flags)
+{
+	struct iovec iov;
+	struct uio uio;
+	struct mbuf *control;
+	size_t maxfiles;
+	size_t i;
+
+	if (so == NULL || (data == NULL && len != 0) || files == NULL ||
+	    nfiles == 0) {
+		return EINVAL;
+	}
+	if (so->so_proto == NULL || so->so_proto->pr_domain == NULL ||
+	    so->so_proto->pr_domain->dom_family != AF_LOCAL ||
+	    (so->so_proto->pr_flags & (PR_RIGHTS | PR_SYNC_PORT)) !=
+	    (PR_RIGHTS | PR_SYNC_PORT) ||
+	    (so->so_proto->pr_flags & PR_ASYNC_SEND) != 0) {
+		return EOPNOTSUPP;
+	}
+
+	maxfiles = (MCLBYTES - CMSG_SPACE(0)) / sizeof(*files);
+	if (nfiles > maxfiles)
+		return E2BIG;
+	for (i = 0; i < nfiles; ++i) {
+		if (files[i] == NULL)
+			return EINVAL;
+		if (files[i]->f_type == DTYPE_KQUEUE)
+			return EOPNOTSUPP;
+	}
+
+	control = sbcreatecontrol(files, nfiles * sizeof(*files), SCM_RIGHTS,
+	    SOL_SOCKET);
+	if (control == NULL)
+		return ENOBUFS;
+	control->m_flags |= M_UNP_KERN_RIGHTS;
+
+	iov.iov_base = __DECONST(void *, data);
+	iov.iov_len = len;
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = 0;
+	uio.uio_resid = len;
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_rw = UIO_WRITE;
+	uio.uio_td = curthread;
+
+	return sosend(so, NULL, &uio, NULL, control, flags, curthread);
+}
+
 static void
 uipc_send(netmsg_t msg)
 {
@@ -633,8 +694,14 @@ uipc_send(netmsg_t msg)
 
 	wakeup_start_delayed();
 
-	if (control && (error = unp_internalize(control, msg->send.nm_td)))
-		goto release;
+	if (control) {
+		if (control->m_flags & M_UNP_KERN_RIGHTS)
+			error = unp_internalize_kernel(control);
+		else
+			error = unp_internalize(control, msg->send.nm_td);
+		if (error)
+			goto release;
+	}
 
 	switch (so->so_type) {
 	case SOCK_DGRAM:
@@ -1828,6 +1895,48 @@ done:
 	spin_unlock_shared(&fdescp->fd_spin);
 	lwkt_reltoken(&unp_rights_token);
 	return error;
+}
+
+static int
+unp_internalize_kernel(struct mbuf *control)
+{
+	struct cmsghdr *cm;
+	struct file **files;
+	size_t nfiles;
+	size_t i;
+
+	if ((control->m_flags & M_UNP_KERN_RIGHTS) == 0 ||
+	    control->m_type != MT_CONTROL || control->m_next != NULL ||
+	    control->m_len < sizeof(*cm)) {
+		return EINVAL;
+	}
+	cm = mtod(control, struct cmsghdr *);
+	if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS ||
+	    cm->cmsg_len < CMSG_LEN(0) || cm->cmsg_len > control->m_len ||
+	    (cm->cmsg_len - CMSG_LEN(0)) % sizeof(*files) != 0) {
+		return EINVAL;
+	}
+
+	nfiles = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(*files);
+	if (nfiles == 0 || control->m_len != CMSG_SPACE(nfiles * sizeof(*files)))
+		return EINVAL;
+
+	files = (struct file **)CMSG_DATA(cm);
+	for (i = 0; i < nfiles; ++i) {
+		if (files[i] == NULL)
+			return EINVAL;
+		if (files[i]->f_type == DTYPE_KQUEUE)
+			return EOPNOTSUPP;
+	}
+
+	control->m_flags &= ~M_UNP_KERN_RIGHTS;
+	lwkt_gettoken(&unp_rights_token);
+	for (i = 0; i < nfiles; ++i) {
+		fhold(files[i]);
+		unp_add_right(files[i]);
+	}
+	lwkt_reltoken(&unp_rights_token);
+	return 0;
 }
 
 #ifdef UNP_GC_ALLFILES
