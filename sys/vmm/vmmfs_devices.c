@@ -1,11 +1,9 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The devices/ collections.  NDEVICES is a machine's (or the host's) devices/
- * directory: it lists the PCIe devices bound to that owner and supports mv
- * (rebind, desired state) and rm (unbind).  NDEVROOT is the flat /vmm/devices/
- * index of symlinks to every device's current owner.  Both draw from the
- * (stub) per-mount device pool.
+ * vmmfs presentation of vPCIe consumers.  This layer only translates
+ * directory operations into vmm_pcie calls; BDF allocation and attachment
+ * lifetime are core-fabric responsibilities.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -21,11 +19,12 @@
 #include <sys/kobj.h>
 
 #include "vmm_machine.h"
+#include "vmm_pcie.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
 #include "vmmfs_node_if.h"
 
-/* ---- machines/<name>/devices/ and machines/host/devices/ (NDEVICES) ---- */
+/* ---- machines/<name>/devices/ and machines/host/devices/ ---- */
 
 static int
 vmmfs_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
@@ -33,11 +32,13 @@ vmmfs_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *child = NULL;
+	struct vmmfs_node *child;
 	struct vmmfs_device *d;
 
+	child = NULL;
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name, ncp->nc_nlen);
+	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name,
+	    ncp->nc_nlen);
 	if (d != NULL)
 		child = &d->node;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -49,44 +50,106 @@ vmmfs_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
+	struct vmmfs_device *d;
+	struct vmm_pcie_root *consumer;
 	off_t off;
-	int full, error, i;
+	int error;
+	int full;
+	int i;
 
 	error = vmmfs_readdir_dots(ap, node, &off, &full);
 	if (error || full)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
+	consumer = node->vn_machine != NULL ?
+	    &node->vn_machine->machine.own_mut_pcie_root :
+	    vmm_pcie_host_root(&vmp->own_mut_pcie);
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	{
-		struct vmmfs_device *d;
-		int skip = (int)off - 2;
-
-		i = 0;
-		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-			if (!vmm_device_owned_by(&d->dev,
-			    VMMFS_CORE_MACHINE_OF(node->vn_machine)))
-				continue;
-			if (i++ < skip)
-				continue;
-			if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_REG,
-			    (uint16_t)strlen(d->dev.bdf), d->dev.bdf)) {
-				full = 1;
-				break;
-			}
-			off++;
+	i = 0;
+	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
+		if (!vmm_pcie_device_attached_to(&d->own_mut_device, consumer))
+			continue;
+		if (i++ < (int)off - 2)
+			continue;
+		if (vop_write_dirent(&error, uio, d->node.vn_ino, DT_DIR,
+		    (uint16_t)d->own_mut_device.imm_name_len,
+		    d->own_mut_device.imm_name)) {
+			full = 1;
+			break;
 		}
+		off++;
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
 
-/*
- * `rm <name>/devices/<dev>` unbinds a device: a host device returns to the host
- * pool, a user backend is unloaded.  The host pool itself is fixed.
- */
+/* A provider starts at the host root.  P2 adds its directory leaves. */
 static int
-vmmfs_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
+vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_device *d;
+	struct vnode *vp;
+	ino_t idx;
+	int alloc_error;
+	int error;
+
+	if (dnode->vn_machine != NULL)
+		return EPERM;
+	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMM_DEVICE_NAME_MAX)
+		return ENAMETOOLONG;
+	d = kmalloc(sizeof(*d), M_VMMFS, M_WAITOK | M_ZERO);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	if (vmp->vm_closing) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		kfree(d, M_VMMFS);
+		return EBUSY;
+	}
+	error = vmm_pcie_device_create(&vmp->own_mut_pcie,
+	    vmm_pcie_host_root(&vmp->own_mut_pcie), ncp->nc_name,
+	    ncp->nc_nlen, &d->own_mut_device);
+	if (error == 0) {
+		idx = (ino_t)vmp->vm_next_dev++;
+		vmmfs_node_init(&d->node, &vmmfs_device_class, VDIR,
+		    VMMFS_DIR_MODE, VMMFS_DEV_INO_BASE + idx, dnode, NULL);
+		vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
+		    VMMFS_DEVLINK_INO_BASE + idx, &vmp->vm_devroot, NULL);
+		SLIST_INSERT_HEAD(&vmp->vm_device_views, d, dv_view_link);
+	}
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	if (error != 0) {
+		kfree(d, M_VMMFS);
+		return error;
+	}
+
+	error = vmmfs_alloc_vp(dvp->v_mount, &d->node,
+	    LK_EXCLUSIVE | LK_RETRY, &vp);
+	if (error != 0) {
+		alloc_error = error;
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		SLIST_REMOVE(&vmp->vm_device_views, d, vmmfs_device,
+		    dv_view_link);
+		error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
+		    &d->own_mut_device);
+		KKASSERT(error == 0);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_node_uninit(&d->node);
+		vmmfs_node_uninit(&d->link);
+		kfree(d, M_VMMFS);
+		return alloc_error;
+	}
+	*ap->a_vpp = vp;
+	cache_setunresolved(ap->a_nch);
+	cache_setvp(ap->a_nch, vp);
+	return 0;
+}
+
+/* A P1 function has no children and may be deleted only before registration. */
+static int
+vmmfs_devices_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 {
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_dvp->v_mount);
 	struct namecache *ncp = ap->a_nch->ncp;
@@ -94,35 +157,31 @@ vmmfs_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	struct vnode *vp;
 	int error;
 
-	if (dnode->vn_machine == NULL)
-		return EPERM;
-
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
-	if (error)
+	if (error != 0)
 		return error;
 	vn_unlock(vp);
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name, ncp->nc_nlen);
+	d = vmmfs_find_device(vmp, dnode->vn_machine, ncp->nc_name,
+	    ncp->nc_nlen);
 	if (d == NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
 		return ENOENT;
 	}
-	if (d->dev.is_host) {
-		vmm_device_unbind(&d->dev);	/* back to host pool */
+	error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
+	    &d->own_mut_device);
+	if (error != 0) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		cache_unlink(ap->a_nch);
 		vrele(vp);
-		return 0;
+		return error;
 	}
-	/*
-	 * A user backend is unloaded: drop it from the pool and free it.  (Real
-	 * backends that can be held open will need the machine-style refcount.)
-	 */
-	SLIST_REMOVE(&vmp->vm_devs, d, vmmfs_device, dv_link);
+	SLIST_REMOVE(&vmp->vm_device_views, d, vmmfs_device, dv_view_link);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	cache_unlink(ap->a_nch);
+
+	vmmfs_node_revoke(&d->link);
+	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	vmmfs_node_uninit(&d->node);
 	vmmfs_node_uninit(&d->link);
@@ -130,11 +189,7 @@ vmmfs_devices_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	return 0;
 }
 
-/*
- * `mv <devices>/<dev> <devices>/` rebinds a device to another owner.  Both ends
- * must be devices/ directories and the BDF name is preserved; cp is impossible
- * (devices/ rejects file creation).  Desired-state semantics.
- */
+/* mv is a consumer attachment change.  A function name is immutable. */
 static int
 vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 {
@@ -143,13 +198,15 @@ vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 	struct vmmfs_node *tdnode = VP_TO_VMMFS(ap->a_tdvp);
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(ap->a_fdvp->v_mount);
 	struct vmmfs_device *d;
+	struct vmm_pcie_root *consumer;
+	int error;
 
 	if (!VMMFS_NODE_IS(fdnode, vmmfs_devices_class) ||
 	    !VMMFS_NODE_IS(tdnode, vmmfs_devices_class))
 		return EXDEV;
 	if (fncp->nc_nlen != tncp->nc_nlen ||
 	    bcmp(fncp->nc_name, tncp->nc_name, fncp->nc_nlen) != 0)
-		return EINVAL;	/* a device keeps its BDF name */
+		return EINVAL;
 
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	d = vmmfs_find_device(vmp, fdnode->vn_machine, fncp->nc_name,
@@ -158,18 +215,16 @@ vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return ENOENT;
 	}
-	if (fdnode->vn_machine == tdnode->vn_machine) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return 0;	/* no-op rebind */
-	}
-	if (vmmfs_find_device(vmp, tdnode->vn_machine, tncp->nc_name,
-	    tncp->nc_nlen) != NULL) {
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		return EEXIST;
-	}
-	vmm_device_bind(&d->dev, VMMFS_CORE_MACHINE_OF(tdnode->vn_machine));
+	consumer = tdnode->vn_machine != NULL ?
+	    &tdnode->vn_machine->machine.own_mut_pcie_root :
+	    vmm_pcie_host_root(&vmp->own_mut_pcie);
+	error = vmm_pcie_device_move(&vmp->own_mut_pcie,
+	    &d->own_mut_device, consumer);
+	if (error == 0)
+		d->node.vn_parent = tdnode;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
-
+	if (error != 0)
+		return error;
 	cache_rename(ap->a_fnch, ap->a_tnch);
 	return 0;
 }
@@ -177,7 +232,8 @@ vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 static kobj_method_t vmmfs_devices_methods[] = {
 	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_devices_nresolve),
 	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_devices_readdir),
-	KOBJMETHOD(vmmfs_node_nremove,		vmmfs_devices_nremove),
+	KOBJMETHOD(vmmfs_node_nmkdir,		vmmfs_devices_nmkdir),
+	KOBJMETHOD(vmmfs_node_nrmdir,		vmmfs_devices_nrmdir),
 	KOBJMETHOD(vmmfs_node_nrename,		vmmfs_devices_nrename),
 	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
 	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
@@ -192,7 +248,7 @@ static kobj_method_t vmmfs_devices_methods[] = {
 };
 DEFINE_CLASS(vmmfs_devices, vmmfs_devices_methods, 0);
 
-/* ---- /vmm/devices/ symlink index (NDEVROOT) ---- */
+/* ---- /vmm/devices/ symlink index ---- */
 
 static int
 vmmfs_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
@@ -200,10 +256,11 @@ vmmfs_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *child = NULL;
+	struct vmmfs_node *child;
 	struct vmmfs_device *d;
 
 	(void)dnode;
+	child = NULL;
 	lockmgr(&vmp->vm_lock, LK_SHARED);
 	d = vmmfs_find_device_any(vmp, ncp->nc_name, ncp->nc_nlen);
 	if (d != NULL)
@@ -217,29 +274,28 @@ vmmfs_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 {
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
+	struct vmmfs_device *d;
 	off_t off;
-	int full, error, i;
+	int error;
+	int full;
+	int i;
 
 	error = vmmfs_readdir_dots(ap, node, &off, &full);
 	if (error || full)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
 	lockmgr(&vmp->vm_lock, LK_SHARED);
-	{
-		struct vmmfs_device *d;
-		int skip = (int)off - 2;
-
-		i = 0;
-		SLIST_FOREACH(d, &vmp->vm_devs, dv_link) {
-			if (i++ < skip)
-				continue;
-			if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
-			    (uint16_t)strlen(d->dev.bdf), d->dev.bdf)) {
-				full = 1;
-				break;
-			}
-			off++;
+	i = 0;
+	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
+		if (i++ < (int)off - 2)
+			continue;
+		if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
+		    (uint16_t)d->own_mut_device.imm_name_len,
+		    d->own_mut_device.imm_name)) {
+			full = 1;
+			break;
 		}
+		off++;
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 out:

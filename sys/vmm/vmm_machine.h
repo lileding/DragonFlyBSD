@@ -15,6 +15,7 @@
 #include "vmm_console.h"
 #include "vmm_loader.h"
 #include "vmm_mem.h"
+#include "vmm_pcie_root.h"
 #include "vmm_vcpu.h"
 
 #define VMM_EVENT_LOG_SIZE (64 * 1024)
@@ -23,6 +24,7 @@ struct ucred;
 struct taskqueue;
 struct vmm_launch;
 struct vmm_machine_task;
+struct vmm_pcie;
 
 typedef void (*vmm_machine_func)(const struct vmm_machine_task *task);
 
@@ -40,6 +42,7 @@ struct vmm_machine {
 	struct lwkt_token token_events;
 	struct vmm_vcpu own_mut_vcpu;
 	struct vmm_mem own_mut_mem;
+	struct vmm_pcie_root own_mut_pcie_root;
 	struct vmm_console own_mut_console;
 	struct taskqueue *own_mut_taskqueue;
 	/* Owned only by the serialized taskqueue after loader acceptance. */
@@ -66,7 +69,7 @@ enum vmm_close_action {
 };
 
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
-void vmm_machine_init(struct vmm_machine *m);
+void vmm_machine_init(struct vmm_machine *m, struct vmm_pcie *pcie);
 void vmm_machine_uninit(struct vmm_machine *m);
 void vmm_machine_drain(struct vmm_machine *m);
 void vmm_debug_trace(const char *fmt, ...);

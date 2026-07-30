@@ -21,6 +21,7 @@
 
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
+#include "vmm_pcie.h"
 
 static int vmm_debug_trace_enabled;
 int vmm_debug_allow_machine_taskqueue = 1;
@@ -143,7 +144,7 @@ vmm_machine_logf(struct vmm_machine *m, const char *fmt, ...)
 }
 
 void
-vmm_machine_init(struct vmm_machine *m)
+vmm_machine_init(struct vmm_machine *m, struct vmm_pcie *pcie)
 {
 	kprintf("vmm klog: core_machine_init memset begin m=%p\n", m);
 	memset(m, 0, sizeof(*m));
@@ -151,6 +152,7 @@ vmm_machine_init(struct vmm_machine *m)
 	lwkt_token_init(&m->token_config, "vmmcfg");
 	kprintf("vmm klog: core_machine_init token_events begin m=%p\n", m);
 	lwkt_token_init(&m->token_events, "vmmev");
+	vmm_pcie_root_init(&m->own_mut_pcie_root, pcie, m);
 	m->imm_events_cap = VMM_EVENT_LOG_SIZE;
 	m->own_mut_events_buf = kmalloc(m->imm_events_cap, M_TEMP,
 	    M_WAITOK | M_ZERO);
@@ -210,6 +212,7 @@ vmm_machine_uninit(struct vmm_machine *m)
 		m->own_mut_boot_launch = NULL;
 	}
 	vmm_console_detach(&m->own_mut_console);
+	vmm_pcie_root_uninit(&m->own_mut_pcie_root);
 	if (m->own_mut_taskqueue != NULL) {
 		kprintf("vmm klog: core_machine_uninit taskqueue_free begin m=%p tq=%p\n",
 		    m, m->own_mut_taskqueue);

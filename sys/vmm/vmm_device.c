@@ -1,70 +1,53 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * PCIe passthrough device core -- see vmm_device.h.
+ * PCIe function object -- see vmm_device.h.
  */
 #include <sys/types.h>
-#include <sys/systm.h>
 
 #include "vmm_device.h"
 
 void
-vmm_device_init(struct vmm_device *d, const char *bdf, int is_host)
+vmm_device_init(struct vmm_device *device, const char *name, int nlen,
+    uint64_t id, struct vmm_pcie *pcie, struct vmm_pcie_root *consumer,
+    uint32_t bdf)
 {
-	size_t i = 0;
+	int i;
 
-	while (bdf[i] != '\0' && i < VMM_BDF_MAX) {
-		d->bdf[i] = bdf[i];
-		i++;
-	}
-	d->bdf[i] = '\0';
-	d->owner = NULL;
-	d->is_host = is_host;
+	for (i = 0; i < nlen; i++)
+		device->imm_name[i] = name[i];
+	device->imm_name[nlen] = '\0';
+	device->imm_name_len = (size_t)nlen;
+	device->imm_id = id;
+	device->borrow_imm_pcie = pcie;
+	device->borrow_mut_consumer = consumer;
+	device->mut_bdf = bdf;
+	device->mut_state = VMM_DEVICE_NEW;
 }
 
 void
-vmm_device_bind(struct vmm_device *d, struct vmm_machine *owner)
+vmm_device_uninit(struct vmm_device *device)
 {
-	d->owner = owner;
-}
-
-void
-vmm_device_unbind(struct vmm_device *d)
-{
-	d->owner = NULL;
-}
-
-int
-vmm_device_owned_by(const struct vmm_device *d, const struct vmm_machine *m)
-{
-	return d->owner == m;
+	device->imm_name[0] = '\0';
+	device->imm_name_len = 0;
+	device->imm_id = 0;
+	device->borrow_imm_pcie = 0;
+	device->borrow_mut_consumer = 0;
+	device->mut_bdf = 0;
+	device->mut_state = VMM_DEVICE_NEW;
 }
 
 int
-vmm_device_bdf_eq(const struct vmm_device *d, const char *name, size_t nlen)
+vmm_device_name_eq(const struct vmm_device *device, const char *name,
+    int nlen)
 {
-	size_t i;
+	int i;
 
-	for (i = 0; i < nlen; i++) {
-		if (d->bdf[i] == '\0' || d->bdf[i] != name[i])
-			return 0;
-	}
-	return d->bdf[nlen] == '\0';
-}
-
-size_t
-vmm_device_format(const struct vmm_device *d, char *out, size_t cap)
-{
-	size_t i = 0;
-
-	while (d->bdf[i] != '\0') {
-		if (i + 1 >= cap)	/* leave room for '\n' */
-			return 0;
-		out[i] = d->bdf[i];
-		i++;
-	}
-	if (i + 1 > cap)
+	if (name == 0 || nlen < 0 || (size_t)nlen != device->imm_name_len)
 		return 0;
-	out[i++] = '\n';
-	return i;
+	for (i = 0; i < nlen; i++) {
+		if (device->imm_name[i] != name[i])
+			return 0;
+	}
+	return 1;
 }

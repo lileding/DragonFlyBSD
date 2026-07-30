@@ -90,8 +90,6 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
 	return d->present == NULL || d->present(&m->machine);
 }
 
-static void vmmfs_machine_revoke_node(struct vmmfs_node *node);
-
 /*
  * Allocate a machine and wire up its nodes with fresh inos.  Only the inode
  * range reservation runs under vm_lock; vmm_machine_init() starts a taskqueue
@@ -123,7 +121,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 	kprintf("vmm klog: machine_create machine_init begin m=%p machine=%p\n",
 	    m, &m->machine);
-	vmm_machine_init(&m->machine);
+	vmm_machine_init(&m->machine, &vmp->own_mut_pcie);
 	kprintf("vmm klog: machine_create machine_init done m=%p machine=%p\n",
 	    m, &m->machine);
 	vmm_console_attach(&m->machine.own_mut_console, m->name, &m->machine);
@@ -152,9 +150,9 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 	kprintf("vmm klog: machine_free begin m=%p machine=%p\n", m,
 	    &m->machine);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++)
-		vmmfs_machine_revoke_node(cfg_node(m, &vmmfs_cfg_table[j]));
-	vmmfs_machine_revoke_node(&m->vn_devices);
-	vmmfs_machine_revoke_node(&m->node);
+		vmmfs_node_revoke(cfg_node(m, &vmmfs_cfg_table[j]));
+	vmmfs_node_revoke(&m->vn_devices);
+	vmmfs_node_revoke(&m->node);
 	vmm_machine_uninit(&m->machine);
 	kprintf("vmm klog: machine_free machine_uninit done m=%p\n", m);
 	vmmfs_node_uninit(&m->node);
@@ -163,43 +161,6 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 	vmmfs_node_uninit(&m->vn_devices);
 	kprintf("vmm klog: machine_free kfree m=%p\n", m);
 	kfree(m, M_VMMFS);
-}
-
-static void
-vmmfs_machine_revoke_node(struct vmmfs_node *node)
-{
-	struct vnode *vp;
-
-	vmmfs_obuf_drain(node);
-
-	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
-	vp = node->vn_vnode;
-	if (vp != NULL)
-		vhold(vp);
-	lockmgr(&node->vn_interlock, LK_RELEASE);
-	if (vp == NULL)
-		return;
-
-	if (vget(vp, LK_EXCLUSIVE | LK_RETRY) != 0) {
-		vdrop(vp);
-		return;
-	}
-	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
-	if (node->vn_vnode != vp) {
-		lockmgr(&node->vn_interlock, LK_RELEASE);
-		vput(vp);
-		vdrop(vp);
-		return;
-	}
-	lockmgr(&node->vn_interlock, LK_RELEASE);
-	vn_unlock(vp);
-
-	(void)vrevoke(vp, proc0.p_ucred);
-	vx_get(vp);
-	vgone_vxlocked(vp);
-	vx_put(vp);
-	vrele(vp);
-	vdrop(vp);
 }
 
 /* --------------------------------------------------------------------- */

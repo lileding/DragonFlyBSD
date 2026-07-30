@@ -1,36 +1,43 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * A PCIe passthrough device: a bus/device/function identity that is either in
- * the host pool (owner == NULL) or bound to a guest VM.
- * FS presentation: vmmfs_device.c.
- *
- * owner is a pointer to the core VM (struct vmm_machine), never the fs slot --
- * that one-way dependency is what keeps this header reusable by kvm.ko.
- *
- * Types (size_t) come from the includer.
+ * One vPCIe function.  PCIe fabric ownership and attachment live in
+ * vmm_pcie.c; vmmfs only presents this core object.
  */
 #ifndef VMM_DEVICE_H
 #define VMM_DEVICE_H
 
-#define VMM_BDF_MAX	31
+#include <sys/tree.h>
+#include <sys/types.h>
 
-struct vmm_machine;		/* owner pointer only; no layout dependency */
+#define VMM_DEVICE_NAME_MAX	63
 
-struct vmm_device {
-	char			bdf[VMM_BDF_MAX + 1];
-	struct vmm_machine     *owner;		/* bound VM, or NULL = host pool */
-	int			is_host;	/* host device (rm returns it) vs user backend */
+struct vmm_pcie;
+struct vmm_pcie_root;
+
+enum vmm_device_state {
+	VMM_DEVICE_NEW,
+	VMM_DEVICE_REGISTERED,
+	VMM_DEVICE_FAILED,
 };
 
-/* Initialize: copy the bdf (truncated to VMM_BDF_MAX), unbound. */
-void	vmm_device_init(struct vmm_device *d, const char *bdf, int is_host);
-void	vmm_device_bind(struct vmm_device *d, struct vmm_machine *owner);
-void	vmm_device_unbind(struct vmm_device *d);
-int	vmm_device_owned_by(const struct vmm_device *d, const struct vmm_machine *m);
-/* True if the bdf equals name[0..nlen) exactly. */
-int	vmm_device_bdf_eq(const struct vmm_device *d, const char *name, size_t nlen);
-/* Serialize the "<bdf>\n" line; bytes written (0 if it does not fit). */
-size_t	vmm_device_format(const struct vmm_device *d, char *out, size_t cap);
+struct vmm_device {
+	/* The fabric token_registry protects every mut_ field below. */
+	char			imm_name[VMM_DEVICE_NAME_MAX + 1];
+	size_t			imm_name_len;
+	uint64_t		imm_id;
+	struct vmm_pcie		*borrow_imm_pcie;
+	struct vmm_pcie_root	*borrow_mut_consumer;
+	uint32_t		mut_bdf;
+	enum vmm_device_state	mut_state;
+	RB_ENTRY(vmm_device)	own_mut_registry_entry;
+};
+
+void	vmm_device_init(struct vmm_device *device, const char *name, int nlen,
+	    uint64_t id, struct vmm_pcie *pcie, struct vmm_pcie_root *consumer,
+	    uint32_t bdf);
+void	vmm_device_uninit(struct vmm_device *device);
+int	vmm_device_name_eq(const struct vmm_device *device, const char *name,
+	    int nlen);
 
 #endif /* VMM_DEVICE_H */

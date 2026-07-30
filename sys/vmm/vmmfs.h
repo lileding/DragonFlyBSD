@@ -11,6 +11,8 @@
 #ifndef VMMFS_H
 #define VMMFS_H
 
+#include "vmm_pcie.h"
+
 MALLOC_DECLARE(M_VMMFS);
 
 /*
@@ -65,7 +67,6 @@ struct vmmfs_node {
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
-SLIST_HEAD(vmmfs_devlist, vmmfs_device);
 RB_HEAD(vmmfs_machtree, vmmfs_machine);
 
 struct vmmfs_mount {
@@ -77,8 +78,9 @@ struct vmmfs_mount {
 	struct vmmfs_node	vm_devroot;	/* /dev/vmm/devices/ symlink index */
 	struct lock		vm_lock;
 	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
+	struct vmm_pcie	own_mut_pcie;	/* core PCIe fabric and host root */
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
-	struct vmmfs_devlist	vm_devs;	/* PCIe device pool (fs nodes) */
+	SLIST_HEAD(, vmmfs_device) vm_device_views; /* VFS views, not registry */
 	int			vm_machine_count; /* machines pending final cleanup */
 	int			vm_closing;	/* unmount has blocked new machines */
 	int			vm_next_dev;	/* monotonic device ino index */
@@ -164,6 +166,7 @@ void	vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class,
 	    enum vtype vtype, mode_t mode, ino_t ino, struct vmmfs_node *parent,
 	    struct vmmfs_machine *machine);
 void	vmmfs_node_uninit(struct vmmfs_node *node);
+void	vmmfs_node_revoke(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
 int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,

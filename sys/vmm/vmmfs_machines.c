@@ -247,7 +247,6 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_devlist tofree = SLIST_HEAD_INITIALIZER(tofree);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
 	int error;
@@ -288,10 +287,9 @@ vmmfs_machines_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	KKASSERT(m->vm_in_tree != 0);
 	m->vm_in_tree = 0;
 	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-	vmmfs_device_unbind_owner_locked(vmp, &m->machine, &tofree);
+	vmmfs_device_return_owner_locked(vmp, &m->machine);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	vmmfs_device_free_list(&tofree);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
 	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,

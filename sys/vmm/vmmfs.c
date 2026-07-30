@@ -28,6 +28,7 @@
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
+#include <sys/proc.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
 #include <sys/dirent.h>
@@ -238,6 +239,44 @@ vmmfs_node_uninit(struct vmmfs_node *node)
 {
 	vmmfs_obuf_drain(node);
 	lockuninit(&node->vn_interlock);
+}
+
+/* Revoke all namecache aliases before the owning vmmfs object is released. */
+void
+vmmfs_node_revoke(struct vmmfs_node *node)
+{
+	struct vnode *vp;
+
+	vmmfs_obuf_drain(node);
+
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	vp = node->vn_vnode;
+	if (vp != NULL)
+		vhold(vp);
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	if (vp == NULL)
+		return;
+
+	if (vget(vp, LK_EXCLUSIVE | LK_RETRY) != 0) {
+		vdrop(vp);
+		return;
+	}
+	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	if (node->vn_vnode != vp) {
+		lockmgr(&node->vn_interlock, LK_RELEASE);
+		vput(vp);
+		vdrop(vp);
+		return;
+	}
+	lockmgr(&node->vn_interlock, LK_RELEASE);
+	vn_unlock(vp);
+
+	(void)vrevoke(vp, proc0.p_ucred);
+	vx_get(vp);
+	vgone_vxlocked(vp);
+	vx_put(vp);
+	vrele(vp);
+	vdrop(vp);
 }
 
 ino_t
@@ -616,6 +655,7 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmp->vm_mp = mp;
 	kprintf("vmm klog: mount node init vmp=%p\n", vmp);
 	lockinit(&vmp->vm_lock, "vmmfs registry", 0, 0);
+	vmm_pcie_init(&vmp->own_mut_pcie);
 	vmmfs_node_init(&vmp->vm_root, &vmmfs_root_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_ROOT_INO, NULL, NULL);
 	vmmfs_node_init(&vmp->vm_machines, &vmmfs_machines_class, VDIR,
@@ -628,11 +668,8 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	    VMMFS_DIR_MODE, VMMFS_DEVROOT_INO, &vmp->vm_root, NULL);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
-	SLIST_INIT(&vmp->vm_devs);
+	SLIST_INIT(&vmp->vm_device_views);
 	vmp->vm_next_dev = 0;
-	kprintf("vmm klog: mount host pool begin vmp=%p\n", vmp);
-	vmmfs_device_init_host_pool(vmp);
-	kprintf("vmm klog: mount host pool done vmp=%p\n", vmp);
 
 	mp->mnt_flag |= MNT_LOCAL;
 	mp->mnt_kern_flag |= MNTK_ALL_MPSAFE;
@@ -686,6 +723,7 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 	}
 
 	vmmfs_device_destroy_all(vmp);
+	vmm_pcie_uninit(&vmp->own_mut_pcie);
 	vmmfs_node_uninit(&vmp->vm_devroot);
 	vmmfs_node_uninit(&vmp->vm_host_devices);
 	vmmfs_node_uninit(&vmp->vm_host);
