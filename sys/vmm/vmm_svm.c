@@ -5294,8 +5294,8 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 }
 
 static int
-vmm_svm_handle_pcie_ecam_mmio(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint64_t gpa)
+vmm_svm_handle_pcie_mmio(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint64_t gpa, int bar)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -5412,8 +5412,12 @@ vmm_svm_handle_pcie_ecam_mmio(struct vmm_svm_backend *svm,
 			value = vmm_svm_gpr_read(svm, reg);
 		off += modsz;
 	}
-	if (vmm_pcie_ecam_access(&svm->borrow_imm_machine->own_mut_pcie_root,
-	    gpa, write, access_size, &value) != 0)
+	if ((!bar && vmm_pcie_ecam_access(
+	    &svm->borrow_imm_machine->own_mut_pcie_root, gpa, write,
+	    access_size, &value) != 0) ||
+	    (bar && vmm_pcie_root_bar_access(
+	    &svm->borrow_imm_machine->own_mut_pcie_root, gpa, write,
+	    access_size, &value) != 0))
 		goto fail;
 	if (write)
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
@@ -5423,16 +5427,18 @@ vmm_svm_handle_pcie_ecam_mmio(struct vmm_svm_backend *svm,
 	if (vmm_svm_trace_enabled &&
 	    ((gpa - VMM_PCIE_ECAM_BASE) & 0xfffULL) == 0) {
 		vmm_machine_logf(svm->borrow_imm_machine,
-		    "svm vcpu%u pcie ecam %s gpa=0x%jx size=%d val=0x%jx",
-		    vc->imm_id, write ? "write" : "read", (uintmax_t)gpa,
+		    "svm vcpu%u pcie %s %s gpa=0x%jx size=%d val=0x%jx",
+		    vc->imm_id, bar ? "bar" : "ecam", write ? "write" : "read",
+		    (uintmax_t)gpa,
 		    access_size, (uintmax_t)value);
 	}
 	vmcb->state.rip += off;
 	return 1;
 fail:
 	vmm_machine_logf(svm->borrow_imm_machine,
-	    "svm vcpu%u unsupported pcie ecam mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
-	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
+	    "svm vcpu%u unsupported pcie %s mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
+	    vc->imm_id, bar ? "bar" : "ecam", (uintmax_t)gpa,
+	    (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
 	return 0;
 }
@@ -5454,7 +5460,7 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		return vmm_svm_handle_ioapic_mmio(svm, vc, gpa);
 	if (gpa >= VMM_PCIE_ECAM_BASE &&
 	    gpa < VMM_PCIE_ECAM_BASE + VMM_PCIE_ECAM_SIZE)
-		return vmm_svm_handle_pcie_ecam_mmio(svm, vc, gpa);
+		return vmm_svm_handle_pcie_mmio(svm, vc, gpa, 0);
 	if (vmcb->ctrl.exitinfo1 & PGEX_W)
 		prot = VM_PROT_WRITE;
 	else if (vmcb->ctrl.exitinfo1 & PGEX_I)
@@ -5470,6 +5476,8 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		return 1;
 	}
+	if (error == EAGAIN)
+		return vmm_svm_handle_pcie_mmio(svm, vc, gpa, 1);
 	if (error != ENOENT)
 		return 0;
 	error = vmm_mem_fault_gpa(&m->own_mut_mem, gpa, prot);

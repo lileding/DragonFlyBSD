@@ -45,6 +45,9 @@ struct vmm_device {
 	int			mut_registered;
 	struct vmm_pcie_config	*own_mut_config;
 	struct vmm_pcie_bar	own_mut_bars[VMM_PCIE_ABI_MAX_BARS];
+	struct vmm_pcie_abi_bar_range
+			own_mut_bar_range[VMM_PCIE_ABI_MAX_BAR_RANGES];
+	unsigned int		mut_bar_range_count;
 	uint64_t		mut_bar_gpa[VMM_PCIE_ABI_MAX_BARS];
 	RB_ENTRY(vmm_device)	own_mut_registry_entry;
 };

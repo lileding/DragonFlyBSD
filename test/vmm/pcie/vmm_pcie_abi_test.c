@@ -41,7 +41,11 @@ build_register(struct vmm_pcie_abi_register *message)
 	message->le_msix_vectors = htole16(1);
 	message->bar[0].le_size = htole64(VMM_PCIE_ABI_PAGE_SIZE);
 	message->bar[0].le_flags = htole32(VMM_PCIE_ABI_BAR_F_MEMORY |
-	    VMM_PCIE_ABI_BAR_F_64BIT | VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT);
+	    VMM_PCIE_ABI_BAR_F_64BIT);
+	message->bar_range_count = 1;
+	message->bar_range[0].le_size = htole64(VMM_PCIE_ABI_PAGE_SIZE);
+	message->bar_range[0].le_flags = htole32(
+	    VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
 }
 
 static void
@@ -81,6 +85,31 @@ main(void)
 	struct vmm_pcie_abi_msix msix_message;
 	struct vmm_pcie_abi_failure failure_message;
 	struct vmm_pcie_abi_bar_cap bar_cap_message;
+	struct vmm_pcie_abi_mmio mmio_message;
+
+	build_register(&register_message);
+	register_message.bar_range_count = 0;
+	expect_result("register range required", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.bar_range[0].le_flags = htole32(
+	    VMM_PCIE_ABI_BAR_RANGE_F_DIRECT |
+	    VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
+	expect_result("register range mode", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.bar_range[0].le_size = htole64(
+	    VMM_PCIE_ABI_PAGE_SIZE / 2);
+	expect_result("register range alignment", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.bar_range[0].le_offset = htole64(
+	    VMM_PCIE_ABI_PAGE_SIZE);
+	expect_result("register range coverage", &register_message,
+	    sizeof(register_message), EINVAL);
 
 	build_register(&register_message);
 	expect_result("valid register", &register_message,
@@ -339,9 +368,11 @@ main(void)
 	build_register(&register_message);
 	register_message.le_msix_vectors = htole16(VMM_PCIE_ABI_MAX_MSIX_VECTORS);
 	register_message.bar[0].le_size = htole64(0x8000);
+	register_message.bar_range[0].le_size = htole64(0x8000);
 	expect_result("msix table does not fit bar", &register_message,
 	    sizeof(register_message), EINVAL);
 	register_message.bar[0].le_size = htole64(0x10000);
+	register_message.bar_range[0].le_size = htole64(0x10000);
 	expect_result("max msix table fits bar", &register_message,
 	    sizeof(register_message), 0);
 
@@ -375,6 +406,30 @@ main(void)
 	bar_cap_message.le_bar_index = htole32(VMM_PCIE_ABI_MAX_BARS);
 	expect_result("bar capability index", &bar_cap_message,
 	    sizeof(bar_cap_message), EINVAL);
+
+	memset(&mmio_message, 0, sizeof(mmio_message));
+	packet_init(&mmio_message.header, VMM_PCIE_ABI_MSG_MMIO_REQUEST,
+	    sizeof(mmio_message), VMM_PCIE_ABI_MMIO_F_WRITE);
+	mmio_message.le_device_id = htole64(1);
+	mmio_message.le_attachment_generation = htole64(2);
+	mmio_message.le_request_id = htole64(3);
+	mmio_message.le_size = htole32(4);
+	expect_result("valid mmio request", &mmio_message,
+	    sizeof(mmio_message), 0);
+
+	mmio_message.le_error = htole32(EIO);
+	expect_result("mmio request error", &mmio_message,
+	    sizeof(mmio_message), EINVAL);
+
+	packet_init(&mmio_message.header, VMM_PCIE_ABI_MSG_MMIO_RESPONSE,
+	    sizeof(mmio_message), 0);
+	mmio_message.le_device_id = htole64(1);
+	mmio_message.le_attachment_generation = htole64(2);
+	mmio_message.le_request_id = htole64(3);
+	mmio_message.le_size = htole32(4);
+	mmio_message.le_error = htole32(EIO);
+	expect_result("valid mmio response", &mmio_message,
+	    sizeof(mmio_message), 0);
 
 	return 0;
 }

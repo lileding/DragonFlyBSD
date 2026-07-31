@@ -50,8 +50,4 @@ vmmfs_node_if.h: vmmfs_node_if.m dragonfly
 # CFLAGS, wiping any CFLAGS+= set earlier).
 COPTS+=	-fno-asynchronous-unwind-tables
 COPTS+=	-fno-unwind-tables
-# virtiod and vmm share one fixed public ABI header in the active sibling
-# nvkm source tree; kmod.mk otherwise exposes only this out-of-tree module.
-COPTS+=	-I${.CURDIR}/../../../nvkm/sys
-
 .include <bsd.kmod.mk>

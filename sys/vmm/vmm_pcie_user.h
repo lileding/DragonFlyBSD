@@ -6,6 +6,8 @@
 #ifndef VMM_PCIE_USER_H
 #define VMM_PCIE_USER_H
 
+#include <sys/types.h>
+
 struct socket;
 struct ucred;
 struct vmm_device;
@@ -32,5 +34,9 @@ int	vmm_pcie_user_send_start(struct vmm_pcie_user *user,
 	    const struct vmm_pcie_abi_start *message);
 int	vmm_pcie_user_send_stop(struct vmm_pcie_user *user,
 	    const struct vmm_pcie_abi_stop *message);
+int	vmm_pcie_user_mmio_access(struct vmm_pcie_user *user,
+	    uint64_t device_id, uint64_t attachment_generation,
+	    unsigned int bar_index, uint64_t offset, int write, int size,
+	    uint64_t *valuep);
 
 #endif /* VMM_PCIE_USER_H */

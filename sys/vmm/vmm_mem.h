@@ -80,7 +80,7 @@ int	vmm_mem_dma_snapshot(struct vmm_mem *m, struct vmspace **vmspacep,
 	    unsigned int *range_countp);
 /* Insert or remove a non-RAM object in the current run vmspace at a fixed GPA. */
 int	vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
-	    struct vm_object *object);
+	    struct vm_object *object, uint64_t object_offset);
 void	vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size);
 /*
  * Called only by an active vCPU backend; memory detach waits for all vCPUs to

@@ -84,6 +84,8 @@ void	vmm_pcie_root_bar_mappings_unmap(struct vmm_pcie_root *root,
 	    const struct vmm_pcie_bar_mapping *mappings);
 int	vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa,
 	    int prot);
+int	vmm_pcie_root_bar_access(struct vmm_pcie_root *root, uint64_t gpa,
+	    int write, int size, uint64_t *valuep);
 void	vmm_pcie_root_start(struct vmm_pcie_root *root,
     struct vmm_dma *dma);
 void	vmm_pcie_root_stop(struct vmm_pcie_root *root);

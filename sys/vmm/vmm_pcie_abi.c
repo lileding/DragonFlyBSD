@@ -13,6 +13,9 @@ static int	vmm_pcie_abi_bar_valid(const struct vmm_pcie_abi_bar *bar,
 		    unsigned int index, int companion);
 static int	vmm_pcie_abi_bar_cap_valid(
 		    const struct vmm_pcie_abi_bar_cap *message);
+static int	vmm_pcie_abi_bar_range_valid(
+		    const struct vmm_pcie_abi_bar_range *range,
+		    const struct vmm_pcie_abi_register *message);
 static int	vmm_pcie_abi_consumer_ready_valid(
 		    const struct vmm_pcie_abi_consumer_ready *message);
 static int	vmm_pcie_abi_failure_valid(
@@ -22,6 +25,8 @@ static int	vmm_pcie_abi_header_valid(
 		    size_t size, uint32_t allowed_flags);
 static int	vmm_pcie_abi_msix_valid(
 		    const struct vmm_pcie_abi_msix *message);
+static int	vmm_pcie_abi_mmio_valid(
+		    const struct vmm_pcie_abi_mmio *message, uint16_t type);
 static int	vmm_pcie_abi_register_valid(
 		    const struct vmm_pcie_abi_register *message);
 static int	vmm_pcie_abi_registered_valid(
@@ -84,9 +89,41 @@ vmm_pcie_abi_validate(const void *message, size_t size)
 		if (size != sizeof(struct vmm_pcie_abi_bar_cap))
 			return EINVAL;
 		return vmm_pcie_abi_bar_cap_valid(message);
+	case VMM_PCIE_ABI_MSG_MMIO_REQUEST:
+		if (size != sizeof(struct vmm_pcie_abi_mmio))
+			return EINVAL;
+		return vmm_pcie_abi_mmio_valid(message, type);
+	case VMM_PCIE_ABI_MSG_MMIO_RESPONSE:
+		if (size != sizeof(struct vmm_pcie_abi_mmio))
+			return EINVAL;
+		return vmm_pcie_abi_mmio_valid(message, type);
 	default:
 		return EINVAL;
 	}
+}
+
+static int
+vmm_pcie_abi_bar_range_valid(const struct vmm_pcie_abi_bar_range *range,
+    const struct vmm_pcie_abi_register *message)
+{
+	uint64_t offset;
+	uint64_t size;
+	uint64_t bar_size;
+	uint32_t bar_index;
+	uint32_t flags;
+
+	offset = le64toh(range->le_offset);
+	size = le64toh(range->le_size);
+	bar_index = le32toh(range->le_bar_index);
+	flags = le32toh(range->le_flags);
+	if (bar_index >= VMM_PCIE_ABI_MAX_BARS || size == 0 ||
+	    (offset & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
+	    (size & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
+	    (flags != VMM_PCIE_ABI_BAR_RANGE_F_DIRECT &&
+	    flags != VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED))
+		return 0;
+	bar_size = le64toh(message->bar[bar_index].le_size);
+	return bar_size != 0 && offset < bar_size && size <= bar_size - offset;
 }
 
 static int
@@ -205,6 +242,33 @@ vmm_pcie_abi_msix_valid(const struct vmm_pcie_abi_msix *message)
 }
 
 static int
+vmm_pcie_abi_mmio_valid(const struct vmm_pcie_abi_mmio *message,
+    uint16_t type)
+{
+	uint32_t flags;
+	uint32_t size;
+
+	flags = le32toh(message->header.le_flags);
+	size = le32toh(message->le_size);
+	if (!vmm_pcie_abi_header_valid(&message->header, type, sizeof(*message),
+	    VMM_PCIE_ABI_MMIO_F_WRITE) ||
+	    le64toh(message->le_device_id) == 0 ||
+	    le64toh(message->le_attachment_generation) == 0 ||
+	    le64toh(message->le_request_id) == 0 ||
+	    le32toh(message->le_bar_index) >= VMM_PCIE_ABI_MAX_BARS ||
+	    (size != 1 && size != 2 && size != 4) ||
+	    message->le_reserved != 0)
+		return EINVAL;
+	if (type == VMM_PCIE_ABI_MSG_MMIO_REQUEST &&
+	    le32toh(message->le_error) != 0)
+		return EINVAL;
+	if (type == VMM_PCIE_ABI_MSG_MMIO_RESPONSE && flags != 0 &&
+	    flags != VMM_PCIE_ABI_MMIO_F_WRITE)
+		return EINVAL;
+	return 0;
+}
+
+static int
 vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 {
 	uint64_t bar0_size;
@@ -214,6 +278,7 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 	unsigned int i;
 	unsigned int j;
 	unsigned int vendor_cap_count;
+	unsigned int bar_range_count;
 	int companion;
 
 	if (!vmm_pcie_abi_header_valid(&message->header,
@@ -245,8 +310,7 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 	    message->le_parent_generation != 0) {
 		return EINVAL;
 	}
-	if (message->reserved1[0] != 0 || message->reserved1[1] != 0 ||
-	    message->reserved1[2] != 0)
+	if (message->reserved1[0] != 0 || message->reserved1[1] != 0)
 		return EINVAL;
 	vendor_cap_count = message->vendor_cap_count;
 	if (vendor_cap_count > VMM_PCIE_ABI_MAX_VENDOR_CAPS)
@@ -272,6 +336,33 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 				return EINVAL;
 		}
 	}
+	bar_range_count = message->bar_range_count;
+	if (bar_range_count == 0 || bar_range_count > VMM_PCIE_ABI_MAX_BAR_RANGES)
+		return EINVAL;
+	for (i = 0; i < VMM_PCIE_ABI_MAX_BAR_RANGES; i++) {
+		const struct vmm_pcie_abi_bar_range *range;
+
+		range = &message->bar_range[i];
+		if (i >= bar_range_count) {
+			if (range->le_offset != 0 || range->le_size != 0 ||
+			    range->le_bar_index != 0 || range->le_flags != 0)
+				return EINVAL;
+			continue;
+		}
+		if (!vmm_pcie_abi_bar_range_valid(range, message))
+			return EINVAL;
+		for (j = 0; j < i; j++) {
+			const struct vmm_pcie_abi_bar_range *prior;
+
+			prior = &message->bar_range[j];
+			if (le32toh(prior->le_bar_index) ==
+			    le32toh(range->le_bar_index) &&
+			    vmm_pcie_abi_range_overlaps(le64toh(prior->le_offset),
+			    le64toh(prior->le_size), le64toh(range->le_offset),
+			    le64toh(range->le_size)))
+				return EINVAL;
+		}
+	}
 	companion = 0;
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
 		if (!vmm_pcie_abi_bar_valid(&message->bar[i], i, companion))
@@ -279,6 +370,25 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 		companion = !companion &&
 		    (le32toh(message->bar[i].le_flags) &
 		    VMM_PCIE_ABI_BAR_F_64BIT) != 0;
+	}
+	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
+		uint64_t covered;
+
+		bar0_size = le64toh(message->bar[i].le_size);
+		if (bar0_size == 0)
+			continue;
+		covered = 0;
+		for (j = 0; j < bar_range_count; j++) {
+			const struct vmm_pcie_abi_bar_range *range;
+
+			range = &message->bar_range[j];
+			if (le32toh(range->le_bar_index) != i ||
+			    le64toh(range->le_offset) != covered)
+				continue;
+			covered += le64toh(range->le_size);
+		}
+		if (covered != bar0_size)
+			return EINVAL;
 	}
 	return 0;
 }

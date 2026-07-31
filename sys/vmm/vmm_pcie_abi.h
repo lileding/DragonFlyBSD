@@ -1,13 +1,12 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The public vPCIe ABI is shared with /sbin/virtiod in the DragonFly base
- * source tree.  Keep this compatibility wrapper so existing vmm sources can
- * retain their local include spelling.
+ * The public vPCIe ABI is published by dfvmm for its in-tree providers.
+ * Keep this wrapper so vmm sources can retain their local include spelling.
  */
 #ifndef VMM_PCIE_ABI_WRAPPER_H
 #define VMM_PCIE_ABI_WRAPPER_H
 
-#include <sys/vmm_pcie_abi.h>
+#include "../sys/vmm_pcie_abi.h"
 
 #endif /* VMM_PCIE_ABI_WRAPPER_H */

@@ -70,6 +70,9 @@ static void	vmm_pcie_device_runtime_release(
 		    struct vmm_pcie_device_runtime *runtime);
 static int	vmm_pcie_root_stop_pending_locked(
 		    struct vmm_pcie_root *root);
+static int	vmm_pcie_device_bar_range_flags_locked(
+		    const struct vmm_device *device, unsigned int bar_index,
+		    uint64_t offset, uint64_t size, uint32_t *flagsp);
 
 RB_GENERATE(vmm_pcie_device_tree, vmm_device, own_mut_registry_entry,
     vmm_pcie_device_cmp);
@@ -475,6 +478,9 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 		device->own_mut_bars[i] = bars[i];
 		__builtin_memset(&bars[i], 0, sizeof(bars[i]));
 	}
+	__builtin_memcpy(device->own_mut_bar_range, request->bar_range,
+	    sizeof(device->own_mut_bar_range));
+	device->mut_bar_range_count = request->bar_range_count;
 	device->own_mut_config = config;
 	config = NULL;
 	device->mut_vendor_id = le16toh(request->le_vendor_id);
@@ -810,9 +816,11 @@ vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa, int prot)
 	uint64_t bar_size;
 	uint64_t mapped_gpa;
 	uint64_t mapped_size;
+	uint64_t object_offset;
+	uint64_t object_size;
 	unsigned int bar_index;
 	uint32_t bdf;
-	int mapped;
+	uint32_t range_flags;
 	int mapped_now;
 	int error;
 
@@ -826,9 +834,10 @@ vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa, int prot)
 	bar_size = 0;
 	mapped_gpa = 0;
 	mapped_size = 0;
+	object_offset = 0;
+	object_size = 0;
 	bar_index = 0;
 	bdf = 0;
-	mapped = 0;
 	mapped_now = 0;
 	error = ENOENT;
 	lwkt_gettoken(&pcie->token_registry);
@@ -849,13 +858,22 @@ vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa, int prot)
 				error = EINVAL;
 				goto out;
 			}
+			error = vmm_pcie_device_bar_range_flags_locked(device, i,
+			    gpa - bar_gpa, 1, &range_flags);
+			if (error != 0)
+				goto out;
+			if (range_flags != VMM_PCIE_ABI_BAR_RANGE_F_DIRECT) {
+				error = EAGAIN;
+				goto out;
+			}
 			bar_index = i;
-			mapped = device->mut_bar_gpa[i] == bar_gpa;
-			if (!mapped)
-				error = vmm_pcie_bar_snapshot(&device->own_mut_bars[i],
-				    &object, &bar_size);
-			else
-				error = 0;
+			mapped_gpa = trunc_page(gpa);
+			mapped_size = PAGE_SIZE;
+			object_offset = mapped_gpa - bar_gpa;
+			error = vmm_pcie_bar_snapshot(&device->own_mut_bars[i],
+			    &object, &object_size);
+			if (error == 0 && object_size != bar_size)
+				error = EINVAL;
 			goto out;
 		}
 	}
@@ -863,34 +881,30 @@ out:
 	lwkt_reltoken(&pcie->token_registry);
 	if (error != 0)
 		return error;
-	if (!mapped) {
-		mapped_gpa = bar_gpa;
-		mapped_size = bar_size;
-		error = vmm_mem_map_object(&machine->own_mut_mem, bar_gpa,
-		    bar_size, object);
-		vm_object_deallocate(object);
-		if (error != 0)
-			return error;
-		lwkt_gettoken(&pcie->token_registry);
-		if (device->borrow_mut_root != root || !device->mut_registered ||
-		    device->own_mut_config == NULL ||
-		    vmm_pcie_config_bar_decode_locked(device->own_mut_config,
-		    bar_index, &bar_gpa, &bar_size) != 0 ||
-		    bar_gpa != mapped_gpa || bar_size != mapped_size ||
-		    device->mut_bar_gpa[bar_index] != 0) {
-			error = ENOENT;
-			} else {
-				device->mut_bar_gpa[bar_index] = bar_gpa;
-				bdf = device->mut_bdf;
-				mapped_now = 1;
-				error = 0;
-			}
-		lwkt_reltoken(&pcie->token_registry);
-		if (error != 0) {
-			vmm_mem_unmap_object(&machine->own_mut_mem, mapped_gpa,
-			    mapped_size);
-			return error;
-		}
+	error = vmm_mem_map_object(&machine->own_mut_mem, mapped_gpa,
+	    mapped_size, object, object_offset);
+	vm_object_deallocate(object);
+	if (error != 0 && error != EBUSY)
+		return error;
+	if (error == EBUSY)
+		error = 0;
+	lwkt_gettoken(&pcie->token_registry);
+	if (device->borrow_mut_root != root || !device->mut_registered ||
+	    device->own_mut_config == NULL ||
+	    vmm_pcie_config_bar_decode_locked(device->own_mut_config,
+	    bar_index, &bar_gpa, &bar_size) != 0 ||
+	    object_offset >= bar_size || mapped_size > bar_size - object_offset) {
+		error = ENOENT;
+	} else if (device->mut_bar_gpa[bar_index] == 0) {
+		device->mut_bar_gpa[bar_index] = bar_gpa;
+		bdf = device->mut_bdf;
+		mapped_now = 1;
+	}
+	lwkt_reltoken(&pcie->token_registry);
+	if (error != 0) {
+		vmm_mem_unmap_object(&machine->own_mut_mem, mapped_gpa,
+		    mapped_size);
+		return error;
 	}
 	if (mapped_now) {
 		vmm_machine_logf(machine,
@@ -898,6 +912,67 @@ out:
 		    bar_index, (uintmax_t)mapped_gpa, (uintmax_t)mapped_size);
 	}
 	return vmm_mem_fault_object_gpa(&machine->own_mut_mem, gpa, prot);
+}
+
+int
+vmm_pcie_root_bar_access(struct vmm_pcie_root *root, uint64_t gpa,
+    int write, int size, uint64_t *valuep)
+{
+	struct vmm_pcie_user *user;
+	struct vmm_device *device;
+	struct vmm_pcie *pcie;
+	uint64_t attachment_generation;
+	uint64_t bar_gpa;
+	uint64_t bar_size;
+	uint64_t offset;
+	unsigned int bar_index;
+	uint32_t range_flags;
+	int error;
+
+	if (root == NULL || root->borrow_imm_pcie == NULL || valuep == NULL ||
+	    (size != 1 && size != 2 && size != 4))
+		return EINVAL;
+	pcie = root->borrow_imm_pcie;
+	user = NULL;
+	attachment_generation = 0;
+	bar_index = 0;
+	offset = 0;
+	error = ENOENT;
+	lwkt_gettoken(&pcie->token_registry);
+	RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+		unsigned int i;
+
+		if (device->borrow_mut_root != root || !device->mut_registered ||
+		    device->own_mut_config == NULL ||
+		    device->borrow_mut_provider == NULL)
+			continue;
+		for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
+			if (vmm_pcie_config_bar_decode_locked(device->own_mut_config, i,
+			    &bar_gpa, &bar_size) != 0 || gpa < bar_gpa ||
+			    gpa - bar_gpa > bar_size || size > bar_size - (gpa - bar_gpa))
+				continue;
+			offset = gpa - bar_gpa;
+			error = vmm_pcie_device_bar_range_flags_locked(device, i,
+			    offset, size, &range_flags);
+			if (error != 0 || range_flags !=
+			    VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED)
+				goto out;
+			user = device->borrow_mut_provider;
+			vmm_pcie_user_hold(user);
+			attachment_generation = device->mut_attachment_generation;
+			bar_index = i;
+			error = 0;
+			goto out;
+		}
+	}
+out:
+	lwkt_reltoken(&pcie->token_registry);
+	if (error != 0)
+		return error;
+	error = vmm_pcie_user_mmio_access(user, device->imm_id,
+	    attachment_generation, bar_index, offset, write, size, valuep);
+	vmm_pcie_user_release(user);
+	return error;
 }
 
 void
@@ -1199,6 +1274,9 @@ vmm_pcie_device_clear_registered_locked(struct vmm_device *device,
 	}
 	*configp = device->own_mut_config;
 	device->own_mut_config = NULL;
+	__builtin_memset(device->own_mut_bar_range, 0,
+	    sizeof(device->own_mut_bar_range));
+	device->mut_bar_range_count = 0;
 	device->mut_vendor_id = 0;
 	device->mut_device_id = 0;
 	device->mut_subsystem_vendor_id = 0;
@@ -1258,6 +1336,37 @@ vmm_pcie_root_stop_pending_locked(struct vmm_pcie_root *root)
 			return 1;
 	}
 	return 0;
+}
+
+static int
+vmm_pcie_device_bar_range_flags_locked(const struct vmm_device *device,
+    unsigned int bar_index, uint64_t offset, uint64_t size,
+    uint32_t *flagsp)
+{
+	const struct vmm_pcie_abi_bar_range *range;
+	unsigned int i;
+
+	if (device == NULL || flagsp == NULL || size == 0 ||
+	    bar_index >= VMM_PCIE_ABI_MAX_BARS)
+		return EINVAL;
+	for (i = 0; i < device->mut_bar_range_count; i++) {
+		uint64_t range_offset;
+		uint64_t range_size;
+		uint64_t delta;
+
+		range = &device->own_mut_bar_range[i];
+		range_offset = le64toh(range->le_offset);
+		range_size = le64toh(range->le_size);
+		if (le32toh(range->le_bar_index) != bar_index ||
+		    offset < range_offset)
+			continue;
+		delta = offset - range_offset;
+		if (delta > range_size || size > range_size - delta)
+			continue;
+		*flagsp = le32toh(range->le_flags);
+		return 0;
+	}
+	return ENOENT;
 }
 
 static int

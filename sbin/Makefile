@@ -99,6 +99,7 @@ SUBDIR=	adjkerntz \
 	sysctl \
 	tcplay \
 	tunefs \
+	virtiod \
 	udevd \
 	umount \
 	usched \

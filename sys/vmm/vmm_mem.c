@@ -433,13 +433,14 @@ vmm_mem_dma_snapshot(struct vmm_mem *m, struct vmspace **vmspacep,
 #ifdef _KERNEL_VIRTUAL
 int
 vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
-    struct vm_object *object)
+    struct vm_object *object, uint64_t object_offset)
 {
 
 	(void)m;
 	(void)gpa;
 	(void)size;
 	(void)object;
+	(void)object_offset;
 	return EOPNOTSUPP;
 }
 
@@ -454,7 +455,7 @@ vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size)
 #else
 int
 vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
-    struct vm_object *object)
+    struct vm_object *object, uint64_t object_offset)
 {
 	struct vmm_mem_backing *b;
 	vm_map_t map;
@@ -464,6 +465,8 @@ vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
 
 	if (m == NULL || object == NULL || size == 0 ||
 	    gpa != trunc_page(gpa) || size != round_page64(size))
+		return EINVAL;
+	if (object_offset != trunc_page(object_offset))
 		return EINVAL;
 	b = m->own_mut_backing;
 	if (b == NULL || b->own_mut_run_vmspace == NULL ||
@@ -476,7 +479,7 @@ vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
 	/* vm_map_insert() consumes this reference on success. */
 	vmm_mem_object_ref(object);
 	vm_object_hold(object);
-	error = vm_map_insert(map, &count, object, NULL, 0, NULL, gpa,
+	error = vm_map_insert(map, &count, object, NULL, object_offset, NULL, gpa,
 	    gpa + size, VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot, 0);
 	vm_object_drop(object);
 	vm_map_unlock(map);
