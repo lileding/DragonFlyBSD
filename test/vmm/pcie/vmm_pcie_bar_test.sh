@@ -4,6 +4,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
+BASE_SYS=$(cd "$REPO/../nvkm/sys" && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-pcie-bar-vmm}
 VM=${VMM_MACHINE:-pciebar0}
@@ -195,7 +196,7 @@ run "$REPO/test/vmm/linux/linux_initrd_rootfs_build.sh"
 [ -f "$INITRD" ] || fail "missing $INITRD"
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	"$REPO/test/vmm/linux/linux_kexec_loader.c" -o "$LOADER"
-run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" \
+run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" -I "$BASE_SYS" \
 	"$REPO/sys/vmm/vmm_pcie_abi.c" \
 	"$REPO/test/vmm/pcie/vmm_pcie_bar_provider.c" -o "$PROVIDER"
 cat >"$WRAPPER" <<EOF_WRAP

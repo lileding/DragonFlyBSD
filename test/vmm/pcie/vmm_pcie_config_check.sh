@@ -3,10 +3,11 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+BASE_SYS=$(cd "$ROOT/../nvkm/sys" && pwd)
 BIN=/var/tmp/vmm_pcie_config_test
 
 cc -Wall -Wextra -Werror -std=c11 -O2 \
-	-I "$ROOT/test/vmm/pcie/compat" -I "$ROOT/sys/vmm" \
+	-I "$ROOT/test/vmm/pcie/compat" -I "$ROOT/sys/vmm" -I "$BASE_SYS" \
 	"$ROOT/sys/vmm/vmm_pcie_config.c" \
 	"$ROOT/test/vmm/pcie/vmm_pcie_config_test.c" \
 	-o "$BIN"
