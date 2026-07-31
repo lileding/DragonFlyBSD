@@ -20,6 +20,12 @@
  */
 #define VMM_MEM_ALIGN	(2ull * 1024 * 1024)
 #define VMM_MEM_MAX	(127ull * 1024 * (1ull << 30))
+#define VMM_MEM_DMA_MAX_RANGES	4U
+
+struct vmm_mem_dma_range {
+	uint64_t	raw_gpa;
+	uint64_t	imm_size;
+};
 
 struct vmm_mem {
 	/*
@@ -65,6 +71,13 @@ int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
  * machine keeps its backing alive until all active vCPUs have exited.
  */
 struct vmspace *vmm_mem_borrow_vmspace(struct vmm_mem *m);
+/*
+ * On success, *vmspacep owns one vmspace reference.  The returned ranges
+ * describe every guest-RAM GPA interval and exclude architectural MMIO holes.
+ */
+int	vmm_mem_dma_snapshot(struct vmm_mem *m, struct vmspace **vmspacep,
+	    uint64_t *aperture_sizep, struct vmm_mem_dma_range *ranges,
+	    unsigned int *range_countp);
 /* Insert or remove a non-RAM object in the current run vmspace at a fixed GPA. */
 int	vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
 	    struct vm_object *object);

@@ -38,6 +38,7 @@
 #include <sys/kobj.h>
 
 #include "vmm_domain.h"
+#include "vmm_dma.h"
 #include "vmm_loader.h"
 #include "vmm_machine.h"
 #include "vmm_pcie_bar.h"
@@ -820,6 +821,10 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	}
 	if (vmm_pcie_bar_mmap_active()) {
 		kprintf("vmm klog: vfs_uninit vPCIe BAR capability active\n");
+		return EBUSY;
+	}
+	if (vmm_dma_mmap_active()) {
+		kprintf("vmm klog: vfs_uninit vPCIe DMA capability active\n");
 		return EBUSY;
 	}
 	vmm_domain_uninit();

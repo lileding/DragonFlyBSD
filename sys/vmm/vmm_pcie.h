@@ -40,6 +40,7 @@ int	vmm_pcie_begin_shutdown(struct vmm_pcie *pcie);
 void	vmm_pcie_cancel_shutdown(struct vmm_pcie *pcie);
 uint64_t vmm_pcie_root_id_alloc(struct vmm_pcie *pcie);
 struct vmm_pcie_root *vmm_pcie_host_root(struct vmm_pcie *pcie);
+struct vmm_dma;
 int	vmm_pcie_device_create(struct vmm_pcie *pcie,
 	    struct vmm_pcie_root *consumer, const char *name, int nlen,
 	    struct vmm_device *device);
@@ -61,8 +62,11 @@ int	vmm_pcie_device_provider_attach(struct vmm_device *device,
 int	vmm_pcie_device_provider_register(struct vmm_device *device,
 	    struct vmm_pcie_user *provider,
 	    const struct vmm_pcie_abi_register *request,
-	    struct vmm_pcie_abi_registered *response,
-	    struct file **bar_fps, unsigned int *bar_countp);
+    struct vmm_pcie_abi_registered *response,
+	    struct file **fps, unsigned int *file_countp);
+int	vmm_pcie_device_provider_stopped(struct vmm_device *device,
+	    struct vmm_pcie_user *provider,
+	    const struct vmm_pcie_abi_stopped *message);
 void	vmm_pcie_device_provider_detach(struct vmm_device *device,
 	    struct vmm_pcie_user *provider);
 int	vmm_pcie_device_provider_msix(struct vmm_device *device,
@@ -80,6 +84,9 @@ void	vmm_pcie_root_bar_mappings_unmap(struct vmm_pcie_root *root,
 	    const struct vmm_pcie_bar_mapping *mappings);
 int	vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa,
 	    int prot);
+void	vmm_pcie_root_start(struct vmm_pcie_root *root,
+    struct vmm_dma *dma);
+void	vmm_pcie_root_stop(struct vmm_pcie_root *root);
 void	vmm_pcie_root_reset(struct vmm_pcie_root *root);
 
 #endif /* VMM_PCIE_H */

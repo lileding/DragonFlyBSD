@@ -19,6 +19,7 @@ extern vm_offset_t vmm_test_vmspace_alloc_min;
 extern vm_offset_t vmm_test_vmspace_alloc_max;
 extern int vmm_test_vmspace_fork_fail;
 extern int vmm_test_vmspace_fork_calls;
+extern int vmm_test_vmspace_ref_calls;
 extern struct vmspace *vmm_test_vmspace_fork_parent;
 extern int vmm_test_pmap_del_all_cpus_pending;
 extern int vmm_test_pmap_del_all_cpus_bad_order;
@@ -33,8 +34,10 @@ vmspace_alloc(vm_offset_t min, vm_offset_t max)
 	vmm_test_vmspace_alloc_min = min;
 	vmm_test_vmspace_alloc_max = max;
 	vmspace = calloc(1, sizeof(*vmspace));
-	if (vmspace != NULL)
+	if (vmspace != NULL) {
 		vmspace->vm_map.pmap = &vmspace->vm_pmap;
+		vmspace->refs = 1;
+	}
 	return vmspace;
 }
 
@@ -56,6 +59,7 @@ vmspace_fork(struct vmspace *parent, void *unused_proc, void *unused_lwp)
 		return NULL;
 	child->vm_map = parent->vm_map;
 	child->vm_map.pmap = &child->vm_pmap;
+	child->refs = 1;
 	n = child->vm_map.mapped_count;
 	if (n > VMM_TEST_VM_MAP_INSERT_MAX)
 		n = VMM_TEST_VM_MAP_INSERT_MAX;
@@ -65,9 +69,19 @@ vmspace_fork(struct vmspace *parent, void *unused_proc, void *unused_lwp)
 }
 
 static inline void
+vmspace_ref(struct vmspace *vmspace)
+{
+
+	if (vmspace != NULL) {
+		vmm_test_vmspace_ref_calls++;
+		vmspace->refs++;
+	}
+}
+
+static inline void
 vmspace_rel(struct vmspace *vmspace)
 {
-	if (vmspace != NULL) {
+	if (vmspace != NULL && --vmspace->refs == 0) {
 		int i;
 		int n = vmspace->vm_map.mapped_count;
 
@@ -79,8 +93,8 @@ vmspace_rel(struct vmspace *vmspace)
 			vmm_test_pmap_del_all_cpus_bad_order = 1;
 		vmm_test_pmap_del_all_cpus_pending = 0;
 		vmm_test_vmspace_free_count++;
+		free(vmspace);
 	}
-	free(vmspace);
 }
 
 static inline int

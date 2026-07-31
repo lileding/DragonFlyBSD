@@ -15,11 +15,12 @@ struct vmm_machine;
 struct vmm_pcie;
 
 struct vmm_pcie_root {
-	/* The parent fabric token_registry protects mut_bdf_mask. */
+	/* The parent fabric token_registry protects mut_bdf_mask and mut_running. */
 	struct vmm_pcie		*borrow_imm_pcie;
 	struct vmm_machine	*borrow_imm_machine;
 	uint64_t		imm_id;
 	uint32_t		mut_bdf_mask;
+	int			mut_running;
 };
 
 void	vmm_pcie_root_init(struct vmm_pcie_root *root,

@@ -28,6 +28,21 @@ struct vmm_mem_backing {
 	uint64_t imm_vmspace_max;
 };
 
+struct vmm_mem_hole {
+	uint64_t start;
+	uint64_t end;
+};
+
+static const struct vmm_mem_hole vmm_mem_holes[] = {
+	{ VMM_PCIE_MMIO_BASE, VMM_PCIE_MMIO_END },
+	{ VMM_PCIE_ECAM_BASE, VMM_PCIE_ECAM_END },
+	{ VMM_X86_LAPIC_MMIO_GPA,
+	  VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE },
+};
+
+#define VMM_MEM_HOLE_COUNT \
+	(sizeof(vmm_mem_holes) / sizeof(vmm_mem_holes[0]))
+
 static int	vmm_mem_fault_vmspace(struct vmm_mem *m, uint64_t gpa,
 		    int prot);
 
@@ -120,21 +135,11 @@ static int
 vmm_mem_map_ram_object(struct vmspace *vm, struct vm_object *object,
     uint64_t bytes)
 {
-	struct vmm_mem_hole {
-		uint64_t start;
-		uint64_t end;
-	};
 	struct vmm_mem_map_segment {
 		vm_offset_t start;
 		vm_offset_t end;
 		vm_ooffset_t offset;
 	} seg[4];
-	const struct vmm_mem_hole holes[] = {
-		{ VMM_PCIE_MMIO_BASE, VMM_PCIE_MMIO_END },
-		{ VMM_PCIE_ECAM_BASE, VMM_PCIE_ECAM_END },
-		{ VMM_X86_LAPIC_MMIO_GPA,
-		  VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE },
-	};
 	vm_map_t map = &vm->vm_map;
 	vm_size_t size = round_page64(bytes);
 	vm_prot_t prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
@@ -143,8 +148,9 @@ vmm_mem_map_ram_object(struct vmspace *vm, struct vm_object *object,
 	uint64_t start;
 
 	start = 0;
-	for (i = 0; i < sizeof(holes) / sizeof(holes[0]) && start < size; i++) {
-		uint64_t end = holes[i].start < size ? holes[i].start : size;
+	for (i = 0; i < VMM_MEM_HOLE_COUNT && start < size; i++) {
+		uint64_t end = vmm_mem_holes[i].start < size ?
+		    vmm_mem_holes[i].start : size;
 
 		if (end > start) {
 			seg[nseg].start = start;
@@ -152,11 +158,11 @@ vmm_mem_map_ram_object(struct vmspace *vm, struct vm_object *object,
 			seg[nseg].offset = start;
 			nseg++;
 		}
-		if (size <= holes[i].end) {
+		if (size <= vmm_mem_holes[i].end) {
 			start = size;
 			break;
 		}
-		start = holes[i].end;
+		start = vmm_mem_holes[i].end;
 	}
 	if (start < size) {
 		seg[nseg].start = start;
@@ -363,6 +369,65 @@ vmm_mem_borrow_vmspace(struct vmm_mem *m)
 	if (m == NULL || m->own_mut_backing == NULL)
 		return NULL;
 	return m->own_mut_backing->own_mut_run_vmspace;
+}
+
+int
+vmm_mem_dma_snapshot(struct vmm_mem *m, struct vmspace **vmspacep,
+    uint64_t *aperture_sizep, struct vmm_mem_dma_range *ranges,
+    unsigned int *range_countp)
+{
+	struct vmm_mem_backing *backing;
+	uint64_t cursor;
+	unsigned int count;
+	unsigned int i;
+
+	if (vmspacep != NULL)
+		*vmspacep = NULL;
+	if (aperture_sizep != NULL)
+		*aperture_sizep = 0;
+	if (range_countp != NULL)
+		*range_countp = 0;
+	if (m == NULL || vmspacep == NULL || aperture_sizep == NULL ||
+	    ranges == NULL || range_countp == NULL)
+		return EINVAL;
+	backing = m->own_mut_backing;
+	if (backing == NULL || backing->own_mut_run_vmspace == NULL ||
+	    backing->imm_bytes == 0)
+		return EINVAL;
+	cursor = 0;
+	count = 0;
+	for (i = 0; i < VMM_MEM_HOLE_COUNT && cursor < backing->imm_bytes;
+	    i++) {
+		uint64_t end;
+
+		if (vmm_mem_holes[i].start > cursor) {
+			end = vmm_mem_holes[i].start < backing->imm_bytes ?
+			    vmm_mem_holes[i].start : backing->imm_bytes;
+			if (end > cursor) {
+				if (count == VMM_MEM_DMA_MAX_RANGES)
+					return EOVERFLOW;
+				ranges[count].raw_gpa = cursor;
+				ranges[count].imm_size = end - cursor;
+				count++;
+			}
+		}
+		if (vmm_mem_holes[i].end > cursor)
+			cursor = vmm_mem_holes[i].end;
+	}
+	if (cursor < backing->imm_bytes) {
+		if (count == VMM_MEM_DMA_MAX_RANGES)
+			return EOVERFLOW;
+		ranges[count].raw_gpa = cursor;
+		ranges[count].imm_size = backing->imm_bytes - cursor;
+		count++;
+	}
+	if (count == 0)
+		return EINVAL;
+	vmspace_ref(backing->own_mut_run_vmspace);
+	*vmspacep = backing->own_mut_run_vmspace;
+	*aperture_sizep = backing->imm_vmspace_max;
+	*range_countp = count;
+	return 0;
 }
 
 #ifdef _KERNEL_VIRTUAL

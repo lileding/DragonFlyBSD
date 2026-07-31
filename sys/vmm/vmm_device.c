@@ -21,6 +21,7 @@ vmm_device_init(struct vmm_device *device, const char *name, int nlen,
 	device->imm_id = id;
 	device->borrow_imm_pcie = pcie;
 	device->borrow_mut_root = consumer;
+	device->own_mut_dma_cap = 0;
 	device->mut_bdf = bdf;
 	device->mut_attachment_generation = 1;
 	device->own_mut_config = 0;
@@ -37,6 +38,7 @@ vmm_device_uninit(struct vmm_device *device)
 	device->borrow_mut_root = 0;
 	device->borrow_mut_provider = 0;
 	device->borrow_mut_offload = 0;
+	device->own_mut_dma_cap = 0;
 	device->mut_bdf = 0;
 	device->mut_attachment_generation = 0;
 	device->mut_vendor_id = 0;

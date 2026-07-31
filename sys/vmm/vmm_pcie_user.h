@@ -16,11 +16,21 @@ enum vmm_pcie_user_role {
 };
 
 struct vmm_pcie_user;
+struct vmm_pcie_abi_start;
+struct vmm_pcie_abi_stop;
+struct file;
 
 int	vmm_pcie_user_open(struct vmm_device *device,
 	    enum vmm_pcie_user_role role, struct ucred *cred,
 	    struct socket **user_socketp);
 /* Caller holds the parent fabric token_registry. */
 int	vmm_pcie_user_force_close(struct vmm_pcie_user *user);
+/* Caller holds a fabric attachment or another vmm_pcie_user reference. */
+void	vmm_pcie_user_hold(struct vmm_pcie_user *user);
+void	vmm_pcie_user_release(struct vmm_pcie_user *user);
+int	vmm_pcie_user_send_start(struct vmm_pcie_user *user,
+	    const struct vmm_pcie_abi_start *message);
+int	vmm_pcie_user_send_stop(struct vmm_pcie_user *user,
+	    const struct vmm_pcie_abi_stop *message);
 
 #endif /* VMM_PCIE_USER_H */

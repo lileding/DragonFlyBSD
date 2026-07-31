@@ -437,11 +437,10 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 		if (!lfd->mut_revoked) {
 			lfd->mut_revoked = 1;
 			/*
-			 * The object token serializes fault admission with this
-			 * revoked publication.  It cannot retract user pmap entries
-			 * that were already installed by earlier faults, so their
-			 * backing reference remains owned by the pager dtor.
+			 * Publish rejection before synchronously removing every installed
+			 * user pmap entry tracked by this MGTDEVICE object.
 			 */
+			vm_object_page_remove(object, 0, 0, FALSE);
 		}
 		VM_OBJECT_UNLOCK(object);
 	} else if (!lfd->mut_revoked) {

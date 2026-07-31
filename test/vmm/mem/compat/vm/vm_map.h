@@ -34,6 +34,7 @@ extern int vmm_test_vm_map_insert_calls;
 struct vmspace {
 	struct vm_map vm_map;
 	struct pmap vm_pmap;
+	int refs;
 };
 
 static inline struct pmap *

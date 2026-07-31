@@ -22,6 +22,7 @@ struct vmm_pcie_bar {
 
 int	vmm_pcie_bar_create(struct vmm_pcie_bar *bar, uint64_t size,
 	    uint32_t flags);
+void	vmm_pcie_bar_revoke(struct vmm_pcie_bar *bar);
 void	vmm_pcie_bar_destroy(struct vmm_pcie_bar *bar);
 /* Caller holds the parent fabric token_registry. */
 int	vmm_pcie_bar_snapshot(struct vmm_pcie_bar *bar,

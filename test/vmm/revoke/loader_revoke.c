@@ -135,8 +135,8 @@ write_result(const char *path, const char *mode, int new3, int new4,
 
 	/*
 	 * Revoke guarantees that new executable mappings fail and that old
-	 * mappings fault when touched.  Existing vm_map entries may still
-	 * accept mprotect until DragonFly grows object-level mmap revoke.
+	 * mappings fault when touched.  mprotect changes VM map protections; it
+	 * is not itself a proof that the MGTDEVICE pager will admit a later fault.
 	 */
 	pass = new3 && new4 && old3 && old4 &&
 	    private3 && private4 && exec3 && exec4;

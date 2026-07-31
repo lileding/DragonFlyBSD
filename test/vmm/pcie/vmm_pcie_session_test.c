@@ -1,13 +1,11 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Black-box P2 test for a vPCIe provider/consumer session.
+ * Black-box P2 test for vPCIe pending provider and consumer sessions.
  */
 #include <sys/endian.h>
-#include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <err.h>
@@ -20,38 +18,6 @@
 #include <unistd.h>
 
 #include "vmm_pcie_abi.h"
-
-static void
-packet_init(struct vmm_pcie_abi_header *header, uint16_t type, uint32_t size)
-{
-
-	memset(header, 0, sizeof(*header));
-	header->le_magic = htole32(VMM_PCIE_ABI_MAGIC);
-	header->le_version = htole16(VMM_PCIE_ABI_VERSION);
-	header->le_type = htole16(type);
-	header->le_size = htole32(size);
-	header->le_sequence = htole64(1);
-}
-
-static void
-build_register(struct vmm_pcie_abi_register *message)
-{
-
-	memset(message, 0, sizeof(*message));
-	packet_init(&message->header, VMM_PCIE_ABI_MSG_REGISTER,
-	    sizeof(*message));
-	message->header.le_flags = htole32(VMM_PCIE_ABI_REGISTER_F_MSIX);
-	message->le_vendor_id = htole16(0x1af4);
-	message->le_device_id = htole16(0x1050);
-	message->le_subsystem_vendor_id = htole16(0x1af4);
-	message->le_subsystem_device_id = htole16(0x0001);
-	message->le_class_code = htole32(0x010000);
-	message->revision = 1;
-	message->le_msix_vectors = htole16(1);
-	message->bar[0].le_size = htole64(VMM_PCIE_ABI_PAGE_SIZE);
-	message->bar[0].le_flags = htole32(VMM_PCIE_ABI_BAR_F_MEMORY |
-	    VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT);
-}
 
 static void
 read_state(const char *device, char *buf, size_t size)
@@ -106,43 +72,6 @@ expect_state_eventually(const char *device, const char *provider,
 	}
 	errno = EPROTO;
 	err(1, "state did not become %s", want);
-}
-
-static int
-recv_registered(int fd, struct vmm_pcie_abi_registered *message)
-{
-	char control[CMSG_SPACE(sizeof(int) * VMM_PCIE_ABI_MAX_BARS)];
-	struct cmsghdr *cmsg;
-	struct iovec iov;
-	struct msghdr msg;
-	int bar_fd = -1;
-	ssize_t n;
-
-	memset(control, 0, sizeof(control));
-	memset(&msg, 0, sizeof(msg));
-	iov.iov_base = message;
-	iov.iov_len = sizeof(*message);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = control;
-	msg.msg_controllen = sizeof(control);
-	n = recvmsg(fd, &msg, 0);
-	if (n != sizeof(*message))
-		errno = n < 0 ? errno : EPROTO, err(1, "recv REGISTERED");
-	if (vmm_pcie_abi_validate(message, sizeof(*message)) != 0 ||
-	    le16toh(message->header.le_type) != VMM_PCIE_ABI_MSG_REGISTERED)
-		errno = EPROTO, err(1, "invalid REGISTERED");
-	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
-	    cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-		if (cmsg->cmsg_level != SOL_SOCKET ||
-		    cmsg->cmsg_type != SCM_RIGHTS ||
-		    cmsg->cmsg_len != CMSG_LEN(sizeof(int)) || bar_fd != -1)
-			errno = EPROTO, err(1, "REGISTERED rights");
-		memcpy(&bar_fd, CMSG_DATA(cmsg), sizeof(bar_fd));
-	}
-	if (bar_fd < 0 || le32toh(message->le_bar_fd_mask) != 1)
-		errno = EPROTO, err(1, "REGISTERED BAR set");
-	return bar_fd;
 }
 
 static void
@@ -227,18 +156,12 @@ receive_fd(int fd)
 int
 main(int argc, char **argv)
 {
-	struct vmm_pcie_abi_register register_message;
-	struct vmm_pcie_abi_registered registered_message;
-	struct stat st;
 	char path[PATH_MAX];
-	volatile uint8_t *bar;
 	int provider;
 	int consumer;
-	int bar_fd;
 	int handoff[2];
 	int status;
 	pid_t child;
-	ssize_t n;
 
 	if (argc != 2)
 		errno = EINVAL, err(1, "usage: %s DEVICE_DIR", argv[0]);
@@ -248,29 +171,7 @@ main(int argc, char **argv)
 	provider = open(path, O_RDWR);
 	if (provider < 0)
 		err(1, "open %s", path);
-	expect_state(argv[1], "attached", "root");
-
-	build_register(&register_message);
-	n = send(provider, &register_message, sizeof(register_message), 0);
-	if (n != sizeof(register_message))
-		errno = n < 0 ? errno : EPROTO, err(1, "send REGISTER");
-	bar_fd = recv_registered(provider, &registered_message);
-	if (fstat(bar_fd, &st) != 0)
-		err(1, "fstat BAR");
-	if (st.st_size != VMM_PCIE_ABI_PAGE_SIZE)
-		errno = EPROTO, err(1, "BAR size");
-	bar = mmap(NULL, VMM_PCIE_ABI_PAGE_SIZE, PROT_READ | PROT_WRITE,
-	    MAP_SHARED, bar_fd, 0);
-	if (bar == MAP_FAILED)
-		err(1, "mmap BAR");
-	bar[0] = 0x5a;
-	if (bar[0] != 0x5a)
-		errno = EIO, err(1, "BAR shared mapping");
-	if (munmap(__DECONST(void *, bar), VMM_PCIE_ABI_PAGE_SIZE) != 0)
-		err(1, "munmap BAR");
-	if (close(bar_fd) != 0)
-		err(1, "close BAR");
-	expect_state(argv[1], "registered", "root");
+	expect_state(argv[1], "pending", "root");
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, handoff) != 0)
 		err(1, "socketpair provider handoff");
 	child = fork();
@@ -303,7 +204,7 @@ main(int argc, char **argv)
 		errno = EPROTO, err(1, "provider transfer ready");
 	if (close(provider) != 0)
 		err(1, "close original provider");
-	expect_state(argv[1], "registered", "root");
+	expect_state(argv[1], "pending", "root");
 	if (send(handoff[0], "C", 1, 0) != 1)
 		err(1, "provider transfer close");
 	if (close(handoff[0]) != 0)

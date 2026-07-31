@@ -5,10 +5,14 @@
  */
 #include <sys/endian.h>
 #include <sys/errno.h>
+#include <sys/param.h>
+#include <sys/file.h>
+#include <sys/kernel.h>
 #include <sys/types.h>
 #include <vm/vm_object.h>
 
 #include "vmm_machine.h"
+#include "vmm_dma.h"
 #include "vmm_mem.h"
 #include "vmm_pcie.h"
 #include "vmm_pcie_bar.h"
@@ -28,10 +32,28 @@
 #define VMM_PCIE_MSI_DATA_ALLOWED		(VMM_PCIE_MSI_DATA_VECTOR_MASK | \
 	 VMM_PCIE_MSI_DATA_DELIVERY_MASK)
 
+struct vmm_pcie_dma_ref {
+	struct vmm_pcie_user	*own_mut_user;
+	struct vmm_dma_cap	*own_mut_cap;
+	uint64_t		imm_device_id;
+	uint64_t		imm_generation;
+};
+
+struct vmm_pcie_device_runtime {
+	struct vmm_pcie_root	*borrow_mut_root;
+	struct vmm_dma_cap	*own_mut_dma_cap;
+	struct vmm_pcie_config	*own_mut_config;
+	struct vmm_pcie_bar	own_mut_bars[VMM_PCIE_ABI_MAX_BARS];
+	struct vmm_pcie_bar_mapping
+				own_mut_mappings[VMM_PCIE_ABI_MAX_BARS];
+};
+
 static int	vmm_pcie_device_cmp(struct vmm_device *left,
 		    struct vmm_device *right);
 static struct vmm_device *vmm_pcie_device_find_name_locked(
 		    struct vmm_pcie *pcie, const char *name, int nlen);
+static struct vmm_device *vmm_pcie_device_find_id_locked(
+		    struct vmm_pcie *pcie, uint64_t id);
 static int	vmm_pcie_device_busy_locked(struct vmm_pcie *pcie);
 static void	vmm_pcie_device_clear_registered_locked(
 		    struct vmm_device *device, struct vmm_pcie_bar *bars,
@@ -42,6 +64,12 @@ static int	vmm_pcie_range_overlaps(uint64_t a_gpa, uint64_t a_size,
 static int	vmm_pcie_root_bar_overlap_locked(struct vmm_pcie_root *root,
 		    const struct vmm_device *skip_device, unsigned int skip_index,
 		    uint64_t gpa, uint64_t size);
+static void	vmm_pcie_device_runtime_take_locked(struct vmm_device *device,
+		    struct vmm_pcie_device_runtime *runtime);
+static void	vmm_pcie_device_runtime_release(
+		    struct vmm_pcie_device_runtime *runtime);
+static int	vmm_pcie_root_stop_pending_locked(
+		    struct vmm_pcie_root *root);
 
 RB_GENERATE(vmm_pcie_device_tree, vmm_device, own_mut_registry_entry,
     vmm_pcie_device_cmp);
@@ -184,7 +212,9 @@ vmm_pcie_device_destroy(struct vmm_pcie *pcie, struct vmm_device *device)
 		goto out;
 	}
 	if (device->borrow_mut_provider != NULL ||
-	    device->borrow_mut_offload != NULL || device->mut_registered) {
+	    device->borrow_mut_offload != NULL ||
+	    device->own_mut_dma_cap != NULL ||
+	    device->mut_registered) {
 		error = EBUSY;
 		goto out;
 	}
@@ -202,12 +232,18 @@ int
 vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
     struct vmm_pcie_root *root)
 {
+	struct vmm_pcie_device_runtime runtime;
+	struct vmm_machine *machine;
 	uint32_t bdf;
+	int start;
 	int error;
 
 	if (device == NULL || device->borrow_imm_pcie != pcie || root == NULL ||
 	    root->borrow_imm_pcie != pcie)
 		return EINVAL;
+	bzero(&runtime, sizeof(runtime));
+	machine = NULL;
+	start = 0;
 	lwkt_gettoken(&pcie->token_registry);
 	if (pcie->mut_closing) {
 		error = EBUSY;
@@ -218,8 +254,7 @@ vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
 		error = ENOENT;
 		goto out;
 	}
-	if (device->borrow_mut_provider != NULL ||
-	    device->borrow_mut_offload != NULL || device->mut_registered) {
+	if (device->borrow_mut_offload != NULL) {
 		error = EBUSY;
 		goto out;
 	}
@@ -232,15 +267,26 @@ vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
 		error = ENOSPC;
 		goto out;
 	}
+	if (device->mut_run_generation != 0 || device->mut_registered ||
+	    device->own_mut_dma_cap != NULL)
+		vmm_pcie_device_runtime_take_locked(device, &runtime);
 	vmm_pcie_root_bdf_release_locked(device->borrow_mut_root,
 	    device->mut_bdf);
 	device->borrow_mut_root = root;
 	device->mut_bdf = bdf;
 	if (device->mut_attachment_generation != (uint64_t)-1)
 		device->mut_attachment_generation++;
+	if (device->borrow_mut_provider != NULL && root->mut_running &&
+	    root->borrow_imm_machine != NULL) {
+		machine = root->borrow_imm_machine;
+		start = 1;
+	}
 	error = 0;
 out:
 	lwkt_reltoken(&pcie->token_registry);
+	vmm_pcie_device_runtime_release(&runtime);
+	if (error == 0 && start)
+		vmm_pcie_root_start(root, &machine->own_mut_dma);
 	return error;
 }
 
@@ -325,13 +371,19 @@ int
 vmm_pcie_device_provider_attach(struct vmm_device *device,
     struct vmm_pcie_user *provider)
 {
+	struct vmm_pcie_root *root;
+	struct vmm_machine *machine;
 	struct vmm_pcie *pcie;
+	int start;
 	int error;
 
 	if (device == NULL || provider == NULL ||
 	    device->borrow_imm_pcie == NULL)
 		return EINVAL;
 	pcie = device->borrow_imm_pcie;
+	root = NULL;
+	machine = NULL;
+	start = 0;
 	lwkt_gettoken(&pcie->token_registry);
 	if (pcie->mut_closing || device->borrow_mut_provider != NULL ||
 	    device->mut_registered) {
@@ -341,37 +393,47 @@ vmm_pcie_device_provider_attach(struct vmm_device *device,
 	} else {
 		device->borrow_mut_provider = provider;
 		device->mut_attachment_generation++;
+		root = device->borrow_mut_root;
+		if (root->mut_running && root->borrow_imm_machine != NULL) {
+			machine = root->borrow_imm_machine;
+			start = 1;
+		}
 		error = 0;
 	}
 	lwkt_reltoken(&pcie->token_registry);
+	if (error == 0 && start)
+		vmm_pcie_root_start(root, &machine->own_mut_dma);
 	return error;
 }
 
 int
 vmm_pcie_device_provider_register(struct vmm_device *device,
     struct vmm_pcie_user *provider, const struct vmm_pcie_abi_register *request,
-    struct vmm_pcie_abi_registered *response, struct file **bar_fps,
-    unsigned int *bar_countp)
+    struct vmm_pcie_abi_registered *response, struct file **fps,
+    unsigned int *file_countp)
 {
 	struct vmm_pcie_bar bars[VMM_PCIE_ABI_MAX_BARS];
 	struct vmm_pcie_config *config;
+	struct vmm_dma_cap *cap;
+	struct file *dma_fp;
 	struct vmm_pcie *pcie;
 	uint32_t bar_fd_mask;
-	unsigned int bar_count;
+	unsigned int file_count;
 	unsigned int i;
 	int error;
 
 	if (device == NULL || provider == NULL || request == NULL ||
-	    response == NULL || bar_fps == NULL || bar_countp == NULL ||
+	    response == NULL || fps == NULL || file_countp == NULL ||
 	    device->borrow_imm_pcie == NULL ||
 	    vmm_pcie_abi_validate(request, sizeof(*request)) != 0)
 		return EINVAL;
 	__builtin_memset(bars, 0, sizeof(bars));
 	config = NULL;
+	dma_fp = NULL;
 	error = vmm_pcie_config_create(&config, request);
 	if (error != 0)
 		return error;
-	bar_count = 0;
+	file_count = 0;
 	bar_fd_mask = 0;
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
 		uint64_t size;
@@ -384,14 +446,22 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 		error = vmm_pcie_bar_create(&bars[i], size, flags);
 		if (error != 0)
 			goto fail;
-		bar_fps[bar_count++] = bars[i].own_mut_fp;
 		bar_fd_mask |= 1U << i;
 	}
 
 	pcie = device->borrow_imm_pcie;
 	lwkt_gettoken(&pcie->token_registry);
 	if (pcie->mut_closing || device->borrow_mut_provider != provider ||
-	    device->mut_registered) {
+	    device->mut_registered || device->mut_run_generation == 0 ||
+	    device->mut_stop_requested || le64toh(request->header.le_sequence) !=
+	    device->mut_run_generation || device->own_mut_dma_cap == NULL) {
+		error = EBUSY;
+		lwkt_reltoken(&pcie->token_registry);
+		goto fail;
+	}
+	cap = device->own_mut_dma_cap;
+	dma_fp = vmm_dma_cap_file_hold(cap);
+	if (dma_fp == NULL) {
 		error = EBUSY;
 		lwkt_reltoken(&pcie->token_registry);
 		goto fail;
@@ -421,6 +491,8 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 	response->header.le_version = htole16(VMM_PCIE_ABI_VERSION);
 	response->header.le_type = htole16(VMM_PCIE_ABI_MSG_REGISTERED);
 	response->header.le_size = htole32(sizeof(*response));
+	response->header.le_flags = htole32(
+	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY);
 	response->header.le_sequence = request->header.le_sequence;
 	response->le_device_id = htole64(device->imm_id);
 	response->le_consumer_id = htole64(device->borrow_mut_root->imm_id);
@@ -429,14 +501,58 @@ vmm_pcie_device_provider_register(struct vmm_device *device,
 	response->le_bdf = htole32(device->mut_bdf);
 	response->le_bar_fd_mask = htole32(bar_fd_mask);
 	response->le_msix_vectors = htole16(device->mut_msix_vectors);
+	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
+		if (device->own_mut_bars[i].own_mut_fp == NULL)
+			continue;
+		fhold(device->own_mut_bars[i].own_mut_fp);
+		fps[file_count++] = device->own_mut_bars[i].own_mut_fp;
+	}
+	/* BAR fds are ordered by BAR index; the DMA fd is always final. */
+	fps[file_count++] = dma_fp;
 	lwkt_reltoken(&pcie->token_registry);
-	*bar_countp = bar_count;
+	*file_countp = file_count;
 	return 0;
 
 fail:
+	if (dma_fp != NULL)
+		fdrop(dma_fp);
 	vmm_pcie_config_destroy(config);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++)
 		vmm_pcie_bar_destroy(&bars[i]);
+	return error;
+}
+
+int
+vmm_pcie_device_provider_stopped(struct vmm_device *device,
+    struct vmm_pcie_user *provider,
+    const struct vmm_pcie_abi_stopped *message)
+{
+	struct vmm_pcie_root *root;
+	struct vmm_pcie *pcie;
+	uint64_t generation;
+	int error;
+
+	if (device == NULL || provider == NULL || message == NULL ||
+	    device->borrow_imm_pcie == NULL ||
+	    vmm_pcie_abi_validate(message, sizeof(*message)) != 0)
+		return EINVAL;
+	pcie = device->borrow_imm_pcie;
+	generation = le64toh(message->le_memory_generation);
+	root = NULL;
+	lwkt_gettoken(&pcie->token_registry);
+	if (device->borrow_mut_provider != provider ||
+	    le64toh(message->le_device_id) != device->imm_id ||
+	    device->mut_run_generation != generation ||
+	    !device->mut_stop_requested) {
+		error = ESTALE;
+	} else {
+		device->mut_stop_requested = 0;
+		root = device->borrow_mut_root;
+		error = 0;
+	}
+	lwkt_reltoken(&pcie->token_registry);
+	if (root != NULL)
+		wakeup(root);
 	return error;
 }
 
@@ -444,42 +560,28 @@ void
 vmm_pcie_device_provider_detach(struct vmm_device *device,
     struct vmm_pcie_user *provider)
 {
-	struct vmm_pcie_bar bars[VMM_PCIE_ABI_MAX_BARS];
-	struct vmm_pcie_bar_mapping mappings[VMM_PCIE_ABI_MAX_BARS];
-	struct vmm_pcie_config *config;
+	struct vmm_pcie_device_runtime runtime;
 	struct vmm_pcie *pcie;
 	struct vmm_pcie_root *root;
-	unsigned int i;
 
 	if (device == NULL || provider == NULL ||
 	    device->borrow_imm_pcie == NULL)
 		return;
-	__builtin_memset(bars, 0, sizeof(bars));
-	__builtin_memset(mappings, 0, sizeof(mappings));
-	config = NULL;
+	bzero(&runtime, sizeof(runtime));
 	root = NULL;
 	pcie = device->borrow_imm_pcie;
 	lwkt_gettoken(&pcie->token_registry);
 	if (device->borrow_mut_provider == provider) {
 		root = device->borrow_mut_root;
-		vmm_pcie_device_bar_mappings_take_locked(device, mappings);
-		vmm_pcie_device_clear_registered_locked(device, bars, &config);
+		vmm_pcie_device_runtime_take_locked(device, &runtime);
 		device->borrow_mut_provider = NULL;
 		if (device->mut_attachment_generation != (uint64_t)-1)
 			device->mut_attachment_generation++;
+		wakeup(root);
 	}
 	lwkt_reltoken(&pcie->token_registry);
-	/*
-	 * This is PCIe hot-unplug, not a machine lifecycle command.  vm_map_remove
-	 * invalidates the tracked run pmap before the device drops its BAR references.
-	 * A BAR fd already sent to the provider retains its own capability reference;
-	 * P4 does not force-revoke that fd or its existing user mappings.  Later
-	 * guest BAR access is an NPF for the guest OS to handle.
-	 */
-	vmm_pcie_root_bar_mappings_unmap(root, mappings);
-	vmm_pcie_config_destroy(config);
-	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++)
-		vmm_pcie_bar_destroy(&bars[i]);
+	/* Provider loss is surprise removal: no STOP handshake or wait. */
+	vmm_pcie_device_runtime_release(&runtime);
 }
 
 int
@@ -799,6 +901,198 @@ out:
 }
 
 void
+vmm_pcie_root_start(struct vmm_pcie_root *root, struct vmm_dma *dma)
+{
+	struct vmm_pcie_dma_ref refs[VMM_PCIE_ROOT_BDF_COUNT];
+	struct vmm_pcie_abi_start message;
+	struct vmm_pcie_device_runtime runtime;
+	struct vmm_pcie_user *user;
+	struct vmm_pcie *pcie;
+	struct vmm_device *device;
+	struct vmm_dma_cap *cap;
+	struct vmm_mem_dma_range ranges[VMM_MEM_DMA_MAX_RANGES];
+	uint64_t device_id;
+	unsigned int count;
+	unsigned int i;
+	unsigned int range_count;
+	unsigned int j;
+	int attached;
+	int error;
+
+	if (root == NULL || dma == NULL || root->borrow_imm_pcie == NULL ||
+	    root->borrow_imm_machine == NULL)
+		return;
+	pcie = root->borrow_imm_pcie;
+	count = 0;
+	lwkt_gettoken(&pcie->token_registry);
+	root->mut_running = 1;
+	RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+		if (device->borrow_mut_root != root ||
+		    device->borrow_mut_provider == NULL ||
+		    device->mut_run_generation != 0)
+			continue;
+		if (count == nitems(refs))
+			break;
+		refs[count].own_mut_user = device->borrow_mut_provider;
+		refs[count].own_mut_cap = NULL;
+		refs[count].imm_device_id = device->imm_id;
+		vmm_pcie_user_hold(refs[count].own_mut_user);
+		count++;
+	}
+	lwkt_reltoken(&pcie->token_registry);
+
+	for (i = 0; i < count; i++) {
+		user = refs[i].own_mut_user;
+		device_id = refs[i].imm_device_id;
+		cap = NULL;
+		error = vmm_dma_cap_create(dma, &cap);
+		if (error != 0) {
+			vmm_machine_logf(root->borrow_imm_machine,
+			    "pcie start capability failed device=%ju error=%d",
+			    (uintmax_t)device_id, error);
+			vmm_pcie_user_release(user);
+			continue;
+		}
+		attached = 0;
+		lwkt_gettoken(&pcie->token_registry);
+		device = vmm_pcie_device_find_id_locked(pcie, device_id);
+		if (root->mut_running && device != NULL &&
+		    device->borrow_mut_root == root &&
+		    device->borrow_mut_provider == user &&
+		    device->mut_run_generation == 0 &&
+		    device->own_mut_dma_cap == NULL) {
+			device->own_mut_dma_cap = cap;
+			device->mut_run_generation = vmm_dma_cap_generation(cap);
+			device->mut_stop_requested = 0;
+			attached = 1;
+		}
+		lwkt_reltoken(&pcie->token_registry);
+		if (!attached) {
+			vmm_dma_cap_revoke(cap);
+			vmm_pcie_user_release(user);
+			continue;
+		}
+		bzero(&message, sizeof(message));
+		message.header.le_magic = htole32(VMM_PCIE_ABI_MAGIC);
+		message.header.le_version = htole16(VMM_PCIE_ABI_VERSION);
+		message.header.le_type = htole16(VMM_PCIE_ABI_MSG_START);
+		message.header.le_size = htole32(sizeof(message));
+		message.header.le_sequence = htole64(vmm_dma_cap_generation(cap));
+		message.le_device_id = htole64(device_id);
+		message.le_memory_generation = htole64(vmm_dma_cap_generation(cap));
+		range_count = vmm_dma_cap_ranges(cap, ranges, nitems(ranges));
+		KKASSERT(range_count != 0);
+		message.le_dma_segment_count = htole32(range_count);
+		for (j = 0; j < range_count; j++) {
+			message.dma_segment[j].le_gpa = htole64(ranges[j].raw_gpa);
+			message.dma_segment[j].le_length = htole64(ranges[j].imm_size);
+			message.dma_segment[j].le_permissions = htole32(
+			    VMM_PCIE_ABI_DMA_PERM_READ |
+			    VMM_PCIE_ABI_DMA_PERM_WRITE);
+		}
+		error = vmm_pcie_user_send_start(user, &message);
+		if (error != 0) {
+			bzero(&runtime, sizeof(runtime));
+			lwkt_gettoken(&pcie->token_registry);
+			device = vmm_pcie_device_find_id_locked(pcie, device_id);
+			if (device != NULL && device->own_mut_dma_cap == cap)
+				vmm_pcie_device_runtime_take_locked(device, &runtime);
+			lwkt_reltoken(&pcie->token_registry);
+			vmm_pcie_device_runtime_release(&runtime);
+			vmm_machine_logf(root->borrow_imm_machine,
+			    "pcie start send failed device=%ju error=%d",
+			    (uintmax_t)device_id, error);
+		} else {
+			vmm_machine_logf(root->borrow_imm_machine,
+			    "pcie start device=%ju generation=%ju",
+			    (uintmax_t)device_id,
+			    (uintmax_t)vmm_dma_cap_generation(cap));
+		}
+		vmm_pcie_user_release(user);
+	}
+}
+
+void
+vmm_pcie_root_stop(struct vmm_pcie_root *root)
+{
+	struct vmm_pcie_dma_ref refs[VMM_PCIE_ROOT_BDF_COUNT];
+	struct vmm_pcie_abi_stop message;
+	struct vmm_pcie_device_runtime runtime;
+	struct vmm_pcie *pcie;
+	struct vmm_device *device;
+	unsigned int count;
+	unsigned int i;
+	int error;
+
+	if (root == NULL || root->borrow_imm_pcie == NULL)
+		return;
+	pcie = root->borrow_imm_pcie;
+	count = 0;
+	lwkt_gettoken(&pcie->token_registry);
+	root->mut_running = 0;
+	RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+		if (device->borrow_mut_root != root ||
+		    device->mut_run_generation == 0)
+			continue;
+		if (count == nitems(refs))
+			break;
+		refs[count].own_mut_user = device->borrow_mut_provider;
+		if (refs[count].own_mut_user != NULL)
+			vmm_pcie_user_hold(refs[count].own_mut_user);
+		refs[count].own_mut_cap = device->own_mut_dma_cap;
+		refs[count].imm_device_id = device->imm_id;
+		refs[count].imm_generation = device->mut_run_generation;
+		device->mut_stop_requested = 1;
+		count++;
+	}
+	lwkt_reltoken(&pcie->token_registry);
+
+	for (i = 0; i < count; i++) {
+		bzero(&message, sizeof(message));
+		message.header.le_magic = htole32(VMM_PCIE_ABI_MAGIC);
+		message.header.le_version = htole16(VMM_PCIE_ABI_VERSION);
+		message.header.le_type = htole16(VMM_PCIE_ABI_MSG_STOP);
+		message.header.le_size = htole32(sizeof(message));
+		message.header.le_sequence = htole64(refs[i].imm_generation);
+		message.le_device_id = htole64(refs[i].imm_device_id);
+		message.le_memory_generation = htole64(refs[i].imm_generation);
+		if (refs[i].own_mut_user != NULL) {
+			error = vmm_pcie_user_send_stop(refs[i].own_mut_user, &message);
+			if (error != 0 && root->borrow_imm_machine != NULL) {
+				vmm_machine_logf(root->borrow_imm_machine,
+				    "pcie stop send failed device=%ju error=%d",
+				    (uintmax_t)refs[i].imm_device_id, error);
+			}
+		}
+		vmm_pcie_user_release(refs[i].own_mut_user);
+	}
+	for (i = 0; i < 10; i++) {
+		lwkt_gettoken(&pcie->token_registry);
+		if (!vmm_pcie_root_stop_pending_locked(root)) {
+			lwkt_reltoken(&pcie->token_registry);
+			break;
+		}
+		(void)tsleep(root, 0, "vmmpcistop", hz);
+		lwkt_reltoken(&pcie->token_registry);
+	}
+	for (;;) {
+		bzero(&runtime, sizeof(runtime));
+		lwkt_gettoken(&pcie->token_registry);
+		RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+			if (device->borrow_mut_root == root &&
+			    device->mut_run_generation != 0) {
+				vmm_pcie_device_runtime_take_locked(device, &runtime);
+				break;
+			}
+		}
+		lwkt_reltoken(&pcie->token_registry);
+		if (runtime.borrow_mut_root == NULL)
+			break;
+		vmm_pcie_device_runtime_release(&runtime);
+	}
+}
+
+void
 vmm_pcie_root_reset(struct vmm_pcie_root *root)
 {
 	struct vmm_device *device;
@@ -865,6 +1159,18 @@ vmm_pcie_device_find_name_locked(struct vmm_pcie *pcie, const char *name,
 	return NULL;
 }
 
+static struct vmm_device *
+vmm_pcie_device_find_id_locked(struct vmm_pcie *pcie, uint64_t id)
+{
+	struct vmm_device *device;
+
+	RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+		if (device->imm_id == id)
+			return device;
+	}
+	return NULL;
+}
+
 static int
 vmm_pcie_device_busy_locked(struct vmm_pcie *pcie)
 {
@@ -901,6 +1207,57 @@ vmm_pcie_device_clear_registered_locked(struct vmm_device *device,
 	device->mut_msix_vectors = 0;
 	device->mut_revision = 0;
 	device->mut_registered = 0;
+}
+
+static void
+vmm_pcie_device_runtime_take_locked(struct vmm_device *device,
+    struct vmm_pcie_device_runtime *runtime)
+{
+
+	KKASSERT(device != NULL);
+	KKASSERT(runtime != NULL);
+	bzero(runtime, sizeof(*runtime));
+	runtime->borrow_mut_root = device->borrow_mut_root;
+	runtime->own_mut_dma_cap = device->own_mut_dma_cap;
+	device->own_mut_dma_cap = NULL;
+	vmm_pcie_device_bar_mappings_take_locked(device,
+	    runtime->own_mut_mappings);
+	vmm_pcie_device_clear_registered_locked(device, runtime->own_mut_bars,
+	    &runtime->own_mut_config);
+	device->mut_run_generation = 0;
+	device->mut_stop_requested = 0;
+}
+
+static void
+vmm_pcie_device_runtime_release(struct vmm_pcie_device_runtime *runtime)
+{
+	unsigned int i;
+
+	if (runtime == NULL || runtime->borrow_mut_root == NULL)
+		return;
+	vmm_pcie_root_bar_mappings_unmap(runtime->borrow_mut_root,
+	    runtime->own_mut_mappings);
+	vmm_dma_cap_revoke(runtime->own_mut_dma_cap);
+	vmm_pcie_config_destroy(runtime->own_mut_config);
+	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
+		vmm_pcie_bar_revoke(&runtime->own_mut_bars[i]);
+		vmm_pcie_bar_destroy(&runtime->own_mut_bars[i]);
+	}
+}
+
+static int
+vmm_pcie_root_stop_pending_locked(struct vmm_pcie_root *root)
+{
+	struct vmm_device *device;
+
+	RB_FOREACH(device, vmm_pcie_device_tree,
+	    &root->borrow_imm_pcie->mut_devices) {
+		if (device->borrow_mut_root == root &&
+		    device->mut_run_generation != 0 &&
+		    device->mut_stop_requested)
+			return 1;
+	}
+	return 0;
 }
 
 static int

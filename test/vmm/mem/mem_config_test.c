@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "vm/vm.h"
+#include "vm/vm_extern.h"
 #include "vm/vm_map.h"
 #include "vm/vm_object.h"
 #include "vmm_mem.h"
@@ -36,6 +37,7 @@ vm_offset_t vmm_test_vmspace_alloc_min;
 vm_offset_t vmm_test_vmspace_alloc_max;
 int vmm_test_vmspace_fork_fail;
 int vmm_test_vmspace_fork_calls;
+int vmm_test_vmspace_ref_calls;
 struct vmspace *vmm_test_vmspace_fork_parent;
 int vmm_test_pmap_maybethreaded_calls;
 struct pmap *vmm_test_pmap_maybethreaded_pmap;
@@ -142,6 +144,7 @@ reset_vm_trace(void)
 	vmm_test_vmspace_alloc_max = 0;
 	vmm_test_vmspace_fork_fail = 0;
 	vmm_test_vmspace_fork_calls = 0;
+	vmm_test_vmspace_ref_calls = 0;
 	vmm_test_vmspace_fork_parent = NULL;
 	vmm_test_pmap_maybethreaded_calls = 0;
 	vmm_test_pmap_maybethreaded_pmap = NULL;
@@ -257,6 +260,31 @@ expect_read_result(struct vmm_mem *mem, const char *name, uint64_t gpa,
 }
 
 static void
+expect_dma_snapshot(struct vmm_mem *mem, struct vmspace *runtime)
+{
+	struct vmm_mem_dma_range ranges[VMM_MEM_DMA_MAX_RANGES];
+	struct vmspace *snapshot;
+	uint64_t aperture_size;
+	unsigned int range_count;
+
+	memset(ranges, 0, sizeof(ranges));
+	snapshot = NULL;
+	aperture_size = 0;
+	range_count = 0;
+	if (vmm_mem_dma_snapshot(mem, &snapshot, &aperture_size, ranges,
+	    &range_count) != 0 || snapshot != runtime ||
+	    aperture_size != VMM_PCIE_ECAM_END || range_count != 1 ||
+	    ranges[0].raw_gpa != 0 || ranges[0].imm_size != VMM_MEM_ALIGN ||
+	    vmm_test_vmspace_ref_calls != 1 || snapshot->refs != 2) {
+		fail("DMA snapshot pins current runtime");
+		return;
+	}
+	vmspace_rel(snapshot);
+	if (runtime->refs != 1)
+		fail("DMA snapshot release retains runtime backing");
+}
+
+static void
 expect_lapic_hole_fault_reject(void)
 {
 	struct vmm_mem mem;
@@ -290,6 +318,33 @@ expect_lapic_hole_fault_reject(void)
 		detached = vmm_mem_detach(&mem);
 		vmm_mem_release_backing(detached);
 		return;
+	}
+	/* DMA must expose RAM only, never the PCIe or LAPIC architectural holes. */
+	{
+		struct vmm_mem_dma_range ranges[VMM_MEM_DMA_MAX_RANGES];
+		struct vmspace *snapshot;
+		uint64_t aperture_size;
+		unsigned int range_count;
+
+		memset(ranges, 0, sizeof(ranges));
+		snapshot = NULL;
+		aperture_size = 0;
+		range_count = 0;
+		if (vmm_mem_dma_snapshot(&mem, &snapshot, &aperture_size, ranges,
+		    &range_count) != 0 || snapshot != vmspace ||
+	    aperture_size != bytes || range_count != 3 ||
+		    ranges[0].raw_gpa != 0 ||
+		    ranges[0].imm_size != VMM_PCIE_MMIO_BASE ||
+		    ranges[1].raw_gpa != VMM_PCIE_ECAM_END ||
+		    ranges[1].imm_size != VMM_X86_LAPIC_MMIO_GPA -
+		    VMM_PCIE_ECAM_END ||
+		    ranges[2].raw_gpa != VMM_X86_LAPIC_MMIO_GPA +
+		    VMM_X86_LAPIC_MMIO_SIZE ||
+		    ranges[2].imm_size != bytes - ranges[2].raw_gpa) {
+		fail("DMA snapshot excludes architectural holes");
+	}
+	if (snapshot != NULL)
+		vmspace_rel(snapshot);
 	}
 	expect_fault_result(&mem, "fault before lapic hole",
 	    VMM_X86_LAPIC_MMIO_GPA - PAGE_SIZE, VM_PROT_READ, 0, 1,
@@ -355,6 +410,8 @@ expect_backing_lifecycle(void)
 	vmspace = vmm_mem_borrow_vmspace(&mem);
 	if (vmspace == NULL)
 		fail("borrow vmspace");
+	else
+		expect_dma_snapshot(&mem, vmspace);
 	if (vmm_test_vmspace_alloc_min != 0 ||
 	    vmm_test_vmspace_alloc_max !=
 	    VMM_PCIE_ECAM_BASE + 0x10000000ULL)

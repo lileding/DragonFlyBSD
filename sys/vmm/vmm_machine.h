@@ -13,6 +13,7 @@
 #include <sys/thread.h>
 
 #include "vmm_console.h"
+#include "vmm_dma.h"
 #include "vmm_loader.h"
 #include "vmm_mem.h"
 #include "vmm_pcie_root.h"
@@ -42,6 +43,7 @@ struct vmm_machine {
 	struct lwkt_token token_events;
 	struct vmm_vcpu own_mut_vcpu;
 	struct vmm_mem own_mut_mem;
+	struct vmm_dma own_mut_dma;
 	struct vmm_pcie_root own_mut_pcie_root;
 	struct vmm_console own_mut_console;
 	struct taskqueue *own_mut_taskqueue;

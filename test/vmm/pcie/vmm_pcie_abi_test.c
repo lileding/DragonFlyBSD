@@ -48,25 +48,15 @@ static void
 build_start(struct vmm_pcie_abi_start *message)
 {
 	memset(message, 0, sizeof(*message));
-	packet_init(&message->header, VMM_PCIE_ABI_MSG_START, sizeof(*message),
-	    VMM_PCIE_ABI_START_F_DMA_CAPABILITY);
+	packet_init(&message->header, VMM_PCIE_ABI_MSG_START, sizeof(*message), 0);
+	message->header.le_sequence = htole64(7);
 	message->le_device_id = htole64(1);
 	message->le_memory_generation = htole64(7);
-	message->le_dma_segment_count = htole32(2);
-	message->dma_segment[0].le_gpa = htole64(0x1000);
-	message->dma_segment[0].le_iova = htole64(0x80001000);
+	message->le_dma_segment_count = htole32(1);
+	message->dma_segment[0].le_gpa = htole64(0);
 	message->dma_segment[0].le_length = htole64(VMM_PCIE_ABI_PAGE_SIZE);
-	message->dma_segment[0].le_flags = htole32(
-	    VMM_PCIE_ABI_DMA_F_IOVA_VALID);
-	message->dma_segment[0].le_permissions = htole32(
-	    VMM_PCIE_ABI_DMA_PERM_READ | VMM_PCIE_ABI_DMA_PERM_WRITE);
-	message->dma_segment[1].le_gpa = htole64(0x3000);
-	message->dma_segment[1].le_iova = htole64(0x80003000);
-	message->dma_segment[1].le_length = htole64(VMM_PCIE_ABI_PAGE_SIZE);
-	message->dma_segment[1].le_flags = htole32(
-	    VMM_PCIE_ABI_DMA_F_IOVA_VALID);
-	message->dma_segment[1].le_permissions = htole32(
-	    VMM_PCIE_ABI_DMA_PERM_READ | VMM_PCIE_ABI_DMA_PERM_WRITE);
+	message->dma_segment[0].le_permissions = htole32(VMM_PCIE_ABI_DMA_PERM_READ |
+	    VMM_PCIE_ABI_DMA_PERM_WRITE);
 }
 
 static void
@@ -87,6 +77,7 @@ main(void)
 	struct vmm_pcie_abi_consumer_ready consumer_ready_message;
 	struct vmm_pcie_abi_start start_message;
 	struct vmm_pcie_abi_stop stop_message;
+	struct vmm_pcie_abi_stopped stopped_message;
 	struct vmm_pcie_abi_msix msix_message;
 	struct vmm_pcie_abi_failure failure_message;
 	struct vmm_pcie_abi_bar_cap bar_cap_message;
@@ -113,6 +104,11 @@ main(void)
 	build_register(&register_message);
 	register_message.header.le_type = htole16(0xffff);
 	expect_result("unknown packet type", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.header.le_sequence = htole64(0);
+	expect_result("register generation required", &register_message,
 	    sizeof(register_message), EINVAL);
 
 	build_register(&register_message);
@@ -171,7 +167,7 @@ main(void)
 
 	memset(&registered_message, 0, sizeof(registered_message));
 	packet_init(&registered_message.header, VMM_PCIE_ABI_MSG_REGISTERED,
-	    sizeof(registered_message), 0);
+	    sizeof(registered_message), VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY);
 	registered_message.le_device_id = htole64(1);
 	registered_message.le_consumer_id = htole64(2);
 	registered_message.le_attachment_generation = htole64(3);
@@ -188,6 +184,14 @@ main(void)
 	registered_message.le_bar_fd_mask = htole32(1);
 	registered_message.le_bdf = htole32(0x00010000);
 	expect_result("registered bdf segment", &registered_message,
+	    sizeof(registered_message), EINVAL);
+
+	registered_message.le_bdf = htole32(8);
+	expect_result("registered DMA capability", &registered_message,
+	    sizeof(registered_message), 0);
+
+	registered_message.header.le_flags = htole32(0);
+	expect_result("registered DMA capability required", &registered_message,
 	    sizeof(registered_message), EINVAL);
 
 	memset(&consumer_ready_message, 0, sizeof(consumer_ready_message));
@@ -207,44 +211,58 @@ main(void)
 	expect_result("valid start", &start_message, sizeof(start_message), 0);
 
 	build_start(&start_message);
-	start_message.dma_segment[0].le_gpa = htole64(0x1001);
-	expect_result("unaligned dma gpa", &start_message, sizeof(start_message),
-	    EINVAL);
-
-	build_start(&start_message);
-	start_message.dma_segment[0].le_length = htole64(2 * VMM_PCIE_ABI_PAGE_SIZE);
-	start_message.dma_segment[1].le_gpa = htole64(0x2000);
-	expect_result("overlapping dma gpa", &start_message,
+	start_message.header.le_sequence = htole64(8);
+	expect_result("start generation mismatch", &start_message,
 	    sizeof(start_message), EINVAL);
 
 	build_start(&start_message);
-	start_message.dma_segment[1].le_iova = htole64(0x80001000);
-	expect_result("overlapping dma iova", &start_message,
+	start_message.le_dma_segment_count = htole32(0);
+	expect_result("start dma range required", &start_message,
 	    sizeof(start_message), EINVAL);
 
 	build_start(&start_message);
 	start_message.dma_segment[0].le_permissions = htole32(0);
-	expect_result("missing dma permissions", &start_message,
+	expect_result("start dma permissions", &start_message,
 	    sizeof(start_message), EINVAL);
 
 	build_start(&start_message);
-	start_message.header.le_flags = htole32(0);
-	expect_result("dma capability flag required", &start_message,
+	start_message.dma_segment[0].le_iova = htole64(VMM_PCIE_ABI_PAGE_SIZE);
+	expect_result("start DMA iova flag", &start_message,
 	    sizeof(start_message), EINVAL);
 
 	build_start(&start_message);
-	start_message.dma_segment[0].le_flags = htole32(0);
-	expect_result("iova flag required", &start_message, sizeof(start_message),
-	    EINVAL);
+	start_message.dma_segment[0].le_gpa = htole64(1);
+	expect_result("start dma GPA alignment", &start_message,
+	    sizeof(start_message), EINVAL);
 
 	build_start(&start_message);
-	start_message.dma_segment[2].le_gpa = htole64(0x5000);
-	expect_result("unused dma segment", &start_message, sizeof(start_message),
-	    EINVAL);
+	start_message.le_dma_segment_count = htole32(2);
+	start_message.dma_segment[1] = start_message.dma_segment[0];
+	expect_result("start dma overlap", &start_message,
+	    sizeof(start_message), EINVAL);
+
+	build_start(&start_message);
+	start_message.le_dma_segment_count = htole32(2);
+	start_message.dma_segment[1] = start_message.dma_segment[0];
+	start_message.dma_segment[1].le_gpa = htole64(
+	    VMM_PCIE_ABI_PAGE_SIZE);
+	start_message.dma_segment[1].le_flags = htole32(
+	    VMM_PCIE_ABI_DMA_F_IOVA_VALID);
+	start_message.dma_segment[1].le_iova = htole64(
+	    2 * VMM_PCIE_ABI_PAGE_SIZE);
+	expect_result("valid start iova", &start_message,
+	    sizeof(start_message), 0);
+
+	build_start(&start_message);
+	start_message.dma_segment[1].le_length = htole64(
+	    VMM_PCIE_ABI_PAGE_SIZE);
+	expect_result("start dma unused slot", &start_message,
+	    sizeof(start_message), EINVAL);
 
 	memset(&stop_message, 0, sizeof(stop_message));
 	packet_init(&stop_message.header, VMM_PCIE_ABI_MSG_STOP,
 	    sizeof(stop_message), 0);
+	stop_message.header.le_sequence = htole64(7);
 	stop_message.le_device_id = htole64(1);
 	stop_message.le_memory_generation = htole64(7);
 	expect_result("valid stop", &stop_message, sizeof(stop_message), 0);
@@ -252,6 +270,19 @@ main(void)
 	stop_message.le_memory_generation = htole64(0);
 	expect_result("stop generation", &stop_message, sizeof(stop_message),
 	    EINVAL);
+
+	memset(&stopped_message, 0, sizeof(stopped_message));
+	packet_init(&stopped_message.header, VMM_PCIE_ABI_MSG_STOPPED,
+	    sizeof(stopped_message), 0);
+	stopped_message.header.le_sequence = htole64(7);
+	stopped_message.le_device_id = htole64(1);
+	stopped_message.le_memory_generation = htole64(7);
+	expect_result("valid stopped", &stopped_message,
+	    sizeof(stopped_message), 0);
+
+	stopped_message.header.le_sequence = htole64(8);
+	expect_result("stopped generation mismatch", &stopped_message,
+	    sizeof(stopped_message), EINVAL);
 
 	memset(&msix_message, 0, sizeof(msix_message));
 	packet_init(&msix_message.header, VMM_PCIE_ABI_MSG_MSIX,

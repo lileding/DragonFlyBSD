@@ -425,7 +425,7 @@ vmmfs_device_info_format(struct vmmfs_device_leaf *leaf, char *buf,
 		else if (device->mut_registered)
 			provider = "registered";
 		else
-			provider = "attached";
+			provider = "pending";
 		consumer = device->borrow_mut_offload != NULL ? "offloaded" :
 		    "root";
 		n = ksnprintf(buf, cap, "provider=%s\nconsumer=%s\n", provider,

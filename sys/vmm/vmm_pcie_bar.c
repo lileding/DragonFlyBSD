@@ -41,6 +41,7 @@ struct vmm_pcie_bar_fd {
 	struct vm_object *own_mut_object;
 	struct vm_object *own_mut_backing_object;
 	vm_size_t	imm_size;
+	int		mut_revoked;
 	int		atomic_mut_refs;
 };
 
@@ -73,6 +74,7 @@ static int		vmm_pcie_bar_open_fd(struct vmm_pcie_bar_fd *,
 static int		vmm_pcie_bar_make_vnode(cdev_t, struct vnode **);
 static void		vmm_pcie_bar_fd_ref(struct vmm_pcie_bar_fd *);
 static void		vmm_pcie_bar_fd_put(struct vmm_pcie_bar_fd *);
+static void		vmm_pcie_bar_cap_revoke(struct vmm_pcie_bar_fd *);
 static void		vmm_pcie_bar_disarm_fp(struct file *);
 static void		vmm_pcie_bar_fill_vattr(struct vattr *, vm_size_t);
 
@@ -139,12 +141,23 @@ vmm_pcie_bar_create(struct vmm_pcie_bar *bar, uint64_t size, uint32_t flags)
 }
 
 void
+vmm_pcie_bar_revoke(struct vmm_pcie_bar *bar)
+{
+	struct vmm_pcie_bar_fd *cap;
+
+	if (bar == NULL || bar->own_mut_fp == NULL)
+		return;
+	if (devfs_get_cdevpriv(bar->own_mut_fp, (void **)&cap) == 0)
+		vmm_pcie_bar_cap_revoke(cap);
+}
+
+void
 vmm_pcie_bar_destroy(struct vmm_pcie_bar *bar)
 {
 
 	if (bar == NULL)
 		return;
-	/* Sent BAR capabilities retain separate backing-object references. */
+	vmm_pcie_bar_revoke(bar);
 	if (bar->own_mut_fp != NULL) {
 		fp_close(bar->own_mut_fp);
 		bar->own_mut_fp = NULL;
@@ -376,6 +389,32 @@ vmm_pcie_bar_fd_put(struct vmm_pcie_bar_fd *cap)
 	}
 }
 
+static void
+vmm_pcie_bar_cap_revoke(struct vmm_pcie_bar_fd *cap)
+{
+	struct vm_object *backing;
+
+	if (cap == NULL)
+		return;
+	backing = NULL;
+	if (cap->own_mut_object != NULL) {
+		VM_OBJECT_LOCK(cap->own_mut_object);
+		if (!cap->mut_revoked) {
+			cap->mut_revoked = 1;
+			vm_object_page_remove(cap->own_mut_object, 0, 0, FALSE);
+			backing = cap->own_mut_backing_object;
+			cap->own_mut_backing_object = NULL;
+		}
+		VM_OBJECT_UNLOCK(cap->own_mut_object);
+	} else if (!cap->mut_revoked) {
+		cap->mut_revoked = 1;
+		backing = cap->own_mut_backing_object;
+		cap->own_mut_backing_object = NULL;
+	}
+	if (backing != NULL)
+		vm_object_deallocate(backing);
+}
+
 static int
 vmm_pcie_bar_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
     vm_ooffset_t foff, struct ucred *cred, u_short *color)
@@ -386,7 +425,7 @@ vmm_pcie_bar_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
 	cap = handle;
 	if (cap == NULL || color == NULL || (prot & VM_PROT_EXECUTE) != 0 ||
 	    foff < 0 || foff > cap->imm_size || size > cap->imm_size - foff ||
-	    cap->own_mut_backing_object == NULL)
+	    cap->mut_revoked || cap->own_mut_backing_object == NULL)
 		return EINVAL;
 	*color = 0;
 	vmm_pcie_bar_fd_ref(cap);
@@ -422,6 +461,10 @@ vmm_pcie_bar_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	    (prot & VM_PROT_EXECUTE) != 0)
 		return VM_PAGER_ERROR;
 	VM_OBJECT_LOCK(object);
+	if (cap->mut_revoked) {
+		VM_OBJECT_UNLOCK(object);
+		return VM_PAGER_ERROR;
+	}
 	backing = cap->own_mut_backing_object;
 	if (backing != NULL)
 		vm_object_reference_quick(backing);
@@ -448,6 +491,7 @@ vmm_pcie_bar_fd_free(void *arg)
 	cap = arg;
 	if (cap == NULL)
 		return;
+	vmm_pcie_bar_cap_revoke(cap);
 	vp = cap->own_mut_vnode;
 	if (vp != NULL) {
 		cap->own_mut_vnode = NULL;
@@ -488,7 +532,7 @@ vmm_pcie_bar_fd_mmap_single(struct dev_mmap_single_args *ap)
 		return EINVAL;
 	object = cap->own_mut_object;
 	VM_OBJECT_LOCK(object);
-	if (cap->own_mut_backing_object == NULL) {
+	if (cap->mut_revoked || cap->own_mut_backing_object == NULL) {
 		VM_OBJECT_UNLOCK(object);
 		return EINVAL;
 	}

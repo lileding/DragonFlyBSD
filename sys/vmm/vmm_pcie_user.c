@@ -15,17 +15,25 @@
 #include <sys/systm.h>
 #include <sys/un.h>
 #include <sys/uio.h>
+#include <machine/atomic.h>
 
 #include "vmm_device.h"
 #include "vmm_pcie.h"
 #include "vmm_pcie_user.h"
 
 struct vmm_pcie_user {
-	/* This object is owned only by its session kthread. */
+	/*
+	 * Ref map:
+ * The session kthread owns the initial reference.  A machine START/STOP
+	 * holds a temporary reference after snapshotting an attached provider under
+	 * token_registry.  The final release closes own_mut_peer, so a concurrent
+	 * lifecycle send never dereferences a socket freed by session teardown.
+	 */
 	struct vmm_device	*borrow_imm_device;
 	struct socket		*own_mut_peer;
 	enum vmm_pcie_user_role	imm_role;
 	struct vmm_pcie_abi_consumer_ready imm_consumer_ready;
+	int			atomic_mut_refs;
 };
 
 static void	vmm_pcie_user_run(void *arg);
@@ -60,6 +68,7 @@ vmm_pcie_user_open(struct vmm_device *device, enum vmm_pcie_user_role role,
 	user->borrow_imm_device = device;
 	user->own_mut_peer = peer;
 	user->imm_role = role;
+	user->atomic_mut_refs = 1;
 	if (role == VMM_PCIE_USER_PROVIDER) {
 		error = vmm_pcie_device_provider_attach(device, user);
 	} else {
@@ -103,6 +112,74 @@ vmm_pcie_user_force_close(struct vmm_pcie_user *user)
 	return soshutdown(user->own_mut_peer, SHUT_RDWR);
 }
 
+void
+vmm_pcie_user_hold(struct vmm_pcie_user *user)
+{
+
+	if (user != NULL)
+		atomic_add_int(&user->atomic_mut_refs, 1);
+}
+
+void
+vmm_pcie_user_release(struct vmm_pcie_user *user)
+{
+	struct socket *peer;
+
+	if (user == NULL || atomic_fetchadd_int(&user->atomic_mut_refs, -1) != 1)
+		return;
+	peer = user->own_mut_peer;
+	user->own_mut_peer = NULL;
+	if (peer != NULL)
+		(void)soclose(peer, 0);
+	kfree(user, M_TEMP);
+}
+
+int
+vmm_pcie_user_send_start(struct vmm_pcie_user *user,
+    const struct vmm_pcie_abi_start *message)
+{
+	struct iovec iov;
+	struct uio uio;
+
+	if (user == NULL || user->imm_role != VMM_PCIE_USER_PROVIDER ||
+	    user->own_mut_peer == NULL || message == NULL)
+		return EINVAL;
+	iov.iov_base = __DECONST(void *, message);
+	iov.iov_len = sizeof(*message);
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = 0;
+	uio.uio_resid = sizeof(*message);
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_rw = UIO_WRITE;
+	uio.uio_td = curthread;
+	return sosend(user->own_mut_peer, NULL, &uio, NULL, NULL, 0,
+	    curthread);
+}
+
+int
+vmm_pcie_user_send_stop(struct vmm_pcie_user *user,
+    const struct vmm_pcie_abi_stop *message)
+{
+	struct iovec iov;
+	struct uio uio;
+
+	if (user == NULL || user->imm_role != VMM_PCIE_USER_PROVIDER ||
+	    user->own_mut_peer == NULL || message == NULL)
+		return EINVAL;
+	iov.iov_base = __DECONST(void *, message);
+	iov.iov_len = sizeof(*message);
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = 0;
+	uio.uio_resid = sizeof(*message);
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_rw = UIO_WRITE;
+	uio.uio_td = curthread;
+	return sosend(user->own_mut_peer, NULL, &uio, NULL, NULL, 0,
+	    curthread);
+}
+
 static void
 vmm_pcie_user_run(void *arg)
 {
@@ -113,51 +190,61 @@ vmm_pcie_user_run(void *arg)
 		vmm_pcie_user_provider_run(user);
 	else
 		vmm_pcie_user_consumer_run(user);
+	vmm_pcie_user_release(user);
 	kthread_exit();
 }
 
 static void
 vmm_pcie_user_provider_run(struct vmm_pcie_user *user)
 {
-	struct vmm_pcie_abi_register request;
+	union {
+		struct vmm_pcie_abi_register register_message;
+		struct vmm_pcie_abi_msix msix_message;
+		struct vmm_pcie_abi_stopped stopped_message;
+	} request;
 	struct vmm_pcie_abi_registered response;
-	struct file *bar_fps[VMM_PCIE_ABI_MAX_BARS];
-	struct vmm_pcie_abi_start message;
+	struct file *fps[VMM_PCIE_ABI_MAX_BARS + 1];
 	size_t size;
-	unsigned int bar_count;
+	unsigned int file_count;
+	unsigned int i;
 	int error;
 
-	error = vmm_pcie_user_receive(user->own_mut_peer, &request,
-	    sizeof(request), &size);
-	if (error == 0 && (size != sizeof(request) ||
-	    le16toh(request.header.le_type) != VMM_PCIE_ABI_MSG_REGISTER))
-		error = EPROTO;
-	if (error == 0) {
-		error = vmm_pcie_device_provider_register(user->borrow_imm_device,
-		    user, &request, &response, bar_fps, &bar_count);
-	}
-	if (error == 0) {
-		error = kern_sendmsg_rights(user->own_mut_peer, &response,
-		    sizeof(response), bar_fps, bar_count, 0);
-	}
+	error = 0;
 	while (error == 0) {
-		error = vmm_pcie_user_receive(user->own_mut_peer, &message,
-		    sizeof(message), &size);
+		error = vmm_pcie_user_receive(user->own_mut_peer, &request,
+		    sizeof(request), &size);
 		if (error != 0)
 			break;
 		if (size == 0) {
 			error = ECONNRESET;
 			break;
 		}
-		if (vmm_pcie_abi_validate(&message, size) != 0) {
+		if (vmm_pcie_abi_validate(&request, size) != 0) {
 			error = EPROTO;
 			break;
 		}
-		switch (le16toh(message.header.le_type)) {
+		switch (le16toh(request.register_message.header.le_type)) {
+		case VMM_PCIE_ABI_MSG_REGISTER:
+			file_count = 0;
+			error = vmm_pcie_device_provider_register(
+			    user->borrow_imm_device, user, &request.register_message,
+			    &response, fps, &file_count);
+			if (error == 0) {
+				error = kern_sendmsg_rights(user->own_mut_peer, &response,
+				    sizeof(response), fps, file_count, 0);
+			}
+			for (i = 0; i < file_count; i++)
+				fdrop(fps[i]);
+			break;
+		case VMM_PCIE_ABI_MSG_STOPPED:
+			error = vmm_pcie_device_provider_stopped(
+			    user->borrow_imm_device, user,
+			    &request.stopped_message);
+			break;
 		case VMM_PCIE_ABI_MSG_MSIX:
 			error = vmm_pcie_device_provider_msix(
 			    user->borrow_imm_device, user,
-			    (const struct vmm_pcie_abi_msix *)&message);
+			    &request.msix_message);
 			break;
 		default:
 			error = EPROTO;
@@ -165,8 +252,6 @@ vmm_pcie_user_provider_run(struct vmm_pcie_user *user)
 		}
 	}
 	vmm_pcie_device_provider_detach(user->borrow_imm_device, user);
-	(void)soclose(user->own_mut_peer, 0);
-	kfree(user, M_TEMP);
 }
 
 static void
@@ -196,8 +281,6 @@ vmm_pcie_user_consumer_run(struct vmm_pcie_user *user)
 			error = size == 0 ? ECONNRESET : EPROTO;
 	}
 	vmm_pcie_device_consumer_detach(user->borrow_imm_device, user);
-	(void)soclose(user->own_mut_peer, 0);
-	kfree(user, M_TEMP);
 }
 
 static int

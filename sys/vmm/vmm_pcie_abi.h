@@ -5,7 +5,10 @@
  *
  * Every multi-byte field is little-endian on the wire.  Each SOCK_SEQPACKET
  * message has one of the fixed-size layouts below; SCM_RIGHTS carries the
- * capability file descriptors associated with REGISTERED, BAR_CAP, or START.
+ * capability file descriptors associated with REGISTERED or BAR_CAP.  START
+ * carries only the run's DMA aperture description; REGISTERED carries the
+ * corresponding capability fds.  The header sequence is the run generation
+ * for START, REGISTER, REGISTERED, STOP, and STOPPED.
  */
 #ifndef VMM_PCIE_ABI_H
 #define VMM_PCIE_ABI_H
@@ -13,7 +16,7 @@
 #include <sys/types.h>
 
 #define VMM_PCIE_ABI_MAGIC			0x564d4d50U
-#define VMM_PCIE_ABI_VERSION			2U
+#define VMM_PCIE_ABI_VERSION			3U
 #define VMM_PCIE_ABI_PAGE_SIZE			4096ULL
 #define VMM_PCIE_ABI_MAX_BARS			6U
 #define VMM_PCIE_ABI_MAX_MSIX_VECTORS		2048U
@@ -21,7 +24,7 @@
 #define VMM_PCIE_ABI_FAILURE_TEXT_SIZE		96U
 
 /*
- * v2 reserves the beginning of BAR0 for the standard MSI-X table and PBA.
+ * The ABI reserves the beginning of BAR0 for the standard MSI-X table and PBA.
  * A provider's device-specific BAR0 layout starts after
  * VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(vectors).
  */
@@ -60,6 +63,7 @@ enum vmm_pcie_abi_message_type {
 	VMM_PCIE_ABI_MSG_CONSUMER_READY,
 	VMM_PCIE_ABI_MSG_START,
 	VMM_PCIE_ABI_MSG_STOP,
+	VMM_PCIE_ABI_MSG_STOPPED,
 	VMM_PCIE_ABI_MSG_MSIX,
 	VMM_PCIE_ABI_MSG_FAILURE,
 	VMM_PCIE_ABI_MSG_BAR_CAP,
@@ -74,7 +78,7 @@ enum vmm_pcie_abi_message_type {
 #define VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT	0x00000008U
 #define VMM_PCIE_ABI_BAR_F_DOORBELL_TRAPPED	0x00000010U
 
-#define VMM_PCIE_ABI_START_F_DMA_CAPABILITY	0x00000001U
+#define VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY	0x00000001U
 
 #define VMM_PCIE_ABI_DMA_F_IOVA_VALID		0x00000001U
 
@@ -150,10 +154,16 @@ struct vmm_pcie_abi_start {
 	uint32_t	le_dma_segment_count;
 	uint32_t	le_reserved;
 	struct vmm_pcie_abi_dma_segment
-		dma_segment[VMM_PCIE_ABI_MAX_DMA_SEGMENTS];
+			dma_segment[VMM_PCIE_ABI_MAX_DMA_SEGMENTS];
 } __attribute__((__packed__));
 
 struct vmm_pcie_abi_stop {
+	struct vmm_pcie_abi_header header;
+	uint64_t	le_device_id;
+	uint64_t	le_memory_generation;
+} __attribute__((__packed__));
+
+struct vmm_pcie_abi_stopped {
 	struct vmm_pcie_abi_header header;
 	uint64_t	le_device_id;
 	uint64_t	le_memory_generation;
@@ -202,6 +212,8 @@ _Static_assert(sizeof(struct vmm_pcie_abi_start) == 1072,
     "vPCIe ABI start size");
 _Static_assert(sizeof(struct vmm_pcie_abi_stop) == 40,
     "vPCIe ABI stop size");
+_Static_assert(sizeof(struct vmm_pcie_abi_stopped) == 40,
+    "vPCIe ABI stopped size");
 _Static_assert(sizeof(struct vmm_pcie_abi_msix) == 48,
     "vPCIe ABI MSI-X size");
 _Static_assert(sizeof(struct vmm_pcie_abi_failure) == 144,

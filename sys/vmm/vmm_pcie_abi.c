@@ -22,16 +22,20 @@ static int	vmm_pcie_abi_header_valid(
 		    size_t size, uint32_t allowed_flags);
 static int	vmm_pcie_abi_msix_valid(
 		    const struct vmm_pcie_abi_msix *message);
-static int	vmm_pcie_abi_range_overlaps(uint64_t a_start, uint64_t a_length,
-		    uint64_t b_start, uint64_t b_length);
 static int	vmm_pcie_abi_register_valid(
 		    const struct vmm_pcie_abi_register *message);
 static int	vmm_pcie_abi_registered_valid(
 		    const struct vmm_pcie_abi_registered *message);
+static int	vmm_pcie_abi_dma_segment_valid(
+		    const struct vmm_pcie_abi_dma_segment *segment);
+static int	vmm_pcie_abi_range_overlaps(uint64_t a_start,
+		    uint64_t a_length, uint64_t b_start, uint64_t b_length);
 static int	vmm_pcie_abi_start_valid(
 		    const struct vmm_pcie_abi_start *message);
 static int	vmm_pcie_abi_stop_valid(
 		    const struct vmm_pcie_abi_stop *message);
+static int	vmm_pcie_abi_stopped_valid(
+		    const struct vmm_pcie_abi_stopped *message);
 
 int
 vmm_pcie_abi_validate(const void *message, size_t size)
@@ -64,6 +68,10 @@ vmm_pcie_abi_validate(const void *message, size_t size)
 		if (size != sizeof(struct vmm_pcie_abi_stop))
 			return EINVAL;
 		return vmm_pcie_abi_stop_valid(message);
+	case VMM_PCIE_ABI_MSG_STOPPED:
+		if (size != sizeof(struct vmm_pcie_abi_stopped))
+			return EINVAL;
+		return vmm_pcie_abi_stopped_valid(message);
 	case VMM_PCIE_ABI_MSG_MSIX:
 		if (size != sizeof(struct vmm_pcie_abi_msix))
 			return EINVAL;
@@ -197,22 +205,6 @@ vmm_pcie_abi_msix_valid(const struct vmm_pcie_abi_msix *message)
 }
 
 static int
-vmm_pcie_abi_range_overlaps(uint64_t a_start, uint64_t a_length,
-    uint64_t b_start, uint64_t b_length)
-{
-	uint64_t a_end;
-	uint64_t b_end;
-
-	if (a_length == 0 || b_length == 0 ||
-	    a_start > (uint64_t)-1 - a_length ||
-	    b_start > (uint64_t)-1 - b_length)
-		return 1;
-	a_end = a_start + a_length;
-	b_end = b_start + b_length;
-	return a_start < b_end && b_start < a_end;
-}
-
-static int
 vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 {
 	uint64_t bar0_size;
@@ -224,6 +216,7 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 	if (!vmm_pcie_abi_header_valid(&message->header,
 	    VMM_PCIE_ABI_MSG_REGISTER, sizeof(*message),
 	    VMM_PCIE_ABI_REGISTER_F_MSIX | VMM_PCIE_ABI_REGISTER_F_PARENT) ||
+	    le64toh(message->header.le_sequence) == 0 ||
 	    le16toh(message->le_vendor_id) == 0 ||
 	    le16toh(message->le_vendor_id) == 0xffff ||
 	    le16toh(message->le_device_id) == 0 ||
@@ -268,7 +261,9 @@ vmm_pcie_abi_registered_valid(const struct vmm_pcie_abi_registered *message)
 	uint16_t msix_vectors;
 
 	if (!vmm_pcie_abi_header_valid(&message->header,
-	    VMM_PCIE_ABI_MSG_REGISTERED, sizeof(*message), 0) ||
+	    VMM_PCIE_ABI_MSG_REGISTERED, sizeof(*message),
+	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) ||
+	    le64toh(message->header.le_sequence) == 0 ||
 	    le64toh(message->le_device_id) == 0 ||
 	    le64toh(message->le_consumer_id) == 0 ||
 	    le64toh(message->le_attachment_generation) == 0 ||
@@ -278,7 +273,9 @@ vmm_pcie_abi_registered_valid(const struct vmm_pcie_abi_registered *message)
 	bar_fd_mask = le32toh(message->le_bar_fd_mask);
 	known_bar_fd_mask = (1U << VMM_PCIE_ABI_MAX_BARS) - 1;
 	msix_vectors = le16toh(message->le_msix_vectors);
-	if ((bar_fd_mask & ~known_bar_fd_mask) != 0 || msix_vectors == 0 ||
+	if ((le32toh(message->header.le_flags) &
+	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0 ||
+	    (bar_fd_mask & ~known_bar_fd_mask) != 0 || msix_vectors == 0 ||
 	    msix_vectors > VMM_PCIE_ABI_MAX_MSIX_VECTORS)
 		return EINVAL;
 	return 0;
@@ -287,81 +284,83 @@ vmm_pcie_abi_registered_valid(const struct vmm_pcie_abi_registered *message)
 static int
 vmm_pcie_abi_start_valid(const struct vmm_pcie_abi_start *message)
 {
-	uint32_t flags;
 	uint32_t count;
 	unsigned int i;
 	unsigned int j;
 
 	if (!vmm_pcie_abi_header_valid(&message->header,
-	    VMM_PCIE_ABI_MSG_START, sizeof(*message),
-	    VMM_PCIE_ABI_START_F_DMA_CAPABILITY) ||
+	    VMM_PCIE_ABI_MSG_START, sizeof(*message), 0) ||
 	    le64toh(message->le_device_id) == 0 ||
 	    le64toh(message->le_memory_generation) == 0 ||
+	    le64toh(message->header.le_sequence) !=
+	    le64toh(message->le_memory_generation) ||
 	    message->le_reserved != 0)
 		return EINVAL;
-	flags = le32toh(message->header.le_flags);
 	count = le32toh(message->le_dma_segment_count);
-	if (count > VMM_PCIE_ABI_MAX_DMA_SEGMENTS ||
-	    ((flags & VMM_PCIE_ABI_START_F_DMA_CAPABILITY) == 0 && count != 0) ||
-	    ((flags & VMM_PCIE_ABI_START_F_DMA_CAPABILITY) != 0 && count == 0))
+	if (count == 0 || count > VMM_PCIE_ABI_MAX_DMA_SEGMENTS)
 		return EINVAL;
 	for (i = 0; i < count; i++) {
-		const struct vmm_pcie_abi_dma_segment *segment;
-		uint64_t gpa;
-		uint64_t iova;
-		uint64_t length;
-		uint32_t segment_flags;
-		uint32_t permissions;
-
-		segment = &message->dma_segment[i];
-		gpa = le64toh(segment->le_gpa);
-		iova = le64toh(segment->le_iova);
-		length = le64toh(segment->le_length);
-		segment_flags = le32toh(segment->le_flags);
-		permissions = le32toh(segment->le_permissions);
-		if ((gpa & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
-		    length == 0 || length > (uint64_t)-1 - gpa ||
-		    (length & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
-		    (segment_flags & ~VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0 ||
-		    permissions == 0 ||
-		    (permissions & ~(VMM_PCIE_ABI_DMA_PERM_READ |
-		    VMM_PCIE_ABI_DMA_PERM_WRITE)) != 0)
+		if (!vmm_pcie_abi_dma_segment_valid(&message->dma_segment[i]))
 			return EINVAL;
-		if ((segment_flags & VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0) {
-			if ((iova & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
-			    length > (uint64_t)-1 - iova)
-				return EINVAL;
-		} else if (iova != 0) {
-			return EINVAL;
-		}
 		for (j = 0; j < i; j++) {
-			const struct vmm_pcie_abi_dma_segment *previous;
-			uint32_t previous_flags;
-
-			previous = &message->dma_segment[j];
-			if (vmm_pcie_abi_range_overlaps(gpa, length,
-			    le64toh(previous->le_gpa),
-			    le64toh(previous->le_length)))
-				return EINVAL;
-			previous_flags = le32toh(previous->le_flags);
-			if ((segment_flags & VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0 &&
-			    (previous_flags & VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0 &&
-			    vmm_pcie_abi_range_overlaps(iova, length,
-			    le64toh(previous->le_iova),
-			    le64toh(previous->le_length)))
+			if (vmm_pcie_abi_range_overlaps(
+			    le64toh(message->dma_segment[i].le_gpa),
+			    le64toh(message->dma_segment[i].le_length),
+			    le64toh(message->dma_segment[j].le_gpa),
+			    le64toh(message->dma_segment[j].le_length)))
 				return EINVAL;
 		}
 	}
 	for (; i < VMM_PCIE_ABI_MAX_DMA_SEGMENTS; i++) {
-		const struct vmm_pcie_abi_dma_segment *segment;
-
-		segment = &message->dma_segment[i];
-		if (segment->le_gpa != 0 || segment->le_iova != 0 ||
-		    segment->le_length != 0 || segment->le_flags != 0 ||
-		    segment->le_permissions != 0)
+		if (message->dma_segment[i].le_gpa != 0 ||
+		    message->dma_segment[i].le_iova != 0 ||
+		    message->dma_segment[i].le_length != 0 ||
+		    message->dma_segment[i].le_flags != 0 ||
+		    message->dma_segment[i].le_permissions != 0)
 			return EINVAL;
 	}
 	return 0;
+}
+
+static int
+vmm_pcie_abi_dma_segment_valid(const struct vmm_pcie_abi_dma_segment *segment)
+{
+	uint64_t gpa;
+	uint64_t iova;
+	uint64_t length;
+	uint32_t flags;
+	uint32_t permissions;
+
+	gpa = le64toh(segment->le_gpa);
+	iova = le64toh(segment->le_iova);
+	length = le64toh(segment->le_length);
+	flags = le32toh(segment->le_flags);
+	permissions = le32toh(segment->le_permissions);
+	if ((gpa & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 || length == 0 ||
+	    (length & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
+	    length > UINT64_MAX - gpa ||
+	    (flags & ~VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0 ||
+	    (permissions & ~(VMM_PCIE_ABI_DMA_PERM_READ |
+	    VMM_PCIE_ABI_DMA_PERM_WRITE)) != 0 || permissions == 0)
+		return 0;
+	if ((flags & VMM_PCIE_ABI_DMA_F_IOVA_VALID) != 0) {
+		if (iova == 0 || (iova & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
+		    length > UINT64_MAX - iova)
+			return 0;
+	} else if (iova != 0) {
+		return 0;
+	}
+	return 1;
+}
+
+static int
+vmm_pcie_abi_range_overlaps(uint64_t a_start, uint64_t a_length,
+    uint64_t b_start, uint64_t b_length)
+{
+
+	if (a_start <= b_start)
+		return b_start - a_start < a_length;
+	return a_start - b_start < b_length;
 }
 
 static int
@@ -370,7 +369,23 @@ vmm_pcie_abi_stop_valid(const struct vmm_pcie_abi_stop *message)
 	if (!vmm_pcie_abi_header_valid(&message->header,
 	    VMM_PCIE_ABI_MSG_STOP, sizeof(*message), 0) ||
 	    le64toh(message->le_device_id) == 0 ||
-	    le64toh(message->le_memory_generation) == 0)
+	    le64toh(message->le_memory_generation) == 0 ||
+	    le64toh(message->header.le_sequence) !=
+	    le64toh(message->le_memory_generation))
+		return EINVAL;
+	return 0;
+}
+
+static int
+vmm_pcie_abi_stopped_valid(const struct vmm_pcie_abi_stopped *message)
+{
+
+	if (!vmm_pcie_abi_header_valid(&message->header,
+	    VMM_PCIE_ABI_MSG_STOPPED, sizeof(*message), 0) ||
+	    le64toh(message->le_device_id) == 0 ||
+	    le64toh(message->le_memory_generation) == 0 ||
+	    le64toh(message->header.le_sequence) !=
+	    le64toh(message->le_memory_generation))
 		return EINVAL;
 	return 0;
 }

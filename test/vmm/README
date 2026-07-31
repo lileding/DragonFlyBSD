@@ -25,6 +25,8 @@ The offline gate covers:
   output and manifest parser acceptance using a synthetic bzImage header.  If
   `LINUX_KERNEL` or `/var/tmp/bzImage` is present, it also runs a real-image
   case with optional `LINUX_INITRAMFS`.
+- `pcie/vmm_pcie_dma_provider_check.sh`: P7 user-provider compiler gate for
+  the `START + SCM_RIGHTS` DMA capability and its later `STOP`/fault path.
 - `linux/linux_initrd_rootfs_build.sh`: builds `/var/tmp/dfvmm-linux-initrd-rootfs.gz`
   from an Alpine initramfs base.  This is the in-memory Linux rootfs used before
   vPCIe exists; it does not require or probe any boot media.
@@ -66,6 +68,14 @@ image selected by the harness:
 - `linux/linux_initrd_rootfs_test.sh`
 - `linux/linux_core_lifecycle_test.sh`
 - `linux/linux_console_terminal_test.sh`
+- `pcie/vmm_pcie_dma_test.sh`
+
+`pcie/vmm_pcie_dma_test.sh` requires a booted DragonFly kernel exporting
+`vm_object_mmap_revoke_locked()`.  It starts a controlled looping guest, maps
+the provider's per-run DMA capability, force-stops the machine, and requires
+the retained user mapping to fault with `SIGBUS` or `SIGSEGV`.  Do not run it
+against a kernel that predates the paired VM-core change: the module is
+expected to reject such a load due to the unresolved symbol.
 
 `lifecycle/lifecycle_capability_soak_test.sh` is the production lifecycle/pager
 gate.  It repeats a real one-vCPU start/force-stop/delete/unmount/unload path,
