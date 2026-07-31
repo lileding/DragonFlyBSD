@@ -15,6 +15,7 @@ LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_pcie_dma_loader}
 WRAPPER=${VMM_LOADER_WRAPPER:-/var/tmp/vmm_pcie_dma_loader_wrapper}
 PROVIDER=${VMM_PCIE_DMA_PROVIDER:-/var/tmp/vmm_pcie_dma_provider}
 PROVIDER_LOG=${VMM_PCIE_DMA_PROVIDER_LOG:-/var/tmp/dfvmm-pcie-dma-provider.log}
+UNLOAD_LOG=${VMM_PCIE_DMA_UNLOAD_LOG:-/var/tmp/dfvmm-pcie-dma-unload.log}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-$$-mount_vmm}
 TIMEOUT=${VMM_TIMEOUT:-20}
 
@@ -119,7 +120,7 @@ cleanup()
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
 		kldunload vmm >>"$LOG" 2>&1
 	fi
-	rm -f "$MOUNT_HELPER" "$LOADER" "$WRAPPER" "$PROVIDER"
+	rm -f "$MOUNT_HELPER" "$LOADER" "$WRAPPER" "$PROVIDER" "$UNLOAD_LOG"
 }
 
 : >"$LOG" || exit 1
@@ -163,8 +164,6 @@ run rm "$(machine)/stopped"
 wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_DMA_PROVIDER_READY' dma_start
 printf '%s\n' force >"$(machine)/stopped" || fail "force stop"
 wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_DMA_PROVIDER_REVOKED' dma_revoke
-wait "$PROVIDER_PID" || fail "provider exit"
-PROVIDER_PID=
 remove_path "$(device)" || fail "remove device"
 remove_path "$(machine)" || fail "remove machine"
 i=0
@@ -174,5 +173,19 @@ while [ "$i" -lt "$TIMEOUT" ]; do
 	i=$((i + 1))
 done
 [ "$MOUNTED" -eq 0 ] || fail "umount $MNT"
+: >"$UNLOAD_LOG" || fail "create unload log"
+say '+ kldunload vmm (expect EBUSY while revoked mappings remain)'
+if kldunload vmm >"$UNLOAD_LOG" 2>&1; then
+	cat "$UNLOAD_LOG" >>"$LOG"
+	fail "kldunload succeeded with retained capability mappings"
+fi
+cat "$UNLOAD_LOG" >>"$LOG"
+grep -qi 'device busy' "$UNLOAD_LOG" ||
+	fail "kldunload did not report EBUSY for retained mappings"
+kldstat -n vmm >/dev/null 2>&1 ||
+	fail "vmm unloaded despite retained capability mappings"
+kill "$PROVIDER_PID" || fail "terminate retained provider"
+wait "$PROVIDER_PID" >/dev/null 2>&1
+PROVIDER_PID=
 run kldunload vmm; LOADED=0
-say 'PASS: vPCIe DMA capability revoke'
+say 'PASS: vPCIe BAR and DMA revoke retains module unload busy'

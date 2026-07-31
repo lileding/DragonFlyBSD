@@ -86,7 +86,11 @@ main(int argc, char **argv)
 	printf("DFVMM_PCIE_DMA_PROVIDER_REVOKED\n");
 	if (fflush(stdout) != 0)
 		err(1, "flush revoke");
-	return 0;
+	/* Keep the revoked mappings alive until the harness terminates us. */
+	if (close(fd) != 0)
+		err(1, "close provider");
+	for (;;)
+		(void)pause();
 }
 
 static void
