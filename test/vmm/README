@@ -28,6 +28,10 @@ The offline gate covers:
 - `pcie/vmm_pcie_dma_provider_check.sh`: P7 user-provider compiler gate for
   the `START -> REGISTER -> REGISTERED` exchange and later `STOPPED`/fault
   path.
+- `pcie/vmm_pcie_dma_reset_provider_check.sh`: P7 compiler gate for one
+  retained provider session across two DMA generations.
+- `pcie/vmm_pcie_dma_loss_provider_check.sh`: P7 compiler gate for final
+  provider close with a retained mapping holder.
 - `pcie/vmm_pcie_ecam_provider_check.sh`: P3 user-provider compiler gate for
   `START`-driven Linux ECAM enumeration.
 - `pcie/vmm_pcie_bar_provider_check.sh`: P4 user-provider compiler gate for
@@ -79,6 +83,8 @@ image selected by the harness:
 - `pcie/vmm_pcie_bar_test.sh`
 - `pcie/vmm_pcie_msix_test.sh`
 - `pcie/vmm_pcie_dma_test.sh`
+- `pcie/vmm_pcie_dma_reset_test.sh`
+- `pcie/vmm_pcie_dma_loss_test.sh`
 
 `pcie/vmm_pcie_ecam_test.sh` boots the initramfs Linux guest with a provider
 that must remain `pending` before machine start.  The provider accepts `START`,
@@ -104,6 +110,15 @@ retained mappings to fault with `SIGBUS` or `SIGSEGV`.  It then deletes the
 machine and unmounts vmmfs while the provider still retains those mappings:
 `kldunload vmm` must return `EBUSY`.  After the provider exits, module unload
 must succeed.
+
+`pcie/vmm_pcie_dma_reset_test.sh` keeps one provider session across an
+external `reset force`.  It requires the old BAR and DMA mappings to fault
+before the provider may register again with a strictly newer DMA generation.
+
+`pcie/vmm_pcie_dma_loss_test.sh` closes the provider without `STOPPED` while
+the machine is running.  A child that retains only the mapped BAR and DMA
+capabilities must see both fault; those mappings keep `kldunload` busy until
+the child exits.
 
 `lifecycle/lifecycle_capability_soak_test.sh` is the production lifecycle/pager
 gate.  It repeats a real one-vCPU start/force-stop/delete/unmount/unload path,
