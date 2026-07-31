@@ -24,6 +24,7 @@ run sh "$ROOT/test/vmm/pcie/vmm_pcie_abi_check.sh"
 run sh "$ROOT/test/vmm/pcie/vmm_pcie_dma_provider_check.sh"
 run sh "$ROOT/test/vmm/pcie/vmm_pcie_ecam_provider_check.sh"
 run sh "$ROOT/test/vmm/pcie/vmm_pcie_bar_provider_check.sh"
+run sh "$ROOT/test/vmm/pcie/vmm_pcie_msix_provider_check.sh"
 run sh "$ROOT/test/vmm/pcie/vmm_pcie_config_check.sh"
 run sh "$ROOT/test/vmm/pcie/vmm_pcie_relation_check.sh"
 printf '%s\n' 'PASS: vmm offline checks'

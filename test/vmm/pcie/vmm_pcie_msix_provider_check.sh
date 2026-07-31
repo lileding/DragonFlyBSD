@@ -1,0 +1,18 @@
+#!/bin/sh
+# Offline compiler gate for the START-driven P5 MSI-X provider.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$ROOT/../../.." && pwd)
+BIN=${VMM_PCIE_MSIX_PROVIDER_BIN:-/var/tmp/vmm_pcie_msix_provider}
+
+cleanup()
+{
+	rm -f "$BIN"
+}
+
+trap cleanup EXIT INT TERM
+
+cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" \
+	"$REPO/sys/vmm/vmm_pcie_abi.c" \
+	"$ROOT/vmm_pcie_msix_provider.c" -o "$BIN"

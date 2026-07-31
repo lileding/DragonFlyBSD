@@ -134,6 +134,24 @@ consumer=root')
 	return 1
 }
 
+wait_device_pending()
+{
+	i=0
+
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		state=$(cat "$(device)/state" 2>/dev/null) || state=
+		case "$state" in
+		'provider=pending
+consumer=root')
+			return 0
+			;;
+		esac
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 remove_path()
 {
 	path=$1
@@ -231,12 +249,13 @@ run mv "$(host_device)" "$(device)"
 : >"$PROVIDER_LOG" || fail "create provider log"
 "$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
 PROVIDER_PID=$!
-wait_device_state || fail "provider did not register"
-wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_READY' provider ||
-	fail "provider did not map BAR"
+wait_device_pending || fail "provider did not remain pending before START"
 
 start_console_reader
 run rm "$(mach)/stopped"
+wait_device_state || fail "provider did not register after START"
+wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_READY' provider ||
+	fail "provider did not map BAR after START"
 wait_pattern "$CONSOLE_LOG" 'DFVMM_LINUX_CONSOLE_READY' console ||
 	fail "Linux console was not ready"
 run sysctl debug.vmm.svm_trace=1
