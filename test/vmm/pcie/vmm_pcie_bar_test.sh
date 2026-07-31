@@ -219,14 +219,24 @@ printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
 run mkdir "$(host_device)"
 run mv "$(host_device)" "$(device)"
 : >"$PROVIDER_LOG" || fail "create provider log"
-"$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
-PROVIDER_PID=$!
-wait_device_state || fail "provider did not register"
-wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_BAR_PROVIDER_READY' provider ||
-	fail "provider did not map BAR"
+	"$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
+	PROVIDER_PID=$!
+	i=0
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		state=$(cat "$(device)/state" 2>/dev/null) || state=
+		[ "$state" = 'provider=pending
+consumer=root' ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+[ "${state-}" = 'provider=pending
+consumer=root' ] || fail "provider was not pending before START"
 
-start_console_reader
-run rm "$(mach)/stopped"
+	start_console_reader
+	run rm "$(mach)/stopped"
+	wait_device_state || fail "provider did not register after START"
+	wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_BAR_PROVIDER_READY' provider ||
+	fail "provider did not map BAR"
 wait_pattern "$CONSOLE_LOG" 'DFVMM_LINUX_CONSOLE_READY' console ||
 	fail "Linux console was not ready"
 printf '%s\n' 'dfvmm-pcie-bar-probe' >"$(mach)/console" ||

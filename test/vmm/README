@@ -30,6 +30,8 @@ The offline gate covers:
   path.
 - `pcie/vmm_pcie_ecam_provider_check.sh`: P3 user-provider compiler gate for
   `START`-driven Linux ECAM enumeration.
+- `pcie/vmm_pcie_bar_provider_check.sh`: P4 user-provider compiler gate for
+  `START`-driven direct BAR mapping.
 - `linux/linux_initrd_rootfs_build.sh`: builds `/var/tmp/dfvmm-linux-initrd-rootfs.gz`
   from an Alpine initramfs base.  This is the in-memory Linux rootfs used before
   vPCIe exists; it does not require or probe any boot media.
@@ -72,6 +74,7 @@ image selected by the harness:
 - `linux/linux_core_lifecycle_test.sh`
 - `linux/linux_console_terminal_test.sh`
 - `pcie/vmm_pcie_ecam_test.sh`
+- `pcie/vmm_pcie_bar_test.sh`
 - `pcie/vmm_pcie_dma_test.sh`
 
 `pcie/vmm_pcie_ecam_test.sh` boots the initramfs Linux guest with a provider
@@ -79,6 +82,11 @@ that must remain `pending` before machine start.  The provider accepts `START`,
 performs generation-matched registration, verifies the BAR and DMA capability
 handoff, then the guest console confirms MCFG enumeration of
 `0000:00:01.0 [1b36:df01]`.
+
+`pcie/vmm_pcie_bar_test.sh` uses the same pending-to-registered lifecycle,
+then verifies that Linux enables `PCI_COMMAND.MEMORY`, reads and writes the
+shared BAR page, and that the provider observes the guest write without an
+MMIO forwarding loop.
 
 `pcie/vmm_pcie_dma_test.sh` uses the boot kernel's existing
 `OBJT_MGTDEVICE` and `vm_object_page_remove()` behavior; it needs no paired

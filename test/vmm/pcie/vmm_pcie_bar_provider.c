@@ -20,13 +20,16 @@
 #define VMM_PCIE_BAR_INITIAL_VALUE	0x11223344U
 #define VMM_PCIE_BAR_GUEST_VALUE	0x55667788U
 
-static void build_register(struct vmm_pcie_abi_register *message);
-static int recv_registered(int fd);
+static void build_register(struct vmm_pcie_abi_register *message,
+	    uint64_t generation);
+static int recv_registered(int fd, const struct vmm_pcie_abi_start *start);
+static void recv_start(int fd, struct vmm_pcie_abi_start *message);
 
 int
 main(int argc, char **argv)
 {
 	struct vmm_pcie_abi_register message;
+	struct vmm_pcie_abi_start start;
 	volatile uint32_t *bar;
 	char path[1024];
 	ssize_t n;
@@ -42,11 +45,12 @@ main(int argc, char **argv)
 	fd = open(path, O_RDWR);
 	if (fd < 0)
 		err(1, "open %s", path);
-	build_register(&message);
+	recv_start(fd, &start);
+	build_register(&message, le64toh(start.header.le_sequence));
 	n = send(fd, &message, sizeof(message), 0);
 	if (n != sizeof(message))
 		errno = n < 0 ? errno : EPROTO, err(1, "send REGISTER");
-	bar_fd = recv_registered(fd);
+	bar_fd = recv_registered(fd, &start);
 	bar = mmap(NULL, VMM_PCIE_ABI_PAGE_SIZE, PROT_READ | PROT_WRITE,
 	    MAP_SHARED, bar_fd, 0);
 	if (bar == MAP_FAILED)
@@ -68,7 +72,7 @@ main(int argc, char **argv)
 }
 
 static void
-build_register(struct vmm_pcie_abi_register *message)
+build_register(struct vmm_pcie_abi_register *message, uint64_t generation)
 {
 
 	memset(message, 0, sizeof(*message));
@@ -77,7 +81,7 @@ build_register(struct vmm_pcie_abi_register *message)
 	message->header.le_type = htole16(VMM_PCIE_ABI_MSG_REGISTER);
 	message->header.le_size = htole32(sizeof(*message));
 	message->header.le_flags = htole32(VMM_PCIE_ABI_REGISTER_F_MSIX);
-	message->header.le_sequence = htole64(1);
+	message->header.le_sequence = htole64(generation);
 	message->le_vendor_id = htole16(0x1b36);
 	message->le_device_id = htole16(0xdf02);
 	message->le_subsystem_vendor_id = htole16(0x1b36);
@@ -91,15 +95,15 @@ build_register(struct vmm_pcie_abi_register *message)
 }
 
 static int
-recv_registered(int fd)
+recv_registered(int fd, const struct vmm_pcie_abi_start *start)
 {
 	struct vmm_pcie_abi_registered message;
-	char control[CMSG_SPACE(sizeof(int))];
+	char control[CMSG_SPACE(sizeof(int) * 2)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr msg;
 	ssize_t n;
-	int bar_fd;
+	int fds[2];
 
 	memset(control, 0, sizeof(control));
 	memset(&msg, 0, sizeof(msg));
@@ -110,17 +114,40 @@ recv_registered(int fd)
 	msg.msg_control = control;
 	msg.msg_controllen = sizeof(control);
 	n = recvmsg(fd, &msg, 0);
-	if (n != sizeof(message))
+	if (n != sizeof(message) ||
+	    (msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0)
 		errno = n < 0 ? errno : EPROTO, err(1, "recv REGISTERED");
 	if (vmm_pcie_abi_validate(&message, sizeof(message)) != 0 ||
 	    le16toh(message.header.le_type) != VMM_PCIE_ABI_MSG_REGISTERED ||
+	    message.header.le_sequence != start->header.le_sequence ||
+	    (le32toh(message.header.le_flags) &
+	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0 ||
 	    le32toh(message.le_bdf) != VMM_PCIE_ABI_BDF(0, 1, 0))
 		errno = EPROTO, err(1, "invalid REGISTERED");
 	cmsg = CMSG_FIRSTHDR(&msg);
 	if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET ||
 	    cmsg->cmsg_type != SCM_RIGHTS ||
-	    cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
-		errno = EPROTO, err(1, "REGISTERED BAR right");
-	memcpy(&bar_fd, CMSG_DATA(cmsg), sizeof(bar_fd));
-	return bar_fd;
+	    cmsg->cmsg_len != CMSG_LEN(sizeof(fds)) ||
+	    CMSG_NXTHDR(&msg, cmsg) != NULL)
+		errno = EPROTO, err(1, "REGISTERED rights");
+	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
+	if (le32toh(message.le_bar_fd_mask) != 1 || fds[0] < 0 || fds[1] < 0)
+		errno = EPROTO, err(1, "REGISTERED capability set");
+	if (close(fds[1]) != 0)
+		err(1, "close DMA fd");
+	return fds[0];
+}
+
+static void
+recv_start(int fd, struct vmm_pcie_abi_start *message)
+{
+	ssize_t n;
+
+	n = recv(fd, message, sizeof(*message), 0);
+	if (n != sizeof(*message))
+		errno = n < 0 ? errno : EPROTO, err(1, "recv START");
+	if (vmm_pcie_abi_validate(message, sizeof(*message)) != 0 ||
+	    le16toh(message->header.le_type) != VMM_PCIE_ABI_MSG_START ||
+	    le32toh(message->le_dma_segment_count) == 0)
+		errno = EPROTO, err(1, "invalid START");
 }
