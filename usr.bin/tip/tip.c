@@ -386,7 +386,7 @@ tipin(void)
 		} else if (!cumode && gch == character(value(RAISECHAR))) {
 			boolean(value(RAISE)) = !boolean(value(RAISE));
 			continue;
-		} else if (gch == '\r') {
+		} else if (gch == '\r' || gch == '\n') {
 			bol = 1;
 			xpwrite(FD, &gch, 1);
 			if (boolean(value(HALFDUPLEX)))
