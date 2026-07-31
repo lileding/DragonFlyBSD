@@ -16,11 +16,16 @@
 #include <sys/types.h>
 
 #define VMM_PCIE_ABI_MAGIC			0x564d4d50U
-#define VMM_PCIE_ABI_VERSION			3U
+#define VMM_PCIE_ABI_VERSION			4U
 #define VMM_PCIE_ABI_PAGE_SIZE			4096ULL
 #define VMM_PCIE_ABI_MAX_BARS			6U
 #define VMM_PCIE_ABI_MAX_MSIX_VECTORS		2048U
 #define VMM_PCIE_ABI_MAX_DMA_SEGMENTS		32U
+#define VMM_PCIE_ABI_MAX_VENDOR_CAPS		4U
+#define VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE	3U
+#define VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE	128U
+#define VMM_PCIE_ABI_VENDOR_CAP_PAYLOAD_SIZE \
+	(VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE - VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE)
 #define VMM_PCIE_ABI_FAILURE_TEXT_SIZE		96U
 
 /*
@@ -106,6 +111,18 @@ struct vmm_pcie_abi_bar {
 	uint32_t	le_reserved;
 } __attribute__((__packed__));
 
+/*
+ * A read-only PCI vendor-specific capability.  The core supplies the standard
+ * capability ID and next pointer; bytes[] is the provider-defined payload
+ * immediately following that three-byte PCI capability header.  This keeps
+ * device-specific capability semantics outside vmm_pcie while retaining one
+ * core-owned, validated capability chain.
+ */
+struct vmm_pcie_abi_vendor_cap {
+	uint8_t		length;
+	uint8_t		bytes[VMM_PCIE_ABI_VENDOR_CAP_PAYLOAD_SIZE];
+} __attribute__((__packed__));
+
 struct vmm_pcie_abi_dma_segment {
 	uint64_t	le_gpa;
 	uint64_t	le_iova;
@@ -127,6 +144,10 @@ struct vmm_pcie_abi_register {
 	uint64_t	le_parent_consumer_id;
 	uint64_t	le_parent_generation;
 	struct vmm_pcie_abi_bar bar[VMM_PCIE_ABI_MAX_BARS];
+	uint8_t		vendor_cap_count;
+	uint8_t		reserved1[3];
+	struct vmm_pcie_abi_vendor_cap
+			vendor_cap[VMM_PCIE_ABI_MAX_VENDOR_CAPS];
 } __attribute__((__packed__));
 
 struct vmm_pcie_abi_registered {
@@ -202,7 +223,9 @@ _Static_assert(sizeof(struct vmm_pcie_abi_bar) == 16,
     "vPCIe ABI BAR size");
 _Static_assert(sizeof(struct vmm_pcie_abi_dma_segment) == 32,
     "vPCIe ABI DMA segment size");
-_Static_assert(sizeof(struct vmm_pcie_abi_register) == 152,
+_Static_assert(sizeof(struct vmm_pcie_abi_vendor_cap) == 126,
+    "vPCIe ABI vendor capability size");
+_Static_assert(sizeof(struct vmm_pcie_abi_register) == 660,
     "vPCIe ABI register size");
 _Static_assert(sizeof(struct vmm_pcie_abi_registered) == 60,
     "vPCIe ABI registered size");

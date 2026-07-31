@@ -83,6 +83,41 @@ main(void)
 	expect_result("unaligned access", vmm_pcie_config_access_locked(config,
 	    0x01, 0, 2, &value), EINVAL);
 	vmm_pcie_config_destroy(config);
+	request.vendor_cap_count = 2;
+	request.vendor_cap[0].length = 16;
+	request.vendor_cap[0].bytes[0] = 1;
+	request.vendor_cap[0].bytes[1] = 0;
+	request.vendor_cap[0].bytes[2] = 0;
+	request.vendor_cap[0].bytes[5] = 0x34;
+	request.vendor_cap[0].bytes[9] = 0x38;
+	request.vendor_cap[1].length = 20;
+	request.vendor_cap[1].bytes[0] = 2;
+	request.vendor_cap[1].bytes[1] = 0;
+	request.vendor_cap[1].bytes[2] = 1;
+	request.vendor_cap[1].bytes[5] = 0x80;
+	request.vendor_cap[1].bytes[9] = 4;
+	request.vendor_cap[1].bytes[13] = 4;
+	expect_result("create vendor capabilities", vmm_pcie_config_create(&config,
+	    &request), 0);
+	expect_value("msix next vendor", config_read(config, 0x71, 1), 0x80);
+	expect_value("vendor cap zero header", config_read(config, 0x80, 4),
+	    0x01109009U);
+	expect_value("vendor cap zero offset", config_read(config, 0x88, 4),
+	    0x00000034U);
+	expect_value("vendor cap one header", config_read(config, 0x90, 4),
+	    0x02140009U);
+	expect_value("vendor cap one length", config_read(config, 0x9c, 4), 4);
+	expect_value("vendor cap one notify multiplier", config_read(config,
+	    0xa0, 4), 4);
+	config_write(config, 0x83, 1, 0xff);
+	expect_value("vendor capability read-only", config_read(config, 0x83, 1),
+	    1);
+	vmm_pcie_config_reset_locked(config);
+	expect_value("vendor capability reset", config_read(config, 0x80, 4),
+	    0x01109009U);
+	vmm_pcie_config_destroy(config);
+	memset(request.vendor_cap, 0, sizeof(request.vendor_cap));
+	request.vendor_cap_count = 0;
 	request.le_msix_vectors = htole16(VMM_PCIE_ABI_MAX_MSIX_VECTORS);
 	request.bar[0].le_size = htole64(0x8000);
 	expect_result("max msix bar too small", vmm_pcie_config_create(&config,
@@ -91,6 +126,11 @@ main(void)
 	expect_result("max msix bar", vmm_pcie_config_create(&config, &request),
 	    0);
 	vmm_pcie_config_destroy(config);
+	request.vendor_cap_count = 2;
+	request.vendor_cap[0].length = VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE;
+	request.vendor_cap[1].length = VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE;
+	expect_result("vendor capabilities exhaust config header",
+	    vmm_pcie_config_create(&config, &request), EINVAL);
 	return 0;
 }
 

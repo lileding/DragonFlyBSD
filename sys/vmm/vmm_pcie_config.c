@@ -25,6 +25,7 @@
 #define VMM_PCI_MSIX_CONTROL		(VMM_PCI_MSIX_CAP + 2U)
 #define VMM_PCI_MSIX_TABLE		(VMM_PCI_MSIX_CAP + 4U)
 #define VMM_PCI_MSIX_PBA		(VMM_PCI_MSIX_CAP + 8U)
+#define VMM_PCI_VENDOR_CAP_BASE		0x80U
 
 #define VMM_PCI_STATUS_CAP_LIST	0x0010U
 #define VMM_PCI_COMMAND_VALID		0x0007U
@@ -34,6 +35,7 @@
 #define VMM_PCI_BAR_ATTRIBUTE_MASK	0x0000000fU
 #define VMM_PCI_CAP_ID_EXP		0x10U
 #define VMM_PCI_CAP_ID_MSIX		0x11U
+#define VMM_PCI_CAP_ID_VENDOR		0x09U
 #define VMM_PCI_MSIX_CONTROL_FUNCTION_MASK	0x40000000U
 #define VMM_PCI_MSIX_CONTROL_ENABLE		0x80000000U
 #define VMM_PCI_MSIX_CONTROL_WRITABLE		(VMM_PCI_MSIX_CONTROL_FUNCTION_MASK | \
@@ -66,15 +68,34 @@ vmm_pcie_config_create(struct vmm_pcie_config **configp,
 	struct vmm_pcie_config *config;
 	uint32_t class_revision;
 	unsigned int i;
+	unsigned int vendor_cap_offset;
+	unsigned int vendor_cap_count;
 
 	if (configp == NULL || request == NULL)
 		return EINVAL;
+	vendor_cap_count = request->vendor_cap_count;
 	if (le16toh(request->le_msix_vectors) == 0 ||
 	    le16toh(request->le_msix_vectors) > VMM_PCIE_ABI_MAX_MSIX_VECTORS ||
 	    le64toh(request->bar[VMM_PCIE_ABI_MSIX_BAR_INDEX].le_size) <
 	    VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(
-	    le16toh(request->le_msix_vectors)))
+	    le16toh(request->le_msix_vectors)) ||
+	    vendor_cap_count > VMM_PCIE_ABI_MAX_VENDOR_CAPS)
 		return EINVAL;
+	for (i = 0; i < vendor_cap_count; i++) {
+		if (request->vendor_cap[i].length <
+		    VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE ||
+		    request->vendor_cap[i].length >
+		    VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE)
+			return EINVAL;
+	}
+	vendor_cap_offset = VMM_PCI_VENDOR_CAP_BASE;
+	for (i = 0; i < vendor_cap_count; i++) {
+		if (vendor_cap_offset > VMM_PCIE_CONFIG_HEADER_SIZE -
+		    request->vendor_cap[i].length)
+			return EINVAL;
+		vendor_cap_offset += request->vendor_cap[i].length;
+		vendor_cap_offset = (vendor_cap_offset + 3U) & ~3U;
+	}
 	config = kmalloc(sizeof(*config), M_TEMP, M_WAITOK | M_ZERO);
 	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_VENDOR_ID,
 	    le16toh(request->le_vendor_id));
@@ -105,6 +126,26 @@ vmm_pcie_config_create(struct vmm_pcie_config **configp,
 	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_PBA,
 	    VMM_PCIE_ABI_MSIX_PBA_OFFSET(le16toh(request->le_msix_vectors)) |
 	    VMM_PCIE_ABI_MSIX_BAR_INDEX);
+	config->own_mut_bytes[VMM_PCI_MSIX_CAP + 1] =
+	    vendor_cap_count == 0 ? 0 : VMM_PCI_VENDOR_CAP_BASE;
+	vendor_cap_offset = VMM_PCI_VENDOR_CAP_BASE;
+	for (i = 0; i < vendor_cap_count; i++) {
+		unsigned int offset;
+		unsigned int next_offset;
+
+		offset = vendor_cap_offset;
+		next_offset = offset + request->vendor_cap[i].length;
+		next_offset = (next_offset + 3U) & ~3U;
+		config->own_mut_bytes[offset] = VMM_PCI_CAP_ID_VENDOR;
+		config->own_mut_bytes[offset + 1] = i + 1 == vendor_cap_count ?
+		    0 : next_offset;
+		config->own_mut_bytes[offset + 2] = request->vendor_cap[i].length;
+		__builtin_memcpy(&config->own_mut_bytes[offset +
+		    VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE], request->vendor_cap[i].bytes,
+		    request->vendor_cap[i].length -
+		    VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE);
+		vendor_cap_offset = next_offset;
+	}
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
 		uint32_t attributes;
 

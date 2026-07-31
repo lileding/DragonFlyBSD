@@ -146,6 +146,46 @@ main(void)
 	    sizeof(register_message), EINVAL);
 
 	build_register(&register_message);
+	register_message.vendor_cap_count = 2;
+	register_message.vendor_cap[0].length = 16;
+	register_message.vendor_cap[0].bytes[0] = 1;
+	register_message.vendor_cap[1].length = 20;
+	register_message.vendor_cap[1].bytes[0] = 2;
+	expect_result("valid vendor capabilities", &register_message,
+	    sizeof(register_message), 0);
+
+	build_register(&register_message);
+	register_message.vendor_cap_count = VMM_PCIE_ABI_MAX_VENDOR_CAPS + 1;
+	expect_result("vendor capability count", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.vendor_cap_count = 1;
+	register_message.vendor_cap[0].length =
+	    VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE - 1;
+	expect_result("vendor capability too short", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.vendor_cap_count = 1;
+	register_message.vendor_cap[0].length = 16;
+	register_message.vendor_cap[0].bytes[13] = 1;
+	expect_result("vendor capability trailing bytes", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.vendor_cap[0].bytes[0] = 1;
+	expect_result("unused vendor capability", &register_message,
+	    sizeof(register_message), EINVAL);
+
+	build_register(&register_message);
+	register_message.vendor_cap_count = 1;
+	register_message.vendor_cap[0].length =
+	    VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE;
+	expect_result("maximum vendor capability", &register_message,
+	    sizeof(register_message), 0);
+
+	build_register(&register_message);
 	register_message.header.le_flags = htole32(
 	    VMM_PCIE_ABI_REGISTER_F_MSIX | VMM_PCIE_ABI_REGISTER_F_PARENT);
 	register_message.le_parent_consumer_id = htole64(4);

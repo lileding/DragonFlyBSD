@@ -208,9 +208,12 @@ static int
 vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 {
 	uint64_t bar0_size;
+	const struct vmm_pcie_abi_vendor_cap *vendor_cap;
 	uint32_t flags;
 	uint32_t class_code;
 	unsigned int i;
+	unsigned int j;
+	unsigned int vendor_cap_count;
 	int companion;
 
 	if (!vmm_pcie_abi_header_valid(&message->header,
@@ -241,6 +244,33 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 	} else if (message->le_parent_consumer_id != 0 ||
 	    message->le_parent_generation != 0) {
 		return EINVAL;
+	}
+	if (message->reserved1[0] != 0 || message->reserved1[1] != 0 ||
+	    message->reserved1[2] != 0)
+		return EINVAL;
+	vendor_cap_count = message->vendor_cap_count;
+	if (vendor_cap_count > VMM_PCIE_ABI_MAX_VENDOR_CAPS)
+		return EINVAL;
+	for (i = 0; i < VMM_PCIE_ABI_MAX_VENDOR_CAPS; i++) {
+		vendor_cap = &message->vendor_cap[i];
+		if (i >= vendor_cap_count) {
+			if (vendor_cap->length != 0)
+				return EINVAL;
+			for (j = 0; j < sizeof(vendor_cap->bytes); j++) {
+				if (vendor_cap->bytes[j] != 0)
+					return EINVAL;
+			}
+			continue;
+		}
+		if (vendor_cap->length < VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE ||
+		    vendor_cap->length > VMM_PCIE_ABI_VENDOR_CAP_MAX_SIZE)
+			return EINVAL;
+		for (j = vendor_cap->length -
+		    VMM_PCIE_ABI_VENDOR_CAP_MIN_SIZE;
+		    j < sizeof(vendor_cap->bytes); j++) {
+			if (vendor_cap->bytes[j] != 0)
+				return EINVAL;
+		}
 	}
 	companion = 0;
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
