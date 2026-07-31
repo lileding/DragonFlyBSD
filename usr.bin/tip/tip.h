@@ -300,7 +300,7 @@ void	user_uid(void);
 void	xpwrite(int, char *, int);
 int	prompt(char *, char *, size_t);
 void	tipabort(char *) __dead2;
-void	cumain(int, char **) __dead2;
+void	cumain(int, char **);
 char	*getremote(char *);
 char	*interp(char *);
 

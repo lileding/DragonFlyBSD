@@ -48,43 +48,52 @@ cumain(int argc, char *argv[])
 	}
 	CU = DV = NULL;
 	BR = DEFBR;
-	for (; argc > 1; argv++, argc--) {
-		if (argv[1][0] != '-')
-			PN = argv[1];
-		else switch (argv[1][1]) {
+	for (i = 1; i < argc; ++i) {
+		if (argv[i][0] != '-') {
+			PN = argv[i];
+			continue;
+		}
+		switch (argv[i][1]) {
 
 		case 't':
 			HW = 1, DU = -1;
-			--argc;
-			continue;
+			break;
 
 		case 'a':
-			CU = argv[2]; ++argv; --argc;
+			if (++i == argc) {
+				fprintf(stderr, "cu: -a requires an argument\n");
+				exit(3);
+			}
+			CU = argv[i];
 			break;
 
 		case 's':
-			if (argc < 3 || speed(atoi(argv[2])) == 0) {
+			if (++i == argc || speed(atoi(argv[i])) == 0) {
 				fprintf(stderr, "cu: unsupported speed %s\n",
-					argv[2]);
+					i == argc ? "" : argv[i]);
 				exit(3);
 			}
-			BR = atoi(argv[2]); ++argv; --argc;
+			BR = atoi(argv[i]);
 			break;
 
 		case 'l':
-			DV = argv[2]; ++argv; --argc;
+			if (++i == argc) {
+				fprintf(stderr, "cu: -l requires an argument\n");
+				exit(3);
+			}
+			DV = argv[i];
 			break;
 
 		case '0': case '1': case '2': case '3': case '4':
 		case '5': case '6': case '7': case '8': case '9':
 			if (CU)
-				CU[strlen(CU)-1] = argv[1][1];
+				CU[strlen(CU)-1] = argv[i][1];
 			if (DV)
-				DV[strlen(DV)-1] = argv[1][1];
+				DV[strlen(DV)-1] = argv[i][1];
 			break;
 
 		default:
-			printf("Bad flag %s", argv[1]);
+			printf("Bad flag %s", argv[i]);
 			break;
 		}
 	}
@@ -123,5 +132,4 @@ cumain(int argc, char *argv[])
 	}
 	if (!HW)
 		ttysetup(speed(BR));
-	exit(0);
 }
