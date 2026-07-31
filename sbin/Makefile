@@ -44,6 +44,7 @@ SUBDIR=	adjkerntz \
 	kldstat \
 	kldunload \
 	ldconfig \
+	load_linux \
 	md5 \
 	mount \
 	mount_autofs \
@@ -63,6 +64,7 @@ SUBDIR=	adjkerntz \
 	mount_tmpfs \
 	mount_udf \
 	mount_ufs \
+	mount_vmmfs \
 	mountctl \
 	mountd \
 	natacontrol \
