@@ -13,12 +13,33 @@
 #include <sys/types.h>
 
 #define VMM_PCIE_ABI_MAGIC			0x564d4d50U
-#define VMM_PCIE_ABI_VERSION			1U
+#define VMM_PCIE_ABI_VERSION			2U
 #define VMM_PCIE_ABI_PAGE_SIZE			4096ULL
 #define VMM_PCIE_ABI_MAX_BARS			6U
 #define VMM_PCIE_ABI_MAX_MSIX_VECTORS		2048U
 #define VMM_PCIE_ABI_MAX_DMA_SEGMENTS		32U
 #define VMM_PCIE_ABI_FAILURE_TEXT_SIZE		96U
+
+/*
+ * v2 reserves the beginning of BAR0 for the standard MSI-X table and PBA.
+ * A provider's device-specific BAR0 layout starts after
+ * VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(vectors).
+ */
+#define VMM_PCIE_ABI_MSIX_BAR_INDEX		0U
+#define VMM_PCIE_ABI_MSIX_TABLE_OFFSET		0ULL
+#define VMM_PCIE_ABI_MSIX_ENTRY_SIZE		16ULL
+#define VMM_PCIE_ABI_MSIX_PBA_ALIGN		8ULL
+#define VMM_PCIE_ABI_MSIX_TABLE_SIZE(vectors) \
+	((uint64_t)(vectors) * VMM_PCIE_ABI_MSIX_ENTRY_SIZE)
+#define VMM_PCIE_ABI_MSIX_PBA_OFFSET(vectors) \
+	((VMM_PCIE_ABI_MSIX_TABLE_SIZE(vectors) + \
+	VMM_PCIE_ABI_MSIX_PBA_ALIGN - 1ULL) & \
+	~(VMM_PCIE_ABI_MSIX_PBA_ALIGN - 1ULL))
+#define VMM_PCIE_ABI_MSIX_PBA_SIZE(vectors) \
+	((((uint64_t)(vectors) + 63ULL) / 64ULL) * sizeof(uint64_t))
+#define VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(vectors) \
+	(VMM_PCIE_ABI_MSIX_PBA_OFFSET(vectors) + \
+	VMM_PCIE_ABI_MSIX_PBA_SIZE(vectors))
 
 #define VMM_PCIE_ABI_BDF_BUS_SHIFT		8U
 #define VMM_PCIE_ABI_BDF_DEVICE_SHIFT		3U

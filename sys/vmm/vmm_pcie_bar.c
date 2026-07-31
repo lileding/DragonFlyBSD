@@ -5,6 +5,7 @@
  */
 #include <sys/param.h>
 #include <sys/types.h>
+#include <sys/errno.h>
 #include <sys/systm.h>
 #include <sys/malloc.h>
 #include <sys/conf.h>
@@ -175,6 +176,31 @@ vmm_pcie_bar_snapshot(struct vmm_pcie_bar *bar, struct vm_object **objectp,
 	vm_object_drop(object);
 	*objectp = object;
 	*sizep = bar->imm_size;
+	return 0;
+}
+
+int
+vmm_pcie_bar_object_read32(struct vm_object *object, uint64_t size,
+    uint64_t offset, uint32_t *valuep)
+{
+	vm_page_t page;
+	uint64_t page_offset;
+	uint32_t *ptr;
+
+	if (object == NULL || valuep == NULL || (offset & 3) != 0 ||
+	    offset > size || size - offset < sizeof(*valuep))
+		return EINVAL;
+	page_offset = offset & ~(uint64_t)PAGE_MASK;
+	page = vm_page_grab(object, OFF_TO_IDX(page_offset),
+	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO | VM_ALLOC_RETRY);
+	if (page == NULL)
+		return ENOMEM;
+	if (page->valid != VM_PAGE_BITS_ALL)
+		vm_page_zero_invalid(page, TRUE);
+	ptr = (uint32_t *)(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(page)) +
+	    (offset & PAGE_MASK));
+	*valuep = atomic_load_acq_int((volatile u_int *)ptr);
+	vm_page_wakeup(page);
 	return 0;
 }
 

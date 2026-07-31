@@ -22,6 +22,9 @@
 #define VMM_PCI_CAP_PTR		0x34U
 #define VMM_PCI_PCIE_CAP		0x50U
 #define VMM_PCI_MSIX_CAP		0x70U
+#define VMM_PCI_MSIX_CONTROL		(VMM_PCI_MSIX_CAP + 2U)
+#define VMM_PCI_MSIX_TABLE		(VMM_PCI_MSIX_CAP + 4U)
+#define VMM_PCI_MSIX_PBA		(VMM_PCI_MSIX_CAP + 8U)
 
 #define VMM_PCI_STATUS_CAP_LIST	0x0010U
 #define VMM_PCI_COMMAND_VALID		0x0007U
@@ -31,6 +34,11 @@
 #define VMM_PCI_BAR_ATTRIBUTE_MASK	0x0000000fU
 #define VMM_PCI_CAP_ID_EXP		0x10U
 #define VMM_PCI_CAP_ID_MSIX		0x11U
+#define VMM_PCI_MSIX_CONTROL_FUNCTION_MASK	0x40000000U
+#define VMM_PCI_MSIX_CONTROL_ENABLE		0x80000000U
+#define VMM_PCI_MSIX_CONTROL_WRITABLE		(VMM_PCI_MSIX_CONTROL_FUNCTION_MASK | \
+	 VMM_PCI_MSIX_CONTROL_ENABLE)
+#define VMM_PCI_MSIX_VECTOR_MASK		0x00000001U
 
 static uint32_t vmm_pcie_config_read32(const uint8_t *bytes,
 	    unsigned int offset);
@@ -46,6 +54,8 @@ static void vmm_pcie_config_write_bar(struct vmm_pcie_config *config,
 	    unsigned int offset, int size, uint64_t value);
 static void vmm_pcie_config_write_command(struct vmm_pcie_config *config,
 	    unsigned int offset, int size, uint64_t value);
+static void vmm_pcie_config_write_msix(struct vmm_pcie_config *config,
+    unsigned int offset, int size, uint64_t value);
 static void vmm_pcie_config_normalize_bar(struct vmm_pcie_config *config,
 	    unsigned int index);
 
@@ -58,6 +68,12 @@ vmm_pcie_config_create(struct vmm_pcie_config **configp,
 	unsigned int i;
 
 	if (configp == NULL || request == NULL)
+		return EINVAL;
+	if (le16toh(request->le_msix_vectors) == 0 ||
+	    le16toh(request->le_msix_vectors) > VMM_PCIE_ABI_MAX_MSIX_VECTORS ||
+	    le64toh(request->bar[VMM_PCIE_ABI_MSIX_BAR_INDEX].le_size) <
+	    VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(
+	    le16toh(request->le_msix_vectors)))
 		return EINVAL;
 	config = kmalloc(sizeof(*config), M_TEMP, M_WAITOK | M_ZERO);
 	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_VENDOR_ID,
@@ -83,9 +99,12 @@ vmm_pcie_config_create(struct vmm_pcie_config **configp,
 	config->own_mut_bytes[VMM_PCI_MSIX_CAP] = VMM_PCI_CAP_ID_MSIX;
 	vmm_pcie_config_write16(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 2,
 	    le16toh(request->le_msix_vectors) - 1U);
-	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 4, 0);
-	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_CAP + 8,
-	    0x800U);
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_TABLE,
+	    VMM_PCIE_ABI_MSIX_TABLE_OFFSET |
+	    VMM_PCIE_ABI_MSIX_BAR_INDEX);
+	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_MSIX_PBA,
+	    VMM_PCIE_ABI_MSIX_PBA_OFFSET(le16toh(request->le_msix_vectors)) |
+	    VMM_PCIE_ABI_MSIX_BAR_INDEX);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
 		uint32_t attributes;
 
@@ -182,6 +201,11 @@ vmm_pcie_config_access_locked(struct vmm_pcie_config *config,
 		if (offset < VMM_PCI_COMMAND + sizeof(uint32_t) &&
 		    offset + (unsigned int)size > VMM_PCI_COMMAND) {
 			vmm_pcie_config_write_command(config, offset, size, *valuep);
+			return 0;
+		}
+		if (offset < VMM_PCI_MSIX_CONTROL + sizeof(uint16_t) &&
+		    offset + (unsigned int)size > VMM_PCI_MSIX_CONTROL) {
+			vmm_pcie_config_write_msix(config, offset, size, *valuep);
 		}
 		return 0;
 	}
@@ -202,6 +226,30 @@ vmm_pcie_config_access_locked(struct vmm_pcie_config *config,
 		value &= 0xffffU;
 	*valuep = value;
 	return 0;
+}
+
+int
+vmm_pcie_config_msix_enabled_locked(const struct vmm_pcie_config *config)
+{
+
+	return config != NULL && (vmm_pcie_config_read32(config->own_mut_bytes,
+	    VMM_PCI_MSIX_CAP) & VMM_PCI_MSIX_CONTROL_ENABLE) != 0;
+}
+
+int
+vmm_pcie_config_msix_function_masked_locked(
+    const struct vmm_pcie_config *config)
+{
+
+	return config == NULL || (vmm_pcie_config_read32(config->own_mut_bytes,
+	    VMM_PCI_MSIX_CAP) & VMM_PCI_MSIX_CONTROL_FUNCTION_MASK) != 0;
+}
+
+int
+vmm_pcie_config_msix_vector_masked(uint32_t vector_control)
+{
+
+	return (vector_control & VMM_PCI_MSIX_VECTOR_MASK) != 0;
 }
 
 static uint32_t
@@ -330,6 +378,26 @@ vmm_pcie_config_write_command(struct vmm_pcie_config *config,
 	    (next & VMM_PCI_COMMAND_VALID);
 	next |= (uint32_t)VMM_PCI_STATUS_CAP_LIST << 16;
 	vmm_pcie_config_write32(config->own_mut_bytes, VMM_PCI_COMMAND, next);
+}
+
+static void
+vmm_pcie_config_write_msix(struct vmm_pcie_config *config,
+    unsigned int offset, int size, uint64_t value)
+{
+	unsigned int base;
+	uint32_t mask;
+	uint32_t old;
+	uint32_t next;
+
+	base = VMM_PCI_MSIX_CAP;
+	old = vmm_pcie_config_read32(config->own_mut_bytes, base);
+	mask = size == 4 ? 0xffffffffU :
+	    ((1U << (size * 8U)) - 1U) << ((offset - base) * 8U);
+	next = (old & ~mask) | (((uint32_t)value <<
+	    ((offset - base) * 8U)) & mask);
+	next = (next & VMM_PCI_MSIX_CONTROL_WRITABLE) |
+	    (old & ~VMM_PCI_MSIX_CONTROL_WRITABLE);
+	vmm_pcie_config_write32(config->own_mut_bytes, base, next);
 }
 
 static void

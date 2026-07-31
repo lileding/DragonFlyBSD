@@ -47,6 +47,23 @@ main(void)
 	expect_value("cap pointer", config_read(config, 0x34, 1), 0x50);
 	expect_value("pcie cap", config_read(config, 0x50, 2), 0x7010);
 	expect_value("msix cap", config_read(config, 0x70, 4), 0x00030011);
+	expect_value("msix table", config_read(config, 0x74, 4), 0);
+	expect_value("msix pba", config_read(config, 0x78, 4), 0x40);
+	config_write(config, 0x72, 2, 0xffffU);
+	expect_value("msix control mask", config_read(config, 0x72, 2),
+	    0xc003U);
+	if (!vmm_pcie_config_msix_enabled_locked(config) ||
+	    !vmm_pcie_config_msix_function_masked_locked(config))
+		err(1, "msix enable/function mask");
+	config_write(config, 0x73, 1, 0);
+	expect_value("msix control enable clear", config_read(config, 0x72, 2),
+	    0x0003U);
+	if (vmm_pcie_config_msix_enabled_locked(config) ||
+	    vmm_pcie_config_msix_function_masked_locked(config))
+		err(1, "msix control clear");
+	if (!vmm_pcie_config_msix_vector_masked(1) ||
+	    vmm_pcie_config_msix_vector_masked(0))
+		err(1, "msix vector mask");
 	expect_value("bar initial", config_read(config, 0x10, 4), 0);
 	config_write(config, 0x10, 4, 0xffffffffU);
 	expect_value("bar sizing", config_read(config, 0x10, 4), 0xfffff000U);
@@ -65,6 +82,14 @@ main(void)
 	value = 0;
 	expect_result("unaligned access", vmm_pcie_config_access_locked(config,
 	    0x01, 0, 2, &value), EINVAL);
+	vmm_pcie_config_destroy(config);
+	request.le_msix_vectors = htole16(VMM_PCIE_ABI_MAX_MSIX_VECTORS);
+	request.bar[0].le_size = htole64(0x8000);
+	expect_result("max msix bar too small", vmm_pcie_config_create(&config,
+	    &request), EINVAL);
+	request.bar[0].le_size = htole64(0x10000);
+	expect_result("max msix bar", vmm_pcie_config_create(&config, &request),
+	    0);
 	vmm_pcie_config_destroy(config);
 	return 0;
 }

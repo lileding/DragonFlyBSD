@@ -31,5 +31,9 @@ int	vmm_pcie_config_access_locked(struct vmm_pcie_config *config,
 	    unsigned int offset, int write, int size, uint64_t *valuep);
 int	vmm_pcie_config_bar_decode_locked(const struct vmm_pcie_config *config,
 	    unsigned int index, uint64_t *gpap, uint64_t *sizep);
+int	vmm_pcie_config_msix_enabled_locked(const struct vmm_pcie_config *config);
+int	vmm_pcie_config_msix_function_masked_locked(
+	    const struct vmm_pcie_config *config);
+int	vmm_pcie_config_msix_vector_masked(uint32_t vector_control);
 
 #endif /* VMM_PCIE_CONFIG_H */

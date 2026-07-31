@@ -265,6 +265,15 @@ main(void)
 	expect_result("msix vector out of range", &msix_message,
 	    sizeof(msix_message), EINVAL);
 
+	build_register(&register_message);
+	register_message.le_msix_vectors = htole16(VMM_PCIE_ABI_MAX_MSIX_VECTORS);
+	register_message.bar[0].le_size = htole64(0x8000);
+	expect_result("msix table does not fit bar", &register_message,
+	    sizeof(register_message), EINVAL);
+	register_message.bar[0].le_size = htole64(0x10000);
+	expect_result("max msix table fits bar", &register_message,
+	    sizeof(register_message), 0);
+
 	memset(&failure_message, 0, sizeof(failure_message));
 	packet_init(&failure_message.header, VMM_PCIE_ABI_MSG_FAILURE,
 	    sizeof(failure_message), 0);

@@ -215,6 +215,7 @@ vmm_pcie_abi_range_overlaps(uint64_t a_start, uint64_t a_length,
 static int
 vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 {
+	uint64_t bar0_size;
 	uint32_t flags;
 	uint32_t class_code;
 	unsigned int i;
@@ -235,6 +236,10 @@ vmm_pcie_abi_register_valid(const struct vmm_pcie_abi_register *message)
 	if ((flags & VMM_PCIE_ABI_REGISTER_F_MSIX) == 0 ||
 	    le16toh(message->le_msix_vectors) == 0 ||
 	    le16toh(message->le_msix_vectors) > VMM_PCIE_ABI_MAX_MSIX_VECTORS)
+		return EINVAL;
+	bar0_size = le64toh(message->bar[VMM_PCIE_ABI_MSIX_BAR_INDEX].le_size);
+	if (bar0_size < VMM_PCIE_ABI_MSIX_MIN_BAR_SIZE(
+	    le16toh(message->le_msix_vectors)))
 		return EINVAL;
 	if ((flags & VMM_PCIE_ABI_REGISTER_F_PARENT) != 0) {
 		if (le64toh(message->le_parent_consumer_id) == 0 ||

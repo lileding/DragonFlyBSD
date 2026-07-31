@@ -713,6 +713,15 @@ vmm_machine_console_input(struct vmm_machine *m)
 	lwkt_reltoken(&m->token_config);
 }
 
+void
+vmm_machine_msix(struct vmm_machine *m, uint8_t vector)
+{
+	lwkt_gettoken(&m->token_config);
+	if (m->mut_status == VMM_MACHINE_RUNNING)
+		vmm_vcpu_interrupt_locked(m, vector);
+	lwkt_reltoken(&m->token_config);
+}
+
 static enum vmm_machine_status
 vmm_machine_status(struct vmm_machine *m)
 {

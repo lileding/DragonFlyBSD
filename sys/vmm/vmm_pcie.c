@@ -16,6 +16,18 @@
 #include "vmm_pcie_layout.h"
 #include "vmm_pcie_user.h"
 
+#define VMM_PCIE_MSIX_TABLE_ADDRESS_LOW	0U
+#define VMM_PCIE_MSIX_TABLE_ADDRESS_HIGH	4U
+#define VMM_PCIE_MSIX_TABLE_DATA		8U
+#define VMM_PCIE_MSIX_TABLE_VECTOR_CONTROL	12U
+#define VMM_PCIE_MSI_ADDRESS_BASE		0xfee00000U
+#define VMM_PCIE_MSI_ADDRESS_DEST_MASK	0x000ff000U
+#define VMM_PCIE_MSI_ADDRESS_CONTROL_MASK	0x0000000cU
+#define VMM_PCIE_MSI_DATA_VECTOR_MASK		0x000000ffU
+#define VMM_PCIE_MSI_DATA_DELIVERY_MASK	0x00000700U
+#define VMM_PCIE_MSI_DATA_ALLOWED		(VMM_PCIE_MSI_DATA_VECTOR_MASK | \
+	 VMM_PCIE_MSI_DATA_DELIVERY_MASK)
+
 static int	vmm_pcie_device_cmp(struct vmm_device *left,
 		    struct vmm_device *right);
 static struct vmm_device *vmm_pcie_device_find_name_locked(
@@ -468,6 +480,100 @@ vmm_pcie_device_provider_detach(struct vmm_device *device,
 	vmm_pcie_config_destroy(config);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++)
 		vmm_pcie_bar_destroy(&bars[i]);
+}
+
+int
+vmm_pcie_device_provider_msix(struct vmm_device *device,
+    struct vmm_pcie_user *provider, const struct vmm_pcie_abi_msix *message)
+{
+	struct vmm_pcie_root *root;
+	struct vmm_machine *machine;
+	struct vm_object *bar_object;
+	struct vmm_pcie *pcie;
+	uint64_t attachment_generation;
+	uint64_t bar_size;
+	uint64_t table_offset;
+	uint32_t address_high;
+	uint32_t address_low;
+	uint32_t data;
+	uint32_t vector_control;
+	uint16_t vector;
+	int error;
+
+	if (device == NULL || provider == NULL || message == NULL ||
+	    device->borrow_imm_pcie == NULL)
+		return EINVAL;
+	pcie = device->borrow_imm_pcie;
+	bar_object = NULL;
+	bar_size = 0;
+	attachment_generation = le64toh(message->le_attachment_generation);
+	vector = le16toh(message->le_vector);
+	lwkt_gettoken(&pcie->token_registry);
+	if (device->borrow_mut_provider != provider || !device->mut_registered ||
+	    device->own_mut_config == NULL ||
+	    le64toh(message->le_device_id) != device->imm_id ||
+	    attachment_generation != device->mut_attachment_generation ||
+	    vector >= device->mut_msix_vectors) {
+		error = ESTALE;
+	} else if (!vmm_pcie_config_msix_enabled_locked(device->own_mut_config) ||
+	    vmm_pcie_config_msix_function_masked_locked(device->own_mut_config)) {
+		error = 0;
+	} else {
+		error = vmm_pcie_bar_snapshot(
+		    &device->own_mut_bars[VMM_PCIE_ABI_MSIX_BAR_INDEX],
+		    &bar_object, &bar_size);
+	}
+	lwkt_reltoken(&pcie->token_registry);
+	if (error != 0 || bar_object == NULL)
+		return error;
+	table_offset = VMM_PCIE_ABI_MSIX_TABLE_OFFSET +
+	    (uint64_t)vector * VMM_PCIE_ABI_MSIX_ENTRY_SIZE;
+	error = vmm_pcie_bar_object_read32(bar_object, bar_size,
+	    table_offset + VMM_PCIE_MSIX_TABLE_ADDRESS_LOW, &address_low);
+	if (error == 0) {
+		error = vmm_pcie_bar_object_read32(bar_object, bar_size,
+		    table_offset + VMM_PCIE_MSIX_TABLE_ADDRESS_HIGH, &address_high);
+	}
+	if (error == 0) {
+		error = vmm_pcie_bar_object_read32(bar_object, bar_size,
+		    table_offset + VMM_PCIE_MSIX_TABLE_DATA, &data);
+	}
+	if (error == 0) {
+		error = vmm_pcie_bar_object_read32(bar_object, bar_size,
+		    table_offset + VMM_PCIE_MSIX_TABLE_VECTOR_CONTROL,
+		    &vector_control);
+	}
+	vm_object_deallocate(bar_object);
+	if (error != 0)
+		return error;
+	/* This first backend accepts one xAPIC physical-destination MSI format. */
+	if (address_high != 0 ||
+	    (address_low & ~(VMM_PCIE_MSI_ADDRESS_DEST_MASK |
+	    VMM_PCIE_MSI_ADDRESS_CONTROL_MASK)) != VMM_PCIE_MSI_ADDRESS_BASE ||
+	    (address_low & (VMM_PCIE_MSI_ADDRESS_DEST_MASK |
+	    VMM_PCIE_MSI_ADDRESS_CONTROL_MASK)) != 0 ||
+	    (data & ~VMM_PCIE_MSI_DATA_ALLOWED) != 0 ||
+	    (data & VMM_PCIE_MSI_DATA_DELIVERY_MASK) != 0 ||
+	    (data & VMM_PCIE_MSI_DATA_VECTOR_MASK) < 32 ||
+	    vmm_pcie_config_msix_vector_masked(vector_control))
+		return 0;
+
+	/* Revalidate after faulting the shared BAR before dereferencing root->machine. */
+	lwkt_gettoken(&pcie->token_registry);
+	root = device->borrow_mut_root;
+	if (device->borrow_mut_provider == provider && device->mut_registered &&
+	    device->own_mut_config != NULL &&
+	    attachment_generation == device->mut_attachment_generation &&
+	    vector < device->mut_msix_vectors &&
+	    vmm_pcie_config_msix_enabled_locked(device->own_mut_config) &&
+	    !vmm_pcie_config_msix_function_masked_locked(device->own_mut_config) &&
+	    root != NULL && root->borrow_imm_machine != NULL) {
+		machine = root->borrow_imm_machine;
+		vmm_machine_msix(machine,
+		    (uint8_t)(data & VMM_PCIE_MSI_DATA_VECTOR_MASK));
+	}
+	lwkt_reltoken(&pcie->token_registry);
+	return 0;
 }
 
 void

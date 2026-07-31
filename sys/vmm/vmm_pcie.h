@@ -65,6 +65,9 @@ int	vmm_pcie_device_provider_register(struct vmm_device *device,
 	    struct file **bar_fps, unsigned int *bar_countp);
 void	vmm_pcie_device_provider_detach(struct vmm_device *device,
 	    struct vmm_pcie_user *provider);
+int	vmm_pcie_device_provider_msix(struct vmm_device *device,
+	    struct vmm_pcie_user *provider,
+	    const struct vmm_pcie_abi_msix *message);
 void	vmm_pcie_device_provider_force_close(struct vmm_device *device);
 int	vmm_pcie_device_consumer_attach(struct vmm_device *device,
 	    struct vmm_pcie_user *consumer,

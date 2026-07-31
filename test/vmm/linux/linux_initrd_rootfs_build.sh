@@ -8,6 +8,7 @@ OUT=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 PACKER=${LINUX_INITRD_PACKER:-$ROOT/linux_initrd_pack_newc.py}
 PROBE_SRC=${LINUX_TSC_PM_PROBE_SRC:-$ROOT/linux_tsc_pm_probe.c}
 BAR_PROBE_SRC=${LINUX_PCIE_BAR_PROBE_SRC:-$ROOT/linux_pcie_bar_probe.c}
+MSIX_MODULE=${LINUX_PCIE_MSIX_MODULE:-}
 PROBE_CC=${LINUX_TSC_PM_PROBE_CC:-/usr/local/bin/clang19}
 PROBE_LD=${LINUX_TSC_PM_PROBE_LD:-/usr/local/bin/ld.lld19}
 
@@ -21,6 +22,8 @@ fail()
 [ -f "$PACKER" ] || fail "missing packer: $PACKER"
 [ -f "$PROBE_SRC" ] || fail "missing TSC/PM probe source: $PROBE_SRC"
 [ -f "$BAR_PROBE_SRC" ] || fail "missing PCIe BAR probe source: $BAR_PROBE_SRC"
+[ -z "$MSIX_MODULE" ] || [ -f "$MSIX_MODULE" ] ||
+	fail "missing PCIe MSI-X module: $MSIX_MODULE"
 [ -x "$PROBE_CC" ] || fail "missing TSC/PM probe compiler: $PROBE_CC"
 [ -x "$PROBE_LD" ] || fail "missing TSC/PM probe linker: $PROBE_LD"
 
@@ -35,6 +38,10 @@ mkdir -p "$WORK"
 	fi
 
 	mkdir -p dev proc sys run tmp root usr/local/bin etc
+	if [ -n "$MSIX_MODULE" ]; then
+		mkdir -p lib/modules/dfvmm
+		cp "$MSIX_MODULE" lib/modules/dfvmm/dfvmm_pcie_msix.ko
+	fi
 	"$PROBE_CC" --target=x86_64-linux-gnu -std=c11 -O2 -Wall -Wextra \
 		-Werror -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -static \
@@ -59,7 +66,7 @@ mkdir -p "$WORK"
 	: >dev/random
 	: >dev/urandom
 	if [ -x bin/busybox ]; then
-		for applet in cat chmod dmesg echo false grep ls mkdir mknod mount poweroff ps reboot sed sh sleep sync true uname; do
+		for applet in cat chmod dmesg echo false grep insmod ls mkdir mknod mount poweroff ps reboot sed sh sleep sync true uname; do
 			ln -sf busybox "bin/$applet"
 		done
 	fi
@@ -110,7 +117,7 @@ $bb mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 [ -c "$serial" ] || $bb mknod "$serial" c 4 64 2>/dev/null || true
 $bb chmod 666 /dev/null /dev/kmsg "$console" "$serial" 2>/dev/null || true
 
-if [ -x /sbin/mdev ]; then
+	if [ -x /sbin/mdev ]; then
 	echo /sbin/mdev >/proc/sys/kernel/hotplug 2>/dev/null || true
 	/sbin/mdev -s 2>/dev/null || true
 fi
@@ -130,6 +137,14 @@ while :; do
 		echo DFVMM_LINUX_CONSOLE_READ_FAILED
 		$bb sleep 1
 		continue
+	fi
+	if [ -f /lib/modules/dfvmm/dfvmm_pcie_msix.ko ] &&
+	    [ ! -f /run/dfvmm-pcie-msix-loaded ]; then
+		if $bb insmod /lib/modules/dfvmm/dfvmm_pcie_msix.ko; then
+			: >/run/dfvmm-pcie-msix-loaded
+		else
+			echo DFVMM_PCIE_MSIX_MODULE_FAILED >"$console"
+		fi
 	fi
 	case "$line" in
 	"")

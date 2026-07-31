@@ -626,10 +626,10 @@ struct vmm_svm_backend {
 	uint32_t *own_mut_avic_log_table;
 	uint64_t imm_avic_log_table_pa;
 	uint32_t imm_avic_apic_id;
-	uint32_t mut_avic_host_apic_id;
-	uint32_t mut_avic_host_cpuid;
+	uint32_t atomic_mut_avic_host_apic_id;
+	uint32_t atomic_mut_avic_host_cpuid;
 	int mut_avic_bound;
-	int mut_avic_running;
+	u_int atomic_mut_avic_running;
 	uint32_t mut_lapic_timer_lvtt;
 	uint32_t mut_lapic_timer_tmict;
 	uint32_t mut_lapic_timer_tdcr;
@@ -951,8 +951,8 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 	int error;
 
 	svm->imm_avic_apic_id = VMM_SVM_AVIC_APIC_ID;
-	svm->mut_avic_host_cpuid = (uint32_t)-1;
-	svm->mut_avic_host_apic_id = (uint32_t)-1;
+	atomic_store_rel_int(&svm->atomic_mut_avic_host_cpuid, (u_int)-1);
+	atomic_store_rel_int(&svm->atomic_mut_avic_host_apic_id, (u_int)-1);
 	svm->own_mut_avic_apic_page =
 	    vmm_svm_contig_alloc(&svm->imm_avic_apic_page_pa, 1);
 	svm->own_mut_avic_phys_table =
@@ -1028,19 +1028,21 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 	cpuid = mycpu->gd_cpuid;
 	apicid = (uint32_t)CPUID_TO_APICID(cpuid);
 	KKASSERT((apicid & ~VMM_SVM_AVIC_PHYS_HOST_ID_MASK) == 0);
-	if (!svm->mut_avic_bound || svm->mut_avic_host_cpuid != cpuid) {
-		svm->mut_avic_host_cpuid = cpuid;
-		svm->mut_avic_host_apic_id = apicid;
+	if (!svm->mut_avic_bound ||
+	    atomic_load_acq_int(&svm->atomic_mut_avic_host_cpuid) != cpuid) {
+		atomic_store_rel_int(&svm->atomic_mut_avic_host_apic_id, apicid);
+		atomic_store_rel_int(&svm->atomic_mut_avic_host_cpuid, cpuid);
 		svm->mut_avic_bound = 1;
 		vmm_machine_logf(svm->borrow_imm_machine,
 		    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
 		    svm->imm_avic_apic_id, cpuid, apicid);
 	}
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
-	    VMM_SVM_AVIC_PHYS_RUNNING | svm->mut_avic_host_apic_id;
+	    VMM_SVM_AVIC_PHYS_RUNNING |
+	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
 	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
-	svm->mut_avic_running = 1;
+	atomic_store_rel_int(&svm->atomic_mut_avic_running, 1);
 }
 
 static void
@@ -1049,13 +1051,14 @@ vmm_svm_avic_unbind_cpu(struct vmm_svm_backend *svm)
 	uint64_t entry;
 
 	if (svm == NULL || svm->own_mut_avic_phys_table == NULL ||
-	    !svm->mut_avic_bound || !svm->mut_avic_running)
+	    !svm->mut_avic_bound ||
+	    atomic_load_acq_int(&svm->atomic_mut_avic_running) == 0)
 		return;
+	atomic_store_rel_int(&svm->atomic_mut_avic_running, 0);
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
-	    svm->mut_avic_host_apic_id;
+	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
 	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
-	svm->mut_avic_running = 0;
 }
 
 static void
@@ -1080,12 +1083,17 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	    "svm vcpu%u avic deliver source=%s vector=0x%x irr=0x%x",
 	    vc->imm_id, source, vector, *irr);
 	/* A local producer returns to VMRUN and consumes IRR without a doorbell. */
-	if (svm->mut_avic_running &&
-	    svm->mut_avic_host_cpuid != mycpu->gd_cpuid) {
-		wrmsr(MSR_AMD64_SVM_AVIC_DOORBELL, svm->mut_avic_host_apic_id);
+	if (atomic_load_acq_int(&svm->atomic_mut_avic_running) != 0 &&
+	    atomic_load_acq_int(&svm->atomic_mut_avic_host_cpuid) !=
+	    mycpu->gd_cpuid) {
+		uint32_t host_apic_id;
+
+		host_apic_id = atomic_load_acq_int(
+		    &svm->atomic_mut_avic_host_apic_id);
+		wrmsr(MSR_AMD64_SVM_AVIC_DOORBELL, host_apic_id);
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u avic doorbell host_apic_id=%u",
-		    vc->imm_id, svm->mut_avic_host_apic_id);
+		    vc->imm_id, host_apic_id);
 	}
 }
 
@@ -4724,6 +4732,15 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 }
 
 static void
+vmm_svm_interrupt(void *backend, struct vmm_vcpu_thread *vc, uint8_t vector)
+{
+	struct vmm_svm_backend *svm = backend;
+
+	if (svm != NULL)
+		vmm_svm_avic_deliver(svm, vc, vector, "pcie_msix");
+}
+
+static void
 vmm_svm_handle_guest_cache_op(struct vmm_svm_backend *svm)
 {
 	/*
@@ -5447,6 +5464,9 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	error = vmm_pcie_root_bar_fault(
 	    &svm->borrow_imm_machine->own_mut_pcie_root, gpa, prot);
 	if (error == 0) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u pcie bar npf gpa=0x%jx prot=%d", vc->imm_id,
+		    (uintmax_t)gpa, prot);
 		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 		return 1;
 	}
@@ -5722,6 +5742,7 @@ const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
 	.destroy = vmm_svm_vcpu_destroy,
 	.run = vmm_svm_vcpu_run,
 	.console_input = vmm_svm_console_input,
+	.interrupt = vmm_svm_interrupt,
 };
 
 VMM_VCPU_BACKEND_SET(vmm_svm_backend_ops);

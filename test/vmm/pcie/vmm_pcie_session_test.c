@@ -8,6 +8,7 @@
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <err.h>
 #include <errno.h>
@@ -158,6 +159,71 @@ expect_consumer_ready(int fd)
 		errno = EPROTO, err(1, "invalid CONSUMER_READY");
 }
 
+static void
+send_fd(int fd, int sent_fd)
+{
+	char control[CMSG_SPACE(sizeof(sent_fd))];
+	struct cmsghdr *cmsg;
+	struct iovec iov;
+	struct msghdr message;
+	char byte;
+
+	memset(&message, 0, sizeof(message));
+	memset(control, 0, sizeof(control));
+	byte = 'F';
+	iov.iov_base = &byte;
+	iov.iov_len = sizeof(byte);
+	message.msg_iov = &iov;
+	message.msg_iovlen = 1;
+	message.msg_control = control;
+	message.msg_controllen = sizeof(control);
+	cmsg = CMSG_FIRSTHDR(&message);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(sent_fd));
+	memcpy(CMSG_DATA(cmsg), &sent_fd, sizeof(sent_fd));
+	if (sendmsg(fd, &message, 0) != 1)
+		err(1, "send provider fd");
+}
+
+static int
+receive_fd(int fd)
+{
+	char control[CMSG_SPACE(sizeof(int))];
+	struct cmsghdr *cmsg;
+	struct iovec iov;
+	struct msghdr message;
+	char byte;
+	int received_fd;
+
+	memset(&message, 0, sizeof(message));
+	memset(control, 0, sizeof(control));
+	byte = 0;
+	received_fd = -1;
+	iov.iov_base = &byte;
+	iov.iov_len = sizeof(byte);
+	message.msg_iov = &iov;
+	message.msg_iovlen = 1;
+	message.msg_control = control;
+	message.msg_controllen = sizeof(control);
+	if (recvmsg(fd, &message, 0) != 1)
+		err(1, "receive provider fd");
+	if ((message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0)
+		errno = EPROTO, err(1, "truncated provider fd");
+	for (cmsg = CMSG_FIRSTHDR(&message); cmsg != NULL;
+	    cmsg = CMSG_NXTHDR(&message, cmsg)) {
+		if (cmsg->cmsg_level != SOL_SOCKET ||
+		    cmsg->cmsg_type != SCM_RIGHTS ||
+		    cmsg->cmsg_len != CMSG_LEN(sizeof(received_fd)) ||
+		    received_fd != -1)
+			errno = EPROTO, err(1, "provider fd rights");
+		memcpy(&received_fd, CMSG_DATA(cmsg), sizeof(received_fd));
+	}
+	if (received_fd < 0)
+		errno = EPROTO, err(1, "missing provider fd");
+	return received_fd;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -169,6 +235,9 @@ main(int argc, char **argv)
 	int provider;
 	int consumer;
 	int bar_fd;
+	int handoff[2];
+	int status;
+	pid_t child;
 	ssize_t n;
 
 	if (argc != 2)
@@ -202,8 +271,46 @@ main(int argc, char **argv)
 	if (close(bar_fd) != 0)
 		err(1, "close BAR");
 	expect_state(argv[1], "registered", "root");
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, handoff) != 0)
+		err(1, "socketpair provider handoff");
+	child = fork();
+	if (child < 0)
+		err(1, "fork provider handoff");
+	if (child == 0) {
+		int transferred;
+		char command;
+
+		if (close(handoff[0]) != 0)
+			err(1, "child close handoff parent");
+		if (close(provider) != 0)
+			err(1, "child close inherited provider");
+		transferred = receive_fd(handoff[1]);
+		if (send(handoff[1], "R", 1, 0) != 1)
+			err(1, "child provider ready");
+		if (recv(handoff[1], &command, sizeof(command), 0) != 1 ||
+		    command != 'C')
+			errno = EPROTO, err(1, "child provider close command");
+		if (close(transferred) != 0)
+			err(1, "child close transferred provider");
+		if (close(handoff[1]) != 0)
+			err(1, "child close handoff");
+		return 0;
+	}
+	if (close(handoff[1]) != 0)
+		err(1, "parent close handoff child");
+	send_fd(handoff[0], provider);
+	if (recv(handoff[0], path, 1, 0) != 1 || path[0] != 'R')
+		errno = EPROTO, err(1, "provider transfer ready");
 	if (close(provider) != 0)
-		err(1, "close provider");
+		err(1, "close original provider");
+	expect_state(argv[1], "registered", "root");
+	if (send(handoff[0], "C", 1, 0) != 1)
+		err(1, "provider transfer close");
+	if (close(handoff[0]) != 0)
+		err(1, "parent close handoff");
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0)
+		errno = EPROTO, err(1, "provider handoff child");
 	expect_state_eventually(argv[1], "detached", "root");
 
 	if (snprintf(path, sizeof(path), "%s/consumer", argv[1]) >=

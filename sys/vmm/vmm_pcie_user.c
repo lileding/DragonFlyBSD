@@ -122,7 +122,7 @@ vmm_pcie_user_provider_run(struct vmm_pcie_user *user)
 	struct vmm_pcie_abi_register request;
 	struct vmm_pcie_abi_registered response;
 	struct file *bar_fps[VMM_PCIE_ABI_MAX_BARS];
-	char discard[sizeof(struct vmm_pcie_abi_start)];
+	struct vmm_pcie_abi_start message;
 	size_t size;
 	unsigned int bar_count;
 	int error;
@@ -141,10 +141,28 @@ vmm_pcie_user_provider_run(struct vmm_pcie_user *user)
 		    sizeof(response), bar_fps, bar_count, 0);
 	}
 	while (error == 0) {
-		error = vmm_pcie_user_receive(user->own_mut_peer, discard,
-		    sizeof(discard), &size);
-		if (error == 0)
-			error = size == 0 ? ECONNRESET : EPROTO;
+		error = vmm_pcie_user_receive(user->own_mut_peer, &message,
+		    sizeof(message), &size);
+		if (error != 0)
+			break;
+		if (size == 0) {
+			error = ECONNRESET;
+			break;
+		}
+		if (vmm_pcie_abi_validate(&message, size) != 0) {
+			error = EPROTO;
+			break;
+		}
+		switch (le16toh(message.header.le_type)) {
+		case VMM_PCIE_ABI_MSG_MSIX:
+			error = vmm_pcie_device_provider_msix(
+			    user->borrow_imm_device, user,
+			    (const struct vmm_pcie_abi_msix *)&message);
+			break;
+		default:
+			error = EPROTO;
+			break;
+		}
 	}
 	vmm_pcie_device_provider_detach(user->borrow_imm_device, user);
 	(void)soclose(user->own_mut_peer, 0);

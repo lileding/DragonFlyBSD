@@ -306,6 +306,25 @@ vmm_vcpu_console_input_locked(struct vmm_machine *m)
 }
 
 void
+vmm_vcpu_interrupt_locked(struct vmm_machine *m, uint8_t vector)
+{
+	struct vmm_vcpu *v = &m->own_mut_vcpu;
+	struct vmm_vcpu_thread *vc;
+
+	if (v->own_mut_threads == NULL ||
+	    atomic_load_acq_int(&v->atomic_mut_active_count) == 0)
+		return;
+	/* Single-vCPU MSI-X always targets the sole local APIC, ID zero. */
+	vc = &v->own_mut_threads[0];
+	if (vc->borrow_imm_backend_ops == NULL ||
+	    vc->borrow_imm_backend_ops->interrupt == NULL ||
+	    vc->own_mut_backend == NULL)
+		return;
+	vc->borrow_imm_backend_ops->interrupt(vc->own_mut_backend, vc, vector);
+	wakeup(vc);
+}
+
+void
 vmm_vcpu_uninit(struct vmm_vcpu *v, struct vmm_vcpu_thread **threadsp)
 {
 	*threadsp = NULL;

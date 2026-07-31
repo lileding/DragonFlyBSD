@@ -26,6 +26,9 @@ void	vmm_pcie_bar_destroy(struct vmm_pcie_bar *bar);
 /* Caller holds the parent fabric token_registry. */
 int	vmm_pcie_bar_snapshot(struct vmm_pcie_bar *bar,
 	    struct vm_object **objectp, uint64_t *sizep);
+/* Caller holds an object reference obtained from vmm_pcie_bar_snapshot(). */
+int	vmm_pcie_bar_object_read32(struct vm_object *object, uint64_t size,
+	    uint64_t offset, uint32_t *valuep);
 int	vmm_pcie_bar_mmap_active(void);
 
 #endif /* VMM_PCIE_BAR_H */
