@@ -24,6 +24,7 @@ vmm_device_init(struct vmm_device *device, const char *name, int nlen,
 	device->mut_bdf = bdf;
 	device->mut_attachment_generation = 1;
 	device->own_mut_config = 0;
+	__builtin_memset(device->mut_bar_gpa, 0, sizeof(device->mut_bar_gpa));
 }
 
 void
@@ -47,6 +48,7 @@ vmm_device_uninit(struct vmm_device *device)
 	device->mut_revision = 0;
 	device->mut_registered = 0;
 	device->own_mut_config = 0;
+	__builtin_memset(device->mut_bar_gpa, 0, sizeof(device->mut_bar_gpa));
 }
 
 int

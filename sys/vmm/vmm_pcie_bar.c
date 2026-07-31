@@ -124,11 +124,14 @@ vmm_pcie_bar_create(struct vmm_pcie_bar *bar, uint64_t size, uint32_t flags)
 	backing = vm_object_allocate(OBJT_DEFAULT, OFF_TO_IDX(size));
 	if (backing == NULL)
 		return ENOMEM;
+	bar->own_mut_backing_object = backing;
 	error = vmm_pcie_bar_open_object_fd(backing, (vm_size_t)size,
 	    &bar->own_mut_fp);
-	vm_object_deallocate(backing);
-	if (error != 0)
+	if (error != 0) {
+		vm_object_deallocate(bar->own_mut_backing_object);
+		bar->own_mut_backing_object = NULL;
 		return error;
+	}
 	bar->imm_size = size;
 	bar->imm_flags = flags;
 	return 0;
@@ -140,12 +143,39 @@ vmm_pcie_bar_destroy(struct vmm_pcie_bar *bar)
 
 	if (bar == NULL)
 		return;
+	/* Sent BAR capabilities retain separate backing-object references. */
 	if (bar->own_mut_fp != NULL) {
 		fp_close(bar->own_mut_fp);
 		bar->own_mut_fp = NULL;
 	}
+	if (bar->own_mut_backing_object != NULL) {
+		vm_object_deallocate(bar->own_mut_backing_object);
+		bar->own_mut_backing_object = NULL;
+	}
 	bar->imm_size = 0;
 	bar->imm_flags = 0;
+}
+
+int
+vmm_pcie_bar_snapshot(struct vmm_pcie_bar *bar, struct vm_object **objectp,
+    uint64_t *sizep)
+{
+	struct vm_object *object;
+
+	if (objectp != NULL)
+		*objectp = NULL;
+	if (sizep != NULL)
+		*sizep = 0;
+	if (bar == NULL || objectp == NULL || sizep == NULL ||
+	    bar->own_mut_backing_object == NULL || bar->imm_size == 0)
+		return EINVAL;
+	object = bar->own_mut_backing_object;
+	vm_object_hold(object);
+	vm_object_reference_locked(object);
+	vm_object_drop(object);
+	*objectp = object;
+	*sizep = bar->imm_size;
+	return 0;
 }
 
 int

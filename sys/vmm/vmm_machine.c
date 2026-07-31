@@ -509,6 +509,7 @@ vmm_machine_start(const struct vmm_machine_task *task)
 		goto fail_after_loader;
 	}
 	vmm_machine_logf(m, "mem runtime started source=boot_snapshot");
+	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	if (!vmm_debug_allow_vcpu_start) {
 		error = EBUSY;
 		vmm_machine_logf(m, "vcpu start gated error=%d", error);
@@ -543,6 +544,7 @@ fail_after_loader:
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=start_failed error=%d",
 	    error);
+	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
@@ -600,6 +602,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 		thread_count = m->own_mut_vcpu.mut_count;
 		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 		vmm_vcpu_release_threads(threads, thread_count);
+		vmm_pcie_root_reset(&m->own_mut_pcie_root);
 		error = vmm_mem_reset_run(&m->own_mut_mem);
 		if (error == 0 && m->own_mut_boot_launch == NULL)
 			error = EINVAL;
@@ -621,6 +624,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 		vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 		vmm_machine_logf(m,
 		    "state stopped reason=guest_reset_failed error=%d", error);
+		vmm_pcie_root_reset(&m->own_mut_pcie_root);
 		backing = vmm_mem_detach(&m->own_mut_mem);
 		vmm_vcpu_release_threads(threads, thread_count);
 		vmm_mem_release_backing(backing);
@@ -643,6 +647,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 	vmm_machine_logf(m, "state stopped reason=%s",
 	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ?
 	    "guest_shutdown" : "guest_fault");
+	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);
@@ -672,6 +677,7 @@ vmm_machine_stop_force(const struct vmm_machine_task *task)
 	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=force");
+	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
 	vmm_vcpu_release_threads(threads, thread_count);
 	vmm_mem_release_backing(backing);

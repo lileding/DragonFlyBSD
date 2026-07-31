@@ -14,6 +14,7 @@
 #include "vm/vm_object.h"
 #include "vmm_mem.h"
 #include "vmm_loader_x86.h"
+#include "vmm_pcie_layout.h"
 
 static int failures;
 int vmm_test_vm_fault_calls;
@@ -272,8 +273,8 @@ expect_lapic_hole_fault_reject(void)
 		fail("prepare lapic-hole backing");
 		return;
 	}
-	if (vmm_test_vm_map_insert_calls != 2)
-		fail("prepare maps RAM around lapic hole");
+	if (vmm_test_vm_map_insert_calls != 3)
+		fail("prepare maps RAM around PCIe and lapic holes");
 	if (vmm_mem_publish(&mem, backing) != 0) {
 		fail("publish lapic-hole backing");
 		vmm_mem_release_backing(backing);
@@ -296,6 +297,13 @@ expect_lapic_hole_fault_reject(void)
 	    VM_FAULT_NORMAL);
 	expect_fault_result(&mem, "fault lapic hole", VMM_X86_LAPIC_MMIO_GPA,
 	    VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
+	expect_fault_result(&mem, "fault pcie mmio hole", VMM_PCIE_MMIO_BASE,
+	    VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
+	expect_fault_result(&mem, "fault first pcie ecam page",
+	    VMM_PCIE_ECAM_BASE, VM_PROT_READ, EINVAL, 0, NULL, 0, 0);
+	expect_fault_result(&mem, "fault last pcie ecam page",
+	    VMM_PCIE_ECAM_BASE + 0x10000000ULL - PAGE_SIZE, VM_PROT_READ,
+	    EINVAL, 0, NULL, 0, 0);
 	expect_read_result(&mem, "read lapic hole",
 	    VMM_X86_LAPIC_MMIO_GPA, EINVAL, 0, NULL, 0);
 	expect_fault_result(&mem, "fault after lapic hole",
@@ -348,7 +356,8 @@ expect_backing_lifecycle(void)
 	if (vmspace == NULL)
 		fail("borrow vmspace");
 	if (vmm_test_vmspace_alloc_min != 0 ||
-	    vmm_test_vmspace_alloc_max != VMM_MEM_ALIGN)
+	    vmm_test_vmspace_alloc_max !=
+	    VMM_PCIE_ECAM_BASE + 0x10000000ULL)
 		fail("prepare allocates machine vmspace over GPA range");
 	if (vmm_test_vmspace_fork_calls != 1 ||
 	    vmm_test_vmspace_fork_parent == vmspace ||
@@ -522,7 +531,7 @@ expect_large_prepare_is_lazy(void)
 	if (vmm_test_default_pager_alloc_size != VMM_MEM_MAX ||
 	    vmm_test_vmspace_alloc_min != 0 ||
 	    vmm_test_vmspace_alloc_max != VMM_MEM_MAX ||
-	    vmm_test_vm_map_insert_calls != 2 ||
+	    vmm_test_vm_map_insert_calls != 3 ||
 	    vmm_test_vm_fault_calls != 0) {
 		fail("prepare max backing is lazy");
 	}

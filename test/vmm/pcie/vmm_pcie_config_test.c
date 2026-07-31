@@ -19,6 +19,8 @@ static uint64_t config_read(struct vmm_pcie_config *config,
     unsigned int offset, int size);
 static void config_write(struct vmm_pcie_config *config, unsigned int offset,
     int size, uint64_t value);
+static void config_decode(struct vmm_pcie_config *config, unsigned int index,
+    int want, uint64_t want_gpa, uint64_t want_size);
 
 int
 main(void)
@@ -48,12 +50,17 @@ main(void)
 	expect_value("bar initial", config_read(config, 0x10, 4), 0);
 	config_write(config, 0x10, 4, 0xffffffffU);
 	expect_value("bar sizing", config_read(config, 0x10, 4), 0xfffff000U);
-	config_write(config, 0x10, 4, 0x12345000U);
+	config_write(config, 0x10, 4, 0xc0001000U);
 	expect_value("bar programmed", config_read(config, 0x10, 4),
-	    0x12345000U);
+	    0xc0001000U);
+	config_decode(config, 0, ENOENT, 0, 0);
 	config_write(config, 0x04, 4, 0xffffffffU);
 	expect_value("command mask", config_read(config, 0x04, 4),
 	    0x00100007U);
+	config_decode(config, 0, 0, 0xc0001000U, 0x1000U);
+	vmm_pcie_config_reset_locked(config);
+	expect_value("bar reset", config_read(config, 0x10, 4), 0);
+	config_decode(config, 0, ENOENT, 0, 0);
 	expect_value("extended read", config_read(config, 0x100, 4), 0);
 	value = 0;
 	expect_result("unaligned access", vmm_pcie_config_access_locked(config,
@@ -97,4 +104,21 @@ config_write(struct vmm_pcie_config *config, unsigned int offset, int size,
 
 	expect_result("config write", vmm_pcie_config_access_locked(config,
 	    offset, 1, size, &value), 0);
+}
+
+static void
+config_decode(struct vmm_pcie_config *config, unsigned int index, int want,
+    uint64_t want_gpa, uint64_t want_size)
+{
+	uint64_t gpa;
+	uint64_t size;
+
+	gpa = 0;
+	size = 0;
+	expect_result("bar decode", vmm_pcie_config_bar_decode_locked(config,
+	    index, &gpa, &size), want);
+	if (want == 0) {
+		expect_value("bar decode gpa", gpa, want_gpa);
+		expect_value("bar decode size", size, want_size);
+	}
 }

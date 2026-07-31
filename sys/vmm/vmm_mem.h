@@ -65,11 +65,17 @@ int	vmm_mem_snapshot(struct vmm_mem *m, struct vm_object **objectp,
  * machine keeps its backing alive until all active vCPUs have exited.
  */
 struct vmspace *vmm_mem_borrow_vmspace(struct vmm_mem *m);
+/* Insert or remove a non-RAM object in the current run vmspace at a fixed GPA. */
+int	vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
+	    struct vm_object *object);
+void	vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size);
 /*
  * Called only by an active vCPU backend; memory detach waits for all vCPUs to
  * exit before releasing the backing.
  */
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
+/* Fault a non-RAM object that is already mapped in the current run vmspace. */
+int	vmm_mem_fault_object_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
 int	vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf,
 	    size_t len);
 

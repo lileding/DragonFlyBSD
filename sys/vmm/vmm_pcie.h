@@ -29,6 +29,11 @@ struct vmm_pcie {
 	int			mut_closing;
 };
 
+struct vmm_pcie_bar_mapping {
+	uint64_t	raw_gpa;
+	uint64_t	imm_size;
+};
+
 void	vmm_pcie_init(struct vmm_pcie *pcie);
 void	vmm_pcie_uninit(struct vmm_pcie *pcie);
 int	vmm_pcie_begin_shutdown(struct vmm_pcie *pcie);
@@ -60,10 +65,18 @@ int	vmm_pcie_device_provider_register(struct vmm_device *device,
 	    struct file **bar_fps, unsigned int *bar_countp);
 void	vmm_pcie_device_provider_detach(struct vmm_device *device,
 	    struct vmm_pcie_user *provider);
+void	vmm_pcie_device_provider_force_close(struct vmm_device *device);
 int	vmm_pcie_device_consumer_attach(struct vmm_device *device,
 	    struct vmm_pcie_user *consumer,
 	    struct vmm_pcie_abi_consumer_ready *response);
 void	vmm_pcie_device_consumer_detach(struct vmm_device *device,
 	    struct vmm_pcie_user *consumer);
+void	vmm_pcie_device_bar_mappings_take_locked(struct vmm_device *device,
+	    struct vmm_pcie_bar_mapping *mappings);
+void	vmm_pcie_root_bar_mappings_unmap(struct vmm_pcie_root *root,
+	    const struct vmm_pcie_bar_mapping *mappings);
+int	vmm_pcie_root_bar_fault(struct vmm_pcie_root *root, uint64_t gpa,
+	    int prot);
+void	vmm_pcie_root_reset(struct vmm_pcie_root *root);
 
 #endif /* VMM_PCIE_H */

@@ -137,10 +137,10 @@ check_linux_boot_data()
 	    "000000e000000000" ] ||
 	    fail "MCFG ECAM base missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70800 + 52)) 8)" = \
-	    "0000000000000000" ] ||
+	    "000000ff00000000" ] ||
 	    fail "MCFG segment/bus range missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "ef000000" ] ||
-	    fail "DSDT PCI root table length missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "09010000" ] ||
+		fail "DSDT PCI root table length missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 36)) 12)" = \
 	    "085f53355f1206020a050a05" ] ||
 	    fail "DSDT S5 package missing in $case_label case"
@@ -155,11 +155,21 @@ check_linux_boot_data()
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 160)) 3)" = "220001" ] ||
 	    fail "DSDT RTC IRQ8 resource missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 165)) 15)" = \
-	    "1049045f53425f5b82410450434930" ] ||
-	    fail "DSDT PCI0 AML scope missing in $case_label case"
+	    "1043065f53425f5b824b0550434930" ] ||
+		fail "DSDT PCI0 AML scope missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70600 + 180)) 12)" = \
 	    "085f4849440c41d00a08085f" ] ||
-	    fail "DSDT PCI0 PNP0A08 HID missing in $case_label case"
+		fail "DSDT PCI0 PNP0A08 HID missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 221 + 10)) 2)" = "ff00" ] ||
+		fail "DSDT PCI0 bus maximum missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 221 + 14)) 2)" = "0001" ] ||
+		fail "DSDT PCI0 bus length missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 237)) 19)" = \
+	    "871700000c0100000000000000c0ffffffdf00" ] ||
+		fail "DSDT PCI0 MMIO resource missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x70600 + 165 + 96)) 4)" = \
+	    "00207900" ] ||
+		fail "DSDT PCI0 resource end tag missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
 	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
@@ -175,20 +185,29 @@ check_linux_boot_data()
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
 	check_zero_sum "$MEM_FILE" $((0x70400)) 74 "$case_label MADT"
 	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
-	check_zero_sum "$MEM_FILE" $((0x70600)) 239 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x70600)) 265 "$case_label DSDT"
 	check_zero_sum "$MEM_FILE" $((0x70800)) 60 "$case_label MCFG"
 	if [ "$mem_size" = 4G ]; then
-		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x1e8)) 1)" = "07" ] ||
-		    fail "e820 ECAM split count missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x1e8)) 1)" = "0a" ] ||
+			fail "e820 PCIe aperture split count missing in $case_label case"
 		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 4 * 20)) 20)" = \
-		    "00001000000000000000f0df0000000001000000" ] ||
-		    fail "e820 pre-ECAM RAM missing in $case_label case"
+		    "00001000000000000000f0bf0000000001000000" ] ||
+			fail "e820 pre-MMIO RAM missing in $case_label case"
 		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 5 * 20)) 20)" = \
-		    "000000e000000000000010000000000002000000" ] ||
-		    fail "e820 ECAM reservation missing in $case_label case"
+		    "000000c000000000000000200000000002000000" ] ||
+			fail "e820 MMIO reservation missing in $case_label case"
 		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 6 * 20)) 20)" = \
-		    "000010e0000000000000f01f0000000001000000" ] ||
-		    fail "e820 post-ECAM RAM missing in $case_label case"
+		    "000000e000000000000000100000000002000000" ] ||
+			fail "e820 ECAM reservation missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 7 * 20)) 20)" = \
+		    "000000f0000000000000e00e0000000001000000" ] ||
+			fail "e820 pre-LAPIC RAM missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 8 * 20)) 20)" = \
+		    "0000e0fe00000000001000000000000002000000" ] ||
+			fail "e820 LAPIC reservation missing in $case_label case"
+		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 9 * 20)) 20)" = \
+		    "0010e0fe0000000000f01f010000000001000000" ] ||
+			fail "e820 post-LAPIC RAM missing in $case_label case"
 	fi
 }
 

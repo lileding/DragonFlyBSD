@@ -8,8 +8,7 @@
 
 #include <sys/types.h>
 
-#define VMM_PCIE_ECAM_BASE	0xe0000000ULL
-#define VMM_PCIE_ECAM_SIZE	0x00100000ULL
+#include "vmm_pcie_layout.h"
 
 struct vmm_pcie_root;
 

@@ -101,4 +101,14 @@ vm_map_insert(vm_map_t map, int *count, struct vm_object *object,
 	return 0;
 }
 
+static inline int
+vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
+{
+
+	(void)map;
+	(void)start;
+	(void)end;
+	return 0;
+}
+
 #endif /* VMM_TEST_MEM_COMPAT_VM_VM_MAP_H */

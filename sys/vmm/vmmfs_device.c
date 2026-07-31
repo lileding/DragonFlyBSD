@@ -154,6 +154,8 @@ vmmfs_device_return_owner_locked(struct vmmfs_mount *vmp,
 	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
 		if (!vmm_pcie_device_at_root(&d->own_mut_device, root))
 			continue;
+		/* Machine deletion is provider removal, not an EBUSY condition. */
+		vmm_pcie_device_provider_force_close(&d->own_mut_device);
 		error = vmm_pcie_device_move(&vmp->own_mut_pcie,
 		    &d->own_mut_device, host);
 		if (error != 0)

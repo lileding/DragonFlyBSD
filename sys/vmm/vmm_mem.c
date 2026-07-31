@@ -18,13 +18,18 @@
 #include "vmm_parse.h"
 #include "vmm_loader_x86.h"
 #include "vmm_mem.h"
+#include "vmm_pcie_layout.h"
 
 struct vmm_mem_backing {
 	struct vm_object *own_mut_object;
 	struct vmspace *own_mut_boot_vmspace;
 	struct vmspace *own_mut_run_vmspace;
 	uint64_t imm_bytes;
+	uint64_t imm_vmspace_max;
 };
+
+static int	vmm_mem_fault_vmspace(struct vmm_mem *m, uint64_t gpa,
+		    int prot);
 
 static void
 vmm_mem_pmap_del_all_cpus(struct vmspace *vmspace)
@@ -103,45 +108,61 @@ vmm_mem_gpa_page_inside(uint64_t bytes, uint64_t gpa)
 
 	page = trunc_page(gpa);
 	return page < bytes && bytes - page >= PAGE_SIZE &&
+	    (page < VMM_PCIE_MMIO_BASE || page >= VMM_PCIE_MMIO_END) &&
+	    (page < VMM_PCIE_ECAM_BASE ||
+	     page >= VMM_PCIE_ECAM_END) &&
 	    (page < VMM_X86_LAPIC_MMIO_GPA ||
 	     page >= VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE);
 }
 
 #ifndef _KERNEL_VIRTUAL
 static int
-vmm_mem_map_object(struct vmspace *vm, struct vm_object *object,
+vmm_mem_map_ram_object(struct vmspace *vm, struct vm_object *object,
     uint64_t bytes)
 {
+	struct vmm_mem_hole {
+		uint64_t start;
+		uint64_t end;
+	};
 	struct vmm_mem_map_segment {
 		vm_offset_t start;
 		vm_offset_t end;
 		vm_ooffset_t offset;
-	} seg[2];
+	} seg[4];
+	const struct vmm_mem_hole holes[] = {
+		{ VMM_PCIE_MMIO_BASE, VMM_PCIE_MMIO_END },
+		{ VMM_PCIE_ECAM_BASE, VMM_PCIE_ECAM_END },
+		{ VMM_X86_LAPIC_MMIO_GPA,
+		  VMM_X86_LAPIC_MMIO_GPA + VMM_X86_LAPIC_MMIO_SIZE },
+	};
 	vm_map_t map = &vm->vm_map;
 	vm_size_t size = round_page64(bytes);
 	vm_prot_t prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
 	unsigned int i;
 	unsigned int nseg = 0;
+	uint64_t start;
 
-	if (size <= VMM_X86_LAPIC_MMIO_GPA) {
-		seg[nseg].start = 0;
-		seg[nseg].end = size;
-		seg[nseg].offset = 0;
-		nseg++;
-	} else {
-		seg[nseg].start = 0;
-		seg[nseg].end = VMM_X86_LAPIC_MMIO_GPA;
-		seg[nseg].offset = 0;
-		nseg++;
-		if (size > VMM_X86_LAPIC_MMIO_GPA +
-		    VMM_X86_LAPIC_MMIO_SIZE) {
-			seg[nseg].start = VMM_X86_LAPIC_MMIO_GPA +
-			    VMM_X86_LAPIC_MMIO_SIZE;
-			seg[nseg].end = size;
-			seg[nseg].offset = VMM_X86_LAPIC_MMIO_GPA +
-			    VMM_X86_LAPIC_MMIO_SIZE;
+	start = 0;
+	for (i = 0; i < sizeof(holes) / sizeof(holes[0]) && start < size; i++) {
+		uint64_t end = holes[i].start < size ? holes[i].start : size;
+
+		if (end > start) {
+			seg[nseg].start = start;
+			seg[nseg].end = end;
+			seg[nseg].offset = start;
 			nseg++;
 		}
+		if (size <= holes[i].end) {
+			start = size;
+			break;
+		}
+		start = holes[i].end;
+	}
+	if (start < size) {
+		seg[nseg].start = start;
+		seg[nseg].end = size;
+		seg[nseg].offset = start;
+		nseg++;
 	}
 	for (i = 0; i < nseg; i++) {
 		int count;
@@ -186,6 +207,8 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 
 	b = kmalloc(sizeof(*b), M_TEMP, M_WAITOK | M_ZERO);
 	b->imm_bytes = bytes;
+	b->imm_vmspace_max = bytes > VMM_PCIE_ECAM_END ? bytes :
+	    VMM_PCIE_ECAM_END;
 	size = round_page64(b->imm_bytes);
 	b->own_mut_object = default_pager_alloc(NULL, size, VM_PROT_DEFAULT, 0);
 	if (b->own_mut_object == NULL) {
@@ -200,13 +223,13 @@ vmm_mem_prepare(uint64_t bytes, struct vmm_mem_backing **backingp)
 	 * guest page.
 	 */
 #ifndef _KERNEL_VIRTUAL
-	b->own_mut_boot_vmspace = vmspace_alloc(0, size);
+	b->own_mut_boot_vmspace = vmspace_alloc(0, b->imm_vmspace_max);
 	if (b->own_mut_boot_vmspace == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
 	pmap_maybethreaded(vmspace_pmap(b->own_mut_boot_vmspace));
-	error = vmm_mem_map_object(b->own_mut_boot_vmspace,
+	error = vmm_mem_map_ram_object(b->own_mut_boot_vmspace,
 	    b->own_mut_object, size);
 	if (error)
 		goto fail;
@@ -342,25 +365,98 @@ vmm_mem_borrow_vmspace(struct vmm_mem *m)
 	return m->own_mut_backing->own_mut_run_vmspace;
 }
 
+#ifdef _KERNEL_VIRTUAL
+int
+vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
+    struct vm_object *object)
+{
+
+	(void)m;
+	(void)gpa;
+	(void)size;
+	(void)object;
+	return EOPNOTSUPP;
+}
+
+void
+vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size)
+{
+
+	(void)m;
+	(void)gpa;
+	(void)size;
+}
+#else
+int
+vmm_mem_map_object(struct vmm_mem *m, uint64_t gpa, uint64_t size,
+    struct vm_object *object)
+{
+	struct vmm_mem_backing *b;
+	vm_map_t map;
+	vm_prot_t prot;
+	int count;
+	int error;
+
+	if (m == NULL || object == NULL || size == 0 ||
+	    gpa != trunc_page(gpa) || size != round_page64(size))
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_run_vmspace == NULL ||
+	    gpa >= b->imm_vmspace_max || size > b->imm_vmspace_max - gpa)
+		return EINVAL;
+	map = &b->own_mut_run_vmspace->vm_map;
+	prot = VM_PROT_READ | VM_PROT_WRITE;
+	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+	vm_map_lock(map);
+	/* vm_map_insert() consumes this reference on success. */
+	vmm_mem_object_ref(object);
+	vm_object_hold(object);
+	error = vm_map_insert(map, &count, object, NULL, 0, NULL, gpa,
+	    gpa + size, VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot, 0);
+	vm_object_drop(object);
+	vm_map_unlock(map);
+	vm_map_entry_release(count);
+	if (error != 0) {
+		vm_object_deallocate(object);
+		return EBUSY;
+	}
+	return 0;
+}
+
+void
+vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size)
+{
+	struct vmm_mem_backing *b;
+
+	if (m == NULL || size == 0 || gpa != trunc_page(gpa) ||
+	    size != round_page64(size))
+		return;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_run_vmspace == NULL ||
+	    gpa >= b->imm_vmspace_max || size > b->imm_vmspace_max - gpa)
+		return;
+	(void)vm_map_remove(&b->own_mut_run_vmspace->vm_map, gpa, gpa + size);
+}
+#endif
+
 int
 vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
 {
 	struct vmm_mem_backing *b;
-	const int valid_prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
-	int flags;
 
-	if (m == NULL)
+	if (m == NULL || m->own_mut_backing == NULL)
 		return EINVAL;
 	b = m->own_mut_backing;
-	if (b == NULL || b->own_mut_run_vmspace == NULL)
-		return EINVAL;
-	if ((prot & valid_prot) == 0 || (prot & ~valid_prot) != 0)
-		return EINVAL;
 	if (!vmm_mem_gpa_page_inside(b->imm_bytes, gpa))
 		return EINVAL;
-	flags = (prot & VM_PROT_WRITE) ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
-	return vm_fault(&b->own_mut_run_vmspace->vm_map, trunc_page(gpa),
-	    (vm_prot_t)prot, flags);
+	return vmm_mem_fault_vmspace(m, gpa, prot);
+}
+
+int
+vmm_mem_fault_object_gpa(struct vmm_mem *m, uint64_t gpa, int prot)
+{
+
+	return vmm_mem_fault_vmspace(m, gpa, prot);
 }
 
 int
@@ -406,4 +502,26 @@ vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
 		len -= chunk;
 	}
 	return 0;
+}
+
+static int
+vmm_mem_fault_vmspace(struct vmm_mem *m, uint64_t gpa, int prot)
+{
+	struct vmm_mem_backing *b;
+	const int valid_prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+	int flags;
+
+	if (m == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_run_vmspace == NULL)
+		return EINVAL;
+	if ((prot & valid_prot) == 0 || (prot & ~valid_prot) != 0)
+		return EINVAL;
+	if (trunc_page(gpa) >= b->imm_vmspace_max ||
+	    trunc_page(gpa) > b->imm_vmspace_max - PAGE_SIZE)
+		return EINVAL;
+	flags = (prot & VM_PROT_WRITE) ? VM_FAULT_DIRTY : VM_FAULT_NORMAL;
+	return vm_fault(&b->own_mut_run_vmspace->vm_map, trunc_page(gpa),
+	    (vm_prot_t)prot, flags);
 }

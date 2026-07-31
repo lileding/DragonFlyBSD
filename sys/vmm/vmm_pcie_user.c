@@ -89,6 +89,20 @@ fail_user:
 	return error;
 }
 
+int
+vmm_pcie_user_force_close(struct vmm_pcie_user *user)
+{
+
+	if (user == NULL || user->own_mut_peer == NULL)
+		return EINVAL;
+	/*
+	 * SHUT_RDWR wakes the session kthread from its receive and makes the
+	 * provider's peer observe device removal.  The caller keeps the fabric
+	 * token, so this session cannot concurrently detach and free itself.
+	 */
+	return soshutdown(user->own_mut_peer, SHUT_RDWR);
+}
+
 static void
 vmm_pcie_user_run(void *arg)
 {

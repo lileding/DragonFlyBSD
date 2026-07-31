@@ -33,6 +33,7 @@
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
 #include "vmm_mem.h"
+#include "vmm_pcie.h"
 #include "vmm_pcie_ecam.h"
 #include "vmm_svm.h"
 #include "vmm_vcpu.h"
@@ -5397,6 +5398,8 @@ vmm_svm_handle_pcie_ecam_mmio(struct vmm_svm_backend *svm,
 	if (vmm_pcie_ecam_access(&svm->borrow_imm_machine->own_mut_pcie_root,
 	    gpa, write, access_size, &value) != 0)
 		goto fail;
+	if (write)
+		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 	if (!write)
 		vmm_svm_gpr_write(svm, reg, value,
 		    result_size != 0 ? result_size : access_size);
@@ -5441,6 +5444,14 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		prot = VM_PROT_EXECUTE;
 	else
 		prot = VM_PROT_READ;
+	error = vmm_pcie_root_bar_fault(
+	    &svm->borrow_imm_machine->own_mut_pcie_root, gpa, prot);
+	if (error == 0) {
+		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		return 1;
+	}
+	if (error != ENOENT)
+		return 0;
 	error = vmm_mem_fault_gpa(&m->own_mut_mem, gpa, prot);
 	if (error)
 		return 0;
