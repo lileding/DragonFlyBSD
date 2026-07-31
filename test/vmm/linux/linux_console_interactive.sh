@@ -2,8 +2,8 @@
 # pc64 manual Linux serial-console harness.
 #
 # This starts one in-memory Linux guest and attaches cu to
-# machines/<name>/console.  Press Ctrl-] to exit; the script then force-stops
-# and removes the guest.
+# machines/<name>/console.  Type '~.' at the beginning of a line to exit; the
+# script then force-stops and removes the guest.
 set -u
 
 ROOT=$(dirname "$0")
@@ -22,7 +22,7 @@ INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-45}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
-CONNECTOR=${VMM_CONNECTOR:-stdio}
+CONNECTOR=${VMM_CONNECTOR:-cu}
 
 LOADED=0
 MOUNTED=0
@@ -173,13 +173,13 @@ attach_console()
 	say "Linux guest is running."
 	say "console: $console"
 	say "log: $LOG"
-	say "escape: press Ctrl-] to exit."
+	say "cu escape: type '~.' at the beginning of a line to exit."
 	case "$CONNECTOR" in
+	cu)
+		cu -s 115200 -l "$console"
+		;;
 	stdio)
 		"$REPO/test/vmm/linux/linux_console_attach.py" "$console"
-		;;
-	cu)
-		cu -l "$console" -s 115200
 		;;
 	none)
 		printf '%s\n' "Press Enter to stop $VM and clean up."
@@ -198,7 +198,11 @@ trap cleanup EXIT INT TERM
 ensure_module_image
 [ -f "$KERNEL" ] || fail "missing $KERNEL"
 [ -f "$INITRD" ] || fail "missing $INITRD"
-[ "$CONNECTOR" = none ] || [ -t 0 ] || fail "interactive terminal required"
+case "$CONNECTOR" in
+cu|stdio)
+	[ -t 0 ] || fail "interactive terminal required"
+	;;
+esac
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
 check_module_image
 

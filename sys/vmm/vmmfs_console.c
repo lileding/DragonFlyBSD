@@ -65,7 +65,9 @@ vmmfs_console_open(struct vmmfs_node *node, struct vop_open_args *ap)
 	dev = vp->v_rdev;
 	if (dev->si_iosize_max == 0)
 		dev->si_iosize_max = min(MAXPHYS, 64 * 1024);
-	vsetflags(vp, VISTTY);
+	/* A terminal has no file position. */
+	/* cu forks concurrent readers and writers. */
+	vsetflags(vp, VISTTY | VNOTSEEKABLE);
 	vn_unlock(vp);
 	error = dev_dopen(dev, ap->a_mode, S_IFCHR, ap->a_cred, ap->a_fpp,
 	    vp);
