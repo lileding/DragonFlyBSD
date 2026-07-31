@@ -216,12 +216,22 @@ printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
 run mkdir "$(host_device)"
 run mv "$(host_device)" "$(device)"
 : >"$PROVIDER_LOG" || fail "create provider log"
-"$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
-PROVIDER_PID=$!
-wait_device_state || fail "provider did not register"
+	"$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
+	PROVIDER_PID=$!
+	i=0
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		state=$(cat "$(device)/state" 2>/dev/null) || state=
+		[ "$state" = 'provider=pending
+consumer=root' ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+[ "${state-}" = 'provider=pending
+consumer=root' ] || fail "provider was not pending before START"
 
-start_console_reader
-run rm "$(mach)/stopped"
+	start_console_reader
+	run rm "$(mach)/stopped"
+	wait_device_state || fail "provider did not register after START"
 wait_console_pattern 'DFVMM_LINUX_CONSOLE_READY' console ||
 	fail "Linux console was not ready"
 printf '%s\n' 'if [ "$(cat /sys/bus/pci/devices/0000:00:01.0/vendor)" = 0x1b36 ] && [ "$(cat /sys/bus/pci/devices/0000:00:01.0/device)" = 0xdf01 ]; then echo DFVMM_PCIE_ECAM_OK; else echo DFVMM_PCIE_ECAM_BAD; fi' >"$(mach)/console" ||

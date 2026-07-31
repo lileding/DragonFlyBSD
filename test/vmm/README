@@ -28,6 +28,8 @@ The offline gate covers:
 - `pcie/vmm_pcie_dma_provider_check.sh`: P7 user-provider compiler gate for
   the `START -> REGISTER -> REGISTERED` exchange and later `STOPPED`/fault
   path.
+- `pcie/vmm_pcie_ecam_provider_check.sh`: P3 user-provider compiler gate for
+  `START`-driven Linux ECAM enumeration.
 - `linux/linux_initrd_rootfs_build.sh`: builds `/var/tmp/dfvmm-linux-initrd-rootfs.gz`
   from an Alpine initramfs base.  This is the in-memory Linux rootfs used before
   vPCIe exists; it does not require or probe any boot media.
@@ -69,7 +71,14 @@ image selected by the harness:
 - `linux/linux_initrd_rootfs_test.sh`
 - `linux/linux_core_lifecycle_test.sh`
 - `linux/linux_console_terminal_test.sh`
+- `pcie/vmm_pcie_ecam_test.sh`
 - `pcie/vmm_pcie_dma_test.sh`
+
+`pcie/vmm_pcie_ecam_test.sh` boots the initramfs Linux guest with a provider
+that must remain `pending` before machine start.  The provider accepts `START`,
+performs generation-matched registration, verifies the BAR and DMA capability
+handoff, then the guest console confirms MCFG enumeration of
+`0000:00:01.0 [1b36:df01]`.
 
 `pcie/vmm_pcie_dma_test.sh` uses the boot kernel's existing
 `OBJT_MGTDEVICE` and `vm_object_page_remove()` behavior; it needs no paired
