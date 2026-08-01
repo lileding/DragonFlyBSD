@@ -91,6 +91,7 @@ struct vmmfs_mount {
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
 
 extern struct vop_ops vmmfs_vnode_vops;
+extern volatile u_int vmmfs_vnode_open_count;
 
 /*
  * Each node binds a KOBJ class -- its behavior and vop dispatch -- chosen at

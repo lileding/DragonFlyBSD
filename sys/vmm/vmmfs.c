@@ -42,6 +42,7 @@
 #include "vmm_loader.h"
 #include "vmm_machine.h"
 #include "vmm_pcie_bar.h"
+#include "vmm_pcie_user.h"
 #include "vmm_vcpu.h"
 #include "vmmfs.h"
 #include "vmmfs_device.h"
@@ -51,6 +52,8 @@
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 static struct lock vmmfs_mount_lock;
 static int vmmfs_mount_count;
+/* Successful vmmfs opens hold the module through their matching close. */
+volatile u_int vmmfs_vnode_open_count;
 /* vfs_register() ignores vfs_init() errors; mount is the real admission point. */
 static int vmmfs_backend_error;
 static int vmmfs_initialized;
@@ -781,6 +784,7 @@ vmmfs_vfs_init(struct vfsconf *conf)
 	kprintf("vmm klog: vfs_init begin\n");
 	vmmfs_backend_error = 0;
 	vmmfs_initialized = 0;
+	vmmfs_vnode_open_count = 0;
 	error = vmm_backend_probe();
 	if (error != 0) {
 		vmmfs_backend_error = error;
@@ -813,6 +817,16 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 		return 0;
 	if (vmmfs_mount_count_busy()) {
 		kprintf("vmm klog: vfs_uninit busy\n");
+		return EBUSY;
+	}
+	if (atomic_load_acq_int(&vmmfs_vnode_open_count) != 0) {
+		kprintf("vmm klog: vfs_uninit vnode open count=%u\n",
+		    vmmfs_vnode_open_count);
+		return EBUSY;
+	}
+	if (atomic_load_acq_int(&vmm_pcie_user_session_count) != 0) {
+		kprintf("vmm klog: vfs_uninit vPCIe session count=%u\n",
+		    vmm_pcie_user_session_count);
 		return EBUSY;
 	}
 	if (vmm_loader_mmap_active()) {

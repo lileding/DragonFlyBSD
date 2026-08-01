@@ -136,7 +136,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_AVIC_PHYS_RUNNING	(1ULL << 62)
 #define VMM_SVM_AVIC_PHYS_HOST_ID_MASK	0xfffULL
 #define VMM_SVM_AVIC_PHYS_MAX_INDEX_MASK 0xffULL
-#define VMM_SVM_AVIC_MAX_PHYS_ID	0U
+#define VMM_SVM_AVIC_MAX_PHYS_ID	0xfeU
 #define VMM_SVM_AVIC_APIC_ID		0U
 #define VMM_SVM_APIC_REG_ID		0x020U
 #define VMM_SVM_APIC_REG_VERSION	0x030U
@@ -800,6 +800,7 @@ CTASSERT(__offsetof(struct vmm_svm_ctrl, inst_len) == 0x0d0);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_abpp) == 0x0e0);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_ltp) == 0x0f0);
 CTASSERT(__offsetof(struct vmm_svm_ctrl, avic_phys) == 0x0f8);
+CTASSERT((VMM_SVM_AVIC_MAX_PHYS_ID + 1U) * sizeof(uint64_t) <= PAGE_SIZE);
 CTASSERT(sizeof(struct vmm_svm_state) == 0xc00);
 CTASSERT(__offsetof(struct vmm_svm_state, rsp) == 0x1d8);
 CTASSERT(__offsetof(struct vmm_svm_state, rax) == 0x1f8);

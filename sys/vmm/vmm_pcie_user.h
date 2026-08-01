@@ -22,6 +22,9 @@ struct vmm_pcie_abi_start;
 struct vmm_pcie_abi_stop;
 struct file;
 
+/* Active socket sessions veto module unload after their vnode has gone away. */
+extern volatile u_int vmm_pcie_user_session_count;
+
 int	vmm_pcie_user_open(struct vmm_device *device,
 	    enum vmm_pcie_user_role role, struct ucred *cred,
 	    struct socket **user_socketp);

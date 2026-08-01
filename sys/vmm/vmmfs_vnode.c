@@ -17,6 +17,7 @@
 #include <sys/dirent.h>
 #include <sys/stat.h>
 #include <sys/fcntl.h>
+#include <sys/file.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
 #include <sys/kobj.h>
@@ -190,13 +191,28 @@ vmmfs_readlink(struct vop_readlink_args *ap)
 static int
 vmmfs_open(struct vop_open_args *ap)
 {
-	return VMMFS_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
+	int error;
+
+	atomic_add_int(&vmmfs_vnode_open_count, 1);
+	error = VMMFS_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
+	if (error != 0) {
+		atomic_subtract_int(&vmmfs_vnode_open_count, 1);
+	}
+	/* Device sessions replace the vnode file with a socket; VOP_CLOSE will not run. */
+	if (error == 0 && ap->a_fpp != NULL && *ap->a_fpp != NULL &&
+	    (*ap->a_fpp)->f_type == DTYPE_SOCKET)
+		atomic_subtract_int(&vmmfs_vnode_open_count, 1);
+	return error;
 }
 
 static int
 vmmfs_close(struct vop_close_args *ap)
 {
-	return VMMFS_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
+	int error;
+
+	error = VMMFS_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
+	atomic_subtract_int(&vmmfs_vnode_open_count, 1);
+	return error;
 }
 
 static int

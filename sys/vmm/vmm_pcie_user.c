@@ -50,6 +50,8 @@ struct vmm_pcie_mmio_request {
 	int			mut_done;
 };
 
+volatile u_int vmm_pcie_user_session_count;
+
 static void	vmm_pcie_user_run(void *arg);
 static void	vmm_pcie_user_provider_run(struct vmm_pcie_user *user);
 static void	vmm_pcie_user_consumer_run(struct vmm_pcie_user *user);
@@ -102,8 +104,10 @@ vmm_pcie_user_open(struct vmm_device *device, enum vmm_pcie_user_role role,
 	}
 	if (error != 0)
 		goto fail_connected;
+	atomic_add_int(&vmm_pcie_user_session_count, 1);
 	error = kthread_create(vmm_pcie_user_run, user, NULL, "vmm pcie");
 	if (error != 0) {
+		atomic_subtract_int(&vmm_pcie_user_session_count, 1);
 		if (role == VMM_PCIE_USER_PROVIDER)
 			vmm_pcie_device_provider_detach(device, user);
 		else
@@ -158,6 +162,7 @@ vmm_pcie_user_release(struct vmm_pcie_user *user)
 	if (peer != NULL)
 		(void)soclose(peer, 0);
 	kfree(user, M_TEMP);
+	atomic_subtract_int(&vmm_pcie_user_session_count, 1);
 }
 
 int
