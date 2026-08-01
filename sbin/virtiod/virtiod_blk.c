@@ -78,6 +78,7 @@ struct virtiod_state {
 	uint8_t	mut_isr;
 	uint8_t *own_mut_bar;
 	uint32_t mut_driver_features[2];
+	uint8_t mut_last_device_status;
 	unsigned int mut_dma_count;
 	int mut_queue_ready;
 	int mut_needs_reset;
@@ -106,7 +107,7 @@ static int virtiod_header_valid(const struct vmm_pcie_abi_header *, uint16_t,
 static void virtiod_state_fini(struct virtiod_state *);
 
 int
-main(int argc, char **argv)
+virtiod_blk_main(int argc, char **argv)
 {
 	struct vmm_pcie_abi_register register_message;
 	struct pollfd pollfd;
@@ -114,17 +115,17 @@ main(int argc, char **argv)
 	char provider_path[1024];
 	int error;
 
-	if (argc != 3)
-		errno = EINVAL, err(1, "usage: %s DEVICE_DIR RAW_IMAGE", argv[0]);
+	if (argc != 2)
+		errno = EINVAL, err(1, "usage: virtiod blk DEVICE_DIR RAW_IMAGE");
 	memset(&state, 0, sizeof(state));
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
 	state.own_block.own_fd = -1;
-	if (snprintf(provider_path, sizeof(provider_path), "%s/provider", argv[1])
+	if (snprintf(provider_path, sizeof(provider_path), "%s/provider", argv[0])
 	    >= (int)sizeof(provider_path))
 		err(1, "provider path");
-	error = virtiod_block_open(&state.own_block, argv[2]);
+	error = virtiod_block_open(&state.own_block, argv[1]);
 	if (error != 0)
 		errno = error, err(1, "open raw image");
 	state.own_provider_fd = open(provider_path, O_RDWR);
@@ -150,7 +151,7 @@ main(int argc, char **argv)
 	error = virtiod_map_dma(&state);
 	if (error != 0)
 		errno = error, err(1, "mmap DMA");
-	printf("virtiod: ready raw=%s capacity=%ju\n", argv[2],
+	printf("virtiod: ready raw=%s capacity=%ju\n", argv[1],
 	    (uintmax_t)(state.own_block.imm_size / 512U));
 	if (fflush(stdout) != 0)
 		err(1, "flush ready");
@@ -273,7 +274,9 @@ virtiod_build_register(struct vmm_pcie_abi_register *message,
 	cap->bytes[0] = VIRTIOD_VIRTIO_PCI_CAP_NOTIFY_CFG;
 	cap->bytes[5] = VIRTIOD_NOTIFY_OFFSET & 0xff;
 	cap->bytes[6] = VIRTIOD_NOTIFY_OFFSET >> 8;
-	cap->bytes[9] = 2;
+	/* virtio_pci_cap.length: the complete direct notify BAR page. */
+	cap->bytes[9] = 0;
+	cap->bytes[10] = 0x10;
 	cap->bytes[13] = 4;
 	cap = &message->vendor_cap[2];
 	cap->length = 16;
@@ -466,7 +469,6 @@ virtiod_sync_queue(struct virtiod_state *state)
 {
 	struct virtiod_common_config *common;
 	uint32_t selector;
-	uint32_t driver_selector;
 	uint32_t features;
 	uint16_t queue_size;
 	uint8_t status;
@@ -475,13 +477,14 @@ virtiod_sync_queue(struct virtiod_state *state)
 
 	common = &state->own_mut_common;
 	status = __atomic_load_n(&common->device_status, __ATOMIC_ACQUIRE);
-	if (status == 0) {
+	if (status == 0 && state->mut_last_device_status != 0) {
 		memset(state->mut_driver_features, 0,
 		    sizeof(state->mut_driver_features));
 		memset(&state->own_queue, 0, sizeof(state->own_queue));
 		state->mut_queue_ready = 0;
 		state->mut_needs_reset = 0;
 	}
+	state->mut_last_device_status = status;
 	if (state->mut_needs_reset)
 		return 0;
 	selector = le32toh(__atomic_load_n(&common->le_device_feature_select,
@@ -503,11 +506,6 @@ virtiod_sync_queue(struct virtiod_state *state)
 	    __ATOMIC_RELEASE);
 	capacity = htole64(state->own_block.imm_size / 512U);
 	(void)capacity;
-	driver_selector = le32toh(__atomic_load_n(&common->le_driver_feature_select,
-	    __ATOMIC_ACQUIRE));
-	if (driver_selector < 2)
-		state->mut_driver_features[driver_selector] = le32toh(__atomic_load_n(
-		    &common->le_driver_feature, __ATOMIC_ACQUIRE));
 	if ((status & VIRTIOD_STATUS_DRIVER_OK) == 0 || le16toh(__atomic_load_n(
 	    &common->le_queue_enable, __ATOMIC_ACQUIRE)) == 0) {
 		state->mut_queue_ready = 0;
@@ -660,8 +658,17 @@ virtiod_handle_mmio(struct virtiod_state *state,
 		uint8_t *bytes;
 
 		bytes = (uint8_t *)(void *)&state->own_mut_common;
-		if ((flags & VMM_PCIE_ABI_MMIO_F_WRITE) != 0)
+		if ((flags & VMM_PCIE_ABI_MMIO_F_WRITE) != 0) {
+			uint32_t selector;
+
 			memcpy(bytes + offset - VIRTIOD_COMMON_OFFSET, &value, size);
+			if (offset == VIRTIOD_COMMON_OFFSET + 12U && size == 4) {
+				selector = le32toh(state->own_mut_common.le_driver_feature_select);
+				if (selector < 2)
+					state->mut_driver_features[selector] = le32toh(
+					    state->own_mut_common.le_driver_feature);
+			}
+		}
 		if (virtiod_sync_queue(state) != 0) {
 			state->mut_needs_reset = 1;
 			state->mut_queue_ready = 0;

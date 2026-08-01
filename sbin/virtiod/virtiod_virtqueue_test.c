@@ -69,10 +69,14 @@ test_valid_chain(void)
 	error = virtiod_vring_configure(&ring, &segment, 1, 128, 0, 4096, 8192);
 	if (error != 0)
 		errno = error, err(1, "configure");
+	if (virtiod_vring_has_available(&ring) != 1)
+		errno = EINVAL, err(1, "available before pop");
 	error = virtiod_vring_pop(&ring, &chain);
 	if (error != 0 || chain.imm_head != 0 || chain.mut_iov_count != 3 ||
 	    chain.mut_readable_count != 1 || chain.mut_writable_count != 2)
 		errno = error == 0 ? EINVAL : error, err(1, "valid chain");
+	if (virtiod_vring_has_available(&ring) != 0)
+		errno = EINVAL, err(1, "available after pop");
 	error = virtiod_vring_complete(&ring, &chain, 33);
 	if (error != 0 || le16toh(used[1]) != 1)
 		errno = error == 0 ? EINVAL : error, err(1, "complete");

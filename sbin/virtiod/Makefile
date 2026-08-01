@@ -1,5 +1,6 @@
 PROG= virtiod
-SRCS= virtiod.c virtiod_virtqueue.c virtiod_block.c
+SRCS= virtiod_main.c virtiod_blk.c virtiod_net.c virtiod_virtqueue.c \
+	virtiod_block.c virtiod_tap.c
 CFLAGS+= -I${.CURDIR}/../../sys
 MAN=
 

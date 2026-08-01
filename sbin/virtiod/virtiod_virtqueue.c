@@ -158,6 +158,24 @@ virtiod_vring_pop(struct virtiod_vring *ring, struct virtiod_chain *chain)
 }
 
 int
+virtiod_vring_has_available(const struct virtiod_vring *ring)
+{
+	uint16_t *available;
+	void *pointer;
+	int error;
+
+	if (ring == NULL || ring->mut_size == 0)
+		return -EINVAL;
+	error = virtiod_dma_translate(ring->borrow_imm_dma, ring->imm_dma_count,
+	    ring->mut_avail_gpa, sizeof(uint16_t) * 2U, &pointer);
+	if (error != 0)
+		return -error;
+	available = pointer;
+	return ring->mut_last_avail == le16toh(__atomic_load_n(&available[1],
+	    __ATOMIC_ACQUIRE)) ? 0 : 1;
+}
+
+int
 virtiod_vring_complete(struct virtiod_vring *ring,
     const struct virtiod_chain *chain, uint32_t length)
 {

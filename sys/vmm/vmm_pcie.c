@@ -614,18 +614,29 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	pcie = device->borrow_imm_pcie;
 	bar_object = NULL;
 	bar_size = 0;
+	root = NULL;
+	machine = NULL;
 	attachment_generation = le64toh(message->le_attachment_generation);
 	vector = le16toh(message->le_vector);
 	lwkt_gettoken(&pcie->token_registry);
+	root = device->borrow_mut_root;
+	if (root != NULL)
+		machine = root->borrow_imm_machine;
 	if (device->borrow_mut_provider != provider || !device->mut_registered ||
 	    device->own_mut_config == NULL ||
 	    le64toh(message->le_device_id) != device->imm_id ||
 	    attachment_generation != device->mut_attachment_generation ||
 	    vector >= device->mut_msix_vectors) {
 		error = ESTALE;
+		if (machine != NULL)
+			vmm_machine_logf(machine,
+			    "pcie msix drop vector=%u reason=stale", vector);
 	} else if (!vmm_pcie_config_msix_enabled_locked(device->own_mut_config) ||
 	    vmm_pcie_config_msix_function_masked_locked(device->own_mut_config)) {
 		error = 0;
+		if (machine != NULL)
+			vmm_machine_logf(machine,
+			    "pcie msix drop vector=%u reason=disabled", vector);
 	} else {
 		error = vmm_pcie_bar_snapshot(
 		    &device->own_mut_bars[VMM_PCIE_ABI_MSIX_BAR_INDEX],
@@ -663,8 +674,13 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    (data & ~VMM_PCIE_MSI_DATA_ALLOWED) != 0 ||
 	    (data & VMM_PCIE_MSI_DATA_DELIVERY_MASK) != 0 ||
 	    (data & VMM_PCIE_MSI_DATA_VECTOR_MASK) < 32 ||
-	    vmm_pcie_config_msix_vector_masked(vector_control))
+	    vmm_pcie_config_msix_vector_masked(vector_control)) {
+		if (machine != NULL)
+			vmm_machine_logf(machine,
+			    "pcie msix drop vector=%u reason=format addr=%08x:%08x data=%08x control=%08x",
+			    vector, address_high, address_low, data, vector_control);
 		return 0;
+	}
 
 	/* Revalidate after faulting the shared BAR before dereferencing root->machine. */
 	lwkt_gettoken(&pcie->token_registry);
@@ -677,8 +693,14 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    !vmm_pcie_config_msix_function_masked_locked(device->own_mut_config) &&
 	    root != NULL && root->borrow_imm_machine != NULL) {
 		machine = root->borrow_imm_machine;
+		vmm_machine_logf(machine,
+		    "pcie msix inject vector=%u guest_vector=0x%x",
+		    vector, data & VMM_PCIE_MSI_DATA_VECTOR_MASK);
 		vmm_machine_msix(machine,
 		    (uint8_t)(data & VMM_PCIE_MSI_DATA_VECTOR_MASK));
+	} else if (machine != NULL) {
+		vmm_machine_logf(machine,
+		    "pcie msix drop vector=%u reason=revalidate", vector);
 	}
 	lwkt_reltoken(&pcie->token_registry);
 	return 0;
