@@ -78,6 +78,7 @@
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
 #define VMM_REC_X64_TIME_STATE	3
+#define VMM_REC_X64_CPU_TOPOLOGY 4
 #define VMM_REC_F_MANDATORY	1
 
 #define VMM_X64_RFLAGS_FIXED	(1ULL << 1)
@@ -286,6 +287,26 @@ vmm_loader_x86_validate_vcpu(uint64_t mem_size,
 }
 
 static int
+vmm_loader_x86_validate_cpu_topology(
+    const struct vmm_x64_cpu_topology *topology)
+{
+	uint32_t i, j;
+
+	if (topology->imm_vcpu_count == 0 ||
+	    topology->imm_vcpu_count > VMM_X64_MAX_VCPU)
+		return EINVAL;
+	if (topology->imm_apic_ids[0] != 0)
+		return EINVAL;
+	for (i = 0; i < topology->imm_vcpu_count; i++) {
+		for (j = 0; j < i; j++) {
+			if (topology->imm_apic_ids[j] == topology->imm_apic_ids[i])
+				return EINVAL;
+		}
+	}
+	return 0;
+}
+
+static int
 vmm_loader_x86_validate_ranges(uint64_t mem_size, const uint8_t *payload,
     uint32_t size, struct vmm_launch *launch)
 {
@@ -326,11 +347,14 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 	int have_vcpu = 0;
 	int have_range = 0;
 	int have_time = 0;
+	int have_topology = 0;
 	int error;
 
 	if (launch != NULL) {
 		bzero(launch, sizeof(*launch));
 		bzero(&tmp, sizeof(tmp));
+		tmp.imm_cpu_topology.imm_vcpu_count = 1;
+		tmp.imm_cpu_topology.imm_apic_ids[0] = 0;
 		out = &tmp;
 	}
 	if (buf == NULL || mem_size == 0)
@@ -418,6 +442,23 @@ vmm_loader_x86_manifest_load(uint64_t mem_size, const uint8_t *buf,
 				    sizeof(out->imm_guest_tsc_hz));
 			}
 			have_time = 1;
+			break;
+		case VMM_REC_X64_CPU_TOPOLOGY:
+			if ((rec.flags & VMM_REC_F_MANDATORY) == 0 ||
+			    rec.size != sizeof(struct vmm_x64_cpu_topology) ||
+			    have_topology) {
+				error = EINVAL;
+				return error;
+			}
+			error = vmm_loader_x86_validate_cpu_topology(
+			    (const struct vmm_x64_cpu_topology *)payload);
+			if (error != 0)
+				return error;
+			if (out != NULL) {
+				bcopy(payload, &out->imm_cpu_topology,
+				    sizeof(out->imm_cpu_topology));
+			}
+			have_topology = 1;
 			break;
 		default:
 			if (rec.flags & VMM_REC_F_MANDATORY) {

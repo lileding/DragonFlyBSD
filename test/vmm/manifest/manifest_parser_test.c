@@ -19,6 +19,7 @@
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
 #define VMM_REC_X64_TIME_STATE	3
+#define VMM_REC_X64_CPU_TOPOLOGY 4
 #define VMM_REC_F_MANDATORY	1
 
 #define MEM_SIZE		(2ULL * 1024ULL * 1024ULL)
@@ -260,6 +261,26 @@ append_duplicate_time(uint8_t *manifest)
 }
 
 static void
+append_cpu_topology(uint8_t *manifest, uint32_t vcpu_count,
+    uint32_t apic_id1)
+{
+	struct vmm_manifest_header *hdr = manifest_header(manifest);
+	struct vmm_x64_cpu_topology topology;
+	uint8_t *p;
+
+	memset(&topology, 0, sizeof(topology));
+	topology.imm_vcpu_count = vcpu_count;
+	topology.imm_apic_ids[0] = 0;
+	if (vcpu_count > 1)
+		topology.imm_apic_ids[1] = apic_id1;
+	p = manifest + hdr->total_size;
+	p = add_record(p, VMM_REC_X64_CPU_TOPOLOGY, &topology,
+	    sizeof(topology));
+	hdr->total_size = (uint32_t)(p - manifest);
+	hdr->record_count++;
+}
+
+static void
 poison_last_record_padding(uint8_t *manifest)
 {
 	struct vmm_manifest_header *hdr = manifest_header(manifest);
@@ -335,6 +356,22 @@ main(void)
 	build_valid_state(manifest);
 	append_optional_unknown(manifest);
 	expect_result("optional unknown record", manifest, 0);
+
+	build_valid_state(manifest);
+	append_cpu_topology(manifest, 2, 1);
+	if (vmm_loader_x86_manifest_load(MEM_SIZE, manifest, MANIFEST_SIZE,
+	    &launch) != 0 || launch.imm_cpu_topology.imm_vcpu_count != 2 ||
+	    launch.imm_cpu_topology.imm_apic_ids[1] != 1) {
+		errx(1, "two cpu topology: unexpected launch topology");
+	}
+
+	build_valid_state(manifest);
+	append_cpu_topology(manifest, 2, 0);
+	expect_result("duplicate cpu apic id", manifest, EINVAL);
+
+	build_valid_state(manifest);
+	append_cpu_topology(manifest, 0, 0);
+	expect_result("zero cpu topology", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_duplicate_ranges(manifest);

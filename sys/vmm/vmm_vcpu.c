@@ -16,6 +16,7 @@
 #include "vmm_parse.h"
 #include "vmm_host.h"
 #include "vmm_loader.h"
+#include "vmm_loader_x86.h"
 #include "vmm_machine.h"
 #include "vmm_vcpu.h"
 
@@ -138,7 +139,10 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 
 	if (count == 0)
 		return EINVAL;
-	if (count != 1 || launch == NULL)
+	if (launch == NULL ||
+	    launch->imm_cpu_topology.imm_vcpu_count != count)
+		return EINVAL;
+	if (count != 1)
 		return EOPNOTSUPP;
 	backend_ops = vmm_backend;
 	if (backend_ops == NULL) {
@@ -166,6 +170,11 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	atomic_store_rel_int(&v->atomic_mut_stop_requested, 0);
 	atomic_store_rel_int(&v->atomic_mut_exit_reason, VMM_VCPU_EXIT_NONE);
 
+	/*
+	 * Construct the complete backend topology before any vCPU can run.  A
+	 * running BSP may otherwise route an early platform interrupt before its
+	 * secondary APIC targets have been registered with the backend context.
+	 */
 	for (i = 0; i < count; i++) {
 		struct vmm_vcpu_thread *vc = &v->own_mut_threads[i];
 		int cpu = vmm_host_next_cpu();
@@ -183,14 +192,16 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 			    i, m, error);
 			break;
 		}
-		if (m->mut_status != VMM_MACHINE_STARTING ||
-		    atomic_load_acq_int(&v->atomic_mut_stop_requested) != 0) {
-			error = ECANCELED;
-			vmm_debug_trace("vcpu%u create canceled machine=%p", i, m);
-			break;
-		}
-		atomic_add_int(&v->atomic_mut_active_count, 1);
+	}
+	if (error == 0 && (m->mut_status != VMM_MACHINE_STARTING ||
+	    atomic_load_acq_int(&v->atomic_mut_stop_requested) != 0)) {
+		error = ECANCELED;
+		vmm_debug_trace("vcpu create canceled machine=%p", m);
+	}
+	for (i = 0; error == 0 && i < count; i++) {
+		struct vmm_vcpu_thread *vc = &v->own_mut_threads[i];
 
+		atomic_add_int(&v->atomic_mut_active_count, 1);
 		error = lwkt_create(vmm_vcpu_thread_main, vc,
 		    &vc->borrow_mut_thread, NULL, 0, vc->imm_cpu,
 		    "vmmvcpu%u", i);

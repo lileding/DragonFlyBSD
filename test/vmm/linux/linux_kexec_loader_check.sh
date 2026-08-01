@@ -13,7 +13,8 @@ KERNEL=${LINUX_KERNEL:-/var/tmp/bzImage}
 INITRAMFS=${LINUX_INITRAMFS:-}
 MEM_SIZE=${LINUX_MEM:-256M}
 MANIFEST_SIZE=${LINUX_MANIFEST_SIZE:-4096}
-TSC_RECORD_OFFSET=520
+CPU_TOPOLOGY_RECORD_OFFSET=520
+TSC_RECORD_OFFSET=1560
 LOADER=${LINUX_KEXEC_LOADER_CHECK_BIN:-/var/tmp/vmmld_linux_kexec_check}
 PARSER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_FILE=${LINUX_CHECK_MEM_FILE:-/var/tmp/dfvmm-linux-loader-$$.mem}
@@ -102,6 +103,10 @@ check_linux_boot_data()
 {
 	case_label=$1
 	mem_size=$2
+	vcpu_count=$3
+	madt_len=$((66 + vcpu_count * 8))
+	ioapic_offset=$((0x70400 + 44 + vcpu_count * 8))
+	iso_offset=$((ioapic_offset + 12))
 
 	[ "$(hex_at "$MEM_FILE" $((0x70000)) 8)" = "5253442050545220" ] ||
 	    fail "missing RSDP signature in $case_label case"
@@ -111,11 +116,11 @@ check_linux_boot_data()
 	    fail "missing FADT signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70400)) 4)" = "41504943" ] ||
 	    fail "missing MADT signature in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70500)) 4)" = "48504554" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70d00)) 4)" = "48504554" ] ||
 	    fail "missing HPET signature in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70800)) 4)" = "4d434647" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x71000)) 4)" = "4d434647" ] ||
 	    fail "missing MCFG signature in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600)) 4)" = "44534454" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00)) 4)" = "44534454" ] ||
 	    fail "missing DSDT signature in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70200 + 244)) 12)" = \
 	    "010800010404000000000000" ] ||
@@ -131,62 +136,62 @@ check_linux_boot_data()
 	[ "$(hex_at "$MEM_FILE" $((0x70200 + 128)) 1)" = "01" ] ||
 	    fail "FADT reset value missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x70100 + 60)) 8)" = \
-	    "0008070000000000" ] ||
+	    "0010070000000000" ] ||
 	    fail "XSDT MCFG entry missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70800 + 44)) 8)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x71000 + 44)) 8)" = \
 	    "000000e000000000" ] ||
 	    fail "MCFG ECAM base missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70800 + 52)) 8)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x71000 + 52)) 8)" = \
 	    "000000ff00000000" ] ||
 	    fail "MCFG segment/bus range missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 4)) 4)" = "09010000" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 4)) 4)" = "09010000" ] ||
 		fail "DSDT PCI root table length missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 36)) 12)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 36)) 12)" = \
 	    "085f53355f1206020a050a05" ] ||
 	    fail "DSDT S5 package missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 58)) 4)" = "434f4d31" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 58)) 4)" = "434f4d31" ] ||
 	    fail "DSDT COM1 device missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 113)) 4)" = "52544330" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 113)) 4)" = "52544330" ] ||
 	    fail "DSDT RTC device missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 123)) 4)" = "000bd041" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 123)) 4)" = "000bd041" ] ||
 	    fail "DSDT RTC PNP0B00 HID missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 152)) 8)" = "4701700070000102" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 152)) 8)" = "4701700070000102" ] ||
 	    fail "DSDT RTC io resource missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 160)) 3)" = "220001" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 160)) 3)" = "220001" ] ||
 	    fail "DSDT RTC IRQ8 resource missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 165)) 15)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 165)) 15)" = \
 	    "1043065f53425f5b824b0550434930" ] ||
 		fail "DSDT PCI0 AML scope missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 180)) 12)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 180)) 12)" = \
 	    "085f4849440c41d00a08085f" ] ||
 		fail "DSDT PCI0 PNP0A08 HID missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 221 + 10)) 2)" = "ff00" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 221 + 10)) 2)" = "ff00" ] ||
 		fail "DSDT PCI0 bus maximum missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 221 + 14)) 2)" = "0001" ] ||
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 221 + 14)) 2)" = "0001" ] ||
 		fail "DSDT PCI0 bus length missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 237)) 19)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 237)) 19)" = \
 	    "871700000c0100000000000000c0ffffffdf00" ] ||
 		fail "DSDT PCI0 MMIO resource missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70600 + 165 + 96)) 4)" = \
+	[ "$(hex_at "$MEM_FILE" $((0x70e00 + 165 + 96)) 4)" = \
 	    "00207900" ] ||
 		fail "DSDT PCI0 resource end tag missing in $case_label case"
 	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
 	    "0000070000000000" ] ||
 	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70400 + 52)) 12)" = \
+	[ "$(hex_at "$MEM_FILE" "$ioapic_offset" 12)" = \
 	    "010c01000000c0fe00000000" ] ||
 	    fail "MADT IOAPIC entry missing in $case_label case"
-	[ "$(hex_at "$MEM_FILE" $((0x70400 + 64)) 10)" = \
+	[ "$(hex_at "$MEM_FILE" "$iso_offset" 10)" = \
 	    "020a0004040000000500" ] ||
 	    fail "MADT COM1 interrupt override missing in $case_label case"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 20 "$case_label RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70000)) 36 "$case_label extended RSDP"
 	check_zero_sum "$MEM_FILE" $((0x70100)) 68 "$case_label XSDT"
 	check_zero_sum "$MEM_FILE" $((0x70200)) 276 "$case_label FADT"
-	check_zero_sum "$MEM_FILE" $((0x70400)) 74 "$case_label MADT"
-	check_zero_sum "$MEM_FILE" $((0x70500)) 56 "$case_label HPET"
-	check_zero_sum "$MEM_FILE" $((0x70600)) 265 "$case_label DSDT"
-	check_zero_sum "$MEM_FILE" $((0x70800)) 60 "$case_label MCFG"
+	check_zero_sum "$MEM_FILE" $((0x70400)) "$madt_len" "$case_label MADT"
+	check_zero_sum "$MEM_FILE" $((0x70d00)) 56 "$case_label HPET"
+	check_zero_sum "$MEM_FILE" $((0x70e00)) 265 "$case_label DSDT"
+	check_zero_sum "$MEM_FILE" $((0x71000)) 60 "$case_label MCFG"
 	if [ "$mem_size" = 4G ]; then
 		[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x1e8)) 1)" = "0a" ] ||
 			fail "e820 PCIe aperture split count missing in $case_label case"
@@ -209,6 +214,37 @@ check_linux_boot_data()
 		    "0010e0fe0000000000f01f010000000001000000" ] ||
 			fail "e820 post-LAPIC RAM missing in $case_label case"
 	fi
+}
+
+check_cpu_topology()
+{
+	vcpu_count=$1
+
+	case "$vcpu_count" in
+	1) expected_count=01000000 ;;
+	2) expected_count=02000000 ;;
+	256) expected_count=00010000 ;;
+	*) fail "unsupported topology test count: $vcpu_count" ;;
+	esac
+	[ "$(hex_at "$MANIFEST_FILE" "$CPU_TOPOLOGY_RECORD_OFFSET" 4)" = \
+	    "$expected_count" ] || fail "bad CPU topology count"
+	[ "$(hex_at "$MANIFEST_FILE" $((CPU_TOPOLOGY_RECORD_OFFSET + 4)) 4)" = \
+	    "00000000" ] || fail "bad BSP APIC ID"
+	if [ "$vcpu_count" -gt 1 ]; then
+		[ "$(hex_at "$MANIFEST_FILE" \
+		    $((CPU_TOPOLOGY_RECORD_OFFSET + 8)) 4)" = "01000000" ] ||
+			fail "bad AP1 APIC ID"
+	fi
+	if [ "$vcpu_count" -eq 256 ]; then
+		[ "$(hex_at "$MANIFEST_FILE" \
+		    $((CPU_TOPOLOGY_RECORD_OFFSET + 4 + 255 * 4)) 4)" = \
+		    "ff000000" ] || fail "bad final APIC ID"
+		[ "$(hex_at "$MEM_FILE" \
+		    $((0x70400 + 44 + 255 * 8)) 8)" = "0008ffff01000000" ] ||
+		    fail "bad final MADT Local APIC entry"
+	fi
+	grep -aq 'vcpu=' "$MEM_FILE" &&
+		fail "vCPU loader argument leaked into guest command line"
 }
 
 check_tsc_manifest()
@@ -238,6 +274,7 @@ run_loader_case()
 	label=$2
 	time_arg=$3
 	mem_size=$4
+	vcpu_count=$5
 
 	rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 	run truncate -s "$mem_size" "$MEM_FILE"
@@ -245,15 +282,17 @@ run_loader_case()
 	if [ -n "$INITRAMFS" ]; then
 		[ -f "$INITRAMFS" ] || fail "missing LINUX_INITRAMFS=$INITRAMFS"
 		run "$LOADER" "$kernel" "initramfs=$INITRAMFS" "$time_arg" \
+		    "vcpu=$vcpu_count" \
 		    "console=ttyS0" "earlyprintk=serial,ttyS0,115200" \
 		    3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
 	else
-		run "$LOADER" "$kernel" "$time_arg" "console=ttyS0" \
+		run "$LOADER" "$kernel" "$time_arg" "vcpu=$vcpu_count" \
 		    "earlyprintk=serial,ttyS0,115200" 3<>"$MEM_FILE" \
 		    4<>"$MANIFEST_FILE"
 	fi
 	run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
-	check_linux_boot_data "$label" "$mem_size"
+	check_linux_boot_data "$label" "$mem_size" "$vcpu_count"
+	check_cpu_topology "$vcpu_count"
 	check_tsc_manifest "$time_arg"
 	say "PASS: Linux kexec loader $label case"
 }
@@ -267,13 +306,17 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 
 make_synth_kernel
 run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-host" "tsc_hz=host" \
-	"$MEM_SIZE"
+	"$MEM_SIZE" 1
 run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-scaled" "tsc_hz=1000000000" \
-	"$MEM_SIZE"
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-ecam-hole" "tsc_hz=host" 4G
+	"$MEM_SIZE" 1
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-two-cpu" "tsc_hz=host" \
+	"$MEM_SIZE" 2
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-max-cpu" "tsc_hz=host" \
+	"$MEM_SIZE" 256
+run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-ecam-hole" "tsc_hz=host" 4G 1
 
 if [ -f "$KERNEL" ]; then
-	run_loader_case "$KERNEL" "real-image" "tsc_hz=host" "$MEM_SIZE"
+	run_loader_case "$KERNEL" "real-image" "tsc_hz=host" "$MEM_SIZE" 1
 else
 	say "SKIP: missing LINUX_KERNEL=$KERNEL; real-image case not run"
 fi

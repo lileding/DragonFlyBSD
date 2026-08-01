@@ -12,6 +12,7 @@
 #define VMM_X64_NCR	6
 #define VMM_X64_NMSR	11
 #define VMM_X64_NSEG	10
+#define VMM_X64_MAX_VCPU 256
 #define VMM_GPA_RANGE_MAX 32
 
 /*
@@ -121,6 +122,15 @@ struct vmm_x64_vcpu_state {
 	uint64_t	intr_flags;
 } __packed;
 
+/*
+ * Immutable CPU topology for one machine run.  The BSP launch state remains
+ * record-local; secondary CPUs start through the backend's reset/SIPI path.
+ */
+struct vmm_x64_cpu_topology {
+	uint32_t	imm_vcpu_count;
+	uint32_t	imm_apic_ids[VMM_X64_MAX_VCPU];
+} __packed;
+
 struct vmm_gpa_range {
 	uint64_t	start;
 	uint64_t	size;
@@ -140,6 +150,7 @@ struct vmm_launch {
 	uint64_t imm_mem_size;
 	uint64_t imm_guest_tsc_hz;
 	struct vmm_x64_vcpu_state imm_vcpu0;
+	struct vmm_x64_cpu_topology imm_cpu_topology;
 	struct vmm_gpa_range imm_ranges[VMM_GPA_RANGE_MAX];
 	uint32_t imm_range_count;
 };
