@@ -21,7 +21,8 @@ cleanup()
 {
 	set +e
 	if [ "$MOUNTED" -eq 1 ]; then
-		rmdir "$MNT/machines/host/devices/session0" >>"$LOG" 2>&1
+		rmdir "$MNT/session0/devices/session0" >>"$LOG" 2>&1
+		rmdir "$MNT/session0" >>"$LOG" 2>&1
 		umount "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
 	fi
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
@@ -45,9 +46,11 @@ run mkdir -p "$MNT"
 run rm -f "$MOUNT_HELPER"
 run ln -s /sbin/mount_std "$MOUNT_HELPER"
 run "$MOUNT_HELPER" vmm "$MNT"; MOUNTED=1
-run mkdir "$MNT/machines/host/devices/session0"
-run "$BIN" "$MNT/machines/host/devices/session0"
-run rmdir "$MNT/machines/host/devices/session0"
+run mkdir "$MNT/session0"
+run mkdir "$MNT/session0/devices/session0"
+run "$BIN" "$MNT/session0/devices/session0"
+run rmdir "$MNT/session0/devices/session0"
+run rmdir "$MNT/session0"
 run umount "$MNT"; MOUNTED=0
 run kldunload vmm; LOADED=0
 say 'PASS: vPCIe provider/consumer session'

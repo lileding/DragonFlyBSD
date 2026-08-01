@@ -49,7 +49,7 @@ run()
 
 machine_dir()
 {
-	printf '%s/machines/%s\n' "$MNT" "$1"
+	printf '%s/%s\n' "$MNT" "$1"
 }
 
 console_path()

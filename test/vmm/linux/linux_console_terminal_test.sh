@@ -51,7 +51,7 @@ run()
 
 mach()
 {
-	printf '%s/machines/%s\n' "$MNT" "$VM"
+	printf '%s/%s\n' "$MNT" "$VM"
 }
 
 console_path()

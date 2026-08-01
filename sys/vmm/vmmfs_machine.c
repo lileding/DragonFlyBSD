@@ -94,7 +94,7 @@ cfg_present(struct vmmfs_machine *m, const struct vmmfs_cfg_desc *d)
  * Allocate a machine and wire up its nodes with fresh inos.  Only the inode
  * range reservation runs under vm_lock; vmm_machine_init() starts a taskqueue
  * thread and must not run there.  The caller later inserts the fully
- * initialized object into machines/ or releases it.
+ * initialized object into the root registry or releases it.
  */
 struct vmmfs_machine *
 vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
@@ -128,7 +128,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 
 	kprintf("vmm klog: machine_create node_init begin m=%p\n", m);
 	vmmfs_node_init(&m->node, &vmmfs_machine_class, VDIR, VMMFS_DIR_MODE,
-	    base, &vmp->vm_machines, m);
+	    base, &vmp->vm_root, m);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++) {
 		const struct vmmfs_cfg_desc *d = &vmmfs_cfg_table[j];
 
@@ -267,7 +267,7 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 }
 
 /*
- * `rm machines/<name>/stopped` declares that the machine should run.  The
+ * `rm <name>/stopped` declares that the machine should run.  The
  * operation only updates desired state and queues the vmm worker; it never
  * waits for loader execution.
  */

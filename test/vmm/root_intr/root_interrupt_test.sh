@@ -20,7 +20,7 @@ MOUNTED=0
 say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
-mach() { echo "$MNT/machines/$1"; }
+mach() { echo "$MNT/$1"; }
 
 check_module_image()
 {

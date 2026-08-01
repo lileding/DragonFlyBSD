@@ -33,7 +33,7 @@ run()
 
 mach()
 {
-	printf '%s/machines/%s\n' "$MNT" "$1"
+	printf '%s/%s\n' "$MNT" "$1"
 }
 
 wait_event()

@@ -44,10 +44,6 @@ static int	vmmfs_device_info_getattr(struct vmmfs_node *,
 		    struct vop_getattr_args *);
 static int	vmmfs_device_info_read(struct vmmfs_node *,
 		    struct vop_read_args *);
-static int	vmmfs_devlink_getattr(struct vmmfs_node *,
-		    struct vop_getattr_args *);
-static int	vmmfs_devlink_readlink(struct vmmfs_node *,
-		    struct vop_readlink_args *);
 static size_t	vmmfs_device_info_format(struct vmmfs_device_leaf *, char *,
 		    size_t);
 
@@ -96,25 +92,14 @@ vmmfs_find_device(struct vmmfs_mount *vmp, struct vmmfs_machine *owner,
 	return device != NULL ? VMMFS_DEV_OF_CORE(device) : NULL;
 }
 
-struct vmmfs_device *
-vmmfs_find_device_any(struct vmmfs_mount *vmp, const char *name, int nlen)
-{
-	struct vmm_device *device;
-
-	device = vmm_pcie_device_find_name(&vmp->own_mut_pcie, name, nlen);
-	return device != NULL ? VMMFS_DEV_OF_CORE(device) : NULL;
-}
-
 void
 vmmfs_device_init(struct vmmfs_device *d, struct vmmfs_node *parent,
-    struct vmmfs_mount *vmp, ino_t index)
+    ino_t index)
 {
 	unsigned int i;
 
 	vmmfs_node_init(&d->node, &vmmfs_device_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_DEV_INO_BASE + index * VMMFS_DEV_INO_STRIDE, parent, NULL);
-	vmmfs_node_init(&d->link, &vmmfs_devlink_class, VLNK, 0777,
-	    VMMFS_DEVLINK_INO_BASE + index, &vmp->vm_devroot, NULL);
 	for (i = 0; i < VMMFS_DEVICE_LEAF_COUNT; i++) {
 		struct vmmfs_device_leaf *leaf = &d->own_mut_leaves[i];
 		const struct vmmfs_device_leaf_desc *desc =
@@ -137,32 +122,52 @@ vmmfs_device_uninit(struct vmmfs_device *d)
 	for (i = 0; i < VMMFS_DEVICE_LEAF_COUNT; i++)
 		vmmfs_node_uninit(&d->own_mut_leaves[i].node);
 	vmmfs_node_uninit(&d->node);
-	vmmfs_node_uninit(&d->link);
+}
+
+/*
+ * A device view owns vnode-private memory.  Reclaim every leaf before the
+ * view is uninitialized so a cached vnode can never retain a stale v_data
+ * pointer after rmdir, machine deletion, or unmount.
+ */
+void
+vmmfs_device_revoke(struct vmmfs_device *d)
+{
+	unsigned int i;
+
+	for (i = 0; i < VMMFS_DEVICE_LEAF_COUNT; i++)
+		vmmfs_node_revoke(&d->own_mut_leaves[i].node);
+	vmmfs_node_revoke(&d->node);
 }
 
 int
-vmmfs_device_return_owner_locked(struct vmmfs_mount *vmp,
+vmmfs_device_destroy_owner_locked(struct vmmfs_mount *vmp,
     struct vmm_machine *owner)
 {
 	struct vmmfs_device *d;
-	struct vmm_pcie_root *host;
 	struct vmm_pcie_root *root;
 	int error;
 
-	host = vmm_pcie_host_root(&vmp->own_mut_pcie);
 	root = &owner->own_mut_pcie_root;
-	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
-		if (!vmm_pcie_device_at_root(&d->own_mut_device, root))
-			continue;
+	for (;;) {
+		d = NULL;
+		SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
+			if (vmm_pcie_device_at_root(&d->own_mut_device, root))
+				break;
+		}
+		if (d == NULL)
+			return 0;
 		/* Machine deletion is provider removal, not an EBUSY condition. */
 		vmm_pcie_device_provider_force_close(&d->own_mut_device);
-		error = vmm_pcie_device_move(&vmp->own_mut_pcie,
-		    &d->own_mut_device, host);
+		error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
+		    &d->own_mut_device);
 		if (error != 0)
 			return error;
-		d->node.vn_parent = &vmp->vm_host_devices;
+		SLIST_REMOVE(&vmp->vm_device_views, d, vmmfs_device,
+		    dv_view_link);
+		vmmfs_device_revoke(d);
+		vmmfs_device_uninit(d);
+		kfree(d, M_VMMFS);
 	}
-	return 0;
 }
 
 void
@@ -177,30 +182,10 @@ vmmfs_device_destroy_all(struct vmmfs_mount *vmp)
 		error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
 		    &d->own_mut_device);
 		KKASSERT(error == 0);
+		vmmfs_device_revoke(d);
 		vmmfs_device_uninit(d);
 		kfree(d, M_VMMFS);
 	}
-}
-
-int
-vmmfs_devlink_target(struct vmmfs_mount *vmp, struct vmmfs_device *d,
-    char *buf, size_t bufsize)
-{
-	struct vmm_pcie_root *root;
-	const char *owner;
-
-	root = vmm_pcie_device_root(&d->own_mut_device);
-	if (root == NULL)
-		return -1;
-	if (root == vmm_pcie_host_root(&vmp->own_mut_pcie)) {
-		owner = "host";
-	} else if (root->borrow_imm_machine != NULL) {
-		owner = VMMFS_MACHINE_OF_CORE(root->borrow_imm_machine)->name;
-	} else {
-		return -1;
-	}
-	return ksnprintf(buf, bufsize, "../machines/%s/devices/%s", owner,
-	    d->own_mut_device.imm_name);
 }
 
 static int
@@ -313,39 +298,6 @@ vmmfs_device_info_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	return uiomove(buf + offset, size - (size_t)offset, ap->a_uio);
 }
 
-static int
-vmmfs_devlink_getattr(struct vmmfs_node *node, struct vop_getattr_args *ap)
-{
-	struct vmmfs_mount *vmp;
-	char tmp[128];
-	int len;
-
-	vmp = VFS_TO_VMMFS(node->vn_vnode->v_mount);
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node), tmp,
-	    sizeof(tmp));
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	vmmfs_fill_attr(node, ap->a_vap, VLNK, 1, len < 0 ? 0 : len);
-	return 0;
-}
-
-static int
-vmmfs_devlink_readlink(struct vmmfs_node *node, struct vop_readlink_args *ap)
-{
-	struct vmmfs_mount *vmp;
-	char buf[128];
-	int len;
-
-	vmp = VFS_TO_VMMFS(node->vn_vnode->v_mount);
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	len = vmmfs_devlink_target(vmp, VMMFS_DEV_OF_LINK(node), buf,
-	    sizeof(buf));
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	if (len < 0)
-		return ENOENT;
-	return uiomove(buf, (size_t)len, ap->a_uio);
-}
-
 static kobj_method_t vmmfs_device_methods[] = {
 	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_device_nresolve),
 	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_device_readdir),
@@ -388,18 +340,6 @@ static kobj_method_t vmmfs_device_info_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_device_info, vmmfs_device_info_methods, 0);
-
-static kobj_method_t vmmfs_devlink_methods[] = {
-	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_devlink_getattr),
-	KOBJMETHOD(vmmfs_node_readlink,	vmmfs_devlink_readlink),
-	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),
-	KOBJMETHOD(vmmfs_node_setattr,	vmmnode_setattr),
-	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),
-	KOBJMETHOD(vmmfs_node_reclaim,	vmmnode_reclaim),
-	KOBJMETHOD(vmmfs_node_print,	vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmmfs_devlink, vmmfs_devlink_methods, 0);
 
 static size_t
 vmmfs_device_info_format(struct vmmfs_device_leaf *leaf, char *buf,

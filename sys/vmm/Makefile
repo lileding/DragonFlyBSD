@@ -27,9 +27,9 @@ SRCS+=	vmm_vkernel.c
 .else
 .error "vmm.ko currently supports only MACHINE_PLATFORM=pc64 or vkernel64"
 .endif
-SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machines.c vmmfs_machine.c vmmfs_devices.c
+SRCS+=	vmmfs.c vmmfs_vnode.c vmmfs_machine.c vmmfs_devices.c
 SRCS+=	vmmfs_vcpu.c vmmfs_mem.c vmmfs_loader.c vmmfs_console.c
-SRCS+=	vmmfs_device.c vmmfs_host.c
+SRCS+=	vmmfs_device.c
 SRCS+=	vmmfs_node_if.c vmmfs_node_if.h
 
 CLEANFILES+=	vmm_svm.o vmm_svm_entry.o vmm_vkernel.o assym.o assym.s

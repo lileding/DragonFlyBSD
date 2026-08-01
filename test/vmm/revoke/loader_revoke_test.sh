@@ -8,7 +8,7 @@ MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:
 say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
-mach() { echo "$MNT/machines/$1"; }
+mach() { echo "$MNT/$1"; }
 check_module_image()
 {
 	sections=$(readelf -SW "$VMM_KO" 2>>"$LOG") ||

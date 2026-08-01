@@ -48,17 +48,12 @@ run()
 
 mach()
 {
-	printf '%s/machines/%s\n' "$MNT" "$VM"
+	printf '%s/%s\n' "$MNT" "$VM"
 }
 
 device()
 {
 	printf '%s/devices/msix0\n' "$(mach)"
-}
-
-host_device()
-{
-	printf '%s/machines/host/devices/msix0\n' "$MNT"
 }
 
 dump_state()
@@ -177,9 +172,6 @@ cleanup()
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(device)" ]; then
 		remove_path "$(device)"
 	fi
-	if [ "$MOUNTED" -eq 1 ] && [ -d "$(host_device)" ]; then
-		remove_path "$(host_device)"
-	fi
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
 		remove_path "$(mach)"
 	fi
@@ -245,8 +237,7 @@ run mkdir "$(mach)"
 printf '1\n' >"$(mach)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(mach)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
-run mkdir "$(host_device)"
-run mv "$(host_device)" "$(device)"
+run mkdir "$(device)"
 : >"$PROVIDER_LOG" || fail "create provider log"
 "$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
 PROVIDER_PID=$!

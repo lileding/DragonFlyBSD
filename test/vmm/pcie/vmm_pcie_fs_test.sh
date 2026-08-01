@@ -42,8 +42,10 @@ cleanup()
 {
 	set +e
 	if [ "$MOUNTED" -eq 1 ]; then
-		rmdir "$MNT/machines/host/devices/testp1" >>"$LOG" 2>&1
-		rmdir "$MNT/machines/pcie0" >>"$LOG" 2>&1
+		rmdir "$MNT/pcie1/devices/testp1" >>"$LOG" 2>&1
+		rmdir "$MNT/pcie0/devices/testp1" >>"$LOG" 2>&1
+		rmdir "$MNT/pcie1" >>"$LOG" 2>&1
+		rmdir "$MNT/pcie0" >>"$LOG" 2>&1
 		umount "$MNT" >>"$LOG" 2>&1 && MOUNTED=0
 	fi
 	[ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ] &&
@@ -66,23 +68,26 @@ run ln -s /sbin/mount_std "$MOUNT_HELPER"
 run mkdir -p "$MNT"
 run "$MOUNT_HELPER" vmm "$MNT"; MOUNTED=1
 
-run mkdir "$MNT/machines/pcie0"
-run mkdir "$MNT/machines/host/devices/testp1"
-[ -d "$MNT/machines/host/devices/testp1" ] || fail "missing host function"
-[ "$(readlink "$MNT/devices/testp1")" = "../machines/host/devices/testp1" ] ||
-	fail "host device index target"
+# Root names are ordinary machine names; no VFS compatibility directories remain.
+run mkdir "$MNT/machines"
+run mkdir "$MNT/host"
+run mkdir "$MNT/devices"
+run rmdir "$MNT/machines"
+run rmdir "$MNT/host"
+run rmdir "$MNT/devices"
 
-run mv "$MNT/machines/host/devices/testp1" \
-	"$MNT/machines/pcie0/devices/testp1"
-[ -d "$MNT/machines/pcie0/devices/testp1" ] || fail "missing moved function"
-[ "$(readlink "$MNT/devices/testp1")" = "../machines/pcie0/devices/testp1" ] ||
-	fail "machine device index target"
+run mkdir "$MNT/pcie0"
+run mkdir "$MNT/pcie1"
+run mkdir "$MNT/pcie0/devices/testp1"
+[ -d "$MNT/pcie0/devices/testp1" ] || fail "missing direct function"
 
-run mv "$MNT/machines/pcie0/devices/testp1" \
-	"$MNT/machines/host/devices/testp1"
-run rmdir "$MNT/machines/host/devices/testp1"
-[ ! -L "$MNT/devices/testp1" ] || fail "removed function remains indexed"
-run rmdir "$MNT/machines/pcie0"
+run mv "$MNT/pcie0/devices/testp1" \
+	"$MNT/pcie1/devices/testp1"
+[ -d "$MNT/pcie1/devices/testp1" ] || fail "missing moved function"
+
+run rmdir "$MNT/pcie1/devices/testp1"
+run rmdir "$MNT/pcie0"
+run rmdir "$MNT/pcie1"
 unmount_when_quiesced || fail "machine teardown did not complete"
 run kldunload vmm; LOADED=0
 say "PASS: vPCIe P1 filesystem relation"

@@ -52,17 +52,12 @@ run()
 
 machine()
 {
-	printf '%s/machines/%s\n' "$MNT" "$VM"
+	printf '%s/%s\n' "$MNT" "$VM"
 }
 
 device()
 {
 	printf '%s/devices/dma0\n' "$(machine)"
-}
-
-host_device()
-{
-	printf '%s/machines/host/devices/dma0\n' "$MNT"
 }
 
 wait_pattern()
@@ -103,9 +98,6 @@ cleanup()
 	fi
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(device)" ]; then
 		remove_path "$(device)"
-	fi
-	if [ "$MOUNTED" -eq 1 ] && [ -d "$(host_device)" ]; then
-		remove_path "$(host_device)"
 	fi
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(machine)" ]; then
 		remove_path "$(machine)"
@@ -154,8 +146,7 @@ run mkdir "$(machine)"
 printf '1\n' >"$(machine)/vcpu" || fail "write vcpu"
 printf '2M\n' >"$(machine)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(machine)/loader" || fail "write loader"
-run mkdir "$(host_device)"
-run mv "$(host_device)" "$(device)"
+run mkdir "$(device)"
 : >"$PROVIDER_LOG" || fail "create provider log"
 "$PROVIDER" "$(device)" >>"$PROVIDER_LOG" 2>>"$LOG" &
 PROVIDER_PID=$!

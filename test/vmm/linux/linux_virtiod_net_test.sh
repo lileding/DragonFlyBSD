@@ -48,17 +48,12 @@ run()
 
 machine()
 {
-	printf '%s/machines/%s\n' "$MNT" "$VM"
+	printf '%s/%s\n' "$MNT" "$VM"
 }
 
 device()
 {
 	printf '%s/devices/%s\n' "$(machine)" "$1"
-}
-
-host_device()
-{
-	printf '%s/machines/host/devices/%s\n' "$MNT" "$1"
 }
 
 wait_pattern()
@@ -170,10 +165,6 @@ cleanup()
 		remove_path "$(device blk0)"
 	[ "$MOUNTED" -eq 1 ] && [ -d "$(machine)" ] &&
 		remove_path "$(machine)"
-	[ "$MOUNTED" -eq 1 ] && [ -d "$(host_device net0)" ] &&
-		remove_path "$(host_device net0)"
-	[ "$MOUNTED" -eq 1 ] && [ -d "$(host_device blk0)" ] &&
-		remove_path "$(host_device blk0)"
 	if [ "$MOUNTED" -eq 1 ]; then
 		i=0
 		while [ "$i" -lt "$STOP_TIMEOUT" ]; do
@@ -229,10 +220,8 @@ run mkdir "$(machine)"
 printf '1\n' >"$(machine)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(machine)/mem" || fail "write mem"
 printf '%s\n' "$LOADER" >"$(machine)/loader" || fail "write loader"
-run mkdir "$(host_device blk0)"
-run mkdir "$(host_device net0)"
-run mv "$(host_device blk0)" "$(device blk0)"
-run mv "$(host_device net0)" "$(device net0)"
+run mkdir "$(device blk0)"
+run mkdir "$(device net0)"
 
 "$VIRTIOD" blk "$(device blk0)" "$ISO" >>"$LOG" 2>&1 &
 BLK_PID=$!

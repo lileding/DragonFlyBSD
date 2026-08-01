@@ -57,7 +57,7 @@ check_module_image()
 
 mach()
 {
-	printf '%s/machines/%s\n' "$MNT" "$VM"
+	printf '%s/%s\n' "$MNT" "$VM"
 }
 
 append_file()

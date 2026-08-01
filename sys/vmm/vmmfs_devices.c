@@ -24,7 +24,7 @@
 #include "vmmfs_device.h"
 #include "vmmfs_node_if.h"
 
-/* ---- machines/<name>/devices/ and machines/host/devices/ ---- */
+/* ---- <machine>/devices/ ---- */
 
 static int
 vmmfs_devices_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
@@ -61,9 +61,8 @@ vmmfs_devices_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 	if (error || full)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
-	consumer = node->vn_machine != NULL ?
-	    &node->vn_machine->machine.own_mut_pcie_root :
-	    vmm_pcie_host_root(&vmp->own_mut_pcie);
+	KKASSERT(node->vn_machine != NULL);
+	consumer = &node->vn_machine->machine.own_mut_pcie_root;
 	lockmgr(&vmp->vm_lock, LK_SHARED);
 	i = 0;
 	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
@@ -84,7 +83,7 @@ out:
 	return vmmfs_readdir_end(ap, off, full, error);
 }
 
-/* A provider starts at the host root.  P2 adds its directory leaves. */
+/* A new provider belongs directly to this machine's PCIe root. */
 static int
 vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 {
@@ -97,7 +96,7 @@ vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	int alloc_error;
 	int error;
 
-	if (dnode->vn_machine != NULL)
+	if (dnode->vn_machine == NULL)
 		return EPERM;
 	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMM_DEVICE_NAME_MAX)
 		return ENAMETOOLONG;
@@ -109,11 +108,11 @@ vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 		return EBUSY;
 	}
 	error = vmm_pcie_device_create(&vmp->own_mut_pcie,
-	    vmm_pcie_host_root(&vmp->own_mut_pcie), ncp->nc_name,
+	    &dnode->vn_machine->machine.own_mut_pcie_root, ncp->nc_name,
 	    ncp->nc_nlen, &d->own_mut_device);
 	if (error == 0) {
 		idx = (ino_t)vmp->vm_next_dev++;
-		vmmfs_device_init(d, dnode, vmp, idx);
+		vmmfs_device_init(d, dnode, idx);
 		SLIST_INSERT_HEAD(&vmp->vm_device_views, d, dv_view_link);
 	}
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -176,9 +175,9 @@ vmmfs_devices_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	SLIST_REMOVE(&vmp->vm_device_views, d, vmmfs_device, dv_view_link);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	vmmfs_node_revoke(&d->link);
 	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
 	vrele(vp);
+	vmmfs_device_revoke(d);
 	vmmfs_device_uninit(d);
 	kfree(d, M_VMMFS);
 	return 0;
@@ -210,9 +209,8 @@ vmmfs_devices_nrename(struct vmmfs_node *fdnode, struct vop_nrename_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return ENOENT;
 	}
-	consumer = tdnode->vn_machine != NULL ?
-	    &tdnode->vn_machine->machine.own_mut_pcie_root :
-	    vmm_pcie_host_root(&vmp->own_mut_pcie);
+	KKASSERT(tdnode->vn_machine != NULL);
+	consumer = &tdnode->vn_machine->machine.own_mut_pcie_root;
 	error = vmm_pcie_device_move(&vmp->own_mut_pcie,
 	    &d->own_mut_device, consumer);
 	if (error == 0)
@@ -242,73 +240,3 @@ static kobj_method_t vmmfs_devices_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_devices, vmmfs_devices_methods, 0);
-
-/* ---- /vmm/devices/ symlink index ---- */
-
-static int
-vmmfs_devroot_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
-{
-	struct vnode *dvp = ap->a_dvp;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
-	struct vmmfs_node *child;
-	struct vmmfs_device *d;
-
-	(void)dnode;
-	child = NULL;
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	d = vmmfs_find_device_any(vmp, ncp->nc_name, ncp->nc_nlen);
-	if (d != NULL)
-		child = &d->link;
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-	return vmmfs_nresolve_finish(dvp, child, ap->a_nch);
-}
-
-static int
-vmmfs_devroot_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
-{
-	struct uio *uio = ap->a_uio;
-	struct vmmfs_mount *vmp;
-	struct vmmfs_device *d;
-	off_t off;
-	int error;
-	int full;
-	int i;
-
-	error = vmmfs_readdir_dots(ap, node, &off, &full);
-	if (error || full)
-		goto out;
-	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
-	lockmgr(&vmp->vm_lock, LK_SHARED);
-	i = 0;
-	SLIST_FOREACH(d, &vmp->vm_device_views, dv_view_link) {
-		if (i++ < (int)off - 2)
-			continue;
-		if (vop_write_dirent(&error, uio, d->link.vn_ino, DT_LNK,
-		    (uint16_t)d->own_mut_device.imm_name_len,
-		    d->own_mut_device.imm_name)) {
-			full = 1;
-			break;
-		}
-		off++;
-	}
-	lockmgr(&vmp->vm_lock, LK_RELEASE);
-out:
-	return vmmfs_readdir_end(ap, off, full, error);
-}
-
-static kobj_method_t vmmfs_devroot_methods[] = {
-	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_devroot_nresolve),
-	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_devroot_readdir),
-	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
-	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
-	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
-	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
-	KOBJMETHOD(vmmfs_node_open,		vmmnode_open),
-	KOBJMETHOD(vmmfs_node_close,		vmmnode_close),
-	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
-	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
-	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
-	KOBJMETHOD_END
-};
-DEFINE_CLASS(vmmfs_devroot, vmmfs_devroot_methods, 0);

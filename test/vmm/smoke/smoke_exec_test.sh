@@ -61,7 +61,7 @@ check_module_image()
 
 mach()
 {
-	printf '%s/machines/%s\n' "$MNT" "$1"
+	printf '%s/%s\n' "$MNT" "$1"
 }
 
 mode_self_exits()

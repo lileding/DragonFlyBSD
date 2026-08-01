@@ -20,7 +20,7 @@ MACHINES=
 say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; dump_runtime_state; exit 1; }
 run() { say "+ $*"; "$@" >>"$LOG" 2>&1 || fail "$*"; }
-mach() { printf '%s/machines/%s\n' "$MNT" "$1"; }
+mach() { printf '%s/%s\n' "$MNT" "$1"; }
 
 check_module_image()
 {

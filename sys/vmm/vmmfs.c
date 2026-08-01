@@ -3,7 +3,7 @@
  *
  * vmmfs - DragonFlyBSD system VMM control filesystem.
  *
- * A machine is created with `mkdir machines/<name>`: it always starts stopped
+ * A machine is created with `mkdir <name>`: it always starts stopped
  * with empty config.  The config files vcpu/mem/loader behave like hardware
  * registers — open() yields a per-open buffer holding the current DESIRED value
  * as text; read/write/seek act on that buffer; only close() atomically parses
@@ -29,6 +29,7 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/proc.h>
+#include <sys/thread2.h>
 #include <sys/vnode.h>
 #include <sys/namecache.h>
 #include <sys/dirent.h>
@@ -89,6 +90,14 @@ vmmfs_mount_count_busy(void)
 
 static int	vmmfs_statfs(struct mount *mp, struct statfs *sbp,
 		    struct ucred *cred);
+static void	vmmfs_machine_reaper(void *arg);
+
+int
+vmmfs_machine_cmp(struct vmmfs_machine *a, struct vmmfs_machine *b)
+{
+	return strcmp(a->name, b->name);
+}
+RB_GENERATE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
 
 /* --------------------------------------------------------------------- */
 
@@ -576,7 +585,38 @@ vmmfs_zero_read(struct vmmfs_node *node, struct vop_read_args *ap)
 	return 0;
 }
 
-/* ---- the filesystem root (/vmm): machines/ + devices/ ---- */
+/* ---- the filesystem root: machine registry keyed by name ---- */
+
+/* Caller holds vm_lock.  name need not be NUL-terminated. */
+static struct vmmfs_machine *
+vmmfs_root_find(struct vmmfs_mount *vmp, const char *name, int nlen)
+{
+	struct vmmfs_machine *m;
+
+	if (nlen < 0 || nlen > VMMFS_NAME_MAX)
+		return NULL;
+	m = RB_ROOT(&vmp->vm_machtree);
+	while (m != NULL) {
+		const char *mname = m->name;
+		int mlen = strlen(mname);
+		int cmp;
+
+		cmp = strncmp(name, mname, (nlen < mlen) ? nlen : mlen);
+		if (cmp == 0) {
+			if (nlen < mlen)
+				cmp = -1;
+			else if (nlen > mlen)
+				cmp = 1;
+		}
+		if (cmp < 0)
+			m = RB_LEFT(m, vm_link);
+		else if (cmp > 0)
+			m = RB_RIGHT(m, vm_link);
+		else
+			return m;
+	}
+	return NULL;
+}
 
 static int
 vmmfs_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
@@ -584,13 +624,15 @@ vmmfs_root_nresolve(struct vmmfs_node *dnode, struct vop_nresolve_args *ap)
 	struct vnode *dvp = ap->a_dvp;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_machine *m;
 	struct vmmfs_node *child = NULL;
 
 	(void)dnode;
-	if (ncp->nc_nlen == 8 && bcmp(ncp->nc_name, "machines", 8) == 0)
-		child = &vmp->vm_machines;
-	else if (ncp->nc_nlen == 7 && bcmp(ncp->nc_name, "devices", 7) == 0)
-		child = &vmp->vm_devroot;
+	lockmgr(&vmp->vm_lock, LK_SHARED);
+	m = vmmfs_root_find(vmp, ncp->nc_name, ncp->nc_nlen);
+	if (m != NULL)
+		child = &m->node;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
 	return vmmfs_nresolve_finish(dvp, child, ap->a_nch);
 }
 
@@ -600,35 +642,171 @@ vmmfs_root_readdir(struct vmmfs_node *node, struct vop_readdir_args *ap)
 	struct uio *uio = ap->a_uio;
 	struct vmmfs_mount *vmp;
 	off_t off;
-	int full, error;
+	int full, error, i;
 
 	error = vmmfs_readdir_dots(ap, node, &off, &full);
 	if (error || full)
 		goto out;
 	vmp = VFS_TO_VMMFS(ap->a_vp->v_mount);
-	if (off == 2) {
-		if (vop_write_dirent(&error, uio, vmp->vm_machines.vn_ino, DT_DIR,
-		    8, "machines")) {
-			full = 1;
-			goto out;
+	lockmgr(&vmp->vm_lock, LK_SHARED);
+	{
+		struct vmmfs_machine *m;
+		int skip = (int)off - 2;
+
+		i = 0;
+		RB_FOREACH(m, vmmfs_machtree, &vmp->vm_machtree) {
+			if (i++ < skip)
+				continue;
+			if (vop_write_dirent(&error, uio, m->node.vn_ino, DT_DIR,
+			    (uint16_t)strlen(m->name), m->name)) {
+				full = 1;
+				break;
+			}
+			off++;
 		}
-		off = 3;
 	}
-	if (off == 3) {
-		if (vop_write_dirent(&error, uio, vmp->vm_devroot.vn_ino, DT_DIR,
-		    7, "devices")) {
-			full = 1;
-			goto out;
-		}
-		off = 4;
-	}
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
 out:
 	return vmmfs_readdir_end(ap, off, full, error);
+}
+
+static int
+vmmfs_root_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_machine *m;
+	struct vnode *vp;
+	int error;
+
+	(void)dnode;
+	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
+		return ENAMETOOLONG;
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	if (vmp->vm_closing) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return EBUSY;
+	}
+	vmp->vm_machine_count++;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	m = vmmfs_machine_create(vmp, ncp->nc_name, ncp->nc_nlen);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	if (vmmfs_root_find(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return EEXIST;
+	}
+	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
+	m->vm_in_tree = 1;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	vmm_debug_trace("root_mkdir inserted name=%s m=%p", m->name,
+	    &m->machine);
+	if (!vmm_debug_allow_nmkdir_vnode) {
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return EBUSY;
+	}
+
+	error = vmmfs_alloc_vp(dvp->v_mount, &m->node,
+	    LK_EXCLUSIVE | LK_RETRY, &vp);
+	if (error != 0) {
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vmmfs_machine_free(m);
+		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+		KKASSERT(vmp->vm_machine_count > 0);
+		vmp->vm_machine_count--;
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return error;
+	}
+	*ap->a_vpp = vp;
+	cache_setunresolved(ap->a_nch);
+	cache_setvp(ap->a_nch, vp);
+	return 0;
+}
+
+static int
+vmmfs_root_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
+{
+	struct vnode *dvp = ap->a_dvp;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
+	struct vmmfs_machine *m;
+	struct vnode *vp;
+	int error;
+
+	(void)dnode;
+	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vp);
+	if (error != 0)
+		return error;
+	vn_unlock(vp);
+
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	m = vmmfs_root_find(vmp, ncp->nc_name, ncp->nc_nlen);
+	if (m == NULL) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vrele(vp);
+		return ENOENT;
+	}
+	lwkt_gettoken(&m->machine.token_config);
+	if (!m->machine.mut_desired_stopped) {
+		lwkt_reltoken(&m->machine.token_config);
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		vrele(vp);
+		return EBUSY;
+	}
+	lwkt_reltoken(&m->machine.token_config);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+
+	error = vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
+	if (error != 0) {
+		vrele(vp);
+		return error;
+	}
+
+	cache_inval_vp(vp, CINV_DESTROY | CINV_CHILDREN);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	error = vmmfs_device_destroy_owner_locked(vmp, &m->machine);
+	if (error == 0) {
+		KKASSERT(m->vm_in_tree != 0);
+		m->vm_in_tree = 0;
+		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+	}
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	if (error != 0) {
+		vrele(vp);
+		return error;
+	}
+
+	vrele(vp);
+	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,
+	    "vmmfsreap");
+	if (error != 0)
+		vmmfs_machine_reaper(m);
+	return 0;
 }
 
 static kobj_method_t vmmfs_root_methods[] = {
 	KOBJMETHOD(vmmfs_node_nresolve,		vmmfs_root_nresolve),
 	KOBJMETHOD(vmmfs_node_readdir,		vmmfs_root_readdir),
+	KOBJMETHOD(vmmfs_node_nmkdir,		vmmfs_root_nmkdir),
+	KOBJMETHOD(vmmfs_node_nrmdir,		vmmfs_root_nrmdir),
 	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_dir_getattr),
 	KOBJMETHOD(vmmfs_node_nlookupdotdot,	vmmnode_nlookupdotdot),
 	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
@@ -640,6 +818,20 @@ static kobj_method_t vmmfs_root_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_root, vmmfs_root_methods, 0);
+
+static void
+vmmfs_machine_reaper(void *arg)
+{
+	struct vmmfs_machine *m = arg;
+	struct vmmfs_mount *vmp = m->vm_mount;
+
+	vmm_machine_drain(&m->machine);
+	vmmfs_machine_free(m);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	KKASSERT(vmp->vm_machine_count > 0);
+	vmp->vm_machine_count--;
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+}
 
 /* --------------------------------------------------------------------- */
 
@@ -663,14 +855,6 @@ vmmfs_mount(struct mount *mp, char *path, caddr_t data, struct ucred *cred)
 	vmm_pcie_init(&vmp->own_mut_pcie);
 	vmmfs_node_init(&vmp->vm_root, &vmmfs_root_class, VDIR, VMMFS_DIR_MODE,
 	    VMMFS_ROOT_INO, NULL, NULL);
-	vmmfs_node_init(&vmp->vm_machines, &vmmfs_machines_class, VDIR,
-	    VMMFS_DIR_MODE, VMMFS_MACHINES_INO, &vmp->vm_root, NULL);
-	vmmfs_node_init(&vmp->vm_host, &vmmfs_host_class, VDIR, VMMFS_DIR_MODE,
-	    VMMFS_HOST_INO, &vmp->vm_machines, NULL);
-	vmmfs_node_init(&vmp->vm_host_devices, &vmmfs_devices_class, VDIR,
-	    VMMFS_DIR_MODE, VMMFS_HOST_DEV_INO, &vmp->vm_host, NULL);
-	vmmfs_node_init(&vmp->vm_devroot, &vmmfs_devroot_class, VDIR,
-	    VMMFS_DIR_MODE, VMMFS_DEVROOT_INO, &vmp->vm_root, NULL);
 	RB_INIT(&vmp->vm_machtree);
 	vmp->vm_next_ino = VMMFS_MACHINE_INO_BASE;
 	SLIST_INIT(&vmp->vm_device_views);
@@ -735,10 +919,6 @@ vmmfs_unmount(struct mount *mp, int mntflags)
 
 	vmmfs_device_destroy_all(vmp);
 	vmm_pcie_uninit(&vmp->own_mut_pcie);
-	vmmfs_node_uninit(&vmp->vm_devroot);
-	vmmfs_node_uninit(&vmp->vm_host_devices);
-	vmmfs_node_uninit(&vmp->vm_host);
-	vmmfs_node_uninit(&vmp->vm_machines);
 	vmmfs_node_uninit(&vmp->vm_root);
 	vmmfs_mount_count_release();
 	lockuninit(&vmp->vm_lock);

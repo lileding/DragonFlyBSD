@@ -22,16 +22,11 @@ MALLOC_DECLARE(M_VMMFS);
 #define VMMFS_VTAG		VT_UNUSED7
 
 #define VMMFS_ROOT_INO		1
-#define VMMFS_MACHINES_INO	2
-#define VMMFS_MACHINE_INO_BASE	3
+#define VMMFS_MACHINE_INO_BASE	2
 #define VMMFS_MACHINE_INO_STRIDE 16	/* room for the machine dir + configs */
 #define VMMFS_MACHINE_DEV_OFF	9	/* devices/ ino = machine base + 9 */
-#define VMMFS_HOST_INO		0x10000
-#define VMMFS_HOST_DEV_INO	0x10001
-#define VMMFS_DEVROOT_INO	0x10002
 #define VMMFS_DEV_INO_BASE	0x20000	/* device i -> base + i * stride */
 #define VMMFS_DEV_INO_STRIDE	16	/* device directory plus fixed leaf files */
-#define VMMFS_DEVLINK_INO_BASE	0x30000	/* device i symlink -> base + i */
 
 #define VMMFS_DIR_MODE		0555
 #define VMMFS_NAME_MAX		63
@@ -73,13 +68,9 @@ RB_HEAD(vmmfs_machtree, vmmfs_machine);
 struct vmmfs_mount {
 	struct mount	       *vm_mp;
 	struct vmmfs_node	vm_root;
-	struct vmmfs_node	vm_machines;
-	struct vmmfs_node	vm_host;	/* machines/host/ */
-	struct vmmfs_node	vm_host_devices; /* machines/host/devices/ */
-	struct vmmfs_node	vm_devroot;	/* /dev/vmm/devices/ symlink index */
 	struct lock		vm_lock;
-	struct vmmfs_machtree	vm_machtree;	/* user VMs, keyed by name */
-	struct vmm_pcie	own_mut_pcie;	/* core PCIe fabric and host root */
+	struct vmmfs_machtree	vm_machtree;	/* root machines, keyed by name */
+	struct vmm_pcie	own_mut_pcie;	/* core PCIe fabric */
 	ino_t			vm_next_ino;	/* monotonic machine ino allocator */
 	SLIST_HEAD(, vmmfs_device) vm_device_views; /* VFS views, not registry */
 	int			vm_machine_count; /* machines pending final cleanup */
@@ -100,14 +91,10 @@ extern volatile u_int vmmfs_vnode_open_count;
 DECLARE_CLASS(vmmfs_base_class);		/* fallback commons (vmmfs_vnode.c) */
 DECLARE_CLASS(vmmfs_root_class);		/* root dir       (vmmfs.c) */
 DECLARE_CLASS(vmmfs_device_class);	/* device file    (vmmfs_device.c) */
-DECLARE_CLASS(vmmfs_devlink_class);	/* device symlink (vmmfs_device.c) */
 DECLARE_CLASS(vmmfs_device_session_class); /* provider/consumer socket */
 DECLARE_CLASS(vmmfs_device_info_class); /* state/BDF snapshot */
 DECLARE_CLASS(vmmfs_machine_class);	/* a machine dir  (vmmfs_machine.c) */
-DECLARE_CLASS(vmmfs_machines_class);	/* machines/      (vmmfs_machines.c) */
-DECLARE_CLASS(vmmfs_host_class);		/* machines/host/ (vmmfs_host.c) */
 DECLARE_CLASS(vmmfs_devices_class);	/* a devices/ dir (vmmfs_devices.c) */
-DECLARE_CLASS(vmmfs_devroot_class);	/* /vmm/devices/  (vmmfs_devices.c) */
 DECLARE_CLASS(vmmfs_vcpu_class);		/* vcpu file      (vmmfs_vcpu.c) */
 DECLARE_CLASS(vmmfs_mem_class);		/* mem file       (vmmfs_mem.c) */
 DECLARE_CLASS(vmmfs_loader_class);	/* loader file    (vmmfs_loader.c) */
