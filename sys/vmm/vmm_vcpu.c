@@ -132,6 +132,7 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	struct vmm_vcpu *v = &m->own_mut_vcpu;
 	struct vmm_vcpu_thread *threads;
 	const struct vmm_vcpu_backend_ops *backend_ops;
+	void *backend_context = NULL;
 	uint32_t i;
 	int error = 0;
 
@@ -146,26 +147,24 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	}
 	vmm_debug_trace("vcpu backend machine=%p name=%s count=%u", m,
 	    backend_ops->imm_name, count);
+	if (v->own_mut_threads != NULL ||
+	    atomic_load_acq_int(&v->atomic_mut_active_count) != 0)
+		return EBUSY;
+	if (m->mut_status != VMM_MACHINE_STARTING)
+		return ECANCELED;
 	threads = kmalloc(sizeof(*threads) * count, M_TEMP, M_WAITOK | M_ZERO);
 
-	if (v->own_mut_threads != NULL ||
-	    atomic_load_acq_int(&v->atomic_mut_active_count) != 0) {
-		error = EBUSY;
-	} else if (m->mut_status != VMM_MACHINE_STARTING) {
-		error = ECANCELED;
-	} else {
-		v->own_mut_threads = threads;
-		v->mut_count = count;
-		atomic_store_rel_int(&v->atomic_mut_stop_requested, 0);
-		atomic_store_rel_int(&v->atomic_mut_exit_reason,
-		    VMM_VCPU_EXIT_NONE);
-		threads = NULL;
-	}
-	if (threads != NULL) {
-		vmm_debug_trace("vcpu start rejected machine=%p error=%d", m, error);
+	error = backend_ops->context_create(m, count, launch, &backend_context);
+	if (error != 0) {
 		kfree(threads, M_TEMP);
 		return error;
 	}
+	v->own_mut_threads = threads;
+	v->borrow_imm_backend_ops = backend_ops;
+	v->own_mut_backend_context = backend_context;
+	v->mut_count = count;
+	atomic_store_rel_int(&v->atomic_mut_stop_requested, 0);
+	atomic_store_rel_int(&v->atomic_mut_exit_reason, VMM_VCPU_EXIT_NONE);
 
 	for (i = 0; i < count; i++) {
 		struct vmm_vcpu_thread *vc = &v->own_mut_threads[i];
@@ -177,7 +176,8 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 		vc->imm_cpu = cpu;
 		vmm_debug_trace("vcpu%u create machine=%p backend=%s cpu=%d", i,
 		    m, backend_ops->imm_name, cpu);
-		error = backend_ops->create(m, launch, &vc->own_mut_backend);
+		error = backend_ops->vcpu_create(v->own_mut_backend_context, launch,
+		    vc, &vc->own_mut_backend);
 		if (error) {
 			vmm_debug_trace("vcpu%u backend create failed machine=%p error=%d",
 			    i, m, error);
@@ -187,8 +187,6 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 		    atomic_load_acq_int(&v->atomic_mut_stop_requested) != 0) {
 			error = ECANCELED;
 			vmm_debug_trace("vcpu%u create canceled machine=%p", i, m);
-			backend_ops->destroy(vc->own_mut_backend);
-			vc->own_mut_backend = NULL;
 			break;
 		}
 		atomic_add_int(&v->atomic_mut_active_count, 1);
@@ -201,8 +199,6 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 			    i, m, error);
 			atomic_add_int(&v->atomic_mut_active_count, -1);
 			atomic_store_rel_int(&v->atomic_mut_stop_requested, 1);
-			backend_ops->destroy(vc->own_mut_backend);
-			vc->own_mut_backend = NULL;
 			break;
 		}
 	}
@@ -217,7 +213,7 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 			v->own_mut_threads = NULL;
 			atomic_store_rel_int(&v->atomic_mut_stop_requested, 0);
 		}
-		vmm_vcpu_release_threads(release_threads, release_count);
+		vmm_vcpu_release_threads(v, release_threads, release_count);
 		vmm_debug_trace("vcpu start cleanup done machine=%p error=%d", m,
 		    error);
 	}
@@ -261,21 +257,30 @@ vmm_vcpu_detach_threads_locked(struct vmm_vcpu *v)
 }
 
 void
-vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads, uint32_t count)
+vmm_vcpu_release_threads(struct vmm_vcpu *v,
+    struct vmm_vcpu_thread *threads, uint32_t count)
 {
+	const struct vmm_vcpu_backend_ops *backend_ops;
+	void *backend_context;
 	uint32_t i;
 
-	if (threads == NULL)
-		return;
+	backend_ops = v->borrow_imm_backend_ops;
+	backend_context = v->own_mut_backend_context;
+	v->borrow_imm_backend_ops = NULL;
+	v->own_mut_backend_context = NULL;
 	for (i = 0; i < count; i++) {
-		if (threads[i].borrow_imm_backend_ops != NULL) {
-			threads[i].borrow_imm_backend_ops->destroy(
-			    threads[i].own_mut_backend);
+		if (threads != NULL && backend_ops != NULL) {
+			backend_ops->vcpu_destroy(threads[i].own_mut_backend);
 		}
-		threads[i].own_mut_backend = NULL;
-		threads[i].borrow_imm_backend_ops = NULL;
+		if (threads != NULL) {
+			threads[i].own_mut_backend = NULL;
+			threads[i].borrow_imm_backend_ops = NULL;
+		}
 	}
-	kfree(threads, M_TEMP);
+	if (backend_ops != NULL)
+		backend_ops->context_destroy(backend_context);
+	if (threads != NULL)
+		kfree(threads, M_TEMP);
 }
 
 int

@@ -15,11 +15,29 @@ vmm_vkernel_probe(void)
 }
 
 static int
-vmm_vkernel_vcpu_create(struct vmm_machine *m,
-    const struct vmm_launch *launch, void **backendp)
+vmm_vkernel_context_create(struct vmm_machine *m, uint32_t count,
+    const struct vmm_launch *launch, void **contextp)
 {
 	(void)m;
+	(void)count;
 	(void)launch;
+	*contextp = NULL;
+	return 0;
+}
+
+static void
+vmm_vkernel_context_destroy(void *context)
+{
+	(void)context;
+}
+
+static int
+vmm_vkernel_vcpu_create(void *context, const struct vmm_launch *launch,
+    const struct vmm_vcpu_thread *vc, void **backendp)
+{
+	(void)context;
+	(void)launch;
+	(void)vc;
 	(void)backendp;
 	return EOPNOTSUPP;
 }
@@ -41,8 +59,10 @@ vmm_vkernel_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 const struct vmm_vcpu_backend_ops vmm_vkernel_backend_ops = {
 	.imm_name = "vkernel",
 	.probe = vmm_vkernel_probe,
-	.create = vmm_vkernel_vcpu_create,
-	.destroy = vmm_vkernel_vcpu_destroy,
+	.context_create = vmm_vkernel_context_create,
+	.context_destroy = vmm_vkernel_context_destroy,
+	.vcpu_create = vmm_vkernel_vcpu_create,
+	.vcpu_destroy = vmm_vkernel_vcpu_destroy,
 	.run = vmm_vkernel_vcpu_run,
 };
 

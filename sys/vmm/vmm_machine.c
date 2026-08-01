@@ -207,7 +207,7 @@ vmm_machine_uninit(struct vmm_machine *m)
 	vmm_pcie_root_stop(&m->own_mut_pcie_root);
 	vmm_dma_uninit(&m->own_mut_dma);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(threads, thread_count);
+	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);
@@ -559,7 +559,7 @@ fail_after_loader:
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(threads, thread_count);
+	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);
@@ -615,7 +615,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 		vmm_pcie_root_stop(&m->own_mut_pcie_root);
 		thread_count = m->own_mut_vcpu.mut_count;
 		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-		vmm_vcpu_release_threads(threads, thread_count);
+		vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 		vmm_dma_stop(&m->own_mut_dma);
 		vmm_pcie_root_reset(&m->own_mut_pcie_root);
 		error = vmm_mem_reset_run(&m->own_mut_mem);
@@ -647,7 +647,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 		vmm_dma_stop(&m->own_mut_dma);
 		vmm_pcie_root_reset(&m->own_mut_pcie_root);
 		backing = vmm_mem_detach(&m->own_mut_mem);
-		vmm_vcpu_release_threads(threads, thread_count);
+		vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 		vmm_mem_release_backing(backing);
 		if (m->own_mut_boot_launch != NULL) {
 			kfree(m->own_mut_boot_launch, M_TEMP);
@@ -672,7 +672,7 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(threads, thread_count);
+	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);
@@ -704,7 +704,7 @@ vmm_machine_stop_force(const struct vmm_machine_task *task)
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(threads, thread_count);
+	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);

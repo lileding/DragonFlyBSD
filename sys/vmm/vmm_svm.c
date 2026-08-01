@@ -608,23 +608,37 @@ struct vmm_svm_vmcb {
 	struct vmm_svm_state state;
 } __packed;
 
-struct vmm_svm_backend {
+/*
+ * One context exists for one machine run and is opaque outside this backend.
+ * It owns the NPT-facing resources shared by all future vCPUs.  Creation and
+ * destruction are serialized by vmm_vcpu_start()/release_threads(); the
+ * physical and logical AVIC tables are only modified during per-vCPU create,
+ * destroy, bind and unbind.  SMP will add their own short synchronization
+ * without exposing that detail to vmm_machine.
+ */
+struct vmm_svm_context {
 	struct vmm_machine *borrow_imm_machine;
 	struct vmspace *borrow_mut_vmspace;
-	struct vmm_svm_vmcb *own_mut_vmcb;
-	uint64_t imm_vmcb_pa;
-	uint8_t *own_mut_iobm;
+	uint8_t *own_imm_iobm;
 	uint64_t imm_iobm_pa;
-	uint8_t *own_mut_msrbm;
+	uint8_t *own_imm_msrbm;
 	uint64_t imm_msrbm_pa;
-	void *own_mut_avic_apic_page;
-	uint64_t imm_avic_apic_page_pa;
 	vm_page_t own_mut_avic_access_page;
 	uint64_t imm_avic_access_page_pa;
 	uint64_t *own_mut_avic_phys_table;
 	uint64_t imm_avic_phys_table_pa;
 	uint32_t *own_mut_avic_log_table;
 	uint64_t imm_avic_log_table_pa;
+};
+
+struct vmm_svm_backend {
+	struct vmm_svm_context *borrow_imm_context;
+	struct vmm_machine *borrow_imm_machine;
+	struct vmspace *borrow_mut_vmspace;
+	struct vmm_svm_vmcb *own_mut_vmcb;
+	uint64_t imm_vmcb_pa;
+	void *own_mut_avic_apic_page;
+	uint64_t imm_avic_apic_page_pa;
 	uint32_t imm_avic_apic_id;
 	uint32_t atomic_mut_avic_host_apic_id;
 	uint32_t atomic_mut_avic_host_cpuid;
@@ -809,6 +823,9 @@ CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
 CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
 
 void	vmm_svm_vmrun(uint64_t vmcb_pa, uint64_t *gprs);
+static int vmm_svm_context_create(struct vmm_machine *m, uint32_t count,
+    const struct vmm_launch *launch, void **contextp);
+static void vmm_svm_context_destroy(void *context);
 static void vmm_svm_vcpu_destroy(void *backend);
 static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
 static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
@@ -922,50 +939,47 @@ vmm_svm_avic_access_page_free(vm_page_t m)
 }
 
 static int
-vmm_svm_avic_map_access_page(struct vmm_svm_backend *svm)
+vmm_svm_avic_map_access_page(struct vmm_svm_context *context)
 {
 	pmap_t pmap;
 
-	if (svm->borrow_mut_vmspace == NULL ||
-	    svm->own_mut_avic_access_page == NULL)
+	if (context->borrow_mut_vmspace == NULL ||
+	    context->own_mut_avic_access_page == NULL)
 		return EINVAL;
-	pmap = vmspace_pmap(svm->borrow_mut_vmspace);
-	pmap_enter(pmap, VMM_SVM_APICBASE_ADDR, svm->own_mut_avic_access_page,
+	pmap = vmspace_pmap(context->borrow_mut_vmspace);
+	pmap_enter(pmap, VMM_SVM_APICBASE_ADDR,
+	    context->own_mut_avic_access_page,
 	    VM_PROT_READ | VM_PROT_WRITE, 0, NULL);
 	return 0;
 }
 
 static void
-vmm_svm_avic_unmap_access_page(struct vmm_svm_backend *svm)
+vmm_svm_avic_unmap_access_page(struct vmm_svm_context *context)
 {
-	if (svm == NULL || svm->borrow_mut_vmspace == NULL)
+	if (context == NULL || context->borrow_mut_vmspace == NULL)
 		return;
-	pmap_remove(vmspace_pmap(svm->borrow_mut_vmspace),
+	pmap_remove(vmspace_pmap(context->borrow_mut_vmspace),
 	    VMM_SVM_APICBASE_ADDR, VMM_SVM_APICBASE_ADDR + PAGE_SIZE);
 }
 
 static int
 vmm_svm_avic_init(struct vmm_svm_backend *svm)
 {
+	struct vmm_svm_context *context = svm->borrow_imm_context;
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint64_t entry;
-	int error;
 
+	if (context == NULL)
+		return EINVAL;
 	svm->imm_avic_apic_id = VMM_SVM_AVIC_APIC_ID;
 	atomic_store_rel_int(&svm->atomic_mut_avic_host_cpuid, (u_int)-1);
 	atomic_store_rel_int(&svm->atomic_mut_avic_host_apic_id, (u_int)-1);
 	svm->own_mut_avic_apic_page =
 	    vmm_svm_contig_alloc(&svm->imm_avic_apic_page_pa, 1);
-	svm->own_mut_avic_phys_table =
-	    vmm_svm_contig_alloc(&svm->imm_avic_phys_table_pa, 1);
-	svm->own_mut_avic_log_table =
-	    vmm_svm_contig_alloc(&svm->imm_avic_log_table_pa, 1);
-	svm->own_mut_avic_access_page =
-	    vmm_svm_avic_access_page_alloc(&svm->imm_avic_access_page_pa);
 	if (svm->own_mut_avic_apic_page == NULL ||
-	    svm->own_mut_avic_phys_table == NULL ||
-	    svm->own_mut_avic_log_table == NULL ||
-	    svm->own_mut_avic_access_page == NULL)
+	    context->own_mut_avic_phys_table == NULL ||
+	    context->own_mut_avic_log_table == NULL ||
+	    context->own_mut_avic_access_page == NULL)
 		return ENOMEM;
 
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ID,
@@ -977,42 +991,33 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
 
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID;
-	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
-
-	error = vmm_svm_avic_map_access_page(svm);
-	if (error)
-		return error;
-
+	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	vmcb->ctrl.v |= VMM_SVM_CTRL_V_INTR_MASKING | VMM_SVM_CTRL_V_AVIC_EN;
 	vmcb->ctrl.avic = VMM_SVM_APICBASE_ADDR;
 	vmcb->ctrl.avic_abpp = svm->imm_avic_apic_page_pa;
-	vmcb->ctrl.avic_ltp = svm->imm_avic_log_table_pa;
-	vmcb->ctrl.avic_phys = svm->imm_avic_phys_table_pa |
+	vmcb->ctrl.avic_ltp = context->imm_avic_log_table_pa;
+	vmcb->ctrl.avic_phys = context->imm_avic_phys_table_pa |
 	    VMM_SVM_AVIC_MAX_PHYS_ID;
 	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm avic enabled apic_id=%u apic_pa=0x%jx access_pa=0x%jx",
 	    svm->imm_avic_apic_id, (uintmax_t)svm->imm_avic_apic_page_pa,
-	    (uintmax_t)svm->imm_avic_access_page_pa);
+	    (uintmax_t)context->imm_avic_access_page_pa);
 	return 0;
 }
 
 static void
 vmm_svm_avic_uninit(struct vmm_svm_backend *svm)
 {
+	struct vmm_svm_context *context;
+
 	if (svm == NULL)
 		return;
-	if (svm->own_mut_avic_phys_table != NULL) {
-		svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = 0;
+	context = svm->borrow_imm_context;
+	if (context != NULL && context->own_mut_avic_phys_table != NULL) {
+		context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = 0;
 		cpu_mfence();
 	}
-	vmm_svm_avic_unmap_access_page(svm);
-	vmm_svm_avic_access_page_free(svm->own_mut_avic_access_page);
-	svm->own_mut_avic_access_page = NULL;
-	vmm_svm_contig_free(svm->own_mut_avic_log_table, 1);
-	vmm_svm_contig_free(svm->own_mut_avic_phys_table, 1);
 	vmm_svm_contig_free(svm->own_mut_avic_apic_page, 1);
-	svm->own_mut_avic_log_table = NULL;
-	svm->own_mut_avic_phys_table = NULL;
 	svm->own_mut_avic_apic_page = NULL;
 }
 
@@ -1020,11 +1025,13 @@ vmm_svm_avic_uninit(struct vmm_svm_backend *svm)
 static void
 vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 {
+	struct vmm_svm_context *context;
 	uint64_t entry;
 	uint32_t cpuid;
 	uint32_t apicid;
 
-	if (svm == NULL || svm->own_mut_avic_phys_table == NULL)
+	if (svm == NULL || (context = svm->borrow_imm_context) == NULL ||
+	    context->own_mut_avic_phys_table == NULL)
 		return;
 	cpuid = mycpu->gd_cpuid;
 	apicid = (uint32_t)CPUID_TO_APICID(cpuid);
@@ -1041,7 +1048,7 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    VMM_SVM_AVIC_PHYS_RUNNING |
 	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
-	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
 	atomic_store_rel_int(&svm->atomic_mut_avic_running, 1);
 }
@@ -1049,16 +1056,18 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 static void
 vmm_svm_avic_unbind_cpu(struct vmm_svm_backend *svm)
 {
+	struct vmm_svm_context *context;
 	uint64_t entry;
 
-	if (svm == NULL || svm->own_mut_avic_phys_table == NULL ||
+	if (svm == NULL || (context = svm->borrow_imm_context) == NULL ||
+	    context->own_mut_avic_phys_table == NULL ||
 	    !svm->mut_avic_bound ||
 	    atomic_load_acq_int(&svm->atomic_mut_avic_running) == 0)
 		return;
 	atomic_store_rel_int(&svm->atomic_mut_avic_running, 0);
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
-	svm->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
 }
 
@@ -1600,9 +1609,77 @@ vmm_svm_fpu_init(struct vmm_svm_backend *svm)
 }
 
 static int
-vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
-    void **backendp)
+vmm_svm_context_create(struct vmm_machine *m, uint32_t count,
+    const struct vmm_launch *launch, void **contextp)
 {
+	struct vmm_svm_context *context;
+	int error;
+
+	(void)count;
+	(void)launch;
+	if (contextp == NULL)
+		return EINVAL;
+	*contextp = NULL;
+	context = kmalloc(sizeof(*context), M_TEMP, M_WAITOK | M_ZERO);
+	context->borrow_imm_machine = m;
+	context->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
+	if (context->borrow_mut_vmspace == NULL) {
+		error = EINVAL;
+		goto fail;
+	}
+	pmap_npt_transform(vmspace_pmap(context->borrow_mut_vmspace), 0);
+	context->own_imm_iobm = vmm_svm_contig_alloc(&context->imm_iobm_pa,
+	    VMM_SVM_IOBM_PAGES);
+	context->own_imm_msrbm = vmm_svm_contig_alloc(&context->imm_msrbm_pa,
+	    VMM_SVM_MSRBM_PAGES);
+	context->own_mut_avic_phys_table = vmm_svm_contig_alloc(
+	    &context->imm_avic_phys_table_pa, 1);
+	context->own_mut_avic_log_table = vmm_svm_contig_alloc(
+	    &context->imm_avic_log_table_pa, 1);
+	context->own_mut_avic_access_page = vmm_svm_avic_access_page_alloc(
+	    &context->imm_avic_access_page_pa);
+	if (context->own_imm_iobm == NULL || context->own_imm_msrbm == NULL ||
+	    context->own_mut_avic_phys_table == NULL ||
+	    context->own_mut_avic_log_table == NULL ||
+	    context->own_mut_avic_access_page == NULL) {
+		error = ENOMEM;
+		goto fail;
+	}
+	memset(context->own_imm_iobm, 0xff, VMM_SVM_IOBM_PAGES * PAGE_SIZE);
+	memset(context->own_imm_msrbm, 0xff, VMM_SVM_MSRBM_PAGES * PAGE_SIZE);
+	error = vmm_svm_avic_map_access_page(context);
+	if (error != 0)
+		goto fail;
+	*contextp = context;
+	return 0;
+
+fail:
+	vmm_svm_context_destroy(context);
+	return error;
+}
+
+static void
+vmm_svm_context_destroy(void *context_arg)
+{
+	struct vmm_svm_context *context = context_arg;
+
+	if (context == NULL)
+		return;
+	vmm_svm_avic_unmap_access_page(context);
+	vmm_svm_avic_access_page_free(context->own_mut_avic_access_page);
+	vmm_svm_contig_free(context->own_mut_avic_log_table, 1);
+	vmm_svm_contig_free(context->own_mut_avic_phys_table, 1);
+	vmm_svm_contig_free(context->own_imm_msrbm, VMM_SVM_MSRBM_PAGES);
+	vmm_svm_contig_free(context->own_imm_iobm, VMM_SVM_IOBM_PAGES);
+	kfree(context, M_TEMP);
+}
+
+static int
+vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
+    const struct vmm_vcpu_thread *vc, void **backendp)
+{
+	struct vmm_svm_context *context = context_arg;
+	struct vmm_machine *m;
 	struct vmm_svm_backend *svm;
 	struct vmm_svm_vmcb *vmcb;
 	uint64_t ratio;
@@ -1611,8 +1688,10 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	uint32_t i;
 	int error;
 
-	if (backendp == NULL || launch == NULL || launch->imm_vcpu0.vcpu_id != 0)
+	if (context == NULL || backendp == NULL || launch == NULL || vc == NULL ||
+	    vc->imm_id != 0 || launch->imm_vcpu0.vcpu_id != 0)
 		return EINVAL;
+	m = context->borrow_imm_machine;
 	if (!vmm_svm_initialized)
 		return ENXIO;
 	if (!vmm_loader_x86_xcr0_valid(
@@ -1621,8 +1700,9 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		return EINVAL;
 	*backendp = NULL;
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
+	svm->borrow_imm_context = context;
 	svm->borrow_imm_machine = m;
-	svm->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
+	svm->borrow_mut_vmspace = context->borrow_mut_vmspace;
 	if (svm->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
 		goto fail;
@@ -1665,7 +1745,6 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	    (uintmax_t)svm->imm_host_tsc_hz,
 	    (uintmax_t)svm->imm_guest_tsc_hz,
 	    (uintmax_t)svm->imm_tsc_ratio);
-	pmap_npt_transform(vmspace_pmap(svm->borrow_mut_vmspace), 0);
 	svm->mut_hpet_counter_tsc = rdtsc();
 	svm->mut_pm_timer_tsc = svm->mut_hpet_counter_tsc;
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
@@ -1717,19 +1796,12 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	}
 
 	svm->own_mut_vmcb = vmm_svm_contig_alloc(&svm->imm_vmcb_pa, 1);
-	svm->own_mut_iobm = vmm_svm_contig_alloc(&svm->imm_iobm_pa,
-	    VMM_SVM_IOBM_PAGES);
-	svm->own_mut_msrbm = vmm_svm_contig_alloc(&svm->imm_msrbm_pa,
-	    VMM_SVM_MSRBM_PAGES);
-	if (svm->own_mut_vmcb == NULL || svm->own_mut_iobm == NULL ||
-	    svm->own_mut_msrbm == NULL) {
+	if (svm->own_mut_vmcb == NULL) {
 		error = ENOMEM;
 		goto fail;
 	}
 
 	vmcb = svm->own_mut_vmcb;
-	memset(svm->own_mut_iobm, 0xff, VMM_SVM_IOBM_PAGES * PAGE_SIZE);
-	memset(svm->own_mut_msrbm, 0xff, VMM_SVM_MSRBM_PAGES * PAGE_SIZE);
 	vmcb->ctrl.intercept_misc1 =
 	    VMM_SVM_CTRL_INTERCEPT_INTR |
 	    VMM_SVM_CTRL_INTERCEPT_NMI |
@@ -1776,8 +1848,8 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	vmcb->ctrl.intercept_vec = 0;
 	vmcb->ctrl.pause_filt_thresh = VMM_SVM_PAUSE_FILTER_THRESHOLD;
 	vmcb->ctrl.pause_filt_cnt = VMM_SVM_PAUSE_FILTER_COUNT;
-	vmcb->ctrl.iopm_base_pa = svm->imm_iobm_pa;
-	vmcb->ctrl.msrpm_base_pa = svm->imm_msrbm_pa;
+	vmcb->ctrl.iopm_base_pa = context->imm_iobm_pa;
+	vmcb->ctrl.msrpm_base_pa = context->imm_msrbm_pa;
 	vmcb->ctrl.guest_asid = VMM_SVM_ASID;
 	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
 	vmcb->ctrl.v = VMM_SVM_CTRL_V_INTR_MASKING;
@@ -1806,8 +1878,6 @@ vmm_svm_vcpu_destroy(void *backend)
 	vmm_svm_avic_uninit(svm);
 	if (svm->own_mut_fpu_sentinel != NULL)
 		kfree(svm->own_mut_fpu_sentinel, M_TEMP);
-	vmm_svm_contig_free(svm->own_mut_msrbm, VMM_SVM_MSRBM_PAGES);
-	vmm_svm_contig_free(svm->own_mut_iobm, VMM_SVM_IOBM_PAGES);
 	vmm_svm_contig_free(svm->own_mut_vmcb, 1);
 	kfree(svm, M_TEMP);
 }
@@ -5738,8 +5808,10 @@ const struct vmm_vcpu_backend_ops vmm_svm_backend_ops = {
 	.probe = vmm_svm_probe,
 	.init = vmm_svm_init,
 	.uninit = vmm_svm_uninit,
-	.create = vmm_svm_vcpu_create,
-	.destroy = vmm_svm_vcpu_destroy,
+	.context_create = vmm_svm_context_create,
+	.context_destroy = vmm_svm_context_destroy,
+	.vcpu_create = vmm_svm_vcpu_create,
+	.vcpu_destroy = vmm_svm_vcpu_destroy,
 	.run = vmm_svm_vcpu_run,
 	.console_input = vmm_svm_console_input,
 	.interrupt = vmm_svm_interrupt,

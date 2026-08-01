@@ -31,10 +31,14 @@ struct vmm_vcpu {
 	 * machine, whose serialized command queue owns lifecycle cleanup.
 	 * Backend teardown follows the memory backing pattern: detach
 	 * own_mut_threads after all vCPUs stop, then destroy backend state and
-	 * free the array outside the stop path.
+	 * free the array outside the stop path.  borrow_imm_backend_ops and
+	 * own_mut_backend_context share that command-queue protection and are
+	 * detached with the thread array; vmm_machine never inspects context.
 	 */
 	uint32_t	mut_count;		/* 0 = unset */
 	struct vmm_vcpu_thread *own_mut_threads;
+	const struct vmm_vcpu_backend_ops *borrow_imm_backend_ops;
+	void		*own_mut_backend_context;
 	u_int		atomic_mut_active_count;
 	u_int		atomic_mut_stop_requested;
 	u_int		atomic_mut_exit_reason;
@@ -60,9 +64,13 @@ struct vmm_vcpu_backend_ops {
 	/* Module lifetime setup/teardown; no machine or vCPU is live here. */
 	int (*init)(void);
 	void (*uninit)(void);
-	int (*create)(struct vmm_machine *m, const struct vmm_launch *launch,
-	    void **backendp);
-	void (*destroy)(void *backend);
+	/* A context is private to the selected backend and one machine run. */
+	int (*context_create)(struct vmm_machine *m, uint32_t count,
+	    const struct vmm_launch *launch, void **contextp);
+	void (*context_destroy)(void *context);
+	int (*vcpu_create)(void *context, const struct vmm_launch *launch,
+	    const struct vmm_vcpu_thread *vc, void **backendp);
+	void (*vcpu_destroy)(void *backend);
 	enum vmm_vcpu_exit_reason (*run)(void *backend,
 	    struct vmm_vcpu_thread *vc);
 	void (*console_input)(void *backend, struct vmm_vcpu_thread *vc);
@@ -87,8 +95,8 @@ void	vmm_vcpu_stop(struct vmm_machine *m);
 int	vmm_vcpu_has_active(struct vmm_vcpu *v);
 void	vmm_vcpu_uninit(struct vmm_vcpu *v,
 	    struct vmm_vcpu_thread **threadsp);
-void	vmm_vcpu_release_threads(struct vmm_vcpu_thread *threads,
-	    uint32_t count);
+void	vmm_vcpu_release_threads(struct vmm_vcpu *v,
+	    struct vmm_vcpu_thread *threads, uint32_t count);
 int	vmm_vcpu_should_stop(const struct vmm_vcpu_thread *vc);
 void	vmm_vcpu_console_input_locked(struct vmm_machine *m);
 void	vmm_vcpu_interrupt_locked(struct vmm_machine *m, uint8_t vector);
