@@ -45,17 +45,17 @@ static int vmm_svm_fpu_check_enabled;
 SYSCTL_DECL(_debug_vmm);
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
     &vmm_svm_trace_enabled, 0,
-    "record SVM trace events in per-machine events logs");
+    "print SVM trace messages to the debug log");
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_timing_trace, CTLFLAG_RW,
     &vmm_svm_timing_trace_enabled, 0,
-    "record bounded SVM PM timer and HPET reference events");
+    "print bounded SVM PM timer and HPET reference messages");
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
     &vmm_svm_fpu_check_enabled, 0,
     "verify root FPU state preservation across each VMRUN");
 
 #define VMM_SVM_TRACE(svm, fmt, ...) do {				\
 	if (vmm_svm_trace_enabled)					\
-		vmm_machine_logf((svm)->borrow_imm_machine, fmt,	\
+		vmm_machine_debugf((svm)->borrow_imm_machine, fmt,	\
 		    __VA_ARGS__);					\
 } while (0)
 
@@ -989,7 +989,7 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 	vmcb->ctrl.avic_ltp = svm->imm_avic_log_table_pa;
 	vmcb->ctrl.avic_phys = svm->imm_avic_phys_table_pa |
 	    VMM_SVM_AVIC_MAX_PHYS_ID;
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm avic enabled apic_id=%u apic_pa=0x%jx access_pa=0x%jx",
 	    svm->imm_avic_apic_id, (uintmax_t)svm->imm_avic_apic_page_pa,
 	    (uintmax_t)svm->imm_avic_access_page_pa);
@@ -1034,7 +1034,7 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 		atomic_store_rel_int(&svm->atomic_mut_avic_host_apic_id, apicid);
 		atomic_store_rel_int(&svm->atomic_mut_avic_host_cpuid, cpuid);
 		svm->mut_avic_bound = 1;
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
 		    svm->imm_avic_apic_id, cpuid, apicid);
 	}
@@ -1070,7 +1070,7 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	uint32_t bit;
 
 	if (vector < 32) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic reject source=%s vector=0x%x reason=low_vector",
 		    vc->imm_id, source, vector);
 		return;
@@ -1418,12 +1418,12 @@ vmm_svm_init(void)
 	for (i = 0; i < ncpus; ++i) {
 		cpu_state = &vmm_svm_cpu_state[i];
 		if (cpu_state->mut_enabled) {
-			kprintf("vmm: svm cpu%d enabled hsave=0x%jx\n", i,
+			vmm_debug_trace("svm cpu%d enabled hsave=0x%jx", i,
 			    (uintmax_t)cpu_state->imm_hsave_pa);
 		}
 	}
 	vmm_svm_initialized = 1;
-	kprintf("vmm: svm initialized cpus=%d\n", ncpus);
+	vmm_debug_trace("svm initialized cpus=%d", ncpus);
 	return 0;
 
 fail:
@@ -1447,7 +1447,7 @@ vmm_svm_uninit(void)
 	for (i = 0; i < ncpus; ++i) {
 		cpu_state = &vmm_svm_cpu_state[i];
 		if (cpu_state->mut_restored)
-			kprintf("vmm: svm cpu%d restored\n", i);
+			vmm_debug_trace("svm cpu%d restored", i);
 	}
 	for (i = 0; i < ncpus; ++i) {
 		cpu_state = &vmm_svm_cpu_state[i];
@@ -1455,7 +1455,7 @@ vmm_svm_uninit(void)
 		bzero(cpu_state, sizeof(*cpu_state));
 	}
 	vmm_svm_initialized = 0;
-	kprintf("vmm: svm uninitialized cpus=%d\n", ncpus);
+	vmm_debug_trace("svm uninitialized cpus=%d", ncpus);
 }
 
 static void
@@ -1634,7 +1634,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 	rate = svm->imm_guest_tsc_hz / svm->imm_host_tsc_hz;
 	remainder = svm->imm_guest_tsc_hz % svm->imm_host_tsc_hz;
 	if (rate > (VMM_SVM_TSC_RATIO_MAX >> 32)) {
-		vmm_machine_logf(m,
+		vmm_machine_debugf(m,
 		    "svm unavailable reason=guest_tsc_rate host_hz=%ju guest_hz=%ju",
 		    (uintmax_t)svm->imm_host_tsc_hz,
 		    (uintmax_t)svm->imm_guest_tsc_hz);
@@ -1652,7 +1652,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		}
 	}
 	if (ratio == 0) {
-		vmm_machine_logf(m,
+		vmm_machine_debugf(m,
 		    "svm unavailable reason=guest_tsc_rate host_hz=%ju guest_hz=%ju",
 		    (uintmax_t)svm->imm_host_tsc_hz,
 		    (uintmax_t)svm->imm_guest_tsc_hz);
@@ -1660,7 +1660,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		goto fail;
 	}
 	svm->imm_tsc_ratio = ratio;
-	vmm_machine_logf(m,
+	vmm_machine_debugf(m,
 	    "svm tsc scale host_hz=%ju guest_hz=%ju ratio=0x%jx",
 	    (uintmax_t)svm->imm_host_tsc_hz,
 	    (uintmax_t)svm->imm_guest_tsc_hz,
@@ -1690,7 +1690,7 @@ vmm_svm_vcpu_create(struct vmm_machine *m, const struct vmm_launch *launch,
 		if ((npx_xcr0_mask & (CPU_XFEATURE_X87 | CPU_XFEATURE_SSE |
 		    CPU_XFEATURE_YMM)) != (CPU_XFEATURE_X87 |
 		    CPU_XFEATURE_SSE | CPU_XFEATURE_YMM)) {
-			vmm_machine_logf(m,
+			vmm_machine_debugf(m,
 			    "svm unavailable reason=fpu_check_requires_avx xcr0=0x%jx",
 			    (uintmax_t)npx_xcr0_mask);
 			error = ENXIO;
@@ -2343,7 +2343,7 @@ vmm_svm_pm_timer_counter(struct vmm_svm_backend *svm)
 	if (vmm_svm_timing_trace_enabled &&
 	    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
 		sample = svm->mut_timing_trace_count++;
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm timing pmtimer sample=%u cpu=%d root_tsc=0x%jx pm=0x%x base_tsc=0x%jx delta=0x%jx offset=0x%jx ratio=0x%jx",
 		    sample, mycpu->gd_cpuid, (uintmax_t)now, counter,
 		    (uintmax_t)svm->mut_pm_timer_tsc, (uintmax_t)delta,
@@ -2409,7 +2409,7 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 			if (((old ^ svm->mut_hpet_config) &
 			    VMM_HPET_CONFIG_ENABLE) != 0)
 				svm->mut_hpet_counter_tsc = rdtsc();
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm hpet config=0x%jx tsc_hz=%ju hpet_hz=%ju",
 			    (uintmax_t)svm->mut_hpet_config,
 			    (uintmax_t)svm->imm_host_tsc_hz,
@@ -2418,7 +2418,7 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 			    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
 				uint32_t sample = svm->mut_timing_trace_count++;
 
-				vmm_machine_logf(svm->borrow_imm_machine,
+				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm timing hpet config sample=%u cpu=%d root_tsc=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
 				    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
 				    (uintmax_t)svm->mut_hpet_config,
@@ -2603,7 +2603,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 		    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
 			uint32_t sample = svm->mut_timing_trace_count++;
 
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm timing hpet counter sample=%u cpu=%d root_tsc=0x%jx hpet=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
 			    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
 			    (uintmax_t)val, (uintmax_t)svm->mut_hpet_config,
@@ -2613,7 +2613,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 			    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
 		}
 		if (gpa - VMM_HPET_BASE < VMM_HPET_REG_COUNTER)
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u hpet read off=0x%jx size=%d val=0x%jx rip=0x%jx inst_len=%u nrip=0x%jx",
 			    vc->imm_id, (uintmax_t)(gpa - VMM_HPET_BASE),
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
@@ -2631,7 +2631,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 		val = vmm_svm_gpr_read(svm, reg);
 		vmm_svm_hpet_write(svm, gpa - VMM_HPET_BASE, size, val);
 		if (gpa - VMM_HPET_BASE < VMM_HPET_REG_COUNTER)
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u hpet write off=0x%jx size=%d val=0x%jx rip=0x%jx inst_len=%u nrip=0x%jx",
 			    vc->imm_id, (uintmax_t)(gpa - VMM_HPET_BASE),
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
@@ -2655,7 +2655,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 			val = (uint64_t)(int64_t)(int32_t)val;
 		vmm_svm_hpet_write(svm, gpa - VMM_HPET_BASE, size, val);
 		if (gpa - VMM_HPET_BASE < VMM_HPET_REG_COUNTER)
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u hpet immwrite off=0x%jx size=%d val=0x%jx rip=0x%jx inst_len=%u nrip=0x%jx",
 			    vc->imm_id, (uintmax_t)(gpa - VMM_HPET_BASE),
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
@@ -2666,7 +2666,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 		break;
 	}
 fail:
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported hpet mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
@@ -2731,7 +2731,7 @@ vmm_svm_handle_fch_pm_mmio(struct vmm_svm_backend *svm,
 			goto fail;
 		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
 		vmm_svm_gpr_write(svm, reg, 0xffffffffU, size);
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u fch pm s5 reset status read val=0xffffffff rip=0x%jx",
 		    vc->imm_id, (uintmax_t)vmcb->state.rip);
 		vmcb->state.rip += off + modsz;
@@ -2760,7 +2760,7 @@ vmm_svm_handle_fch_pm_mmio(struct vmm_svm_backend *svm,
 		break;
 	}
 fail:
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported fch pm mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x fetched=%d",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0],
@@ -2803,20 +2803,20 @@ vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 
 	if (reg == VMM_IOAPIC_REG_ID) {
 		svm->mut_ioapic_id = (val >> 24) & 0x0fU;
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic id=0x%x", vc->imm_id,
 		    svm->mut_ioapic_id);
 		return;
 	}
 	if (reg == VMM_IOAPIC_REG_VERSION || reg == VMM_IOAPIC_REG_ARB) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ignored ioapic readonly reg=0x%x val=0x%x",
 		    vc->imm_id, reg, val);
 		return;
 	}
 	if (reg < VMM_IOAPIC_REDIR_BASE ||
 	    reg >= VMM_IOAPIC_REDIR_BASE + VMM_IOAPIC_PINS * 2) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ignored ioapic write reg=0x%x val=0x%x",
 		    vc->imm_id, reg, val);
 		return;
@@ -2832,7 +2832,7 @@ vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		    (old & 0x00000000ffffffffULL) |
 		    ((uint64_t)(val & VMM_IOAPIC_REDIR_HIGH_VALID) << 32);
 	}
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u ioapic redir pin=%u value=0x%jx",
 	    vc->imm_id, pin, (uintmax_t)svm->mut_ioapic_redir[pin]);
 }
@@ -2848,7 +2848,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	uint32_t dest;
 
 	if (pin >= VMM_IOAPIC_PINS) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic reject source=%s pin=%u reason=bad_pin",
 		    vc->imm_id, source, pin);
 		return;
@@ -2857,7 +2857,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	low = (uint32_t)entry;
 	high = (uint32_t)(entry >> 32);
 	if ((low & VMM_IOAPIC_REDIR_MASKED) != 0) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic drop source=%s pin=%u reason=masked",
 		    vc->imm_id, source, pin);
 		return;
@@ -2875,7 +2875,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	    (low & VMM_IOAPIC_REDIR_POLARITY_LOW) != 0 ||
 	    (low & VMM_IOAPIC_REDIR_TRIGGER_LEVEL) != 0 ||
 	    dest != VMM_SVM_AVIC_APIC_ID) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic reject source=%s pin=%u vector=0x%x low=0x%x high=0x%x",
 		    vc->imm_id, source, pin, vector, low, high);
 		return;
@@ -2931,7 +2931,7 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 			    VMM_HPET_GSI << VMM_HPET_TIMER_ROUTE_SHIFT) {
 				vmm_svm_ioapic_raise(svm, vc, VMM_HPET_GSI, "hpet");
 			} else {
-				vmm_machine_logf(svm->borrow_imm_machine,
+				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm vcpu%u hpet drop timer=%u route=%ju reason=unsupported_route",
 				    vc->imm_id, i, (uintmax_t)((config &
 				    VMM_HPET_TIMER_ROUTE_MASK) >>
@@ -3198,7 +3198,7 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 		break;
 	}
 fail:
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported ioapic mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
 	    (uintmax_t)vmcb->state.rip, vmcb->ctrl.inst_len, bytes[0]);
@@ -3268,12 +3268,12 @@ vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
 	}
 
 	if (has_val) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported msr op=%s msr=0x%jx name=%s category=%s val=0x%jx reason=%s rip=0x%jx",
 		    vc->imm_id, op, (uintmax_t)msr, name, category,
 		    (uintmax_t)val, reason, (uintmax_t)vmcb->state.rip);
 	} else {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported msr op=%s msr=0x%jx name=%s category=%s reason=%s rip=0x%jx",
 		    vc->imm_id, op, (uintmax_t)msr, name, category,
 		    reason, (uintmax_t)vmcb->state.rip);
@@ -3463,7 +3463,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		old_tsc = vmm_svm_guest_tsc(svm);
 		vmcb->ctrl.tsc_offset = val -
 		    (uint64_t)(((_uint128_t)rdtsc() * svm->imm_tsc_ratio) >> 32);
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u tsc write old=0x%jx new=0x%jx offset=0x%jx cpu=%d",
 		    vc->imm_id, (uintmax_t)old_tsc, (uintmax_t)val,
 		    (uintmax_t)vmcb->ctrl.tsc_offset, mycpu->gd_cpuid);
@@ -4265,7 +4265,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	uint32_t val;
 
 	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d info=0x%jx rip=0x%jx",
 		    vc->imm_id, op, port, size, (uintmax_t)info,
 		    (uintmax_t)vmcb->state.rip);
@@ -4275,26 +4275,26 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	switch (port) {
 	case VMM_ACPI_RESET_PORT:
 		if (size != 1 || (info & VMM_SVM_IOIO_IN) != 0) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi reset io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
 		val = vmcb->state.rax & 0xffU;
 		if (val != VMM_ACPI_RESET_VALUE) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi reset value=0x%x rip=0x%jx",
 			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_RESET;
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "guest reset source=acpi_fadt vcpu=%u", vc->imm_id);
 		return 1;
 	case VMM_ACPI_SLEEP_CONTROL_PORT:
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-control io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4312,19 +4312,19 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		    "svm vcpu%u acpi sleep-control io op=out size=%d value=0x%x rip=0x%jx",
 		    vc->imm_id, size, val, (uintmax_t)vmcb->state.rip);
 		if (val != VMM_ACPI_SLEEP_S5_ENABLE) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-control value=0x%x rip=0x%jx",
 			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
 			return 0;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_SHUTDOWN;
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "guest shutdown source=acpi_s5 vcpu=%u", vc->imm_id);
 		return 1;
 	case VMM_ACPI_SLEEP_STATUS_PORT:
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-status io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4345,7 +4345,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	case VMM_PIC1_CMD:
 	case VMM_PIC2_CMD:
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pic cmd io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4358,7 +4358,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	case VMM_PIC1_DATA:
 	case VMM_PIC2_DATA:
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pic data io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4378,7 +4378,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	case VMM_PIC_ELCR1:
 	case VMM_PIC_ELCR2:
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pic elcr io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4406,7 +4406,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		uint8_t new_gate;
 
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit portb io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4440,7 +4440,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 	if (port == VMM_PIT_CH0) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit ch0 io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4470,7 +4470,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 	if (port == VMM_PIT_CMD) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4481,7 +4481,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			val = vmcb->state.rax & 0xffU;
 			if ((val & 0xc0U) == 0) {
 				if ((val & 0x30U) != 0 && (val & 0x30U) != 0x30U) {
-					vmm_machine_logf(svm->borrow_imm_machine,
+					vmm_machine_debugf(svm->borrow_imm_machine,
 					    "svm vcpu%u unsupported pit ch0 cmd=0x%x rip=0x%jx",
 					    vc->imm_id, val,
 					    (uintmax_t)vmcb->state.rip);
@@ -4491,7 +4491,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 				svm->mut_pit_ch0_write_state = 0;
 			} else if ((val & 0xc0U) == 0x80U) {
 				if (val != 0xb0U) {
-					vmm_machine_logf(svm->borrow_imm_machine,
+					vmm_machine_debugf(svm->borrow_imm_machine,
 					    "svm vcpu%u unsupported pit ch2 cmd=0x%x rip=0x%jx",
 					    vc->imm_id, val,
 					    (uintmax_t)vmcb->state.rip);
@@ -4501,7 +4501,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 				svm->mut_pit_ch2_write_state = 0;
 				svm->mut_pit_ch2_armed = 0;
 			} else {
-				vmm_machine_logf(svm->borrow_imm_machine,
+				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm vcpu%u unsupported pit cmd=0x%x rip=0x%jx",
 				    vc->imm_id, val,
 				    (uintmax_t)vmcb->state.rip);
@@ -4513,7 +4513,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 	if (port == VMM_PIT_CH2) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4559,7 +4559,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (port >= VMM_PM_TIMER_PORT && port <= VMM_PM_TIMER_LAST) {
 		if (port + (unsigned int)size - 1 > VMM_PM_TIMER_LAST) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pmtimer io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4570,7 +4570,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    ((port - VMM_PM_TIMER_PORT) * 8);
 			vmm_svm_set_rax_low(vmcb, val, size);
 		} else {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u ignored pmtimer write port=0x%x size=%d val=0x%x rip=0x%jx",
 			    vc->imm_id, port, size,
 			    (uint32_t)vmcb->state.rax,
@@ -4582,7 +4582,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (port == VMM_CMOS_INDEX || port == VMM_CMOS_DATA) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported cmos io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4610,7 +4610,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (port >= VMM_ISA_MISC_PORT && port <= VMM_ISA_MISC_LAST) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported isa misc io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4624,7 +4624,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 	if (port == VMM_PCI_CFG_CTRL) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pci cfg ctrl io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
 			return 0;
@@ -4639,7 +4639,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		uint32_t mask;
 
 		if (port + (unsigned int)size - 1 > VMM_PCI_CFG_ADDR_LAST) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pci cfg addr io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4663,7 +4663,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 	if (port >= VMM_PCI_CFG_DATA && port <= VMM_PCI_CFG_DATA_LAST) {
 		if (port + (unsigned int)size - 1 > VMM_PCI_CFG_DATA_LAST) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pci cfg data io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4679,7 +4679,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	    (port >= VMM_COM3_BASE && port <= VMM_COM3_BASE + VMM_COM1_SCR) ||
 	    (port >= VMM_COM4_BASE && port <= VMM_COM4_BASE + VMM_COM1_SCR)) {
 		if (size != 1) {
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported absent serial io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
@@ -4692,7 +4692,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d rip=0x%jx",
 		    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
 		return 0;
@@ -4898,36 +4898,36 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 		return 0;
 	switch (op) {
 	case VMM_SVM_SMOKE_IOAPIC_RAISE:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke ioapic request pin=%u", arg);
 		vmm_svm_advance_rip(vmcb);
 		vmm_svm_ioapic_raise(svm, vc, arg, "ioapic_smoke");
 		return 1;
 	case VMM_SVM_SMOKE_AVIC_DELIVER:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke avic request vector=0x%x", arg & 0xffU);
 		vmm_svm_advance_rip(vmcb);
 		vmm_svm_avic_deliver(svm, vc, (uint8_t)arg, "smoke");
 		return 1;
 	case VMM_SVM_SMOKE_AVIC_MARKER:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke avic marker=0x%x", arg);
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case VMM_SVM_SMOKE_PAUSE_FILTER:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke pause filter exits=%u", svm->mut_pause_exit_count);
 		return 0;
 	case VMM_SVM_SMOKE_CPU_TEMPLATE_MARKER:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke cpu template marker=0x%x", arg);
 		return 0;
 	case VMM_SVM_SMOKE_FPU_MARKER:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke fpu marker=0x%x", arg);
 		return 0;
 	default:
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke avic unknown op=%u arg=0x%x", op, arg);
 		return -1;
 	}
@@ -5016,7 +5016,7 @@ vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
 		vmm_svm_advance_rip(vmcb);
 	return 1;
 fail:
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported avic read offset=0x%x rip=0x%jx inst_len=%u inst0=0x%x fetched=%d",
 	    vc->imm_id, apic_reg, (uintmax_t)vmcb->state.rip,
 	    vmcb->ctrl.inst_len, bytes[0], fetched_inst);
@@ -5059,7 +5059,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 			name = "unknown";
 			break;
 		}
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic incomplete_ipi reason=%s id=%u index=%u icrl=0x%08x icrh=0x%08x info1=0x%jx info2=0x%jx rip=0x%jx",
 		    vc->imm_id, name, value, extra,
 		    (uint32_t)vmcb->ctrl.exitinfo1,
@@ -5427,7 +5427,7 @@ vmm_svm_handle_pcie_mmio(struct vmm_svm_backend *svm,
 		    result_size != 0 ? result_size : access_size);
 	if (vmm_svm_trace_enabled &&
 	    ((gpa - VMM_PCIE_ECAM_BASE) & 0xfffULL) == 0) {
-		vmm_machine_logf(svm->borrow_imm_machine,
+		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u pcie %s %s gpa=0x%jx size=%d val=0x%jx",
 		    vc->imm_id, bar ? "bar" : "ecam", write ? "write" : "read",
 		    (uintmax_t)gpa,
@@ -5436,7 +5436,7 @@ vmm_svm_handle_pcie_mmio(struct vmm_svm_backend *svm,
 	vmcb->state.rip += off;
 	return 1;
 fail:
-	vmm_machine_logf(svm->borrow_imm_machine,
+	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported pcie %s mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, bar ? "bar" : "ecam", (uintmax_t)gpa,
 	    (uintmax_t)vmcb->ctrl.exitinfo1,
@@ -5514,7 +5514,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
 			wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
 			observed_ratio = rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm cpu%d tsc ratio request=0x%jx observed=0x%jx match=%d",
 			    mycpu->gd_cpuid, (uintmax_t)svm->imm_tsc_ratio,
 			    (uintmax_t)observed_ratio,
@@ -5589,7 +5589,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    sizeof(svm->own_mut_fpu_sentinel[0].sv_ymm64.sv_xstate.
 			    sx_ymm[0].ymm_bytes)) != 0) {
 				vmm_machine_logf(svm->borrow_imm_machine,
-				    "guest fault source=root_fpu_sentinel vcpu%u",
+				    "guest fault source=root_fpu_state vcpu=%u",
 				    vc->imm_id);
 				svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 				fpu_sentinel_failed = 1;
@@ -5656,8 +5656,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto unhandled;
 		case VMM_SVM_EXIT_SHUTDOWN:
 			vmm_machine_logf(svm->borrow_imm_machine,
-			    "guest fault source=svm_shutdown vcpu%u rip=0x%jx",
-			    vc->imm_id, (uintmax_t)vmcb->state.rip);
+			    "guest fault source=svm_shutdown vcpu=%u", vc->imm_id);
 			svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 			goto out;
 		case VMM_SVM_EXIT_MONITOR:
@@ -5667,7 +5666,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 		case VMM_SVM_EXIT_MWAIT_COND:
 			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
 			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_UD;
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u inject ud reason=mwait exit=0x%jx rip=0x%jx",
 			    vc->imm_id, (uintmax_t)vmcb->ctrl.exitcode,
 			    (uintmax_t)vmcb->state.rip);
@@ -5694,7 +5693,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			if (handled > 0)
 				break;
 			if (handled == 0) {
-				vmm_machine_logf(svm->borrow_imm_machine,
+				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm vcpu%u vmmcall exit rip=0x%jx",
 				    vc->imm_id, (uintmax_t)vmcb->state.rip);
 				goto out;
@@ -5702,7 +5701,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto unhandled;
 		default:
 	unhandled:
-			vmm_machine_logf(svm->borrow_imm_machine,
+			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unhandled exit=0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx",
 			    vc->imm_id,
 			    (uintmax_t)vmcb->ctrl.exitcode,
@@ -5712,17 +5711,9 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RCX],
 			    (uintmax_t)vmcb->state.rax,
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
-			kprintf("vmm_svm: vmexit 0x%jx info1=0x%jx info2=0x%jx rip=0x%jx rcx=0x%jx rax=0x%jx rdx=0x%jx\n",
-			    (uintmax_t)vmcb->ctrl.exitcode,
-			    (uintmax_t)vmcb->ctrl.exitinfo1,
-			    (uintmax_t)vmcb->ctrl.exitinfo2,
-			    (uintmax_t)vmcb->state.rip,
-			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RCX],
-			    (uintmax_t)vmcb->state.rax,
-			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
 			vmm_machine_logf(svm->borrow_imm_machine,
-			    "guest fault source=unhandled_vmexit exit=0x%jx vcpu%u",
-			    (uintmax_t)vmcb->ctrl.exitcode, vc->imm_id);
+			    "guest fault source=unhandled_vmexit vcpu=%u",
+			    vc->imm_id);
 			svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 			goto out;
 		}

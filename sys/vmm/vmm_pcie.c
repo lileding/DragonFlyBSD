@@ -629,13 +629,13 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    vector >= device->mut_msix_vectors) {
 		error = ESTALE;
 		if (machine != NULL)
-			vmm_machine_logf(machine,
+			vmm_machine_debugf(machine,
 			    "pcie msix drop vector=%u reason=stale", vector);
 	} else if (!vmm_pcie_config_msix_enabled_locked(device->own_mut_config) ||
 	    vmm_pcie_config_msix_function_masked_locked(device->own_mut_config)) {
 		error = 0;
 		if (machine != NULL)
-			vmm_machine_logf(machine,
+			vmm_machine_debugf(machine,
 			    "pcie msix drop vector=%u reason=disabled", vector);
 	} else {
 		error = vmm_pcie_bar_snapshot(
@@ -676,7 +676,7 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    (data & VMM_PCIE_MSI_DATA_VECTOR_MASK) < 32 ||
 	    vmm_pcie_config_msix_vector_masked(vector_control)) {
 		if (machine != NULL)
-			vmm_machine_logf(machine,
+			vmm_machine_debugf(machine,
 			    "pcie msix drop vector=%u reason=format addr=%08x:%08x data=%08x control=%08x",
 			    vector, address_high, address_low, data, vector_control);
 		return 0;
@@ -693,13 +693,13 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    !vmm_pcie_config_msix_function_masked_locked(device->own_mut_config) &&
 	    root != NULL && root->borrow_imm_machine != NULL) {
 		machine = root->borrow_imm_machine;
-		vmm_machine_logf(machine,
+		vmm_machine_debugf(machine,
 		    "pcie msix inject vector=%u guest_vector=0x%x",
 		    vector, data & VMM_PCIE_MSI_DATA_VECTOR_MASK);
 		vmm_machine_msix(machine,
 		    (uint8_t)(data & VMM_PCIE_MSI_DATA_VECTOR_MASK));
 	} else if (machine != NULL) {
-		vmm_machine_logf(machine,
+		vmm_machine_debugf(machine,
 		    "pcie msix drop vector=%u reason=revalidate", vector);
 	}
 	lwkt_reltoken(&pcie->token_registry);
@@ -929,7 +929,7 @@ out:
 		return error;
 	}
 	if (mapped_now) {
-		vmm_machine_logf(machine,
+		vmm_machine_debugf(machine,
 		    "pcie bar map bdf=%04x bar=%u gpa=0x%jx size=0x%jx", bdf,
 		    bar_index, (uintmax_t)mapped_gpa, (uintmax_t)mapped_size);
 	}
@@ -1045,7 +1045,7 @@ vmm_pcie_root_start(struct vmm_pcie_root *root, struct vmm_dma *dma)
 		error = vmm_dma_cap_create(dma, &cap);
 		if (error != 0) {
 			vmm_machine_logf(root->borrow_imm_machine,
-			    "pcie start capability failed device=%ju error=%d",
+			    "device start failed stage=dma device=%ju error=%d",
 			    (uintmax_t)device_id, error);
 			vmm_pcie_user_release(user);
 			continue;
@@ -1097,13 +1097,11 @@ vmm_pcie_root_start(struct vmm_pcie_root *root, struct vmm_dma *dma)
 			lwkt_reltoken(&pcie->token_registry);
 			vmm_pcie_device_runtime_release(&runtime);
 			vmm_machine_logf(root->borrow_imm_machine,
-			    "pcie start send failed device=%ju error=%d",
+			    "device start failed stage=provider device=%ju error=%d",
 			    (uintmax_t)device_id, error);
 		} else {
 			vmm_machine_logf(root->borrow_imm_machine,
-			    "pcie start device=%ju generation=%ju",
-			    (uintmax_t)device_id,
-			    (uintmax_t)vmm_dma_cap_generation(cap));
+			    "device started id=%ju", (uintmax_t)device_id);
 		}
 		vmm_pcie_user_release(user);
 	}
@@ -1157,7 +1155,7 @@ vmm_pcie_root_stop(struct vmm_pcie_root *root)
 			error = vmm_pcie_user_send_stop(refs[i].own_mut_user, &message);
 			if (error != 0 && root->borrow_imm_machine != NULL) {
 				vmm_machine_logf(root->borrow_imm_machine,
-				    "pcie stop send failed device=%ju error=%d",
+				    "device stop failed device=%ju error=%d",
 				    (uintmax_t)refs[i].imm_device_id, error);
 			}
 		}

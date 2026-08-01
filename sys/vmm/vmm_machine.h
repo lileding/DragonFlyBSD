@@ -75,6 +75,7 @@ void vmm_machine_init(struct vmm_machine *m, struct vmm_pcie *pcie);
 void vmm_machine_uninit(struct vmm_machine *m);
 void vmm_machine_drain(struct vmm_machine *m);
 void vmm_debug_trace(const char *fmt, ...);
+void vmm_machine_debugf(struct vmm_machine *m, const char *fmt, ...);
 extern int vmm_debug_allow_machine_taskqueue;
 extern int vmm_debug_allow_nmkdir_vnode;
 extern int vmm_debug_allow_start_execute;
