@@ -167,9 +167,9 @@ $out"
 			} >>"$LOG"
 		fi
 		if printf '%s\n' "$seen" | awk '
-			/vmmcall exit/ { vmmcall = 1; next }
-			vmmcall && /vcpu0 thread exit active=0/ { exited = 1 }
-			END { exit !exited }
+			/guest shutdown source=smoke_vmmcall/ { shutdown = 1; next }
+			shutdown && /state stopped reason=guest_shutdown/ { stopped = 1 }
+			END { exit !stopped }
 		'; then
 			return 0
 		fi

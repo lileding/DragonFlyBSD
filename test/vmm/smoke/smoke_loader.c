@@ -110,6 +110,7 @@
 #define RTC_VECTOR	0x43U
 #define UD_VECTOR	6U
 #define AVIC_MAGIC	0x43495641U
+#define AVIC_OP_EXIT	0U
 #define AVIC_OP_DELIVER	1U
 #define AVIC_OP_MARKER	2U
 #define IOAPIC_OP_RAISE	3U
@@ -119,6 +120,18 @@
 #define AVIC_MARKER	0xa51c0040U
 #define CPU_TEMPLATE_MARKER_OK	0xc07e0001U
 #define CPU_TEMPLATE_MARKER_FAIL	0xc07effffU
+
+static const uint8_t smoke_exit[] = {
+	0xb8, 0x41, 0x56, 0x49, 0x43,
+	0xbb, 0x00, 0x00, 0x00, 0x00,
+	0x0f, 0x01, 0xd9
+};
+#define SMOKE_EXIT_BYTES \
+	0xb8, 0x41, 0x56, 0x49, 0x43, \
+	0xbb, 0x00, 0x00, 0x00, 0x00, \
+	0x0f, 0x01, 0xd9
+
+static const uint8_t vmmcall_raw[] = { 0x0f, 0x01, 0xd9 };
 #define FPU_MARKER_OK	0xf0a70001U
 #define FPU_MARKER_FAIL	0xf0a7ffffU
 #define MSR_AMD_PATCH_LEVEL	0x0000008bU
@@ -418,7 +431,6 @@ static size_t
 guest_serial_code(uint8_t *code, size_t cap)
 {
 	static const char msg[] = "dfvmm-serial-ok\n";
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t i;
 
@@ -430,7 +442,7 @@ guest_serial_code(uint8_t *code, size_t cap)
 	emit_outb(code, &len, cap, 0x3fc, 0x03);	/* MCR: DTR + RTS */
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -449,7 +461,6 @@ guest_serialin_code(uint8_t *code, size_t cap)
 	    0xf4,		/* hlt */
 	    0xeb, 0xfe		/* jmp . */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-serialin-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -457,7 +468,7 @@ guest_serialin_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, setup, sizeof(setup));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -486,7 +497,6 @@ guest_serialirq_code(uint8_t *code, size_t cap)
 	    0xf4,		/* hlt */
 	    0xeb, 0xfe		/* jmp . */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-serialirq-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -513,7 +523,7 @@ guest_serialirq_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, handler, sizeof(handler));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -537,7 +547,7 @@ guest_timer_code(uint8_t *code, size_t cap)
 	    0xf4,		/* hlt */
 	    0xeb, 0xfe		/* jmp . */
 	};
-	static const uint8_t handler[] = { 0x0f, 0x01, 0xd9 };
+	static const uint8_t handler[] = { SMOKE_EXIT_BYTES };
 	size_t len = 0;
 
 	emit(code, &len, cap, setup, sizeof(setup));
@@ -563,7 +573,6 @@ guest_lapictimer_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_eax_to_eoi[] =
 	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-lapic-timer-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -586,7 +595,7 @@ guest_lapictimer_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -607,7 +616,6 @@ guest_hires_lapictimer_code(uint8_t *code, size_t cap)
 	static const uint8_t sub_esi_from_eax[] = { 0x29, 0xf0 };
 	static const uint8_t mov_eax_to_ecx[] = { 0x89, 0xc1 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-hires-lapic-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -636,10 +644,10 @@ guest_hires_lapictimer_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -660,7 +668,6 @@ guest_hires_tscdeadline_code(uint8_t *code, size_t cap)
 	static const uint8_t adc_edx_zero[] = { 0x83, 0xd2, 0x00 };
 	static const uint8_t wrmsr[] = { 0x0f, 0x30 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-hires-scale-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -690,10 +697,10 @@ guest_hires_tscdeadline_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -715,7 +722,6 @@ guest_lapictimer_masked_code(uint8_t *code, size_t cap)
 	static const uint8_t pause_op[] = { 0xf3, 0x90 };
 	static const uint8_t jmp8[] = { 0xeb, 0x00 };
 	static const uint8_t sti_nop_cli[] = { 0xfb, 0x90, 0xfa };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-lapic-masked-ok\n";
 	size_t len = 0;
 	size_t loop_label;
@@ -743,7 +749,7 @@ guest_lapictimer_masked_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, sti_nop_cli, sizeof(sti_nop_cli));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	patch_rel8(code, jzero, ok_label);
 	patch_rel8(code, jmp_back, loop_label);
 	return len;
@@ -772,7 +778,6 @@ guest_lapictimer_periodic_hlt_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfd };
 	static const uint8_t iretq[] = { 0x48, 0xcf };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-lapic-periodic-hlt-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -809,10 +814,10 @@ guest_lapictimer_periodic_hlt_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return_label = len;
 	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
 	emit_mov_eax(code, &len, cap, 0);
@@ -844,7 +849,6 @@ guest_lapictimer_periodic_busy_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
 	static const uint8_t sti_busy_loop[] = { 0xfb, 0x90, 0xeb, 0xfd };
 	static const uint8_t iretq[] = { 0x48, 0xcf };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-lapic-periodic-busy-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -881,10 +885,10 @@ guest_lapictimer_periodic_busy_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return_label = len;
 	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
 	emit_mov_eax(code, &len, cap, 0);
@@ -916,7 +920,6 @@ guest_lapictimer_periodic_masked_code(uint8_t *code, size_t cap)
 	static const uint8_t test_edx_edx[] = { 0x85, 0xd2 };
 	static const uint8_t mov_esi_one[] = { 0xbe, 0x01, 0x00, 0x00, 0x00 };
 	static const uint8_t cmp_esi_one[] = { 0x83, 0xfe, 0x01 };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-lapic-periodic-masked-ok\n";
 	size_t len = 0;
 	size_t loop_label;
@@ -954,10 +957,10 @@ guest_lapictimer_periodic_masked_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 0x33U);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	saw_low_label = len;
 	emit(code, &len, cap, mov_esi_one, sizeof(mov_esi_one));
 	continue_label = len;
@@ -989,7 +992,6 @@ guest_tscdeadline_code(uint8_t *code, size_t cap)
 	    { 0x05, 0x00, 0x00, 0x00, 0x01 };
 	static const uint8_t adc_edx_zero[] = { 0x83, 0xd2, 0x00 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
 	const uint32_t probe_low = 0x89abcdefU;
 	const uint32_t probe_high = 0x12345678U;
@@ -1041,7 +1043,7 @@ guest_tscdeadline_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
 	emit_mov_eax(code, &len, cap, 0);
 	emit(code, &len, cap, mov_eax_to_eoi, sizeof(mov_eax_to_eoi));
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jfeature, fail_label);
@@ -1059,14 +1061,14 @@ guest_pausefilter_code(uint8_t *code, size_t cap)
 	    0xff, 0xc9,			/* dec ecx */
 	    0x75, 0xfa			/* jnz pause */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 
 	emit(code, &len, cap, pause_loop, sizeof(pause_loop));
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_PAUSE_FILTER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1074,14 +1076,13 @@ static size_t
 guest_ud_code(uint8_t *code, size_t cap)
 {
 	static const uint8_t setup[] = {
-	    0x0f, 0x0b		/* ud2 */
+	    0x0f, 0x01, 0xd9	/* bare vmmcall */
 	};
 	static const uint8_t fixup[] = {
-	    0x48, 0x83, 0x04, 0x24, 0x02 /* addq $2,(%rsp) */
+	    0x48, 0x83, 0x04, 0x24, 0x03 /* addq $3,(%rsp) */
 	};
 	static const char handler_msg[] = "dfvmm-ud-ok\n";
 	static const char return_msg[] = "dfvmm-iret-ok\n";
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t iretq[] = { 0x48, 0xcf };
 	size_t len = 0;
 	size_t i;
@@ -1089,7 +1090,7 @@ guest_ud_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, setup, sizeof(setup));
 	for (i = 0; i < sizeof(return_msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)return_msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	while (len < UD_HANDLER_GPA - ENTRY_GPA) {
 		static const uint8_t nop[] = { 0x90 };
 
@@ -1111,7 +1112,6 @@ guest_mwaitud_code(uint8_t *code, size_t cap)
 	    0x48, 0x83, 0x04, 0x24, 0x03 /* addq $3,(%rsp) */
 	};
 	static const char handler_msg[] = "dfvmm-mwait-ud-ok\n";
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t i;
 
@@ -1125,7 +1125,7 @@ guest_mwaitud_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, fixup, sizeof(fixup));
 	for (i = 0; i < sizeof(handler_msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1149,7 +1149,6 @@ guest_mwaitxud_code(uint8_t *code, size_t cap)
 	    0x48, 0x83, 0x04, 0x24, 0x03 /* addq $3,(%rsp) */
 	};
 	static const char handler_msg[] = "dfvmm-mwaitx-ud-ok\n";
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t jmasked;
 	size_t masked_label;
@@ -1170,7 +1169,7 @@ guest_mwaitxud_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, fixup, sizeof(fixup));
 	for (i = 0; i < sizeof(handler_msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)handler_msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	patch_rel8(code, jmasked, masked_label);
 	return len;
 }
@@ -1179,11 +1178,9 @@ guest_mwaitxud_code(uint8_t *code, size_t cap)
 static size_t
 guest_avicirq_code(uint8_t *code, size_t cap)
 {
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t sti_hlt_loop[] = {
 	    0xfb, 0xf4, 0xeb, 0xfe
 	};
-	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
 	size_t len = 0;
 
 	emit(code, &len, cap, (const uint8_t[]){ 0xfa }, 1);
@@ -1192,7 +1189,7 @@ guest_avicirq_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_DELIVER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, AVIC_VECTOR);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
 	while (len < AVIC_HANDLER_GPA - ENTRY_GPA) {
 		static const uint8_t nop[] = { 0x90 };
@@ -1204,8 +1201,8 @@ guest_avicirq_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, AVIC_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
-	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1374,7 +1371,6 @@ guest_avicread_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_lvtt_to_eax[] =
 	    { 0x8b, 0x87, 0x20, 0x03, 0x00, 0x00 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-avicread-ok\n";
 	size_t len = 0;
 	size_t fail_label;
@@ -1403,7 +1399,7 @@ guest_avicread_code(uint8_t *code, size_t cap)
 
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
@@ -1416,7 +1412,6 @@ guest_avicread_code(uint8_t *code, size_t cap)
 static size_t
 guest_pic_code(uint8_t *code, size_t cap)
 {
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-pic-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -1433,7 +1428,7 @@ guest_pic_code(uint8_t *code, size_t cap)
 	emit_outb(code, &len, cap, 0xa1, 0xff);
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1446,7 +1441,6 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_eax_to_rdi_10[] = { 0x89, 0x47, 0x10 };
 	static const uint8_t mov_rdi_10_to_eax[] = { 0x8b, 0x47, 0x10 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-ioapic-ok\n";
 	size_t len = 0;
 	size_t fail_label;
@@ -1473,7 +1467,7 @@ guest_ioapic_code(uint8_t *code, size_t cap)
 
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
@@ -1495,7 +1489,6 @@ guest_ioapicirq_code(uint8_t *code, size_t cap)
 	    0x31, 0xc0,				/* xor eax,eax */
 	    0x89, 0x87, 0xb0, 0x00, 0x00, 0x00	/* mov [rdi+0xb0],eax */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
 	static const uint8_t hlt_loop[] = { 0xf4, 0xeb, 0xfe };
 	static const char msg[] = "dfvmm-ioapicirq-ok\n";
@@ -1519,7 +1512,7 @@ guest_ioapicirq_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, IOAPIC_OP_RAISE);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 4);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	emit(code, &len, cap, sti_hlt_loop, sizeof(sti_hlt_loop));
 	while (len < AVIC_HANDLER_GPA - ENTRY_GPA) {
 		static const uint8_t nop[] = { 0x90 };
@@ -1530,7 +1523,7 @@ guest_ioapicirq_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, eoi, sizeof(eoi));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
 	return len;
 }
@@ -1551,7 +1544,6 @@ guest_x2apic_code(uint8_t *code, size_t cap)
 	    0xa9, 0x00, 0x10, 0x00, 0x00	/* test eax,0x1000 */
 	};
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-x2apic-ok\n";
 	size_t len = 0;
 	size_t jok;
@@ -1564,7 +1556,7 @@ guest_x2apic_code(uint8_t *code, size_t cap)
 	ok_label = len;
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	patch_rel8(code, jok, ok_label);
 	return len;
 }
@@ -1578,7 +1570,6 @@ guest_cachetlb_code(uint8_t *code, size_t cap)
 	    0x31, 0xc0,		/* xor eax,eax */
 	    0x0f, 0x01, 0x38	/* invlpg (%rax) */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-cachetlb-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -1586,7 +1577,7 @@ guest_cachetlb_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, setup, sizeof(setup));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1612,7 +1603,6 @@ guest_pm64_code(uint8_t *code, size_t cap)
 	    0xea				/* ljmp $0x20,$PM64_LONG_GPA */
 	};
 	static const char msg[] = "dfvmm-pm64-ok\n";
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t i;
 
@@ -1628,7 +1618,7 @@ guest_pm64_code(uint8_t *code, size_t cap)
 	}
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1641,7 +1631,7 @@ guest_msrpatch_code(uint8_t *code, size_t cap)
 	    (MSR_AMD_PATCH_LEVEL >> 16) & 0xffU,
 	    (MSR_AMD_PATCH_LEVEL >> 24) & 0xffU,
 	    0x0f, 0x32,		/* rdmsr */
-	    0x0f, 0x01, 0xd9	/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1658,7 +1648,7 @@ guest_msrsyscfg_code(uint8_t *code, size_t cap)
 	    (MSR_SYSCFG >> 16) & 0xffU,
 	    (MSR_SYSCFG >> 24) & 0xffU,
 	    0x0f, 0x32,		/* rdmsr */
-	    0x0f, 0x01, 0xd9	/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1675,7 +1665,7 @@ guest_mtrrcap_code(uint8_t *code, size_t cap)
 	    (MSR_MTRR_CAP >> 16) & 0xffU,
 	    (MSR_MTRR_CAP >> 24) & 0xffU,
 	    0x0f, 0x32,		/* rdmsr */
-	    0x0f, 0x01, 0xd9	/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1705,13 +1695,12 @@ guest_msrhwcr_code(uint8_t *code, size_t cap)
 	    (HWCR_SMOKE_VALUE >> 24) & 0xffU,
 	    0x0f, 0x30		/* wrmsr */
 	};
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 
 	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
 	emit(code, &len, cap, wrmsr, sizeof(wrmsr));
 	emit(code, &len, cap, rdmsr, sizeof(rdmsr));
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -1728,7 +1717,7 @@ guest_pcicfg_code(uint8_t *code, size_t cap)
 	    0xed,				/* in eax,dx */
 	    0x31, 0xc0,				/* xor eax,eax */
 	    0xef,				/* out dx,eax */
-	    0x0f, 0x01, 0xd9			/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1755,7 +1744,7 @@ guest_pitfallback_code(uint8_t *code, size_t cap)
 	    0xee,				/* out dx,al */
 	    0xee,				/* out dx,al */
 	    0xec,				/* in al,dx */
-	    0x0f, 0x01, 0xd9			/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1804,7 +1793,7 @@ guest_pit0_code(uint8_t *code, size_t cap)
 	    0xb0, 0x00,
 	    0xee,
 	    0xee,
-	    0x0f, 0x01, 0xd9			/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1852,7 +1841,7 @@ guest_rtccmos_code(uint8_t *code, size_t cap)
 	    0xba, CMOS_DATA_PORT & 0xffU,
 	    (CMOS_DATA_PORT >> 8) & 0xffU, 0x00, 0x00,
 	    0xec,			/* in al,dx */
-	    0x0f, 0x01, 0xd9		/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1885,7 +1874,6 @@ guest_rtc_settime_code(uint8_t *code, size_t cap)
 		{ RTC_YEAR, 0x26 },
 	};
 	static const uint8_t in_al_dx[] = { 0xec };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
 	static const char msg[] = "dfvmm-rtc-settime-ok\n";
 	size_t len = 0;
@@ -1928,10 +1916,10 @@ guest_rtc_settime_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 4);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, bad_binary, fail_label);
@@ -1948,7 +1936,7 @@ guest_iodelay_code(uint8_t *code, size_t cap)
 	    (IO_DELAY_PORT >> 8) & 0xffU, 0x00, 0x00,
 	    0xb0, 0x00,			/* mov al,0 */
 	    0xee,			/* out dx,al */
-	    0x0f, 0x01, 0xd9		/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	size_t len = 0;
 
@@ -1973,8 +1961,8 @@ guest_elcr_code(uint8_t *code, size_t cap)
 	    0xee,			/* out dx,al */
 	    0xec,			/* in al,dx */
 	    0x3c, 0xde,			/* cmp al,0xde */
-	    0x75, 0x03,			/* jne fail */
-	    0x0f, 0x01, 0xd9,		/* vmmcall */
+	    0x75, 0x0d,			/* jne fail */
+	    SMOKE_EXIT_BYTES,
 	    0xeb, 0xfe			/* fail: jmp fail */
 	};
 	size_t len = 0;
@@ -1998,7 +1986,6 @@ guest_hpet_code(uint8_t *code, size_t cap)
 	static const uint8_t pause_op[] = { 0xf3, 0x90 };
 	static const uint8_t jmp8[] = { 0xeb, 0x00 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t fail_label;
 	size_t jcap;
@@ -2027,7 +2014,7 @@ guest_hpet_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, jmp8, sizeof(jmp8));
 	jmp_back = len - 1;
 	ok_label = len;
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jcap, fail_label);
@@ -2060,7 +2047,6 @@ guest_hpet_oneshot_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_eax_to_eoi[] =
 	    { 0x89, 0x87, 0xb0, 0x00, 0x00, 0x00 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-hpet-oneshot-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -2102,10 +2088,10 @@ guest_hpet_oneshot_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 1);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return len;
 }
 
@@ -2137,7 +2123,6 @@ guest_hpet_periodic_code(uint8_t *code, size_t cap)
 	static const uint8_t mov_dword_rbx_to_ecx[] = { 0x8b, 0x0b };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfd };
 	static const uint8_t iretq[] = { 0x48, 0xcf };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-hpet-periodic-ok\n";
 	size_t len = 0;
 	size_t i;
@@ -2194,10 +2179,10 @@ guest_hpet_periodic_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	return_label = len;
 	emit(code, &len, cap, iretq, sizeof(iretq));
 	patch_rel32(code, jnot_last, return_label);
@@ -2223,7 +2208,6 @@ guest_hpet_masked_code(uint8_t *code, size_t cap)
 	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
 	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-hpet-masked-ok\n";
 	size_t len = 0;
 	size_t loop_label;
@@ -2266,10 +2250,10 @@ guest_hpet_masked_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 0x33U);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jgot_status, got_status);
@@ -2295,7 +2279,6 @@ guest_rtc_periodic_code(uint8_t *code, size_t cap)
 	    { 0x3c, RTC_REG_C_IRQF | RTC_REG_C_PF };
 	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
 	static const char msg[] = "dfvmm-rtc-periodic-ok\n";
 	size_t len = 0;
@@ -2341,10 +2324,10 @@ guest_rtc_periodic_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 1);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, bad_status, fail_label);
@@ -2361,7 +2344,6 @@ guest_rtc_masked_code(uint8_t *code, size_t cap)
 	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
 	static const uint8_t cpuid_zero[] = { 0x31, 0xc0, 0x0f, 0xa2 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const char msg[] = "dfvmm-rtc-masked-ok\n";
 	size_t len = 0;
 	size_t loop_label;
@@ -2400,10 +2382,10 @@ guest_rtc_masked_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 0x33U);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jgot_status, got_status);
@@ -2429,7 +2411,6 @@ guest_rtc_update_alarm_code(uint8_t *code, size_t cap)
 	    { 0x3c, RTC_REG_C_IRQF | RTC_REG_C_AF | RTC_REG_C_UF };
 	static const uint8_t test_al_al[] = { 0x84, 0xc0 };
 	static const uint8_t sti_hlt_loop[] = { 0xfb, 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
 	static const char msg[] = "dfvmm-rtc-update-alarm-ok\n";
 	size_t len = 0;
@@ -2475,10 +2456,10 @@ guest_rtc_update_alarm_code(uint8_t *code, size_t cap)
 	emit_u32(code, &len, cap, AVIC_OP_MARKER);
 	emit(code, &len, cap, (const uint8_t[]){ 0xb9 }, 1);
 	emit_u32(code, &len, cap, 0xb0U);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
 	for (i = 0; i < sizeof(msg) - 1; i++)
 		emit_serial_char(code, &len, cap, (uint8_t)msg[i]);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	fail_label = len;
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, bad_status, fail_label);
@@ -2497,7 +2478,6 @@ guest_pmtimer_code(uint8_t *code, size_t cap)
 	static const uint8_t pause_op[] = { 0xf3, 0x90 };
 	static const uint8_t jmp8[] = { 0xeb, 0x00 };
 	static const uint8_t fail[] = { 0xf4, 0xeb, 0xfe };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t len = 0;
 	size_t loop_label;
 	size_t jchanged;
@@ -2515,7 +2495,7 @@ guest_pmtimer_code(uint8_t *code, size_t cap)
 	emit(code, &len, cap, jmp8, sizeof(jmp8));
 	jmp_back = len - 1;
 	ok_label = len;
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	emit(code, &len, cap, fail, sizeof(fail));
 	patch_rel32(code, jchanged, ok_label);
 	patch_rel8(code, jmp_back, loop_label);
@@ -2546,7 +2526,6 @@ guest_cpu_template_code(uint8_t *code, size_t cap)
 	static const uint8_t or_eax_ecx[] = { 0x09, 0xc8 };
 	static const uint8_t or_eax_edx[] = { 0x09, 0xd0 };
 	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	size_t failed[16];
 	size_t failed_count = 0;
 	size_t failed_label;
@@ -2664,7 +2643,8 @@ guest_cpu_template_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_CPU_TEMPLATE_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	patch_rel8(code, success_jump, report_label);
 	for (i = 0; i < failed_count; i++)
 		patch_rel32(code, failed[i], failed_label);
@@ -2687,7 +2667,6 @@ guest_fpu_code(uint8_t *code, size_t cap)
 	static const uint8_t vpxor[] = { 0xc5, 0xfd, 0xef, 0xc1 };
 	static const uint8_t vpmovmskb[] = { 0xc5, 0xfd, 0xd7, 0xc0 };
 	static const uint8_t test_eax_eax[] = { 0x85, 0xc0 };
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t pattern[] = {
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -2738,7 +2717,8 @@ guest_fpu_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, AVIC_MAGIC);
 	emit(code, &len, cap, (const uint8_t[]){ 0xbb }, 1);
 	emit_u32(code, &len, cap, AVIC_OP_FPU_MARKER);
-	emit(code, &len, cap, vmmcall, sizeof(vmmcall));
+	emit(code, &len, cap, vmmcall_raw, sizeof(vmmcall_raw));
+	emit(code, &len, cap, smoke_exit, sizeof(smoke_exit));
 	pattern_label = len;
 	emit(code, &len, cap, pattern, sizeof(pattern));
 	patch_rel8(code, success_jump, report_label);
@@ -2752,18 +2732,17 @@ guest_fpu_code(uint8_t *code, size_t cap)
 static size_t
 guest_code(const char *mode, uint8_t *code, size_t cap)
 {
-	static const uint8_t vmmcall[] = { 0x0f, 0x01, 0xd9 };
 	static const uint8_t cpuid_vmmcall[] =
-	    { 0x31, 0xc0, 0x0f, 0xa2, 0x0f, 0x01, 0xd9 };
+	    { 0x31, 0xc0, 0x0f, 0xa2, SMOKE_EXIT_BYTES };
 	static const uint8_t time_vmmcall[] = {
-	    0x0f, 0x31, 0xf3, 0x90, 0x0f, 0x01, 0xf9, 0x0f, 0x01, 0xd9
+	    0x0f, 0x31, 0xf3, 0x90, 0x0f, 0x01, 0xf9, SMOKE_EXIT_BYTES
 	};
 	static const uint8_t xsetbv_vmmcall[] = {
 	    0x31, 0xc9,		/* xor ecx,ecx */
 	    0x31, 0xd2,		/* xor edx,edx */
 	    0xb8, 0x01, 0x00, 0x00, 0x00, /* mov eax,1 */
 	    0x0f, 0x01, 0xd1,	/* xsetbv */
-	    0x0f, 0x01, 0xd9	/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	static const uint8_t apicmsr_vmmcall[] = {
 	    0xb9, 0x1b, 0x00, 0x00, 0x00, /* mov ecx,MSR_APICBASE */
@@ -2782,7 +2761,7 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	    0x0f, 0x32,		/* rdmsr */
 	    0xb9, 0x03, 0x08, 0x00, 0x00, /* mov ecx,x2APIC VERSION */
 	    0x0f, 0x32,		/* rdmsr */
-	    0x0f, 0x01, 0xd9	/* vmmcall */
+	    SMOKE_EXIT_BYTES
 	};
 	static const uint8_t hlt[] = { 0xf4 };
 	static const uint8_t loop[] = { 0xeb, 0xfe };
@@ -2792,8 +2771,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 	size_t len;
 
 	if (strcmp(mode, "vmmcall") == 0) {
-		src = vmmcall;
-		len = sizeof(vmmcall);
+		src = smoke_exit;
+		len = sizeof(smoke_exit);
 	} else if (strcmp(mode, "cpuid") == 0) {
 		src = cpuid_vmmcall;
 		len = sizeof(cpuid_vmmcall);

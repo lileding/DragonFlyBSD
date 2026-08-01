@@ -491,6 +491,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 					 VMM_SVM_HWCR_IRPERF_EN)
 #define VMM_SVM_AMD_PATCH_LEVEL	0ULL
 #define VMM_SVM_SMOKE_AVIC_MAGIC	0x43495641U
+#define VMM_SVM_SMOKE_EXIT		0U
 #define VMM_SVM_SMOKE_AVIC_DELIVER	1U
 #define VMM_SVM_SMOKE_AVIC_MARKER	2U
 #define VMM_SVM_SMOKE_IOAPIC_RAISE	3U
@@ -608,17 +609,22 @@ struct vmm_svm_vmcb {
 	struct vmm_svm_state state;
 } __packed;
 
+struct vmm_svm_backend;
+
 /*
  * One context exists for one machine run and is opaque outside this backend.
  * It owns the NPT-facing resources shared by all future vCPUs.  Creation and
  * destruction are serialized by vmm_vcpu_start()/release_threads(); the
- * physical and logical AVIC tables are only modified during per-vCPU create,
- * destroy, bind and unbind.  SMP will add their own short synchronization
- * without exposing that detail to vmm_machine.
+ * token_platform protects the immutable topology's live backend registry and
+ * shared AVIC physical table publication.  It is never held across VMRUN.
  */
 struct vmm_svm_context {
 	struct vmm_machine *borrow_imm_machine;
 	struct vmspace *borrow_mut_vmspace;
+	struct lwkt_token token_platform;
+	uint32_t imm_vcpu_count;
+	uint32_t imm_apic_ids[VMM_X64_MAX_VCPU];
+	struct vmm_svm_backend *own_mut_apic_targets[VMM_X64_MAX_VCPU];
 	uint8_t *own_imm_iobm;
 	uint64_t imm_iobm_pa;
 	uint8_t *own_imm_msrbm;
@@ -829,6 +835,10 @@ static void vmm_svm_context_destroy(void *context);
 static void vmm_svm_vcpu_destroy(void *backend);
 static int vmm_svm_avic_init(struct vmm_svm_backend *svm);
 static void vmm_svm_avic_uninit(struct vmm_svm_backend *svm);
+static int vmm_svm_context_register_backend(struct vmm_svm_context *context,
+    struct vmm_svm_backend *svm);
+static void vmm_svm_context_unregister_backend(
+    struct vmm_svm_context *context, struct vmm_svm_backend *svm);
 static void vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb);
 static uint64_t vmm_svm_guest_tsc(struct vmm_svm_backend *svm);
 static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
@@ -967,11 +977,10 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_context *context = svm->borrow_imm_context;
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	uint64_t entry;
+	int error;
 
 	if (context == NULL)
 		return EINVAL;
-	svm->imm_avic_apic_id = VMM_SVM_AVIC_APIC_ID;
 	atomic_store_rel_int(&svm->atomic_mut_avic_host_cpuid, (u_int)-1);
 	atomic_store_rel_int(&svm->atomic_mut_avic_host_apic_id, (u_int)-1);
 	svm->own_mut_avic_apic_page =
@@ -990,8 +999,9 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR,
 	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
 
-	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID;
-	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
+	error = vmm_svm_context_register_backend(context, svm);
+	if (error != 0)
+		return error;
 	vmcb->ctrl.v |= VMM_SVM_CTRL_V_INTR_MASKING | VMM_SVM_CTRL_V_AVIC_EN;
 	vmcb->ctrl.avic = VMM_SVM_APICBASE_ADDR;
 	vmcb->ctrl.avic_abpp = svm->imm_avic_apic_page_pa;
@@ -1013,12 +1023,50 @@ vmm_svm_avic_uninit(struct vmm_svm_backend *svm)
 	if (svm == NULL)
 		return;
 	context = svm->borrow_imm_context;
-	if (context != NULL && context->own_mut_avic_phys_table != NULL) {
-		context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = 0;
-		cpu_mfence();
-	}
+	if (context != NULL)
+		vmm_svm_context_unregister_backend(context, svm);
 	vmm_svm_contig_free(svm->own_mut_avic_apic_page, 1);
 	svm->own_mut_avic_apic_page = NULL;
+}
+
+static int
+vmm_svm_context_register_backend(struct vmm_svm_context *context,
+    struct vmm_svm_backend *svm)
+{
+	uint32_t apic_id;
+
+	apic_id = svm->imm_avic_apic_id;
+	if (apic_id > VMM_SVM_AVIC_MAX_PHYS_ID)
+		return EOPNOTSUPP;
+	lwkt_gettoken(&context->token_platform);
+	if (context->own_mut_apic_targets[apic_id] != NULL) {
+		lwkt_reltoken(&context->token_platform);
+		return EEXIST;
+	}
+	context->own_mut_apic_targets[apic_id] = svm;
+	context->own_mut_avic_phys_table[apic_id] =
+	    svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID;
+	cpu_mfence();
+	lwkt_reltoken(&context->token_platform);
+	return 0;
+}
+
+static void
+vmm_svm_context_unregister_backend(struct vmm_svm_context *context,
+    struct vmm_svm_backend *svm)
+{
+	uint32_t apic_id;
+
+	apic_id = svm->imm_avic_apic_id;
+	if (apic_id > VMM_SVM_AVIC_MAX_PHYS_ID)
+		return;
+	lwkt_gettoken(&context->token_platform);
+	if (context->own_mut_apic_targets[apic_id] == svm) {
+		context->own_mut_apic_targets[apic_id] = NULL;
+		context->own_mut_avic_phys_table[apic_id] = 0;
+		cpu_mfence();
+	}
+	lwkt_reltoken(&context->token_platform);
 }
 
 
@@ -1615,13 +1663,16 @@ vmm_svm_context_create(struct vmm_machine *m, uint32_t count,
 	struct vmm_svm_context *context;
 	int error;
 
-	(void)count;
-	(void)launch;
-	if (contextp == NULL)
+	if (contextp == NULL || launch == NULL || count == 0 ||
+	    count != launch->imm_cpu_topology.imm_vcpu_count)
 		return EINVAL;
 	*contextp = NULL;
 	context = kmalloc(sizeof(*context), M_TEMP, M_WAITOK | M_ZERO);
 	context->borrow_imm_machine = m;
+	lwkt_token_init(&context->token_platform, "vmmplat");
+	context->imm_vcpu_count = count;
+	bcopy(launch->imm_cpu_topology.imm_apic_ids, context->imm_apic_ids,
+	    sizeof(context->imm_apic_ids));
 	context->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
 	if (context->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
@@ -1689,7 +1740,8 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	int error;
 
 	if (context == NULL || backendp == NULL || launch == NULL || vc == NULL ||
-	    vc->imm_id != 0 || launch->imm_vcpu0.vcpu_id != 0)
+	    vc->imm_id >= context->imm_vcpu_count ||
+	    launch->imm_vcpu0.vcpu_id != 0)
 		return EINVAL;
 	m = context->borrow_imm_machine;
 	if (!vmm_svm_initialized)
@@ -1703,6 +1755,7 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	svm->borrow_imm_context = context;
 	svm->borrow_imm_machine = m;
 	svm->borrow_mut_vmspace = context->borrow_mut_vmspace;
+	svm->imm_avic_apic_id = context->imm_apic_ids[vc->imm_id];
 	if (svm->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
 		goto fail;
@@ -4967,6 +5020,11 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 	if (magic != VMM_SVM_SMOKE_AVIC_MAGIC)
 		return 0;
 	switch (op) {
+	case VMM_SVM_SMOKE_EXIT:
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "guest shutdown source=smoke_vmmcall vcpu=%u", vc->imm_id);
+		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_SHUTDOWN;
+		return 1;
 	case VMM_SVM_SMOKE_IOAPIC_RAISE:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke ioapic request pin=%u", arg);
@@ -4980,26 +5038,29 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 		vmm_svm_avic_deliver(svm, vc, (uint8_t)arg, "smoke");
 		return 1;
 	case VMM_SVM_SMOKE_AVIC_MARKER:
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke avic marker=0x%x", arg);
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case VMM_SVM_SMOKE_PAUSE_FILTER:
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke pause filter exits=%u", svm->mut_pause_exit_count);
-		return 0;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
 	case VMM_SVM_SMOKE_CPU_TEMPLATE_MARKER:
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke cpu template marker=0x%x", arg);
-		return 0;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
 	case VMM_SVM_SMOKE_FPU_MARKER:
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "smoke fpu marker=0x%x", arg);
-		return 0;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
 	default:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke avic unknown op=%u arg=0x%x", op, arg);
-		return -1;
+		return 0;
 	}
 }
 
@@ -5760,15 +5821,17 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			goto unhandled;
 		case VMM_SVM_EXIT_VMMCALL:
 			handled = vmm_svm_handle_vmmcall(svm, vc);
-			if (handled > 0)
+			if (handled > 0) {
+				if (svm->mut_exit_reason != VMM_VCPU_EXIT_NONE)
+					goto out;
 				break;
-			if (handled == 0) {
-				vmm_machine_debugf(svm->borrow_imm_machine,
-				    "svm vcpu%u vmmcall exit rip=0x%jx",
-				    vc->imm_id, (uintmax_t)vmcb->state.rip);
-				goto out;
 			}
-			goto unhandled;
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_UD;
+			vmm_machine_debugf(svm->borrow_imm_machine,
+			    "svm vcpu%u inject ud reason=vmmcall rip=0x%jx",
+			    vc->imm_id, (uintmax_t)vmcb->state.rip);
+			break;
 		default:
 	unhandled:
 			vmm_machine_debugf(svm->borrow_imm_machine,
