@@ -83,7 +83,7 @@ cleanup()
 {
 	set +e
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(machine)" ]; then
-		echo force >"$(machine)/stopped" 2>>"$LOG"
+		touch "$(machine)/stopped" 2>>"$LOG"
 	fi
 	if [ -n "$PROVIDER_PID" ]; then
 		kill "$PROVIDER_PID" >/dev/null 2>&1
@@ -151,10 +151,10 @@ wait_pattern "$(device)/state" 'provider=pending' provider_pending
 
 run rm "$(machine)/stopped"
 wait_pattern "$PROVIDER_LOG" 'DMA_RESET_PROVIDER_READY run=1' first_start
-printf '%s\n' 'reset force' >"$(machine)/events" || fail "force reset"
+printf '%s\n' 'reset' >"$(machine)/events" || fail "force reset"
 wait_pattern "$PROVIDER_LOG" 'DMA_RESET_PROVIDER_REVOKED run=1' first_revoke
 wait_pattern "$PROVIDER_LOG" 'DMA_RESET_PROVIDER_READY run=2' second_start
-printf '%s\n' force >"$(machine)/stopped" || fail "force stop"
+touch "$(machine)/stopped" || fail "stop"
 wait_pattern "$PROVIDER_LOG" 'DMA_RESET_PROVIDER_REVOKED run=2' second_revoke
 wait "$PROVIDER_PID" || fail "provider did not exit after second stop"
 PROVIDER_PID=

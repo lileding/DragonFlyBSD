@@ -85,7 +85,7 @@ cleanup()
 {
 	set +e
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(machine)" ]; then
-		echo force >"$(machine)/stopped" 2>>"$LOG"
+		touch "$(machine)/stopped" 2>>"$LOG"
 	fi
 	if [ -n "$PROVIDER_PID" ]; then
 		kill "$PROVIDER_PID" >/dev/null 2>&1
@@ -165,7 +165,7 @@ esac
 wait_pattern "$PROVIDER_LOG" 'DMA_LOSS_HOLDER_REVOKED' holder_revoke
 kill -0 "$HOLDER_PID" >/dev/null 2>&1 || fail "mapping holder exited early"
 
-printf '%s\n' force >"$(machine)/stopped" || fail "force stop"
+touch "$(machine)/stopped" || fail "stop"
 remove_path "$(device)" || fail "remove detached device"
 remove_path "$(machine)" || fail "remove machine"
 i=0

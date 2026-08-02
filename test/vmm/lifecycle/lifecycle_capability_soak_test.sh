@@ -1,7 +1,7 @@
 #!/bin/sh
 # pc64 lifecycle/pager soak for loader capability and module teardown.
 #
-# Each command stage enters a looping one-vCPU guest, force-stops it, removes
+# Each command stage enters a looping one-vCPU guest, stops it, removes
 # the machine, unmounts vmmfs, and unloads vmm.ko.  Each revoke stage uses a
 # real fd3/fd4 mmap loader to cover both loader-exit and VM-stop revoke.
 # Periodically, an inherited mapping must veto kldunload until its holder exits.

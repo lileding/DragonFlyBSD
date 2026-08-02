@@ -78,7 +78,7 @@ cleanup_machine()
 	vm=$1
 	[ "$MOUNTED" -eq 1 ] || return 0
 	[ -d "$(mach "$vm")" ] || return 0
-	echo force >"$(mach "$vm")/stopped" 2>>"$LOG"
+	touch "$(mach "$vm")/stopped" 2>>"$LOG"
 	i=0
 	while [ "$i" -lt "$TIMEOUT" ] && [ -d "$(mach "$vm")" ]; do
 		rmdir "$(mach "$vm")" >>"$LOG" 2>&1 && return 0

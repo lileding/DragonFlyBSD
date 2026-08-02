@@ -235,8 +235,7 @@ out:
 }
 
 /*
- * Create "stopped" under a machine: an atomic, idempotent request to stop it.
- * `echo apic > stopped` opens with O_CREAT.
+ * Create "stopped" under a machine: an atomic, idempotent force stop.
  */
 static int
 vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
@@ -253,7 +252,7 @@ vmmfs_machine_ncreate(struct vmmfs_node *dnode, struct vop_ncreate_args *ap)
 	lwkt_gettoken(&m->machine.token_config);
 	m->machine.mut_desired_stopped = 1;
 	lwkt_reltoken(&m->machine.token_config);
-	error = vmm_machine_execute(&m->machine, vmm_machine_stop_apic, NULL);
+	error = vmm_machine_execute(&m->machine, vmm_machine_command_stop, NULL);
 	if (error)
 		return error;
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->n_stopped,
@@ -293,7 +292,7 @@ vmmfs_machine_nremove(struct vmmfs_node *dnode, struct vop_nremove_args *ap)
 	lwkt_reltoken(&m->machine.token_config);
 	vmm_debug_trace("nremove stopped execute begin m=%p machine=%p",
 	    m, &m->machine);
-	error = vmm_machine_execute(&m->machine, vmm_machine_start, ap->a_cred);
+	error = vmm_machine_execute(&m->machine, vmm_machine_command_start, ap->a_cred);
 	vmm_debug_trace("nremove stopped execute done m=%p machine=%p error=%d",
 	    m, &m->machine, error);
 	if (error) {
@@ -393,7 +392,6 @@ vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
 	char buf[32];
 	size_t take;
 	int error;
-	int force;
 
 	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
 	    (size_t)uio->uio_resid : sizeof(buf) - 1;
@@ -410,27 +408,13 @@ vmmfs_events_write(struct vmmfs_node *node, struct vop_write_args *ap)
 		if (error)
 			return error;
 	}
-	if (take < 5 || strncmp(buf, "reset", 5) != 0)
+	if (strcmp(buf, "reset\n") != 0 && strcmp(buf, "reset") != 0)
 		return EINVAL;
-	force = (take >= 11 && strncmp(buf, "reset force", 11) == 0);
-	if (force) {
-		int desired_stopped;
-
-		lwkt_gettoken(&node->vn_machine->machine.token_config);
-		desired_stopped = node->vn_machine->machine.mut_desired_stopped;
-		node->vn_machine->machine.mut_desired_stopped = 0;
-		lwkt_reltoken(&node->vn_machine->machine.token_config);
-		error = vmm_machine_execute(&node->vn_machine->machine,
-		    vmm_machine_reset_force, ap->a_cred);
-		if (error) {
-			lwkt_gettoken(&node->vn_machine->machine.token_config);
-			node->vn_machine->machine.mut_desired_stopped = desired_stopped;
-			lwkt_reltoken(&node->vn_machine->machine.token_config);
-		}
-		return error;
-	}
+	lwkt_gettoken(&node->vn_machine->machine.token_config);
+	node->vn_machine->machine.mut_desired_stopped = 0;
+	lwkt_reltoken(&node->vn_machine->machine.token_config);
 	return vmm_machine_execute(&node->vn_machine->machine,
-	    vmm_machine_reset_apic, NULL);
+	    vmm_machine_command_reset, ap->a_cred);
 }
 
 static kobj_method_t vmmfs_events_methods[] = {
@@ -486,41 +470,13 @@ static kobj_method_t vmmfs_status_methods[] = {
 };
 DEFINE_CLASS(vmmfs_status, vmmfs_status_methods, 0);
 
-/*
- * Writing the stopped control file selects the stop method (apic|force) and
- * (re)applies the stop.  Idempotent.
- */
+/* stopped is created by touch(1); write-style stop requests are not an ABI. */
 static int
 vmmfs_stopped_write(struct vmmfs_node *node, struct vop_write_args *ap)
 {
-	struct uio *uio = ap->a_uio;
-	char buf[16];
-	size_t take;
-	int error, force;
-
-	take = (uio->uio_resid < (int)(sizeof(buf) - 1)) ?
-	    (size_t)uio->uio_resid : sizeof(buf) - 1;
-	error = uiomove(buf, take, uio);
-	if (error)
-		return error;
-	buf[take] = '\0';
-	force = (take >= 5 && strncmp(buf, "force", 5) == 0);
-
-	while (uio->uio_resid > 0) {
-		char dump[32];
-		size_t d = (uio->uio_resid < (int)sizeof(dump)) ?
-		    (size_t)uio->uio_resid : sizeof(dump);
-
-		error = uiomove(dump, d, uio);
-		if (error)
-			return error;
-	}
-
-	lwkt_gettoken(&node->vn_machine->machine.token_config);
-	node->vn_machine->machine.mut_desired_stopped = 1;
-	lwkt_reltoken(&node->vn_machine->machine.token_config);
-	return vmm_machine_execute(&node->vn_machine->machine,
-	    force ? vmm_machine_stop_force : vmm_machine_stop_apic, NULL);
+	(void)node;
+	(void)ap;
+	return EOPNOTSUPP;
 }
 
 static kobj_method_t vmmfs_stopped_methods[] = {

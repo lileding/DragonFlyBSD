@@ -155,7 +155,7 @@ cleanup()
 	set +e
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(machine)" ]; then
-		echo force >"$(machine)/stopped" 2>>"$LOG"
+		touch "$(machine)/stopped" 2>>"$LOG"
 	fi
 	stop_provider "$NET_PID"
 	stop_provider "$BLK_PID"
@@ -254,8 +254,8 @@ wait_pattern "$CONSOLE_LOG" 'DFVMM_VIRTIOD_NET_DONE' shell_done ||
 	fail "guest network command did not finish"
 
 stop_console_reader
-echo force >"$(machine)/stopped" || fail "force stop"
-wait_pattern "$(machine)/events" 'state stopped reason=force' stopped ||
+touch "$(machine)/stopped" || fail "stop"
+wait_pattern "$(machine)/events" 'state stopped reason=stop' stopped ||
 	fail "machine did not stop"
 wait_provider_exit "$NET_PID" network || fail "network provider did not stop"
 NET_PID=

@@ -146,7 +146,7 @@ cleanup()
 	set +e
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
-		echo force >"$(mach)/stopped" 2>>"$LOG"
+		touch "$(mach)/stopped" 2>>"$LOG"
 	fi
 	# Provider close is independent PCIe hot-unplug and may race this stop.
 	stop_provider

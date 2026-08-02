@@ -102,27 +102,34 @@ vmm_vcpu_thread_main(void *arg)
 {
 	struct vmm_vcpu_thread *vc = arg;
 	struct vmm_machine *m = vc->borrow_imm_machine;
+	const struct vmm_vcpu_backend_ops *backend_ops =
+	    vc->borrow_imm_backend_ops;
+	void *backend = vc->own_mut_backend;
 	enum vmm_vcpu_exit_reason exit_reason = VMM_VCPU_EXIT_NONE;
 	u_int active_count;
+	uint32_t id = vc->imm_id;
+	int cpu = vc->imm_cpu;
 
 	lwkt_setpri_self(TDPRI_USER_NORM);
-	vmm_debug_trace("vcpu%u thread enter machine=%p cpu=%d", vc->imm_id, m,
-	    vc->imm_cpu);
-	if (vc->borrow_imm_backend_ops != NULL)
-		exit_reason = vc->borrow_imm_backend_ops->run(
-		    vc->own_mut_backend, vc);
-	if (exit_reason != VMM_VCPU_EXIT_NONE) {
-		atomic_cmpset_int(&m->own_mut_vcpu.atomic_mut_exit_reason,
-		    VMM_VCPU_EXIT_NONE, exit_reason);
-	}
+	vmm_debug_trace("vcpu%u thread enter machine=%p cpu=%d", id, m, cpu);
+	if (backend_ops != NULL)
+		exit_reason = backend_ops->run(backend, vc);
+	if (exit_reason != VMM_VCPU_EXIT_NONE)
+		vmm_machine_vcpu_terminal(m, exit_reason);
+	if (backend_ops != NULL && backend != NULL)
+		backend_ops->vcpu_destroy(backend);
+	vc->own_mut_backend = NULL;
+	vc->borrow_imm_backend_ops = NULL;
 
 	active_count = atomic_fetchadd_int(
 	    &m->own_mut_vcpu.atomic_mut_active_count, -1) - 1;
-	vmm_debug_trace("vcpu%u thread exit machine=%p active=%u", vc->imm_id, m,
+	vmm_debug_trace("vcpu%u thread exit machine=%p active=%u", id, m,
 	    active_count);
-	if (active_count == 0 && atomic_load_acq_int(
-	    &m->own_mut_vcpu.atomic_mut_exit_reason) != VMM_VCPU_EXIT_NONE)
-		vmm_machine_vcpu_exited(m);
+	if (active_count == 0) {
+		wakeup(m);
+		vmm_machine_vcpu_drained(m);
+		return;
+	}
 	wakeup(m);
 }
 
@@ -152,7 +159,7 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	if (v->own_mut_threads != NULL ||
 	    atomic_load_acq_int(&v->atomic_mut_active_count) != 0)
 		return EBUSY;
-	if (m->mut_status != VMM_MACHINE_STARTING)
+	if (atomic_load_acq_int(&m->atomic_mut_status) != VMM_MACHINE_STARTING)
 		return ECANCELED;
 	threads = kmalloc(sizeof(*threads) * count, M_TEMP, M_WAITOK | M_ZERO);
 
@@ -191,7 +198,7 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 			break;
 		}
 	}
-	if (error == 0 && (m->mut_status != VMM_MACHINE_STARTING ||
+	if (error == 0 && (atomic_load_acq_int(&m->atomic_mut_status) != VMM_MACHINE_STARTING ||
 	    atomic_load_acq_int(&v->atomic_mut_stop_requested) != 0)) {
 		error = ECANCELED;
 		vmm_debug_trace("vcpu create canceled machine=%p", m);
@@ -230,21 +237,28 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 }
 
 void
-vmm_vcpu_stop(struct vmm_machine *m)
+vmm_vcpu_request_stop(struct vmm_machine *m)
 {
 	struct vmm_vcpu *v = &m->own_mut_vcpu;
 	uint32_t i;
 
 	atomic_store_rel_int(&v->atomic_mut_stop_requested, 1);
+	if (v->own_mut_threads == NULL)
+		return;
+	for (i = 0; i < v->mut_count; i++)
+		wakeup(&v->own_mut_threads[i]);
+}
+
+void
+vmm_vcpu_stop(struct vmm_machine *m)
+{
+	struct vmm_vcpu *v = &m->own_mut_vcpu;
+
+	vmm_vcpu_request_stop(m);
 	vmm_debug_trace("vcpu stop requested machine=%p active=%u", m,
 	    atomic_load_acq_int(&v->atomic_mut_active_count));
-	while (atomic_load_acq_int(&v->atomic_mut_active_count) != 0) {
-		if (v->own_mut_threads != NULL) {
-			for (i = 0; i < v->mut_count; i++)
-				wakeup(&v->own_mut_threads[i]);
-		}
+	while (atomic_load_acq_int(&v->atomic_mut_active_count) != 0)
 		tsleep(m, 0, "vmmstp", hz / 20 + 1);
-	}
 	vmm_debug_trace("vcpu stop complete machine=%p", m);
 }
 
@@ -278,9 +292,9 @@ vmm_vcpu_release_threads(struct vmm_vcpu *v,
 	v->borrow_imm_backend_ops = NULL;
 	v->own_mut_backend_context = NULL;
 	for (i = 0; i < count; i++) {
-		if (threads != NULL && backend_ops != NULL) {
+		if (threads != NULL && backend_ops != NULL &&
+		    threads[i].own_mut_backend != NULL)
 			backend_ops->vcpu_destroy(threads[i].own_mut_backend);
-		}
 		if (threads != NULL) {
 			threads[i].own_mut_backend = NULL;
 			threads[i].borrow_imm_backend_ops = NULL;

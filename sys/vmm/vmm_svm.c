@@ -164,10 +164,14 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_REG_TDCR		0x3e0U
 #define VMM_SVM_APIC_VERSION		0x00140014U
 #define VMM_SVM_APIC_ICR_DEST_LOGICAL	0x00000800U
+#define VMM_SVM_APIC_ICR_FIXED		0x00000000U
 #define VMM_SVM_APIC_ICR_DELIVERY_MASK	0x00000700U
 #define VMM_SVM_APIC_ICR_INIT		0x00000500U
 #define VMM_SVM_APIC_ICR_SIPI		0x00000600U
 #define VMM_SVM_APIC_ICR_SHORTHAND_MASK	0x000c0000U
+#define VMM_SVM_APIC_ICR_SHORTHAND_SELF		0x00040000U
+#define VMM_SVM_APIC_ICR_SHORTHAND_ALL_INC_SELF	0x00080000U
+#define VMM_SVM_APIC_ICR_SHORTHAND_ALL_EXC_SELF	0x000c0000U
 #define VMM_SVM_APIC_SVR_VALID		0x000003ffU
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
@@ -4858,7 +4862,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_RESET;
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "guest reset source=acpi_fadt vcpu=%u", vc->imm_id);
 		goto out_ok;
 	case VMM_ACPI_SLEEP_CONTROL_PORT:
@@ -4888,7 +4892,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_SHUTDOWN;
-		vmm_machine_debugf(svm->borrow_imm_machine,
+		vmm_machine_logf(svm->borrow_imm_machine,
 		    "guest shutdown source=acpi_s5 vcpu=%u", vc->imm_id);
 		goto out_ok;
 	case VMM_ACPI_SLEEP_STATUS_PORT:
@@ -5599,6 +5603,9 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_svm_context *context;
 	struct vmm_svm_backend *target;
+	uint32_t apic_id;
+	uint32_t shorthand;
+	int handled;
 	const struct vmm_vcpu_thread *target_vc;
 	const char *name;
 	volatile uint32_t *ptr;
@@ -5636,6 +5643,48 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		default:
 			name = "unknown";
 			break;
+		}
+		if (value == VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING &&
+		    delivery == VMM_SVM_APIC_ICR_FIXED &&
+		    (icrl & VMM_SVM_APIC_ICR_DEST_LOGICAL) == 0) {
+			context = svm->borrow_imm_context;
+			shorthand = icrl & VMM_SVM_APIC_ICR_SHORTHAND_MASK;
+			handled = 0;
+			lwkt_gettoken(&context->token_platform);
+			if (shorthand == 0) {
+				if (destination <= VMM_SVM_AVIC_MAX_PHYS_ID) {
+					target = context->own_mut_apic_targets[destination];
+					if (target != NULL && target != svm) {
+						handled = 1;
+						if (atomic_load_acq_int(
+						    &target->atomic_mut_avic_running) == 0) {
+							wakeup(__DECONST(void *,
+							    target->borrow_imm_vcpu));
+						}
+					}
+				}
+			} else {
+				for (apic_id = 0; apic_id <= VMM_SVM_AVIC_MAX_PHYS_ID;
+				    ++apic_id) {
+					target = context->own_mut_apic_targets[apic_id];
+					if (target == NULL)
+						continue;
+					if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_SELF &&
+					    target != svm)
+						continue;
+					if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_ALL_EXC_SELF &&
+					    target == svm)
+						continue;
+					handled = 1;
+					if (atomic_load_acq_int(
+					    &target->atomic_mut_avic_running) == 0)
+						wakeup(__DECONST(void *,
+						    target->borrow_imm_vcpu));
+				}
+			}
+			lwkt_reltoken(&context->token_platform);
+			if (handled)
+				return 1;
 		}
 		if ((icrl & (VMM_SVM_APIC_ICR_DEST_LOGICAL |
 		    VMM_SVM_APIC_ICR_SHORTHAND_MASK)) != 0 ||

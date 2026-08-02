@@ -179,7 +179,7 @@ write_console()
 	vm=$1
 	line=$2
 
-	printf '\033[1;1R%s\n' "$line" >"$(mach "$vm")/console" ||
+	printf '%s\n' "$line" >"$(mach "$vm")/console" ||
 	    fail "$vm console write failed"
 }
 
@@ -246,17 +246,17 @@ stop_machine()
 	reason=$2
 	stop_i=0
 
-	say "force stop $vm reason=$reason"
-	echo force >"$(mach "$vm")/stopped" 2>>"$LOG" ||
-	    fail "$vm force stop request failed"
-	wait_file_pattern "$(mach "$vm")/events" 'state stopped reason=force' \
-	    "$vm events" || fail "$vm force stopped event missing"
+	say "stop $vm reason=$reason"
+	touch "$(mach "$vm")/stopped" ||
+	    fail "$vm stop request failed"
+	wait_file_pattern "$(mach "$vm")/events" 'state stopped reason=stop' \
+	    "$vm events" || fail "$vm stopped event missing"
 	while [ "$stop_i" -lt "$STOP_TIMEOUT" ]; do
 		[ -e "$(mach "$vm")/stopped" ] && return 0
 		sleep 1
 		stop_i=$((stop_i + 1))
 	done
-	fail "$vm stopped control file did not reappear after force stop"
+	fail "$vm stopped control file did not reappear after stop"
 }
 
 remove_machine()
@@ -296,7 +296,7 @@ cleanup()
 	if [ "$MOUNTED" -eq 1 ]; then
 		for vm in $CREATED_MACHINES; do
 			if [ -d "$(mach "$vm")" ]; then
-				echo force >"$(mach "$vm")/stopped" 2>>"$LOG"
+				touch "$(mach "$vm")/stopped"
 				remove_machine "$vm" || say "$vm cleanup did not finish"
 			fi
 		done

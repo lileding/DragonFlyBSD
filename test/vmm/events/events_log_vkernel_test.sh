@@ -68,7 +68,7 @@ cleanup_machine()
 	i=0
 
 	[ -d "$dir" ] || return 0
-	echo force >"$dir/stopped" 2>/dev/null || true
+	touch "$dir/stopped" 2>/dev/null || true
 	while [ "$i" -lt 10 ] && [ -d "$dir" ]; do
 		rmdir "$dir" 2>/dev/null && return 0
 		sleep 1

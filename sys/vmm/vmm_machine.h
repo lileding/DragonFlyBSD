@@ -32,12 +32,13 @@ typedef void (*vmm_machine_func)(const struct vmm_machine_task *task);
 enum vmm_machine_status {
 	VMM_MACHINE_STARTING,
 	VMM_MACHINE_RUNNING,
-	VMM_MACHINE_STOPPING,
+	VMM_MACHINE_DRAINING,
 	VMM_MACHINE_STOPPED,
 };
 
 struct vmm_machine {
-	/* token_config protects control-plane config and mut_status. */
+	/* token_config protects control-plane config. */
+	/* atomic_mut_status is the MPSAFE runtime state and wait predicate. */
 	/* token_events protects the retained textual event ring. */
 	struct lwkt_token token_config;
 	struct lwkt_token token_events;
@@ -49,7 +50,7 @@ struct vmm_machine {
 	struct taskqueue *own_mut_taskqueue;
 	/* Owned only by the serialized taskqueue after loader acceptance. */
 	struct vmm_launch *own_mut_boot_launch;
-	enum vmm_machine_status mut_status;
+	u_int atomic_mut_status;
 
 	int mut_desired_stopped;
 	char mut_loader_path[VMM_LOADER_MAX + 1];
@@ -107,13 +108,13 @@ int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
     struct ucred *cred);
 void vmm_machine_console_input(struct vmm_machine *m);
 void vmm_machine_msix(struct vmm_machine *m, uint8_t vector);
-/* Called by the last vCPU thread after an explicit terminal guest exit. */
-void vmm_machine_vcpu_exited(struct vmm_machine *m);
-void vmm_machine_start(const struct vmm_machine_task *task);
-void vmm_machine_stop_apic(const struct vmm_machine_task *task);
-void vmm_machine_stop_force(const struct vmm_machine_task *task);
-void vmm_machine_reset_apic(const struct vmm_machine_task *task);
-void vmm_machine_reset_force(const struct vmm_machine_task *task);
+/* vCPU terminal/drain notifications run only after VMEXIT host-state restore. */
+void vmm_machine_vcpu_terminal(struct vmm_machine *m,
+    enum vmm_vcpu_exit_reason reason);
+void vmm_machine_vcpu_drained(struct vmm_machine *m);
+void vmm_machine_command_start(const struct vmm_machine_task *task);
+void vmm_machine_command_stop(const struct vmm_machine_task *task);
+void vmm_machine_command_reset(const struct vmm_machine_task *task);
 
 /* Lease reference counting. */
 int vmm_machine_lease_open(struct vmm_machine *m);

@@ -2,7 +2,7 @@
 # pc64 true-hardware two-Linux lifecycle soak.
 #
 # Two independent one-vCPU Linux guests remain interactive while alternating
-# reset force cycles rebuild one guest at a time.  The harness keeps SVM trace
+# reset cycles rebuild one guest at a time.  The harness keeps SVM trace
 # disabled so events remain useful for lifecycle assertions.
 set -u
 
@@ -253,6 +253,8 @@ check_tsc_calibration()
 	vm=$1
 	offset=$2
 	log=$(console_log "$vm")
+	# PIO VMEXIT jitter can make Linux reject quick PIT samples.  Require a
+	# documented PIT, PM timer, or HPET calibration path instead.
 	detected=$(tail -c "+$((offset + 1))" "$log" 2>>"$LOG" |
 	    awk '/tsc: Detected/ {
 		for (i = 1; i < NF; ++i) {
@@ -269,6 +271,21 @@ check_tsc_calibration()
 	    } END { print refined }')
 
 	[ -n "$refined" ] || fail "$vm did not report refined TSC calibration"
+	path=$(tail -c "+$((offset + 1))" "$log" 2>>"$LOG" |
+	    awk '
+		/tsc: Fast TSC calibration using PIT/ { path = "pit" }
+		/tsc: using PMTIMER reference calibration/ { path = "pmtimer" }
+		/tsc: using HPET reference calibration/ { path = "hpet" }
+		END { print path }
+	    ')
+	case "$path" in
+	pit|pmtimer|hpet)
+		;;
+	*)
+		append_file "$vm TSC boot calibration failure" "$log"
+		fail "$vm did not report a supported TSC boot calibration path"
+		;;
+	esac
 	if ! awk -v refined="$refined" -v host_hz="$TSC_HOST_HZ" \
 	    -v max_ppm="$TSC_CALIBRATION_MAX_PPM" 'BEGIN {
 		host_mhz = host_hz / 1000000
@@ -280,20 +297,7 @@ check_tsc_calibration()
 		append_file "$vm tsc calibration failure" "$log"
 		fail "$vm refined TSC calibration ${refined}MHz exceeds ${TSC_CALIBRATION_MAX_PPM}ppm"
 	fi
-	say "$vm TSC calibration detected=${detected:-missing}MHz refined=${refined}MHz host_hz=$TSC_HOST_HZ"
-}
-
-check_pit_calibration()
-{
-	vm=$1
-	offset=$2
-	log=$(console_log "$vm")
-
-	if ! tail -c "+$((offset + 1))" "$log" 2>>"$LOG" |
-	    grep -q "tsc: Fast TSC calibration using PIT"; then
-		append_file "$vm pit calibration failure" "$log"
-		fail "$vm did not complete fast PIT calibration"
-	fi
+	say "$vm TSC calibration path=$path detected=${detected:-missing}MHz refined=${refined}MHz host_hz=$TSC_HOST_HZ"
 }
 
 run_tsc_pm_probe()
@@ -397,13 +401,13 @@ wait_reset_sequence()
 		if cat "$(events_path "$vm")" 2>>"$LOG" |
 		    awk -v after="$after" '
 			$1 > after {
-				if ($0 ~ /reset force begin/)
+				if ($0 ~ /reset begin/)
 					begin = 1
-				if (begin && $0 ~ /state stopped reason=force/)
+				if (begin && $0 ~ /state stopped reason=stop/)
 					stopped = 1
 				if (stopped && $0 ~ /state running/)
 					running = 1
-				if (running && $0 ~ /reset force done/)
+				if (running && $0 ~ /reset done/)
 					done = 1
 			}
 			END { exit done ? 0 : 1 }
@@ -424,13 +428,13 @@ force_stop()
 	before=$(event_seq "$vm")
 
 	[ -n "$before" ] || fail "cannot read event sequence for $vm stop"
-	echo force >"$(machine_dir "$vm")/stopped" 2>>"$LOG" ||
-	    fail "force stop request failed for $vm"
+	touch "$(machine_dir "$vm")/stopped" 2>>"$LOG" ||
+	    fail "stop request failed for $vm"
 	while [ "$stop_i" -lt "$STOP_TIMEOUT" ]; do
 		if [ -e "$(machine_dir "$vm")/stopped" ] &&
 		    cat "$(events_path "$vm")" 2>>"$LOG" |
 		    awk -v after="$before" '
-			$1 > after && /state stopped reason=force/ { found = 1 }
+			$1 > after && /state stopped reason=stop/ { found = 1 }
 			END { exit found ? 0 : 1 }
 		'; then
 			return 0
@@ -438,7 +442,7 @@ force_stop()
 		sleep 1
 		stop_i=$((stop_i + 1))
 	done
-	fail "force stop did not complete for $vm"
+	fail "stop did not complete for $vm"
 }
 
 reset_machine()
@@ -451,9 +455,9 @@ reset_machine()
 
 	[ -n "$before" ] || fail "cannot read event sequence for $vm"
 	[ -n "$ready_before" ] || fail "cannot read serial marker count for $vm"
-	say "reset force machine=$vm after_event=$before"
-	printf '%s\n' 'reset force' >"$(events_path "$vm")" ||
-	    fail "reset force request failed for $vm"
+	say "reset machine=$vm after_event=$before"
+	printf '%s\n' 'reset' >"$(events_path "$vm")" ||
+	    fail "reset request failed for $vm"
 	if [ "$SVM_TRACE" -eq 0 ]; then
 		wait_reset_sequence "$vm" "$before" ||
 		    fail "reset event sequence incomplete for $vm"
@@ -469,7 +473,6 @@ reset_machine()
 		run_tsc_pm_probe "$vm"
 	fi
 	check_tsc_clocksource "$vm" "$console_before"
-	check_pit_calibration "$vm" "$console_before"
 	check_tsc_calibration "$vm" "$console_before"
 	check_console_readers
 	probe_machine "$vm" "$marker"
@@ -512,7 +515,7 @@ cleanup()
 		for vm in $CREATED_MACHINES; do
 			[ -d "$(machine_dir "$vm")" ] || continue
 			if [ ! -e "$(machine_dir "$vm")/stopped" ]; then
-				echo force >"$(machine_dir "$vm")/stopped" 2>>"$LOG"
+				touch "$(machine_dir "$vm")/stopped" 2>>"$LOG"
 			fi
 		done
 	fi
@@ -638,7 +641,6 @@ start_machine()
 		run_tsc_pm_probe "$vm"
 	fi
 	check_tsc_clocksource "$vm" "$console_before"
-	check_pit_calibration "$vm" "$console_before"
 	check_tsc_calibration "$vm" "$console_before"
 	probe_machine "$vm" "$marker"
 }

@@ -117,8 +117,8 @@ stop_machine()
 	i=0
 
 	[ -d "$dir" ] || return 0
-	say "requesting force stop for $VM"
-	echo force >"$dir/stopped" 2>>"$LOG" || true
+	say "requesting stop for $VM"
+	touch "$dir/stopped" 2>>"$LOG" || true
 	wait_for_file_pattern "$dir/events" 'state stopped' "$STOP_TIMEOUT" stopped \
 	    >/dev/null 2>&1 || say "stopped event not observed during cleanup"
 
@@ -244,7 +244,7 @@ run_guest()
 	wait_for_file_pattern "$(mach)/console" "$PAT" "$TIMEOUT" console ||
 	    fail "console pattern not observed: $PAT"
 	say "console pattern observed: $PAT"
-	echo force >"$(mach)/stopped" || fail "request force stop"
+	touch "$(mach)/stopped" || fail "request stop"
 	wait_for_file_pattern "$(mach)/events" 'state stopped' "$STOP_TIMEOUT" stopped ||
 	    fail "stopped event not observed"
 	say "PASS"

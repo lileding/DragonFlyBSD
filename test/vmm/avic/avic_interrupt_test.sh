@@ -86,7 +86,7 @@ cleanup_machine()
 	dir=$(mach avicirq)
 	i=0
 	[ -d "$dir" ] || return 0
-	echo force >"$dir/stopped" 2>>"$LOG" || true
+	touch "$dir/stopped" 2>>"$LOG" || true
 	while [ "$i" -lt "$TIMEOUT" ] && [ -d "$dir" ]; do
 		rmdir "$dir" >>"$LOG" 2>&1 && return 0
 		sleep 1
@@ -159,9 +159,9 @@ wait_event "$(mach avicirq)/events" 'smoke avic request vector=0x40' ||
     fail "guest did not request AVIC injection"
 wait_event "$(mach avicirq)/events" 'smoke avic marker=0xa51c0040' ||
     fail "guest AVIC handler marker not observed"
-echo force >"$(mach avicirq)/stopped" || fail "force stop avicirq"
-wait_event "$(mach avicirq)/events" 'state stopped reason=force' ||
-    fail "machine did not force stop"
+touch "$(mach avicirq)/stopped" || fail "stop avicirq"
+wait_event "$(mach avicirq)/events" 'state stopped reason=stop' ||
+    fail "machine did not stop"
 run rmdir "$(mach avicirq)"
 unmount_vmm || fail "umount $MNT"
 run kldunload vmm; LOADED=0

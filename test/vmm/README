@@ -105,14 +105,14 @@ must receive the AVIC-routed interrupt and complete the test driver probe.
 `pcie/vmm_pcie_dma_test.sh` uses the boot kernel's existing
 `OBJT_MGTDEVICE` and `vm_object_page_remove()` behavior; it needs no paired
 VM-core change.  It starts a controlled looping guest, maps the provider's
-per-run BAR and DMA capabilities, force-stops the machine, and requires both
+per-run BAR and DMA capabilities, stops the machine, and requires both
 retained mappings to fault with `SIGBUS` or `SIGSEGV`.  It then deletes the
 machine and unmounts vmmfs while the provider still retains those mappings:
 `kldunload vmm` must return `EBUSY`.  After the provider exits, module unload
 must succeed.
 
 `pcie/vmm_pcie_dma_reset_test.sh` keeps one provider session across an
-external `reset force`.  It requires the old BAR and DMA mappings to fault
+external `reset`.  It requires the old BAR and DMA mappings to fault
 before the provider may register again with a strictly newer DMA generation.
 
 `pcie/vmm_pcie_dma_loss_test.sh` closes the provider without `STOPPED` while
@@ -121,7 +121,7 @@ capabilities must see both fault; those mappings keep `kldunload` busy until
 the child exits.
 
 `lifecycle/lifecycle_capability_soak_test.sh` is the production lifecycle/pager
-gate.  It repeats a real one-vCPU start/force-stop/delete/unmount/unload path,
+gate.  It repeats a real one-vCPU start/stop/delete/unmount/unload path,
 checks fd3/fd4 revoke after loader exit and VM stop, and every tenth round
 requires a surviving inherited loader mapping to veto `kldunload` until its
 holder exits.  It defaults to 60 rounds; use `VMM_SOAK_ROUNDS=2` only for a

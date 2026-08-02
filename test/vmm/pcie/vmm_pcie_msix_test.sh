@@ -166,7 +166,7 @@ cleanup()
 	set +e
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
-		echo force >"$(mach)/stopped" 2>>"$LOG"
+		touch "$(mach)/stopped" 2>>"$LOG"
 	fi
 	stop_provider
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(device)" ]; then

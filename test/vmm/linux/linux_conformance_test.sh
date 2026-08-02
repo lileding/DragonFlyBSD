@@ -94,15 +94,15 @@ run_stage time-idle env \
 	LINUX_KERNEL="$KERNEL" \
 	LINUX_INITRD_ROOTFS="$INITRD" \
 	"$ROOT/linux_time_idle_test.sh"
-run_stage reset-force env \
+run_stage reset env \
 	VMM_KO="$VMM_KO" \
-	VMM_MOUNT="$WORK/reset-force-vmm" \
-	VMM_LOG="$WORK/reset-force.log" \
-	VMM_CONSOLE_LOG="$WORK/reset-force.console" \
+	VMM_MOUNT="$WORK/reset-vmm" \
+	VMM_LOG="$WORK/reset.log" \
+	VMM_CONSOLE_LOG="$WORK/reset.console" \
 	VMM_RESET_ROUNDS=2 \
 	LINUX_KERNEL="$KERNEL" \
 	LINUX_INITRD_ROOTFS="$INITRD" \
-	"$ROOT/linux_reset_force_test.sh"
+	"$ROOT/linux_reset_test.sh"
 run_stage triplefault env \
 	VMM_KO="$VMM_KO" \
 	VMM_SMOKE_MODES=triplefault \

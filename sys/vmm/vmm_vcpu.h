@@ -20,20 +20,15 @@ enum vmm_vcpu_exit_reason {
 
 struct vmm_vcpu {
 	/*
-	 * Lifecycle:
-	 * vmm_machine's serialized command queue calls vmm_vcpu_start() and
-	 * vmm_vcpu_stop().  mut_count and own_mut_threads are only accessed by
-	 * that command queue.  Active vCPU threads decrement
-	 * atomic_mut_active_count and wake the parent machine when they exit;
-	 * the stop worker reads that count and sets atomic_mut_stop_requested.
-	 * A backend returns an explicit terminal reason to its vCPU thread.  The
-	 * last exiting thread atomically publishes that reason and notifies the
-	 * machine, whose serialized command queue owns lifecycle cleanup.
-	 * Backend teardown follows the memory backing pattern: detach
-	 * own_mut_threads after all vCPUs stop, then destroy backend state and
-	 * free the array outside the stop path.  borrow_imm_backend_ops and
-	 * own_mut_backend_context share that command-queue protection and are
-	 * detached with the thread array; vmm_machine never inspects context.
+	 * Lock map:
+	 * token_config protects mut_count, own_mut_threads,
+	 * borrow_imm_backend_ops, and own_mut_backend_context while a control
+	 * path snapshots them or the last vCPU detaches them.  Active vCPU
+	 * threads publish atomic_mut_active_count, atomic_mut_stop_requested,
+	 * and atomic_mut_exit_reason with atomic operations.  The first terminal
+	 * vCPU moves its machine to DRAINING; every vCPU destroys only its private
+	 * backend.  After active_count reaches zero, the last vCPU detaches this
+	 * shared state under token_config and releases it outside the token.
 	 */
 	uint32_t	mut_count;		/* 0 = unset */
 	struct vmm_vcpu_thread *own_mut_threads;
@@ -93,6 +88,7 @@ int	vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	    const struct vmm_launch *launch);
 void	vmm_vcpu_stop(struct vmm_machine *m);
 int	vmm_vcpu_has_active(struct vmm_vcpu *v);
+void	vmm_vcpu_request_stop(struct vmm_machine *m);
 void	vmm_vcpu_uninit(struct vmm_vcpu *v,
 	    struct vmm_vcpu_thread **threadsp);
 void	vmm_vcpu_release_threads(struct vmm_vcpu *v,

@@ -1,5 +1,5 @@
 #!/bin/sh
-# pc64 true-hardware Linux reset-force harness.
+# pc64 true-hardware Linux reset harness.
 #
 # One long-lived console reader spans every reset.  Each reset must stop the
 # old vCPU, boot a fresh in-memory Linux, retain the terminal endpoint, and
@@ -12,10 +12,10 @@ REPO=$(cd "$ROOT/../../.." && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-reset-vmm}
 VM=${VMM_MACHINE:-linuxreset0}
-LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-reset-force-test.log}
-CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-reset-force.console}
+LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-reset-test.log}
+CONSOLE_LOG=${VMM_CONSOLE_LOG:-/var/tmp/dfvmm-linux-reset.console}
 LOADER=${LINUX_LOADER:-/var/tmp/vmmld_linux_kexec}
-WRAPPER=${LINUX_WRAPPER:-/var/tmp/vmmld_linux_reset_force}
+WRAPPER=${LINUX_WRAPPER:-/var/tmp/vmmld_linux_reset}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-linux-reset-$$-mount_vmm}
 KERNEL=${LINUX_KERNEL:-/var/tmp/alpine-vmlinuz-virt}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
@@ -146,16 +146,18 @@ wait_reset_sequence()
 		if cat "$(events_path)" 2>>"$LOG" |
 		    awk -v after="$after" '
 			$1 > after {
-				if ($0 ~ /reset force begin/)
-					begin = 1
-				if (begin && $0 ~ /state stopped reason=force/)
+				if ($0 ~ /reset requested/)
+					requested = 1
+				if (requested && $0 ~ /state draining reason=stop/)
+					draining = 1
+				if (draining && $0 ~ /state stopped reason=stop/)
 					stopped = 1
-				if (stopped && $0 ~ /state running/)
+				if (stopped && $0 ~ /state starting/)
+					starting = 1
+				if (starting && $0 ~ /state running/)
 					running = 1
-				if (running && $0 ~ /reset force done/)
-					done = 1
 			}
-			END { exit done ? 0 : 1 }
+			END { exit running ? 0 : 1 }
 		'; then
 			return 0
 		fi
@@ -194,18 +196,18 @@ force_stop()
 {
 	stop_i=0
 
-	echo force >"$(machine_dir)/stopped" 2>>"$LOG" ||
-	    fail "force stop request failed"
+	touch "$(machine_dir)/stopped" ||
+	    fail "stop request failed"
 	while [ "$stop_i" -lt "$STOP_TIMEOUT" ]; do
 		if [ -e "$(machine_dir)/stopped" ] &&
 		    cat "$(events_path)" 2>>"$LOG" |
-		    grep -q 'state stopped reason=force'; then
+		    grep -q 'state stopped reason=stop'; then
 			return 0
 		fi
 		sleep 1
 		stop_i=$((stop_i + 1))
 	done
-	fail "force stop did not complete"
+	fail "stop did not complete"
 }
 
 remove_machine()
@@ -245,7 +247,7 @@ cleanup()
 	set +e
 	if [ "$MOUNTED" -eq 1 ] && [ "$CREATED" -eq 1 ] &&
 	    [ -d "$(machine_dir)" ]; then
-		echo force >"$(machine_dir)/stopped" 2>>"$LOG"
+		touch "$(machine_dir)/stopped"
 	fi
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ "$CREATED" -eq 1 ]; then
@@ -263,7 +265,7 @@ cleanup()
 preflight()
 {
 	: >"$LOG" || exit 1
-	say "Linux reset-force true-hardware test"
+	say "Linux reset true-hardware test"
 	say "repo=$REPO vmm_ko=$VMM_KO kernel=$KERNEL initrd=$INITRD"
 	say "machine=$VM mem=$MEM reset_rounds=$RESET_ROUNDS"
 	[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
@@ -312,9 +314,9 @@ reset_machine()
 	before=$(event_seq)
 
 	[ -n "$before" ] || fail "cannot read event sequence before reset $round"
-	say "reset force round=$round after_event=$before"
-	printf '%s\n' 'reset force' >"$(events_path)" ||
-	    fail "reset force request failed in round $round"
+	say "reset round=$round after_event=$before"
+	printf '%s\n' 'reset' >"$(events_path)" ||
+	    fail "reset request failed in round $round"
 	wait_reset_sequence "$before" ||
 	    fail "reset event sequence incomplete in round $round"
 	[ ! -e "$(machine_dir)/stopped" ] ||
@@ -357,4 +359,4 @@ run kldunload vmm
 LOADED=0
 rm -f "$MOUNT_HELPER" "$WRAPPER"
 
-say "PASS: Linux reset-force test"
+say "PASS: Linux reset test"

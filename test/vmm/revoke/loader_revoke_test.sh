@@ -32,7 +32,7 @@ $out"
 }
 cleanup_machine()
 {
-	vm=$1; [ -d "$(mach "$vm")" ] || return 0; echo force >"$(mach "$vm")/stopped" 2>>"$LOG"
+	vm=$1; [ -d "$(mach "$vm")" ] || return 0; touch "$(mach "$vm")/stopped" 2>>"$LOG"
 	i=0; while [ "$i" -lt "$TIMEOUT" ] && [ -d "$(mach "$vm")" ]; do
 		rmdir "$(mach "$vm")" >>"$LOG" 2>&1 && return 0; sleep 1; i=$((i + 1))
 	done; return 1
@@ -65,7 +65,7 @@ run_case()
 	printf '%s\n' "$wrapper" >"$(mach "$vm")/loader" || fail loader; cat "$(mach "$vm")/events" >>"$LOG"
 	run rm "$(mach "$vm")/stopped"; wait_path "$result.ready" || fail "$mode child did not inherit fds"
 	if [ "$mode" = "hang" ]; then
-		echo force >"$(mach "$vm")/stopped" || fail "hang force stop"
+		touch "$(mach "$vm")/stopped" || fail "hang stop"
 		wait_event "$(mach "$vm")/events" 'state stopped reason=start_failed' ||
 			fail "hang stop did not complete"
 		child_pid=$(awk -F= '/^pid=/{print $2}' "$result.ready")

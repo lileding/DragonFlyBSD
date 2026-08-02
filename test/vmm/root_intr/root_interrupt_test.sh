@@ -67,7 +67,7 @@ cleanup_machine()
 	if [ -e "$(mach "$vm")/stopped" ]; then
 		:
 	else
-		echo force >"$(mach "$vm")/stopped" 2>>"$LOG"
+		touch "$(mach "$vm")/stopped" 2>>"$LOG"
 	fi
 	i=0
 	while [ "$i" -lt "$TIMEOUT" ] && [ -d "$(mach "$vm")" ]; do
@@ -171,9 +171,9 @@ stop_machine()
 {
 	vm=$1
 
-	echo force >"$(mach "$vm")/stopped" || fail "$vm force stop"
-	wait_event "$(mach "$vm")/events" 'state stopped reason=force' ||
-	    fail "$vm did not force stop"
+	touch "$(mach "$vm")/stopped" || fail "$vm stop"
+	wait_event "$(mach "$vm")/events" 'state stopped reason=stop' ||
+	    fail "$vm did not stop"
 	cat "$(mach "$vm")/events" >>"$LOG"
 	[ -e "$(mach "$vm")/stopped" ] || fail "$vm stopped file missing"
 	run rmdir "$(mach "$vm")"

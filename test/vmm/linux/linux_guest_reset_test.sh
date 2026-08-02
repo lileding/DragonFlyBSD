@@ -27,6 +27,8 @@ STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-30}
 
 LOADED=0
 MOUNTED=0
+GUEST_REBOOT_COMMAND=${VMM_GUEST_REBOOT_COMMAND:-/bin/busybox reboot -f}
+GUEST_SHUTDOWN_COMMAND=${VMM_GUEST_SHUTDOWN_COMMAND:-/bin/busybox poweroff -f}
 CREATED=0
 CONSOLE_READER_PID=
 
@@ -139,8 +141,8 @@ wait_guest_reset()
 $out"
 		if printf '%s\n' "$events" | awk '
 			/guest reset source=acpi_fadt/ { reset = 1; next }
-			reset && /state stopping reason=guest_reset/ { stopping = 1; next }
-			stopping && /state starting reason=guest_reset/ { starting = 1; next }
+			reset && /state draining reason=guest_reset/ { draining = 1; next }
+			draining && /state starting reason=guest_reset/ { starting = 1; next }
 			starting && /state running reason=guest_reset/ { running = 1 }
 			END { exit running ? 0 : 1 }
 		'; then
@@ -159,7 +161,7 @@ force_stop_remove()
 
 	[ "$MOUNTED" -eq 1 ] || return 0
 	if [ -d "$(machine_dir)" ]; then
-		echo force >"$(machine_dir)/stopped" 2>>"$LOG" || true
+		touch "$(machine_dir)/stopped" || true
 		while [ "$i" -lt "$STOP_TIMEOUT" ]; do
 			rmdir "$(machine_dir)" >>"$LOG" 2>&1 && break
 			sleep 1
@@ -247,7 +249,7 @@ wait_console_next 'DFVMM_LINUX_SERIAL_OK' "$boot_before" initial-boot ||
 [ "$(loader_runs)" -eq 1 ] || fail "loader executed unexpected count before reset"
 
 reset_before=$(console_matches 'DFVMM_LINUX_SERIAL_OK')
-printf '%s\n' '/bin/busybox touch /run/dfvmm-reset-cow; echo DFVMM_GUEST_RESET_PREPARED; /bin/busybox reboot -f' >"$(console_path)" ||
+printf '%s\n' "/bin/busybox touch /run/dfvmm-reset-cow; echo DFVMM_GUEST_RESET_PREPARED; $GUEST_REBOOT_COMMAND" >"$(console_path)" ||
 	fail "request guest reset"
 wait_guest_reset || fail "guest reset event sequence missing"
 wait_console_next 'DFVMM_LINUX_SERIAL_OK' "$reset_before" guest-reset-boot ||
@@ -263,7 +265,7 @@ wait_console_next 'DFVMM_GUEST_RESET_COW_OK' "$cow_before" guest-reset-cow ||
 	fail "guest reset did not restore boot memory"
 [ ! -e "$(machine_dir)/stopped" ] || fail "guest reset recreated stopped"
 
-printf '%s\n' 'poweroff -f' >"$(console_path)" || fail "request guest shutdown"
+printf '%s\n' "$GUEST_SHUTDOWN_COMMAND" >"$(console_path)" || fail "request guest shutdown"
 i=0
 shutdown_events=
 while [ "$i" -lt "$STOP_TIMEOUT" ]; do

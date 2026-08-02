@@ -17,7 +17,7 @@ check_module_image()
 	    fail "$VMM_KO contains .eh_frame"
 }
 wait_path() { p=$1; i=0; while [ "$i" -lt "$TIMEOUT" ]; do [ -e "$p" ] && return 0; sleep 1; i=$((i + 1)); done; return 1; }
-cleanup_machine() { vm=$1; [ -d "$(mach "$vm")" ] || return 0; echo force >"$(mach "$vm")/stopped" 2>>"$LOG"; rmdir "$(mach "$vm")" >>"$LOG" 2>&1 || true; }
+cleanup_machine() { vm=$1; [ -d "$(mach "$vm")" ] || return 0; touch "$(mach "$vm")/stopped" 2>>"$LOG"; rmdir "$(mach "$vm")" >>"$LOG" 2>&1 || true; }
 cleanup()
 {
 	set +e; [ -n "$HOLD_PID" ] && kill "$HOLD_PID" >>"$LOG" 2>&1

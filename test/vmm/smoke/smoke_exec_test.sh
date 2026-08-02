@@ -245,8 +245,8 @@ cleanup_machine()
 	i=0
 
 	[ -d "$dir" ] || return 0
-	say "requesting force stop for $vm"
-	echo force >"$dir/stopped" 2>>"$LOG" || true
+	say "requesting stop for $vm"
+	touch "$dir/stopped" 2>>"$LOG" || true
 	wait_event "$dir/events" 'state stopped' >/dev/null 2>&1 ||
 	    say "$vm stopped event not observed during cleanup"
 	while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$dir" ]; do
@@ -536,8 +536,8 @@ run_case()
 		    fail "$mode first guest fault"
 		[ ! -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode desired changed after first fault"
-		echo reset force >"$(mach "$mode")/events" ||
-		    fail "$mode reset force"
+		echo reset >"$(mach "$mode")/events" ||
+		    fail "$mode reset"
 		fault_count=0
 		fault_wait=0
 		while [ "$fault_wait" -lt "$TIMEOUT" ]; do
@@ -550,7 +550,7 @@ run_case()
 		[ "$fault_count" -ge 2 ] || fail "$mode reset did not fault again"
 		[ ! -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode desired changed after reset"
-		echo force >"$(mach "$mode")/stopped" ||
+		touch "$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 		[ -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode stopped file"
@@ -662,7 +662,7 @@ run_case()
 		fi
 		[ ! -e "$(mach "$mode")/stopped" ] ||
 		    fail "$mode desired changed"
-		echo force >"$(mach "$mode")/stopped" ||
+		touch "$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 	else
 		if [ "$mode" = "tscscale" ]; then
@@ -684,7 +684,7 @@ run_case()
 			wait_event "$(mach "$mode")/events" 'vmmcall exit' ||
 			    fail "$mode deadline handler"
 		fi
-		echo force >"$(mach "$mode")/stopped" ||
+		touch "$(mach "$mode")/stopped" ||
 		    fail "$mode request stopped"
 		wait_event "$(mach "$mode")/events" 'state stopped' ||
 		    fail "$mode stopped"

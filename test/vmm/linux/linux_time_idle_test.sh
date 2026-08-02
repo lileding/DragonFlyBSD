@@ -4,7 +4,7 @@
 # This test keeps the rootfs in initrd memory and focuses on vmm core time and
 # idle behavior: guest sleep must advance on the TSC-deadline clockevent, an
 # idle guest must wake on serial input, and multiple Linux guests must clean up
-# through force stop, rmdir, umount, and kldunload.
+# through stop, rmdir, umount, and kldunload.
 set -u
 
 ROOT=$(dirname "$0")
@@ -282,17 +282,17 @@ stop_machine()
 	vm=$1
 	stop_i=0
 
-	say "force stop $vm"
-	echo force >"$(mach "$vm")/stopped" 2>>"$LOG" ||
-	    fail "$vm force stop request failed"
-	wait_file_pattern "$(mach "$vm")/events" 'state stopped reason=force' \
-	    "$vm events" || fail "$vm force stopped event missing"
+	say "stop $vm"
+	touch "$(mach "$vm")/stopped" 2>>"$LOG" ||
+	    fail "$vm stop request failed"
+	wait_file_pattern "$(mach "$vm")/events" 'state stopped reason=stop' \
+	    "$vm events" || fail "$vm stopped event missing"
 	while [ "$stop_i" -lt "$STOP_TIMEOUT" ]; do
 		[ -e "$(mach "$vm")/stopped" ] && return 0
 		sleep 1
 		stop_i=$((stop_i + 1))
 	done
-	fail "$vm stopped control file did not reappear after force stop"
+	fail "$vm stopped control file did not reappear after stop"
 }
 
 remove_machine()
@@ -335,7 +335,7 @@ cleanup()
 	if [ "$MOUNTED" -eq 1 ]; then
 		for vm in $CREATED_MACHINES; do
 			if [ -d "$(mach "$vm")" ]; then
-				echo force >"$(mach "$vm")/stopped" 2>>"$LOG"
+				touch "$(mach "$vm")/stopped" 2>>"$LOG"
 				remove_machine "$vm" || say "$vm cleanup did not finish"
 			fi
 		done

@@ -53,10 +53,10 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_fork, CTLFLAG_RW,
     "allow vmm_machine_execute to fork the paused loader");
 SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_run, CTLFLAG_RW,
     &vmm_debug_allow_loader_run, 0,
-    "allow vmm_machine_start to install, resume, and wait for loader");
+    "allow vmm_machine_command_start to install, resume, and wait for loader");
 SYSCTL_INT(_debug_vmm, OID_AUTO, allow_vcpu_start, CTLFLAG_RW,
     &vmm_debug_allow_vcpu_start, 0,
-    "allow vmm_machine_start to enter vCPU execution");
+    "allow vmm_machine_command_start to enter vCPU execution");
 
 struct vmm_machine_task {
 	struct task task;
@@ -67,8 +67,6 @@ struct vmm_machine_task {
 
 static void	vmm_machine_task_run(void *arg, int pending);
 static void	vmm_machine_drain_task(void *arg, int pending);
-static void	vmm_machine_guest_exit(
-		    const struct vmm_machine_task *task);
 static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
 static void	vmm_machine_set_status(struct vmm_machine *m,
 			    enum vmm_machine_status status);
@@ -183,7 +181,7 @@ vmm_machine_init(struct vmm_machine *m, struct vmm_pcie *pcie)
 		    TDPRI_KERN_DAEMON, -1, "vmm machine");
 	}
 	m->mut_desired_stopped = 1;
-	m->mut_status = VMM_MACHINE_STOPPED;
+	atomic_store_rel_int(&m->atomic_mut_status, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=create");
 	vmm_debug_trace("machine_init done m=%p tq=%p", m,
 	    m->own_mut_taskqueue);
@@ -285,16 +283,12 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 	TASK_INIT(&task->task, 0, vmm_machine_task_run, task);
 	task->borrow_mut_machine = m;
 	task->fnonce_handler = fnonce_handler;
-	if (fnonce_handler == vmm_machine_start)
+	if (fnonce_handler == vmm_machine_command_start)
 		vmm_machine_logf(m, "start requested");
-	else if (fnonce_handler == vmm_machine_stop_force)
-		vmm_machine_logf(m, "stop requested method=force");
-	else if (fnonce_handler == vmm_machine_stop_apic)
-		vmm_machine_logf(m, "stop requested method=apic");
-	else if (fnonce_handler == vmm_machine_reset_force)
-		vmm_machine_logf(m, "reset requested method=force");
-	else if (fnonce_handler == vmm_machine_reset_apic)
-		vmm_machine_logf(m, "reset requested method=apic");
+	else if (fnonce_handler == vmm_machine_command_stop)
+		vmm_machine_logf(m, "stop requested");
+	else if (fnonce_handler == vmm_machine_command_reset)
+		vmm_machine_logf(m, "reset requested");
 
 	if (cred != NULL) {
 		/* vmmfs froze config by clearing desired_stopped before this call. */
@@ -393,7 +387,7 @@ vmm_machine_drain_task(void *arg, int pending)
 }
 
 void
-vmm_machine_start(const struct vmm_machine_task *task)
+vmm_machine_command_start(const struct vmm_machine_task *task)
 {
 	struct vmm_machine *m = task->borrow_mut_machine;
 	struct vmm_loader *loader = __DECONST(struct vmm_loader *,
@@ -408,6 +402,7 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	uint32_t vcpu_count;
 	uint32_t thread_count;
 	int error;
+	enum vmm_machine_status status;
 	int loader_exit_code;
 
 	lwkt_gettoken(&m->token_config);
@@ -417,16 +412,22 @@ vmm_machine_start(const struct vmm_machine_task *task)
 	vmm_debug_trace("start begin m=%p vcpu=%u mem=%ju loader=%s", m,
 	    vcpu_count, (uintmax_t)mem_bytes,
 	    loader->imm_path != NULL ? loader->imm_path : "-");
-	vmm_debug_trace("start begin m=%p vcpu=%u mem=%ju loader=%s", m,
-	    vcpu_count, (uintmax_t)mem_bytes,
-	    loader->imm_path != NULL ? loader->imm_path : "-");
-	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING) {
-		vmm_debug_trace("start ignored m=%p reason=already_running", m);
-		vmm_loader_fini(loader);
-		return;
+	for (;;) {
+		status = vmm_machine_status(m);
+		if (status == VMM_MACHINE_RUNNING) {
+			vmm_debug_trace("start ignored m=%p reason=already_running", m);
+			vmm_loader_fini(loader);
+			return;
+		}
+		if (status == VMM_MACHINE_STOPPED &&
+		    atomic_cmpset_int(&m->atomic_mut_status,
+		    VMM_MACHINE_STOPPED, VMM_MACHINE_STARTING))
+			break;
+		tsleep_interlock(&m->atomic_mut_status, 0);
+		status = vmm_machine_status(m);
+		if (status != VMM_MACHINE_STOPPED && status != VMM_MACHINE_RUNNING)
+			tsleep(&m->atomic_mut_status, 0, "vmmstart", 0);
 	}
-
-	vmm_machine_set_status(m, VMM_MACHINE_STARTING);
 	vmm_machine_logf(m, "state starting");
 	if (atomic_fetchadd_int(&loader->atomic_mut_state, 0) !=
 	    VMM_LOADER_PAUSED) {
@@ -569,61 +570,61 @@ fail_after_loader:
 }
 
 void
-vmm_machine_stop_apic(const struct vmm_machine_task *task)
+vmm_machine_vcpu_terminal(struct vmm_machine *m,
+    enum vmm_vcpu_exit_reason reason)
 {
-	vmm_machine_logf(task->borrow_mut_machine,
-	    "stop failed method=apic reason=unsupported");
+	const char *name;
+
+	if (!atomic_cmpset_int(&m->atomic_mut_status,
+	    VMM_MACHINE_RUNNING, VMM_MACHINE_DRAINING))
+		return;
+	atomic_store_rel_int(&m->own_mut_vcpu.atomic_mut_exit_reason, reason);
+	switch (reason) {
+	case VMM_VCPU_EXIT_GUEST_RESET:
+		name = "guest_reset";
+		break;
+	case VMM_VCPU_EXIT_GUEST_FAULT:
+		name = "guest_fault";
+		break;
+	default:
+		name = "guest_shutdown";
+		break;
+	}
+	vmm_machine_logf(m, "state draining reason=%s", name);
+	vmm_pcie_root_stop(&m->own_mut_pcie_root);
+	vmm_vcpu_request_stop(m);
 }
 
 void
-vmm_machine_vcpu_exited(struct vmm_machine *m)
+vmm_machine_vcpu_drained(struct vmm_machine *m)
 {
-	u_int exit_reason;
-	int error;
-
-	exit_reason = atomic_load_acq_int(
-	    &m->own_mut_vcpu.atomic_mut_exit_reason);
-	if (exit_reason == VMM_VCPU_EXIT_NONE)
-		return;
-	error = vmm_machine_execute(m, vmm_machine_guest_exit, NULL);
-	if (error != 0) {
-		vmm_machine_logf(m,
-		    "guest exit cleanup enqueue failed reason=%u error=%d",
-		    exit_reason, error);
-	}
-}
-
-static void
-vmm_machine_guest_exit(const struct vmm_machine_task *task)
-{
-	struct vmm_machine *m = task->borrow_mut_machine;
 	struct vmm_mem_backing *backing;
 	struct vmm_vcpu_thread *threads;
+	struct vmm_launch *boot_launch;
 	uint32_t thread_count;
 	u_int exit_reason;
 	int error;
 
-	exit_reason = atomic_load_acq_int(
-	    &m->own_mut_vcpu.atomic_mut_exit_reason);
-	if (vmm_machine_status(m) != VMM_MACHINE_RUNNING)
+	if (vmm_machine_status(m) != VMM_MACHINE_DRAINING)
 		return;
 	KKASSERT(atomic_load_acq_int(
 	    &m->own_mut_vcpu.atomic_mut_active_count) == 0);
+	lwkt_gettoken(&m->token_config);
+	thread_count = m->own_mut_vcpu.mut_count;
+	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+	exit_reason = atomic_load_acq_int(
+	    &m->own_mut_vcpu.atomic_mut_exit_reason);
+	lwkt_reltoken(&m->token_config);
+	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
+	vmm_dma_stop(&m->own_mut_dma);
+	vmm_pcie_root_reset(&m->own_mut_pcie_root);
+
 	if (exit_reason == VMM_VCPU_EXIT_GUEST_RESET) {
-		vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
-		vmm_machine_logf(m, "state stopping reason=guest_reset");
-		vmm_pcie_root_stop(&m->own_mut_pcie_root);
-		thread_count = m->own_mut_vcpu.mut_count;
-		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-		vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
-		vmm_dma_stop(&m->own_mut_dma);
-		vmm_pcie_root_reset(&m->own_mut_pcie_root);
 		error = vmm_mem_reset_run(&m->own_mut_mem);
 		if (error == 0 && m->own_mut_boot_launch == NULL)
 			error = EINVAL;
-		if (error == 0) {
+		if (error == 0)
 			error = vmm_dma_start(&m->own_mut_dma, &m->own_mut_mem);
-		}
 		if (error == 0) {
 			vmm_console_reset(&m->own_mut_console);
 			vmm_machine_set_status(m, VMM_MACHINE_STARTING);
@@ -639,110 +640,69 @@ vmm_machine_guest_exit(const struct vmm_machine_task *task)
 			return;
 		}
 		vmm_machine_logf(m, "guest reset failed error=%d", error);
-		vmm_vcpu_stop(m);
-		vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-		vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
-		vmm_machine_logf(m,
-		    "state stopped reason=guest_reset_failed error=%d", error);
-		vmm_dma_stop(&m->own_mut_dma);
-		vmm_pcie_root_reset(&m->own_mut_pcie_root);
-		backing = vmm_mem_detach(&m->own_mut_mem);
-		vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
-		vmm_mem_release_backing(backing);
-		if (m->own_mut_boot_launch != NULL) {
-			kfree(m->own_mut_boot_launch, M_TEMP);
-			m->own_mut_boot_launch = NULL;
-		}
-		return;
 	}
-	if (exit_reason != VMM_VCPU_EXIT_GUEST_SHUTDOWN &&
-	    exit_reason != VMM_VCPU_EXIT_GUEST_FAULT)
-		return;
-	vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
-	vmm_machine_logf(m, "state stopping reason=%s",
-	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ?
-	    "guest_shutdown" : "guest_fault");
-	vmm_pcie_root_stop(&m->own_mut_pcie_root);
-	thread_count = m->own_mut_vcpu.mut_count;
-	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+	lwkt_gettoken(&m->token_config);
+	backing = vmm_mem_detach(&m->own_mut_mem);
+	boot_launch = m->own_mut_boot_launch;
+	m->own_mut_boot_launch = NULL;
+	lwkt_reltoken(&m->token_config);
+	vmm_mem_release_backing(backing);
+	if (boot_launch != NULL)
+		kfree(boot_launch, M_TEMP);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=%s",
-	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ?
-	    "guest_shutdown" : "guest_fault");
-	vmm_dma_stop(&m->own_mut_dma);
-	vmm_pcie_root_reset(&m->own_mut_pcie_root);
-	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
-	vmm_mem_release_backing(backing);
-	if (m->own_mut_boot_launch != NULL) {
-		kfree(m->own_mut_boot_launch, M_TEMP);
-		m->own_mut_boot_launch = NULL;
-	}
+	    exit_reason == VMM_VCPU_EXIT_GUEST_FAULT ? "guest_fault" :
+	    exit_reason == VMM_VCPU_EXIT_GUEST_SHUTDOWN ? "guest_shutdown" :
+	    exit_reason == VMM_VCPU_EXIT_GUEST_RESET ? "guest_reset_failed" :
+	    "stop");
 }
-
 void
-vmm_machine_stop_force(const struct vmm_machine_task *task)
+vmm_machine_command_stop(const struct vmm_machine_task *task)
 {
 	struct vmm_machine *m = task->borrow_mut_machine;
-	struct vmm_mem_backing *backing = NULL;
-	struct vmm_vcpu_thread *threads = NULL;
-	uint32_t thread_count;
+	enum vmm_machine_status status;
 
-	vmm_debug_trace("stop force begin m=%p", m);
-	if (vmm_machine_status(m) == VMM_MACHINE_STOPPED) {
-		vmm_debug_trace("stop force ignored m=%p reason=already_stopped", m);
-		return;
-	}
-	vmm_machine_set_status(m, VMM_MACHINE_STOPPING);
-	vmm_machine_logf(m, "state stopping reason=force");
-	vmm_pcie_root_stop(&m->own_mut_pcie_root);
-	vmm_vcpu_stop(m);
-	thread_count = m->own_mut_vcpu.mut_count;
-	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
-	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
-	vmm_machine_logf(m, "state stopped reason=force");
-	vmm_dma_stop(&m->own_mut_dma);
-	vmm_pcie_root_reset(&m->own_mut_pcie_root);
-	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
-	vmm_mem_release_backing(backing);
-	if (m->own_mut_boot_launch != NULL) {
-		kfree(m->own_mut_boot_launch, M_TEMP);
-		m->own_mut_boot_launch = NULL;
-	}
-	vmm_debug_trace("stop force done m=%p", m);
+	vmm_debug_trace("stop begin m=%p", m);
+	for (;;) {
+		status = vmm_machine_status(m);
+		if (status == VMM_MACHINE_STOPPED)
+			return;
+		if ((status == VMM_MACHINE_RUNNING ||
+		     status == VMM_MACHINE_STARTING) &&
+		    atomic_cmpset_int(&m->atomic_mut_status, status,
+		    VMM_MACHINE_DRAINING)) {
+			vmm_machine_logf(m, "state draining reason=stop");
+			vmm_pcie_root_stop(&m->own_mut_pcie_root);
+			vmm_vcpu_request_stop(m);
+		}
+		tsleep_interlock(&m->atomic_mut_status, 0);
+		if (vmm_machine_status(m) != VMM_MACHINE_STOPPED)
+			tsleep(&m->atomic_mut_status, 0, "vmmstop", 0);
+}
 }
 
 void
-vmm_machine_reset_apic(const struct vmm_machine_task *task)
+vmm_machine_command_reset(const struct vmm_machine_task *task)
 {
-	vmm_machine_logf(task->borrow_mut_machine,
-	    "reset failed method=apic reason=unsupported");
-}
-
-void
-vmm_machine_reset_force(const struct vmm_machine_task *task)
-{
-	vmm_debug_trace("reset force begin m=%p", task->borrow_mut_machine);
-	vmm_machine_stop_force(task);
-	vmm_machine_start(task);
-	vmm_debug_trace("reset force done m=%p", task->borrow_mut_machine);
+	vmm_debug_trace("reset begin m=%p", task->borrow_mut_machine);
+	vmm_machine_command_stop(task);
+	vmm_machine_command_start(task);
+	vmm_debug_trace("reset done m=%p", task->borrow_mut_machine);
 }
 
 void
 vmm_machine_console_input(struct vmm_machine *m)
 {
 	lwkt_gettoken(&m->token_config);
-	if (m->mut_status == VMM_MACHINE_RUNNING)
+	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
 		vmm_vcpu_console_input_locked(m);
 	lwkt_reltoken(&m->token_config);
 }
-
 void
 vmm_machine_msix(struct vmm_machine *m, uint8_t vector)
 {
 	lwkt_gettoken(&m->token_config);
-	if (m->mut_status == VMM_MACHINE_RUNNING)
+	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
 		vmm_vcpu_interrupt_locked(m, vector);
 	lwkt_reltoken(&m->token_config);
 }
@@ -750,26 +710,22 @@ vmm_machine_msix(struct vmm_machine *m, uint8_t vector)
 static enum vmm_machine_status
 vmm_machine_status(struct vmm_machine *m)
 {
-	enum vmm_machine_status status;
-
-	lwkt_gettoken(&m->token_config);
-	status = m->mut_status;
-	lwkt_reltoken(&m->token_config);
-	return status;
+	return atomic_load_acq_int(&m->atomic_mut_status);
 }
 
 static void
 vmm_machine_set_status(struct vmm_machine *m, enum vmm_machine_status status)
 {
-	lwkt_gettoken(&m->token_config);
-	m->mut_status = status;
-	lwkt_reltoken(&m->token_config);
+	atomic_store_rel_int(&m->atomic_mut_status, status);
+	wakeup(&m->atomic_mut_status);
 }
 
 static int
 vmm_machine_config_writable(const struct vmm_machine *m)
 {
-	return m->mut_desired_stopped && m->mut_status == VMM_MACHINE_STOPPED;
+	return m->mut_desired_stopped &&
+	    atomic_load_acq_int(&__DECONST(struct vmm_machine *, m)->atomic_mut_status) ==
+	    VMM_MACHINE_STOPPED;
 }
 
 size_t
@@ -782,7 +738,6 @@ vmm_machine_format_vcpu(const struct vmm_machine *m, char *out, size_t cap)
 	lwkt_reltoken(&__DECONST(struct vmm_machine *, m)->token_config);
 	return n;
 }
-
 int
 vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len)
 {

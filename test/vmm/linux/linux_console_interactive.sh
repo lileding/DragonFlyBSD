@@ -3,7 +3,7 @@
 #
 # This starts one in-memory Linux guest and attaches cu to
 # machines/<name>/console.  Type '~.' at the beginning of a line to exit; the
-# script then force-stops and removes the guest.
+# script then stops and removes the guest.
 set -u
 
 ROOT=$(dirname "$0")
@@ -113,8 +113,8 @@ cleanup()
 	set +e
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
-		say "cleanup: force stop $VM"
-		echo force >"$(mach)/stopped" 2>>"$LOG"
+		say "cleanup: stop $VM"
+		touch "$(mach)/stopped" 2>>"$LOG"
 		i=0
 		while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$(mach)" ]; do
 			rmdir "$(mach)" >>"$LOG" 2>&1 && break

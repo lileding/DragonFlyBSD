@@ -774,7 +774,7 @@ vmmfs_root_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 	lwkt_reltoken(&m->machine.token_config);
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	error = vmm_machine_execute(&m->machine, vmm_machine_stop_force, NULL);
+	error = vmm_machine_execute(&m->machine, vmm_machine_command_stop, NULL);
 	if (error != 0) {
 		vrele(vp);
 		return error;

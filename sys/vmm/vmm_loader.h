@@ -4,7 +4,7 @@
  * VMM core: one loader process run.
  *
  * The machine object owns the configured path as plain text.  struct
- * vmm_loader is the short-lived execution object used by vmm_machine_start().
+ * vmm_loader is the short-lived execution object used by vmm_machine_command_start().
  */
 #ifndef VMM_LOADER_H
 #define VMM_LOADER_H

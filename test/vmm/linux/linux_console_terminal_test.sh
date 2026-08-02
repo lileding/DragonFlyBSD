@@ -165,7 +165,7 @@ cleanup()
 	fi
 	stop_console_reader
 	if [ "$MOUNTED" -eq 1 ] && [ -d "$(mach)" ]; then
-		echo force >"$(mach)/stopped" 2>>"$LOG"
+		touch "$(mach)/stopped" 2>>"$LOG"
 		i=0
 		while [ "$i" -lt "$STOP_TIMEOUT" ] && [ -d "$(mach)" ]; do
 			rmdir "$(mach)" >>"$LOG" 2>&1 && break
@@ -294,16 +294,16 @@ if [ "$SVM_TRACE" -eq 0 ]; then
 		fail "serial hot path leaked into default events"
 fi
 
-echo force >"$(mach)/stopped" 2>>"$LOG" ||
-	fail "force stop request failed"
+touch "$(mach)/stopped" 2>>"$LOG" ||
+	fail "stop request failed"
 i=0
 while [ "$i" -lt "$STOP_TIMEOUT" ]; do
-	grep -q 'state stopped reason=force' "$(mach)/events" 2>>"$LOG" &&
+	grep -q 'state stopped reason=stop' "$(mach)/events" 2>>"$LOG" &&
 	    break
 	sleep 1
 	i=$((i + 1))
 done
-[ "$i" -lt "$STOP_TIMEOUT" ] || fail "force stop event missing"
+[ "$i" -lt "$STOP_TIMEOUT" ] || fail "stop event missing"
 stop_console_reader
 exec 3>&-
 CONSOLE_WRITER_OPEN=0

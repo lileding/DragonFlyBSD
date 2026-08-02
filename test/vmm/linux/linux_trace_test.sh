@@ -147,18 +147,18 @@ force_stop()
 	vm=$1
 	stop_i=0
 
-	echo force >"$(machine_dir "$vm")/stopped" 2>>"$LOG" ||
-	    fail "force stop request failed for $vm"
+	touch "$(machine_dir "$vm")/stopped" 2>>"$LOG" ||
+	    fail "stop request failed for $vm"
 	while [ "$stop_i" -lt "$STOP_TIMEOUT" ]; do
 		if [ -e "$(machine_dir "$vm")/stopped" ] &&
 		    cat "$(events_path "$vm")" 2>>"$LOG" |
-		    grep -q 'state stopped reason=force'; then
+		    grep -q 'state stopped reason=stop'; then
 			return 0
 		fi
 		sleep 1
 		stop_i=$((stop_i + 1))
 	done
-	fail "force stop did not complete for $vm"
+	fail "stop did not complete for $vm"
 }
 
 remove_machine()
@@ -199,7 +199,7 @@ cleanup()
 		for vm in "$VM_OFF" "$VM_ON"; do
 			[ -d "$(machine_dir "$vm")" ] || continue
 			if [ ! -e "$(machine_dir "$vm")/stopped" ]; then
-				echo force >"$(machine_dir "$vm")/stopped" 2>>"$LOG"
+				touch "$(machine_dir "$vm")/stopped" 2>>"$LOG"
 			fi
 			remove_machine "$vm" || say "machine cleanup did not finish: $vm"
 		done

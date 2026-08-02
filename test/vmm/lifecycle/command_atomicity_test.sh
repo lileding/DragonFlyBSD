@@ -1,5 +1,5 @@
 #!/bin/sh
-# pc64 lifecycle harness for declarative command commit and rmdir force-stop.
+# pc64 lifecycle harness for declarative command commit and rmdir stop.
 set -u
 
 ROOT=$(dirname "$0")
@@ -88,7 +88,7 @@ cleanup_machine()
 
 	[ -d "$dir" ] || return 0
 	[ -e "$dir/stopped" ] || touch "$dir/stopped" >>"$LOG" 2>&1 || true
-	echo force >"$dir/stopped" 2>>"$LOG" || true
+	touch "$dir/stopped" 2>>"$LOG" || true
 	while [ "$i" -lt "$TIMEOUT" ] && [ -d "$dir" ]; do
 		rmdir "$dir" >>"$LOG" 2>&1 && return 0
 		sleep 1
@@ -156,9 +156,9 @@ wait_event "$(mach incomplete_start)/events" 'reason=incomplete_config' ||
     fail "incomplete start did not record preparation failure"
 wait_event "$(mach incomplete_start)/events" 'state stopped reason=start_failed error=22' ||
     fail "incomplete start did not converge current state"
-printf 'reset force\n' >"$(mach incomplete_start)/events" 2>>"$LOG" ||
+printf 'reset\n' >"$(mach incomplete_start)/events" 2>>"$LOG" ||
     fail "incomplete reset command failed"
-wait_event "$(mach incomplete_start)/events" 'reset force done' ||
+wait_event "$(mach incomplete_start)/events" 'reset done' ||
     fail "incomplete reset did not finish"
 [ ! -e "$(mach incomplete_start)/stopped" ] ||
     fail "incomplete reset restored stopped despite desired running"
@@ -177,8 +177,8 @@ start_loop
 run touch "$(mach force_delete)/stopped"
 [ -e "$(mach force_delete)/stopped" ] || fail "touch stopped failed"
 run rmdir "$(mach force_delete)"
-wait_machine_absent force_delete || fail "rmdir did not force-stop loop guest"
-say "PASS: rmdir queued force stop before deletion"
+wait_machine_absent force_delete || fail "rmdir did not stop loop guest"
+say "PASS: rmdir queued stop before deletion"
 
 unmount_cleanly || fail "umount $MNT"
 MOUNTED=0
