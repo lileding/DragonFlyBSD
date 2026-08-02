@@ -142,8 +142,6 @@ vmm_vcpu_start(struct vmm_machine *m, uint32_t count,
 	if (launch == NULL ||
 	    launch->imm_cpu_topology.imm_vcpu_count != count)
 		return EINVAL;
-	if (count != 1)
-		return EOPNOTSUPP;
 	backend_ops = vmm_backend;
 	if (backend_ops == NULL) {
 		vmm_debug_trace("vcpu start failed machine=%p reason=no_backend", m);

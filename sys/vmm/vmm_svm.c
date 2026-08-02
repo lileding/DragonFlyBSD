@@ -38,9 +38,14 @@
 #include "vmm_svm.h"
 #include "vmm_vcpu.h"
 
+struct vmm_svm_backend;
+
 static int vmm_svm_trace_enabled;
 static int vmm_svm_timing_trace_enabled;
 static int vmm_svm_fpu_check_enabled;
+
+static void vmm_svm_tracef(struct vmm_svm_backend *svm,
+    const char *fmt, ...);
 
 SYSCTL_DECL(_debug_vmm);
 SYSCTL_INT(_debug_vmm, OID_AUTO, svm_trace, CTLFLAG_RW,
@@ -55,7 +60,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 
 #define VMM_SVM_TRACE(svm, fmt, ...) do {				\
 	if (vmm_svm_trace_enabled)					\
-		vmm_machine_debugf((svm)->borrow_imm_machine, fmt,	\
+		vmm_svm_tracef((svm), fmt,				\
 		    __VA_ARGS__);					\
 } while (0)
 
@@ -146,6 +151,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
 #define VMM_SVM_APIC_REG_ESR		0x280U
+#define VMM_SVM_APIC_REG_ICR_LOW	0x300U
+#define VMM_SVM_APIC_REG_ICR_HIGH	0x310U
 #define VMM_SVM_APIC_REG_LVTT		0x320U
 #define VMM_SVM_APIC_REG_LVT_THERMAL	0x330U
 #define VMM_SVM_APIC_REG_LVT_PC		0x340U
@@ -156,6 +163,11 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_REG_TMCCT		0x390U
 #define VMM_SVM_APIC_REG_TDCR		0x3e0U
 #define VMM_SVM_APIC_VERSION		0x00140014U
+#define VMM_SVM_APIC_ICR_DEST_LOGICAL	0x00000800U
+#define VMM_SVM_APIC_ICR_DELIVERY_MASK	0x00000700U
+#define VMM_SVM_APIC_ICR_INIT		0x00000500U
+#define VMM_SVM_APIC_ICR_SIPI		0x00000600U
+#define VMM_SVM_APIC_ICR_SHORTHAND_MASK	0x000c0000U
 #define VMM_SVM_APIC_SVR_VALID		0x000003ffU
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
@@ -446,7 +458,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 					 MTRR_DEF_FIXED_ENABLE | MTRR_DEF_TYPE)
 #define VMM_SVM_APICBASE_ADDR		VMM_X86_LAPIC_MMIO_GPA
 #define VMM_SVM_APICBASE_VALID		(APICBASE_BSP | \
-					 APICBASE_ENABLED | APICBASE_ADDRESS)
+					 APICBASE_X2APIC | APICBASE_ENABLED | \
+					 APICBASE_ADDRESS)
 #define VMM_SVM_SPEC_CTRL_VALID		(SPEC_CTRL_IBRS | \
 					 SPEC_CTRL_STIBP | SPEC_CTRL_SSBD)
 #define VMM_SVM_PRED_CMD_IBPB		0x1ULL
@@ -507,6 +520,16 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_X64_DR_DR3			3
 #define VMM_X64_DR_DR6			4
 #define VMM_X64_DR_DR7			5
+
+#define VMM_SVM_SEG_ATTR_DATA		0x0092U
+#define VMM_SVM_SEG_ATTR_CODE		0x009aU
+#define VMM_SVM_SEG_ATTR_LDT		0x0082U
+#define VMM_SVM_SEG_ATTR_TSS16_BUSY	0x0083U
+
+enum vmm_svm_ap_state {
+	VMM_SVM_AP_RUNNING,
+	VMM_SVM_AP_WAIT_SIPI,
+};
 
 struct vmm_svm_segment {
 	uint16_t selector;
@@ -614,9 +637,10 @@ struct vmm_svm_backend;
 /*
  * One context exists for one machine run and is opaque outside this backend.
  * It owns the NPT-facing resources shared by all future vCPUs.  Creation and
- * destruction are serialized by vmm_vcpu_start()/release_threads(); the
- * token_platform protects the immutable topology's live backend registry and
- * shared AVIC physical table publication.  It is never held across VMRUN.
+ * destruction are serialized by vmm_vcpu_start()/release_threads().
+ * token_platform protects the APIC target registry, AVIC physical-table
+ * publication, and every mut_ platform field below.  It is never held across
+ * VMRUN or while holding token_console.
  */
 struct vmm_svm_context {
 	struct vmm_machine *borrow_imm_machine;
@@ -625,6 +649,10 @@ struct vmm_svm_context {
 	uint32_t imm_vcpu_count;
 	uint32_t imm_apic_ids[VMM_X64_MAX_VCPU];
 	struct vmm_svm_backend *own_mut_apic_targets[VMM_X64_MAX_VCPU];
+	const struct vmm_vcpu_thread *borrow_imm_bsp_vcpu;
+	u_int atomic_mut_platform_kick;
+	u_int atomic_mut_ipiq_refs;
+	u_int atomic_mut_platform_closing;
 	uint8_t *own_imm_iobm;
 	uint64_t imm_iobm_pa;
 	uint8_t *own_imm_msrbm;
@@ -635,11 +663,69 @@ struct vmm_svm_context {
 	uint64_t imm_avic_phys_table_pa;
 	uint32_t *own_mut_avic_log_table;
 	uint64_t imm_avic_log_table_pa;
+	/*
+	 * Machine-wide platform state.  token_platform protects every mut_ field
+	 * below and is never held across VMRUN.  vCPU0 owns platform timer expiry;
+	 * other vCPUs update these registers under the token and kick vCPU0.
+	 */
+	uint32_t mut_ioapic_select;
+	uint32_t mut_ioapic_id;
+	uint64_t mut_ioapic_redir[VMM_IOAPIC_PINS];
+	uint64_t mut_hpet_config;
+	uint32_t mut_hpet_status;
+	uint64_t mut_hpet_counter_base;
+	uint64_t mut_hpet_counter_tsc;
+	uint64_t mut_hpet_timer_config[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_comparator[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_deadline[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_period[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_hpet_timer_root_deadline[VMM_HPET_TIMER_COUNT];
+	int mut_hpet_timer_comparator_set[VMM_HPET_TIMER_COUNT];
+	int mut_hpet_timer_active[VMM_HPET_TIMER_COUNT];
+	uint64_t mut_pm_timer_tsc;
+	uint32_t mut_timing_trace_count;
+	uint8_t mut_com1_dll;
+	uint8_t mut_com1_dlm;
+	uint8_t mut_com1_ier;
+	uint8_t mut_com1_fcr;
+	uint8_t mut_com1_lcr;
+	uint8_t mut_com1_mcr;
+	uint8_t mut_com1_scr;
+	int mut_com1_rx_irq_pending;
+	int mut_com1_thr_irq_pending;
+	int mut_com1_lsr_overrun;
+	uint32_t mut_pci_cfg_addr;
+	uint8_t mut_pit_portb;
+	uint8_t mut_pit_ch0_read_state;
+	uint8_t mut_pit_ch0_write_state;
+	uint16_t mut_pit_ch0_reload;
+	uint16_t mut_pit_ch0_count;
+	uint64_t mut_pit_ch2_start_tsc;
+	uint16_t mut_pit_ch2_reload;
+	uint8_t mut_pit_ch2_read_state;
+	uint8_t mut_pit_ch2_write_state;
+	uint8_t mut_pit_ch2_armed;
+	uint8_t mut_pic1_mask;
+	uint8_t mut_pic2_mask;
+	uint8_t mut_pic_elcr1;
+	uint8_t mut_pic_elcr2;
+	uint8_t mut_cmos_index;
+	uint8_t mut_cmos_nmi_disabled;
+	uint8_t mut_cmos_reg_a;
+	uint8_t mut_cmos_reg_b;
+	uint8_t mut_cmos_reg_c;
+	uint8_t mut_cmos_ram[128];
+	uint8_t mut_cmos_time[10];
+	int64_t mut_cmos_time_offset;
+	uint64_t mut_cmos_periodic_root_deadline;
+	uint64_t mut_cmos_update_root_deadline;
+	int mut_cmos_time_expires;
 };
 
 struct vmm_svm_backend {
 	struct vmm_svm_context *borrow_imm_context;
 	struct vmm_machine *borrow_imm_machine;
+	const struct vmm_vcpu_thread *borrow_imm_vcpu;
 	struct vmspace *borrow_mut_vmspace;
 	struct vmm_svm_vmcb *own_mut_vmcb;
 	uint64_t imm_vmcb_pa;
@@ -669,15 +755,6 @@ struct vmm_svm_backend {
 	uint32_t mut_pause_exit_count;
 	int mut_lapic_timer_active;
 	int mut_root_timer_systimer_armed;
-	/*
-	 * IOAPIC and COM1 device state is owned by the vCPU thread.  Host
-	 * console writers may append to vmm_console's input FIFO and wake the
-	 * vCPU, but they must not update these fields directly.  The vCPU
-	 * thread re-evaluates the level-style RX condition before VM entry.
-	 */
-	uint32_t mut_ioapic_select;
-	uint32_t mut_ioapic_id;
-	uint64_t mut_ioapic_redir[VMM_IOAPIC_PINS];
 	uint64_t imm_guest_xcr0;
 	union savefpu mut_guest_fpu __aligned(64);
 	mcontext_t mut_host_fpu_ctx;
@@ -712,59 +789,14 @@ struct vmm_svm_backend {
 	uint64_t imm_host_tsc_hz;
 	uint64_t imm_guest_tsc_hz;
 	uint64_t imm_tsc_ratio;
-	uint64_t mut_hpet_config;
-	uint32_t mut_hpet_status;
-	uint64_t mut_hpet_counter_base;
-	uint64_t mut_hpet_counter_tsc;
-	uint64_t mut_hpet_timer_config[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_hpet_timer_comparator[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_hpet_timer_deadline[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_hpet_timer_period[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_hpet_timer_root_deadline[VMM_HPET_TIMER_COUNT];
-	int mut_hpet_timer_comparator_set[VMM_HPET_TIMER_COUNT];
-	int mut_hpet_timer_active[VMM_HPET_TIMER_COUNT];
-	uint64_t mut_pm_timer_tsc;
-	uint32_t mut_timing_trace_count;
 	uint64_t mut_gprs[VMM_X64_NGPR];
+	/* The target AP LWKT consumes INIT/SIPI in source ICR order. */
+	u_int atomic_mut_ap_init_pending;
+	u_int atomic_mut_ap_sipi_pending;
+	u_int atomic_mut_ap_sipi_vector;
+	enum vmm_svm_ap_state mut_ap_state;
 	/* Set by this vCPU thread before returning to the core lifecycle path. */
 	enum vmm_vcpu_exit_reason mut_exit_reason;
-	uint8_t mut_com1_dll;
-	uint8_t mut_com1_dlm;
-	uint8_t mut_com1_ier;
-	uint8_t mut_com1_fcr;
-	uint8_t mut_com1_lcr;
-	uint8_t mut_com1_mcr;
-	uint8_t mut_com1_scr;
-	int mut_com1_rx_irq_pending;
-	int mut_com1_thr_irq_pending;
-	int mut_com1_lsr_overrun;
-	uint32_t mut_pci_cfg_addr;
-	/* vCPU-thread-owned channel 2 mode-0 polling calibration state. */
-	uint8_t mut_pit_portb;
-	uint8_t mut_pit_ch0_read_state;
-	uint8_t mut_pit_ch0_write_state;
-	uint16_t mut_pit_ch0_reload;
-	uint16_t mut_pit_ch0_count;
-	uint64_t mut_pit_ch2_start_tsc;
-	uint16_t mut_pit_ch2_reload;
-	uint8_t mut_pit_ch2_read_state;
-	uint8_t mut_pit_ch2_write_state;
-	uint8_t mut_pit_ch2_armed;
-	uint8_t mut_pic1_mask;
-	uint8_t mut_pic2_mask;
-	uint8_t mut_pic_elcr1;
-	uint8_t mut_pic_elcr2;
-	uint8_t mut_cmos_index;
-	uint8_t mut_cmos_nmi_disabled;
-	uint8_t mut_cmos_reg_a;
-	uint8_t mut_cmos_reg_b;
-	uint8_t mut_cmos_reg_c;
-	uint8_t mut_cmos_ram[128];
-	uint8_t mut_cmos_time[10];
-	int64_t mut_cmos_time_offset;
-	uint64_t mut_cmos_periodic_root_deadline;
-	uint64_t mut_cmos_update_root_deadline;
-	int mut_cmos_time_expires;
 };
 
 /*
@@ -789,6 +821,19 @@ struct vmm_svm_cpu_state {
 
 static struct vmm_svm_cpu_state vmm_svm_cpu_state[MAXCPU];
 static int vmm_svm_initialized;
+
+static void
+vmm_svm_tracef(struct vmm_svm_backend *svm, const char *fmt, ...)
+{
+	__va_list ap;
+
+	kprintf("vmm tsc=%020ju machine=%p ", (uintmax_t)rdtsc(),
+	    svm->borrow_imm_machine);
+	__va_start(ap, fmt);
+	kvprintf(fmt, ap);
+	__va_end(ap);
+	kprintf("\n");
+}
 
 static void	vmm_svm_cpu_capture(void *arg);
 static void	vmm_svm_cpu_enable(void *arg);
@@ -839,11 +884,24 @@ static int vmm_svm_context_register_backend(struct vmm_svm_context *context,
     struct vmm_svm_backend *svm);
 static void vmm_svm_context_unregister_backend(
     struct vmm_svm_context *context, struct vmm_svm_backend *svm);
+static void vmm_svm_platform_kick_ipi(void *arg, int unused,
+    struct intrframe *frame);
+static void vmm_svm_platform_kick(struct vmm_svm_backend *svm);
 static void vmm_svm_advance_rip(struct vmm_svm_vmcb *vmcb);
 static uint64_t vmm_svm_guest_tsc(struct vmm_svm_backend *svm);
+static int vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
+    uint32_t *valuep);
+static int vmm_svm_lapic_write(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint32_t reg, uint32_t value);
+static void vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
+    const struct vmm_vcpu_thread *vc, const char *op, uint32_t msr,
+    uint64_t val, int has_val, const char *reason);
 static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 		    struct vmm_vcpu_thread *vc, const char *source);
 static void vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm);
+static void vmm_svm_fpu_init(struct vmm_svm_backend *svm);
+static void vmm_svm_ap_init(struct vmm_svm_backend *svm);
+static void vmm_svm_ap_sipi(struct vmm_svm_backend *svm, uint8_t vector);
 
 static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_EFER, "efer", "cpu-state" },
@@ -1044,6 +1102,8 @@ vmm_svm_context_register_backend(struct vmm_svm_context *context,
 		return EEXIST;
 	}
 	context->own_mut_apic_targets[apic_id] = svm;
+	if (apic_id == context->imm_apic_ids[0])
+		context->borrow_imm_bsp_vcpu = svm->borrow_imm_vcpu;
 	context->own_mut_avic_phys_table[apic_id] =
 	    svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID;
 	cpu_mfence();
@@ -1067,6 +1127,37 @@ vmm_svm_context_unregister_backend(struct vmm_svm_context *context,
 		cpu_mfence();
 	}
 	lwkt_reltoken(&context->token_platform);
+}
+
+static void
+vmm_svm_platform_kick_ipi(void *arg, int unused, struct intrframe *frame)
+{
+	struct vmm_svm_context *context = arg;
+	const struct vmm_vcpu_thread *bsp;
+
+	(void)unused;
+	(void)frame;
+	atomic_store_rel_int(&context->atomic_mut_platform_kick, 1);
+	bsp = context->borrow_imm_bsp_vcpu;
+	if (bsp != NULL)
+		wakeup(__DECONST(void *, bsp));
+	if (atomic_fetchadd_int(&context->atomic_mut_ipiq_refs, -1) == 1)
+		wakeup(context);
+}
+
+static void
+vmm_svm_platform_kick(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_context *context = svm->borrow_imm_context;
+	const struct vmm_vcpu_thread *bsp = context->borrow_imm_bsp_vcpu;
+
+	/* Caller holds token_platform and only an AP needs to kick the BSP. */
+	if (svm->borrow_imm_vcpu == bsp || bsp == NULL ||
+	    atomic_load_acq_int(&context->atomic_mut_platform_closing) != 0)
+		return;
+	atomic_add_int(&context->atomic_mut_ipiq_refs, 1);
+	lwkt_send_ipiq3(globaldata_find(bsp->imm_cpu),
+	    vmm_svm_platform_kick_ipi, context, 0);
 }
 
 
@@ -1093,11 +1184,13 @@ vmm_svm_avic_bind_cpu(struct vmm_svm_backend *svm)
 		    "svm avic bound apic_id=%u host_cpuid=%u host_apic_id=%u",
 		    svm->imm_avic_apic_id, cpuid, apicid);
 	}
+	lwkt_gettoken(&context->token_platform);
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    VMM_SVM_AVIC_PHYS_RUNNING |
 	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
 	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
+	lwkt_reltoken(&context->token_platform);
 	atomic_store_rel_int(&svm->atomic_mut_avic_running, 1);
 }
 
@@ -1113,14 +1206,17 @@ vmm_svm_avic_unbind_cpu(struct vmm_svm_backend *svm)
 	    atomic_load_acq_int(&svm->atomic_mut_avic_running) == 0)
 		return;
 	atomic_store_rel_int(&svm->atomic_mut_avic_running, 0);
+	lwkt_gettoken(&context->token_platform);
 	entry = svm->imm_avic_apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    atomic_load_acq_int(&svm->atomic_mut_avic_host_apic_id);
 	context->own_mut_avic_phys_table[svm->imm_avic_apic_id] = entry;
 	cpu_mfence();
+	lwkt_reltoken(&context->token_platform);
 }
 
 static void
-vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+vmm_svm_avic_deliver(struct vmm_svm_backend *svm,
+    const struct vmm_vcpu_thread *vc,
     uint8_t vector, const char *source)
 {
 	volatile uint32_t *irr;
@@ -1137,6 +1233,8 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	bit = 1U << (vector & 31);
 	atomic_set_int((volatile u_int *)irr, bit);
 	cpu_mfence();
+	/* A halted target must observe the new IRR before sleeping again. */
+	wakeup(vc);
 	VMM_SVM_TRACE(svm,
 	    "svm vcpu%u avic deliver source=%s vector=0x%x irr=0x%x",
 	    vc->imm_id, source, vector, *irr);
@@ -1407,6 +1505,163 @@ vmm_svm_lapic_eoi(struct vmm_svm_backend *svm)
 	}
 }
 
+/*
+ * AVIC's backing page is the canonical LAPIC register image.  xAPIC MMIO
+ * no-accelerate exits and x2APIC MSR accesses must update it through this
+ * same path, otherwise a later change of APIC interface loses timer state.
+ */
+static int
+vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
+    uint32_t *valuep)
+{
+	uint64_t now;
+	uint64_t remaining;
+
+	switch (reg) {
+	case VMM_SVM_APIC_REG_ID:
+	case VMM_SVM_APIC_REG_VERSION:
+	case VMM_SVM_APIC_REG_TPR:
+	case VMM_SVM_APIC_REG_SVR:
+	case VMM_SVM_APIC_REG_ESR:
+	case VMM_SVM_APIC_REG_LVTT:
+	case VMM_SVM_APIC_REG_LVT_THERMAL:
+	case VMM_SVM_APIC_REG_LVT_PC:
+	case VMM_SVM_APIC_REG_LVT0:
+	case VMM_SVM_APIC_REG_LVT1:
+	case VMM_SVM_APIC_REG_LVT_ERROR:
+	case VMM_SVM_APIC_REG_TMICT:
+	case VMM_SVM_APIC_REG_TDCR:
+		*valuep = vmm_svm_avic_apic_read32(svm, reg);
+		return 1;
+	case VMM_SVM_APIC_REG_TMCCT:
+		now = rdtsc();
+		if ((svm->mut_lapic_timer_lvtt &
+		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE ||
+		    !svm->mut_lapic_timer_active ||
+		    svm->mut_lapic_timer_interval_root_tsc == 0 ||
+		    svm->mut_lapic_timer_root_deadline <= now) {
+			*valuep = 0;
+		} else {
+			remaining = svm->mut_lapic_timer_root_deadline - now;
+			*valuep = (uint32_t)(((_uint128_t)
+			    svm->mut_lapic_timer_tmict * remaining) /
+			    svm->mut_lapic_timer_interval_root_tsc);
+		}
+		vmm_svm_avic_apic_write32(svm, reg, *valuep);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+vmm_svm_lapic_write(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint32_t reg, uint32_t value)
+{
+	uint32_t tmp1;
+	uint32_t tmp2;
+
+	switch (reg) {
+	case VMM_SVM_APIC_REG_TPR:
+		vmm_svm_avic_apic_write32(svm, reg, value & 0xffU);
+		return 1;
+	case VMM_SVM_APIC_REG_LVT_ERROR:
+		value &= VMM_SVM_APIC_LVT_ERROR_VALID;
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		return 1;
+	case VMM_SVM_APIC_REG_LVTT:
+		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
+		if ((svm->mut_lapic_timer_lvtt &
+		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE &&
+		    (value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) !=
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
+			svm->mut_lapic_timer_active = 0;
+		svm->mut_lapic_timer_lvtt = value;
+		if ((value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
+			svm->mut_lapic_timer_tmict = 0;
+			svm->mut_lapic_timer_interval_root_tsc = 0;
+			svm->mut_lapic_timer_root_deadline = 0;
+			svm->mut_lapic_timer_active =
+			    svm->mut_lapic_timer_tsc_deadline != 0;
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_TMICT, 0);
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_TMCCT, 0);
+		}
+		if (svm->mut_lapic_timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(svm,
+			    svm->mut_lapic_timer_tmict);
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		return 1;
+	case VMM_SVM_APIC_REG_TMICT:
+		if ((svm->mut_lapic_timer_lvtt &
+		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
+		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
+			vmm_svm_avic_apic_write32(svm, reg,
+			    svm->mut_lapic_timer_tmict);
+			return 1;
+		}
+		vmm_svm_lapic_timer_arm(svm, value);
+		return 1;
+	case VMM_SVM_APIC_REG_TDCR:
+		value &= VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+		svm->mut_lapic_timer_tdcr = value;
+		tmp1 = value & 0xfU;
+		tmp2 = ((tmp1 & 0x3U) | ((tmp1 & 0x8U) >> 1)) + 1;
+		svm->mut_lapic_timer_divisor = 1U << (tmp2 & 0x7U);
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		if (svm->mut_lapic_timer_active &&
+		    svm->mut_lapic_timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(svm,
+			    svm->mut_lapic_timer_tmict);
+		return 1;
+	case VMM_SVM_APIC_REG_EOI:
+		vmm_svm_lapic_eoi(svm);
+		return 1;
+	case VMM_SVM_APIC_REG_SVR:
+		value &= VMM_SVM_APIC_SVR_VALID;
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		if ((value & VMM_SVM_APIC_SVR_ENABLE) == 0) {
+			svm->mut_lapic_timer_active = 0;
+			svm->mut_lapic_timer_lvtt |= VMM_SVM_APIC_LVT_MASKED;
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
+			    svm->mut_lapic_timer_lvtt);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT0,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT1,
+			    VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_LVT_ERROR, VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_LVT_THERMAL, VMM_SVM_APIC_LVT_MASKED);
+			vmm_svm_avic_apic_write32(svm,
+			    VMM_SVM_APIC_REG_LVT_PC, VMM_SVM_APIC_LVT_MASKED);
+		}
+		return 1;
+	case VMM_SVM_APIC_REG_ESR:
+		vmm_svm_avic_apic_write32(svm, reg, 0);
+		return 1;
+	case VMM_SVM_APIC_REG_LVT0:
+	case VMM_SVM_APIC_REG_LVT1:
+		vmm_svm_avic_apic_write32(svm, reg,
+		    value & VMM_SVM_APIC_LVT_LINT_VALID);
+		return 1;
+	case VMM_SVM_APIC_REG_LVT_THERMAL:
+	case VMM_SVM_APIC_REG_LVT_PC:
+		vmm_svm_avic_apic_write32(svm, reg,
+		    value & VMM_SVM_APIC_LVT_DELIVERY_VALID);
+		return 1;
+	default:
+		vmm_machine_debugf(svm->borrow_imm_machine,
+		    "svm vcpu%u unsupported lapic write reg=0x%x value=0x%x",
+		    vc->imm_id, reg, value);
+		return 0;
+	}
+}
+
 static const char *
 vmm_svm_probe(void)
 {
@@ -1644,6 +1899,114 @@ vmm_svm_load_state(struct vmm_svm_backend *svm,
 }
 
 static void
+vmm_svm_ap_init(struct vmm_svm_backend *svm)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	/*
+	 * INIT resets an AP to the architectural pre-SIPI state.  This runs only
+	 * in the target vCPU LWKT: the ICR writer publishes an atomic request but
+	 * never writes another vCPU's VMCB.
+	 */
+	bzero(svm->mut_gprs, sizeof(svm->mut_gprs));
+	bzero(svm->mut_guest_drs, sizeof(svm->mut_guest_drs));
+	svm->mut_guest_drs[VMM_X64_DR_DR6] = 0xffff0ff0ULL;
+	svm->mut_guest_drs[VMM_X64_DR_DR7] = 0x400ULL;
+	vmm_svm_fpu_init(svm);
+	svm->imm_guest_xcr0 = VMM_X64_XCR0_X87;
+	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR | APICBASE_ENABLED;
+	svm->mut_lapic_timer_lvtt = 0;
+	svm->mut_lapic_timer_tmict = 0;
+	svm->mut_lapic_timer_tdcr = 0;
+	svm->mut_lapic_timer_active = 0;
+	svm->mut_lapic_timer_tsc_deadline = 0;
+	svm->mut_lapic_timer_root_deadline = 0;
+	svm->mut_root_timer_deadline = 0;
+	if (svm->mut_root_timer_systimer_armed) {
+		systimer_del(&svm->own_mut_root_timer_systimer);
+		svm->mut_root_timer_systimer_armed = 0;
+	}
+
+	vmcb->state.rax = 0;
+	vmcb->state.rsp = 0;
+	vmcb->state.rip = 0xfff0ULL;
+	vmcb->state.rflags = 2;
+	vmcb->state.cr0 = CR0_ET | CR0_NW | CR0_CD;
+	vmcb->state.cr2 = 0;
+	vmcb->state.cr3 = 0;
+	vmcb->state.cr4 = 0;
+	vmcb->state.dr6 = svm->mut_guest_drs[VMM_X64_DR_DR6];
+	vmcb->state.dr7 = svm->mut_guest_drs[VMM_X64_DR_DR7];
+	/* VMRUN requires SVME in the VMCB save state even for a reset AP. */
+	vmcb->state.efer = EFER_SVME;
+	vmcb->state.g_pat = 0x0007040600070406ULL;
+	vmcb->state.star = 0;
+	vmcb->state.lstar = 0;
+	vmcb->state.cstar = 0;
+	vmcb->state.sfmask = 0;
+	vmcb->state.kernelgsbase = 0;
+	vmcb->state.sysenter_cs = 0;
+	vmcb->state.sysenter_esp = 0;
+	vmcb->state.sysenter_eip = 0;
+	bzero(svm->own_mut_avic_apic_page, PAGE_SIZE);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ID,
+	    svm->imm_avic_apic_id << 24);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_VERSION,
+	    VMM_SVM_APIC_VERSION);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TPR, 0);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR, 0);
+	bzero(&vmcb->state.es, sizeof(vmcb->state.es));
+	bzero(&vmcb->state.ss, sizeof(vmcb->state.ss));
+	bzero(&vmcb->state.ds, sizeof(vmcb->state.ds));
+	bzero(&vmcb->state.fs, sizeof(vmcb->state.fs));
+	bzero(&vmcb->state.gs, sizeof(vmcb->state.gs));
+	vmcb->state.es.attrib = VMM_SVM_SEG_ATTR_DATA;
+	vmcb->state.ss.attrib = VMM_SVM_SEG_ATTR_DATA;
+	vmcb->state.ds.attrib = VMM_SVM_SEG_ATTR_DATA;
+	vmcb->state.fs.attrib = VMM_SVM_SEG_ATTR_DATA;
+	vmcb->state.gs.attrib = VMM_SVM_SEG_ATTR_DATA;
+	vmcb->state.es.limit = 0xffffU;
+	vmcb->state.ss.limit = 0xffffU;
+	vmcb->state.ds.limit = 0xffffU;
+	vmcb->state.fs.limit = 0xffffU;
+	vmcb->state.gs.limit = 0xffffU;
+	bzero(&vmcb->state.cs, sizeof(vmcb->state.cs));
+	vmcb->state.cs.selector = 0xf000U;
+	vmcb->state.cs.attrib = VMM_SVM_SEG_ATTR_CODE;
+	vmcb->state.cs.limit = 0xffffU;
+	vmcb->state.cs.base = 0xffff0000ULL;
+	bzero(&vmcb->state.gdt, sizeof(vmcb->state.gdt));
+	bzero(&vmcb->state.idt, sizeof(vmcb->state.idt));
+	vmcb->state.gdt.limit = 0xffffU;
+	vmcb->state.idt.limit = 0xffffU;
+	bzero(&vmcb->state.ldt, sizeof(vmcb->state.ldt));
+	bzero(&vmcb->state.tr, sizeof(vmcb->state.tr));
+	vmcb->state.ldt.attrib = VMM_SVM_SEG_ATTR_LDT;
+	vmcb->state.tr.attrib = VMM_SVM_SEG_ATTR_TSS16_BUSY;
+	vmcb->state.ldt.limit = 0xffffU;
+	vmcb->state.tr.limit = 0xffffU;
+	vmcb->state.cpl = 0;
+	vmcb->ctrl.eventinj = 0;
+	vmcb->ctrl.intr &= ~VMM_SVM_CTRL_INTR_SHADOW;
+	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	vmcb->ctrl.vmcb_clean = 0;
+	svm->mut_ap_state = VMM_SVM_AP_WAIT_SIPI;
+}
+
+static void
+vmm_svm_ap_sipi(struct vmm_svm_backend *svm, uint8_t vector)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+
+	vmcb->state.cs.selector = (uint16_t)vector << 8;
+	vmcb->state.cs.base = (uint64_t)vector << 12;
+	vmcb->state.rip = 0;
+	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	vmcb->ctrl.vmcb_clean = 0;
+	svm->mut_ap_state = VMM_SVM_AP_RUNNING;
+}
+
+static void
 vmm_svm_fpu_init(struct vmm_svm_backend *svm)
 {
 	union savefpu *fpu = &svm->mut_guest_fpu;
@@ -1661,6 +2024,7 @@ vmm_svm_context_create(struct vmm_machine *m, uint32_t count,
     const struct vmm_launch *launch, void **contextp)
 {
 	struct vmm_svm_context *context;
+	uint32_t i;
 	int error;
 
 	if (contextp == NULL || launch == NULL || count == 0 ||
@@ -1673,6 +2037,21 @@ vmm_svm_context_create(struct vmm_machine *m, uint32_t count,
 	context->imm_vcpu_count = count;
 	bcopy(launch->imm_cpu_topology.imm_apic_ids, context->imm_apic_ids,
 	    sizeof(context->imm_apic_ids));
+	context->mut_hpet_counter_tsc = rdtsc();
+	context->mut_pm_timer_tsc = context->mut_hpet_counter_tsc;
+	context->mut_ioapic_id = VMM_IOAPIC_ID;
+	for (i = 0; i < VMM_IOAPIC_PINS; ++i)
+		context->mut_ioapic_redir[i] = VMM_IOAPIC_REDIR_MASKED;
+	context->mut_pic1_mask = 0xffU;
+	context->mut_pic2_mask = 0xffU;
+	context->mut_cmos_reg_a = VMM_RTC_REG_A_DEFAULT;
+	context->mut_cmos_reg_b = VMM_RTC_REG_B_24H;
+	context->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] =
+	    VMM_RTC_ALARM_DONT_CARE;
+	context->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] =
+	    VMM_RTC_ALARM_DONT_CARE;
+	context->mut_cmos_ram[VMM_RTC_HOURS_ALARM] =
+	    VMM_RTC_ALARM_DONT_CARE;
 	context->borrow_mut_vmspace = vmm_mem_borrow_vmspace(&m->own_mut_mem);
 	if (context->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
@@ -1716,6 +2095,9 @@ vmm_svm_context_destroy(void *context_arg)
 
 	if (context == NULL)
 		return;
+	atomic_store_rel_int(&context->atomic_mut_platform_closing, 1);
+	while (atomic_load_acq_int(&context->atomic_mut_ipiq_refs) != 0)
+		tsleep(context, 0, "vmmipiq", hz / 20 + 1);
 	vmm_svm_avic_unmap_access_page(context);
 	vmm_svm_avic_access_page_free(context->own_mut_avic_access_page);
 	vmm_svm_contig_free(context->own_mut_avic_log_table, 1);
@@ -1754,6 +2136,7 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	svm = kmalloc(sizeof(*svm), M_TEMP, M_WAITOK | M_ZERO);
 	svm->borrow_imm_context = context;
 	svm->borrow_imm_machine = m;
+	svm->borrow_imm_vcpu = vc;
 	svm->borrow_mut_vmspace = context->borrow_mut_vmspace;
 	svm->imm_avic_apic_id = context->imm_apic_ids[vc->imm_id];
 	if (svm->borrow_mut_vmspace == NULL) {
@@ -1798,25 +2181,14 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	    (uintmax_t)svm->imm_host_tsc_hz,
 	    (uintmax_t)svm->imm_guest_tsc_hz,
 	    (uintmax_t)svm->imm_tsc_ratio);
-	svm->mut_hpet_counter_tsc = rdtsc();
-	svm->mut_pm_timer_tsc = svm->mut_hpet_counter_tsc;
 	svm->mut_guest_mtrr_def_type = MTRR_WRITE_BACK;
 	svm->mut_guest_nb_cfg = NB_CFG_INITAPICCPUIDLO;
 	/* Guest TSC and CPUID.15 publish one fixed P0-equivalent frequency. */
 	svm->mut_guest_hwcr = VMM_SVM_HWCR_GUEST_FIXED;
-	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR |
-	    APICBASE_BSP | APICBASE_ENABLED;
+	svm->mut_guest_apicbase = VMM_SVM_APICBASE_ADDR | APICBASE_ENABLED;
+	if (vc->imm_id == 0)
+		svm->mut_guest_apicbase |= APICBASE_BSP;
 	svm->mut_lapic_timer_divisor = 2;
-	svm->mut_ioapic_id = VMM_IOAPIC_ID;
-	for (i = 0; i < VMM_IOAPIC_PINS; i++)
-		svm->mut_ioapic_redir[i] = VMM_IOAPIC_REDIR_MASKED;
-	svm->mut_pic1_mask = 0xffU;
-	svm->mut_pic2_mask = 0xffU;
-	svm->mut_cmos_reg_a = VMM_RTC_REG_A_DEFAULT;
-	svm->mut_cmos_reg_b = VMM_RTC_REG_B_24H;
-	svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] = VMM_RTC_ALARM_DONT_CARE;
-	svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] = VMM_RTC_ALARM_DONT_CARE;
-	svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] = VMM_RTC_ALARM_DONT_CARE;
 	vmm_svm_fpu_init(svm);
 	if (vmm_svm_fpu_check_enabled) {
 		if ((npx_xcr0_mask & (CPU_XFEATURE_X87 | CPU_XFEATURE_SSE |
@@ -1912,6 +2284,8 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	if (error)
 		goto fail;
 	vmm_svm_load_state(svm, &launch->imm_vcpu0);
+	if (vc->imm_id != 0)
+		vmm_svm_ap_init(svm);
 
 	*backendp = svm;
 	return 0;
@@ -2074,9 +2448,16 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 	case 1:
 		cpuid_count(1, 0, regs);
 		regs[1] &= CPUID_CLFUSH_SIZE;
-		regs[1] |= 1U << CPUID_HTT_CORE_SHIFT;
-		regs[1] &= ~VMM_CPUID_APIC_ID_MASK;
+		regs[1] |= svm->borrow_imm_context->imm_vcpu_count <<
+		    CPUID_HTT_CORE_SHIFT;
+		regs[1] |= svm->imm_avic_apic_id << 24;
 		regs[2] &= VMM_CPUID1_ECX_ALLOWED;
+		/*
+		 * TSC-deadline is fully intercepted and backed by the root TSC
+		 * scheduler.  It is a guest architectural capability, not a
+		 * pass-through claim about the host LAPIC timer.
+		 */
+		regs[2] |= CPUID2_TSCDLT;
 		regs[3] &= VMM_CPUID1_EDX_ALLOWED;
 		if (npx_xcr0_mask == 0) {
 			regs[2] &= ~(CPUID2_XSAVE | CPUID2_OSXSAVE |
@@ -2438,10 +2819,10 @@ vmm_svm_hpet_counter(struct vmm_svm_backend *svm)
 {
 	uint64_t delta;
 
-	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) == 0)
-		return svm->mut_hpet_counter_base;
-	delta = rdtsc() - svm->mut_hpet_counter_tsc;
-	return svm->mut_hpet_counter_base +
+	if ((svm->borrow_imm_context->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) == 0)
+		return svm->borrow_imm_context->mut_hpet_counter_base;
+	delta = rdtsc() - svm->borrow_imm_context->mut_hpet_counter_tsc;
+	return svm->borrow_imm_context->mut_hpet_counter_base +
 	    (delta / svm->imm_host_tsc_hz) * VMM_HPET_FREQ +
 	    ((delta % svm->imm_host_tsc_hz) * VMM_HPET_FREQ) /
 	    svm->imm_host_tsc_hz;
@@ -2457,19 +2838,19 @@ vmm_svm_pm_timer_counter(struct vmm_svm_backend *svm)
 	uint32_t sample;
 
 	now = rdtsc();
-	delta = now - svm->mut_pm_timer_tsc;
+	delta = now - svm->borrow_imm_context->mut_pm_timer_tsc;
 
 	ticks = (delta / svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ +
 	    ((delta % svm->imm_host_tsc_hz) * VMM_PM_TIMER_FREQ) /
 	    svm->imm_host_tsc_hz;
 	counter = (uint32_t)ticks & VMM_PM_TIMER_MASK;
 	if (vmm_svm_timing_trace_enabled &&
-	    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
-		sample = svm->mut_timing_trace_count++;
+	    svm->borrow_imm_context->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+		sample = svm->borrow_imm_context->mut_timing_trace_count++;
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm timing pmtimer sample=%u cpu=%d root_tsc=0x%jx pm=0x%x base_tsc=0x%jx delta=0x%jx offset=0x%jx ratio=0x%jx",
 		    sample, mycpu->gd_cpuid, (uintmax_t)now, counter,
-		    (uintmax_t)svm->mut_pm_timer_tsc, (uintmax_t)delta,
+		    (uintmax_t)svm->borrow_imm_context->mut_pm_timer_tsc, (uintmax_t)delta,
 		    (uintmax_t)svm->own_mut_vmcb->ctrl.tsc_offset,
 		    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
 	}
@@ -2486,9 +2867,9 @@ vmm_svm_hpet_read64(struct vmm_svm_backend *svm, uint64_t off)
 	case VMM_HPET_REG_CAP:
 		return VMM_HPET_CAP_ID;
 	case VMM_HPET_REG_CONFIG:
-		return svm->mut_hpet_config;
+		return svm->borrow_imm_context->mut_hpet_config;
 	case VMM_HPET_REG_STATUS:
-		return svm->mut_hpet_status;
+		return svm->borrow_imm_context->mut_hpet_status;
 	case VMM_HPET_REG_COUNTER:
 		return vmm_svm_hpet_counter(svm);
 	default:
@@ -2501,10 +2882,10 @@ vmm_svm_hpet_read64(struct vmm_svm_backend *svm, uint64_t off)
 			return 0;
 		switch (reg) {
 		case VMM_HPET_TIMER_CONFIG:
-			return svm->mut_hpet_timer_config[idx] |
+			return svm->borrow_imm_context->mut_hpet_timer_config[idx] |
 			    VMM_HPET_TIMER_CAP;
 		case VMM_HPET_TIMER_COMPARATOR:
-			return svm->mut_hpet_timer_comparator[idx];
+			return svm->borrow_imm_context->mut_hpet_timer_comparator[idx];
 		case VMM_HPET_TIMER_FSB:
 			return 0;
 		default:
@@ -2523,41 +2904,41 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 
 	switch (off) {
 	case VMM_HPET_REG_CONFIG:
-		old = svm->mut_hpet_config;
+		old = svm->borrow_imm_context->mut_hpet_config;
 		val = val & VMM_HPET_CONFIG_VALID;
 		if (((old ^ val) & VMM_HPET_CONFIG_ENABLE) != 0)
-			svm->mut_hpet_counter_base = vmm_svm_hpet_counter(svm);
-		svm->mut_hpet_config = val;
-		if ((old ^ svm->mut_hpet_config) != 0) {
-			if (((old ^ svm->mut_hpet_config) &
+			svm->borrow_imm_context->mut_hpet_counter_base = vmm_svm_hpet_counter(svm);
+		svm->borrow_imm_context->mut_hpet_config = val;
+		if ((old ^ svm->borrow_imm_context->mut_hpet_config) != 0) {
+			if (((old ^ svm->borrow_imm_context->mut_hpet_config) &
 			    VMM_HPET_CONFIG_ENABLE) != 0)
-				svm->mut_hpet_counter_tsc = rdtsc();
+				svm->borrow_imm_context->mut_hpet_counter_tsc = rdtsc();
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm hpet config=0x%jx tsc_hz=%ju hpet_hz=%ju",
-			    (uintmax_t)svm->mut_hpet_config,
+			    (uintmax_t)svm->borrow_imm_context->mut_hpet_config,
 			    (uintmax_t)svm->imm_host_tsc_hz,
 			    (uintmax_t)VMM_HPET_FREQ);
 			if (vmm_svm_timing_trace_enabled &&
-			    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
-				uint32_t sample = svm->mut_timing_trace_count++;
+			    svm->borrow_imm_context->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+				uint32_t sample = svm->borrow_imm_context->mut_timing_trace_count++;
 
 				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm timing hpet config sample=%u cpu=%d root_tsc=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
 				    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
-				    (uintmax_t)svm->mut_hpet_config,
-				    (uintmax_t)svm->mut_hpet_counter_base,
-				    (uintmax_t)svm->mut_hpet_counter_tsc,
+				    (uintmax_t)svm->borrow_imm_context->mut_hpet_config,
+				    (uintmax_t)svm->borrow_imm_context->mut_hpet_counter_base,
+				    (uintmax_t)svm->borrow_imm_context->mut_hpet_counter_tsc,
 				    (uintmax_t)svm->own_mut_vmcb->ctrl.tsc_offset,
 				    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
 			}
 		}
 		return;
 	case VMM_HPET_REG_STATUS:
-		svm->mut_hpet_status &= ~(uint32_t)val;
+		svm->borrow_imm_context->mut_hpet_status &= ~(uint32_t)val;
 		return;
 	case VMM_HPET_REG_COUNTER:
-		svm->mut_hpet_counter_base = val;
-		svm->mut_hpet_counter_tsc = rdtsc();
+		svm->borrow_imm_context->mut_hpet_counter_base = val;
+		svm->borrow_imm_context->mut_hpet_counter_tsc = rdtsc();
 		return;
 	default:
 		break;
@@ -2569,57 +2950,57 @@ vmm_svm_hpet_write64(struct vmm_svm_backend *svm, uint64_t off, uint64_t val)
 			return;
 		switch (reg) {
 		case VMM_HPET_TIMER_CONFIG:
-			svm->mut_hpet_timer_config[idx] = val &
+			svm->borrow_imm_context->mut_hpet_timer_config[idx] = val &
 			    VMM_HPET_TIMER_CONFIG_VALID;
-			if ((svm->mut_hpet_timer_config[idx] &
+			if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 			    VMM_HPET_TIMER_ENABLE) == 0) {
-				svm->mut_hpet_timer_active[idx] = 0;
+				svm->borrow_imm_context->mut_hpet_timer_active[idx] = 0;
 				return;
 			}
-			if ((svm->mut_hpet_timer_config[idx] &
+			if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 			    VMM_HPET_TIMER_PERIODIC) != 0) {
-				if ((svm->mut_hpet_timer_config[idx] &
+				if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 				    VMM_HPET_TIMER_SETVAL) != 0) {
-					svm->mut_hpet_timer_period[idx] = 0;
-					svm->mut_hpet_timer_active[idx] = 0;
-				} else if (svm->mut_hpet_timer_comparator_set[idx] &&
-				    svm->mut_hpet_timer_period[idx] != 0) {
-					svm->mut_hpet_timer_active[idx] = 1;
+					svm->borrow_imm_context->mut_hpet_timer_period[idx] = 0;
+					svm->borrow_imm_context->mut_hpet_timer_active[idx] = 0;
+				} else if (svm->borrow_imm_context->mut_hpet_timer_comparator_set[idx] &&
+				    svm->borrow_imm_context->mut_hpet_timer_period[idx] != 0) {
+					svm->borrow_imm_context->mut_hpet_timer_active[idx] = 1;
 				}
-			} else if (svm->mut_hpet_timer_comparator_set[idx]) {
-				svm->mut_hpet_timer_deadline[idx] =
-				    svm->mut_hpet_timer_comparator[idx];
-				if ((svm->mut_hpet_timer_config[idx] &
+			} else if (svm->borrow_imm_context->mut_hpet_timer_comparator_set[idx]) {
+				svm->borrow_imm_context->mut_hpet_timer_deadline[idx] =
+				    svm->borrow_imm_context->mut_hpet_timer_comparator[idx];
+				if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 				    VMM_HPET_TIMER_32BIT) != 0)
-					svm->mut_hpet_timer_deadline[idx] &= 0xffffffffULL;
-				svm->mut_hpet_timer_active[idx] = 1;
+					svm->borrow_imm_context->mut_hpet_timer_deadline[idx] &= 0xffffffffULL;
+				svm->borrow_imm_context->mut_hpet_timer_active[idx] = 1;
 			}
 			return;
 		case VMM_HPET_TIMER_COMPARATOR:
-			if ((svm->mut_hpet_timer_config[idx] &
+			if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 			    VMM_HPET_TIMER_32BIT) != 0)
 				val &= 0xffffffffULL;
-			svm->mut_hpet_timer_comparator[idx] = val;
-			svm->mut_hpet_timer_comparator_set[idx] = 1;
-			if ((svm->mut_hpet_timer_config[idx] &
+			svm->borrow_imm_context->mut_hpet_timer_comparator[idx] = val;
+			svm->borrow_imm_context->mut_hpet_timer_comparator_set[idx] = 1;
+			if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 			    VMM_HPET_TIMER_PERIODIC) != 0) {
-				if ((svm->mut_hpet_timer_config[idx] &
+				if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 				    VMM_HPET_TIMER_SETVAL) != 0) {
-					svm->mut_hpet_timer_deadline[idx] = val;
-					svm->mut_hpet_timer_period[idx] = 0;
-					svm->mut_hpet_timer_config[idx] &=
+					svm->borrow_imm_context->mut_hpet_timer_deadline[idx] = val;
+					svm->borrow_imm_context->mut_hpet_timer_period[idx] = 0;
+					svm->borrow_imm_context->mut_hpet_timer_config[idx] &=
 					    ~VMM_HPET_TIMER_SETVAL;
-					svm->mut_hpet_timer_active[idx] = 0;
+					svm->borrow_imm_context->mut_hpet_timer_active[idx] = 0;
 				} else {
-					svm->mut_hpet_timer_period[idx] = val;
-					if ((svm->mut_hpet_timer_config[idx] &
+					svm->borrow_imm_context->mut_hpet_timer_period[idx] = val;
+					if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 					    VMM_HPET_TIMER_ENABLE) != 0 && val != 0)
-						svm->mut_hpet_timer_active[idx] = 1;
+						svm->borrow_imm_context->mut_hpet_timer_active[idx] = 1;
 				}
-			} else if ((svm->mut_hpet_timer_config[idx] &
+			} else if ((svm->borrow_imm_context->mut_hpet_timer_config[idx] &
 			    VMM_HPET_TIMER_ENABLE) != 0) {
-				svm->mut_hpet_timer_deadline[idx] = val;
-				svm->mut_hpet_timer_active[idx] = 1;
+				svm->borrow_imm_context->mut_hpet_timer_deadline[idx] = val;
+				svm->borrow_imm_context->mut_hpet_timer_active[idx] = 1;
 			}
 			return;
 		case VMM_HPET_TIMER_FSB:
@@ -2691,6 +3072,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 	int modsz;
 	int size;
 
+	lwkt_gettoken(&svm->borrow_imm_context->token_platform);
 	if (vmcb->ctrl.inst_len == 0 ||
 	    vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
 		goto fail;
@@ -2723,15 +3105,15 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 		vmm_svm_gpr_write(svm, reg, val, size);
 		if (gpa - VMM_HPET_BASE == VMM_HPET_REG_COUNTER &&
 		    vmm_svm_timing_trace_enabled &&
-		    svm->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
-			uint32_t sample = svm->mut_timing_trace_count++;
+		    svm->borrow_imm_context->mut_timing_trace_count < VMM_SVM_TIMING_TRACE_LIMIT) {
+			uint32_t sample = svm->borrow_imm_context->mut_timing_trace_count++;
 
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm timing hpet counter sample=%u cpu=%d root_tsc=0x%jx hpet=0x%jx config=0x%jx base=0x%jx base_tsc=0x%jx offset=0x%jx ratio=0x%jx",
 			    sample, mycpu->gd_cpuid, (uintmax_t)rdtsc(),
-			    (uintmax_t)val, (uintmax_t)svm->mut_hpet_config,
-			    (uintmax_t)svm->mut_hpet_counter_base,
-			    (uintmax_t)svm->mut_hpet_counter_tsc,
+			    (uintmax_t)val, (uintmax_t)svm->borrow_imm_context->mut_hpet_config,
+			    (uintmax_t)svm->borrow_imm_context->mut_hpet_counter_base,
+			    (uintmax_t)svm->borrow_imm_context->mut_hpet_counter_tsc,
 			    (uintmax_t)vmcb->ctrl.tsc_offset,
 			    (uintmax_t)rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO));
 		}
@@ -2742,6 +3124,7 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
 			    vmcb->ctrl.inst_len, (uintmax_t)vmcb->ctrl.nrip);
 		vmcb->state.rip += off + modsz;
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case 0x89:
 		if (off >= vmcb->ctrl.inst_len)
@@ -2760,6 +3143,8 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
 			    vmcb->ctrl.inst_len, (uintmax_t)vmcb->ctrl.nrip);
 		vmcb->state.rip += off + modsz;
+		vmm_svm_platform_kick(svm);
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case 0xc7:
 		if (off >= vmcb->ctrl.inst_len)
@@ -2784,11 +3169,14 @@ vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
 			    size, (uintmax_t)val, (uintmax_t)vmcb->state.rip,
 			    vmcb->ctrl.inst_len, (uintmax_t)vmcb->ctrl.nrip);
 		vmcb->state.rip += off + 4;
+		vmm_svm_platform_kick(svm);
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	default:
 		break;
 	}
 fail:
+	lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported hpet mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
@@ -2894,16 +3282,16 @@ fail:
 static uint32_t
 vmm_svm_ioapic_read(struct vmm_svm_backend *svm)
 {
-	uint32_t reg = svm->mut_ioapic_select;
+	uint32_t reg = svm->borrow_imm_context->mut_ioapic_select;
 	uint32_t pin;
 
 	switch (reg) {
 	case VMM_IOAPIC_REG_ID:
-		return svm->mut_ioapic_id << 24;
+		return svm->borrow_imm_context->mut_ioapic_id << 24;
 	case VMM_IOAPIC_REG_VERSION:
 		return VMM_IOAPIC_VERSION;
 	case VMM_IOAPIC_REG_ARB:
-		return svm->mut_ioapic_id << 24;
+		return svm->borrow_imm_context->mut_ioapic_id << 24;
 	default:
 		break;
 	}
@@ -2912,23 +3300,23 @@ vmm_svm_ioapic_read(struct vmm_svm_backend *svm)
 		return 0;
 	pin = (reg - VMM_IOAPIC_REDIR_BASE) / 2;
 	if ((reg & 1) == 0)
-		return (uint32_t)svm->mut_ioapic_redir[pin];
-	return (uint32_t)(svm->mut_ioapic_redir[pin] >> 32);
+		return (uint32_t)svm->borrow_imm_context->mut_ioapic_redir[pin];
+	return (uint32_t)(svm->borrow_imm_context->mut_ioapic_redir[pin] >> 32);
 }
 
 static void
 vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
     uint32_t val)
 {
-	uint32_t reg = svm->mut_ioapic_select;
+	uint32_t reg = svm->borrow_imm_context->mut_ioapic_select;
 	uint32_t pin;
 	uint64_t old;
 
 	if (reg == VMM_IOAPIC_REG_ID) {
-		svm->mut_ioapic_id = (val >> 24) & 0x0fU;
+		svm->borrow_imm_context->mut_ioapic_id = (val >> 24) & 0x0fU;
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic id=0x%x", vc->imm_id,
-		    svm->mut_ioapic_id);
+		    svm->borrow_imm_context->mut_ioapic_id);
 		return;
 	}
 	if (reg == VMM_IOAPIC_REG_VERSION || reg == VMM_IOAPIC_REG_ARB) {
@@ -2945,25 +3333,27 @@ vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		return;
 	}
 	pin = (reg - VMM_IOAPIC_REDIR_BASE) / 2;
-	old = svm->mut_ioapic_redir[pin];
+	old = svm->borrow_imm_context->mut_ioapic_redir[pin];
 	if ((reg & 1) == 0) {
-		svm->mut_ioapic_redir[pin] =
+		svm->borrow_imm_context->mut_ioapic_redir[pin] =
 		    (old & 0xffffffff00000000ULL) |
 		    (val & VMM_IOAPIC_REDIR_LOW_VALID);
 	} else {
-		svm->mut_ioapic_redir[pin] =
+		svm->borrow_imm_context->mut_ioapic_redir[pin] =
 		    (old & 0x00000000ffffffffULL) |
 		    ((uint64_t)(val & VMM_IOAPIC_REDIR_HIGH_VALID) << 32);
 	}
 	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u ioapic redir pin=%u value=0x%jx",
-	    vc->imm_id, pin, (uintmax_t)svm->mut_ioapic_redir[pin]);
+	    vc->imm_id, pin, (uintmax_t)svm->borrow_imm_context->mut_ioapic_redir[pin]);
 }
 
 static void
 vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
     uint32_t pin, const char *source)
 {
+	struct vmm_svm_context *context = svm->borrow_imm_context;
+	struct vmm_svm_backend *target;
 	uint64_t entry;
 	uint32_t low;
 	uint32_t high;
@@ -2976,7 +3366,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		    vc->imm_id, source, pin);
 		return;
 	}
-	entry = svm->mut_ioapic_redir[pin];
+	entry = context->mut_ioapic_redir[pin];
 	low = (uint32_t)entry;
 	high = (uint32_t)(entry >> 32);
 	if ((low & VMM_IOAPIC_REDIR_MASKED) != 0) {
@@ -2997,16 +3387,18 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 	    (low & VMM_IOAPIC_REDIR_DEST_LOGICAL) != 0 ||
 	    (low & VMM_IOAPIC_REDIR_POLARITY_LOW) != 0 ||
 	    (low & VMM_IOAPIC_REDIR_TRIGGER_LEVEL) != 0 ||
-	    dest != VMM_SVM_AVIC_APIC_ID) {
+	    dest > VMM_SVM_AVIC_MAX_PHYS_ID ||
+	    (target = context->own_mut_apic_targets[dest]) == NULL) {
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic reject source=%s pin=%u vector=0x%x low=0x%x high=0x%x",
 		    vc->imm_id, source, pin, vector, low, high);
 		return;
 	}
 	VMM_SVM_TRACE(svm,
-	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x",
-	    vc->imm_id, source, pin, vector);
-	vmm_svm_avic_deliver(svm, vc, (uint8_t)vector, source);
+	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x target=%u",
+	    vc->imm_id, source, pin, vector, target->borrow_imm_vcpu->imm_id);
+	vmm_svm_avic_deliver(target, target->borrow_imm_vcpu,
+	    (uint8_t)vector, source);
 }
 
 static void
@@ -3027,21 +3419,29 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 	unsigned int i;
 
 	vmm_svm_lapic_timer_check(svm, vc);
+	if (vc->imm_id != 0) {
+		svm->mut_root_timer_deadline =
+		    svm->mut_lapic_timer_active ?
+		    svm->mut_lapic_timer_root_deadline : 0;
+		return;
+	}
+	atomic_swap_int(&svm->borrow_imm_context->atomic_mut_platform_kick, 0);
+	lwkt_gettoken(&svm->borrow_imm_context->token_platform);
 	now = rdtsc();
 	rtc_causes = 0;
 	for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i)
-		svm->mut_hpet_timer_root_deadline[i] = 0;
-	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
+		svm->borrow_imm_context->mut_hpet_timer_root_deadline[i] = 0;
+	if ((svm->borrow_imm_context->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
 		hpet_now = vmm_svm_hpet_counter(svm);
 		for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
-			config = svm->mut_hpet_timer_config[i];
-			if (!svm->mut_hpet_timer_active[i])
+			config = svm->borrow_imm_context->mut_hpet_timer_config[i];
+			if (!svm->borrow_imm_context->mut_hpet_timer_active[i])
 				continue;
 			if ((config & VMM_HPET_TIMER_ENABLE) == 0) {
-				svm->mut_hpet_timer_active[i] = 0;
+				svm->borrow_imm_context->mut_hpet_timer_active[i] = 0;
 				continue;
 			}
-			deadline = svm->mut_hpet_timer_deadline[i];
+			deadline = svm->borrow_imm_context->mut_hpet_timer_deadline[i];
 			if ((config & VMM_HPET_TIMER_32BIT) != 0) {
 				remaining = (uint32_t)(deadline - hpet_now);
 				if (remaining != 0 && remaining <= 0x7fffffffU)
@@ -3049,7 +3449,7 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 			} else if (hpet_now < deadline) {
 				continue;
 			}
-			svm->mut_hpet_status |= 1U << i;
+			svm->borrow_imm_context->mut_hpet_status |= 1U << i;
 			if ((config & VMM_HPET_TIMER_ROUTE_MASK) ==
 			    VMM_HPET_GSI << VMM_HPET_TIMER_ROUTE_SHIFT) {
 				vmm_svm_ioapic_raise(svm, vc, VMM_HPET_GSI, "hpet");
@@ -3061,29 +3461,29 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 				    VMM_HPET_TIMER_ROUTE_SHIFT));
 			}
 			if ((config & VMM_HPET_TIMER_PERIODIC) == 0) {
-				svm->mut_hpet_timer_active[i] = 0;
+				svm->borrow_imm_context->mut_hpet_timer_active[i] = 0;
 				continue;
 			}
-			period = svm->mut_hpet_timer_period[i];
+			period = svm->borrow_imm_context->mut_hpet_timer_period[i];
 			if (period == 0) {
-				svm->mut_hpet_timer_active[i] = 0;
+				svm->borrow_imm_context->mut_hpet_timer_active[i] = 0;
 				continue;
 			}
 			if ((config & VMM_HPET_TIMER_32BIT) != 0) {
 				period &= 0xffffffffULL;
 				if (period == 0) {
-					svm->mut_hpet_timer_active[i] = 0;
+					svm->borrow_imm_context->mut_hpet_timer_active[i] = 0;
 					continue;
 				}
 				periods = (uint32_t)(hpet_now - deadline) / period + 1;
-				svm->mut_hpet_timer_deadline[i] = (uint32_t)(deadline +
+				svm->borrow_imm_context->mut_hpet_timer_deadline[i] = (uint32_t)(deadline +
 				    periods * period);
 			} else {
 				periods = (hpet_now - deadline) / period + 1;
 				if (periods > (UINT64_MAX - deadline) / period)
-					svm->mut_hpet_timer_deadline[i] = UINT64_MAX;
+					svm->borrow_imm_context->mut_hpet_timer_deadline[i] = UINT64_MAX;
 				else
-					svm->mut_hpet_timer_deadline[i] = deadline +
+					svm->borrow_imm_context->mut_hpet_timer_deadline[i] = deadline +
 					    periods * period;
 			}
 		}
@@ -3095,76 +3495,76 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 	 * remains in root TSC units; only the resulting IRQ travels through
 	 * the IOAPIC and AVIC.
 	 */
-	rtc_rate = svm->mut_cmos_reg_a & VMM_RTC_REG_A_RATE_MASK;
-	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
-	    (svm->mut_cmos_reg_b & VMM_RTC_REG_B_PIE) != 0 &&
-	    (svm->mut_cmos_reg_a & VMM_RTC_REG_A_DIV_MASK) ==
+	rtc_rate = svm->borrow_imm_context->mut_cmos_reg_a & VMM_RTC_REG_A_RATE_MASK;
+	if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
+	    (svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_PIE) != 0 &&
+	    (svm->borrow_imm_context->mut_cmos_reg_a & VMM_RTC_REG_A_DIV_MASK) ==
 	    VMM_RTC_REG_A_DIV_32KHZ && rtc_rate != 0) {
 		period = (svm->imm_host_tsc_hz +
 		    ((uint64_t)32768U >> (rtc_rate - 1)) - 1) /
 		    ((uint64_t)32768U >> (rtc_rate - 1));
-		if (svm->mut_cmos_periodic_root_deadline == 0) {
-			svm->mut_cmos_periodic_root_deadline = now + period;
-		} else if (now >= svm->mut_cmos_periodic_root_deadline) {
-			periods = (now - svm->mut_cmos_periodic_root_deadline) /
+		if (svm->borrow_imm_context->mut_cmos_periodic_root_deadline == 0) {
+			svm->borrow_imm_context->mut_cmos_periodic_root_deadline = now + period;
+		} else if (now >= svm->borrow_imm_context->mut_cmos_periodic_root_deadline) {
+			periods = (now - svm->borrow_imm_context->mut_cmos_periodic_root_deadline) /
 			    period + 1;
 			if (periods >
-			    (UINT64_MAX - svm->mut_cmos_periodic_root_deadline) /
+			    (UINT64_MAX - svm->borrow_imm_context->mut_cmos_periodic_root_deadline) /
 			    period)
-				svm->mut_cmos_periodic_root_deadline = UINT64_MAX;
+				svm->borrow_imm_context->mut_cmos_periodic_root_deadline = UINT64_MAX;
 			else
-				svm->mut_cmos_periodic_root_deadline += periods * period;
+				svm->borrow_imm_context->mut_cmos_periodic_root_deadline += periods * period;
 			rtc_causes |= VMM_RTC_REG_C_PF;
 		}
 	} else {
-		svm->mut_cmos_periodic_root_deadline = 0;
+		svm->borrow_imm_context->mut_cmos_periodic_root_deadline = 0;
 	}
 
-	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
-	    (svm->mut_cmos_reg_b & (VMM_RTC_REG_B_UIE | VMM_RTC_REG_B_AIE)) !=
+	if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_SET) == 0 &&
+	    (svm->borrow_imm_context->mut_cmos_reg_b & (VMM_RTC_REG_B_UIE | VMM_RTC_REG_B_AIE)) !=
 	    0) {
-		if (svm->mut_cmos_update_root_deadline == 0) {
-			svm->mut_cmos_update_root_deadline = now + svm->imm_host_tsc_hz;
-		} else if (now >= svm->mut_cmos_update_root_deadline) {
-			periods = (now - svm->mut_cmos_update_root_deadline) /
+		if (svm->borrow_imm_context->mut_cmos_update_root_deadline == 0) {
+			svm->borrow_imm_context->mut_cmos_update_root_deadline = now + svm->imm_host_tsc_hz;
+		} else if (now >= svm->borrow_imm_context->mut_cmos_update_root_deadline) {
+			periods = (now - svm->borrow_imm_context->mut_cmos_update_root_deadline) /
 			    svm->imm_host_tsc_hz + 1;
 			if (periods >
-			    (UINT64_MAX - svm->mut_cmos_update_root_deadline) /
+			    (UINT64_MAX - svm->borrow_imm_context->mut_cmos_update_root_deadline) /
 			    svm->imm_host_tsc_hz)
-				svm->mut_cmos_update_root_deadline = UINT64_MAX;
+				svm->borrow_imm_context->mut_cmos_update_root_deadline = UINT64_MAX;
 			else
-				svm->mut_cmos_update_root_deadline += periods *
+				svm->borrow_imm_context->mut_cmos_update_root_deadline += periods *
 				    svm->imm_host_tsc_hz;
-			svm->mut_cmos_time_expires = 0;
+			svm->borrow_imm_context->mut_cmos_time_expires = 0;
 			vmm_svm_cmos_refresh_time(svm);
-			if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_UIE) != 0)
+			if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_UIE) != 0)
 				rtc_causes |= VMM_RTC_REG_C_UF;
-			if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_AIE) != 0 &&
-			    ((svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] &
+			if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_AIE) != 0 &&
+			    ((svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] &
 			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
-			    svm->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] ==
-			    svm->mut_cmos_time[VMM_RTC_SECONDS]) &&
-			    ((svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] &
+			    svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_SECONDS_ALARM] ==
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_SECONDS]) &&
+			    ((svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] &
 			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
-			    svm->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] ==
-			    svm->mut_cmos_time[VMM_RTC_MINUTES]) &&
-			    ((svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] &
+			    svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_MINUTES_ALARM] ==
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_MINUTES]) &&
+			    ((svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_HOURS_ALARM] &
 			    VMM_RTC_ALARM_DONT_CARE) == VMM_RTC_ALARM_DONT_CARE ||
-			    svm->mut_cmos_ram[VMM_RTC_HOURS_ALARM] ==
-			    svm->mut_cmos_time[VMM_RTC_HOURS]))
+			    svm->borrow_imm_context->mut_cmos_ram[VMM_RTC_HOURS_ALARM] ==
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_HOURS]))
 				rtc_causes |= VMM_RTC_REG_C_AF;
 		}
 	} else {
-		svm->mut_cmos_update_root_deadline = 0;
+		svm->borrow_imm_context->mut_cmos_update_root_deadline = 0;
 	}
 	if (rtc_causes != 0) {
-		rtc_old_reg_c = svm->mut_cmos_reg_c;
-		svm->mut_cmos_reg_c |= rtc_causes;
-		if ((svm->mut_cmos_reg_c & VMM_RTC_REG_C_CAUSE_MASK &
-		    svm->mut_cmos_reg_b) != 0)
-			svm->mut_cmos_reg_c |= VMM_RTC_REG_C_IRQF;
+		rtc_old_reg_c = svm->borrow_imm_context->mut_cmos_reg_c;
+		svm->borrow_imm_context->mut_cmos_reg_c |= rtc_causes;
+		if ((svm->borrow_imm_context->mut_cmos_reg_c & VMM_RTC_REG_C_CAUSE_MASK &
+		    svm->borrow_imm_context->mut_cmos_reg_b) != 0)
+			svm->borrow_imm_context->mut_cmos_reg_c |= VMM_RTC_REG_C_IRQF;
 		if ((rtc_old_reg_c & VMM_RTC_REG_C_IRQF) == 0 &&
-		    (svm->mut_cmos_reg_c & VMM_RTC_REG_C_IRQF) != 0)
+		    (svm->borrow_imm_context->mut_cmos_reg_c & VMM_RTC_REG_C_IRQF) != 0)
 			vmm_svm_ioapic_raise(svm, vc, VMM_RTC_IRQ, "rtc");
 	}
 
@@ -3172,15 +3572,15 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 	if (svm->mut_lapic_timer_active &&
 	    svm->mut_lapic_timer_root_deadline != 0)
 		svm->mut_root_timer_deadline = svm->mut_lapic_timer_root_deadline;
-	if ((svm->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
+	if ((svm->borrow_imm_context->mut_hpet_config & VMM_HPET_CONFIG_ENABLE) != 0) {
 		hpet_now = vmm_svm_hpet_counter(svm);
 		now = rdtsc();
 		for (i = 0; i < VMM_HPET_TIMER_COUNT; ++i) {
-			config = svm->mut_hpet_timer_config[i];
-			if (!svm->mut_hpet_timer_active[i] ||
+			config = svm->borrow_imm_context->mut_hpet_timer_config[i];
+			if (!svm->borrow_imm_context->mut_hpet_timer_active[i] ||
 			    (config & VMM_HPET_TIMER_ENABLE) == 0)
 				continue;
-			deadline = svm->mut_hpet_timer_deadline[i];
+			deadline = svm->borrow_imm_context->mut_hpet_timer_deadline[i];
 			if ((config & VMM_HPET_TIMER_32BIT) != 0)
 				remaining = (uint32_t)(deadline - hpet_now);
 			else if (hpet_now < deadline)
@@ -3190,7 +3590,7 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 			if (remaining == 0 ||
 			    ((config & VMM_HPET_TIMER_32BIT) != 0 &&
 			    remaining > 0x7fffffffU)) {
-				svm->mut_hpet_timer_root_deadline[i] = now;
+				svm->borrow_imm_context->mut_hpet_timer_root_deadline[i] = now;
 			} else {
 				root_delta = (_uint128_t)remaining * svm->imm_host_tsc_hz +
 				    VMM_HPET_FREQ - 1;
@@ -3198,27 +3598,28 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 				if (root_delta == 0)
 					root_delta = 1;
 				if (root_delta > UINT64_MAX - now)
-					svm->mut_hpet_timer_root_deadline[i] = UINT64_MAX;
+					svm->borrow_imm_context->mut_hpet_timer_root_deadline[i] = UINT64_MAX;
 				else
-					svm->mut_hpet_timer_root_deadline[i] = now +
+					svm->borrow_imm_context->mut_hpet_timer_root_deadline[i] = now +
 					    (uint64_t)root_delta;
 			}
 			if (svm->mut_root_timer_deadline == 0 ||
-			    svm->mut_hpet_timer_root_deadline[i] <
+			    svm->borrow_imm_context->mut_hpet_timer_root_deadline[i] <
 			    svm->mut_root_timer_deadline) {
 				svm->mut_root_timer_deadline =
-				    svm->mut_hpet_timer_root_deadline[i];
+				    svm->borrow_imm_context->mut_hpet_timer_root_deadline[i];
 			}
 		}
 	}
-	if (svm->mut_cmos_periodic_root_deadline != 0 &&
+	if (svm->borrow_imm_context->mut_cmos_periodic_root_deadline != 0 &&
 	    (svm->mut_root_timer_deadline == 0 ||
-	    svm->mut_cmos_periodic_root_deadline < svm->mut_root_timer_deadline))
-		svm->mut_root_timer_deadline = svm->mut_cmos_periodic_root_deadline;
-	if (svm->mut_cmos_update_root_deadline != 0 &&
+	    svm->borrow_imm_context->mut_cmos_periodic_root_deadline < svm->mut_root_timer_deadline))
+		svm->mut_root_timer_deadline = svm->borrow_imm_context->mut_cmos_periodic_root_deadline;
+	if (svm->borrow_imm_context->mut_cmos_update_root_deadline != 0 &&
 	    (svm->mut_root_timer_deadline == 0 ||
-	    svm->mut_cmos_update_root_deadline < svm->mut_root_timer_deadline))
-		svm->mut_root_timer_deadline = svm->mut_cmos_update_root_deadline;
+	    svm->borrow_imm_context->mut_cmos_update_root_deadline < svm->mut_root_timer_deadline))
+		svm->mut_root_timer_deadline = svm->borrow_imm_context->mut_cmos_update_root_deadline;
+	lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 }
 
 static int
@@ -3237,6 +3638,7 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 	int modsz;
 	int size;
 
+	lwkt_gettoken(&svm->borrow_imm_context->token_platform);
 	if (vmcb->ctrl.inst_len == 0 ||
 	    vmcb->ctrl.inst_len > sizeof(vmcb->ctrl.inst_bytes))
 		goto fail;
@@ -3268,7 +3670,7 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 			goto fail;
 		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
 		if (gpa == VMM_IOAPIC_BASE) {
-			val = svm->mut_ioapic_select;
+			val = svm->borrow_imm_context->mut_ioapic_select;
 		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
 			val = vmm_svm_ioapic_read(svm);
 		} else {
@@ -3276,6 +3678,7 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 		}
 		vmm_svm_gpr_write(svm, reg, val, size);
 		vmcb->state.rip += off + modsz;
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case 0x89:
 		if (off >= vmcb->ctrl.inst_len)
@@ -3287,13 +3690,14 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 		reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
 		val = vmm_svm_gpr_read(svm, reg);
 		if (gpa == VMM_IOAPIC_BASE) {
-			svm->mut_ioapic_select = val & 0xffU;
+			svm->borrow_imm_context->mut_ioapic_select = val & 0xffU;
 		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
 			vmm_svm_ioapic_write(svm, vc, (uint32_t)val);
 		} else {
 			goto fail;
 		}
 		vmcb->state.rip += off + modsz;
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case 0xc7:
 		if (off >= vmcb->ctrl.inst_len)
@@ -3309,18 +3713,20 @@ vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
 		    ((uint64_t)bytes[off + 2] << 16) |
 		    ((uint64_t)bytes[off + 3] << 24);
 		if (gpa == VMM_IOAPIC_BASE) {
-			svm->mut_ioapic_select = val & 0xffU;
+			svm->borrow_imm_context->mut_ioapic_select = val & 0xffU;
 		} else if (gpa == VMM_IOAPIC_BASE + 0x10) {
 			vmm_svm_ioapic_write(svm, vc, (uint32_t)val);
 		} else {
 			goto fail;
 		}
 		vmcb->state.rip += off + 4;
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	default:
 		break;
 	}
 fail:
+	lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 	vmm_machine_debugf(svm->borrow_imm_machine,
 	    "svm vcpu%u unsupported ioapic mmio gpa=0x%jx info=0x%jx rip=0x%jx inst_len=%u inst0=0x%x",
 	    vc->imm_id, (uintmax_t)gpa, (uintmax_t)vmcb->ctrl.exitinfo1,
@@ -3355,6 +3761,43 @@ vmm_svm_x2apic_msr(uint32_t msr)
 {
 	return msr >= VMM_SVM_X2APIC_MSR_BASE &&
 	    msr <= VMM_SVM_X2APIC_MSR_LAST;
+}
+
+static int
+vmm_svm_handle_x2apic_msr(struct vmm_svm_backend *svm,
+    struct vmm_vcpu_thread *vc, uint32_t msr, int write, uint64_t val)
+{
+	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	uint32_t reg;
+	uint32_t value;
+
+	if ((svm->mut_guest_apicbase &
+	    (APICBASE_ENABLED | APICBASE_X2APIC)) !=
+	    (APICBASE_ENABLED | APICBASE_X2APIC))
+		goto fault;
+	reg = (msr - VMM_SVM_X2APIC_MSR_BASE) << 4;
+	if (reg == VMM_SVM_APIC_REG_ICR_LOW ||
+	    reg == VMM_SVM_APIC_REG_ICR_HIGH)
+		goto fault;
+	if (write) {
+		if ((val >> 32) != 0 ||
+		    !vmm_svm_lapic_write(svm, vc, reg, (uint32_t)val))
+			goto fault;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	}
+	if (!vmm_svm_lapic_read(svm, reg, &value))
+		goto fault;
+	vmm_svm_rdmsr_value(svm, value);
+	return 1;
+
+fault:
+	vmm_svm_log_unsupported_msr(svm, vc, write ? "wr" : "rd", msr,
+	    val, write, "x2apic-register");
+	vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+	    VMM_SVM_EVENTINJ_ERROR_VALID |
+	    VMM_SVM_EVENTINJ_TYPE_EXCEPTION | VMM_X86_EXCEPTION_GP;
+	return 1;
 }
 
 static int
@@ -3422,6 +3865,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	uint64_t val;
 
 	if (vmcb->ctrl.exitinfo1 == 0) {
+		if (vmm_svm_x2apic_msr(msr))
+			return vmm_svm_handle_x2apic_msr(svm, vc, msr, 0, 0);
 		if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTL,
 		    &idx)) {
 			vmm_svm_rdmsr_value(svm, svm->mut_guest_pmu_ctl[idx]);
@@ -3550,6 +3995,8 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	}
 
 	val = vmm_svm_wrmsr_value(svm);
+	if (vmm_svm_x2apic_msr(msr))
+		return vmm_svm_handle_x2apic_msr(svm, vc, msr, 1, val);
 	if (vmm_svm_amd_pmu_msr_index(msr, VMM_SVM_MSR_F15H_PERF_CTL,
 	    &idx)) {
 		svm->mut_guest_pmu_ctl[idx] = val;
@@ -3623,13 +4070,10 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_APICBASE:
-		if ((val & APICBASE_X2APIC) != 0) {
-			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
-			    "x2apic-hidden");
-			return 0;
-		}
 		if ((val & ~VMM_SVM_APICBASE_VALID) != 0 ||
-		    (val & APICBASE_ADDRESS) != VMM_SVM_APICBASE_ADDR) {
+		    (val & APICBASE_ADDRESS) != VMM_SVM_APICBASE_ADDR ||
+		    ((val & APICBASE_X2APIC) != 0 &&
+		    (val & APICBASE_ENABLED) == 0)) {
 			vmm_svm_log_unsupported_msr(svm, vc, "wr", msr, val, 1,
 			    "invalid-value");
 			return 0;
@@ -3900,17 +4344,17 @@ vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 {
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 
-	if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0 ||
+	if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_RDI) == 0 ||
 	    vmm_console_guest_pending(console) == 0)
 		return;
-	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
+	if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 rx irq held source=%s reason=out2_disabled",
 		    vc->imm_id, source);
 		return;
 	}
-	if (svm->mut_com1_rx_irq_pending == 0) {
-		svm->mut_com1_rx_irq_pending = 1;
+	if (svm->borrow_imm_context->mut_com1_rx_irq_pending == 0) {
+		svm->borrow_imm_context->mut_com1_rx_irq_pending = 1;
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 rx irq source=%s", vc->imm_id, source);
 	}
@@ -3921,10 +4365,10 @@ static void
 vmm_svm_com1_tx_notify(struct vmm_svm_backend *svm,
     struct vmm_vcpu_thread *vc, const char *source)
 {
-	if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) == 0 ||
-	    svm->mut_com1_thr_irq_pending == 0)
+	if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_THRI) == 0 ||
+	    svm->borrow_imm_context->mut_com1_thr_irq_pending == 0)
 		return;
-	if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
+	if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0) {
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 tx irq held source=%s reason=out2_disabled",
 		    vc->imm_id, source);
@@ -3947,8 +4391,8 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		return 0;
 	switch (reg) {
 	case VMM_COM1_RBR_THR_DLL:
-		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) != 0) {
-			*valp = svm->mut_com1_dll;
+		if ((svm->borrow_imm_context->mut_com1_lcr & VMM_COM1_LCR_DLAB) != 0) {
+			*valp = svm->borrow_imm_context->mut_com1_dll;
 		} else if (vmm_console_guest_read(console, &ch)) {
 			volatile u_int *irr;
 			uint8_t vector;
@@ -3957,13 +4401,13 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 			VMM_SVM_TRACE(svm,
 			    "svm vcpu%u com1 read rbr val=0x%x pending=%zu",
 			    vc->imm_id, *valp, vmm_console_guest_pending(console));
-			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			vector = (uint8_t)svm->borrow_imm_context->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
 			irr = (volatile u_int *)
 			    ((uint8_t *)svm->own_mut_avic_apic_page +
 			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
 			atomic_clear_int(irr, 1U << (vector & 31));
 			cpu_mfence();
-			svm->mut_com1_rx_irq_pending = 0;
+			svm->borrow_imm_context->mut_com1_rx_irq_pending = 0;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_rbr");
 		} else {
 			*valp = 0;
@@ -3972,21 +4416,21 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
-		*valp = (svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) ?
-		    svm->mut_com1_dlm : svm->mut_com1_ier;
+		*valp = (svm->borrow_imm_context->mut_com1_lcr & VMM_COM1_LCR_DLAB) ?
+		    svm->borrow_imm_context->mut_com1_dlm : svm->borrow_imm_context->mut_com1_ier;
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+		if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
 		    vmm_console_guest_pending(console) != 0) {
 			*valp = VMM_COM1_IIR_RDI;
-		} else if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0 &&
-		    svm->mut_com1_thr_irq_pending != 0) {
+		} else if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_THRI) != 0 &&
+		    svm->borrow_imm_context->mut_com1_thr_irq_pending != 0) {
 			volatile u_int *irr;
 			uint8_t vector;
 
 			*valp = VMM_COM1_IIR_THRI;
-			svm->mut_com1_thr_irq_pending = 0;
-			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			svm->borrow_imm_context->mut_com1_thr_irq_pending = 0;
+			vector = (uint8_t)svm->borrow_imm_context->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
 			irr = (volatile u_int *)
 			    ((uint8_t *)svm->own_mut_avic_apic_page +
 			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
@@ -3998,35 +4442,35 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 read iir val=0x%x pending=%zu ier=0x%x rx_pending=%d thr_pending=%d",
 		    vc->imm_id, *valp, vmm_console_guest_pending(console),
-		    svm->mut_com1_ier, svm->mut_com1_rx_irq_pending,
-		    svm->mut_com1_thr_irq_pending);
+		    svm->borrow_imm_context->mut_com1_ier, svm->borrow_imm_context->mut_com1_rx_irq_pending,
+		    svm->borrow_imm_context->mut_com1_thr_irq_pending);
 		return 1;
 	case VMM_COM1_LCR:
-		*valp = svm->mut_com1_lcr;
+		*valp = svm->borrow_imm_context->mut_com1_lcr;
 		return 1;
 	case VMM_COM1_MCR:
-		*valp = svm->mut_com1_mcr;
+		*valp = svm->borrow_imm_context->mut_com1_mcr;
 		return 1;
 	case VMM_COM1_LSR:
 		lsr = VMM_COM1_LSR_THRE | VMM_COM1_LSR_TEMT;
 		if (vmm_console_guest_pending(console) != 0)
 			lsr |= VMM_COM1_LSR_DR;
-		if (svm->mut_com1_lsr_overrun) {
+		if (svm->borrow_imm_context->mut_com1_lsr_overrun) {
 			lsr |= VMM_COM1_LSR_OE;
-			svm->mut_com1_lsr_overrun = 0;
+			svm->borrow_imm_context->mut_com1_lsr_overrun = 0;
 		}
 		*valp = lsr;
 		return 1;
 	case VMM_COM1_MSR:
-		if ((svm->mut_com1_mcr & VMM_COM1_MCR_LOOP) != 0) {
+		if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_LOOP) != 0) {
 			*valp = 0;
-			if ((svm->mut_com1_mcr & VMM_COM1_MCR_RTS) != 0)
+			if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_RTS) != 0)
 				*valp |= VMM_COM1_MSR_CTS;
-			if ((svm->mut_com1_mcr & VMM_COM1_MCR_DTR) != 0)
+			if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_DTR) != 0)
 				*valp |= VMM_COM1_MSR_DSR;
-			if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT1) != 0)
+			if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT1) != 0)
 				*valp |= VMM_COM1_MSR_RI;
-			if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0)
+			if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0)
 				*valp |= VMM_COM1_MSR_DCD;
 		} else {
 			*valp = VMM_COM1_MSR_CTS | VMM_COM1_MSR_DSR |
@@ -4034,10 +4478,10 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		}
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 read msr val=0x%x mcr=0x%x",
-		    vc->imm_id, *valp, svm->mut_com1_mcr);
+		    vc->imm_id, *valp, svm->borrow_imm_context->mut_com1_mcr);
 		return 1;
 	case VMM_COM1_SCR:
-		*valp = svm->mut_com1_scr;
+		*valp = svm->borrow_imm_context->mut_com1_scr;
 		return 1;
 	default:
 		return 0;
@@ -4054,72 +4498,72 @@ vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 		return 0;
 	switch (reg) {
 	case VMM_COM1_RBR_THR_DLL:
-		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
+		if ((svm->borrow_imm_context->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
 			ch = (char)(val & 0xffU);
 			vmm_console_guest_write(
 			    &svm->borrow_imm_machine->own_mut_console, &ch, 1);
-			svm->mut_com1_thr_irq_pending = 1;
+			svm->borrow_imm_context->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_tx_notify(svm, vc, "com1_thr");
 		} else {
-			svm->mut_com1_dll = val & 0xffU;
+			svm->borrow_imm_context->mut_com1_dll = val & 0xffU;
 		}
 		return 1;
 	case VMM_COM1_IER_DLM:
-		if ((svm->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
-			svm->mut_com1_ier = val & 0x0fU;
+		if ((svm->borrow_imm_context->mut_com1_lcr & VMM_COM1_LCR_DLAB) == 0) {
+			svm->borrow_imm_context->mut_com1_ier = val & 0x0fU;
 			VMM_SVM_TRACE(svm,
 			    "svm vcpu%u com1 write ier val=0x%x pending=%zu",
-			    vc->imm_id, svm->mut_com1_ier,
+			    vc->imm_id, svm->borrow_imm_context->mut_com1_ier,
 			    vmm_console_guest_pending(
 			    &svm->borrow_imm_machine->own_mut_console));
-			if ((svm->mut_com1_ier & VMM_COM1_IER_RDI) == 0)
-				svm->mut_com1_rx_irq_pending = 0;
-			if ((svm->mut_com1_ier & VMM_COM1_IER_THRI) != 0)
-				svm->mut_com1_thr_irq_pending = 1;
+			if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_RDI) == 0)
+				svm->borrow_imm_context->mut_com1_rx_irq_pending = 0;
+			if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_THRI) != 0)
+				svm->borrow_imm_context->mut_com1_thr_irq_pending = 1;
 			vmm_svm_com1_rx_notify(svm, vc, "com1_ier");
 			vmm_svm_com1_tx_notify(svm, vc, "com1_ier");
 		} else {
-			svm->mut_com1_dlm = val & 0xffU;
+			svm->borrow_imm_context->mut_com1_dlm = val & 0xffU;
 		}
 		return 1;
 	case VMM_COM1_IIR_FCR:
-		svm->mut_com1_fcr = val & VMM_COM1_FCR_ENABLE;
+		svm->borrow_imm_context->mut_com1_fcr = val & VMM_COM1_FCR_ENABLE;
 		if ((val & VMM_COM1_FCR_RX_RESET) != 0) {
 			volatile u_int *irr;
 			uint8_t vector;
 
 			vmm_console_guest_reset_input(
 			    &svm->borrow_imm_machine->own_mut_console);
-			vector = (uint8_t)svm->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
+			vector = (uint8_t)svm->borrow_imm_context->mut_ioapic_redir[VMM_COM1_IOAPIC_PIN];
 			irr = (volatile u_int *)
 			    ((uint8_t *)svm->own_mut_avic_apic_page +
 			    VMM_SVM_APIC_REG_IRR_BASE + (vector / 32) * 0x10);
 			atomic_clear_int(irr, 1U << (vector & 31));
 			cpu_mfence();
-			svm->mut_com1_rx_irq_pending = 0;
-			svm->mut_com1_lsr_overrun = 0;
+			svm->borrow_imm_context->mut_com1_rx_irq_pending = 0;
+			svm->borrow_imm_context->mut_com1_lsr_overrun = 0;
 		}
 		if ((val & VMM_COM1_FCR_TX_RESET) != 0)
-			svm->mut_com1_thr_irq_pending = 0;
+			svm->borrow_imm_context->mut_com1_thr_irq_pending = 0;
 		vmm_svm_com1_rx_notify(svm, vc, "com1_fcr");
 		return 1;
 	case VMM_COM1_LCR:
-		svm->mut_com1_lcr = val & 0xffU;
+		svm->borrow_imm_context->mut_com1_lcr = val & 0xffU;
 		return 1;
 	case VMM_COM1_MCR:
-		svm->mut_com1_mcr = val & 0xffU;
+		svm->borrow_imm_context->mut_com1_mcr = val & 0xffU;
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u com1 write mcr val=0x%x pending=%zu",
-		    vc->imm_id, svm->mut_com1_mcr,
+		    vc->imm_id, svm->borrow_imm_context->mut_com1_mcr,
 		    vmm_console_guest_pending(
 		    &svm->borrow_imm_machine->own_mut_console));
-		if ((svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0)
-			svm->mut_com1_rx_irq_pending = 0;
+		if ((svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT2) == 0)
+			svm->borrow_imm_context->mut_com1_rx_irq_pending = 0;
 		vmm_svm_com1_rx_notify(svm, vc, "com1_mcr");
 		vmm_svm_com1_tx_notify(svm, vc, "com1_mcr");
 		return 1;
 	case VMM_COM1_SCR:
-		svm->mut_com1_scr = val & 0xffU;
+		svm->borrow_imm_context->mut_com1_scr = val & 0xffU;
 		return 1;
 	default:
 		return 0;
@@ -4142,12 +4586,12 @@ vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
 	int dim;
 	int binary;
 
-	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
+	if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
 		return;
-	if (svm->mut_cmos_time_expires != 0 &&
-	    (int)(ticks - svm->mut_cmos_time_expires) < 0)
+	if (svm->borrow_imm_context->mut_cmos_time_expires != 0 &&
+	    (int)(ticks - svm->borrow_imm_context->mut_cmos_time_expires) < 0)
 		return;
-	now = time_second + svm->mut_cmos_time_offset;
+	now = time_second + svm->borrow_imm_context->mut_cmos_time_offset;
 	if (now < 0)
 		now = 0;
 	days = now / 86400;
@@ -4168,8 +4612,8 @@ vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
 			break;
 		days -= dim;
 	}
-	binary = (svm->mut_cmos_reg_b & VMM_RTC_REG_B_DM_BINARY) != 0;
-	if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_24H) == 0) {
+	binary = (svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_DM_BINARY) != 0;
+	if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_24H) == 0) {
 		int pm = hours >= 12;
 
 		hours %= 12;
@@ -4178,19 +4622,19 @@ vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm)
 		if (pm)
 			hours |= 0x80;
 	}
-	svm->mut_cmos_time[VMM_RTC_SECONDS] = binary ? second : bin2bcd(second);
-	svm->mut_cmos_time[VMM_RTC_MINUTES] = binary ? minute : bin2bcd(minute);
-	svm->mut_cmos_time[VMM_RTC_HOURS] = binary ? hours :
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_SECONDS] = binary ? second : bin2bcd(second);
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_MINUTES] = binary ? minute : bin2bcd(minute);
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_HOURS] = binary ? hours :
 	    ((hours & 0x80) | bin2bcd(hours & 0x7f));
-	svm->mut_cmos_time[VMM_RTC_DAY_OF_WEEK] = binary ?
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_DAY_OF_WEEK] = binary ?
 	    ((epoch_days + 4) % 7) + 1 : bin2bcd(((epoch_days + 4) % 7) + 1);
-	svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH] = binary ? days + 1 :
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_DAY_OF_MONTH] = binary ? days + 1 :
 	    bin2bcd(days + 1);
-	svm->mut_cmos_time[VMM_RTC_MONTH] = binary ? month + 1 :
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_MONTH] = binary ? month + 1 :
 	    bin2bcd(month + 1);
-	svm->mut_cmos_time[VMM_RTC_YEAR] = binary ? year % 100 :
+	svm->borrow_imm_context->mut_cmos_time[VMM_RTC_YEAR] = binary ? year % 100 :
 	    bin2bcd(year % 100);
-	svm->mut_cmos_time_expires = ticks + hz;
+	svm->borrow_imm_context->mut_cmos_time_expires = ticks + hz;
 }
 
 static int
@@ -4215,7 +4659,7 @@ vmm_svm_cmos_value_decode(uint8_t value, int maximum, int binary,
 static uint8_t
 vmm_svm_cmos_read(struct vmm_svm_backend *svm)
 {
-	uint8_t reg = svm->mut_cmos_index & 0x7fU;
+	uint8_t reg = svm->borrow_imm_context->mut_cmos_index & 0x7fU;
 	uint8_t value;
 
 	switch (reg) {
@@ -4227,23 +4671,23 @@ vmm_svm_cmos_read(struct vmm_svm_backend *svm)
 	case VMM_RTC_MONTH:
 	case VMM_RTC_YEAR:
 		vmm_svm_cmos_refresh_time(svm);
-		value = svm->mut_cmos_time[reg];
+		value = svm->borrow_imm_context->mut_cmos_time[reg];
 		break;
 	case VMM_RTC_REG_A:
-		value = svm->mut_cmos_reg_a & ~VMM_RTC_REG_A_UIP;
+		value = svm->borrow_imm_context->mut_cmos_reg_a & ~VMM_RTC_REG_A_UIP;
 		break;
 	case VMM_RTC_REG_B:
-		value = svm->mut_cmos_reg_b;
+		value = svm->borrow_imm_context->mut_cmos_reg_b;
 		break;
 	case VMM_RTC_REG_C:
-		value = svm->mut_cmos_reg_c;
-		svm->mut_cmos_reg_c = 0;
+		value = svm->borrow_imm_context->mut_cmos_reg_c;
+		svm->borrow_imm_context->mut_cmos_reg_c = 0;
 		break;
 	case VMM_RTC_REG_D:
 		value = VMM_RTC_REG_D_VALID;
 		break;
 	default:
-		value = svm->mut_cmos_ram[reg];
+		value = svm->borrow_imm_context->mut_cmos_ram[reg];
 		break;
 	}
 	return value;
@@ -4254,7 +4698,7 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 {
 	static const int days_in_month[12] =
 	    { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-	uint8_t reg = svm->mut_cmos_index & 0x7fU;
+	uint8_t reg = svm->borrow_imm_context->mut_cmos_index & 0x7fU;
 	uint8_t old_reg_b;
 	time_t now;
 	long days;
@@ -4272,40 +4716,40 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 
 	switch (reg) {
 	case VMM_RTC_REG_A:
-		svm->mut_cmos_reg_a = value & ~VMM_RTC_REG_A_UIP;
-		svm->mut_cmos_periodic_root_deadline = 0;
+		svm->borrow_imm_context->mut_cmos_reg_a = value & ~VMM_RTC_REG_A_UIP;
+		svm->borrow_imm_context->mut_cmos_periodic_root_deadline = 0;
 		break;
 	case VMM_RTC_REG_B:
-		old_reg_b = svm->mut_cmos_reg_b;
+		old_reg_b = svm->borrow_imm_context->mut_cmos_reg_b;
 		if ((old_reg_b & VMM_RTC_REG_B_SET) == 0 &&
 		    (value & VMM_RTC_REG_B_SET) != 0)
 			vmm_svm_cmos_refresh_time(svm);
-		svm->mut_cmos_reg_b = value;
+		svm->borrow_imm_context->mut_cmos_reg_b = value;
 		if ((old_reg_b & VMM_RTC_REG_B_SET) != 0 &&
 		    (value & VMM_RTC_REG_B_SET) == 0) {
 			binary = (value & VMM_RTC_REG_B_DM_BINARY) != 0;
 			if (vmm_svm_cmos_value_decode(
-			    svm->mut_cmos_time[VMM_RTC_SECONDS], 59, binary,
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_SECONDS], 59, binary,
 			    &second) == 0 &&
 			    vmm_svm_cmos_value_decode(
-			    svm->mut_cmos_time[VMM_RTC_MINUTES], 59, binary,
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_MINUTES], 59, binary,
 			    &minute) == 0 &&
 			    vmm_svm_cmos_value_decode(
-			    svm->mut_cmos_time[VMM_RTC_DAY_OF_MONTH], 31, binary,
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_DAY_OF_MONTH], 31, binary,
 			    &day) == 0 &&
 			    vmm_svm_cmos_value_decode(
-			    svm->mut_cmos_time[VMM_RTC_MONTH], 12, binary,
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_MONTH], 12, binary,
 			    &month) == 0 && month != 0 &&
 			    vmm_svm_cmos_value_decode(
-			    svm->mut_cmos_time[VMM_RTC_YEAR], 99, binary,
+			    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_YEAR], 99, binary,
 			    &year) == 0) {
-				pm = svm->mut_cmos_time[VMM_RTC_HOURS] & 0x80U;
+				pm = svm->borrow_imm_context->mut_cmos_time[VMM_RTC_HOURS] & 0x80U;
 				if ((value & VMM_RTC_REG_B_24H) == 0)
 					pm = pm != 0;
 				else
 					pm = 0;
 				if (vmm_svm_cmos_value_decode(
-				    svm->mut_cmos_time[VMM_RTC_HOURS] & 0x7fU,
+				    svm->borrow_imm_context->mut_cmos_time[VMM_RTC_HOURS] & 0x7fU,
 				    (value & VMM_RTC_REG_B_24H) != 0 ? 23 : 12,
 				    binary, &hour) == 0 &&
 				    ((value & VMM_RTC_REG_B_24H) != 0 || hour != 0)) {
@@ -4314,7 +4758,7 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 						if (pm)
 							hour += 12;
 					}
-					now = time_second + svm->mut_cmos_time_offset;
+					now = time_second + svm->borrow_imm_context->mut_cmos_time_offset;
 					if (now < 0)
 						now = 0;
 					days = now / 86400;
@@ -4344,16 +4788,16 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 							days += dim;
 						}
 						days += day - 1;
-						svm->mut_cmos_time_offset =
+						svm->borrow_imm_context->mut_cmos_time_offset =
 						    days * 86400 + hour * 3600 +
 						    minute * 60 + second - time_second;
 					}
 				}
 			}
 		}
-		svm->mut_cmos_time_expires = 0;
-		svm->mut_cmos_periodic_root_deadline = 0;
-		svm->mut_cmos_update_root_deadline = 0;
+		svm->borrow_imm_context->mut_cmos_time_expires = 0;
+		svm->borrow_imm_context->mut_cmos_periodic_root_deadline = 0;
+		svm->borrow_imm_context->mut_cmos_update_root_deadline = 0;
 		break;
 	case VMM_RTC_REG_C:
 	case VMM_RTC_REG_D:
@@ -4365,11 +4809,11 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 	case VMM_RTC_DAY_OF_MONTH:
 	case VMM_RTC_MONTH:
 	case VMM_RTC_YEAR:
-		if ((svm->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
-			svm->mut_cmos_time[reg] = value;
+		if ((svm->borrow_imm_context->mut_cmos_reg_b & VMM_RTC_REG_B_SET) != 0)
+			svm->borrow_imm_context->mut_cmos_time[reg] = value;
 		break;
 	default:
-		svm->mut_cmos_ram[reg] = value;
+		svm->borrow_imm_context->mut_cmos_ram[reg] = value;
 		break;
 	}
 }
@@ -4387,12 +4831,14 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	uint32_t pit_count;
 	uint32_t val;
 
+	lwkt_gettoken(&svm->borrow_imm_context->token_platform);
+
 	if (size == 0 || (info & (VMM_SVM_IOIO_STR | VMM_SVM_IOIO_REP)) != 0) {
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d info=0x%jx rip=0x%jx",
 		    vc->imm_id, op, port, size, (uintmax_t)info,
 		    (uintmax_t)vmcb->state.rip);
-		return 0;
+		goto out_fail;
 	}
 
 	switch (port) {
@@ -4401,26 +4847,26 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi reset io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		val = vmcb->state.rax & 0xffU;
 		if (val != VMM_ACPI_RESET_VALUE) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi reset value=0x%x rip=0x%jx",
 			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_RESET;
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "guest reset source=acpi_fadt vcpu=%u", vc->imm_id);
-		return 1;
+		goto out_ok;
 	case VMM_ACPI_SLEEP_CONTROL_PORT:
 		if (size != 1) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-control io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
 			VMM_SVM_TRACE(svm,
@@ -4428,7 +4874,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    vc->imm_id, size, (uintmax_t)vmcb->state.rip);
 			vmm_svm_set_rax_low(vmcb, 0, size);
 			vmm_svm_advance_ioio(vmcb);
-			return 1;
+			goto out_ok;
 		}
 		val = vmcb->state.rax & 0xffU;
 		VMM_SVM_TRACE(svm,
@@ -4438,19 +4884,19 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-control value=0x%x rip=0x%jx",
 			    vc->imm_id, val, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		vmm_svm_advance_ioio(vmcb);
 		svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_SHUTDOWN;
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "guest shutdown source=acpi_s5 vcpu=%u", vc->imm_id);
-		return 1;
+		goto out_ok;
 	case VMM_ACPI_SLEEP_STATUS_PORT:
 		if (size != 1) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported acpi sleep-status io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
 			VMM_SVM_TRACE(svm,
@@ -4464,7 +4910,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    vc->imm_id, size, val, (uintmax_t)vmcb->state.rip);
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	case VMM_PIC1_CMD:
 	case VMM_PIC2_CMD:
 		if (size != 1) {
@@ -4472,12 +4918,12 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pic cmd io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0, size);
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	case VMM_PIC1_DATA:
 	case VMM_PIC2_DATA:
 		if (size != 1) {
@@ -4485,19 +4931,19 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pic data io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
 			vmm_svm_set_rax_low(vmcb,
-			    port == VMM_PIC1_DATA ? svm->mut_pic1_mask :
-			    svm->mut_pic2_mask, size);
+			    port == VMM_PIC1_DATA ? svm->borrow_imm_context->mut_pic1_mask :
+			    svm->borrow_imm_context->mut_pic2_mask, size);
 		} else if (port == VMM_PIC1_DATA) {
-			svm->mut_pic1_mask = vmcb->state.rax & 0xffU;
+			svm->borrow_imm_context->mut_pic1_mask = vmcb->state.rax & 0xffU;
 		} else {
-			svm->mut_pic2_mask = vmcb->state.rax & 0xffU;
+			svm->borrow_imm_context->mut_pic2_mask = vmcb->state.rax & 0xffU;
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	case VMM_PIC_ELCR1:
 	case VMM_PIC_ELCR2:
 		if (size != 1) {
@@ -4505,21 +4951,21 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pic elcr io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
 			vmm_svm_set_rax_low(vmcb,
-			    port == VMM_PIC_ELCR1 ? svm->mut_pic_elcr1 :
-			    svm->mut_pic_elcr2, size);
+			    port == VMM_PIC_ELCR1 ? svm->borrow_imm_context->mut_pic_elcr1 :
+			    svm->borrow_imm_context->mut_pic_elcr2, size);
 		} else if (port == VMM_PIC_ELCR1) {
-			svm->mut_pic_elcr1 = vmcb->state.rax &
+			svm->borrow_imm_context->mut_pic_elcr1 = vmcb->state.rax &
 			    VMM_PIC_ELCR1_MASK;
 		} else {
-			svm->mut_pic_elcr2 = vmcb->state.rax &
+			svm->borrow_imm_context->mut_pic_elcr2 = vmcb->state.rax &
 			    VMM_PIC_ELCR2_MASK;
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	default:
 		break;
 	}
@@ -4532,71 +4978,71 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit portb io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
-			val = svm->mut_pit_portb;
-			if (svm->mut_pit_ch2_armed == 0 ||
-			    (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2) == 0) {
+			val = svm->borrow_imm_context->mut_pit_portb;
+			if (svm->borrow_imm_context->mut_pit_ch2_armed == 0 ||
+			    (svm->borrow_imm_context->mut_pit_portb & VMM_PIT_PORTB_GATE2) == 0) {
 				val |= VMM_PIT_PORTB_OUT2;
 			} else {
-				elapsed = rdtsc() - svm->mut_pit_ch2_start_tsc;
+				elapsed = rdtsc() - svm->borrow_imm_context->mut_pit_ch2_start_tsc;
 				pit_ticks = (elapsed / svm->imm_host_tsc_hz) *
 				    VMM_PIT_FREQ + ((elapsed % svm->imm_host_tsc_hz) *
 				    VMM_PIT_FREQ) / svm->imm_host_tsc_hz;
-				pit_count = svm->mut_pit_ch2_reload != 0 ?
-				    svm->mut_pit_ch2_reload : 0x10000U;
+				pit_count = svm->borrow_imm_context->mut_pit_ch2_reload != 0 ?
+				    svm->borrow_imm_context->mut_pit_ch2_reload : 0x10000U;
 				if (pit_ticks >= pit_count)
 					val |= VMM_PIT_PORTB_OUT2;
 			}
 			vmm_svm_set_rax_low(vmcb, val, size);
 		} else {
-			old_gate = svm->mut_pit_portb & VMM_PIT_PORTB_GATE2;
-			svm->mut_pit_portb = vmcb->state.rax & 0x03U;
-			new_gate = svm->mut_pit_portb & VMM_PIT_PORTB_GATE2;
+			old_gate = svm->borrow_imm_context->mut_pit_portb & VMM_PIT_PORTB_GATE2;
+			svm->borrow_imm_context->mut_pit_portb = vmcb->state.rax & 0x03U;
+			new_gate = svm->borrow_imm_context->mut_pit_portb & VMM_PIT_PORTB_GATE2;
 			if (old_gate == 0 && new_gate != 0 &&
-			    svm->mut_pit_ch2_armed != 0)
-				svm->mut_pit_ch2_start_tsc = rdtsc();
+			    svm->borrow_imm_context->mut_pit_ch2_armed != 0)
+				svm->borrow_imm_context->mut_pit_ch2_start_tsc = rdtsc();
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 	if (port == VMM_PIT_CH0) {
 		if (size != 1) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit ch0 io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
-			if (svm->mut_pit_ch0_read_state == 0) {
-				val = svm->mut_pit_ch0_count & 0xffU;
-				svm->mut_pit_ch0_read_state = 1;
+			if (svm->borrow_imm_context->mut_pit_ch0_read_state == 0) {
+				val = svm->borrow_imm_context->mut_pit_ch0_count & 0xffU;
+				svm->borrow_imm_context->mut_pit_ch0_read_state = 1;
 			} else {
-				val = (svm->mut_pit_ch0_count >> 8) & 0xffU;
-				svm->mut_pit_ch0_read_state = 0;
+				val = (svm->borrow_imm_context->mut_pit_ch0_count >> 8) & 0xffU;
+				svm->borrow_imm_context->mut_pit_ch0_read_state = 0;
 			}
 			vmm_svm_set_rax_low(vmcb, val, size);
-		} else if (svm->mut_pit_ch0_write_state == 0) {
-			svm->mut_pit_ch0_reload &= 0xff00U;
-			svm->mut_pit_ch0_reload |= vmcb->state.rax & 0xffU;
-			svm->mut_pit_ch0_write_state = 1;
+		} else if (svm->borrow_imm_context->mut_pit_ch0_write_state == 0) {
+			svm->borrow_imm_context->mut_pit_ch0_reload &= 0xff00U;
+			svm->borrow_imm_context->mut_pit_ch0_reload |= vmcb->state.rax & 0xffU;
+			svm->borrow_imm_context->mut_pit_ch0_write_state = 1;
 		} else {
-			svm->mut_pit_ch0_reload &= 0x00ffU;
-			svm->mut_pit_ch0_reload |=
+			svm->borrow_imm_context->mut_pit_ch0_reload &= 0x00ffU;
+			svm->borrow_imm_context->mut_pit_ch0_reload |=
 			    (vmcb->state.rax & 0xffU) << 8;
-			svm->mut_pit_ch0_count = svm->mut_pit_ch0_reload;
-			svm->mut_pit_ch0_write_state = 0;
+			svm->borrow_imm_context->mut_pit_ch0_count = svm->borrow_imm_context->mut_pit_ch0_reload;
+			svm->borrow_imm_context->mut_pit_ch0_write_state = 0;
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 	if (port == VMM_PIT_CMD) {
 		if (size != 1) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0xffU, size);
@@ -4608,45 +5054,45 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 					    "svm vcpu%u unsupported pit ch0 cmd=0x%x rip=0x%jx",
 					    vc->imm_id, val,
 					    (uintmax_t)vmcb->state.rip);
-					return 0;
+					goto out_fail;
 				}
-				svm->mut_pit_ch0_read_state = 0;
-				svm->mut_pit_ch0_write_state = 0;
+				svm->borrow_imm_context->mut_pit_ch0_read_state = 0;
+				svm->borrow_imm_context->mut_pit_ch0_write_state = 0;
 			} else if ((val & 0xc0U) == 0x80U) {
 				if (val != 0xb0U) {
 					vmm_machine_debugf(svm->borrow_imm_machine,
 					    "svm vcpu%u unsupported pit ch2 cmd=0x%x rip=0x%jx",
 					    vc->imm_id, val,
 					    (uintmax_t)vmcb->state.rip);
-					return 0;
+					goto out_fail;
 				}
-				svm->mut_pit_ch2_read_state = 0;
-				svm->mut_pit_ch2_write_state = 0;
-				svm->mut_pit_ch2_armed = 0;
+				svm->borrow_imm_context->mut_pit_ch2_read_state = 0;
+				svm->borrow_imm_context->mut_pit_ch2_write_state = 0;
+				svm->borrow_imm_context->mut_pit_ch2_armed = 0;
 			} else {
 				vmm_machine_debugf(svm->borrow_imm_machine,
 				    "svm vcpu%u unsupported pit cmd=0x%x rip=0x%jx",
 				    vc->imm_id, val,
 				    (uintmax_t)vmcb->state.rip);
-				return 0;
+				goto out_fail;
 			}
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 	if (port == VMM_PIT_CH2) {
 		if (size != 1) {
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pit io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
-			pit_count = svm->mut_pit_ch2_reload != 0 ?
-			    svm->mut_pit_ch2_reload : 0x10000U;
-			if (svm->mut_pit_ch2_armed != 0 &&
-			    (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2) != 0) {
-				elapsed = rdtsc() - svm->mut_pit_ch2_start_tsc;
+			pit_count = svm->borrow_imm_context->mut_pit_ch2_reload != 0 ?
+			    svm->borrow_imm_context->mut_pit_ch2_reload : 0x10000U;
+			if (svm->borrow_imm_context->mut_pit_ch2_armed != 0 &&
+			    (svm->borrow_imm_context->mut_pit_portb & VMM_PIT_PORTB_GATE2) != 0) {
+				elapsed = rdtsc() - svm->borrow_imm_context->mut_pit_ch2_start_tsc;
 				pit_ticks = (elapsed / svm->imm_host_tsc_hz) *
 				    VMM_PIT_FREQ + ((elapsed % svm->imm_host_tsc_hz) *
 				    VMM_PIT_FREQ) / svm->imm_host_tsc_hz;
@@ -4655,29 +5101,29 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 				else
 					pit_count -= (uint32_t)pit_ticks;
 			}
-			if (svm->mut_pit_ch2_read_state == 0) {
+			if (svm->borrow_imm_context->mut_pit_ch2_read_state == 0) {
 				val = pit_count & 0xffU;
-				svm->mut_pit_ch2_read_state = 1;
+				svm->borrow_imm_context->mut_pit_ch2_read_state = 1;
 			} else {
 				val = (pit_count >> 8) & 0xffU;
-				svm->mut_pit_ch2_read_state = 0;
+				svm->borrow_imm_context->mut_pit_ch2_read_state = 0;
 			}
 			vmm_svm_set_rax_low(vmcb, val, size);
-		} else if (svm->mut_pit_ch2_write_state == 0) {
-			svm->mut_pit_ch2_reload &= 0xff00U;
-			svm->mut_pit_ch2_reload |= vmcb->state.rax & 0xffU;
-			svm->mut_pit_ch2_write_state = 1;
+		} else if (svm->borrow_imm_context->mut_pit_ch2_write_state == 0) {
+			svm->borrow_imm_context->mut_pit_ch2_reload &= 0xff00U;
+			svm->borrow_imm_context->mut_pit_ch2_reload |= vmcb->state.rax & 0xffU;
+			svm->borrow_imm_context->mut_pit_ch2_write_state = 1;
 		} else {
-			svm->mut_pit_ch2_reload &= 0x00ffU;
-			svm->mut_pit_ch2_reload |=
+			svm->borrow_imm_context->mut_pit_ch2_reload &= 0x00ffU;
+			svm->borrow_imm_context->mut_pit_ch2_reload |=
 			    (vmcb->state.rax & 0xffU) << 8;
-			svm->mut_pit_ch2_write_state = 0;
-			svm->mut_pit_ch2_armed = 1;
-			if (svm->mut_pit_portb & VMM_PIT_PORTB_GATE2)
-				svm->mut_pit_ch2_start_tsc = rdtsc();
+			svm->borrow_imm_context->mut_pit_ch2_write_state = 0;
+			svm->borrow_imm_context->mut_pit_ch2_armed = 1;
+			if (svm->borrow_imm_context->mut_pit_portb & VMM_PIT_PORTB_GATE2)
+				svm->borrow_imm_context->mut_pit_ch2_start_tsc = rdtsc();
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if (port >= VMM_PM_TIMER_PORT && port <= VMM_PM_TIMER_LAST) {
@@ -4686,7 +5132,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pmtimer io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN) {
 			val = vmm_svm_pm_timer_counter(svm) >>
@@ -4700,7 +5146,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)vmcb->state.rip);
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if (port == VMM_CMOS_INDEX || port == VMM_CMOS_DATA) {
@@ -4709,17 +5155,17 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported cmos io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (port == VMM_CMOS_INDEX) {
 			if (info & VMM_SVM_IOIO_IN) {
-				val = svm->mut_cmos_index |
-				    svm->mut_cmos_nmi_disabled;
+				val = svm->borrow_imm_context->mut_cmos_index |
+				    svm->borrow_imm_context->mut_cmos_nmi_disabled;
 				vmm_svm_set_rax_low(vmcb, val, size);
 			} else {
 				val = vmcb->state.rax & 0xffU;
-				svm->mut_cmos_index = val & 0x7fU;
-				svm->mut_cmos_nmi_disabled = val & 0x80U;
+				svm->borrow_imm_context->mut_cmos_index = val & 0x7fU;
+				svm->borrow_imm_context->mut_cmos_nmi_disabled = val & 0x80U;
 			}
 		} else if (info & VMM_SVM_IOIO_IN) {
 			vmm_svm_set_rax_low(vmcb, vmm_svm_cmos_read(svm),
@@ -4728,7 +5174,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_svm_cmos_write(svm, vmcb->state.rax & 0xffU);
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if (port >= VMM_ISA_MISC_PORT && port <= VMM_ISA_MISC_LAST) {
@@ -4737,12 +5183,12 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported isa misc io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0, size);
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if (port == VMM_PCI_CFG_CTRL) {
@@ -4750,12 +5196,12 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			vmm_machine_debugf(svm->borrow_imm_machine,
 			    "svm vcpu%u unsupported pci cfg ctrl io op=%s size=%d rip=0x%jx",
 			    vc->imm_id, op, size, (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0, size);
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 	if (port >= VMM_PCI_CFG_ADDR && port <= VMM_PCI_CFG_ADDR_LAST) {
 		unsigned int shift;
@@ -4766,7 +5212,7 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pci cfg addr io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		shift = (port - VMM_PCI_CFG_ADDR) * 8U;
 		mask = size == 4 ? 0xffffffffU : ((1U << (size * 8)) - 1U);
@@ -4775,14 +5221,14 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 				vmm_svm_set_rax_low(vmcb, 0xffU, size);
 			else
 				vmm_svm_set_rax_low(vmcb,
-				    svm->mut_pci_cfg_addr >> shift, size);
+				    svm->borrow_imm_context->mut_pci_cfg_addr >> shift, size);
 		} else {
-			svm->mut_pci_cfg_addr &= ~(mask << shift);
-			svm->mut_pci_cfg_addr |=
+			svm->borrow_imm_context->mut_pci_cfg_addr &= ~(mask << shift);
+			svm->borrow_imm_context->mut_pci_cfg_addr |=
 			    ((uint32_t)vmcb->state.rax & mask) << shift;
 		}
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 	if (port >= VMM_PCI_CFG_DATA && port <= VMM_PCI_CFG_DATA_LAST) {
 		if (port + (unsigned int)size - 1 > VMM_PCI_CFG_DATA_LAST) {
@@ -4790,12 +5236,12 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported pci cfg data io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0xffffffffU, size);
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if ((port >= VMM_COM2_BASE && port <= VMM_COM2_BASE + VMM_COM1_SCR) ||
@@ -4806,34 +5252,41 @@ vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			    "svm vcpu%u unsupported absent serial io op=%s port=0x%x size=%d rip=0x%jx",
 			    vc->imm_id, op, port, size,
 			    (uintmax_t)vmcb->state.rip);
-			return 0;
+			goto out_fail;
 		}
 		if (info & VMM_SVM_IOIO_IN)
 			vmm_svm_set_rax_low(vmcb, 0xffU, size);
 		vmm_svm_advance_ioio(vmcb);
-		return 1;
+		goto out_ok;
 	}
 
 	if (port < VMM_COM1_BASE || port > VMM_COM1_BASE + VMM_COM1_SCR) {
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported ioio op=%s port=0x%x size=%d rip=0x%jx",
 		    vc->imm_id, op, port, size, (uintmax_t)vmcb->state.rip);
-		return 0;
+		goto out_fail;
 	}
 
 	if (info & VMM_SVM_IOIO_IN) {
 		if (!vmm_svm_com1_read(svm, vc, port - VMM_COM1_BASE, size,
 		    &val))
-			return 0;
+			goto out_fail;
 		vmm_svm_set_rax_low(vmcb, val, size);
 	} else {
 		val = vmcb->state.rax & 0xffffffffU;
 		if (!vmm_svm_com1_write(svm, vc, port - VMM_COM1_BASE, size,
 		    val))
-			return 0;
+			goto out_fail;
 	}
 	vmm_svm_advance_ioio(vmcb);
+	goto out_ok;
+out_ok:
+	vmm_svm_platform_kick(svm);
+	lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 	return 1;
+out_fail:
+	lwkt_reltoken(&svm->borrow_imm_context->token_platform);
+	return 0;
 }
 
 static void
@@ -4923,6 +5376,7 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 	uint64_t deadline;
 	uint64_t now;
+	int com1_rx_enabled;
 	unsigned int i;
 
 	vmm_svm_advance_rip(vmcb);
@@ -4938,12 +5392,15 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 		 * after dropping it.  Queue before the final predicate check so an
 		 * input byte cannot be lost between the check and tsleep().
 		 */
+		lwkt_gettoken(&svm->borrow_imm_context->token_platform);
+		com1_rx_enabled =
+		    (svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
+		    (svm->borrow_imm_context->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0;
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		lwkt_gettoken(&console->token_console);
 		tsleep_interlock(vc, 0);
 		if (vmm_vcpu_should_stop(vc) ||
-		    ((svm->mut_com1_ier & VMM_COM1_IER_RDI) != 0 &&
-		    (svm->mut_com1_mcr & VMM_COM1_MCR_OUT2) != 0 &&
-		    console->mut_input_len != 0)) {
+		    (com1_rx_enabled && console->mut_input_len != 0)) {
 			lwkt_reltoken(&console->token_console);
 			break;
 		}
@@ -5029,7 +5486,9 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "smoke ioapic request pin=%u", arg);
 		vmm_svm_advance_rip(vmcb);
+		lwkt_gettoken(&svm->borrow_imm_context->token_platform);
 		vmm_svm_ioapic_raise(svm, vc, arg, "ioapic_smoke");
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case VMM_SVM_SMOKE_AVIC_DELIVER:
 		vmm_machine_debugf(svm->borrow_imm_machine,
@@ -5084,29 +5543,8 @@ vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
 	int modsz;
 	int size;
 
-	if (apic_reg == VMM_SVM_APIC_REG_TMCCT) {
-		uint64_t now;
-		uint64_t remaining;
-
-		now = rdtsc();
-		if ((svm->mut_lapic_timer_lvtt &
-		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE ||
-		    !svm->mut_lapic_timer_active ||
-		    svm->mut_lapic_timer_interval_root_tsc == 0 ||
-		    svm->mut_lapic_timer_root_deadline <= now) {
-			value = 0;
-		} else {
-			remaining = svm->mut_lapic_timer_root_deadline - now;
-			value = (uint32_t)
-			    (((_uint128_t)svm->mut_lapic_timer_tmict * remaining) /
-			    svm->mut_lapic_timer_interval_root_tsc);
-		}
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TMCCT,
-		    value);
-	} else {
-		value = vmm_svm_avic_apic_read32(svm, apic_reg);
-	}
+	if (!vmm_svm_lapic_read(svm, apic_reg, &value))
+		goto fail;
 	inst_len = vmcb->ctrl.inst_len;
 	if (inst_len == 0 || inst_len > (int)sizeof(vmcb->ctrl.inst_bytes)) {
 		if (vmm_svm_guest_read_va(svm, vmcb->state.rip, fetched,
@@ -5159,17 +5597,26 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
     struct vmm_vcpu_thread *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
+	struct vmm_svm_context *context;
+	struct vmm_svm_backend *target;
+	const struct vmm_vcpu_thread *target_vc;
 	const char *name;
 	volatile uint32_t *ptr;
+	uint32_t delivery;
+	uint32_t destination;
+	uint32_t icrh;
+	uint32_t icrl;
 	uint32_t value;
 	uint32_t extra;
-	uint32_t tmp1;
-	uint32_t tmp2;
 
 	if (vmcb->ctrl.exitcode == VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI) {
+		icrl = (uint32_t)vmcb->ctrl.exitinfo1;
+		icrh = (uint32_t)(vmcb->ctrl.exitinfo1 >> 32);
 		value = (uint32_t)(vmcb->ctrl.exitinfo2 >> 32);
 		extra = (uint32_t)(vmcb->ctrl.exitinfo2 &
 		    VMM_SVM_AVIC_PHYS_MAX_INDEX_MASK);
+		delivery = icrl & VMM_SVM_APIC_ICR_DELIVERY_MASK;
+		destination = icrh >> 24;
 		switch (value) {
 		case VMM_SVM_AVIC_IPI_INVALID_INT_TYPE:
 			name = "invalid_int_type";
@@ -5190,11 +5637,43 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 			name = "unknown";
 			break;
 		}
+		if ((icrl & (VMM_SVM_APIC_ICR_DEST_LOGICAL |
+		    VMM_SVM_APIC_ICR_SHORTHAND_MASK)) != 0 ||
+		    destination > VMM_SVM_AVIC_MAX_PHYS_ID ||
+		    (delivery != VMM_SVM_APIC_ICR_INIT &&
+		    delivery != VMM_SVM_APIC_ICR_SIPI))
+			goto incomplete_unhandled;
+
+		context = svm->borrow_imm_context;
+		lwkt_gettoken(&context->token_platform);
+		target = context->own_mut_apic_targets[destination];
+		if (target == NULL || target == svm) {
+			lwkt_reltoken(&context->token_platform);
+			goto incomplete_unhandled;
+		}
+		target_vc = target->borrow_imm_vcpu;
+		if (delivery == VMM_SVM_APIC_ICR_INIT) {
+			/* INIT precedes a later SIPI from the same serialized ICR path. */
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 0);
+			atomic_store_rel_int(&target->atomic_mut_ap_init_pending, 1);
+		} else {
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_vector,
+			    icrl & 0xffU);
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 1);
+		}
+		lwkt_reltoken(&context->token_platform);
+		wakeup(__DECONST(void *, target_vc));
+		vmm_machine_debugf(svm->borrow_imm_machine,
+		    "svm vcpu%u apic %s target=%u reason=%s index=%u icrl=0x%08x icrh=0x%08x",
+		    vc->imm_id, delivery == VMM_SVM_APIC_ICR_INIT ? "init" : "sipi",
+		    destination, name, extra, icrl, icrh);
+		return 1;
+
+	incomplete_unhandled:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic incomplete_ipi reason=%s id=%u index=%u icrl=0x%08x icrh=0x%08x info1=0x%jx info2=0x%jx rip=0x%jx",
 		    vc->imm_id, name, value, extra,
-		    (uint32_t)vmcb->ctrl.exitinfo1,
-		    (uint32_t)(vmcb->ctrl.exitinfo1 >> 32),
+		    icrl, icrh,
 		    (uintmax_t)vmcb->ctrl.exitinfo1,
 		    (uintmax_t)vmcb->ctrl.exitinfo2,
 		    (uintmax_t)vmcb->state.rip);
@@ -5292,137 +5771,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		}
 		return 0;
 	}
-	switch (value) {
-	case VMM_SVM_APIC_REG_LVT_ERROR:
-		value = *ptr;
-		value &= VMM_SVM_APIC_LVT_ERROR_VALID;
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_ERROR,
-		    value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic lvt_error accepted value=0x%x",
-		    vc->imm_id, value);
-		return 1;
-	case VMM_SVM_APIC_REG_LVTT:
-		value = *ptr;
-		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
-		if ((svm->mut_lapic_timer_lvtt &
-		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE &&
-		    (value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) !=
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE)
-			svm->mut_lapic_timer_active = 0;
-		svm->mut_lapic_timer_lvtt = value;
-		if ((value & VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
-			svm->mut_lapic_timer_tmict = 0;
-			svm->mut_lapic_timer_interval_root_tsc = 0;
-			svm->mut_lapic_timer_root_deadline = 0;
-			svm->mut_lapic_timer_active =
-			    svm->mut_lapic_timer_tsc_deadline != 0;
-			vmm_svm_avic_apic_write32(svm,
-			    VMM_SVM_APIC_REG_TMICT, 0);
-			vmm_svm_avic_apic_write32(svm,
-			    VMM_SVM_APIC_REG_TMCCT, 0);
-		}
-		if (svm->mut_lapic_timer_tmict != 0)
-			vmm_svm_lapic_timer_arm(svm,
-			    svm->mut_lapic_timer_tmict);
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
-		    value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic lvtt accepted value=0x%x",
-		    vc->imm_id, value);
-		return 1;
-	case VMM_SVM_APIC_REG_TMICT:
-		value = *ptr;
-		if ((svm->mut_lapic_timer_lvtt &
-		    VMM_SVM_APIC_LVT_TIMER_MODE_MASK) ==
-		    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE) {
-			value = svm->mut_lapic_timer_tmict;
-			vmm_svm_avic_apic_write32(svm,
-			    VMM_SVM_APIC_REG_TMICT, value);
-			VMM_SVM_TRACE(svm,
-			    "svm vcpu%u avic tmict ignored tscdeadline value=0x%x",
-			    vc->imm_id, value);
-			return 1;
-		}
-		vmm_svm_lapic_timer_arm(svm, value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic tmict accepted value=0x%x",
-		    vc->imm_id, value);
-		return 1;
-	case VMM_SVM_APIC_REG_TDCR:
-		value = *ptr & VMM_SVM_APIC_TIMER_DIVIDE_VALID;
-		svm->mut_lapic_timer_tdcr = value;
-		tmp1 = value & 0xfU;
-		tmp2 = ((tmp1 & 0x3U) | ((tmp1 & 0x8U) >> 1)) + 1;
-		svm->mut_lapic_timer_divisor = 1U << (tmp2 & 0x7U);
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TDCR,
-		    value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic tdcr accepted value=0x%x divisor=%u",
-		    vc->imm_id, value, svm->mut_lapic_timer_divisor);
-		if (svm->mut_lapic_timer_active &&
-		    svm->mut_lapic_timer_tmict != 0)
-			vmm_svm_lapic_timer_arm(svm,
-			    svm->mut_lapic_timer_tmict);
-		return 1;
-	case VMM_SVM_APIC_REG_EOI:
-		vmm_svm_lapic_eoi(svm);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic eoi accepted", vc->imm_id);
-		return 1;
-	case VMM_SVM_APIC_REG_SVR:
-		value = *ptr & VMM_SVM_APIC_SVR_VALID;
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR, value);
-		if ((value & VMM_SVM_APIC_SVR_ENABLE) == 0) {
-			svm->mut_lapic_timer_active = 0;
-			svm->mut_lapic_timer_lvtt |= VMM_SVM_APIC_LVT_MASKED;
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVTT,
-			    svm->mut_lapic_timer_lvtt);
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT0,
-			    VMM_SVM_APIC_LVT_MASKED);
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT1,
-			    VMM_SVM_APIC_LVT_MASKED);
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_ERROR,
-			    VMM_SVM_APIC_LVT_MASKED);
-			vmm_svm_avic_apic_write32(svm,
-			    VMM_SVM_APIC_REG_LVT_THERMAL,
-			    VMM_SVM_APIC_LVT_MASKED);
-			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LVT_PC,
-			    VMM_SVM_APIC_LVT_MASKED);
-		}
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic svr accepted value=0x%x",
-		    vc->imm_id, value);
-		return 1;
-	case VMM_SVM_APIC_REG_ESR:
-		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ESR, 0);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic esr cleared", vc->imm_id);
-		return 1;
-	case VMM_SVM_APIC_REG_LVT0:
-	case VMM_SVM_APIC_REG_LVT1:
-		tmp1 = value;
-		value = *ptr & VMM_SVM_APIC_LVT_LINT_VALID;
-		vmm_svm_avic_apic_write32(svm, tmp1, value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic %s accepted value=0x%x",
-		    vc->imm_id, name, value);
-		return 1;
-	case VMM_SVM_APIC_REG_LVT_THERMAL:
-	case VMM_SVM_APIC_REG_LVT_PC:
-		tmp1 = value;
-		value = *ptr & VMM_SVM_APIC_LVT_DELIVERY_VALID;
-		vmm_svm_avic_apic_write32(svm, tmp1, value);
-		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u avic %s accepted value=0x%x",
-		    vc->imm_id, name, value);
-		return 1;
-	default:
-		break;
-	}
-	return 0;
+	return vmm_svm_lapic_write(svm, vc, value, *ptr);
 }
 
 static int
@@ -5639,9 +5988,29 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
 	KKASSERT(cpu_state->own_mut_hsave != NULL);
 	while (!vmm_vcpu_should_stop(vc)) {
+		if (vc->imm_id != 0) {
+			if (atomic_swap_int(&svm->atomic_mut_ap_init_pending, 0) != 0)
+				vmm_svm_ap_init(svm);
+			if (svm->mut_ap_state == VMM_SVM_AP_WAIT_SIPI &&
+			    atomic_swap_int(&svm->atomic_mut_ap_sipi_pending, 0) != 0) {
+				vmm_svm_ap_sipi(svm, (uint8_t)atomic_load_acq_int(
+				    &svm->atomic_mut_ap_sipi_vector));
+			}
+			if (svm->mut_ap_state == VMM_SVM_AP_WAIT_SIPI) {
+				tsleep_interlock(vc, 0);
+				if (vmm_vcpu_should_stop(vc) ||
+				    atomic_load_acq_int(&svm->atomic_mut_ap_init_pending) != 0 ||
+				    atomic_load_acq_int(&svm->atomic_mut_ap_sipi_pending) != 0)
+					continue;
+				tsleep(vc, PINTERLOCKED, "vmmsipi", 0);
+				continue;
+			}
+		}
 		vmm_svm_lapic_timer_sync(svm);
 		vmm_svm_timer_check(svm, vc);
+		lwkt_gettoken(&svm->borrow_imm_context->token_platform);
 		vmm_svm_com1_rx_notify(svm, vc, "entry");
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		if (cpu_state->mut_tsc_ratio != svm->imm_tsc_ratio) {
 			wrmsr(VMM_SVM_MSR_AMD64_TSC_RATIO, svm->imm_tsc_ratio);
 			observed_ratio = rdmsr(VMM_SVM_MSR_AMD64_TSC_RATIO);
@@ -5845,8 +6214,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    (uintmax_t)vmcb->state.rax,
 			    (uintmax_t)svm->mut_gprs[VMM_X64_GPR_RDX]);
 			vmm_machine_logf(svm->borrow_imm_machine,
-			    "guest fault source=unhandled_vmexit vcpu=%u",
-			    vc->imm_id);
+			    "guest fault source=unhandled_vmexit vcpu=%u exit=0x%jx info1=0x%jx info2=0x%jx rip=0x%jx",
+			    vc->imm_id, (uintmax_t)vmcb->ctrl.exitcode,
+			    (uintmax_t)vmcb->ctrl.exitinfo1,
+			    (uintmax_t)vmcb->ctrl.exitinfo2,
+			    (uintmax_t)vmcb->state.rip);
 			svm->mut_exit_reason = VMM_VCPU_EXIT_GUEST_FAULT;
 			goto out;
 		}
