@@ -22,6 +22,7 @@
 
 #include "vmm_loader_x86.h"
 #include "vmm_machine.h"
+#include "vmm_host.h"
 #include "vmm_pcie.h"
 
 static int vmm_debug_trace_enabled;
@@ -32,6 +33,7 @@ int vmm_debug_allow_machine_task_run = 1;
 int vmm_debug_allow_loader_fork = 1;
 int vmm_debug_allow_loader_run = 1;
 int vmm_debug_allow_vcpu_start = 1;
+static int vmm_start_timeout_ms = 10000;
 
 SYSCTL_NODE(_debug, OID_AUTO, vmm, CTLFLAG_RW, 0, "vmm debug controls");
 SYSCTL_INT(_debug_vmm, OID_AUTO, trace, CTLFLAG_RW,
@@ -57,6 +59,9 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, allow_loader_run, CTLFLAG_RW,
 SYSCTL_INT(_debug_vmm, OID_AUTO, allow_vcpu_start, CTLFLAG_RW,
     &vmm_debug_allow_vcpu_start, 0,
     "allow vmm_machine_command_start to enter vCPU execution");
+SYSCTL_INT(_debug_vmm, OID_AUTO, start_timeout_ms, CTLFLAG_RW,
+    &vmm_start_timeout_ms, 0,
+    "maximum wait for every vCPU to reach its first VMRUN");
 
 struct vmm_machine_task {
 	struct task task;
@@ -70,6 +75,8 @@ static void	vmm_machine_drain_task(void *arg, int pending);
 static enum vmm_machine_status vmm_machine_status(struct vmm_machine *m);
 static void	vmm_machine_set_status(struct vmm_machine *m,
 			    enum vmm_machine_status status);
+static int vmm_machine_start_vcpus(struct vmm_machine *m,
+    uint32_t count, const struct vmm_launch *launch);
 
 /* --------------------------------------------------------------------- */
 /* Machine model.                                                        */
@@ -191,7 +198,7 @@ void
 vmm_machine_uninit(struct vmm_machine *m)
 {
 	struct vmm_mem_backing *backing;
-	struct vmm_vcpu_thread *threads = NULL;
+	struct vmm_vcpu *threads = NULL;
 	uint32_t thread_count;
 
 	/*
@@ -200,12 +207,12 @@ vmm_machine_uninit(struct vmm_machine *m)
 	 * teardown; it must not be the path that races active vCPUs against
 	 * guest RAM detach.
 	 */
-	thread_count = m->own_mut_vcpu.mut_count;
-	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+	thread_count = m->own_mut_vcpus.mut_count;
+	vmm_vcpus_uninit(&m->own_mut_vcpus, &threads);
 	vmm_pcie_root_stop(&m->own_mut_pcie_root);
 	vmm_dma_uninit(&m->own_mut_dma);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
+	vmm_vcpus_release(&m->own_mut_vcpus, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);
@@ -293,7 +300,7 @@ vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
 	if (cred != NULL) {
 		/* vmmfs froze config by clearing desired_stopped before this call. */
 		lwkt_gettoken(&m->token_config);
-		vcpu_count = m->own_mut_vcpu.mut_count;
+		vcpu_count = m->own_mut_vcpus.mut_count;
 		mem_bytes = m->own_mut_mem.mut_bytes;
 		loader_len = m->mut_loader_len;
 		lwkt_reltoken(&m->token_config);
@@ -394,7 +401,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 									   &task->own_loader);
 	struct vmm_mem_backing *backing = NULL;
 	struct vmm_mem_backing *prepared_backing = NULL;
-	struct vmm_vcpu_thread *threads = NULL;
+	struct vmm_vcpu *threads = NULL;
 	struct vmm_launch launch;
 	struct vm_object *mem_object = NULL;
 	uint64_t mem_size = 0;
@@ -406,7 +413,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 	int loader_exit_code;
 
 	lwkt_gettoken(&m->token_config);
-	vcpu_count = m->own_mut_vcpu.mut_count;
+	vcpu_count = m->own_mut_vcpus.mut_count;
 	mem_bytes = m->own_mut_mem.mut_bytes;
 	lwkt_reltoken(&m->token_config);
 	vmm_debug_trace("start begin m=%p vcpu=%u mem=%ju loader=%s", m,
@@ -529,7 +536,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 		goto fail_after_loader;
 	}
 	vmm_console_reset(&m->own_mut_console);
-	error = vmm_vcpu_start(m, vcpu_count,
+	error = vmm_machine_start_vcpus(m, vcpu_count,
 	    m->own_mut_boot_launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "launch failed stage=vcpu error=%d", error);
@@ -551,22 +558,94 @@ fail:
 fail_after_loader:
 	vmm_debug_trace("start cleanup begin m=%p error=%d", m, error);
 	vmm_pcie_root_stop(&m->own_mut_pcie_root);
-	vmm_vcpu_stop(m);
-	thread_count = m->own_mut_vcpu.mut_count;
-	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+	vmm_vcpus_stop(m);
+	thread_count = m->own_mut_vcpus.mut_count;
+	vmm_vcpus_uninit(&m->own_mut_vcpus, &threads);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=start_failed error=%d",
 	    error);
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 	backing = vmm_mem_detach(&m->own_mut_mem);
-	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
+	vmm_vcpus_release(&m->own_mut_vcpus, threads, thread_count);
 	vmm_mem_release_backing(backing);
 	if (m->own_mut_boot_launch != NULL) {
 		kfree(m->own_mut_boot_launch, M_TEMP);
 		m->own_mut_boot_launch = NULL;
 	}
 	vmm_debug_trace("start cleanup done m=%p error=%d", m, error);
+}
+
+void
+vmm_machine_vcpu_start_failed(struct vmm_machine *m)
+{
+	if (vmm_machine_status(m) != VMM_MACHINE_STARTING)
+		return;
+	atomic_store_rel_int(&m->atomic_mut_start_failed, 1);
+	vmm_vcpus_request_stop(m);
+	wakeup(m);
+}
+
+static int
+vmm_machine_start_vcpus(struct vmm_machine *m, uint32_t count,
+    const struct vmm_launch *launch)
+{
+	struct vmm_vcpus *vcpus = &m->own_mut_vcpus;
+	int deadline;
+	int remaining;
+	int timeout_ticks;
+	uint32_t i;
+	int error;
+
+	error = vmm_vcpus_create(m, count, launch);
+	if (error != 0)
+		return error;
+	atomic_store_rel_int(&m->atomic_mut_start_wait_count, count);
+	atomic_store_rel_int(&m->atomic_mut_start_failed, 0);
+	for (i = 0; i < count; i++) {
+		struct vmm_vcpu *vc = &vcpus->own_mut_vcpus[i];
+
+		vc->borrow_imm_machine = m;
+		vc->borrow_imm_backend_ops = vcpus->borrow_imm_backend_ops;
+		vc->imm_id = i;
+		vc->imm_cpu = vmm_host_next_cpu();
+		error = vmm_vcpu_start(vc);
+		if (error != 0)
+			goto fail;
+	}
+	timeout_ticks = (vmm_start_timeout_ms * hz) / 1000;
+	if (timeout_ticks < 1)
+		timeout_ticks = 1;
+	deadline = ticks + timeout_ticks;
+	for (;;) {
+		if (atomic_load_acq_int(&m->atomic_mut_start_failed) != 0) {
+			error = EIO;
+			goto fail;
+		}
+		if (atomic_load_acq_int(&m->atomic_mut_start_wait_count) == 0)
+			break;
+		tsleep_interlock(m, 0);
+		if (atomic_load_acq_int(&m->atomic_mut_start_failed) != 0 ||
+		    atomic_load_acq_int(&m->atomic_mut_start_wait_count) == 0)
+			continue;
+		remaining = deadline - ticks;
+		if (remaining <= 0) {
+			error = ETIMEDOUT;
+			goto fail;
+		}
+		error = tsleep(m, PINTERLOCKED, "vmmstart", remaining);
+		if (error != 0) {
+			error = ETIMEDOUT;
+			goto fail;
+		}
+	}
+	if (atomic_load_acq_int(&vcpus->atomic_mut_active_count) != count)
+		return EIO;
+	return 0;
+
+fail:
+	vmm_vcpus_stop(m);
+	return error;
 }
 
 void
@@ -578,7 +657,7 @@ vmm_machine_vcpu_terminal(struct vmm_machine *m,
 	if (!atomic_cmpset_int(&m->atomic_mut_status,
 	    VMM_MACHINE_RUNNING, VMM_MACHINE_DRAINING))
 		return;
-	atomic_store_rel_int(&m->own_mut_vcpu.atomic_mut_exit_reason, reason);
+	atomic_store_rel_int(&m->own_mut_vcpus.atomic_mut_exit_reason, reason);
 	switch (reason) {
 	case VMM_VCPU_EXIT_GUEST_RESET:
 		name = "guest_reset";
@@ -592,14 +671,14 @@ vmm_machine_vcpu_terminal(struct vmm_machine *m,
 	}
 	vmm_machine_logf(m, "state draining reason=%s", name);
 	vmm_pcie_root_stop(&m->own_mut_pcie_root);
-	vmm_vcpu_request_stop(m);
+	vmm_vcpus_request_stop(m);
 }
 
 void
 vmm_machine_vcpu_drained(struct vmm_machine *m)
 {
 	struct vmm_mem_backing *backing;
-	struct vmm_vcpu_thread *threads;
+	struct vmm_vcpu *threads;
 	struct vmm_launch *boot_launch;
 	uint32_t thread_count;
 	u_int exit_reason;
@@ -608,14 +687,14 @@ vmm_machine_vcpu_drained(struct vmm_machine *m)
 	if (vmm_machine_status(m) != VMM_MACHINE_DRAINING)
 		return;
 	KKASSERT(atomic_load_acq_int(
-	    &m->own_mut_vcpu.atomic_mut_active_count) == 0);
+	    &m->own_mut_vcpus.atomic_mut_active_count) == 0);
 	lwkt_gettoken(&m->token_config);
-	thread_count = m->own_mut_vcpu.mut_count;
-	vmm_vcpu_uninit(&m->own_mut_vcpu, &threads);
+	thread_count = m->own_mut_vcpus.mut_count;
+	vmm_vcpus_uninit(&m->own_mut_vcpus, &threads);
 	exit_reason = atomic_load_acq_int(
-	    &m->own_mut_vcpu.atomic_mut_exit_reason);
+	    &m->own_mut_vcpus.atomic_mut_exit_reason);
 	lwkt_reltoken(&m->token_config);
-	vmm_vcpu_release_threads(&m->own_mut_vcpu, threads, thread_count);
+	vmm_vcpus_release(&m->own_mut_vcpus, threads, thread_count);
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);
 
@@ -631,7 +710,7 @@ vmm_machine_vcpu_drained(struct vmm_machine *m)
 			vmm_machine_logf(m, "state starting reason=guest_reset");
 			vmm_pcie_root_start(&m->own_mut_pcie_root,
 			    &m->own_mut_dma);
-			error = vmm_vcpu_start(m, thread_count,
+			error = vmm_machine_start_vcpus(m, thread_count,
 			    m->own_mut_boot_launch);
 		}
 		if (error == 0) {
@@ -673,7 +752,7 @@ vmm_machine_command_stop(const struct vmm_machine_task *task)
 		    VMM_MACHINE_DRAINING)) {
 			vmm_machine_logf(m, "state draining reason=stop");
 			vmm_pcie_root_stop(&m->own_mut_pcie_root);
-			vmm_vcpu_request_stop(m);
+			vmm_vcpus_request_stop(m);
 		}
 		tsleep_interlock(&m->atomic_mut_status, 0);
 		if (vmm_machine_status(m) != VMM_MACHINE_STOPPED)
@@ -695,7 +774,7 @@ vmm_machine_console_input(struct vmm_machine *m)
 {
 	lwkt_gettoken(&m->token_config);
 	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
-		vmm_vcpu_console_input_locked(m);
+		vmm_vcpus_console_input_locked(m);
 	lwkt_reltoken(&m->token_config);
 }
 void
@@ -703,7 +782,7 @@ vmm_machine_msix(struct vmm_machine *m, uint8_t vector)
 {
 	lwkt_gettoken(&m->token_config);
 	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
-		vmm_vcpu_interrupt_locked(m, vector);
+		vmm_vcpus_interrupt_locked(m, vector);
 	lwkt_reltoken(&m->token_config);
 }
 
@@ -734,7 +813,7 @@ vmm_machine_format_vcpu(const struct vmm_machine *m, char *out, size_t cap)
 	size_t n;
 
 	lwkt_gettoken(&__DECONST(struct vmm_machine *, m)->token_config);
-	n = vmm_vcpu_format(&m->own_mut_vcpu, out, cap);
+	n = vmm_vcpus_format(&m->own_mut_vcpus, out, cap);
 	lwkt_reltoken(&__DECONST(struct vmm_machine *, m)->token_config);
 	return n;
 }
@@ -745,10 +824,10 @@ vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len)
 
 	lwkt_gettoken(&m->token_config);
 	ok = vmm_machine_config_writable(m) &&
-	    vmm_vcpu_parse(&m->own_mut_vcpu, buf, len);
+	    vmm_vcpus_parse(&m->own_mut_vcpus, buf, len);
 	lwkt_reltoken(&m->token_config);
 	vmm_machine_logf(m, "config vcpu %s count=%u", ok ? "accepted" :
-	    "rejected", m->own_mut_vcpu.mut_count);
+	    "rejected", m->own_mut_vcpus.mut_count);
 	return ok;
 }
 

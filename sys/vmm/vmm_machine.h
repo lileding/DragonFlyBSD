@@ -42,7 +42,7 @@ struct vmm_machine {
 	/* token_events protects the retained textual event ring. */
 	struct lwkt_token token_config;
 	struct lwkt_token token_events;
-	struct vmm_vcpu own_mut_vcpu;
+	struct vmm_vcpus own_mut_vcpus;
 	struct vmm_mem own_mut_mem;
 	struct vmm_dma own_mut_dma;
 	struct vmm_pcie_root own_mut_pcie_root;
@@ -51,6 +51,8 @@ struct vmm_machine {
 	/* Owned only by the serialized taskqueue after loader acceptance. */
 	struct vmm_launch *own_mut_boot_launch;
 	u_int atomic_mut_status;
+	u_int atomic_mut_start_wait_count;
+	u_int atomic_mut_start_failed;
 
 	int mut_desired_stopped;
 	char mut_loader_path[VMM_LOADER_MAX + 1];
@@ -111,6 +113,7 @@ void vmm_machine_msix(struct vmm_machine *m, uint8_t vector);
 /* vCPU terminal/drain notifications run only after VMEXIT host-state restore. */
 void vmm_machine_vcpu_terminal(struct vmm_machine *m,
     enum vmm_vcpu_exit_reason reason);
+void vmm_machine_vcpu_start_failed(struct vmm_machine *m);
 void vmm_machine_vcpu_drained(struct vmm_machine *m);
 void vmm_machine_command_start(const struct vmm_machine_task *task);
 void vmm_machine_command_stop(const struct vmm_machine_task *task);

@@ -205,6 +205,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_MSR_AMD64_TSC_RATIO	0xc0000104U
 #define VMM_SVM_TSC_RATIO_MAX		0x000000ffffffffffULL
 
+#define VMM_SVM_EXIT_INVALID		-1ULL
 #define VMM_SVM_EXIT_INTR		0x060ULL
 #define VMM_SVM_EXIT_NMI		0x061ULL
 #define VMM_SVM_EXIT_SMI		0x062ULL
@@ -653,7 +654,7 @@ struct vmm_svm_context {
 	uint32_t imm_vcpu_count;
 	uint32_t imm_apic_ids[VMM_X64_MAX_VCPU];
 	struct vmm_svm_backend *own_mut_apic_targets[VMM_X64_MAX_VCPU];
-	const struct vmm_vcpu_thread *borrow_imm_bsp_vcpu;
+	const struct vmm_vcpu *borrow_imm_bsp_vcpu;
 	u_int atomic_mut_platform_kick;
 	u_int atomic_mut_ipiq_refs;
 	u_int atomic_mut_platform_closing;
@@ -729,7 +730,7 @@ struct vmm_svm_context {
 struct vmm_svm_backend {
 	struct vmm_svm_context *borrow_imm_context;
 	struct vmm_machine *borrow_imm_machine;
-	const struct vmm_vcpu_thread *borrow_imm_vcpu;
+	const struct vmm_vcpu *borrow_imm_vcpu;
 	struct vmspace *borrow_mut_vmspace;
 	struct vmm_svm_vmcb *own_mut_vmcb;
 	uint64_t imm_vmcb_pa;
@@ -739,6 +740,12 @@ struct vmm_svm_backend {
 	uint32_t atomic_mut_avic_host_apic_id;
 	uint32_t atomic_mut_avic_host_cpuid;
 	int mut_avic_bound;
+	/* This fixed-pCPU LWKT has registered this pmap on this host CPU. */
+	int mut_pmap_cpu;
+	/* Last host-pmap invalidation generation completed by VMRUN. */
+	uint64_t mut_host_tlb_generation;
+	/* Guest/NPT state changed and needs one flush on the next VMRUN. */
+	int mut_guest_tlb_flush;
 	u_int atomic_mut_avic_running;
 	uint32_t mut_lapic_timer_lvtt;
 	uint32_t mut_lapic_timer_tmict;
@@ -896,12 +903,12 @@ static uint64_t vmm_svm_guest_tsc(struct vmm_svm_backend *svm);
 static int vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
     uint32_t *valuep);
 static int vmm_svm_lapic_write(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint32_t reg, uint32_t value);
+    struct vmm_vcpu *vc, uint32_t reg, uint32_t value);
 static void vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
-    const struct vmm_vcpu_thread *vc, const char *op, uint32_t msr,
+    const struct vmm_vcpu *vc, const char *op, uint32_t msr,
     uint64_t val, int has_val, const char *reason);
 static void vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
-		    struct vmm_vcpu_thread *vc, const char *source);
+		    struct vmm_vcpu *vc, const char *source);
 static void vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm);
 static void vmm_svm_fpu_init(struct vmm_svm_backend *svm);
 static void vmm_svm_ap_init(struct vmm_svm_backend *svm);
@@ -1137,7 +1144,7 @@ static void
 vmm_svm_platform_kick_ipi(void *arg, int unused, struct intrframe *frame)
 {
 	struct vmm_svm_context *context = arg;
-	const struct vmm_vcpu_thread *bsp;
+	const struct vmm_vcpu *bsp;
 
 	(void)unused;
 	(void)frame;
@@ -1153,7 +1160,7 @@ static void
 vmm_svm_platform_kick(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_context *context = svm->borrow_imm_context;
-	const struct vmm_vcpu_thread *bsp = context->borrow_imm_bsp_vcpu;
+	const struct vmm_vcpu *bsp = context->borrow_imm_bsp_vcpu;
 
 	/* Caller holds token_platform and only an AP needs to kick the BSP. */
 	if (svm->borrow_imm_vcpu == bsp || bsp == NULL ||
@@ -1220,7 +1227,7 @@ vmm_svm_avic_unbind_cpu(struct vmm_svm_backend *svm)
 
 static void
 vmm_svm_avic_deliver(struct vmm_svm_backend *svm,
-    const struct vmm_vcpu_thread *vc,
+    const struct vmm_vcpu *vc,
     uint8_t vector, const char *source)
 {
 	volatile uint32_t *irr;
@@ -1261,7 +1268,7 @@ static void
 vmm_svm_root_timer_systimer(struct systimer *timer, int in_ipi,
     struct intrframe *frame)
 {
-	struct vmm_vcpu_thread *vc = timer->data;
+	struct vmm_vcpu *vc = timer->data;
 
 	(void)in_ipi;
 	(void)frame;
@@ -1390,7 +1397,7 @@ vmm_svm_lapic_timer_sync(struct vmm_svm_backend *svm)
 
 static void
 vmm_svm_lapic_timer_check(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
+    struct vmm_vcpu *vc)
 {
 	uint32_t current;
 	uint8_t vector;
@@ -1561,7 +1568,7 @@ vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
 
 static int
 vmm_svm_lapic_write(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint32_t reg, uint32_t value)
+    struct vmm_vcpu *vc, uint32_t reg, uint32_t value)
 {
 	uint32_t tmp1;
 	uint32_t tmp2;
@@ -1992,7 +1999,7 @@ vmm_svm_ap_init(struct vmm_svm_backend *svm)
 	vmcb->state.cpl = 0;
 	vmcb->ctrl.eventinj = 0;
 	vmcb->ctrl.intr &= ~VMM_SVM_CTRL_INTR_SHADOW;
-	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	svm->mut_guest_tlb_flush = 1;
 	vmcb->ctrl.vmcb_clean = 0;
 	svm->mut_ap_state = VMM_SVM_AP_WAIT_SIPI;
 }
@@ -2005,7 +2012,7 @@ vmm_svm_ap_sipi(struct vmm_svm_backend *svm, uint8_t vector)
 	vmcb->state.cs.selector = (uint16_t)vector << 8;
 	vmcb->state.cs.base = (uint64_t)vector << 12;
 	vmcb->state.rip = 0;
-	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	svm->mut_guest_tlb_flush = 1;
 	vmcb->ctrl.vmcb_clean = 0;
 	svm->mut_ap_state = VMM_SVM_AP_RUNNING;
 }
@@ -2113,7 +2120,7 @@ vmm_svm_context_destroy(void *context_arg)
 
 static int
 vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
-    const struct vmm_vcpu_thread *vc, void **backendp)
+    const struct vmm_vcpu *vc, void **backendp)
 {
 	struct vmm_svm_context *context = context_arg;
 	struct vmm_machine *m;
@@ -2142,6 +2149,9 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	svm->borrow_imm_machine = m;
 	svm->borrow_imm_vcpu = vc;
 	svm->borrow_mut_vmspace = context->borrow_mut_vmspace;
+	svm->mut_pmap_cpu = -1;
+	svm->mut_host_tlb_generation = UINT64_MAX;
+	svm->mut_guest_tlb_flush = 1;
 	svm->imm_avic_apic_id = context->imm_apic_ids[vc->imm_id];
 	if (svm->borrow_mut_vmspace == NULL) {
 		error = EINVAL;
@@ -2280,7 +2290,7 @@ vmm_svm_vcpu_create(void *context_arg, const struct vmm_launch *launch,
 	vmcb->ctrl.iopm_base_pa = context->imm_iobm_pa;
 	vmcb->ctrl.msrpm_base_pa = context->imm_msrbm_pa;
 	vmcb->ctrl.guest_asid = VMM_SVM_ASID;
-	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	vmcb->ctrl.tlb_ctrl = 0;
 	vmcb->ctrl.v = VMM_SVM_CTRL_V_INTR_MASKING;
 	vmcb->ctrl.enable1 = VMM_SVM_CTRL_ENABLE_NP;
 	vmcb->ctrl.n_cr3 = vtophys(vmspace_pmap(svm->borrow_mut_vmspace)->pm_pml4);
@@ -2325,12 +2335,16 @@ vmm_svm_stgi(void)
 	__asm volatile("stgi" ::: "memory");
 }
 
-static void
+static uint64_t
 vmm_svm_host_tlb_catchup(struct vmm_svm_backend *svm)
 {
-	if (svm->borrow_mut_vmspace != NULL)
+	if (svm->borrow_mut_vmspace != NULL &&
+	    svm->mut_pmap_cpu != mycpu->gd_cpuid) {
 		pmap_add_cpu(svm->borrow_mut_vmspace, mycpu->gd_cpuid);
+		svm->mut_pmap_cpu = mycpu->gd_cpuid;
+	}
 	clear_xinvltlb();
+	return vmspace_pmap(svm->borrow_mut_vmspace)->pm_invgen;
 }
 
 static int
@@ -3062,7 +3076,7 @@ vmm_svm_hpet_write(struct vmm_svm_backend *svm, uint64_t off, int size,
 
 static int
 vmm_svm_handle_hpet_mmio(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint64_t gpa)
+    struct vmm_vcpu *vc, uint64_t gpa)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -3190,7 +3204,7 @@ fail:
 
 static int
 vmm_svm_handle_fch_pm_mmio(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint64_t gpa)
+    struct vmm_vcpu *vc, uint64_t gpa)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -3309,7 +3323,7 @@ vmm_svm_ioapic_read(struct vmm_svm_backend *svm)
 }
 
 static void
-vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
     uint32_t val)
 {
 	uint32_t reg = svm->borrow_imm_context->mut_ioapic_select;
@@ -3353,7 +3367,7 @@ vmm_svm_ioapic_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 }
 
 static void
-vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
     uint32_t pin, const char *source)
 {
 	struct vmm_svm_context *context = svm->borrow_imm_context;
@@ -3407,7 +3421,7 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 
 static void
 vmm_svm_timer_check(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
+    struct vmm_vcpu *vc)
 {
 	uint64_t deadline;
 	uint64_t hpet_now;
@@ -3628,7 +3642,7 @@ vmm_svm_timer_check(struct vmm_svm_backend *svm,
 
 static int
 vmm_svm_handle_ioapic_mmio(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint64_t gpa)
+    struct vmm_vcpu *vc, uint64_t gpa)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -3769,7 +3783,7 @@ vmm_svm_x2apic_msr(uint32_t msr)
 
 static int
 vmm_svm_handle_x2apic_msr(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint32_t msr, int write, uint64_t val)
+    struct vmm_vcpu *vc, uint32_t msr, int write, uint64_t val)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t reg;
@@ -3817,7 +3831,7 @@ vmm_svm_amd_pmu_msr_index(uint32_t msr, uint32_t base, unsigned int *idxp)
 
 static void
 vmm_svm_log_unsupported_msr(struct vmm_svm_backend *svm,
-    const struct vmm_vcpu_thread *vc, const char *op, uint32_t msr,
+    const struct vmm_vcpu *vc, const char *op, uint32_t msr,
     uint64_t val, int has_val, const char *reason)
 {
 	const struct vmm_svm_msr_policy *policy;
@@ -3860,7 +3874,7 @@ vmm_svm_requeue_exit_event(struct vmm_svm_backend *svm)
 }
 
 static int
-vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
+vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t msr = (uint32_t)svm->mut_gprs[VMM_X64_GPR_RCX];
@@ -4021,7 +4035,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 			return 0;
 		}
 		vmcb->state.efer = (val & ~EFER_SVME) | EFER_SVME;
-		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		svm->mut_guest_tlb_flush = 1;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
 	case MSR_PAT:
@@ -4256,7 +4270,7 @@ vmm_svm_handle_msr(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 
 static void
 vmm_svm_handle_root_event(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint32_t reqflags)
+    struct vmm_vcpu *vc, uint32_t reqflags)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const char *name;
@@ -4344,7 +4358,7 @@ vmm_svm_set_rax_low(struct vmm_svm_vmcb *vmcb, uint32_t val, int size)
 
 static void
 vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, const char *source)
+    struct vmm_vcpu *vc, const char *source)
 {
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
 
@@ -4367,7 +4381,7 @@ vmm_svm_com1_rx_notify(struct vmm_svm_backend *svm,
 
 static void
 vmm_svm_com1_tx_notify(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, const char *source)
+    struct vmm_vcpu *vc, const char *source)
 {
 	if ((svm->borrow_imm_context->mut_com1_ier & VMM_COM1_IER_THRI) == 0 ||
 	    svm->borrow_imm_context->mut_com1_thr_irq_pending == 0)
@@ -4384,7 +4398,7 @@ vmm_svm_com1_tx_notify(struct vmm_svm_backend *svm,
 }
 
 static int
-vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
     unsigned int reg, int size, uint32_t *valp)
 {
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
@@ -4493,7 +4507,7 @@ vmm_svm_com1_read(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
 }
 
 static int
-vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc,
+vmm_svm_com1_write(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
     unsigned int reg, int size, uint32_t val)
 {
 	char ch;
@@ -4823,7 +4837,7 @@ vmm_svm_cmos_write(struct vmm_svm_backend *svm, uint8_t value)
 }
 
 static int
-vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
+vmm_svm_handle_ioio(struct vmm_svm_backend *svm, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint64_t info = vmcb->ctrl.exitinfo1;
@@ -5294,7 +5308,7 @@ out_fail:
 }
 
 static void
-vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
+vmm_svm_console_input(void *backend, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_console *console;
@@ -5313,7 +5327,7 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu_thread *vc)
 }
 
 static void
-vmm_svm_interrupt(void *backend, struct vmm_vcpu_thread *vc, uint8_t vector)
+vmm_svm_interrupt(void *backend, struct vmm_vcpu *vc, uint8_t vector)
 {
 	struct vmm_svm_backend *svm = backend;
 
@@ -5336,7 +5350,7 @@ vmm_svm_handle_guest_tlb_op(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 
-	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	svm->mut_guest_tlb_flush = 1;
 	vmm_svm_advance_rip(vmcb);
 }
 
@@ -5374,7 +5388,7 @@ vmm_svm_handle_xsetbv(struct vmm_svm_backend *svm)
 
 static void
 vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
+    struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_console *console = &svm->borrow_imm_machine->own_mut_console;
@@ -5471,7 +5485,7 @@ vmm_svm_handle_idle_wait(struct vmm_svm_backend *svm,
 
 static int
 vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
+    struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	uint32_t magic = (uint32_t)vmcb->state.rax;
@@ -5529,7 +5543,7 @@ vmm_svm_handle_vmmcall(struct vmm_svm_backend *svm,
 
 static int
 vmm_svm_handle_avic_read(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint32_t apic_reg)
+    struct vmm_vcpu *vc, uint32_t apic_reg)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -5598,7 +5612,7 @@ fail:
 
 static int
 vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc)
+    struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_svm_context *context;
@@ -5606,7 +5620,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	uint32_t apic_id;
 	uint32_t shorthand;
 	int handled;
-	const struct vmm_vcpu_thread *target_vc;
+	const struct vmm_vcpu *target_vc;
 	const char *name;
 	volatile uint32_t *ptr;
 	uint32_t delivery;
@@ -5825,7 +5839,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 
 static int
 vmm_svm_handle_pcie_mmio(struct vmm_svm_backend *svm,
-    struct vmm_vcpu_thread *vc, uint64_t gpa, int bar)
+    struct vmm_vcpu *vc, uint64_t gpa, int bar)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
@@ -5950,7 +5964,7 @@ vmm_svm_handle_pcie_mmio(struct vmm_svm_backend *svm,
 	    access_size, &value) != 0))
 		goto fail;
 	if (write)
-		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		svm->mut_guest_tlb_flush = 1;
 	if (!write)
 		vmm_svm_gpr_write(svm, reg, value,
 		    result_size != 0 ? result_size : access_size);
@@ -5974,7 +5988,7 @@ fail:
 }
 
 static int
-vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
+vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_machine *m = svm->borrow_imm_machine;
@@ -6003,7 +6017,7 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 		VMM_SVM_TRACE(svm,
 		    "svm vcpu%u pcie bar npf gpa=0x%jx prot=%d", vc->imm_id,
 		    (uintmax_t)gpa, prot);
-		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		svm->mut_guest_tlb_flush = 1;
 		return 1;
 	}
 	if (error == EAGAIN)
@@ -6013,21 +6027,23 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu_thread *vc)
 	error = vmm_mem_fault_gpa(&m->own_mut_mem, gpa, prot);
 	if (error)
 		return 0;
-	vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+	svm->mut_guest_tlb_flush = 1;
 	return 1;
 }
 
 
 static enum vmm_vcpu_exit_reason
-vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
+vmm_svm_vcpu_run(void *backend, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_backend *svm = backend;
 	struct vmm_svm_cpu_state *cpu_state;
 	struct vmm_svm_vmcb *vmcb;
 	uint64_t observed_ratio;
+	uint64_t host_tlb_generation;
 	uint32_t reqflags;
 	int fpu_sentinel_failed;
 	int handled;
+	int flush_tlb;
 
 	if (svm == NULL)
 		return VMM_VCPU_EXIT_NONE;
@@ -6076,7 +6092,7 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			fpurstor(&svm->own_mut_fpu_sentinel[0], npx_xcr0_mask);
 		}
 		vmm_svm_clgi();
-		vmm_svm_host_tlb_catchup(svm);
+		host_tlb_generation = vmm_svm_host_tlb_catchup(svm);
 		if (__predict_false(vmm_svm_host_entry_blocked())) {
 			vmm_svm_stgi();
 			if (svm->own_mut_fpu_sentinel != NULL)
@@ -6111,11 +6127,19 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
 			    vmm_svm_root_timer_systimer, vc, (int64_t)us);
 			svm->mut_root_timer_systimer_armed = 1;
 		}
-		vmcb->ctrl.tlb_ctrl = VMM_SVM_CTRL_TLB_FLUSH_ALL;
+		flush_tlb = svm->mut_guest_tlb_flush ||
+		    host_tlb_generation != svm->mut_host_tlb_generation;
+		vmcb->ctrl.tlb_ctrl = flush_tlb ? VMM_SVM_CTRL_TLB_FLUSH_ALL : 0;
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
+		/* The machine becomes RUNNING only after every vCPU reaches here. */
+		vmm_vcpu_report_started(vc);
 		vmm_svm_vmrun(svm->imm_vmcb_pa, svm->mut_gprs);
+		if (vmcb->ctrl.exitcode != VMM_SVM_EXIT_INVALID) {
+			svm->mut_host_tlb_generation = host_tlb_generation;
+			svm->mut_guest_tlb_flush = 0;
+		}
 		vmm_svm_guest_fpu_leave(svm);
 		if (svm->own_mut_fpu_sentinel != NULL) {
 			npxdna();

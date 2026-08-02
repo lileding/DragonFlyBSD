@@ -33,7 +33,7 @@ vmm_vkernel_context_destroy(void *context)
 
 static int
 vmm_vkernel_vcpu_create(void *context, const struct vmm_launch *launch,
-    const struct vmm_vcpu_thread *vc, void **backendp)
+    const struct vmm_vcpu *vc, void **backendp)
 {
 	(void)context;
 	(void)launch;
@@ -49,7 +49,7 @@ vmm_vkernel_vcpu_destroy(void *backend)
 }
 
 static enum vmm_vcpu_exit_reason
-vmm_vkernel_vcpu_run(void *backend, struct vmm_vcpu_thread *vc)
+vmm_vkernel_vcpu_run(void *backend, struct vmm_vcpu *vc)
 {
 	(void)backend;
 	(void)vc;

@@ -98,6 +98,84 @@ wait_console_pattern()
 	return 1
 }
 
+event_seq()
+{
+	cat "$(mach)/events" 2>>"$LOG" | awk 'END { print $1 }'
+}
+
+wait_reset_sequence()
+{
+	after=$1
+	i=0
+
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		if cat "$(mach)/events" 2>>"$LOG" |
+		    awk -v after="$after" '
+			$1 > after {
+				if ($0 ~ /reset requested/)
+					requested = 1
+				if (requested && $0 ~ /state draining reason=stop/)
+					draining = 1
+				if (draining && $0 ~ /state stopped reason=stop/)
+					stopped = 1
+				if (requested && (!draining || stopped) &&
+				    $0 ~ /state starting/)
+					starting = 1
+				if (starting && $0 ~ /state running/)
+					running = 1
+			}
+			END { exit running ? 0 : 1 }
+		'; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+wait_smp_online()
+{
+	marker=$1
+	i=0
+
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		printf 'echo %s $(cat /sys/devices/system/cpu/online)\n' "$marker" \
+		    >"$(mach)/console" || fail "write SMP online probe"
+		sleep 1
+		grep -q "$marker 0-1" "$CONSOLE_LOG" && return 0
+		i=$((i + 1))
+	done
+	fail "Linux did not bring CPU1 online"
+}
+
+reset_machine()
+{
+	marker=$1
+	before=$(event_seq)
+
+	[ -n "$before" ] || fail "cannot read event sequence before reset"
+	printf '%s\n' reset >"$(mach)/events" || fail "write reset command"
+	wait_reset_sequence "$before" || fail "reset event sequence incomplete"
+	wait_smp_online "$marker"
+}
+
+force_stop()
+{
+	i=0
+
+	touch "$(mach)/stopped" || fail "write stop command"
+	while [ "$i" -lt "$STOP_TIMEOUT" ]; do
+		if [ -e "$(mach)/stopped" ] && cat "$(mach)/events" 2>>"$LOG" |
+		    grep -q 'state stopped reason=stop'; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	fail "external force stop did not complete"
+}
+
 cleanup()
 {
 	set +e
@@ -187,10 +265,7 @@ wait_console_pattern 'DFVMM_LINUX_INITRD_ROOTFS_OK' initrd ||
 wait_console_pattern 'DFVMM_LINUX_SERIAL_OK' serial ||
 	fail "serial marker not observed"
 
-printf '%s\n' 'echo DFVMM_SMP_ONLINE $(cat /sys/devices/system/cpu/online)' \
-	>"$(mach)/console" || fail "write SMP online probe"
-wait_console_pattern 'DFVMM_SMP_ONLINE 0-1' smp-online ||
-	fail "Linux did not bring CPU1 online"
+wait_smp_online DFVMM_SMP_INITIAL
 
 if grep -q 'Performance Events: Fam17h+ core perfctr' "$CONSOLE_LOG" ||
 	grep -q 'NMI watchdog: Enabled' "$CONSOLE_LOG" ||
@@ -202,6 +277,8 @@ printf 'dfvmm-core-smoke\n' >"$(mach)/console" ||
 	fail "write core smoke command"
 wait_console_pattern 'DFVMM_CORE_SMOKE_END' core-smoke ||
 	fail "core smoke marker not observed"
+
+reset_machine DFVMM_SMP_RESET_RUNNING
 
 if [ "$GUEST_SHUTDOWN" -eq 0 ]; then
 	say "PASS: Linux two-vCPU SMP boot test"
@@ -235,5 +312,8 @@ $out"
 done
 [ "$i" -lt "$STOP_TIMEOUT" ] || fail "guest S5 shutdown events not observed"
 [ ! -e "$(mach)/stopped" ] || fail "guest S5 shutdown recreated stopped"
+
+reset_machine DFVMM_SMP_RESET_STOPPED
+force_stop
 
 say "PASS: Linux two-vCPU SMP test"
