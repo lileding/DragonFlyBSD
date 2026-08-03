@@ -218,7 +218,8 @@ vmm_vcpus_console_input_locked(struct vmm_machine *m)
 }
 
 void
-vmm_vcpus_interrupt_locked(struct vmm_machine *m, uint8_t vector)
+vmm_vcpus_interrupt_locked(struct vmm_machine *m, uint8_t destination,
+    uint8_t vector)
 {
 	struct vmm_vcpus *vcpus = &m->own_mut_vcpus;
 	struct vmm_vcpu *vc;
@@ -231,7 +232,8 @@ vmm_vcpus_interrupt_locked(struct vmm_machine *m, uint8_t vector)
 	    vc->borrow_imm_backend_ops->interrupt == NULL ||
 	    vc->own_mut_backend == NULL)
 		return;
-	vc->borrow_imm_backend_ops->interrupt(vc->own_mut_backend, vc, vector);
+	vc->borrow_imm_backend_ops->interrupt(vc->own_mut_backend, vc,
+	    destination, vector);
 	wakeup(vc);
 }
 

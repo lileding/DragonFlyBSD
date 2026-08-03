@@ -605,6 +605,7 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	uint32_t address_low;
 	uint32_t data;
 	uint32_t vector_control;
+	uint8_t destination;
 	uint16_t vector;
 	int error;
 
@@ -665,12 +666,11 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	vm_object_deallocate(bar_object);
 	if (error != 0)
 		return error;
-	/* This first backend accepts one xAPIC physical-destination MSI format. */
+	/* x2APIC and logical-destination MSI remain outside the current ABI. */
 	if (address_high != 0 ||
 	    (address_low & ~(VMM_PCIE_MSI_ADDRESS_DEST_MASK |
 	    VMM_PCIE_MSI_ADDRESS_CONTROL_MASK)) != VMM_PCIE_MSI_ADDRESS_BASE ||
-	    (address_low & (VMM_PCIE_MSI_ADDRESS_DEST_MASK |
-	    VMM_PCIE_MSI_ADDRESS_CONTROL_MASK)) != 0 ||
+	    (address_low & VMM_PCIE_MSI_ADDRESS_CONTROL_MASK) != 0 ||
 	    (data & ~VMM_PCIE_MSI_DATA_ALLOWED) != 0 ||
 	    (data & VMM_PCIE_MSI_DATA_DELIVERY_MASK) != 0 ||
 	    (data & VMM_PCIE_MSI_DATA_VECTOR_MASK) < 32 ||
@@ -681,6 +681,7 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 			    vector, address_high, address_low, data, vector_control);
 		return 0;
 	}
+	destination = (address_low & VMM_PCIE_MSI_ADDRESS_DEST_MASK) >> 12;
 
 	/* Revalidate after faulting the shared BAR before dereferencing root->machine. */
 	lwkt_gettoken(&pcie->token_registry);
@@ -694,9 +695,9 @@ vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    root != NULL && root->borrow_imm_machine != NULL) {
 		machine = root->borrow_imm_machine;
 		vmm_machine_debugf(machine,
-		    "pcie msix inject vector=%u guest_vector=0x%x",
-		    vector, data & VMM_PCIE_MSI_DATA_VECTOR_MASK);
-		vmm_machine_msix(machine,
+		    "pcie msix inject vector=%u destination=%u guest_vector=0x%x",
+		    vector, destination, data & VMM_PCIE_MSI_DATA_VECTOR_MASK);
+		vmm_machine_msix(machine, destination,
 		    (uint8_t)(data & VMM_PCIE_MSI_DATA_VECTOR_MASK));
 	} else if (machine != NULL) {
 		vmm_machine_debugf(machine,

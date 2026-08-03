@@ -927,7 +927,8 @@ static void vmm_svm_ap_sipi(struct vmm_svm_backend *svm, uint8_t vector);
 static void vmm_svm_avic_logical_update_locked(
     struct vmm_svm_context *context, struct vmm_svm_backend *svm);
 static int vmm_svm_route_icr(struct vmm_svm_backend *svm,
-    struct vmm_vcpu *vc, uint32_t icrl, uint32_t icrh, int x2apic);
+    struct vmm_vcpu *vc, uint32_t icrl, uint32_t icrh, int x2apic,
+    const char *source);
 
 static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_EFER, "efer", "cpu-state" },
@@ -1339,7 +1340,7 @@ vmm_svm_avic_logical_update_locked(struct vmm_svm_context *context,
 
 static int
 vmm_svm_route_icr(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
-    uint32_t icrl, uint32_t icrh, int x2apic)
+    uint32_t icrl, uint32_t icrh, int x2apic, const char *source)
 {
 	struct vmm_svm_context *context = svm->borrow_imm_context;
 	struct vmm_svm_backend *target;
@@ -1420,7 +1421,7 @@ vmm_svm_route_icr(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
 		target_vc = target->borrow_imm_vcpu;
 		switch (delivery) {
 		case VMM_SVM_APIC_ICR_FIXED:
-			vmm_svm_avic_deliver(target, target_vc, (uint8_t)vector, "ipi");
+			vmm_svm_avic_deliver(target, target_vc, (uint8_t)vector, source);
 			break;
 		case VMM_SVM_APIC_ICR_NMI:
 			atomic_store_rel_int(&target->atomic_mut_nmi_pending, 1);
@@ -1441,8 +1442,12 @@ vmm_svm_route_icr(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
 	lwkt_reltoken(&context->token_platform);
 	if (matched) {
 		VMM_SVM_TRACE(svm,
-		    "svm vcpu%u ipi delivery=0x%x dest=0x%x shorthand=0x%x x2=%d",
-		    vc->imm_id, delivery, destination, shorthand, x2apic);
+		    "svm vcpu%u interrupt source=%s delivery=0x%x dest=0x%x shorthand=0x%x x2=%d",
+		    vc->imm_id, source, delivery, destination, shorthand, x2apic);
+	} else {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u interrupt drop source=%s reason=unmatched dest=0x%x shorthand=0x%x x2=%d",
+		    vc->imm_id, source, destination, shorthand, x2apic);
 	}
 	return 1;
 }
@@ -1870,7 +1875,8 @@ vmm_svm_lapic_write(struct vmm_svm_backend *svm,
 	case VMM_SVM_APIC_REG_ICR_LOW:
 		vmm_svm_avic_apic_write32(svm, reg, value);
 		return vmm_svm_route_icr(svm, vc, value,
-		    vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_ICR_HIGH), 0);
+		    vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_ICR_HIGH), 0,
+		    "ipi");
 	default:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported lapic write reg=0x%x value=0x%x",
@@ -3577,12 +3583,10 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
     uint32_t pin, const char *source)
 {
 	struct vmm_svm_context *context = svm->borrow_imm_context;
-	struct vmm_svm_backend *target;
 	uint64_t entry;
 	uint32_t low;
 	uint32_t high;
 	uint32_t vector;
-	uint32_t dest;
 
 	if (pin >= VMM_IOAPIC_PINS) {
 		vmm_machine_debugf(svm->borrow_imm_machine,
@@ -3600,29 +3604,24 @@ vmm_svm_ioapic_raise(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
 		return;
 	}
 	vector = low & 0xffU;
-	dest = high >> 24;
 	/*
-	 * Initial IOAPIC delivery is intentionally narrow: fixed delivery,
-	 * physical destination, active-high, edge-triggered.  Other modes need
-	 * level/remote-IRR/polarity state before they can be delivered safely.
+	 * Platform sources currently assert only edge interrupts.  AVIC routes
+	 * xAPIC physical and logical destinations; level state needs a source
+	 * assert/deassert contract and is rejected until then.
 	 */
 	if ((low & VMM_IOAPIC_REDIR_DELIVERY_MASK) !=
 	    VMM_IOAPIC_REDIR_DELIVERY_FIXED ||
-	    (low & VMM_IOAPIC_REDIR_DEST_LOGICAL) != 0 ||
 	    (low & VMM_IOAPIC_REDIR_POLARITY_LOW) != 0 ||
 	    (low & VMM_IOAPIC_REDIR_TRIGGER_LEVEL) != 0 ||
-	    dest > VMM_SVM_AVIC_MAX_PHYS_ID ||
-	    (target = context->own_mut_apic_targets[dest]) == NULL) {
+	    vector < 32 || !vmm_svm_route_icr(svm, vc, low, high, 0, source)) {
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u ioapic reject source=%s pin=%u vector=0x%x low=0x%x high=0x%x",
 		    vc->imm_id, source, pin, vector, low, high);
 		return;
 	}
 	VMM_SVM_TRACE(svm,
-	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x target=%u",
-	    vc->imm_id, source, pin, vector, target->borrow_imm_vcpu->imm_id);
-	vmm_svm_avic_deliver(target, target->borrow_imm_vcpu,
-	    (uint8_t)vector, source);
+	    "svm vcpu%u ioapic raise source=%s pin=%u vector=0x%x",
+	    vc->imm_id, source, pin, vector);
 }
 
 static void
@@ -4005,7 +4004,7 @@ vmm_svm_handle_x2apic_msr(struct vmm_svm_backend *svm,
 			if ((val & 0x00000000fff32000ULL) != 0)
 				goto fault;
 			if (!vmm_svm_route_icr(svm, vc, (uint32_t)val,
-			    (uint32_t)(val >> 32), 1))
+			    (uint32_t)(val >> 32), 1, "ipi"))
 				goto fault;
 			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ICR_LOW,
 			    (uint32_t)val);
@@ -4023,7 +4022,8 @@ vmm_svm_handle_x2apic_msr(struct vmm_svm_backend *svm,
 	if (reg == 0x3f0U) {
 		if (!write || (val & ~0xffULL) != 0 ||
 		    !vmm_svm_route_icr(svm, vc,
-		    (uint32_t)val | VMM_SVM_APIC_ICR_SHORTHAND_SELF, 0, 1))
+		    (uint32_t)val | VMM_SVM_APIC_ICR_SHORTHAND_SELF, 0, 1,
+		    "ipi"))
 			goto fault;
 		vmm_svm_advance_rip(vmcb);
 		return 1;
@@ -5568,12 +5568,14 @@ vmm_svm_console_input(void *backend, struct vmm_vcpu *vc)
 }
 
 static void
-vmm_svm_interrupt(void *backend, struct vmm_vcpu *vc, uint8_t vector)
+vmm_svm_interrupt(void *backend, struct vmm_vcpu *vc, uint8_t destination,
+    uint8_t vector)
 {
 	struct vmm_svm_backend *svm = backend;
 
 	if (svm != NULL)
-		vmm_svm_avic_deliver(svm, vc, vector, "pcie_msix");
+		(void)vmm_svm_route_icr(svm, vc, vector,
+		    (uint32_t)destination << 24, 0, "pcie_msix");
 }
 
 static void
@@ -5889,7 +5891,7 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 			name = "unknown";
 			break;
 		}
-		if (vmm_svm_route_icr(svm, vc, icrl, icrh, 0))
+		if (vmm_svm_route_icr(svm, vc, icrl, icrh, 0, "ipi"))
 			return 1;
 
 		vmm_machine_debugf(svm->borrow_imm_machine,

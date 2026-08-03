@@ -778,11 +778,11 @@ vmm_machine_console_input(struct vmm_machine *m)
 	lwkt_reltoken(&m->token_config);
 }
 void
-vmm_machine_msix(struct vmm_machine *m, uint8_t vector)
+vmm_machine_msix(struct vmm_machine *m, uint8_t destination, uint8_t vector)
 {
 	lwkt_gettoken(&m->token_config);
 	if (vmm_machine_status(m) == VMM_MACHINE_RUNNING)
-		vmm_vcpus_interrupt_locked(m, vector);
+		vmm_vcpus_interrupt_locked(m, destination, vector);
 	lwkt_reltoken(&m->token_config);
 }
 

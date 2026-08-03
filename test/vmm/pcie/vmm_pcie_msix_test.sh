@@ -19,6 +19,7 @@ KERNEL=${LINUX_KERNEL:-/var/tmp/dfvmm-linux-virt-6.18.40/root/boot/vmlinuz-virt}
 MODULE=${LINUX_PCIE_MSIX_MODULE:-/var/tmp/dfvmm_pcie_msix.ko}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-msix-initrd-rootfs.gz}
 MEM=${LINUX_MEM:-256M}
+VCPU_COUNT=${VMM_VCPU_COUNT:-2}
 TIMEOUT=${VMM_TIMEOUT:-45}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-20}
 
@@ -203,6 +204,10 @@ case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be absolute" ;; esac
 [ -f "$VMM_KO" ] || fail "missing $VMM_KO"
 [ -f "$KERNEL" ] || fail "missing $KERNEL"
 [ -f "$MODULE" ] || fail "missing $MODULE"
+case "$VCPU_COUNT" in
+2) ;;
+*) fail "VMM_VCPU_COUNT must be 2" ;;
+esac
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
 readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
 	fail "$VMM_KO contains .eh_frame"
@@ -218,7 +223,7 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" -I "$BASE_SYS" \
 	"$REPO/sys/vmm/vmm_pcie_abi.c" \
 	"$REPO/test/vmm/pcie/vmm_pcie_msix_provider.c" -o "$PROVIDER"
 printf '%s\n' '#!/bin/sh' >"$WRAPPER" || fail "create $WRAPPER"
-printf '%s\n' "exec \"$LOADER\" \"$KERNEL\" \"initramfs=$INITRD\" \"console=ttyS0,115200\" \"loglevel=7\" \"rdinit=/init\"" >>"$WRAPPER" ||
+printf '%s\n' "exec \"$LOADER\" \"$KERNEL\" \"initramfs=$INITRD\" \"vcpu=$VCPU_COUNT\" \"irqaffinity=1\" \"console=ttyS0,115200\" \"loglevel=7\" \"rdinit=/init\"" >>"$WRAPPER" ||
 	fail "write $WRAPPER"
 chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 
@@ -234,7 +239,7 @@ run "$MOUNT_HELPER" vmm "$MNT"
 MOUNTED=1
 
 run mkdir "$(mach)"
-printf '1\n' >"$(mach)/vcpu" || fail "write vcpu"
+printf '%s\n' "$VCPU_COUNT" >"$(mach)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(mach)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(mach)/loader" || fail "write loader"
 run mkdir "$(device)"
@@ -251,13 +256,20 @@ wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_READY' provider ||
 wait_pattern "$CONSOLE_LOG" 'DFVMM_LINUX_CONSOLE_READY' console ||
 	fail "Linux console was not ready"
 run sysctl debug.vmm.svm_trace=1
-printf '%s\n' true >"$(mach)/console" || fail "trigger MSI-X module load"
+printf '%s\n' 'echo DFVMM_PCIE_COMMAND_ACCEPTED' >"$(mach)/console" ||
+	fail "trigger MSI-X module load"
 wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_KICK' provider_kick ||
 	fail "provider did not observe direct BAR doorbell"
+wait_pattern "$PROVIDER_LOG" 'addr=00000000:fee01000' provider_destination ||
+	fail "Linux did not program MSI-X destination CPU1"
 wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_SENT' provider_msix ||
 	fail "provider did not send MSI-X"
 wait_pattern "$CONSOLE_LOG" 'DFVMM_PCIE_MSIX_IRQ_OK' guest_irq ||
 	fail "Linux did not receive MSI-X"
+printf '%s\n' 'while read n c0 c1 rest; do case "$rest" in *dfvmm_pcie_msix*) echo "DFVMM_PCIE_MSIX_IRQ_COUNTS $c0 $c1"; break;; esac; done < /proc/interrupts' \
+	>"$(mach)/console" || fail "read MSI-X IRQ counts"
+wait_pattern "$CONSOLE_LOG" 'DFVMM_PCIE_MSIX_IRQ_COUNTS 0 1' guest_irq_cpu1 ||
+	fail "Linux did not handle MSI-X only on CPU1"
 wait_pattern "$CONSOLE_LOG" 'DFVMM_PCIE_MSIX_PROBE_OK' guest_probe ||
 	fail "Linux PCI MSI-X probe did not complete"
 cat "$(mach)/events" >>"$LOG" 2>&1 || fail "read machine events"

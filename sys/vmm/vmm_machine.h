@@ -109,7 +109,8 @@ int vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
 int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
     struct ucred *cred);
 void vmm_machine_console_input(struct vmm_machine *m);
-void vmm_machine_msix(struct vmm_machine *m, uint8_t vector);
+void vmm_machine_msix(struct vmm_machine *m, uint8_t destination,
+    uint8_t vector);
 /* vCPU terminal/drain notifications run only after VMEXIT host-state restore. */
 void vmm_machine_vcpu_terminal(struct vmm_machine *m,
     enum vmm_vcpu_exit_reason reason);

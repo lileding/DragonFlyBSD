@@ -71,7 +71,7 @@ struct vmm_vcpu_backend_ops {
 	    struct vmm_vcpu *vc);
 	void (*console_input)(void *backend, struct vmm_vcpu *vc);
 	void (*interrupt)(void *backend, struct vmm_vcpu *vc,
-	    uint8_t vector);
+	    uint8_t destination, uint8_t vector);
 };
 
 #define VMM_VCPU_BACKEND_SET(ops)	DATA_SET(vmm_vcpu_backend_set, ops)
@@ -96,6 +96,7 @@ void	vmm_vcpus_release(struct vmm_vcpus *vcpus,
 int	vmm_vcpu_should_stop(const struct vmm_vcpu *vc);
 void	vmm_vcpu_report_started(struct vmm_vcpu *vc);
 void	vmm_vcpus_console_input_locked(struct vmm_machine *m);
-void	vmm_vcpus_interrupt_locked(struct vmm_machine *m, uint8_t vector);
+void	vmm_vcpus_interrupt_locked(struct vmm_machine *m,
+	    uint8_t destination, uint8_t vector);
 
 #endif /* VMM_VCPU_H */

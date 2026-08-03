@@ -93,6 +93,8 @@ main(int argc, char **argv)
 			    __ATOMIC_ACQUIRE));
 			if (fflush(stdout) != 0)
 				err(1, "flush kick");
+	/* Let the guest enter its IRQ wait before issuing the test interrupt. */
+			usleep(5000000);
 			send_msix(fd, &registered_message);
 			printf("DFVMM_PCIE_MSIX_PROVIDER_SENT\n");
 			if (fflush(stdout) != 0)
@@ -125,6 +127,12 @@ build_register(struct vmm_pcie_abi_register *message, uint64_t generation)
 	message->bar[0].le_size = htole64(DFVMM_PCIE_BAR_SIZE);
 	message->bar[0].le_flags = htole32(VMM_PCIE_ABI_BAR_F_MEMORY |
 	    VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT);
+	message->bar_range_count = 1;
+	message->bar_range[0].le_offset = htole64(0);
+	message->bar_range[0].le_size = htole64(DFVMM_PCIE_BAR_SIZE);
+	message->bar_range[0].le_bar_index = htole32(0);
+	message->bar_range[0].le_flags = htole32(
+	    VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
 }
 
 static int
