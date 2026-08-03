@@ -1527,7 +1527,7 @@ virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *state,
 		flow->imm_request_sequence = 0;
 		error = virtiod_vsock_broker_send_result(broker,
 		    VMM_VSOCK_ABI_MSG_CONNECTED, sequence, source_cid, 0,
-		    flow->own_return_fd, source_port);
+		    flow->own_return_fd, flow->imm_host_port);
 		if (error == 0) {
 			(void)close(flow->own_return_fd);
 			flow->own_return_fd = -1;

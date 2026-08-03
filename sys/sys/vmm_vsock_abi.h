@@ -36,6 +36,7 @@ struct vmm_vsock_abi_header {
 	uint64_t	le_sequence;
 } __attribute__((__packed__));
 
+/* CONNECT le_port is the guest destination port. */
 struct vmm_vsock_abi_request {
 	struct vmm_vsock_abi_header header;
 	uint64_t	le_cid;
@@ -43,6 +44,11 @@ struct vmm_vsock_abi_request {
 	uint32_t	le_reserved;
 } __attribute__((__packed__));
 
+/*
+ * A successful CONNECTED result returns the stream's assigned host source
+ * port in le_port.  The caller passes that value to a guest passfd listener
+ * to identify the returned stream.  ACCEPTED returns the host listener port.
+ */
 struct vmm_vsock_abi_result {
 	struct vmm_vsock_abi_header header;
 	uint64_t	le_cid;
