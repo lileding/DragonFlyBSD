@@ -132,6 +132,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_CTRL_V_AVIC_EN		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_VALID		(1ULL << 31)
 #define VMM_SVM_EVENTINJ_ERROR_VALID	(1ULL << 11)
+#define VMM_SVM_EVENTINJ_TYPE_NMI		(2ULL << 8)
 #define VMM_SVM_EVENTINJ_TYPE_EXCEPTION	(3ULL << 8)
 #define VMM_X86_EXCEPTION_UD		6U
 #define VMM_X86_EXCEPTION_GP		13U
@@ -148,6 +149,8 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_REG_TPR		0x080U
 #define VMM_SVM_APIC_REG_EOI		0x0b0U
 #define VMM_SVM_APIC_REG_ISR_BASE	0x100U
+#define VMM_SVM_APIC_REG_LDR		0x0d0U
+#define VMM_SVM_APIC_REG_DFR		0x0e0U
 #define VMM_SVM_APIC_REG_SVR		0x0f0U
 #define VMM_SVM_APIC_REG_IRR_BASE	0x200U
 #define VMM_SVM_APIC_REG_ESR		0x280U
@@ -165,6 +168,7 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_VERSION		0x00140014U
 #define VMM_SVM_APIC_ICR_DEST_LOGICAL	0x00000800U
 #define VMM_SVM_APIC_ICR_FIXED		0x00000000U
+#define VMM_SVM_APIC_ICR_NMI		0x00000400U
 #define VMM_SVM_APIC_ICR_DELIVERY_MASK	0x00000700U
 #define VMM_SVM_APIC_ICR_INIT		0x00000500U
 #define VMM_SVM_APIC_ICR_SIPI		0x00000600U
@@ -172,6 +176,12 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_SVM_APIC_ICR_SHORTHAND_SELF		0x00040000U
 #define VMM_SVM_APIC_ICR_SHORTHAND_ALL_INC_SELF	0x00080000U
 #define VMM_SVM_APIC_ICR_SHORTHAND_ALL_EXC_SELF	0x000c0000U
+#define VMM_SVM_APIC_ICR_DEST_BROADCAST	0xffU
+#define VMM_SVM_APIC_ICR_X2_DEST_BROADCAST	0xffffffffU
+#define VMM_SVM_APIC_DFR_CLUSTER	0x0fffffffU
+#define VMM_SVM_APIC_DFR_FLAT		0xffffffffU
+#define VMM_SVM_AVIC_LOGICAL_VALID	0x80000000U
+#define VMM_SVM_AVIC_LOGICAL_APIC_ID_MASK	0x000000ffU
 #define VMM_SVM_APIC_SVR_VALID		0x000003ffU
 #define VMM_SVM_APIC_SVR_ENABLE		0x100U
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
@@ -805,6 +815,7 @@ struct vmm_svm_backend {
 	u_int atomic_mut_ap_init_pending;
 	u_int atomic_mut_ap_sipi_pending;
 	u_int atomic_mut_ap_sipi_vector;
+	u_int atomic_mut_nmi_pending;
 	enum vmm_svm_ap_state mut_ap_state;
 	/* Set by this vCPU thread before returning to the core lifecycle path. */
 	enum vmm_vcpu_exit_reason mut_exit_reason;
@@ -913,6 +924,10 @@ static void vmm_svm_cmos_refresh_time(struct vmm_svm_backend *svm);
 static void vmm_svm_fpu_init(struct vmm_svm_backend *svm);
 static void vmm_svm_ap_init(struct vmm_svm_backend *svm);
 static void vmm_svm_ap_sipi(struct vmm_svm_backend *svm, uint8_t vector);
+static void vmm_svm_avic_logical_update_locked(
+    struct vmm_svm_context *context, struct vmm_svm_backend *svm);
+static int vmm_svm_route_icr(struct vmm_svm_backend *svm,
+    struct vmm_vcpu *vc, uint32_t icrl, uint32_t icrh, int x2apic);
 
 static const struct vmm_svm_msr_policy vmm_svm_msr_policies[] = {
 	{ MSR_EFER, "efer", "cpu-state" },
@@ -1067,10 +1082,18 @@ vmm_svm_avic_init(struct vmm_svm_backend *svm)
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_TPR, 0);
 	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_SVR,
 	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
+	vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_DFR,
+	    VMM_SVM_APIC_DFR_FLAT);
+	if (svm->imm_avic_apic_id < 8)
+		vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_LDR,
+		    1U << (24 + svm->imm_avic_apic_id));
 
 	error = vmm_svm_context_register_backend(context, svm);
 	if (error != 0)
 		return error;
+	lwkt_gettoken(&context->token_platform);
+	vmm_svm_avic_logical_update_locked(context, svm);
+	lwkt_reltoken(&context->token_platform);
 	vmcb->ctrl.v |= VMM_SVM_CTRL_V_INTR_MASKING | VMM_SVM_CTRL_V_AVIC_EN;
 	vmcb->ctrl.avic = VMM_SVM_APICBASE_ADDR;
 	vmcb->ctrl.avic_abpp = svm->imm_avic_apic_page_pa;
@@ -1133,8 +1156,17 @@ vmm_svm_context_unregister_backend(struct vmm_svm_context *context,
 		return;
 	lwkt_gettoken(&context->token_platform);
 	if (context->own_mut_apic_targets[apic_id] == svm) {
+		uint32_t i;
+
 		context->own_mut_apic_targets[apic_id] = NULL;
 		context->own_mut_avic_phys_table[apic_id] = 0;
+		for (i = 0; i < PAGE_SIZE / sizeof(uint32_t); ++i) {
+			if ((context->own_mut_avic_log_table[i] &
+			    (VMM_SVM_AVIC_LOGICAL_VALID |
+			    VMM_SVM_AVIC_LOGICAL_APIC_ID_MASK)) ==
+			    (VMM_SVM_AVIC_LOGICAL_VALID | apic_id))
+				context->own_mut_avic_log_table[i] = 0;
+		}
 		cpu_mfence();
 	}
 	lwkt_reltoken(&context->token_platform);
@@ -1262,6 +1294,157 @@ vmm_svm_avic_deliver(struct vmm_svm_backend *svm,
 		    "svm vcpu%u avic doorbell host_apic_id=%u",
 		    vc->imm_id, host_apic_id);
 	}
+}
+
+/* Caller holds context->token_platform. */
+static void
+vmm_svm_avic_logical_update_locked(struct vmm_svm_context *context,
+    struct vmm_svm_backend *svm)
+{
+	uint32_t dfr;
+	uint32_t ldr;
+	uint32_t index;
+	uint32_t logical_id;
+	uint32_t i;
+
+	for (i = 0; i < PAGE_SIZE / sizeof(uint32_t); ++i) {
+		if ((context->own_mut_avic_log_table[i] &
+		    (VMM_SVM_AVIC_LOGICAL_VALID |
+		    VMM_SVM_AVIC_LOGICAL_APIC_ID_MASK)) ==
+		    (VMM_SVM_AVIC_LOGICAL_VALID | svm->imm_avic_apic_id))
+			context->own_mut_avic_log_table[i] = 0;
+	}
+	dfr = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_DFR);
+	ldr = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_LDR) >> 24;
+	if (ldr == 0 || (ldr & (ldr - 1)) != 0)
+		return;
+	if (dfr == VMM_SVM_APIC_DFR_FLAT) {
+		index = ffs(ldr) - 1;
+	} else if (dfr == VMM_SVM_APIC_DFR_CLUSTER) {
+		logical_id = ldr & 0x0fU;
+		if (logical_id == 0 || (logical_id & (logical_id - 1)) != 0)
+			return;
+		if ((ldr >> 4) >= 0x0fU)
+			return;
+		index = ((ldr >> 4) << 2) + ffs(logical_id) - 1;
+	} else {
+		return;
+	}
+	if (index >= PAGE_SIZE / sizeof(uint32_t))
+		return;
+	context->own_mut_avic_log_table[index] = VMM_SVM_AVIC_LOGICAL_VALID |
+	    svm->imm_avic_apic_id;
+	cpu_mfence();
+}
+
+static int
+vmm_svm_route_icr(struct vmm_svm_backend *svm, struct vmm_vcpu *vc,
+    uint32_t icrl, uint32_t icrh, int x2apic)
+{
+	struct vmm_svm_context *context = svm->borrow_imm_context;
+	struct vmm_svm_backend *target;
+	const struct vmm_vcpu *target_vc;
+	uint32_t apic_id;
+	uint32_t delivery;
+	uint32_t destination;
+	uint32_t shorthand;
+	uint32_t target_ldr;
+	uint32_t source_dfr;
+	uint32_t vector;
+	int matched;
+
+	if (context == NULL)
+		return 0;
+	delivery = icrl & VMM_SVM_APIC_ICR_DELIVERY_MASK;
+	shorthand = icrl & VMM_SVM_APIC_ICR_SHORTHAND_MASK;
+	vector = icrl & 0xffU;
+	if (x2apic)
+		destination = icrh;
+	else
+		destination = icrh >> 24;
+	if (delivery != VMM_SVM_APIC_ICR_FIXED &&
+	    delivery != VMM_SVM_APIC_ICR_NMI &&
+	    delivery != VMM_SVM_APIC_ICR_INIT &&
+	    delivery != VMM_SVM_APIC_ICR_SIPI)
+		return 0;
+	if (delivery == VMM_SVM_APIC_ICR_FIXED && vector < 16) {
+		vmm_machine_debugf(svm->borrow_imm_machine,
+		    "svm vcpu%u ipi drop reason=low_vector vector=0x%x",
+		    vc->imm_id, vector);
+		return 1;
+	}
+
+	matched = 0;
+	lwkt_gettoken(&context->token_platform);
+	source_dfr = vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_DFR);
+	for (apic_id = 0; apic_id <= VMM_SVM_AVIC_MAX_PHYS_ID; ++apic_id) {
+		target = context->own_mut_apic_targets[apic_id];
+		if (target == NULL)
+			continue;
+		if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_SELF &&
+		    target != svm)
+			continue;
+		if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_ALL_EXC_SELF &&
+		    target == svm)
+			continue;
+		if (shorthand == 0) {
+			if ((icrl & VMM_SVM_APIC_ICR_DEST_LOGICAL) == 0) {
+				if (x2apic) {
+					if (destination != target->imm_avic_apic_id &&
+					    destination != VMM_SVM_APIC_ICR_X2_DEST_BROADCAST)
+						continue;
+				} else if (destination != target->imm_avic_apic_id &&
+				    destination != VMM_SVM_APIC_ICR_DEST_BROADCAST) {
+					continue;
+				}
+			} else if (x2apic) {
+				target_ldr = ((target->imm_avic_apic_id >> 4) << 16) |
+				    (1U << (target->imm_avic_apic_id & 15));
+				if ((destination >> 16) != (target_ldr >> 16) ||
+				    (destination & target_ldr & 0xffffU) == 0)
+					continue;
+			} else {
+				target_ldr = vmm_svm_avic_apic_read32(target,
+				    VMM_SVM_APIC_REG_LDR) >> 24;
+				if (source_dfr == VMM_SVM_APIC_DFR_FLAT) {
+					if ((destination & target_ldr) == 0)
+						continue;
+				} else if (source_dfr != VMM_SVM_APIC_DFR_CLUSTER ||
+				    (destination & 0xf0U) != (target_ldr & 0xf0U) ||
+				    (destination & target_ldr & 0x0fU) == 0) {
+					continue;
+				}
+			}
+		}
+		matched = 1;
+		target_vc = target->borrow_imm_vcpu;
+		switch (delivery) {
+		case VMM_SVM_APIC_ICR_FIXED:
+			vmm_svm_avic_deliver(target, target_vc, (uint8_t)vector, "ipi");
+			break;
+		case VMM_SVM_APIC_ICR_NMI:
+			atomic_store_rel_int(&target->atomic_mut_nmi_pending, 1);
+			wakeup(__DECONST(void *, target_vc));
+			break;
+		case VMM_SVM_APIC_ICR_INIT:
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 0);
+			atomic_store_rel_int(&target->atomic_mut_ap_init_pending, 1);
+			wakeup(__DECONST(void *, target_vc));
+			break;
+		case VMM_SVM_APIC_ICR_SIPI:
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_vector, vector);
+			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 1);
+			wakeup(__DECONST(void *, target_vc));
+			break;
+		}
+	}
+	lwkt_reltoken(&context->token_platform);
+	if (matched) {
+		VMM_SVM_TRACE(svm,
+		    "svm vcpu%u ipi delivery=0x%x dest=0x%x shorthand=0x%x x2=%d",
+		    vc->imm_id, delivery, destination, shorthand, x2apic);
+	}
+	return 1;
 }
 
 static void
@@ -1532,6 +1715,8 @@ vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
 	case VMM_SVM_APIC_REG_ID:
 	case VMM_SVM_APIC_REG_VERSION:
 	case VMM_SVM_APIC_REG_TPR:
+	case VMM_SVM_APIC_REG_LDR:
+	case VMM_SVM_APIC_REG_DFR:
 	case VMM_SVM_APIC_REG_SVR:
 	case VMM_SVM_APIC_REG_ESR:
 	case VMM_SVM_APIC_REG_LVTT:
@@ -1542,6 +1727,8 @@ vmm_svm_lapic_read(struct vmm_svm_backend *svm, uint32_t reg,
 	case VMM_SVM_APIC_REG_LVT_ERROR:
 	case VMM_SVM_APIC_REG_TMICT:
 	case VMM_SVM_APIC_REG_TDCR:
+	case VMM_SVM_APIC_REG_ICR_LOW:
+	case VMM_SVM_APIC_REG_ICR_HIGH:
 		*valuep = vmm_svm_avic_apic_read32(svm, reg);
 		return 1;
 	case VMM_SVM_APIC_REG_TMCCT:
@@ -1576,6 +1763,18 @@ vmm_svm_lapic_write(struct vmm_svm_backend *svm,
 	switch (reg) {
 	case VMM_SVM_APIC_REG_TPR:
 		vmm_svm_avic_apic_write32(svm, reg, value & 0xffU);
+		return 1;
+	case VMM_SVM_APIC_REG_LDR:
+		vmm_svm_avic_apic_write32(svm, reg, value & 0xff000000U);
+		lwkt_gettoken(&svm->borrow_imm_context->token_platform);
+		vmm_svm_avic_logical_update_locked(svm->borrow_imm_context, svm);
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
+		return 1;
+	case VMM_SVM_APIC_REG_DFR:
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		lwkt_gettoken(&svm->borrow_imm_context->token_platform);
+		vmm_svm_avic_logical_update_locked(svm->borrow_imm_context, svm);
+		lwkt_reltoken(&svm->borrow_imm_context->token_platform);
 		return 1;
 	case VMM_SVM_APIC_REG_LVT_ERROR:
 		value &= VMM_SVM_APIC_LVT_ERROR_VALID;
@@ -1665,6 +1864,13 @@ vmm_svm_lapic_write(struct vmm_svm_backend *svm,
 		vmm_svm_avic_apic_write32(svm, reg,
 		    value & VMM_SVM_APIC_LVT_DELIVERY_VALID);
 		return 1;
+	case VMM_SVM_APIC_REG_ICR_HIGH:
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		return 1;
+	case VMM_SVM_APIC_REG_ICR_LOW:
+		vmm_svm_avic_apic_write32(svm, reg, value);
+		return vmm_svm_route_icr(svm, vc, value,
+		    vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_ICR_HIGH), 0);
 	default:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u unsupported lapic write reg=0x%x value=0x%x",
@@ -3794,8 +4000,43 @@ vmm_svm_handle_x2apic_msr(struct vmm_svm_backend *svm,
 	    (APICBASE_ENABLED | APICBASE_X2APIC))
 		goto fault;
 	reg = (msr - VMM_SVM_X2APIC_MSR_BASE) << 4;
-	if (reg == VMM_SVM_APIC_REG_ICR_LOW ||
-	    reg == VMM_SVM_APIC_REG_ICR_HIGH)
+	if (reg == VMM_SVM_APIC_REG_ICR_LOW) {
+		if (write) {
+			if ((val & 0x00000000fff32000ULL) != 0)
+				goto fault;
+			if (!vmm_svm_route_icr(svm, vc, (uint32_t)val,
+			    (uint32_t)(val >> 32), 1))
+				goto fault;
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ICR_LOW,
+			    (uint32_t)val);
+			vmm_svm_avic_apic_write32(svm, VMM_SVM_APIC_REG_ICR_HIGH,
+			    (uint32_t)(val >> 32));
+			vmm_svm_advance_rip(vmcb);
+			return 1;
+		}
+		vmm_svm_rdmsr_value(svm,
+		    vmm_svm_avic_apic_read32(svm, VMM_SVM_APIC_REG_ICR_LOW) |
+		    ((uint64_t)vmm_svm_avic_apic_read32(svm,
+		    VMM_SVM_APIC_REG_ICR_HIGH) << 32));
+		return 1;
+	}
+	if (reg == 0x3f0U) {
+		if (!write || (val & ~0xffULL) != 0 ||
+		    !vmm_svm_route_icr(svm, vc,
+		    (uint32_t)val | VMM_SVM_APIC_ICR_SHORTHAND_SELF, 0, 1))
+			goto fault;
+		vmm_svm_advance_rip(vmcb);
+		return 1;
+	}
+	if (reg == VMM_SVM_APIC_REG_LDR) {
+		if (write)
+			goto fault;
+		vmm_svm_rdmsr_value(svm,
+		    ((svm->imm_avic_apic_id >> 4) << 16) |
+		    (1U << (svm->imm_avic_apic_id & 15)));
+		return 1;
+	}
+	if (reg == VMM_SVM_APIC_REG_ICR_HIGH || reg == VMM_SVM_APIC_REG_DFR)
 		goto fault;
 	if (write) {
 		if ((val >> 32) != 0 ||
@@ -5615,16 +5856,8 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
     struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
-	struct vmm_svm_context *context;
-	struct vmm_svm_backend *target;
-	uint32_t apic_id;
-	uint32_t shorthand;
-	int handled;
-	const struct vmm_vcpu *target_vc;
 	const char *name;
 	volatile uint32_t *ptr;
-	uint32_t delivery;
-	uint32_t destination;
 	uint32_t icrh;
 	uint32_t icrl;
 	uint32_t value;
@@ -5636,8 +5869,6 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		value = (uint32_t)(vmcb->ctrl.exitinfo2 >> 32);
 		extra = (uint32_t)(vmcb->ctrl.exitinfo2 &
 		    VMM_SVM_AVIC_PHYS_MAX_INDEX_MASK);
-		delivery = icrl & VMM_SVM_APIC_ICR_DELIVERY_MASK;
-		destination = icrh >> 24;
 		switch (value) {
 		case VMM_SVM_AVIC_IPI_INVALID_INT_TYPE:
 			name = "invalid_int_type";
@@ -5658,81 +5889,9 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 			name = "unknown";
 			break;
 		}
-		if (value == VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING &&
-		    delivery == VMM_SVM_APIC_ICR_FIXED &&
-		    (icrl & VMM_SVM_APIC_ICR_DEST_LOGICAL) == 0) {
-			context = svm->borrow_imm_context;
-			shorthand = icrl & VMM_SVM_APIC_ICR_SHORTHAND_MASK;
-			handled = 0;
-			lwkt_gettoken(&context->token_platform);
-			if (shorthand == 0) {
-				if (destination <= VMM_SVM_AVIC_MAX_PHYS_ID) {
-					target = context->own_mut_apic_targets[destination];
-					if (target != NULL && target != svm) {
-						handled = 1;
-						if (atomic_load_acq_int(
-						    &target->atomic_mut_avic_running) == 0) {
-							wakeup(__DECONST(void *,
-							    target->borrow_imm_vcpu));
-						}
-					}
-				}
-			} else {
-				for (apic_id = 0; apic_id <= VMM_SVM_AVIC_MAX_PHYS_ID;
-				    ++apic_id) {
-					target = context->own_mut_apic_targets[apic_id];
-					if (target == NULL)
-						continue;
-					if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_SELF &&
-					    target != svm)
-						continue;
-					if (shorthand == VMM_SVM_APIC_ICR_SHORTHAND_ALL_EXC_SELF &&
-					    target == svm)
-						continue;
-					handled = 1;
-					if (atomic_load_acq_int(
-					    &target->atomic_mut_avic_running) == 0)
-						wakeup(__DECONST(void *,
-						    target->borrow_imm_vcpu));
-				}
-			}
-			lwkt_reltoken(&context->token_platform);
-			if (handled)
-				return 1;
-		}
-		if ((icrl & (VMM_SVM_APIC_ICR_DEST_LOGICAL |
-		    VMM_SVM_APIC_ICR_SHORTHAND_MASK)) != 0 ||
-		    destination > VMM_SVM_AVIC_MAX_PHYS_ID ||
-		    (delivery != VMM_SVM_APIC_ICR_INIT &&
-		    delivery != VMM_SVM_APIC_ICR_SIPI))
-			goto incomplete_unhandled;
+		if (vmm_svm_route_icr(svm, vc, icrl, icrh, 0))
+			return 1;
 
-		context = svm->borrow_imm_context;
-		lwkt_gettoken(&context->token_platform);
-		target = context->own_mut_apic_targets[destination];
-		if (target == NULL || target == svm) {
-			lwkt_reltoken(&context->token_platform);
-			goto incomplete_unhandled;
-		}
-		target_vc = target->borrow_imm_vcpu;
-		if (delivery == VMM_SVM_APIC_ICR_INIT) {
-			/* INIT precedes a later SIPI from the same serialized ICR path. */
-			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 0);
-			atomic_store_rel_int(&target->atomic_mut_ap_init_pending, 1);
-		} else {
-			atomic_store_rel_int(&target->atomic_mut_ap_sipi_vector,
-			    icrl & 0xffU);
-			atomic_store_rel_int(&target->atomic_mut_ap_sipi_pending, 1);
-		}
-		lwkt_reltoken(&context->token_platform);
-		wakeup(__DECONST(void *, target_vc));
-		vmm_machine_debugf(svm->borrow_imm_machine,
-		    "svm vcpu%u apic %s target=%u reason=%s index=%u icrl=0x%08x icrh=0x%08x",
-		    vc->imm_id, delivery == VMM_SVM_APIC_ICR_INIT ? "init" : "sipi",
-		    destination, name, extra, icrl, icrh);
-		return 1;
-
-	incomplete_unhandled:
 		vmm_machine_debugf(svm->borrow_imm_machine,
 		    "svm vcpu%u avic incomplete_ipi reason=%s id=%u index=%u icrl=0x%08x icrh=0x%08x info1=0x%jx info2=0x%jx rip=0x%jx",
 		    vc->imm_id, name, value, extra,
@@ -5817,6 +5976,8 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 	if (extra == 0) {
 		switch (value) {
 		case VMM_SVM_APIC_REG_ID:
+		case VMM_SVM_APIC_REG_LDR:
+		case VMM_SVM_APIC_REG_DFR:
 		case VMM_SVM_APIC_REG_SVR:
 		case VMM_SVM_APIC_REG_ESR:
 		case VMM_SVM_APIC_REG_LVTT:
@@ -5828,6 +5989,8 @@ vmm_svm_handle_avic_exit(struct vmm_svm_backend *svm,
 		case VMM_SVM_APIC_REG_TMICT:
 		case VMM_SVM_APIC_REG_TMCCT:
 		case VMM_SVM_APIC_REG_TDCR:
+		case VMM_SVM_APIC_REG_ICR_LOW:
+		case VMM_SVM_APIC_REG_ICR_HIGH:
 			return vmm_svm_handle_avic_read(svm, vc, value);
 		default:
 			break;
@@ -6101,6 +6264,12 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu *vc)
 			vmm_svm_avic_unbind_cpu(svm);
 			lwkt_user_yield();
 			continue;
+		}
+		if ((vmcb->ctrl.eventinj & VMM_SVM_EVENTINJ_VALID) == 0 &&
+		    atomic_swap_int(&svm->atomic_mut_nmi_pending, 0) != 0) {
+			vmcb->ctrl.eventinj = VMM_SVM_EVENTINJ_VALID |
+			    VMM_SVM_EVENTINJ_TYPE_NMI;
+			VMM_SVM_TRACE(svm, "svm vcpu%u inject nmi", vc->imm_id);
 		}
 		vmm_svm_avic_bind_cpu(svm);
 		/* Recheck immediately before entry, then let systimer own the wakeup. */
