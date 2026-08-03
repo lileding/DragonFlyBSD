@@ -255,6 +255,10 @@ wait_pattern "$PROVIDER_LOG" 'DFVMM_PCIE_MSIX_PROVIDER_READY' provider ||
 	fail "provider did not map BAR after START"
 wait_pattern "$CONSOLE_LOG" 'DFVMM_LINUX_CONSOLE_READY' console ||
 	fail "Linux console was not ready"
+printf '%s\n' 'dfvmm-cpu-topology-probe' >"$(mach)/console" ||
+	fail "run guest CPU topology probe"
+wait_pattern "$CONSOLE_LOG" 'DFVMM_CPU_TOPOLOGY_OK cores=2 threads=1 x2apic=0' \
+	guest_topology || fail "guest CPU topology contract was not observed"
 run sysctl debug.vmm.svm_trace=1
 printf '%s\n' 'echo DFVMM_PCIE_COMMAND_ACCEPTED' >"$(mach)/console" ||
 	fail "trigger MSI-X module load"

@@ -8,6 +8,7 @@ OUT=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 PACKER=${LINUX_INITRD_PACKER:-$ROOT/linux_initrd_pack_newc.py}
 PROBE_SRC=${LINUX_TSC_PM_PROBE_SRC:-$ROOT/linux_tsc_pm_probe.c}
 BAR_PROBE_SRC=${LINUX_PCIE_BAR_PROBE_SRC:-$ROOT/linux_pcie_bar_probe.c}
+TOPOLOGY_PROBE_SRC=${LINUX_CPU_TOPOLOGY_PROBE_SRC:-$ROOT/linux_cpu_topology_probe.c}
 MSIX_MODULE=${LINUX_PCIE_MSIX_MODULE:-}
 PROBE_CC=${LINUX_TSC_PM_PROBE_CC:-/usr/local/bin/clang19}
 PROBE_LD=${LINUX_TSC_PM_PROBE_LD:-/usr/local/bin/ld.lld19}
@@ -22,6 +23,7 @@ fail()
 [ -f "$PACKER" ] || fail "missing packer: $PACKER"
 [ -f "$PROBE_SRC" ] || fail "missing TSC/PM probe source: $PROBE_SRC"
 [ -f "$BAR_PROBE_SRC" ] || fail "missing PCIe BAR probe source: $BAR_PROBE_SRC"
+[ -f "$TOPOLOGY_PROBE_SRC" ] || fail "missing CPU topology probe source: $TOPOLOGY_PROBE_SRC"
 [ -z "$MSIX_MODULE" ] || [ -f "$MSIX_MODULE" ] ||
 	fail "missing PCIe MSI-X module: $MSIX_MODULE"
 [ -x "$PROBE_CC" ] || fail "missing TSC/PM probe compiler: $PROBE_CC"
@@ -58,6 +60,14 @@ mkdir -p "$WORK"
 		-o usr/local/bin/dfvmm-pcie-bar-probe
 	readelf -SW usr/local/bin/dfvmm-pcie-bar-probe | grep -qi eh_frame &&
 		fail "PCIe BAR probe contains unwind sections"
+	"$PROBE_CC" --target=x86_64-linux-gnu -std=c11 -O2 -Wall -Wextra \
+		-Werror -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone \
+		-fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -static \
+		--ld-path="$PROBE_LD" -Wl,-e,_start -Wl,-z,noexecstack \
+		-Wl,--build-id=none "$TOPOLOGY_PROBE_SRC" \
+		-o usr/local/bin/dfvmm-cpu-topology-probe
+	readelf -SW usr/local/bin/dfvmm-cpu-topology-probe | grep -qi eh_frame &&
+		fail "CPU topology probe contains unwind sections"
 	: >dev/console
 	: >dev/ttyS0
 	: >dev/null

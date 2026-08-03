@@ -366,9 +366,12 @@ SYSCTL_INT(_debug_vmm, OID_AUTO, svm_fpu_check, CTLFLAG_RW,
 #define VMM_RTC_LEAP_YEAR(year) \
 	((((year) % 4) == 0 && ((year) % 100) != 0) || ((year) % 400) == 0)
 #define VMM_CPUID_APIC_ID_MASK	0xff000000U
-#define VMM_CPUID_MAX_BASIC	0x16U
+#define VMM_CPUID_MAX_BASIC	0x1fU
 #define VMM_CPUID_MAX_EXTENDED	0x8000001dU
 #define VMM_CPUID_XSAVE_LEGACY_SIZE 0x240U
+#define VMM_CPUID_TOPOLOGY_SMT	1U
+#define VMM_CPUID_TOPOLOGY_CORE	2U
+#define VMM_CPUID_TOPOLOGY_TYPE_SHIFT 8
 #define VMM_CPUID1_ECX_ALLOWED	(CPUID2_SSE3 | CPUID2_PCLMULQDQ | \
 					 CPUID2_SSSE3 | CPUID2_FMA | \
 					 CPUID2_CX16 | CPUID2_SSE41 | \
@@ -2651,6 +2654,38 @@ vmm_svm_guest_misc_leave(struct vmm_svm_backend *svm)
 }
 
 static void
+vmm_svm_cpuid_topology(const struct vmm_svm_backend *svm,
+    uint32_t subleaf, uint32_t regs[4])
+{
+	uint32_t count;
+	uint32_t shift;
+	uint32_t span;
+
+	count = svm->borrow_imm_context->imm_vcpu_count;
+	shift = 0;
+	for (span = 1; span < count; span <<= 1)
+		++shift;
+	regs[3] = svm->imm_avic_apic_id;
+	switch (subleaf) {
+	case 0:
+		regs[0] = 0;
+		regs[1] = 1;
+		regs[2] = VMM_CPUID_TOPOLOGY_SMT <<
+		    VMM_CPUID_TOPOLOGY_TYPE_SHIFT;
+		break;
+	case 1:
+		regs[0] = shift;
+		regs[1] = count;
+		regs[2] = (VMM_CPUID_TOPOLOGY_CORE <<
+		    VMM_CPUID_TOPOLOGY_TYPE_SHIFT) | 1;
+		break;
+	default:
+		bzero(regs, sizeof(uint32_t) * 4);
+		break;
+	}
+}
+
+static void
 vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
@@ -2666,7 +2701,7 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 	bzero(regs, sizeof(regs));
 
 	/*
-	 * This is the dfvmm single-vCPU CPU template.  Do not let an unlisted
+	 * This is the dfvmm CPU template.  Do not let an unlisted
 	 * CPUID leaf fall through to host CPUID: every advertised feature must
 	 * have matching guest state, MSR, interrupt, and VMCB semantics.
 	 */
@@ -2689,6 +2724,8 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		 */
 		regs[2] |= CPUID2_TSCDLT;
 		regs[3] &= VMM_CPUID1_EDX_ALLOWED;
+		if (svm->borrow_imm_context->imm_vcpu_count > 1)
+			regs[3] |= CPUID_HTT;
 		if (npx_xcr0_mask == 0) {
 			regs[2] &= ~(CPUID2_XSAVE | CPUID2_OSXSAVE |
 			    CPUID2_AVX | CPUID2_FMA | CPUID2_F16C);
@@ -2697,6 +2734,10 @@ vmm_svm_handle_cpuid(struct vmm_svm_backend *svm)
 		}
 		if ((vmcb->state.cr4 & CR4_OSXSAVE) == 0)
 			regs[2] &= ~CPUID2_OSXSAVE;
+		break;
+	case 0x0b:
+	case 0x1f:
+		vmm_svm_cpuid_topology(svm, subleaf, regs);
 		break;
 	case 6:
 		cpuid_count(6, 0, regs);
