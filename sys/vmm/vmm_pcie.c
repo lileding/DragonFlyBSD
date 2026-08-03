@@ -740,6 +740,27 @@ vmm_pcie_device_provider_force_close(struct vmm_device *device)
 		vmm_pcie_device_provider_detach(device, provider);
 }
 
+void
+vmm_pcie_device_force_close(struct vmm_device *device)
+{
+	struct vmm_pcie_user *consumer;
+	struct vmm_pcie *pcie;
+
+	vmm_pcie_device_provider_force_close(device);
+	if (device == NULL || device->borrow_imm_pcie == NULL)
+		return;
+	pcie = device->borrow_imm_pcie;
+	consumer = NULL;
+	lwkt_gettoken(&pcie->token_registry);
+	if (device->borrow_mut_offload != NULL) {
+		consumer = device->borrow_mut_offload;
+		(void)vmm_pcie_user_force_close(consumer);
+	}
+	lwkt_reltoken(&pcie->token_registry);
+	if (consumer != NULL)
+		vmm_pcie_device_consumer_detach(device, consumer);
+}
+
 int
 vmm_pcie_device_consumer_attach(struct vmm_device *device,
     struct vmm_pcie_user *consumer,

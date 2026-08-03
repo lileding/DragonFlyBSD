@@ -60,6 +60,9 @@ struct vmmfs_node {
 	struct vmmfs_machine	*vn_machine;
 	struct vnode		*vn_vnode;
 	struct lock		vn_interlock;
+	struct lwkt_token	token_gate;
+	int			mut_revoking;
+	u_int			mut_active;
 	SLIST_HEAD(, vmmfs_openbuf) vn_obufs;	/* register open buffers */
 };
 
@@ -82,8 +85,6 @@ struct vmmfs_mount {
 #define VP_TO_VMMFS(vp)		((struct vmmfs_node *)((vp)->v_data))
 
 extern struct vop_ops vmmfs_vnode_vops;
-extern volatile u_int vmmfs_vnode_open_count;
-
 /*
  * Each node binds a KOBJ class -- its behavior and vop dispatch -- chosen at
  * creation, not via a type switch.  The class IS the node's type.
@@ -157,6 +158,12 @@ void	vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class,
 	    enum vtype vtype, mode_t mode, ino_t ino, struct vmmfs_node *parent,
 	    struct vmmfs_machine *machine);
 void	vmmfs_node_uninit(struct vmmfs_node *node);
+int	vmmfs_node_enter(struct vmmfs_node *node);
+void	vmmfs_node_enter_close(struct vmmfs_node *node);
+void	vmmfs_node_leave(struct vmmfs_node *node);
+void	vmmfs_node_begin_revoke(struct vmmfs_node *node);
+int	vmmfs_node_is_revoking(struct vmmfs_node *node);
+void	vmmfs_node_wait(struct vmmfs_node *node);
 void	vmmfs_node_revoke(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);

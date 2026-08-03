@@ -6133,8 +6133,6 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu *vc)
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);
-		/* The machine becomes RUNNING only after every vCPU reaches here. */
-		vmm_vcpu_report_started(vc);
 		vmm_svm_vmrun(svm->imm_vmcb_pa, svm->mut_gprs);
 		if (vmcb->ctrl.exitcode != VMM_SVM_EXIT_INVALID) {
 			svm->mut_host_tlb_generation = host_tlb_generation;

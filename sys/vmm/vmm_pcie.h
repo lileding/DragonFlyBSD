@@ -73,6 +73,7 @@ int	vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    struct vmm_pcie_user *provider,
 	    const struct vmm_pcie_abi_msix *message);
 void	vmm_pcie_device_provider_force_close(struct vmm_device *device);
+void	vmm_pcie_device_force_close(struct vmm_device *device);
 int	vmm_pcie_device_consumer_attach(struct vmm_device *device,
 	    struct vmm_pcie_user *consumer,
 	    struct vmm_pcie_abi_consumer_ready *response);

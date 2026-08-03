@@ -27,6 +27,17 @@
 #include "vmmfs_machine.h"
 #include "vmmfs_node_if.h"
 
+#define VMMFS_NODE_ENTER_OR_RETURN(node) do { \
+	int error__ = vmmfs_node_enter(node); \
+	if (error__ != 0) \
+		return error__; \
+} while (0)
+
+#define VMMFS_NODE_LEAVE_RETURN(node, error) do { \
+	vmmfs_node_leave(node); \
+	return error; \
+} while (0)
+
 int
 vmmnode_nlookupdotdot(struct vmmfs_node *dnode, struct vop_nlookupdotdot_args *ap)
 {
@@ -135,6 +146,12 @@ vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 	return 0;
 }
 
+static void
+vmmnode_revoke(struct vmmfs_node *node)
+{
+	(void)node;
+}
+
 /*
  * KOBJ dispatch.  Each vop_ops entry is a thin shim that resolves the node and
  * forwards to its class via the VMMFS_NODE_* methods; every node carries its own
@@ -143,132 +160,205 @@ vmmnode_print(struct vmmfs_node *node, struct vop_print_args *ap)
 static int
 vmmfs_nresolve(struct vop_nresolve_args *ap)
 {
-	return VMMFS_NODE_NRESOLVE(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NRESOLVE(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
-	return VMMFS_NODE_NLOOKUPDOTDOT(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NLOOKUPDOTDOT(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_nmkdir(struct vop_nmkdir_args *ap)
 {
-	return VMMFS_NODE_NMKDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NMKDIR(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
 {
-	return VMMFS_NODE_NCREATE(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NCREATE(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_nremove(struct vop_nremove_args *ap)
 {
-	return VMMFS_NODE_NREMOVE(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NREMOVE(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_nrmdir(struct vop_nrmdir_args *ap)
 {
-	return VMMFS_NODE_NRMDIR(VP_TO_VMMFS(ap->a_dvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_dvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NRMDIR(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_nrename(struct vop_nrename_args *ap)
 {
-	return VMMFS_NODE_NRENAME(VP_TO_VMMFS(ap->a_fdvp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_fdvp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_NRENAME(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_readlink(struct vop_readlink_args *ap)
 {
-	return VMMFS_NODE_READLINK(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_READLINK(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_open(struct vop_open_args *ap)
 {
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 	int error;
 
-	atomic_add_int(&vmmfs_vnode_open_count, 1);
-	error = VMMFS_NODE_OPEN(VP_TO_VMMFS(ap->a_vp), ap);
-	if (error != 0) {
-		atomic_subtract_int(&vmmfs_vnode_open_count, 1);
-	}
-	/* Device sessions replace the vnode file with a socket; VOP_CLOSE will not run. */
-	if (error == 0 && ap->a_fpp != NULL && *ap->a_fpp != NULL &&
-	    (*ap->a_fpp)->f_type == DTYPE_SOCKET)
-		atomic_subtract_int(&vmmfs_vnode_open_count, 1);
-	return error;
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_OPEN(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_close(struct vop_close_args *ap)
 {
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
 	int error;
 
-	error = VMMFS_NODE_CLOSE(VP_TO_VMMFS(ap->a_vp), ap);
-	atomic_subtract_int(&vmmfs_vnode_open_count, 1);
-	return error;
+	vmmfs_node_enter_close(node);
+	error = VMMFS_NODE_CLOSE(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_access(struct vop_access_args *ap)
 {
-	return VMMFS_NODE_ACCESS(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_ACCESS(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_getattr(struct vop_getattr_args *ap)
 {
-	return VMMFS_NODE_GETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_GETATTR(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_setattr(struct vop_setattr_args *ap)
 {
-	return VMMFS_NODE_SETATTR(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_SETATTR(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_read(struct vop_read_args *ap)
 {
-	return VMMFS_NODE_READ(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_READ(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_write(struct vop_write_args *ap)
 {
-	return VMMFS_NODE_WRITE(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_WRITE(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_ioctl(struct vop_ioctl_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
 
+	VMMFS_NODE_ENTER_OR_RETURN(node);
 	if (!VMMFS_NODE_IS(node, vmmfs_console_class))
-		return vop_stdioctl(ap);
-	return VMMFS_NODE_IOCTL(node, ap);
+		error = vop_stdioctl(ap);
+	else
+		error = VMMFS_NODE_IOCTL(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_kqfilter(struct vop_kqfilter_args *ap)
 {
 	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
 
+	VMMFS_NODE_ENTER_OR_RETURN(node);
 	if (!VMMFS_NODE_IS(node, vmmfs_console_class))
-		return EOPNOTSUPP;
-	return VMMFS_NODE_KQFILTER(node, ap);
+		error = EOPNOTSUPP;
+	else
+		error = VMMFS_NODE_KQFILTER(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
 vmmfs_readdir(struct vop_readdir_args *ap)
 {
-	return VMMFS_NODE_READDIR(VP_TO_VMMFS(ap->a_vp), ap);
+	struct vmmfs_node *node = VP_TO_VMMFS(ap->a_vp);
+	int error;
+
+	VMMFS_NODE_ENTER_OR_RETURN(node);
+	error = VMMFS_NODE_READDIR(node, ap);
+	VMMFS_NODE_LEAVE_RETURN(node, error);
 }
 
 static int
@@ -318,6 +408,7 @@ static kobj_method_t vmmfs_base_methods[] = {
 	KOBJMETHOD(vmmfs_node_inactive,		vmmnode_inactive),
 	KOBJMETHOD(vmmfs_node_reclaim,		vmmnode_reclaim),
 	KOBJMETHOD(vmmfs_node_print,		vmmnode_print),
+	KOBJMETHOD(vmmfs_node_revoke,		vmmnode_revoke),
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_base, vmmfs_base_methods, 0);

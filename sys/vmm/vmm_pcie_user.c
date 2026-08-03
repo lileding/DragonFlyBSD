@@ -32,6 +32,8 @@ struct vmm_pcie_user {
 	 * lifecycle send never dereferences a socket freed by session teardown.
 	 */
 	struct vmm_device	*borrow_imm_device;
+	void			*borrow_imm_release_arg;
+	vmm_pcie_user_release_fn	*fnonce_release;
 	struct socket		*own_mut_peer;
 	enum vmm_pcie_user_role	imm_role;
 	struct vmm_pcie_abi_consumer_ready imm_consumer_ready;
@@ -68,7 +70,8 @@ static void	vmm_pcie_user_provider_message(struct vmm_pcie_user *user,
 
 int
 vmm_pcie_user_open(struct vmm_device *device, enum vmm_pcie_user_role role,
-    struct ucred *cred, struct socket **user_socketp)
+    struct ucred *cred, void *release_arg, vmm_pcie_user_release_fn *release,
+    struct socket **user_socketp)
 {
 	struct vmm_pcie_user *user;
 	struct socket *peer;
@@ -90,6 +93,8 @@ vmm_pcie_user_open(struct vmm_device *device, enum vmm_pcie_user_role role,
 	if (error != 0)
 		goto fail_peer;
 	user->borrow_imm_device = device;
+	user->borrow_imm_release_arg = release_arg;
+	user->fnonce_release = release;
 	user->own_mut_peer = peer;
 	user->imm_role = role;
 	lwkt_token_init(&user->token_requests, "vmmpcieq");
@@ -161,6 +166,8 @@ vmm_pcie_user_release(struct vmm_pcie_user *user)
 	user->own_mut_peer = NULL;
 	if (peer != NULL)
 		(void)soclose(peer, 0);
+	if (user->fnonce_release != NULL)
+		user->fnonce_release(user->borrow_imm_release_arg);
 	kfree(user, M_TEMP);
 	atomic_subtract_int(&vmm_pcie_user_session_count, 1);
 }

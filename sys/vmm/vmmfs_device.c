@@ -40,6 +40,7 @@ static int	vmmfs_device_readdir(struct vmmfs_node *,
 		    struct vop_readdir_args *);
 static int	vmmfs_device_session_open(struct vmmfs_node *,
 		    struct vop_open_args *);
+static void	vmmfs_device_session_release(void *);
 static int	vmmfs_device_info_getattr(struct vmmfs_node *,
 		    struct vop_getattr_args *);
 static int	vmmfs_device_info_read(struct vmmfs_node *,
@@ -134,6 +135,9 @@ vmmfs_device_revoke(struct vmmfs_device *d)
 {
 	unsigned int i;
 
+	vmmfs_node_begin_revoke(&d->node);
+	for (i = 0; i < VMMFS_DEVICE_LEAF_COUNT; i++)
+		vmmfs_node_begin_revoke(&d->own_mut_leaves[i].node);
 	for (i = 0; i < VMMFS_DEVICE_LEAF_COUNT; i++)
 		vmmfs_node_revoke(&d->own_mut_leaves[i].node);
 	vmmfs_node_revoke(&d->node);
@@ -157,7 +161,7 @@ vmmfs_device_destroy_owner_locked(struct vmmfs_mount *vmp,
 		if (d == NULL)
 			return 0;
 		/* Machine deletion is provider removal, not an EBUSY condition. */
-		vmm_pcie_device_provider_force_close(&d->own_mut_device);
+		vmm_pcie_device_force_close(&d->own_mut_device);
 		error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
 		    &d->own_mut_device);
 		if (error != 0)
@@ -255,16 +259,35 @@ vmmfs_device_session_open(struct vmmfs_node *node, struct vop_open_args *ap)
 	leaf = VMMFS_DEVICE_LEAF_OF_NODE(node);
 	role = leaf->imm_kind == VMMFS_DEVICE_LEAF_PROVIDER ?
 	    VMM_PCIE_USER_PROVIDER : VMM_PCIE_USER_CONSUMER;
-	error = vmm_pcie_user_open(&leaf->borrow_imm_device->own_mut_device,
-	    role, ap->a_cred, &user_socket);
+	error = vmmfs_node_enter(node);
 	if (error != 0)
 		return error;
+	error = vmm_pcie_user_open(&leaf->borrow_imm_device->own_mut_device,
+	    role, ap->a_cred, node, vmmfs_device_session_release, &user_socket);
+	if (error != 0) {
+		vmmfs_node_leave(node);
+		return error;
+	}
 	fp = *ap->a_fpp;
 	fp->f_type = DTYPE_SOCKET;
 	fp->f_flag = (fp->f_flag & ~FMASK) | FREAD | FWRITE;
 	fp->f_ops = &socketops;
 	fp->f_data = user_socket;
 	return 0;
+}
+
+static void
+vmmfs_device_session_release(void *arg)
+{
+	vmmfs_node_leave(arg);
+}
+
+static void
+vmmfs_device_session_revoke(struct vmmfs_node *node)
+{
+	struct vmmfs_device_leaf *leaf = VMMFS_DEVICE_LEAF_OF_NODE(node);
+
+	vmm_pcie_device_force_close(&leaf->borrow_imm_device->own_mut_device);
 }
 
 static int
@@ -318,6 +341,7 @@ static kobj_method_t vmmfs_device_session_methods[] = {
 	KOBJMETHOD(vmmfs_node_getattr,		vmmfs_zero_getattr),
 	KOBJMETHOD(vmmfs_node_read,		vmmfs_zero_read),
 	KOBJMETHOD(vmmfs_node_open,		vmmfs_device_session_open),
+	KOBJMETHOD(vmmfs_node_revoke,		vmmfs_device_session_revoke),
 	KOBJMETHOD(vmmfs_node_access,		vmmnode_access),
 	KOBJMETHOD(vmmfs_node_setattr,		vmmnode_setattr),
 	KOBJMETHOD(vmmfs_node_inactive,	vmmnode_inactive),

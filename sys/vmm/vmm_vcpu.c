@@ -287,15 +287,25 @@ vmm_vcpu_thread_main(void *arg)
 		error = backend_ops->vcpu_create(vcpus->own_mut_backend_context,
 		    vcpus->borrow_imm_launch, vc, &vc->own_mut_backend);
 	}
-	if (error == 0 && vmm_vcpu_backend_ready(vc) != 0)
-		exit_reason = backend_ops->run(vc->own_mut_backend, vc);
 	if (error != 0) {
 		atomic_store_rel_int(&vcpus->atomic_mut_start_failed, 1);
 		vmm_machine_vcpu_start_failed(m);
 		wakeup(vcpus);
+		/* A failed LWKT still completes the machine start barrier. */
+		vmm_vcpu_report_started(vc);
+	} else {
+		/*
+		 * All LWKT backends exist before the machine is published RUNNING.
+		 * An AP may then remain in WAIT_SIPI while the BSP starts executing;
+		 * waiting for an AP's first VMRUN here would deadlock that startup.
+		 */
+		if (vmm_vcpu_backend_ready(vc) != 0) {
+			vmm_vcpu_report_started(vc);
+			exit_reason = backend_ops->run(vc->own_mut_backend, vc);
+		} else {
+			vmm_vcpu_report_started(vc);
+		}
 	}
-	/* Every vCPU reports exactly once, including failures before VMRUN. */
-	vmm_vcpu_report_started(vc);
 	if (exit_reason != VMM_VCPU_EXIT_NONE) {
 		if (atomic_load_acq_int(&m->atomic_mut_status) == VMM_MACHINE_STARTING)
 			vmm_machine_vcpu_start_failed(m);

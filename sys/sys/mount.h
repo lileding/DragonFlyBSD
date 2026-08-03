@@ -744,6 +744,7 @@ int	vfs_allocate_syncvnode (struct mount *);
 void	vfs_getnewfsid (struct mount *);
 void	vfs_setfsid(struct mount *mp, fsid_t *template);
 cdev_t	vfs_getrootfsid (struct mount *);
+struct	mount *vfs_get_dummymount(void);   /* permanent borrowed dummy mount */
 struct	mount *vfs_getvfs (fsid_t *);      /* return vfs given fsid */
 int	vfs_modevent (module_t, int, void *);
 int	vfs_mountedon (struct vnode *);    /* is a vfs mounted on vp */

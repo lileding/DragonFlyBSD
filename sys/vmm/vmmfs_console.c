@@ -177,12 +177,22 @@ vmmfs_console_kqfilter(struct vmmfs_node *node,
 	return dev_dkqfilter(dev, ap->a_kn, NULL);
 }
 
+static void
+vmmfs_console_revoke(struct vmmfs_node *node)
+{
+	cdev_t dev = vmmfs_console_dev(node);
+
+	if (dev != NULL)
+		dev_drevoke(dev);
+}
+
 static kobj_method_t vmmfs_console_methods[] = {
 	KOBJMETHOD(vmmfs_node_getattr,	vmmfs_console_getattr),
 	KOBJMETHOD(vmmfs_node_read,	vmmfs_console_read),
 	KOBJMETHOD(vmmfs_node_write,	vmmfs_console_write),
 	KOBJMETHOD(vmmfs_node_ioctl,	vmmfs_console_ioctl),
 	KOBJMETHOD(vmmfs_node_kqfilter,	vmmfs_console_kqfilter),
+	KOBJMETHOD(vmmfs_node_revoke,	vmmfs_console_revoke),
 	KOBJMETHOD(vmmfs_node_open,	vmmfs_console_open),
 	KOBJMETHOD(vmmfs_node_close,	vmmfs_console_close),
 	KOBJMETHOD(vmmfs_node_access,	vmmnode_access),

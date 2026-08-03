@@ -149,6 +149,10 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 
 	kprintf("vmm klog: machine_free begin m=%p machine=%p\n", m,
 	    &m->machine);
+	vmmfs_node_begin_revoke(&m->node);
+	for (j = 0; j < VMMFS_NCFG_FILES; j++)
+		vmmfs_node_begin_revoke(cfg_node(m, &vmmfs_cfg_table[j]));
+	vmmfs_node_begin_revoke(&m->vn_devices);
 	for (j = 0; j < VMMFS_NCFG_FILES; j++)
 		vmmfs_node_revoke(cfg_node(m, &vmmfs_cfg_table[j]));
 	vmmfs_node_revoke(&m->vn_devices);

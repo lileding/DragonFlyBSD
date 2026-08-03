@@ -124,3 +124,7 @@ METHOD int print {
 	struct vmmfs_node	*node;
 	struct vop_print_args	*ap;
 };
+
+METHOD void revoke {
+	struct vmmfs_node	*node;
+};

@@ -53,8 +53,6 @@
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs mount structures");
 static struct lock vmmfs_mount_lock;
 static int vmmfs_mount_count;
-/* Successful vmmfs opens hold the module through their matching close. */
-volatile u_int vmmfs_vnode_open_count;
 /* vfs_register() ignores vfs_init() errors; mount is the real admission point. */
 static int vmmfs_backend_error;
 static int vmmfs_initialized;
@@ -117,8 +115,73 @@ vmmfs_node_init(struct vmmfs_node *node, kobj_class_t class, enum vtype vtype,
 	node->vn_machine = machine;
 	node->vn_vnode = NULL;
 	lockinit(&node->vn_interlock, "vmmfs node", 0, 0);
+	lwkt_token_init(&node->token_gate, "vmmfsgate");
+	node->mut_revoking = 0;
+	node->mut_active = 0;
 	SLIST_INIT(&node->vn_obufs);
 	kobj_init((kobj_t)node, class);
+}
+
+int
+vmmfs_node_enter(struct vmmfs_node *node)
+{
+	int error;
+
+	lwkt_gettoken(&node->token_gate);
+	if (node->mut_revoking)
+		error = ENXIO;
+	else {
+		node->mut_active++;
+		error = 0;
+	}
+	lwkt_reltoken(&node->token_gate);
+	return error;
+}
+
+void
+vmmfs_node_enter_close(struct vmmfs_node *node)
+{
+	lwkt_gettoken(&node->token_gate);
+	node->mut_active++;
+	lwkt_reltoken(&node->token_gate);
+}
+
+void
+vmmfs_node_leave(struct vmmfs_node *node)
+{
+	lwkt_gettoken(&node->token_gate);
+	KKASSERT(node->mut_active != 0);
+	if (--node->mut_active == 0)
+		wakeup(node);
+	lwkt_reltoken(&node->token_gate);
+}
+
+void
+vmmfs_node_begin_revoke(struct vmmfs_node *node)
+{
+	lwkt_gettoken(&node->token_gate);
+	node->mut_revoking = 1;
+	lwkt_reltoken(&node->token_gate);
+}
+
+int
+vmmfs_node_is_revoking(struct vmmfs_node *node)
+{
+	int revoking;
+
+	lwkt_gettoken(&node->token_gate);
+	revoking = node->mut_revoking;
+	lwkt_reltoken(&node->token_gate);
+	return revoking;
+}
+
+void
+vmmfs_node_wait(struct vmmfs_node *node)
+{
+	lwkt_gettoken(&node->token_gate);
+	while (node->mut_active != 0)
+		tsleep(node, 0, "vmmfsgate", 0);
+	lwkt_reltoken(&node->token_gate);
 }
 
 /* Fill the type-independent fields of a getattr result. */
@@ -167,6 +230,10 @@ vmmfs_nresolve_finish(struct vnode *dvp, struct vmmfs_node *child,
 	int error;
 
 	if (child == NULL) {
+		cache_setvp(nch, NULL);
+		return ENOENT;
+	}
+	if (vmmfs_node_is_revoking(child)) {
 		cache_setvp(nch, NULL);
 		return ENOENT;
 	}
@@ -251,8 +318,10 @@ vmmfs_obuf_drain(struct vmmfs_node *node)
 void
 vmmfs_node_uninit(struct vmmfs_node *node)
 {
+	vmmfs_node_wait(node);
 	vmmfs_obuf_drain(node);
 	lockuninit(&node->vn_interlock);
+	lwkt_token_uninit(&node->token_gate);
 }
 
 /* Revoke all namecache aliases before the owning vmmfs object is released. */
@@ -261,7 +330,8 @@ vmmfs_node_revoke(struct vmmfs_node *node)
 {
 	struct vnode *vp;
 
-	vmmfs_obuf_drain(node);
+	vmmfs_node_begin_revoke(node);
+	VMMFS_NODE_REVOKE(node);
 
 	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
 	vp = node->vn_vnode;
@@ -288,9 +358,12 @@ vmmfs_node_revoke(struct vmmfs_node *node)
 	(void)vrevoke(vp, proc0.p_ucred);
 	vx_get(vp);
 	vgone_vxlocked(vp);
+	if (vp->v_mount == NULL)
+		insmntque(vp, vfs_get_dummymount());
 	vx_put(vp);
 	vrele(vp);
 	vdrop(vp);
+	vmmfs_node_wait(node);
 }
 
 ino_t
@@ -326,6 +399,8 @@ vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	enum vtype vtype = node->vn_vtype;
 	int error = 0;
 
+	if (vmmfs_node_is_revoking(node))
+		return ENOENT;
 	kprintf("vmm klog: alloc_vp begin node=%p ino=%ju type=%d vnode=%p\n",
 	    node, (uintmax_t)node->vn_ino, vtype, node->vn_vnode);
 loop:
@@ -350,6 +425,12 @@ loop:
 	}
 
 	lockmgr(&node->vn_interlock, LK_EXCLUSIVE);
+	if (vmmfs_node_is_revoking(node)) {
+		lockmgr(&node->vn_interlock, LK_RELEASE);
+		if (vp != NULL)
+			vmmfs_discard_new_vp(vp);
+		return ENOENT;
+	}
 	if (node->vn_vnode != NULL) {
 		struct vnode *ovp = node->vn_vnode;
 
@@ -559,7 +640,7 @@ vmmfs_register_close(struct vmmfs_node *node, struct vop_close_args *ap,
 	}
 	lockmgr(&node->vn_interlock, LK_RELEASE);
 	if (ob != NULL) {
-		if (ob->ob_written)
+		if (ob->ob_written && !vmmfs_node_is_revoking(node))
 			(void)commit(&node->vn_machine->machine, ob->ob_data,
 			    (size_t)ob->ob_len);
 		kfree(ob->ob_data, M_VMMFS);
@@ -964,7 +1045,6 @@ vmmfs_vfs_init(struct vfsconf *conf)
 	kprintf("vmm klog: vfs_init begin\n");
 	vmmfs_backend_error = 0;
 	vmmfs_initialized = 0;
-	vmmfs_vnode_open_count = 0;
 	error = vmm_backend_probe();
 	if (error != 0) {
 		vmmfs_backend_error = error;
@@ -997,11 +1077,6 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 		return 0;
 	if (vmmfs_mount_count_busy()) {
 		kprintf("vmm klog: vfs_uninit busy\n");
-		return EBUSY;
-	}
-	if (atomic_load_acq_int(&vmmfs_vnode_open_count) != 0) {
-		kprintf("vmm klog: vfs_uninit vnode open count=%u\n",
-		    vmmfs_vnode_open_count);
 		return EBUSY;
 	}
 	if (atomic_load_acq_int(&vmm_pcie_user_session_count) != 0) {
