@@ -139,6 +139,17 @@ SYSCTL_INT(_debug, OID_AUTO, vnlru_nowhere, CTLFLAG_RD,
 static struct lwkt_token mntid_token;
 static struct mount dummymount;
 
+/*
+ * Return the permanent dummy mount used by dead vnodes that can still
+ * receive late VOPs after forced reclamation.  The returned pointer is
+ * borrowed and requires no release.
+ */
+struct mount *
+vfs_get_dummymount(void)
+{
+	return (&dummymount);
+}
+
 /* note: mountlist exported to pstat */
 struct mntlist mountlist = TAILQ_HEAD_INITIALIZER(mountlist);
 struct mount_rb_tree mounttree = RB_INITIALIZER(dev_tree_mounttree);
