@@ -147,38 +147,52 @@ static int virtiod_net_iov_skip(const struct virtiod_chain *, size_t,
 static size_t virtiod_net_iov_limit(struct iovec *, int, size_t);
 static int virtiod_net_header_valid(const struct vmm_pcie_abi_header *,
     uint16_t, size_t);
+static void virtiod_net_generation_fini(struct virtiod_net_state *);
 static void virtiod_net_state_fini(struct virtiod_net_state *);
 
 int
-virtiod_net_main(int argc, char **argv)
+virtiod_net_run(const struct virtiod_device *device)
 {
 	struct vmm_pcie_abi_register register_message;
 	struct virtiod_net_state state;
 	char provider_path[1024];
 	int error;
 
-	if (argc != 3)
-		errno = EINVAL, err(1, "usage: virtiod net DEVICE_DIR TAP MAC");
+	if (device == NULL || device->imm_type != VIRTIOD_DEVICE_NET)
+		return EINVAL;
 	memset(&state, 0, sizeof(state));
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
 	state.own_tap.own_fd = -1;
-	error = virtiod_net_parse_mac(argv[2], state.own_mut_config.mac);
+	error = virtiod_net_parse_mac(device->imm_mac, state.own_mut_config.mac);
 	if (error != 0)
-		errno = error, err(1, "parse MAC %s", argv[2]);
-	error = virtiod_tap_open(&state.own_tap, argv[1]);
+		errno = error, err(1, "parse MAC %s", device->imm_mac);
+	error = virtiod_tap_open(&state.own_tap, device->imm_path);
 	if (error != 0)
-		errno = error, err(1, "open TAP %s", argv[1]);
-	if (snprintf(provider_path, sizeof(provider_path), "%s/provider", argv[0])
+		errno = error, err(1, "open TAP %s", device->imm_path);
+	if (snprintf(provider_path, sizeof(provider_path), "%s/provider",
+	    device->imm_slot_path)
 	    >= (int)sizeof(provider_path))
 		errno = ENAMETOOLONG, err(1, "provider path");
 	state.own_provider_fd = open(provider_path, O_RDWR);
 	if (state.own_provider_fd < 0)
 		err(1, "open %s", provider_path);
+
+restart:
+	memset(&state.own_registered, 0, sizeof(state.own_registered));
+	memset(state.own_dma, 0, sizeof(state.own_dma));
+	memset(state.own_queue, 0, sizeof(state.own_queue));
+	memset(state.mut_queue_ready, 0, sizeof(state.mut_queue_ready));
+	memset(&state.own_mut_common, 0, sizeof(state.own_mut_common));
+	memset(state.mut_driver_features, 0, sizeof(state.mut_driver_features));
+	state.mut_last_device_status = 0;
+	state.mut_needs_reset = 0;
 	error = virtiod_net_receive_start(state.own_provider_fd, &state.own_start);
-	if (error != 0)
-		errno = error, err(1, "recv START");
+	if (error != 0) {
+		virtiod_net_state_fini(&state);
+		return error == ECONNRESET ? 0 : error;
+	}
 	virtiod_net_build_register(&register_message,
 	    le64toh(state.own_start.header.le_sequence));
 	if (send(state.own_provider_fd, &register_message, sizeof(register_message),
@@ -197,8 +211,8 @@ virtiod_net_main(int argc, char **argv)
 	error = virtiod_net_map_dma(&state);
 	if (error != 0)
 		errno = error, err(1, "mmap DMA");
-	printf("virtiod: ready net=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
-	    argv[1], state.own_mut_config.mac[0], state.own_mut_config.mac[1],
+	printf("virtiod: ready slot=%s net=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+	    device->imm_slot_path, device->imm_path, state.own_mut_config.mac[0], state.own_mut_config.mac[1],
 	    state.own_mut_config.mac[2], state.own_mut_config.mac[3],
 	    state.own_mut_config.mac[4], state.own_mut_config.mac[5]);
 	if (fflush(stdout) != 0)
@@ -266,6 +280,10 @@ virtiod_net_main(int argc, char **argv)
 			ssize_t size;
 
 			size = recv(state.own_provider_fd, &message, sizeof(message), 0);
+			if (size == 0) {
+				virtiod_net_state_fini(&state);
+				return 0;
+			}
 			if (size < 0)
 				err(1, "recv provider");
 			if (size == sizeof(message.stop) && virtiod_net_header_valid(
@@ -284,12 +302,13 @@ virtiod_net_main(int argc, char **argv)
 			err(1, "provider message");
 		}
 	}
-	virtiod_net_unmap_dma(&state);
+	virtiod_net_generation_fini(&state);
 	error = virtiod_net_send_stopped(&state);
-	if (error != 0)
-		errno = error, err(1, "send STOPPED");
-	virtiod_net_state_fini(&state);
-	return 0;
+	if (error != 0) {
+		virtiod_net_state_fini(&state);
+		return error;
+	}
+	goto restart;
 }
 
 static void
@@ -369,6 +388,8 @@ virtiod_net_receive_start(int fd, struct vmm_pcie_abi_start *message)
 	ssize_t size;
 
 	size = recv(fd, message, sizeof(*message), 0);
+	if (size == 0)
+		return ECONNRESET;
 	if (size != sizeof(*message))
 		return size < 0 ? errno : EPROTO;
 	if (!virtiod_net_header_valid(&message->header, VMM_PCIE_ABI_MSG_START,
@@ -962,15 +983,26 @@ virtiod_net_header_valid(const struct vmm_pcie_abi_header *header,
 }
 
 static void
-virtiod_net_state_fini(struct virtiod_net_state *state)
+virtiod_net_generation_fini(struct virtiod_net_state *state)
 {
 
+	virtiod_net_unmap_dma(state);
 	if (state->own_mut_bar != NULL && state->own_mut_bar != MAP_FAILED)
 		(void)munmap(state->own_mut_bar, VIRTIOD_NET_BAR_SIZE);
+	state->own_mut_bar = NULL;
 	if (state->own_bar_fd >= 0)
 		(void)close(state->own_bar_fd);
 	if (state->own_dma_fd >= 0)
 		(void)close(state->own_dma_fd);
+	state->own_bar_fd = -1;
+	state->own_dma_fd = -1;
+}
+
+static void
+virtiod_net_state_fini(struct virtiod_net_state *state)
+{
+
+	virtiod_net_generation_fini(state);
 	if (state->own_provider_fd >= 0)
 		(void)close(state->own_provider_fd);
 	virtiod_tap_close(&state->own_tap);

@@ -6,6 +6,7 @@
 
 #include <sys/types.h>
 
+#include <stdio.h>
 #include <stdint.h>
 #include <sys/uio.h>
 
@@ -13,6 +14,26 @@
 #define VIRTIOD_MAX_DMA_SEGMENTS 32U
 #define VIRTIOD_MAX_CHAIN 128U
 #define VIRTIOD_TAP_FRAME_MAX 65536U
+#define VIRTIOD_PATH_MAX 1024U
+#define VIRTIOD_MAX_QUEUES 64U
+
+enum virtiod_device_type {
+	VIRTIOD_DEVICE_BLK,
+	VIRTIOD_DEVICE_NET
+};
+
+struct virtiod_device {
+	enum virtiod_device_type imm_type;
+	char imm_slot_path[VIRTIOD_PATH_MAX];
+	char imm_path[VIRTIOD_PATH_MAX];
+	char imm_mac[18];
+	unsigned int imm_queue_count;
+};
+
+struct virtiod_config {
+	struct virtiod_device *own_mut_devices;
+	size_t mut_count;
+};
 
 #define VIRTIOD_DESC_F_NEXT 0x0001U
 #define VIRTIOD_DESC_F_WRITE 0x0002U
@@ -73,8 +94,10 @@ int virtiod_vring_pop(struct virtiod_vring *, struct virtiod_chain *);
 int virtiod_vring_has_available(const struct virtiod_vring *);
 int virtiod_vring_complete(struct virtiod_vring *, const struct virtiod_chain *,
     uint32_t);
-int virtiod_blk_main(int, char **);
-int virtiod_net_main(int, char **);
+int virtiod_config_load(FILE *, struct virtiod_config *);
+void virtiod_config_fini(struct virtiod_config *);
+int virtiod_blk_run(const struct virtiod_device *);
+int virtiod_net_run(const struct virtiod_device *);
 int virtiod_block_open(struct virtiod_block *, const char *);
 void virtiod_block_close(struct virtiod_block *);
 int virtiod_block_request(struct virtiod_block *, uint32_t, uint64_t,

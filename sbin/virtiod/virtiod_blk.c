@@ -104,10 +104,11 @@ static int virtiod_send_mmio_response(const struct virtiod_state *,
     const struct vmm_pcie_abi_mmio *, uint64_t, int);
 static int virtiod_header_valid(const struct vmm_pcie_abi_header *, uint16_t,
     size_t);
+static void virtiod_generation_fini(struct virtiod_state *);
 static void virtiod_state_fini(struct virtiod_state *);
 
 int
-virtiod_blk_main(int argc, char **argv)
+virtiod_blk_run(const struct virtiod_device *device)
 {
 	struct vmm_pcie_abi_register register_message;
 	struct pollfd pollfd;
@@ -115,25 +116,37 @@ virtiod_blk_main(int argc, char **argv)
 	char provider_path[1024];
 	int error;
 
-	if (argc != 2)
-		errno = EINVAL, err(1, "usage: virtiod blk DEVICE_DIR RAW_IMAGE");
+	if (device == NULL || device->imm_type != VIRTIOD_DEVICE_BLK)
+		return EINVAL;
 	memset(&state, 0, sizeof(state));
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
 	state.own_block.own_fd = -1;
-	if (snprintf(provider_path, sizeof(provider_path), "%s/provider", argv[0])
+	if (snprintf(provider_path, sizeof(provider_path), "%s/provider",
+	    device->imm_slot_path)
 	    >= (int)sizeof(provider_path))
-		err(1, "provider path");
-	error = virtiod_block_open(&state.own_block, argv[1]);
+		return ENAMETOOLONG;
+	error = virtiod_block_open(&state.own_block, device->imm_path);
 	if (error != 0)
 		errno = error, err(1, "open raw image");
 	state.own_provider_fd = open(provider_path, O_RDWR);
 	if (state.own_provider_fd < 0)
 		err(1, "open %s", provider_path);
+
+restart:
+	memset(&state.own_registered, 0, sizeof(state.own_registered));
+	memset(state.own_dma, 0, sizeof(state.own_dma));
+	memset(&state.own_queue, 0, sizeof(state.own_queue));
+	memset(&state.own_mut_common, 0, sizeof(state.own_mut_common));
+	memset(state.mut_driver_features, 0, sizeof(state.mut_driver_features));
+	state.mut_last_device_status = 0;
+	state.mut_needs_reset = 0;
 	error = virtiod_receive_start(state.own_provider_fd, &state.own_start);
-	if (error != 0)
-		errno = error, err(1, "recv START");
+	if (error != 0) {
+		virtiod_state_fini(&state);
+		return error == ECONNRESET ? 0 : error;
+	}
 	virtiod_build_register(&register_message,
 	    le64toh(state.own_start.header.le_sequence));
 	if (send(state.own_provider_fd, &register_message,
@@ -151,7 +164,8 @@ virtiod_blk_main(int argc, char **argv)
 	error = virtiod_map_dma(&state);
 	if (error != 0)
 		errno = error, err(1, "mmap DMA");
-	printf("virtiod: ready raw=%s capacity=%ju\n", argv[1],
+	printf("virtiod: ready slot=%s raw=%s capacity=%ju\n",
+	    device->imm_slot_path, device->imm_path,
 	    (uintmax_t)(state.own_block.imm_size / 512U));
 	if (fflush(stdout) != 0)
 		err(1, "flush ready");
@@ -193,6 +207,10 @@ virtiod_blk_main(int argc, char **argv)
 			ssize_t size;
 
 			size = recv(state.own_provider_fd, &message, sizeof(message), 0);
+			if (size == 0) {
+				virtiod_state_fini(&state);
+				return 0;
+			}
 			if (size < 0)
 				err(1, "recv provider");
 			if (size == sizeof(message.stop) &&
@@ -211,12 +229,13 @@ virtiod_blk_main(int argc, char **argv)
 			err(1, "provider message");
 		}
 	}
-	virtiod_unmap_dma(&state);
+	virtiod_generation_fini(&state);
 	error = virtiod_send_stopped(&state);
-	if (error != 0)
-		errno = error, err(1, "send STOPPED");
-	virtiod_state_fini(&state);
-	return 0;
+	if (error != 0) {
+		virtiod_state_fini(&state);
+		return error;
+	}
+	goto restart;
 }
 
 static void
@@ -298,6 +317,8 @@ virtiod_receive_start(int fd, struct vmm_pcie_abi_start *message)
 	ssize_t size;
 
 	size = recv(fd, message, sizeof(*message), 0);
+	if (size == 0)
+		return ECONNRESET;
 	if (size != sizeof(*message))
 		return size < 0 ? errno : EPROTO;
 	if (!virtiod_header_valid(&message->header, VMM_PCIE_ABI_MSG_START,
@@ -738,15 +759,26 @@ virtiod_header_valid(const struct vmm_pcie_abi_header *header, uint16_t type,
 }
 
 static void
-virtiod_state_fini(struct virtiod_state *state)
+virtiod_generation_fini(struct virtiod_state *state)
 {
 
+	virtiod_unmap_dma(state);
 	if (state->own_mut_bar != NULL && state->own_mut_bar != MAP_FAILED)
 		(void)munmap(state->own_mut_bar, VIRTIOD_BAR_SIZE);
+	state->own_mut_bar = NULL;
 	if (state->own_bar_fd >= 0)
 		(void)close(state->own_bar_fd);
 	if (state->own_dma_fd >= 0)
 		(void)close(state->own_dma_fd);
+	state->own_bar_fd = -1;
+	state->own_dma_fd = -1;
+}
+
+static void
+virtiod_state_fini(struct virtiod_state *state)
+{
+
+	virtiod_generation_fini(state);
 	if (state->own_provider_fd >= 0)
 		(void)close(state->own_provider_fd);
 	virtiod_block_close(&state->own_block);
