@@ -95,6 +95,7 @@ virtiod_config_parse_line(char *text, struct virtiod_device *device)
 	char *fields[4];
 	char *cursor;
 	unsigned int count;
+	int error;
 
 	memset(device, 0, sizeof(*device));
 	cursor = text;
@@ -119,7 +120,13 @@ virtiod_config_parse_line(char *text, struct virtiod_device *device)
 	    sizeof(device->imm_slot_path)) >= sizeof(device->imm_slot_path))
 		return EINVAL;
 	device->imm_queue_count = 1;
-	return virtiod_config_set_parameter(device, fields[2]);
+	error = virtiod_config_set_parameter(device, fields[2]);
+	if (error != 0)
+		return error;
+	if (device->imm_type == VIRTIOD_DEVICE_NET &&
+	    device->imm_queue_count != 1)
+		return EOPNOTSUPP;
+	return 0;
 }
 
 static int

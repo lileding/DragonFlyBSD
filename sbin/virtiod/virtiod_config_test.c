@@ -29,8 +29,8 @@ test_valid(void)
 	stream = tmpfile();
 	assert(stream != NULL);
 	fputs("# sandbox devices\n"
-	    "blk kata0/devices/root path=/var/lib/runv/root.raw\n"
-	    "net kata0/devices/eth0 tap=tap0,mac=02:df:00:00:00:01,queues=2\n", stream);
+	    "blk kata0/devices/root path=/var/lib/runv/root.raw,queues=2\n"
+	    "net kata0/devices/eth0 tap=tap0,mac=02:df:00:00:00:01\n", stream);
 	rewind(stream);
 	assert(virtiod_config_load(stream, &config) == 0);
 	assert(config.mut_count == 2);
@@ -39,8 +39,8 @@ test_valid(void)
 	    "kata0/devices/root") == 0);
 	assert(strcmp(config.own_mut_devices[1].imm_mac,
 	    "02:df:00:00:00:01") == 0);
-	assert(config.own_mut_devices[0].imm_queue_count == 1);
-	assert(config.own_mut_devices[1].imm_queue_count == 2);
+	assert(config.own_mut_devices[0].imm_queue_count == 2);
+	assert(config.own_mut_devices[1].imm_queue_count == 1);
 	virtiod_config_fini(&config);
 	fclose(stream);
 }
@@ -56,6 +56,7 @@ test_invalid(void)
 		"blk kata0/devices/root path=/tmp/a,path=/tmp/b\n",
 		"blk kata0/devices/root path=/tmp/a,queues=0\n",
 		"blk kata0/devices/root path=/tmp/a,queues=65\n",
+		"net kata0/devices/eth0 tap=tap0,mac=02:df:00:00:00:01,queues=2\n",
 		"blk kata0/devices/root path=/tmp/a\nblk kata0/devices/root path=/tmp/b\n",
 		"unknown kata0/devices/root path=/tmp/root.raw\n"
 	};

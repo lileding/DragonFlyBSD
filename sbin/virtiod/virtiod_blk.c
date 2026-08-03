@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@
 #define VIRTIOD_VIRTIO_PCI_CAP_DEVICE_CFG 4U
 #define VIRTIOD_F_VERSION_1 0x00000001U
 #define VIRTIOD_BLK_F_FLUSH (1U << 9)
+#define VIRTIOD_BLK_F_MQ (1U << 12)
 #define VIRTIOD_BLK_F_RO (1U << 5)
 #define VIRTIOD_STATUS_DRIVER_OK 0x04U
 #define VIRTIOD_STATUS_NEEDS_RESET 0x40U
@@ -65,6 +67,36 @@ struct virtiod_block_header {
 	uint64_t le_sector;
 } __attribute__((__packed__));
 
+struct virtiod_block_config {
+	uint64_t le_capacity;
+	uint32_t le_size_max;
+	uint32_t le_seg_max;
+	uint16_t le_cylinders;
+	uint8_t heads;
+	uint8_t sectors;
+	uint32_t le_blk_size;
+	uint8_t physical_block_exp;
+	uint8_t alignment_offset;
+	uint16_t le_min_io_size;
+	uint32_t le_opt_io_size;
+	uint8_t writeback;
+	uint8_t unused0;
+	uint16_t le_num_queues;
+} __attribute__((__packed__));
+
+struct virtiod_state;
+
+struct virtiod_queue {
+	struct virtiod_state *borrow_mut_state;
+	struct virtiod_vring own_mut_vring;
+	pthread_cond_t own_cond;
+	pthread_mutex_t own_mutex;
+	pthread_t own_thread;
+	uint16_t atomic_mut_msix_vector;
+	int mut_ready;
+	int mut_running;
+};
+
 struct virtiod_state {
 	int own_provider_fd;
 	int own_bar_fd;
@@ -73,18 +105,19 @@ struct virtiod_state {
 	struct vmm_pcie_abi_start own_start;
 	struct vmm_pcie_abi_registered own_registered;
 	struct virtiod_dma_segment own_dma[VIRTIOD_MAX_DMA_SEGMENTS];
-	struct virtiod_vring own_queue;
+	struct virtiod_queue own_mut_queues[VIRTIOD_MAX_QUEUES];
 	struct virtiod_common_config own_mut_common;
-	uint8_t	mut_isr;
+	uint8_t	atomic_mut_isr;
 	uint8_t *own_mut_bar;
 	uint32_t mut_driver_features[2];
 	uint8_t mut_last_device_status;
 	unsigned int mut_dma_count;
-	int mut_queue_ready;
+	unsigned int imm_queue_count;
 	int mut_needs_reset;
 };
 
-static void virtiod_build_register(struct vmm_pcie_abi_register *, uint64_t);
+static void virtiod_build_register(struct vmm_pcie_abi_register *, uint64_t,
+    unsigned int);
 static int virtiod_receive_start(int, struct vmm_pcie_abi_start *);
 static int virtiod_receive_registered(int, const struct vmm_pcie_abi_start *,
     struct vmm_pcie_abi_registered *, int *, int *);
@@ -94,10 +127,12 @@ static int virtiod_map_dma(struct virtiod_state *);
 static void virtiod_unmap_dma(struct virtiod_state *);
 static void virtiod_initialize_bar(struct virtiod_state *);
 static int virtiod_sync_queue(struct virtiod_state *);
-static int virtiod_process_queue(struct virtiod_state *);
-static int virtiod_process_chain(struct virtiod_state *,
+static void *virtiod_queue_main(void *);
+static int virtiod_process_queue(struct virtiod_state *, struct virtiod_queue *);
+static int virtiod_process_chain(struct virtiod_state *, struct virtiod_queue *,
     const struct virtiod_chain *);
-static int virtiod_queue_interrupt_disabled(const struct virtiod_state *);
+static int virtiod_queue_interrupt_disabled(const struct virtiod_state *,
+    const struct virtiod_queue *);
 static int virtiod_handle_mmio(struct virtiod_state *,
     const struct vmm_pcie_abi_mmio *);
 static int virtiod_send_mmio_response(const struct virtiod_state *,
@@ -137,9 +172,10 @@ virtiod_blk_run(const struct virtiod_device *device)
 restart:
 	memset(&state.own_registered, 0, sizeof(state.own_registered));
 	memset(state.own_dma, 0, sizeof(state.own_dma));
-	memset(&state.own_queue, 0, sizeof(state.own_queue));
+	memset(state.own_mut_queues, 0, sizeof(state.own_mut_queues));
 	memset(&state.own_mut_common, 0, sizeof(state.own_mut_common));
 	memset(state.mut_driver_features, 0, sizeof(state.mut_driver_features));
+	__atomic_store_n(&state.atomic_mut_isr, 0, __ATOMIC_RELEASE);
 	state.mut_last_device_status = 0;
 	state.mut_needs_reset = 0;
 	error = virtiod_receive_start(state.own_provider_fd, &state.own_start);
@@ -147,8 +183,9 @@ restart:
 		virtiod_state_fini(&state);
 		return error == ECONNRESET ? 0 : error;
 	}
+	state.imm_queue_count = device->imm_queue_count;
 	virtiod_build_register(&register_message,
-	    le64toh(state.own_start.header.le_sequence));
+	    le64toh(state.own_start.header.le_sequence), state.imm_queue_count);
 	if (send(state.own_provider_fd, &register_message,
 	    sizeof(register_message), 0) != sizeof(register_message))
 		err(1, "send REGISTER");
@@ -164,6 +201,20 @@ restart:
 	error = virtiod_map_dma(&state);
 	if (error != 0)
 		errno = error, err(1, "mmap DMA");
+	for (unsigned int i = 0; i < state.imm_queue_count; i++) {
+		struct virtiod_queue *queue = &state.own_mut_queues[i];
+
+		memset(queue, 0, sizeof(*queue));
+		queue->borrow_mut_state = &state;
+		queue->mut_running = 1;
+		if ((error = pthread_mutex_init(&queue->own_mutex, NULL)) != 0 ||
+		    (error = pthread_cond_init(&queue->own_cond, NULL)) != 0 ||
+		    (error = pthread_create(&queue->own_thread, NULL,
+		    virtiod_queue_main, queue)) != 0) {
+			errno = error;
+			err(1, "create block queue worker");
+		}
+	}
 	printf("virtiod: ready slot=%s raw=%s capacity=%ju\n",
 	    device->imm_slot_path, device->imm_path,
 	    (uintmax_t)(state.own_block.imm_size / 512U));
@@ -174,28 +225,6 @@ restart:
 	for (;;) {
 		int result;
 
-		error = virtiod_sync_queue(&state);
-		if (error != 0) {
-			struct virtiod_common_config *common;
-
-			common = &state.own_mut_common;
-			__atomic_fetch_or(&common->device_status,
-			    VIRTIOD_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
-			state.mut_queue_ready = 0;
-			state.mut_needs_reset = 1;
-		}
-		if (state.mut_queue_ready) {
-			error = virtiod_process_queue(&state);
-			if (error != 0) {
-				struct virtiod_common_config *common;
-
-				common = &state.own_mut_common;
-				__atomic_fetch_or(&common->device_status,
-				    VIRTIOD_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
-				state.mut_queue_ready = 0;
-				state.mut_needs_reset = 1;
-			}
-		}
 		result = poll(&pollfd, 1, 1);
 		if (result < 0)
 			err(1, "poll provider");
@@ -240,7 +269,7 @@ restart:
 
 static void
 virtiod_build_register(struct vmm_pcie_abi_register *message,
-    uint64_t generation)
+    uint64_t generation, unsigned int queue_count)
 {
 	struct vmm_pcie_abi_vendor_cap *cap;
 
@@ -258,7 +287,7 @@ virtiod_build_register(struct vmm_pcie_abi_register *message,
 	message->le_class_code = htole32(0x010000);
 	message->revision = 1;
 	/* Linux allocates one config and one queue vector even for one queue. */
-	message->le_msix_vectors = htole16(2);
+	message->le_msix_vectors = htole16((uint16_t)(queue_count + 1));
 	message->bar[0].le_size = htole64(VIRTIOD_BAR_SIZE);
 	message->bar[0].le_flags = htole32(VMM_PCIE_ABI_BAR_F_MEMORY |
 	    VMM_PCIE_ABI_BAR_F_64BIT);
@@ -308,7 +337,7 @@ virtiod_build_register(struct vmm_pcie_abi_register *message,
 	cap->bytes[0] = VIRTIOD_VIRTIO_PCI_CAP_DEVICE_CFG;
 	cap->bytes[5] = VIRTIOD_DEVICE_OFFSET & 0xff;
 	cap->bytes[6] = VIRTIOD_DEVICE_OFFSET >> 8;
-	cap->bytes[9] = 8;
+	cap->bytes[9] = sizeof(struct virtiod_block_config);
 }
 
 static int
@@ -462,7 +491,6 @@ virtiod_unmap_dma(struct virtiod_state *state)
 		state->own_dma[i].own_mut_bytes = NULL;
 	}
 	state->mut_dma_count = 0;
-	state->mut_queue_ready = 0;
 }
 
 static void
@@ -489,8 +517,10 @@ static int
 virtiod_sync_queue(struct virtiod_state *state)
 {
 	struct virtiod_common_config *common;
+	struct virtiod_queue *queue;
 	uint32_t selector;
 	uint32_t features;
+	uint16_t queue_index;
 	uint16_t queue_size;
 	uint8_t status;
 	uint64_t capacity;
@@ -501,8 +531,13 @@ virtiod_sync_queue(struct virtiod_state *state)
 	if (status == 0 && state->mut_last_device_status != 0) {
 		memset(state->mut_driver_features, 0,
 		    sizeof(state->mut_driver_features));
-		memset(&state->own_queue, 0, sizeof(state->own_queue));
-		state->mut_queue_ready = 0;
+		for (unsigned int i = 0; i < state->imm_queue_count; i++) {
+			queue = &state->own_mut_queues[i];
+			pthread_mutex_lock(&queue->own_mutex);
+			memset(&queue->own_mut_vring, 0, sizeof(queue->own_mut_vring));
+			queue->mut_ready = 0;
+			pthread_mutex_unlock(&queue->own_mutex);
+		}
 		state->mut_needs_reset = 0;
 	}
 	state->mut_last_device_status = status;
@@ -513,6 +548,8 @@ virtiod_sync_queue(struct virtiod_state *state)
 	features = 0;
 	if (selector == 0) {
 		features = VIRTIOD_BLK_F_FLUSH;
+		if (state->imm_queue_count > 1)
+			features |= VIRTIOD_BLK_F_MQ;
 		if (state->own_block.imm_read_only)
 			features |= VIRTIOD_BLK_F_RO;
 	} else if (selector == 1) {
@@ -520,7 +557,8 @@ virtiod_sync_queue(struct virtiod_state *state)
 	}
 	__atomic_store_n(&common->le_device_feature, htole32(features),
 	    __ATOMIC_RELEASE);
-	__atomic_store_n(&common->le_num_queues, htole16(1), __ATOMIC_RELEASE);
+	__atomic_store_n(&common->le_num_queues,
+	    htole16((uint16_t)state->imm_queue_count), __ATOMIC_RELEASE);
 	__atomic_store_n(&common->le_queue_size, htole16(VIRTIOD_QUEUE_SIZE),
 	    __ATOMIC_RELEASE);
 	__atomic_store_n(&common->le_queue_notify_off, htole16(0),
@@ -529,12 +567,19 @@ virtiod_sync_queue(struct virtiod_state *state)
 	(void)capacity;
 	if ((status & VIRTIOD_STATUS_DRIVER_OK) == 0 || le16toh(__atomic_load_n(
 	    &common->le_queue_enable, __ATOMIC_ACQUIRE)) == 0) {
-		state->mut_queue_ready = 0;
+		for (unsigned int i = 0; i < state->imm_queue_count; i++) {
+			queue = &state->own_mut_queues[i];
+			pthread_mutex_lock(&queue->own_mutex);
+			queue->mut_ready = 0;
+			pthread_mutex_unlock(&queue->own_mutex);
+		}
 		return 0;
 	}
-	if (le16toh(__atomic_load_n(&common->le_queue_select,
-	    __ATOMIC_ACQUIRE)) != 0)
+	queue_index = le16toh(__atomic_load_n(&common->le_queue_select,
+	    __ATOMIC_ACQUIRE));
+	if (queue_index >= state->imm_queue_count)
 		return EPROTO;
+	queue = &state->own_mut_queues[queue_index];
 	if ((state->mut_driver_features[1] & VIRTIOD_F_VERSION_1) == 0)
 		return EPROTO;
 	queue_size = le16toh(__atomic_load_n(&common->le_queue_size,
@@ -543,39 +588,73 @@ virtiod_sync_queue(struct virtiod_state *state)
 		queue_size = VIRTIOD_QUEUE_SIZE;
 	if (queue_size != VIRTIOD_QUEUE_SIZE)
 		return EPROTO;
-	if (!state->mut_queue_ready) {
-		error = virtiod_vring_configure(&state->own_queue, state->own_dma,
+	pthread_mutex_lock(&queue->own_mutex);
+	__atomic_store_n(&queue->atomic_mut_msix_vector, le16toh(__atomic_load_n(
+	    &common->le_queue_msix_vector, __ATOMIC_ACQUIRE)), __ATOMIC_RELEASE);
+	if (!queue->mut_ready) {
+		error = virtiod_vring_configure(&queue->own_mut_vring, state->own_dma,
 		    state->mut_dma_count, queue_size, le64toh(__atomic_load_n(
 	    &common->le_queue_desc, __ATOMIC_ACQUIRE)), le64toh(__atomic_load_n(
 	    &common->le_queue_driver, __ATOMIC_ACQUIRE)), le64toh(__atomic_load_n(
 	    &common->le_queue_device, __ATOMIC_ACQUIRE)));
-		if (error != 0)
+		if (error != 0) {
+			pthread_mutex_unlock(&queue->own_mutex);
 			return error;
-		state->mut_queue_ready = 1;
+		}
+		queue->mut_ready = 1;
+		pthread_cond_signal(&queue->own_cond);
 	}
+	pthread_mutex_unlock(&queue->own_mutex);
 	return 0;
 }
 
+static void *
+virtiod_queue_main(void *argument)
+{
+	struct virtiod_queue *queue;
+	struct virtiod_state *state;
+
+	queue = argument;
+	state = queue->borrow_mut_state;
+	pthread_mutex_lock(&queue->own_mutex);
+	while (queue->mut_running) {
+		while (queue->mut_running && !queue->mut_ready)
+			pthread_cond_wait(&queue->own_cond, &queue->own_mutex);
+		if (!queue->mut_running)
+			break;
+		if (virtiod_process_queue(state, queue) != 0) {
+			__atomic_fetch_or(&state->own_mut_common.device_status,
+			    VIRTIOD_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
+			queue->mut_ready = 0;
+		}
+		pthread_mutex_unlock(&queue->own_mutex);
+		usleep(1000);
+		pthread_mutex_lock(&queue->own_mutex);
+	}
+	pthread_mutex_unlock(&queue->own_mutex);
+	return NULL;
+}
+
 static int
-virtiod_process_queue(struct virtiod_state *state)
+virtiod_process_queue(struct virtiod_state *state, struct virtiod_queue *queue)
 {
 	struct virtiod_chain chain;
 	int error;
 
 	for (;;) {
-		error = virtiod_vring_pop(&state->own_queue, &chain);
+		error = virtiod_vring_pop(&queue->own_mut_vring, &chain);
 		if (error == ENOENT)
 			return 0;
 		if (error != 0)
 			return error;
-		error = virtiod_process_chain(state, &chain);
+		error = virtiod_process_chain(state, queue, &chain);
 		if (error != 0)
 			return error;
 	}
 }
 
 static int
-virtiod_process_chain(struct virtiod_state *state,
+virtiod_process_chain(struct virtiod_state *state, struct virtiod_queue *queue,
     const struct virtiod_chain *chain)
 {
 	struct virtiod_block_header header;
@@ -615,19 +694,18 @@ virtiod_process_chain(struct virtiod_state *state,
 		for (i = 0; i < data_count; i++)
 			used_length += chain->own_mut_iov[i + 1U].iov_len;
 	}
-	error = virtiod_vring_complete(&state->own_queue, chain, used_length);
+	error = virtiod_vring_complete(&queue->own_mut_vring, chain, used_length);
 	if (error != 0)
 		return error;
-	state->mut_isr = 1;
-	if (!virtiod_queue_interrupt_disabled(state)) {
+	__atomic_store_n(&state->atomic_mut_isr, 1, __ATOMIC_RELEASE);
+	if (!virtiod_queue_interrupt_disabled(state, queue)) {
 		uint16_t vector;
 
-		vector = le16toh(__atomic_load_n(
-		    &state->own_mut_common.le_queue_msix_vector,
-		    __ATOMIC_ACQUIRE));
+		vector = __atomic_load_n(&queue->atomic_mut_msix_vector,
+		    __ATOMIC_ACQUIRE);
 		if (vector == VIRTIOD_MSI_NO_VECTOR)
 			return 0;
-		if (vector >= 2)
+		if (vector >= state->imm_queue_count + 1)
 			return EPROTO;
 		return virtiod_send_msix(state, vector);
 	}
@@ -635,14 +713,15 @@ virtiod_process_chain(struct virtiod_state *state,
 }
 
 static int
-virtiod_queue_interrupt_disabled(const struct virtiod_state *state)
+virtiod_queue_interrupt_disabled(const struct virtiod_state *state,
+    const struct virtiod_queue *queue)
 {
 	uint16_t *available;
 	void *pointer;
 	int error;
 
 	error = virtiod_dma_translate(state->own_dma, state->mut_dma_count,
-	    state->own_queue.mut_avail_gpa, sizeof(*available), &pointer);
+	    queue->own_mut_vring.mut_avail_gpa, sizeof(*available), &pointer);
 	if (error != 0)
 		return 0;
 	available = pointer;
@@ -654,7 +733,7 @@ static int
 virtiod_handle_mmio(struct virtiod_state *state,
     const struct vmm_pcie_abi_mmio *request)
 {
-	uint64_t capacity;
+	struct virtiod_block_config config;
 	uint64_t value;
 	uint64_t offset;
 	uint32_t flags;
@@ -692,7 +771,13 @@ virtiod_handle_mmio(struct virtiod_state *state,
 		}
 		if (virtiod_sync_queue(state) != 0) {
 			state->mut_needs_reset = 1;
-			state->mut_queue_ready = 0;
+			for (unsigned int i = 0; i < state->imm_queue_count; i++) {
+				struct virtiod_queue *queue = &state->own_mut_queues[i];
+
+				pthread_mutex_lock(&queue->own_mutex);
+				queue->mut_ready = 0;
+				pthread_mutex_unlock(&queue->own_mutex);
+			}
 			state->own_mut_common.device_status |= VIRTIOD_STATUS_NEEDS_RESET;
 		}
 		if ((flags & VMM_PCIE_ABI_MMIO_F_WRITE) == 0) {
@@ -703,19 +788,21 @@ virtiod_handle_mmio(struct virtiod_state *state,
 		if ((flags & VMM_PCIE_ABI_MMIO_F_WRITE) != 0)
 			error = EROFS;
 		else {
-			value = state->mut_isr;
-			state->mut_isr = 0;
+			value = __atomic_exchange_n(&state->atomic_mut_isr, 0,
+			    __ATOMIC_ACQ_REL);
 		}
 	} else if (offset >= VIRTIOD_DEVICE_OFFSET &&
-	    offset - VIRTIOD_DEVICE_OFFSET <= sizeof(capacity) &&
-	    size <= sizeof(capacity) &&
-	    size <= sizeof(capacity) - (offset - VIRTIOD_DEVICE_OFFSET)) {
+	    offset - VIRTIOD_DEVICE_OFFSET <= sizeof(config) &&
+	    size <= sizeof(config) &&
+	    size <= sizeof(config) - (offset - VIRTIOD_DEVICE_OFFSET)) {
 		if ((flags & VMM_PCIE_ABI_MMIO_F_WRITE) != 0)
 			error = EROFS;
 		else {
-			capacity = htole64(state->own_block.imm_size / 512U);
+			memset(&config, 0, sizeof(config));
+			config.le_capacity = htole64(state->own_block.imm_size / 512U);
+			config.le_num_queues = htole16((uint16_t)state->imm_queue_count);
 			value = 0;
-			memcpy(&value, (const uint8_t *)(const void *)&capacity +
+			memcpy(&value, (const uint8_t *)(const void *)&config +
 			    offset - VIRTIOD_DEVICE_OFFSET, size);
 		}
 	} else {
@@ -761,6 +848,23 @@ virtiod_header_valid(const struct vmm_pcie_abi_header *header, uint16_t type,
 static void
 virtiod_generation_fini(struct virtiod_state *state)
 {
+	unsigned int i;
+
+	for (i = 0; i < state->imm_queue_count; i++) {
+		struct virtiod_queue *queue = &state->own_mut_queues[i];
+
+		if (!queue->mut_running)
+			continue;
+		pthread_mutex_lock(&queue->own_mutex);
+		queue->mut_running = 0;
+		pthread_cond_signal(&queue->own_cond);
+		pthread_mutex_unlock(&queue->own_mutex);
+		(void)pthread_join(queue->own_thread, NULL);
+		(void)pthread_cond_destroy(&queue->own_cond);
+		(void)pthread_mutex_destroy(&queue->own_mutex);
+		queue->mut_running = 0;
+		queue->mut_ready = 0;
+	}
 
 	virtiod_unmap_dma(state);
 	if (state->own_mut_bar != NULL && state->own_mut_bar != MAP_FAILED)
