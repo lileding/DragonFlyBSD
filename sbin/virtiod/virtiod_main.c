@@ -17,6 +17,7 @@
 
 struct virtiod_worker {
 	const struct virtiod_device *borrow_imm_device;
+	struct virtiod_vsock_broker *borrow_imm_broker;
 	int mut_error;
 	pthread_t own_thread;
 };
@@ -30,6 +31,7 @@ main(int argc, char **argv)
 {
 	struct virtiod_config config;
 	struct virtiod_worker *workers;
+	struct virtiod_vsock_broker *broker;
 	FILE *stream;
 	const char *config_path;
 	const char *control;
@@ -37,9 +39,11 @@ main(int argc, char **argv)
 	int ch;
 	int error;
 	int status;
+	int has_vsock;
 
 	config_path = "-";
 	control = NULL;
+	broker = NULL;
 	while ((ch = getopt(argc, argv, "c:dhvs:")) != -1) {
 		switch (ch) {
 		case 'c':
@@ -83,11 +87,24 @@ main(int argc, char **argv)
 		errno = error;
 		err(1, "parse configuration");
 	}
+	has_vsock = 0;
+	for (i = 0; i < config.mut_count; i++) {
+		if (config.own_mut_devices[i].imm_type == VIRTIOD_DEVICE_VSOCK)
+			has_vsock = 1;
+	}
+	if (has_vsock && control == NULL)
+		err(1, "vsock requires -s fd:N");
+	if (has_vsock && (error = virtiod_vsock_broker_init(&broker,
+	    atoi(control + 3))) != 0) {
+		errno = error;
+		err(1, "initialize vsock broker");
+	}
 	workers = calloc(config.mut_count, sizeof(*workers));
 	if (workers == NULL)
 		err(1, "allocate workers");
 	for (i = 0; i < config.mut_count; i++) {
 		workers[i].borrow_imm_device = &config.own_mut_devices[i];
+		workers[i].borrow_imm_broker = broker;
 		error = pthread_create(&workers[i].own_thread, NULL,
 		    virtiod_worker_main, &workers[i]);
 		if (error != 0) {
@@ -106,6 +123,7 @@ main(int argc, char **argv)
 		}
 	}
 	free(workers);
+	virtiod_vsock_broker_fini(broker);
 	virtiod_config_fini(&config);
 	return status;
 }
@@ -149,7 +167,10 @@ virtiod_worker_main(void *argument)
 	worker = argument;
 	if (worker->borrow_imm_device->imm_type == VIRTIOD_DEVICE_BLK)
 		worker->mut_error = virtiod_blk_run(worker->borrow_imm_device);
-	else
+	else if (worker->borrow_imm_device->imm_type == VIRTIOD_DEVICE_NET)
 		worker->mut_error = virtiod_net_run(worker->borrow_imm_device);
+	else
+		worker->mut_error = virtiod_vsock_run(worker->borrow_imm_device,
+		    worker->borrow_imm_broker);
 	return NULL;
 }

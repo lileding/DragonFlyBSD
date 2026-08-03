@@ -51,6 +51,12 @@ virtiod_config_load(FILE *stream, struct virtiod_config *config)
 				error = EEXIST;
 				break;
 			}
+			if (device.imm_type == VIRTIOD_DEVICE_VSOCK &&
+			    config->own_mut_devices[i].imm_type ==
+			    VIRTIOD_DEVICE_VSOCK) {
+				error = EEXIST;
+				break;
+			}
 		}
 		if (error != 0)
 			break;
@@ -113,6 +119,8 @@ virtiod_config_parse_line(char *text, struct virtiod_device *device)
 		device->imm_type = VIRTIOD_DEVICE_BLK;
 	else if (strcmp(fields[0], "net") == 0)
 		device->imm_type = VIRTIOD_DEVICE_NET;
+	else if (strcmp(fields[0], "vsock") == 0)
+		device->imm_type = VIRTIOD_DEVICE_VSOCK;
 	else
 		return EINVAL;
 	if (!virtiod_config_slot_valid(fields[1]) ||
@@ -124,6 +132,9 @@ virtiod_config_parse_line(char *text, struct virtiod_device *device)
 	if (error != 0)
 		return error;
 	if (device->imm_type == VIRTIOD_DEVICE_NET &&
+	    device->imm_queue_count != 1)
+		return EOPNOTSUPP;
+	if (device->imm_type == VIRTIOD_DEVICE_VSOCK &&
 	    device->imm_queue_count != 1)
 		return EOPNOTSUPP;
 	return 0;
@@ -160,11 +171,13 @@ virtiod_config_set_parameter(struct virtiod_device *device, char *parameters)
 	int has_path;
 	int has_tap;
 	int has_mac;
+	int has_cid;
 	int has_queues;
 
 	has_path = 0;
 	has_tap = 0;
 	has_mac = 0;
+	has_cid = 0;
 	has_queues = 0;
 	cursor = parameters;
 	while ((parameter = strsep(&cursor, ",")) != NULL) {
@@ -191,6 +204,18 @@ virtiod_config_set_parameter(struct virtiod_device *device, char *parameters)
 			    sizeof(device->imm_mac))
 				return EINVAL;
 			has_mac = 1;
+		} else if (strcmp(parameter, "cid") == 0 &&
+		    device->imm_type == VIRTIOD_DEVICE_VSOCK && !has_cid) {
+			char *end;
+			unsigned long long cid;
+
+			errno = 0;
+			cid = strtoull(value, &end, 10);
+			if (*value == '\0' || *end != '\0' || errno != 0 ||
+			    cid <= 2)
+				return EINVAL;
+			device->imm_guest_cid = (uint64_t)cid;
+			has_cid = 1;
 		} else if (strcmp(parameter, "queues") == 0 && !has_queues) {
 			char *end;
 			unsigned long count;
@@ -208,5 +233,7 @@ virtiod_config_set_parameter(struct virtiod_device *device, char *parameters)
 	}
 	if (device->imm_type == VIRTIOD_DEVICE_BLK)
 		return has_path ? 0 : EINVAL;
-	return has_tap && has_mac ? 0 : EINVAL;
+	if (device->imm_type == VIRTIOD_DEVICE_NET)
+		return has_tap && has_mac ? 0 : EINVAL;
+	return has_cid ? 0 : EINVAL;
 }

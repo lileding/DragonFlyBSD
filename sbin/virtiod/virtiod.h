@@ -19,7 +19,8 @@
 
 enum virtiod_device_type {
 	VIRTIOD_DEVICE_BLK,
-	VIRTIOD_DEVICE_NET
+	VIRTIOD_DEVICE_NET,
+	VIRTIOD_DEVICE_VSOCK
 };
 
 struct virtiod_device {
@@ -27,6 +28,7 @@ struct virtiod_device {
 	char imm_slot_path[VIRTIOD_PATH_MAX];
 	char imm_path[VIRTIOD_PATH_MAX];
 	char imm_mac[18];
+	uint64_t imm_guest_cid;
 	unsigned int imm_queue_count;
 };
 
@@ -77,6 +79,8 @@ struct virtiod_tap {
 	uint8_t own_mut_rx_bytes[VIRTIOD_TAP_FRAME_MAX];
 };
 
+struct virtiod_vsock_broker;
+
 #define VIRTIOD_BLK_T_IN 0U
 #define VIRTIOD_BLK_T_OUT 1U
 #define VIRTIOD_BLK_T_FLUSH 4U
@@ -98,6 +102,10 @@ int virtiod_config_load(FILE *, struct virtiod_config *);
 void virtiod_config_fini(struct virtiod_config *);
 int virtiod_blk_run(const struct virtiod_device *);
 int virtiod_net_run(const struct virtiod_device *);
+int virtiod_vsock_run(const struct virtiod_device *,
+    struct virtiod_vsock_broker *);
+int virtiod_vsock_broker_init(struct virtiod_vsock_broker **, int);
+void virtiod_vsock_broker_fini(struct virtiod_vsock_broker *);
 int virtiod_block_open(struct virtiod_block *, const char *);
 void virtiod_block_close(struct virtiod_block *);
 int virtiod_block_request(struct virtiod_block *, uint32_t, uint64_t,
