@@ -24,6 +24,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/kern_syscall.h>
 #include <sys/module.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -33,6 +34,7 @@
 #include <sys/vnode.h>
 #include <sys/namecache.h>
 #include <sys/dirent.h>
+#include <sys/filedesc.h>
 #include <sys/uio.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
@@ -759,11 +761,20 @@ vmmfs_root_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	struct vmmfs_mount *vmp = VFS_TO_VMMFS(dvp->v_mount);
 	struct vmmfs_machine *m;
 	struct vnode *vp;
+	const char *name = ncp->nc_name;
+	int name_len = ncp->nc_nlen;
+	int create_leased = 0;
 	int error;
 
 	(void)dnode;
-	if (ncp->nc_nlen == 0 || ncp->nc_nlen > VMMFS_NAME_MAX)
+	if (name_len == 0 || name_len > VMMFS_NAME_MAX)
 		return ENAMETOOLONG;
+	if (name_len >= 7 && bcmp(name + name_len - 7, ".leased", 7) == 0) {
+		if (name_len == 7)
+			return EINVAL;
+		name_len -= 7;
+		create_leased = 1;
+	}
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	if (vmp->vm_closing) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
@@ -772,9 +783,9 @@ vmmfs_root_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	vmp->vm_machine_count++;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
 
-	m = vmmfs_machine_create(vmp, ncp->nc_name, ncp->nc_nlen);
+	m = vmmfs_machine_create(vmp, name, name_len);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-	if (vmmfs_root_find(vmp, ncp->nc_name, ncp->nc_nlen) != NULL) {
+	if (vmmfs_root_find(vmp, name, name_len) != NULL) {
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vmmfs_machine_free(m);
 		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
@@ -783,42 +794,65 @@ vmmfs_root_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		return EEXIST;
 	}
+	if (create_leased) {
+		error = vmmfs_machine_install_hidden_lease(m, ap->a_cred);
+		if (error != 0) {
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+			vmmfs_machine_free(m);
+			lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+			KKASSERT(vmp->vm_machine_count > 0);
+			vmp->vm_machine_count--;
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+			return error;
+		}
+	}
 	RB_INSERT(vmmfs_machtree, &vmp->vm_machtree, m);
 	m->vm_in_tree = 1;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	if (create_leased)
+		cache_inval_vp(dvp, CINV_CHILDREN);
 
 	vmm_debug_trace("root_mkdir inserted name=%s m=%p", m->name,
 	    &m->machine);
 	if (!vmm_debug_allow_nmkdir_vnode) {
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		m->vm_in_tree = 0;
-		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vmmfs_machine_free(m);
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		KKASSERT(vmp->vm_machine_count > 0);
-		vmp->vm_machine_count--;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		if (create_leased) {
+			(void)kern_close(m->mut_hidden_lease_fd);
+		} else {
+			lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+			m->vm_in_tree = 0;
+			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+			vmmfs_machine_free(m);
+			lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+			KKASSERT(vmp->vm_machine_count > 0);
+			vmp->vm_machine_count--;
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+		}
 		return EBUSY;
 	}
 
 	error = vmmfs_alloc_vp(dvp->v_mount, &m->node,
 	    LK_EXCLUSIVE | LK_RETRY, &vp);
 	if (error != 0) {
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		m->vm_in_tree = 0;
-		RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
-		vmmfs_machine_free(m);
-		lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
-		KKASSERT(vmp->vm_machine_count > 0);
-		vmp->vm_machine_count--;
-		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		if (create_leased) {
+			(void)kern_close(m->mut_hidden_lease_fd);
+		} else {
+			lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+			m->vm_in_tree = 0;
+			RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+			vmmfs_machine_free(m);
+			lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+			KKASSERT(vmp->vm_machine_count > 0);
+			vmp->vm_machine_count--;
+			lockmgr(&vmp->vm_lock, LK_RELEASE);
+		}
 		return error;
 	}
 	*ap->a_vpp = vp;
 	cache_setunresolved(ap->a_nch);
-	cache_setvp(ap->a_nch, vp);
+	if (!create_leased)
+		cache_setvp(ap->a_nch, vp);
 	return 0;
 }
 
@@ -846,7 +880,7 @@ vmmfs_root_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		return ENOENT;
 	}
 	lwkt_gettoken(&m->machine.token_config);
-	if (!m->machine.mut_desired_stopped) {
+	if (m->machine.mut_leased || !m->machine.mut_desired_stopped) {
 		lwkt_reltoken(&m->machine.token_config);
 		lockmgr(&vmp->vm_lock, LK_RELEASE);
 		vrele(vp);
@@ -905,13 +939,48 @@ vmmfs_machine_reaper(void *arg)
 {
 	struct vmmfs_machine *m = arg;
 	struct vmmfs_mount *vmp = m->vm_mount;
+	int error;
+
+	lwkt_gettoken(&m->machine.token_config);
+	m->machine.mut_desired_stopped = 1;
+	lwkt_reltoken(&m->machine.token_config);
+	(void)vmm_machine_execute(&m->machine, vmm_machine_command_stop, NULL);
 
 	vmm_machine_drain(&m->machine);
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	error = vmmfs_device_destroy_owner_locked(vmp, &m->machine);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	if (error != 0) {
+		kprintf("vmm klog: machine_reaper device destroy failed m=%p error=%d\n",
+		    m, error);
+		return;
+	}
 	vmmfs_machine_free(m);
 	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
 	KKASSERT(vmp->vm_machine_count > 0);
 	vmp->vm_machine_count--;
 	lockmgr(&vmp->vm_lock, LK_RELEASE);
+}
+
+void
+vmmfs_machine_reclaim(struct vmmfs_machine *m)
+{
+	struct vmmfs_mount *vmp = m->vm_mount;
+	int error;
+
+	lockmgr(&vmp->vm_lock, LK_EXCLUSIVE);
+	if (m->vm_in_tree == 0) {
+		lockmgr(&vmp->vm_lock, LK_RELEASE);
+		return;
+	}
+	m->vm_in_tree = 0;
+	RB_REMOVE(vmmfs_machtree, &vmp->vm_machtree, m);
+	lockmgr(&vmp->vm_lock, LK_RELEASE);
+	error = lwkt_create(vmmfs_machine_reaper, m, NULL, NULL, 0, -1,
+	    "vmmfsreap");
+	if (error != 0)
+		kprintf("vmm klog: machine_reclaim lwkt_create failed m=%p error=%d\n",
+		    m, error);
 }
 
 /* --------------------------------------------------------------------- */

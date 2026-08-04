@@ -167,6 +167,7 @@ void	vmmfs_node_wait(struct vmmfs_node *node);
 void	vmmfs_node_revoke(struct vmmfs_node *node);
 int	vmmfs_alloc_vp(struct mount *mp, struct vmmfs_node *node, int lkflag,
 	    struct vnode **vpp);
+void	vmmfs_machine_reclaim(struct vmmfs_machine *m);
 int	vmmfs_obuf_write(struct vmmfs_node *node, struct file *fp,
 	    struct uio *uio);
 void	vmmfs_obuf_drain(struct vmmfs_node *node);

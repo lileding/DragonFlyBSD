@@ -897,28 +897,6 @@ vmm_machine_commit_loader(struct vmm_machine *m, const char *buf, size_t len)
 }
 
 int
-vmm_machine_lease_open(struct vmm_machine *m)
-{
-	m->mut_lease_count++;
-	m->mut_lease_armed = 1;
-	return 1;
-}
-
-enum vmm_close_action
-vmm_machine_lease_close(struct vmm_machine *m)
-{
-	enum vmm_close_action action = VMM_CLOSE_NONE;
-
-	if (m->mut_lease_count > 0)
-		m->mut_lease_count--;
-	if (m->mut_lease_armed && m->mut_lease_count == 0)
-		action = VMM_CLOSE_DELETE;
-	if (action == VMM_CLOSE_DELETE)
-		wakeup(m);
-	return action;
-}
-
-int
 vmm_machine_events_pending(const struct vmm_machine *m)
 {
 	struct vmm_machine *machine = __DECONST(struct vmm_machine *, m);

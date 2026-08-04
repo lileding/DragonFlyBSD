@@ -16,6 +16,11 @@ struct vmmfs_machine {
 	struct vmmfs_mount	*vm_mount;
 	char			name[VMMFS_NAME_MAX + 1];
 	int			vm_in_tree;	/* guards a single RB_REMOVE */
+	/* token_config protects the hidden .leased claim handoff. */
+	struct proc			*ref_mut_lease_claim_proc;
+	struct file			*raw_mut_hidden_lease_fp;
+	int			mut_hidden_lease_fd;
+	int			mut_hidden_lease_claiming;
 	struct vmm_machine	machine;	/* executable VM core object */
 	struct vmmfs_node	node;		/* the machine directory */
 	struct vmmfs_node	n_vcpu, n_mem, n_loader, n_console;
@@ -33,5 +38,8 @@ RB_PROTOTYPE(vmmfs_machtree, vmmfs_machine, vm_link, vmmfs_machine_cmp);
 struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_mount *vmp,
 	    const char *name, int nlen);
 void	vmmfs_machine_free(struct vmmfs_machine *m);
+int	vmmfs_machine_install_hidden_lease(struct vmmfs_machine *m,
+	    struct ucred *cred);
+void	vmmfs_machine_begin_reclaim(struct vmmfs_machine *m);
 
 #endif /* VMMFS_MACHINE_H */

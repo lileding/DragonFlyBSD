@@ -57,8 +57,7 @@ struct vmm_machine {
 	int mut_desired_stopped;
 	char mut_loader_path[VMM_LOADER_MAX + 1];
 	size_t mut_loader_len;
-	uint32_t mut_lease_count;
-	int mut_lease_armed;
+	int mut_leased;
 	char *own_mut_events_buf;
 	size_t imm_events_cap;
 	size_t mut_events_start;
@@ -66,12 +65,6 @@ struct vmm_machine {
 	uint64_t mut_events_seq;
 	uint64_t mut_events_last_tsc;
 	uint64_t mut_events_drop_bytes;
-};
-
-/* Result of lease_close. */
-enum vmm_close_action {
-	VMM_CLOSE_NONE,
-	VMM_CLOSE_DELETE,
 };
 
 /* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
@@ -120,10 +113,6 @@ void vmm_machine_vcpu_drained(struct vmm_machine *m);
 void vmm_machine_command_start(const struct vmm_machine_task *task);
 void vmm_machine_command_stop(const struct vmm_machine_task *task);
 void vmm_machine_command_reset(const struct vmm_machine_task *task);
-
-/* Lease reference counting. */
-int vmm_machine_lease_open(struct vmm_machine *m);
-enum vmm_close_action vmm_machine_lease_close(struct vmm_machine *m);
 
 /* Events: retained per-machine textual log, one line per record. */
 int vmm_machine_events_pending(const struct vmm_machine *m);

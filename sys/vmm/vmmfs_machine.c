@@ -8,6 +8,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
+#include <sys/kern_syscall.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -15,6 +16,8 @@
 #include <sys/vnode.h>
 #include <sys/namecache.h>
 #include <sys/dirent.h>
+#include <sys/file.h>
+#include <sys/filedesc.h>
 #include <sys/uio.h>
 #include <sys/tree.h>
 #include <sys/kobj.h>
@@ -60,10 +63,8 @@ static const struct vmmfs_cfg_desc vmmfs_cfg_table[] = {
 	    __offsetof(struct vmmfs_machine, n_mem),	  NULL },
 	{ "loader",	  VREG, 0644, &vmmfs_loader_class,
 	    __offsetof(struct vmmfs_machine, n_loader),  NULL },
-#if 0
 	{ "lease",	  VREG, 0444, &vmmfs_lease_class,
 	    __offsetof(struct vmmfs_machine, n_lease),	  NULL },
-#endif
 	{ "events",	  VREG, 0644, &vmmfs_events_class,
 	    __offsetof(struct vmmfs_machine, n_events),  NULL },
 	{ "console",	  VCHR, 0600, &vmmfs_console_class,
@@ -108,6 +109,7 @@ vmmfs_machine_create(struct vmmfs_mount *vmp, const char *name, int nlen)
 	m = kmalloc(sizeof(*m), M_VMMFS, M_WAITOK | M_ZERO);
 	kprintf("vmm klog: machine_create kmalloc done m=%p\n", m);
 	m->vm_mount = vmp;
+	m->mut_hidden_lease_fd = -1;
 	bcopy(name, m->name, nlen);
 	m->name[nlen] = '\0';
 
@@ -165,6 +167,59 @@ vmmfs_machine_free(struct vmmfs_machine *m)
 	vmmfs_node_uninit(&m->vn_devices);
 	kprintf("vmm klog: machine_free kfree m=%p\n", m);
 	kfree(m, M_VMMFS);
+}
+
+/* Block new machine operations before the asynchronous final-close reaper. */
+void
+vmmfs_machine_begin_reclaim(struct vmmfs_machine *m)
+{
+	int j;
+
+	vmmfs_node_begin_revoke(&m->node);
+	for (j = 0; j < VMMFS_NCFG_FILES; j++)
+		vmmfs_node_begin_revoke(cfg_node(m, &vmmfs_cfg_table[j]));
+	vmmfs_node_begin_revoke(&m->vn_devices);
+	vmmfs_machine_reclaim(m);
+}
+
+/* Install the unnamed .leased capability before its machine reaches the tree. */
+int
+vmmfs_machine_install_hidden_lease(struct vmmfs_machine *m,
+    struct ucred *cred)
+{
+	struct file *fp;
+	struct vnode *vp;
+	int fd;
+	int error;
+
+	error = vmmfs_alloc_vp(m->vm_mount->vm_mp, &m->n_lease,
+	    LK_EXCLUSIVE | LK_RETRY, &vp);
+	if (error != 0)
+		return error;
+	error = falloc(curthread->td_lwp, &fp, &fd);
+	if (error != 0) {
+		vput(vp);
+		return error;
+	}
+	error = VOP_OPEN(vp, FREAD, cred, &fp);
+	if (error != 0) {
+		fsetfd(curproc->p_fd, NULL, fd);
+		fdrop(fp);
+		vput(vp);
+		return error;
+	}
+
+	lwkt_gettoken(&m->machine.token_config);
+	KKASSERT(m->machine.mut_leased != 0);
+	PHOLD(curproc);
+	m->ref_mut_lease_claim_proc = curproc;
+	m->raw_mut_hidden_lease_fp = fp;
+	m->mut_hidden_lease_fd = fd;
+	lwkt_reltoken(&m->machine.token_config);
+	fsetfd(curproc->p_fd, fp, fd);
+	fdrop(fp);
+	vput(vp);
+	return 0;
 }
 
 /* --------------------------------------------------------------------- */
@@ -334,25 +389,70 @@ static kobj_method_t vmmfs_machine_methods[] = {
 DEFINE_CLASS(vmmfs_machine, vmmfs_machine_methods, 0);
 
 /*
- * The machine's lifecycle files: lease (a reference handle whose last close
- * destroys an armed machine), events (a drained stream), status (a stub), and
- * stopped (the lifecycle control written to stop the machine).
+ * The machine's lifecycle files: lease (the one-shot owner capability),
+ * events (a drained stream), status (a stub), and stopped (the lifecycle
+ * control written to stop the machine).
  */
-#if 0
 static int
 vmmfs_lease_open(struct vmmfs_node *node, struct vop_open_args *ap)
 {
-	if (vmm_machine_lease_open(&node->vn_machine->machine) == 0)
-		return ENXIO;
-	return vop_stdopen(ap);
+	struct vmmfs_machine *m = node->vn_machine;
+	int hidden_fd = -1;
+	int error;
+
+	lwkt_gettoken(&m->machine.token_config);
+	if (m->machine.mut_leased == 0) {
+		m->machine.mut_leased = 1;
+	} else if (m->ref_mut_lease_claim_proc == curproc &&
+	    m->raw_mut_hidden_lease_fp != NULL) {
+		hidden_fd = m->mut_hidden_lease_fd;
+	} else {
+		lwkt_reltoken(&m->machine.token_config);
+		return EBUSY;
+	}
+	lwkt_reltoken(&m->machine.token_config);
+	error = vop_stdopen(ap);
+	if (error != 0) {
+		if (hidden_fd < 0) {
+			lwkt_gettoken(&m->machine.token_config);
+			m->machine.mut_leased = 0;
+			lwkt_reltoken(&m->machine.token_config);
+		}
+		return error;
+	}
+	if (hidden_fd >= 0) {
+		lwkt_gettoken(&m->machine.token_config);
+		m->mut_hidden_lease_claiming = 1;
+		lwkt_reltoken(&m->machine.token_config);
+		(void)kern_close(hidden_fd);
+	}
+	return 0;
 }
 
 static int
 vmmfs_lease_close(struct vmmfs_node *node, struct vop_close_args *ap)
 {
+	struct vmmfs_machine *m = node->vn_machine;
+	struct proc *claim_proc = NULL;
+	int hidden_claiming = 0;
+	int hidden = 0;
 	int error = vop_stdclose(ap);
 
-	(void)vmm_machine_lease_close(&node->vn_machine->machine);
+	lwkt_gettoken(&m->machine.token_config);
+	if (m->raw_mut_hidden_lease_fp == ap->a_fp) {
+		hidden = 1;
+		hidden_claiming = m->mut_hidden_lease_claiming;
+		m->mut_hidden_lease_claiming = 0;
+		m->raw_mut_hidden_lease_fp = NULL;
+		m->mut_hidden_lease_fd = -1;
+		claim_proc = m->ref_mut_lease_claim_proc;
+		m->ref_mut_lease_claim_proc = NULL;
+	}
+	lwkt_reltoken(&m->machine.token_config);
+	if (claim_proc != NULL)
+		PRELE(claim_proc);
+	if (!hidden || !hidden_claiming)
+		vmmfs_machine_begin_reclaim(m);
 	return error;
 }
 
@@ -369,7 +469,6 @@ static kobj_method_t vmmfs_lease_methods[] = {
 	KOBJMETHOD_END
 };
 DEFINE_CLASS(vmmfs_lease, vmmfs_lease_methods, 0);
-#endif
 
 static int
 vmmfs_events_read(struct vmmfs_node *node, struct vop_read_args *ap)
