@@ -61,10 +61,7 @@
 #define VMM_REC_X64_VCPU_STATE	1
 #define VMM_REC_GPA_RANGE	2
 #define VMM_REC_X64_TIME_STATE	3
-#define VMM_REC_X64_CPU_TOPOLOGY 4
 #define VMM_REC_F_MANDATORY	1
-
-#define VMM_X64_MAX_VCPU	256
 
 #define VMM_X64_NGPR	18
 #define VMM_X64_NCR	6
@@ -217,11 +214,6 @@ struct vmm_x64_vcpu_state {
 	uint64_t	msr[VMM_X64_NMSR];
 	struct vmm_x64_seg_state seg[VMM_X64_NSEG];
 	uint64_t	intr_flags;
-} __attribute__((packed));
-
-struct vmm_x64_cpu_topology {
-	uint32_t	imm_vcpu_count;
-	uint32_t	imm_apic_ids[VMM_X64_MAX_VCPU];
 } __attribute__((packed));
 
 struct vmm_gpa_range {
@@ -1257,6 +1249,35 @@ guest_smpboot_code(uint8_t *code, size_t cap)
 	emit_mov_eax(code, &len, cap, 0x00000608U);
 	emit(code, &len, cap, mov_eax_to_icr_low, sizeof(mov_eax_to_icr_low));
 	emit(code, &len, cap, hlt_loop, sizeof(hlt_loop));
+	return len;
+}
+
+static size_t
+guest_smptriplefault_code(uint8_t *code, size_t cap)
+{
+	static const uint8_t mov_edi_apic[] = { 0xbf, 0x00, 0x00, 0xe0, 0xfe };
+	static const uint8_t mov_eax_to_icr_high[] =
+	    { 0x89, 0x87, 0x10, 0x03, 0x00, 0x00 };
+	static const uint8_t mov_eax_to_icr_low[] =
+	    { 0x89, 0x87, 0x00, 0x03, 0x00, 0x00 };
+	static const uint8_t delay_then_ud[] = {
+	    0xb9, 0x00, 0xe1, 0xf5, 0x05, /* mov ecx, 100000000 */
+	    0xff, 0xc9,                   /* dec ecx */
+	    0x75, 0xfc,                   /* jnz dec ecx */
+	    0x0f, 0x0b                    /* ud2 with an empty IDT */
+	};
+	size_t len = 0;
+
+	/* Start APIC ID 1, then fault after the AP has reached its HLT loop. */
+	emit(code, &len, cap, mov_edi_apic, sizeof(mov_edi_apic));
+	emit_mov_eax(code, &len, cap, 1U << 24);
+	emit(code, &len, cap, mov_eax_to_icr_high,
+	    sizeof(mov_eax_to_icr_high));
+	emit_mov_eax(code, &len, cap, 0x00000500U);
+	emit(code, &len, cap, mov_eax_to_icr_low, sizeof(mov_eax_to_icr_low));
+	emit_mov_eax(code, &len, cap, 0x00000608U);
+	emit(code, &len, cap, mov_eax_to_icr_low, sizeof(mov_eax_to_icr_low));
+	emit(code, &len, cap, delay_then_ud, sizeof(delay_then_ud));
 	return len;
 }
 
@@ -2872,6 +2893,8 @@ guest_code(const char *mode, uint8_t *code, size_t cap)
 		return guest_avicipi_code(code, cap);
 	} else if (strcmp(mode, "smpboot") == 0) {
 		return guest_smpboot_code(code, cap);
+	} else if (strcmp(mode, "smptriplefault") == 0) {
+		return guest_smptriplefault_code(code, cap);
 	} else if (strcmp(mode, "aviclvt") == 0) {
 		return guest_aviclvt_code(code, cap);
 	} else if (strcmp(mode, "avictimercfg") == 0) {
@@ -3019,7 +3042,8 @@ build_guest(uint8_t *mem, size_t mem_size, const char *mode, size_t *code_len)
 
 	*code_len = guest_code(mode, code, sizeof(code));
 	memcpy(mem + ENTRY_GPA, code, *code_len);
-	if (strcmp(mode, "smpboot") == 0) {
+	if (strcmp(mode, "smpboot") == 0 ||
+	    strcmp(mode, "smptriplefault") == 0) {
 		static const uint8_t ap_hlt_loop[] = { 0xf4, 0xeb, 0xfe };
 
 		memcpy(mem + AP_SIPI_GPA, ap_hlt_loop, sizeof(ap_hlt_loop));
@@ -3120,7 +3144,6 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 {
 	struct vmm_manifest_header hdr;
 	struct vmm_gpa_range ranges[6];
-	struct vmm_x64_cpu_topology topology;
 	struct vmm_x64_time_state time;
 	uint8_t *ptr;
 	uint32_t range_count = 5;
@@ -3134,7 +3157,8 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	    PAGE_SIZE_GUEST, 7, 0 };
 	ranges[4] = (struct vmm_gpa_range){ IOAPIC_PD_GPA, PAGE_SIZE_GUEST,
 	    8, 0 };
-	if (strcmp(mode, "smpboot") == 0) {
+	if (strcmp(mode, "smpboot") == 0 ||
+	    strcmp(mode, "smptriplefault") == 0) {
 		ranges[5] = (struct vmm_gpa_range){ AP_SIPI_GPA,
 		    PAGE_SIZE_GUEST, 9, 0 };
 		range_count = 6;
@@ -3148,14 +3172,6 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	ptr = add_record(ptr, VMM_REC_X64_TIME_STATE, &time, sizeof(time));
 	ptr = add_record(ptr, VMM_REC_GPA_RANGE, ranges,
 	    sizeof(*ranges) * range_count);
-	if (strcmp(mode, "smpboot") == 0) {
-		memset(&topology, 0, sizeof(topology));
-		topology.imm_vcpu_count = 2;
-		topology.imm_apic_ids[0] = 0;
-		topology.imm_apic_ids[1] = 1;
-		ptr = add_record(ptr, VMM_REC_X64_CPU_TOPOLOGY, &topology,
-		    sizeof(topology));
-	}
 	if ((size_t)(ptr - manifest) > manifest_size)
 		errx(1, "manifest does not fit fd4");
 
@@ -3165,7 +3181,7 @@ build_manifest(uint8_t *manifest, size_t manifest_size, size_t mem_size,
 	hdr.arch = VMM_MANIFEST_ARCH_X64;
 	hdr.header_size = sizeof(hdr);
 	hdr.total_size = (uint32_t)(ptr - manifest);
-	hdr.record_count = strcmp(mode, "smpboot") == 0 ? 4 : 3;
+	hdr.record_count = 3;
 	hdr.mem_size = mem_size;
 	memcpy(manifest, &hdr, sizeof(hdr));
 }
@@ -3181,7 +3197,7 @@ main(int argc, char **argv)
 	size_t code_len;
 
 	if (argc != 2)
-		errx(1, "usage: %s vmmcall|cpuid|cputemplate|fpu|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|triplefault|avicirq|avicipi|smpboot|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
+		errx(1, "usage: %s vmmcall|cpuid|cputemplate|fpu|serial|serialin|serialirq|time|xsetbv|apicmsr|timerint|lapictimer|lapictimer_periodic_hlt|lapictimer_periodic_busy|lapictimer_periodic_masked|hireslapic|tscdeadline|tscscale|hiresscale|hpet_oneshot|hpet_periodic|hpet_masked|rtc_periodic|rtc_masked|rtc_update_alarm|rtc_settime|pausefilter|lapictimer_masked|ud|mwaitud|mwaitxud|pic|ioapic|ioapicirq|x2apic|cachetlb|pm64|msrpatch|msrsyscfg|mtrrcap|msrhwcr|pcicfg|pitfallback|pit0|rtccmos|iodelay|elcr|hpet|pmtimer|acpi_s5|hlt|loop|cliloop|triplefault|avicirq|avicipi|smpboot|smptriplefault|aviclvt|avictimercfg|aviclint|aviclvtpc|avicesr|avicsvr|avicnoaccel|avicread", argv[0]);
 	if (fstat(3, &mem_stat) != 0 || fstat(4, &manifest_stat) != 0)
 		err(1, "fstat fd3/fd4");
 	if (mem_stat.st_size <= 0 || manifest_stat.st_size <= 0)

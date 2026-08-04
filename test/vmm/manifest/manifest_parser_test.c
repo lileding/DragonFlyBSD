@@ -359,19 +359,15 @@ main(void)
 
 	build_valid_state(manifest);
 	append_cpu_topology(manifest, 2, 1);
-	if (vmm_loader_x86_manifest_load(MEM_SIZE, manifest, MANIFEST_SIZE,
-	    &launch) != 0 || launch.imm_cpu_topology.imm_vcpu_count != 2 ||
-	    launch.imm_cpu_topology.imm_apic_ids[1] != 1) {
-		errx(1, "two cpu topology: unexpected launch topology");
-	}
+	expect_result("loader cpu topology", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_cpu_topology(manifest, 2, 0);
-	expect_result("duplicate cpu apic id", manifest, EINVAL);
+	expect_result("loader duplicate cpu apic id", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_cpu_topology(manifest, 0, 0);
-	expect_result("zero cpu topology", manifest, EINVAL);
+	expect_result("loader zero cpu topology", manifest, EINVAL);
 
 	build_valid_state(manifest);
 	append_duplicate_ranges(manifest);

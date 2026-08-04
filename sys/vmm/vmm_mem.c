@@ -572,6 +572,44 @@ vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf, size_t len)
 	return 0;
 }
 
+int
+vmm_mem_write_boot_gpa(struct vmm_mem *m, uint64_t gpa, const void *buf,
+    size_t len)
+{
+	struct vmm_mem_backing *b;
+	const uint8_t *src = buf;
+	vm_page_t page;
+	uint64_t page_gpa;
+	size_t chunk;
+	size_t off;
+
+	if (m == NULL || buf == NULL)
+		return EINVAL;
+	b = m->own_mut_backing;
+	if (b == NULL || b->own_mut_boot_vmspace == NULL)
+		return EINVAL;
+	while (len != 0) {
+		page_gpa = trunc_page(gpa);
+		if (!vmm_mem_gpa_page_inside(b->imm_bytes, page_gpa))
+			return EINVAL;
+		off = (size_t)(gpa - page_gpa);
+		chunk = PAGE_SIZE - off;
+		if (chunk > len)
+			chunk = len;
+		/* Do not populate the boot pmap: it may be threadable on another CPU. */
+		page = vm_page_grab(b->own_mut_object, OFF_TO_IDX(page_gpa),
+		    VM_ALLOC_NORMAL | VM_ALLOC_RETRY | VM_ALLOC_ZERO);
+		bcopy(src, (void *)(PHYS_TO_DMAP(VM_PAGE_TO_PHYS(page)) + off),
+		    chunk);
+		vm_page_dirty(page);
+		vm_page_wakeup(page);
+		gpa += chunk;
+		src += chunk;
+		len -= chunk;
+	}
+	return 0;
+}
+
 static int
 vmm_mem_fault_vmspace(struct vmm_mem *m, uint64_t gpa, int prot)
 {

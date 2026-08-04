@@ -13,8 +13,7 @@ KERNEL=${LINUX_KERNEL:-/var/tmp/bzImage}
 INITRAMFS=${LINUX_INITRAMFS:-}
 MEM_SIZE=${LINUX_MEM:-256M}
 MANIFEST_SIZE=${LINUX_MANIFEST_SIZE:-4096}
-CPU_TOPOLOGY_RECORD_OFFSET=520
-TSC_RECORD_OFFSET=1560
+TSC_RECORD_OFFSET=520
 LOADER=${LINUX_KEXEC_LOADER_CHECK_BIN:-/var/tmp/vmmld_linux_kexec_check}
 PARSER=${VMM_MANIFEST_FILE_CHECK_BIN:-/var/tmp/vmm_manifest_file_check}
 MEM_FILE=${LINUX_CHECK_MEM_FILE:-/var/tmp/dfvmm-linux-loader-$$.mem}
@@ -103,10 +102,18 @@ check_linux_boot_data()
 {
 	case_label=$1
 	mem_size=$2
-	vcpu_count=$3
-	madt_len=$((66 + vcpu_count * 8))
-	ioapic_offset=$((0x70400 + 44 + vcpu_count * 8))
-	iso_offset=$((ioapic_offset + 12))
+
+	# ACPI content and CPU topology are core-owned.  The loader owns only the
+	# Linux boot-protocol pointer and the reserved E820 interval.
+	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x70)) 8)" = \
+	    "0000070000000000" ] ||
+	    fail "boot_params.acpi_rsdp_addr missing in $case_label case"
+	[ "$(hex_at "$MEM_FILE" $((0x90000 + 0x2d0 + 20)) 20)" = \
+	    "0000070000000000002000000000000003000000" ] ||
+	    fail "E820 ACPI reservation missing in $case_label case"
+	grep -aq 'vcpu=' "$MEM_FILE" &&
+	    fail "vCPU loader argument leaked into guest command line"
+	return
 
 	[ "$(hex_at "$MEM_FILE" $((0x70000)) 8)" = "5253442050545220" ] ||
 	    fail "missing RSDP signature in $case_label case"
@@ -274,7 +281,6 @@ run_loader_case()
 	label=$2
 	time_arg=$3
 	mem_size=$4
-	vcpu_count=$5
 
 	rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 	run truncate -s "$mem_size" "$MEM_FILE"
@@ -282,17 +288,15 @@ run_loader_case()
 	if [ -n "$INITRAMFS" ]; then
 		[ -f "$INITRAMFS" ] || fail "missing LINUX_INITRAMFS=$INITRAMFS"
 		run "$LOADER" "$kernel" "initramfs=$INITRAMFS" "$time_arg" \
-		    "vcpu=$vcpu_count" \
 		    "console=ttyS0" "earlyprintk=serial,ttyS0,115200" \
 		    3<>"$MEM_FILE" 4<>"$MANIFEST_FILE"
 	else
-		run "$LOADER" "$kernel" "$time_arg" "vcpu=$vcpu_count" \
+		run "$LOADER" "$kernel" "$time_arg" \
 		    "earlyprintk=serial,ttyS0,115200" 3<>"$MEM_FILE" \
 		    4<>"$MANIFEST_FILE"
 	fi
 	run "$PARSER" "$MEM_FILE" "$MANIFEST_FILE"
-	check_linux_boot_data "$label" "$mem_size" "$vcpu_count"
-	check_cpu_topology "$vcpu_count"
+	check_linux_boot_data "$label" "$mem_size"
 	check_tsc_manifest "$time_arg"
 	say "PASS: Linux kexec loader $label case"
 }
@@ -309,10 +313,6 @@ run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-host" "tsc_hz=host" \
 	"$MEM_SIZE" 1
 run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-scaled" "tsc_hz=1000000000" \
 	"$MEM_SIZE" 1
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-two-cpu" "tsc_hz=host" \
-	"$MEM_SIZE" 2
-run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-max-cpu" "tsc_hz=host" \
-	"$MEM_SIZE" 256
 run_loader_case "$SYNTH_KERNEL_FILE" "synthetic-ecam-hole" "tsc_hz=host" 4G 1
 
 if [ -f "$KERNEL" ]; then

@@ -39,7 +39,7 @@ enum vmm_machine_status {
 struct vmm_machine {
 	/* token_config protects control-plane config. */
 	/* atomic_mut_status is the MPSAFE runtime state and wait predicate. */
-	/* token_events protects the retained textual event ring. */
+	/* token_events protects the retained textual event ring and its TSC order. */
 	struct lwkt_token token_config;
 	struct lwkt_token token_events;
 	struct vmm_vcpus own_mut_vcpus;
@@ -64,6 +64,7 @@ struct vmm_machine {
 	size_t mut_events_start;
 	size_t mut_events_len;
 	uint64_t mut_events_seq;
+	uint64_t mut_events_last_tsc;
 	uint64_t mut_events_drop_bytes;
 };
 

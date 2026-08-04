@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/vmm_pcie_abi.h>
@@ -137,10 +138,14 @@ struct virtiod_vsock_flow {
 	uint32_t mut_peer_fwd_cnt;
 	uint32_t mut_tx_cnt;
 	uint32_t mut_rx_fwd_cnt;
+	struct timespec mut_retry_at;
+	uint32_t mut_retry_delay_ms;
 	int own_backend_fd;
 	int own_return_fd;
 	enum virtiod_vsock_flow_origin imm_origin;
 	int mut_open;
+	int mut_wait_connect;
+	int mut_retry_pending;
 };
 
 struct virtiod_vsock_listener {
@@ -154,7 +159,9 @@ struct virtiod_vsock_broker {
 	TAILQ_HEAD(, virtiod_vsock_listener) own_mut_listeners;
 	pthread_mutex_t own_mutex;
 	pthread_mutex_t own_send_mutex;
+	pthread_cond_t own_retry_cond;
 	pthread_t own_thread;
+	pthread_t own_retry_thread;
 	struct virtiod_vsock_state *weak_mut_state;
 	uint32_t mut_next_port;
 	int own_control_fd;
@@ -188,6 +195,9 @@ struct virtiod_vsock_state {
 	unsigned int mut_thread_count;
 	int mut_broker_attached;
 	int mut_generation_active;
+	u_int atomic_mut_driver_ready_logged;
+	u_int atomic_mut_first_guest_packet_logged;
+	u_int atomic_mut_agent_response_logged;
 	int own_provider_fd;
 	int own_bar_fd;
 	int own_dma_fd;
@@ -232,6 +242,7 @@ static int virtiod_vsock_broker_attach(struct virtiod_vsock_broker *,
 static void virtiod_vsock_broker_detach(struct virtiod_vsock_broker *,
     struct virtiod_vsock_state *);
 static void *virtiod_vsock_broker_main(void *);
+static void *virtiod_vsock_broker_retry_main(void *);
 static int virtiod_vsock_broker_request(struct virtiod_vsock_broker *,
     const struct vmm_vsock_abi_request *);
 static int virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *,
@@ -251,6 +262,8 @@ static struct virtiod_vsock_flow *virtiod_vsock_broker_find_flow_locked(
 static struct virtiod_vsock_listener *virtiod_vsock_broker_find_listener_locked(
     struct virtiod_vsock_broker *, uint32_t);
 static int virtiod_vsock_broker_set_nonblock(int);
+static void virtiod_vsock_broker_schedule_retry_locked(
+    struct virtiod_vsock_broker *, struct virtiod_vsock_flow *);
 
 int
 virtiod_vsock_broker_init(struct virtiod_vsock_broker **result, int control_fd)
@@ -279,9 +292,31 @@ virtiod_vsock_broker_init(struct virtiod_vsock_broker **result, int control_fd)
 		free(broker);
 		return error;
 	}
+	error = pthread_cond_init(&broker->own_retry_cond, NULL);
+	if (error != 0) {
+		(void)pthread_mutex_destroy(&broker->own_send_mutex);
+		(void)pthread_mutex_destroy(&broker->own_mutex);
+		free(broker);
+		return error;
+	}
+	error = pthread_create(&broker->own_retry_thread, NULL,
+	    virtiod_vsock_broker_retry_main, broker);
+	if (error != 0) {
+		(void)pthread_cond_destroy(&broker->own_retry_cond);
+		(void)pthread_mutex_destroy(&broker->own_send_mutex);
+		(void)pthread_mutex_destroy(&broker->own_mutex);
+		free(broker);
+		return error;
+	}
 	error = pthread_create(&broker->own_thread, NULL,
 	    virtiod_vsock_broker_main, broker);
 	if (error != 0) {
+		pthread_mutex_lock(&broker->own_mutex);
+		broker->mut_running = 0;
+		pthread_cond_broadcast(&broker->own_retry_cond);
+		pthread_mutex_unlock(&broker->own_mutex);
+		(void)pthread_join(broker->own_retry_thread, NULL);
+		(void)pthread_cond_destroy(&broker->own_retry_cond);
 		(void)pthread_mutex_destroy(&broker->own_send_mutex);
 		(void)pthread_mutex_destroy(&broker->own_mutex);
 		free(broker);
@@ -299,10 +334,13 @@ virtiod_vsock_broker_fini(struct virtiod_vsock_broker *broker)
 		return;
 	pthread_mutex_lock(&broker->own_mutex);
 	broker->mut_running = 0;
+	pthread_cond_broadcast(&broker->own_retry_cond);
 	pthread_mutex_unlock(&broker->own_mutex);
 	(void)shutdown(broker->own_control_fd, SHUT_RDWR);
 	(void)pthread_join(broker->own_thread, NULL);
+	(void)pthread_join(broker->own_retry_thread, NULL);
 	(void)close(broker->own_control_fd);
+	(void)pthread_cond_destroy(&broker->own_retry_cond);
 	(void)pthread_mutex_destroy(&broker->own_send_mutex);
 	(void)pthread_mutex_destroy(&broker->own_mutex);
 	free(broker);
@@ -413,6 +451,10 @@ restart:
 		state.mut_thread_count++;
 	}
 	state.mut_generation_active = 1;
+	fprintf(stderr, "virtiod tsc=%020" PRIu64
+	    " vsock provider_ready cid=%" PRIu64 "\n",
+	    (uint64_t)__builtin_ia32_rdtsc(),
+	    le64toh(state.own_mut_config.le_guest_cid));
 	printf("virtiod: ready slot=%s vsock-cid=%ju\n", device->imm_slot_path,
 	    (uintmax_t)device->imm_guest_cid);
 	if (fflush(stdout) != 0) {
@@ -751,6 +793,13 @@ virtiod_vsock_sync_queues(struct virtiod_vsock_state *state)
 		return 0;
 	if ((state->mut_driver_features[1] & VIRTIOD_VSOCK_F_VERSION_1) == 0)
 		return EPROTO;
+	if (__atomic_exchange_n(&state->atomic_mut_driver_ready_logged, 1,
+	    __ATOMIC_ACQ_REL) == 0) {
+		fprintf(stderr, "virtiod tsc=%020" PRIu64
+		    " vsock driver_ok cid=%" PRIu64 "\n",
+		    (uint64_t)__builtin_ia32_rdtsc(),
+		    le64toh(state->own_mut_config.le_guest_cid));
+	}
 	for (i = 0; i < VIRTIOD_VSOCK_QUEUE_COUNT; i++) {
 		const struct virtiod_vsock_queue_config *config;
 
@@ -1201,6 +1250,8 @@ static int
 virtiod_vsock_broker_attach(struct virtiod_vsock_broker *broker,
     struct virtiod_vsock_state *state)
 {
+	struct virtiod_vsock_flow *flow;
+	struct virtiod_vsock_flow *next;
 	int error;
 
 	pthread_mutex_lock(&broker->own_mutex);
@@ -1208,6 +1259,32 @@ virtiod_vsock_broker_attach(struct virtiod_vsock_broker *broker,
 		error = EBUSY;
 	else {
 		broker->weak_mut_state = state;
+		error = 0;
+		for (flow = TAILQ_FIRST(&broker->own_mut_flows); flow != NULL;
+		    flow = next) {
+			next = TAILQ_NEXT(flow, entry);
+			if (flow->borrow_mut_state != NULL)
+				continue;
+			if (flow->imm_guest_cid !=
+			    le64toh(state->own_mut_config.le_guest_cid)) {
+				(void)virtiod_vsock_broker_send_result(broker,
+				    VMM_VSOCK_ABI_MSG_CONNECTED,
+				    flow->imm_request_sequence, flow->imm_guest_cid,
+				    EINVAL, -1, flow->imm_guest_port);
+				virtiod_vsock_broker_close_flow_locked(broker, flow);
+				continue;
+			}
+			flow->borrow_mut_state = state;
+			error = virtiod_vsock_broker_queue_packet_locked(broker, flow,
+			    VIRTIOD_VSOCK_OP_REQUEST, 0, NULL, 0);
+			if (error != 0) {
+				(void)virtiod_vsock_broker_send_result(broker,
+				    VMM_VSOCK_ABI_MSG_CONNECTED,
+				    flow->imm_request_sequence, flow->imm_guest_cid,
+				    error, -1, flow->imm_guest_port);
+				virtiod_vsock_broker_close_flow_locked(broker, flow);
+			}
+		}
 		error = 0;
 	}
 	pthread_mutex_unlock(&broker->own_mutex);
@@ -1269,6 +1346,60 @@ virtiod_vsock_broker_main(void *argument)
 	return NULL;
 }
 
+static void *
+virtiod_vsock_broker_retry_main(void *argument)
+{
+	struct virtiod_vsock_broker *broker = argument;
+
+	pthread_mutex_lock(&broker->own_mutex);
+	while (broker->mut_running) {
+		struct virtiod_vsock_flow *flow;
+		struct virtiod_vsock_flow *due = NULL;
+		struct timespec now;
+		struct timespec earliest;
+		int have_earliest = 0;
+		int error;
+
+		(void)clock_gettime(CLOCK_REALTIME, &now);
+		TAILQ_FOREACH(flow, &broker->own_mut_flows, entry) {
+			if (!flow->mut_retry_pending)
+				continue;
+			if (flow->mut_retry_at.tv_sec < now.tv_sec ||
+			    (flow->mut_retry_at.tv_sec == now.tv_sec &&
+			    flow->mut_retry_at.tv_nsec <= now.tv_nsec)) {
+				due = flow;
+				break;
+			}
+			if (!have_earliest || flow->mut_retry_at.tv_sec < earliest.tv_sec ||
+			    (flow->mut_retry_at.tv_sec == earliest.tv_sec &&
+			    flow->mut_retry_at.tv_nsec < earliest.tv_nsec)) {
+				earliest = flow->mut_retry_at;
+				have_earliest = 1;
+			}
+		}
+		if (due == NULL) {
+			if (have_earliest)
+				(void)pthread_cond_timedwait(&broker->own_retry_cond,
+				    &broker->own_mutex, &earliest);
+			else
+				(void)pthread_cond_wait(&broker->own_retry_cond,
+				    &broker->own_mutex);
+			continue;
+		}
+		due->mut_retry_pending = 0;
+		error = virtiod_vsock_broker_queue_packet_locked(broker, due,
+		    VIRTIOD_VSOCK_OP_REQUEST, 0, NULL, 0);
+		if (error != 0) {
+			(void)virtiod_vsock_broker_send_result(broker,
+			    VMM_VSOCK_ABI_MSG_CONNECTED, due->imm_request_sequence,
+			    due->imm_guest_cid, error, -1, due->imm_guest_port);
+			virtiod_vsock_broker_close_flow_locked(broker, due);
+		}
+	}
+	pthread_mutex_unlock(&broker->own_mutex);
+	return NULL;
+}
+
 static int
 virtiod_vsock_broker_request(struct virtiod_vsock_broker *broker,
     const struct vmm_vsock_abi_request *request)
@@ -1292,15 +1423,18 @@ virtiod_vsock_broker_request(struct virtiod_vsock_broker *broker,
 		    VMM_VSOCK_ABI_MSG_COMPLETE, sequence, cid, EINVAL, -1, port);
 	pthread_mutex_lock(&broker->own_mutex);
 	state = broker->weak_mut_state;
-	if (state == NULL || !state->mut_running) {
+	if (state == NULL && type != VMM_VSOCK_ABI_MSG_CONNECT_WAIT) {
 		pthread_mutex_unlock(&broker->own_mutex);
 		return virtiod_vsock_broker_send_result(broker,
 		    VMM_VSOCK_ABI_MSG_COMPLETE, sequence, cid, ENXIO, -1, port);
 	}
-	if (type == VMM_VSOCK_ABI_MSG_CONNECT) {
-		if (cid != le64toh(state->own_mut_config.le_guest_cid) ||
+	if (type == VMM_VSOCK_ABI_MSG_CONNECT ||
+	    type == VMM_VSOCK_ABI_MSG_CONNECT_WAIT) {
+		if ((state != NULL && cid !=
+		    le64toh(state->own_mut_config.le_guest_cid)) ||
 		    socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
-			error = cid != le64toh(state->own_mut_config.le_guest_cid) ?
+			error = state != NULL && cid !=
+			    le64toh(state->own_mut_config.le_guest_cid) ?
 			    EINVAL : errno;
 			pthread_mutex_unlock(&broker->own_mutex);
 			return virtiod_vsock_broker_send_result(broker,
@@ -1332,9 +1466,14 @@ virtiod_vsock_broker_request(struct virtiod_vsock_broker *broker,
 		flow->own_backend_fd = sockets[1];
 		flow->own_return_fd = sockets[0];
 		flow->imm_origin = VIRTIOD_VSOCK_FLOW_HOST_CONNECT;
+		flow->mut_wait_connect = type == VMM_VSOCK_ABI_MSG_CONNECT_WAIT;
 		TAILQ_INSERT_TAIL(&broker->own_mut_flows, flow, entry);
-		error = virtiod_vsock_broker_queue_packet_locked(broker, flow,
-		    VIRTIOD_VSOCK_OP_REQUEST, 0, NULL, 0);
+		if (state != NULL) {
+			error = virtiod_vsock_broker_queue_packet_locked(broker, flow,
+			    VIRTIOD_VSOCK_OP_REQUEST, 0, NULL, 0);
+		} else {
+			error = 0;
+		}
 		if (error != 0)
 			virtiod_vsock_broker_close_flow_locked(broker, flow);
 		pthread_mutex_unlock(&broker->own_mutex);
@@ -1437,6 +1576,14 @@ virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *state,
 	source_port = le32toh(header->le_src_port);
 	destination_port = le32toh(header->le_dst_port);
 	op = le16toh(header->le_op);
+	if (__atomic_exchange_n(&state->atomic_mut_first_guest_packet_logged, 1,
+	    __ATOMIC_ACQ_REL) == 0) {
+		fprintf(stderr, "virtiod tsc=%020" PRIu64
+		    " vsock guest_packet op=%u src=%" PRIu64 ":%u dst=%" PRIu64
+		    ":%u\n", (uint64_t)__builtin_ia32_rdtsc(), op, source_cid,
+		    source_port,
+		    destination_cid, destination_port);
+	}
 	if (source_cid != le64toh(state->own_mut_config.le_guest_cid) ||
 	    destination_cid != VMM_VSOCK_HOST_CID || source_port == 0 ||
 	    destination_port == 0)
@@ -1522,6 +1669,13 @@ virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *state,
 	flow->mut_peer_fwd_cnt = le32toh(header->le_fwd_cnt);
 	if (op == VIRTIOD_VSOCK_OP_RESPONSE &&
 	    flow->imm_origin == VIRTIOD_VSOCK_FLOW_HOST_CONNECT) {
+		if (source_port == 1024 &&
+		    __atomic_exchange_n(&state->atomic_mut_agent_response_logged, 1,
+		    __ATOMIC_ACQ_REL) == 0) {
+			fprintf(stderr, "virtiod tsc=%020" PRIu64
+			    " vsock agent_response cid=%" PRIu64 " port=%u\n",
+			    (uint64_t)__builtin_ia32_rdtsc(), source_cid, source_port);
+		}
 		flow->mut_open = 1;
 		sequence = flow->imm_request_sequence;
 		flow->imm_request_sequence = 0;
@@ -1536,6 +1690,11 @@ virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *state,
 		return error;
 	}
 	if (op == VIRTIOD_VSOCK_OP_RST) {
+		if (flow->mut_wait_connect) {
+			virtiod_vsock_broker_schedule_retry_locked(broker, flow);
+			pthread_mutex_unlock(&broker->own_mutex);
+			return 0;
+		}
 		if (flow->imm_request_sequence != 0)
 			(void)virtiod_vsock_broker_send_result(broker,
 			    VMM_VSOCK_ABI_MSG_CONNECTED, flow->imm_request_sequence,
@@ -1570,6 +1729,31 @@ virtiod_vsock_broker_guest_packet(struct virtiod_vsock_state *state,
 	TAILQ_INSERT_TAIL(&flow->own_mut_to_host, bytes, entry);
 	pthread_mutex_unlock(&broker->own_mutex);
 	return 0;
+}
+
+static void
+virtiod_vsock_broker_schedule_retry_locked(struct virtiod_vsock_broker *broker,
+    struct virtiod_vsock_flow *flow)
+{
+	uint32_t delay;
+
+	if (flow->mut_retry_pending)
+		return;
+	delay = flow->mut_retry_delay_ms;
+	if (delay == 0) {
+		delay = 1;
+		flow->mut_retry_delay_ms = 2;
+	} else if (delay < 64) {
+		flow->mut_retry_delay_ms = delay * 2;
+	}
+	(void)clock_gettime(CLOCK_REALTIME, &flow->mut_retry_at);
+	flow->mut_retry_at.tv_nsec += (long)delay * 1000000L;
+	if (flow->mut_retry_at.tv_nsec >= 1000000000L) {
+		flow->mut_retry_at.tv_sec++;
+		flow->mut_retry_at.tv_nsec -= 1000000000L;
+	}
+	flow->mut_retry_pending = 1;
+	pthread_cond_signal(&broker->own_retry_cond);
 }
 
 static int

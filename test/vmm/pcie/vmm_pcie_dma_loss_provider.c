@@ -121,6 +121,10 @@ build_register(struct vmm_pcie_abi_register *message, uint64_t generation)
 	message->bar[0].le_size = htole64(VMM_PCIE_ABI_PAGE_SIZE);
 	message->bar[0].le_flags = htole32(VMM_PCIE_ABI_BAR_F_MEMORY |
 	    VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT);
+	message->bar_range_count = 1;
+	message->bar_range[0].le_size = htole64(VMM_PCIE_ABI_PAGE_SIZE);
+	message->bar_range[0].le_flags = htole32(
+	    VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
 }
 
 static void
@@ -214,8 +218,11 @@ receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	socket_message.msg_controllen = sizeof(control);
 	n = recvmsg(fd, &socket_message, 0);
 	if (n != sizeof(message) ||
-	    (socket_message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0)
+	    (socket_message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) != 0) {
+		warnx("REGISTERED size=%zd flags=%#x control=%zu", n,
+		    socket_message.msg_flags, (size_t)socket_message.msg_controllen);
 		errno = n < 0 ? errno : EPROTO, err(1, "recv REGISTERED");
+	}
 	if (vmm_pcie_abi_validate(&message, sizeof(message)) != 0 ||
 	    le16toh(message.header.le_type) != VMM_PCIE_ABI_MSG_REGISTERED ||
 	    message.header.le_sequence != start->header.le_sequence ||
@@ -226,8 +233,14 @@ receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET ||
 	    cmsg->cmsg_type != SCM_RIGHTS ||
 	    cmsg->cmsg_len != CMSG_LEN(sizeof(fds)) ||
-	    CMSG_NXTHDR(&socket_message, cmsg) != NULL)
+	    CMSG_NXTHDR(&socket_message, cmsg) != NULL) {
+		warnx("REGISTERED rights control=%zu level=%d type=%d length=%zu",
+		    (size_t)socket_message.msg_controllen,
+		    cmsg == NULL ? -1 : cmsg->cmsg_level,
+		    cmsg == NULL ? -1 : cmsg->cmsg_type,
+		    cmsg == NULL ? 0 : (size_t)cmsg->cmsg_len);
 		errno = EPROTO, err(1, "REGISTERED rights");
+	}
 	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
 	if (bar_fdp == NULL || dma_fdp == NULL ||
 	    le32toh(message.le_bar_fd_mask) != 1 || fds[0] < 0 || fds[1] < 0)

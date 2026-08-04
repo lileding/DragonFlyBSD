@@ -151,6 +151,7 @@ vmm_console_reset(struct vmm_console *c)
 	c->mut_output_start = 0;
 	c->mut_output_len = 0;
 	lwkt_reltoken(&c->token_console);
+	atomic_store_rel_int(&c->atomic_mut_first_guest_output_logged, 0);
 	if (tp != NULL) {
 		lwkt_gettoken(&tp->t_token);
 		opened = (tp->t_state & TS_ISOPEN) != 0;
@@ -190,6 +191,12 @@ vmm_console_guest_write(struct vmm_console *c, const char *buf, size_t len)
 	c->mut_guest_rx_bytes += accepted;
 	c->mut_guest_drop_bytes += dropped;
 	lwkt_reltoken(&c->token_console);
+	if (accepted != 0 &&
+	    atomic_cmpset_int(&c->atomic_mut_first_guest_output_logged, 0, 1) &&
+	    c->borrow_mut_machine != NULL) {
+		vmm_machine_logf(c->borrow_mut_machine,
+		    "guest first_console_output bytes=%ju", (uintmax_t)accepted);
+	}
 	if (accepted == 0 || c->own_mut_drain_taskqueue == NULL)
 		return;
 	error = taskqueue_enqueue(c->own_mut_drain_taskqueue,

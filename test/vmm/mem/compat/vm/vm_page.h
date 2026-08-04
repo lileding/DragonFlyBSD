@@ -29,4 +29,25 @@ vm_page_lookup(struct vm_object *object, vm_pindex_t pindex)
 	return NULL;
 }
 
+static inline vm_page_t
+vm_page_grab(struct vm_object *object, vm_pindex_t pindex, int flags)
+{
+	(void)object;
+	(void)pindex;
+	(void)flags;
+	return NULL;
+}
+
+static inline void
+vm_page_dirty(vm_page_t page)
+{
+	(void)page;
+}
+
+static inline void
+vm_page_wakeup(vm_page_t page)
+{
+	(void)page;
+}
+
 #endif /* VMM_TEST_MEM_COMPAT_VM_VM_PAGE_H */

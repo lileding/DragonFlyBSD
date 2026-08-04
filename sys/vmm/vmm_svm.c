@@ -752,6 +752,7 @@ struct vmm_svm_backend {
 	uint32_t imm_avic_apic_id;
 	uint32_t atomic_mut_avic_host_apic_id;
 	uint32_t atomic_mut_avic_host_cpuid;
+	u_int atomic_mut_first_vmrun_logged;
 	int mut_avic_bound;
 	/* This fixed-pCPU LWKT has registered this pmap on this host CPU. */
 	int mut_pmap_cpu;
@@ -2553,11 +2554,6 @@ vmm_svm_stgi(void)
 static uint64_t
 vmm_svm_host_tlb_catchup(struct vmm_svm_backend *svm)
 {
-	if (svm->borrow_mut_vmspace != NULL &&
-	    svm->mut_pmap_cpu != mycpu->gd_cpuid) {
-		pmap_add_cpu(svm->borrow_mut_vmspace, mycpu->gd_cpuid);
-		svm->mut_pmap_cpu = mycpu->gd_cpuid;
-	}
 	clear_xinvltlb();
 	return vmspace_pmap(svm->borrow_mut_vmspace)->pm_invgen;
 }
@@ -6259,6 +6255,18 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu *vc)
 	cpu_state = &vmm_svm_cpu_state[mycpu->gd_cpuid];
 	KKASSERT(cpu_state->own_mut_hsave != NULL);
 	while (!vmm_vcpu_should_stop(vc)) {
+		/*
+		 * pmap_add_cpu() publishes this CPU in pm_active and can wait for
+		 * a concurrent pmap invalidation.  It must run with GIF open: an
+		 * XINVLTLB IPI sent after publication has to interrupt this CPU.
+		 * The CLGI section below is limited to the VMRUN handoff, where
+		 * clear_xinvltlb() consumes work already delivered in root mode.
+		 */
+		if (svm->borrow_mut_vmspace != NULL &&
+		    svm->mut_pmap_cpu != mycpu->gd_cpuid) {
+			pmap_add_cpu(svm->borrow_mut_vmspace, mycpu->gd_cpuid);
+			svm->mut_pmap_cpu = mycpu->gd_cpuid;
+		}
 		if (vc->imm_id != 0) {
 			if (atomic_swap_int(&svm->atomic_mut_ap_init_pending, 0) != 0)
 				vmm_svm_ap_init(svm);
@@ -6342,6 +6350,11 @@ vmm_svm_vcpu_run(void *backend, struct vmm_vcpu *vc)
 		flush_tlb = svm->mut_guest_tlb_flush ||
 		    host_tlb_generation != svm->mut_host_tlb_generation;
 		vmcb->ctrl.tlb_ctrl = flush_tlb ? VMM_SVM_CTRL_TLB_FLUSH_ALL : 0;
+		if (vc->imm_id == 0 &&
+		    atomic_cmpset_int(&svm->atomic_mut_first_vmrun_logged, 0, 1)) {
+			vmm_machine_logf(svm->borrow_imm_machine,
+			    "guest first_vmrun vcpu=0");
+		}
 		vmm_svm_guest_dbregs_enter(svm);
 		vmm_svm_guest_misc_enter(svm);
 		vmm_svm_guest_fpu_enter(svm);

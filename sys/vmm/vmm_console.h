@@ -26,6 +26,8 @@ struct vmm_console {
 	 * token_console protects the host-to-guest input FIFO, guest-to-host
 	 * output FIFO, and byte counters.  atomic_mut_open records whether the
 	 * tty has a consumer, allowing guest I/O exits to avoid the tty token.
+	 * atomic_mut_first_guest_output_logged gates one event per execution
+	 * epoch and is reset before the vCPUs are started.
 	 * The drain task is the only path that calls ttyinput().
 	 */
 	struct cdev	*own_mut_dev;
@@ -35,6 +37,7 @@ struct vmm_console {
 	struct task	own_mut_drain_task;
 	struct lwkt_token token_console;
 	volatile u_int	atomic_mut_open;
+	volatile u_int	atomic_mut_first_guest_output_logged;
 	uint64_t	mut_host_tx_bytes;
 	uint64_t	mut_host_drop_bytes;
 	uint64_t	mut_guest_rx_bytes;

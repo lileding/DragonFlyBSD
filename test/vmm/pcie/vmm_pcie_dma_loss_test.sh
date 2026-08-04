@@ -16,6 +16,8 @@ PROVIDER_LOG=${VMM_PCIE_DMA_LOSS_PROVIDER_LOG:-/var/tmp/dfvmm-pcie-dma-loss-prov
 UNLOAD_LOG=${VMM_PCIE_DMA_LOSS_UNLOAD_LOG:-/var/tmp/dfvmm-pcie-dma-loss-unload.log}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-loss-$$-mount_vmm}
 TIMEOUT=${VMM_TIMEOUT:-25}
+VCPU=${VMM_VCPU:-1}
+SMOKE_MODE=${VMM_SMOKE_MODE:-loop}
 
 LOADED=0
 MOUNTED=0
@@ -133,7 +135,7 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" -I "$BASE_SYS" \
 	"$REPO/sys/vmm/vmm_pcie_abi.c" \
 	"$REPO/test/vmm/pcie/vmm_pcie_dma_loss_provider.c" -o "$PROVIDER"
 printf '%s\n' '#!/bin/sh' >"$WRAPPER" || fail "create $WRAPPER"
-printf '%s\n' "exec \"$LOADER\" loop" >>"$WRAPPER" ||
+printf '%s\n' "exec \"$LOADER\" \"$SMOKE_MODE\"" >>"$WRAPPER" ||
 	fail "write $WRAPPER"
 chmod 755 "$WRAPPER" || fail "chmod $WRAPPER"
 
@@ -145,7 +147,7 @@ run ln -s /sbin/mount_std "$MOUNT_HELPER"
 run "$MOUNT_HELPER" vmm "$MNT"
 MOUNTED=1
 run mkdir "$(machine)"
-printf '1\n' >"$(machine)/vcpu" || fail "write vcpu"
+printf '%s\n' "$VCPU" >"$(machine)/vcpu" || fail "write vcpu"
 printf '2M\n' >"$(machine)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(machine)/loader" || fail "write loader"
 run mkdir "$(device)"

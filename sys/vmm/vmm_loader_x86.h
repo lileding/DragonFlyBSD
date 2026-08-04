@@ -123,8 +123,10 @@ struct vmm_x64_vcpu_state {
 } __packed;
 
 /*
- * Immutable CPU topology for one machine run.  The BSP launch state remains
- * record-local; secondary CPUs start through the backend's reset/SIPI path.
+ * Immutable CPU topology for one machine run.  vmm core derives this from
+ * the frozen vmmfs vcpu config after fd4 validation; loaders do not control
+ * the topology record.  The BSP launch state remains record-local; secondary
+ * CPUs start through the backend's reset/SIPI path.
  */
 struct vmm_x64_cpu_topology {
 	uint32_t	imm_vcpu_count;

@@ -89,6 +89,9 @@ void	vmm_mem_unmap_object(struct vmm_mem *m, uint64_t gpa, uint64_t size);
 int	vmm_mem_fault_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
 /* Fault a non-RAM object that is already mapped in the current run vmspace. */
 int	vmm_mem_fault_object_gpa(struct vmm_mem *m, uint64_t gpa, int prot);
+/* Write the loader-complete boot vmspace before it is COW-forked for vCPUs. */
+int	vmm_mem_write_boot_gpa(struct vmm_mem *m, uint64_t gpa,
+	    const void *buf, size_t len);
 int	vmm_mem_read_gpa(struct vmm_mem *m, uint64_t gpa, void *buf,
 	    size_t len);
 

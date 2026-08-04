@@ -24,6 +24,7 @@
 #include "vmm_machine.h"
 #include "vmm_host.h"
 #include "vmm_pcie.h"
+#include "vmm_platform_x86.h"
 
 static int vmm_debug_trace_enabled;
 int vmm_debug_allow_machine_taskqueue = 1;
@@ -136,6 +137,9 @@ vmm_machine_logf(struct vmm_machine *m, const char *fmt, ...)
 	}
 	lwkt_gettoken(&m->token_events);
 	tsc = rdtsc();
+	if (tsc <= m->mut_events_last_tsc)
+		tsc = m->mut_events_last_tsc + 1;
+	m->mut_events_last_tsc = tsc;
 	m->mut_events_seq++;
 	n = ksnprintf(line, sizeof(line), "%010ju %020ju %s\n",
 	    (uintmax_t)m->mut_events_seq, (uintmax_t)tsc, msg);
@@ -503,6 +507,11 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 	error = vmm_loader_manifest_load(loader, &launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "launch failed stage=manifest error=%d", error);
+		goto fail;
+	}
+	error = vmm_platform_x86_prepare(&m->own_mut_mem, vcpu_count, &launch);
+	if (error != 0) {
+		vmm_machine_logf(m, "launch failed stage=platform error=%d", error);
 		goto fail;
 	}
 	vmm_debug_trace("manifest accepted m=%p ranges=%u rip=0x%jx rsp=0x%jx cr3=0x%jx",

@@ -14,6 +14,8 @@ main(void)
 	assert(VMM_VSOCK_HOST_CID == 2);
 	assert(sizeof(request) == 40);
 	assert(VMM_VSOCK_ABI_MSG_CONNECT != VMM_VSOCK_ABI_MSG_DEVICE_DOWN);
+	assert(VMM_VSOCK_ABI_MSG_CONNECT_WAIT != VMM_VSOCK_ABI_MSG_CONNECT);
+	assert(VMM_VSOCK_ABI_MSG_CONNECT_WAIT != VMM_VSOCK_ABI_MSG_DEVICE_DOWN);
 	puts("PASS: virtiod vsock ABI");
 	return 0;
 }

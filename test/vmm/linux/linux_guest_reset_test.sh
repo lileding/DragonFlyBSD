@@ -24,6 +24,7 @@ INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 MEM=${LINUX_MEM:-256M}
 TIMEOUT=${VMM_TIMEOUT:-45}
 STOP_TIMEOUT=${VMM_STOP_TIMEOUT:-30}
+VCPU_COUNT=${VMM_VCPU_COUNT:-1}
 
 LOADED=0
 MOUNTED=0
@@ -130,6 +131,24 @@ wait_console_next()
 	return 1
 }
 
+wait_smp_online()
+{
+	marker=$1
+	expected="0-$((VCPU_COUNT - 1))"
+	i=0
+
+	printf '%s\n' "echo $marker \$(cat /sys/devices/system/cpu/online)" \
+	    >"$(console_path)" || return 1
+	while [ "$i" -lt "$TIMEOUT" ]; do
+		if grep -q "$marker $expected" "$CONSOLE_LOG" 2>/dev/null; then
+			return 0
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 wait_guest_reset()
 {
 	events=
@@ -212,6 +231,10 @@ check_module_image()
 trap cleanup EXIT INT TERM
 
 [ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
+case "$VCPU_COUNT" in
+1|2|4) ;;
+*) fail "VMM_VCPU_COUNT must be 1, 2, or 4" ;;
+esac
 ensure_module_image
 check_module_image
 [ -f "$KERNEL" ] || fail "missing $KERNEL"
@@ -224,7 +247,7 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 cat >"$WRAPPER" <<EOF_WRAP
 #!/bin/sh
 printf '%s\\n' loader >>'$LOADER_RUN_LOG'
-exec '$LOADER' '$KERNEL' 'initramfs=$INITRD' 'reboot=a' 'console=ttyS0,115200' 'earlycon=uart,io,0x3f8,115200' 'loglevel=7' 'rdinit=/init'
+exec '$LOADER' '$KERNEL' 'initramfs=$INITRD' 'vcpu=$VCPU_COUNT' 'reboot=a' 'console=ttyS0,115200' 'earlycon=uart,io,0x3f8,115200' 'loglevel=7' 'rdinit=/init'
 EOF_WRAP
 chmod +x "$WRAPPER" || fail "chmod $WRAPPER"
 
@@ -237,7 +260,7 @@ run "$MOUNT_HELPER" vmm "$MNT"
 MOUNTED=1
 run mkdir "$(machine_dir)"
 CREATED=1
-printf '1\n' >"$(machine_dir)/vcpu" || fail "write vcpu"
+printf '%s\n' "$VCPU_COUNT" >"$(machine_dir)/vcpu" || fail "write vcpu"
 printf '%s\n' "$MEM" >"$(machine_dir)/mem" || fail "write mem"
 printf '%s\n' "$WRAPPER" >"$(machine_dir)/loader" || fail "write loader"
 start_console_reader
@@ -247,6 +270,8 @@ boot_before=$(console_matches 'DFVMM_LINUX_SERIAL_OK')
 wait_console_next 'DFVMM_LINUX_SERIAL_OK' "$boot_before" initial-boot ||
 	fail "initial Linux serial marker missing"
 [ "$(loader_runs)" -eq 1 ] || fail "loader executed unexpected count before reset"
+wait_smp_online DFVMM_GUEST_RESET_SMP_INITIAL ||
+	fail "Linux did not bring all vCPUs online before reset"
 
 reset_before=$(console_matches 'DFVMM_LINUX_SERIAL_OK')
 printf '%s\n' "/bin/busybox touch /run/dfvmm-reset-cow; echo DFVMM_GUEST_RESET_PREPARED; $GUEST_REBOOT_COMMAND" >"$(console_path)" ||
@@ -257,6 +282,8 @@ wait_console_next 'DFVMM_LINUX_SERIAL_OK' "$reset_before" guest-reset-boot ||
 kill -0 "$CONSOLE_READER_PID" >/dev/null 2>&1 ||
 	fail "console reader exited across guest reset"
 [ "$(loader_runs)" -eq 1 ] || fail "guest reset executed loader again"
+wait_smp_online DFVMM_GUEST_RESET_SMP_AFTER_RESET ||
+	fail "Linux did not bring all vCPUs online after reset"
 
 cow_before=$(console_matches 'DFVMM_GUEST_RESET_COW_OK')
 printf '%s\n' '[ ! -e /run/dfvmm-reset-cow ] && echo DFVMM_GUEST_RESET_COW_OK || echo DFVMM_GUEST_RESET_COW_BAD' >"$(console_path)" ||
@@ -285,4 +312,4 @@ done
 [ "$i" -lt "$STOP_TIMEOUT" ] || fail "guest S5 shutdown missing after reset"
 [ ! -e "$(machine_dir)/stopped" ] || fail "guest S5 recreated stopped"
 
-say "PASS: Linux guest reset COW test"
+say "PASS: Linux ${VCPU_COUNT}-vCPU guest reset COW test"

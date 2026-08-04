@@ -25,6 +25,8 @@ enum vmm_vsock_abi_message_type {
 	VMM_VSOCK_ABI_MSG_ACCEPTED,
 	VMM_VSOCK_ABI_MSG_COMPLETE,
 	VMM_VSOCK_ABI_MSG_DEVICE_DOWN,
+	/* CONNECT with broker-owned retry after a guest RST. */
+	VMM_VSOCK_ABI_MSG_CONNECT_WAIT,
 };
 
 struct vmm_vsock_abi_header {
