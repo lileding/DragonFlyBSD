@@ -458,6 +458,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 		vmm_machine_logf(m, "start failed stage=memory error=%d", error);
 		goto fail;
 	}
+	vmm_machine_logf(m, "memory prepared bytes=%ju", (uintmax_t)mem_bytes);
 	vmm_debug_trace("mem prepared m=%p bytes=%ju", m,
 	    (uintmax_t)mem_bytes);
 	error = vmm_mem_publish(&m->own_mut_mem, prepared_backing);
@@ -493,7 +494,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 		    error);
 		goto fail;
 	}
-	vmm_machine_logf(m, "loader started");
+	vmm_machine_logf(m, "loader resumed");
 	error = vmm_loader_wait(loader);
 	if (error != 0) {
 		loader_exit_code = loader->mut_exit_code;
@@ -509,6 +510,8 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 		vmm_machine_logf(m, "launch failed stage=manifest error=%d", error);
 		goto fail;
 	}
+	vmm_machine_logf(m, "manifest accepted ranges=%u",
+	    launch.imm_range_count);
 	error = vmm_platform_x86_prepare(&m->own_mut_mem, vcpu_count, &launch);
 	if (error != 0) {
 		vmm_machine_logf(m, "launch failed stage=platform error=%d", error);
@@ -531,6 +534,7 @@ vmm_machine_command_start(const struct vmm_machine_task *task)
 		vmm_machine_logf(m, "launch failed stage=memory error=%d", error);
 		goto fail_after_loader;
 	}
+	vmm_machine_logf(m, "runtime vmspace ready");
 	vmm_debug_trace("mem runtime started m=%p source=boot_snapshot", m);
 	error = vmm_dma_start(&m->own_mut_dma, &m->own_mut_mem);
 	if (error != 0) {

@@ -671,6 +671,7 @@ struct vmm_svm_context {
 	u_int atomic_mut_platform_kick;
 	u_int atomic_mut_ipiq_refs;
 	u_int atomic_mut_platform_closing;
+	u_int atomic_mut_first_ram_npf_logged;
 	uint8_t *own_imm_iobm;
 	uint64_t imm_iobm_pa;
 	uint8_t *own_imm_msrbm;
@@ -753,6 +754,10 @@ struct vmm_svm_backend {
 	uint32_t atomic_mut_avic_host_apic_id;
 	uint32_t atomic_mut_avic_host_cpuid;
 	u_int atomic_mut_first_vmrun_logged;
+	/* These RAM NPF counters are owned by this fixed-pCPU vCPU LWKT. */
+	uint64_t mut_ram_npf_count;
+	uint64_t mut_ram_npf_tsc;
+	uint64_t mut_ram_npf_max_tsc;
 	int mut_avic_bound;
 	/* This fixed-pCPU LWKT has registered this pmap on this host CPU. */
 	int mut_pmap_cpu;
@@ -2532,6 +2537,15 @@ vmm_svm_vcpu_destroy(void *backend)
 
 	if (svm == NULL)
 		return;
+	if (svm->mut_ram_npf_count != 0 && svm->borrow_imm_machine != NULL &&
+	    svm->borrow_imm_vcpu != NULL) {
+		vmm_machine_logf(svm->borrow_imm_machine,
+		    "guest ram_npf summary vcpu=%u count=%ju total_tsc=%ju max_tsc=%ju",
+		    svm->borrow_imm_vcpu->imm_id,
+		    (uintmax_t)svm->mut_ram_npf_count,
+		    (uintmax_t)svm->mut_ram_npf_tsc,
+		    (uintmax_t)svm->mut_ram_npf_max_tsc);
+	}
 	vmm_svm_avic_uninit(svm);
 	if (svm->own_mut_fpu_sentinel != NULL)
 		kfree(svm->own_mut_fpu_sentinel, M_TEMP);
@@ -6194,6 +6208,8 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu *vc)
 {
 	struct vmm_svm_vmcb *vmcb = svm->own_mut_vmcb;
 	struct vmm_machine *m = svm->borrow_imm_machine;
+	uint64_t started_tsc;
+	uint64_t elapsed_tsc;
 	uint64_t gpa = vmcb->ctrl.exitinfo2;
 	int prot;
 	int error;
@@ -6226,9 +6242,21 @@ vmm_svm_handle_npf(struct vmm_svm_backend *svm, struct vmm_vcpu *vc)
 		return vmm_svm_handle_pcie_mmio(svm, vc, gpa, 1);
 	if (error != ENOENT)
 		return 0;
+	started_tsc = rdtsc();
 	error = vmm_mem_fault_gpa(&m->own_mut_mem, gpa, prot);
+	elapsed_tsc = rdtsc() - started_tsc;
 	if (error)
 		return 0;
+	++svm->mut_ram_npf_count;
+	svm->mut_ram_npf_tsc += elapsed_tsc;
+	if (elapsed_tsc > svm->mut_ram_npf_max_tsc)
+		svm->mut_ram_npf_max_tsc = elapsed_tsc;
+	if (atomic_cmpset_int(
+	    &svm->borrow_imm_context->atomic_mut_first_ram_npf_logged, 0, 1)) {
+		vmm_machine_logf(m,
+		    "guest first_ram_npf vcpu=%u gpa=0x%jx", vc->imm_id,
+		    (uintmax_t)gpa);
+	}
 	svm->mut_guest_tlb_flush = 1;
 	return 1;
 }
