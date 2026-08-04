@@ -50,8 +50,9 @@ struct vmm_pcie_device_runtime {
 
 static int	vmm_pcie_device_cmp(struct vmm_device *left,
 		    struct vmm_device *right);
-static struct vmm_device *vmm_pcie_device_find_name_locked(
-		    struct vmm_pcie *pcie, const char *name, int nlen);
+static struct vmm_device *vmm_pcie_device_find_locked(
+		    struct vmm_pcie *pcie, const struct vmm_pcie_root *root,
+		    const char *name, int nlen);
 static struct vmm_device *vmm_pcie_device_find_id_locked(
 		    struct vmm_pcie *pcie, uint64_t id);
 static int	vmm_pcie_device_busy_locked(struct vmm_pcie *pcie);
@@ -174,7 +175,7 @@ vmm_pcie_device_create(struct vmm_pcie *pcie,
 		error = EBUSY;
 		goto out;
 	}
-	if (vmm_pcie_device_find_name_locked(pcie, name, nlen) != NULL) {
+	if (vmm_pcie_device_find_locked(pcie, root, name, nlen) != NULL) {
 		error = EEXIST;
 		goto out;
 	}
@@ -209,8 +210,8 @@ vmm_pcie_device_destroy(struct vmm_pcie *pcie, struct vmm_device *device)
 	if (device == NULL || device->borrow_imm_pcie != pcie)
 		return EINVAL;
 	lwkt_gettoken(&pcie->token_registry);
-	if (vmm_pcie_device_find_name_locked(pcie, device->imm_name,
-	    (int)device->imm_name_len) != device) {
+	if (vmm_pcie_device_find_locked(pcie, device->borrow_mut_root,
+	    device->imm_name, (int)device->imm_name_len) != device) {
 		error = ENOENT;
 		goto out;
 	}
@@ -252,8 +253,8 @@ vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
 		error = EBUSY;
 		goto out;
 	}
-	if (vmm_pcie_device_find_name_locked(pcie, device->imm_name,
-	    (int)device->imm_name_len) != device) {
+	if (vmm_pcie_device_find_locked(pcie, device->borrow_mut_root,
+	    device->imm_name, (int)device->imm_name_len) != device) {
 		error = ENOENT;
 		goto out;
 	}
@@ -302,22 +303,7 @@ vmm_pcie_device_find(struct vmm_pcie *pcie,
 	if (pcie == NULL || root == NULL || root->borrow_imm_pcie != pcie)
 		return NULL;
 	lwkt_gettoken(&pcie->token_registry);
-	device = vmm_pcie_device_find_name_locked(pcie, name, nlen);
-	if (device != NULL && device->borrow_mut_root != root)
-		device = NULL;
-	lwkt_reltoken(&pcie->token_registry);
-	return device;
-}
-
-struct vmm_device *
-vmm_pcie_device_find_name(struct vmm_pcie *pcie, const char *name, int nlen)
-{
-	struct vmm_device *device;
-
-	if (pcie == NULL)
-		return NULL;
-	lwkt_gettoken(&pcie->token_registry);
-	device = vmm_pcie_device_find_name_locked(pcie, name, nlen);
+	device = vmm_pcie_device_find_locked(pcie, root, name, nlen);
 	lwkt_reltoken(&pcie->token_registry);
 	return device;
 }
@@ -1233,45 +1219,26 @@ vmm_pcie_root_reset(struct vmm_pcie_root *root)
 static int
 vmm_pcie_device_cmp(struct vmm_device *left, struct vmm_device *right)
 {
-	unsigned int i;
-
-	for (i = 0; i < sizeof(left->imm_name); i++) {
-		if (left->imm_name[i] < right->imm_name[i])
-			return -1;
-		if (left->imm_name[i] > right->imm_name[i])
-			return 1;
-		if (left->imm_name[i] == '\0')
-			return 0;
-	}
+	if (left->imm_id < right->imm_id)
+		return -1;
+	if (left->imm_id > right->imm_id)
+		return 1;
 	return 0;
 }
 
 static struct vmm_device *
-vmm_pcie_device_find_name_locked(struct vmm_pcie *pcie, const char *name,
-    int nlen)
+vmm_pcie_device_find_locked(struct vmm_pcie *pcie,
+	    const struct vmm_pcie_root *root, const char *name, int nlen)
 {
 	struct vmm_device *device;
 
-	if (name == NULL || nlen < 0 || nlen > VMM_DEVICE_NAME_MAX)
+	if (root == NULL || root->borrow_imm_pcie != pcie || name == NULL ||
+	    nlen < 0 || nlen > VMM_DEVICE_NAME_MAX)
 		return NULL;
-	device = RB_ROOT(&pcie->mut_devices);
-	while (device != NULL) {
-		int cmp;
-		int i;
-
-		for (i = 0; i < nlen; i++) {
-			if (name[i] != device->imm_name[i])
-				break;
-		}
-		if (i == nlen) {
-			if (device->imm_name[i] == '\0')
-				return device;
-			cmp = -1;
-		} else {
-			cmp = name[i] < device->imm_name[i] ? -1 : 1;
-		}
-		device = cmp < 0 ? RB_LEFT(device, own_mut_registry_entry) :
-		    RB_RIGHT(device, own_mut_registry_entry);
+	RB_FOREACH(device, vmm_pcie_device_tree, &pcie->mut_devices) {
+		if (device->borrow_mut_root == root &&
+		    vmm_device_name_eq(device, name, nlen))
+			return device;
 	}
 	return NULL;
 }

@@ -50,8 +50,6 @@ int	vmm_pcie_device_move(struct vmm_pcie *pcie,
 	    struct vmm_device *device, struct vmm_pcie_root *consumer);
 struct vmm_device *vmm_pcie_device_find(struct vmm_pcie *pcie,
 	    const struct vmm_pcie_root *consumer, const char *name, int nlen);
-struct vmm_device *vmm_pcie_device_find_name(struct vmm_pcie *pcie,
-	    const char *name, int nlen);
 int	vmm_pcie_device_at_root(const struct vmm_device *device,
 	    const struct vmm_pcie_root *root);
 struct vmm_pcie_root *vmm_pcie_device_root(
