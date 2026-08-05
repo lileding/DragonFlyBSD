@@ -20,6 +20,7 @@ struct vmm_pcie_config;
 struct vmm_pcie_root;
 struct vmm_pcie_user;
 struct vmm_dma_cap;
+struct vmm_pcie_event;
 
 struct vmm_device {
 	/* The fabric token_registry protects every mut_ field below. */
@@ -31,6 +32,7 @@ struct vmm_device {
 	struct vmm_pcie_user	*borrow_mut_provider;
 	struct vmm_pcie_user	*borrow_mut_offload;
 	struct vmm_dma_cap	*own_mut_dma_cap;
+	struct vmm_pcie_event	*own_mut_event;
 	uint32_t		mut_bdf;
 	uint64_t		mut_attachment_generation;
 	uint64_t		mut_run_generation;

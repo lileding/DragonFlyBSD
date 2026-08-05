@@ -4,6 +4,7 @@
  * Modern virtio-blk-pci provider for a regular raw image.
  */
 #include <sys/endian.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -94,6 +95,7 @@ struct virtiod_queue {
 	pthread_t own_thread;
 	uint16_t atomic_mut_msix_vector;
 	int mut_ready;
+	int mut_kicked;
 	int mut_running;
 };
 
@@ -101,6 +103,7 @@ struct virtiod_state {
 	int own_provider_fd;
 	int own_bar_fd;
 	int own_dma_fd;
+	int own_event_fd;
 	struct virtiod_block own_block;
 	struct vmm_pcie_abi_start own_start;
 	struct vmm_pcie_abi_registered own_registered;
@@ -120,7 +123,7 @@ static void virtiod_build_register(struct vmm_pcie_abi_register *, uint64_t,
     unsigned int);
 static int virtiod_receive_start(int, struct vmm_pcie_abi_start *);
 static int virtiod_receive_registered(int, const struct vmm_pcie_abi_start *,
-    struct vmm_pcie_abi_registered *, int *, int *);
+    struct vmm_pcie_abi_registered *, int *, int *, int *);
 static int virtiod_send_stopped(const struct virtiod_state *);
 static int virtiod_send_msix(const struct virtiod_state *, uint16_t);
 static int virtiod_map_dma(struct virtiod_state *);
@@ -146,7 +149,8 @@ int
 virtiod_blk_run(const struct virtiod_device *device)
 {
 	struct vmm_pcie_abi_register register_message;
-	struct pollfd pollfd;
+	struct kevent change[2];
+	struct kevent ready;
 	struct virtiod_state state;
 	char provider_path[1024];
 	int error;
@@ -157,6 +161,7 @@ virtiod_blk_run(const struct virtiod_device *device)
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
+	state.own_event_fd = -1;
 	state.own_block.own_fd = -1;
 	if (snprintf(provider_path, sizeof(provider_path), "%s/provider",
 	    device->imm_slot_path)
@@ -190,7 +195,8 @@ restart:
 	    sizeof(register_message), 0) != sizeof(register_message))
 		err(1, "send REGISTER");
 	error = virtiod_receive_registered(state.own_provider_fd, &state.own_start,
-	    &state.own_registered, &state.own_bar_fd, &state.own_dma_fd);
+	    &state.own_registered, &state.own_bar_fd, &state.own_dma_fd,
+	    &state.own_event_fd);
 	if (error != 0)
 		errno = error, err(1, "recv REGISTERED");
 	state.own_mut_bar = mmap(NULL, VIRTIOD_BAR_SIZE, PROT_READ | PROT_WRITE,
@@ -220,15 +226,43 @@ restart:
 	    (uintmax_t)(state.own_block.imm_size / 512U));
 	if (fflush(stdout) != 0)
 		err(1, "flush ready");
-	pollfd.fd = state.own_provider_fd;
-	pollfd.events = POLLIN | POLLHUP | POLLERR;
+	{
+		int kq;
+
+		kq = kqueue();
+		if (kq < 0)
+			err(1, "kqueue");
+		EV_SET(&change[0], state.own_provider_fd, EVFILT_READ, EV_ADD, 0,
+		    0, NULL);
+		EV_SET(&change[1], state.own_event_fd, EVFILT_READ, EV_ADD, 0, 0,
+		    NULL);
+		if (kevent(kq, change, 2, NULL, 0, NULL) != 0)
+			err(1, "kevent register");
 	for (;;) {
 		int result;
 
-		result = poll(&pollfd, 1, 1);
+		result = kevent(kq, NULL, 0, &ready, 1, NULL);
 		if (result < 0)
-			err(1, "poll provider");
-		if (result != 0 && (pollfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+			err(1, "kevent wait");
+		if (ready.ident == (uintptr_t)state.own_event_fd) {
+			uint64_t sequence;
+
+			if (read(state.own_event_fd, &sequence, sizeof(sequence)) !=
+			    sizeof(sequence))
+				err(1, "read doorbell");
+			for (unsigned int i = 0; i < state.imm_queue_count; i++) {
+				struct virtiod_queue *queue = &state.own_mut_queues[i];
+
+				pthread_mutex_lock(&queue->own_mutex);
+				if (queue->mut_ready) {
+					queue->mut_kicked = 1;
+					pthread_cond_signal(&queue->own_cond);
+				}
+				pthread_mutex_unlock(&queue->own_mutex);
+			}
+			continue;
+		}
+		if (ready.ident == (uintptr_t)state.own_provider_fd) {
 			union {
 				struct vmm_pcie_abi_stop stop;
 				struct vmm_pcie_abi_mmio mmio;
@@ -257,6 +291,8 @@ restart:
 			errno = EPROTO;
 			err(1, "provider message");
 		}
+	}
+	(void)close(kq);
 	}
 	virtiod_generation_fini(&state);
 	error = virtiod_send_stopped(&state);
@@ -300,7 +336,7 @@ virtiod_build_register(struct vmm_pcie_abi_register *message,
 	message->bar_range[1].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
 	message->bar_range[2].le_offset = htole64(VIRTIOD_NOTIFY_OFFSET);
 	message->bar_range[2].le_size = htole64(0x1000);
-	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
+	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DOORBELL);
 	message->bar_range[3].le_offset = htole64(VIRTIOD_ISR_OFFSET);
 	message->bar_range[3].le_size = htole64(0x1000);
 	message->bar_range[3].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
@@ -359,13 +395,14 @@ virtiod_receive_start(int fd, struct vmm_pcie_abi_start *message)
 
 static int
 virtiod_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
-    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp)
+    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp,
+    int *event_fdp)
 {
-	char control[CMSG_SPACE(sizeof(int) * 2)];
+	char control[CMSG_SPACE(sizeof(int) * 3)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr socket_message;
-	int fds[2];
+	int fds[3];
 	ssize_t size;
 
 	memset(control, 0, sizeof(control));
@@ -387,7 +424,10 @@ virtiod_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	    sizeof(*message)) || message->header.le_sequence !=
 	    start->header.le_sequence || le32toh(message->le_bar_fd_mask) != 1 ||
 	    (le32toh(message->header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0) {
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) !=
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) {
 		warnx("REGISTERED magic=%#x version=%u type=%u size=%u flags=%#x "
 		    "sequence=%ju expected=%ju bars=%#x", le32toh(message->header.le_magic),
 		    le16toh(message->header.le_version),
@@ -410,10 +450,12 @@ virtiod_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 		return EPROTO;
 	}
 	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
-	if (bar_fdp == NULL || dma_fdp == NULL || fds[0] < 0 || fds[1] < 0)
+	if (bar_fdp == NULL || dma_fdp == NULL || event_fdp == NULL ||
+	    fds[0] < 0 || fds[1] < 0 || fds[2] < 0)
 		return EPROTO;
 	*bar_fdp = fds[0];
 	*dma_fdp = fds[1];
+	*event_fdp = fds[2];
 	return 0;
 }
 
@@ -448,7 +490,7 @@ virtiod_send_msix(const struct virtiod_state *state, uint16_t vector)
 	message.le_attachment_generation =
 	    state->own_registered.le_attachment_generation;
 	message.le_vector = htole16(vector);
-	return send(state->own_provider_fd, &message, sizeof(message), 0) ==
+	return write(state->own_event_fd, &message, sizeof(message)) ==
 	    sizeof(message) ? 0 : errno;
 }
 
@@ -602,6 +644,7 @@ virtiod_sync_queue(struct virtiod_state *state)
 			return error;
 		}
 		queue->mut_ready = 1;
+		queue->mut_kicked = 1;
 		pthread_cond_signal(&queue->own_cond);
 	}
 	pthread_mutex_unlock(&queue->own_mutex);
@@ -618,17 +661,18 @@ virtiod_queue_main(void *argument)
 	state = queue->borrow_mut_state;
 	pthread_mutex_lock(&queue->own_mutex);
 	while (queue->mut_running) {
-		while (queue->mut_running && !queue->mut_ready)
+		while (queue->mut_running && (!queue->mut_ready ||
+		    !queue->mut_kicked))
 			pthread_cond_wait(&queue->own_cond, &queue->own_mutex);
 		if (!queue->mut_running)
 			break;
+		queue->mut_kicked = 0;
 		if (virtiod_process_queue(state, queue) != 0) {
 			__atomic_fetch_or(&state->own_mut_common.device_status,
 			    VIRTIOD_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
 			queue->mut_ready = 0;
 		}
 		pthread_mutex_unlock(&queue->own_mutex);
-		usleep(1000);
 		pthread_mutex_lock(&queue->own_mutex);
 	}
 	pthread_mutex_unlock(&queue->own_mutex);
@@ -874,8 +918,11 @@ virtiod_generation_fini(struct virtiod_state *state)
 		(void)close(state->own_bar_fd);
 	if (state->own_dma_fd >= 0)
 		(void)close(state->own_dma_fd);
+	if (state->own_event_fd >= 0)
+		(void)close(state->own_event_fd);
 	state->own_bar_fd = -1;
 	state->own_dma_fd = -1;
+	state->own_event_fd = -1;
 }
 
 static void

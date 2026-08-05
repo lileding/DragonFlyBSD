@@ -195,6 +195,7 @@ struct virtiod_vsock_state {
 	int own_provider_fd;
 	int own_bar_fd;
 	int own_dma_fd;
+	int own_event_fd;
 };
 
 static void virtiod_vsock_build_register(struct vmm_pcie_abi_register *,
@@ -202,7 +203,7 @@ static void virtiod_vsock_build_register(struct vmm_pcie_abi_register *,
 static int virtiod_vsock_receive_start(int, struct vmm_pcie_abi_start *);
 static int virtiod_vsock_receive_registered(int,
     const struct vmm_pcie_abi_start *, struct vmm_pcie_abi_registered *,
-    int *, int *);
+    int *, int *, int *);
 static int virtiod_vsock_send_stopped(const struct virtiod_vsock_state *);
 static int virtiod_vsock_send_msix(const struct virtiod_vsock_state *,
     unsigned int);
@@ -333,6 +334,7 @@ virtiod_vsock_run(const struct virtiod_device *device,
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
+	state.own_event_fd = -1;
 	if ((error = pthread_mutex_init(&state.own_mutex, NULL)) != 0)
 		return error;
 	if (snprintf(provider_path, sizeof(provider_path), "%s/provider",
@@ -378,7 +380,7 @@ restart:
 	}
 	error = virtiod_vsock_receive_registered(state.own_provider_fd,
 	    &state.own_start, &state.own_registered, &state.own_bar_fd,
-	    &state.own_dma_fd);
+	    &state.own_dma_fd, &state.own_event_fd);
 	if (error != 0) {
 		virtiod_vsock_state_fini(&state);
 		return error;
@@ -490,7 +492,7 @@ virtiod_vsock_build_register(struct vmm_pcie_abi_register *message,
 	message->bar_range[1].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
 	message->bar_range[2].le_offset = htole64(VIRTIOD_VSOCK_NOTIFY_OFFSET);
 	message->bar_range[2].le_size = htole64(0x1000);
-	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
+	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DOORBELL);
 	message->bar_range[3].le_offset = htole64(VIRTIOD_VSOCK_ISR_OFFSET);
 	message->bar_range[3].le_size = htole64(0x1000);
 	message->bar_range[3].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
@@ -549,13 +551,14 @@ virtiod_vsock_receive_start(int fd, struct vmm_pcie_abi_start *message)
 static int
 virtiod_vsock_receive_registered(int fd,
     const struct vmm_pcie_abi_start *start,
-    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp)
+    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp,
+    int *event_fdp)
 {
-	char control[CMSG_SPACE(sizeof(int) * 2)];
+	char control[CMSG_SPACE(sizeof(int) * 3)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr socket_message;
-	int fds[2];
+	int fds[3];
 	ssize_t size;
 
 	memset(control, 0, sizeof(control));
@@ -576,7 +579,10 @@ virtiod_vsock_receive_registered(int fd,
 	    le32toh(message->le_bar_fd_mask) != 1 ||
 	    le16toh(message->le_msix_vectors) != VIRTIOD_VSOCK_MSIX_COUNT ||
 	    (le32toh(message->header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0)
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) !=
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY))
 		return EPROTO;
 	cmsg = CMSG_FIRSTHDR(&socket_message);
 	if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET ||
@@ -584,10 +590,12 @@ virtiod_vsock_receive_registered(int fd,
 	    CMSG_LEN(sizeof(fds)) || CMSG_NXTHDR(&socket_message, cmsg) != NULL)
 		return EPROTO;
 	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
-	if (bar_fdp == NULL || dma_fdp == NULL || fds[0] < 0 || fds[1] < 0)
+	if (bar_fdp == NULL || dma_fdp == NULL || event_fdp == NULL ||
+	    fds[0] < 0 || fds[1] < 0 || fds[2] < 0)
 		return EPROTO;
 	*bar_fdp = fds[0];
 	*dma_fdp = fds[1];
+	*event_fdp = fds[2];
 	return 0;
 }
 
@@ -632,7 +640,7 @@ virtiod_vsock_send_msix(const struct virtiod_vsock_state *state,
 	message.le_attachment_generation =
 	    state->own_registered.le_attachment_generation;
 	message.le_vector = htole16(vector);
-	return send(state->own_provider_fd, &message, sizeof(message), 0) ==
+	return write(state->own_event_fd, &message, sizeof(message)) ==
 	    sizeof(message) ? 0 : errno;
 }
 
@@ -1860,7 +1868,7 @@ virtiod_vsock_generation_fini(struct virtiod_vsock_state *state)
 
 	if (!state->mut_generation_active && !state->mut_broker_attached &&
 	    state->own_mut_bar == NULL && state->own_bar_fd < 0 &&
-	    state->own_dma_fd < 0)
+	    state->own_dma_fd < 0 && state->own_event_fd < 0)
 		return;
 	pthread_mutex_lock(&state->own_mutex);
 	state->mut_running = 0;
@@ -1889,6 +1897,10 @@ virtiod_vsock_generation_fini(struct virtiod_vsock_state *state)
 	if (state->own_dma_fd >= 0) {
 		(void)close(state->own_dma_fd);
 		state->own_dma_fd = -1;
+	}
+	if (state->own_event_fd >= 0) {
+		(void)close(state->own_event_fd);
+		state->own_event_fd = -1;
 	}
 	state->mut_generation_active = 0;
 }

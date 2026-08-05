@@ -6,6 +6,7 @@
  * implementation, adapted to the dfvmm provider ABI.
  */
 #include <sys/endian.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -95,6 +96,7 @@ struct virtiod_net_state {
 	int own_provider_fd;
 	int own_bar_fd;
 	int own_dma_fd;
+	int own_event_fd;
 	struct virtiod_tap own_tap;
 	struct vmm_pcie_abi_start own_start;
 	struct vmm_pcie_abi_registered own_registered;
@@ -122,13 +124,14 @@ static void virtiod_net_build_register(struct vmm_pcie_abi_register *,
 static int virtiod_net_receive_start(int, struct vmm_pcie_abi_start *);
 static int virtiod_net_receive_registered(int,
     const struct vmm_pcie_abi_start *, struct vmm_pcie_abi_registered *,
-    int *, int *);
+    int *, int *, int *);
 static int virtiod_net_send_stopped(const struct virtiod_net_state *);
 static int virtiod_net_send_msix(const struct virtiod_net_state *, uint16_t);
 static int virtiod_net_map_dma(struct virtiod_net_state *);
 static void virtiod_net_unmap_dma(struct virtiod_net_state *);
 static void virtiod_net_initialize_bar(struct virtiod_net_state *);
 static int virtiod_net_sync_queues(struct virtiod_net_state *);
+static int virtiod_net_service_queues(struct virtiod_net_state *);
 static void virtiod_net_capture_queue(struct virtiod_net_state *, unsigned int);
 static void virtiod_net_restore_queue(struct virtiod_net_state *, unsigned int);
 static int virtiod_net_process_tx(struct virtiod_net_state *);
@@ -164,6 +167,7 @@ virtiod_net_run(const struct virtiod_device *device)
 	state.own_provider_fd = -1;
 	state.own_bar_fd = -1;
 	state.own_dma_fd = -1;
+	state.own_event_fd = -1;
 	state.own_tap.own_fd = -1;
 	error = virtiod_net_parse_mac(device->imm_mac, state.own_mut_config.mac);
 	if (error != 0)
@@ -200,7 +204,7 @@ restart:
 		err(1, "send REGISTER");
 	error = virtiod_net_receive_registered(state.own_provider_fd,
 	    &state.own_start, &state.own_registered, &state.own_bar_fd,
-	    &state.own_dma_fd);
+	    &state.own_dma_fd, &state.own_event_fd);
 	if (error != 0)
 		errno = error, err(1, "recv REGISTERED");
 	state.own_mut_bar = mmap(NULL, VIRTIOD_NET_BAR_SIZE, PROT_READ | PROT_WRITE,
@@ -217,62 +221,46 @@ restart:
 	    state.own_mut_config.mac[4], state.own_mut_config.mac[5]);
 	if (fflush(stdout) != 0)
 		err(1, "flush ready");
-	for (;;) {
-		struct pollfd pollfd;
-		size_t rx_length;
-		int rx_ready;
-		int result;
+	{
+		struct kevent change[3];
+		struct kevent ready;
+		int kq;
 
-		error = virtiod_net_sync_queues(&state);
-		if (error != 0) {
-			warnx("virtio-net queue configuration failed: %s",
-			    strerror(error));
-			__atomic_fetch_or(&state.own_mut_common.device_status,
-			    VIRTIOD_NET_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
-			state.mut_needs_reset = 1;
-			memset(state.mut_queue_ready, 0, sizeof(state.mut_queue_ready));
-		}
-		if (state.mut_queue_ready[VIRTIOD_NET_QUEUE_TX]) {
-			error = virtiod_net_process_tx(&state);
-			if (error != 0) {
-				warnx("virtio-net transmit failed: %s", strerror(error));
-				__atomic_fetch_or(&state.own_mut_common.device_status,
-				    VIRTIOD_NET_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
-				state.mut_needs_reset = 1;
-			}
-		}
-		rx_ready = state.mut_queue_ready[VIRTIOD_NET_QUEUE_RX] ?
-		    virtiod_vring_has_available(&state.own_queue[VIRTIOD_NET_QUEUE_RX]) : 0;
-		if (rx_ready < 0)
-			rx_ready = 0;
-		if (rx_ready != 0) {
-			if (!state.mut_rx_available_logged) {
-				printf("virtiod: net RX descriptor available\n");
-				(void)fflush(stdout);
-				state.mut_rx_available_logged = 1;
-			}
-			rx_length = 0;
-			error = virtiod_tap_pending(&state.own_tap, &rx_length);
-			if (error != 0)
-				errno = error, err(1, "receive TAP frame");
-			if (rx_length != 0) {
-				if (!state.mut_rx_tap_logged) {
-					printf("virtiod: net TAP frame bytes=%zu\n", rx_length);
-					(void)fflush(stdout);
-					state.mut_rx_tap_logged = 1;
-				}
-				error = virtiod_net_process_rx(&state);
+		kq = kqueue();
+		if (kq < 0)
+			err(1, "kqueue");
+		EV_SET(&change[0], state.own_provider_fd, EVFILT_READ, EV_ADD, 0,
+		    0, NULL);
+		EV_SET(&change[1], state.own_event_fd, EVFILT_READ, EV_ADD, 0, 0,
+		    NULL);
+		EV_SET(&change[2], state.own_tap.own_fd, EVFILT_READ, EV_ADD, 0, 0,
+		    NULL);
+		if (kevent(kq, change, 3, NULL, 0, NULL) != 0)
+			err(1, "kevent register");
+		for (;;) {
+			int result;
+
+			result = kevent(kq, NULL, 0, &ready, 1, NULL);
+			if (result < 0)
+				err(1, "kevent wait");
+			if (ready.ident == (uintptr_t)state.own_event_fd) {
+				uint64_t sequence;
+
+				if (read(state.own_event_fd, &sequence, sizeof(sequence)) !=
+				    sizeof(sequence))
+					err(1, "read doorbell");
+				error = virtiod_net_service_queues(&state);
 				if (error != 0)
-					errno = error, err(1, "receive TAP frame");
+					errno = error, err(1, "service virtio-net queues");
+				continue;
 			}
-		}
-		memset(&pollfd, 0, sizeof(pollfd));
-		pollfd.fd = state.own_provider_fd;
-		pollfd.events = POLLIN | POLLHUP | POLLERR;
-		result = poll(&pollfd, 1, 1);
-		if (result < 0)
-			err(1, "poll provider");
-		if ((pollfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+			if (ready.ident == (uintptr_t)state.own_tap.own_fd) {
+				error = virtiod_net_service_queues(&state);
+				if (error != 0)
+					errno = error, err(1, "service TAP frame");
+				continue;
+			}
+			if (ready.ident == (uintptr_t)state.own_provider_fd) {
 			union {
 				struct vmm_pcie_abi_stop stop;
 				struct vmm_pcie_abi_mmio mmio;
@@ -296,11 +284,16 @@ restart:
 				error = virtiod_net_handle_mmio(&state, &message.mmio);
 				if (error != 0)
 					errno = error, err(1, "handle MMIO");
+				error = virtiod_net_service_queues(&state);
+				if (error != 0)
+					errno = error, err(1, "service virtio-net queues");
 				continue;
 			}
 			errno = EPROTO;
 			err(1, "provider message");
 		}
+		}
+		(void)close(kq);
 	}
 	virtiod_net_generation_fini(&state);
 	error = virtiod_net_send_stopped(&state);
@@ -342,7 +335,7 @@ virtiod_net_build_register(struct vmm_pcie_abi_register *message,
 	message->bar_range[1].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
 	message->bar_range[2].le_offset = htole64(VIRTIOD_NET_NOTIFY_OFFSET);
 	message->bar_range[2].le_size = htole64(0x1000);
-	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DIRECT);
+	message->bar_range[2].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_DOORBELL);
 	message->bar_range[3].le_offset = htole64(VIRTIOD_NET_ISR_OFFSET);
 	message->bar_range[3].le_size = htole64(0x1000);
 	message->bar_range[3].le_flags = htole32(VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED);
@@ -401,13 +394,14 @@ virtiod_net_receive_start(int fd, struct vmm_pcie_abi_start *message)
 
 static int
 virtiod_net_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
-    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp)
+    struct vmm_pcie_abi_registered *message, int *bar_fdp, int *dma_fdp,
+    int *event_fdp)
 {
-	char control[CMSG_SPACE(sizeof(int) * 2)];
+	char control[CMSG_SPACE(sizeof(int) * 3)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr socket_message;
-	int fds[2];
+	int fds[3];
 	ssize_t size;
 
 	memset(control, 0, sizeof(control));
@@ -426,7 +420,10 @@ virtiod_net_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	    sizeof(*message)) || message->header.le_sequence !=
 	    start->header.le_sequence || le32toh(message->le_bar_fd_mask) != 1 ||
 	    (le32toh(message->header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0)
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) !=
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY))
 		return EPROTO;
 	cmsg = CMSG_FIRSTHDR(&socket_message);
 	if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET ||
@@ -434,10 +431,12 @@ virtiod_net_receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	    CMSG_LEN(sizeof(fds)) || CMSG_NXTHDR(&socket_message, cmsg) != NULL)
 		return EPROTO;
 	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
-	if (bar_fdp == NULL || dma_fdp == NULL || fds[0] < 0 || fds[1] < 0)
+	if (bar_fdp == NULL || dma_fdp == NULL || event_fdp == NULL ||
+	    fds[0] < 0 || fds[1] < 0 || fds[2] < 0)
 		return EPROTO;
 	*bar_fdp = fds[0];
 	*dma_fdp = fds[1];
+	*event_fdp = fds[2];
 	return 0;
 }
 
@@ -471,7 +470,7 @@ virtiod_net_send_msix(const struct virtiod_net_state *state, uint16_t vector)
 	message.le_device_id = state->own_registered.le_device_id;
 	message.le_attachment_generation = state->own_registered.le_attachment_generation;
 	message.le_vector = htole16(vector);
-	return send(state->own_provider_fd, &message, sizeof(message), 0) ==
+	return write(state->own_event_fd, &message, sizeof(message)) ==
 	    sizeof(message) ? 0 : errno;
 }
 
@@ -538,6 +537,38 @@ virtiod_net_initialize_bar(struct virtiod_net_state *state)
 	}
 	virtiod_net_restore_queue(state, VIRTIOD_NET_QUEUE_RX);
 	state->own_mut_config.le_status = htole16(1);
+}
+
+static int
+virtiod_net_service_queues(struct virtiod_net_state *state)
+{
+	size_t rx_length;
+	int error;
+	int rx_ready;
+
+	error = virtiod_net_sync_queues(state);
+	if (error != 0) {
+		warnx("virtio-net queue configuration failed: %s", strerror(error));
+		__atomic_fetch_or(&state->own_mut_common.device_status,
+		    VIRTIOD_NET_STATUS_NEEDS_RESET, __ATOMIC_RELEASE);
+		state->mut_needs_reset = 1;
+		memset(state->mut_queue_ready, 0, sizeof(state->mut_queue_ready));
+		return error;
+	}
+	if (state->mut_queue_ready[VIRTIOD_NET_QUEUE_TX]) {
+		error = virtiod_net_process_tx(state);
+		if (error != 0)
+			return error;
+	}
+	rx_ready = state->mut_queue_ready[VIRTIOD_NET_QUEUE_RX] ?
+	    virtiod_vring_has_available(&state->own_queue[VIRTIOD_NET_QUEUE_RX]) : 0;
+	if (rx_ready <= 0)
+		return 0;
+	rx_length = 0;
+	error = virtiod_tap_pending(&state->own_tap, &rx_length);
+	if (error != 0 || rx_length == 0)
+		return error;
+	return virtiod_net_process_rx(state);
 }
 
 static int
@@ -994,8 +1025,11 @@ virtiod_net_generation_fini(struct virtiod_net_state *state)
 		(void)close(state->own_bar_fd);
 	if (state->own_dma_fd >= 0)
 		(void)close(state->own_dma_fd);
+	if (state->own_event_fd >= 0)
+		(void)close(state->own_event_fd);
 	state->own_bar_fd = -1;
 	state->own_dma_fd = -1;
+	state->own_event_fd = -1;
 }
 
 static void

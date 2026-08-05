@@ -98,12 +98,12 @@ static int
 recv_registered(int fd, const struct vmm_pcie_abi_start *start)
 {
 	struct vmm_pcie_abi_registered message;
-	char control[CMSG_SPACE(sizeof(int) * 2)];
+	char control[CMSG_SPACE(sizeof(int) * 3)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr msg;
 	ssize_t n;
-	int fds[2];
+	int fds[3];
 
 	memset(control, 0, sizeof(control));
 	memset(&msg, 0, sizeof(msg));
@@ -121,7 +121,7 @@ recv_registered(int fd, const struct vmm_pcie_abi_start *start)
 	    le16toh(message.header.le_type) != VMM_PCIE_ABI_MSG_REGISTERED ||
 	    message.header.le_sequence != start->header.le_sequence ||
 	    (le32toh(message.header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0 ||
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY | VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) != (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY | VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY) ||
 	    le32toh(message.le_bdf) != VMM_PCIE_ABI_BDF(0, 1, 0))
 		errno = EPROTO, err(1, "invalid REGISTERED");
 	cmsg = CMSG_FIRSTHDR(&msg);
@@ -133,6 +133,8 @@ recv_registered(int fd, const struct vmm_pcie_abi_start *start)
 	memcpy(fds, CMSG_DATA(cmsg), sizeof(fds));
 	if (le32toh(message.le_bar_fd_mask) != 1 || fds[0] < 0 || fds[1] < 0)
 		errno = EPROTO, err(1, "REGISTERED capability set");
+	if (close(fds[2]) != 0)
+		err(1, "close event fd");
 	if (close(fds[1]) != 0)
 		err(1, "close DMA fd");
 	return fds[0];

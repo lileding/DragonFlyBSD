@@ -45,6 +45,7 @@
 #include "vmm_loader.h"
 #include "vmm_machine.h"
 #include "vmm_pcie_bar.h"
+#include "vmm_pcie_event.h"
 #include "vmm_pcie_user.h"
 #include "vmm_vcpu.h"
 #include "vmmfs.h"
@@ -1159,6 +1160,10 @@ vmmfs_vfs_uninit(struct vfsconf *conf)
 	}
 	if (vmm_pcie_bar_mmap_active()) {
 		kprintf("vmm klog: vfs_uninit vPCIe BAR capability active\n");
+		return EBUSY;
+	}
+	if (vmm_pcie_event_active()) {
+		kprintf("vmm klog: vfs_uninit vPCIe event capability active\n");
 		return EBUSY;
 	}
 	if (vmm_dma_mmap_active()) {

@@ -142,7 +142,7 @@ vmmfs_devices_nmkdir(struct vmmfs_node *dnode, struct vop_nmkdir_args *ap)
 	return 0;
 }
 
-/* A P1 function has no children and may be deleted only before registration. */
+/* Destroying a slot forcibly disconnects any inserted provider or consumer. */
 static int
 vmmfs_devices_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 {
@@ -165,6 +165,8 @@ vmmfs_devices_nrmdir(struct vmmfs_node *dnode, struct vop_nrmdir_args *ap)
 		vrele(vp);
 		return ENOENT;
 	}
+	/* Slot removal is physical removal, not an EBUSY condition. */
+	vmm_pcie_device_force_close(&d->own_mut_device);
 	error = vmm_pcie_device_destroy(&vmp->own_mut_pcie,
 	    &d->own_mut_device);
 	if (error != 0) {

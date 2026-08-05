@@ -41,6 +41,7 @@ void	vmm_pcie_cancel_shutdown(struct vmm_pcie *pcie);
 uint64_t vmm_pcie_root_id_alloc(struct vmm_pcie *pcie);
 struct vmm_pcie_root *vmm_pcie_host_root(struct vmm_pcie *pcie);
 struct vmm_dma;
+struct vmm_pcie_event;
 int	vmm_pcie_device_create(struct vmm_pcie *pcie,
 	    struct vmm_pcie_root *consumer, const char *name, int nlen,
 	    struct vmm_device *device);
@@ -69,6 +70,8 @@ void	vmm_pcie_device_provider_detach(struct vmm_device *device,
 	    struct vmm_pcie_user *provider);
 int	vmm_pcie_device_provider_msix(struct vmm_device *device,
 	    struct vmm_pcie_user *provider,
+	    const struct vmm_pcie_abi_msix *message);
+int	vmm_pcie_device_event_msix(struct vmm_pcie_event *event,
 	    const struct vmm_pcie_abi_msix *message);
 void	vmm_pcie_device_provider_force_close(struct vmm_device *device);
 void	vmm_pcie_device_force_close(struct vmm_device *device);

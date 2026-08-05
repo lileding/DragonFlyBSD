@@ -236,7 +236,8 @@ main(void)
 
 	memset(&registered_message, 0, sizeof(registered_message));
 	packet_init(&registered_message.header, VMM_PCIE_ABI_MSG_REGISTERED,
-	    sizeof(registered_message), VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY);
+	    sizeof(registered_message), VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY);
 	registered_message.le_device_id = htole64(1);
 	registered_message.le_consumer_id = htole64(2);
 	registered_message.le_attachment_generation = htole64(3);

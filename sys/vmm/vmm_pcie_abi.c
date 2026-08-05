@@ -120,7 +120,8 @@ vmm_pcie_abi_bar_range_valid(const struct vmm_pcie_abi_bar_range *range,
 	    (offset & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
 	    (size & (VMM_PCIE_ABI_PAGE_SIZE - 1)) != 0 ||
 	    (flags != VMM_PCIE_ABI_BAR_RANGE_F_DIRECT &&
-	    flags != VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED))
+	    flags != VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED &&
+	    flags != VMM_PCIE_ABI_BAR_RANGE_F_DOORBELL))
 		return 0;
 	bar_size = le64toh(message->bar[bar_index].le_size);
 	return bar_size != 0 && offset < bar_size && size <= bar_size - offset;
@@ -402,7 +403,8 @@ vmm_pcie_abi_registered_valid(const struct vmm_pcie_abi_registered *message)
 
 	if (!vmm_pcie_abi_header_valid(&message->header,
 	    VMM_PCIE_ABI_MSG_REGISTERED, sizeof(*message),
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) ||
+	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY) ||
 	    le64toh(message->header.le_sequence) == 0 ||
 	    le64toh(message->le_device_id) == 0 ||
 	    le64toh(message->le_consumer_id) == 0 ||
@@ -414,7 +416,10 @@ vmm_pcie_abi_registered_valid(const struct vmm_pcie_abi_registered *message)
 	known_bar_fd_mask = (1U << VMM_PCIE_ABI_MAX_BARS) - 1;
 	msix_vectors = le16toh(message->le_msix_vectors);
 	if ((le32toh(message->header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0 ||
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) !=
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY |
+	    VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY) ||
 	    (bar_fd_mask & ~known_bar_fd_mask) != 0 || msix_vectors == 0 ||
 	    msix_vectors > VMM_PCIE_ABI_MAX_MSIX_VECTORS)
 		return EINVAL;

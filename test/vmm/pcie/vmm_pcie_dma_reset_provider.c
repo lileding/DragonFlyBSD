@@ -186,11 +186,11 @@ receive_registered(int fd, const struct vmm_pcie_abi_start *start,
     int *bar_fdp, int *dma_fdp)
 {
 	struct vmm_pcie_abi_registered message;
-	char control[CMSG_SPACE(sizeof(int) * 2)];
+	char control[CMSG_SPACE(sizeof(int) * 3)];
 	struct cmsghdr *cmsg;
 	struct iovec iov;
 	struct msghdr socket_message;
-	int fds[2];
+	int fds[3];
 	ssize_t n;
 
 	memset(control, 0, sizeof(control));
@@ -209,7 +209,7 @@ receive_registered(int fd, const struct vmm_pcie_abi_start *start,
 	    le16toh(message.header.le_type) != VMM_PCIE_ABI_MSG_REGISTERED ||
 	    message.header.le_sequence != start->header.le_sequence ||
 	    (le32toh(message.header.le_flags) &
-	    VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY) == 0)
+	    (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY | VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY)) != (VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY | VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY))
 		errno = EPROTO, err(1, "invalid REGISTERED");
 	cmsg = CMSG_FIRSTHDR(&socket_message);
 	if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET ||

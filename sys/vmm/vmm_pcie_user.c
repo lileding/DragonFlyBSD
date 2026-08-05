@@ -485,7 +485,7 @@ vmm_pcie_user_provider_message(struct vmm_pcie_user *user,
 {
 	const struct vmm_pcie_abi_header *header;
 	struct vmm_pcie_abi_registered response;
-	struct file *fps[VMM_PCIE_ABI_MAX_BARS + 1];
+	struct file *fps[VMM_PCIE_ABI_MAX_BARS + 2];
 	unsigned int file_count;
 	unsigned int i;
 

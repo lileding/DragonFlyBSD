@@ -16,7 +16,7 @@
 #include <sys/types.h>
 
 #define VMM_PCIE_ABI_MAGIC			0x564d4d50U
-#define VMM_PCIE_ABI_VERSION			5U
+#define VMM_PCIE_ABI_VERSION			6U
 #define VMM_PCIE_ABI_PAGE_SIZE			4096ULL
 #define VMM_PCIE_ABI_MAX_BARS			6U
 #define VMM_PCIE_ABI_MAX_MSIX_VECTORS		2048U
@@ -86,13 +86,15 @@ enum vmm_pcie_abi_message_type {
 #define VMM_PCIE_ABI_BAR_F_DOORBELL_DIRECT	0x00000008U
 #define VMM_PCIE_ABI_BAR_F_DOORBELL_TRAPPED	0x00000010U
 
-/* One BAR page is either guest-direct or synchronously provider-trapped. */
+/* One BAR page is guest-direct, synchronously provider-trapped, or a doorbell. */
 #define VMM_PCIE_ABI_BAR_RANGE_F_DIRECT	0x00000001U
 #define VMM_PCIE_ABI_BAR_RANGE_F_TRAPPED	0x00000002U
+#define VMM_PCIE_ABI_BAR_RANGE_F_DOORBELL	0x00000004U
 
 #define VMM_PCIE_ABI_MMIO_F_WRITE		0x00000001U
 
 #define VMM_PCIE_ABI_REGISTERED_F_DMA_CAPABILITY	0x00000001U
+#define VMM_PCIE_ABI_REGISTERED_F_EVENT_CAPABILITY	0x00000002U
 
 #define VMM_PCIE_ABI_DMA_F_IOVA_VALID		0x00000001U
 
