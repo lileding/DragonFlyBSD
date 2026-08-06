@@ -44,7 +44,7 @@ SUBDIR=	adjkerntz \
 	kldstat \
 	kldunload \
 	ldconfig \
-	load_linux \
+	vmmld_linux \
 	md5 \
 	mount \
 	mount_autofs \
@@ -101,7 +101,6 @@ SUBDIR=	adjkerntz \
 	sysctl \
 	tcplay \
 	tunefs \
-	virtiod \
 	udevd \
 	umount \
 	usched \

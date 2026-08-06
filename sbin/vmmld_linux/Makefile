@@ -1,5 +1,5 @@
-PROG= load_linux
-SRCS= load_linux.c
+PROG= vmmld_linux
+SRCS= vmmld_linux.c
 CFLAGS+= -I${.CURDIR}/../../sys
 MAN=
 
