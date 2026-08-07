@@ -10,7 +10,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-guest-reset-vmm}
 VM=${VMM_MACHINE:-linuxguestreset0}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-guest-reset-test.log}
@@ -214,9 +214,9 @@ cleanup()
 ensure_module_image()
 {
 	[ -f "$VMM_KO" ] && return 0
-	[ "$VMM_KO" = "$REPO/sys/vmm/vmm.ko" ] || fail "missing $VMM_KO"
-	say "+ make -C $REPO/sys/vmm MACHINE_PLATFORM=pc64"
-	( cd "$REPO/sys/vmm" && make MACHINE_PLATFORM=pc64 ) >>"$LOG" 2>&1 ||
+	[ "$VMM_KO" = "$REPO/sys/dev/vmm/vmm.ko" ] || fail "missing $VMM_KO"
+	say "+ make -C $REPO/sys/dev/vmm MACHINE_PLATFORM=pc64"
+	( cd "$REPO/sys/dev/vmm" && make MACHINE_PLATFORM=pc64 ) >>"$LOG" 2>&1 ||
 		fail "build $VMM_KO"
 }
 

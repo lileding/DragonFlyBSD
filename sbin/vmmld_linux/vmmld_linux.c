@@ -16,7 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../sys/vmm/vmm_pcie_layout.h"
+#include "../../sys/dev/vmm/vmm_pcie_layout.h"
 
 #define PAGE_SIZE_GUEST		4096ULL
 #define ONE_MIB			0x100000ULL

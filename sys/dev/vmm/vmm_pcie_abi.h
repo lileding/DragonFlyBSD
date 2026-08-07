@@ -7,6 +7,6 @@
 #ifndef VMM_PCIE_ABI_WRAPPER_H
 #define VMM_PCIE_ABI_WRAPPER_H
 
-#include "../sys/vmm_pcie_abi.h"
+#include <sys/vmm_pcie_abi.h>
 
 #endif /* VMM_PCIE_ABI_WRAPPER_H */

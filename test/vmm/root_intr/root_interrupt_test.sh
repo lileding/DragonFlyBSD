@@ -5,7 +5,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-root-intr-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-root-intr-test.log}
 LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_root_intr_smoke_loader}

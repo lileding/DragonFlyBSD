@@ -8,7 +8,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-console-vmm}
 VM=${VMM_MACHINE:-linuxterm0}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-console-terminal-test.log}
@@ -195,11 +195,11 @@ ensure_module_image()
 	if [ -f "$VMM_KO" ]; then
 		return
 	fi
-	if [ "$VMM_KO" != "$REPO/sys/vmm/vmm.ko" ]; then
+	if [ "$VMM_KO" != "$REPO/sys/dev/vmm/vmm.ko" ]; then
 		fail "missing $VMM_KO"
 	fi
-	say "+ make -C $REPO/sys/vmm MACHINE_PLATFORM=pc64"
-	( cd "$REPO/sys/vmm" && make MACHINE_PLATFORM=pc64 ) >>"$LOG" 2>&1 ||
+	say "+ make -C $REPO/sys/dev/vmm MACHINE_PLATFORM=pc64"
+	( cd "$REPO/sys/dev/vmm" && make MACHINE_PLATFORM=pc64 ) >>"$LOG" 2>&1 ||
 	    fail "build $VMM_KO"
 	[ -f "$VMM_KO" ] || fail "missing $VMM_KO after build"
 }

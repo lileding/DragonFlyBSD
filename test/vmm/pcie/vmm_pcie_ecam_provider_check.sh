@@ -16,7 +16,7 @@ cleanup()
 trap cleanup EXIT INT TERM
 
 cc -Wall -Wextra -Werror -std=c11 -O2 \
-	-I "$REPO/sys/vmm" \
+	-I "$REPO/sys/dev/vmm" \
 	-I "$BASE_SYS" \
-	"$REPO/sys/vmm/vmm_pcie_abi.c" \
+	"$REPO/sys/dev/vmm/vmm_pcie_abi.c" \
 	"$ROOT/vmm_pcie_ecam_provider.c" -o "$BIN"

@@ -20,6 +20,8 @@
 #include "vmm_machine.h"
 #include "vmm_vcpu.h"
 
+MODULE_VERSION(vmm, 1);
+
 #define VMM_VCPU_MAX	256u
 
 SET_DECLARE(vmm_vcpu_backend_set, const struct vmm_vcpu_backend_ops);

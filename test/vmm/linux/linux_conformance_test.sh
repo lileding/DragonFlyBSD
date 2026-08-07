@@ -8,7 +8,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 KERNEL=${LINUX_KERNEL:-/var/tmp/alpine-vmlinuz-virt}
 INITRD=${LINUX_INITRD_ROOTFS:-/var/tmp/dfvmm-linux-initrd-rootfs.gz}
 WORK=${VMM_CONFORMANCE_WORK:-/var/tmp/dfvmm-linux-conformance-$$}
@@ -55,9 +55,9 @@ mkdir -p "$WORK" || fail "mkdir $WORK"
 
 run_stage offline "$REPO/test/vmm/offline_check.sh"
 
-say "+ make -C $REPO/sys/vmm MACHINE_PLATFORM=pc64"
+say "+ make -C $REPO/sys/dev/vmm MACHINE_PLATFORM=pc64"
 (
-	cd "$REPO/sys/vmm" || exit 1
+	cd "$REPO/sys/dev/vmm" || exit 1
 	make MACHINE_PLATFORM=pc64
 ) >"$WORK/build.log" 2>&1 || {
 	cat "$WORK/build.log"

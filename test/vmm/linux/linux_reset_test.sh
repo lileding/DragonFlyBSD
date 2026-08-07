@@ -9,7 +9,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-reset-vmm}
 VM=${VMM_MACHINE:-linuxreset0}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-linux-reset-test.log}

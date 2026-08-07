@@ -1189,4 +1189,5 @@ static struct vfsops vmmfs_vfsops = {
 };
 
 VFS_SET(vmmfs_vfsops, vmm, VFCF_MPSAFE);
-MODULE_VERSION(vmm, 1);
+MODULE_VERSION(vmmfs, 1);
+MODULE_DEPEND(vmmfs, vmm, 1, 1, 1);

@@ -10,7 +10,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-nuttx-vmm}
 VM=${VMM_MACHINE:-nuttx0}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-nuttx-test.log}

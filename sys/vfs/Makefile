@@ -5,7 +5,7 @@ SUBDIR=	fifofs msdosfs nfs procfs \
 	hpfs ntfs smbfs isofs mfs udf \
 	nullfs hammer tmpfs autofs ext2fs fuse
 
-SUBDIR+= hammer2
+SUBDIR+= hammer2 vmmfs
 
 # empty to allow concurrent building
 #

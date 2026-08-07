@@ -5,7 +5,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 BASE_SYS="$REPO/sys"
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-pcie-session-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-pcie-session-test.log}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-session-$$-mount_vmm}
@@ -38,8 +38,8 @@ case "$VMM_KO" in /*) ;; *) fail "VMM_KO must be absolute" ;; esac
 [ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
 kldstat -n vmm >/dev/null 2>&1 && fail "vmm already loaded"
 
-run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" -I "$BASE_SYS" \
-	"$REPO/sys/vmm/vmm_pcie_abi.c" \
+run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/dev/vmm" -I "$BASE_SYS" \
+	"$REPO/sys/dev/vmm/vmm_pcie_abi.c" \
 	"$REPO/test/vmm/pcie/vmm_pcie_session_test.c" -o "$BIN"
 run kldload "$VMM_KO"; LOADED=1
 run mkdir -p "$MNT"

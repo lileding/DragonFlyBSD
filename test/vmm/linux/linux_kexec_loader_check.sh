@@ -304,8 +304,8 @@ run_loader_case()
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$ROOT/linux_kexec_loader.c" -o "$LOADER"
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
-    -I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/vmm" \
-    "$REPO/sys/vmm/vmm_loader_x86.c" \
+    -I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/dev/vmm" \
+    "$REPO/sys/dev/vmm/vmm_loader_x86.c" \
     "$REPO/test/vmm/manifest/manifest_file_check.c" -o "$PARSER"
 
 make_synth_kernel

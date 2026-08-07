@@ -9,7 +9,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 WORK=${VMM_SOAK_WORK:-/var/tmp/dfvmm-lifecycle-capability-soak-$$}
 ROUNDS=${VMM_SOAK_ROUNDS:-60}
 HOLD_EVERY=${VMM_SOAK_HOLD_EVERY:-10}

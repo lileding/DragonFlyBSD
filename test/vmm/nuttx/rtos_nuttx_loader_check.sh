@@ -66,8 +66,8 @@ run cc -Wall -Wextra -Werror -std=c11 -O2 \
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
     "$ROOT/rtos_nuttx_manifest_check.c" -o "$CHECKER"
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
-    -I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/vmm" \
-    "$REPO/sys/vmm/vmm_loader_x86.c" \
+    -I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/dev/vmm" \
+    "$REPO/sys/dev/vmm/vmm_loader_x86.c" \
     "$REPO/test/vmm/manifest/manifest_file_check.c" -o "$PARSER"
 rm -f "$MEM_FILE" "$MANIFEST_FILE" || fail "remove old output files"
 run truncate -s "$MEM_SIZE" "$MEM_FILE"

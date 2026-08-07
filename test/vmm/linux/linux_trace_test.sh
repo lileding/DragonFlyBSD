@@ -9,7 +9,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-trace-vmm}
 VM_OFF=${VMM_TRACE_OFF_MACHINE:-linuxtraceoff0}
 VM_ON=${VMM_TRACE_ON_MACHINE:-linuxtraceon0}

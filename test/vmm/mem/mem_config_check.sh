@@ -17,7 +17,7 @@ cleanup()
 trap cleanup EXIT INT TERM
 
 cc -Wall -Wextra -Werror -std=c11 -O2 \
-    -I "$ROOT/compat" -I "$REPO/sys/vmm" \
-    "$REPO/sys/vmm/vmm_parse.c" "$REPO/sys/vmm/vmm_mem.c" \
+    -I "$ROOT/compat" -I "$REPO/sys/dev/vmm" \
+    "$REPO/sys/dev/vmm/vmm_parse.c" "$REPO/sys/dev/vmm/vmm_mem.c" \
     "$ROOT/mem_config_test.c" -o "$BIN"
 "$BIN"

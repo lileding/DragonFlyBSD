@@ -9,7 +9,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-svm-host-state.log}
 DMESG_AFTER=/var/tmp/dfvmm-svm-host-state-after-$$.log
 DMESG_SESSION=/var/tmp/dfvmm-svm-host-state-session-$$.log

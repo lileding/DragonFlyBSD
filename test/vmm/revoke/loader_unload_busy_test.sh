@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 ROOT=$(dirname "$0"); REPO=$(cd "$ROOT/../../.." && pwd)
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}; MNT=${VMM_MOUNT:-/var/tmp/dfvmm-unload-vmm}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}; MNT=${VMM_MOUNT:-/var/tmp/dfvmm-unload-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-unload-busy-test.log}; LOADER=${VMM_REVOKE_LOADER:-/var/tmp/vmm_revoke_loader}
 MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-unload-$$-mount_vmm}
 MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:-5}; LOADED=0; MOUNTED=0; HOLD_PID=

@@ -10,7 +10,8 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
+VMMFS_KO=${VMMFS_KO:-$REPO/sys/vfs/vmmfs/vmmfs.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-smoke-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-smoke-test.log}
 LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_smoke_loader}
@@ -298,6 +299,7 @@ cleanup()
 	if [ "$LOADED" -eq 1 ] && [ "$MOUNTED" -eq 0 ]; then
 		sysctl debug.vmm.svm_trace=0 >>"$LOG" 2>&1 || true
 		sysctl debug.vmm.svm_fpu_check=0 >>"$LOG" 2>&1 || true
+		kldunload vmmfs >>"$LOG" 2>&1 || say "kldunload vmmfs failed"
 		kldunload vmm >>"$LOG" 2>&1 || say "kldunload vmm failed"
 	fi
 	for mode in $MODES; do
@@ -316,6 +318,7 @@ preflight()
 	say "SVM smoke true-hardware bring-up"
 	say "repo=$REPO"
 	say "vmm_ko=$VMM_KO"
+	say "vmmfs_ko=$VMMFS_KO"
 	say "mem=$MEM mount=$MNT"
 	[ "$(id -u)" -eq 0 ] || fail "run as root on the pc64 host"
 	case "$VMM_KO" in
@@ -323,6 +326,7 @@ preflight()
 	*) fail "VMM_KO must be an absolute path" ;;
 	esac
 	[ -f "$VMM_KO" ] || fail "missing VMM_KO=$VMM_KO"
+	[ -f "$VMMFS_KO" ] || fail "missing VMMFS_KO=$VMMFS_KO"
 	case "$MOUNT_HELPER" in
 	*_vmm) ;;
 	*) fail "VMM_MOUNT_HELPER path must end in _vmm for mount_std" ;;
@@ -354,6 +358,7 @@ load_module()
 		fail "vmm already loaded; unload it before running this harness"
 	else
 		run kldload "$VMM_KO"
+		run kldload "$VMMFS_KO"
 		LOADED=1
 		if [ "$SVM_TRACE" -eq 1 ]; then
 			run sysctl debug.vmm.svm_trace=1

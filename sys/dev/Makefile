@@ -15,7 +15,8 @@ SUBDIR=	\
 	sound \
 	smbus \
 	video \
-	virtual
+	virtual \
+	vmm
 
 # empty to allow concurrent building
 SUBDIR_ORDERED=

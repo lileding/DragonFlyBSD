@@ -2,7 +2,7 @@
 set -u
 
 REPO=${REPO:-/home/lileding/projects/dfly-vmm/DragonFlyBSD}
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-initrd-vmm}
 VM=${VMM_MACHINE:-linuxinitrd0}
 LOADER=${LINUX_LOADER:-/var/tmp/vmmld_linux_kexec}

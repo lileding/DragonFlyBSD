@@ -5,7 +5,7 @@ set -u
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
 BASE_SYS="$REPO/sys"
-VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
+VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-pcie-ecam-vmm}
 VM=${VMM_MACHINE:-pcieecam0}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-pcie-ecam-test.log}
@@ -185,8 +185,8 @@ readelf -SW "$VMM_KO" 2>>"$LOG" | grep -qi eh_frame &&
 
 run cc -Wall -Wextra -Werror -std=c11 -O2 \
 	"$REPO/test/vmm/linux/linux_kexec_loader.c" -o "$LOADER"
-run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/vmm" -I "$BASE_SYS" \
-	"$REPO/sys/vmm/vmm_pcie_abi.c" \
+run cc -Wall -Wextra -Werror -std=c11 -O2 -I "$REPO/sys/dev/vmm" -I "$BASE_SYS" \
+	"$REPO/sys/dev/vmm/vmm_pcie_abi.c" \
 	"$REPO/test/vmm/pcie/vmm_pcie_ecam_provider.c" -o "$PROVIDER"
 cat >"$WRAPPER" <<EOF_WRAP
 #!/bin/sh

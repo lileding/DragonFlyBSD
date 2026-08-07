@@ -1,0 +1,18 @@
+# Kernel module build artifacts
+*.o
+*.ko
+*.kld
+*.d
+.depend*
+export_syms
+# DragonFly kmod build-generated symlinks / forwarders
+dragonfly
+forwarder_*/
+machine
+machine_base
+cpu
+cpu_base
+@
+# Generated KOBJ interface glue (from vmmfs_node_if.m via makeobjops)
+vmmfs_node_if.c
+vmmfs_node_if.h

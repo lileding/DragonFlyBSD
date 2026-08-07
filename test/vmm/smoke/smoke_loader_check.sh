@@ -22,8 +22,8 @@ trap cleanup EXIT INT TERM
 
 cc -Wall -Wextra -Werror -std=c11 -O2 "$ROOT/smoke_loader.c" -o "$LOADER"
 cc -Wall -Wextra -Werror -std=c11 -O2 \
-	-I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/vmm" \
-	"$REPO/sys/vmm/vmm_loader_x86.c" \
+	-I "$REPO/test/vmm/manifest/compat" -I "$REPO/sys/dev/vmm" \
+	"$REPO/sys/dev/vmm/vmm_loader_x86.c" \
 	"$REPO/test/vmm/manifest/manifest_file_check.c" -o "$CHECKER"
 for mode in $MODES; do
 	mem=$PREFIX-$mode.mem

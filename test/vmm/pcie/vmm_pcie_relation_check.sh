@@ -7,8 +7,8 @@ BASE_SYS="$ROOT/sys"
 BIN=/var/tmp/vmm_pcie_relation_test
 
 cc -Wall -Wextra -Werror -std=c11 -O2 \
-	-I "$ROOT/test/vmm/pcie/compat" -I "$ROOT/sys/vmm" -I "$BASE_SYS" \
-	"$ROOT/sys/vmm/vmm_pcie_root.c" \
+	-I "$ROOT/test/vmm/pcie/compat" -I "$ROOT/sys/dev/vmm" -I "$BASE_SYS" \
+	"$ROOT/sys/dev/vmm/vmm_pcie_root.c" \
 	"$ROOT/test/vmm/pcie/vmm_pcie_relation_test.c" \
 	-o "$BIN"
 "$BIN"
