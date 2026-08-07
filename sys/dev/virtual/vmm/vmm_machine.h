@@ -1,123 +1,15 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * VMM core: the machine model.  It composes the config value objects
- * (vcpu/mem/loader) and owns the lifecycle / lease / event state.  It is
- * kernel code and can be reused by a future kvm.ko.
- *
- * Types (uint32_t/uint8_t/size_t) come from the includer.
+ * VMM core: opaque machine allocation and lifetime entry points.  The machine
+ * implementation is independent of the VFS frontend.
  */
 #ifndef VMM_MACHINE_H
 #define VMM_MACHINE_H
 
-#include <sys/thread.h>
+struct vmm_machine;
 
-#include "vmm_console.h"
-#include "vmm_dma.h"
-#include "vmm_loader.h"
-#include "vmm_mem.h"
-#include "vmm_pcie_root.h"
-#include "vmm_vcpu.h"
-
-#define VMM_EVENT_LOG_SIZE (64 * 1024)
-
-struct ucred;
-struct taskqueue;
-struct vmm_launch;
-struct vmm_machine_task;
-struct vmm_pcie;
-
-typedef void (*vmm_machine_func)(const struct vmm_machine_task *task);
-
-enum vmm_machine_status {
-	VMM_MACHINE_STARTING,
-	VMM_MACHINE_RUNNING,
-	VMM_MACHINE_DRAINING,
-	VMM_MACHINE_STOPPED,
-};
-
-struct vmm_machine {
-	/* token_config protects control-plane config. */
-	/* atomic_mut_status is the MPSAFE runtime state and wait predicate. */
-	/* token_events protects the retained textual event ring and its TSC order. */
-	struct lwkt_token token_config;
-	struct lwkt_token token_events;
-	struct vmm_vcpus own_mut_vcpus;
-	struct vmm_mem own_mut_mem;
-	struct vmm_dma own_mut_dma;
-	struct vmm_pcie_root own_mut_pcie_root;
-	struct vmm_console own_mut_console;
-	struct taskqueue *own_mut_taskqueue;
-	/* Owned only by the serialized taskqueue after loader acceptance. */
-	struct vmm_launch *own_mut_boot_launch;
-	u_int atomic_mut_status;
-	u_int atomic_mut_start_wait_count;
-	u_int atomic_mut_start_failed;
-
-	int mut_desired_stopped;
-	char mut_loader_path[VMM_LOADER_MAX + 1];
-	size_t mut_loader_len;
-	int mut_leased;
-	char *own_mut_events_buf;
-	size_t imm_events_cap;
-	size_t mut_events_start;
-	size_t mut_events_len;
-	uint64_t mut_events_seq;
-	uint64_t mut_events_last_tsc;
-	uint64_t mut_events_drop_bytes;
-};
-
-/* Initialize in place (mkdir): stopped, no config, created+stopped queued. */
-void vmm_machine_init(struct vmm_machine *m, struct vmm_pcie *pcie);
-void vmm_machine_uninit(struct vmm_machine *m);
-void vmm_machine_drain(struct vmm_machine *m);
-void vmm_debug_trace(const char *fmt, ...);
-void vmm_machine_debugf(struct vmm_machine *m, const char *fmt, ...);
-extern int vmm_debug_allow_machine_taskqueue;
-extern int vmm_debug_allow_nmkdir_vnode;
-extern int vmm_debug_allow_start_execute;
-extern int vmm_debug_allow_machine_task_run;
-extern int vmm_debug_allow_loader_fork;
-extern int vmm_debug_allow_loader_run;
-extern int vmm_debug_allow_vcpu_start;
-size_t vmm_machine_format_vcpu(const struct vmm_machine *m, char *out,
-    size_t cap);
-int vmm_machine_commit_vcpu(struct vmm_machine *m, const char *buf, size_t len);
-size_t vmm_machine_format_mem(const struct vmm_machine *m, char *out,
-    size_t cap);
-int vmm_machine_commit_mem(struct vmm_machine *m, const char *buf, size_t len);
-size_t vmm_machine_format_loader(const struct vmm_machine *m, char *out,
-    size_t cap);
-int vmm_machine_commit_loader(struct vmm_machine *m, const char *buf,
-    size_t len);
-
-/*
- * Lifecycle.  stopped is declarative: it means "desired stopped", which is
- * what vmmfs presents as the stopped control file.  vmmfs translates file
- * operations into ordered command handlers; vmm_machine_execute() captures
- * syscall-context-only state (currently the paused loader process) and queues
- * a serialized command.  A start command reads frozen configuration when it
- * executes.  starting/running are current execution state, not proof that a
- * just-returned vmmfs operation already completed.
- */
-int vmm_machine_execute(struct vmm_machine *m, vmm_machine_func fnonce_handler,
-    struct ucred *cred);
-void vmm_machine_console_input(struct vmm_machine *m);
-void vmm_machine_msix(struct vmm_machine *m, uint8_t destination,
-    uint8_t vector);
-/* vCPU terminal/drain notifications run only after VMEXIT host-state restore. */
-void vmm_machine_vcpu_terminal(struct vmm_machine *m,
-    enum vmm_vcpu_exit_reason reason);
-void vmm_machine_vcpu_start_failed(struct vmm_machine *m);
-void vmm_machine_vcpu_drained(struct vmm_machine *m);
-void vmm_machine_command_start(const struct vmm_machine_task *task);
-void vmm_machine_command_stop(const struct vmm_machine_task *task);
-void vmm_machine_command_reset(const struct vmm_machine_task *task);
-
-/* Events: retained per-machine textual log, one line per record. */
-int vmm_machine_events_pending(const struct vmm_machine *m);
-size_t vmm_machine_read_events(struct vmm_machine *m, off_t off, char *out,
-    size_t cap);
-void vmm_machine_logf(struct vmm_machine *m, const char *fmt, ...);
+int vmm_machine_create(struct vmm_machine **machine);
+int vmm_machine_destroy(struct vmm_machine *machine);
 
 #endif /* VMM_MACHINE_H */

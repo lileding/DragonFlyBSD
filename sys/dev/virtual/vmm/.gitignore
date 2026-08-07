@@ -13,9 +13,14 @@ machine_base
 cpu
 cpu_base
 @
+# Kernel build-generated interface headers
+bus_if.h
+device_if.h
+opt_nfs.h
 # Generated KOBJ interface glue (from vmmfs_node_if.m via makeobjops)
 vmmfs_node_if.c
 vmmfs_node_if.h
 # Local scratch
+compile_commands.json
 transform.py
 *.bak
