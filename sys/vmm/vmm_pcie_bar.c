@@ -393,15 +393,17 @@ static void
 vmm_pcie_bar_cap_revoke(struct vmm_pcie_bar_fd *cap)
 {
 	struct vm_object *backing;
+	int remove_pages;
 
 	if (cap == NULL)
 		return;
 	backing = NULL;
+	remove_pages = 0;
 	if (cap->own_mut_object != NULL) {
 		VM_OBJECT_LOCK(cap->own_mut_object);
 		if (!cap->mut_revoked) {
 			cap->mut_revoked = 1;
-			vm_object_page_remove(cap->own_mut_object, 0, 0, FALSE);
+			remove_pages = 1;
 			backing = cap->own_mut_backing_object;
 			cap->own_mut_backing_object = NULL;
 		}
@@ -411,6 +413,8 @@ vmm_pcie_bar_cap_revoke(struct vmm_pcie_bar_fd *cap)
 		backing = cap->own_mut_backing_object;
 		cap->own_mut_backing_object = NULL;
 	}
+	if (remove_pages)
+		vm_object_page_remove(cap->own_mut_object, 0, 0, FALSE);
 	if (backing != NULL)
 		vm_object_deallocate(backing);
 }

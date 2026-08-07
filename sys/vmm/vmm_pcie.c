@@ -71,6 +71,8 @@ static void	vmm_pcie_device_runtime_take_locked(struct vmm_device *device,
 		    struct vmm_pcie_device_runtime *runtime);
 static void	vmm_pcie_device_runtime_release(
 		    struct vmm_pcie_device_runtime *runtime);
+static void	vmm_pcie_device_runtime_release_cold(
+		    struct vmm_pcie_device_runtime *runtime);
 static int	vmm_pcie_root_stop_pending_locked(
 		    struct vmm_pcie_root *root);
 static int	vmm_pcie_device_bar_range_flags_locked(
@@ -238,18 +240,12 @@ int
 vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
     struct vmm_pcie_root *root)
 {
-	struct vmm_pcie_device_runtime runtime;
-	struct vmm_machine *machine;
 	uint32_t bdf;
-	int start;
 	int error;
 
 	if (device == NULL || device->borrow_imm_pcie != pcie || root == NULL ||
 	    root->borrow_imm_pcie != pcie)
 		return EINVAL;
-	bzero(&runtime, sizeof(runtime));
-	machine = NULL;
-	start = 0;
 	lwkt_gettoken(&pcie->token_registry);
 	if (pcie->mut_closing) {
 		error = EBUSY;
@@ -268,31 +264,30 @@ vmm_pcie_device_move(struct vmm_pcie *pcie, struct vmm_device *device,
 		error = 0;
 		goto out;
 	}
+	/* A move changes the cold machine topology, never a live runtime. */
+	if (device->borrow_mut_root->mut_running || root->mut_running) {
+		error = EBUSY;
+		goto out;
+	}
+	if (device->mut_run_generation != 0 || device->mut_registered ||
+	    device->own_mut_dma_cap != NULL) {
+		error = EBUSY;
+		goto out;
+	}
 	bdf = vmm_pcie_root_bdf_alloc_locked(root);
 	if (bdf == 0) {
 		error = ENOSPC;
 		goto out;
 	}
-	if (device->mut_run_generation != 0 || device->mut_registered ||
-	    device->own_mut_dma_cap != NULL)
-		vmm_pcie_device_runtime_take_locked(device, &runtime);
 	vmm_pcie_root_bdf_release_locked(device->borrow_mut_root,
 	    device->mut_bdf);
 	device->borrow_mut_root = root;
 	device->mut_bdf = bdf;
 	if (device->mut_attachment_generation != (uint64_t)-1)
 		device->mut_attachment_generation++;
-	if (device->borrow_mut_provider != NULL && root->mut_running &&
-	    root->borrow_imm_machine != NULL) {
-		machine = root->borrow_imm_machine;
-		start = 1;
-	}
 	error = 0;
 out:
 	lwkt_reltoken(&pcie->token_registry);
-	vmm_pcie_device_runtime_release(&runtime);
-	if (error == 0 && start)
-		vmm_pcie_root_start(root, &machine->own_mut_dma);
 	return error;
 }
 
@@ -595,7 +590,7 @@ vmm_pcie_device_provider_detach(struct vmm_device *device,
 		wakeup(root);
 	}
 	lwkt_reltoken(&pcie->token_registry);
-	/* Provider loss is surprise removal: no STOP handshake or wait. */
+	/* Provider loss leaves guest BAR mappings in place until cold stop. */
 	vmm_pcie_device_runtime_release(&runtime);
 }
 
@@ -1186,7 +1181,7 @@ vmm_pcie_root_start(struct vmm_pcie_root *root, struct vmm_dma *dma)
 			if (device != NULL && device->own_mut_dma_cap == cap)
 				vmm_pcie_device_runtime_take_locked(device, &runtime);
 			lwkt_reltoken(&pcie->token_registry);
-			vmm_pcie_device_runtime_release(&runtime);
+			vmm_pcie_device_runtime_release_cold(&runtime);
 			vmm_machine_logf(root->borrow_imm_machine,
 			    "device start failed stage=provider device=%ju error=%d",
 			    (uintmax_t)device_id, error);
@@ -1274,7 +1269,7 @@ vmm_pcie_root_stop(struct vmm_pcie_root *root)
 		lwkt_reltoken(&pcie->token_registry);
 		if (runtime.borrow_mut_root == NULL)
 			break;
-		vmm_pcie_device_runtime_release(&runtime);
+		vmm_pcie_device_runtime_release_cold(&runtime);
 	}
 }
 
@@ -1408,14 +1403,23 @@ vmm_pcie_device_runtime_release(struct vmm_pcie_device_runtime *runtime)
 	if (runtime == NULL || runtime->borrow_mut_root == NULL)
 		return;
 	vmm_pcie_event_destroy(runtime->own_mut_event);
-	vmm_pcie_root_bar_mappings_unmap(runtime->borrow_mut_root,
-	    runtime->own_mut_mappings);
 	vmm_dma_cap_revoke(runtime->own_mut_dma_cap);
 	vmm_pcie_config_destroy(runtime->own_mut_config);
 	for (i = 0; i < VMM_PCIE_ABI_MAX_BARS; i++) {
 		vmm_pcie_bar_revoke(&runtime->own_mut_bars[i]);
 		vmm_pcie_bar_destroy(&runtime->own_mut_bars[i]);
 	}
+}
+
+static void
+vmm_pcie_device_runtime_release_cold(struct vmm_pcie_device_runtime *runtime)
+{
+
+	if (runtime == NULL || runtime->borrow_mut_root == NULL)
+		return;
+	vmm_pcie_root_bar_mappings_unmap(runtime->borrow_mut_root,
+	    runtime->own_mut_mappings);
+	vmm_pcie_device_runtime_release(runtime);
 }
 
 static int

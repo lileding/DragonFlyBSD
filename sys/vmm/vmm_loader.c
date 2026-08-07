@@ -430,19 +430,18 @@ vmm_loader_fd_revoke(struct vmm_loader_fd *lfd)
 {
 	struct vm_object *backing = NULL;
 	struct vm_object *object;
+	int remove_pages = 0;
 
 	object = lfd->own_mut_object;
 	if (object != NULL) {
 		VM_OBJECT_LOCK(object);
 		if (!lfd->mut_revoked) {
 			lfd->mut_revoked = 1;
-			/*
-			 * Publish rejection before synchronously removing every installed
-			 * user pmap entry tracked by this MGTDEVICE object.
-			 */
-			vm_object_page_remove(object, 0, 0, FALSE);
+			remove_pages = 1;
 		}
 		VM_OBJECT_UNLOCK(object);
+		if (remove_pages)
+			vm_object_page_remove(object, 0, 0, FALSE);
 	} else if (!lfd->mut_revoked) {
 		lfd->mut_revoked = 1;
 		backing = lfd->own_mut_backing_object;

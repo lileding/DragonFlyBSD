@@ -213,6 +213,7 @@ vmm_machine_uninit(struct vmm_machine *m)
 	 */
 	thread_count = m->own_mut_vcpus.mut_count;
 	vmm_vcpus_uninit(&m->own_mut_vcpus, &threads);
+	vmm_mem_runtime_deactivate(&m->own_mut_mem);
 	vmm_pcie_root_stop(&m->own_mut_pcie_root);
 	vmm_dma_uninit(&m->own_mut_dma);
 	backing = vmm_mem_detach(&m->own_mut_mem);
@@ -574,6 +575,7 @@ fail_after_loader:
 	vmm_vcpus_stop(m);
 	thread_count = m->own_mut_vcpus.mut_count;
 	vmm_vcpus_uninit(&m->own_mut_vcpus, &threads);
+	vmm_mem_runtime_deactivate(&m->own_mut_mem);
 	vmm_machine_set_status(m, VMM_MACHINE_STOPPED);
 	vmm_machine_logf(m, "state stopped reason=start_failed error=%d",
 	    error);
@@ -707,6 +709,7 @@ vmm_machine_vcpu_drained(struct vmm_machine *m)
 	exit_reason = atomic_load_acq_int(
 	    &m->own_mut_vcpus.atomic_mut_exit_reason);
 	lwkt_reltoken(&m->token_config);
+	vmm_mem_runtime_deactivate(&m->own_mut_mem);
 	vmm_vcpus_release(&m->own_mut_vcpus, threads, thread_count);
 	vmm_dma_stop(&m->own_mut_dma);
 	vmm_pcie_root_reset(&m->own_mut_pcie_root);

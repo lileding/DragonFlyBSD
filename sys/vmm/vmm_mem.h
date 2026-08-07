@@ -58,6 +58,12 @@ int	vmm_mem_publish(struct vmm_mem *m, struct vmm_mem_backing *backing);
 int	vmm_mem_start_run(struct vmm_mem *m);
 /* Replace the stopped runtime vmspace with a fresh COW fork of boot. */
 int	vmm_mem_reset_run(struct vmm_mem *m);
+/*
+ * Called after all vCPUs have drained and before any runtime mapping or
+ * backend state is destroyed.  It removes the runtime pmap from every CPU
+ * active set, so later pmap removal cannot wait on a vCPU that no longer runs.
+ */
+void	vmm_mem_runtime_deactivate(struct vmm_mem *m);
 struct vmm_mem_backing *vmm_mem_detach(struct vmm_mem *m);
 void	vmm_mem_release_backing(struct vmm_mem_backing *b);
 /*

@@ -2,7 +2,7 @@
 # pc64 SVM staged Linux SMP bring-up and concurrent pmap pressure regression.
 set -u
 
-REPO=${REPO:-/home/lileding/src/dfvmm}
+REPO=${REPO:-/home/lileding/projects/dfly-vmm/DragonFlyBSD}
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-smp-bringup-vmm}
 VM=${VMM_MACHINE:-linuxsmpbringup0}

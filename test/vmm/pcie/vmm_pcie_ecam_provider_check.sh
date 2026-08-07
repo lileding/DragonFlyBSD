@@ -5,7 +5,7 @@ set -eu
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-BASE_SYS=$(cd "$REPO/../nvkm/sys" && pwd)
+BASE_SYS="$REPO/sys"
 BIN=${VMM_PCIE_ECAM_PROVIDER_BIN:-/var/tmp/vmm_pcie_ecam_provider}
 
 cleanup()

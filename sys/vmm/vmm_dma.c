@@ -231,17 +231,18 @@ vmm_dma_cap_revoke(struct vmm_dma_cap *cap)
 	struct vm_object *object;
 	struct file *fp;
 	struct vmspace *vmspace;
+	int remove_pages;
 
 	if (cap == NULL)
 		return;
 	vmspace = NULL;
+	remove_pages = 0;
 	object = cap->own_mut_object;
 	if (object != NULL) {
 		VM_OBJECT_LOCK(object);
 		if (!cap->mut_revoked) {
 			cap->mut_revoked = 1;
-			/* Publish rejection before invalidating installed user mappings. */
-			vm_object_page_remove(object, 0, 0, FALSE);
+			remove_pages = 1;
 			vmspace = cap->own_mut_vmspace;
 			cap->own_mut_vmspace = NULL;
 		}
@@ -251,6 +252,8 @@ vmm_dma_cap_revoke(struct vmm_dma_cap *cap)
 		vmspace = cap->own_mut_vmspace;
 		cap->own_mut_vmspace = NULL;
 	}
+	if (remove_pages)
+		vm_object_page_remove(object, 0, 0, FALSE);
 	if (vmspace != NULL)
 		vmspace_rel(vmspace);
 	fp = cap->own_mut_fp;

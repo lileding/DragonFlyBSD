@@ -4,7 +4,7 @@ set -u
 
 ROOT=$(dirname "$0")
 REPO=$(cd "$ROOT/../../.." && pwd)
-BASE_SYS=$(cd "$REPO/../nvkm/sys" && pwd)
+BASE_SYS="$REPO/sys"
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-pcie-ecam-vmm}
 VM=${VMM_MACHINE:-pcieecam0}

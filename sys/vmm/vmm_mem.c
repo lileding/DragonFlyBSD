@@ -313,6 +313,18 @@ vmm_mem_reset_run(struct vmm_mem *m)
 	return 0;
 }
 
+void
+vmm_mem_runtime_deactivate(struct vmm_mem *m)
+{
+	struct vmm_mem_backing *b;
+
+	if (m == NULL)
+		return;
+	b = m->own_mut_backing;
+	if (b != NULL && b->own_mut_run_vmspace != NULL)
+		vmm_mem_pmap_del_all_cpus(b->own_mut_run_vmspace);
+}
+
 struct vmm_mem_backing *
 vmm_mem_detach(struct vmm_mem *m)
 {

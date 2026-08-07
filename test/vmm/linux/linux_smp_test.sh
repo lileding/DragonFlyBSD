@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-REPO=${REPO:-/home/lileding/src/dfvmm}
+REPO=${REPO:-/home/lileding/projects/dfly-vmm/DragonFlyBSD}
 VMM_KO=${VMM_KO:-$REPO/sys/vmm/vmm.ko}
 MNT=${VMM_MOUNT:-/var/tmp/dfvmm-linux-smp-vmm}
 VM=${VMM_MACHINE:-linuxsmp0}
