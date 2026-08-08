@@ -26,23 +26,10 @@
  * SUCH DAMAGE.
  */
 
-#if defined(__NetBSD__)
-/* Override user-land alignment before including asm.h */
-#define ALIGN_DATA	.align	8
-#define ALIGN_TEXT	.align 16,0x90
-#define _ALIGN_TEXT	ALIGN_TEXT
-#define _LOCORE
-#include "assym.h"
-#include <machine/asm.h>
-#elif defined(__DragonFly__)
+#define LOCORE
 #include <machine/asmacros.h>
-#include "assym.s"
-#endif
-
 #include <machine/segments.h>
-
-#define ASM_NVMM
-#include "nvmm_x86.h"
+#include <machine/specialreg.h>
 
 	.text
 
@@ -78,26 +65,12 @@
 	strw	%ax		;\
 	pushq	%rax
 
-#if defined(__NetBSD__)
 #define HOST_RESTORE_TR				\
-	popq	%rax				;\
-	movzwq	%ax,%rdx			;\
-	movq	CPUVAR(GDT),%rax		;\
-	/* Clear the busy bit for reloading. */	\
-	andq	$~0x0200,4(%rax,%rdx, 1)	;\
-	ltrw	%dx
-#elif defined(__DragonFly__)
-/* In DragonFly, PCPU(tss_gdt) points directly to the gdt[] entry for the
- * current CPU's TSS descriptor; while NetBSD's CPUVAR(GDT) points to the
- * gdtstore[] table. */
-#define HOST_RESTORE_TR				\
-	popq	%rax				;\
-	movzwq	%ax,%rdx			;\
-	movq	PCPU(tss_gdt),%rax		;\
-	/* Clear the busy bit for reloading. */	\
-	andq	$~0x0200,4(%rax)		;\
-	ltrw	%dx
-#endif
+	popq	%rdi				;\
+	movzwq	%di,%rdi			;\
+	subq	$8,%rsp			;\
+	call	vmm_svm_restore_tr		;\
+	addq	$8,%rsp
 
 #define HOST_SAVE_LDT		\
 	sldtw	%ax		;\
@@ -107,41 +80,56 @@
 	popq	%rax		;\
 	lldtw	%ax
 
+#define VMM_X64_GPR_RCX	1
+#define VMM_X64_GPR_RDX	2
+#define VMM_X64_GPR_RBX	3
+#define VMM_X64_GPR_RBP	5
+#define VMM_X64_GPR_RSI	6
+#define VMM_X64_GPR_RDI	7
+#define VMM_X64_GPR_R8		8
+#define VMM_X64_GPR_R9		9
+#define VMM_X64_GPR_R10	10
+#define VMM_X64_GPR_R11	11
+#define VMM_X64_GPR_R12	12
+#define VMM_X64_GPR_R13	13
+#define VMM_X64_GPR_R14	14
+#define VMM_X64_GPR_R15	15
+
 /*
- * All GPRs except RAX and RSP, which are taken care of in VMCB.
+ * All guest GPRs except RAX and RSP, which are taken care of in the VMCB.
  */
 
 #define GUEST_SAVE_GPRS(reg)				\
-	movq	%rcx,(NVMM_X64_GPR_RCX * 8)(reg)	;\
-	movq	%rdx,(NVMM_X64_GPR_RDX * 8)(reg)	;\
-	movq	%rbx,(NVMM_X64_GPR_RBX * 8)(reg)	;\
-	movq	%rbp,(NVMM_X64_GPR_RBP * 8)(reg)	;\
-	movq	%rsi,(NVMM_X64_GPR_RSI * 8)(reg)	;\
-	movq	%rdi,(NVMM_X64_GPR_RDI * 8)(reg)	;\
-	movq	%r8,(NVMM_X64_GPR_R8 * 8)(reg)		;\
-	movq	%r9,(NVMM_X64_GPR_R9 * 8)(reg)		;\
-	movq	%r10,(NVMM_X64_GPR_R10 * 8)(reg)	;\
-	movq	%r11,(NVMM_X64_GPR_R11 * 8)(reg)	;\
-	movq	%r12,(NVMM_X64_GPR_R12 * 8)(reg)	;\
-	movq	%r13,(NVMM_X64_GPR_R13 * 8)(reg)	;\
-	movq	%r14,(NVMM_X64_GPR_R14 * 8)(reg)	;\
-	movq	%r15,(NVMM_X64_GPR_R15 * 8)(reg)
+	movq	%rcx,(VMM_X64_GPR_RCX * 8)(reg)	;\
+	movq	%rdx,(VMM_X64_GPR_RDX * 8)(reg)	;\
+	movq	%rbx,(VMM_X64_GPR_RBX * 8)(reg)	;\
+	movq	%rbp,(VMM_X64_GPR_RBP * 8)(reg)	;\
+	movq	%rsi,(VMM_X64_GPR_RSI * 8)(reg)	;\
+	movq	%rdi,(VMM_X64_GPR_RDI * 8)(reg)	;\
+	movq	%r8,(VMM_X64_GPR_R8 * 8)(reg)		;\
+	movq	%r9,(VMM_X64_GPR_R9 * 8)(reg)		;\
+	movq	%r10,(VMM_X64_GPR_R10 * 8)(reg)	;\
+	movq	%r11,(VMM_X64_GPR_R11 * 8)(reg)	;\
+	movq	%r12,(VMM_X64_GPR_R12 * 8)(reg)	;\
+	movq	%r13,(VMM_X64_GPR_R13 * 8)(reg)	;\
+	movq	%r14,(VMM_X64_GPR_R14 * 8)(reg)	;\
+	movq	%r15,(VMM_X64_GPR_R15 * 8)(reg)
 
 #define GUEST_RESTORE_GPRS(reg)				\
-	movq	(NVMM_X64_GPR_RCX * 8)(reg),%rcx	;\
-	movq	(NVMM_X64_GPR_RDX * 8)(reg),%rdx	;\
-	movq	(NVMM_X64_GPR_RBX * 8)(reg),%rbx	;\
-	movq	(NVMM_X64_GPR_RBP * 8)(reg),%rbp	;\
-	movq	(NVMM_X64_GPR_RSI * 8)(reg),%rsi	;\
-	movq	(NVMM_X64_GPR_RDI * 8)(reg),%rdi	;\
-	movq	(NVMM_X64_GPR_R8 * 8)(reg),%r8		;\
-	movq	(NVMM_X64_GPR_R9 * 8)(reg),%r9		;\
-	movq	(NVMM_X64_GPR_R10 * 8)(reg),%r10	;\
-	movq	(NVMM_X64_GPR_R11 * 8)(reg),%r11	;\
-	movq	(NVMM_X64_GPR_R12 * 8)(reg),%r12	;\
-	movq	(NVMM_X64_GPR_R13 * 8)(reg),%r13	;\
-	movq	(NVMM_X64_GPR_R14 * 8)(reg),%r14	;\
-	movq	(NVMM_X64_GPR_R15 * 8)(reg),%r15
+	movq	(VMM_X64_GPR_RCX * 8)(reg),%rcx	;\
+	movq	(VMM_X64_GPR_RDX * 8)(reg),%rdx	;\
+	movq	(VMM_X64_GPR_RBX * 8)(reg),%rbx	;\
+	movq	(VMM_X64_GPR_RBP * 8)(reg),%rbp	;\
+	movq	(VMM_X64_GPR_RSI * 8)(reg),%rsi	;\
+	movq	(VMM_X64_GPR_RDI * 8)(reg),%rdi	;\
+	movq	(VMM_X64_GPR_R8 * 8)(reg),%r8		;\
+	movq	(VMM_X64_GPR_R9 * 8)(reg),%r9		;\
+	movq	(VMM_X64_GPR_R10 * 8)(reg),%r10	;\
+	movq	(VMM_X64_GPR_R11 * 8)(reg),%r11	;\
+	movq	(VMM_X64_GPR_R12 * 8)(reg),%r12	;\
+	movq	(VMM_X64_GPR_R13 * 8)(reg),%r13	;\
+	movq	(VMM_X64_GPR_R14 * 8)(reg),%r14	;\
+	movq	(VMM_X64_GPR_R15 * 8)(reg),%r15
 
 /*
  * %rdi = PA of VMCB

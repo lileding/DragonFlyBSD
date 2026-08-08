@@ -12,6 +12,7 @@
 #include <sys/thread2.h>
 
 #include <machine/cpufunc.h>
+#include <machine/globaldata.h>
 #include <machine/smp.h>
 #include <machine/specialreg.h>
 
@@ -326,6 +327,13 @@ void
 vmm_svm_vcpu_kick(struct vmm_vcpu *vcpu)
 {
 	(void)vcpu;
+}
+
+void
+vmm_svm_restore_tr(uint16_t selector)
+{
+	mdcpu->gd_tss_gdt->sd_type &= ~0x2;
+	ltr(selector);
 }
 
 static void

@@ -6,6 +6,8 @@
 #ifndef VMM_SVM_H
 #define VMM_SVM_H
 
+#include <sys/types.h>
+
 struct vmm_machine;
 struct vmm_vcpu;
 struct vmm_cpuexit;
@@ -19,5 +21,7 @@ int vmm_svm_vcpu_create(struct vmm_vcpu *);
 void vmm_svm_vcpu_destroy(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
+void vmm_svm_vmrun(uint64_t, uint64_t *);
+void vmm_svm_restore_tr(uint16_t);
 
 #endif /* VMM_SVM_H */
