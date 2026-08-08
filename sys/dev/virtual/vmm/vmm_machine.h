@@ -30,8 +30,6 @@ struct vmm_machine {
 	/* token protects vmspace, memory, memory_generation, vcpu_count, and run_count. */
 	struct lwkt_token token;
 	const struct vmm_backend_ops *backend;
-	/* backend_data is fixed between backend machine create and destroy. */
-	void *backend_data;
 	struct vmspace *vmspace;
 	struct vmm_memory_mapping_list memory;
 	uint64_t memory_generation;

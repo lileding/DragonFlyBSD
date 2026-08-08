@@ -25,7 +25,6 @@ struct vmm_backend_ops {
 	void (*vcpu_kick)(struct vmm_vcpu *);
 };
 
-const struct vmm_backend_ops *vmm_backend_machine_acquire(void);
-void vmm_backend_machine_release(const struct vmm_backend_ops *);
+#define VMM_BACKEND_SET(ops)	DATA_SET(vmm_backend_set, ops)
 
 #endif /* VMM_BACKEND_H */

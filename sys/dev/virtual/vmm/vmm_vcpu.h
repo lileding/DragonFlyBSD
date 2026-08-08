@@ -12,6 +12,7 @@ struct vmm_vcpu {
 	/* token protects running and kick_pending. */
 	struct lwkt_token token;
 	struct vmm_machine *machine;
+	const struct vmm_backend_ops *backend_ops;
 	struct vmm_cpustate *state;
 	void *backend;
 	int running;

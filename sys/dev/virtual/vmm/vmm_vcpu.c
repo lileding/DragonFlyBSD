@@ -25,9 +25,10 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 		return ENOMEM;
 
 	vc->machine = machine;
+	vc->backend_ops = machine->backend;
 	vc->state = state;
 	lwkt_token_init(&vc->token, "vmmvcpu");
-	error = machine->backend->vcpu_create(vc);
+	error = vc->backend_ops->vcpu_create(vc);
 	if (error != 0) {
 		kfree(vc, M_VMM);
 		return error;
@@ -64,7 +65,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	if (error != 0)
 		return error;
 
-	error = machine->backend->vcpu_run(vcpu, reason);
+	error = vcpu->backend_ops->vcpu_run(vcpu, reason);
 
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
@@ -92,7 +93,7 @@ vmm_vcpu_kick(vmm_vcpu_t vcpu)
 	}
 	vcpu->kick_pending = 1;
 	lwkt_reltoken(&vcpu->token);
-	vcpu->machine->backend->vcpu_kick(vcpu);
+	vcpu->backend_ops->vcpu_kick(vcpu);
 	return 0;
 }
 
@@ -115,7 +116,7 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	--machine->vcpu_count;
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
-	machine->backend->vcpu_destroy(vcpu);
+	vcpu->backend_ops->vcpu_destroy(vcpu);
 	kfree(vcpu, M_VMM);
 	return 0;
 }

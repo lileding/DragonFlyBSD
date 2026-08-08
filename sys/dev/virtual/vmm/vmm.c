@@ -10,39 +10,19 @@
 #include <sys/systm.h>
 #include <sys/thread.h>
 
-#include "vmm_backend.h"
-#include "x64/svm/vmm_x64_svm.h"
+#include "vmm_internal.h"
 
-static const struct vmm_backend_ops *vmm_backend;
-static struct lwkt_token vmm_backend_token;
-static unsigned int vmm_machine_count;
+SET_DECLARE(vmm_backend_set, const struct vmm_backend_ops);
 
-const struct vmm_backend_ops *
-vmm_backend_machine_acquire(void)
-{
-	const struct vmm_backend_ops *backend;
-
-	lwkt_gettoken(&vmm_backend_token);
-	backend = vmm_backend;
-	if (backend != NULL)
-		++vmm_machine_count;
-	lwkt_reltoken(&vmm_backend_token);
-	return backend;
-}
-
-void
-vmm_backend_machine_release(const struct vmm_backend_ops *backend)
-{
-	lwkt_gettoken(&vmm_backend_token);
-	KKASSERT(vmm_backend == backend);
-	KKASSERT(vmm_machine_count != 0);
-	--vmm_machine_count;
-	lwkt_reltoken(&vmm_backend_token);
-}
+const struct vmm_backend_ops *vmm_backend;
+struct lwkt_token vmm_token;
+int vmm_machine_count;
+bool vmm_draining;
 
 static int
 vmm_modevent(module_t module, int event, void *arg)
 {
+	const struct vmm_backend_ops **ops;
 	const struct vmm_backend_ops *backend;
 	int error;
 
@@ -51,29 +31,40 @@ vmm_modevent(module_t module, int event, void *arg)
 
 	switch (event) {
 	case MOD_LOAD:
-		lwkt_token_init(&vmm_backend_token, "vmmbackend");
-		backend = &vmm_x64_svm_backend;
-		error = backend->probe();
-		if (error != 0) {
-			kprintf("vmm: %s backend unavailable (%d)\n", backend->name,
-			    error);
+		lwkt_token_init(&vmm_token, "vmm");
+		backend = NULL;
+		vmm_machine_count = 0;
+		vmm_draining = false;
+		error = ENXIO;
+		SET_FOREACH(ops, vmm_backend_set) {
+			error = (*ops)->probe();
+			if (error != 0)
+				continue;
+			error = (*ops)->init();
+			if (error != 0) {
+				kprintf("vmm: %s backend init failed (%d)\n",
+				    (*ops)->name, error);
+				return error;
+			}
+			backend = *ops;
+			break;
+		}
+		if (backend == NULL) {
+			kprintf("vmm: no usable backend (%d)\n", error);
 			return error;
 		}
-		error = backend->init();
-		if (error != 0)
-			return error;
 		vmm_backend = backend;
 		kprintf("vmm: selected %s backend\n", backend->name);
 		return 0;
 	case MOD_UNLOAD:
-		lwkt_gettoken(&vmm_backend_token);
+		lwkt_gettoken(&vmm_token);
 		if (vmm_machine_count != 0) {
-			lwkt_reltoken(&vmm_backend_token);
+			lwkt_reltoken(&vmm_token);
 			return EBUSY;
 		}
+		vmm_draining = true;
 		backend = vmm_backend;
-		vmm_backend = NULL;
-		lwkt_reltoken(&vmm_backend_token);
+		lwkt_reltoken(&vmm_token);
 		if (backend != NULL)
 			backend->fini();
 		return 0;
