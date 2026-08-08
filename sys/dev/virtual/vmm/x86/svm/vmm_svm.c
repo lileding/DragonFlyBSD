@@ -236,7 +236,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	vmcb->ctrl.tlb_ctrl = VMM_SVM_TLB_FLUSH_ALL;
 	vmcb->ctrl.enable1 = VMM_SVM_ENABLE_NPT;
 	vmcb->ctrl.n_cr3 = vtophys(pmap->pm_pml4);
-	error = vmm_svm_state_init(vmcb, vcpu->state, &svm->xcr0);
+	error = vmm_svm_state_create(vmcb, vcpu->state, &svm->xcr0);
 	if (error != 0)
 		goto fail;
 	return 0;

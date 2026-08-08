@@ -50,7 +50,16 @@ CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
 CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
 
 int
-vmm_svm_state_init(struct vmm_svm_vmcb *vmcb,
+vmm_svm_state_create(struct vmm_svm_vmcb *vmcb,
+	const struct vmm_cpustate *state, uint64_t *xcr0)
+{
+	vmcb->state.dr6 = 0xffff0ff0ULL;
+	vmcb->state.dr7 = 0x400ULL;
+	return vmm_svm_state_load(vmcb, state, xcr0);
+}
+
+int
+vmm_svm_state_load(struct vmm_svm_vmcb *vmcb,
 	const struct vmm_cpustate *state, uint64_t *xcr0)
 {
 	uint64_t value;
@@ -87,8 +96,6 @@ vmm_svm_state_init(struct vmm_svm_vmcb *vmcb,
 	vmcb->state.cr2 = state->cr[VMM_X64_CR_CR2];
 	vmcb->state.cr3 = state->cr[VMM_X64_CR_CR3];
 	vmcb->state.cr4 = state->cr[VMM_X64_CR_CR4];
-	vmcb->state.dr6 = 0xffff0ff0ULL;
-	vmcb->state.dr7 = 0x400ULL;
 	vmcb->ctrl.v = (vmcb->ctrl.v & ~VMM_SVM_V_TPR) |
 	    (state->cr[VMM_X64_CR_CR8] & VMM_SVM_V_TPR);
 	*xcr0 = value;
@@ -125,4 +132,51 @@ vmm_svm_state_init(struct vmm_svm_vmcb *vmcb,
 	    sizeof(vmcb->state.tr));
 	vmcb->state.cpl = (vmcb->state.ss.attrib >> 5) & 3;
 	return 0;
+}
+
+void
+vmm_svm_state_store(const struct vmm_svm_vmcb *vmcb,
+	struct vmm_cpustate *state, uint64_t xcr0)
+{
+	state->gpr[VMM_X64_GPR_RAX] = vmcb->state.rax;
+	state->gpr[VMM_X64_GPR_RSP] = vmcb->state.rsp;
+	state->gpr[VMM_X64_GPR_RIP] = vmcb->state.rip;
+	state->gpr[VMM_X64_GPR_RFLAGS] = vmcb->state.rflags;
+	state->cr[VMM_X64_CR_CR0] = vmcb->state.cr0;
+	state->cr[VMM_X64_CR_CR2] = vmcb->state.cr2;
+	state->cr[VMM_X64_CR_CR3] = vmcb->state.cr3;
+	state->cr[VMM_X64_CR_CR4] = vmcb->state.cr4;
+	state->cr[VMM_X64_CR_CR8] = vmcb->ctrl.v & VMM_SVM_V_TPR;
+	state->cr[VMM_X64_CR_XCR0] = xcr0;
+	state->msr[VMM_X64_MSR_EFER] = vmcb->state.efer & ~EFER_SVME;
+	state->msr[VMM_X64_MSR_STAR] = vmcb->state.star;
+	state->msr[VMM_X64_MSR_LSTAR] = vmcb->state.lstar;
+	state->msr[VMM_X64_MSR_CSTAR] = vmcb->state.cstar;
+	state->msr[VMM_X64_MSR_SFMASK] = vmcb->state.sfmask;
+	state->msr[VMM_X64_MSR_KERNELGSBASE] = vmcb->state.kernelgsbase;
+	state->msr[VMM_X64_MSR_SYSENTER_CS] = vmcb->state.sysenter_cs;
+	state->msr[VMM_X64_MSR_SYSENTER_ESP] = vmcb->state.sysenter_esp;
+	state->msr[VMM_X64_MSR_SYSENTER_EIP] = vmcb->state.sysenter_eip;
+	state->msr[VMM_X64_MSR_PAT] = vmcb->state.g_pat;
+
+	bcopy(&vmcb->state.es, &state->seg[VMM_X64_SEG_ES],
+	    sizeof(vmcb->state.es));
+	bcopy(&vmcb->state.cs, &state->seg[VMM_X64_SEG_CS],
+	    sizeof(vmcb->state.cs));
+	bcopy(&vmcb->state.ss, &state->seg[VMM_X64_SEG_SS],
+	    sizeof(vmcb->state.ss));
+	bcopy(&vmcb->state.ds, &state->seg[VMM_X64_SEG_DS],
+	    sizeof(vmcb->state.ds));
+	bcopy(&vmcb->state.fs, &state->seg[VMM_X64_SEG_FS],
+	    sizeof(vmcb->state.fs));
+	bcopy(&vmcb->state.gs, &state->seg[VMM_X64_SEG_GS],
+	    sizeof(vmcb->state.gs));
+	bcopy(&vmcb->state.gdt, &state->seg[VMM_X64_SEG_GDT],
+	    sizeof(vmcb->state.gdt));
+	bcopy(&vmcb->state.idt, &state->seg[VMM_X64_SEG_IDT],
+	    sizeof(vmcb->state.idt));
+	bcopy(&vmcb->state.ldt, &state->seg[VMM_X64_SEG_LDT],
+	    sizeof(vmcb->state.ldt));
+	bcopy(&vmcb->state.tr, &state->seg[VMM_X64_SEG_TR],
+	    sizeof(vmcb->state.tr));
 }

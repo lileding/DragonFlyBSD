@@ -125,8 +125,12 @@ int vmm_svm_vcpu_create(struct vmm_vcpu *);
 void vmm_svm_vcpu_destroy(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
-int vmm_svm_state_init(struct vmm_svm_vmcb *,
+int vmm_svm_state_create(struct vmm_svm_vmcb *,
 	const struct vmm_cpustate *, uint64_t *);
+int vmm_svm_state_load(struct vmm_svm_vmcb *,
+	const struct vmm_cpustate *, uint64_t *);
+void vmm_svm_state_store(const struct vmm_svm_vmcb *,
+	struct vmm_cpustate *, uint64_t);
 void vmm_svm_vmrun(uint64_t, uint64_t *);
 void vmm_svm_restore_tr(uint16_t);
 
