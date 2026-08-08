@@ -56,132 +56,6 @@
 
 #define VMM_SVM_ENABLE_NPT		0x001ULL
 #define VMM_SVM_TLB_FLUSH_ALL		0x001U
-#define VMM_SVM_V_TPR			0x00fULL
-
-/* The VMCB control area is a fixed AMD hardware ABI. */
-struct vmm_svm_ctrl {
-	uint32_t intercept_cr;
-	uint32_t intercept_dr;
-	uint32_t intercept_vec;
-	uint32_t intercept_misc1;
-	uint32_t intercept_misc2;
-	uint32_t intercept_misc3;
-	uint8_t reserved1[36];
-	uint16_t pause_filt_thresh;
-	uint16_t pause_filt_cnt;
-	uint64_t iopm_base_pa;
-	uint64_t msrpm_base_pa;
-	uint64_t tsc_offset;
-	uint32_t guest_asid;
-	uint32_t tlb_ctrl;
-	uint64_t v;
-	uint64_t intr;
-	uint64_t exitcode;
-	uint64_t exitinfo1;
-	uint64_t exitinfo2;
-	uint64_t exitintinfo;
-	uint64_t enable1;
-	uint64_t avic;
-	uint64_t ghcb;
-	uint64_t eventinj;
-	uint64_t n_cr3;
-	uint64_t enable2;
-	uint32_t vmcb_clean;
-	uint32_t reserved2;
-	uint64_t nrip;
-	uint8_t inst_len;
-	uint8_t inst_bytes[15];
-	uint64_t avic_abpp;
-	uint64_t reserved3;
-	uint64_t avic_ltp;
-	uint64_t avic_phys;
-	uint64_t reserved4;
-	uint64_t vmsa_ptr;
-	uint8_t pad[752];
-} __packed;
-
-/* The VMCB save area is a fixed AMD hardware ABI. */
-struct vmm_svm_segment {
-	uint16_t selector;
-	uint16_t attrib;
-	uint32_t limit;
-	uint64_t base;
-} __packed;
-
-struct vmm_svm_state {
-	struct vmm_svm_segment es;
-	struct vmm_svm_segment cs;
-	struct vmm_svm_segment ss;
-	struct vmm_svm_segment ds;
-	struct vmm_svm_segment fs;
-	struct vmm_svm_segment gs;
-	struct vmm_svm_segment gdt;
-	struct vmm_svm_segment ldt;
-	struct vmm_svm_segment idt;
-	struct vmm_svm_segment tr;
-	uint8_t reserved1[43];
-	uint8_t cpl;
-	uint8_t reserved2[4];
-	uint64_t efer;
-	uint8_t reserved3[112];
-	uint64_t cr4;
-	uint64_t cr3;
-	uint64_t cr0;
-	uint64_t dr7;
-	uint64_t dr6;
-	uint64_t rflags;
-	uint64_t rip;
-	uint8_t reserved4[88];
-	uint64_t rsp;
-	uint64_t s_cet;
-	uint64_t ssp;
-	uint64_t isst_addr;
-	uint64_t rax;
-	uint64_t star;
-	uint64_t lstar;
-	uint64_t cstar;
-	uint64_t sfmask;
-	uint64_t kernelgsbase;
-	uint64_t sysenter_cs;
-	uint64_t sysenter_esp;
-	uint64_t sysenter_eip;
-	uint64_t cr2;
-	uint8_t reserved5[32];
-	uint64_t g_pat;
-	uint64_t dbgctl;
-	uint64_t br_from;
-	uint64_t br_to;
-	uint64_t int_from;
-	uint64_t int_to;
-	uint8_t pad[2408];
-} __packed;
-
-struct vmm_svm_vmcb {
-	struct vmm_svm_ctrl ctrl;
-	struct vmm_svm_state state;
-} __packed;
-
-CTASSERT(sizeof(struct vmm_svm_ctrl) == 0x400);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, iopm_base_pa) == 0x040);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, msrpm_base_pa) == 0x048);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, guest_asid) == 0x058);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, tlb_ctrl) == 0x05c);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, enable1) == 0x090);
-CTASSERT(__offsetof(struct vmm_svm_ctrl, n_cr3) == 0x0b0);
-CTASSERT(sizeof(struct vmm_svm_segment) == 0x10);
-CTASSERT(__offsetof(struct vmm_svm_state, efer) == 0x0d0);
-CTASSERT(__offsetof(struct vmm_svm_state, cr4) == 0x148);
-CTASSERT(__offsetof(struct vmm_svm_state, cr3) == 0x150);
-CTASSERT(__offsetof(struct vmm_svm_state, cr0) == 0x158);
-CTASSERT(__offsetof(struct vmm_svm_state, rflags) == 0x170);
-CTASSERT(__offsetof(struct vmm_svm_state, rip) == 0x178);
-CTASSERT(__offsetof(struct vmm_svm_state, rsp) == 0x1d8);
-CTASSERT(__offsetof(struct vmm_svm_state, rax) == 0x1f8);
-CTASSERT(__offsetof(struct vmm_svm_state, cr2) == 0x240);
-CTASSERT(__offsetof(struct vmm_svm_state, g_pat) == 0x268);
-CTASSERT(sizeof(struct vmm_svm_state) == 0xc00);
-CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
-CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
 
 /* Module-lifetime SVM state for one host CPU. */
 struct vmm_svm_cpu {
@@ -300,10 +174,11 @@ int
 vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 {
 	struct pmap *pmap;
-	struct vmm_cpustate *state;
 	struct vmm_svm_vmcb *vmcb;
 	struct vmm_svm_vcpu *svm;
+	int error;
 
+	error = ENOMEM;
 	svm = kmalloc(sizeof(*svm), M_VMM, M_WAITOK | M_ZERO);
 	if (svm == NULL)
 		return ENOMEM;
@@ -361,60 +236,14 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	vmcb->ctrl.tlb_ctrl = VMM_SVM_TLB_FLUSH_ALL;
 	vmcb->ctrl.enable1 = VMM_SVM_ENABLE_NPT;
 	vmcb->ctrl.n_cr3 = vtophys(pmap->pm_pml4);
-
-	state = vcpu->state;
-	vmcb->state.rax = state->gpr[VMM_X64_GPR_RAX];
-	vmcb->state.rsp = state->gpr[VMM_X64_GPR_RSP];
-	vmcb->state.rip = state->gpr[VMM_X64_GPR_RIP];
-	vmcb->state.rflags = state->gpr[VMM_X64_GPR_RFLAGS];
-	if (vmcb->state.rflags == 0)
-		vmcb->state.rflags = 2;
-	vmcb->state.cr0 = state->cr[VMM_X64_CR_CR0] | CR0_ET | CR0_NE;
-	vmcb->state.cr2 = state->cr[VMM_X64_CR_CR2];
-	vmcb->state.cr3 = state->cr[VMM_X64_CR_CR3];
-	vmcb->state.cr4 = state->cr[VMM_X64_CR_CR4];
-	vmcb->state.dr6 = 0xffff0ff0ULL;
-	vmcb->state.dr7 = 0x400ULL;
-	vmcb->ctrl.v = (vmcb->ctrl.v & ~VMM_SVM_V_TPR) |
-	    (state->cr[VMM_X64_CR_CR8] & VMM_SVM_V_TPR);
-	svm->xcr0 = state->cr[VMM_X64_CR_XCR0];
-	vmcb->state.efer = state->msr[VMM_X64_MSR_EFER] | EFER_SVME;
-	vmcb->state.g_pat = state->msr[VMM_X64_MSR_PAT];
-	vmcb->state.star = state->msr[VMM_X64_MSR_STAR];
-	vmcb->state.lstar = state->msr[VMM_X64_MSR_LSTAR];
-	vmcb->state.cstar = state->msr[VMM_X64_MSR_CSTAR];
-	vmcb->state.sfmask = state->msr[VMM_X64_MSR_SFMASK];
-	vmcb->state.kernelgsbase = state->msr[VMM_X64_MSR_KERNELGSBASE];
-	vmcb->state.sysenter_cs = state->msr[VMM_X64_MSR_SYSENTER_CS];
-	vmcb->state.sysenter_esp = state->msr[VMM_X64_MSR_SYSENTER_ESP];
-	vmcb->state.sysenter_eip = state->msr[VMM_X64_MSR_SYSENTER_EIP];
-
-	bcopy(&state->seg[VMM_X64_SEG_ES], &vmcb->state.es,
-	    sizeof(vmcb->state.es));
-	bcopy(&state->seg[VMM_X64_SEG_CS], &vmcb->state.cs,
-	    sizeof(vmcb->state.cs));
-	bcopy(&state->seg[VMM_X64_SEG_SS], &vmcb->state.ss,
-	    sizeof(vmcb->state.ss));
-	bcopy(&state->seg[VMM_X64_SEG_DS], &vmcb->state.ds,
-	    sizeof(vmcb->state.ds));
-	bcopy(&state->seg[VMM_X64_SEG_FS], &vmcb->state.fs,
-	    sizeof(vmcb->state.fs));
-	bcopy(&state->seg[VMM_X64_SEG_GS], &vmcb->state.gs,
-	    sizeof(vmcb->state.gs));
-	bcopy(&state->seg[VMM_X64_SEG_GDT], &vmcb->state.gdt,
-	    sizeof(vmcb->state.gdt));
-	bcopy(&state->seg[VMM_X64_SEG_IDT], &vmcb->state.idt,
-	    sizeof(vmcb->state.idt));
-	bcopy(&state->seg[VMM_X64_SEG_LDT], &vmcb->state.ldt,
-	    sizeof(vmcb->state.ldt));
-	bcopy(&state->seg[VMM_X64_SEG_TR], &vmcb->state.tr,
-	    sizeof(vmcb->state.tr));
-	vmcb->state.cpl = (vmcb->state.ss.attrib >> 5) & 3;
+	error = vmm_svm_state_init(vmcb, vcpu->state, &svm->xcr0);
+	if (error != 0)
+		goto fail;
 	return 0;
 
 fail:
 	vmm_svm_vcpu_destroy(vcpu);
-	return ENOMEM;
+	return error;
 }
 
 void

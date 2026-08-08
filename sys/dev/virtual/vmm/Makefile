@@ -5,7 +5,7 @@ SRCS=	vmm.c vmm_machine.c vmm_vcpu.c
 
 .if ${MACHINE_ARCH} == "x86_64"
 .PATH:	${.CURDIR}/x86/svm
-SRCS+=	vmm_svm.c vmm_svm_backend.c vmm_svm_entry.S
+SRCS+=	vmm_svm.c vmm_svm_backend.c vmm_svm_entry.S vmm_svm_state.c
 
 .if !defined(KERNBUILDDIR)
 SRCS+=	bus_if.h device_if.h opt_nfs.h
