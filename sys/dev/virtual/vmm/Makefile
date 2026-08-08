@@ -3,8 +3,8 @@ KMOD=	vmm
 # path.  Legacy implementations stay under legacy/ and are excluded from the build.
 SRCS=	vmm.c vmm_machine.c vmm_vcpu.c
 
-.PATH:	${.CURDIR}/x64/svm
-SRCS+=	vmm_x64_svm.c vmm_x64_svm_entry.S
+.PATH:	${.CURDIR}/x64/svm ${.CURDIR}/x64/svm_avic
+SRCS+=	vmm_x64_svm.c vmm_x64_svm_entry.S vmm_x64_svm_avic.c
 
 vmm_x64_svm_entry.o:
 	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS:N-flto} ${.IMPSRC}

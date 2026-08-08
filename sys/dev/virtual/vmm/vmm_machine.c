@@ -140,8 +140,8 @@ vmm_machine_destroy(vmm_machine_t machine)
 	machine->vmspace = NULL;
 	lwkt_reltoken(&machine->token);
 
-	machine->backend->machine_destroy(machine);
 	vmm_machine_vmspace_destroy(vmspace);
+	machine->backend->machine_destroy(machine);
 	vmm_memory_release(&memory);
 	vmm_backend_machine_release(machine->backend);
 	kfree(machine, M_VMM);
