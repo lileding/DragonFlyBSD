@@ -24,7 +24,8 @@ typedef struct vmm_vcpu *vmm_vcpu_t;
 
 /*
  * Creates a machine using vmspace as its guest GPA address space.
- * The caller retains ownership and must keep the private vmspace valid until
+ * vmspace must be initialized, private to the guest, and not already converted
+ * for nested paging.  The caller retains ownership and keeps it valid until
  * vmm_machine_destroy() returns.  Returns EBUSY while the module drains.
  */
 int vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine);

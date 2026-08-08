@@ -10,6 +10,10 @@
 #include <machine/cpufunc.h>
 #include <machine/specialreg.h>
 
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+
+#include "../../vmm_machine.h"
 #include "vmm_svm.h"
 
 #define VMM_SVM_MSR_VM_CR		0xc0010114U
@@ -49,7 +53,11 @@ vmm_svm_fini(void)
 int
 vmm_svm_machine_create(struct vmm_machine *machine)
 {
-	(void)machine;
+	struct pmap *pmap;
+
+	pmap = vmspace_pmap(machine->vmspace);
+	pmap_maybethreaded(pmap);
+	pmap_npt_transform(pmap, 0);
 	return 0;
 }
 
