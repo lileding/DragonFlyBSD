@@ -39,9 +39,10 @@ int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vmm_vcpu_t *vcpu);
 
 /*
- * Runs a vCPU until it exits to the caller.  On success, *reason is valid
- * until the next vmm_vcpu_run() call or vmm_vcpu_destroy().  Returns EBUSY
- * when another caller is already running the vCPU.
+ * Runs a vCPU until it exits to the caller.  The backend resolves known
+ * architectural exits and registered I/O in kernel before returning.  On
+ * success, *reason is valid until the next vmm_vcpu_run() call or
+ * vmm_vcpu_destroy().  Returns EBUSY when another caller is running it.
  */
 int vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason);
 

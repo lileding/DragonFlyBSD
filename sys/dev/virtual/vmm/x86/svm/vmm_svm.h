@@ -117,6 +117,19 @@ struct vmm_svm_vmcb {
 	struct vmm_svm_state state;
 } __packed;
 
+/* Hardware pages and host context owned by one SVM vCPU. */
+struct vmm_svm_vcpu {
+	struct vmm_svm_vmcb *vmcb;
+	uint64_t vmcb_pa;
+	void *iopm;
+	uint64_t iopm_pa;
+	void *msrpm;
+	uint64_t msrpm_pa;
+	struct vmm_svm_context *context;
+	volatile int run_cpu;
+	uint64_t xcr0;
+};
+
 int vmm_svm_probe(void);
 int vmm_svm_init(void);
 void vmm_svm_fini(void);

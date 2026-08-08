@@ -71,8 +71,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	lwkt_gettoken(&vcpu->token);
 	vcpu->running = 0;
 	--machine->run_count;
-	if (error == 0 && vcpu->kick_pending) {
-		vcpu->kick_pending = 0;
+	if (error == 0 && atomic_swap_int(&vcpu->kick_pending, 0) != 0) {
 		error = EINTR;
 	}
 	lwkt_reltoken(&vcpu->token);
@@ -91,7 +90,7 @@ vmm_vcpu_kick(vmm_vcpu_t vcpu)
 		lwkt_reltoken(&vcpu->token);
 		return EALREADY;
 	}
-	vcpu->kick_pending = 1;
+	atomic_store_rel_int(&vcpu->kick_pending, 1);
 	lwkt_reltoken(&vcpu->token);
 	vcpu->backend_ops->vcpu_kick(vcpu);
 	return 0;

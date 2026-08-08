@@ -9,14 +9,16 @@
 #include "vmm_machine.h"
 
 struct vmm_vcpu {
-	/* token protects running and kick_pending. */
+	/* token protects running; kick_pending is atomic. */
 	struct lwkt_token token;
 	struct vmm_machine *machine;
 	const struct vmm_backend_ops *backend_ops;
 	struct vmm_cpustate *state;
+	/* Published by run(); callers may read it only after run returns. */
+	struct vmm_cpuexit exit;
 	void *backend;
 	int running;
-	int kick_pending;
+	volatile int kick_pending;
 };
 
 #endif /* VMM_VCPU_H */

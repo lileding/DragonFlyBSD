@@ -55,6 +55,8 @@
 #define VMM_SVM_INTERCEPT_CLGI		(1U << 5)
 #define VMM_SVM_INTERCEPT_SKINIT		(1U << 6)
 
+#define VMM_SVM_INTERCEPT_XSETBV	(1U << 13)
+
 #define VMM_SVM_ENABLE_NPT		0x001ULL
 #define VMM_SVM_TLB_FLUSH_ALL		0x001U
 
@@ -66,18 +68,6 @@ struct vmm_svm_cpu {
 	uint64_t saved_efer;
 	uint64_t saved_hsave_pa;
 	bool captured;
-};
-
-/* Hardware pages owned by one SVM vCPU. */
-struct vmm_svm_vcpu {
-	struct vmm_svm_vmcb *vmcb;
-	vm_paddr_t vmcb_pa;
-	void *iopm;
-	vm_paddr_t iopm_pa;
-	void *msrpm;
-	vm_paddr_t msrpm_pa;
-	struct vmm_svm_context *context;
-	uint64_t xcr0;
 };
 
 static struct vmm_svm_cpu vmm_svm_cpus[MAXCPU];
@@ -185,6 +175,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	if (svm == NULL)
 		return ENOMEM;
 	vcpu->backend = svm;
+	svm->run_cpu = -1;
 	error = vmm_svm_context_create(&svm->context);
 	if (error != 0)
 		goto fail;
@@ -235,6 +226,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	    VMM_SVM_INTERCEPT_STGI |
 	    VMM_SVM_INTERCEPT_CLGI |
 	    VMM_SVM_INTERCEPT_SKINIT;
+	vmcb->ctrl.intercept_misc3 = VMM_SVM_INTERCEPT_XSETBV;
 	vmcb->ctrl.iopm_base_pa = svm->iopm_pa;
 	vmcb->ctrl.msrpm_base_pa = svm->msrpm_pa;
 	vmcb->ctrl.guest_asid = 1;
@@ -268,20 +260,6 @@ vmm_svm_vcpu_destroy(struct vmm_vcpu *vcpu)
 		contigfree(svm->vmcb, VMM_SVM_VMCB_PAGES * PAGE_SIZE, M_VMM);
 	kfree(svm, M_VMM);
 	vcpu->backend = NULL;
-}
-
-int
-vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
-{
-	(void)vcpu;
-	*reason = NULL;
-	return ENOTSUP;
-}
-
-void
-vmm_svm_vcpu_kick(struct vmm_vcpu *vcpu)
-{
-	(void)vcpu;
 }
 
 void
