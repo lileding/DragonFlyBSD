@@ -8,6 +8,7 @@
 #include <sys/globaldata.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <sys/systm.h>
 #include <sys/thread2.h>
 
 #include <machine/cpufunc.h>
@@ -28,6 +29,90 @@
 #define VMM_SVM_IOPM_PAGES	3
 #define VMM_SVM_MSRPM_PAGES	2
 
+#define VMM_SVM_INTERCEPT_INTR		(1U << 0)
+#define VMM_SVM_INTERCEPT_NMI		(1U << 1)
+#define VMM_SVM_INTERCEPT_SMI		(1U << 2)
+#define VMM_SVM_INTERCEPT_INIT		(1U << 3)
+#define VMM_SVM_INTERCEPT_RDPMC		(1U << 15)
+#define VMM_SVM_INTERCEPT_CPUID		(1U << 18)
+#define VMM_SVM_INTERCEPT_RSM		(1U << 19)
+#define VMM_SVM_INTERCEPT_INVD		(1U << 22)
+#define VMM_SVM_INTERCEPT_HLT		(1U << 24)
+#define VMM_SVM_INTERCEPT_INVLPGA	(1U << 26)
+#define VMM_SVM_INTERCEPT_IOIO		(1U << 27)
+#define VMM_SVM_INTERCEPT_MSR		(1U << 28)
+#define VMM_SVM_INTERCEPT_TASKSW		(1U << 29)
+#define VMM_SVM_INTERCEPT_FERR		(1U << 30)
+#define VMM_SVM_INTERCEPT_SHUTDOWN	(1U << 31)
+
+#define VMM_SVM_INTERCEPT_VMRUN		(1U << 0)
+#define VMM_SVM_INTERCEPT_VMMCALL	(1U << 1)
+#define VMM_SVM_INTERCEPT_VMLOAD		(1U << 2)
+#define VMM_SVM_INTERCEPT_VMSAVE		(1U << 3)
+#define VMM_SVM_INTERCEPT_STGI		(1U << 4)
+#define VMM_SVM_INTERCEPT_CLGI		(1U << 5)
+#define VMM_SVM_INTERCEPT_SKINIT		(1U << 6)
+
+#define VMM_SVM_ENABLE_NPT		0x001ULL
+#define VMM_SVM_TLB_FLUSH_ALL		0x001U
+
+/* The VMCB control area is a fixed AMD hardware ABI. */
+struct vmm_svm_ctrl {
+	uint32_t intercept_cr;
+	uint32_t intercept_dr;
+	uint32_t intercept_vec;
+	uint32_t intercept_misc1;
+	uint32_t intercept_misc2;
+	uint32_t intercept_misc3;
+	uint8_t reserved1[36];
+	uint16_t pause_filt_thresh;
+	uint16_t pause_filt_cnt;
+	uint64_t iopm_base_pa;
+	uint64_t msrpm_base_pa;
+	uint64_t tsc_offset;
+	uint32_t guest_asid;
+	uint32_t tlb_ctrl;
+	uint64_t v;
+	uint64_t intr;
+	uint64_t exitcode;
+	uint64_t exitinfo1;
+	uint64_t exitinfo2;
+	uint64_t exitintinfo;
+	uint64_t enable1;
+	uint64_t avic;
+	uint64_t ghcb;
+	uint64_t eventinj;
+	uint64_t n_cr3;
+	uint64_t enable2;
+	uint32_t vmcb_clean;
+	uint32_t reserved2;
+	uint64_t nrip;
+	uint8_t inst_len;
+	uint8_t inst_bytes[15];
+	uint64_t avic_abpp;
+	uint64_t reserved3;
+	uint64_t avic_ltp;
+	uint64_t avic_phys;
+	uint64_t reserved4;
+	uint64_t vmsa_ptr;
+	uint8_t pad[752];
+} __packed;
+
+struct vmm_svm_vmcb {
+	struct vmm_svm_ctrl ctrl;
+	uint8_t state[PAGE_SIZE - sizeof(struct vmm_svm_ctrl)];
+} __packed;
+
+CTASSERT(sizeof(struct vmm_svm_ctrl) == 0x400);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, iopm_base_pa) == 0x040);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, msrpm_base_pa) == 0x048);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, guest_asid) == 0x058);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, tlb_ctrl) == 0x05c);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, enable1) == 0x090);
+CTASSERT(__offsetof(struct vmm_svm_ctrl, n_cr3) == 0x0b0);
+CTASSERT(sizeof(struct vmm_svm_vmcb) == PAGE_SIZE);
+CTASSERT(__offsetof(struct vmm_svm_vmcb, state) == 0x400);
+
 /* Module-lifetime SVM state for one host CPU. */
 struct vmm_svm_cpu {
 	void *hsave;
@@ -40,7 +125,7 @@ struct vmm_svm_cpu {
 
 /* Hardware pages owned by one SVM vCPU. */
 struct vmm_svm_vcpu {
-	void *vmcb;
+	struct vmm_svm_vmcb *vmcb;
 	vm_paddr_t vmcb_pa;
 	void *iopm;
 	vm_paddr_t iopm_pa;
@@ -143,6 +228,8 @@ vmm_svm_machine_destroy(struct vmm_machine *machine)
 int
 vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 {
+	struct pmap *pmap;
+	struct vmm_svm_vmcb *vmcb;
 	struct vmm_svm_vcpu *svm;
 
 	svm = kmalloc(sizeof(*svm), M_VMM, M_WAITOK | M_ZERO);
@@ -167,6 +254,41 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	if (svm->msrpm == NULL)
 		goto fail;
 	svm->msrpm_pa = vtophys(svm->msrpm);
+
+	memset(svm->iopm, 0xff, VMM_SVM_IOPM_PAGES * PAGE_SIZE);
+	memset(svm->msrpm, 0xff, VMM_SVM_MSRPM_PAGES * PAGE_SIZE);
+	pmap = vmspace_pmap(vcpu->machine->vmspace);
+	vmcb = svm->vmcb;
+	vmcb->ctrl.intercept_misc1 =
+	    VMM_SVM_INTERCEPT_INTR |
+	    VMM_SVM_INTERCEPT_NMI |
+	    VMM_SVM_INTERCEPT_SMI |
+	    VMM_SVM_INTERCEPT_INIT |
+	    VMM_SVM_INTERCEPT_RDPMC |
+	    VMM_SVM_INTERCEPT_CPUID |
+	    VMM_SVM_INTERCEPT_RSM |
+	    VMM_SVM_INTERCEPT_INVD |
+	    VMM_SVM_INTERCEPT_HLT |
+	    VMM_SVM_INTERCEPT_INVLPGA |
+	    VMM_SVM_INTERCEPT_IOIO |
+	    VMM_SVM_INTERCEPT_MSR |
+	    VMM_SVM_INTERCEPT_TASKSW |
+	    VMM_SVM_INTERCEPT_FERR |
+	    VMM_SVM_INTERCEPT_SHUTDOWN;
+	vmcb->ctrl.intercept_misc2 =
+	    VMM_SVM_INTERCEPT_VMRUN |
+	    VMM_SVM_INTERCEPT_VMMCALL |
+	    VMM_SVM_INTERCEPT_VMLOAD |
+	    VMM_SVM_INTERCEPT_VMSAVE |
+	    VMM_SVM_INTERCEPT_STGI |
+	    VMM_SVM_INTERCEPT_CLGI |
+	    VMM_SVM_INTERCEPT_SKINIT;
+	vmcb->ctrl.iopm_base_pa = svm->iopm_pa;
+	vmcb->ctrl.msrpm_base_pa = svm->msrpm_pa;
+	vmcb->ctrl.guest_asid = 1;
+	vmcb->ctrl.tlb_ctrl = VMM_SVM_TLB_FLUSH_ALL;
+	vmcb->ctrl.enable1 = VMM_SVM_ENABLE_NPT;
+	vmcb->ctrl.n_cr3 = vtophys(pmap->pm_pml4);
 	return 0;
 
 fail:
