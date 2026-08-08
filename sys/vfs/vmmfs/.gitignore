@@ -16,3 +16,4 @@ cpu_base
 # Generated KOBJ interface glue (from vmmfs_node_if.m via makeobjops)
 vmmfs_node_if.c
 vmmfs_node_if.h
+compile_commands.json
