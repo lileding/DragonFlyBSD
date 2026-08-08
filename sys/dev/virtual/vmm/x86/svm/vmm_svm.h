@@ -12,6 +12,7 @@ struct vmm_machine;
 struct vmm_vcpu;
 struct vmm_cpustate;
 struct vmm_cpuexit;
+struct vmm_svm_context;
 
 /* The VMCB control area is a fixed AMD hardware ABI. */
 struct vmm_svm_ctrl {

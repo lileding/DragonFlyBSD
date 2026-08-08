@@ -22,6 +22,7 @@
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "vmm_svm.h"
+#include "vmm_svm_context.h"
 
 #define VMM_SVM_VM_CR_LOCK		(1ULL << 3)
 #define VMM_SVM_VM_CR_SVME_DISABLED	(1ULL << 4)
@@ -75,6 +76,7 @@ struct vmm_svm_vcpu {
 	vm_paddr_t iopm_pa;
 	void *msrpm;
 	vm_paddr_t msrpm_pa;
+	struct vmm_svm_context *context;
 	uint64_t xcr0;
 };
 
@@ -183,6 +185,9 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	if (svm == NULL)
 		return ENOMEM;
 	vcpu->backend = svm;
+	error = vmm_svm_context_create(&svm->context);
+	if (error != 0)
+		goto fail;
 
 	svm->vmcb = contigmalloc(VMM_SVM_VMCB_PAGES * PAGE_SIZE, M_VMM,
 	    M_WAITOK | M_ZERO, 0, ~0UL, PAGE_SIZE, 0);
@@ -254,6 +259,7 @@ vmm_svm_vcpu_destroy(struct vmm_vcpu *vcpu)
 	svm = vcpu->backend;
 	if (svm == NULL)
 		return;
+	vmm_svm_context_destroy(svm->context);
 	if (svm->msrpm != NULL)
 		contigfree(svm->msrpm, VMM_SVM_MSRPM_PAGES * PAGE_SIZE, M_VMM);
 	if (svm->iopm != NULL)
