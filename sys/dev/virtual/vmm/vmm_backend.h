@@ -9,7 +9,6 @@
 struct vmm_machine;
 struct vmm_vcpu;
 struct vmm_cpuexit;
-struct pmap;
 
 struct vmm_backend_ops {
 	const char *name;
@@ -18,7 +17,6 @@ struct vmm_backend_ops {
 	void (*fini)(void);
 	int (*machine_create)(struct vmm_machine *);
 	void (*machine_destroy)(struct vmm_machine *);
-	int (*machine_pmap_init)(struct vmm_machine *, struct pmap *);
 	int (*vcpu_create)(struct vmm_vcpu *);
 	void (*vcpu_destroy)(struct vmm_vcpu *);
 	int (*vcpu_run)(struct vmm_vcpu *, struct vmm_cpuexit **);

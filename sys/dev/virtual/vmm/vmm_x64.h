@@ -63,6 +63,7 @@
 #define VMM_X64_SEG_TR		9
 #define VMM_X64_SEG_COUNT	10
 
+/* One x86-64 segment descriptor image. */
 struct vmm_segment {
 	uint16_t	selector;
 	uint16_t	attrib;
@@ -70,6 +71,10 @@ struct vmm_segment {
 	uint64_t	base;
 } __packed;
 
+/*
+ * Caller-owned architectural state for one x86-64 vCPU.  The VMM updates this
+ * object across VM entry and exit; callers must serialize changes with run().
+ */
 struct vmm_cpustate {
 	uint32_t	id;
 	uint32_t	flags;
@@ -82,9 +87,9 @@ struct vmm_cpustate {
 } __packed;
 
 /*
- * One architectural VM exit.  code, info1, and info2 are the raw hardware
- * exit fields; the caller interprets them through the selected architecture
- * backend.  rip and instruction bytes are a stable snapshot at VM exit.
+ * One architectural VM exit.  code, info1, and info2 are raw hardware fields;
+ * the caller interprets them through the selected architecture backend.  rip
+ * and instruction bytes are a stable snapshot at VM exit.
  */
 struct vmm_cpuexit {
 	uint64_t	code;
