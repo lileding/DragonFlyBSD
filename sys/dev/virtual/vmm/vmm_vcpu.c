@@ -6,6 +6,7 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 
+#include "vmm_backend.h"
 #include "vmm_vcpu.h"
 
 int
@@ -13,6 +14,7 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vmm_vcpu_t *vcpu)
 {
 	struct vmm_vcpu *vc;
+	int error;
 
 	if (machine == NULL || state == NULL || vcpu == NULL)
 		return EINVAL;
@@ -25,6 +27,11 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->machine = machine;
 	vc->state = state;
 	lwkt_token_init(&vc->token, "vmmvcpu");
+	error = machine->backend->vcpu_create(vc);
+	if (error != 0) {
+		kfree(vc, M_VMM);
+		return error;
+	}
 	lwkt_gettoken(&machine->token);
 	++machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
@@ -57,17 +64,15 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	if (error != 0)
 		return error;
 
-	/* The backend VMRUN loop is installed here. */
+	error = machine->backend->vcpu_run(vcpu, reason);
 
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
 	vcpu->running = 0;
 	--machine->run_count;
-	if (vcpu->kick_pending) {
+	if (error == 0 && vcpu->kick_pending) {
 		vcpu->kick_pending = 0;
 		error = EINTR;
-	} else {
-		error = ENOTSUP;
 	}
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
@@ -87,6 +92,7 @@ vmm_vcpu_kick(vmm_vcpu_t vcpu)
 	}
 	vcpu->kick_pending = 1;
 	lwkt_reltoken(&vcpu->token);
+	vcpu->machine->backend->vcpu_kick(vcpu);
 	return 0;
 }
 
@@ -109,6 +115,7 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	--machine->vcpu_count;
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
+	machine->backend->vcpu_destroy(vcpu);
 	kfree(vcpu, M_VMM);
 	return 0;
 }

@@ -6,9 +6,61 @@
 #ifndef VMM_X64_H
 #define VMM_X64_H
 
+/* General-purpose register indices. */
+#define VMM_X64_GPR_RAX	0
+#define VMM_X64_GPR_RCX	1
+#define VMM_X64_GPR_RDX	2
+#define VMM_X64_GPR_RBX	3
+#define VMM_X64_GPR_RSP	4
+#define VMM_X64_GPR_RBP	5
+#define VMM_X64_GPR_RSI	6
+#define VMM_X64_GPR_RDI	7
+#define VMM_X64_GPR_R8		8
+#define VMM_X64_GPR_R9		9
+#define VMM_X64_GPR_R10	10
+#define VMM_X64_GPR_R11	11
+#define VMM_X64_GPR_R12	12
+#define VMM_X64_GPR_R13	13
+#define VMM_X64_GPR_R14	14
+#define VMM_X64_GPR_R15	15
+#define VMM_X64_GPR_RIP	16
+#define VMM_X64_GPR_RFLAGS	17
 #define VMM_X64_GPR_COUNT	18
+
+/* Control register indices. */
+#define VMM_X64_CR_CR0		0
+#define VMM_X64_CR_CR2		1
+#define VMM_X64_CR_CR3		2
+#define VMM_X64_CR_CR4		3
+#define VMM_X64_CR_CR8		4
+#define VMM_X64_CR_XCR0	5
 #define VMM_X64_CR_COUNT	6
-#define VMM_X64_MSR_COUNT	11
+
+/* MSR state indices. */
+#define VMM_X64_MSR_EFER		0
+#define VMM_X64_MSR_STAR		1
+#define VMM_X64_MSR_LSTAR		2
+#define VMM_X64_MSR_CSTAR		3
+#define VMM_X64_MSR_SFMASK		4
+#define VMM_X64_MSR_KERNELGSBASE	5
+#define VMM_X64_MSR_SYSENTER_CS	6
+#define VMM_X64_MSR_SYSENTER_ESP	7
+#define VMM_X64_MSR_SYSENTER_EIP	8
+#define VMM_X64_MSR_PAT		9
+#define VMM_X64_MSR_TSC		10
+#define VMM_X64_MSR_COUNT		11
+
+/* Segment state indices. */
+#define VMM_X64_SEG_ES		0
+#define VMM_X64_SEG_CS		1
+#define VMM_X64_SEG_SS		2
+#define VMM_X64_SEG_DS		3
+#define VMM_X64_SEG_FS		4
+#define VMM_X64_SEG_GS		5
+#define VMM_X64_SEG_GDT	6
+#define VMM_X64_SEG_IDT	7
+#define VMM_X64_SEG_LDT	8
+#define VMM_X64_SEG_TR		9
 #define VMM_X64_SEG_COUNT	10
 
 struct vmm_segment {
@@ -29,6 +81,18 @@ struct vmm_cpustate {
 	uint64_t	intr_flags;
 } __packed;
 
-struct vmm_cpuexit;
+/*
+ * One architectural VM exit.  code, info1, and info2 are the raw hardware
+ * exit fields; the caller interprets them through the selected architecture
+ * backend.  rip and instruction bytes are a stable snapshot at VM exit.
+ */
+struct vmm_cpuexit {
+	uint64_t	code;
+	uint64_t	info1;
+	uint64_t	info2;
+	uint64_t	rip;
+	uint8_t		inst_len;
+	uint8_t		inst_bytes[15];
+};
 
 #endif /* VMM_X64_H */

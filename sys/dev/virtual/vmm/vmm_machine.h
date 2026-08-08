@@ -12,6 +12,9 @@
 
 #include "vmm.h"
 
+struct vmm_backend_ops;
+struct vmspace;
+
 struct vmm_memory_mapping {
 	TAILQ_ENTRY(vmm_memory_mapping) entry;
 	/* The mapping owns one vm_object reference. */
@@ -24,8 +27,10 @@ struct vmm_memory_mapping {
 TAILQ_HEAD(vmm_memory_mapping_list, vmm_memory_mapping);
 
 struct vmm_machine {
-	/* token protects memory, memory_generation, vcpu_count, and run_count. */
+	/* token protects vmspace, memory, memory_generation, vcpu_count, and run_count. */
 	struct lwkt_token token;
+	const struct vmm_backend_ops *backend;
+	struct vmspace *vmspace;
 	struct vmm_memory_mapping_list memory;
 	uint64_t memory_generation;
 	unsigned int vcpu_count;

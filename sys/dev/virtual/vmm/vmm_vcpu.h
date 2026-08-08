@@ -13,6 +13,7 @@ struct vmm_vcpu {
 	struct lwkt_token token;
 	struct vmm_machine *machine;
 	struct vmm_cpustate *state;
+	void *backend;
 	int running;
 	int kick_pending;
 };

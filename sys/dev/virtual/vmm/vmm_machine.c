@@ -7,8 +7,14 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 
+#include <machine/vmparam.h>
+
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_object.h>
 
+#include "vmm_backend.h"
 #include "vmm_machine.h"
 
 MALLOC_DEFINE(M_VMM, "vmm", "vmm runtime objects");
@@ -22,6 +28,11 @@ struct vmm_memory_snapshot {
 
 static int vmm_machine_remap(struct vmm_machine *, uint64_t, uint64_t,
 	struct vm_object *, uint64_t);
+static int vmm_machine_vmspace_create(struct vmm_machine *,
+	struct vmm_memory_mapping_list *, struct vmspace **);
+static int vmm_machine_vmspace_map(struct vmspace *,
+	const struct vmm_memory_mapping *);
+static void vmm_machine_vmspace_destroy(struct vmspace *);
 static int vmm_memory_snapshot_take(struct vmm_machine *,
 	struct vmm_memory_snapshot **, unsigned int *, uint64_t *);
 static void vmm_memory_snapshot_release(struct vmm_memory_snapshot *,
@@ -37,18 +48,39 @@ int
 vmm_machine_create(vmm_machine_t *machine)
 {
 	struct vmm_machine *m;
+	const struct vmm_backend_ops *backend;
+	int error;
 
 	if (machine == NULL)
 		return EINVAL;
 
 	*machine = NULL;
+	backend = vmm_backend_machine_acquire();
+	if (backend == NULL)
+		return ENXIO;
 	m = kmalloc(sizeof(*m), M_VMM, M_WAITOK | M_ZERO);
-	if (m == NULL)
+	if (m == NULL) {
+		vmm_backend_machine_release(backend);
 		return ENOMEM;
+	}
 
 	lwkt_token_init(&m->token, "vmmmach");
 	TAILQ_INIT(&m->memory);
 	m->memory_generation = 1;
+	m->backend = backend;
+	error = backend->machine_create(m);
+	if (error != 0) {
+		kfree(m, M_VMM);
+		vmm_backend_machine_release(backend);
+		return error;
+	}
+	error = vmm_machine_vmspace_create(m, &m->memory, &m->vmspace);
+	if (error != 0) {
+		backend->machine_destroy(m);
+		kfree(m, M_VMM);
+		vmm_backend_machine_release(backend);
+		return error;
+	}
 	*machine = m;
 	return 0;
 }
@@ -92,6 +124,7 @@ int
 vmm_machine_destroy(vmm_machine_t machine)
 {
 	struct vmm_memory_mapping_list memory;
+	struct vmspace *vmspace;
 
 	if (machine == NULL)
 		return EINVAL;
@@ -103,9 +136,14 @@ vmm_machine_destroy(vmm_machine_t machine)
 	}
 	memory = machine->memory;
 	TAILQ_INIT(&machine->memory);
+	vmspace = machine->vmspace;
+	machine->vmspace = NULL;
 	lwkt_reltoken(&machine->token);
 
+	machine->backend->machine_destroy(machine);
+	vmm_machine_vmspace_destroy(vmspace);
 	vmm_memory_release(&memory);
+	vmm_backend_machine_release(machine->backend);
 	kfree(machine, M_VMM);
 	return 0;
 }
@@ -116,6 +154,8 @@ vmm_machine_remap(struct vmm_machine *machine, uint64_t gpa_base,
 {
 	struct vmm_memory_mapping_list memory;
 	struct vmm_memory_snapshot *snapshot;
+	struct vmspace *vmspace;
+	struct vmspace *old_vmspace;
 	uint64_t generation;
 	unsigned int count;
 	int changed;
@@ -138,15 +178,22 @@ vmm_machine_remap(struct vmm_machine *machine, uint64_t gpa_base,
 			vmm_memory_release(&memory);
 			return 0;
 		}
+		error = vmm_machine_vmspace_create(machine, &memory, &vmspace);
+		if (error != 0) {
+			vmm_memory_release(&memory);
+			return error;
+		}
 
 		lwkt_gettoken(&machine->token);
 		if (machine->run_count != 0) {
 			lwkt_reltoken(&machine->token);
+			vmm_machine_vmspace_destroy(vmspace);
 			vmm_memory_release(&memory);
 			return EBUSY;
 		}
 		if (machine->memory_generation != generation) {
 			lwkt_reltoken(&machine->token);
+			vmm_machine_vmspace_destroy(vmspace);
 			vmm_memory_release(&memory);
 			continue;
 		}
@@ -156,12 +203,84 @@ vmm_machine_remap(struct vmm_machine *machine, uint64_t gpa_base,
 			old_memory = machine->memory;
 			machine->memory = memory;
 			TAILQ_INIT(&memory);
+			old_vmspace = machine->vmspace;
+			machine->vmspace = vmspace;
 			++machine->memory_generation;
 			lwkt_reltoken(&machine->token);
+			vmm_machine_vmspace_destroy(old_vmspace);
 			vmm_memory_release(&old_memory);
 		}
 		return 0;
 	}
+}
+
+static int
+vmm_machine_vmspace_create(struct vmm_machine *machine,
+	struct vmm_memory_mapping_list *memory, struct vmspace **vmspacep)
+{
+	struct vmm_memory_mapping *mapping;
+	struct vmspace *vmspace;
+	int error;
+
+	*vmspacep = NULL;
+	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VM_MAX_USER_ADDRESS);
+	if (vmspace == NULL)
+		return ENOMEM;
+	pmap_maybethreaded(vmspace_pmap(vmspace));
+	error = machine->backend->machine_pmap_init(machine,
+		vmspace_pmap(vmspace));
+	if (error != 0)
+		goto fail;
+	TAILQ_FOREACH(mapping, memory, entry) {
+		error = vmm_machine_vmspace_map(vmspace, mapping);
+		if (error != 0)
+			goto fail;
+	}
+	*vmspacep = vmspace;
+	return 0;
+
+fail:
+	vmm_machine_vmspace_destroy(vmspace);
+	return error;
+}
+
+static int
+vmm_machine_vmspace_map(struct vmspace *vmspace,
+	const struct vmm_memory_mapping *mapping)
+{
+	struct vm_map *map;
+	int count;
+	int error;
+
+	map = &vmspace->vm_map;
+	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+	vm_map_lock(map);
+	vm_object_hold(mapping->object);
+	vm_object_reference_locked(mapping->object);
+	vm_object_drop(mapping->object);
+	vm_object_hold(mapping->object);
+	error = vm_map_insert(map, &count, mapping->object, NULL,
+		mapping->offset, NULL, mapping->gpa_base,
+		mapping->gpa_base + mapping->gpa_size, VM_MAPTYPE_NORMAL,
+		VM_SUBSYS_MMAP, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+		VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, 0);
+	vm_object_drop(mapping->object);
+	vm_map_unlock(map);
+	vm_map_entry_release(count);
+	if (error != 0) {
+		vm_object_deallocate(mapping->object);
+		return ENOMEM;
+	}
+	return 0;
+}
+
+static void
+vmm_machine_vmspace_destroy(struct vmspace *vmspace)
+{
+	if (vmspace == NULL)
+		return;
+	pmap_del_all_cpus(vmspace);
+	vmspace_rel(vmspace);
 }
 
 static int
