@@ -1,15 +1,22 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * AMD SVM backend registration.
+ * AMD SVM backend registration and vmm core adapter.
  */
+#include <sys/errno.h>
 #include <sys/kernel.h>
 
 #include "../../vmm_backend.h"
 #include "vmm_svm.h"
 
+int
+vmm_svm_probe(void)
+{
+	return vmm_svm_ident() ? 0 : ENXIO;
+}
+
 const struct vmm_backend_ops vmm_svm_backend = {
-	.name = "x86/svm",
+	.name = "x64/svm",
 	.probe = vmm_svm_probe,
 	.init = vmm_svm_init,
 	.fini = vmm_svm_fini,

@@ -34,6 +34,13 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 		return error;
 	}
 	lwkt_gettoken(&machine->token);
+	if (machine->next_vcpu_id == (unsigned int)-1) {
+		lwkt_reltoken(&machine->token);
+		vc->backend_ops->vcpu_destroy(vc);
+		kfree(vc, M_VMM);
+		return EOVERFLOW;
+	}
+	vc->id = machine->next_vcpu_id++;
 	++machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
 	*vcpu = vc;

@@ -2,7 +2,7 @@
  * Copyright (c) 2018-2021 Maxime Villard, m00nbsd.net
  * All rights reserved.
  *
- * This code is part of the NVMM hypervisor.
+ * This code is part of the VMM hypervisor.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions

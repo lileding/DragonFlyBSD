@@ -17,7 +17,7 @@ typedef struct vmm_machine *vmm_machine_t;
 typedef struct vmm_vcpu *vmm_vcpu_t;
 
 #if defined(__x86_64__)
-#include "vmm_x64.h"
+#include "x64/vmm_x64.h"
 #else
 #error "vmm has no public API for this architecture"
 #endif

@@ -1,0 +1,54 @@
+VMM X64 SVM IMPORT MAP
+
+This directory contains the active AMD SVM backend built by
+sys/dev/virtual/vmm/Makefile on x86_64.
+
+ACTIVE BUILD INPUTS
+
+  vmm_svm.c
+  vmm_svm_backend.c
+  vmm_svm_entry.S
+
+SOURCE MAP
+
+  vmm_svm.c
+    Source: sys/dev/virtual/nvmm/x86/nvmm_x86_svm.c
+    Role: AMD SVM machine setup, VMCB state, VMRUN loop, and VMEXIT decode.
+    Differences: VMM object names and public x64 ABI spellings are applied directly.
+    The NVMM ioctl/cache/config layer is replaced by the VMM backend interface and the
+    caller-owned vmm_cpustate/vmm_cpuexit ABI.
+
+  vmm_svm_entry.S
+    Source: sys/dev/virtual/nvmm/x86/nvmm_x86_svmfunc.S
+    Role: low-level VMRUN entry wrapper.
+    Differences: exported symbols use the vmm_svm_ prefix.
+
+  vmm_svm_x86defs.h
+    Source: sys/dev/virtual/nvmm/x86/nvmm_x86.h, lines 356 through 716.
+    Role: CPUID, CR, MSR, XCR, EFER, and SVM feature-bit definitions.
+    Differences: extracted into a VMM-private header; no NVMM state, ioctl,
+    capability, or configuration structures are included.
+
+  vmm_svm_os.h
+    References: sys/dev/virtual/nvmm/nvmm_os.h,
+                sys/dev/virtual/nvmm/nvmm_dragonfly.c,
+                sys/dev/virtual/nvmm/x86/nvmm_x86_internal.h.
+    Role: DragonFly allocation, pmap, token, CPU, FPU, debug-register, and
+    IPI glue used by the imported SVM implementation.
+    Differences: binds those operations to VMM ownership and M_VMM; it has no
+    dependency on nvmm.ko.
+
+VMM-SPECIFIC FILES
+
+  vmm_svm.h
+    Private AMD SVM backend declarations matching struct vmm_backend_ops.
+
+  vmm_svm_backend.c
+    VMM backend probe and linker-set registration.
+
+REVIEW BOUNDARY
+
+The active backend has no include of sys/dev/virtual/nvmm and no unresolved
+nvmm_* or M_NVMM module symbol.  The only imported implementation files are
+the SVM C loop, the VMRUN assembly wrapper, and the documented architecture
+definition subset above.  Old unbuilt VMM SVM prototype files were removed.

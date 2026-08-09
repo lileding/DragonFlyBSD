@@ -14,6 +14,8 @@ struct vmm_vcpu {
 	struct vmm_machine *machine;
 	const struct vmm_backend_ops *backend_ops;
 	struct vmm_cpustate *state;
+	/* Assigned once by machine under its token; stable for this vCPU. */
+	unsigned int id;
 	/* Published by run(); callers may read it only after run returns. */
 	struct vmm_cpuexit exit;
 	void *backend;
