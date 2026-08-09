@@ -40,7 +40,9 @@
 #include "../vmm_x64.h"
 #include "vmm_svm_x86defs.h"
 
-struct vmm_svm_cpuid_mask {
+#define SVM_NCPUID_MASKS	32
+
+struct vmm_svm_cpuid_filter {
 	uint32_t eax;
 	uint32_t ebx;
 	uint32_t ecx;
@@ -56,7 +58,7 @@ struct vmm_svm_xsave {
 };
 CTASSERT(sizeof(struct vmm_svm_xsave) == 512 + 64);
 
-static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_00000001 = {
+static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_00000001 = {
 	.eax = ~0,
 	.ebx = ~0,
 	.ecx =
@@ -99,7 +101,7 @@ static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_00000001 = {
 	    CPUID_0_01_EDX_PBE
 };
 
-static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_00000007 = {
+static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_00000007 = {
 	.eax = ~0,
 	.ebx =
 	    CPUID_0_07_EBX_FSGSBASE |
@@ -129,7 +131,7 @@ static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_00000007 = {
 	    CPUID_0_07_EDX_SERIALIZE
 };
 
-static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_80000001 = {
+static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_80000001 = {
 	.eax = ~0,
 	.ebx = ~0,
 	.ecx =
@@ -171,11 +173,11 @@ static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_80000001 = {
 	    CPUID_8_01_EDX_3DNOW
 };
 
-static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_80000007 = {
+static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_80000007 = {
 	.edx = CPUID_8_07_EDX_TscInvariant
 };
 
-static const struct vmm_svm_cpuid_mask vmm_svm_cpuid_80000008 = {
+static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_80000008 = {
 	.eax = ~0,
 	.ebx =
 	    CPUID_8_08_EBX_CLZERO |
@@ -754,6 +756,8 @@ struct vmm_svm_cpudata {
 	uint64_t gtsc_offset;
 	uint64_t gtsc_match;
 	struct vmm_svm_xsave gxsave __aligned(64);
+	size_t cpuid_mask_count;
+	struct vmm_cpuid_mask cpuid_masks[SVM_NCPUID_MASKS];
 };
 
 static void
@@ -884,12 +888,15 @@ vmm_svm_excp_has_error(uint8_t vector)
 	}
 }
 
-static int
-vmm_svm_vcpu_inject(struct vmm_vcpu *vcpu, u_int evtype,
-    uint8_t vector, uint64_t error)
+int
+vmm_svm_vcpu_inject(struct vmm_vcpu *vcpu,
+    const struct vmm_cpuevent *event)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	struct vmcb *vmcb = cpudata->vmcb;
+	u_int evtype = event->type;
+	uint8_t vector = event->vector;
+	uint64_t error = event->error;
 	int type = 0, err = 0;
 
 	switch (evtype) {
@@ -931,18 +938,26 @@ vmm_svm_vcpu_inject(struct vmm_vcpu *vcpu, u_int evtype,
 static void
 vmm_svm_inject_ud(struct vmm_vcpu *vcpu)
 {
+	struct vmm_cpuevent event = {
+		.type = VMM_CPUEVENT_EXCP,
+		.vector = 6,
+	};
 	int ret __diagused;
 
-	ret = vmm_svm_vcpu_inject(vcpu, VMM_CPUEVENT_EXCP, 6, 0);
+	ret = vmm_svm_vcpu_inject(vcpu, &event);
 	OS_ASSERT(ret == 0);
 }
 
 static void
 vmm_svm_inject_gp(struct vmm_vcpu *vcpu)
 {
+	struct vmm_cpuevent event = {
+		.type = VMM_CPUEVENT_EXCP,
+		.vector = 13,
+	};
 	int ret __diagused;
 
-	ret = vmm_svm_vcpu_inject(vcpu, VMM_CPUEVENT_EXCP, 13, 0);
+	ret = vmm_svm_vcpu_inject(vcpu, &event);
 	OS_ASSERT(ret == 0);
 }
 
@@ -1203,11 +1218,27 @@ vmm_svm_exit_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	uint32_t eax, ecx;
+	size_t i;
 
 	eax = (cpudata->vmcb->state.rax & 0xFFFFFFFF);
 	ecx = (cpudata->gprs[VMM_X64_GPR_RCX] & 0xFFFFFFFF);
 	vmm_svm_inkernel_exec_cpuid(cpudata, eax, ecx);
 	vmm_svm_inkernel_handle_cpuid(mach, vcpu, eax, ecx);
+	for (i = 0; i < cpudata->cpuid_mask_count; ++i) {
+		const struct vmm_cpuid_mask *mask = &cpudata->cpuid_masks[i];
+
+		if (mask->leaf != eax)
+			continue;
+		cpudata->vmcb->state.rax &= ~mask->clear_eax;
+		cpudata->gprs[VMM_X64_GPR_RBX] &= ~mask->clear_ebx;
+		cpudata->gprs[VMM_X64_GPR_RCX] &= ~mask->clear_ecx;
+		cpudata->gprs[VMM_X64_GPR_RDX] &= ~mask->clear_edx;
+		cpudata->vmcb->state.rax |= mask->set_eax;
+		cpudata->gprs[VMM_X64_GPR_RBX] |= mask->set_ebx;
+		cpudata->gprs[VMM_X64_GPR_RCX] |= mask->set_ecx;
+		cpudata->gprs[VMM_X64_GPR_RDX] |= mask->set_edx;
+		break;
+	}
 
 	vmm_svm_inkernel_advance(cpudata->vmcb);
 	exit->reason = VMM_CPUEXIT_NONE;
@@ -2157,7 +2188,7 @@ vmm_svm_vcpu_setstate(struct vmm_vcpu *vcpu, uint64_t flags)
 }
 
 static void
-vmm_svm_vcpu_getstate(struct vmm_vcpu *vcpu, uint64_t flags)
+vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 {
 	struct vmm_cpustate *state = vcpu->state;
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
@@ -2258,7 +2289,13 @@ vmm_svm_vcpu_getstate(struct vmm_vcpu *vcpu, uint64_t flags)
 static void
 vmm_svm_vcpu_state_provide(struct vmm_vcpu *vcpu, uint64_t flags)
 {
-	vmm_svm_vcpu_getstate(vcpu, flags);
+	vmm_svm_vcpu_getstate_all(vcpu, flags);
+}
+
+void
+vmm_svm_vcpu_getstate(struct vmm_vcpu *vcpu)
+{
+	vmm_svm_vcpu_getstate_all(vcpu, VMM_X64_STATE_ALL);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2448,6 +2485,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 {
 	struct vmm_machine *mach = vcpu->machine;
 	struct vmm_svm_cpudata *cpudata;
+	size_t i, j;
 	int error;
 
 	/* Allocate the SVM cpudata. */
@@ -2458,6 +2496,31 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	vcpu->backend = cpudata;
 	cpudata->hcpu_last = -1;
 	atomic_store_rel_int(&cpudata->running_cpu, -1);
+	if (vcpu->cpuid_mask_count > SVM_NCPUID_MASKS) {
+		error = ENOBUFS;
+		goto error;
+	}
+	for (i = 0; i < vcpu->cpuid_mask_count; ++i) {
+		if ((vcpu->cpuid_masks[i].clear_eax &
+		     vcpu->cpuid_masks[i].set_eax) != 0 ||
+		    (vcpu->cpuid_masks[i].clear_ebx &
+		     vcpu->cpuid_masks[i].set_ebx) != 0 ||
+		    (vcpu->cpuid_masks[i].clear_ecx &
+		     vcpu->cpuid_masks[i].set_ecx) != 0 ||
+		    (vcpu->cpuid_masks[i].clear_edx &
+		     vcpu->cpuid_masks[i].set_edx) != 0) {
+			error = EINVAL;
+			goto error;
+		}
+		for (j = 0; j < i; ++j) {
+			if (vcpu->cpuid_masks[j].leaf == vcpu->cpuid_masks[i].leaf) {
+				error = EINVAL;
+				goto error;
+			}
+		}
+		cpudata->cpuid_masks[i] = vcpu->cpuid_masks[i];
+	}
+	cpudata->cpuid_mask_count = vcpu->cpuid_mask_count;
 
 	/* VMCB */
 	error = os_contigpa_zalloc(&cpudata->vmcb_pa,

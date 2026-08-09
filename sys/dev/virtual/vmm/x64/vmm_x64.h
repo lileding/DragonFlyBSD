@@ -74,6 +74,19 @@
 #define VMM_X64_SEG_TR		9
 #define VMM_X64_SEG_COUNT	10
 
+/* CPUID bits to clear and set after VMM applies its base CPU policy. */
+struct vmm_cpuid_mask {
+	uint32_t leaf;
+	uint32_t clear_eax;
+	uint32_t clear_ebx;
+	uint32_t clear_ecx;
+	uint32_t clear_edx;
+	uint32_t set_eax;
+	uint32_t set_ebx;
+	uint32_t set_ecx;
+	uint32_t set_edx;
+};
+
 /* One x86-64 segment descriptor image. */
 struct vmm_segment {
 	uint16_t	selector;
@@ -222,6 +235,13 @@ struct vmm_cpuexit_invalid {
 /* x86 architectural event classes accepted by a backend. */
 #define VMM_CPUEVENT_EXCP	0
 #define VMM_CPUEVENT_INTR	1
+
+/* One architectural event requested by the caller before a vCPU run. */
+struct vmm_cpuevent {
+	uint8_t type;
+	uint8_t vector;
+	uint64_t error;
+};
 
 /*
  * One x86-64 architectural VM exit.  reason selects the valid union member;

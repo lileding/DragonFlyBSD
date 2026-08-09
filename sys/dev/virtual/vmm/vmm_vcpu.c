@@ -5,18 +5,26 @@
  */
 #include <sys/errno.h>
 #include <sys/malloc.h>
+#include <sys/mman.h>
+
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
+#include <vm/vm_param.h>
 
 #include "vmm_backend.h"
 #include "vmm_vcpu.h"
 
 int
 vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
+	const struct vmm_cpuid_mask *cpuid_masks, size_t cpuid_mask_count,
 	vmm_vcpu_t *vcpu)
 {
 	struct vmm_vcpu *vc;
 	int error;
 
-	if (machine == NULL || state == NULL || vcpu == NULL)
+	if (machine == NULL || state == NULL || vcpu == NULL ||
+	    (cpuid_mask_count != 0 && cpuid_masks == NULL))
 		return EINVAL;
 
 	*vcpu = NULL;
@@ -27,22 +35,29 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->machine = machine;
 	vc->backend_ops = machine->backend;
 	vc->state = state;
+	vc->cpuid_masks = cpuid_masks;
+	vc->cpuid_mask_count = cpuid_mask_count;
 	lwkt_token_init(&vc->token, "vmmvcpu");
-	error = vc->backend_ops->vcpu_create(vc);
-	if (error != 0) {
-		kfree(vc, M_VMM);
-		return error;
-	}
 	lwkt_gettoken(&machine->token);
 	if (machine->next_vcpu_id == (unsigned int)-1) {
 		lwkt_reltoken(&machine->token);
-		vc->backend_ops->vcpu_destroy(vc);
 		kfree(vc, M_VMM);
 		return EOVERFLOW;
 	}
 	vc->id = machine->next_vcpu_id++;
 	++machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
+	error = vc->backend_ops->vcpu_create(vc);
+	vc->cpuid_masks = NULL;
+	vc->cpuid_mask_count = 0;
+	if (error != 0) {
+		lwkt_gettoken(&machine->token);
+		KKASSERT(machine->vcpu_count > 0);
+		--machine->vcpu_count;
+		lwkt_reltoken(&machine->token);
+		kfree(vc, M_VMM);
+		return error;
+	}
 	*vcpu = vc;
 	return 0;
 }
@@ -51,6 +66,8 @@ int
 vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 {
 	struct vmm_machine *machine;
+	struct vmm_cpuexit *exit;
+	int fault_error;
 	int error;
 
 	if (vcpu == NULL || reason == NULL)
@@ -60,7 +77,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	machine = vcpu->machine;
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
-	if (vcpu->running) {
+	if (vcpu->running || vcpu->destroying) {
 		error = EBUSY;
 	} else {
 		vcpu->running = 1;
@@ -72,7 +89,21 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	if (error != 0)
 		return error;
 
-	error = vcpu->backend_ops->vcpu_run(vcpu, reason);
+	for (;;) {
+		error = vcpu->backend_ops->vcpu_run(vcpu, reason);
+		if (error != 0 || *reason == NULL ||
+		    (*reason)->reason != VMM_CPUEXIT_MEMORY) {
+			break;
+		}
+		exit = *reason;
+		fault_error = vm_fault(&machine->vmspace->vm_map,
+		    trunc_page(exit->u.mem.gpa), exit->u.mem.prot,
+		    (exit->u.mem.prot & VM_PROT_WRITE) ?
+		    VM_FAULT_DIRTY : VM_FAULT_NORMAL);
+		if (fault_error != KERN_SUCCESS)
+			break;
+	}
+	vcpu->backend_ops->vcpu_getstate(vcpu);
 
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
@@ -87,13 +118,31 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 }
 
 int
+vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event)
+{
+	int error;
+
+	if (vcpu == NULL || event == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	error = vcpu->backend_ops->vcpu_inject(vcpu, event);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
 vmm_vcpu_kick(vmm_vcpu_t vcpu)
 {
 	if (vcpu == NULL)
 		return EINVAL;
 
 	lwkt_gettoken(&vcpu->token);
-	if (!vcpu->running) {
+	if (!vcpu->running || vcpu->destroying) {
 		lwkt_reltoken(&vcpu->token);
 		return EALREADY;
 	}
@@ -114,15 +163,19 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	machine = vcpu->machine;
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
-	if (vcpu->running) {
+	if (vcpu->running || vcpu->destroying) {
 		lwkt_reltoken(&vcpu->token);
 		lwkt_reltoken(&machine->token);
 		return EBUSY;
 	}
-	--machine->vcpu_count;
+	vcpu->destroying = 1;
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
 	vcpu->backend_ops->vcpu_destroy(vcpu);
+	lwkt_gettoken(&machine->token);
+	KKASSERT(machine->vcpu_count > 0);
+	--machine->vcpu_count;
+	lwkt_reltoken(&machine->token);
 	kfree(vcpu, M_VMM);
 	return 0;
 }

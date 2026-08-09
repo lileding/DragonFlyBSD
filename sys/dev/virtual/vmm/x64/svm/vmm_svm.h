@@ -10,6 +10,7 @@
 
 struct vmm_machine;
 struct vmm_vcpu;
+struct vmm_cpuevent;
 struct vmm_cpuexit;
 
 bool vmm_svm_ident(void);
@@ -21,6 +22,8 @@ void vmm_svm_machine_destroy(struct vmm_machine *);
 int vmm_svm_vcpu_create(struct vmm_vcpu *);
 void vmm_svm_vcpu_destroy(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
+void vmm_svm_vcpu_getstate(struct vmm_vcpu *);
+int vmm_svm_vcpu_inject(struct vmm_vcpu *, const struct vmm_cpuevent *);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
 
 #endif /* VMM_SVM_H */

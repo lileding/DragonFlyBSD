@@ -9,6 +9,7 @@
 #include <sys/systm.h>
 
 #include <vm/pmap.h>
+#include <vm/vm_map.h>
 
 #include "vmm_internal.h"
 #include "vmm_machine.h"
@@ -48,6 +49,7 @@ vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine)
 	lwkt_token_init(&m->token, "vmmmach");
 	m->backend = backend;
 	m->vmspace = vmspace;
+	pmap_maybethreaded(&vmspace->vm_pmap);
 	error = backend->machine_create(m);
 	if (error != 0) {
 		kfree(m, M_VMM);

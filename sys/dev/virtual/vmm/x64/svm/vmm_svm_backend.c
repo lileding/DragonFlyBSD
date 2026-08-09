@@ -25,6 +25,8 @@ const struct vmm_backend_ops vmm_svm_backend = {
 	.vcpu_create = vmm_svm_vcpu_create,
 	.vcpu_destroy = vmm_svm_vcpu_destroy,
 	.vcpu_run = vmm_svm_vcpu_run,
+	.vcpu_getstate = vmm_svm_vcpu_getstate,
+	.vcpu_inject = vmm_svm_vcpu_inject,
 	.vcpu_kick = vmm_svm_vcpu_kick,
 };
 
