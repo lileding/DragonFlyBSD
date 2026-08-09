@@ -10,6 +10,7 @@
 #include <sys/systm.h>
 #include <sys/thread.h>
 
+#include "vmm.h"
 #include "vmm_internal.h"
 
 SET_DECLARE(vmm_backend_set, const struct vmm_backend_ops);
@@ -18,6 +19,19 @@ const struct vmm_backend_ops *vmm_backend;
 struct lwkt_token vmm_token;
 int vmm_machine_count;
 bool vmm_draining;
+
+int
+vmm_capability(struct vmm_x64_capability *capability)
+{
+	const struct vmm_backend_ops *backend;
+
+	if (capability == NULL)
+		return EINVAL;
+	backend = vmm_backend;
+	if (backend == NULL)
+		return ENXIO;
+	return backend->capability(capability);
+}
 
 static int
 vmm_modevent(module_t module, int event, void *arg)

@@ -8,6 +8,7 @@
 
 struct vmm_machine;
 struct vmm_vcpu;
+struct vmm_x64_capability;
 struct vmm_cpuevent;
 struct vmm_cpuexit;
 
@@ -16,6 +17,7 @@ struct vmm_backend_ops {
 	int (*probe)(void);
 	int (*init)(void);
 	void (*fini)(void);
+	int (*capability)(struct vmm_x64_capability *);
 	int (*machine_create)(struct vmm_machine *);
 	void (*machine_destroy)(struct vmm_machine *);
 	int (*vcpu_create)(struct vmm_vcpu *);

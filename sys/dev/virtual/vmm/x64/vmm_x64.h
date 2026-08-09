@@ -87,6 +87,13 @@ struct vmm_cpuid_mask {
 	uint32_t set_edx;
 };
 
+/* Capabilities of the selected x86-64 backend. */
+struct vmm_x64_capability {
+	uint64_t xcr0_mask;
+	uint32_t mxcsr_mask;
+	uint32_t cpuid_mask_max;
+};
+
 /* One x86-64 segment descriptor image. */
 struct vmm_segment {
 	uint16_t	selector;

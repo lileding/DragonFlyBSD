@@ -20,6 +20,7 @@ const struct vmm_backend_ops vmm_svm_backend = {
 	.probe = vmm_svm_probe,
 	.init = vmm_svm_init,
 	.fini = vmm_svm_fini,
+	.capability = vmm_svm_capability,
 	.machine_create = vmm_svm_machine_create,
 	.machine_destroy = vmm_svm_machine_destroy,
 	.vcpu_create = vmm_svm_vcpu_create,

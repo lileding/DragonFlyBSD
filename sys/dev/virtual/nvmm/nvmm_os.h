@@ -274,7 +274,6 @@ typedef cpumask_t		os_cpuset_t;
 
 os_vmspace_t *	os_vmspace_create(vaddr_t, vaddr_t);
 void		os_vmspace_destroy(os_vmspace_t *);
-int		os_vmspace_fault(os_vmspace_t *, vaddr_t, vm_prot_t);
 
 os_vmobj_t *	os_vmobj_create(voff_t);
 void		os_vmobj_ref(os_vmobj_t *);

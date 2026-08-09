@@ -55,39 +55,13 @@ CTASSERT(KERN_SUCCESS == 0);
 os_vmspace_t *
 os_vmspace_create(vaddr_t vmin, vaddr_t vmax)
 {
-	struct vmspace *vm;
-
-	vm = vmspace_alloc(vmin, vmax);
-
-	/*
-	 * Set PMAP_MULTI on the backing pmap for the machine.  Only
-	 * pmap changes to the backing pmap for the machine affect the
-	 * guest.  Changes to the host's pmap do not affect the guest's
-	 * backing pmap.
-	 */
-	pmap_maybethreaded(&vm->vm_pmap);
-
-	return vm;
+	return vmspace_alloc(vmin, vmax);
 }
 
 void
 os_vmspace_destroy(os_vmspace_t *vm)
 {
-	pmap_del_all_cpus(vm);
 	vmspace_rel(vm);
-}
-
-int
-os_vmspace_fault(os_vmspace_t *vm, vaddr_t va, vm_prot_t prot)
-{
-	int fault_flags;
-
-	if (prot & VM_PROT_WRITE)
-		fault_flags = VM_FAULT_DIRTY;
-	else
-		fault_flags = VM_FAULT_NORMAL;
-
-	return vm_fault(&vm->vm_map, trunc_page(va), prot, fault_flags);
 }
 
 os_vmobj_t *
@@ -295,8 +269,6 @@ dfbsd_nvmm_open(struct dev_open_args *ap)
 	struct file *fp;
 	int error;
 
-	if (__predict_false(nvmm_impl == NULL))
-		return ENXIO;
 	if (!(flags & O_CLOEXEC))
 		return EINVAL;
 
@@ -358,7 +330,7 @@ nvmm_attach(void)
 	error = nvmm_init();
 	if (error)
 		panic("%s: impossible", __func__);
-	os_printf("nvmm: attached, using backend %s\n", nvmm_impl->name);
+	os_printf("nvmm: attached, using vmm\n");
 
 	return 0;
 }
@@ -381,10 +353,6 @@ nvmm_modevent(module_t mod __unused, int type, void *data __unused)
 
 	switch (type) {
 	case MOD_LOAD:
-		if (nvmm_ident() == NULL) {
-			os_printf("nvmm: cpu not supported\n");
-			return ENOTSUP;
-		}
 		error = nvmm_attach();
 		if (error)
 			return error;
@@ -424,3 +392,4 @@ static moduledata_t nvmm_moddata = {
 
 DECLARE_MODULE(nvmm, nvmm_moddata, SI_SUB_PSEUDO, SI_ORDER_ANY);
 MODULE_VERSION(nvmm, NVMM_KERN_VERSION);
+MODULE_DEPEND(nvmm, vmm, 1, 1, 1);

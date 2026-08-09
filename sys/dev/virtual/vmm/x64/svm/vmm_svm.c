@@ -2582,6 +2582,18 @@ vmm_svm_vcpu_destroy(struct vmm_vcpu *vcpu)
 /* -------------------------------------------------------------------------- */
 
 int
+vmm_svm_capability(struct vmm_x64_capability *capability)
+{
+	if (capability == NULL)
+		return EINVAL;
+
+	capability->xcr0_mask = vmm_svm_xcr0_mask;
+	capability->mxcsr_mask = x86_fpu_mxcsr_mask;
+	capability->cpuid_mask_max = SVM_NCPUID_MASKS;
+	return 0;
+}
+
+int
 vmm_svm_machine_create(struct vmm_machine *mach)
 {
 	struct pmap *pmap = os_vmspace_pmap(mach->vmspace);

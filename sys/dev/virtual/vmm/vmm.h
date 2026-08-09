@@ -32,6 +32,12 @@ typedef struct vmm_vcpu *vmm_vcpu_t;
 int vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine);
 
 /*
+ * Reports the capabilities of the backend selected when the module loaded.
+ * The result is architecture-specific and does not expose backend internals.
+ */
+int vmm_capability(struct vmm_x64_capability *capability);
+
+/*
  * Creates a vCPU using caller-owned architectural state.  state must remain
  * valid until vmm_vcpu_destroy(), and machine must remain valid throughout.
  * cpuid_masks is copied during this call and may be NULL when the count is

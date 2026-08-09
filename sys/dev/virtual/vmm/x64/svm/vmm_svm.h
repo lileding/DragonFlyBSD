@@ -17,6 +17,7 @@ bool vmm_svm_ident(void);
 int vmm_svm_probe(void);
 int vmm_svm_init(void);
 void vmm_svm_fini(void);
+int vmm_svm_capability(struct vmm_x64_capability *);
 int vmm_svm_machine_create(struct vmm_machine *);
 void vmm_svm_machine_destroy(struct vmm_machine *);
 int vmm_svm_vcpu_create(struct vmm_vcpu *);

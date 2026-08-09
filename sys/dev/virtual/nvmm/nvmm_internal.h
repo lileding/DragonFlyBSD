@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2026 Maxime Villard, m00nbsd.net
+ * Copyright (c) 2018-2021 Maxime Villard, m00nbsd.net
  * All rights reserved.
  *
  * This code is part of the NVMM hypervisor.
@@ -34,6 +34,7 @@
 #endif
 
 #include "nvmm_os.h"
+#include "../vmm/vmm.h"
 
 #define NVMM_MAX_MACHINES	128
 #define NVMM_MAX_VCPUS		128
@@ -54,6 +55,23 @@ struct nvmm_owner {
 	pid_t pid;
 };
 
+struct nvmm_ioc_capability;
+struct nvmm_ioc_machine_create;
+struct nvmm_ioc_machine_destroy;
+struct nvmm_ioc_machine_configure;
+struct nvmm_ioc_vcpu_create;
+struct nvmm_ioc_vcpu_destroy;
+struct nvmm_ioc_vcpu_configure;
+struct nvmm_ioc_vcpu_setstate;
+struct nvmm_ioc_vcpu_getstate;
+struct nvmm_ioc_vcpu_inject;
+struct nvmm_ioc_vcpu_run;
+struct nvmm_ioc_gpa_map;
+struct nvmm_ioc_gpa_unmap;
+struct nvmm_ioc_hva_map;
+struct nvmm_ioc_hva_unmap;
+struct nvmm_ioc_ctl;
+
 struct nvmm_cpu {
 	/* Shared. */
 	bool present;
@@ -63,11 +81,9 @@ struct nvmm_cpu {
 	/* Comm page. */
 	struct nvmm_comm_page *comm;
 
-	/* Last host CPU on which the VCPU ran. */
-	int hcpu_last;
-
-	/* Implementation-specific. */
-	void *cpudata;
+	/* VMM owns the hardware vCPU and consumes state across runs. */
+	vmm_vcpu_t vmm_vcpu;
+	struct vmm_cpustate state;
 };
 
 struct nvmm_hmapping {
@@ -88,7 +104,7 @@ struct nvmm_machine {
 	os_vmobj_t *commvmobj;
 
 	/* Kernel */
-	os_vmspace_t *vm;
+	struct vmspace *vm;
 	gpaddr_t gpa_begin;
 	gpaddr_t gpa_end;
 
@@ -99,51 +115,58 @@ struct nvmm_machine {
 	volatile unsigned int ncpus;
 	struct nvmm_cpu cpus[NVMM_MAX_VCPUS];
 
-	/* Implementation-specific */
-	void *machdata;
+	/* VMM owns the backend machine instance. */
+	vmm_machine_t vmm_machine;
 };
-
-struct nvmm_impl {
-	const char *name;
-	bool (*ident)(void);
-	void (*init)(void);
-	void (*fini)(void);
-	void (*capability)(struct nvmm_capability *);
-
-	size_t mach_conf_max;
-	const size_t *mach_conf_sizes;
-
-	size_t vcpu_conf_max;
-	const size_t *vcpu_conf_sizes;
-
-	size_t state_size;
-
-	void (*machine_create)(struct nvmm_machine *);
-	void (*machine_destroy)(struct nvmm_machine *);
-	int (*machine_configure)(struct nvmm_machine *, uint64_t, void *);
-
-	int (*vcpu_create)(struct nvmm_machine *, struct nvmm_cpu *);
-	void (*vcpu_destroy)(struct nvmm_machine *, struct nvmm_cpu *);
-	int (*vcpu_configure)(struct nvmm_cpu *, uint64_t, void *);
-	void (*vcpu_setstate)(struct nvmm_cpu *);
-	void (*vcpu_getstate)(struct nvmm_cpu *);
-	int (*vcpu_run)(struct nvmm_machine *, struct nvmm_cpu *,
-	    struct nvmm_vcpu_exit *);
-};
-
-#if defined(__x86_64__)
-extern const struct nvmm_impl nvmm_x86_svm;
-extern const struct nvmm_impl nvmm_x86_vmx;
-#endif
 
 extern struct nvmm_owner nvmm_root_owner;
 extern volatile unsigned int nmachines;
-extern const struct nvmm_impl *nvmm_impl;
 
-const struct nvmm_impl *nvmm_ident(void);
 int	nvmm_init(void);
 void	nvmm_fini(void);
 int	nvmm_ioctl(struct nvmm_owner *, unsigned long, void *);
 void	nvmm_kill_machines(struct nvmm_owner *);
+int	nvmm_machine_alloc(struct nvmm_machine **);
+void	nvmm_machine_free(struct nvmm_machine *);
+int	nvmm_machine_get(struct nvmm_owner *, nvmm_machid_t,
+	    struct nvmm_machine **, bool);
+void	nvmm_machine_put(struct nvmm_machine *);
+int	nvmm_vcpu_alloc(struct nvmm_machine *, nvmm_cpuid_t,
+	    struct nvmm_cpu **);
+void	nvmm_vcpu_free(struct nvmm_machine *, struct nvmm_cpu *);
+int	nvmm_vcpu_get(struct nvmm_machine *, nvmm_cpuid_t,
+	    struct nvmm_cpu **);
+void	nvmm_vcpu_put(struct nvmm_cpu *);
+
+int	nvmm_syscall_capability(struct nvmm_owner *,
+	    struct nvmm_ioc_capability *);
+int	nvmm_syscall_machine_create(struct nvmm_owner *,
+	    struct nvmm_ioc_machine_create *);
+int	nvmm_syscall_machine_destroy(struct nvmm_owner *,
+	    struct nvmm_ioc_machine_destroy *);
+int	nvmm_syscall_machine_destroy_locked(struct nvmm_machine *);
+int	nvmm_syscall_machine_configure(struct nvmm_owner *,
+	    struct nvmm_ioc_machine_configure *);
+int	nvmm_syscall_vcpu_create(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_create *);
+int	nvmm_syscall_vcpu_destroy(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_destroy *);
+int	nvmm_syscall_vcpu_configure(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_configure *);
+int	nvmm_syscall_vcpu_setstate(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_setstate *);
+int	nvmm_syscall_vcpu_getstate(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_getstate *);
+int	nvmm_syscall_vcpu_inject(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_inject *);
+int	nvmm_syscall_vcpu_run(struct nvmm_owner *,
+	    struct nvmm_ioc_vcpu_run *);
+int	nvmm_syscall_gpa_map(struct nvmm_owner *, struct nvmm_ioc_gpa_map *);
+int	nvmm_syscall_gpa_unmap(struct nvmm_owner *,
+	    struct nvmm_ioc_gpa_unmap *);
+int	nvmm_syscall_hva_map(struct nvmm_owner *, struct nvmm_ioc_hva_map *);
+int	nvmm_syscall_hva_unmap(struct nvmm_owner *,
+	    struct nvmm_ioc_hva_unmap *);
+int	nvmm_syscall_ctl(struct nvmm_owner *, struct nvmm_ioc_ctl *);
 
 #endif /* _NVMM_INTERNAL_H_ */
