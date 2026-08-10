@@ -40,7 +40,7 @@
 #include "../vmm_x64.h"
 #include "vmm_svm_x86defs.h"
 
-#define SVM_NCPUID_MASKS	32
+#define SVM_NCPUID_ENTRIES	64
 
 struct vmm_svm_cpuid_filter {
 	uint32_t eax;
@@ -57,6 +57,22 @@ struct vmm_svm_xsave {
 	uint8_t reserved[40];
 };
 CTASSERT(sizeof(struct vmm_svm_xsave) == 512 + 64);
+CTASSERT(VMM_X64_GPR_RAX == 0);
+CTASSERT(VMM_X64_GPR_RCX == 1);
+CTASSERT(VMM_X64_GPR_RDX == 2);
+CTASSERT(VMM_X64_GPR_RBX == 3);
+CTASSERT(VMM_X64_GPR_RSP == 4);
+CTASSERT(VMM_X64_GPR_RBP == 5);
+CTASSERT(VMM_X64_GPR_RSI == 6);
+CTASSERT(VMM_X64_GPR_RDI == 7);
+CTASSERT(VMM_X64_GPR_R8 == 8);
+CTASSERT(VMM_X64_GPR_R9 == 9);
+CTASSERT(VMM_X64_GPR_R10 == 10);
+CTASSERT(VMM_X64_GPR_R11 == 11);
+CTASSERT(VMM_X64_GPR_R12 == 12);
+CTASSERT(VMM_X64_GPR_R13 == 13);
+CTASSERT(VMM_X64_GPR_R14 == 14);
+CTASSERT(VMM_X64_GPR_R15 == 15);
 
 static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_00000001 = {
 	.eax = ~0,
@@ -65,7 +81,6 @@ static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_00000001 = {
 	    CPUID_0_01_ECX_SSE3 |
 	    CPUID_0_01_ECX_PCLMULQDQ |
 	    CPUID_0_01_ECX_SSSE3 |
-	    CPUID_0_01_ECX_FMA |
 	    CPUID_0_01_ECX_CX16 |
 	    CPUID_0_01_ECX_SSE41 |
 	    CPUID_0_01_ECX_SSE42 |
@@ -74,7 +89,6 @@ static const struct vmm_svm_cpuid_filter vmm_svm_cpuid_00000001 = {
 	    CPUID_0_01_ECX_AESNI |
 	    CPUID_0_01_ECX_XSAVE |
 	    CPUID_0_01_ECX_OSXSAVE |
-	    CPUID_0_01_ECX_F16C |
 	    CPUID_0_01_ECX_RDRAND,
 	.edx =
 	    CPUID_0_01_EDX_FPU |
@@ -738,6 +752,9 @@ struct vmm_svm_cpudata {
 	struct {
 		uint64_t fsbase;
 		uint64_t kernelgsbase;
+		uint64_t sysenter_cs;
+		uint64_t sysenter_esp;
+		uint64_t sysenter_eip;
 		uint64_t drs[VMM_X64_DR_COUNT];
 #ifdef __DragonFly__
 		mcontext_t hmctx;  /* TODO: remove this like NetBSD */
@@ -756,8 +773,8 @@ struct vmm_svm_cpudata {
 	uint64_t gtsc_offset;
 	uint64_t gtsc_match;
 	struct vmm_svm_xsave gxsave __aligned(64);
-	size_t cpuid_mask_count;
-	struct vmm_cpuid_mask cpuid_masks[SVM_NCPUID_MASKS];
+	size_t cpuid_entry_count;
+	struct vmm_cpuid_entry cpuid_entries[SVM_NCPUID_ENTRIES];
 };
 
 static void
@@ -1103,7 +1120,8 @@ vmm_svm_inkernel_handle_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 			    (CPUID_0_0D_ECX1_EAX_XSAVEOPT |
 			     CPUID_0_0D_ECX1_EAX_XSAVEC |
 			     CPUID_0_0D_ECX1_EAX_XGETBV);
-			cpudata->gprs[VMM_X64_GPR_RBX] = 0;
+			cpudata->gprs[VMM_X64_GPR_RBX] =
+			    vmm_svm_xsave_size(cpudata->gxcr0);
 			cpudata->gprs[VMM_X64_GPR_RCX] = 0;
 			cpudata->gprs[VMM_X64_GPR_RDX] = 0;
 			break;
@@ -1191,8 +1209,13 @@ vmm_svm_inkernel_handle_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 		cpudata->gprs[VMM_X64_GPR_RDX] = 0;
 		break;
 	case 0x8000001D: /* Cache Topology Information */
+		break;
 	case 0x8000001E: /* Processor Topology Information */
-		break; /* TODO? */
+		cpudata->vmcb->state.rax = vcpu->id;
+		cpudata->gprs[VMM_X64_GPR_RBX] = vcpu->id;
+		cpudata->gprs[VMM_X64_GPR_RCX] = 0;
+		cpudata->gprs[VMM_X64_GPR_RDX] = 0;
+		break;
 	case 0x8000001F: /* Encrypted Memory Capabilities */
 		cpudata->vmcb->state.rax = 0;
 		cpudata->gprs[VMM_X64_GPR_RBX] = 0;
@@ -1203,6 +1226,140 @@ vmm_svm_inkernel_handle_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	default:
 		break;
 	}
+}
+
+static void
+vmm_svm_supported_cpuid_entry(struct vmm_cpuid_entry *entry)
+{
+	cpuid_desc_t descs;
+
+	x86_get_cpuid2(entry->leaf, entry->subleaf, &descs);
+	entry->eax = descs.eax;
+	entry->ebx = descs.ebx;
+	entry->ecx = descs.ecx;
+	entry->edx = descs.edx;
+
+	switch (entry->leaf) {
+	case 0x00000000:
+		entry->eax = vmm_svm_cpuid_max_basic;
+		break;
+	case 0x00000001:
+		entry->eax &= vmm_svm_cpuid_00000001.eax;
+		entry->ebx &= ~(CPUID_0_01_EBX_LOCAL_APIC_ID |
+		    CPUID_0_01_EBX_HTT_CORES);
+		entry->ecx &= vmm_svm_cpuid_00000001.ecx;
+		entry->ecx |= CPUID_0_01_ECX_RAZ;
+		entry->edx &= vmm_svm_cpuid_00000001.edx;
+		break;
+	case 0x00000002:
+	case 0x00000003:
+	case 0x00000004:
+	case 0x00000005:
+	case 0x00000006:
+	case 0x00000008:
+	case 0x00000009:
+	case 0x0000000A:
+	case 0x0000000B:
+	case 0x0000000C:
+		entry->eax = 0;
+		entry->ebx = 0;
+		entry->ecx = 0;
+		entry->edx = 0;
+		break;
+	case 0x00000007:
+		entry->eax = 0;
+		entry->ebx &= vmm_svm_cpuid_00000007.ebx;
+		entry->ecx &= vmm_svm_cpuid_00000007.ecx;
+		entry->edx &= vmm_svm_cpuid_00000007.edx;
+		break;
+	case 0x0000000D:
+		if (vmm_svm_xcr0_mask == 0)
+			break;
+		if (entry->subleaf == 0) {
+			entry->eax = vmm_svm_xcr0_mask & 0xFFFFFFFF;
+			entry->edx = vmm_svm_xcr0_mask >> 32;
+			entry->ebx = vmm_svm_xsave_size(vmm_svm_xcr0_mask);
+			entry->ecx = vmm_svm_xsave_size(vmm_svm_xcr0_mask);
+		} else {
+			entry->eax &= CPUID_0_0D_ECX1_EAX_XSAVEOPT |
+			    CPUID_0_0D_ECX1_EAX_XSAVEC |
+			    CPUID_0_0D_ECX1_EAX_XGETBV;
+			entry->ebx = vmm_svm_xsave_size(vmm_svm_xcr0_mask);
+			entry->ecx = 0;
+			entry->edx = 0;
+		}
+		break;
+	case 0x40000000:
+		entry->eax = SVM_CPUID_MAX_HYPERVISOR;
+		entry->ebx = 0;
+		entry->ecx = 0;
+		entry->edx = 0;
+		memcpy(&entry->ebx, "___ ", 4);
+		memcpy(&entry->ecx, "VMM ", 4);
+		memcpy(&entry->edx, " ___", 4);
+		break;
+	case 0x80000000:
+		entry->eax = vmm_svm_cpuid_max_extended;
+		break;
+	case 0x80000001:
+		entry->eax &= vmm_svm_cpuid_80000001.eax;
+		entry->ebx &= vmm_svm_cpuid_80000001.ebx;
+		entry->ecx &= vmm_svm_cpuid_80000001.ecx;
+		entry->edx &= vmm_svm_cpuid_80000001.edx;
+		break;
+	case 0x80000007:
+		entry->eax &= vmm_svm_cpuid_80000007.eax;
+		entry->ebx &= vmm_svm_cpuid_80000007.ebx;
+		entry->ecx &= vmm_svm_cpuid_80000007.ecx;
+		entry->edx &= vmm_svm_cpuid_80000007.edx;
+		break;
+	case 0x80000008:
+		entry->eax &= vmm_svm_cpuid_80000008.eax;
+		entry->ebx &= vmm_svm_cpuid_80000008.ebx;
+		entry->ecx = 0;
+		entry->edx &= vmm_svm_cpuid_80000008.edx;
+		break;
+	case 0x8000001E:
+		entry->eax = 0;
+		entry->ebx = 0;
+		entry->ecx = 0;
+		entry->edx = 0;
+		break;
+	case 0x80000009:
+	case 0x8000000A:
+	case 0x8000000B:
+	case 0x8000000C:
+	case 0x8000000D:
+	case 0x8000000E:
+	case 0x8000000F:
+	case 0x80000010:
+	case 0x80000011:
+	case 0x80000012:
+	case 0x80000013:
+	case 0x80000014:
+	case 0x80000015:
+	case 0x80000016:
+	case 0x80000017:
+	case 0x80000018:
+	case 0x8000001B:
+	case 0x8000001C:
+	case 0x8000001F:
+		entry->eax = 0;
+		entry->ebx = 0;
+		entry->ecx = 0;
+		entry->edx = 0;
+		break;
+	default:
+		break;
+	}
+}
+
+static size_t
+vmm_svm_supported_cpuid_count(void)
+{
+	return (size_t)vmm_svm_cpuid_max_basic + 1 +
+	    (vmm_svm_cpuid_max_basic >= 0x0000000D ? 1 : 0) + 1 +
+	    (size_t)(vmm_svm_cpuid_max_extended - 0x80000000) + 1;
 }
 
 static void
@@ -1217,6 +1374,8 @@ vmm_svm_exit_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
     struct vmm_cpuexit *exit)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	const struct vmm_cpuid_entry *entry;
+	const struct vmm_cpuid_entry *leaf_entry;
 	uint32_t eax, ecx;
 	size_t i;
 
@@ -1224,19 +1383,68 @@ vmm_svm_exit_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	ecx = (cpudata->gprs[VMM_X64_GPR_RCX] & 0xFFFFFFFF);
 	vmm_svm_inkernel_exec_cpuid(cpudata, eax, ecx);
 	vmm_svm_inkernel_handle_cpuid(mach, vcpu, eax, ecx);
-	for (i = 0; i < cpudata->cpuid_mask_count; ++i) {
-		const struct vmm_cpuid_mask *mask = &cpudata->cpuid_masks[i];
+	entry = NULL;
+	leaf_entry = NULL;
+	for (i = 0; i < cpudata->cpuid_entry_count; ++i) {
+		const struct vmm_cpuid_entry *candidate =
+		    &cpudata->cpuid_entries[i];
 
-		if (mask->leaf != eax)
+		if (candidate->leaf != eax)
 			continue;
-		cpudata->vmcb->state.rax &= ~mask->clear_eax;
-		cpudata->gprs[VMM_X64_GPR_RBX] &= ~mask->clear_ebx;
-		cpudata->gprs[VMM_X64_GPR_RCX] &= ~mask->clear_ecx;
-		cpudata->gprs[VMM_X64_GPR_RDX] &= ~mask->clear_edx;
-		cpudata->vmcb->state.rax |= mask->set_eax;
-		cpudata->gprs[VMM_X64_GPR_RBX] |= mask->set_ebx;
-		cpudata->gprs[VMM_X64_GPR_RCX] |= mask->set_ecx;
-		cpudata->gprs[VMM_X64_GPR_RDX] |= mask->set_edx;
+		if ((candidate->flags &
+		    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) == 0) {
+			leaf_entry = candidate;
+			continue;
+		}
+		if (candidate->subleaf == ecx) {
+			entry = candidate;
+			break;
+		}
+	}
+	if (entry == NULL)
+		entry = leaf_entry;
+	if (entry != NULL) {
+		cpudata->vmcb->state.rax = entry->eax;
+		cpudata->gprs[VMM_X64_GPR_RBX] = entry->ebx;
+		cpudata->gprs[VMM_X64_GPR_RCX] = entry->ecx;
+		cpudata->gprs[VMM_X64_GPR_RDX] = entry->edx;
+	}
+
+	/* These fields are properties of the live vCPU, not its CPUID template. */
+	switch (eax) {
+	case 0x00000001:
+		cpudata->gprs[VMM_X64_GPR_RBX] &=
+		    ~(CPUID_0_01_EBX_LOCAL_APIC_ID | CPUID_0_01_EBX_HTT_CORES);
+		cpudata->gprs[VMM_X64_GPR_RBX] |= __SHIFTIN(vcpu->id,
+		    CPUID_0_01_EBX_LOCAL_APIC_ID);
+		lwkt_gettoken(&mach->token);
+		cpudata->gprs[VMM_X64_GPR_RBX] |= __SHIFTIN(mach->vcpu_count,
+		    CPUID_0_01_EBX_HTT_CORES);
+		lwkt_reltoken(&mach->token);
+		if (!(cpudata->vmcb->state.cr4 & CR4_OSXSAVE))
+			cpudata->gprs[VMM_X64_GPR_RCX] &= ~CPUID_0_01_ECX_OSXSAVE;
+		break;
+	case 0x0000000D:
+		if (vmm_svm_xcr0_mask != 0 && ecx <= 1)
+			cpudata->gprs[VMM_X64_GPR_RBX] =
+			    vmm_svm_xsave_size(cpudata->gxcr0);
+		break;
+	case 0x80000008:
+		lwkt_gettoken(&mach->token);
+		cpudata->gprs[VMM_X64_GPR_RCX] &=
+		    ~(CPUID_8_08_ECX_NC | CPUID_8_08_ECX_ApicIdSize);
+		cpudata->gprs[VMM_X64_GPR_RCX] |=
+		    __SHIFTIN(mach->vcpu_count - 1, CPUID_8_08_ECX_NC) |
+		    __SHIFTIN(mach->vcpu_count > 1 ? fls(mach->vcpu_count - 1) : 0,
+		    CPUID_8_08_ECX_ApicIdSize);
+		lwkt_reltoken(&mach->token);
+		break;
+	case 0x8000001E:
+		/* One vCPU is one compute unit in the single-node topology. */
+		cpudata->vmcb->state.rax = vcpu->id;
+		cpudata->gprs[VMM_X64_GPR_RBX] = vcpu->id;
+		cpudata->gprs[VMM_X64_GPR_RCX] = 0;
+		cpudata->gprs[VMM_X64_GPR_RDX] = 0;
 		break;
 	}
 
@@ -1612,7 +1820,16 @@ vmm_svm_vcpu_guest_dbregs_enter(struct vmm_vcpu *vcpu)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 
-	x86_curthread_save_dbregs(cpudata->hstate.drs);
+	if (curthread->td_lwp == NULL) {
+		cpudata->hstate.drs[VMM_X64_DR_DR0] = x86_get_dr0();
+		cpudata->hstate.drs[VMM_X64_DR_DR1] = x86_get_dr1();
+		cpudata->hstate.drs[VMM_X64_DR_DR2] = x86_get_dr2();
+		cpudata->hstate.drs[VMM_X64_DR_DR3] = x86_get_dr3();
+		cpudata->hstate.drs[VMM_X64_DR_DR6] = x86_get_dr6();
+		cpudata->hstate.drs[VMM_X64_DR_DR7] = x86_get_dr7();
+	} else {
+		x86_curthread_save_dbregs(cpudata->hstate.drs);
+	}
 
 	x86_set_dr7(0);
 
@@ -1632,7 +1849,16 @@ vmm_svm_vcpu_guest_dbregs_leave(struct vmm_vcpu *vcpu)
 	cpudata->drs[VMM_X64_DR_DR2] = x86_get_dr2();
 	cpudata->drs[VMM_X64_DR_DR3] = x86_get_dr3();
 
-	x86_curthread_restore_dbregs(cpudata->hstate.drs);
+	if (curthread->td_lwp == NULL) {
+		x86_set_dr0(cpudata->hstate.drs[VMM_X64_DR_DR0]);
+		x86_set_dr1(cpudata->hstate.drs[VMM_X64_DR_DR1]);
+		x86_set_dr2(cpudata->hstate.drs[VMM_X64_DR_DR2]);
+		x86_set_dr3(cpudata->hstate.drs[VMM_X64_DR_DR3]);
+		x86_set_dr6(cpudata->hstate.drs[VMM_X64_DR_DR6]);
+		x86_set_dr7(cpudata->hstate.drs[VMM_X64_DR_DR7]);
+	} else {
+		x86_curthread_restore_dbregs(cpudata->hstate.drs);
+	}
 }
 
 static void
@@ -1643,6 +1869,9 @@ vmm_svm_vcpu_guest_misc_enter(struct vmm_vcpu *vcpu)
 	/* Save the percpu host state. */
 	cpudata->hstate.fsbase = rdmsr(MSR_FSBASE);
 	cpudata->hstate.kernelgsbase = rdmsr(MSR_KERNELGSBASE);
+	cpudata->hstate.sysenter_cs = rdmsr(MSR_SYSENTER_CS);
+	cpudata->hstate.sysenter_esp = rdmsr(MSR_SYSENTER_ESP);
+	cpudata->hstate.sysenter_eip = rdmsr(MSR_SYSENTER_EIP);
 }
 
 static void
@@ -1655,6 +1884,9 @@ vmm_svm_vcpu_guest_misc_leave(struct vmm_vcpu *vcpu)
 	wrmsr(MSR_LSTAR, vmm_svm_global_hstate.lstar);
 	wrmsr(MSR_CSTAR, vmm_svm_global_hstate.cstar);
 	wrmsr(MSR_SFMASK, vmm_svm_global_hstate.sfmask);
+	wrmsr(MSR_SYSENTER_CS, cpudata->hstate.sysenter_cs);
+	wrmsr(MSR_SYSENTER_ESP, cpudata->hstate.sysenter_esp);
+	wrmsr(MSR_SYSENTER_EIP, cpudata->hstate.sysenter_eip);
 
 	/* Restore the percpu host state. */
 	wrmsr(MSR_FSBASE, cpudata->hstate.fsbase);
@@ -1727,6 +1959,20 @@ vmm_svm_exit_evt(struct vmm_svm_cpudata *cpudata, struct vmcb *vmcb)
 	}
 }
 
+void
+vmm_svm_restore_tr(uint16_t selector)
+{
+	struct mdglobaldata *globaldata;
+	volatile uint64_t *descriptor;
+
+	/* VMRUN marks the host TSS descriptor busy; LTR requires it clear. */
+	globaldata = (struct mdglobaldata *)(void *)mycpu;
+	descriptor = (volatile uint64_t *)(void *)
+	    ((char *)globaldata->gd_tss_gdt + 4);
+	*descriptor &= ~0x0200ULL;
+	ltr(selector);
+}
+
 int
 vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 {
@@ -1740,7 +1986,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 
 	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
 
-	os_preempt_disable();
 	hcpu = os_curcpu_number();
 
 	vmm_svm_gtlb_catchup(vcpu, hcpu);
@@ -1760,9 +2005,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 #endif
 	}
 
-	vmm_svm_vcpu_guest_dbregs_enter(vcpu);
-	vmm_svm_vcpu_guest_misc_enter(vcpu);
-
 	while (1) {
 		if (__predict_false(cpudata->gtlb_want_flush ||
 				    cpudata->htlb_want_flush))
@@ -1778,6 +2020,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		}
 
 		vmm_svm_clgi();
+		vmm_svm_vcpu_guest_dbregs_enter(vcpu);
+		vmm_svm_vcpu_guest_misc_enter(vcpu);
 		vmm_svm_vcpu_guest_fpu_enter(vcpu);
 		machgen = vmm_svm_htlb_flush(mach, cpudata);
 
@@ -1795,6 +2039,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		if (__predict_false(mycpu->gd_reqflags & RQF_HVM_MASK)) {
 			/* No hTLB flush ack, because it's not executed. */
 			vmm_svm_vcpu_guest_fpu_leave(vcpu);
+			vmm_svm_vcpu_guest_misc_leave(vcpu);
+			vmm_svm_vcpu_guest_dbregs_leave(vcpu);
 			vmm_svm_stgi();
 			exit->reason = VMM_CPUEXIT_NONE;
 			error = ERESTART;
@@ -1808,6 +2054,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
 		vmm_svm_htlb_flush_ack(cpudata, machgen);
 		vmm_svm_vcpu_guest_fpu_leave(vcpu);
+		vmm_svm_vcpu_guest_misc_leave(vcpu);
+		vmm_svm_vcpu_guest_dbregs_leave(vcpu);
 		vmm_svm_stgi();
 
 		vmm_svm_vmcb_cache_default(vmcb);
@@ -1896,11 +2144,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		}
 	}
-
-	vmm_svm_vcpu_guest_misc_leave(vcpu);
-	vmm_svm_vcpu_guest_dbregs_leave(vcpu);
-
-	os_preempt_enable();
 
 	exit->exitstate.rflags = vmcb->state.rflags;
 	exit->exitstate.cr8 = __SHIFTOUT(vmcb->ctrl.v, VMCB_CTRL_V_TPR);
@@ -2485,7 +2728,6 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 {
 	struct vmm_machine *mach = vcpu->machine;
 	struct vmm_svm_cpudata *cpudata;
-	size_t i, j;
 	int error;
 
 	/* Allocate the SVM cpudata. */
@@ -2496,31 +2738,6 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	vcpu->backend = cpudata;
 	cpudata->hcpu_last = -1;
 	atomic_store_rel_int(&cpudata->running_cpu, -1);
-	if (vcpu->cpuid_mask_count > SVM_NCPUID_MASKS) {
-		error = ENOBUFS;
-		goto error;
-	}
-	for (i = 0; i < vcpu->cpuid_mask_count; ++i) {
-		if ((vcpu->cpuid_masks[i].clear_eax &
-		     vcpu->cpuid_masks[i].set_eax) != 0 ||
-		    (vcpu->cpuid_masks[i].clear_ebx &
-		     vcpu->cpuid_masks[i].set_ebx) != 0 ||
-		    (vcpu->cpuid_masks[i].clear_ecx &
-		     vcpu->cpuid_masks[i].set_ecx) != 0 ||
-		    (vcpu->cpuid_masks[i].clear_edx &
-		     vcpu->cpuid_masks[i].set_edx) != 0) {
-			error = EINVAL;
-			goto error;
-		}
-		for (j = 0; j < i; ++j) {
-			if (vcpu->cpuid_masks[j].leaf == vcpu->cpuid_masks[i].leaf) {
-				error = EINVAL;
-				goto error;
-			}
-		}
-		cpudata->cpuid_masks[i] = vcpu->cpuid_masks[i];
-	}
-	cpudata->cpuid_mask_count = vcpu->cpuid_mask_count;
 
 	/* VMCB */
 	error = os_contigpa_zalloc(&cpudata->vmcb_pa,
@@ -2589,7 +2806,95 @@ vmm_svm_capability(struct vmm_x64_capability *capability)
 
 	capability->xcr0_mask = vmm_svm_xcr0_mask;
 	capability->mxcsr_mask = x86_fpu_mxcsr_mask;
-	capability->cpuid_mask_max = SVM_NCPUID_MASKS;
+	return 0;
+}
+
+int
+vmm_svm_get_supported_cpuid(struct vmm_cpuid_entry *entries,
+	size_t *entry_count)
+{
+	uint32_t leaf;
+	size_t count;
+	size_t i;
+
+	if (entry_count == NULL)
+		return EINVAL;
+	count = vmm_svm_supported_cpuid_count();
+	if (entries == NULL) {
+		*entry_count = count;
+		return 0;
+	}
+	if (*entry_count < count) {
+		*entry_count = count;
+		return E2BIG;
+	}
+
+	i = 0;
+	for (leaf = 0; leaf <= vmm_svm_cpuid_max_basic; ++leaf) {
+		entries[i].leaf = leaf;
+		entries[i].subleaf = 0;
+		entries[i].flags = leaf == 0x00000007 || leaf == 0x0000000D ?
+		    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF : 0;
+		vmm_svm_supported_cpuid_entry(&entries[i]);
+		++i;
+		if (leaf == 0x0000000D) {
+			entries[i].leaf = leaf;
+			entries[i].subleaf = 1;
+			entries[i].flags = VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF;
+			vmm_svm_supported_cpuid_entry(&entries[i]);
+			++i;
+		}
+	}
+	entries[i].leaf = 0x40000000;
+	entries[i].subleaf = 0;
+	entries[i].flags = 0;
+	vmm_svm_supported_cpuid_entry(&entries[i]);
+	++i;
+	for (leaf = 0x80000000; leaf <= vmm_svm_cpuid_max_extended; ++leaf) {
+		entries[i].leaf = leaf;
+		entries[i].subleaf = 0;
+		entries[i].flags = 0;
+		vmm_svm_supported_cpuid_entry(&entries[i]);
+		++i;
+	}
+	KKASSERT(i == count);
+	*entry_count = count;
+	return 0;
+}
+
+int
+vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *vcpu,
+	const struct vmm_cpuid_entry *entries, size_t entry_count)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	size_t i, j;
+
+	if (entry_count > SVM_NCPUID_ENTRIES)
+		return ENOBUFS;
+	for (i = 0; i < entry_count; ++i) {
+		if ((entries[i].flags &
+		    ~VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) != 0)
+			return EINVAL;
+		for (j = 0; j < i; ++j) {
+			if (entries[j].leaf != entries[i].leaf)
+				continue;
+			if ((entries[j].flags &
+			    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) == 0 &&
+			    (entries[i].flags &
+			    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) == 0)
+				return EINVAL;
+			if ((entries[j].flags &
+			    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) != 0 &&
+			    (entries[i].flags &
+			    VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF) != 0 &&
+			    entries[j].subleaf == entries[i].subleaf)
+				return EINVAL;
+		}
+	}
+	if (entry_count != 0)
+		bcopy(entries, cpudata->cpuid_entries,
+		    entry_count * sizeof(*entries));
+	cpudata->cpuid_entry_count = entry_count;
 	return 0;
 }
 

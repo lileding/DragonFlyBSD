@@ -23,6 +23,7 @@
 
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
+#include <machine/globaldata.h>
 #include <machine/npx.h>
 #include <machine/segments.h>
 
@@ -114,6 +115,8 @@ x86_curthread_save_dbregs(uint64_t *drs)
 {
 	struct pcb *pcb;
 
+	if (curthread->td_lwp == NULL)
+		return;
 	pcb = curthread->td_lwp->lwp_thread->td_pcb;
 	if (__predict_true(!(pcb->pcb_flags & PCB_DBREGS)))
 		return;
@@ -130,6 +133,8 @@ x86_curthread_restore_dbregs(uint64_t *drs)
 {
 	struct pcb *pcb;
 
+	if (curthread->td_lwp == NULL)
+		return;
 	pcb = curthread->td_lwp->lwp_thread->td_pcb;
 	if (__predict_true(!(pcb->pcb_flags & PCB_DBREGS)))
 		return;
@@ -196,7 +201,8 @@ os_return_needed(void)
 {
 	if (__predict_false(hvm_break_wanted()))
 		return true;
-	if (__predict_false(curthread->td_lwp->lwp_mpflags & LWP_MP_URETMASK))
+	if (__predict_false(curthread->td_lwp != NULL &&
+	    (curthread->td_lwp->lwp_mpflags & LWP_MP_URETMASK)))
 		return true;
 	return false;
 }

@@ -17,14 +17,12 @@
 
 int
 vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
-	const struct vmm_cpuid_mask *cpuid_masks, size_t cpuid_mask_count,
 	vmm_vcpu_t *vcpu)
 {
 	struct vmm_vcpu *vc;
 	int error;
 
-	if (machine == NULL || state == NULL || vcpu == NULL ||
-	    (cpuid_mask_count != 0 && cpuid_masks == NULL))
+	if (machine == NULL || state == NULL || vcpu == NULL)
 		return EINVAL;
 
 	*vcpu = NULL;
@@ -35,8 +33,6 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->machine = machine;
 	vc->backend_ops = machine->backend;
 	vc->state = state;
-	vc->cpuid_masks = cpuid_masks;
-	vc->cpuid_mask_count = cpuid_mask_count;
 	lwkt_token_init(&vc->token, "vmmvcpu");
 	lwkt_gettoken(&machine->token);
 	if (machine->next_vcpu_id == (unsigned int)-1) {
@@ -48,8 +44,6 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	++machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
 	error = vc->backend_ops->vcpu_create(vc);
-	vc->cpuid_masks = NULL;
-	vc->cpuid_mask_count = 0;
 	if (error != 0) {
 		lwkt_gettoken(&machine->token);
 		KKASSERT(machine->vcpu_count > 0);
@@ -60,6 +54,29 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	}
 	*vcpu = vc;
 	return 0;
+}
+
+int
+vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
+	const struct vmm_cpuid_entry *entries, size_t entry_count)
+{
+	int error;
+
+	if (vcpu == NULL || (entry_count != 0 && entries == NULL))
+		return EINVAL;
+
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	if (vcpu->backend_ops->vcpu_set_cpuid == NULL) {
+		lwkt_reltoken(&vcpu->token);
+		return ENOTSUP;
+	}
+	error = vcpu->backend_ops->vcpu_set_cpuid(vcpu, entries, entry_count);
+	lwkt_reltoken(&vcpu->token);
+	return error;
 }
 
 int
@@ -131,6 +148,8 @@ vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event)
 		return EBUSY;
 	}
 	error = vcpu->backend_ops->vcpu_inject(vcpu, event);
+	if (error == 0)
+		vcpu->backend_ops->vcpu_getstate(vcpu);
 	lwkt_reltoken(&vcpu->token);
 	return error;
 }

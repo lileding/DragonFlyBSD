@@ -74,25 +74,38 @@
 #define VMM_X64_SEG_TR		9
 #define VMM_X64_SEG_COUNT	10
 
-/* CPUID bits to clear and set after VMM applies its base CPU policy. */
-struct vmm_cpuid_mask {
+/* CPUID entry whose ECX input is significant. */
+#define VMM_CPUID_FLAG_SIGNIFICANT_SUBLEAF	0x00000001U
+
+/* One exact CPUID result selected by EAX leaf and, optionally, ECX subleaf. */
+struct vmm_cpuid_entry {
 	uint32_t leaf;
-	uint32_t clear_eax;
-	uint32_t clear_ebx;
-	uint32_t clear_ecx;
-	uint32_t clear_edx;
-	uint32_t set_eax;
-	uint32_t set_ebx;
-	uint32_t set_ecx;
-	uint32_t set_edx;
+	uint32_t subleaf;
+	uint32_t flags;
+	uint32_t eax;
+	uint32_t ebx;
+	uint32_t ecx;
+	uint32_t edx;
 };
 
 /* Capabilities of the selected x86-64 backend. */
 struct vmm_x64_capability {
 	uint64_t xcr0_mask;
 	uint32_t mxcsr_mask;
-	uint32_t cpuid_mask_max;
 };
+
+/* Reports scalar capabilities of the backend selected when the module loaded. */
+int vmm_x64_get_capability(struct vmm_x64_capability *capability);
+
+/*
+ * Returns a backend-safe CPUID baseline.  Callers choose every static per-vCPU
+ * policy value before installing entries with vmm_vcpu_set_cpuid().  The backend
+ * recomputes APIC topology and current XSAVE size while executing CPUID.  Set
+ * entries to NULL to obtain the required count.  A too-small buffer returns
+ * E2BIG and updates entry_count with the required count.
+ */
+int vmm_x64_get_supported_cpuid(struct vmm_cpuid_entry *entries,
+	size_t *entry_count);
 
 /* One x86-64 segment descriptor image. */
 struct vmm_segment {

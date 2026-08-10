@@ -39,6 +39,7 @@
 #define NVMM_MAX_MACHINES	128
 #define NVMM_MAX_VCPUS		128
 #define NVMM_MAX_HMAPPINGS	32
+#define NVMM_CPUID_MASK_MAX	32
 
 #if defined(__NetBSD__)
 #define NVMM_MAX_RAM		(128ULL * (1 << 30))
@@ -84,6 +85,10 @@ struct nvmm_cpu {
 	/* VMM owns the hardware vCPU and consumes state across runs. */
 	vmm_vcpu_t vmm_vcpu;
 	struct vmm_cpustate state;
+
+	/* NVMM CPUID masks are translated into VMM exact CPUID entries. */
+	size_t cpuid_mask_count;
+	struct nvmm_vcpu_conf_cpuid cpuid_masks[NVMM_CPUID_MASK_MAX];
 };
 
 struct nvmm_hmapping {

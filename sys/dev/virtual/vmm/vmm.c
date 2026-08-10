@@ -21,7 +21,7 @@ int vmm_machine_count;
 bool vmm_draining;
 
 int
-vmm_capability(struct vmm_x64_capability *capability)
+vmm_x64_get_capability(struct vmm_x64_capability *capability)
 {
 	const struct vmm_backend_ops *backend;
 
@@ -31,6 +31,20 @@ vmm_capability(struct vmm_x64_capability *capability)
 	if (backend == NULL)
 		return ENXIO;
 	return backend->capability(capability);
+}
+
+int
+vmm_x64_get_supported_cpuid(struct vmm_cpuid_entry *entries,
+	size_t *entry_count)
+{
+	const struct vmm_backend_ops *backend;
+
+	if (entry_count == NULL)
+		return EINVAL;
+	backend = vmm_backend;
+	if (backend == NULL || backend->get_supported_cpuid == NULL)
+		return ENXIO;
+	return backend->get_supported_cpuid(entries, entry_count);
 }
 
 static int

@@ -32,20 +32,20 @@ typedef struct vmm_vcpu *vmm_vcpu_t;
 int vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine);
 
 /*
- * Reports the capabilities of the backend selected when the module loaded.
- * The result is architecture-specific and does not expose backend internals.
- */
-int vmm_capability(struct vmm_x64_capability *capability);
-
-/*
  * Creates a vCPU using caller-owned architectural state.  state must remain
  * valid until vmm_vcpu_destroy(), and machine must remain valid throughout.
- * cpuid_masks is copied during this call and may be NULL when the count is
- * zero.  Callers must not change state while the vCPU runs.
+ * Callers must not change state while the vCPU runs.
  */
 int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
-	const struct vmm_cpuid_mask *cpuid_masks, size_t cpuid_mask_count,
 	vmm_vcpu_t *vcpu);
+
+/*
+ * Replaces the vCPU's exact CPUID override table.  A specific subleaf entry
+ * takes precedence over a leaf-only entry.  Entries not present continue to
+ * use backend policy.  The vCPU must not be running.
+ */
+int vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
+	const struct vmm_cpuid_entry *entries, size_t entry_count);
 
 /*
  * Runs a vCPU until it exits to the caller.  The backend resolves known

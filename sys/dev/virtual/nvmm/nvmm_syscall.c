@@ -46,6 +46,10 @@ CTASSERT(NVMM_X64_STATE_FPU == VMM_X64_STATE_FPU);
 CTASSERT(sizeof(struct nvmm_x64_state) == sizeof(struct vmm_cpustate));
 CTASSERT(sizeof(struct nvmm_vcpu_exit) == sizeof(struct vmm_cpuexit));
 
+static int nvmm_syscall_vcpu_configure_cpuid(struct nvmm_cpu *,
+	const struct nvmm_vcpu_conf_cpuid *, const struct vmm_cpuid_entry *,
+	size_t, struct vmm_cpuid_entry *);
+
 static void
 nvmm_syscall_state_to_vmm(struct vmm_cpustate *dst,
 	const struct nvmm_x64_state *src, uint64_t flags)
@@ -148,7 +152,7 @@ nvmm_syscall_capability(struct nvmm_owner *owner __unused,
 	struct vmm_x64_capability capability;
 	int error;
 
-	error = vmm_capability(&capability);
+	error = vmm_x64_get_capability(&capability);
 	if (error != 0)
 		return error;
 
@@ -159,10 +163,10 @@ nvmm_syscall_capability(struct nvmm_owner *owner __unused,
 	args->cap.max_vcpus = NVMM_MAX_VCPUS;
 	args->cap.max_ram = NVMM_MAX_RAM;
 	args->cap.arch.mach_conf_support = 0;
-	args->cap.arch.vcpu_conf_support = 0;
+	args->cap.arch.vcpu_conf_support = NVMM_CAP_ARCH_VCPU_CONF_CPUID;
 	args->cap.arch.xcr0_mask = capability.xcr0_mask;
 	args->cap.arch.mxcsr_mask = capability.mxcsr_mask;
-	args->cap.arch.conf_cpuid_maxops = capability.cpuid_mask_max;
+	args->cap.arch.conf_cpuid_maxops = NVMM_CPUID_MASK_MAX;
 	return 0;
 }
 
@@ -289,6 +293,7 @@ nvmm_syscall_vcpu_create(struct nvmm_owner *owner,
 {
 	struct nvmm_machine *mach;
 	struct nvmm_cpu *vcpu;
+	bool user_comm_mapped;
 	int error;
 
 	error = nvmm_machine_get(owner, args->machid, &mach, false);
@@ -298,6 +303,7 @@ nvmm_syscall_vcpu_create(struct nvmm_owner *owner,
 	error = nvmm_vcpu_alloc(mach, args->cpuid, &vcpu);
 	if (error != 0)
 		goto out_machine;
+	user_comm_mapped = false;
 
 	error = os_vmobj_map(os_kernel_map, (vaddr_t *)&vcpu->comm,
 	    NVMM_COMM_PAGE_SIZE, mach->commvmobj,
@@ -313,10 +319,11 @@ nvmm_syscall_vcpu_create(struct nvmm_owner *owner,
 	    PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE);
 	if (error != 0)
 		goto fail_vcpu;
+	user_comm_mapped = true;
 
 	nvmm_syscall_state_to_vmm(&vcpu->state, &nvmm_x86_reset_state,
 	    NVMM_X64_STATE_ALL);
-	error = vmm_vcpu_create(mach->vmm_machine, &vcpu->state, NULL, 0,
+	error = vmm_vcpu_create(mach->vmm_machine, &vcpu->state,
 	    &vcpu->vmm_vcpu);
 	if (error != 0)
 		goto fail_vcpu;
@@ -328,6 +335,10 @@ nvmm_syscall_vcpu_create(struct nvmm_owner *owner,
 	return 0;
 
 fail_vcpu:
+	if (user_comm_mapped) {
+		os_vmobj_unmap(os_curproc_map, (vaddr_t)args->comm,
+		    (vaddr_t)args->comm + NVMM_COMM_PAGE_SIZE, false);
+	}
 	nvmm_vcpu_free(mach, vcpu);
 	nvmm_vcpu_put(vcpu);
 out_machine:
@@ -363,10 +374,132 @@ out_machine:
 }
 
 int
-nvmm_syscall_vcpu_configure(struct nvmm_owner *owner __unused,
-	struct nvmm_ioc_vcpu_configure *args __unused)
+nvmm_syscall_vcpu_configure(struct nvmm_owner *owner,
+	struct nvmm_ioc_vcpu_configure *args)
 {
-	return ENOTSUP;
+	struct nvmm_vcpu_conf_cpuid cpuid;
+	struct nvmm_machine *mach;
+	struct nvmm_cpu *vcpu;
+	struct vmm_cpuid_entry *supported;
+	struct vmm_cpuid_entry *overrides;
+	size_t supported_count;
+	size_t allocation_count;
+	int error;
+
+	if (args->op != NVMM_VCPU_CONF_CPUID ||
+	    args->conf == NULL)
+		return EINVAL;
+	error = copyin(args->conf, &cpuid, sizeof(cpuid));
+	if (error != 0)
+		return error;
+	if (cpuid.mask && cpuid.exit)
+		return EINVAL;
+	if (cpuid.exit)
+		return ENOTSUP;
+	if (cpuid.mask &&
+	    ((cpuid.u.mask.set.eax & cpuid.u.mask.del.eax) != 0 ||
+	    (cpuid.u.mask.set.ebx & cpuid.u.mask.del.ebx) != 0 ||
+	    (cpuid.u.mask.set.ecx & cpuid.u.mask.del.ecx) != 0 ||
+		    (cpuid.u.mask.set.edx & cpuid.u.mask.del.edx) != 0))
+		return EINVAL;
+	supported_count = 0;
+	error = vmm_x64_get_supported_cpuid(NULL, &supported_count);
+	if (error != 0)
+		return error;
+	allocation_count = supported_count;
+	supported = os_mem_alloc(allocation_count * sizeof(*supported));
+	overrides = os_mem_alloc(allocation_count * sizeof(*overrides));
+	error = vmm_x64_get_supported_cpuid(supported, &supported_count);
+	if (error != 0)
+		goto out_tables;
+	error = nvmm_machine_get(owner, args->machid, &mach, false);
+	if (error != 0)
+		goto out_tables;
+	error = nvmm_vcpu_get(mach, args->cpuid, &vcpu);
+	if (error == 0) {
+		error = nvmm_syscall_vcpu_configure_cpuid(vcpu, &cpuid,
+		    supported, supported_count, overrides);
+		nvmm_vcpu_put(vcpu);
+	}
+	nvmm_machine_put(mach);
+out_tables:
+	os_mem_free(overrides, allocation_count * sizeof(*overrides));
+	os_mem_free(supported, allocation_count * sizeof(*supported));
+	return error;
+}
+
+static int
+nvmm_syscall_vcpu_configure_cpuid(struct nvmm_cpu *vcpu,
+	const struct nvmm_vcpu_conf_cpuid *cpuid,
+	const struct vmm_cpuid_entry *supported, size_t supported_count,
+	struct vmm_cpuid_entry *overrides)
+{
+	struct nvmm_vcpu_conf_cpuid masks[NVMM_CPUID_MASK_MAX];
+	size_t override_count;
+	size_t mask_count;
+	size_t i, j;
+	int error;
+	int found;
+
+	mask_count = vcpu->cpuid_mask_count;
+	bzero(masks, sizeof(masks));
+	if (mask_count != 0)
+		bcopy(vcpu->cpuid_masks, masks,
+		    mask_count * sizeof(masks[0]));
+	for (i = 0; i < mask_count; ++i) {
+		if (masks[i].leaf == cpuid->leaf)
+			break;
+	}
+	if (!cpuid->mask) {
+		if (i < mask_count) {
+			--mask_count;
+			if (i != mask_count)
+				masks[i] = masks[mask_count];
+		}
+	} else if (i < mask_count) {
+		masks[i] = *cpuid;
+	} else {
+		if (mask_count == NVMM_CPUID_MASK_MAX)
+			return ENOBUFS;
+		masks[mask_count++] = *cpuid;
+	}
+
+	if (mask_count == 0) {
+		error = vmm_vcpu_set_cpuid(vcpu->vmm_vcpu, NULL, 0);
+		if (error == 0)
+			vcpu->cpuid_mask_count = 0;
+		return error;
+	}
+
+	override_count = 0;
+	for (i = 0; i < mask_count; ++i) {
+		found = 0;
+		for (j = 0; j < supported_count; ++j) {
+			if (supported[j].leaf != masks[i].leaf)
+				continue;
+			overrides[override_count] = supported[j];
+			overrides[override_count].eax &= ~masks[i].u.mask.del.eax;
+			overrides[override_count].ebx &= ~masks[i].u.mask.del.ebx;
+			overrides[override_count].ecx &= ~masks[i].u.mask.del.ecx;
+			overrides[override_count].edx &= ~masks[i].u.mask.del.edx;
+			overrides[override_count].eax |= masks[i].u.mask.set.eax;
+			overrides[override_count].ebx |= masks[i].u.mask.set.ebx;
+			overrides[override_count].ecx |= masks[i].u.mask.set.ecx;
+			overrides[override_count].edx |= masks[i].u.mask.set.edx;
+			++override_count;
+			found = 1;
+		}
+		if (!found) {
+			return EINVAL;
+		}
+	}
+
+	error = vmm_vcpu_set_cpuid(vcpu->vmm_vcpu, overrides, override_count);
+	if (error == 0) {
+		bcopy(masks, vcpu->cpuid_masks, sizeof(masks));
+		vcpu->cpuid_mask_count = mask_count;
+	}
+	return error;
 }
 
 int
@@ -438,6 +571,7 @@ nvmm_syscall_vcpu_run(struct nvmm_owner *owner,
 {
 	struct nvmm_machine *mach;
 	struct nvmm_cpu *vcpu;
+	struct vmm_cpuevent event;
 	struct vmm_cpuexit *exit;
 	int error;
 
@@ -447,12 +581,24 @@ nvmm_syscall_vcpu_run(struct nvmm_owner *owner,
 	error = nvmm_vcpu_get(mach, args->cpuid, &vcpu);
 	if (error != 0)
 		goto out_machine;
+	if (os_return_needed()) {
+		args->exit.reason = NVMM_VCPU_EXIT_NONE;
+		goto out_vcpu;
+	}
 
 	nvmm_syscall_state_commit(vcpu);
-	error = vmm_vcpu_run(vcpu->vmm_vcpu, &exit);
+	if (vcpu->comm->event_commit) {
+		vcpu->comm->event_commit = false;
+		error = nvmm_syscall_event_from_comm(vcpu, &event);
+		if (error == 0)
+			error = vmm_vcpu_inject(vcpu->vmm_vcpu, &event);
+	}
+	if (error == 0)
+		error = vmm_vcpu_run(vcpu->vmm_vcpu, &exit);
 	nvmm_syscall_state_provide(vcpu, NVMM_X64_STATE_ALL);
 	if (error == 0 && exit != NULL)
 		nvmm_syscall_exit_from_vmm(&args->exit, exit);
+out_vcpu:
 	nvmm_vcpu_put(vcpu);
 out_machine:
 	nvmm_machine_put(mach);
@@ -572,10 +718,20 @@ nvmm_syscall_hva_map(struct nvmm_owner *owner, struct nvmm_ioc_hva_map *args)
 	hmapping->hva = args->hva;
 	hmapping->size = args->size;
 	hmapping->vmobj = os_vmobj_create(hmapping->size);
+	if (hmapping->vmobj == NULL) {
+		hmapping->present = false;
+		error = ENOMEM;
+		goto out;
+	}
 	uva = hmapping->hva;
 	error = os_vmobj_map(os_curproc_map, &uva, hmapping->size,
 	    hmapping->vmobj, 0, false, true, true,
 	    PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE);
+	if (error != 0) {
+		os_vmobj_rel(hmapping->vmobj);
+		hmapping->vmobj = NULL;
+		hmapping->present = false;
+	}
 out:
 	nvmm_machine_put(mach);
 	return error;
