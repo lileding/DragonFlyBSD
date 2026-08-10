@@ -19,6 +19,7 @@
 
 #include "kvm_eventfd.h"
 #include "kvm_internal.h"
+#include "kvm_vm.h"
 
 MALLOC_DEFINE(M_KVM, "kvm", "KVM compatibility frontend");
 
@@ -121,11 +122,19 @@ kvm_ioctl(struct dev_ioctl_args *ap)
 	case KVM_LINUX_IO(0x03):
 		return kvm_ioctl_capability(ap);
 	case KVM_CREATE_VM:
-	case KVM_LINUX_IO(0x01):
-		return ENOTSUP;
+	case KVM_LINUX_IO(0x01): {
+		int fd;
+		int error;
+
+		error = kvm_vm_create(curthread->td_lwp, &fd);
+		if (error == 0)
+			ap->a_sysmsg->sysmsg_result = fd;
+		return error;
+	}
 	case KVM_GET_VCPU_MMAP_SIZE:
 	case KVM_LINUX_IO(0x04):
-		return ENOTSUP;
+		ap->a_sysmsg->sysmsg_result = PAGE_SIZE;
+		return 0;
 	case KVM_DFLY_CREATE_EVENTFD: {
 		struct kvm_dfly_eventfd *request;
 		int error;
