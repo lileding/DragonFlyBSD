@@ -17,6 +17,34 @@
 MALLOC_DEFINE(M_VMM, "vmm", "vmm runtime objects");
 
 int
+vmm_machine_create_irqchip(vmm_machine_t machine)
+{
+	int error;
+
+	if (machine == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&machine->token);
+	if (machine->vcpu_count != 0 || machine->run_count != 0) {
+		lwkt_reltoken(&machine->token);
+		return EBUSY;
+	}
+	if (machine->irqchip) {
+		lwkt_reltoken(&machine->token);
+		return EALREADY;
+	}
+	if (machine->backend->machine_create_irqchip == NULL) {
+		lwkt_reltoken(&machine->token);
+		return ENOTSUP;
+	}
+	error = machine->backend->machine_create_irqchip(machine);
+	if (error == 0)
+		machine->irqchip = true;
+	lwkt_reltoken(&machine->token);
+	return error;
+}
+
+int
 vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine)
 {
 	struct vmm_machine *m;

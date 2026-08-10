@@ -15,13 +15,14 @@ struct vmm_backend_ops;
 struct vmspace;
 
 struct vmm_machine {
-	/* token protects vcpu_count, next_vcpu_id, and run_count. */
+	/* token protects irqchip, vcpu_count, next_vcpu_id, and run_count. */
 	struct lwkt_token token;
 	const struct vmm_backend_ops *backend;
 	/* Borrowed from the caller and fixed for this machine's lifetime. */
 	struct vmspace *vmspace;
 	/* Private storage owned by the selected backend. */
 	void *backend_state;
+	bool irqchip;
 	unsigned int vcpu_count;
 	unsigned int next_vcpu_id;
 	unsigned int run_count;

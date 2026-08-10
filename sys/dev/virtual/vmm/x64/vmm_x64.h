@@ -128,10 +128,7 @@ struct vmm_segment {
 /* Architectural interrupt state. */
 struct vmm_cpustate_intr {
 	uint64_t int_shadow:1;
-	uint64_t int_window_exiting:1;
-	uint64_t nmi_window_exiting:1;
-	uint64_t evt_pending:1;
-	uint64_t rsvd:60;
+	uint64_t rsvd:63;
 };
 
 /* FXSAVE-format x87 and SSE architectural state. */

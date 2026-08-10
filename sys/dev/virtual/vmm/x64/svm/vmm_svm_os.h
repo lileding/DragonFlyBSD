@@ -20,6 +20,7 @@
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
 #include <vm/vm_page.h>
+#include <vm/vm_page2.h>
 
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>

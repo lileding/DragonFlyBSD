@@ -137,21 +137,21 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 int
 vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event)
 {
-	int error;
-
 	if (vcpu == NULL || event == NULL)
+		return EINVAL;
+	if (event->type != VMM_CPUEVENT_EXCP &&
+	    event->type != VMM_CPUEVENT_INTR)
 		return EINVAL;
 
 	lwkt_gettoken(&vcpu->token);
-	if (vcpu->running || vcpu->destroying) {
+	if (vcpu->running || vcpu->destroying || vcpu->event_pending) {
 		lwkt_reltoken(&vcpu->token);
 		return EBUSY;
 	}
-	error = vcpu->backend_ops->vcpu_inject(vcpu, event);
-	if (error == 0)
-		vcpu->backend_ops->vcpu_getstate(vcpu);
+	vcpu->event = *event;
+	vcpu->event_pending = 1;
 	lwkt_reltoken(&vcpu->token);
-	return error;
+	return 0;
 }
 
 int

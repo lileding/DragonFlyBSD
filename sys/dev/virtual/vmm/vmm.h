@@ -32,6 +32,14 @@ typedef struct vmm_vcpu *vmm_vcpu_t;
 int vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine);
 
 /*
+ * Gives VMM ownership of this machine's interrupt-controller model.  It must
+ * be called before creating any vCPU and cannot be undone.  The selected
+ * backend uses hardware acceleration when available, otherwise it provides
+ * an in-kernel software interrupt controller or returns ENOTSUP.
+ */
+int vmm_machine_create_irqchip(vmm_machine_t machine);
+
+/*
  * Creates a vCPU using caller-owned architectural state.  state must remain
  * valid until vmm_vcpu_destroy(), and machine must remain valid throughout.
  * Callers must not change state while the vCPU runs.
@@ -58,7 +66,9 @@ int vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason);
 
 /*
  * Queues one architectural event for the next vCPU run.  The vCPU must not be
- * running; callers choose the synchronization and delivery policy.
+ * running.  At most one event can wait for entry; the event is committed only
+ * after the backend has loaded architectural state and confirmed VM entry.
+ * Returns EBUSY while an event is already pending.
  */
 int vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event);
 

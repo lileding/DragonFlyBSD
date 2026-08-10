@@ -35,6 +35,7 @@
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "vmm_svm.h"
+#include "vmm_svm_avic.h"
 #include "vmm_svm_os.h"
 
 #include "../vmm_x64.h"
@@ -722,10 +723,6 @@ static uint64_t vmm_svm_xcr0_mask __read_mostly;
 
 /* -------------------------------------------------------------------------- */
 
-struct vmm_svm_machdata {
-	volatile uint64_t mach_htlb_gen;
-};
-
 struct vmm_svm_cpudata {
 	/* General. */
 	bool shared_asid;
@@ -775,6 +772,7 @@ struct vmm_svm_cpudata {
 	struct vmm_svm_xsave gxsave __aligned(64);
 	size_t cpuid_entry_count;
 	struct vmm_cpuid_entry cpuid_entries[SVM_NCPUID_ENTRIES];
+	struct vmm_svm_interrupt_vcpu *interrupt;
 };
 
 static void
@@ -905,8 +903,8 @@ vmm_svm_excp_has_error(uint8_t vector)
 	}
 }
 
-int
-vmm_svm_vcpu_inject(struct vmm_vcpu *vcpu,
+static int
+vmm_svm_vcpu_commit_event(struct vmm_vcpu *vcpu,
     const struct vmm_cpuevent *event)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
@@ -961,7 +959,7 @@ vmm_svm_inject_ud(struct vmm_vcpu *vcpu)
 	};
 	int ret __diagused;
 
-	ret = vmm_svm_vcpu_inject(vcpu, &event);
+	ret = vmm_svm_vcpu_commit_event(vcpu, &event);
 	OS_ASSERT(ret == 0);
 }
 
@@ -974,7 +972,7 @@ vmm_svm_inject_gp(struct vmm_vcpu *vcpu)
 	};
 	int ret __diagused;
 
-	ret = vmm_svm_vcpu_inject(vcpu, &event);
+	ret = vmm_svm_vcpu_commit_event(vcpu, &event);
 	OS_ASSERT(ret == 0);
 }
 
@@ -1973,6 +1971,94 @@ vmm_svm_restore_tr(uint16_t selector)
 	ltr(selector);
 }
 
+static int
+vmm_svm_avic_modrm_size(const uint8_t *bytes, int length, int offset)
+{
+	uint8_t modrm;
+	uint8_t mod;
+	uint8_t rm;
+	uint8_t sib;
+	int size;
+
+	if (offset >= length)
+		return 0;
+	modrm = bytes[offset];
+	mod = modrm >> 6;
+	rm = modrm & 7;
+	if (mod == 3)
+		return 0;
+	size = 1;
+	if (rm == 4) {
+		if (offset + size >= length)
+			return 0;
+		sib = bytes[offset + size++];
+		if (mod == 0 && (sib & 7) == 5)
+			size += 4;
+	}
+	if (mod == 0 && rm == 5)
+		size += 4;
+	else if (mod == 1)
+		size++;
+	else if (mod == 2)
+		size += 4;
+	return offset + size <= length ? size : 0;
+}
+
+static bool
+vmm_svm_avic_noaccel_read(struct vmm_svm_cpudata *cpudata,
+    uint64_t exitinfo1)
+{
+	struct vmcb *vmcb = cpudata->vmcb;
+	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint32_t value;
+	uint8_t modrm;
+	unsigned int reg;
+	int length;
+	int offset;
+	int rex;
+	int modrm_size;
+	bool data16;
+
+	if ((exitinfo1 >> 32) & __BIT(0))
+		return false;
+	if (vmm_svm_avic_read_register(cpudata->interrupt,
+	    exitinfo1 & 0xff0U, &value) != 0)
+		return false;
+	length = vmcb->ctrl.inst_len;
+	if (length == 0 || length > (int)sizeof(vmcb->ctrl.inst_bytes))
+		return false;
+	offset = 0;
+	rex = 0;
+	data16 = false;
+	while (offset < length) {
+		if (bytes[offset] == 0x66) {
+			data16 = true;
+			offset++;
+			continue;
+		}
+		if (bytes[offset] >= 0x40 && bytes[offset] <= 0x4f) {
+			rex = bytes[offset++];
+			continue;
+		}
+		break;
+	}
+	if (offset >= length || data16 || (rex & 0x08) != 0 ||
+	    bytes[offset++] != 0x8b || offset >= length)
+		return false;
+	modrm = bytes[offset];
+	modrm_size = vmm_svm_avic_modrm_size(bytes, length, offset);
+	if (modrm_size == 0)
+		return false;
+	reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+	if (reg >= VMM_X64_GPR_RIP)
+		return false;
+	cpudata->gprs[reg] = value;
+	if (reg == VMM_X64_GPR_RAX)
+		vmcb->state.rax = value;
+	vmm_svm_inkernel_advance(vmcb);
+	return true;
+}
+
 int
 vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 {
@@ -2049,9 +2135,31 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 
 #endif
 
+		/*
+		 * Commit caller events only after host work can no longer prevent
+		 * this VM entry.  State load above never contains delivery controls.
+		 */
+		if (__predict_false(vcpu->event_pending)) {
+			struct vmm_cpuevent event = vcpu->event;
+
+			vcpu->event_pending = 0;
+			if (vmm_svm_vcpu_commit_event(vcpu, &event) != 0) {
+				/* No hTLB flush ack, because VMRUN is not executed. */
+				vmm_svm_vcpu_guest_fpu_leave(vcpu);
+				vmm_svm_vcpu_guest_misc_leave(vcpu);
+				vmm_svm_vcpu_guest_dbregs_leave(vcpu);
+				vmm_svm_stgi();
+				exit->reason = VMM_CPUEXIT_NONE;
+				error = EINVAL;
+				break;
+			}
+		}
+
+		vmm_svm_interrupt_ops->vcpu_enter(cpudata->interrupt);
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
+		vmm_svm_interrupt_ops->vcpu_leave(cpudata->interrupt);
 		vmm_svm_htlb_flush_ack(cpudata, machgen);
 		vmm_svm_vcpu_guest_fpu_leave(vcpu);
 		vmm_svm_vcpu_guest_misc_leave(vcpu);
@@ -2129,6 +2237,17 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		case VMCB_EXITCODE_NPF:
 			vmm_svm_exit_npf(mach, vcpu, exit);
+			break;
+		case VMCB_EXITCODE_AVIC_INCOMP_IPI:
+		case VMCB_EXITCODE_AVIC_NOACCEL:
+			if (vmm_svm_interrupt_ops->vcpu_exit(cpudata->interrupt,
+			    vmcb->ctrl.exitcode, vmcb->ctrl.exitinfo1,
+			    vmcb->ctrl.exitinfo2) ||
+			    vmm_svm_avic_noaccel_read(cpudata, vmcb->ctrl.exitinfo1)) {
+				exit->reason = VMM_CPUEXIT_NONE;
+			} else {
+				vmm_svm_exit_invalid(exit, vmcb->ctrl.exitcode);
+			}
 			break;
 		case VMCB_EXITCODE_FERR_FREEZE: /* ? */
 		default:
@@ -2398,18 +2517,6 @@ vmm_svm_vcpu_setstate(struct vmm_vcpu *vcpu, uint64_t flags)
 		} else {
 			vmcb->ctrl.intr &= ~VMCB_CTRL_INTR_SHADOW;
 		}
-
-		if (state->intr.int_window_exiting) {
-			vmm_svm_event_waitexit_enable(vcpu, false);
-		} else {
-			vmm_svm_event_waitexit_disable(vcpu, false);
-		}
-
-		if (state->intr.nmi_window_exiting) {
-			vmm_svm_event_waitexit_enable(vcpu, true);
-		} else {
-			vmm_svm_event_waitexit_disable(vcpu, true);
-		}
 	}
 
 	CTASSERT(sizeof(cpudata->gxsave.fpu) == sizeof(state->fpu));
@@ -2517,9 +2624,6 @@ vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 	if (flags & VMM_X64_STATE_INTR) {
 		state->intr.int_shadow =
 		    (vmcb->ctrl.intr & VMCB_CTRL_INTR_SHADOW) != 0;
-		state->intr.int_window_exiting = cpudata->int_window_exit;
-		state->intr.nmi_window_exiting = cpudata->nmi_window_exit;
-		state->intr.evt_pending = cpudata->evt_pending;
 	}
 
 	CTASSERT(sizeof(cpudata->gxsave.fpu) == sizeof(state->fpu));
@@ -2728,6 +2832,8 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 {
 	struct vmm_machine *mach = vcpu->machine;
 	struct vmm_svm_cpudata *cpudata;
+	struct vmm_svm_machdata *machdata;
+	struct vmm_svm_interrupt_config interrupt_config;
 	int error;
 
 	/* Allocate the SVM cpudata. */
@@ -2759,10 +2865,27 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 
 	/* Init the VCPU info. */
 	vmm_svm_vcpu_init(mach, vcpu);
+	machdata = mach->backend_state;
+	error = vmm_svm_interrupt_ops->vcpu_create(machdata->interrupt, vcpu,
+	    &cpudata->interrupt, &interrupt_config);
+	if (error != 0)
+		goto error;
+	if (interrupt_config.enabled) {
+		cpudata->vmcb->ctrl.v |= VMCB_CTRL_V_INTR_MASKING |
+		    VMCB_CTRL_V_AVIC_EN;
+		cpudata->vmcb->ctrl.avic = interrupt_config.apic_base;
+		cpudata->vmcb->ctrl.avic_abpp = interrupt_config.apic_backing_page;
+		cpudata->vmcb->ctrl.avic_ltp = interrupt_config.logical_table;
+		cpudata->vmcb->ctrl.avic_phys = interrupt_config.physical_table |
+		    interrupt_config.physical_max_index;
+		vmm_svm_vmcb_cache_flush(cpudata->vmcb,
+		    VMCB_CTRL_VMCB_CLEAN_AVIC);
+	}
 
 	return 0;
 
 error:
+	vmm_svm_interrupt_ops->vcpu_destroy(cpudata->interrupt);
 	if (cpudata->vmcb_pa) {
 		os_contigpa_free(cpudata->vmcb_pa, (vaddr_t)cpudata->vmcb,
 		    VMCB_NPAGES);
@@ -2784,6 +2907,7 @@ vmm_svm_vcpu_destroy(struct vmm_vcpu *vcpu)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 
+	vmm_svm_interrupt_ops->vcpu_destroy(cpudata->interrupt);
 	vmm_svm_asid_free(vcpu);
 
 	os_contigpa_free(cpudata->vmcb_pa, (vaddr_t)cpudata->vmcb,
@@ -2903,22 +3027,43 @@ vmm_svm_machine_create(struct vmm_machine *mach)
 {
 	struct pmap *pmap = os_vmspace_pmap(mach->vmspace);
 	struct vmm_svm_machdata *machdata;
+	int error;
 
 	/* Transform the caller-owned guest pmap for nested paging. */
 	pmap_npt_transform(pmap, 0);
 
 	machdata = os_mem_zalloc(sizeof(struct vmm_svm_machdata));
+	if (machdata == NULL)
+		return ENOMEM;
 	mach->backend_state = machdata;
+	error = vmm_svm_interrupt_ops->machine_create(mach,
+	    &machdata->interrupt);
+	if (error != 0) {
+		mach->backend_state = NULL;
+		os_mem_free(machdata, sizeof(*machdata));
+		return error;
+	}
 
 	/* Start with an hTLB flush everywhere. */
 	machdata->mach_htlb_gen = 1;
 	return 0;
 }
 
+int
+vmm_svm_machine_create_irqchip(struct vmm_machine *mach)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->machine_enable(machdata->interrupt);
+}
+
 void
 vmm_svm_machine_destroy(struct vmm_machine *mach)
 {
-	os_mem_free(mach->backend_state, sizeof(struct vmm_svm_machdata));
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
+	os_mem_free(machdata, sizeof(*machdata));
 }
 
 /* -------------------------------------------------------------------------- */

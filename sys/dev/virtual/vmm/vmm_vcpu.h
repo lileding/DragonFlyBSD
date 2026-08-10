@@ -9,11 +9,13 @@
 #include "vmm_machine.h"
 
 struct vmm_vcpu {
-	/* token protects running and destroying; kick_pending is atomic. */
+	/* token protects running, destroying, event, and event_pending. */
 	struct lwkt_token token;
 	struct vmm_machine *machine;
 	const struct vmm_backend_ops *backend_ops;
 	struct vmm_cpustate *state;
+	/* One caller-supplied event, committed only immediately before VM entry. */
+	struct vmm_cpuevent event;
 	/* Assigned once by machine under its token; stable for this vCPU. */
 	unsigned int id;
 	/* Published by run(); callers may read it only after run returns. */
@@ -21,6 +23,7 @@ struct vmm_vcpu {
 	void *backend;
 	int running;
 	int destroying;
+	int event_pending;
 	volatile int kick_pending;
 };
 
