@@ -98,9 +98,16 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	else
 		capability = (int)(intptr_t)ap->a_data;
 
-	/* No capability is advertised before its complete ABI is implemented. */
-	(void)capability;
-	ap->a_sysmsg->sysmsg_result = 0;
+	switch (capability) {
+	case KVM_CAP_USER_MEMORY:
+	case KVM_CAP_DESTROY_MEMORY_REGION_WORKS:
+	case KVM_CAP_JOIN_MEMORY_REGIONS_WORKS:
+		ap->a_sysmsg->sysmsg_result = 1;
+		break;
+	default:
+		ap->a_sysmsg->sysmsg_result = 0;
+		break;
+	}
 	return 0;
 }
 

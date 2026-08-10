@@ -22,6 +22,19 @@
 #define KVM_CHECK_EXTENSION	_IO(KVMIO, 0x03)
 #define KVM_GET_VCPU_MMAP_SIZE	_IO(KVMIO, 0x04)
 
+struct kvm_userspace_memory_region {
+	uint32_t slot;
+	uint32_t flags;
+	uint64_t guest_phys_addr;
+	uint64_t memory_size;
+	uint64_t userspace_addr;
+};
+
+#define KVM_MEM_LOG_DIRTY_PAGES	(1U << 0)
+#define KVM_MEM_READONLY		(1U << 1)
+#define KVM_SET_USER_MEMORY_REGION \
+	_IOW(KVMIO, 0x46, struct kvm_userspace_memory_region)
+
 /*
  * DragonFly extension used by the QEMU port to create an event counter fd.
  * It will become the backing primitive for KVM_IOEVENTFD and KVM_IRQFD.

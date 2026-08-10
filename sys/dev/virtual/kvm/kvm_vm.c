@@ -11,15 +11,19 @@
 #include <sys/filedesc.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
+#include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/sysmsg.h>
+#include <sys/thread.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
 #include <machine/atomic.h>
 
 #include <vm/vm_extern.h>
+#include <vm/vm_map.h>
+#include <vm/vm_object.h>
 
 #include <sys/kvm.h>
 
@@ -29,11 +33,30 @@
 
 #define KVM_GPA_MAX	((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
+#define KVM_MEMORY_SLOTS	32
+
+struct kvm_memory_slot {
+	vm_offset_t gpa;
+	vm_size_t size;
+	bool present;
+};
+
+struct kvm_memory_piece {
+	STAILQ_ENTRY(kvm_memory_piece) entry;
+	struct vm_object *object;
+	vm_ooffset_t offset;
+	vm_offset_t gpa;
+	vm_size_t size;
+};
+
+STAILQ_HEAD(kvm_memory_piece_list, kvm_memory_piece);
 
 struct kvm_vm {
 	/* The file descriptor owns machine and vmspace until close. */
 	vmm_machine_t machine;
 	struct vmspace *vmspace;
+	struct lwkt_token token;
+	struct kvm_memory_slot slots[KVM_MEMORY_SLOTS];
 	cdev_t dev;
 	struct vnode *vnode;
 };
@@ -54,6 +77,11 @@ static int kvm_vm_fo_close(struct file *);
 static int kvm_vm_fo_seek(struct file *, off_t, int, off_t *);
 static int kvm_vm_make_vnode(cdev_t, struct vnode **);
 static void kvm_vm_release(struct kvm_vm *);
+static int kvm_vm_set_user_memory(struct kvm_vm *,
+	const struct kvm_userspace_memory_region *);
+static int kvm_vm_collect_memory(struct vmspace *, vm_offset_t, vm_size_t,
+	vm_offset_t, struct kvm_memory_piece_list *, int *);
+static void kvm_vm_drop_memory(struct kvm_memory_piece_list *);
 
 static struct dev_ops kvm_vm_ops = {
 	{ "kvm_vm", 0, D_MPSAFE },
@@ -97,6 +125,7 @@ kvm_vm_create(struct lwp *lp, int *fd)
 		return EINVAL;
 	*fd = -1;
 	vm = kmalloc(sizeof(*vm), M_KVM, M_WAITOK | M_ZERO);
+	lwkt_token_init(&vm->token, "kvmvm");
 
 	lwkt_gettoken(&kvm_frontend_token);
 	if (kvm_draining) {
@@ -218,7 +247,6 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	int error;
 
 	(void)cred;
-	(void)data;
 	error = devfs_get_cdevpriv(fp, (void **)&vm);
 	if (error != 0)
 		return error;
@@ -227,8 +255,184 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	case KVM_LINUX_IO(0x04):
 		msg->sysmsg_result = PAGE_SIZE;
 		return 0;
+	case KVM_SET_USER_MEMORY_REGION:
+		return kvm_vm_set_user_memory(vm,
+		    (const struct kvm_userspace_memory_region *)data);
 	default:
 		return ENOTTY;
+	}
+}
+
+static int
+kvm_vm_set_user_memory(struct kvm_vm *vm,
+	const struct kvm_userspace_memory_region *region)
+{
+	struct kvm_memory_piece_list pieces;
+	struct kvm_memory_piece *piece;
+	struct kvm_memory_slot *slot;
+	vm_offset_t gpa;
+	vm_offset_t gpa_end;
+	vm_offset_t hva;
+	vm_size_t size;
+	vm_prot_t protection;
+	int count;
+	int error;
+	int piece_count;
+	int slot_index;
+
+	if (region == NULL || region->slot >= KVM_MEMORY_SLOTS)
+		return EINVAL;
+	if ((region->flags & ~KVM_MEM_READONLY) != 0)
+		return EOPNOTSUPP;
+
+	gpa = region->guest_phys_addr;
+	size = region->memory_size;
+	hva = region->userspace_addr;
+	if (size == 0) {
+		if (region->flags != 0 || hva != 0)
+			return EINVAL;
+		lwkt_gettoken(&vm->token);
+		slot = &vm->slots[region->slot];
+		if (slot->present) {
+			vm_map_remove(&vm->vmspace->vm_map, slot->gpa,
+			    slot->gpa + slot->size);
+			slot->present = false;
+		}
+		lwkt_reltoken(&vm->token);
+		return 0;
+	}
+	if ((gpa & PAGE_MASK) != 0 || (hva & PAGE_MASK) != 0 ||
+	    (size & PAGE_MASK) != 0 || hva == 0 || size > KVM_GPA_MAX ||
+	    gpa > KVM_GPA_MAX - size || hva > (vm_offset_t)-1 - size)
+		return EINVAL;
+	gpa_end = gpa + size;
+
+	STAILQ_INIT(&pieces);
+	piece_count = 0;
+	if (curthread->td_lwp == NULL)
+		return EINVAL;
+	error = kvm_vm_collect_memory(curthread->td_lwp->lwp_proc->p_vmspace,
+	    hva, size, gpa, &pieces, &piece_count);
+	if (error != 0)
+		return error;
+
+	protection = VM_PROT_READ | VM_PROT_EXECUTE;
+	if ((region->flags & KVM_MEM_READONLY) == 0)
+		protection |= VM_PROT_WRITE;
+
+	count = vm_map_entry_reserve(piece_count + MAP_RESERVE_COUNT);
+	lwkt_gettoken(&vm->token);
+	for (slot_index = 0; slot_index < KVM_MEMORY_SLOTS; ++slot_index) {
+		slot = &vm->slots[slot_index];
+		if (slot_index == region->slot || !slot->present)
+			continue;
+		if (gpa < slot->gpa + slot->size && slot->gpa < gpa_end) {
+			error = EEXIST;
+			goto out;
+		}
+	}
+
+	slot = &vm->slots[region->slot];
+	if (slot->present) {
+		vm_map_remove(&vm->vmspace->vm_map, slot->gpa,
+		    slot->gpa + slot->size);
+		slot->present = false;
+	}
+
+	error = 0;
+	vm_map_lock(&vm->vmspace->vm_map);
+	STAILQ_FOREACH(piece, &pieces, entry) {
+		vm_object_hold(piece->object);
+		error = vm_map_insert(&vm->vmspace->vm_map, &count,
+		    piece->object, NULL, piece->offset, NULL, piece->gpa,
+		    piece->gpa + piece->size, VM_MAPTYPE_NORMAL, VM_SUBSYS_NVMM,
+		    protection, VM_PROT_ALL, 0);
+		vm_object_drop(piece->object);
+		if (error != 0)
+			break;
+		piece->object = NULL;
+	}
+	vm_map_unlock(&vm->vmspace->vm_map);
+	if (error == 0)
+		error = vm_map_inherit(&vm->vmspace->vm_map, gpa, gpa_end,
+		    VM_INHERIT_SHARE);
+	if (error != 0) {
+		vm_map_remove(&vm->vmspace->vm_map, gpa, gpa_end);
+		error = vm_mmap_to_errno(error);
+		goto out;
+	}
+	slot->gpa = gpa;
+	slot->size = size;
+	slot->present = true;
+
+out:
+	lwkt_reltoken(&vm->token);
+	vm_map_entry_release(count);
+	kvm_vm_drop_memory(&pieces);
+	return error;
+}
+
+static int
+kvm_vm_collect_memory(struct vmspace *vmspace, vm_offset_t hva,
+	vm_size_t size, vm_offset_t gpa, struct kvm_memory_piece_list *pieces,
+	int *piece_count)
+{
+	struct vm_map *map;
+	struct vm_map_entry *entry;
+	struct kvm_memory_piece *piece;
+	vm_offset_t end;
+	vm_offset_t piece_end;
+	int error;
+
+	if (vmspace == NULL || pieces == NULL || piece_count == NULL)
+		return EINVAL;
+	map = &vmspace->vm_map;
+	end = hva + size;
+	while (hva < end) {
+		piece = kmalloc(sizeof(*piece), M_KVM, M_WAITOK | M_ZERO);
+		lwkt_gettoken(&map->token);
+		vm_map_lock_read(map);
+		if (!vm_map_lookup_entry(map, hva, &entry) ||
+		    entry->maptype != VM_MAPTYPE_NORMAL ||
+		    entry->ba.object == NULL) {
+			vm_map_unlock_read(map);
+			lwkt_reltoken(&map->token);
+			kfree(piece, M_KVM);
+			error = EFAULT;
+			goto fail;
+		}
+		piece_end = entry->ba.end < end ? entry->ba.end : end;
+		piece->object = entry->ba.object;
+		vm_object_hold(piece->object);
+		vm_object_reference_locked(piece->object);
+		vm_object_drop(piece->object);
+		piece->offset = entry->ba.offset + (hva - entry->ba.start);
+		piece->gpa = gpa;
+		piece->size = piece_end - hva;
+		vm_map_unlock_read(map);
+		lwkt_reltoken(&map->token);
+		STAILQ_INSERT_TAIL(pieces, piece, entry);
+		++*piece_count;
+		gpa += piece->size;
+		hva = piece_end;
+	}
+	return 0;
+
+fail:
+	kvm_vm_drop_memory(pieces);
+	return error;
+}
+
+static void
+kvm_vm_drop_memory(struct kvm_memory_piece_list *pieces)
+{
+	struct kvm_memory_piece *piece;
+
+	while ((piece = STAILQ_FIRST(pieces)) != NULL) {
+		STAILQ_REMOVE_HEAD(pieces, entry);
+		if (piece->object != NULL)
+			vm_object_deallocate(piece->object);
+		kfree(piece, M_KVM);
 	}
 }
 
