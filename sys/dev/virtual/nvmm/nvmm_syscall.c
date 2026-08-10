@@ -65,7 +65,7 @@ nvmm_syscall_state_to_vmm(struct vmm_cpustate *dst,
 	if (flags & NVMM_X64_STATE_MSRS)
 		bcopy(src->msrs, dst->msrs, sizeof(src->msrs));
 	if (flags & NVMM_X64_STATE_INTR)
-		bcopy(&src->intr, &dst->intr, sizeof(src->intr));
+		dst->intr.int_shadow = src->intr.int_shadow;
 	if (flags & NVMM_X64_STATE_FPU)
 		bcopy(&src->fpu, &dst->fpu, sizeof(src->fpu));
 }
@@ -85,7 +85,7 @@ nvmm_syscall_state_from_vmm(struct nvmm_x64_state *dst,
 	if (flags & NVMM_X64_STATE_MSRS)
 		bcopy(src->msrs, dst->msrs, sizeof(dst->msrs));
 	if (flags & NVMM_X64_STATE_INTR)
-		bcopy(&src->intr, &dst->intr, sizeof(dst->intr));
+		dst->intr.int_shadow = src->intr.int_shadow;
 	if (flags & NVMM_X64_STATE_FPU)
 		bcopy(&src->fpu, &dst->fpu, sizeof(dst->fpu));
 }
@@ -574,8 +574,14 @@ nvmm_syscall_vcpu_run(struct nvmm_owner *owner,
 	if (error == 0)
 		error = vmm_vcpu_run(vcpu->vmm_vcpu, &exit);
 	nvmm_syscall_state_provide(vcpu, NVMM_X64_STATE_ALL);
-	if (error == 0 && exit != NULL)
+	if (error == 0 && exit != NULL) {
 		nvmm_syscall_exit_from_vmm(&args->exit, exit);
+		vcpu->comm->state.intr.int_window_exiting =
+		    exit->exitstate.int_window_exiting;
+		vcpu->comm->state.intr.nmi_window_exiting =
+		    exit->exitstate.nmi_window_exiting;
+		vcpu->comm->state.intr.evt_pending = exit->exitstate.evt_pending;
+	}
 out_vcpu:
 	nvmm_vcpu_put(vcpu);
 out_machine:
