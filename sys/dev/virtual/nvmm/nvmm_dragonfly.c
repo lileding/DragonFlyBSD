@@ -38,6 +38,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 
 #include "nvmm.h"
 #include "nvmm_os.h"
@@ -45,12 +46,32 @@
 
 MALLOC_DEFINE(M_NVMM, "nvmm", "NVMM data");
 
+static int nvmm_sysctl_use_vmm(SYSCTL_HANDLER_ARGS);
+
+SYSCTL_NODE(_hw, OID_AUTO, nvmm, CTLFLAG_RW, 0, "NVMM configuration");
+SYSCTL_PROC(_hw_nvmm, OID_AUTO, use_vmm, CTLTYPE_INT | CTLFLAG_RW,
+	NULL, 0, nvmm_sysctl_use_vmm, "I",
+	"Use the VMM core for NVMM ioctls (0 uses the native NVMM backend)");
+
 /*
  * NVMM expects VM functions to return 0 on success, but DragonFly's VM
  * functions return KERN_SUCCESS.  Although it's also defined to be 0,
  * assert it to be future-proofing.
  */
 CTASSERT(KERN_SUCCESS == 0);
+
+static int
+nvmm_sysctl_use_vmm(SYSCTL_HANDLER_ARGS)
+{
+	int use_vmm;
+	int error;
+
+	use_vmm = nvmm_use_vmm;
+	error = sysctl_handle_int(oidp, &use_vmm, 0, req);
+	if (error != 0 || req->newptr == NULL)
+		return error;
+	return nvmm_set_use_vmm(use_vmm);
+}
 
 os_vmspace_t *
 os_vmspace_create(vaddr_t vmin, vaddr_t vmax)
@@ -330,7 +351,8 @@ nvmm_attach(void)
 	error = nvmm_init();
 	if (error)
 		panic("%s: impossible", __func__);
-	os_printf("nvmm: attached, using vmm\n");
+	os_printf("nvmm: attached, native backend %s; hw.nvmm.use_vmm=%d\n",
+	    nvmm_impl->name, nvmm_use_vmm);
 
 	return 0;
 }

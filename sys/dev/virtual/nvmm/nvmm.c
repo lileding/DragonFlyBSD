@@ -29,6 +29,7 @@
 #include <sys/param.h>
 #include <sys/errno.h>
 #include <sys/systm.h>
+#include <sys/thread.h>
 
 #include "nvmm.h"
 #include "nvmm_internal.h"
@@ -36,6 +37,17 @@
 
 static struct nvmm_machine machines[NVMM_MAX_MACHINES];
 volatile unsigned int nmachines __cacheline_aligned;
+
+static const struct nvmm_impl *nvmm_impl_list[] = {
+#if defined(__x86_64__)
+	&nvmm_x86_svm,
+	&nvmm_x86_vmx
+#endif
+};
+
+const struct nvmm_impl *nvmm_impl __read_mostly;
+static struct lwkt_token nvmm_ioctl_token;
+int nvmm_use_vmm = 1;
 
 struct nvmm_owner nvmm_root_owner;
 
@@ -125,6 +137,8 @@ nvmm_vcpu_alloc(struct nvmm_machine *mach, nvmm_cpuid_t cpuid,
 
 	vcpu->present = true;
 	vcpu->comm = NULL;
+	vcpu->hcpu_last = -1;
+	vcpu->cpudata = NULL;
 	vcpu->vmm_vcpu = NULL;
 	*ret = vcpu;
 	return 0;
@@ -184,7 +198,10 @@ nvmm_kill_machines(struct nvmm_owner *owner)
 			continue;
 		}
 
-		error = nvmm_syscall_machine_destroy_locked(mach);
+		if (mach->use_vmm)
+			error = nvmm_syscall_machine_destroy_locked(mach);
+		else
+			error = nvmm_native_machine_destroy_locked(mach);
 		if (error != 0) {
 			kprintf("nvmm: unable to destroy machine %u on close (%d)\n",
 			    mach->machid, error);
@@ -198,6 +215,17 @@ nvmm_init(void)
 {
 	size_t i, n;
 
+	for (i = 0; i < __arraycount(nvmm_impl_list); i++) {
+		if ((*nvmm_impl_list[i]->ident)()) {
+			nvmm_impl = nvmm_impl_list[i];
+			break;
+		}
+	}
+	if (nvmm_impl == NULL)
+		return ENOTSUP;
+
+	lwkt_token_init(&nvmm_ioctl_token, "nvmm_ioctl");
+
 	for (i = 0; i < NVMM_MAX_MACHINES; i++) {
 		machines[i].machid = i;
 		os_rwl_init(&machines[i].lock);
@@ -207,6 +235,7 @@ nvmm_init(void)
 			os_mtx_init(&machines[i].cpus[n].lock);
 		}
 	}
+	(*nvmm_impl->init)();
 	return 0;
 }
 
@@ -220,45 +249,51 @@ nvmm_fini(void)
 		for (n = 0; n < NVMM_MAX_VCPUS; n++)
 			os_mtx_destroy(&machines[i].cpus[n].lock);
 	}
+	(*nvmm_impl->fini)();
+	nvmm_impl = NULL;
+}
+
+int
+nvmm_set_use_vmm(int use_vmm)
+{
+	int error;
+
+	if (use_vmm != 0 && use_vmm != 1)
+		return EINVAL;
+
+	lwkt_gettoken(&nvmm_ioctl_token);
+	if (os_atomic_load_uint(&nmachines) != 0) {
+		error = EBUSY;
+	} else {
+		nvmm_use_vmm = use_vmm;
+		error = 0;
+	}
+	lwkt_reltoken(&nvmm_ioctl_token);
+	return error;
 }
 
 int
 nvmm_ioctl(struct nvmm_owner *owner, unsigned long cmd, void *data)
 {
-	switch (cmd) {
-	case NVMM_IOC_CAPABILITY:
-		return nvmm_syscall_capability(owner, data);
-	case NVMM_IOC_MACHINE_CREATE:
-		return nvmm_syscall_machine_create(owner, data);
-	case NVMM_IOC_MACHINE_DESTROY:
-		return nvmm_syscall_machine_destroy(owner, data);
-	case NVMM_IOC_MACHINE_CONFIGURE:
-		return nvmm_syscall_machine_configure(owner, data);
-	case NVMM_IOC_VCPU_CREATE:
-		return nvmm_syscall_vcpu_create(owner, data);
-	case NVMM_IOC_VCPU_DESTROY:
-		return nvmm_syscall_vcpu_destroy(owner, data);
-	case NVMM_IOC_VCPU_CONFIGURE:
-		return nvmm_syscall_vcpu_configure(owner, data);
-	case NVMM_IOC_VCPU_SETSTATE:
-		return nvmm_syscall_vcpu_setstate(owner, data);
-	case NVMM_IOC_VCPU_GETSTATE:
-		return nvmm_syscall_vcpu_getstate(owner, data);
-	case NVMM_IOC_VCPU_INJECT:
-		return nvmm_syscall_vcpu_inject(owner, data);
-	case NVMM_IOC_VCPU_RUN:
-		return nvmm_syscall_vcpu_run(owner, data);
-	case NVMM_IOC_GPA_MAP:
-		return nvmm_syscall_gpa_map(owner, data);
-	case NVMM_IOC_GPA_UNMAP:
-		return nvmm_syscall_gpa_unmap(owner, data);
-	case NVMM_IOC_HVA_MAP:
-		return nvmm_syscall_hva_map(owner, data);
-	case NVMM_IOC_HVA_UNMAP:
-		return nvmm_syscall_hva_unmap(owner, data);
-	case NVMM_IOC_CTL:
-		return nvmm_syscall_ctl(owner, data);
-	default:
-		return EINVAL;
+	int use_vmm;
+	int error;
+
+	/*
+	 * The gate may change only without a machine.  Serializing creation
+	 * with the sysctl makes the selected backend immutable per machine.
+	 */
+	if (cmd == NVMM_IOC_MACHINE_CREATE || cmd == NVMM_IOC_CAPABILITY) {
+		lwkt_gettoken(&nvmm_ioctl_token);
+		use_vmm = nvmm_use_vmm;
+		if (use_vmm)
+			error = nvmm_syscall_ioctl(owner, cmd, data);
+		else
+			error = nvmm_native_ioctl(owner, cmd, data);
+		lwkt_reltoken(&nvmm_ioctl_token);
+		return error;
 	}
+
+	if (nvmm_use_vmm)
+		return nvmm_syscall_ioctl(owner, cmd, data);
+	return nvmm_native_ioctl(owner, cmd, data);
 }

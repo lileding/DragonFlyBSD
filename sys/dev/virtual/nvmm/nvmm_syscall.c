@@ -182,6 +182,7 @@ nvmm_syscall_machine_create(struct nvmm_owner *owner,
 		return error;
 
 	mach->owner = owner;
+	mach->use_vmm = true;
 	memset(mach->hmap, 0, sizeof(mach->hmap));
 	mach->gpa_begin = 0;
 	mach->gpa_end = NVMM_MAX_RAM;
@@ -858,6 +859,47 @@ nvmm_syscall_ctl(struct nvmm_owner *owner, struct nvmm_ioc_ctl *args)
 	switch (args->op) {
 	case NVMM_CTL_MACH_INFO:
 		return nvmm_syscall_ctl_mach_info(owner, args);
+	default:
+		return EINVAL;
+	}
+}
+
+int
+nvmm_syscall_ioctl(struct nvmm_owner *owner, unsigned long cmd, void *data)
+{
+	switch (cmd) {
+	case NVMM_IOC_CAPABILITY:
+		return nvmm_syscall_capability(owner, data);
+	case NVMM_IOC_MACHINE_CREATE:
+		return nvmm_syscall_machine_create(owner, data);
+	case NVMM_IOC_MACHINE_DESTROY:
+		return nvmm_syscall_machine_destroy(owner, data);
+	case NVMM_IOC_MACHINE_CONFIGURE:
+		return nvmm_syscall_machine_configure(owner, data);
+	case NVMM_IOC_VCPU_CREATE:
+		return nvmm_syscall_vcpu_create(owner, data);
+	case NVMM_IOC_VCPU_DESTROY:
+		return nvmm_syscall_vcpu_destroy(owner, data);
+	case NVMM_IOC_VCPU_CONFIGURE:
+		return nvmm_syscall_vcpu_configure(owner, data);
+	case NVMM_IOC_VCPU_SETSTATE:
+		return nvmm_syscall_vcpu_setstate(owner, data);
+	case NVMM_IOC_VCPU_GETSTATE:
+		return nvmm_syscall_vcpu_getstate(owner, data);
+	case NVMM_IOC_VCPU_INJECT:
+		return nvmm_syscall_vcpu_inject(owner, data);
+	case NVMM_IOC_VCPU_RUN:
+		return nvmm_syscall_vcpu_run(owner, data);
+	case NVMM_IOC_GPA_MAP:
+		return nvmm_syscall_gpa_map(owner, data);
+	case NVMM_IOC_GPA_UNMAP:
+		return nvmm_syscall_gpa_unmap(owner, data);
+	case NVMM_IOC_HVA_MAP:
+		return nvmm_syscall_hva_map(owner, data);
+	case NVMM_IOC_HVA_UNMAP:
+		return nvmm_syscall_hva_unmap(owner, data);
+	case NVMM_IOC_CTL:
+		return nvmm_syscall_ctl(owner, data);
 	default:
 		return EINVAL;
 	}

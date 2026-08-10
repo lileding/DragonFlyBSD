@@ -82,6 +82,10 @@ struct nvmm_cpu {
 	/* Comm page. */
 	struct nvmm_comm_page *comm;
 
+	/* Native NVMM backend state. */
+	int hcpu_last;
+	void *cpudata;
+
 	/* VMM owns the hardware vCPU and consumes state across runs. */
 	vmm_vcpu_t vmm_vcpu;
 	struct vmm_cpustate state;
@@ -122,10 +126,52 @@ struct nvmm_machine {
 
 	/* VMM owns the backend machine instance. */
 	vmm_machine_t vmm_machine;
+
+	/* Native NVMM backend state. */
+	void *machdata;
+
+	/* Fixed at creation because a live machine cannot change backend. */
+	bool use_vmm;
 };
+
+struct nvmm_impl {
+	const char *name;
+	bool (*ident)(void);
+	void (*init)(void);
+	void (*fini)(void);
+	void (*capability)(struct nvmm_capability *);
+
+	size_t mach_conf_max;
+	const size_t *mach_conf_sizes;
+
+	size_t vcpu_conf_max;
+	const size_t *vcpu_conf_sizes;
+
+	size_t state_size;
+
+	void (*machine_create)(struct nvmm_machine *);
+	void (*machine_destroy)(struct nvmm_machine *);
+	int (*machine_configure)(struct nvmm_machine *, uint64_t, void *);
+
+	int (*vcpu_create)(struct nvmm_machine *, struct nvmm_cpu *);
+	void (*vcpu_destroy)(struct nvmm_machine *, struct nvmm_cpu *);
+	int (*vcpu_configure)(struct nvmm_cpu *, uint64_t, void *);
+	void (*vcpu_setstate)(struct nvmm_cpu *);
+	void (*vcpu_getstate)(struct nvmm_cpu *);
+	int (*vcpu_inject)(struct nvmm_cpu *);
+	int (*vcpu_run)(struct nvmm_machine *, struct nvmm_cpu *,
+	    struct nvmm_vcpu_exit *);
+};
+
+#if defined(__x86_64__)
+extern const struct nvmm_impl nvmm_x86_svm;
+extern const struct nvmm_impl nvmm_x86_vmx;
+#endif
 
 extern struct nvmm_owner nvmm_root_owner;
 extern volatile unsigned int nmachines;
+extern const struct nvmm_impl *nvmm_impl;
+extern int nvmm_use_vmm;
 
 int	nvmm_init(void);
 void	nvmm_fini(void);
@@ -142,6 +188,7 @@ void	nvmm_vcpu_free(struct nvmm_machine *, struct nvmm_cpu *);
 int	nvmm_vcpu_get(struct nvmm_machine *, nvmm_cpuid_t,
 	    struct nvmm_cpu **);
 void	nvmm_vcpu_put(struct nvmm_cpu *);
+int	nvmm_set_use_vmm(int);
 
 int	nvmm_syscall_capability(struct nvmm_owner *,
 	    struct nvmm_ioc_capability *);
@@ -173,5 +220,9 @@ int	nvmm_syscall_hva_map(struct nvmm_owner *, struct nvmm_ioc_hva_map *);
 int	nvmm_syscall_hva_unmap(struct nvmm_owner *,
 	    struct nvmm_ioc_hva_unmap *);
 int	nvmm_syscall_ctl(struct nvmm_owner *, struct nvmm_ioc_ctl *);
+int	nvmm_syscall_ioctl(struct nvmm_owner *, unsigned long, void *);
+
+int	nvmm_native_machine_destroy_locked(struct nvmm_machine *);
+int	nvmm_native_ioctl(struct nvmm_owner *, unsigned long, void *);
 
 #endif /* _NVMM_INTERNAL_H_ */

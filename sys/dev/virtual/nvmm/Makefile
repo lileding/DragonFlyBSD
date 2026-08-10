@@ -1,9 +1,20 @@
 KMOD=	nvmm
-SRCS=	nvmm.c nvmm_syscall.c nvmm_dragonfly.c
+SRCS=	nvmm.c nvmm_native.c nvmm_syscall.c nvmm_dragonfly.c
 
 .if ${MACHINE_ARCH} == "x86_64"
 .PATH:	${.CURDIR}/x86
 SRCS+=	nvmm_x86.c
+SRCS+=	nvmm_x86_svm.c nvmm_x86_svmfunc.S
+SRCS+=	nvmm_x86_vmx.c nvmm_x86_vmxfunc.S
+
+nvmm_x86_svmfunc.o nvmm_x86_vmxfunc.o:
+	${CC} -c -x assembler-with-cpp -DLOCORE ${CFLAGS:N-flto} ${.IMPSRC}
+
+.if !defined(KERNBUILDDIR)
+SRCS+=	bus_if.h device_if.h opt_nfs.h
+SRCS+=	assym.s
+nvmm_x86_svmfunc.o nvmm_x86_vmxfunc.o: assym.s
+.endif
 .endif
 
 # Help quickly build and test this module alone.
