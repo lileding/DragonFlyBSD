@@ -544,29 +544,6 @@ nvmm_syscall_vcpu_getstate(struct nvmm_owner *owner,
 }
 
 int
-nvmm_syscall_vcpu_inject(struct nvmm_owner *owner,
-	struct nvmm_ioc_vcpu_inject *args)
-{
-	struct nvmm_machine *mach;
-	struct nvmm_cpu *vcpu;
-	struct vmm_cpuevent event;
-	int error;
-
-	error = nvmm_machine_get(owner, args->machid, &mach, false);
-	if (error != 0)
-		return error;
-	error = nvmm_vcpu_get(mach, args->cpuid, &vcpu);
-	if (error == 0) {
-		error = nvmm_syscall_event_from_comm(vcpu, &event);
-		if (error == 0)
-			error = vmm_vcpu_inject(vcpu->vmm_vcpu, &event);
-		nvmm_vcpu_put(vcpu);
-	}
-	nvmm_machine_put(mach);
-	return error;
-}
-
-int
 nvmm_syscall_vcpu_run(struct nvmm_owner *owner,
 	struct nvmm_ioc_vcpu_run *args)
 {
@@ -886,8 +863,6 @@ nvmm_syscall_ioctl(struct nvmm_owner *owner, unsigned long cmd, void *data)
 		return nvmm_syscall_vcpu_setstate(owner, data);
 	case NVMM_IOC_VCPU_GETSTATE:
 		return nvmm_syscall_vcpu_getstate(owner, data);
-	case NVMM_IOC_VCPU_INJECT:
-		return nvmm_syscall_vcpu_inject(owner, data);
 	case NVMM_IOC_VCPU_RUN:
 		return nvmm_syscall_vcpu_run(owner, data);
 	case NVMM_IOC_GPA_MAP:

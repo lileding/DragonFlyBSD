@@ -385,29 +385,6 @@ out:
 }
 
 static int
-nvmm_native_vcpu_inject(struct nvmm_owner *owner, struct nvmm_ioc_vcpu_inject *args)
-{
-	struct nvmm_machine *mach;
-	struct nvmm_cpu *vcpu;
-	int error;
-
-	error = nvmm_machine_get(owner, args->machid, &mach, false);
-	if (error)
-		return error;
-
-	error = nvmm_vcpu_get(mach, args->cpuid, &vcpu);
-	if (error)
-		goto out;
-
-	error = (*nvmm_impl->vcpu_inject)(vcpu);
-	nvmm_vcpu_put(vcpu);
-
-out:
-	nvmm_machine_put(mach);
-	return error;
-}
-
-static int
 nvmm_native_do_vcpu_run(struct nvmm_machine *mach, struct nvmm_cpu *vcpu,
     struct nvmm_vcpu_exit *exit)
 {
@@ -820,8 +797,6 @@ nvmm_native_ioctl(struct nvmm_owner *owner, unsigned long cmd, void *data)
 		return nvmm_native_vcpu_setstate(owner, data);
 	case NVMM_IOC_VCPU_GETSTATE:
 		return nvmm_native_vcpu_getstate(owner, data);
-	case NVMM_IOC_VCPU_INJECT:
-		return nvmm_native_vcpu_inject(owner, data);
 	case NVMM_IOC_VCPU_RUN:
 		return nvmm_native_vcpu_run(owner, data);
 	case NVMM_IOC_GPA_MAP:
