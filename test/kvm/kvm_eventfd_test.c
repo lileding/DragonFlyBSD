@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Manual runtime test for the DragonFly KVM eventfd extension.
+ * Runtime test for the public DragonFly KVM eventfd() interface.
  */
 #include <sys/event.h>
 #include <sys/types.h>
@@ -21,26 +21,14 @@ main(void)
 {
 	struct kevent change;
 	struct kevent result;
-	struct kvm_dfly_eventfd request;
 	struct timespec timeout = { 0, 0 };
 	uint64_t value;
-	int control_fd;
 	int event_fd;
 	int queue_fd;
 
-	control_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
-	if (control_fd < 0)
-		err(1, "open /dev/kvm");
-	if (ioctl(control_fd, KVM_GET_API_VERSION) != KVM_API_VERSION)
-		err(1, "KVM_GET_API_VERSION");
-	request.initial = 0;
-	request.flags = KVM_DFLY_EVENTFD_NONBLOCK | KVM_DFLY_EVENTFD_CLOEXEC;
-	request.fd = -1;
-	if (ioctl(control_fd, KVM_DFLY_CREATE_EVENTFD, &request) != 0)
-		err(1, "KVM_DFLY_CREATE_EVENTFD");
-	event_fd = request.fd;
+	event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (event_fd < 0)
-		err(1, "KVM_DFLY_CREATE_EVENTFD returned no fd");
+		err(1, "eventfd");
 	if ((fcntl(event_fd, F_GETFD) & FD_CLOEXEC) == 0)
 		err(1, "eventfd lacks FD_CLOEXEC");
 	queue_fd = kqueue();
@@ -63,7 +51,7 @@ main(void)
 		errx(1, "eventfd returned %ju instead of 5", (uintmax_t)value);
 	if (read(event_fd, &value, sizeof(value)) != -1 || errno != EWOULDBLOCK)
 		err(1, "empty nonblocking eventfd read");
-	if (close(queue_fd) != 0 || close(event_fd) != 0 || close(control_fd) != 0)
+	if (close(queue_fd) != 0 || close(event_fd) != 0)
 		err(1, "close");
 	puts("kvm eventfd: PASS");
 	return 0;
