@@ -35,9 +35,13 @@ main(void)
 	kvm_fd = open("/dev/kvm", O_RDWR);
 	if (kvm_fd < 0)
 		err(1, "open /dev/kvm");
+	if (ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_READONLY_MEM) != 1)
+		err(1, "KVM_CAP_READONLY_MEM");
 	vm_fd = ioctl(kvm_fd, KVM_CREATE_VM, 0);
 	if (vm_fd < 0)
 		err(1, "KVM_CREATE_VM");
+	if (ioctl(vm_fd, KVM_CHECK_EXTENSION, KVM_CAP_READONLY_MEM) != 1)
+		err(1, "VM KVM_CAP_READONLY_MEM");
 	bzero(&region, sizeof(region));
 	region.memory_size = page_size;
 	region.userspace_addr = (uintptr_t)memory;
@@ -46,6 +50,15 @@ main(void)
 	bzero(&region, sizeof(region));
 	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
 		err(1, "KVM_SET_USER_MEMORY_REGION unmap");
+	bzero(&region, sizeof(region));
+	region.memory_size = page_size;
+	region.userspace_addr = (uintptr_t)memory;
+	region.flags = KVM_MEM_READONLY;
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
+		err(1, "KVM_SET_USER_MEMORY_REGION readonly map");
+	bzero(&region, sizeof(region));
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
+		err(1, "KVM_SET_USER_MEMORY_REGION readonly unmap");
 	if (close(vm_fd) != 0)
 		err(1, "close vm fd");
 	if (close(kvm_fd) != 0)

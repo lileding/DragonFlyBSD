@@ -180,6 +180,10 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	if (error != 0)
 		return error;
 	switch (command) {
+	case KVM_CHECK_EXTENSION:
+	case KVM_LINUX_IO(0x03):
+		msg->sysmsg_result = kvm_capability((int)(intptr_t)*(caddr_t *)data);
+		return 0;
 	case KVM_GET_VCPU_MMAP_SIZE:
 	case KVM_LINUX_IO(0x04):
 		msg->sysmsg_result = 2 * PAGE_SIZE;

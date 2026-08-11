@@ -118,7 +118,13 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	 * the command direction would decode its slot address as the request.
 	 */
 	capability = (int)(intptr_t)*(caddr_t *)ap->a_data;
+	ap->a_sysmsg->sysmsg_result = kvm_capability(capability);
+	return 0;
+}
 
+int
+kvm_capability(int capability)
+{
 	switch (capability) {
 	case KVM_CAP_IRQCHIP:
 	case KVM_CAP_IRQ_ROUTING:
@@ -126,10 +132,9 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	case KVM_CAP_SIGNAL_MSI:
 	case KVM_CAP_PIT2:
 	case KVM_CAP_PIT_STATE2:
-		ap->a_sysmsg->sysmsg_result = vmm_irqchip_available() ?
+		return vmm_irqchip_available() ?
 		    (capability == KVM_CAP_IRQ_ROUTING ? KVM_MAX_IRQ_ROUTES + 1 : 1) :
 		    0;
-		break;
 	case KVM_CAP_USER_MEMORY:
 	case KVM_CAP_SET_TSS_ADDR:
 	case KVM_CAP_EXT_CPUID:
@@ -144,22 +149,18 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	case KVM_CAP_XCRS:
 	case KVM_CAP_VCPU_EVENTS:
 	case KVM_CAP_ADJUST_CLOCK:
+	case KVM_CAP_READONLY_MEM:
 	case KVM_CAP_SET_IDENTITY_MAP_ADDR:
 	case KVM_CAP_IMMEDIATE_EXIT:
-		ap->a_sysmsg->sysmsg_result = 1;
-		break;
+		return 1;
 	case KVM_CAP_NR_MEMSLOTS:
-		ap->a_sysmsg->sysmsg_result = KVM_MEMORY_SLOTS;
-		break;
+		return KVM_MEMORY_SLOTS;
 	case KVM_CAP_NR_VCPUS:
 	case KVM_CAP_MAX_VCPUS:
-		ap->a_sysmsg->sysmsg_result = KVM_MAX_VCPUS;
-		break;
+		return KVM_MAX_VCPUS;
 	default:
-		ap->a_sysmsg->sysmsg_result = 0;
-		break;
+		return 0;
 	}
-	return 0;
 }
 
 static int

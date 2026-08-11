@@ -16,4 +16,7 @@ extern struct lwkt_token kvm_frontend_token;
 extern int kvm_file_count;
 extern bool kvm_draining;
 
+/* Returns the supported value for one Linux KVM capability. */
+int kvm_capability(int capability);
+
 #endif /* KVM_INTERNAL_H */
