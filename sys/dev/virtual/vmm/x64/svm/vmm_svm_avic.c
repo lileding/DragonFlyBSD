@@ -15,6 +15,8 @@
 #include <vm/vm.h>
 #include <vm/vm_page.h>
 
+#include <machine/clock.h>
+
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "vmm_svm.h"
@@ -30,6 +32,19 @@
 #define VMM_SVM_AVIC_LOGICAL_VALID	__BIT(31)
 #define VMM_SVM_AVIC_LOGICAL_APIC_ID	__BITS(7, 0)
 #define VMM_SVM_AVIC_DOORBELL_MSR	0xc001011bU
+
+#define VMM_SVM_IOAPIC_BASE		0xfec00000ULL
+#define VMM_SVM_IOAPIC_PINS		24U
+#define VMM_SVM_IOAPIC_REG_ID		0x00U
+#define VMM_SVM_IOAPIC_REG_VERSION	0x01U
+#define VMM_SVM_IOAPIC_REG_ARB		0x02U
+#define VMM_SVM_IOAPIC_REDIR_BASE	0x10U
+#define VMM_SVM_IOAPIC_VERSION		(((VMM_SVM_IOAPIC_PINS - 1U) << 16) | 0x11U)
+#define VMM_SVM_IOAPIC_REDIR_MASKED	__BIT(16)
+#define VMM_SVM_IOAPIC_REDIR_FIXED	0x00000000U
+#define VMM_SVM_IOAPIC_REDIR_DELIVERY_MASK	0x00000700U
+#define VMM_SVM_IOAPIC_REDIR_DEST_LOGICAL	__BIT(11)
+#define VMM_SVM_IOAPIC_REDIR_LEVEL	__BIT(15)
 
 #define VMM_SVM_APIC_ID			0x020U
 #define VMM_SVM_APIC_VERSION		0x030U
@@ -49,7 +64,9 @@
 #define VMM_SVM_APIC_LVT1			0x360U
 #define VMM_SVM_APIC_LVT_ERROR		0x370U
 #define VMM_SVM_APIC_TMICT			0x380U
+#define VMM_SVM_APIC_TMCCT			0x390U
 #define VMM_SVM_APIC_TDCR			0x3e0U
+#define VMM_SVM_APIC_ISR_BASE			0x100U
 
 #define VMM_SVM_APIC_VERSION_VALUE	0x00140014U
 #define VMM_SVM_APIC_SVR_ENABLE	__BIT(8)
@@ -64,6 +81,9 @@
 #define VMM_SVM_APIC_LVT_LEVEL		0x00008000U
 #define VMM_SVM_APIC_LVT_MASKED		0x00010000U
 #define VMM_SVM_APIC_LVT_TIMER_MODE		0x00060000U
+#define VMM_SVM_APIC_LVT_TIMER_ONESHOT		0x00000000U
+#define VMM_SVM_APIC_LVT_TIMER_PERIODIC	0x00020000U
+#define VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE	0x00040000U
 #define VMM_SVM_APIC_LVT_COMMON_VALID	\
 	(VMM_SVM_APIC_LVT_VECTOR_MASK | VMM_SVM_APIC_LVT_SEND_PENDING | \
 	 VMM_SVM_APIC_LVT_MASKED)
@@ -90,6 +110,14 @@
 #define VMM_SVM_APIC_ICR_DEST_BROADCAST	0xffU
 #define VMM_SVM_APIC_ICR_X2_DEST_BROADCAST	0xffffffffU
 
+#define VMM_SVM_MSI_ADDRESS_BASE		0xfee00000ULL
+#define VMM_SVM_MSI_ADDRESS_DEST_MASK		0x000ff000ULL
+#define VMM_SVM_MSI_ADDRESS_CONTROL_MASK	0x0000000cULL
+#define VMM_SVM_MSI_DATA_VECTOR_MASK		0x000000ffU
+#define VMM_SVM_MSI_DATA_DELIVERY_MASK		0x00000700U
+#define VMM_SVM_MSI_DATA_ALLOWED		(VMM_SVM_MSI_DATA_VECTOR_MASK | \
+	VMM_SVM_MSI_DATA_DELIVERY_MASK)
+
 #define VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI	0x0401ULL
 #define VMM_SVM_EXIT_AVIC_NOACCEL		0x0402ULL
 #define VMM_SVM_AVIC_NOACCEL_WRITE		__BIT(0)
@@ -105,6 +133,11 @@ struct vmm_svm_interrupt_machine {
 	uint32_t *logical_table;
 	paddr_t logical_table_pa;
 	bool access_page_mapped;
+	bool avic;
+	uint32_t ioapic_select;
+	uint32_t ioapic_id;
+	uint64_t ioapic_redir[VMM_SVM_IOAPIC_PINS];
+	bool ioapic_level[VMM_SVM_IOAPIC_PINS];
 	struct vmm_svm_interrupt_vcpu *targets[VMM_SVM_AVIC_MAX_PHYS_ID + 1];
 };
 
@@ -117,11 +150,24 @@ struct vmm_svm_interrupt_vcpu {
 	volatile int host_cpu;
 	volatile int host_apic_id;
 	volatile int running;
+	uint32_t timer_lvtt;
+	uint32_t timer_tmict;
+	uint32_t timer_tdcr;
+	uint32_t timer_divisor;
+	uint64_t timer_interval_tsc;
+	uint64_t timer_deadline_tsc;
+	bool timer_active;
 };
 
 static int vmm_svm_soft_machine_create(struct vmm_machine *,
     struct vmm_svm_interrupt_machine **);
 static int vmm_svm_soft_machine_enable(struct vmm_svm_interrupt_machine *);
+static int vmm_svm_soft_irq_raise_msi(struct vmm_svm_interrupt_machine *,
+    uint64_t, uint32_t);
+static int vmm_svm_soft_irq_set(struct vmm_svm_interrupt_machine *, uint32_t,
+    bool);
+static int vmm_svm_soft_vcpu_mmio(struct vmm_svm_interrupt_vcpu *, uint64_t,
+    bool, uint32_t *);
 static void vmm_svm_soft_machine_destroy(struct vmm_svm_interrupt_machine *);
 static int vmm_svm_soft_vcpu_create(struct vmm_svm_interrupt_machine *,
     struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
@@ -135,6 +181,12 @@ static int vmm_svm_soft_vcpu_exit(struct vmm_svm_interrupt_vcpu *, uint64_t,
 static int vmm_svm_avic_machine_create(struct vmm_machine *,
     struct vmm_svm_interrupt_machine **);
 static int vmm_svm_avic_machine_enable(struct vmm_svm_interrupt_machine *);
+static int vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *,
+    uint64_t, uint32_t);
+static int vmm_svm_avic_irq_set(struct vmm_svm_interrupt_machine *, uint32_t,
+    bool);
+static int vmm_svm_avic_vcpu_mmio(struct vmm_svm_interrupt_vcpu *, uint64_t,
+    bool, uint32_t *);
 static void vmm_svm_avic_machine_destroy(struct vmm_svm_interrupt_machine *);
 static int vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *,
     struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
@@ -149,11 +201,30 @@ static void vmm_svm_avic_logical_update_locked(
 static int vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t, int);
 static void vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *, uint8_t);
+static uint32_t vmm_svm_avic_read(const struct vmm_svm_interrupt_vcpu *,
+    uint32_t);
+static void vmm_svm_avic_write(const struct vmm_svm_interrupt_vcpu *,
+    uint32_t, uint32_t);
+static int vmm_svm_lapic_read(struct vmm_svm_interrupt_vcpu *, uint32_t,
+    uint32_t *);
+static int vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *, uint32_t,
+    uint32_t);
+static void vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *,
+    uint32_t);
+static void vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *);
+static int vmm_svm_lapic_eoi(struct vmm_svm_interrupt_vcpu *);
+static void vmm_svm_ioapic_deliver_locked(
+    struct vmm_svm_interrupt_machine *, uint32_t);
+static void vmm_svm_ioapic_reassert(struct vmm_svm_interrupt_machine *,
+    uint8_t);
 
 const struct vmm_svm_interrupt_ops vmm_svm_soft_interrupt_ops = {
 	.name = "software",
 	.machine_create = vmm_svm_soft_machine_create,
 	.machine_enable = vmm_svm_soft_machine_enable,
+	.irq_raise_msi = vmm_svm_soft_irq_raise_msi,
+	.irq_set = vmm_svm_soft_irq_set,
+	.vcpu_mmio = vmm_svm_soft_vcpu_mmio,
 	.machine_destroy = vmm_svm_soft_machine_destroy,
 	.vcpu_create = vmm_svm_soft_vcpu_create,
 	.vcpu_destroy = vmm_svm_soft_vcpu_destroy,
@@ -166,6 +237,9 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.name = "avic",
 	.machine_create = vmm_svm_avic_machine_create,
 	.machine_enable = vmm_svm_avic_machine_enable,
+	.irq_raise_msi = vmm_svm_avic_irq_raise_msi,
+	.irq_set = vmm_svm_avic_irq_set,
+	.vcpu_mmio = vmm_svm_avic_vcpu_mmio,
 	.machine_destroy = vmm_svm_avic_machine_destroy,
 	.vcpu_create = vmm_svm_avic_vcpu_create,
 	.vcpu_destroy = vmm_svm_avic_vcpu_destroy,
@@ -194,22 +268,131 @@ static int
 vmm_svm_soft_machine_create(struct vmm_machine *machine,
     struct vmm_svm_interrupt_machine **result)
 {
-	(void)machine;
-	*result = NULL;
+	struct vmm_svm_interrupt_machine *soft;
+	uint32_t pin;
+
+	soft = os_mem_zalloc(sizeof(*soft));
+	if (soft == NULL)
+		return ENOMEM;
+	lwkt_token_init(&soft->token, "vmmirq");
+	soft->vmspace = machine->vmspace;
+	soft->ioapic_id = 1;
+	for (pin = 0; pin < VMM_SVM_IOAPIC_PINS; ++pin)
+		soft->ioapic_redir[pin] = VMM_SVM_IOAPIC_REDIR_MASKED;
+	*result = soft;
 	return 0;
 }
 
 static int
 vmm_svm_soft_machine_enable(struct vmm_svm_interrupt_machine *machine)
 {
-	(void)machine;
-	return ENOTSUP;
+	return machine == NULL ? EINVAL : 0;
+}
+
+static int
+vmm_svm_soft_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
+    uint64_t address, uint32_t data)
+{
+	struct vmm_svm_interrupt_vcpu *target;
+	uint32_t destination;
+	uint32_t vector;
+
+	if ((address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
+	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) != VMM_SVM_MSI_ADDRESS_BASE ||
+	    (address & VMM_SVM_MSI_ADDRESS_CONTROL_MASK) != 0 ||
+	    (data & ~VMM_SVM_MSI_DATA_ALLOWED) != 0 ||
+	    (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != 0)
+		return EOPNOTSUPP;
+	vector = data & VMM_SVM_MSI_DATA_VECTOR_MASK;
+	if (vector < 32)
+		return EINVAL;
+	destination = (address & VMM_SVM_MSI_ADDRESS_DEST_MASK) >> 12;
+	if (destination > VMM_SVM_AVIC_MAX_PHYS_ID)
+		return ENOENT;
+	lwkt_gettoken(&machine->token);
+	target = machine->targets[destination];
+	if (target != NULL)
+		vmm_svm_avic_deliver(target, (uint8_t)vector);
+	lwkt_reltoken(&machine->token);
+	return target != NULL ? 0 : ENOENT;
+}
+
+static int
+vmm_svm_soft_irq_set(struct vmm_svm_interrupt_machine *machine,
+    uint32_t gsi, bool level)
+{
+	if (gsi >= VMM_SVM_IOAPIC_PINS)
+		return EINVAL;
+	lwkt_gettoken(&machine->token);
+	if (level == machine->ioapic_level[gsi]) {
+		lwkt_reltoken(&machine->token);
+		return 0;
+	}
+	machine->ioapic_level[gsi] = level;
+	if (!level) {
+		lwkt_reltoken(&machine->token);
+		return 0;
+	}
+	vmm_svm_ioapic_deliver_locked(machine, gsi);
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+/* Caller holds machine->token. */
+static void
+vmm_svm_ioapic_deliver_locked(struct vmm_svm_interrupt_machine *machine,
+    uint32_t pin)
+{
+	struct vmm_svm_interrupt_vcpu *target;
+	uint64_t entry;
+	uint32_t low;
+	uint32_t destination;
+	uint32_t id;
+
+	entry = machine->ioapic_redir[pin];
+	low = entry;
+	if ((low & VMM_SVM_IOAPIC_REDIR_MASKED) != 0 ||
+	    (low & VMM_SVM_IOAPIC_REDIR_DELIVERY_MASK) !=
+	    VMM_SVM_IOAPIC_REDIR_FIXED || (low & 0xffU) < 32)
+		return;
+	destination = entry >> 56;
+	for (id = 0; id <= VMM_SVM_AVIC_MAX_PHYS_ID; ++id) {
+		target = machine->targets[id];
+		if (target == NULL)
+			continue;
+		if ((low & VMM_SVM_IOAPIC_REDIR_DEST_LOGICAL) != 0) {
+			if ((destination &
+			    (vmm_svm_avic_read(target, VMM_SVM_APIC_LDR) >> 24)) == 0)
+				continue;
+		} else if (destination != target->apic_id) {
+			continue;
+		}
+		vmm_svm_avic_deliver(target, low & 0xffU);
+	}
+}
+
+static void
+vmm_svm_ioapic_reassert(struct vmm_svm_interrupt_machine *machine,
+    uint8_t vector)
+{
+	uint32_t pin;
+
+	lwkt_gettoken(&machine->token);
+	for (pin = 0; pin < VMM_SVM_IOAPIC_PINS; ++pin) {
+		if (!machine->ioapic_level[pin] ||
+		    (machine->ioapic_redir[pin] & VMM_SVM_IOAPIC_REDIR_LEVEL) == 0 ||
+		    (machine->ioapic_redir[pin] & 0xffU) != vector)
+			continue;
+		vmm_svm_ioapic_deliver_locked(machine, pin);
+	}
+	lwkt_reltoken(&machine->token);
 }
 
 static void
 vmm_svm_soft_machine_destroy(struct vmm_svm_interrupt_machine *machine)
 {
-	(void)machine;
+	if (machine != NULL)
+		os_mem_free(machine, sizeof(*machine));
 }
 
 static int
@@ -217,23 +400,91 @@ vmm_svm_soft_vcpu_create(struct vmm_svm_interrupt_machine *machine,
     struct vmm_vcpu *vcpu, struct vmm_svm_interrupt_vcpu **result,
     struct vmm_svm_interrupt_config *config)
 {
-	(void)machine;
-	(void)vcpu;
-	*result = NULL;
+	struct vmm_svm_interrupt_vcpu *soft;
+
 	bzero(config, sizeof(*config));
+	*result = NULL;
+	if (!vcpu->machine->irqchip)
+		return 0;
+	if (vcpu->id > VMM_SVM_AVIC_MAX_PHYS_ID)
+		return E2BIG;
+	soft = os_mem_zalloc(sizeof(*soft));
+	if (soft == NULL)
+		return ENOMEM;
+	soft->machine = machine;
+	soft->vcpu = vcpu;
+	soft->apic_id = vcpu->id;
+	if (os_contigpa_zalloc(&soft->apic_page_pa,
+	    (vaddr_t *)&soft->apic_page, 1) != 0) {
+		os_mem_free(soft, sizeof(*soft));
+		return ENOMEM;
+	}
+	vmm_svm_avic_write(soft, VMM_SVM_APIC_ID, soft->apic_id << 24);
+	vmm_svm_avic_write(soft, VMM_SVM_APIC_VERSION, VMM_SVM_APIC_VERSION_VALUE);
+	vmm_svm_avic_write(soft, VMM_SVM_APIC_SVR,
+	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
+	vmm_svm_avic_write(soft, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
+	soft->timer_divisor = 2;
+	if (soft->apic_id < 8)
+		vmm_svm_avic_write(soft, VMM_SVM_APIC_LDR,
+		    1U << (24 + soft->apic_id));
+	lwkt_gettoken(&machine->token);
+	if (machine->targets[soft->apic_id] != NULL) {
+		lwkt_reltoken(&machine->token);
+		os_contigpa_free(soft->apic_page_pa, (vaddr_t)soft->apic_page, 1);
+		os_mem_free(soft, sizeof(*soft));
+		return EEXIST;
+	}
+	machine->targets[soft->apic_id] = soft;
+	lwkt_reltoken(&machine->token);
+	*result = soft;
 	return 0;
 }
 
 static void
 vmm_svm_soft_vcpu_destroy(struct vmm_svm_interrupt_vcpu *vcpu)
 {
-	(void)vcpu;
+	if (vcpu == NULL)
+		return;
+	lwkt_gettoken(&vcpu->machine->token);
+	if (vcpu->machine->targets[vcpu->apic_id] == vcpu)
+		vcpu->machine->targets[vcpu->apic_id] = NULL;
+	lwkt_reltoken(&vcpu->machine->token);
+	os_contigpa_free(vcpu->apic_page_pa, (vaddr_t)vcpu->apic_page, 1);
+	os_mem_free(vcpu, sizeof(*vcpu));
 }
 
 static void
 vmm_svm_soft_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 {
-	(void)vcpu;
+	volatile uint32_t *irr;
+	volatile uint32_t *isr;
+	int word;
+	int bit;
+	uint32_t value;
+	uint8_t vector;
+
+	if (vcpu == NULL)
+		return;
+	vmm_svm_lapic_timer_check(vcpu);
+	for (word = 7; word >= 1; --word) {
+		irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
+		    VMM_SVM_APIC_IRR_BASE + word * 0x10);
+		value = atomic_load_acq_int((volatile u_int *)irr);
+		if (value == 0)
+			continue;
+		bit = fls(value) - 1;
+		vector = word * 32 + bit;
+		atomic_clear_int((volatile u_int *)irr, __BIT(bit));
+		if (vmm_svm_vcpu_inject_interrupt(vcpu->vcpu, vector) != 0) {
+			atomic_set_int((volatile u_int *)irr, __BIT(bit));
+		} else {
+			isr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
+			    VMM_SVM_APIC_ISR_BASE + word * 0x10);
+			atomic_set_int((volatile u_int *)isr, __BIT(bit));
+		}
+		return;
+	}
 }
 
 static void
@@ -269,8 +520,7 @@ vmm_svm_avic_read_register(struct vmm_svm_interrupt_vcpu *vcpu,
 	if (vcpu == NULL || value == NULL ||
 	    reg > PAGE_SIZE - sizeof(*value) || (reg & 3) != 0)
 		return EINVAL;
-	*value = vmm_svm_avic_read(vcpu, reg);
-	return 0;
+	return vmm_svm_lapic_read(vcpu, reg, value);
 }
 
 static void
@@ -281,6 +531,172 @@ vmm_svm_avic_write(const struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 
 	slot = (volatile uint32_t *)((uint8_t *)vcpu->apic_page + reg);
 	*slot = value;
+}
+
+static void
+vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint32_t count)
+{
+	uint64_t delta;
+	uint64_t now;
+
+	vcpu->timer_tmict = count;
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_TMICT, count);
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_TMCCT, count);
+	if (count == 0 ||
+	    (vcpu->timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE) ==
+	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE || tsc_frequency == 0) {
+		vcpu->timer_active = false;
+		return;
+	}
+	delta = ((uint64_t)count * vcpu->timer_divisor * tsc_frequency +
+	    10000000U - 1) / 10000000U;
+	if (delta == 0)
+		delta = 1;
+	now = rdtsc();
+	vcpu->timer_interval_tsc = delta;
+	vcpu->timer_deadline_tsc = UINT64_MAX - now < delta ?
+	    UINT64_MAX : now + delta;
+	vcpu->timer_active = true;
+}
+
+static void
+vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *vcpu)
+{
+	uint64_t now;
+	uint64_t periods;
+	uint8_t vector;
+
+	if (!vcpu->timer_active)
+		return;
+	now = rdtsc();
+	if (now < vcpu->timer_deadline_tsc)
+		return;
+	vector = vcpu->timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_TMCCT, 0);
+	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_MASKED) == 0 &&
+	    vector >= 32)
+		vmm_svm_avic_deliver(vcpu, vector);
+	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE) ==
+	    VMM_SVM_APIC_LVT_TIMER_PERIODIC && vcpu->timer_interval_tsc != 0 &&
+	    vcpu->timer_tmict != 0) {
+		periods = (now - vcpu->timer_deadline_tsc) /
+	    vcpu->timer_interval_tsc + 1;
+		if (periods > (UINT64_MAX - vcpu->timer_deadline_tsc) /
+		    vcpu->timer_interval_tsc)
+			vcpu->timer_deadline_tsc = UINT64_MAX;
+		else
+			vcpu->timer_deadline_tsc += periods *
+			    vcpu->timer_interval_tsc;
+		vmm_svm_avic_write(vcpu, VMM_SVM_APIC_TMCCT,
+	    vcpu->timer_tmict);
+	} else {
+		vcpu->timer_active = false;
+	}
+}
+
+static int
+vmm_svm_lapic_eoi(struct vmm_svm_interrupt_vcpu *vcpu)
+{
+	volatile uint32_t *isr;
+	int word;
+	int bit;
+
+	for (word = 7; word >= 0; --word) {
+		isr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
+		    VMM_SVM_APIC_ISR_BASE + word * 0x10);
+		if (*isr == 0)
+			continue;
+		bit = fls(*isr) - 1;
+		atomic_clear_int((volatile u_int *)isr, __BIT(bit));
+		vmm_svm_ioapic_reassert(vcpu->machine, word * 32 + bit);
+		return word * 32 + bit;
+	}
+	return -1;
+}
+
+static int
+vmm_svm_lapic_read(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
+    uint32_t *value)
+{
+	uint64_t now;
+
+	if (reg > PAGE_SIZE - sizeof(*value) || (reg & 3) != 0)
+		return EINVAL;
+	now = rdtsc();
+	if (reg == VMM_SVM_APIC_TMCCT && vcpu->timer_active &&
+	    vcpu->timer_interval_tsc != 0 && now < vcpu->timer_deadline_tsc)
+		*value = (uint32_t)((uint64_t)vcpu->timer_tmict *
+		    (vcpu->timer_deadline_tsc - now) /
+		    vcpu->timer_interval_tsc);
+	else
+		*value = vmm_svm_avic_read(vcpu, reg);
+	return 0;
+}
+
+static int
+vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
+    uint32_t value)
+{
+	uint32_t divide;
+
+	switch (reg) {
+	case VMM_SVM_APIC_TPR:
+		value &= 0xffU;
+		break;
+	case VMM_SVM_APIC_LDR:
+		value &= 0xff000000U;
+		vmm_svm_avic_write(vcpu, reg, value);
+		lwkt_gettoken(&vcpu->machine->token);
+		vmm_svm_avic_logical_update_locked(vcpu);
+		lwkt_reltoken(&vcpu->machine->token);
+		return 0;
+	case VMM_SVM_APIC_DFR:
+		vmm_svm_avic_write(vcpu, reg, value);
+		lwkt_gettoken(&vcpu->machine->token);
+		vmm_svm_avic_logical_update_locked(vcpu);
+		lwkt_reltoken(&vcpu->machine->token);
+		return 0;
+	case VMM_SVM_APIC_EOI:
+		(void)vmm_svm_lapic_eoi(vcpu);
+		return 0;
+	case VMM_SVM_APIC_ESR:
+		value = 0;
+		break;
+	case VMM_SVM_APIC_LVTT:
+		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
+		vcpu->timer_lvtt = value;
+		if (vcpu->timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(vcpu, vcpu->timer_tmict);
+		break;
+	case VMM_SVM_APIC_TMICT:
+		vmm_svm_lapic_timer_arm(vcpu, value);
+		return 0;
+	case VMM_SVM_APIC_TDCR:
+		value &= VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+		vcpu->timer_tdcr = value;
+		divide = ((value & 0x3U) | ((value & 0x8U) >> 1)) + 1;
+		vcpu->timer_divisor = 1U << (divide & 0x7U);
+		if (vcpu->timer_tmict != 0)
+			vmm_svm_lapic_timer_arm(vcpu, vcpu->timer_tmict);
+		break;
+	case VMM_SVM_APIC_SVR:
+		value &= VMM_SVM_APIC_SVR_VALID;
+		break;
+	case VMM_SVM_APIC_LVT_ERROR:
+	case VMM_SVM_APIC_LVT_THERMAL:
+	case VMM_SVM_APIC_LVT_PERF:
+	case VMM_SVM_APIC_LVT0:
+	case VMM_SVM_APIC_LVT1:
+		value &= VMM_SVM_APIC_LVT_COMMON_VALID |
+		    VMM_SVM_APIC_LVT_DELIVERY_MASK | VMM_SVM_APIC_LVT_POLARITY |
+		    VMM_SVM_APIC_LVT_LEVEL;
+		break;
+	default:
+		return ENOENT;
+	}
+	vmm_svm_avic_write(vcpu, reg, value);
+	return 0;
 }
 
 static int
@@ -296,6 +712,10 @@ vmm_svm_avic_machine_create(struct vmm_machine *machine,
 		return ENOMEM;
 	lwkt_token_init(&avic->token, "vmmavic");
 	avic->vmspace = machine->vmspace;
+	avic->avic = true;
+	avic->ioapic_id = 1;
+	for (uint32_t pin = 0; pin < VMM_SVM_IOAPIC_PINS; ++pin)
+		avic->ioapic_redir[pin] = VMM_SVM_IOAPIC_REDIR_MASKED;
 
 	avic->access_page = vm_page_alloc(NULL, (vm_pindex_t)ticks,
 	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_FORCE_ZERO);
@@ -338,6 +758,41 @@ vmm_svm_avic_machine_enable(struct vmm_svm_interrupt_machine *avic)
 	    avic->access_page, VM_PROT_READ | VM_PROT_WRITE, 0, NULL);
 	avic->access_page_mapped = true;
 	return 0;
+}
+
+static int
+vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
+    uint64_t address, uint32_t data)
+{
+	struct vmm_svm_interrupt_vcpu *target;
+	uint32_t destination;
+	uint32_t vector;
+
+	if ((address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
+	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) != VMM_SVM_MSI_ADDRESS_BASE ||
+	    (address & VMM_SVM_MSI_ADDRESS_CONTROL_MASK) != 0 ||
+	    (data & ~VMM_SVM_MSI_DATA_ALLOWED) != 0 ||
+	    (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != 0)
+		return EOPNOTSUPP;
+	vector = data & VMM_SVM_MSI_DATA_VECTOR_MASK;
+	if (vector < 32)
+		return EINVAL;
+	destination = (address & VMM_SVM_MSI_ADDRESS_DEST_MASK) >> 12;
+	if (destination > VMM_SVM_AVIC_MAX_PHYS_ID)
+		return ENOENT;
+	lwkt_gettoken(&machine->token);
+	target = machine->targets[destination];
+	if (target != NULL)
+		vmm_svm_avic_deliver(target, (uint8_t)vector);
+	lwkt_reltoken(&machine->token);
+	return target != NULL ? 0 : ENOENT;
+}
+
+static int
+vmm_svm_avic_irq_set(struct vmm_svm_interrupt_machine *machine,
+    uint32_t gsi, bool level)
+{
+	return vmm_svm_soft_irq_set(machine, gsi, level);
 }
 
 static void
@@ -402,6 +857,7 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR,
 	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
+	avic->timer_divisor = 2;
 	if (apic_id < 8)
 		vmm_svm_avic_write(avic, VMM_SVM_APIC_LDR, 1U << (24 + apic_id));
 
@@ -437,6 +893,7 @@ vmm_svm_avic_vcpu_destroy(struct vmm_svm_interrupt_vcpu *avic)
 
 	if (avic == NULL)
 		return;
+	vmm_svm_lapic_timer_check(avic);
 	machine = avic->machine;
 	lwkt_gettoken(&machine->token);
 	if (machine->targets[avic->apic_id] == avic) {
@@ -510,6 +967,10 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
 	atomic_set_int((volatile u_int *)irr, __BIT(vector & 31));
 	cpu_mfence();
+	if (!avic->machine->avic) {
+		(void)vmm_vcpu_kick(avic->vcpu);
+		return;
+	}
 	if (atomic_load_acq_int(&avic->running) == 0)
 		return;
 	host_cpu = atomic_load_acq_int(&avic->host_cpu);
@@ -517,6 +978,94 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 		return;
 	host_apic_id = atomic_load_acq_int(&avic->host_apic_id);
 	wrmsr(VMM_SVM_AVIC_DOORBELL_MSR, host_apic_id);
+}
+
+static int
+vmm_svm_irqchip_mmio(struct vmm_svm_interrupt_vcpu *vcpu, uint64_t address,
+    bool write, uint32_t *value)
+{
+	struct vmm_svm_interrupt_machine *machine = vcpu->machine;
+	uint32_t reg;
+	uint32_t pin;
+	uint64_t entry;
+
+	if (address >= VMM_SVM_AVIC_APIC_BASE &&
+	    address < VMM_SVM_AVIC_APIC_BASE + PAGE_SIZE) {
+		reg = address - VMM_SVM_AVIC_APIC_BASE;
+		if ((reg & 3) != 0)
+			return ENOENT;
+		if (!write)
+			return vmm_svm_lapic_read(vcpu, reg, value);
+		if (reg == VMM_SVM_APIC_ICR_LOW) {
+			vmm_svm_avic_write(vcpu, reg, *value);
+			return vmm_svm_avic_route_icr(vcpu, *value,
+			    vmm_svm_avic_read(vcpu, VMM_SVM_APIC_ICR_HIGH), 0) ?
+			    0 : ENOTSUP;
+		}
+		if (reg == VMM_SVM_APIC_ICR_HIGH) {
+			vmm_svm_avic_write(vcpu, reg, *value);
+			return 0;
+		}
+		return vmm_svm_lapic_write(vcpu, reg, *value);
+	}
+	if (address != VMM_SVM_IOAPIC_BASE &&
+	    address != VMM_SVM_IOAPIC_BASE + 0x10)
+		return ENOENT;
+	lwkt_gettoken(&machine->token);
+	if (address == VMM_SVM_IOAPIC_BASE) {
+		if (write)
+			machine->ioapic_select = *value & 0xffU;
+		else
+			*value = machine->ioapic_select;
+		lwkt_reltoken(&machine->token);
+		return 0;
+	}
+	reg = machine->ioapic_select;
+	if (!write) {
+		if (reg == VMM_SVM_IOAPIC_REG_ID || reg == VMM_SVM_IOAPIC_REG_ARB)
+			*value = machine->ioapic_id << 24;
+		else if (reg == VMM_SVM_IOAPIC_REG_VERSION)
+			*value = VMM_SVM_IOAPIC_VERSION;
+		else if (reg >= VMM_SVM_IOAPIC_REDIR_BASE &&
+		    reg < VMM_SVM_IOAPIC_REDIR_BASE + VMM_SVM_IOAPIC_PINS * 2) {
+			pin = (reg - VMM_SVM_IOAPIC_REDIR_BASE) / 2;
+			entry = machine->ioapic_redir[pin];
+			*value = (reg & 1) ? entry >> 32 : entry;
+		} else
+			*value = 0;
+		lwkt_reltoken(&machine->token);
+		return 0;
+	}
+	if (reg == VMM_SVM_IOAPIC_REG_ID)
+		machine->ioapic_id = (*value >> 24) & 0x0fU;
+	else if (reg >= VMM_SVM_IOAPIC_REDIR_BASE &&
+	    reg < VMM_SVM_IOAPIC_REDIR_BASE + VMM_SVM_IOAPIC_PINS * 2) {
+		pin = (reg - VMM_SVM_IOAPIC_REDIR_BASE) / 2;
+		entry = machine->ioapic_redir[pin];
+		if (reg & 1)
+			entry = (entry & 0xffffffffULL) | ((uint64_t)*value << 32);
+		else
+			entry = (entry & 0xffffffff00000000ULL) | *value;
+		machine->ioapic_redir[pin] = entry;
+		if (machine->ioapic_level[pin])
+			vmm_svm_ioapic_deliver_locked(machine, pin);
+	}
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+static int
+vmm_svm_soft_vcpu_mmio(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint64_t address, bool write, uint32_t *value)
+{
+	return vmm_svm_irqchip_mmio(vcpu, address, write, value);
+}
+
+static int
+vmm_svm_avic_vcpu_mmio(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint64_t address, bool write, uint32_t *value)
+{
+	return vmm_svm_irqchip_mmio(vcpu, address, write, value);
 }
 
 /* Caller holds machine->token. */
@@ -638,45 +1187,10 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 		return 0;
 	offset = exitinfo1 & VMM_SVM_AVIC_NOACCEL_OFFSET;
 	value = vmm_svm_avic_read(avic, offset);
+	if (offset != VMM_SVM_APIC_ICR_LOW &&
+	    offset != VMM_SVM_APIC_ICR_HIGH)
+		return vmm_svm_lapic_write(avic, offset, value) == 0;
 	switch (offset) {
-	case VMM_SVM_APIC_TPR:
-		vmm_svm_avic_write(avic, offset, value & 0xffU);
-		return 1;
-	case VMM_SVM_APIC_LDR:
-		vmm_svm_avic_write(avic, offset, value & 0xff000000U);
-		lwkt_gettoken(&avic->machine->token);
-		vmm_svm_avic_logical_update_locked(avic);
-		cpu_mfence();
-		lwkt_reltoken(&avic->machine->token);
-		return 1;
-	case VMM_SVM_APIC_DFR:
-		vmm_svm_avic_write(avic, offset, value);
-		lwkt_gettoken(&avic->machine->token);
-		vmm_svm_avic_logical_update_locked(avic);
-		cpu_mfence();
-		lwkt_reltoken(&avic->machine->token);
-		return 1;
-	case VMM_SVM_APIC_SVR:
-		vmm_svm_avic_write(avic, offset, value & VMM_SVM_APIC_SVR_VALID);
-		return 1;
-	case VMM_SVM_APIC_ESR:
-		vmm_svm_avic_write(avic, offset, 0);
-		return 1;
-	case VMM_SVM_APIC_LVT_ERROR:
-		vmm_svm_avic_write(avic, offset,
-		    value & VMM_SVM_APIC_LVT_COMMON_VALID);
-		return 1;
-	case VMM_SVM_APIC_LVTT:
-		vmm_svm_avic_write(avic, offset,
-		    value & VMM_SVM_APIC_LVT_TIMER_VALID);
-		return 1;
-	case VMM_SVM_APIC_TMICT:
-		vmm_svm_avic_write(avic, offset, value);
-		return 1;
-	case VMM_SVM_APIC_TDCR:
-		vmm_svm_avic_write(avic, offset,
-		    value & VMM_SVM_APIC_TIMER_DIVIDE_VALID);
-		return 1;
 	case VMM_SVM_APIC_ICR_HIGH:
 		vmm_svm_avic_write(avic, offset, value);
 		return 1;
@@ -684,18 +1198,6 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 		vmm_svm_avic_write(avic, offset, value);
 		return vmm_svm_avic_route_icr(avic, value,
 		    vmm_svm_avic_read(avic, VMM_SVM_APIC_ICR_HIGH), 0);
-	case VMM_SVM_APIC_EOI:
-		return 1;
-	case VMM_SVM_APIC_LVT0:
-	case VMM_SVM_APIC_LVT1:
-		vmm_svm_avic_write(avic, offset,
-		    value & VMM_SVM_APIC_LVT_LINT_VALID);
-		return 1;
-	case VMM_SVM_APIC_LVT_THERMAL:
-	case VMM_SVM_APIC_LVT_PERF:
-		vmm_svm_avic_write(avic, offset,
-		    value & VMM_SVM_APIC_LVT_DELIVERY_VALID);
-		return 1;
 	default:
 		return 0;
 	}

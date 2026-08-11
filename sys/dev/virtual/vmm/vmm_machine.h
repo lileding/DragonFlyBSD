@@ -7,15 +7,17 @@
 #define VMM_MACHINE_H
 
 #include <sys/malloc.h>
+#include <sys/queue.h>
 #include <sys/thread.h>
 
 #include "vmm.h"
 
 struct vmm_backend_ops;
 struct vmspace;
+struct vmm_io;
 
 struct vmm_machine {
-	/* token protects irqchip, vcpu_count, next_vcpu_id, and run_count. */
+	/* token protects lifecycle state, vCPU counters, and io_list. */
 	struct lwkt_token token;
 	const struct vmm_backend_ops *backend;
 	/* Borrowed from the caller and fixed for this machine's lifetime. */
@@ -23,9 +25,11 @@ struct vmm_machine {
 	/* Private storage owned by the selected backend. */
 	void *backend_state;
 	bool irqchip;
+	bool destroying;
 	unsigned int vcpu_count;
 	unsigned int next_vcpu_id;
 	unsigned int run_count;
+	TAILQ_HEAD(, vmm_io) io_list;
 };
 
 MALLOC_DECLARE(M_VMM);

@@ -35,6 +35,11 @@ struct vmm_svm_interrupt_ops {
 	int (*machine_create)(struct vmm_machine *,
 	    struct vmm_svm_interrupt_machine **);
 	int (*machine_enable)(struct vmm_svm_interrupt_machine *);
+	int (*irq_raise_msi)(struct vmm_svm_interrupt_machine *, uint64_t,
+	    uint32_t);
+	int (*irq_set)(struct vmm_svm_interrupt_machine *, uint32_t, bool);
+	int (*vcpu_mmio)(struct vmm_svm_interrupt_vcpu *, uint64_t, bool,
+	    uint32_t *);
 	void (*machine_destroy)(struct vmm_svm_interrupt_machine *);
 	int (*vcpu_create)(struct vmm_svm_interrupt_machine *,
 	    struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,

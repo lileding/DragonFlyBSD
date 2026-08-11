@@ -5,8 +5,10 @@
  */
 #include <sys/param.h>
 #include <sys/errno.h>
+#include <sys/globaldata.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/thread.h>
 
@@ -19,6 +21,44 @@ const struct vmm_backend_ops *vmm_backend;
 struct lwkt_token vmm_token;
 int vmm_machine_count;
 bool vmm_draining;
+static uint64_t vmm_vmexit_count[MAXCPU];
+static uint64_t vmm_vcpu_run_return_count[MAXCPU];
+
+static int vmm_sysctl_stats(SYSCTL_HANDLER_ARGS);
+
+SYSCTL_NODE(_hw, OID_AUTO, vmm, CTLFLAG_RW, 0, "VMM configuration");
+SYSCTL_NODE(_hw_vmm, OID_AUTO, stats, CTLFLAG_RD, 0, "VMM statistics");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, vmexit, CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vmexit_count, 0, vmm_sysctl_stats, "QU",
+    "Number of hardware VM exits");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, vcpu_run_return,
+    CTLTYPE_U64 | CTLFLAG_RD, (void *)vmm_vcpu_run_return_count, 0,
+    vmm_sysctl_stats, "QU", "Number of vmm_vcpu_run returns after VM entry");
+
+static int
+vmm_sysctl_stats(SYSCTL_HANDLER_ARGS)
+{
+	uint64_t *counts = arg1;
+	uint64_t total;
+	int cpu;
+
+	total = 0;
+	for (cpu = 0; cpu < ncpus; ++cpu)
+		total += atomic_load_acq_64(&counts[cpu]);
+	return sysctl_handle_64(oidp, &total, 0, req);
+}
+
+void
+vmm_stat_vmexit(void)
+{
+	atomic_add_64(&vmm_vmexit_count[mycpu->gd_cpuid], 1);
+}
+
+void
+vmm_stat_vcpu_run_return(void)
+{
+	atomic_add_64(&vmm_vcpu_run_return_count[mycpu->gd_cpuid], 1);
+}
 
 int
 vmm_x64_get_capability(struct vmm_x64_capability *capability)
@@ -63,6 +103,8 @@ vmm_modevent(module_t module, int event, void *arg)
 		backend = NULL;
 		vmm_machine_count = 0;
 		vmm_draining = false;
+		bzero(vmm_vmexit_count, sizeof(vmm_vmexit_count));
+		bzero(vmm_vcpu_run_return_count, sizeof(vmm_vcpu_run_return_count));
 		error = ENXIO;
 		SET_FOREACH(ops, vmm_backend_set) {
 			error = (*ops)->probe();

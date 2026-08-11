@@ -662,6 +662,7 @@ CTASSERT(offsetof(struct vmcb, state) == 0x400);
 
 static void vmm_svm_vcpu_state_provide(struct vmm_vcpu *, uint64_t);
 static void vmm_svm_vcpu_setstate(struct vmm_vcpu *, uint64_t);
+static int vmm_svm_avic_modrm_size(const uint8_t *, int, int);
 
 /*
  * These host values are static, they do not change at runtime and are the same
@@ -948,6 +949,20 @@ vmm_svm_vcpu_commit_event(struct vmm_vcpu *vcpu,
 	cpudata->evt_pending = true;
 
 	return 0;
+}
+
+int
+vmm_svm_vcpu_inject_interrupt(struct vmm_vcpu *vcpu, uint8_t vector)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmm_cpuevent event = {
+		.type = VMM_CPUEVENT_INTR,
+		.vector = vector,
+	};
+
+	if (cpudata->evt_pending)
+		return EBUSY;
+	return vmm_svm_vcpu_commit_event(vcpu, &event);
 }
 
 static void
@@ -1716,6 +1731,91 @@ vmm_svm_exit_npf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	uint64_t gpa = cpudata->vmcb->ctrl.exitinfo2;
+	const uint8_t *bytes = cpudata->vmcb->ctrl.inst_bytes;
+	uint32_t value;
+	uint8_t opcode;
+	uint8_t modrm;
+	unsigned int reg;
+	int length;
+	int offset;
+	int rex;
+	int modrm_size;
+	bool data16;
+	bool write;
+
+	if (vcpu->machine->irqchip && cpudata->interrupt != NULL) {
+		length = cpudata->vmcb->ctrl.inst_len;
+		if (length != 0 && length <= (int)sizeof(cpudata->vmcb->ctrl.inst_bytes)) {
+			offset = 0;
+			rex = 0;
+			data16 = false;
+			while (offset < length) {
+				if (bytes[offset] == 0x66) {
+					data16 = true;
+					++offset;
+					continue;
+				}
+				if (bytes[offset] >= 0x40 && bytes[offset] <= 0x4f) {
+					rex = bytes[offset++];
+					continue;
+				}
+				break;
+			}
+			if (offset < length && !data16 && (rex & 0x08) == 0) {
+				opcode = bytes[offset++];
+				switch (opcode) {
+				case 0x8b:
+					write = false;
+					break;
+				case 0x89:
+					write = true;
+					break;
+				case 0xc7:
+					if (offset >= length ||
+					    ((bytes[offset] >> 3) & 7) != 0)
+						goto not_irqchip;
+					write = true;
+					break;
+				default:
+					goto not_irqchip;
+				}
+				if (offset >= length)
+					goto not_irqchip;
+				modrm = bytes[offset];
+				modrm_size = vmm_svm_avic_modrm_size(bytes, length, offset);
+				if (modrm_size == 0)
+					goto not_irqchip;
+				reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
+				if (reg >= VMM_X64_GPR_RIP)
+					goto not_irqchip;
+				if (opcode == 0xc7) {
+					if (offset + modrm_size + 4 > length)
+						goto not_irqchip;
+					offset += modrm_size;
+					value = bytes[offset] | ((uint32_t)bytes[offset + 1] << 8) |
+					    ((uint32_t)bytes[offset + 2] << 16) |
+					    ((uint32_t)bytes[offset + 3] << 24);
+				} else if (write) {
+					value = cpudata->gprs[reg];
+				} else {
+					value = 0;
+				}
+				if (vmm_svm_interrupt_ops->vcpu_mmio(cpudata->interrupt,
+				    gpa, write, &value) == 0) {
+					if (!write) {
+						cpudata->gprs[reg] = value;
+						if (reg == VMM_X64_GPR_RAX)
+							cpudata->vmcb->state.rax = value;
+					}
+					vmm_svm_inkernel_advance(cpudata->vmcb);
+					exit->reason = VMM_CPUEXIT_NONE;
+					return;
+				}
+			}
+		}
+	}
+
+not_irqchip:
 
 	exit->reason = VMM_CPUEXIT_MEMORY;
 	if (cpudata->vmcb->ctrl.exitinfo1 & PGEX_W)
@@ -2158,6 +2258,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		vmm_svm_interrupt_ops->vcpu_enter(cpudata->interrupt);
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
+		vmm_stat_vmexit();
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
 		vmm_svm_interrupt_ops->vcpu_leave(cpudata->interrupt);
 		vmm_svm_htlb_flush_ack(cpudata, machgen);
@@ -3055,6 +3156,41 @@ vmm_svm_machine_create_irqchip(struct vmm_machine *mach)
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
 	return vmm_svm_interrupt_ops->machine_enable(machdata->interrupt);
+}
+
+bool
+vmm_svm_irqchip_available(void)
+{
+	return vmm_svm_interrupt_ops != NULL;
+}
+
+int
+vmm_svm_irq_raise_msi(struct vmm_machine *mach, uint64_t address,
+    uint32_t data)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->irq_raise_msi(machdata->interrupt,
+	    address, data);
+}
+
+int
+vmm_svm_machine_raise_irq(struct vmm_machine *mach, uint32_t gsi)
+{
+	int error;
+
+	error = vmm_svm_machine_set_irq(mach, gsi, true);
+	if (error != 0)
+		return error;
+	return vmm_svm_machine_set_irq(mach, gsi, false);
+}
+
+int
+vmm_svm_machine_set_irq(struct vmm_machine *mach, uint32_t gsi, bool level)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->irq_set(machdata->interrupt, gsi, level);
 }
 
 void

@@ -1,7 +1,7 @@
 KMOD=	vmm
 # The active core starts with the machine object and its initial allocation
 # path.  Legacy implementations stay under legacy/ and are excluded from the build.
-SRCS=	vmm.c vmm_machine.c vmm_vcpu.c
+SRCS=	vmm.c vmm_machine.c vmm_vcpu.c vmm_io.c
 
 .if ${MACHINE_ARCH} == "x86_64"
 .PATH:	${.CURDIR}/x64/svm

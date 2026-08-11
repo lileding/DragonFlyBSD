@@ -11,10 +11,12 @@
 struct vmspace;
 struct vmm_machine;
 struct vmm_vcpu;
+struct vmm_io;
 
 /* Opaque runtime handles created and destroyed only through this API. */
 typedef struct vmm_machine *vmm_machine_t;
 typedef struct vmm_vcpu *vmm_vcpu_t;
+typedef struct vmm_io *vmm_io_t;
 
 #if defined(__x86_64__)
 #include "x64/vmm_x64.h"
@@ -35,9 +37,77 @@ int vmm_machine_create(struct vmspace *vmspace, vmm_machine_t *machine);
  * Gives VMM ownership of this machine's interrupt-controller model.  It must
  * be called before creating any vCPU and cannot be undone.  The selected
  * backend uses hardware acceleration when available, otherwise it provides
- * an in-kernel software interrupt controller or returns ENOTSUP.
+ * an in-kernel software interrupt controller.
  */
 int vmm_machine_create_irqchip(vmm_machine_t machine);
+
+/* Reports whether the selected backend can create an in-kernel irqchip. */
+bool vmm_irqchip_available(void);
+
+/*
+ * Delivers one x86 MSI message through the machine interrupt controller.
+ * Hardware-backed irqchips deliver directly when possible.  The software
+ * irqchip accepts the same fixed, physical-destination MSI form.
+ */
+int vmm_machine_raise_msi(vmm_machine_t machine, uint64_t address,
+	uint32_t data);
+
+/*
+ * Raises one edge-triggered guest GSI through the machine interrupt
+ * controller.  The GSI is neither a host IRQ nor an APIC vector.  Backends
+ * without an in-kernel GSI input return ENOTSUP.
+ */
+int vmm_machine_raise_irq(vmm_machine_t machine, uint32_t gsi);
+
+/*
+ * Drives one guest GSI input to level.  This is the level-sensitive form of
+ * vmm_machine_raise_irq(); callers must deassert an asserted input.  It is
+ * required for virtual INTx and other level-triggered IOAPIC sources.
+ */
+int vmm_machine_set_irq(vmm_machine_t machine, uint32_t gsi, bool level);
+
+enum vmm_io_width {
+	VMM_IO_WIDTH_8 = 1,
+	VMM_IO_WIDTH_16 = 2,
+	VMM_IO_WIDTH_32 = 4,
+	VMM_IO_WIDTH_64 = 8,
+};
+
+struct vmm_io_write {
+	uint64_t address;
+	enum vmm_io_width width;
+	uint64_t value;
+};
+
+/*
+ * A trap handler consumes one scalar guest write by returning zero.
+ * Returning ENOENT leaves the VM exit visible to the vCPU caller.  Handlers
+ * run under the machine token and must not call back into the same machine.
+ */
+typedef int (*vmm_io_handler_t)(void *, const struct vmm_io_write *);
+
+/*
+ * Traps one PIO write at address with the exact width.  A successful handler
+ * avoids a caller round trip and resumes the guest at the next instruction.
+ */
+int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
+	enum vmm_io_width width, vmm_io_handler_t handler, void *argument,
+	vmm_io_t *io);
+
+/*
+ * Traps one MMIO write at address with the exact width.  VMM recognizes
+ * ordinary x86 MOV stores only; other accesses remain visible to the vCPU
+ * caller unchanged.
+ */
+int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t address,
+	enum vmm_io_width width, vmm_io_handler_t handler, void *argument,
+	vmm_io_t *io);
+
+/*
+ * Removes one I/O write trap.  machine must own io.  The caller must stop
+ * using io; an in-flight handler is serialized by the machine token.
+ */
+int vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io);
 
 /*
  * Creates a vCPU using caller-owned architectural state.  state must remain

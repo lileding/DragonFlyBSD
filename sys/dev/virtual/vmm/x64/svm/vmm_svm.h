@@ -25,7 +25,11 @@ void vmm_svm_fini(void);
 int vmm_svm_capability(struct vmm_x64_capability *);
 int vmm_svm_get_supported_cpuid(struct vmm_cpuid_entry *, size_t *);
 int vmm_svm_machine_create(struct vmm_machine *);
+bool vmm_svm_irqchip_available(void);
 int vmm_svm_machine_create_irqchip(struct vmm_machine *);
+int vmm_svm_irq_raise_msi(struct vmm_machine *, uint64_t, uint32_t);
+int vmm_svm_machine_raise_irq(struct vmm_machine *, uint32_t);
+int vmm_svm_machine_set_irq(struct vmm_machine *, uint32_t, bool);
 void vmm_svm_machine_destroy(struct vmm_machine *);
 int vmm_svm_vcpu_create(struct vmm_vcpu *);
 int vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *,
@@ -34,6 +38,7 @@ void vmm_svm_vcpu_destroy(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_svm_vcpu_getstate(struct vmm_vcpu *);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
+int vmm_svm_vcpu_inject_interrupt(struct vmm_vcpu *, uint8_t);
 void vmm_svm_restore_tr(uint16_t);
 
 #endif /* VMM_SVM_H */

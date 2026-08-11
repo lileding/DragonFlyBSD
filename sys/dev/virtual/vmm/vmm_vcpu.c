@@ -13,6 +13,8 @@
 #include <vm/vm_param.h>
 
 #include "vmm_backend.h"
+#include "vmm_internal.h"
+#include "vmm_io.h"
 #include "vmm_vcpu.h"
 
 int
@@ -35,7 +37,8 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->state = state;
 	lwkt_token_init(&vc->token, "vmmvcpu");
 	lwkt_gettoken(&machine->token);
-	if (machine->next_vcpu_id == (unsigned int)-1) {
+	if (machine->destroying ||
+	    machine->next_vcpu_id == (unsigned int)-1) {
 		lwkt_reltoken(&machine->token);
 		kfree(vc, M_VMM);
 		return EOVERFLOW;
@@ -108,11 +111,28 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 
 	for (;;) {
 		error = vcpu->backend_ops->vcpu_run(vcpu, reason);
-		if (error != 0 || *reason == NULL ||
-		    (*reason)->reason != VMM_CPUEXIT_MEMORY) {
+		if (error != 0 || *reason == NULL) {
 			break;
 		}
 		exit = *reason;
+		if (exit->reason == VMM_CPUEXIT_IO) {
+			error = vmm_io_handle_pio(vcpu, exit);
+			if (error == 0)
+				continue;
+			if (error == ENOENT) {
+				error = 0;
+				break;
+			}
+			break;
+		}
+		if (exit->reason != VMM_CPUEXIT_MEMORY)
+			break;
+		error = vmm_io_handle_mmio(vcpu, exit);
+		if (error == 0)
+			continue;
+		if (error != ENOENT)
+			break;
+		error = 0;
 		fault_error = vm_fault(&machine->vmspace->vm_map,
 		    trunc_page(exit->u.mem.gpa), exit->u.mem.prot,
 		    (exit->u.mem.prot & VM_PROT_WRITE) ?
@@ -131,6 +151,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	}
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
+	vmm_stat_vcpu_run_return();
 	return error;
 }
 
@@ -182,7 +203,7 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	machine = vcpu->machine;
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
-	if (vcpu->running || vcpu->destroying) {
+	if (machine->destroying || vcpu->running || vcpu->destroying) {
 		lwkt_reltoken(&vcpu->token);
 		lwkt_reltoken(&machine->token);
 		return EBUSY;

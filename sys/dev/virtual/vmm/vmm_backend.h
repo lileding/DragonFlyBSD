@@ -22,8 +22,12 @@ struct vmm_backend_ops {
 	int (*capability)(struct vmm_x64_capability *);
 	int (*get_supported_cpuid)(struct vmm_cpuid_entry *, size_t *);
 	int (*machine_create)(struct vmm_machine *);
+	bool (*irqchip_available)(void);
 	/* Non-blocking capability check for pre-vCPU irqchip creation. */
 	int (*machine_create_irqchip)(struct vmm_machine *);
+	int (*irq_raise_msi)(struct vmm_machine *, uint64_t, uint32_t);
+	int (*machine_raise_irq)(struct vmm_machine *, uint32_t);
+	int (*machine_set_irq)(struct vmm_machine *, uint32_t, bool);
 	void (*machine_destroy)(struct vmm_machine *);
 	int (*vcpu_create)(struct vmm_vcpu *);
 	int (*vcpu_set_cpuid)(struct vmm_vcpu *,

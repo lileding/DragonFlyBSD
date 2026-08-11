@@ -15,4 +15,7 @@ extern struct lwkt_token vmm_token;
 extern int vmm_machine_count;
 extern bool vmm_draining;
 
+void vmm_stat_vmexit(void);
+void vmm_stat_vcpu_run_return(void);
+
 #endif /* VMM_INTERNAL_H */
