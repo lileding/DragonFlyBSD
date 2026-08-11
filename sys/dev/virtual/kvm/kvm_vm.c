@@ -25,21 +25,17 @@
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 
-#include <sys/kvm.h>
+#include "../../../sys/kvm.h"
 
 #include "../vmm/vmm.h"
 #include "kvm_internal.h"
+#include "kvm_ioevent.h"
+#include "kvm_irqfd.h"
+#include "kvm_vcpu.h"
 #include "kvm_vm.h"
 
 #define KVM_GPA_MAX	((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
-#define KVM_MEMORY_SLOTS	32
-
-struct kvm_memory_slot {
-	vm_offset_t gpa;
-	vm_size_t size;
-	bool present;
-};
 
 struct kvm_memory_piece {
 	STAILQ_ENTRY(kvm_memory_piece) entry;
@@ -51,22 +47,7 @@ struct kvm_memory_piece {
 
 STAILQ_HEAD(kvm_memory_piece_list, kvm_memory_piece);
 
-struct kvm_vm {
-	/* The file descriptor owns machine and vmspace until close. */
-	vmm_machine_t machine;
-	struct vmspace *vmspace;
-	struct lwkt_token token;
-	struct kvm_memory_slot slots[KVM_MEMORY_SLOTS];
-	cdev_t dev;
-	struct vnode *vnode;
-};
-
-static uint32_t kvm_vm_serial;
-
-static d_open_t kvm_vm_open;
-static d_close_t kvm_vm_close;
-static d_priv_dtor_t kvm_vm_destroy;
-static int kvm_vm_vop_getattr(struct vop_getattr_args *);
+static d_priv_dtor_t kvm_vm_file_destroy;
 static int kvm_vm_fo_read(struct file *, struct uio *, struct ucred *, int);
 static int kvm_vm_fo_write(struct file *, struct uio *, struct ucred *, int);
 static int kvm_vm_fo_ioctl(struct file *, u_long, caddr_t,
@@ -75,31 +56,15 @@ static int kvm_vm_fo_kqfilter(struct file *, struct knote *);
 static int kvm_vm_fo_stat(struct file *, struct stat *, struct ucred *);
 static int kvm_vm_fo_close(struct file *);
 static int kvm_vm_fo_seek(struct file *, off_t, int, off_t *);
-static int kvm_vm_make_vnode(cdev_t, struct vnode **);
-static void kvm_vm_release(struct kvm_vm *);
+static void kvm_vm_destroy(struct kvm_vm *);
 static int kvm_vm_set_user_memory(struct kvm_vm *,
-	const struct kvm_userspace_memory_region *);
+    const struct kvm_userspace_memory_region *);
+static int kvm_vm_signal_msi(struct kvm_vm *, const struct kvm_msi *);
+static int kvm_vm_set_tss_address(struct kvm_vm *, uint64_t);
+static int kvm_vm_set_identity_map_address(struct kvm_vm *, uint64_t);
 static int kvm_vm_collect_memory(struct vmspace *, vm_offset_t, vm_size_t,
 	vm_offset_t, struct kvm_memory_piece_list *, int *);
 static void kvm_vm_drop_memory(struct kvm_memory_piece_list *);
-
-static struct dev_ops kvm_vm_ops = {
-	{ "kvm_vm", 0, D_MPSAFE },
-	.d_open = kvm_vm_open,
-	.d_close = kvm_vm_close,
-};
-
-static struct vop_ops kvm_vm_vnode_vops = {
-	.vop_default = vop_defaultop,
-	.vop_close = vop_stdclose,
-	.vop_getattr = kvm_vm_vop_getattr,
-	.vop_advlock = (void *)vop_null,
-	.vop_inactive = (void *)vop_null,
-	.vop_reclaim = (void *)vop_null,
-	.vop_pathconf = vop_stdpathconf,
-};
-
-static struct vop_ops *kvm_vm_vnode_vops_p = &kvm_vm_vnode_vops;
 
 static struct fileops kvm_vm_fileops = {
 	.fo_read = kvm_vm_fo_read,
@@ -113,19 +78,21 @@ static struct fileops kvm_vm_fileops = {
 };
 
 int
-kvm_vm_create(struct lwp *lp, int *fd)
+kvm_vm_create(struct lwp *lp, struct vnode *vp, int *fd)
 {
 	struct kvm_vm *vm;
 	struct file *fp;
-	struct vnode *vp;
-	uint32_t serial;
 	int error;
 
-	if (lp == NULL || fd == NULL)
+	if (lp == NULL || vp == NULL || fd == NULL)
 		return EINVAL;
 	*fd = -1;
 	vm = kmalloc(sizeof(*vm), M_KVM, M_WAITOK | M_ZERO);
 	lwkt_token_init(&vm->token, "kvmvm");
+	TAILQ_INIT(&vm->ioevents);
+	TAILQ_INIT(&vm->irqroutes);
+	TAILQ_INIT(&vm->irqfds);
+	vm->references = 1;
 
 	lwkt_gettoken(&kvm_frontend_token);
 	if (kvm_draining) {
@@ -145,19 +112,6 @@ kvm_vm_create(struct lwp *lp, int *fd)
 	if (error != 0)
 		goto fail;
 
-	serial = atomic_fetchadd_int(&kvm_vm_serial, 1);
-	vm->dev = make_only_dev(&kvm_vm_ops, serial, UID_ROOT, GID_WHEEL,
-	    0600, "kvmvm%d", serial);
-	if (vm->dev == NULL) {
-		error = ENOMEM;
-		goto fail;
-	}
-	vm->dev->si_drv1 = vm;
-	error = kvm_vm_make_vnode(vm->dev, &vp);
-	if (error != 0)
-		goto fail;
-	vm->vnode = vp;
-
 	error = falloc(lp, &fp, fd);
 	if (error != 0)
 		goto fail;
@@ -166,9 +120,7 @@ kvm_vm_create(struct lwp *lp, int *fd)
 	fp->f_ops = &kvm_vm_fileops;
 	fp->f_data = vp;
 	vref(vp);
-	atomic_add_int(&vp->v_opencount, 1);
-	atomic_add_int(&vp->v_writecount, 1);
-	error = devfs_set_cdevpriv(fp, vm, kvm_vm_destroy);
+	error = devfs_set_cdevpriv(fp, vm, kvm_vm_file_destroy);
 	if (error != 0) {
 		(void)fp_close(fp);
 		fsetfd(lp->lwp_proc->p_fd, NULL, *fd);
@@ -182,37 +134,6 @@ kvm_vm_create(struct lwp *lp, int *fd)
 fail:
 	kvm_vm_release(vm);
 	return error;
-}
-
-static int
-kvm_vm_open(struct dev_open_args *ap)
-{
-
-	(void)ap;
-	return 0;
-}
-
-static int
-kvm_vm_close(struct dev_close_args *ap)
-{
-
-	(void)ap;
-	return 0;
-}
-
-static int
-kvm_vm_vop_getattr(struct vop_getattr_args *ap)
-{
-
-	(void)ap->a_fp;
-	bzero(ap->a_vap, sizeof(*ap->a_vap));
-	ap->a_vap->va_type = VCHR;
-	ap->a_vap->va_mode = 0600;
-	ap->a_vap->va_uid = UID_ROOT;
-	ap->a_vap->va_gid = GID_WHEEL;
-	ap->a_vap->va_nlink = 1;
-	ap->a_vap->va_blocksize = PAGE_SIZE;
-	return 0;
 }
 
 static int
@@ -253,14 +174,86 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	switch (command) {
 	case KVM_GET_VCPU_MMAP_SIZE:
 	case KVM_LINUX_IO(0x04):
-		msg->sysmsg_result = PAGE_SIZE;
+		msg->sysmsg_result = 2 * PAGE_SIZE;
 		return 0;
+	case KVM_CREATE_VCPU:
+	case KVM_LINUX_IO(0x41): {
+		uint32_t id;
+		int fd;
+
+		id = (uint32_t)(uintptr_t)*(caddr_t *)data;
+		error = kvm_vcpu_create(vm, curthread->td_lwp, fp->f_data, id,
+		    &fd);
+		if (error == 0)
+			msg->sysmsg_result = fd;
+		return error;
+	}
 	case KVM_SET_USER_MEMORY_REGION:
 		return kvm_vm_set_user_memory(vm,
 		    (const struct kvm_userspace_memory_region *)data);
+	case KVM_SET_TSS_ADDR:
+	case KVM_LINUX_IO(0x47):
+		return kvm_vm_set_tss_address(vm,
+		    (uint64_t)(uintptr_t)*(caddr_t *)data);
+	case KVM_SET_IDENTITY_MAP_ADDR:
+		return kvm_vm_set_identity_map_address(vm,
+		    *(const uint64_t *)data);
+	case KVM_CREATE_IRQCHIP:
+	case KVM_LINUX_IO(0x60):
+		return vmm_machine_create_irqchip(vm->machine);
+	case KVM_IOEVENTFD:
+		return kvm_ioevent_configure(vm,
+		    (const struct kvm_ioeventfd *)data);
+	case KVM_DFLY_SET_GSI_ROUTING:
+		return kvm_irqroute_configure(vm,
+		    (const struct kvm_dfly_buffer *)data);
+	case KVM_IRQFD:
+		return kvm_irqfd_configure(vm, (const struct kvm_irqfd *)data);
+	case KVM_SIGNAL_MSI:
+	case KVM_LINUX_IO(0xa5):
+		return kvm_vm_signal_msi(vm, (const struct kvm_msi *)data);
 	default:
 		return ENOTTY;
 	}
+}
+
+/*
+ * These legacy KVM addresses reserve guest pages for a shadow-MMU irqchip.
+ * VMM uses NPT, so they are retained as KVM VM compatibility state only.
+ */
+static int
+kvm_vm_set_tss_address(struct kvm_vm *vm, uint64_t address)
+{
+
+	if ((address & PAGE_MASK) != 0 || address >= KVM_GPA_MAX)
+		return EINVAL;
+	lwkt_gettoken(&vm->token);
+	vm->tss_address = address;
+	lwkt_reltoken(&vm->token);
+	return 0;
+}
+
+static int
+kvm_vm_set_identity_map_address(struct kvm_vm *vm, uint64_t address)
+{
+
+	if ((address & PAGE_MASK) != 0 || address >= KVM_GPA_MAX)
+		return EINVAL;
+	lwkt_gettoken(&vm->token);
+	vm->identity_map_address = address;
+	lwkt_reltoken(&vm->token);
+	return 0;
+}
+
+static int
+kvm_vm_signal_msi(struct kvm_vm *vm, const struct kvm_msi *msi)
+{
+	uint64_t address;
+
+	if (msi == NULL || (msi->flags & ~KVM_MSI_VALID_DEVID) != 0)
+		return EINVAL;
+	address = ((uint64_t)msi->address_hi << 32) | msi->address_lo;
+	return vmm_machine_raise_msi(vm->machine, address, msi->data);
 }
 
 static int
@@ -471,7 +464,7 @@ kvm_vm_fo_close(struct file *fp)
 	atomic_clear_int(&fp->f_flag, FHASLOCK);
 	fp->f_ops = &badfileops;
 	if (vp != NULL)
-		(void)vn_close(vp, fp->f_flag, fp);
+		vrele(vp);
 	devfs_clear_cdevpriv(fp);
 	return 0;
 }
@@ -487,60 +480,50 @@ kvm_vm_fo_seek(struct file *fp, off_t offset, int whence, off_t *result)
 	return ESPIPE;
 }
 
-static int
-kvm_vm_make_vnode(cdev_t dev, struct vnode **vpp)
-{
-	struct vnode *vp;
-	int error;
-
-	error = getspecialvnode(VT_NON, NULL, &kvm_vm_vnode_vops_p, &vp, 0, 0);
-	if (error != 0) {
-		*vpp = NULL;
-		return error;
-	}
-	vp->v_type = VCHR;
-	error = v_associate_rdev(vp, dev);
-	if (error != 0) {
-		vgone_vxlocked(vp);
-		vx_put(vp);
-		*vpp = NULL;
-		return error;
-	}
-	vp->v_umajor = dev->si_umajor;
-	vp->v_uminor = dev->si_uminor;
-	vx_unlock(vp);
-	*vpp = vp;
-	return 0;
-}
-
 static void
-kvm_vm_destroy(void *arg)
+kvm_vm_file_destroy(void *arg)
 {
 
 	kvm_vm_release(arg);
 }
 
-static void
+void
 kvm_vm_release(struct kvm_vm *vm)
 {
-	struct vnode *vp;
-	int error;
+	int destroy;
 
 	if (vm == NULL)
 		return;
-	vp = vm->vnode;
-	if (vp != NULL) {
-		vm->vnode = NULL;
-		vx_get(vp);
-		vgone_vxlocked(vp);
-		vx_put(vp);
-		vrele(vp);
-	}
-	if (vm->dev != NULL) {
-		vm->dev->si_drv1 = NULL;
-		destroy_only_dev(vm->dev);
-		vm->dev = NULL;
-	}
+	lwkt_gettoken(&vm->token);
+	KKASSERT(vm->references != 0);
+	destroy = --vm->references == 0;
+	lwkt_reltoken(&vm->token);
+	if (destroy)
+		kvm_vm_destroy(vm);
+}
+
+void
+kvm_vm_reference(struct kvm_vm *vm)
+{
+
+	KKASSERT(vm != NULL);
+	lwkt_gettoken(&vm->token);
+	KKASSERT(vm->references != 0);
+	++vm->references;
+	lwkt_reltoken(&vm->token);
+}
+
+static void
+kvm_vm_destroy(struct kvm_vm *vm)
+{
+	unsigned int id;
+	int error;
+
+	for (id = 0; id < KVM_MAX_VCPUS; ++id)
+		KKASSERT(vm->vcpus[id] == NULL);
+	kvm_ioevent_clear(vm);
+	kvm_irqfd_clear(vm);
+	kvm_irqroute_clear(vm);
 	if (vm->machine != NULL) {
 		error = vmm_machine_destroy(vm->machine);
 		KKASSERT(error == 0);

@@ -22,26 +22,21 @@
 
 #include <machine/atomic.h>
 
-#include <sys/kvm.h>
+#include "../../../sys/kvm.h"
 
 #include "kvm_eventfd.h"
 #include "kvm_internal.h"
 
 struct kvm_eventfd {
-	/* token protects count and read_kq. */
+	/* token protects count, read_kq, and listeners. */
 	struct lwkt_token token;
 	struct kqinfo read_kq;
+	TAILQ_HEAD(, kvm_eventfd_listener) listeners;
 	uint64_t count;
-	cdev_t dev;
-	struct vnode *vnode;
+	uint64_t signal_generation;
 };
 
-static uint32_t kvm_eventfd_serial;
-
-static d_open_t kvm_eventfd_open;
-static d_close_t kvm_eventfd_close;
 static d_priv_dtor_t kvm_eventfd_destroy;
-static int kvm_eventfd_vop_getattr(struct vop_getattr_args *);
 static int kvm_eventfd_fo_read(struct file *, struct uio *,
 	struct ucred *, int);
 static int kvm_eventfd_fo_write(struct file *, struct uio *,
@@ -55,26 +50,9 @@ static int kvm_eventfd_fo_close(struct file *);
 static int kvm_eventfd_fo_seek(struct file *, off_t, int, off_t *);
 static void kvm_eventfd_filter_detach(struct knote *);
 static int kvm_eventfd_filter_read(struct knote *, long);
-static int kvm_eventfd_make_vnode(cdev_t, struct vnode **);
 static void kvm_eventfd_release(struct kvm_eventfd *);
-
-static struct dev_ops kvm_eventfd_ops = {
-	{ "kvm_eventfd", 0, D_MPSAFE },
-	.d_open = kvm_eventfd_open,
-	.d_close = kvm_eventfd_close,
-};
-
-static struct vop_ops kvm_eventfd_vnode_vops = {
-	.vop_default = vop_defaultop,
-	.vop_close = vop_stdclose,
-	.vop_getattr = kvm_eventfd_vop_getattr,
-	.vop_advlock = (void *)vop_null,
-	.vop_inactive = (void *)vop_null,
-	.vop_reclaim = (void *)vop_null,
-	.vop_pathconf = vop_stdpathconf,
-};
-
-static struct vop_ops *kvm_eventfd_vnode_vops_p = &kvm_eventfd_vnode_vops;
+static int kvm_eventfd_add(struct kvm_eventfd *, uint64_t, int);
+static int kvm_eventfd_from_file(struct file *, struct kvm_eventfd **);
 
 static struct fileops kvm_eventfd_fileops = {
 	.fo_read = kvm_eventfd_fo_read,
@@ -95,21 +73,21 @@ static struct filterops kvm_eventfd_read_filterops = {
 };
 
 int
-kvm_eventfd_create(struct lwp *lp, uint64_t initial, uint32_t flags, int *fd)
+kvm_eventfd_create(struct lwp *lp, struct vnode *vp, uint64_t initial,
+	uint32_t flags, int *fd)
 {
 	struct kvm_eventfd *eventfd;
 	struct file *fp;
-	struct vnode *vp;
-	uint32_t serial;
 	int error;
 
-	if (lp == NULL || fd == NULL || initial == UINT64_MAX ||
+	if (lp == NULL || vp == NULL || fd == NULL || initial == UINT64_MAX ||
 	    (flags & ~KVM_DFLY_EVENTFD_VALID_FLAGS) != 0)
 		return EINVAL;
 	*fd = -1;
 	eventfd = kmalloc(sizeof(*eventfd), M_KVM, M_WAITOK | M_ZERO);
 	lwkt_token_init(&eventfd->token, "kvmevent");
 	SLIST_INIT(&eventfd->read_kq.ki_note);
+	TAILQ_INIT(&eventfd->listeners);
 	eventfd->count = initial;
 
 	lwkt_gettoken(&kvm_frontend_token);
@@ -121,19 +99,6 @@ kvm_eventfd_create(struct lwp *lp, uint64_t initial, uint32_t flags, int *fd)
 	++kvm_file_count;
 	lwkt_reltoken(&kvm_frontend_token);
 
-	serial = atomic_fetchadd_int(&kvm_eventfd_serial, 1);
-	eventfd->dev = make_only_dev(&kvm_eventfd_ops, serial, UID_ROOT,
-	    GID_WHEEL, 0600, "kvmevent%d", serial);
-	if (eventfd->dev == NULL) {
-		error = ENOMEM;
-		goto fail;
-	}
-	eventfd->dev->si_drv1 = eventfd;
-	error = kvm_eventfd_make_vnode(eventfd->dev, &vp);
-	if (error != 0)
-		goto fail;
-	eventfd->vnode = vp;
-
 	error = falloc(lp, &fp, fd);
 	if (error != 0)
 		goto fail;
@@ -144,8 +109,6 @@ kvm_eventfd_create(struct lwp *lp, uint64_t initial, uint32_t flags, int *fd)
 	fp->f_ops = &kvm_eventfd_fileops;
 	fp->f_data = vp;
 	vref(vp);
-	atomic_add_int(&vp->v_opencount, 1);
-	atomic_add_int(&vp->v_writecount, 1);
 	error = devfs_set_cdevpriv(fp, eventfd, kvm_eventfd_destroy);
 	if (error != 0) {
 		(void)fp_close(fp);
@@ -164,37 +127,6 @@ kvm_eventfd_create(struct lwp *lp, uint64_t initial, uint32_t flags, int *fd)
 fail:
 	kvm_eventfd_release(eventfd);
 	return error;
-}
-
-static int
-kvm_eventfd_open(struct dev_open_args *ap)
-{
-
-	(void)ap;
-	return 0;
-}
-
-static int
-kvm_eventfd_close(struct dev_close_args *ap)
-{
-
-	(void)ap;
-	return 0;
-}
-
-static int
-kvm_eventfd_vop_getattr(struct vop_getattr_args *ap)
-{
-
-	(void)ap->a_fp;
-	bzero(ap->a_vap, sizeof(*ap->a_vap));
-	ap->a_vap->va_type = VCHR;
-	ap->a_vap->va_mode = 0600;
-	ap->a_vap->va_uid = UID_ROOT;
-	ap->a_vap->va_gid = GID_WHEEL;
-	ap->a_vap->va_nlink = 1;
-	ap->a_vap->va_blocksize = PAGE_SIZE;
-	return 0;
 }
 
 static int
@@ -252,24 +184,7 @@ kvm_eventfd_fo_write(struct file *fp, struct uio *uio, struct ucred *cred,
 	error = devfs_get_cdevpriv(fp, (void **)&eventfd);
 	if (error != 0)
 		return error;
-	for (;;) {
-		lwkt_gettoken(&eventfd->token);
-		if (eventfd->count <= UINT64_MAX - 1 - value) {
-			eventfd->count += value;
-			KNOTE(&eventfd->read_kq.ki_note, 0);
-			wakeup(eventfd);
-			lwkt_reltoken(&eventfd->token);
-			return 0;
-		}
-		if ((fp->f_flag & FNONBLOCK) != 0) {
-			lwkt_reltoken(&eventfd->token);
-			return EWOULDBLOCK;
-		}
-		error = tsleep(eventfd, PCATCH, "kvmevent", 0);
-		lwkt_reltoken(&eventfd->token);
-		if (error != 0)
-			return error;
-	}
+	return kvm_eventfd_add(eventfd, value, (fp->f_flag & FNONBLOCK) != 0);
 }
 
 static int
@@ -330,7 +245,7 @@ kvm_eventfd_fo_close(struct file *fp)
 	atomic_clear_int(&fp->f_flag, FHASLOCK);
 	fp->f_ops = &badfileops;
 	if (vp != NULL)
-		(void)vn_close(vp, fp->f_flag, fp);
+		vrele(vp);
 	devfs_clear_cdevpriv(fp);
 	return 0;
 }
@@ -372,33 +287,6 @@ kvm_eventfd_filter_read(struct knote *kn, long hint)
 	return ready;
 }
 
-static int
-kvm_eventfd_make_vnode(cdev_t dev, struct vnode **vpp)
-{
-	struct vnode *vp;
-	int error;
-
-	error = getspecialvnode(VT_NON, NULL, &kvm_eventfd_vnode_vops_p, &vp,
-	    0, 0);
-	if (error != 0) {
-		*vpp = NULL;
-		return error;
-	}
-	vp->v_type = VCHR;
-	error = v_associate_rdev(vp, dev);
-	if (error != 0) {
-		vgone_vxlocked(vp);
-		vx_put(vp);
-		*vpp = NULL;
-		return error;
-	}
-	vp->v_umajor = dev->si_umajor;
-	vp->v_uminor = dev->si_uminor;
-	vx_unlock(vp);
-	*vpp = vp;
-	return 0;
-}
-
 static void
 kvm_eventfd_destroy(void *arg)
 {
@@ -409,26 +297,168 @@ kvm_eventfd_destroy(void *arg)
 static void
 kvm_eventfd_release(struct kvm_eventfd *eventfd)
 {
-	struct vnode *vp;
-
 	if (eventfd == NULL)
 		return;
-	vp = eventfd->vnode;
-	if (vp != NULL) {
-		eventfd->vnode = NULL;
-		vx_get(vp);
-		vgone_vxlocked(vp);
-		vx_put(vp);
-		vrele(vp);
-	}
-	if (eventfd->dev != NULL) {
-		eventfd->dev->si_drv1 = NULL;
-		destroy_only_dev(eventfd->dev);
-		eventfd->dev = NULL;
-	}
+	KKASSERT(TAILQ_EMPTY(&eventfd->listeners));
 	lwkt_gettoken(&kvm_frontend_token);
 	KKASSERT(kvm_file_count != 0);
 	--kvm_file_count;
 	lwkt_reltoken(&kvm_frontend_token);
 	kfree(eventfd, M_KVM);
+}
+
+int
+kvm_eventfd_hold(struct thread *td, int fd, struct file **fpp)
+{
+	struct file *fp;
+	struct kvm_eventfd *eventfd;
+
+	if (td == NULL || fpp == NULL || fd < 0)
+		return EINVAL;
+	*fpp = NULL;
+	fp = holdfp(td, fd, -1);
+	if (fp == NULL)
+		return EBADF;
+	if (kvm_eventfd_from_file(fp, &eventfd) != 0) {
+		fdrop(fp);
+		return EINVAL;
+	}
+	*fpp = fp;
+	return 0;
+}
+
+void
+kvm_eventfd_drop(struct file *fp)
+{
+
+	if (fp != NULL)
+		fdrop(fp);
+}
+
+int
+kvm_eventfd_signal(struct file *fp)
+{
+	struct kvm_eventfd *eventfd;
+	int error;
+
+	error = kvm_eventfd_from_file(fp, &eventfd);
+	if (error != 0)
+		return error;
+	error = kvm_eventfd_add(eventfd, 1, 1);
+	return error == EWOULDBLOCK ? 0 : error;
+}
+
+int
+kvm_eventfd_listen(struct file *fp, struct kvm_eventfd_listener *listener)
+{
+	struct kvm_eventfd *eventfd;
+	int error;
+
+	if (listener == NULL || listener->callback == NULL)
+		return EINVAL;
+	error = kvm_eventfd_from_file(fp, &eventfd);
+	if (error != 0)
+		return error;
+	lwkt_gettoken(&eventfd->token);
+	if (listener->active) {
+		lwkt_reltoken(&eventfd->token);
+		return EBUSY;
+	}
+	listener->last_generation = eventfd->signal_generation;
+	listener->references = 0;
+	listener->active = 1;
+	listener->eventfd = eventfd;
+	TAILQ_INSERT_TAIL(&eventfd->listeners, listener, entry);
+	lwkt_reltoken(&eventfd->token);
+	return 0;
+}
+
+int
+kvm_eventfd_unlisten(struct file *fp, struct kvm_eventfd_listener *listener)
+{
+	struct kvm_eventfd *eventfd;
+	int error;
+
+	if (listener == NULL)
+		return EINVAL;
+	error = kvm_eventfd_from_file(fp, &eventfd);
+	if (error != 0)
+		return error;
+	lwkt_gettoken(&eventfd->token);
+	if (!listener->active || listener->eventfd != eventfd) {
+		lwkt_reltoken(&eventfd->token);
+		return ENOENT;
+	}
+	TAILQ_REMOVE(&eventfd->listeners, listener, entry);
+	listener->active = 0;
+	listener->eventfd = NULL;
+	lwkt_reltoken(&eventfd->token);
+	while (atomic_load_acq_int(&listener->references) != 0)
+		tsleep(listener, 0, "kvmirqfd", 0);
+	return 0;
+}
+
+static int
+kvm_eventfd_add(struct kvm_eventfd *eventfd, uint64_t value, int nonblock)
+{
+	struct kvm_eventfd_listener *listener;
+	uint64_t generation;
+	int error;
+
+	for (;;) {
+		lwkt_gettoken(&eventfd->token);
+		if (eventfd->count <= UINT64_MAX - 1 - value) {
+			eventfd->count += value;
+			++eventfd->signal_generation;
+			if (eventfd->signal_generation == 0)
+				++eventfd->signal_generation;
+			generation = eventfd->signal_generation;
+			KNOTE(&eventfd->read_kq.ki_note, 0);
+			wakeup(eventfd);
+			lwkt_reltoken(&eventfd->token);
+			break;
+		}
+		if (nonblock) {
+			lwkt_reltoken(&eventfd->token);
+			return EWOULDBLOCK;
+		}
+		error = tsleep(eventfd, PCATCH, "kvmevent", 0);
+		lwkt_reltoken(&eventfd->token);
+		if (error != 0)
+			return error;
+	}
+	for (;;) {
+		listener = NULL;
+		lwkt_gettoken(&eventfd->token);
+		TAILQ_FOREACH(listener, &eventfd->listeners, entry) {
+			if (listener->active &&
+			    listener->last_generation < generation) {
+				listener->last_generation = generation;
+				atomic_add_int(&listener->references, 1);
+				break;
+			}
+		}
+		lwkt_reltoken(&eventfd->token);
+		if (listener == NULL)
+			break;
+		listener->callback(listener->argument);
+		if (atomic_fetchadd_int(&listener->references, -1) == 1)
+			wakeup(listener);
+	}
+	return 0;
+}
+
+static int
+kvm_eventfd_from_file(struct file *fp, struct kvm_eventfd **eventfdp)
+{
+	struct kvm_eventfd *eventfd;
+	int error;
+
+	if (fp == NULL || eventfdp == NULL || fp->f_ops != &kvm_eventfd_fileops)
+		return EINVAL;
+	error = devfs_get_cdevpriv(fp, (void **)&eventfd);
+	if (error != 0 || eventfd == NULL)
+		return error != 0 ? error : ENXIO;
+	*eventfdp = eventfd;
+	return 0;
 }

@@ -1,5 +1,5 @@
 KMOD=	kvm
-SRCS=	kvm.c kvm_eventfd.c kvm_vm.c
+SRCS=	kvm.c kvm_eventfd.c kvm_ioevent.c kvm_irqfd.c kvm_vm.c kvm_vcpu.c
 
 .if !defined(KERNBUILDDIR)
 SRCS+=	bus_if.h device_if.h opt_nfs.h
