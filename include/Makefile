@@ -42,7 +42,7 @@ LHDRS=	aio.h errno.h fcntl.h linker_set.h poll.h sched.h syslog.h ucontext.h
 # Other directories, like 'bus' and 'netproto', are created using mtree.
 #
 # XXX allow these directories to not contain header files.
-LDIRS=	net netbt netgraph netgraph7 netinet netinet6 sys vm
+LDIRS=	linux net netbt netgraph netgraph7 netinet netinet6 sys vm
 
 # Subdirectories containing header files to copy.  In symlink mode
 # the subdirectory will be symlinked.

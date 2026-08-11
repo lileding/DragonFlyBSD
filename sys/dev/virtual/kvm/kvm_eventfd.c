@@ -22,7 +22,7 @@
 
 #include <machine/atomic.h>
 
-#include "../../../sys/kvm.h"
+#include <linux/kvm.h>
 
 #include "kvm_eventfd.h"
 #include "kvm_internal.h"

@@ -14,7 +14,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include "../../sys/sys/kvm.h"
+#include <linux/kvm.h>
 
 #define KVM_PIC_MEMORY_SIZE	0x100000U
 #define KVM_PIC_RESET_OFFSET	0xfff0U

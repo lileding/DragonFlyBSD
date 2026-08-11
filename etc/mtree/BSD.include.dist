@@ -241,6 +241,8 @@
     ..
     lzma
     ..
+    linux
+    ..
     machine
         pc
         ..

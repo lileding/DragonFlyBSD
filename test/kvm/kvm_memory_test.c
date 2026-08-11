@@ -14,7 +14,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <sys/kvm.h>
+#include <linux/kvm.h>
 
 int
 main(void)

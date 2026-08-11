@@ -17,7 +17,7 @@
 #include <sys/thread.h>
 #include <sys/vnode.h>
 
-#include "../../../sys/kvm.h"
+#include <linux/kvm.h>
 
 #include "../vmm/vmm.h"
 #include "kvm_eventfd.h"

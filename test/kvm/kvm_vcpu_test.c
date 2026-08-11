@@ -17,7 +17,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include "../../sys/sys/kvm.h"
+#include <linux/kvm.h>
 
 #define KVM_TEST_CPUID_ENTRIES	256
 

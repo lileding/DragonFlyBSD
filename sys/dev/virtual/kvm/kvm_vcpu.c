@@ -28,7 +28,7 @@
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
-#include "../../../sys/kvm.h"
+#include <linux/kvm.h>
 
 #include "../vmm/vmm.h"
 #include "kvm_internal.h"
@@ -578,7 +578,7 @@ kvm_vcpu_run(struct kvm_vcpu *vcpu)
 		return EINTR;
 	}
 	if (vcpu->mp_state == KVM_MP_STATE_HALTED) {
-		bzero(&vcpu->run->u, sizeof(vcpu->run->u));
+		bzero(&vcpu->run->hw, sizeof(vcpu->run->padding));
 		vcpu->run->exit_reason = KVM_EXIT_HLT;
 		lwkt_reltoken(&vcpu->token);
 		return 0;
@@ -1493,7 +1493,7 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	uint64_t count;
 	int error;
 
-	bzero(&run->u, sizeof(run->u));
+	bzero(&run->hw, sizeof(run->padding));
 	run->if_flag = (vcpu->state.gprs[VMM_X64_GPR_RFLAGS] & 0x200) != 0;
 	run->cr8 = vcpu->state.crs[VMM_X64_CR_CR8];
 	run->apic_base = vcpu->apic_base;
@@ -1519,27 +1519,27 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	case VMM_CPUEXIT_MEMORY:
 		if (kvm_vcpu_set_mmio_exit(vcpu, exit) != 0) {
 			run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-			run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
-			run->u.internal.ndata = 1;
-			run->u.internal.data[0] = VMM_CPUEXIT_MEMORY;
+			run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+			run->internal.ndata = 1;
+			run->internal.data[0] = VMM_CPUEXIT_MEMORY;
 		}
 		return;
 	case VMM_CPUEXIT_IO:
 		if (exit->u.io.operand_size == 0 ||
 		    exit->u.io.operand_size > sizeof(rax)) {
 			run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-			run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
-			run->u.internal.ndata = 1;
-			run->u.internal.data[0] = VMM_CPUEXIT_IO;
+			run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+			run->internal.ndata = 1;
+			run->internal.data[0] = VMM_CPUEXIT_IO;
 			return;
 		}
 		run->exit_reason = KVM_EXIT_IO;
-		run->u.io.direction = exit->u.io.in ? KVM_EXIT_IO_IN :
+		run->io.direction = exit->u.io.in ? KVM_EXIT_IO_IN :
 		    KVM_EXIT_IO_OUT;
-		run->u.io.size = exit->u.io.operand_size;
-		run->u.io.port = exit->u.io.port;
-		run->u.io.count = 1;
-		run->u.io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE;
+		run->io.size = exit->u.io.operand_size;
+		run->io.port = exit->u.io.port;
+		run->io.count = 1;
+		run->io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE;
 		vcpu->pio_string = exit->u.io.str;
 		vcpu->pio_rep = exit->u.io.rep;
 		vcpu->pio_address_size = exit->u.io.address_size;
@@ -1565,16 +1565,16 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 			}
 			if (count == 0) {
 				vcpu->state.gprs[VMM_X64_GPR_RIP] = exit->u.io.npc;
-				run->u.io.count = 0;
+				run->io.count = 0;
 				return;
 			}
 			error = kvm_vcpu_pio_string_gpa(vcpu, exit,
 			    &vcpu->pio_gpa);
 			if (error != 0) {
 				run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-				run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
-				run->u.internal.ndata = 1;
-				run->u.internal.data[0] = VMM_CPUEXIT_IO;
+				run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+				run->internal.ndata = 1;
+				run->internal.data[0] = VMM_CPUEXIT_IO;
 				return;
 			}
 			if (!exit->u.io.in) {
@@ -1582,10 +1582,10 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 				    vcpu->pio_data, exit->u.io.operand_size, 0);
 				if (error != 0) {
 					run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-					run->u.internal.suberror =
+					run->internal.suberror =
 					    KVM_INTERNAL_ERROR_EMULATION;
-					run->u.internal.ndata = 1;
-					run->u.internal.data[0] = VMM_CPUEXIT_IO;
+					run->internal.ndata = 1;
+					run->internal.data[0] = VMM_CPUEXIT_IO;
 					return;
 				}
 			}
@@ -1609,14 +1609,14 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 		return;
 	case VMM_CPUEXIT_INVALID:
 		run->exit_reason = KVM_EXIT_FAIL_ENTRY;
-		run->u.fail_entry.hardware_entry_failure_reason =
+		run->fail_entry.hardware_entry_failure_reason =
 		    exit->u.inv.hwcode;
 		return;
 	default:
 		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
-		run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
-		run->u.internal.ndata = 1;
-		run->u.internal.data[0] = exit->reason;
+		run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+		run->internal.ndata = 1;
+		run->internal.data[0] = exit->reason;
 		return;
 	}
 }
@@ -1799,7 +1799,7 @@ kvm_vcpu_complete_mmio(struct kvm_vcpu *vcpu)
 		return 0;
 	if (!vcpu->mmio_write) {
 		value = 0;
-		bcopy(vcpu->run->u.mmio.data, &value, vcpu->mmio_size);
+		bcopy(vcpu->run->mmio.data, &value, vcpu->mmio_size);
 		if (vcpu->mmio_extend == KVM_MMIO_EXTEND_ZERO) {
 			kvm_vcpu_write_gpr(vcpu, vcpu->mmio_dst_reg,
 			    vcpu->mmio_dst_size, 0, value);
@@ -1843,11 +1843,11 @@ kvm_vcpu_set_mmio_exit(struct kvm_vcpu *vcpu,
 	if (error != 0)
 		return error;
 	vcpu->run->exit_reason = KVM_EXIT_MMIO;
-	vcpu->run->u.mmio.phys_addr = exit->u.mem.gpa;
-	vcpu->run->u.mmio.len = vcpu->mmio_size;
-	vcpu->run->u.mmio.is_write = vcpu->mmio_write;
+	vcpu->run->mmio.phys_addr = exit->u.mem.gpa;
+	vcpu->run->mmio.len = vcpu->mmio_size;
+	vcpu->run->mmio.is_write = vcpu->mmio_write;
 	if (vcpu->mmio_write)
-		bcopy(&value, vcpu->run->u.mmio.data, vcpu->mmio_size);
+		bcopy(&value, vcpu->run->mmio.data, vcpu->mmio_size);
 	vcpu->mmio_npc = vcpu->state.gprs[VMM_X64_GPR_RIP] +
 	    exit->u.mem.inst_len;
 	vcpu->mmio_pending = true;

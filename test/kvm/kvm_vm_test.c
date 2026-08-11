@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "../../sys/sys/kvm.h"
+#include <linux/kvm.h>
 
 int
 main(void)

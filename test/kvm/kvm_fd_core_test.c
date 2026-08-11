@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "../../sys/sys/kvm.h"
+#include <linux/kvm.h>
 
 static void
 kvm_fd_core_child(void)

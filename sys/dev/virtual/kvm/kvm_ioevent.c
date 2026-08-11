@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * KVM ioeventfd bindings -- see sys/kvm.h.
+ * KVM ioeventfd bindings -- see linux/kvm.h.
  */
 #include <sys/param.h>
 #include <sys/errno.h>
