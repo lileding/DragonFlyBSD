@@ -3,7 +3,7 @@ set -u
 ROOT=$(dirname "$0"); REPO=$(cd "$ROOT/../../.." && pwd)
 VMM_KO=${VMM_KO:-$REPO/sys/dev/vmm/vmm.ko}; MNT=${VMM_MOUNT:-/var/tmp/dfvmm-revoke-vmm}
 LOG=${VMM_LOG:-/var/tmp/dfvmm-revoke-test.log}; LOADER=${VMM_REVOKE_LOADER:-/var/tmp/vmm_revoke_loader}
-MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-revoke-$$-mount_vmm}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-revoke-$$-mount_vmmfs}
 MEM=${VMM_REVOKE_MEM:-2M}; TIMEOUT=${VMM_TIMEOUT:-20}; DELAY=${VMM_REVOKE_DELAY:-12}; LOADED=0; MOUNTED=0
 say() { echo "$@" | tee -a "$LOG"; }
 fail() { say "FAIL: $*"; exit 1; }

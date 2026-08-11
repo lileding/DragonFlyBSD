@@ -13,7 +13,7 @@ LOADER=${VMM_SMOKE_LOADER:-/var/tmp/vmm_pcie_dma_reset_loader}
 WRAPPER=${VMM_LOADER_WRAPPER:-/var/tmp/vmm_pcie_dma_reset_loader_wrapper}
 PROVIDER=${VMM_PCIE_DMA_RESET_PROVIDER:-/var/tmp/vmm_pcie_dma_reset_provider}
 PROVIDER_LOG=${VMM_PCIE_DMA_RESET_PROVIDER_LOG:-/var/tmp/dfvmm-pcie-dma-reset-provider.log}
-MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-reset-$$-mount_vmm}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-reset-$$-mount_vmmfs}
 TIMEOUT=${VMM_TIMEOUT:-25}
 
 LOADED=0

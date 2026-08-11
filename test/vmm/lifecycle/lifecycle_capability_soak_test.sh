@@ -70,7 +70,7 @@ run_command_stage()
 		VMM_MOUNT="$WORK/round-$round-command-vmm" \
 		VMM_LOG="$WORK/round-$round-command-detail.log" \
 		VMM_SMOKE_LOADER="$WORK/round-$round-command-loader" \
-		VMM_MOUNT_HELPER="$WORK/round-$round-command-mount_vmm" \
+		VMM_MOUNT_HELPER="$WORK/round-$round-command-mount_vmmfs" \
 		VMM_TIMEOUT="$TIMEOUT" \
 		"$ROOT/command_atomicity_test.sh"
 }
@@ -84,7 +84,7 @@ run_revoke_stage()
 		VMM_MOUNT="$WORK/round-$round-revoke-vmm" \
 		VMM_LOG="$WORK/round-$round-revoke-detail.log" \
 		VMM_REVOKE_LOADER="$WORK/round-$round-revoke-loader" \
-		VMM_MOUNT_HELPER="$WORK/round-$round-revoke-mount_vmm" \
+		VMM_MOUNT_HELPER="$WORK/round-$round-revoke-mount_vmmfs" \
 		VMM_REVOKE_DELAY=1 \
 		VMM_TIMEOUT="$TIMEOUT" \
 		"$REPO/test/vmm/revoke/loader_revoke_test.sh"
@@ -99,7 +99,7 @@ run_holder_stage()
 		VMM_MOUNT="$WORK/round-$round-holder-vmm" \
 		VMM_LOG="$WORK/round-$round-holder-detail.log" \
 		VMM_REVOKE_LOADER="$WORK/round-$round-holder-loader" \
-		VMM_MOUNT_HELPER="$WORK/round-$round-holder-mount_vmm" \
+		VMM_MOUNT_HELPER="$WORK/round-$round-holder-mount_vmmfs" \
 		VMM_REVOKE_DELAY=1 \
 		VMM_TIMEOUT="$TIMEOUT" \
 		"$REPO/test/vmm/revoke/loader_unload_busy_test.sh"

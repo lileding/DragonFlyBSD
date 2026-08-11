@@ -42,7 +42,7 @@ main(int argc, char **argv)
 		usage();
 
 	checkpath(argv[0], mntpath);
-	if (mount("vmm", mntpath, mntflags, NULL) != 0)
+	if (mount("vmmfs", mntpath, mntflags, NULL) != 0)
 		err(EX_OSERR, "mount vmm on %s", mntpath);
 	return 0;
 }

@@ -17,7 +17,7 @@ WRAPPER=${VMM_LOADER_WRAPPER:-/var/tmp/vmm_pcie_dma_loader_wrapper}
 PROVIDER=${VMM_PCIE_DMA_PROVIDER:-/var/tmp/vmm_pcie_dma_provider}
 PROVIDER_LOG=${VMM_PCIE_DMA_PROVIDER_LOG:-/var/tmp/dfvmm-pcie-dma-provider.log}
 UNLOAD_LOG=${VMM_PCIE_DMA_UNLOAD_LOG:-/var/tmp/dfvmm-pcie-dma-unload.log}
-MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-$$-mount_vmm}
+MOUNT_HELPER=${VMM_MOUNT_HELPER:-/var/tmp/dfvmm-pcie-dma-$$-mount_vmmfs}
 TIMEOUT=${VMM_TIMEOUT:-20}
 
 LOADED=0

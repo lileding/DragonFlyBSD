@@ -4,7 +4,7 @@ set -u
 
 MNT=/vmm
 M=$MNT/machines
-MOUNT_HELPER=/tmp/dfvmm-events-$$-mount_vmm
+MOUNT_HELPER=/tmp/dfvmm-events-$$-mount_vmmfs
 PASS=0
 FAIL=0
 
