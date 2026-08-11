@@ -16,6 +16,9 @@
 #include "vmm_internal.h"
 #include "vmm_io.h"
 #include "vmm_vcpu.h"
+#include "x64/vmm_x64.h"
+#include "x64/vmm_x64_pic.h"
+#include "x64/vmm_x64_pit.h"
 
 int
 vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
@@ -83,6 +86,50 @@ vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
 }
 
 int
+vmm_vcpu_get_lapic(vmm_vcpu_t vcpu, void *registers, size_t size)
+{
+	int error;
+
+	if (vcpu == NULL || registers == NULL ||
+	    size != VMM_X64_LAPIC_STATE_SIZE)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	if (vcpu->backend_ops->vcpu_get_lapic == NULL) {
+		lwkt_reltoken(&vcpu->token);
+		return ENOTSUP;
+	}
+	error = vcpu->backend_ops->vcpu_get_lapic(vcpu, registers, size);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
+vmm_vcpu_set_lapic(vmm_vcpu_t vcpu, const void *registers, size_t size)
+{
+	int error;
+
+	if (vcpu == NULL || registers == NULL ||
+	    size != VMM_X64_LAPIC_STATE_SIZE)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	if (vcpu->backend_ops->vcpu_set_lapic == NULL) {
+		lwkt_reltoken(&vcpu->token);
+		return ENOTSUP;
+	}
+	error = vcpu->backend_ops->vcpu_set_lapic(vcpu, registers, size);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
 vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 {
 	struct vmm_machine *machine;
@@ -116,6 +163,17 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		}
 		exit = *reason;
 		if (exit->reason == VMM_CPUEXIT_IO) {
+			vcpu->backend_ops->vcpu_getstate(vcpu);
+			error = vmm_x64_pit_io(machine, vcpu->state, &exit->u.io);
+			if (error == 0)
+				continue;
+			if (error != ENOENT)
+				break;
+			error = vmm_x64_pic_io(machine, vcpu->state, &exit->u.io);
+			if (error == 0)
+				continue;
+			if (error != ENOENT)
+				break;
 			error = vmm_io_handle_pio(vcpu, exit);
 			if (error == 0)
 				continue;

@@ -15,6 +15,7 @@
 #include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/sysmsg.h>
 #include <sys/thread.h>
 #include <sys/uio.h>
@@ -45,9 +46,12 @@ struct kvm_vcpu {
 	struct kvm_run *run;
 	uint8_t *pio_data;
 	uint64_t apic_base;
+	uint64_t vapic_address;
+	uint64_t pio_gpa;
 	uint64_t pio_npc;
 	uint64_t mmio_npc;
 	unsigned int id;
+	uint8_t pio_address_size;
 	uint8_t pio_size;
 	uint8_t mmio_size;
 	uint8_t mmio_dst_size;
@@ -57,6 +61,8 @@ struct kvm_vcpu {
 	bool running;
 	bool pio_pending;
 	bool pio_in;
+	bool pio_rep;
+	bool pio_string;
 	bool mmio_pending;
 	bool mmio_write;
 	bool mmio_high8;
@@ -67,7 +73,11 @@ struct kvm_vcpu {
 #define KVM_MMIO_EXTEND_SIGN	2
 
 #define KVM_MSR_IA32_TSC		0x00000010U
+#define KVM_MSR_KVM_WALL_CLOCK		0x00000011U
+#define KVM_MSR_KVM_SYSTEM_TIME	0x00000012U
 #define KVM_MSR_IA32_APICBASE		0x0000001bU
+#define KVM_MSR_IA32_MTRRCAP		0x000000feU
+#define KVM_MSR_IA32_MTRR_DEF_TYPE	0x000002ffU
 #define KVM_MSR_IA32_SYSENTER_CS	0x00000174U
 #define KVM_MSR_IA32_SYSENTER_ESP	0x00000175U
 #define KVM_MSR_IA32_SYSENTER_EIP	0x00000176U
@@ -78,6 +88,17 @@ struct kvm_vcpu {
 #define KVM_MSR_CSTAR			0xc0000083U
 #define KVM_MSR_SFMASK			0xc0000084U
 #define KVM_MSR_KERNEL_GS_BASE		0xc0000102U
+#define KVM_X86_EXCEPTION_GP		13U
+
+#define KVM_VCPU_TRACE_LIMIT		64U
+
+static int kvm_vcpu_trace;
+static unsigned int kvm_vcpu_trace_count;
+
+SYSCTL_NODE(_debug, OID_AUTO, kvm, CTLFLAG_RW, 0,
+    "KVM frontend debug controls");
+SYSCTL_INT(_debug_kvm, OID_AUTO, trace, CTLFLAG_RW, &kvm_vcpu_trace, 0,
+    "log the first KVM vCPU exits after module load");
 
 static d_priv_dtor_t kvm_vcpu_file_destroy;
 static int kvm_vcpu_fo_read(struct file *, struct uio *, struct ucred *, int);
@@ -117,6 +138,9 @@ static int kvm_vcpu_set_debugregs(struct kvm_vcpu *,
 static int kvm_vcpu_get_mp_state(struct kvm_vcpu *, struct kvm_mp_state *);
 static int kvm_vcpu_set_mp_state(struct kvm_vcpu *,
     const struct kvm_mp_state *);
+static int kvm_vcpu_get_lapic(struct kvm_vcpu *, struct kvm_lapic_state *);
+static int kvm_vcpu_set_lapic(struct kvm_vcpu *,
+    const struct kvm_lapic_state *);
 static void kvm_vcpu_reset_state(struct vmm_cpustate *);
 static void kvm_vcpu_segment_from_vmm(struct kvm_segment *,
 	const struct vmm_segment *);
@@ -124,7 +148,13 @@ static void kvm_vcpu_segment_to_vmm(struct vmm_segment *,
 	const struct kvm_segment *);
 static void kvm_vcpu_set_exit(struct kvm_vcpu *,
 	const struct vmm_cpuexit *);
+static int kvm_vcpu_handle_msr_exit(struct kvm_vcpu *,
+	const struct vmm_cpuexit *);
 static int kvm_vcpu_complete_pio(struct kvm_vcpu *);
+static int kvm_vcpu_copy_gpa(struct kvm_vcpu *, uint64_t, void *, size_t,
+	int);
+static int kvm_vcpu_pio_string_gpa(struct kvm_vcpu *,
+	const struct vmm_cpuexit *, uint64_t *);
 static int kvm_vcpu_complete_mmio(struct kvm_vcpu *);
 static int kvm_vcpu_set_mmio_exit(struct kvm_vcpu *,
 	const struct vmm_cpuexit *);
@@ -156,12 +186,19 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	struct kvm_vcpu *vcpu;
 	struct file *fp;
 	struct vmm_x64_capability capability;
+	const char *stage;
 	int error;
 
 	if (vm == NULL || lp == NULL || vp == NULL || fd == NULL ||
-	    id >= KVM_MAX_VCPUS)
+	    id >= KVM_MAX_VCPUS) {
+		if (kvm_vcpu_trace) {
+			kprintf("kvm: create vcpu%u invalid vm=%p lwp=%p vnode=%p fd=%p\n",
+			    id, vm, lp, vp, fd);
+		}
 		return EINVAL;
+	}
 	*fd = -1;
+	stage = "allocation";
 	lwkt_gettoken(&vm->token);
 	if (vm->vcpus[id] != NULL) {
 		lwkt_reltoken(&vm->token);
@@ -175,15 +212,18 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	vcpu->id = id;
 	lwkt_token_init(&vcpu->token, "kvmvcpu");
 	kvm_vcpu_reset_state(&vcpu->state);
+	stage = "capability";
 	error = vmm_x64_get_capability(&capability);
 	if (error != 0)
 		goto fail;
 	vcpu->state.fpu.fx_mxcsr_mask = capability.mxcsr_mask;
 	vcpu->mp_state = KVM_MP_STATE_RUNNABLE;
 
+	stage = "run-page allocation";
 	error = kvm_vcpu_alloc_run(vcpu);
 	if (error != 0)
 		goto fail;
+	stage = "vmm vcpu allocation";
 	error = vmm_vcpu_create(vm->machine, &vcpu->state, &vcpu->vcpu);
 	if (error != 0)
 		goto fail;
@@ -212,6 +252,7 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	++vm->references;
 	lwkt_reltoken(&vm->token);
 
+	stage = "file allocation";
 	error = falloc(lp, &fp, fd);
 	if (error != 0)
 		goto fail;
@@ -220,6 +261,7 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	fp->f_ops = &kvm_vcpu_fileops;
 	fp->f_data = vp;
 	vref(vp);
+	stage = "file private data";
 	error = devfs_set_cdevpriv(fp, vcpu, kvm_vcpu_file_destroy);
 	if (error != 0) {
 		(void)fp_close(fp);
@@ -232,6 +274,9 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	return 0;
 
 fail:
+	if (kvm_vcpu_trace)
+		kprintf("kvm: create vcpu%u failed at %s: %d\n", id, stage,
+		    error);
 	kvm_vcpu_destroy(vcpu);
 	return error;
 }
@@ -353,6 +398,21 @@ kvm_vcpu_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	case KVM_SET_MP_STATE:
 		return kvm_vcpu_set_mp_state(vcpu,
 		    (const struct kvm_mp_state *)data);
+	case KVM_GET_LAPIC:
+		return kvm_vcpu_get_lapic(vcpu,
+		    (struct kvm_lapic_state *)data);
+	case KVM_SET_LAPIC:
+		return kvm_vcpu_set_lapic(vcpu,
+		    (const struct kvm_lapic_state *)data);
+	case KVM_SET_VAPIC_ADDR:
+		if ((((const struct kvm_vapic_addr *)data)->vapic_addr & PAGE_MASK) != 0 ||
+		    ((const struct kvm_vapic_addr *)data)->vapic_addr >= KVM_GPA_MAX)
+			return EINVAL;
+		lwkt_gettoken(&vcpu->token);
+		vcpu->vapic_address =
+		    ((const struct kvm_vapic_addr *)data)->vapic_addr;
+		lwkt_reltoken(&vcpu->token);
+		return 0;
 	default:
 		(void)msg;
 		return ENOTTY;
@@ -365,6 +425,7 @@ kvm_vcpu_get_supported_msrs(uint32_t *indices, size_t *count)
 	static const uint32_t supported[] = {
 		KVM_MSR_IA32_TSC,
 		KVM_MSR_IA32_APICBASE,
+		KVM_MSR_IA32_MTRRCAP,
 		KVM_MSR_IA32_SYSENTER_CS,
 		KVM_MSR_IA32_SYSENTER_ESP,
 		KVM_MSR_IA32_SYSENTER_EIP,
@@ -535,16 +596,47 @@ kvm_vcpu_run(struct kvm_vcpu *vcpu)
 	if (error != 0)
 		return error;
 
-	exit = NULL;
-	error = vmm_vcpu_run(vcpu->vcpu, &exit);
-	lwkt_gettoken(&vcpu->token);
-	vcpu->running = false;
-	if (error == ERESTART)
-		error = EINTR;
-	if (error == 0)
-		kvm_vcpu_set_exit(vcpu, exit);
-	lwkt_reltoken(&vcpu->token);
-	return error;
+	for (;;) {
+		struct vmm_cpuevent event = {
+			.type = VMM_CPUEVENT_EXCP,
+			.vector = KVM_X86_EXCEPTION_GP,
+		};
+
+		exit = NULL;
+		error = vmm_vcpu_run(vcpu->vcpu, &exit);
+		lwkt_gettoken(&vcpu->token);
+		vcpu->running = false;
+		if (error == ERESTART)
+			error = EINTR;
+		if (error == 0 && exit != NULL &&
+		    (exit->reason == VMM_CPUEXIT_RDMSR ||
+		    exit->reason == VMM_CPUEXIT_WRMSR)) {
+			error = kvm_vcpu_handle_msr_exit(vcpu, exit);
+			if (error == 0) {
+				vcpu->running = true;
+				lwkt_reltoken(&vcpu->token);
+				continue;
+			}
+			if (error == ENOENT || error == EOPNOTSUPP) {
+				lwkt_reltoken(&vcpu->token);
+				error = vmm_vcpu_inject(vcpu->vcpu, &event);
+				lwkt_gettoken(&vcpu->token);
+				if (error == 0) {
+					vcpu->running = true;
+					lwkt_reltoken(&vcpu->token);
+					continue;
+				}
+			}
+		}
+		if (error == 0) {
+			if (exit != NULL && exit->reason == VMM_CPUEXIT_NONE)
+				error = EINTR;
+			else
+				kvm_vcpu_set_exit(vcpu, exit);
+		}
+		lwkt_reltoken(&vcpu->token);
+		return error;
+	}
 }
 
 static int
@@ -1138,12 +1230,60 @@ kvm_vcpu_set_mp_state(struct kvm_vcpu *vcpu,
 }
 
 static int
+kvm_vcpu_get_lapic(struct kvm_vcpu *vcpu, struct kvm_lapic_state *state)
+{
+	int error;
+
+	if (state == NULL)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	error = vmm_vcpu_get_lapic(vcpu->vcpu, state->regs,
+	    sizeof(state->regs));
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+static int
+kvm_vcpu_set_lapic(struct kvm_vcpu *vcpu,
+    const struct kvm_lapic_state *state)
+{
+	int error;
+
+	if (state == NULL)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	error = vmm_vcpu_set_lapic(vcpu->vcpu, state->regs,
+	    sizeof(state->regs));
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+static int
 kvm_vcpu_get_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t *value)
 {
 
 	if (value == NULL)
 		return EINVAL;
+	if (index == KVM_MSR_IA32_MTRRCAP ||
+	    (index >= 0x200U && index <= 0x20fU) ||
+	    (index >= 0x250U && index <= 0x26fU) ||
+	    index == KVM_MSR_IA32_MTRR_DEF_TYPE) {
+		*value = 0;
+		return 0;
+	}
 	switch (index) {
+	case KVM_MSR_KVM_WALL_CLOCK:
+	case KVM_MSR_KVM_SYSTEM_TIME:
+		*value = 0;
+		return 0;
 	case KVM_MSR_IA32_TSC:
 		*value = vcpu->state.msrs[VMM_X64_MSR_TSC];
 		return 0;
@@ -1189,7 +1329,16 @@ static int
 kvm_vcpu_set_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t value)
 {
 
+	if (index == KVM_MSR_IA32_MTRRCAP)
+		return EOPNOTSUPP;
+	if ((index >= 0x200U && index <= 0x20fU) ||
+	    (index >= 0x250U && index <= 0x26fU) ||
+	    index == KVM_MSR_IA32_MTRR_DEF_TYPE)
+		return value == 0 ? 0 : EOPNOTSUPP;
 	switch (index) {
+	case KVM_MSR_KVM_WALL_CLOCK:
+	case KVM_MSR_KVM_SYSTEM_TIME:
+		return value == 0 ? 0 : EOPNOTSUPP;
 	case KVM_MSR_IA32_TSC:
 		vcpu->state.msrs[VMM_X64_MSR_TSC] = value;
 		return 0;
@@ -1229,6 +1378,33 @@ kvm_vcpu_set_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t value)
 	default:
 		return ENOENT;
 	}
+}
+
+static int
+kvm_vcpu_handle_msr_exit(struct kvm_vcpu *vcpu,
+	const struct vmm_cpuexit *exit)
+{
+	uint64_t value;
+	int error;
+
+	if (exit->reason == VMM_CPUEXIT_RDMSR) {
+		error = kvm_vcpu_get_msr(vcpu, exit->u.rdmsr.msr, &value);
+		if (error != 0)
+			return error;
+		vcpu->state.gprs[VMM_X64_GPR_RAX] = (uint32_t)value;
+		vcpu->state.gprs[VMM_X64_GPR_RDX] = value >> 32;
+		vcpu->state.gprs[VMM_X64_GPR_RIP] = exit->u.rdmsr.npc;
+		return 0;
+	}
+	if (exit->reason == VMM_CPUEXIT_WRMSR) {
+		error = kvm_vcpu_set_msr(vcpu, exit->u.wrmsr.msr,
+		    exit->u.wrmsr.val);
+		if (error != 0)
+			return error;
+		vcpu->state.gprs[VMM_X64_GPR_RIP] = exit->u.wrmsr.npc;
+		return 0;
+	}
+	return EINVAL;
 }
 
 static void
@@ -1314,12 +1490,27 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 {
 	struct kvm_run *run = vcpu->run;
 	uint64_t rax;
+	uint64_t count;
+	int error;
 
 	bzero(&run->u, sizeof(run->u));
 	run->if_flag = (vcpu->state.gprs[VMM_X64_GPR_RFLAGS] & 0x200) != 0;
 	run->cr8 = vcpu->state.crs[VMM_X64_CR_CR8];
 	run->apic_base = vcpu->apic_base;
 	run->ready_for_interrupt_injection = 0;
+	if (kvm_vcpu_trace && kvm_vcpu_trace_count < KVM_VCPU_TRACE_LIMIT &&
+	    exit != NULL && exit->reason == VMM_CPUEXIT_IO &&
+	    exit->u.io.port == 0x402) {
+		++kvm_vcpu_trace_count;
+		kprintf("kvm: vcpu%u debugcon %s value=%#x size=%u str=%u rep=%u rip=%#jx npc=%#jx rcx=%#jx rsi=%#jx\n",
+		    vcpu->id, exit->u.io.in ? "in" : "out",
+		    (unsigned int)vcpu->state.gprs[VMM_X64_GPR_RAX] & 0xff,
+		    exit->u.io.operand_size, exit->u.io.str, exit->u.io.rep,
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
+		    (uintmax_t)exit->u.io.npc,
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RCX],
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSI]);
+	}
 	if (exit == NULL) {
 		run->exit_reason = KVM_EXIT_INTR;
 		return;
@@ -1334,7 +1525,7 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 		}
 		return;
 	case VMM_CPUEXIT_IO:
-		if (exit->u.io.str || exit->u.io.operand_size == 0 ||
+		if (exit->u.io.operand_size == 0 ||
 		    exit->u.io.operand_size > sizeof(rax)) {
 			run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 			run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
@@ -1349,7 +1540,56 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 		run->u.io.port = exit->u.io.port;
 		run->u.io.count = 1;
 		run->u.io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE;
-		if (!exit->u.io.in) {
+		vcpu->pio_string = exit->u.io.str;
+		vcpu->pio_rep = exit->u.io.rep;
+		vcpu->pio_address_size = exit->u.io.address_size;
+		if (exit->u.io.str) {
+			count = 1;
+			if (exit->u.io.rep) {
+				switch (exit->u.io.address_size) {
+				case 2:
+					count = vcpu->state.gprs[VMM_X64_GPR_RCX] &
+					    UINT16_MAX;
+					break;
+				case 4:
+					count = vcpu->state.gprs[VMM_X64_GPR_RCX] &
+					    UINT32_MAX;
+					break;
+				case 8:
+					count = vcpu->state.gprs[VMM_X64_GPR_RCX];
+					break;
+				default:
+					count = UINT64_MAX;
+					break;
+				}
+			}
+			if (count == 0) {
+				vcpu->state.gprs[VMM_X64_GPR_RIP] = exit->u.io.npc;
+				run->u.io.count = 0;
+				return;
+			}
+			error = kvm_vcpu_pio_string_gpa(vcpu, exit,
+			    &vcpu->pio_gpa);
+			if (error != 0) {
+				run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+				run->u.internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
+				run->u.internal.ndata = 1;
+				run->u.internal.data[0] = VMM_CPUEXIT_IO;
+				return;
+			}
+			if (!exit->u.io.in) {
+				error = kvm_vcpu_copy_gpa(vcpu, vcpu->pio_gpa,
+				    vcpu->pio_data, exit->u.io.operand_size, 0);
+				if (error != 0) {
+					run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+					run->u.internal.suberror =
+					    KVM_INTERNAL_ERROR_EMULATION;
+					run->u.internal.ndata = 1;
+					run->u.internal.data[0] = VMM_CPUEXIT_IO;
+					return;
+				}
+			}
+		} else if (!exit->u.io.in) {
 			rax = vcpu->state.gprs[VMM_X64_GPR_RAX];
 			bcopy(&rax, vcpu->pio_data, exit->u.io.operand_size);
 		}
@@ -1384,21 +1624,168 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 static int
 kvm_vcpu_complete_pio(struct kvm_vcpu *vcpu)
 {
+	uint64_t count;
+	uint64_t index;
 	uint64_t value;
 	uint64_t mask;
+	uint64_t step;
+	unsigned int reg;
+	int error;
 
 	if (!vcpu->pio_pending)
 		return 0;
 	if (vcpu->pio_in) {
-		value = 0;
-		bcopy(vcpu->pio_data, &value, vcpu->pio_size);
-		mask = vcpu->pio_size == sizeof(mask) ? UINT64_MAX :
-		    (1ULL << (vcpu->pio_size * NBBY)) - 1;
-		vcpu->state.gprs[VMM_X64_GPR_RAX] =
-		    (vcpu->state.gprs[VMM_X64_GPR_RAX] & ~mask) | (value & mask);
+		if (vcpu->pio_string) {
+			error = kvm_vcpu_copy_gpa(vcpu, vcpu->pio_gpa,
+			    vcpu->pio_data, vcpu->pio_size, 1);
+			if (error != 0)
+				return error;
+		} else {
+			value = 0;
+			bcopy(vcpu->pio_data, &value, vcpu->pio_size);
+			mask = vcpu->pio_size == sizeof(mask) ? UINT64_MAX :
+			    (1ULL << (vcpu->pio_size * NBBY)) - 1;
+			vcpu->state.gprs[VMM_X64_GPR_RAX] =
+			    (vcpu->state.gprs[VMM_X64_GPR_RAX] & ~mask) |
+			    (value & mask);
+		}
+	}
+	if (!vcpu->pio_string) {
+		vcpu->state.gprs[VMM_X64_GPR_RIP] = vcpu->pio_npc;
+		vcpu->pio_pending = false;
+		return 0;
+	}
+	reg = vcpu->pio_in ? VMM_X64_GPR_RDI : VMM_X64_GPR_RSI;
+	step = vcpu->pio_size;
+	if ((vcpu->state.gprs[VMM_X64_GPR_RFLAGS] & (1ULL << 10)) != 0)
+		step = (uint64_t)-step;
+	switch (vcpu->pio_address_size) {
+	case 2:
+		index = (vcpu->state.gprs[reg] + step) & UINT16_MAX;
+		vcpu->state.gprs[reg] = (vcpu->state.gprs[reg] & ~UINT16_MAX) |
+		    index;
+		break;
+	case 4:
+		index = (vcpu->state.gprs[reg] + step) & UINT32_MAX;
+		vcpu->state.gprs[reg] = (uint32_t)index;
+		break;
+	case 8:
+		vcpu->state.gprs[reg] += step;
+		break;
+	default:
+		return EINVAL;
+	}
+	if (vcpu->pio_rep) {
+		switch (vcpu->pio_address_size) {
+		case 2:
+			count = (vcpu->state.gprs[VMM_X64_GPR_RCX] - 1) &
+			    UINT16_MAX;
+			vcpu->state.gprs[VMM_X64_GPR_RCX] =
+			    (vcpu->state.gprs[VMM_X64_GPR_RCX] & ~UINT16_MAX) |
+			    count;
+			break;
+		case 4:
+			count = (vcpu->state.gprs[VMM_X64_GPR_RCX] - 1) &
+			    UINT32_MAX;
+			vcpu->state.gprs[VMM_X64_GPR_RCX] = (uint32_t)count;
+			break;
+		case 8:
+			count = --vcpu->state.gprs[VMM_X64_GPR_RCX];
+			break;
+		default:
+			return EINVAL;
+		}
+		if (count != 0) {
+			vcpu->pio_pending = false;
+			vcpu->pio_string = false;
+			return 0;
+		}
 	}
 	vcpu->state.gprs[VMM_X64_GPR_RIP] = vcpu->pio_npc;
 	vcpu->pio_pending = false;
+	vcpu->pio_string = false;
+	return 0;
+}
+
+static int
+kvm_vcpu_copy_gpa(struct kvm_vcpu *vcpu, uint64_t gpa, void *data,
+	size_t length, int write)
+{
+	void *pmap_handle;
+	vm_paddr_t pa;
+	uint64_t page_gpa;
+	size_t chunk;
+	size_t offset;
+	int error;
+
+	if (vcpu == NULL || vcpu->vm == NULL || data == NULL || length == 0 ||
+	    gpa >= KVM_GPA_MAX || length > KVM_GPA_MAX - gpa)
+		return EFAULT;
+	while (length != 0) {
+		page_gpa = trunc_page(gpa);
+		offset = (size_t)(gpa - page_gpa);
+		chunk = PAGE_SIZE - offset;
+		if (chunk > length)
+			chunk = length;
+		error = vm_fault(&vcpu->vm->vmspace->vm_map, page_gpa,
+		    write ? VM_PROT_WRITE : VM_PROT_READ,
+		    write ? VM_FAULT_DIRTY : VM_FAULT_NORMAL);
+		if (error != 0)
+			return vm_mmap_to_errno(error);
+		pmap_handle = NULL;
+		pa = pmap_extract(vmspace_pmap(vcpu->vm->vmspace), page_gpa,
+		    &pmap_handle);
+		if (pa == 0) {
+			pmap_extract_done(pmap_handle);
+			return EFAULT;
+		}
+		if (write) {
+			bcopy(data, (void *)(PHYS_TO_DMAP(pa) + offset), chunk);
+		} else {
+			bcopy((const void *)(PHYS_TO_DMAP(pa) + offset), data, chunk);
+		}
+		pmap_extract_done(pmap_handle);
+		gpa += chunk;
+		data = (uint8_t *)data + chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+
+static int
+kvm_vcpu_pio_string_gpa(struct kvm_vcpu *vcpu,
+	const struct vmm_cpuexit *exit, uint64_t *gpa)
+{
+	uint64_t base;
+	uint64_t index;
+	uint64_t mask;
+	unsigned int reg;
+
+	if (vcpu == NULL || exit == NULL || gpa == NULL ||
+	    (vcpu->state.crs[VMM_X64_CR_CR0] & (1ULL << 31)) != 0 ||
+	    exit->u.io.seg < VMM_X64_SEG_ES ||
+	    exit->u.io.seg > VMM_X64_SEG_GS)
+		return EOPNOTSUPP;
+	switch (exit->u.io.address_size) {
+	case 2:
+		mask = UINT16_MAX;
+		break;
+	case 4:
+		mask = UINT32_MAX;
+		break;
+	case 8:
+		mask = UINT64_MAX;
+		break;
+	default:
+		return EOPNOTSUPP;
+	}
+	reg = exit->u.io.in ? VMM_X64_GPR_RDI : VMM_X64_GPR_RSI;
+	index = vcpu->state.gprs[reg] & mask;
+	base = vcpu->state.segs[(unsigned int)exit->u.io.seg].base;
+	if (base > UINT64_MAX - index || base + index >= KVM_GPA_MAX ||
+	    exit->u.io.operand_size > KVM_GPA_MAX - (base + index))
+		return EFAULT;
+	*gpa = base + index;
 	return 0;
 }
 

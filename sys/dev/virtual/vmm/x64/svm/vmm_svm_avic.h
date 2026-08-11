@@ -12,6 +12,7 @@
 
 struct vmm_machine;
 struct vmm_cpuevent;
+struct vmm_ioapic_state;
 struct vmm_vcpu;
 struct vmm_svm_interrupt_machine;
 struct vmm_svm_interrupt_vcpu;
@@ -38,12 +39,20 @@ struct vmm_svm_interrupt_ops {
 	int (*irq_raise_msi)(struct vmm_svm_interrupt_machine *, uint64_t,
 	    uint32_t);
 	int (*irq_set)(struct vmm_svm_interrupt_machine *, uint32_t, bool);
+	int (*irq_raise_legacy)(struct vmm_svm_interrupt_machine *, uint8_t);
+	int (*machine_get_ioapic)(struct vmm_svm_interrupt_machine *,
+	    struct vmm_ioapic_state *);
+	int (*machine_set_ioapic)(struct vmm_svm_interrupt_machine *,
+	    const struct vmm_ioapic_state *);
 	int (*vcpu_mmio)(struct vmm_svm_interrupt_vcpu *, uint64_t, bool,
 	    uint32_t *);
 	void (*machine_destroy)(struct vmm_svm_interrupt_machine *);
 	int (*vcpu_create)(struct vmm_svm_interrupt_machine *,
 	    struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
 	    struct vmm_svm_interrupt_config *);
+	int (*vcpu_get_lapic)(struct vmm_svm_interrupt_vcpu *, void *, size_t);
+	int (*vcpu_set_lapic)(struct vmm_svm_interrupt_vcpu *, const void *,
+	    size_t);
 	void (*vcpu_destroy)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_enter)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_leave)(struct vmm_svm_interrupt_vcpu *);

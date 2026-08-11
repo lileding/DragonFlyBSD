@@ -298,6 +298,120 @@ struct kvm_mp_state {
 	uint32_t mp_state;
 };
 
+#define KVM_APIC_REG_SIZE	0x400
+
+struct kvm_lapic_state {
+	uint8_t regs[KVM_APIC_REG_SIZE];
+};
+
+/* Guest physical page used by KVM's legacy virtual-APIC TPR assist path. */
+struct kvm_vapic_addr {
+	uint64_t vapic_addr;
+};
+
+struct kvm_pic_state {
+	uint8_t last_irr;
+	uint8_t irr;
+	uint8_t imr;
+	uint8_t isr;
+	uint8_t priority_add;
+	uint8_t irq_base;
+	uint8_t read_reg_select;
+	uint8_t poll;
+	uint8_t special_mask;
+	uint8_t init_state;
+	uint8_t auto_eoi;
+	uint8_t rotate_on_auto_eoi;
+	uint8_t special_fully_nested_mode;
+	uint8_t init4;
+	uint8_t elcr;
+	uint8_t elcr_mask;
+};
+
+#define KVM_IOAPIC_NUM_PINS	24
+
+struct kvm_ioapic_state {
+	uint64_t base_address;
+	uint32_t ioregsel;
+	uint32_t id;
+	uint32_t irr;
+	uint32_t pad;
+	union {
+		uint64_t bits;
+	} redirtbl[KVM_IOAPIC_NUM_PINS];
+};
+
+struct kvm_irqchip {
+	uint32_t chip_id;
+	uint32_t pad;
+	union {
+		uint8_t dummy[512];
+		struct kvm_pic_state pic;
+		struct kvm_ioapic_state ioapic;
+	} chip;
+};
+
+struct kvm_irq_level {
+	uint32_t irq;
+	uint32_t level;
+};
+
+/* KVM's stable in-kernel 8254 state representation. */
+struct kvm_pit_channel_state {
+	uint32_t count;
+	uint16_t latched_count;
+	uint8_t count_latched;
+	uint8_t status_latched;
+	uint8_t status;
+	uint8_t read_state;
+	uint8_t write_state;
+	uint8_t write_latch;
+	uint8_t rw_mode;
+	uint8_t mode;
+	uint8_t bcd;
+	uint8_t gate;
+	int64_t count_load_time;
+};
+
+#define KVM_PIT_FLAGS_HPET_LEGACY	0x00000001U
+#define KVM_PIT_FLAGS_SPEAKER_DATA_ON	0x00000002U
+
+struct kvm_pit_config {
+	uint32_t flags;
+	uint32_t pad[15];
+};
+
+#define KVM_PIT_SPEAKER_DUMMY		1U
+
+struct kvm_pit_state2 {
+	struct kvm_pit_channel_state channels[3];
+	uint32_t flags;
+	uint32_t reserved[9];
+};
+
+#ifdef _KERNEL
+CTASSERT(sizeof(struct kvm_pit_channel_state) == 24);
+CTASSERT(sizeof(struct kvm_pit_state2) == 112);
+#else
+_Static_assert(sizeof(struct kvm_pit_channel_state) == 24,
+    "kvm_pit_channel_state ABI");
+_Static_assert(sizeof(struct kvm_pit_state2) == 112, "kvm_pit_state2 ABI");
+#endif
+
+/* Monotonic and realtime clock snapshot returned by KVM_GET_CLOCK. */
+struct kvm_clock_data {
+	uint64_t clock;
+	uint32_t flags;
+	uint32_t pad0;
+	uint64_t realtime;
+	uint64_t host_tsc;
+	uint32_t pad[4];
+};
+
+#define KVM_CLOCK_TSC_STABLE	2U
+#define KVM_CLOCK_REALTIME	(1U << 2)
+#define KVM_CLOCK_HOST_TSC	(1U << 3)
+
 #define KVM_IOEVENTFD_FLAG_DATAMATCH	(1U << 0)
 #define KVM_IOEVENTFD_FLAG_PIO		(1U << 1)
 #define KVM_IOEVENTFD_FLAG_DEASSIGN	(1U << 2)
@@ -315,6 +429,10 @@ struct kvm_ioeventfd {
 
 #define KVM_IRQ_ROUTING_IRQCHIP	1
 #define KVM_IRQ_ROUTING_MSI		2
+
+#define KVM_IRQCHIP_PIC_MASTER	0
+#define KVM_IRQCHIP_PIC_SLAVE		1
+#define KVM_IRQCHIP_IOAPIC		2
 
 struct kvm_irq_routing_irqchip {
 	uint32_t irqchip;
@@ -392,7 +510,10 @@ struct kvm_dfly_buffer {
 #define KVM_SET_MSRS			_IOW(KVMIO, 0x89, struct kvm_msrs)
 #define KVM_GET_FPU			_IOR(KVMIO, 0x8c, struct kvm_fpu)
 #define KVM_SET_FPU			_IOW(KVMIO, 0x8d, struct kvm_fpu)
+#define KVM_GET_LAPIC			_IOR(KVMIO, 0x8e, struct kvm_lapic_state)
+#define KVM_SET_LAPIC			_IOW(KVMIO, 0x8f, struct kvm_lapic_state)
 #define KVM_SET_CPUID2		_IOW(KVMIO, 0x90, struct kvm_cpuid2)
+#define KVM_SET_VAPIC_ADDR		_IOW(KVMIO, 0x93, struct kvm_vapic_addr)
 #define KVM_GET_VCPU_EVENTS		_IOR(KVMIO, 0x9f, struct kvm_vcpu_events)
 #define KVM_SET_VCPU_EVENTS		_IOW(KVMIO, 0xa0, struct kvm_vcpu_events)
 #define KVM_GET_DEBUGREGS		_IOR(KVMIO, 0xa1, struct kvm_debugregs)
@@ -406,9 +527,17 @@ struct kvm_dfly_buffer {
 #define KVM_SET_TSS_ADDR		_IO(KVMIO, 0x47)
 #define KVM_SET_IDENTITY_MAP_ADDR	_IOW(KVMIO, 0x48, uint64_t)
 #define KVM_CREATE_IRQCHIP		_IO(KVMIO, 0x60)
+#define KVM_IRQ_LINE			_IOW(KVMIO, 0x61, struct kvm_irq_level)
+#define KVM_GET_IRQCHIP		_IOWR(KVMIO, 0x62, struct kvm_irqchip)
+#define KVM_SET_IRQCHIP		_IOW(KVMIO, 0x63, struct kvm_irqchip)
+#define KVM_SET_CLOCK			_IOW(KVMIO, 0x7b, struct kvm_clock_data)
+#define KVM_GET_CLOCK			_IOR(KVMIO, 0x7c, struct kvm_clock_data)
 #define KVM_SET_GSI_ROUTING		_IOW(KVMIO, 0x6a, struct kvm_irq_routing)
 #define KVM_IRQFD			_IOW(KVMIO, 0x76, struct kvm_irqfd)
+#define KVM_CREATE_PIT2		_IOW(KVMIO, 0x77, struct kvm_pit_config)
 #define KVM_IOEVENTFD			_IOW(KVMIO, 0x79, struct kvm_ioeventfd)
+#define KVM_GET_PIT2			_IOR(KVMIO, 0x9f, struct kvm_pit_state2)
+#define KVM_SET_PIT2			_IOW(KVMIO, 0xa0, struct kvm_pit_state2)
 #define KVM_SIGNAL_MSI			_IOW(KVMIO, 0xa5, struct kvm_msi)
 
 /* DragonFly indirection for Linux KVM's flexible-array CPUID/MSR payloads. */
@@ -470,6 +599,8 @@ struct kvm_dfly_eventfd {
 #define KVM_CAP_JOIN_MEMORY_REGIONS_WORKS	30
 #define KVM_CAP_IRQ_ROUTING		25
 #define KVM_CAP_IRQFD		32
+#define KVM_CAP_PIT2		33
+#define KVM_CAP_PIT_STATE2	35
 #define KVM_CAP_IOEVENTFD		36
 #define KVM_CAP_SET_IDENTITY_MAP_ADDR	37
 #define KVM_CAP_INTERNAL_ERROR_DATA	40

@@ -124,6 +124,8 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	case KVM_CAP_IRQ_ROUTING:
 	case KVM_CAP_IRQFD:
 	case KVM_CAP_SIGNAL_MSI:
+	case KVM_CAP_PIT2:
+	case KVM_CAP_PIT_STATE2:
 		ap->a_sysmsg->sysmsg_result = vmm_irqchip_available() ?
 		    (capability == KVM_CAP_IRQ_ROUTING ? KVM_MAX_IRQ_ROUTES + 1 : 1) :
 		    0;

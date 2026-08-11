@@ -24,6 +24,7 @@ struct kvm_irqfd_binding;
 #define KVM_MEMORY_SLOTS	32
 #define KVM_MAX_VCPUS		256
 #define KVM_MAX_IRQ_ROUTES	1024
+#define KVM_GPA_MAX		((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 
 struct kvm_memory_slot {
 	vm_offset_t gpa;
@@ -43,7 +44,9 @@ struct kvm_vm {
 	TAILQ_HEAD(, kvm_irqfd_binding) irqfds;
 	uint64_t tss_address;
 	uint64_t identity_map_address;
+	int64_t clock_offset;
 	unsigned int references;
+	bool irqchip;
 };
 
 /* Creates one KVM VM fd with an independent guest vmspace. */

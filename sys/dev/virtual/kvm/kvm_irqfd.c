@@ -25,6 +25,8 @@
 struct kvm_irqroute {
 	TAILQ_ENTRY(kvm_irqroute) entry;
 	uint32_t gsi;
+	uint32_t type;
+	uint32_t pin;
 	uint64_t address;
 	uint32_t data;
 };
@@ -72,11 +74,19 @@ kvm_irqroute_configure(struct kvm_vm *vm,
 		error = kvm_irqroute_validate(entries, index);
 		if (error != 0)
 			goto fail;
+		if (entries[index].type == KVM_IRQ_ROUTING_IRQCHIP &&
+		    entries[index].u.irqchip.irqchip != KVM_IRQCHIP_IOAPIC)
+			continue;
 		route = kmalloc(sizeof(*route), M_KVM, M_WAITOK | M_ZERO);
 		route->gsi = entries[index].gsi;
-		route->address = entries[index].u.msi.address_lo |
-		    ((uint64_t)entries[index].u.msi.address_hi << 32);
-		route->data = entries[index].u.msi.data;
+		route->type = entries[index].type;
+		if (route->type == KVM_IRQ_ROUTING_MSI) {
+			route->address = entries[index].u.msi.address_lo |
+			    ((uint64_t)entries[index].u.msi.address_hi << 32);
+			route->data = entries[index].u.msi.data;
+		} else {
+			route->pin = entries[index].u.irqchip.pin;
+		}
 		TAILQ_INSERT_TAIL(&routes, route, entry);
 	}
 	TAILQ_INIT(&old_routes);
@@ -201,16 +211,22 @@ static int
 kvm_irqroute_validate(const struct kvm_irq_routing_entry *entries,
 	uint32_t index)
 {
-	uint32_t other;
-
-	if (entries[index].type != KVM_IRQ_ROUTING_MSI ||
-	    (entries[index].flags & ~KVM_MSI_VALID_DEVID) != 0)
-		return EOPNOTSUPP;
-	for (other = 0; other < index; ++other) {
-		if (entries[other].gsi == entries[index].gsi)
-			return EEXIST;
+	if (entries[index].type == KVM_IRQ_ROUTING_MSI) {
+		if ((entries[index].flags & ~KVM_MSI_VALID_DEVID) != 0)
+			return EINVAL;
+		return 0;
 	}
-	return 0;
+	if (entries[index].type != KVM_IRQ_ROUTING_IRQCHIP ||
+	    entries[index].flags != 0)
+		return EOPNOTSUPP;
+	switch (entries[index].u.irqchip.irqchip) {
+	case KVM_IRQCHIP_PIC_MASTER:
+	case KVM_IRQCHIP_PIC_SLAVE:
+	case KVM_IRQCHIP_IOAPIC:
+		return 0;
+	default:
+		return EOPNOTSUPP;
+	}
 }
 
 static struct kvm_irqroute *
@@ -323,19 +339,27 @@ kvm_irqfd_signal(void *argument)
 	struct kvm_irqroute *route;
 	uint64_t address;
 	uint32_t data;
+	uint32_t pin;
+	uint32_t type;
 	int found;
 
 	found = 0;
 	lwkt_gettoken(&binding->vm->token);
 	route = kvm_irqroute_find(binding->vm, binding->gsi);
 	if (route != NULL) {
+		type = route->type;
 		address = route->address;
 		data = route->data;
+		pin = route->pin;
 		found = 1;
 	}
 	lwkt_reltoken(&binding->vm->token);
-	if (found)
-		(void)vmm_machine_raise_msi(binding->vm->machine, address, data);
+	if (found) {
+		if (type == KVM_IRQ_ROUTING_MSI)
+			(void)vmm_machine_raise_msi(binding->vm->machine, address, data);
+		else
+			(void)vmm_machine_raise_irq(binding->vm->machine, pin);
+	}
 }
 
 static int

@@ -13,6 +13,7 @@ struct vmm_vcpu;
 struct vmm_cpuid_entry;
 struct vmm_x64_capability;
 struct vmm_cpuexit;
+struct vmm_ioapic_state;
 
 struct vmm_backend_ops {
 	const char *name;
@@ -26,12 +27,18 @@ struct vmm_backend_ops {
 	/* Non-blocking capability check for pre-vCPU irqchip creation. */
 	int (*machine_create_irqchip)(struct vmm_machine *);
 	int (*irq_raise_msi)(struct vmm_machine *, uint64_t, uint32_t);
-	int (*machine_raise_irq)(struct vmm_machine *, uint32_t);
 	int (*machine_set_irq)(struct vmm_machine *, uint32_t, bool);
+	int (*machine_raise_legacy)(struct vmm_machine *, uint8_t);
+	int (*machine_get_ioapic)(struct vmm_machine *,
+	    struct vmm_ioapic_state *);
+	int (*machine_set_ioapic)(struct vmm_machine *,
+	    const struct vmm_ioapic_state *);
 	void (*machine_destroy)(struct vmm_machine *);
 	int (*vcpu_create)(struct vmm_vcpu *);
 	int (*vcpu_set_cpuid)(struct vmm_vcpu *,
 	    const struct vmm_cpuid_entry *, size_t);
+	int (*vcpu_get_lapic)(struct vmm_vcpu *, void *, size_t);
+	int (*vcpu_set_lapic)(struct vmm_vcpu *, const void *, size_t);
 	void (*vcpu_destroy)(struct vmm_vcpu *);
 	int (*vcpu_run)(struct vmm_vcpu *, struct vmm_cpuexit **);
 	void (*vcpu_getstate)(struct vmm_vcpu *);

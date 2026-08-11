@@ -30,6 +30,7 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/thread2.h>
 
 #include "../../vmm_machine.h"
@@ -42,6 +43,14 @@
 #include "vmm_svm_x86defs.h"
 
 #define SVM_NCPUID_ENTRIES	64
+#define VMM_SVM_TRACE_LIMIT	32U
+
+static int vmm_svm_trace;
+static unsigned int vmm_svm_trace_count;
+
+SYSCTL_DECL(_hw_vmm);
+SYSCTL_INT(_hw_vmm, OID_AUTO, svm_trace, CTLFLAG_RW, &vmm_svm_trace, 0,
+    "log the first SVM state transitions after module load");
 
 struct vmm_svm_cpuid_filter {
 	uint32_t eax;
@@ -2171,6 +2180,14 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	int error = 0;
 
 	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
+	if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
+	    vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xea590 &&
+	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xea5b0) {
+		++vmm_svm_trace_count;
+		kprintf("vmm: svm vcpu%u entry state-rip=%#jx vmcb-rip=%#jx\n",
+		    vcpu->id, (uintmax_t)vcpu->state->gprs[VMM_X64_GPR_RIP],
+		    (uintmax_t)vmcb->state.rip);
+	}
 
 	hcpu = os_curcpu_number();
 
@@ -2259,6 +2276,14 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
 		vmm_stat_vmexit();
+		if (vmm_svm_trace &&
+		    vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
+		    vmcb->state.rip >= 0xea590 && vmcb->state.rip < 0xea5b0) {
+			++vmm_svm_trace_count;
+			kprintf("vmm: svm vcpu%u exit code=%#jx vmcb-rip=%#jx\n",
+			    vcpu->id, (uintmax_t)vmcb->ctrl.exitcode,
+			    (uintmax_t)vmcb->state.rip);
+		}
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
 		vmm_svm_interrupt_ops->vcpu_leave(cpudata->interrupt);
 		vmm_svm_htlb_flush_ack(cpudata, machgen);
@@ -3124,6 +3149,29 @@ vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *vcpu,
 }
 
 int
+vmm_svm_vcpu_get_lapic(struct vmm_vcpu *vcpu, void *registers, size_t size)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata->interrupt == NULL)
+		return ENOTSUP;
+	return vmm_svm_interrupt_ops->vcpu_get_lapic(cpudata->interrupt,
+	    registers, size);
+}
+
+int
+vmm_svm_vcpu_set_lapic(struct vmm_vcpu *vcpu, const void *registers,
+    size_t size)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata->interrupt == NULL)
+		return ENOTSUP;
+	return vmm_svm_interrupt_ops->vcpu_set_lapic(cpudata->interrupt,
+	    registers, size);
+}
+
+int
 vmm_svm_machine_create(struct vmm_machine *mach)
 {
 	struct pmap *pmap = os_vmspace_pmap(mach->vmspace);
@@ -3175,22 +3223,40 @@ vmm_svm_irq_raise_msi(struct vmm_machine *mach, uint64_t address,
 }
 
 int
-vmm_svm_machine_raise_irq(struct vmm_machine *mach, uint32_t gsi)
-{
-	int error;
-
-	error = vmm_svm_machine_set_irq(mach, gsi, true);
-	if (error != 0)
-		return error;
-	return vmm_svm_machine_set_irq(mach, gsi, false);
-}
-
-int
 vmm_svm_machine_set_irq(struct vmm_machine *mach, uint32_t gsi, bool level)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
 	return vmm_svm_interrupt_ops->irq_set(machdata->interrupt, gsi, level);
+}
+
+int
+vmm_svm_machine_raise_legacy(struct vmm_machine *mach, uint8_t vector)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->irq_raise_legacy(machdata->interrupt,
+	    vector);
+}
+
+int
+vmm_svm_machine_get_ioapic(struct vmm_machine *mach,
+	struct vmm_ioapic_state *state)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->machine_get_ioapic(machdata->interrupt,
+	    state);
+}
+
+int
+vmm_svm_machine_set_ioapic(struct vmm_machine *mach,
+	const struct vmm_ioapic_state *state)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	return vmm_svm_interrupt_ops->machine_set_ioapic(machdata->interrupt,
+	    state);
 }
 
 void

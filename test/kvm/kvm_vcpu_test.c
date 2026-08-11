@@ -167,6 +167,107 @@ kvm_test_mp_state(int vcpu_fd)
 }
 
 static void
+kvm_test_lapic(int vcpu_fd)
+{
+	struct kvm_lapic_state state;
+	struct kvm_vapic_addr vapic;
+
+	bzero(&state, sizeof(state));
+	state.regs[0x80] = 0x20;
+	if (ioctl(vcpu_fd, KVM_SET_LAPIC, &state) != 0)
+		err(1, "KVM_SET_LAPIC");
+	bzero(&state, sizeof(state));
+	if (ioctl(vcpu_fd, KVM_GET_LAPIC, &state) != 0)
+		err(1, "KVM_GET_LAPIC");
+	if (state.regs[0x80] != 0x20)
+		errx(1, "KVM LAPIC TPR round trip mismatch");
+	bzero(&vapic, sizeof(vapic));
+	vapic.vapic_addr = 0x1000;
+	if (ioctl(vcpu_fd, KVM_SET_VAPIC_ADDR, &vapic) != 0)
+		err(1, "KVM_SET_VAPIC_ADDR");
+	vapic.vapic_addr = 1;
+	errno = 0;
+	if (ioctl(vcpu_fd, KVM_SET_VAPIC_ADDR, &vapic) != -1 ||
+	    errno != EINVAL)
+		errx(1, "KVM_SET_VAPIC_ADDR alignment check");
+}
+
+static void
+kvm_test_clock(int vm_fd)
+{
+	struct kvm_clock_data clock;
+	uint64_t requested;
+
+	bzero(&clock, sizeof(clock));
+	if (ioctl(vm_fd, KVM_GET_CLOCK, &clock) != 0)
+		err(1, "KVM_GET_CLOCK initial");
+	requested = clock.clock + 1000000000ULL;
+	clock.clock = requested;
+	clock.flags = KVM_CLOCK_REALTIME;
+	if (ioctl(vm_fd, KVM_SET_CLOCK, &clock) != 0)
+		err(1, "KVM_SET_CLOCK");
+	bzero(&clock, sizeof(clock));
+	if (ioctl(vm_fd, KVM_GET_CLOCK, &clock) != 0)
+		err(1, "KVM_GET_CLOCK updated");
+	if (clock.clock < requested ||
+	    (clock.flags & KVM_CLOCK_REALTIME) == 0)
+		errx(1, "KVM clock round trip mismatch");
+}
+
+static void
+kvm_test_irqchip(int vm_fd)
+{
+	struct kvm_irqchip irqchip;
+	struct kvm_irq_level line;
+	uint32_t pin;
+
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_PIC_MASTER;
+	irqchip.chip.pic.last_irr = 0x5a;
+	irqchip.chip.pic.irq_base = 0x08;
+	irqchip.chip.pic.init4 = 1;
+	if (ioctl(vm_fd, KVM_SET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_SET_IRQCHIP PIC");
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_PIC_MASTER;
+	if (ioctl(vm_fd, KVM_GET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_GET_IRQCHIP PIC");
+	if (irqchip.chip.pic.last_irr != 0x5a ||
+	    irqchip.chip.pic.irq_base != 0x08 || irqchip.chip.pic.init4 != 1)
+		errx(1, "KVM PIC round trip mismatch");
+
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_IOAPIC;
+	irqchip.chip.ioapic.base_address = 0xfec00000ULL;
+	irqchip.chip.ioapic.ioregsel = 0x11;
+	irqchip.chip.ioapic.id = 1;
+	irqchip.chip.ioapic.irr = 1U << 4;
+	for (pin = 0; pin < KVM_IOAPIC_NUM_PINS; ++pin)
+		irqchip.chip.ioapic.redirtbl[pin].bits = 0x00010000ULL;
+	irqchip.chip.ioapic.redirtbl[4].bits = 0x00010051ULL;
+	if (ioctl(vm_fd, KVM_SET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_SET_IRQCHIP IOAPIC");
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_IOAPIC;
+	if (ioctl(vm_fd, KVM_GET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_GET_IRQCHIP IOAPIC");
+	if (irqchip.chip.ioapic.base_address != 0xfec00000ULL ||
+	    irqchip.chip.ioapic.ioregsel != 0x11 ||
+	    irqchip.chip.ioapic.id != 1 ||
+	    irqchip.chip.ioapic.irr != (1U << 4) ||
+	    irqchip.chip.ioapic.redirtbl[4].bits != 0x00010051ULL)
+		errx(1, "KVM IOAPIC round trip mismatch");
+
+	line.irq = 4;
+	line.level = 1;
+	if (ioctl(vm_fd, KVM_IRQ_LINE, &line) != 0)
+		err(1, "KVM_IRQ_LINE assert");
+	line.level = 0;
+	if (ioctl(vm_fd, KVM_IRQ_LINE, &line) != 0)
+		err(1, "KVM_IRQ_LINE deassert");
+}
+
+static void
 kvm_test_extended_state(int control_fd, int vcpu_fd)
 {
 	struct kvm_debugregs debugregs;
@@ -298,9 +399,13 @@ main(void)
 	if (ioctl(vm_fd, KVM_SET_TSS_ADDR, tss_address) != 0)
 		err(1, "KVM_SET_TSS_ADDR");
 	KVM_TEST_STEP("step: legacy-mm-state");
+	kvm_test_clock(vm_fd);
+	KVM_TEST_STEP("step: clock");
 	if (ioctl(vm_fd, KVM_CREATE_IRQCHIP, 0) != 0)
 		err(1, "KVM_CREATE_IRQCHIP");
 	KVM_TEST_STEP("step: irqchip");
+	kvm_test_irqchip(vm_fd);
+	KVM_TEST_STEP("step: irqchip-state");
 	run_size = ioctl(vm_fd, KVM_GET_VCPU_MMAP_SIZE);
 	if (run_size != 2 * getpagesize())
 		errx(1, "unexpected KVM_RUN mapping size %d", run_size);
@@ -338,6 +443,8 @@ main(void)
 	KVM_TEST_STEP("step: xcrs");
 	kvm_test_mp_state(vcpu_fd);
 	KVM_TEST_STEP("step: mp-state");
+	kvm_test_lapic(vcpu_fd);
+	KVM_TEST_STEP("step: lapic");
 	kvm_test_extended_state(control_fd, vcpu_fd);
 	KVM_TEST_STEP("step: extended-state");
 	bzero(&eventfd, sizeof(eventfd));

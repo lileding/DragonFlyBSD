@@ -16,6 +16,7 @@
 #include <sys/systm.h>
 #include <sys/sysmsg.h>
 #include <sys/thread.h>
+#include <sys/time.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -34,7 +35,6 @@
 #include "kvm_vcpu.h"
 #include "kvm_vm.h"
 
-#define KVM_GPA_MAX	((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
 
 struct kvm_memory_piece {
@@ -60,6 +60,14 @@ static void kvm_vm_destroy(struct kvm_vm *);
 static int kvm_vm_set_user_memory(struct kvm_vm *,
     const struct kvm_userspace_memory_region *);
 static int kvm_vm_signal_msi(struct kvm_vm *, const struct kvm_msi *);
+static int kvm_vm_set_irq_line(struct kvm_vm *, const struct kvm_irq_level *);
+static int kvm_vm_get_irqchip(struct kvm_vm *, struct kvm_irqchip *);
+static int kvm_vm_set_irqchip(struct kvm_vm *, const struct kvm_irqchip *);
+static int kvm_vm_get_clock(struct kvm_vm *, struct kvm_clock_data *);
+static int kvm_vm_set_clock(struct kvm_vm *, const struct kvm_clock_data *);
+static int kvm_vm_create_pit(struct kvm_vm *, const struct kvm_pit_config *);
+static int kvm_vm_get_pit(struct kvm_vm *, struct kvm_pit_state2 *);
+static int kvm_vm_set_pit(struct kvm_vm *, const struct kvm_pit_state2 *);
 static int kvm_vm_set_tss_address(struct kvm_vm *, uint64_t);
 static int kvm_vm_set_identity_map_address(struct kvm_vm *, uint64_t);
 static int kvm_vm_collect_memory(struct vmspace *, vm_offset_t, vm_size_t,
@@ -200,7 +208,34 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 		    *(const uint64_t *)data);
 	case KVM_CREATE_IRQCHIP:
 	case KVM_LINUX_IO(0x60):
-		return vmm_machine_create_irqchip(vm->machine);
+		error = vmm_machine_create_irqchip(vm->machine);
+		if (error == 0) {
+			lwkt_gettoken(&vm->token);
+			vm->irqchip = true;
+			lwkt_reltoken(&vm->token);
+		}
+		return error;
+	case KVM_CREATE_PIT2:
+		return kvm_vm_create_pit(vm,
+		    (const struct kvm_pit_config *)data);
+	case KVM_GET_PIT2:
+		return kvm_vm_get_pit(vm, (struct kvm_pit_state2 *)data);
+	case KVM_SET_PIT2:
+		return kvm_vm_set_pit(vm,
+		    (const struct kvm_pit_state2 *)data);
+	case KVM_IRQ_LINE:
+		return kvm_vm_set_irq_line(vm,
+		    (const struct kvm_irq_level *)data);
+	case KVM_GET_IRQCHIP:
+		return kvm_vm_get_irqchip(vm, (struct kvm_irqchip *)data);
+	case KVM_SET_IRQCHIP:
+		return kvm_vm_set_irqchip(vm,
+		    (const struct kvm_irqchip *)data);
+	case KVM_SET_CLOCK:
+		return kvm_vm_set_clock(vm,
+		    (const struct kvm_clock_data *)data);
+	case KVM_GET_CLOCK:
+		return kvm_vm_get_clock(vm, (struct kvm_clock_data *)data);
 	case KVM_IOEVENTFD:
 		return kvm_ioevent_configure(vm,
 		    (const struct kvm_ioeventfd *)data);
@@ -215,6 +250,98 @@ kvm_vm_fo_ioctl(struct file *fp, u_long command, caddr_t data,
 	default:
 		return ENOTTY;
 	}
+}
+
+static int
+kvm_vm_create_pit(struct kvm_vm *vm, const struct kvm_pit_config *config)
+{
+	unsigned int index;
+
+	if (vm == NULL || config == NULL ||
+	    (config->flags & ~KVM_PIT_SPEAKER_DUMMY) != 0)
+		return EINVAL;
+	for (index = 0; index < nitems(config->pad); ++index) {
+		if (config->pad[index] != 0)
+			return EINVAL;
+	}
+	return vmm_machine_create_pit(vm->machine);
+}
+
+static int
+kvm_vm_get_pit(struct kvm_vm *vm, struct kvm_pit_state2 *state)
+{
+	struct vmm_pit_state pit_state;
+	unsigned int index;
+	int error;
+
+	if (vm == NULL || state == NULL)
+		return EINVAL;
+	error = vmm_machine_get_pit(vm->machine, &pit_state);
+	if (error != 0)
+		return error;
+	bzero(state, sizeof(*state));
+	for (index = 0; index < nitems(state->channels); ++index) {
+		state->channels[index].count = pit_state.channels[index].count;
+		state->channels[index].latched_count =
+		    pit_state.channels[index].latched_count;
+		state->channels[index].count_latched =
+		    pit_state.channels[index].count_latched;
+		state->channels[index].status_latched =
+		    pit_state.channels[index].status_latched;
+		state->channels[index].status = pit_state.channels[index].status;
+		state->channels[index].read_state =
+		    pit_state.channels[index].read_state;
+		state->channels[index].write_state =
+		    pit_state.channels[index].write_state;
+		state->channels[index].write_latch =
+		    pit_state.channels[index].write_latch;
+		state->channels[index].rw_mode = pit_state.channels[index].rw_mode;
+		state->channels[index].mode = pit_state.channels[index].mode;
+		state->channels[index].bcd = pit_state.channels[index].bcd;
+		state->channels[index].gate = pit_state.channels[index].gate;
+		state->channels[index].count_load_time =
+		    pit_state.channels[index].count_load_time;
+	}
+	state->flags = pit_state.flags;
+	return 0;
+}
+
+static int
+kvm_vm_set_pit(struct kvm_vm *vm, const struct kvm_pit_state2 *state)
+{
+	struct vmm_pit_state pit_state;
+	unsigned int index;
+
+	if (vm == NULL || state == NULL)
+		return EINVAL;
+	for (index = 0; index < nitems(state->reserved); ++index) {
+		if (state->reserved[index] != 0)
+			return EINVAL;
+	}
+	bzero(&pit_state, sizeof(pit_state));
+	for (index = 0; index < nitems(state->channels); ++index) {
+		pit_state.channels[index].count = state->channels[index].count;
+		pit_state.channels[index].latched_count =
+		    state->channels[index].latched_count;
+		pit_state.channels[index].count_latched =
+		    state->channels[index].count_latched;
+		pit_state.channels[index].status_latched =
+		    state->channels[index].status_latched;
+		pit_state.channels[index].status = state->channels[index].status;
+		pit_state.channels[index].read_state = state->channels[index].read_state;
+		pit_state.channels[index].write_state =
+		    state->channels[index].write_state;
+		pit_state.channels[index].write_latch =
+		    state->channels[index].write_latch;
+		pit_state.channels[index].rw_mode = state->channels[index].rw_mode;
+		pit_state.channels[index].mode = state->channels[index].mode;
+		pit_state.channels[index].bcd = state->channels[index].bcd;
+		pit_state.channels[index].gate = state->channels[index].gate;
+		pit_state.channels[index].count_load_time =
+		    state->channels[index].count_load_time;
+	}
+	pit_state.flags = state->flags;
+	return vmm_machine_set_pit(vm->machine, &pit_state);
 }
 
 /*
@@ -257,6 +384,150 @@ kvm_vm_signal_msi(struct kvm_vm *vm, const struct kvm_msi *msi)
 }
 
 static int
+kvm_vm_set_irq_line(struct kvm_vm *vm, const struct kvm_irq_level *line)
+{
+	if (line == NULL || line->level > 1)
+		return EINVAL;
+	return vmm_machine_set_irq(vm->machine, line->irq, line->level != 0);
+}
+
+static int
+kvm_vm_get_irqchip(struct kvm_vm *vm, struct kvm_irqchip *irqchip)
+{
+	struct vmm_ioapic_state state;
+	struct vmm_pic_state pic_state;
+	uint32_t chip_id;
+	uint32_t pin;
+	int error;
+
+	if (irqchip == NULL)
+		return EINVAL;
+	chip_id = irqchip->chip_id;
+	bzero(irqchip, sizeof(*irqchip));
+	irqchip->chip_id = chip_id;
+	switch (irqchip->chip_id) {
+	case KVM_IRQCHIP_PIC_MASTER:
+	case KVM_IRQCHIP_PIC_SLAVE:
+		error = vmm_machine_get_pic(vm->machine, &pic_state);
+		if (error != 0)
+			return error;
+		if (irqchip->chip_id == KVM_IRQCHIP_PIC_MASTER)
+			bcopy(&pic_state.master, &irqchip->chip.pic,
+			    sizeof(irqchip->chip.pic));
+		else
+			bcopy(&pic_state.slave, &irqchip->chip.pic,
+			    sizeof(irqchip->chip.pic));
+		return 0;
+	case KVM_IRQCHIP_IOAPIC:
+		bzero(&state, sizeof(state));
+		error = vmm_machine_get_ioapic(vm->machine, &state);
+		if (error != 0)
+			return error;
+		irqchip->chip.ioapic.base_address = state.base;
+		irqchip->chip.ioapic.ioregsel = state.select;
+		irqchip->chip.ioapic.id = state.id;
+		irqchip->chip.ioapic.irr = state.irr;
+		for (pin = 0; pin < KVM_IOAPIC_NUM_PINS; ++pin)
+			irqchip->chip.ioapic.redirtbl[pin].bits = state.redir[pin];
+		return 0;
+	default:
+		return EINVAL;
+	}
+}
+
+static int
+kvm_vm_set_irqchip(struct kvm_vm *vm, const struct kvm_irqchip *irqchip)
+{
+	struct vmm_ioapic_state state;
+	struct vmm_pic_state pic_state;
+	uint32_t pin;
+	int error;
+
+	if (irqchip == NULL)
+		return EINVAL;
+	switch (irqchip->chip_id) {
+	case KVM_IRQCHIP_PIC_MASTER:
+	case KVM_IRQCHIP_PIC_SLAVE:
+		error = vmm_machine_get_pic(vm->machine, &pic_state);
+		if (error != 0)
+			return error;
+		if (irqchip->chip_id == KVM_IRQCHIP_PIC_MASTER)
+			bcopy(&irqchip->chip.pic, &pic_state.master,
+			    sizeof(pic_state.master));
+		else
+			bcopy(&irqchip->chip.pic, &pic_state.slave,
+			    sizeof(pic_state.slave));
+		return vmm_machine_set_pic(vm->machine, &pic_state);
+	case KVM_IRQCHIP_IOAPIC:
+		bzero(&state, sizeof(state));
+		state.base = irqchip->chip.ioapic.base_address;
+		state.select = irqchip->chip.ioapic.ioregsel;
+		state.id = irqchip->chip.ioapic.id;
+		state.irr = irqchip->chip.ioapic.irr;
+		for (pin = 0; pin < KVM_IOAPIC_NUM_PINS; ++pin)
+			state.redir[pin] = irqchip->chip.ioapic.redirtbl[pin].bits;
+		return vmm_machine_set_ioapic(vm->machine, &state);
+	default:
+		return EINVAL;
+	}
+}
+
+static int
+kvm_vm_set_clock(struct kvm_vm *vm, const struct kvm_clock_data *clock)
+{
+	struct timespec monotonic;
+	struct timespec realtime;
+	uint64_t clock_value;
+	uint64_t now_monotonic;
+	uint64_t now_realtime;
+
+	if (vm == NULL || clock == NULL ||
+	    (clock->flags & ~(KVM_CLOCK_TSC_STABLE | KVM_CLOCK_REALTIME |
+	    KVM_CLOCK_HOST_TSC)) != 0)
+		return EINVAL;
+	nanouptime(&monotonic);
+	getnanotime(&realtime);
+	now_monotonic = (uint64_t)monotonic.tv_sec * 1000000000ULL +
+	    monotonic.tv_nsec;
+	now_realtime = (uint64_t)realtime.tv_sec * 1000000000ULL +
+	    realtime.tv_nsec;
+	clock_value = clock->clock;
+	if ((clock->flags & KVM_CLOCK_REALTIME) != 0 &&
+	    now_realtime > clock->realtime) {
+		if (clock_value > UINT64_MAX - (now_realtime - clock->realtime))
+			return EINVAL;
+		clock_value += now_realtime - clock->realtime;
+	}
+	lwkt_gettoken(&vm->token);
+	vm->clock_offset = (int64_t)(clock_value - now_monotonic);
+	lwkt_reltoken(&vm->token);
+	return 0;
+}
+
+static int
+kvm_vm_get_clock(struct kvm_vm *vm, struct kvm_clock_data *clock)
+{
+	struct timespec monotonic;
+	struct timespec realtime;
+	int64_t offset;
+
+	if (vm == NULL || clock == NULL)
+		return EINVAL;
+	nanouptime(&monotonic);
+	getnanotime(&realtime);
+	lwkt_gettoken(&vm->token);
+	offset = vm->clock_offset;
+	lwkt_reltoken(&vm->token);
+	bzero(clock, sizeof(*clock));
+	clock->clock = (uint64_t)monotonic.tv_sec * 1000000000ULL +
+		monotonic.tv_nsec + offset;
+	clock->realtime = (uint64_t)realtime.tv_sec * 1000000000ULL +
+		realtime.tv_nsec;
+	clock->flags = KVM_CLOCK_REALTIME;
+	return 0;
+}
+
+static int
 kvm_vm_set_user_memory(struct kvm_vm *vm,
 	const struct kvm_userspace_memory_region *region)
 {
@@ -282,7 +553,7 @@ kvm_vm_set_user_memory(struct kvm_vm *vm,
 	size = region->memory_size;
 	hva = region->userspace_addr;
 	if (size == 0) {
-		if (region->flags != 0 || hva != 0)
+		if (region->flags != 0)
 			return EINVAL;
 		lwkt_gettoken(&vm->token);
 		slot = &vm->slots[region->slot];
@@ -384,16 +655,18 @@ kvm_vm_collect_memory(struct vmspace *vmspace, vm_offset_t hva,
 	while (hva < end) {
 		piece = kmalloc(sizeof(*piece), M_KVM, M_WAITOK | M_ZERO);
 		lwkt_gettoken(&map->token);
-		vm_map_lock_read(map);
+		vm_map_lock(map);
 		if (!vm_map_lookup_entry(map, hva, &entry) ||
-		    entry->maptype != VM_MAPTYPE_NORMAL ||
-		    entry->ba.object == NULL) {
-			vm_map_unlock_read(map);
+		    entry->maptype != VM_MAPTYPE_NORMAL) {
+			vm_map_unlock(map);
 			lwkt_reltoken(&map->token);
 			kfree(piece, M_KVM);
 			error = EFAULT;
 			goto fail;
 		}
+		/* Anonymous QEMU RAM gets an object on first durable reference. */
+		if (entry->ba.object == NULL)
+			vm_map_entry_allocate_object(entry);
 		piece_end = entry->ba.end < end ? entry->ba.end : end;
 		piece->object = entry->ba.object;
 		vm_object_hold(piece->object);
@@ -402,7 +675,7 @@ kvm_vm_collect_memory(struct vmspace *vmspace, vm_offset_t hva,
 		piece->offset = entry->ba.offset + (hva - entry->ba.start);
 		piece->gpa = gpa;
 		piece->size = piece_end - hva;
-		vm_map_unlock_read(map);
+		vm_map_unlock(map);
 		lwkt_reltoken(&map->token);
 		STAILQ_INSERT_TAIL(pieces, piece, entry);
 		++*piece_count;
@@ -530,6 +803,7 @@ kvm_vm_destroy(struct kvm_vm *vm)
 		vm->machine = NULL;
 	}
 	if (vm->vmspace != NULL) {
+		pmap_del_all_cpus(vm->vmspace);
 		vmspace_rel(vm->vmspace);
 		vm->vmspace = NULL;
 	}

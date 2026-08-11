@@ -17,6 +17,7 @@
 
 #include <machine/clock.h>
 
+#include "../../vmm.h"
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "vmm_svm.h"
@@ -150,6 +151,7 @@ struct vmm_svm_interrupt_vcpu {
 	volatile int host_cpu;
 	volatile int host_apic_id;
 	volatile int running;
+	volatile u_int legacy_pending;
 	uint32_t timer_lvtt;
 	uint32_t timer_tmict;
 	uint32_t timer_tdcr;
@@ -166,6 +168,12 @@ static int vmm_svm_soft_irq_raise_msi(struct vmm_svm_interrupt_machine *,
     uint64_t, uint32_t);
 static int vmm_svm_soft_irq_set(struct vmm_svm_interrupt_machine *, uint32_t,
     bool);
+static int vmm_svm_interrupt_raise_legacy(
+    struct vmm_svm_interrupt_machine *, uint8_t);
+static int vmm_svm_interrupt_machine_get_ioapic(
+    struct vmm_svm_interrupt_machine *, struct vmm_ioapic_state *);
+static int vmm_svm_interrupt_machine_set_ioapic(
+    struct vmm_svm_interrupt_machine *, const struct vmm_ioapic_state *);
 static int vmm_svm_soft_vcpu_mmio(struct vmm_svm_interrupt_vcpu *, uint64_t,
     bool, uint32_t *);
 static void vmm_svm_soft_machine_destroy(struct vmm_svm_interrupt_machine *);
@@ -209,6 +217,10 @@ static int vmm_svm_lapic_read(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t *);
 static int vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t);
+static int vmm_svm_interrupt_vcpu_get_lapic(
+    struct vmm_svm_interrupt_vcpu *, void *, size_t);
+static int vmm_svm_interrupt_vcpu_set_lapic(
+    struct vmm_svm_interrupt_vcpu *, const void *, size_t);
 static void vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *);
@@ -224,9 +236,14 @@ const struct vmm_svm_interrupt_ops vmm_svm_soft_interrupt_ops = {
 	.machine_enable = vmm_svm_soft_machine_enable,
 	.irq_raise_msi = vmm_svm_soft_irq_raise_msi,
 	.irq_set = vmm_svm_soft_irq_set,
+	.irq_raise_legacy = vmm_svm_interrupt_raise_legacy,
+	.machine_get_ioapic = vmm_svm_interrupt_machine_get_ioapic,
+	.machine_set_ioapic = vmm_svm_interrupt_machine_set_ioapic,
 	.vcpu_mmio = vmm_svm_soft_vcpu_mmio,
 	.machine_destroy = vmm_svm_soft_machine_destroy,
 	.vcpu_create = vmm_svm_soft_vcpu_create,
+	.vcpu_get_lapic = vmm_svm_interrupt_vcpu_get_lapic,
+	.vcpu_set_lapic = vmm_svm_interrupt_vcpu_set_lapic,
 	.vcpu_destroy = vmm_svm_soft_vcpu_destroy,
 	.vcpu_enter = vmm_svm_soft_vcpu_enter,
 	.vcpu_leave = vmm_svm_soft_vcpu_leave,
@@ -239,9 +256,14 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.machine_enable = vmm_svm_avic_machine_enable,
 	.irq_raise_msi = vmm_svm_avic_irq_raise_msi,
 	.irq_set = vmm_svm_avic_irq_set,
+	.irq_raise_legacy = vmm_svm_interrupt_raise_legacy,
+	.machine_get_ioapic = vmm_svm_interrupt_machine_get_ioapic,
+	.machine_set_ioapic = vmm_svm_interrupt_machine_set_ioapic,
 	.vcpu_mmio = vmm_svm_avic_vcpu_mmio,
 	.machine_destroy = vmm_svm_avic_machine_destroy,
 	.vcpu_create = vmm_svm_avic_vcpu_create,
+	.vcpu_get_lapic = vmm_svm_interrupt_vcpu_get_lapic,
+	.vcpu_set_lapic = vmm_svm_interrupt_vcpu_set_lapic,
 	.vcpu_destroy = vmm_svm_avic_vcpu_destroy,
 	.vcpu_enter = vmm_svm_avic_vcpu_enter,
 	.vcpu_leave = vmm_svm_avic_vcpu_leave,
@@ -334,6 +356,73 @@ vmm_svm_soft_irq_set(struct vmm_svm_interrupt_machine *machine,
 		return 0;
 	}
 	vmm_svm_ioapic_deliver_locked(machine, gsi);
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+static int
+vmm_svm_interrupt_raise_legacy(struct vmm_svm_interrupt_machine *machine,
+    uint8_t vector)
+{
+	struct vmm_svm_interrupt_vcpu *target;
+
+	lwkt_gettoken(&machine->token);
+	target = machine->targets[0];
+	if (target == NULL) {
+		lwkt_reltoken(&machine->token);
+		return ENOENT;
+	}
+	if (vector < 32) {
+		atomic_set_int(&target->legacy_pending, __BIT(vector));
+		(void)vmm_vcpu_kick(target->vcpu);
+	} else {
+		vmm_svm_avic_deliver(target, vector);
+	}
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+static int
+vmm_svm_interrupt_machine_get_ioapic(
+	struct vmm_svm_interrupt_machine *machine, struct vmm_ioapic_state *state)
+{
+	uint32_t pin;
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+	bzero(state, sizeof(*state));
+	state->base = VMM_IOAPIC_BASE;
+	lwkt_gettoken(&machine->token);
+	state->select = machine->ioapic_select;
+	state->id = machine->ioapic_id;
+	for (pin = 0; pin < VMM_IOAPIC_PIN_COUNT; ++pin) {
+		state->redir[pin] = machine->ioapic_redir[pin];
+		if (machine->ioapic_level[pin])
+			state->irr |= 1U << pin;
+	}
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+static int
+vmm_svm_interrupt_machine_set_ioapic(
+	struct vmm_svm_interrupt_machine *machine,
+	const struct vmm_ioapic_state *state)
+{
+	uint32_t pin;
+
+	if (machine == NULL || state == NULL || state->base != VMM_IOAPIC_BASE ||
+	    state->id > 0x0fU)
+		return EINVAL;
+	lwkt_gettoken(&machine->token);
+	machine->ioapic_select = state->select & 0xffU;
+	machine->ioapic_id = state->id;
+	for (pin = 0; pin < VMM_IOAPIC_PIN_COUNT; ++pin) {
+		machine->ioapic_redir[pin] = state->redir[pin];
+		machine->ioapic_level[pin] = (state->irr & (1U << pin)) != 0;
+		if (machine->ioapic_level[pin])
+			vmm_svm_ioapic_deliver_locked(machine, pin);
+	}
 	lwkt_reltoken(&machine->token);
 	return 0;
 }
@@ -467,6 +556,14 @@ vmm_svm_soft_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 	if (vcpu == NULL)
 		return;
 	vmm_svm_lapic_timer_check(vcpu);
+	value = atomic_swap_int(&vcpu->legacy_pending, 0);
+	if (value != 0) {
+		vector = fls(value) - 1;
+		if (vmm_svm_vcpu_inject_interrupt(vcpu->vcpu, vector) != 0)
+			atomic_set_int(&vcpu->legacy_pending, __BIT(vector));
+		else
+			return;
+	}
 	for (word = 7; word >= 1; --word) {
 		irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
 		    VMM_SVM_APIC_IRR_BASE + word * 0x10);
@@ -521,6 +618,61 @@ vmm_svm_avic_read_register(struct vmm_svm_interrupt_vcpu *vcpu,
 	    reg > PAGE_SIZE - sizeof(*value) || (reg & 3) != 0)
 		return EINVAL;
 	return vmm_svm_lapic_read(vcpu, reg, value);
+}
+
+static int
+vmm_svm_interrupt_vcpu_get_lapic(struct vmm_svm_interrupt_vcpu *vcpu,
+    void *registers, size_t size)
+{
+	uint8_t *state;
+	uint32_t value;
+	uint32_t reg;
+	int error;
+
+	if (vcpu == NULL || registers == NULL || size != 0x400U)
+		return EINVAL;
+	state = registers;
+	for (reg = 0; reg < size; reg += sizeof(value)) {
+		error = vmm_svm_lapic_read(vcpu, reg, &value);
+		if (error != 0)
+			return error;
+		bcopy(&value, state + reg, sizeof(value));
+	}
+	return 0;
+}
+
+static int
+vmm_svm_interrupt_vcpu_set_lapic(struct vmm_svm_interrupt_vcpu *vcpu,
+    const void *registers, size_t size)
+{
+	const uint8_t *state;
+	uint32_t divide;
+	uint32_t value;
+
+	if (vcpu == NULL || registers == NULL || size != 0x400U)
+		return EINVAL;
+	state = registers;
+	bcopy(state, vcpu->apic_page, size);
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_ID, vcpu->apic_id << 24);
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_VERSION,
+	    VMM_SVM_APIC_VERSION_VALUE);
+	vcpu->timer_lvtt = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_LVTT) &
+	    VMM_SVM_APIC_LVT_TIMER_VALID;
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_LVTT, vcpu->timer_lvtt);
+	vcpu->timer_tdcr = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_TDCR) &
+	    VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+	vmm_svm_avic_write(vcpu, VMM_SVM_APIC_TDCR, vcpu->timer_tdcr);
+	divide = ((vcpu->timer_tdcr & 0x3U) |
+	    ((vcpu->timer_tdcr & 0x8U) >> 1)) + 1;
+	vcpu->timer_divisor = 1U << (divide & 0x7U);
+	value = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_TMICT);
+	vmm_svm_lapic_timer_arm(vcpu, value);
+	if (vcpu->machine->logical_table != NULL) {
+		lwkt_gettoken(&vcpu->machine->token);
+		vmm_svm_avic_logical_update_locked(vcpu);
+		lwkt_reltoken(&vcpu->machine->token);
+	}
+	return 0;
 }
 
 static void
@@ -647,15 +799,19 @@ vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 	case VMM_SVM_APIC_LDR:
 		value &= 0xff000000U;
 		vmm_svm_avic_write(vcpu, reg, value);
-		lwkt_gettoken(&vcpu->machine->token);
-		vmm_svm_avic_logical_update_locked(vcpu);
-		lwkt_reltoken(&vcpu->machine->token);
+		if (vcpu->machine->logical_table != NULL) {
+			lwkt_gettoken(&vcpu->machine->token);
+			vmm_svm_avic_logical_update_locked(vcpu);
+			lwkt_reltoken(&vcpu->machine->token);
+		}
 		return 0;
 	case VMM_SVM_APIC_DFR:
 		vmm_svm_avic_write(vcpu, reg, value);
-		lwkt_gettoken(&vcpu->machine->token);
-		vmm_svm_avic_logical_update_locked(vcpu);
-		lwkt_reltoken(&vcpu->machine->token);
+		if (vcpu->machine->logical_table != NULL) {
+			lwkt_gettoken(&vcpu->machine->token);
+			vmm_svm_avic_logical_update_locked(vcpu);
+			lwkt_reltoken(&vcpu->machine->token);
+		}
 		return 0;
 	case VMM_SVM_APIC_EOI:
 		(void)vmm_svm_lapic_eoi(vcpu);
@@ -922,6 +1078,17 @@ vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *avic)
 
 	if (avic == NULL)
 		return;
+	if (atomic_load_acq_int(&avic->legacy_pending) != 0) {
+		uint32_t pending;
+		uint8_t vector;
+
+		pending = atomic_swap_int(&avic->legacy_pending, 0);
+		if (pending != 0) {
+			vector = fls(pending) - 1;
+			if (vmm_svm_vcpu_inject_interrupt(avic->vcpu, vector) != 0)
+				atomic_set_int(&avic->legacy_pending, __BIT(vector));
+		}
+	}
 	machine = avic->machine;
 	cpu = os_curcpu_number();
 	apic_id = CPUID_TO_APICID(cpu);
@@ -1123,13 +1290,17 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 	shorthand = low & VMM_SVM_APIC_ICR_SHORTHAND;
 	vector = low & 0xffU;
 	/*
-	 * Only fixed-vector IPIs have an AVIC delivery path today.  Returning
-	 * unhandled preserves the exit for the frontend instead of silently
-	 * dropping NMI, INIT, or SIPI.
+	 * A broadcast without a recipient is architecturally complete.  In
+	 * particular, SeaBIOS issues INIT | all-excluding-self for a one-vCPU
+	 * guest.  A targeted NMI, INIT, or SIPI remains unhandled until the
+	 * vCPU lifecycle implements it.
 	 */
-	if (delivery != VMM_SVM_APIC_ICR_FIXED)
+	if (delivery != VMM_SVM_APIC_ICR_FIXED &&
+	    delivery != VMM_SVM_APIC_ICR_NMI &&
+	    delivery != VMM_SVM_APIC_ICR_INIT &&
+	    delivery != VMM_SVM_APIC_ICR_SIPI)
 		return 0;
-	if (vector < 16)
+	if (delivery == VMM_SVM_APIC_ICR_FIXED && vector < 16)
 		return 1;
 	destination = x2apic ? high : high >> 24;
 	lwkt_gettoken(&machine->token);
@@ -1161,6 +1332,10 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 					continue;
 				}
 			}
+		}
+		if (delivery != VMM_SVM_APIC_ICR_FIXED) {
+			lwkt_reltoken(&machine->token);
+			return 0;
 		}
 		vmm_svm_avic_deliver(target, (uint8_t)vector);
 	}

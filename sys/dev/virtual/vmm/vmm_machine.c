@@ -14,36 +14,97 @@
 #include "vmm_internal.h"
 #include "vmm_io.h"
 #include "vmm_machine.h"
+#include "x64/vmm_x64_pic.h"
+#include "x64/vmm_x64_pit.h"
 
 MALLOC_DEFINE(M_VMM, "vmm", "vmm runtime objects");
 
 int
 vmm_machine_create_irqchip(vmm_machine_t machine)
 {
+	struct vmm_x64_pic *pic;
 	int error;
 
 	if (machine == NULL)
 		return EINVAL;
+	pic = vmm_x64_pic_alloc();
+	if (pic == NULL)
+		return ENOMEM;
 
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying || machine->vcpu_count != 0 ||
 	    machine->run_count != 0) {
 		lwkt_reltoken(&machine->token);
+		vmm_x64_pic_free(pic);
 		return EBUSY;
 	}
 	if (machine->irqchip) {
 		lwkt_reltoken(&machine->token);
+		vmm_x64_pic_free(pic);
 		return EALREADY;
 	}
 	if (machine->backend->machine_create_irqchip == NULL) {
 		lwkt_reltoken(&machine->token);
+		vmm_x64_pic_free(pic);
 		return ENOTSUP;
 	}
 	error = machine->backend->machine_create_irqchip(machine);
-	if (error == 0)
+	if (error == 0) {
+		machine->pic = pic;
 		machine->irqchip = true;
+		pic = NULL;
+	}
 	lwkt_reltoken(&machine->token);
+	if (pic != NULL)
+		vmm_x64_pic_free(pic);
 	return error;
+}
+
+int
+vmm_machine_create_pit(vmm_machine_t machine)
+{
+
+	if (machine == NULL)
+		return EINVAL;
+	return vmm_x64_pit_create(machine);
+}
+
+int
+vmm_machine_get_pit(vmm_machine_t machine, struct vmm_pit_state *state)
+{
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+	return vmm_x64_pit_get_state(machine, state);
+}
+
+int
+vmm_machine_get_pic(vmm_machine_t machine, struct vmm_pic_state *state)
+{
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+	return vmm_x64_pic_get_state(machine, state);
+}
+
+int
+vmm_machine_set_pic(vmm_machine_t machine,
+	const struct vmm_pic_state *state)
+{
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+	return vmm_x64_pic_set_state(machine, state);
+}
+
+int
+vmm_machine_set_pit(vmm_machine_t machine,
+	const struct vmm_pit_state *state)
+{
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+	return vmm_x64_pit_set_state(machine, state);
 }
 
 bool
@@ -87,20 +148,16 @@ vmm_machine_raise_irq(vmm_machine_t machine, uint32_t gsi)
 	if (machine == NULL)
 		return EINVAL;
 
-	lwkt_gettoken(&machine->token);
-	if (machine->destroying || !machine->irqchip ||
-	    machine->backend->machine_raise_irq == NULL) {
-		lwkt_reltoken(&machine->token);
-		return ENOTSUP;
-	}
-	error = machine->backend->machine_raise_irq(machine, gsi);
-	lwkt_reltoken(&machine->token);
-	return error;
+	error = vmm_machine_set_irq(machine, gsi, true);
+	if (error != 0)
+		return error;
+	return vmm_machine_set_irq(machine, gsi, false);
 }
 
 int
 vmm_machine_set_irq(vmm_machine_t machine, uint32_t gsi, bool level)
 {
+	int vector;
 	int error;
 
 	if (machine == NULL)
@@ -108,11 +165,57 @@ vmm_machine_set_irq(vmm_machine_t machine, uint32_t gsi, bool level)
 
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying || !machine->irqchip ||
-	    machine->backend->machine_set_irq == NULL) {
+	    machine->backend->machine_set_irq == NULL ||
+	    machine->backend->machine_raise_legacy == NULL) {
 		lwkt_reltoken(&machine->token);
 		return ENOTSUP;
 	}
 	error = machine->backend->machine_set_irq(machine, gsi, level);
+	if (error == 0 && gsi < 16) {
+		error = vmm_x64_pic_set_irq_locked(machine, gsi, level, &vector);
+		if (error == 0 && vector >= 0)
+			error = machine->backend->machine_raise_legacy(machine,
+			    (uint8_t)vector);
+	}
+	lwkt_reltoken(&machine->token);
+	return error;
+}
+
+int
+vmm_machine_get_ioapic(vmm_machine_t machine, struct vmm_ioapic_state *state)
+{
+	int error;
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&machine->token);
+	if (machine->destroying || !machine->irqchip ||
+	    machine->backend->machine_get_ioapic == NULL) {
+		lwkt_reltoken(&machine->token);
+		return ENOTSUP;
+	}
+	error = machine->backend->machine_get_ioapic(machine, state);
+	lwkt_reltoken(&machine->token);
+	return error;
+}
+
+int
+vmm_machine_set_ioapic(vmm_machine_t machine,
+	const struct vmm_ioapic_state *state)
+{
+	int error;
+
+	if (machine == NULL || state == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&machine->token);
+	if (machine->destroying || !machine->irqchip ||
+	    machine->backend->machine_set_ioapic == NULL) {
+		lwkt_reltoken(&machine->token);
+		return ENOTSUP;
+	}
+	error = machine->backend->machine_set_ioapic(machine, state);
 	lwkt_reltoken(&machine->token);
 	return error;
 }
@@ -183,8 +286,9 @@ vmm_machine_destroy(vmm_machine_t machine)
 	machine->destroying = true;
 	lwkt_reltoken(&machine->token);
 
+	vmm_x64_pit_destroy(machine);
+	vmm_x64_pic_destroy(machine);
 	machine->backend->machine_destroy(machine);
-	pmap_del_all_cpus(machine->vmspace);
 	kfree(machine, M_VMM);
 
 	lwkt_gettoken(&vmm_token);

@@ -211,6 +211,7 @@ fail_vmm:
 	(void)vmm_machine_destroy(mach->vmm_machine);
 	mach->vmm_machine = NULL;
 fail_vmspace:
+	pmap_del_all_cpus(mach->vm);
 	os_vmspace_destroy(mach->vm);
 	mach->vm = NULL;
 fail_machine:
@@ -251,6 +252,7 @@ nvmm_syscall_machine_destroy_locked(struct nvmm_machine *mach)
 		return error;
 	mach->vmm_machine = NULL;
 
+	pmap_del_all_cpus(mach->vm);
 	os_vmspace_destroy(mach->vm);
 	mach->vm = NULL;
 
