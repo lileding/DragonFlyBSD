@@ -143,6 +143,7 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	case KVM_CAP_XSAVE:
 	case KVM_CAP_XCRS:
 	case KVM_CAP_VCPU_EVENTS:
+	case KVM_CAP_ADJUST_CLOCK:
 	case KVM_CAP_SET_IDENTITY_MAP_ADDR:
 	case KVM_CAP_IMMEDIATE_EXIT:
 		ap->a_sysmsg->sysmsg_result = 1;
