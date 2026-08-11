@@ -46,6 +46,10 @@ main(void)
 		err(1, "KVM_CREATE_VM");
 	if (ioctl(vm_fd, KVM_CREATE_IRQCHIP, 0) != 0)
 		err(1, "KVM_CREATE_IRQCHIP");
+	/* QEMU creates idle vCPUs before its in-kernel PIT. */
+	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
+	if (vcpu_fd < 0)
+		err(1, "KVM_CREATE_VCPU");
 	bzero(&pit_config, sizeof(pit_config));
 	if (ioctl(vm_fd, KVM_CREATE_PIT2, &pit_config) != 0)
 		err(1, "KVM_CREATE_PIT2");
@@ -92,9 +96,6 @@ main(void)
 	memory_region.userspace_addr = (uintptr_t)guest_memory;
 	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &memory_region) != 0)
 		err(1, "KVM_SET_USER_MEMORY_REGION");
-	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
-	if (vcpu_fd < 0)
-		err(1, "KVM_CREATE_VCPU");
 	run_size = ioctl(vm_fd, KVM_GET_VCPU_MMAP_SIZE);
 	if (run_size != 2 * getpagesize())
 		errx(1, "unexpected KVM_RUN mapping size %d", run_size);

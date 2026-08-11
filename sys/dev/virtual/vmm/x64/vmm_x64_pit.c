@@ -84,7 +84,7 @@ vmm_x64_pit_create(struct vmm_machine *machine)
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying || !machine->irqchip) {
 		error = ENXIO;
-	} else if (machine->vcpu_count != 0 || machine->run_count != 0) {
+	} else if (machine->run_count != 0) {
 		error = EBUSY;
 	} else if (machine->pit != NULL) {
 		error = EEXIST;

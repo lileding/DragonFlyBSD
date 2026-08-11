@@ -110,8 +110,8 @@ CTASSERT(sizeof(struct vmm_pit_channel_state) == 24);
 
 /*
  * Creates the machine's single in-kernel 8254 PIT.  The machine must already
- * have an irqchip and no vCPU may have been created.  A second call returns
- * EEXIST.  The PIT is destroyed automatically with its machine.
+ * have an irqchip and no vCPU may be running.  A second call returns EEXIST.
+ * The PIT is destroyed automatically with its machine.
  */
 int vmm_machine_create_pit(vmm_machine_t machine);
 
