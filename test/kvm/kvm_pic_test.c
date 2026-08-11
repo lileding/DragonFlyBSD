@@ -101,6 +101,8 @@ main(void)
 		err(1, "KVM_CREATE_VM");
 	if (ioctl(vm_fd, KVM_CREATE_IRQCHIP, 0) != 0)
 		err(1, "KVM_CREATE_IRQCHIP");
+	if ((KVM_SET_IRQCHIP & IOC_IN) == 0)
+		errx(1, "KVM_SET_IRQCHIP does not copy input on DragonFly");
 
 	bzero(&irqchip, sizeof(irqchip));
 	irqchip.chip_id = KVM_IRQCHIP_PIC_MASTER;

@@ -2270,10 +2270,24 @@ struct kvm_vfio_spapr_tce {
 #define KVM_CREATE_IRQCHIP        _IO(KVMIO,   0x60)
 #define KVM_IRQ_LINE              _IOW(KVMIO,  0x61, struct kvm_irq_level)
 #define KVM_GET_IRQCHIP           _IOWR(KVMIO, 0x62, struct kvm_irqchip)
+#ifdef __DragonFly__
+/*
+ * Linux historically encodes KVM_SET_IRQCHIP and KVM_SET_PIT as _IOR.
+ * Linux KVM copies their payloads explicitly, so that direction does not
+ * control its copyin.  DragonFly ioctl(2) does use it, therefore both
+ * commands must be input.
+ */
+#define KVM_SET_IRQCHIP           _IOW(KVMIO,  0x63, struct kvm_irqchip)
+#else
 #define KVM_SET_IRQCHIP           _IOR(KVMIO,  0x63, struct kvm_irqchip)
+#endif
 #define KVM_CREATE_PIT            _IO(KVMIO,   0x64)
 #define KVM_GET_PIT               _IOWR(KVMIO, 0x65, struct kvm_pit_state)
+#ifdef __DragonFly__
+#define KVM_SET_PIT               _IOW(KVMIO,  0x66, struct kvm_pit_state)
+#else
 #define KVM_SET_PIT               _IOR(KVMIO,  0x66, struct kvm_pit_state)
+#endif
 #define KVM_IRQ_LINE_STATUS       _IOWR(KVMIO, 0x67, struct kvm_irq_level)
 #define KVM_REGISTER_COALESCED_MMIO \
 			_IOW(KVMIO,  0x67, struct kvm_coalesced_mmio_zone)
