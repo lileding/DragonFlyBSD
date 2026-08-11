@@ -463,6 +463,14 @@ main(void)
 	ioevent.flags |= KVM_IOEVENTFD_FLAG_DEASSIGN;
 	if (ioctl(vm_fd, KVM_IOEVENTFD, &ioevent) != 0)
 		err(1, "KVM_IOEVENTFD deassign");
+	ioevent.len = 0;
+	ioevent.flags &= ~(KVM_IOEVENTFD_FLAG_DATAMATCH |
+	    KVM_IOEVENTFD_FLAG_DEASSIGN);
+	if (ioctl(vm_fd, KVM_IOEVENTFD, &ioevent) != 0)
+		err(1, "KVM_IOEVENTFD any-length bind");
+	ioevent.flags |= KVM_IOEVENTFD_FLAG_DEASSIGN;
+	if (ioctl(vm_fd, KVM_IOEVENTFD, &ioevent) != 0)
+		err(1, "KVM_IOEVENTFD any-length deassign");
 	if (close(eventfd.fd) != 0)
 		err(1, "close ioeventfd");
 	KVM_TEST_STEP("step: ioeventfd");

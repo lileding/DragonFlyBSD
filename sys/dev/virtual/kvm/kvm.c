@@ -137,6 +137,7 @@ kvm_ioctl_capability(struct dev_ioctl_args *ap)
 	case KVM_CAP_JOIN_MEMORY_REGIONS_WORKS:
 	case KVM_CAP_MP_STATE:
 	case KVM_CAP_IOEVENTFD:
+	case KVM_CAP_IOEVENTFD_ANY_LENGTH:
 	case KVM_CAP_INTERNAL_ERROR_DATA:
 	case KVM_CAP_DEBUGREGS:
 	case KVM_CAP_XSAVE:
