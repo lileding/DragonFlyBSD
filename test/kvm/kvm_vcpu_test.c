@@ -20,6 +20,19 @@
 #include <linux/kvm.h>
 
 #define KVM_TEST_CPUID_ENTRIES	256
+#define KVM_TEST_LAPIC_VERSION	0x030U
+#define KVM_TEST_LAPIC_TPR		0x080U
+#define KVM_TEST_LAPIC_PPR		0x0a0U
+#define KVM_TEST_LAPIC_LDR		0x0d0U
+#define KVM_TEST_LAPIC_DFR		0x0e0U
+#define KVM_TEST_LAPIC_SVR		0x0f0U
+#define KVM_TEST_LAPIC_LVT_TIMER	0x320U
+#define KVM_TEST_LAPIC_LVT_THERMAL	0x330U
+#define KVM_TEST_LAPIC_LVT_PERF	0x340U
+#define KVM_TEST_LAPIC_LVT0		0x350U
+#define KVM_TEST_LAPIC_LVT1		0x360U
+#define KVM_TEST_LAPIC_LVT_ERROR	0x370U
+#define KVM_TEST_LAPIC_LVT_MASKED	0x00010000U
 
 #define KVM_TEST_STEP(message) do { \
 	puts(message); \
@@ -164,6 +177,51 @@ kvm_test_mp_state(int vcpu_fd)
 		err(1, "KVM_GET_MP_STATE");
 	if (state.mp_state != KVM_MP_STATE_RUNNABLE)
 		errx(1, "unexpected KVM MP state");
+}
+
+static void
+kvm_test_lapic_reset(int vcpu_fd)
+{
+	static const size_t lvt_registers[] = {
+		KVM_TEST_LAPIC_LVT_TIMER,
+		KVM_TEST_LAPIC_LVT_THERMAL,
+		KVM_TEST_LAPIC_LVT_PERF,
+		KVM_TEST_LAPIC_LVT0,
+		KVM_TEST_LAPIC_LVT1,
+		KVM_TEST_LAPIC_LVT_ERROR,
+	};
+	struct kvm_lapic_state state;
+	size_t index;
+	uint32_t value;
+
+	bzero(&state, sizeof(state));
+	if (ioctl(vcpu_fd, KVM_GET_LAPIC, &state) != 0)
+		err(1, "KVM_GET_LAPIC reset state");
+	bcopy(state.regs + KVM_TEST_LAPIC_VERSION, &value, sizeof(value));
+	if (value != 0x00140014U)
+		errx(1, "KVM LAPIC version %#x", value);
+	bcopy(state.regs + KVM_TEST_LAPIC_TPR, &value, sizeof(value));
+	if (value != 0)
+		errx(1, "KVM LAPIC reset TPR %#x", value);
+	bcopy(state.regs + KVM_TEST_LAPIC_PPR, &value, sizeof(value));
+	if (value != 0)
+		errx(1, "KVM LAPIC reset PPR %#x", value);
+	bcopy(state.regs + KVM_TEST_LAPIC_LDR, &value, sizeof(value));
+	if (value != 0)
+		errx(1, "KVM LAPIC reset LDR %#x", value);
+	bcopy(state.regs + KVM_TEST_LAPIC_DFR, &value, sizeof(value));
+	if (value != UINT32_MAX)
+		errx(1, "KVM LAPIC reset DFR %#x", value);
+	bcopy(state.regs + KVM_TEST_LAPIC_SVR, &value, sizeof(value));
+	if (value != 0xffU)
+		errx(1, "KVM LAPIC reset SVR %#x", value);
+	for (index = 0; index < sizeof(lvt_registers) / sizeof(lvt_registers[0]);
+	    ++index) {
+		bcopy(state.regs + lvt_registers[index], &value, sizeof(value));
+		if (value != KVM_TEST_LAPIC_LVT_MASKED)
+			errx(1, "KVM LAPIC reset LVT %#zx is %#x",
+			    lvt_registers[index], value);
+	}
 }
 
 static void
@@ -443,6 +501,8 @@ main(void)
 	KVM_TEST_STEP("step: xcrs");
 	kvm_test_mp_state(vcpu_fd);
 	KVM_TEST_STEP("step: mp-state");
+	kvm_test_lapic_reset(vcpu_fd);
+	KVM_TEST_STEP("step: lapic-reset");
 	kvm_test_lapic(vcpu_fd);
 	KVM_TEST_STEP("step: lapic");
 	kvm_test_extended_state(control_fd, vcpu_fd);

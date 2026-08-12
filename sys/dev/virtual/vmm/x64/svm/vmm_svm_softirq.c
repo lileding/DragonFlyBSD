@@ -467,13 +467,21 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	}
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_ID, soft->apic_id << 24);
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_VERSION, VMM_SVM_APIC_VERSION_VALUE);
-	vmm_svm_softirq_write(soft, VMM_SVM_APIC_SVR,
-	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_SVR, 0xff);
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVTT,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT_THERMAL,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT_PERF,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT0,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT1,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT_ERROR,
+	    VMM_SVM_APIC_LVT_MASKED);
 	soft->timer_divisor = 2;
-	if (soft->apic_id < 8)
-		vmm_svm_softirq_write(soft, VMM_SVM_APIC_LDR,
-		    1U << (24 + soft->apic_id));
 	lwkt_gettoken(&machine->token);
 	if (machine->targets[soft->apic_id] != NULL) {
 		lwkt_reltoken(&machine->token);

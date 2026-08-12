@@ -22,6 +22,7 @@
 #define KVM_LAPIC_PPR_GDT_OFFSET	0x3000U
 #define KVM_LAPIC_PPR_TPR		0x080U
 #define KVM_LAPIC_PPR_PPR		0x0a0U
+#define KVM_LAPIC_PPR_SVR		0x0f0U
 #define KVM_LAPIC_PPR_IRR		0x200U
 
 static void
@@ -123,6 +124,7 @@ main(void)
 	int vm_fd;
 	int vcpu_fd;
 	int run_size;
+	uint32_t value;
 
 	control_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
 	if (control_fd < 0)
@@ -149,6 +151,13 @@ main(void)
 	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
 	if (vcpu_fd < 0)
 		err(1, "KVM_CREATE_VCPU");
+	bzero(&lapic, sizeof(lapic));
+	if (ioctl(vcpu_fd, KVM_GET_LAPIC, &lapic) != 0)
+		err(1, "KVM_GET_LAPIC before enable");
+	value = 0x1ffU;
+	bcopy(&value, lapic.regs + KVM_LAPIC_PPR_SVR, sizeof(value));
+	if (ioctl(vcpu_fd, KVM_SET_LAPIC, &lapic) != 0)
+		err(1, "KVM_SET_LAPIC enable");
 	kvm_lapic_ppr_set_protected_entry(vcpu_fd);
 	run_size = ioctl(vm_fd, KVM_GET_VCPU_MMAP_SIZE);
 	if (run_size != 2 * getpagesize())
