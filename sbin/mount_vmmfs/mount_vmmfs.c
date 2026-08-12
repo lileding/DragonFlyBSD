@@ -38,18 +38,19 @@ main(int argc, char **argv)
 	}
 	argc -= optind;
 	argv += optind;
-	if (argc != 1)
+	if (argc != 2)
 		usage();
 
-	checkpath(argv[0], mntpath);
+	/* mount(8) passes a synthetic special followed by the mountpoint. */
+	checkpath(argv[1], mntpath);
 	if (mount("vmmfs", mntpath, mntflags, NULL) != 0)
-		err(EX_OSERR, "mount vmm on %s", mntpath);
+		err(EX_OSERR, "mount vmmfs on %s", mntpath);
 	return 0;
 }
 
 static void
 usage(void)
 {
-	fprintf(stderr, "usage: mount_vmmfs [-o options] mountpoint\n");
+	fprintf(stderr, "usage: mount_vmmfs [-o options] special mountpoint\n");
 	exit(EX_USAGE);
 }
