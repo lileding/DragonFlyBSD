@@ -181,6 +181,7 @@ static int vmm_svm_softirq_vcpu_exit(struct vmm_svm_interrupt_vcpu *, uint64_t,
 static int vmm_svm_softirq_route_icr(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t, int);
 static void vmm_svm_softirq_deliver(struct vmm_svm_interrupt_vcpu *, uint8_t);
+static bool vmm_svm_lapic_enabled(const struct vmm_svm_interrupt_vcpu *);
 static uint32_t vmm_svm_softirq_read(const struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_softirq_write(const struct vmm_svm_interrupt_vcpu *,
@@ -527,6 +528,8 @@ vmm_svm_softirq_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 		}
 		return;
 	}
+	if (!vmm_svm_lapic_enabled(vcpu))
+		return;
 	for (word = 7; word >= 1; --word) {
 		irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
 		    VMM_SVM_APIC_IRR_BASE + word * 0x10);
@@ -867,12 +870,22 @@ vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 	vmm_svm_softirq_write(vcpu, reg, value);
 	return 0;
 }
+
+static bool
+vmm_svm_lapic_enabled(const struct vmm_svm_interrupt_vcpu *vcpu)
+{
+
+	return (vcpu->apic_base & VMM_SVM_APICBASE_ENABLED) != 0 &&
+	    (vmm_svm_softirq_read(vcpu, VMM_SVM_APIC_SVR) &
+	    VMM_SVM_APIC_SVR_ENABLE) != 0;
+}
+
 static void
 vmm_svm_softirq_deliver(struct vmm_svm_interrupt_vcpu *vcpu, uint8_t vector)
 {
 	volatile uint32_t *irr;
 
-	if (vector < 32)
+	if (vector < 32 || !vmm_svm_lapic_enabled(vcpu))
 		return;
 	irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
