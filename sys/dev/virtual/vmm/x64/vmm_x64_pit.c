@@ -27,6 +27,7 @@ struct vmm_x64_pit {
 	struct vmm_machine *machine;
 	struct callout callout;
 	struct vmm_pit_state state;
+	uint64_t deadline;
 	bool destroying;
 };
 
@@ -280,7 +281,8 @@ vmm_x64_pit_timeout(void *arg)
 	raise_irq = !pit->destroying &&
 	    (pit->state.flags & VMM_PIT_FLAG_HPET_LEGACY) == 0 &&
 	    pit->state.channels[0].gate != 0 &&
-	    pit->state.channels[0].count != 0;
+	    pit->state.channels[0].count != 0 && pit->deadline != 0 &&
+	    now >= pit->deadline;
 	if (!pit->destroying)
 		vmm_x64_pit_arm(pit, now);
 	lwkt_reltoken(&pit->token);
@@ -415,6 +417,7 @@ vmm_x64_pit_arm(struct vmm_x64_pit *pit, uint64_t now)
 	    (pit->state.flags & VMM_PIT_FLAG_HPET_LEGACY) != 0 ||
 	    channel->gate == 0 || channel->count == 0 ||
 	    channel->count_load_time <= 0) {
+		pit->deadline = 0;
 		callout_stop_async(&pit->callout);
 		return;
 	}
@@ -424,6 +427,7 @@ vmm_x64_pit_arm(struct vmm_x64_pit *pit, uint64_t now)
 		remaining = elapsed == 0 ? channel->count : channel->count - elapsed;
 	} else {
 		if (elapsed >= channel->count) {
+			pit->deadline = 0;
 			callout_stop_async(&pit->callout);
 			return;
 		}
@@ -432,6 +436,8 @@ vmm_x64_pit_arm(struct vmm_x64_pit *pit, uint64_t now)
 	delay = vmm_x64_pit_count_ns(remaining);
 	callout_ticks = (delay * hz + VMM_X64_PIT_NSEC_PER_SEC - 1) /
 	    VMM_X64_PIT_NSEC_PER_SEC;
+	/* Ignore early host callouts; only this deadline may emit guest IRQ0. */
+	pit->deadline = now + delay;
 	callout_reset(&pit->callout, (int)MAX(callout_ticks, 1),
 	    vmm_x64_pit_timeout, pit);
 }
