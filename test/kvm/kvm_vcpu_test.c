@@ -33,6 +33,7 @@
 #define KVM_TEST_LAPIC_LVT1		0x360U
 #define KVM_TEST_LAPIC_LVT_ERROR	0x370U
 #define KVM_TEST_LAPIC_LVT_MASKED	0x00010000U
+#define KVM_TEST_LAPIC_LVT_EXTINT	0x00000700U
 
 #define KVM_TEST_STEP(message) do { \
 	puts(message); \
@@ -218,7 +219,8 @@ kvm_test_lapic_reset(int vcpu_fd)
 	for (index = 0; index < sizeof(lvt_registers) / sizeof(lvt_registers[0]);
 	    ++index) {
 		bcopy(state.regs + lvt_registers[index], &value, sizeof(value));
-		if (value != KVM_TEST_LAPIC_LVT_MASKED)
+		if (value != (lvt_registers[index] == KVM_TEST_LAPIC_LVT0 ?
+		    KVM_TEST_LAPIC_LVT_EXTINT : KVM_TEST_LAPIC_LVT_MASKED))
 			errx(1, "KVM LAPIC reset LVT %#zx is %#x",
 			    lvt_registers[index], value);
 	}

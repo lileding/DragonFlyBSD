@@ -26,7 +26,6 @@
 
 #define VMM_SVM_SOFTIRQ_LAPIC_BASE		0xfee00000ULL
 #define VMM_SVM_SOFTIRQ_MAX_APIC_ID	0xfeU
-#define VMM_SVM_SOFTIRQ_VECTOR_WORDS	8U
 #define VMM_SVM_MSR_APICBASE			0x01bU
 #define VMM_SVM_APICBASE_BSP			0x00000100ULL
 #define VMM_SVM_APICBASE_ENABLED		0x00000800ULL
@@ -76,6 +75,7 @@
 #define VMM_SVM_APIC_LVT_VECTOR_MASK	0x000000ffU
 #define VMM_SVM_APIC_LVT_DELIVERY_MASK	0x00000700U
 #define VMM_SVM_APIC_LVT_SEND_PENDING	0x00001000U
+#define VMM_SVM_APIC_LVT_EXTINT		0x00000700U
 #define VMM_SVM_APIC_LVT_POLARITY		0x00002000U
 #define VMM_SVM_APIC_LVT_REMOTE_IRR		0x00004000U
 #define VMM_SVM_APIC_LVT_LEVEL		0x00008000U
@@ -140,7 +140,6 @@ struct vmm_svm_interrupt_vcpu {
 	paddr_t apic_page_pa;
 	uint32_t apic_id;
 	uint64_t apic_base;
-	volatile u_int legacy_pending[VMM_SVM_SOFTIRQ_VECTOR_WORDS];
 	bool delivery_pending;
 	bool delivery_legacy;
 	uint8_t delivery_vector;
@@ -191,6 +190,7 @@ static int vmm_svm_softirq_route_icr(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t, int);
 static void vmm_svm_softirq_deliver(struct vmm_svm_interrupt_vcpu *, uint8_t);
 static bool vmm_svm_lapic_enabled(const struct vmm_svm_interrupt_vcpu *);
+static bool vmm_svm_lapic_accepts_pic(const struct vmm_svm_interrupt_vcpu *);
 static uint32_t vmm_svm_softirq_read(const struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_softirq_write(const struct vmm_svm_interrupt_vcpu *,
@@ -353,14 +353,13 @@ vmm_svm_interrupt_raise_legacy(struct vmm_svm_interrupt_machine *machine,
 {
 	struct vmm_svm_interrupt_vcpu *target;
 
+	(void)vector;
 	lwkt_gettoken(&machine->token);
 	target = machine->targets[0];
 	if (target == NULL) {
 		lwkt_reltoken(&machine->token);
 		return ENOENT;
 	}
-	atomic_set_int(&target->legacy_pending[vector / 32],
-	    __BIT(vector & 31));
 	(void)vmm_vcpu_kick(target->vcpu);
 	lwkt_reltoken(&machine->token);
 	return 0;
@@ -510,6 +509,7 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT_PERF,
 	    VMM_SVM_APIC_LVT_MASKED);
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT0,
+	    soft->apic_id == 0 ? VMM_SVM_APIC_LVT_EXTINT :
 	    VMM_SVM_APIC_LVT_MASKED);
 	vmm_svm_softirq_write(soft, VMM_SVM_APIC_LVT1,
 	    VMM_SVM_APIC_LVT_MASKED);
@@ -554,6 +554,8 @@ static void
 vmm_svm_softirq_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 {
 	volatile uint32_t *irr;
+	struct vmm_machine *machine;
+	int error;
 	int word;
 	int bit;
 	uint32_t value;
@@ -564,21 +566,26 @@ vmm_svm_softirq_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 	vmm_svm_lapic_timer_check(vcpu);
 	if (vcpu->delivery_pending)
 		return;
-	for (word = VMM_SVM_SOFTIRQ_VECTOR_WORDS - 1; word >= 0; --word) {
-		value = atomic_load_acq_int(&vcpu->legacy_pending[word]);
-		if (value == 0)
-			continue;
-		vector = word * 32 + fls(value) - 1;
+	if (vmm_svm_lapic_accepts_pic(vcpu)) {
 		if (!vmm_svm_vcpu_interrupt_allowed(vcpu->vcpu)) {
 			vmm_svm_vcpu_request_interrupt_window(vcpu->vcpu);
 			return;
 		}
-		if (vmm_svm_vcpu_inject_interrupt(vcpu->vcpu, vector) == 0) {
+		machine = vcpu->vcpu->machine;
+		lwkt_gettoken(&machine->token);
+		error = vmm_x64_pic_peek_locked(machine, &vector);
+		if (error == 0)
+			error = vmm_svm_vcpu_inject_interrupt(vcpu->vcpu, vector);
+		if (error == 0)
+			error = vmm_x64_pic_accept_locked(machine, &vector);
+		if (error == 0) {
 			vcpu->delivery_pending = true;
 			vcpu->delivery_legacy = true;
 			vcpu->delivery_vector = vector;
 		}
-		return;
+		lwkt_reltoken(&machine->token);
+		if (error != ENOENT)
+			return;
 	}
 	if (!vmm_svm_lapic_enabled(vcpu))
 		return;
@@ -623,8 +630,7 @@ vmm_svm_softirq_vcpu_event_result(struct vmm_svm_interrupt_vcpu *vcpu,
 		return;
 	vector = vcpu->delivery_vector;
 	if (vcpu->delivery_legacy) {
-		atomic_clear_int(&vcpu->legacy_pending[vector / 32],
-		    __BIT(vector & 31));
+		/* The PIC moved IRR to ISR when vcpu_enter committed this event. */
 	} else {
 		irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
@@ -1018,6 +1024,23 @@ vmm_svm_lapic_enabled(const struct vmm_svm_interrupt_vcpu *vcpu)
 	return (vcpu->apic_base & VMM_SVM_APICBASE_ENABLED) != 0 &&
 	    (vmm_svm_softirq_read(vcpu, VMM_SVM_APIC_SVR) &
 	    VMM_SVM_APIC_SVR_ENABLE) != 0;
+}
+
+/*
+ * The legacy PIC reaches a hardware-enabled local APIC through LINT0 ExtINT.
+ * SVR software enable controls LAPIC IRR delivery and does not gate this wire.
+ */
+static bool
+vmm_svm_lapic_accepts_pic(const struct vmm_svm_interrupt_vcpu *vcpu)
+{
+	uint32_t lvt0;
+
+	if ((vcpu->apic_base & VMM_SVM_APICBASE_ENABLED) == 0)
+		return true;
+	lvt0 = vmm_svm_softirq_read(vcpu, VMM_SVM_APIC_LVT0);
+	return (lvt0 & VMM_SVM_APIC_LVT_MASKED) == 0 &&
+	    (lvt0 & VMM_SVM_APIC_LVT_DELIVERY_MASK) ==
+	    VMM_SVM_APIC_LVT_EXTINT;
 }
 
 static void

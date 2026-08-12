@@ -21,6 +21,10 @@ int vmm_x64_pic_get_state(struct vmm_machine *, struct vmm_pic_state *);
 int vmm_x64_pic_set_state(struct vmm_machine *,
 	const struct vmm_pic_state *);
 int vmm_x64_pic_set_irq_locked(struct vmm_machine *, uint32_t, bool, int *);
+/* Caller holds machine->token; inspect the current PIC output. */
+int vmm_x64_pic_peek_locked(struct vmm_machine *, uint8_t *);
+/* Caller holds machine->token; acknowledge the current PIC output. */
+int vmm_x64_pic_accept_locked(struct vmm_machine *, uint8_t *);
 int vmm_x64_pic_io(struct vmm_machine *, struct vmm_cpustate *,
 	const struct vmm_cpuexit_io *);
 

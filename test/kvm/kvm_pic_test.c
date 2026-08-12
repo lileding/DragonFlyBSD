@@ -21,6 +21,9 @@
 #define KVM_PIC_STUB_OFFSET	0x1000U
 #define KVM_PIC_HANDLER_OFFSET	0x0200U
 #define KVM_PIC_RESULT_OFFSET	0x0300U
+#define KVM_PIC_LVT0			0x350U
+#define KVM_PIC_LVT_MASKED		0x00010000U
+#define KVM_PIC_LVT_EXTINT		0x00000700U
 
 static void
 kvm_pic_write_code(uint8_t *memory)
@@ -83,6 +86,7 @@ main(void)
 	struct kvm_userspace_memory_region memory_region;
 	struct kvm_irqchip irqchip;
 	struct kvm_irq_level irq_line;
+	struct kvm_lapic_state lapic;
 	struct kvm_run *run;
 	uint8_t *guest_memory;
 	void *run_mapping;
@@ -90,6 +94,7 @@ main(void)
 	int vm_fd;
 	int vcpu_fd;
 	int run_size;
+	uint32_t lvt0;
 
 	control_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
 	if (control_fd < 0)
@@ -158,6 +163,13 @@ main(void)
 		errx(1, "guest PIC PIO state: base=%#x imr=%#x init=%u",
 		    irqchip.chip.pic.irq_base, irqchip.chip.pic.imr,
 		    irqchip.chip.pic.init_state);
+	bzero(&lapic, sizeof(lapic));
+	if (ioctl(vcpu_fd, KVM_GET_LAPIC, &lapic) != 0)
+		err(1, "KVM_GET_LAPIC mask LINT0");
+	lvt0 = KVM_PIC_LVT_MASKED;
+	bcopy(&lvt0, lapic.regs + KVM_PIC_LVT0, sizeof(lvt0));
+	if (ioctl(vcpu_fd, KVM_SET_LAPIC, &lapic) != 0)
+		err(1, "KVM_SET_LAPIC mask LINT0");
 
 	irq_line.irq = 0;
 	irq_line.level = 1;
@@ -166,6 +178,25 @@ main(void)
 	irq_line.level = 0;
 	if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
 		err(1, "KVM_IRQ_LINE deassert IRQ0");
+	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
+		err(1, "KVM_RUN masked IRQ0");
+	if (run->exit_reason != KVM_EXIT_HLT)
+		errx(1, "expected HLT after masked IRQ0, got %u", run->exit_reason);
+	if (guest_memory[KVM_PIC_RESULT_OFFSET] != 0)
+		errx(1, "masked PIC IRQ0 handler ran");
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_PIC_MASTER;
+	if (ioctl(vm_fd, KVM_GET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_GET_IRQCHIP masked IRQ0");
+	if ((irqchip.chip.pic.irr & 1U) == 0 || irqchip.chip.pic.isr != 0)
+		errx(1, "masked PIC IRQ0 was acknowledged");
+	bzero(&lapic, sizeof(lapic));
+	if (ioctl(vcpu_fd, KVM_GET_LAPIC, &lapic) != 0)
+		err(1, "KVM_GET_LAPIC unmask LINT0");
+	lvt0 = KVM_PIC_LVT_EXTINT;
+	bcopy(&lvt0, lapic.regs + KVM_PIC_LVT0, sizeof(lvt0));
+	if (ioctl(vcpu_fd, KVM_SET_LAPIC, &lapic) != 0)
+		err(1, "KVM_SET_LAPIC unmask LINT0");
 	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
 		err(1, "KVM_RUN IRQ0");
 	if (run->exit_reason != KVM_EXIT_HLT)

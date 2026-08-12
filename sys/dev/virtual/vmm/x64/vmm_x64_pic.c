@@ -45,7 +45,9 @@ static int vmm_x64_pic_chip_next(const struct vmm_pic_chip_state *);
 static void vmm_x64_pic_chip_ack(struct vmm_pic_chip_state *, int);
 static void vmm_x64_pic_chip_eoi(struct vmm_pic_chip_state *, int, bool);
 static void vmm_x64_pic_chip_reassert(struct vmm_pic_chip_state *);
-static int vmm_x64_pic_next_locked(struct vmm_x64_pic *);
+static int vmm_x64_pic_select_locked(struct vmm_x64_pic *, int *, int *);
+static int vmm_x64_pic_peek(struct vmm_x64_pic *);
+static int vmm_x64_pic_ack_locked(struct vmm_x64_pic *);
 static int vmm_x64_pic_pio_locked(struct vmm_x64_pic *,
 	struct vmm_cpustate *, const struct vmm_cpuexit_io *, int *);
 static int vmm_x64_pic_read_locked(struct vmm_x64_pic *, uint16_t,
@@ -135,7 +137,7 @@ vmm_x64_pic_set_state(struct vmm_machine *machine,
 	pic = machine->pic;
 	lwkt_gettoken(&pic->token);
 	pic->state = *state;
-	vector = vmm_x64_pic_next_locked(pic);
+	vector = vmm_x64_pic_peek(pic);
 	lwkt_reltoken(&pic->token);
 	if (vector >= 0)
 		(void)machine->backend->machine_raise_legacy(machine,
@@ -169,8 +171,44 @@ vmm_x64_pic_set_irq_locked(struct vmm_machine *machine, uint32_t gsi,
 	} else {
 		chip->last_irr &= ~bit;
 	}
-	*vector = vmm_x64_pic_next_locked(pic);
+	*vector = vmm_x64_pic_peek(pic);
 	lwkt_reltoken(&pic->token);
+	return 0;
+}
+
+int
+vmm_x64_pic_peek_locked(struct vmm_machine *machine, uint8_t *vector)
+{
+	struct vmm_x64_pic *pic;
+	int value;
+
+	if (machine == NULL || vector == NULL || machine->pic == NULL)
+		return ENOENT;
+	pic = machine->pic;
+	lwkt_gettoken(&pic->token);
+	value = vmm_x64_pic_peek(pic);
+	lwkt_reltoken(&pic->token);
+	if (value < 0)
+		return ENOENT;
+	*vector = (uint8_t)value;
+	return 0;
+}
+
+int
+vmm_x64_pic_accept_locked(struct vmm_machine *machine, uint8_t *vector)
+{
+	struct vmm_x64_pic *pic;
+	int value;
+
+	if (machine == NULL || vector == NULL || machine->pic == NULL)
+		return ENOENT;
+	pic = machine->pic;
+	lwkt_gettoken(&pic->token);
+	value = vmm_x64_pic_ack_locked(pic);
+	lwkt_reltoken(&pic->token);
+	if (value < 0)
+		return ENOENT;
+	*vector = (uint8_t)value;
 	return 0;
 }
 
@@ -321,28 +359,54 @@ vmm_x64_pic_chip_reassert(struct vmm_pic_chip_state *chip)
 }
 
 static int
-vmm_x64_pic_next_locked(struct vmm_x64_pic *pic)
+vmm_x64_pic_select_locked(struct vmm_x64_pic *pic, int *master_irq,
+    int *slave_irq)
 {
 	struct vmm_pic_chip_state *master;
 	struct vmm_pic_chip_state *slave;
-	int master_irq;
-	int slave_irq;
 
 	master = &pic->state.master;
 	slave = &pic->state.slave;
 	if (master->init_state != 0 || slave->init_state != 0)
 		return -1;
-	slave_irq = vmm_x64_pic_chip_next(slave);
-	if (slave_irq >= 0)
+	*slave_irq = vmm_x64_pic_chip_next(slave);
+	if (*slave_irq >= 0)
 		master->irr |= 1U << 2;
-	master_irq = vmm_x64_pic_chip_next(master);
-	if (master_irq < 0)
+	*master_irq = vmm_x64_pic_chip_next(master);
+	if (*master_irq < 0)
 		return -1;
+	if (*master_irq != 2 || *slave_irq < 0)
+		return master->irq_base + *master_irq;
+	return slave->irq_base + *slave_irq;
+}
+
+static int
+vmm_x64_pic_peek(struct vmm_x64_pic *pic)
+{
+	int master_irq;
+	int slave_irq;
+
+	return vmm_x64_pic_select_locked(pic, &master_irq, &slave_irq);
+}
+
+static int
+vmm_x64_pic_ack_locked(struct vmm_x64_pic *pic)
+{
+	struct vmm_pic_chip_state *master;
+	struct vmm_pic_chip_state *slave;
+	int master_irq;
+	int slave_irq;
+	int vector;
+
+	vector = vmm_x64_pic_select_locked(pic, &master_irq, &slave_irq);
+	if (vector < 0)
+		return vector;
+	master = &pic->state.master;
+	slave = &pic->state.slave;
 	vmm_x64_pic_chip_ack(master, master_irq);
-	if (master_irq != 2 || slave_irq < 0)
-		return master->irq_base + master_irq;
-	vmm_x64_pic_chip_ack(slave, slave_irq);
-	return slave->irq_base + slave_irq;
+	if (master_irq == 2 && slave_irq >= 0)
+		vmm_x64_pic_chip_ack(slave, slave_irq);
+	return vector;
 }
 
 static int
@@ -410,7 +474,7 @@ vmm_x64_pic_read_locked(struct vmm_x64_pic *pic, uint16_t port,
 	}
 	if (chip->poll) {
 		chip->poll = 0;
-		vector = vmm_x64_pic_next_locked(pic);
+		vector = vmm_x64_pic_ack_locked(pic);
 		if (vector < 0)
 			*value = 0;
 		else if (chip == &pic->state.master &&
@@ -444,11 +508,11 @@ vmm_x64_pic_write_locked(struct vmm_x64_pic *pic, uint16_t port,
 		    vector);
 	case VMM_X64_PIC_MASTER_ELCR:
 		pic->state.master.elcr = value & pic->state.master.elcr_mask;
-		*vector = vmm_x64_pic_next_locked(pic);
+		*vector = vmm_x64_pic_peek(pic);
 		return 0;
 	case VMM_X64_PIC_SLAVE_ELCR:
 		pic->state.slave.elcr = value & pic->state.slave.elcr_mask;
-		*vector = vmm_x64_pic_next_locked(pic);
+		*vector = vmm_x64_pic_peek(pic);
 		return 0;
 	default:
 		return ENOENT;
@@ -489,7 +553,7 @@ vmm_x64_pic_command_locked(struct vmm_x64_pic *pic,
 		irq = (value & VMM_X64_PIC_OCW2_SPECIFIC) != 0 ? value & 7 : -1;
 		vmm_x64_pic_chip_eoi(chip, irq,
 		    (value & VMM_X64_PIC_OCW2_ROTATE) != 0);
-		*vector = vmm_x64_pic_next_locked(pic);
+		*vector = vmm_x64_pic_peek(pic);
 		return 0;
 	}
 	if ((value & (VMM_X64_PIC_OCW2_ROTATE | VMM_X64_PIC_OCW2_SPECIFIC)) ==
@@ -505,7 +569,7 @@ vmm_x64_pic_data_locked(struct vmm_x64_pic *pic,
 	switch (chip->init_state) {
 	case 0:
 		chip->imr = value;
-		*vector = vmm_x64_pic_next_locked(pic);
+		*vector = vmm_x64_pic_peek(pic);
 		return 0;
 	case 1:
 		chip->irq_base = value & 0xf8U;
@@ -519,7 +583,7 @@ vmm_x64_pic_data_locked(struct vmm_x64_pic *pic,
 		chip->special_fully_nested_mode =
 		    (value & VMM_X64_PIC_ICW4_SFNM) != 0;
 		chip->init_state = 0;
-		*vector = vmm_x64_pic_next_locked(pic);
+		*vector = vmm_x64_pic_peek(pic);
 		return 0;
 	default:
 		return EINVAL;
