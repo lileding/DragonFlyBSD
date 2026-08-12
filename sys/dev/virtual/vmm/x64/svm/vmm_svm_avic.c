@@ -36,6 +36,13 @@
 #define VMM_SVM_AVIC_LOGICAL_APIC_ID	__BITS(7, 0)
 #define VMM_SVM_AVIC_DOORBELL_MSR	0xc001011bU
 
+#define VMM_SVM_MSR_APICBASE			0x01bU
+#define VMM_SVM_APICBASE_BSP			0x00000100ULL
+#define VMM_SVM_APICBASE_ENABLED		0x00000800ULL
+#define VMM_SVM_APICBASE_ADDRESS		0xfffff000ULL
+#define VMM_SVM_AVIC_APICBASE_VALID	(VMM_SVM_APICBASE_BSP | \
+	VMM_SVM_APICBASE_ENABLED | VMM_SVM_APICBASE_ADDRESS)
+
 #define VMM_SVM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_SVM_IOAPIC_PINS		24U
 #define VMM_SVM_IOAPIC_REG_ID		0x00U
@@ -151,6 +158,7 @@ struct vmm_svm_interrupt_vcpu {
 	void *apic_page;
 	paddr_t apic_page_pa;
 	uint32_t apic_id;
+	uint64_t apic_base;
 	volatile int host_cpu;
 	volatile int host_apic_id;
 	volatile int running;
@@ -182,6 +190,8 @@ static int vmm_svm_avic_vcpu_mmio(struct vmm_svm_interrupt_vcpu *, uint64_t,
     bool, uint32_t *);
 static int vmm_svm_avic_vcpu_io(struct vmm_vcpu *,
     const struct vmm_cpuexit_io *);
+static int vmm_svm_avic_vcpu_msr(struct vmm_svm_interrupt_vcpu *, bool,
+    uint32_t, uint64_t *);
 static void vmm_svm_avic_machine_destroy(struct vmm_svm_interrupt_machine *);
 static int vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *,
     struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
@@ -198,6 +208,8 @@ static void vmm_svm_avic_logical_update_locked(
 static int vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t, int);
 static void vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *, uint8_t);
+static bool vmm_svm_avic_lapic_enabled(
+    const struct vmm_svm_interrupt_vcpu *);
 static bool vmm_svm_avic_lapic_accepts_pic(
     const struct vmm_svm_interrupt_vcpu *);
 static uint32_t vmm_svm_avic_read(const struct vmm_svm_interrupt_vcpu *,
@@ -232,6 +244,7 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.machine_set_ioapic = vmm_svm_interrupt_machine_set_ioapic,
 	.vcpu_mmio = vmm_svm_avic_vcpu_mmio,
 	.vcpu_io = vmm_svm_avic_vcpu_io,
+	.vcpu_msr = vmm_svm_avic_vcpu_msr,
 	.machine_destroy = vmm_svm_avic_machine_destroy,
 	.vcpu_create = vmm_svm_avic_vcpu_create,
 	.vcpu_get_lapic = vmm_svm_interrupt_vcpu_get_lapic,
@@ -443,6 +456,23 @@ vmm_svm_interrupt_vcpu_set_lapic(struct vmm_svm_interrupt_vcpu *vcpu,
 		vmm_svm_avic_logical_update_locked(vcpu);
 		lwkt_reltoken(&vcpu->machine->token);
 	}
+	return 0;
+}
+
+static int
+vmm_svm_avic_vcpu_msr(struct vmm_svm_interrupt_vcpu *vcpu, bool write,
+    uint32_t msr, uint64_t *value)
+{
+	if (msr != VMM_SVM_MSR_APICBASE || value == NULL)
+		return ENOENT;
+	if (!write) {
+		*value = vcpu->apic_base;
+		return 0;
+	}
+	if ((*value & ~VMM_SVM_AVIC_APICBASE_VALID) != 0 ||
+	    (*value & VMM_SVM_APICBASE_ADDRESS) != VMM_SVM_AVIC_APIC_BASE)
+		return EINVAL;
+	vcpu->apic_base = *value;
 	return 0;
 }
 
@@ -792,6 +822,10 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	avic->machine = machine;
 	avic->vcpu = vcpu;
 	avic->apic_id = apic_id;
+	avic->apic_base = VMM_SVM_AVIC_APIC_BASE |
+	    VMM_SVM_APICBASE_ENABLED;
+	if (apic_id == 0)
+		avic->apic_base |= VMM_SVM_APICBASE_BSP;
 	atomic_store_rel_int(&avic->host_cpu, -1);
 	atomic_store_rel_int(&avic->host_apic_id, -1);
 
@@ -954,7 +988,7 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 	uint32_t host_cpu;
 	uint32_t host_apic_id;
 
-	if (vector < 32)
+	if (vector < 32 || !vmm_svm_avic_lapic_enabled(avic))
 		return;
 	irr = (volatile uint32_t *)((uint8_t *)avic->apic_page +
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
@@ -973,12 +1007,22 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 	wrmsr(VMM_SVM_AVIC_DOORBELL_MSR, host_apic_id);
 }
 
+static bool
+vmm_svm_avic_lapic_enabled(const struct vmm_svm_interrupt_vcpu *avic)
+{
+	return (avic->apic_base & VMM_SVM_APICBASE_ENABLED) != 0 &&
+	    (vmm_svm_avic_read(avic, VMM_SVM_APIC_SVR) &
+	    VMM_SVM_APIC_SVR_ENABLE) != 0;
+}
+
 /* PIC virtual wire is controlled by BSP LINT0, not the SVR software bit. */
 static bool
 vmm_svm_avic_lapic_accepts_pic(const struct vmm_svm_interrupt_vcpu *avic)
 {
 	uint32_t lvt0;
 
+	if ((avic->apic_base & VMM_SVM_APICBASE_ENABLED) == 0)
+		return true;
 	lvt0 = vmm_svm_avic_read(avic, VMM_SVM_APIC_LVT0);
 	return (lvt0 & VMM_SVM_APIC_LVT_MASKED) == 0 &&
 	    (lvt0 & VMM_SVM_APIC_LVT_DELIVERY_MASK) ==
@@ -996,6 +1040,8 @@ vmm_svm_irqchip_mmio(struct vmm_svm_interrupt_vcpu *vcpu, uint64_t address,
 
 	if (address >= VMM_SVM_AVIC_APIC_BASE &&
 	    address < VMM_SVM_AVIC_APIC_BASE + PAGE_SIZE) {
+		if ((vcpu->apic_base & VMM_SVM_APICBASE_ENABLED) == 0)
+			return ENOENT;
 		reg = address - VMM_SVM_AVIC_APIC_BASE;
 		if ((reg & 3) != 0)
 			return ENOENT;
