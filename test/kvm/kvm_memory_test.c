@@ -16,12 +16,16 @@
 
 #include <linux/kvm.h>
 
+#define KVM_TEST_ROM_GPA	0xfd000000ULL
+#define KVM_TEST_ROM_SIZE	(16U * 1024U * 1024U)
+
 int
 main(void)
 {
 	struct kvm_userspace_memory_region region;
 	long page_size;
 	void *memory;
+	void *rom;
 	int kvm_fd;
 	int vm_fd;
 
@@ -32,6 +36,10 @@ main(void)
 	    MAP_ANON | MAP_PRIVATE, -1, 0);
 	if (memory == MAP_FAILED)
 		err(1, "mmap");
+	rom = mmap(NULL, KVM_TEST_ROM_SIZE, PROT_READ | PROT_WRITE,
+	    MAP_ANON | MAP_PRIVATE, -1, 0);
+	if (rom == MAP_FAILED)
+		err(1, "mmap ROM");
 	kvm_fd = open("/dev/kvm", O_RDWR);
 	if (kvm_fd < 0)
 		err(1, "open /dev/kvm");
@@ -47,6 +55,18 @@ main(void)
 	region.userspace_addr = (uintptr_t)memory;
 	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
 		err(1, "KVM_SET_USER_MEMORY_REGION map");
+	bzero(&region, sizeof(region));
+	region.slot = 2;
+	region.flags = KVM_MEM_READONLY;
+	region.guest_phys_addr = KVM_TEST_ROM_GPA;
+	region.memory_size = KVM_TEST_ROM_SIZE;
+	region.userspace_addr = (uintptr_t)rom;
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
+		err(1, "KVM_SET_USER_MEMORY_REGION ROM map");
+	bzero(&region, sizeof(region));
+	region.slot = 2;
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
+		err(1, "KVM_SET_USER_MEMORY_REGION ROM unmap");
 	bzero(&region, sizeof(region));
 	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) != 0)
 		err(1, "KVM_SET_USER_MEMORY_REGION unmap");
@@ -65,5 +85,7 @@ main(void)
 		err(1, "close kvm fd");
 	if (munmap(memory, page_size) != 0)
 		err(1, "munmap");
+	if (munmap(rom, KVM_TEST_ROM_SIZE) != 0)
+		err(1, "munmap ROM");
 	return 0;
 }
