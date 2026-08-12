@@ -223,9 +223,15 @@ out:
 	lwkt_gettoken(&vcpu->token);
 	vcpu->running = 0;
 	--machine->run_count;
-	if (error == 0 && atomic_swap_int(&vcpu->kick_pending, 0) != 0) {
+	/*
+	 * A kick only interrupts a run that has no architecturally observable
+	 * exit.  A concurrent kick must not discard a terminal VMEXIT such as
+	 * HLT: the caller would retry at the next instruction and lose the
+	 * guest's stopped state.
+	 */
+	if (error == 0 && atomic_swap_int(&vcpu->kick_pending, 0) != 0 &&
+	    (*reason == NULL || (*reason)->reason == VMM_CPUEXIT_NONE))
 		error = EINTR;
-	}
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
 	vmm_stat_vcpu_run_return();
