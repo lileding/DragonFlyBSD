@@ -13,6 +13,7 @@ struct vmm_vcpu;
 struct vmm_cpuid_entry;
 struct vmm_x64_capability;
 struct vmm_cpuexit;
+struct vmm_cpuexit_io;
 struct vmm_ioapic_state;
 
 struct vmm_backend_ops {
@@ -39,6 +40,10 @@ struct vmm_backend_ops {
 	    const struct vmm_cpuid_entry *, size_t);
 	int (*vcpu_get_lapic)(struct vmm_vcpu *, void *, size_t);
 	int (*vcpu_set_lapic)(struct vmm_vcpu *, const void *, size_t);
+	/* Handle an in-kernel PIO device, or return ENOENT for the frontend. */
+	int (*vcpu_io)(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
+	/* Handle one scalar access claimed by the backend, or return ENOENT. */
+	int (*vcpu_mmio)(struct vmm_vcpu *, uint64_t, size_t, bool, uint64_t *);
 	void (*vcpu_destroy)(struct vmm_vcpu *);
 	int (*vcpu_run)(struct vmm_vcpu *, struct vmm_cpuexit **);
 	void (*vcpu_getstate)(struct vmm_vcpu *);

@@ -18,6 +18,13 @@ typedef struct vmm_machine *vmm_machine_t;
 typedef struct vmm_vcpu *vmm_vcpu_t;
 typedef struct vmm_io *vmm_io_t;
 
+enum vmm_io_width {
+	VMM_IO_WIDTH_8 = 1,
+	VMM_IO_WIDTH_16 = 2,
+	VMM_IO_WIDTH_32 = 4,
+	VMM_IO_WIDTH_64 = 8,
+};
+
 #if defined(__x86_64__)
 #include "x64/vmm_x64.h"
 #else
@@ -66,13 +73,6 @@ int vmm_machine_raise_irq(vmm_machine_t machine, uint32_t gsi);
  */
 int vmm_machine_set_irq(vmm_machine_t machine, uint32_t gsi, bool level);
 
-enum vmm_io_width {
-	VMM_IO_WIDTH_8 = 1,
-	VMM_IO_WIDTH_16 = 2,
-	VMM_IO_WIDTH_32 = 4,
-	VMM_IO_WIDTH_64 = 8,
-};
-
 struct vmm_io_write {
 	uint64_t address;
 	enum vmm_io_width width;
@@ -95,9 +95,9 @@ int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
 	vmm_io_t *io);
 
 /*
- * Traps one MMIO write at address with the exact width.  VMM recognizes
- * ordinary x86 MOV stores only; other accesses remain visible to the vCPU
- * caller unchanged.
+ * Traps one MMIO write at address with the exact width.  VMM completes
+ * registered scalar writes in kernel; unsupported memory instructions remain
+ * visible to the vCPU caller.
  */
 int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t address,
 	enum vmm_io_width width, vmm_io_handler_t handler, void *argument,
@@ -133,6 +133,21 @@ int vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
  * Returns EBUSY when another caller is running it.
  */
 int vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason);
+
+/*
+ * Acknowledges the write fragment returned as VMM_CPUEXIT_MEMORY.  The vCPU
+ * must be stopped at that fragment.  VMM completes the decoded instruction
+ * on the next vmm_vcpu_run() call.
+ */
+int vmm_vcpu_complete_mmio_write(vmm_vcpu_t vcpu);
+
+/*
+ * Supplies the bytes read for the fragment returned as VMM_CPUEXIT_MEMORY.
+ * size must equal the exit width.  The vCPU must be stopped at that fragment;
+ * VMM completes the decoded instruction on the next vmm_vcpu_run() call.
+ */
+int vmm_vcpu_complete_mmio_read(vmm_vcpu_t vcpu, const void *data,
+	size_t size);
 
 /*
  * Queues one architectural event for the next vCPU run.  The vCPU must not be

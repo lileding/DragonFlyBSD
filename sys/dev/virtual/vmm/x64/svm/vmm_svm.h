@@ -11,6 +11,7 @@
 struct vmm_machine;
 struct vmm_vcpu;
 struct vmm_cpuexit;
+struct vmm_cpuexit_io;
 struct vmm_ioapic_state;
 struct vmm_svm_interrupt_machine;
 
@@ -41,11 +42,16 @@ int vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *,
 	const struct vmm_cpuid_entry *, size_t);
 int vmm_svm_vcpu_get_lapic(struct vmm_vcpu *, void *, size_t);
 int vmm_svm_vcpu_set_lapic(struct vmm_vcpu *, const void *, size_t);
+int vmm_svm_vcpu_io(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
+int vmm_svm_vcpu_mmio(struct vmm_vcpu *, uint64_t, size_t, bool,
+	uint64_t *);
 void vmm_svm_vcpu_destroy(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_svm_vcpu_getstate(struct vmm_vcpu *);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
 int vmm_svm_vcpu_inject_interrupt(struct vmm_vcpu *, uint8_t);
+bool vmm_svm_vcpu_interrupt_allowed(struct vmm_vcpu *);
+void vmm_svm_vcpu_request_interrupt_window(struct vmm_vcpu *);
 void vmm_svm_restore_tr(uint16_t);
 
 #endif /* VMM_SVM_H */

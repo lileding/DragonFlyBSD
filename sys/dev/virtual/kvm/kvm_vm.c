@@ -36,6 +36,7 @@
 #include "kvm_vm.h"
 
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
+#define KVM_X86_MSI_APIC_BASE	0xfee00000ULL
 
 struct kvm_memory_piece {
 	STAILQ_ENTRY(kvm_memory_piece) entry;
@@ -384,6 +385,14 @@ kvm_vm_signal_msi(struct kvm_vm *vm, const struct kvm_msi *msi)
 	if (msi == NULL || (msi->flags & ~KVM_MSI_VALID_DEVID) != 0)
 		return EINVAL;
 	address = ((uint64_t)msi->address_hi << 32) | msi->address_lo;
+	/*
+	 * Linux KVM accepts an all-zero APIC-style message from QEMU's
+	 * in-kernel APIC memory region.  Its zero destination fields mean
+	 * physical APIC ID 0; vmm's core MSI ABI requires the architectural
+	 * x86 APIC base bits, so normalize only this frontend representation.
+	 */
+	if (address == 0)
+		address = KVM_X86_MSI_APIC_BASE;
 	return vmm_machine_raise_msi(vm->machine, address, msi->data);
 }
 
@@ -550,7 +559,9 @@ kvm_vm_set_user_memory(struct kvm_vm *vm,
 
 	if (region == NULL || region->slot >= KVM_MEMORY_SLOTS)
 		return EINVAL;
-	if ((region->flags & ~KVM_MEM_READONLY) != 0)
+	/* Dirty logging is optional migration state, not guest mapping state. */
+	if ((region->flags &
+	    ~(KVM_MEM_READONLY | KVM_MEM_LOG_DIRTY_PAGES)) != 0)
 		return EOPNOTSUPP;
 
 	gpa = region->guest_phys_addr;

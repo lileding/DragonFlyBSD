@@ -49,14 +49,10 @@ struct kvm_vcpu {
 	uint64_t vapic_address;
 	uint64_t pio_gpa;
 	uint64_t pio_npc;
-	uint64_t mmio_npc;
 	unsigned int id;
 	uint8_t pio_address_size;
 	uint8_t pio_size;
 	uint8_t mmio_size;
-	uint8_t mmio_dst_size;
-	uint8_t mmio_dst_reg;
-	uint8_t mmio_extend;
 	uint32_t mp_state;
 	bool running;
 	bool pio_pending;
@@ -65,12 +61,7 @@ struct kvm_vcpu {
 	bool pio_string;
 	bool mmio_pending;
 	bool mmio_write;
-	bool mmio_high8;
 };
-
-#define KVM_MMIO_EXTEND_NONE	0
-#define KVM_MMIO_EXTEND_ZERO	1
-#define KVM_MMIO_EXTEND_SIGN	2
 
 #define KVM_MSR_IA32_TSC		0x00000010U
 #define KVM_MSR_KVM_WALL_CLOCK		0x00000011U
@@ -88,6 +79,8 @@ struct kvm_vcpu {
 #define KVM_MSR_CSTAR			0xc0000083U
 #define KVM_MSR_SFMASK			0xc0000084U
 #define KVM_MSR_KERNEL_GS_BASE		0xc0000102U
+#define KVM_MSR_K7_PERFCTL0		0xc0010000U
+#define KVM_MSR_K7_PERFCTR3		0xc0010007U
 #define KVM_X86_EXCEPTION_GP		13U
 
 #define KVM_VCPU_TRACE_LIMIT		64U
@@ -159,14 +152,6 @@ static int kvm_vcpu_pio_string_gpa(struct kvm_vcpu *,
 static int kvm_vcpu_complete_mmio(struct kvm_vcpu *);
 static int kvm_vcpu_set_mmio_exit(struct kvm_vcpu *,
 	const struct vmm_cpuexit *);
-static int kvm_vcpu_decode_mmio(const struct vmm_cpuexit *,
-	struct kvm_vcpu *, uint64_t *, unsigned int *);
-static int kvm_vcpu_modrm_length(const uint8_t *, unsigned int, unsigned int,
-	unsigned int, unsigned int *);
-static uint64_t kvm_vcpu_read_gpr(const struct kvm_vcpu *, unsigned int,
-	unsigned int, int);
-static void kvm_vcpu_write_gpr(struct kvm_vcpu *, unsigned int,
-	unsigned int, int, uint64_t);
 static int kvm_vcpu_get_msr(struct kvm_vcpu *, uint32_t, uint64_t *);
 static int kvm_vcpu_set_msr(struct kvm_vcpu *, uint32_t, uint64_t);
 static void kvm_vcpu_destroy(struct kvm_vcpu *);
@@ -1278,6 +1263,8 @@ kvm_vcpu_get_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t *value)
 	if (index == KVM_MSR_IA32_MTRRCAP ||
 	    (index >= 0x200U && index <= 0x20fU) ||
 	    (index >= 0x250U && index <= 0x26fU) ||
+	    (index >= KVM_MSR_K7_PERFCTL0 &&
+	    index <= KVM_MSR_K7_PERFCTR3) ||
 	    index == KVM_MSR_IA32_MTRR_DEF_TYPE) {
 		*value = 0;
 		return 0;
@@ -1336,6 +1323,8 @@ kvm_vcpu_set_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t value)
 		return EOPNOTSUPP;
 	if ((index >= 0x200U && index <= 0x20fU) ||
 	    (index >= 0x250U && index <= 0x26fU) ||
+	    (index >= KVM_MSR_K7_PERFCTL0 &&
+	    index <= KVM_MSR_K7_PERFCTR3) ||
 	    index == KVM_MSR_IA32_MTRR_DEF_TYPE)
 		return value == 0 ? 0 : EOPNOTSUPP;
 	switch (index) {
@@ -1494,6 +1483,10 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	struct kvm_run *run = vcpu->run;
 	uint64_t rax;
 	uint64_t count;
+	uint32_t stack_word;
+	uint32_t rax_word;
+	int stack_error;
+	int rax_error;
 	int error;
 
 	bzero(&run->hw, sizeof(run->padding));
@@ -1501,18 +1494,61 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	run->cr8 = vcpu->state.crs[VMM_X64_CR_CR8];
 	run->apic_base = vcpu->apic_base;
 	run->ready_for_interrupt_injection = 0;
+	if (kvm_vcpu_trace && exit != NULL &&
+	    (exit->reason == VMM_CPUEXIT_HALTED ||
+	    exit->reason == VMM_CPUEXIT_SHUTDOWN ||
+	    exit->reason == VMM_CPUEXIT_INVALID)) {
+		stack_error = kvm_vcpu_copy_gpa(vcpu,
+		    vcpu->state.gprs[VMM_X64_GPR_RSP], &stack_word,
+		    sizeof(stack_word), 0);
+		rax_error = kvm_vcpu_copy_gpa(vcpu,
+		    vcpu->state.gprs[VMM_X64_GPR_RAX], &rax_word,
+		    sizeof(rax_word), 0);
+		kprintf("kvm: vcpu%u terminal exit=%ju rip=%#jx rsp=%#jx "
+		    "rflags=%#jx cr0=%#jx cr3=%#jx cr4=%#jx efer=%#jx\n",
+		    vcpu->id, (uintmax_t)exit->reason,
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RFLAGS],
+		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR0],
+		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR3],
+		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR4],
+		    (uintmax_t)vcpu->state.msrs[VMM_X64_MSR_EFER]);
+		kprintf("kvm: vcpu%u terminal stack=%#x/%d rax=%#jx "
+		    "raxmem=%#x/%d\n", vcpu->id, stack_word, stack_error,
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RAX], rax_word,
+		    rax_error);
+		kprintf("kvm: vcpu%u terminal cs=%#x:%#jx ss=%#x:%#jx "
+		    "idt=%#jx/%#x tr=%#x:%#jx\n", vcpu->id,
+		    vcpu->state.segs[VMM_X64_SEG_CS].selector,
+		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_CS].base,
+		    vcpu->state.segs[VMM_X64_SEG_SS].selector,
+		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_SS].base,
+		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_IDT].base,
+		    vcpu->state.segs[VMM_X64_SEG_IDT].limit,
+		    vcpu->state.segs[VMM_X64_SEG_TR].selector,
+		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_TR].base);
+	}
 	if (kvm_vcpu_trace && kvm_vcpu_trace_count < KVM_VCPU_TRACE_LIMIT &&
-	    exit != NULL && exit->reason == VMM_CPUEXIT_IO &&
-	    exit->u.io.port == 0x402) {
+	    exit != NULL && exit->reason == VMM_CPUEXIT_IO) {
 		++kvm_vcpu_trace_count;
-		kprintf("kvm: vcpu%u debugcon %s value=%#x size=%u str=%u rep=%u rip=%#jx npc=%#jx rcx=%#jx rsi=%#jx\n",
-		    vcpu->id, exit->u.io.in ? "in" : "out",
-		    (unsigned int)vcpu->state.gprs[VMM_X64_GPR_RAX] & 0xff,
+		kprintf("kvm: vcpu%u pio port=%#x %s value=%#jx size=%u str=%u rep=%u rip=%#jx npc=%#jx rsp=%#jx rcx=%#jx rsi=%#jx\n",
+		    vcpu->id, exit->u.io.port, exit->u.io.in ? "in" : "out",
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RAX],
 		    exit->u.io.operand_size, exit->u.io.str, exit->u.io.rep,
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
 		    (uintmax_t)exit->u.io.npc,
+		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RCX],
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSI]);
+		stack_error = kvm_vcpu_copy_gpa(vcpu,
+		    vcpu->state.gprs[VMM_X64_GPR_RSP], &stack_word,
+		    sizeof(stack_word), 0);
+		if (stack_error == 0) {
+			kprintf("kvm: vcpu%u pio stack[%#jx]=%#x\n", vcpu->id,
+			    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
+			    stack_word);
+		}
 	}
 	if (kvm_vcpu_trace &&
 	    kvm_vcpu_memory_trace_count < KVM_VCPU_TRACE_LIMIT &&
@@ -1806,39 +1842,17 @@ kvm_vcpu_pio_string_gpa(struct kvm_vcpu *vcpu,
 static int
 kvm_vcpu_complete_mmio(struct kvm_vcpu *vcpu)
 {
-	uint64_t value;
-	int64_t signed_value;
+	int error;
 
 	if (!vcpu->mmio_pending)
 		return 0;
-	if (!vcpu->mmio_write) {
-		value = 0;
-		bcopy(vcpu->run->mmio.data, &value, vcpu->mmio_size);
-		if (vcpu->mmio_extend == KVM_MMIO_EXTEND_ZERO) {
-			kvm_vcpu_write_gpr(vcpu, vcpu->mmio_dst_reg,
-			    vcpu->mmio_dst_size, 0, value);
-		} else if (vcpu->mmio_extend == KVM_MMIO_EXTEND_SIGN) {
-			switch (vcpu->mmio_size) {
-			case 1:
-				signed_value = (int8_t)value;
-				break;
-			case 2:
-				signed_value = (int16_t)value;
-				break;
-			case 4:
-				signed_value = (int32_t)value;
-				break;
-			default:
-				return EINVAL;
-			}
-			kvm_vcpu_write_gpr(vcpu, vcpu->mmio_dst_reg,
-			    vcpu->mmio_dst_size, 0, (uint64_t)signed_value);
-		} else {
-			kvm_vcpu_write_gpr(vcpu, vcpu->mmio_dst_reg,
-			    vcpu->mmio_dst_size, vcpu->mmio_high8, value);
-		}
-	}
-	vcpu->state.gprs[VMM_X64_GPR_RIP] = vcpu->mmio_npc;
+	if (vcpu->mmio_write)
+		error = vmm_vcpu_complete_mmio_write(vcpu->vcpu);
+	else
+		error = vmm_vcpu_complete_mmio_read(vcpu->vcpu,
+		    vcpu->run->mmio.data, vcpu->mmio_size);
+	if (error != 0)
+		return error;
 	vcpu->mmio_pending = false;
 	return 0;
 }
@@ -1847,341 +1861,26 @@ static int
 kvm_vcpu_set_mmio_exit(struct kvm_vcpu *vcpu,
 	const struct vmm_cpuexit *exit)
 {
-	unsigned int instruction_length;
-	uint64_t value;
-	int error;
-
-	if (exit->u.mem.inst_len == 0 ||
-	    exit->u.mem.inst_len > sizeof(exit->u.mem.inst_bytes))
+	if (exit->u.mem.width != VMM_IO_WIDTH_8 &&
+	    exit->u.mem.width != VMM_IO_WIDTH_16 &&
+	    exit->u.mem.width != VMM_IO_WIDTH_32 &&
+	    exit->u.mem.width != VMM_IO_WIDTH_64)
 		return EINVAL;
-	error = kvm_vcpu_decode_mmio(exit, vcpu, &value, &instruction_length);
-	if (error != 0)
-		return error;
+	if ((exit->u.mem.prot & (VM_PROT_READ | VM_PROT_WRITE)) == 0)
+		return EINVAL;
+
+	bzero(&vcpu->run->mmio, sizeof(vcpu->run->mmio));
 	vcpu->run->exit_reason = KVM_EXIT_MMIO;
 	vcpu->run->mmio.phys_addr = exit->u.mem.gpa;
+	vcpu->mmio_size = exit->u.mem.width;
+	vcpu->mmio_write = (exit->u.mem.prot & VM_PROT_WRITE) != 0;
 	vcpu->run->mmio.len = vcpu->mmio_size;
 	vcpu->run->mmio.is_write = vcpu->mmio_write;
 	if (vcpu->mmio_write)
-		bcopy(&value, vcpu->run->mmio.data, vcpu->mmio_size);
-	vcpu->mmio_npc = vcpu->state.gprs[VMM_X64_GPR_RIP] +
-	    instruction_length;
+		bcopy(&exit->u.mem.value, vcpu->run->mmio.data,
+		    vcpu->mmio_size);
 	vcpu->mmio_pending = true;
 	return 0;
-}
-
-static int
-kvm_vcpu_decode_mmio(const struct vmm_cpuexit *exit, struct kvm_vcpu *vcpu,
-	uint64_t *value, unsigned int *instruction_length)
-{
-	const uint8_t *bytes = exit->u.mem.inst_bytes;
-	unsigned int address_size = 8;
-	unsigned int immediate_length;
-	unsigned int length = exit->u.mem.inst_len;
-	unsigned int modrm_length;
-	unsigned int offset = 0;
-	unsigned int reg = 0;
-	unsigned int size = 4;
-	uint8_t modrm = 0;
-	uint8_t opcode;
-	uint8_t rex = 0;
-	int error;
-	int write;
-
-	if (value == NULL || instruction_length == NULL || length == 0 ||
-	    length > 15)
-		return EINVAL;
-	vcpu->mmio_write = false;
-	vcpu->mmio_high8 = false;
-	vcpu->mmio_extend = KVM_MMIO_EXTEND_NONE;
-	immediate_length = 0;
-	modrm_length = 0;
-	for (;;) {
-		if (offset == length)
-			return EINVAL;
-		switch (bytes[offset]) {
-		case 0x26:
-		case 0x2e:
-		case 0x36:
-		case 0x3e:
-		case 0x64:
-		case 0x65:
-		case 0x66:
-		case 0x67:
-		case 0xf0:
-			if (bytes[offset] == 0x66)
-				size = 2;
-			if (bytes[offset] == 0x67)
-				address_size = 4;
-			++offset;
-			continue;
-		default:
-			if (bytes[offset] >= 0x40 && bytes[offset] <= 0x4f) {
-				rex = bytes[offset++];
-				continue;
-			}
-			break;
-		}
-		break;
-	}
-	opcode = bytes[offset++];
-	write = 0;
-	if (opcode == 0x0f) {
-		if (offset == length)
-			return EINVAL;
-		opcode = bytes[offset++];
-		if (opcode != 0xb6 && opcode != 0xb7 && opcode != 0xbe &&
-		    opcode != 0xbf)
-			return EOPNOTSUPP;
-		if (offset == length)
-			return EINVAL;
-		modrm = bytes[offset];
-		if ((modrm & 0xc0U) == 0xc0U)
-			return EINVAL;
-		reg = ((modrm >> 3) & 7U) |
-		    ((rex & 0x04U) != 0 ? 8U : 0U);
-		if (reg >= 16 || exit->u.mem.prot != PROT_READ)
-			return EINVAL;
-		error = kvm_vcpu_modrm_length(bytes, length, offset, address_size,
-		    &modrm_length);
-		if (error != 0)
-			return error;
-		vcpu->mmio_size = (opcode == 0xb6 || opcode == 0xbe) ? 1 : 2;
-		vcpu->mmio_dst_size = (rex & 0x08U) != 0 ? 8 : size;
-		vcpu->mmio_dst_reg = reg;
-		vcpu->mmio_extend = (opcode == 0xb6 || opcode == 0xb7) ?
-		    KVM_MMIO_EXTEND_ZERO : KVM_MMIO_EXTEND_SIGN;
-		*instruction_length = offset + modrm_length;
-		return 0;
-	}
-	if (opcode == 0x8a || opcode == 0x8b || opcode == 0x88 ||
-	    opcode == 0x89 || opcode == 0xc6 || opcode == 0xc7 ||
-	    opcode == 0x63) {
-		if (offset == length)
-			return EINVAL;
-		modrm = bytes[offset];
-		if ((modrm & 0xc0U) == 0xc0U)
-			return EINVAL;
-		reg = ((modrm >> 3) & 7U) |
-		    ((rex & 0x04U) != 0 ? 8U : 0U);
-		if (reg >= 16)
-			return EINVAL;
-		error = kvm_vcpu_modrm_length(bytes, length, offset, address_size,
-		    &modrm_length);
-		if (error != 0)
-			return error;
-	}
-	switch (opcode) {
-	case 0x88:
-		write = 1;
-		size = 1;
-		*value = kvm_vcpu_read_gpr(vcpu, reg, size, rex == 0 &&
-		    reg >= 4 && reg <= 7);
-		break;
-	case 0x89:
-		write = 1;
-		if ((rex & 0x08U) != 0)
-			size = 8;
-		*value = kvm_vcpu_read_gpr(vcpu, reg, size, 0);
-		break;
-	case 0x8a:
-		size = 1;
-		vcpu->mmio_dst_reg = reg;
-		vcpu->mmio_dst_size = size;
-		vcpu->mmio_high8 = rex == 0 && reg >= 4 && reg <= 7;
-		break;
-	case 0x8b:
-		if ((rex & 0x08U) != 0)
-			size = 8;
-		vcpu->mmio_dst_reg = reg;
-		vcpu->mmio_dst_size = size;
-		break;
-	case 0xa0:
-		if (length - offset < address_size)
-			return EINVAL;
-		modrm_length = address_size;
-		size = 1;
-		vcpu->mmio_dst_reg = VMM_X64_GPR_RAX;
-		vcpu->mmio_dst_size = size;
-		break;
-	case 0xa1:
-		if (length - offset < address_size)
-			return EINVAL;
-		modrm_length = address_size;
-		if ((rex & 0x08U) != 0)
-			size = 8;
-		vcpu->mmio_dst_reg = VMM_X64_GPR_RAX;
-		vcpu->mmio_dst_size = size;
-		break;
-	case 0xa2:
-		if (length - offset < address_size)
-			return EINVAL;
-		modrm_length = address_size;
-		write = 1;
-		size = 1;
-		*value = kvm_vcpu_read_gpr(vcpu, VMM_X64_GPR_RAX, size, 0);
-		break;
-	case 0xa3:
-		if (length - offset < address_size)
-			return EINVAL;
-		modrm_length = address_size;
-		write = 1;
-		if ((rex & 0x08U) != 0)
-			size = 8;
-		*value = kvm_vcpu_read_gpr(vcpu, VMM_X64_GPR_RAX, size, 0);
-		break;
-	case 0xc6:
-		if (((modrm >> 3) & 7U) != 0 ||
-		    offset + modrm_length >= length)
-			return EINVAL;
-		write = 1;
-		size = 1;
-		immediate_length = 1;
-		*value = bytes[offset + modrm_length];
-		break;
-	case 0xc7:
-		if (((modrm >> 3) & 7U) != 0)
-			return EINVAL;
-		write = 1;
-		if (size == 2) {
-			if (offset + modrm_length + 2 > length)
-				return EINVAL;
-			immediate_length = 2;
-			*value = bytes[offset + modrm_length] |
-			    ((uint64_t)bytes[offset + modrm_length + 1] << 8);
-		} else {
-			if (offset + modrm_length + 4 > length)
-				return EINVAL;
-			immediate_length = 4;
-			*value = bytes[offset + modrm_length] |
-			    ((uint64_t)bytes[offset + modrm_length + 1] << 8) |
-			    ((uint64_t)bytes[offset + modrm_length + 2] << 16) |
-			    ((uint64_t)bytes[offset + modrm_length + 3] << 24);
-		}
-		if ((rex & 0x08U) != 0) {
-			size = 8;
-			*value = (uint64_t)(int64_t)(int32_t)*value;
-		}
-		break;
-	case 0x63:
-		if ((rex & 0x08U) == 0)
-			return EOPNOTSUPP;
-		vcpu->mmio_size = 4;
-		vcpu->mmio_dst_size = 8;
-		vcpu->mmio_dst_reg = reg;
-		vcpu->mmio_extend = KVM_MMIO_EXTEND_SIGN;
-		*instruction_length = offset + modrm_length;
-		return exit->u.mem.prot == PROT_READ ? 0 : EINVAL;
-	default:
-		return EOPNOTSUPP;
-	}
-	if (write) {
-		if (exit->u.mem.prot != PROT_WRITE)
-			return EINVAL;
-		vcpu->mmio_write = true;
-		vcpu->mmio_size = size;
-	} else {
-		if (exit->u.mem.prot != PROT_READ)
-			return EINVAL;
-		vcpu->mmio_size = size;
-	}
-	*instruction_length = offset + modrm_length + immediate_length;
-	return 0;
-}
-
-static int
-kvm_vcpu_modrm_length(const uint8_t *bytes, unsigned int length,
-	unsigned int offset, unsigned int address_size, unsigned int *size)
-{
-	unsigned int base;
-	unsigned int count;
-	unsigned int mod;
-	unsigned int rm;
-	uint8_t modrm;
-
-	if (bytes == NULL || size == NULL || offset >= length)
-		return EINVAL;
-	modrm = bytes[offset];
-	mod = modrm >> 6;
-	rm = modrm & 7U;
-	if (mod == 3)
-		return EINVAL;
-	count = 1;
-	if (address_size == 2) {
-		if (mod == 0 && rm == 6)
-			count += 2;
-		else if (mod == 1)
-			++count;
-		else if (mod == 2)
-			count += 2;
-	} else {
-		if (rm == 4) {
-			if (offset + count >= length)
-				return EINVAL;
-			base = bytes[offset + count] & 7U;
-			++count;
-			if (mod == 0 && base == 5)
-				count += 4;
-		} else if (mod == 0 && rm == 5) {
-			count += 4;
-		}
-		if (mod == 1)
-			++count;
-		else if (mod == 2)
-			count += 4;
-	}
-	if (offset + count > length)
-		return EINVAL;
-	*size = count;
-	return 0;
-}
-
-static uint64_t
-kvm_vcpu_read_gpr(const struct kvm_vcpu *vcpu, unsigned int reg,
-	unsigned int size, int high8)
-{
-	uint64_t value;
-
-	if (reg >= 16)
-		return 0;
-	value = vcpu->state.gprs[reg];
-	if (size == 1)
-		return high8 ? (value >> 8) & 0xffU : value & 0xffU;
-	if (size == 2)
-		return value & 0xffffU;
-	if (size == 4)
-		return value & 0xffffffffU;
-	return size == 8 ? value : 0;
-}
-
-static void
-kvm_vcpu_write_gpr(struct kvm_vcpu *vcpu, unsigned int reg,
-	unsigned int size, int high8, uint64_t value)
-{
-	uint64_t old;
-
-	if (reg >= 16)
-		return;
-	old = vcpu->state.gprs[reg];
-	switch (size) {
-	case 1:
-		if (high8)
-			vcpu->state.gprs[reg] = (old & ~0xff00ULL) |
-			    ((value & 0xffU) << 8);
-		else
-			vcpu->state.gprs[reg] = (old & ~0xffULL) | (value & 0xffU);
-		break;
-	case 2:
-		vcpu->state.gprs[reg] = (old & ~0xffffULL) | (value & 0xffffU);
-		break;
-	case 4:
-		vcpu->state.gprs[reg] = (uint32_t)value;
-		break;
-	case 8:
-		vcpu->state.gprs[reg] = value;
-		break;
-	default:
-		break;
-	}
 }
 
 static void

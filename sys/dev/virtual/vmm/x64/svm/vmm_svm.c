@@ -47,10 +47,14 @@
 
 static int vmm_svm_trace;
 static unsigned int vmm_svm_trace_count;
+static unsigned int vmm_svm_npf_trace_count;
 
 SYSCTL_DECL(_hw_vmm);
 SYSCTL_INT(_hw_vmm, OID_AUTO, svm_trace, CTLFLAG_RW, &vmm_svm_trace, 0,
     "log the first SVM state transitions after module load");
+
+static int vmm_svm_guest_read_instruction(struct vmm_vcpu *, void *,
+    size_t);
 
 struct vmm_svm_cpuid_filter {
 	uint32_t eax;
@@ -974,6 +978,23 @@ vmm_svm_vcpu_inject_interrupt(struct vmm_vcpu *vcpu, uint8_t vector)
 	return vmm_svm_vcpu_commit_event(vcpu, &event);
 }
 
+bool
+vmm_svm_vcpu_interrupt_allowed(struct vmm_vcpu *vcpu)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmcb *vmcb = cpudata->vmcb;
+
+	return (vmcb->state.rflags & PSL_I) != 0 &&
+	    (vmcb->ctrl.intr & VMCB_CTRL_INTR_SHADOW) == 0;
+}
+
+void
+vmm_svm_vcpu_request_interrupt_window(struct vmm_vcpu *vcpu)
+{
+
+	vmm_svm_event_waitexit_enable(vcpu, false);
+}
+
 static void
 vmm_svm_inject_ud(struct vmm_vcpu *vcpu)
 {
@@ -1740,93 +1761,14 @@ vmm_svm_exit_npf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	uint64_t gpa = cpudata->vmcb->ctrl.exitinfo2;
-	const uint8_t *bytes = cpudata->vmcb->ctrl.inst_bytes;
-	uint32_t value;
-	uint8_t opcode;
-	uint8_t modrm;
-	unsigned int reg;
 	int length;
-	int offset;
-	int rex;
-	int modrm_size;
-	bool data16;
-	bool write;
 
-	if (vcpu->machine->irqchip && cpudata->interrupt != NULL) {
-		length = cpudata->vmcb->ctrl.inst_len;
-		if (length != 0 && length <= (int)sizeof(cpudata->vmcb->ctrl.inst_bytes)) {
-			offset = 0;
-			rex = 0;
-			data16 = false;
-			while (offset < length) {
-				if (bytes[offset] == 0x66) {
-					data16 = true;
-					++offset;
-					continue;
-				}
-				if (bytes[offset] >= 0x40 && bytes[offset] <= 0x4f) {
-					rex = bytes[offset++];
-					continue;
-				}
-				break;
-			}
-			if (offset < length && !data16 && (rex & 0x08) == 0) {
-				opcode = bytes[offset++];
-				switch (opcode) {
-				case 0x8b:
-					write = false;
-					break;
-				case 0x89:
-					write = true;
-					break;
-				case 0xc7:
-					if (offset >= length ||
-					    ((bytes[offset] >> 3) & 7) != 0)
-						goto not_irqchip;
-					write = true;
-					break;
-				default:
-					goto not_irqchip;
-				}
-				if (offset >= length)
-					goto not_irqchip;
-				modrm = bytes[offset];
-				modrm_size = vmm_svm_avic_modrm_size(bytes, length, offset);
-				if (modrm_size == 0)
-					goto not_irqchip;
-				reg = ((modrm >> 3) & 7) | ((rex & 0x04) ? 8 : 0);
-				if (reg >= VMM_X64_GPR_RIP)
-					goto not_irqchip;
-				if (opcode == 0xc7) {
-					if (offset + modrm_size + 4 > length)
-						goto not_irqchip;
-					offset += modrm_size;
-					value = bytes[offset] | ((uint32_t)bytes[offset + 1] << 8) |
-					    ((uint32_t)bytes[offset + 2] << 16) |
-					    ((uint32_t)bytes[offset + 3] << 24);
-				} else if (write) {
-					value = cpudata->gprs[reg];
-				} else {
-					value = 0;
-				}
-				if (vmm_svm_interrupt_ops->vcpu_mmio(cpudata->interrupt,
-				    gpa, write, &value) == 0) {
-					if (!write) {
-						cpudata->gprs[reg] = value;
-						if (reg == VMM_X64_GPR_RAX)
-							cpudata->vmcb->state.rax = value;
-					}
-					vmm_svm_inkernel_advance(cpudata->vmcb);
-					exit->reason = VMM_CPUEXIT_NONE;
-					return;
-				}
-			}
-		}
-	}
-
-not_irqchip:
+	length = cpudata->vmcb->ctrl.inst_len;
+	if (length > (int)sizeof(cpudata->vmcb->ctrl.inst_bytes))
+		length = 0;
 
 	exit->reason = VMM_CPUEXIT_MEMORY;
+	bzero(&exit->u.mem, sizeof(exit->u.mem));
 	if (cpudata->vmcb->ctrl.exitinfo1 & PGEX_W)
 		exit->u.mem.prot = PROT_WRITE;
 	else if (cpudata->vmcb->ctrl.exitinfo1 & PGEX_I)
@@ -1834,9 +1776,18 @@ not_irqchip:
 	else
 		exit->u.mem.prot = PROT_READ;
 	exit->u.mem.gpa = gpa;
-	exit->u.mem.inst_len = cpudata->vmcb->ctrl.inst_len;
-	memcpy(exit->u.mem.inst_bytes, cpudata->vmcb->ctrl.inst_bytes,
-	    sizeof(exit->u.mem.inst_bytes));
+	exit->u.mem.inst_len = length;
+	bzero(exit->u.mem.inst_bytes, sizeof(exit->u.mem.inst_bytes));
+	if (length != 0)
+		memcpy(exit->u.mem.inst_bytes, cpudata->vmcb->ctrl.inst_bytes,
+		    length);
+	if (vmm_svm_trace && vmm_svm_npf_trace_count < VMM_SVM_TRACE_LIMIT) {
+		++vmm_svm_npf_trace_count;
+		kprintf("vmm: svm vcpu%u npf gpa=%#jx info=%#jx rip=%#jx\n",
+		    vcpu->id, (uintmax_t)gpa,
+		    (uintmax_t)cpudata->vmcb->ctrl.exitinfo1,
+		    (uintmax_t)cpudata->vmcb->state.rip);
+	}
 
 	vmm_svm_vcpu_state_provide(vcpu,
 	    VMM_X64_STATE_GPRS | VMM_X64_STATE_SEGS |
@@ -2113,12 +2064,145 @@ vmm_svm_avic_modrm_size(const uint8_t *bytes, int length, int offset)
 	return offset + size <= length ? size : 0;
 }
 
-static bool
-vmm_svm_avic_noaccel_read(struct vmm_svm_cpudata *cpudata,
-    uint64_t exitinfo1)
+static int
+vmm_svm_guest_read_gpa(struct vmm_machine *machine, uint64_t gpa,
+    void *data, size_t length)
 {
+	void *pmap_handle;
+	vm_paddr_t pa;
+	uint64_t page_gpa;
+	size_t chunk;
+	size_t offset;
+	int error;
+
+	if (machine->vmspace == NULL || data == NULL || length == 0)
+		return EFAULT;
+	while (length != 0) {
+		page_gpa = trunc_page(gpa);
+		offset = (size_t)(gpa - page_gpa);
+		chunk = PAGE_SIZE - offset;
+		if (chunk > length)
+			chunk = length;
+		error = vm_fault(&machine->vmspace->vm_map, page_gpa,
+		    VM_PROT_READ, VM_FAULT_NORMAL);
+		if (error != 0)
+			return EFAULT;
+		pmap_handle = NULL;
+		pa = pmap_extract(os_vmspace_pmap(machine->vmspace), page_gpa,
+		    &pmap_handle);
+		if (pa == 0) {
+			pmap_extract_done(pmap_handle);
+			return EFAULT;
+		}
+		bcopy((const void *)(PHYS_TO_DMAP(pa) + offset), data, chunk);
+		pmap_extract_done(pmap_handle);
+		gpa += chunk;
+		data = (uint8_t *)data + chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+
+static int
+vmm_svm_guest_translate(struct vmm_vcpu *vcpu, uint64_t va, uint64_t *gpa)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	struct vmcb *vmcb = cpudata->vmcb;
-	const uint8_t *bytes = vmcb->ctrl.inst_bytes;
+	uint64_t entry;
+	uint64_t table;
+	int error;
+
+	if (gpa == NULL || ((va >> 48) != 0 && (va >> 48) != 0xffffULL))
+		return EFAULT;
+	if ((vmcb->state.efer & EFER_LMA) == 0 ||
+	    (vmcb->state.cr4 & CR4_LA57) != 0)
+		return EOPNOTSUPP;
+	table = vmcb->state.cr3 & PG_FRAME;
+
+	error = vmm_svm_guest_read_gpa(vcpu->machine,
+	    table + (((va >> 39) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error != 0 || (entry & X86_PG_V) == 0)
+		return EFAULT;
+	table = entry & PG_FRAME;
+	error = vmm_svm_guest_read_gpa(vcpu->machine,
+	    table + (((va >> 30) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error != 0 || (entry & X86_PG_V) == 0)
+		return EFAULT;
+	if ((entry & X86_PG_PS) != 0) {
+		*gpa = (entry & 0x000fffffc0000000ULL) |
+		    (va & ((1ULL << 30) - 1));
+		return 0;
+	}
+	table = entry & PG_FRAME;
+	error = vmm_svm_guest_read_gpa(vcpu->machine,
+	    table + (((va >> 21) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error != 0 || (entry & X86_PG_V) == 0)
+		return EFAULT;
+	if ((entry & X86_PG_PS) != 0) {
+		*gpa = (entry & PG_PS_FRAME) | (va & ((1ULL << 21) - 1));
+		return 0;
+	}
+	table = entry & PG_FRAME;
+	error = vmm_svm_guest_read_gpa(vcpu->machine,
+	    table + (((va >> 12) & 0x1ffULL) * sizeof(entry)),
+	    &entry, sizeof(entry));
+	if (error != 0 || (entry & X86_PG_V) == 0)
+		return EFAULT;
+	*gpa = (entry & PG_FRAME) | (va & PAGE_MASK);
+	return 0;
+}
+
+static int
+vmm_svm_guest_read_va(struct vmm_vcpu *vcpu, uint64_t va, void *data,
+    size_t length)
+{
+	uint64_t gpa;
+	size_t chunk;
+	int error;
+
+	while (length != 0) {
+		error = vmm_svm_guest_translate(vcpu, va, &gpa);
+		if (error != 0)
+			return error;
+		chunk = PAGE_SIZE - (size_t)(gpa & PAGE_MASK);
+		if (chunk > length)
+			chunk = length;
+		error = vmm_svm_guest_read_gpa(vcpu->machine, gpa, data, chunk);
+		if (error != 0)
+			return error;
+		va += chunk;
+		data = (uint8_t *)data + chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+
+static int
+vmm_svm_guest_read_instruction(struct vmm_vcpu *vcpu, void *data,
+    size_t length)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmcb *vmcb = cpudata->vmcb;
+	uint64_t gpa;
+
+	if ((vmcb->state.cr0 & CR0_PG) != 0)
+		return vmm_svm_guest_read_va(vcpu, vmcb->state.rip, data, length);
+	if (vmcb->state.rip > UINT64_MAX - vmcb->state.cs.base)
+		return EFAULT;
+	gpa = vmcb->state.cs.base + vmcb->state.rip;
+	return vmm_svm_guest_read_gpa(vcpu->machine, gpa, data, length);
+}
+
+static bool
+vmm_svm_avic_noaccel_read(struct vmm_vcpu *vcpu, uint64_t exitinfo1)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmcb *vmcb = cpudata->vmcb;
+	const uint8_t *bytes;
+	uint8_t fetched[sizeof(vmcb->ctrl.inst_bytes)];
 	uint32_t value;
 	uint8_t modrm;
 	unsigned int reg;
@@ -2126,6 +2210,7 @@ vmm_svm_avic_noaccel_read(struct vmm_svm_cpudata *cpudata,
 	int offset;
 	int rex;
 	int modrm_size;
+	int instruction_length;
 	bool data16;
 
 	if ((exitinfo1 >> 32) & __BIT(0))
@@ -2134,8 +2219,16 @@ vmm_svm_avic_noaccel_read(struct vmm_svm_cpudata *cpudata,
 	    exitinfo1 & 0xff0U, &value) != 0)
 		return false;
 	length = vmcb->ctrl.inst_len;
-	if (length == 0 || length > (int)sizeof(vmcb->ctrl.inst_bytes))
+	bytes = vmcb->ctrl.inst_bytes;
+	if (length == 0) {
+		if (vmm_svm_guest_read_instruction(vcpu, fetched,
+		    sizeof(fetched)) != 0)
+			return false;
+		bytes = fetched;
+		length = sizeof(fetched);
+	} else if (length > (int)sizeof(vmcb->ctrl.inst_bytes)) {
 		return false;
+	}
 	offset = 0;
 	rex = 0;
 	data16 = false;
@@ -2164,7 +2257,14 @@ vmm_svm_avic_noaccel_read(struct vmm_svm_cpudata *cpudata,
 	cpudata->gprs[reg] = value;
 	if (reg == VMM_X64_GPR_RAX)
 		vmcb->state.rax = value;
-	vmm_svm_inkernel_advance(vmcb);
+	instruction_length = offset + modrm_size;
+	if (vmcb->ctrl.nrip != 0) {
+		vmm_svm_inkernel_advance(vmcb);
+	} else {
+		vmcb->state.rip += instruction_length;
+		vmcb->state.rflags &= ~PSL_RF;
+		vmcb->ctrl.intr &= ~VMCB_CTRL_INTR_SHADOW;
+	}
 	return true;
 }
 
@@ -2181,14 +2281,15 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 
 	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
 	if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
-	    vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xea590 &&
-	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xea5b0) {
+	    ((vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xea590 &&
+	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xea5b0) ||
+	    (vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xebd80 &&
+	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xebd90))) {
 		++vmm_svm_trace_count;
 		kprintf("vmm: svm vcpu%u entry state-rip=%#jx vmcb-rip=%#jx\n",
 		    vcpu->id, (uintmax_t)vcpu->state->gprs[VMM_X64_GPR_RIP],
 		    (uintmax_t)vmcb->state.rip);
 	}
-
 	hcpu = os_curcpu_number();
 
 	vmm_svm_gtlb_catchup(vcpu, hcpu);
@@ -2276,9 +2377,9 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
 		vmm_stat_vmexit();
-		if (vmm_svm_trace &&
-		    vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
-		    vmcb->state.rip >= 0xea590 && vmcb->state.rip < 0xea5b0) {
+		if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
+		    ((vmcb->state.rip >= 0xea590 && vmcb->state.rip < 0xea5b0) ||
+		    (vmcb->state.rip >= 0xebd80 && vmcb->state.rip < 0xebd90))) {
 			++vmm_svm_trace_count;
 			kprintf("vmm: svm vcpu%u exit code=%#jx vmcb-rip=%#jx\n",
 			    vcpu->id, (uintmax_t)vmcb->ctrl.exitcode,
@@ -2300,6 +2401,10 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			cpudata->hcpu_last = hcpu;
 		}
 		vmm_svm_exit_evt(cpudata, vmcb);
+		if (vmm_svm_interrupt_ops->vcpu_event_result != NULL) {
+			vmm_svm_interrupt_ops->vcpu_event_result(cpudata->interrupt,
+			    cpudata->evt_pending);
+		}
 
 		switch (vmcb->ctrl.exitcode) {
 		case VMCB_EXITCODE_INTR:
@@ -2308,7 +2413,9 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		case VMCB_EXITCODE_VINTR:
 			vmm_svm_event_waitexit_disable(vcpu, false);
-			exit->reason = VMM_CPUEXIT_INT_READY;
+			exit->reason = cpudata->interrupt != NULL &&
+			    vmm_svm_interrupt_ops->vintr_internal ?
+			    VMM_CPUEXIT_NONE : VMM_CPUEXIT_INT_READY;
 			break;
 		case VMCB_EXITCODE_CR0_SEL_WRITE:
 			vmm_svm_exit_cr0(mach, vcpu, exit);
@@ -2330,6 +2437,20 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmm_svm_exit_msr(mach, vcpu, exit);
 			break;
 		case VMCB_EXITCODE_SHUTDOWN:
+			if (vmm_svm_trace) {
+				kprintf("vmm: svm vcpu%u shutdown info1=%#jx info2=%#jx "
+				    "exitintinfo=%#jx eventinj=%#jx rip=%#jx rsp=%#jx "
+				    "cr0=%#jx cr3=%#jx efer=%#jx\n", vcpu->id,
+				    (uintmax_t)vmcb->ctrl.exitinfo1,
+				    (uintmax_t)vmcb->ctrl.exitinfo2,
+				    (uintmax_t)vmcb->ctrl.exitintinfo,
+				    (uintmax_t)vmcb->ctrl.eventinj,
+				    (uintmax_t)vmcb->state.rip,
+				    (uintmax_t)vmcb->state.rsp,
+				    (uintmax_t)vmcb->state.cr0,
+				    (uintmax_t)vmcb->state.cr3,
+				    (uintmax_t)vmcb->state.efer);
+			}
 			exit->reason = VMM_CPUEXIT_SHUTDOWN;
 			break;
 		case VMCB_EXITCODE_RDPMC:
@@ -2369,7 +2490,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			if (vmm_svm_interrupt_ops->vcpu_exit(cpudata->interrupt,
 			    vmcb->ctrl.exitcode, vmcb->ctrl.exitinfo1,
 			    vmcb->ctrl.exitinfo2) ||
-			    vmm_svm_avic_noaccel_read(cpudata, vmcb->ctrl.exitinfo1)) {
+			    vmm_svm_avic_noaccel_read(vcpu, vmcb->ctrl.exitinfo1)) {
 				exit->reason = VMM_CPUEXIT_NONE;
 			} else {
 				vmm_svm_exit_invalid(exit, vmcb->ctrl.exitcode);
@@ -3172,11 +3293,42 @@ vmm_svm_vcpu_set_lapic(struct vmm_vcpu *vcpu, const void *registers,
 }
 
 int
+vmm_svm_vcpu_io(struct vmm_vcpu *vcpu, const struct vmm_cpuexit_io *exit)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+
+	if (!vcpu->machine->irqchip || cpudata->interrupt == NULL ||
+	    vmm_svm_interrupt_ops->vcpu_io == NULL)
+		return ENOENT;
+	return vmm_svm_interrupt_ops->vcpu_io(vcpu, exit);
+}
+
+int
+vmm_svm_vcpu_mmio(struct vmm_vcpu *vcpu, uint64_t address, size_t size,
+    bool write, uint64_t *value)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	uint32_t value32;
+	int error;
+
+	/* The xAPIC and IOAPIC register ABI admits aligned 32-bit accesses only. */
+	if (!vcpu->machine->irqchip || cpudata->interrupt == NULL ||
+	    size != sizeof(value32) || value == NULL)
+		return ENOENT;
+	value32 = *value;
+	error = vmm_svm_interrupt_ops->vcpu_mmio(cpudata->interrupt, address,
+	    write, &value32);
+	if (error != 0)
+		return ENOENT;
+	*value = value32;
+	return 0;
+}
+
+int
 vmm_svm_machine_create(struct vmm_machine *mach)
 {
 	struct pmap *pmap = os_vmspace_pmap(mach->vmspace);
 	struct vmm_svm_machdata *machdata;
-	int error;
 
 	/* Transform the caller-owned guest pmap for nested paging. */
 	pmap_npt_transform(pmap, 0);
@@ -3185,14 +3337,6 @@ vmm_svm_machine_create(struct vmm_machine *mach)
 	if (machdata == NULL)
 		return ENOMEM;
 	mach->backend_state = machdata;
-	error = vmm_svm_interrupt_ops->machine_create(mach,
-	    &machdata->interrupt);
-	if (error != 0) {
-		mach->backend_state = NULL;
-		os_mem_free(machdata, sizeof(*machdata));
-		return error;
-	}
-
 	/* Start with an hTLB flush everywhere. */
 	machdata->mach_htlb_gen = 1;
 	return 0;
@@ -3202,8 +3346,22 @@ int
 vmm_svm_machine_create_irqchip(struct vmm_machine *mach)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
+	int error;
 
-	return vmm_svm_interrupt_ops->machine_enable(machdata->interrupt);
+	if (machdata == NULL)
+		return ENXIO;
+	if (machdata->interrupt != NULL)
+		return EALREADY;
+	error = vmm_svm_interrupt_ops->machine_create(mach,
+	    &machdata->interrupt);
+	if (error != 0)
+		return error;
+	error = vmm_svm_interrupt_ops->machine_enable(machdata->interrupt);
+	if (error == 0)
+		return 0;
+	vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
+	machdata->interrupt = NULL;
+	return error;
 }
 
 bool
@@ -3218,6 +3376,8 @@ vmm_svm_irq_raise_msi(struct vmm_machine *mach, uint64_t address,
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
 	return vmm_svm_interrupt_ops->irq_raise_msi(machdata->interrupt,
 	    address, data);
 }
@@ -3227,6 +3387,8 @@ vmm_svm_machine_set_irq(struct vmm_machine *mach, uint32_t gsi, bool level)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
 	return vmm_svm_interrupt_ops->irq_set(machdata->interrupt, gsi, level);
 }
 
@@ -3235,6 +3397,8 @@ vmm_svm_machine_raise_legacy(struct vmm_machine *mach, uint8_t vector)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
 	return vmm_svm_interrupt_ops->irq_raise_legacy(machdata->interrupt,
 	    vector);
 }
@@ -3245,6 +3409,8 @@ vmm_svm_machine_get_ioapic(struct vmm_machine *mach,
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
 	return vmm_svm_interrupt_ops->machine_get_ioapic(machdata->interrupt,
 	    state);
 }
@@ -3255,6 +3421,8 @@ vmm_svm_machine_set_ioapic(struct vmm_machine *mach,
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
 	return vmm_svm_interrupt_ops->machine_set_ioapic(machdata->interrupt,
 	    state);
 }
@@ -3264,7 +3432,11 @@ vmm_svm_machine_destroy(struct vmm_machine *mach)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
-	vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
+	if (machdata == NULL)
+		return;
+	if (machdata->interrupt != NULL)
+		vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
+	mach->backend_state = NULL;
 	os_mem_free(machdata, sizeof(*machdata));
 }
 

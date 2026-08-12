@@ -50,7 +50,7 @@ vmm_svm_sysctl_avic_enable(SYSCTL_HANDLER_ARGS)
 	}
 	vmm_svm_avic_enable = enable;
 	vmm_svm_interrupt_ops = enable ? &vmm_svm_avic_interrupt_ops :
-	    &vmm_svm_soft_interrupt_ops;
+	    &vmm_svm_softirq_interrupt_ops;
 	lwkt_reltoken(&vmm_token);
 	return 0;
 }
@@ -65,7 +65,7 @@ vmm_svm_probe(void)
 	if (vmm_svm_avic_enable)
 		vmm_svm_interrupt_ops = &vmm_svm_avic_interrupt_ops;
 	else
-		vmm_svm_interrupt_ops = &vmm_svm_soft_interrupt_ops;
+		vmm_svm_interrupt_ops = &vmm_svm_softirq_interrupt_ops;
 	kprintf("vmm: SVM interrupt mode: %s\n", vmm_svm_interrupt_ops->name);
 	return 0;
 }
@@ -90,6 +90,8 @@ const struct vmm_backend_ops vmm_svm_backend = {
 	.vcpu_set_cpuid = vmm_svm_vcpu_set_cpuid,
 	.vcpu_get_lapic = vmm_svm_vcpu_get_lapic,
 	.vcpu_set_lapic = vmm_svm_vcpu_set_lapic,
+	.vcpu_io = vmm_svm_vcpu_io,
+	.vcpu_mmio = vmm_svm_vcpu_mmio,
 	.vcpu_destroy = vmm_svm_vcpu_destroy,
 	.vcpu_run = vmm_svm_vcpu_run,
 	.vcpu_getstate = vmm_svm_vcpu_getstate,

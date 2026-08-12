@@ -26,6 +26,7 @@ struct vmm_io {
 };
 
 int vmm_io_handle_pio(struct vmm_vcpu *, const struct vmm_cpuexit *);
-int vmm_io_handle_mmio(struct vmm_vcpu *, const struct vmm_cpuexit *);
+int vmm_io_dispatch(struct vmm_vcpu *, enum vmm_io_space,
+    const struct vmm_io_write *);
 
 #endif /* VMM_IO_H */

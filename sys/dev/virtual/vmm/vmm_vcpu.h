@@ -8,6 +8,8 @@
 
 #include "vmm_machine.h"
 
+struct vmm_x64_emul;
+
 struct vmm_vcpu {
 	/* token protects running, destroying, event, and event_pending. */
 	struct lwkt_token token;
@@ -20,6 +22,8 @@ struct vmm_vcpu {
 	unsigned int id;
 	/* Published by run(); callers may read it only after run returns. */
 	struct vmm_cpuexit exit;
+	/* x86 memory instruction state retained across an external MMIO exit. */
+	struct vmm_x64_emul *emul;
 	void *backend;
 	int running;
 	int destroying;

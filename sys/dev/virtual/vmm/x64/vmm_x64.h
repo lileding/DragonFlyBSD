@@ -316,6 +316,10 @@ struct vmm_cpuexit_memory {
 	uint64_t gpa;
 	uint8_t inst_len;
 	uint8_t inst_bytes[15];
+	/* Valid after VMM decodes an external MMIO fragment. */
+	enum vmm_io_width width;
+	/* Valid only when prot includes VM_PROT_WRITE. */
+	uint64_t value;
 };
 
 struct vmm_cpuexit_io {

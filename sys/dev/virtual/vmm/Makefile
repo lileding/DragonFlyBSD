@@ -5,7 +5,8 @@ SRCS=	vmm.c vmm_machine.c vmm_vcpu.c vmm_io.c
 
 .if ${MACHINE_ARCH} == "x86_64"
 .PATH:	${.CURDIR}/x64 ${.CURDIR}/x64/svm
-SRCS+=	vmm_x64_pic.c vmm_x64_pit.c vmm_svm.c vmm_svm_avic.c vmm_svm_backend.c \
+SRCS+=	vmm_x64_pic.c vmm_x64_pit.c vmm_x64_emul.c vmm_svm.c vmm_svm_softirq.c \
+	vmm_svm_avic.c vmm_svm_backend.c \
 	vmm_svm_entry.S
 
 .if !defined(KERNBUILDDIR)

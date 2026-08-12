@@ -17,8 +17,7 @@
 #include "vmm_io.h"
 #include "vmm_vcpu.h"
 #include "x64/vmm_x64.h"
-#include "x64/vmm_x64_pic.h"
-#include "x64/vmm_x64_pit.h"
+#include "x64/vmm_x64_emul.h"
 
 int
 vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
@@ -39,10 +38,16 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->backend_ops = machine->backend;
 	vc->state = state;
 	lwkt_token_init(&vc->token, "vmmvcpu");
+	error = vmm_x64_emul_init(vc);
+	if (error != 0) {
+		kfree(vc, M_VMM);
+		return error;
+	}
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying ||
 	    machine->next_vcpu_id == (unsigned int)-1) {
 		lwkt_reltoken(&machine->token);
+		vmm_x64_emul_uninit(vc);
 		kfree(vc, M_VMM);
 		return EOVERFLOW;
 	}
@@ -55,6 +60,7 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 		KKASSERT(machine->vcpu_count > 0);
 		--machine->vcpu_count;
 		lwkt_reltoken(&machine->token);
+		vmm_x64_emul_uninit(vc);
 		kfree(vc, M_VMM);
 		return error;
 	}
@@ -134,6 +140,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 {
 	struct vmm_machine *machine;
 	struct vmm_cpuexit *exit;
+	bool ran_backend;
 	int fault_error;
 	int error;
 
@@ -156,7 +163,17 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	if (error != 0)
 		return error;
 
+	ran_backend = false;
+	error = vmm_x64_emul_resume(vcpu);
+	if (error == EINPROGRESS) {
+		*reason = &vcpu->exit;
+		error = 0;
+		goto out;
+	}
+	if (error != 0 && error != ENOENT)
+		goto out;
 	for (;;) {
+		ran_backend = true;
 		error = vcpu->backend_ops->vcpu_run(vcpu, reason);
 		if (error != 0 || *reason == NULL) {
 			break;
@@ -164,12 +181,9 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		exit = *reason;
 		if (exit->reason == VMM_CPUEXIT_IO) {
 			vcpu->backend_ops->vcpu_getstate(vcpu);
-			error = vmm_x64_pit_io(machine, vcpu->state, &exit->u.io);
-			if (error == 0)
-				continue;
-			if (error != ENOENT)
-				break;
-			error = vmm_x64_pic_io(machine, vcpu->state, &exit->u.io);
+			error = ENOENT;
+			if (vcpu->backend_ops->vcpu_io != NULL)
+				error = vcpu->backend_ops->vcpu_io(vcpu, &exit->u.io);
 			if (error == 0)
 				continue;
 			if (error != ENOENT)
@@ -185,20 +199,25 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		}
 		if (exit->reason != VMM_CPUEXIT_MEMORY)
 			break;
-		error = vmm_io_handle_mmio(vcpu, exit);
-		if (error == 0)
-			continue;
-		if (error != ENOENT)
-			break;
-		error = 0;
 		fault_error = vm_fault(&machine->vmspace->vm_map,
 		    trunc_page(exit->u.mem.gpa), exit->u.mem.prot,
 		    (exit->u.mem.prot & VM_PROT_WRITE) ?
 		    VM_FAULT_DIRTY : VM_FAULT_NORMAL);
-		if (fault_error != KERN_SUCCESS)
-			break;
+		if (fault_error == KERN_SUCCESS)
+			continue;
+		vcpu->backend_ops->vcpu_getstate(vcpu);
+		error = vmm_x64_emul_memory(vcpu, exit);
+		if (error == 0)
+			continue;
+		if (error == EINPROGRESS) {
+			*reason = &vcpu->exit;
+			error = 0;
+		}
+		break;
 	}
-	vcpu->backend_ops->vcpu_getstate(vcpu);
+out:
+	if (ran_backend)
+		vcpu->backend_ops->vcpu_getstate(vcpu);
 
 	lwkt_gettoken(&machine->token);
 	lwkt_gettoken(&vcpu->token);
@@ -210,6 +229,38 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
 	vmm_stat_vcpu_run_return();
+	return error;
+}
+
+int
+vmm_vcpu_complete_mmio_write(vmm_vcpu_t vcpu)
+{
+	int error;
+
+	if (vcpu == NULL)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying)
+		error = EBUSY;
+	else
+		error = vmm_x64_emul_complete_write(vcpu);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
+vmm_vcpu_complete_mmio_read(vmm_vcpu_t vcpu, const void *data, size_t size)
+{
+	int error;
+
+	if (vcpu == NULL || data == NULL)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying)
+		error = EBUSY;
+	else
+		error = vmm_x64_emul_complete_read(vcpu, data, size);
+	lwkt_reltoken(&vcpu->token);
 	return error;
 }
 
@@ -270,6 +321,7 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&machine->token);
 	vcpu->backend_ops->vcpu_destroy(vcpu);
+	vmm_x64_emul_uninit(vcpu);
 	lwkt_gettoken(&machine->token);
 	KKASSERT(machine->vcpu_count > 0);
 	--machine->vcpu_count;

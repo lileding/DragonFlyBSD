@@ -12,6 +12,7 @@
 
 struct vmm_machine;
 struct vmm_cpuevent;
+struct vmm_cpuexit_io;
 struct vmm_ioapic_state;
 struct vmm_vcpu;
 struct vmm_svm_interrupt_machine;
@@ -46,6 +47,7 @@ struct vmm_svm_interrupt_ops {
 	    const struct vmm_ioapic_state *);
 	int (*vcpu_mmio)(struct vmm_svm_interrupt_vcpu *, uint64_t, bool,
 	    uint32_t *);
+	int (*vcpu_io)(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
 	void (*machine_destroy)(struct vmm_svm_interrupt_machine *);
 	int (*vcpu_create)(struct vmm_svm_interrupt_machine *,
 	    struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
@@ -56,6 +58,10 @@ struct vmm_svm_interrupt_ops {
 	void (*vcpu_destroy)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_enter)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_leave)(struct vmm_svm_interrupt_vcpu *);
+	/* Resolve an interrupt queued by vcpu_enter after this VMRUN exits. */
+	void (*vcpu_event_result)(struct vmm_svm_interrupt_vcpu *, bool);
+	/* A software irqchip consumes VINTR as an internal retry point. */
+	bool vintr_internal;
 	int (*vcpu_exit)(struct vmm_svm_interrupt_vcpu *, uint64_t, uint64_t,
 	    uint64_t);
 };
@@ -65,7 +71,7 @@ int vmm_svm_avic_read_register(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t *);
 
 extern const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops;
-extern const struct vmm_svm_interrupt_ops vmm_svm_soft_interrupt_ops;
+extern const struct vmm_svm_interrupt_ops vmm_svm_softirq_interrupt_ops;
 extern const struct vmm_svm_interrupt_ops *vmm_svm_interrupt_ops;
 
 #endif /* VMM_SVM_AVIC_H */
