@@ -115,7 +115,10 @@
 
 #define VMM_SVM_MSI_ADDRESS_BASE		0xfee00000ULL
 #define VMM_SVM_MSI_ADDRESS_DEST_MASK		0x000ff000ULL
-#define VMM_SVM_MSI_ADDRESS_CONTROL_MASK	0x0000000cULL
+#define VMM_SVM_MSI_ADDRESS_DEST_LOGICAL	__BIT(2)
+#define VMM_SVM_MSI_ADDRESS_REDIRECTION_HINT	__BIT(3)
+#define VMM_SVM_MSI_ADDRESS_CONTROL_MASK	(VMM_SVM_MSI_ADDRESS_DEST_LOGICAL | \
+	VMM_SVM_MSI_ADDRESS_REDIRECTION_HINT)
 #define VMM_SVM_MSI_DATA_VECTOR_MASK		0x000000ffU
 #define VMM_SVM_MSI_DATA_DELIVERY_MASK		0x00000700U
 #define VMM_SVM_MSI_DATA_ALLOWED		(VMM_SVM_MSI_DATA_VECTOR_MASK | \
@@ -271,11 +274,14 @@ vmm_svm_softirq_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 {
 	struct vmm_svm_interrupt_vcpu *target;
 	uint32_t destination;
+	uint32_t id;
 	uint32_t vector;
+	bool logical;
+	bool delivered;
 
 	if ((address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
 	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) != VMM_SVM_MSI_ADDRESS_BASE ||
-	    (address & VMM_SVM_MSI_ADDRESS_CONTROL_MASK) != 0 ||
+	    (address & VMM_SVM_MSI_ADDRESS_REDIRECTION_HINT) != 0 ||
 	    (data & ~VMM_SVM_MSI_DATA_ALLOWED) != 0 ||
 	    (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != 0)
 		return EOPNOTSUPP;
@@ -283,14 +289,29 @@ vmm_svm_softirq_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 	if (vector < 32)
 		return EINVAL;
 	destination = (address & VMM_SVM_MSI_ADDRESS_DEST_MASK) >> 12;
-	if (destination > VMM_SVM_SOFTIRQ_MAX_APIC_ID)
+	logical = (address & VMM_SVM_MSI_ADDRESS_DEST_LOGICAL) != 0;
+	if (!logical && destination > VMM_SVM_SOFTIRQ_MAX_APIC_ID)
 		return ENOENT;
+	delivered = false;
 	lwkt_gettoken(&machine->token);
-	target = machine->targets[destination];
-	if (target != NULL)
-		vmm_svm_softirq_deliver(target, (uint8_t)vector);
+	if (!logical) {
+		target = machine->targets[destination];
+		if (target != NULL) {
+			vmm_svm_softirq_deliver(target, (uint8_t)vector);
+			delivered = true;
+		}
+	} else {
+		for (id = 0; id <= VMM_SVM_SOFTIRQ_MAX_APIC_ID; ++id) {
+			target = machine->targets[id];
+			if (target == NULL || (destination &
+			    (vmm_svm_softirq_read(target, VMM_SVM_APIC_LDR) >> 24)) == 0)
+				continue;
+			vmm_svm_softirq_deliver(target, (uint8_t)vector);
+			delivered = true;
+		}
+	}
 	lwkt_reltoken(&machine->token);
-	return target != NULL ? 0 : ENOENT;
+	return delivered ? 0 : ENOENT;
 }
 
 static int
