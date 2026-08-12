@@ -1,139 +1,164 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Vnode and identity lifecycle for one vmmfs machine directory.
+ * DragonFly vmmfs machine directory object.
  */
-#include <sys/param.h>
 #include <sys/dirent.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/namecache.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
-#include "vmmfs_machine.h"
+#include "vmmfs.h"
 
-#define VMMFS_MACHINE_TAG VT_UNUSED6
-#define VMMFS_MACHINE_INO 2
 #define VMMFS_MACHINE_MODE 0555
 
-MALLOC_DECLARE(M_VMMFS);
-
+static struct vnode *vmmfs_machine_vnode(struct vmmfs_machine *);
+static int vmmfs_machine_access(struct vop_access_args *);
 static int vmmfs_machine_getattr(struct vop_getattr_args *);
 static int vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *);
-static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *);
-static int vmmfs_machine_access(struct vop_access_args *);
+static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
+static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
-	.vop_open = vop_stdopen,
-	.vop_close = vop_stdclose,
-	.vop_nlookupdotdot = vmmfs_machine_nlookupdotdot,
 	.vop_access = vmmfs_machine_access,
+	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_machine_getattr,
 	.vop_getattr_lite = vmmfs_machine_getattr_lite,
+	.vop_nlookupdotdot = vmmfs_machine_nlookupdotdot,
+	.vop_nresolve = vmmfs_machine_nresolve,
+	.vop_open = vop_stdopen,
+	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_machine_readdir,
 	.vop_reclaim = vmmfs_machine_reclaim,
 };
 
 int
-vmmfs_machine_name_cmp(struct vmmfs_machine_name *left,
-    struct vmmfs_machine_name *right)
+vmmfs_machine_compare(struct vmmfs_machine *left,
+	struct vmmfs_machine *right)
 {
-	return strcmp(left->name, right->name);
+	return (strcmp(left->name, right->name));
 }
 
-RB_GENERATE(vmmfs_machine_tree, vmmfs_machine_name, entry,
-	vmmfs_machine_name_cmp);
+RB_GENERATE(vmmfs_machine_tree, vmmfs_machine, entry, vmmfs_machine_compare);
 
-int
-vmmfs_machine_create(struct mount *mount, struct vnode *parent,
-    struct vop_ops **machine_vops, const char *name, int name_len,
-    struct vmmfs_machine **machinep)
+struct vmmfs_machine *
+vmmfs_machine_create(struct vmmfs_domain *domain, const char *name,
+	size_t namelen)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_machine_name *name_entry;
-	struct vnode *vnode;
-	int error;
 
-	if (name_len <= 0 || name_len > VMMFS_MACHINE_NAME_MAX)
-		return EINVAL;
-	KKASSERT(machine_vops != NULL);
-
+	if (namelen == 0 || namelen > NAME_MAX)
+		return (NULL);
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
-	name_entry = kmalloc(sizeof(*name_entry), M_VMMFS, M_WAITOK | M_ZERO);
-	machine->mount = mount;
-	machine->parent = parent;
-	name_entry->machine = machine;
-	bcopy(name, name_entry->name, name_len);
-	name_entry->name[name_len] = '\0';
-	machine->name_entry = name_entry;
-
-	error = getnewvnode(VMMFS_MACHINE_TAG, mount, &vnode, VLKTIMEOUT,
-	    LK_CANRECURSE);
-	if (error != 0) {
-		kfree(name_entry, M_VMMFS);
-		kfree(machine, M_VMMFS);
-		return error;
-	}
-	vnode->v_ops = machine_vops;
-	vnode->v_type = VDIR;
-	vnode->v_data = machine;
-	machine->vnode = vnode;
-	vx_downgrade(vnode);
-	*machinep = machine;
-	return 0;
+	machine->domain = domain;
+	machine->as_vnode = vmmfs_machine_vnode;
+	bcopy(name, machine->name, namelen);
+	machine->name[namelen] = '\0';
+	lwkt_token_init(&machine->spec_token, "vmmfsmachine");
+	return (machine);
 }
 
 void
-vmmfs_machine_free(struct vmmfs_machine *machine)
+vmmfs_machine_destroy(struct vmmfs_machine *machine)
 {
-	struct vmmfs_machine_name *name_entry;
-	struct vnode *vnode;
+	KKASSERT(machine->domain == NULL);
+	KKASSERT(machine->vnode == NULL);
+	lwkt_token_uninit(&machine->spec_token);
+	kfree(machine, M_VMMFS);
+}
 
-	name_entry = machine->name_entry;
-	machine->name_entry = NULL;
+static struct vnode *
+vmmfs_machine_vnode(struct vmmfs_machine *machine)
+{
+	struct vmmfs_domain *domain;
+	struct vnode *vnode;
+	int detached;
+	int error;
+
+retry:
+	lwkt_gettoken(&machine->spec_token);
 	vnode = machine->vnode;
 	if (vnode != NULL) {
-		machine->vnode = NULL;
-		vnode->v_data = NULL;
-		vn_gone(vnode);
-		vrele(vnode);
+		vhold(vnode);
+		lwkt_reltoken(&machine->spec_token);
+		error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
+		vdrop(vnode);
+		if (error == 0)
+			return (vnode);
+		if (error != ENOENT)
+			return (NULL);
+		goto retry;
 	}
-	kfree(name_entry, M_VMMFS);
-	kfree(machine, M_VMMFS);
+	domain = machine->domain;
+	if (domain == NULL) {
+		lwkt_reltoken(&machine->spec_token);
+		return (NULL);
+	}
+	lwkt_reltoken(&machine->spec_token);
+
+	error = getnewvnode(VT_SYNTH, domain->mount, &vnode, 0, 0);
+	if (error != 0)
+		return (NULL);
+
+	lwkt_gettoken(&machine->spec_token);
+	detached = machine->domain == NULL;
+	if (machine->vnode != NULL || detached) {
+		vnode->v_type = VBAD;
+		vx_put(vnode);
+		lwkt_reltoken(&machine->spec_token);
+		if (detached)
+			return (NULL);
+		goto retry;
+	}
+	vnode->v_data = machine;
+	vnode->v_ops = &domain->machine_vops;
+	vnode->v_type = VDIR;
+	machine->vnode = vnode;
+	lwkt_reltoken(&machine->spec_token);
+	vx_downgrade(vnode);
+	return (vnode);
+}
+
+static int
+vmmfs_machine_access(struct vop_access_args *ap)
+{
+	return (vop_helper_access(ap, 0, 0, VMMFS_MACHINE_MODE, 0));
 }
 
 static int
 vmmfs_machine_getattr(struct vop_getattr_args *ap)
 {
+	struct vmmfs_machine *machine;
 	struct vattr *vattr;
 
+	machine = ap->a_vp->v_data;
+	if (machine == NULL)
+		return (ENOENT);
 	vattr = ap->a_vap;
+	VATTR_NULL(vattr);
 	vattr->va_type = VDIR;
 	vattr->va_mode = VMMFS_MACHINE_MODE;
 	vattr->va_nlink = 2;
 	vattr->va_uid = 0;
 	vattr->va_gid = 0;
 	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = VMMFS_MACHINE_INO;
+	vattr->va_fileid = machine->inode;
 	vattr->va_size = 0;
 	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_atime.tv_sec = 0;
-	vattr->va_atime.tv_nsec = 0;
-	vattr->va_mtime = vattr->va_atime;
-	vattr->va_ctime = vattr->va_atime;
-	vattr->va_gen = 1;
-	vattr->va_flags = 0;
 	vattr->va_bytes = 0;
+	vattr->va_flags = 0;
 	vattr->va_filerev = 0;
-	return 0;
+	return (0);
 }
 
 static int
@@ -149,84 +174,97 @@ vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *ap)
 	vattr->va_gid = 0;
 	vattr->va_size = 0;
 	vattr->va_flags = 0;
-	return 0;
-}
-
-static int
-vmmfs_machine_readdir(struct vop_readdir_args *ap)
-{
-	struct uio *uio;
-	off_t offset;
-	int error;
-	int full;
-
-	uio = ap->a_uio;
-	if (ap->a_vp->v_type != VDIR)
-		return ENOTDIR;
-	if (uio->uio_offset < 0)
-		return EINVAL;
-	offset = uio->uio_offset;
-	error = 0;
-	full = 0;
-	if (offset == 0) {
-		if (vop_write_dirent(&error, uio, VMMFS_MACHINE_INO, DT_DIR, 1,
-		    ".")) {
-			full = 1;
-			goto done;
-		}
-		offset = 1;
-	}
-	if (offset == 1) {
-		if (vop_write_dirent(&error, uio, VMMFS_MACHINE_INO, DT_DIR, 2,
-		    "..")) {
-			full = 1;
-			goto done;
-		}
-		offset = 2;
-	}
-done:
-	uio->uio_offset = offset;
-	if (ap->a_eofflag != NULL)
-		*ap->a_eofflag = !full;
-	if (ap->a_ncookies != NULL) {
-		*ap->a_ncookies = 0;
-		*ap->a_cookies = NULL;
-	}
-	return error;
+	return (0);
 }
 
 static int
 vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
 	struct vmmfs_machine *machine;
+	struct vmmfs_domain *domain;
+	struct vnode *vnode;
 
-	if (ap->a_dvp->v_type != VDIR)
-		return ENOTDIR;
 	machine = ap->a_dvp->v_data;
-	if (machine == NULL || machine->parent == NULL)
-		return ENOENT;
-	vref(machine->parent);
-	*ap->a_vpp = machine->parent;
-	return 0;
+	domain = (struct vmmfs_domain *)ap->a_dvp->v_mount->mnt_data;
+	if (machine == NULL || domain == NULL)
+		return (ENOENT);
+	lwkt_gettoken(&machine->spec_token);
+	if (machine->domain != domain) {
+		lwkt_reltoken(&machine->spec_token);
+		return (ENOENT);
+	}
+	lwkt_reltoken(&machine->spec_token);
+	vnode = domain->as_vnode(domain);
+	if (vnode == NULL)
+		return (ENOMEM);
+	*ap->a_vpp = vnode;
+	vn_unlock(vnode);
+	return (0);
 }
 
 static int
-vmmfs_machine_access(struct vop_access_args *ap)
+vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 {
-	return vop_helper_access(ap, 0, 0, VMMFS_MACHINE_MODE, 0);
+	cache_setvp(ap->a_nch, NULL);
+	return (ENOENT);
+}
+
+static int
+vmmfs_machine_readdir(struct vop_readdir_args *ap)
+{
+	struct vmmfs_machine *machine;
+	struct uio *uio;
+	off_t offset;
+	int error;
+	int stop;
+
+	machine = ap->a_vp->v_data;
+	if (machine == NULL)
+		return (ENOENT);
+	uio = ap->a_uio;
+	if (uio->uio_offset < 0)
+		return (EINVAL);
+	if (ap->a_ncookies != NULL) {
+		*ap->a_ncookies = 0;
+		*ap->a_cookies = NULL;
+	}
+	offset = uio->uio_offset;
+	error = 0;
+	stop = 0;
+	if (offset == 0) {
+		stop = vop_write_dirent(&error, uio, machine->inode, DT_DIR, 1,
+		    ".");
+		if (!stop)
+			offset = 1;
+	}
+	if (!stop && offset == 1) {
+		stop = vop_write_dirent(&error, uio, VMMFS_ROOT_INO, DT_DIR, 2,
+		    "..");
+		if (!stop)
+			offset = 2;
+	}
+	uio->uio_offset = offset;
+	if (ap->a_eofflag != NULL)
+		*ap->a_eofflag = !stop;
+	return (error);
 }
 
 static int
 vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_machine *machine;
+	int destroy;
 
 	machine = ap->a_vp->v_data;
-	if (machine != NULL) {
+	if (machine == NULL)
+		return (0);
+	lwkt_gettoken(&machine->spec_token);
+	if (machine->vnode == ap->a_vp)
 		machine->vnode = NULL;
-		ap->a_vp->v_data = NULL;
-		kfree(machine->name_entry, M_VMMFS);
-		kfree(machine, M_VMMFS);
-	}
-	return 0;
+	destroy = machine->domain == NULL;
+	lwkt_reltoken(&machine->spec_token);
+	ap->a_vp->v_data = NULL;
+	if (destroy)
+		vmmfs_machine_destroy(machine);
+	return (0);
 }
