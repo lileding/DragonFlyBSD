@@ -9,6 +9,7 @@
  * LAPIC/IOAPIC VMEXITs it claims.
  */
 #include <sys/errno.h>
+#include <sys/callout.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 
@@ -140,6 +141,9 @@ struct vmm_svm_interrupt_vcpu {
 	bool delivery_pending;
 	bool delivery_legacy;
 	uint8_t delivery_vector;
+	/* timer_token protects the LAPIC timer fields and timer_callout. */
+	struct lwkt_token timer_token;
+	struct callout timer_callout;
 	uint32_t timer_lvtt;
 	uint32_t timer_tmict;
 	uint32_t timer_tdcr;
@@ -147,6 +151,7 @@ struct vmm_svm_interrupt_vcpu {
 	uint64_t timer_interval_tsc;
 	uint64_t timer_deadline_tsc;
 	bool timer_active;
+	bool timer_expired;
 };
 
 static int vmm_svm_softirq_machine_create(struct vmm_machine *,
@@ -197,7 +202,14 @@ static int vmm_svm_interrupt_vcpu_set_lapic(
     struct vmm_svm_interrupt_vcpu *, const void *, size_t);
 static void vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *,
     uint32_t);
+static void vmm_svm_lapic_timer_arm_locked(
+    struct vmm_svm_interrupt_vcpu *, uint32_t);
 static void vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *);
+static void vmm_svm_lapic_timer_timeout(void *);
+static bool vmm_svm_lapic_timer_expire_locked(
+    struct vmm_svm_interrupt_vcpu *, uint64_t);
+static void vmm_svm_lapic_timer_schedule_locked(
+    struct vmm_svm_interrupt_vcpu *, uint64_t);
 static int vmm_svm_lapic_eoi(struct vmm_svm_interrupt_vcpu *);
 static uint8_t vmm_svm_lapic_ppr(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_ioapic_deliver_locked(
@@ -451,6 +463,8 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	soft = os_mem_zalloc(sizeof(*soft));
 	if (soft == NULL)
 		return ENOMEM;
+	lwkt_token_init(&soft->timer_token, "vmmltimer");
+	callout_init_mp(&soft->timer_callout);
 	soft->machine = machine;
 	soft->vcpu = vcpu;
 	soft->apic_id = vcpu->id;
@@ -460,6 +474,7 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 		soft->apic_base |= VMM_SVM_APICBASE_BSP;
 	if (os_contigpa_zalloc(&soft->apic_page_pa,
 	    (vaddr_t *)&soft->apic_page, 1) != 0) {
+		callout_terminate(&soft->timer_callout);
 		os_mem_free(soft, sizeof(*soft));
 		return ENOMEM;
 	}
@@ -484,6 +499,7 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	if (machine->targets[soft->apic_id] != NULL) {
 		lwkt_reltoken(&machine->token);
 		os_contigpa_free(soft->apic_page_pa, (vaddr_t)soft->apic_page, 1);
+		callout_terminate(&soft->timer_callout);
 		os_mem_free(soft, sizeof(*soft));
 		return EEXIST;
 	}
@@ -498,6 +514,13 @@ vmm_svm_softirq_vcpu_destroy(struct vmm_svm_interrupt_vcpu *vcpu)
 {
 	if (vcpu == NULL)
 		return;
+	lwkt_gettoken(&vcpu->timer_token);
+	vcpu->timer_active = false;
+	vcpu->timer_expired = false;
+	callout_stop_async(&vcpu->timer_callout);
+	lwkt_reltoken(&vcpu->timer_token);
+	callout_drain(&vcpu->timer_callout);
+	callout_terminate(&vcpu->timer_callout);
 	lwkt_gettoken(&vcpu->machine->token);
 	if (vcpu->machine->targets[vcpu->apic_id] == vcpu)
 		vcpu->machine->targets[vcpu->apic_id] = NULL;
@@ -644,6 +667,7 @@ vmm_svm_interrupt_vcpu_set_lapic(struct vmm_svm_interrupt_vcpu *vcpu,
 	if (vcpu == NULL || registers == NULL || size != 0x400U)
 		return EINVAL;
 	state = registers;
+	lwkt_gettoken(&vcpu->timer_token);
 	bcopy(state, vcpu->apic_page, size);
 	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_ID, vcpu->apic_id << 24);
 	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_VERSION,
@@ -658,7 +682,8 @@ vmm_svm_interrupt_vcpu_set_lapic(struct vmm_svm_interrupt_vcpu *vcpu,
 	    ((vcpu->timer_tdcr & 0x8U) >> 1)) + 1;
 	vcpu->timer_divisor = 1U << (divide & 0x7U);
 	value = vmm_svm_softirq_read(vcpu, VMM_SVM_APIC_TMICT);
-	vmm_svm_lapic_timer_arm(vcpu, value);
+	vmm_svm_lapic_timer_arm_locked(vcpu, value);
+	lwkt_reltoken(&vcpu->timer_token);
 	return 0;
 }
 
@@ -676,9 +701,21 @@ static void
 vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *vcpu,
     uint32_t count)
 {
+	lwkt_gettoken(&vcpu->timer_token);
+	vmm_svm_lapic_timer_arm_locked(vcpu, count);
+	lwkt_reltoken(&vcpu->timer_token);
+}
+
+/* Caller holds vcpu->timer_token. */
+static void
+vmm_svm_lapic_timer_arm_locked(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint32_t count)
+{
 	uint64_t delta;
 	uint64_t now;
 
+	callout_stop_async(&vcpu->timer_callout);
+	vcpu->timer_expired = false;
 	vcpu->timer_tmict = count;
 	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMICT, count);
 	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMCCT, count);
@@ -686,6 +723,8 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *vcpu,
 	    (vcpu->timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE) ==
 	    VMM_SVM_APIC_LVT_TIMER_TSCDEADLINE || tsc_frequency == 0) {
 		vcpu->timer_active = false;
+		vcpu->timer_interval_tsc = 0;
+		vcpu->timer_deadline_tsc = 0;
 		return;
 	}
 	delta = ((uint64_t)count * vcpu->timer_divisor * tsc_frequency +
@@ -697,41 +736,99 @@ vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *vcpu,
 	vcpu->timer_deadline_tsc = UINT64_MAX - now < delta ?
 	    UINT64_MAX : now + delta;
 	vcpu->timer_active = true;
+	vmm_svm_lapic_timer_schedule_locked(vcpu, now);
+}
+
+/* Caller holds vcpu->timer_token. */
+static void
+vmm_svm_lapic_timer_schedule_locked(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint64_t now)
+{
+	uint64_t delay;
+	uint64_t callout_ticks;
+
+	if (!vcpu->timer_active || vcpu->timer_deadline_tsc <= now ||
+	    tsc_frequency == 0) {
+		callout_stop_async(&vcpu->timer_callout);
+		return;
+	}
+	delay = vcpu->timer_deadline_tsc - now;
+	callout_ticks = (delay * hz + tsc_frequency - 1) / tsc_frequency;
+	if (callout_ticks > INT_MAX)
+		callout_ticks = INT_MAX;
+	callout_reset(&vcpu->timer_callout, (int)MAX(callout_ticks, 1),
+	    vmm_svm_lapic_timer_timeout, vcpu);
+}
+
+/* Caller holds vcpu->timer_token. */
+static bool
+vmm_svm_lapic_timer_expire_locked(struct vmm_svm_interrupt_vcpu *vcpu,
+    uint64_t now)
+{
+	uint64_t periods;
+
+	if (!vcpu->timer_active || now < vcpu->timer_deadline_tsc)
+		return false;
+	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMCCT, 0);
+	vcpu->timer_expired = true;
+	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE) !=
+	    VMM_SVM_APIC_LVT_TIMER_PERIODIC || vcpu->timer_interval_tsc == 0 ||
+	    vcpu->timer_tmict == 0) {
+		vcpu->timer_active = false;
+		return true;
+	}
+	periods = (now - vcpu->timer_deadline_tsc) / vcpu->timer_interval_tsc +
+	    1;
+	if (periods > (UINT64_MAX - vcpu->timer_deadline_tsc) /
+	    vcpu->timer_interval_tsc) {
+		vcpu->timer_active = false;
+		vcpu->timer_deadline_tsc = 0;
+		return true;
+	}
+	vcpu->timer_deadline_tsc += periods * vcpu->timer_interval_tsc;
+	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMCCT,
+	    vcpu->timer_tmict);
+	return true;
+}
+
+static void
+vmm_svm_lapic_timer_timeout(void *argument)
+{
+	struct vmm_svm_interrupt_vcpu *vcpu;
+	uint64_t now;
+	bool expired;
+
+	vcpu = argument;
+	now = rdtsc();
+	lwkt_gettoken(&vcpu->timer_token);
+	expired = vmm_svm_lapic_timer_expire_locked(vcpu, now);
+	if (vcpu->timer_active)
+		vmm_svm_lapic_timer_schedule_locked(vcpu, now);
+	lwkt_reltoken(&vcpu->timer_token);
+	if (expired)
+		(void)vmm_vcpu_kick(vcpu->vcpu);
 }
 
 static void
 vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *vcpu)
 {
 	uint64_t now;
-	uint64_t periods;
 	uint8_t vector;
+	bool deliver;
 
-	if (!vcpu->timer_active)
-		return;
 	now = rdtsc();
-	if (now < vcpu->timer_deadline_tsc)
-		return;
+	lwkt_gettoken(&vcpu->timer_token);
+	if (vmm_svm_lapic_timer_expire_locked(vcpu, now) &&
+	    vcpu->timer_active)
+		vmm_svm_lapic_timer_schedule_locked(vcpu, now);
+	deliver = vcpu->timer_expired;
+	vcpu->timer_expired = false;
 	vector = vcpu->timer_lvtt & VMM_SVM_APIC_LVT_VECTOR_MASK;
-	vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMCCT, 0);
-	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_MASKED) == 0 &&
-	    vector >= 32)
+	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_MASKED) != 0 || vector < 32)
+		deliver = false;
+	lwkt_reltoken(&vcpu->timer_token);
+	if (deliver)
 		vmm_svm_softirq_deliver(vcpu, vector);
-	if ((vcpu->timer_lvtt & VMM_SVM_APIC_LVT_TIMER_MODE) ==
-	    VMM_SVM_APIC_LVT_TIMER_PERIODIC && vcpu->timer_interval_tsc != 0 &&
-	    vcpu->timer_tmict != 0) {
-		periods = (now - vcpu->timer_deadline_tsc) /
-	    vcpu->timer_interval_tsc + 1;
-		if (periods > (UINT64_MAX - vcpu->timer_deadline_tsc) /
-		    vcpu->timer_interval_tsc)
-			vcpu->timer_deadline_tsc = UINT64_MAX;
-		else
-			vcpu->timer_deadline_tsc += periods *
-			    vcpu->timer_interval_tsc;
-		vmm_svm_softirq_write(vcpu, VMM_SVM_APIC_TMCCT,
-	    vcpu->timer_tmict);
-	} else {
-		vcpu->timer_active = false;
-	}
 }
 
 static int
@@ -762,16 +859,25 @@ vmm_svm_lapic_read(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 
 	if (reg > PAGE_SIZE - sizeof(*value) || (reg & 3) != 0)
 		return EINVAL;
-	now = rdtsc();
 	if (reg == VMM_SVM_APIC_PPR) {
 		*value = vmm_svm_lapic_ppr(vcpu);
-	} else if (reg == VMM_SVM_APIC_TMCCT && vcpu->timer_active &&
-	    vcpu->timer_interval_tsc != 0 && now < vcpu->timer_deadline_tsc)
+		return 0;
+	}
+	if (reg != VMM_SVM_APIC_TMCCT) {
+		*value = vmm_svm_softirq_read(vcpu, reg);
+		return 0;
+	}
+	now = rdtsc();
+	lwkt_gettoken(&vcpu->timer_token);
+	if (vcpu->timer_active && vcpu->timer_interval_tsc != 0 &&
+	    now < vcpu->timer_deadline_tsc) {
 		*value = (uint32_t)((uint64_t)vcpu->timer_tmict *
 		    (vcpu->timer_deadline_tsc - now) /
 		    vcpu->timer_interval_tsc);
-	else
+	} else {
 		*value = vmm_svm_softirq_read(vcpu, reg);
+	}
+	lwkt_reltoken(&vcpu->timer_token);
 	return 0;
 }
 
@@ -846,21 +952,25 @@ vmm_svm_lapic_write(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 		break;
 	case VMM_SVM_APIC_LVTT:
 		value &= VMM_SVM_APIC_LVT_TIMER_VALID;
+		lwkt_gettoken(&vcpu->timer_token);
 		vcpu->timer_lvtt = value;
-		if (vcpu->timer_tmict != 0)
-			vmm_svm_lapic_timer_arm(vcpu, vcpu->timer_tmict);
-		break;
+		vmm_svm_softirq_write(vcpu, reg, value);
+		vmm_svm_lapic_timer_arm_locked(vcpu, vcpu->timer_tmict);
+		lwkt_reltoken(&vcpu->timer_token);
+		return 0;
 	case VMM_SVM_APIC_TMICT:
 		vmm_svm_lapic_timer_arm(vcpu, value);
 		return 0;
 	case VMM_SVM_APIC_TDCR:
 		value &= VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+		lwkt_gettoken(&vcpu->timer_token);
 		vcpu->timer_tdcr = value;
 		divide = ((value & 0x3U) | ((value & 0x8U) >> 1)) + 1;
 		vcpu->timer_divisor = 1U << (divide & 0x7U);
-		if (vcpu->timer_tmict != 0)
-			vmm_svm_lapic_timer_arm(vcpu, vcpu->timer_tmict);
-		break;
+		vmm_svm_softirq_write(vcpu, reg, value);
+		vmm_svm_lapic_timer_arm_locked(vcpu, vcpu->timer_tmict);
+		lwkt_reltoken(&vcpu->timer_token);
+		return 0;
 	case VMM_SVM_APIC_SVR:
 		value &= VMM_SVM_APIC_SVR_VALID;
 		break;
