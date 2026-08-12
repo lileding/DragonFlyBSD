@@ -1,8 +1,8 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Verifies in-kernel x86 IOAPIC MMIO and fixed GSI delivery from a 32-bit
- * protected-mode guest.
+ * Verifies in-kernel x86 IOAPIC MMIO plus fixed edge and level GSI delivery
+ * from a 32-bit protected-mode guest.
  */
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <err.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <strings.h>
@@ -22,6 +23,7 @@
 #define KVM_IOAPIC_CODE_OFFSET	0x1000U
 #define KVM_IOAPIC_HANDLER_OFFSET	0x0200U
 #define KVM_IOAPIC_RESULT_OFFSET	0x0300U
+#define KVM_IOAPIC_GATE_OFFSET		0x0301U
 #define KVM_IOAPIC_IDT_OFFSET		0x1800U
 #define KVM_IOAPIC_GDT_OFFSET	0x3000U
 #define KVM_IOAPIC_ADDRESS	0xfec00000U
@@ -29,6 +31,12 @@
 #define KVM_IOAPIC_GSI		4U
 #define KVM_IOAPIC_VECTOR		0x41U
 #define KVM_IOAPIC_SVR		0x0f0U
+#define KVM_IOAPIC_REDIR_LEVEL	0x00008000U
+
+struct kvm_ioapic_run_task {
+	int vcpu_fd;
+	int error;
+};
 
 static void
 kvm_ioapic_set_segment(struct kvm_segment *segment, uint16_t selector,
@@ -94,12 +102,17 @@ kvm_ioapic_write_code(uint8_t *memory)
 		0xeb, 0xfd				/* jmp hlt */
 	};
 	static const uint8_t handler[] = {
-		0xc6, 0x05, 0x00, 0x03, 0x00, 0x00, 0x7a,
-						/* movb $0x7a,0x300 */
+		0xfe, 0x05, 0x00, 0x03, 0x00, 0x00,
+						/* incb 0x300 */
+		0x80, 0x3d, 0x01, 0x03, 0x00, 0x00, 0x00,
+						/* cmpb $0,0x301 */
+		0x74, 0xf7,				/* je cmp */
+		0xc6, 0x05, 0x01, 0x03, 0x00, 0x00, 0x00,
+						/* movb $0,0x301 */
 		0xb8, 0x00, 0x00, 0x00, 0x00,	/* mov $0,%eax */
 		0xbf, 0xb0, 0x00, 0xe0, 0xfe,	/* mov $0xfee000b0,%edi */
 		0x89, 0x07,				/* mov %eax,(%edi) */
-		0xf4					/* hlt */
+		0xcf					/* iret */
 	};
 
 	gdt = (uint64_t *)(memory + KVM_IOAPIC_GDT_OFFSET);
@@ -127,6 +140,38 @@ kvm_ioapic_run(int vcpu_fd)
 	}
 }
 
+static void *
+kvm_ioapic_run_thread(void *argument)
+{
+	struct kvm_ioapic_run_task *task;
+	unsigned int interrupted;
+
+	task = argument;
+	interrupted = 0;
+	while (ioctl(task->vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno == EINTR && interrupted++ != 10000) {
+			usleep(100);
+			continue;
+		}
+		task->error = errno;
+		return NULL;
+	}
+	return NULL;
+}
+
+static int
+kvm_ioapic_wait_for_result(volatile uint8_t *result, uint8_t value)
+{
+	unsigned int attempt;
+
+	for (attempt = 0; attempt < 10000; ++attempt) {
+		if (*result == value)
+			return 0;
+		usleep(100);
+	}
+	return ETIMEDOUT;
+}
+
 int
 main(void)
 {
@@ -136,9 +181,14 @@ main(void)
 	struct kvm_lapic_state lapic;
 	struct kvm_regs regs;
 	struct kvm_run *run;
+	struct kvm_ioapic_run_task task;
+	pthread_t thread;
 	uint8_t *guest_memory;
+	volatile uint8_t *gate;
+	volatile uint8_t *result;
 	void *run_mapping;
 	int control_fd;
+	int error;
 	int vm_fd;
 	int vcpu_fd;
 	int run_size;
@@ -159,6 +209,8 @@ main(void)
 	if (guest_memory == MAP_FAILED)
 		err(1, "mmap guest memory");
 	bzero(guest_memory, KVM_IOAPIC_MEMORY_SIZE);
+	result = guest_memory + KVM_IOAPIC_RESULT_OFFSET;
+	gate = guest_memory + KVM_IOAPIC_GATE_OFFSET;
 	kvm_ioapic_write_code(guest_memory);
 	bzero(&memory_region, sizeof(memory_region));
 	memory_region.slot = 0;
@@ -206,6 +258,7 @@ main(void)
 		err(1, "KVM_SET_IRQCHIP redirection");
 	irq_line.irq = KVM_IOAPIC_GSI;
 	irq_line.level = 1;
+	*gate = 1;
 	if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
 		err(1, "KVM_IRQ_LINE assert");
 	irq_line.level = 0;
@@ -214,8 +267,62 @@ main(void)
 	kvm_ioapic_run(vcpu_fd);
 	if (run->exit_reason != KVM_EXIT_HLT)
 		err(1, "expected HLT after GSI, got %u", run->exit_reason);
-	if (guest_memory[KVM_IOAPIC_RESULT_OFFSET] != 0x7a)
+	if (*result != 1)
 		err(1, "IOAPIC GSI handler did not run");
+	*result = 0;
+	*gate = 0;
+	irqchip.chip.ioapic.redirtbl[KVM_IOAPIC_GSI].bits =
+	    KVM_IOAPIC_VECTOR | KVM_IOAPIC_REDIR_LEVEL;
+	if (ioctl(vm_fd, KVM_SET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_SET_IRQCHIP level redirection");
+	irq_line.level = 1;
+	if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
+		err(1, "KVM_IRQ_LINE assert level GSI");
+	bzero(&task, sizeof(task));
+	task.vcpu_fd = vcpu_fd;
+	error = pthread_create(&thread, NULL, kvm_ioapic_run_thread, &task);
+	if (error != 0)
+		errc(1, error, "pthread_create");
+	error = kvm_ioapic_wait_for_result(result, 1);
+	if (error != 0) {
+		int join_error;
+
+		irq_line.level = 0;
+		if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
+			err(1, "KVM_IRQ_LINE timeout deassert");
+		*gate = 1;
+		join_error = pthread_join(thread, NULL);
+		if (join_error != 0)
+			errc(1, join_error, "pthread_join timeout");
+		errx(1, "level IOAPIC GSI handler did not run");
+	}
+	*gate = 1;
+	error = kvm_ioapic_wait_for_result(result, 2);
+	if (error != 0) {
+		int join_error;
+
+		irq_line.level = 0;
+		if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
+			err(1, "KVM_IRQ_LINE timeout deassert");
+		*gate = 1;
+		join_error = pthread_join(thread, NULL);
+		if (join_error != 0)
+			errc(1, join_error, "pthread_join timeout");
+		errx(1, "level IOAPIC GSI was not reasserted after EOI");
+	}
+	irq_line.level = 0;
+	if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
+		err(1, "KVM_IRQ_LINE deassert level GSI");
+	*gate = 1;
+	error = pthread_join(thread, NULL);
+	if (error != 0)
+		errc(1, error, "pthread_join");
+	if (task.error != 0)
+		errc(1, task.error, "KVM_RUN level GSI");
+	if (run->exit_reason != KVM_EXIT_HLT)
+		err(1, "expected HLT after level EOI, got %u", run->exit_reason);
+	if (*result != 2)
+		err(1, "level IOAPIC GSI was not reasserted after EOI");
 	if (munmap(run_mapping, run_size) != 0 || close(vcpu_fd) != 0 ||
 	    close(vm_fd) != 0 ||
 	    munmap(guest_memory, KVM_IOAPIC_MEMORY_SIZE) != 0 ||
