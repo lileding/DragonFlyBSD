@@ -17,5 +17,6 @@ int vmm_x64_emul_memory(struct vmm_vcpu *, const struct vmm_cpuexit *);
 int vmm_x64_emul_resume(struct vmm_vcpu *);
 int vmm_x64_emul_complete_write(struct vmm_vcpu *);
 int vmm_x64_emul_complete_read(struct vmm_vcpu *, const void *, size_t);
+int vmm_x64_translate(struct vmm_vcpu *, uint64_t, uint64_t *);
 
 #endif /* VMM_X64_EMUL_H */

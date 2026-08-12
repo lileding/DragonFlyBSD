@@ -203,6 +203,14 @@ int vmm_x64_get_supported_cpuid(struct vmm_cpuid_entry *entries,
 	size_t *entry_count);
 
 /*
+ * Translates one current guest virtual address through the vCPU page tables.
+ * The vCPU must not be running.  It only reports the corresponding GPA and
+ * does not modify guest CPU state or data.  Resolving guest page-table pages
+ * may fault their backing into the machine vmspace.
+ */
+int vmm_vcpu_translate(vmm_vcpu_t vcpu, uint64_t gva, uint64_t *gpa);
+
+/*
  * Copies the x86 LAPIC register image to or from a stopped vCPU.  The image
  * is fixed at VMM_X64_LAPIC_STATE_SIZE bytes and has no host pointer fields.
  * Restoring it also rebuilds backend-derived LAPIC timer and routing state.

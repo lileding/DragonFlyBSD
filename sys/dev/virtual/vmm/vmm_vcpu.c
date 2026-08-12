@@ -92,6 +92,22 @@ vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
 }
 
 int
+vmm_vcpu_translate(vmm_vcpu_t vcpu, uint64_t gva, uint64_t *gpa)
+{
+	int error;
+
+	if (vcpu == NULL || gpa == NULL)
+		return EINVAL;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying)
+		error = EBUSY;
+	else
+		error = vmm_x64_translate(vcpu, gva, gpa);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
 vmm_vcpu_get_lapic(vmm_vcpu_t vcpu, void *registers, size_t size)
 {
 	int error;

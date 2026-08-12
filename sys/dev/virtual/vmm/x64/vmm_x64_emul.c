@@ -312,6 +312,16 @@ vmm_x64_emul_translate(struct vmm_vcpu *vcpu, uint64_t gva, uint64_t *gpa,
 	return 0;
 }
 
+int
+vmm_x64_translate(struct vmm_vcpu *vcpu, uint64_t gva, uint64_t *gpa)
+{
+	uint64_t prot;
+
+	if (vcpu == NULL || gpa == NULL)
+		return EINVAL;
+	return vmm_x64_emul_translate(vcpu, gva, gpa, &prot);
+}
+
 static int
 vmm_x64_emul_gpa_access(struct vmm_vcpu *vcpu, uint64_t gpa, uint8_t *data,
 	size_t size, bool write)
