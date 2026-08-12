@@ -1641,9 +1641,30 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	struct vmcb *vmcb = cpudata->vmcb;
 	uint64_t val;
+	uint32_t msr;
+	bool write;
+	int error;
 	size_t i;
 
-	if (exit->reason == VMM_CPUEXIT_RDMSR) {
+	write = exit->reason == VMM_CPUEXIT_WRMSR;
+	msr = write ? exit->u.wrmsr.msr : exit->u.rdmsr.msr;
+	val = write ? exit->u.wrmsr.val : 0;
+	if (cpudata->interrupt != NULL &&
+	    vmm_svm_interrupt_ops->vcpu_msr != NULL) {
+		error = vmm_svm_interrupt_ops->vcpu_msr(cpudata->interrupt,
+		    write, msr, &val);
+		if (error == 0) {
+			if (!write) {
+				vmcb->state.rax = val & 0xffffffffU;
+				cpudata->gprs[VMM_X64_GPR_RDX] = val >> 32;
+			}
+			goto handled;
+		}
+		if (error != ENOENT)
+			goto error;
+	}
+
+	if (!write) {
 		if (exit->u.rdmsr.msr == MSR_EFER) {
 			val = vmcb->state.efer & ~EFER_SVME;
 			vmcb->state.rax = (val & 0xFFFFFFFF);

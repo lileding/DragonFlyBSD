@@ -48,6 +48,9 @@ struct vmm_svm_interrupt_ops {
 	int (*vcpu_mmio)(struct vmm_svm_interrupt_vcpu *, uint64_t, bool,
 	    uint32_t *);
 	int (*vcpu_io)(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
+	/* Handle an irqchip-owned MSR; ENOENT leaves it to the frontend. */
+	int (*vcpu_msr)(struct vmm_svm_interrupt_vcpu *, bool, uint32_t,
+	    uint64_t *);
 	void (*machine_destroy)(struct vmm_svm_interrupt_machine *);
 	int (*vcpu_create)(struct vmm_svm_interrupt_machine *,
 	    struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,

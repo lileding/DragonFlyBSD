@@ -13,7 +13,6 @@
 #include <sys/systm.h>
 
 #include <machine/clock.h>
-
 #include "../../vmm.h"
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
@@ -26,6 +25,10 @@
 
 #define VMM_SVM_SOFTIRQ_LAPIC_BASE		0xfee00000ULL
 #define VMM_SVM_SOFTIRQ_MAX_APIC_ID	0xfeU
+#define VMM_SVM_MSR_APICBASE			0x01bU
+#define VMM_SVM_APICBASE_BSP			0x00000100ULL
+#define VMM_SVM_APICBASE_ENABLED		0x00000800ULL
+#define VMM_SVM_APICBASE_ADDRESS		0xfffff000ULL
 
 #define VMM_SVM_IOAPIC_BASE		0xfec00000ULL
 #define VMM_SVM_IOAPIC_PINS		24U
@@ -43,6 +46,7 @@
 #define VMM_SVM_APIC_ID			0x020U
 #define VMM_SVM_APIC_VERSION		0x030U
 #define VMM_SVM_APIC_TPR			0x080U
+#define VMM_SVM_APIC_PPR			0x0a0U
 #define VMM_SVM_APIC_EOI			0x0b0U
 #define VMM_SVM_APIC_LDR			0x0d0U
 #define VMM_SVM_APIC_DFR			0x0e0U
@@ -91,6 +95,9 @@
 	 VMM_SVM_APIC_LVT_LEVEL)
 #define VMM_SVM_APIC_TIMER_DIVIDE_VALID	0x0000000bU
 
+#define VMM_SVM_SOFTIRQ_APICBASE_VALID	(VMM_SVM_APICBASE_BSP | \
+	VMM_SVM_APICBASE_ENABLED | VMM_SVM_APICBASE_ADDRESS)
+
 #define VMM_SVM_APIC_ICR_DELIVERY_MASK	0x00000700U
 #define VMM_SVM_APIC_ICR_FIXED		0x00000000U
 #define VMM_SVM_APIC_ICR_NMI		0x00000400U
@@ -127,6 +134,7 @@ struct vmm_svm_interrupt_vcpu {
 	void *apic_page;
 	paddr_t apic_page_pa;
 	uint32_t apic_id;
+	uint64_t apic_base;
 	volatile u_int legacy_pending;
 	bool delivery_pending;
 	bool delivery_legacy;
@@ -157,6 +165,8 @@ static int vmm_svm_softirq_vcpu_mmio(struct vmm_svm_interrupt_vcpu *, uint64_t,
     bool, uint32_t *);
 static int vmm_svm_softirq_vcpu_io(struct vmm_vcpu *,
     const struct vmm_cpuexit_io *);
+static int vmm_svm_softirq_vcpu_msr(struct vmm_svm_interrupt_vcpu *, bool,
+    uint32_t, uint64_t *);
 static void vmm_svm_softirq_machine_destroy(struct vmm_svm_interrupt_machine *);
 static int vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *,
     struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
@@ -187,6 +197,7 @@ static void vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *);
 static int vmm_svm_lapic_eoi(struct vmm_svm_interrupt_vcpu *);
+static uint8_t vmm_svm_lapic_ppr(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_ioapic_deliver_locked(
     struct vmm_svm_interrupt_machine *, uint32_t);
 static void vmm_svm_ioapic_reassert(struct vmm_svm_interrupt_machine *,
@@ -203,6 +214,7 @@ const struct vmm_svm_interrupt_ops vmm_svm_softirq_interrupt_ops = {
 	.machine_set_ioapic = vmm_svm_interrupt_machine_set_ioapic,
 	.vcpu_mmio = vmm_svm_softirq_vcpu_mmio,
 	.vcpu_io = vmm_svm_softirq_vcpu_io,
+	.vcpu_msr = vmm_svm_softirq_vcpu_msr,
 	.machine_destroy = vmm_svm_softirq_machine_destroy,
 	.vcpu_create = vmm_svm_softirq_vcpu_create,
 	.vcpu_get_lapic = vmm_svm_interrupt_vcpu_get_lapic,
@@ -443,6 +455,10 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	soft->machine = machine;
 	soft->vcpu = vcpu;
 	soft->apic_id = vcpu->id;
+	soft->apic_base = VMM_SVM_SOFTIRQ_LAPIC_BASE |
+	    VMM_SVM_APICBASE_ENABLED;
+	if (soft->apic_id == 0)
+		soft->apic_base |= VMM_SVM_APICBASE_BSP;
 	if (os_contigpa_zalloc(&soft->apic_page_pa,
 	    (vaddr_t *)&soft->apic_page, 1) != 0) {
 		os_mem_free(soft, sizeof(*soft));
@@ -519,6 +535,8 @@ vmm_svm_softirq_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 			continue;
 		bit = fls(value) - 1;
 		vector = word * 32 + bit;
+		if ((vector & 0xf0U) <= vmm_svm_lapic_ppr(vcpu))
+			return;
 		if (!vmm_svm_vcpu_interrupt_allowed(vcpu->vcpu)) {
 			vmm_svm_vcpu_request_interrupt_window(vcpu->vcpu);
 			return;
@@ -733,13 +751,61 @@ vmm_svm_lapic_read(struct vmm_svm_interrupt_vcpu *vcpu, uint32_t reg,
 	if (reg > PAGE_SIZE - sizeof(*value) || (reg & 3) != 0)
 		return EINVAL;
 	now = rdtsc();
-	if (reg == VMM_SVM_APIC_TMCCT && vcpu->timer_active &&
+	if (reg == VMM_SVM_APIC_PPR) {
+		*value = vmm_svm_lapic_ppr(vcpu);
+	} else if (reg == VMM_SVM_APIC_TMCCT && vcpu->timer_active &&
 	    vcpu->timer_interval_tsc != 0 && now < vcpu->timer_deadline_tsc)
 		*value = (uint32_t)((uint64_t)vcpu->timer_tmict *
 		    (vcpu->timer_deadline_tsc - now) /
 		    vcpu->timer_interval_tsc);
 	else
 		*value = vmm_svm_softirq_read(vcpu, reg);
+	return 0;
+}
+
+/*
+ * PPR is the active task priority.  An in-service vector overrides the TPR
+ * priority class; otherwise the complete TPR value remains visible.
+ */
+static uint8_t
+vmm_svm_lapic_ppr(struct vmm_svm_interrupt_vcpu *vcpu)
+{
+	volatile uint32_t *isr;
+	uint8_t tpr;
+	int word;
+	int bit;
+	uint32_t value;
+
+	tpr = vmm_svm_softirq_read(vcpu, VMM_SVM_APIC_TPR);
+	for (word = 7; word >= 0; --word) {
+		isr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
+		    VMM_SVM_APIC_ISR_BASE + word * 0x10);
+		value = atomic_load_acq_int((volatile u_int *)isr);
+		if (value == 0)
+			continue;
+		bit = fls(value) - 1;
+		if ((word * 2 + (bit >> 4)) > (tpr >> 4))
+			return (uint8_t)((word * 2 + (bit >> 4)) << 4);
+		break;
+	}
+	return tpr;
+}
+
+static int
+vmm_svm_softirq_vcpu_msr(struct vmm_svm_interrupt_vcpu *vcpu, bool write,
+    uint32_t msr, uint64_t *value)
+{
+
+	if (msr != VMM_SVM_MSR_APICBASE || value == NULL)
+		return ENOENT;
+	if (!write) {
+		*value = vcpu->apic_base;
+		return 0;
+	}
+	if ((*value & ~VMM_SVM_SOFTIRQ_APICBASE_VALID) != 0 ||
+	    (*value & VMM_SVM_APICBASE_ADDRESS) != VMM_SVM_SOFTIRQ_LAPIC_BASE)
+		return EINVAL;
+	vcpu->apic_base = *value;
 	return 0;
 }
 
@@ -827,6 +893,8 @@ vmm_svm_softirq_vcpu_mmio(struct vmm_svm_interrupt_vcpu *vcpu,
 
 	if (address >= VMM_SVM_SOFTIRQ_LAPIC_BASE &&
 	    address < VMM_SVM_SOFTIRQ_LAPIC_BASE + PAGE_SIZE) {
+		if ((vcpu->apic_base & VMM_SVM_APICBASE_ENABLED) == 0)
+			return ENOENT;
 		reg = address - VMM_SVM_SOFTIRQ_LAPIC_BASE;
 		if ((reg & 3) != 0)
 			return ENOENT;
