@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 
+#include <errno.h>
 #include <err.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -71,6 +72,7 @@ main(void)
 	void *run_mapping;
 	uint8_t *code;
 	int control_fd;
+	int interrupted;
 	int vm_fd;
 	int vcpu_fd;
 	int run_size;
@@ -150,8 +152,11 @@ main(void)
 	if (run_mapping == MAP_FAILED)
 		err(1, "mmap KVM_RUN");
 	run = run_mapping;
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected KVM_EXIT_HLT, got %u", run->exit_reason);
 	bzero(&pit_state, sizeof(pit_state));
@@ -163,16 +168,22 @@ main(void)
 		errx(1, "guest PIT programming was not retained");
 	/* Let one guest-programmed period expire before entering HLT again. */
 	usleep(100000);
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN PIT IRQ0");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN PIT IRQ0");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected HLT after PIT IRQ0, got %u", run->exit_reason);
 	if (guest_low_memory[KVM_PIT_RESULT_OFFSET] != 1)
 		errx(1, "first PIT IRQ0 handler did not run");
 	/* A second host callout must occur after the guest completed the first EOI. */
 	usleep(100000);
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN periodic PIT IRQ0");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN periodic PIT IRQ0");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected HLT after periodic PIT IRQ0, got %u",
 		    run->exit_reason);

@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+#include <errno.h>
 #include <err.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -94,6 +95,7 @@ main(void)
 	int vm_fd;
 	int vcpu_fd;
 	int run_size;
+	int interrupted;
 	uint32_t lvt0;
 
 	control_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
@@ -149,8 +151,11 @@ main(void)
 		err(1, "mmap KVM_RUN");
 	run = run_mapping;
 
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN PIC initialization");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN PIC initialization");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected HLT after PIC initialization, got %u",
 		    run->exit_reason);
@@ -178,8 +183,11 @@ main(void)
 	irq_line.level = 0;
 	if (ioctl(vm_fd, KVM_IRQ_LINE, &irq_line) != 0)
 		err(1, "KVM_IRQ_LINE deassert IRQ0");
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN masked IRQ0");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN masked IRQ0");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected HLT after masked IRQ0, got %u", run->exit_reason);
 	if (guest_memory[KVM_PIC_RESULT_OFFSET] != 0)
@@ -197,8 +205,11 @@ main(void)
 	bcopy(&lvt0, lapic.regs + KVM_PIC_LVT0, sizeof(lvt0));
 	if (ioctl(vcpu_fd, KVM_SET_LAPIC, &lapic) != 0)
 		err(1, "KVM_SET_LAPIC unmask LINT0");
-	if (ioctl(vcpu_fd, KVM_RUN, 0) != 0)
-		err(1, "KVM_RUN IRQ0");
+	interrupted = 0;
+	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
+		if (errno != EINTR || interrupted++ == 10000)
+			err(1, "KVM_RUN IRQ0");
+	}
 	if (run->exit_reason != KVM_EXIT_HLT)
 		errx(1, "expected HLT after IRQ0, got %u", run->exit_reason);
 	if (guest_memory[KVM_PIC_RESULT_OFFSET] != 0x7a)

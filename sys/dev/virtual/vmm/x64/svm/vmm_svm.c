@@ -2450,6 +2450,10 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		case VMCB_EXITCODE_HLT:
 			vmm_svm_exit_hlt(mach, vcpu, exit);
+			if (vmm_svm_interrupt_ops->vcpu_exit(cpudata->interrupt,
+			    vmcb->ctrl.exitcode, vmcb->ctrl.exitinfo1,
+			    vmcb->ctrl.exitinfo2))
+				exit->reason = VMM_CPUEXIT_NONE;
 			break;
 		case VMCB_EXITCODE_IOIO:
 			vmm_svm_exit_io(mach, vcpu, exit);
