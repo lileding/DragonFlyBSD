@@ -52,6 +52,10 @@ static void kvm_irqfd_signal(void *);
 static int kvm_irqfd_matches(const struct kvm_irqfd_binding *,
 	const struct kvm_irqfd *, const struct file *);
 
+static unsigned int kvm_irqroute_trace_count;
+static unsigned int kvm_irqfd_bind_trace_count;
+static unsigned int kvm_irqfd_signal_trace_count;
+
 int
 kvm_irqroute_configure(struct kvm_vm *vm,
 	const struct kvm_dfly_buffer *buffer)
@@ -86,6 +90,17 @@ kvm_irqroute_configure(struct kvm_vm *vm,
 			route->data = entries[index].u.msi.data;
 		} else {
 			route->pin = entries[index].u.irqchip.pin;
+		}
+		if (kvm_debug_trace &&
+		    kvm_irqroute_trace_count < KVM_DEBUG_TRACE_LIMIT) {
+			++kvm_irqroute_trace_count;
+			if (route->type == KVM_IRQ_ROUTING_MSI) {
+				kprintf("kvm: irqroute gsi=%u msi addr=%#jx data=%#x\n",
+				    route->gsi, (uintmax_t)route->address, route->data);
+			} else {
+				kprintf("kvm: irqroute gsi=%u ioapic pin=%u\n",
+				    route->gsi, route->pin);
+			}
 		}
 		TAILQ_INSERT_TAIL(&routes, route, entry);
 	}
@@ -301,6 +316,11 @@ kvm_irqfd_bind(struct kvm_vm *vm, const struct kvm_irqfd *request)
 	}
 	TAILQ_INSERT_TAIL(&vm->irqfds, binding, entry);
 	lwkt_reltoken(&vm->token);
+	if (kvm_debug_trace &&
+	    kvm_irqfd_bind_trace_count < KVM_DEBUG_TRACE_LIMIT) {
+		++kvm_irqfd_bind_trace_count;
+		kprintf("kvm: irqfd bind gsi=%u\n", binding->gsi);
+	}
 	return 0;
 }
 
@@ -355,6 +375,17 @@ kvm_irqfd_signal(void *argument)
 	}
 	lwkt_reltoken(&binding->vm->token);
 	if (found) {
+		if (kvm_debug_trace &&
+		    kvm_irqfd_signal_trace_count < KVM_DEBUG_TRACE_LIMIT) {
+			++kvm_irqfd_signal_trace_count;
+			if (type == KVM_IRQ_ROUTING_MSI) {
+				kprintf("kvm: irqfd fire gsi=%u msi addr=%#jx data=%#x\n",
+				    binding->gsi, (uintmax_t)address, data);
+			} else {
+				kprintf("kvm: irqfd fire gsi=%u ioapic pin=%u\n",
+				    binding->gsi, pin);
+			}
+		}
 		if (type == KVM_IRQ_ROUTING_MSI)
 			(void)vmm_machine_raise_msi(binding->vm->machine, address, data);
 		else

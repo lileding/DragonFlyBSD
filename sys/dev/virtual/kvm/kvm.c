@@ -13,6 +13,7 @@
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/sysmsg.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/thread.h>
 #include <sys/vnode.h>
@@ -52,6 +53,12 @@ static cdev_t kvm_dev;
 struct lwkt_token kvm_frontend_token;
 int kvm_file_count;
 bool kvm_draining;
+int kvm_debug_trace;
+
+SYSCTL_NODE(_debug, OID_AUTO, kvm, CTLFLAG_RW, 0,
+    "KVM frontend debug controls");
+SYSCTL_INT(_debug_kvm, OID_AUTO, trace, CTLFLAG_RW, &kvm_debug_trace, 0,
+    "log rate-limited KVM frontend events");
 
 /* Linux _IO() commands use no direction bit; accept them during transition. */
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))

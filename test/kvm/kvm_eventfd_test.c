@@ -9,8 +9,10 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,8 +23,10 @@ main(void)
 {
 	struct kevent change;
 	struct kevent result;
+	struct pollfd pollfd;
 	struct timespec timeout = { 0, 0 };
 	uint64_t value;
+	uint8_t buffer[512];
 	int event_fd;
 	int queue_fd;
 
@@ -51,6 +55,28 @@ main(void)
 		errx(1, "eventfd returned %ju instead of 5", (uintmax_t)value);
 	if (read(event_fd, &value, sizeof(value)) != -1 || errno != EWOULDBLOCK)
 		err(1, "empty nonblocking eventfd read");
+	value = 7;
+	if (write(event_fd, &value, sizeof(value)) != sizeof(value))
+		err(1, "eventfd poll write");
+	pollfd.fd = event_fd;
+	pollfd.events = POLLIN;
+	pollfd.revents = 0;
+	if (poll(&pollfd, 1, 0) != 1 || (pollfd.revents & POLLIN) == 0)
+		err(1, "eventfd poll readiness");
+	value = 0;
+	if (read(event_fd, &value, sizeof(value)) != sizeof(value))
+		err(1, "eventfd poll read");
+	if (value != 7)
+		errx(1, "eventfd poll returned %ju instead of 7", (uintmax_t)value);
+	value = 9;
+	if (write(event_fd, &value, sizeof(value)) != sizeof(value))
+		err(1, "eventfd buffered read write");
+	if (read(event_fd, buffer, sizeof(buffer)) != sizeof(value))
+		err(1, "eventfd buffered read");
+	memcpy(&value, buffer, sizeof(value));
+	if (value != 9)
+		errx(1, "eventfd buffered read returned %ju instead of 9",
+	    (uintmax_t)value);
 	if (close(queue_fd) != 0 || close(event_fd) != 0)
 		err(1, "close");
 	puts("kvm eventfd: PASS");
