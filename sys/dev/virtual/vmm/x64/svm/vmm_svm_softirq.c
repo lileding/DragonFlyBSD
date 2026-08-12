@@ -25,6 +25,7 @@
 
 #define VMM_SVM_SOFTIRQ_LAPIC_BASE		0xfee00000ULL
 #define VMM_SVM_SOFTIRQ_MAX_APIC_ID	0xfeU
+#define VMM_SVM_SOFTIRQ_VECTOR_WORDS	8U
 #define VMM_SVM_MSR_APICBASE			0x01bU
 #define VMM_SVM_APICBASE_BSP			0x00000100ULL
 #define VMM_SVM_APICBASE_ENABLED		0x00000800ULL
@@ -135,7 +136,7 @@ struct vmm_svm_interrupt_vcpu {
 	paddr_t apic_page_pa;
 	uint32_t apic_id;
 	uint64_t apic_base;
-	volatile u_int legacy_pending;
+	volatile u_int legacy_pending[VMM_SVM_SOFTIRQ_VECTOR_WORDS];
 	bool delivery_pending;
 	bool delivery_legacy;
 	uint8_t delivery_vector;
@@ -325,12 +326,9 @@ vmm_svm_interrupt_raise_legacy(struct vmm_svm_interrupt_machine *machine,
 		lwkt_reltoken(&machine->token);
 		return ENOENT;
 	}
-	if (vector < 32) {
-		atomic_set_int(&target->legacy_pending, __BIT(vector));
-		(void)vmm_vcpu_kick(target->vcpu);
-	} else {
-		vmm_svm_softirq_deliver(target, vector);
-	}
+	atomic_set_int(&target->legacy_pending[vector / 32],
+	    __BIT(vector & 31));
+	(void)vmm_vcpu_kick(target->vcpu);
 	lwkt_reltoken(&machine->token);
 	return 0;
 }
@@ -522,9 +520,11 @@ vmm_svm_softirq_vcpu_enter(struct vmm_svm_interrupt_vcpu *vcpu)
 	vmm_svm_lapic_timer_check(vcpu);
 	if (vcpu->delivery_pending)
 		return;
-	value = atomic_load_acq_int(&vcpu->legacy_pending);
-	if (value != 0) {
-		vector = fls(value) - 1;
+	for (word = VMM_SVM_SOFTIRQ_VECTOR_WORDS - 1; word >= 0; --word) {
+		value = atomic_load_acq_int(&vcpu->legacy_pending[word]);
+		if (value == 0)
+			continue;
+		vector = word * 32 + fls(value) - 1;
 		if (!vmm_svm_vcpu_interrupt_allowed(vcpu->vcpu)) {
 			vmm_svm_vcpu_request_interrupt_window(vcpu->vcpu);
 			return;
@@ -579,7 +579,8 @@ vmm_svm_softirq_vcpu_event_result(struct vmm_svm_interrupt_vcpu *vcpu,
 		return;
 	vector = vcpu->delivery_vector;
 	if (vcpu->delivery_legacy) {
-		atomic_clear_int(&vcpu->legacy_pending, __BIT(vector));
+		atomic_clear_int(&vcpu->legacy_pending[vector / 32],
+		    __BIT(vector & 31));
 	} else {
 		irr = (volatile uint32_t *)((uint8_t *)vcpu->apic_page +
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
