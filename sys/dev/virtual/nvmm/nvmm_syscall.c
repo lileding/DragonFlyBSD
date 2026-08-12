@@ -44,7 +44,6 @@ CTASSERT(NVMM_X64_STATE_MSRS == VMM_X64_STATE_MSRS);
 CTASSERT(NVMM_X64_STATE_INTR == VMM_X64_STATE_INTR);
 CTASSERT(NVMM_X64_STATE_FPU == VMM_X64_STATE_FPU);
 CTASSERT(sizeof(struct nvmm_x64_state) == sizeof(struct vmm_cpustate));
-CTASSERT(sizeof(struct nvmm_vcpu_exit) == sizeof(struct vmm_cpuexit));
 
 static int nvmm_syscall_vcpu_configure_cpuid(struct nvmm_cpu *,
 	const struct nvmm_vcpu_conf_cpuid *, const struct vmm_cpuid_entry *,
@@ -136,6 +135,10 @@ nvmm_syscall_exit_from_vmm(struct nvmm_vcpu_exit *dst,
 	const struct vmm_cpuexit *src)
 {
 	dst->reason = src->reason;
+	/*
+	 * VMM adds decoded external-MMIO fields after the NVMM memory-exit
+	 * prefix.  NVMM keeps its established ABI and receives only its union.
+	 */
 	bcopy(&src->u, &dst->u, sizeof(dst->u));
 	dst->exitstate.rflags = src->exitstate.rflags;
 	dst->exitstate.cr8 = src->exitstate.cr8;
