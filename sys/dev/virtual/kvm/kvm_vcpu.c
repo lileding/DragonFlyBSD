@@ -15,7 +15,6 @@
 #include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
-#include <sys/sysctl.h>
 #include <sys/sysmsg.h>
 #include <sys/thread.h>
 #include <sys/uio.h>
@@ -47,7 +46,7 @@ struct kvm_vcpu {
 	uint8_t *pio_data;
 	uint64_t apic_base;
 	uint64_t vapic_address;
-	uint64_t pio_gpa;
+	uint64_t pio_gva;
 	uint64_t pio_npc;
 	unsigned int id;
 	uint8_t pio_address_size;
@@ -83,16 +82,8 @@ struct kvm_vcpu {
 #define KVM_MSR_K7_PERFCTR3		0xc0010007U
 #define KVM_X86_EXCEPTION_GP		13U
 
-#define KVM_VCPU_TRACE_LIMIT		64U
-
-static int kvm_vcpu_trace;
 static unsigned int kvm_vcpu_trace_count;
 static unsigned int kvm_vcpu_memory_trace_count;
-
-SYSCTL_NODE(_debug, OID_AUTO, kvm, CTLFLAG_RW, 0,
-    "KVM frontend debug controls");
-SYSCTL_INT(_debug_kvm, OID_AUTO, trace, CTLFLAG_RW, &kvm_vcpu_trace, 0,
-    "log the first KVM vCPU exits after module load");
 
 static d_priv_dtor_t kvm_vcpu_file_destroy;
 static int kvm_vcpu_fo_read(struct file *, struct uio *, struct ucred *, int);
@@ -147,7 +138,9 @@ static int kvm_vcpu_handle_msr_exit(struct kvm_vcpu *,
 static int kvm_vcpu_complete_pio(struct kvm_vcpu *);
 static int kvm_vcpu_copy_gpa(struct kvm_vcpu *, uint64_t, void *, size_t,
 	int);
-static int kvm_vcpu_pio_string_gpa(struct kvm_vcpu *,
+static int kvm_vcpu_copy_gva(struct kvm_vcpu *, uint64_t, void *, size_t,
+	int);
+static int kvm_vcpu_pio_string_gva(struct kvm_vcpu *,
 	const struct vmm_cpuexit *, uint64_t *);
 static int kvm_vcpu_complete_mmio(struct kvm_vcpu *);
 static int kvm_vcpu_set_mmio_exit(struct kvm_vcpu *,
@@ -179,7 +172,7 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 
 	if (vm == NULL || lp == NULL || vp == NULL || fd == NULL ||
 	    id >= KVM_MAX_VCPUS) {
-		if (kvm_vcpu_trace) {
+		if (kvm_debug_trace) {
 			kprintf("kvm: create vcpu%u invalid vm=%p lwp=%p vnode=%p fd=%p\n",
 			    id, vm, lp, vp, fd);
 		}
@@ -262,7 +255,7 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	return 0;
 
 fail:
-	if (kvm_vcpu_trace)
+	if (kvm_debug_trace)
 		kprintf("kvm: create vcpu%u failed at %s: %d\n", id, stage,
 		    error);
 	kvm_vcpu_destroy(vcpu);
@@ -1483,10 +1476,6 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	struct kvm_run *run = vcpu->run;
 	uint64_t rax;
 	uint64_t count;
-	uint32_t stack_word;
-	uint32_t rax_word;
-	int stack_error;
-	int rax_error;
 	int error;
 
 	bzero(&run->hw, sizeof(run->padding));
@@ -1494,43 +1483,10 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	run->cr8 = vcpu->state.crs[VMM_X64_CR_CR8];
 	run->apic_base = vcpu->apic_base;
 	run->ready_for_interrupt_injection = 0;
-	if (kvm_vcpu_trace && exit != NULL &&
-	    (exit->reason == VMM_CPUEXIT_HALTED ||
-	    exit->reason == VMM_CPUEXIT_SHUTDOWN ||
-	    exit->reason == VMM_CPUEXIT_INVALID)) {
-		stack_error = kvm_vcpu_copy_gpa(vcpu,
-		    vcpu->state.gprs[VMM_X64_GPR_RSP], &stack_word,
-		    sizeof(stack_word), 0);
-		rax_error = kvm_vcpu_copy_gpa(vcpu,
-		    vcpu->state.gprs[VMM_X64_GPR_RAX], &rax_word,
-		    sizeof(rax_word), 0);
-		kprintf("kvm: vcpu%u terminal exit=%ju rip=%#jx rsp=%#jx "
-		    "rflags=%#jx cr0=%#jx cr3=%#jx cr4=%#jx efer=%#jx\n",
-		    vcpu->id, (uintmax_t)exit->reason,
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RFLAGS],
-		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR0],
-		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR3],
-		    (uintmax_t)vcpu->state.crs[VMM_X64_CR_CR4],
-		    (uintmax_t)vcpu->state.msrs[VMM_X64_MSR_EFER]);
-		kprintf("kvm: vcpu%u terminal stack=%#x/%d rax=%#jx "
-		    "raxmem=%#x/%d\n", vcpu->id, stack_word, stack_error,
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RAX], rax_word,
-		    rax_error);
-		kprintf("kvm: vcpu%u terminal cs=%#x:%#jx ss=%#x:%#jx "
-		    "idt=%#jx/%#x tr=%#x:%#jx\n", vcpu->id,
-		    vcpu->state.segs[VMM_X64_SEG_CS].selector,
-		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_CS].base,
-		    vcpu->state.segs[VMM_X64_SEG_SS].selector,
-		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_SS].base,
-		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_IDT].base,
-		    vcpu->state.segs[VMM_X64_SEG_IDT].limit,
-		    vcpu->state.segs[VMM_X64_SEG_TR].selector,
-		    (uintmax_t)vcpu->state.segs[VMM_X64_SEG_TR].base);
-	}
-	if (kvm_vcpu_trace && kvm_vcpu_trace_count < KVM_VCPU_TRACE_LIMIT &&
-	    exit != NULL && exit->reason == VMM_CPUEXIT_IO) {
+	if (kvm_debug_trace &&
+	    kvm_vcpu_trace_count < KVM_DEBUG_TRACE_LIMIT &&
+	    exit != NULL && exit->reason == VMM_CPUEXIT_IO &&
+	    exit->u.io.port != 0x402) {
 		++kvm_vcpu_trace_count;
 		kprintf("kvm: vcpu%u pio port=%#x %s value=%#jx size=%u str=%u rep=%u rip=%#jx npc=%#jx rsp=%#jx rcx=%#jx rsi=%#jx\n",
 		    vcpu->id, exit->u.io.port, exit->u.io.in ? "in" : "out",
@@ -1541,17 +1497,9 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RCX],
 		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSI]);
-		stack_error = kvm_vcpu_copy_gpa(vcpu,
-		    vcpu->state.gprs[VMM_X64_GPR_RSP], &stack_word,
-		    sizeof(stack_word), 0);
-		if (stack_error == 0) {
-			kprintf("kvm: vcpu%u pio stack[%#jx]=%#x\n", vcpu->id,
-			    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
-			    stack_word);
-		}
 	}
-	if (kvm_vcpu_trace &&
-	    kvm_vcpu_memory_trace_count < KVM_VCPU_TRACE_LIMIT &&
+	if (kvm_debug_trace &&
+	    kvm_vcpu_memory_trace_count < KVM_DEBUG_TRACE_LIMIT &&
 	    exit != NULL && exit->reason == VMM_CPUEXIT_MEMORY) {
 		++kvm_vcpu_memory_trace_count;
 		kprintf("kvm: vcpu%u memory gpa=%#jx prot=%#x rip=%#jx len=%u bytes=%02x %02x %02x %02x\n",
@@ -1618,8 +1566,8 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 				run->io.count = 0;
 				return;
 			}
-			error = kvm_vcpu_pio_string_gpa(vcpu, exit,
-			    &vcpu->pio_gpa);
+			error = kvm_vcpu_pio_string_gva(vcpu, exit,
+			    &vcpu->pio_gva);
 			if (error != 0) {
 				run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
 				run->internal.suberror = KVM_INTERNAL_ERROR_EMULATION;
@@ -1628,7 +1576,7 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 				return;
 			}
 			if (!exit->u.io.in) {
-				error = kvm_vcpu_copy_gpa(vcpu, vcpu->pio_gpa,
+				error = kvm_vcpu_copy_gva(vcpu, vcpu->pio_gva,
 				    vcpu->pio_data, exit->u.io.operand_size, 0);
 				if (error != 0) {
 					run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
@@ -1686,7 +1634,7 @@ kvm_vcpu_complete_pio(struct kvm_vcpu *vcpu)
 		return 0;
 	if (vcpu->pio_in) {
 		if (vcpu->pio_string) {
-			error = kvm_vcpu_copy_gpa(vcpu, vcpu->pio_gpa,
+			error = kvm_vcpu_copy_gva(vcpu, vcpu->pio_gva,
 			    vcpu->pio_data, vcpu->pio_size, 1);
 			if (error != 0)
 				return error;
@@ -1803,16 +1751,42 @@ kvm_vcpu_copy_gpa(struct kvm_vcpu *vcpu, uint64_t gpa, void *data,
 }
 
 static int
-kvm_vcpu_pio_string_gpa(struct kvm_vcpu *vcpu,
-	const struct vmm_cpuexit *exit, uint64_t *gpa)
+kvm_vcpu_copy_gva(struct kvm_vcpu *vcpu, uint64_t gva, void *data,
+	size_t length, int write)
+{
+	uint64_t gpa;
+	size_t chunk;
+	int error;
+
+	if (vcpu == NULL || data == NULL || length == 0)
+		return EFAULT;
+	while (length != 0) {
+		error = vmm_vcpu_translate(vcpu->vcpu, gva, &gpa);
+		if (error != 0)
+			return error;
+		chunk = PAGE_SIZE - (gva & PAGE_MASK);
+		if (chunk > length)
+			chunk = length;
+		error = kvm_vcpu_copy_gpa(vcpu, gpa, data, chunk, write);
+		if (error != 0)
+			return error;
+		gva += chunk;
+		data = (uint8_t *)data + chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+
+static int
+kvm_vcpu_pio_string_gva(struct kvm_vcpu *vcpu,
+	const struct vmm_cpuexit *exit, uint64_t *gva)
 {
 	uint64_t base;
 	uint64_t index;
 	uint64_t mask;
 	unsigned int reg;
 
-	if (vcpu == NULL || exit == NULL || gpa == NULL ||
-	    (vcpu->state.crs[VMM_X64_CR_CR0] & (1ULL << 31)) != 0 ||
+	if (vcpu == NULL || exit == NULL || gva == NULL ||
 	    exit->u.io.seg < VMM_X64_SEG_ES ||
 	    exit->u.io.seg > VMM_X64_SEG_GS)
 		return EOPNOTSUPP;
@@ -1832,10 +1806,10 @@ kvm_vcpu_pio_string_gpa(struct kvm_vcpu *vcpu,
 	reg = exit->u.io.in ? VMM_X64_GPR_RDI : VMM_X64_GPR_RSI;
 	index = vcpu->state.gprs[reg] & mask;
 	base = vcpu->state.segs[(unsigned int)exit->u.io.seg].base;
-	if (base > UINT64_MAX - index || base + index >= KVM_GPA_MAX ||
-	    exit->u.io.operand_size > KVM_GPA_MAX - (base + index))
+	if (base > UINT64_MAX - index ||
+	    exit->u.io.operand_size > UINT64_MAX - (base + index))
 		return EFAULT;
-	*gpa = base + index;
+	*gva = base + index;
 	return 0;
 }
 
