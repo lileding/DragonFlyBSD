@@ -10,6 +10,11 @@
 
 struct vmm_x64_emul;
 
+enum vmm_memory_exit_mode {
+	VMM_MEMORY_EXIT_RAW,
+	VMM_MEMORY_EXIT_EMULATE
+};
+
 struct vmm_vcpu {
 	/* token protects running, destroying, event, and event_pending. */
 	struct lwkt_token token;
@@ -25,6 +30,8 @@ struct vmm_vcpu {
 	/* x86 memory instruction state retained across an external MMIO exit. */
 	struct vmm_x64_emul *emul;
 	void *backend;
+	/* Selected by the frontend before the vCPU can run. */
+	enum vmm_memory_exit_mode memory_exit_mode;
 	int running;
 	int destroying;
 	int event_pending;

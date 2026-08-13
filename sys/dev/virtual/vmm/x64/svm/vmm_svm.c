@@ -673,7 +673,7 @@ CTASSERT(offsetof(struct vmcb, state) == 0x400);
 /* -------------------------------------------------------------------------- */
 
 static void vmm_svm_vcpu_state_provide(struct vmm_vcpu *, uint64_t);
-static void vmm_svm_vcpu_setstate(struct vmm_vcpu *, uint64_t);
+static void vmm_svm_vcpu_setstate_all(struct vmm_vcpu *, uint64_t);
 static int vmm_svm_avic_modrm_size(const uint8_t *, int, int);
 
 /*
@@ -2300,7 +2300,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	bool pmap_active;
 	int error = 0;
 
-	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
 	if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
 	    ((vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xea590 &&
 	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xea5b0) ||
@@ -2332,7 +2331,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 				continue;
 			}
 			if (error == EINPROGRESS) {
-				vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
+				vmm_svm_vcpu_setstate_all(vcpu, VMM_X64_STATE_ALL);
 				continue;
 			}
 			if (error != 0)
@@ -2700,7 +2699,7 @@ vmm_svm_state_gtlb_flush(const struct vmcb *vmcb,
 }
 
 static void
-vmm_svm_vcpu_setstate(struct vmm_vcpu *vcpu, uint64_t flags)
+vmm_svm_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 {
 	const struct vmm_cpustate *state = vcpu->state;
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
@@ -2944,6 +2943,12 @@ vmm_svm_vcpu_getstate(struct vmm_vcpu *vcpu)
 	vmm_svm_vcpu_getstate_all(vcpu, VMM_X64_STATE_ALL);
 }
 
+void
+vmm_svm_vcpu_setstate(struct vmm_vcpu *vcpu)
+{
+	vmm_svm_vcpu_setstate_all(vcpu, VMM_X64_STATE_ALL);
+}
+
 /* -------------------------------------------------------------------------- */
 
 static void
@@ -3123,7 +3128,7 @@ vmm_svm_vcpu_init(struct vmm_machine *mach, struct vmm_vcpu *vcpu)
 	cpudata->gxsave.xcomp_bv = 0;
 
 	/* The caller owns the initial architectural state. */
-	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
+	vmm_svm_vcpu_setstate_all(vcpu, VMM_X64_STATE_ALL);
 }
 
 int

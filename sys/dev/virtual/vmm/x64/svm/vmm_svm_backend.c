@@ -93,6 +93,7 @@ const struct vmm_backend_ops vmm_svm_backend = {
 	.vcpu_io = vmm_svm_vcpu_io,
 	.vcpu_mmio = vmm_svm_vcpu_mmio,
 	.vcpu_destroy = vmm_svm_vcpu_destroy,
+	.vcpu_setstate = vmm_svm_vcpu_setstate,
 	.vcpu_run = vmm_svm_vcpu_run,
 	.vcpu_getstate = vmm_svm_vcpu_getstate,
 	.vcpu_kick = vmm_svm_vcpu_kick,

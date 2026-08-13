@@ -37,6 +37,7 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vc->machine = machine;
 	vc->backend_ops = machine->backend;
 	vc->state = state;
+	vc->memory_exit_mode = VMM_MEMORY_EXIT_RAW;
 	lwkt_token_init(&vc->token, "vmmvcpu");
 	error = vmm_x64_emul_init(vc);
 	if (error != 0) {
@@ -188,6 +189,7 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 	}
 	if (error != 0 && error != ENOENT)
 		goto out;
+	vcpu->backend_ops->vcpu_setstate(vcpu);
 	for (;;) {
 		ran_backend = true;
 		error = vcpu->backend_ops->vcpu_run(vcpu, reason);
@@ -200,13 +202,17 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 			error = ENOENT;
 			if (vcpu->backend_ops->vcpu_io != NULL)
 				error = vcpu->backend_ops->vcpu_io(vcpu, &exit->u.io);
-			if (error == 0)
+			if (error == 0) {
+				vcpu->backend_ops->vcpu_setstate(vcpu);
 				continue;
+			}
 			if (error != ENOENT)
 				break;
 			error = vmm_io_handle_pio(vcpu, exit);
-			if (error == 0)
+			if (error == 0) {
+				vcpu->backend_ops->vcpu_setstate(vcpu);
 				continue;
+			}
 			if (error == ENOENT) {
 				error = 0;
 				break;
@@ -222,9 +228,15 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		if (fault_error == KERN_SUCCESS)
 			continue;
 		vcpu->backend_ops->vcpu_getstate(vcpu);
+		if (vcpu->memory_exit_mode == VMM_MEMORY_EXIT_RAW) {
+			error = 0;
+			break;
+		}
 		error = vmm_x64_emul_memory(vcpu, exit);
-		if (error == 0)
+		if (error == 0) {
+			vcpu->backend_ops->vcpu_setstate(vcpu);
 			continue;
+		}
 		if (error == EINPROGRESS) {
 			*reason = &vcpu->exit;
 			error = 0;

@@ -30,6 +30,7 @@
 #include <linux/kvm.h>
 
 #include "../vmm/vmm.h"
+#include "../vmm/vmm_vcpu.h"
 #include "kvm_internal.h"
 #include "kvm_vcpu.h"
 #include "kvm_vm.h"
@@ -208,6 +209,8 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	error = vmm_vcpu_create(vm->machine, &vcpu->state, &vcpu->vcpu);
 	if (error != 0)
 		goto fail;
+	/* KVM_EXIT_MMIO carries decoded fragments and completes them on re-entry. */
+	vcpu->vcpu->memory_exit_mode = VMM_MEMORY_EXIT_EMULATE;
 
 	lwkt_gettoken(&kvm_frontend_token);
 	if (kvm_draining) {

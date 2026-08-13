@@ -45,6 +45,8 @@ struct vmm_backend_ops {
 	/* Handle one scalar access claimed by the backend, or return ENOENT. */
 	int (*vcpu_mmio)(struct vmm_vcpu *, uint64_t, size_t, bool, uint64_t *);
 	void (*vcpu_destroy)(struct vmm_vcpu *);
+	/* Load the frontend-owned architectural state before a public run. */
+	void (*vcpu_setstate)(struct vmm_vcpu *);
 	int (*vcpu_run)(struct vmm_vcpu *, struct vmm_cpuexit **);
 	void (*vcpu_getstate)(struct vmm_vcpu *);
 	void (*vcpu_kick)(struct vmm_vcpu *);

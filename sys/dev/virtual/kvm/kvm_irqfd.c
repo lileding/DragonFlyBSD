@@ -387,7 +387,8 @@ kvm_irqfd_signal(void *argument)
 			}
 		}
 		if (type == KVM_IRQ_ROUTING_MSI)
-			(void)vmm_machine_raise_msi(binding->vm->machine, address, data);
+			(void)vmm_machine_raise_msi(binding->vm->machine, address,
+			    data);
 		else
 			(void)vmm_machine_raise_irq(binding->vm->machine, pin);
 	}
