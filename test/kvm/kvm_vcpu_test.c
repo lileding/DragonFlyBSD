@@ -170,6 +170,14 @@ kvm_test_mp_state(int vcpu_fd)
 {
 	struct kvm_mp_state state;
 
+	state.mp_state = KVM_MP_STATE_UNINITIALIZED;
+	if (ioctl(vcpu_fd, KVM_SET_MP_STATE, &state) != 0)
+		err(1, "KVM_SET_MP_STATE uninitialized");
+	state.mp_state = UINT32_MAX;
+	if (ioctl(vcpu_fd, KVM_GET_MP_STATE, &state) != 0)
+		err(1, "KVM_GET_MP_STATE uninitialized");
+	if (state.mp_state != KVM_MP_STATE_UNINITIALIZED)
+		err(1, "unexpected KVM uninitialized MP state");
 	state.mp_state = KVM_MP_STATE_RUNNABLE;
 	if (ioctl(vcpu_fd, KVM_SET_MP_STATE, &state) != 0)
 		err(1, "KVM_SET_MP_STATE");

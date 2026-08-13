@@ -36,8 +36,6 @@
 #include "kvm_vm.h"
 
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
-#define KVM_X86_MSI_APIC_BASE	0xfee00000ULL
-
 static unsigned int kvm_irq_line_trace_count;
 
 struct kvm_memory_piece {
@@ -387,14 +385,6 @@ kvm_vm_signal_msi(struct kvm_vm *vm, const struct kvm_msi *msi)
 	if (msi == NULL || (msi->flags & ~KVM_MSI_VALID_DEVID) != 0)
 		return EINVAL;
 	address = ((uint64_t)msi->address_hi << 32) | msi->address_lo;
-	/*
-	 * Linux KVM accepts an all-zero APIC-style message from QEMU's
-	 * in-kernel APIC memory region.  Its zero destination fields mean
-	 * physical APIC ID 0; vmm's core MSI ABI requires the architectural
-	 * x86 APIC base bits, so normalize only this frontend representation.
-	 */
-	if (address == 0)
-		address = KVM_X86_MSI_APIC_BASE;
 	return vmm_machine_raise_msi(vm->machine, address, msi->data);
 }
 

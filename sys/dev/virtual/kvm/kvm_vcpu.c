@@ -564,7 +564,8 @@ kvm_vcpu_run(struct kvm_vcpu *vcpu)
 		lwkt_reltoken(&vcpu->token);
 		return 0;
 	}
-	if (vcpu->mp_state != KVM_MP_STATE_RUNNABLE) {
+	if (vcpu->mp_state != KVM_MP_STATE_RUNNABLE &&
+	    vcpu->mp_state != KVM_MP_STATE_UNINITIALIZED) {
 		lwkt_reltoken(&vcpu->token);
 		return EOPNOTSUPP;
 	}
@@ -608,6 +609,12 @@ kvm_vcpu_run(struct kvm_vcpu *vcpu)
 					continue;
 				}
 			}
+		}
+		if (error == 0 && exit != NULL &&
+		    exit->reason == VMM_CPUEXIT_NMI_READY) {
+			vcpu->running = true;
+			lwkt_reltoken(&vcpu->token);
+			continue;
 		}
 		if (error == 0) {
 			if (exit != NULL && exit->reason == VMM_CPUEXIT_NONE)
@@ -1198,7 +1205,8 @@ kvm_vcpu_set_mp_state(struct kvm_vcpu *vcpu,
 {
 
 	if (state == NULL || (state->mp_state != KVM_MP_STATE_RUNNABLE &&
-	    state->mp_state != KVM_MP_STATE_HALTED))
+	    state->mp_state != KVM_MP_STATE_HALTED &&
+	    state->mp_state != KVM_MP_STATE_UNINITIALIZED))
 		return EOPNOTSUPP;
 	lwkt_gettoken(&vcpu->token);
 	if (vcpu->running) {
