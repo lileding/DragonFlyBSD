@@ -15,6 +15,9 @@ struct vmm_cpuexit_io;
 struct vmm_ioapic_state;
 struct vmm_svm_interrupt_machine;
 
+/* SVM exit code shared by VMRUN and the software irqchip. */
+#define VMCB_EXITCODE_IRET	0x0074
+
 struct vmm_svm_machdata {
 	volatile uint64_t mach_htlb_gen;
 	struct vmm_svm_interrupt_machine *interrupt;

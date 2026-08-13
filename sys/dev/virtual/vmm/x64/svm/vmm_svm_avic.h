@@ -59,6 +59,8 @@ struct vmm_svm_interrupt_ops {
 	int (*vcpu_set_lapic)(struct vmm_svm_interrupt_vcpu *, const void *,
 	    size_t);
 	void (*vcpu_destroy)(struct vmm_svm_interrupt_vcpu *);
+	/* May sleep while a reset AP awaits INIT/SIPI, before the VMRUN handoff. */
+	int (*vcpu_prepare)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_enter)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_leave)(struct vmm_svm_interrupt_vcpu *);
 	/* Resolve an interrupt queued by vcpu_enter after this VMRUN exits. */

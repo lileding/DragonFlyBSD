@@ -374,7 +374,6 @@ vmm_svm_stgi(void)
 #define VMCB_EXITCODE_POPF		0x0071
 #define VMCB_EXITCODE_CPUID		0x0072
 #define VMCB_EXITCODE_RSM		0x0073
-#define VMCB_EXITCODE_IRET		0x0074
 #define VMCB_EXITCODE_SWINT		0x0075
 #define VMCB_EXITCODE_INVD		0x0076
 #define VMCB_EXITCODE_PAUSE		0x0077
@@ -2298,6 +2297,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	uint64_t machgen;
 	int hcpu;
+	bool pmap_active;
 	int error = 0;
 
 	vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
@@ -2311,26 +2311,50 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		    vcpu->id, (uintmax_t)vcpu->state->gprs[VMM_X64_GPR_RIP],
 		    (uintmax_t)vmcb->state.rip);
 	}
-	hcpu = os_curcpu_number();
-
-	vmm_svm_gtlb_catchup(vcpu, hcpu);
-	vmm_svm_htlb_catchup(vcpu, hcpu);
-
-	if (cpudata->hcpu_last != hcpu) {
-		vmm_svm_vmcb_cache_flush_all(vmcb);
-		cpudata->gtsc_want_update = true;
-
-#ifdef __DragonFly__
-		/*
-		 * XXX: We aren't tracking overloaded CPUs (multiple vCPUs
-		 *      scheduled on the same physical CPU) yet so there are
-		 *      currently no calls to pmap_del_cpu().
-		 */
-		pmap_add_cpu(mach->vmspace, hcpu);
-#endif
-	}
+	pmap_active = false;
 
 	while (1) {
+		if (cpudata->interrupt != NULL &&
+		    vmm_svm_interrupt_ops->vcpu_prepare != NULL) {
+			error = vmm_svm_interrupt_ops->vcpu_prepare(
+			    cpudata->interrupt);
+			if (error == EAGAIN) {
+#ifdef __DragonFly__
+				if (pmap_active) {
+					pmap_del_cpu(mach->vmspace, os_curcpu_number());
+					pmap_active = false;
+				}
+#endif
+				error = tsleep(vcpu, PINTERLOCKED | PCATCH,
+				    "vmmsipi", 0);
+				if (error != 0)
+					break;
+				continue;
+			}
+			if (error == EINPROGRESS) {
+				vmm_svm_vcpu_setstate(vcpu, VMM_X64_STATE_ALL);
+				continue;
+			}
+			if (error != 0)
+				break;
+		}
+		if (!pmap_active) {
+			hcpu = os_curcpu_number();
+			vmm_svm_gtlb_catchup(vcpu, hcpu);
+			vmm_svm_htlb_catchup(vcpu, hcpu);
+			if (cpudata->hcpu_last != hcpu) {
+				vmm_svm_vmcb_cache_flush_all(vmcb);
+				cpudata->gtsc_want_update = true;
+			}
+#ifdef __DragonFly__
+			/*
+			 * Publish this CPU only immediately before VMRUN.  A reset AP may
+			 * sleep indefinitely awaiting SIPI and must not remain active then.
+			 */
+			pmap_add_cpu(mach->vmspace, hcpu);
+#endif
+			pmap_active = true;
+		}
 		if (__predict_false(cpudata->gtlb_want_flush ||
 				    cpudata->htlb_want_flush))
 		{
@@ -2443,7 +2467,10 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		case VMCB_EXITCODE_IRET:
 			vmm_svm_event_waitexit_disable(vcpu, true);
-			exit->reason = VMM_CPUEXIT_NMI_READY;
+			exit->reason = vmm_svm_interrupt_ops->vcpu_exit(
+			    cpudata->interrupt, vmcb->ctrl.exitcode,
+			    vmcb->ctrl.exitinfo1, vmcb->ctrl.exitinfo2) ?
+			    VMM_CPUEXIT_NONE : VMM_CPUEXIT_NMI_READY;
 			break;
 		case VMCB_EXITCODE_CPUID:
 			vmm_svm_exit_cpuid(mach, vcpu, exit);
