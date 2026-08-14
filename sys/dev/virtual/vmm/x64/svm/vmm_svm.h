@@ -20,6 +20,9 @@ struct vmm_svm_interrupt_machine;
 
 struct vmm_svm_machdata {
 	volatile uint64_t mach_htlb_gen;
+	/* One guest TSC timeline is shared by every vCPU in the machine. */
+	volatile uint64_t gtsc_offset;
+	volatile uint64_t gtsc_generation;
 	struct vmm_svm_interrupt_machine *interrupt;
 };
 

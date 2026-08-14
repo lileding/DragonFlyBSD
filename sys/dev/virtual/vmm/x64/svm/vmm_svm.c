@@ -678,6 +678,7 @@ CTASSERT(offsetof(struct vmcb, state) == 0x400);
 
 static void vmm_svm_vcpu_state_provide(struct vmm_vcpu *, uint64_t);
 static void vmm_svm_vcpu_setstate_all(struct vmm_vcpu *, uint64_t);
+static void vmm_svm_machine_set_tsc(struct vmm_machine *, uint64_t);
 static int vmm_svm_avic_modrm_size(const uint8_t *, int, int);
 
 /*
@@ -786,6 +787,7 @@ struct vmm_svm_cpudata {
 	uint64_t drs[VMM_X64_DR_COUNT];
 	uint64_t gtsc_offset;
 	uint64_t gtsc_match;
+	uint64_t gtsc_generation;
 	struct vmm_svm_xsave gxsave __aligned(64);
 	size_t cpuid_entry_count;
 	struct vmm_cpuid_entry cpuid_entries[SVM_NCPUID_ENTRIES];
@@ -1702,8 +1704,8 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 			goto handled;
 		}
 		if (exit->u.wrmsr.msr == MSR_TSC) {
-			cpudata->gtsc_offset = exit->u.wrmsr.val - rdtsc();
-			cpudata->gtsc_want_update = true;
+			vmm_svm_machine_set_tsc(vcpu->machine,
+			    exit->u.wrmsr.val);
 			goto handled;
 		}
 		for (i = 0; i < __arraycount(msr_ignore_list); i++) {
@@ -2297,9 +2299,11 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 {
 	struct vmm_machine *mach = vcpu->machine;
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmm_svm_machdata *machdata = mach->backend_state;
 	struct vmcb *vmcb = cpudata->vmcb;
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	uint64_t machgen;
+	uint64_t tsc_generation;
 	int hcpu;
 	int error = 0;
 
@@ -2356,7 +2360,14 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmcb->ctrl.tlb_ctrl = 0;
 		}
 
+		tsc_generation = atomic_load_acq_64(&machdata->gtsc_generation);
+		if (cpudata->gtsc_generation != tsc_generation)
+			cpudata->gtsc_want_update = true;
 		if (__predict_false(cpudata->gtsc_want_update)) {
+			cpudata->gtsc_offset = atomic_load_acq_64(
+			    &machdata->gtsc_offset);
+			cpudata->gtsc_generation = atomic_load_acq_64(
+			    &machdata->gtsc_generation);
 			vmcb->ctrl.tsc_offset = cpudata->gtsc_offset;
 			vmm_svm_vmcb_cache_flush(vmcb, VMCB_CTRL_VMCB_CLEAN_I);
 		}
@@ -2797,9 +2808,8 @@ vmm_svm_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		 */
 		if (state->msrs[VMM_X64_MSR_TSC] != cpudata->gtsc_match &&
 		    state->msrs[VMM_X64_MSR_TSC] != 0) {
-			cpudata->gtsc_offset =
-			    state->msrs[VMM_X64_MSR_TSC] - rdtsc();
-			cpudata->gtsc_want_update = true;
+			vmm_svm_machine_set_tsc(vcpu->machine,
+			    state->msrs[VMM_X64_MSR_TSC]);
 		}
 	}
 
@@ -2834,6 +2844,7 @@ vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 {
 	struct vmm_cpustate *state = vcpu->state;
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmm_svm_machdata *machdata = vcpu->machine->backend_state;
 	const struct vmcb *vmcb = cpudata->vmcb;
 
 	if (flags & VMM_X64_STATE_SEGS) {
@@ -2904,7 +2915,8 @@ vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		state->msrs[VMM_X64_MSR_SYSENTER_EIP] =
 		    vmcb->state.sysenter_eip;
 		state->msrs[VMM_X64_MSR_PAT] = vmcb->state.g_pat;
-		state->msrs[VMM_X64_MSR_TSC] = rdtsc() + cpudata->gtsc_offset;
+		state->msrs[VMM_X64_MSR_TSC] = rdtsc() +
+		    atomic_load_acq_64(&machdata->gtsc_offset);
 
 		/* Hide SVME. */
 		state->msrs[VMM_X64_MSR_EFER] &= ~EFER_SVME;
@@ -2923,6 +2935,17 @@ vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		memcpy(&state->fpu, &cpudata->gxsave.fpu, sizeof(state->fpu));
 	}
 
+}
+
+static void
+vmm_svm_machine_set_tsc(struct vmm_machine *mach, uint64_t value)
+{
+	struct vmm_svm_machdata *machdata = mach->backend_state;
+
+	lwkt_gettoken(&mach->token);
+	atomic_store_rel_64(&machdata->gtsc_offset, value - rdtsc());
+	atomic_fetchadd_64(&machdata->gtsc_generation, 1);
+	lwkt_reltoken(&mach->token);
 }
 
 static void
