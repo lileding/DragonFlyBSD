@@ -147,7 +147,7 @@ vmm_x64_pic_set_state(struct vmm_machine *machine,
 }
 
 int
-vmm_x64_pic_set_irq_locked(struct vmm_machine *machine, uint32_t gsi,
+vmm_x64_pic_set_irq_machine_locked(struct vmm_machine *machine, uint32_t gsi,
 	bool level, int *vector)
 {
 	struct vmm_x64_pic *pic;

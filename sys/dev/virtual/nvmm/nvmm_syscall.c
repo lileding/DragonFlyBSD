@@ -801,7 +801,7 @@ nvmm_syscall_gpa_unmap(struct nvmm_owner *owner,
 	gpa_end = gpa + args->size;
 	if (gpa_end <= gpa || (gpa % PAGE_SIZE) != 0 ||
 	    (args->size % PAGE_SIZE) != 0 || gpa < mach->gpa_begin ||
-	    gpa >= mach->gpa_end || gpa_end >= mach->gpa_end) {
+	    gpa >= mach->gpa_end || gpa_end > mach->gpa_end) {
 		error = EINVAL;
 		goto out;
 	}

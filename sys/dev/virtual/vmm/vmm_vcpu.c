@@ -70,6 +70,25 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 }
 
 int
+vmm_vcpu_set_memory_exit_mode(vmm_vcpu_t vcpu,
+	enum vmm_memory_exit_mode mode)
+{
+
+	if (vcpu == NULL || (mode != VMM_MEMORY_EXIT_RAW &&
+	    mode != VMM_MEMORY_EXIT_EMULATE))
+		return EINVAL;
+
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	vcpu->memory_exit_mode = mode;
+	lwkt_reltoken(&vcpu->token);
+	return 0;
+}
+
+int
 vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
 	const struct vmm_cpuid_entry *entries, size_t entry_count)
 {

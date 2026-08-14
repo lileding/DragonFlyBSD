@@ -25,6 +25,11 @@ enum vmm_io_width {
 	VMM_IO_WIDTH_64 = 8,
 };
 
+enum vmm_memory_exit_mode {
+	VMM_MEMORY_EXIT_RAW,
+	VMM_MEMORY_EXIT_EMULATE
+};
+
 #if defined(__x86_64__)
 #include "x64/vmm_x64.h"
 #else
@@ -116,6 +121,14 @@ int vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io);
  */
 int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vmm_vcpu_t *vcpu);
+
+/*
+ * Selects how unresolved guest-memory exits reach the caller.  RAW returns
+ * the hardware exit; EMULATE decodes scalar MMIO fragments for completion.
+ * Returns EBUSY while vmm_vcpu_run() is active.
+ */
+int vmm_vcpu_set_memory_exit_mode(vmm_vcpu_t vcpu,
+	enum vmm_memory_exit_mode mode);
 
 /*
  * Replaces the vCPU's exact CPUID override table.  A specific subleaf entry

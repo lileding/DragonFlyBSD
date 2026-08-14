@@ -10,11 +10,6 @@
 
 struct vmm_x64_emul;
 
-enum vmm_memory_exit_mode {
-	VMM_MEMORY_EXIT_RAW,
-	VMM_MEMORY_EXIT_EMULATE
-};
-
 struct vmm_vcpu {
 	/* token protects running, destroying, event, and event_pending. */
 	struct lwkt_token token;

@@ -172,7 +172,9 @@ vmm_machine_set_irq(vmm_machine_t machine, uint32_t gsi, bool level)
 	}
 	error = machine->backend->machine_set_irq(machine, gsi, level);
 	if (error == 0 && gsi < 16) {
-		error = vmm_x64_pic_set_irq_locked(machine, gsi, level, &vector);
+		/* ISA lines feed both IOAPIC and 8259 PIC, like a physical PC. */
+		error = vmm_x64_pic_set_irq_machine_locked(machine, gsi, level,
+		    &vector);
 		if (error == 0 && vector >= 0)
 			error = machine->backend->machine_raise_legacy(machine,
 			    (uint8_t)vector);

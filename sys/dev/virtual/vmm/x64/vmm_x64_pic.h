@@ -20,7 +20,9 @@ void vmm_x64_pic_destroy(struct vmm_machine *);
 int vmm_x64_pic_get_state(struct vmm_machine *, struct vmm_pic_state *);
 int vmm_x64_pic_set_state(struct vmm_machine *,
 	const struct vmm_pic_state *);
-int vmm_x64_pic_set_irq_locked(struct vmm_machine *, uint32_t, bool, int *);
+/* Caller holds machine->token; this function acquires pic->token itself. */
+int vmm_x64_pic_set_irq_machine_locked(struct vmm_machine *, uint32_t, bool,
+	int *);
 /* Caller holds machine->token; inspect the current PIC output. */
 int vmm_x64_pic_peek_locked(struct vmm_machine *, uint8_t *);
 /* Caller holds machine->token; acknowledge the current PIC output. */

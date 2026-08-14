@@ -1,6 +1,9 @@
 KMOD=	kvm
 SRCS=	kvm.c kvm_eventfd.c kvm_ioevent.c kvm_irqfd.c kvm_vm.c kvm_vcpu.c
 
+# KVM's public ABI is part of this source tree, never an ambient host header.
+COPTS+=	-I${.CURDIR}/../../../..
+
 .if !defined(KERNBUILDDIR)
 SRCS+=	bus_if.h device_if.h opt_nfs.h
 .endif

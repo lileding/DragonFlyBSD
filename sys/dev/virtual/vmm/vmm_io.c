@@ -59,7 +59,6 @@ vmm_io_handle_pio(struct vmm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	size = exit->u.io.operand_size;
 	if (size != 1 && size != 2 && size != 4)
 		return ENOENT;
-	vcpu->backend_ops->vcpu_getstate(vcpu);
 	write.address = exit->u.io.port;
 	write.width = (enum vmm_io_width)size;
 	write.value = vcpu->state->gprs[VMM_X64_GPR_RAX];
