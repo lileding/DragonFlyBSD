@@ -3140,7 +3140,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 	error = vmm_svm_interrupt_ops->vcpu_create(machdata->interrupt, vcpu,
 	    &cpudata->interrupt, &interrupt_config);
 	if (error != 0)
-		goto error;
+		goto error_after_init;
 	if (interrupt_config.enabled) {
 		cpudata->vmcb->ctrl.v |= VMCB_CTRL_V_INTR_MASKING |
 		    VMCB_CTRL_V_AVIC_EN;
@@ -3155,6 +3155,8 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 
 	return 0;
 
+error_after_init:
+	vmm_svm_asid_free(vcpu);
 error:
 	vmm_svm_interrupt_ops->vcpu_destroy(cpudata->interrupt);
 	if (cpudata->vmcb_pa) {
