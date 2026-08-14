@@ -23,6 +23,8 @@
 #include <vm/vm_page2.h>
 
 #include <machine/cpu.h>
+#include <machine/pcb.h>
+#include <machine/pmap.h>
 #include <machine/cpufunc.h>
 #include <machine/globaldata.h>
 #include <machine/npx.h>
