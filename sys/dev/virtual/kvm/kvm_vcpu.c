@@ -30,7 +30,6 @@
 #include <sys/kvm.h>
 
 #include "../vmm/vmm.h"
-#include "../vmm/vmm_vcpu.h"
 #include "kvm_internal.h"
 #include "kvm_vcpu.h"
 #include "kvm_vm.h"
@@ -82,9 +81,6 @@ struct kvm_vcpu {
 #define KVM_MSR_K7_PERFCTL0		0xc0010000U
 #define KVM_MSR_K7_PERFCTR3		0xc0010007U
 #define KVM_X86_EXCEPTION_GP		13U
-
-static unsigned int kvm_vcpu_trace_count;
-static unsigned int kvm_vcpu_memory_trace_count;
 
 static d_priv_dtor_t kvm_vcpu_file_destroy;
 static int kvm_vcpu_fo_read(struct file *, struct uio *, struct ucred *, int);
@@ -168,19 +164,12 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	struct kvm_vcpu *vcpu;
 	struct file *fp;
 	struct vmm_x64_capability capability;
-	const char *stage;
 	int error;
 
 	if (vm == NULL || lp == NULL || vp == NULL || fd == NULL ||
-	    id >= KVM_MAX_VCPUS) {
-		if (kvm_debug_trace) {
-			kprintf("kvm: create vcpu%u invalid vm=%p lwp=%p vnode=%p fd=%p\n",
-			    id, vm, lp, vp, fd);
-		}
+	    id >= KVM_MAX_VCPUS)
 		return EINVAL;
-	}
 	*fd = -1;
-	stage = "allocation";
 	lwkt_gettoken(&vm->token);
 	if (vm->vcpus[id] != NULL) {
 		lwkt_reltoken(&vm->token);
@@ -194,23 +183,22 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	vcpu->id = id;
 	lwkt_token_init(&vcpu->token, "kvmvcpu");
 	kvm_vcpu_reset_state(&vcpu->state);
-	stage = "capability";
 	error = vmm_x64_get_capability(&capability);
 	if (error != 0)
 		goto fail;
 	vcpu->state.fpu.fx_mxcsr_mask = capability.mxcsr_mask;
 	vcpu->mp_state = KVM_MP_STATE_RUNNABLE;
 
-	stage = "run-page allocation";
 	error = kvm_vcpu_alloc_run(vcpu);
 	if (error != 0)
 		goto fail;
-	stage = "vmm vcpu allocation";
 	error = vmm_vcpu_create(vm->machine, &vcpu->state, &vcpu->vcpu);
 	if (error != 0)
 		goto fail;
-	/* KVM_EXIT_MMIO carries decoded fragments and completes them on re-entry. */
-	vcpu->vcpu->memory_exit_mode = VMM_MEMORY_EXIT_EMULATE;
+	error = vmm_vcpu_set_memory_exit_mode(vcpu->vcpu,
+	    VMM_MEMORY_EXIT_EMULATE);
+	if (error != 0)
+		goto fail;
 
 	lwkt_gettoken(&kvm_frontend_token);
 	if (kvm_draining) {
@@ -236,7 +224,6 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	++vm->references;
 	lwkt_reltoken(&vm->token);
 
-	stage = "file allocation";
 	error = falloc(lp, &fp, fd);
 	if (error != 0)
 		goto fail;
@@ -245,7 +232,6 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	fp->f_ops = &kvm_vcpu_fileops;
 	fp->f_data = vp;
 	vref(vp);
-	stage = "file private data";
 	error = devfs_set_cdevpriv(fp, vcpu, kvm_vcpu_file_destroy);
 	if (error != 0) {
 		(void)fp_close(fp);
@@ -258,9 +244,6 @@ kvm_vcpu_create(struct kvm_vm *vm, struct lwp *lp, struct vnode *vp,
 	return 0;
 
 fail:
-	if (kvm_debug_trace)
-		kprintf("kvm: create vcpu%u failed at %s: %d\n", id, stage,
-		    error);
 	kvm_vcpu_destroy(vcpu);
 	return error;
 }
@@ -1494,32 +1477,6 @@ kvm_vcpu_set_exit(struct kvm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 	run->cr8 = vcpu->state.crs[VMM_X64_CR_CR8];
 	run->apic_base = vcpu->apic_base;
 	run->ready_for_interrupt_injection = 0;
-	if (kvm_debug_trace &&
-	    kvm_vcpu_trace_count < KVM_DEBUG_TRACE_LIMIT &&
-	    exit != NULL && exit->reason == VMM_CPUEXIT_IO &&
-	    exit->u.io.port != 0x402) {
-		++kvm_vcpu_trace_count;
-		kprintf("kvm: vcpu%u pio port=%#x %s value=%#jx size=%u str=%u rep=%u rip=%#jx npc=%#jx rsp=%#jx rcx=%#jx rsi=%#jx\n",
-		    vcpu->id, exit->u.io.port, exit->u.io.in ? "in" : "out",
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RAX],
-		    exit->u.io.operand_size, exit->u.io.str, exit->u.io.rep,
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
-		    (uintmax_t)exit->u.io.npc,
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSP],
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RCX],
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RSI]);
-	}
-	if (kvm_debug_trace &&
-	    kvm_vcpu_memory_trace_count < KVM_DEBUG_TRACE_LIMIT &&
-	    exit != NULL && exit->reason == VMM_CPUEXIT_MEMORY) {
-		++kvm_vcpu_memory_trace_count;
-		kprintf("kvm: vcpu%u memory gpa=%#jx prot=%#x rip=%#jx len=%u bytes=%02x %02x %02x %02x\n",
-		    vcpu->id, (uintmax_t)exit->u.mem.gpa, exit->u.mem.prot,
-		    (uintmax_t)vcpu->state.gprs[VMM_X64_GPR_RIP],
-		    exit->u.mem.inst_len, exit->u.mem.inst_bytes[0],
-		    exit->u.mem.inst_bytes[1], exit->u.mem.inst_bytes[2],
-		    exit->u.mem.inst_bytes[3]);
-	}
 	if (exit == NULL) {
 		run->exit_reason = KVM_EXIT_INTR;
 		return;

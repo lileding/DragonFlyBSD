@@ -72,8 +72,6 @@ static struct filterops kvm_eventfd_read_filterops = {
 	kvm_eventfd_filter_read,
 };
 
-static unsigned int kvm_eventfd_trace_count;
-
 int
 kvm_eventfd_create(struct lwp *lp, struct vnode *vp, uint64_t initial,
 	uint32_t flags, int *fd)
@@ -212,12 +210,6 @@ kvm_eventfd_fo_kqfilter(struct file *fp, struct knote *kn)
 	error = devfs_get_cdevpriv(fp, (void **)&eventfd);
 	if (error != 0)
 		return error;
-	if (kvm_debug_trace &&
-	    atomic_fetchadd_int(&kvm_eventfd_trace_count, 1) <
-	    KVM_DEBUG_TRACE_LIMIT) {
-		kprintf("kvm: eventfd filter event=%p filter=%d\n", eventfd,
-		    kn->kn_filter);
-	}
 	if (kn->kn_filter != EVFILT_READ)
 		return EOPNOTSUPP;
 	lwkt_gettoken(&eventfd->token);
@@ -412,8 +404,6 @@ kvm_eventfd_add(struct kvm_eventfd *eventfd, uint64_t value, int nonblock)
 {
 	struct kvm_eventfd_listener *listener;
 	uint64_t generation;
-	uint64_t count;
-	int watched;
 	int error;
 
 	for (;;) {
@@ -424,8 +414,6 @@ kvm_eventfd_add(struct kvm_eventfd *eventfd, uint64_t value, int nonblock)
 			if (eventfd->signal_generation == 0)
 				++eventfd->signal_generation;
 			generation = eventfd->signal_generation;
-			count = eventfd->count;
-			watched = !SLIST_EMPTY(&eventfd->read_kq.ki_note);
 			KNOTE(&eventfd->read_kq.ki_note, 0);
 			wakeup(eventfd);
 			lwkt_reltoken(&eventfd->token);
@@ -439,12 +427,6 @@ kvm_eventfd_add(struct kvm_eventfd *eventfd, uint64_t value, int nonblock)
 		lwkt_reltoken(&eventfd->token);
 		if (error != 0)
 			return error;
-	}
-	if (kvm_debug_trace && watched &&
-	    atomic_fetchadd_int(&kvm_eventfd_trace_count, 1) <
-	    KVM_DEBUG_TRACE_LIMIT) {
-		kprintf("kvm: eventfd signal event=%p count=%ju\n", eventfd,
-		    (uintmax_t)count);
 	}
 	for (;;) {
 		listener = NULL;

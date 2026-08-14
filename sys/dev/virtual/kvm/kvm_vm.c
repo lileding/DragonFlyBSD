@@ -36,7 +36,6 @@
 #include "kvm_vm.h"
 
 #define KVM_LINUX_IO(number)	((unsigned long)((KVMIO << 8) | (number)))
-static unsigned int kvm_irq_line_trace_count;
 
 struct kvm_memory_piece {
 	STAILQ_ENTRY(kvm_memory_piece) entry;
@@ -393,12 +392,6 @@ kvm_vm_set_irq_line(struct kvm_vm *vm, const struct kvm_irq_level *line)
 {
 	if (line == NULL || line->level > 1)
 		return EINVAL;
-	if (kvm_debug_trace &&
-	    kvm_irq_line_trace_count < KVM_DEBUG_TRACE_LIMIT) {
-		++kvm_irq_line_trace_count;
-		kprintf("kvm: irq line gsi=%u level=%u\n", line->irq,
-		    line->level);
-	}
 	return vmm_machine_set_irq(vm->machine, line->irq, line->level != 0);
 }
 

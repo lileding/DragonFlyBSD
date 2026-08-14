@@ -26,9 +26,6 @@ static int kvm_ioevent_handler(void *, const struct vmm_io_write *);
 static int kvm_ioevent_matches(const struct kvm_ioevent *,
     const struct kvm_ioeventfd *, const struct file *);
 
-static unsigned int kvm_ioevent_bind_trace_count;
-static unsigned int kvm_ioevent_fire_trace_count;
-
 int
 kvm_ioevent_configure(struct kvm_vm *vm, const struct kvm_ioeventfd *request)
 {
@@ -124,15 +121,6 @@ kvm_ioevent_bind(struct kvm_vm *vm, const struct kvm_ioeventfd *request)
 	lwkt_gettoken(&vm->token);
 	TAILQ_INSERT_TAIL(&vm->ioevents, event, entry);
 	lwkt_reltoken(&vm->token);
-	if (kvm_debug_trace &&
-	    kvm_ioevent_bind_trace_count < KVM_DEBUG_TRACE_LIMIT) {
-		++kvm_ioevent_bind_trace_count;
-		kprintf("kvm: ioeventfd bind event=%p %s addr=%#jx len=%u match=%#jx flags=%#x\n",
-		    event->eventfp,
-		    (event->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 ? "pio" : "mmio",
-		    (uintmax_t)event->address, event->length,
-		    (uintmax_t)event->datamatch, event->flags);
-	}
 	return 0;
 }
 
@@ -175,15 +163,6 @@ kvm_ioevent_handler(void *argument, const struct vmm_io_write *write)
 	if ((event->flags & KVM_IOEVENTFD_FLAG_DATAMATCH) != 0 &&
 	    write->value != event->datamatch)
 		return ENOENT;
-	if (kvm_debug_trace &&
-	    kvm_ioevent_fire_trace_count < KVM_DEBUG_TRACE_LIMIT) {
-		++kvm_ioevent_fire_trace_count;
-		kprintf("kvm: ioeventfd fire event=%p %s addr=%#jx width=%u value=%#jx\n",
-		    event->eventfp,
-		    (event->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 ? "pio" : "mmio",
-		    (uintmax_t)write->address, write->width,
-		    (uintmax_t)write->value);
-	}
 	return kvm_eventfd_signal(event->eventfp);
 }
 

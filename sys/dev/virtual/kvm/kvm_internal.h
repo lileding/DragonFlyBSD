@@ -15,9 +15,6 @@ MALLOC_DECLARE(M_KVM);
 extern struct lwkt_token kvm_frontend_token;
 extern int kvm_file_count;
 extern bool kvm_draining;
-extern int kvm_debug_trace;
-
-#define KVM_DEBUG_TRACE_LIMIT 64U
 
 /* Returns the supported value for one Linux KVM capability. */
 int kvm_capability(int capability);

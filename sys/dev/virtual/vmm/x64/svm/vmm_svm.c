@@ -30,7 +30,6 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/mman.h>
-#include <sys/sysctl.h>
 #include <sys/thread2.h>
 
 #include "../../vmm_machine.h"
@@ -43,15 +42,6 @@
 #include "vmm_svm_x86defs.h"
 
 #define SVM_NCPUID_ENTRIES	64
-#define VMM_SVM_TRACE_LIMIT	32U
-
-static int vmm_svm_trace;
-static unsigned int vmm_svm_trace_count;
-static unsigned int vmm_svm_npf_trace_count;
-
-SYSCTL_DECL(_hw_vmm);
-SYSCTL_INT(_hw_vmm, OID_AUTO, svm_trace, CTLFLAG_RW, &vmm_svm_trace, 0,
-    "log the first SVM state transitions after module load");
 
 static int vmm_svm_guest_read_instruction(struct vmm_vcpu *, void *,
     size_t);
@@ -1807,14 +1797,6 @@ vmm_svm_exit_npf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	if (length != 0)
 		memcpy(exit->u.mem.inst_bytes, cpudata->vmcb->ctrl.inst_bytes,
 		    length);
-	if (vmm_svm_trace && vmm_svm_npf_trace_count < VMM_SVM_TRACE_LIMIT) {
-		++vmm_svm_npf_trace_count;
-		kprintf("vmm: svm vcpu%u npf gpa=%#jx info=%#jx rip=%#jx\n",
-		    vcpu->id, (uintmax_t)gpa,
-		    (uintmax_t)cpudata->vmcb->ctrl.exitinfo1,
-		    (uintmax_t)cpudata->vmcb->state.rip);
-	}
-
 	vmm_svm_vcpu_state_provide(vcpu,
 	    VMM_X64_STATE_GPRS | VMM_X64_STATE_SEGS |
 	    VMM_X64_STATE_CRS | VMM_X64_STATE_MSRS);
@@ -2307,16 +2289,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	int hcpu;
 	int error = 0;
 
-	if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
-	    ((vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xea590 &&
-	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xea5b0) ||
-	    (vcpu->state->gprs[VMM_X64_GPR_RIP] >= 0xebd80 &&
-	    vcpu->state->gprs[VMM_X64_GPR_RIP] < 0xebd90))) {
-		++vmm_svm_trace_count;
-		kprintf("vmm: svm vcpu%u entry state-rip=%#jx vmcb-rip=%#jx\n",
-		    vcpu->id, (uintmax_t)vcpu->state->gprs[VMM_X64_GPR_RIP],
-		    (uintmax_t)vmcb->state.rip);
-	}
 	while (1) {
 		if (cpudata->interrupt != NULL &&
 		    vmm_svm_interrupt_ops->vcpu_prepare != NULL) {
@@ -2426,14 +2398,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
 		vmm_stat_vmexit();
-		if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
-		    ((vmcb->state.rip >= 0xea590 && vmcb->state.rip < 0xea5b0) ||
-		    (vmcb->state.rip >= 0xebd80 && vmcb->state.rip < 0xebd90))) {
-			++vmm_svm_trace_count;
-			kprintf("vmm: svm vcpu%u exit code=%#jx vmcb-rip=%#jx\n",
-			    vcpu->id, (uintmax_t)vmcb->ctrl.exitcode,
-			    (uintmax_t)vmcb->state.rip);
-		}
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
 		vmm_svm_interrupt_ops->vcpu_leave(cpudata->interrupt);
 		vmm_svm_htlb_flush_ack(cpudata, machgen);
@@ -2493,20 +2457,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmm_svm_exit_msr(mach, vcpu, exit);
 			break;
 		case VMCB_EXITCODE_SHUTDOWN:
-			if (vmm_svm_trace) {
-				kprintf("vmm: svm vcpu%u shutdown info1=%#jx info2=%#jx "
-				    "exitintinfo=%#jx eventinj=%#jx rip=%#jx rsp=%#jx "
-				    "cr0=%#jx cr3=%#jx efer=%#jx\n", vcpu->id,
-				    (uintmax_t)vmcb->ctrl.exitinfo1,
-				    (uintmax_t)vmcb->ctrl.exitinfo2,
-				    (uintmax_t)vmcb->ctrl.exitintinfo,
-				    (uintmax_t)vmcb->ctrl.eventinj,
-				    (uintmax_t)vmcb->state.rip,
-				    (uintmax_t)vmcb->state.rsp,
-				    (uintmax_t)vmcb->state.cr0,
-				    (uintmax_t)vmcb->state.cr3,
-				    (uintmax_t)vmcb->state.efer);
-			}
 			exit->reason = VMM_CPUEXIT_SHUTDOWN;
 			break;
 		case VMCB_EXITCODE_RDPMC:
