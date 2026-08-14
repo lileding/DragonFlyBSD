@@ -1,0 +1,67 @@
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * DragonFly vmmfs machine declaration object.
+ */
+#ifndef VMMFS_MACHINE_H
+#define VMMFS_MACHINE_H
+
+#include <sys/param.h>
+#include <sys/thread.h>
+#include <sys/tree.h>
+#include <sys/types.h>
+
+#include "vmmfs_console.h"
+#include "vmmfs_events.h"
+#include "vmmfs_loader.h"
+#include "vmmfs_memory.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_status.h"
+#include "vmmfs_vcpu.h"
+
+struct mount;
+struct vnode;
+struct vop_ops;
+struct vmmfs_root;
+struct vmm_machine;
+
+struct vmmfs_stopped {
+	bool present;
+};
+
+struct vmmfs_machine_spec {
+	struct vmmfs_stopped stopped;
+};
+
+struct vmmfs_machine {
+	RB_ENTRY(vmmfs_machine) entry;
+	struct vmmfs_root *root;
+	struct vnode *vnode;
+	struct vop_ops *vops;
+	ino_t inode;
+	char name[NAME_MAX + 1];
+	struct lwkt_token token;
+	struct vmmfs_machine_spec spec;
+	struct vmm_machine *machine;
+	struct vmmfs_vcpu vcpu;
+	struct vmmfs_memory memory;
+	struct vmmfs_loader loader;
+	struct vmmfs_pciroot pciroot;
+	struct vmmfs_events events;
+	struct vmmfs_status status;
+	struct vmmfs_console console;
+};
+
+struct vmmfs_machine_tree;
+RB_PROTOTYPE(vmmfs_machine_tree, vmmfs_machine, entry,
+	vmmfs_machine_compare);
+
+extern struct vop_ops vmmfs_machine_vops;
+
+int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
+struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_root *,
+	const char *, size_t);
+int vmmfs_machine_destroy(struct vmmfs_machine *);
+void vmmfs_machine_free(struct vmmfs_machine *);
+
+#endif /* VMMFS_MACHINE_H */

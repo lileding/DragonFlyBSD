@@ -19,7 +19,6 @@
 
 #define VMMFS_MACHINE_MODE 0555
 
-static struct vnode *vmmfs_machine_vnode(struct vmmfs_machine *);
 static int vmmfs_machine_access(struct vop_access_args *);
 static int vmmfs_machine_getattr(struct vop_getattr_args *);
 static int vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *);
@@ -52,81 +51,51 @@ vmmfs_machine_compare(struct vmmfs_machine *left,
 RB_GENERATE(vmmfs_machine_tree, vmmfs_machine, entry, vmmfs_machine_compare);
 
 struct vmmfs_machine *
-vmmfs_machine_create(struct vmmfs_domain *domain, const char *name,
+vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	size_t namelen)
 {
 	struct vmmfs_machine *machine;
+	struct vmmfs_mount *state;
+	struct vnode *vnode;
+	int error;
 
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (NULL);
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
-	machine->domain = domain;
-	machine->as_vnode = vmmfs_machine_vnode;
+	machine->root = root;
+	state = (struct vmmfs_mount *)root->mount->mnt_data;
+	machine->vops = state->machine_vops;
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = '\0';
-	lwkt_token_init(&machine->spec_token, "vmmfsmachine");
+	lwkt_token_init(&machine->token, "vmmfsmachine");
+	error = getnewvnode(VT_SYNTH, root->mount, &vnode, 0, 0);
+	if (error != 0) {
+		lwkt_token_uninit(&machine->token);
+		kfree(machine, M_VMMFS);
+		return (NULL);
+	}
+	vnode->v_data = machine;
+	vnode->v_ops = &state->machine_vops;
+	vnode->v_type = VDIR;
+	machine->vnode = vnode;
+	vx_downgrade(vnode);
 	return (machine);
 }
 
-void
+int
 vmmfs_machine_destroy(struct vmmfs_machine *machine)
 {
-	KKASSERT(machine->domain == NULL);
-	KKASSERT(machine->vnode == NULL);
-	lwkt_token_uninit(&machine->spec_token);
-	kfree(machine, M_VMMFS);
+	KKASSERT(machine->root == NULL);
+	return (0);
 }
 
-static struct vnode *
-vmmfs_machine_vnode(struct vmmfs_machine *machine)
+void
+vmmfs_machine_free(struct vmmfs_machine *machine)
 {
-	struct vmmfs_domain *domain;
-	struct vnode *vnode;
-	int detached;
-	int error;
-
-retry:
-	lwkt_gettoken(&machine->spec_token);
-	vnode = machine->vnode;
-	if (vnode != NULL) {
-		vhold(vnode);
-		lwkt_reltoken(&machine->spec_token);
-		error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-		vdrop(vnode);
-		if (error == 0)
-			return (vnode);
-		if (error != ENOENT)
-			return (NULL);
-		goto retry;
-	}
-	domain = machine->domain;
-	if (domain == NULL) {
-		lwkt_reltoken(&machine->spec_token);
-		return (NULL);
-	}
-	lwkt_reltoken(&machine->spec_token);
-
-	error = getnewvnode(VT_SYNTH, domain->mount, &vnode, 0, 0);
-	if (error != 0)
-		return (NULL);
-
-	lwkt_gettoken(&machine->spec_token);
-	detached = machine->domain == NULL;
-	if (machine->vnode != NULL || detached) {
-		vnode->v_type = VBAD;
-		vx_put(vnode);
-		lwkt_reltoken(&machine->spec_token);
-		if (detached)
-			return (NULL);
-		goto retry;
-	}
-	vnode->v_data = machine;
-	vnode->v_ops = &domain->machine_vops;
-	vnode->v_type = VDIR;
-	machine->vnode = vnode;
-	lwkt_reltoken(&machine->spec_token);
-	vx_downgrade(vnode);
-	return (vnode);
+	KKASSERT(machine->root == NULL);
+	KKASSERT(machine->vnode == NULL);
+	lwkt_token_uninit(&machine->token);
+	kfree(machine, M_VMMFS);
 }
 
 static int
@@ -181,22 +150,31 @@ static int
 vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_domain *domain;
+	struct vmmfs_root *root;
 	struct vnode *vnode;
 
 	machine = ap->a_dvp->v_data;
-	domain = (struct vmmfs_domain *)ap->a_dvp->v_mount->mnt_data;
-	if (machine == NULL || domain == NULL)
+	root = ((struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data)->root;
+	if (machine == NULL || root == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&machine->spec_token);
-	if (machine->domain != domain) {
-		lwkt_reltoken(&machine->spec_token);
+	lwkt_gettoken(&machine->token);
+	if (machine->root != root) {
+		lwkt_reltoken(&machine->token);
 		return (ENOENT);
 	}
-	lwkt_reltoken(&machine->spec_token);
-	vnode = domain->as_vnode(domain);
+	lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&root->token);
+	vnode = root->vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&root->token);
 	if (vnode == NULL)
-		return (ENOMEM);
+		return (ENOENT);
+	if (vget(vnode, LK_EXCLUSIVE | LK_RETRY) != 0) {
+		vdrop(vnode);
+		return (ENOENT);
+	}
+	vdrop(vnode);
 	*ap->a_vpp = vnode;
 	vn_unlock(vnode);
 	return (0);
@@ -258,13 +236,13 @@ vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 	machine = ap->a_vp->v_data;
 	if (machine == NULL)
 		return (0);
-	lwkt_gettoken(&machine->spec_token);
+	lwkt_gettoken(&machine->token);
 	if (machine->vnode == ap->a_vp)
 		machine->vnode = NULL;
-	destroy = machine->domain == NULL;
-	lwkt_reltoken(&machine->spec_token);
+	destroy = machine->root == NULL;
+	lwkt_reltoken(&machine->token);
 	ap->a_vp->v_data = NULL;
 	if (destroy)
-		vmmfs_machine_destroy(machine);
+		vmmfs_machine_free(machine);
 	return (0);
 }
