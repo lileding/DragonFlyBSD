@@ -139,6 +139,7 @@
 
 #define VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI	0x0401ULL
 #define VMM_SVM_EXIT_AVIC_NOACCEL		0x0402ULL
+#define VMM_SVM_EXIT_IRET			0x0074ULL
 #define VMM_SVM_EXIT_HLT			0x0078ULL
 #define VMM_SVM_AVIC_NOACCEL_WRITE		__BIT(0)
 #define VMM_SVM_AVIC_NOACCEL_OFFSET		0xff0U
@@ -173,6 +174,12 @@ struct vmm_svm_interrupt_vcpu {
 	volatile int running;
 	bool delivery_pending;
 	uint8_t delivery_vector;
+	volatile u_int init_pending;
+	volatile u_int sipi_pending;
+	volatile u_int sipi_vector;
+	volatile u_int nmi_pending;
+	bool nmi_delivery_pending;
+	bool wait_sipi;
 	/* timer_token protects the LAPIC timer fields and timer_callout. */
 	struct lwkt_token timer_token;
 	struct callout timer_callout;
@@ -209,6 +216,10 @@ static int vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *,
     struct vmm_vcpu *, struct vmm_svm_interrupt_vcpu **,
     struct vmm_svm_interrupt_config *);
 static void vmm_svm_avic_vcpu_destroy(struct vmm_svm_interrupt_vcpu *);
+static void vmm_svm_avic_vcpu_reset_lapic(
+    struct vmm_svm_interrupt_vcpu *);
+static void vmm_svm_avic_vcpu_reset(struct vmm_svm_interrupt_vcpu *);
+static int vmm_svm_avic_vcpu_prepare(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_leave(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_event_result(
@@ -269,6 +280,7 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.vcpu_get_lapic = vmm_svm_interrupt_vcpu_get_lapic,
 	.vcpu_set_lapic = vmm_svm_interrupt_vcpu_set_lapic,
 	.vcpu_destroy = vmm_svm_avic_vcpu_destroy,
+	.vcpu_prepare = vmm_svm_avic_vcpu_prepare,
 	.vcpu_enter = vmm_svm_avic_vcpu_enter,
 	.vcpu_leave = vmm_svm_avic_vcpu_leave,
 	.vcpu_event_result = vmm_svm_avic_vcpu_event_result,
@@ -905,18 +917,28 @@ vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 	uint32_t destination;
 	uint32_t id;
 	uint32_t vector;
+	bool bridge;
 	bool logical;
+	bool nmi;
 	bool delivered;
 
-	if ((address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
-	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) != VMM_SVM_MSI_ADDRESS_BASE ||
+	/* QEMU's in-kernel APIC bridge encodes only MSI destination bits. */
+	bridge = (address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
+	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) == 0;
+	if (((address & ~(VMM_SVM_MSI_ADDRESS_DEST_MASK |
+	    VMM_SVM_MSI_ADDRESS_CONTROL_MASK)) != VMM_SVM_MSI_ADDRESS_BASE &&
+	    !bridge) ||
 	    (address & VMM_SVM_MSI_ADDRESS_REDIRECTION_HINT) != 0 ||
-	    (data & ~VMM_SVM_MSI_DATA_ALLOWED) != 0 ||
-	    (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != 0 ||
+	    (data & ~(VMM_SVM_MSI_DATA_ALLOWED |
+	    (bridge ? VMM_SVM_APIC_ICR_DEST_LOGICAL : 0))) != 0 ||
+	    ((data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != 0 &&
+	    (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) != VMM_SVM_APIC_ICR_NMI) ||
 	    (data & VMM_SVM_MSI_DATA_TRIGGER_LEVEL) != 0)
 		return EOPNOTSUPP;
+	nmi = (data & VMM_SVM_MSI_DATA_DELIVERY_MASK) ==
+	    VMM_SVM_APIC_ICR_NMI;
 	vector = data & VMM_SVM_MSI_DATA_VECTOR_MASK;
-	if (vector < 32)
+	if (!nmi && vector < 32)
 		return EINVAL;
 	destination = (address & VMM_SVM_MSI_ADDRESS_DEST_MASK) >> 12;
 	logical = (address & VMM_SVM_MSI_ADDRESS_DEST_LOGICAL) != 0;
@@ -927,7 +949,12 @@ vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 	if (!logical) {
 		target = machine->targets[destination];
 		if (target != NULL) {
-			vmm_svm_avic_deliver(target, (uint8_t)vector);
+			if (nmi) {
+				atomic_set_int(&target->nmi_pending, 1);
+				(void)vmm_vcpu_kick(target->vcpu);
+			} else {
+				vmm_svm_avic_deliver(target, (uint8_t)vector);
+			}
 			delivered = true;
 		}
 	} else {
@@ -936,7 +963,12 @@ vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 			if (target == NULL || (destination &
 			    (vmm_svm_avic_read(target, VMM_SVM_APIC_LDR) >> 24)) == 0)
 				continue;
-			vmm_svm_avic_deliver(target, (uint8_t)vector);
+			if (nmi) {
+				atomic_set_int(&target->nmi_pending, 1);
+				(void)vmm_vcpu_kick(target->vcpu);
+			} else {
+				vmm_svm_avic_deliver(target, (uint8_t)vector);
+			}
 			delivered = true;
 		}
 	}
@@ -1027,6 +1059,7 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	    VMM_SVM_APICBASE_ENABLED;
 	if (apic_id == 0)
 		avic->apic_base |= VMM_SVM_APICBASE_BSP;
+	avic->wait_sipi = apic_id != 0;
 	atomic_store_rel_int(&avic->host_cpu, -1);
 	atomic_store_rel_int(&avic->host_apic_id, -1);
 
@@ -1083,6 +1116,128 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 }
 
 static void
+vmm_svm_avic_vcpu_reset_lapic(struct vmm_svm_interrupt_vcpu *avic)
+{
+	lwkt_gettoken(&avic->timer_token);
+	callout_stop_async(&avic->timer_callout);
+	avic->timer_lvtt = VMM_SVM_APIC_LVT_MASKED;
+	avic->timer_tmict = 0;
+	avic->timer_tdcr = 0;
+	avic->timer_divisor = 2;
+	avic->timer_interval_tsc = 0;
+	avic->timer_deadline_tsc = 0;
+	avic->timer_active = false;
+	lwkt_reltoken(&avic->timer_token);
+
+	bzero(avic->apic_page, PAGE_SIZE);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_ID, avic->apic_id << 24);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_VERSION,
+	    VMM_SVM_APIC_VERSION_VALUE);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR, 0xff);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVTT,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_THERMAL,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_PERF,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT0,
+	    avic->apic_id == 0 ? VMM_SVM_APIC_LVT_EXTINT :
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT1,
+	    VMM_SVM_APIC_LVT_MASKED);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_ERROR,
+	    VMM_SVM_APIC_LVT_MASKED);
+}
+
+static void
+vmm_svm_avic_vcpu_reset(struct vmm_svm_interrupt_vcpu *avic)
+{
+	struct vmm_cpustate *state = avic->vcpu->state;
+	uint32_t mxcsr_mask = state->fpu.fx_mxcsr_mask;
+	unsigned int index;
+
+	bzero(state, sizeof(*state));
+	for (index = VMM_X64_SEG_ES; index <= VMM_X64_SEG_GS; ++index) {
+		state->segs[index].limit = 0xffff;
+		state->segs[index].attrib.type = 3;
+		state->segs[index].attrib.s = 1;
+		state->segs[index].attrib.p = 1;
+	}
+	state->segs[VMM_X64_SEG_CS].selector = 0xf000;
+	state->segs[VMM_X64_SEG_CS].base = 0xffff0000;
+	for (index = VMM_X64_SEG_GDT; index <= VMM_X64_SEG_IDT; ++index) {
+		state->segs[index].limit = 0xffff;
+		state->segs[index].attrib.type = 2;
+		state->segs[index].attrib.s = 1;
+		state->segs[index].attrib.p = 1;
+	}
+	state->segs[VMM_X64_SEG_LDT].limit = 0xffff;
+	state->segs[VMM_X64_SEG_LDT].attrib.type = 2;
+	state->segs[VMM_X64_SEG_LDT].attrib.p = 1;
+	state->segs[VMM_X64_SEG_TR].limit = 0xffff;
+	state->segs[VMM_X64_SEG_TR].attrib.type = 3;
+	state->segs[VMM_X64_SEG_TR].attrib.p = 1;
+	state->gprs[VMM_X64_GPR_RDX] = 0x600;
+	state->gprs[VMM_X64_GPR_RIP] = 0xfff0;
+	state->gprs[VMM_X64_GPR_RFLAGS] = 0x2;
+	state->crs[VMM_X64_CR_CR0] = 0x60000010;
+	state->crs[VMM_X64_CR_XCR0] = 0x1;
+	state->drs[VMM_X64_DR_DR6] = 0xffff0ff0;
+	state->drs[VMM_X64_DR_DR7] = 0x400;
+	state->msrs[VMM_X64_MSR_PAT] = 0x0007040600070406ULL;
+	state->fpu.fx_cw = 0x40;
+	state->fpu.fx_tw = 0x55;
+	state->fpu.fx_zero = 0x55;
+	state->fpu.fx_mxcsr_mask = mxcsr_mask;
+	state->fpu.fx_mxcsr = 0x1f80 & mxcsr_mask;
+	avic->apic_base = VMM_SVM_AVIC_APIC_BASE |
+	    VMM_SVM_APICBASE_ENABLED;
+	avic->delivery_pending = false;
+	atomic_clear_int(&avic->nmi_pending, 1);
+	avic->nmi_delivery_pending = false;
+	vmm_svm_avic_vcpu_reset_lapic(avic);
+	avic->wait_sipi = true;
+}
+
+static int
+vmm_svm_avic_vcpu_prepare(struct vmm_svm_interrupt_vcpu *avic)
+{
+	struct vmm_svm_interrupt_machine *machine;
+
+	if (avic == NULL)
+		return 0;
+	if (avic->apic_id != 0) {
+		for (;;) {
+			if (atomic_swap_int(&avic->init_pending, 0) != 0)
+				vmm_svm_avic_vcpu_reset(avic);
+			if (!avic->wait_sipi)
+				break;
+			if (atomic_swap_int(&avic->sipi_pending, 0) != 0) {
+				avic->vcpu->state->segs[VMM_X64_SEG_CS].selector =
+				    (uint16_t)atomic_load_acq_int(&avic->sipi_vector) << 8;
+				avic->vcpu->state->segs[VMM_X64_SEG_CS].base =
+				    (uint64_t)atomic_load_acq_int(&avic->sipi_vector) << 12;
+				avic->vcpu->state->gprs[VMM_X64_GPR_RIP] = 0;
+				avic->wait_sipi = false;
+				return EINPROGRESS;
+			}
+			tsleep_interlock(avic->vcpu, 0);
+			if (atomic_load_acq_int(&avic->init_pending) == 0 &&
+			    atomic_load_acq_int(&avic->sipi_pending) == 0)
+				return EAGAIN;
+		}
+	}
+
+	/* This can take the machine token because VMRUN has not disabled GIF. */
+	machine = avic->machine;
+	lwkt_gettoken(&machine->token);
+	vmm_svm_ioapic_scan_eoi_locked(machine);
+	lwkt_reltoken(&machine->token);
+	return 0;
+}
+
+static void
 vmm_svm_avic_vcpu_destroy(struct vmm_svm_interrupt_vcpu *avic)
 {
 	struct vmm_svm_interrupt_machine *machine;
@@ -1117,18 +1272,29 @@ vmm_svm_avic_vcpu_destroy(struct vmm_svm_interrupt_vcpu *avic)
 static void
 vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *avic)
 {
-	struct vmm_svm_interrupt_machine *machine;
 	struct vmm_machine *vmm_machine;
 	int error;
 	uint32_t cpu;
 	uint32_t apic_id;
 	uint64_t entry;
 	uint8_t vector;
+	bool nmi_queued;
 
 	if (avic == NULL)
 		return;
 	vmm_svm_lapic_timer_check(avic);
-	if (!avic->delivery_pending && vmm_svm_avic_lapic_accepts_pic(avic)) {
+	nmi_queued = false;
+	if (!avic->delivery_pending &&
+	    atomic_swap_int(&avic->nmi_pending, 0) != 0) {
+		if (vmm_svm_vcpu_inject_interrupt(avic->vcpu, 2) != 0)
+			atomic_set_int(&avic->nmi_pending, 1);
+		else {
+			avic->nmi_delivery_pending = true;
+			nmi_queued = true;
+		}
+	}
+	if (!avic->delivery_pending && !nmi_queued &&
+	    vmm_svm_avic_lapic_accepts_pic(avic)) {
 		if (!vmm_svm_vcpu_interrupt_allowed(avic->vcpu)) {
 			vmm_svm_vcpu_request_interrupt_window(avic->vcpu);
 		} else {
@@ -1147,19 +1313,15 @@ vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *avic)
 			lwkt_reltoken(&vmm_machine->token);
 		}
 	}
-	machine = avic->machine;
 	cpu = os_curcpu_number();
 	apic_id = CPUID_TO_APICID(cpu);
 	KKASSERT((apic_id & ~VMM_SVM_AVIC_HOST_APIC_ID_MASK) == 0);
 	atomic_store_rel_int(&avic->host_apic_id, apic_id);
 	atomic_store_rel_int(&avic->host_cpu, cpu);
-	lwkt_gettoken(&machine->token);
-	vmm_svm_ioapic_scan_eoi_locked(machine);
 	entry = avic->apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    VMM_SVM_AVIC_PHYS_RUNNING | apic_id;
-	machine->physical_table[avic->apic_id] = entry;
+	atomic_store_rel_64(&avic->machine->physical_table[avic->apic_id], entry);
 	cpu_mfence();
-	lwkt_reltoken(&machine->token);
 	atomic_store_rel_int(&avic->running, 1);
 }
 
@@ -1176,18 +1338,14 @@ vmm_svm_avic_vcpu_event_result(struct vmm_svm_interrupt_vcpu *avic,
 static void
 vmm_svm_avic_vcpu_leave(struct vmm_svm_interrupt_vcpu *avic)
 {
-	struct vmm_svm_interrupt_machine *machine;
 	uint64_t entry;
 
 	if (avic == NULL || atomic_swap_int(&avic->running, 0) == 0)
 		return;
-	machine = avic->machine;
-	lwkt_gettoken(&machine->token);
 	entry = avic->apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
 	    atomic_load_acq_int(&avic->host_apic_id);
-	machine->physical_table[avic->apic_id] = entry;
+	atomic_store_rel_64(&avic->machine->physical_table[avic->apic_id], entry);
 	cpu_mfence();
-	lwkt_reltoken(&machine->token);
 }
 
 static void
@@ -1382,8 +1540,7 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 	/*
 	 * A broadcast without a recipient is architecturally complete.  In
 	 * particular, SeaBIOS issues INIT | all-excluding-self for a one-vCPU
-	 * guest.  A targeted NMI, INIT, or SIPI remains unhandled until the
-	 * vCPU lifecycle implements it.
+	 * guest.
 	 */
 	if (delivery != VMM_SVM_APIC_ICR_FIXED &&
 	    delivery != VMM_SVM_APIC_ICR_NMI &&
@@ -1423,11 +1580,28 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 				}
 			}
 		}
-		if (delivery != VMM_SVM_APIC_ICR_FIXED) {
-			lwkt_reltoken(&machine->token);
-			return 0;
+		switch (delivery) {
+		case VMM_SVM_APIC_ICR_FIXED:
+			vmm_svm_avic_deliver(target, (uint8_t)vector);
+			break;
+		case VMM_SVM_APIC_ICR_NMI:
+			atomic_set_int(&target->nmi_pending, 1);
+			(void)vmm_vcpu_kick(target->vcpu);
+			wakeup(target->vcpu);
+			break;
+		case VMM_SVM_APIC_ICR_INIT:
+			atomic_store_rel_int(&target->sipi_pending, 0);
+			atomic_store_rel_int(&target->init_pending, 1);
+			(void)vmm_vcpu_kick(target->vcpu);
+			wakeup(target->vcpu);
+			break;
+		case VMM_SVM_APIC_ICR_SIPI:
+			atomic_store_rel_int(&target->sipi_vector, vector);
+			atomic_store_rel_int(&target->sipi_pending, 1);
+			(void)vmm_vcpu_kick(target->vcpu);
+			wakeup(target->vcpu);
+			break;
 		}
-		vmm_svm_avic_deliver(target, (uint8_t)vector);
 	}
 	lwkt_reltoken(&machine->token);
 	return 1;
@@ -1445,6 +1619,10 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 	(void)exitinfo2;
 	if (avic == NULL)
 		return 0;
+	if (exitcode == VMM_SVM_EXIT_IRET && avic->nmi_delivery_pending) {
+		avic->nmi_delivery_pending = false;
+		return 1;
+	}
 	if (exitcode == VMM_SVM_EXIT_HLT) {
 		machine = avic->machine;
 		lwkt_gettoken(&machine->token);

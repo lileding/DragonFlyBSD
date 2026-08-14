@@ -602,6 +602,10 @@ struct vmcb_ctrl {
 } __packed;
 
 CTASSERT(sizeof(struct vmcb_ctrl) == 1024);
+CTASSERT(offsetof(struct vmcb_ctrl, avic) == 0x098);
+CTASSERT(offsetof(struct vmcb_ctrl, avic_abpp) == 0x0e0);
+CTASSERT(offsetof(struct vmcb_ctrl, avic_ltp) == 0x0f0);
+CTASSERT(offsetof(struct vmcb_ctrl, avic_phys) == 0x0f8);
 
 struct vmcb_segment {
 	uint16_t selector;
@@ -2297,7 +2301,6 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	uint64_t machgen;
 	int hcpu;
-	bool pmap_active;
 	int error = 0;
 
 	if (vmm_svm_trace && vmm_svm_trace_count < VMM_SVM_TRACE_LIMIT &&
@@ -2310,20 +2313,12 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		    vcpu->id, (uintmax_t)vcpu->state->gprs[VMM_X64_GPR_RIP],
 		    (uintmax_t)vmcb->state.rip);
 	}
-	pmap_active = false;
-
 	while (1) {
 		if (cpudata->interrupt != NULL &&
 		    vmm_svm_interrupt_ops->vcpu_prepare != NULL) {
 			error = vmm_svm_interrupt_ops->vcpu_prepare(
 			    cpudata->interrupt);
 			if (error == EAGAIN) {
-#ifdef __DragonFly__
-				if (pmap_active) {
-					pmap_del_cpu(mach->vmspace, os_curcpu_number());
-					pmap_active = false;
-				}
-#endif
 				error = tsleep(vcpu, PINTERLOCKED | PCATCH,
 				    "vmmsipi", 0);
 				if (error != 0)
@@ -2337,8 +2332,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			if (error != 0)
 				break;
 		}
-		if (!pmap_active) {
-			hcpu = os_curcpu_number();
+		hcpu = os_curcpu_number();
+		if (cpudata->hcpu_last != hcpu) {
 			vmm_svm_gtlb_catchup(vcpu, hcpu);
 			vmm_svm_htlb_catchup(vcpu, hcpu);
 			if (cpudata->hcpu_last != hcpu) {
@@ -2347,12 +2342,11 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			}
 #ifdef __DragonFly__
 			/*
-			 * Publish this CPU only immediately before VMRUN.  A reset AP may
-			 * sleep indefinitely awaiting SIPI and must not remain active then.
+			 * The guest pmap records every CPU on which this vCPU has entered.
+			 * It is a machine-wide bitset and is cleared only at machine teardown.
 			 */
 			pmap_add_cpu(mach->vmspace, hcpu);
 #endif
-			pmap_active = true;
 		}
 		if (__predict_false(cpudata->gtlb_want_flush ||
 				    cpudata->htlb_want_flush))
@@ -3491,6 +3485,14 @@ vmm_svm_machine_destroy(struct vmm_machine *mach)
 
 	if (machdata == NULL)
 		return;
+#ifdef __DragonFly__
+	/*
+	 * VMRUN publishes host CPUs in this guest pmap.  Tear them down before
+	 * an irqchip destroys a guest-pmap mapping such as the AVIC access page.
+	 * pm_active is a shared CPU bitset, not a per-vCPU reference count.
+	 */
+	pmap_del_all_cpus(mach->vmspace);
+#endif
 	if (machdata->interrupt != NULL)
 		vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
 	mach->backend_state = NULL;
