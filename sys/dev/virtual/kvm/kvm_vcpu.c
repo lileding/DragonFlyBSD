@@ -27,7 +27,7 @@
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #include "../vmm/vmm.h"
 #include "../vmm/vmm_vcpu.h"

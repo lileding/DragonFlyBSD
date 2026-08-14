@@ -26,7 +26,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #include "../vmm/vmm.h"
 #include "kvm_internal.h"

@@ -1,14 +1,14 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * KVM ioeventfd bindings -- see linux/kvm.h.
+ * KVM ioeventfd bindings -- see sys/kvm.h.
  */
 #ifndef KVM_IOEVENT_H
 #define KVM_IOEVENT_H
 
 #include <sys/queue.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #include "kvm_vm.h"
 

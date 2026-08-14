@@ -1,6 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef _LINUX_KVM_H_
-#define _LINUX_KVM_H_
+/*-
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * DragonFly KVM compatibility ABI.
+ */
+#ifndef _SYS_KVM_H_
+#define _SYS_KVM_H_
 
 #include <sys/ioccom.h>
 #include <sys/types.h>
@@ -2759,4 +2763,4 @@ kvm_dfly_eventfd(unsigned int initial, int flags)
     kvm_dfly_eventfd((initial), (flags))
 #endif
 
-#endif /* _LINUX_KVM_H_ */
+#endif /* _SYS_KVM_H_ */

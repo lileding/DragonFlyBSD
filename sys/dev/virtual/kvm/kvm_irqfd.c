@@ -15,7 +15,7 @@
 
 #include <machine/atomic.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #include "kvm_eventfd.h"
 #include "kvm_internal.h"
