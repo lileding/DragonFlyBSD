@@ -16,6 +16,7 @@ struct vmmfs_stopped {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
+	bool expect_stopped;
 };
 
 extern struct vop_ops vmmfs_stopped_vops;

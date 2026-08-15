@@ -184,6 +184,11 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		lwkt_reltoken(&root->token);
 		return (ENOENT);
 	}
+	if (!machine->stopped.expect_stopped) {
+		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&root->token);
+		return (EBUSY);
+	}
 	RB_REMOVE(vmmfs_machine_tree, &root->machines, machine);
 	machine->root = NULL;
 	lwkt_reltoken(&machine->token);

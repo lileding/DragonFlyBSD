@@ -12,12 +12,24 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+#include <sys/taskqueue.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
 
 #define VMMFS_MACHINE_MODE 0555
+
+enum vmmfs_machine_task_type {
+	VMMFS_MACHINE_TASK_START,
+	VMMFS_MACHINE_TASK_STOP,
+	VMMFS_MACHINE_TASK_RESET,
+};
+
+struct vmmfs_machine_task {
+	struct task task;
+	struct vmmfs_machine *machine;
+};
 
 static int vmmfs_machine_access(struct vop_access_args *);
 static int vmmfs_machine_getattr(struct vop_getattr_args *);
@@ -29,6 +41,12 @@ static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_open(struct vop_open_args *);
 static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
+static int vmmfs_machine_enqueue(struct vmmfs_machine *,
+	enum vmmfs_machine_task_type);
+static void vmmfs_machine_task_done(struct vmmfs_machine_task *);
+static void vmmfs_machine_start(void *, int);
+static void vmmfs_machine_stop(void *, int);
+static void vmmfs_machine_reset(void *, int);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
@@ -73,10 +91,17 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = '\0';
 	lwkt_token_init(&machine->token, "vmmfsmachine");
-	machine->spec.stopped = true;
+	machine->taskqueue = taskqueue_create("vmmfs_machine", M_WAITOK,
+	    taskqueue_thread_enqueue, &machine->taskqueue);
+	if (machine->taskqueue == NULL)
+		goto fail_token;
+	error = taskqueue_start_threads(&machine->taskqueue, 1,
+	    TDPRI_KERN_DAEMON, -1, "vmmfs machine");
+	if (error != 0)
+		goto fail_taskqueue;
 	error = vmmfs_vcpu_create(machine, &machine->vcpu);
 	if (error != 0)
-		goto fail_token;
+		goto fail_taskqueue;
 	error = vmmfs_memory_create(machine, &machine->memory);
 	if (error != 0)
 		goto fail_vcpu;
@@ -86,6 +111,7 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	error = vmmfs_stopped_create(machine, &machine->stopped);
 	if (error != 0)
 		goto fail_loader;
+	machine->stopped.expect_stopped = true;
 	error = getnewvnode(VT_SYNTH, root->mount, &vnode, 0, 0);
 	if (error != 0)
 		goto fail_stopped;
@@ -105,6 +131,9 @@ fail_memory:
 	(void)vmmfs_memory_destroy(&machine->memory);
 fail_vcpu:
 	(void)vmmfs_vcpu_destroy(&machine->vcpu);
+fail_taskqueue:
+	taskqueue_free(machine->taskqueue);
+	machine->taskqueue = NULL;
 fail_token:
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
@@ -114,28 +143,46 @@ fail_token:
 int
 vmmfs_machine_destroy(struct vmmfs_machine *machine)
 {
+	struct taskqueue *taskqueue;
 	struct vnode *vnode;
 	int error;
 
 	KKASSERT(machine->root == NULL);
+	lwkt_gettoken(&machine->token);
+	if (atomic_load_acq_int(&machine->pending_task_count) != 0) {
+		lwkt_reltoken(&machine->token);
+		return (EBUSY);
+	}
+	taskqueue = machine->taskqueue;
+	machine->taskqueue = NULL;
+	lwkt_reltoken(&machine->token);
 	error = vmmfs_stopped_destroy(&machine->stopped);
 	if (error != 0)
-		return (error);
+		goto fail_taskqueue;
 	error = vmmfs_loader_destroy(&machine->loader);
 	if (error != 0)
-		return (error);
+		goto fail_taskqueue;
 	error = vmmfs_memory_destroy(&machine->memory);
 	if (error != 0)
-		return (error);
+		goto fail_taskqueue;
 	error = vmmfs_vcpu_destroy(&machine->vcpu);
 	if (error != 0)
-		return (error);
+		goto fail_taskqueue;
+	if (taskqueue != NULL)
+		taskqueue_free(taskqueue);
 
 	/* Release the reference retained by vmmfs_machine_create(). */
 	vnode = machine->vnode;
 	if (vnode != NULL)
 		vrele(vnode);
 	return (0);
+
+fail_taskqueue:
+	lwkt_gettoken(&machine->token);
+	KKASSERT(machine->taskqueue == NULL);
+	machine->taskqueue = taskqueue;
+	lwkt_reltoken(&machine->token);
+	return (error);
 }
 
 void
@@ -143,6 +190,8 @@ vmmfs_machine_free(struct vmmfs_machine *machine)
 {
 	KKASSERT(machine->root == NULL);
 	KKASSERT(machine->vnode == NULL);
+	KKASSERT(machine->taskqueue == NULL);
+	KKASSERT(atomic_load_acq_int(&machine->pending_task_count) == 0);
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
 }
@@ -216,7 +265,7 @@ vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 	if (ap->a_vap->va_type != VREG)
 		return (EINVAL);
 	lwkt_gettoken(&machine->token);
-	if (machine->spec.stopped) {
+	if (machine->stopped.expect_stopped) {
 		lwkt_reltoken(&machine->token);
 		return (EEXIST);
 	}
@@ -231,7 +280,19 @@ vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 	if (error != 0)
 		return (error);
 	lwkt_gettoken(&machine->token);
-	machine->spec.stopped = true;
+	if (machine->stopped.expect_stopped) {
+		lwkt_reltoken(&machine->token);
+		vput(vnode);
+		return (EEXIST);
+	}
+	machine->stopped.expect_stopped = true;
+	error = vmmfs_machine_enqueue(machine, VMMFS_MACHINE_TASK_STOP);
+	if (error != 0) {
+		machine->stopped.expect_stopped = false;
+		lwkt_reltoken(&machine->token);
+		vput(vnode);
+		return (error);
+	}
 	lwkt_reltoken(&machine->token);
 	*ap->a_vpp = vnode;
 	cache_setunresolved(ap->a_nch);
@@ -297,7 +358,7 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 		vnode = machine->loader.vnode;
 	else if (ncp->nc_nlen == sizeof("stopped") - 1 &&
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) == 0)
-		vnode = machine->spec.stopped ? machine->stopped.vnode : NULL;
+		vnode = machine->stopped.expect_stopped ? machine->stopped.vnode : NULL;
 	else {
 		lwkt_reltoken(&machine->token);
 		cache_setvp(ap->a_nch, NULL);
@@ -325,6 +386,7 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 {
 	struct vmmfs_machine *machine;
 	struct namecache *ncp;
+	int error;
 
 	machine = ap->a_dvp->v_data;
 	if (machine == NULL)
@@ -334,11 +396,17 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) != 0)
 		return (EOPNOTSUPP);
 	lwkt_gettoken(&machine->token);
-	if (!machine->spec.stopped) {
+	if (!machine->stopped.expect_stopped) {
 		lwkt_reltoken(&machine->token);
 		return (ENOENT);
 	}
-	machine->spec.stopped = false;
+	machine->stopped.expect_stopped = false;
+	error = vmmfs_machine_enqueue(machine, VMMFS_MACHINE_TASK_START);
+	if (error != 0) {
+		machine->stopped.expect_stopped = true;
+		lwkt_reltoken(&machine->token);
+		return (error);
+	}
 	lwkt_reltoken(&machine->token);
 	cache_unlink(ap->a_nch);
 	return (0);
@@ -406,7 +474,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	}
 	if (!stop && offset == 5) {
 		lwkt_gettoken(&machine->token);
-		present = machine->spec.stopped;
+		present = machine->stopped.expect_stopped;
 		inode = machine->stopped.inode;
 		lwkt_reltoken(&machine->token);
 		if (present) {
@@ -440,4 +508,78 @@ vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 	if (destroy)
 		vmmfs_machine_free(machine);
 	return (0);
+}
+
+static int
+vmmfs_machine_enqueue(struct vmmfs_machine *machine,
+	enum vmmfs_machine_task_type type)
+{
+	struct vmmfs_machine_task *task;
+	task_fn_t *handler;
+	int error;
+
+	switch (type) {
+	case VMMFS_MACHINE_TASK_START:
+		handler = vmmfs_machine_start;
+		break;
+	case VMMFS_MACHINE_TASK_STOP:
+		handler = vmmfs_machine_stop;
+		break;
+	case VMMFS_MACHINE_TASK_RESET:
+		handler = vmmfs_machine_reset;
+		break;
+	default:
+		return (EINVAL);
+	}
+	task = kmalloc(sizeof(*task), M_VMMFS, M_NOWAIT | M_ZERO);
+	if (task == NULL)
+		return (ENOMEM);
+	TASK_INIT(&task->task, 0, handler, task);
+	task->machine = machine;
+	if (machine->taskqueue == NULL) {
+		kfree(task, M_VMMFS);
+		return (EPIPE);
+	}
+	atomic_add_int(&machine->pending_task_count, 1);
+	error = taskqueue_enqueue(machine->taskqueue, &task->task);
+	if (error != 0) {
+		atomic_subtract_int(&machine->pending_task_count, 1);
+		kfree(task, M_VMMFS);
+	}
+	return (error);
+}
+
+static void
+vmmfs_machine_task_done(struct vmmfs_machine_task *task)
+{
+	KKASSERT(atomic_load_acq_int(&task->machine->pending_task_count) != 0);
+	atomic_subtract_int(&task->machine->pending_task_count, 1);
+	kfree(task, M_VMMFS);
+}
+
+static void
+vmmfs_machine_start(void *arg, int pending)
+{
+	struct vmmfs_machine_task *task = arg;
+
+	KKASSERT(pending == 1);
+	vmmfs_machine_task_done(task);
+}
+
+static void
+vmmfs_machine_stop(void *arg, int pending)
+{
+	struct vmmfs_machine_task *task = arg;
+
+	KKASSERT(pending == 1);
+	vmmfs_machine_task_done(task);
+}
+
+static void
+vmmfs_machine_reset(void *arg, int pending)
+{
+	struct vmmfs_machine_task *task = arg;
+
+	KKASSERT(pending == 1);
+	vmmfs_machine_task_done(task);
 }

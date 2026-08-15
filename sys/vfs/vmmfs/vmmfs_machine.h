@@ -21,14 +21,11 @@
 #include "vmmfs_vcpu.h"
 
 struct mount;
+struct taskqueue;
 struct vnode;
 struct vop_ops;
 struct vmmfs_root;
 struct vmm_machine;
-
-struct vmmfs_machine_spec {
-	bool stopped;
-};
 
 struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine) entry;
@@ -37,7 +34,8 @@ struct vmmfs_machine {
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	struct lwkt_token token;
-	struct vmmfs_machine_spec spec;
+	struct taskqueue *taskqueue;
+	u_int pending_task_count;
 	struct vmm_machine *machine;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
