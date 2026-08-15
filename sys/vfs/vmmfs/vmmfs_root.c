@@ -63,7 +63,6 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_root **rootp)
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	lwkt_token_init(&root->token, "vmmfsroot");
 	RB_INIT(&root->machines);
-	root->next_ino = 2;
 	error = getnewvnode(VT_SYNTH, mount, &vnode, 0, 0);
 	if (error != 0) {
 		lwkt_token_uninit(&root->token);
@@ -154,7 +153,6 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 		vmmfs_machine_free(machine);
 		return (EEXIST);
 	}
-	machine->inode = root->next_ino++;
 	RB_INSERT(vmmfs_machine_tree, &root->machines, machine);
 	lwkt_reltoken(&root->token);
 	*machinep = machine;
@@ -339,7 +337,7 @@ vmmfs_root_nresolve(struct vop_nresolve_args *ap)
 	if (vnode == NULL)
 		return (ENOENT);
 	vhold(vnode);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
+	error = vget(vnode, LK_EXCLUSIVE);
 	vdrop(vnode);
 	if (error != 0)
 		return (error);

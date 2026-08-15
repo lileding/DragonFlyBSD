@@ -14,9 +14,28 @@
 #include "vmmfs.h"
 
 static int vmmfs_mount(struct mount *, char *, caddr_t, struct ucred *);
+static int vmmfs_ncreate(struct vop_ncreate_args *);
+static int vmmfs_nmkdir(struct vop_nmkdir_args *);
+static int vmmfs_nremove(struct vop_nremove_args *);
+static int vmmfs_nresolve(struct vop_nresolve_args *);
+static int vmmfs_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_unmount(struct mount *, int);
 static int vmmfs_statfs(struct mount *, struct statfs *, struct ucred *);
 static int vmmfs_root_vfs(struct mount *, struct vnode **);
+
+/*
+ * DragonFly dispatches namespace VOPs through mnt_vn_use_ops rather than the
+ * parent vnode's v_ops.  Keep this mount vector as a thin trampoline so each
+ * vmmfs object still owns the namespace methods in its own VOP vector.
+ */
+static struct vop_ops vmmfs_namespace_vops = {
+	.vop_default = vop_defaultop,
+	.vop_ncreate = vmmfs_ncreate,
+	.vop_nmkdir = vmmfs_nmkdir,
+	.vop_nremove = vmmfs_nremove,
+	.vop_nresolve = vmmfs_nresolve,
+	.vop_nrmdir = vmmfs_nrmdir,
+};
 
 static struct vfsops vmmfs_vfsops = {
 	.vfs_flags = 0,
@@ -25,6 +44,36 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_root = vmmfs_root_vfs,
 	.vfs_statfs = vmmfs_statfs,
 };
+
+static int
+vmmfs_ncreate(struct vop_ncreate_args *ap)
+{
+	return ((*ap->a_dvp->v_ops)->vop_ncreate(ap));
+}
+
+static int
+vmmfs_nmkdir(struct vop_nmkdir_args *ap)
+{
+	return ((*ap->a_dvp->v_ops)->vop_nmkdir(ap));
+}
+
+static int
+vmmfs_nremove(struct vop_nremove_args *ap)
+{
+	return ((*ap->a_dvp->v_ops)->vop_nremove(ap));
+}
+
+static int
+vmmfs_nresolve(struct vop_nresolve_args *ap)
+{
+	return ((*ap->a_dvp->v_ops)->vop_nresolve(ap));
+}
+
+static int
+vmmfs_nrmdir(struct vop_nrmdir_args *ap)
+{
+	return ((*ap->a_dvp->v_ops)->vop_nrmdir(ap));
+}
 
 static int
 vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
@@ -70,6 +119,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 
 	state = kmalloc(sizeof(*state), M_VMMFS, M_WAITOK | M_ZERO);
 	state->mount = mount;
+	state->next_inode = 2;
 	mount->mnt_flag |= MNT_LOCAL;
 	mount->mnt_kern_flag |= MNTK_NOSTKMNT | MNTK_ALL_MPSAFE;
 	mount->mnt_data = (qaddr_t)state;
@@ -86,14 +136,24 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		mount->mnt_data = NULL;
 		goto fail;
 	}
-	vfs_add_vnodeops(mount, &vmmfs_root_vops,
+	vfs_add_vnodeops(mount, &vmmfs_namespace_vops,
 	    &mount->mnt_vn_norm_ops);
-	state->root_vops = mount->mnt_vn_norm_ops;
+	vfs_add_vnodeops(mount, &vmmfs_root_vops, &state->root_vops);
 	vfs_add_vnodeops(mount, &vmmfs_machine_vops,
 	    &state->machine_vops);
+	vfs_add_vnodeops(mount, &vmmfs_vcpu_vops, &state->vcpu_vops);
+	vfs_add_vnodeops(mount, &vmmfs_memory_vops, &state->memory_vops);
+	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
+	vfs_add_vnodeops(mount, &vmmfs_stopped_vops,
+	    &state->stopped_vops);
 	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
+		vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->root_vops);
 		vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
 		mount->mnt_data = NULL;
 		goto fail;
@@ -111,7 +171,6 @@ vmmfs_unmount(struct mount *mount, int flags)
 {
 	struct vmmfs_mount *state;
 	struct vmmfs_root *root;
-	struct vnode *root_vnode;
 	int error;
 
 	state = (struct vmmfs_mount *)mount->mnt_data;
@@ -125,19 +184,20 @@ vmmfs_unmount(struct mount *mount, int flags)
 		lwkt_reltoken(&root->token);
 		return (EBUSY);
 	}
-	root_vnode = root->vnode;
-	root->vnode = NULL;
 	lwkt_reltoken(&root->token);
-	if (root_vnode != NULL)
-		vrele(root_vnode);
-	error = vflush(mount, 0, (flags & MNT_FORCE) ? FORCECLOSE : 0);
+	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)
 		return (error);
+	error = vmmfs_root_destroy(root);
+	if (error != 0)
+		return (error);
+	vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
-	state->root_vops = NULL;
-	vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
+	vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->root_vops);
 	mount->mnt_data = NULL;
-	vmmfs_root_destroy(root);
 	kfree(state, M_VMMFS);
 	return (0);
 }

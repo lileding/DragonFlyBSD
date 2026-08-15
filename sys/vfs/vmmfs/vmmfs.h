@@ -17,9 +17,14 @@ struct vop_ops;
 
 struct vmmfs_mount {
 	struct mount *mount;
+	volatile u_int next_inode;
 	struct vmmfs_root *root;
 	struct vop_ops *root_vops;
 	struct vop_ops *machine_vops;
+	struct vop_ops *vcpu_vops;
+	struct vop_ops *memory_vops;
+	struct vop_ops *loader_vops;
+	struct vop_ops *stopped_vops;
 };
 
 MALLOC_DECLARE(M_VMMFS);

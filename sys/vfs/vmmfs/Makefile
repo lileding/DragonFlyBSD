@@ -1,5 +1,5 @@
 KMOD= vmmfs
-SRCS= vmmfs.c vmmfs_root.c vmmfs_machine.c
+SRCS= vmmfs.c vmmfs_root.c vmmfs_machine.c vmmfs_vcpu.c vmmfs_memory.c vmmfs_loader.c vmmfs_stopped.c
 
 COPTS+= -fno-asynchronous-unwind-tables
 COPTS+= -fno-unwind-tables

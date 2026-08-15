@@ -11,13 +11,20 @@
 struct vm_object;
 struct vmspace;
 struct vmmfs_machine;
+struct vmmfs_memory;
 
 struct vmmfs_memory_spec {
 	uint64_t size;
 };
 
+extern struct vop_ops vmmfs_memory_vops;
+int vmmfs_memory_create(struct vmmfs_machine *, struct vmmfs_memory *);
+int vmmfs_memory_destroy(struct vmmfs_memory *);
+
 struct vmmfs_memory {
 	struct vmmfs_machine *machine;
+	struct vnode *vnode;
+	ino_t inode;
 	struct vmmfs_memory_spec spec;
 	struct vm_object *object;
 	struct vmspace *boot_vmspace;

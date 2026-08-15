@@ -17,6 +17,7 @@
 #include "vmmfs_memory.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_status.h"
+#include "vmmfs_stopped.h"
 #include "vmmfs_vcpu.h"
 
 struct mount;
@@ -25,19 +26,14 @@ struct vop_ops;
 struct vmmfs_root;
 struct vmm_machine;
 
-struct vmmfs_stopped {
-	bool present;
-};
-
 struct vmmfs_machine_spec {
-	struct vmmfs_stopped stopped;
+	bool stopped;
 };
 
 struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine) entry;
 	struct vmmfs_root *root;
 	struct vnode *vnode;
-	struct vop_ops *vops;
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	struct lwkt_token token;
@@ -46,6 +42,7 @@ struct vmmfs_machine {
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
+	struct vmmfs_stopped stopped;
 	struct vmmfs_pciroot pciroot;
 	struct vmmfs_events events;
 	struct vmmfs_status status;

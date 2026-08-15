@@ -32,7 +32,6 @@ struct vmmfs_root {
 	struct vnode *vnode;
 	struct lwkt_token token;
 	struct vmmfs_machine_tree machines;
-	ino_t next_ino;
 };
 
 extern struct vop_ops vmmfs_root_vops;
