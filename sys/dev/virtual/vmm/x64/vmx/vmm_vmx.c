@@ -37,6 +37,7 @@
 #include "../../vmm_vcpu.h"
 #include "../vmm_x64.h"
 #include "vmm_vmx.h"
+#include "vmm_vmx_apicv.h"
 #include "vmm_vmx_os.h"
 #include "vmm_vmx_x86defs.h"
 
@@ -448,6 +449,7 @@ vmm_vmx_sti(void)
 #define VMCS_ENTRY_INSTRUCTION_LENGTH		0x0000401A
 #define VMCS_TPR_THRESHOLD			0x0000401C
 #define VMCS_PROCBASED_CTLS2			0x0000401E
+#define VMCS_GUEST_INTR_STATUS			0x00000810
 #define		PROC_CTLS2_VIRT_APIC_ACCESSES	__BIT(0)
 #define		PROC_CTLS2_ENABLE_EPT		__BIT(1)
 #define		PROC_CTLS2_DESC_TABLE_EXITING	__BIT(2)
@@ -842,6 +844,7 @@ static uint64_t vmm_vmx_xcr0_mask __read_mostly;
 
 struct vmm_vmx_machdata {
 	volatile uint64_t mach_htlb_gen;
+	struct vmm_vmx_interrupt_machine *interrupt;
 };
 
 struct vmm_vmx_xsave {
@@ -1191,6 +1194,7 @@ struct vmm_vmx_cpudata {
 	bool int_window_exit;
 	bool nmi_window_exit;
 	bool evt_pending;
+	struct vmm_vmx_interrupt_vcpu *interrupt;
 
 	/* Guest state. */
 	struct msr_entry *gmsr;
@@ -1554,6 +1558,57 @@ vmm_vmx_vcpu_event_commit(struct vmm_vcpu *vcpu)
 	event = vcpu->event;
 	vcpu->event_pending = 0;
 	return vmm_vmx_vcpu_inject(vcpu, &event);
+}
+
+int
+vmm_vmx_vcpu_inject_interrupt(struct vmm_vcpu *vcpu, uint8_t vector)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+	struct vmm_cpuevent event = {
+		.type = VMM_CPUEVENT_INTR,
+		.vector = vector,
+	};
+
+	if (cpudata->evt_pending)
+		return EBUSY;
+	return vmm_vmx_vcpu_inject(vcpu, &event);
+}
+
+bool
+vmm_vmx_vcpu_interrupt_allowed(struct vmm_vcpu *vcpu)
+{
+	uint64_t intstate;
+	uint64_t rflags;
+	bool allowed;
+
+	vmm_vmx_vmcs_enter(vcpu);
+	rflags = vmm_vmx_vmread(VMCS_GUEST_RFLAGS);
+	intstate = vmm_vmx_vmread(VMCS_GUEST_INTERRUPTIBILITY);
+	allowed = (rflags & PSL_I) != 0 &&
+	    (intstate & (INT_STATE_STI | INT_STATE_MOVSS)) == 0;
+	vmm_vmx_vmcs_leave(vcpu);
+	return allowed;
+}
+
+void
+vmm_vmx_vcpu_request_interrupt_window(struct vmm_vcpu *vcpu)
+{
+	vmm_vmx_vmcs_enter(vcpu);
+	vmm_vmx_event_waitexit_enable(vcpu, false);
+	vmm_vmx_vmcs_leave(vcpu);
+}
+
+void
+vmm_vmx_vcpu_set_rvi(struct vmm_vcpu *vcpu, uint8_t vector)
+{
+	uint64_t status;
+
+	vmm_vmx_vmcs_enter(vcpu);
+	status = vmm_vmx_vmread(VMCS_GUEST_INTR_STATUS);
+	status &= ~0xffULL;
+	status |= vector;
+	vmm_vmx_vmwrite(VMCS_GUEST_INTR_STATUS, status);
+	vmm_vmx_vmcs_leave(vcpu);
 }
 
 static inline void
@@ -2464,7 +2519,28 @@ vmm_vmx_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 {
 	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
 	uint64_t val;
+	uint32_t msr;
+	bool write;
+	int error;
 	size_t i;
+
+	write = exit->reason == VMM_CPUEXIT_WRMSR;
+	msr = write ? exit->u.wrmsr.msr : exit->u.rdmsr.msr;
+	val = write ? exit->u.wrmsr.val : 0;
+	if (cpudata->interrupt != NULL &&
+	    vmm_vmx_interrupt_ops->vcpu_msr != NULL) {
+		error = vmm_vmx_interrupt_ops->vcpu_msr(cpudata->interrupt,
+		    write, msr, &val);
+		if (error == 0) {
+			if (!write) {
+				cpudata->gprs[VMM_X64_GPR_RAX] = val & 0xffffffffU;
+				cpudata->gprs[VMM_X64_GPR_RDX] = val >> 32;
+			}
+			goto handled;
+		}
+		if (error != ENOENT)
+			goto error;
+	}
 
 	if (exit->reason == VMM_CPUEXIT_RDMSR) {
 		if (exit->u.rdmsr.msr == MSR_CR_PAT) {
@@ -2846,6 +2922,7 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	int error = 0;
 	bool launched;
 
+restart:
 	vmm_vmx_vmcs_enter(vcpu);
 
 	hcpu = os_curcpu_number();
@@ -2876,6 +2953,29 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	vmm_vmx_vcpu_guest_misc_enter(vcpu);
 
 	while (1) {
+		if (cpudata->interrupt != NULL &&
+		    vmm_vmx_interrupt_ops->vcpu_prepare != NULL) {
+			error = vmm_vmx_interrupt_ops->vcpu_prepare(
+			    cpudata->interrupt);
+			if (error == EAGAIN || error == EINPROGRESS) {
+				if (error == EINPROGRESS)
+					vmm_vmx_vcpu_setstate_all(vcpu,
+					    VMM_X64_STATE_ALL);
+				cpudata->vmcs_launched = launched;
+				vmm_vmx_vcpu_guest_misc_leave(vcpu);
+				vmm_vmx_vcpu_guest_dbregs_leave(vcpu);
+				vmm_vmx_vmcs_leave(vcpu);
+				if (error == EAGAIN) {
+					error = tsleep(vcpu, PINTERLOCKED | PCATCH,
+					    "vmmisip", 0);
+					if (error != 0)
+						return error;
+				}
+				goto restart;
+			}
+			if (error != 0)
+				break;
+		}
 		if (cpudata->gtlb_want_flush) {
 			vpid_desc.vpid = cpudata->asid;
 			vpid_desc.addr = 0;
@@ -2928,6 +3028,9 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		}
 #endif
 
+		if (cpudata->interrupt != NULL &&
+		    vmm_vmx_interrupt_ops->vcpu_enter != NULL)
+			vmm_vmx_interrupt_ops->vcpu_enter(cpudata->interrupt);
 		x86_set_cr2(cpudata->gcr2);
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
 		if (launched) {
@@ -2936,6 +3039,9 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			ret = vmm_vmx_vmlaunch(cpudata->gprs);
 		}
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
+		if (cpudata->interrupt != NULL &&
+		    vmm_vmx_interrupt_ops->vcpu_leave != NULL)
+			vmm_vmx_interrupt_ops->vcpu_leave(cpudata->interrupt);
 		vmm_stat_vmexit();
 		cpudata->gcr2 = x86_get_cr2();
 		vmm_vmx_htlb_flush_ack(cpudata, machgen);
@@ -2947,8 +3053,13 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		}
 		vmm_vmx_exit_evt(cpudata);
+		if (cpudata->interrupt != NULL &&
+		    vmm_vmx_interrupt_ops->vcpu_event_result != NULL)
+			vmm_vmx_interrupt_ops->vcpu_event_result(cpudata->interrupt,
+			    cpudata->evt_pending);
 
 		launched = true;
+		cpudata->vmcs_launched = true;
 
 		exitcode = vmm_vmx_vmread(VMCS_EXIT_REASON);
 		exitcode &= __BITS(15,0);
@@ -2965,6 +3076,11 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		case VMCS_EXITCODE_HLT:
 			vmm_vmx_exit_hlt(mach, vcpu, exit);
+			if (cpudata->interrupt != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit(cpudata->interrupt,
+			    exitcode, 0, 0))
+				exit->reason = VMM_CPUEXIT_NONE;
 			break;
 		case VMCS_EXITCODE_CR:
 			vmm_vmx_exit_cr(mach, vcpu, exit);
@@ -3010,13 +3126,31 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		case VMCS_EXITCODE_EPT_VIOLATION:
 			vmm_vmx_exit_epf(mach, vcpu, exit);
 			break;
+		case VMCS_EXITCODE_APIC_ACCESS:
+		case VMCS_EXITCODE_VEOI:
+		case VMCS_EXITCODE_APIC_WRITE:
+			if (cpudata->interrupt != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit(cpudata->interrupt,
+			    exitcode, vmm_vmx_vmread(VMCS_EXIT_QUALIFICATION), 0)) {
+				exit->reason = VMM_CPUEXIT_NONE;
+			} else {
+				vmm_vmx_exit_invalid(exit, exitcode);
+			}
+			break;
 		case VMCS_EXITCODE_INT_WINDOW:
 			vmm_vmx_event_waitexit_disable(vcpu, false);
-			exit->reason = VMM_CPUEXIT_INT_READY;
+			exit->reason = cpudata->interrupt != NULL &&
+			    vmm_vmx_interrupt_ops->vintr_internal ?
+			    VMM_CPUEXIT_NONE : VMM_CPUEXIT_INT_READY;
 			break;
 		case VMCS_EXITCODE_NMI_WINDOW:
 			vmm_vmx_event_waitexit_disable(vcpu, true);
-			exit->reason = VMM_CPUEXIT_NMI_READY;
+			exit->reason = cpudata->interrupt != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit != NULL &&
+			    vmm_vmx_interrupt_ops->vcpu_exit(cpudata->interrupt,
+			    exitcode, 0, 0) ? VMM_CPUEXIT_NONE :
+			    VMM_CPUEXIT_NMI_READY;
 			break;
 		default:
 			vmm_vmx_exit_invalid(exit, exitcode);
@@ -3613,6 +3747,8 @@ int
 vmm_vmx_vcpu_create(struct vmm_vcpu *vcpu)
 {
 	struct vmm_vmx_cpudata *cpudata;
+	struct vmm_vmx_machdata *machdata;
+	struct vmm_vmx_interrupt_config interrupt_config;
 	int error;
 
 	/* Allocate the VMX cpudata. */
@@ -3647,6 +3783,41 @@ vmm_vmx_vcpu_create(struct vmm_vcpu *vcpu)
 	/* Init the VCPU info. */
 	vmm_vmx_vcpu_init(vcpu);
 
+	machdata = vcpu->machine->backend_state;
+	if (machdata != NULL && machdata->interrupt != NULL) {
+		error = vmm_vmx_interrupt_ops->vcpu_create(machdata->interrupt,
+		    vcpu, &cpudata->interrupt, &interrupt_config);
+		if (error != 0) {
+			vmm_vmx_vcpu_destroy(vcpu);
+			return error;
+		}
+		if (interrupt_config.enabled) {
+			vmm_vmx_vmcs_enter(vcpu);
+			vmm_vmx_vmwrite(VMCS_VIRTUAL_APIC,
+			    interrupt_config.virtual_apic_page);
+			vmm_vmx_vmwrite(VMCS_APIC_ACCESS,
+			    interrupt_config.apic_access_page);
+			vmm_vmx_vmwrite(VMCS_TPR_THRESHOLD, 0);
+			vmm_vmx_vmwrite(VMCS_PROCBASED_CTLS,
+			    vmm_vmx_vmread(VMCS_PROCBASED_CTLS) |
+			    PROC_CTLS_USE_TPR_SHADOW);
+			vmm_vmx_vmwrite(VMCS_PROCBASED_CTLS2,
+			    vmm_vmx_vmread(VMCS_PROCBASED_CTLS2) |
+			    PROC_CTLS2_VIRT_APIC_ACCESSES |
+			    PROC_CTLS2_APIC_REG_VIRT |
+			    PROC_CTLS2_VIRT_INT_DELIVERY);
+			vmm_vmx_vmwrite(VMCS_EOI_EXIT0,
+			    interrupt_config.eoi_exit[0]);
+			vmm_vmx_vmwrite(VMCS_EOI_EXIT1,
+			    interrupt_config.eoi_exit[1]);
+			vmm_vmx_vmwrite(VMCS_EOI_EXIT2,
+			    interrupt_config.eoi_exit[2]);
+			vmm_vmx_vmwrite(VMCS_EOI_EXIT3,
+			    interrupt_config.eoi_exit[3]);
+			vmm_vmx_vmcs_leave(vcpu);
+		}
+	}
+
 	return 0;
 
 error:
@@ -3669,6 +3840,11 @@ void
 vmm_vmx_vcpu_destroy(struct vmm_vcpu *vcpu)
 {
 	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata->interrupt != NULL) {
+		vmm_vmx_interrupt_ops->vcpu_destroy(cpudata->interrupt);
+		cpudata->interrupt = NULL;
+	}
 
 	vmm_vmx_vmcs_enter(vcpu);
 	vmm_vmx_asid_free(vcpu);
@@ -3728,6 +3904,61 @@ vmm_vmx_vcpu_set_cpuid(struct vmm_vcpu *vcpu,
 	return 0;
 }
 
+int
+vmm_vmx_vcpu_get_lapic(struct vmm_vcpu *vcpu, void *registers, size_t size)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata->interrupt == NULL)
+		return ENOTSUP;
+	return vmm_vmx_interrupt_ops->vcpu_get_lapic(cpudata->interrupt,
+	    registers, size);
+}
+
+int
+vmm_vmx_vcpu_set_lapic(struct vmm_vcpu *vcpu, const void *registers,
+    size_t size)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata->interrupt == NULL)
+		return ENOTSUP;
+	return vmm_vmx_interrupt_ops->vcpu_set_lapic(cpudata->interrupt,
+	    registers, size);
+}
+
+int
+vmm_vmx_vcpu_io(struct vmm_vcpu *vcpu, const struct vmm_cpuexit_io *exit)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+
+	if (!vcpu->machine->irqchip || cpudata->interrupt == NULL ||
+	    vmm_vmx_interrupt_ops->vcpu_io == NULL)
+		return ENOENT;
+	return vmm_vmx_interrupt_ops->vcpu_io(vcpu, exit);
+}
+
+int
+vmm_vmx_vcpu_mmio(struct vmm_vcpu *vcpu, uint64_t address, size_t size,
+    bool write, uint64_t *value)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+	uint32_t value32;
+	int error;
+
+	/* The xAPIC and IOAPIC register ABI admits aligned 32-bit accesses only. */
+	if (!vcpu->machine->irqchip || cpudata->interrupt == NULL ||
+	    size != sizeof(value32) || value == NULL)
+		return ENOENT;
+	value32 = *value;
+	error = vmm_vmx_interrupt_ops->vcpu_mmio(cpudata->interrupt, address,
+	    write, &value32);
+	if (error != 0)
+		return ENOENT;
+	*value = value32;
+	return 0;
+}
+
 /* -------------------------------------------------------------------------- */
 
 #ifdef __NetBSD__
@@ -3774,10 +4005,105 @@ vmm_vmx_machine_create(struct vmm_machine *mach)
 	return 0;
 }
 
+int
+vmm_vmx_machine_create_irqchip(struct vmm_machine *mach)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+	int error;
+
+	if (machdata == NULL || vmm_vmx_interrupt_ops == NULL)
+		return ENXIO;
+	if (machdata->interrupt != NULL)
+		return EALREADY;
+	error = vmm_vmx_interrupt_ops->machine_create(mach,
+	    &machdata->interrupt);
+	if (error != 0)
+		return error;
+	error = vmm_vmx_interrupt_ops->machine_enable(machdata->interrupt);
+	if (error == 0)
+		return 0;
+	vmm_vmx_interrupt_ops->machine_destroy(machdata->interrupt);
+	machdata->interrupt = NULL;
+	return error;
+}
+
+bool
+vmm_vmx_irqchip_available(void)
+{
+	return vmm_vmx_interrupt_ops != NULL;
+}
+
+int
+vmm_vmx_irq_raise_msi(struct vmm_machine *mach, uint64_t address,
+    uint32_t data)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
+	return vmm_vmx_interrupt_ops->irq_raise_msi(machdata->interrupt,
+	    address, data);
+}
+
+int
+vmm_vmx_machine_set_irq(struct vmm_machine *mach, uint32_t gsi, bool level)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
+	return vmm_vmx_interrupt_ops->irq_set(machdata->interrupt, gsi, level);
+}
+
+int
+vmm_vmx_machine_raise_legacy(struct vmm_machine *mach, uint8_t vector)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
+	return vmm_vmx_interrupt_ops->irq_raise_legacy(machdata->interrupt,
+	    vector);
+}
+
+int
+vmm_vmx_machine_get_ioapic(struct vmm_machine *mach,
+	struct vmm_ioapic_state *state)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
+	return vmm_vmx_interrupt_ops->machine_get_ioapic(machdata->interrupt,
+	    state);
+}
+
+int
+vmm_vmx_machine_set_ioapic(struct vmm_machine *mach,
+	const struct vmm_ioapic_state *state)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL || machdata->interrupt == NULL)
+		return ENXIO;
+	return vmm_vmx_interrupt_ops->machine_set_ioapic(machdata->interrupt,
+	    state);
+}
+
 void
 vmm_vmx_machine_destroy(struct vmm_machine *mach)
 {
-	os_mem_free(mach->backend_state, sizeof(struct vmm_vmx_machdata));
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL)
+		return;
+#ifdef __DragonFly__
+	/* Remove host pmap membership before removing the APIC access mapping. */
+	pmap_del_all_cpus(mach->vmspace);
+#endif
+	if (machdata->interrupt != NULL)
+		vmm_vmx_interrupt_ops->machine_destroy(machdata->interrupt);
+	os_mem_free(machdata, sizeof(*machdata));
 	mach->backend_state = NULL;
 }
 
@@ -3815,6 +4141,20 @@ vmm_vmx_check_ctls(uint64_t msr_ctls, uint64_t msr_true_ctls, uint64_t set_one)
 	}
 
 	return 0;
+}
+
+bool
+vmm_vmx_apicv_available(void)
+{
+	if (vmm_vmx_check_ctls(MSR_IA32_VMX_PROCBASED_CTLS,
+	    MSR_IA32_VMX_TRUE_PROCBASED_CTLS,
+	    PROC_CTLS_USE_TPR_SHADOW | PROC_CTLS_ACTIVATE_CTLS2) != 0) {
+		return false;
+	}
+	return vmm_vmx_check_ctls(MSR_IA32_VMX_PROCBASED_CTLS2,
+	    MSR_IA32_VMX_PROCBASED_CTLS2,
+	    PROC_CTLS2_VIRT_APIC_ACCESSES | PROC_CTLS2_APIC_REG_VIRT |
+	    PROC_CTLS2_VIRT_INT_DELIVERY) == 0;
 }
 
 static int
@@ -4186,36 +4526,3 @@ vmm_vmx_capability(struct vmm_x64_capability *capability)
 	capability->mxcsr_mask = x86_fpu_mxcsr_mask;
 	return 0;
 }
-
-int
-vmm_vmx_probe(void)
-{
-	return vmm_vmx_ident() ? 0 : ENXIO;
-}
-
-static bool
-vmm_vmx_irqchip_available(void)
-{
-	return false;
-}
-
-const struct vmm_backend_ops vmm_vmx_backend = {
-	.name = "x64/vmx",
-	.probe = vmm_vmx_probe,
-	.init = vmm_vmx_init,
-	.fini = vmm_vmx_fini,
-	.capability = vmm_vmx_capability,
-	.get_supported_cpuid = vmm_vmx_get_supported_cpuid,
-	.machine_create = vmm_vmx_machine_create,
-	.irqchip_available = vmm_vmx_irqchip_available,
-	.machine_destroy = vmm_vmx_machine_destroy,
-	.vcpu_create = vmm_vmx_vcpu_create,
-	.vcpu_set_cpuid = vmm_vmx_vcpu_set_cpuid,
-	.vcpu_destroy = vmm_vmx_vcpu_destroy,
-	.vcpu_setstate = vmm_vmx_vcpu_setstate,
-	.vcpu_run = vmm_vmx_vcpu_run,
-	.vcpu_getstate = vmm_vmx_vcpu_getstate,
-	.vcpu_kick = vmm_vmx_vcpu_kick,
-};
-
-VMM_BACKEND_SET(vmm_vmx_backend);

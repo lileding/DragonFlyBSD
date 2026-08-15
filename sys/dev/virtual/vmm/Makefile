@@ -7,7 +7,8 @@ SRCS=	vmm.c vmm_machine.c vmm_vcpu.c vmm_io.c
 .PATH:	${.CURDIR}/x64 ${.CURDIR}/x64/svm ${.CURDIR}/x64/vmx
 SRCS+=	vmm_x64_pic.c vmm_x64_pit.c vmm_x64_emul.c vmm_svm.c vmm_svm_softirq.c \
 	vmm_svm_avic.c vmm_svm_backend.c \
-	vmm_svm_entry.S vmm_vmx.c vmm_vmx_entry.S
+	vmm_svm_entry.S vmm_vmx.c vmm_vmx_softirq.c vmm_vmx_apicv.c \
+	vmm_vmx_backend.c vmm_vmx_entry.S
 
 .if !defined(KERNBUILDDIR)
 SRCS+=	bus_if.h device_if.h opt_nfs.h
