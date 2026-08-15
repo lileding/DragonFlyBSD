@@ -560,6 +560,7 @@ vmm_x64_emul_memory_access(struct vmm_vcpu *vcpu,
 {
 	struct vmm_x64_emul *emul = vcpu->emul;
 	struct vmm_x64_emul_access *access;
+	struct vmm_io_read read;
 	struct vmm_io_write write;
 	uint64_t value;
 	unsigned int index;
@@ -623,8 +624,24 @@ vmm_x64_emul_memory_access(struct vmm_vcpu *vcpu,
 		write.address = memory->gpa;
 		write.width = (enum vmm_io_width)memory->size;
 		write.value = access->value;
-		error = vmm_io_dispatch(vcpu, VMM_IO_MMIO, &write);
+		error = vmm_io_dispatch_write(vcpu, VMM_IO_MMIO, &write);
 		if (error == 0) {
+			++emul->completed_count;
+			return;
+		}
+		if (error != ENOENT) {
+			emul->error = error;
+			emul->blocked = true;
+			return;
+		}
+	} else {
+		read.address = memory->gpa;
+		read.width = (enum vmm_io_width)memory->size;
+		read.value = 0;
+		error = vmm_io_dispatch_read(vcpu, VMM_IO_MMIO, &read);
+		if (error == 0) {
+			access->value = read.value;
+			bcopy(&access->value, memory->data, memory->size);
 			++emul->completed_count;
 			return;
 		}

@@ -22,7 +22,8 @@ static int kvm_ioevent_unbind(struct kvm_vm *,
 static int kvm_ioevent_trap(struct kvm_ioevent *, enum vmm_io_width,
     vmm_io_t *);
 static void kvm_ioevent_untrap(struct kvm_ioevent *);
-static int kvm_ioevent_handler(void *, const struct vmm_io_write *);
+static int kvm_ioevent_handler(vmm_vcpu_t, void *,
+    const struct vmm_io_write *);
 static int kvm_ioevent_matches(const struct kvm_ioevent *,
     const struct kvm_ioeventfd *, const struct file *);
 
@@ -152,10 +153,12 @@ kvm_ioevent_unbind(struct kvm_vm *vm, const struct kvm_ioeventfd *request)
 }
 
 static int
-kvm_ioevent_handler(void *argument, const struct vmm_io_write *write)
+kvm_ioevent_handler(vmm_vcpu_t vcpu, void *argument,
+    const struct vmm_io_write *write)
 {
 	struct kvm_ioevent *event = argument;
 
+	(void)vcpu;
 	if (event == NULL || write == NULL ||
 	    write->address != event->address ||
 	    (event->length != 0 && write->width != event->length))

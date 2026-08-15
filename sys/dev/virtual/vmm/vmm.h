@@ -84,19 +84,48 @@ struct vmm_io_write {
 	uint64_t value;
 };
 
+struct vmm_io_read {
+	uint64_t address;
+	enum vmm_io_width width;
+	uint64_t value;
+};
+
 /*
- * A trap handler consumes one scalar guest write by returning zero.
- * Returning ENOENT leaves the VM exit visible to the vCPU caller.  Handlers
- * run under the machine token and must not call back into the same machine.
+ * A trap handler consumes one scalar guest access by returning zero.
+ * A read handler must set read->value before returning.  Returning ENOENT
+ * declines this registration; if no registration consumes the access, VMM
+ * leaves the VM exit visible to the vCPU caller.  Handlers run synchronously
+ * under the machine token and must neither block nor call back into machine.
  */
-typedef int (*vmm_io_handler_t)(void *, const struct vmm_io_write *);
+typedef int (*vmm_io_read_handler_t)(vmm_vcpu_t, void *,
+	struct vmm_io_read *);
+
+typedef int (*vmm_io_write_handler_t)(vmm_vcpu_t, void *,
+	const struct vmm_io_write *);
+
+/*
+ * Traps one PIO read at address with the exact width.  PIO accepts only 8-,
+ * 16-, and 32-bit accesses.  A successful handler supplies the result and
+ * resumes the guest at the next instruction.
+ */
+int vmm_machine_trap_pio_read(vmm_machine_t machine, uint16_t address,
+	enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
+	vmm_io_t *io);
 
 /*
  * Traps one PIO write at address with the exact width.  A successful handler
  * avoids a caller round trip and resumes the guest at the next instruction.
  */
 int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
-	enum vmm_io_width width, vmm_io_handler_t handler, void *argument,
+	enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
+	vmm_io_t *io);
+
+/*
+ * Traps one MMIO read at address with the exact width.  A successful handler
+ * supplies the result while VMM completes the decoded scalar instruction.
+ */
+int vmm_machine_trap_mmio_read(vmm_machine_t machine, uint64_t address,
+	enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*
@@ -105,12 +134,12 @@ int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
  * visible to the vCPU caller.
  */
 int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t address,
-	enum vmm_io_width width, vmm_io_handler_t handler, void *argument,
+	enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*
- * Removes one I/O write trap.  machine must own io.  The caller must stop
- * using io; an in-flight handler is serialized by the machine token.
+ * Removes one I/O read or write trap.  machine must own io.  The caller must
+ * stop using io; an in-flight handler is serialized by the machine token.
  */
 int vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io);
 
