@@ -17,7 +17,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_IOAPIC_MEMORY_SIZE	0x4000U
 #define KVM_IOAPIC_CODE_OFFSET	0x1000U
@@ -31,6 +31,7 @@
 #define KVM_IOAPIC_GSI		4U
 #define KVM_IOAPIC_VECTOR		0x41U
 #define KVM_IOAPIC_SVR		0x0f0U
+#define KVM_IOAPIC_REDIR_REMOTE_IRR	0x00004000U
 #define KVM_IOAPIC_REDIR_LEVEL	0x00008000U
 
 struct kvm_ioapic_run_task {
@@ -296,6 +297,13 @@ main(void)
 			errc(1, join_error, "pthread_join timeout");
 		errx(1, "level IOAPIC GSI handler did not run");
 	}
+	bzero(&irqchip, sizeof(irqchip));
+	irqchip.chip_id = KVM_IRQCHIP_IOAPIC;
+	if (ioctl(vm_fd, KVM_GET_IRQCHIP, &irqchip) != 0)
+		err(1, "KVM_GET_IRQCHIP level GSI");
+	if ((irqchip.chip.ioapic.redirtbl[KVM_IOAPIC_GSI].bits &
+	    KVM_IOAPIC_REDIR_REMOTE_IRR) == 0)
+		errx(1, "level IOAPIC GSI did not set remote IRR");
 	*gate = 1;
 	error = kvm_ioapic_wait_for_result(result, 2);
 	if (error != 0) {

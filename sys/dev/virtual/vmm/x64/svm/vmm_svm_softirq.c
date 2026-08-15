@@ -38,6 +38,7 @@
 #define VMM_SVM_IOAPIC_REG_ARB		0x02U
 #define VMM_SVM_IOAPIC_REDIR_BASE	0x10U
 #define VMM_SVM_IOAPIC_VERSION		(((VMM_SVM_IOAPIC_PINS - 1U) << 16) | 0x11U)
+#define VMM_SVM_IOAPIC_REDIR_REMOTE_IRR	__BIT(14)
 #define VMM_SVM_IOAPIC_REDIR_MASKED	__BIT(16)
 #define VMM_SVM_IOAPIC_REDIR_FIXED	0x00000000U
 #define VMM_SVM_IOAPIC_REDIR_DELIVERY_MASK	0x00000700U
@@ -455,14 +456,18 @@ vmm_svm_ioapic_deliver_locked(struct vmm_svm_interrupt_machine *machine,
 	uint32_t low;
 	uint32_t destination;
 	uint32_t id;
+	int delivered;
 
 	entry = machine->ioapic_redir[pin];
 	low = entry;
 	if ((low & VMM_SVM_IOAPIC_REDIR_MASKED) != 0 ||
+	    ((low & VMM_SVM_IOAPIC_REDIR_LEVEL) != 0 &&
+	    (low & VMM_SVM_IOAPIC_REDIR_REMOTE_IRR) != 0) ||
 	    (low & VMM_SVM_IOAPIC_REDIR_DELIVERY_MASK) !=
 	    VMM_SVM_IOAPIC_REDIR_FIXED || (low & 0xffU) < 32)
 		return;
 	destination = entry >> 56;
+	delivered = 0;
 	for (id = 0; id <= VMM_SVM_SOFTIRQ_MAX_APIC_ID; ++id) {
 		target = machine->targets[id];
 		if (target == NULL)
@@ -475,7 +480,10 @@ vmm_svm_ioapic_deliver_locked(struct vmm_svm_interrupt_machine *machine,
 			continue;
 		}
 		vmm_svm_softirq_deliver(target, low & 0xffU);
+		delivered = 1;
 	}
+	if (delivered && (low & VMM_SVM_IOAPIC_REDIR_LEVEL) != 0)
+		machine->ioapic_redir[pin] |= VMM_SVM_IOAPIC_REDIR_REMOTE_IRR;
 }
 
 static void
@@ -490,6 +498,7 @@ vmm_svm_ioapic_reassert(struct vmm_svm_interrupt_machine *machine,
 		    (machine->ioapic_redir[pin] & VMM_SVM_IOAPIC_REDIR_LEVEL) == 0 ||
 		    (machine->ioapic_redir[pin] & 0xffU) != vector)
 			continue;
+		machine->ioapic_redir[pin] &= ~VMM_SVM_IOAPIC_REDIR_REMOTE_IRR;
 		vmm_svm_ioapic_deliver_locked(machine, pin);
 	}
 	lwkt_reltoken(&machine->token);
@@ -1271,6 +1280,11 @@ vmm_svm_softirq_vcpu_mmio(struct vmm_svm_interrupt_vcpu *vcpu,
 			entry = (entry & 0xffffffffULL) | ((uint64_t)*value << 32);
 		else
 			entry = (entry & 0xffffffff00000000ULL) | *value;
+		entry = (entry & ~VMM_SVM_IOAPIC_REDIR_REMOTE_IRR) |
+		    (machine->ioapic_redir[pin] &
+		    VMM_SVM_IOAPIC_REDIR_REMOTE_IRR);
+		if ((entry & VMM_SVM_IOAPIC_REDIR_LEVEL) == 0)
+			entry &= ~VMM_SVM_IOAPIC_REDIR_REMOTE_IRR;
 		machine->ioapic_redir[pin] = entry;
 		if (machine->ioapic_level[pin])
 			vmm_svm_ioapic_deliver_locked(machine, pin);

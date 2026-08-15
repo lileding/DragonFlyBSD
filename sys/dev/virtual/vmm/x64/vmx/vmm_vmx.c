@@ -36,6 +36,7 @@
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "../vmm_x64.h"
+#include "../vmm_x64_emul.h"
 #include "vmm_vmx.h"
 #include "vmm_vmx_apicv.h"
 #include "vmm_vmx_os.h"
@@ -2710,6 +2711,7 @@ vmm_vmx_exit_epf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	gpa = vmm_vmx_vmread(VMCS_GUEST_PHYSICAL_ADDRESS);
 
 	exit->reason = VMM_CPUEXIT_MEMORY;
+	bzero(&exit->u.mem, sizeof(exit->u.mem));
 	perm = vmm_vmx_vmread(VMCS_EXIT_QUALIFICATION);
 	if (perm & VMM_VMX_EPT_VIOLATION_WRITE)
 		exit->u.mem.prot = VM_PROT_WRITE;
@@ -2718,11 +2720,12 @@ vmm_vmx_exit_epf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	else
 		exit->u.mem.prot = VM_PROT_READ;
 	exit->u.mem.gpa = gpa;
-	exit->u.mem.inst_len = 0;
-
 	vmm_vmx_vcpu_state_provide(vcpu,
 	    VMM_X64_STATE_GPRS | VMM_X64_STATE_SEGS |
 	    VMM_X64_STATE_CRS | VMM_X64_STATE_MSRS);
+	if (vmm_x64_fetch_instruction(vcpu, exit->u.mem.inst_bytes,
+	    sizeof(exit->u.mem.inst_bytes)) == 0)
+		exit->u.mem.inst_len = sizeof(exit->u.mem.inst_bytes);
 }
 
 /* -------------------------------------------------------------------------- */

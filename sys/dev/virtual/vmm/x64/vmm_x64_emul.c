@@ -322,6 +322,42 @@ vmm_x64_translate(struct vmm_vcpu *vcpu, uint64_t gva, uint64_t *gpa)
 	return vmm_x64_emul_translate(vcpu, gva, gpa, &prot);
 }
 
+int
+vmm_x64_fetch_instruction(struct vmm_vcpu *vcpu, uint8_t *data,
+	size_t size)
+{
+	struct vmm_cpustate *state;
+	uint64_t gpa;
+	uint64_t gva;
+	uint64_t prot;
+	size_t chunk;
+	int error;
+
+	if (vcpu == NULL || data == NULL || size == 0)
+		return EINVAL;
+	state = vcpu->state;
+	if (state->gprs[VMM_X64_GPR_RIP] >
+	    UINT64_MAX - state->segs[VMM_X64_SEG_CS].base)
+		return EFAULT;
+	gva = state->segs[VMM_X64_SEG_CS].base +
+	    state->gprs[VMM_X64_GPR_RIP];
+	while (size != 0) {
+		error = vmm_x64_emul_translate(vcpu, gva, &gpa, &prot);
+		if (error != 0 || (prot & VMM_EMUL_PROT_EXEC) == 0)
+			return EFAULT;
+		chunk = MIN(size, PAGE_SIZE - (size_t)(gpa & PAGE_MASK));
+		error = vmm_x64_emul_read_ram(vcpu->machine, gpa, data, chunk);
+		if (error != 0)
+			return error;
+		if (size != chunk && gva > UINT64_MAX - chunk)
+			return EFAULT;
+		gva += chunk;
+		data += chunk;
+		size -= chunk;
+	}
+	return 0;
+}
+
 static int
 vmm_x64_emul_gpa_access(struct vmm_vcpu *vcpu, uint64_t gpa, uint8_t *data,
 	size_t size, bool write)

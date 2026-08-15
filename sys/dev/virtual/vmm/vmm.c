@@ -137,6 +137,10 @@ vmm_modevent(module_t module, int event, void *arg)
 		lwkt_reltoken(&vmm_token);
 		if (backend != NULL)
 			backend->fini();
+		lwkt_gettoken(&vmm_token);
+		if (vmm_backend == backend)
+			vmm_backend = NULL;
+		lwkt_reltoken(&vmm_token);
 		return 0;
 	case MOD_SHUTDOWN:
 		return 0;
