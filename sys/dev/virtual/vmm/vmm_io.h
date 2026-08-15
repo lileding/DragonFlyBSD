@@ -30,8 +30,8 @@ struct vmm_io {
 	struct vmm_machine *machine;
 	union vmm_io_handler handler;
 	void *argument;
-	uint64_t address;
-	enum vmm_io_width width;
+	uint64_t base;
+	uint64_t size;
 	enum vmm_io_space space;
 	enum vmm_io_direction direction;
 };

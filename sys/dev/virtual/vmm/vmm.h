@@ -104,37 +104,40 @@ typedef int (*vmm_io_write_handler_t)(vmm_vcpu_t, void *,
 	const struct vmm_io_write *);
 
 /*
- * Traps one PIO read at address with the exact width.  PIO accepts only 8-,
- * 16-, and 32-bit accesses.  A successful handler supplies the result and
- * resumes the guest at the next instruction.
+ * Traps scalar PIO reads fully contained in [base, base + size).  PIO accepts
+ * only 8-, 16-, and 32-bit accesses.  size may describe the entire 64 KiB PIO
+ * space.  A successful handler supplies the result and resumes the guest at
+ * the next instruction.
  */
-int vmm_machine_trap_pio_read(vmm_machine_t machine, uint16_t address,
-	enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
+int vmm_machine_trap_pio_read(vmm_machine_t machine, uint16_t base,
+	uint32_t size, vmm_io_read_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*
- * Traps one PIO write at address with the exact width.  A successful handler
- * avoids a caller round trip and resumes the guest at the next instruction.
+ * Traps scalar PIO writes fully contained in [base, base + size).  A
+ * successful handler avoids a caller round trip and resumes the guest at the
+ * next instruction.
  */
-int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
-	enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
+int vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t base,
+	uint32_t size, vmm_io_write_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*
- * Traps one MMIO read at address with the exact width.  A successful handler
- * supplies the result while VMM completes the decoded scalar instruction.
+ * Traps scalar MMIO reads fully contained in [base, base + size).  A
+ * successful handler supplies the result while VMM completes the decoded
+ * scalar instruction.
  */
-int vmm_machine_trap_mmio_read(vmm_machine_t machine, uint64_t address,
-	enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
+int vmm_machine_trap_mmio_read(vmm_machine_t machine, uint64_t base,
+	uint64_t size, vmm_io_read_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*
- * Traps one MMIO write at address with the exact width.  VMM completes
- * registered scalar writes in kernel; unsupported memory instructions remain
- * visible to the vCPU caller.
+ * Traps scalar MMIO writes fully contained in [base, base + size).  VMM
+ * completes registered writes in kernel; unsupported memory instructions
+ * remain visible to the vCPU caller.
  */
-int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t address,
-	enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
+int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t base,
+	uint64_t size, vmm_io_write_handler_t handler, void *argument,
 	vmm_io_t *io);
 
 /*

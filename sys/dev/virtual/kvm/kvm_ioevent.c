@@ -19,8 +19,7 @@ static int kvm_ioevent_bind(struct kvm_vm *,
     const struct kvm_ioeventfd *);
 static int kvm_ioevent_unbind(struct kvm_vm *,
     const struct kvm_ioeventfd *);
-static int kvm_ioevent_trap(struct kvm_ioevent *, enum vmm_io_width,
-    vmm_io_t *);
+static int kvm_ioevent_trap(struct kvm_ioevent *, vmm_io_t *);
 static void kvm_ioevent_untrap(struct kvm_ioevent *);
 static int kvm_ioevent_handler(vmm_vcpu_t, void *,
     const struct vmm_io_write *);
@@ -88,31 +87,7 @@ kvm_ioevent_bind(struct kvm_vm *vm, const struct kvm_ioeventfd *request)
 		kfree(event, M_KVM);
 		return EINVAL;
 	}
-	if (request->len != 0)
-		error = kvm_ioevent_trap(event, (enum vmm_io_width)request->len,
-		    &event->io[0]);
-	else {
-		static const enum vmm_io_width widths[] = {
-			VMM_IO_WIDTH_8,
-			VMM_IO_WIDTH_16,
-			VMM_IO_WIDTH_32,
-			VMM_IO_WIDTH_64,
-		};
-		size_t index;
-
-		for (index = 0; index < nitems(widths); ++index) {
-			if ((request->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 &&
-			    widths[index] == VMM_IO_WIDTH_64)
-				continue;
-			if ((request->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 &&
-			    request->addr + widths[index] > (uint64_t)UINT16_MAX + 1)
-				continue;
-			error = kvm_ioevent_trap(event, widths[index],
-			    &event->io[index]);
-			if (error != 0)
-				break;
-		}
-	}
+	error = kvm_ioevent_trap(event, &event->io);
 	if (error != 0) {
 		kvm_ioevent_untrap(event);
 		kvm_eventfd_drop(eventfp);
@@ -170,29 +145,36 @@ kvm_ioevent_handler(vmm_vcpu_t vcpu, void *argument,
 }
 
 static int
-kvm_ioevent_trap(struct kvm_ioevent *event, enum vmm_io_width width,
-    vmm_io_t *io)
+kvm_ioevent_trap(struct kvm_ioevent *event, vmm_io_t *io)
 {
+	uint64_t size;
+
+	size = event->length;
+	if (size == 0) {
+		size = (event->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 ?
+		    VMM_IO_WIDTH_32 : VMM_IO_WIDTH_64;
+		if ((event->flags & KVM_IOEVENTFD_FLAG_PIO) != 0 &&
+		    size > (uint64_t)UINT16_MAX + 1 - event->address)
+			size = (uint64_t)UINT16_MAX + 1 - event->address;
+		if (event->address > UINT64_MAX - size)
+			size = UINT64_MAX - event->address + 1;
+	}
 
 	if ((event->flags & KVM_IOEVENTFD_FLAG_PIO) != 0) {
 		return vmm_machine_trap_pio_write(event->vm->machine,
-		    event->address, width, kvm_ioevent_handler, event, io);
+		    event->address, (uint32_t)size, kvm_ioevent_handler, event, io);
 	}
 	return vmm_machine_trap_mmio_write(event->vm->machine,
-	    event->address, width, kvm_ioevent_handler, event, io);
+	    event->address, size, kvm_ioevent_handler, event, io);
 }
 
 static void
 kvm_ioevent_untrap(struct kvm_ioevent *event)
 {
-	size_t index;
-
-	for (index = 0; index < nitems(event->io); ++index) {
-		if (event->io[index] == NULL)
-			continue;
-		(void)vmm_machine_untrap(event->vm->machine, event->io[index]);
-		event->io[index] = NULL;
-	}
+	if (event->io == NULL)
+		return;
+	(void)vmm_machine_untrap(event->vm->machine, event->io);
+	event->io = NULL;
 }
 
 static int

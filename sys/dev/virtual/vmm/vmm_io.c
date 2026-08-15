@@ -11,54 +11,56 @@
 #include "vmm_io.h"
 
 static int vmm_io_trap(struct vmm_machine *, enum vmm_io_space,
-    enum vmm_io_direction, uint64_t, enum vmm_io_width,
+    enum vmm_io_direction, uint64_t, uint64_t,
     union vmm_io_handler, void *, vmm_io_t *);
+static bool vmm_io_contains(const struct vmm_io *, uint64_t,
+    enum vmm_io_width);
 
 int
-vmm_machine_trap_pio_read(vmm_machine_t machine, uint16_t address,
-    enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
+vmm_machine_trap_pio_read(vmm_machine_t machine, uint16_t base,
+    uint32_t size, vmm_io_read_handler_t handler, void *argument,
     vmm_io_t *io)
 {
 	union vmm_io_handler trap;
 
 	trap.read = handler;
-	return vmm_io_trap(machine, VMM_IO_PIO, VMM_IO_READ, address, width,
+	return vmm_io_trap(machine, VMM_IO_PIO, VMM_IO_READ, base, size,
 	    trap, argument, io);
 }
 
 int
-vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t address,
-    enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
+vmm_machine_trap_pio_write(vmm_machine_t machine, uint16_t base,
+    uint32_t size, vmm_io_write_handler_t handler, void *argument,
     vmm_io_t *io)
 {
 	union vmm_io_handler trap;
 
 	trap.write = handler;
-	return vmm_io_trap(machine, VMM_IO_PIO, VMM_IO_WRITE, address, width,
+	return vmm_io_trap(machine, VMM_IO_PIO, VMM_IO_WRITE, base, size,
 	    trap, argument, io);
 }
 
 int
-vmm_machine_trap_mmio_read(vmm_machine_t machine, uint64_t address,
-    enum vmm_io_width width, vmm_io_read_handler_t handler, void *argument,
+vmm_machine_trap_mmio_read(vmm_machine_t machine, uint64_t base,
+    uint64_t size, vmm_io_read_handler_t handler, void *argument,
     vmm_io_t *io)
 {
 	union vmm_io_handler trap;
 
 	trap.read = handler;
-	return vmm_io_trap(machine, VMM_IO_MMIO, VMM_IO_READ, address, width,
+	return vmm_io_trap(machine, VMM_IO_MMIO, VMM_IO_READ, base, size,
 	    trap, argument, io);
 }
 
 int
-vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t address,
-    enum vmm_io_width width, vmm_io_write_handler_t handler, void *argument,
+vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t base,
+    uint64_t size, vmm_io_write_handler_t handler, void *argument,
     vmm_io_t *io)
 {
 	union vmm_io_handler trap;
 
 	trap.write = handler;
-	return vmm_io_trap(machine, VMM_IO_MMIO, VMM_IO_WRITE, address, width,
+	return vmm_io_trap(machine, VMM_IO_MMIO, VMM_IO_WRITE, base, size,
 	    trap, argument, io);
 }
 
@@ -116,20 +118,20 @@ vmm_io_handle_pio(struct vmm_vcpu *vcpu, const struct vmm_cpuexit *exit)
 
 static int
 vmm_io_trap(struct vmm_machine *machine, enum vmm_io_space space,
-    enum vmm_io_direction direction, uint64_t address,
-    enum vmm_io_width width, union vmm_io_handler handler, void *argument,
+    enum vmm_io_direction direction, uint64_t base, uint64_t size,
+    union vmm_io_handler handler, void *argument,
     vmm_io_t *io)
 {
 	struct vmm_io *entry;
 
-	if (machine == NULL || io == NULL ||
-	    (width != VMM_IO_WIDTH_8 && width != VMM_IO_WIDTH_16 &&
-	    width != VMM_IO_WIDTH_32 && width != VMM_IO_WIDTH_64))
+	if (machine == NULL || io == NULL || size == 0 ||
+	    (base != 0 && size > UINT64_MAX - base + 1))
 		return EINVAL;
 	if ((direction == VMM_IO_READ && handler.read == NULL) ||
 	    (direction == VMM_IO_WRITE && handler.write == NULL))
 		return EINVAL;
-	if (space == VMM_IO_PIO && width == VMM_IO_WIDTH_64)
+	if (space == VMM_IO_PIO &&
+	    (base > UINT16_MAX || size > (uint64_t)UINT16_MAX + 1 - base))
 		return EINVAL;
 	*io = NULL;
 	entry = kmalloc(sizeof(*entry), M_VMM, M_WAITOK | M_ZERO);
@@ -138,8 +140,8 @@ vmm_io_trap(struct vmm_machine *machine, enum vmm_io_space space,
 	entry->machine = machine;
 	entry->handler = handler;
 	entry->argument = argument;
-	entry->address = address;
-	entry->width = width;
+	entry->base = base;
+	entry->size = size;
 	entry->space = space;
 	entry->direction = direction;
 	lwkt_gettoken(&machine->token);
@@ -165,7 +167,7 @@ vmm_io_dispatch_read(struct vmm_vcpu *vcpu, enum vmm_io_space space,
 	lwkt_gettoken(&machine->token);
 	TAILQ_FOREACH(entry, &machine->io_list, entry) {
 		if (entry->space != space || entry->direction != VMM_IO_READ ||
-		    entry->address != read->address || entry->width != read->width)
+		    !vmm_io_contains(entry, read->address, read->width))
 			continue;
 		error = entry->handler.read(vcpu, entry->argument, read);
 		if (error != ENOENT)
@@ -186,7 +188,7 @@ vmm_io_dispatch_write(struct vmm_vcpu *vcpu, enum vmm_io_space space,
 	lwkt_gettoken(&machine->token);
 	TAILQ_FOREACH(entry, &machine->io_list, entry) {
 		if (entry->space != space || entry->direction != VMM_IO_WRITE ||
-		    entry->address != write->address || entry->width != write->width)
+		    !vmm_io_contains(entry, write->address, write->width))
 			continue;
 		error = entry->handler.write(vcpu, entry->argument, write);
 		if (error != ENOENT)
@@ -194,4 +196,16 @@ vmm_io_dispatch_write(struct vmm_vcpu *vcpu, enum vmm_io_space space,
 	}
 	lwkt_reltoken(&machine->token);
 	return error;
+}
+
+static bool
+vmm_io_contains(const struct vmm_io *entry, uint64_t address,
+    enum vmm_io_width width)
+{
+
+	if (width != VMM_IO_WIDTH_8 && width != VMM_IO_WIDTH_16 &&
+	    width != VMM_IO_WIDTH_32 && width != VMM_IO_WIDTH_64)
+		return false;
+	return address >= entry->base && (uint64_t)width <= entry->size &&
+	    address - entry->base <= entry->size - (uint64_t)width;
 }

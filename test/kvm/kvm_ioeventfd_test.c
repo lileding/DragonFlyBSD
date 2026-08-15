@@ -21,6 +21,7 @@
 #define KVM_IOEVENT_CODE_OFFSET	0x1000U
 #define KVM_IOEVENT_GDT_OFFSET		0x3000U
 #define KVM_IOEVENT_ADDRESS		0xfec10000U
+#define KVM_IOEVENT_ANY_ADDRESS		(KVM_IOEVENT_ADDRESS + 8U)
 #define KVM_IOEVENT_VALUE		0x11223344U
 
 static void
@@ -75,6 +76,7 @@ kvm_ioeventfd_write_code(uint8_t *memory)
 		0xb8, 0x44, 0x33, 0x22, 0x11,	/* mov $VALUE,%eax */
 		0xbf, 0x00, 0x00, 0xc1, 0xfe,	/* mov $ADDRESS,%edi */
 		0x89, 0x07,				/* mov %eax,(%edi) */
+		0xc6, 0x47, 0x08, 0x5a,		/* movb $0x5a,8(%edi) */
 		0xf4					/* hlt */
 	};
 
@@ -88,7 +90,9 @@ int
 main(void)
 {
 	struct kvm_dfly_eventfd eventfd;
+	struct kvm_dfly_eventfd any_eventfd;
 	struct kvm_ioeventfd ioevent;
+	struct kvm_ioeventfd any_ioevent;
 	struct kvm_run *run;
 	struct kvm_userspace_memory_region memory_region;
 	uint8_t *guest_memory;
@@ -144,6 +148,16 @@ main(void)
 	ioevent.flags = KVM_IOEVENTFD_FLAG_DATAMATCH;
 	if (ioctl(vm_fd, KVM_IOEVENTFD, &ioevent) != 0)
 		err(1, "KVM_IOEVENTFD");
+	bzero(&any_eventfd, sizeof(any_eventfd));
+	any_eventfd.flags = KVM_DFLY_EVENTFD_NONBLOCK |
+	    KVM_DFLY_EVENTFD_CLOEXEC;
+	if (ioctl(control_fd, KVM_DFLY_CREATE_EVENTFD, &any_eventfd) != 0)
+		err(1, "KVM_DFLY_CREATE_EVENTFD any-length");
+	bzero(&any_ioevent, sizeof(any_ioevent));
+	any_ioevent.addr = KVM_IOEVENT_ANY_ADDRESS;
+	any_ioevent.fd = any_eventfd.fd;
+	if (ioctl(vm_fd, KVM_IOEVENTFD, &any_ioevent) != 0)
+		err(1, "KVM_IOEVENTFD any-length");
 	interrupted = 0;
 	while (ioctl(vcpu_fd, KVM_RUN, 0) != 0) {
 		if (errno != EINTR || interrupted++ == 10000)
@@ -156,10 +170,18 @@ main(void)
 		err(1, "read ioeventfd");
 	if (value != 1)
 		err(1, "ioeventfd count %ju", (uintmax_t)value);
+	if (read(any_eventfd.fd, &value, sizeof(value)) != sizeof(value))
+		err(1, "read any-length ioeventfd");
+	if (value != 1)
+		err(1, "any-length ioeventfd count %ju", (uintmax_t)value);
 	ioevent.flags |= KVM_IOEVENTFD_FLAG_DEASSIGN;
 	if (ioctl(vm_fd, KVM_IOEVENTFD, &ioevent) != 0)
 		err(1, "KVM_IOEVENTFD deassign");
+	any_ioevent.flags |= KVM_IOEVENTFD_FLAG_DEASSIGN;
+	if (ioctl(vm_fd, KVM_IOEVENTFD, &any_ioevent) != 0)
+		err(1, "KVM_IOEVENTFD any-length deassign");
 	if (munmap(run_mapping, run_size) != 0 || close(eventfd.fd) != 0 ||
+	    close(any_eventfd.fd) != 0 ||
 	    close(vcpu_fd) != 0 || close(vm_fd) != 0 ||
 	    munmap(guest_memory, KVM_IOEVENT_MEMORY_SIZE) != 0 ||
 	    close(control_fd) != 0)

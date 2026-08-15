@@ -18,7 +18,7 @@ struct kvm_ioevent {
 	TAILQ_ENTRY(kvm_ioevent) entry;
 	struct kvm_vm *vm;
 	struct file *eventfp;
-	vmm_io_t io[4];
+	vmm_io_t io;
 	uint64_t address;
 	uint64_t datamatch;
 	uint32_t length;
