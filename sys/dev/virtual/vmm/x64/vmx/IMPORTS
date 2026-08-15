@@ -1,0 +1,24 @@
+VMX import map
+==============
+
+Source input:
+  sys/dev/virtual/nvmm/x86/nvmm_x86_vmx.c
+  sys/dev/virtual/nvmm/x86/nvmm_x86_vmxfunc.S
+  sys/dev/virtual/nvmm/x86/nvmm_x86.h
+  sys/dev/virtual/nvmm/x86/nvmm_x86_internal.h
+
+VMM outputs:
+  vmm_vmx.c          VMX hardware backend and VMM backend registration
+  vmm_vmx_entry.S    VMLAUNCH/VMRESUME assembly wrapper
+  vmm_vmx_os.h       DragonFly OS adaptation boundary
+  vmm_vmx_x86defs.h  x86 constants retained under VMM names
+  vmm_vmx.h          VMM backend declarations
+
+Deliberate VMM boundary changes:
+  - VMM owns no NVMM communication page.  The caller-owned vmm_cpustate is
+    loaded before each public run and written back after it returns.
+  - Exact VMM CPUID entries replace NVMM's mask-or-exit configuration API.
+  - VMX exposes no irqchip in this import.  Software irqchip and APICv are
+    independent follow-up work, not hidden in this backend.
+  - EPT uses the caller-provided machine vmspace, which VMM transforms during
+    machine creation.
