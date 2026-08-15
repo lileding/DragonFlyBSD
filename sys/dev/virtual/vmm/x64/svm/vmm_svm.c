@@ -1392,6 +1392,48 @@ vmm_svm_supported_cpuid_entry(struct vmm_cpuid_entry *entry)
 	}
 }
 
+/*
+ * A frontend may supply its own CPU template, but it must not advertise an
+ * architectural feature for which this backend has no corresponding state or
+ * emulation.  In particular, QEMU templates can enable MTRR even though the
+ * supported-CPUID query deliberately hides it.
+ */
+static void
+vmm_svm_filter_configured_cpuid_entry(struct vmm_cpuid_entry *entry)
+{
+	struct vmm_cpuid_entry supported;
+
+	supported = *entry;
+	vmm_svm_supported_cpuid_entry(&supported);
+
+	switch (entry->leaf) {
+	case 0x00000001:
+		entry->ecx &= supported.ecx;
+		entry->edx &= supported.edx;
+		break;
+	case 0x00000007:
+		if (entry->subleaf == 0) {
+			entry->eax = supported.eax;
+			entry->ebx &= supported.ebx;
+			entry->ecx &= supported.ecx;
+			entry->edx &= supported.edx;
+		}
+		break;
+	case 0x80000001:
+		entry->ecx &= supported.ecx;
+		entry->edx &= supported.edx;
+		break;
+	case 0x80000007:
+		entry->edx &= supported.edx;
+		break;
+	case 0x80000008:
+		entry->ebx &= supported.ebx;
+		break;
+	default:
+		break;
+	}
+}
+
 static size_t
 vmm_svm_supported_cpuid_count(void)
 {
@@ -3288,9 +3330,13 @@ vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *vcpu,
 				return EINVAL;
 		}
 	}
-	if (entry_count != 0)
+	if (entry_count != 0) {
 		bcopy(entries, cpudata->cpuid_entries,
 		    entry_count * sizeof(*entries));
+		for (i = 0; i < entry_count; ++i)
+			vmm_svm_filter_configured_cpuid_entry(
+			    &cpudata->cpuid_entries[i]);
+	}
 	cpudata->cpuid_entry_count = entry_count;
 	return 0;
 }
