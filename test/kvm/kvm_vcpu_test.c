@@ -17,7 +17,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_TEST_CPUID_ENTRIES	256
 #define KVM_TEST_LAPIC_VERSION	0x030U

@@ -15,7 +15,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_LAPIC_PPR_MEMORY_SIZE	0x4000U
 #define KVM_LAPIC_PPR_CODE_OFFSET	0x1000U

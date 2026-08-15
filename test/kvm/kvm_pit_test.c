@@ -15,7 +15,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_PIT_GPA_BASE	0xffff0000ULL
 #define KVM_PIT_MEMORY_SIZE	0x10000ULL

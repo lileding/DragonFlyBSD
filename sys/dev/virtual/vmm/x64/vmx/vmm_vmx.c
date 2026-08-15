@@ -36,7 +36,6 @@
 #include "../../vmm_machine.h"
 #include "../../vmm_vcpu.h"
 #include "../vmm_x64.h"
-#include "../vmm_x64_emul.h"
 #include "vmm_vmx.h"
 #include "vmm_vmx_apicv.h"
 #include "vmm_vmx_os.h"
@@ -2702,8 +2701,7 @@ error:
 #define VMM_VMX_EPT_VIOLATION_EXECUTE	__BIT(2)
 
 static void
-vmm_vmx_exit_epf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
-    struct vmm_cpuexit *exit)
+vmm_vmx_exit_epf(struct vmm_vcpu *vcpu, struct vmm_cpuexit *exit)
 {
 	uint64_t perm;
 	gpaddr_t gpa;
@@ -2720,12 +2718,6 @@ vmm_vmx_exit_epf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	else
 		exit->u.mem.prot = VM_PROT_READ;
 	exit->u.mem.gpa = gpa;
-	vmm_vmx_vcpu_state_provide(vcpu,
-	    VMM_X64_STATE_GPRS | VMM_X64_STATE_SEGS |
-	    VMM_X64_STATE_CRS | VMM_X64_STATE_MSRS);
-	if (vmm_x64_fetch_instruction(vcpu, exit->u.mem.inst_bytes,
-	    sizeof(exit->u.mem.inst_bytes)) == 0)
-		exit->u.mem.inst_len = sizeof(exit->u.mem.inst_bytes);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -3127,7 +3119,7 @@ restart:
 			exit->reason = VMM_CPUEXIT_NONE;
 			break;
 		case VMCS_EXITCODE_EPT_VIOLATION:
-			vmm_vmx_exit_epf(mach, vcpu, exit);
+			vmm_vmx_exit_epf(vcpu, exit);
 			break;
 		case VMCS_EXITCODE_APIC_ACCESS:
 		case VMCS_EXITCODE_VEOI:

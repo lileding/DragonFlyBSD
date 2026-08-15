@@ -14,11 +14,13 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_MMIO_MEMORY_SIZE	0x4000U
 #define KVM_MMIO_CODE_OFFSET	0x1000U
 #define KVM_MMIO_GDT_OFFSET	0x3000U
+#define KVM_MMIO_BOUNDARY_MEMORY_SIZE	0x1000U
+#define KVM_MMIO_BOUNDARY_CODE_OFFSET	(KVM_MMIO_BOUNDARY_MEMORY_SIZE - 2U)
 #define KVM_MMIO_ADDRESS	0xfec10000U
 #define KVM_MMIO_WRITE_VALUE	0x11223344U
 #define KVM_MMIO_READ_VALUE	0x55667788U
@@ -182,6 +184,23 @@ main(void)
 		err(1, "KVM_GET_REGS");
 	if ((uint32_t)registers.rbx != KVM_MMIO_READ_VALUE)
 		errx(1, "MMIO read %#x", (uint32_t)registers.rbx);
+
+	/*
+	 * Leave only the page containing the two-byte MMIO write mapped.  A
+	 * VMX frontend must not require a readable next page merely to decode it.
+	 */
+	memory_region.memory_size = KVM_MMIO_BOUNDARY_MEMORY_SIZE;
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &memory_region) != 0)
+		err(1, "KVM_SET_USER_MEMORY_REGION boundary");
+	guest_memory[KVM_MMIO_BOUNDARY_CODE_OFFSET] = 0x89;
+	guest_memory[KVM_MMIO_BOUNDARY_CODE_OFFSET + 1] = 0x07;
+	registers.rax = KVM_MMIO_WRITE_VALUE;
+	registers.rdi = KVM_MMIO_ADDRESS;
+	registers.rip = KVM_MMIO_BOUNDARY_CODE_OFFSET;
+	if (ioctl(vcpu_fd, KVM_SET_REGS, &registers) != 0)
+		err(1, "KVM_SET_REGS boundary");
+	kvm_mmio_expect_write(vcpu_fd, run, KVM_MMIO_WRITE_VALUE);
+
 	if (munmap(run_mapping, run_size) != 0 || close(vcpu_fd) != 0 ||
 	    close(vm_fd) != 0 ||
 	    munmap(guest_memory, KVM_MMIO_MEMORY_SIZE) != 0 ||

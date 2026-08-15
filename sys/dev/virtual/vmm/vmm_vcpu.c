@@ -246,10 +246,16 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		    VM_FAULT_DIRTY : VM_FAULT_NORMAL);
 		if (fault_error == KERN_SUCCESS)
 			continue;
-		vcpu->backend_ops->vcpu_getstate(vcpu);
 		if (vcpu->memory_exit_mode == VMM_MEMORY_EXIT_RAW) {
 			error = 0;
 			break;
+		}
+		/* Only an unbacked GPA needs state transfer and instruction fetch. */
+		vcpu->backend_ops->vcpu_getstate(vcpu);
+		if (exit->u.mem.inst_len == 0) {
+			exit->u.mem.inst_len = (uint8_t)vmm_x64_fetch_instruction(vcpu,
+			    exit->u.mem.inst_bytes,
+			    sizeof(exit->u.mem.inst_bytes));
 		}
 		error = vmm_x64_emul_memory(vcpu, exit);
 		if (error == 0) {

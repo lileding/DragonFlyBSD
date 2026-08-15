@@ -14,7 +14,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_TEST_ROM_GPA	0xfd000000ULL
 #define KVM_TEST_ROM_SIZE	(16U * 1024U * 1024U)

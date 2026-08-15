@@ -14,7 +14,7 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 #define KVM_PIO_STRING_MEMORY_SIZE	0x9000U
 #define KVM_PIO_STRING_CODE_GPA		0x1000U

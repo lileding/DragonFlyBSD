@@ -1814,8 +1814,7 @@ vmm_svm_exit_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 }
 
 static void
-vmm_svm_exit_npf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
-    struct vmm_cpuexit *exit)
+vmm_svm_exit_npf(struct vmm_vcpu *vcpu, struct vmm_cpuexit *exit)
 {
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	uint64_t gpa = cpudata->vmcb->ctrl.exitinfo2;
@@ -1839,9 +1838,6 @@ vmm_svm_exit_npf(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	if (length != 0)
 		memcpy(exit->u.mem.inst_bytes, cpudata->vmcb->ctrl.inst_bytes,
 		    length);
-	vmm_svm_vcpu_state_provide(vcpu,
-	    VMM_X64_STATE_GPRS | VMM_X64_STATE_SEGS |
-	    VMM_X64_STATE_CRS | VMM_X64_STATE_MSRS);
 }
 
 static void
@@ -2531,7 +2527,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmm_svm_exit_xsetbv(mach, vcpu, exit);
 			break;
 		case VMCB_EXITCODE_NPF:
-			vmm_svm_exit_npf(mach, vcpu, exit);
+			vmm_svm_exit_npf(vcpu, exit);
 			break;
 		case VMCB_EXITCODE_AVIC_INCOMP_IPI:
 		case VMCB_EXITCODE_AVIC_NOACCEL:

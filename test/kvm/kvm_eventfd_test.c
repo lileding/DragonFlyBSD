@@ -16,7 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <linux/kvm.h>
+#include <sys/kvm.h>
 
 int
 main(void)
