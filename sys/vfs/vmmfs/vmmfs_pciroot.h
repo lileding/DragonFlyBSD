@@ -20,6 +20,7 @@ struct vmmfs_pciroot {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
+	uint32_t bdf_mask;
 	struct vmmfs_pcislot_tree slots;
 };
 

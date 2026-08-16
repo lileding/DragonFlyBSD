@@ -23,6 +23,7 @@ static int vmmfs_pcislot_access(struct vop_access_args *);
 static int vmmfs_pcislot_getattr(struct vop_getattr_args *);
 static int vmmfs_pcislot_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *);
+static int vmmfs_pcislot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_pcislot_open(struct vop_open_args *);
 static int vmmfs_pcislot_readdir(struct vop_readdir_args *);
 static int vmmfs_pcislot_reclaim(struct vop_reclaim_args *);
@@ -34,6 +35,7 @@ struct vop_ops vmmfs_pcislot_vops = {
 	.vop_getattr = vmmfs_pcislot_getattr,
 	.vop_getattr_lite = vmmfs_pcislot_getattr_lite,
 	.vop_nlookupdotdot = vmmfs_pcislot_nlookupdotdot,
+	.vop_nresolve = vmmfs_pcislot_nresolve,
 	.vop_open = vmmfs_pcislot_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_pcislot_readdir,
@@ -81,19 +83,44 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, const char *name,
 	vnode->v_ops = &state->pcislot_vops;
 	vnode->v_type = VDIR;
 	slot->vnode = vnode;
+	error = vmmfs_pcislot_bdf_create(slot, &slot->bdf_node);
+	if (error != 0)
+		goto fail_vnode;
+	error = vmmfs_pcislot_state_create(slot, &slot->state);
+	if (error != 0)
+		goto fail_bdf;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	*slotp = slot;
 	return (0);
+
+fail_bdf:
+	(void)vmmfs_pcislot_bdf_destroy(&slot->bdf_node);
+fail_vnode:
+	vx_get(vnode);
+	vgone_vxlocked(vnode);
+	vx_put(vnode);
+	vrele(vnode);
+	slot->pciroot = NULL;
+	kfree(slot, M_VMMFS);
+	return (error);
 }
 
 int
 vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 {
+	struct vmmfs_pciroot *pciroot;
 	struct vnode *vnode;
+	int error;
 
 	if (slot == NULL)
 		return (EINVAL);
+	error = vmmfs_pcislot_state_destroy(&slot->state);
+	if (error != 0)
+		return (error);
+	error = vmmfs_pcislot_bdf_destroy(&slot->bdf_node);
+	if (error != 0)
+		return (error);
 	vnode = slot->vnode;
 	if (vnode != NULL) {
 		vx_get(vnode);
@@ -102,6 +129,13 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 		vrele(vnode);
 	}
 	KKASSERT(slot->vnode == NULL);
+	pciroot = slot->pciroot;
+	if (pciroot != NULL && pciroot->machine != NULL && slot->bdf != 0) {
+		lwkt_gettoken(&pciroot->machine->token);
+		pciroot->bdf_mask &= ~(1U << ((slot->bdf >> 3) & 0x1f));
+		lwkt_reltoken(&pciroot->machine->token);
+	}
+	slot->bdf = 0;
 	slot->pciroot = NULL;
 	kfree(slot, M_VMMFS);
 	return (0);
@@ -183,6 +217,45 @@ vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 }
 
 static int
+vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
+{
+	struct vmmfs_pcislot *slot;
+	struct namecache *ncp;
+	struct vnode *vnode;
+	int error;
+
+	slot = ap->a_dvp->v_data;
+	if (slot == NULL || slot->pciroot == NULL ||
+	    slot->pciroot->machine == NULL)
+		return (ENOENT);
+	ncp = ap->a_nch->ncp;
+	lwkt_gettoken(&slot->pciroot->machine->token);
+	if (ncp->nc_nlen == sizeof("bdf") - 1 &&
+	    bcmp(ncp->nc_name, "bdf", sizeof("bdf") - 1) == 0)
+		vnode = slot->bdf_node.vnode;
+	else if (ncp->nc_nlen == sizeof("state") - 1 &&
+	    bcmp(ncp->nc_name, "state", sizeof("state") - 1) == 0)
+		vnode = slot->state.vnode;
+	else
+		vnode = NULL;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&slot->pciroot->machine->token);
+	if (vnode == NULL) {
+		cache_setvp(ap->a_nch, NULL);
+		return (ENOENT);
+	}
+	error = vget(vnode, LK_EXCLUSIVE);
+	vdrop(vnode);
+	if (error != 0)
+		return (error);
+	vn_unlock(vnode);
+	cache_setvp(ap->a_nch, vnode);
+	vrele(vnode);
+	return (0);
+}
+
+static int
 vmmfs_pcislot_open(struct vop_open_args *ap)
 {
 	return (vop_stdopen(ap));
@@ -220,6 +293,18 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 		    2, "..");
 		if (!stop)
 			offset = 2;
+	}
+	if (!stop && offset == 2) {
+		stop = vop_write_dirent(&error, uio, slot->bdf_node.inode, DT_REG,
+		    sizeof("bdf") - 1, "bdf");
+		if (!stop)
+			offset = 3;
+	}
+	if (!stop && offset == 3) {
+		stop = vop_write_dirent(&error, uio, slot->state.inode, DT_REG,
+		    sizeof("state") - 1, "state");
+		if (!stop)
+			offset = 4;
 	}
 	uio->uio_offset = offset;
 	if (ap->a_eofflag != NULL)

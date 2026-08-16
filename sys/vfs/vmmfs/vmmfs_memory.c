@@ -48,9 +48,7 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 	uint64_t size;
 	int result;
 
-	lwkt_gettoken(&memory->machine->token);
 	size = memory->machine->spec.memory.size;
-	lwkt_reltoken(&memory->machine->token);
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -83,6 +81,11 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	}
 
 	lwkt_gettoken(&memory->machine->token);
+	if (!memory->machine->stopped.expect_stopped ||
+	    memory->machine->machine != NULL) {
+		lwkt_reltoken(&memory->machine->token);
+		return (EBUSY);
+	}
 	memory->machine->spec.memory.size = (uint64_t)value;
 	lwkt_reltoken(&memory->machine->token);
 	return (0);

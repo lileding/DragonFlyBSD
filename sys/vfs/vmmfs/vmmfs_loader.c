@@ -45,10 +45,8 @@ static int
 vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, size_t *length)
 {
 	int result;
-	lwkt_gettoken(&loader->machine->token);
 	result = ksnprintf(buffer, capacity, "%s\n",
 	    loader->machine->spec.loader.path);
-	lwkt_reltoken(&loader->machine->token);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
 	*length = (size_t)result;
@@ -65,6 +63,11 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 	if (length == 0 || length >= MAXPATHLEN)
 		return (ENAMETOOLONG);
 	lwkt_gettoken(&loader->machine->token);
+	if (!loader->machine->stopped.expect_stopped ||
+	    loader->machine->machine != NULL) {
+		lwkt_reltoken(&loader->machine->token);
+		return (EBUSY);
+	}
 	bcopy(buffer, loader->machine->spec.loader.path, length);
 	loader->machine->spec.loader.path[length] = 0;
 	lwkt_reltoken(&loader->machine->token);

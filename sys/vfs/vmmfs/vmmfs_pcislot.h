@@ -11,6 +11,8 @@
 #include <sys/types.h>
 
 #include "vmmfs_pciroot.h"
+#include "vmmfs_pcislot_bdf.h"
+#include "vmmfs_pcislot_state.h"
 
 struct vnode;
 struct vop_ops;
@@ -20,7 +22,10 @@ struct vmmfs_pcislot {
 	struct vmmfs_pciroot *pciroot;
 	struct vnode *vnode;
 	ino_t inode;
+	uint16_t bdf;
 	char name[NAME_MAX + 1];
+	struct vmmfs_pcislot_bdf bdf_node;
+	struct vmmfs_pcislot_state state;
 };
 
 RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pcislot, entry,

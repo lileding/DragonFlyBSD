@@ -35,6 +35,7 @@ static int vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_pciroot_open(struct vop_open_args *);
 static int vmmfs_pciroot_readdir(struct vop_readdir_args *);
 static int vmmfs_pciroot_reclaim(struct vop_reclaim_args *);
+static uint16_t vmmfs_pciroot_bdf_alloc_locked(struct vmmfs_pciroot *);
 static int vmmfs_pciroot_read_item(struct vmmfs_pciroot *, uint64_t,
 	struct vmmfs_pciroot_item *);
 
@@ -212,7 +213,21 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 		(void)vmmfs_pcislot_destroy(slot);
 		return (ENOENT);
 	}
+	if (!pciroot->machine->stopped.expect_stopped ||
+	    pciroot->machine->machine != NULL) {
+		lwkt_reltoken(&pciroot->machine->token);
+		(void)vmmfs_pcislot_destroy(slot);
+		return (EBUSY);
+	}
+	slot->bdf = vmmfs_pciroot_bdf_alloc_locked(pciroot);
+	if (slot->bdf == 0) {
+		lwkt_reltoken(&pciroot->machine->token);
+		(void)vmmfs_pcislot_destroy(slot);
+		return (ENOSPC);
+	}
 	if (RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot) != NULL) {
+		pciroot->bdf_mask &= ~(1U << ((slot->bdf >> 3) & 0x1f));
+		slot->bdf = 0;
 		lwkt_reltoken(&pciroot->machine->token);
 		(void)vmmfs_pcislot_destroy(slot);
 		return (EEXIST);
@@ -304,11 +319,22 @@ vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vnode);
 		return (ENOENT);
 	}
+	if (!pciroot->machine->stopped.expect_stopped ||
+	    pciroot->machine->machine != NULL) {
+		lwkt_reltoken(&pciroot->machine->token);
+		vrele(vnode);
+		return (EBUSY);
+	}
 	RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
 	lwkt_reltoken(&pciroot->machine->token);
 	error = vmmfs_pcislot_destroy(slot);
 	if (error == 0)
 		cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+	else {
+		lwkt_gettoken(&pciroot->machine->token);
+		(void)RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot);
+		lwkt_reltoken(&pciroot->machine->token);
+	}
 	vrele(vnode);
 	return (error);
 }
@@ -390,6 +416,23 @@ vmmfs_pciroot_reclaim(struct vop_reclaim_args *ap)
 		lwkt_reltoken(&pciroot->machine->token);
 	}
 	ap->a_vp->v_data = NULL;
+	return (0);
+}
+
+static uint16_t
+vmmfs_pciroot_bdf_alloc_locked(struct vmmfs_pciroot *pciroot)
+{
+	unsigned int device;
+
+	for (device = 1; device < 32; ++device) {
+		uint32_t bit;
+
+		bit = 1U << device;
+		if ((pciroot->bdf_mask & bit) != 0)
+			continue;
+		pciroot->bdf_mask |= bit;
+		return ((uint16_t)(device << 3));
+	}
 	return (0);
 }
 

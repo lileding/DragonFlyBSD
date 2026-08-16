@@ -19,11 +19,11 @@
 #include "vmmfs_vcpu.h"
 
 struct mount;
-struct taskqueue;
 struct vnode;
 struct vop_ops;
 struct vmmfs_root;
 struct vmm_machine;
+struct ucred;
 
 struct vmmfs_machine_spec {
 	struct vmmfs_vcpu_spec vcpu;
@@ -38,8 +38,6 @@ struct vmmfs_machine {
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	struct lwkt_token token;
-	struct taskqueue *taskqueue;
-	u_int pending_task_count;
 	struct vmm_machine *machine;
 	struct vmmfs_machine_spec spec;
 	struct vmmfs_vcpu vcpu;
@@ -62,7 +60,7 @@ struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_root *,
 int vmmfs_machine_destroy(struct vmmfs_machine *);
 void vmmfs_machine_free(struct vmmfs_machine *);
 
-/* Queue a warm reset for this machine. */
-int vmmfs_machine_reset(struct vmmfs_machine *);
+/* Synchronously forces a warm reset using the caller's credentials. */
+int vmmfs_machine_reset(struct vmmfs_machine *, struct ucred *);
 
 #endif /* VMMFS_MACHINE_H */

@@ -28,6 +28,8 @@ struct vmmfs_mount {
 	struct vop_ops *events_vops;
 	struct vop_ops *pciroot_vops;
 	struct vop_ops *pcislot_vops;
+	struct vop_ops *pcislot_bdf_vops;
+	struct vop_ops *pcislot_state_vops;
 };
 
 MALLOC_DECLARE(M_VMMFS);

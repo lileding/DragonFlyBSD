@@ -312,5 +312,5 @@ vmmfs_events_write(struct vop_write_args *ap)
 	buffer[length] = '\0';
 	if (strcmp(buffer, "reset") != 0 && strcmp(buffer, "reset\n") != 0)
 		return (EINVAL);
-	return (vmmfs_machine_reset(events->machine));
+	return (vmmfs_machine_reset(events->machine, ap->a_cred));
 }

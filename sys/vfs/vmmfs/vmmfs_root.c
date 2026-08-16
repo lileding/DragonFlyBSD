@@ -184,7 +184,7 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		lwkt_reltoken(&root->token);
 		return (ENOENT);
 	}
-	if (!machine->stopped.expect_stopped) {
+	if (!machine->stopped.expect_stopped || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&root->token);
 		return (EBUSY);
