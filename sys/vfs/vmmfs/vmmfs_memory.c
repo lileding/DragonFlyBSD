@@ -14,6 +14,13 @@
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
+#include <vm/pmap.h>
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
+#include <vm/vm_object.h>
+#include <vm/vm_pager.h>
+
 #include "vmmfs.h"
 
 #define VMMFS_MEMORY_MODE 0644
@@ -26,6 +33,9 @@ static int vmmfs_memory_read(struct vop_read_args *);
 static int vmmfs_memory_setattr(struct vop_setattr_args *);
 static int vmmfs_memory_write(struct vop_write_args *);
 static int vmmfs_memory_reclaim(struct vop_reclaim_args *);
+static int vmmfs_memory_map_object(struct vmspace *, struct vm_object *,
+	uint64_t);
+static void vmmfs_memory_object_reference(struct vm_object *);
 
 struct vop_ops vmmfs_memory_vops = {
 	.vop_default = vop_defaultop,
@@ -136,6 +146,103 @@ vmmfs_memory_destroy(struct vmmfs_memory *memory)
 	KKASSERT(memory->vnode == NULL);
 	memory->machine = NULL;
 	return (0);
+}
+
+int
+vmmfs_memory_prepare(struct vmmfs_memory *memory)
+{
+	struct vm_object *object;
+	struct vmspace *vmspace;
+	uint64_t size;
+	int error;
+
+	if (memory == NULL || memory->machine == NULL)
+		return (EINVAL);
+	if (memory->object != NULL || memory->boot_vmspace != NULL ||
+	    memory->run_vmspace != NULL)
+		return (EBUSY);
+	size = memory->machine->spec.memory.size;
+	if (size == 0 || (size & PAGE_MASK) != 0)
+		return (EINVAL);
+	object = default_pager_alloc(NULL, round_page64(size), VM_PROT_DEFAULT,
+	    0);
+	if (object == NULL)
+		return (ENOMEM);
+	vm_object_set_flag(object, OBJ_NOSPLIT);
+	vmspace = vmspace_alloc(0, (vm_offset_t)size);
+	if (vmspace == NULL) {
+		vm_object_deallocate(object);
+		return (ENOMEM);
+	}
+	pmap_maybethreaded(vmspace_pmap(vmspace));
+	error = vmmfs_memory_map_object(vmspace, object, size);
+	if (error != 0) {
+		vmspace_rel(vmspace);
+		vm_object_deallocate(object);
+		return (error);
+	}
+	memory->object = object;
+	memory->boot_vmspace = vmspace;
+	return (0);
+}
+
+void
+vmmfs_memory_release(struct vmmfs_memory *memory)
+{
+	struct vm_object *object;
+	struct vmspace *boot_vmspace;
+	struct vmspace *run_vmspace;
+
+	if (memory == NULL)
+		return;
+	object = memory->object;
+	boot_vmspace = memory->boot_vmspace;
+	run_vmspace = memory->run_vmspace;
+	memory->object = NULL;
+	memory->boot_vmspace = NULL;
+	memory->run_vmspace = NULL;
+	if (run_vmspace != NULL)
+		vmspace_rel(run_vmspace);
+	if (boot_vmspace != NULL)
+		vmspace_rel(boot_vmspace);
+	if (object != NULL)
+		vm_object_deallocate(object);
+}
+
+static int
+vmmfs_memory_map_object(struct vmspace *vmspace, struct vm_object *object,
+	uint64_t size)
+{
+	vm_map_t map;
+	vm_prot_t prot;
+	int count;
+	int error;
+
+	map = &vmspace->vm_map;
+	prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
+	vm_map_lock(map);
+	vmmfs_memory_object_reference(object);
+	vm_object_hold(object);
+	error = vm_map_insert(map, &count, object, NULL, 0, NULL, 0,
+	    round_page64(size), VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot,
+	    0);
+	vm_object_drop(object);
+	vm_map_unlock(map);
+	vm_map_entry_release(count);
+	if (error != 0) {
+		vm_object_deallocate(object);
+		return (ENOMEM);
+	}
+	return (0);
+}
+
+static void
+vmmfs_memory_object_reference(struct vm_object *object)
+{
+	vm_object_hold(object);
+	vm_object_reference_locked(object);
+	vm_object_drop(object);
 }
 
 static int

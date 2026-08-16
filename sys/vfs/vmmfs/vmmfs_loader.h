@@ -10,6 +10,8 @@
 
 struct vmmfs_machine;
 struct vmmfs_loader;
+struct vmmfs_memory;
+struct ucred;
 
 struct vmmfs_loader_spec {
 	char path[MAXPATHLEN];
@@ -18,6 +20,10 @@ struct vmmfs_loader_spec {
 extern struct vop_ops vmmfs_loader_vops;
 int vmmfs_loader_create(struct vmmfs_machine *, struct vmmfs_loader *);
 int vmmfs_loader_destroy(struct vmmfs_loader *);
+int vmmfs_loader_init(void);
+int vmmfs_loader_uninit(void);
+int vmmfs_loader_run(struct vmmfs_loader *, struct vmmfs_memory *,
+	struct ucred *);
 
 struct vmmfs_loader {
 	struct vmmfs_machine *machine;

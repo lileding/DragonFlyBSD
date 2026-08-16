@@ -23,6 +23,8 @@ static int vmmfs_nmkdir(struct vop_nmkdir_args *);
 static int vmmfs_nremove(struct vop_nremove_args *);
 static int vmmfs_nresolve(struct vop_nresolve_args *);
 static int vmmfs_nrmdir(struct vop_nrmdir_args *);
+static int vmmfs_vfs_init(struct vfsconf *);
+static int vmmfs_vfs_uninit(struct vfsconf *);
 static int vmmfs_unmount(struct mount *, int);
 static int vmmfs_statfs(struct mount *, struct statfs *, struct ucred *);
 static int vmmfs_root_vfs(struct mount *, struct vnode **);
@@ -47,12 +49,28 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_unmount = vmmfs_unmount,
 	.vfs_root = vmmfs_root_vfs,
 	.vfs_statfs = vmmfs_statfs,
+	.vfs_init = vmmfs_vfs_init,
+	.vfs_uninit = vmmfs_vfs_uninit,
 };
 
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
 {
 	return ((*ap->a_dvp->v_ops)->vop_ncreate(ap));
+}
+
+static int
+vmmfs_vfs_init(struct vfsconf *configuration)
+{
+	(void)configuration;
+	return (vmmfs_loader_init());
+}
+
+static int
+vmmfs_vfs_uninit(struct vfsconf *configuration)
+{
+	(void)configuration;
+	return (vmmfs_loader_uninit());
 }
 
 static int

@@ -15,10 +15,6 @@
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
-#include <vm/pmap.h>
-#include <vm/vm_extern.h>
-#include <vm/vm_map.h>
-
 #include "vmmfs.h"
 
 #define VMMFS_MACHINE_MODE 0555
@@ -566,8 +562,8 @@ vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 static int
 vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 {
-	struct vmspace *vmspace;
-	uint64_t size;
+	char event[64];
+	int error;
 
 	if (machine == NULL || cred == NULL)
 		return (EINVAL);
@@ -576,34 +572,38 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
-	size = machine->spec.memory.size;
 	lwkt_reltoken(&machine->token);
-	if (size == 0)
+	vmmfs_events_log(&machine->events, "start requested");
+	if (machine->spec.memory.size == 0 ||
+	    machine->spec.loader.path[0] == '\0')
 		return (EINVAL);
-	vmspace = vmspace_alloc(0, (vm_offset_t)size);
-	if (vmspace == NULL)
-		return (ENOMEM);
-	pmap_maybethreaded(vmspace_pmap(vmspace));
-
+	error = vmmfs_memory_prepare(&machine->memory);
+	if (error != 0)
+		goto failed;
+	error = vmmfs_loader_run(&machine->loader, &machine->memory, cred);
+	if (error != 0)
+		goto failed;
 	lwkt_gettoken(&machine->token);
 	if (machine->stopped.expect_stopped || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
-		vmspace_rel(vmspace);
-		return (EBUSY);
+		error = EBUSY;
+		goto failed;
 	}
-	machine->memory.boot_vmspace = vmspace;
 	machine->machine = (struct vmm_machine *)(uintptr_t)0xdeadbeef;
 	lwkt_reltoken(&machine->token);
-	vmmfs_events_log(&machine->events, "start requested");
 	vmmfs_events_log(&machine->events, "start completed");
 	return (0);
+
+failed:
+	vmmfs_memory_release(&machine->memory);
+	ksnprintf(event, sizeof(event), "start failed error=%d", error);
+	vmmfs_events_log(&machine->events, event);
+	return (error);
 }
 
 static int
 vmmfs_machine_stop(struct vmmfs_machine *machine)
 {
-	struct vmspace *vmspace;
-
 	if (machine == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&machine->token);
@@ -611,12 +611,9 @@ vmmfs_machine_stop(struct vmmfs_machine *machine)
 		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
-	vmspace = machine->memory.boot_vmspace;
-	machine->memory.boot_vmspace = NULL;
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "stop requested");
-	if (vmspace != NULL)
-		vmspace_rel(vmspace);
+	vmmfs_memory_release(&machine->memory);
 	lwkt_gettoken(&machine->token);
 	KKASSERT(machine->stopped.expect_stopped && machine->machine != NULL);
 	machine->machine = NULL;
