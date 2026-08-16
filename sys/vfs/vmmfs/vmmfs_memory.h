@@ -25,7 +25,6 @@ struct vmmfs_memory {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
-	struct vmmfs_memory_spec spec;
 	struct vm_object *object;
 	struct vmspace *boot_vmspace;
 	struct vmspace *run_vmspace;

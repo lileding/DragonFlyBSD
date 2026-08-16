@@ -49,7 +49,7 @@ vmmfs_vcpu_load(struct vmmfs_vcpu *vcpu, char *buffer, size_t capacity,
 	int result;
 
 	lwkt_gettoken(&vcpu->machine->token);
-	count = vcpu->spec.count;
+	count = vcpu->machine->spec.vcpu.count;
 	lwkt_reltoken(&vcpu->machine->token);
 	result = ksnprintf(buffer, capacity, "%u\n", count);
 	if (result < 0 || (size_t)result >= capacity)
@@ -83,7 +83,7 @@ vmmfs_vcpu_store(struct vmmfs_vcpu *vcpu, const char *buffer, size_t length)
 	}
 
 	lwkt_gettoken(&vcpu->machine->token);
-	vcpu->spec.count = (uint32_t)value;
+	vcpu->machine->spec.vcpu.count = (uint32_t)value;
 	lwkt_reltoken(&vcpu->machine->token);
 	return (0);
 }

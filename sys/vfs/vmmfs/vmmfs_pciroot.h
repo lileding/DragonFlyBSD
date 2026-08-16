@@ -1,37 +1,31 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * DragonFly vmmfs PCI root declaration object.
+ * DragonFly vmmfs PCI root directory object.
  */
 #ifndef VMMFS_PCIROOT_H
 #define VMMFS_PCIROOT_H
 
-#include <sys/param.h>
 #include <sys/tree.h>
+#include <sys/types.h>
 
 struct vmmfs_machine;
-struct vmmfs_pcidev;
+struct vmmfs_pcislot;
+struct vnode;
+struct vop_ops;
 
-struct vmmfs_pcislot_spec {
-	RB_ENTRY(vmmfs_pcislot_spec) entry;
-	char name[NAME_MAX + 1];
-};
-
-RB_HEAD(vmmfs_pcislot_spec_tree, vmmfs_pcislot_spec);
-
-struct vmmfs_pciroot_spec {
-	struct vmmfs_pcislot_spec_tree slots;
-};
-
-struct vmmfs_pcislot {
-	struct vmmfs_machine *machine;
-	struct vmmfs_pcislot_spec spec;
-	struct vmmfs_pcidev *device;
-};
+RB_HEAD(vmmfs_pcislot_tree, vmmfs_pcislot);
 
 struct vmmfs_pciroot {
 	struct vmmfs_machine *machine;
-	struct vmmfs_pciroot_spec spec;
+	struct vnode *vnode;
+	ino_t inode;
+	struct vmmfs_pcislot_tree slots;
 };
+
+extern struct vop_ops vmmfs_pciroot_vops;
+
+int vmmfs_pciroot_create(struct vmmfs_machine *, struct vmmfs_pciroot *);
+int vmmfs_pciroot_destroy(struct vmmfs_pciroot *);
 
 #endif /* VMMFS_PCIROOT_H */

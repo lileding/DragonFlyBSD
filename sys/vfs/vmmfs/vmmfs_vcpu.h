@@ -21,7 +21,6 @@ struct vmmfs_vcpu {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
-	struct vmmfs_vcpu_spec spec;
 	struct vmm_vcpu **vcpus;
 	uint32_t active_count;
 };

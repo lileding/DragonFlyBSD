@@ -11,12 +11,10 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
-#include "vmmfs_console.h"
 #include "vmmfs_events.h"
 #include "vmmfs_loader.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_pciroot.h"
-#include "vmmfs_status.h"
 #include "vmmfs_stopped.h"
 #include "vmmfs_vcpu.h"
 
@@ -26,6 +24,12 @@ struct vnode;
 struct vop_ops;
 struct vmmfs_root;
 struct vmm_machine;
+
+struct vmmfs_machine_spec {
+	struct vmmfs_vcpu_spec vcpu;
+	struct vmmfs_memory_spec memory;
+	struct vmmfs_loader_spec loader;
+};
 
 struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine) entry;
@@ -37,14 +41,13 @@ struct vmmfs_machine {
 	struct taskqueue *taskqueue;
 	u_int pending_task_count;
 	struct vmm_machine *machine;
+	struct vmmfs_machine_spec spec;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
 	struct vmmfs_stopped stopped;
 	struct vmmfs_pciroot pciroot;
 	struct vmmfs_events events;
-	struct vmmfs_status status;
-	struct vmmfs_console console;
 };
 
 struct vmmfs_machine_tree;
@@ -58,5 +61,8 @@ struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_root *,
 	const char *, size_t);
 int vmmfs_machine_destroy(struct vmmfs_machine *);
 void vmmfs_machine_free(struct vmmfs_machine *);
+
+/* Queue a warm reset for this machine. */
+int vmmfs_machine_reset(struct vmmfs_machine *);
 
 #endif /* VMMFS_MACHINE_H */

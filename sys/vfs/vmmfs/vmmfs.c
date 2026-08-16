@@ -12,6 +12,8 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_pcislot.h"
 
 static int vmmfs_mount(struct mount *, char *, caddr_t, struct ucred *);
 static int vmmfs_ncreate(struct vop_ncreate_args *);
@@ -146,8 +148,17 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
 	vfs_add_vnodeops(mount, &vmmfs_stopped_vops,
 	    &state->stopped_vops);
+	vfs_add_vnodeops(mount, &vmmfs_events_vops,
+	    &state->events_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pciroot_vops,
+	    &state->pciroot_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pcislot_vops,
+	    &state->pcislot_vops);
 	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
+		vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
@@ -191,7 +202,10 @@ vmmfs_unmount(struct mount *mount, int flags)
 	error = vmmfs_root_destroy(root);
 	if (error != 0)
 		return (error);
+	vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);

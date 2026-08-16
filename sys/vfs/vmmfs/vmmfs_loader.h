@@ -23,7 +23,6 @@ struct vmmfs_loader {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
-	struct vmmfs_loader_spec spec;
 };
 
 #endif /* VMMFS_LOADER_H */
