@@ -37,6 +37,13 @@
 static MALLOC_DEFINE(M_IOPORT, "ioport", "memory for ioport system");
 
 #define IO_FRAME_MAX	8
+#define IP_CANCEL_HASH_SIZE	64
+
+/* request states */
+#define IO_REQ_QUEUED	0	/* dispatch pending */
+#define IO_REQ_RUNNING	1	/* worker task running */
+#define IO_REQ_PENDING	2	/* async lower layer owns it */
+#define IO_REQ_RETURNING	3	/* reverse completion path */
 
 struct io_req;
 struct ioport;
@@ -59,6 +66,10 @@ struct io_req {
 	uint32_t	 req_flags;	/* completion flags (event fflags) */
 	struct knote	*req_kn;	/* IO_KEVENT knote, or NULL */
 	struct ioport_kevent_ctx *req_knctx;
+	int		 req_state;	/* IO_REQ_* */
+	int		 req_cancel_requested;
+	void		(*req_cancel_hook)(struct io_req *);
+	LIST_ENTRY(io_req) req_hash_link;
 	struct file	*req_fp;	/* held target file, or NULL */
 	struct proc	*req_proc;	/* held submitting proc */
 	struct ucred	*req_cred;	/* held credentials */
@@ -81,6 +92,7 @@ struct ioport {
 	struct lock	 ip_lock;	/* protects ip_cq / ip_cq_count */
 	STAILQ_HEAD(, io_req) ip_cq;	/* completion queue */
 	struct kqueue	 ip_kevent_kq;	/* helper kqueue for IO_KEVENT knotes */
+	LIST_HEAD(, io_req) ip_cancel_hash[IP_CANCEL_HASH_SIZE];
 	int		 ip_cq_count;	/* pending completions */
 	int		 ip_nworkers;
 };
@@ -139,6 +151,13 @@ static void ioport_exec(struct io_req *req, void (*fn)(struct io_req *));
 static void io_task_handler(void *context, int pending);
 static void ioport_post(struct io_req *req);
 static void io_req_free(struct io_req *req);
+static void io_req_cancel_hash_add(struct ioport *ip, struct io_req *req);
+static void io_req_begin_forward(struct io_req *req,
+				 void (*cancel_hook)(struct io_req *));
+static int  io_req_begin_return(struct io_req *req);
+static void ioport_cancel(struct ioport *ip, uint64_t tag);
+static void io_cancel_kevent_hook(struct io_req *req);
+static void io_cancel_worker_hook(struct io_req *req);
 static int  ioevent_submit(struct ioport *ip,
 			   const struct io_submit *submits, int nsubmits);
 static int  ioevent_submit_one(struct ioport *ip, const struct io_submit *sub);
@@ -265,6 +284,9 @@ io_return(struct io_req *req)
 {
 	struct io_frame *fr;
 
+	if (!io_req_begin_return(req))
+		return;		/* already returning (cancel/completion won) */
+
 	fr = io_frame_pop(req);
 	if (fr != NULL)
 		fr->fr_complete(req, fr->fr_context);
@@ -285,6 +307,12 @@ io_task_handler(void *context, int pending)
 {
 	struct io_req *req = (struct io_req *)context;
 
+	if (req->req_cancel_requested) {
+		req->req_error = ECANCELED;
+		req->req_result = 0;
+		io_return(req);
+		return;
+	}
 	req->req_fn(req);
 }
 
@@ -322,6 +350,94 @@ io_req_free(struct io_req *req)
 	kfree(req, M_IOPORT);
 }
 
+static void
+io_req_cancel_hash_add(struct ioport *ip, struct io_req *req)
+{
+	int slot = (int)(req->req_tag % IP_CANCEL_HASH_SIZE);
+
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	LIST_INSERT_HEAD(&ip->ip_cancel_hash[slot], req, req_hash_link);
+	lockmgr(&ip->ip_lock, LK_RELEASE);
+}
+
+/* Enter the forward path: the request is now cancellable via IO_CANCEL. */
+static void
+io_req_begin_forward(struct io_req *req, void (*cancel_hook)(struct io_req *))
+{
+	req->req_state = IO_REQ_QUEUED;
+	req->req_cancel_hook = cancel_hook;
+	io_req_cancel_hash_add(req->req_ioport, req);
+}
+
+/* Transition to the reverse path.  Returns 1 if this caller wins the
+ * transition (and must drive the completion), 0 if already returning. */
+static int
+io_req_begin_return(struct io_req *req)
+{
+	struct ioport *ip = req->req_ioport;
+	int win;
+
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	if (req->req_state == IO_REQ_RETURNING) {
+		win = 0;
+	} else {
+		req->req_state = IO_REQ_RETURNING;
+		LIST_REMOVE(req, req_hash_link);
+		win = 1;
+	}
+	lockmgr(&ip->ip_lock, LK_RELEASE);
+	return (win);
+}
+
+/* IO_CANCEL: best-effort truncation of one matching forward request. */
+static void
+ioport_cancel(struct ioport *ip, uint64_t tag)
+{
+	struct io_req *req;
+	struct io_req *found = NULL;
+	int slot = (int)(tag % IP_CANCEL_HASH_SIZE);
+
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	LIST_FOREACH(req, &ip->ip_cancel_hash[slot], req_hash_link) {
+		if (req->req_tag == tag && req->req_state != IO_REQ_RETURNING) {
+			req->req_cancel_requested = 1;
+			found = req;
+			break;
+		}
+	}
+	lockmgr(&ip->ip_lock, LK_RELEASE);
+
+	if (found != NULL)
+		found->req_cancel_hook(found);
+}
+
+static void
+io_cancel_kevent_hook(struct io_req *req)
+{
+	if (req->req_kn != NULL) {
+		while (knote_acquire(req->req_kn) == 0)
+			;
+		knote_detach_and_drop(req->req_kn);
+		req->req_kn = NULL;
+	}
+	req->req_error = ECANCELED;
+	req->req_result = 0;
+	io_return(req);
+}
+
+static void
+io_cancel_worker_hook(struct io_req *req)
+{
+	/* taskqueue_cancel() returns 0 when the task was still queued and has
+	 * been removed; EBUSY when the worker already picked it up (then the
+	 * trampoline sees req_cancel_requested and completes ECANCELED). */
+	if (taskqueue_cancel(req->req_ioport->ip_tq, &req->req_task, NULL) == 0) {
+		req->req_error = ECANCELED;
+		req->req_result = 0;
+		io_return(req);
+	}
+}
+
 static int
 ioevent_submit(struct ioport *ip, const struct io_submit *submits, int nsubmits)
 {
@@ -343,6 +459,9 @@ static int
 ioevent_submit_one(struct ioport *ip, const struct io_submit *sub)
 {
 	switch (sub->opcode) {
+	case IO_CANCEL:
+		ioport_cancel(ip, sub->tag);	/* control marker, no completion */
+		return (0);
 	case IO_CLOSE:
 		return (ioevent_close(ip, sub));
 	case IO_READ:
@@ -377,6 +496,7 @@ ioevent_close(struct ioport *ip, const struct io_submit *sub)
 	PHOLD(req->req_proc);
 	req->req_cred = crhold(td->td_ucred);
 
+	io_req_begin_forward(req, io_cancel_worker_hook);
 	ioport_exec(req, io_close_worker);
 	return (0);
 }
@@ -441,6 +561,7 @@ ioevent_rw(struct ioport *ip, const struct io_submit *sub)
 	req->req_len = len;
 	req->req_offset = offset;
 
+	io_req_begin_forward(req, io_cancel_worker_hook);
 	ioport_exec(req, io_rw_worker);
 	return (0);
 }
@@ -509,7 +630,7 @@ ioport_kevent_event(struct knote *kn, long hint)
 	struct ioport_kevent_ctx *ctx = kn->kn_kevent.udata;
 	int ready;
 
-	if (ctx->ik_done)
+	if (ctx->ik_done || ctx->ik_req->req_cancel_requested)
 		return (0);
 	ready = ctx->ik_fop->f_event(kn, hint);
 	if (ready) {
@@ -585,6 +706,8 @@ ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 		io_req_free(req);
 		return (error);
 	}
+
+	io_req_begin_forward(req, io_cancel_kevent_hook);
 
 	/* Immediate readiness check (e.g. the pipe already has data). */
 	(void)ioport_kevent_event(kn, 0);
@@ -688,7 +811,7 @@ sys_ioport(struct sysmsg *sysmsg, const struct ioport_args *uap)
 	struct thread *td = curthread;
 	struct ioport *ip;
 	struct file *fp;
-	int fd, error;
+	int fd, error, i;
 
 	if (uap->nworkers == 0)
 		return (EINVAL);
@@ -710,6 +833,8 @@ sys_ioport(struct sysmsg *sysmsg, const struct ioport_args *uap)
 				TDPRI_KERN_DAEMON, -1, "ioport");
 	lockinit(&ip->ip_lock, "ioport", 0, 0);
 	STAILQ_INIT(&ip->ip_cq);
+	for (i = 0; i < IP_CANCEL_HASH_SIZE; i++)
+		LIST_INIT(&ip->ip_cancel_hash[i]);
 	kqueue_init(&ip->ip_kevent_kq, td->td_proc->p_fd);
 	ip->ip_cq_count = 0;
 
