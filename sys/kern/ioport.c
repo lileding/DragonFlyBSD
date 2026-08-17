@@ -56,6 +56,9 @@ struct io_req {
 	int		 req_opcode;	/* IO_* */
 	int		 req_error;	/* final errno */
 	int64_t		 req_result;	/* final result */
+	uint32_t	 req_flags;	/* completion flags (event fflags) */
+	struct knote	*req_kn;	/* IO_KEVENT knote, or NULL */
+	struct ioport_kevent_ctx *req_knctx;
 	struct file	*req_fp;	/* held target file, or NULL */
 	struct proc	*req_proc;	/* held submitting proc */
 	struct ucred	*req_cred;	/* held credentials */
@@ -77,6 +80,7 @@ struct ioport {
 	struct kqinfo	 ip_kq;		/* EVFILT_READ knotes */
 	struct lock	 ip_lock;	/* protects ip_cq / ip_cq_count */
 	STAILQ_HEAD(, io_req) ip_cq;	/* completion queue */
+	struct kqueue	 ip_kevent_kq;	/* helper kqueue for IO_KEVENT knotes */
 	int		 ip_cq_count;	/* pending completions */
 	int		 ip_nworkers;
 };
@@ -109,6 +113,24 @@ static struct filterops ioport_read_filtops =
 	{ FILTEROP_ISFD | FILTEROP_MPSAFE, NULL, filt_ioportdetach,
 	  filt_ioport };
 
+/*
+ * IO_KEVENT wrapper: a knote whose f_event/f_detach delegate to the target's
+ * real filterops but complete the owning io_req when the filter fires.
+ */
+struct ioport_kevent_ctx {
+	struct io_req	*ik_req;
+	struct filterops *ik_fop;	/* real filterops */
+	int		 ik_done;
+};
+
+static int  ioport_kevent_attach(struct knote *kn);
+static void ioport_kevent_detach(struct knote *kn);
+static int  ioport_kevent_event(struct knote *kn, long hint);
+
+static struct filterops ioport_kevent_filtops =
+	{ FILTEROP_ISFD | FILTEROP_MPSAFE, ioport_kevent_attach,
+	  ioport_kevent_detach, ioport_kevent_event };
+
 static void io_frame_push(struct io_req *req,
 			  void (*complete)(struct io_req *, void *), void *ctx) __unused;
 static struct io_frame *io_frame_pop(struct io_req *req);
@@ -123,6 +145,7 @@ static int  ioevent_submit_one(struct ioport *ip, const struct io_submit *sub);
 static int  ioevent_close(struct ioport *ip, const struct io_submit *sub);
 static void io_close_worker(struct io_req *req);
 static int  ioevent_rw(struct ioport *ip, const struct io_submit *sub);
+static int  ioevent_kevent(struct ioport *ip, const struct io_submit *sub);
 static void io_rw_worker(struct io_req *req);
 static int  ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			 int ncompletions, struct timespec *tsp, int *res);
@@ -212,6 +235,7 @@ ioport_close(struct file *fp)
 
 	if (ip->ip_tq != NULL)
 		taskqueue_free(ip->ip_tq);
+	kqueue_terminate(&ip->ip_kevent_kq);
 	lockuninit(&ip->ip_lock);
 	kfree(ip, M_IOPORT);
 	return (0);
@@ -289,6 +313,12 @@ io_req_free(struct io_req *req)
 		PRELE(req->req_proc);
 	if (req->req_buf != NULL)
 		kfree(req->req_buf, M_IOPORT);
+	if (req->req_kn != NULL) {
+		while (knote_acquire(req->req_kn) == 0)
+			;
+		knote_detach_and_drop(req->req_kn);
+		kfree(req->req_knctx, M_IOPORT);
+	}
 	kfree(req, M_IOPORT);
 }
 
@@ -318,6 +348,8 @@ ioevent_submit_one(struct ioport *ip, const struct io_submit *sub)
 	case IO_READ:
 	case IO_WRITE:
 		return (ioevent_rw(ip, sub));
+	case IO_KEVENT:
+		return (ioevent_kevent(ip, sub));
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -445,6 +477,123 @@ io_rw_worker(struct io_req *req)
 }
 
 static int
+ioport_kevent_attach(struct knote *kn)
+{
+	struct ioport_kevent_ctx *ctx = kn->kn_kevent.udata;
+	struct file *fp = kn->kn_fp;
+	int error;
+
+	/* Delegate to the target fo_kqfilter(): sets the real filterops,
+	 * kn_hook, and inserts into the target's klist. */
+	error = fo_kqfilter(fp, kn);
+	if (error)
+		return (error);
+
+	ctx->ik_fop = kn->kn_fop;	/* save the real filterops */
+	kn->kn_fop = &ioport_kevent_filtops;
+	return (0);
+}
+
+static void
+ioport_kevent_detach(struct knote *kn)
+{
+	struct ioport_kevent_ctx *ctx = kn->kn_kevent.udata;
+
+	if (ctx->ik_fop->f_detach != NULL)
+		ctx->ik_fop->f_detach(kn);
+}
+
+static int
+ioport_kevent_event(struct knote *kn, long hint)
+{
+	struct ioport_kevent_ctx *ctx = kn->kn_kevent.udata;
+	int ready;
+
+	if (ctx->ik_done)
+		return (0);
+	ready = ctx->ik_fop->f_event(kn, hint);
+	if (ready) {
+		ctx->ik_done = 1;
+		ctx->ik_req->req_result = (int64_t)kn->kn_data;
+		ctx->ik_req->req_flags = (uint32_t)kn->kn_fflags;
+		io_return(ctx->ik_req);
+	}
+	return (ready);
+}
+
+static int
+ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
+{
+	struct thread *td = curthread;
+	struct file *fp;
+	struct knote *kn;
+	struct io_req *req;
+	struct ioport_kevent_ctx *ctx;
+	int error;
+
+	/* Phase 5 supports fd-based filters (EVFILT_READ/WRITE). */
+	if (sub->args.kevent.filter != EVFILT_READ &&
+	    sub->args.kevent.filter != EVFILT_WRITE)
+		return (EOPNOTSUPP);
+
+	fp = holdfp(td, (int)sub->args.kevent.ident, -1);
+	if (fp == NULL)
+		return (EBADF);
+
+	req = kmalloc(sizeof(*req), M_IOPORT, M_WAITOK | M_ZERO);
+	ctx = kmalloc(sizeof(*ctx), M_IOPORT, M_WAITOK | M_ZERO);
+	kn = knote_alloc();
+
+	req->req_ioport = ip;
+	req->req_tag = sub->tag;
+	req->req_opcode = sub->opcode;
+	/* The file reference is held by the knote (kn_fp), dropped by
+	 * knote_drop(); the io_req must not drop it a second time. */
+	req->req_fp = NULL;
+	req->req_proc = td->td_proc;
+	PHOLD(req->req_proc);
+	req->req_cred = crhold(td->td_ucred);
+	req->req_fd = (int)sub->args.kevent.ident;
+	req->req_kn = kn;
+	req->req_knctx = ctx;
+
+	ctx->ik_req = req;
+	ctx->ik_fop = NULL;
+	ctx->ik_done = 0;
+
+	kn->kn_kq = &ip->ip_kevent_kq;
+	kn->kn_fp = fp;
+	kn->kn_kevent.ident = sub->args.kevent.ident;
+	kn->kn_kevent.filter = sub->args.kevent.filter;
+	kn->kn_kevent.flags = 0;
+	kn->kn_kevent.fflags = sub->args.kevent.fflags;
+	kn->kn_kevent.data = sub->args.kevent.data;
+	kn->kn_kevent.udata = ctx;
+	kn->kn_sfflags = sub->args.kevent.fflags;
+	kn->kn_sdata = sub->args.kevent.data;
+	kn->kn_status = KN_PROCESSING;
+	kn->kn_fop = &ioport_kevent_filtops;
+
+	knote_attach(kn);
+	error = filter_attach(kn);
+	if (error) {
+		kn->kn_status |= KN_DELETING;
+		knote_detach_and_drop(kn);
+		kfree(ctx, M_IOPORT);
+		req->req_kn = NULL;
+		req->req_knctx = NULL;
+		io_req_free(req);
+		return (error);
+	}
+
+	/* Immediate readiness check (e.g. the pipe already has data). */
+	(void)ioport_kevent_event(kn, 0);
+	kn->kn_status &= ~KN_PROCESSING;
+
+	return (0);
+}
+
+static int
 ioevent_reap(struct ioport *ip, struct io_completion *completions,
 	     int ncompletions, struct timespec *tsp, int *res)
 {
@@ -489,7 +638,7 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			comp.opcode = req->req_opcode;
 			comp.error = req->req_error;
 			comp.result = req->req_result;
-			comp.flags = 0;
+			comp.flags = req->req_flags;
 			comp.reserved = 0;
 			io_req_free(req);
 
@@ -561,6 +710,7 @@ sys_ioport(struct sysmsg *sysmsg, const struct ioport_args *uap)
 				TDPRI_KERN_DAEMON, -1, "ioport");
 	lockinit(&ip->ip_lock, "ioport", 0, 0);
 	STAILQ_INIT(&ip->ip_cq);
+	kqueue_init(&ip->ip_kevent_kq, td->td_proc->p_fd);
 	ip->ip_cq_count = 0;
 
 	fp->f_flag = FREAD | FWRITE;

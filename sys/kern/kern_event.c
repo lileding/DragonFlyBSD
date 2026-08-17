@@ -88,7 +88,6 @@ static int 	kqueue_stat(struct file *fp, struct stat *st,
 		    struct ucred *cred);
 static int 	kqueue_close(struct file *fp);
 static void	kqueue_wakeup(struct kqueue *kq);
-static int	filter_attach(struct knote *kn);
 static int	filter_event(struct knote *kn, long hint);
 
 /*
@@ -105,12 +104,9 @@ static struct fileops kqueueops = {
 	.fo_seek = badfo_seek
 };
 
-static void 	knote_attach(struct knote *kn);
 static void 	knote_drop(struct knote *kn);
-static void	knote_detach_and_drop(struct knote *kn);
 static void 	knote_enqueue(struct knote *kn);
 static void 	knote_dequeue(struct knote *kn);
-static struct 	knote *knote_alloc(void);
 static void 	knote_free(struct knote *kn);
 
 static void	precise_sleep_intr(systimer_t info, int in_ipi,
@@ -200,7 +196,7 @@ static struct knote_cache_list	knote_cache_lists[MAXCPU];
  *
  * Related kq token must be held.
  */
-static __inline int
+int
 knote_acquire(struct knote *kn)
 {
 	if (kn->kn_status & KN_PROCESSING) {
@@ -1737,7 +1733,7 @@ kqueue_wakeup(struct kqueue *kq)
  *
  * Caller must be holding the related kq token
  */
-static int
+int
 filter_attach(struct knote *kn)
 {
 	int ret;
@@ -1760,7 +1756,7 @@ filter_attach(struct knote *kn)
  *
  * Caller must be holding the related kq token
  */
-static void
+void
 knote_detach_and_drop(struct knote *kn)
 {
 	kn->kn_status |= KN_DELETING | KN_REPROCESS;
@@ -1979,7 +1975,7 @@ restart:
  * The knote should already be marked for processing.
  * Caller must hold the related kq token.
  */
-static void
+void
 knote_attach(struct knote *kn)
 {
 	struct klist *list;
@@ -2074,7 +2070,7 @@ knote_dequeue(struct knote *kn)
 	kq->kq_count--;
 }
 
-static struct knote *
+struct knote *
 knote_alloc(void)
 {
 	return kmalloc(sizeof(struct knote), M_KQUEUE, M_WAITOK);
