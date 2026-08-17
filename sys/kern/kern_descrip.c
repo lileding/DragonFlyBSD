@@ -1466,14 +1466,22 @@ int
 kern_close(int fd)
 {
 	struct thread *td = curthread;
-	struct proc *p = td->td_proc;
-	struct filedesc *fdp;
+
+	return (kern_close_fdp(td->td_proc->p_fd, fd, td->td_proc));
+}
+
+/*
+ * close() helper operating on an explicit filedesc/process, for callers that
+ * are not running in the fd owner's thread context (e.g. async ioport workers).
+ */
+int
+kern_close_fdp(struct filedesc *fdp, int fd, struct proc *p)
+{
 	struct file *fp;
 	int error;
 	int holdleaders;
 
 	KKASSERT(p);
-	fdp = p->p_fd;
 
 	/*
 	 * funsetfd*() also clears the fd cache
