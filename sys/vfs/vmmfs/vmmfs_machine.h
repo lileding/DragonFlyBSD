@@ -11,6 +11,8 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
+#include <dev/virtual/vmm/vmm.h>
+
 #include "vmmfs_events.h"
 #include "vmmfs_loader.h"
 #include "vmmfs_memory.h"
@@ -22,7 +24,6 @@ struct mount;
 struct vnode;
 struct vop_ops;
 struct vmmfs_root;
-struct vmm_machine;
 struct ucred;
 
 struct vmmfs_machine_spec {
@@ -38,7 +39,7 @@ struct vmmfs_machine {
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	struct lwkt_token token;
-	struct vmm_machine *machine;
+	vmm_machine_t machine;
 	struct vmmfs_machine_spec spec;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;

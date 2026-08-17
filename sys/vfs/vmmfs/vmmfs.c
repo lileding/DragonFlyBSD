@@ -269,3 +269,4 @@ vmmfs_statfs(struct mount *mount, struct statfs *statfs,
 
 VFS_SET(vmmfs_vfsops, vmmfs, VFCF_SYNTHETIC | VFCF_MPSAFE);
 MODULE_VERSION(vmmfs, 1);
+MODULE_DEPEND(vmmfs, vmm, 1, 1, 1);

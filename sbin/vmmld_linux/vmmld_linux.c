@@ -1,14 +1,13 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Linux x86_64 kexec-style fd3/fd4 loader for dfvmm tests.
+ * Linux x86_64 boot-protocol loader for DragonFly vmmfs.
  */
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 #include <err.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../sys/dev/vmm/vmm_pcie_layout.h"
+#include "../../sys/dev/virtual/vmm/vmm.h"
 
 #define PAGE_SIZE_GUEST		4096ULL
 #define ONE_MIB			0x100000ULL
@@ -27,32 +26,13 @@
 #define PD_GPA			0x4000ULL
 #define GDT_GPA			0x5000ULL
 #define TSS_GPA			0x6000ULL
-#define ACPI_GPA		0x70000ULL
 #define BOOT_PARAMS_GPA		0x90000ULL
 #define CMDLINE_GPA		0x98000ULL
 #define STACK_TOP_GPA		0x80000ULL
 #define KERNEL_LOAD_GPA		0x100000ULL
 #define KERNEL_64_ENTRY_DELTA	0x200ULL
-#define ACPI_SIZE		(2 * PAGE_SIZE_GUEST)
-#define ACPI_RSDP_GPA		(ACPI_GPA + 0x000ULL)
-#define ACPI_XSDT_GPA		(ACPI_GPA + 0x100ULL)
-#define ACPI_FADT_GPA		(ACPI_GPA + 0x200ULL)
-#define ACPI_MADT_GPA		(ACPI_GPA + 0x400ULL)
-/*
- * The MADT has one eight-byte Local APIC entry per configured vCPU.  Keep
- * the fixed tables after its maximum 256-entry representation rather than
- * letting a large topology overlap them in the original one-page layout.
- */
-#define ACPI_HPET_GPA		(ACPI_GPA + 0xd00ULL)
-#define ACPI_DSDT_GPA		(ACPI_GPA + 0xe00ULL)
-#define ACPI_MCFG_GPA		(ACPI_GPA + 0x1000ULL)
-#define ACPI_HPET_MMIO_GPA	0xfed00000ULL
-#define ACPI_IOAPIC_GPA		0xfec00000ULL
-#define ACPI_LAPIC_GPA		0xfee00000ULL
-#define ACPI_LAPIC_MMIO_SIZE	PAGE_SIZE_GUEST
 #define CMDLINE_CAP		PAGE_SIZE_GUEST
 
-#define LINUX_ACPI_RSDP_ADDR	0x070U
 #define LINUX_SETUP_SECTS	0x1f1U
 #define LINUX_SETUP_HEADER_COPY	(0x290U - LINUX_SETUP_SECTS)
 #define LINUX_HDR_MAGIC		0x202U
@@ -82,80 +62,6 @@
 #define LINUX_XLF_KERNEL_64	0x0001U
 #define LINUX_E820_RAM		1U
 #define LINUX_E820_RESERVED	2U
-#define LINUX_E820_ACPI		3U
-
-#define ACPI_TABLE_HEADER_SIZE	36U
-#define ACPI_RSDP_SIZE		36U
-#define ACPI_FADT_SIZE		276U
-#define ACPI_MCFG_SIZE		60U
-#define ACPI_MADT_LOCAL_APIC_SIZE	8U
-#define ACPI_MADT_IOAPIC_SIZE		12U
-#define ACPI_MADT_INTERRUPT_OVERRIDE_SIZE	10U
-#define ACPI_FADT_WBINVD	0x00000001U
-#define ACPI_FADT_RESET_REGISTER	0x00000400U
-#define ACPI_FADT_HW_REDUCED	0x00100000U
-#define ACPI_FADT_NO_VGA	0x0004U
-#define ACPI_SPACE_SYSTEM_MEMORY	0U
-#define ACPI_SPACE_SYSTEM_IO	1U
-#define ACPI_ACCESS_BYTE	1U
-#define ACPI_ACCESS_DWORD	3U
-#define ACPI_MADT_LOCAL_APIC_ENABLED	0x00000001U
-#define ACPI_MADT_POLARITY_ACTIVE_HIGH	0x0001U
-#define ACPI_MADT_TRIGGER_EDGE		0x0004U
-#define ACPI_ISA_BUS			0U
-#define ACPI_COM1_IRQ			4U
-#define ACPI_SLEEP_CONTROL_PORT	0x404U
-#define ACPI_SLEEP_STATUS_PORT	0x405U
-#define ACPI_PM_TIMER_PORT	0x408U
-#define ACPI_RESET_PORT		0x40cU
-#define ACPI_RESET_VALUE	0x01U
-
-#define VMM_MANIFEST_MAGIC	"VMMLD0\0\0"
-#define VMM_MANIFEST_ABI	1
-#define VMM_MANIFEST_ARCH_X64	1
-#define VMM_REC_X64_VCPU_STATE	1
-#define VMM_REC_GPA_RANGE	2
-#define VMM_REC_X64_TIME_STATE	3
-#define VMM_REC_X64_CPU_TOPOLOGY 4
-#define VMM_REC_F_MANDATORY	1
-
-#define VMM_X64_NGPR		18
-#define VMM_X64_NCR		6
-#define VMM_X64_NMSR		11
-#define VMM_X64_NSEG		10
-#define VMM_X64_MAX_VCPU	256
-#define VMM_GPA_RANGE_MAX	32
-
-#define VMM_GPA_RANGE_LOAD		1
-#define VMM_GPA_RANGE_BOOT_PARAMS	2
-#define VMM_GPA_RANGE_CMDLINE		3
-#define VMM_GPA_RANGE_INITRAMFS		4
-#define VMM_GPA_RANGE_PAGE_TABLE	5
-#define VMM_GPA_RANGE_DESC_TABLE	6
-#define VMM_GPA_RANGE_STACK		7
-#define VMM_GPA_RANGE_BOOT_DATA		8
-
-#define VMM_X64_GPR_RSP		4
-#define VMM_X64_GPR_RSI		6
-#define VMM_X64_GPR_RIP		16
-#define VMM_X64_GPR_RFLAGS	17
-#define VMM_X64_CR_CR0		0
-#define VMM_X64_CR_CR3		2
-#define VMM_X64_CR_CR4		3
-#define VMM_X64_CR_XCR0		5
-#define VMM_X64_MSR_EFER	0
-#define VMM_X64_MSR_PAT		9
-#define VMM_X64_SEG_ES		0
-#define VMM_X64_SEG_CS		1
-#define VMM_X64_SEG_SS		2
-#define VMM_X64_SEG_DS		3
-#define VMM_X64_SEG_FS		4
-#define VMM_X64_SEG_GS		5
-#define VMM_X64_SEG_GDT		6
-#define VMM_X64_SEG_IDT		7
-#define VMM_X64_SEG_LDT		8
-#define VMM_X64_SEG_TR		9
-
 #define CR0_PE			0x00000001ULL
 #define CR0_NE			0x00000020ULL
 #define CR0_PG			0x80000000ULL
@@ -173,8 +79,6 @@
 struct loader_options {
 	const char	*kernel_path;
 	const char	*initramfs_path;
-	uint64_t	tsc_hz;
-	int		tsc_hz_set;
 	char		*cmdline;
 	size_t		cmdline_len;
 };
@@ -201,53 +105,6 @@ struct loaded_initramfs {
 	uint64_t	gpa;
 };
 
-struct vmm_manifest_header {
-	char		magic[8];
-	uint16_t	abi_version;
-	uint16_t	arch;
-	uint32_t	header_size;
-	uint32_t	total_size;
-	uint32_t	record_count;
-	uint64_t	mem_size;
-	uint32_t	flags;
-	uint32_t	reserved;
-} __attribute__((packed));
-
-struct vmm_manifest_record {
-	uint16_t	type;
-	uint16_t	flags;
-	uint32_t	size;
-} __attribute__((packed));
-
-struct vmm_x64_seg_state {
-	uint16_t	selector;
-	uint16_t	attrib;
-	uint32_t	limit;
-	uint64_t	base;
-} __attribute__((packed));
-
-struct vmm_x64_vcpu_state {
-	uint32_t	vcpu_id;
-	uint32_t	flags;
-	uint64_t	runnable;
-	uint64_t	gpr[VMM_X64_NGPR];
-	uint64_t	cr[VMM_X64_NCR];
-	uint64_t	msr[VMM_X64_NMSR];
-	struct vmm_x64_seg_state seg[VMM_X64_NSEG];
-	uint64_t	intr_flags;
-} __attribute__((packed));
-
-struct vmm_gpa_range {
-	uint64_t	start;
-	uint64_t	size;
-	uint32_t	type;
-	uint32_t	flags;
-} __attribute__((packed));
-
-struct vmm_x64_time_state {
-	uint64_t	tsc_hz;
-} __attribute__((packed));
-
 static void parse_options(int argc, char **argv, struct loader_options *opts);
 static uint8_t *map_fd(int fd, int prot, uint64_t *sizep);
 static void map_file_readonly(const char *path, struct mapped_file *file);
@@ -256,13 +113,9 @@ static void linux_kernel_init(struct linux_kernel *kernel, const char *path);
 static void linux_kernel_fini(const struct linux_kernel *kernel);
 static void build_linux_guest(uint8_t *mem, uint64_t mem_size,
     const struct loader_options *opts, const struct linux_kernel *kernel,
-    struct loaded_initramfs *initramfs, struct vmm_gpa_range *ranges,
-    uint32_t *range_count);
-static void build_vcpu(struct vmm_x64_vcpu_state *vcpu);
-static void build_manifest(uint8_t *manifest, uint64_t manifest_size,
-    uint64_t mem_size, const struct vmm_x64_vcpu_state *vcpu,
-    const struct vmm_x64_time_state *time,
-    const struct vmm_gpa_range *ranges, uint32_t range_count);
+    struct loaded_initramfs *initramfs);
+static void build_vcpu(struct vmm_cpustate *state);
+static void write_cpustate(const struct vmm_cpustate *state);
 static void loaded_initramfs_fini(const struct loaded_initramfs *initramfs);
 
 int
@@ -271,38 +124,23 @@ main(int argc, char **argv)
 	struct loader_options opts;
 	struct linux_kernel kernel;
 	struct loaded_initramfs initramfs;
-	struct vmm_x64_vcpu_state vcpu;
-	struct vmm_gpa_range ranges[VMM_GPA_RANGE_MAX];
-	struct vmm_x64_time_state time;
+	struct vmm_cpustate state;
 	uint8_t *mem;
-	uint8_t *manifest;
 	uint64_t mem_size;
-	uint64_t manifest_size;
-	uint32_t range_count;
 
 	parse_options(argc, argv, &opts);
 	mem = map_fd(3, PROT_READ | PROT_WRITE, &mem_size);
-	manifest = map_fd(4, PROT_READ | PROT_WRITE, &manifest_size);
 	linux_kernel_init(&kernel, opts.kernel_path);
 	memset(&initramfs, 0, sizeof(initramfs));
 
-	build_linux_guest(mem, mem_size, &opts, &kernel, &initramfs, ranges,
-	    &range_count);
-	build_vcpu(&vcpu);
-	time.tsc_hz = opts.tsc_hz;
-	build_manifest(manifest, manifest_size, mem_size, &vcpu, &time, ranges,
-	    range_count);
+	build_linux_guest(mem, mem_size, &opts, &kernel, &initramfs);
+	build_vcpu(&state);
+	write_cpustate(&state);
 
 	loaded_initramfs_fini(&initramfs);
 	linux_kernel_fini(&kernel);
 	free(opts.cmdline);
 	return 0;
-}
-
-static size_t
-align8(size_t value)
-{
-	return (value + 7U) & ~(size_t)7U;
 }
 
 static uint64_t
@@ -391,26 +229,6 @@ parse_options(int argc, char **argv, struct loader_options *opts)
 			opts->initramfs_path = argv[i] + 10;
 			continue;
 		}
-		if (strncmp(argv[i], "tsc_hz=", 7) == 0) {
-			char *end;
-			uint64_t tsc_hz;
-
-			if (opts->tsc_hz_set)
-				errx(1, "duplicate tsc_hz argument");
-			if (strcmp(argv[i] + 7, "host") == 0) {
-				tsc_hz = 0;
-			} else {
-				errno = 0;
-				tsc_hz = strtoull(argv[i] + 7, &end, 10);
-				if (errno != 0 || end == argv[i] + 7 || *end != '\0' ||
-				    tsc_hz == 0) {
-					errx(1, "invalid tsc_hz argument: %s", argv[i]);
-				}
-			}
-			opts->tsc_hz = tsc_hz;
-			opts->tsc_hz_set = 1;
-			continue;
-		}
 		cmdline_cap += strlen(argv[i]) + 1;
 	}
 	opts->cmdline = calloc(1, cmdline_cap);
@@ -418,8 +236,7 @@ parse_options(int argc, char **argv, struct loader_options *opts)
 		err(1, "calloc cmdline");
 	cmdline_len = 0;
 	for (i = 2; i < argc; i++) {
-		if (strncmp(argv[i], "initramfs=", 10) == 0 ||
-		    strncmp(argv[i], "tsc_hz=", 7) == 0)
+		if (strncmp(argv[i], "initramfs=", 10) == 0)
 			continue;
 		if (cmdline_len != 0)
 			opts->cmdline[cmdline_len++] = ' ';
@@ -524,21 +341,6 @@ linux_kernel_fini(const struct linux_kernel *kernel)
 }
 
 static void
-add_range(struct vmm_gpa_range *ranges, uint32_t *count, uint64_t start,
-    uint64_t size, uint32_t type)
-{
-	if (size == 0)
-		return;
-	if (*count >= VMM_GPA_RANGE_MAX)
-		errx(1, "too many GPA ranges");
-	ranges[*count].start = start;
-	ranges[*count].size = size;
-	ranges[*count].type = type;
-	ranges[*count].flags = 0;
-	(*count)++;
-}
-
-static void
 check_guest_range(uint64_t mem_size, uint64_t start, uint64_t size,
     const char *name)
 {
@@ -590,10 +392,6 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	uint64_t cmdline_addr;
 	uint64_t initramfs_addr;
 	uint32_t initramfs_size;
-	uint64_t ecam_end;
-	uint64_t lapic_end;
-	uint64_t mmio_end;
-	uint64_t ram_end;
 	uint8_t loadflags;
 	unsigned int e820_count;
 
@@ -613,7 +411,6 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	write32(boot_params, LINUX_CODE32_START, (uint32_t)KERNEL_LOAD_GPA);
 
 	cmdline_addr = CMDLINE_GPA;
-	write64(boot_params, LINUX_ACPI_RSDP_ADDR, ACPI_RSDP_GPA);
 	write32(boot_params, LINUX_CMD_LINE_PTR, (uint32_t)cmdline_addr);
 	write32(boot_params, LINUX_EXT_CMD_LINE_PTR,
 	    (uint32_t)(cmdline_addr >> 32));
@@ -633,71 +430,13 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 	}
 
 	e820_count = 0;
-	write_e820_entry(boot_params, e820_count++, 0, ACPI_GPA,
+	write_e820_entry(boot_params, e820_count++, 0, 0x9f000,
 	    LINUX_E820_RAM);
-	write_e820_entry(boot_params, e820_count++, ACPI_GPA, ACPI_SIZE,
-	    LINUX_E820_ACPI);
-	write_e820_entry(boot_params, e820_count++, ACPI_GPA + ACPI_SIZE,
-	    0x9f000 - (ACPI_GPA + ACPI_SIZE), LINUX_E820_RAM);
 	write_e820_entry(boot_params, e820_count++, 0x9f000,
 	    ONE_MIB - 0x9f000, LINUX_E820_RESERVED);
-	if (mem_size > ONE_MIB) {
-		ram_end = mem_size < VMM_PCIE_MMIO_BASE ? mem_size :
-		    VMM_PCIE_MMIO_BASE;
-		if (ram_end > ONE_MIB) {
-			write_e820_entry(boot_params, e820_count++, ONE_MIB,
-			    ram_end - ONE_MIB, LINUX_E820_RAM);
-		}
-		if (mem_size > VMM_PCIE_MMIO_BASE) {
-			mmio_end = VMM_PCIE_MMIO_END;
-			if (mmio_end > mem_size)
-				mmio_end = mem_size;
-			write_e820_entry(boot_params, e820_count++,
-			    VMM_PCIE_MMIO_BASE, mmio_end - VMM_PCIE_MMIO_BASE,
-			    LINUX_E820_RESERVED);
-			if (mem_size > mmio_end) {
-				ram_end = mem_size < VMM_PCIE_ECAM_BASE ? mem_size :
-				    VMM_PCIE_ECAM_BASE;
-				if (ram_end > mmio_end) {
-					write_e820_entry(boot_params, e820_count++, mmio_end,
-					    ram_end - mmio_end, LINUX_E820_RAM);
-				}
-				if (mem_size > VMM_PCIE_ECAM_BASE) {
-					ecam_end = VMM_PCIE_ECAM_END;
-					if (ecam_end > mem_size)
-						ecam_end = mem_size;
-					write_e820_entry(boot_params, e820_count++,
-					    VMM_PCIE_ECAM_BASE,
-					    ecam_end - VMM_PCIE_ECAM_BASE,
-					    LINUX_E820_RESERVED);
-					if (mem_size > ecam_end) {
-						ram_end = mem_size < ACPI_LAPIC_GPA ? mem_size :
-						    ACPI_LAPIC_GPA;
-						if (ram_end > ecam_end) {
-							write_e820_entry(boot_params, e820_count++,
-							    ecam_end, ram_end - ecam_end,
-							    LINUX_E820_RAM);
-						}
-						if (mem_size > ACPI_LAPIC_GPA) {
-							lapic_end = ACPI_LAPIC_GPA +
-							    ACPI_LAPIC_MMIO_SIZE;
-							if (lapic_end > mem_size)
-								lapic_end = mem_size;
-							write_e820_entry(boot_params, e820_count++,
-							    ACPI_LAPIC_GPA,
-							    lapic_end - ACPI_LAPIC_GPA,
-							    LINUX_E820_RESERVED);
-							if (mem_size > lapic_end) {
-								write_e820_entry(boot_params, e820_count++,
-								    lapic_end, mem_size - lapic_end,
-								    LINUX_E820_RAM);
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	if (mem_size > ONE_MIB)
+		write_e820_entry(boot_params, e820_count++, ONE_MIB,
+		    mem_size - ONE_MIB, LINUX_E820_RAM);
 	write8(boot_params, LINUX_E820_ENTRIES, (uint8_t)e820_count);
 }
 
@@ -748,8 +487,7 @@ load_initramfs(uint8_t *mem, uint64_t mem_size,
 static void
 build_linux_guest(uint8_t *mem, uint64_t mem_size,
     const struct loader_options *opts, const struct linux_kernel *kernel,
-    struct loaded_initramfs *initramfs, struct vmm_gpa_range *ranges,
-    uint32_t *range_count)
+    struct loaded_initramfs *initramfs)
 {
 	if (mem_size < 16 * ONE_MIB)
 		errx(1, "guest memory must be at least 16M");
@@ -762,124 +500,75 @@ build_linux_guest(uint8_t *mem, uint64_t mem_size,
 	check_guest_range(mem_size, BOOT_PARAMS_GPA, PAGE_SIZE_GUEST,
 	    "boot params");
 	check_guest_range(mem_size, CMDLINE_GPA, CMDLINE_CAP, "cmdline");
-	check_guest_range(mem_size, ACPI_GPA, ACPI_SIZE, "ACPI tables");
 
 	build_identity_page_tables(mem);
 	build_descriptor_tables(mem);
 	load_kernel_payload(mem, mem_size, kernel);
 	load_initramfs(mem, mem_size, opts, kernel, initramfs);
 	build_boot_params(mem, mem_size, opts, kernel, initramfs);
-
-	*range_count = 0;
-	add_range(ranges, range_count, KERNEL_LOAD_GPA, kernel->init_size,
-	    VMM_GPA_RANGE_LOAD);
-	add_range(ranges, range_count, BOOT_PARAMS_GPA, PAGE_SIZE_GUEST,
-	    VMM_GPA_RANGE_BOOT_PARAMS);
-	add_range(ranges, range_count, CMDLINE_GPA, opts->cmdline_len + 1,
-	    VMM_GPA_RANGE_CMDLINE);
-	if (initramfs->file.data != NULL) {
-		add_range(ranges, range_count, initramfs->gpa,
-		    initramfs->file.size, VMM_GPA_RANGE_INITRAMFS);
-	}
-	add_range(ranges, range_count, PML4_GPA, PAGE_SIZE_GUEST * 3,
-	    VMM_GPA_RANGE_PAGE_TABLE);
-	add_range(ranges, range_count, GDT_GPA, PAGE_SIZE_GUEST * 2,
-	    VMM_GPA_RANGE_DESC_TABLE);
-	add_range(ranges, range_count, STACK_TOP_GPA - PAGE_SIZE_GUEST,
-	    PAGE_SIZE_GUEST, VMM_GPA_RANGE_STACK);
-	add_range(ranges, range_count, ACPI_GPA, ACPI_SIZE,
-	    VMM_GPA_RANGE_BOOT_DATA);
 }
 
 static void
-set_segment(struct vmm_x64_seg_state *seg, uint16_t selector,
+set_segment(struct vmm_segment *seg, uint16_t selector,
     uint16_t attrib, uint32_t limit, uint64_t base)
 {
 	seg->selector = selector;
-	seg->attrib = attrib;
+	seg->attrib.type = attrib & 0xf;
+	seg->attrib.s = (attrib & SEG_S) != 0;
+	seg->attrib.dpl = (attrib >> 5) & 0x3;
+	seg->attrib.p = (attrib & SEG_P) != 0;
+	seg->attrib.avl = (attrib >> 8) & 0x1;
+	seg->attrib.l = (attrib & SEG_L) != 0;
+	seg->attrib.def = (attrib & SEG_DB) != 0;
+	seg->attrib.g = (attrib & SEG_G) != 0;
+	seg->attrib.rsvd = 0;
 	seg->limit = limit;
 	seg->base = base;
 }
 
 static void
-build_vcpu(struct vmm_x64_vcpu_state *vcpu)
+build_vcpu(struct vmm_cpustate *state)
 {
-	memset(vcpu, 0, sizeof(*vcpu));
-	vcpu->runnable = 1;
-	vcpu->gpr[VMM_X64_GPR_RSP] = STACK_TOP_GPA;
-	vcpu->gpr[VMM_X64_GPR_RSI] = BOOT_PARAMS_GPA;
-	vcpu->gpr[VMM_X64_GPR_RIP] =
+	memset(state, 0, sizeof(*state));
+	state->gprs[VMM_X64_GPR_RSP] = STACK_TOP_GPA;
+	state->gprs[VMM_X64_GPR_RSI] = BOOT_PARAMS_GPA;
+	state->gprs[VMM_X64_GPR_RIP] =
 	    KERNEL_LOAD_GPA + KERNEL_64_ENTRY_DELTA;
-	vcpu->gpr[VMM_X64_GPR_RFLAGS] = 2;
-	vcpu->cr[VMM_X64_CR_CR0] = CR0_PE | CR0_NE | CR0_PG;
-	vcpu->cr[VMM_X64_CR_CR3] = PML4_GPA;
-	vcpu->cr[VMM_X64_CR_CR4] = CR4_PAE;
-	vcpu->cr[VMM_X64_CR_XCR0] = XCR0_X87;
-	vcpu->msr[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
-	vcpu->msr[VMM_X64_MSR_PAT] = 0x0007040600070406ULL;
+	state->gprs[VMM_X64_GPR_RFLAGS] = 2;
+	state->crs[VMM_X64_CR_CR0] = CR0_PE | CR0_NE | CR0_PG;
+	state->crs[VMM_X64_CR_CR3] = PML4_GPA;
+	state->crs[VMM_X64_CR_CR4] = CR4_PAE;
+	state->crs[VMM_X64_CR_XCR0] = XCR0_X87;
+	state->msrs[VMM_X64_MSR_EFER] = EFER_LME | EFER_LMA;
+	state->msrs[VMM_X64_MSR_PAT] = 0x0007040600070406ULL;
 
-	set_segment(&vcpu->seg[VMM_X64_SEG_ES], 0x18,
+	set_segment(&state->segs[VMM_X64_SEG_ES], 0x18,
 	    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_CS], 0x10,
+	set_segment(&state->segs[VMM_X64_SEG_CS], 0x10,
 	    0xb | SEG_S | SEG_P | SEG_L | SEG_G, 0xffffffffU, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_SS], 0x18,
+	set_segment(&state->segs[VMM_X64_SEG_SS], 0x18,
 	    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_DS], 0x18,
+	set_segment(&state->segs[VMM_X64_SEG_DS], 0x18,
 	    0x3 | SEG_S | SEG_P | SEG_DB | SEG_G, 0xffffffffU, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_FS], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_GDT], 0, 0, 47, GDT_GPA);
-	set_segment(&vcpu->seg[VMM_X64_SEG_IDT], 0, 0, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_LDT], 0, SEG_UNUSABLE, 0, 0);
-	set_segment(&vcpu->seg[VMM_X64_SEG_TR], 0x20, 0x9 | SEG_P, 0x67,
+	set_segment(&state->segs[VMM_X64_SEG_FS], 0, SEG_UNUSABLE, 0, 0);
+	set_segment(&state->segs[VMM_X64_SEG_GS], 0, SEG_UNUSABLE, 0, 0);
+	set_segment(&state->segs[VMM_X64_SEG_GDT], 0, 0, 47, GDT_GPA);
+	set_segment(&state->segs[VMM_X64_SEG_IDT], 0, 0, 0, 0);
+	set_segment(&state->segs[VMM_X64_SEG_LDT], 0, SEG_UNUSABLE, 0, 0);
+	set_segment(&state->segs[VMM_X64_SEG_TR], 0x20, 0x9 | SEG_P, 0x67,
 	    TSS_GPA);
 }
 
-static uint8_t *
-add_record(uint8_t *ptr, uint16_t type, const void *payload, uint32_t size)
-{
-	struct vmm_manifest_record rec;
-	size_t total;
-
-	rec.type = type;
-	rec.flags = VMM_REC_F_MANDATORY;
-	rec.size = size;
-	total = align8(sizeof(rec) + size);
-	memcpy(ptr, &rec, sizeof(rec));
-	memcpy(ptr + sizeof(rec), payload, size);
-	memset(ptr + sizeof(rec) + size, 0, total - sizeof(rec) - size);
-	return ptr + total;
-}
-
 static void
-build_manifest(uint8_t *manifest, uint64_t manifest_size, uint64_t mem_size,
-    const struct vmm_x64_vcpu_state *vcpu,
-    const struct vmm_x64_time_state *time,
-    const struct vmm_gpa_range *ranges, uint32_t range_count)
+write_cpustate(const struct vmm_cpustate *state)
 {
-	struct vmm_manifest_header hdr;
-	uint8_t *ptr;
+	ssize_t written;
 
-	if (manifest_size < PAGE_SIZE_GUEST)
-		errx(1, "fd4 is smaller than one page");
-	memset(manifest, 0, (size_t)manifest_size);
-	ptr = manifest + sizeof(hdr);
-	ptr = add_record(ptr, VMM_REC_X64_VCPU_STATE, vcpu, sizeof(*vcpu));
-	ptr = add_record(ptr, VMM_REC_X64_TIME_STATE, time, sizeof(*time));
-	ptr = add_record(ptr, VMM_REC_GPA_RANGE, ranges,
-	    range_count * sizeof(ranges[0]));
-	if ((uint64_t)(ptr - manifest) > manifest_size)
-		errx(1, "manifest does not fit fd4");
-
-	memset(&hdr, 0, sizeof(hdr));
-	memcpy(hdr.magic, VMM_MANIFEST_MAGIC, sizeof(hdr.magic));
-	hdr.abi_version = VMM_MANIFEST_ABI;
-	hdr.arch = VMM_MANIFEST_ARCH_X64;
-	hdr.header_size = sizeof(hdr);
-	hdr.total_size = (uint32_t)(ptr - manifest);
-	hdr.record_count = 3;
-	hdr.mem_size = mem_size;
-	memcpy(manifest, &hdr, sizeof(hdr));
+	written = write(2, state, sizeof(*state));
+	if (written < 0)
+		err(1, "write fd2 cpustate");
+	if ((size_t)written != sizeof(*state))
+		errx(1, "short write to fd2 cpustate");
 }
 
 static void

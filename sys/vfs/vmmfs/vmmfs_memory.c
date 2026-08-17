@@ -182,7 +182,23 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory)
 		return (error);
 	}
 	memory->object = object;
-	memory->boot_vmspace = vmspace;
+	memory->run_vmspace = vmspace;
+	return (0);
+}
+
+int
+vmmfs_memory_snapshot(struct vmmfs_memory *memory)
+{
+	struct vmspace *boot_vmspace;
+
+	if (memory == NULL || memory->object == NULL ||
+	    memory->run_vmspace == NULL || memory->boot_vmspace != NULL)
+		return (EINVAL);
+	boot_vmspace = vmspace_fork(memory->run_vmspace, NULL, NULL);
+	if (boot_vmspace == NULL)
+		return (ENOMEM);
+	pmap_pinit2(vmspace_pmap(boot_vmspace));
+	memory->boot_vmspace = boot_vmspace;
 	return (0);
 }
 

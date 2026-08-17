@@ -563,10 +563,13 @@ static int
 vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 {
 	char event[64];
+	struct vmm_cpustate state;
+	vmm_machine_t runtime_machine;
 	int error;
 
 	if (machine == NULL || cred == NULL)
 		return (EINVAL);
+	runtime_machine = NULL;
 	lwkt_gettoken(&machine->token);
 	if (machine->stopped.expect_stopped || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
@@ -580,7 +583,20 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	error = vmmfs_memory_prepare(&machine->memory);
 	if (error != 0)
 		goto failed;
-	error = vmmfs_loader_run(&machine->loader, &machine->memory, cred);
+	error = vmm_machine_create(machine->memory.run_vmspace, &runtime_machine);
+	if (error != 0)
+		goto failed;
+	error = vmm_machine_create_irqchip(runtime_machine);
+	if (error != 0)
+		goto failed;
+	error = vmmfs_loader_run(&machine->loader, &machine->memory, cred,
+	    &state);
+	if (error != 0)
+		goto failed;
+	error = vmmfs_memory_snapshot(&machine->memory);
+	if (error != 0)
+		goto failed;
+	error = vmmfs_vcpu_start(&machine->vcpu, runtime_machine, &state);
 	if (error != 0)
 		goto failed;
 	lwkt_gettoken(&machine->token);
@@ -589,12 +605,16 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		error = EBUSY;
 		goto failed;
 	}
-	machine->machine = (struct vmm_machine *)(uintptr_t)0xdeadbeef;
+	machine->machine = runtime_machine;
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "start completed");
 	return (0);
 
 failed:
+	if (runtime_machine != NULL) {
+		(void)vmmfs_vcpu_stop(&machine->vcpu);
+		(void)vmm_machine_destroy(runtime_machine);
+	}
 	vmmfs_memory_release(&machine->memory);
 	ksnprintf(event, sizeof(event), "start failed error=%d", error);
 	vmmfs_events_log(&machine->events, event);
@@ -604,6 +624,9 @@ failed:
 static int
 vmmfs_machine_stop(struct vmmfs_machine *machine)
 {
+	vmm_machine_t runtime_machine;
+	int error;
+
 	if (machine == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&machine->token);
@@ -611,8 +634,15 @@ vmmfs_machine_stop(struct vmmfs_machine *machine)
 		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
+	runtime_machine = machine->machine;
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "stop requested");
+	error = vmmfs_vcpu_stop(&machine->vcpu);
+	if (error != 0)
+		return (error);
+	error = vmm_machine_destroy(runtime_machine);
+	if (error != 0)
+		return (error);
 	vmmfs_memory_release(&machine->memory);
 	lwkt_gettoken(&machine->token);
 	KKASSERT(machine->stopped.expect_stopped && machine->machine != NULL);

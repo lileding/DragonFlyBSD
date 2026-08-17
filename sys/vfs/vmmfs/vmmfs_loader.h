@@ -8,6 +8,8 @@
 
 #include <sys/param.h>
 
+#include <dev/virtual/vmm/vmm.h>
+
 struct vmmfs_machine;
 struct vmmfs_loader;
 struct vmmfs_memory;
@@ -23,7 +25,7 @@ int vmmfs_loader_destroy(struct vmmfs_loader *);
 int vmmfs_loader_init(void);
 int vmmfs_loader_uninit(void);
 int vmmfs_loader_run(struct vmmfs_loader *, struct vmmfs_memory *,
-	struct ucred *);
+	struct ucred *, struct vmm_cpustate *);
 
 struct vmmfs_loader {
 	struct vmmfs_machine *machine;

@@ -8,6 +8,13 @@
 
 #include <sys/types.h>
 
+#ifndef _KERNEL
+#include <stdbool.h>
+#ifndef CTASSERT
+#define CTASSERT(expression) _Static_assert((expression), #expression)
+#endif
+#endif
+
 struct vmspace;
 struct vmm_machine;
 struct vmm_vcpu;

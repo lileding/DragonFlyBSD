@@ -11,8 +11,12 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+#include <sys/thread.h>
+#include <sys/thread2.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
+
+#include <machine/atomic.h>
 
 #include "vmmfs.h"
 
@@ -26,6 +30,7 @@ static int vmmfs_vcpu_read(struct vop_read_args *);
 static int vmmfs_vcpu_setattr(struct vop_setattr_args *);
 static int vmmfs_vcpu_write(struct vop_write_args *);
 static int vmmfs_vcpu_reclaim(struct vop_reclaim_args *);
+static void vmmfs_vcpu_thread_main(void *);
 
 struct vop_ops vmmfs_vcpu_vops = {
 	.vop_default = vop_defaultop,
@@ -124,7 +129,8 @@ vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 
 	if (vcpu == NULL)
 		return (EINVAL);
-	if (vcpu->active_count != 0 || vcpu->vcpus != NULL)
+	if (atomic_fetchadd_int(&vcpu->active_count, 0) != 0 ||
+	    vcpu->threads != NULL)
 		return (EBUSY);
 	vnode = vcpu->vnode;
 	if (vnode != NULL) {
@@ -136,6 +142,168 @@ vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 	KKASSERT(vcpu->vnode == NULL);
 	vcpu->machine = NULL;
 	return (0);
+}
+
+int
+vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
+	const struct vmm_cpustate *state)
+{
+	struct vmmfs_vcpu_thread *thread;
+	uint32_t count;
+	uint32_t index;
+	int error;
+
+	if (vcpu == NULL || machine == NULL || state == NULL ||
+	    vcpu->threads != NULL)
+		return (EINVAL);
+	count = vcpu->machine->spec.vcpu.count;
+	if (count == 0)
+		return (EINVAL);
+	thread = kmalloc(sizeof(*thread) * count, M_VMMFS, M_WAITOK | M_ZERO);
+	vcpu->threads = thread;
+	vcpu->runtime_machine = machine;
+	vcpu->count = count;
+	atomic_store_rel_int(&vcpu->active_count, 0);
+	atomic_store_rel_int(&vcpu->ready_count, 0);
+	atomic_store_rel_int(&vcpu->release, 0);
+	atomic_store_rel_int(&vcpu->stop_requested, 0);
+	atomic_store_rel_int(&vcpu->start_error, 0);
+
+	for (index = 0; index < count; ++index) {
+		thread = &vcpu->threads[index];
+		thread->group = vcpu;
+		thread->index = index;
+		thread->state = *state;
+		atomic_add_int(&vcpu->active_count, 1);
+		error = lwkt_create(vmmfs_vcpu_thread_main, thread,
+		    &thread->thread, NULL, 0, -1, "vmmfs-vcpu%u", index);
+		if (error != 0) {
+			atomic_add_int(&vcpu->active_count, -1);
+			atomic_cmpset_int(&vcpu->start_error, 0, error);
+			break;
+		}
+	}
+	while (atomic_fetchadd_int(&vcpu->ready_count, 0) !=
+	    atomic_fetchadd_int(&vcpu->active_count, 0) &&
+	    atomic_fetchadd_int(&vcpu->active_count, 0) != 0) {
+		tsleep_interlock(vcpu, PCATCH);
+		if (atomic_fetchadd_int(&vcpu->ready_count, 0) ==
+		    atomic_fetchadd_int(&vcpu->active_count, 0) ||
+		    atomic_fetchadd_int(&vcpu->active_count, 0) == 0)
+			continue;
+		error = tsleep(vcpu, PINTERLOCKED | PCATCH, "vmmvcpu", hz * 10);
+		if (error != 0) {
+			atomic_cmpset_int(&vcpu->start_error, 0,
+			    error == EWOULDBLOCK ? ETIMEDOUT : error);
+			break;
+		}
+	}
+	error = atomic_fetchadd_int(&vcpu->start_error, 0);
+	if (error != 0 || atomic_fetchadd_int(&vcpu->ready_count, 0) != count) {
+		(void)vmmfs_vcpu_stop(vcpu);
+		return (error != 0 ? error : EIO);
+	}
+	atomic_store_rel_int(&vcpu->release, 1);
+	for (index = 0; index < count; ++index)
+		wakeup(&vcpu->threads[index]);
+	return (0);
+}
+
+int
+vmmfs_vcpu_stop(struct vmmfs_vcpu *vcpu)
+{
+	uint32_t index;
+	int error;
+
+	if (vcpu == NULL)
+		return (EINVAL);
+	if (vcpu->threads == NULL)
+		return (0);
+	atomic_store_rel_int(&vcpu->stop_requested, 1);
+	for (index = 0; index < vcpu->count; ++index) {
+		if (vcpu->threads[index].vcpu != NULL) {
+			(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+			wakeup(vcpu->threads[index].vcpu);
+		}
+		wakeup(&vcpu->threads[index]);
+	}
+	while (atomic_fetchadd_int(&vcpu->active_count, 0) != 0) {
+		tsleep_interlock(vcpu, 0);
+		if (atomic_fetchadd_int(&vcpu->active_count, 0) != 0)
+			(void)tsleep(vcpu, PINTERLOCKED, "vmmvstop", 0);
+	}
+	for (index = 0; index < vcpu->count; ++index) {
+		if (vcpu->threads[index].vcpu != NULL) {
+			error = vmm_vcpu_destroy(vcpu->threads[index].vcpu);
+			if (error != 0)
+				return (error);
+			vcpu->threads[index].vcpu = NULL;
+		}
+	}
+	kfree(vcpu->threads, M_VMMFS);
+	vcpu->threads = NULL;
+	vcpu->runtime_machine = NULL;
+	vcpu->count = 0;
+	return (0);
+}
+
+static void
+vmmfs_vcpu_thread_main(void *argument)
+{
+	struct vmmfs_vcpu_thread *thread;
+	struct vmmfs_vcpu *vcpu;
+	struct vmm_cpuexit *exit;
+	char event[96];
+	int error;
+
+	thread = argument;
+	vcpu = thread->group;
+	lwkt_setpri_self(TDPRI_USER_NORM);
+	error = vmm_vcpu_create(vcpu->runtime_machine, &thread->state,
+	    &thread->vcpu);
+	if (error != 0)
+		atomic_cmpset_int(&vcpu->start_error, 0, error);
+	atomic_add_int(&vcpu->ready_count, 1);
+	wakeup(vcpu);
+	while (error == 0 && !atomic_fetchadd_int(&vcpu->release, 0) &&
+	    !atomic_fetchadd_int(&vcpu->stop_requested, 0)) {
+		tsleep_interlock(thread, 0);
+		if (!atomic_fetchadd_int(&vcpu->release, 0) &&
+		    !atomic_fetchadd_int(&vcpu->stop_requested, 0))
+			(void)tsleep(thread, PINTERLOCKED, "vmmvwait", 0);
+	}
+	while (error == 0 && !atomic_fetchadd_int(&vcpu->stop_requested, 0)) {
+		exit = NULL;
+		error = vmm_vcpu_run(thread->vcpu, &exit);
+		if (error == EINTR)
+			continue;
+		if (error != 0)
+			break;
+		if (exit == NULL || exit->reason == VMM_CPUEXIT_NONE)
+			continue;
+		if (exit->reason == VMM_CPUEXIT_HALTED) {
+			if (!thread->halted_logged) {
+				thread->halted_logged = true;
+				ksnprintf(event, sizeof(event), "vcpu%u halted",
+				    thread->index);
+				vmmfs_events_log(&vcpu->machine->events, event);
+			}
+			(void)tsleep(thread, PCATCH, "vmmhlt", hz / 20 + 1);
+			continue;
+		}
+		ksnprintf(event, sizeof(event), "vcpu%u exit reason=%#jx",
+		    thread->index, (uintmax_t)exit->reason);
+		vmmfs_events_log(&vcpu->machine->events, event);
+		break;
+	}
+	if (error != 0 && error != EINTR &&
+	    !atomic_fetchadd_int(&vcpu->stop_requested, 0)) {
+		ksnprintf(event, sizeof(event), "vcpu%u failed error=%d",
+		    thread->index, error);
+		vmmfs_events_log(&vcpu->machine->events, event);
+	}
+	atomic_add_int(&vcpu->active_count, -1);
+	wakeup(vcpu);
 }
 
 static int
