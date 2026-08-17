@@ -16,7 +16,8 @@ struct vmmfs_memory;
 struct ucred;
 
 struct vmmfs_loader_spec {
-	char path[MAXPATHLEN];
+	/* A NUL-terminated, one-page shell script executed with fd 2 and fd 3. */
+	char script[PAGE_SIZE];
 };
 
 extern struct vop_ops vmmfs_loader_vops;

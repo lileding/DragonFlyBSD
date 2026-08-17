@@ -44,6 +44,7 @@
 
 #define VMMFS_LOADER_MODE 0644
 #define VMMFS_LOADER_WAIT_TICKS (hz * 10)
+#define VMMFS_LOADER_SHELL "/bin/sh"
 
 #define VMMFS_LOADER_INITING -3
 #define VMMFS_LOADER_PAUSED -2
@@ -86,7 +87,7 @@ struct vmmfs_loader_fd {
 };
 
 struct vmmfs_loader_process {
-	const char *path;
+	const char *script;
 	pid_t pid;
 	struct vmmfs_loader_handler handler;
 	struct file *memory_file;
@@ -118,7 +119,7 @@ static void vmmfs_loader_process_kill(struct vmmfs_loader_process *);
 static void vmmfs_loader_child(void *, struct trapframe *);
 static void vmmfs_loader_child_exit(int);
 static int vmmfs_loader_install_fd(struct file *, int);
-static int vmmfs_loader_exec_path(const char *);
+static int vmmfs_loader_exec_shell(const char *);
 static void vmmfs_loader_set_process_cred(struct proc *, struct ucred *);
 static int vmmfs_loader_open_memory_fd(struct vm_object *, vm_size_t,
 	struct file **);
@@ -256,11 +257,12 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
 
 	if (loader == NULL || memory == NULL || cred == NULL || state == NULL ||
 	    loader->machine == NULL || memory->object == NULL ||
-	    memory->machine != loader->machine || memory->machine->spec.loader.path[0] == '\0')
+	    memory->machine != loader->machine ||
+	    memory->machine->spec.loader.script[0] == '\0')
 		return (EINVAL);
 	bzero(&process, sizeof(process));
 	error = vmmfs_loader_process_init(&process,
-	    loader->machine->spec.loader.path, cred);
+	    loader->machine->spec.loader.script, cred);
 	if (error != 0) {
 		ksnprintf(event, sizeof(event),
 		    "loader initialization failed error=%d", error);
@@ -358,16 +360,16 @@ vmmfs_loader_process_exit(struct thread *thread)
 
 static int
 vmmfs_loader_process_init(struct vmmfs_loader_process *process,
-	const char *path, struct ucred *cred)
+	const char *script, struct ucred *cred)
 {
 	struct proc *child;
 	struct lwp *child_lwp;
 	int error;
 	int state;
 
-	if (process == NULL || path == NULL || path[0] == '\0' || cred == NULL)
+	if (process == NULL || script == NULL || script[0] == '\0' || cred == NULL)
 		return (EINVAL);
-	process->path = path;
+	process->script = script;
 	process->state = VMMFS_LOADER_INITING;
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
@@ -603,7 +605,7 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 	if (error == 0)
 		error = vmmfs_loader_install_fd(process->memory_file, 3);
 	if (error == 0)
-		error = vmmfs_loader_exec_path(process->path);
+		error = vmmfs_loader_exec_shell(process->script);
 	if (error == 0) {
 		lwp = curthread->td_lwp;
 		lwp->lwp_proc->p_usched->acquire_curproc(lwp);
@@ -646,38 +648,60 @@ vmmfs_loader_install_fd(struct file *file, int target_fd)
 }
 
 static int
-vmmfs_loader_exec_path(const char *path)
+vmmfs_loader_exec_shell(const char *script)
 {
 	struct sysmsg message;
 	struct execve_args arguments;
-	char *argument;
+	char *shell_argument;
+	char *option_argument;
+	char *script_argument;
 	char *user_pointer;
 	char **user_argv;
 	size_t index;
-	size_t length;
+	size_t script_length;
+	size_t shell_length;
 
-	if (path == NULL)
+	if (script == NULL)
 		return (EINVAL);
-	length = strlen(path);
-	if (length == 0 || length >= PATH_MAX)
+	script_length = strnlen(script, PAGE_SIZE);
+	if (script_length == 0 || script_length >= PAGE_SIZE)
 		return (EINVAL);
+	shell_length = sizeof(VMMFS_LOADER_SHELL) - 1;
 	user_pointer = (char *)USRSTACK;
 	if (subyte(--user_pointer, 0) != 0)
 		return (EFAULT);
-	for (index = length; index > 0; --index) {
-		if (subyte(--user_pointer, path[index - 1]) != 0)
+	for (index = script_length; index > 0; --index) {
+		if (subyte(--user_pointer, script[index - 1]) != 0)
 			return (EFAULT);
 	}
-	argument = user_pointer;
+	script_argument = user_pointer;
+	if (subyte(--user_pointer, 0) != 0 ||
+	    subyte(--user_pointer, 'c') != 0 ||
+	    subyte(--user_pointer, '-') != 0)
+		return (EFAULT);
+	option_argument = user_pointer;
+	if (subyte(--user_pointer, 0) != 0)
+		return (EFAULT);
+	for (index = shell_length; index > 0; --index) {
+		if (subyte(--user_pointer, VMMFS_LOADER_SHELL[index - 1]) != 0)
+			return (EFAULT);
+	}
+	shell_argument = user_pointer;
 	user_argv = (char **)rounddown2((intptr_t)user_pointer,
 	    sizeof(intptr_t));
 	if (suword64((uint64_t *)(caddr_t)--user_argv, 0) != 0)
 		return (EFAULT);
 	if (suword64((uint64_t *)(caddr_t)--user_argv,
-	    (uint64_t)(intptr_t)argument) != 0)
+	    (uint64_t)(intptr_t)script_argument) != 0)
+		return (EFAULT);
+	if (suword64((uint64_t *)(caddr_t)--user_argv,
+	    (uint64_t)(intptr_t)option_argument) != 0)
+		return (EFAULT);
+	if (suword64((uint64_t *)(caddr_t)--user_argv,
+	    (uint64_t)(intptr_t)shell_argument) != 0)
 		return (EFAULT);
 	bzero(&message, sizeof(message));
-	arguments.fname = argument;
+	arguments.fname = shell_argument;
 	arguments.argv = user_argv;
 	arguments.envv = NULL;
 	return (sys_execve(&message, &arguments));
@@ -1198,7 +1222,7 @@ vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, si
 {
 	int result;
 	result = ksnprintf(buffer, capacity, "%s\n",
-	    loader->machine->spec.loader.path);
+	    loader->machine->spec.loader.script);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
 	*length = (size_t)result;
@@ -1212,7 +1236,7 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 		return (EINVAL);
 	if (buffer[length - 1] == 10)
 		--length;
-	if (length == 0 || length >= MAXPATHLEN)
+	if (length == 0 || length >= sizeof(loader->machine->spec.loader.script))
 		return (ENAMETOOLONG);
 	lwkt_gettoken(&loader->machine->token);
 	if (!loader->machine->stopped.expect_stopped ||
@@ -1220,8 +1244,8 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 		lwkt_reltoken(&loader->machine->token);
 		return (EBUSY);
 	}
-	bcopy(buffer, loader->machine->spec.loader.path, length);
-	loader->machine->spec.loader.path[length] = 0;
+	bcopy(buffer, loader->machine->spec.loader.script, length);
+	loader->machine->spec.loader.script[length] = 0;
 	lwkt_reltoken(&loader->machine->token);
 	return (0);
 }
@@ -1283,7 +1307,7 @@ vmmfs_loader_getattr(struct vop_getattr_args *ap)
 {
 	struct vmmfs_loader *loader;
 	struct vattr *vattr;
-	char buffer[32];
+	char buffer[PAGE_SIZE + 1];
 	size_t length;
 	int error;
 
@@ -1332,7 +1356,7 @@ vmmfs_loader_read(struct vop_read_args *ap)
 {
 	struct vmmfs_loader *loader;
 	struct uio *uio;
-	char buffer[32];
+	char buffer[PAGE_SIZE + 1];
 	size_t length;
 	off_t offset;
 	int error;
@@ -1365,7 +1389,7 @@ vmmfs_loader_write(struct vop_write_args *ap)
 {
 	struct vmmfs_loader *loader;
 	struct uio *uio;
-	char buffer[32];
+	char buffer[PAGE_SIZE];
 	size_t length;
 	int error;
 

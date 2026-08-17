@@ -578,7 +578,7 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "start requested");
 	if (machine->spec.memory.size == 0 ||
-	    machine->spec.loader.path[0] == '\0')
+	    machine->spec.loader.script[0] == '\0')
 		return (EINVAL);
 	error = vmmfs_memory_prepare(&machine->memory);
 	if (error != 0)
