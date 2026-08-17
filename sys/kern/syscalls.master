@@ -29,6 +29,7 @@
 #include <sys/sysent.h>
 #include <sys/sysmsg.h>
 #include <sys/statvfs.h>
+#include <sys/ioport.h>
 
 ; Reserved/unimplemented system calls in the range 0-150 inclusive
 ; are reserved for use in future Berkeley releases.
@@ -739,3 +740,7 @@
 553	STD	{ int posix_fallocate(int fd, off_t offset, off_t len); }
 554	STD	{ int fdatasync(int fd); }
 555	STD	{ int futimesat(int fd, const char *path, const struct timeval *tptr); }
+556	STD	{ int ioport(unsigned nworkers); }
+557	STD	{ int ioevent(int pfd, const struct io_submit *submits, int nsubmits, \
+		    struct io_completion *completions, int ncompletions, \
+		    const struct timespec *timeout); }

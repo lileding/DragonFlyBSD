@@ -318,4 +318,6 @@ MIASM =  \
 	fexecve.o \
 	posix_fallocate.o \
 	fdatasync.o \
-	futimesat.o
+	futimesat.o \
+	ioport.o \
+	ioevent.o

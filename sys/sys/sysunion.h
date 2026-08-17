@@ -325,4 +325,6 @@ union sysunion {
 	struct	posix_fallocate_args posix_fallocate;
 	struct	fdatasync_args fdatasync;
 	struct	futimesat_args futimesat;
+	struct	ioport_args ioport;
+	struct	ioevent_args ioevent;
 };

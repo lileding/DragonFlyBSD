@@ -1456,6 +1456,17 @@ struct	futimesat_args {
 	const char *	path;	char path_[PAD_(const char *)];
 	const struct timeval *	tptr;	char tptr_[PAD_(const struct timeval *)];
 };
+struct	ioport_args {
+	unsigned	nworkers;	char nworkers_[PAD_(unsigned)];
+};
+struct	ioevent_args {
+	int	pfd;	char pfd_[PAD_(int)];
+	const struct io_submit *	submits;	char submits_[PAD_(const struct io_submit *)];
+	int	nsubmits;	char nsubmits_[PAD_(int)];
+	struct io_completion *	completions;	char completions_[PAD_(struct io_completion *)];
+	int	ncompletions;	char ncompletions_[PAD_(int)];
+	const struct timespec *	timeout;	char timeout_[PAD_(const struct timespec *)];
+};
 
 #undef PAD_
 
@@ -1785,6 +1796,8 @@ int	sys_fexecve (struct sysmsg *sysmsg, const struct fexecve_args *);
 int	sys_posix_fallocate (struct sysmsg *sysmsg, const struct posix_fallocate_args *);
 int	sys_fdatasync (struct sysmsg *sysmsg, const struct fdatasync_args *);
 int	sys_futimesat (struct sysmsg *sysmsg, const struct futimesat_args *);
+int	sys_ioport (struct sysmsg *sysmsg, const struct ioport_args *);
+int	sys_ioevent (struct sysmsg *sysmsg, const struct ioevent_args *);
 
 #endif /* _KERNEL */
 

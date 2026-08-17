@@ -72,6 +72,7 @@ struct vnode;
 struct lwkt_port;
 struct namecache;
 struct sysmsg;
+struct io_req;
 
 struct	fileops {
 	int (*fo_read)	(struct file *fp, struct uio *uio,
@@ -86,6 +87,10 @@ struct	fileops {
 	int (*fo_close)	(struct file *fp);
 	int (*fo_shutdown)(struct file *fp, int how);
 	int (*fo_seek)	(struct file *fp, off_t offset, int whence, off_t *res);
+	/* asynchronous (ioport) entries; NULL means no native async path */
+	int (*fo_begin_read)	(struct io_req *req);
+	int (*fo_begin_write)	(struct io_req *req);
+	int (*fo_begin_ioctl)	(struct io_req *req);
 };
 
 /*

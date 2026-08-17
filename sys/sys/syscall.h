@@ -383,4 +383,6 @@
 #define	SYS_posix_fallocate	553
 #define	SYS_fdatasync	554
 #define	SYS_futimesat	555
-#define	SYS_MAXSYSCALL	556
+#define	SYS_ioport	556
+#define	SYS_ioevent	557
+#define	SYS_MAXSYSCALL	558

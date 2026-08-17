@@ -562,4 +562,6 @@ const char *syscallnames[] = {
 	"posix_fallocate",			/* 553 = posix_fallocate */
 	"fdatasync",			/* 554 = fdatasync */
 	"futimesat",			/* 555 = futimesat */
+	"ioport",			/* 556 = ioport */
+	"ioevent",			/* 557 = ioevent */
 };

@@ -9,6 +9,7 @@
 #include <sys/sysent.h>
 #include <sys/sysmsg.h>
 #include <sys/statvfs.h>
+#include <sys/ioport.h>
 
 #define AS(name) (sizeof(struct name) / sizeof(register_t))
 
@@ -570,4 +571,6 @@ struct sysent sysent[] = {
 	{ AS(posix_fallocate_args), 4, (sy_call_t *)sys_posix_fallocate },	/* 553 = posix_fallocate */
 	{ AS(fdatasync_args), 4, (sy_call_t *)sys_fdatasync },	/* 554 = fdatasync */
 	{ AS(futimesat_args), 4, (sy_call_t *)sys_futimesat },	/* 555 = futimesat */
+	{ AS(ioport_args), 4, (sy_call_t *)sys_ioport },	/* 556 = ioport */
+	{ AS(ioevent_args), 4, (sy_call_t *)sys_ioevent },	/* 557 = ioevent */
 };

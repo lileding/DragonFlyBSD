@@ -1347,6 +1347,7 @@ kern/imgact_resident.c	standard
 kern/imgact_shell.c	standard
 kern/init_main.c	standard
 kern/init_sysent.c	standard
+kern/ioport.c		standard
 kern/kern_checkpoint.c	standard
 kern/kern_sysref.c	standard
 kern/kern_intr.c	standard
