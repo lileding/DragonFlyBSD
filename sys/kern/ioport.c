@@ -17,6 +17,7 @@
 #include <sys/proc.h>
 #include <sys/malloc.h>
 #include <sys/file.h>
+#include <sys/file2.h>
 #include <sys/fcntl.h>
 #include <sys/filedesc.h>
 #include <sys/stat.h>
@@ -59,6 +60,10 @@ struct io_req {
 	struct proc	*req_proc;	/* held submitting proc */
 	struct ucred	*req_cred;	/* held credentials */
 	int		 req_fd;	/* target fd */
+	void		*req_buf;	/* kernel buffer (copy in/out) */
+	void		*req_ubuf;	/* user buffer VA */
+	size_t		 req_len;	/* requested length */
+	off_t		 req_offset;	/* file offset */
 	struct io_frame	 req_frames[IO_FRAME_MAX];
 	int		 req_nframes;
 	struct task	 req_task;	/* worker task for ioport_exec */
@@ -117,6 +122,8 @@ static int  ioevent_submit(struct ioport *ip,
 static int  ioevent_submit_one(struct ioport *ip, const struct io_submit *sub);
 static int  ioevent_close(struct ioport *ip, const struct io_submit *sub);
 static void io_close_worker(struct io_req *req);
+static int  ioevent_rw(struct ioport *ip, const struct io_submit *sub);
+static void io_rw_worker(struct io_req *req);
 static int  ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			 int ncompletions, struct timespec *tsp, int *res);
 
@@ -280,6 +287,8 @@ io_req_free(struct io_req *req)
 		crfree(req->req_cred);
 	if (req->req_proc != NULL)
 		PRELE(req->req_proc);
+	if (req->req_buf != NULL)
+		kfree(req->req_buf, M_IOPORT);
 	kfree(req, M_IOPORT);
 }
 
@@ -306,6 +315,9 @@ ioevent_submit_one(struct ioport *ip, const struct io_submit *sub)
 	switch (sub->opcode) {
 	case IO_CLOSE:
 		return (ioevent_close(ip, sub));
+	case IO_READ:
+	case IO_WRITE:
+		return (ioevent_rw(ip, sub));
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -351,6 +363,88 @@ io_close_worker(struct io_req *req)
 }
 
 static int
+ioevent_rw(struct ioport *ip, const struct io_submit *sub)
+{
+	struct thread *td = curthread;
+	struct file *fp;
+	struct io_req *req;
+	void *buf;
+	size_t len;
+	off_t offset;
+	int error;
+
+	len = sub->args.rw.len;
+	offset = (off_t)sub->args.rw.offset;
+
+	fp = holdfp(td, sub->fd, -1);
+	if (fp == NULL)
+		return (EBADF);
+
+	buf = kmalloc((len > 0) ? len : 1, M_IOPORT, M_WAITOK);
+	if (buf == NULL) {
+		dropfp(td, sub->fd, fp);
+		return (ENOMEM);
+	}
+
+	if (sub->opcode == IO_WRITE) {
+		error = copyin(sub->args.rw.buf, buf, len);
+		if (error) {
+			dropfp(td, sub->fd, fp);
+			kfree(buf, M_IOPORT);
+			return (error);
+		}
+	}
+
+	req = kmalloc(sizeof(*req), M_IOPORT, M_WAITOK | M_ZERO);
+	req->req_ioport = ip;
+	req->req_tag = sub->tag;
+	req->req_opcode = sub->opcode;
+	req->req_fp = fp;
+	req->req_proc = td->td_proc;
+	PHOLD(req->req_proc);
+	req->req_cred = crhold(td->td_ucred);
+	req->req_fd = sub->fd;
+	req->req_buf = buf;
+	req->req_ubuf = sub->args.rw.buf;
+	req->req_len = len;
+	req->req_offset = offset;
+
+	ioport_exec(req, io_rw_worker);
+	return (0);
+}
+
+static void
+io_rw_worker(struct io_req *req)
+{
+	struct uio uio;
+	struct iovec iov;
+	int error;
+
+	bzero(&uio, sizeof(uio));
+	iov.iov_base = req->req_buf;
+	iov.iov_len = req->req_len;
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = req->req_offset;
+	uio.uio_resid = req->req_len;
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_rw = (req->req_opcode == IO_READ) ? UIO_READ : UIO_WRITE;
+	uio.uio_td = curthread;
+
+	/* O_FOFFSET: use the explicit uio_offset from the submit record
+	 * (pread/pwrite semantics) rather than the file's shared f_offset. */
+	if (req->req_opcode == IO_READ)
+		error = fo_read(req->req_fp, &uio, req->req_cred, O_FOFFSET);
+	else
+		error = fo_write(req->req_fp, &uio, req->req_cred, O_FOFFSET);
+
+	req->req_error = error;
+	req->req_result = (int64_t)(req->req_len - uio.uio_resid);
+
+	io_return(req);
+}
+
+static int
 ioevent_reap(struct ioport *ip, struct io_completion *completions,
 	     int ncompletions, struct timespec *tsp, int *res)
 {
@@ -373,6 +467,23 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			lockmgr(&ip->ip_lock, LK_RELEASE);
 			if (req == NULL)
 				break;
+
+			/*
+			 * Deliver read data to the user buffer before the
+			 * completion becomes visible.  Slice simplification:
+			 * uses the reaper's vmspace (== submitter's in the
+			 * single-threaded test); true pinning replaces this in
+			 * the native async VOP phase.
+			 */
+			if (req->req_opcode == IO_READ && req->req_error == 0 &&
+			    req->req_result > 0) {
+				error = copyout(req->req_buf, req->req_ubuf,
+						req->req_result);
+				if (error) {
+					req->req_error = error;
+					req->req_result = 0;
+				}
+			}
 
 			comp.tag = req->req_tag;
 			comp.opcode = req->req_opcode;
