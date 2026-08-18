@@ -137,36 +137,45 @@ int
 vmmfs_machine_destroy(struct vmmfs_machine *machine)
 {
 	struct vnode *vnode;
+	int expected_stopped;
+	int runtime_active;
+	int pci_slots;
+	int serial_ports;
 	int error;
 
 	KKASSERT(machine->root == NULL);
 	lwkt_gettoken(&machine->token);
-	if (!machine->stopped.expect_stopped || machine->machine != NULL ||
-	    !RB_EMPTY(&machine->pciroot.slots) ||
-	    !RB_EMPTY(&machine->serialroot.ports)) {
+	expected_stopped = machine->stopped.expect_stopped;
+	runtime_active = machine->machine != NULL;
+	pci_slots = !RB_EMPTY(&machine->pciroot.slots);
+	serial_ports = !RB_EMPTY(&machine->serialroot.ports);
+	if (!expected_stopped || runtime_active || pci_slots || serial_ports) {
 		lwkt_reltoken(&machine->token);
+		vmmfs_events_log(&machine->events,
+		    "destroy refused stopped=%d runtime=%d pci=%d serial=%d",
+		    expected_stopped, runtime_active, pci_slots, serial_ports);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->token);
-	error = vmmfs_events_destroy(&machine->events);
-	if (error != 0)
-		return (error);
 	error = vmmfs_stopped_destroy(&machine->stopped);
 	if (error != 0)
-		return (error);
+		goto failed;
 	error = vmmfs_loader_destroy(&machine->loader);
 	if (error != 0)
-		return (error);
+		goto failed;
 	error = vmmfs_memory_destroy(&machine->memory);
 	if (error != 0)
-		return (error);
+		goto failed;
 	error = vmmfs_vcpu_destroy(&machine->vcpu);
 	if (error != 0)
-		return (error);
+		goto failed;
 	error = vmmfs_serialroot_destroy(&machine->serialroot);
 	if (error != 0)
-		return (error);
+		goto failed;
 	error = vmmfs_pciroot_destroy(&machine->pciroot);
+	if (error != 0)
+		goto failed;
+	error = vmmfs_events_destroy(&machine->events);
 	if (error != 0)
 		return (error);
 
@@ -175,6 +184,10 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	if (vnode != NULL)
 		vrele(vnode);
 	return (0);
+
+failed:
+	vmmfs_events_log(&machine->events, "destroy failed error=%d", error);
+	return (error);
 }
 
 void
