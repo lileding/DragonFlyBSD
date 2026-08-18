@@ -70,6 +70,8 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 static int
 vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t length)
 {
+	int expected_stopped;
+	int runtime_active;
 	uint64_t value;
 	size_t index;
 	unsigned int digit;
@@ -92,9 +94,13 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	}
 
 	lwkt_gettoken(&memory->machine->token);
-	if (!memory->machine->stopped.expect_stopped ||
-	    memory->machine->machine != NULL) {
+	expected_stopped = memory->machine->stopped.expect_stopped;
+	runtime_active = memory->machine->machine != NULL;
+	if (!expected_stopped || runtime_active) {
 		lwkt_reltoken(&memory->machine->token);
+		vmmfs_events_log(&memory->machine->events,
+		    "memory config rejected stopped=%d runtime=%d",
+		    expected_stopped, runtime_active);
 		return (EBUSY);
 	}
 	memory->machine->spec.memory.size = (uint64_t)value;
