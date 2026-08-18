@@ -117,6 +117,7 @@ kvm_pio_complete_read(struct kvm_run *run, uint32_t value)
 int
 main(void)
 {
+	struct kvm_pit_config pit_config;
 	struct kvm_userspace_memory_region memory_region;
 	struct kvm_regs registers;
 	struct kvm_run *run;
@@ -133,6 +134,8 @@ main(void)
 	vm_fd = ioctl(control_fd, KVM_CREATE_VM, 0);
 	if (vm_fd < 0)
 		err(1, "KVM_CREATE_VM");
+	if (ioctl(vm_fd, KVM_CREATE_IRQCHIP, 0) != 0)
+		err(1, "KVM_CREATE_IRQCHIP");
 	guest_memory = mmap(NULL, KVM_PIO_MEMORY_SIZE, PROT_READ | PROT_WRITE,
 	    MAP_ANON | MAP_PRIVATE, -1, 0);
 	if (guest_memory == MAP_FAILED)
@@ -148,6 +151,9 @@ main(void)
 	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
 	if (vcpu_fd < 0)
 		err(1, "KVM_CREATE_VCPU");
+	bzero(&pit_config, sizeof(pit_config));
+	if (ioctl(vm_fd, KVM_CREATE_PIT2, &pit_config) != 0)
+		err(1, "KVM_CREATE_PIT2");
 	kvm_pio_set_protected_entry(vcpu_fd);
 	run_size = ioctl(vm_fd, KVM_GET_VCPU_MMAP_SIZE);
 	if (run_size != 2 * getpagesize())
