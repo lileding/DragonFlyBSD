@@ -249,6 +249,10 @@ vmm_x64_pit_io_locked(struct vmm_x64_pit *pit,
 
 	if (pit == NULL || state == NULL || exit == NULL)
 		return EOPNOTSUPP;
+	if (exit->port != VMM_X64_PIT_PORT_SPEAKER &&
+	    (exit->port < VMM_X64_PIT_PORT_CHANNEL0 ||
+	    exit->port > VMM_X64_PIT_PORT_CONTROL))
+		return ENOENT;
 	if (exit->str || exit->rep || exit->operand_size != 1)
 		return EOPNOTSUPP;
 	if (exit->port == VMM_X64_PIT_PORT_SPEAKER) {
@@ -266,9 +270,6 @@ vmm_x64_pit_io_locked(struct vmm_x64_pit *pit,
 			state->gprs[VMM_X64_GPR_RIP] = exit->npc;
 		return error;
 	}
-	if (exit->port < VMM_X64_PIT_PORT_CHANNEL0 ||
-	    exit->port > VMM_X64_PIT_PORT_CONTROL)
-		return ENOENT;
 	if (exit->in) {
 		error = vmm_x64_pit_read(pit,
 		    exit->port - VMM_X64_PIT_PORT_CHANNEL0, &value);

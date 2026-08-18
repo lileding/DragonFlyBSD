@@ -251,6 +251,7 @@ static void vmm_svm_lapic_timer_arm(struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_lapic_timer_arm_locked(
     struct vmm_svm_interrupt_vcpu *, uint32_t);
+static void vmm_svm_lapic_timer_sync(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_lapic_timer_check(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_lapic_timer_timeout(void *);
 static bool vmm_svm_lapic_timer_expire_locked(
@@ -284,6 +285,8 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.vcpu_enter = vmm_svm_avic_vcpu_enter,
 	.vcpu_leave = vmm_svm_avic_vcpu_leave,
 	.vcpu_event_result = vmm_svm_avic_vcpu_event_result,
+	/* Re-enter after an interrupt-window exit to inject a pending PIC IRQ. */
+	.vintr_internal = true,
 	.vcpu_exit = vmm_svm_avic_vcpu_exit,
 };
 
@@ -626,6 +629,43 @@ vmm_svm_lapic_timer_arm_locked(struct vmm_svm_interrupt_vcpu *vcpu,
 	    UINT64_MAX : now + delta;
 	vcpu->timer_active = true;
 	vmm_svm_lapic_timer_schedule_locked(vcpu, now);
+}
+
+/*
+ * AVIC maps the LAPIC access page directly into the guest.  Timer-register
+ * writes therefore do not VMEXIT and must be sampled before VMRUN.
+ */
+static void
+vmm_svm_lapic_timer_sync(struct vmm_svm_interrupt_vcpu *vcpu)
+{
+	uint32_t divide;
+	uint32_t lvtt;
+	uint32_t tdcr;
+	uint32_t tmict;
+	bool changed;
+	bool rearm;
+
+	lwkt_gettoken(&vcpu->timer_token);
+	rearm = false;
+	tdcr = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_TDCR) &
+	    VMM_SVM_APIC_TIMER_DIVIDE_VALID;
+	if (tdcr != vcpu->timer_tdcr) {
+		vcpu->timer_tdcr = tdcr;
+		divide = ((tdcr & 0x3U) | ((tdcr & 0x8U) >> 1)) + 1;
+		vcpu->timer_divisor = 1U << (divide & 0x7U);
+		rearm = true;
+	}
+	lvtt = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_LVTT) &
+	    VMM_SVM_APIC_LVT_TIMER_VALID;
+	if (lvtt != vcpu->timer_lvtt) {
+		vcpu->timer_lvtt = lvtt;
+		rearm = true;
+	}
+	tmict = vmm_svm_avic_read(vcpu, VMM_SVM_APIC_TMICT);
+	changed = tmict != vcpu->timer_tmict || (rearm && tmict != 0);
+	if (changed)
+		vmm_svm_lapic_timer_arm_locked(vcpu, tmict);
+	lwkt_reltoken(&vcpu->timer_token);
 }
 
 /* Caller holds vcpu->timer_token. */
@@ -1072,8 +1112,13 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_ID, apic_id << 24);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_VERSION, VMM_SVM_APIC_VERSION_VALUE);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_TPR, 0);
-	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR, 0xff);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR,
+	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
+	if (avic->apic_id < 8) {
+		vmm_svm_avic_write(avic, VMM_SVM_APIC_LDR,
+		    1U << (24 + avic->apic_id));
+	}
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVTT,
 	    VMM_SVM_APIC_LVT_MASKED);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_THERMAL,
@@ -1136,7 +1181,12 @@ vmm_svm_avic_vcpu_reset_lapic(struct vmm_svm_interrupt_vcpu *avic)
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_VERSION,
 	    VMM_SVM_APIC_VERSION_VALUE);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_DFR, VMM_SVM_APIC_DFR_FLAT);
-	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR, 0xff);
+	vmm_svm_avic_write(avic, VMM_SVM_APIC_SVR,
+	    VMM_SVM_APIC_SVR_ENABLE | 0xff);
+	if (avic->apic_id < 8) {
+		vmm_svm_avic_write(avic, VMM_SVM_APIC_LDR,
+		    1U << (24 + avic->apic_id));
+	}
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVTT,
 	    VMM_SVM_APIC_LVT_MASKED);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_THERMAL,
@@ -1286,6 +1336,7 @@ vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *avic)
 
 	if (avic == NULL)
 		return;
+	vmm_svm_lapic_timer_sync(avic);
 	vmm_svm_lapic_timer_check(avic);
 	nmi_queued = false;
 	if (!avic->delivery_pending &&
@@ -1365,12 +1416,11 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
 	atomic_set_int((volatile u_int *)irr, __BIT(vector & 31));
 	cpu_mfence();
-	if (!avic->machine->avic) {
+	if (!avic->machine->avic ||
+	    atomic_load_acq_int(&avic->running) == 0) {
 		(void)vmm_vcpu_kick(avic->vcpu);
 		return;
 	}
-	if (atomic_load_acq_int(&avic->running) == 0)
-		return;
 	host_cpu = atomic_load_acq_int(&avic->host_cpu);
 	if (host_cpu == os_curcpu_number())
 		return;

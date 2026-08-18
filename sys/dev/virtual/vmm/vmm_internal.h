@@ -17,5 +17,7 @@ extern bool vmm_draining;
 
 void vmm_stat_vmexit(void);
 void vmm_stat_vcpu_run_return(void);
+void vmm_stat_vcpu_run_restart_preentry(uint32_t);
+void vmm_stat_vcpu_run_restart_postexit(uint32_t);
 
 #endif /* VMM_INTERNAL_H */

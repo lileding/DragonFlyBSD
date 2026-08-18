@@ -2433,6 +2433,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmm_svm_vcpu_guest_dbregs_leave(vcpu);
 			vmm_svm_stgi();
 			exit->reason = VMM_CPUEXIT_NONE;
+			vmm_stat_vcpu_run_restart_preentry(
+			    mycpu->gd_reqflags & RQF_HVM_MASK);
 			error = ERESTART;
 			break;
 		}
@@ -2596,6 +2598,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		}
 		if (os_return_needed()) {
+			vmm_stat_vcpu_run_restart_postexit(
+			    mycpu->gd_reqflags & RQF_HVM_MASK);
 			error = ERESTART;
 			break;
 		}

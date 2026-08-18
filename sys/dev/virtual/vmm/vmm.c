@@ -23,8 +23,13 @@ int vmm_machine_count;
 bool vmm_draining;
 static uint64_t vmm_vmexit_count[MAXCPU];
 static uint64_t vmm_vcpu_run_return_count[MAXCPU];
+static uint64_t vmm_vcpu_run_restart_preentry_count[MAXCPU];
+static uint64_t vmm_vcpu_run_restart_postexit_count[MAXCPU];
+static uint32_t vmm_vcpu_run_restart_preentry_flags[MAXCPU];
+static uint32_t vmm_vcpu_run_restart_postexit_flags[MAXCPU];
 
 static int vmm_sysctl_stats(SYSCTL_HANDLER_ARGS);
+static int vmm_sysctl_stats_flags(SYSCTL_HANDLER_ARGS);
 
 SYSCTL_NODE(_hw, OID_AUTO, vmm, CTLFLAG_RW, 0, "VMM configuration");
 SYSCTL_NODE(_hw_vmm, OID_AUTO, stats, CTLFLAG_RD, 0, "VMM statistics");
@@ -34,6 +39,18 @@ SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, vmexit, CTLTYPE_U64 | CTLFLAG_RD,
 SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, vcpu_run_return,
     CTLTYPE_U64 | CTLFLAG_RD, (void *)vmm_vcpu_run_return_count, 0,
     vmm_sysctl_stats, "QU", "Number of vmm_vcpu_run returns after VM entry");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry,
+    CTLTYPE_U64 | CTLFLAG_RD, (void *)vmm_vcpu_run_restart_preentry_count, 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry for pending root work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_postexit,
+    CTLTYPE_U64 | CTLFLAG_RD, (void *)vmm_vcpu_run_restart_postexit_count, 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries after an exit for pending root work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_flags,
+    CTLTYPE_U32 | CTLFLAG_RD, (void *)vmm_vcpu_run_restart_preentry_flags, 0,
+    vmm_sysctl_stats_flags, "IU", "OR of root-work flags that blocked VMRUN entry");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_postexit_flags,
+    CTLTYPE_U32 | CTLFLAG_RD, (void *)vmm_vcpu_run_restart_postexit_flags, 0,
+    vmm_sysctl_stats_flags, "IU", "OR of root-work flags after VMEXIT");
 
 static int
 vmm_sysctl_stats(SYSCTL_HANDLER_ARGS)
@@ -48,6 +65,19 @@ vmm_sysctl_stats(SYSCTL_HANDLER_ARGS)
 	return sysctl_handle_64(oidp, &total, 0, req);
 }
 
+static int
+vmm_sysctl_stats_flags(SYSCTL_HANDLER_ARGS)
+{
+	uint32_t *flags = arg1;
+	uint32_t value;
+	int cpu;
+
+	value = 0;
+	for (cpu = 0; cpu < ncpus; ++cpu)
+		value |= atomic_load_acq_int(&flags[cpu]);
+	return sysctl_handle_int(oidp, &value, 0, req);
+}
+
 void
 vmm_stat_vmexit(void)
 {
@@ -58,6 +88,22 @@ void
 vmm_stat_vcpu_run_return(void)
 {
 	atomic_add_64(&vmm_vcpu_run_return_count[mycpu->gd_cpuid], 1);
+}
+
+void
+vmm_stat_vcpu_run_restart_preentry(uint32_t flags)
+{
+	atomic_add_64(&vmm_vcpu_run_restart_preentry_count[mycpu->gd_cpuid], 1);
+	atomic_set_int(&vmm_vcpu_run_restart_preentry_flags[mycpu->gd_cpuid],
+	    flags);
+}
+
+void
+vmm_stat_vcpu_run_restart_postexit(uint32_t flags)
+{
+	atomic_add_64(&vmm_vcpu_run_restart_postexit_count[mycpu->gd_cpuid], 1);
+	atomic_set_int(&vmm_vcpu_run_restart_postexit_flags[mycpu->gd_cpuid],
+	    flags);
 }
 
 int
@@ -105,6 +151,14 @@ vmm_modevent(module_t module, int event, void *arg)
 		vmm_draining = false;
 		bzero(vmm_vmexit_count, sizeof(vmm_vmexit_count));
 		bzero(vmm_vcpu_run_return_count, sizeof(vmm_vcpu_run_return_count));
+		bzero(vmm_vcpu_run_restart_preentry_count,
+		    sizeof(vmm_vcpu_run_restart_preentry_count));
+		bzero(vmm_vcpu_run_restart_postexit_count,
+		    sizeof(vmm_vcpu_run_restart_postexit_count));
+		bzero(vmm_vcpu_run_restart_preentry_flags,
+		    sizeof(vmm_vcpu_run_restart_preentry_flags));
+		bzero(vmm_vcpu_run_restart_postexit_flags,
+		    sizeof(vmm_vcpu_run_restart_postexit_flags));
 		error = ENXIO;
 		SET_FOREACH(ops, vmm_backend_set) {
 			error = (*ops)->probe();
