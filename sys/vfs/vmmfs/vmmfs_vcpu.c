@@ -297,8 +297,16 @@ vmmfs_vcpu_thread_main(void *argument)
 		error = vmm_vcpu_run(thread->vcpu, &exit);
 
 		lwkt_gettoken(&vcpu->token);
-		if (error == ERESTART)
-			error = EINTR;
+		/*
+		 * SVM uses ERESTART when DragonFly has pending root work.
+		 * Unlike the NVMM ioctl path, this LWKT has no user-return path
+		 * to consume it, so it must yield before attempting VMRUN again.
+		 */
+		if (error == ERESTART) {
+			lwkt_reltoken(&vcpu->token);
+			lwkt_user_yield();
+			continue;
+		}
 		if (error == EINTR) {
 			stop_requested = vcpu->stop_requested;
 			lwkt_reltoken(&vcpu->token);
