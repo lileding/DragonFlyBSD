@@ -299,83 +299,142 @@ vmmfs_vcpu_thread_main(void *argument)
 		lwkt_gettoken(&vcpu->token);
 		/*
 		 * SVM uses ERESTART when DragonFly has pending root work.
-		 * Unlike the NVMM ioctl path, this LWKT has no user-return path
-		 * to consume it, so it must yield before attempting VMRUN again.
+		 * Unlike the NVMM ioctl path, this is a pure kernel LWKT.  Use
+		 * the kernel yield path so a stale LWKT reschedule request is
+		 * consumed before attempting VMRUN again.
 		 */
 		if (error == ERESTART) {
 			lwkt_reltoken(&vcpu->token);
-			lwkt_user_yield();
+			lwkt_yield_quick();
 			continue;
 		}
 		if (error == EINTR) {
 			stop_requested = vcpu->stop_requested;
 			lwkt_reltoken(&vcpu->token);
 			if (stop_requested)
-				break;
+				goto out;
 			continue;
 		}
-		if (error == 0 && exit != NULL &&
-		    (exit->reason == VMM_CPUEXIT_RDMSR ||
-		    exit->reason == VMM_CPUEXIT_WRMSR)) {
+		if (error != 0) {
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		}
+		if (exit == NULL) {
+			error = EIO;
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		}
+
+		switch (exit->reason) {
+		case VMM_CPUEXIT_NONE:
+			lwkt_reltoken(&vcpu->token);
+			continue;
+		case VMM_CPUEXIT_NMI_READY:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u unexpected nmi-ready exit", thread->index);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_RDMSR:
+		case VMM_CPUEXIT_WRMSR:
 			lwkt_reltoken(&vcpu->token);
 			error = vmm_vcpu_inject(thread->vcpu, &exception);
-			lwkt_gettoken(&vcpu->token);
 			if (error == 0) {
-				lwkt_reltoken(&vcpu->token);
 				continue;
 			}
-		}
-		if (error == 0 && exit != NULL &&
-		    exit->reason == VMM_CPUEXIT_NMI_READY) {
-			lwkt_reltoken(&vcpu->token);
-			continue;
-		}
-		if (error == 0 && exit != NULL &&
-		    exit->reason == VMM_CPUEXIT_NONE) {
-			lwkt_reltoken(&vcpu->token);
-			continue;
-		}
-		if (error == 0 && exit == NULL)
-			error = EIO;
-		if (error == 0 && exit->reason == VMM_CPUEXIT_HALTED) {
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u %s inject-gp failed error=%d", thread->index,
+			    exit->reason == VMM_CPUEXIT_RDMSR ? "rdmsr" : "wrmsr",
+			    error);
+			goto out;
+		case VMM_CPUEXIT_HALTED:
 			if (!thread->halted_logged) {
 				thread->halted_logged = true;
 				vmmfs_events_log(&vcpu->machine->events,
-				    "vcpu%u halted rip=%#jx",
-				    thread->index,
+				    "vcpu%u halted rip=%#jx", thread->index,
 				    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
 			}
 			lwkt_reltoken(&vcpu->token);
 			error = vmm_vcpu_wait(thread->vcpu);
-			if (error != 0)
-				break;
+			if (error == 0)
+				continue;
+			goto out;
+		case VMM_CPUEXIT_MONITOR:
+			if (exit->u.insn.npc == 0) {
+				vmmfs_events_log(&vcpu->machine->events,
+				    "vcpu%u monitor missing-npc", thread->index);
+				lwkt_reltoken(&vcpu->token);
+				goto out;
+			}
+			thread->state.gprs[VMM_X64_GPR_RIP] = exit->u.insn.npc;
+			lwkt_reltoken(&vcpu->token);
 			continue;
-		}
-		if (error == 0 && exit->reason == VMM_CPUEXIT_RDMSR) {
+		case VMM_CPUEXIT_MWAIT:
+			if (exit->u.insn.npc == 0) {
+				vmmfs_events_log(&vcpu->machine->events,
+				    "vcpu%u mwait missing-npc", thread->index);
+				lwkt_reltoken(&vcpu->token);
+				goto out;
+			}
+			thread->state.gprs[VMM_X64_GPR_RIP] = exit->u.insn.npc;
+			lwkt_reltoken(&vcpu->token);
+			error = vmm_vcpu_wait(thread->vcpu);
+			if (error == 0)
+				continue;
+			goto out;
+		case VMM_CPUEXIT_IO:
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u rdmsr msr=%#x rip=%#jx", thread->index,
-			    exit->u.rdmsr.msr,
-			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
-		} else if (error == 0 && exit->reason == VMM_CPUEXIT_WRMSR) {
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u wrmsr msr=%#x value=%#jx rip=%#jx",
-			    thread->index, exit->u.wrmsr.msr,
-			    (uintmax_t)exit->u.wrmsr.val,
-			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
-		} else if (error == 0 && exit->reason == VMM_CPUEXIT_IO) {
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u pio %s port=%#x width=%u rip=%#jx",
+			    "vcpu%u unhandled pio %s port=%#x width=%u str=%d rep=%d rip=%#jx",
 			    thread->index, exit->u.io.in ? "read" : "write",
-			    exit->u.io.port, exit->u.io.operand_size,
+			    exit->u.io.port, exit->u.io.operand_size, exit->u.io.str,
+			    exit->u.io.rep,
 			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
-		} else if (error == 0) {
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_MEMORY:
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u exit reason=%#jx",
-			    thread->index, (uintmax_t)exit->reason);
+			    "vcpu%u unhandled memory gpa=%#jx prot=%#x width=%u value=%#jx rip=%#jx",
+			    thread->index, (uintmax_t)exit->u.mem.gpa,
+			    exit->u.mem.prot, exit->u.mem.width,
+			    (uintmax_t)exit->u.mem.value,
+			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_SHUTDOWN:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u guest shutdown", thread->index);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_INT_READY:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u unexpected interrupt-ready exit", thread->index);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_TPR_CHANGED:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u unexpected tpr-changed exit", thread->index);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_CPUID:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u unhandled cpuid exit", thread->index);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		case VMM_CPUEXIT_INVALID:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u invalid exit hwcode=%#jx", thread->index,
+			    (uintmax_t)exit->u.inv.hwcode);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
+		default:
+			vmmfs_events_log(&vcpu->machine->events,
+			    "vcpu%u unsupported exit reason=%#jx", thread->index,
+			    (uintmax_t)exit->reason);
+			lwkt_reltoken(&vcpu->token);
+			goto out;
 		}
-		lwkt_reltoken(&vcpu->token);
-		break;
 	}
+
+out:
 	lwkt_gettoken(&vcpu->token);
 	if (error != 0 && error != EINTR && error != ERESTART &&
 	    !vcpu->stop_requested) {
