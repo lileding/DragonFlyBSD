@@ -230,6 +230,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&root->token);
+	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)
 		return (error);

@@ -10,6 +10,7 @@
 #include <sys/mount.h>
 #include <sys/namecache.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
@@ -94,9 +95,15 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	error = vmmfs_pciroot_create(machine, &machine->pciroot);
 	if (error != 0)
 		goto fail_stopped;
-	error = vmmfs_serialroot_create(machine, &machine->serialroot);
+	error = vmmfs_platform_x64_create(machine, &machine->platform);
 	if (error != 0)
 		goto fail_pciroot;
+	error = vmmfs_rtc_create(machine, &machine->rtc);
+	if (error != 0)
+		goto fail_platform;
+	error = vmmfs_serialroot_create(machine, &machine->serialroot);
+	if (error != 0)
+		goto fail_rtc;
 	error = vmmfs_events_create(machine, &machine->events);
 	if (error != 0)
 		goto fail_serialroot;
@@ -117,6 +124,10 @@ fail_events:
 	(void)vmmfs_events_destroy(&machine->events);
 fail_serialroot:
 	(void)vmmfs_serialroot_destroy(&machine->serialroot);
+fail_rtc:
+	(void)vmmfs_rtc_destroy(&machine->rtc);
+fail_platform:
+	(void)vmmfs_platform_x64_destroy(&machine->platform);
 fail_pciroot:
 	(void)vmmfs_pciroot_destroy(&machine->pciroot);
 fail_stopped:
@@ -139,39 +150,50 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	struct vnode *vnode;
 	int expected_stopped;
 	int runtime_active;
-	int pci_slots;
-	int serial_ports;
+	const char *object;
 	int error;
 
 	KKASSERT(machine->root == NULL);
 	lwkt_gettoken(&machine->token);
 	expected_stopped = machine->stopped.expect_stopped;
 	runtime_active = machine->machine != NULL;
-	pci_slots = !RB_EMPTY(&machine->pciroot.slots);
-	serial_ports = !RB_EMPTY(&machine->serialroot.ports);
-	if (!expected_stopped || runtime_active || pci_slots || serial_ports) {
+	if (!expected_stopped || runtime_active) {
 		lwkt_reltoken(&machine->token);
 		vmmfs_events_log(&machine->events,
-		    "destroy refused stopped=%d runtime=%d pci=%d serial=%d",
-		    expected_stopped, runtime_active, pci_slots, serial_ports);
+		    "destroy refused stopped=%d runtime=%d", expected_stopped,
+		    runtime_active);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->token);
+	object = "stopped";
 	error = vmmfs_stopped_destroy(&machine->stopped);
 	if (error != 0)
 		goto failed;
+	object = "loader";
 	error = vmmfs_loader_destroy(&machine->loader);
 	if (error != 0)
 		goto failed;
+	object = "memory";
 	error = vmmfs_memory_destroy(&machine->memory);
 	if (error != 0)
 		goto failed;
+	object = "vcpu";
 	error = vmmfs_vcpu_destroy(&machine->vcpu);
 	if (error != 0)
 		goto failed;
+	object = "serial";
 	error = vmmfs_serialroot_destroy(&machine->serialroot);
 	if (error != 0)
 		goto failed;
+	object = "rtc";
+	error = vmmfs_rtc_destroy(&machine->rtc);
+	if (error != 0)
+		goto failed;
+	object = "platform";
+	error = vmmfs_platform_x64_destroy(&machine->platform);
+	if (error != 0)
+		goto failed;
+	object = "pci";
 	error = vmmfs_pciroot_destroy(&machine->pciroot);
 	if (error != 0)
 		goto failed;
@@ -181,12 +203,15 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 
 	/* Release the reference retained by vmmfs_machine_create(). */
 	vnode = machine->vnode;
-	if (vnode != NULL)
+	if (vnode != NULL) {
+		(void)vrevoke(vnode, proc0.p_ucred);
 		vrele(vnode);
+	}
 	return (0);
 
 failed:
-	vmmfs_events_log(&machine->events, "destroy failed error=%d", error);
+	vmmfs_events_log(&machine->events, "destroy failed object=%s error=%d",
+	    object, error);
 	return (error);
 }
 
@@ -600,6 +625,8 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	struct vmm_cpustate state;
 	vmm_machine_t runtime_machine;
 	bool pci_started;
+	bool platform_started;
+	bool rtc_started;
 	bool serial_started;
 	int error;
 
@@ -607,6 +634,8 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		return (EINVAL);
 	runtime_machine = NULL;
 	pci_started = false;
+	platform_started = false;
+	rtc_started = false;
 	serial_started = false;
 	lwkt_gettoken(&machine->token);
 	if (machine->stopped.expect_stopped || machine->machine != NULL) {
@@ -646,11 +675,17 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		goto failed;
 	vmmfs_events_log(&machine->events, "pit create completed");
 	vmmfs_events_log(&machine->events, "platform prepare begin");
-	error = vmmfs_platform_x64_prepare(&machine->memory,
-	    machine->spec.vcpu.count, &machine->serialroot);
+	error = vmmfs_platform_x64_prepare(&machine->platform,
+	    &machine->memory, machine->spec.vcpu.count, &machine->serialroot);
 	if (error != 0)
 		goto failed;
 	vmmfs_events_log(&machine->events, "platform prepare completed");
+	vmmfs_events_log(&machine->events, "rtc start begin");
+	error = vmmfs_rtc_start(&machine->rtc, runtime_machine);
+	if (error != 0)
+		goto failed;
+	rtc_started = true;
+	vmmfs_events_log(&machine->events, "rtc start completed");
 	vmmfs_events_log(&machine->events, "pci root start begin");
 	error = vmmfs_pciroot_start(&machine->pciroot, runtime_machine);
 	if (error != 0)
@@ -663,6 +698,13 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		goto failed;
 	serial_started = true;
 	vmmfs_events_log(&machine->events, "serial start completed");
+	/* Its whole-legacy-PIO fallback must follow every concrete device. */
+	vmmfs_events_log(&machine->events, "platform start begin");
+	error = vmmfs_platform_x64_start(&machine->platform, runtime_machine);
+	if (error != 0)
+		goto failed;
+	platform_started = true;
+	vmmfs_events_log(&machine->events, "platform start completed");
 	vmmfs_events_log(&machine->events, "loader start begin");
 	error = vmmfs_loader_run(&machine->loader, &machine->memory, cred,
 	    &state);
@@ -693,6 +735,10 @@ failed:
 		(void)vmmfs_serialroot_stop(&machine->serialroot);
 	if (pci_started)
 		(void)vmmfs_pciroot_stop(&machine->pciroot);
+	if (rtc_started)
+		(void)vmmfs_rtc_stop(&machine->rtc);
+	if (platform_started)
+		(void)vmmfs_platform_x64_stop(&machine->platform);
 	if (runtime_machine != NULL) {
 		(void)vmmfs_vcpu_stop(&machine->vcpu);
 		(void)vmm_machine_destroy(runtime_machine);
@@ -726,6 +772,12 @@ vmmfs_machine_stop(struct vmmfs_machine *machine)
 	if (error != 0)
 		return (error);
 	error = vmmfs_serialroot_stop(&machine->serialroot);
+	if (error != 0)
+		return (error);
+	error = vmmfs_rtc_stop(&machine->rtc);
+	if (error != 0)
+		return (error);
+	error = vmmfs_platform_x64_stop(&machine->platform);
 	if (error != 0)
 		return (error);
 	error = vmmfs_pciroot_stop(&machine->pciroot);

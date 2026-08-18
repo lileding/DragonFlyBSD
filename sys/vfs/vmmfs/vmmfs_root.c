@@ -165,7 +165,9 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 {
 	struct vmmfs_machine key;
 	struct vmmfs_machine *machine;
+	int expected_stopped;
 	int error;
+	int runtime_active;
 
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (ENAMETOOLONG);
@@ -184,9 +186,14 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		lwkt_reltoken(&root->token);
 		return (ENOENT);
 	}
-	if (!machine->stopped.expect_stopped || machine->machine != NULL) {
+	expected_stopped = machine->stopped.expect_stopped;
+	runtime_active = machine->machine != NULL;
+	if (!expected_stopped || runtime_active) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&root->token);
+		vmmfs_events_log(&machine->events,
+		    "destroy refused stopped=%d runtime=%d", expected_stopped,
+		    runtime_active);
 		return (EBUSY);
 	}
 	RB_REMOVE(vmmfs_machine_tree, &root->machines, machine);
@@ -198,6 +205,8 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		machine->root = root;
 		(void)RB_INSERT(vmmfs_machine_tree, &root->machines, machine);
 		lwkt_reltoken(&machine->token);
+		vmmfs_events_log(&machine->events, "destroy rejected error=%d",
+		    error);
 	}
 	lwkt_reltoken(&root->token);
 	return (error);

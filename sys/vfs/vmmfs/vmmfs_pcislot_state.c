@@ -8,6 +8,7 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
@@ -81,6 +82,7 @@ vmmfs_pcislot_state_destroy(struct vmmfs_pcislot_state *state_node)
 		return (EINVAL);
 	vnode = state_node->vnode;
 	if (vnode != NULL) {
+		(void)vrevoke(vnode, proc0.p_ucred);
 		vx_get(vnode);
 		vgone_vxlocked(vnode);
 		vx_put(vnode);

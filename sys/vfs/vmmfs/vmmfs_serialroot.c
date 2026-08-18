@@ -10,6 +10,7 @@
 #include <sys/mount.h>
 #include <sys/namecache.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
@@ -91,20 +92,33 @@ vmmfs_serialroot_create(struct vmmfs_machine *machine,
 int
 vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
 {
+	struct vmmfs_serialport *port;
 	struct vnode *vnode;
-	int busy;
+	int error;
 
 	if (serialroot == NULL)
 		return (EINVAL);
 	if (serialroot->machine == NULL)
 		return (0);
-	lwkt_gettoken(&serialroot->machine->token);
-	busy = !RB_EMPTY(&serialroot->ports);
-	lwkt_reltoken(&serialroot->machine->token);
-	if (busy)
-		return (EBUSY);
+	for (;;) {
+		lwkt_gettoken(&serialroot->machine->token);
+		port = RB_ROOT(&serialroot->ports);
+		if (port != NULL)
+			RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, port);
+		lwkt_reltoken(&serialroot->machine->token);
+		if (port == NULL)
+			break;
+		error = vmmfs_serialport_destroy(port);
+		if (error == 0)
+			continue;
+		lwkt_gettoken(&serialroot->machine->token);
+		(void)RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, port);
+		lwkt_reltoken(&serialroot->machine->token);
+		return (error);
+	}
 	vnode = serialroot->vnode;
 	if (vnode != NULL) {
+		(void)vrevoke(vnode, proc0.p_ucred);
 		vx_get(vnode);
 		vgone_vxlocked(vnode);
 		vx_put(vnode);

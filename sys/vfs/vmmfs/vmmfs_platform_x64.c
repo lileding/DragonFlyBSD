@@ -8,11 +8,15 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 
+#include <machine/clock.h>
+#include <machine/cpufunc.h>
+
 #include <vm/vm.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_platform_x64.h"
 #include "vmmfs_serialport.h"
@@ -29,6 +33,20 @@
 #define VMMFS_PLATFORM_X64_LAPIC_GPA 0xfee00000ULL
 #define VMMFS_PLATFORM_X64_IOAPIC_GPA 0xfec00000ULL
 
+#define VMMFS_PLATFORM_X64_DELAY_PORT 0x80U
+#define VMMFS_PLATFORM_X64_DELAY_SIZE 0x10U
+#define VMMFS_PLATFORM_X64_ACPI_PORT 0x404U
+#define VMMFS_PLATFORM_X64_ACPI_SIZE_PIO 9U
+#define VMMFS_PLATFORM_X64_PM_TIMER_PORT 0x408U
+#define VMMFS_PLATFORM_X64_PM_TIMER_LAST 0x40bU
+#define VMMFS_PLATFORM_X64_PM_TIMER_FREQUENCY 3579545ULL
+#define VMMFS_PLATFORM_X64_PM_TIMER_MASK 0x00ffffffU
+#define VMMFS_PLATFORM_X64_FCH_PM_BASE 0xfed80300ULL
+#define VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_STATUS 0x0c0ULL
+#define VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA \
+	(VMMFS_PLATFORM_X64_FCH_PM_BASE + \
+	VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_STATUS)
+
 #define VMMFS_ACPI_HEADER_SIZE 36U
 #define VMMFS_ACPI_RSDP_SIZE 36U
 #define VMMFS_ACPI_FADT_SIZE 276U
@@ -37,6 +55,12 @@
 #define VMMFS_ACPI_DSDT_HEADER_SIZE VMMFS_ACPI_HEADER_SIZE
 #define VMMFS_ACPI_SERIAL_AML_SIZE 55U
 
+static int vmmfs_platform_x64_read(vmm_vcpu_t, void *,
+	struct vmm_io_read *);
+static int vmmfs_platform_x64_write(vmm_vcpu_t, void *,
+	const struct vmm_io_write *);
+static uint32_t vmmfs_platform_x64_pm_timer(
+	const struct vmmfs_platform_x64 *);
 static int vmmfs_platform_x64_write_memory(struct vmmfs_memory *, uint64_t,
 	const void *, size_t);
 static void vmmfs_platform_x64_header(uint8_t *, const char[4], uint32_t,
@@ -66,7 +90,30 @@ static const uint8_t vmmfs_platform_x64_serial_aml[] = {
 };
 
 int
-vmmfs_platform_x64_prepare(struct vmmfs_memory *memory, uint32_t vcpu_count,
+vmmfs_platform_x64_create(struct vmmfs_machine *machine,
+	struct vmmfs_platform_x64 *platform)
+{
+	if (machine == NULL || platform == NULL)
+		return (EINVAL);
+	bzero(platform, sizeof(*platform));
+	platform->machine = machine;
+	return (0);
+}
+
+int
+vmmfs_platform_x64_destroy(struct vmmfs_platform_x64 *platform)
+{
+	if (platform == NULL)
+		return (EINVAL);
+	if (platform->runtime_machine != NULL)
+		return (EBUSY);
+	platform->machine = NULL;
+	return (0);
+}
+
+int
+vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
+	struct vmmfs_memory *memory, uint32_t vcpu_count,
 	struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_serialport *port;
@@ -80,8 +127,10 @@ vmmfs_platform_x64_prepare(struct vmmfs_memory *memory, uint32_t vcpu_count,
 	uint32_t index;
 	int error;
 
-	if (memory == NULL || memory->object == NULL ||
+	if (platform == NULL || platform->machine == NULL || memory == NULL ||
+	    memory->object == NULL ||
 	    memory->machine == NULL || serialroot == NULL ||
+	    platform->machine != memory->machine ||
 	    serialroot->machine != memory->machine || vcpu_count == 0 ||
 	    vcpu_count > UINT8_MAX + 1U ||
 	    memory->machine->spec.memory.size <
@@ -111,6 +160,10 @@ vmmfs_platform_x64_prepare(struct vmmfs_memory *memory, uint32_t vcpu_count,
 	table = tables + 0x200;
 	vmmfs_platform_x64_header(table, "FACP", VMMFS_ACPI_FADT_SIZE, 6);
 	vmmfs_platform_x64_write32(table, 40, VMMFS_PLATFORM_X64_DSDT_GPA);
+	vmmfs_platform_x64_write32(table, 76,
+	    VMMFS_PLATFORM_X64_PM_TIMER_PORT);
+	table[91] = 4;
+	table[108] = 0x32;
 	vmmfs_platform_x64_write64(table, 140, VMMFS_PLATFORM_X64_DSDT_GPA);
 	vmmfs_platform_x64_checksum(table, VMMFS_ACPI_FADT_SIZE, 9);
 
@@ -173,6 +226,254 @@ vmmfs_platform_x64_prepare(struct vmmfs_memory *memory, uint32_t vcpu_count,
 	    VMMFS_PLATFORM_X64_ACPI_SIZE);
 	kfree(tables, M_VMMFS);
 	return error;
+}
+
+int
+vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
+	vmm_machine_t machine)
+{
+	int error;
+
+	if (platform == NULL || platform->machine == NULL || machine == NULL)
+		return (EINVAL);
+	if (platform->runtime_machine != NULL)
+		return (EBUSY);
+	error = vmm_machine_trap_pio_read(machine,
+	    VMMFS_PLATFORM_X64_DELAY_PORT, VMMFS_PLATFORM_X64_DELAY_SIZE,
+	    vmmfs_platform_x64_read, platform, &platform->delay_read);
+	if (error != 0)
+		return (error);
+	error = vmm_machine_trap_pio_write(machine,
+	    VMMFS_PLATFORM_X64_DELAY_PORT, VMMFS_PLATFORM_X64_DELAY_SIZE,
+	    vmmfs_platform_x64_write, platform, &platform->delay_write);
+	if (error != 0)
+		goto fail_delay_read;
+	error = vmm_machine_trap_pio_read(machine,
+	    VMMFS_PLATFORM_X64_ACPI_PORT, VMMFS_PLATFORM_X64_ACPI_SIZE_PIO,
+	    vmmfs_platform_x64_read, platform, &platform->acpi_read);
+	if (error != 0)
+		goto fail_delay_write;
+	error = vmm_machine_trap_pio_write(machine,
+	    VMMFS_PLATFORM_X64_ACPI_PORT, VMMFS_PLATFORM_X64_ACPI_SIZE_PIO,
+	    vmmfs_platform_x64_write, platform, &platform->acpi_write);
+	if (error != 0)
+		goto fail_acpi_read;
+	/*
+	 * Zen Linux reads this FCH status register during early CPU setup.
+	 * VMMFS has no FCH, so report the architectural all-ones absent value.
+	 */
+	error = vmm_machine_trap_mmio_read(machine,
+	    VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA, sizeof(uint32_t),
+	    vmmfs_platform_x64_read, platform, &platform->fch_pm_read);
+	if (error != 0)
+		goto fail_acpi_write;
+	error = vmm_machine_trap_mmio_write(machine,
+	    VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA, sizeof(uint32_t),
+	    vmmfs_platform_x64_write, platform, &platform->fch_pm_write);
+	if (error != 0)
+		goto fail_fch_pm_read;
+	/*
+	 * VMMFS has no userspace monitor to complete unrelated legacy PIO
+	 * probes.  Specific devices were registered before this catch-all range,
+	 * so an unclaimed scalar read observes an absent device and a write is
+	 * discarded.
+	 */
+	error = vmm_machine_trap_pio_read(machine, 0, 0x10000U,
+	    vmmfs_platform_x64_read, platform, &platform->fallback_read);
+	if (error != 0)
+		goto fail_fch_pm_write;
+	error = vmm_machine_trap_pio_write(machine, 0, 0x10000U,
+	    vmmfs_platform_x64_write, platform, &platform->fallback_write);
+	if (error != 0)
+		goto fail_fallback_read;
+	platform->tsc_base = rdtsc();
+	platform->runtime_machine = machine;
+	return (0);
+
+fail_fallback_read:
+	(void)vmm_machine_untrap(machine, platform->fallback_read);
+	platform->fallback_read = NULL;
+fail_fch_pm_write:
+	(void)vmm_machine_untrap(machine, platform->fch_pm_write);
+	platform->fch_pm_write = NULL;
+fail_fch_pm_read:
+	(void)vmm_machine_untrap(machine, platform->fch_pm_read);
+	platform->fch_pm_read = NULL;
+fail_acpi_write:
+	(void)vmm_machine_untrap(machine, platform->acpi_write);
+	platform->acpi_write = NULL;
+fail_acpi_read:
+	(void)vmm_machine_untrap(machine, platform->acpi_read);
+	platform->acpi_read = NULL;
+fail_delay_write:
+	(void)vmm_machine_untrap(machine, platform->delay_write);
+	platform->delay_write = NULL;
+fail_delay_read:
+	(void)vmm_machine_untrap(machine, platform->delay_read);
+	platform->delay_read = NULL;
+	return (error);
+}
+
+int
+vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
+{
+	vmm_machine_t machine;
+	vmm_io_t acpi_read;
+	vmm_io_t acpi_write;
+	vmm_io_t delay_read;
+	vmm_io_t delay_write;
+	vmm_io_t fch_pm_read;
+	vmm_io_t fch_pm_write;
+	vmm_io_t fallback_read;
+	vmm_io_t fallback_write;
+	int error;
+	int result;
+
+	if (platform == NULL || platform->machine == NULL)
+		return (EINVAL);
+	machine = platform->runtime_machine;
+	if (machine == NULL)
+		return (0);
+	acpi_read = platform->acpi_read;
+	acpi_write = platform->acpi_write;
+	delay_read = platform->delay_read;
+	delay_write = platform->delay_write;
+	fch_pm_read = platform->fch_pm_read;
+	fch_pm_write = platform->fch_pm_write;
+	fallback_read = platform->fallback_read;
+	fallback_write = platform->fallback_write;
+	platform->runtime_machine = NULL;
+	platform->acpi_read = NULL;
+	platform->acpi_write = NULL;
+	platform->delay_read = NULL;
+	platform->delay_write = NULL;
+	platform->fch_pm_read = NULL;
+	platform->fch_pm_write = NULL;
+	platform->fallback_read = NULL;
+	platform->fallback_write = NULL;
+	result = 0;
+	if (fallback_write != NULL) {
+		error = vmm_machine_untrap(machine, fallback_write);
+		if (error != 0)
+			result = error;
+	}
+	if (fallback_read != NULL) {
+		error = vmm_machine_untrap(machine, fallback_read);
+		if (result == 0)
+			result = error;
+	}
+	if (fch_pm_write != NULL) {
+		error = vmm_machine_untrap(machine, fch_pm_write);
+		if (result == 0)
+			result = error;
+	}
+	if (fch_pm_read != NULL) {
+		error = vmm_machine_untrap(machine, fch_pm_read);
+		if (result == 0)
+			result = error;
+	}
+	if (acpi_write != NULL) {
+		error = vmm_machine_untrap(machine, acpi_write);
+		if (error != 0)
+			result = error;
+	}
+	if (acpi_read != NULL) {
+		error = vmm_machine_untrap(machine, acpi_read);
+		if (result == 0)
+			result = error;
+	}
+	if (delay_write != NULL) {
+		error = vmm_machine_untrap(machine, delay_write);
+		if (result == 0)
+			result = error;
+	}
+	if (delay_read != NULL) {
+		error = vmm_machine_untrap(machine, delay_read);
+		if (result == 0)
+			result = error;
+	}
+	return (result);
+}
+
+static int
+vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
+	struct vmm_io_read *read)
+{
+	struct vmmfs_platform_x64 *platform;
+	uint64_t end;
+
+	(void)vcpu;
+	platform = argument;
+	if (platform == NULL || read == NULL)
+		return (ENOENT);
+	if (read->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
+	    read->width == VMM_IO_WIDTH_32) {
+		read->value = UINT32_MAX;
+		return (0);
+	}
+	end = read->address + read->width;
+	if (read->address >= VMMFS_PLATFORM_X64_DELAY_PORT &&
+	    end <= VMMFS_PLATFORM_X64_DELAY_PORT +
+	    VMMFS_PLATFORM_X64_DELAY_SIZE) {
+		read->value = 0;
+		return (0);
+	}
+	if (read->address >= VMMFS_PLATFORM_X64_PM_TIMER_PORT &&
+	    end <= VMMFS_PLATFORM_X64_PM_TIMER_LAST + 1U) {
+		read->value = vmmfs_platform_x64_pm_timer(platform) >>
+		    ((read->address - VMMFS_PLATFORM_X64_PM_TIMER_PORT) * 8U);
+		return (0);
+	}
+	if (read->address >= VMMFS_PLATFORM_X64_ACPI_PORT &&
+	    end <= VMMFS_PLATFORM_X64_ACPI_PORT +
+	    VMMFS_PLATFORM_X64_ACPI_SIZE_PIO) {
+		read->value = 0;
+		return (0);
+	}
+	read->value = UINT64_MAX;
+	return (0);
+}
+
+static int
+vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
+	const struct vmm_io_write *write)
+{
+	struct vmmfs_platform_x64 *platform;
+	uint64_t end;
+
+	(void)vcpu;
+	platform = argument;
+	if (platform == NULL || write == NULL)
+		return (ENOENT);
+	if (write->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
+	    write->width == VMM_IO_WIDTH_32)
+		return (0);
+	end = write->address + write->width;
+	if ((write->address >= VMMFS_PLATFORM_X64_DELAY_PORT &&
+	    end <= VMMFS_PLATFORM_X64_DELAY_PORT +
+	    VMMFS_PLATFORM_X64_DELAY_SIZE) ||
+	    (write->address >= VMMFS_PLATFORM_X64_ACPI_PORT &&
+	    end <= VMMFS_PLATFORM_X64_ACPI_PORT +
+	    VMMFS_PLATFORM_X64_ACPI_SIZE_PIO))
+		return (0);
+	return (0);
+}
+
+static uint32_t
+vmmfs_platform_x64_pm_timer(const struct vmmfs_platform_x64 *platform)
+{
+	uint64_t delta;
+	uint64_t frequency;
+	uint64_t ticks;
+
+	frequency = tsc_frequency;
+	if (frequency == 0)
+		return (0);
+	delta = rdtsc() - platform->tsc_base;
+	ticks = (delta / frequency) * VMMFS_PLATFORM_X64_PM_TIMER_FREQUENCY +
+	    ((delta % frequency) * VMMFS_PLATFORM_X64_PM_TIMER_FREQUENCY) /
+	    frequency;
+	return ((uint32_t)ticks & VMMFS_PLATFORM_X64_PM_TIMER_MASK);
 }
 
 static int

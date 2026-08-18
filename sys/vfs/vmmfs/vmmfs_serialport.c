@@ -11,6 +11,7 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
@@ -224,7 +225,6 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 	struct tty *tty;
 	struct vnode *vnode;
 	cdev_t dev;
-	bool busy;
 
 	if (port == NULL)
 		return EINVAL;
@@ -238,19 +238,18 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 	tty = port->tty;
 	vnode = port->vnode;
 	lwkt_reltoken(&port->token);
-	busy = false;
-	if (vnode != NULL) {
-		vx_get(vnode);
-		busy = vnode->v_opencount != 0;
-		vx_put(vnode);
-	}
+	if (vnode != NULL)
+		(void)vrevoke(vnode, proc0.p_ucred);
 	lwkt_gettoken(&port->token);
-	busy = busy || port->opening_count != 0;
-	if (busy)
-		port->destroying = false;
+	while (port->opening_count != 0) {
+		tsleep_interlock(port, 0);
+		if (port->opening_count != 0) {
+			lwkt_reltoken(&port->token);
+			(void)tsleep(port, PINTERLOCKED, "vmmserdestroy", 0);
+			lwkt_gettoken(&port->token);
+		}
+	}
 	lwkt_reltoken(&port->token);
-	if (busy)
-		return EBUSY;
 	if (port->taskqueue != NULL) {
 		taskqueue_drain(port->taskqueue, &port->task);
 		taskqueue_free(port->taskqueue);
@@ -433,13 +432,25 @@ vmmfs_serialport_open(struct vop_open_args *ap)
 	error = dev_dopen(dev, ap->a_mode, S_IFCHR, ap->a_cred, ap->a_fpp,
 	    vnode);
 	vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
-	if (error == 0)
-		error = vop_stdopen(ap);
+	if (error == 0) {
+		lwkt_gettoken(&port->token);
+		if (port->destroying) {
+			lwkt_reltoken(&port->token);
+			vn_unlock(vnode);
+			(void)dev_dclose(dev, ap->a_mode, S_IFCHR, *ap->a_fpp);
+			vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
+			error = ENXIO;
+		} else {
+			lwkt_reltoken(&port->token);
+			error = vop_stdopen(ap);
+		}
+	}
 done:
 	lwkt_gettoken(&port->token);
 	KKASSERT(port->opening_count != 0);
 	--port->opening_count;
 	lwkt_reltoken(&port->token);
+	wakeup(port);
 	return error;
 }
 
