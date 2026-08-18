@@ -542,8 +542,10 @@ vmm_svm_softirq_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 		os_mem_free(soft, sizeof(*soft));
 		return ENOMEM;
 	}
-	soft->wait_sipi = soft->apic_id != 0;
-	vmm_svm_softirq_vcpu_reset_lapic(soft);
+	if (soft->apic_id != 0)
+		vmm_svm_softirq_vcpu_reset(soft);
+	else
+		vmm_svm_softirq_vcpu_reset_lapic(soft);
 	lwkt_gettoken(&machine->token);
 	if (machine->targets[soft->apic_id] != NULL) {
 		lwkt_reltoken(&machine->token);
@@ -602,6 +604,8 @@ vmm_svm_softirq_vcpu_reset(struct vmm_svm_interrupt_vcpu *vcpu)
 	uint32_t mxcsr_mask = state->fpu.fx_mxcsr_mask;
 	unsigned int index;
 
+	if (mxcsr_mask == 0)
+		mxcsr_mask = x86_fpu_mxcsr_mask;
 	bzero(state, sizeof(*state));
 	for (index = VMM_X64_SEG_ES; index <= VMM_X64_SEG_GS; ++index) {
 		state->segs[index].limit = 0xffff;
@@ -1361,19 +1365,16 @@ vmm_svm_softirq_route_icr(struct vmm_svm_interrupt_vcpu *source,
 		case VMM_SVM_APIC_ICR_NMI:
 			atomic_set_int(&target->nmi_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_INIT:
 			atomic_store_rel_int(&target->sipi_pending, 0);
 			atomic_store_rel_int(&target->init_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_SIPI:
 			atomic_store_rel_int(&target->sipi_vector, vector);
 			atomic_store_rel_int(&target->sipi_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		}
 	}

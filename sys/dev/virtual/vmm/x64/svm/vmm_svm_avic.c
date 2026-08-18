@@ -1059,7 +1059,6 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	    VMM_SVM_APICBASE_ENABLED;
 	if (apic_id == 0)
 		avic->apic_base |= VMM_SVM_APICBASE_BSP;
-	avic->wait_sipi = apic_id != 0;
 	atomic_store_rel_int(&avic->host_cpu, -1);
 	atomic_store_rel_int(&avic->host_apic_id, -1);
 
@@ -1088,7 +1087,10 @@ vmm_svm_avic_vcpu_create(struct vmm_svm_interrupt_machine *machine,
 	    VMM_SVM_APIC_LVT_MASKED);
 	vmm_svm_avic_write(avic, VMM_SVM_APIC_LVT_ERROR,
 	    VMM_SVM_APIC_LVT_MASKED);
-	avic->timer_divisor = 2;
+	if (avic->apic_id != 0)
+		vmm_svm_avic_vcpu_reset(avic);
+	else
+		avic->timer_divisor = 2;
 
 	lwkt_gettoken(&machine->token);
 	if (machine->targets[apic_id] != NULL) {
@@ -1157,6 +1159,8 @@ vmm_svm_avic_vcpu_reset(struct vmm_svm_interrupt_vcpu *avic)
 	uint32_t mxcsr_mask = state->fpu.fx_mxcsr_mask;
 	unsigned int index;
 
+	if (mxcsr_mask == 0)
+		mxcsr_mask = x86_fpu_mxcsr_mask;
 	bzero(state, sizeof(*state));
 	for (index = VMM_X64_SEG_ES; index <= VMM_X64_SEG_GS; ++index) {
 		state->segs[index].limit = 0xffff;
@@ -1587,19 +1591,16 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 		case VMM_SVM_APIC_ICR_NMI:
 			atomic_set_int(&target->nmi_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_INIT:
 			atomic_store_rel_int(&target->sipi_pending, 0);
 			atomic_store_rel_int(&target->init_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_SIPI:
 			atomic_store_rel_int(&target->sipi_vector, vector);
 			atomic_store_rel_int(&target->sipi_pending, 1);
 			(void)vmm_vcpu_kick(target->vcpu);
-			wakeup(target->vcpu);
 			break;
 		}
 	}

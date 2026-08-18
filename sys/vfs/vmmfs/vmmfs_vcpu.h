@@ -6,6 +6,7 @@
 #ifndef VMMFS_VCPU_H
 #define VMMFS_VCPU_H
 
+#include <sys/thread.h>
 #include <sys/types.h>
 
 #include <dev/virtual/vmm/vmm.h>
@@ -34,12 +35,11 @@ struct vmmfs_vcpu {
 	ino_t inode;
 	struct vmmfs_vcpu_thread *threads;
 	vmm_machine_t runtime_machine;
+	/* Protects stop_requested and active_count. */
+	struct lwkt_token token;
 	uint32_t count;
-	volatile u_int active_count;
-	volatile u_int ready_count;
-	volatile u_int release;
-	volatile u_int stop_requested;
-	volatile int start_error;
+	unsigned int active_count;
+	bool stop_requested;
 };
 
 extern struct vop_ops vmmfs_vcpu_vops;
@@ -47,7 +47,7 @@ extern struct vop_ops vmmfs_vcpu_vops;
 int vmmfs_vcpu_create(struct vmmfs_machine *, struct vmmfs_vcpu *);
 int vmmfs_vcpu_destroy(struct vmmfs_vcpu *);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, vmm_machine_t,
-	const struct vmm_cpustate *);
+	const struct vmm_cpustate *bsp_state);
 int vmmfs_vcpu_stop(struct vmmfs_vcpu *);
 
 #endif /* VMMFS_VCPU_H */

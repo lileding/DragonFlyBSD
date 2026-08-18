@@ -156,7 +156,8 @@ int vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io);
 /*
  * Creates a vCPU using caller-owned architectural state.  state must remain
  * valid until vmm_vcpu_destroy(), and machine must remain valid throughout.
- * Callers must not change state while the vCPU runs.
+ * Callers must not change state while the vCPU runs.  Passing NULL requests
+ * backend-owned AP reset state and requires an irqchip-enabled machine.
  */
 int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	vmm_vcpu_t *vcpu);
@@ -202,18 +203,28 @@ int vmm_vcpu_complete_mmio_read(vmm_vcpu_t vcpu, const void *data,
 	size_t size);
 
 /*
- * Queues one architectural event for the next vCPU run.  The vCPU must not be
- * running.  At most one event can wait for entry; the event is committed only
- * after the backend has loaded architectural state and confirmed VM entry.
- * Returns EBUSY while an event is already pending.
+ * Queues one architectural event for the next vCPU run and wakes a parked
+ * frontend, if any.  The vCPU must not be running.  At most one event can wait
+ * for entry; the event is committed only after the backend has loaded
+ * architectural state and confirmed VM entry.  Returns EBUSY while an event is
+ * already pending.
  */
 int vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event);
 
 /*
  * Requests that a running vCPU return promptly without changing guest state.
- * Returns EALREADY when the vCPU is not running.
+ * A parked frontend is woken directly.  Returns EALREADY while destruction is
+ * in progress.
  */
 int vmm_vcpu_kick(vmm_vcpu_t vcpu);
+
+/*
+ * Waits for a queued event or kick after vmm_vcpu_run() reports HALTED.
+ * VMM owns the sleep channel and interlocks the wait with event injection and
+ * kick requests.  Returns EBUSY if the vCPU is running and EALREADY while it
+ * is being destroyed.
+ */
+int vmm_vcpu_wait(vmm_vcpu_t vcpu);
 
 /*
  * Destroys a non-running vCPU; returns EBUSY while vmm_vcpu_run() is active.

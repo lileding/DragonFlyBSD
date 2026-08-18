@@ -17,6 +17,7 @@
 #include "vmmfs_loader.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_pciroot.h"
+#include "vmmfs_serialroot.h"
 #include "vmmfs_stopped.h"
 #include "vmmfs_vcpu.h"
 
@@ -46,6 +47,7 @@ struct vmmfs_machine {
 	struct vmmfs_loader loader;
 	struct vmmfs_stopped stopped;
 	struct vmmfs_pciroot pciroot;
+	struct vmmfs_serialroot serialroot;
 	struct vmmfs_events events;
 };
 

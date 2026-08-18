@@ -3,11 +3,13 @@
 
 PROG=	mount_std
 MAN=	mount_std.8
-MLINKS=	mount_std.8 mount_procfs.8
+MLINKS=	mount_std.8 mount_procfs.8 \
+	mount_std.8 mount_vmmfs.8
 
 LDADD=	-lutil
 DPADD=	${LIBUTIL}
 
-LINKS=	${BINDIR}/mount_std ${BINDIR}/mount_procfs
+LINKS=	${BINDIR}/mount_std ${BINDIR}/mount_procfs \
+	${BINDIR}/mount_std ${BINDIR}/mount_vmmfs
 
 .include <bsd.prog.mk>

@@ -29,6 +29,8 @@
 #define BOOT_PARAMS_GPA		0x90000ULL
 #define CMDLINE_GPA		0x98000ULL
 #define STACK_TOP_GPA		0x80000ULL
+#define VMMFS_PLATFORM_ACPI_GPA	0x70000ULL
+#define VMMFS_PLATFORM_ACPI_SIZE	(64ULL * 1024ULL)
 #define KERNEL_LOAD_GPA		0x100000ULL
 #define KERNEL_64_ENTRY_DELTA	0x200ULL
 #define CMDLINE_CAP		PAGE_SIZE_GUEST
@@ -50,6 +52,7 @@
 #define LINUX_EXT_RAMDISK_IMAGE	0x0c0U
 #define LINUX_EXT_RAMDISK_SIZE	0x0c4U
 #define LINUX_EXT_CMD_LINE_PTR	0x0c8U
+#define LINUX_ACPI_RSDP_ADDR	0x070U
 #define LINUX_E820_ENTRIES	0x1e8U
 #define LINUX_E820_TABLE	0x2d0U
 #define LINUX_E820_ENTRY_SIZE	20U
@@ -429,8 +432,16 @@ build_boot_params(uint8_t *mem, uint64_t mem_size,
 		    (uint32_t)(initramfs->file.size >> 32));
 	}
 
+	write64(boot_params, LINUX_ACPI_RSDP_ADDR,
+	    VMMFS_PLATFORM_ACPI_GPA);
 	e820_count = 0;
-	write_e820_entry(boot_params, e820_count++, 0, 0x9f000,
+	write_e820_entry(boot_params, e820_count++, 0,
+	    VMMFS_PLATFORM_ACPI_GPA, LINUX_E820_RAM);
+	write_e820_entry(boot_params, e820_count++, VMMFS_PLATFORM_ACPI_GPA,
+	    VMMFS_PLATFORM_ACPI_SIZE, LINUX_E820_RESERVED);
+	write_e820_entry(boot_params, e820_count++,
+	    VMMFS_PLATFORM_ACPI_GPA + VMMFS_PLATFORM_ACPI_SIZE,
+	    0x9f000 - (VMMFS_PLATFORM_ACPI_GPA + VMMFS_PLATFORM_ACPI_SIZE),
 	    LINUX_E820_RAM);
 	write_e820_entry(boot_params, e820_count++, 0x9f000,
 	    ONE_MIB - 0x9f000, LINUX_E820_RESERVED);

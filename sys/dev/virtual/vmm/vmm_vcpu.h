@@ -16,6 +16,8 @@ struct vmm_vcpu {
 	struct vmm_machine *machine;
 	const struct vmm_backend_ops *backend_ops;
 	struct vmm_cpustate *state;
+	/* True when VMM allocated reset state for an AP. */
+	bool state_allocated;
 	/* One caller-supplied event, committed only immediately before VM entry. */
 	struct vmm_cpuevent event;
 	/* Assigned once by machine under its token; stable for this vCPU. */

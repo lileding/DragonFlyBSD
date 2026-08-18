@@ -64,7 +64,6 @@ SUBDIR=	adjkerntz \
 	mount_tmpfs \
 	mount_udf \
 	mount_ufs \
-	mount_vmmfs \
 	mountctl \
 	mountd \
 	natacontrol \

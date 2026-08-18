@@ -233,8 +233,18 @@ vmm_svm_stgi(void)
 #define MSR_NB_CFG		0xC001001F	/* Northbridge Configuration */
 #define		NB_CFG_INITAPICCPUIDLO	__BIT(54)
 
+#define MSR_K7_HWCR		0xC0010015	/* Hardware Configuration */
+#define HWCR_MC_STATUS_WR_EN	__BIT(18)
+#define HWCR_TSC_FREQ_SEL	__BIT(24)
+#define HWCR_IRPERF_EN		__BIT(30)
+#define HWCR_GUEST_FIXED	HWCR_TSC_FREQ_SEL
+#define HWCR_IGNORE		(0x8ULL | 0x40ULL | 0x100ULL)
+#define HWCR_VALID		(HWCR_MC_STATUS_WR_EN | HWCR_TSC_FREQ_SEL | \
+				 HWCR_IRPERF_EN)
+
 #define MSR_CMPHALT		0xC0010055	/* Interrupt Pending and CMP-Halt */
 #define MSR_VM_HSAVE_PA		0xC0010117	/* Host Save Area Physical Address */
+#define MSR_LS_CFG		0xC0011020	/* Load-Store Configuration */
 #define MSR_IC_CFG		0xC0011021	/* Instruction Cache Configuration */
 #define MSR_DE_CFG		0xC0011029	/* Decode Configuration */
 #define MSR_UCODE_AMD_PATCHLEVEL 0x0000008B
@@ -778,6 +788,7 @@ struct vmm_svm_cpudata {
 	uint64_t gtsc_offset;
 	uint64_t gtsc_match;
 	uint64_t gtsc_generation;
+	uint64_t hwcr;
 	struct vmm_svm_xsave gxsave __aligned(64);
 	size_t cpuid_entry_count;
 	struct vmm_cpuid_entry cpuid_entries[SVM_NCPUID_ENTRIES];
@@ -1666,6 +1677,7 @@ vmm_svm_exit_io(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 
 static const uint64_t msr_ignore_list[] = {
 	MSR_CMPHALT,
+	MSR_LS_CFG,
 	MSR_DE_CFG,
 	MSR_IC_CFG,
 	MSR_UCODE_AMD_PATCHLEVEL
@@ -1714,6 +1726,12 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 			cpudata->gprs[VMM_X64_GPR_RDX] = (val >> 32);
 			goto handled;
 		}
+		if (exit->u.rdmsr.msr == MSR_K7_HWCR) {
+			val = cpudata->hwcr;
+			vmcb->state.rax = (val & 0xFFFFFFFF);
+			cpudata->gprs[VMM_X64_GPR_RDX] = (val >> 32);
+			goto handled;
+		}
 		for (i = 0; i < __arraycount(msr_ignore_list); i++) {
 			if (msr_ignore_list[i] != exit->u.rdmsr.msr)
 				continue;
@@ -1738,6 +1756,14 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 		if (exit->u.wrmsr.msr == MSR_TSC) {
 			vmm_svm_machine_set_tsc(vcpu->machine,
 			    exit->u.wrmsr.val);
+			goto handled;
+		}
+		if (exit->u.wrmsr.msr == MSR_K7_HWCR) {
+			val = exit->u.wrmsr.val & ~HWCR_IGNORE;
+			if (val & ~HWCR_VALID)
+				goto error;
+			cpudata->hwcr = (val & ~HWCR_GUEST_FIXED) |
+			    HWCR_GUEST_FIXED;
 			goto handled;
 		}
 		for (i = 0; i < __arraycount(msr_ignore_list); i++) {
@@ -2026,13 +2052,10 @@ vmm_svm_htlb_flush(struct vmm_machine *mach, struct vmm_svm_cpudata *cpudata)
 	struct vmcb *vmcb = cpudata->vmcb;
 	uint64_t machgen;
 
-#if defined(__NetBSD__)
-	machgen = ((struct vmm_svm_machdata *)mach->backend_state)->mach_htlb_gen;
-#elif defined(__DragonFly__)
 	clear_xinvltlb();
 	machgen = vmspace_pmap(mach->vmspace)->pm_invgen;
-#endif
-	if (__predict_true(machgen == cpudata->vcpu_htlb_gen)) {
+	if (__predict_true(machgen == cpudata->vcpu_htlb_gen &&
+	    !cpudata->htlb_want_flush)) {
 		return machgen;
 	}
 
@@ -2324,6 +2347,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	uint64_t machgen;
 	uint64_t tsc_generation;
+	uint32_t tlb_ctrl;
+	bool host_interrupts_enabled;
 	int hcpu;
 	int error = 0;
 
@@ -2354,18 +2379,20 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 				vmm_svm_vmcb_cache_flush_all(vmcb);
 				cpudata->gtsc_want_update = true;
 			}
-#ifdef __DragonFly__
 			/*
-			 * The guest pmap records every CPU on which this vCPU has entered.
-			 * It is a machine-wide bitset and is cleared only at machine teardown.
+			 * Publish this CPU while it can execute the guest NPT pmap.
+			 * The VM pager uses pm_active to synchronize invalidation before
+			 * reclaiming a guest backing page.  This must precede CLGI so an
+			 * XINVLTLB IPI can force VMRUN to return to the host.
 			 */
 			pmap_add_cpu(mach->vmspace, hcpu);
-#endif
 		}
-		if (__predict_false(cpudata->gtlb_want_flush ||
-				    cpudata->htlb_want_flush))
-		{
-			vmcb->ctrl.tlb_ctrl = vmm_svm_ctrl_tlb_flush;
+		tlb_ctrl = (cpudata->gtlb_want_flush ||
+		    cpudata->htlb_want_flush) ? vmm_svm_ctrl_tlb_flush : 0;
+		if (tlb_ctrl != 0) {
+			vmcb->ctrl.tlb_ctrl = tlb_ctrl;
+			vmm_svm_vmcb_cache_flush(vmcb,
+			    VMCB_CTRL_VMCB_CLEAN_ASID);
 		} else {
 			vmcb->ctrl.tlb_ctrl = 0;
 		}
@@ -2434,7 +2461,17 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 
 		vmm_svm_interrupt_ops->vcpu_enter(cpudata->interrupt);
 		atomic_store_rel_int(&cpudata->running_cpu, hcpu);
+		/*
+		 * V_INTR_MASKING makes the host IF at VMRUN control physical
+		 * interrupt delivery while the guest runs.  Keep GIF clear while
+		 * switching guest state, then enter with IF set so root timer and
+		 * IPI delivery produce an INTR VMEXIT.  VMRUN itself sets GIF after
+		 * loading guest state; VMEXIT clears it before returning here.
+		 */
+		host_interrupts_enabled = (read_rflags() & PSL_I) != 0;
+		cpu_enable_intr();
 		vmm_svm_vmrun(cpudata->vmcb_pa, cpudata->gprs);
+		cpu_disable_intr();
 		vmm_stat_vmexit();
 		atomic_store_rel_int(&cpudata->running_cpu, -1);
 		vmm_svm_interrupt_ops->vcpu_leave(cpudata->interrupt);
@@ -2443,6 +2480,8 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		vmm_svm_vcpu_guest_misc_leave(vcpu);
 		vmm_svm_vcpu_guest_dbregs_leave(vcpu);
 		vmm_svm_stgi();
+		if (host_interrupts_enabled)
+			cpu_enable_intr();
 
 		vmm_svm_vmcb_cache_default(vmcb);
 
@@ -2546,11 +2585,18 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			break;
 		}
 
-		/* If no reason to return to userland, keep rolling. */
-		if (os_return_needed()) {
+		/* A concurrent kick must return through vmm_vcpu_run(). */
+		if (exit->reason == VMM_CPUEXIT_NONE &&
+		    atomic_load_acq_int(&vcpu->kick_pending) != 0) {
 			break;
 		}
+
+		/* Preserve an architectural exit for the generic VMM dispatcher. */
 		if (exit->reason != VMM_CPUEXIT_NONE) {
+			break;
+		}
+		if (os_return_needed()) {
+			error = ERESTART;
 			break;
 		}
 	}
@@ -2566,6 +2612,14 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	if (error == 0)
 		*reason = exit;
 	return error;
+}
+
+void
+vmm_svm_vcpu_memory_mapping_changed(struct vmm_vcpu *vcpu)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+
+	cpudata->htlb_want_flush = true;
 }
 
 static void
@@ -3152,6 +3206,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 
 	vcpu->backend = cpudata;
 	cpudata->hcpu_last = -1;
+	cpudata->hwcr = HWCR_GUEST_FIXED;
 	atomic_store_rel_int(&cpudata->running_cpu, -1);
 
 	/* VMCB */
@@ -3502,14 +3557,6 @@ vmm_svm_machine_destroy(struct vmm_machine *mach)
 
 	if (machdata == NULL)
 		return;
-#ifdef __DragonFly__
-	/*
-	 * VMRUN publishes host CPUs in this guest pmap.  Tear them down before
-	 * an irqchip destroys a guest-pmap mapping such as the AVIC access page.
-	 * pm_active is a shared CPU bitset, not a per-vCPU reference count.
-	 */
-	pmap_del_all_cpus(mach->vmspace);
-#endif
 	if (machdata->interrupt != NULL)
 		vmm_svm_interrupt_ops->machine_destroy(machdata->interrupt);
 	mach->backend_state = NULL;

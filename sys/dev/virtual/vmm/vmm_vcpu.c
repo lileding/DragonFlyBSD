@@ -6,7 +6,6 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 #include <sys/mman.h>
-
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
@@ -26,7 +25,7 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 	struct vmm_vcpu *vc;
 	int error;
 
-	if (machine == NULL || state == NULL || vcpu == NULL)
+	if (machine == NULL || vcpu == NULL)
 		return EINVAL;
 
 	*vcpu = NULL;
@@ -36,25 +35,45 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 
 	vc->machine = machine;
 	vc->backend_ops = machine->backend;
-	vc->state = state;
+	if (state != NULL) {
+		vc->state = state;
+	} else {
+		vc->state = kmalloc(sizeof(*vc->state), M_VMM,
+		    M_WAITOK | M_ZERO);
+		if (vc->state == NULL) {
+			kfree(vc, M_VMM);
+			return ENOMEM;
+		}
+		vc->state_allocated = true;
+	}
 	vc->memory_exit_mode = VMM_MEMORY_EXIT_RAW;
 	lwkt_token_init(&vc->token, "vmmvcpu");
 	error = vmm_x64_emul_init(vc);
 	if (error != 0) {
+		if (vc->state_allocated)
+			kfree(vc->state, M_VMM);
 		kfree(vc, M_VMM);
 		return error;
 	}
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying ||
 	    machine->next_vcpu_id == (unsigned int)-1) {
-		lwkt_reltoken(&machine->token);
-		vmm_x64_emul_uninit(vc);
-		kfree(vc, M_VMM);
-		return EOVERFLOW;
+		error = EOVERFLOW;
+	} else if (state == NULL && !machine->irqchip) {
+		error = EINVAL;
+	} else {
+		vc->id = machine->next_vcpu_id++;
+		++machine->vcpu_count;
+		error = 0;
 	}
-	vc->id = machine->next_vcpu_id++;
-	++machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
+	if (error != 0) {
+		vmm_x64_emul_uninit(vc);
+		if (vc->state_allocated)
+			kfree(vc->state, M_VMM);
+		kfree(vc, M_VMM);
+		return error;
+	}
 	error = vc->backend_ops->vcpu_create(vc);
 	if (error != 0) {
 		lwkt_gettoken(&machine->token);
@@ -62,6 +81,8 @@ vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 		--machine->vcpu_count;
 		lwkt_reltoken(&machine->token);
 		vmm_x64_emul_uninit(vc);
+		if (vc->state_allocated)
+			kfree(vc->state, M_VMM);
 		kfree(vc, M_VMM);
 		return error;
 	}
@@ -244,8 +265,10 @@ vmm_vcpu_run(vmm_vcpu_t vcpu, struct vmm_cpuexit **reason)
 		    trunc_page(exit->u.mem.gpa), exit->u.mem.prot,
 		    (exit->u.mem.prot & VM_PROT_WRITE) ?
 		    VM_FAULT_DIRTY : VM_FAULT_NORMAL);
-		if (fault_error == KERN_SUCCESS)
+		if (fault_error == KERN_SUCCESS) {
+			vcpu->backend_ops->vcpu_memory_mapping_changed(vcpu);
 			continue;
+		}
 		if (vcpu->memory_exit_mode == VMM_MEMORY_EXIT_RAW) {
 			error = 0;
 			break;
@@ -339,25 +362,58 @@ vmm_vcpu_inject(vmm_vcpu_t vcpu, const struct vmm_cpuevent *event)
 	}
 	vcpu->event = *event;
 	vcpu->event_pending = 1;
+	atomic_store_rel_int(&vcpu->kick_pending, 1);
 	lwkt_reltoken(&vcpu->token);
+	wakeup(vcpu);
 	return 0;
 }
 
 int
 vmm_vcpu_kick(vmm_vcpu_t vcpu)
 {
+	int running;
+
 	if (vcpu == NULL)
 		return EINVAL;
 
 	lwkt_gettoken(&vcpu->token);
-	if (!vcpu->running || vcpu->destroying) {
+	if (vcpu->destroying) {
 		lwkt_reltoken(&vcpu->token);
 		return EALREADY;
 	}
 	atomic_store_rel_int(&vcpu->kick_pending, 1);
+	running = vcpu->running;
 	lwkt_reltoken(&vcpu->token);
-	vcpu->backend_ops->vcpu_kick(vcpu);
+	if (running)
+		vcpu->backend_ops->vcpu_kick(vcpu);
+	else
+		wakeup(vcpu);
 	return 0;
+}
+
+int
+vmm_vcpu_wait(vmm_vcpu_t vcpu)
+{
+	int error;
+
+	if (vcpu == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->destroying) {
+		error = EALREADY;
+	} else if (vcpu->running) {
+		error = EBUSY;
+	} else if (atomic_swap_int(&vcpu->kick_pending, 0) != 0) {
+		error = 0;
+	} else {
+		/* vcpu->token serializes the condition with kick's wakeup. */
+		tsleep_interlock(vcpu, 0);
+		lwkt_reltoken(&vcpu->token);
+		return tsleep(vcpu, PINTERLOCKED, "vmmhlt", 0);
+	}
+	lwkt_reltoken(&vcpu->token);
+	return error;
 }
 
 int
@@ -385,6 +441,8 @@ vmm_vcpu_destroy(vmm_vcpu_t vcpu)
 	KKASSERT(machine->vcpu_count > 0);
 	--machine->vcpu_count;
 	lwkt_reltoken(&machine->token);
+	if (vcpu->state_allocated)
+		kfree(vcpu->state, M_VMM);
 	kfree(vcpu, M_VMM);
 	return 0;
 }

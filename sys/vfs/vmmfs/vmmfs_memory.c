@@ -24,6 +24,7 @@
 #include "vmmfs.h"
 
 #define VMMFS_MEMORY_MODE 0644
+#define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 
 static int vmmfs_memory_access(struct vop_access_args *);
 static int vmmfs_memory_getattr(struct vop_getattr_args *);
@@ -154,7 +155,6 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory)
 	struct vm_object *object;
 	struct vmspace *vmspace;
 	uint64_t size;
-	int error;
 
 	if (memory == NULL || memory->machine == NULL)
 		return (EINVAL);
@@ -169,20 +169,37 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory)
 	if (object == NULL)
 		return (ENOMEM);
 	vm_object_set_flag(object, OBJ_NOSPLIT);
-	vmspace = vmspace_alloc(0, (vm_offset_t)size);
+	/*
+	 * Keep the complete GPA namespace available.  RAM is the one mapped
+	 * vm_object; platform MMIO and future PCI windows remain unmapped holes.
+	 */
+	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VMMFS_GPA_MAX);
 	if (vmspace == NULL) {
 		vm_object_deallocate(object);
 		return (ENOMEM);
 	}
+	/* VMM transforms this empty pmap to NPT before RAM is mapped into it. */
 	pmap_maybethreaded(vmspace_pmap(vmspace));
-	error = vmmfs_memory_map_object(vmspace, object, size);
-	if (error != 0) {
-		vmspace_rel(vmspace);
-		vm_object_deallocate(object);
-		return (error);
-	}
 	memory->object = object;
 	memory->run_vmspace = vmspace;
+	return (0);
+}
+
+int
+vmmfs_memory_map(struct vmmfs_memory *memory)
+{
+	uint64_t size;
+	int error;
+
+	if (memory == NULL || memory->object == NULL ||
+	    memory->run_vmspace == NULL || memory->mapped)
+		return (EINVAL);
+	size = memory->machine->spec.memory.size;
+	error = vmmfs_memory_map_object(memory->run_vmspace, memory->object,
+	    size);
+	if (error != 0)
+		return (error);
+	memory->mapped = true;
 	return (0);
 }
 
@@ -192,7 +209,8 @@ vmmfs_memory_snapshot(struct vmmfs_memory *memory)
 	struct vmspace *boot_vmspace;
 
 	if (memory == NULL || memory->object == NULL ||
-	    memory->run_vmspace == NULL || memory->boot_vmspace != NULL)
+	    memory->run_vmspace == NULL || !memory->mapped ||
+	    memory->boot_vmspace != NULL)
 		return (EINVAL);
 	boot_vmspace = vmspace_fork(memory->run_vmspace, NULL, NULL);
 	if (boot_vmspace == NULL)
@@ -217,10 +235,15 @@ vmmfs_memory_release(struct vmmfs_memory *memory)
 	memory->object = NULL;
 	memory->boot_vmspace = NULL;
 	memory->run_vmspace = NULL;
-	if (run_vmspace != NULL)
+	memory->mapped = false;
+	if (run_vmspace != NULL) {
+		pmap_del_all_cpus(run_vmspace);
 		vmspace_rel(run_vmspace);
-	if (boot_vmspace != NULL)
+	}
+	if (boot_vmspace != NULL) {
+		pmap_del_all_cpus(boot_vmspace);
 		vmspace_rel(boot_vmspace);
+	}
 	if (object != NULL)
 		vm_object_deallocate(object);
 }

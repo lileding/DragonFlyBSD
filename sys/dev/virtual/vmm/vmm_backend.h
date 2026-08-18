@@ -44,6 +44,8 @@ struct vmm_backend_ops {
 	int (*vcpu_io)(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
 	/* Handle one scalar access claimed by the backend, or return ENOENT. */
 	int (*vcpu_mmio)(struct vmm_vcpu *, uint64_t, size_t, bool, uint64_t *);
+	/* Retry after the core populated a guest RAM mapping. */
+	void (*vcpu_memory_mapping_changed)(struct vmm_vcpu *);
 	void (*vcpu_destroy)(struct vmm_vcpu *);
 	/* Load the frontend-owned architectural state before a public run. */
 	void (*vcpu_setstate)(struct vmm_vcpu *);

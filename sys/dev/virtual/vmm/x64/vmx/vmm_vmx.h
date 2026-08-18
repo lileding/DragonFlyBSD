@@ -42,6 +42,7 @@ int vmm_vmx_vcpu_io(struct vmm_vcpu *, const struct vmm_cpuexit_io *);
 int vmm_vmx_vcpu_mmio(struct vmm_vcpu *, uint64_t, size_t, bool,
     uint64_t *);
 void vmm_vmx_vcpu_destroy(struct vmm_vcpu *);
+void vmm_vmx_vcpu_memory_mapping_changed(struct vmm_vcpu *);
 void vmm_vmx_vcpu_setstate(struct vmm_vcpu *);
 int vmm_vmx_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_vmx_vcpu_getstate(struct vmm_vcpu *);

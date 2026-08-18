@@ -88,6 +88,7 @@ struct vmmfs_loader_fd {
 
 struct vmmfs_loader_process {
 	const char *script;
+	struct vmmfs_events *events;
 	pid_t pid;
 	struct vmmfs_loader_handler handler;
 	struct file *memory_file;
@@ -107,7 +108,7 @@ static int vmmfs_loader_handler_register(struct vmmfs_loader_handler *);
 static void vmmfs_loader_handler_unregister(struct vmmfs_loader_handler *);
 static void vmmfs_loader_exit_callback(void *, int);
 static int vmmfs_loader_process_init(struct vmmfs_loader_process *,
-	const char *, struct ucred *);
+	const char *, struct ucred *, struct vmmfs_events *);
 static int vmmfs_loader_process_install(struct vmmfs_loader_process *,
 	struct vm_object *, uint64_t);
 static int vmmfs_loader_process_get_state(struct vmmfs_loader_process *,
@@ -251,7 +252,6 @@ int
 vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
 	struct ucred *cred, struct vmm_cpustate *state)
 {
-	char event[96];
 	struct vmmfs_loader_process process;
 	int error;
 
@@ -262,15 +262,14 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
 		return (EINVAL);
 	bzero(&process, sizeof(process));
 	error = vmmfs_loader_process_init(&process,
-	    loader->machine->spec.loader.script, cred);
+	    loader->machine->spec.loader.script, cred, &loader->machine->events);
 	if (error != 0) {
-		ksnprintf(event, sizeof(event),
+		vmmfs_events_log(&loader->machine->events,
 		    "loader initialization failed error=%d", error);
-		vmmfs_events_log(&loader->machine->events, event);
 		return (error);
 	}
-	ksnprintf(event, sizeof(event), "loader started pid=%d", process.pid);
-	vmmfs_events_log(&loader->machine->events, event);
+	vmmfs_events_log(&loader->machine->events, "loader started pid=%d",
+	    process.pid);
 	error = vmmfs_loader_process_install(&process, memory->object,
 	    memory->machine->spec.memory.size);
 	if (error == 0)
@@ -280,10 +279,10 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
 	if (error == 0)
 		error = vmmfs_loader_process_get_state(&process, state);
 	if (error == 0)
-		ksnprintf(event, sizeof(event), "loader completed");
+		vmmfs_events_log(&loader->machine->events, "loader completed");
 	else
-		ksnprintf(event, sizeof(event), "loader failed error=%d", error);
-	vmmfs_events_log(&loader->machine->events, event);
+		vmmfs_events_log(&loader->machine->events,
+		    "loader failed error=%d", error);
 	vmmfs_loader_process_finish(&process);
 	return (error);
 }
@@ -360,22 +359,26 @@ vmmfs_loader_process_exit(struct thread *thread)
 
 static int
 vmmfs_loader_process_init(struct vmmfs_loader_process *process,
-	const char *script, struct ucred *cred)
+	const char *script, struct ucred *cred, struct vmmfs_events *events)
 {
 	struct proc *child;
 	struct lwp *child_lwp;
 	int error;
 	int state;
 
-	if (process == NULL || script == NULL || script[0] == '\0' || cred == NULL)
+	if (process == NULL || script == NULL || script[0] == '\0' || cred == NULL ||
+	    events == NULL)
 		return (EINVAL);
 	process->script = script;
+	process->events = events;
 	process->state = VMMFS_LOADER_INITING;
+	error = 0;
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
 	if (error != 0)
 		return (error);
 	process->pid = child->p_pid;
+	vmmfs_events_log(process->events, "loader fork completed");
 	process->handler.pid = process->pid;
 	process->handler.exit_callback = vmmfs_loader_exit_callback;
 	process->handler.argument = process;
@@ -387,12 +390,14 @@ vmmfs_loader_process_init(struct vmmfs_loader_process *process,
 		process->pid = 0;
 		return (error);
 	}
+	vmmfs_events_log(process->events, "loader handler registered");
 	child_lwp = ONLY_LWP_IN_PROC(child);
 	vmmfs_loader_set_process_cred(child, cred);
 	cpu_set_fork_handler(child_lwp, vmmfs_loader_child, process);
 	PHOLD(child);
 	start_forked_proc(curthread->td_lwp, child);
 	PRELE(child);
+	vmmfs_events_log(process->events, "loader child scheduled");
 	for (;;) {
 		state = atomic_fetchadd_int(&process->state, 0);
 		if (state == VMMFS_LOADER_PAUSED)
@@ -585,6 +590,7 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 	if (!atomic_cmpset_int(&process->state, VMMFS_LOADER_INITING,
 	    VMMFS_LOADER_PAUSED))
 		vmmfs_loader_child_exit(W_EXITCODE(127, SIGKILL));
+	vmmfs_events_log(process->events, "loader child paused");
 	wakeup(&process->handler);
 	for (;;) {
 		state = atomic_fetchadd_int(&process->state, 0);

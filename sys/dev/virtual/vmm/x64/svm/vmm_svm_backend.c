@@ -92,6 +92,7 @@ const struct vmm_backend_ops vmm_svm_backend = {
 	.vcpu_set_lapic = vmm_svm_vcpu_set_lapic,
 	.vcpu_io = vmm_svm_vcpu_io,
 	.vcpu_mmio = vmm_svm_vcpu_mmio,
+	.vcpu_memory_mapping_changed = vmm_svm_vcpu_memory_mapping_changed,
 	.vcpu_destroy = vmm_svm_vcpu_destroy,
 	.vcpu_setstate = vmm_svm_vcpu_setstate,
 	.vcpu_run = vmm_svm_vcpu_run,

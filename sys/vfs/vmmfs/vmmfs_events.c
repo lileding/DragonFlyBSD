@@ -9,12 +9,12 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <sys/stdarg.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
 #include <machine/cpufunc.h>
-
 #include "vmmfs.h"
 
 #define VMMFS_EVENTS_MODE 0644
@@ -108,8 +108,10 @@ vmmfs_events_destroy(struct vmmfs_events *events)
 }
 
 void
-vmmfs_events_log(struct vmmfs_events *events, const char *message)
+vmmfs_events_log(struct vmmfs_events *events, const char *format, ...)
 {
+	va_list ap;
+	char message[VMMFS_EVENTS_LINE_SIZE];
 	char text[VMMFS_EVENTS_LINE_SIZE];
 	char line[VMMFS_EVENTS_LINE_SIZE];
 	uint64_t tsc;
@@ -118,7 +120,12 @@ vmmfs_events_log(struct vmmfs_events *events, const char *message)
 	size_t i;
 	int result;
 
-	if (events == NULL || message == NULL)
+	if (events == NULL || format == NULL)
+		return;
+	va_start(ap, format);
+	result = kvsnprintf(message, sizeof(message), format, ap);
+	va_end(ap);
+	if (result < 0)
 		return;
 	length = strnlen(message, sizeof(text) - 1);
 	for (i = 0; i < length; ++i) {

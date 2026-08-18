@@ -1166,6 +1166,7 @@ struct vmm_vmx_cpudata {
 	uint64_t asid;
 	bool gtlb_want_flush;
 	bool gtsc_want_update;
+	bool htlb_force_flush;
 	uint64_t vcpu_htlb_gen;
 	os_cpuset_t *htlb_want_flush;
 	int hcpu_last;
@@ -2850,13 +2851,10 @@ vmm_vmx_htlb_flush(struct vmm_machine *mach, struct vmm_vmx_cpudata *cpudata)
 	struct ept_desc ept_desc;
 	uint64_t machgen;
 
-#if defined(__NetBSD__)
-	machgen = ((struct vmm_vmx_machdata *)mach->backend_state)->mach_htlb_gen;
-#elif defined(__DragonFly__)
 	clear_xinvltlb();
 	machgen = vmspace_pmap(mach->vmspace)->pm_invgen;
-#endif
-	if (__predict_true(machgen == cpudata->vcpu_htlb_gen)) {
+	if (__predict_true(machgen == cpudata->vcpu_htlb_gen &&
+	    !cpudata->htlb_force_flush)) {
 		return machgen;
 	}
 
@@ -2874,6 +2872,7 @@ vmm_vmx_htlb_flush_ack(struct vmm_vmx_cpudata *cpudata, uint64_t machgen)
 {
 	cpudata->vcpu_htlb_gen = machgen;
 	os_cpuset_clear(cpudata->htlb_want_flush, os_curcpu_number());
+	cpudata->htlb_force_flush = false;
 }
 
 static inline void
@@ -3154,6 +3153,7 @@ restart:
 
 		/* If no reason to return to userland, keep rolling. */
 		if (os_return_needed()) {
+			error = ERESTART;
 			break;
 		}
 		if (exit->reason != VMM_CPUEXIT_NONE) {
@@ -3180,6 +3180,14 @@ restart:
 	if (error == 0)
 		*reason = exit;
 	return error;
+}
+
+void
+vmm_vmx_vcpu_memory_mapping_changed(struct vmm_vcpu *vcpu)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+
+	cpudata->htlb_force_flush = true;
 }
 
 static void

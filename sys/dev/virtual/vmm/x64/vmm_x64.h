@@ -8,6 +8,9 @@
 
 #include <sys/types.h>
 
+/* x86 architectural exception vectors. */
+#define VMM_X64_EXCEPTION_GP	13U
+
 /* General-purpose register indices. */
 #define VMM_X64_GPR_RAX	0
 #define VMM_X64_GPR_RCX	1

@@ -16,6 +16,7 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_platform_x64.h"
 
 #define VMMFS_MACHINE_MODE 0555
 
@@ -93,9 +94,12 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	error = vmmfs_pciroot_create(machine, &machine->pciroot);
 	if (error != 0)
 		goto fail_stopped;
-	error = vmmfs_events_create(machine, &machine->events);
+	error = vmmfs_serialroot_create(machine, &machine->serialroot);
 	if (error != 0)
 		goto fail_pciroot;
+	error = vmmfs_events_create(machine, &machine->events);
+	if (error != 0)
+		goto fail_serialroot;
 	error = getnewvnode(VT_SYNTH, root->mount, &vnode, 0, 0);
 	if (error != 0)
 		goto fail_events;
@@ -111,6 +115,8 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 
 fail_events:
 	(void)vmmfs_events_destroy(&machine->events);
+fail_serialroot:
+	(void)vmmfs_serialroot_destroy(&machine->serialroot);
 fail_pciroot:
 	(void)vmmfs_pciroot_destroy(&machine->pciroot);
 fail_stopped:
@@ -136,7 +142,8 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	KKASSERT(machine->root == NULL);
 	lwkt_gettoken(&machine->token);
 	if (!machine->stopped.expect_stopped || machine->machine != NULL ||
-	    !RB_EMPTY(&machine->pciroot.slots)) {
+	    !RB_EMPTY(&machine->pciroot.slots) ||
+	    !RB_EMPTY(&machine->serialroot.ports)) {
 		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
@@ -154,6 +161,9 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	if (error != 0)
 		return (error);
 	error = vmmfs_vcpu_destroy(&machine->vcpu);
+	if (error != 0)
+		return (error);
+	error = vmmfs_serialroot_destroy(&machine->serialroot);
 	if (error != 0)
 		return (error);
 	error = vmmfs_pciroot_destroy(&machine->pciroot);
@@ -377,6 +387,9 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 	else if (ncp->nc_nlen == sizeof("pci") - 1 &&
 	    bcmp(ncp->nc_name, "pci", sizeof("pci") - 1) == 0)
 		vnode = machine->pciroot.vnode;
+	else if (ncp->nc_nlen == sizeof("serial") - 1 &&
+	    bcmp(ncp->nc_name, "serial", sizeof("serial") - 1) == 0)
+		vnode = machine->serialroot.vnode;
 	else if (ncp->nc_nlen == sizeof("stopped") - 1 &&
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) == 0)
 		vnode = machine->stopped.expect_stopped ? machine->stopped.vnode : NULL;
@@ -533,6 +546,15 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 		if (!stop)
 			offset = 8;
 	}
+	if (!stop && offset == 8) {
+		lwkt_gettoken(&machine->token);
+		inode = machine->serialroot.inode;
+		lwkt_reltoken(&machine->token);
+		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
+		    sizeof("serial") - 1, "serial");
+		if (!stop)
+			offset = 9;
+	}
 	uio->uio_offset = offset;
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop;
@@ -562,14 +584,17 @@ vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 static int
 vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 {
-	char event[64];
 	struct vmm_cpustate state;
 	vmm_machine_t runtime_machine;
+	bool pci_started;
+	bool serial_started;
 	int error;
 
 	if (machine == NULL || cred == NULL)
 		return (EINVAL);
 	runtime_machine = NULL;
+	pci_started = false;
+	serial_started = false;
 	lwkt_gettoken(&machine->token);
 	if (machine->stopped.expect_stopped || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
@@ -578,24 +603,59 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "start requested");
 	if (machine->spec.memory.size == 0 ||
-	    machine->spec.loader.script[0] == '\0')
-		return (EINVAL);
+	    machine->spec.loader.script[0] == '\0') {
+		error = EINVAL;
+		goto failed;
+	}
+	vmmfs_events_log(&machine->events, "memory prepare begin");
 	error = vmmfs_memory_prepare(&machine->memory);
 	if (error != 0)
 		goto failed;
+	vmmfs_events_log(&machine->events, "memory prepare completed");
+	vmmfs_events_log(&machine->events, "machine create begin");
 	error = vmm_machine_create(machine->memory.run_vmspace, &runtime_machine);
 	if (error != 0)
 		goto failed;
+	vmmfs_events_log(&machine->events, "machine create completed");
+	vmmfs_events_log(&machine->events, "memory map begin");
+	error = vmmfs_memory_map(&machine->memory);
+	if (error != 0)
+		goto failed;
+	vmmfs_events_log(&machine->events, "memory map completed");
+	vmmfs_events_log(&machine->events, "irqchip create begin");
 	error = vmm_machine_create_irqchip(runtime_machine);
 	if (error != 0)
 		goto failed;
+	vmmfs_events_log(&machine->events, "irqchip create completed");
+	vmmfs_events_log(&machine->events, "platform prepare begin");
+	error = vmmfs_platform_x64_prepare(&machine->memory,
+	    machine->spec.vcpu.count, &machine->serialroot);
+	if (error != 0)
+		goto failed;
+	vmmfs_events_log(&machine->events, "platform prepare completed");
+	vmmfs_events_log(&machine->events, "pci root start begin");
+	error = vmmfs_pciroot_start(&machine->pciroot, runtime_machine);
+	if (error != 0)
+		goto failed;
+	pci_started = true;
+	vmmfs_events_log(&machine->events, "pci root start completed");
+	vmmfs_events_log(&machine->events, "serial start begin");
+	error = vmmfs_serialroot_start(&machine->serialroot, runtime_machine);
+	if (error != 0)
+		goto failed;
+	serial_started = true;
+	vmmfs_events_log(&machine->events, "serial start completed");
+	vmmfs_events_log(&machine->events, "loader start begin");
 	error = vmmfs_loader_run(&machine->loader, &machine->memory, cred,
 	    &state);
 	if (error != 0)
 		goto failed;
+	vmmfs_events_log(&machine->events, "memory snapshot begin");
 	error = vmmfs_memory_snapshot(&machine->memory);
 	if (error != 0)
 		goto failed;
+	vmmfs_events_log(&machine->events, "memory snapshot completed");
+	vmmfs_events_log(&machine->events, "vcpu start begin");
 	error = vmmfs_vcpu_start(&machine->vcpu, runtime_machine, &state);
 	if (error != 0)
 		goto failed;
@@ -611,13 +671,20 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	return (0);
 
 failed:
+	if (serial_started)
+		(void)vmmfs_serialroot_stop(&machine->serialroot);
+	if (pci_started)
+		(void)vmmfs_pciroot_stop(&machine->pciroot);
 	if (runtime_machine != NULL) {
 		(void)vmmfs_vcpu_stop(&machine->vcpu);
 		(void)vmm_machine_destroy(runtime_machine);
 	}
 	vmmfs_memory_release(&machine->memory);
-	ksnprintf(event, sizeof(event), "start failed error=%d", error);
-	vmmfs_events_log(&machine->events, event);
+	lwkt_gettoken(&machine->token);
+	if (machine->machine == NULL)
+		machine->stopped.expect_stopped = true;
+	lwkt_reltoken(&machine->token);
+	vmmfs_events_log(&machine->events, "start failed error=%d", error);
 	return (error);
 }
 
@@ -638,6 +705,12 @@ vmmfs_machine_stop(struct vmmfs_machine *machine)
 	lwkt_reltoken(&machine->token);
 	vmmfs_events_log(&machine->events, "stop requested");
 	error = vmmfs_vcpu_stop(&machine->vcpu);
+	if (error != 0)
+		return (error);
+	error = vmmfs_serialroot_stop(&machine->serialroot);
+	if (error != 0)
+		return (error);
+	error = vmmfs_pciroot_stop(&machine->pciroot);
 	if (error != 0)
 		return (error);
 	error = vmm_machine_destroy(runtime_machine);
