@@ -2362,6 +2362,14 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 				    "vmmsipi", 0);
 				if (error != 0)
 					break;
+				if (atomic_load_acq_int(&vcpu->kick_pending) != 0) {
+					/*
+					 * A parked AP must return through the common kick
+					 * path so its frontend can observe a stop request.
+					 */
+					exit->reason = VMM_CPUEXIT_NONE;
+					break;
+				}
 				continue;
 			}
 			if (error == EINPROGRESS) {

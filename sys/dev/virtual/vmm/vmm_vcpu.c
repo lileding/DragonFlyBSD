@@ -386,8 +386,11 @@ vmm_vcpu_kick(vmm_vcpu_t vcpu)
 	lwkt_reltoken(&vcpu->token);
 	if (running)
 		vcpu->backend_ops->vcpu_kick(vcpu);
-	else
-		wakeup(vcpu);
+	/*
+	 * A backend kick interrupts VMRUN, while this wakeup covers a vCPU
+	 * parked in a backend-owned pre-entry wait such as AP SIPI.
+	 */
+	wakeup(vcpu);
 	return 0;
 }
 
