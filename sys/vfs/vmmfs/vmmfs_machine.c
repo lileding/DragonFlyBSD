@@ -640,6 +640,11 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	if (error != 0)
 		goto failed;
 	vmmfs_events_log(&machine->events, "irqchip create completed");
+	vmmfs_events_log(&machine->events, "pit create begin");
+	error = vmm_machine_create_pit(runtime_machine);
+	if (error != 0)
+		goto failed;
+	vmmfs_events_log(&machine->events, "pit create completed");
 	vmmfs_events_log(&machine->events, "platform prepare begin");
 	error = vmmfs_platform_x64_prepare(&machine->memory,
 	    machine->spec.vcpu.count, &machine->serialroot);

@@ -18,6 +18,7 @@
 #define VMM_X64_PIT_PORT_CHANNEL0	0x40U
 #define VMM_X64_PIT_PORT_CHANNEL2	0x42U
 #define VMM_X64_PIT_PORT_CONTROL	0x43U
+#define VMM_X64_PIT_PORT_SPEAKER	0x61U
 #define VMM_X64_PIT_MAX_COUNT		65536U
 #define VMM_X64_PIT_NSEC_PER_SEC	1000000000ULL
 
@@ -50,6 +51,8 @@ static int vmm_x64_pit_io_locked(struct vmm_x64_pit *,
 	struct vmm_cpustate *, const struct vmm_cpuexit_io *);
 static int vmm_x64_pit_read(struct vmm_x64_pit *, unsigned int, uint8_t *);
 static int vmm_x64_pit_write(struct vmm_x64_pit *, unsigned int, uint8_t);
+static int vmm_x64_pit_speaker_read(struct vmm_x64_pit *, uint8_t *);
+static int vmm_x64_pit_speaker_write(struct vmm_x64_pit *, uint8_t);
 
 int
 vmm_x64_pit_create(struct vmm_machine *machine)
@@ -246,11 +249,26 @@ vmm_x64_pit_io_locked(struct vmm_x64_pit *pit,
 
 	if (pit == NULL || state == NULL || exit == NULL)
 		return EOPNOTSUPP;
+	if (exit->str || exit->rep || exit->operand_size != 1)
+		return EOPNOTSUPP;
+	if (exit->port == VMM_X64_PIT_PORT_SPEAKER) {
+		if (exit->in) {
+			error = vmm_x64_pit_speaker_read(pit, &value);
+			if (error == 0) {
+				state->gprs[VMM_X64_GPR_RAX] =
+				    (state->gprs[VMM_X64_GPR_RAX] & ~0xffULL) | value;
+			}
+		} else {
+			value = state->gprs[VMM_X64_GPR_RAX] & 0xffU;
+			error = vmm_x64_pit_speaker_write(pit, value);
+		}
+		if (error == 0)
+			state->gprs[VMM_X64_GPR_RIP] = exit->npc;
+		return error;
+	}
 	if (exit->port < VMM_X64_PIT_PORT_CHANNEL0 ||
 	    exit->port > VMM_X64_PIT_PORT_CONTROL)
 		return ENOENT;
-	if (exit->str || exit->rep || exit->operand_size != 1)
-		return EOPNOTSUPP;
 	if (exit->in) {
 		error = vmm_x64_pit_read(pit,
 		    exit->port - VMM_X64_PIT_PORT_CHANNEL0, &value);
@@ -440,6 +458,45 @@ vmm_x64_pit_arm(struct vmm_x64_pit *pit, uint64_t now)
 	pit->deadline = now + delay;
 	callout_reset(&pit->callout, (int)MAX(callout_ticks, 1),
 	    vmm_x64_pit_timeout, pit);
+}
+
+static int
+vmm_x64_pit_speaker_read(struct vmm_x64_pit *pit, uint8_t *value)
+{
+	uint64_t now;
+
+	if (value == NULL)
+		return EINVAL;
+	now = vmm_x64_pit_now();
+	lwkt_gettoken(&pit->token);
+	if (pit->destroying) {
+		lwkt_reltoken(&pit->token);
+		return ENXIO;
+	}
+	*value = (pit->state.channels[2].gate != 0 ? 0x01U : 0) |
+	    ((pit->state.flags & VMM_PIT_FLAG_SPEAKER_DATA_ON) != 0 ?
+	    0x02U : 0) |
+	    (vmm_x64_pit_output(&pit->state.channels[2], now) != 0 ?
+	    0x20U : 0);
+	lwkt_reltoken(&pit->token);
+	return 0;
+}
+
+static int
+vmm_x64_pit_speaker_write(struct vmm_x64_pit *pit, uint8_t value)
+{
+	lwkt_gettoken(&pit->token);
+	if (pit->destroying) {
+		lwkt_reltoken(&pit->token);
+		return ENXIO;
+	}
+	pit->state.channels[2].gate = value & 0x01U;
+	if ((value & 0x02U) != 0)
+		pit->state.flags |= VMM_PIT_FLAG_SPEAKER_DATA_ON;
+	else
+		pit->state.flags &= ~VMM_PIT_FLAG_SPEAKER_DATA_ON;
+	lwkt_reltoken(&pit->token);
+	return 0;
 }
 
 static int
