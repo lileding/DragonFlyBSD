@@ -214,23 +214,36 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 	ncp = ap->a_nch->ncp;
 	error = vmmfs_serialport_create(serialroot, ncp->nc_name, ncp->nc_nlen,
 	    &port);
-	if (error != 0)
+	if (error != 0) {
+		vmmfs_events_log(&serialroot->machine->events,
+		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
+		    ncp->nc_name, error);
 		return (error);
+	}
 	lwkt_gettoken(&serialroot->machine->token);
 	if (serialroot->machine->root == NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
+		vmmfs_events_log(&serialroot->machine->events,
+		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
+		    ncp->nc_name, ENOENT);
 		return (ENOENT);
 	}
 	if (!serialroot->machine->stopped.expect_stopped ||
 	    serialroot->machine->machine != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
+		vmmfs_events_log(&serialroot->machine->events,
+		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
+		    ncp->nc_name, EBUSY);
 		return (EBUSY);
 	}
 	if (RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, port) != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
+		vmmfs_events_log(&serialroot->machine->events,
+		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
+		    ncp->nc_name, EEXIST);
 		return (EEXIST);
 	}
 	lwkt_reltoken(&serialroot->machine->token);
@@ -241,6 +254,9 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, port);
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
+		vmmfs_events_log(&serialroot->machine->events,
+		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
+		    ncp->nc_name, error);
 		return (error);
 	}
 	*ap->a_vpp = vnode;
