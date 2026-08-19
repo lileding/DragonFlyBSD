@@ -33,6 +33,7 @@ void vmm_svm_fini(void);
 int vmm_svm_capability(struct vmm_x64_capability *);
 int vmm_svm_get_supported_cpuid(struct vmm_cpuid_entry *, size_t *);
 int vmm_svm_machine_create(struct vmm_machine *);
+int vmm_svm_machine_set_tsc(struct vmm_machine *, uint64_t);
 bool vmm_svm_irqchip_available(void);
 int vmm_svm_machine_create_irqchip(struct vmm_machine *);
 int vmm_svm_irq_raise_msi(struct vmm_machine *, uint64_t, uint32_t);
@@ -46,6 +47,7 @@ void vmm_svm_machine_destroy(struct vmm_machine *);
 int vmm_svm_vcpu_create(struct vmm_vcpu *);
 int vmm_svm_vcpu_set_cpuid(struct vmm_vcpu *,
 	const struct vmm_cpuid_entry *, size_t);
+int vmm_svm_vcpu_get_tsc(struct vmm_vcpu *, uint64_t *);
 int vmm_svm_vcpu_get_lapic(struct vmm_vcpu *, void *, size_t);
 int vmm_svm_vcpu_set_lapic(struct vmm_vcpu *, const void *, size_t);
 int vmm_svm_vcpu_io(struct vmm_vcpu *, const struct vmm_cpuexit_io *);

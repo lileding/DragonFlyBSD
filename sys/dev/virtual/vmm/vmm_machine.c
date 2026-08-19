@@ -274,6 +274,24 @@ fail_count:
 }
 
 int
+vmm_machine_set_tsc(vmm_machine_t machine, uint64_t tsc)
+{
+	int error;
+
+	if (machine == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&machine->token);
+	if (machine->destroying || machine->backend->machine_set_tsc == NULL) {
+		lwkt_reltoken(&machine->token);
+		return ENOTSUP;
+	}
+	error = machine->backend->machine_set_tsc(machine, tsc);
+	lwkt_reltoken(&machine->token);
+	return error;
+}
+
+int
 vmm_machine_destroy(vmm_machine_t machine)
 {
 	if (machine == NULL)

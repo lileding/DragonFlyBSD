@@ -1262,8 +1262,7 @@ kvm_vcpu_get_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t *value)
 		*value = 0;
 		return 0;
 	case KVM_MSR_IA32_TSC:
-		*value = vcpu->state.msrs[VMM_X64_MSR_TSC];
-		return 0;
+		return vmm_vcpu_get_tsc(vcpu->vcpu, value);
 	case KVM_MSR_IA32_APICBASE:
 		*value = vcpu->apic_base;
 		return 0;
@@ -1319,8 +1318,7 @@ kvm_vcpu_set_msr(struct kvm_vcpu *vcpu, uint32_t index, uint64_t value)
 	case KVM_MSR_KVM_SYSTEM_TIME:
 		return value == 0 ? 0 : EOPNOTSUPP;
 	case KVM_MSR_IA32_TSC:
-		vcpu->state.msrs[VMM_X64_MSR_TSC] = value;
-		return 0;
+		return vmm_machine_set_tsc(vcpu->vm->machine, value);
 	case KVM_MSR_IA32_APICBASE:
 		vcpu->apic_base = value;
 		return 0;

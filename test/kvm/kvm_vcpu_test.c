@@ -19,6 +19,7 @@
 
 #include <sys/kvm.h>
 
+#define KVM_TEST_TSC		1000000ULL
 #define KVM_TEST_CPUID_ENTRIES	256
 #define KVM_TEST_LAPIC_VERSION	0x030U
 #define KVM_TEST_LAPIC_TPR		0x080U
@@ -66,7 +67,7 @@ kvm_test_cpuid(int control_fd, int vcpu_fd)
 }
 
 static void
-kvm_test_msrs(int vcpu_fd)
+kvm_test_msrs(int vcpu_fd, int peer_vcpu_fd)
 {
 	struct {
 		struct kvm_msrs msrs;
@@ -77,7 +78,7 @@ kvm_test_msrs(int vcpu_fd)
 	bzero(&data, sizeof(data));
 	data.msrs.nmsrs = 2;
 	data.entries[0].index = 0x00000010U;
-	data.entries[0].data = 0;
+	data.entries[0].data = KVM_TEST_TSC;
 	data.entries[1].index = 0x00000277U;
 	data.entries[1].data = 0x0007040600070406ULL;
 	bzero(&request, sizeof(request));
@@ -89,9 +90,17 @@ kvm_test_msrs(int vcpu_fd)
 	data.entries[1].data = 0;
 	if (ioctl(vcpu_fd, KVM_DFLY_GET_MSRS, &request) != 2)
 		err(1, "KVM_DFLY_GET_MSRS");
-	if (data.entries[0].data != 0 ||
+	if (data.entries[0].data < KVM_TEST_TSC ||
 	    data.entries[1].data != 0x0007040600070406ULL)
 		errx(1, "KVM MSR round trip mismatch");
+
+	bzero(&data, sizeof(data));
+	data.msrs.nmsrs = 1;
+	data.entries[0].index = 0x00000010U;
+	if (ioctl(peer_vcpu_fd, KVM_DFLY_GET_MSRS, &request) != 1)
+		err(1, "KVM_DFLY_GET_MSRS peer TSC");
+	if (data.entries[0].data < KVM_TEST_TSC)
+		errx(1, "KVM shared TSC mismatch");
 }
 
 static void
@@ -438,6 +447,7 @@ main(void)
 	int control_fd;
 	int vm_fd;
 	int vcpu_fd;
+	int peer_vcpu_fd;
 	int run_size;
 	uint64_t identity_address;
 	uint64_t tss_address;
@@ -480,6 +490,9 @@ main(void)
 	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
 	if (vcpu_fd < 0)
 		err(1, "KVM_CREATE_VCPU");
+	peer_vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 1);
+	if (peer_vcpu_fd < 0)
+		err(1, "KVM_CREATE_VCPU peer");
 	KVM_TEST_STEP("step: vcpu");
 	mapping = mmap(NULL, run_size, PROT_READ | PROT_WRITE, MAP_SHARED,
 	    vcpu_fd, 0);
@@ -505,8 +518,10 @@ main(void)
 	KVM_TEST_STEP("step: msr-index-list");
 	kvm_test_msr_feature_index_list(control_fd);
 	KVM_TEST_STEP("step: msr-feature-index-list");
-	kvm_test_msrs(vcpu_fd);
+	kvm_test_msrs(vcpu_fd, peer_vcpu_fd);
 	KVM_TEST_STEP("step: msrs");
+	if (close(peer_vcpu_fd) != 0)
+		err(1, "close peer vCPU fd");
 	kvm_test_xcrs(control_fd, vcpu_fd);
 	KVM_TEST_STEP("step: xcrs");
 	kvm_test_mp_state(vcpu_fd);

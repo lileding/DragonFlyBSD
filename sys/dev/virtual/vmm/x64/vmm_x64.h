@@ -206,6 +206,20 @@ int vmm_x64_get_supported_cpuid(struct vmm_cpuid_entry *entries,
 	size_t *entry_count);
 
 /*
+ * Sets the shared guest TSC timeline for every vCPU in machine.  Running
+ * vCPUs observe the new base before their next VM entry.  This does not
+ * change a vCPU's guest-managed IA32_TSC_ADJUST value.
+ */
+int vmm_machine_set_tsc(vmm_machine_t machine, uint64_t tsc);
+
+/*
+ * Returns the current virtual TSC for a stopped vCPU.  It includes the
+ * machine-wide TSC base and that vCPU's guest-managed IA32_TSC_ADJUST value.
+ * Returns EBUSY while the vCPU runs.
+ */
+int vmm_vcpu_get_tsc(vmm_vcpu_t vcpu, uint64_t *tsc);
+
+/*
  * Translates one current guest virtual address through the vCPU page tables.
  * The vCPU must not be running.  It only reports the corresponding GPA and
  * does not modify guest CPU state or data.  Resolving guest page-table pages

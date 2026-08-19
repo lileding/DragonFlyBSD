@@ -844,6 +844,9 @@ static uint64_t vmm_vmx_xcr0_mask __read_mostly;
 
 struct vmm_vmx_machdata {
 	volatile uint64_t mach_htlb_gen;
+	/* One guest TSC timeline is shared by every vCPU in the machine. */
+	volatile uint64_t gtsc_offset;
+	volatile uint64_t gtsc_generation;
 	struct vmm_vmx_interrupt_machine *interrupt;
 };
 
@@ -1207,7 +1210,8 @@ struct vmm_vmx_cpudata {
 	uint64_t gprs[VMM_X64_GPR_COUNT];
 	uint64_t drs[VMM_X64_DR_COUNT];
 	uint64_t gtsc_offset;
-	uint64_t gtsc_last;
+	uint64_t gtsc_match;
+	uint64_t gtsc_generation;
 	uint64_t gtsc_adjust;
 	struct vmm_vmx_xsave gxsave __aligned(64);
 
@@ -2926,11 +2930,13 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 {
 	struct vmm_machine *mach = vcpu->machine;
 	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	struct vpid_desc vpid_desc;
 	uint64_t exitcode;
 	uint64_t intstate;
 	uint64_t machgen;
+	uint64_t tsc_generation;
 	int hcpu, ret;
 	int error = 0;
 	bool launched;
@@ -2996,6 +3002,13 @@ restart:
 			cpudata->gtlb_want_flush = false;
 		}
 
+		tsc_generation = atomic_load_acq_64(&machdata->gtsc_generation);
+		if (cpudata->gtsc_generation != tsc_generation) {
+			cpudata->gtsc_offset = atomic_load_acq_64(
+			    &machdata->gtsc_offset) + cpudata->gtsc_adjust;
+			cpudata->gtsc_generation = tsc_generation;
+			cpudata->gtsc_want_update = true;
+		}
 		if (__predict_false(cpudata->gtsc_want_update)) {
 			vmm_vmx_vmwrite(VMCS_TSC_OFFSET, cpudata->gtsc_offset);
 			cpudata->gtsc_want_update = false;
@@ -3355,6 +3368,7 @@ vmm_vmx_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 	struct msr_entry *gmsr = cpudata->gmsr;
 	struct vmm_cpustate_fpu *fpustate;
 	uint64_t ctls1, intstate;
+	int error;
 
 	vmm_vmx_vmcs_enter(vcpu);
 
@@ -3450,10 +3464,11 @@ vmm_vmx_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		 * If it's writing the last TSC value we reported via getstate,
 		 * assume that the emulator does not want to write to the TSC.
 		 */
-		if (state->msrs[VMM_X64_MSR_TSC] != cpudata->gtsc_last) {
-			cpudata->gtsc_offset =
-			    state->msrs[VMM_X64_MSR_TSC] - rdtsc();
-			cpudata->gtsc_want_update = true;
+		if (state->msrs[VMM_X64_MSR_TSC] != cpudata->gtsc_match &&
+		    state->msrs[VMM_X64_MSR_TSC] != 0) {
+			error = vmm_machine_set_tsc(vcpu->machine,
+			    state->msrs[VMM_X64_MSR_TSC]);
+			KKASSERT(error == 0);
 		}
 
 		/* ENTRY_CTLS_LONG_MODE must match EFER_LMA. */
@@ -3571,7 +3586,7 @@ vmm_vmx_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		state->msrs[VMM_X64_MSR_TSC] = rdtsc() + cpudata->gtsc_offset;
 
 		/* Save reported TSC value for later setstate check. */
-		cpudata->gtsc_last = state->msrs[VMM_X64_MSR_TSC];
+		cpudata->gtsc_match = state->msrs[VMM_X64_MSR_TSC];
 	}
 
 	if (flags & VMM_X64_STATE_INTR) {
@@ -4024,6 +4039,38 @@ vmm_vmx_machine_create(struct vmm_machine *mach)
 
 	/* Start with an hTLB flush everywhere. */
 	machdata->mach_htlb_gen = 1;
+	return 0;
+}
+
+int
+vmm_vmx_machine_set_tsc(struct vmm_machine *mach, uint64_t value)
+{
+	struct vmm_vmx_machdata *machdata = mach->backend_state;
+
+	if (machdata == NULL)
+		return ENXIO;
+	atomic_store_rel_64(&machdata->gtsc_offset, value - rdtsc());
+	atomic_fetchadd_64(&machdata->gtsc_generation, 1);
+	return 0;
+}
+
+int
+vmm_vmx_vcpu_get_tsc(struct vmm_vcpu *vcpu, uint64_t *value)
+{
+	struct vmm_vmx_cpudata *cpudata = vcpu->backend;
+	struct vmm_vmx_machdata *machdata = vcpu->machine->backend_state;
+	uint64_t generation;
+
+	if (machdata == NULL)
+		return ENXIO;
+	generation = atomic_load_acq_64(&machdata->gtsc_generation);
+	if (cpudata->gtsc_generation != generation) {
+		cpudata->gtsc_offset = atomic_load_acq_64(&machdata->gtsc_offset) +
+		    cpudata->gtsc_adjust;
+		cpudata->gtsc_generation = generation;
+		cpudata->gtsc_want_update = true;
+	}
+	*value = rdtsc() + cpudata->gtsc_offset;
 	return 0;
 }
 

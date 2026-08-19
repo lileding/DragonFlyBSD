@@ -24,6 +24,7 @@ struct vmm_backend_ops {
 	int (*capability)(struct vmm_x64_capability *);
 	int (*get_supported_cpuid)(struct vmm_cpuid_entry *, size_t *);
 	int (*machine_create)(struct vmm_machine *);
+	int (*machine_set_tsc)(struct vmm_machine *, uint64_t);
 	bool (*irqchip_available)(void);
 	/* Non-blocking capability check for pre-vCPU irqchip creation. */
 	int (*machine_create_irqchip)(struct vmm_machine *);
@@ -38,6 +39,7 @@ struct vmm_backend_ops {
 	int (*vcpu_create)(struct vmm_vcpu *);
 	int (*vcpu_set_cpuid)(struct vmm_vcpu *,
 	    const struct vmm_cpuid_entry *, size_t);
+	int (*vcpu_get_tsc)(struct vmm_vcpu *, uint64_t *);
 	int (*vcpu_get_lapic)(struct vmm_vcpu *, void *, size_t);
 	int (*vcpu_set_lapic)(struct vmm_vcpu *, const void *, size_t);
 	/* Handle an in-kernel PIO device, or return ENOENT for the frontend. */

@@ -679,7 +679,6 @@ CTASSERT(offsetof(struct vmcb, state) == 0x400);
 
 static void vmm_svm_vcpu_state_provide(struct vmm_vcpu *, uint64_t);
 static void vmm_svm_vcpu_setstate_all(struct vmm_vcpu *, uint64_t);
-static void vmm_svm_machine_set_tsc(struct vmm_machine *, uint64_t);
 static int vmm_svm_avic_modrm_size(const uint8_t *, int, int);
 
 /*
@@ -2784,6 +2783,7 @@ vmm_svm_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 	struct vmm_svm_cpudata *cpudata = vcpu->backend;
 	struct vmcb *vmcb = cpudata->vmcb;
 	struct vmm_cpustate_fpu *fpustate;
+	int error;
 
 	if (vmm_svm_state_gtlb_flush(vmcb, state, flags)) {
 		cpudata->gtlb_want_flush = true;
@@ -2882,8 +2882,9 @@ vmm_svm_vcpu_setstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 		 */
 		if (state->msrs[VMM_X64_MSR_TSC] != cpudata->gtsc_match &&
 		    state->msrs[VMM_X64_MSR_TSC] != 0) {
-			vmm_svm_machine_set_tsc(vcpu->machine,
+			error = vmm_machine_set_tsc(vcpu->machine,
 			    state->msrs[VMM_X64_MSR_TSC]);
+			KKASSERT(error == 0);
 		}
 	}
 
@@ -3009,15 +3010,36 @@ vmm_svm_vcpu_getstate_all(struct vmm_vcpu *vcpu, uint64_t flags)
 
 }
 
-static void
+int
 vmm_svm_machine_set_tsc(struct vmm_machine *mach, uint64_t value)
 {
 	struct vmm_svm_machdata *machdata = mach->backend_state;
 
-	lwkt_gettoken(&mach->token);
+	if (machdata == NULL)
+		return ENXIO;
 	atomic_store_rel_64(&machdata->gtsc_offset, value - rdtsc());
 	atomic_fetchadd_64(&machdata->gtsc_generation, 1);
-	lwkt_reltoken(&mach->token);
+	return 0;
+}
+
+int
+vmm_svm_vcpu_get_tsc(struct vmm_vcpu *vcpu, uint64_t *value)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+	struct vmm_svm_machdata *machdata = vcpu->machine->backend_state;
+	uint64_t generation;
+
+	if (machdata == NULL)
+		return ENXIO;
+	generation = atomic_load_acq_64(&machdata->gtsc_generation);
+	if (cpudata->gtsc_generation != generation) {
+		cpudata->gtsc_offset = atomic_load_acq_64(&machdata->gtsc_offset) +
+		    cpudata->gtsc_adjust;
+		cpudata->gtsc_generation = generation;
+		cpudata->gtsc_want_update = true;
+	}
+	*value = rdtsc() + cpudata->gtsc_offset;
+	return 0;
 }
 
 static void

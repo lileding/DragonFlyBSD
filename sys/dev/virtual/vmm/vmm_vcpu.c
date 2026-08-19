@@ -133,6 +133,28 @@ vmm_vcpu_set_cpuid(vmm_vcpu_t vcpu,
 }
 
 int
+vmm_vcpu_get_tsc(vmm_vcpu_t vcpu, uint64_t *tsc)
+{
+	int error;
+
+	if (vcpu == NULL || tsc == NULL)
+		return EINVAL;
+
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->running || vcpu->destroying) {
+		lwkt_reltoken(&vcpu->token);
+		return EBUSY;
+	}
+	if (vcpu->backend_ops->vcpu_get_tsc == NULL) {
+		lwkt_reltoken(&vcpu->token);
+		return ENOTSUP;
+	}
+	error = vcpu->backend_ops->vcpu_get_tsc(vcpu, tsc);
+	lwkt_reltoken(&vcpu->token);
+	return error;
+}
+
+int
 vmm_vcpu_translate(vmm_vcpu_t vcpu, uint64_t gva, uint64_t *gpa)
 {
 	int error;
