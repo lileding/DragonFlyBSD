@@ -55,6 +55,7 @@ struct io_req {
 	int		 req_state;	/* IO_REQ_* */
 	int		 req_cancel_requested;
 	void		(*req_cancel_hook)(struct io_req *);
+	volatile int	 req_refs;	/* active references (main + transient) */
 	LIST_ENTRY(io_req) req_hash_link;
 	struct file	*req_fp;	/* held target file, or NULL */
 	struct proc	*req_proc;	/* held submitting proc */

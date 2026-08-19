@@ -49,6 +49,7 @@ struct ioport {
 	LIST_HEAD(, io_req) ip_cancel_hash[IP_CANCEL_HASH_SIZE];
 	int		 ip_cq_count;	/* pending completions */
 	int		 ip_nworkers;
+	int		 ip_closing;	/* refuse new submissions */
 };
 
 static int ioport_read(struct file *fp, struct uio *uio,
@@ -103,6 +104,9 @@ static struct io_frame *io_frame_pop(struct io_req *req);
 static void io_task_handler(void *context, int pending);
 static void ioport_post(struct io_req *req);
 static void io_req_free(struct io_req *req);
+static void io_req_ref(struct io_req *req);
+static void io_req_drop(struct io_req *req);
+static void ioport_cancel_all(struct ioport *ip);
 static void io_req_cancel_hash_add(struct ioport *ip, struct io_req *req);
 static int  io_req_begin_return(struct io_req *req);
 static void ioport_cancel(struct ioport *ip, uint64_t tag);
@@ -184,10 +188,38 @@ ioport_close(struct file *fp)
 {
 	struct ioport *ip = (struct ioport *)fp->f_data;
 	struct io_req *req;
+	int slot, empty;
 
 	fp->f_data = NULL;
 
-	/* Drain any un-reaped completions. */
+	/* Refuse new submissions (defensive: fo_close runs on the last
+	 * reference, but a dup'd fd or an in-flight ioevent could race). */
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	ip->ip_closing = 1;
+	lockmgr(&ip->ip_lock, LK_RELEASE);
+
+	/* Cancel every forward request.  Each request converges to a
+	 * completion (worker tasks are dequeued or observe the flag; native
+	 * requests observe the flag at their XOP completion). */
+	ioport_cancel_all(ip);
+
+	/* Wait for every forward request to leave the cancel hash. */
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	for (;;) {
+		empty = 1;
+		for (slot = 0; slot < IP_CANCEL_HASH_SIZE; slot++) {
+			if (!LIST_EMPTY(&ip->ip_cancel_hash[slot])) {
+				empty = 0;
+				break;
+			}
+		}
+		if (empty)
+			break;
+		lksleep(ip, &ip->ip_lock, 0, "iocclose", 0);
+	}
+	lockmgr(&ip->ip_lock, LK_RELEASE);
+
+	/* Drain all completions. */
 	for (;;) {
 		lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
 		req = STAILQ_FIRST(&ip->ip_cq);
@@ -198,7 +230,7 @@ ioport_close(struct file *fp)
 		lockmgr(&ip->ip_lock, LK_RELEASE);
 		if (req == NULL)
 			break;
-		io_req_free(req);
+		io_req_drop(req);
 	}
 
 	if (ip->ip_tq != NULL)
@@ -299,6 +331,23 @@ io_req_free(struct io_req *req)
 	kfree(req, M_IOPORT);
 }
 
+/* Take a transient reference on a request.  Used by ioport_cancel() and
+ * ioport_cancel_all() to keep a request alive across the cancel-hook call
+ * even if it concurrently completes and is reaped. */
+static void
+io_req_ref(struct io_req *req)
+{
+	atomic_add_int(&req->req_refs, 1);
+}
+
+/* Drop a reference; free the request when the last one is gone. */
+static void
+io_req_drop(struct io_req *req)
+{
+	if (atomic_fetchadd_int(&req->req_refs, -1) == 1)
+		io_req_free(req);
+}
+
 static void
 io_req_cancel_hash_add(struct ioport *ip, struct io_req *req)
 {
@@ -354,20 +403,60 @@ ioport_cancel(struct ioport *ip, uint64_t tag)
 {
 	struct io_req *req;
 	struct io_req *found = NULL;
+	void (*hook)(struct io_req *) = NULL;
 	int slot = (int)(tag % IP_CANCEL_HASH_SIZE);
 
 	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
 	LIST_FOREACH(req, &ip->ip_cancel_hash[slot], req_hash_link) {
 		if (req->req_tag == tag && req->req_state != IO_REQ_RETURNING) {
 			req->req_cancel_requested = 1;
+			io_req_ref(req);	/* keep alive across the hook */
+			hook = req->req_cancel_hook;
 			found = req;
 			break;
 		}
 	}
 	lockmgr(&ip->ip_lock, LK_RELEASE);
 
-	if (found != NULL && found->req_cancel_hook != NULL)
-		found->req_cancel_hook(found);
+	if (found != NULL) {
+		if (hook != NULL)
+			hook(found);
+		io_req_drop(found);
+	}
+}
+
+/* Cancel every forward request (used by close(pfd)).  Each matching request
+ * is ref'd across its hook so a concurrently completing request cannot be
+ * freed out from under us. */
+static void
+ioport_cancel_all(struct ioport *ip)
+{
+	struct io_req *req;
+	void (*hook)(struct io_req *);
+	int slot;
+
+	for (slot = 0; slot < IP_CANCEL_HASH_SIZE; slot++) {
+		for (;;) {
+			req = NULL;
+			hook = NULL;
+			lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+			LIST_FOREACH(req, &ip->ip_cancel_hash[slot],
+				     req_hash_link) {
+				if (req->req_state != IO_REQ_RETURNING) {
+					req->req_cancel_requested = 1;
+					io_req_ref(req);
+					hook = req->req_cancel_hook;
+					break;
+				}
+			}
+			lockmgr(&ip->ip_lock, LK_RELEASE);
+			if (req == NULL)
+				break;
+			if (hook != NULL)
+				hook(req);
+			io_req_drop(req);
+		}
+	}
 }
 
 static void
@@ -448,6 +537,7 @@ ioevent_close(struct ioport *ip, const struct io_submit *sub)
 
 	req = kmalloc(sizeof(*req), M_IOPORT, M_WAITOK | M_ZERO);
 	req->req_ioport = ip;
+	req->req_refs = 1;
 	req->req_tag = sub->tag;
 	req->req_opcode = sub->opcode;
 	req->req_fd = sub->fd;
@@ -508,6 +598,7 @@ ioevent_rw(struct ioport *ip, const struct io_submit *sub)
 
 	req = kmalloc(sizeof(*req), M_IOPORT, M_WAITOK | M_ZERO);
 	req->req_ioport = ip;
+	req->req_refs = 1;
 	req->req_tag = sub->tag;
 	req->req_opcode = sub->opcode;
 	req->req_fp = fp;
@@ -639,6 +730,7 @@ ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 	kn = knote_alloc();
 
 	req->req_ioport = ip;
+	req->req_refs = 1;
 	req->req_tag = sub->tag;
 	req->req_opcode = sub->opcode;
 	/* The file reference is held by the knote (kn_fp), dropped by
@@ -676,7 +768,7 @@ ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 		kfree(ctx, M_IOPORT);
 		req->req_kn = NULL;
 		req->req_knctx = NULL;
-		io_req_free(req);
+		io_req_drop(req);
 		return (error);
 	}
 
@@ -743,7 +835,7 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			comp.result = req->req_result;
 			comp.flags = req->req_flags;
 			comp.reserved = 0;
-			io_req_free(req);
+			io_req_drop(req);
 
 			error = copyout(&comp, &completions[total],
 					sizeof(comp));
@@ -858,6 +950,15 @@ sys_ioevent(struct sysmsg *sysmsg, const struct ioevent_args *uap)
 		return (EBADF);
 	}
 	ip = (struct ioport *)fp->f_data;
+
+	/* Refuse new submissions once the port is closing. */
+	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
+	if (ip->ip_closing) {
+		lockmgr(&ip->ip_lock, LK_RELEASE);
+		dropfp(td, uap->pfd, fp);
+		return (EBADF);
+	}
+	lockmgr(&ip->ip_lock, LK_RELEASE);
 
 	error = ioevent_submit(ip, uap->submits, uap->nsubmits);
 	if (error) {
