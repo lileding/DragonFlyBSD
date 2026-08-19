@@ -2989,6 +2989,16 @@ restart:
 					    "vmmisip", 0);
 					if (error != 0)
 						return error;
+					if (atomic_load_acq_int(&vcpu->kick_pending) != 0) {
+						/*
+						 * The VMCS and guest host-state swaps have already
+						 * been undone above.  Return directly so the common
+						 * vCPU layer can expose this as EINTR.
+						 */
+						exit->reason = VMM_CPUEXIT_NONE;
+						*reason = exit;
+						return 0;
+					}
 				}
 				goto restart;
 			}
@@ -3035,6 +3045,8 @@ restart:
 			vmm_vmx_vcpu_guest_fpu_leave(vcpu);
 			vmm_vmx_sti();
 			exit->reason = VMM_CPUEXIT_NONE;
+			vmm_stat_vcpu_run_restart_preentry(
+			    mycpu->gd_reqflags & RQF_HVM_MASK);
 			error = ERESTART;
 			break;
 		}
@@ -3183,12 +3195,22 @@ restart:
 			break;
 		}
 
-		/* If no reason to return to userland, keep rolling. */
-		if (os_return_needed()) {
-			error = ERESTART;
+		/* A concurrent kick must return through vmm_vcpu_run(). */
+		if (exit->reason == VMM_CPUEXIT_NONE &&
+		    atomic_load_acq_int(&vcpu->kick_pending) != 0) {
 			break;
 		}
+
+		/* Preserve an architectural exit for the generic VMM dispatcher. */
 		if (exit->reason != VMM_CPUEXIT_NONE) {
+			break;
+		}
+
+		/* If no reason to return to userland, keep rolling. */
+		if (os_return_needed()) {
+			vmm_stat_vcpu_run_restart_postexit(
+			    mycpu->gd_reqflags & RQF_HVM_MASK);
+			error = ERESTART;
 			break;
 		}
 	}

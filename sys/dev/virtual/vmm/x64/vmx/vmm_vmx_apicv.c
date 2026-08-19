@@ -633,8 +633,14 @@ vmm_vmx_apicv_vcpu_reset_lapic(struct vmm_vmx_interrupt_vcpu *vcpu)
 	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_ID, vcpu->apic_id << 24);
 	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_VERSION,
 	    VMM_VMX_APIC_VERSION_VALUE);
+	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_TPR, 0);
 	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_DFR, VMM_VMX_APIC_DFR_FLAT);
-	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_SVR, 0xff);
+	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_SVR,
+	    VMM_VMX_APIC_SVR_ENABLE | 0xff);
+	if (vcpu->apic_id < 8) {
+		vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_LDR,
+		    1U << (24 + vcpu->apic_id));
+	}
 	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_LVTT,
 	    VMM_VMX_APIC_LVT_MASKED);
 	vmm_vmx_apicv_write(vcpu, VMM_VMX_APIC_LVT_THERMAL,
