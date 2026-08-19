@@ -15,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../sys/dev/virtual/vmm/vmm.h"
+#include <sys/vmm.h>
 
 #define PAGE_SIZE_GUEST		4096ULL
 #define ONE_MIB			0x100000ULL

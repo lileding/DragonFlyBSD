@@ -7,12 +7,10 @@
 #define VMM_H
 
 #include <sys/types.h>
+#include <sys/vmm.h>
 
 #ifndef _KERNEL
 #include <stdbool.h>
-#ifndef CTASSERT
-#define CTASSERT(expression) _Static_assert((expression), #expression)
-#endif
 #endif
 
 struct vmspace;
@@ -24,13 +22,6 @@ struct vmm_io;
 typedef struct vmm_machine *vmm_machine_t;
 typedef struct vmm_vcpu *vmm_vcpu_t;
 typedef struct vmm_io *vmm_io_t;
-
-enum vmm_io_width {
-	VMM_IO_WIDTH_8 = 1,
-	VMM_IO_WIDTH_16 = 2,
-	VMM_IO_WIDTH_32 = 4,
-	VMM_IO_WIDTH_64 = 8,
-};
 
 enum vmm_memory_exit_mode {
 	VMM_MEMORY_EXIT_RAW,

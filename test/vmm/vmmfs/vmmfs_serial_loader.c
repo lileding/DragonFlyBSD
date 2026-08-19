@@ -12,7 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <dev/virtual/vmm/vmm.h>
+#include <sys/vmm.h>
 
 #define PAGE_SIZE_GUEST 4096ULL
 #define PML4_GPA 0x2000ULL
