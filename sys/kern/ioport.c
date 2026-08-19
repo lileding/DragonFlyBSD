@@ -33,57 +33,11 @@
 #include <sys/time.h>
 #include <sys/kern_syscall.h>
 #include <sys/ioport.h>
+#include <sys/ioport_var.h>
 
-static MALLOC_DEFINE(M_IOPORT, "ioport", "memory for ioport system");
+MALLOC_DEFINE(M_IOPORT, "ioport", "memory for ioport system");
 
-#define IO_FRAME_MAX	8
 #define IP_CANCEL_HASH_SIZE	64
-
-/* request states */
-#define IO_REQ_QUEUED	0	/* dispatch pending */
-#define IO_REQ_RUNNING	1	/* worker task running */
-#define IO_REQ_PENDING	2	/* async lower layer owns it */
-#define IO_REQ_RETURNING	3	/* reverse completion path */
-
-struct io_req;
-struct ioport;
-
-/* One continuation frame in the io_req reverse-completion chain. */
-struct io_frame {
-	void	(*fr_complete)(struct io_req *, void *);
-	void	*fr_context;
-};
-
-/*
- * A single accepted request.  One request yields exactly one completion.
- */
-struct io_req {
-	struct ioport	*req_ioport;	/* owning port */
-	uint64_t	 req_tag;	/* caller tag */
-	int		 req_opcode;	/* IO_* */
-	int		 req_error;	/* final errno */
-	int64_t		 req_result;	/* final result */
-	uint32_t	 req_flags;	/* completion flags (event fflags) */
-	struct knote	*req_kn;	/* IO_KEVENT knote, or NULL */
-	struct ioport_kevent_ctx *req_knctx;
-	int		 req_state;	/* IO_REQ_* */
-	int		 req_cancel_requested;
-	void		(*req_cancel_hook)(struct io_req *);
-	LIST_ENTRY(io_req) req_hash_link;
-	struct file	*req_fp;	/* held target file, or NULL */
-	struct proc	*req_proc;	/* held submitting proc */
-	struct ucred	*req_cred;	/* held credentials */
-	int		 req_fd;	/* target fd */
-	void		*req_buf;	/* kernel buffer (copy in/out) */
-	void		*req_ubuf;	/* user buffer VA */
-	size_t		 req_len;	/* requested length */
-	off_t		 req_offset;	/* file offset */
-	struct io_frame	 req_frames[IO_FRAME_MAX];
-	int		 req_nframes;
-	struct task	 req_task;	/* worker task for ioport_exec */
-	void		(*req_fn)(struct io_req *);
-	STAILQ_ENTRY(io_req) req_cq_link;
-};
 
 /* Kernel-internal completion port. */
 struct ioport {
@@ -146,14 +100,10 @@ static struct filterops ioport_kevent_filtops =
 static void io_frame_push(struct io_req *req,
 			  void (*complete)(struct io_req *, void *), void *ctx) __unused;
 static struct io_frame *io_frame_pop(struct io_req *req);
-static void io_return(struct io_req *req);
-static void ioport_exec(struct io_req *req, void (*fn)(struct io_req *));
 static void io_task_handler(void *context, int pending);
 static void ioport_post(struct io_req *req);
 static void io_req_free(struct io_req *req);
 static void io_req_cancel_hash_add(struct ioport *ip, struct io_req *req);
-static void io_req_begin_forward(struct io_req *req,
-				 void (*cancel_hook)(struct io_req *));
 static int  io_req_begin_return(struct io_req *req);
 static void ioport_cancel(struct ioport *ip, uint64_t tag);
 static void io_cancel_kevent_hook(struct io_req *req);
@@ -165,7 +115,6 @@ static int  ioevent_close(struct ioport *ip, const struct io_submit *sub);
 static void io_close_worker(struct io_req *req);
 static int  ioevent_rw(struct ioport *ip, const struct io_submit *sub);
 static int  ioevent_kevent(struct ioport *ip, const struct io_submit *sub);
-static void io_rw_worker(struct io_req *req);
 static int  ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			 int ncompletions, struct timespec *tsp, int *res);
 
@@ -279,7 +228,7 @@ io_frame_pop(struct io_req *req)
 	return (&req->req_frames[req->req_nframes]);
 }
 
-static void
+void
 io_return(struct io_req *req)
 {
 	struct io_frame *fr;
@@ -294,7 +243,7 @@ io_return(struct io_req *req)
 		ioport_post(req);
 }
 
-static void
+void
 ioport_exec(struct io_req *req, void (*fn)(struct io_req *))
 {
 	req->req_fn = fn;
@@ -361,12 +310,22 @@ io_req_cancel_hash_add(struct ioport *ip, struct io_req *req)
 }
 
 /* Enter the forward path: the request is now cancellable via IO_CANCEL. */
-static void
+void
 io_req_begin_forward(struct io_req *req, void (*cancel_hook)(struct io_req *))
 {
 	req->req_state = IO_REQ_QUEUED;
 	req->req_cancel_hook = cancel_hook;
 	io_req_cancel_hash_add(req->req_ioport, req);
+}
+
+/* Replace the cancel hook: the layer that actually owns the request installs
+ * the truncation action matching its execution mode.  A NULL hook means the
+ * in-flight work cannot be withdrawn; the owner observes req_cancel_requested
+ * at completion time instead. */
+void
+io_req_set_cancel(struct io_req *req, void (*cancel_hook)(struct io_req *))
+{
+	req->req_cancel_hook = cancel_hook;
 }
 
 /* Transition to the reverse path.  Returns 1 if this caller wins the
@@ -407,7 +366,7 @@ ioport_cancel(struct ioport *ip, uint64_t tag)
 	}
 	lockmgr(&ip->ip_lock, LK_RELEASE);
 
-	if (found != NULL)
+	if (found != NULL && found->req_cancel_hook != NULL)
 		found->req_cancel_hook(found);
 }
 
@@ -561,12 +520,26 @@ ioevent_rw(struct ioport *ip, const struct io_submit *sub)
 	req->req_len = len;
 	req->req_offset = offset;
 
+	/* Single asynchronous entry: fileops->fo_begin_io (verb in req_opcode).
+	 * vnode files route through vn_begin_io -> vop_begin_io, whose default
+	 * simulates async on the pfd worker and whose HAMMER2 override does a
+	 * real XOP.  Files without fo_begin_io (pipe/socket) fall back to the
+	 * generic fo_read/fo_write worker. */
 	io_req_begin_forward(req, io_cancel_worker_hook);
-	ioport_exec(req, io_rw_worker);
+	if (fp->f_ops->fo_begin_io != NULL) {
+		error = fp->f_ops->fo_begin_io(req);
+		if (error) {
+			req->req_error = error;
+			req->req_result = 0;
+			io_return(req);
+		}
+	} else {
+		ioport_exec(req, io_rw_worker);
+	}
 	return (0);
 }
 
-static void
+void
 io_rw_worker(struct io_req *req)
 {
 	struct uio uio;
@@ -742,14 +715,21 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 
 			/*
 			 * Deliver read data to the user buffer before the
-			 * completion becomes visible.  Slice simplification:
-			 * uses the reaper's vmspace (== submitter's in the
-			 * single-threaded test); true pinning replaces this in
-			 * the native async VOP phase.
+			 * completion becomes visible.  Uses the reaper's
+			 * vmspace (== submitter's in the single-threaded
+			 * test); true pinning replaces this later.
+			 *
+			 * The native H2 path stores the data in a 64K-aligned
+			 * window starting before req_offset; req_data_off is
+			 * the byte offset of the requested data within it
+			 * (zero for the generic worker path).
 			 */
 			if (req->req_opcode == IO_READ && req->req_error == 0 &&
 			    req->req_result > 0) {
-				error = copyout(req->req_buf, req->req_ubuf,
+				void *src = (char *)req->req_buf +
+					    req->req_data_off;
+
+				error = copyout(src, req->req_ubuf,
 						req->req_result);
 				if (error) {
 					req->req_error = error;

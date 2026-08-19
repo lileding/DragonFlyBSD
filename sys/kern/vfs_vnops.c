@@ -40,6 +40,7 @@
 #include <sys/uio.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
+#include <sys/ioport_var.h>
 #include <sys/file2.h>
 #include <sys/stat.h>
 #include <sys/proc.h>
@@ -73,6 +74,7 @@ static int vn_statfile (struct file *fp, struct stat *sb, struct ucred *cred);
 static int vn_write (struct file *fp, struct uio *uio,
 		struct ucred *cred, int flags);
 static int vn_seek (struct file *fp, off_t offset, int whence, off_t *res);
+static int vn_begin_io (struct io_req *req);
 
 struct fileops vnode_fileops = {
 	.fo_read = vn_read,
@@ -82,7 +84,8 @@ struct fileops vnode_fileops = {
 	.fo_stat = vn_statfile,
 	.fo_close = vn_closefile,
 	.fo_shutdown = nofo_shutdown,
-	.fo_seek = vn_seek
+	.fo_seek = vn_seek,
+	.fo_begin_io = vn_begin_io
 };
 
 /*
@@ -716,6 +719,30 @@ vn_rdwr_inchunks(enum uio_rw rw, struct vnode *vp, caddr_t base, int len,
 	} while (len);
 	if (aresid)
 		*aresid += len;
+	return (error);
+}
+
+/*
+ * Asynchronous I/O entry point (fo_begin_io) for vnode-backed files.  The
+ * verb is carried by req->req_opcode.  We hand off to the filesystem's
+ * vop_begin_io(); the framework supplies a default that simulates async on
+ * the ioport worker, and filesystems such as HAMMER2 override it with a real
+ * native path.
+ */
+static int
+vn_begin_io(struct io_req *req)
+{
+	struct vnode *vp;
+	int error;
+
+	vp = (struct vnode *)req->req_fp->f_data;
+	error = vop_begin_io(*vp->v_ops, vp, req);
+	if (error == EOPNOTSUPP) {
+		/* The filesystem has no native async path for this opcode;
+		 * simulate async on the ioport worker. */
+		ioport_exec(req, io_rw_worker);
+		error = 0;
+	}
 	return (error);
 }
 

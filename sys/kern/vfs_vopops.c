@@ -120,6 +120,7 @@ VNODEOP_DESC_INIT(inactive);
 VNODEOP_DESC_INIT(reclaim);
 VNODEOP_DESC_INIT(bmap);
 VNODEOP_DESC_INIT(strategy);
+VNODEOP_DESC_INIT(begin_io);
 VNODEOP_DESC_INIT(print);
 VNODEOP_DESC_INIT(pathconf);
 VNODEOP_DESC_INIT(advlock);
@@ -958,6 +959,26 @@ vop_strategy(struct vop_ops *ops, struct vnode *vp, struct bio *bio)
 		rel_mplock();
 	}
 	return(error);
+}
+
+/*
+ * Asynchronous I/O entry point.  MPSAFE: it must issue the underlying work
+ * (native or worker-scheduled) and return without holding the mplock or any
+ * vnode lock across the pending state.
+ */
+int
+vop_begin_io(struct vop_ops *ops, struct vnode *vp, struct io_req *req)
+{
+	struct vop_begin_io_args ap;
+	int error;
+
+	ap.a_head.a_desc = &vop_begin_io_desc;
+	ap.a_head.a_ops = ops;
+	ap.a_vp = vp;
+	ap.a_req = req;
+
+	DO_OPS(ops, error, &ap, vop_begin_io);
+	return (error);
 }
 
 /*
@@ -1979,6 +2000,15 @@ vop_strategy_ap(struct vop_strategy_args *ap)
 	int error;
 
 	DO_OPS(ap->a_head.a_ops, error, ap, vop_strategy);
+	return(error);
+}
+
+int
+vop_begin_io_ap(struct vop_begin_io_args *ap)
+{
+	int error;
+
+	DO_OPS(ap->a_head.a_ops, error, ap, vop_begin_io);
 	return(error);
 }
 
