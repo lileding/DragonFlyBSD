@@ -933,7 +933,7 @@ static const struct vmm_vmx_cpuid_filter vmm_vmx_cpuid_00000007 = {
 	.eax = ~0,
 	.ebx =
 	    CPUID_0_07_EBX_FSGSBASE |
-	    /* CPUID_0_07_EBX_TSC_ADJUST excluded */
+	    CPUID_0_07_EBX_TSC_ADJUST |
 	    /* CPUID_0_07_EBX_SGX excluded */
 	    CPUID_0_07_EBX_BMI1 |
 	    /* CPUID_0_07_EBX_HLE excluded */
@@ -1208,6 +1208,7 @@ struct vmm_vmx_cpudata {
 	uint64_t drs[VMM_X64_DR_COUNT];
 	uint64_t gtsc_offset;
 	uint64_t gtsc_last;
+	uint64_t gtsc_adjust;
 	struct vmm_vmx_xsave gxsave __aligned(64);
 
 	/* Exact frontend CPUID template. */
@@ -1778,6 +1779,8 @@ vmm_vmx_inkernel_handle_cpuid(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 		case 0:
 			cpudata->gprs[VMM_X64_GPR_RAX] = 0;
 			cpudata->gprs[VMM_X64_GPR_RBX] &= vmm_vmx_cpuid_00000007.ebx;
+			cpudata->gprs[VMM_X64_GPR_RBX] |=
+			    CPUID_0_07_EBX_TSC_ADJUST;
 			cpudata->gprs[VMM_X64_GPR_RCX] &= vmm_vmx_cpuid_00000007.ecx;
 			cpudata->gprs[VMM_X64_GPR_RDX] &= vmm_vmx_cpuid_00000007.edx;
 			if (!(vmm_vmx_procbased_ctls2 & PROC_CTLS2_INVPCID_ENABLE)) {
@@ -1976,6 +1979,7 @@ vmm_vmx_supported_cpuid_entry(struct vmm_cpuid_entry *entry)
 	case 0x00000007:
 		entry->eax = 0;
 		entry->ebx &= vmm_vmx_cpuid_00000007.ebx;
+		entry->ebx |= CPUID_0_07_EBX_TSC_ADJUST;
 		entry->ecx &= vmm_vmx_cpuid_00000007.ecx;
 		entry->edx &= vmm_vmx_cpuid_00000007.edx;
 		break;
@@ -2544,6 +2548,12 @@ vmm_vmx_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 	}
 
 	if (exit->reason == VMM_CPUEXIT_RDMSR) {
+		if (exit->u.rdmsr.msr == MSR_TSC_ADJUST) {
+			val = cpudata->gtsc_adjust;
+			cpudata->gprs[VMM_X64_GPR_RAX] = val & 0xFFFFFFFF;
+			cpudata->gprs[VMM_X64_GPR_RDX] = val >> 32;
+			goto handled;
+		}
 		if (exit->u.rdmsr.msr == MSR_CR_PAT) {
 			val = vmm_vmx_vmread(VMCS_GUEST_IA32_PAT);
 			cpudata->gprs[VMM_X64_GPR_RAX] = (val & 0xFFFFFFFF);
@@ -2586,7 +2596,16 @@ vmm_vmx_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 		}
 	} else {
 		if (exit->u.wrmsr.msr == MSR_TSC) {
-			cpudata->gtsc_offset = exit->u.wrmsr.val - rdtsc();
+			val = exit->u.wrmsr.val - rdtsc();
+			cpudata->gtsc_adjust += val - cpudata->gtsc_offset;
+			cpudata->gtsc_offset = val;
+			cpudata->gtsc_want_update = true;
+			goto handled;
+		}
+		if (exit->u.wrmsr.msr == MSR_TSC_ADJUST) {
+			cpudata->gtsc_offset += exit->u.wrmsr.val -
+			    cpudata->gtsc_adjust;
+			cpudata->gtsc_adjust = exit->u.wrmsr.val;
 			cpudata->gtsc_want_update = true;
 			goto handled;
 		}

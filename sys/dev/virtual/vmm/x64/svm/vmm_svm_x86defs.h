@@ -363,6 +363,7 @@
 #define XCR0_AVX	__BIT(2)	/* AVX state */
 
 #define MSR_TSC			0x0010
+#define MSR_TSC_ADJUST		0x003b
 #define MSR_SYSENTER_CS		0x0174
 #define MSR_SYSENTER_ESP	0x0175
 #define MSR_SYSENTER_EIP	0x0176
