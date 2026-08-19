@@ -40,6 +40,7 @@
 #include <sys/uio.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
+#include <sys/ioport.h>
 #include <sys/ioport_var.h>
 #include <sys/file2.h>
 #include <sys/stat.h>
@@ -723,27 +724,164 @@ vn_rdwr_inchunks(enum uio_rw rw, struct vnode *vp, caddr_t base, int len,
 }
 
 /*
- * Asynchronous I/O entry point (fo_begin_io) for vnode-backed files.  The
- * verb is carried by req->req_opcode.  We hand off to the filesystem's
- * vop_begin_io(); the framework supplies a default that simulates async on
- * the ioport worker, and filesystems such as HAMMER2 override it with a real
- * native path.
+ * Asynchronous read via the buffer cache (page cache).  The page cache is
+ * already asynchronous underneath: breadcb()/cluster_readcb() issue strategy
+ * I/O (down to the filesystem's XOP) with a bio_done callback and BUF_KERNPROC
+ * lock handoff, and satisfy cache hits synchronously.  We fan out the request
+ * across block-aligned breadcb() calls and gather the blocks here.
+ */
+struct vn_async_read_ctx {
+	struct io_req	*req;
+	int		 nblocks;
+	volatile int	 done;
+	volatile int	 error;
+	off_t		 first_lbase;
+	size_t		 nread;
+	int		 blksize;
+};
+
+static void vn_async_read_complete(struct bio *bio);
+static void vn_async_read_finish(struct vn_async_read_ctx *ctx);
+
+static int
+vn_async_read(struct io_req *req, struct vnode *vp)
+{
+	struct vn_async_read_ctx *ctx;
+	struct vattr vap;
+	off_t offset = req->req_offset;
+	size_t len = req->req_len;
+	off_t filesize, first_lbase, last_lbase;
+	size_t nread;
+	int blksize, nblocks, i, error;
+
+	error = vn_lock(vp, LK_SHARED);
+	if (error)
+		return (error);
+	error = VOP_GETATTR(vp, &vap);
+	vn_unlock(vp);
+	if (error)
+		return (error);
+	filesize = vap.va_size;
+	blksize = vap.va_blocksize;
+	if (blksize <= 0)
+		blksize = MAXBSIZE;
+
+	/* EOF or zero-length: complete synchronously. */
+	if (offset >= filesize || len == 0) {
+		req->req_error = 0;
+		req->req_result = 0;
+		io_return(req);
+		return (0);
+	}
+	nread = (size_t)(filesize - offset);
+	if (nread > len)
+		nread = len;
+
+	first_lbase = offset & ~(off_t)(blksize - 1);
+	last_lbase = (offset + (off_t)nread - 1) & ~(off_t)(blksize - 1);
+	nblocks = (int)((last_lbase - first_lbase) / blksize) + 1;
+
+	ctx = kmalloc(sizeof(*ctx), M_IOPORT, M_WAITOK | M_ZERO);
+	ctx->req = req;
+	ctx->nblocks = nblocks;
+	ctx->done = 0;
+	ctx->error = 0;
+	ctx->first_lbase = first_lbase;
+	ctx->nread = nread;
+	ctx->blksize = blksize;
+
+	/* The requested data lands at req_buf[0..nread); req_data_off is 0. */
+	io_req_set_cancel(req, NULL);
+	req->req_state = IO_REQ_PENDING;
+
+	for (i = 0; i < nblocks; i++) {
+		off_t lbase = first_lbase + (off_t)i * blksize;
+
+		cluster_readcb(vp, filesize, lbase, blksize,
+			       B_NOTMETA | B_KVABIO, blksize, blksize,
+			       vn_async_read_complete, ctx);
+	}
+	return (0);
+}
+
+/*
+ * cluster_readcb() callback.  Runs synchronously on a cache hit (BIO_DONE set)
+ * or on the strategy completion thread on a miss.  Contract (see hammer_io.c):
+ * run bpdone(bp, 0) only when real I/O was issued, clear BIO_DONE, then
+ * bqrelse().  The buffer is KVABIO so bkvasync() it before touching b_data.
+ */
+static void
+vn_async_read_complete(struct bio *bio)
+{
+	struct vn_async_read_ctx *ctx = bio->bio_caller_info1.ptr;
+	struct io_req *req = ctx->req;
+	struct buf *bp = bio->bio_buf;
+	off_t lbase = bp->b_loffset;
+	off_t offset = req->req_offset;
+	off_t wstart, wend;
+	size_t n;
+
+	if ((bio->bio_flags & BIO_DONE) == 0)
+		bpdone(bp, 0);
+	bio->bio_flags &= ~(BIO_DONE | BIO_SYNC);
+
+	wstart = (offset > lbase) ? offset : lbase;
+	wend = (offset + (off_t)ctx->nread < lbase + ctx->blksize) ?
+	       (offset + (off_t)ctx->nread) : (lbase + ctx->blksize);
+	n = (wend > wstart) ? (size_t)(wend - wstart) : 0;
+
+	if (bp->b_flags & B_ERROR) {
+		ctx->error = bp->b_error;
+	} else if (n > 0) {
+		bkvasync(bp);
+		bcopy(bp->b_data + (wstart - lbase),
+		      (char *)req->req_buf + (wstart - offset), n);
+	}
+	bqrelse(bp);
+
+	if (atomic_fetchadd_int(&ctx->done, 1) == ctx->nblocks - 1)
+		vn_async_read_finish(ctx);
+}
+
+static void
+vn_async_read_finish(struct vn_async_read_ctx *ctx)
+{
+	struct io_req *req = ctx->req;
+
+	if (req->req_cancel_requested) {
+		req->req_error = ECANCELED;
+		req->req_result = 0;
+	} else if (ctx->error != 0) {
+		req->req_error = ctx->error;
+		req->req_result = 0;
+	} else {
+		req->req_error = 0;
+		req->req_result = (int64_t)ctx->nread;
+	}
+
+	kfree(ctx, M_IOPORT);
+	io_return(req);
+}
+
+/*
+ * Asynchronous I/O entry point (fo_begin_io) for vnode-backed files.  Reads go
+ * through the page cache (breadcb); writes go through the page cache write-
+ * behind path (vn_write) on the ioport worker, matching buffered write(2)
+ * semantics.
  */
 static int
 vn_begin_io(struct io_req *req)
 {
 	struct vnode *vp;
-	int error;
 
 	vp = (struct vnode *)req->req_fp->f_data;
-	error = vop_begin_io(*vp->v_ops, vp, req);
-	if (error == EOPNOTSUPP) {
-		/* The filesystem has no native async path for this opcode;
-		 * simulate async on the ioport worker. */
-		ioport_exec(req, io_rw_worker);
-		error = 0;
-	}
-	return (error);
+
+	if (req->req_opcode == IO_READ)
+		return (vn_async_read(req, vp));
+
+	/* IO_WRITE (and anything else): worker runs the sync vnode path. */
+	ioport_exec(req, io_rw_worker);
+	return (0);
 }
 
 /*

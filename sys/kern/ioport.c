@@ -793,6 +793,10 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 	error = 0;
 	*res = 0;
 
+	/* Submit-only (ncompletions == 0): nothing to reap or wait for. */
+	if (ncompletions <= 0)
+		return (0);
+
 	for (;;) {
 		while (total < ncompletions) {
 			lockmgr(&ip->ip_lock, LK_EXCLUSIVE);

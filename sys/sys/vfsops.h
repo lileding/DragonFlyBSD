@@ -82,7 +82,6 @@ struct vattr;
 struct ucred;
 struct uio;
 struct file;
-struct io_req;
 struct knote;
 struct vm_object;
 struct vm_page;
@@ -323,12 +322,6 @@ struct vop_strategy_args {
 	struct vop_generic_args a_head;
 	struct vnode *a_vp;
 	struct bio *a_bio;
-};
-
-struct vop_begin_io_args {
-	struct vop_generic_args a_head;
-	struct vnode *a_vp;
-	struct io_req *a_req;
 };
 
 struct vop_print_args {
@@ -684,8 +677,7 @@ struct vop_ops {
 	int	(*vop_nremove)(struct vop_nremove_args *);
 	int	(*vop_nrmdir)(struct vop_nrmdir_args *);
 	int	(*vop_nrename)(struct vop_nrename_args *);
-	int	(*vop_begin_io)(struct vop_begin_io_args *);
-#define vop_ops_last_field	vop_begin_io
+#define vop_ops_last_field	vop_nrename
 };
 #endif	/* _KERNEL */
 
@@ -838,7 +830,6 @@ int vop_reclaim(struct vop_ops *ops, struct vnode *vp);
 int vop_bmap(struct vop_ops *ops, struct vnode *vp, off_t loffset,
 		off_t *doffsetp, int *runp, int *runb, buf_cmd_t cmd);
 int vop_strategy(struct vop_ops *ops, struct vnode *vp, struct bio *bio);
-int vop_begin_io(struct vop_ops *ops, struct vnode *vp, struct io_req *req);
 int vop_print(struct vop_ops *ops, struct vnode *vp);
 int vop_pathconf(struct vop_ops *ops, struct vnode *vp, int name,
 		register_t *retval);
@@ -941,7 +932,6 @@ int vop_inactive_ap(struct vop_inactive_args *ap);
 int vop_reclaim_ap(struct vop_reclaim_args *ap);
 int vop_bmap_ap(struct vop_bmap_args *ap);
 int vop_strategy_ap(struct vop_strategy_args *ap);
-int vop_begin_io_ap(struct vop_begin_io_args *ap);
 int vop_print_ap(struct vop_print_args *ap);
 int vop_pathconf_ap(struct vop_pathconf_args *ap);
 int vop_advlock_ap(struct vop_advlock_args *ap);
@@ -1007,7 +997,6 @@ extern struct syslink_desc vop_inactive_desc;
 extern struct syslink_desc vop_reclaim_desc;
 extern struct syslink_desc vop_bmap_desc;
 extern struct syslink_desc vop_strategy_desc;
-extern struct syslink_desc vop_begin_io_desc;
 extern struct syslink_desc vop_print_desc;
 extern struct syslink_desc vop_pathconf_desc;
 extern struct syslink_desc vop_advlock_desc;

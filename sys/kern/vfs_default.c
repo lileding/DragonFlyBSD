@@ -53,7 +53,6 @@
 #include <sys/mountctl.h>
 #include <sys/vfs_quota.h>
 #include <sys/uio.h>
-#include <sys/ioport_var.h>
 
 #include <machine/limits.h>
 
@@ -67,18 +66,6 @@ static int	vop_nolookup (struct vop_old_lookup_args *);
 static int	vop_nostrategy (struct vop_strategy_args *);
 
 /*
- * Default asynchronous I/O: simulate async by running the ordinary
- * synchronous fo_read/fo_write on the ioport worker thread.  Filesystems
- * that implement a native async path override vop_begin_io.
- */
-static int
-vop_begin_io_default(struct vop_begin_io_args *ap)
-{
-	ioport_exec(ap->a_req, io_rw_worker);
-	return (0);
-}
-
-/*
  * This vnode table stores what we want to do if the filesystem doesn't
  * implement a particular VOP.
  *
@@ -86,7 +73,6 @@ vop_begin_io_default(struct vop_begin_io_args *ap)
  */
 struct vop_ops default_vnode_vops = {
 	.vop_default		= vop_eopnotsupp,
-	.vop_begin_io		= vop_begin_io_default,
 	.vop_advlock		= (void *)vop_einval,
 	.vop_fsync		= (void *)vop_null,
 	.vop_fdatasync		= vop_stdfdatasync,
