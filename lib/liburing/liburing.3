@@ -1,0 +1,291 @@
+.\" Copyright (c) 2026 The DragonFly Project
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd August 20, 2026
+.Dt LIBURING 3
+.Os
+.Sh NAME
+.Nm liburing
+.Nd io_uring compatibility library backed by ioport/ioevent
+.Sh LIBRARY
+.Nm
+library
+.Sh SYNOPSIS
+.In liburing.h
+.In io_uring.h
+.Ft int
+.Fn io_uring_queue_init "unsigned entries" "struct io_uring *ring" "unsigned flags"
+.Ft int
+.Fn io_uring_queue_init_params "unsigned entries" "struct io_uring *ring" "struct io_uring_params *p"
+.Ft void
+.Fn io_uring_queue_exit "struct io_uring *ring"
+.Ft int
+.Fn io_uring_queue_mmap "int fd" "struct io_uring_params *p" "struct io_uring *ring"
+.Ft struct io_uring_sqe *
+.Fn io_uring_get_sqe "struct io_uring *ring"
+.Ft int
+.Fn io_uring_submit "struct io_uring *ring"
+.Ft int
+.Fn io_uring_submit_and_wait "struct io_uring *ring" "unsigned wait_nr"
+.Ft int
+.Fn io_uring_submit_and_get_events "struct io_uring *ring"
+.Ft int
+.Fn io_uring_wait_cqe "struct io_uring *ring" "struct io_uring_cqe **cqe_ptr"
+.Ft int
+.Fn io_uring_wait_cqe_nr "struct io_uring *ring" "struct io_uring_cqe **cqe_ptr" "unsigned wait_nr"
+.Ft int
+.Fn io_uring_peek_cqe "struct io_uring *ring" "struct io_uring_cqe **cqe_ptr"
+.Ft int
+.Fn io_uring_peek_batch_cqe "struct io_uring *ring" "struct io_uring_cqe **cqes" "unsigned count"
+.Ft int
+.Fn io_uring_cqe_seen "struct io_uring *ring" "struct io_uring_cqe *cqe"
+.Ft void
+.Fn io_uring_cq_advance "struct io_uring *ring" "unsigned nr"
+.Ft unsigned
+.Fn io_uring_sq_ready "const struct io_uring *ring"
+.Ft unsigned
+.Fn io_uring_sq_space_left "const struct io_uring *ring"
+.Ft unsigned
+.Fn io_uring_cq_ready "const struct io_uring *ring"
+.Ft void
+.Fn io_uring_prep_rw "int op" "struct io_uring_sqe *sqe" "int fd" "const void *addr" "unsigned len" "__u64 offset"
+.Ft void
+.Fn io_uring_prep_read "struct io_uring_sqe *sqe" "int fd" "void *buf" "unsigned nbytes" "__u64 offset"
+.Ft void
+.Fn io_uring_prep_write "struct io_uring_sqe *sqe" "int fd" "const void *buf" "unsigned nbytes" "__u64 offset"
+.Ft void
+.Fn io_uring_prep_nop "struct io_uring_sqe *sqe"
+.Ft void
+.Fn io_uring_sqe_set_data "struct io_uring_sqe *sqe" "void *data"
+.Ft void
+.Fn io_uring_sqe_set_flags "struct io_uring_sqe *sqe" "unsigned flags"
+.Ft void *
+.Fn io_uring_cqe_get_data "const struct io_uring_cqe *cqe"
+.Ft int
+.Fn io_uring_setup "unsigned entries" "struct io_uring_params *p"
+.Ft int
+.Fn io_uring_enter "int fd" "unsigned to_submit" "unsigned min_complete" "unsigned flags" "sigset_t *sig"
+.Ft int
+.Fn io_uring_enter2 "int fd" "unsigned to_submit" "unsigned min_complete" "unsigned flags" "sigset_t *sig" "size_t sz"
+.Ft int
+.Fn io_uring_register "int fd" "unsigned opcode" "const void *arg" "unsigned nr_args"
+.Ft int
+.Fn io_uring_major_version "void"
+.Ft int
+.Fn io_uring_minor_version "void"
+.Ft bool
+.Fn io_uring_check_version "int major" "int minor"
+.Sh DESCRIPTION
+The
+.Nm
+library provides a source-compatible subset of the Linux liburing queue API on
+top of the native .Dx
+.Xr ioport 2
+and
+.Xr ioevent 2
+completion-port system calls, so that io_uring programs recompile unchanged.
+The submission and completion queues live in ordinary user memory allocated by
+the library; there is no Linux ring mmap and no shared kernel ring.
+Only the basic single-operation read, write, and nop paths are provided.
+Every Linux-specific operation that cannot be expressed faithfully fails
+honestly rather than emulating partial semantics.
+.Pp
+The
+.Nm
+API reports the aligned upstream liburing release via
+.Fn io_uring_major_version
+and
+.Fn io_uring_minor_version ;
+the current release is 2.14.
+.Ss Queue setup
+.Fn io_uring_queue_init
+creates a ring with
+.Fa entries
+submission queue slots, allocating the local submission and completion queues
+and creating the underlying completion port.
+The
+.Fa flags
+argument is reserved and must be zero.
+.Fn io_uring_queue_init_params
+is identical but fills
+.Fa p
+.Pq if non- Dv NULL
+with the resulting ring parameters.
+.Fn io_uring_queue_exit
+closes the underlying port and frees the local queues.
+.Pp
+.Fn io_uring_queue_mmap
+always fails with
+.Er ENOSYS :
+.Dx has no Linux ring mmap ABI.
+.Ss Submission
+.Fn io_uring_get_sqe
+returns a pointer to the next available submission queue entry, or
+.Dv NULL
+if the submission queue is full.
+The returned
+.Vt struct io_uring_sqe
+is filled in with one of the
+.Fn io_uring_prep_*
+helpers before being submitted.
+.Pp
+.Fn io_uring_submit
+submits all prepared but not yet submitted entries.
+Entries prepared with
+.Fn io_uring_prep_nop
+complete locally;
+entries prepared with
+.Fn io_uring_prep_read
+or
+.Fn io_uring_prep_write
+are translated into
+.Dv IO_READ
+or
+.Dv IO_WRITE
+requests on the completion port.
+.Fn io_uring_submit_and_wait
+submits and then waits until at least
+.Fa wait_nr
+completions are ready.
+.Fn io_uring_submit_and_get_events
+submits and then reaps any already-available completions.
+.Ss Completion
+.Fn io_uring_wait_cqe
+waits for one completion and returns it in
+.Fa cqe_ptr ;
+.Fn io_uring_wait_cqe_nr
+waits until at least
+.Fa wait_nr
+completions are ready and returns the first in
+.Fa cqe_ptr .
+.Fn io_uring_peek_cqe
+returns the next completion without blocking, or
+.Er EAGAIN
+if none is ready.
+.Fn io_uring_peek_batch_cqe
+fills
+.Fa cqes
+with up to
+.Fa count
+completion pointers and returns the number filled.
+.Pp
+.Fn io_uring_cqe_seen
+marks one completion consumed;
+.Fn io_uring_cq_advance
+marks
+.Fa nr
+completions consumed.
+.Fn io_uring_cq_ready
+returns the number of completions ready in the local queue, and
+.Fn io_uring_sq_ready
+returns the number of prepared but unsubmitted submission entries, with
+.Fn io_uring_sq_space_left
+returning the remaining free slots.
+.Ss Preparation helpers
+The following are inline functions in
+.In liburing.h .
+.Fn io_uring_prep_read
+and
+.Fn io_uring_prep_write
+prepare a read or write at
+.Fa offset
+of
+.Fa nbytes
+bytes to or from
+.Fa buf ;
+.Fn io_uring_prep_rw
+is their common underlying helper.
+.Fn io_uring_prep_nop
+prepares a no-op.
+.Fn io_uring_sqe_set_data
+stores an opaque pointer in the entry, returned later by
+.Fn io_uring_cqe_get_data .
+.Fn io_uring_sqe_set_flags
+sets the per-entry flags; only zero is currently supported.
+.Ss Raw syscall wrappers
+.Fn io_uring_setup ,
+.Fn io_uring_enter ,
+.Fn io_uring_enter2 ,
+and
+.Fn io_uring_register
+are provided for ABI compatibility and always fail with
+.Er ENOSYS ;
+they never issue Linux-numbered system calls.
+Programs that rely on the Linux ring file descriptor, ring mmap offsets, or
+these raw entry points are outside the compatibility target.
+.Ss Version
+.Fn io_uring_major_version
+and
+.Fn io_uring_minor_version
+return the aligned upstream liburing release numbers.
+.Fn io_uring_check_version
+returns
+.Dv true
+if the aligned release is at least
+.Fa major . Fa minor .
+.Sh RETURN VALUES
+The queue API functions return 0 or a positive value on success and a negative
+errno value on failure, following the upstream liburing convention.
+The raw syscall wrappers and
+.Fn io_uring_queue_mmap
+instead return -1 and set
+.Va errno .
+.Fn io_uring_get_sqe
+returns a pointer or
+.Dv NULL .
+.Fn io_uring_sq_ready ,
+.Fn io_uring_sq_space_left ,
+and
+.Fn io_uring_cq_ready
+return unsigned counts.
+.Sh ERRORS
+.Bl -tag -width Er
+.It Bq Er EAGAIN
+No completion is ready for
+.Fn io_uring_peek_cqe .
+.It Bq Er EINVAL
+.Fn io_uring_queue_init
+was called with zero
+.Fa entries
+or non-zero
+.Fa flags .
+.It Bq Er ENOMEM
+Memory allocation for the local queues failed.
+.It Bq Er ENOSYS
+A Linux-only raw wrapper or
+.Fn io_uring_queue_mmap
+was called.
+.It Bq Er EOPNOTSUPP
+A submission queue entry requested an operation that is not implemented; it
+completes with a negative
+.Er EOPNOTSUPP
+result in its completion.
+.El
+.Sh SEE ALSO
+.Xr ioevent 2 ,
+.Xr ioport 2
+.Sh HISTORY
+The
+.Nm
+library first appeared in
+.Dx 6.5 .

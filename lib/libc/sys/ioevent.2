@@ -1,0 +1,305 @@
+.\" Copyright (c) 2026 The DragonFly Project
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd August 20, 2026
+.Dt IOEVENT 2
+.Os
+.Sh NAME
+.Nm ioevent
+.Nd submit and reap asynchronous I/O requests on a completion port
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/ioport.h
+.Ft int
+.Fn ioevent "int pfd" "const struct io_submit *submits" "int nsubmits" "struct io_completion *completions" "int ncompletions" "const struct timespec *timeout"
+.Sh DESCRIPTION
+The
+.Fn ioevent
+system call submits a batch of asynchronous requests to the completion port
+identified by
+.Fa pfd
+.Pq see Xr ioport 2 ,
+and/or reaps a batch of their completions.
+Its shape mirrors
+.Xr kevent 2 :
+one call may submit up to
+.Fa nsubmits
+requests from the array
+.Fa submits ,
+reap up to
+.Fa ncompletions
+completions into the array
+.Fa completions ,
+and, when no completion is immediately available, wait as directed by
+.Fa timeout .
+.Pp
+If
+.Fa ncompletions
+is zero, the call only submits and returns immediately.
+If
+.Fa nsubmits
+is zero, the call only reaps and, if necessary, waits.
+.Ss Submission records
+Each element of
+.Fa submits
+is a
+.Vt struct io_submit :
+.Bd -literal
+struct io_submit {
+    uint64_t tag;        /* caller tag, echoed in the completion */
+    uint32_t opcode;     /* IO_* or IO_CANCEL */
+    int32_t  fd;         /* target fd, or -1 */
+    uint32_t flags;      /* IOSUB_* */
+    uint32_t reserved0;  /* must be zero */
+    union {
+        struct { void *buf; uint64_t len; uint64_t offset; } rw;
+        struct { struct iovec *iov; uint64_t iovcnt;
+                 uint64_t offset; } rwv;
+        struct { uint64_t ident; int32_t filter; uint32_t fflags;
+                 int64_t data; void *udata; } kevent;
+        struct { const char *path; uint32_t flags; uint32_t mode;
+                 int32_t dirfd; uint32_t pad0; } openat;
+    } args;
+    uint64_t reserved1[2]; /* must be zero */
+};
+.Ed
+.Pp
+The
+.Va tag
+is an opaque caller value echoed back in the completion.
+.Va flags
+is reserved; only
+.Dv IOSUB_NONE
+(0) is currently defined, and
+.Va reserved0
+and
+.Va reserved1
+must be zero.
+The
+.Va args
+member is interpreted according to
+.Va opcode .
+.Ss Opcodes
+.Bl -tag -width ".Dv IO_FTRUNCATE"
+.It Dv IO_READ
+Read
+.Va args.rw.len
+bytes from
+.Va fd
+at
+.Va args.rw.offset
+into the user buffer
+.Va args.rw.buf .
+.It Dv IO_WRITE
+Write
+.Va args.rw.len
+bytes from the user buffer
+.Va args.rw.buf
+to
+.Va fd
+at
+.Va args.rw.offset .
+.It Dv IO_KEVENT
+Wait for the kqueue filter described by
+.Va args.kevent
+.Pq ident , filter , fflags , data
+and, when it fires, complete with the event information.
+Currently the
+.Ev EVFILT_READ
+and
+.Ev EVFILT_WRITE
+filters on a file descriptor are supported.
+.It Dv IO_CLOSE
+Close
+.Va fd
+.Pq equivalent to Xr close 2 ;
+.Va args
+is unused.
+.It Dv IO_CANCEL
+A control marker, not a request: it allocates no request, occupies no
+completion slot, and produces no completion.
+Its only parameter is the caller
+.Va tag
+of the request to cancel; see
+.Sx Cancellation .
+.It Dv IO_READV , Dv IO_WRITEV , Dv IO_FSYNC , Dv IO_FTRUNCATE , Dv IO_OPENAT
+Reserved opcodes that are not yet implemented.
+Submitting one fails with
+.Er EOPNOTSUPP
+as a direct error return, not as a completion.
+.El
+.Ss Completion records
+Each accepted request produces exactly one completion:
+.Bd -literal
+struct io_completion {
+    uint64_t tag;      /* echoed caller tag */
+    int32_t  opcode;   /* IO_* */
+    int32_t  error;    /* errno, 0 = success */
+    int64_t  result;   /* bytes, new fd, or 0 */
+    uint32_t flags;    /* IOCOMPL_* */
+    uint32_t reserved; /* must be zero */
+};
+.Ed
+.Pp
+On success
+.Va error
+is zero and
+.Va result
+is the operation result: the number of bytes transferred for I/O, the new
+file descriptor for fd-creating operations, or zero for operations without a
+return value.
+On failure
+.Va error
+holds the errno value and
+.Va result
+is zero.
+.Va flags
+is reserved; only
+.Dv IOCOMPL_NONE
+(0) is currently defined, and
+.Dv IOCOMPL_MORE
+is reserved for future use.
+.Ss Acceptance and error channels
+The two error channels are distinct:
+.Bl -bullet
+.It
+Synchronous validation failures are returned directly as the result of
+.Fn ioevent
+and produce no completion.
+These include an unknown or unimplemented
+.Va opcode
+.Pq Er EOPNOTSUPP ,
+an invalid
+.Va fd
+for an fd-based opcode
+.Pq Er EBADF ,
+a bad
+.Va submits ,
+.Va completions ,
+or
+.Va timeout
+pointer, and a bad write buffer
+.Pq all Er EFAULT ,
+and resource exhaustion
+.Pq Er ENOMEM .
+.It
+A request that the port is unable to service asynchronously because it needs
+a worker but the port was created with
+.Fa nworkers
+equal to zero
+.Pq a pure asynchronous port, see Xr ioport 2
+is still accepted: it completes with
+.Va error
+set to
+.Er EOPNOTSUPP ,
+and
+.Fn ioevent
+returns the number of completions reaped.
+.El
+.Ss Cancellation
+.Dv IO_CANCEL
+is a best-effort, silent control marker placed in the
+.Fa submits
+array.
+It targets the in-flight request whose
+.Va tag
+matches the
+.Va tag
+field of the
+.Dv IO_CANCEL
+record.
+If no request matches, or the request has already started completing,
+.Dv IO_CANCEL
+has no effect and reports nothing: it never returns
+.Er ENOENT ,
+.Er EALREADY ,
+or
+.Er EOPNOTSUPP .
+A request that has already begun and whose underlying backend cannot be
+aborted is not forged as cancelled; it still completes with its real result.
+Duplicate tags are legal, but then cancel may hit any one matching request.
+Closing the port is the only operation that cancels everything; see
+.Xr ioport 2 .
+.Ss Waiting
+When no completion is available, the behavior is controlled by
+.Fa timeout :
+.Bl -tag -width ".Fa timeout"
+.It Fa timeout No is Dv NULL
+Block indefinitely until a completion arrives or a signal is delivered.
+.It Fa timeout No is zero Pq Dv { 0, 0 }
+Do not block; return immediately.
+.It Fa timeout No is non-zero
+Block for at most the given interval.
+If the interval expires before a completion arrives,
+.Fn ioevent
+fails with
+.Er EWOULDBLOCK .
+.El
+.Sh RETURN VALUES
+On success,
+.Fn ioevent
+returns the number of completions reaped, in the range 0 through
+.Fa ncompletions .
+Otherwise, -1 is returned and
+.Va errno
+is set to indicate the error.
+.Sh ERRORS
+The
+.Fn ioevent
+system call will fail if:
+.Bl -tag -width Er
+.It Bq Er EBADF
+.Fa pfd
+is not a valid descriptor, is not a completion port, or the port is being
+closed.
+.It Bq Er EFAULT
+.Fa submits ,
+.Fa completions ,
+or
+.Fa timeout
+points outside the process address space, or a write buffer could not be
+copied in.
+.It Bq Er EINTR
+The call was interrupted by a signal while waiting.
+.It Bq Er ENOMEM
+Insufficient memory to accept a request.
+.It Bq Er EOPNOTSUPP
+.Fa opcode
+is unknown or not yet implemented.
+.It Bq Er EWOULDBLOCK
+The
+.Fa timeout
+interval expired before any completion arrived.
+.El
+.Sh SEE ALSO
+.Xr close 2 ,
+.Xr ioport 2 ,
+.Xr kevent 2 ,
+.Xr kqueue 2 ,
+.Xr liburing 3
+.Sh HISTORY
+The
+.Fn ioevent
+system call first appeared in
+.Dx 6.5 .

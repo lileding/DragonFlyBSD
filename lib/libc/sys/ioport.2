@@ -1,0 +1,105 @@
+.\" Copyright (c) 2026 The DragonFly Project
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd August 20, 2026
+.Dt IOPORT 2
+.Os
+.Sh NAME
+.Nm ioport
+.Nd create an asynchronous I/O completion port
+.Sh LIBRARY
+.Lb libc
+.Sh SYNOPSIS
+.In sys/ioport.h
+.Ft int
+.Fn ioport "unsigned nworkers"
+.Sh DESCRIPTION
+The
+.Fn ioport
+system call creates an asynchronous I/O completion port and returns a file
+descriptor for it, referred to throughout this manual page as a
+.Dq pfd .
+The pfd is used with
+.Xr ioevent 2
+to submit asynchronous requests and to reap their completions.
+.Pp
+Each port created with a non-zero
+.Fa nworkers
+owns an independent task queue and exactly
+.Fa nworkers
+kernel worker threads (LWKTs).
+The workers execute requests whose back end is a synchronous kernel API and
+run deferred continuations of asynchronous requests.
+.Pp
+If
+.Fa nworkers
+is zero, the port is created as a
+.Dq pure asynchronous
+port: no worker task queue is started, and only requests with a native
+asynchronous path (vnode reads), together with
+.Dv IO_KEVENT
+and
+.Dv IO_CANCEL ,
+are serviced.
+Any request that requires a worker completes with an
+.Er EOPNOTSUPP
+error in its completion record rather than silently falling back to
+synchronous execution.
+.Pp
+The returned descriptor is an ordinary file descriptor
+.Pq Dv DTYPE_IOPORT .
+It can be registered with
+.Xr kqueue 2 :
+.Dv EVFILT_READ
+on a pfd becomes ready when its completion queue is non-empty, and
+.Va kevent.data
+reports the number of completions currently available to be reaped.
+kqueue only notifies; it does not consume completions.
+Completions are reaped by
+.Xr ioevent 2 .
+.Sh RETURN VALUES
+Upon successful completion, a new pfd is returned.
+Otherwise, -1 is returned and
+.Va errno
+is set to indicate the error.
+.Sh ERRORS
+The
+.Fn ioport
+system call will fail if:
+.Bl -tag -width Er
+.It Bq Er ENOMEM
+Insufficient memory to create the port or to start its task queue.
+.It Bq Er EMFILE
+The process has already reached its limit for open file descriptors.
+.It Bq Er ENFILE
+The system file table is full.
+.El
+.Sh SEE ALSO
+.Xr ioevent 2 ,
+.Xr kqueue 2 ,
+.Xr liburing 3
+.Sh HISTORY
+The
+.Fn ioport
+system call first appeared in
+.Dx 6.5 .

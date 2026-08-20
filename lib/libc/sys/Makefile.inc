@@ -71,7 +71,7 @@ MAN+=	_exit.2 accept.2 access.2 acct.2 adjtime.2 bind.2 \
 	getpeername.2 getpgrp.2 getpid.2 getpriority.2 getrandom.2 \
 	getrlimit.2 getrusage.2 getsid.2 getsockname.2 \
 	getsockopt.2 gettimeofday.2 getuid.2 \
-	intro.2 ioctl.2 ioprio_get.2 issetugid.2 \
+	intro.2 ioctl.2 ioevent.2 ioport.2 ioprio_get.2 issetugid.2 \
 	jail.2 jail_attach.2 kenv.2 kill.2 \
 	kldfind.2 kldfirstmod.2 kldload.2 kldnext.2 kldstat.2 kldsym.2 \
 	kldunload.2 ktrace.2 kqueue.2 link.2 listen.2 lseek.2 \

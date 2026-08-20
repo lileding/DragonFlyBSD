@@ -9,6 +9,8 @@ LIB=	uring
 SRCS=	liburing.c
 INCS=	liburing.h io_uring.h
 
+MAN=	liburing.3
+
 # Static library only for now (no shared lib / symbol versioning).
 NOPIC=	true
 
