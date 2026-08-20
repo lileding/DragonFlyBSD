@@ -13,6 +13,7 @@
 #include "vmmfs_pcislot_bdf.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_auth.h"
+#include "vmmfs_pcislot_config.h"
 #include "vmmfs_pcislot_events.h"
 
 struct vnode;
@@ -40,6 +41,7 @@ struct vmmfs_pcislot {
 	uint16_t bdf;
 	struct vmmfs_pcislot_bdf bdf_node;
 	struct vmmfs_pcislot_descriptor descriptor;
+	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;
 	struct vmmfs_pcislot_type0 type0;
 };
@@ -55,9 +57,9 @@ int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 int vmmfs_pcislot_destroy(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
-int vmmfs_pcislot_config_read(struct vmmfs_pcislot *, vmm_vcpu_t,
+int vmmfs_pcislot_type0_config_read(struct vmmfs_pcislot *, vmm_vcpu_t,
 	uint16_t, enum vmm_io_width, uint32_t *);
-int vmmfs_pcislot_config_write(struct vmmfs_pcislot *, vmm_vcpu_t,
+int vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *, vmm_vcpu_t,
 	uint16_t, enum vmm_io_width, uint32_t);
 
 #endif /* VMMFS_PCISLOT_H */

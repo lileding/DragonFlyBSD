@@ -116,6 +116,9 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	error = vmmfs_pcislot_events_create(slot, &slot->events);
 	if (error != 0)
 		goto fail_bdf;
+	error = vmmfs_pcislot_config_create(slot, &slot->config);
+	if (error != 0)
+		goto fail_events;
 	vmmfs_pcislot_events_log(&slot->events, "slot created bdf=0000:%02x:%02x.%x",
 	    bdf >> 8, (bdf >> 3) & 0x1f, bdf & 0x7);
 	vx_downgrade(vnode);
@@ -123,6 +126,8 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	*slotp = slot;
 	return (0);
 
+fail_events:
+	(void)vmmfs_pcislot_events_destroy(&slot->events);
 fail_bdf:
 	(void)vmmfs_pcislot_bdf_destroy(&slot->bdf_node);
 fail_vnode:
@@ -141,6 +146,9 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 
 	if (slot == NULL)
 		return (EINVAL);
+	error = vmmfs_pcislot_config_destroy(&slot->config);
+	if (error != 0)
+		return (error);
 	error = vmmfs_pcislot_descriptor_destroy(&slot->descriptor);
 	if (error != 0)
 		return (error);
@@ -180,6 +188,8 @@ vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
 		bzero(&slot->type0, sizeof(slot->type0));
 		return (error);
 	}
+	vmmfs_pcislot_config_power_on(&slot->config,
+	    slot->descriptor.generation);
 	slot->type0.powered = true;
 	cache_inval_vp(slot->vnode, CINV_CHILDREN);
 	return (0);
@@ -193,6 +203,7 @@ vmmfs_pcislot_power_off(struct vmmfs_pcislot *slot)
 	if (slot == NULL)
 		return;
 	cache_inval_vp(slot->vnode, CINV_CHILDREN);
+	vmmfs_pcislot_config_power_off(&slot->config);
 	resources = slot->descriptor.resources;
 	slot->descriptor.resources = NULL;
 	(void)vmmfs_pcislot_resources_destroy(resources);
@@ -201,7 +212,7 @@ vmmfs_pcislot_power_off(struct vmmfs_pcislot *slot)
 }
 
 int
-vmmfs_pcislot_config_read(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
+vmmfs_pcislot_type0_config_read(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 	uint16_t offset, enum vmm_io_width width, uint32_t *value)
 {
 	const struct vmmfs_pcislot_bar *bar;
@@ -257,7 +268,7 @@ vmmfs_pcislot_config_read(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 }
 
 int
-vmmfs_pcislot_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
+vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 	uint16_t offset, enum vmm_io_width width, uint32_t value)
 {
 	const struct vmmfs_pcislot_bar *bar_value;
@@ -528,6 +539,9 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	else if (ncp->nc_nlen == sizeof("events") - 1 &&
 	    bcmp(ncp->nc_name, "events", sizeof("events") - 1) == 0)
 		vnode = slot->descriptor.committed ? slot->events.vnode : NULL;
+	else if (ncp->nc_nlen == sizeof("config") - 1 &&
+	    bcmp(ncp->nc_name, "config", sizeof("config") - 1) == 0)
+		vnode = slot->descriptor.committed ? slot->config.vnode : NULL;
 	else if (ncp->nc_nlen == sizeof("descriptor") - 1 &&
 	    bcmp(ncp->nc_name, "descriptor", sizeof("descriptor") - 1) == 0)
 		vnode = slot->descriptor.vnode;
@@ -663,6 +677,14 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 		item->inode = slot->events.inode;
 		item->type = DT_REG;
 		bcopy("events", item->name, sizeof("events"));
+			lwkt_reltoken(&slot->pciroot->machine->token);
+			return (0);
+		}
+		--index;
+		if (index == 0) {
+			item->inode = slot->config.inode;
+			item->type = DT_REG;
+			bcopy("config", item->name, sizeof("config"));
 			lwkt_reltoken(&slot->pciroot->machine->token);
 			return (0);
 		}

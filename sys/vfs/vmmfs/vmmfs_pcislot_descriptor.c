@@ -49,6 +49,11 @@
 #define VMMFS_DESCRIPTOR_DOORBELL_SIZE 0x08
 #define VMMFS_DESCRIPTOR_DOORBELL_SPACE 0x10
 
+#define VMMFS_DESCRIPTOR_CONFIG_BAR 0x01
+#define VMMFS_DESCRIPTOR_CONFIG_OFFSET 0x02
+#define VMMFS_DESCRIPTOR_CONFIG_WIDTH 0x04
+#define VMMFS_DESCRIPTOR_CONFIG_SPACE 0x08
+
 #define VMMFS_DESCRIPTOR_CAP_KIND 0x0001
 #define VMMFS_DESCRIPTOR_CAP_VECTORS 0x0002
 #define VMMFS_DESCRIPTOR_CAP_ADDRESS_WIDTH 0x0004
@@ -306,6 +311,9 @@ vmmfs_pcislot_descriptor_close(struct vop_close_args *ap)
 	descriptor->generation = generation;
 	descriptor->committing = false;
 	lwkt_reltoken(&machine->token);
+	vmmfs_pcislot_config_descriptor_changed(&descriptor->slot->config,
+	    generation, length != 0);
+	cache_inval_vp(descriptor->slot->vnode, CINV_CHILDREN);
 	if (length == 0) {
 		vmmfs_pcislot_events_log(&descriptor->slot->events,
 		    "descriptor_removed generation=%ju", (uintmax_t)generation);
@@ -527,6 +535,7 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 	uint32_t fields;
 	uint8_t bars[VMMFS_PCISLOT_MAX_BARS];
 	uint8_t doorbells[VMMFS_PCISLOT_MAX_DOORBELLS];
+	uint8_t configs[VMMFS_PCISLOT_MAX_CONFIGS];
 	uint16_t caps[VMMFS_PCISLOT_MAX_CAPS];
 	uint8_t ecaps[VMMFS_PCISLOT_MAX_ECAPS];
 	const char *line;
@@ -556,6 +565,7 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 	bzero(value, sizeof(*value));
 	bzero(bars, sizeof(bars));
 	bzero(doorbells, sizeof(doorbells));
+	bzero(configs, sizeof(configs));
 	bzero(caps, sizeof(caps));
 	bzero(ecaps, sizeof(ecaps));
 	fields = 0;
@@ -771,6 +781,53 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 			else
 				return (EINVAL);
 			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_SPACE;
+		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
+		    key_length, "config", "bar", VMMFS_PCISLOT_MAX_CONFIGS,
+		    &index)) != ENOENT) {
+			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_BAR)
+				return (EINVAL);
+			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
+			    value_length, &number);
+			if (error != 0 || number >= VMMFS_PCISLOT_MAX_BARS)
+				return (EINVAL);
+			value->configs[index].present = true;
+			value->configs[index].bar = number;
+			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_BAR;
+		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
+		    key_length, "config", "offset", VMMFS_PCISLOT_MAX_CONFIGS,
+		    &index)) != ENOENT) {
+			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_OFFSET)
+				return (EINVAL);
+			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
+			    value_length, &number);
+			if (error != 0)
+				return (error);
+			value->configs[index].offset = number;
+			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_OFFSET;
+		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
+		    key_length, "config", "width", VMMFS_PCISLOT_MAX_CONFIGS,
+		    &index)) != ENOENT) {
+			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_WIDTH)
+				return (EINVAL);
+			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
+			    value_length, &number);
+			if (error != 0 || (number != 1 && number != 2 && number != 4 &&
+			    number != 8))
+				return (EINVAL);
+			value->configs[index].width = number;
+			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_WIDTH;
+		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
+		    key_length, "config", "space", VMMFS_PCISLOT_MAX_CONFIGS,
+		    &index)) != ENOENT) {
+			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_SPACE)
+				return (EINVAL);
+			if (value_length == 4 && bcmp(equals + 1, "mmio", 4) == 0)
+				value->configs[index].space = VMMFS_PCISLOT_CONFIG_MMIO;
+			else if (value_length == 3 && bcmp(equals + 1, "pio", 3) == 0)
+				value->configs[index].space = VMMFS_PCISLOT_CONFIG_PIO;
+			else
+				return (EINVAL);
+			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_SPACE;
 		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
 		    key_length, "cap", "kind", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
 		    ENOENT) {
@@ -1006,6 +1063,45 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 		}
 	}
 	gap = false;
+	for (index = 0; index < VMMFS_PCISLOT_MAX_CONFIGS; ++index) {
+		if (configs[index] == 0) {
+			gap = true;
+			continue;
+		}
+		if (gap || configs[index] != (VMMFS_DESCRIPTOR_CONFIG_BAR |
+		    VMMFS_DESCRIPTOR_CONFIG_OFFSET | VMMFS_DESCRIPTOR_CONFIG_WIDTH |
+		    VMMFS_DESCRIPTOR_CONFIG_SPACE) ||
+		    !value->bars[value->configs[index].bar].present ||
+		    value->configs[index].offset > value->bars[
+		    value->configs[index].bar].size || value->configs[index].width >
+		    value->bars[value->configs[index].bar].size -
+		    value->configs[index].offset ||
+		    (value->configs[index].offset % value->configs[index].width) != 0 ||
+		    (value->bars[value->configs[index].bar].type ==
+		    VMMFS_PCISLOT_BAR_IO) != (value->configs[index].space ==
+		    VMMFS_PCISLOT_CONFIG_PIO) ||
+		    (value->configs[index].space == VMMFS_PCISLOT_CONFIG_PIO &&
+		    value->configs[index].width == 8))
+			return (EINVAL);
+		for (other = 0; other < index; ++other) {
+			if (value->configs[other].bar != value->configs[index].bar)
+				continue;
+			if (vmmfs_pcislot_descriptor_ranges_overlap(
+			    value->configs[other].offset, value->configs[other].width,
+			    value->configs[index].offset, value->configs[index].width))
+				return (EINVAL);
+		}
+		for (other = 0; other < VMMFS_PCISLOT_MAX_DOORBELLS; ++other) {
+			if (!value->doorbells[other].present ||
+			    value->doorbells[other].bar != value->configs[index].bar)
+				continue;
+			if (vmmfs_pcislot_descriptor_ranges_overlap(
+			    value->doorbells[other].offset, value->doorbells[other].size,
+			    value->configs[index].offset, value->configs[index].width))
+				return (EINVAL);
+		}
+	}
+	gap = false;
 	pcie_caps = 0;
 	for (cap = 0; cap < VMMFS_PCISLOT_MAX_CAPS; ++cap) {
 		if (caps[cap] == 0) {
@@ -1062,6 +1158,19 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 			    (value->doorbells[index].bar == value->caps[cap].pba_bar &&
 			    vmmfs_pcislot_descriptor_ranges_overlap(value->doorbells[index].offset,
 			    value->doorbells[index].size, value->caps[cap].pba_offset,
+			    ((uint64_t)value->caps[cap].vectors + 63) / 64 * 8)))
+				return (EINVAL);
+		}
+		for (index = 0; index < VMMFS_PCISLOT_MAX_CONFIGS; ++index) {
+			if (!value->configs[index].present)
+				continue;
+			if ((value->configs[index].bar == value->caps[cap].table_bar &&
+			    vmmfs_pcislot_descriptor_ranges_overlap(value->configs[index].offset,
+			    value->configs[index].width, value->caps[cap].table_offset,
+			    (uint64_t)value->caps[cap].vectors * 16)) ||
+			    (value->configs[index].bar == value->caps[cap].pba_bar &&
+			    vmmfs_pcislot_descriptor_ranges_overlap(value->configs[index].offset,
+			    value->configs[index].width, value->caps[cap].pba_offset,
 			    ((uint64_t)value->caps[cap].vectors + 63) / 64 * 8)))
 				return (EINVAL);
 		}

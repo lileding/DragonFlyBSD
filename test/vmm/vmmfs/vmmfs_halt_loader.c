@@ -43,7 +43,7 @@
 #define SEG_UNUSABLE		0x1000U
 
 static void build_cpu_state(struct vmm_cpustate *);
-static void build_guest(uint8_t *, uint64_t, int, int, int);
+static void build_guest(uint8_t *, uint64_t, int, int, int, int);
 static void check_pci_topology(const uint8_t *, uint64_t);
 static void set_segment(struct vmm_segment *, uint16_t, uint16_t, uint32_t,
     uint64_t);
@@ -57,17 +57,22 @@ main(int argc, char **argv)
 	uint8_t *memory;
 	ssize_t written;
 	int check_pci;
+	int check_pci_config;
 	int check_pci_doorbell;
 	int loop_pci;
 
 	if (argc > 2 || (argc == 2 && strcmp(argv[1], "--check-pci") != 0 &&
 	    strcmp(argv[1], "--check-pci-loop") != 0 &&
-	    strcmp(argv[1], "--check-pci-doorbell-loop") != 0))
-		errx(1, "usage: %s [--check-pci|--check-pci-loop|--check-pci-doorbell-loop]",
+	    strcmp(argv[1], "--check-pci-doorbell-loop") != 0 &&
+	    strcmp(argv[1], "--check-pci-config-loop") != 0))
+		errx(1, "usage: %s [--check-pci|--check-pci-loop|--check-pci-doorbell-loop|--check-pci-config-loop]",
 		    argv[0]);
 	check_pci = argc == 2;
+	check_pci_config = argc == 2 &&
+	    strcmp(argv[1], "--check-pci-config-loop") == 0;
 	check_pci_doorbell = argc == 2 &&
-	    strcmp(argv[1], "--check-pci-doorbell-loop") == 0;
+	    (strcmp(argv[1], "--check-pci-doorbell-loop") == 0 ||
+	    check_pci_config);
 	loop_pci = argc == 2 && strcmp(argv[1], "--check-pci-loop") == 0;
 	if (fstat(3, &st) != 0)
 		err(1, "fstat fd3");
@@ -80,7 +85,7 @@ main(int argc, char **argv)
 	if (check_pci)
 		check_pci_topology(memory, (uint64_t)st.st_size);
 	build_guest(memory, (uint64_t)st.st_size, check_pci, loop_pci,
-	    check_pci_doorbell);
+	    check_pci_doorbell, check_pci_config);
 	build_cpu_state(&state);
 	written = write(2, &state, sizeof(state));
 	if (written < 0)
@@ -116,11 +121,11 @@ check_pci_topology(const uint8_t *memory, uint64_t memory_size)
 
 static void
 build_guest(uint8_t *memory, uint64_t memory_size, int check_pci, int loop_pci,
-	int check_pci_doorbell)
+	int check_pci_doorbell, int check_pci_config)
 {
 	unsigned int index;
 
-	if (ENTRY_GPA + 15 > memory_size || STACK_TOP_GPA > memory_size)
+	if (ENTRY_GPA + 64 > memory_size || STACK_TOP_GPA > memory_size)
 		errx(1, "guest memory is too small");
 	memset(memory + PML4_GPA, 0, PAGE_SIZE_GUEST * 3);
 	write64(memory, PML4_GPA, PDPT_GPA | 3);
@@ -157,10 +162,17 @@ build_guest(uint8_t *memory, uint64_t memory_size, int check_pci, int loop_pci,
 			0x83, 0xe0, 0xf0,			/* and eax, 0xfffffff0 */
 			0x48, 0x89, 0xc1,			/* mov rcx, rax */
 			0xc7, 0x01, 0xef, 0xbe, 0xad, 0xde,	/* mov dword [rcx], 0xdeadbeef */
+			0x8b, 0x81, 0x00, 0x01, 0x00, 0x00,	/* mov eax, [rcx+0x100] */
+			0x3d, 0xfe, 0xca, 0xde, 0xc0,	/* cmp eax, 0xc0decafe */
+			0x74, 0x02,				/* je 2 */
+			0x0f, 0x0b,				/* ud2 */
 			0xeb, 0xfe,				/* jmp . */
 		};
 
-		memcpy(memory + ENTRY_GPA, guest, sizeof(guest));
+		if (check_pci_config)
+			memcpy(memory + ENTRY_GPA, guest, sizeof(guest));
+		else
+			memcpy(memory + ENTRY_GPA, guest, sizeof(guest) - 15);
 	} else if (check_pci) {
 		memory[ENTRY_GPA] = 0xb8;
 		memory[ENTRY_GPA + 1] = 0x00;

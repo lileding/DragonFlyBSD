@@ -12,6 +12,7 @@
 #include <dev/virtual/vmm/vmm.h>
 
 struct vmmfs_machine;
+struct vmmfs_pcislot_config_request;
 struct thread;
 struct vnode;
 struct vop_ops;
@@ -27,6 +28,8 @@ struct vmmfs_vcpu_thread {
 	struct vmm_cpustate state;
 	uint32_t index;
 	bool halted_logged;
+	struct vmmfs_pcislot_config_request *config_request;
+	bool config_done;
 };
 
 struct vmmfs_vcpu {

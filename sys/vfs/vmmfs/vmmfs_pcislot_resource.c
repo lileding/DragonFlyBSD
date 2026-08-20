@@ -32,6 +32,7 @@
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_events.h"
 #include "vmmfs_pcislot_resource.h"
+#include "vmmfs_vcpu.h"
 
 #define VMMFS_PCISLOT_RESOURCE_MODE 0600
 #define VMMFS_PCISLOT_KICK_INITIAL 64
@@ -62,6 +63,14 @@ static int vmmfs_pcislot_resource_filter_read(struct knote *, long);
 static int vmmfs_pcislot_resource_mmio_write(vmm_vcpu_t, void *,
 	const struct vmm_io_write *);
 static int vmmfs_pcislot_resource_pio_write(vmm_vcpu_t, void *,
+	const struct vmm_io_write *);
+static int vmmfs_pcislot_resource_mmio_read(vmm_vcpu_t, void *,
+	struct vmm_io_read *);
+static int vmmfs_pcislot_resource_pio_read(vmm_vcpu_t, void *,
+	struct vmm_io_read *);
+static int vmmfs_pcislot_resource_config_mmio_write(vmm_vcpu_t, void *,
+	const struct vmm_io_write *);
+static int vmmfs_pcislot_resource_config_pio_write(vmm_vcpu_t, void *,
 	const struct vmm_io_write *);
 static void vmmfs_pcislot_resources_hold(struct vmmfs_pcislot_resources *);
 static void vmmfs_pcislot_resources_drop(struct vmmfs_pcislot_resources *);
@@ -527,17 +536,20 @@ vmmfs_pcislot_resources_msix_unmask(struct vmmfs_pcislot_resources *resources,
 
 int
 vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *resources,
-	vmm_vcpu_t vcpu, const struct vmm_cpuexit *exit)
+	struct vmmfs_vcpu_thread *thread, const struct vmm_cpuexit *exit)
 {
 	struct vmmfs_pcislot_resource *resource;
 	uint64_t value;
 	bool write;
+	vmm_vcpu_t vcpu;
 	size_t index;
 	int error;
 
-	if (resources == NULL || vcpu == NULL || exit == NULL ||
+	if (resources == NULL || thread == NULL || thread->vcpu == NULL ||
+	    exit == NULL ||
 	    exit->reason != VMM_CPUEXIT_MEMORY)
 		return (ENOENT);
+	vcpu = thread->vcpu;
 	write = (exit->u.mem.prot & VM_PROT_WRITE) != 0;
 	value = 0;
 	for (index = 0; index < resources->count; ++index) {
@@ -546,9 +558,13 @@ vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *resources,
 		    resource->kind != VMMFS_PCISLOT_RESOURCE_ROM) ||
 		    !resource->mapped || exit->u.mem.gpa < resource->gpa ||
 		    exit->u.mem.gpa - resource->gpa > resource->size ||
-		    (uint64_t)exit->u.mem.width > resource->size -
-		    (exit->u.mem.gpa - resource->gpa))
+			(uint64_t)exit->u.mem.width > resource->size -
+			(exit->u.mem.gpa - resource->gpa))
 			continue;
+		error = vmmfs_pcislot_config_memory(&resources->slot->config,
+		    thread, resource, exit);
+		if (error != ENOENT)
+			return (error);
 		if (write) {
 			error = vmmfs_pcislot_resource_doorbell(resource,
 			    exit->u.mem.gpa, exit->u.mem.width, exit->u.mem.value, true);
@@ -577,16 +593,19 @@ vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *resources,
 
 int
 vmmfs_pcislot_resources_io(struct vmmfs_pcislot_resources *resources,
-	vmm_vcpu_t vcpu, struct vmm_cpustate *state,
+	struct vmmfs_vcpu_thread *thread, struct vmm_cpustate *state,
 	const struct vmm_cpuexit *exit)
 {
 	struct vmmfs_pcislot_resource *resource;
 	size_t index;
+	vmm_vcpu_t vcpu;
 	int error;
 
-	if (resources == NULL || vcpu == NULL || state == NULL || exit == NULL ||
+	if (resources == NULL || thread == NULL || thread->vcpu == NULL ||
+	    state == NULL || exit == NULL ||
 	    exit->reason != VMM_CPUEXIT_IO || exit->u.io.str || exit->u.io.rep)
 		return (ENOENT);
+	vcpu = thread->vcpu;
 	for (index = 0; index < resources->count; ++index) {
 		resource = &resources->items[index];
 		if (resource->kind != VMMFS_PCISLOT_RESOURCE_PIO ||
@@ -595,6 +614,10 @@ vmmfs_pcislot_resources_io(struct vmmfs_pcislot_resources *resources,
 		    (uint64_t)exit->u.io.operand_size > resource->size -
 		    (exit->u.io.port - resource->gpa))
 			continue;
+		error = vmmfs_pcislot_config_io(&resources->slot->config, thread,
+		    resource, state, exit);
+		if (error != ENOENT)
+			return (error);
 		if (exit->u.io.in) {
 			uint64_t value;
 			uint64_t mask;
@@ -798,10 +821,12 @@ vmmfs_pcislot_resource_install_traps(struct vmmfs_pcislot_resource *resource)
 {
 	const struct vmmfs_pcislot_descriptor_value *value;
 	const struct vmmfs_pcislot_doorbell *doorbell;
+	const struct vmmfs_pcislot_config_register *config;
 	struct vmmfs_pcislot_resource_trap *trap;
 	size_t count;
 	size_t index;
 	unsigned int doorbell_index;
+	unsigned int config_index;
 	int error;
 
 	if (resource->kind != VMMFS_PCISLOT_RESOURCE_BAR &&
@@ -813,6 +838,12 @@ vmmfs_pcislot_resource_install_traps(struct vmmfs_pcislot_resource *resource)
 	    ++doorbell_index) {
 		doorbell = &value->doorbells[doorbell_index];
 		if (doorbell->present && doorbell->bar == resource->index)
+			++count;
+	}
+	for (config_index = 0; config_index < VMMFS_PCISLOT_MAX_CONFIGS;
+	    ++config_index) {
+		config = &value->configs[config_index];
+		if (config->present && config->bar == resource->index)
 			++count;
 	}
 	if (count == 0)
@@ -837,6 +868,39 @@ vmmfs_pcislot_resource_install_traps(struct vmmfs_pcislot_resource *resource)
 			error = vmm_machine_trap_pio_write(resource->resources->machine,
 			    (uint16_t)trap->base, (uint32_t)trap->size,
 			    vmmfs_pcislot_resource_pio_write, resource, &trap->write_io);
+		if (error != 0) {
+			vmmfs_pcislot_resource_remove_traps(resource);
+			return (error);
+		}
+	}
+	for (config_index = 0; config_index < VMMFS_PCISLOT_MAX_CONFIGS;
+	    ++config_index) {
+		config = &value->configs[config_index];
+		if (!config->present || config->bar != resource->index)
+			continue;
+		trap = &resource->traps[index++];
+		trap->base = resource->gpa + config->offset;
+		trap->size = config->width;
+		if (resource->kind == VMMFS_PCISLOT_RESOURCE_BAR) {
+			error = vmm_machine_trap_mmio_read(resource->resources->machine,
+			    trap->base, trap->size, vmmfs_pcislot_resource_mmio_read,
+			    resource, &trap->read_io);
+			if (error == 0)
+				error = vmm_machine_trap_mmio_write(
+				    resource->resources->machine, trap->base, trap->size,
+				    vmmfs_pcislot_resource_config_mmio_write, resource,
+				    &trap->write_io);
+		} else {
+			error = vmm_machine_trap_pio_read(resource->resources->machine,
+			    (uint16_t)trap->base, (uint32_t)trap->size,
+			    vmmfs_pcislot_resource_pio_read, resource, &trap->read_io);
+			if (error == 0)
+				error = vmm_machine_trap_pio_write(
+				    resource->resources->machine, (uint16_t)trap->base,
+				    (uint32_t)trap->size,
+				    vmmfs_pcislot_resource_config_pio_write, resource,
+				    &trap->write_io);
+		}
 		if (error != 0) {
 			vmmfs_pcislot_resource_remove_traps(resource);
 			return (error);
@@ -1547,4 +1611,44 @@ vmmfs_pcislot_resource_pio_write(vmm_vcpu_t vcpu, void *argument,
 	(void)vcpu;
 	return (vmmfs_pcislot_resource_doorbell(argument, write->address,
 	    write->width, write->value, false));
+}
+
+static int
+vmmfs_pcislot_resource_mmio_read(vmm_vcpu_t vcpu, void *argument,
+	struct vmm_io_read *read)
+{
+	(void)vcpu;
+	(void)argument;
+	(void)read;
+	return (ENOENT);
+}
+
+static int
+vmmfs_pcislot_resource_pio_read(vmm_vcpu_t vcpu, void *argument,
+	struct vmm_io_read *read)
+{
+	(void)vcpu;
+	(void)argument;
+	(void)read;
+	return (ENOENT);
+}
+
+static int
+vmmfs_pcislot_resource_config_mmio_write(vmm_vcpu_t vcpu, void *argument,
+	const struct vmm_io_write *write)
+{
+	(void)vcpu;
+	(void)argument;
+	(void)write;
+	return (ENOENT);
+}
+
+static int
+vmmfs_pcislot_resource_config_pio_write(vmm_vcpu_t vcpu, void *argument,
+	const struct vmm_io_write *write)
+{
+	(void)vcpu;
+	(void)argument;
+	(void)write;
+	return (ENOENT);
 }

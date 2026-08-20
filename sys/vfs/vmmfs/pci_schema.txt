@@ -134,10 +134,13 @@ by a BME transition.
 A future IOMMU maps driver-selected IOVA ranges under kernel control.  It
 changes translation policy, not this descriptor or backend capability ABI.
 
-6. Doorbell Ranges
-------------------
+6. BAR Access Classes
+---------------------
 
-Each doorbell N describes one write-only BAR range:
+6.1 Doorbell Ranges
+~~~~~~~~~~~~~~~~~~~
+
+Each doorbell N describes one asynchronous write-only BAR range:
 
     doorbellN.bar=<declared BAR index>
     doorbellN.offset=<u64>
@@ -147,9 +150,9 @@ Each doorbell N describes one write-only BAR range:
 
 The interval [offset, offset + size) must be within the selected BAR.  space
 must match that BAR's type, the interval must be aligned to width and disjoint
-from every other doorbell range and all MSI-X Table/PBA ranges.  The guest
-write width must equal doorbellN.width.  A pio doorbell width may be 1, 2, or
-4 only.
+from every other doorbell range, every configN register, and all MSI-X
+Table/PBA ranges. The guest write width must equal doorbellN.width. A pio
+doorbell width may be 1, 2, or 4 only.
 
 VMMFS traps writes in the range and appends one ordered record to kickN:
 
@@ -165,6 +168,35 @@ at least one complete record can be read.  Records are not coalesced or lost.
 Backends that only need a rescan edge, including virtio queue notification,
 may ignore the record value.  Other PCIe functions retain exact ordering and
 values.
+
+6.2 Synchronous Configuration Registers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each configN describes one exact synchronous device-register transaction:
+
+    configN.bar=<declared BAR index>
+    configN.offset=<u64>
+    configN.width=1|2|4|8
+    configN.space=mmio|pio
+
+N is contiguous from config0. The interval [offset, offset + width) must be
+within the selected BAR, aligned to width, and disjoint from every other
+configN register, every doorbell range, and all MSI-X Table/PBA ranges. space
+must match the selected BAR's type. A pio configuration-register width may be
+1, 2, or 4 only.
+
+VMMFS automatically traps reads and writes to every configN when the powered
+slot is activated. A guest transaction must exactly match its `space`, BAR,
+offset, and width. An access which overlaps a configN but is not an exact match
+must not fall through to direct BAR backing; VMMFS completes it as an
+unsupported device-register access. configN declares no direction policy: the
+backend receives both reads and writes and decides whether each operation is
+supported.
+
+configN is not a vnode. Every committed descriptor has one token-authorized,
+exclusive `config` responder fd which carries requests for all of its configN
+registers. `config` is not PCI configuration space. It is the synchronous
+BAR/PIO register protocol defined in Section 10.
 
 7. INTx Resource
 ----------------
@@ -233,14 +265,12 @@ A blob capability has:
 
     capN.kind=blob
     capN.id=<u8>
-    capN.access=static|proxy
     capN.data=<hex byte string>
 
 blob data excludes the standard capability ID, next-pointer, and length
-bytes.  static makes the data read-only to the guest.  proxy delegates all
-accesses within that capability's payload to the config channel defined in
-Section 10.  blob permits vendor-specific capabilities and standard
-capabilities whose semantics are deliberately delegated to a backend.
+bytes. Blob data is read-only to the guest. Blob permits vendor-specific
+capabilities and static standard-capability payloads without delegating PCI
+configuration space semantics to a backend.
 
 9. PCIe Extended Capability List
 --------------------------------
@@ -254,7 +284,6 @@ Each extended capability contains:
 
     ecapN.id=<u16>
     ecapN.version=<1..15>
-    ecapN.access=static|proxy
     ecapN.data=<hex byte string>
 
 The data excludes the four-byte extended-capability header.  VMMFS rejects a
@@ -275,67 +304,68 @@ never carries binary requests or responses, and closing it has no device
 lifecycle effect.
 
 The config node is a separate token-authorized, exclusive binary responder
-channel.  It carries synchronous low-frequency configuration requests and
-responses when at least one blob or ecap uses access=proxy.  It is not a BAR
-and is never used for data-plane I/O.  An authorized backend opens named
-barN, pioN, rom, dma, kickN, intx, msiN, and msixN nodes itself; no provider
-socket and no fd bundle are part of this ABI.
+channel. Every committed descriptor creates exactly one config node, regardless
+of its BAR layout. It carries synchronous low-frequency requests and responses
+for every declared configN BAR/PIO register. It is not PCI ECAM configuration
+space and is never used for data-plane doorbells. An authorized backend opens
+named barN, pioN, rom, dma, kickN, intx, msiN, and msixN nodes itself; no
+provider socket and no fd bundle are part of this ABI.
 
-VMMFS handles all Type-0 header fields, PCIe, MSI, and MSI-X itself.  A guest
-configuration access to a proxy capability must not wait in a VMM I/O trap
-callback.  The VMMFS PCI configuration callback immediately returns ENOENT.
-VMM preserves the decoded MMIO access at its instruction boundary and returns
-VMM_CPUEXIT_MEMORY to the owning VMMFS vCPU LWKT.  The fixed host-local,
-native-endian request and response ABI is declared in sys/sys/vmmfs_pci.h.
-A request carries a powered-slot generation, a sequence unique within that
-generation, a configuration offset, width, operation, and write value.  A
-response names the same generation and sequence and supplies a read value or
-acknowledges a write.  width is 1, 2, or 4; read values and write values use
-only their low width bytes.
+VMMFS handles all Type-0 header fields, PCIe, MSI, MSI-X, and static
+capabilities itself. For a configN access, the VMM trap callback never waits:
+it returns ENOENT. VMM preserves the decoded MMIO or PIO instruction at its
+fragment boundary and returns it to the owning VMMFS vCPU LWKT. The fixed
+host-local, native-endian request and response ABI is declared in
+sys/sys/vmmfs_pci.h. A request carries a powered-slot generation, a sequence
+unique within that generation, a BAR index, MMIO or PIO space, BAR-relative
+offset, width, operation, and write value. A response names the same generation
+and sequence and supplies a status plus a read value. Width is 1, 2, 4, or 8;
+PIO excludes width 8. Read values and write values use only their low width
+bytes.
 
 The backend reads config requests in order and responds only to the FIFO head.
-VMMFS rejects a malformed, stale, or out-of-order response. A PCI configuration
-write has no host errno channel: a matching response completes the guest
-instruction, while backend disappearance is represented as a device-absent
-completion.  Reads from an absent device return all-one bits; writes complete
-without a device side effect, matching normal PCI configuration probing.
+VMMFS rejects a malformed, stale, or out-of-order response. A matching response
+completes the guest instruction. Backend disappearance, a revoked generation,
+or a non-success response is represented as a device-absent completion: reads
+return all-one bits and writes complete without a device side effect.
 
 The vCPU that generated the access waits for its matching response; other
-vCPUs and all BAR/DMA/kick/MSI-X fast paths continue independently.  The LWKT
+vCPUs and all BAR/DMA/kick/MSI-X fast paths continue independently. The LWKT
 holds neither the VMM machine token nor the VMMFS vCPU token while it waits.
 It sleeps on its underlying vmm_vcpu_t channel, the same channel used by
-vmm_vcpu_kick().  Thus timer, APIC, NMI, INIT/SIPI, backend response, and stop
-all wake the same LWKT.  A wakeup only rechecks predicates: a completion calls
-vmm_vcpu_complete_mmio_read() or vmm_vcpu_complete_mmio_write() and then
-vmm_vcpu_run(); a stop withdraws the request and exits the LWKT; every other
-wakeup sleeps again.  This resumes the blocked instruction rather than
-restarting or skipping it.
+vmm_vcpu_kick(). Thus timer, APIC, NMI, INIT/SIPI, backend response, and stop
+all wake the same LWKT. A wakeup only rechecks predicates: a completion calls
+the appropriate VMM MMIO or PIO completion API and then vmm_vcpu_run(); a stop
+withdraws the request and exits the LWKT; every other wakeup sleeps again. This
+resumes the blocked instruction rather than restarting or skipping it.
 
-VMMFS serializes proxy transactions per powered slot.  Only the FIFO head is
-visible to the backend.  This provides one device-observable order across
-concurrent vCPUs without holding a VMM token while any vCPU sleeps.  Backend
+VMMFS serializes configN transactions per powered slot. Only the FIFO head is
+visible to the backend. This provides one device-observable order across
+concurrent vCPUs without holding a VMM token while any vCPU sleeps. Backend
 records contain no kernel pointers, so a late response after stop, power-off,
 or revoke cannot retain or access released state.
 
-This is the generic escape hatch required for an arbitrary PCIe function.  A
-virtio-pci function normally uses only static blob capabilities, so it never
-enters this slow path after power-on.
+This is the generic synchronous register path required for an arbitrary PCIe
+function. It is separate from direct BAR backing, DMA, doorbell, and interrupt
+fast paths.
 
 11. Virtio-PCI Mapping
 ----------------------
 
-Virtio-pci is not a descriptor kind.  A virtio backend emits ordinary PCI
+Virtio-pci is not a descriptor kind. A virtio backend emits ordinary PCI
 identity fields, one or more memory BARs, an MSI-X capability, notification
-doorbell ranges, and several static blob capabilities.  Those
-blob payloads are the standard Virtio PCI vendor capabilities for common,
-notify, ISR, and device configuration regions.  Their BAR offsets refer to
-the already declared BAR backing objects.
+doorbell ranges, configN register points, and several static blob capabilities.
+Those blob payloads are the standard Virtio PCI vendor capabilities for common,
+notify, ISR, and device configuration regions. Their BAR offsets refer to the
+already declared BAR backing objects.
 
 VMMFS does not parse those Virtio payloads and does not know whether the
 backend is block, network, socket, filesystem, entropy, or another Virtio
-device.  The backend implements that protocol through barN, dma, kickN, and
-msixN.  It reads events only for lifecycle observability and uses config only
-for a descriptor-declared proxy capability.
+device. The backend implements that protocol through config, barN, dma, kickN,
+and msixN. For example, common configuration selectors and their dependent
+reads, ISR read-to-clear, and device-specific configuration are configN
+registers, while queue notification is a doorbell range. VMMFS does not need
+to recognize any of those Virtio meanings.
 
 12. Power and Revocation
 ------------------------
@@ -349,10 +379,10 @@ response; that LWKT withdraws its request and exits without completing the
 blocked fragment.  Descriptor topology and its events and config control nodes
 survive power-off.
 
-Closing events has no device lifecycle effect.  Closing an active config
-responder makes its proxy capability absent.  A request already waiting for
-that responder completes as device-absent.  Descriptor topology remains
-unchanged; guest failure is permitted and VMMFS must remain host-safe.
+Closing events has no device lifecycle effect. Closing an active config
+responder makes every configN register device-absent. A request already
+waiting for that responder completes as device-absent. Descriptor topology
+remains unchanged; guest failure is permitted and VMMFS must remain host-safe.
 
 A warm reset preserves descriptor topology and resource identities.  A cold
 stop followed by a start is required before a changed descriptor can take

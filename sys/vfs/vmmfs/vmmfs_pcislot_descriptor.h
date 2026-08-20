@@ -7,10 +7,12 @@
 #define VMMFS_PCISLOT_DESCRIPTOR_H
 
 #include <sys/types.h>
+#include <sys/vmmfs_pci.h>
 
 #define VMMFS_PCISLOT_DESCRIPTOR_MAX 16384
 #define VMMFS_PCISLOT_MAX_BARS 6
 #define VMMFS_PCISLOT_MAX_DOORBELLS 16
+#define VMMFS_PCISLOT_MAX_CONFIGS 64
 #define VMMFS_PCISLOT_MAX_MSIX_VECTORS 2048
 #define VMMFS_PCISLOT_MAX_CAPS 32
 #define VMMFS_PCISLOT_MAX_ECAPS 32
@@ -43,6 +45,11 @@ enum vmmfs_pcislot_doorbell_space {
 	VMMFS_PCISLOT_DOORBELL_PIO,
 };
 
+enum vmmfs_pcislot_config_space {
+	VMMFS_PCISLOT_CONFIG_MMIO = VMMFS_PCI_CONFIG_MMIO,
+	VMMFS_PCISLOT_CONFIG_PIO = VMMFS_PCI_CONFIG_PIO,
+};
+
 enum vmmfs_pcislot_cap_kind {
 	VMMFS_PCISLOT_CAP_PCIE,
 	VMMFS_PCISLOT_CAP_MSI,
@@ -68,6 +75,14 @@ struct vmmfs_pcislot_doorbell {
 	uint64_t size;
 	uint8_t width;
 	enum vmmfs_pcislot_doorbell_space space;
+};
+
+struct vmmfs_pcislot_config_register {
+	bool present;
+	uint8_t bar;
+	uint64_t offset;
+	uint8_t width;
+	enum vmmfs_pcislot_config_space space;
 };
 
 struct vmmfs_pcislot_cap {
@@ -109,6 +124,7 @@ struct vmmfs_pcislot_descriptor_value {
 	bool rom_present;
 	uint64_t rom_size;
 	struct vmmfs_pcislot_doorbell doorbells[VMMFS_PCISLOT_MAX_DOORBELLS];
+	struct vmmfs_pcislot_config_register configs[VMMFS_PCISLOT_MAX_CONFIGS];
 	struct vmmfs_pcislot_cap caps[VMMFS_PCISLOT_MAX_CAPS];
 	struct vmmfs_pcislot_ecap ecaps[VMMFS_PCISLOT_MAX_ECAPS];
 	uint8_t cap_data[VMMFS_PCISLOT_CAP_DATA_MAX];

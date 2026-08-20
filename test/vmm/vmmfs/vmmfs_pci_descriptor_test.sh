@@ -53,7 +53,7 @@ mount -t vmmfs vmmfs "$MOUNT"
 mkdir "$MOUNT/$MACHINE" "$MOUNT/$MACHINE/pci/0000:00:01.0"
 printf '%s\n' 2097152 >"$MOUNT/$MACHINE/mem"
 printf '%s\n' 1 >"$MOUNT/$MACHINE/vcpu"
-printf '%s\n' "$LOADER --check-pci-doorbell-loop" >"$MOUNT/$MACHINE/loader"
+printf '%s\n' "$LOADER --check-pci-config-loop" >"$MOUNT/$MACHINE/loader"
 test "$(cat "$SLOT/bdf")" = '0000:00:01.0'
 cat >"$BASE" <<'EOF'
 version=1
@@ -73,6 +73,10 @@ doorbell0.offset=0x0000
 doorbell0.size=0x0004
 doorbell0.width=4
 doorbell0.space=mmio
+config0.bar=0
+config0.offset=0x0100
+config0.width=4
+config0.space=mmio
 cap0.kind=pcie
 cap1.kind=msix
 cap1.vectors=4
@@ -88,25 +92,30 @@ EOF
 "$CLIENT" create "$SLOT/descriptor" <"$BASE"
 cmp "$BASE" "$SLOT/descriptor"
 test -e "$SLOT/events"
-test ! -e "$SLOT/config"
+test -e "$SLOT/config"
 sed 's/cap2.access=static/cap2.access=proxy/' "$BASE" >"$BAD"
 if "$CLIENT" replace "$SLOT/descriptor" <"$BAD" 2>/dev/null; then
 	echo "proxy capability unexpectedly accepted" >&2
 	exit 1
 fi
 cmp "$BASE" "$SLOT/descriptor"
-"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" <"$BASE" >"$LOG" 2>&1 &
+"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" "$SLOT/config" <"$BASE" >"$LOG" 2>&1 &
 CLIENT_PID=$!
 wait_for committed
 rm "$MOUNT/$MACHINE/stopped"
 wait_for ready
 wait_for kick
+wait_for config
 if sh -c 'exec 3<"$1"' sh "$SLOT/kick0" 2>/dev/null; then
 	echo "unauthorized kick open unexpectedly succeeded" >&2
 	exit 1
 fi
 if sh -c 'exec 3<"$1"' sh "$SLOT/events" 2>/dev/null; then
 	echo "unauthorized events open unexpectedly succeeded" >&2
+	exit 1
+fi
+if sh -c 'exec 3<>"$1"' sh "$SLOT/config" 2>/dev/null; then
+	echo "unauthorized config open unexpectedly succeeded" >&2
 	exit 1
 fi
 for name in bar0 dma kick0 msix0 msix1 msix2 msix3; do
@@ -117,9 +126,11 @@ wait "$CLIENT_PID"
 unset CLIENT_PID
 grep -qx revoked "$LOG"
 test -e "$MOUNT/$MACHINE/stopped"
+test -e "$SLOT/config"
 for name in bar0 dma kick0 msix0 msix1 msix2 msix3; do
 	test ! -e "$SLOT/$name"
 done
 : | "$CLIENT" replace "$SLOT/descriptor"
 test ! -e "$SLOT/events"
+test ! -e "$SLOT/config"
 printf '%s\n' 'PASS: VMMFS PCI descriptor static configuration and revoke'

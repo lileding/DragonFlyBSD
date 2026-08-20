@@ -19,6 +19,7 @@
 #include "vmmfs.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_resource.h"
+#include "vmmfs_vcpu.h"
 
 #define VMMFS_PCIROOT_MODE 0555
 #define VMMFS_PCI_CONFIG_ADDRESS 0xcf8U
@@ -320,7 +321,8 @@ vmmfs_pciroot_stop(struct vmmfs_pciroot *pciroot)
 }
 
 int
-vmmfs_pciroot_memory(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
+vmmfs_pciroot_memory(struct vmmfs_pciroot *pciroot,
+	struct vmmfs_vcpu_thread *thread,
 	const struct vmm_cpuexit *exit)
 {
 	struct vmmfs_pcislot *slot;
@@ -329,15 +331,18 @@ vmmfs_pciroot_memory(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
 	uint16_t offset;
 	uint32_t value;
 	bool write;
+	vmm_vcpu_t vcpu;
 	int error;
 
-	if (pciroot == NULL || vcpu == NULL || exit == NULL ||
+	if (pciroot == NULL || thread == NULL || thread->vcpu == NULL ||
+	    exit == NULL ||
 	    exit->reason != VMM_CPUEXIT_MEMORY)
 		return (ENOENT);
+	vcpu = thread->vcpu;
 	if (!vmmfs_pciroot_ecam_contains(exit->u.mem.gpa, exit->u.mem.width)) {
 		RB_FOREACH(slot, vmmfs_pcislot_tree, &pciroot->slots) {
 			error = vmmfs_pcislot_resources_memory(
-			    slot->descriptor.resources, vcpu, exit);
+			    slot->descriptor.resources, thread, exit);
 			if (error != ENOENT)
 				return (error);
 		}
@@ -361,10 +366,10 @@ vmmfs_pciroot_memory(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
 	lwkt_reltoken(&pciroot->machine->token);
 	value = 0;
 	if (write) {
-		error = vmmfs_pcislot_config_write(slot, vcpu, offset,
+		error = vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
 		    exit->u.mem.width, (uint32_t)exit->u.mem.value);
 	} else {
-		error = vmmfs_pcislot_config_read(slot, vcpu, offset,
+		error = vmmfs_pcislot_type0_config_read(slot, vcpu, offset,
 		    exit->u.mem.width, &value);
 	}
 	if (error == ENXIO) {
@@ -380,7 +385,8 @@ vmmfs_pciroot_memory(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
 }
 
 int
-vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
+vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot,
+	struct vmmfs_vcpu_thread *thread,
 	struct vmm_cpustate *state, const struct vmm_cpuexit *exit)
 {
 	struct vmmfs_pcislot *slot;
@@ -390,19 +396,22 @@ vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
 	uint16_t offset;
 	uint64_t mask;
 	bool write;
+	vmm_vcpu_t vcpu;
 	int error;
 
-	if (pciroot == NULL || vcpu == NULL || state == NULL || exit == NULL ||
+	if (pciroot == NULL || thread == NULL || thread->vcpu == NULL ||
+	    state == NULL || exit == NULL ||
 	    exit->reason != VMM_CPUEXIT_IO || exit->u.io.str || exit->u.io.rep ||
 	    (exit->u.io.operand_size != 1 && exit->u.io.operand_size != 2 &&
 	    exit->u.io.operand_size != 4))
 		return (ENOENT);
+	vcpu = thread->vcpu;
 	if (exit->u.io.port < VMMFS_PCI_CONFIG_DATA ||
 	    exit->u.io.port + exit->u.io.operand_size >
 	    VMMFS_PCI_CONFIG_DATA + sizeof(uint32_t)) {
 		RB_FOREACH(slot, vmmfs_pcislot_tree, &pciroot->slots) {
 			error = vmmfs_pcislot_resources_io(slot->descriptor.resources,
-			    vcpu, state, exit);
+			    thread, state, exit);
 			if (error != ENOENT)
 				return (error);
 		}
@@ -440,10 +449,10 @@ vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot, vmm_vcpu_t vcpu,
 	write = !exit->u.io.in;
 	value = (uint32_t)state->gprs[VMM_X64_GPR_RAX];
 	if (write)
-		error = vmmfs_pcislot_config_write(slot, vcpu, offset,
+		error = vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
 		    (enum vmm_io_width)exit->u.io.operand_size, value);
 	else
-		error = vmmfs_pcislot_config_read(slot, vcpu, offset,
+		error = vmmfs_pcislot_type0_config_read(slot, vcpu, offset,
 		    (enum vmm_io_width)exit->u.io.operand_size, &value);
 	if (error == ENXIO) {
 		error = 0;
@@ -1096,7 +1105,7 @@ vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *pciroot,
 		*value = vmmfs_pciroot_absent_value(width);
 		return (0);
 	}
-	error = vmmfs_pcislot_config_read(slot, vcpu, offset, width, value);
+	error = vmmfs_pcislot_type0_config_read(slot, vcpu, offset, width, value);
 	if (error == ENOENT)
 		return (ENOENT);
 	if (error != 0) {

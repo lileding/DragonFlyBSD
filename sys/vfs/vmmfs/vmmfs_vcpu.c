@@ -381,7 +381,7 @@ vmmfs_vcpu_thread_main(void *argument)
 		case VMM_CPUEXIT_IO:
 			lwkt_reltoken(&vcpu->token);
 			error = vmmfs_pciroot_io(&vcpu->machine->pciroot,
-			    thread->vcpu, &thread->state, exit);
+			    thread, &thread->state, exit);
 			if (error == 0)
 				continue;
 			vmmfs_events_log(&vcpu->machine->events,
@@ -394,7 +394,7 @@ vmmfs_vcpu_thread_main(void *argument)
 		case VMM_CPUEXIT_MEMORY:
 			lwkt_reltoken(&vcpu->token);
 			error = vmmfs_pciroot_memory(&vcpu->machine->pciroot,
-			    thread->vcpu, exit);
+			    thread, exit);
 			if (error == 0)
 				continue;
 			vmmfs_events_log(&vcpu->machine->events,
