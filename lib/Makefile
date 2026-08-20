@@ -91,6 +91,7 @@ SUBDIR=	${SUBDIR_ORDERED} \
 	libtcplay \
 	libtelnet \
 	libu4bhid \
+	liburing \
 	libvgl \
 	libwrap \
 	liby
