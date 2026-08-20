@@ -66,6 +66,7 @@ struct io_req {
 	size_t		 req_len;	/* requested length */
 	off_t		 req_offset;	/* file offset */
 	off_t		 req_data_off;	/* user data offset within req_buf */
+	int		 req_copied;	/* data already copied to user (skip reap) */
 	struct io_frame	 req_frames[IO_FRAME_MAX];
 	int		 req_nframes;
 	struct task	 req_task;	/* worker task for ioport_exec */

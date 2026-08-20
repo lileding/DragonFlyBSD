@@ -738,6 +738,8 @@ struct vn_async_read_ctx {
 	off_t		 first_lbase;
 	size_t		 nread;
 	int		 blksize;
+	int		 direct;	/* single block: copyout on cache hit */
+	volatile int	 copied;	/* already copied straight to user */
 };
 
 static void vn_async_read_complete(struct bio *bio);
@@ -789,6 +791,8 @@ vn_async_read(struct io_req *req, struct vnode *vp)
 	ctx->first_lbase = first_lbase;
 	ctx->nread = nread;
 	ctx->blksize = blksize;
+	ctx->direct = (nblocks == 1);
+	ctx->copied = 0;
 
 	/* The requested data lands at req_buf[0..nread); req_data_off is 0. */
 	io_req_set_cancel(req, NULL);
@@ -820,8 +824,10 @@ vn_async_read_complete(struct bio *bio)
 	off_t offset = req->req_offset;
 	off_t wstart, wend;
 	size_t n;
+	int cached;
 
-	if ((bio->bio_flags & BIO_DONE) == 0)
+	cached = (bio->bio_flags & BIO_DONE) != 0;	/* sync, submit thread */
+	if (!cached)
 		bpdone(bp, 0);
 	bio->bio_flags &= ~(BIO_DONE | BIO_SYNC);
 
@@ -834,8 +840,20 @@ vn_async_read_complete(struct bio *bio)
 		ctx->error = bp->b_error;
 	} else if (n > 0) {
 		bkvasync(bp);
-		bcopy(bp->b_data + (wstart - lbase),
-		      (char *)req->req_buf + (wstart - offset), n);
+		if (ctx->direct && cached) {
+			/* Cache hit on the submit thread: copy straight to
+			 * the user buffer, saving the second (reap) copy. */
+			if (copyout(bp->b_data + (wstart - lbase),
+				    (char *)req->req_ubuf + (wstart - offset),
+				    n) != 0)
+				ctx->error = EFAULT;
+			else
+				ctx->copied = 1;
+		} else {
+			/* Miss (XOP thread, no user vmspace): stage it. */
+			bcopy(bp->b_data + (wstart - lbase),
+			      (char *)req->req_buf + (wstart - offset), n);
+		}
 	}
 	bqrelse(bp);
 
@@ -858,6 +876,7 @@ vn_async_read_finish(struct vn_async_read_ctx *ctx)
 		req->req_error = 0;
 		req->req_result = (int64_t)ctx->nread;
 	}
+	req->req_copied = ctx->copied;
 
 	kfree(ctx, M_IOPORT);
 	io_return(req);

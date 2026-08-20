@@ -815,13 +815,13 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			 * vmspace (== submitter's in the single-threaded
 			 * test); true pinning replaces this later.
 			 *
-			 * The native H2 path stores the data in a 64K-aligned
-			 * window starting before req_offset; req_data_off is
-			 * the byte offset of the requested data within it
-			 * (zero for the generic worker path).
+			 * The page-cache async read stages uncached blocks in
+			 * req_buf (req_data_off into it), but a single-block
+			 * cache hit copies straight to the user buffer and sets
+			 * req_copied so we skip this second copy.
 			 */
 			if (req->req_opcode == IO_READ && req->req_error == 0 &&
-			    req->req_result > 0) {
+			    req->req_result > 0 && req->req_copied == 0) {
 				void *src = (char *)req->req_buf +
 					    req->req_data_off;
 
