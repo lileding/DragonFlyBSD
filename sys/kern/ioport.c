@@ -278,6 +278,15 @@ io_return(struct io_req *req)
 void
 ioport_exec(struct io_req *req, void (*fn)(struct io_req *))
 {
+	/* ioport(0) creates a pure-async port with no worker taskqueue; any
+	 * operation that must run the synchronous fallback on a worker fails
+	 * as an error completion instead. */
+	if (req->req_ioport->ip_tq == NULL) {
+		req->req_error = EOPNOTSUPP;
+		req->req_result = 0;
+		io_return(req);
+		return;
+	}
 	req->req_fn = fn;
 	TASK_INIT(&req->req_task, 0, io_task_handler, req);
 	taskqueue_enqueue(req->req_ioport->ip_tq, &req->req_task);
@@ -476,6 +485,9 @@ io_cancel_kevent_hook(struct io_req *req)
 static void
 io_cancel_worker_hook(struct io_req *req)
 {
+	/* Pure-async ports have no taskqueue; nothing can be pending there. */
+	if (req->req_ioport->ip_tq == NULL)
+		return;
 	/* taskqueue_cancel() returns 0 when the task was still queued and has
 	 * been removed; EBUSY when the worker already picked it up (then the
 	 * trampoline sees req_cancel_requested and completes ECANCELED). */
@@ -889,24 +901,27 @@ sys_ioport(struct sysmsg *sysmsg, const struct ioport_args *uap)
 	struct file *fp;
 	int fd, error, i;
 
-	if (uap->nworkers == 0)
-		return (EINVAL);
-
 	error = falloc(td->td_lwp, &fp, &fd);
 	if (error)
 		return (error);
 
 	ip = kmalloc(sizeof(*ip), M_IOPORT, M_WAITOK | M_ZERO);
 	ip->ip_nworkers = (int)uap->nworkers;
-	ip->ip_tq = taskqueue_create("ioport", M_WAITOK,
-				     taskqueue_thread_enqueue, &ip->ip_tq);
-	if (ip->ip_tq == NULL) {
-		kfree(ip, M_IOPORT);
-		fdrop(fp);
-		return (ENOMEM);
+	/* nworkers == 0 is a valid pure-async port: no worker taskqueue, so
+	 * only native async operations (and IO_KEVENT/IO_CANCEL) are serviced;
+	 * anything needing the sync fallback completes with EOPNOTSUPP. */
+	if (uap->nworkers > 0) {
+		ip->ip_tq = taskqueue_create("ioport", M_WAITOK,
+					     taskqueue_thread_enqueue,
+					     &ip->ip_tq);
+		if (ip->ip_tq == NULL) {
+			kfree(ip, M_IOPORT);
+			fdrop(fp);
+			return (ENOMEM);
+		}
+		taskqueue_start_threads(&ip->ip_tq, ip->ip_nworkers,
+					TDPRI_KERN_DAEMON, -1, "ioport");
 	}
-	taskqueue_start_threads(&ip->ip_tq, ip->ip_nworkers,
-				TDPRI_KERN_DAEMON, -1, "ioport");
 	lockinit(&ip->ip_lock, "ioport", 0, 0);
 	STAILQ_INIT(&ip->ip_cq);
 	for (i = 0; i < IP_CANCEL_HASH_SIZE; i++)
