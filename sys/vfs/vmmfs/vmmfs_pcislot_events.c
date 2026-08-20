@@ -73,6 +73,7 @@ vmmfs_pcislot_events_create(struct vmmfs_pcislot *slot,
 	vnode->v_ops = &mount->pcislot_events_vops;
 	vnode->v_type = VREG;
 	state_node->vnode = vnode;
+	vmmfs_machine_hold(slot->pciroot->machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -92,11 +93,10 @@ vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *state_node)
 
 	if (state_node == NULL)
 		return (EINVAL);
+	vmmfs_pcislot_events_revoke(state_node);
 	lwkt_gettoken(&state_node->token);
-	state_node->closed = true;
 	vnode = state_node->vnode;
 	lwkt_reltoken(&state_node->token);
-	wakeup(state_node);
 	if (vnode != NULL) {
 		vmmfs_vnode_revoke(vnode);
 	}
@@ -106,6 +106,17 @@ vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *state_node)
 	state_node->slot = NULL;
 	lwkt_token_uninit(&state_node->token);
 	return (0);
+}
+
+void
+vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *state_node)
+{
+	if (state_node == NULL)
+		return;
+	lwkt_gettoken(&state_node->token);
+	state_node->closed = true;
+	lwkt_reltoken(&state_node->token);
+	wakeup(state_node);
 }
 
 void
@@ -185,6 +196,9 @@ vmmfs_pcislot_events_getattr(struct vop_getattr_args *ap)
 	state_node = ap->a_vp->v_data;
 	if (state_node == NULL)
 		return (ENOENT);
+	if (state_node->slot == NULL || state_node->slot->pciroot == NULL ||
+	    vmmfs_machine_is_dead(state_node->slot->pciroot->machine))
+		return (ENXIO);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
 	vattr->va_type = VREG;
@@ -283,10 +297,19 @@ static int
 vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot_events *state_node;
+	struct vmmfs_machine *machine;
 
 	state_node = ap->a_vp->v_data;
-	if (state_node != NULL && state_node->vnode == ap->a_vp)
-		state_node->vnode = NULL;
+	if (state_node != NULL && state_node->slot != NULL &&
+	    state_node->slot->pciroot != NULL) {
+		machine = state_node->slot->pciroot->machine;
+		if (state_node->vnode == ap->a_vp)
+			state_node->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }

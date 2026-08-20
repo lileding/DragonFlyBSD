@@ -84,6 +84,7 @@ vmmfs_serialroot_create(struct vmmfs_machine *machine,
 	vnode->v_ops = &state->serialroot_vops;
 	vnode->v_type = VDIR;
 	serialroot->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -460,15 +461,21 @@ static int
 vmmfs_serialroot_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_serialroot *serialroot;
+	struct vmmfs_machine *machine;
 
 	serialroot = ap->a_vp->v_data;
 	if (serialroot != NULL && serialroot->machine != NULL) {
-		lwkt_gettoken(&serialroot->machine->token);
+		machine = serialroot->machine;
+		lwkt_gettoken(&machine->token);
 		if (serialroot->vnode == ap->a_vp)
 			serialroot->vnode = NULL;
-		lwkt_reltoken(&serialroot->machine->token);
+		lwkt_reltoken(&machine->token);
+	} else {
+		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

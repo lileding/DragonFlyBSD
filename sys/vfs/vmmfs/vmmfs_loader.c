@@ -1224,6 +1224,9 @@ static int
 vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, size_t *length)
 {
 	int result;
+
+	if (loader == NULL || vmmfs_machine_is_dead(loader->machine))
+		return (ENOENT);
 	result = ksnprintf(buffer, capacity, "%s\n",
 	    loader->machine->spec.loader.script);
 	if (result < 0 || (size_t)result >= capacity)
@@ -1242,6 +1245,10 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 	if (length == 0 || length >= sizeof(loader->machine->spec.loader.script))
 		return (ENAMETOOLONG);
 	lwkt_gettoken(&loader->machine->token);
+	if (loader->machine->dead) {
+		lwkt_reltoken(&loader->machine->token);
+		return (ENOENT);
+	}
 	if (!loader->machine->stopped.expect_stopped ||
 	    loader->machine->machine != NULL) {
 		lwkt_reltoken(&loader->machine->token);
@@ -1274,6 +1281,7 @@ vmmfs_loader_create(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 	vnode->v_ops = &state->loader_vops;
 	vnode->v_type = VREG;
 	loader->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -1411,10 +1419,18 @@ static int
 vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_loader *loader;
+	struct vmmfs_machine *machine;
 
 	loader = ap->a_vp->v_data;
-	if (loader != NULL && loader->vnode == ap->a_vp)
-		loader->vnode = NULL;
+	if (loader != NULL) {
+		machine = loader->machine;
+		if (loader->vnode == ap->a_vp)
+			loader->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }

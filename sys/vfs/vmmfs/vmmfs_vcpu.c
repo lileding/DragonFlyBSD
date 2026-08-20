@@ -53,6 +53,8 @@ vmmfs_vcpu_load(struct vmmfs_vcpu *vcpu, char *buffer, size_t capacity,
 	uint32_t count;
 	int result;
 
+	if (vcpu == NULL || vmmfs_machine_is_dead(vcpu->machine))
+		return (ENOENT);
 	count = vcpu->machine->spec.vcpu.count;
 	result = ksnprintf(buffer, capacity, "%u\n", count);
 	if (result < 0 || (size_t)result >= capacity)
@@ -86,6 +88,10 @@ vmmfs_vcpu_store(struct vmmfs_vcpu *vcpu, const char *buffer, size_t length)
 	}
 
 	lwkt_gettoken(&vcpu->machine->token);
+	if (vcpu->machine->dead) {
+		lwkt_reltoken(&vcpu->machine->token);
+		return (ENOENT);
+	}
 	if (!vcpu->machine->stopped.expect_stopped ||
 	    vcpu->machine->machine != NULL) {
 		lwkt_reltoken(&vcpu->machine->token);
@@ -118,6 +124,7 @@ vmmfs_vcpu_create(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 	vnode->v_ops = &state->vcpu_vops;
 	vnode->v_type = VREG;
 	vcpu->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -567,10 +574,18 @@ static int
 vmmfs_vcpu_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_vcpu *vcpu;
+	struct vmmfs_machine *machine;
 
 	vcpu = ap->a_vp->v_data;
-	if (vcpu != NULL && vcpu->vnode == ap->a_vp)
-		vcpu->vnode = NULL;
+	if (vcpu != NULL) {
+		machine = vcpu->machine;
+		if (vcpu->vnode == ap->a_vp)
+			vcpu->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }

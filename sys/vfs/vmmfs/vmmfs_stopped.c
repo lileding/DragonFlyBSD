@@ -60,6 +60,7 @@ vmmfs_stopped_create(struct vmmfs_machine *machine,
 	vnode->v_ops = &state->stopped_vops;
 	vnode->v_type = VREG;
 	stopped->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -140,11 +141,19 @@ static int
 vmmfs_stopped_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_stopped *stopped;
+	struct vmmfs_machine *machine;
 
 	stopped = ap->a_vp->v_data;
-	if (stopped != NULL && stopped->vnode == ap->a_vp)
-		stopped->vnode = NULL;
+	if (stopped != NULL) {
+		machine = stopped->machine;
+		if (stopped->vnode == ap->a_vp)
+			stopped->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

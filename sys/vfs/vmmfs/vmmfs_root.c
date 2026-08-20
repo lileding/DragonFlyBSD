@@ -87,7 +87,8 @@ vmmfs_root_destroy(struct vmmfs_root *root)
 	if (root == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&root->token);
-	busy = root->vnode != NULL || !RB_EMPTY(&root->machines);
+	busy = root->vnode != NULL || root->machine_count != 0 ||
+	    !RB_EMPTY(&root->machines);
 	lwkt_reltoken(&root->token);
 	if (busy)
 		return (EBUSY);
@@ -112,6 +113,7 @@ vmmfs_root_read_item(struct vmmfs_root *root, uint64_t index,
 		item->id = machine->inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
 		item->machine = machine;
+		vmmfs_machine_hold(machine);
 		lwkt_reltoken(&root->token);
 		return (0);
 	}
@@ -146,14 +148,16 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 	}
 	if (cursor != NULL) {
 		lwkt_reltoken(&root->token);
-		machine->root = NULL;
-		machine->vnode->v_type = VBAD;
-		vx_put(machine->vnode);
-		machine->vnode = NULL;
-		vmmfs_machine_free(machine);
+		lwkt_gettoken(&machine->token);
+		machine->dead = true;
+		lwkt_reltoken(&machine->token);
+		(void)vmmfs_machine_destroy(machine);
+		vmmfs_machine_put(machine);
 		return (EEXIST);
 	}
 	RB_INSERT(vmmfs_machine_tree, &root->machines, machine);
+	machine->root_counted = true;
+	++root->machine_count;
 	lwkt_reltoken(&root->token);
 	*machinep = machine;
 	return (0);
@@ -181,7 +185,7 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		return (ENOENT);
 	}
 	lwkt_gettoken(&machine->token);
-	if (machine->root != root) {
+	if (machine->root != root || machine->dead) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&root->token);
 		return (ENOENT);
@@ -197,18 +201,11 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		return (EBUSY);
 	}
 	RB_REMOVE(vmmfs_machine_tree, &root->machines, machine);
-	machine->root = NULL;
+	machine->dead = true;
 	lwkt_reltoken(&machine->token);
-	error = vmmfs_machine_destroy(machine);
-	if (error != 0) {
-		lwkt_gettoken(&machine->token);
-		machine->root = root;
-		(void)RB_INSERT(vmmfs_machine_tree, &root->machines, machine);
-		lwkt_reltoken(&machine->token);
-		vmmfs_events_log(&machine->events, "destroy rejected error=%d",
-		    error);
-	}
 	lwkt_reltoken(&root->token);
+	error = vmmfs_machine_destroy(machine);
+	vmmfs_machine_put(machine);
 	return (error);
 }
 
@@ -305,6 +302,7 @@ vmmfs_root_readdir(struct vop_readdir_args *ap)
 			break;
 		stop = vop_write_dirent(&error, uio, item.id, DT_DIR,
 		    (uint16_t)strlen(item.name), item.name);
+		vmmfs_machine_put(item.machine);
 		if (!stop) {
 			offset++;
 			index++;
@@ -336,23 +334,32 @@ vmmfs_root_nresolve(struct vop_nresolve_args *ap)
 		error = vmmfs_root_read_item(root, index, &item);
 		if (error != 0)
 			break;
-		if (ncp->nc_nlen != strlen(item.name))
+		if (ncp->nc_nlen != strlen(item.name)) {
+			vmmfs_machine_put(item.machine);
 			continue;
+		}
 		if (strncmp(ncp->nc_name, item.name, ncp->nc_nlen) == 0) {
 			machine = item.machine;
 			break;
 		}
+		vmmfs_machine_put(item.machine);
 	}
 	if (machine == NULL) {
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
 	}
-	vnode = machine->vnode;
-	if (vnode == NULL)
-		return (ENOENT);
-	vhold(vnode);
-	error = vget(vnode, LK_EXCLUSIVE);
-	vdrop(vnode);
+	lwkt_gettoken(&machine->token);
+	vnode = machine->dead ? NULL : machine->vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&machine->token);
+	if (vnode == NULL) {
+		error = ENOENT;
+	} else {
+		error = vget(vnode, LK_EXCLUSIVE);
+		vdrop(vnode);
+	}
+	vmmfs_machine_put(machine);
 	if (error != 0)
 		return (error);
 	vn_unlock(vnode);

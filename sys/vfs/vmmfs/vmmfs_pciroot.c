@@ -108,6 +108,7 @@ vmmfs_pciroot_create(struct vmmfs_machine *machine,
 	vnode->v_ops = &state->pciroot_vops;
 	vnode->v_type = VDIR;
 	pciroot->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -756,15 +757,21 @@ static int
 vmmfs_pciroot_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pciroot *pciroot;
+	struct vmmfs_machine *machine;
 
 	pciroot = ap->a_vp->v_data;
 	if (pciroot != NULL && pciroot->machine != NULL) {
-		lwkt_gettoken(&pciroot->machine->token);
+		machine = pciroot->machine;
+		lwkt_gettoken(&machine->token);
 		if (pciroot->vnode == ap->a_vp)
 			pciroot->vnode = NULL;
-		lwkt_reltoken(&pciroot->machine->token);
+		lwkt_reltoken(&machine->token);
+	} else {
+		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

@@ -69,6 +69,7 @@ vmmfs_events_create(struct vmmfs_machine *machine, struct vmmfs_events *events)
 	vnode->v_ops = &state->events_vops;
 	vnode->v_type = VREG;
 	events->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -88,11 +89,10 @@ vmmfs_events_destroy(struct vmmfs_events *events)
 
 	if (events == NULL)
 		return (EINVAL);
+	vmmfs_events_revoke(events);
 	lwkt_gettoken(&events->token);
-	events->closed = true;
 	vnode = events->vnode;
 	lwkt_reltoken(&events->token);
-	wakeup(events);
 	if (vnode != NULL) {
 		vmmfs_vnode_revoke(vnode);
 	}
@@ -102,6 +102,17 @@ vmmfs_events_destroy(struct vmmfs_events *events)
 	events->machine = NULL;
 	lwkt_token_uninit(&events->token);
 	return (0);
+}
+
+void
+vmmfs_events_revoke(struct vmmfs_events *events)
+{
+	if (events == NULL)
+		return;
+	lwkt_gettoken(&events->token);
+	events->closed = true;
+	lwkt_reltoken(&events->token);
+	wakeup(events);
 }
 
 void
@@ -183,6 +194,8 @@ vmmfs_events_getattr(struct vop_getattr_args *ap)
 	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
+	if (vmmfs_machine_is_dead(events->machine))
+		return (ENXIO);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
 	vattr->va_type = VREG;
@@ -233,6 +246,8 @@ vmmfs_events_read(struct vop_read_args *ap)
 	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
+	if (vmmfs_machine_is_dead(events->machine))
+		return (ENXIO);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
 		return (EINVAL);
@@ -276,11 +291,19 @@ static int
 vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_events *events;
+	struct vmmfs_machine *machine;
 
 	events = ap->a_vp->v_data;
-	if (events != NULL && events->vnode == ap->a_vp)
-		events->vnode = NULL;
+	if (events != NULL) {
+		machine = events->machine;
+		if (events->vnode == ap->a_vp)
+			events->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

@@ -60,6 +60,17 @@ static struct vfsops vmmfs_vfsops = {
 };
 
 void
+vmmfs_vnode_close(struct vnode *vnode)
+{
+	if (vnode == NULL)
+		return;
+	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+	(void)vrevoke(vnode, proc0.p_ucred);
+	vfinalize(vnode);
+	vrele(vnode);
+}
+
+void
 vmmfs_vnode_revoke(struct vnode *vnode)
 {
 	if (vnode == NULL)

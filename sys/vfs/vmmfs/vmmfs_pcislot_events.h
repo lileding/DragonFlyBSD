@@ -33,6 +33,7 @@ extern struct vop_ops vmmfs_pcislot_events_vops;
 int vmmfs_pcislot_events_create(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_events *);
 int vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *);
+void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *, const char *, ...);
 
 #endif /* VMMFS_PCISLOT_EVENTS_H */

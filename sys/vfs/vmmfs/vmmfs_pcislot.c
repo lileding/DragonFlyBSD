@@ -110,6 +110,7 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	vnode->v_ops = &mount->pcislot_vops;
 	vnode->v_type = VDIR;
 	slot->vnode = vnode;
+	vmmfs_machine_hold(pciroot->machine);
 	error = vmmfs_pcislot_bdf_create(slot, &slot->bdf_node);
 	if (error != 0)
 		goto fail_vnode;
@@ -635,20 +636,29 @@ vmmfs_pcislot_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot *slot;
 	struct vmmfs_pciroot *pciroot;
+	struct vmmfs_machine *machine;
 
 	slot = ap->a_vp->v_data;
 	if (slot != NULL) {
 		pciroot = slot->pciroot;
 		if (pciroot != NULL && pciroot->machine != NULL) {
-			lwkt_gettoken(&pciroot->machine->token);
+			machine = pciroot->machine;
+			lwkt_gettoken(&machine->token);
 			if (slot->vnode == ap->a_vp)
 				slot->vnode = NULL;
-			lwkt_reltoken(&pciroot->machine->token);
+			lwkt_reltoken(&machine->token);
 		} else if (slot->vnode == ap->a_vp) {
 			slot->vnode = NULL;
+			machine = NULL;
+		} else {
+			machine = NULL;
 		}
+	} else {
+		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

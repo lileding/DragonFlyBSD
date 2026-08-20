@@ -145,6 +145,7 @@ vmmfs_pcislot_descriptor_create(struct vmmfs_pcislot *slot,
 	vnode->v_ops = &mount->pcislot_descriptor_vops;
 	vnode->v_type = VREG;
 	descriptor->vnode = vnode;
+	vmmfs_machine_hold(slot->pciroot->machine);
 	lwkt_reltoken(&slot->pciroot->machine->token);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
@@ -252,6 +253,12 @@ vmmfs_pcislot_descriptor_close(struct vop_close_args *ap)
 	descriptor->writer = NULL;
 	descriptor->writer_buffer = NULL;
 	descriptor->writer_length = 0;
+	if (machine->dead) {
+		descriptor->committing = false;
+		lwkt_reltoken(&machine->token);
+		kfree(buffer, M_VMMFS);
+		return (vop_stdclose(ap));
+	}
 	descriptor->committing = true;
 	lwkt_reltoken(&machine->token);
 
@@ -393,9 +400,11 @@ vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
 	    descriptor->slot->pciroot == NULL ||
 	    descriptor->slot->pciroot->machine == NULL)
 		return (ENOENT);
+	machine = descriptor->slot->pciroot->machine;
+	if (vmmfs_machine_is_dead(machine))
+		return (ENOENT);
 	if ((ap->a_mode & FWRITE) == 0)
 		return (vop_stdopen(ap));
-	machine = descriptor->slot->pciroot->machine;
 	buffer = kmalloc(VMMFS_PCISLOT_DESCRIPTOR_MAX, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	lwkt_gettoken(&machine->token);
@@ -453,6 +462,8 @@ vmmfs_pcislot_descriptor_read(struct vop_read_args *ap)
 	if (ap->a_uio->uio_offset < 0)
 		return (EINVAL);
 	machine = descriptor->slot->pciroot->machine;
+	if (vmmfs_machine_is_dead(machine))
+		return (ENOENT);
 	buffer = kmalloc(VMMFS_PCISLOT_DESCRIPTOR_MAX, M_VMMFS, M_WAITOK);
 	lwkt_gettoken(&machine->token);
 	length = descriptor->committed ? descriptor->value.length : 0;
@@ -473,11 +484,20 @@ static int
 vmmfs_pcislot_descriptor_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot_descriptor *descriptor;
+	struct vmmfs_machine *machine;
 
 	descriptor = ap->a_vp->v_data;
-	if (descriptor != NULL && descriptor->vnode == ap->a_vp)
-		descriptor->vnode = NULL;
+	if (descriptor != NULL && descriptor->slot != NULL &&
+	    descriptor->slot->pciroot != NULL) {
+		machine = descriptor->slot->pciroot->machine;
+		if (descriptor->vnode == ap->a_vp)
+			descriptor->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -511,6 +531,10 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 		return (EFBIG);
 	machine = descriptor->slot->pciroot->machine;
 	lwkt_gettoken(&machine->token);
+	if (machine->dead) {
+		lwkt_reltoken(&machine->token);
+		return (ENOENT);
+	}
 	if (descriptor->writer != ap->a_fp || descriptor->writer_buffer == NULL) {
 		lwkt_reltoken(&machine->token);
 		return (EBADF);

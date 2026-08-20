@@ -42,6 +42,9 @@ struct vmmfs_machine {
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	struct lwkt_token token;
+	unsigned int references;
+	bool dead;
+	bool root_counted;
 	vmm_machine_t machine;
 	struct vmmfs_machine_spec spec;
 	struct vmmfs_vcpu vcpu;
@@ -66,6 +69,9 @@ struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_root *,
 	const char *, size_t);
 int vmmfs_machine_destroy(struct vmmfs_machine *);
 void vmmfs_machine_free(struct vmmfs_machine *);
+void vmmfs_machine_hold(struct vmmfs_machine *);
+void vmmfs_machine_put(struct vmmfs_machine *);
+bool vmmfs_machine_is_dead(struct vmmfs_machine *);
 
 /* Synchronously forces a warm reset using the caller's credentials. */
 int vmmfs_machine_reset(struct vmmfs_machine *, struct ucred *);

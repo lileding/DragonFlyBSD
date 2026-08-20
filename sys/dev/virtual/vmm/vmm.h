@@ -139,8 +139,9 @@ int vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t base,
 	vmm_io_t *io);
 
 /*
- * Removes one I/O read or write trap.  machine must own io.  The caller must
- * stop using io; an in-flight handler is serialized by the machine token.
+ * Removes one I/O read or write trap.  The caller must stop using io; an
+ * in-flight handler is serialized by the owner machine token.  If machine
+ * does not own io, EINVAL is returned after io is detached and released.
  */
 int vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io);
 

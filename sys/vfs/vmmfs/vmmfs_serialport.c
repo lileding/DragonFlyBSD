@@ -199,6 +199,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
 	vnode->v_ops = &state->serialport_vops;
 	vnode->v_type = VCHR;
 	port->vnode = vnode;
+	vmmfs_machine_hold(serialroot->machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	*portp = port;
@@ -540,15 +541,22 @@ static int
 vmmfs_serialport_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_serialport *port;
+	struct vmmfs_machine *machine;
 
 	port = ap->a_vp->v_data;
 	if (port != NULL) {
+		machine = port->serialroot == NULL ? NULL :
+		    port->serialroot->machine;
 		lwkt_gettoken(&port->token);
 		if (port->vnode == ap->a_vp)
 			port->vnode = NULL;
 		lwkt_reltoken(&port->token);
+	} else {
+		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return 0;
 }
 

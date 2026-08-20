@@ -67,15 +67,26 @@ vmm_machine_trap_mmio_write(vmm_machine_t machine, uint64_t base,
 int
 vmm_machine_untrap(vmm_machine_t machine, vmm_io_t io)
 {
+	struct vmm_machine *owner;
+	int error;
 
-	if (machine == NULL || io == NULL || io->machine != machine)
+	if (io == NULL)
 		return EINVAL;
-	lwkt_gettoken(&machine->token);
-	TAILQ_REMOVE(&machine->io_list, io, entry);
+	owner = io->machine;
+	if (owner == NULL)
+		return EINVAL;
+	error = owner == machine ? 0 : EINVAL;
+
+	/*
+	 * Teardown is best-effort at the semantic layer, but the handle must
+	 * always leave its owning machine before the caller can discard it.
+	 */
+	lwkt_gettoken(&owner->token);
+	TAILQ_REMOVE(&owner->io_list, io, entry);
 	io->machine = NULL;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&owner->token);
 	kfree(io, M_VMM);
-	return 0;
+	return error;
 }
 
 int

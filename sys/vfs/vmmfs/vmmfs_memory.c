@@ -60,6 +60,8 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 	uint64_t size;
 	int result;
 
+	if (memory == NULL || vmmfs_machine_is_dead(memory->machine))
+		return (ENOENT);
 	size = memory->machine->spec.memory.size;
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
 	if (result < 0 || (size_t)result >= capacity)
@@ -97,6 +99,10 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	lwkt_gettoken(&memory->machine->token);
 	expected_stopped = memory->machine->stopped.expect_stopped;
 	runtime_active = memory->machine->machine != NULL;
+	if (memory->machine->dead) {
+		lwkt_reltoken(&memory->machine->token);
+		return (ENOENT);
+	}
 	if (!expected_stopped || runtime_active) {
 		lwkt_reltoken(&memory->machine->token);
 		vmmfs_events_log(&memory->machine->events,
@@ -130,6 +136,7 @@ vmmfs_memory_create(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 	vnode->v_ops = &state->memory_vops;
 	vnode->v_type = VREG;
 	memory->vnode = vnode;
+	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -437,10 +444,18 @@ static int
 vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_memory *memory;
+	struct vmmfs_machine *machine;
 
 	memory = ap->a_vp->v_data;
-	if (memory != NULL && memory->vnode == ap->a_vp)
-		memory->vnode = NULL;
+	if (memory != NULL) {
+		machine = memory->machine;
+		if (memory->vnode == ap->a_vp)
+			memory->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }

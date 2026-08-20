@@ -102,6 +102,7 @@ vmmfs_pcislot_config_create(struct vmmfs_pcislot *slot,
 	vnode->v_ops = &mount->pcislot_config_vops;
 	vnode->v_type = VREG;
 	config->vnode = vnode;
+	vmmfs_machine_hold(slot->pciroot->machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -119,22 +120,32 @@ vmmfs_pcislot_config_destroy(struct vmmfs_pcislot_config *config)
 
 	if (config == NULL)
 		return (EINVAL);
+	vmmfs_pcislot_config_revoke(config);
 	lwkt_gettoken(&config->token);
-	config->closed = true;
-	config->powered = false;
-	config->responder = NULL;
-	config->opening = false;
-	vmmfs_pcislot_config_cancel_locked(config, VMMFS_PCI_CONFIG_FAILURE);
 	vnode = config->vnode;
 	lwkt_reltoken(&config->token);
-	wakeup(config);
-	KNOTE(&config->read_kq.ki_note, 0);
 	if (vnode != NULL)
 		vmmfs_vnode_revoke(vnode);
 	KKASSERT(config->vnode == NULL);
 	config->slot = NULL;
 	lwkt_token_uninit(&config->token);
 	return (0);
+}
+
+void
+vmmfs_pcislot_config_revoke(struct vmmfs_pcislot_config *config)
+{
+	if (config == NULL)
+		return;
+	lwkt_gettoken(&config->token);
+	config->closed = true;
+	config->powered = false;
+	config->responder = NULL;
+	config->opening = false;
+	vmmfs_pcislot_config_cancel_locked(config, VMMFS_PCI_CONFIG_FAILURE);
+	lwkt_reltoken(&config->token);
+	wakeup(config);
+	KNOTE(&config->read_kq.ki_note, 0);
 }
 
 void
@@ -367,6 +378,9 @@ vmmfs_pcislot_config_open(struct vop_open_args *ap)
 	config = ap->a_vp->v_data;
 	if (config == NULL || config->slot == NULL)
 		return (ENOENT);
+	if (config->slot->pciroot == NULL ||
+	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+		return (ENOENT);
 	if ((ap->a_mode & (FREAD | FWRITE)) != (FREAD | FWRITE))
 		return (EINVAL);
 	if (vmmfs_pcislot_auth_check(config->slot) != 0)
@@ -401,6 +415,9 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 	config = ap->a_vp->v_data;
 	if (config == NULL)
 		return (ENOENT);
+	if (config->slot == NULL || config->slot->pciroot == NULL ||
+	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+		return (ENXIO);
 	if (ap->a_uio->uio_resid != sizeof(record))
 		return (EINVAL);
 	for (;;) {
@@ -436,11 +453,20 @@ static int
 vmmfs_pcislot_config_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot_config *config;
+	struct vmmfs_machine *machine;
 
 	config = ap->a_vp->v_data;
-	if (config != NULL && config->vnode == ap->a_vp)
-		config->vnode = NULL;
+	if (config != NULL && config->slot != NULL &&
+	    config->slot->pciroot != NULL) {
+		machine = config->slot->pciroot->machine;
+		if (config->vnode == ap->a_vp)
+			config->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -456,6 +482,9 @@ vmmfs_pcislot_config_write(struct vop_write_args *ap)
 	config = ap->a_vp->v_data;
 	if (config == NULL)
 		return (ENOENT);
+	if (config->slot == NULL || config->slot->pciroot == NULL ||
+	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+		return (ENXIO);
 	if (ap->a_uio->uio_resid != sizeof(response))
 		return (EINVAL);
 	error = uiomove((caddr_t)&response, sizeof(response), ap->a_uio);

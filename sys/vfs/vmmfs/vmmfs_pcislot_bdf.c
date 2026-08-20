@@ -66,6 +66,7 @@ vmmfs_pcislot_bdf_create(struct vmmfs_pcislot *slot,
 	vnode->v_ops = &mount->pcislot_bdf_vops;
 	vnode->v_type = VREG;
 	bdf->vnode = vnode;
+	vmmfs_machine_hold(slot->pciroot->machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -169,10 +170,18 @@ static int
 vmmfs_pcislot_bdf_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot_bdf *bdf;
+	struct vmmfs_machine *machine;
 
 	bdf = ap->a_vp->v_data;
-	if (bdf != NULL && bdf->vnode == ap->a_vp)
-		bdf->vnode = NULL;
+	if (bdf != NULL && bdf->slot != NULL && bdf->slot->pciroot != NULL) {
+		machine = bdf->slot->pciroot->machine;
+		if (bdf->vnode == ap->a_vp)
+			bdf->vnode = NULL;
+	} else {
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
