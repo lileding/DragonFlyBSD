@@ -118,11 +118,7 @@ vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
 	}
 	vnode = serialroot->vnode;
 	if (vnode != NULL) {
-		(void)vrevoke(vnode, proc0.p_ucred);
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(serialroot->vnode == NULL);
 	serialroot->machine = NULL;

@@ -270,10 +270,7 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 		destroy_dev(dev);
 	}
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(port->vnode == NULL);
 	port->tty = NULL;

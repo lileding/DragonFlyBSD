@@ -20,8 +20,13 @@
 #define PD_GPA			0x4000ULL
 #define GDT_GPA		0x5000ULL
 #define TSS_GPA		0x6000ULL
+#define ECAM_PD_GPA		0x9000ULL
 #define STACK_TOP_GPA		0x80000ULL
 #define ENTRY_GPA		0x100000ULL
+#define XSDT_GPA		0x70100ULL
+#define MCFG_GPA		0x70600ULL
+#define MCFG_SIZE		60U
+#define PCI_ECAM_GPA		0xe0000000ULL
 
 #define CR0_PE			0x00000001ULL
 #define CR0_NE			0x00000020ULL
@@ -38,19 +43,32 @@
 #define SEG_UNUSABLE		0x1000U
 
 static void build_cpu_state(struct vmm_cpustate *);
-static void build_guest(uint8_t *, uint64_t);
+static void build_guest(uint8_t *, uint64_t, int, int, int);
+static void check_pci_topology(const uint8_t *, uint64_t);
 static void set_segment(struct vmm_segment *, uint16_t, uint16_t, uint32_t,
     uint64_t);
 static void write64(uint8_t *, uint64_t, uint64_t);
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	struct vmm_cpustate state;
 	struct stat st;
 	uint8_t *memory;
 	ssize_t written;
+	int check_pci;
+	int check_pci_doorbell;
+	int loop_pci;
 
+	if (argc > 2 || (argc == 2 && strcmp(argv[1], "--check-pci") != 0 &&
+	    strcmp(argv[1], "--check-pci-loop") != 0 &&
+	    strcmp(argv[1], "--check-pci-doorbell-loop") != 0))
+		errx(1, "usage: %s [--check-pci|--check-pci-loop|--check-pci-doorbell-loop]",
+		    argv[0]);
+	check_pci = argc == 2;
+	check_pci_doorbell = argc == 2 &&
+	    strcmp(argv[1], "--check-pci-doorbell-loop") == 0;
+	loop_pci = argc == 2 && strcmp(argv[1], "--check-pci-loop") == 0;
 	if (fstat(3, &st) != 0)
 		err(1, "fstat fd3");
 	if (st.st_size < 2 * 1024 * 1024)
@@ -59,7 +77,10 @@ main(void)
 	    MAP_SHARED, 3, 0);
 	if (memory == MAP_FAILED)
 		err(1, "mmap fd3");
-	build_guest(memory, (uint64_t)st.st_size);
+	if (check_pci)
+		check_pci_topology(memory, (uint64_t)st.st_size);
+	build_guest(memory, (uint64_t)st.st_size, check_pci, loop_pci,
+	    check_pci_doorbell);
 	build_cpu_state(&state);
 	written = write(2, &state, sizeof(state));
 	if (written < 0)
@@ -70,27 +91,101 @@ main(void)
 }
 
 static void
-build_guest(uint8_t *memory, uint64_t memory_size)
+check_pci_topology(const uint8_t *memory, uint64_t memory_size)
+{
+	uint32_t length;
+	uint64_t address;
+
+	if (memory_size < MCFG_GPA + MCFG_SIZE)
+		errx(1, "guest memory lacks MCFG");
+	if (memcmp(memory + MCFG_GPA, "MCFG", 4) != 0)
+		errx(1, "MCFG signature");
+	memcpy(&length, memory + MCFG_GPA + 4, sizeof(length));
+	if (length != MCFG_SIZE)
+		errx(1, "MCFG length");
+	memcpy(&address, memory + MCFG_GPA + 44, sizeof(address));
+	if (address != PCI_ECAM_GPA)
+		errx(1, "MCFG ECAM address");
+	if (memory[MCFG_GPA + 54] != 0 ||
+	    memory[MCFG_GPA + 55] != UINT8_MAX)
+		errx(1, "MCFG bus range");
+	memcpy(&address, memory + XSDT_GPA + 52, sizeof(address));
+	if (address != MCFG_GPA)
+		errx(1, "XSDT MCFG entry");
+}
+
+static void
+build_guest(uint8_t *memory, uint64_t memory_size, int check_pci, int loop_pci,
+	int check_pci_doorbell)
 {
 	unsigned int index;
 
-	if (ENTRY_GPA + 3 > memory_size || STACK_TOP_GPA > memory_size)
+	if (ENTRY_GPA + 15 > memory_size || STACK_TOP_GPA > memory_size)
 		errx(1, "guest memory is too small");
 	memset(memory + PML4_GPA, 0, PAGE_SIZE_GUEST * 3);
 	write64(memory, PML4_GPA, PDPT_GPA | 3);
 	write64(memory, PDPT_GPA, PD_GPA | 3);
+	if (check_pci)
+		write64(memory, PDPT_GPA + 3 * sizeof(uint64_t), ECAM_PD_GPA | 3);
 	for (index = 0; index < 512; ++index) {
 		write64(memory, PD_GPA + index * sizeof(uint64_t),
 		    (uint64_t)index * 0x200000ULL | 0x83ULL);
+	}
+	if (check_pci) {
+		memset(memory + ECAM_PD_GPA, 0, PAGE_SIZE_GUEST);
+		for (index = 0; index < 512; ++index) {
+			write64(memory, ECAM_PD_GPA + index * sizeof(uint64_t),
+			    (0xc0000000ULL + (uint64_t)index * 0x200000ULL) | 0x83ULL);
+		}
 	}
 	memset(memory + GDT_GPA, 0, PAGE_SIZE_GUEST);
 	write64(memory, GDT_GPA + 16, 0x00209a0000000000ULL);
 	write64(memory, GDT_GPA + 24, 0x0000920000000000ULL);
 	write64(memory, GDT_GPA + 32, 0x0000890060000067ULL);
 	memset(memory + TSS_GPA, 0, 0x68);
-	memory[ENTRY_GPA] = 0xf4;
-	memory[ENTRY_GPA + 1] = 0xeb;
-	memory[ENTRY_GPA + 2] = 0xfd;
+	if (check_pci_doorbell) {
+		static const uint8_t guest[] = {
+			0xb8, 0x00, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008000 */
+			0x8b, 0x00,				/* mov eax, [rax] */
+			0x3d, 0xf4, 0x1a, 0x42, 0x10,	/* cmp eax, 0x10421af4 */
+			0x74, 0x02,				/* je 2 */
+			0x0f, 0x0b,				/* ud2 */
+			0xb8, 0x04, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008004 */
+			0xc7, 0x00, 0x02, 0x00, 0x00, 0x00,	/* mov dword [rax], 2 */
+			0xb8, 0x10, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008010 */
+			0x8b, 0x00,				/* mov eax, [rax] */
+			0x83, 0xe0, 0xf0,			/* and eax, 0xfffffff0 */
+			0x48, 0x89, 0xc1,			/* mov rcx, rax */
+			0xc7, 0x01, 0xef, 0xbe, 0xad, 0xde,	/* mov dword [rcx], 0xdeadbeef */
+			0xeb, 0xfe,				/* jmp . */
+		};
+
+		memcpy(memory + ENTRY_GPA, guest, sizeof(guest));
+	} else if (check_pci) {
+		memory[ENTRY_GPA] = 0xb8;
+		memory[ENTRY_GPA + 1] = 0x00;
+		memory[ENTRY_GPA + 2] = 0x00;
+		memory[ENTRY_GPA + 3] = 0x00;
+		memory[ENTRY_GPA + 4] = 0xe0;
+		memory[ENTRY_GPA + 5] = 0x8b;
+		memory[ENTRY_GPA + 6] = 0x00;
+		memory[ENTRY_GPA + 7] = 0x83;
+		memory[ENTRY_GPA + 8] = 0xf8;
+		memory[ENTRY_GPA + 9] = 0xff;
+		memory[ENTRY_GPA + 10] = 0x74;
+		memory[ENTRY_GPA + 11] = loop_pci ? 0x02 : 0x01;
+		memory[ENTRY_GPA + 12] = loop_pci ? 0xeb : 0xf4;
+		memory[ENTRY_GPA + 13] = loop_pci ? 0xfe : 0x0f;
+		memory[ENTRY_GPA + 14] = 0x0b;
+		if (loop_pci) {
+			memory[ENTRY_GPA + 14] = 0x0f;
+			memory[ENTRY_GPA + 15] = 0x0b;
+		}
+	} else {
+		memory[ENTRY_GPA] = 0xf4;
+		memory[ENTRY_GPA + 1] = 0xeb;
+		memory[ENTRY_GPA + 2] = 0xfd;
+	}
 }
 
 static void

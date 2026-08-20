@@ -94,10 +94,7 @@ vmmfs_events_destroy(struct vmmfs_events *events)
 	lwkt_reltoken(&events->token);
 	wakeup(events);
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(events->vnode == NULL);
 	kfree(events->buffer, M_VMMFS);

@@ -14,6 +14,7 @@
 
 struct mount;
 struct vop_ops;
+struct vnode;
 
 struct vmmfs_mount {
 	struct mount *mount;
@@ -31,9 +32,17 @@ struct vmmfs_mount {
 	struct vop_ops *pciroot_vops;
 	struct vop_ops *pcislot_vops;
 	struct vop_ops *pcislot_bdf_vops;
-	struct vop_ops *pcislot_state_vops;
+	struct vop_ops *pcislot_descriptor_vops;
+	struct vop_ops *pcislot_resource_vops;
+	struct vop_ops *pcislot_events_vops;
 };
 
 MALLOC_DECLARE(M_VMMFS);
+
+/*
+ * Revoke a VMMFS vnode and leave a permanent mount for late close handling.
+ * The caller transfers the object's vnode reference to this function.
+ */
+void vmmfs_vnode_revoke(struct vnode *);
 
 #endif /* VMMFS_H */

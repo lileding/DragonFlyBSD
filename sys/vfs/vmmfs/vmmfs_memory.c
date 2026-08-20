@@ -22,6 +22,7 @@
 #include <vm/vm_pager.h>
 
 #include "vmmfs.h"
+#include "vmmfs_pciroot.h"
 
 #define VMMFS_MEMORY_MODE 0644
 #define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
@@ -34,8 +35,8 @@ static int vmmfs_memory_read(struct vop_read_args *);
 static int vmmfs_memory_setattr(struct vop_setattr_args *);
 static int vmmfs_memory_write(struct vop_write_args *);
 static int vmmfs_memory_reclaim(struct vop_reclaim_args *);
-static int vmmfs_memory_map_object(struct vmspace *, struct vm_object *,
-	uint64_t);
+static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
+	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static void vmmfs_memory_object_reference(struct vm_object *);
 
 struct vop_ops vmmfs_memory_vops = {
@@ -145,10 +146,7 @@ vmmfs_memory_destroy(struct vmmfs_memory *memory)
 		return (EBUSY);
 	vnode = memory->vnode;
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(memory->vnode == NULL);
 	memory->machine = NULL;
@@ -176,8 +174,8 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory)
 		return (ENOMEM);
 	vm_object_set_flag(object, OBJ_NOSPLIT);
 	/*
-	 * Keep the complete GPA namespace available.  RAM is the one mapped
-	 * vm_object; platform MMIO and future PCI windows remain unmapped holes.
+	 * Keep the complete GPA namespace available.  RAM is mapped later around
+	 * the fixed platform and PCI MMIO aperture.
 	 */
 	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VMMFS_GPA_MAX);
 	if (vmspace == NULL) {
@@ -201,10 +199,23 @@ vmmfs_memory_map(struct vmmfs_memory *memory)
 	    memory->run_vmspace == NULL || memory->mapped)
 		return (EINVAL);
 	size = memory->machine->spec.memory.size;
-	error = vmmfs_memory_map_object(memory->run_vmspace, memory->object,
-	    size);
+	if (size <= VMMFS_PCI_MMIO_GPA)
+		error = vmmfs_memory_map_object(memory, memory->object, 0, 0,
+		    size, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+	else
+		error = vmmfs_memory_map_object(memory, memory->object, 0, 0,
+		    VMMFS_PCI_MMIO_GPA,
+		    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
 	if (error != 0)
 		return (error);
+	if (size > VMMFS_PCI_MMIO_END) {
+		error = vmmfs_memory_map_object(memory, memory->object,
+		    VMMFS_PCI_MMIO_END, VMMFS_PCI_MMIO_END,
+		    size - VMMFS_PCI_MMIO_END,
+		    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+		if (error != 0)
+			return (error);
+	}
 	memory->mapped = true;
 	return (0);
 }
@@ -254,24 +265,45 @@ vmmfs_memory_release(struct vmmfs_memory *memory)
 		vm_object_deallocate(object);
 }
 
+int
+vmmfs_memory_map_object(struct vmmfs_memory *memory,
+	struct vm_object *object, uint64_t gpa, uint64_t offset, uint64_t size,
+	vm_prot_t prot)
+{
+	if (memory == NULL || memory->run_vmspace == NULL || object == NULL ||
+	    size == 0 || (gpa & PAGE_MASK) != 0 || (offset & PAGE_MASK) != 0 ||
+	    (size & PAGE_MASK) != 0 || gpa > VMMFS_GPA_MAX - size)
+		return (EINVAL);
+	return (vmmfs_memory_map_vmspace(memory->run_vmspace, object, gpa,
+	    offset, size, prot));
+}
+
+void
+vmmfs_memory_unmap(struct vmmfs_memory *memory, uint64_t gpa, uint64_t size)
+{
+	if (memory == NULL || memory->run_vmspace == NULL || size == 0 ||
+	    (gpa & PAGE_MASK) != 0 || (size & PAGE_MASK) != 0 ||
+	    gpa > VMMFS_GPA_MAX - size)
+		return;
+	(void)vm_map_remove(&memory->run_vmspace->vm_map, gpa, gpa + size);
+}
+
 static int
-vmmfs_memory_map_object(struct vmspace *vmspace, struct vm_object *object,
-	uint64_t size)
+vmmfs_memory_map_vmspace(struct vmspace *vmspace, struct vm_object *object,
+	uint64_t gpa, uint64_t offset, uint64_t size, vm_prot_t prot)
 {
 	vm_map_t map;
-	vm_prot_t prot;
 	int count;
 	int error;
 
 	map = &vmspace->vm_map;
-	prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
 	count = vm_map_entry_reserve(MAP_RESERVE_COUNT);
 	vm_map_lock(map);
 	vmmfs_memory_object_reference(object);
 	vm_object_hold(object);
-	error = vm_map_insert(map, &count, object, NULL, 0, NULL, 0,
-	    round_page64(size), VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot, prot,
-	    0);
+	error = vm_map_insert(map, &count, object, NULL, offset, NULL, gpa,
+	    gpa + round_page64(size), VM_MAPTYPE_NORMAL, VM_SUBSYS_MMAP, prot,
+	    prot, 0);
 	vm_object_drop(object);
 	vm_map_unlock(map);
 	vm_map_entry_release(count);

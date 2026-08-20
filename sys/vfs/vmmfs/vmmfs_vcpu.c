@@ -138,10 +138,7 @@ vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 	lwkt_reltoken(&vcpu->token);
 	vnode = vcpu->vnode;
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(vcpu->vnode == NULL);
 	vcpu->machine = NULL;
@@ -382,22 +379,30 @@ vmmfs_vcpu_thread_main(void *argument)
 				continue;
 			goto out;
 		case VMM_CPUEXIT_IO:
+			lwkt_reltoken(&vcpu->token);
+			error = vmmfs_pciroot_io(&vcpu->machine->pciroot,
+			    thread->vcpu, &thread->state, exit);
+			if (error == 0)
+				continue;
 			vmmfs_events_log(&vcpu->machine->events,
 			    "vcpu%u unhandled pio %s port=%#x width=%u str=%d rep=%d rip=%#jx",
 			    thread->index, exit->u.io.in ? "read" : "write",
 			    exit->u.io.port, exit->u.io.operand_size, exit->u.io.str,
 			    exit->u.io.rep,
 			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
-			lwkt_reltoken(&vcpu->token);
 			goto out;
 		case VMM_CPUEXIT_MEMORY:
+			lwkt_reltoken(&vcpu->token);
+			error = vmmfs_pciroot_memory(&vcpu->machine->pciroot,
+			    thread->vcpu, exit);
+			if (error == 0)
+				continue;
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unhandled memory gpa=%#jx prot=%#x width=%u value=%#jx rip=%#jx",
+			    "vcpu%u unhandled memory gpa=%#jx prot=%#x width=%u value=%#jx rip=%#jx error=%d",
 			    thread->index, (uintmax_t)exit->u.mem.gpa,
 			    exit->u.mem.prot, exit->u.mem.width,
 			    (uintmax_t)exit->u.mem.value,
-			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
-			lwkt_reltoken(&vcpu->token);
+			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP], error);
 			goto out;
 		case VMM_CPUEXIT_SHUTDOWN:
 			vmmfs_events_log(&vcpu->machine->events,

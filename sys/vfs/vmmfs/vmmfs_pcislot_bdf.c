@@ -26,8 +26,6 @@ static int vmmfs_pcislot_bdf_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_bdf_open(struct vop_open_args *);
 static int vmmfs_pcislot_bdf_read(struct vop_read_args *);
 static int vmmfs_pcislot_bdf_reclaim(struct vop_reclaim_args *);
-static int vmmfs_pcislot_bdf_load(struct vmmfs_pcislot_bdf *, char *,
-	size_t, size_t *);
 
 struct vop_ops vmmfs_pcislot_bdf_vops = {
 	.vop_default = vop_defaultop,
@@ -45,19 +43,19 @@ int
 vmmfs_pcislot_bdf_create(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_bdf *bdf)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_mount *mount;
 	struct vnode *vnode;
 	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || bdf == NULL)
 		return (EINVAL);
-	state = (struct vmmfs_mount *)slot->pciroot->machine->root->mount->mnt_data;
-	if (state->pcislot_bdf_vops == NULL)
+	mount = (struct vmmfs_mount *)slot->pciroot->machine->root->mount->mnt_data;
+	if (mount->pcislot_bdf_vops == NULL)
 		return (ENXIO);
 	bzero(bdf, sizeof(*bdf));
 	bdf->slot = slot;
-	bdf->inode = atomic_fetchadd_int(&state->next_inode, 1);
+	bdf->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	error = getnewvnode(VT_SYNTH, slot->pciroot->machine->root->mount,
 	    &vnode, 0, 0);
 	if (error != 0) {
@@ -65,7 +63,7 @@ vmmfs_pcislot_bdf_create(struct vmmfs_pcislot *slot,
 		return (error);
 	}
 	vnode->v_data = bdf;
-	vnode->v_ops = &state->pcislot_bdf_vops;
+	vnode->v_ops = &mount->pcislot_bdf_vops;
 	vnode->v_type = VREG;
 	bdf->vnode = vnode;
 	vx_downgrade(vnode);
@@ -82,11 +80,7 @@ vmmfs_pcislot_bdf_destroy(struct vmmfs_pcislot_bdf *bdf)
 		return (EINVAL);
 	vnode = bdf->vnode;
 	if (vnode != NULL) {
-		(void)vrevoke(vnode, proc0.p_ucred);
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(bdf->vnode == NULL);
 	bdf->slot = NULL;
@@ -104,16 +98,10 @@ vmmfs_pcislot_bdf_getattr(struct vop_getattr_args *ap)
 {
 	struct vmmfs_pcislot_bdf *bdf;
 	struct vattr *vattr;
-	char buffer[16];
-	size_t length;
-	int error;
 
 	bdf = ap->a_vp->v_data;
-	if (bdf == NULL)
+	if (bdf == NULL || bdf->slot == NULL)
 		return (ENOENT);
-	error = vmmfs_pcislot_bdf_load(bdf, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
 	vattr->va_type = VREG;
@@ -123,9 +111,9 @@ vmmfs_pcislot_bdf_getattr(struct vop_getattr_args *ap)
 	vattr->va_gid = 0;
 	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
 	vattr->va_fileid = bdf->inode;
-	vattr->va_size = length;
+	vattr->va_size = sizeof("0000:00:00.0\n") - 1;
 	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = length;
+	vattr->va_bytes = vattr->va_size;
 	return (0);
 }
 
@@ -137,7 +125,7 @@ vmmfs_pcislot_bdf_getattr_lite(struct vop_getattr_lite_args *ap)
 	ap->a_lvap->va_nlink = 1;
 	ap->a_lvap->va_uid = 0;
 	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
+	ap->a_lvap->va_size = sizeof("0000:00:00.0\n") - 1;
 	ap->a_lvap->va_flags = 0;
 	return (0);
 }
@@ -152,23 +140,29 @@ static int
 vmmfs_pcislot_bdf_read(struct vop_read_args *ap)
 {
 	struct vmmfs_pcislot_bdf *bdf;
-	char buffer[16];
+	char text[sizeof("0000:00:00.0\n")];
+	uint16_t value;
 	size_t length;
-	off_t offset;
-	int error;
+	int result;
 
 	bdf = ap->a_vp->v_data;
-	if (bdf == NULL)
+	if (bdf == NULL || bdf->slot == NULL || bdf->slot->pciroot == NULL ||
+	    bdf->slot->pciroot->machine == NULL)
 		return (ENOENT);
 	if (ap->a_uio->uio_offset < 0)
 		return (EINVAL);
-	error = vmmfs_pcislot_bdf_load(bdf, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
-	offset = ap->a_uio->uio_offset;
-	if ((size_t)offset >= length)
+	lwkt_gettoken(&bdf->slot->pciroot->machine->token);
+	value = bdf->slot->bdf;
+	lwkt_reltoken(&bdf->slot->pciroot->machine->token);
+	result = ksnprintf(text, sizeof(text), "0000:%02x:%02x.%x\n",
+	    value >> 8, (value >> 3) & 0x1f, value & 0x7);
+	if (result < 0 || (size_t)result >= sizeof(text))
+		return (EOVERFLOW);
+	length = (size_t)result;
+	if ((size_t)ap->a_uio->uio_offset >= length)
 		return (0);
-	return (uiomove(buffer + offset, length - (size_t)offset, ap->a_uio));
+	return (uiomove(text + ap->a_uio->uio_offset,
+	    length - (size_t)ap->a_uio->uio_offset, ap->a_uio));
 }
 
 static int
@@ -180,25 +174,5 @@ vmmfs_pcislot_bdf_reclaim(struct vop_reclaim_args *ap)
 	if (bdf != NULL && bdf->vnode == ap->a_vp)
 		bdf->vnode = NULL;
 	ap->a_vp->v_data = NULL;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_bdf_load(struct vmmfs_pcislot_bdf *bdf, char *buffer,
-	size_t capacity, size_t *length)
-{
-	uint16_t value;
-	int result;
-
-	if (bdf->slot == NULL || bdf->slot->pciroot == NULL ||
-	    bdf->slot->pciroot->machine == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&bdf->slot->pciroot->machine->token);
-	value = bdf->slot->bdf;
-	lwkt_reltoken(&bdf->slot->pciroot->machine->token);
-	result = ksnprintf(buffer, capacity, "0x%x\n", value);
-	if (result < 0 || (size_t)result >= capacity)
-		return (EOVERFLOW);
-	*length = (size_t)result;
 	return (0);
 }

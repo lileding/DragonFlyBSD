@@ -1021,10 +1021,7 @@ vmmfs_loader_fd_free(void *argument)
 	vnode = fd->vnode;
 	if (vnode != NULL) {
 		fd->vnode = NULL;
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	if (fd->dev != NULL) {
 		fd->dev->si_drv1 = NULL;
@@ -1292,10 +1289,7 @@ vmmfs_loader_destroy(struct vmmfs_loader *loader)
 
 	vnode = loader->vnode;
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(loader->vnode == NULL);
 	loader->machine = NULL;

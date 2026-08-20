@@ -8,6 +8,7 @@
 #include <sys/module.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/vnode.h>
 
@@ -15,7 +16,9 @@
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_bdf.h"
-#include "vmmfs_pcislot_state.h"
+#include "vmmfs_pcislot_descriptor.h"
+#include "vmmfs_pcislot_resource.h"
+#include "vmmfs_pcislot_events.h"
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
 
@@ -54,6 +57,20 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_init = vmmfs_vfs_init,
 	.vfs_uninit = vmmfs_vfs_uninit,
 };
+
+void
+vmmfs_vnode_revoke(struct vnode *vnode)
+{
+	if (vnode == NULL)
+		return;
+	(void)vrevoke(vnode, proc0.p_ucred);
+	vx_get(vnode);
+	vgone_vxlocked(vnode);
+	if (vnode->v_mount == NULL)
+		insmntque(vnode, vfs_get_dummymount());
+	vx_put(vnode);
+	vrele(vnode);
+}
 
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
@@ -182,12 +199,15 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_bdf_vops,
 	    &state->pcislot_bdf_vops);
-	vfs_add_vnodeops(mount, &vmmfs_pcislot_state_vops,
-	    &state->pcislot_state_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pcislot_descriptor_vops,
+	    &state->pcislot_descriptor_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pcislot_resource_vops,
+	    &state->pcislot_resource_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pcislot_events_vops,
+	    &state->pcislot_events_vops);
 	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
-		vfs_rm_vnodeops(mount, NULL, &state->pcislot_state_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->pcislot_bdf_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->serialport_vops);
@@ -237,7 +257,9 @@ vmmfs_unmount(struct mount *mount, int flags)
 	error = vmmfs_root_destroy(root);
 	if (error != 0)
 		return (error);
-	vfs_rm_vnodeops(mount, NULL, &state->pcislot_state_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_bdf_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);

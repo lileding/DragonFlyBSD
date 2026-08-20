@@ -8,6 +8,8 @@
 
 #include <sys/types.h>
 
+#include <vm/vm.h>
+
 struct vm_object;
 struct vmspace;
 struct vmmfs_machine;
@@ -24,6 +26,9 @@ int vmmfs_memory_prepare(struct vmmfs_memory *);
 int vmmfs_memory_map(struct vmmfs_memory *);
 int vmmfs_memory_snapshot(struct vmmfs_memory *);
 void vmmfs_memory_release(struct vmmfs_memory *);
+int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
+	uint64_t, uint64_t, uint64_t, vm_prot_t);
+void vmmfs_memory_unmap(struct vmmfs_memory *, uint64_t, uint64_t);
 
 struct vmmfs_memory {
 	struct vmmfs_machine *machine;

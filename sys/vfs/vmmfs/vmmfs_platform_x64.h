@@ -14,6 +14,7 @@
 
 struct vmmfs_machine;
 struct vmmfs_memory;
+struct vmmfs_pciroot;
 struct vmmfs_serialroot;
 
 #define VMMFS_PLATFORM_X64_ACPI_GPA 0x70000ULL
@@ -40,6 +41,7 @@ int vmmfs_platform_x64_create(struct vmmfs_machine *,
 int vmmfs_platform_x64_destroy(struct vmmfs_platform_x64 *);
 int vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *,
 	struct vmmfs_memory *, uint32_t,
+	struct vmmfs_pciroot *,
 	struct vmmfs_serialroot *);
 int vmmfs_platform_x64_start(struct vmmfs_platform_x64 *, vmm_machine_t);
 int vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *);

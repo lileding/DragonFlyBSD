@@ -74,10 +74,7 @@ vmmfs_stopped_destroy(struct vmmfs_stopped *stopped)
 		return (EINVAL);
 	vnode = stopped->vnode;
 	if (vnode != NULL) {
-		vx_get(vnode);
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
-		vrele(vnode);
+		vmmfs_vnode_revoke(vnode);
 	}
 	KKASSERT(stopped->vnode == NULL);
 	stopped->machine = NULL;

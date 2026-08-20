@@ -676,7 +676,8 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	vmmfs_events_log(&machine->events, "pit create completed");
 	vmmfs_events_log(&machine->events, "platform prepare begin");
 	error = vmmfs_platform_x64_prepare(&machine->platform,
-	    &machine->memory, machine->spec.vcpu.count, &machine->serialroot);
+	    &machine->memory, machine->spec.vcpu.count, &machine->pciroot,
+	    &machine->serialroot);
 	if (error != 0)
 		goto failed;
 	vmmfs_events_log(&machine->events, "platform prepare completed");

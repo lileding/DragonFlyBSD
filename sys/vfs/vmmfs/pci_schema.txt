@@ -1,0 +1,359 @@
+VMMFS PCI SLOT DESCRIPTOR SCHEMA
+=================================
+
+Status: normative VMMFS ABI
+Version: 1
+
+1. Scope
+--------
+
+A descriptor describes one PCIe Type-0 endpoint function.  The slot directory
+name supplies its BDF; a descriptor never supplies a BDF.  VMMFS supplies the
+PCIe root complex, ECAM, bridge topology, and bus-number policy.
+
+Version 1 supports PCI and PCIe Type-0 endpoint functions: memory and I/O
+BARs, option ROMs, INTx, MSI, MSI-X, conventional capabilities, and PCIe
+extended capabilities.  It does not describe PCI-to-PCI bridges, CardBus,
+root ports, switch topology, PCIe hotplug, or SR-IOV topology.  A driver can
+only depend on a capability that this descriptor has declared.  Future
+support for excluded topology must be added as a new schema version or an
+explicitly negotiated capability kind; it must not change the meaning of a
+Version-1 document.
+
+This is complete for a single ordinary endpoint function, including modern
+virtio-pci, NVMe, NIC, and GPU functions, without claiming to emulate a whole
+historical PC chipset.
+
+2. Grammar and Transaction
+--------------------------
+
+A nonempty descriptor is an ASCII sequence of records:
+
+    key=value\n
+
+There are no comments, blank records, whitespace, duplicate keys, unknown
+keys, or partial records.  Numeric values are unsigned decimal integers or C
+style hexadecimal integers.  Boolean values are exactly 0 or 1.  A hex byte
+string contains a nonzero, even number of lowercase hexadecimal digits and has
+no 0x prefix.
+
+The descriptor is close-committed while its machine is stopped.  A zero-byte
+close removes the committed descriptor.  A failed close preserves the prior
+generation without modification.  `rm descriptor` is not part of this ABI.
+
+Every successful nonempty close creates a new descriptor generation and
+injects one anonymous auth-token fd into the committing process.  The token
+authorizes every open of this generation's events, config, and resource nodes.  It is a
+normal inheritable file description: fork, dup, and SCM_RIGHTS retain the
+capability, and it is neither close-on-exec nor close-on-fork.  A process
+discovers the injected token by scanning its descriptors through F_MAXFD and
+matching its fstat identity: VMMFS mount, slot inode, and descriptor
+generation.  F_GETPATH is not applicable because the token is anonymous.
+
+A descriptor replacement rotates its token.  Old tokens cannot open the new
+generation, and old resources are revoked before the replacement is
+published.  A process without the current token may enumerate slot nodes but
+gets EACCES from open.
+
+3. Required Header Fields
+-------------------------
+
+Every nonempty Version-1 descriptor contains exactly these fields:
+
+    version=1
+    header.type=endpoint
+    vendor_id=<u16>
+    device_id=<u16>
+    subsystem_vendor_id=<u16>
+    subsystem_device_id=<u16>
+    class=<u24>
+    revision=<u8>
+    intx.pin=none|a|b|c|d
+
+VMMFS owns the remaining Type-0 configuration-header state: command, status,
+cache line size, header type, BAR values, capability-list pointer, and
+interrupt-line state.  Those are run-time PCI state, not descriptor fields.
+
+4. BARs and Option ROM
+----------------------
+
+Each present BAR N has the following complete field group:
+
+    barN.type=io|mem32|mem64
+    barN.size=<power-of-two u64>
+    barN.prefetchable=0|1
+
+N ranges from 0 through 5.  An io BAR requires prefetchable=0.  A mem64 BAR
+at N consumes BAR registers N and N+1, therefore N must be less than 5 and
+no bar(N+1).* fields may exist.  A BAR size must be nonzero, a power of two,
+and satisfy the PCI BAR alignment rules.  All BAR regions are disjoint.
+
+For example, bar0 and bar2 may coexist when bar0 is mem64, because BAR
+register 1 is then the upper half of bar0:
+
+    bar0.type=mem64
+    bar0.size=0x200000
+    bar0.prefetchable=1
+    bar2.type=mem32
+    bar2.size=0x10000
+    bar2.prefetchable=0
+
+There is no bar1 in this example.  The parser rejects it.
+
+VMMFS allocates memory BAR guest addresses from its PCIe MMIO windows and I/O
+BAR guest addresses from its PIO windows at power-on.  It implements normal
+BAR sizing probes, configuration writes, relocation, and MEMORY or I/O decode
+enable/disable.  The BAR backing object is stable across a guest BAR
+relocation; only its guest mapping changes.  A memory BAR creates a barN
+resource capability and an I/O BAR creates a pioN resource capability.
+
+An optional expansion ROM contains:
+
+    rom.size=<power-of-two u64>
+
+VMMFS allocates the guest ROM address, implements the ROM BAR sizing and
+enable bit, and creates an rom resource capability.  The ROM contents are
+owned by the backend after power-on.
+
+5. DMA Capability
+-----------------
+
+DMA is not a descriptor field.  Every committed endpoint has one token-gated
+dma resource which covers the complete current guest GPA space zero-copy.  A
+PCI device issues addresses supplied by its guest driver; it does not describe
+an aperture, GPA layout, IOVA policy, or memory permissions in its descriptor.
+
+The standard PCI Command bus-master-enable bit controls live access to this
+mapping.  An authorized backend may mmap dma in either BME state.  When BME
+changes from one to zero, VMMFS removes established DMA pmap mappings and
+switches the resource to a bad pager, so later accesses fault safely.  When
+BME changes from zero to one, VMMFS restores the run-vmspace pager and
+invalidates stale translations.  The file description itself is not revoked
+by a BME transition.
+
+A future IOMMU maps driver-selected IOVA ranges under kernel control.  It
+changes translation policy, not this descriptor or backend capability ABI.
+
+6. Doorbell Ranges
+------------------
+
+Each doorbell N describes one write-only BAR range:
+
+    doorbellN.bar=<declared BAR index>
+    doorbellN.offset=<u64>
+    doorbellN.size=<nonzero u64>
+    doorbellN.width=1|2|4|8
+    doorbellN.space=mmio|pio
+
+The interval [offset, offset + size) must be within the selected BAR.  space
+must match that BAR's type, the interval must be aligned to width and disjoint
+from every other doorbell range and all MSI-X Table/PBA ranges.  The guest
+write width must equal doorbellN.width.  A pio doorbell width may be 1, 2, or
+4 only.
+
+VMMFS traps writes in the range and appends one ordered record to kickN:
+
+    struct vmmfs_pci_kick {
+            uint64_t offset;
+            uint64_t value;
+            uint8_t width;
+            uint8_t reserved[7];
+    };
+
+kickN is readable and kqueue-observable.  A readiness notification means that
+at least one complete record can be read.  Records are not coalesced or lost.
+Backends that only need a rescan edge, including virtio queue notification,
+may ignore the record value.  Other PCIe functions retain exact ordering and
+values.
+
+7. INTx Resource
+----------------
+
+When intx.pin is not none, VMMFS creates an intx resource capability.  A
+backend writes assert or deassert records to it.  VMMFS maintains the
+level-triggered INTx line state and routes an asserted line to the virtual
+GSI selected by the PCI platform.  The selected line is reported through the
+ordinary Type-0 interrupt-line register.
+
+    struct vmmfs_pci_intx {
+            uint8_t asserted;
+            uint8_t reserved[7];
+    };
+
+INTx is independent of optional MSI or MSI-X capabilities.  A guest selects
+the active mechanism through the standard configuration-space enable and mask
+bits.  A backend must not need a Virtio-specific rule to implement this.
+
+8. Conventional Capability List
+--------------------------------
+
+Conventional capabilities are named cap0, cap1, and so on.  They must be
+contiguous from cap0; their numeric order is the order in the PCI conventional
+capability list.  VMMFS allocates aligned offsets and writes every ID, next
+pointer, and length field.  Callers never supply those linkage bytes.
+
+capN.kind is one of:
+
+    pcie
+    msi
+    msix
+    blob
+
+pcie is VMMFS's Type-0 PCIe endpoint capability.  It may appear exactly once.
+VMMFS supplies its endpoint/link fields from the virtual PCIe platform.
+
+An MSI capability has:
+
+    capN.kind=msi
+    capN.vectors=1|2|4|8|16|32
+    capN.address_width=32|64
+    capN.maskable=0|1
+
+An MSI-X capability has:
+
+    capN.kind=msix
+    capN.vectors=<1..2048>
+    capN.table.bar=<declared memory BAR index>
+    capN.table.offset=<u64>
+    capN.pba.bar=<declared memory BAR index>
+    capN.pba.offset=<u64>
+
+The MSI-X Table occupies vectors * 16 bytes.  The PBA occupies enough bytes to
+contain one pending bit per vector.  VMMFS validates both ranges, reserves
+them from ordinary BAR and doorbell access, traps their guest accesses, and
+implements table masks, function masking, PBA state, and pending delivery.
+
+For MSI, VMMFS implements standard MSI configuration state.  For MSI-X,
+VMMFS implements standard Table/PBA configuration state.  Each available
+message route creates msiN or msixN, respectively.  A backend writes such a
+resource to request an interrupt.  VMMFS reads the active message route and
+uses the VMM interrupt API; hardware delivery is selected by VMM capability.
+
+A blob capability has:
+
+    capN.kind=blob
+    capN.id=<u8>
+    capN.access=static|proxy
+    capN.data=<hex byte string>
+
+blob data excludes the standard capability ID, next-pointer, and length
+bytes.  static makes the data read-only to the guest.  proxy delegates all
+accesses within that capability's payload to the config channel defined in
+Section 10.  blob permits vendor-specific capabilities and standard
+capabilities whose semantics are deliberately delegated to a backend.
+
+9. PCIe Extended Capability List
+--------------------------------
+
+Extended capabilities are named ecap0, ecap1, and so on.  They must be
+contiguous from ecap0; their numeric order is their order in PCIe extended
+configuration space.  VMMFS lays them out at four-byte-aligned offsets in the
+0x100..0xfff range and constructs the standard extended-capability header.
+
+Each extended capability contains:
+
+    ecapN.id=<u16>
+    ecapN.version=<1..15>
+    ecapN.access=static|proxy
+    ecapN.data=<hex byte string>
+
+The data excludes the four-byte extended-capability header.  VMMFS rejects a
+set that cannot fit into 4 KiB configuration space.
+
+10. Events Log and Config Slow Path
+-----------------------------------
+
+The events node exists for every committed descriptor.  It is a token-
+authorized, read-only, append-only text log.  Every line uses the common
+VMMFS form:
+
+    <sequence> <host-tsc-hex> <message>
+
+VMMFS appends lifecycle observations such as descriptor replacement,
+POWER_ON, POWER_OFF, configuration timeout, and backend failure.  Events
+never carries binary requests or responses, and closing it has no device
+lifecycle effect.
+
+The config node is a separate token-authorized, exclusive binary responder
+channel.  It carries synchronous low-frequency configuration requests and
+responses when at least one blob or ecap uses access=proxy.  It is not a BAR
+and is never used for data-plane I/O.  An authorized backend opens named
+barN, pioN, rom, dma, kickN, intx, msiN, and msixN nodes itself; no provider
+socket and no fd bundle are part of this ABI.
+
+VMMFS handles all Type-0 header fields, PCIe, MSI, and MSI-X itself.  A guest
+configuration access to a proxy capability must not wait in a VMM I/O trap
+callback.  The VMMFS PCI configuration callback immediately returns ENOENT.
+VMM preserves the decoded MMIO access at its instruction boundary and returns
+VMM_CPUEXIT_MEMORY to the owning VMMFS vCPU LWKT.  The fixed host-local,
+native-endian request and response ABI is declared in sys/sys/vmmfs_pci.h.
+A request carries a powered-slot generation, a sequence unique within that
+generation, a configuration offset, width, operation, and write value.  A
+response names the same generation and sequence and supplies a read value or
+acknowledges a write.  width is 1, 2, or 4; read values and write values use
+only their low width bytes.
+
+The backend reads config requests in order and responds only to the FIFO head.
+VMMFS rejects a malformed, stale, or out-of-order response. A PCI configuration
+write has no host errno channel: a matching response completes the guest
+instruction, while backend disappearance is represented as a device-absent
+completion.  Reads from an absent device return all-one bits; writes complete
+without a device side effect, matching normal PCI configuration probing.
+
+The vCPU that generated the access waits for its matching response; other
+vCPUs and all BAR/DMA/kick/MSI-X fast paths continue independently.  The LWKT
+holds neither the VMM machine token nor the VMMFS vCPU token while it waits.
+It sleeps on its underlying vmm_vcpu_t channel, the same channel used by
+vmm_vcpu_kick().  Thus timer, APIC, NMI, INIT/SIPI, backend response, and stop
+all wake the same LWKT.  A wakeup only rechecks predicates: a completion calls
+vmm_vcpu_complete_mmio_read() or vmm_vcpu_complete_mmio_write() and then
+vmm_vcpu_run(); a stop withdraws the request and exits the LWKT; every other
+wakeup sleeps again.  This resumes the blocked instruction rather than
+restarting or skipping it.
+
+VMMFS serializes proxy transactions per powered slot.  Only the FIFO head is
+visible to the backend.  This provides one device-observable order across
+concurrent vCPUs without holding a VMM token while any vCPU sleeps.  Backend
+records contain no kernel pointers, so a late response after stop, power-off,
+or revoke cannot retain or access released state.
+
+This is the generic escape hatch required for an arbitrary PCIe function.  A
+virtio-pci function normally uses only static blob capabilities, so it never
+enters this slow path after power-on.
+
+11. Virtio-PCI Mapping
+----------------------
+
+Virtio-pci is not a descriptor kind.  A virtio backend emits ordinary PCI
+identity fields, one or more memory BARs, an MSI-X capability, notification
+doorbell ranges, and several static blob capabilities.  Those
+blob payloads are the standard Virtio PCI vendor capabilities for common,
+notify, ISR, and device configuration regions.  Their BAR offsets refer to
+the already declared BAR backing objects.
+
+VMMFS does not parse those Virtio payloads and does not know whether the
+backend is block, network, socket, filesystem, entropy, or another Virtio
+device.  The backend implements that protocol through barN, dma, kickN, and
+msixN.  It reads events only for lifecycle observability and uses config only
+for a descriptor-declared proxy capability.
+
+12. Power and Revocation
+------------------------
+
+Descriptor fields are stopped-state topology.  Every cold power-on creates a
+fresh powered generation: config state, BAR backing/mappings, interrupt state,
+and resource cdevs.  Every power-off first stops vCPUs, removes all VMM traps,
+emits POWER_OFF, and revokes all live resources and mappings after vCPU drain
+and bounded backend cleanup.  The stop kick wakes a vCPU parked on a config
+response; that LWKT withdraws its request and exits without completing the
+blocked fragment.  Descriptor topology and its events and config control nodes
+survive power-off.
+
+Closing events has no device lifecycle effect.  Closing an active config
+responder makes its proxy capability absent.  A request already waiting for
+that responder completes as device-absent.  Descriptor topology remains
+unchanged; guest failure is permitted and VMMFS must remain host-safe.
+
+A warm reset preserves descriptor topology and resource identities.  A cold
+stop followed by a start is required before a changed descriptor can take
+effect.

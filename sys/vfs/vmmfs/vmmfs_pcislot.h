@@ -6,16 +6,31 @@
 #ifndef VMMFS_PCISLOT_H
 #define VMMFS_PCISLOT_H
 
-#include <sys/param.h>
 #include <sys/tree.h>
 #include <sys/types.h>
 
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot_bdf.h"
-#include "vmmfs_pcislot_state.h"
+#include "vmmfs_pcislot_descriptor.h"
+#include "vmmfs_pcislot_auth.h"
+#include "vmmfs_pcislot_events.h"
 
 struct vnode;
 struct vop_ops;
+
+#define VMMFS_PCISLOT_CONFIG_SIZE 4096
+struct vmmfs_pcislot_type0 {
+	uint8_t bytes[VMMFS_PCISLOT_CONFIG_SIZE];
+	uint64_t bar_address[VMMFS_PCISLOT_MAX_BARS];
+	uint64_t rom_address;
+	uint32_t intx_gsi;
+	uint8_t bar_probe[VMMFS_PCISLOT_MAX_BARS];
+	uint16_t cap_offset[VMMFS_PCISLOT_MAX_CAPS];
+	uint16_t ecap_offset[VMMFS_PCISLOT_MAX_ECAPS];
+	bool rom_probe;
+	bool powered;
+	bool bus_master_enabled;
+};
 
 struct vmmfs_pcislot {
 	RB_ENTRY(vmmfs_pcislot) entry;
@@ -23,9 +38,10 @@ struct vmmfs_pcislot {
 	struct vnode *vnode;
 	ino_t inode;
 	uint16_t bdf;
-	char name[NAME_MAX + 1];
 	struct vmmfs_pcislot_bdf bdf_node;
-	struct vmmfs_pcislot_state state;
+	struct vmmfs_pcislot_descriptor descriptor;
+	struct vmmfs_pcislot_events events;
+	struct vmmfs_pcislot_type0 type0;
 };
 
 RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pcislot, entry,
@@ -34,8 +50,14 @@ RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pcislot, entry,
 extern struct vop_ops vmmfs_pcislot_vops;
 
 int vmmfs_pcislot_compare(struct vmmfs_pcislot *, struct vmmfs_pcislot *);
-int vmmfs_pcislot_create(struct vmmfs_pciroot *, const char *, size_t,
+int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 	struct vmmfs_pcislot **);
 int vmmfs_pcislot_destroy(struct vmmfs_pcislot *);
+int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
+void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
+int vmmfs_pcislot_config_read(struct vmmfs_pcislot *, vmm_vcpu_t,
+	uint16_t, enum vmm_io_width, uint32_t *);
+int vmmfs_pcislot_config_write(struct vmmfs_pcislot *, vmm_vcpu_t,
+	uint16_t, enum vmm_io_width, uint32_t);
 
 #endif /* VMMFS_PCISLOT_H */
