@@ -124,17 +124,15 @@ fail_token:
 int
 vmmfs_pcislot_config_destroy(struct vmmfs_pcislot_config *config)
 {
-	struct vnode *vnode;
-
 	if (config == NULL)
 		return (EINVAL);
-	vmmfs_pcislot_config_revoke(config);
 	lwkt_gettoken(&config->token);
-	vnode = config->vnode;
+	if (config->vnode != NULL) {
+		lwkt_reltoken(&config->token);
+		return (EBUSY);
+	}
 	lwkt_reltoken(&config->token);
-	if (vnode != NULL)
-		vmmfs_vnode_revoke(vnode);
-	KKASSERT(config->vnode == NULL);
+	vmmfs_pcislot_config_revoke(config);
 	config->slot = NULL;
 	lwkt_token_uninit(&config->token);
 	return (0);

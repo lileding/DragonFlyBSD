@@ -85,18 +85,15 @@ fail_buffer:
 int
 vmmfs_events_destroy(struct vmmfs_events *events)
 {
-	struct vnode *vnode;
-
 	if (events == NULL)
 		return (EINVAL);
-	vmmfs_events_revoke(events);
 	lwkt_gettoken(&events->token);
-	vnode = events->vnode;
-	lwkt_reltoken(&events->token);
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
+	if (events->vnode != NULL) {
+		lwkt_reltoken(&events->token);
+		return (EBUSY);
 	}
-	KKASSERT(events->vnode == NULL);
+	lwkt_reltoken(&events->token);
+	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
 	events->machine = NULL;

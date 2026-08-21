@@ -152,7 +152,9 @@ vmmfs_pcislot_descriptor_create(struct vmmfs_pcislot *slot,
 	return (0);
 
 fail_vnode:
-	vmmfs_vnode_revoke(vnode);
+	vx_downgrade(vnode);
+	vn_unlock(vnode);
+	vmmfs_vnode_discard(vnode);
 	descriptor->slot = NULL;
 	return (error);
 }
@@ -163,12 +165,13 @@ vmmfs_pcislot_descriptor_destroy(struct vmmfs_pcislot_descriptor *descriptor)
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_pcislot_auth *auth;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 
 	if (descriptor == NULL)
 		return (EINVAL);
 	machine = descriptor->slot == NULL || descriptor->slot->pciroot == NULL ?
 	    NULL : descriptor->slot->pciroot->machine;
+	if (descriptor->vnode != NULL)
+		return (EBUSY);
 	if (machine != NULL) {
 		lwkt_gettoken(&machine->token);
 		if (descriptor->writer_buffer != NULL || descriptor->committing) {
@@ -189,11 +192,6 @@ vmmfs_pcislot_descriptor_destroy(struct vmmfs_pcislot_descriptor *descriptor)
 	}
 	(void)vmmfs_pcislot_resources_destroy(resources);
 	vmmfs_pcislot_auth_revoke(auth);
-	vnode = descriptor->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(descriptor->vnode == NULL);
 	descriptor->slot = NULL;
 	return (0);
 }

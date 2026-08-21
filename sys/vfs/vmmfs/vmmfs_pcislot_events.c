@@ -89,18 +89,15 @@ fail_buffer:
 int
 vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *state_node)
 {
-	struct vnode *vnode;
-
 	if (state_node == NULL)
 		return (EINVAL);
-	vmmfs_pcislot_events_revoke(state_node);
 	lwkt_gettoken(&state_node->token);
-	vnode = state_node->vnode;
-	lwkt_reltoken(&state_node->token);
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
+	if (state_node->vnode != NULL) {
+		lwkt_reltoken(&state_node->token);
+		return (EBUSY);
 	}
-	KKASSERT(state_node->vnode == NULL);
+	lwkt_reltoken(&state_node->token);
+	vmmfs_pcislot_events_revoke(state_node);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
 	state_node->slot = NULL;

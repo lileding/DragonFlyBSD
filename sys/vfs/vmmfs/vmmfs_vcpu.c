@@ -133,8 +133,6 @@ vmmfs_vcpu_create(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 int
 vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 {
-	struct vnode *vnode;
-
 	if (vcpu == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&vcpu->token);
@@ -143,11 +141,8 @@ vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&vcpu->token);
-	vnode = vcpu->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(vcpu->vnode == NULL);
+	if (vcpu->vnode != NULL)
+		return (EBUSY);
 	vcpu->machine = NULL;
 	return (0);
 }

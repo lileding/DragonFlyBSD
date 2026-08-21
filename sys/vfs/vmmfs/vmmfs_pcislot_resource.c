@@ -27,6 +27,7 @@
 #include <vm/vm_pager.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
@@ -260,6 +261,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	KKASSERT(index == count);
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
+		resource->machine = slot->pciroot->machine;
 		resource->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 		lwkt_token_init(&resource->token, "vmmfspcires");
 		SLIST_INIT(&resource->read_kq.ki_note);
@@ -276,6 +278,8 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	return (0);
 
 fail:
+	for (index = 0; index < resources->count; ++index)
+		vmmfs_vnode_discard(resources->items[index].vnode);
 	(void)vmmfs_pcislot_resources_destroy(resources);
 	return (error);
 }
@@ -284,7 +288,6 @@ int
 vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 {
 	struct vmmfs_pcislot_resource *resource;
-	struct vnode *vnode;
 	size_t index;
 
 	if (resources == NULL)
@@ -295,11 +298,6 @@ vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 	for (index = 0; index < resources->count; ++index) {
 		resource = &resources->items[index];
 		vmmfs_pcislot_resource_revoke(resource);
-		vnode = resource->vnode;
-		if (vnode == NULL)
-			continue;
-		vmmfs_vnode_revoke(vnode);
-		KKASSERT(resource->vnode == NULL);
 	}
 	if (resources->slot != NULL) {
 		vmmfs_pcislot_events_log(&resources->slot->events,
@@ -761,14 +759,17 @@ vmmfs_pcislot_resource_create_vnode(struct vmmfs_pcislot_resource *resource,
 	if (vnode->v_type == VCHR) {
 		error = v_associate_rdev(vnode, resource->dev);
 		if (error != 0) {
-			vgone_vxlocked(vnode);
-			vx_put(vnode);
+			vx_downgrade(vnode);
+			vn_unlock(vnode);
+			vmmfs_vnode_discard(vnode);
 			return (error);
 		}
 		vnode->v_umajor = resource->dev->si_umajor;
 		vnode->v_uminor = resource->dev->si_uminor;
 	}
 	resource->vnode = vnode;
+	vmmfs_pcislot_resources_hold(resource->resources);
+	vmmfs_machine_hold(resource->machine);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -1391,11 +1392,25 @@ static int
 vmmfs_pcislot_resource_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pcislot_resource *resource;
+	struct vmmfs_pcislot_resources *resources;
+	struct vmmfs_machine *machine;
 
 	resource = ap->a_vp->v_data;
-	if (resource != NULL && resource->vnode == ap->a_vp)
-		resource->vnode = NULL;
+	if (resource != NULL) {
+		resources = resource->resources;
+		machine = resource->machine;
+		if (resource->vnode == ap->a_vp)
+			resource->vnode = NULL;
+		resource->machine = NULL;
+	} else {
+		resources = NULL;
+		machine = NULL;
+	}
 	ap->a_vp->v_data = NULL;
+	if (resources != NULL)
+		vmmfs_pcislot_resources_drop(resources);
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

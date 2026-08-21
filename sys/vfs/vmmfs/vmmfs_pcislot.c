@@ -125,9 +125,12 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	return (0);
 
 fail_events:
+	vmmfs_vnode_discard(slot->events.vnode);
 	(void)vmmfs_pcislot_events_destroy(&slot->events);
 fail_vnode:
-	vmmfs_vnode_revoke(vnode);
+	vx_downgrade(vnode);
+	vn_unlock(vnode);
+	vmmfs_vnode_discard(vnode);
 fail_slot:
 	slot->pciroot = NULL;
 	kfree(slot, M_VMMFS);
@@ -137,11 +140,12 @@ fail_slot:
 int
 vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 {
-	struct vnode *vnode;
 	int error;
 
 	if (slot == NULL)
 		return (EINVAL);
+	if (slot->vnode != NULL)
+		return (EBUSY);
 	error = vmmfs_pcislot_config_destroy(&slot->config);
 	if (error != 0)
 		return (error);
@@ -151,11 +155,6 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 	error = vmmfs_pcislot_events_destroy(&slot->events);
 	if (error != 0)
 		return (error);
-	vnode = slot->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(slot->vnode == NULL);
 	slot->bdf = 0;
 	slot->pciroot = NULL;
 	kfree(slot, M_VMMFS);

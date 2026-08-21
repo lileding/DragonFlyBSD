@@ -145,17 +145,12 @@ vmmfs_memory_create(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 int
 vmmfs_memory_destroy(struct vmmfs_memory *memory)
 {
-	struct vnode *vnode;
-
 	if (memory == NULL)
 		return (EINVAL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		return (EBUSY);
-	vnode = memory->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(memory->vnode == NULL);
+	if (memory->vnode != NULL)
+		return (EBUSY);
 	memory->machine = NULL;
 	return (0);
 }

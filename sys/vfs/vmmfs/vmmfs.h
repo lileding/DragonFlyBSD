@@ -39,17 +39,7 @@ struct vmmfs_mount {
 
 MALLOC_DECLARE(M_VMMFS);
 
-/*
- * Removes a VMMFS vnode from its namespace and releases the reference kept
- * by its object.  Existing descriptors are revoked; final object release is
- * deferred to VOP_RECLAIM.
- */
-void vmmfs_vnode_close(struct vnode *);
-
-/*
- * Revoke a VMMFS vnode and leave a permanent mount for late close handling.
- * The caller transfers the object's vnode reference to this function.
- */
-void vmmfs_vnode_revoke(struct vnode *);
+/* Releases a vnode that was never made reachable from the namespace. */
+void vmmfs_vnode_discard(struct vnode *);
 
 #endif /* VMMFS_H */

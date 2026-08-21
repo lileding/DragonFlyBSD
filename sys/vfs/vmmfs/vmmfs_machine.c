@@ -36,7 +36,7 @@ static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
 static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_stop(struct vmmfs_machine *);
-static void vmmfs_machine_close_vnodes(struct vmmfs_machine *);
+static void vmmfs_machine_wake_waiters(struct vmmfs_machine *);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
@@ -125,27 +125,56 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	return (machine);
 
 fail_events:
+	vmmfs_vnode_discard(machine->events.vnode);
 	(void)vmmfs_events_destroy(&machine->events);
 fail_serialroot:
+	vmmfs_vnode_discard(machine->serialroot.vnode);
 	(void)vmmfs_serialroot_destroy(&machine->serialroot);
 fail_rtc:
 	(void)vmmfs_rtc_destroy(&machine->rtc);
 fail_platform:
 	(void)vmmfs_platform_x64_destroy(&machine->platform);
 fail_pciroot:
+	vmmfs_vnode_discard(machine->pciroot.vnode);
 	(void)vmmfs_pciroot_destroy(&machine->pciroot);
 fail_stopped:
+	vmmfs_vnode_discard(machine->stopped.vnode);
 	(void)vmmfs_stopped_destroy(&machine->stopped);
 fail_loader:
+	vmmfs_vnode_discard(machine->loader.vnode);
 	(void)vmmfs_loader_destroy(&machine->loader);
 fail_memory:
+	vmmfs_vnode_discard(machine->memory.vnode);
 	(void)vmmfs_memory_destroy(&machine->memory);
 fail_vcpu:
+	vmmfs_vnode_discard(machine->vcpu.vnode);
 	(void)vmmfs_vcpu_destroy(&machine->vcpu);
 fail_token:
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
 	return (NULL);
+}
+
+void
+vmmfs_machine_abort_create(struct vmmfs_machine *machine)
+{
+	struct vnode *vnode;
+
+	if (machine == NULL)
+		return;
+	vmmfs_vnode_discard(machine->events.vnode);
+	vmmfs_vnode_discard(machine->serialroot.vnode);
+	vmmfs_vnode_discard(machine->pciroot.vnode);
+	vmmfs_vnode_discard(machine->stopped.vnode);
+	vmmfs_vnode_discard(machine->loader.vnode);
+	vmmfs_vnode_discard(machine->memory.vnode);
+	vmmfs_vnode_discard(machine->vcpu.vnode);
+	vnode = machine->vnode;
+	if (vnode != NULL) {
+		vx_downgrade(vnode);
+		vn_unlock(vnode);
+		vmmfs_vnode_discard(vnode);
+	}
 }
 
 int
@@ -167,7 +196,7 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->token);
-	vmmfs_machine_close_vnodes(machine);
+	vmmfs_machine_wake_waiters(machine);
 	return (0);
 }
 
@@ -251,31 +280,15 @@ vmmfs_machine_is_dead(struct vmmfs_machine *machine)
 }
 
 static void
-vmmfs_machine_close_vnodes(struct vmmfs_machine *machine)
+vmmfs_machine_wake_waiters(struct vmmfs_machine *machine)
 {
 	struct vmmfs_pcislot *slot;
-	struct vmmfs_serialport *port;
 
-	/* Close children before their directory vnode can be reclaimed. */
+	vmmfs_events_revoke(&machine->events);
 	RB_FOREACH(slot, vmmfs_pcislot_tree, &machine->pciroot.slots) {
 		vmmfs_pcislot_config_revoke(&slot->config);
 		vmmfs_pcislot_events_revoke(&slot->events);
-		vmmfs_vnode_close(slot->descriptor.vnode);
-		vmmfs_vnode_close(slot->config.vnode);
-		vmmfs_vnode_close(slot->events.vnode);
-		vmmfs_vnode_close(slot->vnode);
 	}
-	RB_FOREACH(port, vmmfs_serialport_tree, &machine->serialroot.ports)
-		vmmfs_vnode_close(port->vnode);
-	vmmfs_vnode_close(machine->pciroot.vnode);
-	vmmfs_vnode_close(machine->serialroot.vnode);
-	vmmfs_vnode_close(machine->vcpu.vnode);
-	vmmfs_vnode_close(machine->memory.vnode);
-	vmmfs_vnode_close(machine->loader.vnode);
-	vmmfs_vnode_close(machine->stopped.vnode);
-	vmmfs_events_revoke(&machine->events);
-	vmmfs_vnode_close(machine->events.vnode);
-	vmmfs_vnode_close(machine->vnode);
 }
 
 int

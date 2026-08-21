@@ -69,15 +69,10 @@ vmmfs_stopped_create(struct vmmfs_machine *machine,
 int
 vmmfs_stopped_destroy(struct vmmfs_stopped *stopped)
 {
-	struct vnode *vnode;
-
 	if (stopped == NULL)
 		return (EINVAL);
-	vnode = stopped->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(stopped->vnode == NULL);
+	if (stopped->vnode != NULL)
+		return (EBUSY);
 	stopped->machine = NULL;
 	return (0);
 }

@@ -1021,7 +1021,7 @@ vmmfs_loader_fd_free(void *argument)
 	vnode = fd->vnode;
 	if (vnode != NULL) {
 		fd->vnode = NULL;
-		vmmfs_vnode_revoke(vnode);
+		vmmfs_vnode_discard(vnode);
 	}
 	if (fd->dev != NULL) {
 		fd->dev->si_drv1 = NULL;
@@ -1080,8 +1080,9 @@ vmmfs_loader_make_vnode(cdev_t dev, struct vnode **vnode_pointer)
 	vnode->v_type = VCHR;
 	error = v_associate_rdev(vnode, dev);
 	if (error != 0) {
-		vgone_vxlocked(vnode);
-		vx_put(vnode);
+		vx_downgrade(vnode);
+		vn_unlock(vnode);
+		vmmfs_vnode_discard(vnode);
 		*vnode_pointer = NULL;
 		return (error);
 	}
@@ -1290,16 +1291,10 @@ vmmfs_loader_create(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 int
 vmmfs_loader_destroy(struct vmmfs_loader *loader)
 {
-	struct vnode *vnode;
-
 	if (loader == NULL)
 		return (EINVAL);
-
-	vnode = loader->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(loader->vnode == NULL);
+	if (loader->vnode != NULL)
+		return (EBUSY);
 	loader->machine = NULL;
 	return (0);
 }

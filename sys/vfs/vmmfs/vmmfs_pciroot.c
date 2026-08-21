@@ -118,7 +118,6 @@ int
 vmmfs_pciroot_destroy(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
 	int error;
 
 	if (pciroot == NULL)
@@ -131,6 +130,8 @@ vmmfs_pciroot_destroy(struct vmmfs_pciroot *pciroot)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&pciroot->machine->token);
+	if (pciroot->vnode != NULL)
+		return (EBUSY);
 	for (;;) {
 		lwkt_gettoken(&pciroot->machine->token);
 		slot = RB_ROOT(&pciroot->slots);
@@ -147,11 +148,6 @@ vmmfs_pciroot_destroy(struct vmmfs_pciroot *pciroot)
 		lwkt_reltoken(&pciroot->machine->token);
 		return (error);
 	}
-	vnode = pciroot->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(pciroot->vnode == NULL);
 	pciroot->machine = NULL;
 	return (0);
 }

@@ -8,7 +8,6 @@
 #include <sys/module.h>
 #include <sys/mount.h>
 #include <sys/param.h>
-#include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/vnode.h>
 
@@ -59,27 +58,12 @@ static struct vfsops vmmfs_vfsops = {
 };
 
 void
-vmmfs_vnode_close(struct vnode *vnode)
+vmmfs_vnode_discard(struct vnode *vnode)
 {
 	if (vnode == NULL)
 		return;
 	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
-	(void)vrevoke(vnode, proc0.p_ucred);
 	vfinalize(vnode);
-	vrele(vnode);
-}
-
-void
-vmmfs_vnode_revoke(struct vnode *vnode)
-{
-	if (vnode == NULL)
-		return;
-	(void)vrevoke(vnode, proc0.p_ucred);
-	vx_get(vnode);
-	vgone_vxlocked(vnode);
-	if (vnode->v_mount == NULL)
-		insmntque(vnode, vfs_get_dummymount());
-	vx_put(vnode);
 	vrele(vnode);
 }
 

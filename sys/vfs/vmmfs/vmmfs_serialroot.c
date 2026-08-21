@@ -94,13 +94,14 @@ int
 vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_serialport *port;
-	struct vnode *vnode;
 	int error;
 
 	if (serialroot == NULL)
 		return (EINVAL);
 	if (serialroot->machine == NULL)
 		return (0);
+	if (serialroot->vnode != NULL)
+		return (EBUSY);
 	for (;;) {
 		lwkt_gettoken(&serialroot->machine->token);
 		port = RB_ROOT(&serialroot->ports);
@@ -117,11 +118,6 @@ vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
 		lwkt_reltoken(&serialroot->machine->token);
 		return (error);
 	}
-	vnode = serialroot->vnode;
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(serialroot->vnode == NULL);
 	serialroot->machine = NULL;
 	return (0);
 }

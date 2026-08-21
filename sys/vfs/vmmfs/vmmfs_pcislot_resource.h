@@ -15,6 +15,7 @@
 struct cdev;
 struct vm_object;
 struct vmspace;
+struct vmmfs_machine;
 struct vnode;
 struct vop_ops;
 struct vmm_cpuexit;
@@ -45,6 +46,7 @@ struct vmmfs_pcislot_resource_trap {
 
 struct vmmfs_pcislot_resource {
 	struct vmmfs_pcislot_resources *resources;
+	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
 	enum vmmfs_pcislot_resource_kind kind;

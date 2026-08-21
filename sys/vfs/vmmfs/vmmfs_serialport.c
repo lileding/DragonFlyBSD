@@ -224,23 +224,20 @@ int
 vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 {
 	struct tty *tty;
-	struct vnode *vnode;
 	cdev_t dev;
 
 	if (port == NULL)
 		return EINVAL;
 	lwkt_gettoken(&port->token);
-	if (port->machine != NULL || port->stopping || port->destroying) {
+	if (port->machine != NULL || port->stopping || port->destroying ||
+	    port->vnode != NULL) {
 		lwkt_reltoken(&port->token);
 		return EBUSY;
 	}
 	port->destroying = true;
 	dev = port->dev;
 	tty = port->tty;
-	vnode = port->vnode;
 	lwkt_reltoken(&port->token);
-	if (vnode != NULL)
-		(void)vrevoke(vnode, proc0.p_ucred);
 	lwkt_gettoken(&port->token);
 	while (port->opening_count != 0) {
 		tsleep_interlock(port, 0);
@@ -270,10 +267,6 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 		dev->si_tty = NULL;
 		destroy_dev(dev);
 	}
-	if (vnode != NULL) {
-		vmmfs_vnode_revoke(vnode);
-	}
-	KKASSERT(port->vnode == NULL);
 	port->tty = NULL;
 	port->dev = NULL;
 	port->serialroot = NULL;
