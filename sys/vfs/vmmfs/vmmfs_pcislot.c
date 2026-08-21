@@ -1070,9 +1070,12 @@ vmmfs_pcislot_type0_cap_write(struct vmmfs_pcislot *slot, uint16_t offset,
 			}
 		} else if (msix) {
 			resources = slot->descriptor.resources;
-			if (resources != NULL)
+			if (resources != NULL) {
+				vmmfs_pcislot_resources_trace_msix_control(resources,
+				    index);
 				return (vmmfs_pcislot_resources_msix_unmask(resources,
 				    index));
+			}
 		}
 		return (0);
 	}

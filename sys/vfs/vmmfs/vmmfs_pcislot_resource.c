@@ -543,6 +543,27 @@ vmmfs_pcislot_resources_msix_unmask(struct vmmfs_pcislot_resources *resources,
 	return (0);
 }
 
+void
+vmmfs_pcislot_resources_trace_msix_control(
+	struct vmmfs_pcislot_resources *resources, unsigned int capability)
+{
+	const struct vmmfs_pcislot_cap *cap;
+	uint16_t offset;
+	uint16_t control;
+
+	if (vmmfs_msix_trace == 0 || resources == NULL ||
+	    capability >= VMMFS_PCISLOT_MAX_CAPS)
+		return;
+	cap = &resources->slot->descriptor.value.caps[capability];
+	if (!cap->present || cap->kind != VMMFS_PCISLOT_CAP_MSIX)
+		return;
+	offset = resources->slot->type0.cap_offset[capability];
+	control = vmmfs_pcislot_resource_read16(resources->slot->type0.bytes,
+	    offset + 2);
+	kprintf("vmmfs: msix_config bdf=%04x cap=%u control=%04x\n",
+	    resources->slot->bdf, capability, control);
+}
+
 int
 vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *resources,
 	struct vmmfs_vcpu_thread *thread, const struct vmm_cpuexit *exit)
@@ -1263,7 +1284,7 @@ vmmfs_pcislot_resource_msix_trace(
 		return;
 	kprintf("vmmfs: msix bdf=%04x vector=%u control=%04x "
 	    "entry_control=%08x address=%016jx data=%08x pba=%016jx "
-	    "outcome=%s error=%d\\n", resource->resources->slot->bdf,
+	    "outcome=%s error=%d\n", resource->resources->slot->bdf,
 	    resource->vector, control, vector_control, (uintmax_t)address, data,
 	    (uintmax_t)pending, outcome, error);
 }

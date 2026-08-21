@@ -106,6 +106,8 @@ int vmmfs_pcislot_resources_rom_relocate(struct vmmfs_pcislot_resources *,
 	uint64_t);
 int vmmfs_pcislot_resources_msix_unmask(struct vmmfs_pcislot_resources *,
 	unsigned int);
+void vmmfs_pcislot_resources_trace_msix_control(
+	struct vmmfs_pcislot_resources *, unsigned int);
 int vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *,
 	struct vmmfs_vcpu_thread *, const struct vmm_cpuexit *);
 int vmmfs_pcislot_resources_io(struct vmmfs_pcislot_resources *,
