@@ -22,6 +22,7 @@ struct vmmfs_mount {
 	struct vmmfs_root *root;
 	struct vop_ops *root_vops;
 	struct vop_ops *machine_vops;
+	struct vop_ops *machine_id_vops;
 	struct vop_ops *vcpu_vops;
 	struct vop_ops *memory_vops;
 	struct vop_ops *loader_vops;

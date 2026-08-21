@@ -12,6 +12,7 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine_id.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_config.h"
@@ -177,6 +178,8 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	vfs_add_vnodeops(mount, &vmmfs_root_vops, &state->root_vops);
 	vfs_add_vnodeops(mount, &vmmfs_machine_vops,
 	    &state->machine_vops);
+	vfs_add_vnodeops(mount, &vmmfs_machine_id_vops,
+	    &state->machine_id_vops);
 	vfs_add_vnodeops(mount, &vmmfs_vcpu_vops, &state->vcpu_vops);
 	vfs_add_vnodeops(mount, &vmmfs_memory_vops, &state->memory_vops);
 	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
@@ -214,6 +217,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->root_vops);
 		vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
@@ -266,8 +270,9 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->root_vops);
 	mount->mnt_data = NULL;
 	kfree(state, M_VMMFS);

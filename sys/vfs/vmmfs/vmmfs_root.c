@@ -127,6 +127,7 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_machine *cursor;
+	int error;
 
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (ENAMETOOLONG);
@@ -138,9 +139,9 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 	lwkt_reltoken(&root->token);
 	if (cursor != NULL)
 		return (EEXIST);
-	machine = vmmfs_machine_create(root, name, namelen);
-	if (machine == NULL)
-		return (ENOMEM);
+	error = vmmfs_machine_create(root, name, namelen, &machine);
+	if (error != 0)
+		return (error);
 	lwkt_gettoken(&root->token);
 	RB_FOREACH(cursor, vmmfs_machine_tree, &root->machines) {
 		if (strcmp(cursor->name, machine->name) == 0)

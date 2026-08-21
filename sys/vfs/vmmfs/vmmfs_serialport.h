@@ -7,7 +7,6 @@
 #define VMMFS_SERIALPORT_H
 
 #include <sys/queue.h>
-#include <sys/taskqueue.h>
 #include <sys/thread.h>
 #include <sys/tree.h>
 #include <sys/types.h>
@@ -34,8 +33,7 @@ struct vmmfs_serialport {
 	uint32_t gsi;
 	struct cdev *dev;
 	struct tty *tty;
-	struct taskqueue *taskqueue;
-	struct task task;
+	struct thread *thread;
 	struct lwkt_token token;
 	vmm_machine_t machine;
 	vmm_io_t read_io;
@@ -44,6 +42,7 @@ struct vmmfs_serialport {
 	unsigned int opening_count;
 	bool stopping;
 	bool destroying;
+	bool thread_exited;
 	uint8_t dll;
 	uint8_t dlm;
 	uint8_t ier;

@@ -15,6 +15,7 @@
 
 #include "vmmfs_events.h"
 #include "vmmfs_loader.h"
+#include "vmmfs_machine_id.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_platform_x64.h"
@@ -41,6 +42,8 @@ struct vmmfs_machine {
 	struct vnode *vnode;
 	ino_t inode;
 	char name[NAME_MAX + 1];
+	uint32_t id;
+	struct vmmfs_machine_id id_node;
 	struct lwkt_token token;
 	unsigned int references;
 	bool dead;
@@ -65,8 +68,8 @@ RB_PROTOTYPE(vmmfs_machine_tree, vmmfs_machine, entry,
 extern struct vop_ops vmmfs_machine_vops;
 
 int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
-struct vmmfs_machine *vmmfs_machine_create(struct vmmfs_root *,
-	const char *, size_t);
+int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
+	struct vmmfs_machine **);
 void vmmfs_machine_abort_create(struct vmmfs_machine *);
 int vmmfs_machine_destroy(struct vmmfs_machine *);
 void vmmfs_machine_free(struct vmmfs_machine *);

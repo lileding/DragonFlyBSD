@@ -154,6 +154,7 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	const struct vmm_cpustate *bsp_state)
 {
 	struct vmmfs_vcpu_thread *thread;
+	char thread_name[sizeof("vmm999999-vcpu99")];
 	uint32_t count;
 	uint32_t index;
 	int error;
@@ -162,8 +163,8 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	    vcpu->threads != NULL)
 		return (EINVAL);
 	count = vcpu->machine->spec.vcpu.count;
-	if (count == 0)
-		return (EINVAL);
+	if (count == 0 || count > VMMFS_MACHINE_INDEX_MAX + 1)
+		return (ERANGE);
 	thread = kmalloc(sizeof(*thread) * count, M_VMMFS, M_WAITOK | M_ZERO);
 	vcpu->threads = thread;
 	vcpu->runtime_machine = machine;
@@ -177,9 +178,14 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 		thread = &vcpu->threads[index];
 		thread->group = vcpu;
 		thread->index = index;
+		error = ksnprintf(thread_name, sizeof(thread_name),
+		    "vmm%6u-vcpu%02u", vcpu->machine->id, index);
+		if (error < 0 || (size_t)error >= sizeof(thread_name)) {
+			error = EOVERFLOW;
+			goto failed;
+		}
 		error = lwkt_create(vmmfs_vcpu_thread_main, thread,
-		    &thread->thread, NULL, TDF_NOSTART, -1, "vmmfs-vcpu%u",
-		    index);
+		    &thread->thread, NULL, TDF_NOSTART, -1, "%s", thread_name);
 		if (error != 0)
 			goto failed;
 	}

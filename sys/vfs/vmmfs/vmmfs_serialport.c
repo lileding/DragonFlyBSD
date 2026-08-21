@@ -14,7 +14,6 @@
 #include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
-#include <sys/taskqueue.h>
 #include <sys/tty.h>
 #include <sys/ttydefaults.h>
 #include <sys/uio.h>
@@ -77,7 +76,7 @@ static int vmmfs_serialport_inactive(struct vop_inactive_args *);
 static int vmmfs_serialport_reclaim(struct vop_reclaim_args *);
 static int vmmfs_serialport_tty_param(struct tty *, struct termios *);
 static void vmmfs_serialport_tty_start(struct tty *);
-static void vmmfs_serialport_task(void *, int);
+static void vmmfs_serialport_thread_main(void *);
 static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
     struct vmm_io_read *);
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
@@ -166,15 +165,6 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
 	lwkt_token_init(&port->token, "vmmfsserial");
 	port->output = kmalloc(VMMFS_SERIALPORT_OUTPUT_SIZE, M_TTYS,
 	    M_WAITOK | M_ZERO);
-	port->taskqueue = taskqueue_create("vmmfs_serial", M_WAITOK,
-	    taskqueue_thread_enqueue, &port->taskqueue);
-	if (port->taskqueue == NULL) {
-		error = ENOMEM;
-		goto fail_output;
-	}
-	TASK_INIT(&port->task, 0, vmmfs_serialport_task, port);
-	taskqueue_start_threads(&port->taskqueue, 1, TDPRI_KERN_DAEMON, -1,
-	    "vmmfs serial");
 	tty = kmalloc(sizeof(*tty), M_TTYS, M_WAITOK | M_ZERO);
 	ttyinit(tty);
 	ttyregister(tty);
@@ -214,8 +204,6 @@ fail_dev:
 fail_tty:
 	ttyunregister(tty);
 	kfree(tty, M_TTYS);
-	taskqueue_free(port->taskqueue);
-fail_output:
 	kfree(port->output, M_TTYS);
 	lwkt_token_uninit(&port->token);
 	kfree(port, M_VMMFS);
@@ -231,7 +219,8 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 	if (port == NULL)
 		return EINVAL;
 	lwkt_gettoken(&port->token);
-	if (port->machine != NULL || port->stopping || port->vnode != NULL) {
+	if (port->machine != NULL || port->stopping || port->thread != NULL ||
+	    port->vnode != NULL) {
 		lwkt_reltoken(&port->token);
 		return EBUSY;
 	}
@@ -249,11 +238,6 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 		}
 	}
 	lwkt_reltoken(&port->token);
-	if (port->taskqueue != NULL) {
-		taskqueue_drain(port->taskqueue, &port->task);
-		taskqueue_free(port->taskqueue);
-		port->taskqueue = NULL;
-	}
 	if (tty != NULL) {
 		lwkt_gettoken(&tty->t_token);
 		if (tty->t_state & TS_ISOPEN) {
@@ -280,10 +264,16 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 int
 vmmfs_serialport_start(struct vmmfs_serialport *port, vmm_machine_t machine)
 {
+	struct thread *thread;
+	char thread_name[sizeof("vmm999999-com4")];
 	int error;
 
 	if (port == NULL || machine == NULL)
 		return EINVAL;
+	error = ksnprintf(thread_name, sizeof(thread_name), "vmm%6u-com%u",
+	    port->serialroot->machine->id, port->number);
+	if (error < 0 || (size_t)error >= sizeof(thread_name))
+		return EOVERFLOW;
 	lwkt_gettoken(&port->token);
 	if (port->machine != NULL || port->stopping || port->destroying) {
 		lwkt_reltoken(&port->token);
@@ -303,9 +293,27 @@ vmmfs_serialport_start(struct vmmfs_serialport *port, vmm_machine_t machine)
 	}
 	lwkt_gettoken(&port->token);
 	port->machine = machine;
+	port->thread_exited = false;
 	lwkt_reltoken(&port->token);
-	vmmfs_serialport_schedule(port);
+	error = lwkt_create(vmmfs_serialport_thread_main, port, &thread,
+	    NULL, TDF_NOSTART, -1, "%s", thread_name);
+	if (error != 0)
+		goto fail_machine;
+	lwkt_gettoken(&port->token);
+	port->thread = thread;
+	lwkt_reltoken(&port->token);
+	lwkt_schedule(thread);
 	return 0;
+
+fail_machine:
+	lwkt_gettoken(&port->token);
+	port->machine = NULL;
+	lwkt_reltoken(&port->token);
+	(void)vmm_machine_untrap(machine, port->read_io);
+	(void)vmm_machine_untrap(machine, port->write_io);
+	port->read_io = NULL;
+	port->write_io = NULL;
+	return error;
 }
 
 int
@@ -314,6 +322,7 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
 	vmm_machine_t machine;
 	vmm_io_t read_io;
 	vmm_io_t write_io;
+	struct thread *thread;
 
 	if (port == NULL)
 		return EINVAL;
@@ -325,8 +334,15 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
 	port->stopping = true;
 	machine = port->machine;
 	lwkt_reltoken(&port->token);
-	taskqueue_drain(port->taskqueue, &port->task);
+	wakeup(port);
 	lwkt_gettoken(&port->token);
+	while (!port->thread_exited) {
+		tsleep_interlock(port, 0);
+		if (!port->thread_exited)
+			(void)tsleep(port, PINTERLOCKED, "vmmcomstop", 0);
+	}
+	thread = port->thread;
+	port->thread = NULL;
 	read_io = port->read_io;
 	write_io = port->write_io;
 	port->read_io = NULL;
@@ -335,6 +351,8 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
 	port->irq_asserted = false;
 	port->stopping = false;
 	lwkt_reltoken(&port->token);
+	if (thread != NULL)
+		lwkt_free_thread(thread);
 	(void)vmm_machine_set_irq(machine, port->gsi, false);
 	if (read_io != NULL)
 		(void)vmm_machine_untrap(machine, read_io);
@@ -635,29 +653,56 @@ vmmfs_serialport_tty_start(struct tty *tty)
 }
 
 static void
-vmmfs_serialport_task(void *argument, int pending)
+vmmfs_serialport_thread_main(void *argument)
 {
 	struct vmmfs_serialport *port;
 	vmm_machine_t machine;
 	bool asserted;
+	bool drain_output;
+	bool update_irq;
 
-	(void)pending;
 	port = argument;
-	vmmfs_serialport_drain_output(port);
-	lwkt_gettoken(&port->token);
-	if (port->stopping || port->destroying || port->machine == NULL) {
+	for (;;) {
+		lwkt_gettoken(&port->token);
+		if (port->stopping || port->destroying) {
+			port->thread_exited = true;
+			wakeup(port);
+			lwkt_reltoken(&port->token);
+			return;
+		}
+		machine = port->machine;
+		drain_output = atomic_load_acq_int(&port->open) != 0 &&
+		    port->output_length != 0;
+		update_irq = false;
+		if (!port->stopping && machine != NULL) {
+			asserted = vmmfs_serialport_irq_pending_locked(port);
+			if (port->irq_asserted != asserted) {
+				port->irq_asserted = asserted;
+				update_irq = true;
+			}
+		}
+		if (!drain_output && !update_irq) {
+			tsleep_interlock(port, 0);
+			if (port->stopping || port->destroying ||
+			    (atomic_load_acq_int(&port->open) != 0 &&
+			    port->output_length != 0) ||
+			    (!port->stopping && port->machine != NULL &&
+			    port->irq_asserted !=
+			    vmmfs_serialport_irq_pending_locked(port))) {
+				lwkt_reltoken(&port->token);
+				continue;
+			}
+			lwkt_reltoken(&port->token);
+			(void)tsleep(port, PINTERLOCKED, "vmmfscom", 0);
+			continue;
+		}
 		lwkt_reltoken(&port->token);
-		return;
+		if (drain_output)
+			vmmfs_serialport_drain_output(port);
+		if (update_irq) {
+			(void)vmm_machine_set_irq(machine, port->gsi, asserted);
+		}
 	}
-	machine = port->machine;
-	asserted = vmmfs_serialport_irq_pending_locked(port);
-	if (port->irq_asserted == asserted) {
-		lwkt_reltoken(&port->token);
-		return;
-	}
-	port->irq_asserted = asserted;
-	lwkt_reltoken(&port->token);
-	(void)vmm_machine_set_irq(machine, port->gsi, asserted);
 }
 
 static int
@@ -864,14 +909,7 @@ vmmfs_serialport_associate(struct vmmfs_serialport *port,
 static void
 vmmfs_serialport_schedule(struct vmmfs_serialport *port)
 {
-	struct taskqueue *taskqueue;
-
-	lwkt_gettoken(&port->token);
-	taskqueue = !port->stopping && !port->destroying && port->machine != NULL ?
-	    port->taskqueue : NULL;
-	lwkt_reltoken(&port->token);
-	if (taskqueue != NULL)
-		(void)taskqueue_enqueue(taskqueue, &port->task);
+	wakeup(port);
 }
 
 static size_t

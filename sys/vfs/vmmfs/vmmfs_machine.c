@@ -66,17 +66,19 @@ vmmfs_machine_compare(struct vmmfs_machine *left,
 
 RB_GENERATE(vmmfs_machine_tree, vmmfs_machine, entry, vmmfs_machine_compare);
 
-struct vmmfs_machine *
+int
 vmmfs_machine_create(struct vmmfs_root *root, const char *name,
-	size_t namelen)
+	size_t namelen, struct vmmfs_machine **machinep)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
 	int error;
 
-	if (namelen == 0 || namelen > NAME_MAX)
-		return (NULL);
+	if (root == NULL || name == NULL || machinep == NULL || namelen == 0 ||
+	    namelen > NAME_MAX)
+		return (EINVAL);
+	*machinep = NULL;
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
 	machine->root = root;
 	machine->references = 1;
@@ -85,9 +87,12 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = '\0';
 	lwkt_token_init(&machine->token, "vmmfsmachine");
-	error = vmmfs_vcpu_create(machine, &machine->vcpu);
+	error = vmmfs_machine_id_create(machine, &machine->id_node);
 	if (error != 0)
 		goto fail_token;
+	error = vmmfs_vcpu_create(machine, &machine->vcpu);
+	if (error != 0)
+		goto fail_id;
 	error = vmmfs_memory_create(machine, &machine->memory);
 	if (error != 0)
 		goto fail_vcpu;
@@ -124,7 +129,8 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	vx_downgrade(vnode);
 	vmmfs_events_log(&machine->events, "machine created");
 	vmmfs_events_log(&machine->events, "state stopped reason=create");
-	return (machine);
+	*machinep = machine;
+	return (0);
 
 fail_events:
 	vmmfs_vnode_discard(machine->events.vnode);
@@ -151,10 +157,13 @@ fail_memory:
 fail_vcpu:
 	vmmfs_vnode_discard(machine->vcpu.vnode);
 	(void)vmmfs_vcpu_destroy(&machine->vcpu);
+fail_id:
+	vmmfs_vnode_discard(machine->id_node.vnode);
+	(void)vmmfs_machine_id_destroy(&machine->id_node);
 fail_token:
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
-	return (NULL);
+	return (error);
 }
 
 void
@@ -171,6 +180,7 @@ vmmfs_machine_abort_create(struct vmmfs_machine *machine)
 	vmmfs_vnode_discard(machine->loader.vnode);
 	vmmfs_vnode_discard(machine->memory.vnode);
 	vmmfs_vnode_discard(machine->vcpu.vnode);
+	vmmfs_vnode_discard(machine->id_node.vnode);
 	vnode = machine->vnode;
 	if (vnode != NULL) {
 		vx_downgrade(vnode);
@@ -206,6 +216,7 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	vmmfs_vnode_discard(machine->loader.vnode);
 	vmmfs_vnode_discard(machine->memory.vnode);
 	vmmfs_vnode_discard(machine->vcpu.vnode);
+	vmmfs_vnode_discard(machine->id_node.vnode);
 	vmmfs_vnode_discard(machine->vnode);
 	return (0);
 }
@@ -221,6 +232,7 @@ vmmfs_machine_free(struct vmmfs_machine *machine)
 	KKASSERT(machine->dead);
 	KKASSERT(machine->references == 0);
 	KKASSERT(machine->vnode == NULL);
+	KKASSERT(machine->id_node.vnode == NULL);
 	KKASSERT(machine->vcpu.vnode == NULL);
 	KKASSERT(machine->memory.vnode == NULL);
 	KKASSERT(machine->loader.vnode == NULL);
@@ -247,6 +259,8 @@ vmmfs_machine_free(struct vmmfs_machine *machine)
 	error = vmmfs_pciroot_destroy(&machine->pciroot);
 	KKASSERT(error == 0);
 	error = vmmfs_events_destroy(&machine->events);
+	KKASSERT(error == 0);
+	error = vmmfs_machine_id_destroy(&machine->id_node);
 	KKASSERT(error == 0);
 	machine->root = NULL;
 	lwkt_token_uninit(&machine->token);
@@ -523,7 +537,10 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
 	}
-	if (ncp->nc_nlen == sizeof("vcpu") - 1 &&
+	if (ncp->nc_nlen == sizeof("id") - 1 &&
+	    bcmp(ncp->nc_name, "id", sizeof("id") - 1) == 0)
+		vnode = machine->id_node.vnode;
+	else if (ncp->nc_nlen == sizeof("vcpu") - 1 &&
 	    bcmp(ncp->nc_name, "vcpu", sizeof("vcpu") - 1) == 0)
 		vnode = machine->vcpu.vnode;
 	else if (ncp->nc_nlen == sizeof("mem") - 1 &&
@@ -653,30 +670,36 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 2;
 	}
 	if (!stop && offset == 2) {
-		stop = vop_write_dirent(&error, uio, machine->vcpu.inode,
-		    DT_REG, sizeof("vcpu") - 1, "vcpu");
+		stop = vop_write_dirent(&error, uio, machine->id_node.inode,
+		    DT_REG, sizeof("id") - 1, "id");
 		if (!stop)
 			offset = 3;
 	}
 	if (!stop && offset == 3) {
-		stop = vop_write_dirent(&error, uio, machine->memory.inode,
-		    DT_REG, sizeof("mem") - 1, "mem");
+		stop = vop_write_dirent(&error, uio, machine->vcpu.inode,
+		    DT_REG, sizeof("vcpu") - 1, "vcpu");
 		if (!stop)
 			offset = 4;
 	}
 	if (!stop && offset == 4) {
-		stop = vop_write_dirent(&error, uio, machine->loader.inode,
-		    DT_REG, sizeof("loader") - 1, "loader");
+		stop = vop_write_dirent(&error, uio, machine->memory.inode,
+		    DT_REG, sizeof("mem") - 1, "mem");
 		if (!stop)
 			offset = 5;
 	}
 	if (!stop && offset == 5) {
-		stop = vop_write_dirent(&error, uio, machine->events.inode,
-		    DT_REG, sizeof("events") - 1, "events");
+		stop = vop_write_dirent(&error, uio, machine->loader.inode,
+		    DT_REG, sizeof("loader") - 1, "loader");
 		if (!stop)
 			offset = 6;
 	}
 	if (!stop && offset == 6) {
+		stop = vop_write_dirent(&error, uio, machine->events.inode,
+		    DT_REG, sizeof("events") - 1, "events");
+		if (!stop)
+			offset = 7;
+	}
+	if (!stop && offset == 7) {
 		lwkt_gettoken(&machine->token);
 		present = machine->stopped.expect_stopped;
 		inode = machine->stopped.inode;
@@ -686,25 +709,25 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			    sizeof("stopped") - 1, "stopped");
 		}
 		if (!stop)
-			offset = 7;
+			offset = 8;
 	}
-	if (!stop && offset == 7) {
+	if (!stop && offset == 8) {
 		lwkt_gettoken(&machine->token);
 		inode = machine->pciroot.inode;
 		lwkt_reltoken(&machine->token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("pci") - 1, "pci");
 		if (!stop)
-			offset = 8;
+			offset = 9;
 	}
-	if (!stop && offset == 8) {
+	if (!stop && offset == 9) {
 		lwkt_gettoken(&machine->token);
 		inode = machine->serialroot.inode;
 		lwkt_reltoken(&machine->token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("serial") - 1, "serial");
 		if (!stop)
-			offset = 9;
+			offset = 10;
 	}
 	uio->uio_offset = offset;
 	if (ap->a_eofflag != NULL)
