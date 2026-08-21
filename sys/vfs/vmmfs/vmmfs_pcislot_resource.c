@@ -289,8 +289,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	return (0);
 
 fail:
-	for (index = 0; index < resources->count; ++index)
-		vmmfs_vnode_discard(resources->items[index].vnode);
 	(void)vmmfs_pcislot_resources_destroy(resources);
 	return (error);
 }
@@ -310,6 +308,8 @@ vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 		resource = &resources->items[index];
 		vmmfs_pcislot_resource_revoke(resource);
 	}
+	for (index = 0; index < resources->count; ++index)
+		vmmfs_vnode_discard(resources->items[index].vnode);
 	if (resources->slot != NULL) {
 		vmmfs_pcislot_events_log(&resources->slot->events,
 		    "POWER_OFF generation=%ju",

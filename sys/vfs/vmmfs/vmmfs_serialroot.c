@@ -122,6 +122,18 @@ vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
 	return (0);
 }
 
+void
+vmmfs_serialroot_release_vnodes(struct vmmfs_serialroot *serialroot)
+{
+	struct vmmfs_serialport *port;
+
+	if (serialroot == NULL)
+		return;
+	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
+		vmmfs_vnode_discard(port->vnode);
+	vmmfs_vnode_discard(serialroot->vnode);
+}
+
 int
 vmmfs_serialroot_start(struct vmmfs_serialroot *serialroot,
 	vmm_machine_t machine)
@@ -228,7 +240,7 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		return (error);
 	}
 	lwkt_gettoken(&serialroot->machine->token);
-	if (serialroot->machine->root == NULL) {
+	if (serialroot->machine->root == NULL || serialroot->machine->dead) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,

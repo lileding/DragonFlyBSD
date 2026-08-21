@@ -197,6 +197,14 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	}
 	lwkt_reltoken(&machine->token);
 	vmmfs_machine_wake_waiters(machine);
+	vmmfs_pciroot_release_vnodes(&machine->pciroot);
+	vmmfs_serialroot_release_vnodes(&machine->serialroot);
+	vmmfs_vnode_discard(machine->events.vnode);
+	vmmfs_vnode_discard(machine->stopped.vnode);
+	vmmfs_vnode_discard(machine->loader.vnode);
+	vmmfs_vnode_discard(machine->memory.vnode);
+	vmmfs_vnode_discard(machine->vcpu.vnode);
+	vmmfs_vnode_discard(machine->vnode);
 	return (0);
 }
 

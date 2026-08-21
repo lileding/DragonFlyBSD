@@ -152,6 +152,18 @@ vmmfs_pciroot_destroy(struct vmmfs_pciroot *pciroot)
 	return (0);
 }
 
+void
+vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *pciroot)
+{
+	struct vmmfs_pcislot *slot;
+
+	if (pciroot == NULL)
+		return;
+	RB_FOREACH(slot, vmmfs_pcislot_tree, &pciroot->slots)
+		vmmfs_pcislot_release_vnodes(slot);
+	vmmfs_vnode_discard(pciroot->vnode);
+}
+
 int
 vmmfs_pciroot_start(struct vmmfs_pciroot *pciroot, vmm_machine_t machine)
 {
@@ -565,7 +577,7 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 	if (error != 0)
 		return (error);
 	lwkt_gettoken(&pciroot->machine->token);
-	if (pciroot->machine->root == NULL) {
+	if (pciroot->machine->root == NULL || pciroot->machine->dead) {
 		lwkt_reltoken(&pciroot->machine->token);
 		(void)vmmfs_pcislot_destroy(slot);
 		return (ENOENT);

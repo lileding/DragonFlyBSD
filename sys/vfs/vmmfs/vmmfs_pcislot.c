@@ -161,6 +161,17 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 	return (0);
 }
 
+void
+vmmfs_pcislot_release_vnodes(struct vmmfs_pcislot *slot)
+{
+	if (slot == NULL)
+		return;
+	vmmfs_vnode_discard(slot->descriptor.vnode);
+	vmmfs_vnode_discard(slot->config.vnode);
+	vmmfs_vnode_discard(slot->events.vnode);
+	vmmfs_vnode_discard(slot->vnode);
+}
+
 int
 vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
 {
@@ -439,7 +450,8 @@ vmmfs_pcislot_ncreate(struct vop_ncreate_args *ap)
 	    (ap->a_vap->va_vaflags & VA_EXCLUSIVE) == 0)
 		return (EINVAL);
 	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (!slot->pciroot->machine->stopped.expect_stopped ||
+	if (slot->pciroot->machine->dead ||
+	    !slot->pciroot->machine->stopped.expect_stopped ||
 	    slot->pciroot->machine->machine != NULL) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
