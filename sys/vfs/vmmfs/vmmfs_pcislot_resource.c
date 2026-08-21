@@ -744,8 +744,15 @@ vmmfs_pcislot_resource_create_vnode(struct vmmfs_pcislot_resource *resource,
 	struct vnode *vnode;
 	int error;
 
-	error = getnewvnode(VT_SYNTH, resource->resources->slot->pciroot->machine->root->mount,
-	    &vnode, 0, 0);
+	if (vmmfs_pcislot_resource_mappable(resource)) {
+		error = getspecialvnode(VT_SYNTH,
+		    resource->resources->slot->pciroot->machine->root->mount,
+		    &mount->pcislot_resource_vops, &vnode, 0, 0);
+	} else {
+		error = getnewvnode(VT_SYNTH,
+		    resource->resources->slot->pciroot->machine->root->mount,
+		    &vnode, 0, 0);
+	}
 	if (error != 0)
 		return (error);
 	vnode->v_data = resource;
@@ -1261,6 +1268,7 @@ vmmfs_pcislot_resource_getattr(struct vop_getattr_args *ap)
 	vattr->va_size = vmmfs_pcislot_resource_mappable(resource) ?
 	    resource->size : 0;
 	vattr->va_blocksize = PAGE_SIZE;
+	vattr->va_flags = 0;
 	vattr->va_bytes = vattr->va_size;
 	return (0);
 }

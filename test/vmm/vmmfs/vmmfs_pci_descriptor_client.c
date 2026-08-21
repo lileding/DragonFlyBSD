@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <sys/vmmfs_pci.h>
@@ -18,6 +19,7 @@ static int write_all(int, const char *, size_t);
 static int commit_descriptor(const char *, int);
 static int register_config_readiness(int, int);
 static int wait_config_readiness(int, int16_t);
+static int map_bar(const char *);
 
 int
 main(int argc, char **argv)
@@ -30,8 +32,8 @@ main(int argc, char **argv)
 	int queue_fd;
 	ssize_t result;
 
-	if (argc != 3 && argc != 5) {
-		fprintf(stderr, "usage: %s create|replace <descriptor> | hold <descriptor> <kick> <config>\n",
+	if (argc != 3 && argc != 6) {
+		fprintf(stderr, "usage: %s create|replace <descriptor> | hold <descriptor> <kick> <config> <bar>\n",
 		    argv[0]);
 		return (2);
 	}
@@ -39,7 +41,7 @@ main(int argc, char **argv)
 		return (commit_descriptor(argv[2], O_CREAT | O_EXCL));
 	if (argc == 3 && strcmp(argv[1], "replace") == 0)
 		return (commit_descriptor(argv[2], 0));
-	if (argc != 5 || strcmp(argv[1], "hold") != 0)
+	if (argc != 6 || strcmp(argv[1], "hold") != 0)
 		return (2);
 	if (commit_descriptor(argv[2], 0) != 0)
 		return (1);
@@ -80,6 +82,15 @@ main(int argc, char **argv)
 		close(kick_fd);
 		return (1);
 	}
+	if (map_bar(argv[5]) != 0) {
+		perror("map bar");
+		close(queue_fd);
+		close(config_fd);
+		close(kick_fd);
+		return (1);
+	}
+	if (puts("mapped") == EOF || fflush(stdout) != 0)
+		return (1);
 	result = read(kick_fd, &kick, sizeof(kick));
 	if (result != sizeof(kick)) {
 		fprintf(stderr, "kick read failed: %zd\n", result);
@@ -217,6 +228,31 @@ wait_config_readiness(int queue_fd, int16_t filter)
 		if (result.filter == filter)
 			return (0);
 	}
+}
+
+static int
+map_bar(const char *path)
+{
+	volatile uint8_t *mapping;
+	long page_size;
+	int fd;
+
+	fd = open(path, O_RDWR);
+	if (fd < 0)
+		return (-1);
+	page_size = getpagesize();
+	mapping = mmap(NULL, (size_t)page_size, PROT_READ | PROT_WRITE,
+	    MAP_SHARED, fd, 0);
+	if (mapping == MAP_FAILED) {
+		close(fd);
+		return (-1);
+	}
+	(void)mapping[0];
+	if (munmap((void *)mapping, (size_t)page_size) != 0) {
+		close(fd);
+		return (-1);
+	}
+	return (close(fd));
 }
 
 static int

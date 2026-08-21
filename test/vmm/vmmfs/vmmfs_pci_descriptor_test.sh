@@ -98,11 +98,12 @@ if "$CLIENT" replace "$SLOT/descriptor" <"$BAD" 2>/dev/null; then
 	exit 1
 fi
 cmp "$BASE" "$SLOT/descriptor"
-"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" "$SLOT/config" <"$BASE" >"$LOG" 2>&1 &
+"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" "$SLOT/config" "$SLOT/bar0" <"$BASE" >"$LOG" 2>&1 &
 CLIENT_PID=$!
 wait_for committed
 rm "$MOUNT/$MACHINE/stopped"
 wait_for ready
+wait_for mapped
 wait_for kick
 wait_for config
 if sh -c 'exec 3<"$1"' sh "$SLOT/kick0" 2>/dev/null; then
