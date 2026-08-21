@@ -185,6 +185,13 @@ static struct filterops *sysfilt_ops[] = {
 	&fs_filtops,			/* EVFILT_FS */
 };
 
+struct filterops *
+filter_fops(int filter)
+{
+	if (filter < 0 && ~filter < EVFILT_SYSCOUNT)
+		return (sysfilt_ops[~filter]);
+	return (NULL);
+}
 static struct knote_cache_list	knote_cache_lists[MAXCPU];
 
 /*

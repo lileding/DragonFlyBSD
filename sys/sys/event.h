@@ -261,6 +261,7 @@ struct	knote *knote_alloc(void);
 void	knote_attach(struct knote *);
 int	knote_acquire(struct knote *);
 int	filter_attach(struct knote *);
+struct	filterops *filter_fops(int filter);
 void	knote_detach_and_drop(struct knote *);
 void	knote_remove(struct klist *, struct knote *);
 void	knote_assume_knotes(struct kqinfo *, struct kqinfo *,

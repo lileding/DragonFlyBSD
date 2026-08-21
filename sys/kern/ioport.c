@@ -105,6 +105,12 @@ static struct filterops ioport_kevent_filtops =
 	{ FILTEROP_ISFD | FILTEROP_MPSAFE, ioport_kevent_attach,
 	  ioport_kevent_detach, ioport_kevent_event };
 
+/* Non-fd variant: knote_attach() must not use the FILTEROP_ISFD f_klist path
+ * when kn_fp is NULL (proc/signal filters live on the process klist). */
+static struct filterops ioport_kevent_nofd_filtops =
+	{ FILTEROP_MPSAFE, ioport_kevent_attach,
+	  ioport_kevent_detach, ioport_kevent_event };
+
 static struct io_frame *io_frame_pop(struct io_req *req);
 static void io_task_handler(void *context, int pending);
 static void ioport_post(struct io_req *req);
@@ -695,17 +701,29 @@ static int
 ioport_kevent_attach(struct knote *kn)
 {
 	struct ioport_kevent_ctx *ctx = kn->kn_kevent.udata;
-	struct file *fp = kn->kn_fp;
 	int error;
 
-	/* Delegate to the target fo_kqfilter(): sets the real filterops,
-	 * kn_hook, and inserts into the target's klist. */
-	error = fo_kqfilter(fp, kn);
-	if (error)
-		return (error);
-
-	ctx->ik_fop = kn->kn_fop;	/* save the real filterops */
-	kn->kn_fop = &ioport_kevent_filtops;
+	if (kn->kn_fp != NULL) {
+		/* fd-based filter: delegate to the target's fo_kqfilter(),
+		 * which sets the real filterops and inserts into the target's
+		 * klist. */
+		error = fo_kqfilter(kn->kn_fp, kn);
+		if (error)
+			return (error);
+		ctx->ik_fop = kn->kn_fop;	/* save the real filterops */
+		kn->kn_fop = &ioport_kevent_filtops;	/* keep FILTEROP_ISFD */
+	} else {
+		/* non-fd filter: attach the real filterops directly (e.g.
+		 * proc/signal filters insert into the process klist). */
+		ctx->ik_fop = filter_fops(kn->kn_kevent.filter);
+		if (ctx->ik_fop == NULL)
+			return (EINVAL);
+		kn->kn_fop = ctx->ik_fop;
+		error = filter_attach(kn);
+		if (error)
+			return (error);
+		kn->kn_fop = &ioport_kevent_nofd_filtops;	/* no FILTEROP_ISFD */
+	}
 	return (0);
 }
 
@@ -740,20 +758,34 @@ static int
 ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 {
 	struct thread *td = curthread;
-	struct file *fp;
+	struct file *fp = NULL;
 	struct knote *kn;
 	struct io_req *req;
 	struct ioport_kevent_ctx *ctx;
+	int filter = sub->args.kevent.filter;
 	int error;
 
-	/* Phase 5 supports fd-based filters (EVFILT_READ/WRITE). */
-	if (sub->args.kevent.filter != EVFILT_READ &&
-	    sub->args.kevent.filter != EVFILT_WRITE)
+	switch (filter) {
+	case EVFILT_READ:
+	case EVFILT_WRITE:
+	case EVFILT_VNODE:
+		/* fd-identified filters. */
+		fp = holdfp(td, (int)sub->args.kevent.ident, -1);
+		if (fp == NULL)
+			return (EBADF);
+		break;
+	case EVFILT_PROC:
+	case EVFILT_SIGNAL:
+		/* non-fd filters: ident is a pid (PROC) or a signal
+		 * number (SIGNAL). */
+		break;
+	default:
+		/* EVFILT_TIMER / EVFILT_USER are activated via
+		 * KNOTE_ACTIVATE rather than the filter f_event, so this
+		 * wrapper cannot drive the io_req completion; reject them
+		 * honestly. */
 		return (EOPNOTSUPP);
-
-	fp = holdfp(td, (int)sub->args.kevent.ident, -1);
-	if (fp == NULL)
-		return (EBADF);
+	}
 
 	req = kmalloc(sizeof(*req), M_IOPORT, M_WAITOK | M_ZERO);
 	ctx = kmalloc(sizeof(*ctx), M_IOPORT, M_WAITOK | M_ZERO);
@@ -788,7 +820,8 @@ ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 	kn->kn_sfflags = sub->args.kevent.fflags;
 	kn->kn_sdata = sub->args.kevent.data;
 	kn->kn_status = KN_PROCESSING;
-	kn->kn_fop = &ioport_kevent_filtops;
+	kn->kn_fop = (fp != NULL) ? &ioport_kevent_filtops :
+				   &ioport_kevent_nofd_filtops;
 
 	knote_attach(kn);
 	error = filter_attach(kn);
