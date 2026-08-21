@@ -50,6 +50,7 @@
 #include <sys/nlookup.h>
 #include <sys/vnode.h>
 #include <sys/buf.h>
+#include <sys/buf2.h>
 #include <sys/filio.h>
 #include <sys/ttycom.h>
 #include <sys/conf.h>
@@ -744,6 +745,7 @@ struct vn_async_read_ctx {
 
 static void vn_async_read_complete(struct bio *bio);
 static void vn_async_read_finish(struct vn_async_read_ctx *ctx);
+static int  vn_async_write(struct io_req *req, struct vnode *vp);
 
 static int
 vn_async_read(struct io_req *req, struct vnode *vp)
@@ -883,10 +885,121 @@ vn_async_read_finish(struct vn_async_read_ctx *ctx)
 }
 
 /*
+ * Asynchronous buffered write through the page cache.  Copies the request's
+ * already-copyin'd kernel buffer into the buffer cache block by block and
+ * marks each block delayed-write (write-behind).  The request completes once
+ * every block is dirtied, matching buffered write(2): success means the data
+ * has been accepted into the page cache, not that it has reached disk.
+ */
+static int
+vn_async_write(struct io_req *req, struct vnode *vp)
+{
+	struct vattr vap;
+	off_t offset = req->req_offset;
+	size_t len = req->req_len;
+	off_t filesize, first_lbase, last_lbase;
+	size_t nwrite;
+	int blksize, nblocks, i, error;
+	struct buf *bp;
+
+	if (len == 0) {
+		req->req_error = 0;
+		req->req_result = 0;
+		io_return(req);
+		return (0);
+	}
+
+	error = vn_lock(vp, LK_EXCLUSIVE);
+	if (error)
+		return (error);
+	error = VOP_GETATTR(vp, &vap);
+	if (error) {
+		vn_unlock(vp);
+		return (error);
+	}
+	filesize = vap.va_size;
+	blksize = vap.va_blocksize;
+	if (blksize <= 0)
+		blksize = MAXBSIZE;
+
+	/* Extend the file (VOP_SETATTR updates the inode size and preallocates
+	 * for HAMMER2) when the write goes past EOF. */
+	if (offset + (off_t)len > filesize) {
+		VATTR_NULL(&vap);
+		vap.va_size = offset + (off_t)len;
+		error = VOP_SETATTR(vp, &vap, req->req_cred);
+		if (error) {
+			vn_unlock(vp);
+			return (error);
+		}
+	}
+
+	nwrite = len;
+	first_lbase = offset & ~(off_t)(blksize - 1);
+	last_lbase = (offset + (off_t)nwrite - 1) & ~(off_t)(blksize - 1);
+	nblocks = (int)((last_lbase - first_lbase) / blksize) + 1;
+
+	io_req_set_cancel(req, NULL);
+	req->req_state = IO_REQ_PENDING;
+
+	/* The whole dirty pass runs under the vnode exclusive lock (a
+	 * synchronous buffered write, like vn_write), so concurrent writers to
+	 * the same blocks serialize.  The lock is released before io_return().
+	 */
+	error = 0;
+	for (i = 0; i < nblocks; i++) {
+		off_t lbase = first_lbase + (off_t)i * blksize;
+		off_t wstart, wend;
+		size_t n;
+		int loff;
+
+		wstart = (offset > lbase) ? offset : lbase;
+		wend = (offset + (off_t)nwrite < lbase + blksize) ?
+		       (offset + (off_t)nwrite) : (lbase + blksize);
+		n = (wend > wstart) ? (size_t)(wend - wstart) : 0;
+		loff = (int)(wstart - lbase);
+
+		if (loff == 0 && n == (size_t)blksize) {
+			/* Full-block overwrite: zero a fresh buffer to avoid
+			 * exposing uninitialized bytes. */
+			bp = getblk(vp, lbase, blksize,
+				    GETBLK_BHEAVY | GETBLK_KVABIO, 0);
+			if ((bp->b_flags & B_CACHE) == 0)
+				vfs_bio_clrbuf(bp);
+		} else {
+			/* Partial overwrite: read-modify-write. */
+			error = bread_kvabio(vp, lbase, blksize, &bp);
+			if (error) {
+				brelse(bp);
+				break;
+			}
+		}
+		bkvasync(bp);
+		bcopy((char *)req->req_buf + (wstart - offset),
+		      bp->b_data + loff, n);
+		bdwrite(bp);
+	}
+
+	vn_unlock(vp);
+
+	if (req->req_cancel_requested) {
+		req->req_error = ECANCELED;
+		req->req_result = 0;
+	} else if (error != 0) {
+		req->req_error = error;
+		req->req_result = 0;
+	} else {
+		req->req_error = 0;
+		req->req_result = (int64_t)nwrite;
+	}
+	io_return(req);
+	return (0);
+}
+
+/*
  * Asynchronous I/O entry point (fo_begin_io) for vnode-backed files.  Reads go
  * through the page cache (breadcb); writes go through the page cache write-
- * behind path (vn_write) on the ioport worker, matching buffered write(2)
- * semantics.
+ * behind path (bdwrite), matching buffered write(2) semantics.
  */
 static int
 vn_begin_io(struct io_req *req)
@@ -898,9 +1011,8 @@ vn_begin_io(struct io_req *req)
 	if (req->req_opcode == IO_READ)
 		return (vn_async_read(req, vp));
 
-	/* IO_WRITE (and anything else): worker runs the sync vnode path. */
-	ioport_exec(req, io_rw_worker);
-	return (0);
+	/* IO_WRITE: native buffered write through the page cache. */
+	return (vn_async_write(req, vp));
 }
 
 /*

@@ -1047,6 +1047,10 @@ sys_ioport(struct sysmsg *sysmsg, const struct ioport_args *uap)
 		}
 		taskqueue_start_threads(&ip->ip_tq, ip->ip_nworkers,
 					TDPRI_KERN_DAEMON, -1, "ioport");
+		/* taskqueue_start_threads() only schedules the workers; give them
+		 * a tick to actually start so an immediate close(pfd) does not
+		 * race their startup against taskqueue_free(). */
+		tsleep(ip, 0, "iopw", 1);
 	}
 	lockinit(&ip->ip_lock, "ioport", 0, 0);
 	STAILQ_INIT(&ip->ip_cq);

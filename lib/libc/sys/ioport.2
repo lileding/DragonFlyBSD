@@ -56,7 +56,7 @@ If
 is zero, the port is created as a
 .Dq pure asynchronous
 port: no worker task queue is started, and only requests with a native
-asynchronous path (vnode reads), together with
+asynchronous path (vnode reads and writes), together with
 .Dv IO_KEVENT
 and
 .Dv IO_CANCEL ,
