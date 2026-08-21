@@ -743,8 +743,28 @@ struct vn_async_read_ctx {
 	volatile int	 copied;	/* already copied straight to user */
 };
 
+/*
+ * Asynchronous buffered write context.  Full-block overwrites are dirtied
+ * synchronously in the submit thread (no I/O); partial-block overwrites issue
+ * an asynchronous read (breadcb) for the read-modify-write and dirtied in the
+ * bio_done callback.  The request completes when every block is dirtied.
+ */
+struct vn_async_write_ctx {
+	struct io_req	*req;
+	int		 nblocks;
+	volatile int	 done;		/* blocks dirtied */
+	volatile int	 error;
+	volatile int	 nwritten;	/* bytes dirtied so far */
+	off_t		 first_lbase;
+	off_t		 offset;
+	size_t		 nwrite;
+	int		 blksize;
+};
+
 static void vn_async_read_complete(struct bio *bio);
 static void vn_async_read_finish(struct vn_async_read_ctx *ctx);
+static void vn_async_write_complete(struct bio *bio);
+static void vn_async_write_finish(struct vn_async_write_ctx *ctx);
 static int  vn_async_write(struct io_req *req, struct vnode *vp);
 
 static int
@@ -885,20 +905,91 @@ vn_async_read_finish(struct vn_async_read_ctx *ctx)
 }
 
 /*
- * Asynchronous buffered write through the page cache.  Copies the request's
- * already-copyin'd kernel buffer into the buffer cache block by block and
- * marks each block delayed-write (write-behind).  The request completes once
- * every block is dirtied, matching buffered write(2): success means the data
- * has been accepted into the page cache, not that it has reached disk.
+ * breadcb() callback for the read-modify-write of a partial-block write.
+ * Runs synchronously on a cache hit or on the strategy completion thread on a
+ * miss; the buffer is B_LOCKED on entry.  Contract mirrors vn_async_read:
+ * bpdone() only when real I/O was issued, clear BIO_DONE, then release via
+ * bdwrite()/brelse()/bqrelse().
+ */
+static void
+vn_async_write_complete(struct bio *bio)
+{
+	struct vn_async_write_ctx *ctx = bio->bio_caller_info1.ptr;
+	struct io_req *req = ctx->req;
+	struct buf *bp = bio->bio_buf;
+	off_t lbase = bp->b_loffset;
+	off_t offset = ctx->offset;
+	off_t wstart, wend;
+	size_t n;
+	int loff;
+	int cached;
+
+	cached = (bio->bio_flags & BIO_DONE) != 0;	/* sync, submit thread */
+	if (!cached)
+		bpdone(bp, 0);
+	bio->bio_flags &= ~(BIO_DONE | BIO_SYNC);
+
+	wstart = (offset > lbase) ? offset : lbase;
+	wend = (offset + (off_t)ctx->nwrite < lbase + ctx->blksize) ?
+	       (offset + (off_t)ctx->nwrite) : (lbase + ctx->blksize);
+	n = (wend > wstart) ? (size_t)(wend - wstart) : 0;
+	loff = (int)(wstart - lbase);
+
+	if (bp->b_flags & B_ERROR) {
+		ctx->error = bp->b_error;
+		brelse(bp);
+	} else if (n > 0) {
+		bkvasync(bp);
+		bcopy((char *)req->req_buf + (wstart - offset),
+		      bp->b_data + loff, n);
+		bdwrite(bp);
+		atomic_add_int(&ctx->nwritten, (int)n);
+	} else {
+		bqrelse(bp);
+	}
+
+	if (atomic_fetchadd_int(&ctx->done, 1) == ctx->nblocks - 1)
+		vn_async_write_finish(ctx);
+}
+
+static void
+vn_async_write_finish(struct vn_async_write_ctx *ctx)
+{
+	struct io_req *req = ctx->req;
+
+	/* A cancelled write has still committed its dirty blocks (the side
+	 * effect cannot be withdrawn), so report the real result rather than
+	 * ECANCELED.  On error, report the bytes already committed, like a
+	 * short write(2). */
+	if (ctx->error != 0 && ctx->nwritten == 0) {
+		req->req_error = ctx->error;
+		req->req_result = 0;
+	} else {
+		req->req_error = 0;
+		req->req_result = (int64_t)ctx->nwritten;
+	}
+	kfree(ctx, M_IOPORT);
+	io_return(req);
+}
+
+/*
+ * Asynchronous buffered write through the page cache.  Full-block overwrites
+ * are dirtied inline (getblk + bcopy + bdwrite, no I/O) and partial-block
+ * overwrites issue an asynchronous read (breadcb) whose bio_done callback
+ * completes the read-modify-write and dirties the block.  The submit returns
+ * as soon as the fan-out is set up; the request completes when every block is
+ * dirtied, matching buffered write(2) (data accepted into the page cache, not
+ * yet on disk).
  */
 static int
 vn_async_write(struct io_req *req, struct vnode *vp)
 {
+	struct vn_async_write_ctx *ctx;
 	struct vattr vap;
 	off_t offset = req->req_offset;
 	size_t len = req->req_len;
 	off_t filesize, first_lbase, last_lbase;
-	size_t nwrite, nwritten;
+	size_t nwrite;
 	int blksize, nblocks, i, error;
 	struct buf *bp;
 
@@ -933,21 +1024,30 @@ vn_async_write(struct io_req *req, struct vnode *vp)
 			return (error);
 		}
 	}
+	vn_unlock(vp);
 
 	nwrite = len;
 	first_lbase = offset & ~(off_t)(blksize - 1);
 	last_lbase = (offset + (off_t)nwrite - 1) & ~(off_t)(blksize - 1);
 	nblocks = (int)((last_lbase - first_lbase) / blksize) + 1;
 
+	ctx = kmalloc(sizeof(*ctx), M_IOPORT, M_WAITOK | M_ZERO);
+	ctx->req = req;
+	ctx->nblocks = nblocks;
+	ctx->done = 0;
+	ctx->error = 0;
+	ctx->nwritten = 0;
+	ctx->first_lbase = first_lbase;
+	ctx->offset = offset;
+	ctx->nwrite = nwrite;
+	ctx->blksize = blksize;
+
 	io_req_set_cancel(req, NULL);
 	req->req_state = IO_REQ_PENDING;
 
-	/* The whole dirty pass runs under the vnode exclusive lock (a
-	 * synchronous buffered write, like vn_write), so concurrent writers to
-	 * the same blocks serialize.  The lock is released before io_return().
+	/* Full blocks are dirtied here (the buffer cache's B_LOCKED serializes
+	 * concurrent writers); partial blocks complete via breadcb's callback.
 	 */
-	error = 0;
-	nwritten = 0;
 	for (i = 0; i < nblocks; i++) {
 		off_t lbase = first_lbase + (off_t)i * blksize;
 		off_t wstart, wend;
@@ -967,35 +1067,20 @@ vn_async_write(struct io_req *req, struct vnode *vp)
 				    GETBLK_BHEAVY | GETBLK_KVABIO, 0);
 			if ((bp->b_flags & B_CACHE) == 0)
 				vfs_bio_clrbuf(bp);
+			bkvasync(bp);
+			bcopy((char *)req->req_buf + (wstart - offset),
+			      bp->b_data + loff, n);
+			bdwrite(bp);
+			atomic_add_int(&ctx->nwritten, (int)n);
+			if (atomic_fetchadd_int(&ctx->done, 1) ==
+			    ctx->nblocks - 1)
+				vn_async_write_finish(ctx);
 		} else {
-			/* Partial overwrite: read-modify-write. */
-			error = bread_kvabio(vp, lbase, blksize, &bp);
-			if (error) {
-				brelse(bp);
-				break;
-			}
+			/* Partial overwrite: async read-modify-write. */
+			breadcb(vp, lbase, blksize, B_NOTMETA | B_KVABIO,
+				vn_async_write_complete, ctx);
 		}
-		bkvasync(bp);
-		bcopy((char *)req->req_buf + (wstart - offset),
-		      bp->b_data + loff, n);
-		bdwrite(bp);
-		nwritten += n;
 	}
-
-	vn_unlock(vp);
-
-	/* A cancelled write has still committed its dirty blocks (the side
-	 * effect cannot be withdrawn), so report the real result rather than
-	 * ECANCELED.  On error, report the bytes already committed, like a
-	 * short write(2). */
-	if (error != 0 && nwritten == 0) {
-		req->req_error = error;
-		req->req_result = 0;
-	} else {
-		req->req_error = 0;
-		req->req_result = (int64_t)nwritten;
-	}
-	io_return(req);
 	return (0);
 }
 
