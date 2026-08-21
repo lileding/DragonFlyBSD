@@ -15,6 +15,7 @@
 #include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+#include <sys/sysctl.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -39,6 +40,13 @@
 #define VMMFS_PCISLOT_KICK_INITIAL 64
 
 static uint32_t vmmfs_pcislot_resource_serial;
+static int vmmfs_msix_trace;
+
+SYSCTL_NODE(_debug, OID_AUTO, vmmfs, CTLFLAG_RW, 0,
+	"VMMFS debug controls");
+SYSCTL_INT(_debug_vmmfs, OID_AUTO, msix_trace, CTLFLAG_RW,
+	&vmmfs_msix_trace, 0,
+	"Log VMMFS MSI-X delivery decisions");
 
 static int vmmfs_pcislot_resource_access(struct vop_access_args *);
 static int vmmfs_pcislot_resource_close(struct vop_close_args *);
@@ -111,6 +119,9 @@ static int vmmfs_pcislot_resource_raise_msi(
 	struct vmmfs_pcislot_resource *);
 static int vmmfs_pcislot_resource_raise_msix(
 	struct vmmfs_pcislot_resource *);
+static void vmmfs_pcislot_resource_msix_trace(
+	struct vmmfs_pcislot_resource *, uint16_t, uint32_t, uint64_t, uint32_t,
+	uint64_t, const char *, int);
 
 static struct dev_ops vmmfs_pcislot_resource_dev_ops = {
 	{ "vmmfs_pci", 0, D_MPSAFE },
@@ -1185,41 +1196,76 @@ vmmfs_pcislot_resource_raise_msix(struct vmmfs_pcislot_resource *resource)
 	uint16_t control;
 	uint64_t entry;
 	uint64_t address;
+	uint64_t pending;
+	uint64_t pba_offset;
 	uint32_t data;
 	uint32_t vector_control;
+	int error;
 
 	cap = &resource->resources->slot->descriptor.value.caps[resource->capability];
 	bytes = resource->resources->slot->type0.bytes;
 	offset = resource->resources->slot->type0.cap_offset[resource->capability];
 	control = vmmfs_pcislot_resource_read16(bytes, offset + 2);
-	if ((control & 0x8000) == 0)
-		return (0);
 	table = vmmfs_pcislot_resource_bar(resource->resources, cap->table_bar);
 	pba = vmmfs_pcislot_resource_bar(resource->resources, cap->pba_bar);
 	if (table == NULL || pba == NULL || table->backing_object == NULL ||
-	    pba->backing_object == NULL)
+	    pba->backing_object == NULL) {
+		vmmfs_pcislot_resource_msix_trace(resource, control, 0, 0, 0, 0,
+		    "no_backing", ENXIO);
 		return (ENXIO);
+	}
 	entry = cap->table_offset + (uint64_t)resource->vector * 16;
 	vector_control = vmmfs_pcislot_resource_object_read32(table, entry + 12);
-	if ((control & 0x4000) != 0 || (vector_control & 1) != 0) {
-		uint64_t pba_offset = cap->pba_offset +
-		    (uint64_t)(resource->vector / 64) * sizeof(uint64_t);
-		uint64_t pending;
-
-		if (vmmfs_pcislot_resource_object_read(pba, pba_offset,
-		    &pending, sizeof(pending)) != 0)
-			return (EIO);
-		pending |= 1ULL << (resource->vector % 64);
-		if (vmmfs_pcislot_resource_object_write(pba, pba_offset,
-		    &pending, sizeof(pending)) != 0)
-			return (EIO);
-		return (0);
-	}
 	address = vmmfs_pcislot_resource_object_read32(table, entry);
 	address |= (uint64_t)vmmfs_pcislot_resource_object_read32(table,
 	    entry + 4) << 32;
 	data = vmmfs_pcislot_resource_object_read32(table, entry + 8);
-	return (vmm_machine_raise_msi(resource->resources->machine, address, data));
+	pba_offset = cap->pba_offset +
+	    (uint64_t)(resource->vector / 64) * sizeof(uint64_t);
+	error = vmmfs_pcislot_resource_object_read(pba, pba_offset, &pending,
+	    sizeof(pending));
+	if (error != 0) {
+		vmmfs_pcislot_resource_msix_trace(resource, control, vector_control,
+		    address, data, 0, "pba_read", error);
+		return (error);
+	}
+	if ((control & 0x8000) == 0) {
+		vmmfs_pcislot_resource_msix_trace(resource, control, vector_control,
+		    address, data, pending, "disabled", 0);
+		return (0);
+	}
+	if ((control & 0x4000) != 0 || (vector_control & 1) != 0) {
+		pending |= 1ULL << (resource->vector % 64);
+		error = vmmfs_pcislot_resource_object_write(pba, pba_offset,
+		    &pending, sizeof(pending));
+		vmmfs_pcislot_resource_msix_trace(resource, control, vector_control,
+		    address, data, pending,
+		    (control & 0x4000) != 0 ? "function_mask" : "vector_mask",
+		    error);
+		if (error != 0)
+			return (error);
+		return (0);
+	}
+	error = vmm_machine_raise_msi(resource->resources->machine, address, data);
+	vmmfs_pcislot_resource_msix_trace(resource, control, vector_control,
+	    address, data, pending, "raise", error);
+	return (error);
+}
+
+static void
+vmmfs_pcislot_resource_msix_trace(
+	struct vmmfs_pcislot_resource *resource, uint16_t control,
+	uint32_t vector_control, uint64_t address, uint32_t data,
+	uint64_t pending, const char *outcome, int error)
+{
+
+	if (vmmfs_msix_trace == 0)
+		return;
+	kprintf("vmmfs: msix bdf=%04x vector=%u control=%04x "
+	    "entry_control=%08x address=%016jx data=%08x pba=%016jx "
+	    "outcome=%s error=%d\\n", resource->resources->slot->bdf,
+	    resource->vector, control, vector_control, (uintmax_t)address, data,
+	    (uintmax_t)pending, outcome, error);
 }
 
 static int
