@@ -34,6 +34,13 @@
 #include <sys/kern_syscall.h>
 #include <sys/ioport.h>
 #include <sys/ioport_var.h>
+#include <vm/vm.h>
+#include <vm/vm_param.h>
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
+#include <vm/vm_kern.h>
+#include <vm/vm_page.h>
 
 MALLOC_DEFINE(M_IOPORT, "ioport", "memory for ioport system");
 
@@ -804,6 +811,51 @@ ioevent_kevent(struct ioport *ip, const struct io_submit *sub)
 	return (0);
 }
 
+/*
+ * Copy len bytes from the kernel buffer src into user address uva within the
+ * (held) vmspace.  Used to deliver read data to the submitter's buffer from
+ * the reaper's context, which may be a different thread or process than the
+ * submitter.  Each target page is faulted in on behalf of the vmspace and
+ * mapped temporarily into the kernel map for the copy.
+ */
+static int
+io_copyout_user(struct vmspace *vm, const void *src, void *uva, size_t len)
+{
+	vm_offset_t kva;
+	size_t done;
+	int error;
+
+	kva = kmem_alloc_pageable(kernel_map, PAGE_SIZE, VM_SUBSYS_PROC);
+	done = 0;
+	error = 0;
+	while (done < len) {
+		vm_offset_t u = (vm_offset_t)uva + done;
+		vm_offset_t pageno = trunc_page(u);
+		size_t off = u - pageno;
+		size_t chunk = szmin(PAGE_SIZE - off, len - done);
+		vm_page_t m;
+		int busy;
+
+		m = vm_fault_page(&vm->vm_map, pageno,
+				  VM_PROT_WRITE | VM_PROT_OVERRIDE_WRITE,
+				  VM_FAULT_NORMAL, &error, &busy);
+		if (error) {
+			error = EFAULT;
+			break;
+		}
+		pmap_kenter_quick(kva, VM_PAGE_TO_PHYS(m));
+		bcopy((const char *)src + done, (char *)kva + off, chunk);
+		pmap_kremove_quick(kva);
+		if (busy)
+			vm_page_wakeup(m);
+		else
+			vm_page_unhold(m);
+		done += chunk;
+	}
+	kmem_free(kernel_map, kva, PAGE_SIZE);
+	return (error);
+}
+
 static int
 ioevent_reap(struct ioport *ip, struct io_completion *completions,
 	     int ncompletions, struct timespec *tsp, int *res)
@@ -834,9 +886,11 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 
 			/*
 			 * Deliver read data to the user buffer before the
-			 * completion becomes visible.  Uses the reaper's
-			 * vmspace (== submitter's in the single-threaded
-			 * test); true pinning replaces this later.
+			 * completion becomes visible.  The data must land in
+			 * the submitter's address space, which may differ from
+			 * the reaper's: hold the submitter's vmspace inline
+			 * (on this, the reaping thread) and copy through a
+			 * temporary kernel mapping of each faulted-in page.
 			 *
 			 * The page-cache async read stages uncached blocks in
 			 * req_buf (req_data_off into it), but a single-block
@@ -845,11 +899,19 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 			 */
 			if (req->req_opcode == IO_READ && req->req_error == 0 &&
 			    req->req_result > 0 && req->req_copied == 0) {
+				struct vmspace *vm = req->req_proc->p_vmspace;
 				void *src = (char *)req->req_buf +
 					    req->req_data_off;
 
-				error = copyout(src, req->req_ubuf,
-						req->req_result);
+				if (vm == NULL || vmspace_getrefs(vm) < 0) {
+					error = EFAULT;
+				} else {
+					vmspace_hold(vm);
+					error = io_copyout_user(vm, src,
+								req->req_ubuf,
+								req->req_result);
+					vmspace_drop(vm);
+				}
 				if (error) {
 					req->req_error = error;
 					req->req_result = 0;
