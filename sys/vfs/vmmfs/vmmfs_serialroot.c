@@ -318,6 +318,7 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 	struct vmmfs_serialroot *serialroot;
 	struct vmmfs_serialport *port;
 	struct vnode *vnode;
+	bool busy;
 	int error;
 
 	serialroot = ap->a_dvp->v_data;
@@ -348,18 +349,22 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 		vrele(vnode);
 		return (EBUSY);
 	}
+	lwkt_gettoken(&port->token);
+	busy = atomic_load_acq_int(&port->open) != 0 ||
+	    port->opening_count != 0;
+	if (!busy)
+		port->destroying = true;
+	lwkt_reltoken(&port->token);
+	if (busy) {
+		lwkt_reltoken(&serialroot->machine->token);
+		vrele(vnode);
+		return (EBUSY);
+	}
 	RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, port);
 	lwkt_reltoken(&serialroot->machine->token);
-	error = vmmfs_serialport_destroy(port);
-	if (error == 0) {
-		cache_inval_vp(vnode, CINV_DESTROY);
-	} else {
-		lwkt_gettoken(&serialroot->machine->token);
-		(void)RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, port);
-		lwkt_reltoken(&serialroot->machine->token);
-	}
+	vmmfs_vnode_discard(vnode);
 	vrele(vnode);
-	return (error);
+	return (0);
 }
 
 static int

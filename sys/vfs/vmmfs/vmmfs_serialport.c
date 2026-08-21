@@ -231,8 +231,7 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
 	if (port == NULL)
 		return EINVAL;
 	lwkt_gettoken(&port->token);
-	if (port->machine != NULL || port->stopping || port->destroying ||
-	    port->vnode != NULL) {
+	if (port->machine != NULL || port->stopping || port->vnode != NULL) {
 		lwkt_reltoken(&port->token);
 		return EBUSY;
 	}
@@ -537,11 +536,25 @@ vmmfs_serialport_inactive(struct vop_inactive_args *ap)
 {
 	struct vmmfs_serialport *port;
 	struct vmmfs_machine *machine;
+	bool destroying;
+	int error;
 
 	port = ap->a_vp->v_data;
 	if (port == NULL || port->serialroot == NULL)
 		return (0);
 	machine = port->serialroot->machine;
+	lwkt_gettoken(&port->token);
+	destroying = port->destroying && port->vnode == ap->a_vp;
+	if (destroying)
+		port->vnode = NULL;
+	lwkt_reltoken(&port->token);
+	if (destroying) {
+		ap->a_vp->v_data = NULL;
+		error = vmmfs_serialport_destroy(port);
+		KKASSERT(error == 0);
+		vmmfs_machine_put(machine);
+		return (0);
+	}
 	if (!vmmfs_machine_vnode_detach(machine, &port->vnode, ap->a_vp))
 		return (0);
 	ap->a_vp->v_data = NULL;
