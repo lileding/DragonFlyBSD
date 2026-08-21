@@ -54,7 +54,6 @@ mkdir "$MOUNT/$MACHINE" "$MOUNT/$MACHINE/pci/0000:00:01.0"
 printf '%s\n' 2097152 >"$MOUNT/$MACHINE/mem"
 printf '%s\n' 1 >"$MOUNT/$MACHINE/vcpu"
 printf '%s\n' "$LOADER --check-pci-config-loop" >"$MOUNT/$MACHINE/loader"
-test "$(cat "$SLOT/bdf")" = '0000:00:01.0'
 cat >"$BASE" <<'EOF'
 version=1
 header.type=endpoint

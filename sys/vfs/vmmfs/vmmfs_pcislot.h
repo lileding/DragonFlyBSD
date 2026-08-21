@@ -10,7 +10,6 @@
 #include <sys/types.h>
 
 #include "vmmfs_pciroot.h"
-#include "vmmfs_pcislot_bdf.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_config.h"
@@ -39,7 +38,6 @@ struct vmmfs_pcislot {
 	struct vnode *vnode;
 	ino_t inode;
 	uint16_t bdf;
-	struct vmmfs_pcislot_bdf bdf_node;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;

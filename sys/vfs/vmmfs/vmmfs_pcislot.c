@@ -111,12 +111,9 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	vnode->v_type = VDIR;
 	slot->vnode = vnode;
 	vmmfs_machine_hold(pciroot->machine);
-	error = vmmfs_pcislot_bdf_create(slot, &slot->bdf_node);
-	if (error != 0)
-		goto fail_vnode;
 	error = vmmfs_pcislot_events_create(slot, &slot->events);
 	if (error != 0)
-		goto fail_bdf;
+		goto fail_vnode;
 	error = vmmfs_pcislot_config_create(slot, &slot->config);
 	if (error != 0)
 		goto fail_events;
@@ -129,8 +126,6 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 
 fail_events:
 	(void)vmmfs_pcislot_events_destroy(&slot->events);
-fail_bdf:
-	(void)vmmfs_pcislot_bdf_destroy(&slot->bdf_node);
 fail_vnode:
 	vmmfs_vnode_revoke(vnode);
 fail_slot:
@@ -154,9 +149,6 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 	if (error != 0)
 		return (error);
 	error = vmmfs_pcislot_events_destroy(&slot->events);
-	if (error != 0)
-		return (error);
-	error = vmmfs_pcislot_bdf_destroy(&slot->bdf_node);
 	if (error != 0)
 		return (error);
 	vnode = slot->vnode;
@@ -534,10 +526,7 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
 	}
-	if (ncp->nc_nlen == sizeof("bdf") - 1 &&
-	    bcmp(ncp->nc_name, "bdf", sizeof("bdf") - 1) == 0)
-		vnode = slot->bdf_node.vnode;
-	else if (ncp->nc_nlen == sizeof("events") - 1 &&
+	if (ncp->nc_nlen == sizeof("events") - 1 &&
 	    bcmp(ncp->nc_name, "events", sizeof("events") - 1) == 0)
 		vnode = slot->descriptor.committed ? slot->events.vnode : NULL;
 	else if (ncp->nc_nlen == sizeof("config") - 1 &&
@@ -674,14 +663,6 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
 	}
-	if (index == 0) {
-		item->inode = slot->bdf_node.inode;
-		item->type = DT_REG;
-		bcopy("bdf", item->name, sizeof("bdf"));
-		lwkt_reltoken(&slot->pciroot->machine->token);
-		return (0);
-	}
-	--index;
 	if (slot->descriptor.committed) {
 		if (index == 0) {
 		item->inode = slot->events.inode;

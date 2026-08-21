@@ -260,7 +260,6 @@ vmmfs_machine_close_vnodes(struct vmmfs_machine *machine)
 	RB_FOREACH(slot, vmmfs_pcislot_tree, &machine->pciroot.slots) {
 		vmmfs_pcislot_config_revoke(&slot->config);
 		vmmfs_pcislot_events_revoke(&slot->events);
-		vmmfs_vnode_close(slot->bdf_node.vnode);
 		vmmfs_vnode_close(slot->descriptor.vnode);
 		vmmfs_vnode_close(slot->config.vnode);
 		vmmfs_vnode_close(slot->events.vnode);

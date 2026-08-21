@@ -15,7 +15,6 @@
 #include "vmmfs.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot.h"
-#include "vmmfs_pcislot_bdf.h"
 #include "vmmfs_pcislot_config.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_resource.h"
@@ -209,8 +208,6 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pciroot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_vops,
 	    &state->pcislot_vops);
-	vfs_add_vnodeops(mount, &vmmfs_pcislot_bdf_vops,
-	    &state->pcislot_bdf_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_descriptor_vops,
 	    &state->pcislot_descriptor_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_config_vops,
@@ -224,7 +221,6 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->pcislot_bdf_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->serialport_vops);
@@ -278,7 +274,6 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->pcislot_bdf_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->serialport_vops);

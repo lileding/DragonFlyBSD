@@ -31,7 +31,6 @@ struct vmmfs_mount {
 	struct vop_ops *serialport_vops;
 	struct vop_ops *pciroot_vops;
 	struct vop_ops *pcislot_vops;
-	struct vop_ops *pcislot_bdf_vops;
 	struct vop_ops *pcislot_descriptor_vops;
 	struct vop_ops *pcislot_config_vops;
 	struct vop_ops *pcislot_resource_vops;
