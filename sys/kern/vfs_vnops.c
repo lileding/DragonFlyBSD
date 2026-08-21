@@ -898,7 +898,7 @@ vn_async_write(struct io_req *req, struct vnode *vp)
 	off_t offset = req->req_offset;
 	size_t len = req->req_len;
 	off_t filesize, first_lbase, last_lbase;
-	size_t nwrite;
+	size_t nwrite, nwritten;
 	int blksize, nblocks, i, error;
 	struct buf *bp;
 
@@ -947,6 +947,7 @@ vn_async_write(struct io_req *req, struct vnode *vp)
 	 * the same blocks serialize.  The lock is released before io_return().
 	 */
 	error = 0;
+	nwritten = 0;
 	for (i = 0; i < nblocks; i++) {
 		off_t lbase = first_lbase + (off_t)i * blksize;
 		off_t wstart, wend;
@@ -978,19 +979,21 @@ vn_async_write(struct io_req *req, struct vnode *vp)
 		bcopy((char *)req->req_buf + (wstart - offset),
 		      bp->b_data + loff, n);
 		bdwrite(bp);
+		nwritten += n;
 	}
 
 	vn_unlock(vp);
 
-	if (req->req_cancel_requested) {
-		req->req_error = ECANCELED;
-		req->req_result = 0;
-	} else if (error != 0) {
+	/* A cancelled write has still committed its dirty blocks (the side
+	 * effect cannot be withdrawn), so report the real result rather than
+	 * ECANCELED.  On error, report the bytes already committed, like a
+	 * short write(2). */
+	if (error != 0 && nwritten == 0) {
 		req->req_error = error;
 		req->req_result = 0;
 	} else {
 		req->req_error = 0;
-		req->req_result = (int64_t)nwrite;
+		req->req_result = (int64_t)nwritten;
 	}
 	io_return(req);
 	return (0);
@@ -1007,6 +1010,18 @@ vn_begin_io(struct io_req *req)
 	struct vnode *vp;
 
 	vp = (struct vnode *)req->req_fp->f_data;
+
+	/* Only regular files have a native async page-cache path.  Directories
+	 * fail with EISDIR, and other non-regular vnodes (FIFO, device, ...)
+	 * go through the synchronous VOP_READ/VOP_WRITE path on the worker,
+	 * which carries the type checks and the other invariants that the
+	 * raw buffer-cache path would otherwise bypass. */
+	if (vp->v_type == VDIR)
+		return (EISDIR);
+	if (vp->v_type != VREG) {
+		ioport_exec(req, io_rw_worker);
+		return (0);
+	}
 
 	if (req->req_opcode == IO_READ)
 		return (vn_async_read(req, vp));
