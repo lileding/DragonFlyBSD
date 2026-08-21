@@ -9,12 +9,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <unistd.h>
 
 #include <sys/vmmfs_pci.h>
 
 static int write_all(int, const char *, size_t);
 static int commit_descriptor(const char *, int);
+static int register_config_readiness(int, int);
+static int wait_config_readiness(int, int16_t);
 
 int
 main(int argc, char **argv)
@@ -24,6 +27,7 @@ main(int argc, char **argv)
 	struct vmmfs_pci_kick kick;
 	int config_fd;
 	int kick_fd;
+	int queue_fd;
 	ssize_t result;
 
 	if (argc != 3 && argc != 5) {
@@ -46,18 +50,32 @@ main(int argc, char **argv)
 		perror("open config");
 		return (1);
 	}
+	queue_fd = kqueue();
+	if (queue_fd < 0) {
+		perror("kqueue");
+		close(config_fd);
+		return (1);
+	}
+	if (register_config_readiness(queue_fd, config_fd) != 0) {
+		perror("register config readiness");
+		close(queue_fd);
+		close(config_fd);
+		return (1);
+	}
 	for (;;) {
 		kick_fd = open(argv[3], O_RDONLY);
 		if (kick_fd >= 0)
 			break;
 		if (errno != ENOENT && errno != ENXIO) {
 			perror("open resource");
+			close(queue_fd);
 			close(config_fd);
 			return (1);
 		}
 		usleep(10000);
 	}
 	if (puts("ready") == EOF || fflush(stdout) != 0) {
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -65,6 +83,7 @@ main(int argc, char **argv)
 	result = read(kick_fd, &kick, sizeof(kick));
 	if (result != sizeof(kick)) {
 		fprintf(stderr, "kick read failed: %zd\n", result);
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -72,11 +91,20 @@ main(int argc, char **argv)
 	if (kick.offset != 0 || kick.width != 4 || kick.value != 0xdeadbeefU) {
 		fprintf(stderr, "unexpected kick: offset=%ju width=%u value=%jx\n",
 		    (uintmax_t)kick.offset, kick.width, (uintmax_t)kick.value);
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
 	}
 	if (puts("kick") == EOF || fflush(stdout) != 0) {
+		close(queue_fd);
+		close(config_fd);
+		close(kick_fd);
+		return (1);
+	}
+	if (wait_config_readiness(queue_fd, EVFILT_READ) != 0) {
+		perror("wait config read readiness");
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -84,6 +112,7 @@ main(int argc, char **argv)
 	result = read(config_fd, &request, sizeof(request));
 	if (result != sizeof(request)) {
 		fprintf(stderr, "config read failed: %zd\n", result);
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -95,6 +124,14 @@ main(int argc, char **argv)
 	    request.reserved[0] != 0 || request.reserved[1] != 0 ||
 	    request.reserved[2] != 0) {
 		fprintf(stderr, "unexpected config request\n");
+		close(queue_fd);
+		close(config_fd);
+		close(kick_fd);
+		return (1);
+	}
+	if (wait_config_readiness(queue_fd, EVFILT_WRITE) != 0) {
+		perror("wait config write readiness");
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -106,11 +143,13 @@ main(int argc, char **argv)
 	response.status = VMMFS_PCI_CONFIG_SUCCESS;
 	if (write_all(config_fd, (const char *)&response, sizeof(response)) != 0) {
 		perror("config write");
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
 	}
 	if (puts("config") == EOF || fflush(stdout) != 0) {
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
@@ -118,18 +157,66 @@ main(int argc, char **argv)
 	result = read(kick_fd, &kick, sizeof(kick));
 	if (result >= 0) {
 		fprintf(stderr, "kick revoke read unexpectedly completed: %zd\n", result);
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
 	}
 	if (puts("revoked") == EOF || fflush(stdout) != 0) {
+		close(queue_fd);
 		close(config_fd);
 		close(kick_fd);
 		return (1);
 	}
+	close(queue_fd);
 	close(config_fd);
 	close(kick_fd);
 	return (0);
+}
+
+static int
+register_config_readiness(int queue_fd, int config_fd)
+{
+	struct kevent changes[2];
+	struct kevent results[2];
+	int index;
+	int result;
+
+	EV_SET(&changes[0], config_fd, EVFILT_READ,
+	    EV_ADD | EV_CLEAR | EV_RECEIPT, 0, 0, NULL);
+	EV_SET(&changes[1], config_fd, EVFILT_WRITE,
+	    EV_ADD | EV_CLEAR | EV_RECEIPT, 0, 0, NULL);
+	result = kevent(queue_fd, changes, 2, results, 2, NULL);
+	if (result != 2) {
+		if (result >= 0)
+			errno = EPROTO;
+		return (-1);
+	}
+	for (index = 0; index < 2; ++index) {
+		if ((results[index].flags & EV_ERROR) == 0 ||
+		    results[index].data == 0)
+			continue;
+		errno = (int)results[index].data;
+		return (-1);
+	}
+	return (0);
+}
+
+static int
+wait_config_readiness(int queue_fd, int16_t filter)
+{
+	struct kevent result;
+
+	for (;;) {
+		if (kevent(queue_fd, NULL, 0, &result, 1, NULL) != 1)
+			return (-1);
+		if ((result.flags & EV_ERROR) != 0) {
+			errno = (int)result.data;
+			return (-1);
+		}
+		if (result.filter == filter)
+			return (0);
+	}
 }
 
 static int

@@ -40,7 +40,7 @@ struct vmmfs_pcislot_config {
 	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
-	struct kqinfo read_kq;
+	struct kqinfo kq;
 	struct file *responder;
 	struct vmmfs_pcislot_config_request_queue requests;
 	uint64_t generation;

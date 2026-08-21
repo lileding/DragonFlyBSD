@@ -39,6 +39,7 @@ static int vmmfs_pcislot_config_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_config_write(struct vop_write_args *);
 static void vmmfs_pcislot_config_filter_detach(struct knote *);
 static int vmmfs_pcislot_config_filter_read(struct knote *, long);
+static int vmmfs_pcislot_config_filter_write(struct knote *, long);
 static void vmmfs_pcislot_config_cancel_locked(
 	struct vmmfs_pcislot_config *, uint32_t);
 static void vmmfs_pcislot_config_wake_next(struct vmmfs_pcislot_config *);
@@ -58,6 +59,13 @@ static struct filterops vmmfs_pcislot_config_read_filterops = {
 	NULL,
 	vmmfs_pcislot_config_filter_detach,
 	vmmfs_pcislot_config_filter_read,
+};
+
+static struct filterops vmmfs_pcislot_config_write_filterops = {
+	FILTEROP_ISFD | FILTEROP_MPSAFE,
+	NULL,
+	vmmfs_pcislot_config_filter_detach,
+	vmmfs_pcislot_config_filter_write,
 };
 
 struct vop_ops vmmfs_pcislot_config_vops = {
@@ -93,7 +101,7 @@ vmmfs_pcislot_config_create(struct vmmfs_pcislot *slot,
 	config->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	lwkt_token_init(&config->token, "vmmfspcicfg");
 	TAILQ_INIT(&config->requests);
-	SLIST_INIT(&config->read_kq.ki_note);
+	SLIST_INIT(&config->kq.ki_note);
 	error = getnewvnode(VT_SYNTH, slot->pciroot->machine->root->mount,
 	    &vnode, 0, 0);
 	if (error != 0)
@@ -145,7 +153,7 @@ vmmfs_pcislot_config_revoke(struct vmmfs_pcislot_config *config)
 	vmmfs_pcislot_config_cancel_locked(config, VMMFS_PCI_CONFIG_FAILURE);
 	lwkt_reltoken(&config->token);
 	wakeup(config);
-	KNOTE(&config->read_kq.ki_note, 0);
+	KNOTE(&config->kq.ki_note, 0);
 }
 
 void
@@ -162,7 +170,7 @@ vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *config,
 	vmmfs_pcislot_config_cancel_locked(config, VMMFS_PCI_CONFIG_FAILURE);
 	lwkt_reltoken(&config->token);
 	wakeup(config);
-	KNOTE(&config->read_kq.ki_note, 0);
+	KNOTE(&config->kq.ki_note, 0);
 	(void)present;
 }
 
@@ -189,7 +197,7 @@ vmmfs_pcislot_config_power_off(struct vmmfs_pcislot_config *config)
 	vmmfs_pcislot_config_cancel_locked(config, VMMFS_PCI_CONFIG_FAILURE);
 	lwkt_reltoken(&config->token);
 	wakeup(config);
-	KNOTE(&config->read_kq.ki_note, 0);
+	KNOTE(&config->kq.ki_note, 0);
 }
 
 int
@@ -309,7 +317,7 @@ vmmfs_pcislot_config_close(struct vop_close_args *ap)
 		}
 		lwkt_reltoken(&config->token);
 		wakeup(config);
-		KNOTE(&config->read_kq.ki_note, 0);
+		KNOTE(&config->kq.ki_note, 0);
 	}
 	return (vop_stdclose(ap));
 }
@@ -359,12 +367,19 @@ vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *ap)
 	config = ap->a_vp->v_data;
 	if (config == NULL)
 		return (ENOENT);
-	if (ap->a_kn->kn_filter != EVFILT_READ)
+	switch (ap->a_kn->kn_filter) {
+	case EVFILT_READ:
+		ap->a_kn->kn_fop = &vmmfs_pcislot_config_read_filterops;
+		break;
+	case EVFILT_WRITE:
+		ap->a_kn->kn_fop = &vmmfs_pcislot_config_write_filterops;
+		break;
+	default:
 		return (EOPNOTSUPP);
+	}
 	lwkt_gettoken(&config->token);
-	ap->a_kn->kn_fop = &vmmfs_pcislot_config_read_filterops;
 	ap->a_kn->kn_hook = (caddr_t)config;
-	knote_insert(&config->read_kq.ki_note, ap->a_kn);
+	knote_insert(&config->kq.ki_note, ap->a_kn);
 	lwkt_reltoken(&config->token);
 	return (0);
 }
@@ -431,6 +446,7 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 			record = request->request;
 			request->delivered = true;
 			lwkt_reltoken(&config->token);
+			KNOTE(&config->kq.ki_note, 0);
 			return (uiomove((caddr_t)&record, sizeof(record), ap->a_uio));
 		}
 		if (config->closed || config->responder == NULL) {
@@ -517,6 +533,7 @@ vmmfs_pcislot_config_write(struct vop_write_args *ap)
 	vcpu = request->vcpu;
 	lwkt_reltoken(&request->thread->group->token);
 	lwkt_reltoken(&config->token);
+	KNOTE(&config->kq.ki_note, 0);
 	(void)vmm_vcpu_kick(vcpu);
 	return (0);
 }
@@ -530,7 +547,7 @@ vmmfs_pcislot_config_filter_detach(struct knote *knote)
 	if (config == NULL)
 		return;
 	lwkt_gettoken(&config->token);
-	knote_remove(&config->read_kq.ki_note, knote);
+	knote_remove(&config->kq.ki_note, knote);
 	lwkt_reltoken(&config->token);
 }
 
@@ -548,6 +565,26 @@ vmmfs_pcislot_config_filter_read(struct knote *knote, long hint)
 	request = TAILQ_FIRST(&config->requests);
 	knote->kn_data = request != NULL && !request->delivered ?
 	    sizeof(request->request) : 0;
+	if (config->closed || config->responder == NULL)
+		knote->kn_flags |= EV_EOF;
+	lwkt_reltoken(&config->token);
+	return (knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0);
+}
+
+static int
+vmmfs_pcislot_config_filter_write(struct knote *knote, long hint)
+{
+	struct vmmfs_pcislot_config *config;
+	struct vmmfs_pcislot_config_request *request;
+
+	(void)hint;
+	config = (struct vmmfs_pcislot_config *)knote->kn_hook;
+	if (config == NULL)
+		return (0);
+	lwkt_gettoken(&config->token);
+	request = TAILQ_FIRST(&config->requests);
+	knote->kn_data = request != NULL && request->delivered &&
+	    !request->completed ? sizeof(struct vmmfs_pci_config_response) : 0;
 	if (config->closed || config->responder == NULL)
 		knote->kn_flags |= EV_EOF;
 	lwkt_reltoken(&config->token);
@@ -577,7 +614,7 @@ static void
 vmmfs_pcislot_config_wake_next(struct vmmfs_pcislot_config *config)
 {
 	wakeup(config);
-	KNOTE(&config->read_kq.ki_note, 0);
+	KNOTE(&config->kq.ki_note, 0);
 }
 
 static int
