@@ -1049,6 +1049,7 @@ vmmfs_pcislot_type0_cap_write(struct vmmfs_pcislot *slot, uint16_t offset,
 	uint16_t base;
 	uint16_t address_end;
 	uint16_t data_offset;
+	uint16_t length;
 	uint16_t mask_offset;
 	uint8_t byte;
 	uint8_t writable;
@@ -1062,7 +1063,25 @@ vmmfs_pcislot_type0_cap_write(struct vmmfs_pcislot *slot, uint16_t offset,
 		if (!cap->present)
 			break;
 		base = slot->type0.cap_offset[index];
-		if (offset < base || offset - base >= 0x40)
+		switch (cap->kind) {
+		case VMMFS_PCISLOT_CAP_PCIE:
+			length = 0x3c;
+			break;
+		case VMMFS_PCISLOT_CAP_MSI:
+			length = 10 + (cap->address_width == 64 ? 4 : 0) +
+			    (cap->maskable ? 8 : 0);
+			break;
+		case VMMFS_PCISLOT_CAP_MSIX:
+			length = 12;
+			break;
+		case VMMFS_PCISLOT_CAP_BLOB:
+			length = 3 + cap->data_length;
+			break;
+		default:
+			return (EINVAL);
+		}
+		length = (length + 3) & ~3U;
+		if (offset < base || offset - base >= length)
 			continue;
 		msix = cap->kind == VMMFS_PCISLOT_CAP_MSIX;
 		for (byte_index = 0; byte_index < width; ++byte_index) {

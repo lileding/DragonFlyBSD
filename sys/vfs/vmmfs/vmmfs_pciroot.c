@@ -978,13 +978,12 @@ vmmfs_pciroot_config_data_write(vmm_vcpu_t vcpu, void *argument,
 	const struct vmm_io_write *write)
 {
 	struct vmmfs_pciroot *pciroot;
+	struct vmmfs_pcislot *slot;
 	uint32_t address;
 	uint16_t bdf;
 	uint16_t offset;
-	int error;
 
 	pciroot = argument;
-	(void)vcpu;
 	if (pciroot == NULL || !vmmfs_pciroot_config_contains(
 	    VMMFS_PCI_CONFIG_DATA, write->address, write->width))
 		return (ENOENT);
@@ -999,12 +998,14 @@ vmmfs_pciroot_config_data_write(vmm_vcpu_t vcpu, void *argument,
 	    ((address >> 11) & 0x1f) << 3 | ((address >> 8) & 0x7);
 	offset = (address & 0xfc) +
 	    (uint16_t)(write->address - VMMFS_PCI_CONFIG_DATA);
-	if (vmmfs_pciroot_find_locked(pciroot, bdf) != NULL)
-		error = ENOENT;
-	else
-		error = 0;
+	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
+	if (slot == NULL || !slot->type0.powered) {
+		lwkt_reltoken(&pciroot->machine->token);
+		return (0);
+	}
 	lwkt_reltoken(&pciroot->machine->token);
-	return (error == ENOENT ? ENOENT : 0);
+	return (vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
+	    write->width, (uint32_t)write->value));
 }
 
 static int
@@ -1048,13 +1049,12 @@ vmmfs_pciroot_ecam_write(vmm_vcpu_t vcpu, void *argument,
 	const struct vmm_io_write *write)
 {
 	struct vmmfs_pciroot *pciroot;
+	struct vmmfs_pcislot *slot;
 	uint64_t relative;
 	uint16_t bdf;
 	uint16_t offset;
-	int error;
 
 	pciroot = argument;
-	(void)vcpu;
 	if (pciroot == NULL || write == NULL ||
 	    !vmmfs_pciroot_ecam_contains(write->address, write->width))
 		return (ENOENT);
@@ -1067,12 +1067,14 @@ vmmfs_pciroot_ecam_write(vmm_vcpu_t vcpu, void *argument,
 	bdf = ((relative >> 20) & 0xff) << 8 |
 	    ((relative >> 15) & 0x1f) << 3 | ((relative >> 12) & 0x7);
 	offset = relative & 0xfff;
-	if (vmmfs_pciroot_find_locked(pciroot, bdf) != NULL)
-		error = ENOENT;
-	else
-		error = 0;
+	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
+	if (slot == NULL || !slot->type0.powered) {
+		lwkt_reltoken(&pciroot->machine->token);
+		return (0);
+	}
 	lwkt_reltoken(&pciroot->machine->token);
-	return (error == ENOENT ? ENOENT : 0);
+	return (vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
+	    write->width, (uint32_t)write->value));
 }
 
 static bool
