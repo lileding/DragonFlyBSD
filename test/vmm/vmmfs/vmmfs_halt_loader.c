@@ -24,6 +24,7 @@
 #define STACK_TOP_GPA		0x80000ULL
 #define ENTRY_GPA		0x100000ULL
 #define XSDT_GPA		0x70100ULL
+#define FADT_GPA		0x70200ULL
 #define MCFG_GPA		0x70600ULL
 #define MCFG_SIZE		60U
 #define PCI_ECAM_GPA		0xe0000000ULL
@@ -99,10 +100,19 @@ static void
 check_pci_topology(const uint8_t *memory, uint64_t memory_size)
 {
 	uint32_t length;
+	uint32_t pm1_event;
+	uint32_t pm1_control;
 	uint64_t address;
 
 	if (memory_size < MCFG_GPA + MCFG_SIZE)
 		errx(1, "guest memory lacks MCFG");
+	if (memcmp(memory + FADT_GPA, "FACP", 4) != 0)
+		errx(1, "FADT signature");
+	memcpy(&pm1_event, memory + FADT_GPA + 56, sizeof(pm1_event));
+	memcpy(&pm1_control, memory + FADT_GPA + 64, sizeof(pm1_control));
+	if (pm1_event != 0x400 || pm1_control != 0x404 ||
+	    memory[FADT_GPA + 88] != 4 || memory[FADT_GPA + 89] != 2)
+		errx(1, "FADT PM1 registers");
 	if (memcmp(memory + MCFG_GPA, "MCFG", 4) != 0)
 		errx(1, "MCFG signature");
 	memcpy(&length, memory + MCFG_GPA + 4, sizeof(length));

@@ -888,7 +888,7 @@ vmmfs_pcislot_type0_append_capabilities(struct vmmfs_pcislot *slot)
 			length = 12;
 			break;
 		case VMMFS_PCISLOT_CAP_BLOB:
-			length = 2 + cap->data_length;
+			length = 3 + cap->data_length;
 			break;
 		default:
 			return (EINVAL);
@@ -936,8 +936,9 @@ vmmfs_pcislot_type0_append_capabilities(struct vmmfs_pcislot *slot)
 		case VMMFS_PCISLOT_CAP_BLOB:
 			type0->bytes[offset] = cap->id;
 			type0->bytes[offset + 1] = next;
+			type0->bytes[offset + 2] = 3 + cap->data_length;
 			bcopy(&value->cap_data[cap->data_offset],
-			    &type0->bytes[offset + 2], cap->data_length);
+			    &type0->bytes[offset + 3], cap->data_length);
 			break;
 		default:
 			return (EINVAL);
