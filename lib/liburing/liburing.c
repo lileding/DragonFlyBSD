@@ -191,12 +191,24 @@ io_uring_submit(struct io_uring *ring)
 			&ring->sq.sqes[head & ring->sq.ring_mask];
 		head++;
 
+		/* Unsupported per-SQE flags (IOSQE_IO_LINK/DRAIN/...) are not
+		 * implemented: fail honestly instead of silently dropping the
+		 * requested semantics. */
+		if (sqe->flags != 0) {
+			post_cqe(ring, sqe->user_data, -EOPNOTSUPP, 0);
+			continue;
+		}
+
 		switch (sqe->opcode) {
 		case IORING_OP_NOP:
 			post_cqe(ring, sqe->user_data, 0, 0);
 			break;
 		case IORING_OP_READ:
 		case IORING_OP_WRITE:
+			if (sqe->rw_flags != 0) {
+				post_cqe(ring, sqe->user_data, -EOPNOTSUPP, 0);
+				break;
+			}
 			subs[nsub].tag = sqe->user_data;
 			subs[nsub].opcode = (sqe->opcode == IORING_OP_READ) ?
 					     IO_READ : IO_WRITE;
@@ -225,6 +237,11 @@ io_uring_submit(struct io_uring *ring)
 
 	free(subs);
 	ring->sq.sqe_head = tail;
+	/* Surface a native submit error instead of reporting every SQE as
+	 * submitted and stranding the application on completions that will
+	 * never arrive. */
+	if (ret != 0)
+		return ret;
 	return (int)nr;
 }
 
@@ -255,7 +272,6 @@ io_uring_wait_cqe_nr(struct io_uring *ring, struct io_uring_cqe **cqe_ptr,
 		     unsigned wait_nr)
 {
 	struct io_completion comp;
-	struct timespec block = { 60, 0 };
 	unsigned ready;
 	int ret;
 
@@ -269,8 +285,10 @@ io_uring_wait_cqe_nr(struct io_uring *ring, struct io_uring_cqe **cqe_ptr,
 					*ring->cq.khead & ring->cq.ring_mask];
 			return 0;
 		}
+		/* Block indefinitely (NULL timeout): wait_cqe() must not give up
+		 * on its own after a fixed interval. */
 		ret = (int)syscall(SYS_ioevent, ring->ring_fd, NULL, 0,
-				   &comp, 1, &block);
+				   &comp, 1, NULL);
 		if (ret != 1)
 			return -errno;
 		post_cqe(ring, comp.tag,

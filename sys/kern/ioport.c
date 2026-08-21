@@ -55,6 +55,7 @@ struct ioport {
 	struct kqueue	 ip_kevent_kq;	/* helper kqueue for IO_KEVENT knotes */
 	LIST_HEAD(, io_req) ip_cancel_hash[IP_CANCEL_HASH_SIZE];
 	int		 ip_cq_count;	/* pending completions */
+	int		 ip_inflight;	/* accepted requests not yet posted to CQ */
 	int		 ip_nworkers;
 	int		 ip_closing;	/* refuse new submissions */
 };
@@ -199,7 +200,6 @@ ioport_close(struct file *fp)
 {
 	struct ioport *ip = (struct ioport *)fp->f_data;
 	struct io_req *req;
-	int slot, empty;
 
 	fp->f_data = NULL;
 
@@ -214,20 +214,16 @@ ioport_close(struct file *fp)
 	 * requests observe the flag at their XOP completion). */
 	ioport_cancel_all(ip);
 
-	/* Wait for every forward request to leave the cancel hash. */
+	/* Wait for every in-flight request to reach the completion queue.
+	 * ip_inflight counts accepted requests that have not yet been posted
+	 * to the CQ (ioport_post decrements it), so once it reaches zero every
+	 * request is in the CQ and the drain loop below reclaims it.  Waiting
+	 * for the cancel hash to empty instead would race io_req_begin_return()
+	 * (which leaves the hash before ioport_post() re-inserts the request
+	 * into the CQ). */
 	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
-	for (;;) {
-		empty = 1;
-		for (slot = 0; slot < IP_CANCEL_HASH_SIZE; slot++) {
-			if (!LIST_EMPTY(&ip->ip_cancel_hash[slot])) {
-				empty = 0;
-				break;
-			}
-		}
-		if (empty)
-			break;
+	while (ip->ip_inflight > 0)
 		lksleep(ip, &ip->ip_lock, 0, "iocclose", 0);
-	}
 	lockmgr(&ip->ip_lock, LK_RELEASE);
 
 	/* Drain all completions. */
@@ -338,6 +334,7 @@ ioport_post(struct io_req *req)
 	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
 	STAILQ_INSERT_TAIL(&ip->ip_cq, req, req_cq_link);
 	ip->ip_cq_count++;
+	ip->ip_inflight--;
 	wakeup(ip);
 	lockmgr(&ip->ip_lock, LK_RELEASE);
 
@@ -388,6 +385,7 @@ io_req_cancel_hash_add(struct ioport *ip, struct io_req *req)
 
 	lockmgr(&ip->ip_lock, LK_EXCLUSIVE);
 	LIST_INSERT_HEAD(&ip->ip_cancel_hash[slot], req, req_hash_link);
+	ip->ip_inflight++;
 	lockmgr(&ip->ip_lock, LK_RELEASE);
 }
 
@@ -509,13 +507,20 @@ io_cancel_kevent_hook(struct io_req *req)
 static void
 io_cancel_worker_hook(struct io_req *req)
 {
+	u_int pending = 0;
+
 	/* Pure-async ports have no taskqueue; nothing can be pending there. */
 	if (req->req_ioport->ip_tq == NULL)
 		return;
-	/* taskqueue_cancel() returns 0 when the task was still queued and has
-	 * been removed; EBUSY when the worker already picked it up (then the
-	 * trampoline sees req_cancel_requested and completes ECANCELED). */
-	if (taskqueue_cancel(req->req_ioport->ip_tq, &req->req_task, NULL) == 0) {
+	/* taskqueue_cancel() reports, via *pendp, how many times the task was
+	 * actually queued.  Only a still-queued task (pending > 0) has been
+	 * withdrawn and must be completed here.  A task that was never
+	 * TASK_INIT'd or enqueued (e.g. a native async read that never uses
+	 * the worker) reports 0 and must not be completed here -- its owner
+	 * observes req_cancel_requested at completion time.  A running task
+	 * reports 0 too and completes with its real result via the trampoline. */
+	taskqueue_cancel(req->req_ioport->ip_tq, &req->req_task, &pending);
+	if (pending > 0) {
 		req->req_error = ECANCELED;
 		req->req_result = 0;
 		io_return(req);
@@ -542,6 +547,11 @@ ioevent_submit(struct ioport *ip, const struct io_submit *submits, int nsubmits)
 static int
 ioevent_submit_one(struct ioport *ip, const struct io_submit *sub)
 {
+	/* Frozen ABI: unknown flag bits and reserved words must be zero. */
+	if (sub->flags != 0 || sub->reserved0 != 0 ||
+	    sub->reserved1[0] != 0 || sub->reserved1[1] != 0)
+		return (EINVAL);
+
 	switch (sub->opcode) {
 	case IO_CANCEL:
 		ioport_cancel(ip, sub->tag);	/* control marker, no completion */
@@ -611,6 +621,11 @@ ioevent_rw(struct ioport *ip, const struct io_submit *sub)
 	int error;
 
 	len = sub->args.rw.len;
+	/* A single request stages the whole buffer in kernel memory; bound it
+	 * so a malicious length cannot kmalloc() an absurd amount (the slab
+	 * allocator panics on oversized allocations). */
+	if (len > MAXPHYS * 8)
+		return (EMSGSIZE);
 	offset = (off_t)sub->args.rw.offset;
 
 	fp = holdfp(td, sub->fd, -1);
@@ -869,8 +884,7 @@ io_copyout_user(struct vmspace *vm, const void *src, void *uva, size_t len)
 		vm_page_t m;
 		int busy;
 
-		m = vm_fault_page(&vm->vm_map, pageno,
-				  VM_PROT_WRITE | VM_PROT_OVERRIDE_WRITE,
+		m = vm_fault_page(&vm->vm_map, pageno, VM_PROT_WRITE,
 				  VM_FAULT_NORMAL, &error, &busy);
 		if (error) {
 			error = EFAULT;
@@ -988,8 +1002,14 @@ ioevent_reap(struct ioport *ip, struct io_completion *completions,
 					timo);
 		}
 		lockmgr(&ip->ip_lock, LK_RELEASE);
-		if (error != 0)
+		if (error != 0) {
+			/* A signal interrupted the wait.  Do not let the syscall
+			 * framework restart it: the submit batch has already
+			 * been issued and must not be replayed. */
+			if (error == ERESTART)
+				error = EINTR;
 			break;
+		}
 	}
 
 	*res = total;
