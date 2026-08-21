@@ -37,6 +37,7 @@ static int vmmfs_pcislot_nremove(struct vop_nremove_args *);
 static int vmmfs_pcislot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_pcislot_open(struct vop_open_args *);
 static int vmmfs_pcislot_readdir(struct vop_readdir_args *);
+static int vmmfs_pcislot_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_read_item(struct vmmfs_pcislot *, uint64_t,
 	struct vmmfs_pcislot_item *);
@@ -71,6 +72,7 @@ struct vop_ops vmmfs_pcislot_vops = {
 	.vop_open = vmmfs_pcislot_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_pcislot_readdir,
+	.vop_inactive = vmmfs_pcislot_inactive,
 	.vop_reclaim = vmmfs_pcislot_reclaim,
 };
 
@@ -629,6 +631,26 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop && error == 0;
 	return (error);
+}
+
+static int
+vmmfs_pcislot_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_pcislot *slot;
+	struct vmmfs_pciroot *pciroot;
+	struct vmmfs_machine *machine;
+
+	slot = ap->a_vp->v_data;
+	if (slot == NULL || slot->pciroot == NULL ||
+	    slot->pciroot->machine == NULL)
+		return (0);
+	pciroot = slot->pciroot;
+	machine = pciroot->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &slot->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

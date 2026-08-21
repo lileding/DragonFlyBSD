@@ -34,6 +34,7 @@ static int vmmfs_memory_open(struct vop_open_args *);
 static int vmmfs_memory_read(struct vop_read_args *);
 static int vmmfs_memory_setattr(struct vop_setattr_args *);
 static int vmmfs_memory_write(struct vop_write_args *);
+static int vmmfs_memory_inactive(struct vop_inactive_args *);
 static int vmmfs_memory_reclaim(struct vop_reclaim_args *);
 static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
@@ -48,6 +49,7 @@ struct vop_ops vmmfs_memory_vops = {
 	.vop_open = vmmfs_memory_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_memory_read,
+	.vop_inactive = vmmfs_memory_inactive,
 	.vop_reclaim = vmmfs_memory_reclaim,
 	.vop_setattr = vmmfs_memory_setattr,
 	.vop_write = vmmfs_memory_write,
@@ -433,6 +435,23 @@ vmmfs_memory_write(struct vop_write_args *ap)
 	if (error != 0)
 		return (error);
 	return (vmmfs_memory_store(memory, buffer, length));
+}
+
+static int
+vmmfs_memory_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_memory *memory;
+	struct vmmfs_machine *machine;
+
+	memory = ap->a_vp->v_data;
+	if (memory == NULL)
+		return (0);
+	machine = memory->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &memory->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

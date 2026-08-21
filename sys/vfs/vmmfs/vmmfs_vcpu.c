@@ -29,6 +29,7 @@ static int vmmfs_vcpu_open(struct vop_open_args *);
 static int vmmfs_vcpu_read(struct vop_read_args *);
 static int vmmfs_vcpu_setattr(struct vop_setattr_args *);
 static int vmmfs_vcpu_write(struct vop_write_args *);
+static int vmmfs_vcpu_inactive(struct vop_inactive_args *);
 static int vmmfs_vcpu_reclaim(struct vop_reclaim_args *);
 static void vmmfs_vcpu_thread_main(void *);
 
@@ -41,6 +42,7 @@ struct vop_ops vmmfs_vcpu_vops = {
 	.vop_open = vmmfs_vcpu_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_vcpu_read,
+	.vop_inactive = vmmfs_vcpu_inactive,
 	.vop_reclaim = vmmfs_vcpu_reclaim,
 	.vop_setattr = vmmfs_vcpu_setattr,
 	.vop_write = vmmfs_vcpu_write,
@@ -206,7 +208,10 @@ failed:
 	for (index = 0; index < count; ++index) {
 		thread = &vcpu->threads[index];
 		if (thread->vcpu != NULL) {
-			KKASSERT(vmm_vcpu_destroy(thread->vcpu) == 0);
+			int destroy_error;
+
+			destroy_error = vmm_vcpu_destroy(thread->vcpu);
+			KKASSERT(destroy_error == 0);
 			thread->vcpu = NULL;
 		}
 		if (thread->thread != NULL) {
@@ -563,6 +568,23 @@ vmmfs_vcpu_write(struct vop_write_args *ap)
 	if (error != 0)
 		return (error);
 	return (vmmfs_vcpu_store(vcpu, buffer, length));
+}
+
+static int
+vmmfs_vcpu_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_vcpu *vcpu;
+	struct vmmfs_machine *machine;
+
+	vcpu = ap->a_vp->v_data;
+	if (vcpu == NULL)
+		return (0);
+	machine = vcpu->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &vcpu->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

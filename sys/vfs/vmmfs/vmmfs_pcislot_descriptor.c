@@ -78,6 +78,7 @@ static int vmmfs_pcislot_descriptor_getattr_lite(
 	struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_descriptor_open(struct vop_open_args *);
 static int vmmfs_pcislot_descriptor_read(struct vop_read_args *);
+static int vmmfs_pcislot_descriptor_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_descriptor_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_descriptor_setattr(struct vop_setattr_args *);
 static int vmmfs_pcislot_descriptor_write(struct vop_write_args *);
@@ -106,6 +107,7 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 	.vop_open = vmmfs_pcislot_descriptor_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_descriptor_read,
+	.vop_inactive = vmmfs_pcislot_descriptor_inactive,
 	.vop_reclaim = vmmfs_pcislot_descriptor_reclaim,
 	.vop_setattr = vmmfs_pcislot_descriptor_setattr,
 	.vop_write = vmmfs_pcislot_descriptor_write,
@@ -476,6 +478,25 @@ vmmfs_pcislot_descriptor_read(struct vop_read_args *ap)
 	error = uiomove(buffer + offset, length - (size_t)offset, ap->a_uio);
 	kfree(buffer, M_VMMFS);
 	return (error);
+}
+
+static int
+vmmfs_pcislot_descriptor_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_pcislot_descriptor *descriptor;
+	struct vmmfs_machine *machine;
+
+	descriptor = ap->a_vp->v_data;
+	if (descriptor == NULL || descriptor->slot == NULL ||
+	    descriptor->slot->pciroot == NULL)
+		return (0);
+	machine = descriptor->slot->pciroot->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &descriptor->vnode,
+	    ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

@@ -21,6 +21,7 @@ static int vmmfs_stopped_access(struct vop_access_args *);
 static int vmmfs_stopped_getattr(struct vop_getattr_args *);
 static int vmmfs_stopped_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_stopped_read(struct vop_read_args *);
+static int vmmfs_stopped_inactive(struct vop_inactive_args *);
 static int vmmfs_stopped_reclaim(struct vop_reclaim_args *);
 static int vmmfs_stopped_setattr(struct vop_setattr_args *);
 static int vmmfs_stopped_write(struct vop_write_args *);
@@ -34,6 +35,7 @@ struct vop_ops vmmfs_stopped_vops = {
 	.vop_open = vop_stdopen,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_stopped_read,
+	.vop_inactive = vmmfs_stopped_inactive,
 	.vop_reclaim = vmmfs_stopped_reclaim,
 	.vop_setattr = vmmfs_stopped_setattr,
 	.vop_write = vmmfs_stopped_write,
@@ -129,6 +131,23 @@ vmmfs_stopped_read(struct vop_read_args *ap)
 		return (ENOENT);
 	if (ap->a_uio->uio_offset < 0)
 		return (EINVAL);
+	return (0);
+}
+
+static int
+vmmfs_stopped_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_stopped *stopped;
+	struct vmmfs_machine *machine;
+
+	stopped = ap->a_vp->v_data;
+	if (stopped == NULL)
+		return (0);
+	machine = stopped->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &stopped->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 

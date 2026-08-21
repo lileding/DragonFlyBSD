@@ -33,6 +33,7 @@ static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_machine_open(struct vop_open_args *);
 static int vmmfs_machine_readdir(struct vop_readdir_args *);
+static int vmmfs_machine_inactive(struct vop_inactive_args *);
 static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
 static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_stop(struct vmmfs_machine *);
@@ -52,6 +53,7 @@ struct vop_ops vmmfs_machine_vops = {
 	.vop_open = vmmfs_machine_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_machine_readdir,
+	.vop_inactive = vmmfs_machine_inactive,
 	.vop_reclaim = vmmfs_machine_reclaim,
 };
 
@@ -213,6 +215,7 @@ vmmfs_machine_free(struct vmmfs_machine *machine)
 {
 	struct vmmfs_root *root;
 	bool root_counted;
+	int error;
 
 	KKASSERT(machine != NULL);
 	KKASSERT(machine->dead);
@@ -227,15 +230,24 @@ vmmfs_machine_free(struct vmmfs_machine *machine)
 	KKASSERT(machine->serialroot.vnode == NULL);
 	root = machine->root;
 	root_counted = machine->root_counted;
-	KKASSERT(vmmfs_stopped_destroy(&machine->stopped) == 0);
-	KKASSERT(vmmfs_loader_destroy(&machine->loader) == 0);
-	KKASSERT(vmmfs_memory_destroy(&machine->memory) == 0);
-	KKASSERT(vmmfs_vcpu_destroy(&machine->vcpu) == 0);
-	KKASSERT(vmmfs_serialroot_destroy(&machine->serialroot) == 0);
-	KKASSERT(vmmfs_rtc_destroy(&machine->rtc) == 0);
-	KKASSERT(vmmfs_platform_x64_destroy(&machine->platform) == 0);
-	KKASSERT(vmmfs_pciroot_destroy(&machine->pciroot) == 0);
-	KKASSERT(vmmfs_events_destroy(&machine->events) == 0);
+	error = vmmfs_stopped_destroy(&machine->stopped);
+	KKASSERT(error == 0);
+	error = vmmfs_loader_destroy(&machine->loader);
+	KKASSERT(error == 0);
+	error = vmmfs_memory_destroy(&machine->memory);
+	KKASSERT(error == 0);
+	error = vmmfs_vcpu_destroy(&machine->vcpu);
+	KKASSERT(error == 0);
+	error = vmmfs_serialroot_destroy(&machine->serialroot);
+	KKASSERT(error == 0);
+	error = vmmfs_rtc_destroy(&machine->rtc);
+	KKASSERT(error == 0);
+	error = vmmfs_platform_x64_destroy(&machine->platform);
+	KKASSERT(error == 0);
+	error = vmmfs_pciroot_destroy(&machine->pciroot);
+	KKASSERT(error == 0);
+	error = vmmfs_events_destroy(&machine->events);
+	KKASSERT(error == 0);
 	machine->root = NULL;
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
@@ -285,6 +297,22 @@ vmmfs_machine_is_dead(struct vmmfs_machine *machine)
 	dead = machine->dead;
 	lwkt_reltoken(&machine->token);
 	return (dead);
+}
+
+bool
+vmmfs_machine_vnode_detach(struct vmmfs_machine *machine,
+	struct vnode **vnodep, struct vnode *vnode)
+{
+	bool detached;
+
+	if (machine == NULL || vnodep == NULL || vnode == NULL)
+		return (false);
+	lwkt_gettoken(&machine->token);
+	detached = machine->dead && *vnodep == vnode;
+	if (detached)
+		*vnodep = NULL;
+	lwkt_reltoken(&machine->token);
+	return (detached);
 }
 
 static void
@@ -682,6 +710,20 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop;
 	return (error);
+}
+
+static int
+vmmfs_machine_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_machine *machine;
+
+	machine = ap->a_vp->v_data;
+	if (machine == NULL || !vmmfs_machine_vnode_detach(machine,
+	    &machine->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

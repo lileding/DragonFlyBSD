@@ -26,6 +26,7 @@ static int vmmfs_events_getattr(struct vop_getattr_args *);
 static int vmmfs_events_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_events_open(struct vop_open_args *);
 static int vmmfs_events_read(struct vop_read_args *);
+static int vmmfs_events_inactive(struct vop_inactive_args *);
 static int vmmfs_events_reclaim(struct vop_reclaim_args *);
 static int vmmfs_events_setattr(struct vop_setattr_args *);
 static int vmmfs_events_write(struct vop_write_args *);
@@ -39,6 +40,7 @@ struct vop_ops vmmfs_events_vops = {
 	.vop_open = vmmfs_events_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_events_read,
+	.vop_inactive = vmmfs_events_inactive,
 	.vop_reclaim = vmmfs_events_reclaim,
 	.vop_setattr = vmmfs_events_setattr,
 	.vop_write = vmmfs_events_write,
@@ -282,6 +284,23 @@ vmmfs_events_read(struct vop_read_args *ap)
 	events->length -= length;
 	lwkt_reltoken(&events->token);
 	return (uiomove(buffer, length, uio));
+}
+
+static int
+vmmfs_events_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_events *events;
+	struct vmmfs_machine *machine;
+
+	events = ap->a_vp->v_data;
+	if (events == NULL)
+		return (0);
+	machine = events->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &events->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

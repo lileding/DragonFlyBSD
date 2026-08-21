@@ -35,6 +35,7 @@ static int vmmfs_pcislot_config_getattr_lite(
 static int vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_pcislot_config_open(struct vop_open_args *);
 static int vmmfs_pcislot_config_read(struct vop_read_args *);
+static int vmmfs_pcislot_config_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_config_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_config_write(struct vop_write_args *);
 static void vmmfs_pcislot_config_filter_detach(struct knote *);
@@ -78,6 +79,7 @@ struct vop_ops vmmfs_pcislot_config_vops = {
 	.vop_open = vmmfs_pcislot_config_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_config_read,
+	.vop_inactive = vmmfs_pcislot_config_inactive,
 	.vop_reclaim = vmmfs_pcislot_config_reclaim,
 	.vop_write = vmmfs_pcislot_config_write,
 };
@@ -461,6 +463,24 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 		if (error != 0)
 			return (error);
 	}
+}
+
+static int
+vmmfs_pcislot_config_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_pcislot_config *config;
+	struct vmmfs_machine *machine;
+
+	config = ap->a_vp->v_data;
+	if (config == NULL || config->slot == NULL ||
+	    config->slot->pciroot == NULL)
+		return (0);
+	machine = config->slot->pciroot->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &config->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

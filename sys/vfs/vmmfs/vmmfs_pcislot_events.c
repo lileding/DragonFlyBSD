@@ -31,6 +31,7 @@ static int vmmfs_pcislot_events_getattr(struct vop_getattr_args *);
 static int vmmfs_pcislot_events_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_events_open(struct vop_open_args *);
 static int vmmfs_pcislot_events_read(struct vop_read_args *);
+static int vmmfs_pcislot_events_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *);
 
 struct vop_ops vmmfs_pcislot_events_vops = {
@@ -42,6 +43,7 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 	.vop_open = vmmfs_pcislot_events_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_events_read,
+	.vop_inactive = vmmfs_pcislot_events_inactive,
 	.vop_reclaim = vmmfs_pcislot_events_reclaim,
 };
 
@@ -288,6 +290,25 @@ vmmfs_pcislot_events_read(struct vop_read_args *ap)
 	state_node->length -= length;
 	lwkt_reltoken(&state_node->token);
 	return (uiomove(buffer, length, uio));
+}
+
+static int
+vmmfs_pcislot_events_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_pcislot_events *state_node;
+	struct vmmfs_machine *machine;
+
+	state_node = ap->a_vp->v_data;
+	if (state_node == NULL || state_node->slot == NULL ||
+	    state_node->slot->pciroot == NULL)
+		return (0);
+	machine = state_node->slot->pciroot->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &state_node->vnode,
+	    ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

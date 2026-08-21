@@ -73,6 +73,8 @@ void vmmfs_machine_free(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);
 void vmmfs_machine_put(struct vmmfs_machine *);
 bool vmmfs_machine_is_dead(struct vmmfs_machine *);
+bool vmmfs_machine_vnode_detach(struct vmmfs_machine *, struct vnode **,
+	struct vnode *);
 
 /* Synchronously forces a warm reset using the caller's credentials. */
 int vmmfs_machine_reset(struct vmmfs_machine *, struct ucred *);

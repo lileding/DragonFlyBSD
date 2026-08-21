@@ -38,6 +38,7 @@ static int vmmfs_serialroot_nremove(struct vop_nremove_args *);
 static int vmmfs_serialroot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_serialroot_open(struct vop_open_args *);
 static int vmmfs_serialroot_readdir(struct vop_readdir_args *);
+static int vmmfs_serialroot_inactive(struct vop_inactive_args *);
 static int vmmfs_serialroot_reclaim(struct vop_reclaim_args *);
 static int vmmfs_serialroot_read_item(struct vmmfs_serialroot *, uint64_t,
 	struct vmmfs_serialroot_item *);
@@ -55,6 +56,7 @@ struct vop_ops vmmfs_serialroot_vops = {
 	.vop_open = vmmfs_serialroot_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_serialroot_readdir,
+	.vop_inactive = vmmfs_serialroot_inactive,
 	.vop_reclaim = vmmfs_serialroot_reclaim,
 };
 
@@ -463,6 +465,24 @@ vmmfs_serialroot_readdir(struct vop_readdir_args *ap)
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop && error == 0;
 	return (error);
+}
+
+static int
+vmmfs_serialroot_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_serialroot *serialroot;
+	struct vmmfs_machine *machine;
+
+	serialroot = ap->a_vp->v_data;
+	if (serialroot == NULL || serialroot->machine == NULL)
+		return (0);
+	machine = serialroot->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &serialroot->vnode,
+	    ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

@@ -166,6 +166,7 @@ static int vmmfs_loader_open(struct vop_open_args *);
 static int vmmfs_loader_read(struct vop_read_args *);
 static int vmmfs_loader_setattr(struct vop_setattr_args *);
 static int vmmfs_loader_write(struct vop_write_args *);
+static int vmmfs_loader_inactive(struct vop_inactive_args *);
 static int vmmfs_loader_reclaim(struct vop_reclaim_args *);
 
 struct vop_ops vmmfs_loader_vops = {
@@ -177,6 +178,7 @@ struct vop_ops vmmfs_loader_vops = {
 	.vop_open = vmmfs_loader_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_loader_read,
+	.vop_inactive = vmmfs_loader_inactive,
 	.vop_reclaim = vmmfs_loader_reclaim,
 	.vop_setattr = vmmfs_loader_setattr,
 	.vop_write = vmmfs_loader_write,
@@ -1408,6 +1410,23 @@ vmmfs_loader_write(struct vop_write_args *ap)
 	if (error != 0)
 		return (error);
 	return (vmmfs_loader_store(loader, buffer, length));
+}
+
+static int
+vmmfs_loader_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_loader *loader;
+	struct vmmfs_machine *machine;
+
+	loader = ap->a_vp->v_data;
+	if (loader == NULL)
+		return (0);
+	machine = loader->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &loader->vnode, ap->a_vp))
+		return (0);
+	ap->a_vp->v_data = NULL;
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int

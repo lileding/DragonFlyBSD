@@ -56,6 +56,7 @@ static int vmmfs_pcislot_resource_getattr_lite(
 static int vmmfs_pcislot_resource_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_pcislot_resource_open(struct vop_open_args *);
 static int vmmfs_pcislot_resource_read(struct vop_read_args *);
+static int vmmfs_pcislot_resource_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_resource_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_resource_write(struct vop_write_args *);
 static int vmmfs_pcislot_resource_dev_open(struct dev_open_args *);
@@ -153,6 +154,7 @@ struct vop_ops vmmfs_pcislot_resource_vops = {
 	.vop_open = vmmfs_pcislot_resource_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_resource_read,
+	.vop_inactive = vmmfs_pcislot_resource_inactive,
 	.vop_reclaim = vmmfs_pcislot_resource_reclaim,
 	.vop_write = vmmfs_pcislot_resource_write,
 };
@@ -1453,6 +1455,28 @@ vmmfs_pcislot_resource_read(struct vop_read_args *ap)
 	--resource->kick_count;
 	lwkt_reltoken(&resource->token);
 	return (uiomove((caddr_t)&kick, sizeof(kick), uio));
+}
+
+static int
+vmmfs_pcislot_resource_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_pcislot_resource *resource;
+	struct vmmfs_pcislot_resources *resources;
+	struct vmmfs_machine *machine;
+
+	resource = ap->a_vp->v_data;
+	if (resource == NULL)
+		return (0);
+	resources = resource->resources;
+	machine = resource->machine;
+	if (!vmmfs_machine_vnode_detach(machine, &resource->vnode, ap->a_vp))
+		return (0);
+	resource->machine = NULL;
+	ap->a_vp->v_data = NULL;
+	if (resources != NULL)
+		vmmfs_pcislot_resources_drop(resources);
+	vmmfs_machine_put(machine);
+	return (0);
 }
 
 static int
