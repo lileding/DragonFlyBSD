@@ -78,7 +78,10 @@ struct io_req {
  * ioport core entry points used by the VFS async layer (fo_begin_io /
  * vop_begin_io).
  */
-void	io_return(struct io_req *req);
+void	io_return(struct io_req *req);		/* gated reverse entry */
+void	io_return_next(struct io_req *req);	/* re-entrant frame unwind */
+void	io_frame_push(struct io_req *req,
+		      void (*complete)(struct io_req *, void *), void *ctx);
 void	ioport_exec(struct io_req *req, void (*fn)(struct io_req *));
 void	io_rw_worker(struct io_req *req);	/* fo_read/fo_write on a worker */
 void	io_req_begin_forward(struct io_req *req,

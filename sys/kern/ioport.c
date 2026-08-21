@@ -98,8 +98,6 @@ static struct filterops ioport_kevent_filtops =
 	{ FILTEROP_ISFD | FILTEROP_MPSAFE, ioport_kevent_attach,
 	  ioport_kevent_detach, ioport_kevent_event };
 
-static void io_frame_push(struct io_req *req,
-			  void (*complete)(struct io_req *, void *), void *ctx) __unused;
 static struct io_frame *io_frame_pop(struct io_req *req);
 static void io_task_handler(void *context, int pending);
 static void ioport_post(struct io_req *req);
@@ -241,7 +239,7 @@ ioport_close(struct file *fp)
 	return (0);
 }
 
-static void
+void
 io_frame_push(struct io_req *req, void (*complete)(struct io_req *, void *),
 	      void *ctx)
 {
@@ -263,10 +261,23 @@ io_frame_pop(struct io_req *req)
 void
 io_return(struct io_req *req)
 {
-	struct io_frame *fr;
-
 	if (!io_req_begin_return(req))
 		return;		/* already returning (cancel/completion won) */
+	io_return_next(req);
+}
+
+/*
+ * Unwind one continuation frame and continue the reverse path.  Unlike
+ * io_return(), this does not re-run the completion gate: the gate has already
+ * been won by the first caller of io_return(), so frame completions call this
+ * to re-enter the frame stack safely.  Each popped frame may start further
+ * lower-level I/O and defer the return; when the stack is exhausted the
+ * request is posted to the completion queue.
+ */
+void
+io_return_next(struct io_req *req)
+{
+	struct io_frame *fr;
 
 	fr = io_frame_pop(req);
 	if (fr != NULL)
