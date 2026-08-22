@@ -31,6 +31,11 @@ static int vmmfs_vcpu_setattr(struct vop_setattr_args *);
 static int vmmfs_vcpu_write(struct vop_write_args *);
 static int vmmfs_vcpu_inactive(struct vop_inactive_args *);
 static int vmmfs_vcpu_reclaim(struct vop_reclaim_args *);
+static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *);
+static bool vmmfs_vcpu_is_reset_requested(struct vmmfs_vcpu *);
+static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *);
+static void vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *);
+static void vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_main(void *);
 
 struct vop_ops vmmfs_vcpu_vops = {
@@ -57,7 +62,9 @@ vmmfs_vcpu_load(struct vmmfs_vcpu *vcpu, char *buffer, size_t capacity,
 
 	if (vcpu == NULL || vmmfs_machine_is_dead(vcpu->machine))
 		return (ENOENT);
-	count = vcpu->machine->spec.vcpu.count;
+	lwkt_gettoken(&vcpu->machine->token);
+	count = vcpu->count;
+	lwkt_reltoken(&vcpu->machine->token);
 	result = ksnprintf(buffer, capacity, "%u\n", count);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -94,22 +101,21 @@ vmmfs_vcpu_store(struct vmmfs_vcpu *vcpu, const char *buffer, size_t length)
 		lwkt_reltoken(&vcpu->machine->token);
 		return (ENOENT);
 	}
-	if (!vcpu->machine->stopped.expect_stopped ||
-	    vcpu->machine->machine != NULL) {
+	if (vcpu->machine->machine != NULL) {
 		lwkt_reltoken(&vcpu->machine->token);
 		return (EBUSY);
 	}
-	vcpu->machine->spec.vcpu.count = (uint32_t)value;
+	vcpu->count = (uint32_t)value;
 	lwkt_reltoken(&vcpu->machine->token);
 	return (0);
 }
 
 int
-vmmfs_vcpu_create(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
+vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 {
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
-	int error;
+	int error = 0;
 
 	bzero(vcpu, sizeof(*vcpu));
 	vcpu->machine = machine;
@@ -133,7 +139,7 @@ vmmfs_vcpu_create(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 }
 
 int
-vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
+vmmfs_vcpu_fini(struct vmmfs_vcpu *vcpu)
 {
 	if (vcpu == NULL)
 		return (EINVAL);
@@ -150,27 +156,24 @@ vmmfs_vcpu_destroy(struct vmmfs_vcpu *vcpu)
 }
 
 int
-vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
+vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
+	vmm_machine_t machine,
 	const struct vmm_cpustate *bsp_state)
 {
 	struct vmmfs_vcpu_thread *thread;
-	char thread_name[sizeof("vmm999999-vcpu99")];
-	uint32_t count;
+	char thread_name[sizeof("vmm4294967295-vcpu4294967295")];
 	uint32_t index;
 	int error;
 
 	if (vcpu == NULL || machine == NULL || bsp_state == NULL ||
 	    vcpu->threads != NULL)
 		return (EINVAL);
-	count = vcpu->machine->spec.vcpu.count;
 	if (count == 0 || count > VMMFS_MACHINE_INDEX_MAX + 1)
 		return (ERANGE);
 	thread = kmalloc(sizeof(*thread) * count, M_VMMFS, M_WAITOK | M_ZERO);
+	lwkt_gettoken(&vcpu->token);
 	vcpu->threads = thread;
 	vcpu->runtime_machine = machine;
-	vcpu->count = count;
-	lwkt_gettoken(&vcpu->token);
-	vcpu->stop_requested = false;
 	lwkt_reltoken(&vcpu->token);
 
 	/* Create every LWKT paused so no vCPU can observe partial setup. */
@@ -179,7 +182,7 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 		thread->group = vcpu;
 		thread->index = index;
 		error = ksnprintf(thread_name, sizeof(thread_name),
-		    "vmm%6u-vcpu%02u", vcpu->machine->id, index);
+		    "vmm%u-vcpu%u", vcpu->machine->id, index);
 		if (error < 0 || (size_t)error >= sizeof(thread_name)) {
 			error = EOVERFLOW;
 			goto failed;
@@ -194,7 +197,18 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	vcpu->threads[0].state = *bsp_state;
 	for (index = 0; index < count; ++index) {
 		thread = &vcpu->threads[index];
-		error = vmm_vcpu_create(machine, &thread->state, &thread->vcpu);
+		{
+			vmm_vcpu_t created_vcpu;
+
+			created_vcpu = NULL;
+			error = vmm_vcpu_create(machine, &thread->state,
+			    &created_vcpu);
+			if (error == 0) {
+				lwkt_gettoken(&vcpu->token);
+				thread->vcpu = created_vcpu;
+				lwkt_reltoken(&vcpu->token);
+			}
+		}
 		if (error != 0)
 			goto failed;
 		error = vmm_vcpu_set_memory_exit_mode(thread->vcpu,
@@ -226,57 +240,260 @@ failed:
 		}
 	}
 	kfree(vcpu->threads, M_VMMFS);
+	lwkt_gettoken(&vcpu->token);
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
-	vcpu->count = 0;
+	lwkt_reltoken(&vcpu->token);
 	return (error);
 }
 
-int
-vmmfs_vcpu_stop(struct vmmfs_vcpu *vcpu)
+void
+vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 {
+	uint32_t index;
+
+	if (vcpu == NULL)
+		return;
+	lwkt_gettoken(&vcpu->token);
+	vcpu->stop_requested = true;
+	vcpu->reset_requested = false;
+	for (index = 0; index < vcpu->count; ++index) {
+		if (vcpu->threads == NULL)
+			break;
+		if (vcpu->threads[index].vcpu != NULL)
+			(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+		if (vcpu->threads[index].wait_channel != NULL)
+			wakeup(vcpu->threads[index].wait_channel);
+	}
+	lwkt_reltoken(&vcpu->token);
+}
+
+void
+vmmfs_vcpu_request_reset(struct vmmfs_vcpu *vcpu)
+{
+	uint32_t index;
+
+	if (vcpu == NULL)
+		return;
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->stop_requested || vcpu->reset_requested) {
+		lwkt_reltoken(&vcpu->token);
+		return;
+	}
+	vcpu->reset_requested = true;
+	if (vcpu->threads != NULL) {
+		for (index = 0; index < vcpu->count; ++index) {
+			if (vcpu->threads[index].vcpu != NULL)
+				(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+		}
+	}
+	lwkt_reltoken(&vcpu->token);
+}
+
+int
+vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
+	const struct vmm_cpustate *bsp_state)
+{
+	struct vmmfs_vcpu_thread *thread;
 	uint32_t index;
 	int error;
 
-	if (vcpu == NULL)
+	if (vcpu == NULL || machine == NULL || bsp_state == NULL ||
+	    vcpu->threads == NULL)
 		return (EINVAL);
-	if (vcpu->threads == NULL)
-		return (0);
-	lwkt_gettoken(&vcpu->token);
-	vcpu->stop_requested = true;
-	lwkt_reltoken(&vcpu->token);
 	for (index = 0; index < vcpu->count; ++index) {
-		if (vcpu->threads[index].vcpu != NULL) {
-			(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+		thread = &vcpu->threads[index];
+		if (thread->vcpu != NULL)
+			return (EBUSY);
+		bzero(&thread->state, sizeof(thread->state));
+		if (index == 0)
+			thread->state = *bsp_state;
+		error = vmm_vcpu_create(machine, &thread->state, &thread->vcpu);
+		if (error != 0)
+			goto failed;
+		error = vmm_vcpu_set_memory_exit_mode(thread->vcpu,
+		    VMM_MEMORY_EXIT_EMULATE);
+		if (error != 0)
+			goto failed;
+	}
+	lwkt_gettoken(&vcpu->token);
+	if (vcpu->stop_requested) {
+		lwkt_reltoken(&vcpu->token);
+		error = EINTR;
+		goto failed;
+	}
+	vcpu->runtime_machine = machine;
+	vcpu->reset_requested = false;
+	vcpu->reset_waiting = 0;
+	for (index = 1; index < vcpu->count; ++index) {
+		if (vcpu->threads[index].wait_channel != NULL) {
+			wakeup(vcpu->threads[index].wait_channel);
+			vcpu->threads[index].wait_channel = NULL;
 		}
 	}
-	lwkt_gettoken(&vcpu->token);
-	while (vcpu->active_count != 0) {
-		tsleep_interlock(vcpu, 0);
-		if (vcpu->active_count != 0)
-			(void)tsleep(vcpu, PINTERLOCKED, "vmmvstop", 0);
-	}
 	lwkt_reltoken(&vcpu->token);
+	return (0);
+
+failed:
 	for (index = 0; index < vcpu->count; ++index) {
-		if (vcpu->threads[index].vcpu != NULL) {
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u stopped rip=%#jx rcx=%#jx rsi=%#jx rdi=%#jx",
-			    index,
-			    (uintmax_t)vcpu->threads[index].state.gprs[VMM_X64_GPR_RIP],
-			    (uintmax_t)vcpu->threads[index].state.gprs[VMM_X64_GPR_RCX],
-			    (uintmax_t)vcpu->threads[index].state.gprs[VMM_X64_GPR_RSI],
-			    (uintmax_t)vcpu->threads[index].state.gprs[VMM_X64_GPR_RDI]);
-			error = vmm_vcpu_destroy(vcpu->threads[index].vcpu);
-			if (error != 0)
-				return (error);
-			vcpu->threads[index].vcpu = NULL;
-		}
+		thread = &vcpu->threads[index];
+		if (thread->vcpu == NULL)
+			continue;
+		(void)vmm_vcpu_destroy(thread->vcpu);
+		thread->vcpu = NULL;
 	}
-	kfree(vcpu->threads, M_VMMFS);
+	return (error);
+}
+
+static bool
+vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *vcpu)
+{
+	bool requested;
+
+	lwkt_gettoken(&vcpu->token);
+	requested = vcpu->stop_requested;
+	lwkt_reltoken(&vcpu->token);
+	return (requested);
+}
+
+static bool
+vmmfs_vcpu_is_reset_requested(struct vmmfs_vcpu *vcpu)
+{
+	bool requested;
+
+	lwkt_gettoken(&vcpu->token);
+	requested = vcpu->reset_requested;
+	lwkt_reltoken(&vcpu->token);
+	return (requested);
+}
+
+static void
+vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *thread)
+{
+	vmm_vcpu_t vcpu;
+	int error;
+
+	lwkt_gettoken(&thread->group->token);
+	vcpu = thread->vcpu;
+	lwkt_reltoken(&thread->group->token);
+	if (vcpu == NULL)
+		return;
+	error = vmm_vcpu_destroy(vcpu);
+	KKASSERT(error == 0);
+	lwkt_gettoken(&thread->group->token);
+	KKASSERT(thread->vcpu == vcpu);
+	thread->vcpu = NULL;
+	lwkt_reltoken(&thread->group->token);
+}
+
+static void
+vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
+{
+	struct vmmfs_vcpu *vcpu;
+	struct vmmfs_machine *machine;
+	struct vmmfs_vcpu_thread *threads;
+	vmm_machine_t runtime_machine;
+	vmm_vcpu_t bsp_vcpu;
+	void *channel;
+
+	vcpu = thread->group;
+	machine = vcpu->machine;
+	if (thread->index != 0) {
+		vmmfs_vcpu_thread_destroy(thread);
+		lwkt_gettoken(&vcpu->token);
+		KKASSERT(vcpu->active_count > 1);
+		--vcpu->active_count;
+		bsp_vcpu = vcpu->threads[0].vcpu;
+		channel = bsp_vcpu != NULL ? bsp_vcpu :
+		    vcpu->threads[0].wait_channel;
+		lwkt_reltoken(&vcpu->token);
+		wakeup(channel);
+		lwkt_exit();
+	}
+
+	vmmfs_vcpu_request_stop(vcpu);
+	for (;;) {
+		channel = thread->vcpu != NULL ? thread->vcpu : thread->wait_channel;
+		tsleep_interlock(channel, 0);
+		lwkt_gettoken(&vcpu->token);
+		if (vcpu->active_count == 1) {
+			lwkt_reltoken(&vcpu->token);
+			break;
+		}
+		lwkt_reltoken(&vcpu->token);
+		(void)tsleep(channel, PINTERLOCKED, "vmmfsstop", 0);
+	}
+	vmmfs_vcpu_thread_destroy(thread);
+	lwkt_gettoken(&vcpu->token);
+	KKASSERT(vcpu->active_count == 1);
+	threads = vcpu->threads;
+	runtime_machine = vcpu->runtime_machine;
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
-	vcpu->count = 0;
-	return (0);
+	vcpu->active_count = 0;
+	vcpu->reset_waiting = 0;
+	vcpu->stop_requested = false;
+	vcpu->reset_requested = false;
+	lwkt_reltoken(&vcpu->token);
+	kfree(threads, M_VMMFS);
+	vmmfs_machine_vcpu_stopped(machine);
+	lwkt_exit();
+}
+
+static void
+vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
+{
+	struct vmmfs_vcpu *vcpu;
+	void *channel;
+	int error;
+
+	vcpu = thread->group;
+	if (thread->index != 0) {
+		channel = thread->vcpu;
+		vmmfs_vcpu_thread_destroy(thread);
+		lwkt_gettoken(&vcpu->token);
+		thread->wait_channel = channel;
+		++vcpu->reset_waiting;
+		wakeup(vcpu->threads[0].vcpu);
+		lwkt_reltoken(&vcpu->token);
+		for (;;) {
+			tsleep_interlock(channel, 0);
+			lwkt_gettoken(&vcpu->token);
+			if (!vcpu->reset_requested || vcpu->stop_requested) {
+				thread->wait_channel = NULL;
+				lwkt_reltoken(&vcpu->token);
+				break;
+			}
+			lwkt_reltoken(&vcpu->token);
+			(void)tsleep(channel, PINTERLOCKED, "vmmfsreset", 0);
+		}
+		return;
+	}
+
+	for (;;) {
+		tsleep_interlock(thread->vcpu, 0);
+		lwkt_gettoken(&vcpu->token);
+		if (vcpu->stop_requested ||
+		    vcpu->reset_waiting == vcpu->count - 1) {
+			lwkt_reltoken(&vcpu->token);
+			break;
+		}
+		lwkt_reltoken(&vcpu->token);
+		(void)tsleep(thread->vcpu, PINTERLOCKED, "vmmfsreset", 0);
+	}
+	if (vmmfs_vcpu_is_stop_requested(vcpu))
+		return;
+	thread->wait_channel = thread->vcpu;
+	vmmfs_vcpu_thread_destroy(thread);
+	error = vmmfs_machine_vcpu_reset(vcpu->machine);
+	if (error != 0) {
+		vmmfs_events_log(&vcpu->machine->events,
+		    "warm reset failed error=%d", error);
+		vmmfs_vcpu_request_stop(vcpu);
+		return;
+	}
+	vmmfs_events_log(&vcpu->machine->events, "warm reset completed");
+	thread->wait_channel = NULL;
 }
 
 static void
@@ -289,68 +506,41 @@ vmmfs_vcpu_thread_main(void *argument)
 		.type = VMM_CPUEVENT_EXCP,
 		.vector = VMM_X64_EXCEPTION_GP,
 	};
-	bool stop_requested;
 	int error = 0;
 
 	thread = argument;
 	vcpu = thread->group;
 	lwkt_setpri_self(TDPRI_USER_NORM);
-	KKASSERT(thread->vcpu != NULL);
 	for (;;) {
-		lwkt_gettoken(&vcpu->token);
-		stop_requested = vcpu->stop_requested;
-		lwkt_reltoken(&vcpu->token);
-		if (stop_requested)
+		if (vmmfs_vcpu_is_stop_requested(vcpu))
 			break;
-
+		if (vmmfs_vcpu_is_reset_requested(vcpu)) {
+			vmmfs_vcpu_thread_reset(thread);
+			continue;
+		}
+		KKASSERT(thread->vcpu != NULL);
 		exit = NULL;
 		error = vmm_vcpu_run(thread->vcpu, &exit);
-
-		lwkt_gettoken(&vcpu->token);
-		/*
-		 * SVM uses ERESTART when DragonFly has pending root work.
-		 * Unlike the NVMM ioctl path, this is a pure kernel LWKT.  Use
-		 * the kernel yield path so a stale LWKT reschedule request is
-		 * consumed before attempting VMRUN again.
-		 */
 		if (error == ERESTART) {
-			lwkt_reltoken(&vcpu->token);
 			lwkt_yield_quick();
 			continue;
 		}
-		if (error == EINTR) {
-			stop_requested = vcpu->stop_requested;
-			lwkt_reltoken(&vcpu->token);
-			if (stop_requested)
-				goto out;
+		if (error == EINTR)
 			continue;
-		}
-		if (error != 0) {
-			lwkt_reltoken(&vcpu->token);
-			goto out;
-		}
-		if (exit == NULL) {
-			error = EIO;
-			lwkt_reltoken(&vcpu->token);
+		if (error != 0 || exit == NULL) {
+			if (error == 0)
+				error = EIO;
 			goto out;
 		}
 
 		switch (exit->reason) {
 		case VMM_CPUEXIT_NONE:
-			lwkt_reltoken(&vcpu->token);
 			continue;
-		case VMM_CPUEXIT_NMI_READY:
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unexpected nmi-ready exit", thread->index);
-			lwkt_reltoken(&vcpu->token);
-			goto out;
 		case VMM_CPUEXIT_RDMSR:
 		case VMM_CPUEXIT_WRMSR:
-			lwkt_reltoken(&vcpu->token);
 			error = vmm_vcpu_inject(thread->vcpu, &exception);
-			if (error == 0) {
+			if (error == 0)
 				continue;
-			}
 			vmmfs_events_log(&vcpu->machine->events,
 			    "vcpu%u %s inject-gp failed error=%d", thread->index,
 			    exit->reason == VMM_CPUEXIT_RDMSR ? "rdmsr" : "wrmsr",
@@ -363,106 +553,57 @@ vmmfs_vcpu_thread_main(void *argument)
 				    "vcpu%u halted rip=%#jx", thread->index,
 				    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
 			}
-			lwkt_reltoken(&vcpu->token);
 			error = vmm_vcpu_wait(thread->vcpu);
-			if (error == 0)
+			if (error == 0 || error == EINTR)
 				continue;
 			goto out;
 		case VMM_CPUEXIT_MONITOR:
-			if (exit->u.insn.npc == 0) {
-				vmmfs_events_log(&vcpu->machine->events,
-				    "vcpu%u monitor missing-npc", thread->index);
-				lwkt_reltoken(&vcpu->token);
-				goto out;
-			}
-			thread->state.gprs[VMM_X64_GPR_RIP] = exit->u.insn.npc;
-			lwkt_reltoken(&vcpu->token);
-			continue;
 		case VMM_CPUEXIT_MWAIT:
 			if (exit->u.insn.npc == 0) {
-				vmmfs_events_log(&vcpu->machine->events,
-				    "vcpu%u mwait missing-npc", thread->index);
-				lwkt_reltoken(&vcpu->token);
+				error = EIO;
 				goto out;
 			}
 			thread->state.gprs[VMM_X64_GPR_RIP] = exit->u.insn.npc;
-			lwkt_reltoken(&vcpu->token);
+			if (exit->reason == VMM_CPUEXIT_MONITOR)
+				continue;
 			error = vmm_vcpu_wait(thread->vcpu);
-			if (error == 0)
+			if (error == 0 || error == EINTR)
 				continue;
 			goto out;
 		case VMM_CPUEXIT_IO:
-			lwkt_reltoken(&vcpu->token);
 			error = vmmfs_pciroot_io(&vcpu->machine->pciroot,
 			    thread, &thread->state, exit);
 			if (error == 0)
 				continue;
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unhandled pio %s port=%#x width=%u str=%d rep=%d rip=%#jx",
-			    thread->index, exit->u.io.in ? "read" : "write",
-			    exit->u.io.port, exit->u.io.operand_size, exit->u.io.str,
-			    exit->u.io.rep,
-			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
 			goto out;
 		case VMM_CPUEXIT_MEMORY:
-			lwkt_reltoken(&vcpu->token);
 			error = vmmfs_pciroot_memory(&vcpu->machine->pciroot,
 			    thread, exit);
 			if (error == 0)
 				continue;
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unhandled memory gpa=%#jx prot=%#x width=%u value=%#jx rip=%#jx error=%d",
-			    thread->index, (uintmax_t)exit->u.mem.gpa,
-			    exit->u.mem.prot, exit->u.mem.width,
-			    (uintmax_t)exit->u.mem.value,
-			    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP], error);
 			goto out;
 		case VMM_CPUEXIT_SHUTDOWN:
 			vmmfs_events_log(&vcpu->machine->events,
 			    "vcpu%u guest shutdown", thread->index);
-			lwkt_reltoken(&vcpu->token);
-			goto out;
-		case VMM_CPUEXIT_INT_READY:
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unexpected interrupt-ready exit", thread->index);
-			lwkt_reltoken(&vcpu->token);
-			goto out;
-		case VMM_CPUEXIT_TPR_CHANGED:
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unexpected tpr-changed exit", thread->index);
-			lwkt_reltoken(&vcpu->token);
-			goto out;
-		case VMM_CPUEXIT_CPUID:
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unhandled cpuid exit", thread->index);
-			lwkt_reltoken(&vcpu->token);
-			goto out;
-		case VMM_CPUEXIT_INVALID:
-			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u invalid exit hwcode=%#jx", thread->index,
-			    (uintmax_t)exit->u.inv.hwcode);
-			lwkt_reltoken(&vcpu->token);
+			error = 0;
 			goto out;
 		default:
 			vmmfs_events_log(&vcpu->machine->events,
 			    "vcpu%u unsupported exit reason=%#jx", thread->index,
 			    (uintmax_t)exit->reason);
-			lwkt_reltoken(&vcpu->token);
+			error = EIO;
 			goto out;
 		}
 	}
 
 out:
-	lwkt_gettoken(&vcpu->token);
-	if (error != 0 && error != EINTR && error != ERESTART &&
-	    !vcpu->stop_requested) {
+	if (error != 0 && !vmmfs_vcpu_is_stop_requested(vcpu)) {
 		vmmfs_events_log(&vcpu->machine->events,
 		    "vcpu%u failed error=%d", thread->index, error);
 	}
-	KKASSERT(vcpu->active_count != 0);
-	--vcpu->active_count;
-	wakeup(vcpu);
-	lwkt_reltoken(&vcpu->token);
+	if (!vmmfs_vcpu_is_stop_requested(vcpu))
+		(void)vmmfs_machine_stop_request(vcpu->machine, "guest-exit");
+	vmmfs_vcpu_thread_stop(thread);
 }
 
 static int

@@ -238,7 +238,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	resource = &resources->items[index++];
 	resource->resources = resources;
 	resource->kind = VMMFS_PCISLOT_RESOURCE_DMA;
-	resource->size = slot->pciroot->machine->spec.memory.size;
+	resource->size = slot->pciroot->machine->memory.size;
 	for (doorbell = 0; doorbell < VMMFS_PCISLOT_MAX_DOORBELLS;
 	    ++doorbell) {
 		if (!value->doorbells[doorbell].present)
@@ -298,6 +298,7 @@ fail:
 int
 vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 {
+	struct vm_object *pager_object;
 	struct vmmfs_pcislot_resource *resource;
 	size_t index;
 
@@ -309,6 +310,18 @@ vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 	for (index = 0; index < resources->count; ++index) {
 		resource = &resources->items[index];
 		vmmfs_pcislot_resource_revoke(resource);
+		/*
+		 * cdev_pager_allocate() holds resources through its ctor.  Drop
+		 * our object reference after revoke so that reference cannot form
+		 * a cycle with the final resources destructor.  Existing mappings
+		 * retain their own object reference and still fault as revoked.
+		 */
+		lwkt_gettoken(&resource->token);
+		pager_object = resource->pager_object;
+		resource->pager_object = NULL;
+		lwkt_reltoken(&resource->token);
+		if (pager_object != NULL)
+			vm_object_deallocate(pager_object);
 	}
 	for (index = 0; index < resources->count; ++index)
 		vmmfs_vnode_discard(resources->items[index].vnode);
@@ -322,6 +335,87 @@ vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 	resources->slot = NULL;
 	vmmfs_pcislot_resources_drop(resources);
 	return (0);
+}
+
+int
+vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *resources,
+	vmm_machine_t machine)
+{
+	struct vmmfs_pcislot_resource *resource;
+	struct vmspace *new_vmspace;
+	size_t index;
+	int error;
+
+	if (resources == NULL || machine == NULL || resources->destroying ||
+	    !resources->powered || resources->slot == NULL ||
+	    resources->slot->pciroot == NULL)
+		return (EINVAL);
+	if (resources->machine != NULL)
+		return (EBUSY);
+	new_vmspace = resources->slot->pciroot->machine->memory.run_vmspace;
+	if (new_vmspace == NULL)
+		return (ENXIO);
+	for (index = 0; index < resources->count; ++index) {
+		resource = &resources->items[index];
+		if (resource->kind != VMMFS_PCISLOT_RESOURCE_DMA)
+			continue;
+		lwkt_gettoken(&resource->token);
+		if (resource->vmspace != NULL) {
+			lwkt_reltoken(&resource->token);
+			return (EBUSY);
+		}
+		vmspace_ref(new_vmspace);
+		resource->vmspace = new_vmspace;
+		lwkt_reltoken(&resource->token);
+		break;
+	}
+	resources->machine = machine;
+	for (index = 0; index < resources->count; ++index) {
+		resource = &resources->items[index];
+		if (!resource->mapped)
+			continue;
+		error = vmmfs_pcislot_resource_install_traps(resource);
+		if (error == 0)
+			continue;
+		while (index-- != 0)
+			vmmfs_pcislot_resource_remove_traps(&resources->items[index]);
+		resources->machine = NULL;
+		return (error);
+	}
+	return (0);
+}
+
+void
+vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *resources)
+{
+	struct vmmfs_pcislot_resource *resource;
+	struct vmspace *vmspace;
+	size_t index;
+
+	if (resources == NULL || resources->machine == NULL)
+		return;
+	for (index = 0; index < resources->count; ++index) {
+		resource = &resources->items[index];
+		if (resource->mapped)
+			vmmfs_pcislot_resource_remove_traps(resource);
+		if (resource->kind != VMMFS_PCISLOT_RESOURCE_DMA)
+			continue;
+		lwkt_gettoken(&resource->token);
+		vmspace = resource->vmspace;
+		resource->vmspace = NULL;
+		lwkt_reltoken(&resource->token);
+		if (vmspace != NULL)
+			vmspace_rel(vmspace);
+		/*
+		 * Existing DMA mappings may still cache pages obtained from the old
+		 * guest vmspace.  Keep the provider session alive for warm reset,
+		 * but discard those pages before that vmspace can be released.
+		 * Subsequent accesses fault through the same pager after rebind.
+		 */
+		if (resource->pager_object != NULL)
+			vm_object_page_remove(resource->pager_object, 0, 0, FALSE);
+	}
+	resources->machine = NULL;
 }
 
 struct vmmfs_pcislot_resource *
@@ -1467,15 +1561,21 @@ vmmfs_pcislot_resource_inactive(struct vop_inactive_args *ap)
 	resource = ap->a_vp->v_data;
 	if (resource == NULL)
 		return (0);
+	lwkt_gettoken(&resource->token);
+	if (!resource->revoked || resource->vnode != ap->a_vp) {
+		lwkt_reltoken(&resource->token);
+		return (0);
+	}
 	resources = resource->resources;
 	machine = resource->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &resource->vnode, ap->a_vp))
-		return (0);
+	resource->vnode = NULL;
 	resource->machine = NULL;
 	ap->a_vp->v_data = NULL;
+	lwkt_reltoken(&resource->token);
 	if (resources != NULL)
 		vmmfs_pcislot_resources_drop(resources);
-	vmmfs_machine_put(machine);
+	if (machine != NULL)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -1569,22 +1669,30 @@ vmmfs_pcislot_resource_dev_mmap_single(struct dev_mmap_single_args *ap)
 	if (ap == NULL || ap->a_head.a_dev == NULL)
 		return (EINVAL);
 	resource = ap->a_head.a_dev->si_drv1;
-	if (!vmmfs_pcislot_resource_enabled(resource) ||
-	    resource->pager_object == NULL ||
-	    (ap->a_nprot & VM_PROT_EXECUTE) != 0)
+	if (resource == NULL || (ap->a_nprot & VM_PROT_EXECUTE) != 0)
 		return (EINVAL);
+	lwkt_gettoken(&resource->token);
+	if (!vmmfs_pcislot_resource_enabled(resource) ||
+	    resource->pager_object == NULL) {
+		lwkt_reltoken(&resource->token);
+		return (EINVAL);
+	}
 	offset = *ap->a_offset;
 	if (offset < 0 || offset > resource->mapping_size ||
-	    ap->a_size > resource->mapping_size - offset)
+	    ap->a_size > resource->mapping_size - offset) {
+		lwkt_reltoken(&resource->token);
 		return (EINVAL);
+	}
 	object = resource->pager_object;
 	VM_OBJECT_LOCK(object);
 	if (resource->revoked) {
 		VM_OBJECT_UNLOCK(object);
+		lwkt_reltoken(&resource->token);
 		return (EINVAL);
 	}
 	vm_object_reference_locked(object);
 	VM_OBJECT_UNLOCK(object);
+	lwkt_reltoken(&resource->token);
 	*ap->a_object = object;
 	return (0);
 }

@@ -6,6 +6,8 @@
 #ifndef VMMFS_PCISLOT_EVENTS_H
 #define VMMFS_PCISLOT_EVENTS_H
 
+#include <sys/time.h>
+#include <sys/event.h>
 #include <sys/thread.h>
 #include <sys/types.h>
 
@@ -20,6 +22,7 @@ struct vmmfs_pcislot_events {
 	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
+	struct kqinfo kq;
 	char *buffer;
 	size_t start;
 	size_t length;
@@ -30,9 +33,9 @@ struct vmmfs_pcislot_events {
 
 extern struct vop_ops vmmfs_pcislot_events_vops;
 
-int vmmfs_pcislot_events_create(struct vmmfs_pcislot *,
+int vmmfs_pcislot_events_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_events *);
-int vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *);
+int vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *, const char *, ...);
 

@@ -6,6 +6,8 @@
 #ifndef VMMFS_EVENTS_H
 #define VMMFS_EVENTS_H
 
+#include <sys/time.h>
+#include <sys/event.h>
 #include <sys/thread.h>
 #include <sys/types.h>
 
@@ -20,6 +22,7 @@ struct vmmfs_events {
 	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
+	struct kqinfo kq;
 	char *buffer;
 	size_t start;
 	size_t length;
@@ -30,8 +33,8 @@ struct vmmfs_events {
 
 extern struct vop_ops vmmfs_events_vops;
 
-int vmmfs_events_create(struct vmmfs_machine *, struct vmmfs_events *);
-int vmmfs_events_destroy(struct vmmfs_events *);
+int vmmfs_events_init(struct vmmfs_machine *, struct vmmfs_events *);
+int vmmfs_events_fini(struct vmmfs_events *);
 void vmmfs_events_revoke(struct vmmfs_events *);
 void vmmfs_events_log(struct vmmfs_events *, const char *, ...);
 

@@ -24,6 +24,7 @@ struct vmmfs_serialroot;
 /* Runtime x86 platform PIO state owned by one vmmfs machine. */
 struct vmmfs_platform_x64 {
 	struct vmmfs_machine *machine;
+	struct lwkt_token token;
 	vmm_machine_t runtime_machine;
 	uint64_t tsc_base;
 	uint16_t pm1_status;
@@ -39,9 +40,9 @@ struct vmmfs_platform_x64 {
 	vmm_io_t fallback_write;
 };
 
-int vmmfs_platform_x64_create(struct vmmfs_machine *,
+int vmmfs_platform_x64_init(struct vmmfs_machine *,
 	struct vmmfs_platform_x64 *);
-int vmmfs_platform_x64_destroy(struct vmmfs_platform_x64 *);
+int vmmfs_platform_x64_fini(struct vmmfs_platform_x64 *);
 int vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *,
 	struct vmmfs_memory *, uint32_t,
 	struct vmmfs_pciroot *,

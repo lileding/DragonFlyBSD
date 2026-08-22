@@ -61,7 +61,7 @@ struct vop_ops vmmfs_serialroot_vops = {
 };
 
 int
-vmmfs_serialroot_create(struct vmmfs_machine *machine,
+vmmfs_serialroot_init(struct vmmfs_machine *machine,
 	struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_mount *state;
@@ -93,7 +93,7 @@ vmmfs_serialroot_create(struct vmmfs_machine *machine,
 }
 
 int
-vmmfs_serialroot_destroy(struct vmmfs_serialroot *serialroot)
+vmmfs_serialroot_fini(struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_serialport *port;
 	int error;
@@ -250,8 +250,7 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		    ncp->nc_name, ENOENT);
 		return (ENOENT);
 	}
-	if (!serialroot->machine->stopped.expect_stopped ||
-	    serialroot->machine->machine != NULL) {
+	if (serialroot->machine->machine != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,
@@ -343,8 +342,7 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 		vrele(vnode);
 		return (ENOENT);
 	}
-	if (!serialroot->machine->stopped.expect_stopped ||
-	    serialroot->machine->machine != NULL) {
+	if (serialroot->machine->machine != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		vrele(vnode);
 		return (EBUSY);

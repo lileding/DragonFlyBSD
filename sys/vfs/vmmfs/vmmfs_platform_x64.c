@@ -48,6 +48,11 @@
 #define VMMFS_PLATFORM_X64_ACPI_SIZE_PIO 13U
 #define VMMFS_PLATFORM_X64_PM_TIMER_PORT 0x408U
 #define VMMFS_PLATFORM_X64_PM_TIMER_LAST 0x40bU
+#define VMMFS_PLATFORM_X64_RESET_PORT 0x40cU
+#define VMMFS_PLATFORM_X64_RESET_VALUE 0x01U
+#define VMMFS_PLATFORM_X64_PM1_SLP_TYPE_MASK 0x1c00U
+#define VMMFS_PLATFORM_X64_PM1_SLP_TYPE_S5 (5U << 10)
+#define VMMFS_PLATFORM_X64_PM1_SLP_ENABLE 0x2000U
 #define VMMFS_PLATFORM_X64_PM_TIMER_FREQUENCY 3579545ULL
 #define VMMFS_PLATFORM_X64_PM_TIMER_MASK 0x00ffffffU
 #define VMMFS_PLATFORM_X64_FCH_PM_BASE 0xfed80300ULL
@@ -109,24 +114,26 @@ static const uint8_t vmmfs_platform_x64_pciroot_aml[] = {
 };
 
 int
-vmmfs_platform_x64_create(struct vmmfs_machine *machine,
+vmmfs_platform_x64_init(struct vmmfs_machine *machine,
 	struct vmmfs_platform_x64 *platform)
 {
 	if (machine == NULL || platform == NULL)
 		return (EINVAL);
 	bzero(platform, sizeof(*platform));
 	platform->machine = machine;
+	lwkt_token_init(&platform->token, "vmmfsplatform");
 	return (0);
 }
 
 int
-vmmfs_platform_x64_destroy(struct vmmfs_platform_x64 *platform)
+vmmfs_platform_x64_fini(struct vmmfs_platform_x64 *platform)
 {
 	if (platform == NULL)
 		return (EINVAL);
 	if (platform->runtime_machine != NULL)
 		return (EBUSY);
 	platform->machine = NULL;
+	lwkt_token_uninit(&platform->token);
 	return (0);
 }
 
@@ -142,7 +149,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	uint8_t *tables;
 	uint32_t dsdt_length;
 	uint32_t madt_length;
-	uint32_t scope_length;
+	uint32_t scope_body_length;
 	uint32_t serial_count;
 	uint32_t index;
 	int error;
@@ -154,7 +161,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	    pciroot->machine != memory->machine ||
 	    serialroot->machine != memory->machine || vcpu_count == 0 ||
 	    vcpu_count > UINT8_MAX + 1U ||
-	    memory->machine->spec.memory.size <
+	    memory->size <
 	    VMMFS_PLATFORM_X64_ACPI_GPA + VMMFS_PLATFORM_X64_ACPI_SIZE)
 		return EINVAL;
 	tables = kmalloc(VMMFS_PLATFORM_X64_ACPI_SIZE, M_VMMFS,
@@ -194,6 +201,13 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	table[89] = VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE;
 	table[91] = 4;
 	table[108] = 0x32;
+	vmmfs_platform_x64_write32(table, 112, 1U << 10);
+	table[116] = 1;
+	table[117] = 8;
+	table[119] = 1;
+	vmmfs_platform_x64_write64(table, 120,
+	    VMMFS_PLATFORM_X64_RESET_PORT);
+	table[128] = VMMFS_PLATFORM_X64_RESET_VALUE;
 	vmmfs_platform_x64_write64(table, 132, VMMFS_PLATFORM_X64_FACS_GPA);
 	vmmfs_platform_x64_write64(table, 140, VMMFS_PLATFORM_X64_DSDT_GPA);
 	vmmfs_platform_x64_checksum(table, VMMFS_ACPI_FADT_SIZE, 9);
@@ -233,7 +247,20 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	vmmfs_platform_x64_checksum(table, VMMFS_ACPI_MCFG_SIZE, 9);
 
 	table = tables + 0xe00;
+	/*
+	 * Initialize the header before emitting AML.  The generic header helper
+	 * clears its complete length argument, so clearing the final DSDT length
+	 * here would erase the AML body we build below.
+	 */
+	vmmfs_platform_x64_header(table, "DSDT",
+	    VMMFS_ACPI_DSDT_HEADER_SIZE, 2);
 	cursor = table + VMMFS_ACPI_DSDT_HEADER_SIZE;
+	/* Place _S5_ in the root namespace for ACPI sleep discovery. */
+	*cursor++ = 0x10;
+	cursor = vmmfs_platform_x64_pkg_length(cursor,
+	    sizeof(vmmfs_platform_x64_s5_aml) + 2);
+	*cursor++ = 0x5c;
+	*cursor++ = 0x00;
 	bcopy(vmmfs_platform_x64_s5_aml, cursor,
 	    sizeof(vmmfs_platform_x64_s5_aml));
 	cursor += sizeof(vmmfs_platform_x64_s5_aml);
@@ -241,10 +268,10 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	lwkt_gettoken(&serialroot->machine->token);
 	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
 		++serial_count;
-	scope_length = 5 + sizeof(vmmfs_platform_x64_pciroot_aml) +
+	scope_body_length = 5 + sizeof(vmmfs_platform_x64_pciroot_aml) +
 	    serial_count * VMMFS_ACPI_SERIAL_AML_SIZE;
 	*cursor++ = 0x10;
-	cursor = vmmfs_platform_x64_pkg_length(cursor, scope_length);
+	cursor = vmmfs_platform_x64_pkg_length(cursor, scope_body_length);
 	*cursor++ = 0x5c;
 	*cursor++ = 0x5f;
 	*cursor++ = 0x53;
@@ -261,7 +288,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 		kfree(tables, M_VMMFS);
 		return EOVERFLOW;
 	}
-	vmmfs_platform_x64_header(table, "DSDT", dsdt_length, 2);
+	vmmfs_platform_x64_write32(table, 4, dsdt_length);
 	vmmfs_platform_x64_checksum(table, dsdt_length, 9);
 
 	error = vmmfs_platform_x64_write_memory(memory,
@@ -452,9 +479,11 @@ vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
 	platform = argument;
 	if (platform == NULL || read == NULL)
 		return (ENOENT);
+	lwkt_gettoken(&platform->token);
 	if (read->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
 	    read->width == VMM_IO_WIDTH_32) {
 		read->value = UINT32_MAX;
+		lwkt_reltoken(&platform->token);
 		return (0);
 	}
 	end = read->address + read->width;
@@ -462,6 +491,7 @@ vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
 	    end <= VMMFS_PLATFORM_X64_DELAY_PORT +
 	    VMMFS_PLATFORM_X64_DELAY_SIZE) {
 		read->value = 0;
+		lwkt_reltoken(&platform->token);
 		return (0);
 	}
 	if (read->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
@@ -491,23 +521,27 @@ vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
 				value = platform->pm1_control >> 8;
 				break;
 			}
-			read->value |= (uint64_t)value << (index * 8U);
+				read->value |= (uint64_t)value << (index * 8U);
 		}
+		lwkt_reltoken(&platform->token);
 		return (0);
 	}
 	if (read->address >= VMMFS_PLATFORM_X64_PM_TIMER_PORT &&
 	    end <= VMMFS_PLATFORM_X64_PM_TIMER_LAST + 1U) {
 		read->value = vmmfs_platform_x64_pm_timer(platform) >>
 		    ((read->address - VMMFS_PLATFORM_X64_PM_TIMER_PORT) * 8U);
+		lwkt_reltoken(&platform->token);
 		return (0);
 	}
 	if (read->address >= VMMFS_PLATFORM_X64_ACPI_PORT &&
 	    end <= VMMFS_PLATFORM_X64_ACPI_PORT +
 	    VMMFS_PLATFORM_X64_ACPI_SIZE_PIO) {
 		read->value = 0;
+		lwkt_reltoken(&platform->token);
 		return (0);
 	}
 	read->value = UINT64_MAX;
+	lwkt_reltoken(&platform->token);
 	return (0);
 }
 
@@ -516,17 +550,25 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 	const struct vmm_io_write *write)
 {
 	struct vmmfs_platform_x64 *platform;
+	bool power_off;
+	bool reset;
 	uint64_t end;
 
 	(void)vcpu;
 	platform = argument;
 	if (platform == NULL || write == NULL)
 		return (ENOENT);
-	if (write->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
-	    write->width == VMM_IO_WIDTH_32)
-		return (0);
+	power_off = false;
+	reset = false;
 	end = write->address + write->width;
-	if (write->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
+	lwkt_gettoken(&platform->token);
+	if ((write->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
+	    write->width == VMM_IO_WIDTH_32) ||
+	    (write->address == VMMFS_PLATFORM_X64_RESET_PORT &&
+	    write->width == VMM_IO_WIDTH_8 &&
+	    write->value == VMMFS_PLATFORM_X64_RESET_VALUE)) {
+		reset = true;
+	} else if (write->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
 	    end <= VMMFS_PLATFORM_X64_PM1_CONTROL_PORT +
 	    VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE) {
 		for (unsigned int index = 0; index < write->width; ++index) {
@@ -559,15 +601,23 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 				break;
 			}
 		}
-		return (0);
+		power_off = (platform->pm1_control &
+		    (VMMFS_PLATFORM_X64_PM1_SLP_TYPE_MASK |
+		    VMMFS_PLATFORM_X64_PM1_SLP_ENABLE)) ==
+		    (VMMFS_PLATFORM_X64_PM1_SLP_TYPE_S5 |
+		    VMMFS_PLATFORM_X64_PM1_SLP_ENABLE);
 	}
-	if ((write->address >= VMMFS_PLATFORM_X64_DELAY_PORT &&
-	    end <= VMMFS_PLATFORM_X64_DELAY_PORT +
-	    VMMFS_PLATFORM_X64_DELAY_SIZE) ||
-	    (write->address >= VMMFS_PLATFORM_X64_ACPI_PORT &&
-	    end <= VMMFS_PLATFORM_X64_ACPI_PORT +
-	    VMMFS_PLATFORM_X64_ACPI_SIZE_PIO))
-		return (0);
+	lwkt_reltoken(&platform->token);
+	if (power_off) {
+		if (vmmfs_machine_stop_request(platform->machine, "guest-s5") != 0)
+			vmmfs_events_log(&platform->machine->events,
+			    "guest-s5 stop request failed");
+	}
+	if (reset) {
+		if (vmmfs_machine_reset(platform->machine) != 0)
+			vmmfs_events_log(&platform->machine->events,
+			    "guest reset request failed");
+	}
 	return (0);
 }
 
@@ -599,8 +649,7 @@ vmmfs_platform_x64_write_memory(struct vmmfs_memory *memory, uint64_t gpa,
 	size_t offset;
 
 	if (memory == NULL || memory->object == NULL || buffer == NULL ||
-	    gpa > memory->machine->spec.memory.size ||
-	    length > memory->machine->spec.memory.size - gpa)
+	    gpa > memory->size || length > memory->size - gpa)
 		return EINVAL;
 	source = buffer;
 	while (length != 0) {
@@ -657,12 +706,17 @@ vmmfs_platform_x64_sum(const uint8_t *table, uint32_t length)
 }
 
 static uint8_t *
-vmmfs_platform_x64_pkg_length(uint8_t *buffer, uint32_t length)
+vmmfs_platform_x64_pkg_length(uint8_t *buffer, uint32_t body_length)
 {
+	uint32_t length;
+
+	/* AML package lengths include the PkgLength encoding itself. */
+	length = body_length + 1;
 	if (length <= 0x3f) {
 		*buffer++ = (uint8_t)length;
 		return buffer;
 	}
+	++length;
 	KKASSERT(length <= 0xfff);
 	*buffer++ = (uint8_t)(0x40 | (length & 0x0f));
 	*buffer++ = (uint8_t)(length >> 4);

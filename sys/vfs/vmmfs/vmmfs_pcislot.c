@@ -113,10 +113,10 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	vnode->v_type = VDIR;
 	slot->vnode = vnode;
 	vmmfs_machine_hold(pciroot->machine);
-	error = vmmfs_pcislot_events_create(slot, &slot->events);
+	error = vmmfs_pcislot_events_init(slot, &slot->events);
 	if (error != 0)
 		goto fail_vnode;
-	error = vmmfs_pcislot_config_create(slot, &slot->config);
+	error = vmmfs_pcislot_config_init(slot, &slot->config);
 	if (error != 0)
 		goto fail_events;
 	vmmfs_pcislot_events_log(&slot->events, "slot created bdf=0000:%02x:%02x.%x",
@@ -128,7 +128,7 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 
 fail_events:
 	vmmfs_vnode_discard(slot->events.vnode);
-	(void)vmmfs_pcislot_events_destroy(&slot->events);
+	(void)vmmfs_pcislot_events_fini(&slot->events);
 fail_vnode:
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
@@ -148,13 +148,13 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 		return (EINVAL);
 	if (slot->vnode != NULL)
 		return (EBUSY);
-	error = vmmfs_pcislot_config_destroy(&slot->config);
+	error = vmmfs_pcislot_config_fini(&slot->config);
 	if (error != 0)
 		return (error);
-	error = vmmfs_pcislot_descriptor_destroy(&slot->descriptor);
+	error = vmmfs_pcislot_descriptor_fini(&slot->descriptor);
 	if (error != 0)
 		return (error);
-	error = vmmfs_pcislot_events_destroy(&slot->events);
+	error = vmmfs_pcislot_events_fini(&slot->events);
 	if (error != 0)
 		return (error);
 	slot->bdf = 0;
@@ -214,6 +214,45 @@ vmmfs_pcislot_power_off(struct vmmfs_pcislot *slot)
 	(void)vmmfs_pcislot_resources_destroy(resources);
 	bzero(&slot->type0, sizeof(slot->type0));
 	cache_inval_vp(slot->vnode, CINV_CHILDREN);
+}
+
+int
+vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
+{
+	struct vmmfs_pcislot_resources *resources;
+	int error;
+
+	/*
+	 * Resources identify the persistent provider session.  Type-0 config
+	 * space is reset state and may already have been cleared while tearing
+	 * down the previous vmm_machine.  Rebuild it rather than treating that
+	 * derived state as a failed reset precondition.
+	 */
+	if (slot == NULL || slot->pciroot == NULL ||
+	    !slot->descriptor.committed)
+		return (EINVAL);
+	resources = slot->descriptor.resources;
+	if (resources == NULL)
+		return (ENXIO);
+
+	/*
+	 * A guest reset resets the PCI function, not its host provider session.
+	 * Remove all decode before recreating config space so rebind installs no
+	 * stale BAR traps on the new vmm_machine.
+	 */
+	error = vmmfs_pcislot_resources_set_decode(resources, false, false,
+	    false);
+	if (error != 0)
+		return (error);
+	error = vmmfs_pcislot_type0_build(slot);
+	if (error != 0)
+		return (error);
+	vmmfs_pcislot_config_power_on(&slot->config,
+	    slot->descriptor.generation);
+	slot->type0.powered = true;
+	vmmfs_pcislot_events_log(&slot->events, "RESET generation=%ju",
+	    (uintmax_t)slot->descriptor.generation);
+	return (0);
 }
 
 int
@@ -453,7 +492,6 @@ vmmfs_pcislot_ncreate(struct vop_ncreate_args *ap)
 		return (EINVAL);
 	lwkt_gettoken(&slot->pciroot->machine->token);
 	if (slot->pciroot->machine->dead ||
-	    !slot->pciroot->machine->stopped.expect_stopped ||
 	    slot->pciroot->machine->machine != NULL) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
@@ -463,13 +501,13 @@ vmmfs_pcislot_ncreate(struct vop_ncreate_args *ap)
 		return (EEXIST);
 	}
 	lwkt_reltoken(&slot->pciroot->machine->token);
-	error = vmmfs_pcislot_descriptor_create(slot, &slot->descriptor);
+	error = vmmfs_pcislot_descriptor_init(slot, &slot->descriptor);
 	if (error != 0)
 		return (error);
 	vnode = slot->descriptor.vnode;
 	error = vget(vnode, LK_EXCLUSIVE);
 	if (error != 0) {
-		(void)vmmfs_pcislot_descriptor_destroy(&slot->descriptor);
+		(void)vmmfs_pcislot_descriptor_fini(&slot->descriptor);
 		return (error);
 	}
 	*ap->a_vpp = vnode;

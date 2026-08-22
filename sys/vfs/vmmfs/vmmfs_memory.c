@@ -64,7 +64,9 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 
 	if (memory == NULL || vmmfs_machine_is_dead(memory->machine))
 		return (ENOENT);
-	size = memory->machine->spec.memory.size;
+	lwkt_gettoken(&memory->machine->token);
+	size = memory->size;
+	lwkt_reltoken(&memory->machine->token);
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -75,8 +77,6 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 static int
 vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t length)
 {
-	int expected_stopped;
-	int runtime_active;
 	uint64_t value;
 	size_t index;
 	unsigned int digit;
@@ -99,26 +99,21 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	}
 
 	lwkt_gettoken(&memory->machine->token);
-	expected_stopped = memory->machine->stopped.expect_stopped;
-	runtime_active = memory->machine->machine != NULL;
 	if (memory->machine->dead) {
 		lwkt_reltoken(&memory->machine->token);
 		return (ENOENT);
 	}
-	if (!expected_stopped || runtime_active) {
+	if (memory->machine->machine != NULL) {
 		lwkt_reltoken(&memory->machine->token);
-		vmmfs_events_log(&memory->machine->events,
-		    "memory config rejected stopped=%d runtime=%d",
-		    expected_stopped, runtime_active);
 		return (EBUSY);
 	}
-	memory->machine->spec.memory.size = (uint64_t)value;
+	memory->size = value;
 	lwkt_reltoken(&memory->machine->token);
 	return (0);
 }
 
 int
-vmmfs_memory_create(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
+vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 {
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
@@ -145,7 +140,7 @@ vmmfs_memory_create(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 }
 
 int
-vmmfs_memory_destroy(struct vmmfs_memory *memory)
+vmmfs_memory_fini(struct vmmfs_memory *memory)
 {
 	if (memory == NULL)
 		return (EINVAL);
@@ -158,18 +153,16 @@ vmmfs_memory_destroy(struct vmmfs_memory *memory)
 }
 
 int
-vmmfs_memory_prepare(struct vmmfs_memory *memory)
+vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)
 {
 	struct vm_object *object;
 	struct vmspace *vmspace;
-	uint64_t size;
 
 	if (memory == NULL || memory->machine == NULL)
 		return (EINVAL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL ||
 	    memory->run_vmspace != NULL)
 		return (EBUSY);
-	size = memory->machine->spec.memory.size;
 	if (size == 0 || (size & PAGE_MASK) != 0)
 		return (EINVAL);
 	object = default_pager_alloc(NULL, round_page64(size), VM_PROT_DEFAULT,
@@ -202,7 +195,7 @@ vmmfs_memory_map(struct vmmfs_memory *memory)
 	if (memory == NULL || memory->object == NULL ||
 	    memory->run_vmspace == NULL || memory->mapped)
 		return (EINVAL);
-	size = memory->machine->spec.memory.size;
+	size = memory->size;
 	if (size <= VMMFS_PCI_MMIO_GPA)
 		error = vmmfs_memory_map_object(memory, memory->object, 0, 0,
 		    size, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
@@ -239,6 +232,52 @@ vmmfs_memory_snapshot(struct vmmfs_memory *memory)
 	pmap_pinit2(vmspace_pmap(boot_vmspace));
 	memory->boot_vmspace = boot_vmspace;
 	return (0);
+}
+
+int
+vmmfs_memory_reset_begin(struct vmmfs_memory *memory,
+	struct vmspace **old_vmspacep)
+{
+	struct vmspace *old_vmspace;
+	struct vmspace *run_vmspace;
+
+	if (memory == NULL || old_vmspacep == NULL ||
+	    memory->boot_vmspace == NULL || memory->run_vmspace == NULL)
+		return (EINVAL);
+	run_vmspace = vmspace_fork(memory->boot_vmspace, NULL, NULL);
+	if (run_vmspace == NULL)
+		return (ENOMEM);
+	pmap_maybethreaded(vmspace_pmap(run_vmspace));
+	old_vmspace = memory->run_vmspace;
+	memory->run_vmspace = run_vmspace;
+	*old_vmspacep = old_vmspace;
+	return (0);
+}
+
+void
+vmmfs_memory_reset_abort(struct vmmfs_memory *memory,
+	struct vmspace *old_vmspace)
+{
+	struct vmspace *run_vmspace;
+
+	KKASSERT(memory != NULL);
+	KKASSERT(old_vmspace != NULL);
+	run_vmspace = memory->run_vmspace;
+	KKASSERT(run_vmspace != NULL && run_vmspace != old_vmspace);
+	memory->run_vmspace = old_vmspace;
+	pmap_del_all_cpus(run_vmspace);
+	vmspace_rel(run_vmspace);
+}
+
+void
+vmmfs_memory_reset_commit(struct vmmfs_memory *memory,
+	struct vmspace *old_vmspace)
+{
+	KKASSERT(memory != NULL);
+	KKASSERT(memory->run_vmspace != NULL);
+	KKASSERT(old_vmspace != NULL && memory->run_vmspace != old_vmspace);
+	pmap_del_all_cpus(old_vmspace);
+	vmspace_rel(old_vmspace);
 }
 
 void

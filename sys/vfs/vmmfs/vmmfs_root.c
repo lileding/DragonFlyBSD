@@ -152,7 +152,7 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 		lwkt_gettoken(&machine->token);
 		machine->dead = true;
 		lwkt_reltoken(&machine->token);
-		(void)vmmfs_machine_destroy(machine);
+		(void)vmmfs_machine_begin_destroy(machine);
 		vmmfs_machine_put(machine);
 		return (EEXIST);
 	}
@@ -170,7 +170,6 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 {
 	struct vmmfs_machine key;
 	struct vmmfs_machine *machine;
-	int expected_stopped;
 	int error;
 	int runtime_active;
 
@@ -191,13 +190,11 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 		lwkt_reltoken(&root->token);
 		return (ENOENT);
 	}
-	expected_stopped = machine->stopped.expect_stopped;
 	runtime_active = machine->machine != NULL;
-	if (!expected_stopped || runtime_active) {
+	if (runtime_active) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&root->token);
-		vmmfs_events_log(&machine->events,
-		    "destroy refused stopped=%d runtime=%d", expected_stopped,
+		vmmfs_events_log(&machine->events, "destroy refused runtime=%d",
 		    runtime_active);
 		return (EBUSY);
 	}
@@ -205,7 +202,7 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 	machine->dead = true;
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&root->token);
-	error = vmmfs_machine_destroy(machine);
+	error = vmmfs_machine_begin_destroy(machine);
 	vmmfs_machine_put(machine);
 	return (error);
 }
@@ -428,8 +425,10 @@ vmmfs_root_nrmdir(struct vop_nrmdir_args *ap)
 		return (ENOENT);
 	}
 	error = vmmfs_root_remove_item(root, ncp->nc_name, ncp->nc_nlen);
-	if (error == 0)
+	if (error == 0) {
+		cache_unlink(ap->a_nch);
 		cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+	}
 	vrele(vnode);
 	return (error);
 }

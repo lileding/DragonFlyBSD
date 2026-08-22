@@ -29,8 +29,8 @@ struct vmmfs_rtc {
 	vmm_io_t write_io;
 };
 
-int vmmfs_rtc_create(struct vmmfs_machine *, struct vmmfs_rtc *);
-int vmmfs_rtc_destroy(struct vmmfs_rtc *);
+int vmmfs_rtc_init(struct vmmfs_machine *, struct vmmfs_rtc *);
+int vmmfs_rtc_fini(struct vmmfs_rtc *);
 int vmmfs_rtc_start(struct vmmfs_rtc *, vmm_machine_t);
 int vmmfs_rtc_stop(struct vmmfs_rtc *);
 

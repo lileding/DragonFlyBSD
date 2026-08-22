@@ -224,8 +224,9 @@ int vmm_vcpu_wait(vmm_vcpu_t vcpu);
 int vmm_vcpu_destroy(vmm_vcpu_t vcpu);
 
 /*
- * Destroys a machine after every vCPU has been destroyed.  This removes VMM's
- * pmap CPU association but does not otherwise manage vmspace.
+ * Destroys a machine after every vCPU has been destroyed.  Registered I/O
+ * traps are revoked, and VMM removes the pmap CPU association; vmspace remains
+ * owned by the caller.
  * Returns EBUSY while a vCPU exists or is running.
  */
 int vmm_machine_destroy(vmm_machine_t machine);

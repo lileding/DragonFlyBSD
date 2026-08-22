@@ -56,6 +56,7 @@ int vmmfs_pcislot_destroy(struct vmmfs_pcislot *);
 void vmmfs_pcislot_release_vnodes(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
+int vmmfs_pcislot_reset(struct vmmfs_pcislot *);
 int vmmfs_pcislot_type0_config_read(struct vmmfs_pcislot *, vmm_vcpu_t,
 	uint16_t, enum vmm_io_width, uint32_t *);
 int vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *, vmm_vcpu_t,

@@ -221,7 +221,7 @@ static struct fileops vmmfs_loader_fileops = {
 };
 
 int
-vmmfs_loader_init(void)
+vmmfs_loader_module_init(void)
 {
 	int error;
 
@@ -237,7 +237,7 @@ vmmfs_loader_init(void)
 }
 
 int
-vmmfs_loader_uninit(void)
+vmmfs_loader_module_fini(void)
 {
 	if (!vmmfs_loader_domain.initialized)
 		return (0);
@@ -251,20 +251,21 @@ vmmfs_loader_uninit(void)
 }
 
 int
-vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
-	struct ucred *cred, struct vmm_cpustate *state)
+vmmfs_loader_run(struct vmmfs_loader *loader, const char *script,
+	struct vmmfs_memory *memory, struct ucred *cred,
+	struct vmm_cpustate *state)
 {
 	struct vmmfs_loader_process process;
 	int error;
 
-	if (loader == NULL || memory == NULL || cred == NULL || state == NULL ||
+	if (loader == NULL || script == NULL || memory == NULL || cred == NULL ||
+	    state == NULL ||
 	    loader->machine == NULL || memory->object == NULL ||
-	    memory->machine != loader->machine ||
-	    memory->machine->spec.loader.script[0] == '\0')
+	    memory->machine != loader->machine || script[0] == '\0')
 		return (EINVAL);
 	bzero(&process, sizeof(process));
-	error = vmmfs_loader_process_init(&process,
-	    loader->machine->spec.loader.script, cred, &loader->machine->events);
+	error = vmmfs_loader_process_init(&process, script, cred,
+	    &loader->machine->events);
 	if (error != 0) {
 		vmmfs_events_log(&loader->machine->events,
 		    "loader initialization failed error=%d", error);
@@ -273,7 +274,7 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_memory *memory,
 	vmmfs_events_log(&loader->machine->events, "loader started pid=%d",
 	    process.pid);
 	error = vmmfs_loader_process_install(&process, memory->object,
-	    memory->machine->spec.memory.size);
+	    memory->size);
 	if (error == 0)
 		error = vmmfs_loader_process_resume(&process);
 	if (error == 0)
@@ -1231,7 +1232,7 @@ vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, si
 	if (loader == NULL || vmmfs_machine_is_dead(loader->machine))
 		return (ENOENT);
 	result = ksnprintf(buffer, capacity, "%s\n",
-	    loader->machine->spec.loader.script);
+	    loader->script);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
 	*length = (size_t)result;
@@ -1245,26 +1246,25 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 		return (EINVAL);
 	if (buffer[length - 1] == 10)
 		--length;
-	if (length == 0 || length >= sizeof(loader->machine->spec.loader.script))
+	if (length == 0 || length >= sizeof(loader->script))
 		return (ENAMETOOLONG);
 	lwkt_gettoken(&loader->machine->token);
 	if (loader->machine->dead) {
 		lwkt_reltoken(&loader->machine->token);
 		return (ENOENT);
 	}
-	if (!loader->machine->stopped.expect_stopped ||
-	    loader->machine->machine != NULL) {
+	if (loader->machine->machine != NULL) {
 		lwkt_reltoken(&loader->machine->token);
 		return (EBUSY);
 	}
-	bcopy(buffer, loader->machine->spec.loader.script, length);
-	loader->machine->spec.loader.script[length] = 0;
+	bcopy(buffer, loader->script, length);
+	loader->script[length] = 0;
 	lwkt_reltoken(&loader->machine->token);
 	return (0);
 }
 
 int
-vmmfs_loader_create(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
+vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 {
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
@@ -1291,7 +1291,7 @@ vmmfs_loader_create(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 }
 
 int
-vmmfs_loader_destroy(struct vmmfs_loader *loader)
+vmmfs_loader_fini(struct vmmfs_loader *loader)
 {
 	if (loader == NULL)
 		return (EINVAL);

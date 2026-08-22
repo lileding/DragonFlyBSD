@@ -46,10 +46,11 @@ struct vmmfs_pciroot {
 
 extern struct vop_ops vmmfs_pciroot_vops;
 
-int vmmfs_pciroot_create(struct vmmfs_machine *, struct vmmfs_pciroot *);
-int vmmfs_pciroot_destroy(struct vmmfs_pciroot *);
+int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *);
+int vmmfs_pciroot_fini(struct vmmfs_pciroot *);
 void vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
+int vmmfs_pciroot_reset(struct vmmfs_pciroot *);
 int vmmfs_pciroot_stop(struct vmmfs_pciroot *);
 int vmmfs_pciroot_memory(struct vmmfs_pciroot *, struct vmmfs_vcpu_thread *,
 	const struct vmm_cpuexit *);

@@ -4,6 +4,8 @@
  * DragonFly vmmfs machine event stream.
  */
 #include <sys/errno.h>
+#include <sys/time.h>
+#include <sys/event.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -24,12 +26,22 @@
 static int vmmfs_events_access(struct vop_access_args *);
 static int vmmfs_events_getattr(struct vop_getattr_args *);
 static int vmmfs_events_getattr_lite(struct vop_getattr_lite_args *);
+static int vmmfs_events_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_events_open(struct vop_open_args *);
 static int vmmfs_events_read(struct vop_read_args *);
 static int vmmfs_events_inactive(struct vop_inactive_args *);
 static int vmmfs_events_reclaim(struct vop_reclaim_args *);
 static int vmmfs_events_setattr(struct vop_setattr_args *);
 static int vmmfs_events_write(struct vop_write_args *);
+static void vmmfs_events_filter_detach(struct knote *);
+static int vmmfs_events_filter_read(struct knote *, long);
+
+static struct filterops vmmfs_events_read_filterops = {
+	FILTEROP_ISFD | FILTEROP_MPSAFE,
+	NULL,
+	vmmfs_events_filter_detach,
+	vmmfs_events_filter_read,
+};
 
 struct vop_ops vmmfs_events_vops = {
 	.vop_default = vop_defaultop,
@@ -37,6 +49,7 @@ struct vop_ops vmmfs_events_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_events_getattr,
 	.vop_getattr_lite = vmmfs_events_getattr_lite,
+	.vop_kqfilter = vmmfs_events_kqfilter,
 	.vop_open = vmmfs_events_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_events_read,
@@ -47,7 +60,7 @@ struct vop_ops vmmfs_events_vops = {
 };
 
 int
-vmmfs_events_create(struct vmmfs_machine *machine, struct vmmfs_events *events)
+vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 {
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
@@ -56,6 +69,7 @@ vmmfs_events_create(struct vmmfs_machine *machine, struct vmmfs_events *events)
 	bzero(events, sizeof(*events));
 	events->machine = machine;
 	lwkt_token_init(&events->token, "vmmfsevents");
+	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
@@ -85,7 +99,7 @@ fail_buffer:
 }
 
 int
-vmmfs_events_destroy(struct vmmfs_events *events)
+vmmfs_events_fini(struct vmmfs_events *events)
 {
 	if (events == NULL)
 		return (EINVAL);
@@ -112,6 +126,7 @@ vmmfs_events_revoke(struct vmmfs_events *events)
 	events->closed = true;
 	lwkt_reltoken(&events->token);
 	wakeup(events);
+	KNOTE(&events->kq.ki_note, 0);
 }
 
 void
@@ -176,6 +191,7 @@ vmmfs_events_log(struct vmmfs_events *events, const char *format, ...)
 	}
 	lwkt_reltoken(&events->token);
 	wakeup(events);
+	KNOTE(&events->kq.ki_note, 0);
 }
 
 static int
@@ -222,6 +238,24 @@ vmmfs_events_getattr_lite(struct vop_getattr_lite_args *ap)
 	ap->a_lvap->va_gid = 0;
 	ap->a_lvap->va_size = 0;
 	ap->a_lvap->va_flags = 0;
+	return (0);
+}
+
+static int
+vmmfs_events_kqfilter(struct vop_kqfilter_args *ap)
+{
+	struct vmmfs_events *events;
+
+	events = ap->a_vp->v_data;
+	if (events == NULL)
+		return (ENOENT);
+	if (ap->a_kn->kn_filter != EVFILT_READ)
+		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->token);
+	ap->a_kn->kn_fop = &vmmfs_events_read_filterops;
+	ap->a_kn->kn_hook = (caddr_t)events;
+	knote_insert(&events->kq.ki_note, ap->a_kn);
+	lwkt_reltoken(&events->token);
 	return (0);
 }
 
@@ -284,6 +318,41 @@ vmmfs_events_read(struct vop_read_args *ap)
 	events->length -= length;
 	lwkt_reltoken(&events->token);
 	return (uiomove(buffer, length, uio));
+}
+
+static int
+vmmfs_events_filter_read(struct knote *knote, long hint)
+{
+	struct vmmfs_events *events;
+
+	(void)hint;
+	events = (struct vmmfs_events *)knote->kn_hook;
+	if (events == NULL)
+		return (0);
+	lwkt_gettoken(&events->token);
+	if (events->machine == NULL || vmmfs_machine_is_dead(events->machine)) {
+		knote->kn_data = 0;
+		knote->kn_flags |= EV_EOF;
+	} else {
+		knote->kn_data = events->length;
+		if (events->closed)
+			knote->kn_flags |= EV_EOF;
+	}
+	lwkt_reltoken(&events->token);
+	return (knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0);
+}
+
+static void
+vmmfs_events_filter_detach(struct knote *knote)
+{
+	struct vmmfs_events *events;
+
+	events = (struct vmmfs_events *)knote->kn_hook;
+	if (events == NULL)
+		return;
+	lwkt_gettoken(&events->token);
+	knote_remove(&events->kq.ki_note, knote);
+	lwkt_reltoken(&events->token);
 }
 
 static int
@@ -355,5 +424,5 @@ vmmfs_events_write(struct vop_write_args *ap)
 	buffer[length] = '\0';
 	if (strcmp(buffer, "reset") != 0 && strcmp(buffer, "reset\n") != 0)
 		return (EINVAL);
-	return (vmmfs_machine_reset(events->machine, ap->a_cred));
+	return (vmmfs_machine_reset(events->machine));
 }

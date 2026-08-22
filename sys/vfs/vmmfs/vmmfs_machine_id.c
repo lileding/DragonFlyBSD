@@ -44,7 +44,7 @@ struct vop_ops vmmfs_machine_id_vops = {
 };
 
 int
-vmmfs_machine_id_create(struct vmmfs_machine *machine,
+vmmfs_machine_id_init(struct vmmfs_machine *machine,
 	struct vmmfs_machine_id *identity)
 {
 	struct vmmfs_mount *state;
@@ -78,7 +78,7 @@ vmmfs_machine_id_create(struct vmmfs_machine *machine,
 }
 
 int
-vmmfs_machine_id_destroy(struct vmmfs_machine_id *identity)
+vmmfs_machine_id_fini(struct vmmfs_machine_id *identity)
 {
 	if (identity == NULL)
 		return (EINVAL);

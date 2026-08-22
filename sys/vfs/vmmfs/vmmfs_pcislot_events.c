@@ -4,6 +4,8 @@
  * DragonFly vmmfs PCI slot events stream.
  */
 #include <sys/errno.h>
+#include <sys/time.h>
+#include <sys/event.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -29,10 +31,20 @@
 static int vmmfs_pcislot_events_access(struct vop_access_args *);
 static int vmmfs_pcislot_events_getattr(struct vop_getattr_args *);
 static int vmmfs_pcislot_events_getattr_lite(struct vop_getattr_lite_args *);
+static int vmmfs_pcislot_events_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_pcislot_events_open(struct vop_open_args *);
 static int vmmfs_pcislot_events_read(struct vop_read_args *);
 static int vmmfs_pcislot_events_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *);
+static void vmmfs_pcislot_events_filter_detach(struct knote *);
+static int vmmfs_pcislot_events_filter_read(struct knote *, long);
+
+static struct filterops vmmfs_pcislot_events_read_filterops = {
+	FILTEROP_ISFD | FILTEROP_MPSAFE,
+	NULL,
+	vmmfs_pcislot_events_filter_detach,
+	vmmfs_pcislot_events_filter_read,
+};
 
 struct vop_ops vmmfs_pcislot_events_vops = {
 	.vop_default = vop_defaultop,
@@ -40,6 +52,7 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_pcislot_events_getattr,
 	.vop_getattr_lite = vmmfs_pcislot_events_getattr_lite,
+	.vop_kqfilter = vmmfs_pcislot_events_kqfilter,
 	.vop_open = vmmfs_pcislot_events_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_events_read,
@@ -48,7 +61,7 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 };
 
 int
-vmmfs_pcislot_events_create(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_events *state_node)
 {
 	struct vmmfs_mount *mount;
@@ -64,6 +77,7 @@ vmmfs_pcislot_events_create(struct vmmfs_pcislot *slot,
 	bzero(state_node, sizeof(*state_node));
 	state_node->slot = slot;
 	lwkt_token_init(&state_node->token, "vmmfspcievents");
+	SLIST_INIT(&state_node->kq.ki_note);
 	state_node->buffer = kmalloc(VMMFS_PCISLOT_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	state_node->inode = atomic_fetchadd_int(&mount->next_inode, 1);
@@ -89,7 +103,7 @@ fail_buffer:
 }
 
 int
-vmmfs_pcislot_events_destroy(struct vmmfs_pcislot_events *state_node)
+vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *state_node)
 {
 	if (state_node == NULL)
 		return (EINVAL);
@@ -116,6 +130,7 @@ vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *state_node)
 	state_node->closed = true;
 	lwkt_reltoken(&state_node->token);
 	wakeup(state_node);
+	KNOTE(&state_node->kq.ki_note, 0);
 }
 
 void
@@ -178,6 +193,7 @@ vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
 	}
 	lwkt_reltoken(&state_node->token);
 	wakeup(state_node);
+	KNOTE(&state_node->kq.ki_note, 0);
 }
 
 static int
@@ -223,6 +239,24 @@ vmmfs_pcislot_events_getattr_lite(struct vop_getattr_lite_args *ap)
 	ap->a_lvap->va_gid = 0;
 	ap->a_lvap->va_size = 0;
 	ap->a_lvap->va_flags = 0;
+	return (0);
+}
+
+static int
+vmmfs_pcislot_events_kqfilter(struct vop_kqfilter_args *ap)
+{
+	struct vmmfs_pcislot_events *events;
+
+	events = ap->a_vp->v_data;
+	if (events == NULL)
+		return (ENOENT);
+	if (ap->a_kn->kn_filter != EVFILT_READ)
+		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->token);
+	ap->a_kn->kn_fop = &vmmfs_pcislot_events_read_filterops;
+	ap->a_kn->kn_hook = (caddr_t)events;
+	knote_insert(&events->kq.ki_note, ap->a_kn);
+	lwkt_reltoken(&events->token);
 	return (0);
 }
 
@@ -290,6 +324,42 @@ vmmfs_pcislot_events_read(struct vop_read_args *ap)
 	state_node->length -= length;
 	lwkt_reltoken(&state_node->token);
 	return (uiomove(buffer, length, uio));
+}
+
+static int
+vmmfs_pcislot_events_filter_read(struct knote *knote, long hint)
+{
+	struct vmmfs_pcislot_events *events;
+
+	(void)hint;
+	events = (struct vmmfs_pcislot_events *)knote->kn_hook;
+	if (events == NULL)
+		return (0);
+	lwkt_gettoken(&events->token);
+	if (events->slot == NULL || events->slot->pciroot == NULL ||
+	    vmmfs_machine_is_dead(events->slot->pciroot->machine)) {
+		knote->kn_data = 0;
+		knote->kn_flags |= EV_EOF;
+	} else {
+		knote->kn_data = events->length;
+		if (events->closed)
+			knote->kn_flags |= EV_EOF;
+	}
+	lwkt_reltoken(&events->token);
+	return (knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0);
+}
+
+static void
+vmmfs_pcislot_events_filter_detach(struct knote *knote)
+{
+	struct vmmfs_pcislot_events *events;
+
+	events = (struct vmmfs_pcislot_events *)knote->kn_hook;
+	if (events == NULL)
+		return;
+	lwkt_gettoken(&events->token);
+	knote_remove(&events->kq.ki_note, knote);
+	lwkt_reltoken(&events->token);
 }
 
 static int

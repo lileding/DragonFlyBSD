@@ -25,8 +25,8 @@ struct vmmfs_machine_id {
 
 extern struct vop_ops vmmfs_machine_id_vops;
 
-int vmmfs_machine_id_create(struct vmmfs_machine *,
+int vmmfs_machine_id_init(struct vmmfs_machine *,
 	struct vmmfs_machine_id *);
-int vmmfs_machine_id_destroy(struct vmmfs_machine_id *);
+int vmmfs_machine_id_fini(struct vmmfs_machine_id *);
 
 #endif /* VMMFS_MACHINE_ID_H */

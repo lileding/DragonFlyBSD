@@ -114,7 +114,7 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 };
 
 int
-vmmfs_pcislot_descriptor_create(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_descriptor *descriptor)
 {
 	struct vmmfs_mount *mount;
@@ -137,8 +137,7 @@ vmmfs_pcislot_descriptor_create(struct vmmfs_pcislot *slot,
 		return (error);
 	}
 	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (!slot->pciroot->machine->stopped.expect_stopped ||
-	    slot->pciroot->machine->machine != NULL || descriptor->vnode != NULL) {
+	if (slot->pciroot->machine->machine != NULL || descriptor->vnode != NULL) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		error = EBUSY;
 		goto fail_vnode;
@@ -162,7 +161,7 @@ fail_vnode:
 }
 
 int
-vmmfs_pcislot_descriptor_destroy(struct vmmfs_pcislot_descriptor *descriptor)
+vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 {
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_pcislot_auth *auth;
@@ -270,7 +269,7 @@ vmmfs_pcislot_descriptor_close(struct vop_close_args *ap)
 			if (error != 0)
 				goto failed;
 		lwkt_gettoken(&machine->token);
-		if (!machine->stopped.expect_stopped || machine->machine != NULL ||
+		if (machine->machine != NULL ||
 		    descriptor->generation == UINT64_MAX) {
 			lwkt_reltoken(&machine->token);
 			error = EBUSY;
@@ -280,7 +279,7 @@ vmmfs_pcislot_descriptor_close(struct vop_close_args *ap)
 		lwkt_reltoken(&machine->token);
 	} else {
 		lwkt_gettoken(&machine->token);
-		if (!machine->stopped.expect_stopped || machine->machine != NULL ||
+		if (machine->machine != NULL ||
 		    descriptor->generation == UINT64_MAX) {
 			lwkt_reltoken(&machine->token);
 			error = EBUSY;
@@ -408,7 +407,7 @@ vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
 	buffer = kmalloc(VMMFS_PCISLOT_DESCRIPTOR_MAX, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	lwkt_gettoken(&machine->token);
-	if (!machine->stopped.expect_stopped || machine->machine != NULL) {
+	if (machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
 		kfree(buffer, M_VMMFS);
 		return (EBUSY);

@@ -148,9 +148,9 @@ struct vmmfs_pcislot_descriptor {
 
 extern struct vop_ops vmmfs_pcislot_descriptor_vops;
 
-int vmmfs_pcislot_descriptor_create(struct vmmfs_pcislot *,
+int vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_descriptor *);
-int vmmfs_pcislot_descriptor_destroy(struct vmmfs_pcislot_descriptor *);
+int vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *);
 bool vmmfs_pcislot_descriptor_busy(struct vmmfs_pcislot_descriptor *);
 
 #endif /* VMMFS_PCISLOT_DESCRIPTOR_H */

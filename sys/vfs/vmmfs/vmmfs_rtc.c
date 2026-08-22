@@ -43,7 +43,7 @@ static uint8_t vmmfs_rtc_encode(const struct vmmfs_rtc *, unsigned int);
 static bool vmmfs_rtc_leap_year(unsigned int);
 
 int
-vmmfs_rtc_create(struct vmmfs_machine *machine, struct vmmfs_rtc *rtc)
+vmmfs_rtc_init(struct vmmfs_machine *machine, struct vmmfs_rtc *rtc)
 {
 	if (machine == NULL || rtc == NULL)
 		return (EINVAL);
@@ -55,7 +55,7 @@ vmmfs_rtc_create(struct vmmfs_machine *machine, struct vmmfs_rtc *rtc)
 }
 
 int
-vmmfs_rtc_destroy(struct vmmfs_rtc *rtc)
+vmmfs_rtc_fini(struct vmmfs_rtc *rtc)
 {
 	if (rtc == NULL)
 		return (EINVAL);

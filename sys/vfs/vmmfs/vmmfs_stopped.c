@@ -42,7 +42,7 @@ struct vop_ops vmmfs_stopped_vops = {
 };
 
 int
-vmmfs_stopped_create(struct vmmfs_machine *machine,
+vmmfs_stopped_init(struct vmmfs_machine *machine,
 	struct vmmfs_stopped *stopped)
 {
 	struct vmmfs_mount *state;
@@ -69,7 +69,7 @@ vmmfs_stopped_create(struct vmmfs_machine *machine,
 }
 
 int
-vmmfs_stopped_destroy(struct vmmfs_stopped *stopped)
+vmmfs_stopped_fini(struct vmmfs_stopped *stopped)
 {
 	if (stopped == NULL)
 		return (EINVAL);

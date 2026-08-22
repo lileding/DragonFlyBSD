@@ -85,7 +85,7 @@ struct vop_ops vmmfs_pcislot_config_vops = {
 };
 
 int
-vmmfs_pcislot_config_create(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_config *config)
 {
 	struct vmmfs_mount *mount;
@@ -124,7 +124,7 @@ fail_token:
 }
 
 int
-vmmfs_pcislot_config_destroy(struct vmmfs_pcislot_config *config)
+vmmfs_pcislot_config_fini(struct vmmfs_pcislot_config *config)
 {
 	if (config == NULL)
 		return (EINVAL);
@@ -644,6 +644,7 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 {
 	struct vmmfs_pcislot_config_request *request;
 	bool notify;
+	bool reset_requested;
 	bool stop_requested;
 	int error;
 
@@ -690,7 +691,8 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	for (;;) {
 		lwkt_gettoken(&thread->group->token);
 		stop_requested = thread->group->stop_requested;
-		if (stop_requested || thread->config_done) {
+		reset_requested = thread->group->reset_requested;
+		if (stop_requested || reset_requested || thread->config_done) {
 			lwkt_reltoken(&thread->group->token);
 			break;
 		}
@@ -719,6 +721,10 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	lwkt_reltoken(&config->token);
 	kfree(request, M_VMMFS);
 	vmmfs_pcislot_config_wake_next(config);
+	/*
+	 * Reset discards the current guest state.  Complete this access with the
+	 * synthesized failure response so the vCPU reaches its reset barrier.
+	 */
 	return (stop_requested ? EINTR : 0);
 }
 

@@ -92,6 +92,9 @@ int vmmfs_pcislot_resources_create(struct vmmfs_pcislot *,
 	vmm_machine_t, const struct vmmfs_pcislot_descriptor_value *, uint64_t,
 	struct vmmfs_pcislot_resources **);
 int vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *);
+int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
+	vmm_machine_t);
+void vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *);
 struct vmmfs_pcislot_resource *vmmfs_pcislot_resources_find(
 	struct vmmfs_pcislot_resources *, const char *, size_t);
 int vmmfs_pcislot_resource_name(const struct vmmfs_pcislot_resource *,

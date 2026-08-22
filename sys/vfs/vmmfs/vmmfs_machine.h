@@ -30,12 +30,6 @@ struct vop_ops;
 struct vmmfs_root;
 struct ucred;
 
-struct vmmfs_machine_spec {
-	struct vmmfs_vcpu_spec vcpu;
-	struct vmmfs_memory_spec memory;
-	struct vmmfs_loader_spec loader;
-};
-
 struct vmmfs_machine {
 	RB_ENTRY(vmmfs_machine) entry;
 	struct vmmfs_root *root;
@@ -48,8 +42,9 @@ struct vmmfs_machine {
 	unsigned int references;
 	bool dead;
 	bool root_counted;
+	/* NULL is stopped.  A non-NULL instance owns the running topology. */
 	vmm_machine_t machine;
-	struct vmmfs_machine_spec spec;
+	struct vmm_cpustate boot_state;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
@@ -71,15 +66,21 @@ int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
 int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **);
 void vmmfs_machine_abort_create(struct vmmfs_machine *);
-int vmmfs_machine_destroy(struct vmmfs_machine *);
-void vmmfs_machine_free(struct vmmfs_machine *);
+int vmmfs_machine_begin_destroy(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);
 void vmmfs_machine_put(struct vmmfs_machine *);
 bool vmmfs_machine_is_dead(struct vmmfs_machine *);
 bool vmmfs_machine_vnode_detach(struct vmmfs_machine *, struct vnode **,
 	struct vnode *);
 
-/* Synchronously forces a warm reset using the caller's credentials. */
-int vmmfs_machine_reset(struct vmmfs_machine *, struct ucred *);
+/* Requests a warm reset without rerunning the loader. */
+int vmmfs_machine_reset(struct vmmfs_machine *);
+
+/* Requests terminal power-off from an external VOP or a guest runtime event. */
+int vmmfs_machine_stop_request(struct vmmfs_machine *, const char *);
+
+/* The BSP invokes these after every other vCPU has reached its barrier. */
+int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);
+void vmmfs_machine_vcpu_stopped(struct vmmfs_machine *);
 
 #endif /* VMMFS_MACHINE_H */

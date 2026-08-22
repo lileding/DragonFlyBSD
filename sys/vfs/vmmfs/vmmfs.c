@@ -78,14 +78,14 @@ static int
 vmmfs_vfs_init(struct vfsconf *configuration)
 {
 	(void)configuration;
-	return (vmmfs_loader_init());
+	return (vmmfs_loader_module_init());
 }
 
 static int
 vmmfs_vfs_uninit(struct vfsconf *configuration)
 {
 	(void)configuration;
-	return (vmmfs_loader_uninit());
+	return (vmmfs_loader_module_fini());
 }
 
 static int
@@ -274,6 +274,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->root_vops);
+	vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
 	mount->mnt_data = NULL;
 	kfree(state, M_VMMFS);
 	return (0);

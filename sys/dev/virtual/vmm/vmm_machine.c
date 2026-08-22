@@ -294,17 +294,30 @@ vmm_machine_set_tsc(vmm_machine_t machine, uint64_t tsc)
 int
 vmm_machine_destroy(vmm_machine_t machine)
 {
+	TAILQ_HEAD(, vmm_io) detached_ios;
+	struct vmm_io *io;
+
 	if (machine == NULL)
 		return EINVAL;
 
+	TAILQ_INIT(&detached_ios);
 	lwkt_gettoken(&machine->token);
 	if (machine->destroying || machine->vcpu_count != 0 ||
-	    machine->run_count != 0 || !TAILQ_EMPTY(&machine->io_list)) {
+	    machine->run_count != 0) {
 		lwkt_reltoken(&machine->token);
 		return EBUSY;
 	}
 	machine->destroying = true;
+	while ((io = TAILQ_FIRST(&machine->io_list)) != NULL) {
+		TAILQ_REMOVE(&machine->io_list, io, entry);
+		io->machine = NULL;
+		TAILQ_INSERT_TAIL(&detached_ios, io, entry);
+	}
 	lwkt_reltoken(&machine->token);
+	while ((io = TAILQ_FIRST(&detached_ios)) != NULL) {
+		TAILQ_REMOVE(&detached_ios, io, entry);
+		kfree(io, M_VMM);
+	}
 
 	vmm_x64_pit_destroy(machine);
 	vmm_x64_pic_destroy(machine);

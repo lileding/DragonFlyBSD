@@ -16,12 +16,11 @@ struct vmmfs_stopped {
 	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	ino_t inode;
-	bool expect_stopped;
 };
 
 extern struct vop_ops vmmfs_stopped_vops;
 
-int vmmfs_stopped_create(struct vmmfs_machine *, struct vmmfs_stopped *);
-int vmmfs_stopped_destroy(struct vmmfs_stopped *);
+int vmmfs_stopped_init(struct vmmfs_machine *, struct vmmfs_stopped *);
+int vmmfs_stopped_fini(struct vmmfs_stopped *);
 
 #endif /* VMMFS_STOPPED_H */
