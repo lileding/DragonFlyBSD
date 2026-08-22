@@ -26,6 +26,9 @@ struct vmmfs_platform_x64 {
 	struct vmmfs_machine *machine;
 	vmm_machine_t runtime_machine;
 	uint64_t tsc_base;
+	uint16_t pm1_status;
+	uint16_t pm1_enable;
+	uint16_t pm1_control;
 	vmm_io_t delay_read;
 	vmm_io_t delay_write;
 	vmm_io_t acpi_read;

@@ -232,7 +232,10 @@ vmm_svm_stgi(void)
 }
 
 #define MSR_NB_CFG		0xC001001F	/* Northbridge Configuration */
-#define		NB_CFG_INITAPICCPUIDLO	__BIT(54)
+#define NB_CFG_ENABLE_CF8_EXT_CFG	__BIT(46)
+#define NB_CFG_INITAPICCPUIDLO		__BIT(54)
+#define NB_CFG_VALID		(NB_CFG_ENABLE_CF8_EXT_CFG | \
+					 NB_CFG_INITAPICCPUIDLO)
 
 #define MSR_K7_HWCR		0xC0010015	/* Hardware Configuration */
 #define HWCR_MC_STATUS_WR_EN	__BIT(18)
@@ -789,6 +792,7 @@ struct vmm_svm_cpudata {
 	uint64_t gtsc_match;
 	uint64_t gtsc_generation;
 	uint64_t gtsc_adjust;
+	uint64_t nb_cfg;
 	uint64_t hwcr;
 	struct vmm_svm_xsave gxsave __aligned(64);
 	size_t cpuid_entry_count;
@@ -1731,7 +1735,7 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 			goto handled;
 		}
 		if (exit->u.rdmsr.msr == MSR_NB_CFG) {
-			val = NB_CFG_INITAPICCPUIDLO;
+			val = cpudata->nb_cfg;
 			vmcb->state.rax = (val & 0xFFFFFFFF);
 			cpudata->gprs[VMM_X64_GPR_RDX] = (val >> 32);
 			goto handled;
@@ -1775,6 +1779,12 @@ vmm_svm_inkernel_handle_msr(struct vmm_machine *mach, struct vmm_vcpu *vcpu,
 			    cpudata->gtsc_adjust;
 			cpudata->gtsc_adjust = exit->u.wrmsr.val;
 			cpudata->gtsc_want_update = true;
+			goto handled;
+		}
+		if (exit->u.wrmsr.msr == MSR_NB_CFG) {
+			if (exit->u.wrmsr.val & ~NB_CFG_VALID)
+				goto error;
+			cpudata->nb_cfg = exit->u.wrmsr.val;
 			goto handled;
 		}
 		if (exit->u.wrmsr.msr == MSR_K7_HWCR) {
@@ -3258,6 +3268,7 @@ vmm_svm_vcpu_create(struct vmm_vcpu *vcpu)
 
 	vcpu->backend = cpudata;
 	cpudata->hcpu_last = -1;
+	cpudata->nb_cfg = NB_CFG_INITAPICCPUIDLO;
 	cpudata->hwcr = HWCR_GUEST_FIXED;
 	atomic_store_rel_int(&cpudata->running_cpu, -1);
 

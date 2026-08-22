@@ -27,6 +27,8 @@
 	(VMMFS_PLATFORM_X64_ACPI_GPA + 0x100ULL)
 #define VMMFS_PLATFORM_X64_FADT_GPA \
 	(VMMFS_PLATFORM_X64_ACPI_GPA + 0x200ULL)
+#define VMMFS_PLATFORM_X64_FACS_GPA \
+	(VMMFS_PLATFORM_X64_ACPI_GPA + 0x800ULL)
 #define VMMFS_PLATFORM_X64_MADT_GPA \
 	(VMMFS_PLATFORM_X64_ACPI_GPA + 0x400ULL)
 #define VMMFS_PLATFORM_X64_DSDT_GPA \
@@ -57,6 +59,7 @@
 #define VMMFS_ACPI_HEADER_SIZE 36U
 #define VMMFS_ACPI_RSDP_SIZE 36U
 #define VMMFS_ACPI_FADT_SIZE 276U
+#define VMMFS_ACPI_FACS_SIZE 64U
 #define VMMFS_ACPI_MADT_LAPIC_SIZE 8U
 #define VMMFS_ACPI_MADT_IOAPIC_SIZE 12U
 #define VMMFS_ACPI_MCFG_SIZE 60U
@@ -178,6 +181,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 
 	table = tables + 0x200;
 	vmmfs_platform_x64_header(table, "FACP", VMMFS_ACPI_FADT_SIZE, 6);
+	vmmfs_platform_x64_write32(table, 36, VMMFS_PLATFORM_X64_FACS_GPA);
 	vmmfs_platform_x64_write32(table, 40, VMMFS_PLATFORM_X64_DSDT_GPA);
 	vmmfs_platform_x64_write16(table, 46, 9);
 	vmmfs_platform_x64_write32(table, 56,
@@ -190,8 +194,13 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	table[89] = VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE;
 	table[91] = 4;
 	table[108] = 0x32;
+	vmmfs_platform_x64_write64(table, 132, VMMFS_PLATFORM_X64_FACS_GPA);
 	vmmfs_platform_x64_write64(table, 140, VMMFS_PLATFORM_X64_DSDT_GPA);
 	vmmfs_platform_x64_checksum(table, VMMFS_ACPI_FADT_SIZE, 9);
+
+	table = tables + 0x800;
+	bcopy("FACS", table, 4);
+	vmmfs_platform_x64_write32(table, 4, VMMFS_ACPI_FACS_SIZE);
 
 	table = tables + 0x400;
 	madt_length = VMMFS_ACPI_HEADER_SIZE + 8 +
@@ -272,6 +281,9 @@ vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
 		return (EINVAL);
 	if (platform->runtime_machine != NULL)
 		return (EBUSY);
+	platform->pm1_status = 0;
+	platform->pm1_enable = 0;
+	platform->pm1_control = 0;
 	error = vmm_machine_trap_pio_read(machine,
 	    VMMFS_PLATFORM_X64_DELAY_PORT, VMMFS_PLATFORM_X64_DELAY_SIZE,
 	    vmmfs_platform_x64_read, platform, &platform->delay_read);
@@ -452,6 +464,37 @@ vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
 		read->value = 0;
 		return (0);
 	}
+	if (read->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
+	    end <= VMMFS_PLATFORM_X64_PM1_CONTROL_PORT +
+	    VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE) {
+		read->value = 0;
+		for (unsigned int index = 0; index < read->width; ++index) {
+			uint8_t value;
+
+			switch (read->address + index) {
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT:
+				value = platform->pm1_status;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 1U:
+				value = platform->pm1_status >> 8;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 2U:
+				value = platform->pm1_enable;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 3U:
+				value = platform->pm1_enable >> 8;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_CONTROL_PORT:
+				value = platform->pm1_control;
+				break;
+			default:
+				value = platform->pm1_control >> 8;
+				break;
+			}
+			read->value |= (uint64_t)value << (index * 8U);
+		}
+		return (0);
+	}
 	if (read->address >= VMMFS_PLATFORM_X64_PM_TIMER_PORT &&
 	    end <= VMMFS_PLATFORM_X64_PM_TIMER_LAST + 1U) {
 		read->value = vmmfs_platform_x64_pm_timer(platform) >>
@@ -483,6 +526,41 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 	    write->width == VMM_IO_WIDTH_32)
 		return (0);
 	end = write->address + write->width;
+	if (write->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
+	    end <= VMMFS_PLATFORM_X64_PM1_CONTROL_PORT +
+	    VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE) {
+		for (unsigned int index = 0; index < write->width; ++index) {
+			uint8_t value = write->value >> (index * 8U);
+
+			switch (write->address + index) {
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT:
+				platform->pm1_status &= ~(uint16_t)value;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 1U:
+				platform->pm1_status &= ~((uint16_t)value << 8);
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 2U:
+				platform->pm1_enable =
+				    (platform->pm1_enable & 0xff00U) | value;
+				break;
+			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 3U:
+				platform->pm1_enable =
+				    (platform->pm1_enable & 0x00ffU) |
+				    ((uint16_t)value << 8);
+				break;
+			case VMMFS_PLATFORM_X64_PM1_CONTROL_PORT:
+				platform->pm1_control =
+				    (platform->pm1_control & 0xff00U) | value;
+				break;
+			default:
+				platform->pm1_control =
+				    (platform->pm1_control & 0x00ffU) |
+				    ((uint16_t)value << 8);
+				break;
+			}
+		}
+		return (0);
+	}
 	if ((write->address >= VMMFS_PLATFORM_X64_DELAY_PORT &&
 	    end <= VMMFS_PLATFORM_X64_DELAY_PORT +
 	    VMMFS_PLATFORM_X64_DELAY_SIZE) ||
