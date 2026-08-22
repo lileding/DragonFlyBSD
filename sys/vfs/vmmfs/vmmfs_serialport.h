@@ -20,7 +20,6 @@ struct vop_ops;
 struct vmmfs_serialroot;
 
 #define VMMFS_SERIALPORT_FIFO_SIZE 1024
-#define VMMFS_SERIALPORT_OUTPUT_SIZE (64 * 1024)
 
 struct vmmfs_serialport {
 	RB_ENTRY(vmmfs_serialport) entry;
@@ -33,7 +32,6 @@ struct vmmfs_serialport {
 	uint32_t gsi;
 	struct cdev *dev;
 	struct tty *tty;
-	struct thread *thread;
 	struct lwkt_token token;
 	vmm_machine_t machine;
 	vmm_io_t read_io;
@@ -42,7 +40,6 @@ struct vmmfs_serialport {
 	unsigned int opening_count;
 	bool stopping;
 	bool destroying;
-	bool thread_exited;
 	uint8_t dll;
 	uint8_t dlm;
 	uint8_t ier;
@@ -56,9 +53,6 @@ struct vmmfs_serialport {
 	size_t input_start;
 	size_t input_length;
 	char input[VMMFS_SERIALPORT_FIFO_SIZE];
-	size_t output_start;
-	size_t output_length;
-	char *output;
 };
 
 RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialport, entry,
