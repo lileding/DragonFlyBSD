@@ -26,6 +26,8 @@ static uint64_t vmm_vcpu_run_return_count[MAXCPU];
 static uint64_t vmm_vcpu_run_restart_preentry_count[MAXCPU];
 static uint64_t vmm_vcpu_run_restart_postexit_count[MAXCPU];
 static uint32_t vmm_vcpu_run_restart_preentry_flags[MAXCPU];
+static uint32_t vmm_vcpu_run_restart_preentry_last_flags[MAXCPU];
+static uint64_t vmm_vcpu_run_restart_preentry_reason_count[RQB_XINVLTLB + 1][MAXCPU];
 static uint32_t vmm_vcpu_run_restart_postexit_flags[MAXCPU];
 
 static int vmm_sysctl_stats(SYSCTL_HANDLER_ARGS);
@@ -51,6 +53,48 @@ SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_flags,
 SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_postexit_flags,
     CTLTYPE_U32 | CTLFLAG_RD, (void *)vmm_vcpu_run_restart_postexit_flags, 0,
     vmm_sysctl_stats_flags, "IU", "OR of root-work flags after VMEXIT");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_last_flags,
+    CTLTYPE_U32 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_last_flags, 0,
+    vmm_sysctl_stats_flags, "IU",
+    "OR of the most recent root-work flags on each CPU before VMRUN");
+
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_ipiq,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_IPIQ], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending IPI work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_intpend,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_INTPEND], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending interrupt work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_ast_oweupc,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_AST_OWEUPC], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending user profiling work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_ast_signal,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_AST_SIGNAL], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending signal work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_ast_user_resched,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_AST_USER_RESCHED], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending user scheduler work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_ast_lwkt_resched,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_AST_LWKT_RESCHED], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending LWKT scheduler work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_timer,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_TIMER], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending timer work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_kqueue,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_KQUEUE], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending kqueue work");
+SYSCTL_PROC(_hw_vmm_stats, OID_AUTO, restart_preentry_xinvaltlb,
+    CTLTYPE_U64 | CTLFLAG_RD,
+    (void *)vmm_vcpu_run_restart_preentry_reason_count[RQB_XINVLTLB], 0,
+    vmm_sysctl_stats, "QU", "VMRUN retries before entry due to pending hTLB invalidation");
 
 static int
 vmm_sysctl_stats(SYSCTL_HANDLER_ARGS)
@@ -93,9 +137,18 @@ vmm_stat_vcpu_run_return(void)
 void
 vmm_stat_vcpu_run_restart_preentry(uint32_t flags)
 {
+	int bit;
+	int cpuid;
+
+	cpuid = mycpu->gd_cpuid;
 	atomic_add_64(&vmm_vcpu_run_restart_preentry_count[mycpu->gd_cpuid], 1);
-	atomic_set_int(&vmm_vcpu_run_restart_preentry_flags[mycpu->gd_cpuid],
-	    flags);
+	atomic_set_int(&vmm_vcpu_run_restart_preentry_flags[cpuid], flags);
+	atomic_swap_int(&vmm_vcpu_run_restart_preentry_last_flags[cpuid], flags);
+	for (bit = 0; bit <= RQB_XINVLTLB; ++bit) {
+		if ((flags & (1U << bit)) != 0)
+			atomic_add_64(
+			    &vmm_vcpu_run_restart_preentry_reason_count[bit][cpuid], 1);
+	}
 }
 
 void
@@ -155,6 +208,10 @@ vmm_modevent(module_t module, int event, void *arg)
 		    sizeof(vmm_vcpu_run_restart_preentry_count));
 		bzero(vmm_vcpu_run_restart_postexit_count,
 		    sizeof(vmm_vcpu_run_restart_postexit_count));
+		bzero(vmm_vcpu_run_restart_preentry_reason_count,
+		    sizeof(vmm_vcpu_run_restart_preentry_reason_count));
+		bzero(vmm_vcpu_run_restart_preentry_last_flags,
+		    sizeof(vmm_vcpu_run_restart_preentry_last_flags));
 		bzero(vmm_vcpu_run_restart_preentry_flags,
 		    sizeof(vmm_vcpu_run_restart_preentry_flags));
 		bzero(vmm_vcpu_run_restart_postexit_flags,

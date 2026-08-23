@@ -13,13 +13,11 @@
 
 struct vmmfs_machine;
 struct vmmfs_pcislot_config_request;
-struct thread;
 struct vnode;
 struct vop_ops;
 
 struct vmmfs_vcpu_thread {
 	struct vmmfs_vcpu *group;
-	struct thread *thread;
 	vmm_vcpu_t vcpu;
 	struct vmm_cpustate state;
 	uint32_t index;
@@ -40,6 +38,8 @@ struct vmmfs_vcpu {
 	uint32_t count;
 	unsigned int active_count;
 	unsigned int reset_waiting;
+	bool start_ready;
+	bool start_failed;
 	bool stop_requested;
 	bool reset_requested;
 };

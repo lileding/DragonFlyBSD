@@ -5,18 +5,23 @@
  */
 #include <sys/dirent.h>
 #include <sys/errno.h>
+#include <sys/globaldata.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/proc.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/thread.h>
 #include <sys/thread2.h>
 #include <sys/uio.h>
+#include <sys/unistd.h>
+#include <sys/usched.h>
 #include <sys/vnode.h>
 
 #include <machine/atomic.h>
+#include <machine/cpu.h>
 
 #include "vmmfs.h"
 
@@ -34,9 +39,11 @@ static int vmmfs_vcpu_reclaim(struct vop_reclaim_args *);
 static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *);
 static bool vmmfs_vcpu_is_reset_requested(struct vmmfs_vcpu *);
 static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *);
+static int vmmfs_vcpu_thread_start(struct vmmfs_vcpu_thread *);
+static void vmmfs_vcpu_thread_wait_start(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *);
-static void vmmfs_vcpu_thread_main(void *);
+static void vmmfs_vcpu_thread_main(void *, struct trapframe *);
 
 struct vop_ops vmmfs_vcpu_vops = {
 	.vop_default = vop_defaultop,
@@ -161,8 +168,9 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
 	const struct vmm_cpustate *bsp_state)
 {
 	struct vmmfs_vcpu_thread *thread;
-	char thread_name[sizeof("vmm4294967295-vcpu4294967295")];
+	struct vmmfs_vcpu_thread *threads;
 	uint32_t index;
+	bool workers_started;
 	int error;
 
 	if (vcpu == NULL || machine == NULL || bsp_state == NULL ||
@@ -174,29 +182,16 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
 	lwkt_gettoken(&vcpu->token);
 	vcpu->threads = thread;
 	vcpu->runtime_machine = machine;
+	vcpu->start_ready = false;
+	vcpu->start_failed = false;
 	lwkt_reltoken(&vcpu->token);
 
-	/* Create every LWKT paused so no vCPU can observe partial setup. */
+	/* Construct every vCPU before any worker process is allowed to run. */
+	vcpu->threads[0].state = *bsp_state;
 	for (index = 0; index < count; ++index) {
 		thread = &vcpu->threads[index];
 		thread->group = vcpu;
 		thread->index = index;
-		error = ksnprintf(thread_name, sizeof(thread_name),
-		    "vmm%u-vcpu%u", vcpu->machine->id, index);
-		if (error < 0 || (size_t)error >= sizeof(thread_name)) {
-			error = EOVERFLOW;
-			goto failed;
-		}
-		error = lwkt_create(vmmfs_vcpu_thread_main, thread,
-		    &thread->thread, NULL, TDF_NOSTART, -1, "%s", thread_name);
-		if (error != 0)
-			goto failed;
-	}
-
-	/* Construct every vCPU before any LWKT is allowed to run. */
-	vcpu->threads[0].state = *bsp_state;
-	for (index = 0; index < count; ++index) {
-		thread = &vcpu->threads[index];
 		{
 			vmm_vcpu_t created_vcpu;
 
@@ -217,14 +212,47 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
 			goto failed;
 	}
 
+	/*
+	 * fork1() has no paused-process counterpart.  Each worker therefore
+	 * waits on the group channel until this loop has created the complete
+	 * vCPU set.  A launch failure wakes the partial group only to tear it
+	 * down; the caller retains ownership of the array in that case.
+	 */
+	for (index = 0; index < count; ++index) {
+		error = vmmfs_vcpu_thread_start(&vcpu->threads[index]);
+		if (error != 0)
+			goto failed;
+	}
 	lwkt_gettoken(&vcpu->token);
-	vcpu->active_count = count;
+	vcpu->start_ready = true;
 	lwkt_reltoken(&vcpu->token);
-	for (index = 0; index < count; ++index)
-		lwkt_schedule(vcpu->threads[index].thread);
+	wakeup(vcpu);
 	return (0);
 
 failed:
+	lwkt_gettoken(&vcpu->token);
+	workers_started = vcpu->active_count != 0;
+	if (workers_started) {
+		vcpu->start_failed = true;
+		vcpu->stop_requested = true;
+		vcpu->reset_requested = false;
+		vcpu->start_ready = true;
+	}
+	lwkt_reltoken(&vcpu->token);
+	if (workers_started) {
+		vmmfs_vcpu_request_stop(vcpu);
+		wakeup(vcpu);
+		for (;;) {
+			tsleep_interlock(vcpu, 0);
+			lwkt_gettoken(&vcpu->token);
+			if (vcpu->active_count == 0) {
+				lwkt_reltoken(&vcpu->token);
+				break;
+			}
+			lwkt_reltoken(&vcpu->token);
+			(void)tsleep(vcpu, PINTERLOCKED, "vmmfsstart", 0);
+		}
+	}
 	for (index = 0; index < count; ++index) {
 		thread = &vcpu->threads[index];
 		if (thread->vcpu != NULL) {
@@ -234,16 +262,19 @@ failed:
 			KKASSERT(destroy_error == 0);
 			thread->vcpu = NULL;
 		}
-		if (thread->thread != NULL) {
-			lwkt_free_thread(thread->thread);
-			thread->thread = NULL;
-		}
 	}
-	kfree(vcpu->threads, M_VMMFS);
 	lwkt_gettoken(&vcpu->token);
+	threads = vcpu->threads;
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
+	vcpu->active_count = 0;
+	vcpu->reset_waiting = 0;
+	vcpu->start_ready = false;
+	vcpu->start_failed = false;
+	vcpu->stop_requested = false;
+	vcpu->reset_requested = false;
 	lwkt_reltoken(&vcpu->token);
+	kfree(threads, M_VMMFS);
 	return (error);
 }
 
@@ -266,6 +297,7 @@ vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 			wakeup(vcpu->threads[index].wait_channel);
 	}
 	lwkt_reltoken(&vcpu->token);
+	wakeup(vcpu);
 }
 
 void
@@ -386,15 +418,64 @@ vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *thread)
 	lwkt_reltoken(&thread->group->token);
 }
 
+static int
+vmmfs_vcpu_thread_start(struct vmmfs_vcpu_thread *thread)
+{
+	struct proc *process;
+	struct lwp *lwp;
+	struct vmmfs_vcpu *vcpu;
+	int error;
+
+	vcpu = thread->group;
+	/*
+	 * RFNOWAIT makes the reaper own this kernel worker.  vmmfs retains
+	 * lifecycle ownership through vcpu->active_count, not through wait(2).
+	 */
+	error = fork1(&lwp0, RFMEM | RFFDG | RFPROC | RFNOWAIT, &process);
+	if (error != 0)
+		return (error);
+	process->p_flags |= P_SYSTEM;
+	(void)ksnprintf(process->p_comm, sizeof(process->p_comm),
+	    "vmm%u-vcpu%u", vcpu->machine->id, thread->index);
+	lwp = ONLY_LWP_IN_PROC(process);
+	lwp->lwp_thread->td_ucred = crhold(proc0.p_ucred);
+	cpu_set_fork_handler(lwp, vmmfs_vcpu_thread_main, thread);
+
+	/* Make the worker visible to the stop barrier before it can run. */
+	lwkt_gettoken(&vcpu->token);
+	++vcpu->active_count;
+	lwkt_reltoken(&vcpu->token);
+	start_forked_proc(&lwp0, process);
+	return (0);
+}
+
+static void
+vmmfs_vcpu_thread_wait_start(struct vmmfs_vcpu_thread *thread)
+{
+	struct vmmfs_vcpu *vcpu;
+
+	vcpu = thread->group;
+	for (;;) {
+		tsleep_interlock(vcpu, 0);
+		lwkt_gettoken(&vcpu->token);
+		if (vcpu->start_ready) {
+			lwkt_reltoken(&vcpu->token);
+			return;
+		}
+		lwkt_reltoken(&vcpu->token);
+		(void)tsleep(vcpu, PINTERLOCKED, "vmmfsstart", 0);
+	}
+}
+
 static void
 vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 {
 	struct vmmfs_vcpu *vcpu;
 	struct vmmfs_machine *machine;
 	struct vmmfs_vcpu_thread *threads;
-	vmm_machine_t runtime_machine;
 	vmm_vcpu_t bsp_vcpu;
 	void *channel;
+	bool start_failed;
 
 	vcpu = thread->group;
 	machine = vcpu->machine;
@@ -405,10 +486,10 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 		--vcpu->active_count;
 		bsp_vcpu = vcpu->threads[0].vcpu;
 		channel = bsp_vcpu != NULL ? bsp_vcpu :
-		    vcpu->threads[0].wait_channel;
+			vcpu->threads[0].wait_channel;
 		lwkt_reltoken(&vcpu->token);
 		wakeup(channel);
-		lwkt_exit();
+		exit1(0);
 	}
 
 	vmmfs_vcpu_request_stop(vcpu);
@@ -426,18 +507,27 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	vmmfs_vcpu_thread_destroy(thread);
 	lwkt_gettoken(&vcpu->token);
 	KKASSERT(vcpu->active_count == 1);
+	start_failed = vcpu->start_failed;
+	if (start_failed) {
+		vcpu->active_count = 0;
+		vcpu->reset_waiting = 0;
+		lwkt_reltoken(&vcpu->token);
+		wakeup(vcpu);
+		exit1(0);
+	}
 	threads = vcpu->threads;
-	runtime_machine = vcpu->runtime_machine;
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
 	vcpu->active_count = 0;
 	vcpu->reset_waiting = 0;
+	vcpu->start_ready = false;
+	vcpu->start_failed = false;
 	vcpu->stop_requested = false;
 	vcpu->reset_requested = false;
 	lwkt_reltoken(&vcpu->token);
 	kfree(threads, M_VMMFS);
 	vmmfs_machine_vcpu_stopped(machine);
-	lwkt_exit();
+	exit1(0);
 }
 
 static void
@@ -497,7 +587,7 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 }
 
 static void
-vmmfs_vcpu_thread_main(void *argument)
+vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 {
 	struct vmmfs_vcpu_thread *thread;
 	struct vmmfs_vcpu *vcpu;
@@ -510,7 +600,8 @@ vmmfs_vcpu_thread_main(void *argument)
 
 	thread = argument;
 	vcpu = thread->group;
-	lwkt_setpri_self(TDPRI_USER_NORM);
+	(void)frame;
+	vmmfs_vcpu_thread_wait_start(thread);
 	for (;;) {
 		if (vmmfs_vcpu_is_stop_requested(vcpu))
 			break;
@@ -519,10 +610,26 @@ vmmfs_vcpu_thread_main(void *argument)
 			continue;
 		}
 		KKASSERT(thread->vcpu != NULL);
+		/*
+		 * Guest execution is kernel work on behalf of this LWP.  Join the
+		 * existing user scheduler before VMRUN so an AST can release this
+		 * CPU to a normal user process.
+		 */
+		lwkt_passive_recover(curthread);
+		curthread->td_lwp->lwp_proc->p_usched->acquire_curproc(
+		    curthread->td_lwp);
+		curthread->td_release = lwkt_passive_release;
 		exit = NULL;
 		error = vmm_vcpu_run(thread->vcpu, &exit);
 		if (error == ERESTART) {
-			lwkt_yield();
+			/*
+			 * An AST signal is normally consumed only on a return to
+			 * userland.  This daemon stays in the kernel, so request a
+			 * user-scheduler pass and let passive release run that path.
+			 */
+			if (mycpu->gd_reqflags & RQF_AST_SIGNAL)
+				need_user_resched();
+			lwkt_user_yield();
 			continue;
 		}
 		if (error == EINTR)
