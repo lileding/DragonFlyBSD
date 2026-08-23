@@ -522,7 +522,7 @@ vmmfs_vcpu_thread_main(void *argument)
 		exit = NULL;
 		error = vmm_vcpu_run(thread->vcpu, &exit);
 		if (error == ERESTART) {
-			lwkt_yield_quick();
+			lwkt_yield();
 			continue;
 		}
 		if (error == EINTR)
