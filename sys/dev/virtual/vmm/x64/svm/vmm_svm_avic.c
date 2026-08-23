@@ -37,6 +37,8 @@
 #define VMM_SVM_AVIC_LOGICAL_APIC_ID	__BITS(7, 0)
 #define VMM_SVM_AVIC_DOORBELL_MSR	0xc001011bU
 
+static bool vmm_svm_avic_ipi_enabled;
+
 #define VMM_SVM_MSR_APICBASE			0x01bU
 #define VMM_SVM_APICBASE_BSP			0x00000100ULL
 #define VMM_SVM_APICBASE_ENABLED		0x00000800ULL
@@ -294,6 +296,7 @@ bool
 vmm_svm_avic_available(void)
 {
 	cpuid_desc_t desc;
+	uint32_t family;
 	uint32_t cpu;
 
 	x86_get_cpuid(0x8000000a, &desc);
@@ -302,6 +305,20 @@ vmm_svm_avic_available(void)
 	for (cpu = 0; cpu < ncpus; ++cpu) {
 		if ((CPUID_TO_APICID(cpu) & ~VMM_SVM_AVIC_HOST_APIC_ID_MASK) != 0)
 			return false;
+	}
+	x86_get_cpuid(1, &desc);
+	family = (desc.eax >> 8) & 0x0fU;
+	if (family == 0x0fU)
+		family += (desc.eax >> 20) & 0xffU;
+	/*
+	 * Family 17h/18h erratum 1235 can lose the sender's incomplete-IPI
+	 * VMEXIT.  Keep AVIC posted interrupts, but force guest IPIs through
+	 * the incomplete-IPI exit and software routing path.
+	 */
+	vmm_svm_avic_ipi_enabled = family != 0x17U && family != 0x18U;
+	if (!vmm_svm_avic_ipi_enabled) {
+		kprintf("vmm: AVIC direct IPI disabled for AMD family %#x "
+		    "(erratum 1235)\n", family);
 	}
 	return true;
 }
@@ -1373,8 +1390,9 @@ vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *avic)
 	KKASSERT((apic_id & ~VMM_SVM_AVIC_HOST_APIC_ID_MASK) == 0);
 	atomic_store_rel_int(&avic->host_apic_id, apic_id);
 	atomic_store_rel_int(&avic->host_cpu, cpu);
-	entry = avic->apic_page_pa | VMM_SVM_AVIC_PHYS_VALID |
-	    VMM_SVM_AVIC_PHYS_RUNNING | apic_id;
+	entry = avic->apic_page_pa | VMM_SVM_AVIC_PHYS_VALID | apic_id;
+	if (vmm_svm_avic_ipi_enabled)
+		entry |= VMM_SVM_AVIC_PHYS_RUNNING;
 	atomic_store_rel_64(&avic->machine->physical_table[avic->apic_id], entry);
 	cpu_mfence();
 	atomic_store_rel_int(&avic->running, 1);
