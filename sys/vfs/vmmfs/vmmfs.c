@@ -13,6 +13,7 @@
 
 #include "vmmfs.h"
 #include "vmmfs_machine_id.h"
+#include "vmmfs_boot.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_config.h"
@@ -84,7 +85,12 @@ vmmfs_vfs_init(struct vfsconf *configuration)
 static int
 vmmfs_vfs_uninit(struct vfsconf *configuration)
 {
+	int error;
+
 	(void)configuration;
+	error = vmmfs_boot_module_fini();
+	if (error != 0)
+		return (error);
 	return (vmmfs_loader_module_fini());
 }
 
@@ -183,6 +189,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	vfs_add_vnodeops(mount, &vmmfs_vcpu_vops, &state->vcpu_vops);
 	vfs_add_vnodeops(mount, &vmmfs_memory_vops, &state->memory_vops);
 	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
+	vfs_add_vnodeops(mount, &vmmfs_boot_vops, &state->boot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_stopped_vops,
 	    &state->stopped_vops);
 	vfs_add_vnodeops(mount, &vmmfs_events_vops,
@@ -205,6 +212,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_events_vops);
 	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
+		vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
@@ -269,6 +277,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);

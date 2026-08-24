@@ -573,7 +573,7 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 		return (ENOENT);
 	ncp = ap->a_nch->ncp;
 	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (slot->descriptor.committing) {
+	if (slot->descriptor.updating) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
 	}
@@ -730,7 +730,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	size_t name_length;
 
 	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (slot->descriptor.committing) {
+	if (slot->descriptor.updating) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		return (EBUSY);
 	}

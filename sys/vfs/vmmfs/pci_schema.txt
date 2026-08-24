@@ -37,12 +37,18 @@ style hexadecimal integers.  Boolean values are exactly 0 or 1.  A hex byte
 string contains a nonzero, even number of lowercase hexadecimal digits and has
 no 0x prefix.
 
-The descriptor is close-committed while its machine is stopped.  A zero-byte
-close removes the committed descriptor.  A failed close preserves the prior
-generation without modification.  `rm descriptor` is not part of this ABI.
+The descriptor is write-committed while its machine is stopped.  Every write
+must contain exactly one complete document at offset zero.  VMMFS parses and
+validates the complete write before atomically replacing the prior generation;
+a failed write preserves that generation without modification.  `close()` has
+no descriptor lifecycle effect and `rm descriptor` is not part of this ABI.
 
-Every successful nonempty close creates a new descriptor generation and
-injects one anonymous auth-token fd into the committing process.  The token
+The exact one-record document `present=0\n` removes the committed descriptor.
+It is the sole absent-device encoding.  A zero-byte write has no descriptor
+meaning and callers must not use it as an unplug operation.
+
+Every successful nonempty write creates a new descriptor generation and
+injects one anonymous auth-token fd into the writing process.  The token
 authorizes every open of this generation's events, config, and resource nodes.  It is a
 normal inheritable file description: fork, dup, and SCM_RIGHTS retain the
 capability, and it is neither close-on-exec nor close-on-fork.  A process

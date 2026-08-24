@@ -37,6 +37,8 @@ static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_inactive(struct vop_inactive_args *);
 static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
 static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
+static int vmmfs_machine_prepare_start(struct vmmfs_machine *, char *,
+	uint32_t *);
 static void vmmfs_machine_wake_waiters(struct vmmfs_machine *);
 static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
 
@@ -100,9 +102,12 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	error = vmmfs_loader_init(machine, &machine->loader);
 	if (error != 0)
 		goto fail_memory;
-	error = vmmfs_stopped_init(machine, &machine->stopped);
+	error = vmmfs_boot_init(machine, &machine->boot);
 	if (error != 0)
 		goto fail_loader;
+	error = vmmfs_stopped_init(machine, &machine->stopped);
+	if (error != 0)
+		goto fail_boot;
 	error = vmmfs_pciroot_init(machine, &machine->pciroot);
 	if (error != 0)
 		goto fail_stopped;
@@ -148,6 +153,9 @@ fail_pciroot:
 fail_stopped:
 	vmmfs_vnode_discard(machine->stopped.vnode);
 	(void)vmmfs_stopped_fini(&machine->stopped);
+fail_boot:
+	vmmfs_vnode_discard(machine->boot.vnode);
+	(void)vmmfs_boot_fini(&machine->boot);
 fail_loader:
 	vmmfs_vnode_discard(machine->loader.vnode);
 	(void)vmmfs_loader_fini(&machine->loader);
@@ -177,6 +185,7 @@ vmmfs_machine_abort_create(struct vmmfs_machine *machine)
 	vmmfs_vnode_discard(machine->serialroot.vnode);
 	vmmfs_vnode_discard(machine->pciroot.vnode);
 	vmmfs_vnode_discard(machine->stopped.vnode);
+	vmmfs_vnode_discard(machine->boot.vnode);
 	vmmfs_vnode_discard(machine->loader.vnode);
 	vmmfs_vnode_discard(machine->memory.vnode);
 	vmmfs_vnode_discard(machine->vcpu.vnode);
@@ -210,6 +219,7 @@ vmmfs_machine_begin_destroy(struct vmmfs_machine *machine)
 	vmmfs_serialroot_release_vnodes(&machine->serialroot);
 	vmmfs_vnode_discard(machine->events.vnode);
 	vmmfs_vnode_discard(machine->stopped.vnode);
+	vmmfs_vnode_discard(machine->boot.vnode);
 	vmmfs_vnode_discard(machine->loader.vnode);
 	vmmfs_vnode_discard(machine->memory.vnode);
 	vmmfs_vnode_discard(machine->vcpu.vnode);
@@ -233,6 +243,7 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	KKASSERT(machine->vcpu.vnode == NULL);
 	KKASSERT(machine->memory.vnode == NULL);
 	KKASSERT(machine->loader.vnode == NULL);
+	KKASSERT(machine->boot.vnode == NULL);
 	KKASSERT(machine->stopped.vnode == NULL);
 	KKASSERT(machine->events.vnode == NULL);
 	KKASSERT(machine->pciroot.vnode == NULL);
@@ -240,6 +251,8 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	root = machine->root;
 	root_counted = machine->root_counted;
 	error = vmmfs_stopped_fini(&machine->stopped);
+	KKASSERT(error == 0);
+	error = vmmfs_boot_fini(&machine->boot);
 	KKASSERT(error == 0);
 	error = vmmfs_loader_fini(&machine->loader);
 	KKASSERT(error == 0);
@@ -331,6 +344,7 @@ vmmfs_machine_wake_waiters(struct vmmfs_machine *machine)
 {
 	struct vmmfs_pcislot *slot;
 
+	vmmfs_boot_revoke(&machine->boot);
 	vmmfs_events_revoke(&machine->events);
 	RB_FOREACH(slot, vmmfs_pcislot_tree, &machine->pciroot.slots) {
 		vmmfs_pcislot_config_revoke(&slot->config);
@@ -342,6 +356,7 @@ int
 vmmfs_machine_stop_request(struct vmmfs_machine *machine, const char *reason)
 {
 	bool running;
+	bool boot_pending;
 
 	if (machine == NULL || reason == NULL)
 		return (EINVAL);
@@ -354,6 +369,11 @@ vmmfs_machine_stop_request(struct vmmfs_machine *machine, const char *reason)
 	lwkt_reltoken(&machine->token);
 	if (!running)
 		return (0);
+	boot_pending = vmmfs_boot_is_active(&machine->boot);
+	if (boot_pending) {
+		vmmfs_events_log(&machine->events, "stop requested reason=%s", reason);
+		return (vmmfs_machine_release_runtime(machine));
+	}
 	vmmfs_vcpu_request_stop(&machine->vcpu);
 	vmmfs_events_log(&machine->events, "stop requested reason=%s", reason);
 	return (0);
@@ -537,6 +557,9 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 	else if (ncp->nc_nlen == sizeof("loader") - 1 &&
 	    bcmp(ncp->nc_name, "loader", sizeof("loader") - 1) == 0)
 		vnode = machine->loader.vnode;
+	else if (ncp->nc_nlen == sizeof("boot") - 1 &&
+	    bcmp(ncp->nc_name, "boot", sizeof("boot") - 1) == 0)
+		vnode = machine->boot.vnode;
 	else if (ncp->nc_nlen == sizeof("events") - 1 &&
 	    bcmp(ncp->nc_name, "events", sizeof("events") - 1) == 0)
 		vnode = machine->events.vnode;
@@ -676,12 +699,18 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 6;
 	}
 	if (!stop && offset == 6) {
-		stop = vop_write_dirent(&error, uio, machine->events.inode,
-		    DT_REG, sizeof("events") - 1, "events");
+		stop = vop_write_dirent(&error, uio, machine->boot.inode,
+		    DT_CHR, sizeof("boot") - 1, "boot");
 		if (!stop)
 			offset = 7;
 	}
 	if (!stop && offset == 7) {
+		stop = vop_write_dirent(&error, uio, machine->events.inode,
+		    DT_REG, sizeof("events") - 1, "events");
+		if (!stop)
+			offset = 8;
+	}
+	if (!stop && offset == 8) {
 		lwkt_gettoken(&machine->token);
 		present = machine->machine == NULL;
 		inode = machine->stopped.inode;
@@ -691,25 +720,25 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			    sizeof("stopped") - 1, "stopped");
 		}
 		if (!stop)
-			offset = 8;
+			offset = 9;
 	}
-	if (!stop && offset == 8) {
+	if (!stop && offset == 9) {
 		lwkt_gettoken(&machine->token);
 		inode = machine->pciroot.inode;
 		lwkt_reltoken(&machine->token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("pci") - 1, "pci");
 		if (!stop)
-			offset = 9;
+			offset = 10;
 	}
-	if (!stop && offset == 9) {
+	if (!stop && offset == 10) {
 		lwkt_gettoken(&machine->token);
 		inode = machine->serialroot.inode;
 		lwkt_reltoken(&machine->token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("serial") - 1, "serial");
 		if (!stop)
-			offset = 10;
+			offset = 11;
 	}
 	uio->uio_offset = offset;
 	if (ap->a_eofflag != NULL)
@@ -749,34 +778,31 @@ vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
 }
 
 static int
-vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
+vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
+	char *loader_script, uint32_t *vcpu_countp)
 {
-	struct vmm_cpustate state;
 	vmm_machine_t runtime_machine;
-	char *loader_script;
 	uint64_t memory_size;
 	uint32_t vcpu_count;
 	int error;
 	int release_error;
 
-	if (machine == NULL || cred == NULL)
+	if (machine == NULL)
 		return (EINVAL);
 	runtime_machine = NULL;
-	loader_script = kmalloc(sizeof(machine->loader.script), M_VMMFS,
-	    M_WAITOK);
 	lwkt_gettoken(&machine->token);
 	if (machine->dead || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
-		kfree(loader_script, M_VMMFS);
 		return (EBUSY);
 	}
 	memory_size = machine->memory.size;
 	vcpu_count = machine->vcpu.count;
-	bcopy(machine->loader.script, loader_script,
-	    sizeof(machine->loader.script));
-	if (memory_size == 0 || vcpu_count == 0 || loader_script[0] == '\0') {
+	if (loader_script != NULL)
+		bcopy(machine->loader.script, loader_script,
+		    sizeof(machine->loader.script));
+	if (memory_size == 0 || vcpu_count == 0 ||
+	    (loader_script != NULL && loader_script[0] == '\0')) {
 		lwkt_reltoken(&machine->token);
-		kfree(loader_script, M_VMMFS);
 		return (EINVAL);
 	}
 
@@ -785,7 +811,6 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	 * machine token from the stopped topology snapshot through its publication,
 	 * so no VOP can change the topology between these two operations.
 	 */
-	vmmfs_events_log(&machine->events, "start requested");
 	error = vmmfs_memory_prepare(&machine->memory, memory_size);
 	if (error != 0)
 		goto failed_locked;
@@ -821,21 +846,32 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	error = vmmfs_platform_x64_start(&machine->platform, runtime_machine);
 	if (error != 0)
 		goto failed;
-	error = vmmfs_loader_run(&machine->loader, loader_script,
-	    &machine->memory, cred,
-	    &state);
-	if (error != 0)
-		goto failed;
-	error = vmmfs_memory_snapshot(&machine->memory);
-	if (error != 0)
-		goto failed;
-	machine->boot_state = state;
-	error = vmmfs_vcpu_start(&machine->vcpu, vcpu_count, runtime_machine,
-	    &state);
-	if (error != 0)
-		goto failed;
-	vmmfs_events_log(&machine->events, "start completed");
-	kfree(loader_script, M_VMMFS);
+	if (loader_script == NULL) {
+		bool stop_requested;
+
+		/*
+		 * Do not expose the direct-boot pager until the platform is fully
+		 * constructed.  A stop during construction remains a vCPU stop
+		 * request; once the pager is published, stop may revoke it directly.
+		 */
+		lwkt_gettoken(&machine->token);
+		lwkt_gettoken(&machine->vcpu.token);
+		stop_requested = machine->vcpu.stop_requested;
+		lwkt_reltoken(&machine->vcpu.token);
+		if (!stop_requested) {
+			error = vmmfs_boot_arm_locked(&machine->boot,
+			    machine->memory.object, memory_size);
+		}
+		lwkt_reltoken(&machine->token);
+		if (stop_requested) {
+			error = EINTR;
+			goto failed;
+		}
+		if (error != 0)
+			goto failed;
+	}
+	if (vcpu_countp != NULL)
+		*vcpu_countp = vcpu_count;
 	return (0);
 
 failed_locked:
@@ -844,8 +880,109 @@ failed:
 	release_error = vmmfs_machine_release_runtime(machine);
 	if (release_error != 0)
 		error = release_error;
+	return (error);
+}
+
+static int
+vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
+{
+	struct vmm_cpustate state;
+	vmm_machine_t runtime_machine;
+	char *loader_script;
+	uint32_t vcpu_count;
+	int error;
+	int release_error;
+
+	if (machine == NULL || cred == NULL)
+		return (EINVAL);
+	loader_script = kmalloc(sizeof(machine->loader.script), M_VMMFS,
+	    M_WAITOK);
+	vmmfs_events_log(&machine->events, "start requested");
+	error = vmmfs_machine_prepare_start(machine, loader_script, &vcpu_count);
+	if (error != 0)
+		goto failed;
+	lwkt_gettoken(&machine->token);
+	runtime_machine = machine->machine;
+	lwkt_reltoken(&machine->token);
+	KKASSERT(runtime_machine != NULL);
+	error = vmmfs_loader_run(&machine->loader, loader_script,
+	    &machine->memory, cred, &state);
+	if (error != 0)
+		goto failed_runtime;
+	error = vmmfs_memory_snapshot(&machine->memory);
+	if (error != 0)
+		goto failed_runtime;
+	machine->boot_state = state;
+	error = vmmfs_vcpu_start(&machine->vcpu, vcpu_count, runtime_machine,
+	    &state);
+	if (error != 0)
+		goto failed_runtime;
+	vmmfs_events_log(&machine->events, "start completed");
+	kfree(loader_script, M_VMMFS);
+	return (0);
+
+failed_runtime:
+	release_error = vmmfs_machine_release_runtime(machine);
+	if (release_error != 0)
+		error = release_error;
+failed:
 	vmmfs_events_log(&machine->events, "start failed error=%d", error);
 	kfree(loader_script, M_VMMFS);
+	return (error);
+}
+
+int
+vmmfs_machine_boot_start(struct vmmfs_machine *machine)
+{
+	int error;
+
+	if (machine == NULL)
+		return (EINVAL);
+	vmmfs_events_log(&machine->events, "boot requested");
+	error = vmmfs_machine_prepare_start(machine, NULL, NULL);
+	if (error != 0) {
+		vmmfs_events_log(&machine->events, "boot failed error=%d", error);
+		return (error);
+	}
+	vmmfs_events_log(&machine->events, "boot ready");
+	return (0);
+}
+
+int
+vmmfs_machine_boot_submit(struct vmmfs_machine *machine,
+	const struct vmm_cpustate *state)
+{
+	vmm_machine_t runtime_machine;
+	uint32_t vcpu_count;
+	int error;
+	int release_error;
+
+	if (machine == NULL || state == NULL)
+		return (EINVAL);
+	lwkt_gettoken(&machine->token);
+	if (machine->dead || machine->machine == NULL) {
+		lwkt_reltoken(&machine->token);
+		return (EPIPE);
+	}
+	runtime_machine = machine->machine;
+	vcpu_count = machine->vcpu.count;
+	lwkt_reltoken(&machine->token);
+	error = vmmfs_memory_snapshot(&machine->memory);
+	if (error != 0)
+		goto failed;
+	machine->boot_state = *state;
+	error = vmmfs_vcpu_start(&machine->vcpu, vcpu_count, runtime_machine,
+	    state);
+	if (error != 0)
+		goto failed;
+	vmmfs_events_log(&machine->events, "boot completed");
+	return (0);
+
+failed:
+	release_error = vmmfs_machine_release_runtime(machine);
+	if (release_error != 0)
+		error = release_error;
+	vmmfs_events_log(&machine->events, "boot failed error=%d", error);
 	return (error);
 }
 
@@ -858,6 +995,7 @@ vmmfs_machine_release_runtime(struct vmmfs_machine *machine)
 	lwkt_gettoken(&machine->token);
 	runtime_machine = machine->machine;
 	lwkt_reltoken(&machine->token);
+	vmmfs_boot_revoke(&machine->boot);
 	(void)vmmfs_platform_x64_stop(&machine->platform);
 	(void)vmmfs_serialroot_stop(&machine->serialroot);
 	(void)vmmfs_pciroot_stop(&machine->pciroot);
@@ -869,6 +1007,13 @@ vmmfs_machine_release_runtime(struct vmmfs_machine *machine)
 		}
 	}
 	vmmfs_memory_release(&machine->memory);
+	/* A pre-vCPU stop has no worker to clear these request bits. */
+	lwkt_gettoken(&machine->vcpu.token);
+	if (machine->vcpu.active_count == 0 && machine->vcpu.threads == NULL) {
+		machine->vcpu.stop_requested = false;
+		machine->vcpu.reset_requested = false;
+	}
+	lwkt_reltoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->token);
 	KKASSERT(machine->machine == runtime_machine);
 	machine->machine = NULL;

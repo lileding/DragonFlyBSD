@@ -180,8 +180,7 @@ vmmfs_pciroot_start(struct vmmfs_pciroot *pciroot, vmm_machine_t machine)
 		return (EBUSY);
 	}
 	RB_FOREACH(slot, vmmfs_pcislot_tree, &pciroot->slots) {
-		if (slot->descriptor.writer_buffer != NULL ||
-		    slot->descriptor.committing) {
+		if (slot->descriptor.updating) {
 			lwkt_reltoken(&pciroot->machine->token);
 			return (EBUSY);
 		}

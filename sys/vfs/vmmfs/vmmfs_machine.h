@@ -14,6 +14,7 @@
 #include <dev/virtual/vmm/vmm.h>
 
 #include "vmmfs_events.h"
+#include "vmmfs_boot.h"
 #include "vmmfs_loader.h"
 #include "vmmfs_machine_id.h"
 #include "vmmfs_memory.h"
@@ -48,6 +49,7 @@ struct vmmfs_machine {
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
+	struct vmmfs_boot boot;
 	struct vmmfs_stopped stopped;
 	struct vmmfs_pciroot pciroot;
 	struct vmmfs_platform_x64 platform;
@@ -78,6 +80,13 @@ int vmmfs_machine_reset(struct vmmfs_machine *);
 
 /* Requests terminal power-off from an external VOP or a guest runtime event. */
 int vmmfs_machine_stop_request(struct vmmfs_machine *, const char *);
+
+/* Starts a direct boot session and publishes its guest-memory mapping. */
+int vmmfs_machine_boot_start(struct vmmfs_machine *);
+
+/* Consumes the one direct-boot BSP state submission and starts the vCPUs. */
+int vmmfs_machine_boot_submit(struct vmmfs_machine *,
+	const struct vmm_cpustate *);
 
 /* The BSP invokes these after every other vCPU has reached its barrier. */
 int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);
