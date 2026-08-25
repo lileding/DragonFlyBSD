@@ -63,6 +63,7 @@ static bool vmmfs_pciroot_config_contains(uint16_t, uint64_t,
 static bool vmmfs_pciroot_ecam_contains(uint64_t, enum vmm_io_width);
 static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
 	struct vmmfs_pciroot *, uint16_t);
+static void vmmfs_pciroot_drop_slot(struct vmmfs_pcislot *);
 static uint32_t vmmfs_pciroot_absent_value(enum vmm_io_width);
 static int vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *,
 	vmm_vcpu_t, uint16_t, uint16_t, enum vmm_io_width, uint32_t *);
@@ -120,7 +121,6 @@ int
 vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pcislot *slot;
-	int error;
 
 	if (pciroot == NULL)
 		return (EINVAL);
@@ -137,18 +137,14 @@ vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 	for (;;) {
 		lwkt_gettoken(&pciroot->machine->token);
 		slot = RB_ROOT(&pciroot->slots);
-		if (slot != NULL)
+		if (slot != NULL) {
 			RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
+			slot->dead = true;
+		}
 		lwkt_reltoken(&pciroot->machine->token);
 		if (slot == NULL)
 			break;
-		error = vmmfs_pcislot_destroy(slot);
-		if (error == 0)
-			continue;
-		lwkt_gettoken(&pciroot->machine->token);
-		(void)RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot);
-		lwkt_reltoken(&pciroot->machine->token);
-		return (error);
+		vmmfs_pciroot_drop_slot(slot);
 	}
 	pciroot->machine = NULL;
 	return (0);
@@ -649,18 +645,21 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 		return (error);
 	lwkt_gettoken(&pciroot->machine->token);
 	if (pciroot->machine->root == NULL || pciroot->machine->dead) {
+		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		(void)vmmfs_pcislot_destroy(slot);
+		vmmfs_pciroot_drop_slot(slot);
 		return (ENOENT);
 	}
 	if (pciroot->machine->machine != NULL) {
+		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		(void)vmmfs_pcislot_destroy(slot);
+		vmmfs_pciroot_drop_slot(slot);
 		return (EBUSY);
 	}
 	if (RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot) != NULL) {
+		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		(void)vmmfs_pcislot_destroy(slot);
+		vmmfs_pciroot_drop_slot(slot);
 		return (EEXIST);
 	}
 	lwkt_reltoken(&pciroot->machine->token);
@@ -669,8 +668,9 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 	if (error != 0) {
 		lwkt_gettoken(&pciroot->machine->token);
 		RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
+		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		(void)vmmfs_pcislot_destroy(slot);
+		vmmfs_pciroot_drop_slot(slot);
 		return (error);
 	}
 	*ap->a_vpp = vnode;
@@ -742,7 +742,7 @@ vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *ap)
 		return (ENOENT);
 	}
 	lwkt_gettoken(&pciroot->machine->token);
-	if (slot->pciroot != pciroot) {
+	if (slot->pciroot != pciroot || slot->dead) {
 		lwkt_reltoken(&pciroot->machine->token);
 		vrele(vnode);
 		return (ENOENT);
@@ -753,17 +753,20 @@ vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *ap)
 		return (EBUSY);
 	}
 	RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
+	slot->dead = true;
 	lwkt_reltoken(&pciroot->machine->token);
-	error = vmmfs_pcislot_destroy(slot);
-	if (error == 0)
-		cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
-	else {
-		lwkt_gettoken(&pciroot->machine->token);
-		(void)RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot);
-		lwkt_reltoken(&pciroot->machine->token);
-	}
+	cache_unlink(ap->a_nch);
+	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+	vmmfs_pciroot_drop_slot(slot);
 	vrele(vnode);
-	return (error);
+	return (0);
+}
+
+static void
+vmmfs_pciroot_drop_slot(struct vmmfs_pcislot *slot)
+{
+	vmmfs_pcislot_release_vnodes(slot);
+	vmmfs_pcislot_put(slot);
 }
 
 static int
@@ -844,6 +847,7 @@ vmmfs_pciroot_inactive(struct vop_inactive_args *ap)
 		return (0);
 	ap->a_vp->v_data = NULL;
 	vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 

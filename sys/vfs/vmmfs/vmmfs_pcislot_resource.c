@@ -1576,6 +1576,7 @@ vmmfs_pcislot_resource_inactive(struct vop_inactive_args *ap)
 		vmmfs_pcislot_resources_drop(resources);
 	if (machine != NULL)
 		vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 

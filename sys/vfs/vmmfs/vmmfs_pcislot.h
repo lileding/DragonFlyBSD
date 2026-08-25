@@ -38,6 +38,8 @@ struct vmmfs_pcislot {
 	struct vnode *vnode;
 	ino_t inode;
 	uint16_t bdf;
+	unsigned int references;
+	bool dead;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;
@@ -52,7 +54,11 @@ extern struct vop_ops vmmfs_pcislot_vops;
 int vmmfs_pcislot_compare(struct vmmfs_pcislot *, struct vmmfs_pcislot *);
 int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 	struct vmmfs_pcislot **);
-int vmmfs_pcislot_destroy(struct vmmfs_pcislot *);
+void vmmfs_pcislot_hold(struct vmmfs_pcislot *);
+void vmmfs_pcislot_put(struct vmmfs_pcislot *);
+bool vmmfs_pcislot_is_dead(struct vmmfs_pcislot *);
+bool vmmfs_pcislot_vnode_detach(struct vmmfs_pcislot *, struct vnode **,
+	struct vnode *);
 void vmmfs_pcislot_release_vnodes(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);

@@ -113,6 +113,7 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	vnode->v_type = VREG;
 	config->vnode = vnode;
 	vmmfs_machine_hold(slot->pciroot->machine);
+	vmmfs_pcislot_hold(slot);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -329,7 +330,8 @@ vmmfs_pcislot_config_getattr(struct vop_getattr_args *ap)
 	struct vattr *vattr;
 
 	config = ap->a_vp->v_data;
-	if (config == NULL)
+	if (config == NULL || config->slot == NULL ||
+	    vmmfs_pcislot_is_dead(config->slot))
 		return (ENOENT);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -365,7 +367,8 @@ vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *ap)
 	struct vmmfs_pcislot_config *config;
 
 	config = ap->a_vp->v_data;
-	if (config == NULL)
+	if (config == NULL || config->slot == NULL ||
+	    vmmfs_pcislot_is_dead(config->slot))
 		return (ENOENT);
 	switch (ap->a_kn->kn_filter) {
 	case EVFILT_READ:
@@ -394,7 +397,7 @@ vmmfs_pcislot_config_open(struct vop_open_args *ap)
 	if (config == NULL || config->slot == NULL)
 		return (ENOENT);
 	if (config->slot->pciroot == NULL ||
-	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+	    vmmfs_pcislot_is_dead(config->slot))
 		return (ENOENT);
 	if ((ap->a_mode & (FREAD | FWRITE)) != (FREAD | FWRITE))
 		return (EINVAL);
@@ -431,7 +434,7 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 	if (config == NULL)
 		return (ENOENT);
 	if (config->slot == NULL || config->slot->pciroot == NULL ||
-	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+	    vmmfs_pcislot_is_dead(config->slot))
 		return (ENXIO);
 	if (ap->a_uio->uio_resid != sizeof(record))
 		return (EINVAL);
@@ -476,10 +479,13 @@ vmmfs_pcislot_config_inactive(struct vop_inactive_args *ap)
 	    config->slot->pciroot == NULL)
 		return (0);
 	machine = config->slot->pciroot->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &config->vnode, ap->a_vp))
+	if (!vmmfs_pcislot_vnode_detach(config->slot, &config->vnode,
+	    ap->a_vp))
 		return (0);
 	ap->a_vp->v_data = NULL;
+	vmmfs_pcislot_put(config->slot);
 	vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 
@@ -499,8 +505,10 @@ vmmfs_pcislot_config_reclaim(struct vop_reclaim_args *ap)
 		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (machine != NULL) {
+		vmmfs_pcislot_put(config->slot);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }
 
@@ -517,7 +525,7 @@ vmmfs_pcislot_config_write(struct vop_write_args *ap)
 	if (config == NULL)
 		return (ENOENT);
 	if (config->slot == NULL || config->slot->pciroot == NULL ||
-	    vmmfs_machine_is_dead(config->slot->pciroot->machine))
+	    vmmfs_pcislot_is_dead(config->slot))
 		return (ENXIO);
 	if (ap->a_uio->uio_resid != sizeof(response))
 		return (EINVAL);

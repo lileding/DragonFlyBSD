@@ -131,8 +131,10 @@ vmmfs_serialroot_release_vnodes(struct vmmfs_serialroot *serialroot)
 
 	if (serialroot == NULL)
 		return;
-	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
+	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports) {
+		vmmfs_serialport_revoke(port);
 		vmmfs_vnode_discard(port->vnode);
+	}
 	vmmfs_vnode_discard(serialroot->vnode);
 }
 
@@ -317,7 +319,6 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 	struct vmmfs_serialroot *serialroot;
 	struct vmmfs_serialport *port;
 	struct vnode *vnode;
-	bool busy;
 	int error;
 
 	serialroot = ap->a_dvp->v_data;
@@ -348,18 +349,11 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 		return (EBUSY);
 	}
 	lwkt_gettoken(&port->token);
-	busy = atomic_load_acq_int(&port->open) != 0 ||
-	    port->opening_count != 0;
-	if (!busy)
-		port->destroying = true;
+	port->destroying = true;
 	lwkt_reltoken(&port->token);
-	if (busy) {
-		lwkt_reltoken(&serialroot->machine->token);
-		vrele(vnode);
-		return (EBUSY);
-	}
 	RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, port);
 	lwkt_reltoken(&serialroot->machine->token);
+	vmmfs_serialport_revoke(port);
 	vmmfs_vnode_discard(vnode);
 	vrele(vnode);
 	return (0);
@@ -507,6 +501,7 @@ vmmfs_serialroot_reclaim(struct vop_reclaim_args *ap)
 	ap->a_vp->v_data = NULL;
 	if (machine != NULL)
 		vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 

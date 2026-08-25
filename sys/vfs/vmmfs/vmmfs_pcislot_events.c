@@ -90,6 +90,7 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	vnode->v_type = VREG;
 	state_node->vnode = vnode;
 	vmmfs_machine_hold(slot->pciroot->machine);
+	vmmfs_pcislot_hold(slot);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	return (0);
@@ -212,7 +213,7 @@ vmmfs_pcislot_events_getattr(struct vop_getattr_args *ap)
 	if (state_node == NULL)
 		return (ENOENT);
 	if (state_node->slot == NULL || state_node->slot->pciroot == NULL ||
-	    vmmfs_machine_is_dead(state_node->slot->pciroot->machine))
+	    vmmfs_pcislot_is_dead(state_node->slot))
 		return (ENXIO);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -248,7 +249,8 @@ vmmfs_pcislot_events_kqfilter(struct vop_kqfilter_args *ap)
 	struct vmmfs_pcislot_events *events;
 
 	events = ap->a_vp->v_data;
-	if (events == NULL)
+	if (events == NULL || events->slot == NULL ||
+	    vmmfs_pcislot_is_dead(events->slot))
 		return (ENOENT);
 	if (ap->a_kn->kn_filter != EVFILT_READ)
 		return (EOPNOTSUPP);
@@ -268,6 +270,8 @@ vmmfs_pcislot_events_open(struct vop_open_args *ap)
 	events = ap->a_vp->v_data;
 	if (events == NULL || events->slot == NULL)
 		return (ENOENT);
+	if (vmmfs_pcislot_is_dead(events->slot))
+		return (ENXIO);
 	if (vmmfs_pcislot_auth_check(events->slot) != 0)
 		return (EACCES);
 	return (vop_stdopen(ap));
@@ -337,7 +341,7 @@ vmmfs_pcislot_events_filter_read(struct knote *knote, long hint)
 		return (0);
 	lwkt_gettoken(&events->token);
 	if (events->slot == NULL || events->slot->pciroot == NULL ||
-	    vmmfs_machine_is_dead(events->slot->pciroot->machine)) {
+	    vmmfs_pcislot_is_dead(events->slot)) {
 		knote->kn_data = 0;
 		knote->kn_flags |= EV_EOF;
 	} else {
@@ -373,11 +377,14 @@ vmmfs_pcislot_events_inactive(struct vop_inactive_args *ap)
 	    state_node->slot->pciroot == NULL)
 		return (0);
 	machine = state_node->slot->pciroot->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &state_node->vnode,
+	if (!vmmfs_pcislot_vnode_detach(state_node->slot,
+	    &state_node->vnode,
 	    ap->a_vp))
 		return (0);
 	ap->a_vp->v_data = NULL;
+	vmmfs_pcislot_put(state_node->slot);
 	vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 
@@ -397,7 +404,9 @@ vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *ap)
 		machine = NULL;
 	}
 	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (machine != NULL) {
+		vmmfs_pcislot_put(state_node->slot);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }

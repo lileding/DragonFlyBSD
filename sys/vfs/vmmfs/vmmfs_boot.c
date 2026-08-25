@@ -424,6 +424,7 @@ vmmfs_boot_inactive(struct vop_inactive_args *ap)
 		return (0);
 	ap->a_vp->v_data = NULL;
 	vmmfs_machine_put(machine);
+	vrecycle(ap->a_vp);
 	return (0);
 }
 
