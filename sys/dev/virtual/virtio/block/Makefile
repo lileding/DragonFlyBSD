@@ -25,6 +25,7 @@
 
 KMOD=	virtio_blk
 SRCS=	virtio_blk.c
+SRCS+=	virtio_blk_v1.c
 SRCS+=	bus_if.h device_if.h 
 
 .include <bsd.kmod.mk>
