@@ -236,9 +236,11 @@ static driver_t vtnet_driver = {
 
 static devclass_t vtnet_devclass;
 
-DRIVER_MODULE(vtnet, virtio_pci, vtnet_driver, vtnet_devclass, NULL, NULL);
-MODULE_VERSION(vtnet, 1);
-MODULE_DEPEND(vtnet, virtio, 1, 1, 1);
+/* Keep the legacy module namespace distinct from the V1 registration. */
+DRIVER_MODULE(vtnet_legacy, virtio_pci, vtnet_driver, vtnet_devclass,
+    NULL, NULL);
+MODULE_VERSION(vtnet_legacy, 1);
+MODULE_DEPEND(vtnet_legacy, virtio, 1, 1, 1);
 
 static int
 vtnet_probe(device_t dev)

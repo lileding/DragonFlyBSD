@@ -5,3 +5,5 @@ SRCS+=	bus_if.h device_if.h
 SRCS+=	opt_ifpoll.h
 
 .include <bsd.kmod.mk>
+
+CFLAGS+=	-DINVARIANTS

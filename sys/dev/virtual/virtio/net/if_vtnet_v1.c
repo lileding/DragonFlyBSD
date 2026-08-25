@@ -571,7 +571,8 @@ static int
 vtnet_v1_alloc_intrs(struct vtnet_softc *sc)
 {
 	sc->vtnet_nintr = 1;
-	sc->vtnet_cpus[0] = -1;
+	/* The current V1 interrupt path uses one vector and pins it to CPU 0. */
+	sc->vtnet_cpus[0] = 0;
 	return (0);
 }
 
@@ -750,7 +751,10 @@ vtnet_v1_set_hwaddr(struct vtnet_softc *sc)
 	} else if (sc->vtnet_flags & VTNET_FLAG_MAC) {
 		virtio_v1_write_device_config(dev,
 		    offsetof(struct virtio_net_config, mac),
-		    sc->vtnet_hwaddr, ETHER_ADDR_LEN);
+		    sc->vtnet_hwaddr, sizeof(uint32_t));
+		virtio_v1_write_device_config(dev,
+		    offsetof(struct virtio_net_config, mac) + sizeof(uint32_t),
+		    sc->vtnet_hwaddr + sizeof(uint32_t), sizeof(uint16_t));
 	}
 }
 
@@ -776,7 +780,10 @@ vtnet_v1_get_hwaddr(struct vtnet_softc *sc)
 
 	virtio_v1_read_device_config(dev,
 	    offsetof(struct virtio_net_config, mac),
-	    sc->vtnet_hwaddr, ETHER_ADDR_LEN);
+	    sc->vtnet_hwaddr, sizeof(uint32_t));
+	virtio_v1_read_device_config(dev,
+	    offsetof(struct virtio_net_config, mac) + sizeof(uint32_t),
+	    sc->vtnet_hwaddr + sizeof(uint32_t), sizeof(uint16_t));
 }
 
 static int
