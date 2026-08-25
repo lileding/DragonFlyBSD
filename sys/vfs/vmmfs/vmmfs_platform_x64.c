@@ -627,12 +627,12 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 	if (power_off) {
 		if (vmmfs_machine_stop_request(platform->machine, "guest-s5") != 0)
 			vmmfs_events_log(&platform->machine->events,
-			    "guest-s5 stop request failed");
+			    VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED, NULL);
 	}
 	if (reset) {
 		if (vmmfs_machine_reset(platform->machine) != 0)
 			vmmfs_events_log(&platform->machine->events,
-			    "guest reset request failed");
+			    VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED, NULL);
 	}
 	return (0);
 }

@@ -13,7 +13,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include <sys/vmmfs_pci.h>
+#include <sys/vmmfs.h>
 
 static int write_all(int, const char *, size_t);
 static int commit_descriptor(const char *, int);

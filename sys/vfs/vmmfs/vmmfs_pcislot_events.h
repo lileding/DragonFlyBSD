@@ -10,6 +10,7 @@
 #include <sys/event.h>
 #include <sys/thread.h>
 #include <sys/types.h>
+#include <sys/vmmfs.h>
 
 #define VMMFS_PCISLOT_EVENTS_BUFFER_SIZE (16 * 1024)
 
@@ -37,6 +38,7 @@ int vmmfs_pcislot_events_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_events *);
 int vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);
-void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *, const char *, ...);
+void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *,
+	enum vmmfs_pci_event, const char *, ...);
 
 #endif /* VMMFS_PCISLOT_EVENTS_H */

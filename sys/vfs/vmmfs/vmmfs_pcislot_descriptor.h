@@ -7,7 +7,7 @@
 #define VMMFS_PCISLOT_DESCRIPTOR_H
 
 #include <sys/types.h>
-#include <sys/vmmfs_pci.h>
+#include <sys/vmmfs.h>
 
 #define VMMFS_PCISLOT_DESCRIPTOR_MAX 16384
 #define VMMFS_PCISLOT_MAX_BARS 6

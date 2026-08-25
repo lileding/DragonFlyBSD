@@ -239,8 +239,8 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 	    &port);
 	if (error != 0) {
 		vmmfs_events_log(&serialroot->machine->events,
-		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
-		    ncp->nc_name, error);
+		    VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+		    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, error);
 		return (error);
 	}
 	lwkt_gettoken(&serialroot->machine->token);
@@ -248,24 +248,24 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,
-		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
-		    ncp->nc_name, ENOENT);
+		    VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+		    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, ENOENT);
 		return (ENOENT);
 	}
 	if (serialroot->machine->machine != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,
-		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
-		    ncp->nc_name, EBUSY);
+		    VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+		    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, EBUSY);
 		return (EBUSY);
 	}
 	if (RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, port) != NULL) {
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,
-		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
-		    ncp->nc_name, EEXIST);
+		    VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+		    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, EEXIST);
 		return (EEXIST);
 	}
 	lwkt_reltoken(&serialroot->machine->token);
@@ -277,8 +277,8 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		lwkt_reltoken(&serialroot->machine->token);
 		(void)vmmfs_serialport_destroy(port);
 		vmmfs_events_log(&serialroot->machine->events,
-		    "serial create %.*s failed error=%d", (int)ncp->nc_nlen,
-		    ncp->nc_name, error);
+		    VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+		    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, error);
 		return (error);
 	}
 	*ap->a_vpp = vnode;

@@ -10,7 +10,7 @@
 #include <sys/queue.h>
 #include <sys/types.h>
 
-#include <sys/vmmfs_pci.h>
+#include <sys/vmmfs.h>
 
 struct file;
 struct vmm_cpuexit;

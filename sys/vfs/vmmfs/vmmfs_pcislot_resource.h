@@ -10,7 +10,7 @@
 #include <sys/types.h>
 
 #include <dev/virtual/vmm/vmm.h>
-#include <sys/vmmfs_pci.h>
+#include <sys/vmmfs.h>
 
 struct cdev;
 struct vm_object;

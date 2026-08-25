@@ -578,11 +578,12 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 	error = vmmfs_machine_vcpu_reset(vcpu->machine);
 	if (error != 0) {
 		vmmfs_events_log(&vcpu->machine->events,
-		    "warm reset failed error=%d", error);
+		    VMMFS_MACHINE_EVENT_RESET_FAILED, "error=%d", error);
 		vmmfs_vcpu_request_stop(vcpu);
 		return;
 	}
-	vmmfs_events_log(&vcpu->machine->events, "warm reset completed");
+	vmmfs_events_log(&vcpu->machine->events,
+	    VMMFS_MACHINE_EVENT_RESET_COMPLETED, NULL);
 	thread->wait_channel = NULL;
 }
 
@@ -648,7 +649,8 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 			if (error == 0)
 				continue;
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u %s inject-gp failed error=%d", thread->index,
+			    VMMFS_MACHINE_EVENT_VCPU_INJECT_GP_FAILED,
+			    "index=%u access=%s error=%d", thread->index,
 			    exit->reason == VMM_CPUEXIT_RDMSR ? "rdmsr" : "wrmsr",
 			    error);
 			goto out;
@@ -656,7 +658,8 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 			if (!thread->halted_logged) {
 				thread->halted_logged = true;
 				vmmfs_events_log(&vcpu->machine->events,
-				    "vcpu%u halted rip=%#jx", thread->index,
+				    VMMFS_MACHINE_EVENT_VCPU_HALTED,
+				    "index=%u rip=%#jx", thread->index,
 				    (uintmax_t)thread->state.gprs[VMM_X64_GPR_RIP]);
 			}
 			error = vmm_vcpu_wait(thread->vcpu);
@@ -690,12 +693,13 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 			goto out;
 		case VMM_CPUEXIT_SHUTDOWN:
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u guest shutdown", thread->index);
+			    VMMFS_MACHINE_EVENT_VCPU_SHUTDOWN, "index=%u", thread->index);
 			error = 0;
 			goto out;
 		default:
 			vmmfs_events_log(&vcpu->machine->events,
-			    "vcpu%u unsupported exit reason=%#jx", thread->index,
+			    VMMFS_MACHINE_EVENT_VCPU_UNSUPPORTED_EXIT,
+			    "index=%u reason=%#jx", thread->index,
 			    (uintmax_t)exit->reason);
 			error = EIO;
 			goto out;
@@ -705,7 +709,8 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 out:
 	if (error != 0 && !vmmfs_vcpu_is_stop_requested(vcpu)) {
 		vmmfs_events_log(&vcpu->machine->events,
-		    "vcpu%u failed error=%d", thread->index, error);
+		    VMMFS_MACHINE_EVENT_VCPU_FAILED, "index=%u error=%d",
+		    thread->index, error);
 	}
 	if (!vmmfs_vcpu_is_stop_requested(vcpu))
 		(void)vmmfs_machine_stop_request(vcpu->machine, "guest-exit");

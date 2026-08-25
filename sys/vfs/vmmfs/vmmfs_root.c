@@ -194,7 +194,8 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 	if (runtime_active) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&root->token);
-		vmmfs_events_log(&machine->events, "destroy refused runtime=%d",
+		vmmfs_events_log(&machine->events,
+		    VMMFS_MACHINE_EVENT_DESTROY_REFUSED, "runtime=%d",
 		    runtime_active);
 		return (EBUSY);
 	}

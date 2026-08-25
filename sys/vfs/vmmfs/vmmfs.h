@@ -8,6 +8,7 @@
 
 #include <sys/malloc.h>
 #include <sys/types.h>
+#include <sys/vmmfs.h>
 
 #include "vmmfs_machine.h"
 #include "vmmfs_root.h"

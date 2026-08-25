@@ -199,10 +199,10 @@ vmmfs_loader_run(struct vmmfs_loader *loader, const char *script,
 		error = vmmfs_loader_process_wait(&process);
 	if (error == 0)
 		vmmfs_events_log(&loader->machine->events,
-		    "loader submitted cpustate");
+		    VMMFS_MACHINE_EVENT_LOADER_SUBMITTED_CPUSTATE, NULL);
 	else
 		vmmfs_events_log(&loader->machine->events,
-		    "loader failed error=%d", error);
+		    VMMFS_MACHINE_EVENT_LOADER_FAILED, "error=%d", error);
 	vmmfs_loader_process_finish(&process);
 	return (error);
 }

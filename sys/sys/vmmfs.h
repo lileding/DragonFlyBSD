@@ -1,13 +1,13 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * VMMFS PCI backend ABI.
+ * VMMFS public ABI.
  *
- * This is a host-local, native-endian ABI between vmmfs(5) and a PCI backend.
- * It is not a PCI wire protocol.
+ * This is a host-local, native-endian ABI between vmmfs(5) and its clients.
+ * It is not a guest wire protocol.
  */
-#ifndef _SYS_VMMFS_PCI_H_
-#define _SYS_VMMFS_PCI_H_
+#ifndef _SYS_VMMFS_H_
+#define _SYS_VMMFS_H_
 
 #include <sys/types.h>
 
@@ -16,6 +16,51 @@
 #define CTASSERT(expression) _Static_assert((expression), #expression)
 #endif
 #endif
+
+/*
+ * Machine events written to <machine>/events.  The event name is fixed by
+ * this enum; callers may append event-specific key=value arguments.
+ */
+enum vmmfs_machine_event {
+	VMMFS_MACHINE_EVENT_CREATED = 1,
+	VMMFS_MACHINE_EVENT_DESTROY_REFUSED,
+	VMMFS_MACHINE_EVENT_STOP_REQUESTED,
+	VMMFS_MACHINE_EVENT_STOPPED,
+	VMMFS_MACHINE_EVENT_RESET_REQUESTED,
+	VMMFS_MACHINE_EVENT_RESET_STARTED,
+	VMMFS_MACHINE_EVENT_RESET_COMPLETED,
+	VMMFS_MACHINE_EVENT_RESET_FAILED,
+	VMMFS_MACHINE_EVENT_START_REQUESTED,
+	VMMFS_MACHINE_EVENT_START_COMPLETED,
+	VMMFS_MACHINE_EVENT_START_FAILED,
+	VMMFS_MACHINE_EVENT_BOOT_REQUESTED,
+	VMMFS_MACHINE_EVENT_BOOT_READY,
+	VMMFS_MACHINE_EVENT_BOOT_COMPLETED,
+	VMMFS_MACHINE_EVENT_BOOT_FAILED,
+	VMMFS_MACHINE_EVENT_LOADER_SUBMITTED_CPUSTATE,
+	VMMFS_MACHINE_EVENT_LOADER_FAILED,
+	VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
+	VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED,
+	VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED,
+	VMMFS_MACHINE_EVENT_VCPU_INJECT_GP_FAILED,
+	VMMFS_MACHINE_EVENT_VCPU_HALTED,
+	VMMFS_MACHINE_EVENT_VCPU_SHUTDOWN,
+	VMMFS_MACHINE_EVENT_VCPU_UNSUPPORTED_EXIT,
+	VMMFS_MACHINE_EVENT_VCPU_FAILED,
+};
+
+/*
+ * PCI slot events written to <machine>/pci/<slot>/events.  The event name is
+ * fixed by this enum; callers may append event-specific key=value arguments.
+ */
+enum vmmfs_pci_event {
+	VMMFS_PCI_EVENT_SLOT_CREATED = 1,
+	VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED,
+	VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED,
+	VMMFS_PCI_EVENT_POWER_ON,
+	VMMFS_PCI_EVENT_POWER_OFF,
+	VMMFS_PCI_EVENT_RESET,
+};
 
 /*
  * One exact guest doorbell write.  The named kickN node determines the
@@ -94,4 +139,4 @@ CTASSERT(sizeof(struct vmmfs_pci_interrupt) == 8);
 CTASSERT(sizeof(struct vmmfs_pci_config_request) == 40);
 CTASSERT(sizeof(struct vmmfs_pci_config_response) == 32);
 
-#endif /* _SYS_VMMFS_PCI_H_ */
+#endif /* _SYS_VMMFS_H_ */

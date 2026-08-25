@@ -35,6 +35,7 @@ static int vmmfs_events_setattr(struct vop_setattr_args *);
 static int vmmfs_events_write(struct vop_write_args *);
 static void vmmfs_events_filter_detach(struct knote *);
 static int vmmfs_events_filter_read(struct knote *, long);
+static const char *vmmfs_machine_event_name(enum vmmfs_machine_event);
 
 static struct filterops vmmfs_events_read_filterops = {
 	FILTEROP_ISFD | FILTEROP_MPSAFE,
@@ -130,9 +131,11 @@ vmmfs_events_revoke(struct vmmfs_events *events)
 }
 
 void
-vmmfs_events_log(struct vmmfs_events *events, const char *format, ...)
+vmmfs_events_log(struct vmmfs_events *events, enum vmmfs_machine_event event,
+	const char *args, ...)
 {
 	va_list ap;
+	const char *name;
 	char message[VMMFS_EVENTS_LINE_SIZE];
 	char text[VMMFS_EVENTS_LINE_SIZE];
 	char line[VMMFS_EVENTS_LINE_SIZE];
@@ -142,11 +145,21 @@ vmmfs_events_log(struct vmmfs_events *events, const char *format, ...)
 	size_t i;
 	int result;
 
-	if (events == NULL || format == NULL)
+	if (events == NULL)
 		return;
-	va_start(ap, format);
-	result = kvsnprintf(message, sizeof(message), format, ap);
-	va_end(ap);
+	name = vmmfs_machine_event_name(event);
+	if (name == NULL)
+		return;
+	if (args == NULL) {
+		result = ksnprintf(message, sizeof(message), "%s", name);
+	} else {
+		va_start(ap, args);
+		result = kvsnprintf(text, sizeof(text), args, ap);
+		va_end(ap);
+		if (result >= 0)
+			result = ksnprintf(message, sizeof(message), "%s %s", name,
+			    text);
+	}
 	if (result < 0)
 		return;
 	length = strnlen(message, sizeof(text) - 1);
@@ -192,6 +205,64 @@ vmmfs_events_log(struct vmmfs_events *events, const char *format, ...)
 	lwkt_reltoken(&events->token);
 	wakeup(events);
 	KNOTE(&events->kq.ki_note, 0);
+}
+
+static const char *
+vmmfs_machine_event_name(enum vmmfs_machine_event event)
+{
+	switch (event) {
+	case VMMFS_MACHINE_EVENT_CREATED:
+		return ("machine created");
+	case VMMFS_MACHINE_EVENT_DESTROY_REFUSED:
+		return ("machine destroy refused");
+	case VMMFS_MACHINE_EVENT_STOP_REQUESTED:
+		return ("machine stop requested");
+	case VMMFS_MACHINE_EVENT_STOPPED:
+		return ("machine stopped");
+	case VMMFS_MACHINE_EVENT_RESET_REQUESTED:
+		return ("machine reset requested");
+	case VMMFS_MACHINE_EVENT_RESET_STARTED:
+		return ("machine reset started");
+	case VMMFS_MACHINE_EVENT_RESET_COMPLETED:
+		return ("machine reset completed");
+	case VMMFS_MACHINE_EVENT_RESET_FAILED:
+		return ("machine reset failed");
+	case VMMFS_MACHINE_EVENT_START_REQUESTED:
+		return ("machine start requested");
+	case VMMFS_MACHINE_EVENT_START_COMPLETED:
+		return ("machine start completed");
+	case VMMFS_MACHINE_EVENT_START_FAILED:
+		return ("machine start failed");
+	case VMMFS_MACHINE_EVENT_BOOT_REQUESTED:
+		return ("machine boot requested");
+	case VMMFS_MACHINE_EVENT_BOOT_READY:
+		return ("machine boot ready");
+	case VMMFS_MACHINE_EVENT_BOOT_COMPLETED:
+		return ("machine boot completed");
+	case VMMFS_MACHINE_EVENT_BOOT_FAILED:
+		return ("machine boot failed");
+	case VMMFS_MACHINE_EVENT_LOADER_SUBMITTED_CPUSTATE:
+		return ("machine loader submitted cpustate");
+	case VMMFS_MACHINE_EVENT_LOADER_FAILED:
+		return ("machine loader failed");
+	case VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED:
+		return ("machine serial create failed");
+	case VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED:
+		return ("machine guest stop request failed");
+	case VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED:
+		return ("machine guest reset request failed");
+	case VMMFS_MACHINE_EVENT_VCPU_INJECT_GP_FAILED:
+		return ("machine vcpu inject-gp failed");
+	case VMMFS_MACHINE_EVENT_VCPU_HALTED:
+		return ("machine vcpu halted");
+	case VMMFS_MACHINE_EVENT_VCPU_SHUTDOWN:
+		return ("machine vcpu shutdown");
+	case VMMFS_MACHINE_EVENT_VCPU_UNSUPPORTED_EXIT:
+		return ("machine vcpu unsupported exit");
+	case VMMFS_MACHINE_EVENT_VCPU_FAILED:
+		return ("machine vcpu failed");
+	}
+	return (NULL);
 }
 
 static int

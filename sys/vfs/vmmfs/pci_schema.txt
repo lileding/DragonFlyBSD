@@ -322,7 +322,7 @@ capabilities itself. For a configN access, the VMM trap callback never waits:
 it returns ENOENT. VMM preserves the decoded MMIO or PIO instruction at its
 fragment boundary and returns it to the owning VMMFS vCPU LWKT. The fixed
 host-local, native-endian request and response ABI is declared in
-sys/sys/vmmfs_pci.h. A request carries a powered-slot generation, a sequence
+sys/sys/vmmfs.h. A request carries a powered-slot generation, a sequence
 unique within that generation, a BAR index, MMIO or PIO space, BAR-relative
 offset, width, operation, and write value. A response names the same generation
 and sequence and supplies a status plus a read value. Width is 1, 2, 4, or 8;

@@ -132,8 +132,9 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	machine->vnode = vnode;
 	vmmfs_machine_hold(machine);
 	vx_downgrade(vnode);
-	vmmfs_events_log(&machine->events, "machine created");
-	vmmfs_events_log(&machine->events, "state stopped reason=create");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_CREATED, NULL);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
+	    "reason=create");
 	*machinep = machine;
 	return (0);
 
@@ -209,7 +210,8 @@ vmmfs_machine_begin_destroy(struct vmmfs_machine *machine)
 	runtime_active = machine->machine != NULL;
 	if (runtime_active) {
 		lwkt_reltoken(&machine->token);
-		vmmfs_events_log(&machine->events, "destroy refused runtime=%d",
+		vmmfs_events_log(&machine->events,
+		    VMMFS_MACHINE_EVENT_DESTROY_REFUSED, "runtime=%d",
 		    runtime_active);
 		return (EBUSY);
 	}
@@ -371,11 +373,13 @@ vmmfs_machine_stop_request(struct vmmfs_machine *machine, const char *reason)
 		return (0);
 	boot_pending = vmmfs_boot_is_active(&machine->boot);
 	if (boot_pending) {
-		vmmfs_events_log(&machine->events, "stop requested reason=%s", reason);
+		vmmfs_events_log(&machine->events,
+		    VMMFS_MACHINE_EVENT_STOP_REQUESTED, "reason=%s", reason);
 		return (vmmfs_machine_release_runtime(machine));
 	}
 	vmmfs_vcpu_request_stop(&machine->vcpu);
-	vmmfs_events_log(&machine->events, "stop requested reason=%s", reason);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOP_REQUESTED,
+	    "reason=%s", reason);
 	return (0);
 }
 
@@ -396,7 +400,8 @@ vmmfs_machine_reset(struct vmmfs_machine *machine)
 	if (!running)
 		return (EBUSY);
 	vmmfs_vcpu_request_reset(&machine->vcpu);
-	vmmfs_events_log(&machine->events, "reset requested reason=external");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_RESET_REQUESTED,
+	    "reason=external");
 	return (0);
 }
 
@@ -891,7 +896,8 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 		return (EINVAL);
 	loader_script = kmalloc(sizeof(machine->loader.script), M_VMMFS,
 	    M_WAITOK);
-	vmmfs_events_log(&machine->events, "start requested");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_START_REQUESTED,
+	    NULL);
 	error = vmmfs_machine_prepare_start(machine, loader_script, NULL);
 	if (error != 0)
 		goto failed;
@@ -899,7 +905,8 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	    &machine->boot, cred);
 	if (error != 0)
 		goto failed_runtime;
-	vmmfs_events_log(&machine->events, "start completed");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_START_COMPLETED,
+	    NULL);
 	kfree(loader_script, M_VMMFS);
 	return (0);
 
@@ -908,7 +915,8 @@ failed_runtime:
 	if (release_error != 0)
 		error = release_error;
 failed:
-	vmmfs_events_log(&machine->events, "start failed error=%d", error);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_START_FAILED,
+	    "error=%d", error);
 	kfree(loader_script, M_VMMFS);
 	return (error);
 }
@@ -920,13 +928,15 @@ vmmfs_machine_boot_start(struct vmmfs_machine *machine)
 
 	if (machine == NULL)
 		return (EINVAL);
-	vmmfs_events_log(&machine->events, "boot requested");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_REQUESTED,
+	    NULL);
 	error = vmmfs_machine_prepare_start(machine, NULL, NULL);
 	if (error != 0) {
-		vmmfs_events_log(&machine->events, "boot failed error=%d", error);
+		vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_FAILED,
+		    "error=%d", error);
 		return (error);
 	}
-	vmmfs_events_log(&machine->events, "boot ready");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_READY, NULL);
 	return (0);
 }
 
@@ -950,7 +960,8 @@ vmmfs_machine_boot_abort(struct vmmfs_machine *machine)
 	error = vmmfs_machine_release_runtime(machine);
 	if (error != 0)
 		return (error);
-	vmmfs_events_log(&machine->events, "boot failed error=%d", EPIPE);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_FAILED,
+	    "error=%d", EPIPE);
 	return (0);
 }
 
@@ -981,14 +992,16 @@ vmmfs_machine_boot_submit(struct vmmfs_machine *machine,
 	    state);
 	if (error != 0)
 		goto failed;
-	vmmfs_events_log(&machine->events, "boot completed");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_COMPLETED,
+	    NULL);
 	return (0);
 
 failed:
 	release_error = vmmfs_machine_release_runtime(machine);
 	if (release_error != 0)
 		error = release_error;
-	vmmfs_events_log(&machine->events, "boot failed error=%d", error);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_FAILED,
+	    "error=%d", error);
 	return (error);
 }
 
@@ -1036,7 +1049,8 @@ vmmfs_machine_vcpu_stopped(struct vmmfs_machine *machine)
 		return;
 	error = vmmfs_machine_release_runtime(machine);
 	KKASSERT(error == 0);
-	vmmfs_events_log(&machine->events, "state stopped reason=vcpu");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
+	    "reason=vcpu");
 }
 
 int
@@ -1057,7 +1071,8 @@ vmmfs_machine_vcpu_reset(struct vmmfs_machine *machine)
 
 	runtime_machine = NULL;
 	old_vmspace = NULL;
-	vmmfs_events_log(&machine->events, "warm reset begin");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_RESET_STARTED,
+	    NULL);
 	(void)vmmfs_platform_x64_stop(&machine->platform);
 	(void)vmmfs_serialroot_stop(&machine->serialroot);
 	error = vmmfs_pciroot_reset(&machine->pciroot);
@@ -1105,7 +1120,8 @@ vmmfs_machine_vcpu_reset(struct vmmfs_machine *machine)
 	    &machine->boot_state);
 	if (error != 0)
 		return (error);
-	vmmfs_events_log(&machine->events, "warm reset rebuilt");
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_RESET_COMPLETED,
+	    "phase=rebuild");
 	return (0);
 
 failed:

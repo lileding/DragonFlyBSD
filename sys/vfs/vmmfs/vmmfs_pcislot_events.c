@@ -38,6 +38,7 @@ static int vmmfs_pcislot_events_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *);
 static void vmmfs_pcislot_events_filter_detach(struct knote *);
 static int vmmfs_pcislot_events_filter_read(struct knote *, long);
+static const char *vmmfs_pci_event_name(enum vmmfs_pci_event);
 
 static struct filterops vmmfs_pcislot_events_read_filterops = {
 	FILTEROP_ISFD | FILTEROP_MPSAFE,
@@ -136,9 +137,10 @@ vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *state_node)
 
 void
 vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
-	const char *format, ...)
+	enum vmmfs_pci_event event, const char *args, ...)
 {
 	va_list ap;
+	const char *name;
 	char message[VMMFS_PCISLOT_EVENTS_LINE_SIZE];
 	char text[VMMFS_PCISLOT_EVENTS_LINE_SIZE];
 	char line[VMMFS_PCISLOT_EVENTS_LINE_SIZE];
@@ -148,11 +150,21 @@ vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
 	size_t i;
 	int result;
 
-	if (state_node == NULL || format == NULL)
+	if (state_node == NULL)
 		return;
-	va_start(ap, format);
-	result = kvsnprintf(message, sizeof(message), format, ap);
-	va_end(ap);
+	name = vmmfs_pci_event_name(event);
+	if (name == NULL)
+		return;
+	if (args == NULL) {
+		result = ksnprintf(message, sizeof(message), "%s", name);
+	} else {
+		va_start(ap, args);
+		result = kvsnprintf(text, sizeof(text), args, ap);
+		va_end(ap);
+		if (result >= 0)
+			result = ksnprintf(message, sizeof(message), "%s %s", name,
+			    text);
+	}
 	if (result < 0)
 		return;
 	length = strnlen(message, sizeof(text) - 1);
@@ -195,6 +207,26 @@ vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
 	lwkt_reltoken(&state_node->token);
 	wakeup(state_node);
 	KNOTE(&state_node->kq.ki_note, 0);
+}
+
+static const char *
+vmmfs_pci_event_name(enum vmmfs_pci_event event)
+{
+	switch (event) {
+	case VMMFS_PCI_EVENT_SLOT_CREATED:
+		return ("pci slot created");
+	case VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED:
+		return ("pci descriptor committed");
+	case VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED:
+		return ("pci descriptor removed");
+	case VMMFS_PCI_EVENT_POWER_ON:
+		return ("pci power on");
+	case VMMFS_PCI_EVENT_POWER_OFF:
+		return ("pci power off");
+	case VMMFS_PCI_EVENT_RESET:
+		return ("pci reset");
+	}
+	return (NULL);
 }
 
 static int

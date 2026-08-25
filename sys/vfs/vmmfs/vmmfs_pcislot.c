@@ -123,8 +123,9 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	error = vmmfs_pcislot_descriptor_init(slot, &slot->descriptor);
 	if (error != 0)
 		goto fail_config;
-	vmmfs_pcislot_events_log(&slot->events, "slot created bdf=0000:%02x:%02x.%x",
-	    bdf >> 8, (bdf >> 3) & 0x1f, bdf & 0x7);
+	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
+	    "bdf=0000:%02x:%02x.%x", bdf >> 8, (bdf >> 3) & 0x1f,
+	    bdf & 0x7);
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	*slotp = slot;
@@ -353,8 +354,8 @@ vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
 	vmmfs_pcislot_config_power_on(&slot->config,
 	    slot->descriptor.generation);
 	slot->type0.powered = true;
-	vmmfs_pcislot_events_log(&slot->events, "RESET generation=%ju",
-	    (uintmax_t)slot->descriptor.generation);
+	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_RESET,
+	    "generation=%ju", (uintmax_t)slot->descriptor.generation);
 	return (0);
 }
 

@@ -286,8 +286,8 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 			goto fail;
 	}
 	*resourcesp = resources;
-	vmmfs_pcislot_events_log(&slot->events,
-	    "POWER_ON generation=%ju resources=%zu", (uintmax_t)generation, count);
+	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_POWER_ON,
+	    "generation=%ju resources=%zu", (uintmax_t)generation, count);
 	return (0);
 
 fail:
@@ -327,7 +327,7 @@ vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *resources)
 		vmmfs_vnode_discard(resources->items[index].vnode);
 	if (resources->slot != NULL) {
 		vmmfs_pcislot_events_log(&resources->slot->events,
-		    "POWER_OFF generation=%ju",
+		    VMMFS_PCI_EVENT_POWER_OFF, "generation=%ju",
 		    (uintmax_t)resources->descriptor_generation);
 	}
 	resources->powered = false;

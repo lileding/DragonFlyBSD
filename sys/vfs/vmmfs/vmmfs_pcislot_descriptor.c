@@ -475,10 +475,12 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	cache_inval_vp(descriptor->slot->vnode, CINV_CHILDREN);
 	if (removing) {
 		vmmfs_pcislot_events_log(&descriptor->slot->events,
-		    "descriptor_removed generation=%ju", (uintmax_t)generation);
+		    VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED, "generation=%ju",
+		    (uintmax_t)generation);
 	} else {
 		vmmfs_pcislot_events_log(&descriptor->slot->events,
-		    "descriptor_committed generation=%ju", (uintmax_t)generation);
+		    VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED, "generation=%ju",
+		    (uintmax_t)generation);
 	}
 	kfree(value, M_VMMFS);
 	kfree(buffer, M_VMMFS);
