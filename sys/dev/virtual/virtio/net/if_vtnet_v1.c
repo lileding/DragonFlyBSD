@@ -2172,6 +2172,9 @@ vtnet_v1_init(void *xsc)
 		return;
 	}
 
+	/* The host processes control virtqueue requests only after DRIVER_OK. */
+	virtio_v1_reinit_complete(dev);
+
 	/* Update host with assigned MAC address. */
 	bcopy(IF_LLADDR(ifp), sc->vtnet_hwaddr, ETHER_ADDR_LEN);
 	vtnet_v1_set_hwaddr(sc);
@@ -2215,8 +2218,6 @@ vtnet_v1_init(void *xsc)
 	ifp->if_flags |= IFF_RUNNING;
 	ifq_clr_oactive(&ifp->if_snd);
 	ifsq_watchdog_start(&sc->vtnet_tx_watchdog);
-
-	virtio_v1_reinit_complete(dev);
 
 	vtnet_v1_update_link_status(sc);
 }
