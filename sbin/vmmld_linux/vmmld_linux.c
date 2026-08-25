@@ -575,11 +575,11 @@ write_cpustate(const struct vmm_cpustate *state)
 {
 	ssize_t written;
 
-	written = write(2, state, sizeof(*state));
+	written = write(3, state, sizeof(*state));
 	if (written < 0)
-		err(1, "write fd2 cpustate");
+		err(1, "write fd3 cpustate");
 	if ((size_t)written != sizeof(*state))
-		errx(1, "short write to fd2 cpustate");
+		errx(1, "short write to fd3 cpustate");
 }
 
 static void

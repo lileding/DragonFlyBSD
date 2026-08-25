@@ -63,8 +63,6 @@ static void vmmfs_boot_session_drop_base(struct vmmfs_boot_session *);
 static void vmmfs_boot_session_drop_pager(struct vmmfs_boot_session *);
 static struct vmmfs_boot_session *vmmfs_boot_take_session(
 	struct vmmfs_boot *, struct vnode **);
-static int vmmfs_boot_submit(struct vmmfs_boot *,
-	const struct vmm_cpustate *);
 
 struct vop_ops vmmfs_boot_vops = {
 	.vop_default = vop_defaultop,
@@ -251,7 +249,7 @@ vmmfs_boot_take_session(struct vmmfs_boot *boot, struct vnode **vnodep)
 	return (session);
 }
 
-static int
+int
 vmmfs_boot_submit(struct vmmfs_boot *boot, const struct vmm_cpustate *state)
 {
 	struct vmmfs_boot_session *session;
@@ -297,6 +295,7 @@ vmmfs_boot_getattr(struct vop_getattr_args *ap)
 	VATTR_NULL(vattr);
 	vattr->va_type = VCHR;
 	vattr->va_mode = VMMFS_BOOT_MODE;
+	vattr->va_flags = 0;
 	vattr->va_nlink = 1;
 	vattr->va_uid = 0;
 	vattr->va_gid = 0;

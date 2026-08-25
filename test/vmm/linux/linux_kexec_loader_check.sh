@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Verify the Linux loader's fd3 memory and fd2 cpustate protocol offline.
+# Verify the Linux loader's mmap and cpustate write protocol on fd3.
 set -eu
 
 ROOT=$(dirname "$0")
@@ -8,12 +8,11 @@ REPO=$(cd "$ROOT/../../.." && pwd)
 LOADER="$REPO/sbin/vmmld_linux/vmmld_linux"
 BASE=/var/tmp/vmmld-linux-check-$$
 MEM=$BASE.mem
-STATE=$BASE.state
 KERNEL=$BASE.bzImage
 
 cleanup()
 {
-	rm -f "$MEM" "$STATE" "$KERNEL"
+	rm -f "$MEM" "$KERNEL"
 }
 
 fail()
@@ -38,12 +37,13 @@ printf '\001\000' | dd of="$KERNEL" bs=1 seek=566 conv=notrunc >/dev/null 2>&1
 printf '\000\020\000\000' | dd of="$KERNEL" bs=1 seek=568 conv=notrunc >/dev/null 2>&1
 printf '\000\040\000\000' | dd of="$KERNEL" bs=1 seek=608 conv=notrunc >/dev/null 2>&1
 truncate -s 256M "$MEM"
-"$LOADER" "$KERNEL" console=ttyS0 3<>"$MEM" 2>"$STATE"
-[ -s "$STATE" ] || fail "loader did not write fd2 cpustate"
+"$LOADER" "$KERNEL" console=ttyS0 3<>"$MEM"
+hexdump -v -e '1/1 "%02x"' -n 1024 "$MEM" | grep -qv '^0*$' ||
+	fail "loader did not write fd3 cpustate"
 [ "$(hex_at "$MEM" $((0x90000 + 0x70)) 8)" = "0000070000000000" ] ||
 	fail "boot_params.acpi_rsdp_addr"
 [ "$(hex_at "$MEM" $((0x90000 + 0x2d0 + 20)) 20)" = \
 	"0000070000000000000001000000000002000000" ] ||
 	fail "E820 platform reservation"
 grep -aq 'vcpu=' "$MEM" && fail "vcpu argument leaked into command line"
-echo "PASS: Linux loader fd3/fd2 platform ABI"
+echo "PASS: Linux loader fd3 boot platform ABI"

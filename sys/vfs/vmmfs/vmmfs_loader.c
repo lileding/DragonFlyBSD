@@ -3,7 +3,6 @@
  *
  * vmmfs machine loader declaration node.
  */
-#include <sys/dirent.h>
 #include <sys/conf.h>
 #include <sys/devfs.h>
 #include <sys/errno.h>
@@ -16,13 +15,10 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/proc.h>
-#include <sys/resource.h>
 #include <sys/signal.h>
-#include <sys/signalvar.h>
 #include <sys/spinlock.h>
 #include <sys/spinlock2.h>
 #include <sys/stat.h>
-#include <sys/tree.h>
 #include <sys/systm.h>
 #include <sys/sysmsg.h>
 #include <sys/sysproto.h>
@@ -30,17 +26,15 @@
 #include <sys/ucred.h>
 #include <sys/unistd.h>
 #include <sys/vnode.h>
-#include <sys/wait.h>
 
 #include <machine/atomic.h>
+#include <machine/pmap.h>
 #include <machine/vmparam.h>
 
-#include <vm/vm.h>
-#include <vm/vm_object.h>
-#include <vm/vm_page.h>
-#include <vm/vm_pager.h>
-
 #include "vmmfs.h"
+#include "vmmfs_boot.h"
+#include "vmmfs_loader.h"
+#include "vmmfs_machine.h"
 
 #define VMMFS_LOADER_MODE 0644
 #define VMMFS_LOADER_WAIT_TICKS (hz * 10)
@@ -52,67 +46,44 @@
 #define VMMFS_LOADER_OK 0
 #define VMMFS_LOADER_FAILED 1
 
-enum vmmfs_loader_fd_kind {
-	VMMFS_LOADER_FD_MEMORY,
-	VMMFS_LOADER_FD_CPUSTATE,
+enum vmmfs_loader_file_state {
+	VMMFS_LOADER_FILE_ACTIVE,
+	VMMFS_LOADER_FILE_SUBMITTING,
+	VMMFS_LOADER_FILE_SUBMITTED,
+	VMMFS_LOADER_FILE_FAILED,
 };
 
-struct vmmfs_loader_handler {
-	RB_ENTRY(vmmfs_loader_handler) entry;
-	pid_t pid;
-	void (*exit_callback)(void *, int);
-	void *argument;
-	void *wait_channel;
-};
-
-struct vmmfs_loader_domain {
-	struct spinlock spin;
-	RB_HEAD(vmmfs_loader_handler_tree, vmmfs_loader_handler) handlers;
-	bool initialized;
-};
-
-struct vmmfs_loader_fd {
-	cdev_t dev;
-	struct vnode *vnode;
-	struct vm_object *object;
-	struct vm_object *backing_object;
-	struct spinlock state_lock;
-	struct vmm_cpustate state;
-	vm_size_t size;
-	enum vmmfs_loader_fd_kind kind;
-	int references;
-	int mmap_counted;
-	int revoked;
-	int state_written;
-};
+struct vmmfs_loader_file;
 
 struct vmmfs_loader_process {
 	const char *script;
 	struct vmmfs_events *events;
+	struct vmmfs_boot *boot;
+	struct file *file;
+	struct vnode *vnode;
+	struct vmmfs_loader_file *control;
 	pid_t pid;
-	struct vmmfs_loader_handler handler;
-	struct file *memory_file;
-	struct file *state_file;
-	int exec_error;
+	int error;
 	int state;
+	int file_installed;
 };
 
-static struct vmmfs_loader_domain vmmfs_loader_domain;
-static int vmmfs_loader_mmap_object_count;
-static uint32_t vmmfs_loader_fd_serial;
+struct vmmfs_loader_file {
+	struct vmmfs_loader_process *process;
+	struct vmmfs_boot *boot;
+	struct spinlock lock;
+	enum vmmfs_loader_file_state state;
+	int references;
+	int counted;
+};
 
-static int vmmfs_loader_handler_compare(struct vmmfs_loader_handler *,
-	struct vmmfs_loader_handler *);
-static void vmmfs_loader_process_exit(struct thread *);
-static int vmmfs_loader_handler_register(struct vmmfs_loader_handler *);
-static void vmmfs_loader_handler_unregister(struct vmmfs_loader_handler *);
-static void vmmfs_loader_exit_callback(void *, int);
+static int vmmfs_loader_file_count;
+
+static void vmmfs_loader_process_complete(struct vmmfs_loader_process *, int);
 static int vmmfs_loader_process_init(struct vmmfs_loader_process *,
-	const char *, struct ucred *, struct vmmfs_events *);
-static int vmmfs_loader_process_install(struct vmmfs_loader_process *,
-	struct vm_object *, uint64_t);
-static int vmmfs_loader_process_get_state(struct vmmfs_loader_process *,
-	struct vmm_cpustate *);
+	const char *, struct vmmfs_boot *, struct ucred *,
+	struct vmmfs_events *);
+static int vmmfs_loader_process_install(struct vmmfs_loader_process *);
 static int vmmfs_loader_process_resume(struct vmmfs_loader_process *);
 static int vmmfs_loader_process_wait(struct vmmfs_loader_process *);
 static void vmmfs_loader_process_finish(struct vmmfs_loader_process *);
@@ -122,23 +93,16 @@ static void vmmfs_loader_child_exit(int);
 static int vmmfs_loader_install_fd(struct file *, int);
 static int vmmfs_loader_exec_shell(const char *);
 static void vmmfs_loader_set_process_cred(struct proc *, struct ucred *);
-static int vmmfs_loader_open_memory_fd(struct vm_object *, vm_size_t,
-	struct file **);
-static int vmmfs_loader_open_state_fd(struct file **);
-static int vmmfs_loader_open_fd(struct vmmfs_loader_fd *, struct file **);
+static int vmmfs_loader_open_file(struct vmmfs_loader_process *);
 static int vmmfs_loader_make_vnode(cdev_t, struct vnode **);
-static void vmmfs_loader_revoke(struct vmmfs_loader_process *);
-static void vmmfs_loader_revoke_file(struct file *);
-static void vmmfs_loader_close_files(struct vmmfs_loader_process *);
-static void vmmfs_loader_fd_revoke(struct vmmfs_loader_fd *);
-static void vmmfs_loader_fd_free(void *);
-static void vmmfs_loader_fd_ref(struct vmmfs_loader_fd *);
-static void vmmfs_loader_fd_put(struct vmmfs_loader_fd *);
-static int vmmfs_loader_fd_open(struct dev_open_args *);
-static int vmmfs_loader_fd_close(struct dev_close_args *);
-static int vmmfs_loader_fd_mmap_single(struct dev_mmap_single_args *);
-static int vmmfs_loader_fd_getattr(struct vop_getattr_args *);
-static int vmmfs_loader_file_readwrite(struct file *, struct uio *,
+static void vmmfs_loader_revoke_vnode(struct vnode *);
+static void vmmfs_loader_file_detach(struct vmmfs_loader_file *);
+static void vmmfs_loader_file_hold(struct vmmfs_loader_file *);
+static void vmmfs_loader_file_put(struct vmmfs_loader_file *);
+static void vmmfs_loader_file_free(void *);
+static int vmmfs_loader_file_getattr(struct vop_getattr_args *);
+static int vmmfs_loader_file_getattr_lite(struct vop_getattr_lite_args *);
+static int vmmfs_loader_file_write(struct file *, struct uio *,
 	struct ucred *, int);
 static int vmmfs_loader_file_ioctl(struct file *, u_long, caddr_t,
 	struct ucred *, struct sysmsg *);
@@ -148,16 +112,6 @@ static int vmmfs_loader_file_stat(struct file *, struct stat *,
 static int vmmfs_loader_file_close(struct file *);
 static int vmmfs_loader_file_seek(struct file *, off_t, int, off_t *);
 static void vmmfs_loader_file_disarm(struct file *);
-static int vmmfs_loader_pager_fault(vm_object_t, vm_ooffset_t, int,
-	vm_page_t *);
-static int vmmfs_loader_pager_ctor(void *, vm_ooffset_t, vm_prot_t,
-	vm_ooffset_t, struct ucred *, u_short *);
-static void vmmfs_loader_pager_dtor(void *);
-
-RB_PROTOTYPE_STATIC(vmmfs_loader_handler_tree, vmmfs_loader_handler, entry,
-	vmmfs_loader_handler_compare);
-RB_GENERATE_STATIC(vmmfs_loader_handler_tree, vmmfs_loader_handler, entry,
-	vmmfs_loader_handler_compare);
 
 static int vmmfs_loader_access(struct vop_access_args *);
 static int vmmfs_loader_getattr(struct vop_getattr_args *);
@@ -184,34 +138,24 @@ struct vop_ops vmmfs_loader_vops = {
 	.vop_write = vmmfs_loader_write,
 };
 
-static struct dev_ops vmmfs_loader_fd_ops = {
-	{ "vmmfs_loader_fd", 0, D_MPSAFE },
-	.d_open = vmmfs_loader_fd_open,
-	.d_close = vmmfs_loader_fd_close,
-	.d_mmap_single = vmmfs_loader_fd_mmap_single,
-};
-
-static struct cdev_pager_ops vmmfs_loader_pager_ops = {
-	.cdev_pg_fault = vmmfs_loader_pager_fault,
-	.cdev_pg_ctor = vmmfs_loader_pager_ctor,
-	.cdev_pg_dtor = vmmfs_loader_pager_dtor,
-};
-
-static struct vop_ops vmmfs_loader_fd_vops = {
+static struct vop_ops vmmfs_loader_file_vops = {
 	.vop_default = vop_defaultop,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_loader_fd_getattr,
 	.vop_advlock = (void *)vop_null,
+	.vop_getattr = vmmfs_loader_file_getattr,
+	.vop_getattr_lite = vmmfs_loader_file_getattr_lite,
 	.vop_inactive = (void *)vop_null,
+	.vop_mmap = (void *)vop_null,
 	.vop_reclaim = (void *)vop_null,
 	.vop_pathconf = vop_stdpathconf,
 };
 
-static struct vop_ops *vmmfs_loader_fd_vops_pointer = &vmmfs_loader_fd_vops;
+static struct vop_ops *vmmfs_loader_file_vops_pointer =
+	&vmmfs_loader_file_vops;
 
 static struct fileops vmmfs_loader_fileops = {
-	.fo_read = vmmfs_loader_file_readwrite,
-	.fo_write = vmmfs_loader_file_readwrite,
+	.fo_read = badfo_readwrite,
+	.fo_write = vmmfs_loader_file_write,
 	.fo_ioctl = vmmfs_loader_file_ioctl,
 	.fo_kqfilter = vmmfs_loader_file_kqfilter,
 	.fo_stat = vmmfs_loader_file_stat,
@@ -223,66 +167,39 @@ static struct fileops vmmfs_loader_fileops = {
 int
 vmmfs_loader_module_init(void)
 {
-	int error;
-
-	spin_init(&vmmfs_loader_domain.spin, "vmmfsload");
-	RB_INIT(&vmmfs_loader_domain.handlers);
-	error = at_exit(vmmfs_loader_process_exit);
-	if (error != 0) {
-		spin_uninit(&vmmfs_loader_domain.spin);
-		return (error);
-	}
-	vmmfs_loader_domain.initialized = true;
 	return (0);
 }
 
 int
 vmmfs_loader_module_fini(void)
 {
-	if (!vmmfs_loader_domain.initialized)
-		return (0);
-	if (!RB_EMPTY(&vmmfs_loader_domain.handlers) ||
-	    atomic_fetchadd_int(&vmmfs_loader_mmap_object_count, 0) != 0)
-		return (EBUSY);
-	rm_at_exit(vmmfs_loader_process_exit);
-	spin_uninit(&vmmfs_loader_domain.spin);
-	vmmfs_loader_domain.initialized = false;
-	return (0);
+	return (atomic_fetchadd_int(&vmmfs_loader_file_count, 0) == 0 ?
+	    0 : EBUSY);
 }
 
 int
 vmmfs_loader_run(struct vmmfs_loader *loader, const char *script,
-	struct vmmfs_memory *memory, struct ucred *cred,
-	struct vmm_cpustate *state)
+	struct vmmfs_boot *boot, struct ucred *cred)
 {
 	struct vmmfs_loader_process process;
 	int error;
 
-	if (loader == NULL || script == NULL || memory == NULL || cred == NULL ||
-	    state == NULL ||
-	    loader->machine == NULL || memory->object == NULL ||
-	    memory->machine != loader->machine || script[0] == '\0')
+	if (loader == NULL || script == NULL || boot == NULL || cred == NULL ||
+	    loader->machine == NULL || boot->machine != loader->machine ||
+	    script[0] == '\0')
 		return (EINVAL);
 	bzero(&process, sizeof(process));
-	error = vmmfs_loader_process_init(&process, script, cred,
+	error = vmmfs_loader_process_init(&process, script, boot, cred,
 	    &loader->machine->events);
-	if (error != 0) {
-		vmmfs_events_log(&loader->machine->events,
-		    "loader initialization failed error=%d", error);
-		return (error);
-	}
-	vmmfs_events_log(&loader->machine->events, "loader started pid=%d",
-	    process.pid);
-	error = vmmfs_loader_process_install(&process, memory->object,
-	    memory->size);
+	if (error == 0)
+		error = vmmfs_loader_process_install(&process);
 	if (error == 0)
 		error = vmmfs_loader_process_resume(&process);
 	if (error == 0)
 		error = vmmfs_loader_process_wait(&process);
 	if (error == 0)
-		error = vmmfs_loader_process_get_state(&process, state);
-	if (error == 0)
-		vmmfs_events_log(&loader->machine->events, "loader completed");
+		vmmfs_events_log(&loader->machine->events,
+		    "loader submitted cpustate");
 	else
 		vmmfs_events_log(&loader->machine->events,
 		    "loader failed error=%d", error);
@@ -290,196 +207,126 @@ vmmfs_loader_run(struct vmmfs_loader *loader, const char *script,
 	return (error);
 }
 
-static int
-vmmfs_loader_handler_compare(struct vmmfs_loader_handler *left,
-	struct vmmfs_loader_handler *right)
-{
-	if (left->pid < right->pid)
-		return (-1);
-	if (left->pid > right->pid)
-		return (1);
-	return (0);
-}
-
-static int
-vmmfs_loader_handler_register(struct vmmfs_loader_handler *handler)
-{
-	struct vmmfs_loader_handler *old;
-
-	if (!vmmfs_loader_domain.initialized || handler == NULL ||
-	    handler->pid <= 0 || handler->exit_callback == NULL)
-		return (EINVAL);
-	spin_lock(&vmmfs_loader_domain.spin);
-	old = RB_INSERT(vmmfs_loader_handler_tree,
-	    &vmmfs_loader_domain.handlers, handler);
-	spin_unlock(&vmmfs_loader_domain.spin);
-	return (old == NULL ? 0 : EEXIST);
-}
-
 static void
-vmmfs_loader_handler_unregister(struct vmmfs_loader_handler *handler)
+vmmfs_loader_process_complete(struct vmmfs_loader_process *process, int error)
 {
-	struct vmmfs_loader_handler key;
-	struct vmmfs_loader_handler *found;
+	int state;
 
-	if (!vmmfs_loader_domain.initialized || handler == NULL ||
-	    handler->pid <= 0)
+	if (process == NULL)
 		return;
-	key.pid = handler->pid;
-	spin_lock(&vmmfs_loader_domain.spin);
-	found = RB_FIND(vmmfs_loader_handler_tree,
-	    &vmmfs_loader_domain.handlers, &key);
-	if (found == handler)
-		RB_REMOVE(vmmfs_loader_handler_tree,
-		    &vmmfs_loader_domain.handlers, handler);
-	spin_unlock(&vmmfs_loader_domain.spin);
-}
-
-static void
-vmmfs_loader_process_exit(struct thread *thread)
-{
-	struct vmmfs_loader_handler key;
-	struct vmmfs_loader_handler *handler;
-	void *wait_channel;
-	struct proc *process;
-
-	if (thread == NULL || thread->td_proc == NULL)
-		return;
-	process = thread->td_proc;
-	key.pid = process->p_pid;
-	wait_channel = NULL;
-	spin_lock(&vmmfs_loader_domain.spin);
-	handler = RB_FIND(vmmfs_loader_handler_tree,
-	    &vmmfs_loader_domain.handlers, &key);
-	if (handler != NULL) {
-		handler->exit_callback(handler->argument, process->p_xstat);
-		wait_channel = handler->wait_channel;
+	for (;;) {
+		state = atomic_fetchadd_int(&process->state, 0);
+		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
+			return;
+		if (atomic_cmpset_int(&process->state, state,
+		    error == 0 ? VMMFS_LOADER_OK : VMMFS_LOADER_FAILED)) {
+			atomic_store_rel_int(&process->error, error);
+			wakeup(process);
+			return;
+		}
 	}
-	spin_unlock(&vmmfs_loader_domain.spin);
-	if (wait_channel != NULL)
-		wakeup(wait_channel);
 }
 
 static int
 vmmfs_loader_process_init(struct vmmfs_loader_process *process,
-	const char *script, struct ucred *cred, struct vmmfs_events *events)
+	const char *script, struct vmmfs_boot *boot, struct ucred *cred,
+	struct vmmfs_events *events)
 {
 	struct proc *child;
 	struct lwp *child_lwp;
 	int error;
 	int state;
 
-	if (process == NULL || script == NULL || script[0] == '\0' || cred == NULL ||
+	if (process == NULL || script == NULL || script[0] == '\0' ||
+	    boot == NULL || boot->machine == NULL || cred == NULL ||
 	    events == NULL)
 		return (EINVAL);
 	process->script = script;
+	process->boot = boot;
 	process->events = events;
 	process->state = VMMFS_LOADER_INITING;
-	error = 0;
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
 	if (error != 0)
 		return (error);
 	process->pid = child->p_pid;
-	vmmfs_events_log(process->events, "loader fork completed");
-	process->handler.pid = process->pid;
-	process->handler.exit_callback = vmmfs_loader_exit_callback;
-	process->handler.argument = process;
-	process->handler.wait_channel = &process->handler;
-	error = vmmfs_loader_handler_register(&process->handler);
-	if (error != 0) {
-		ksignal(child, SIGKILL);
-		wakeup(process);
-		process->pid = 0;
-		return (error);
-	}
-	vmmfs_events_log(process->events, "loader handler registered");
 	child_lwp = ONLY_LWP_IN_PROC(child);
 	vmmfs_loader_set_process_cred(child, cred);
 	cpu_set_fork_handler(child_lwp, vmmfs_loader_child, process);
 	PHOLD(child);
 	start_forked_proc(curthread->td_lwp, child);
 	PRELE(child);
-	vmmfs_events_log(process->events, "loader child scheduled");
 	for (;;) {
 		state = atomic_fetchadd_int(&process->state, 0);
 		if (state == VMMFS_LOADER_PAUSED)
 			return (0);
-		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
-			break;
-		tsleep_interlock(&process->handler, PCATCH);
+		if (state == VMMFS_LOADER_FAILED)
+			return (atomic_load_acq_int(&process->error));
+		tsleep_interlock(process, PCATCH);
 		state = atomic_fetchadd_int(&process->state, 0);
-		if (state == VMMFS_LOADER_PAUSED || state == VMMFS_LOADER_OK ||
+		if (state == VMMFS_LOADER_PAUSED ||
 		    state == VMMFS_LOADER_FAILED)
 			continue;
-		error = tsleep(&process->handler, PINTERLOCKED | PCATCH,
-		    "vmmfsldi", VMMFS_LOADER_WAIT_TICKS);
+		error = tsleep(process, PINTERLOCKED | PCATCH, "vmmfsldi",
+		    VMMFS_LOADER_WAIT_TICKS);
 		if (error == 0)
 			continue;
+		if (error == EWOULDBLOCK)
+			error = ETIMEDOUT;
+		vmmfs_loader_process_complete(process, error);
 		vmmfs_loader_process_kill(process);
-		break;
+		return (error);
 	}
-	vmmfs_loader_process_finish(process);
-	if (error == 0)
-		error = atomic_load_acq_int(&process->exec_error);
-	return (error == 0 ? ENOEXEC : error);
 }
 
 static int
-vmmfs_loader_process_install(struct vmmfs_loader_process *process,
-	struct vm_object *object, uint64_t size)
+vmmfs_loader_process_install(struct vmmfs_loader_process *process)
 {
-	int error;
-
-	if (process == NULL || object == NULL || size == 0 ||
+	if (process == NULL || process->boot == NULL ||
 	    atomic_fetchadd_int(&process->state, 0) != VMMFS_LOADER_PAUSED)
 		return (EINVAL);
-	error = vmmfs_loader_open_memory_fd(object, (vm_size_t)size,
-	    &process->memory_file);
-	if (error != 0)
-		return (error);
-	error = vmmfs_loader_open_state_fd(&process->state_file);
-	if (error != 0) {
-		vmmfs_loader_revoke_file(process->memory_file);
-		fp_close(process->memory_file);
-		process->memory_file = NULL;
-	}
-	return (error);
-}
-
-static int
-vmmfs_loader_process_get_state(struct vmmfs_loader_process *process,
-	struct vmm_cpustate *state)
-{
-	struct vmmfs_loader_fd *fd;
-	int error;
-
-	if (process == NULL || state == NULL || process->state_file == NULL)
-		return (EINVAL);
-	error = devfs_get_cdevpriv(process->state_file, (void **)&fd);
-	if (error != 0)
-		return (error);
-	spin_lock(&fd->state_lock);
-	if (fd->revoked || !fd->state_written)
-		error = EPROTO;
-	else {
-		*state = fd->state;
-		error = 0;
-	}
-	spin_unlock(&fd->state_lock);
-	return (error);
+	return (vmmfs_loader_open_file(process));
 }
 
 static int
 vmmfs_loader_process_resume(struct vmmfs_loader_process *process)
 {
-	if (process == NULL || process->memory_file == NULL ||
-	    process->state_file == NULL ||
+	struct file *file;
+	int error;
+	int state;
+
+	if (process == NULL || process->file == NULL ||
 	    !atomic_cmpset_int(&process->state, VMMFS_LOADER_PAUSED,
 	    VMMFS_LOADER_RUNNING))
 		return (ECANCELED);
 	wakeup(process);
-	return (0);
+	for (;;) {
+		if (atomic_load_acq_int(&process->file_installed) != 0) {
+			file = process->file;
+			process->file = NULL;
+			fp_close(file);
+			return (0);
+		}
+		state = atomic_fetchadd_int(&process->state, 0);
+		if (state == VMMFS_LOADER_FAILED) {
+			error = atomic_load_acq_int(&process->error);
+			return (error == 0 ? EPROTO : error);
+		}
+		tsleep_interlock(process, PCATCH);
+		if (atomic_load_acq_int(&process->file_installed) != 0 ||
+		    atomic_fetchadd_int(&process->state, 0) ==
+		    VMMFS_LOADER_FAILED)
+			continue;
+		error = tsleep(process, PINTERLOCKED | PCATCH, "vmmfsldf",
+		    VMMFS_LOADER_WAIT_TICKS);
+		if (error == 0)
+			continue;
+		if (error == EWOULDBLOCK)
+			error = ETIMEDOUT;
+		vmmfs_loader_process_complete(process, error);
+		vmmfs_loader_process_kill(process);
+		return (error);
+	}
 }
 
 static int
@@ -494,20 +341,23 @@ vmmfs_loader_process_wait(struct vmmfs_loader_process *process)
 		state = atomic_fetchadd_int(&process->state, 0);
 		if (state == VMMFS_LOADER_OK)
 			return (0);
-		if (state != VMMFS_LOADER_RUNNING) {
-			error = atomic_load_acq_int(&process->exec_error);
-			return (error == 0 ? ENOEXEC : error);
+		if (state == VMMFS_LOADER_FAILED) {
+			error = atomic_load_acq_int(&process->error);
+			return (error == 0 ? EPROTO : error);
 		}
-		tsleep_interlock(&process->handler, PCATCH);
+		tsleep_interlock(process, PCATCH);
 		state = atomic_fetchadd_int(&process->state, 0);
-		if (state != VMMFS_LOADER_RUNNING)
+		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
 			continue;
-		error = tsleep(&process->handler, PINTERLOCKED | PCATCH,
-		    "vmmfsld", VMMFS_LOADER_WAIT_TICKS);
+		error = tsleep(process, PINTERLOCKED | PCATCH, "vmmfsld",
+		    VMMFS_LOADER_WAIT_TICKS);
 		if (error == 0)
 			continue;
+		if (error == EWOULDBLOCK)
+			error = ETIMEDOUT;
+		vmmfs_loader_process_complete(process, error);
 		vmmfs_loader_process_kill(process);
-		return (error == EWOULDBLOCK ? ENOEXEC : error);
+		return (error);
 	}
 }
 
@@ -519,23 +369,20 @@ vmmfs_loader_process_finish(struct vmmfs_loader_process *process)
 	if (process == NULL)
 		return;
 	state = atomic_fetchadd_int(&process->state, 0);
-	if (state != VMMFS_LOADER_OK && state != VMMFS_LOADER_FAILED)
+	if (state != VMMFS_LOADER_OK)
 		vmmfs_loader_process_kill(process);
-	for (;;) {
-		state = atomic_fetchadd_int(&process->state, 0);
-		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
-			break;
-		tsleep_interlock(&process->handler, 0);
-		state = atomic_fetchadd_int(&process->state, 0);
-		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
-			continue;
-		(void)tsleep(&process->handler, PINTERLOCKED, "vmmfsldx",
-		    VMMFS_LOADER_WAIT_TICKS);
-		vmmfs_loader_process_kill(process);
+	vmmfs_loader_file_detach(process->control);
+	vmmfs_loader_revoke_vnode(process->vnode);
+	if (process->file != NULL) {
+		fp_close(process->file);
+		process->file = NULL;
 	}
-	vmmfs_loader_handler_unregister(&process->handler);
-	vmmfs_loader_revoke(process);
-	vmmfs_loader_close_files(process);
+	if (process->vnode != NULL) {
+		vmmfs_vnode_discard(process->vnode);
+		process->vnode = NULL;
+	}
+	vmmfs_loader_file_put(process->control);
+	process->control = NULL;
 	process->pid = 0;
 }
 
@@ -544,37 +391,12 @@ vmmfs_loader_process_kill(struct vmmfs_loader_process *process)
 {
 	struct proc *target;
 
-	if (process == NULL)
+	if (process == NULL || process->pid <= 0)
 		return;
-	if (process->pid > 0) {
-		target = pfind(process->pid);
-		if (target != NULL) {
-			ksignal(target, SIGKILL);
-			PRELE(target);
-		}
-	}
-	wakeup(process);
-	vmmfs_loader_revoke(process);
-}
-
-static void
-vmmfs_loader_exit_callback(void *argument, int exit_code)
-{
-	struct vmmfs_loader_process *process;
-	int state;
-	int old;
-
-	process = argument;
-	if (process == NULL)
-		return;
-	state = WIFEXITED(exit_code) && WEXITSTATUS(exit_code) == 0 ?
-	    VMMFS_LOADER_OK : VMMFS_LOADER_FAILED;
-	for (;;) {
-		old = atomic_fetchadd_int(&process->state, 0);
-		if (old == VMMFS_LOADER_OK || old == VMMFS_LOADER_FAILED)
-			return;
-		if (atomic_cmpset_int(&process->state, old, state))
-			return;
+	target = pfind(process->pid);
+	if (target != NULL) {
+		ksignal(target, SIGKILL);
+		PRELE(target);
 	}
 }
 
@@ -589,18 +411,17 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 	(void)frame;
 	process = argument;
 	if (process == NULL)
-		vmmfs_loader_child_exit(W_EXITCODE(127, SIGKILL));
+		vmmfs_loader_child_exit(1);
 	if (!atomic_cmpset_int(&process->state, VMMFS_LOADER_INITING,
 	    VMMFS_LOADER_PAUSED))
-		vmmfs_loader_child_exit(W_EXITCODE(127, SIGKILL));
-	vmmfs_events_log(process->events, "loader child paused");
-	wakeup(&process->handler);
+		vmmfs_loader_child_exit(1);
+	wakeup(process);
 	for (;;) {
 		state = atomic_fetchadd_int(&process->state, 0);
 		if (state == VMMFS_LOADER_RUNNING)
 			break;
 		if (state == VMMFS_LOADER_OK || state == VMMFS_LOADER_FAILED)
-			vmmfs_loader_child_exit(W_EXITCODE(127, SIGKILL));
+			vmmfs_loader_child_exit(1);
 		tsleep_interlock(process, PCATCH);
 		state = atomic_fetchadd_int(&process->state, 0);
 		if (state == VMMFS_LOADER_RUNNING || state == VMMFS_LOADER_OK ||
@@ -608,11 +429,13 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 			continue;
 		error = tsleep(process, PINTERLOCKED | PCATCH, "vmmfsldp", 0);
 		if (error != 0)
-			vmmfs_loader_child_exit(W_EXITCODE(127, SIGKILL));
+			vmmfs_loader_child_exit(1);
 	}
-	error = vmmfs_loader_install_fd(process->state_file, 2);
-	if (error == 0)
-		error = vmmfs_loader_install_fd(process->memory_file, 3);
+	error = vmmfs_loader_install_fd(process->file, 3);
+	if (error == 0) {
+		atomic_store_rel_int(&process->file_installed, 1);
+		wakeup(process);
+	}
 	if (error == 0)
 		error = vmmfs_loader_exec_shell(process->script);
 	if (error == 0) {
@@ -620,10 +443,8 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 		lwp->lwp_proc->p_usched->acquire_curproc(lwp);
 		return;
 	}
-	atomic_store_rel_int(&process->exec_error, error);
-	if (error < 0)
-		vmmfs_loader_child_exit(W_EXITCODE(127, SIGABRT));
-	vmmfs_loader_child_exit(W_EXITCODE(127, 0));
+	vmmfs_loader_process_complete(process, error);
+	vmmfs_loader_child_exit(1);
 }
 
 static void
@@ -732,54 +553,195 @@ vmmfs_loader_set_process_cred(struct proc *process, struct ucred *cred)
 }
 
 static int
-vmmfs_loader_fd_open(struct dev_open_args *arguments)
+vmmfs_loader_make_vnode(cdev_t dev, struct vnode **vnodep)
 {
-	(void)arguments;
+	struct vnode *vnode;
+	int error;
+
+	if (dev == NULL || vnodep == NULL)
+		return (EINVAL);
+	error = getspecialvnode(VT_NON, NULL, &vmmfs_loader_file_vops_pointer,
+	    &vnode, 0, 0);
+	if (error != 0)
+		return (error);
+	vnode->v_type = VCHR;
+	error = v_associate_rdev(vnode, dev);
+	if (error != 0) {
+		vx_downgrade(vnode);
+		vn_unlock(vnode);
+		vmmfs_vnode_discard(vnode);
+		return (error);
+	}
+	vnode->v_umajor = dev->si_umajor;
+	vnode->v_uminor = dev->si_uminor;
+	vx_unlock(vnode);
+	*vnodep = vnode;
 	return (0);
 }
 
 static int
-vmmfs_loader_fd_close(struct dev_close_args *arguments)
+vmmfs_loader_open_file(struct vmmfs_loader_process *process)
 {
-	(void)arguments;
+	struct vmmfs_loader_file *control;
+	struct file *file;
+	struct vnode *vnode;
+	int error;
+
+	if (process == NULL || process->boot == NULL ||
+	    process->boot->machine == NULL || process->boot->dev == NULL)
+		return (EINVAL);
+	control = kmalloc(sizeof(*control), M_VMMFS, M_WAITOK | M_ZERO);
+	control->process = process;
+	control->boot = process->boot;
+	control->state = VMMFS_LOADER_FILE_ACTIVE;
+	control->references = 1;
+	spin_init(&control->lock, "vmmfsldfd");
+	vmmfs_machine_hold(process->boot->machine);
+	error = vmmfs_loader_make_vnode(process->boot->dev, &vnode);
+	if (error != 0)
+		goto fail_control;
+	error = falloc(NULL, &file, NULL);
+	if (error != 0)
+		goto fail_vnode;
+	fsetcred(file, proc0.p_ucred);
+	file->f_type = DTYPE_VNODE;
+	file->f_flag = FREAD | FWRITE;
+	file->f_ops = &vmmfs_loader_fileops;
+	file->f_data = vnode;
+	vref(vnode);
+	atomic_add_int(&vnode->v_opencount, 1);
+	atomic_add_int(&vnode->v_writecount, 1);
+	error = devfs_set_cdevpriv(file, control, vmmfs_loader_file_free);
+	if (error != 0) {
+		fp_close(file);
+		goto fail_control;
+	}
+	vmmfs_loader_file_hold(control);
+	control->counted = 1;
+	atomic_add_int(&vmmfs_loader_file_count, 1);
+	process->file = file;
+	process->vnode = vnode;
+	process->control = control;
+	return (0);
+
+fail_vnode:
+	vmmfs_vnode_discard(vnode);
+fail_control:
+	vmmfs_loader_file_put(control);
+	return (error);
+}
+
+static void
+vmmfs_loader_file_detach(struct vmmfs_loader_file *control)
+{
+	if (control == NULL)
+		return;
+	spin_lock(&control->lock);
+	control->process = NULL;
+	spin_unlock(&control->lock);
+}
+
+static void
+vmmfs_loader_revoke_vnode(struct vnode *vnode)
+{
+	if (vnode == NULL)
+		return;
+	(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
+}
+
+static void
+vmmfs_loader_file_hold(struct vmmfs_loader_file *control)
+{
+	if (control != NULL)
+		atomic_add_int(&control->references, 1);
+}
+
+static void
+vmmfs_loader_file_put(struct vmmfs_loader_file *control)
+{
+	int references;
+
+	if (control == NULL)
+		return;
+	references = atomic_fetchadd_int(&control->references, -1);
+	KKASSERT(references > 0);
+	if (references != 1)
+		return;
+	vmmfs_machine_put(control->boot->machine);
+	spin_uninit(&control->lock);
+	if (control->counted != 0)
+		atomic_add_int(&vmmfs_loader_file_count, -1);
+	kfree(control, M_VMMFS);
+}
+
+static void
+vmmfs_loader_file_free(void *argument)
+{
+	struct vmmfs_loader_file *control;
+
+	control = argument;
+	vmmfs_loader_file_put(control);
+}
+
+static int
+vmmfs_loader_file_getattr(struct vop_getattr_args *ap)
+{
+	struct vmmfs_boot *boot;
+	struct vattr *vattr;
+	uint64_t size;
+
+	if (ap == NULL || ap->a_vp == NULL || ap->a_vp->v_rdev == NULL)
+		return (EBADF);
+	boot = ap->a_vp->v_rdev->si_drv1;
+	if (boot == NULL || boot->machine == NULL)
+		return (EBADF);
+	lwkt_gettoken(&boot->machine->token);
+	size = boot->machine->memory.size;
+	lwkt_reltoken(&boot->machine->token);
+	vattr = ap->a_vap;
+	VATTR_NULL(vattr);
+	vattr->va_type = VCHR;
+	vattr->va_mode = 0600;
+	vattr->va_flags = 0;
+	vattr->va_nlink = 1;
+	vattr->va_uid = UID_ROOT;
+	vattr->va_gid = GID_WHEEL;
+	vattr->va_size = (off_t)size;
+	vattr->va_blocksize = PAGE_SIZE;
+	vattr->va_bytes = size;
 	return (0);
 }
 
 static int
-vmmfs_loader_fd_getattr(struct vop_getattr_args *arguments)
+vmmfs_loader_file_getattr_lite(struct vop_getattr_lite_args *ap)
 {
-	struct vmmfs_loader_fd *fd;
-	struct vattr *attributes;
+	struct vmmfs_boot *boot;
+	uint64_t size;
 
-	fd = arguments->a_vp->v_rdev->si_drv1;
-	if (fd == NULL)
-		return (ENOENT);
-	attributes = arguments->a_vap;
-	VATTR_NULL(attributes);
-	attributes->va_type = VCHR;
-	attributes->va_mode = 0600;
-	attributes->va_nlink = 1;
-	attributes->va_uid = UID_ROOT;
-	attributes->va_gid = GID_WHEEL;
-	attributes->va_size = fd->size;
-	attributes->va_blocksize = PAGE_SIZE;
-	attributes->va_bytes = fd->size;
-	attributes->va_fileid = 0;
-	attributes->va_atime.tv_sec = 0;
-	attributes->va_atime.tv_nsec = 0;
-	attributes->va_mtime = attributes->va_atime;
-	attributes->va_ctime = attributes->va_atime;
-	attributes->va_flags = 0;
-	attributes->va_gen = 1;
-	attributes->va_filerev = 0;
+	if (ap == NULL || ap->a_vp == NULL || ap->a_vp->v_rdev == NULL)
+		return (EBADF);
+	boot = ap->a_vp->v_rdev->si_drv1;
+	if (boot == NULL || boot->machine == NULL)
+		return (EBADF);
+	lwkt_gettoken(&boot->machine->token);
+	size = boot->machine->memory.size;
+	lwkt_reltoken(&boot->machine->token);
+	ap->a_lvap->va_type = VCHR;
+	ap->a_lvap->va_mode = 0600;
+	ap->a_lvap->va_nlink = 1;
+	ap->a_lvap->va_uid = UID_ROOT;
+	ap->a_lvap->va_gid = GID_WHEEL;
+	ap->a_lvap->va_size = (off_t)size;
+	ap->a_lvap->va_flags = 0;
 	return (0);
 }
 
 static int
-vmmfs_loader_file_readwrite(struct file *file, struct uio *uio,
+vmmfs_loader_file_write(struct file *file, struct uio *uio,
 	struct ucred *cred, int flags)
 {
-	struct vmmfs_loader_fd *fd;
+	struct vmmfs_loader_file *control;
+	struct vmmfs_loader_process *process;
 	struct vmm_cpustate state;
 	int error;
 
@@ -789,31 +751,32 @@ vmmfs_loader_file_readwrite(struct file *file, struct uio *uio,
 	    (uio->uio_offset != -1 && uio->uio_offset != 0) ||
 	    uio->uio_resid != sizeof(state))
 		return (EINVAL);
-	/*
-	 * sys_write() passes -1 and ordinary vnode/device fileops translate it
-	 * to the current file offset.  This one-record control FD has no file
-	 * position, so normalize both write(2) and pwrite(2, 0) to offset zero.
-	 */
 	uio->uio_offset = 0;
-	error = devfs_get_cdevpriv(file, (void **)&fd);
-	if (error != 0)
-		return (error);
-	if (fd->kind != VMMFS_LOADER_FD_CPUSTATE)
-		return (EOPNOTSUPP);
+	error = devfs_get_cdevpriv(file, (void **)&control);
+	if (error != 0 || control == NULL)
+		return (error == 0 ? EBADF : error);
 	error = uiomove((caddr_t)&state, sizeof(state), uio);
 	if (error != 0)
 		return (error);
-	spin_lock(&fd->state_lock);
-	if (fd->revoked)
-		error = EPIPE;
-	else if (fd->state_written)
+	spin_lock(&control->lock);
+	if (control->process == NULL)
+		error = EBADF;
+	else if (control->state != VMMFS_LOADER_FILE_ACTIVE)
 		error = EBUSY;
 	else {
-		fd->state = state;
-		fd->state_written = 1;
+		control->state = VMMFS_LOADER_FILE_SUBMITTING;
+		process = control->process;
 		error = 0;
 	}
-	spin_unlock(&fd->state_lock);
+	spin_unlock(&control->lock);
+	if (error != 0)
+		return (error);
+	error = vmmfs_boot_submit(control->boot, &state);
+	spin_lock(&control->lock);
+	control->state = error == 0 ? VMMFS_LOADER_FILE_SUBMITTED :
+	    VMMFS_LOADER_FILE_FAILED;
+	spin_unlock(&control->lock);
+	vmmfs_loader_process_complete(process, error);
 	return (error);
 }
 
@@ -841,23 +804,64 @@ static int
 vmmfs_loader_file_stat(struct file *file, struct stat *status,
 	struct ucred *cred)
 {
-	struct vmmfs_loader_fd *fd;
+	struct vmmfs_loader_file *control;
+	uint64_t size;
 	int error;
 
 	(void)cred;
-	error = devfs_get_cdevpriv(file, (void **)&fd);
-	if (error != 0)
-		return (error);
+	error = devfs_get_cdevpriv(file, (void **)&control);
+	if (error != 0 || control == NULL)
+		return (error == 0 ? EBADF : error);
+	lwkt_gettoken(&control->boot->machine->token);
+	size = control->boot->machine->memory.size;
+	lwkt_reltoken(&control->boot->machine->token);
 	bzero(status, sizeof(*status));
 	status->st_nlink = 1;
 	status->st_mode = S_IFCHR | 0600;
 	status->st_uid = UID_ROOT;
 	status->st_gid = GID_WHEEL;
-	status->st_size = (off_t)fd->size;
-	status->st_blocks = howmany(fd->size, S_BLKSIZE);
+	status->st_size = (off_t)size;
+	status->st_blocks = howmany(size, S_BLKSIZE);
 	status->st_blksize = PAGE_SIZE;
 	status->__old_st_blksize = status->st_blksize;
 	return (0);
+}
+
+static int
+vmmfs_loader_file_close(struct file *file)
+{
+	struct vmmfs_loader_file *control;
+	struct vmmfs_loader_process *process;
+	bool failed;
+
+	process = NULL;
+	failed = false;
+	if (file != NULL &&
+	    devfs_get_cdevpriv(file, (void **)&control) == 0 &&
+	    control != NULL) {
+		spin_lock(&control->lock);
+		if (control->state == VMMFS_LOADER_FILE_ACTIVE) {
+			control->state = VMMFS_LOADER_FILE_FAILED;
+			process = control->process;
+			failed = true;
+		}
+		spin_unlock(&control->lock);
+	}
+	if (failed)
+		vmmfs_loader_process_complete(process, EPIPE);
+	vmmfs_loader_file_disarm(file);
+	return (0);
+}
+
+static int
+vmmfs_loader_file_seek(struct file *file, off_t offset, int whence,
+	off_t *result)
+{
+	(void)file;
+	(void)offset;
+	(void)whence;
+	(void)result;
+	return (ESPIPE);
 }
 
 static void
@@ -877,362 +881,14 @@ vmmfs_loader_file_disarm(struct file *file)
 }
 
 static int
-vmmfs_loader_file_close(struct file *file)
-{
-	vmmfs_loader_file_disarm(file);
-	return (0);
-}
-
-static int
-vmmfs_loader_file_seek(struct file *file, off_t offset, int whence,
-	off_t *result)
-{
-	(void)file;
-	(void)offset;
-	(void)whence;
-	(void)result;
-	return (ESPIPE);
-}
-
-static void
-vmmfs_loader_fd_ref(struct vmmfs_loader_fd *fd)
-{
-	atomic_add_int(&fd->references, 1);
-}
-
-static void
-vmmfs_loader_fd_put(struct vmmfs_loader_fd *fd)
-{
-	if (atomic_fetchadd_int(&fd->references, -1) == 1) {
-		if (fd->mmap_counted)
-			atomic_add_int(&vmmfs_loader_mmap_object_count, -1);
-		spin_uninit(&fd->state_lock);
-		kfree(fd, M_VMMFS);
-	}
-}
-
-static int
-vmmfs_loader_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
-	vm_ooffset_t offset, struct ucred *cred, u_short *color)
-{
-	struct vmmfs_loader_fd *fd;
-
-	(void)cred;
-	fd = handle;
-	if (fd == NULL || color == NULL)
-		return (EINVAL);
-	if ((prot & VM_PROT_EXECUTE) != 0 || offset < 0 || offset > fd->size ||
-	    size > fd->size - offset || fd->revoked ||
-	    fd->backing_object == NULL)
-		return (EINVAL);
-	*color = 0;
-	vmmfs_loader_fd_ref(fd);
-	return (0);
-}
-
-static void
-vmmfs_loader_pager_dtor(void *handle)
-{
-	struct vmmfs_loader_fd *fd;
-	struct vm_object *backing_object;
-
-	fd = handle;
-	if (fd == NULL)
-		return;
-	backing_object = fd->backing_object;
-	fd->backing_object = NULL;
-	if (backing_object != NULL)
-		vm_object_deallocate(backing_object);
-	vmmfs_loader_fd_put(fd);
-}
-
-static int
-vmmfs_loader_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
-	vm_page_t *page_result)
-{
-	struct vmmfs_loader_fd *fd;
-	struct vm_object *backing_object;
-	vm_page_t page;
-
-	fd = object->handle;
-	if (fd == NULL || page_result == NULL || offset < 0 ||
-	    offset >= fd->size || (prot & VM_PROT_EXECUTE) != 0)
-		return (VM_PAGER_ERROR);
-	VM_OBJECT_LOCK(object);
-	if (fd->revoked || fd->backing_object == NULL) {
-		VM_OBJECT_UNLOCK(object);
-		return (VM_PAGER_ERROR);
-	}
-	backing_object = fd->backing_object;
-	vm_object_reference_quick(backing_object);
-	VM_OBJECT_UNLOCK(object);
-	page = vm_page_grab(backing_object, OFF_TO_IDX(offset),
-	    VM_ALLOC_NORMAL | VM_ALLOC_SYSTEM | VM_ALLOC_ZERO | VM_ALLOC_RETRY);
-	vm_object_deallocate(backing_object);
-	if (page == NULL)
-		return (VM_PAGER_ERROR);
-	if (page->valid != VM_PAGE_BITS_ALL)
-		vm_page_zero_invalid(page, TRUE);
-	*page_result = page;
-	return (VM_PAGER_OK);
-}
-
-static void
-vmmfs_loader_fd_revoke(struct vmmfs_loader_fd *fd)
-{
-	struct vm_object *backing_object;
-	struct vm_object *object;
-	int remove_pages;
-
-	if (fd->kind == VMMFS_LOADER_FD_CPUSTATE) {
-		spin_lock(&fd->state_lock);
-		fd->revoked = 1;
-		spin_unlock(&fd->state_lock);
-		return;
-	}
-	backing_object = NULL;
-	remove_pages = 0;
-	object = fd->object;
-	if (object != NULL) {
-		VM_OBJECT_LOCK(object);
-		if (!fd->revoked) {
-			fd->revoked = 1;
-			remove_pages = 1;
-		}
-		VM_OBJECT_UNLOCK(object);
-		if (remove_pages)
-			vm_object_page_remove(object, 0, 0, FALSE);
-	} else if (!fd->revoked) {
-		fd->revoked = 1;
-		backing_object = fd->backing_object;
-		fd->backing_object = NULL;
-	}
-	if (backing_object != NULL)
-		vm_object_deallocate(backing_object);
-}
-
-static void
-vmmfs_loader_fd_free(void *argument)
-{
-	struct vmmfs_loader_fd *fd;
-	struct vnode *vnode;
-
-	fd = argument;
-	if (fd == NULL)
-		return;
-	vmmfs_loader_fd_revoke(fd);
-	vnode = fd->vnode;
-	if (vnode != NULL) {
-		fd->vnode = NULL;
-		vmmfs_vnode_discard(vnode);
-	}
-	if (fd->dev != NULL) {
-		fd->dev->si_drv1 = NULL;
-		destroy_only_dev(fd->dev);
-		fd->dev = NULL;
-	}
-	if (fd->object != NULL) {
-		vm_object_deallocate(fd->object);
-		fd->object = NULL;
-	}
-	vmmfs_loader_fd_put(fd);
-}
-
-static int
-vmmfs_loader_fd_mmap_single(struct dev_mmap_single_args *arguments)
-{
-	struct vmmfs_loader_fd *fd;
-	struct vm_object *object;
-	vm_ooffset_t offset;
-
-	if (arguments == NULL || arguments->a_head.a_dev == NULL)
-		return (EINVAL);
-	fd = arguments->a_head.a_dev->si_drv1;
-	if (fd == NULL || fd->object == NULL)
-		return (EINVAL);
-	object = fd->object;
-	if ((arguments->a_nprot & VM_PROT_EXECUTE) != 0)
-		return (EACCES);
-	offset = *arguments->a_offset;
-	if (offset < 0 || offset > fd->size ||
-	    arguments->a_size > fd->size - offset)
-		return (EINVAL);
-	VM_OBJECT_LOCK(object);
-	if (fd->revoked || fd->backing_object == NULL) {
-		VM_OBJECT_UNLOCK(object);
-		return (EINVAL);
-	}
-	vm_object_reference_locked(object);
-	VM_OBJECT_UNLOCK(object);
-	*arguments->a_object = object;
-	return (0);
-}
-
-static int
-vmmfs_loader_make_vnode(cdev_t dev, struct vnode **vnode_pointer)
-{
-	struct vnode *vnode;
-	int error;
-
-	error = getspecialvnode(VT_NON, NULL, &vmmfs_loader_fd_vops_pointer,
-	    &vnode, 0, 0);
-	if (error != 0) {
-		*vnode_pointer = NULL;
-		return (error);
-	}
-	vnode->v_type = VCHR;
-	error = v_associate_rdev(vnode, dev);
-	if (error != 0) {
-		vx_downgrade(vnode);
-		vn_unlock(vnode);
-		vmmfs_vnode_discard(vnode);
-		*vnode_pointer = NULL;
-		return (error);
-	}
-	vnode->v_umajor = dev->si_umajor;
-	vnode->v_uminor = dev->si_uminor;
-	vx_unlock(vnode);
-	*vnode_pointer = vnode;
-	return (0);
-}
-
-static int
-vmmfs_loader_open_fd(struct vmmfs_loader_fd *fd, struct file **file_pointer)
-{
-	struct file *file;
-	struct vnode *vnode;
-	int error;
-
-	error = vmmfs_loader_make_vnode(fd->dev, &vnode);
-	if (error != 0)
-		goto fail;
-	fd->vnode = vnode;
-	error = falloc(NULL, &file, NULL);
-	if (error != 0)
-		goto fail;
-	fsetcred(file, proc0.p_ucred);
-	file->f_type = DTYPE_VNODE;
-	file->f_flag = FREAD | FWRITE;
-	file->f_ops = &vmmfs_loader_fileops;
-	file->f_data = vnode;
-	vref(vnode);
-	atomic_add_int(&vnode->v_opencount, 1);
-	atomic_add_int(&vnode->v_writecount, 1);
-	error = devfs_set_cdevpriv(file, fd, vmmfs_loader_fd_free);
-	if (error != 0) {
-		fp_close(file);
-		vmmfs_loader_fd_free(fd);
-		return (error);
-	}
-	*file_pointer = file;
-	return (0);
-
-fail:
-	vmmfs_loader_fd_free(fd);
-	return (error);
-}
-
-static int
-vmmfs_loader_open_memory_fd(struct vm_object *object, vm_size_t size,
-	struct file **file_pointer)
-{
-	struct vmmfs_loader_fd *fd;
-	uint32_t serial;
-
-	if (object == NULL || size == 0)
-		return (EINVAL);
-	fd = kmalloc(sizeof(*fd), M_VMMFS, M_WAITOK | M_ZERO);
-	vm_object_reference_quick(object);
-	fd->backing_object = object;
-	fd->size = round_page(size);
-	fd->kind = VMMFS_LOADER_FD_MEMORY;
-	fd->references = 1;
-	spin_init(&fd->state_lock, "vmmfsldfd");
-	fd->mmap_counted = 1;
-	atomic_add_int(&vmmfs_loader_mmap_object_count, 1);
-	fd->object = cdev_pager_allocate(fd, OBJT_MGTDEVICE,
-	    &vmmfs_loader_pager_ops, fd->size,
-	    VM_PROT_READ | VM_PROT_WRITE, 0, proc0.p_ucred);
-	if (fd->object == NULL) {
-		vmmfs_loader_fd_free(fd);
-		return (ENOMEM);
-	}
-	serial = atomic_fetchadd_int(&vmmfs_loader_fd_serial, 1);
-	fd->dev = make_only_dev(&vmmfs_loader_fd_ops, serial, UID_ROOT,
-	    GID_WHEEL, 0600, "vmmfsld%d", serial);
-	if (fd->dev == NULL) {
-		vmmfs_loader_fd_free(fd);
-		return (ENXIO);
-	}
-	fd->dev->si_drv1 = fd;
-	return (vmmfs_loader_open_fd(fd, file_pointer));
-}
-
-static int
-vmmfs_loader_open_state_fd(struct file **file_pointer)
-{
-	struct vmmfs_loader_fd *fd;
-	uint32_t serial;
-
-	if (file_pointer == NULL)
-		return (EINVAL);
-	fd = kmalloc(sizeof(*fd), M_VMMFS, M_WAITOK | M_ZERO);
-	fd->kind = VMMFS_LOADER_FD_CPUSTATE;
-	fd->size = sizeof(fd->state);
-	fd->references = 1;
-	spin_init(&fd->state_lock, "vmmfsldst");
-	serial = atomic_fetchadd_int(&vmmfs_loader_fd_serial, 1);
-	fd->dev = make_only_dev(&vmmfs_loader_fd_ops, serial, UID_ROOT,
-	    GID_WHEEL, 0600, "vmmfsld%d", serial);
-	if (fd->dev == NULL) {
-		vmmfs_loader_fd_free(fd);
-		return (ENXIO);
-	}
-	fd->dev->si_drv1 = fd;
-	return (vmmfs_loader_open_fd(fd, file_pointer));
-}
-
-static void
-vmmfs_loader_revoke_file(struct file *file)
-{
-	struct vmmfs_loader_fd *fd;
-
-	if (file == NULL || file->f_type != DTYPE_VNODE || file->f_data == NULL)
-		return;
-	if (devfs_get_cdevpriv(file, (void **)&fd) == 0)
-		vmmfs_loader_fd_revoke(fd);
-	(void)fdrevoke(file->f_data, DTYPE_VNODE, proc0.p_ucred);
-}
-
-static void
-vmmfs_loader_revoke(struct vmmfs_loader_process *process)
-{
-	vmmfs_loader_revoke_file(process->memory_file);
-	vmmfs_loader_revoke_file(process->state_file);
-}
-
-static void
-vmmfs_loader_close_files(struct vmmfs_loader_process *process)
-{
-	if (process->memory_file != NULL) {
-		fp_close(process->memory_file);
-		process->memory_file = NULL;
-	}
-	if (process->state_file != NULL) {
-		fp_close(process->state_file);
-		process->state_file = NULL;
-	}
-}
-
-static int
-vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, size_t *length)
+vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer,
+	size_t capacity, size_t *length)
 {
 	int result;
 
 	if (loader == NULL || vmmfs_machine_is_dead(loader->machine))
 		return (ENOENT);
-	result = ksnprintf(buffer, capacity, "%s\n",
-	    loader->script);
+	result = ksnprintf(buffer, capacity, "%s\n", loader->script);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
 	*length = (size_t)result;
@@ -1240,11 +896,12 @@ vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer, size_t capacity, si
 }
 
 static int
-vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t length)
+vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
+	size_t length)
 {
 	if (length == 0)
 		return (EINVAL);
-	if (buffer[length - 1] == 10)
+	if (buffer[length - 1] == '\n')
 		--length;
 	if (length == 0 || length >= sizeof(loader->script))
 		return (ENAMETOOLONG);
@@ -1266,22 +923,23 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer, size_t lengt
 int
 vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_mount *mount;
 	struct vnode *vnode;
 	int error;
 
+	if (machine == NULL || loader == NULL || machine->root == NULL)
+		return (EINVAL);
 	bzero(loader, sizeof(*loader));
 	loader->machine = machine;
-	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
-    loader->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	if (state->loader_vops == NULL)
+	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	if (mount == NULL || mount->loader_vops == NULL)
 		return (ENXIO);
-
+	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
 	if (error != 0)
 		return (error);
 	vnode->v_data = loader;
-	vnode->v_ops = &state->loader_vops;
+	vnode->v_ops = &mount->loader_vops;
 	vnode->v_type = VREG;
 	loader->vnode = vnode;
 	vmmfs_machine_hold(machine);
@@ -1326,6 +984,7 @@ vmmfs_loader_getattr(struct vop_getattr_args *ap)
 	VATTR_NULL(vattr);
 	vattr->va_type = VREG;
 	vattr->va_mode = VMMFS_LOADER_MODE;
+	vattr->va_flags = 0;
 	vattr->va_nlink = 1;
 	vattr->va_uid = 0;
 	vattr->va_gid = 0;
@@ -1384,7 +1043,6 @@ vmmfs_loader_read(struct vop_read_args *ap)
 static int
 vmmfs_loader_setattr(struct vop_setattr_args *ap)
 {
-	/* Accept the O_TRUNC size update performed before a control write. */
 	(void)ap;
 	return (0);
 }

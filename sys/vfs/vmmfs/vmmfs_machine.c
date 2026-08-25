@@ -784,6 +784,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	vmm_machine_t runtime_machine;
 	uint64_t memory_size;
 	uint32_t vcpu_count;
+	bool stop_requested;
 	int error;
 	int release_error;
 
@@ -846,30 +847,25 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	error = vmmfs_platform_x64_start(&machine->platform, runtime_machine);
 	if (error != 0)
 		goto failed;
-	if (loader_script == NULL) {
-		bool stop_requested;
-
-		/*
-		 * Do not expose the direct-boot pager until the platform is fully
-		 * constructed.  A stop during construction remains a vCPU stop
-		 * request; once the pager is published, stop may revoke it directly.
-		 */
-		lwkt_gettoken(&machine->token);
-		lwkt_gettoken(&machine->vcpu.token);
-		stop_requested = machine->vcpu.stop_requested;
-		lwkt_reltoken(&machine->vcpu.token);
-		if (!stop_requested) {
-			error = vmmfs_boot_arm_locked(&machine->boot,
-			    machine->memory.object, memory_size);
-		}
-		lwkt_reltoken(&machine->token);
-		if (stop_requested) {
-			error = EINTR;
-			goto failed;
-		}
-		if (error != 0)
-			goto failed;
+	/*
+	 * Both named boot and loader fd3 use this one session.  Do not expose it
+	 * until platform construction has completed.
+	 */
+	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->vcpu.token);
+	stop_requested = machine->vcpu.stop_requested;
+	lwkt_reltoken(&machine->vcpu.token);
+	if (!stop_requested) {
+		error = vmmfs_boot_arm_locked(&machine->boot,
+		    machine->memory.object, memory_size);
 	}
+	lwkt_reltoken(&machine->token);
+	if (stop_requested) {
+		error = EINTR;
+		goto failed;
+	}
+	if (error != 0)
+		goto failed;
 	if (vcpu_countp != NULL)
 		*vcpu_countp = vcpu_count;
 	return (0);
@@ -886,10 +882,7 @@ failed:
 static int
 vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 {
-	struct vmm_cpustate state;
-	vmm_machine_t runtime_machine;
 	char *loader_script;
-	uint32_t vcpu_count;
 	int error;
 	int release_error;
 
@@ -898,23 +891,11 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	loader_script = kmalloc(sizeof(machine->loader.script), M_VMMFS,
 	    M_WAITOK);
 	vmmfs_events_log(&machine->events, "start requested");
-	error = vmmfs_machine_prepare_start(machine, loader_script, &vcpu_count);
+	error = vmmfs_machine_prepare_start(machine, loader_script, NULL);
 	if (error != 0)
 		goto failed;
-	lwkt_gettoken(&machine->token);
-	runtime_machine = machine->machine;
-	lwkt_reltoken(&machine->token);
-	KKASSERT(runtime_machine != NULL);
 	error = vmmfs_loader_run(&machine->loader, loader_script,
-	    &machine->memory, cred, &state);
-	if (error != 0)
-		goto failed_runtime;
-	error = vmmfs_memory_snapshot(&machine->memory);
-	if (error != 0)
-		goto failed_runtime;
-	machine->boot_state = state;
-	error = vmmfs_vcpu_start(&machine->vcpu, vcpu_count, runtime_machine,
-	    &state);
+	    &machine->boot, cred);
 	if (error != 0)
 		goto failed_runtime;
 	vmmfs_events_log(&machine->events, "start completed");
