@@ -58,6 +58,7 @@ void vmm_svm_vcpu_memory_mapping_changed(struct vmm_vcpu *);
 void vmm_svm_vcpu_setstate(struct vmm_vcpu *);
 int vmm_svm_vcpu_run(struct vmm_vcpu *, struct vmm_cpuexit **);
 void vmm_svm_vcpu_getstate(struct vmm_vcpu *);
+bool vmm_svm_vcpu_runnable(struct vmm_vcpu *);
 void vmm_svm_vcpu_kick(struct vmm_vcpu *);
 int vmm_svm_vcpu_inject_interrupt(struct vmm_vcpu *, uint8_t);
 bool vmm_svm_vcpu_interrupt_allowed(struct vmm_vcpu *);

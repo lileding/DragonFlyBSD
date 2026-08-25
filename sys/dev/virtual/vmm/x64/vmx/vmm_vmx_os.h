@@ -225,10 +225,51 @@ os_contigpa_free(vm_paddr_t physical __unused, vm_offset_t virtual,
 	contigfree((void *)virtual, npages * PAGE_SIZE, M_VMM);
 }
 
+/*
+ * VMMFS executes guests in kernel-resident P_SYSTEM LWPs.  Those workers
+ * must participate in ordinary user scheduling, but never return to
+ * userland to consume an AST signal or profiling tick owned by another LWP.
+ * Keep all host-interrupt, scheduler, and TLB-safety work as VM-entry
+ * barriers; leave return-to-user-only ASTs to an ordinary user LWP.
+ */
+static inline uint32_t
+os_vmrun_entry_pending(void)
+{
+	struct lwp *lp;
+	uint32_t pending;
+
+	pending = mycpu->gd_reqflags;
+	lp = curthread->td_lwp;
+	if (lp != NULL && (lp->lwp_proc->p_flags & P_SYSTEM) != 0) {
+		pending &= RQF_IDLECHECK_MASK | RQF_AST_USER_RESCHED |
+		    RQF_AST_LWKT_RESCHED | RQF_XINVLTLB;
+	} else {
+		pending &= RQF_HVM_MASK;
+	}
+	return pending;
+}
+
+static inline uint32_t
+os_vmrun_return_pending(void)
+{
+	struct lwp *lp;
+	uint32_t pending;
+
+	pending = mycpu->gd_reqflags;
+	lp = curthread->td_lwp;
+	if (lp != NULL && (lp->lwp_proc->p_flags & P_SYSTEM) != 0) {
+		pending &= RQF_IDLECHECK_MASK | RQF_AST_USER_RESCHED |
+		    RQF_AST_LWKT_RESCHED;
+	} else {
+		pending &= RQF_HVM_MASK & ~RQF_XINVLTLB;
+	}
+	return pending;
+}
+
 static inline bool
 os_return_needed(void)
 {
-	if (__predict_false(hvm_break_wanted()))
+	if (__predict_false(os_vmrun_return_pending() != 0))
 		return true;
 	if (__predict_false(curthread->td_lwp != NULL &&
 	    (curthread->td_lwp->lwp_mpflags & LWP_MP_URETMASK)))

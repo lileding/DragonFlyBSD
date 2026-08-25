@@ -603,6 +603,9 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 	(void)frame;
 	vmmfs_vcpu_thread_wait_start(thread);
 	for (;;) {
+		lwpkthreaddeferred();
+		if (curthread->td_lwp->lwp_mpflags & LWP_MP_WEXIT)
+			break;
 		if (vmmfs_vcpu_is_stop_requested(vcpu))
 			break;
 		if (vmmfs_vcpu_is_reset_requested(vcpu)) {
@@ -612,8 +615,8 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 		KKASSERT(thread->vcpu != NULL);
 		/*
 		 * Guest execution is kernel work on behalf of this LWP.  Join the
-		 * existing user scheduler before VMRUN so an AST can release this
-		 * CPU to a normal user process.
+		 * existing user scheduler before VMRUN so a reschedule AST can
+		 * release this CPU to a normal user process.
 		 */
 		lwkt_passive_recover(curthread);
 		curthread->td_lwp->lwp_proc->p_usched->acquire_curproc(
@@ -622,13 +625,9 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 		exit = NULL;
 		error = vmm_vcpu_run(thread->vcpu, &exit);
 		if (error == ERESTART) {
-			/*
-			 * An AST signal is normally consumed only on a return to
-			 * userland.  This daemon stays in the kernel, so request a
-			 * user-scheduler pass and let passive release run that path.
-			 */
-			if (mycpu->gd_reqflags & RQF_AST_SIGNAL)
-				need_user_resched();
+			lwpkthreaddeferred();
+			if (curthread->td_lwp->lwp_mpflags & LWP_MP_WEXIT)
+				break;
 			lwkt_user_yield();
 			continue;
 		}

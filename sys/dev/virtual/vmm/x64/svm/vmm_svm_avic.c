@@ -227,6 +227,7 @@ static void vmm_svm_avic_vcpu_reset_lapic(
     struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_reset(struct vmm_svm_interrupt_vcpu *);
 static int vmm_svm_avic_vcpu_prepare(struct vmm_svm_interrupt_vcpu *);
+static bool vmm_svm_avic_vcpu_runnable(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_enter(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_leave(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_vcpu_event_result(
@@ -237,11 +238,13 @@ static void vmm_svm_avic_logical_update_locked(
     struct vmm_svm_interrupt_vcpu *);
 static int vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *, uint32_t,
     uint32_t, int);
+static void vmm_svm_avic_notify_posted(struct vmm_svm_interrupt_vcpu *);
 static void vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *, uint8_t);
 static bool vmm_svm_avic_lapic_enabled(
     const struct vmm_svm_interrupt_vcpu *);
 static bool vmm_svm_avic_lapic_accepts_pic(
     const struct vmm_svm_interrupt_vcpu *);
+static uint8_t vmm_svm_avic_lapic_ppr(struct vmm_svm_interrupt_vcpu *);
 static uint32_t vmm_svm_avic_read(const struct vmm_svm_interrupt_vcpu *,
     uint32_t);
 static void vmm_svm_avic_write(const struct vmm_svm_interrupt_vcpu *,
@@ -289,6 +292,7 @@ const struct vmm_svm_interrupt_ops vmm_svm_avic_interrupt_ops = {
 	.vcpu_set_lapic = vmm_svm_interrupt_vcpu_set_lapic,
 	.vcpu_destroy = vmm_svm_avic_vcpu_destroy,
 	.vcpu_prepare = vmm_svm_avic_vcpu_prepare,
+	.vcpu_runnable = vmm_svm_avic_vcpu_runnable,
 	.vcpu_enter = vmm_svm_avic_vcpu_enter,
 	.vcpu_leave = vmm_svm_avic_vcpu_leave,
 	.vcpu_event_result = vmm_svm_avic_vcpu_event_result,
@@ -1317,6 +1321,48 @@ vmm_svm_avic_vcpu_prepare(struct vmm_svm_interrupt_vcpu *avic)
 	return 0;
 }
 
+/*
+ * This is the final check before a halted vCPU sleeps.  A direct AVIC IPI
+ * updates the backing-page IRR without executing host code, so the normal
+ * wakeup latch alone cannot close the HLT-to-sleep race.
+ */
+static bool
+vmm_svm_avic_vcpu_runnable(struct vmm_svm_interrupt_vcpu *avic)
+{
+	volatile uint32_t *irr;
+	uint32_t value;
+	uint8_t vector;
+	int word;
+	int bit;
+
+	if (avic == NULL)
+		return false;
+
+	/* Observe an AVIC hardware IRR update before testing its priority. */
+	cpu_mfence();
+	if (atomic_load_acq_int(&avic->init_pending) != 0 ||
+	    atomic_load_acq_int(&avic->nmi_pending) != 0 ||
+	    (avic->wait_sipi &&
+	    atomic_load_acq_int(&avic->sipi_pending) != 0))
+		return true;
+	if (!vmm_svm_avic_lapic_enabled(avic) ||
+	    !vmm_svm_vcpu_interrupt_allowed(avic->vcpu))
+		return false;
+
+	for (word = 7; word >= 1; --word) {
+		irr = (volatile uint32_t *)((uint8_t *)avic->apic_page +
+		    VMM_SVM_APIC_IRR_BASE + word * 0x10);
+		value = atomic_load_acq_int((volatile u_int *)irr);
+		if (value == 0)
+			continue;
+		bit = fls(value) - 1;
+		vector = word * 32 + bit;
+		if ((vector & 0xf0U) > vmm_svm_avic_lapic_ppr(avic))
+			return true;
+	}
+	return false;
+}
+
 static void
 vmm_svm_avic_vcpu_destroy(struct vmm_svm_interrupt_vcpu *avic)
 {
@@ -1431,21 +1477,19 @@ vmm_svm_avic_vcpu_leave(struct vmm_svm_interrupt_vcpu *avic)
 }
 
 static void
-vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
+vmm_svm_avic_notify_posted(struct vmm_svm_interrupt_vcpu *avic)
 {
-	volatile uint32_t *irr;
 	uint32_t host_cpu;
 	uint32_t host_apic_id;
 
-	if (vector < 32 || !vmm_svm_avic_lapic_enabled(avic))
-		return;
-	irr = (volatile uint32_t *)((uint8_t *)avic->apic_page +
-	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
-	atomic_set_int((volatile u_int *)irr, __BIT(vector & 31));
-	cpu_mfence();
+	/*
+	 * Preserve a wakeup for the HLT-to-wait race.  This is intentionally not
+	 * vmm_vcpu_kick(): a posted fixed interrupt must not force an active VMRUN
+	 * out to its frontend.
+	 */
+	vmm_vcpu_wakeup(avic->vcpu);
 	if (!avic->machine->avic ||
 	    atomic_load_acq_int(&avic->running) == 0) {
-		(void)vmm_vcpu_kick(avic->vcpu);
 		return;
 	}
 	host_cpu = atomic_load_acq_int(&avic->host_cpu);
@@ -1455,12 +1499,52 @@ vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
 	wrmsr(VMM_SVM_AVIC_DOORBELL_MSR, host_apic_id);
 }
 
+static void
+vmm_svm_avic_deliver(struct vmm_svm_interrupt_vcpu *avic, uint8_t vector)
+{
+	volatile uint32_t *irr;
+
+	if (vector < 32 || !vmm_svm_avic_lapic_enabled(avic))
+		return;
+	irr = (volatile uint32_t *)((uint8_t *)avic->apic_page +
+	    VMM_SVM_APIC_IRR_BASE + (vector / 32) * 0x10);
+	atomic_set_int((volatile u_int *)irr, __BIT(vector & 31));
+	/* Pair the posted IRR update with AVIC running-state observation. */
+	cpu_mfence();
+	vmm_svm_avic_notify_posted(avic);
+}
+
 static bool
 vmm_svm_avic_lapic_enabled(const struct vmm_svm_interrupt_vcpu *avic)
 {
 	return (avic->apic_base & VMM_SVM_APICBASE_ENABLED) != 0 &&
 	    (vmm_svm_avic_read(avic, VMM_SVM_APIC_SVR) &
 	    VMM_SVM_APIC_SVR_ENABLE) != 0;
+}
+
+/* Return the highest in-service priority class, or the complete TPR. */
+static uint8_t
+vmm_svm_avic_lapic_ppr(struct vmm_svm_interrupt_vcpu *avic)
+{
+	volatile uint32_t *isr;
+	uint8_t tpr;
+	int word;
+	int bit;
+	uint32_t value;
+
+	tpr = vmm_svm_avic_read(avic, VMM_SVM_APIC_TPR);
+	for (word = 7; word >= 0; --word) {
+		isr = (volatile uint32_t *)((uint8_t *)avic->apic_page +
+		    VMM_SVM_APIC_ISR_BASE + word * 0x10);
+		value = atomic_load_acq_int((volatile u_int *)isr);
+		if (value == 0)
+			continue;
+		bit = fls(value) - 1;
+		if ((word * 2 + (bit >> 4)) > (tpr >> 4))
+			return (uint8_t)((word * 2 + (bit >> 4)) << 4);
+		break;
+	}
+	return tpr;
 }
 
 /* PIC virtual wire is controlled by BSP LINT0, not the SVR software bit. */
@@ -1720,9 +1804,10 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 		case VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING:
 			/*
 			 * AVIC has already set IRR for every valid target.  IsRunning
-			 * was clear, so hardware could not wake a target that is parked
-			 * outside VMRUN.  Do not route or re-deliver this IPI; only make
-			 * the selected frontend return to observe the posted interrupt.
+			 * was clear.  Do not route or re-deliver this IPI: notify the
+			 * selected targets exactly as Linux KVM does for an already-posted
+			 * interrupt.  Active targets receive an AVIC doorbell; a blocked
+			 * target consumes the wakeup from vmm_vcpu_wait().
 			 */
 			machine = avic->machine;
 			shorthand = exitinfo1 & VMM_SVM_APIC_ICR_SHORTHAND;
@@ -1762,7 +1847,7 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 						}
 					}
 				}
-				(void)vmm_vcpu_kick(target->vcpu);
+				vmm_svm_avic_notify_posted(target);
 			}
 			lwkt_reltoken(&machine->token);
 			return 1;

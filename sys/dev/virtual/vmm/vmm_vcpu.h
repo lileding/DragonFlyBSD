@@ -33,6 +33,10 @@ struct vmm_vcpu {
 	int destroying;
 	int event_pending;
 	volatile int kick_pending;
+	volatile int wake_pending;
 };
+
+/* Internal posted-interrupt wakeup; unlike kick, it never forces VMRUN out. */
+void vmm_vcpu_wakeup(struct vmm_vcpu *);
 
 #endif /* VMM_VCPU_H */

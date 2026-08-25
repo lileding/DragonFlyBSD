@@ -53,6 +53,8 @@ struct vmm_backend_ops {
 	void (*vcpu_setstate)(struct vmm_vcpu *);
 	int (*vcpu_run)(struct vmm_vcpu *, struct vmm_cpuexit **);
 	void (*vcpu_getstate)(struct vmm_vcpu *);
+	/* Test backend-owned pending work after a halted vCPU armed its sleep. */
+	bool (*vcpu_runnable)(struct vmm_vcpu *);
 	void (*vcpu_kick)(struct vmm_vcpu *);
 };
 

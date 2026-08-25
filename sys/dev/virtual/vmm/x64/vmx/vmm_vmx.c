@@ -2937,6 +2937,7 @@ vmm_vmx_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	uint64_t intstate;
 	uint64_t machgen;
 	uint64_t tsc_generation;
+	uint32_t pending_flags;
 	int hcpu, ret;
 	int error = 0;
 	bool launched;
@@ -3039,14 +3040,14 @@ restart:
 		 * we have to return to process these events.  To deal with
 		 * this, use ERESTART mechanics.
 		 */
-		if (__predict_false(mycpu->gd_reqflags & RQF_HVM_MASK)) {
+		pending_flags = os_vmrun_entry_pending();
+		if (__predict_false(pending_flags != 0)) {
 			/* INVEPT executed, so ack hTLB flush. */
 			vmm_vmx_htlb_flush_ack(cpudata, machgen);
 			vmm_vmx_vcpu_guest_fpu_leave(vcpu);
 			vmm_vmx_sti();
 			exit->reason = VMM_CPUEXIT_NONE;
-			vmm_stat_vcpu_run_restart_preentry(
-			    mycpu->gd_reqflags & RQF_HVM_MASK);
+			vmm_stat_vcpu_run_restart_preentry(pending_flags);
 			error = ERESTART;
 			break;
 		}
@@ -3209,7 +3210,7 @@ restart:
 		/* If no reason to return to userland, keep rolling. */
 		if (os_return_needed()) {
 			vmm_stat_vcpu_run_restart_postexit(
-			    mycpu->gd_reqflags & RQF_HVM_MASK);
+			    os_vmrun_return_pending());
 			error = ERESTART;
 			break;
 		}

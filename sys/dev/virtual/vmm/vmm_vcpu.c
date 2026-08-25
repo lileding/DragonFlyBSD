@@ -416,6 +416,22 @@ vmm_vcpu_kick(vmm_vcpu_t vcpu)
 	return 0;
 }
 
+void
+vmm_vcpu_wakeup(struct vmm_vcpu *vcpu)
+{
+	bool wake;
+
+	if (vcpu == NULL)
+		return;
+	lwkt_gettoken(&vcpu->token);
+	wake = !vcpu->destroying;
+	if (wake)
+		atomic_store_rel_int(&vcpu->wake_pending, 1);
+	lwkt_reltoken(&vcpu->token);
+	if (wake)
+		wakeup(vcpu);
+}
+
 int
 vmm_vcpu_wait(vmm_vcpu_t vcpu)
 {
@@ -429,11 +445,26 @@ vmm_vcpu_wait(vmm_vcpu_t vcpu)
 		error = EALREADY;
 	} else if (vcpu->running) {
 		error = EBUSY;
-	} else if (atomic_swap_int(&vcpu->kick_pending, 0) != 0) {
+	} else if (atomic_swap_int(&vcpu->kick_pending, 0) != 0 ||
+	    atomic_swap_int(&vcpu->wake_pending, 0) != 0) {
 		error = 0;
 	} else {
-		/* vcpu->token serializes the condition with kick's wakeup. */
+		/* vcpu->token serializes the condition with every vCPU wakeup. */
 		tsleep_interlock(vcpu, 0);
+		/*
+		 * A posted interrupt can update backend state without taking this
+		 * token.  Test it after arming the sleep, as KVM does before block.
+		 * The backend callback must not take the machine token here.
+		 */
+		if (vcpu->backend_ops->vcpu_runnable != NULL &&
+		    vcpu->backend_ops->vcpu_runnable(vcpu)) {
+			/* tsleep_interlock() has queued us; remove that reservation. */
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
+			lwkt_reltoken(&vcpu->token);
+			return 0;
+		}
 		lwkt_reltoken(&vcpu->token);
 		return tsleep(vcpu, PINTERLOCKED, "vmmhlt", 0);
 	}

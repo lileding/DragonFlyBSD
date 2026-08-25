@@ -2376,6 +2376,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 	struct vmm_cpuexit *exit = &vcpu->exit;
 	uint64_t machgen;
 	uint64_t tsc_generation;
+	uint32_t pending_flags;
 	uint32_t tlb_ctrl;
 	bool host_interrupts_enabled;
 	int hcpu;
@@ -2463,15 +2464,15 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		 * we have to return to process these events.  To deal with
 		 * this, use ERESTART mechanics.
 		 */
-		if (__predict_false(mycpu->gd_reqflags & RQF_HVM_MASK)) {
+		pending_flags = os_vmrun_entry_pending();
+		if (__predict_false(pending_flags != 0)) {
 			/* No hTLB flush ack, because it's not executed. */
 			vmm_svm_vcpu_guest_fpu_leave(vcpu);
 			vmm_svm_vcpu_guest_misc_leave(vcpu);
 			vmm_svm_vcpu_guest_dbregs_leave(vcpu);
 			vmm_svm_stgi();
 			exit->reason = VMM_CPUEXIT_NONE;
-			vmm_stat_vcpu_run_restart_preentry(
-			    mycpu->gd_reqflags & RQF_HVM_MASK);
+			vmm_stat_vcpu_run_restart_preentry(pending_flags);
 			error = ERESTART;
 			break;
 		}
@@ -2636,7 +2637,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 		}
 		if (os_return_needed()) {
 			vmm_stat_vcpu_run_restart_postexit(
-			    mycpu->gd_reqflags & RQF_HVM_MASK);
+			    os_vmrun_return_pending());
 			error = ERESTART;
 			break;
 		}
@@ -2667,6 +2668,18 @@ static void
 vmm_svm_kick_ipiq(void *arg)
 {
 	(void)arg;
+}
+
+bool
+vmm_svm_vcpu_runnable(struct vmm_vcpu *vcpu)
+{
+	struct vmm_svm_cpudata *cpudata = vcpu->backend;
+
+	if (cpudata == NULL || cpudata->interrupt == NULL ||
+	    vmm_svm_interrupt_ops == NULL ||
+	    vmm_svm_interrupt_ops->vcpu_runnable == NULL)
+		return false;
+	return vmm_svm_interrupt_ops->vcpu_runnable(cpudata->interrupt);
 }
 
 void

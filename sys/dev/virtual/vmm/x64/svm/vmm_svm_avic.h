@@ -61,6 +61,8 @@ struct vmm_svm_interrupt_ops {
 	void (*vcpu_destroy)(struct vmm_svm_interrupt_vcpu *);
 	/* May sleep while a reset AP awaits INIT/SIPI, before the VMRUN handoff. */
 	int (*vcpu_prepare)(struct vmm_svm_interrupt_vcpu *);
+	/* Non-blocking check after a HLT wait is armed; cannot take machine token. */
+	bool (*vcpu_runnable)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_enter)(struct vmm_svm_interrupt_vcpu *);
 	void (*vcpu_leave)(struct vmm_svm_interrupt_vcpu *);
 	/* Resolve an interrupt queued by vcpu_enter after this VMRUN exits. */
