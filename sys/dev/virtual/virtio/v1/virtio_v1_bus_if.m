@@ -1,5 +1,6 @@
-#
-# $FreeBSD$
+#-
+# Copyright (c) 2011, Bryan Venteicher <bryanv@FreeBSD.org>
+# All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -23,13 +24,86 @@
 # SUCH DAMAGE.
 #
 
-KMOD= virtio_pci
-MFILES= kern/bus_if.m kern/device_if.m bus/pci/pci_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_v1_bus_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_if.m
-MFILES+= dev/virtual/virtio/pci/v1/virtio_pci_if.m
-SRCS= virtio_pci.c virtio_pci_v1_core.c virtio_pci_v1_modern.c
-SRCS+= virtio_bus_if.h virtio_v1_bus_if.h virtio_if.h virtio_pci_if.h virtio_pci_if.c
-SRCS+=	bus_if.h device_if.h pci_if.h
+#include <sys/bus.h>
 
-.include <bsd.kmod.mk>
+INTERFACE virtio_v1_bus;
+
+HEADER {
+struct vq_alloc_info;
+};
+
+CODE {
+	static int
+	virtio_bus_default_finalize_features(device_t dev)
+	{
+		return (0);
+	}
+
+	static int
+	virtio_bus_default_config_generation(device_t dev)
+	{
+		return (0);
+	}
+};
+
+METHOD uint64_t negotiate_features {
+	device_t	dev;
+	uint64_t	child_features;
+};
+
+METHOD int finalize_features {
+	device_t	dev;
+} DEFAULT virtio_bus_default_finalize_features;
+
+METHOD bool with_feature {
+	device_t	dev;
+	uint64_t	feature;
+};
+
+METHOD int alloc_virtqueues {
+	device_t	dev;
+	int		nvqs;
+	struct vq_alloc_info *info;
+};
+
+METHOD int setup_intr {
+	device_t	dev;
+	int	type;
+};
+
+METHOD void stop {
+	device_t	dev;
+};
+
+METHOD int reinit {
+	device_t	dev;
+	uint64_t	features;
+};
+
+METHOD void reinit_complete {
+	device_t	dev;
+};
+
+METHOD void notify_vq {
+	device_t	dev;
+	uint16_t	queue;
+	bus_size_t	offset;
+};
+
+METHOD int config_generation {
+	device_t	dev;
+} DEFAULT virtio_bus_default_config_generation;
+
+METHOD void read_device_config {
+	device_t	dev;
+	bus_size_t	offset;
+	void		*dst;
+	int		len;
+};
+
+METHOD void write_device_config {
+	device_t	dev;
+	bus_size_t	offset;
+	const void	*src;
+	int		len;
+};

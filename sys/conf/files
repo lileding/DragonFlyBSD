@@ -3075,14 +3075,22 @@ dev/virtual/nvmm/x86/nvmm_x86_vmxfunc.S	optional nvmm
 dev/virtual/virtio/balloon/virtio_balloon.c optional virtio_balloon virtio
 dev/virtual/virtio/block/virtio_blk.c	optional virtio_blk virtio
 dev/virtual/virtio/random/virtio_random.c optional virtio_random virtio
+dev/virtual/virtio/random/virtio_random_v1.c optional virtio_random virtio
 dev/virtual/virtio/scsi/virtio_scsi.c	optional virtio_scsi virtio
 dev/virtual/virtio/net/if_vtnet.c	optional vtnet virtio
 dev/virtual/virtio/pci/virtio_pci.c	optional virtio pci
+dev/virtual/virtio/pci/virtio_pci_v1_core.c optional virtio pci
+dev/virtual/virtio/pci/v1/virtio_pci_modern.c optional virtio pci
 dev/virtual/virtio/mmio/virtio_mmio.c	optional virtio_mmio virtio
 dev/virtual/virtio/mmio/virtio_mmio_kenv.c optional virtio_mmio virtio
 dev/virtual/virtio/virtio/virtio.c	optional virtio
 dev/virtual/virtio/virtio/virtio_bus_if.m optional virtio
+dev/virtual/virtio/v1/virtio_v1_bus_if.m optional virtio
+dev/virtual/virtio/v1/virtio_if.m optional virtio
+dev/virtual/virtio/pci/v1/virtio_pci_if.m optional virtio pci
 dev/virtual/virtio/virtio/virtqueue.c	optional virtio
+dev/virtual/virtio/virtio/virtio_v1_core.c optional virtio
+dev/virtual/virtio/virtio/virtqueue_v1.c optional virtio
 
 #
 # VMware support

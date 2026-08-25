@@ -1,5 +1,6 @@
-#
-# $FreeBSD$
+#-
+# Copyright (c) 2017, Bryan Venteicher <bryanv@FreeBSD.org>
+# All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -23,13 +24,46 @@
 # SUCH DAMAGE.
 #
 
-KMOD= virtio_pci
-MFILES= kern/bus_if.m kern/device_if.m bus/pci/pci_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_v1_bus_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_if.m
-MFILES+= dev/virtual/virtio/pci/v1/virtio_pci_if.m
-SRCS= virtio_pci.c virtio_pci_v1_core.c virtio_pci_v1_modern.c
-SRCS+= virtio_bus_if.h virtio_v1_bus_if.h virtio_if.h virtio_pci_if.h virtio_pci_if.c
-SRCS+=	bus_if.h device_if.h pci_if.h
+#include <sys/bus.h>
 
-.include <bsd.kmod.mk>
+INTERFACE virtio_pci;
+
+HEADER {
+struct virtqueue;
+struct vtpci_interrupt;
+};
+
+METHOD uint8_t read_isr {
+	device_t	dev;
+};
+
+METHOD uint16_t get_vq_size {
+	device_t	dev;
+	int		idx;
+};
+
+METHOD bus_size_t get_vq_notify_off {
+	device_t	dev;
+	int		idx;
+};
+
+METHOD void set_vq {
+	device_t		dev;
+	struct virtqueue	*vq;
+};
+
+METHOD void disable_vq {
+	device_t		 dev;
+	int			 idx;
+};
+
+METHOD int register_cfg_msix {
+	device_t	dev;
+	struct vtpci_interrupt *intr;
+};
+
+METHOD int register_vq_msix {
+	device_t		dev;
+	int			idx;
+	struct vtpci_interrupt	*intr;
+};
