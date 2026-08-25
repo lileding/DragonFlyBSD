@@ -239,6 +239,8 @@ static devclass_t vtnet_devclass;
 /* Keep the legacy module namespace distinct from the V1 registration. */
 DRIVER_MODULE(vtnet_legacy, virtio_pci, vtnet_driver, vtnet_devclass,
     NULL, NULL);
+DRIVER_MODULE(vtnet_legacy, virtio_mmio, vtnet_driver, vtnet_devclass,
+    NULL, NULL);
 MODULE_VERSION(vtnet_legacy, 1);
 MODULE_DEPEND(vtnet_legacy, virtio, 1, 1, 1);
 

@@ -236,7 +236,7 @@ static devclass_t vtnet_v1_devclass;
 
 DRIVER_MODULE(vtnet_v1, virtio_pci_modern, vtnet_v1_driver, vtnet_v1_devclass, NULL, NULL);
 MODULE_VERSION(vtnet_v1, 1);
-MODULE_DEPEND(vtnet_v1, virtio_pci_v1, 1, 1, 1);
+MODULE_DEPEND(vtnet_v1, virtio_pci, 1, 1, 1);
 
 static int
 vtnet_v1_probe(device_t dev)
