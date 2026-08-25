@@ -63,6 +63,7 @@ static void vmmfs_boot_session_drop_base(struct vmmfs_boot_session *);
 static void vmmfs_boot_session_drop_pager(struct vmmfs_boot_session *);
 static struct vmmfs_boot_session *vmmfs_boot_take_session(
 	struct vmmfs_boot *, struct vnode **);
+static bool vmmfs_boot_cancel_unsubmitted(struct vmmfs_boot *);
 
 struct vop_ops vmmfs_boot_vops = {
 	.vop_default = vop_defaultop,
@@ -467,8 +468,45 @@ vmmfs_boot_dev_open(struct dev_open_args *ap)
 static int
 vmmfs_boot_dev_close(struct dev_close_args *ap)
 {
-	(void)ap;
-	return (0);
+	struct vmmfs_boot *boot;
+	int error;
+
+	if (ap == NULL || ap->a_head.a_dev == NULL)
+		return (EINVAL);
+	boot = ap->a_head.a_dev->si_drv1;
+	if (boot == NULL || boot->machine == NULL)
+		return (0);
+	if (!vmmfs_boot_cancel_unsubmitted(boot))
+		return (0);
+	error = vmmfs_machine_boot_abort(boot->machine);
+	if (error != 0)
+		return (error);
+	/* The final boot-session fd closed without a committed BSP state. */
+	return (EPIPE);
+}
+
+/*
+ * Claim and revoke an uncommitted direct-boot session.  A successful
+ * cpustate write claims the session first, so a final close can only abort
+ * the start when it obtains this session.
+ */
+static bool
+vmmfs_boot_cancel_unsubmitted(struct vmmfs_boot *boot)
+{
+	struct vmmfs_boot_session *session;
+	struct vnode *vnode;
+
+	session = vmmfs_boot_take_session(boot, &vnode);
+	if (session == NULL) {
+		if (vnode != NULL)
+			vdrop(vnode);
+		return (false);
+	}
+	vmmfs_boot_session_revoke(session);
+	vmmfs_boot_session_drop_base(session);
+	if (vnode != NULL)
+		vdrop(vnode);
+	return (true);
 }
 
 static int

@@ -84,6 +84,9 @@ int vmmfs_machine_stop_request(struct vmmfs_machine *, const char *);
 /* Starts a direct boot session and publishes its guest-memory mapping. */
 int vmmfs_machine_boot_start(struct vmmfs_machine *);
 
+/* Releases a direct boot whose final session fd closed before submission. */
+int vmmfs_machine_boot_abort(struct vmmfs_machine *);
+
 /* Consumes the one direct-boot BSP state submission and starts the vCPUs. */
 int vmmfs_machine_boot_submit(struct vmmfs_machine *,
 	const struct vmm_cpustate *);

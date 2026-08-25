@@ -930,6 +930,30 @@ vmmfs_machine_boot_start(struct vmmfs_machine *machine)
 }
 
 int
+vmmfs_machine_boot_abort(struct vmmfs_machine *machine)
+{
+	bool running;
+	int error;
+
+	if (machine == NULL)
+		return (EINVAL);
+	lwkt_gettoken(&machine->token);
+	if (machine->dead) {
+		lwkt_reltoken(&machine->token);
+		return (ENOENT);
+	}
+	running = machine->machine != NULL;
+	lwkt_reltoken(&machine->token);
+	if (!running)
+		return (0);
+	error = vmmfs_machine_release_runtime(machine);
+	if (error != 0)
+		return (error);
+	vmmfs_events_log(&machine->events, "boot failed error=%d", EPIPE);
+	return (0);
+}
+
+int
 vmmfs_machine_boot_submit(struct vmmfs_machine *machine,
 	const struct vmm_cpustate *state)
 {
