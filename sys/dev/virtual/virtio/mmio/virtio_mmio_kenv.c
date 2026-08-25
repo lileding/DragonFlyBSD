@@ -50,11 +50,13 @@ static void
 vtmmio_parsearg(driver_t *driver, device_t parent, char *arg)
 {
 	device_t child;
+	struct resource *res;
 	char *p;
 	unsigned long sz;
 	unsigned long baseaddr;
 	unsigned long irq;
 	unsigned long unit;
+	int rid;
 
 	/* <size> */
 	sz = strtoul(arg, &p, 0);
@@ -116,7 +118,6 @@ vtmmio_parsearg(driver_t *driver, device_t parent, char *arg)
 	    unit ? (int)unit : -1);
 	if (child == NULL)
 		return;
-	device_set_driver(child, driver);
 	bus_set_resource(child, SYS_RES_MEMORY, 0, baseaddr, sz, -1);
 	/*
 	 * The x86 nexus keeps a per-CPU IRQ rman and rejects a -1 cpuid, so the
@@ -127,6 +128,17 @@ vtmmio_parsearg(driver_t *driver, device_t parent, char *arg)
 	 */
 	bus_set_resource(child, SYS_RES_IRQ, 0, irq, 1,
 	    machintr_legacy_intr_cpuid(irq));
+
+	/* Select a root bus class before attachment; Version 2 uses V1 KOBJ. */
+	rid = 0;
+	res = bus_alloc_resource_any(child, SYS_RES_MEMORY, &rid, RF_ACTIVE);
+	if (res == NULL)
+		return;
+	if (bus_read_4(res, VIRTIO_MMIO_VERSION) == 2)
+		device_set_driver(child, &vtmmio_v1_root_driver);
+	else
+		device_set_driver(child, &vtmmio_root_driver);
+	bus_release_resource(child, SYS_RES_MEMORY, rid, res);
 
 	if (vtmmio_kenv_nchildren < VTMMIO_KENV_MAXDEV)
 		vtmmio_kenv_children[vtmmio_kenv_nchildren++] = child;

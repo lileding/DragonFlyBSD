@@ -39,6 +39,8 @@
 #include <sys/systm.h>
 
 DECLARE_CLASS(vtmmio_driver);
+extern driver_t vtmmio_root_driver;
+extern driver_t vtmmio_v1_root_driver;
 
 struct virtio_feature_desc;
 struct vqentry;
@@ -86,10 +88,17 @@ int vtmmio_attach(device_t);
 #define VIRTIO_MMIO_QUEUE_NUM		0x038
 #define VIRTIO_MMIO_QUEUE_ALIGN	0x03c
 #define VIRTIO_MMIO_QUEUE_PFN		0x040
+#define VIRTIO_MMIO_QUEUE_READY		0x044
 #define VIRTIO_MMIO_QUEUE_NOTIFY	0x050
 #define VIRTIO_MMIO_INTERRUPT_STATUS	0x060
 #define VIRTIO_MMIO_INTERRUPT_ACK	0x064
 #define VIRTIO_MMIO_STATUS		0x070
+#define VIRTIO_MMIO_QUEUE_DESC_LOW	0x080
+#define VIRTIO_MMIO_QUEUE_DESC_HIGH	0x084
+#define VIRTIO_MMIO_QUEUE_AVAIL_LOW	0x090
+#define VIRTIO_MMIO_QUEUE_AVAIL_HIGH	0x094
+#define VIRTIO_MMIO_QUEUE_USED_LOW	0x0a0
+#define VIRTIO_MMIO_QUEUE_USED_HIGH	0x0a4
 #define VIRTIO_MMIO_CONFIG		0x100
 #define VIRTIO_MMIO_MAGIC_VIRT		0x74726976
 #define VIRTIO_MMIO_INT_VRING		(1 << 0)

@@ -223,8 +223,10 @@ static driver_t vtblk_v1_driver = {
 static devclass_t vtblk_v1_devclass;
 
 DRIVER_MODULE(virtio_blk_v1, virtio_pci_modern, vtblk_v1_driver, vtblk_v1_devclass, NULL, NULL);
+DRIVER_MODULE(virtio_blk_v1, virtio_mmio_modern, vtblk_v1_driver, vtblk_v1_devclass, NULL, NULL);
 MODULE_VERSION(virtio_blk_v1, 1);
 MODULE_DEPEND(virtio_blk_v1, virtio_pci, 1, 1, 1);
+MODULE_DEPEND(virtio_blk_v1, virtio_mmio, 1, 1, 1);
 
 static int
 vtblk_v1_probe(device_t dev)

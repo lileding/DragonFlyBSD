@@ -166,7 +166,7 @@ static device_method_t vtmmio_methods[] = {
 DEFINE_CLASS_0(virtio_mmio, vtmmio_driver, vtmmio_methods,
     sizeof(struct vtmmio_softc));
 
-static driver_t vtmmio_root_driver = {
+driver_t vtmmio_root_driver = {
 	"virtio_mmio",
 	vtmmio_methods,
 	sizeof(struct vtmmio_softc)

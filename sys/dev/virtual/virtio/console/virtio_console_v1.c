@@ -109,8 +109,11 @@ static devclass_t vcon_devclass;
 
 DRIVER_MODULE(virtio_console, virtio_pci_modern, vcon_driver,
 	vcon_devclass, vcon_modevent, NULL);
+DRIVER_MODULE(virtio_console, virtio_mmio_modern, vcon_driver,
+	vcon_devclass, vcon_modevent, NULL);
 MODULE_VERSION(virtio_console, 1);
 MODULE_DEPEND(virtio_console, virtio_pci, 1, 1, 1);
+MODULE_DEPEND(virtio_console, virtio_mmio, 1, 1, 1);
 
 static int
 vcon_modevent(module_t mod __unused, int type, void *data __unused)
