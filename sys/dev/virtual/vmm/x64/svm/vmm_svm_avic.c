@@ -143,6 +143,11 @@ static bool vmm_svm_avic_ipi_enabled;
 #define VMM_SVM_EXIT_AVIC_NOACCEL		0x0402ULL
 #define VMM_SVM_EXIT_IRET			0x0074ULL
 #define VMM_SVM_EXIT_HLT			0x0078ULL
+#define VMM_SVM_AVIC_IPI_INVALID_INT_TYPE	0U
+#define VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING	1U
+#define VMM_SVM_AVIC_IPI_INVALID_TARGET	2U
+#define VMM_SVM_AVIC_IPI_INVALID_BACKING_PAGE	3U
+#define VMM_SVM_AVIC_IPI_INVALID_VECTOR	4U
 #define VMM_SVM_AVIC_NOACCEL_WRITE		__BIT(0)
 #define VMM_SVM_AVIC_NOACCEL_OFFSET		0xff0U
 
@@ -312,8 +317,12 @@ vmm_svm_avic_available(void)
 		family += (desc.eax >> 20) & 0xffU;
 	/*
 	 * Family 17h/18h erratum 1235 can lose the sender's incomplete-IPI
-	 * VMEXIT.  Keep AVIC posted interrupts, but force guest IPIs through
-	 * the incomplete-IPI exit and software routing path.
+	 * wakeup.  Keep AVIC posted interrupts, but clear IsRunning to force
+	 * guest IPIs through incomplete-IPI exits on the affected families.
+	 *
+	 * No Zen3+ machine is available for local validation.  Direct IPI
+	 * virtualization intentionally remains enabled there until a
+	 * family-specific defect is demonstrated.
 	 */
 	vmm_svm_avic_ipi_enabled = family != 0x17U && family != 0x18U;
 	if (!vmm_svm_avic_ipi_enabled) {
@@ -1681,11 +1690,17 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
     uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
 	struct vmm_svm_interrupt_machine *machine;
+	struct vmm_svm_interrupt_vcpu *target;
+	uint32_t cause;
+	uint32_t destination;
 	uint32_t offset;
+	uint32_t shorthand;
+	uint32_t source_dfr;
+	uint32_t target_ldr;
 	uint32_t value;
+	uint32_t id;
 	bool redelivered;
 
-	(void)exitinfo2;
 	if (avic == NULL)
 		return 0;
 	if (exitcode == VMM_SVM_EXIT_IRET && avic->nmi_delivery_pending) {
@@ -1700,8 +1715,70 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 		return redelivered;
 	}
 	if (exitcode == VMM_SVM_EXIT_AVIC_INCOMPLETE_IPI) {
-		return vmm_svm_avic_route_icr(avic, (uint32_t)exitinfo1,
-		    (uint32_t)(exitinfo1 >> 32), 0);
+		cause = (uint32_t)(exitinfo2 >> 32);
+		switch (cause) {
+		case VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING:
+			/*
+			 * AVIC has already set IRR for every valid target.  IsRunning
+			 * was clear, so hardware could not wake a target that is parked
+			 * outside VMRUN.  Do not route or re-deliver this IPI; only make
+			 * the selected frontend return to observe the posted interrupt.
+			 */
+			machine = avic->machine;
+			shorthand = exitinfo1 & VMM_SVM_APIC_ICR_SHORTHAND;
+			destination = (uint32_t)(exitinfo1 >> 32) >> 24;
+			lwkt_gettoken(&machine->token);
+			source_dfr = vmm_svm_avic_read(avic,
+			    VMM_SVM_APIC_DFR);
+			for (id = 0; id <= VMM_SVM_AVIC_MAX_PHYS_ID; ++id) {
+				target = machine->targets[id];
+				if (target == NULL)
+					continue;
+				if (shorthand == VMM_SVM_APIC_ICR_SELF && target != avic)
+					continue;
+				if (shorthand == VMM_SVM_APIC_ICR_ALL_EXC_SELF &&
+				    target == avic)
+					continue;
+				if (shorthand == 0) {
+					if ((exitinfo1 &
+					    VMM_SVM_APIC_ICR_DEST_LOGICAL) == 0) {
+						if (destination != target->apic_id &&
+						    destination !=
+						    VMM_SVM_APIC_ICR_DEST_BROADCAST)
+							continue;
+					} else {
+						target_ldr = vmm_svm_avic_read(target,
+						    VMM_SVM_APIC_LDR) >> 24;
+						if (source_dfr ==
+						    VMM_SVM_APIC_DFR_FLAT) {
+							if ((destination & target_ldr) == 0)
+								continue;
+						} else if (source_dfr !=
+						    VMM_SVM_APIC_DFR_CLUSTER ||
+						    (destination & 0xf0U) !=
+						    (target_ldr & 0xf0U) ||
+						    (destination & target_ldr & 0x0fU) == 0) {
+							continue;
+						}
+					}
+				}
+				(void)vmm_vcpu_kick(target->vcpu);
+			}
+			lwkt_reltoken(&machine->token);
+			return 1;
+		case VMM_SVM_AVIC_IPI_INVALID_INT_TYPE:
+		case VMM_SVM_AVIC_IPI_INVALID_TARGET:
+			return vmm_svm_avic_route_icr(avic,
+			    (uint32_t)exitinfo1, (uint32_t)(exitinfo1 >> 32), 0);
+		case VMM_SVM_AVIC_IPI_INVALID_VECTOR:
+			return 1;
+		case VMM_SVM_AVIC_IPI_INVALID_BACKING_PAGE:
+			kprintf("vmm: AVIC incomplete IPI invalid backing page\\n");
+			return 0;
+		default:
+			kprintf("vmm: AVIC incomplete IPI unknown cause %#x\\n", cause);
+			return 0;
+		}
 	}
 	if (exitcode != VMM_SVM_EXIT_AVIC_NOACCEL ||
 	    ((exitinfo1 >> 32) & VMM_SVM_AVIC_NOACCEL_WRITE) == 0)
