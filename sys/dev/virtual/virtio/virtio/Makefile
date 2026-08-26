@@ -6,7 +6,7 @@ MFILES+= dev/virtual/virtio/virtio/virtio_v1_if.m
 
 SRCS=   virtio.c virtqueue.c virtio_v1_core.c virtqueue_v1.c
 SRCS+= virtio_bus_if.h virtio_bus_if.c
-SRCS+= virtio_v1_bus_if.h virtio_v1_bus_if.c virtio_v1_if.h virtio_v1_if.c
+SRCS+= virtio_v1_bus_if.h virtio_v1_bus_if.c virtio_if.h virtio_if.c
 SRCS+= device_if.h bus_if.h
 
 .include <bsd.kmod.mk>
