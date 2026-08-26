@@ -49,8 +49,8 @@
 #include <dev/virtual/virtio/pci/virtio_pci_v1_modern_var.h>
 
 #include "virtio_v1_bus_if.h"
-#include "virtio_pci_if.h"
-#include "virtio_if.h"
+#include "virtio_pci_v1_if.h"
+#include "virtio_v1_if.h"
 
 #define MPASS(_expr) KASSERT((_expr), ("virtio-pci modern assertion"))
 
@@ -206,13 +206,13 @@ static device_method_t vtpci_v1_modern_methods[] = {
 	DEVMETHOD(bus_write_ivar,		vtpci_v1_modern_write_ivar),
 
 	/* VirtIO PCI interface. */
-	DEVMETHOD(virtio_pci_read_isr,		 vtpci_v1_modern_read_isr),
-	DEVMETHOD(virtio_pci_get_vq_size,	 vtpci_v1_modern_get_vq_size),
-	DEVMETHOD(virtio_pci_get_vq_notify_off,	 vtpci_v1_modern_get_vq_notify_off),
-	DEVMETHOD(virtio_pci_set_vq,		 vtpci_v1_modern_set_vq),
-	DEVMETHOD(virtio_pci_disable_vq,	 vtpci_v1_modern_disable_vq),
-	DEVMETHOD(virtio_pci_register_cfg_msix,	 vtpci_v1_modern_register_cfg_msix),
-	DEVMETHOD(virtio_pci_register_vq_msix,	 vtpci_v1_modern_register_vq_msix),
+	DEVMETHOD(virtio_pci_v1_read_isr,		 vtpci_v1_modern_read_isr),
+	DEVMETHOD(virtio_pci_v1_get_vq_size,	 vtpci_v1_modern_get_vq_size),
+	DEVMETHOD(virtio_pci_v1_get_vq_notify_off,	 vtpci_v1_modern_get_vq_notify_off),
+	DEVMETHOD(virtio_pci_v1_set_vq,		 vtpci_v1_modern_set_vq),
+	DEVMETHOD(virtio_pci_v1_disable_vq,	 vtpci_v1_modern_disable_vq),
+	DEVMETHOD(virtio_pci_v1_register_cfg_msix,	 vtpci_v1_modern_register_cfg_msix),
+	DEVMETHOD(virtio_pci_v1_register_vq_msix,	 vtpci_v1_modern_register_vq_msix),
 
 	/* VirtIO bus interface. */
 	DEVMETHOD(virtio_v1_bus_negotiate_features,  vtpci_v1_modern_negotiate_features),
@@ -1123,7 +1123,7 @@ vtpci_v1_modern_probe_and_attach_child(struct vtpci_v1_modern_softc *sc)
 		vtpci_v1_modern_child_detached(dev, child);
 	} else {
 		vtpci_v1_modern_set_status(sc, VIRTIO_CONFIG_STATUS_DRIVER_OK);
-		VIRTIO_ATTACH_COMPLETED(child);
+		VIRTIO_V1_ATTACH_COMPLETED(child);
 	}
 }
 

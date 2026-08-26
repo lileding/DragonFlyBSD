@@ -46,8 +46,8 @@
 #include <dev/virtual/virtio/pci/virtio_pci_v1.h>
 #include <dev/virtual/virtio/pci/virtio_pci_v1_var.h>
 
-#include "virtio_pci_if.h"
-#include "virtio_if.h"
+#include "virtio_pci_v1_if.h"
+#include "virtio_v1_if.h"
 
 static void	vtpci_v1_describe_features(struct vtpci_v1_common *, const char *,
 		    uint64_t);
@@ -106,44 +106,44 @@ SYSCTL_INT(_hw_virtio_pci, OID_AUTO, disable_msix, CTLFLAG_RW,
 static uint8_t
 vtpci_v1_read_isr(struct vtpci_v1_common *cn)
 {
-	return (VIRTIO_PCI_READ_ISR(cn->vtpci_v1_dev));
+	return (VIRTIO_PCI_V1_READ_ISR(cn->vtpci_v1_dev));
 }
 
 static uint16_t
 vtpci_v1_get_vq_size(struct vtpci_v1_common *cn, int idx)
 {
-	return (VIRTIO_PCI_GET_VQ_SIZE(cn->vtpci_v1_dev, idx));
+	return (VIRTIO_PCI_V1_GET_VQ_SIZE(cn->vtpci_v1_dev, idx));
 }
 
 static bus_size_t
 vtpci_v1_get_vq_notify_off(struct vtpci_v1_common *cn, int idx)
 {
-	return (VIRTIO_PCI_GET_VQ_NOTIFY_OFF(cn->vtpci_v1_dev, idx));
+	return (VIRTIO_PCI_V1_GET_VQ_NOTIFY_OFF(cn->vtpci_v1_dev, idx));
 }
 
 static void
 vtpci_v1_set_vq(struct vtpci_v1_common *cn, struct virtqueue *vq)
 {
-	VIRTIO_PCI_SET_VQ(cn->vtpci_v1_dev, vq);
+	VIRTIO_PCI_V1_SET_VQ(cn->vtpci_v1_dev, vq);
 }
 
 static void
 vtpci_v1_disable_vq(struct vtpci_v1_common *cn, int idx)
 {
-	VIRTIO_PCI_DISABLE_VQ(cn->vtpci_v1_dev, idx);
+	VIRTIO_PCI_V1_DISABLE_VQ(cn->vtpci_v1_dev, idx);
 }
 
 static int
 vtpci_v1_register_cfg_msix(struct vtpci_v1_common *cn, struct vtpci_interrupt *intr)
 {
-	return (VIRTIO_PCI_REGISTER_CFG_MSIX(cn->vtpci_v1_dev, intr));
+	return (VIRTIO_PCI_V1_REGISTER_CFG_MSIX(cn->vtpci_v1_dev, intr));
 }
 
 static int
 vtpci_v1_register_vq_msix(struct vtpci_v1_common *cn, int idx,
     struct vtpci_interrupt *intr)
 {
-	return (VIRTIO_PCI_REGISTER_VQ_MSIX(cn->vtpci_v1_dev, idx, intr));
+	return (VIRTIO_PCI_V1_REGISTER_VQ_MSIX(cn->vtpci_v1_dev, idx, intr));
 }
 
 void
@@ -915,7 +915,7 @@ vtpci_v1_config_intr(void *xcn)
 	child = cn->vtpci_v1_child_dev;
 
 	if (child != NULL)
-		VIRTIO_CONFIG_CHANGE(child);
+		VIRTIO_V1_CONFIG_CHANGE(child);
 }
 
 static int

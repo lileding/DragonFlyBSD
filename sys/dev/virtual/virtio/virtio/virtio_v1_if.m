@@ -26,11 +26,11 @@
 
 #include <sys/bus.h>
 
-INTERFACE virtio;
+INTERFACE virtio_v1;
 
 CODE {
 	static int
-	virtio_default_attach_completed(device_t dev)
+	virtio_v1_default_attach_completed(device_t dev)
 	{
 		return (0);
 	}
@@ -38,11 +38,11 @@ CODE {
 
 METHOD int attach_completed {
 	device_t	dev;
-} DEFAULT virtio_default_attach_completed;
+} DEFAULT virtio_v1_default_attach_completed;
 
 CODE {
 	static int
-	virtio_default_config_change(device_t dev)
+	virtio_v1_default_config_change(device_t dev)
 	{
 		return (0);
 	}
@@ -50,4 +50,4 @@ CODE {
 
 METHOD int config_change {
 	device_t	dev;
-} DEFAULT virtio_default_config_change;
+} DEFAULT virtio_v1_default_config_change;

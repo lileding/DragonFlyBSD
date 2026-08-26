@@ -26,7 +26,7 @@
 
 #include <sys/bus.h>
 
-INTERFACE virtio_pci;
+INTERFACE virtio_pci_v1;
 
 HEADER {
 struct virtqueue;
