@@ -6,6 +6,7 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 #include <sys/mman.h>
+#include <sys/thread2.h>
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
