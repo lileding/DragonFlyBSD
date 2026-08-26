@@ -43,8 +43,8 @@
 #include <sys/disk.h>
 #include <sys/devicestat.h>
 
-#include <dev/virtual/virtio/v1/virtio.h>
-#include <dev/virtual/virtio/v1/virtqueue.h>
+#include <dev/virtual/virtio/virtio/virtio_v1.h>
+#include <dev/virtual/virtio/virtio/virtqueue_v1.h>
 #include "virtio_blk.h"
 
 struct vtblk_v1_request {

@@ -23,8 +23,8 @@
 #include <sys/ucred.h>
 
 #include <dev/virtual/virtio/console/virtio_console.h>
-#include <dev/virtual/virtio/v1/virtio.h>
-#include <dev/virtual/virtio/v1/virtqueue.h>
+#include <dev/virtual/virtio/virtio/virtio_v1.h>
+#include <dev/virtual/virtio/virtio/virtqueue_v1.h>
 
 #define VCON_BUFSIZE	128
 #define VCON_RX_BUFS	32

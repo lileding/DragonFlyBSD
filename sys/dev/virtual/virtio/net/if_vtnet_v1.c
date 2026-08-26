@@ -68,8 +68,8 @@
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
 
-#include <dev/virtual/virtio/v1/virtio.h>
-#include <dev/virtual/virtio/v1/virtqueue.h>
+#include <dev/virtual/virtio/virtio/virtio_v1.h>
+#include <dev/virtual/virtio/virtio/virtqueue_v1.h>
 #include <dev/virtual/virtio/net/virtio_net.h>
 #include <dev/virtual/virtio/net/if_vtnetvar.h>
 

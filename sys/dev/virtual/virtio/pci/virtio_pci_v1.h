@@ -74,7 +74,10 @@ struct vtpci_v1_common {
 	 */
 	struct vtpci_interrupt		 vtpci_v1_device_interrupt;
 	struct vtpci_interrupt		*vtpci_v1_msix_vq_interrupts;
-	int				 vtpci_v1_nmsix_resources;
+	int                 vtpci_v1_nmsix_resources;
+	int                *vtpci_v1_msix_rids;
+	int                 vtpci_v1_msi_rid;
+	int                 vtpci_v1_irq_flags;
 };
 
 extern int vtpci_v1_disable_msix;

@@ -6,8 +6,8 @@
 #include <sys/module.h>
 #include <sys/malloc.h>
 #include <sys/rman.h>
-#include <dev/virtual/virtio/v1/virtio.h>
-#include <dev/virtual/virtio/v1/virtqueue.h>
+#include <dev/virtual/virtio/virtio/virtio_v1.h>
+#include <dev/virtual/virtio/virtio/virtqueue_v1.h>
 #include "virtio_mmio.h"
 #include "virtio_v1_bus_if.h"
 

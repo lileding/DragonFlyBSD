@@ -29,9 +29,9 @@
 #ifndef _VIRTIO_H_
 #define _VIRTIO_H_
 
-#include <dev/virtual/virtio/v1/virtio_endian.h>
-#include <dev/virtual/virtio/v1/virtio_ids.h>
-#include <dev/virtual/virtio/v1/virtio_config.h>
+#include <dev/virtual/virtio/virtio/virtio_v1_endian.h>
+#include <dev/virtual/virtio/virtio/virtio_v1_ids.h>
+#include <dev/virtual/virtio/virtio/virtio_v1_config.h>
 
 #ifdef _KERNEL
 

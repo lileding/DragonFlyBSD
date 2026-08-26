@@ -25,9 +25,9 @@
 
 KMOD= virtio_pci
 MFILES= kern/bus_if.m kern/device_if.m bus/pci/pci_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_v1_bus_if.m
-MFILES+= dev/virtual/virtio/v1/virtio_if.m
-MFILES+= dev/virtual/virtio/pci/v1/virtio_pci_if.m
+MFILES+= dev/virtual/virtio/virtio/virtio_v1_bus_if.m
+MFILES+= dev/virtual/virtio/virtio/virtio_v1_if.m
+MFILES+= dev/virtual/virtio/pci/virtio_pci_v1_if.m
 SRCS= virtio_pci.c virtio_pci_v1_core.c virtio_pci_v1_modern.c
 SRCS+= virtio_bus_if.h virtio_v1_bus_if.h virtio_if.h virtio_pci_if.h virtio_pci_if.c
 SRCS+=	bus_if.h device_if.h pci_if.h
