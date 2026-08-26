@@ -7,6 +7,7 @@
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
+#include <machine/limits.h>
 #include <sys/mount.h>
 #include <sys/namecache.h>
 #include <sys/param.h>
