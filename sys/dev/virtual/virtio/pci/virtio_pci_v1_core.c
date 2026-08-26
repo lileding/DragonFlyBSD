@@ -91,9 +91,6 @@ static void	vtpci_v1_setup_sysctl(struct vtpci_v1_common *);
  *   - virtio_pci_legacy for pre-V1 support
  *   - virtio_pci_modern for V1 support
  */
-MODULE_VERSION(virtio_pci, 1);
-MODULE_DEPEND(virtio_pci, pci, 1, 1, 1);
-MODULE_DEPEND(virtio_pci, virtio, 1, 1, 1);
 
 SYSCTL_DECL(_hw_virtio);
 SYSCTL_NODE(_hw_virtio, OID_AUTO, pci, CTLFLAG_RD, 0,
@@ -567,6 +564,11 @@ vtpci_v1_free_virtqueues(struct vtpci_v1_common *cn)
 {
 	struct vtpci_v1_virtqueue *vqx;
 	int idx;
+
+	if (cn->vtpci_v1_vqs == NULL) {
+		cn->vtpci_v1_nvqs = 0;
+		return;
+	}
 
 	for (idx = 0; idx < cn->vtpci_v1_nvqs; idx++) {
 		vtpci_v1_disable_vq(cn, idx);

@@ -43,7 +43,6 @@
 
 #include "virtio_v1_bus_if.h"
 
-static int virtio_v1_modevent(module_t, int, void *);
 static const char *virtio_v1_feature_name(uint64_t, struct virtio_feature_desc *);
 
 static struct virtio_v1_ident {
@@ -363,31 +362,3 @@ virtio_v1_child_pnpinfo(device_t busdev __unused, device_t child, struct sbuf *s
 	    (unsigned)virtio_v1_get_device_type(child));
 	return (0);
 }
-
-static int
-virtio_v1_modevent(module_t mod, int type, void *unused)
-{
-	int error;
-
-	switch (type) {
-	case MOD_LOAD:
-	case MOD_UNLOAD:
-	case MOD_SHUTDOWN:
-		error = 0;
-		break;
-	default:
-		error = EOPNOTSUPP;
-		break;
-	}
-
-	return (error);
-}
-
-static moduledata_t virtio_v1_mod = {
-	"virtio",
-	virtio_v1_modevent,
-	0
-};
-
-DECLARE_MODULE(virtio, virtio_v1_mod, SI_SUB_DRIVERS, SI_ORDER_FIRST);
-MODULE_VERSION(virtio, 1);
