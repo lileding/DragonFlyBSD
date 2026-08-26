@@ -1,5 +1,6 @@
 KMOD=   virtio
 MFILES= kern/bus_if.m kern/device_if.m
+MFILES+= dev/virtual/virtio/virtio/virtio_bus_if.m
 MFILES+= dev/virtual/virtio/virtio/virtio_v1_bus_if.m
 MFILES+= dev/virtual/virtio/virtio/virtio_v1_if.m
 
