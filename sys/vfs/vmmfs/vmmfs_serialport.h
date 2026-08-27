@@ -7,10 +7,10 @@
 #define VMMFS_SERIALPORT_H
 
 #include <sys/queue.h>
-#include <sys/event.h>
 #include <sys/thread.h>
 #include <sys/tree.h>
 #include <sys/types.h>
+#include <sys/tty.h>
 
 #include <dev/virtual/vmm/vmm.h>
 
@@ -39,7 +39,7 @@ struct vmmfs_serialport {
 	uint32_t gsi;
 	struct cdev *dev;
 	struct lwkt_token token;
-	struct kqinfo kq;
+	struct tty tty;
 	vmm_machine_t machine;
 	vmm_io_t read_io;
 	vmm_io_t write_io;
@@ -58,7 +58,6 @@ struct vmmfs_serialport {
 	bool lsr_overrun;
 	bool irq_asserted;
 	struct vmmfs_serialring host_to_guest;
-	struct vmmfs_serialring guest_to_host;
 };
 
 RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialport, entry,

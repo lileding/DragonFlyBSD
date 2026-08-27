@@ -4,9 +4,9 @@
  * DragonFly vmmfs 16550-compatible serial port.
  */
 #include <sys/conf.h>
+#include <sys/caps.h>
 #include <sys/dirent.h>
 #include <sys/errno.h>
-#include <sys/event.h>
 #include <sys/fcntl.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <sys/tty.h>
+#include <sys/ttydefaults.h>
 #include <sys/vnode.h>
 
 #include <machine/atomic.h>
@@ -23,7 +25,6 @@
 #include "vmmfs_serialroot.h"
 
 #define VMMFS_SERIALPORT_MODE 0600
-#define VMMFS_SERIALPORT_READ_SIZE 256
 
 #define VMMFS_UART_RBR_THR_DLL 0
 #define VMMFS_UART_IER_DLM 1
@@ -59,11 +60,9 @@
 
 static d_open_t vmmfs_serialport_dev_open;
 static d_close_t vmmfs_serialport_dev_close;
-static d_read_t vmmfs_serialport_dev_read;
-static d_write_t vmmfs_serialport_dev_write;
 static d_ioctl_t vmmfs_serialport_dev_ioctl;
-static d_kqfilter_t vmmfs_serialport_dev_kqfilter;
-static d_revoke_t vmmfs_serialport_dev_revoke;
+static void vmmfs_serialport_tty_start(struct tty *);
+static int vmmfs_serialport_tty_param(struct tty *, struct termios *);
 
 static int vmmfs_serialport_access(struct vop_access_args *);
 static int vmmfs_serialport_getattr(struct vop_getattr_args *);
@@ -80,8 +79,6 @@ static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
     struct vmm_io_read *);
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
     const struct vmm_io_write *);
-static int vmmfs_serialport_associate(struct vmmfs_serialport *,
-    struct vnode *);
 static void vmmfs_serialport_irq_update(struct vmmfs_serialport *);
 static bool vmmfs_serialport_irq_pending_locked(
     const struct vmmfs_serialport *);
@@ -92,40 +89,25 @@ static bool vmmfs_serialring_write(struct vmmfs_serialring *, uint8_t);
 static size_t vmmfs_serialring_read(struct vmmfs_serialring *, char *,
     size_t);
 static void vmmfs_serialring_clear(struct vmmfs_serialring *);
-static void vmmfs_serialport_filter_detach(struct knote *);
-static int vmmfs_serialport_filter_read(struct knote *, long);
-static int vmmfs_serialport_filter_write(struct knote *, long);
 
 static uint32_t vmmfs_serialport_dev_serial;
 
-static struct filterops vmmfs_serialport_read_filterops = {
-    FILTEROP_ISFD | FILTEROP_MPSAFE,
-    NULL,
-    vmmfs_serialport_filter_detach,
-    vmmfs_serialport_filter_read,
-};
-
-static struct filterops vmmfs_serialport_write_filterops = {
-    FILTEROP_ISFD | FILTEROP_MPSAFE,
-    NULL,
-    vmmfs_serialport_filter_detach,
-    vmmfs_serialport_filter_write,
-};
 
 static struct dev_ops vmmfs_serialport_dev_ops = {
-    { "vmmfs_serial", 0, D_MPSAFE },
+    { "vmmfs_serial", 0, D_TTY | D_MPSAFE },
     .d_open = vmmfs_serialport_dev_open,
     .d_close = vmmfs_serialport_dev_close,
-    .d_read = vmmfs_serialport_dev_read,
-    .d_write = vmmfs_serialport_dev_write,
+    .d_read = ttyread,
+    .d_write = ttywrite,
     .d_ioctl = vmmfs_serialport_dev_ioctl,
-    .d_kqfilter = vmmfs_serialport_dev_kqfilter,
-    .d_revoke = vmmfs_serialport_dev_revoke,
+    .d_kqfilter = ttykqfilter,
+    .d_revoke = ttyrevoke,
 };
 
 struct vop_ops vmmfs_serialport_vops = {
     .vop_default = vop_defaultop,
     .vop_access = vmmfs_serialport_access,
+    .vop_setattr = (void *)vop_null,
     .vop_close = vmmfs_serialport_close,
     .vop_getattr = vmmfs_serialport_getattr,
     .vop_getattr_lite = vmmfs_serialport_getattr_lite,
@@ -179,7 +161,6 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->base = base;
     port->gsi = gsi;
     lwkt_token_init(&port->token, "vmmfsserial");
-    SLIST_INIT(&port->kq.ki_note);
     unit = atomic_fetchadd_int(&vmmfs_serialport_dev_serial, 1);
     dev = make_only_dev(&vmmfs_serialport_dev_ops, (int)unit, 0, 0, 0600,
         "vmmfs_serial/%s/%s", serialroot->machine->name, port->name);
@@ -188,14 +169,30 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
         goto fail_token;
     }
     dev->si_drv1 = port;
+    dev->si_tty = &port->tty;
+    ttyinit(&port->tty);
+    ttyregister(&port->tty);
+    port->tty.t_dev = dev;
+    port->tty.t_oproc = vmmfs_serialport_tty_start;
+    port->tty.t_stop = nottystop;
+    port->tty.t_param = vmmfs_serialport_tty_param;
     port->dev = dev;
-    error = getnewvnode(VT_SYNTH, serialroot->machine->root->mount, &vnode,
-        0, 0);
+    error = getspecialvnode(VT_SYNTH, serialroot->machine->root->mount,
+        &state->serialport_vops, &vnode, 0, 0);
     if (error != 0)
         goto fail_dev;
     vnode->v_data = port;
     vnode->v_ops = &state->serialport_vops;
     vnode->v_type = VCHR;
+    error = v_associate_rdev(vnode, dev);
+    if (error != 0) {
+        vx_downgrade(vnode);
+        vn_unlock(vnode);
+        vmmfs_vnode_discard(vnode);
+        goto fail_dev;
+    }
+    vnode->v_umajor = dev->si_umajor;
+    vnode->v_uminor = dev->si_uminor;
     port->vnode = vnode;
     vmmfs_machine_hold(serialroot->machine);
     vx_downgrade(vnode);
@@ -204,6 +201,11 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     return 0;
 
 fail_dev:
+    lwkt_gettoken(&port->tty.t_token);
+    ttyunregister(&port->tty);
+    lwkt_reltoken(&port->tty.t_token);
+    lwkt_token_uninit(&port->tty.t_token);
+    dev->si_tty = NULL;
     dev->si_drv1 = NULL;
     destroy_dev(dev);
 fail_token:
@@ -238,32 +240,42 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
     }
     lwkt_reltoken(&port->token);
     vmmfs_serialport_revoke(port);
+    lwkt_gettoken(&port->tty.t_token);
+    if ((port->tty.t_state & TS_ISOPEN) != 0) {
+        (*linesw[port->tty.t_line].l_close)(&port->tty, 0);
+        ttyclose(&port->tty);
+    }
+    ttyunregister(&port->tty);
+    lwkt_reltoken(&port->tty.t_token);
     if (dev != NULL) {
+        dev->si_tty = NULL;
         dev->si_drv1 = NULL;
         destroy_dev(dev);
     }
     port->dev = NULL;
     port->serialroot = NULL;
+    lwkt_token_uninit(&port->tty.t_token);
     lwkt_token_uninit(&port->token);
     kfree(port, M_VMMFS);
     return 0;
 }
-
 void
 vmmfs_serialport_revoke(struct vmmfs_serialport *port)
 {
+    cdev_t dev;
     vmm_machine_t machine;
     bool deassert;
 
     if (port == NULL)
         return;
+    dev = NULL;
     machine = NULL;
     deassert = false;
     lwkt_gettoken(&port->token);
     port->closed = true;
     vmmfs_serialring_clear(&port->host_to_guest);
-    vmmfs_serialring_clear(&port->guest_to_host);
     port->lsr_overrun = false;
+    dev = port->dev;
     if (port->machine != NULL && port->irq_asserted) {
         machine = port->machine;
         port->irq_asserted = false;
@@ -272,11 +284,9 @@ vmmfs_serialport_revoke(struct vmmfs_serialport *port)
     lwkt_reltoken(&port->token);
     if (deassert)
         (void)vmm_machine_set_irq(machine, port->gsi, false);
-    wakeup(&port->host_to_guest);
-    wakeup(&port->guest_to_host);
-    KNOTE(&port->kq.ki_note, 0);
+    if (dev != NULL)
+        KKASSERT(dev_drevoke(dev) == 0);
 }
-
 int
 vmmfs_serialport_start(struct vmmfs_serialport *port, vmm_machine_t machine)
 {
@@ -352,14 +362,10 @@ vmmfs_serialport_getattr(struct vop_getattr_args *ap)
 {
     struct vmmfs_serialport *port;
     struct vattr *vattr;
-    int error;
 
     port = ap->a_vp->v_data;
     if (port == NULL)
         return ENOENT;
-    error = vmmfs_serialport_associate(port, ap->a_vp);
-    if (error != 0)
-        return error;
     vattr = ap->a_vap;
     VATTR_NULL(vattr);
     vattr->va_type = VCHR;
@@ -409,9 +415,6 @@ vmmfs_serialport_open(struct vop_open_args *ap)
     }
     ++port->opening_count;
     lwkt_reltoken(&port->token);
-    error = vmmfs_serialport_associate(port, vnode);
-    if (error != 0)
-        goto done;
     dev = vnode->v_rdev;
     if (dev == NULL) {
         error = ENXIO;
@@ -688,7 +691,7 @@ vmmfs_serialport_write_io(vmm_vcpu_t vcpu, void *argument,
     struct vmmfs_serialport *port;
     uint64_t reg;
     uint8_t value;
-    bool output_ready;
+    bool input_ready;
     bool update_irq;
 
     (void)vcpu;
@@ -698,7 +701,7 @@ vmmfs_serialport_write_io(vmm_vcpu_t vcpu, void *argument,
         return ENOENT;
     reg = write->address - port->base;
     value = (uint8_t)write->value;
-    output_ready = false;
+    input_ready = false;
     update_irq = false;
     lwkt_gettoken(&port->token);
     if (port->machine == NULL || port->stopping || port->destroying ||
@@ -711,9 +714,8 @@ vmmfs_serialport_write_io(vmm_vcpu_t vcpu, void *argument,
         if ((port->lcr & VMMFS_UART_LCR_DLAB) != 0) {
             port->dll = value;
         } else {
-            (void)vmmfs_serialring_write(&port->guest_to_host, value);
             port->thre_pending = true;
-            output_ready = true;
+            input_ready = true;
             update_irq = true;
         }
         break;
@@ -752,34 +754,14 @@ vmmfs_serialport_write_io(vmm_vcpu_t vcpu, void *argument,
         return ENOENT;
     }
     lwkt_reltoken(&port->token);
-    if (output_ready) {
-        wakeup(&port->guest_to_host);
-        KNOTE(&port->kq.ki_note, 0);
+    if (input_ready) {
+        lwkt_gettoken(&port->tty.t_token);
+        if ((port->tty.t_state & TS_ISOPEN) != 0)
+            (void)ttyinput(value, &port->tty);
+        lwkt_reltoken(&port->tty.t_token);
     }
     if (update_irq)
         vmmfs_serialport_irq_update(port);
-    return 0;
-}
-
-static int
-vmmfs_serialport_associate(struct vmmfs_serialport *port,
-    struct vnode *vnode)
-{
-    cdev_t dev;
-    int error;
-
-    if (vnode->v_rdev != NULL)
-        return 0;
-    lwkt_gettoken(&port->token);
-    dev = port->closed ? NULL : port->dev;
-    lwkt_reltoken(&port->token);
-    if (dev == NULL)
-        return ENXIO;
-    error = v_associate_rdev(vnode, dev);
-    if (error != 0)
-        return error;
-    vnode->v_umajor = dev->si_umajor;
-    vnode->v_uminor = dev->si_uminor;
     return 0;
 }
 
@@ -894,10 +876,15 @@ vmmfs_serialport_name(const char *name, size_t namelen, uint8_t *number,
 static int
 vmmfs_serialport_dev_open(struct dev_open_args *ap)
 {
+    cdev_t dev;
     struct vmmfs_serialport *port;
+    struct tty *tty;
+    int error;
 
-    port = ap->a_head.a_dev->si_drv1;
-    if (port == NULL)
+    dev = ap->a_head.a_dev;
+    port = dev->si_drv1;
+    tty = dev->si_tty;
+    if (port == NULL || tty == NULL)
         return ENXIO;
     lwkt_gettoken(&port->token);
     if (port->closed || port->destroying) {
@@ -905,186 +892,100 @@ vmmfs_serialport_dev_open(struct dev_open_args *ap)
         return ENXIO;
     }
     lwkt_reltoken(&port->token);
-    return 0;
+    lwkt_gettoken(&tty->t_token);
+    if ((tty->t_state & TS_ISOPEN) == 0) {
+        tty->t_state |= TS_CARR_ON;
+        ttychars(tty);
+        tty->t_iflag = TTYDEF_IFLAG;
+        tty->t_oflag = TTYDEF_OFLAG;
+        tty->t_cflag = TTYDEF_CFLAG | CLOCAL;
+        tty->t_lflag = TTYDEF_LFLAG;
+        tty->t_ispeed = tty->t_ospeed = TTYDEF_SPEED;
+        ttsetwater(tty);
+    } else if ((tty->t_state & TS_XCLUDE) != 0 &&
+        caps_priv_check(ap->a_cred, SYSCAP_RESTRICTEDROOT)) {
+        lwkt_reltoken(&tty->t_token);
+        return EBUSY;
+    }
+    error = (*linesw[tty->t_line].l_open)(dev, tty);
+    lwkt_reltoken(&tty->t_token);
+    return error;
 }
 
 static int
 vmmfs_serialport_dev_close(struct dev_close_args *ap)
 {
-    (void)ap;
-    return 0;
-}
-
-static int
-vmmfs_serialport_dev_read(struct dev_read_args *ap)
-{
-    struct vmmfs_serialport *port;
-    char buffer[VMMFS_SERIALPORT_READ_SIZE];
-    size_t length;
+    struct tty *tty;
     int error;
 
-    port = ap->a_head.a_dev->si_drv1;
-    if (port == NULL)
+    tty = ap->a_head.a_dev->si_tty;
+    if (tty == NULL)
         return ENXIO;
-    if (ap->a_uio->uio_resid == 0)
-        return 0;
-    for (;;) {
-        lwkt_gettoken(&port->token);
-        if (vmmfs_serialring_length(&port->guest_to_host) != 0)
-            break;
-        if (port->closed) {
-            lwkt_reltoken(&port->token);
-            return ENXIO;
-        }
-        if ((ap->a_ioflag & IO_NDELAY) != 0) {
-            lwkt_reltoken(&port->token);
-            return EWOULDBLOCK;
-        }
-        tsleep_interlock(&port->guest_to_host, PCATCH);
-        lwkt_reltoken(&port->token);
-        error = tsleep(&port->guest_to_host, PINTERLOCKED | PCATCH,
-            "vmmserread", 0);
-        if (error != 0)
-            return error;
+    error = 0;
+    lwkt_gettoken(&tty->t_token);
+    if ((tty->t_state & TS_ISOPEN) != 0) {
+        error = (*linesw[tty->t_line].l_close)(tty, ap->a_fflag);
+        ttyclose(tty);
     }
-    length = vmmfs_serialring_length(&port->guest_to_host);
-    if (length > sizeof(buffer))
-        length = sizeof(buffer);
-    if (length > (size_t)ap->a_uio->uio_resid)
-        length = (size_t)ap->a_uio->uio_resid;
-    (void)vmmfs_serialring_read(&port->guest_to_host, buffer, length);
-    lwkt_reltoken(&port->token);
-    return uiomove(buffer, length, ap->a_uio);
-}
-
-static int
-vmmfs_serialport_dev_write(struct dev_write_args *ap)
-{
-    struct vmmfs_serialport *port;
-    char buffer[VMMFS_SERIALPORT_READ_SIZE];
-    size_t length;
-    size_t index;
-    bool update_irq;
-    int error;
-
-    port = ap->a_head.a_dev->si_drv1;
-    if (port == NULL)
-        return ENXIO;
-    while (ap->a_uio->uio_resid != 0) {
-        length = min((size_t)ap->a_uio->uio_resid, sizeof(buffer));
-        error = uiomove(buffer, length, ap->a_uio);
-        if (error != 0)
-            return error;
-        update_irq = false;
-        lwkt_gettoken(&port->token);
-        if (port->closed) {
-            lwkt_reltoken(&port->token);
-            return ENXIO;
-        }
-        for (index = 0; index < length; ++index) {
-            if (vmmfs_serialring_write(&port->host_to_guest,
-                (uint8_t)buffer[index]))
-                port->lsr_overrun = true;
-        }
-        update_irq = port->machine != NULL && !port->stopping &&
-            !port->destroying;
-        lwkt_reltoken(&port->token);
-        if (update_irq)
-            vmmfs_serialport_irq_update(port);
-    }
-    return 0;
+    lwkt_reltoken(&tty->t_token);
+    return error;
 }
 
 static int
 vmmfs_serialport_dev_ioctl(struct dev_ioctl_args *ap)
 {
-    (void)ap;
-    return ENOTTY;
-}
+    struct tty *tty;
+    int error;
 
-static int
-vmmfs_serialport_dev_kqfilter(struct dev_kqfilter_args *ap)
-{
-    struct vmmfs_serialport *port;
-
-    port = ap->a_head.a_dev->si_drv1;
-    if (port == NULL)
+    tty = ap->a_head.a_dev->si_tty;
+    if (tty == NULL)
         return ENXIO;
-    ap->a_result = 0;
-    switch (ap->a_kn->kn_filter) {
-    case EVFILT_READ:
-        ap->a_kn->kn_fop = &vmmfs_serialport_read_filterops;
-        break;
-    case EVFILT_WRITE:
-        ap->a_kn->kn_fop = &vmmfs_serialport_write_filterops;
-        break;
-    default:
-        ap->a_result = EOPNOTSUPP;
-        return 0;
-    }
-    lwkt_gettoken(&port->token);
-    ap->a_kn->kn_hook = (caddr_t)port;
-    knote_insert(&port->kq.ki_note, ap->a_kn);
-    lwkt_reltoken(&port->token);
-    return 0;
+    lwkt_gettoken(&tty->t_token);
+    error = (*linesw[tty->t_line].l_ioctl)(tty, ap->a_cmd, ap->a_data,
+        ap->a_fflag, ap->a_cred);
+    if (error == ENOIOCTL)
+        error = ttioctl(tty, ap->a_cmd, ap->a_data, ap->a_fflag);
+    lwkt_reltoken(&tty->t_token);
+    return error == ENOIOCTL ? ENOTTY : error;
 }
 
 static int
-vmmfs_serialport_dev_revoke(struct dev_revoke_args *ap)
+vmmfs_serialport_tty_param(struct tty *tty, struct termios *termios)
 {
-    vmmfs_serialport_revoke(ap->a_head.a_dev->si_drv1);
+    lwkt_gettoken(&tty->t_token);
+    tty->t_ispeed = termios->c_ispeed;
+    tty->t_ospeed = termios->c_ospeed;
+    tty->t_cflag = termios->c_cflag;
+    lwkt_reltoken(&tty->t_token);
     return 0;
 }
 
 static void
-vmmfs_serialport_filter_detach(struct knote *knote)
+vmmfs_serialport_tty_start(struct tty *tty)
 {
     struct vmmfs_serialport *port;
+    int character;
+    bool update_irq;
 
-    port = (struct vmmfs_serialport *)knote->kn_hook;
-    if (port == NULL)
-        return;
-    lwkt_gettoken(&port->token);
-    knote_remove(&port->kq.ki_note, knote);
-    lwkt_reltoken(&port->token);
-}
-
-static int
-vmmfs_serialport_filter_read(struct knote *knote, long hint)
-{
-    struct vmmfs_serialport *port;
-
-    (void)hint;
-    port = (struct vmmfs_serialport *)knote->kn_hook;
-    if (port == NULL)
-        return 0;
-    lwkt_gettoken(&port->token);
-    if (port->closed) {
-        knote->kn_data = 0;
-        knote->kn_flags |= EV_EOF | EV_NODATA;
-    } else {
-        knote->kn_data = vmmfs_serialring_length(&port->guest_to_host);
+    update_irq = false;
+    lwkt_gettoken(&tty->t_token);
+    port = tty->t_dev == NULL ? NULL : tty->t_dev->si_drv1;
+    if (port != NULL && (tty->t_state & (TS_TIMEOUT | TS_TTSTOP)) == 0) {
+        tty->t_state |= TS_BUSY;
+        lwkt_gettoken(&port->token);
+        while ((character = clist_getc(&tty->t_outq)) >= 0) {
+            if (!port->closed && !port->destroying &&
+                vmmfs_serialring_write(&port->host_to_guest,
+                (uint8_t)character))
+                port->lsr_overrun = true;
+        }
+        update_irq = !port->closed && !port->destroying &&
+            port->machine != NULL && !port->stopping;
+        lwkt_reltoken(&port->token);
+        tty->t_state &= ~TS_BUSY;
     }
-    lwkt_reltoken(&port->token);
-    return knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0;
-}
-
-static int
-vmmfs_serialport_filter_write(struct knote *knote, long hint)
-{
-    struct vmmfs_serialport *port;
-
-    (void)hint;
-    port = (struct vmmfs_serialport *)knote->kn_hook;
-    if (port == NULL)
-        return 0;
-    lwkt_gettoken(&port->token);
-    if (port->closed) {
-        knote->kn_data = 0;
-        knote->kn_flags |= EV_EOF;
-    } else {
-        knote->kn_data = VMMFS_SERIALPORT_RING_SIZE;
-    }
-    lwkt_reltoken(&port->token);
-    return knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0;
+    ttwwakeup(tty);
+    lwkt_reltoken(&tty->t_token);
+    if (update_irq)
+        vmmfs_serialport_irq_update(port);
 }
