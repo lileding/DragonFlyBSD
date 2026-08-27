@@ -2409,6 +2409,13 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			if (error != 0)
 				break;
 		}
+		/*
+		 * Keep the CPU that published this guest pmap active until the
+		 * corresponding VMRUN has returned and its host state is restored.
+		 * vcpu_prepare() remains above this point because an AP may sleep
+		 * there while waiting for INIT/SIPI.
+		 */
+		os_preempt_disable();
 		hcpu = os_curcpu_number();
 		if (cpudata->hcpu_last != hcpu) {
 			vmm_svm_gtlb_catchup(vcpu, hcpu);
@@ -2474,6 +2481,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			exit->reason = VMM_CPUEXIT_NONE;
 			vmm_stat_vcpu_run_restart_preentry(pending_flags);
 			error = ERESTART;
+			os_preempt_enable();
 			break;
 		}
 
@@ -2495,6 +2503,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 				vmm_svm_stgi();
 				exit->reason = VMM_CPUEXIT_NONE;
 				error = EINVAL;
+				os_preempt_enable();
 				break;
 			}
 		}
@@ -2624,6 +2633,7 @@ vmm_svm_vcpu_run(struct vmm_vcpu *vcpu, struct vmm_cpuexit **reason)
 			vmm_svm_exit_invalid(exit, vmcb->ctrl.exitcode);
 			break;
 		}
+		os_preempt_enable();
 
 		/* A concurrent kick must return through vmm_vcpu_run(). */
 		if (exit->reason == VMM_CPUEXIT_NONE &&
