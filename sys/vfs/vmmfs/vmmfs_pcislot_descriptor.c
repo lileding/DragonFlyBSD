@@ -457,6 +457,7 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	lwkt_reltoken(&machine->token);
 	(void)vmmfs_pcislot_resources_destroy(old_resources);
 	vmmfs_pcislot_auth_revoke(old_auth);
+	vmmfs_pcislot_events_reset(&descriptor->slot->events);
 	lwkt_gettoken(&machine->token);
 	if (removing) {
 		bzero(&descriptor->value, sizeof(descriptor->value));

@@ -136,6 +136,19 @@ vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *state_node)
 }
 
 void
+vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *state_node)
+{
+	if (state_node == NULL)
+		return;
+	lwkt_gettoken(&state_node->token);
+	if (!state_node->closed && state_node->buffer != NULL) {
+		state_node->start = 0;
+		state_node->length = 0;
+	}
+	lwkt_reltoken(&state_node->token);
+}
+
+void
 vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
 	enum vmmfs_pci_event event, const char *args, ...)
 {

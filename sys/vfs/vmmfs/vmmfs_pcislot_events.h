@@ -38,6 +38,7 @@ int vmmfs_pcislot_events_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_events *);
 int vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);
+void vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *,
 	enum vmmfs_pci_event, const char *, ...);
 
