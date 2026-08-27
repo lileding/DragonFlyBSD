@@ -343,6 +343,7 @@ vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *resources,
 {
 	struct vmmfs_pcislot_resource *resource;
 	struct vmspace *new_vmspace;
+	struct vmspace *old_vmspace;
 	size_t index;
 	int error;
 
@@ -360,14 +361,20 @@ vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *resources,
 		if (resource->kind != VMMFS_PCISLOT_RESOURCE_DMA)
 			continue;
 		lwkt_gettoken(&resource->token);
-		if (resource->vmspace != NULL) {
-			lwkt_reltoken(&resource->token);
-			return (EBUSY);
-		}
 		vmspace_ref(new_vmspace);
+		old_vmspace = resource->vmspace;
 		resource->vmspace = new_vmspace;
 		lwkt_reltoken(&resource->token);
-		break;
+		/*
+		 * The replacement is visible before cached old pages are removed.
+		 * A provider access in this window may finish against the discarded
+		 * guest image, but it can neither fault through a NULL vmspace nor
+		 * reach the new guest through a stale cached page.
+		 */
+		if (resource->pager_object != NULL)
+			vm_object_page_remove(resource->pager_object, 0, 0, FALSE);
+		if (old_vmspace != NULL)
+			vmspace_rel(old_vmspace);
 	}
 	resources->machine = machine;
 	for (index = 0; index < resources->count; ++index) {
@@ -389,7 +396,6 @@ void
 vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *resources)
 {
 	struct vmmfs_pcislot_resource *resource;
-	struct vmspace *vmspace;
 	size_t index;
 
 	if (resources == NULL || resources->machine == NULL)
@@ -398,23 +404,12 @@ vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *resources)
 		resource = &resources->items[index];
 		if (resource->mapped)
 			vmmfs_pcislot_resource_remove_traps(resource);
-		if (resource->kind != VMMFS_PCISLOT_RESOURCE_DMA)
-			continue;
-		lwkt_gettoken(&resource->token);
-		vmspace = resource->vmspace;
-		resource->vmspace = NULL;
-		lwkt_reltoken(&resource->token);
-		if (vmspace != NULL)
-			vmspace_rel(vmspace);
-		/*
-		 * Existing DMA mappings may still cache pages obtained from the old
-		 * guest vmspace.  Keep the provider session alive for warm reset,
-		 * but discard those pages before that vmspace can be released.
-		 * Subsequent accesses fault through the same pager after rebind.
-		 */
-		if (resource->pager_object != NULL)
-			vm_object_page_remove(resource->pager_object, 0, 0, FALSE);
 	}
+	/*
+	 * A warm reset preserves provider file descriptors and their DMA
+	 * mappings.  Keep each DMA resource's old vmspace reference until
+	 * rebind() atomically installs the new guest vmspace.
+	 */
 	resources->machine = NULL;
 }
 
