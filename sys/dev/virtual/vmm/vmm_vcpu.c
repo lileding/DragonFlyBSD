@@ -433,6 +433,29 @@ vmm_vcpu_wakeup(struct vmm_vcpu *vcpu)
 		wakeup(vcpu);
 }
 
+void
+vmm_vcpu_interrupt(struct vmm_vcpu *vcpu)
+{
+	bool wake;
+	int running;
+
+	if (vcpu == NULL)
+		return;
+
+	lwkt_gettoken(&vcpu->token);
+	wake = !vcpu->destroying;
+	running = vcpu->running;
+	if (wake)
+		atomic_store_rel_int(&vcpu->wake_pending, 1);
+	lwkt_reltoken(&vcpu->token);
+
+	if (!wake)
+		return;
+	if (running)
+		vcpu->backend_ops->vcpu_kick(vcpu);
+	wakeup(vcpu);
+}
+
 int
 vmm_vcpu_wait(vmm_vcpu_t vcpu)
 {

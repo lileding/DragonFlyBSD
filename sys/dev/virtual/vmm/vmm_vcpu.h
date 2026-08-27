@@ -36,7 +36,16 @@ struct vmm_vcpu {
 	volatile int wake_pending;
 };
 
-/* Internal posted-interrupt wakeup; unlike kick, it never forces VMRUN out. */
+/*
+ * Internal posted-interrupt wakeup; unlike a frontend kick, it never forces
+ * an active VMRUN to return.
+ */
 void vmm_vcpu_wakeup(struct vmm_vcpu *);
+
+/*
+ * Internal irqchip notification.  It wakes a parked vCPU or forces VMRUN to
+ * return so the backend can consume pending interrupt-controller state.
+ */
+void vmm_vcpu_interrupt(struct vmm_vcpu *);
 
 #endif /* VMM_VCPU_H */

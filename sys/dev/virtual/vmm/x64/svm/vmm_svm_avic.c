@@ -349,7 +349,7 @@ vmm_svm_interrupt_raise_legacy(struct vmm_svm_interrupt_machine *machine,
 		lwkt_reltoken(&machine->token);
 		return ENOENT;
 	}
-	(void)vmm_vcpu_kick(target->vcpu);
+	vmm_vcpu_interrupt(target->vcpu);
 	lwkt_reltoken(&machine->token);
 	return 0;
 }
@@ -1021,7 +1021,7 @@ vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 		if (target != NULL) {
 			if (nmi) {
 				atomic_set_int(&target->nmi_pending, 1);
-				(void)vmm_vcpu_kick(target->vcpu);
+				vmm_vcpu_interrupt(target->vcpu);
 			} else {
 				vmm_svm_avic_deliver(target, (uint8_t)vector);
 			}
@@ -1035,7 +1035,7 @@ vmm_svm_avic_irq_raise_msi(struct vmm_svm_interrupt_machine *machine,
 				continue;
 			if (nmi) {
 				atomic_set_int(&target->nmi_pending, 1);
-				(void)vmm_vcpu_kick(target->vcpu);
+				vmm_vcpu_interrupt(target->vcpu);
 			} else {
 				vmm_svm_avic_deliver(target, (uint8_t)vector);
 			}
@@ -1751,17 +1751,17 @@ vmm_svm_avic_route_icr(struct vmm_svm_interrupt_vcpu *source,
 			break;
 		case VMM_SVM_APIC_ICR_NMI:
 			atomic_set_int(&target->nmi_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_INIT:
 			atomic_store_rel_int(&target->sipi_pending, 0);
 			atomic_store_rel_int(&target->init_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		case VMM_SVM_APIC_ICR_SIPI:
 			atomic_store_rel_int(&target->sipi_vector, vector);
 			atomic_store_rel_int(&target->sipi_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		}
 	}
@@ -1776,6 +1776,7 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 	struct vmm_svm_interrupt_machine *machine;
 	struct vmm_svm_interrupt_vcpu *target;
 	uint32_t cause;
+	uint32_t delivery;
 	uint32_t destination;
 	uint32_t offset;
 	uint32_t shorthand;
@@ -1802,6 +1803,20 @@ vmm_svm_avic_vcpu_exit(struct vmm_svm_interrupt_vcpu *avic,
 		cause = (uint32_t)(exitinfo2 >> 32);
 		switch (cause) {
 		case VMM_SVM_AVIC_IPI_TARGET_NOT_RUNNING:
+			delivery = (uint32_t)exitinfo1 &
+			    VMM_SVM_APIC_ICR_DELIVERY_MASK;
+			/*
+			 * AVIC can retain a fixed IPI in IRR, but INIT, SIPI and NMI
+			 * require software state transitions even when the target is
+			 * currently parked.  In particular, INIT/SIPI must update the
+			 * target's reset and startup-vector state before it is woken.
+			 */
+			if (delivery == VMM_SVM_APIC_ICR_INIT ||
+			    delivery == VMM_SVM_APIC_ICR_SIPI ||
+			    delivery == VMM_SVM_APIC_ICR_NMI) {
+				return vmm_svm_avic_route_icr(avic, (uint32_t)exitinfo1,
+				    (uint32_t)(exitinfo1 >> 32), 0);
+			}
 			/*
 			 * AVIC has already set IRR for every valid target.  IsRunning
 			 * was clear.  Do not route or re-deliver this IPI: notify the

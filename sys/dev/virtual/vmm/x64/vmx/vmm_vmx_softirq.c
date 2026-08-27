@@ -325,7 +325,7 @@ vmm_vmx_softirq_irq_raise_msi(struct vmm_vmx_interrupt_machine *machine,
 		if (target != NULL) {
 			if (nmi) {
 				atomic_set_int(&target->nmi_pending, 1);
-				(void)vmm_vcpu_kick(target->vcpu);
+				vmm_vcpu_interrupt(target->vcpu);
 			} else {
 				vmm_vmx_softirq_deliver(target, (uint8_t)vector);
 			}
@@ -339,7 +339,7 @@ vmm_vmx_softirq_irq_raise_msi(struct vmm_vmx_interrupt_machine *machine,
 				continue;
 			if (nmi) {
 				atomic_set_int(&target->nmi_pending, 1);
-				(void)vmm_vcpu_kick(target->vcpu);
+				vmm_vcpu_interrupt(target->vcpu);
 			} else {
 				vmm_vmx_softirq_deliver(target, (uint8_t)vector);
 			}
@@ -396,7 +396,7 @@ vmm_vmx_interrupt_raise_legacy(struct vmm_vmx_interrupt_machine *machine,
 		lwkt_reltoken(&machine->token);
 		return ENOENT;
 	}
-	(void)vmm_vcpu_kick(target->vcpu);
+	vmm_vcpu_interrupt(target->vcpu);
 	lwkt_reltoken(&machine->token);
 	return 0;
 }
@@ -991,7 +991,7 @@ vmm_vmx_lapic_timer_timeout(void *argument)
 		vmm_vmx_lapic_timer_schedule_locked(vcpu, now);
 	lwkt_reltoken(&vcpu->timer_token);
 	if (expired)
-		(void)vmm_vcpu_kick(vcpu->vcpu);
+		vmm_vcpu_interrupt(vcpu->vcpu);
 }
 
 static void
@@ -1212,7 +1212,7 @@ vmm_vmx_softirq_deliver(struct vmm_vmx_interrupt_vcpu *vcpu, uint8_t vector)
 	    VMM_VMX_APIC_IRR_BASE + (vector / 32) * 0x10);
 	atomic_set_int((volatile u_int *)irr, __BIT(vector & 31));
 	cpu_mfence();
-	(void)vmm_vcpu_kick(vcpu->vcpu);
+	vmm_vcpu_interrupt(vcpu->vcpu);
 }
 
 static int
@@ -1364,17 +1364,17 @@ vmm_vmx_softirq_route_icr(struct vmm_vmx_interrupt_vcpu *source,
 			break;
 		case VMM_VMX_APIC_ICR_NMI:
 			atomic_set_int(&target->nmi_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		case VMM_VMX_APIC_ICR_INIT:
 			atomic_store_rel_int(&target->sipi_pending, 0);
 			atomic_store_rel_int(&target->init_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		case VMM_VMX_APIC_ICR_SIPI:
 			atomic_store_rel_int(&target->sipi_vector, vector);
 			atomic_store_rel_int(&target->sipi_pending, 1);
-			(void)vmm_vcpu_kick(target->vcpu);
+			vmm_vcpu_interrupt(target->vcpu);
 			break;
 		}
 	}
