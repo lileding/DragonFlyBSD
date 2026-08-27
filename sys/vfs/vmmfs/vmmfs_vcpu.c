@@ -246,6 +246,9 @@ failed:
 			tsleep_interlock(vcpu, 0);
 			lwkt_gettoken(&vcpu->token);
 			if (vcpu->active_count == 0) {
+				crit_enter();
+				tsleep_remove(curthread);
+				crit_exit();
 				lwkt_reltoken(&vcpu->token);
 				break;
 			}
@@ -293,8 +296,6 @@ vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 			break;
 		if (vcpu->threads[index].vcpu != NULL)
 			(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
-		if (vcpu->threads[index].wait_channel != NULL)
-			wakeup(vcpu->threads[index].wait_channel);
 	}
 	lwkt_reltoken(&vcpu->token);
 	wakeup(vcpu);
@@ -320,6 +321,7 @@ vmmfs_vcpu_request_reset(struct vmmfs_vcpu *vcpu)
 		}
 	}
 	lwkt_reltoken(&vcpu->token);
+	wakeup(vcpu);
 }
 
 int
@@ -357,13 +359,8 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	vcpu->runtime_machine = machine;
 	vcpu->reset_requested = false;
 	vcpu->reset_waiting = 0;
-	for (index = 1; index < vcpu->count; ++index) {
-		if (vcpu->threads[index].wait_channel != NULL) {
-			wakeup(vcpu->threads[index].wait_channel);
-			vcpu->threads[index].wait_channel = NULL;
-		}
-	}
 	lwkt_reltoken(&vcpu->token);
+	wakeup(vcpu);
 	return (0);
 
 failed:
@@ -459,6 +456,9 @@ vmmfs_vcpu_thread_wait_start(struct vmmfs_vcpu_thread *thread)
 		tsleep_interlock(vcpu, 0);
 		lwkt_gettoken(&vcpu->token);
 		if (vcpu->start_ready) {
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
 			lwkt_reltoken(&vcpu->token);
 			return;
 		}
@@ -473,8 +473,6 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	struct vmmfs_vcpu *vcpu;
 	struct vmmfs_machine *machine;
 	struct vmmfs_vcpu_thread *threads;
-	vmm_vcpu_t bsp_vcpu;
-	void *channel;
 	bool start_failed;
 
 	vcpu = thread->group;
@@ -484,25 +482,24 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 		lwkt_gettoken(&vcpu->token);
 		KKASSERT(vcpu->active_count > 1);
 		--vcpu->active_count;
-		bsp_vcpu = vcpu->threads[0].vcpu;
-		channel = bsp_vcpu != NULL ? bsp_vcpu :
-			vcpu->threads[0].wait_channel;
 		lwkt_reltoken(&vcpu->token);
-		wakeup(channel);
+		wakeup(vcpu);
 		exit1(0);
 	}
 
 	vmmfs_vcpu_request_stop(vcpu);
 	for (;;) {
-		channel = thread->vcpu != NULL ? thread->vcpu : thread->wait_channel;
-		tsleep_interlock(channel, 0);
+		tsleep_interlock(vcpu, 0);
 		lwkt_gettoken(&vcpu->token);
 		if (vcpu->active_count == 1) {
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
 			lwkt_reltoken(&vcpu->token);
 			break;
 		}
 		lwkt_reltoken(&vcpu->token);
-		(void)tsleep(channel, PINTERLOCKED, "vmmfsstop", 0);
+		(void)tsleep(vcpu, PINTERLOCKED, "vmmfsstop", 0);
 	}
 	vmmfs_vcpu_thread_destroy(thread);
 	lwkt_gettoken(&vcpu->token);
@@ -534,46 +531,47 @@ static void
 vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 {
 	struct vmmfs_vcpu *vcpu;
-	void *channel;
 	int error;
 
 	vcpu = thread->group;
 	if (thread->index != 0) {
-		channel = thread->vcpu;
 		vmmfs_vcpu_thread_destroy(thread);
 		lwkt_gettoken(&vcpu->token);
-		thread->wait_channel = channel;
 		++vcpu->reset_waiting;
-		wakeup(vcpu->threads[0].vcpu);
 		lwkt_reltoken(&vcpu->token);
+		wakeup(vcpu);
 		for (;;) {
-			tsleep_interlock(channel, 0);
+			tsleep_interlock(vcpu, 0);
 			lwkt_gettoken(&vcpu->token);
 			if (!vcpu->reset_requested || vcpu->stop_requested) {
-				thread->wait_channel = NULL;
+				crit_enter();
+				tsleep_remove(curthread);
+				crit_exit();
 				lwkt_reltoken(&vcpu->token);
 				break;
 			}
 			lwkt_reltoken(&vcpu->token);
-			(void)tsleep(channel, PINTERLOCKED, "vmmfsreset", 0);
+			(void)tsleep(vcpu, PINTERLOCKED, "vmmfsreset", 0);
 		}
 		return;
 	}
 
 	for (;;) {
-		tsleep_interlock(thread->vcpu, 0);
+		tsleep_interlock(vcpu, 0);
 		lwkt_gettoken(&vcpu->token);
 		if (vcpu->stop_requested ||
 		    vcpu->reset_waiting == vcpu->count - 1) {
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
 			lwkt_reltoken(&vcpu->token);
 			break;
 		}
 		lwkt_reltoken(&vcpu->token);
-		(void)tsleep(thread->vcpu, PINTERLOCKED, "vmmfsreset", 0);
+		(void)tsleep(vcpu, PINTERLOCKED, "vmmfsreset", 0);
 	}
 	if (vmmfs_vcpu_is_stop_requested(vcpu))
 		return;
-	thread->wait_channel = thread->vcpu;
 	vmmfs_vcpu_thread_destroy(thread);
 	error = vmmfs_machine_vcpu_reset(vcpu->machine);
 	if (error != 0) {
@@ -584,7 +582,6 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 	}
 	vmmfs_events_log(&vcpu->machine->events,
 	    VMMFS_MACHINE_EVENT_RESET_COMPLETED, NULL);
-	thread->wait_channel = NULL;
 }
 
 static void

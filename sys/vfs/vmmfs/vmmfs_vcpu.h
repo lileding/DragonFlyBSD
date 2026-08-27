@@ -24,7 +24,6 @@ struct vmmfs_vcpu_thread {
 	bool halted_logged;
 	struct vmmfs_pcislot_config_request *config_request;
 	bool config_done;
-	void *wait_channel;
 };
 
 struct vmmfs_vcpu {
