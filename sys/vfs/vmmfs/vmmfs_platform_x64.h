@@ -1,9 +1,12 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * x86-64 platform data prepared by vmmfs before its loader runs.  The region
- * is part of the vmmfs platform ABI; loaders must not overwrite it and must
- * publish its RSDP address through their guest boot protocol.
+ * VMMFS x64 platform data prepared before its loader runs.  This is the sole
+ * VMMFS x64 platform ABI: Cloud Hypervisor's BAR/MMIO [0xc0000000,
+ * 0xe8000000), ECAM [0xe8000000, 0xf8000000), and high-RAM-at-4-GiB layout.
+ * Direct Linux/DragonFly loaders and a CloudHV PVH firmware consume one
+ * machine.  Loaders must not overwrite this region and must publish its RSDP
+ * address through their guest boot protocol.
  */
 #ifndef VMMFS_PLATFORM_X64_H
 #define VMMFS_PLATFORM_X64_H
@@ -27,13 +30,11 @@ struct vmmfs_platform_x64 {
 	struct lwkt_token token;
 	vmm_machine_t runtime_machine;
 	uint64_t tsc_base;
-	uint16_t pm1_status;
-	uint16_t pm1_enable;
-	uint16_t pm1_control;
 	vmm_io_t delay_read;
 	vmm_io_t delay_write;
-	vmm_io_t acpi_read;
-	vmm_io_t acpi_write;
+	vmm_io_t power_read;
+	vmm_io_t power_write;
+	vmm_io_t timer_read;
 	vmm_io_t fch_pm_read;
 	vmm_io_t fch_pm_write;
 	vmm_io_t fallback_read;

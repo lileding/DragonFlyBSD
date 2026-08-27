@@ -691,8 +691,8 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 		case VMM_CPUEXIT_SHUTDOWN:
 			vmmfs_events_log(&vcpu->machine->events,
 			    VMMFS_MACHINE_EVENT_VCPU_SHUTDOWN, "index=%u", thread->index);
-			error = 0;
-			goto out;
+			vmmfs_vcpu_request_reset(vcpu);
+			continue;
 		default:
 			vmmfs_events_log(&vcpu->machine->events,
 			    VMMFS_MACHINE_EVENT_VCPU_UNSUPPORTED_EXIT,

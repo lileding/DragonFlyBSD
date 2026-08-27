@@ -1,7 +1,9 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * x86-64 ACPI platform tables owned by vmmfs.
+ * VMMFS x64 platform ABI.  The fixed layout follows Cloud Hypervisor so a
+ * direct Linux/DragonFly loader and a CloudHV PVH firmware consume the same
+ * machine.  Do not add legacy PM1 or alternate CloudHV PIO aliases here.
  */
 #include <sys/errno.h>
 #include <sys/malloc.h>
@@ -40,19 +42,15 @@
 
 #define VMMFS_PLATFORM_X64_DELAY_PORT 0x80U
 #define VMMFS_PLATFORM_X64_DELAY_SIZE 0x10U
-#define VMMFS_PLATFORM_X64_PM1_EVENT_PORT 0x400U
-#define VMMFS_PLATFORM_X64_PM1_EVENT_SIZE 4U
-#define VMMFS_PLATFORM_X64_PM1_CONTROL_PORT 0x404U
-#define VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE 2U
-#define VMMFS_PLATFORM_X64_ACPI_PORT VMMFS_PLATFORM_X64_PM1_EVENT_PORT
-#define VMMFS_PLATFORM_X64_ACPI_SIZE_PIO 13U
-#define VMMFS_PLATFORM_X64_PM_TIMER_PORT 0x408U
-#define VMMFS_PLATFORM_X64_PM_TIMER_LAST 0x40bU
-#define VMMFS_PLATFORM_X64_RESET_PORT 0x40cU
-#define VMMFS_PLATFORM_X64_RESET_VALUE 0x01U
-#define VMMFS_PLATFORM_X64_PM1_SLP_TYPE_MASK 0x1c00U
-#define VMMFS_PLATFORM_X64_PM1_SLP_TYPE_S5 (5U << 10)
-#define VMMFS_PLATFORM_X64_PM1_SLP_ENABLE 0x2000U
+#define VMMFS_PLATFORM_X64_POWER_PORT 0x600U
+#define VMMFS_PLATFORM_X64_POWER_SIZE 4U
+#define VMMFS_PLATFORM_X64_POWER_RESET_VALUE 0x01U
+#define VMMFS_PLATFORM_X64_POWER_OFF_VALUE 0x34U
+#define VMMFS_PLATFORM_X64_PM_TIMER_PORT 0x608U
+#define VMMFS_PLATFORM_X64_I8042_COMMAND_PORT 0x64U
+#define VMMFS_PLATFORM_X64_I8042_COMMAND_SIZE 1U
+#define VMMFS_PLATFORM_X64_I8042_RESET_VALUE 0xfeU
+#define VMMFS_PLATFORM_X64_PM_TIMER_SIZE 4U
 #define VMMFS_PLATFORM_X64_PM_TIMER_FREQUENCY 3579545ULL
 #define VMMFS_PLATFORM_X64_PM_TIMER_MASK 0x00ffffffU
 #define VMMFS_PLATFORM_X64_FCH_PM_BASE 0xfed80300ULL
@@ -89,6 +87,8 @@ static uint8_t *vmmfs_platform_x64_append_serial(uint8_t *,
 static void vmmfs_platform_x64_write16(uint8_t *, uint32_t, uint16_t);
 static void vmmfs_platform_x64_write32(uint8_t *, uint32_t, uint32_t);
 static void vmmfs_platform_x64_write64(uint8_t *, uint32_t, uint64_t);
+static void vmmfs_platform_x64_write_gas(uint8_t *, uint32_t, uint8_t,
+	uint8_t, uint64_t);
 
 static const uint8_t vmmfs_platform_x64_s5_aml[] = {
 	0x08, 0x5f, 0x53, 0x35, 0x5f, 0x12, 0x06, 0x02,
@@ -107,8 +107,8 @@ static const uint8_t vmmfs_platform_x64_serial_aml[] = {
 
 static const uint8_t vmmfs_platform_x64_pciroot_aml[] = {
 	/*
-	 * PCI0 publishes the bus and BAR apertures owned by VMMFS.  ECAM is
-	 * configuration space, not a downstream resource; MCFG describes it.
+	 * PCI0 publishes the bus and BAR aperture owned by VMMFS.  ECAM belongs
+	 * to the host bridge and is reserved separately as a motherboard resource.
 	 */
 	0x5b, 0x82, 0x4b, 0x06, 0x50, 0x43, 0x49, 0x30,
 	0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a,
@@ -122,11 +122,23 @@ static const uint8_t vmmfs_platform_x64_pciroot_aml[] = {
 	/* WordIO: 1000-bfff. */
 	0x88, 0x0d, 0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00,
 	0x10, 0xff, 0xbf, 0x00, 0x00, 0x00, 0xb0,
-	/* DWordMemory: c0000000-dfffffff. */
+	/* DWordMemory: c0000000-e7ffffff. */
 	0x87, 0x17, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xdf,
+	0x00, 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0xe7,
 	0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x79, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x79, 0x00,
+};
+
+/* Reserve ECAM outside PCI0 so MCFG is valid for generic ACPI guests. */
+static const uint8_t vmmfs_platform_x64_ecam_aml[] = {
+	0x5b, 0x82, 0x3a, 0x45, 0x43, 0x41, 0x4d, 0x08,
+	0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0c,
+	0x02, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x00, 0x08,
+	0x5f, 0x43, 0x52, 0x53, 0x11, 0x1f, 0x0a, 0x1c,
+	0x87, 0x17, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0xe8, 0xff, 0xff,
+	0xff, 0xf7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x10, 0x79, 0x00,
 };
 
 int
@@ -207,25 +219,25 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	vmmfs_platform_x64_write32(table, 36, VMMFS_PLATFORM_X64_FACS_GPA);
 	vmmfs_platform_x64_write32(table, 40, VMMFS_PLATFORM_X64_DSDT_GPA);
 	vmmfs_platform_x64_write16(table, 46, 9);
-	vmmfs_platform_x64_write32(table, 56,
-	    VMMFS_PLATFORM_X64_PM1_EVENT_PORT);
-	vmmfs_platform_x64_write32(table, 64,
-	    VMMFS_PLATFORM_X64_PM1_CONTROL_PORT);
-	vmmfs_platform_x64_write32(table, 76,
-	    VMMFS_PLATFORM_X64_PM_TIMER_PORT);
-	table[88] = VMMFS_PLATFORM_X64_PM1_EVENT_SIZE;
-	table[89] = VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE;
-	table[91] = 4;
-	table[108] = 0x32;
-	vmmfs_platform_x64_write32(table, 112, 1U << 10);
-	table[116] = 1;
-	table[117] = 8;
-	table[119] = 1;
-	vmmfs_platform_x64_write64(table, 120,
-	    VMMFS_PLATFORM_X64_RESET_PORT);
-	table[128] = VMMFS_PLATFORM_X64_RESET_VALUE;
+	/*
+	 * Hardware-reduced ACPI is the sole VMMFS x64 ABI.  These GAS records
+	 * match Cloud Hypervisor: reset/sleep at 0x600 and a 32-bit PM timer at
+	 * 0x608.  Legacy PM1 blocks are intentionally absent.
+	 */
+	vmmfs_platform_x64_write32(table, 112,
+	    (1U << 20) | (1U << 10) | (1U << 8));
+	vmmfs_platform_x64_write_gas(table, 116, 8, 1,
+	    VMMFS_PLATFORM_X64_POWER_PORT);
+	table[128] = VMMFS_PLATFORM_X64_POWER_RESET_VALUE;
+	table[131] = 3;
 	vmmfs_platform_x64_write64(table, 132, VMMFS_PLATFORM_X64_FACS_GPA);
 	vmmfs_platform_x64_write64(table, 140, VMMFS_PLATFORM_X64_DSDT_GPA);
+	vmmfs_platform_x64_write_gas(table, 208, 32, 3,
+	    VMMFS_PLATFORM_X64_PM_TIMER_PORT);
+	vmmfs_platform_x64_write_gas(table, 244, 8, 1,
+	    VMMFS_PLATFORM_X64_POWER_PORT);
+	vmmfs_platform_x64_write_gas(table, 256, 8, 1,
+	    VMMFS_PLATFORM_X64_POWER_PORT);
 	vmmfs_platform_x64_checksum(table, VMMFS_ACPI_FADT_SIZE, 9);
 
 	table = tables + 0x800;
@@ -285,6 +297,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
 		++serial_count;
 	scope_body_length = 5 + sizeof(vmmfs_platform_x64_pciroot_aml) +
+	    sizeof(vmmfs_platform_x64_ecam_aml) +
 	    serial_count * VMMFS_ACPI_SERIAL_AML_SIZE;
 	*cursor++ = 0x10;
 	cursor = vmmfs_platform_x64_pkg_length(cursor, scope_body_length);
@@ -296,6 +309,9 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	bcopy(vmmfs_platform_x64_pciroot_aml, cursor,
 	    sizeof(vmmfs_platform_x64_pciroot_aml));
 	cursor += sizeof(vmmfs_platform_x64_pciroot_aml);
+	bcopy(vmmfs_platform_x64_ecam_aml, cursor,
+	    sizeof(vmmfs_platform_x64_ecam_aml));
+	cursor += sizeof(vmmfs_platform_x64_ecam_aml);
 	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
 		cursor = vmmfs_platform_x64_append_serial(cursor, port);
 	lwkt_reltoken(&serialroot->machine->token);
@@ -324,9 +340,9 @@ vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
 		return (EINVAL);
 	if (platform->runtime_machine != NULL)
 		return (EBUSY);
-	platform->pm1_status = 0;
-	platform->pm1_enable = 0;
-	platform->pm1_control = 0;
+	platform->power_read = NULL;
+	platform->power_write = NULL;
+	platform->timer_read = NULL;
 	error = vmm_machine_trap_pio_read(machine,
 	    VMMFS_PLATFORM_X64_DELAY_PORT, VMMFS_PLATFORM_X64_DELAY_SIZE,
 	    vmmfs_platform_x64_read, platform, &platform->delay_read);
@@ -338,15 +354,21 @@ vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
 	if (error != 0)
 		goto fail_delay_read;
 	error = vmm_machine_trap_pio_read(machine,
-	    VMMFS_PLATFORM_X64_ACPI_PORT, VMMFS_PLATFORM_X64_ACPI_SIZE_PIO,
-	    vmmfs_platform_x64_read, platform, &platform->acpi_read);
+	    VMMFS_PLATFORM_X64_POWER_PORT, VMMFS_PLATFORM_X64_POWER_SIZE,
+	    vmmfs_platform_x64_read, platform, &platform->power_read);
 	if (error != 0)
 		goto fail_delay_write;
 	error = vmm_machine_trap_pio_write(machine,
-	    VMMFS_PLATFORM_X64_ACPI_PORT, VMMFS_PLATFORM_X64_ACPI_SIZE_PIO,
-	    vmmfs_platform_x64_write, platform, &platform->acpi_write);
+	    VMMFS_PLATFORM_X64_POWER_PORT, VMMFS_PLATFORM_X64_POWER_SIZE,
+	    vmmfs_platform_x64_write, platform, &platform->power_write);
 	if (error != 0)
-		goto fail_acpi_read;
+		goto fail_power_read;
+	error = vmm_machine_trap_pio_read(machine,
+	    VMMFS_PLATFORM_X64_PM_TIMER_PORT,
+	    VMMFS_PLATFORM_X64_PM_TIMER_SIZE,
+	    vmmfs_platform_x64_read, platform, &platform->timer_read);
+	if (error != 0)
+		goto fail_power_write;
 	/*
 	 * Zen Linux reads this FCH status register during early CPU setup.
 	 * VMMFS has no FCH, so report the architectural all-ones absent value.
@@ -355,7 +377,7 @@ vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
 	    VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA, sizeof(uint32_t),
 	    vmmfs_platform_x64_read, platform, &platform->fch_pm_read);
 	if (error != 0)
-		goto fail_acpi_write;
+		goto fail_timer_read;
 	error = vmm_machine_trap_mmio_write(machine,
 	    VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA, sizeof(uint32_t),
 	    vmmfs_platform_x64_write, platform, &platform->fch_pm_write);
@@ -388,12 +410,15 @@ fail_fch_pm_write:
 fail_fch_pm_read:
 	(void)vmm_machine_untrap(machine, platform->fch_pm_read);
 	platform->fch_pm_read = NULL;
-fail_acpi_write:
-	(void)vmm_machine_untrap(machine, platform->acpi_write);
-	platform->acpi_write = NULL;
-fail_acpi_read:
-	(void)vmm_machine_untrap(machine, platform->acpi_read);
-	platform->acpi_read = NULL;
+fail_timer_read:
+	(void)vmm_machine_untrap(machine, platform->timer_read);
+	platform->timer_read = NULL;
+fail_power_write:
+	(void)vmm_machine_untrap(machine, platform->power_write);
+	platform->power_write = NULL;
+fail_power_read:
+	(void)vmm_machine_untrap(machine, platform->power_read);
+	platform->power_read = NULL;
 fail_delay_write:
 	(void)vmm_machine_untrap(machine, platform->delay_write);
 	platform->delay_write = NULL;
@@ -407,14 +432,15 @@ int
 vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 {
 	vmm_machine_t machine;
-	vmm_io_t acpi_read;
-	vmm_io_t acpi_write;
 	vmm_io_t delay_read;
 	vmm_io_t delay_write;
 	vmm_io_t fch_pm_read;
 	vmm_io_t fch_pm_write;
 	vmm_io_t fallback_read;
 	vmm_io_t fallback_write;
+	vmm_io_t power_read;
+	vmm_io_t power_write;
+	vmm_io_t timer_read;
 	int error;
 	int result;
 
@@ -423,23 +449,25 @@ vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 	machine = platform->runtime_machine;
 	if (machine == NULL)
 		return (0);
-	acpi_read = platform->acpi_read;
-	acpi_write = platform->acpi_write;
 	delay_read = platform->delay_read;
 	delay_write = platform->delay_write;
 	fch_pm_read = platform->fch_pm_read;
 	fch_pm_write = platform->fch_pm_write;
 	fallback_read = platform->fallback_read;
 	fallback_write = platform->fallback_write;
+	power_read = platform->power_read;
+	power_write = platform->power_write;
+	timer_read = platform->timer_read;
 	platform->runtime_machine = NULL;
-	platform->acpi_read = NULL;
-	platform->acpi_write = NULL;
 	platform->delay_read = NULL;
 	platform->delay_write = NULL;
 	platform->fch_pm_read = NULL;
 	platform->fch_pm_write = NULL;
 	platform->fallback_read = NULL;
 	platform->fallback_write = NULL;
+	platform->power_read = NULL;
+	platform->power_write = NULL;
+	platform->timer_read = NULL;
 	result = 0;
 	if (fallback_write != NULL) {
 		error = vmm_machine_untrap(machine, fallback_write);
@@ -461,13 +489,18 @@ vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 		if (result == 0)
 			result = error;
 	}
-	if (acpi_write != NULL) {
-		error = vmm_machine_untrap(machine, acpi_write);
-		if (error != 0)
+	if (timer_read != NULL) {
+		error = vmm_machine_untrap(machine, timer_read);
+		if (result == 0)
 			result = error;
 	}
-	if (acpi_read != NULL) {
-		error = vmm_machine_untrap(machine, acpi_read);
+	if (power_write != NULL) {
+		error = vmm_machine_untrap(machine, power_write);
+		if (result == 0)
+			result = error;
+	}
+	if (power_read != NULL) {
+		error = vmm_machine_untrap(machine, power_read);
 		if (result == 0)
 			result = error;
 	}
@@ -510,49 +543,27 @@ vmmfs_platform_x64_read(vmm_vcpu_t vcpu, void *argument,
 		lwkt_reltoken(&platform->token);
 		return (0);
 	}
-	if (read->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
-	    end <= VMMFS_PLATFORM_X64_PM1_CONTROL_PORT +
-	    VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE) {
+	if (read->address >= VMMFS_PLATFORM_X64_POWER_PORT &&
+	    end <= VMMFS_PLATFORM_X64_POWER_PORT +
+	    VMMFS_PLATFORM_X64_POWER_SIZE) {
 		read->value = 0;
-		for (unsigned int index = 0; index < read->width; ++index) {
-			uint8_t value;
-
-			switch (read->address + index) {
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT:
-				value = platform->pm1_status;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 1U:
-				value = platform->pm1_status >> 8;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 2U:
-				value = platform->pm1_enable;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 3U:
-				value = platform->pm1_enable >> 8;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_CONTROL_PORT:
-				value = platform->pm1_control;
-				break;
-			default:
-				value = platform->pm1_control >> 8;
-				break;
-			}
-				read->value |= (uint64_t)value << (index * 8U);
-		}
 		lwkt_reltoken(&platform->token);
 		return (0);
 	}
-	if (read->address >= VMMFS_PLATFORM_X64_PM_TIMER_PORT &&
-	    end <= VMMFS_PLATFORM_X64_PM_TIMER_LAST + 1U) {
-		read->value = vmmfs_platform_x64_pm_timer(platform) >>
-		    ((read->address - VMMFS_PLATFORM_X64_PM_TIMER_PORT) * 8U);
+	/*
+	 * Provide only the i8042 reset-control status bit.  Linux waits for
+	 * bit 1 to clear before issuing the architectural 0xfe reset command.
+	 * VMMFS does not otherwise emulate a keyboard controller.
+	 */
+	if (read->address == VMMFS_PLATFORM_X64_I8042_COMMAND_PORT &&
+	    read->width == VMM_IO_WIDTH_8) {
+		read->value = 0;
 		lwkt_reltoken(&platform->token);
 		return (0);
 	}
-	if (read->address >= VMMFS_PLATFORM_X64_ACPI_PORT &&
-	    end <= VMMFS_PLATFORM_X64_ACPI_PORT +
-	    VMMFS_PLATFORM_X64_ACPI_SIZE_PIO) {
-		read->value = 0;
+	if (read->address == VMMFS_PLATFORM_X64_PM_TIMER_PORT &&
+	    read->width == VMM_IO_WIDTH_32) {
+		read->value = vmmfs_platform_x64_pm_timer(platform);
 		lwkt_reltoken(&platform->token);
 		return (0);
 	}
@@ -568,7 +579,6 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 	struct vmmfs_platform_x64 *platform;
 	bool power_off;
 	bool reset;
-	uint64_t end;
 
 	(void)vcpu;
 	platform = argument;
@@ -576,52 +586,20 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 		return (ENOENT);
 	power_off = false;
 	reset = false;
-	end = write->address + write->width;
 	lwkt_gettoken(&platform->token);
 	if ((write->address == VMMFS_PLATFORM_X64_FCH_PM_S5_RESET_GPA &&
 	    write->width == VMM_IO_WIDTH_32) ||
-	    (write->address == VMMFS_PLATFORM_X64_RESET_PORT &&
+	    (write->address == VMMFS_PLATFORM_X64_POWER_PORT &&
 	    write->width == VMM_IO_WIDTH_8 &&
-	    write->value == VMMFS_PLATFORM_X64_RESET_VALUE)) {
+	    write->value == VMMFS_PLATFORM_X64_POWER_RESET_VALUE) ||
+	    (write->address == VMMFS_PLATFORM_X64_I8042_COMMAND_PORT &&
+	    write->width == VMM_IO_WIDTH_8 &&
+	    write->value == VMMFS_PLATFORM_X64_I8042_RESET_VALUE)) {
 		reset = true;
-	} else if (write->address >= VMMFS_PLATFORM_X64_PM1_EVENT_PORT &&
-	    end <= VMMFS_PLATFORM_X64_PM1_CONTROL_PORT +
-	    VMMFS_PLATFORM_X64_PM1_CONTROL_SIZE) {
-		for (unsigned int index = 0; index < write->width; ++index) {
-			uint8_t value = write->value >> (index * 8U);
-
-			switch (write->address + index) {
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT:
-				platform->pm1_status &= ~(uint16_t)value;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 1U:
-				platform->pm1_status &= ~((uint16_t)value << 8);
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 2U:
-				platform->pm1_enable =
-				    (platform->pm1_enable & 0xff00U) | value;
-				break;
-			case VMMFS_PLATFORM_X64_PM1_EVENT_PORT + 3U:
-				platform->pm1_enable =
-				    (platform->pm1_enable & 0x00ffU) |
-				    ((uint16_t)value << 8);
-				break;
-			case VMMFS_PLATFORM_X64_PM1_CONTROL_PORT:
-				platform->pm1_control =
-				    (platform->pm1_control & 0xff00U) | value;
-				break;
-			default:
-				platform->pm1_control =
-				    (platform->pm1_control & 0x00ffU) |
-				    ((uint16_t)value << 8);
-				break;
-			}
-		}
-		power_off = (platform->pm1_control &
-		    (VMMFS_PLATFORM_X64_PM1_SLP_TYPE_MASK |
-		    VMMFS_PLATFORM_X64_PM1_SLP_ENABLE)) ==
-		    (VMMFS_PLATFORM_X64_PM1_SLP_TYPE_S5 |
-		    VMMFS_PLATFORM_X64_PM1_SLP_ENABLE);
+	} else if (write->address == VMMFS_PLATFORM_X64_POWER_PORT &&
+	    write->width == VMM_IO_WIDTH_8 &&
+	    write->value == VMMFS_PLATFORM_X64_POWER_OFF_VALUE) {
+		power_off = true;
 	}
 	lwkt_reltoken(&platform->token);
 	if (power_off) {
@@ -776,4 +754,15 @@ static void
 vmmfs_platform_x64_write64(uint8_t *buffer, uint32_t offset, uint64_t value)
 {
 	bcopy(&value, buffer + offset, sizeof(value));
+}
+
+static void
+vmmfs_platform_x64_write_gas(uint8_t *buffer, uint32_t offset,
+	uint8_t bit_width, uint8_t access_size, uint64_t address)
+{
+	buffer[offset] = 1; /* System I/O */
+	buffer[offset + 1] = bit_width;
+	buffer[offset + 2] = 0;
+	buffer[offset + 3] = access_size;
+	vmmfs_platform_x64_write64(buffer, offset + 4, address);
 }

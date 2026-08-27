@@ -172,7 +172,7 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)
 	vm_object_set_flag(object, OBJ_NOSPLIT);
 	/*
 	 * Keep the complete GPA namespace available.  RAM is mapped later around
-	 * the fixed platform and PCI MMIO aperture.
+	 * the fixed VMMFS x64 PCI hole.
 	 */
 	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VMMFS_GPA_MAX);
 	if (vmspace == NULL) {
@@ -205,10 +205,10 @@ vmmfs_memory_map(struct vmmfs_memory *memory)
 		    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
 	if (error != 0)
 		return (error);
-	if (size > VMMFS_PCI_MMIO_END) {
+	if (size > VMMFS_PCI_HOLE_END) {
 		error = vmmfs_memory_map_object(memory, memory->object,
-		    VMMFS_PCI_MMIO_END, VMMFS_PCI_MMIO_END,
-		    size - VMMFS_PCI_MMIO_END,
+		    VMMFS_PCI_HOLE_END, VMMFS_PCI_HOLE_END,
+		    size - VMMFS_PCI_HOLE_END,
 		    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
 		if (error != 0)
 			return (error);

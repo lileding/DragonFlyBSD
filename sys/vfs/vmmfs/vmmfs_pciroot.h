@@ -17,11 +17,17 @@ struct vmmfs_vcpu_thread;
 struct vnode;
 struct vop_ops;
 
+/*
+ * The sole VMMFS x64 platform ABI follows the Cloud Hypervisor layout:
+ * BAR/MMIO is [0xc0000000, 0xe8000000), ECAM is [0xe8000000, 0xf8000000),
+ * and [0xf8000000, 4 GiB) remains a non-RAM platform hole.
+ */
 #define VMMFS_PCI_MMIO_GPA 0xc0000000ULL
-#define VMMFS_PCI_MMIO_END 0x100000000ULL
-#define VMMFS_PCI_ECAM_GPA 0xe0000000ULL
+#define VMMFS_PCI_MMIO_END 0xe8000000ULL
+#define VMMFS_PCI_ECAM_GPA 0xe8000000ULL
 #define VMMFS_PCI_ECAM_SIZE 0x10000000ULL
 #define VMMFS_PCI_ECAM_END (VMMFS_PCI_ECAM_GPA + VMMFS_PCI_ECAM_SIZE)
+#define VMMFS_PCI_HOLE_END 0x100000000ULL
 #define VMMFS_PCI_PIO_GPA 0x1000U
 #define VMMFS_PCI_PIO_END 0xc000U
 

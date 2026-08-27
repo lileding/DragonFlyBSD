@@ -24,6 +24,11 @@
 #define VMMFS_PCIROOT_MODE 0555
 #define VMMFS_PCI_CONFIG_ADDRESS 0xcf8U
 #define VMMFS_PCI_CONFIG_DATA 0xcfcU
+#define VMMFS_PCI_HOSTBRIDGE_BDF 0U
+#define VMMFS_PCI_HOSTBRIDGE_VENDOR_ID 0x8086U
+#define VMMFS_PCI_HOSTBRIDGE_DEVICE_ID 0x0d57U
+#define VMMFS_PCI_HOSTBRIDGE_CLASS 0x060000U
+#define VMMFS_PCI_HOSTBRIDGE_CONFIG_SIZE 0x100U
 
 struct vmmfs_pciroot_item {
 	ino_t inode;
@@ -65,6 +70,8 @@ static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
 	struct vmmfs_pciroot *, uint16_t);
 static void vmmfs_pciroot_drop_slot(struct vmmfs_pcislot *);
 static uint32_t vmmfs_pciroot_absent_value(enum vmm_io_width);
+static int vmmfs_pciroot_hostbridge_read(uint16_t, enum vmm_io_width,
+	uint32_t *);
 static int vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *,
 	vmm_vcpu_t, uint16_t, uint16_t, enum vmm_io_width, uint32_t *);
 
@@ -1207,6 +1214,8 @@ vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *pciroot,
 		*value = vmmfs_pciroot_absent_value(width);
 		return (0);
 	}
+	if (bdf == VMMFS_PCI_HOSTBRIDGE_BDF)
+		return (vmmfs_pciroot_hostbridge_read(offset, width, value));
 	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
 	if (slot == NULL || !slot->type0.powered) {
 		*value = vmmfs_pciroot_absent_value(width);
@@ -1218,6 +1227,42 @@ vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *pciroot,
 	if (error != 0) {
 		*value = vmmfs_pciroot_absent_value(width);
 		return (0);
+	}
+	return (0);
+}
+
+static int
+vmmfs_pciroot_hostbridge_read(uint16_t offset, enum vmm_io_width width,
+	uint32_t *value)
+{
+	uint8_t byte;
+
+	if (value == NULL || width == 0 || width > VMM_IO_WIDTH_32 ||
+	    offset > VMMFS_PCI_HOSTBRIDGE_CONFIG_SIZE - width)
+		return (EINVAL);
+	*value = 0;
+	for (unsigned int index = 0; index < width; ++index) {
+		switch (offset + index) {
+		case 0x00:
+			byte = VMMFS_PCI_HOSTBRIDGE_VENDOR_ID & UINT8_MAX;
+			break;
+		case 0x01:
+			byte = VMMFS_PCI_HOSTBRIDGE_VENDOR_ID >> 8;
+			break;
+		case 0x02:
+			byte = VMMFS_PCI_HOSTBRIDGE_DEVICE_ID & UINT8_MAX;
+			break;
+		case 0x03:
+			byte = VMMFS_PCI_HOSTBRIDGE_DEVICE_ID >> 8;
+			break;
+		case 0x0b:
+			byte = VMMFS_PCI_HOSTBRIDGE_CLASS >> 16;
+			break;
+		default:
+			byte = 0;
+			break;
+		}
+		*value |= (uint32_t)byte << (index * NBBY);
 	}
 	return (0);
 }
