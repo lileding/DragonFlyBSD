@@ -95,6 +95,20 @@ static const uint8_t vmmfs_platform_x64_s5_aml[] = {
 	0x0a, 0x05, 0x0a, 0x05,
 };
 
+/*
+ * Publish the existing CMOS PIO implementation as the ACPI RTC device.
+ * No IRQ resource is advertised until VMMFS implements RTC alarm/periodic
+ * interrupt delivery.
+ */
+static const uint8_t vmmfs_platform_x64_rtc_aml[] = {
+	0x5b, 0x82, 0x28, 0x52, 0x54, 0x43, 0x30,
+	0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0b,
+	0x00, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x00, 0x08,
+	0x5f, 0x43, 0x52, 0x53, 0x11, 0x0d, 0x0a, 0x0a,
+	0x47, 0x01, 0x70, 0x00, 0x70, 0x00, 0x01, 0x02,
+	0x79, 0x00,
+};
+
 static const uint8_t vmmfs_platform_x64_serial_aml[] = {
 	0x5b, 0x82, 0x35, 0x43, 0x4f, 0x4d, 0x31,
 	0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x05,
@@ -298,6 +312,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 		++serial_count;
 	scope_body_length = 5 + sizeof(vmmfs_platform_x64_pciroot_aml) +
 	    sizeof(vmmfs_platform_x64_ecam_aml) +
+	    sizeof(vmmfs_platform_x64_rtc_aml) +
 	    serial_count * VMMFS_ACPI_SERIAL_AML_SIZE;
 	*cursor++ = 0x10;
 	cursor = vmmfs_platform_x64_pkg_length(cursor, scope_body_length);
@@ -312,6 +327,9 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	bcopy(vmmfs_platform_x64_ecam_aml, cursor,
 	    sizeof(vmmfs_platform_x64_ecam_aml));
 	cursor += sizeof(vmmfs_platform_x64_ecam_aml);
+	bcopy(vmmfs_platform_x64_rtc_aml, cursor,
+	    sizeof(vmmfs_platform_x64_rtc_aml));
+	cursor += sizeof(vmmfs_platform_x64_rtc_aml);
 	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
 		cursor = vmmfs_platform_x64_append_serial(cursor, port);
 	lwkt_reltoken(&serialroot->machine->token);
