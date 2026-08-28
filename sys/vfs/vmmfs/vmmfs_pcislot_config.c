@@ -88,12 +88,14 @@ int
 vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_config *config)
 {
+	struct vmmfs_machine *machine;
 	struct vmmfs_mount *mount;
 	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || config == NULL)
 		return (EINVAL);
+	machine = slot->pciroot->machine;
 	mount = (struct vmmfs_mount *)slot->pciroot->machine->root->mount->mnt_data;
 	if (mount->pcislot_config_vops == NULL)
 		return (ENXIO);
@@ -103,17 +105,21 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	lwkt_token_init(&config->token, "vmmfspcicfg");
 	TAILQ_INIT(&config->requests);
 	SLIST_INIT(&config->kq.ki_note);
+	vmmfs_machine_hold(machine);
+	vmmfs_pcislot_hold(slot);
 	error = vmmfs_node_init(&config->node,
-	    slot->pciroot->machine->root->mount,
+	    machine->root->mount,
 	    &mount->pcislot_config_vops, VREG, config);
 	if (error != 0)
-		goto fail_token;
-	vmmfs_machine_hold(slot->pciroot->machine);
-	vmmfs_pcislot_hold(slot);
+		goto fail_node;
 	return (0);
 
-fail_token:
+fail_node:
+	vmmfs_node_abort(&config->node);
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
 	config->slot = NULL;
+	config->inode = 0;
 	lwkt_token_uninit(&config->token);
 	return (error);
 }
@@ -121,17 +127,30 @@ fail_token:
 int
 vmmfs_pcislot_config_fini(struct vmmfs_pcislot_config *config)
 {
+	struct vmmfs_machine *machine;
+	struct vmmfs_pcislot *slot;
+
 	if (config == NULL)
 		return (EINVAL);
+	slot = config->slot;
+	if (slot == NULL || slot->pciroot == NULL)
+		return (0);
+	machine = slot->pciroot->machine;
+	if (machine == NULL)
+		return (EINVAL);
 	lwkt_gettoken(&config->token);
-	if (config->node.vnode != NULL) {
+	if (config->node.published) {
 		lwkt_reltoken(&config->token);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&config->token);
+	vmmfs_node_abort(&config->node);
 	vmmfs_pcislot_config_revoke(config);
 	config->slot = NULL;
+	config->inode = 0;
 	lwkt_token_uninit(&config->token);
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
 	return (0);
 }
 

@@ -66,9 +66,12 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 	struct vmmfs_mount *state;
 	int error;
 
+	if (machine == NULL || events == NULL)
+		return (EINVAL);
 	bzero(events, sizeof(*events));
 	events->machine = machine;
 	lwkt_token_init(&events->token, "vmmfsevents");
+	vmmfs_machine_hold(machine);
 	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
@@ -76,39 +79,49 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 	events->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	if (state->events_vops == NULL) {
 		error = ENXIO;
-		goto fail_buffer;
+		goto fail;
 	}
 	error = vmmfs_node_init(&events->node, machine->root->mount,
 	    &state->events_vops, VREG, events);
 	if (error != 0)
-		goto fail_buffer;
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
 
-fail_buffer:
+fail:
+	vmmfs_node_abort(&events->node);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
-	lwkt_token_uninit(&events->token);
 	events->machine = NULL;
+	events->inode = 0;
+	lwkt_token_uninit(&events->token);
+	vmmfs_machine_put(machine);
 	return (error);
 }
 
 int
 vmmfs_events_fini(struct vmmfs_events *events)
 {
+	struct vmmfs_machine *machine;
+
 	if (events == NULL)
 		return (EINVAL);
+	machine = events->machine;
+	if (machine == NULL)
+		return (0);
 	lwkt_gettoken(&events->token);
-	if (events->node.vnode != NULL) {
+	if (events->node.published) {
 		lwkt_reltoken(&events->token);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&events->token);
+	vmmfs_node_abort(&events->node);
 	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
 	events->machine = NULL;
+	events->inode = 0;
 	lwkt_token_uninit(&events->token);
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -454,7 +467,6 @@ vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 	if (reclaim) {
 		error = vmmfs_events_fini(events);
 		KKASSERT(error == 0);
-		vmmfs_machine_put(machine);
 	}
 	return (0);
 }

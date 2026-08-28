@@ -123,37 +123,59 @@ vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 	struct vmmfs_mount *state;
 	int error = 0;
 
+	if (machine == NULL || vcpu == NULL)
+		return (EINVAL);
 	bzero(vcpu, sizeof(*vcpu));
 	vcpu->machine = machine;
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
+	vmmfs_machine_hold(machine);
 	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
 	vcpu->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	if (state->vcpu_vops == NULL)
-		return (ENXIO);
+	if (state->vcpu_vops == NULL) {
+		error = ENXIO;
+		goto fail;
+	}
 
 	error = vmmfs_node_init(&vcpu->node, machine->root->mount,
 	    &state->vcpu_vops, VREG, vcpu);
 	if (error != 0)
-		return (error);
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
+
+fail:
+	vmmfs_node_abort(&vcpu->node);
+	vcpu->machine = NULL;
+	vcpu->inode = 0;
+	lwkt_token_uninit(&vcpu->token);
+	vmmfs_machine_put(machine);
+	return (error);
 }
 
 int
 vmmfs_vcpu_fini(struct vmmfs_vcpu *vcpu)
 {
+	struct vmmfs_machine *machine;
+
 	if (vcpu == NULL)
 		return (EINVAL);
+	machine = vcpu->machine;
+	if (machine == NULL)
+		return (0);
 	lwkt_gettoken(&vcpu->token);
 	if (vcpu->active_count != 0 || vcpu->threads != NULL) {
 		lwkt_reltoken(&vcpu->token);
 		return (EBUSY);
 	}
-	lwkt_reltoken(&vcpu->token);
-	if (vcpu->node.vnode != NULL)
+	if (vcpu->node.published) {
+		lwkt_reltoken(&vcpu->token);
 		return (EBUSY);
+	}
+	lwkt_reltoken(&vcpu->token);
+	vmmfs_node_abort(&vcpu->node);
 	lwkt_token_uninit(&vcpu->token);
 	vcpu->machine = NULL;
+	vcpu->inode = 0;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -854,7 +876,6 @@ vmmfs_vcpu_reclaim(struct vop_reclaim_args *ap)
 	if (reclaim) {
 		error = vmmfs_vcpu_fini(vcpu);
 		KKASSERT(error == 0);
-		vmmfs_machine_put(machine);
 	}
 	return (0);
 }

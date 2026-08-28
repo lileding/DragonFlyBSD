@@ -54,31 +54,51 @@ vmmfs_machine_id_init(struct vmmfs_machine *machine,
 	if (machine == NULL || identity == NULL)
 		return (EINVAL);
 	bzero(identity, sizeof(*identity));
+	vmmfs_machine_hold(machine);
 	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
-	if (state->machine_id_vops == NULL)
-		return (ENXIO);
+	if (state->machine_id_vops == NULL) {
+		error = ENXIO;
+		goto fail;
+	}
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
-	if (value > VMMFS_MACHINE_ID_MAX)
-		return (ENOSPC);
+	if (value > VMMFS_MACHINE_ID_MAX) {
+		error = ENOSPC;
+		goto fail;
+	}
 	identity->machine = machine;
 	identity->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	machine->id = value;
 	error = vmmfs_node_init(&identity->node, machine->root->mount,
 	    &state->machine_id_vops, VREG, identity);
 	if (error != 0)
-		return (error);
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
+
+fail:
+	vmmfs_node_abort(&identity->node);
+	identity->machine = NULL;
+	identity->inode = 0;
+	machine->id = 0;
+	vmmfs_machine_put(machine);
+	return (error);
 }
 
 int
 vmmfs_machine_id_fini(struct vmmfs_machine_id *identity)
 {
+	struct vmmfs_machine *machine;
+
 	if (identity == NULL)
 		return (EINVAL);
-	if (identity->node.vnode != NULL)
+	machine = identity->machine;
+	if (machine == NULL)
+		return (0);
+	if (identity->node.published)
 		return (EBUSY);
+	vmmfs_node_abort(&identity->node);
 	identity->machine = NULL;
+	identity->inode = 0;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -202,7 +222,6 @@ vmmfs_machine_id_reclaim(struct vop_reclaim_args *ap)
 	if (reclaim) {
 		error = vmmfs_machine_id_fini(identity);
 		KKASSERT(error == 0);
-		vmmfs_machine_put(machine);
 	}
 	return (0);
 }

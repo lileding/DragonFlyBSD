@@ -111,45 +111,61 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot)
 
 	if (machine == NULL || boot == NULL || machine->root == NULL)
 		return (EINVAL);
+	bzero(boot, sizeof(*boot));
 	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
 	boot->machine = machine;
+	vmmfs_machine_hold(machine);
 	boot->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	serial = atomic_fetchadd_int(&vmmfs_boot_dev_serial, 1);
 	boot->dev = make_only_dev(&vmmfs_boot_dev_ops, serial, UID_ROOT,
 		GID_WHEEL, VMMFS_BOOT_MODE, "vmmfs_boot%d", serial);
-	if (boot->dev == NULL)
-		return (ENOMEM);
+	if (boot->dev == NULL) {
+		error = ENOMEM;
+		goto fail;
+	}
 	boot->dev->si_drv1 = boot;
 	error = vmmfs_node_init_cdev(&boot->node, machine->root->mount,
 		&mount->boot_vops, boot->dev, boot);
 	if (error != 0)
-		goto fail_dev;
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
 
-fail_dev:
-	boot->dev->si_drv1 = NULL;
-	destroy_only_dev(boot->dev);
-	boot->dev = NULL;
-	boot->machine = NULL;
-	return (error);
-}
-
-int
-vmmfs_boot_fini(struct vmmfs_boot *boot)
-{
-	if (boot == NULL)
-		return (EINVAL);
-	if (boot->node.vnode != NULL || boot->session != NULL)
-		return (EBUSY);
+fail:
+	vmmfs_node_abort(&boot->node);
 	if (boot->dev != NULL) {
 		boot->dev->si_drv1 = NULL;
 		destroy_only_dev(boot->dev);
 		boot->dev = NULL;
 	}
 	boot->machine = NULL;
+	boot->inode = 0;
+	vmmfs_machine_put(machine);
+	return (error);
+}
+
+int
+vmmfs_boot_fini(struct vmmfs_boot *boot)
+{
+	struct vmmfs_machine *machine;
+
+	if (boot == NULL)
+		return (EINVAL);
+	machine = boot->machine;
+	if (machine == NULL)
+		return (0);
+	if (boot->node.published || boot->session != NULL)
+		return (EBUSY);
+	vmmfs_node_abort(&boot->node);
+	if (boot->dev != NULL) {
+		boot->dev->si_drv1 = NULL;
+		destroy_only_dev(boot->dev);
+		boot->dev = NULL;
+	}
+	boot->machine = NULL;
+	boot->inode = 0;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -425,8 +441,8 @@ vmmfs_boot_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&boot->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim)
-		vmmfs_machine_put(machine);
+	if (reclaim && vmmfs_boot_fini(boot) != 0)
+		panic("vmmfs_boot_reclaim: boot fini failed");
 	return (0);
 }
 

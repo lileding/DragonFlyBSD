@@ -65,12 +65,14 @@ int
 vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_events *state_node)
 {
+	struct vmmfs_machine *machine;
 	struct vmmfs_mount *mount;
 	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || state_node == NULL)
 		return (EINVAL);
+	machine = slot->pciroot->machine;
 	mount = (struct vmmfs_mount *)slot->pciroot->machine->root->mount->mnt_data;
 	if (mount->pcislot_events_vops == NULL)
 		return (ENXIO);
@@ -81,39 +83,56 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	state_node->buffer = kmalloc(VMMFS_PCISLOT_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	state_node->inode = atomic_fetchadd_int(&mount->next_inode, 1);
+	vmmfs_machine_hold(machine);
+	vmmfs_pcislot_hold(slot);
 	error = vmmfs_node_init(&state_node->node,
-	    slot->pciroot->machine->root->mount,
+	    machine->root->mount,
 	    &mount->pcislot_events_vops, VREG, state_node);
 	if (error != 0)
-		goto fail_buffer;
-	vmmfs_machine_hold(slot->pciroot->machine);
-	vmmfs_pcislot_hold(slot);
+		goto fail_node;
 	return (0);
 
-fail_buffer:
+fail_node:
+	vmmfs_node_abort(&state_node->node);
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
 	lwkt_token_uninit(&state_node->token);
 	state_node->slot = NULL;
+	state_node->inode = 0;
 	return (error);
 }
 
 int
 vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *state_node)
 {
+	struct vmmfs_machine *machine;
+	struct vmmfs_pcislot *slot;
+
 	if (state_node == NULL)
 		return (EINVAL);
+	slot = state_node->slot;
+	if (slot == NULL || slot->pciroot == NULL)
+		return (0);
+	machine = slot->pciroot->machine;
+	if (machine == NULL)
+		return (EINVAL);
 	lwkt_gettoken(&state_node->token);
-	if (state_node->node.vnode != NULL) {
+	if (state_node->node.published) {
 		lwkt_reltoken(&state_node->token);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&state_node->token);
+	vmmfs_node_abort(&state_node->node);
 	vmmfs_pcislot_events_revoke(state_node);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
 	state_node->slot = NULL;
+	state_node->inode = 0;
 	lwkt_token_uninit(&state_node->token);
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
 	return (0);
 }
 

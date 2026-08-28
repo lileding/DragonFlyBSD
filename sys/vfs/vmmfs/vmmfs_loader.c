@@ -941,26 +941,43 @@ vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 		return (EINVAL);
 	bzero(loader, sizeof(*loader));
 	loader->machine = machine;
+	vmmfs_machine_hold(machine);
 	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
-	if (mount == NULL || mount->loader_vops == NULL)
-		return (ENXIO);
+	if (mount == NULL || mount->loader_vops == NULL) {
+		error = ENXIO;
+		goto fail;
+	}
 	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	error = vmmfs_node_init(&loader->node, machine->root->mount,
 	    &mount->loader_vops, VREG, loader);
 	if (error != 0)
-		return (error);
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
+
+fail:
+	vmmfs_node_abort(&loader->node);
+	loader->machine = NULL;
+	loader->inode = 0;
+	vmmfs_machine_put(machine);
+	return (error);
 }
 
 int
 vmmfs_loader_fini(struct vmmfs_loader *loader)
 {
+	struct vmmfs_machine *machine;
+
 	if (loader == NULL)
 		return (EINVAL);
-	if (loader->node.vnode != NULL)
+	machine = loader->machine;
+	if (machine == NULL)
+		return (0);
+	if (loader->node.published)
 		return (EBUSY);
+	vmmfs_node_abort(&loader->node);
 	loader->machine = NULL;
+	loader->inode = 0;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -1109,7 +1126,6 @@ vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 	if (reclaim) {
 		error = vmmfs_loader_fini(loader);
 		KKASSERT(error == 0);
-		vmmfs_machine_put(machine);
 	}
 	return (0);
 }

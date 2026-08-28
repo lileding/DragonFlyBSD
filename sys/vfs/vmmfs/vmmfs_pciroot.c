@@ -69,6 +69,7 @@ static bool vmmfs_pciroot_ecam_contains(uint64_t, enum vmm_io_width);
 static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
 	struct vmmfs_pciroot *, uint16_t);
 static void vmmfs_pciroot_drop_slot(struct vmmfs_pcislot *);
+static void vmmfs_pciroot_release_node_reference(struct vmmfs_pciroot *);
 static uint32_t vmmfs_pciroot_absent_value(enum vmm_io_width);
 static int vmmfs_pciroot_hostbridge_read(uint16_t, enum vmm_io_width,
 	uint32_t *);
@@ -108,45 +109,55 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	pciroot->machine = machine;
 	pciroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	RB_INIT(&pciroot->slots);
+	vmmfs_machine_hold(machine);
+	pciroot->node_reference = true;
 	error = vmmfs_node_init(&pciroot->node, machine->root->mount,
 	    &state->pciroot_vops, VDIR, pciroot);
-	if (error != 0) {
-		pciroot->machine = NULL;
-		return (error);
-	}
-	vmmfs_machine_hold(machine);
+	if (error != 0)
+		goto fail;
 	return (0);
+
+fail:
+	vmmfs_node_abort(&pciroot->node);
+	pciroot->node_reference = false;
+	pciroot->machine = NULL;
+	vmmfs_machine_put(machine);
+	return (error);
 }
 
 int
 vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pcislot *slot;
+	struct vmmfs_machine *machine;
 
 	if (pciroot == NULL)
 		return (EINVAL);
-	if (pciroot->machine == NULL)
+	machine = pciroot->machine;
+	if (machine == NULL)
 		return (0);
-	lwkt_gettoken(&pciroot->machine->token);
+	if (pciroot->node.published)
+		return (EBUSY);
+	lwkt_gettoken(&machine->token);
 	if (pciroot->runtime_machine != NULL) {
-		lwkt_reltoken(&pciroot->machine->token);
+		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
-	lwkt_reltoken(&pciroot->machine->token);
-	if (pciroot->node.vnode != NULL)
-		return (EBUSY);
+	lwkt_reltoken(&machine->token);
+	vmmfs_node_abort(&pciroot->node);
 	for (;;) {
-		lwkt_gettoken(&pciroot->machine->token);
+		lwkt_gettoken(&machine->token);
 		slot = RB_ROOT(&pciroot->slots);
 		if (slot != NULL) {
 			RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
 			slot->dead = true;
 		}
-		lwkt_reltoken(&pciroot->machine->token);
+		lwkt_reltoken(&machine->token);
 		if (slot == NULL)
 			break;
 		vmmfs_pciroot_drop_slot(slot);
 	}
+	vmmfs_pciroot_release_node_reference(pciroot);
 	pciroot->machine = NULL;
 	return (0);
 }
@@ -878,8 +889,20 @@ vmmfs_pciroot_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&pciroot->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_machine_put(machine);
+		vmmfs_pciroot_release_node_reference(pciroot);
 	return (0);
+}
+
+static void
+vmmfs_pciroot_release_node_reference(struct vmmfs_pciroot *pciroot)
+{
+	struct vmmfs_machine *machine;
+
+	machine = pciroot->machine;
+	if (machine == NULL || !pciroot->node_reference)
+		return;
+	pciroot->node_reference = false;
+	vmmfs_machine_put(machine);
 }
 
 static int

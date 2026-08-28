@@ -80,6 +80,8 @@ vmmfs_node_abort(struct vmmfs_node *node)
 	if (node == NULL || node->vnode == NULL)
 		return;
 	vnode = node->vnode;
+	KKASSERT(!node->published);
+	KKASSERT(node->base_reference);
 	node->vnode = NULL;
 	node->published = false;
 	node->base_reference = false;

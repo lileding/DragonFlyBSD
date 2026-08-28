@@ -39,6 +39,7 @@ struct vmmfs_pciroot {
 	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
 	ino_t inode;
+	bool node_reference;
 	struct vmmfs_pcislot_tree slots;
 	vmm_machine_t runtime_machine;
 	uint64_t mmio_next;

@@ -118,31 +118,50 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 	struct vmmfs_mount *state;
 	int error;
 
+	if (machine == NULL || memory == NULL)
+		return (EINVAL);
 	bzero(memory, sizeof(*memory));
 	memory->machine = machine;
+	vmmfs_machine_hold(machine);
 	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
-    memory->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	if (state->memory_vops == NULL)
-		return (ENXIO);
+	memory->inode = atomic_fetchadd_int(&state->next_inode, 1);
+	if (state->memory_vops == NULL) {
+		error = ENXIO;
+		goto fail;
+	}
 
 	error = vmmfs_node_init(&memory->node, machine->root->mount,
 	    &state->memory_vops, VREG, memory);
 	if (error != 0)
-		return (error);
-	vmmfs_machine_hold(machine);
+		goto fail;
 	return (0);
+
+fail:
+	vmmfs_node_abort(&memory->node);
+	memory->machine = NULL;
+	memory->inode = 0;
+	vmmfs_machine_put(machine);
+	return (error);
 }
 
 int
 vmmfs_memory_fini(struct vmmfs_memory *memory)
 {
+	struct vmmfs_machine *machine;
+
 	if (memory == NULL)
 		return (EINVAL);
+	machine = memory->machine;
+	if (machine == NULL)
+		return (0);
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		return (EBUSY);
-	if (memory->node.vnode != NULL)
+	if (memory->node.published)
 		return (EBUSY);
+	vmmfs_node_abort(&memory->node);
 	memory->machine = NULL;
+	memory->inode = 0;
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
@@ -504,7 +523,6 @@ vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 	if (reclaim) {
 		error = vmmfs_memory_fini(memory);
 		KKASSERT(error == 0);
-		vmmfs_machine_put(machine);
 	}
 	return (0);
 }

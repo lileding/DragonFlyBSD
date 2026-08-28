@@ -24,6 +24,7 @@ struct vmmfs_serialroot {
 	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
 	ino_t inode;
+	bool node_reference;
 	struct vmmfs_serialport_tree ports;
 };
 

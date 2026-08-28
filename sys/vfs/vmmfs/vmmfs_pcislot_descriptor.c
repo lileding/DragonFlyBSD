@@ -113,39 +113,40 @@ int
 vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_descriptor *descriptor)
 {
+	struct vmmfs_machine *machine;
 	struct vmmfs_mount *mount;
 	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || descriptor == NULL)
 		return (EINVAL);
+	machine = slot->pciroot->machine;
 	mount = (struct vmmfs_mount *)slot->pciroot->machine->root->mount->mnt_data;
 	if (mount->pcislot_descriptor_vops == NULL)
 		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
+	lwkt_gettoken(&machine->token);
+	if (machine->machine != NULL) {
+		lwkt_reltoken(&machine->token);
+		return (EBUSY);
+	}
+	lwkt_reltoken(&machine->token);
 	descriptor->slot = slot;
 	descriptor->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	error = vmmfs_node_init(&descriptor->node,
-	    slot->pciroot->machine->root->mount,
-	    &mount->pcislot_descriptor_vops, VREG, descriptor);
-	if (error != 0) {
-		descriptor->slot = NULL;
-		return (error);
-	}
-	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (slot->pciroot->machine->machine != NULL) {
-		lwkt_reltoken(&slot->pciroot->machine->token);
-		error = EBUSY;
-		goto fail_vnode;
-	}
-	vmmfs_machine_hold(slot->pciroot->machine);
-	lwkt_reltoken(&slot->pciroot->machine->token);
+	vmmfs_machine_hold(machine);
 	vmmfs_pcislot_hold(slot);
+	error = vmmfs_node_init(&descriptor->node,
+	    machine->root->mount,
+	    &mount->pcislot_descriptor_vops, VREG, descriptor);
+	if (error != 0)
+		goto fail_node;
 	return (0);
 
-fail_vnode:
+fail_node:
 	vmmfs_node_abort(&descriptor->node);
-	descriptor->slot = NULL;
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
+	bzero(descriptor, sizeof(*descriptor));
 	return (error);
 }
 
@@ -155,34 +156,35 @@ vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_pcislot_auth *auth;
 	struct vmmfs_machine *machine;
+	struct vmmfs_pcislot *slot;
 
 	if (descriptor == NULL)
 		return (EINVAL);
-	machine = descriptor->slot == NULL || descriptor->slot->pciroot == NULL ?
-	    NULL : descriptor->slot->pciroot->machine;
-	if (descriptor->node.vnode != NULL)
+	slot = descriptor->slot;
+	if (slot == NULL || slot->pciroot == NULL)
+		return (0);
+	machine = slot->pciroot->machine;
+	if (machine == NULL)
+		return (EINVAL);
+	if (descriptor->node.published)
 		return (EBUSY);
-	if (machine != NULL) {
-		lwkt_gettoken(&machine->token);
-		if (descriptor->updating) {
-			lwkt_reltoken(&machine->token);
-			return (EBUSY);
-		}
-		resources = descriptor->resources;
-		auth = descriptor->auth;
-		descriptor->resources = NULL;
-		descriptor->auth = NULL;
-		descriptor->committed = false;
+	lwkt_gettoken(&machine->token);
+	if (descriptor->updating) {
 		lwkt_reltoken(&machine->token);
-	} else {
-		resources = descriptor->resources;
-		auth = descriptor->auth;
-		descriptor->resources = NULL;
-		descriptor->auth = NULL;
+		return (EBUSY);
 	}
+	resources = descriptor->resources;
+	auth = descriptor->auth;
+	descriptor->resources = NULL;
+	descriptor->auth = NULL;
+	descriptor->committed = false;
+	lwkt_reltoken(&machine->token);
+	vmmfs_node_abort(&descriptor->node);
 	(void)vmmfs_pcislot_resources_destroy(resources);
 	vmmfs_pcislot_auth_revoke(auth);
-	descriptor->slot = NULL;
+	bzero(descriptor, sizeof(*descriptor));
+	vmmfs_pcislot_put(slot);
+	vmmfs_machine_put(machine);
 	return (0);
 }
 
