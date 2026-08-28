@@ -6,6 +6,8 @@
 #ifndef VMMFS_MACHINE_ID_H
 #define VMMFS_MACHINE_ID_H
 
+#include "vmmfs_node.h"
+
 #include <sys/types.h>
 
 struct vmmfs_machine;
@@ -18,8 +20,8 @@ struct vop_ops;
 #define VMMFS_MACHINE_INDEX_MAX 99U
 
 struct vmmfs_machine_id {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 };
 

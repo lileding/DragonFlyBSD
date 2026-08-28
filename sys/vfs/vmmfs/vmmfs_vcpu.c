@@ -121,7 +121,6 @@ int
 vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 {
 	struct vmmfs_mount *state;
-	struct vnode *vnode;
 	int error = 0;
 
 	bzero(vcpu, sizeof(*vcpu));
@@ -132,16 +131,11 @@ vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu)
 	if (state->vcpu_vops == NULL)
 		return (ENXIO);
 
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&vcpu->node, machine->root->mount,
+	    &state->vcpu_vops, VREG, vcpu);
 	if (error != 0)
 		return (error);
-	vnode->v_data = vcpu;
-	vnode->v_ops = &state->vcpu_vops;
-	vnode->v_type = VREG;
-	vcpu->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 }
 
@@ -156,8 +150,9 @@ vmmfs_vcpu_fini(struct vmmfs_vcpu *vcpu)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&vcpu->token);
-	if (vcpu->vnode != NULL)
+	if (vcpu->node.vnode != NULL)
 		return (EBUSY);
+	lwkt_token_uninit(&vcpu->token);
 	vcpu->machine = NULL;
 	return (0);
 }
@@ -835,11 +830,9 @@ vmmfs_vcpu_inactive(struct vop_inactive_args *ap)
 	if (vcpu == NULL)
 		return (0);
 	machine = vcpu->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &vcpu->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&vcpu->node, ap->a_vp);
 	return (0);
 }
 
@@ -848,17 +841,20 @@ vmmfs_vcpu_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_vcpu *vcpu;
 	struct vmmfs_machine *machine;
+	bool reclaim;
+	int error;
 
 	vcpu = ap->a_vp->v_data;
-	if (vcpu != NULL) {
-		machine = vcpu->machine;
-		if (vcpu->vnode == ap->a_vp)
-			vcpu->vnode = NULL;
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (vcpu == NULL || vcpu->machine == NULL)
+		return (0);
+	machine = vcpu->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&vcpu->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim) {
+		error = vmmfs_vcpu_fini(vcpu);
+		KKASSERT(error == 0);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }

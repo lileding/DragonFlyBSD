@@ -8,6 +8,8 @@
 
 #include <sys/event.h>
 #include <sys/queue.h>
+
+#include "vmmfs_node.h"
 #include <sys/types.h>
 
 #include <sys/vmmfs.h>
@@ -36,8 +38,8 @@ TAILQ_HEAD(vmmfs_pcislot_config_request_queue,
 	    vmmfs_pcislot_config_request);
 
 struct vmmfs_pcislot_config {
+	struct vmmfs_node node;
 	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;

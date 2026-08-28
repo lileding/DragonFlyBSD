@@ -11,6 +11,7 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
+#include "vmmfs_node.h"
 #include <dev/virtual/vmm/vmm.h>
 
 #include "vmmfs_events.h"
@@ -32,9 +33,9 @@ struct vmmfs_root;
 struct ucred;
 
 struct vmmfs_machine {
+	struct vmmfs_node node;
 	RB_ENTRY(vmmfs_machine) entry;
 	struct vmmfs_root *root;
-	struct vnode *vnode;
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	uint32_t id;
@@ -50,7 +51,7 @@ struct vmmfs_machine {
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
 	struct vmmfs_boot boot;
-	struct vmmfs_stopped stopped;
+	struct vmmfs_stopped *stopped;
 	struct vmmfs_pciroot pciroot;
 	struct vmmfs_platform_x64 platform;
 	struct vmmfs_rtc rtc;
@@ -67,13 +68,12 @@ extern struct vop_ops vmmfs_machine_vops;
 int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
 int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **);
+void vmmfs_machine_publish(struct vmmfs_machine *);
 void vmmfs_machine_abort_create(struct vmmfs_machine *);
 int vmmfs_machine_begin_destroy(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);
 void vmmfs_machine_put(struct vmmfs_machine *);
 bool vmmfs_machine_is_dead(struct vmmfs_machine *);
-bool vmmfs_machine_vnode_detach(struct vmmfs_machine *, struct vnode **,
-	struct vnode *);
 
 /* Requests a warm reset without rerunning the loader. */
 int vmmfs_machine_reset(struct vmmfs_machine *);

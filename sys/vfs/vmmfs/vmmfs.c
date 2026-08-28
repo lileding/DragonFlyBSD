@@ -59,16 +59,6 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_uninit = vmmfs_vfs_uninit,
 };
 
-void
-vmmfs_vnode_discard(struct vnode *vnode)
-{
-	if (vnode == NULL)
-		return;
-	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
-	vfinalize(vnode);
-	vrele(vnode);
-}
-
 static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
 {
@@ -134,7 +124,7 @@ vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 		return (ENXIO);
 
 	lwkt_gettoken(&root->token);
-	vp = root->vnode;
+	vp = root->node.vnode;
 	lwkt_reltoken(&root->token);
 	if (vp == NULL)
 		return (ENOENT);

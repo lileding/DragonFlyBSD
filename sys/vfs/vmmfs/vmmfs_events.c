@@ -64,7 +64,6 @@ int
 vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 {
 	struct vmmfs_mount *state;
-	struct vnode *vnode;
 	int error;
 
 	bzero(events, sizeof(*events));
@@ -79,16 +78,11 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 		error = ENXIO;
 		goto fail_buffer;
 	}
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&events->node, machine->root->mount,
+	    &state->events_vops, VREG, events);
 	if (error != 0)
 		goto fail_buffer;
-	vnode->v_data = events;
-	vnode->v_ops = &state->events_vops;
-	vnode->v_type = VREG;
-	events->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 
 fail_buffer:
@@ -105,7 +99,7 @@ vmmfs_events_fini(struct vmmfs_events *events)
 	if (events == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&events->token);
-	if (events->vnode != NULL) {
+	if (events->node.vnode != NULL) {
 		lwkt_reltoken(&events->token);
 		return (EBUSY);
 	}
@@ -436,11 +430,9 @@ vmmfs_events_inactive(struct vop_inactive_args *ap)
 	if (events == NULL)
 		return (0);
 	machine = events->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &events->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&events->node, ap->a_vp);
 	return (0);
 }
 
@@ -449,18 +441,21 @@ vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_events *events;
 	struct vmmfs_machine *machine;
+	bool reclaim;
+	int error;
 
 	events = ap->a_vp->v_data;
-	if (events != NULL) {
-		machine = events->machine;
-		if (events->vnode == ap->a_vp)
-			events->vnode = NULL;
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (events == NULL || events->machine == NULL)
+		return (0);
+	machine = events->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&events->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim) {
+		error = vmmfs_events_fini(events);
+		KKASSERT(error == 0);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }
 

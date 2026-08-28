@@ -114,7 +114,6 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 	struct vmmfs_pcislot_descriptor *descriptor)
 {
 	struct vmmfs_mount *mount;
-	struct vnode *vnode;
 	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
@@ -126,33 +125,26 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 	bzero(descriptor, sizeof(*descriptor));
 	descriptor->slot = slot;
 	descriptor->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	error = getnewvnode(VT_SYNTH, slot->pciroot->machine->root->mount,
-	    &vnode, 0, 0);
+	error = vmmfs_node_init(&descriptor->node,
+	    slot->pciroot->machine->root->mount,
+	    &mount->pcislot_descriptor_vops, VREG, descriptor);
 	if (error != 0) {
 		descriptor->slot = NULL;
 		return (error);
 	}
 	lwkt_gettoken(&slot->pciroot->machine->token);
-	if (slot->pciroot->machine->machine != NULL || descriptor->vnode != NULL) {
+	if (slot->pciroot->machine->machine != NULL) {
 		lwkt_reltoken(&slot->pciroot->machine->token);
 		error = EBUSY;
 		goto fail_vnode;
 	}
-	vnode->v_data = descriptor;
-	vnode->v_ops = &mount->pcislot_descriptor_vops;
-	vnode->v_type = VREG;
-	descriptor->vnode = vnode;
 	vmmfs_machine_hold(slot->pciroot->machine);
 	lwkt_reltoken(&slot->pciroot->machine->token);
 	vmmfs_pcislot_hold(slot);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 
 fail_vnode:
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
-	vmmfs_vnode_discard(vnode);
+	vmmfs_node_abort(&descriptor->node);
 	descriptor->slot = NULL;
 	return (error);
 }
@@ -168,7 +160,7 @@ vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 		return (EINVAL);
 	machine = descriptor->slot == NULL || descriptor->slot->pciroot == NULL ?
 	    NULL : descriptor->slot->pciroot->machine;
-	if (descriptor->vnode != NULL)
+	if (descriptor->node.vnode != NULL)
 		return (EBUSY);
 	if (machine != NULL) {
 		lwkt_gettoken(&machine->token);
@@ -337,13 +329,9 @@ vmmfs_pcislot_descriptor_inactive(struct vop_inactive_args *ap)
 	    descriptor->slot->pciroot == NULL)
 		return (0);
 	machine = descriptor->slot->pciroot->machine;
-	if (!vmmfs_pcislot_vnode_detach(descriptor->slot, &descriptor->vnode,
-	    ap->a_vp))
+	if (machine == NULL || !vmmfs_pcislot_is_dead(descriptor->slot))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_pcislot_put(descriptor->slot);
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&descriptor->node, ap->a_vp);
 	return (0);
 }
 
@@ -357,13 +345,17 @@ vmmfs_pcislot_descriptor_reclaim(struct vop_reclaim_args *ap)
 	if (descriptor != NULL && descriptor->slot != NULL &&
 	    descriptor->slot->pciroot != NULL) {
 		machine = descriptor->slot->pciroot->machine;
-		if (descriptor->vnode == ap->a_vp)
-			descriptor->vnode = NULL;
 	} else {
 		machine = NULL;
 	}
-	ap->a_vp->v_data = NULL;
 	if (machine != NULL) {
+		bool reclaim;
+
+		lwkt_gettoken(&machine->token);
+		reclaim = vmmfs_node_reclaim(&descriptor->node, ap->a_vp);
+		lwkt_reltoken(&machine->token);
+		if (!reclaim)
+			return (0);
 		vmmfs_pcislot_put(descriptor->slot);
 		vmmfs_machine_put(machine);
 	}
@@ -399,21 +391,22 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	    descriptor->slot->pciroot == NULL ||
 	    descriptor->slot->pciroot->machine == NULL)
 		return (ENOENT);
-	if (ap->a_uio->uio_offset != 0 || ap->a_uio->uio_resid == 0 ||
+	if (ap->a_uio->uio_offset != 0 ||
 	    ap->a_uio->uio_resid >= VMMFS_PCISLOT_DESCRIPTOR_MAX)
 		return (EINVAL);
 	machine = descriptor->slot->pciroot->machine;
 	length = (size_t)ap->a_uio->uio_resid;
-	buffer = kmalloc(length, M_VMMFS, M_WAITOK);
-	value = kmalloc(sizeof(*value), M_VMMFS, M_WAITOK | M_ZERO);
+	buffer = NULL;
+	value = NULL;
 	new_auth = NULL;
 	updating = false;
-	error = uiomove(buffer, length, ap->a_uio);
-	if (error != 0)
-		goto failed;
-	removing = length == sizeof("present=0\n") - 1 &&
-	    bcmp(buffer, "present=0\n", length) == 0;
+	removing = length == 0;
 	if (!removing) {
+		buffer = kmalloc(length, M_VMMFS, M_WAITOK);
+		value = kmalloc(sizeof(*value), M_VMMFS, M_WAITOK | M_ZERO);
+		error = uiomove(buffer, length, ap->a_uio);
+		if (error != 0)
+			goto failed;
 		error = vmmfs_pcislot_descriptor_parse(descriptor->slot, buffer,
 		    length, value);
 		if (error != 0)
@@ -457,8 +450,20 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	lwkt_reltoken(&machine->token);
 	(void)vmmfs_pcislot_resources_destroy(old_resources);
 	vmmfs_pcislot_auth_revoke(old_auth);
-	vmmfs_pcislot_events_reset(&descriptor->slot->events);
 	lwkt_gettoken(&machine->token);
+	if (machine->dead || descriptor->slot->dead) {
+		descriptor->updating = false;
+		updating = false;
+		lwkt_reltoken(&machine->token);
+		error = ENOENT;
+		goto failed;
+	}
+	/*
+	 * Keep the machine token through the complete visible commit.  A
+	 * concurrent rmdir must not reclaim config, events, or the slot vnode
+	 * between this state update and its notification.
+	 */
+	vmmfs_pcislot_events_reset(&descriptor->slot->events);
 	if (removing) {
 		bzero(&descriptor->value, sizeof(descriptor->value));
 		descriptor->committed = false;
@@ -468,12 +473,9 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 		descriptor->auth = new_auth;
 	}
 	descriptor->generation = generation;
-	descriptor->updating = false;
-	updating = false;
-	lwkt_reltoken(&machine->token);
 	vmmfs_pcislot_config_descriptor_changed(&descriptor->slot->config,
 	    generation, !removing);
-	cache_inval_vp(descriptor->slot->vnode, CINV_CHILDREN);
+	cache_inval_vp(descriptor->slot->node.vnode, CINV_CHILDREN);
 	if (removing) {
 		vmmfs_pcislot_events_log(&descriptor->slot->events,
 		    VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED, "generation=%ju",
@@ -483,8 +485,13 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 		    VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED, "generation=%ju",
 		    (uintmax_t)generation);
 	}
-	kfree(value, M_VMMFS);
-	kfree(buffer, M_VMMFS);
+	descriptor->updating = false;
+	updating = false;
+	lwkt_reltoken(&machine->token);
+	if (value != NULL)
+		kfree(value, M_VMMFS);
+	if (buffer != NULL)
+		kfree(buffer, M_VMMFS);
 	return (0);
 
 failed:
@@ -494,8 +501,10 @@ failed:
 		descriptor->updating = false;
 		lwkt_reltoken(&machine->token);
 	}
-	kfree(value, M_VMMFS);
-	kfree(buffer, M_VMMFS);
+	if (value != NULL)
+		kfree(value, M_VMMFS);
+	if (buffer != NULL)
+		kfree(buffer, M_VMMFS);
 	return (error);
 }
 

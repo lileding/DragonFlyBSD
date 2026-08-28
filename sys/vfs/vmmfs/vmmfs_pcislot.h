@@ -9,6 +9,7 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
+#include "vmmfs_node.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_auth.h"
@@ -33,9 +34,9 @@ struct vmmfs_pcislot_type0 {
 };
 
 struct vmmfs_pcislot {
+	struct vmmfs_node node;
 	RB_ENTRY(vmmfs_pcislot) entry;
 	struct vmmfs_pciroot *pciroot;
-	struct vnode *vnode;
 	ino_t inode;
 	uint16_t bdf;
 	unsigned int references;
@@ -55,10 +56,9 @@ int vmmfs_pcislot_compare(struct vmmfs_pcislot *, struct vmmfs_pcislot *);
 int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 	struct vmmfs_pcislot **);
 void vmmfs_pcislot_hold(struct vmmfs_pcislot *);
+void vmmfs_pcislot_publish(struct vmmfs_pcislot *);
 void vmmfs_pcislot_put(struct vmmfs_pcislot *);
 bool vmmfs_pcislot_is_dead(struct vmmfs_pcislot *);
-bool vmmfs_pcislot_vnode_detach(struct vmmfs_pcislot *, struct vnode **,
-	struct vnode *);
 void vmmfs_pcislot_release_vnodes(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);

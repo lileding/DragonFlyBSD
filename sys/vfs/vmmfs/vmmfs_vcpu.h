@@ -6,6 +6,8 @@
 #ifndef VMMFS_VCPU_H
 #define VMMFS_VCPU_H
 
+#include "vmmfs_node.h"
+
 #include <sys/thread.h>
 #include <sys/types.h>
 
@@ -27,8 +29,8 @@ struct vmmfs_vcpu_thread {
 };
 
 struct vmmfs_vcpu {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	struct vmmfs_vcpu_thread *threads;
 	vmm_machine_t runtime_machine;

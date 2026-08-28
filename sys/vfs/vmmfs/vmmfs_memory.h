@@ -6,6 +6,8 @@
 #ifndef VMMFS_MEMORY_H
 #define VMMFS_MEMORY_H
 
+#include "vmmfs_node.h"
+
 #include <sys/types.h>
 
 #include <vm/vm.h>
@@ -30,8 +32,8 @@ int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
 void vmmfs_memory_unmap(struct vmmfs_memory *, uint64_t, uint64_t);
 
 struct vmmfs_memory {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	struct vm_object *object;
 	struct vmspace *boot_vmspace;

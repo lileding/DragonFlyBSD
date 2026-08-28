@@ -116,7 +116,6 @@ int
 vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 {
 	struct vmmfs_mount *state;
-	struct vnode *vnode;
 	int error;
 
 	bzero(memory, sizeof(*memory));
@@ -126,16 +125,11 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 	if (state->memory_vops == NULL)
 		return (ENXIO);
 
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&memory->node, machine->root->mount,
+	    &state->memory_vops, VREG, memory);
 	if (error != 0)
 		return (error);
-	vnode->v_data = memory;
-	vnode->v_ops = &state->memory_vops;
-	vnode->v_type = VREG;
-	memory->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 }
 
@@ -146,7 +140,7 @@ vmmfs_memory_fini(struct vmmfs_memory *memory)
 		return (EINVAL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		return (EBUSY);
-	if (memory->vnode != NULL)
+	if (memory->node.vnode != NULL)
 		return (EBUSY);
 	memory->machine = NULL;
 	return (0);
@@ -486,11 +480,9 @@ vmmfs_memory_inactive(struct vop_inactive_args *ap)
 	if (memory == NULL)
 		return (0);
 	machine = memory->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &memory->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&memory->node, ap->a_vp);
 	return (0);
 }
 
@@ -499,17 +491,20 @@ vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_memory *memory;
 	struct vmmfs_machine *machine;
+	bool reclaim;
+	int error;
 
 	memory = ap->a_vp->v_data;
-	if (memory != NULL) {
-		machine = memory->machine;
-		if (memory->vnode == ap->a_vp)
-			memory->vnode = NULL;
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (memory == NULL || memory->machine == NULL)
+		return (0);
+	machine = memory->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&memory->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim) {
+		error = vmmfs_memory_fini(memory);
+		KKASSERT(error == 0);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }

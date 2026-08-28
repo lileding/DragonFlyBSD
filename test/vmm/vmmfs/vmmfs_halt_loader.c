@@ -27,7 +27,7 @@
 #define FADT_GPA		0x70200ULL
 #define MCFG_GPA		0x70600ULL
 #define MCFG_SIZE		60U
-#define PCI_ECAM_GPA		0xe0000000ULL
+#define PCI_ECAM_GPA		0xe8000000ULL
 
 #define CR0_PE			0x00000001ULL
 #define CR0_NE			0x00000020ULL
@@ -46,6 +46,7 @@
 static void build_cpu_state(struct vmm_cpustate *);
 static void build_guest(uint8_t *, uint64_t, int, int, int, int);
 static void check_pci_topology(const uint8_t *, uint64_t);
+static void check_gas(const uint8_t *, uint8_t, uint8_t, uint64_t);
 static void set_segment(struct vmm_segment *, uint16_t, uint16_t, uint32_t,
     uint64_t);
 static void write64(uint8_t *, uint64_t, uint64_t);
@@ -88,11 +89,11 @@ main(int argc, char **argv)
 	build_guest(memory, (uint64_t)st.st_size, check_pci, loop_pci,
 	    check_pci_doorbell, check_pci_config);
 	build_cpu_state(&state);
-	written = write(2, &state, sizeof(state));
+	written = write(3, &state, sizeof(state));
 	if (written < 0)
-		err(1, "write fd2 cpustate");
+		err(1, "write fd3 cpustate");
 	if ((size_t)written != sizeof(state))
-		errx(1, "short write to fd2 cpustate");
+		errx(1, "short write to fd3 cpustate");
 	return (0);
 }
 
@@ -100,19 +101,21 @@ static void
 check_pci_topology(const uint8_t *memory, uint64_t memory_size)
 {
 	uint32_t length;
-	uint32_t pm1_event;
-	uint32_t pm1_control;
+	uint32_t fadt_flags;
 	uint64_t address;
 
 	if (memory_size < MCFG_GPA + MCFG_SIZE)
 		errx(1, "guest memory lacks MCFG");
 	if (memcmp(memory + FADT_GPA, "FACP", 4) != 0)
 		errx(1, "FADT signature");
-	memcpy(&pm1_event, memory + FADT_GPA + 56, sizeof(pm1_event));
-	memcpy(&pm1_control, memory + FADT_GPA + 64, sizeof(pm1_control));
-	if (pm1_event != 0x400 || pm1_control != 0x404 ||
-	    memory[FADT_GPA + 88] != 4 || memory[FADT_GPA + 89] != 2)
-		errx(1, "FADT PM1 registers");
+	memcpy(&fadt_flags, memory + FADT_GPA + 112, sizeof(fadt_flags));
+	if (fadt_flags != ((1U << 20) | (1U << 10) | (1U << 8)) ||
+	    memory[FADT_GPA + 128] != 1 || memory[FADT_GPA + 131] != 3)
+		errx(1, "FADT hardware-reduced reset");
+	check_gas(memory + FADT_GPA + 116, 8, 1, 0x600);
+	check_gas(memory + FADT_GPA + 208, 32, 3, 0x608);
+	check_gas(memory + FADT_GPA + 244, 8, 1, 0x600);
+	check_gas(memory + FADT_GPA + 256, 8, 1, 0x600);
 	if (memcmp(memory + MCFG_GPA, "MCFG", 4) != 0)
 		errx(1, "MCFG signature");
 	memcpy(&length, memory + MCFG_GPA + 4, sizeof(length));
@@ -127,6 +130,20 @@ check_pci_topology(const uint8_t *memory, uint64_t memory_size)
 	memcpy(&address, memory + XSDT_GPA + 52, sizeof(address));
 	if (address != MCFG_GPA)
 		errx(1, "XSDT MCFG entry");
+}
+
+static void
+check_gas(const uint8_t *gas, uint8_t width, uint8_t access,
+	uint64_t expected_address)
+{
+	uint64_t address;
+
+	if (gas[0] != 1 || gas[1] != width || gas[2] != 0 ||
+	    gas[3] != access)
+		errx(1, "FADT GAS format");
+	memcpy(&address, gas + 4, sizeof(address));
+	if (address != expected_address)
+		errx(1, "FADT GAS address");
 }
 
 static void
@@ -160,14 +177,14 @@ build_guest(uint8_t *memory, uint64_t memory_size, int check_pci, int loop_pci,
 	memset(memory + TSS_GPA, 0, 0x68);
 	if (check_pci_doorbell) {
 		static const uint8_t guest[] = {
-			0xb8, 0x00, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008000 */
+			0xb8, 0x00, 0x80, 0x00, 0xe8,	/* mov eax, 0xe8008000 */
 			0x8b, 0x00,				/* mov eax, [rax] */
 			0x3d, 0xf4, 0x1a, 0x42, 0x10,	/* cmp eax, 0x10421af4 */
 			0x74, 0x02,				/* je 2 */
 			0x0f, 0x0b,				/* ud2 */
-			0xb8, 0x04, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008004 */
+			0xb8, 0x04, 0x80, 0x00, 0xe8,	/* mov eax, 0xe8008004 */
 			0xc7, 0x00, 0x02, 0x00, 0x00, 0x00,	/* mov dword [rax], 2 */
-			0xb8, 0x10, 0x80, 0x00, 0xe0,	/* mov eax, 0xe0008010 */
+			0xb8, 0x10, 0x80, 0x00, 0xe8,	/* mov eax, 0xe8008010 */
 			0x8b, 0x00,				/* mov eax, [rax] */
 			0x83, 0xe0, 0xf0,			/* and eax, 0xfffffff0 */
 			0x48, 0x89, 0xc1,			/* mov rcx, rax */
@@ -188,7 +205,7 @@ build_guest(uint8_t *memory, uint64_t memory_size, int check_pci, int loop_pci,
 		memory[ENTRY_GPA + 1] = 0x00;
 		memory[ENTRY_GPA + 2] = 0x00;
 		memory[ENTRY_GPA + 3] = 0x00;
-		memory[ENTRY_GPA + 4] = 0xe0;
+		memory[ENTRY_GPA + 4] = 0xe8;
 		memory[ENTRY_GPA + 5] = 0x8b;
 		memory[ENTRY_GPA + 6] = 0x00;
 		memory[ENTRY_GPA + 7] = 0x83;

@@ -97,7 +97,6 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_mount *state;
-	struct vnode *vnode;
 	int error;
 
 	if (machine == NULL || pciroot == NULL)
@@ -109,18 +108,13 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	pciroot->machine = machine;
 	pciroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	RB_INIT(&pciroot->slots);
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&pciroot->node, machine->root->mount,
+	    &state->pciroot_vops, VDIR, pciroot);
 	if (error != 0) {
 		pciroot->machine = NULL;
 		return (error);
 	}
-	vnode->v_data = pciroot;
-	vnode->v_ops = &state->pciroot_vops;
-	vnode->v_type = VDIR;
-	pciroot->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 }
 
@@ -139,7 +133,7 @@ vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 		return (EBUSY);
 	}
 	lwkt_reltoken(&pciroot->machine->token);
-	if (pciroot->vnode != NULL)
+	if (pciroot->node.vnode != NULL)
 		return (EBUSY);
 	for (;;) {
 		lwkt_gettoken(&pciroot->machine->token);
@@ -162,11 +156,23 @@ vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pcislot *slot;
 
-	if (pciroot == NULL)
+	if (pciroot == NULL || pciroot->machine == NULL)
 		return;
-	RB_FOREACH(slot, vmmfs_pcislot_tree, &pciroot->slots)
+	for (;;) {
+		lwkt_gettoken(&pciroot->machine->token);
+		slot = RB_ROOT(&pciroot->slots);
+		if (slot != NULL) {
+			RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
+			slot->dead = true;
+		}
+		lwkt_reltoken(&pciroot->machine->token);
+		if (slot == NULL)
+			break;
+		/* The parent reference ends here; vnode reclaim owns final free. */
 		vmmfs_pcislot_release_vnodes(slot);
-	vmmfs_vnode_discard(pciroot->vnode);
+		vmmfs_pcislot_put(slot);
+	}
+	vmmfs_node_unpublish(&pciroot->node);
 }
 
 int
@@ -613,7 +619,7 @@ vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	if (machine == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&machine->token);
-	vnode = machine->vnode;
+	vnode = machine->node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&machine->token);
@@ -669,8 +675,9 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 		vmmfs_pciroot_drop_slot(slot);
 		return (EEXIST);
 	}
+	vmmfs_pcislot_publish(slot);
 	lwkt_reltoken(&pciroot->machine->token);
-	vnode = slot->vnode;
+	vnode = slot->node.vnode;
 	error = vget(vnode, LK_EXCLUSIVE);
 	if (error != 0) {
 		lwkt_gettoken(&pciroot->machine->token);
@@ -706,7 +713,8 @@ vmmfs_pciroot_nresolve(struct vop_nresolve_args *ap)
 	}
 	lwkt_gettoken(&pciroot->machine->token);
 	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
-	vnode = slot == NULL ? NULL : slot->vnode;
+	vnode = slot == NULL || !vmmfs_node_is_published(&slot->node) ?
+	    NULL : slot->node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&pciroot->machine->token);
@@ -763,7 +771,6 @@ vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *ap)
 	slot->dead = true;
 	lwkt_reltoken(&pciroot->machine->token);
 	cache_unlink(ap->a_nch);
-	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
 	vmmfs_pciroot_drop_slot(slot);
 	vrele(vnode);
 	return (0);
@@ -850,11 +857,9 @@ vmmfs_pciroot_inactive(struct vop_inactive_args *ap)
 	if (pciroot == NULL || pciroot->machine == NULL)
 		return (0);
 	machine = pciroot->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &pciroot->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&pciroot->node, ap->a_vp);
 	return (0);
 }
 
@@ -863,19 +868,16 @@ vmmfs_pciroot_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_machine *machine;
+	bool reclaim;
 
 	pciroot = ap->a_vp->v_data;
-	if (pciroot != NULL && pciroot->machine != NULL) {
-		machine = pciroot->machine;
-		lwkt_gettoken(&machine->token);
-		if (pciroot->vnode == ap->a_vp)
-			pciroot->vnode = NULL;
-		lwkt_reltoken(&machine->token);
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (pciroot == NULL || pciroot->machine == NULL)
+		return (0);
+	machine = pciroot->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&pciroot->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim)
 		vmmfs_machine_put(machine);
 	return (0);
 }

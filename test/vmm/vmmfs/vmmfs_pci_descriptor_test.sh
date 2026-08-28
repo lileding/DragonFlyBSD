@@ -11,19 +11,20 @@ LOADER=/var/tmp/vmmfs_halt_loader
 BASE=/var/tmp/vmmfs-pci-descriptor-base-$$
 BAD=/var/tmp/vmmfs-pci-descriptor-bad-$$
 LOG=/var/tmp/vmmfs-pci-descriptor-client-$$
+RELEASE=/var/tmp/vmmfs-pci-descriptor-release-$$
 
 cleanup() {
 	set +e
 	[ -n "${CLIENT_PID:-}" ] && kill "$CLIENT_PID" 2>/dev/null
 	[ -n "${CLIENT_PID:-}" ] && wait "$CLIENT_PID" 2>/dev/null
-	[ -e "$SLOT/descriptor" ] && : | "$CLIENT" replace "$SLOT/descriptor"
+	[ -e "$SLOT/descriptor" ] && : | "$CLIENT" commit "$SLOT/descriptor"
 	[ -d "$SLOT" ] && rmdir "$SLOT"
 	[ -d "$MOUNT/$MACHINE" ] && rmdir "$MOUNT/$MACHINE"
 	mount | grep -q " on $MOUNT " && umount "$MOUNT"
 	rmdir "$MOUNT"
 	kldstat -n vmmfs >/dev/null 2>&1 && kldunload vmmfs
 	kldstat -n vmm >/dev/null 2>&1 && kldunload vmm
-	rm -f "$CLIENT" "$LOADER" "$BASE" "$BAD" "$LOG"
+	rm -f "$CLIENT" "$LOADER" "$BASE" "$BAD" "$LOG" "$RELEASE"
 }
 
 wait_for() {
@@ -88,17 +89,17 @@ cap2.id=0x09
 cap2.access=static
 cap2.data=0000
 EOF
-"$CLIENT" create "$SLOT/descriptor" <"$BASE"
+"$CLIENT" commit "$SLOT/descriptor" <"$BASE"
 cmp "$BASE" "$SLOT/descriptor"
 test -e "$SLOT/events"
 test -e "$SLOT/config"
 sed 's/cap2.access=static/cap2.access=proxy/' "$BASE" >"$BAD"
-if "$CLIENT" replace "$SLOT/descriptor" <"$BAD" 2>/dev/null; then
+if "$CLIENT" commit "$SLOT/descriptor" <"$BAD" 2>/dev/null; then
 	echo "proxy capability unexpectedly accepted" >&2
 	exit 1
 fi
 cmp "$BASE" "$SLOT/descriptor"
-"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" "$SLOT/config" "$SLOT/bar0" <"$BASE" >"$LOG" 2>&1 &
+"$CLIENT" hold "$SLOT/descriptor" "$SLOT/kick0" "$SLOT/config" "$SLOT/bar0" "$RELEASE" <"$BASE" >"$LOG" 2>&1 &
 CLIENT_PID=$!
 wait_for committed
 rm "$MOUNT/$MACHINE/stopped"
@@ -122,15 +123,15 @@ for name in bar0 dma kick0 msix0 msix1 msix2 msix3; do
 	test -e "$SLOT/$name"
 done
 touch "$MOUNT/$MACHINE/stopped"
-wait "$CLIENT_PID"
-unset CLIENT_PID
-grep -qx revoked "$LOG"
+wait_for revoked
 test -e "$MOUNT/$MACHINE/stopped"
 test -e "$SLOT/config"
 for name in bar0 dma kick0 msix0 msix1 msix2 msix3; do
 	test ! -e "$SLOT/$name"
 done
-: | "$CLIENT" replace "$SLOT/descriptor"
-test ! -e "$SLOT/events"
-test ! -e "$SLOT/config"
+rmdir "$MOUNT/$MACHINE"
+test ! -e "$MOUNT/$MACHINE"
+touch "$RELEASE"
+wait "$CLIENT_PID"
+unset CLIENT_PID
 printf '%s\n' 'PASS: VMMFS PCI descriptor static configuration and revoke'

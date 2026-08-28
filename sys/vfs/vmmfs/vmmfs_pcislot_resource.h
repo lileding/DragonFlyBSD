@@ -12,6 +12,8 @@
 #include <dev/virtual/vmm/vmm.h>
 #include <sys/vmmfs.h>
 
+#include "vmmfs_node.h"
+
 struct cdev;
 struct vm_object;
 struct vmspace;
@@ -45,9 +47,9 @@ struct vmmfs_pcislot_resource_trap {
 };
 
 struct vmmfs_pcislot_resource {
+	struct vmmfs_node node;
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	enum vmmfs_pcislot_resource_kind kind;
 	uint16_t index;
@@ -83,6 +85,7 @@ struct vmmfs_pcislot_resources {
 	bool destroying;
 	int references;
 	size_t count;
+	size_t initialized_count;
 	struct vmmfs_pcislot_resource items[];
 };
 

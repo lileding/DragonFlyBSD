@@ -7,6 +7,8 @@
 #define VMMFS_BOOT_H
 
 #include <sys/types.h>
+#include "vmmfs_node.h"
+
 
 struct cdev;
 struct vm_object;
@@ -16,8 +18,8 @@ struct vnode;
 struct vop_ops;
 
 struct vmmfs_boot {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	cdev_t dev;
 	ino_t inode;
 	struct vmmfs_boot_session *session;

@@ -7,6 +7,8 @@
 #define VMMFS_PCISLOT_DESCRIPTOR_H
 
 #include <sys/types.h>
+
+#include "vmmfs_node.h"
 #include <sys/vmmfs.h>
 
 #define VMMFS_PCISLOT_DESCRIPTOR_MAX 16384
@@ -131,8 +133,8 @@ struct vmmfs_pcislot_descriptor_value {
 };
 
 struct vmmfs_pcislot_descriptor {
+	struct vmmfs_node node;
 	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
 	ino_t inode;
 	bool updating;
 	bool committed;

@@ -48,7 +48,6 @@ vmmfs_machine_id_init(struct vmmfs_machine *machine,
 	struct vmmfs_machine_id *identity)
 {
 	struct vmmfs_mount *state;
-	struct vnode *vnode;
 	u_int value;
 	int error;
 
@@ -64,16 +63,11 @@ vmmfs_machine_id_init(struct vmmfs_machine *machine,
 	identity->machine = machine;
 	identity->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	machine->id = value;
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&identity->node, machine->root->mount,
+	    &state->machine_id_vops, VREG, identity);
 	if (error != 0)
 		return (error);
-	vnode->v_data = identity;
-	vnode->v_ops = &state->machine_id_vops;
-	vnode->v_type = VREG;
-	identity->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 }
 
@@ -82,7 +76,7 @@ vmmfs_machine_id_fini(struct vmmfs_machine_id *identity)
 {
 	if (identity == NULL)
 		return (EINVAL);
-	if (identity->vnode != NULL)
+	if (identity->node.vnode != NULL)
 		return (EBUSY);
 	identity->machine = NULL;
 	return (0);
@@ -184,11 +178,9 @@ vmmfs_machine_id_inactive(struct vop_inactive_args *ap)
 	if (identity == NULL)
 		return (0);
 	machine = identity->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &identity->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&identity->node, ap->a_vp);
 	return (0);
 }
 
@@ -197,17 +189,20 @@ vmmfs_machine_id_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_machine_id *identity;
 	struct vmmfs_machine *machine;
+	bool reclaim;
+	int error;
 
 	identity = ap->a_vp->v_data;
-	if (identity != NULL) {
-		machine = identity->machine;
-		if (identity->vnode == ap->a_vp)
-			identity->vnode = NULL;
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (identity == NULL || identity->machine == NULL)
+		return (0);
+	machine = identity->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&identity->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim) {
+		error = vmmfs_machine_id_fini(identity);
+		KKASSERT(error == 0);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }

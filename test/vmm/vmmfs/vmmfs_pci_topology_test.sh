@@ -48,6 +48,6 @@ if mkdir "$MOUNT/$MACHINE/pci/0000:00:00.0" 2>/dev/null; then exit 1; fi
 rm "$MOUNT/$MACHINE/stopped"
 sleep 2
 /usr/bin/timeout 1 cat "$MOUNT/$MACHINE/events" >"$EVENTS" || [ $? -eq 124 ]
-grep -q 'pci root start completed' "$EVENTS"
-grep -q 'vcpu0 halted' "$EVENTS"
+grep -q 'machine start completed' "$EVENTS"
+grep -q 'machine vcpu halted index=0' "$EVENTS"
 printf '%s\n' 'PASS: VMMFS PCI root topology'

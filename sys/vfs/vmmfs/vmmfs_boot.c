@@ -21,6 +21,7 @@
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pager.h>
+#include "vmmfs_node.h"
 
 #include "vmmfs.h"
 #include "vmmfs_boot.h"
@@ -105,7 +106,6 @@ int
 vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot)
 {
 	struct vmmfs_mount *mount;
-	struct vnode *vnode;
 	uint32_t serial;
 	int error;
 
@@ -122,26 +122,11 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot)
 	if (boot->dev == NULL)
 		return (ENOMEM);
 	boot->dev->si_drv1 = boot;
-	error = getspecialvnode(VT_SYNTH, machine->root->mount,
-		&mount->boot_vops, &vnode, 0, 0);
+	error = vmmfs_node_init_cdev(&boot->node, machine->root->mount,
+		&mount->boot_vops, boot->dev, boot);
 	if (error != 0)
 		goto fail_dev;
-	vnode->v_data = boot;
-	vnode->v_ops = &mount->boot_vops;
-	vnode->v_type = VCHR;
-	error = v_associate_rdev(vnode, boot->dev);
-	if (error != 0) {
-		vx_downgrade(vnode);
-		vn_unlock(vnode);
-		vmmfs_vnode_discard(vnode);
-		goto fail_dev;
-	}
-	vnode->v_umajor = boot->dev->si_umajor;
-	vnode->v_uminor = boot->dev->si_uminor;
-	boot->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 
 fail_dev:
@@ -157,7 +142,7 @@ vmmfs_boot_fini(struct vmmfs_boot *boot)
 {
 	if (boot == NULL)
 		return (EINVAL);
-	if (boot->vnode != NULL || boot->session != NULL)
+	if (boot->node.vnode != NULL || boot->session != NULL)
 		return (EBUSY);
 	if (boot->dev != NULL) {
 		boot->dev->si_drv1 = NULL;
@@ -243,7 +228,7 @@ vmmfs_boot_take_session(struct vmmfs_boot *boot, struct vnode **vnodep)
 	lwkt_gettoken(&boot->machine->token);
 	session = boot->session;
 	boot->session = NULL;
-	*vnodep = boot->vnode;
+	*vnodep = boot->node.vnode;
 	if (*vnodep != NULL)
 		vhold(*vnodep);
 	lwkt_reltoken(&boot->machine->token);
@@ -420,11 +405,9 @@ vmmfs_boot_inactive(struct vop_inactive_args *ap)
 	if (boot == NULL || boot->machine == NULL)
 		return (0);
 	machine = boot->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &boot->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&boot->node, ap->a_vp);
 	return (0);
 }
 
@@ -433,17 +416,17 @@ vmmfs_boot_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_boot *boot;
 	struct vmmfs_machine *machine;
+	bool reclaim;
 
 	boot = ap->a_vp->v_data;
 	if (boot == NULL || boot->machine == NULL)
 		return (0);
 	machine = boot->machine;
 	lwkt_gettoken(&machine->token);
-	if (boot->vnode == ap->a_vp)
-		boot->vnode = NULL;
+	reclaim = vmmfs_node_reclaim(&boot->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
+	if (reclaim)
+		vmmfs_machine_put(machine);
 	return (0);
 }
 

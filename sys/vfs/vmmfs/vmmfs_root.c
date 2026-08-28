@@ -33,7 +33,8 @@ static int vmmfs_root_read_item(struct vmmfs_root *, uint64_t,
 	struct vmmfs_item *);
 static int vmmfs_root_create_item(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **);
-static int vmmfs_root_remove_item(struct vmmfs_root *, const char *, size_t);
+static int vmmfs_root_remove_item(struct vmmfs_root *, const char *, size_t,
+	struct vmmfs_machine **);
 
 struct vop_ops vmmfs_root_vops = {
 	.vop_default = vop_defaultop,
@@ -55,7 +56,6 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_root **rootp)
 {
 	struct vmmfs_mount *state;
 	struct vmmfs_root *root;
-	struct vnode *vnode;
 	int error;
 
 	root = kmalloc(sizeof(*root), M_VMMFS, M_WAITOK | M_ZERO);
@@ -63,19 +63,24 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_root **rootp)
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	lwkt_token_init(&root->token, "vmmfsroot");
 	RB_INIT(&root->machines);
-	error = getnewvnode(VT_SYNTH, mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&root->node, mount, &state->root_vops, VDIR,
+		root);
 	if (error != 0) {
 		lwkt_token_uninit(&root->token);
 		kfree(root, M_VMMFS);
 		return (error);
 	}
-	vnode->v_data = root;
-	vnode->v_ops = &state->root_vops;
-	vnode->v_type = VDIR;
-	vsetflags(vnode, VROOT);
-	root->vnode = vnode;
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
+	error = vget(root->node.vnode, LK_EXCLUSIVE | LK_RETRY);
+	if (error != 0) {
+		vmmfs_node_abort(&root->node);
+		lwkt_token_uninit(&root->token);
+		kfree(root, M_VMMFS);
+		return (error);
+	}
+	vsetflags(root->node.vnode, VROOT);
+	vn_unlock(root->node.vnode);
+	vrele(root->node.vnode);
+	vmmfs_node_publish(&root->node);
 	*rootp = root;
 	return (0);
 }
@@ -87,7 +92,7 @@ vmmfs_root_destroy(struct vmmfs_root *root)
 	if (root == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&root->token);
-	busy = root->vnode != NULL || root->machine_count != 0 ||
+	busy = root->node.vnode != NULL || root->machine_count != 0 ||
 	    !RB_EMPTY(&root->machines);
 	lwkt_reltoken(&root->token);
 	if (busy)
@@ -149,16 +154,13 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 	}
 	if (cursor != NULL) {
 		lwkt_reltoken(&root->token);
-		lwkt_gettoken(&machine->token);
-		machine->dead = true;
-		lwkt_reltoken(&machine->token);
-		(void)vmmfs_machine_begin_destroy(machine);
-		vmmfs_machine_put(machine);
+		vmmfs_machine_abort_create(machine);
 		return (EEXIST);
 	}
 	RB_INSERT(vmmfs_machine_tree, &root->machines, machine);
 	machine->root_counted = true;
 	++root->machine_count;
+	vmmfs_machine_publish(machine);
 	lwkt_reltoken(&root->token);
 	*machinep = machine;
 	return (0);
@@ -166,15 +168,17 @@ vmmfs_root_create_item(struct vmmfs_root *root, const char *name,
 
 static int
 vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
-	size_t namelen)
+	size_t namelen, struct vmmfs_machine **machinep)
 {
 	struct vmmfs_machine key;
 	struct vmmfs_machine *machine;
-	int error;
 	int runtime_active;
 
+	if (machinep == NULL)
+		return (EINVAL);
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (ENAMETOOLONG);
+	*machinep = NULL;
 	bzero(&key, sizeof(key));
 	bcopy(name, key.name, namelen);
 	key.name[namelen] = '\0';
@@ -203,9 +207,8 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 	machine->dead = true;
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&root->token);
-	error = vmmfs_machine_begin_destroy(machine);
-	vmmfs_machine_put(machine);
-	return (error);
+	*machinep = machine;
+	return (0);
 }
 
 static int
@@ -348,7 +351,7 @@ vmmfs_root_nresolve(struct vop_nresolve_args *ap)
 		return (ENOENT);
 	}
 	lwkt_gettoken(&machine->token);
-	vnode = machine->dead ? NULL : machine->vnode;
+	vnode = machine->dead ? NULL : machine->node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&machine->token);
@@ -375,6 +378,7 @@ vmmfs_root_nmkdir(struct vop_nmkdir_args *ap)
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
+	int cleanup_error;
 
 	root = ap->a_dvp->v_data;
 	if (root == NULL)
@@ -386,14 +390,29 @@ vmmfs_root_nmkdir(struct vop_nmkdir_args *ap)
 	    &machine);
 	if (error != 0)
 		return (error);
-	vnode = machine->vnode;
+	vnode = machine->node.vnode;
 	if (vnode == NULL) {
-		error = vmmfs_root_remove_item(root, ncp->nc_name, ncp->nc_nlen);
+		error = vmmfs_root_remove_item(root, ncp->nc_name, ncp->nc_nlen,
+			&machine);
+		if (error != 0)
+			return (error);
+		error = vmmfs_machine_begin_destroy(machine);
+		vmmfs_machine_put(machine);
 		if (error != 0)
 			return (error);
 		return (ENOMEM);
 	}
 	*ap->a_vpp = vnode;
+	error = vget(vnode, LK_EXCLUSIVE);
+	if (error != 0) {
+		cleanup_error = vmmfs_root_remove_item(root, ncp->nc_name,
+			ncp->nc_nlen, &machine);
+		if (cleanup_error == 0) {
+			cleanup_error = vmmfs_machine_begin_destroy(machine);
+			vmmfs_machine_put(machine);
+		}
+		return (cleanup_error != 0 ? cleanup_error : error);
+	}
 	cache_setunresolved(ap->a_nch);
 	cache_setvp(ap->a_nch, vnode);
 	return (0);
@@ -425,10 +444,12 @@ vmmfs_root_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vnode);
 		return (ENOENT);
 	}
-	error = vmmfs_root_remove_item(root, ncp->nc_name, ncp->nc_nlen);
+	error = vmmfs_root_remove_item(root, ncp->nc_name, ncp->nc_nlen,
+		&machine);
 	if (error == 0) {
 		cache_unlink(ap->a_nch);
-		cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+		error = vmmfs_machine_begin_destroy(machine);
+		vmmfs_machine_put(machine);
 	}
 	vrele(vnode);
 	return (error);
@@ -442,10 +463,8 @@ vmmfs_root_reclaim(struct vop_reclaim_args *ap)
 	root = ap->a_vp->v_data;
 	if (root != NULL) {
 		lwkt_gettoken(&root->token);
-		if (root->vnode == ap->a_vp)
-			root->vnode = NULL;
+		(void)vmmfs_node_reclaim(&root->node, ap->a_vp);
 		lwkt_reltoken(&root->token);
 	}
-	ap->a_vp->v_data = NULL;
 	return (0);
 }

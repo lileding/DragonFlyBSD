@@ -6,6 +6,8 @@
 #ifndef VMMFS_LOADER_H
 #define VMMFS_LOADER_H
 
+#include "vmmfs_node.h"
+
 #include <sys/param.h>
 
 #include <dev/virtual/vmm/vmm.h>
@@ -24,8 +26,8 @@ int vmmfs_loader_run(struct vmmfs_loader *, const char *,
 	struct vmmfs_boot *, struct ucred *);
 
 struct vmmfs_loader {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	/* A NUL-terminated, one-page shell script executed with boot fd 3. */
 	char script[PAGE_SIZE];

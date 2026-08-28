@@ -10,6 +10,8 @@
 #include <sys/event.h>
 #include <sys/thread.h>
 #include <sys/types.h>
+
+#include "vmmfs_node.h"
 #include <sys/vmmfs.h>
 
 #define VMMFS_PCISLOT_EVENTS_BUFFER_SIZE (16 * 1024)
@@ -19,8 +21,8 @@ struct vnode;
 struct vop_ops;
 
 struct vmmfs_pcislot_events {
+	struct vmmfs_node node;
 	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;

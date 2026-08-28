@@ -43,6 +43,5 @@ struct vmmfs_mount {
 MALLOC_DECLARE(M_VMMFS);
 
 /* Releases a vnode that was never made reachable from the namespace. */
-void vmmfs_vnode_discard(struct vnode *);
 
 #endif /* VMMFS_H */

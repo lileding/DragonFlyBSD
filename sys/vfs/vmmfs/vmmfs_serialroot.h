@@ -6,6 +6,8 @@
 #ifndef VMMFS_SERIALROOT_H
 #define VMMFS_SERIALROOT_H
 
+#include "vmmfs_node.h"
+
 #include <sys/tree.h>
 #include <sys/types.h>
 
@@ -19,8 +21,8 @@ struct vop_ops;
 RB_HEAD(vmmfs_serialport_tree, vmmfs_serialport);
 
 struct vmmfs_serialroot {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	struct vmmfs_serialport_tree ports;
 };

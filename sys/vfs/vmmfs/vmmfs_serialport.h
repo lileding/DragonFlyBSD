@@ -14,6 +14,8 @@
 
 #include <dev/virtual/vmm/vmm.h>
 
+#include "vmmfs_node.h"
+
 struct cdev;
 struct vnode;
 struct vop_ops;
@@ -29,9 +31,9 @@ struct vmmfs_serialring {
 };
 
 struct vmmfs_serialport {
+	struct vmmfs_node node;
 	RB_ENTRY(vmmfs_serialport) entry;
 	struct vmmfs_serialroot *serialroot;
-	struct vnode *vnode;
 	ino_t inode;
 	char name[sizeof("com4")];
 	uint8_t number;

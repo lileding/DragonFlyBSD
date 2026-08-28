@@ -6,6 +6,8 @@
 #ifndef VMMFS_PCIROOT_H
 #define VMMFS_PCIROOT_H
 
+#include "vmmfs_node.h"
+
 #include <sys/tree.h>
 #include <sys/types.h>
 
@@ -34,8 +36,8 @@ struct vop_ops;
 RB_HEAD(vmmfs_pcislot_tree, vmmfs_pcislot);
 
 struct vmmfs_pciroot {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	struct vmmfs_pcislot_tree slots;
 	vmm_machine_t runtime_machine;

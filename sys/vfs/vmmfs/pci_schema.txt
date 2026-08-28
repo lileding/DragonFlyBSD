@@ -43,9 +43,10 @@ validates the complete write before atomically replacing the prior generation;
 a failed write preserves that generation without modification.  `close()` has
 no descriptor lifecycle effect and `rm descriptor` is not part of this ABI.
 
-The exact one-record document `present=0\n` removes the committed descriptor.
-It is the sole absent-device encoding.  A zero-byte write has no descriptor
-meaning and callers must not use it as an unplug operation.
+A zero-byte write at offset zero removes the committed descriptor.  It is the
+sole absent-device encoding.  A zero-byte write creates no descriptor
+generation and injects no auth token.  `present=0` is not a Version-1 record
+and is rejected as an unknown key.
 
 Every successful nonempty write creates a new descriptor generation and
 injects one anonymous auth-token fd into the writing process.  The token

@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Exercise descriptor close-commit and the generation-bound auth token.
+ * Exercise descriptor one-write commit and the generation-bound auth token.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -16,10 +16,18 @@
 #include <sys/vmmfs.h>
 
 static int write_all(int, const char *, size_t);
-static int commit_descriptor(const char *, int);
+static int commit_descriptor(const char *);
 static int register_config_readiness(int, int);
 static int wait_config_readiness(int, int16_t);
-static int map_bar(const char *);
+struct bar_mapping {
+	void *address;
+	size_t length;
+	int fd;
+};
+
+static int map_bar(const char *, struct bar_mapping *);
+static int unmap_bar(struct bar_mapping *);
+static int wait_release(const char *);
 
 int
 main(int argc, char **argv)
@@ -27,23 +35,27 @@ main(int argc, char **argv)
 	struct vmmfs_pci_config_request request;
 	struct vmmfs_pci_config_response response;
 	struct vmmfs_pci_kick kick;
+	struct bar_mapping bar_mapping;
+	const char *release_path;
 	int config_fd;
 	int kick_fd;
 	int queue_fd;
 	ssize_t result;
 
-	if (argc != 3 && argc != 6) {
-		fprintf(stderr, "usage: %s create|replace <descriptor> | hold <descriptor> <kick> <config> <bar>\n",
+	bar_mapping.address = NULL;
+	bar_mapping.length = 0;
+	bar_mapping.fd = -1;
+	release_path = argc == 7 ? argv[6] : NULL;
+	if (argc != 3 && argc != 6 && argc != 7) {
+		fprintf(stderr, "usage: %s commit <descriptor> | hold <descriptor> <kick> <config> <bar> [release]\n",
 		    argv[0]);
 		return (2);
 	}
-	if (argc == 3 && strcmp(argv[1], "create") == 0)
-		return (commit_descriptor(argv[2], O_CREAT | O_EXCL));
-	if (argc == 3 && strcmp(argv[1], "replace") == 0)
-		return (commit_descriptor(argv[2], 0));
-	if (argc != 6 || strcmp(argv[1], "hold") != 0)
+	if (argc == 3 && strcmp(argv[1], "commit") == 0)
+		return (commit_descriptor(argv[2]));
+	if ((argc != 6 && argc != 7) || strcmp(argv[1], "hold") != 0)
 		return (2);
-	if (commit_descriptor(argv[2], 0) != 0)
+	if (commit_descriptor(argv[2]) != 0)
 		return (1);
 	if (puts("committed") == EOF || fflush(stdout) != 0)
 		return (1);
@@ -82,7 +94,7 @@ main(int argc, char **argv)
 		close(kick_fd);
 		return (1);
 	}
-	if (map_bar(argv[5]) != 0) {
+	if (map_bar(argv[5], &bar_mapping) != 0) {
 		perror("map bar");
 		close(queue_fd);
 		close(config_fd);
@@ -179,6 +191,14 @@ main(int argc, char **argv)
 		close(kick_fd);
 		return (1);
 	}
+	if (release_path != NULL && wait_release(release_path) != 0) {
+		perror("wait release");
+		return (1);
+	}
+	if (unmap_bar(&bar_mapping) != 0) {
+		perror("unmap bar");
+		return (1);
+	}
 	close(queue_fd);
 	close(config_fd);
 	close(kick_fd);
@@ -231,12 +251,19 @@ wait_config_readiness(int queue_fd, int16_t filter)
 }
 
 static int
-map_bar(const char *path)
+map_bar(const char *path, struct bar_mapping *bar)
 {
 	volatile uint8_t *mapping;
 	long page_size;
 	int fd;
 
+	if (bar == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	bar->address = NULL;
+	bar->length = 0;
+	bar->fd = -1;
 	fd = open(path, O_RDWR);
 	if (fd < 0)
 		return (-1);
@@ -248,11 +275,46 @@ map_bar(const char *path)
 		return (-1);
 	}
 	(void)mapping[0];
-	if (munmap((void *)mapping, (size_t)page_size) != 0) {
-		close(fd);
+	bar->address = (void *)mapping;
+	bar->length = (size_t)page_size;
+	bar->fd = fd;
+	return (0);
+}
+
+static int
+unmap_bar(struct bar_mapping *bar)
+{
+	int error;
+
+	if (bar == NULL) {
+		errno = EINVAL;
 		return (-1);
 	}
-	return (close(fd));
+	error = 0;
+	if (bar->address != NULL && munmap(bar->address, bar->length) != 0)
+		error = errno;
+	if (bar->fd >= 0 && close(bar->fd) != 0 && error == 0)
+		error = errno;
+	bar->address = NULL;
+	bar->length = 0;
+	bar->fd = -1;
+	if (error == 0)
+		return (0);
+	errno = error;
+	return (-1);
+}
+
+static int
+wait_release(const char *path)
+{
+
+	for (;;) {
+		if (access(path, F_OK) == 0)
+			return (0);
+		if (errno != ENOENT)
+			return (-1);
+		usleep(10000);
+	}
 }
 
 static int
@@ -271,25 +333,33 @@ write_all(int fd, const char *buffer, size_t length)
 }
 
 static int
-commit_descriptor(const char *path, int flags)
+commit_descriptor(const char *path)
 {
 	char buffer[1024];
 	int fd;
 	ssize_t length;
+	ssize_t written;
 
-	fd = open(path, O_WRONLY | flags, 0600);
+	fd = open(path, O_WRONLY);
 	if (fd < 0) {
 		perror("open descriptor");
 		return (1);
 	}
-	while ((length = read(STDIN_FILENO, buffer, sizeof(buffer))) > 0) {
-		if (write_all(fd, buffer, (size_t)length) != 0) {
-			perror("write descriptor");
-			close(fd);
-			return (1);
-		}
+	length = read(STDIN_FILENO, buffer, sizeof(buffer));
+	if (length < 0) {
+		perror("read descriptor");
+		close(fd);
+		return (1);
 	}
-	if (length < 0 || close(fd) != 0) {
+	written = write(fd, buffer, (size_t)length);
+	if (written != length) {
+		if (written >= 0)
+			errno = EIO;
+		perror("write descriptor");
+		close(fd);
+		return (1);
+	}
+	if (close(fd) != 0) {
 		perror("commit descriptor");
 		return (1);
 	}

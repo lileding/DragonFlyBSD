@@ -6,6 +6,8 @@
 #ifndef VMMFS_EVENTS_H
 #define VMMFS_EVENTS_H
 
+#include "vmmfs_node.h"
+
 #include <sys/time.h>
 #include <sys/event.h>
 #include <sys/thread.h>
@@ -19,8 +21,8 @@ struct vop_ops;
 #define VMMFS_EVENTS_BUFFER_SIZE (64 * 1024)
 
 struct vmmfs_events {
+	struct vmmfs_node node;
 	struct vmmfs_machine *machine;
-	struct vnode *vnode;
 	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;

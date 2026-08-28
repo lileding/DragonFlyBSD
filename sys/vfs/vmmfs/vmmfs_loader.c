@@ -97,6 +97,7 @@ static int vmmfs_loader_open_file(struct vmmfs_loader_process *);
 static int vmmfs_loader_make_vnode(cdev_t, struct vnode **);
 static void vmmfs_loader_revoke_vnode(struct vnode *);
 static void vmmfs_loader_file_detach(struct vmmfs_loader_file *);
+static void vmmfs_loader_file_vnode_destroy(struct vnode *);
 static void vmmfs_loader_file_hold(struct vmmfs_loader_file *);
 static void vmmfs_loader_file_put(struct vmmfs_loader_file *);
 static void vmmfs_loader_file_free(void *);
@@ -378,7 +379,7 @@ vmmfs_loader_process_finish(struct vmmfs_loader_process *process)
 		process->file = NULL;
 	}
 	if (process->vnode != NULL) {
-		vmmfs_vnode_discard(process->vnode);
+		vmmfs_loader_file_vnode_destroy(process->vnode);
 		process->vnode = NULL;
 	}
 	vmmfs_loader_file_put(process->control);
@@ -538,6 +539,16 @@ vmmfs_loader_exec_shell(const char *script)
 }
 
 static void
+vmmfs_loader_file_vnode_destroy(struct vnode *vnode)
+{
+	if (vnode == NULL)
+		return;
+	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
+	vfinalize(vnode);
+	vrele(vnode);
+}
+
+static void
 vmmfs_loader_set_process_cred(struct proc *process, struct ucred *cred)
 {
 	struct lwp *lwp;
@@ -569,7 +580,7 @@ vmmfs_loader_make_vnode(cdev_t dev, struct vnode **vnodep)
 	if (error != 0) {
 		vx_downgrade(vnode);
 		vn_unlock(vnode);
-		vmmfs_vnode_discard(vnode);
+		vmmfs_loader_file_vnode_destroy(vnode);
 		return (error);
 	}
 	vnode->v_umajor = dev->si_umajor;
@@ -625,7 +636,7 @@ vmmfs_loader_open_file(struct vmmfs_loader_process *process)
 	return (0);
 
 fail_vnode:
-	vmmfs_vnode_discard(vnode);
+	vmmfs_loader_file_vnode_destroy(vnode);
 fail_control:
 	vmmfs_loader_file_put(control);
 	return (error);
@@ -924,7 +935,6 @@ int
 vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 {
 	struct vmmfs_mount *mount;
-	struct vnode *vnode;
 	int error;
 
 	if (machine == NULL || loader == NULL || machine->root == NULL)
@@ -935,16 +945,11 @@ vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 	if (mount == NULL || mount->loader_vops == NULL)
 		return (ENXIO);
 	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	error = getnewvnode(VT_SYNTH, machine->root->mount, &vnode, 0, 0);
+	error = vmmfs_node_init(&loader->node, machine->root->mount,
+	    &mount->loader_vops, VREG, loader);
 	if (error != 0)
 		return (error);
-	vnode->v_data = loader;
-	vnode->v_ops = &mount->loader_vops;
-	vnode->v_type = VREG;
-	loader->vnode = vnode;
 	vmmfs_machine_hold(machine);
-	vx_downgrade(vnode);
-	vn_unlock(vnode);
 	return (0);
 }
 
@@ -953,7 +958,7 @@ vmmfs_loader_fini(struct vmmfs_loader *loader)
 {
 	if (loader == NULL)
 		return (EINVAL);
-	if (loader->vnode != NULL)
+	if (loader->node.vnode != NULL)
 		return (EBUSY);
 	loader->machine = NULL;
 	return (0);
@@ -1080,11 +1085,9 @@ vmmfs_loader_inactive(struct vop_inactive_args *ap)
 	if (loader == NULL)
 		return (0);
 	machine = loader->machine;
-	if (!vmmfs_machine_vnode_detach(machine, &loader->vnode, ap->a_vp))
+	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	ap->a_vp->v_data = NULL;
-	vmmfs_machine_put(machine);
-	vrecycle(ap->a_vp);
+	vmmfs_node_inactive(&loader->node, ap->a_vp);
 	return (0);
 }
 
@@ -1093,17 +1096,20 @@ vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 {
 	struct vmmfs_loader *loader;
 	struct vmmfs_machine *machine;
+	bool reclaim;
+	int error;
 
 	loader = ap->a_vp->v_data;
-	if (loader != NULL) {
-		machine = loader->machine;
-		if (loader->vnode == ap->a_vp)
-			loader->vnode = NULL;
-	} else {
-		machine = NULL;
-	}
-	ap->a_vp->v_data = NULL;
-	if (machine != NULL)
+	if (loader == NULL || loader->machine == NULL)
+		return (0);
+	machine = loader->machine;
+	lwkt_gettoken(&machine->token);
+	reclaim = vmmfs_node_reclaim(&loader->node, ap->a_vp);
+	lwkt_reltoken(&machine->token);
+	if (reclaim) {
+		error = vmmfs_loader_fini(loader);
+		KKASSERT(error == 0);
 		vmmfs_machine_put(machine);
+	}
 	return (0);
 }
