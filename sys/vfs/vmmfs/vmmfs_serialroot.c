@@ -93,20 +93,19 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_serialroot_fini(struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_serialport *port;
 	struct vmmfs_machine *machine;
-	int error;
 
 	if (serialroot == NULL)
-		return (EINVAL);
+		return;
 	machine = serialroot->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (serialroot->node.published)
-		return (EBUSY);
+		panic("vmmfs_serialroot_fini: node is still published");
 	vmmfs_node_abort(&serialroot->node);
 	for (;;) {
 		lwkt_gettoken(&machine->token);
@@ -116,17 +115,12 @@ vmmfs_serialroot_fini(struct vmmfs_serialroot *serialroot)
 		lwkt_reltoken(&machine->token);
 		if (port == NULL)
 			break;
-		error = vmmfs_serialport_destroy(port);
-		if (error == 0)
-			continue;
-		lwkt_gettoken(&machine->token);
-		(void)RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, port);
-		lwkt_reltoken(&machine->token);
-		return (error);
+		if (vmmfs_serialport_destroy(port) != 0)
+			panic("vmmfs_serialroot_fini: serial port still busy");
 	}
 	vmmfs_serialroot_release_node_reference(serialroot);
 	serialroot->machine = NULL;
-	return (0);
+	return;
 }
 
 void

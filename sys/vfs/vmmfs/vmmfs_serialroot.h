@@ -31,7 +31,7 @@ struct vmmfs_serialroot {
 extern struct vop_ops vmmfs_serialroot_vops;
 
 int vmmfs_serialroot_init(struct vmmfs_machine *, struct vmmfs_serialroot *);
-int vmmfs_serialroot_fini(struct vmmfs_serialroot *);
+void vmmfs_serialroot_fini(struct vmmfs_serialroot *);
 void vmmfs_serialroot_release_vnodes(struct vmmfs_serialroot *);
 int vmmfs_serialroot_start(struct vmmfs_serialroot *, vmm_machine_t);
 int vmmfs_serialroot_stop(struct vmmfs_serialroot *);

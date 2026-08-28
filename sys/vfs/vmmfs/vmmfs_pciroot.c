@@ -125,23 +125,23 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pcislot *slot;
 	struct vmmfs_machine *machine;
 
 	if (pciroot == NULL)
-		return (EINVAL);
+		return;
 	machine = pciroot->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (pciroot->node.published)
-		return (EBUSY);
+		panic("vmmfs_pciroot_fini: node is still published");
 	lwkt_gettoken(&machine->token);
 	if (pciroot->runtime_machine != NULL) {
 		lwkt_reltoken(&machine->token);
-		return (EBUSY);
+		panic("vmmfs_pciroot_fini: runtime PCI root is still active");
 	}
 	lwkt_reltoken(&machine->token);
 	vmmfs_node_abort(&pciroot->node);
@@ -159,7 +159,7 @@ vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 	}
 	vmmfs_pciroot_release_node_reference(pciroot);
 	pciroot->machine = NULL;
-	return (0);
+	return;
 }
 
 void

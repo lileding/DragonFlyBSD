@@ -150,7 +150,7 @@ fail_node:
 	return (error);
 }
 
-int
+void
 vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 {
 	struct vmmfs_pcislot_resources *resources;
@@ -159,19 +159,21 @@ vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 	struct vmmfs_pcislot *slot;
 
 	if (descriptor == NULL)
-		return (EINVAL);
+		return;
 	slot = descriptor->slot;
-	if (slot == NULL || slot->pciroot == NULL)
-		return (0);
+	if (slot == NULL)
+		return;
+	if (slot->pciroot == NULL)
+		panic("vmmfs_pcislot_descriptor_fini: slot lost its PCI root");
 	machine = slot->pciroot->machine;
 	if (machine == NULL)
-		return (EINVAL);
+		panic("vmmfs_pcislot_descriptor_fini: PCI root lost its machine");
 	if (descriptor->node.published)
-		return (EBUSY);
+		panic("vmmfs_pcislot_descriptor_fini: node is still published");
 	lwkt_gettoken(&machine->token);
 	if (descriptor->updating) {
 		lwkt_reltoken(&machine->token);
-		return (EBUSY);
+		panic("vmmfs_pcislot_descriptor_fini: update is still active");
 	}
 	resources = descriptor->resources;
 	auth = descriptor->auth;
@@ -185,7 +187,7 @@ vmmfs_pcislot_descriptor_fini(struct vmmfs_pcislot_descriptor *descriptor)
 	bzero(descriptor, sizeof(*descriptor));
 	vmmfs_pcislot_put(slot);
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 bool
@@ -358,8 +360,7 @@ vmmfs_pcislot_descriptor_reclaim(struct vop_reclaim_args *ap)
 		lwkt_reltoken(&machine->token);
 		if (!reclaim)
 			return (0);
-		vmmfs_pcislot_put(descriptor->slot);
-		vmmfs_machine_put(machine);
+		vmmfs_pcislot_descriptor_fini(descriptor);
 	}
 	return (0);
 }

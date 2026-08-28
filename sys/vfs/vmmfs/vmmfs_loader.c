@@ -962,23 +962,23 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_loader_fini(struct vmmfs_loader *loader)
 {
 	struct vmmfs_machine *machine;
 
 	if (loader == NULL)
-		return (EINVAL);
+		return;
 	machine = loader->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (loader->node.published)
-		return (EBUSY);
+		panic("vmmfs_loader_fini: node is still published");
 	vmmfs_node_abort(&loader->node);
 	loader->machine = NULL;
 	loader->inode = 0;
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 static int
@@ -1114,7 +1114,6 @@ vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_loader *loader;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	loader = ap->a_vp->v_data;
 	if (loader == NULL || loader->machine == NULL)
@@ -1123,9 +1122,7 @@ vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&loader->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_loader_fini(loader);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_loader_fini(loader);
 	return (0);
 }

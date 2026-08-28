@@ -144,25 +144,25 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_memory_fini(struct vmmfs_memory *memory)
 {
 	struct vmmfs_machine *machine;
 
 	if (memory == NULL)
-		return (EINVAL);
+		return;
 	machine = memory->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
-		return (EBUSY);
+		panic("vmmfs_memory_fini: runtime memory is still active");
 	if (memory->node.published)
-		return (EBUSY);
+		panic("vmmfs_memory_fini: node is still published");
 	vmmfs_node_abort(&memory->node);
 	memory->machine = NULL;
 	memory->inode = 0;
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 int
@@ -511,7 +511,6 @@ vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_memory *memory;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	memory = ap->a_vp->v_data;
 	if (memory == NULL || memory->machine == NULL)
@@ -520,9 +519,7 @@ vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&memory->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_memory_fini(memory);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_memory_fini(memory);
 	return (0);
 }

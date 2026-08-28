@@ -104,24 +104,26 @@ fail_node:
 	return (error);
 }
 
-int
+void
 vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *state_node)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_pcislot *slot;
 
 	if (state_node == NULL)
-		return (EINVAL);
+		return;
 	slot = state_node->slot;
-	if (slot == NULL || slot->pciroot == NULL)
-		return (0);
+	if (slot == NULL)
+		return;
+	if (slot->pciroot == NULL)
+		panic("vmmfs_pcislot_events_fini: slot lost its PCI root");
 	machine = slot->pciroot->machine;
 	if (machine == NULL)
-		return (EINVAL);
+		panic("vmmfs_pcislot_events_fini: PCI root lost its machine");
 	lwkt_gettoken(&state_node->token);
 	if (state_node->node.published) {
 		lwkt_reltoken(&state_node->token);
-		return (EBUSY);
+		panic("vmmfs_pcislot_events_fini: node is still published");
 	}
 	lwkt_reltoken(&state_node->token);
 	vmmfs_node_abort(&state_node->node);
@@ -133,7 +135,7 @@ vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *state_node)
 	lwkt_token_uninit(&state_node->token);
 	vmmfs_pcislot_put(slot);
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 void
@@ -458,9 +460,7 @@ vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&state_node->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		vmmfs_pcislot_put(state_node->slot);
-		vmmfs_machine_put(machine);
-	}
+	if (reclaim)
+		vmmfs_pcislot_events_fini(state_node);
 	return (0);
 }

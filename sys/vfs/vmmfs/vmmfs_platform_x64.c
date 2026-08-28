@@ -167,16 +167,16 @@ vmmfs_platform_x64_init(struct vmmfs_machine *machine,
 	return (0);
 }
 
-int
+void
 vmmfs_platform_x64_fini(struct vmmfs_platform_x64 *platform)
 {
 	if (platform == NULL)
-		return (EINVAL);
+		return;
 	if (platform->runtime_machine != NULL)
-		return (EBUSY);
+		panic("vmmfs_platform_x64_fini: runtime is still active");
 	platform->machine = NULL;
 	lwkt_token_uninit(&platform->token);
-	return (0);
+	return;
 }
 
 int

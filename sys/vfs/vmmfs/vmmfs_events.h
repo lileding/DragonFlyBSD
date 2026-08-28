@@ -37,7 +37,7 @@ struct vmmfs_events {
 extern struct vop_ops vmmfs_events_vops;
 
 int vmmfs_events_init(struct vmmfs_machine *, struct vmmfs_events *);
-int vmmfs_events_fini(struct vmmfs_events *);
+void vmmfs_events_fini(struct vmmfs_events *);
 void vmmfs_events_revoke(struct vmmfs_events *);
 void vmmfs_events_log(struct vmmfs_events *, enum vmmfs_machine_event,
 	const char *, ...);

@@ -45,7 +45,6 @@ static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
 static int vmmfs_machine_publish_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_unpublish_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_abort_stopped(struct vmmfs_machine *);
-static void vmmfs_machine_require_cleanup(int);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
@@ -139,27 +138,27 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	return (0);
 
 fail_events:
-	vmmfs_machine_require_cleanup(vmmfs_events_fini(&machine->events));
+	vmmfs_events_fini(&machine->events);
 fail_serialroot:
-	vmmfs_machine_require_cleanup(vmmfs_serialroot_fini(&machine->serialroot));
+	vmmfs_serialroot_fini(&machine->serialroot);
 fail_rtc:
-	vmmfs_machine_require_cleanup(vmmfs_rtc_fini(&machine->rtc));
+	vmmfs_rtc_fini(&machine->rtc);
 fail_platform:
-	vmmfs_machine_require_cleanup(vmmfs_platform_x64_fini(&machine->platform));
+	vmmfs_platform_x64_fini(&machine->platform);
 fail_pciroot:
-	vmmfs_machine_require_cleanup(vmmfs_pciroot_fini(&machine->pciroot));
+	vmmfs_pciroot_fini(&machine->pciroot);
 fail_stopped:
 	vmmfs_machine_abort_stopped(machine);
 fail_boot:
-	vmmfs_machine_require_cleanup(vmmfs_boot_fini(&machine->boot));
+	vmmfs_boot_fini(&machine->boot);
 fail_loader:
-	vmmfs_machine_require_cleanup(vmmfs_loader_fini(&machine->loader));
+	vmmfs_loader_fini(&machine->loader);
 fail_memory:
-	vmmfs_machine_require_cleanup(vmmfs_memory_fini(&machine->memory));
+	vmmfs_memory_fini(&machine->memory);
 fail_vcpu:
-	vmmfs_machine_require_cleanup(vmmfs_vcpu_fini(&machine->vcpu));
+	vmmfs_vcpu_fini(&machine->vcpu);
 fail_id:
-	vmmfs_machine_require_cleanup(vmmfs_machine_id_fini(&machine->id_node));
+	vmmfs_machine_id_fini(&machine->id_node);
 fail_token:
 	KKASSERT(machine->references == 1);
 	lwkt_token_uninit(&machine->token);
@@ -195,20 +194,20 @@ vmmfs_machine_abort_create(struct vmmfs_machine *machine)
 	KKASSERT(!vmmfs_node_is_published(&machine->node));
 	machine->dead = true;
 	lwkt_reltoken(&machine->token);
-	vmmfs_machine_require_cleanup(vmmfs_events_fini(&machine->events));
-	vmmfs_machine_require_cleanup(vmmfs_serialroot_fini(
-	    &machine->serialroot));
-	vmmfs_machine_require_cleanup(vmmfs_rtc_fini(&machine->rtc));
-	vmmfs_machine_require_cleanup(vmmfs_platform_x64_fini(
-	    &machine->platform));
-	vmmfs_machine_require_cleanup(vmmfs_pciroot_fini(&machine->pciroot));
+	vmmfs_events_fini(&machine->events);
+	vmmfs_serialroot_fini(
+	    &machine->serialroot);
+	vmmfs_rtc_fini(&machine->rtc);
+	vmmfs_platform_x64_fini(
+	    &machine->platform);
+	vmmfs_pciroot_fini(&machine->pciroot);
 	vmmfs_machine_abort_stopped(machine);
-	vmmfs_machine_require_cleanup(vmmfs_boot_fini(&machine->boot));
-	vmmfs_machine_require_cleanup(vmmfs_loader_fini(&machine->loader));
-	vmmfs_machine_require_cleanup(vmmfs_memory_fini(&machine->memory));
-	vmmfs_machine_require_cleanup(vmmfs_vcpu_fini(&machine->vcpu));
-	vmmfs_machine_require_cleanup(vmmfs_machine_id_fini(
-	    &machine->id_node));
+	vmmfs_boot_fini(&machine->boot);
+	vmmfs_loader_fini(&machine->loader);
+	vmmfs_memory_fini(&machine->memory);
+	vmmfs_vcpu_fini(&machine->vcpu);
+	vmmfs_machine_id_fini(
+	    &machine->id_node);
 	vmmfs_node_abort(&machine->node);
 	/*
 	 * The only remaining references are the creator's reference and the
@@ -233,13 +232,15 @@ vmmfs_machine_publish_stopped(struct vmmfs_machine *machine)
 	if (machine->dead || machine->machine != NULL) {
 		lwkt_reltoken(&machine->token);
 		vmmfs_node_abort(&stopped->node);
-		vmmfs_machine_require_cleanup(vmmfs_stopped_destroy(stopped));
+		if (vmmfs_stopped_destroy(stopped) != 0)
+			panic("vmmfs_machine_publish_stopped: stopped destroy failed");
 		return (EBUSY);
 	}
 	if (machine->stopped != NULL) {
 		lwkt_reltoken(&machine->token);
 		vmmfs_node_abort(&stopped->node);
-		vmmfs_machine_require_cleanup(vmmfs_stopped_destroy(stopped));
+		if (vmmfs_stopped_destroy(stopped) != 0)
+			panic("vmmfs_machine_publish_stopped: stopped destroy failed");
 		return (0);
 	}
 	vnode = machine->node.vnode;
@@ -285,7 +286,8 @@ vmmfs_machine_abort_stopped(struct vmmfs_machine *machine)
 	if (stopped == NULL)
 		return;
 	vmmfs_node_abort(&stopped->node);
-	vmmfs_machine_require_cleanup(vmmfs_stopped_destroy(stopped));
+	if (vmmfs_stopped_destroy(stopped) != 0)
+		panic("vmmfs_machine_abort_stopped: stopped destroy failed");
 }
 
 int
@@ -324,7 +326,6 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 {
 	struct vmmfs_root *root;
 	bool root_counted;
-	int error;
 
 	KKASSERT(machine != NULL);
 	KKASSERT(machine->dead);
@@ -341,16 +342,11 @@ vmmfs_machine_destroy(struct vmmfs_machine *machine)
 	KKASSERT(machine->serialroot.node.vnode == NULL);
 	root = machine->root;
 	root_counted = machine->root_counted;
-	error = vmmfs_boot_fini(&machine->boot);
-	KKASSERT(error == 0);
-	error = vmmfs_serialroot_fini(&machine->serialroot);
-	KKASSERT(error == 0);
-	error = vmmfs_rtc_fini(&machine->rtc);
-	KKASSERT(error == 0);
-	error = vmmfs_platform_x64_fini(&machine->platform);
-	KKASSERT(error == 0);
-	error = vmmfs_pciroot_fini(&machine->pciroot);
-	KKASSERT(error == 0);
+	vmmfs_boot_fini(&machine->boot);
+	vmmfs_serialroot_fini(&machine->serialroot);
+	vmmfs_rtc_fini(&machine->rtc);
+	vmmfs_platform_x64_fini(&machine->platform);
+	vmmfs_pciroot_fini(&machine->pciroot);
 	machine->root = NULL;
 	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
@@ -466,12 +462,6 @@ vmmfs_machine_reset(struct vmmfs_machine *machine)
 	return (0);
 }
 
-static void
-vmmfs_machine_require_cleanup(int error)
-{
-	if (error != 0)
-		panic("vmmfs machine pre-publication cleanup failed");
-}
 
 static int
 vmmfs_machine_access(struct vop_access_args *ap)

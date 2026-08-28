@@ -145,18 +145,18 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_boot_fini(struct vmmfs_boot *boot)
 {
 	struct vmmfs_machine *machine;
 
 	if (boot == NULL)
-		return (EINVAL);
+		return;
 	machine = boot->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (boot->node.published || boot->session != NULL)
-		return (EBUSY);
+		panic("vmmfs_boot_fini: node or session is still active");
 	vmmfs_node_abort(&boot->node);
 	if (boot->dev != NULL) {
 		boot->dev->si_drv1 = NULL;
@@ -166,7 +166,7 @@ vmmfs_boot_fini(struct vmmfs_boot *boot)
 	boot->machine = NULL;
 	boot->inode = 0;
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 int
@@ -441,8 +441,8 @@ vmmfs_boot_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&boot->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim && vmmfs_boot_fini(boot) != 0)
-		panic("vmmfs_boot_reclaim: boot fini failed");
+	if (reclaim)
+		vmmfs_boot_fini(boot);
 	return (0);
 }
 

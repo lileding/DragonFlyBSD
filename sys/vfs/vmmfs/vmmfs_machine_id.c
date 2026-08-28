@@ -83,23 +83,23 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_machine_id_fini(struct vmmfs_machine_id *identity)
 {
 	struct vmmfs_machine *machine;
 
 	if (identity == NULL)
-		return (EINVAL);
+		return;
 	machine = identity->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	if (identity->node.published)
-		return (EBUSY);
+		panic("vmmfs_machine_id_fini: node is still published");
 	vmmfs_node_abort(&identity->node);
 	identity->machine = NULL;
 	identity->inode = 0;
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 static int
@@ -210,7 +210,6 @@ vmmfs_machine_id_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_machine_id *identity;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	identity = ap->a_vp->v_data;
 	if (identity == NULL || identity->machine == NULL)
@@ -219,9 +218,7 @@ vmmfs_machine_id_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&identity->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_machine_id_fini(identity);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_machine_id_fini(identity);
 	return (0);
 }

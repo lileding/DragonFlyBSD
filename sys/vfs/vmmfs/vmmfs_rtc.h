@@ -30,7 +30,7 @@ struct vmmfs_rtc {
 };
 
 int vmmfs_rtc_init(struct vmmfs_machine *, struct vmmfs_rtc *);
-int vmmfs_rtc_fini(struct vmmfs_rtc *);
+void vmmfs_rtc_fini(struct vmmfs_rtc *);
 int vmmfs_rtc_start(struct vmmfs_rtc *, vmm_machine_t);
 int vmmfs_rtc_stop(struct vmmfs_rtc *);
 

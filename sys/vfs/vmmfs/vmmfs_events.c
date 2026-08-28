@@ -98,20 +98,20 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_events_fini(struct vmmfs_events *events)
 {
 	struct vmmfs_machine *machine;
 
 	if (events == NULL)
-		return (EINVAL);
+		return;
 	machine = events->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	lwkt_gettoken(&events->token);
 	if (events->node.published) {
 		lwkt_reltoken(&events->token);
-		return (EBUSY);
+		panic("vmmfs_events_fini: node is still published");
 	}
 	lwkt_reltoken(&events->token);
 	vmmfs_node_abort(&events->node);
@@ -122,7 +122,7 @@ vmmfs_events_fini(struct vmmfs_events *events)
 	events->inode = 0;
 	lwkt_token_uninit(&events->token);
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 void
@@ -455,7 +455,6 @@ vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_events *events;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	events = ap->a_vp->v_data;
 	if (events == NULL || events->machine == NULL)
@@ -464,10 +463,8 @@ vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&events->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_events_fini(events);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_events_fini(events);
 	return (0);
 }
 

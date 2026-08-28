@@ -43,7 +43,7 @@ struct vmmfs_platform_x64 {
 
 int vmmfs_platform_x64_init(struct vmmfs_machine *,
 	struct vmmfs_platform_x64 *);
-int vmmfs_platform_x64_fini(struct vmmfs_platform_x64 *);
+void vmmfs_platform_x64_fini(struct vmmfs_platform_x64 *);
 int vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *,
 	struct vmmfs_memory *, uint32_t,
 	struct vmmfs_pciroot *,

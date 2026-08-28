@@ -29,7 +29,7 @@ extern struct vop_ops vmmfs_boot_vops;
 
 int vmmfs_boot_module_fini(void);
 int vmmfs_boot_init(struct vmmfs_machine *, struct vmmfs_boot *);
-int vmmfs_boot_fini(struct vmmfs_boot *);
+void vmmfs_boot_fini(struct vmmfs_boot *);
 int vmmfs_boot_arm_locked(struct vmmfs_boot *, struct vm_object *, uint64_t);
 int vmmfs_boot_submit(struct vmmfs_boot *, const struct vmm_cpustate *);
 void vmmfs_boot_revoke(struct vmmfs_boot *);

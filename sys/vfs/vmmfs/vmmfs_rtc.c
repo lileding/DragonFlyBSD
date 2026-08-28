@@ -54,15 +54,15 @@ vmmfs_rtc_init(struct vmmfs_machine *machine, struct vmmfs_rtc *rtc)
 	return (0);
 }
 
-int
+void
 vmmfs_rtc_fini(struct vmmfs_rtc *rtc)
 {
 	if (rtc == NULL)
-		return (EINVAL);
+		return;
 	if (rtc->runtime_machine != NULL)
-		return (EBUSY);
+		panic("vmmfs_rtc_fini: runtime is still active");
 	rtc->machine = NULL;
-	return (0);
+	return;
 }
 
 int

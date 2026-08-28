@@ -151,24 +151,24 @@ fail:
 	return (error);
 }
 
-int
+void
 vmmfs_vcpu_fini(struct vmmfs_vcpu *vcpu)
 {
 	struct vmmfs_machine *machine;
 
 	if (vcpu == NULL)
-		return (EINVAL);
+		return;
 	machine = vcpu->machine;
 	if (machine == NULL)
-		return (0);
+		return;
 	lwkt_gettoken(&vcpu->token);
 	if (vcpu->active_count != 0 || vcpu->threads != NULL) {
 		lwkt_reltoken(&vcpu->token);
-		return (EBUSY);
+		panic("vmmfs_vcpu_fini: vCPU threads are still active");
 	}
 	if (vcpu->node.published) {
 		lwkt_reltoken(&vcpu->token);
-		return (EBUSY);
+		panic("vmmfs_vcpu_fini: node is still published");
 	}
 	lwkt_reltoken(&vcpu->token);
 	vmmfs_node_abort(&vcpu->node);
@@ -176,7 +176,7 @@ vmmfs_vcpu_fini(struct vmmfs_vcpu *vcpu)
 	vcpu->machine = NULL;
 	vcpu->inode = 0;
 	vmmfs_machine_put(machine);
-	return (0);
+	return;
 }
 
 int
@@ -864,7 +864,6 @@ vmmfs_vcpu_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_vcpu *vcpu;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	vcpu = ap->a_vp->v_data;
 	if (vcpu == NULL || vcpu->machine == NULL)
@@ -873,9 +872,7 @@ vmmfs_vcpu_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&vcpu->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_vcpu_fini(vcpu);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_vcpu_fini(vcpu);
 	return (0);
 }

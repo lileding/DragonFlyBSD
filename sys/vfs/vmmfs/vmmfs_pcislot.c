@@ -93,7 +93,6 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	struct vmmfs_mount *mount;
 	struct vmmfs_pcislot *slot;
 	int error;
-	int cleanup_error;
 
 	if (pciroot == NULL || pciroot->machine == NULL || slotp == NULL)
 		return (EINVAL);
@@ -127,17 +126,13 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	return (0);
 
 fail_config:
-	cleanup_error = vmmfs_pcislot_config_fini(&slot->config);
-	if (cleanup_error != 0)
-		panic("vmmfs_pcislot_create: config fini failed");
+	vmmfs_pcislot_config_fini(&slot->config);
 fail_events:
 fail_vnode:
 	lwkt_gettoken(&pciroot->machine->token);
 	slot->dead = true;
 	lwkt_reltoken(&pciroot->machine->token);
-	cleanup_error = vmmfs_pcislot_events_fini(&slot->events);
-	if (cleanup_error != 0)
-		panic("vmmfs_pcislot_create: events fini failed");
+	vmmfs_pcislot_events_fini(&slot->events);
 	vmmfs_node_abort(&slot->node);
 	vmmfs_pcislot_put(slot);
 	vmmfs_machine_put(pciroot->machine);
@@ -216,7 +211,6 @@ vmmfs_pcislot_is_dead(struct vmmfs_pcislot *slot)
 static void
 vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 {
-	int error;
 
 	KKASSERT(slot != NULL);
 	KKASSERT(slot->dead);
@@ -226,16 +220,13 @@ vmmfs_pcislot_destroy(struct vmmfs_pcislot *slot)
 	KKASSERT(slot->config.node.vnode == NULL);
 	KKASSERT(slot->events.node.vnode == NULL);
 	if (slot->config.slot != NULL) {
-		error = vmmfs_pcislot_config_fini(&slot->config);
-		KKASSERT(error == 0);
+		vmmfs_pcislot_config_fini(&slot->config);
 	}
 	if (slot->descriptor.slot != NULL) {
-		error = vmmfs_pcislot_descriptor_fini(&slot->descriptor);
-		KKASSERT(error == 0);
+		vmmfs_pcislot_descriptor_fini(&slot->descriptor);
 	}
 	if (slot->events.slot != NULL) {
-		error = vmmfs_pcislot_events_fini(&slot->events);
-		KKASSERT(error == 0);
+		vmmfs_pcislot_events_fini(&slot->events);
 	}
 	slot->bdf = 0;
 	slot->pciroot = NULL;
