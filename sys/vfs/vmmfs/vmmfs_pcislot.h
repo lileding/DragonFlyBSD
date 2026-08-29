@@ -36,7 +36,6 @@ struct vmmfs_pcislot_type0 {
 struct vmmfs_pcislot {
 	struct vmmfs_branch branch;
 	RB_ENTRY(vmmfs_pcislot) entry;
-	struct vmmfs_pciroot *pciroot;
 	ino_t inode;
 	uint16_t bdf;
 	bool dead;

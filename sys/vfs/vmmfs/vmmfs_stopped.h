@@ -16,7 +16,6 @@ struct vop_ops;
 
 struct vmmfs_stopped {
 	struct vmmfs_node node;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 };
 
@@ -24,6 +23,5 @@ extern struct vop_ops vmmfs_stopped_vops;
 
 int vmmfs_stopped_create(struct vmmfs_machine *, struct vmmfs_stopped **);
 int vmmfs_stopped_publish(struct vmmfs_stopped *);
-void vmmfs_stopped_destroy(struct vmmfs_stopped *);
 
 #endif /* VMMFS_STOPPED_H */

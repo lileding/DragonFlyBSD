@@ -33,7 +33,7 @@ static int vmmfs_pcislot_auth_stat(struct file *, struct stat *,
 static int vmmfs_pcislot_auth_close(struct file *);
 static int vmmfs_pcislot_auth_seek(struct file *, off_t, int, off_t *);
 static void vmmfs_pcislot_auth_hold(struct vmmfs_pcislot_auth *);
-static void vmmfs_pcislot_auth_drop(struct vmmfs_pcislot_auth *);
+static void vmmfs_pcislot_auth_put(struct vmmfs_pcislot_auth *);
 
 static struct fileops vmmfs_pcislot_auth_fileops = {
 	.fo_read = vmmfs_pcislot_auth_readwrite,
@@ -83,7 +83,7 @@ vmmfs_pcislot_auth_create(struct vmmfs_pcislot *slot, uint64_t generation,
 	return (0);
 
 fail:
-	vmmfs_pcislot_auth_drop(auth);
+	vmmfs_pcislot_auth_put(auth);
 	return (error);
 }
 
@@ -94,7 +94,7 @@ vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth)
 		return;
 	atomic_store_rel_int(&auth->valid, 0);
 	auth->slot = NULL;
-	vmmfs_pcislot_auth_drop(auth);
+	vmmfs_pcislot_auth_put(auth);
 }
 
 int
@@ -193,7 +193,7 @@ vmmfs_pcislot_auth_close(struct file *file)
 	auth = file->f_data;
 	file->f_data = NULL;
 	if (auth != NULL)
-		vmmfs_pcislot_auth_drop(auth);
+		vmmfs_pcislot_auth_put(auth);
 	return (0);
 }
 
@@ -215,7 +215,7 @@ vmmfs_pcislot_auth_hold(struct vmmfs_pcislot_auth *auth)
 }
 
 static void
-vmmfs_pcislot_auth_drop(struct vmmfs_pcislot_auth *auth)
+vmmfs_pcislot_auth_put(struct vmmfs_pcislot_auth *auth)
 {
 	if (atomic_fetchadd_int(&auth->references, -1) == 1)
 		kfree(auth, M_VMMFS);

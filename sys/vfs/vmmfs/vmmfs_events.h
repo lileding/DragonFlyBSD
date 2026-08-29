@@ -22,7 +22,6 @@ struct vop_ops;
 
 struct vmmfs_events {
 	struct vmmfs_node node;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;
@@ -38,7 +37,6 @@ extern struct vop_ops vmmfs_events_vops;
 
 int vmmfs_events_init(struct vmmfs_machine *, struct vmmfs_events *);
 int vmmfs_events_publish(struct vmmfs_events *);
-void vmmfs_events_fini(struct vmmfs_events *);
 void vmmfs_events_revoke(struct vmmfs_events *);
 void vmmfs_events_log(struct vmmfs_events *, enum vmmfs_machine_event,
 	const char *, ...);

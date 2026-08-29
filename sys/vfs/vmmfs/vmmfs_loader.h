@@ -20,7 +20,6 @@ struct ucred;
 extern struct vop_ops vmmfs_loader_vops;
 int vmmfs_loader_init(struct vmmfs_machine *, struct vmmfs_loader *);
 int vmmfs_loader_publish(struct vmmfs_loader *);
-void vmmfs_loader_fini(struct vmmfs_loader *);
 int vmmfs_loader_module_init(void);
 int vmmfs_loader_module_fini(void);
 int vmmfs_loader_run(struct vmmfs_loader *, const char *,
@@ -28,7 +27,6 @@ int vmmfs_loader_run(struct vmmfs_loader *, const char *,
 
 struct vmmfs_loader {
 	struct vmmfs_node node;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	/* A NUL-terminated, one-page shell script executed with boot fd 3. */
 	char script[PAGE_SIZE];

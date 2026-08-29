@@ -12,6 +12,7 @@
 
 #include "vmmfs_machine.h"
 #include "vmmfs_root.h"
+#include "vmmfs_parent.h"
 
 struct mount;
 struct vop_ops;

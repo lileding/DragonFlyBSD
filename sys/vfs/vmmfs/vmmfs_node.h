@@ -35,14 +35,14 @@ int vmmfs_node_publish_cdev(struct vmmfs_node *, struct mount *,
 /* Runs a terminal object destructor exactly once. */
 void vmmfs_node_drop(struct vmmfs_node *);
 
-/* Detaches and returns the direct parent retained by this object. */
-struct vmmfs_node *vmmfs_node_detach_parent(struct vmmfs_node *);
-
 /* Evaluates the local and direct-parent service gates. */
 bool vmmfs_node_is_dead(struct vmmfs_node *);
 
 /* Disposes of an unpublished regular or cdev vnode during error rollback. */
 void vmmfs_node_abort(struct vmmfs_node *);
+
+/* Atomically rolls back a partially published node and releases its object. */
+void vmmfs_node_abort_drop(struct vmmfs_node *);
 
 
 /* Drops the base reference after the owner has removed its namespace entry. */

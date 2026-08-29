@@ -11,6 +11,7 @@
 #include <sys/vnode.h>
 
 #include "vmmfs_node.h"
+#include "vmmfs_branch.h"
 
 void
 vmmfs_node_setup(struct vmmfs_node *node, struct vmmfs_node *parent,
@@ -23,31 +24,30 @@ vmmfs_node_setup(struct vmmfs_node *node, struct vmmfs_node *parent,
 	node->parent = parent;
 	node->drop = drop;
 	node->is_dead = is_dead;
+	if (parent != NULL)
+		vmmfs_branch_hold((struct vmmfs_branch *)parent);
 }
 
 void
 vmmfs_node_drop(struct vmmfs_node *node)
 {
 	void (*drop)(struct vmmfs_node *);
+	struct vmmfs_node *parent;
 
 	KKASSERT(node != NULL);
 	drop = node->drop;
 	KKASSERT(drop != NULL);
 	node->drop = NULL;
-	drop(node);
-}
-
-struct vmmfs_node *
-vmmfs_node_detach_parent(struct vmmfs_node *node)
-{
-	struct vmmfs_node *parent;
-
-	KKASSERT(node != NULL);
+	/*
+	 * The object may free itself in drop(), so retain its parent locally.
+	 * Keep node->parent readable until local cleanup is complete.
+	 */
 	parent = node->parent;
-	KKASSERT(parent != NULL);
-	node->parent = NULL;
-	return (parent);
+	drop(node);
+	if (parent != NULL)
+		vmmfs_branch_put((struct vmmfs_branch *)parent);
 }
+
 
 bool
 vmmfs_node_is_dead(struct vmmfs_node *node)
@@ -133,6 +133,15 @@ vmmfs_node_abort(struct vmmfs_node *node)
 	vx_put(vnode);
 	/* Drop the base reference that publish retained. */
 	vrele(vnode);
+}
+
+void
+vmmfs_node_abort_drop(struct vmmfs_node *node)
+{
+	if (node == NULL || node->drop == NULL)
+		return;
+	vmmfs_node_abort(node);
+	vmmfs_node_drop(node);
 }
 
 void

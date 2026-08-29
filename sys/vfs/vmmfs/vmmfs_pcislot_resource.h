@@ -49,8 +49,6 @@ struct vmmfs_pcislot_resource_trap {
 
 struct vmmfs_pcislot_resource {
 	struct vmmfs_node node;
-	struct vmmfs_pcislot_resources *resources;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	enum vmmfs_pcislot_resource_kind kind;
 	uint16_t index;
@@ -80,7 +78,6 @@ struct vmmfs_pcislot_resource {
 
 struct vmmfs_pcislot_resources {
 	struct vmmfs_branch branch;
-	struct vmmfs_pcislot *slot;
 	vmm_machine_t machine;
 	uint64_t descriptor_generation;
 	bool powered;
@@ -95,7 +92,7 @@ extern struct vop_ops vmmfs_pcislot_resource_vops;
 int vmmfs_pcislot_resources_create(struct vmmfs_pcislot *,
 	vmm_machine_t, const struct vmmfs_pcislot_descriptor_value *, uint64_t,
 	struct vmmfs_pcislot_resources **);
-void vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *);
+void vmmfs_pcislot_resources_unpublish(struct vmmfs_pcislot_resources *);
 int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
 	vmm_machine_t);
 void vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *);

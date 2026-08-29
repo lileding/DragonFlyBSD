@@ -30,6 +30,20 @@ vmmfs_branch_hold(struct vmmfs_branch *branch)
 }
 
 void
+vmmfs_branch_abort(struct vmmfs_branch *branch)
+{
+	bool vnode_reference;
+
+	KKASSERT(branch != NULL);
+	KKASSERT(branch->node.drop != NULL);
+	vnode_reference = branch->node.vnode != NULL;
+	vmmfs_node_abort(&branch->node);
+	if (vnode_reference)
+		vmmfs_branch_put(branch);
+	vmmfs_branch_put(branch);
+}
+
+void
 vmmfs_branch_put(struct vmmfs_branch *branch)
 {
 	struct vmmfs_node *node;

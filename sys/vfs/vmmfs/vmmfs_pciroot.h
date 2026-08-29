@@ -37,7 +37,6 @@ RB_HEAD(vmmfs_pcislot_tree, vmmfs_pcislot);
 
 struct vmmfs_pciroot {
 	struct vmmfs_branch branch;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	struct vmmfs_pcislot_tree slots;
 	vmm_machine_t runtime_machine;
@@ -56,7 +55,6 @@ extern struct vop_ops vmmfs_pciroot_vops;
 
 int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *);
 int vmmfs_pciroot_publish(struct vmmfs_pciroot *);
-void vmmfs_pciroot_fini(struct vmmfs_pciroot *);
 void vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);

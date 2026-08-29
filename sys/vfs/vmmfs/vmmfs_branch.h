@@ -25,4 +25,7 @@ void vmmfs_branch_init(struct vmmfs_branch *, struct vmmfs_node *,
 void vmmfs_branch_hold(struct vmmfs_branch *);
 void vmmfs_branch_put(struct vmmfs_branch *);
 
+/* Rolls back a branch before it is inserted into its parent collection. */
+void vmmfs_branch_abort(struct vmmfs_branch *);
+
 #endif /* VMMFS_BRANCH_H */

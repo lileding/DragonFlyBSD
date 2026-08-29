@@ -146,15 +146,14 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     uint32_t unit;
     int error;
 
-    if (serialroot == NULL || serialroot->machine == NULL || portp == NULL ||
+    if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL || portp == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
-    state = (struct vmmfs_mount *)serialroot->machine->root->mount->mnt_data;
+    state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
     if (state->serialport_vops == NULL)
         return ENXIO;
     *portp = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
-    port->serialroot = serialroot;
     port->inode = atomic_fetchadd_int(&state->next_inode, 1);
     bcopy(name, port->name, namelen);
     port->name[namelen] = '\0';
@@ -164,7 +163,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     lwkt_token_init(&port->token, "vmmfsserial");
     unit = atomic_fetchadd_int(&vmmfs_serialport_dev_serial, 1);
     dev = make_only_dev(&vmmfs_serialport_dev_ops, (int)unit, 0, 0, 0600,
-        "vmmfs_serial/%s/%s", serialroot->machine->name, port->name);
+        "vmmfs_serial/%s/%s", vmmfs_serialroot_machine(serialroot)->name, port->name);
     if (dev == NULL) {
         error = ENOMEM;
         goto fail_token;
@@ -180,7 +179,6 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->dev = dev;
     vmmfs_node_setup(&port->node, &serialroot->branch.node,
         vmmfs_serialport_drop, NULL);
-    vmmfs_branch_hold(&serialroot->branch);
     *portp = port;
     return 0;
 
@@ -196,28 +194,27 @@ vmmfs_serialport_publish(struct vmmfs_serialport *port)
     struct vmmfs_mount *state;
     struct vmmfs_serialroot *serialroot;
 
-    if (port == NULL || port->serialroot == NULL || port->dev == NULL)
+    if (port == NULL || vmmfs_serialport_serialroot(port) == NULL || port->dev == NULL)
         return EINVAL;
-    serialroot = port->serialroot;
-    if (serialroot->machine == NULL || serialroot->machine->root == NULL)
+    serialroot = vmmfs_serialport_serialroot(port);
+    if (vmmfs_serialroot_machine(serialroot) == NULL || vmmfs_machine_root(vmmfs_serialroot_machine(serialroot)) == NULL)
         return ENXIO;
-    state = (struct vmmfs_mount *)serialroot->machine->root->mount->mnt_data;
+    state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
     if (state == NULL || state->serialport_vops == NULL)
         return ENXIO;
     return vmmfs_node_publish_cdev(&port->node,
-        serialroot->machine->root->mount, &state->serialport_vops, port->dev,
+        vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount, &state->serialport_vops, port->dev,
         port);
 }
 
-void
-vmmfs_serialport_destroy(struct vmmfs_serialport *port)
+static void
+vmmfs_serialport_drop(struct vmmfs_node *node)
 {
+    struct vmmfs_serialport *port;
     cdev_t dev;
-    struct vmmfs_serialroot *serialroot;
 
+    port = (struct vmmfs_serialport *)node;
     KKASSERT(port != NULL);
-    KKASSERT(port->serialroot != NULL);
-    serialroot = port->serialroot;
     lwkt_gettoken(&port->token);
     KKASSERT(port->destroying);
     KKASSERT(port->machine == NULL);
@@ -250,19 +247,9 @@ vmmfs_serialport_destroy(struct vmmfs_serialport *port)
         destroy_dev(dev);
     }
     port->dev = NULL;
-    KKASSERT(vmmfs_node_detach_parent(&port->node) ==
-        &serialroot->branch.node);
-    port->serialroot = NULL;
     lwkt_token_uninit(&port->tty.t_token);
     lwkt_token_uninit(&port->token);
     kfree(port, M_VMMFS);
-    vmmfs_branch_put(&serialroot->branch);
-}
-
-static void
-vmmfs_serialport_drop(struct vmmfs_node *node)
-{
-    vmmfs_serialport_destroy((struct vmmfs_serialport *)node);
 }
 void
 vmmfs_serialport_revoke(struct vmmfs_serialport *port)

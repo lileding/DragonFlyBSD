@@ -30,7 +30,6 @@ struct vmmfs_vcpu_thread {
 
 struct vmmfs_vcpu {
 	struct vmmfs_node node;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	struct vmmfs_vcpu_thread *threads;
 	vmm_machine_t runtime_machine;
@@ -49,7 +48,6 @@ extern struct vop_ops vmmfs_vcpu_vops;
 
 int vmmfs_vcpu_init(struct vmmfs_machine *, struct vmmfs_vcpu *);
 int vmmfs_vcpu_publish(struct vmmfs_vcpu *);
-void vmmfs_vcpu_fini(struct vmmfs_vcpu *);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);
 int vmmfs_vcpu_reset(struct vmmfs_vcpu *, vmm_machine_t,

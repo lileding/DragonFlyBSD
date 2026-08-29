@@ -33,7 +33,6 @@ struct vmmfs_serialring {
 struct vmmfs_serialport {
 	struct vmmfs_node node;
 	RB_ENTRY(vmmfs_serialport) entry;
-	struct vmmfs_serialroot *serialroot;
 	ino_t inode;
 	char name[sizeof("com4")];
 	uint8_t number;
@@ -72,7 +71,6 @@ int vmmfs_serialport_compare(struct vmmfs_serialport *,
 int vmmfs_serialport_create(struct vmmfs_serialroot *, const char *, size_t,
 	struct vmmfs_serialport **);
 int vmmfs_serialport_publish(struct vmmfs_serialport *);
-void vmmfs_serialport_destroy(struct vmmfs_serialport *);
 int vmmfs_serialport_start(struct vmmfs_serialport *, vmm_machine_t);
 int vmmfs_serialport_stop(struct vmmfs_serialport *);
 void vmmfs_serialport_revoke(struct vmmfs_serialport *);

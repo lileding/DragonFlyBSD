@@ -20,7 +20,6 @@ struct vmmfs_memory;
 extern struct vop_ops vmmfs_memory_vops;
 int vmmfs_memory_init(struct vmmfs_machine *, struct vmmfs_memory *);
 int vmmfs_memory_publish(struct vmmfs_memory *);
-void vmmfs_memory_fini(struct vmmfs_memory *);
 int vmmfs_memory_prepare(struct vmmfs_memory *, uint64_t);
 int vmmfs_memory_map(struct vmmfs_memory *);
 int vmmfs_memory_snapshot(struct vmmfs_memory *);
@@ -34,7 +33,6 @@ void vmmfs_memory_unmap(struct vmmfs_memory *, uint64_t, uint64_t);
 
 struct vmmfs_memory {
 	struct vmmfs_node node;
-	struct vmmfs_machine *machine;
 	ino_t inode;
 	struct vm_object *object;
 	struct vmspace *boot_vmspace;

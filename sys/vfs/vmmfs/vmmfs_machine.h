@@ -35,7 +35,6 @@ struct ucred;
 struct vmmfs_machine {
 	struct vmmfs_branch branch;
 	RB_ENTRY(vmmfs_machine) entry;
-	struct vmmfs_root *root;
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	uint32_t id;
@@ -69,7 +68,7 @@ int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **);
 int vmmfs_machine_publish(struct vmmfs_machine *);
 void vmmfs_machine_abort_create(struct vmmfs_machine *);
-int vmmfs_machine_begin_destroy(struct vmmfs_machine *);
+int vmmfs_machine_unpublish(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);
 void vmmfs_machine_put(struct vmmfs_machine *);
 bool vmmfs_machine_is_dead(struct vmmfs_machine *);
