@@ -123,6 +123,7 @@ static int vmmfs_loader_setattr(struct vop_setattr_args *);
 static int vmmfs_loader_write(struct vop_write_args *);
 static int vmmfs_loader_inactive(struct vop_inactive_args *);
 static int vmmfs_loader_reclaim(struct vop_reclaim_args *);
+static void vmmfs_loader_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_loader_vops = {
 	.vop_default = vop_defaultop,
@@ -941,6 +942,7 @@ vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 		return (EINVAL);
 	bzero(loader, sizeof(*loader));
 	loader->machine = machine;
+	vmmfs_node_setup(&loader->node, &machine->branch.node, vmmfs_loader_drop, NULL);
 	vmmfs_machine_hold(machine);
 	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
 	if (mount == NULL || mount->loader_vops == NULL) {
@@ -948,16 +950,13 @@ vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
 		goto fail;
 	}
 	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	error = vmmfs_node_init(&loader->node, machine->root->mount,
-	    &mount->loader_vops, VREG, loader);
-	if (error != 0)
-		goto fail;
 	return (0);
 
 fail:
-	vmmfs_node_abort(&loader->node);
 	loader->machine = NULL;
 	loader->inode = 0;
+	KKASSERT(vmmfs_node_detach_parent(&loader->node) ==
+	    &machine->branch.node);
 	vmmfs_machine_put(machine);
 	return (error);
 }
@@ -972,13 +971,34 @@ vmmfs_loader_fini(struct vmmfs_loader *loader)
 	machine = loader->machine;
 	if (machine == NULL)
 		return;
-	if (loader->node.published)
-		panic("vmmfs_loader_fini: node is still published");
-	vmmfs_node_abort(&loader->node);
+	if (loader->node.vnode != NULL)
+		panic("vmmfs_loader_fini: vnode is still published");
+	KKASSERT(vmmfs_node_detach_parent(&loader->node) ==
+	    &machine->branch.node);
 	loader->machine = NULL;
 	loader->inode = 0;
 	vmmfs_machine_put(machine);
 	return;
+}
+
+int
+vmmfs_loader_publish(struct vmmfs_loader *loader)
+{
+	struct vmmfs_mount *state;
+
+	if (loader == NULL || loader->machine == NULL)
+		return (EINVAL);
+	state = (struct vmmfs_mount *)loader->machine->root->mount->mnt_data;
+	if (state == NULL || state->loader_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&loader->node,
+	    loader->machine->root->mount, &state->loader_vops, VREG, loader));
+}
+
+static void
+vmmfs_loader_drop(struct vmmfs_node *node)
+{
+	vmmfs_loader_fini((struct vmmfs_loader *)node);
 }
 
 static int
@@ -1123,6 +1143,6 @@ vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&loader->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_loader_fini(loader);
+		vmmfs_node_drop(&loader->node);
 	return (0);
 }

@@ -38,6 +38,7 @@ static int vmmfs_memory_inactive(struct vop_inactive_args *);
 static int vmmfs_memory_reclaim(struct vop_reclaim_args *);
 static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
+static void vmmfs_memory_drop(struct vmmfs_node *);
 static void vmmfs_memory_object_reference(struct vm_object *);
 
 struct vop_ops vmmfs_memory_vops = {
@@ -122,6 +123,7 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 		return (EINVAL);
 	bzero(memory, sizeof(*memory));
 	memory->machine = machine;
+	vmmfs_node_setup(&memory->node, &machine->branch.node, vmmfs_memory_drop, NULL);
 	vmmfs_machine_hold(machine);
 	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
 	memory->inode = atomic_fetchadd_int(&state->next_inode, 1);
@@ -130,16 +132,13 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory)
 		goto fail;
 	}
 
-	error = vmmfs_node_init(&memory->node, machine->root->mount,
-	    &state->memory_vops, VREG, memory);
-	if (error != 0)
-		goto fail;
 	return (0);
 
 fail:
-	vmmfs_node_abort(&memory->node);
 	memory->machine = NULL;
 	memory->inode = 0;
+	KKASSERT(vmmfs_node_detach_parent(&memory->node) ==
+	    &machine->branch.node);
 	vmmfs_machine_put(machine);
 	return (error);
 }
@@ -156,13 +155,34 @@ vmmfs_memory_fini(struct vmmfs_memory *memory)
 		return;
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		panic("vmmfs_memory_fini: runtime memory is still active");
-	if (memory->node.published)
-		panic("vmmfs_memory_fini: node is still published");
-	vmmfs_node_abort(&memory->node);
+	if (memory->node.vnode != NULL)
+		panic("vmmfs_memory_fini: vnode is still published");
+	KKASSERT(vmmfs_node_detach_parent(&memory->node) ==
+	    &machine->branch.node);
 	memory->machine = NULL;
 	memory->inode = 0;
 	vmmfs_machine_put(machine);
 	return;
+}
+
+int
+vmmfs_memory_publish(struct vmmfs_memory *memory)
+{
+	struct vmmfs_mount *state;
+
+	if (memory == NULL || memory->machine == NULL)
+		return (EINVAL);
+	state = (struct vmmfs_mount *)memory->machine->root->mount->mnt_data;
+	if (state == NULL || state->memory_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&memory->node,
+	    memory->machine->root->mount, &state->memory_vops, VREG, memory));
+}
+
+static void
+vmmfs_memory_drop(struct vmmfs_node *node)
+{
+	vmmfs_memory_fini((struct vmmfs_memory *)node);
 }
 
 int
@@ -520,6 +540,6 @@ vmmfs_memory_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&memory->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_memory_fini(memory);
+		vmmfs_node_drop(&memory->node);
 	return (0);
 }

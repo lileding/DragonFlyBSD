@@ -13,6 +13,7 @@
 #include <sys/vmmfs.h>
 
 #include "vmmfs_node.h"
+#include "vmmfs_branch.h"
 
 struct cdev;
 struct vm_object;
@@ -78,12 +79,12 @@ struct vmmfs_pcislot_resource {
 };
 
 struct vmmfs_pcislot_resources {
+	struct vmmfs_branch branch;
 	struct vmmfs_pcislot *slot;
 	vmm_machine_t machine;
 	uint64_t descriptor_generation;
 	bool powered;
 	bool destroying;
-	int references;
 	size_t count;
 	size_t initialized_count;
 	struct vmmfs_pcislot_resource items[];
@@ -94,7 +95,7 @@ extern struct vop_ops vmmfs_pcislot_resource_vops;
 int vmmfs_pcislot_resources_create(struct vmmfs_pcislot *,
 	vmm_machine_t, const struct vmmfs_pcislot_descriptor_value *, uint64_t,
 	struct vmmfs_pcislot_resources **);
-int vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *);
+void vmmfs_pcislot_resources_destroy(struct vmmfs_pcislot_resources *);
 int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
 	vmm_machine_t);
 void vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *);

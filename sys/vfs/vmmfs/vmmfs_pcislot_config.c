@@ -54,6 +54,7 @@ static int vmmfs_pcislot_config_match(struct vmmfs_pcislot_config *,
 static bool vmmfs_pcislot_config_overlap(uint64_t, uint64_t, uint64_t,
 	uint64_t);
 static uint64_t vmmfs_pcislot_config_absent_value(enum vmm_io_width);
+static void vmmfs_pcislot_config_drop(struct vmmfs_node *);
 
 static struct filterops vmmfs_pcislot_config_read_filterops = {
 	FILTEROP_ISFD | FILTEROP_MPSAFE,
@@ -90,7 +91,6 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_mount *mount;
-	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || config == NULL)
@@ -105,23 +105,30 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	lwkt_token_init(&config->token, "vmmfspcicfg");
 	TAILQ_INIT(&config->requests);
 	SLIST_INIT(&config->kq.ki_note);
-	vmmfs_machine_hold(machine);
+	vmmfs_node_setup(&config->node, &slot->branch.node,
+	    vmmfs_pcislot_config_drop, NULL);
 	vmmfs_pcislot_hold(slot);
-	error = vmmfs_node_init(&config->node,
-	    machine->root->mount,
-	    &mount->pcislot_config_vops, VREG, config);
-	if (error != 0)
-		goto fail_node;
 	return (0);
+}
 
-fail_node:
-	vmmfs_node_abort(&config->node);
-	vmmfs_pcislot_put(slot);
-	vmmfs_machine_put(machine);
-	config->slot = NULL;
-	config->inode = 0;
-	lwkt_token_uninit(&config->token);
-	return (error);
+int
+vmmfs_pcislot_config_publish(struct vmmfs_pcislot_config *config)
+{
+	struct vmmfs_machine *machine;
+	struct vmmfs_mount *mount;
+	struct vmmfs_pcislot *slot;
+
+	if (config == NULL || config->slot == NULL)
+		return (EINVAL);
+	slot = config->slot;
+	if (slot->pciroot == NULL || slot->pciroot->machine == NULL)
+		return (ENXIO);
+	machine = slot->pciroot->machine;
+	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	if (mount == NULL || mount->pcislot_config_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&config->node,
+	    machine->root->mount, &mount->pcislot_config_vops, VREG, config));
 }
 
 void
@@ -141,19 +148,26 @@ vmmfs_pcislot_config_fini(struct vmmfs_pcislot_config *config)
 	if (machine == NULL)
 		panic("vmmfs_pcislot_config_fini: PCI root lost its machine");
 	lwkt_gettoken(&config->token);
-	if (config->node.published) {
+	if (config->node.vnode != NULL) {
 		lwkt_reltoken(&config->token);
-		panic("vmmfs_pcislot_config_fini: node is still published");
+		panic("vmmfs_pcislot_config_fini: vnode is still live");
 	}
 	lwkt_reltoken(&config->token);
-	vmmfs_node_abort(&config->node);
 	vmmfs_pcislot_config_revoke(config);
+	KKASSERT(vmmfs_node_detach_parent(&config->node) ==
+	    &slot->branch.node);
 	config->slot = NULL;
 	config->inode = 0;
 	lwkt_token_uninit(&config->token);
 	vmmfs_pcislot_put(slot);
-	vmmfs_machine_put(machine);
 	return;
+}
+
+static void
+vmmfs_pcislot_config_drop(struct vmmfs_node *node)
+{
+
+	vmmfs_pcislot_config_fini((struct vmmfs_pcislot_config *)node);
 }
 
 void
@@ -518,7 +532,7 @@ vmmfs_pcislot_config_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&config->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_pcislot_config_fini(config);
+		vmmfs_node_drop(&config->node);
 	return (0);
 }
 

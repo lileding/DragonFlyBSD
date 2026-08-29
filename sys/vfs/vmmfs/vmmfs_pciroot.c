@@ -69,7 +69,8 @@ static bool vmmfs_pciroot_ecam_contains(uint64_t, enum vmm_io_width);
 static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
 	struct vmmfs_pciroot *, uint16_t);
 static void vmmfs_pciroot_drop_slot(struct vmmfs_pcislot *);
-static void vmmfs_pciroot_release_node_reference(struct vmmfs_pciroot *);
+static void vmmfs_pciroot_drop(struct vmmfs_node *);
+static bool vmmfs_pciroot_is_dead(struct vmmfs_node *);
 static uint32_t vmmfs_pciroot_absent_value(enum vmm_io_width);
 static int vmmfs_pciroot_hostbridge_read(uint16_t, enum vmm_io_width,
 	uint32_t *);
@@ -98,7 +99,6 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_mount *state;
-	int error;
 
 	if (machine == NULL || pciroot == NULL)
 		return (EINVAL);
@@ -107,28 +107,37 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 		return (ENXIO);
 	bzero(pciroot, sizeof(*pciroot));
 	pciroot->machine = machine;
+	vmmfs_branch_init(&pciroot->branch, &machine->branch.node,
+	    vmmfs_pciroot_drop, vmmfs_pciroot_is_dead);
 	pciroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	RB_INIT(&pciroot->slots);
 	vmmfs_machine_hold(machine);
-	pciroot->node_reference = true;
-	error = vmmfs_node_init(&pciroot->node, machine->root->mount,
-	    &state->pciroot_vops, VDIR, pciroot);
-	if (error != 0)
-		goto fail;
 	return (0);
 
-fail:
-	vmmfs_node_abort(&pciroot->node);
-	pciroot->node_reference = false;
-	pciroot->machine = NULL;
-	vmmfs_machine_put(machine);
+}
+
+int
+vmmfs_pciroot_publish(struct vmmfs_pciroot *pciroot)
+{
+	struct vmmfs_mount *state;
+	int error;
+
+	if (pciroot == NULL || pciroot->machine == NULL)
+		return (EINVAL);
+	state = (struct vmmfs_mount *)pciroot->machine->root->mount->mnt_data;
+	if (state == NULL || state->pciroot_vops == NULL)
+		return (ENXIO);
+	error = vmmfs_node_publish_regular(&pciroot->branch.node,
+	    pciroot->machine->root->mount, &state->pciroot_vops, VDIR,
+	    pciroot);
+	if (error == 0)
+		vmmfs_branch_hold(&pciroot->branch);
 	return (error);
 }
 
 void
 vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 {
-	struct vmmfs_pcislot *slot;
 	struct vmmfs_machine *machine;
 
 	if (pciroot == NULL)
@@ -136,28 +145,16 @@ vmmfs_pciroot_fini(struct vmmfs_pciroot *pciroot)
 	machine = pciroot->machine;
 	if (machine == NULL)
 		return;
-	if (pciroot->node.published)
-		panic("vmmfs_pciroot_fini: node is still published");
+	if (pciroot->branch.node.vnode != NULL)
+		panic("vmmfs_pciroot_fini: vnode is still published");
+	KKASSERT(pciroot->branch.references == 0);
 	lwkt_gettoken(&machine->token);
 	if (pciroot->runtime_machine != NULL) {
 		lwkt_reltoken(&machine->token);
 		panic("vmmfs_pciroot_fini: runtime PCI root is still active");
 	}
 	lwkt_reltoken(&machine->token);
-	vmmfs_node_abort(&pciroot->node);
-	for (;;) {
-		lwkt_gettoken(&machine->token);
-		slot = RB_ROOT(&pciroot->slots);
-		if (slot != NULL) {
-			RB_REMOVE(vmmfs_pcislot_tree, &pciroot->slots, slot);
-			slot->dead = true;
-		}
-		lwkt_reltoken(&machine->token);
-		if (slot == NULL)
-			break;
-		vmmfs_pciroot_drop_slot(slot);
-	}
-	vmmfs_pciroot_release_node_reference(pciroot);
+	KKASSERT(RB_EMPTY(&pciroot->slots));
 	pciroot->machine = NULL;
 	return;
 }
@@ -183,7 +180,7 @@ vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *pciroot)
 		vmmfs_pcislot_release_vnodes(slot);
 		vmmfs_pcislot_put(slot);
 	}
-	vmmfs_node_unpublish(&pciroot->node);
+	vmmfs_node_unpublish(&pciroot->branch.node);
 }
 
 int
@@ -630,7 +627,7 @@ vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	if (machine == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&machine->token);
-	vnode = machine->node.vnode;
+	vnode = machine->branch.node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&machine->token);
@@ -667,28 +664,29 @@ vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *ap)
 	error = vmmfs_pcislot_create(pciroot, bdf, &slot);
 	if (error != 0)
 		return (error);
+	error = vmmfs_pcislot_publish(slot);
+	if (error != 0) {
+		vmmfs_pcislot_abort_create(slot);
+		return (error);
+	}
 	lwkt_gettoken(&pciroot->machine->token);
 	if (pciroot->machine->root == NULL || pciroot->machine->dead) {
-		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		vmmfs_pciroot_drop_slot(slot);
+		vmmfs_pcislot_abort_create(slot);
 		return (ENOENT);
 	}
 	if (pciroot->machine->machine != NULL) {
-		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		vmmfs_pciroot_drop_slot(slot);
+		vmmfs_pcislot_abort_create(slot);
 		return (EBUSY);
 	}
 	if (RB_INSERT(vmmfs_pcislot_tree, &pciroot->slots, slot) != NULL) {
-		slot->dead = true;
 		lwkt_reltoken(&pciroot->machine->token);
-		vmmfs_pciroot_drop_slot(slot);
+		vmmfs_pcislot_abort_create(slot);
 		return (EEXIST);
 	}
-	vmmfs_pcislot_publish(slot);
 	lwkt_reltoken(&pciroot->machine->token);
-	vnode = slot->node.vnode;
+	vnode = slot->branch.node.vnode;
 	error = vget(vnode, LK_EXCLUSIVE);
 	if (error != 0) {
 		lwkt_gettoken(&pciroot->machine->token);
@@ -724,8 +722,7 @@ vmmfs_pciroot_nresolve(struct vop_nresolve_args *ap)
 	}
 	lwkt_gettoken(&pciroot->machine->token);
 	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
-	vnode = slot == NULL || !vmmfs_node_is_published(&slot->node) ?
-	    NULL : slot->node.vnode;
+	vnode = slot == NULL ? NULL : slot->branch.node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&pciroot->machine->token);
@@ -870,7 +867,7 @@ vmmfs_pciroot_inactive(struct vop_inactive_args *ap)
 	machine = pciroot->machine;
 	if (!vmmfs_machine_is_dead(machine))
 		return (0);
-	vmmfs_node_inactive(&pciroot->node, ap->a_vp);
+	vmmfs_node_inactive(&pciroot->branch.node, ap->a_vp);
 	return (0);
 }
 
@@ -886,23 +883,37 @@ vmmfs_pciroot_reclaim(struct vop_reclaim_args *ap)
 		return (0);
 	machine = pciroot->machine;
 	lwkt_gettoken(&machine->token);
-	reclaim = vmmfs_node_reclaim(&pciroot->node, ap->a_vp);
+	reclaim = vmmfs_node_reclaim(&pciroot->branch.node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_pciroot_release_node_reference(pciroot);
+		vmmfs_branch_put(&pciroot->branch);
 	return (0);
 }
 
 static void
-vmmfs_pciroot_release_node_reference(struct vmmfs_pciroot *pciroot)
+vmmfs_pciroot_drop(struct vmmfs_node *node)
 {
+	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_machine *machine;
 
+	pciroot = (struct vmmfs_pciroot *)node;
 	machine = pciroot->machine;
-	if (machine == NULL || !pciroot->node_reference)
-		return;
-	pciroot->node_reference = false;
+	KKASSERT(machine != NULL);
+	KKASSERT(pciroot->branch.references == 0);
+	KKASSERT(vmmfs_node_detach_parent(&pciroot->branch.node) ==
+	    &machine->branch.node);
+	vmmfs_pciroot_fini(pciroot);
 	vmmfs_machine_put(machine);
+}
+
+static bool
+vmmfs_pciroot_is_dead(struct vmmfs_node *node)
+{
+	struct vmmfs_pciroot *pciroot;
+
+	pciroot = (struct vmmfs_pciroot *)node;
+	return (pciroot->machine == NULL ||
+	    vmmfs_machine_is_dead(pciroot->machine));
 }
 
 static int

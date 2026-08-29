@@ -11,7 +11,7 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
-#include "vmmfs_node.h"
+#include "vmmfs_branch.h"
 #include <dev/virtual/vmm/vmm.h>
 
 #include "vmmfs_events.h"
@@ -33,7 +33,7 @@ struct vmmfs_root;
 struct ucred;
 
 struct vmmfs_machine {
-	struct vmmfs_node node;
+	struct vmmfs_branch branch;
 	RB_ENTRY(vmmfs_machine) entry;
 	struct vmmfs_root *root;
 	ino_t inode;
@@ -41,7 +41,6 @@ struct vmmfs_machine {
 	uint32_t id;
 	struct vmmfs_machine_id id_node;
 	struct lwkt_token token;
-	unsigned int references;
 	bool dead;
 	bool root_counted;
 	/* NULL is stopped.  A non-NULL instance owns the running topology. */
@@ -68,7 +67,7 @@ extern struct vop_ops vmmfs_machine_vops;
 int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
 int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **);
-void vmmfs_machine_publish(struct vmmfs_machine *);
+int vmmfs_machine_publish(struct vmmfs_machine *);
 void vmmfs_machine_abort_create(struct vmmfs_machine *);
 int vmmfs_machine_begin_destroy(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);

@@ -36,6 +36,7 @@ static int vmmfs_events_write(struct vop_write_args *);
 static void vmmfs_events_filter_detach(struct knote *);
 static int vmmfs_events_filter_read(struct knote *, long);
 static const char *vmmfs_machine_event_name(enum vmmfs_machine_event);
+static void vmmfs_events_drop(struct vmmfs_node *);
 
 static struct filterops vmmfs_events_read_filterops = {
 	FILTEROP_ISFD | FILTEROP_MPSAFE,
@@ -71,6 +72,7 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 	bzero(events, sizeof(*events));
 	events->machine = machine;
 	lwkt_token_init(&events->token, "vmmfsevents");
+	vmmfs_node_setup(&events->node, &machine->branch.node, vmmfs_events_drop, NULL);
 	vmmfs_machine_hold(machine);
 	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
@@ -81,16 +83,13 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_node_init(&events->node, machine->root->mount,
-	    &state->events_vops, VREG, events);
-	if (error != 0)
-		goto fail;
 	return (0);
 
 fail:
-	vmmfs_node_abort(&events->node);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
+	KKASSERT(vmmfs_node_detach_parent(&events->node) ==
+	    &machine->branch.node);
 	events->machine = NULL;
 	events->inode = 0;
 	lwkt_token_uninit(&events->token);
@@ -109,20 +108,41 @@ vmmfs_events_fini(struct vmmfs_events *events)
 	if (machine == NULL)
 		return;
 	lwkt_gettoken(&events->token);
-	if (events->node.published) {
+	if (events->node.vnode != NULL) {
 		lwkt_reltoken(&events->token);
-		panic("vmmfs_events_fini: node is still published");
+		panic("vmmfs_events_fini: vnode is still published");
 	}
 	lwkt_reltoken(&events->token);
-	vmmfs_node_abort(&events->node);
 	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
+	KKASSERT(vmmfs_node_detach_parent(&events->node) ==
+	    &machine->branch.node);
 	events->machine = NULL;
 	events->inode = 0;
 	lwkt_token_uninit(&events->token);
 	vmmfs_machine_put(machine);
 	return;
+}
+
+int
+vmmfs_events_publish(struct vmmfs_events *events)
+{
+	struct vmmfs_mount *state;
+
+	if (events == NULL || events->machine == NULL)
+		return (EINVAL);
+	state = (struct vmmfs_mount *)events->machine->root->mount->mnt_data;
+	if (state == NULL || state->events_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&events->node,
+	    events->machine->root->mount, &state->events_vops, VREG, events));
+}
+
+static void
+vmmfs_events_drop(struct vmmfs_node *node)
+{
+	vmmfs_events_fini((struct vmmfs_events *)node);
 }
 
 void
@@ -464,7 +484,7 @@ vmmfs_events_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&events->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_events_fini(events);
+		vmmfs_node_drop(&events->node);
 	return (0);
 }
 

@@ -39,6 +39,7 @@ static int vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *);
 static void vmmfs_pcislot_events_filter_detach(struct knote *);
 static int vmmfs_pcislot_events_filter_read(struct knote *, long);
 static const char *vmmfs_pci_event_name(enum vmmfs_pci_event);
+static void vmmfs_pcislot_events_drop(struct vmmfs_node *);
 
 static struct filterops vmmfs_pcislot_events_read_filterops = {
 	FILTEROP_ISFD | FILTEROP_MPSAFE,
@@ -67,7 +68,6 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_mount *mount;
-	int error;
 
 	if (slot == NULL || slot->pciroot == NULL ||
 	    slot->pciroot->machine == NULL || state_node == NULL)
@@ -83,25 +83,30 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	state_node->buffer = kmalloc(VMMFS_PCISLOT_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	state_node->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	vmmfs_machine_hold(machine);
+	vmmfs_node_setup(&state_node->node, &slot->branch.node,
+	    vmmfs_pcislot_events_drop, NULL);
 	vmmfs_pcislot_hold(slot);
-	error = vmmfs_node_init(&state_node->node,
-	    machine->root->mount,
-	    &mount->pcislot_events_vops, VREG, state_node);
-	if (error != 0)
-		goto fail_node;
 	return (0);
+}
 
-fail_node:
-	vmmfs_node_abort(&state_node->node);
-	vmmfs_pcislot_put(slot);
-	vmmfs_machine_put(machine);
-	kfree(state_node->buffer, M_VMMFS);
-	state_node->buffer = NULL;
-	lwkt_token_uninit(&state_node->token);
-	state_node->slot = NULL;
-	state_node->inode = 0;
-	return (error);
+int
+vmmfs_pcislot_events_publish(struct vmmfs_pcislot_events *state_node)
+{
+	struct vmmfs_machine *machine;
+	struct vmmfs_mount *mount;
+	struct vmmfs_pcislot *slot;
+
+	if (state_node == NULL || state_node->slot == NULL)
+		return (EINVAL);
+	slot = state_node->slot;
+	if (slot->pciroot == NULL || slot->pciroot->machine == NULL)
+		return (ENXIO);
+	machine = slot->pciroot->machine;
+	mount = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	if (mount == NULL || mount->pcislot_events_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&state_node->node,
+	    machine->root->mount, &mount->pcislot_events_vops, VREG, state_node));
 }
 
 void
@@ -121,21 +126,28 @@ vmmfs_pcislot_events_fini(struct vmmfs_pcislot_events *state_node)
 	if (machine == NULL)
 		panic("vmmfs_pcislot_events_fini: PCI root lost its machine");
 	lwkt_gettoken(&state_node->token);
-	if (state_node->node.published) {
+	if (state_node->node.vnode != NULL) {
 		lwkt_reltoken(&state_node->token);
-		panic("vmmfs_pcislot_events_fini: node is still published");
+		panic("vmmfs_pcislot_events_fini: vnode is still live");
 	}
 	lwkt_reltoken(&state_node->token);
-	vmmfs_node_abort(&state_node->node);
 	vmmfs_pcislot_events_revoke(state_node);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
 	state_node->slot = NULL;
 	state_node->inode = 0;
+	KKASSERT(vmmfs_node_detach_parent(&state_node->node) ==
+	    &slot->branch.node);
 	lwkt_token_uninit(&state_node->token);
 	vmmfs_pcislot_put(slot);
-	vmmfs_machine_put(machine);
 	return;
+}
+
+static void
+vmmfs_pcislot_events_drop(struct vmmfs_node *node)
+{
+
+	vmmfs_pcislot_events_fini((struct vmmfs_pcislot_events *)node);
 }
 
 void
@@ -461,6 +473,6 @@ vmmfs_pcislot_events_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&state_node->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_pcislot_events_fini(state_node);
+		vmmfs_node_drop(&state_node->node);
 	return (0);
 }

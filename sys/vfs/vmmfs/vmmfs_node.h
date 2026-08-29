@@ -15,23 +15,35 @@ struct vop_ops;
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
 	struct vnode *vnode;
-	bool published;
-	bool base_reference;
+	struct vmmfs_node *parent;
+	void (*drop)(struct vmmfs_node *);
+	bool (*is_dead)(struct vmmfs_node *);
 };
 
-/* Creates a regular vnode ready for parent namespace publication. */
-int vmmfs_node_init(struct vmmfs_node *, struct mount *,
+/* Initializes object ownership before the object becomes namespace-visible. */
+void vmmfs_node_setup(struct vmmfs_node *, struct vmmfs_node *,
+	void (*)(struct vmmfs_node *), bool (*)(struct vmmfs_node *));
+
+/* Publishes a fully initialized regular vnode for a namespace object. */
+int vmmfs_node_publish_regular(struct vmmfs_node *, struct mount *,
 	struct vop_ops **, enum vtype, void *);
 
-/* Creates a cdev vnode ready for parent namespace publication. */
-int vmmfs_node_init_cdev(struct vmmfs_node *, struct mount *,
+/* Publishes a fully initialized special vnode for a cdev-backed object. */
+int vmmfs_node_publish_cdev(struct vmmfs_node *, struct mount *,
 	struct vop_ops **, struct cdev *, void *);
+
+/* Runs a terminal object destructor exactly once. */
+void vmmfs_node_drop(struct vmmfs_node *);
+
+/* Detaches and returns the direct parent retained by this object. */
+struct vmmfs_node *vmmfs_node_detach_parent(struct vmmfs_node *);
+
+/* Evaluates the local and direct-parent service gates. */
+bool vmmfs_node_is_dead(struct vmmfs_node *);
 
 /* Disposes of an unpublished regular or cdev vnode during error rollback. */
 void vmmfs_node_abort(struct vmmfs_node *);
 
-/* Publishes a fully initialized node after its parent owns the object. */
-void vmmfs_node_publish(struct vmmfs_node *);
 
 /* Drops the base reference after the owner has removed its namespace entry. */
 void vmmfs_node_unpublish(struct vmmfs_node *);
@@ -39,8 +51,6 @@ void vmmfs_node_unpublish(struct vmmfs_node *);
 /* Drops the base reference of a transient node after cache_setunresolved(). */
 void vmmfs_node_release_transient(struct vmmfs_node *);
 
-/* Reports whether the node remains reachable through its parent namespace. */
-bool vmmfs_node_is_published(const struct vmmfs_node *);
 
 
 

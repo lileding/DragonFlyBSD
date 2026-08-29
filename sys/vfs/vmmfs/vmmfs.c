@@ -124,7 +124,7 @@ vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 		return (ENXIO);
 
 	lwkt_gettoken(&root->token);
-	vp = root->node.vnode;
+	vp = root->branch.node.vnode;
 	lwkt_reltoken(&root->token);
 	if (vp == NULL)
 		return (ENOENT);

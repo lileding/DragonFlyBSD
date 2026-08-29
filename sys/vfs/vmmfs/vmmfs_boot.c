@@ -50,6 +50,7 @@ static int vmmfs_boot_read(struct vop_read_args *);
 static int vmmfs_boot_write(struct vop_write_args *);
 static int vmmfs_boot_inactive(struct vop_inactive_args *);
 static int vmmfs_boot_reclaim(struct vop_reclaim_args *);
+static void vmmfs_boot_drop(struct vmmfs_node *);
 static int vmmfs_boot_dev_open(struct dev_open_args *);
 static int vmmfs_boot_dev_close(struct dev_close_args *);
 static int vmmfs_boot_dev_write(struct dev_write_args *);
@@ -116,6 +117,7 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot)
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
 	boot->machine = machine;
+	vmmfs_node_setup(&boot->node, &machine->branch.node, vmmfs_boot_drop, NULL);
 	vmmfs_machine_hold(machine);
 	boot->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	serial = atomic_fetchadd_int(&vmmfs_boot_dev_serial, 1);
@@ -126,19 +128,16 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot)
 		goto fail;
 	}
 	boot->dev->si_drv1 = boot;
-	error = vmmfs_node_init_cdev(&boot->node, machine->root->mount,
-		&mount->boot_vops, boot->dev, boot);
-	if (error != 0)
-		goto fail;
 	return (0);
 
 fail:
-	vmmfs_node_abort(&boot->node);
 	if (boot->dev != NULL) {
 		boot->dev->si_drv1 = NULL;
 		destroy_only_dev(boot->dev);
 		boot->dev = NULL;
 	}
+	KKASSERT(vmmfs_node_detach_parent(&boot->node) ==
+	    &machine->branch.node);
 	boot->machine = NULL;
 	boot->inode = 0;
 	vmmfs_machine_put(machine);
@@ -155,18 +154,39 @@ vmmfs_boot_fini(struct vmmfs_boot *boot)
 	machine = boot->machine;
 	if (machine == NULL)
 		return;
-	if (boot->node.published || boot->session != NULL)
-		panic("vmmfs_boot_fini: node or session is still active");
-	vmmfs_node_abort(&boot->node);
+	if (boot->node.vnode != NULL || boot->session != NULL)
+		panic("vmmfs_boot_fini: vnode or session is still active");
 	if (boot->dev != NULL) {
 		boot->dev->si_drv1 = NULL;
 		destroy_only_dev(boot->dev);
 		boot->dev = NULL;
 	}
+	KKASSERT(vmmfs_node_detach_parent(&boot->node) ==
+	    &machine->branch.node);
 	boot->machine = NULL;
 	boot->inode = 0;
 	vmmfs_machine_put(machine);
 	return;
+}
+
+int
+vmmfs_boot_publish(struct vmmfs_boot *boot)
+{
+	struct vmmfs_mount *state;
+
+	if (boot == NULL || boot->machine == NULL || boot->dev == NULL)
+		return (EINVAL);
+	state = (struct vmmfs_mount *)boot->machine->root->mount->mnt_data;
+	if (state == NULL || state->boot_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_cdev(&boot->node,
+	    boot->machine->root->mount, &state->boot_vops, boot->dev, boot));
+}
+
+static void
+vmmfs_boot_drop(struct vmmfs_node *node)
+{
+	vmmfs_boot_fini((struct vmmfs_boot *)node);
 }
 
 int
@@ -442,7 +462,7 @@ vmmfs_boot_reclaim(struct vop_reclaim_args *ap)
 	reclaim = vmmfs_node_reclaim(&boot->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
 	if (reclaim)
-		vmmfs_boot_fini(boot);
+		vmmfs_node_drop(&boot->node);
 	return (0);
 }
 

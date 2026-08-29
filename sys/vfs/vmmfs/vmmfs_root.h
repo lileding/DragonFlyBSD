@@ -7,7 +7,7 @@
 #define VMMFS_ROOT_H
 
 #include <sys/param.h>
-#include "vmmfs_node.h"
+#include "vmmfs_branch.h"
 
 #include <sys/thread.h>
 #include <sys/tree.h>
@@ -30,7 +30,7 @@ RB_HEAD(vmmfs_machine_tree, vmmfs_machine);
 
 /* One vmmfs mountpoint root and its machine namespace. */
 struct vmmfs_root {
-	struct vmmfs_node node;
+	struct vmmfs_branch branch;
 	struct mount *mount;
 	struct lwkt_token token;
 	struct vmmfs_machine_tree machines;

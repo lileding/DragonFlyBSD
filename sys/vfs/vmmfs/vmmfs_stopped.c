@@ -25,6 +25,7 @@ static int vmmfs_stopped_inactive(struct vop_inactive_args *);
 static int vmmfs_stopped_reclaim(struct vop_reclaim_args *);
 static int vmmfs_stopped_setattr(struct vop_setattr_args *);
 static int vmmfs_stopped_write(struct vop_write_args *);
+static void vmmfs_stopped_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_stopped_vops = {
 	.vop_default = vop_defaultop,
@@ -47,48 +48,58 @@ vmmfs_stopped_create(struct vmmfs_machine *machine,
 {
 	struct vmmfs_mount *state;
 	struct vmmfs_stopped *stopped;
-	int error;
 
 	if (machine == NULL || stoppedp == NULL)
 		return (EINVAL);
 	*stoppedp = NULL;
+	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	if (state->stopped_vops == NULL)
+		return (ENXIO);
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
 	stopped->machine = machine;
-	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	vmmfs_node_setup(&stopped->node, &machine->branch.node, vmmfs_stopped_drop, NULL);
 	stopped->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	if (state->stopped_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
-	error = vmmfs_node_init(&stopped->node, machine->root->mount,
-	    &state->stopped_vops, VREG, stopped);
-	if (error != 0)
-		goto fail;
 	vmmfs_machine_hold(machine);
 	*stoppedp = stopped;
 	return (0);
-fail:
-	stopped->machine = NULL;
-	kfree(stopped, M_VMMFS);
-	return (error);
 }
 
 int
+vmmfs_stopped_publish(struct vmmfs_stopped *stopped)
+{
+	struct vmmfs_machine *machine;
+	struct vmmfs_mount *state;
+
+	if (stopped == NULL || stopped->machine == NULL)
+		return (EINVAL);
+	machine = stopped->machine;
+	state = (struct vmmfs_mount *)machine->root->mount->mnt_data;
+	if (state->stopped_vops == NULL)
+		return (ENXIO);
+	return (vmmfs_node_publish_regular(&stopped->node,
+	    machine->root->mount, &state->stopped_vops, VREG, stopped));
+}
+
+void
 vmmfs_stopped_destroy(struct vmmfs_stopped *stopped)
 {
 	struct vmmfs_machine *machine;
 
-	if (stopped == NULL)
-		return (EINVAL);
-	if (stopped->node.vnode != NULL)
-		return (EBUSY);
+	KKASSERT(stopped != NULL);
+	KKASSERT(stopped->node.vnode == NULL);
 	machine = stopped->machine;
-	if (machine == NULL)
-		return (EINVAL);
+	KKASSERT(machine != NULL);
+	KKASSERT(vmmfs_node_detach_parent(&stopped->node) ==
+	    &machine->branch.node);
 	stopped->machine = NULL;
 	kfree(stopped, M_VMMFS);
 	vmmfs_machine_put(machine);
-	return (0);
+}
+
+static void
+vmmfs_stopped_drop(struct vmmfs_node *node)
+{
+	vmmfs_stopped_destroy((struct vmmfs_stopped *)node);
 }
 
 static int
@@ -161,7 +172,7 @@ vmmfs_stopped_inactive(struct vop_inactive_args *ap)
 		return (0);
 	lwkt_gettoken(&machine->token);
 	recycle = machine->dead ||
-	    !vmmfs_node_is_published(&stopped->node);
+	    stopped->node.vnode == NULL;
 	lwkt_reltoken(&machine->token);
 	if (!recycle)
 		return (0);
@@ -175,7 +186,6 @@ vmmfs_stopped_reclaim(struct vop_reclaim_args *ap)
 	struct vmmfs_stopped *stopped;
 	struct vmmfs_machine *machine;
 	bool reclaim;
-	int error;
 
 	stopped = ap->a_vp->v_data;
 	if (stopped == NULL || stopped->machine == NULL)
@@ -184,10 +194,8 @@ vmmfs_stopped_reclaim(struct vop_reclaim_args *ap)
 	lwkt_gettoken(&machine->token);
 	reclaim = vmmfs_node_reclaim(&stopped->node, ap->a_vp);
 	lwkt_reltoken(&machine->token);
-	if (reclaim) {
-		error = vmmfs_stopped_destroy(stopped);
-		KKASSERT(error == 0);
-	}
+	if (reclaim)
+		vmmfs_node_drop(&stopped->node);
 	return (0);
 }
 
