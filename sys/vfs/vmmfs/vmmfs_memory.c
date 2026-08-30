@@ -31,13 +31,9 @@
 #define VMMFS_MEMORY_MODE 0644
 #define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 
-static int vmmfs_memory_access(struct vop_access_args *);
-static int vmmfs_memory_getattr(struct vop_getattr_args *);
-static int vmmfs_memory_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_memory_read(struct vop_read_args *);
 static int vmmfs_memory_setattr(struct vop_setattr_args *);
 static int vmmfs_memory_write(struct vop_write_args *);
-static int vmmfs_memory_inactive(struct vop_inactive_args *);
 static int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
@@ -47,14 +43,14 @@ static void vmmfs_memory_object_reference(struct vm_object *);
 
 struct vop_ops vmmfs_memory_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_memory_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_memory_getattr,
-	.vop_getattr_lite = vmmfs_memory_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_memory_read,
-	.vop_inactive = vmmfs_memory_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_setattr = vmmfs_memory_setattr,
 	.vop_write = vmmfs_memory_write,
@@ -111,6 +107,8 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 		return (EBUSY);
 	}
 	memory->size = value;
+	memory->node.size = vmmfs_node_decimal_size(value);
+	vmmfs_memory_machine(memory)->boot.node.size = (off_t)value;
 	lwkt_reltoken(&vmmfs_memory_machine(memory)->branch.token);
 	return (0);
 }
@@ -127,8 +125,10 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory,
 	*vnodep = NULL;
 	bzero(memory, sizeof(*memory));
 	vmmfs_node_setup(&memory->node, &machine->branch, vmmfs_memory_drop);
-	state = vmmfs_root_state(vmmfs_machine_root(machine));
-	memory->inode = atomic_fetchadd_int(&state->next_inode, 1);
+	state = machine->mount;
+	memory->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_set_metadata(&memory->node, memory->inode,
+	    VMMFS_MEMORY_MODE, vmmfs_node_decimal_size(memory->size));
 	if (state->memory_vops == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -361,55 +361,6 @@ vmmfs_memory_object_reference(struct vm_object *object)
 }
 
 static int
-vmmfs_memory_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_MEMORY_MODE, 0));
-}
-
-static int
-vmmfs_memory_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_memory *memory;
-	struct vattr *vattr;
-	char buffer[32];
-	size_t length;
-	int error;
-
-	memory = ap->a_vp->v_data;
-	if (memory == NULL)
-		return (ENOENT);
-	error = vmmfs_memory_load(memory, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VREG;
-	vattr->va_mode = VMMFS_MEMORY_MODE;
-	vattr->va_nlink = 1;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = memory->inode;
-	vattr->va_size = length;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = length;
-	return (0);
-}
-
-static int
-vmmfs_memory_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	ap->a_lvap->va_type = VREG;
-	ap->a_lvap->va_mode = VMMFS_MEMORY_MODE;
-	ap->a_lvap->va_nlink = 1;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
-	ap->a_lvap->va_flags = 0;
-	return (0);
-}
-
-static int
 vmmfs_memory_read(struct vop_read_args *ap)
 {
 	struct vmmfs_memory *memory;
@@ -463,20 +414,4 @@ vmmfs_memory_write(struct vop_write_args *ap)
 	if (error != 0)
 		return (error);
 	return (vmmfs_memory_store(memory, buffer, length));
-}
-
-static int
-vmmfs_memory_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_memory *memory;
-	struct vmmfs_machine *machine;
-
-	memory = ap->a_vp->v_data;
-	if (memory == NULL)
-		return (0);
-	machine = vmmfs_memory_machine(memory);
-	if (!memory->node.dead)
-		return (0);
-	vmmfs_node_inactive(&memory->node, ap->a_vp);
-	return (0);
 }

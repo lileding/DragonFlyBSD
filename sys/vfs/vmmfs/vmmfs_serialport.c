@@ -68,16 +68,12 @@ static d_ioctl_t vmmfs_serialport_dev_ioctl;
 static void vmmfs_serialport_tty_start(struct tty *);
 static int vmmfs_serialport_tty_param(struct tty *, struct termios *);
 
-static int vmmfs_serialport_access(struct vop_access_args *);
-static int vmmfs_serialport_getattr(struct vop_getattr_args *);
-static int vmmfs_serialport_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_serialport_open(struct vop_open_args *);
 static int vmmfs_serialport_close(struct vop_close_args *);
 static int vmmfs_serialport_read(struct vop_read_args *);
 static int vmmfs_serialport_write(struct vop_write_args *);
 static int vmmfs_serialport_ioctl(struct vop_ioctl_args *);
 static int vmmfs_serialport_kqfilter(struct vop_kqfilter_args *);
-static int vmmfs_serialport_inactive(struct vop_inactive_args *);
 static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
     struct vmm_io_read *);
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
@@ -110,17 +106,17 @@ static struct dev_ops vmmfs_serialport_dev_ops = {
 
 struct vop_ops vmmfs_serialport_vops = {
     .vop_default = vop_defaultop,
-    .vop_access = vmmfs_serialport_access,
+    .vop_access = vmmfs_node_access,
     .vop_setattr = (void *)vop_null,
     .vop_close = vmmfs_serialport_close,
-    .vop_getattr = vmmfs_serialport_getattr,
-    .vop_getattr_lite = vmmfs_serialport_getattr_lite,
+    .vop_getattr = vmmfs_node_getattr,
+    .vop_getattr_lite = vmmfs_node_getattr_lite,
     .vop_ioctl = vmmfs_serialport_ioctl,
     .vop_kqfilter = vmmfs_serialport_kqfilter,
     .vop_open = vmmfs_serialport_open,
     .vop_pathconf = vop_stdpathconf,
     .vop_read = vmmfs_serialport_read,
-    .vop_inactive = vmmfs_serialport_inactive,
+    .vop_inactive = vmmfs_node_inactive,
     .vop_reclaim = vmmfs_node_reclaim,
     .vop_write = vmmfs_serialport_write,
 };
@@ -131,6 +127,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     struct vnode **vnodep)
 {
     struct vmmfs_mount *state;
+    struct vmmfs_machine *machine;
     struct vmmfs_serialport *port;
     cdev_t dev;
     uint8_t number;
@@ -143,13 +140,14 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
         portp == NULL || vnodep == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
-    state = vmmfs_root_state(vmmfs_machine_root(vmmfs_serialroot_machine(serialroot)));
-    if (state->serialport_vops == NULL)
+    machine = vmmfs_serialroot_machine(serialroot);
+    state = machine == NULL ? NULL : machine->mount;
+    if (state == NULL || state->serialport_vops == NULL)
         return ENXIO;
     *portp = NULL;
     *vnodep = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
-    port->inode = atomic_fetchadd_int(&state->next_inode, 1);
+    port->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
     bcopy(name, port->name, namelen);
     port->name[namelen] = '\0';
     port->number = number;
@@ -175,6 +173,8 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->dev = dev;
     vmmfs_node_setup(&port->node, &serialroot->branch,
         vmmfs_serialport_drop);
+    vmmfs_node_set_metadata(&port->node, port->inode,
+        VMMFS_SERIALPORT_MODE, 0);
     error = vmmfs_vnode_create_cdev(
         state->mount,
         &state->serialport_vops, port->dev, &port->node, vnodep);
@@ -331,51 +331,6 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
 }
 
 static int
-vmmfs_serialport_access(struct vop_access_args *ap)
-{
-    return vop_helper_access(ap, 0, 0, VMMFS_SERIALPORT_MODE, 0);
-}
-
-static int
-vmmfs_serialport_getattr(struct vop_getattr_args *ap)
-{
-    struct vmmfs_serialport *port;
-    struct vattr *vattr;
-
-    port = ap->a_vp->v_data;
-    if (port == NULL)
-        return ENOENT;
-    vattr = ap->a_vap;
-    VATTR_NULL(vattr);
-    vattr->va_type = VCHR;
-    vattr->va_mode = VMMFS_SERIALPORT_MODE;
-    vattr->va_nlink = 1;
-    vattr->va_uid = 0;
-    vattr->va_gid = 0;
-    vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-    vattr->va_fileid = port->inode;
-    vattr->va_size = 0;
-    vattr->va_blocksize = PAGE_SIZE;
-    vattr->va_bytes = 0;
-    vattr->va_flags = 0;
-    vattr->va_filerev = 0;
-    return 0;
-}
-
-static int
-vmmfs_serialport_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-    ap->a_lvap->va_type = VCHR;
-    ap->a_lvap->va_mode = VMMFS_SERIALPORT_MODE;
-    ap->a_lvap->va_nlink = 1;
-    ap->a_lvap->va_uid = 0;
-    ap->a_lvap->va_gid = 0;
-    ap->a_lvap->va_size = 0;
-    ap->a_lvap->va_flags = 0;
-    return 0;
-}
-
-static int
 vmmfs_serialport_open(struct vop_open_args *ap)
 {
     struct vmmfs_serialport *port;
@@ -511,23 +466,6 @@ vmmfs_serialport_kqfilter(struct vop_kqfilter_args *ap)
     if (dev == NULL)
         return EBADF;
     return dev_dkqfilter(dev, ap->a_kn, NULL);
-}
-
-static int
-vmmfs_serialport_inactive(struct vop_inactive_args *ap)
-{
-    struct vmmfs_serialport *port;
-    bool destroying;
-
-    port = ap->a_vp->v_data;
-    if (port == NULL)
-        return 0;
-    lwkt_gettoken(&port->token);
-    destroying = port->destroying;
-    lwkt_reltoken(&port->token);
-    if (destroying)
-        vmmfs_node_inactive(&port->node, ap->a_vp);
-    return 0;
 }
 
 

@@ -72,13 +72,8 @@
 #define VMMFS_DESCRIPTOR_ECAP_ACCESS 0x04
 #define VMMFS_DESCRIPTOR_ECAP_DATA 0x08
 
-static int vmmfs_pcislot_descriptor_access(struct vop_access_args *);
-static int vmmfs_pcislot_descriptor_getattr(struct vop_getattr_args *);
-static int vmmfs_pcislot_descriptor_getattr_lite(
-	struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_descriptor_open(struct vop_open_args *);
 static int vmmfs_pcislot_descriptor_read(struct vop_read_args *);
-static int vmmfs_pcislot_descriptor_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_descriptor_setattr(struct vop_setattr_args *);
 static int vmmfs_pcislot_descriptor_write(struct vop_write_args *);
 static int vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *,
@@ -98,14 +93,14 @@ static void vmmfs_pcislot_descriptor_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_pcislot_descriptor_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_pcislot_descriptor_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_pcislot_descriptor_getattr,
-	.vop_getattr_lite = vmmfs_pcislot_descriptor_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_pcislot_descriptor_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_descriptor_read,
-	.vop_inactive = vmmfs_pcislot_descriptor_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_setattr = vmmfs_pcislot_descriptor_setattr,
 	.vop_write = vmmfs_pcislot_descriptor_write,
@@ -125,7 +120,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 		return (EINVAL);
 	*vnodep = NULL;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = vmmfs_root_state(vmmfs_machine_root(machine));
+	mount = machine->mount;
 	if (mount->pcislot_descriptor_vops == NULL)
 		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
@@ -135,9 +130,11 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->branch.token);
-	descriptor->inode = atomic_fetchadd_int(&mount->next_inode, 1);
+	descriptor->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
 	vmmfs_node_setup(&descriptor->node, &slot->branch,
 	    vmmfs_pcislot_descriptor_drop);
+	vmmfs_node_set_metadata(&descriptor->node, descriptor->inode,
+	    VMMFS_PCISLOT_DESCRIPTOR_MODE, 0);
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_descriptor_vops, VREG, &descriptor->node, vnodep);
 	if (error != 0)
@@ -179,59 +176,6 @@ vmmfs_pcislot_descriptor_drop(struct vmmfs_node *node)
 	vmmfs_node_parent_put(node);
 	bzero(descriptor, sizeof(*descriptor));
 }
-static int
-vmmfs_pcislot_descriptor_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_PCISLOT_DESCRIPTOR_MODE, 0));
-}
-
-static int
-vmmfs_pcislot_descriptor_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_pcislot_descriptor *descriptor;
-	struct vmmfs_pcislot *slot;
-	struct vattr *vattr;
-	size_t length;
-
-	descriptor = ap->a_vp->v_data;
-	if (descriptor == NULL || vmmfs_pcislot_descriptor_slot(descriptor) == NULL ||
-	    vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor))) == NULL)
-		return (ENOENT);
-	slot = vmmfs_pcislot_descriptor_slot(descriptor);
-	if (descriptor->node.dead)
-		return (ENOENT);
-	lwkt_gettoken(&slot->branch.token);
-	length = descriptor->committed ? descriptor->value.length : 0;
-	lwkt_reltoken(&slot->branch.token);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VREG;
-	vattr->va_mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
-	vattr->va_nlink = 1;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = descriptor->inode;
-	vattr->va_size = length;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = length;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_descriptor_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	ap->a_lvap->va_type = VREG;
-	ap->a_lvap->va_mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
-	ap->a_lvap->va_nlink = 1;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
-	ap->a_lvap->va_flags = 0;
-	return (0);
-}
-
 static int
 vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
 {
@@ -291,18 +235,6 @@ vmmfs_pcislot_descriptor_read(struct vop_read_args *ap)
 	error = uiomove(buffer + offset, length - (size_t)offset, ap->a_uio);
 	kfree(buffer, M_VMMFS);
 	return (error);
-}
-
-static int
-vmmfs_pcislot_descriptor_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_pcislot_descriptor *descriptor;
-
-	descriptor = ap->a_vp->v_data;
-	if (descriptor == NULL || !descriptor->node.dead)
-		return (0);
-	vmmfs_node_inactive(&descriptor->node, ap->a_vp);
-	return (0);
 }
 
 
@@ -423,9 +355,11 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	if (removing) {
 		bzero(&descriptor->value, sizeof(descriptor->value));
 		descriptor->committed = false;
+		descriptor->node.size = 0;
 	} else {
 		descriptor->value = *value;
 		descriptor->committed = true;
+		descriptor->node.size = (off_t)descriptor->value.length;
 		descriptor->auth = new_auth;
 	}
 	descriptor->generation = generation;

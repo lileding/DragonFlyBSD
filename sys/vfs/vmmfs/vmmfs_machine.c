@@ -28,16 +28,12 @@
 
 #define VMMFS_MACHINE_MODE 0555
 
-static int vmmfs_machine_access(struct vop_access_args *);
-static int vmmfs_machine_getattr(struct vop_getattr_args *);
-static int vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_machine_ncreate(struct vop_ncreate_args *);
 static int vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_machine_nremove(struct vop_nremove_args *);
 static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_machine_readdir(struct vop_readdir_args *);
-static int vmmfs_machine_inactive(struct vop_inactive_args *);
 static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_prepare_start(struct vmmfs_machine *, char *,
 	uint32_t *);
@@ -47,15 +43,16 @@ static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *, struct vnode *);
-static void vmmfs_machine_deactivate_node(struct vmmfs_node *);
+static void vmmfs_machine_deactivate(struct vmmfs_node *);
 static void vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *);
+static void vmmfs_machine_invalidate_children(struct vmmfs_machine *);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_machine_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_machine_getattr,
-	.vop_getattr_lite = vmmfs_machine_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_ncreate = vmmfs_machine_ncreate,
 	.vop_nlookupdotdot = vmmfs_machine_nlookupdotdot,
 	.vop_nremove = vmmfs_machine_nremove,
@@ -64,34 +61,34 @@ struct vop_ops vmmfs_machine_vops = {
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_machine_readdir,
-	.vop_inactive = vmmfs_machine_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 };
 
 int
-vmmfs_machine_create(struct vmmfs_root *root, const char *name,
-	size_t namelen, struct vmmfs_machine **machinep, struct vnode **vnodep)
+vmmfs_machine_create(struct vmmfs_branch *parent, struct vmmfs_mount *mount,
+	ino_t inode, const char *name, size_t namelen,
+	struct vmmfs_machine **machinep, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_mount *state;
 	struct vnode *vnode;
 	int error;
 
-	if (root == NULL || name == NULL || machinep == NULL || vnodep == NULL ||
-	    namelen == 0 || namelen > NAME_MAX)
+	if (parent == NULL || mount == NULL || inode == 0 || name == NULL ||
+	    machinep == NULL || vnodep == NULL || namelen == 0 ||
+	    namelen > NAME_MAX)
 		return (EINVAL);
 	*machinep = NULL;
 	*vnodep = NULL;
 	vnode = NULL;
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_branch_init(&machine->branch, vmmfs_root_branch(root),
-	    vmmfs_machine_drop);
-	machine->branch.node.deactivate = vmmfs_machine_deactivate_node;
-	machine->inode = vmmfs_root_allocate_inode(root);
-	if (machine->inode == 0) {
-		error = ENXIO;
-		goto fail;
-	}
+	vmmfs_branch_init(&machine->branch, parent, vmmfs_machine_drop);
+	machine->branch.node.deactivate = vmmfs_machine_deactivate;
+	machine->mount = mount;
+	machine->inode = inode;
+	vmmfs_node_set_metadata(&machine->branch.node, machine->inode,
+	    VMMFS_MACHINE_MODE, 0);
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
 	error = vmmfs_machine_id_init(machine, &machine->id_node,
@@ -135,7 +132,7 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	    &machine->events_vnode);
 	if (error != 0)
 		goto fail;
-	state = vmmfs_root_state(root);
+	state = machine->mount;
 	if (state == NULL || state->machine_vops == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -144,6 +141,7 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	    VDIR, &machine->branch.node, &vnode);
 	if (error != 0)
 		goto fail;
+	machine->vnode = vnode;
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_CREATED, NULL);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
 	    "reason=create");
@@ -162,7 +160,6 @@ vmmfs_machine_cleanup_partial(struct vmmfs_machine *machine, struct vnode *vnode
 	if (machine == NULL)
 		return;
 	lwkt_gettoken(&machine->branch.token);
-	KKASSERT(!machine->root_counted);
 	machine->branch.node.dead = true;
 	lwkt_reltoken(&machine->branch.token);
 	if (machine->events.node.drop != NULL) {
@@ -239,7 +236,7 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	machine->stopped = stopped;
 	machine->stopped_vnode = stopped_vnode;
 	lwkt_reltoken(&machine->branch.token);
-	vmmfs_root_invalidate_machine(vmmfs_machine_root(machine), machine);
+	vmmfs_machine_invalidate_children(machine);
 	return (0);
 }
 
@@ -291,7 +288,7 @@ vmmfs_machine_deactivate_begin(struct vmmfs_machine *machine)
 }
 
 static void
-vmmfs_machine_deactivate_node(struct vmmfs_node *node)
+vmmfs_machine_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_stopped *stopped;
@@ -338,40 +335,22 @@ vmmfs_machine_deactivate_node(struct vmmfs_node *node)
 
 	vmmfs_pciroot_deactivate_slots(&machine->pciroot);
 	vmmfs_serialroot_deactivate_ports(&machine->serialroot);
-	vmmfs_node_deactivate(&machine->events.node);
 	vmmfs_vnode_deactivate(events_vnode);
 	if (stopped != NULL)
-		vmmfs_node_deactivate(&stopped->node);
 	vmmfs_vnode_deactivate(stopped_vnode);
-	vmmfs_node_deactivate(&machine->boot.node);
 	vmmfs_vnode_deactivate(boot_vnode);
-	vmmfs_node_deactivate(&machine->loader.node);
 	vmmfs_vnode_deactivate(loader_vnode);
-	vmmfs_node_deactivate(&machine->memory.node);
 	vmmfs_vnode_deactivate(memory_vnode);
-	vmmfs_node_deactivate(&machine->vcpu.node);
 	vmmfs_vnode_deactivate(vcpu_vnode);
-	vmmfs_node_deactivate(&machine->id_node.node);
 	vmmfs_vnode_deactivate(id_vnode);
-	vmmfs_node_deactivate(&machine->serialroot.branch.node);
 	vmmfs_vnode_deactivate(serialroot_vnode);
-	vmmfs_node_deactivate(&machine->pciroot.branch.node);
 	vmmfs_vnode_deactivate(pciroot_vnode);
-}
-
-void
-vmmfs_machine_deactivate(struct vmmfs_machine *machine)
-{
-	if (machine != NULL)
-		vmmfs_node_deactivate(&machine->branch.node);
 }
 
 static void
 vmmfs_machine_drop(struct vmmfs_node *node)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_root *root;
-	bool root_counted;
 
 	machine = (struct vmmfs_machine *)node;
 	KKASSERT(machine != NULL);
@@ -387,11 +366,7 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	KKASSERT(machine->pciroot.branch.node.drop == NULL);
 	KKASSERT(machine->serialroot.branch.node.drop == NULL);
 	KKASSERT(machine->pciroot.runtime_machine == NULL);
-	root = vmmfs_machine_root(machine);
-	root_counted = machine->root_counted;
-	KKASSERT(root != NULL);
-	if (root_counted)
-		vmmfs_root_machine_dropped(root);
+	KKASSERT(machine->vnode == NULL);
 	if (machine->rtc.machine != NULL)
 		vmmfs_rtc_fini(&machine->rtc);
 	if (machine->platform.machine != NULL)
@@ -399,18 +374,22 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	kfree(machine, M_VMMFS);
 }
 
-void
-vmmfs_machine_hold(struct vmmfs_machine *machine)
+static void
+vmmfs_machine_invalidate_children(struct vmmfs_machine *machine)
 {
-	KKASSERT(machine != NULL);
-	vmmfs_branch_hold(&machine->branch);
-}
+	struct vnode *vnode;
 
-void
-vmmfs_machine_put(struct vmmfs_machine *machine)
-{
-	KKASSERT(machine != NULL);
-	vmmfs_branch_put(&machine->branch);
+	if (machine == NULL)
+		return;
+	lwkt_gettoken(&machine->branch.token);
+	vnode = machine->vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&machine->branch.token);
+	if (vnode == NULL)
+		return;
+	cache_inval_vp(vnode, CINV_CHILDREN);
+	vdrop(vnode);
 }
 
 static void
@@ -473,57 +452,6 @@ vmmfs_machine_reset(struct vmmfs_machine *machine)
 
 
 static int
-vmmfs_machine_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_MACHINE_MODE, 0));
-}
-
-static int
-vmmfs_machine_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_machine *machine;
-	struct vattr *vattr;
-
-	machine = ap->a_vp->v_data;
-	if (machine == NULL || machine->branch.node.dead)
-		return (ENOENT);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VDIR;
-	vattr->va_mode = VMMFS_MACHINE_MODE;
-	vattr->va_nlink = 2;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = machine->inode;
-	vattr->va_size = 0;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = 0;
-	vattr->va_flags = 0;
-	vattr->va_filerev = 0;
-	return (0);
-}
-
-static int
-vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	struct vmmfs_machine *machine;
-	struct vattr_lite *vattr;
-	machine = ap->a_vp->v_data;
-	if (machine == NULL || machine->branch.node.dead)
-		return (ENOENT);
-	vattr = ap->a_lvap;
-	vattr->va_type = VDIR;
-	vattr->va_mode = VMMFS_MACHINE_MODE;
-	vattr->va_nlink = 2;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_size = 0;
-	vattr->va_flags = 0;
-	return (0);
-}
-
-static int
 vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 {
 	struct vmmfs_machine *machine;
@@ -566,27 +494,29 @@ static int
 vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_root *root;
+	struct vmmfs_mount *mount;
 	struct vnode *vnode;
+	int error;
 
 	machine = ap->a_dvp->v_data;
-	root = ((struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data)->root;
-	if (machine == NULL || root == NULL || machine->branch.node.dead)
+	mount = (struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data;
+	if (machine == NULL || mount == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&machine->branch.token);
-	if (vmmfs_machine_root(machine) != root) {
+	if (machine->branch.node.dead) {
 		lwkt_reltoken(&machine->branch.token);
 		return (ENOENT);
 	}
+	vnode = mount->root_vnode;
+	if (vnode != NULL)
+		vhold(vnode);
 	lwkt_reltoken(&machine->branch.token);
-	vnode = vmmfs_root_vnode(root);
 	if (vnode == NULL)
 		return (ENOENT);
-	if (vget(vnode, LK_EXCLUSIVE | LK_RETRY) != 0) {
-		vdrop(vnode);
-		return (ENOENT);
-	}
+	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
 	vdrop(vnode);
+	if (error != 0)
+		return (error);
 	*ap->a_vpp = vnode;
 	vn_unlock(vnode);
 	return (0);
@@ -702,6 +632,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_stopped *stopped;
+	struct vmmfs_mount *mount;
 	struct uio *uio;
 	off_t offset;
 	ino_t inode;
@@ -710,7 +641,9 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	int stop;
 
 	machine = ap->a_vp->v_data;
-	if (machine == NULL || machine->branch.node.dead)
+	mount = (struct vmmfs_mount *)ap->a_vp->v_mount->mnt_data;
+	if (machine == NULL || mount == NULL || mount->root_inode == 0 ||
+	    machine->branch.node.dead)
 		return (ENOENT);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -729,7 +662,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 1;
 	}
 	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, VMMFS_ROOT_INO, DT_DIR, 2,
+		stop = vop_write_dirent(&error, uio, mount->root_inode, DT_DIR, 2,
 		    "..");
 		if (!stop)
 			offset = 2;
@@ -807,18 +740,6 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	return (error);
 }
 
-static int
-vmmfs_machine_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_machine *machine;
-
-	machine = ap->a_vp->v_data;
-	if (machine == NULL || !machine->branch.node.dead)
-		return (0);
-	vmmfs_node_inactive(&machine->branch.node, ap->a_vp);
-	return (0);
-}
-
 
 static int
 vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
@@ -869,9 +790,8 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	machine->stopped = NULL;
 	machine->stopped_vnode = NULL;
 	lwkt_reltoken(&machine->branch.token);
-	vmmfs_node_deactivate(&stopped->node);
 	vmmfs_vnode_deactivate(stopped_vnode);
-	vmmfs_root_invalidate_machine(vmmfs_machine_root(machine), machine);
+	vmmfs_machine_invalidate_children(machine);
 
 	error = vmmfs_memory_map(&machine->memory);
 	if (error != 0)

@@ -29,16 +29,18 @@
 struct mount;
 struct vnode;
 struct vop_ops;
-struct vmmfs_root;
+struct vmmfs_mount;
 struct ucred;
 
 struct vmmfs_machine {
 	struct vmmfs_branch branch;
+	struct vmmfs_mount *mount;
+	/* Borrowed from the root registry while this directory is published. */
+	struct vnode *vnode;
 	ino_t inode;
 	char name[NAME_MAX + 1];
 	uint32_t id;
 	struct vmmfs_machine_id id_node;
-	bool root_counted;
 	/* NULL is stopped.  A non-NULL instance owns the running topology. */
 	vmm_machine_t machine;
 	struct vmm_cpustate boot_state;
@@ -64,12 +66,8 @@ struct vmmfs_machine {
 	struct vnode *events_vnode;
 };
 
-int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
-	struct vmmfs_machine **, struct vnode **);
-/* Marks the machine and fixed children unavailable without revoking vnodes. */
-void vmmfs_machine_deactivate(struct vmmfs_machine *);
-void vmmfs_machine_hold(struct vmmfs_machine *);
-void vmmfs_machine_put(struct vmmfs_machine *);
+int vmmfs_machine_create(struct vmmfs_branch *, struct vmmfs_mount *,
+	ino_t, const char *, size_t, struct vmmfs_machine **, struct vnode **);
 
 /* Requests a warm reset without rerunning the loader. */
 int vmmfs_machine_reset(struct vmmfs_machine *);

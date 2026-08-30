@@ -54,15 +54,11 @@ struct vmmfs_pciroot_registry {
 	struct vmmfs_pcislot_tree slots;
 };
 
-static int vmmfs_pciroot_access(struct vop_access_args *);
-static int vmmfs_pciroot_getattr(struct vop_getattr_args *);
-static int vmmfs_pciroot_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_pciroot_nmkdir(struct vop_nmkdir_args *);
 static int vmmfs_pciroot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_pciroot_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_pciroot_readdir(struct vop_readdir_args *);
-static int vmmfs_pciroot_inactive(struct vop_inactive_args *);
 static int vmmfs_pciroot_parse_bdf(const char *, size_t, uint16_t *);
 static int vmmfs_pciroot_parse_hex(char, unsigned int *);
 static void vmmfs_pciroot_format_bdf(uint16_t, char *, size_t);
@@ -101,10 +97,10 @@ static int vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *,
 
 struct vop_ops vmmfs_pciroot_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_pciroot_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_pciroot_getattr,
-	.vop_getattr_lite = vmmfs_pciroot_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_nlookupdotdot = vmmfs_pciroot_nlookupdotdot,
 	.vop_nmkdir = vmmfs_pciroot_nmkdir,
 	.vop_nresolve = vmmfs_pciroot_nresolve,
@@ -112,7 +108,7 @@ struct vop_ops vmmfs_pciroot_vops = {
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_pciroot_readdir,
-	.vop_inactive = vmmfs_pciroot_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 };
 
@@ -136,7 +132,7 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	if (machine == NULL || pciroot == NULL || vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	state = vmmfs_root_state(vmmfs_machine_root(machine));
+	state = machine->mount;
 	if (state->pciroot_vops == NULL)
 		return (ENXIO);
 	bzero(pciroot, sizeof(*pciroot));
@@ -146,7 +142,9 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 		return (ENOMEM);
 	vmmfs_branch_init(&pciroot->branch, &machine->branch,
 	    vmmfs_pciroot_drop);
-	pciroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
+	pciroot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_set_metadata(&pciroot->branch.node, pciroot->inode,
+	    VMMFS_PCIROOT_MODE, 0);
 	RB_INIT(&pciroot->registry->slots);
 	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->pciroot_vops, VDIR, &pciroot->branch.node, vnodep);
@@ -649,51 +647,6 @@ vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot,
 }
 
 static int
-vmmfs_pciroot_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_PCIROOT_MODE, 0));
-}
-
-static int
-vmmfs_pciroot_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_pciroot *pciroot;
-	struct vattr *vattr;
-
-	pciroot = ap->a_vp->v_data;
-	if (pciroot == NULL || pciroot->branch.node.dead)
-		return (ENOENT);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VDIR;
-	vattr->va_mode = VMMFS_PCIROOT_MODE;
-	vattr->va_nlink = 2;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = pciroot->inode;
-	vattr->va_size = 0;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = 0;
-	vattr->va_flags = 0;
-	vattr->va_filerev = 0;
-	return (0);
-}
-
-static int
-vmmfs_pciroot_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	ap->a_lvap->va_type = VDIR;
-	ap->a_lvap->va_mode = VMMFS_PCIROOT_MODE;
-	ap->a_lvap->va_nlink = 2;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
-	ap->a_lvap->va_flags = 0;
-	return (0);
-}
-
-static int
 vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
 	struct vmmfs_pciroot *pciroot;
@@ -707,7 +660,11 @@ vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	machine = vmmfs_pciroot_machine(pciroot);
 	if (machine == NULL)
 		return (ENOENT);
-	vnode = vmmfs_root_machine_vnode(vmmfs_machine_root(machine), machine);
+	lwkt_gettoken(&machine->branch.token);
+	vnode = machine->vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&machine->branch.token);
 	if (vnode == NULL)
 		return (ENOENT);
 	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
@@ -935,18 +892,6 @@ vmmfs_pciroot_readdir(struct vop_readdir_args *ap)
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop && error == 0;
 	return (error);
-}
-
-static int
-vmmfs_pciroot_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_pciroot *pciroot;
-
-	pciroot = ap->a_vp->v_data;
-	if (pciroot == NULL || !pciroot->branch.node.dead)
-		return (0);
-	vmmfs_node_inactive(&pciroot->branch.node, ap->a_vp);
-	return (0);
 }
 
 

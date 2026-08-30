@@ -12,6 +12,7 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_branch.h"
 #include "vmmfs_boot.h"
 #include "vmmfs_events.h"
 #include "vmmfs_loader.h"
@@ -49,7 +50,6 @@ extern struct vop_ops vmmfs_pcislot_resource_vops;
 extern struct vop_ops vmmfs_pcislot_events_vops;
 
 extern int vmmfs_boot_module_fini(void);
-extern int vmmfs_loader_module_init(void);
 extern int vmmfs_loader_module_fini(void);
 
 static int vmmfs_mount(struct mount *, char *, caddr_t, struct ucred *);
@@ -58,7 +58,6 @@ static int vmmfs_nmkdir(struct vop_nmkdir_args *);
 static int vmmfs_nremove(struct vop_nremove_args *);
 static int vmmfs_nresolve(struct vop_nresolve_args *);
 static int vmmfs_nrmdir(struct vop_nrmdir_args *);
-static int vmmfs_vfs_init(struct vfsconf *);
 static int vmmfs_vfs_uninit(struct vfsconf *);
 static int vmmfs_unmount(struct mount *, int);
 static int vmmfs_statfs(struct mount *, struct statfs *, struct ucred *);
@@ -84,7 +83,6 @@ static struct vfsops vmmfs_vfsops = {
 	.vfs_unmount = vmmfs_unmount,
 	.vfs_root = vmmfs_root_vfs,
 	.vfs_statfs = vmmfs_statfs,
-	.vfs_init = vmmfs_vfs_init,
 	.vfs_uninit = vmmfs_vfs_uninit,
 };
 
@@ -92,13 +90,6 @@ static int
 vmmfs_ncreate(struct vop_ncreate_args *ap)
 {
 	return ((*ap->a_dvp->v_ops)->vop_ncreate(ap));
-}
-
-static int
-vmmfs_vfs_init(struct vfsconf *configuration)
-{
-	(void)configuration;
-	return (vmmfs_loader_module_init());
 }
 
 static int
@@ -141,20 +132,16 @@ static int
 vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 {
 	struct vmmfs_mount *state;
-	struct vmmfs_root *root;
 	struct vnode *vp;
 	int error;
 
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	if (state == NULL)
 		return (ENXIO);
-	root = state->root;
-	if (root == NULL)
-		return (ENXIO);
-
-	vp = vmmfs_root_vnode(root);
+	vp = state->root_vnode;
 	if (vp == NULL)
 		return (ENOENT);
+	vhold(vp);
 	error = vget(vp, LK_EXCLUSIVE | LK_RETRY);
 	vdrop(vp);
 	if (error != 0)
@@ -168,7 +155,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	struct ucred *cred)
 {
 	struct vmmfs_mount *state;
-	struct vmmfs_root *root;
+	struct vnode *root_vnode;
 	size_t size;
 	int error;
 
@@ -178,7 +165,6 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 
 	state = kmalloc(sizeof(*state), M_VMMFS, M_WAITOK | M_ZERO);
 	state->mount = mount;
-	state->next_inode = 2;
 	mount->mnt_flag |= MNT_LOCAL;
 	mount->mnt_kern_flag |= MNTK_NOSTKMNT | MNTK_ALL_MPSAFE;
 	mount->mnt_data = (qaddr_t)state;
@@ -226,7 +212,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_resource_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_events_vops,
 	    &state->pcislot_events_vops);
-	error = vmmfs_root_create(mount, &root);
+	error = vmmfs_root_create(mount, &root_vnode);
 	if (error != 0) {
 		vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
@@ -248,7 +234,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		mount->mnt_data = NULL;
 		goto fail;
 	}
-	state->root = root;
+	state->root_vnode = root_vnode;
 	return (vmmfs_statfs(mount, &mount->mnt_stat, cred));
 
 fail:
@@ -261,12 +247,16 @@ vmmfs_unmount(struct mount *mount, int flags)
 {
 	struct vmmfs_mount *state;
 	struct vmmfs_root *root;
+	struct vnode *root_vnode;
 	int error;
 
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	if (state == NULL)
 		return (ENXIO);
-	root = state->root;
+	root_vnode = state->root_vnode;
+	if (root_vnode == NULL)
+		return (ENXIO);
+	root = root_vnode->v_data;
 	if (root == NULL)
 		return (ENXIO);
 	if (!vmmfs_root_empty(root))
@@ -275,9 +265,8 @@ vmmfs_unmount(struct mount *mount, int flags)
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)
 		return (error);
-	error = vmmfs_root_destroy(root);
-	if (error != 0)
-		return (error);
+	state->root_vnode = NULL;
+	vmmfs_vnode_deactivate(root_vnode);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);

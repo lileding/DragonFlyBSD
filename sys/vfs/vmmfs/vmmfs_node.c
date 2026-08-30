@@ -8,6 +8,8 @@
 #include <sys/file.h>
 #include <sys/filedesc.h>
 #include <sys/mount.h>
+#include <sys/param.h>
+#include <sys/stat.h>
 #include <sys/namecache.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
@@ -49,6 +51,106 @@ vmmfs_node_default_deactivate(struct vmmfs_node *node)
 	node->dead = true;
 }
 
+void
+vmmfs_node_set_metadata(struct vmmfs_node *node, ino_t inode,
+	mode_t mode, off_t size)
+{
+	KKASSERT(node != NULL);
+	KKASSERT(inode != 0);
+	node->inode = inode;
+	node->mode = mode;
+	node->size = size;
+}
+
+off_t
+vmmfs_node_decimal_size(uint64_t value)
+{
+	off_t size;
+
+	size = 2; /* one digit plus the trailing newline */
+	while (value >= 10) {
+		value /= 10;
+		++size;
+	}
+	return (size);
+}
+
+int
+vmmfs_node_access(struct vop_access_args *ap)
+{
+	struct vmmfs_node *node;
+
+	if (ap == NULL || ap->a_vp == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	return (vop_helper_access(ap, 0, 0, node->mode, 0));
+}
+
+int
+vmmfs_node_getattr(struct vop_getattr_args *ap)
+{
+	struct vmmfs_node *node;
+	struct vattr *vattr;
+
+	if (ap == NULL || ap->a_vp == NULL || ap->a_vap == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	vattr = ap->a_vap;
+	VATTR_NULL(vattr);
+	vattr->va_type = ap->a_vp->v_type;
+	vattr->va_mode = node->mode;
+	vattr->va_nlink = ap->a_vp->v_type == VDIR ? 2 : 1;
+	vattr->va_uid = 0;
+	vattr->va_gid = 0;
+	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
+	vattr->va_fileid = node->inode;
+	vattr->va_size = node->size;
+	vattr->va_blocksize = PAGE_SIZE;
+	vattr->va_bytes = node->size;
+	vattr->va_flags = 0;
+	vattr->va_filerev = 0;
+	return (0);
+}
+
+int
+vmmfs_node_getattr_lite(struct vop_getattr_lite_args *ap)
+{
+	struct vmmfs_node *node;
+	struct vattr_lite *vattr;
+
+	if (ap == NULL || ap->a_vp == NULL || ap->a_lvap == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	vattr = ap->a_lvap;
+	vattr->va_type = ap->a_vp->v_type;
+	vattr->va_mode = node->mode;
+	vattr->va_nlink = ap->a_vp->v_type == VDIR ? 2 : 1;
+	vattr->va_uid = 0;
+	vattr->va_gid = 0;
+	vattr->va_size = node->size;
+	vattr->va_flags = 0;
+	return (0);
+}
+
+int
+vmmfs_node_inactive(struct vop_inactive_args *ap)
+{
+	struct vmmfs_node *node;
+
+	if (ap == NULL || ap->a_vp == NULL)
+		return (0);
+	node = ap->a_vp->v_data;
+	if (node != NULL && node->dead && node->drop != NULL)
+		(void)vrecycle(ap->a_vp);
+	return (0);
+}
+
 int
 vmmfs_node_open(struct vop_open_args *ap)
 {
@@ -60,14 +162,6 @@ vmmfs_node_open(struct vop_open_args *ap)
 	if (node == NULL || node->dead)
 		return (ENOENT);
 	return (vop_stdopen(ap));
-}
-
-void
-vmmfs_node_deactivate(struct vmmfs_node *node)
-{
-	if (node == NULL || node->deactivate == NULL)
-		return;
-	node->deactivate(node);
 }
 
 void
@@ -153,8 +247,13 @@ vmmfs_vnode_discard(struct vnode *vnode)
 void
 vmmfs_vnode_deactivate(struct vnode *vnode)
 {
+	struct vmmfs_node *node;
+
 	if (vnode == NULL)
 		return;
+	node = vnode->v_data;
+	if (node != NULL && node->deactivate != NULL)
+		node->deactivate(node);
 	(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
 	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
 	vfinalize(vnode);
@@ -162,14 +261,6 @@ vmmfs_vnode_deactivate(struct vnode *vnode)
 }
 
 
-
-void
-vmmfs_node_inactive(struct vmmfs_node *node, struct vnode *vnode)
-{
-	if (node != NULL && vnode != NULL && vnode->v_data != NULL &&
-	    node->drop != NULL)
-		(void)vrecycle(vnode);
-}
 
 int
 vmmfs_node_reclaim(struct vop_reclaim_args *ap)

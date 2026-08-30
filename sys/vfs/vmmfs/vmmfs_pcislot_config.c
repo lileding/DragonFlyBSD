@@ -42,15 +42,10 @@ struct vmmfs_pcislot_config_request {
 
 #define VMMFS_PCISLOT_CONFIG_MODE 0600
 
-static int vmmfs_pcislot_config_access(struct vop_access_args *);
 static int vmmfs_pcislot_config_close(struct vop_close_args *);
-static int vmmfs_pcislot_config_getattr(struct vop_getattr_args *);
-static int vmmfs_pcislot_config_getattr_lite(
-	struct vop_getattr_lite_args *);
 static int vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_pcislot_config_open(struct vop_open_args *);
 static int vmmfs_pcislot_config_read(struct vop_read_args *);
-static int vmmfs_pcislot_config_inactive(struct vop_inactive_args *);
 static int vmmfs_pcislot_config_write(struct vop_write_args *);
 static void vmmfs_pcislot_config_filter_detach(struct knote *);
 static int vmmfs_pcislot_config_filter_read(struct knote *, long);
@@ -86,15 +81,15 @@ static struct filterops vmmfs_pcislot_config_write_filterops = {
 
 struct vop_ops vmmfs_pcislot_config_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_pcislot_config_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vmmfs_pcislot_config_close,
-	.vop_getattr = vmmfs_pcislot_config_getattr,
-	.vop_getattr_lite = vmmfs_pcislot_config_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_kqfilter = vmmfs_pcislot_config_kqfilter,
 	.vop_open = vmmfs_pcislot_config_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_config_read,
-	.vop_inactive = vmmfs_pcislot_config_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_write = vmmfs_pcislot_config_write,
 };
@@ -113,16 +108,18 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 		return (EINVAL);
 	*vnodep = NULL;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = vmmfs_root_state(vmmfs_machine_root(machine));
+	mount = machine->mount;
 	if (mount->pcislot_config_vops == NULL)
 		return (ENXIO);
 	bzero(config, sizeof(*config));
-	config->inode = atomic_fetchadd_int(&mount->next_inode, 1);
+	config->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
 	lwkt_token_init(&config->token, "vmmfspcicfg");
 	TAILQ_INIT(&config->requests);
 	SLIST_INIT(&config->kq.ki_note);
 	vmmfs_node_setup(&config->node, &slot->branch,
 	    vmmfs_pcislot_config_drop);
+	vmmfs_node_set_metadata(&config->node, config->inode,
+	    VMMFS_PCISLOT_CONFIG_MODE, 0);
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_config_vops, VREG, &config->node, vnodep);
 	if (error != 0)
@@ -308,12 +305,6 @@ vmmfs_pcislot_config_io(struct vmmfs_pcislot_config *config,
 }
 
 static int
-vmmfs_pcislot_config_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_PCISLOT_CONFIG_MODE, 0));
-}
-
-static int
 vmmfs_pcislot_config_close(struct vop_close_args *ap)
 {
 	struct vmmfs_pcislot_config *config;
@@ -331,44 +322,6 @@ vmmfs_pcislot_config_close(struct vop_close_args *ap)
 		KNOTE(&config->kq.ki_note, 0);
 	}
 	return (vop_stdclose(ap));
-}
-
-static int
-vmmfs_pcislot_config_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_pcislot_config *config;
-	struct vattr *vattr;
-
-	config = ap->a_vp->v_data;
-	if (config == NULL || vmmfs_pcislot_config_slot(config) == NULL ||
-	    config->node.dead)
-		return (ENOENT);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VREG;
-	vattr->va_mode = VMMFS_PCISLOT_CONFIG_MODE;
-	vattr->va_nlink = 1;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = config->inode;
-	vattr->va_size = 0;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = 0;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_config_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	ap->a_lvap->va_type = VREG;
-	ap->a_lvap->va_mode = VMMFS_PCISLOT_CONFIG_MODE;
-	ap->a_lvap->va_nlink = 1;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
-	ap->a_lvap->va_flags = 0;
-	return (0);
 }
 
 static int
@@ -476,18 +429,6 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 		if (error != 0)
 			return (error);
 	}
-}
-
-static int
-vmmfs_pcislot_config_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_pcislot_config *config;
-
-	config = ap->a_vp->v_data;
-	if (config == NULL || !config->node.dead)
-		return (0);
-	vmmfs_node_inactive(&config->node, ap->a_vp);
-	return (0);
 }
 
 

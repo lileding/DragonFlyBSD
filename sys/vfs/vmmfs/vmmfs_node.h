@@ -16,15 +16,23 @@ struct vmmfs_branch;
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
 	struct vmmfs_branch *parent;
+	ino_t inode;
+	mode_t mode;
+	off_t size;
 	bool dead;
 	void (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
 };
 
 void vmmfs_node_parent_put(struct vmmfs_node *);
-void vmmfs_node_deactivate(struct vmmfs_node *);
 void vmmfs_node_default_deactivate(struct vmmfs_node *);
+void vmmfs_node_set_metadata(struct vmmfs_node *, ino_t, mode_t, off_t);
+off_t vmmfs_node_decimal_size(uint64_t);
 int vmmfs_node_open(struct vop_open_args *);
+int vmmfs_node_access(struct vop_access_args *);
+int vmmfs_node_getattr(struct vop_getattr_args *);
+int vmmfs_node_getattr_lite(struct vop_getattr_lite_args *);
+int vmmfs_node_inactive(struct vop_inactive_args *);
 
 /* Initializes object ownership before the object becomes namespace-visible. */
 void vmmfs_node_setup(struct vmmfs_node *, struct vmmfs_branch *,
@@ -47,9 +55,6 @@ void vmmfs_vnode_discard(struct vnode *);
 
 /* Runs a terminal object destructor exactly once. */
 void vmmfs_node_drop(struct vmmfs_node *);
-
-/* Common VOP_INACTIVE tail after the object's semantic dead gate. */
-void vmmfs_node_inactive(struct vmmfs_node *, struct vnode *);
 
 /* Common VOP_RECLAIM handoff for every VMMFS namespace vnode. */
 int vmmfs_node_reclaim(struct vop_reclaim_args *);

@@ -46,15 +46,11 @@ struct vmmfs_serialroot_item {
 	char name[sizeof("com4")];
 };
 
-static int vmmfs_serialroot_access(struct vop_access_args *);
-static int vmmfs_serialroot_getattr(struct vop_getattr_args *);
-static int vmmfs_serialroot_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_serialroot_ncreate(struct vop_ncreate_args *);
 static int vmmfs_serialroot_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_serialroot_nremove(struct vop_nremove_args *);
 static int vmmfs_serialroot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_serialroot_readdir(struct vop_readdir_args *);
-static int vmmfs_serialroot_inactive(struct vop_inactive_args *);
 static int vmmfs_serialroot_read_item(struct vmmfs_serialroot *, uint64_t,
 	struct vmmfs_serialroot_item *);
 static int vmmfs_serialroot_port_compare(struct vmmfs_serialroot_port *,
@@ -69,10 +65,10 @@ static void vmmfs_serialroot_deactivate_port(struct vmmfs_serialport *,
 
 struct vop_ops vmmfs_serialroot_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_serialroot_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_serialroot_getattr,
-	.vop_getattr_lite = vmmfs_serialroot_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_ncreate = vmmfs_serialroot_ncreate,
 	.vop_nlookupdotdot = vmmfs_serialroot_nlookupdotdot,
 	.vop_nremove = vmmfs_serialroot_nremove,
@@ -80,7 +76,7 @@ struct vop_ops vmmfs_serialroot_vops = {
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_serialroot_readdir,
-	.vop_inactive = vmmfs_serialroot_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 };
 
@@ -105,7 +101,7 @@ vmmfs_serialroot_init(struct vmmfs_machine *machine,
 	if (machine == NULL || serialroot == NULL || vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	state = vmmfs_root_state(vmmfs_machine_root(machine));
+	state = machine->mount;
 	if (state->serialroot_vops == NULL)
 		return (ENXIO);
 	bzero(serialroot, sizeof(*serialroot));
@@ -113,10 +109,12 @@ vmmfs_serialroot_init(struct vmmfs_machine *machine,
 	if (registry == NULL)
 		return (ENOMEM);
 	serialroot->registry = registry;
-	serialroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
+	serialroot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
 	RB_INIT(&serialroot->registry->ports);
 	vmmfs_branch_init(&serialroot->branch, &machine->branch,
 	    vmmfs_serialroot_drop);
+	vmmfs_node_set_metadata(&serialroot->branch.node, serialroot->inode,
+	    VMMFS_SERIALROOT_MODE, 0);
 	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->serialroot_vops, VDIR, &serialroot->branch.node, vnodep);
 	if (error != 0)
@@ -167,7 +165,6 @@ vmmfs_serialroot_deactivate_port(struct vmmfs_serialport *port,
 	port->destroying = true;
 	lwkt_reltoken(&port->token);
 	vmmfs_serialport_revoke(port);
-	vmmfs_node_deactivate(&port->node);
 	vmmfs_vnode_deactivate(vnode);
 }
 
@@ -273,51 +270,6 @@ vmmfs_serialroot_port_info(struct vmmfs_serialroot *serialroot,
 }
 
 static int
-vmmfs_serialroot_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_SERIALROOT_MODE, 0));
-}
-
-static int
-vmmfs_serialroot_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_serialroot *serialroot;
-	struct vattr *vattr;
-
-	serialroot = ap->a_vp->v_data;
-	if (serialroot == NULL || serialroot->branch.node.dead)
-		return (ENOENT);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VDIR;
-	vattr->va_mode = VMMFS_SERIALROOT_MODE;
-	vattr->va_nlink = 2;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = serialroot->inode;
-	vattr->va_size = 0;
-	vattr->va_blocksize = PAGE_SIZE;
-	vattr->va_bytes = 0;
-	vattr->va_flags = 0;
-	vattr->va_filerev = 0;
-	return (0);
-}
-
-static int
-vmmfs_serialroot_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	ap->a_lvap->va_type = VDIR;
-	ap->a_lvap->va_mode = VMMFS_SERIALROOT_MODE;
-	ap->a_lvap->va_nlink = 2;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = 0;
-	ap->a_lvap->va_flags = 0;
-	return (0);
-}
-
-static int
 vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 {
 	struct vmmfs_machine *machine;
@@ -395,16 +347,21 @@ static int
 vmmfs_serialroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
 	struct vmmfs_serialroot *serialroot;
+	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	int error;
 
 	serialroot = ap->a_dvp->v_data;
-	if (serialroot == NULL || serialroot->branch.node.dead ||
-	    vmmfs_serialroot_machine(serialroot) == NULL)
+	if (serialroot == NULL || serialroot->branch.node.dead)
 		return (ENOENT);
-	vnode = vmmfs_root_machine_vnode(
-	    vmmfs_machine_root(vmmfs_serialroot_machine(serialroot)),
-	    vmmfs_serialroot_machine(serialroot));
+	machine = vmmfs_serialroot_machine(serialroot);
+	if (machine == NULL)
+		return (ENOENT);
+	lwkt_gettoken(&machine->branch.token);
+	vnode = machine->vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&machine->branch.token);
 	if (vnode == NULL)
 		return (ENOENT);
 	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
@@ -562,18 +519,6 @@ vmmfs_serialroot_readdir(struct vop_readdir_args *ap)
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = !stop && error == 0;
 	return (error);
-}
-
-static int
-vmmfs_serialroot_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_serialroot *serialroot;
-
-	serialroot = ap->a_vp->v_data;
-	if (serialroot == NULL || !serialroot->branch.node.dead)
-		return (0);
-	vmmfs_node_inactive(&serialroot->branch.node, ap->a_vp);
-	return (0);
 }
 
 

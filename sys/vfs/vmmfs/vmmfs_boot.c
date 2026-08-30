@@ -43,14 +43,10 @@ struct vmmfs_boot_session {
 	bool revoked;
 };
 
-static int vmmfs_boot_access(struct vop_access_args *);
-static int vmmfs_boot_getattr(struct vop_getattr_args *);
-static int vmmfs_boot_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_boot_open(struct vop_open_args *);
 static int vmmfs_boot_close(struct vop_close_args *);
 static int vmmfs_boot_read(struct vop_read_args *);
 static int vmmfs_boot_write(struct vop_write_args *);
-static int vmmfs_boot_inactive(struct vop_inactive_args *);
 static void vmmfs_boot_drop(struct vmmfs_node *);
 static int vmmfs_boot_dev_open(struct dev_open_args *);
 static int vmmfs_boot_dev_close(struct dev_close_args *);
@@ -72,14 +68,14 @@ int vmmfs_boot_module_fini(void);
 
 struct vop_ops vmmfs_boot_vops = {
 	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_boot_access,
+	.vop_access = vmmfs_node_access,
 	.vop_close = vmmfs_boot_close,
-	.vop_getattr = vmmfs_boot_getattr,
-	.vop_getattr_lite = vmmfs_boot_getattr_lite,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_boot_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_boot_read,
-	.vop_inactive = vmmfs_boot_inactive,
+	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_write = vmmfs_boot_write,
 };
@@ -119,11 +115,13 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot,
 		return (EINVAL);
 	*vnodep = NULL;
 	bzero(boot, sizeof(*boot));
-	mount = vmmfs_root_state(vmmfs_machine_root(machine));
+	mount = machine->mount;
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
 	vmmfs_node_setup(&boot->node, &machine->branch, vmmfs_boot_drop);
-	boot->inode = atomic_fetchadd_int(&mount->next_inode, 1);
+	boot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_set_metadata(&boot->node, boot->inode, VMMFS_BOOT_MODE,
+	    machine->memory.size);
 	serial = atomic_fetchadd_int(&vmmfs_boot_dev_serial, 1);
 	boot->dev = make_only_dev(&vmmfs_boot_dev_ops, serial, UID_ROOT,
 		GID_WHEEL, VMMFS_BOOT_MODE, "vmmfs_boot%d", serial);
@@ -274,64 +272,6 @@ vmmfs_boot_submit(struct vmmfs_boot *boot, const struct vmm_cpustate *state)
 }
 
 static int
-vmmfs_boot_access(struct vop_access_args *ap)
-{
-	return (vop_helper_access(ap, 0, 0, VMMFS_BOOT_MODE, 0));
-}
-
-static int
-vmmfs_boot_getattr(struct vop_getattr_args *ap)
-{
-	struct vmmfs_boot *boot;
-	struct vattr *vattr;
-	uint64_t size;
-
-	boot = ap->a_vp->v_data;
-	if (boot == NULL || vmmfs_boot_machine(boot) == NULL ||
-	    boot->node.dead)
-		return (ENOENT);
-	vattr = ap->a_vap;
-	VATTR_NULL(vattr);
-	vattr->va_type = VCHR;
-	vattr->va_mode = VMMFS_BOOT_MODE;
-	vattr->va_flags = 0;
-	vattr->va_nlink = 1;
-	vattr->va_uid = 0;
-	vattr->va_gid = 0;
-	vattr->va_fsid = ap->a_vp->v_mount->mnt_stat.f_fsid.val[0];
-	vattr->va_fileid = boot->inode;
-	lwkt_gettoken(&vmmfs_boot_machine(boot)->branch.token);
-	size = vmmfs_boot_machine(boot)->memory.size;
-	lwkt_reltoken(&vmmfs_boot_machine(boot)->branch.token);
-	vattr->va_size = size;
-	vattr->va_blocksize = PAGE_SIZE;
-	return (0);
-}
-
-static int
-vmmfs_boot_getattr_lite(struct vop_getattr_lite_args *ap)
-{
-	struct vmmfs_boot *boot;
-	uint64_t size;
-
-	boot = ap->a_vp->v_data;
-	if (boot == NULL || boot->node.dead ||
-	    vmmfs_boot_machine(boot) == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&vmmfs_boot_machine(boot)->branch.token);
-	size = vmmfs_boot_machine(boot)->memory.size;
-	lwkt_reltoken(&vmmfs_boot_machine(boot)->branch.token);
-	ap->a_lvap->va_type = VCHR;
-	ap->a_lvap->va_mode = VMMFS_BOOT_MODE;
-	ap->a_lvap->va_nlink = 1;
-	ap->a_lvap->va_uid = 0;
-	ap->a_lvap->va_gid = 0;
-	ap->a_lvap->va_size = size;
-	ap->a_lvap->va_flags = 0;
-	return (0);
-}
-
-static int
 vmmfs_boot_open(struct vop_open_args *ap)
 {
 	struct vmmfs_boot *boot;
@@ -408,22 +348,6 @@ vmmfs_boot_write(struct vop_write_args *ap)
 	error = dev_dwrite(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
 	vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
 	return (error);
-}
-
-static int
-vmmfs_boot_inactive(struct vop_inactive_args *ap)
-{
-	struct vmmfs_boot *boot;
-	struct vmmfs_machine *machine;
-
-	boot = ap->a_vp->v_data;
-	if (boot == NULL || vmmfs_boot_machine(boot) == NULL)
-		return (0);
-	machine = vmmfs_boot_machine(boot);
-	if (!boot->node.dead)
-		return (0);
-	vmmfs_node_inactive(&boot->node, ap->a_vp);
-	return (0);
 }
 
 
@@ -570,7 +494,7 @@ vmmfs_boot_pager_ctor(void *handle, vm_ooffset_t size, vm_prot_t prot,
 	if (session->revoked || session->backing_object == NULL)
 		goto fail;
 	atomic_add_int(&session->references, 1);
-	vmmfs_machine_hold(machine);
+	vmmfs_branch_hold(&machine->branch);
 	atomic_add_int(&vmmfs_boot_pager_count, 1);
 	lwkt_reltoken(&machine->branch.token);
 	*color = 0;
@@ -658,7 +582,7 @@ vmmfs_boot_session_drop_pager(struct vmmfs_boot_session *session)
 {
 	if (session == NULL)
 		return;
-	vmmfs_machine_put(vmmfs_boot_machine(session->boot));
+	vmmfs_branch_put(&vmmfs_boot_machine(session->boot)->branch);
 	atomic_add_int(&vmmfs_boot_pager_count, -1);
 	vmmfs_boot_session_drop_base(session);
 }
