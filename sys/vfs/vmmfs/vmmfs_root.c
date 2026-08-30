@@ -290,7 +290,6 @@ vmmfs_root_remove_item(struct vmmfs_root *root, const char *name,
 	entry->vnode = NULL;
 	kfree(entry, M_VMMFS);
 	lwkt_reltoken(&machine->branch.token);
-	vmmfs_machine_deactivate_begin(machine);
 	lwkt_reltoken(&root->branch.token);
 	*machinep = machine;
 	*vnodep = vnode;

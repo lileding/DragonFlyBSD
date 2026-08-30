@@ -157,20 +157,32 @@ vmmfs_pcislot_drop(struct vmmfs_node *node)
 void
 vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *slot)
 {
+	struct vnode *descriptor_vnode;
+	struct vnode *config_vnode;
+	struct vnode *events_vnode;
+
 	if (slot == NULL)
 		return;
 	vmmfs_pcislot_power_off(slot);
 	vmmfs_pcislot_config_revoke(&slot->config);
 	vmmfs_pcislot_events_revoke(&slot->events);
-	vmmfs_node_deactivate(&slot->descriptor.node);
-	vmmfs_vnode_deactivate(slot->descriptor_vnode);
+
+	/* Detach the slot-owned fixed-child Arcs before VFS revoke. */
+	lwkt_gettoken(&slot->branch.token);
+	descriptor_vnode = slot->descriptor_vnode;
 	slot->descriptor_vnode = NULL;
-	vmmfs_node_deactivate(&slot->config.node);
-	vmmfs_vnode_deactivate(slot->config_vnode);
+	config_vnode = slot->config_vnode;
 	slot->config_vnode = NULL;
-	vmmfs_node_deactivate(&slot->events.node);
-	vmmfs_vnode_deactivate(slot->events_vnode);
+	events_vnode = slot->events_vnode;
 	slot->events_vnode = NULL;
+	lwkt_reltoken(&slot->branch.token);
+
+	vmmfs_node_deactivate(&slot->descriptor.node);
+	vmmfs_vnode_deactivate(descriptor_vnode);
+	vmmfs_node_deactivate(&slot->config.node);
+	vmmfs_vnode_deactivate(config_vnode);
+	vmmfs_node_deactivate(&slot->events.node);
+	vmmfs_vnode_deactivate(events_vnode);
 }
 int
 vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
@@ -208,10 +220,15 @@ vmmfs_pcislot_power_off(struct vmmfs_pcislot *slot)
 		return;
 	vmmfs_pciroot_invalidate_slot(vmmfs_pcislot_pciroot(slot), slot);
 	vmmfs_pcislot_config_power_off(&slot->config);
+
+	/* The slot owns the active generation reference. */
+	lwkt_gettoken(&slot->branch.token);
 	resources = slot->descriptor.resources;
 	slot->descriptor.resources = NULL;
-	vmmfs_pcislot_resources_deactivate(resources);
 	bzero(&slot->type0, sizeof(slot->type0));
+	lwkt_reltoken(&slot->branch.token);
+
+	vmmfs_pcislot_resources_deactivate(resources);
 	vmmfs_pciroot_invalidate_slot(vmmfs_pcislot_pciroot(slot), slot);
 }
 

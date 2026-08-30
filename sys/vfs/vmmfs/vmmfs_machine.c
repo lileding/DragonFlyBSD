@@ -41,7 +41,6 @@ static int vmmfs_machine_prepare_start(struct vmmfs_machine *, char *,
 static void vmmfs_machine_wake_waiters(struct vmmfs_machine *);
 static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
-static void vmmfs_machine_deactivate_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *, struct vnode *);
@@ -238,24 +237,6 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	return (0);
 }
 
-static void
-vmmfs_machine_deactivate_stopped(struct vmmfs_machine *machine)
-{
-	struct vmmfs_stopped *stopped;
-	struct vnode *vnode;
-
-	if (machine == NULL)
-		return;
-	lwkt_gettoken(&machine->branch.token);
-	stopped = machine->stopped;
-	vnode = machine->stopped_vnode;
-	machine->stopped = NULL;
-	machine->stopped_vnode = NULL;
-	lwkt_reltoken(&machine->branch.token);
-	if (stopped != NULL)
-		vmmfs_node_deactivate(&stopped->node);
-	vmmfs_vnode_deactivate(vnode);
-}
 
 static void
 vmmfs_machine_cleanup_stopped(struct vmmfs_machine *machine)
@@ -307,6 +288,16 @@ static void
 vmmfs_machine_deactivate_node(struct vmmfs_node *node)
 {
 	struct vmmfs_machine *machine;
+	struct vmmfs_stopped *stopped;
+	struct vnode *events_vnode;
+	struct vnode *stopped_vnode;
+	struct vnode *boot_vnode;
+	struct vnode *loader_vnode;
+	struct vnode *memory_vnode;
+	struct vnode *vcpu_vnode;
+	struct vnode *id_vnode;
+	struct vnode *serialroot_vnode;
+	struct vnode *pciroot_vnode;
 
 	machine = (struct vmmfs_machine *)node;
 	if (machine == NULL)
@@ -314,33 +305,52 @@ vmmfs_machine_deactivate_node(struct vmmfs_node *node)
 	vmmfs_machine_deactivate_begin(machine);
 	KKASSERT(machine->machine == NULL);
 	vmmfs_machine_wake_waiters(machine);
+
+	/* Detach every parent-owned vnode Arc before any VFS operation. */
+	lwkt_gettoken(&machine->branch.token);
+	events_vnode = machine->events_vnode;
+	machine->events_vnode = NULL;
+	stopped = machine->stopped;
+	stopped_vnode = machine->stopped_vnode;
+	machine->stopped = NULL;
+	machine->stopped_vnode = NULL;
+	boot_vnode = machine->boot_vnode;
+	machine->boot_vnode = NULL;
+	loader_vnode = machine->loader_vnode;
+	machine->loader_vnode = NULL;
+	memory_vnode = machine->memory_vnode;
+	machine->memory_vnode = NULL;
+	vcpu_vnode = machine->vcpu_vnode;
+	machine->vcpu_vnode = NULL;
+	id_vnode = machine->id_vnode;
+	machine->id_vnode = NULL;
+	serialroot_vnode = machine->serialroot_vnode;
+	machine->serialroot_vnode = NULL;
+	pciroot_vnode = machine->pciroot_vnode;
+	machine->pciroot_vnode = NULL;
+	lwkt_reltoken(&machine->branch.token);
+
 	vmmfs_pciroot_deactivate_slots(&machine->pciroot);
 	vmmfs_serialroot_deactivate_ports(&machine->serialroot);
 	vmmfs_node_deactivate(&machine->events.node);
-	vmmfs_vnode_deactivate(machine->events_vnode);
-	machine->events_vnode = NULL;
-	vmmfs_machine_deactivate_stopped(machine);
+	vmmfs_vnode_deactivate(events_vnode);
+	if (stopped != NULL)
+		vmmfs_node_deactivate(&stopped->node);
+	vmmfs_vnode_deactivate(stopped_vnode);
 	vmmfs_node_deactivate(&machine->boot.node);
-	vmmfs_vnode_deactivate(machine->boot_vnode);
-	machine->boot_vnode = NULL;
+	vmmfs_vnode_deactivate(boot_vnode);
 	vmmfs_node_deactivate(&machine->loader.node);
-	vmmfs_vnode_deactivate(machine->loader_vnode);
-	machine->loader_vnode = NULL;
+	vmmfs_vnode_deactivate(loader_vnode);
 	vmmfs_node_deactivate(&machine->memory.node);
-	vmmfs_vnode_deactivate(machine->memory_vnode);
-	machine->memory_vnode = NULL;
+	vmmfs_vnode_deactivate(memory_vnode);
 	vmmfs_node_deactivate(&machine->vcpu.node);
-	vmmfs_vnode_deactivate(machine->vcpu_vnode);
-	machine->vcpu_vnode = NULL;
+	vmmfs_vnode_deactivate(vcpu_vnode);
 	vmmfs_node_deactivate(&machine->id_node.node);
-	vmmfs_vnode_deactivate(machine->id_vnode);
-	machine->id_vnode = NULL;
+	vmmfs_vnode_deactivate(id_vnode);
 	vmmfs_node_deactivate(&machine->serialroot.branch.node);
-	vmmfs_vnode_deactivate(machine->serialroot_vnode);
-	machine->serialroot_vnode = NULL;
+	vmmfs_vnode_deactivate(serialroot_vnode);
 	vmmfs_node_deactivate(&machine->pciroot.branch.node);
-	vmmfs_vnode_deactivate(machine->pciroot_vnode);
-	machine->pciroot_vnode = NULL;
+	vmmfs_vnode_deactivate(pciroot_vnode);
 }
 
 void
