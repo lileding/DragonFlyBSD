@@ -5,8 +5,11 @@
  */
 #include <sys/conf.h>
 #include <sys/errno.h>
+#include <sys/file.h>
+#include <sys/filedesc.h>
 #include <sys/mount.h>
 #include <sys/namecache.h>
+#include <sys/proc.h>
 #include <sys/systm.h>
 #include <sys/vnode.h>
 
@@ -14,90 +17,108 @@
 #include "vmmfs_branch.h"
 
 void
-vmmfs_node_setup(struct vmmfs_node *node, struct vmmfs_node *parent,
-	void (*drop)(struct vmmfs_node *),
-	bool (*is_dead)(struct vmmfs_node *))
+vmmfs_node_setup(struct vmmfs_node *node, struct vmmfs_branch *parent,
+	void (*drop)(struct vmmfs_node *))
 {
 	KKASSERT(node != NULL);
 	KKASSERT(drop != NULL);
-	node->vnode = NULL;
 	node->parent = parent;
+	node->dead = false;
+	node->deactivate = vmmfs_node_default_deactivate;
 	node->drop = drop;
-	node->is_dead = is_dead;
 	if (parent != NULL)
-		vmmfs_branch_hold((struct vmmfs_branch *)parent);
+		vmmfs_branch_hold(parent);
+}
+
+void
+vmmfs_node_parent_put(struct vmmfs_node *node)
+{
+	struct vmmfs_branch *parent;
+
+	KKASSERT(node != NULL);
+	parent = node->parent;
+	node->parent = NULL;
+	if (parent != NULL)
+		vmmfs_branch_put(parent);
+}
+
+void
+vmmfs_node_default_deactivate(struct vmmfs_node *node)
+{
+	KKASSERT(node != NULL);
+	node->dead = true;
+}
+
+int
+vmmfs_node_open(struct vop_open_args *ap)
+{
+	struct vmmfs_node *node;
+
+	if (ap == NULL || ap->a_vp == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	return (vop_stdopen(ap));
+}
+
+void
+vmmfs_node_deactivate(struct vmmfs_node *node)
+{
+	if (node == NULL || node->deactivate == NULL)
+		return;
+	node->deactivate(node);
 }
 
 void
 vmmfs_node_drop(struct vmmfs_node *node)
 {
 	void (*drop)(struct vmmfs_node *);
-	struct vmmfs_node *parent;
 
 	KKASSERT(node != NULL);
 	drop = node->drop;
 	KKASSERT(drop != NULL);
 	node->drop = NULL;
-	/*
-	 * The object may free itself in drop(), so retain its parent locally.
-	 * Keep node->parent readable until local cleanup is complete.
-	 */
-	parent = node->parent;
 	drop(node);
-	if (parent != NULL)
-		vmmfs_branch_put((struct vmmfs_branch *)parent);
 }
 
 
-bool
-vmmfs_node_is_dead(struct vmmfs_node *node)
-{
-	if (node == NULL)
-		return (true);
-	if (node->is_dead != NULL && node->is_dead(node))
-		return (true);
-	return (node->parent != NULL && vmmfs_node_is_dead(node->parent));
-}
 
 int
-vmmfs_node_publish_regular(struct vmmfs_node *node, struct mount *mount,
-	struct vop_ops **vops, enum vtype type, void *data)
+vmmfs_vnode_create_regular(struct mount *mount, struct vop_ops **vops,
+	enum vtype type, struct vmmfs_node *node, struct vnode **vnodep)
 {
 	struct vnode *vnode;
 	int error;
 
-	if (node == NULL || mount == NULL || vops == NULL || data == NULL)
+	if (mount == NULL || vops == NULL || node == NULL || vnodep == NULL)
 		return (EINVAL);
-	if (node->vnode != NULL)
-		return (EBUSY);
 	error = getnewvnode(VT_SYNTH, mount, &vnode, 0, 0);
 	if (error != 0)
 		return (error);
-	vnode->v_data = data;
+	vnode->v_data = node;
 	vnode->v_ops = vops;
 	vnode->v_type = type;
-	node->vnode = vnode;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
+	*vnodep = vnode;
 	return (0);
 }
 
 int
-vmmfs_node_publish_cdev(struct vmmfs_node *node, struct mount *mount,
-	struct vop_ops **vops, struct cdev *dev, void *data)
+vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
+	struct cdev *dev, struct vmmfs_node *node, struct vnode **vnodep)
 {
 	struct vnode *vnode;
 	int error;
 
-	if (node == NULL || mount == NULL || vops == NULL || dev == NULL ||
-	    data == NULL)
+	if (mount == NULL || vops == NULL || dev == NULL || node == NULL ||
+	    vnodep == NULL)
 		return (EINVAL);
-	if (node->vnode != NULL)
-		return (EBUSY);
 	error = getspecialvnode(VT_SYNTH, mount, vops, &vnode, 0, 0);
 	if (error != 0)
 		return (error);
-	vnode->v_data = data;
+	vnode->v_data = node;
 	vnode->v_ops = vops;
 	vnode->v_type = VCHR;
 	error = v_associate_rdev(vnode, dev);
@@ -111,65 +132,35 @@ vmmfs_node_publish_cdev(struct vmmfs_node *node, struct mount *mount,
 	}
 	vnode->v_umajor = dev->si_umajor;
 	vnode->v_uminor = dev->si_uminor;
-	node->vnode = vnode;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
+	*vnodep = vnode;
 	return (0);
 }
 
-
 void
-vmmfs_node_abort(struct vmmfs_node *node)
+vmmfs_vnode_discard(struct vnode *vnode)
 {
-	struct vnode *vnode;
-
-	if (node == NULL || node->vnode == NULL)
+	if (vnode == NULL)
 		return;
-	vnode = node->vnode;
-	node->vnode = NULL;
 	vx_get(vnode);
 	vnode->v_data = NULL;
 	vnode->v_type = VBAD;
 	vx_put(vnode);
-	/* Drop the base reference that publish retained. */
 	vrele(vnode);
 }
 
 void
-vmmfs_node_abort_drop(struct vmmfs_node *node)
+vmmfs_vnode_deactivate(struct vnode *vnode)
 {
-	if (node == NULL || node->drop == NULL)
+	if (vnode == NULL)
 		return;
-	vmmfs_node_abort(node);
-	vmmfs_node_drop(node);
-}
-
-void
-vmmfs_node_unpublish(struct vmmfs_node *node)
-{
-	struct vnode *vnode;
-
-	KKASSERT(node != NULL);
-	KKASSERT(node->vnode != NULL);
-	vnode = node->vnode;
-	node->vnode = NULL;
+	(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
 	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
 	vfinalize(vnode);
-	/* Drop the base reference that keeps a published object alive. */
 	vrele(vnode);
 }
 
-void
-vmmfs_node_release_transient(struct vmmfs_node *node)
-{
-	struct vnode *vnode;
-
-	if (node == NULL || node->vnode == NULL)
-		return;
-	vnode = node->vnode;
-	node->vnode = NULL;
-	vrele(vnode);
-}
 
 
 void
@@ -180,12 +171,16 @@ vmmfs_node_inactive(struct vmmfs_node *node, struct vnode *vnode)
 		(void)vrecycle(vnode);
 }
 
-bool
-vmmfs_node_reclaim(struct vmmfs_node *node, struct vnode *vnode)
+int
+vmmfs_node_reclaim(struct vop_reclaim_args *ap)
 {
-	if (node == NULL || vnode == NULL || vnode->v_data == NULL ||
-	    node->drop == NULL)
-		return (false);
+	struct vnode *vnode;
+	struct vmmfs_node *node;
+
+	vnode = ap->a_vp;
+	node = vnode->v_data;
 	vnode->v_data = NULL;
-	return (true);
+	if (node != NULL)
+		vmmfs_node_drop(node);
+	return (0);
 }

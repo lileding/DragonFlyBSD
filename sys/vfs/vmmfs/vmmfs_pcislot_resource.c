@@ -58,7 +58,6 @@ static int vmmfs_pcislot_resource_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_pcislot_resource_open(struct vop_open_args *);
 static int vmmfs_pcislot_resource_read(struct vop_read_args *);
 static int vmmfs_pcislot_resource_inactive(struct vop_inactive_args *);
-static int vmmfs_pcislot_resource_reclaim(struct vop_reclaim_args *);
 static int vmmfs_pcislot_resource_write(struct vop_write_args *);
 static int vmmfs_pcislot_resource_dev_open(struct dev_open_args *);
 static int vmmfs_pcislot_resource_dev_close(struct dev_close_args *);
@@ -93,8 +92,8 @@ static bool vmmfs_pcislot_resource_enabled(
 	const struct vmmfs_pcislot_resource *);
 static int vmmfs_pcislot_resource_create_mapping(
 	struct vmmfs_pcislot_resource *);
-static int vmmfs_pcislot_resource_publish(
-	struct vmmfs_pcislot_resource *, struct vmmfs_mount *);
+static int vmmfs_pcislot_resource_create_vnode(
+	struct vmmfs_pcislot_resource *, struct vmmfs_mount *, struct vnode **);
 static void vmmfs_pcislot_resource_revoke(
 	struct vmmfs_pcislot_resource *);
 static int vmmfs_pcislot_resource_map(struct vmmfs_pcislot_resource *);
@@ -158,7 +157,7 @@ struct vop_ops vmmfs_pcislot_resource_vops = {
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_pcislot_resource_read,
 	.vop_inactive = vmmfs_pcislot_resource_inactive,
-	.vop_reclaim = vmmfs_pcislot_resource_reclaim,
+	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_write = vmmfs_pcislot_resource_write,
 };
 
@@ -211,12 +210,14 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		return (EOVERFLOW);
 	resources = kmalloc(sizeof(*resources) + count * sizeof(resources->items[0]),
 	    M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_branch_init(&resources->branch, &slot->branch.node,
-	    vmmfs_pcislot_resources_drop, NULL);
+	vmmfs_branch_init(&resources->branch, &slot->branch,
+	    vmmfs_pcislot_resources_drop);
 	resources->machine = machine;
 	resources->descriptor_generation = generation;
 	resources->powered = true;
 	resources->count = count;
+	resources->vnodes = kmalloc(count * sizeof(resources->vnodes[0]),
+	    M_VMMFS, M_WAITOK | M_ZERO);
 	index = 0;
 	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
 		if (!value->bars[bar].present)
@@ -275,15 +276,16 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		lwkt_token_init(&resource->token, "vmmfspcires");
 		++resources->initialized_count;
 		SLIST_INIT(&resource->read_kq.ki_note);
-		vmmfs_node_setup(&resource->node, &resources->branch.node,
-		    vmmfs_pcislot_resource_drop, NULL);
+		vmmfs_node_setup(&resource->node, &resources->branch,
+		    vmmfs_pcislot_resource_drop);
 		error = vmmfs_pcislot_resource_create_mapping(resource);
 		if (error != 0)
 			goto fail;
 	}
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
-		error = vmmfs_pcislot_resource_publish(resource, mount);
+		error = vmmfs_pcislot_resource_create_vnode(resource, mount,
+		    &resources->vnodes[index]);
 		if (error != 0)
 			goto fail;
 	}
@@ -293,31 +295,50 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	return (0);
 
 fail:
-	vmmfs_pcislot_resources_unpublish(resources);
+	vmmfs_pcislot_resources_deactivate(resources);
 	return (error);
 }
 
 void
-vmmfs_pcislot_resources_unpublish(struct vmmfs_pcislot_resources *resources)
+vmmfs_pcislot_resources_deactivate_begin(
+	struct vmmfs_pcislot_resources *resources)
 {
-	struct vm_object *pager_object;
-	struct vmmfs_pcislot_resource *resource;
 	size_t index;
 
 	if (resources == NULL)
 		return;
+	lwkt_gettoken(&resources->branch.token);
+	vmmfs_node_default_deactivate(&resources->branch.node);
+	for (index = 0; index < resources->initialized_count; ++index)
+		vmmfs_node_default_deactivate(&resources->items[index].node);
+	lwkt_reltoken(&resources->branch.token);
+}
+
+void
+vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
+{
+	struct vm_object *pager_object;
+	struct vmmfs_pcislot_resource *resource;
+	struct vnode *vnode;
+	size_t index;
+
+	if (resources == NULL)
+		return;
+	vmmfs_pcislot_resources_deactivate_begin(resources);
+	lwkt_gettoken(&resources->branch.token);
+	if (resources->destroying) {
+		lwkt_reltoken(&resources->branch.token);
+		return;
+	}
 	resources->destroying = true;
+	resources->powered = false;
+	lwkt_reltoken(&resources->branch.token);
 	for (index = 0; index < resources->initialized_count; ++index)
 		vmmfs_pcislot_resource_unmap(&resources->items[index]);
 	for (index = 0; index < resources->initialized_count; ++index) {
 		resource = &resources->items[index];
 		vmmfs_pcislot_resource_revoke(resource);
-		/*
-		 * cdev_pager_allocate() holds resources through its ctor.  Drop
-		 * our object reference after revoke so that reference cannot form
-		 * a cycle with the final resources destructor.  Existing mappings
-		 * retain their own object reference and still fault as revoked.
-		 */
+		/* cdev pager mappings retain independent references after revoke. */
 		lwkt_gettoken(&resource->token);
 		pager_object = resource->pager_object;
 		resource->pager_object = NULL;
@@ -327,18 +348,26 @@ vmmfs_pcislot_resources_unpublish(struct vmmfs_pcislot_resources *resources)
 	}
 	for (index = 0; index < resources->initialized_count; ++index) {
 		resource = &resources->items[index];
-		if (resource->node.vnode != NULL)
-			vmmfs_node_unpublish(&resource->node);
-		else
+		lwkt_gettoken(&resources->branch.token);
+		vnode = resources->vnodes == NULL ? NULL : resources->vnodes[index];
+		if (resources->vnodes != NULL)
+			resources->vnodes[index] = NULL;
+		lwkt_reltoken(&resources->branch.token);
+		vmmfs_node_deactivate(&resource->node);
+		if (vnode != NULL) {
+			vmmfs_vnode_deactivate(vnode);
+		} else {
 			vmmfs_node_drop(&resource->node);
+		}
 	}
 	if (vmmfs_pcislot_resources_slot(resources) != NULL) {
 		vmmfs_pcislot_events_log(&vmmfs_pcislot_resources_slot(resources)->events,
 		    VMMFS_PCI_EVENT_POWER_OFF, "generation=%ju",
 		    (uintmax_t)resources->descriptor_generation);
 	}
-	resources->powered = false;
+	lwkt_gettoken(&resources->branch.token);
 	resources->machine = NULL;
+	lwkt_reltoken(&resources->branch.token);
 	vmmfs_pcislot_resources_put(resources);
 }
 
@@ -423,20 +452,53 @@ vmmfs_pcislot_resources_find(struct vmmfs_pcislot_resources *resources,
 	const char *name, size_t length)
 {
 	char candidate[32];
+	struct vmmfs_pcislot_resource *resource;
 	size_t candidate_length;
 	size_t index;
 
 	if (resources == NULL || name == NULL)
 		return (NULL);
+	lwkt_gettoken(&resources->branch.token);
+	if (resources->destroying) {
+		lwkt_reltoken(&resources->branch.token);
+		return (NULL);
+	}
 	for (index = 0; index < resources->count; ++index) {
 		if (vmmfs_pcislot_resource_name(&resources->items[index], candidate,
 		    sizeof(candidate), &candidate_length) != 0)
 			continue;
 		if (candidate_length == length &&
-		    bcmp(candidate, name, length) == 0)
-			return (&resources->items[index]);
+		    bcmp(candidate, name, length) == 0) {
+			resource = &resources->items[index];
+			lwkt_reltoken(&resources->branch.token);
+			return (resource);
+		}
 	}
+	lwkt_reltoken(&resources->branch.token);
 	return (NULL);
+}
+
+struct vnode *
+vmmfs_pcislot_resources_vnode(struct vmmfs_pcislot_resources *resources,
+	const struct vmmfs_pcislot_resource *resource)
+{
+	struct vnode *vnode;
+	size_t index;
+
+	if (resources == NULL || resource == NULL ||
+	    resource < resources->items ||
+	    resource >= resources->items + resources->count) {
+		return (NULL);
+	}
+	lwkt_gettoken(&resources->branch.token);
+	if (resources->destroying || resources->vnodes == NULL) {
+		lwkt_reltoken(&resources->branch.token);
+		return (NULL);
+	}
+	index = (size_t)(resource - resources->items);
+	vnode = resources->vnodes[index];
+	lwkt_reltoken(&resources->branch.token);
+	return (vnode);
 }
 
 int
@@ -816,6 +878,8 @@ vmmfs_pcislot_resources_drop(struct vmmfs_node *node)
 			kfree(resource->traps, M_VMMFS);
 		lwkt_token_uninit(&resource->token);
 	}
+	if (resources->vnodes != NULL)
+		kfree(resources->vnodes, M_VMMFS);
 	kfree(resources, M_VMMFS);
 }
 
@@ -826,6 +890,7 @@ vmmfs_pcislot_resource_drop(struct vmmfs_node *node)
 
 	resource = (struct vmmfs_pcislot_resource *)node;
 	KKASSERT(resource != NULL);
+	vmmfs_node_parent_put(node);
 }
 
 static bool
@@ -840,7 +905,8 @@ vmmfs_pcislot_resource_mappable(const struct vmmfs_pcislot_resource *resource)
 static bool
 vmmfs_pcislot_resource_enabled(const struct vmmfs_pcislot_resource *resource)
 {
-	return resource != NULL && vmmfs_pcislot_resource_resources(resource) != NULL &&
+	return resource != NULL && !resource->node.dead &&
+	    vmmfs_pcislot_resource_resources(resource) != NULL &&
 	    vmmfs_pcislot_resource_resources(resource)->powered && !vmmfs_pcislot_resource_resources(resource)->destroying &&
 	    !resource->revoked;
 }
@@ -890,17 +956,16 @@ vmmfs_pcislot_resource_create_mapping(struct vmmfs_pcislot_resource *resource)
 }
 
 static int
-vmmfs_pcislot_resource_publish(struct vmmfs_pcislot_resource *resource,
-	struct vmmfs_mount *mount)
+vmmfs_pcislot_resource_create_vnode(struct vmmfs_pcislot_resource *resource,
+	struct vmmfs_mount *mount, struct vnode **vnodep)
 {
 	if (vmmfs_pcislot_resource_mappable(resource)) {
-		return vmmfs_node_publish_cdev(&resource->node,
-		    mount->mount,
-		    &mount->pcislot_resource_vops, resource->dev, resource);
+		return (vmmfs_vnode_create_cdev(mount->mount,
+		    &mount->pcislot_resource_vops, resource->dev, &resource->node,
+		    vnodep));
 	}
-	return vmmfs_node_publish_regular(&resource->node,
-	    mount->mount,
-	    &mount->pcislot_resource_vops, VREG, resource);
+	return (vmmfs_vnode_create_regular(mount->mount,
+	    &mount->pcislot_resource_vops, VREG, &resource->node, vnodep));
 }
 
 static void
@@ -1418,7 +1483,8 @@ vmmfs_pcislot_resource_getattr(struct vop_getattr_args *ap)
 	struct vattr *vattr;
 
 	resource = ap->a_vp->v_data;
-	if (resource == NULL || vmmfs_pcislot_resource_resources(resource) == NULL)
+	if (resource == NULL || resource->node.dead ||
+	    vmmfs_pcislot_resource_resources(resource) == NULL)
 		return (ENOENT);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -1463,8 +1529,8 @@ vmmfs_pcislot_resource_kqfilter(struct vop_kqfilter_args *ap)
 	struct vmmfs_pcislot_resource *resource;
 
 	resource = ap->a_vp->v_data;
-	if (resource == NULL)
-		return (ENOENT);
+	if (!vmmfs_pcislot_resource_enabled(resource))
+		return (ENXIO);
 	if (resource->kind != VMMFS_PCISLOT_RESOURCE_KICK ||
 	    ap->a_kn->kn_filter != EVFILT_READ)
 		return (EOPNOTSUPP);
@@ -1569,22 +1635,6 @@ vmmfs_pcislot_resource_inactive(struct vop_inactive_args *ap)
 	return (0);
 }
 
-static int
-vmmfs_pcislot_resource_reclaim(struct vop_reclaim_args *ap)
-{
-	struct vmmfs_pcislot_resource *resource;
-	bool reclaim;
-
-	resource = ap->a_vp->v_data;
-	if (resource == NULL)
-		return (0);
-	lwkt_gettoken(&resource->token);
-	reclaim = vmmfs_node_reclaim(&resource->node, ap->a_vp);
-	lwkt_reltoken(&resource->token);
-	if (reclaim)
-		vmmfs_node_drop(&resource->node);
-	return (0);
-}
 
 static int
 vmmfs_pcislot_resource_write(struct vop_write_args *ap)

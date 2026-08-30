@@ -27,10 +27,8 @@ static int vmmfs_events_access(struct vop_access_args *);
 static int vmmfs_events_getattr(struct vop_getattr_args *);
 static int vmmfs_events_getattr_lite(struct vop_getattr_lite_args *);
 static int vmmfs_events_kqfilter(struct vop_kqfilter_args *);
-static int vmmfs_events_open(struct vop_open_args *);
 static int vmmfs_events_read(struct vop_read_args *);
 static int vmmfs_events_inactive(struct vop_inactive_args *);
-static int vmmfs_events_reclaim(struct vop_reclaim_args *);
 static int vmmfs_events_setattr(struct vop_setattr_args *);
 static int vmmfs_events_write(struct vop_write_args *);
 static void vmmfs_events_filter_detach(struct knote *);
@@ -52,26 +50,28 @@ struct vop_ops vmmfs_events_vops = {
 	.vop_getattr = vmmfs_events_getattr,
 	.vop_getattr_lite = vmmfs_events_getattr_lite,
 	.vop_kqfilter = vmmfs_events_kqfilter,
-	.vop_open = vmmfs_events_open,
+	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_events_read,
 	.vop_inactive = vmmfs_events_inactive,
-	.vop_reclaim = vmmfs_events_reclaim,
+	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_setattr = vmmfs_events_setattr,
 	.vop_write = vmmfs_events_write,
 };
 
 int
-vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
+vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events,
+	struct vnode **vnodep)
 {
 	struct vmmfs_mount *state;
 	int error;
 
-	if (machine == NULL || events == NULL)
+	if (machine == NULL || events == NULL || vnodep == NULL)
 		return (EINVAL);
+	*vnodep = NULL;
 	bzero(events, sizeof(*events));
 	lwkt_token_init(&events->token, "vmmfsevents");
-	vmmfs_node_setup(&events->node, &machine->branch.node, vmmfs_events_drop, NULL);
+	vmmfs_node_setup(&events->node, &machine->branch, vmmfs_events_drop);
 	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
@@ -81,7 +81,10 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events)
 		error = ENXIO;
 		goto fail;
 	}
-	return (0);
+	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	    &state->events_vops, VREG, &events->node, vnodep);
+	if (error == 0)
+		return (0);
 
 fail:
 	vmmfs_node_drop(&events->node);
@@ -96,30 +99,13 @@ vmmfs_events_drop(struct vmmfs_node *node)
 	events = (struct vmmfs_events *)node;
 	KKASSERT(events != NULL);
 	lwkt_gettoken(&events->token);
-	if (events->node.vnode != NULL) {
-		lwkt_reltoken(&events->token);
-		panic("vmmfs_events_drop: vnode is still published");
-	}
 	lwkt_reltoken(&events->token);
 	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
 	events->inode = 0;
 	lwkt_token_uninit(&events->token);
-}
-
-int
-vmmfs_events_publish(struct vmmfs_events *events)
-{
-	struct vmmfs_mount *state;
-
-	if (events == NULL || vmmfs_events_machine(events) == NULL)
-		return (EINVAL);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_events_machine(events))->mount->mnt_data;
-	if (state == NULL || state->events_vops == NULL)
-		return (ENXIO);
-	return (vmmfs_node_publish_regular(&events->node,
-	    vmmfs_machine_root(vmmfs_events_machine(events))->mount, &state->events_vops, VREG, events));
+	vmmfs_node_parent_put(node);
 }
 
 
@@ -252,6 +238,8 @@ vmmfs_machine_event_name(enum vmmfs_machine_event event)
 		return ("machine loader failed");
 	case VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED:
 		return ("machine serial create failed");
+	case VMMFS_MACHINE_EVENT_PCI_CREATE_FAILED:
+		return ("machine pci create failed");
 	case VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED:
 		return ("machine guest stop request failed");
 	case VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED:
@@ -285,7 +273,7 @@ vmmfs_events_getattr(struct vop_getattr_args *ap)
 	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
-	if (vmmfs_machine_is_dead(vmmfs_events_machine(events)))
+	if (events->node.dead)
 		return (ENXIO);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -336,12 +324,6 @@ vmmfs_events_kqfilter(struct vop_kqfilter_args *ap)
 }
 
 static int
-vmmfs_events_open(struct vop_open_args *ap)
-{
-	return (vop_stdopen(ap));
-}
-
-static int
 vmmfs_events_read(struct vop_read_args *ap)
 {
 	struct vmmfs_events *events;
@@ -355,7 +337,7 @@ vmmfs_events_read(struct vop_read_args *ap)
 	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
-	if (vmmfs_machine_is_dead(vmmfs_events_machine(events)))
+	if (events->node.dead)
 		return (ENXIO);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -406,7 +388,7 @@ vmmfs_events_filter_read(struct knote *knote, long hint)
 	if (events == NULL)
 		return (0);
 	lwkt_gettoken(&events->token);
-	if (vmmfs_events_machine(events) == NULL || vmmfs_machine_is_dead(vmmfs_events_machine(events))) {
+	if (vmmfs_events_machine(events) == NULL || events->node.dead) {
 		knote->kn_data = 0;
 		knote->kn_flags |= EV_EOF;
 	} else {
@@ -441,30 +423,12 @@ vmmfs_events_inactive(struct vop_inactive_args *ap)
 	if (events == NULL)
 		return (0);
 	machine = vmmfs_events_machine(events);
-	if (!vmmfs_machine_is_dead(machine))
+	if (!events->node.dead)
 		return (0);
 	vmmfs_node_inactive(&events->node, ap->a_vp);
 	return (0);
 }
 
-static int
-vmmfs_events_reclaim(struct vop_reclaim_args *ap)
-{
-	struct vmmfs_events *events;
-	struct vmmfs_machine *machine;
-	bool reclaim;
-
-	events = ap->a_vp->v_data;
-	if (events == NULL || vmmfs_events_machine(events) == NULL)
-		return (0);
-	machine = vmmfs_events_machine(events);
-	lwkt_gettoken(&machine->token);
-	reclaim = vmmfs_node_reclaim(&events->node, ap->a_vp);
-	lwkt_reltoken(&machine->token);
-	if (reclaim)
-		vmmfs_node_drop(&events->node);
-	return (0);
-}
 
 static int
 vmmfs_events_setattr(struct vop_setattr_args *ap)

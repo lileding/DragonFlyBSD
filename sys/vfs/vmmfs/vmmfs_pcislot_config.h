@@ -54,8 +54,7 @@ struct vmmfs_pcislot_config {
 extern struct vop_ops vmmfs_pcislot_config_vops;
 
 int vmmfs_pcislot_config_init(struct vmmfs_pcislot *,
-	struct vmmfs_pcislot_config *);
-int vmmfs_pcislot_config_publish(struct vmmfs_pcislot_config *);
+	struct vmmfs_pcislot_config *, struct vnode **);
 void vmmfs_pcislot_config_revoke(struct vmmfs_pcislot_config *);
 void vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *,
 	uint64_t, bool);

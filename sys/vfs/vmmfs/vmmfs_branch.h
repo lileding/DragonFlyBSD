@@ -6,26 +6,28 @@
 #ifndef VMMFS_BRANCH_H
 #define VMMFS_BRANCH_H
 
+#include <sys/thread.h>
 #include <sys/types.h>
 
 #include "vmmfs_node.h"
 
 /*
- * A branch owns a namespace collection.  Its initial reference belongs to
- * the creator or collection; published vnodes and children hold additional
- * references.  The final put calls node.drop().
+ * A branch owns a namespace collection. A named branch begins with the
+ * reference retained by its vnode; an internal branch begins with the
+ * reference retained by its direct owner. The final put invokes final_drop.
  */
 struct vmmfs_branch {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	volatile u_int references;
+	void (*final_drop)(struct vmmfs_node *);
 };
 
-void vmmfs_branch_init(struct vmmfs_branch *, struct vmmfs_node *,
-	void (*)(struct vmmfs_node *), bool (*)(struct vmmfs_node *));
+void vmmfs_branch_drop(struct vmmfs_node *);
+void vmmfs_branch_init(struct vmmfs_branch *, struct vmmfs_branch *,
+	void (*)(struct vmmfs_node *));
 void vmmfs_branch_hold(struct vmmfs_branch *);
 void vmmfs_branch_put(struct vmmfs_branch *);
 
-/* Rolls back a branch before it is inserted into its parent collection. */
-void vmmfs_branch_abort(struct vmmfs_branch *);
 
 #endif /* VMMFS_BRANCH_H */

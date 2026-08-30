@@ -33,7 +33,15 @@ struct vop_ops;
 #define VMMFS_PCI_PIO_GPA 0x1000U
 #define VMMFS_PCI_PIO_END 0xc000U
 
-RB_HEAD(vmmfs_pcislot_tree, vmmfs_pcislot);
+struct vmmfs_pciroot_slot {
+	RB_ENTRY(vmmfs_pciroot_slot) entry;
+	struct vmmfs_pcislot *slot;
+	struct vnode *vnode;
+};
+
+RB_HEAD(vmmfs_pcislot_tree, vmmfs_pciroot_slot);
+RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pciroot_slot, entry,
+	vmmfs_pciroot_slot_compare);
 
 struct vmmfs_pciroot {
 	struct vmmfs_branch branch;
@@ -53,9 +61,9 @@ struct vmmfs_pciroot {
 
 extern struct vop_ops vmmfs_pciroot_vops;
 
-int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *);
-int vmmfs_pciroot_publish(struct vmmfs_pciroot *);
-void vmmfs_pciroot_release_vnodes(struct vmmfs_pciroot *);
+int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *, struct vnode **);
+void vmmfs_pciroot_deactivate_begin(struct vmmfs_pciroot *);
+void vmmfs_pciroot_deactivate_slots(struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);
 int vmmfs_pciroot_stop(struct vmmfs_pciroot *);
@@ -64,4 +72,6 @@ int vmmfs_pciroot_memory(struct vmmfs_pciroot *, struct vmmfs_vcpu_thread *,
 int vmmfs_pciroot_io(struct vmmfs_pciroot *, struct vmmfs_vcpu_thread *,
 	struct vmm_cpustate *, const struct vmm_cpuexit *);
 
+void vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *,
+	struct vmmfs_pcislot *);
 #endif /* VMMFS_PCIROOT_H */

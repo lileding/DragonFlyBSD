@@ -123,9 +123,9 @@ vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 	if (root == NULL)
 		return (ENXIO);
 
-	lwkt_gettoken(&root->token);
-	vp = root->branch.node.vnode;
-	lwkt_reltoken(&root->token);
+	lwkt_gettoken(&root->branch.token);
+	vp = state->root_vnode;
+	lwkt_reltoken(&root->branch.token);
 	if (vp == NULL)
 		return (ENOENT);
 	vhold(vp);
@@ -243,12 +243,12 @@ vmmfs_unmount(struct mount *mount, int flags)
 	root = state->root;
 	if (root == NULL)
 		return (ENXIO);
-	lwkt_gettoken(&root->token);
+	lwkt_gettoken(&root->branch.token);
 	if (!RB_EMPTY(&root->machines)) {
-		lwkt_reltoken(&root->token);
+		lwkt_reltoken(&root->branch.token);
 		return (EBUSY);
 	}
-	lwkt_reltoken(&root->token);
+	lwkt_reltoken(&root->branch.token);
 	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)

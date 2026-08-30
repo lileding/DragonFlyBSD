@@ -75,7 +75,6 @@ static int vmmfs_serialport_write(struct vop_write_args *);
 static int vmmfs_serialport_ioctl(struct vop_ioctl_args *);
 static int vmmfs_serialport_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_serialport_inactive(struct vop_inactive_args *);
-static int vmmfs_serialport_reclaim(struct vop_reclaim_args *);
 static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
     struct vmm_io_read *);
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
@@ -119,23 +118,14 @@ struct vop_ops vmmfs_serialport_vops = {
     .vop_pathconf = vop_stdpathconf,
     .vop_read = vmmfs_serialport_read,
     .vop_inactive = vmmfs_serialport_inactive,
-    .vop_reclaim = vmmfs_serialport_reclaim,
+    .vop_reclaim = vmmfs_node_reclaim,
     .vop_write = vmmfs_serialport_write,
 };
 
 int
-vmmfs_serialport_compare(struct vmmfs_serialport *left,
-    struct vmmfs_serialport *right)
-{
-    return strcmp(left->name, right->name);
-}
-
-RB_GENERATE(vmmfs_serialport_tree, vmmfs_serialport, entry,
-    vmmfs_serialport_compare);
-
-int
 vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
-    const char *name, size_t namelen, struct vmmfs_serialport **portp)
+    const char *name, size_t namelen, struct vmmfs_serialport **portp,
+    struct vnode **vnodep)
 {
     struct vmmfs_mount *state;
     struct vmmfs_serialport *port;
@@ -146,13 +136,16 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     uint32_t unit;
     int error;
 
-    if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL || portp == NULL ||
+    if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL ||
+        portp == NULL || vnodep == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
-    state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
+    state = (struct vmmfs_mount *)vmmfs_machine_root(
+        vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
     if (state->serialport_vops == NULL)
         return ENXIO;
     *portp = NULL;
+    *vnodep = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
     port->inode = atomic_fetchadd_int(&state->next_inode, 1);
     bcopy(name, port->name, namelen);
@@ -163,7 +156,8 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     lwkt_token_init(&port->token, "vmmfsserial");
     unit = atomic_fetchadd_int(&vmmfs_serialport_dev_serial, 1);
     dev = make_only_dev(&vmmfs_serialport_dev_ops, (int)unit, 0, 0, 0600,
-        "vmmfs_serial/%s/%s", vmmfs_serialroot_machine(serialroot)->name, port->name);
+        "vmmfs_serial/%s/%s", vmmfs_serialroot_machine(serialroot)->name,
+        port->name);
     if (dev == NULL) {
         error = ENOMEM;
         goto fail_token;
@@ -177,8 +171,18 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->tty.t_stop = nottystop;
     port->tty.t_param = vmmfs_serialport_tty_param;
     port->dev = dev;
-    vmmfs_node_setup(&port->node, &serialroot->branch.node,
-        vmmfs_serialport_drop, NULL);
+    vmmfs_node_setup(&port->node, &serialroot->branch,
+        vmmfs_serialport_drop);
+    error = vmmfs_vnode_create_cdev(
+        vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount,
+        &state->serialport_vops, port->dev, &port->node, vnodep);
+    if (error != 0) {
+        lwkt_gettoken(&port->token);
+        port->destroying = true;
+        lwkt_reltoken(&port->token);
+        vmmfs_node_drop(&port->node);
+        return error;
+    }
     *portp = port;
     return 0;
 
@@ -186,25 +190,6 @@ fail_token:
     lwkt_token_uninit(&port->token);
     kfree(port, M_VMMFS);
     return error;
-}
-
-int
-vmmfs_serialport_publish(struct vmmfs_serialport *port)
-{
-    struct vmmfs_mount *state;
-    struct vmmfs_serialroot *serialroot;
-
-    if (port == NULL || vmmfs_serialport_serialroot(port) == NULL || port->dev == NULL)
-        return EINVAL;
-    serialroot = vmmfs_serialport_serialroot(port);
-    if (vmmfs_serialroot_machine(serialroot) == NULL || vmmfs_machine_root(vmmfs_serialroot_machine(serialroot)) == NULL)
-        return ENXIO;
-    state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
-    if (state == NULL || state->serialport_vops == NULL)
-        return ENXIO;
-    return vmmfs_node_publish_cdev(&port->node,
-        vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount, &state->serialport_vops, port->dev,
-        port);
 }
 
 static void
@@ -219,7 +204,6 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     KKASSERT(port->destroying);
     KKASSERT(port->machine == NULL);
     KKASSERT(!port->stopping);
-    KKASSERT(port->node.vnode == NULL);
     port->destroying = true;
     dev = port->dev;
     lwkt_reltoken(&port->token);
@@ -249,6 +233,7 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     port->dev = NULL;
     lwkt_token_uninit(&port->tty.t_token);
     lwkt_token_uninit(&port->token);
+    vmmfs_node_parent_put(node);
     kfree(port, M_VMMFS);
 }
 void
@@ -543,23 +528,6 @@ vmmfs_serialport_inactive(struct vop_inactive_args *ap)
     return 0;
 }
 
-static int
-vmmfs_serialport_reclaim(struct vop_reclaim_args *ap)
-{
-    struct vmmfs_serialport *port;
-    bool reclaim;
-
-    port = ap->a_vp->v_data;
-    if (port == NULL)
-        return 0;
-    lwkt_gettoken(&port->token);
-    reclaim = vmmfs_node_reclaim(&port->node, ap->a_vp);
-    lwkt_reltoken(&port->token);
-    if (!reclaim)
-        return 0;
-    vmmfs_node_drop(&port->node);
-    return 0;
-}
 
 static int
 vmmfs_serialport_read_io(vmm_vcpu_t vcpu, void *argument,

@@ -18,7 +18,7 @@ struct vmmfs_serialroot;
 static __inline struct vmmfs_node *
 vmmfs_node_parent(const struct vmmfs_node *node)
 {
-	return (node == NULL ? NULL : node->parent);
+	return (node == NULL || node->parent == NULL ? NULL : &node->parent->node);
 }
 
 #define vmmfs_machine_root(machine) \

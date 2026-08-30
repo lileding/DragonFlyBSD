@@ -33,20 +33,20 @@ static int vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_machine_nremove(struct vop_nremove_args *);
 static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
-static int vmmfs_machine_open(struct vop_open_args *);
 static int vmmfs_machine_readdir(struct vop_readdir_args *);
 static int vmmfs_machine_inactive(struct vop_inactive_args *);
-static int vmmfs_machine_reclaim(struct vop_reclaim_args *);
 static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_prepare_start(struct vmmfs_machine *, char *,
 	uint32_t *);
 static void vmmfs_machine_wake_waiters(struct vmmfs_machine *);
 static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
-static int vmmfs_machine_publish_stopped(struct vmmfs_machine *);
-static void vmmfs_machine_unpublish_stopped(struct vmmfs_machine *);
-static void vmmfs_machine_abort_stopped(struct vmmfs_machine *);
+static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
+static void vmmfs_machine_deactivate_stopped(struct vmmfs_machine *);
+static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
-static bool vmmfs_machine_node_is_dead(struct vmmfs_node *);
+static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *, struct vnode *);
+static void vmmfs_machine_deactivate_node(struct vmmfs_node *);
+static void vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *);
 
 struct vop_ops vmmfs_machine_vops = {
 	.vop_default = vop_defaultop,
@@ -59,60 +59,61 @@ struct vop_ops vmmfs_machine_vops = {
 	.vop_nremove = vmmfs_machine_nremove,
 	.vop_nresolve = vmmfs_machine_nresolve,
 	.vop_nrmdir = vmmfs_machine_nrmdir,
-	.vop_open = vmmfs_machine_open,
+	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_machine_readdir,
 	.vop_inactive = vmmfs_machine_inactive,
-	.vop_reclaim = vmmfs_machine_reclaim,
+	.vop_reclaim = vmmfs_node_reclaim,
 };
 
 int
-vmmfs_machine_compare(struct vmmfs_machine *left,
-	struct vmmfs_machine *right)
-{
-	return (strcmp(left->name, right->name));
-}
-
-RB_GENERATE(vmmfs_machine_tree, vmmfs_machine, entry, vmmfs_machine_compare);
-
-int
 vmmfs_machine_create(struct vmmfs_root *root, const char *name,
-	size_t namelen, struct vmmfs_machine **machinep)
+	size_t namelen, struct vmmfs_machine **machinep, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
+	struct vmmfs_mount *state;
+	struct vnode *vnode;
 	int error;
 
-	if (root == NULL || name == NULL || machinep == NULL || namelen == 0 ||
-	    namelen > NAME_MAX)
+	if (root == NULL || name == NULL || machinep == NULL || vnodep == NULL ||
+	    namelen == 0 || namelen > NAME_MAX)
 		return (EINVAL);
 	*machinep = NULL;
+	*vnodep = NULL;
+	vnode = NULL;
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_branch_init(&machine->branch, &root->branch.node,
-	    vmmfs_machine_drop, vmmfs_machine_node_is_dead);
+	vmmfs_branch_init(&machine->branch, &root->branch,
+	    vmmfs_machine_drop);
+	machine->branch.node.deactivate = vmmfs_machine_deactivate_node;
 	machine->inode = atomic_fetchadd_int(
 	    &((struct vmmfs_mount *)root->mount->mnt_data)->next_inode, 1);
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
-	lwkt_token_init(&machine->token, "vmmfsmachine");
-	error = vmmfs_machine_id_init(machine, &machine->id_node);
+	error = vmmfs_machine_id_init(machine, &machine->id_node,
+	    &machine->id_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_vcpu_init(machine, &machine->vcpu);
+	error = vmmfs_vcpu_init(machine, &machine->vcpu,
+	    &machine->vcpu_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_memory_init(machine, &machine->memory);
+	error = vmmfs_memory_init(machine, &machine->memory,
+	    &machine->memory_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_loader_init(machine, &machine->loader);
+	error = vmmfs_loader_init(machine, &machine->loader,
+	    &machine->loader_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_boot_init(machine, &machine->boot);
+	error = vmmfs_boot_init(machine, &machine->boot,
+	    &machine->boot_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_machine_publish_stopped(machine);
+	error = vmmfs_machine_create_stopped(machine);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_pciroot_init(machine, &machine->pciroot);
+	error = vmmfs_pciroot_init(machine, &machine->pciroot,
+	    &machine->pciroot_vnode);
 	if (error != 0)
 		goto fail;
 	error = vmmfs_platform_x64_init(machine, &machine->platform);
@@ -121,229 +122,232 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	error = vmmfs_rtc_init(machine, &machine->rtc);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_serialroot_init(machine, &machine->serialroot);
+	error = vmmfs_serialroot_init(machine, &machine->serialroot,
+	    &machine->serialroot_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_events_init(machine, &machine->events);
+	error = vmmfs_events_init(machine, &machine->events,
+	    &machine->events_vnode);
+	if (error != 0)
+		goto fail;
+	state = (struct vmmfs_mount *)root->mount->mnt_data;
+	if (state == NULL || state->machine_vops == NULL) {
+		error = ENXIO;
+		goto fail;
+	}
+	error = vmmfs_vnode_create_regular(root->mount, &state->machine_vops,
+	    VDIR, &machine->branch.node, &vnode);
 	if (error != 0)
 		goto fail;
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_CREATED, NULL);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
 	    "reason=create");
 	*machinep = machine;
+	*vnodep = vnode;
 	return (0);
 
 fail:
-	vmmfs_machine_abort_create(machine);
+	vmmfs_machine_cleanup_partial(machine, vnode);
 	return (error);
 }
 
-int
-vmmfs_machine_publish(struct vmmfs_machine *machine)
+static void
+vmmfs_machine_cleanup_partial(struct vmmfs_machine *machine, struct vnode *vnode)
 {
-	struct vmmfs_mount *state;
-	int error;
-
-	if (machine == NULL)
-		return (EINVAL);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
-	if (state == NULL || state->machine_vops == NULL)
-		return (ENXIO);
-	error = vmmfs_machine_id_publish(&machine->id_node);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_vcpu_publish(&machine->vcpu);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_memory_publish(&machine->memory);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_loader_publish(&machine->loader);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_boot_publish(&machine->boot);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_stopped_publish(machine->stopped);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_pciroot_publish(&machine->pciroot);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_serialroot_publish(&machine->serialroot);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_events_publish(&machine->events);
-	if (error != 0)
-		goto fail;
-	error = vmmfs_node_publish_regular(&machine->branch.node,
-	    vmmfs_machine_root(machine)->mount, &state->machine_vops, VDIR,
-	    machine);
-	if (error != 0)
-		goto fail;
-	vmmfs_machine_hold(machine);
-	return (0);
-
-fail:
-	vmmfs_machine_abort_create(machine);
-	return (error);
-}
-
-void
-vmmfs_machine_abort_create(struct vmmfs_machine *machine)
-{
-
 	if (machine == NULL)
 		return;
-	vmmfs_machine_hold(machine);
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	KKASSERT(!machine->root_counted);
-	machine->dead = true;
-	lwkt_reltoken(&machine->token);
-	vmmfs_node_abort_drop(&machine->events.node);
-	if (machine->serialroot.branch.node.drop != NULL)
-		vmmfs_branch_abort(&machine->serialroot.branch);
+	machine->branch.node.dead = true;
+	lwkt_reltoken(&machine->branch.token);
+	if (machine->events.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->events_vnode);
+		machine->events_vnode = NULL;
+		vmmfs_node_drop(&machine->events.node);
+	}
+	if (machine->serialroot.branch.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->serialroot_vnode);
+		machine->serialroot_vnode = NULL;
+		vmmfs_node_drop(&machine->serialroot.branch.node);
+	}
 	if (machine->rtc.machine != NULL)
 		vmmfs_rtc_fini(&machine->rtc);
 	if (machine->platform.machine != NULL)
 		vmmfs_platform_x64_fini(&machine->platform);
-	if (machine->pciroot.branch.node.drop != NULL)
-		vmmfs_branch_abort(&machine->pciroot.branch);
-	vmmfs_machine_abort_stopped(machine);
-	vmmfs_node_abort_drop(&machine->boot.node);
-	vmmfs_node_abort_drop(&machine->loader.node);
-	vmmfs_node_abort_drop(&machine->memory.node);
-	vmmfs_node_abort_drop(&machine->vcpu.node);
-	vmmfs_node_abort_drop(&machine->id_node.node);
-	vmmfs_branch_abort(&machine->branch);
-	/* Drop the temporary cleanup reference after creator and vnode refs. */
-	vmmfs_machine_put(machine);
+	if (machine->pciroot.branch.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->pciroot_vnode);
+		machine->pciroot_vnode = NULL;
+		vmmfs_node_drop(&machine->pciroot.branch.node);
+	}
+	vmmfs_machine_cleanup_stopped(machine);
+	if (machine->boot.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->boot_vnode);
+		machine->boot_vnode = NULL;
+		vmmfs_node_drop(&machine->boot.node);
+	}
+	if (machine->loader.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->loader_vnode);
+		machine->loader_vnode = NULL;
+		vmmfs_node_drop(&machine->loader.node);
+	}
+	if (machine->memory.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->memory_vnode);
+		machine->memory_vnode = NULL;
+		vmmfs_node_drop(&machine->memory.node);
+	}
+	if (machine->vcpu.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->vcpu_vnode);
+		machine->vcpu_vnode = NULL;
+		vmmfs_node_drop(&machine->vcpu.node);
+	}
+	if (machine->id_node.node.drop != NULL) {
+		vmmfs_vnode_discard(machine->id_vnode);
+		machine->id_vnode = NULL;
+		vmmfs_node_drop(&machine->id_node.node);
+	}
+	vmmfs_vnode_discard(vnode);
+	vmmfs_node_drop(&machine->branch.node);
 }
-
 static int
-vmmfs_machine_publish_stopped(struct vmmfs_machine *machine)
+vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 {
 	struct vmmfs_stopped *stopped;
-	struct vnode *vnode;
-	bool machine_vnode_ready;
+	struct vnode *stopped_vnode;
 	int error;
 
-	error = vmmfs_stopped_create(machine, &stopped);
+	error = vmmfs_stopped_create(machine, &stopped, &stopped_vnode);
 	if (error != 0)
 		return (error);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead || machine->machine != NULL) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead || machine->machine != NULL) {
+		lwkt_reltoken(&machine->branch.token);
+		vmmfs_vnode_discard(stopped_vnode);
 		vmmfs_node_drop(&stopped->node);
 		return (EBUSY);
 	}
 	if (machine->stopped != NULL) {
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
+		vmmfs_vnode_discard(stopped_vnode);
 		vmmfs_node_drop(&stopped->node);
 		return (0);
 	}
-	machine_vnode_ready = machine->branch.node.vnode != NULL;
-	if (!machine_vnode_ready) {
-		machine->stopped = stopped;
-		lwkt_reltoken(&machine->token);
-		return (0);
-	}
-	lwkt_reltoken(&machine->token);
-
-	error = vmmfs_stopped_publish(stopped);
-	if (error != 0) {
-		vmmfs_node_drop(&stopped->node);
-		return (error);
-	}
-	lwkt_gettoken(&machine->token);
-	if (machine->dead || machine->machine != NULL ||
-	    machine->stopped != NULL) {
-		lwkt_reltoken(&machine->token);
-		vmmfs_node_abort_drop(&stopped->node);
-		return (EBUSY);
-	}
-	vnode = machine->branch.node.vnode;
 	machine->stopped = stopped;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&machine->token);
-	if (vnode != NULL) {
-		cache_inval_vp(vnode, CINV_CHILDREN);
-		vdrop(vnode);
-	}
+	machine->stopped_vnode = stopped_vnode;
+	lwkt_reltoken(&machine->branch.token);
+	vmmfs_root_invalidate_machine(vmmfs_machine_root(machine), machine);
 	return (0);
 }
 
 static void
-vmmfs_machine_unpublish_stopped(struct vmmfs_machine *machine)
+vmmfs_machine_deactivate_stopped(struct vmmfs_machine *machine)
 {
 	struct vmmfs_stopped *stopped;
+	struct vnode *vnode;
 
 	if (machine == NULL)
 		return;
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	stopped = machine->stopped;
+	vnode = machine->stopped_vnode;
 	machine->stopped = NULL;
-	lwkt_reltoken(&machine->token);
+	machine->stopped_vnode = NULL;
+	lwkt_reltoken(&machine->branch.token);
 	if (stopped != NULL)
-		vmmfs_node_unpublish(&stopped->node);
+		vmmfs_node_deactivate(&stopped->node);
+	vmmfs_vnode_deactivate(vnode);
 }
 
 static void
-vmmfs_machine_abort_stopped(struct vmmfs_machine *machine)
+vmmfs_machine_cleanup_stopped(struct vmmfs_machine *machine)
 {
 	struct vmmfs_stopped *stopped;
+	struct vnode *vnode;
 
 	if (machine == NULL)
 		return;
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	stopped = machine->stopped;
+	vnode = machine->stopped_vnode;
 	machine->stopped = NULL;
-	lwkt_reltoken(&machine->token);
+	machine->stopped_vnode = NULL;
+	lwkt_reltoken(&machine->branch.token);
 	if (stopped == NULL)
 		return;
-	vmmfs_node_abort_drop(&stopped->node);
+	vmmfs_vnode_discard(vnode);
+	vmmfs_node_drop(&stopped->node);
 }
 
-int
-vmmfs_machine_unpublish(struct vmmfs_machine *machine)
+static void
+vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *machine)
 {
-	int runtime_active;
+	vmmfs_node_default_deactivate(&machine->id_node.node);
+	vmmfs_node_default_deactivate(&machine->vcpu.node);
+	vmmfs_node_default_deactivate(&machine->memory.node);
+	vmmfs_node_default_deactivate(&machine->loader.node);
+	vmmfs_node_default_deactivate(&machine->boot.node);
+	vmmfs_node_default_deactivate(&machine->events.node);
+	vmmfs_pciroot_deactivate_begin(&machine->pciroot);
+	vmmfs_serialroot_deactivate_begin(&machine->serialroot);
+	if (machine->stopped != NULL)
+		vmmfs_node_default_deactivate(&machine->stopped->node);
+}
 
+void
+vmmfs_machine_deactivate_begin(struct vmmfs_machine *machine)
+{
 	if (machine == NULL)
-		return (EINVAL);
-	lwkt_gettoken(&machine->token);
-	if (!machine->dead) {
-		lwkt_reltoken(&machine->token);
-		return (EBUSY);
-	}
-	runtime_active = machine->machine != NULL;
-	if (runtime_active) {
-		lwkt_reltoken(&machine->token);
-		vmmfs_events_log(&machine->events,
-		    VMMFS_MACHINE_EVENT_DESTROY_REFUSED, "runtime=%d",
-		    runtime_active);
-		return (EBUSY);
-	}
-	lwkt_reltoken(&machine->token);
-	vmmfs_machine_hold(machine);
+		return;
+	lwkt_gettoken(&machine->branch.token);
+	vmmfs_node_default_deactivate(&machine->branch.node);
+	vmmfs_machine_deactivate_fixed_locked(machine);
+	lwkt_reltoken(&machine->branch.token);
+}
+
+static void
+vmmfs_machine_deactivate_node(struct vmmfs_node *node)
+{
+	struct vmmfs_machine *machine;
+
+	machine = (struct vmmfs_machine *)node;
+	if (machine == NULL)
+		return;
+	vmmfs_machine_deactivate_begin(machine);
+	KKASSERT(machine->machine == NULL);
 	vmmfs_machine_wake_waiters(machine);
-	vmmfs_pciroot_release_vnodes(&machine->pciroot);
-	vmmfs_serialroot_release_vnodes(&machine->serialroot);
-	vmmfs_node_unpublish(&machine->events.node);
-	vmmfs_machine_unpublish_stopped(machine);
-	vmmfs_node_unpublish(&machine->boot.node);
-	vmmfs_node_unpublish(&machine->loader.node);
-	vmmfs_node_unpublish(&machine->memory.node);
-	vmmfs_node_unpublish(&machine->vcpu.node);
-	vmmfs_node_unpublish(&machine->id_node.node);
-	vmmfs_node_unpublish(&machine->serialroot.branch.node);
-	vmmfs_branch_put(&machine->serialroot.branch);
-	vmmfs_node_unpublish(&machine->pciroot.branch.node);
-	vmmfs_branch_put(&machine->pciroot.branch);
-	vmmfs_node_unpublish(&machine->branch.node);
-	vmmfs_machine_put(machine);
-	return (0);
+	vmmfs_pciroot_deactivate_slots(&machine->pciroot);
+	vmmfs_serialroot_deactivate_ports(&machine->serialroot);
+	vmmfs_node_deactivate(&machine->events.node);
+	vmmfs_vnode_deactivate(machine->events_vnode);
+	machine->events_vnode = NULL;
+	vmmfs_machine_deactivate_stopped(machine);
+	vmmfs_node_deactivate(&machine->boot.node);
+	vmmfs_vnode_deactivate(machine->boot_vnode);
+	machine->boot_vnode = NULL;
+	vmmfs_node_deactivate(&machine->loader.node);
+	vmmfs_vnode_deactivate(machine->loader_vnode);
+	machine->loader_vnode = NULL;
+	vmmfs_node_deactivate(&machine->memory.node);
+	vmmfs_vnode_deactivate(machine->memory_vnode);
+	machine->memory_vnode = NULL;
+	vmmfs_node_deactivate(&machine->vcpu.node);
+	vmmfs_vnode_deactivate(machine->vcpu_vnode);
+	machine->vcpu_vnode = NULL;
+	vmmfs_node_deactivate(&machine->id_node.node);
+	vmmfs_vnode_deactivate(machine->id_vnode);
+	machine->id_vnode = NULL;
+	vmmfs_node_deactivate(&machine->serialroot.branch.node);
+	vmmfs_vnode_deactivate(machine->serialroot_vnode);
+	machine->serialroot_vnode = NULL;
+	vmmfs_node_deactivate(&machine->pciroot.branch.node);
+	vmmfs_vnode_deactivate(machine->pciroot_vnode);
+	machine->pciroot_vnode = NULL;
+}
+
+void
+vmmfs_machine_deactivate(struct vmmfs_machine *machine)
+{
+	if (machine != NULL)
+		vmmfs_node_deactivate(&machine->branch.node);
 }
 
 static void
@@ -355,9 +359,8 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 
 	machine = (struct vmmfs_machine *)node;
 	KKASSERT(machine != NULL);
-	KKASSERT(machine->dead);
+	KKASSERT(machine->branch.node.dead);
 	KKASSERT(machine->branch.references == 0);
-	KKASSERT(machine->branch.node.vnode == NULL);
 	KKASSERT(machine->id_node.node.drop == NULL);
 	KKASSERT(machine->vcpu.node.drop == NULL);
 	KKASSERT(machine->memory.node.drop == NULL);
@@ -372,23 +375,16 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	root_counted = machine->root_counted;
 	KKASSERT(root != NULL);
 	if (root_counted) {
-		lwkt_gettoken(&root->token);
+		lwkt_gettoken(&root->branch.token);
 		KKASSERT(root->machine_count != 0);
 		--root->machine_count;
-		lwkt_reltoken(&root->token);
+		lwkt_reltoken(&root->branch.token);
 	}
 	if (machine->rtc.machine != NULL)
 		vmmfs_rtc_fini(&machine->rtc);
 	if (machine->platform.machine != NULL)
 		vmmfs_platform_x64_fini(&machine->platform);
-	lwkt_token_uninit(&machine->token);
 	kfree(machine, M_VMMFS);
-}
-
-static bool
-vmmfs_machine_node_is_dead(struct vmmfs_node *node)
-{
-	return (vmmfs_machine_is_dead((struct vmmfs_machine *)node));
 }
 
 void
@@ -405,30 +401,11 @@ vmmfs_machine_put(struct vmmfs_machine *machine)
 	vmmfs_branch_put(&machine->branch);
 }
 
-bool
-vmmfs_machine_is_dead(struct vmmfs_machine *machine)
-{
-	bool dead;
-
-	if (machine == NULL)
-		return (true);
-	lwkt_gettoken(&machine->token);
-	dead = machine->dead;
-	lwkt_reltoken(&machine->token);
-	return (dead);
-}
-
 static void
 vmmfs_machine_wake_waiters(struct vmmfs_machine *machine)
 {
-	struct vmmfs_pcislot *slot;
-
 	vmmfs_boot_revoke(&machine->boot);
 	vmmfs_events_revoke(&machine->events);
-	RB_FOREACH(slot, vmmfs_pcislot_tree, &machine->pciroot.slots) {
-		vmmfs_pcislot_config_revoke(&slot->config);
-		vmmfs_pcislot_events_revoke(&slot->events);
-	}
 }
 
 int
@@ -439,13 +416,13 @@ vmmfs_machine_stop_request(struct vmmfs_machine *machine, const char *reason)
 
 	if (machine == NULL || reason == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead) {
+		lwkt_reltoken(&machine->branch.token);
 		return (ENOENT);
 	}
 	running = machine->machine != NULL;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (!running)
 		return (0);
 	boot_pending = vmmfs_boot_is_active(&machine->boot);
@@ -467,13 +444,13 @@ vmmfs_machine_reset(struct vmmfs_machine *machine)
 
 	if (machine == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead) {
+		lwkt_reltoken(&machine->branch.token);
 		return (ENOENT);
 	}
 	running = machine->machine != NULL;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (!running)
 		return (EBUSY);
 	vmmfs_vcpu_request_reset(&machine->vcpu);
@@ -496,7 +473,7 @@ vmmfs_machine_getattr(struct vop_getattr_args *ap)
 	struct vattr *vattr;
 
 	machine = ap->a_vp->v_data;
-	if (machine == NULL || vmmfs_machine_is_dead(machine))
+	if (machine == NULL || machine->branch.node.dead)
 		return (ENOENT);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -521,7 +498,7 @@ vmmfs_machine_getattr_lite(struct vop_getattr_lite_args *ap)
 	struct vmmfs_machine *machine;
 	struct vattr_lite *vattr;
 	machine = ap->a_vp->v_data;
-	if (machine == NULL || vmmfs_machine_is_dead(machine))
+	if (machine == NULL || machine->branch.node.dead)
 		return (ENOENT);
 	vattr = ap->a_lvap;
 	vattr->va_type = VDIR;
@@ -538,7 +515,6 @@ static int
 vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_stopped *stopped;
 	struct vnode *vnode;
 	struct namecache *ncp;
 	int error;
@@ -555,22 +531,21 @@ vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 	error = vmmfs_machine_stop_request(machine, "external");
 	if (error != 0)
 		return (error);
-	error = vmmfs_stopped_create(machine, &stopped);
+	error = vmmfs_machine_create_stopped(machine);
 	if (error != 0)
 		return (error);
-	error = vmmfs_stopped_publish(stopped);
-	if (error != 0) {
-		vmmfs_node_drop(&stopped->node);
-		return (error);
-	}
-	vnode = stopped->node.vnode;
+	lwkt_gettoken(&machine->branch.token);
+	vnode = machine->stopped_vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&machine->branch.token);
+	if (vnode == NULL)
+		return (ENOENT);
 	error = vget(vnode, LK_EXCLUSIVE);
-	if (error != 0) {
-		vmmfs_node_abort_drop(&stopped->node);
+	vdrop(vnode);
+	if (error != 0)
 		return (error);
-	}
 	cache_setunresolved(ap->a_nch);
-	vmmfs_node_release_transient(&stopped->node);
 	*ap->a_vpp = vnode;
 	return (0);
 }
@@ -584,19 +559,19 @@ vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 
 	machine = ap->a_dvp->v_data;
 	root = ((struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data)->root;
-	if (machine == NULL || root == NULL || vmmfs_machine_is_dead(machine))
+	if (machine == NULL || root == NULL || machine->branch.node.dead)
 		return (ENOENT);
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	if (vmmfs_machine_root(machine) != root) {
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		return (ENOENT);
 	}
-	lwkt_reltoken(&machine->token);
-	lwkt_gettoken(&root->token);
-	vnode = root->branch.node.vnode;
+	lwkt_reltoken(&machine->branch.token);
+	lwkt_gettoken(&root->branch.token);
+	vnode = ((struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data)->root_vnode;
 	if (vnode != NULL)
 		vhold(vnode);
-	lwkt_reltoken(&root->token);
+	lwkt_reltoken(&root->branch.token);
 	if (vnode == NULL)
 		return (ENOENT);
 	if (vget(vnode, LK_EXCLUSIVE | LK_RETRY) != 0) {
@@ -621,48 +596,47 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 	if (machine == NULL)
 		return (ENOENT);
 	ncp = ap->a_nch->ncp;
-	lwkt_gettoken(&machine->token);
-	if (machine->dead) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead) {
+		lwkt_reltoken(&machine->branch.token);
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
 	}
 	if (ncp->nc_nlen == sizeof("id") - 1 &&
 	    bcmp(ncp->nc_name, "id", sizeof("id") - 1) == 0)
-		vnode = machine->id_node.node.vnode;
+		vnode = machine->id_vnode;
 	else if (ncp->nc_nlen == sizeof("vcpu") - 1 &&
 	    bcmp(ncp->nc_name, "vcpu", sizeof("vcpu") - 1) == 0)
-		vnode = machine->vcpu.node.vnode;
+		vnode = machine->vcpu_vnode;
 	else if (ncp->nc_nlen == sizeof("mem") - 1 &&
 	    bcmp(ncp->nc_name, "mem", sizeof("mem") - 1) == 0)
-		vnode = machine->memory.node.vnode;
+		vnode = machine->memory_vnode;
 	else if (ncp->nc_nlen == sizeof("loader") - 1 &&
 	    bcmp(ncp->nc_name, "loader", sizeof("loader") - 1) == 0)
-		vnode = machine->loader.node.vnode;
+		vnode = machine->loader_vnode;
 	else if (ncp->nc_nlen == sizeof("boot") - 1 &&
 	    bcmp(ncp->nc_name, "boot", sizeof("boot") - 1) == 0)
-		vnode = machine->boot.node.vnode;
+		vnode = machine->boot_vnode;
 	else if (ncp->nc_nlen == sizeof("events") - 1 &&
 	    bcmp(ncp->nc_name, "events", sizeof("events") - 1) == 0)
-		vnode = machine->events.node.vnode;
+		vnode = machine->events_vnode;
 	else if (ncp->nc_nlen == sizeof("pci") - 1 &&
 	    bcmp(ncp->nc_name, "pci", sizeof("pci") - 1) == 0)
-		vnode = machine->pciroot.branch.node.vnode;
+		vnode = machine->pciroot_vnode;
 	else if (ncp->nc_nlen == sizeof("serial") - 1 &&
 	    bcmp(ncp->nc_name, "serial", sizeof("serial") - 1) == 0)
-		vnode = machine->serialroot.branch.node.vnode;
+		vnode = machine->serialroot_vnode;
 	else if (ncp->nc_nlen == sizeof("stopped") - 1 &&
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) == 0)
-		vnode = machine->machine == NULL && machine->stopped != NULL ?
-		    machine->stopped->node.vnode : NULL;
+		vnode = machine->machine == NULL ? machine->stopped_vnode : NULL;
 	else {
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
 	}
 	if (vnode != NULL)
 		vhold(vnode);
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (vnode == NULL) {
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
@@ -691,12 +665,12 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 	if (ncp->nc_nlen != sizeof("stopped") - 1 ||
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) != 0)
 		return (EOPNOTSUPP);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead || machine->machine != NULL || machine->stopped == NULL) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead || machine->machine != NULL || machine->stopped == NULL) {
+		lwkt_reltoken(&machine->branch.token);
 		return (EBUSY);
 	}
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	error = vmmfs_machine_start(machine, ap->a_cred);
 	if (error != 0)
 		return (error);
@@ -716,12 +690,6 @@ vmmfs_machine_nrmdir(struct vop_nrmdir_args *ap)
 }
 
 static int
-vmmfs_machine_open(struct vop_open_args *ap)
-{
-	return (vop_stdopen(ap));
-}
-
-static int
 vmmfs_machine_readdir(struct vop_readdir_args *ap)
 {
 	struct vmmfs_machine *machine;
@@ -734,7 +702,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	int stop;
 
 	machine = ap->a_vp->v_data;
-	if (machine == NULL || vmmfs_machine_is_dead(machine))
+	if (machine == NULL || machine->branch.node.dead)
 		return (ENOENT);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -795,11 +763,11 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 8;
 	}
 	if (!stop && offset == 8) {
-		lwkt_gettoken(&machine->token);
+		lwkt_gettoken(&machine->branch.token);
 		stopped = machine->stopped;
 		present = stopped != NULL;
 		inode = present ? stopped->inode : 0;
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		if (present) {
 			stop = vop_write_dirent(&error, uio, inode, DT_REG,
 			    sizeof("stopped") - 1, "stopped");
@@ -808,18 +776,18 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 9;
 	}
 	if (!stop && offset == 9) {
-		lwkt_gettoken(&machine->token);
+		lwkt_gettoken(&machine->branch.token);
 		inode = machine->pciroot.inode;
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("pci") - 1, "pci");
 		if (!stop)
 			offset = 10;
 	}
 	if (!stop && offset == 10) {
-		lwkt_gettoken(&machine->token);
+		lwkt_gettoken(&machine->branch.token);
 		inode = machine->serialroot.inode;
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("serial") - 1, "serial");
 		if (!stop)
@@ -837,28 +805,12 @@ vmmfs_machine_inactive(struct vop_inactive_args *ap)
 	struct vmmfs_machine *machine;
 
 	machine = ap->a_vp->v_data;
-	if (machine == NULL || !vmmfs_machine_is_dead(machine))
+	if (machine == NULL || !machine->branch.node.dead)
 		return (0);
 	vmmfs_node_inactive(&machine->branch.node, ap->a_vp);
 	return (0);
 }
 
-static int
-vmmfs_machine_reclaim(struct vop_reclaim_args *ap)
-{
-	struct vmmfs_machine *machine;
-	bool reclaim;
-
-	machine = ap->a_vp->v_data;
-	if (machine == NULL)
-		return (0);
-	lwkt_gettoken(&machine->token);
-	reclaim = vmmfs_node_reclaim(&machine->branch.node, ap->a_vp);
-	lwkt_reltoken(&machine->token);
-	if (reclaim)
-		vmmfs_machine_put(machine);
-	return (0);
-}
 
 static int
 vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
@@ -866,6 +818,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 {
 	vmm_machine_t runtime_machine;
 	struct vmmfs_stopped *stopped;
+	struct vnode *stopped_vnode;
 	uint64_t memory_size;
 	uint32_t vcpu_count;
 	bool stop_requested;
@@ -875,9 +828,9 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	if (machine == NULL)
 		return (EINVAL);
 	runtime_machine = NULL;
-	lwkt_gettoken(&machine->token);
-	if (machine->dead || machine->machine != NULL || machine->stopped == NULL) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead || machine->machine != NULL || machine->stopped == NULL) {
+		lwkt_reltoken(&machine->branch.token);
 		return (EBUSY);
 	}
 	memory_size = machine->memory.size;
@@ -887,7 +840,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 		    sizeof(machine->loader.script));
 	if (memory_size == 0 || vcpu_count == 0 ||
 	    (loader_script != NULL && loader_script[0] == '\0')) {
-		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->branch.token);
 		return (EINVAL);
 	}
 
@@ -904,9 +857,13 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 		goto failed_locked;
 	machine->machine = runtime_machine;
 	stopped = machine->stopped;
+	stopped_vnode = machine->stopped_vnode;
 	machine->stopped = NULL;
-	lwkt_reltoken(&machine->token);
-	vmmfs_node_unpublish(&stopped->node);
+	machine->stopped_vnode = NULL;
+	lwkt_reltoken(&machine->branch.token);
+	vmmfs_node_deactivate(&stopped->node);
+	vmmfs_vnode_deactivate(stopped_vnode);
+	vmmfs_root_invalidate_machine(vmmfs_machine_root(machine), machine);
 
 	error = vmmfs_memory_map(&machine->memory);
 	if (error != 0)
@@ -938,7 +895,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	 * Both named boot and loader fd3 use this one session.  Do not expose it
 	 * until platform construction has completed.
 	 */
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	lwkt_gettoken(&machine->vcpu.token);
 	stop_requested = machine->vcpu.stop_requested;
 	lwkt_reltoken(&machine->vcpu.token);
@@ -946,7 +903,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 		error = vmmfs_boot_arm_locked(&machine->boot,
 		    machine->memory.object, memory_size);
 	}
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (stop_requested) {
 		error = EINTR;
 		goto failed;
@@ -958,7 +915,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	return (0);
 
 failed_locked:
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 failed:
 	release_error = vmmfs_machine_release_runtime(machine);
 	if (release_error != 0)
@@ -1029,13 +986,13 @@ vmmfs_machine_boot_abort(struct vmmfs_machine *machine)
 
 	if (machine == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead) {
+		lwkt_reltoken(&machine->branch.token);
 		return (ENOENT);
 	}
 	running = machine->machine != NULL;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (!running)
 		return (0);
 	error = vmmfs_machine_release_runtime(machine);
@@ -1057,14 +1014,14 @@ vmmfs_machine_boot_submit(struct vmmfs_machine *machine,
 
 	if (machine == NULL || state == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&machine->token);
-	if (machine->dead || machine->machine == NULL) {
-		lwkt_reltoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead || machine->machine == NULL) {
+		lwkt_reltoken(&machine->branch.token);
 		return (EPIPE);
 	}
 	runtime_machine = machine->machine;
 	vcpu_count = machine->vcpu.count;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	error = vmmfs_memory_snapshot(&machine->memory);
 	if (error != 0)
 		goto failed;
@@ -1092,9 +1049,9 @@ vmmfs_machine_release_runtime(struct vmmfs_machine *machine)
 	vmm_machine_t runtime_machine;
 	int error;
 
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	runtime_machine = machine->machine;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	vmmfs_boot_revoke(&machine->boot);
 	(void)vmmfs_platform_x64_stop(&machine->platform);
 	(void)vmmfs_serialroot_stop(&machine->serialroot);
@@ -1114,11 +1071,11 @@ vmmfs_machine_release_runtime(struct vmmfs_machine *machine)
 		machine->vcpu.reset_requested = false;
 	}
 	lwkt_reltoken(&machine->vcpu.token);
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	KKASSERT(machine->machine == runtime_machine);
 	machine->machine = NULL;
-	lwkt_reltoken(&machine->token);
-	error = vmmfs_machine_publish_stopped(machine);
+	lwkt_reltoken(&machine->branch.token);
+	error = vmmfs_machine_create_stopped(machine);
 	if (error != 0)
 		return (error);
 	return (0);
@@ -1147,9 +1104,9 @@ vmmfs_machine_vcpu_reset(struct vmmfs_machine *machine)
 
 	if (machine == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	old_machine = machine->machine;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	if (old_machine == NULL)
 		return (EINVAL);
 
@@ -1196,10 +1153,10 @@ vmmfs_machine_vcpu_reset(struct vmmfs_machine *machine)
 	lwkt_gettoken(&machine->vcpu.token);
 	machine->vcpu.runtime_machine = runtime_machine;
 	lwkt_reltoken(&machine->vcpu.token);
-	lwkt_gettoken(&machine->token);
+	lwkt_gettoken(&machine->branch.token);
 	KKASSERT(machine->machine == old_machine);
 	machine->machine = runtime_machine;
-	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->branch.token);
 	error = vmmfs_vcpu_reset(&machine->vcpu, runtime_machine,
 	    &machine->boot_state);
 	if (error != 0)

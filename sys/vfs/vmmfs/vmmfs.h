@@ -22,6 +22,7 @@ struct vmmfs_mount {
 	struct mount *mount;
 	volatile u_int next_inode;
 	struct vmmfs_root *root;
+	struct vnode *root_vnode;
 	struct vop_ops *root_vops;
 	struct vop_ops *machine_vops;
 	struct vop_ops *machine_id_vops;

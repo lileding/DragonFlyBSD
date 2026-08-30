@@ -18,7 +18,15 @@ struct vmmfs_serialport;
 struct vnode;
 struct vop_ops;
 
-RB_HEAD(vmmfs_serialport_tree, vmmfs_serialport);
+struct vmmfs_serialroot_port {
+	RB_ENTRY(vmmfs_serialroot_port) entry;
+	struct vmmfs_serialport *port;
+	struct vnode *vnode;
+};
+
+RB_HEAD(vmmfs_serialport_tree, vmmfs_serialroot_port);
+RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
+	vmmfs_serialroot_port_compare);
 
 struct vmmfs_serialroot {
 	struct vmmfs_branch branch;
@@ -28,9 +36,9 @@ struct vmmfs_serialroot {
 
 extern struct vop_ops vmmfs_serialroot_vops;
 
-int vmmfs_serialroot_init(struct vmmfs_machine *, struct vmmfs_serialroot *);
-int vmmfs_serialroot_publish(struct vmmfs_serialroot *);
-void vmmfs_serialroot_release_vnodes(struct vmmfs_serialroot *);
+int vmmfs_serialroot_init(struct vmmfs_machine *, struct vmmfs_serialroot *, struct vnode **);
+void vmmfs_serialroot_deactivate_begin(struct vmmfs_serialroot *);
+void vmmfs_serialroot_deactivate_ports(struct vmmfs_serialroot *);
 int vmmfs_serialroot_start(struct vmmfs_serialroot *, vmm_machine_t);
 int vmmfs_serialroot_stop(struct vmmfs_serialroot *);
 

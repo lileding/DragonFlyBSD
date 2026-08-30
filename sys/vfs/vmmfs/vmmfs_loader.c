@@ -117,12 +117,10 @@ static void vmmfs_loader_file_disarm(struct file *);
 static int vmmfs_loader_access(struct vop_access_args *);
 static int vmmfs_loader_getattr(struct vop_getattr_args *);
 static int vmmfs_loader_getattr_lite(struct vop_getattr_lite_args *);
-static int vmmfs_loader_open(struct vop_open_args *);
 static int vmmfs_loader_read(struct vop_read_args *);
 static int vmmfs_loader_setattr(struct vop_setattr_args *);
 static int vmmfs_loader_write(struct vop_write_args *);
 static int vmmfs_loader_inactive(struct vop_inactive_args *);
-static int vmmfs_loader_reclaim(struct vop_reclaim_args *);
 static void vmmfs_loader_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_loader_vops = {
@@ -131,11 +129,11 @@ struct vop_ops vmmfs_loader_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_loader_getattr,
 	.vop_getattr_lite = vmmfs_loader_getattr_lite,
-	.vop_open = vmmfs_loader_open,
+	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_loader_read,
 	.vop_inactive = vmmfs_loader_inactive,
-	.vop_reclaim = vmmfs_loader_reclaim,
+	.vop_reclaim = vmmfs_node_reclaim,
 	.vop_setattr = vmmfs_loader_setattr,
 	.vop_write = vmmfs_loader_write,
 };
@@ -707,9 +705,9 @@ vmmfs_loader_file_getattr(struct vop_getattr_args *ap)
 	boot = ap->a_vp->v_rdev->si_drv1;
 	if (boot == NULL || vmmfs_boot_machine(boot) == NULL)
 		return (EBADF);
-	lwkt_gettoken(&vmmfs_boot_machine(boot)->token);
+	lwkt_gettoken(&vmmfs_boot_machine(boot)->branch.token);
 	size = vmmfs_boot_machine(boot)->memory.size;
-	lwkt_reltoken(&vmmfs_boot_machine(boot)->token);
+	lwkt_reltoken(&vmmfs_boot_machine(boot)->branch.token);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
 	vattr->va_type = VCHR;
@@ -735,9 +733,9 @@ vmmfs_loader_file_getattr_lite(struct vop_getattr_lite_args *ap)
 	boot = ap->a_vp->v_rdev->si_drv1;
 	if (boot == NULL || vmmfs_boot_machine(boot) == NULL)
 		return (EBADF);
-	lwkt_gettoken(&vmmfs_boot_machine(boot)->token);
+	lwkt_gettoken(&vmmfs_boot_machine(boot)->branch.token);
 	size = vmmfs_boot_machine(boot)->memory.size;
-	lwkt_reltoken(&vmmfs_boot_machine(boot)->token);
+	lwkt_reltoken(&vmmfs_boot_machine(boot)->branch.token);
 	ap->a_lvap->va_type = VCHR;
 	ap->a_lvap->va_mode = 0600;
 	ap->a_lvap->va_nlink = 1;
@@ -824,9 +822,9 @@ vmmfs_loader_file_stat(struct file *file, struct stat *status,
 	error = devfs_get_cdevpriv(file, (void **)&control);
 	if (error != 0 || control == NULL)
 		return (error == 0 ? EBADF : error);
-	lwkt_gettoken(&vmmfs_boot_machine(control->boot)->token);
+	lwkt_gettoken(&vmmfs_boot_machine(control->boot)->branch.token);
 	size = vmmfs_boot_machine(control->boot)->memory.size;
-	lwkt_reltoken(&vmmfs_boot_machine(control->boot)->token);
+	lwkt_reltoken(&vmmfs_boot_machine(control->boot)->branch.token);
 	bzero(status, sizeof(*status));
 	status->st_nlink = 1;
 	status->st_mode = S_IFCHR | 0600;
@@ -898,7 +896,7 @@ vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer,
 {
 	int result;
 
-	if (loader == NULL || vmmfs_machine_is_dead(vmmfs_loader_machine(loader)))
+	if (loader == NULL || loader->node.dead)
 		return (ENOENT);
 	result = ksnprintf(buffer, capacity, "%s\n", loader->script);
 	if (result < 0 || (size_t)result >= capacity)
@@ -917,38 +915,42 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
 		--length;
 	if (length == 0 || length >= sizeof(loader->script))
 		return (ENAMETOOLONG);
-	lwkt_gettoken(&vmmfs_loader_machine(loader)->token);
-	if (vmmfs_loader_machine(loader)->dead) {
-		lwkt_reltoken(&vmmfs_loader_machine(loader)->token);
+	if (loader->node.dead)
 		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_loader_machine(loader)->branch.token);
 	if (vmmfs_loader_machine(loader)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_loader_machine(loader)->token);
+		lwkt_reltoken(&vmmfs_loader_machine(loader)->branch.token);
 		return (EBUSY);
 	}
 	bcopy(buffer, loader->script, length);
 	loader->script[length] = 0;
-	lwkt_reltoken(&vmmfs_loader_machine(loader)->token);
+	lwkt_reltoken(&vmmfs_loader_machine(loader)->branch.token);
 	return (0);
 }
 
 int
-vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader)
+vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader,
+	struct vnode **vnodep)
 {
 	struct vmmfs_mount *mount;
 	int error;
 
-	if (machine == NULL || loader == NULL || vmmfs_machine_root(machine) == NULL)
+	if (machine == NULL || loader == NULL || vnodep == NULL ||
+	    vmmfs_machine_root(machine) == NULL)
 		return (EINVAL);
+	*vnodep = NULL;
 	bzero(loader, sizeof(*loader));
-	vmmfs_node_setup(&loader->node, &machine->branch.node, vmmfs_loader_drop, NULL);
+	vmmfs_node_setup(&loader->node, &machine->branch, vmmfs_loader_drop);
 	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
 	if (mount == NULL || mount->loader_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
 	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	return (0);
+	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	    &mount->loader_vops, VREG, &loader->node, vnodep);
+	if (error == 0)
+		return (0);
 
 fail:
 	vmmfs_node_drop(&loader->node);
@@ -962,23 +964,8 @@ vmmfs_loader_drop(struct vmmfs_node *node)
 
 	loader = (struct vmmfs_loader *)node;
 	KKASSERT(loader != NULL);
-	if (loader->node.vnode != NULL)
-		panic("vmmfs_loader_drop: vnode is still published");
 	loader->inode = 0;
-}
-
-int
-vmmfs_loader_publish(struct vmmfs_loader *loader)
-{
-	struct vmmfs_mount *state;
-
-	if (loader == NULL || vmmfs_loader_machine(loader) == NULL)
-		return (EINVAL);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_loader_machine(loader))->mount->mnt_data;
-	if (state == NULL || state->loader_vops == NULL)
-		return (ENXIO);
-	return (vmmfs_node_publish_regular(&loader->node,
-	    vmmfs_machine_root(vmmfs_loader_machine(loader))->mount, &state->loader_vops, VREG, loader));
+	vmmfs_node_parent_put(node);
 }
 
 
@@ -1030,12 +1017,6 @@ vmmfs_loader_getattr_lite(struct vop_getattr_lite_args *ap)
 	ap->a_lvap->va_size = 0;
 	ap->a_lvap->va_flags = 0;
 	return (0);
-}
-
-static int
-vmmfs_loader_open(struct vop_open_args *ap)
-{
-	return (vop_stdopen(ap));
 }
 
 static int
@@ -1103,27 +1084,8 @@ vmmfs_loader_inactive(struct vop_inactive_args *ap)
 	if (loader == NULL)
 		return (0);
 	machine = vmmfs_loader_machine(loader);
-	if (!vmmfs_machine_is_dead(machine))
+	if (!loader->node.dead)
 		return (0);
 	vmmfs_node_inactive(&loader->node, ap->a_vp);
-	return (0);
-}
-
-static int
-vmmfs_loader_reclaim(struct vop_reclaim_args *ap)
-{
-	struct vmmfs_loader *loader;
-	struct vmmfs_machine *machine;
-	bool reclaim;
-
-	loader = ap->a_vp->v_data;
-	if (loader == NULL || vmmfs_loader_machine(loader) == NULL)
-		return (0);
-	machine = vmmfs_loader_machine(loader);
-	lwkt_gettoken(&machine->token);
-	reclaim = vmmfs_node_reclaim(&loader->node, ap->a_vp);
-	lwkt_reltoken(&machine->token);
-	if (reclaim)
-		vmmfs_node_drop(&loader->node);
 	return (0);
 }

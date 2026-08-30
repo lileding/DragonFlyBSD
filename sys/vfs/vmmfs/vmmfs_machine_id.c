@@ -25,10 +25,8 @@ static volatile u_int vmmfs_machine_next_id;
 static int vmmfs_machine_id_access(struct vop_access_args *);
 static int vmmfs_machine_id_getattr(struct vop_getattr_args *);
 static int vmmfs_machine_id_getattr_lite(struct vop_getattr_lite_args *);
-static int vmmfs_machine_id_open(struct vop_open_args *);
 static int vmmfs_machine_id_read(struct vop_read_args *);
 static int vmmfs_machine_id_inactive(struct vop_inactive_args *);
-static int vmmfs_machine_id_reclaim(struct vop_reclaim_args *);
 static void vmmfs_machine_id_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_machine_id_vops = {
@@ -37,42 +35,41 @@ struct vop_ops vmmfs_machine_id_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_machine_id_getattr,
 	.vop_getattr_lite = vmmfs_machine_id_getattr_lite,
-	.vop_open = vmmfs_machine_id_open,
+	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_read = vmmfs_machine_id_read,
 	.vop_inactive = vmmfs_machine_id_inactive,
-	.vop_reclaim = vmmfs_machine_id_reclaim,
+	.vop_reclaim = vmmfs_node_reclaim,
 };
 
 int
 vmmfs_machine_id_init(struct vmmfs_machine *machine,
-	struct vmmfs_machine_id *identity)
+	struct vmmfs_machine_id *identity, struct vnode **vnodep)
 {
 	struct vmmfs_mount *state;
 	u_int value;
 	int error;
 
-	if (machine == NULL || identity == NULL)
+	if (machine == NULL || identity == NULL || vnodep == NULL)
 		return (EINVAL);
+	*vnodep = NULL;
 	bzero(identity, sizeof(*identity));
 	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
-	if (state->machine_id_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
+	if (state->machine_id_vops == NULL)
+		return (ENXIO);
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
-	if (value > VMMFS_MACHINE_ID_MAX) {
-		error = ENOSPC;
-		goto fail;
-	}
-	vmmfs_node_setup(&identity->node, &machine->branch.node, vmmfs_machine_id_drop, NULL);
+	if (value > VMMFS_MACHINE_ID_MAX)
+		return (ENOSPC);
+	vmmfs_node_setup(&identity->node, &machine->branch, vmmfs_machine_id_drop);
 	identity->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	machine->id = value;
-	return (0);
-
-fail:
+	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	    &state->machine_id_vops, VREG, &identity->node, vnodep);
+	if (error == 0)
+		return (0);
 	identity->inode = 0;
 	machine->id = 0;
+	vmmfs_machine_id_drop(&identity->node);
 	return (error);
 }
 
@@ -83,26 +80,9 @@ vmmfs_machine_id_drop(struct vmmfs_node *node)
 
 	identity = (struct vmmfs_machine_id *)node;
 	KKASSERT(identity != NULL);
-	if (identity->node.vnode != NULL)
-		panic("vmmfs_machine_id_drop: vnode is still published");
 	identity->inode = 0;
+	vmmfs_node_parent_put(node);
 }
-
-int
-vmmfs_machine_id_publish(struct vmmfs_machine_id *identity)
-{
-	struct vmmfs_mount *state;
-
-	if (identity == NULL || vmmfs_machine_id_machine(identity) == NULL)
-		return (EINVAL);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_machine_id_machine(identity))->mount->mnt_data;
-	if (state == NULL || state->machine_id_vops == NULL)
-		return (ENXIO);
-	return (vmmfs_node_publish_regular(&identity->node,
-	    vmmfs_machine_root(vmmfs_machine_id_machine(identity))->mount, &state->machine_id_vops, VREG,
-	    identity));
-}
-
 
 static int
 vmmfs_machine_id_access(struct vop_access_args *ap)
@@ -117,7 +97,7 @@ vmmfs_machine_id_getattr(struct vop_getattr_args *ap)
 	struct vattr *vattr;
 
 	identity = ap->a_vp->v_data;
-	if (identity == NULL || vmmfs_machine_is_dead(vmmfs_machine_id_machine(identity)))
+	if (identity == NULL || identity->node.dead)
 		return (ENOENT);
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
@@ -143,7 +123,7 @@ vmmfs_machine_id_getattr_lite(struct vop_getattr_lite_args *ap)
 	struct vattr_lite *vattr;
 
 	identity = ap->a_vp->v_data;
-	if (identity == NULL || vmmfs_machine_is_dead(vmmfs_machine_id_machine(identity)))
+	if (identity == NULL || identity->node.dead)
 		return (ENOENT);
 	vattr = ap->a_lvap;
 	vattr->va_type = VREG;
@@ -157,17 +137,6 @@ vmmfs_machine_id_getattr_lite(struct vop_getattr_lite_args *ap)
 }
 
 static int
-vmmfs_machine_id_open(struct vop_open_args *ap)
-{
-	struct vmmfs_machine_id *identity;
-
-	identity = ap->a_vp->v_data;
-	if (identity == NULL || vmmfs_machine_is_dead(vmmfs_machine_id_machine(identity)))
-		return (ENOENT);
-	return (vop_stdopen(ap));
-}
-
-static int
 vmmfs_machine_id_read(struct vop_read_args *ap)
 {
 	struct vmmfs_machine_id *identity;
@@ -176,7 +145,7 @@ vmmfs_machine_id_read(struct vop_read_args *ap)
 	int error;
 
 	identity = ap->a_vp->v_data;
-	if (identity == NULL || vmmfs_machine_is_dead(vmmfs_machine_id_machine(identity)))
+	if (identity == NULL || identity->node.dead)
 		return (ENOENT);
 	if (ap->a_uio->uio_offset < 0)
 		return (EINVAL);
@@ -200,27 +169,8 @@ vmmfs_machine_id_inactive(struct vop_inactive_args *ap)
 	if (identity == NULL)
 		return (0);
 	machine = vmmfs_machine_id_machine(identity);
-	if (!vmmfs_machine_is_dead(machine))
+	if (!identity->node.dead)
 		return (0);
 	vmmfs_node_inactive(&identity->node, ap->a_vp);
-	return (0);
-}
-
-static int
-vmmfs_machine_id_reclaim(struct vop_reclaim_args *ap)
-{
-	struct vmmfs_machine_id *identity;
-	struct vmmfs_machine *machine;
-	bool reclaim;
-
-	identity = ap->a_vp->v_data;
-	if (identity == NULL || vmmfs_machine_id_machine(identity) == NULL)
-		return (0);
-	machine = vmmfs_machine_id_machine(identity);
-	lwkt_gettoken(&machine->token);
-	reclaim = vmmfs_node_reclaim(&identity->node, ap->a_vp);
-	lwkt_reltoken(&machine->token);
-	if (reclaim)
-		vmmfs_node_drop(&identity->node);
 	return (0);
 }

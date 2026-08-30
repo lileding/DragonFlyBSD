@@ -46,8 +46,8 @@ struct vmmfs_vcpu {
 
 extern struct vop_ops vmmfs_vcpu_vops;
 
-int vmmfs_vcpu_init(struct vmmfs_machine *, struct vmmfs_vcpu *);
-int vmmfs_vcpu_publish(struct vmmfs_vcpu *);
+int vmmfs_vcpu_init(struct vmmfs_machine *, struct vmmfs_vcpu *,
+	struct vnode **);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);
 int vmmfs_vcpu_reset(struct vmmfs_vcpu *, vmm_machine_t,

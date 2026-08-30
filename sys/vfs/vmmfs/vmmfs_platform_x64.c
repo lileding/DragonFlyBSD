@@ -185,7 +185,7 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	struct vmmfs_pciroot *pciroot,
 	struct vmmfs_serialroot *serialroot)
 {
-	struct vmmfs_serialport *port;
+	struct vmmfs_serialroot_port *entry;
 	uint8_t *cursor;
 	uint8_t *table;
 	uint8_t *tables;
@@ -307,8 +307,8 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	    sizeof(vmmfs_platform_x64_s5_aml));
 	cursor += sizeof(vmmfs_platform_x64_s5_aml);
 	serial_count = 0;
-	lwkt_gettoken(&vmmfs_serialroot_machine(serialroot)->token);
-	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
+	lwkt_gettoken(&vmmfs_serialroot_machine(serialroot)->branch.token);
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports)
 		++serial_count;
 	scope_body_length = 5 + sizeof(vmmfs_platform_x64_pciroot_aml) +
 	    sizeof(vmmfs_platform_x64_ecam_aml) +
@@ -330,9 +330,9 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	bcopy(vmmfs_platform_x64_rtc_aml, cursor,
 	    sizeof(vmmfs_platform_x64_rtc_aml));
 	cursor += sizeof(vmmfs_platform_x64_rtc_aml);
-	RB_FOREACH(port, vmmfs_serialport_tree, &serialroot->ports)
-		cursor = vmmfs_platform_x64_append_serial(cursor, port);
-	lwkt_reltoken(&vmmfs_serialroot_machine(serialroot)->token);
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports)
+		cursor = vmmfs_platform_x64_append_serial(cursor, entry->port);
+	lwkt_reltoken(&vmmfs_serialroot_machine(serialroot)->branch.token);
 	dsdt_length = (uint32_t)(cursor - table);
 	if (dsdt_length > VMMFS_PLATFORM_X64_ACPI_SIZE - 0xe00) {
 		kfree(tables, M_VMMFS);

@@ -35,30 +35,22 @@ struct vmmfs_pcislot_type0 {
 
 struct vmmfs_pcislot {
 	struct vmmfs_branch branch;
-	RB_ENTRY(vmmfs_pcislot) entry;
 	ino_t inode;
 	uint16_t bdf;
-	bool dead;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;
 	struct vmmfs_pcislot_type0 type0;
+	struct vnode *descriptor_vnode;
+	struct vnode *config_vnode;
+	struct vnode *events_vnode;
 };
-
-RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pcislot, entry,
-	vmmfs_pcislot_compare);
 
 extern struct vop_ops vmmfs_pcislot_vops;
 
-int vmmfs_pcislot_compare(struct vmmfs_pcislot *, struct vmmfs_pcislot *);
 int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
-	struct vmmfs_pcislot **);
-void vmmfs_pcislot_abort_create(struct vmmfs_pcislot *);
-void vmmfs_pcislot_hold(struct vmmfs_pcislot *);
-int vmmfs_pcislot_publish(struct vmmfs_pcislot *);
-void vmmfs_pcislot_put(struct vmmfs_pcislot *);
-bool vmmfs_pcislot_is_dead(struct vmmfs_pcislot *);
-void vmmfs_pcislot_release_vnodes(struct vmmfs_pcislot *);
+	struct vmmfs_pcislot **, struct vnode **);
+void vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
 int vmmfs_pcislot_reset(struct vmmfs_pcislot *);

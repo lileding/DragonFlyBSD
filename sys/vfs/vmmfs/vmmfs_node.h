@@ -11,53 +11,47 @@
 struct mount;
 struct cdev;
 struct vop_ops;
+struct vmmfs_branch;
 
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
-	struct vnode *vnode;
-	struct vmmfs_node *parent;
+	struct vmmfs_branch *parent;
+	bool dead;
+	void (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
-	bool (*is_dead)(struct vmmfs_node *);
 };
 
+void vmmfs_node_parent_put(struct vmmfs_node *);
+void vmmfs_node_deactivate(struct vmmfs_node *);
+void vmmfs_node_default_deactivate(struct vmmfs_node *);
+int vmmfs_node_open(struct vop_open_args *);
+
 /* Initializes object ownership before the object becomes namespace-visible. */
-void vmmfs_node_setup(struct vmmfs_node *, struct vmmfs_node *,
-	void (*)(struct vmmfs_node *), bool (*)(struct vmmfs_node *));
+void vmmfs_node_setup(struct vmmfs_node *, struct vmmfs_branch *,
+	void (*)(struct vmmfs_node *));
 
-/* Publishes a fully initialized regular vnode for a namespace object. */
-int vmmfs_node_publish_regular(struct vmmfs_node *, struct mount *,
-	struct vop_ops **, enum vtype, void *);
+/* Creates a regular vnode without storing it in the semantic node. */
+int vmmfs_vnode_create_regular(struct mount *, struct vop_ops **,
+	enum vtype, struct vmmfs_node *, struct vnode **);
 
-/* Publishes a fully initialized special vnode for a cdev-backed object. */
-int vmmfs_node_publish_cdev(struct vmmfs_node *, struct mount *,
-	struct vop_ops **, struct cdev *, void *);
+/* Creates a cdev-backed vnode without storing it in the semantic node. */
+int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
+	struct cdev *, struct vmmfs_node *, struct vnode **);
+
+/* Revokes, removes, finalizes, and releases one parent-owned vnode Arc. */
+void vmmfs_vnode_deactivate(struct vnode *);
+
+/* Drops an unpublished vnode after clearing its semantic node binding. */
+void vmmfs_vnode_discard(struct vnode *);
+
 
 /* Runs a terminal object destructor exactly once. */
 void vmmfs_node_drop(struct vmmfs_node *);
 
-/* Evaluates the local and direct-parent service gates. */
-bool vmmfs_node_is_dead(struct vmmfs_node *);
-
-/* Disposes of an unpublished regular or cdev vnode during error rollback. */
-void vmmfs_node_abort(struct vmmfs_node *);
-
-/* Atomically rolls back a partially published node and releases its object. */
-void vmmfs_node_abort_drop(struct vmmfs_node *);
-
-
-/* Drops the base reference after the owner has removed its namespace entry. */
-void vmmfs_node_unpublish(struct vmmfs_node *);
-
-/* Drops the base reference of a transient node after cache_setunresolved(). */
-void vmmfs_node_release_transient(struct vmmfs_node *);
-
-
-
-
 /* Common VOP_INACTIVE tail after the object's semantic dead gate. */
 void vmmfs_node_inactive(struct vmmfs_node *, struct vnode *);
 
-/* Common VOP_RECLAIM handoff.  The caller holds its object lock if needed. */
-bool vmmfs_node_reclaim(struct vmmfs_node *, struct vnode *);
+/* Common VOP_RECLAIM handoff for every VMMFS namespace vnode. */
+int vmmfs_node_reclaim(struct vop_reclaim_args *);
 
 #endif /* VMMFS_NODE_H */

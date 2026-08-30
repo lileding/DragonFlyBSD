@@ -83,6 +83,7 @@ struct vmmfs_pcislot_resources {
 	bool powered;
 	bool destroying;
 	size_t count;
+	struct vnode **vnodes;
 	size_t initialized_count;
 	struct vmmfs_pcislot_resource items[];
 };
@@ -92,12 +93,16 @@ extern struct vop_ops vmmfs_pcislot_resource_vops;
 int vmmfs_pcislot_resources_create(struct vmmfs_pcislot *,
 	vmm_machine_t, const struct vmmfs_pcislot_descriptor_value *, uint64_t,
 	struct vmmfs_pcislot_resources **);
-void vmmfs_pcislot_resources_unpublish(struct vmmfs_pcislot_resources *);
+void vmmfs_pcislot_resources_deactivate_begin(
+	struct vmmfs_pcislot_resources *);
+void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *);
 int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
 	vmm_machine_t);
 void vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *);
 struct vmmfs_pcislot_resource *vmmfs_pcislot_resources_find(
 	struct vmmfs_pcislot_resources *, const char *, size_t);
+struct vnode *vmmfs_pcislot_resources_vnode(
+	struct vmmfs_pcislot_resources *, const struct vmmfs_pcislot_resource *);
 int vmmfs_pcislot_resource_name(const struct vmmfs_pcislot_resource *,
 	char *, size_t, size_t *);
 int vmmfs_pcislot_resources_set_decode(struct vmmfs_pcislot_resources *,
