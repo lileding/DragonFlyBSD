@@ -23,7 +23,6 @@ struct vmmfs_branch {
 	void (*final_drop)(struct vmmfs_node *);
 };
 
-void vmmfs_branch_drop(struct vmmfs_node *);
 void vmmfs_branch_init(struct vmmfs_branch *, struct vmmfs_branch *,
 	void (*)(struct vmmfs_node *));
 void vmmfs_branch_hold(struct vmmfs_branch *);

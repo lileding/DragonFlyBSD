@@ -13,13 +13,44 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <sys/tree.h>
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_branch.h"
+#include "vmmfs_events.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_node.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 
 MALLOC_DEFINE(M_VMMFS, "vmmfs", "vmmfs objects");
 
 #define VMMFS_ROOT_MODE	0555
+
+struct vmmfs_item {
+	uint64_t id;
+	char name[NAME_MAX + 1];
+	struct vmmfs_machine *machine;
+	struct vnode *vnode;
+};
+
+struct vmmfs_root_machine {
+	RB_ENTRY(vmmfs_root_machine) entry;
+	struct vmmfs_machine *machine;
+	struct vnode *vnode;
+};
+
+RB_HEAD(vmmfs_machine_tree, vmmfs_root_machine);
+RB_PROTOTYPE(vmmfs_machine_tree, vmmfs_root_machine, entry,
+	vmmfs_root_machine_compare);
+
+struct vmmfs_root {
+	struct vmmfs_branch branch;
+	struct mount *mount;
+	struct vmmfs_machine_tree machines;
+	unsigned int machine_count;
+};
 
 static int vmmfs_root_access(struct vop_access_args *);
 static int vmmfs_root_getattr(struct vop_getattr_args *);
@@ -54,7 +85,7 @@ struct vop_ops vmmfs_root_vops = {
 	.vop_reclaim = vmmfs_node_reclaim,
 };
 
-int
+static int
 vmmfs_root_machine_compare(struct vmmfs_root_machine *left,
 	struct vmmfs_root_machine *right)
 {
@@ -97,6 +128,74 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_root **rootp)
 	*rootp = root;
 	return (0);
 }
+struct vmmfs_branch *
+vmmfs_root_branch(struct vmmfs_root *root)
+{
+	return root == NULL ? NULL : &root->branch;
+}
+
+struct vmmfs_mount *
+vmmfs_root_state(struct vmmfs_root *root)
+{
+	return root == NULL ? NULL :
+	    (struct vmmfs_mount *)root->mount->mnt_data;
+}
+
+ino_t
+vmmfs_root_allocate_inode(struct vmmfs_root *root)
+{
+	struct vmmfs_mount *state;
+
+	if (root == NULL)
+		return (0);
+	state = vmmfs_root_state(root);
+	return state == NULL ? 0 :
+	    atomic_fetchadd_int(&state->next_inode, 1);
+}
+
+struct vnode *
+vmmfs_root_vnode(struct vmmfs_root *root)
+{
+	struct vmmfs_mount *state;
+	struct vnode *vnode;
+
+	if (root == NULL)
+		return (NULL);
+	state = vmmfs_root_state(root);
+	if (state == NULL)
+		return (NULL);
+	lwkt_gettoken(&root->branch.token);
+	vnode = state->root_vnode;
+	if (vnode != NULL)
+		vhold(vnode);
+	lwkt_reltoken(&root->branch.token);
+	return (vnode);
+}
+
+bool
+vmmfs_root_empty(struct vmmfs_root *root)
+{
+	bool empty;
+
+	if (root == NULL)
+		return (true);
+	lwkt_gettoken(&root->branch.token);
+	empty = root->machine_count == 0 && RB_EMPTY(&root->machines);
+	lwkt_reltoken(&root->branch.token);
+	return (empty);
+}
+
+void
+vmmfs_root_machine_dropped(struct vmmfs_root *root)
+{
+	if (root == NULL)
+		return;
+	lwkt_gettoken(&root->branch.token);
+	KKASSERT(root->machine_count != 0);
+	--root->machine_count;
+	lwkt_reltoken(&root->branch.token);
+}
+
 int
 vmmfs_root_destroy(struct vmmfs_root *root)
 {
@@ -106,12 +205,10 @@ vmmfs_root_destroy(struct vmmfs_root *root)
 
 	if (root == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&root->branch.token);
-	busy = root->machine_count != 0 || !RB_EMPTY(&root->machines);
-	lwkt_reltoken(&root->branch.token);
+	busy = !vmmfs_root_empty(root);
 	if (busy)
 		return (EBUSY);
-	state = (struct vmmfs_mount *)root->mount->mnt_data;
+	state = vmmfs_root_state(root);
 	KKASSERT(state != NULL);
 	vnode = state->root_vnode;
 	KKASSERT(vnode != NULL);

@@ -6,7 +6,7 @@
 #ifndef VMMFS_PARENT_H
 #define VMMFS_PARENT_H
 
-#include "vmmfs_node.h"
+#include "vmmfs_branch.h"
 
 struct vmmfs_root;
 struct vmmfs_machine;

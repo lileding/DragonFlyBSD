@@ -22,6 +22,10 @@
 #include <vm/vm_pager.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_memory.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 #include "vmmfs_pciroot.h"
 
 #define VMMFS_MEMORY_MODE 0644
@@ -34,6 +38,8 @@ static int vmmfs_memory_read(struct vop_read_args *);
 static int vmmfs_memory_setattr(struct vop_setattr_args *);
 static int vmmfs_memory_write(struct vop_write_args *);
 static int vmmfs_memory_inactive(struct vop_inactive_args *);
+static int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
+	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static void vmmfs_memory_drop(struct vmmfs_node *);
@@ -121,13 +127,13 @@ vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory,
 	*vnodep = NULL;
 	bzero(memory, sizeof(*memory));
 	vmmfs_node_setup(&memory->node, &machine->branch, vmmfs_memory_drop);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	memory->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	if (state->memory_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->memory_vops, VREG, &memory->node, vnodep);
 	if (error == 0)
 		return (0);
@@ -307,7 +313,7 @@ vmmfs_memory_release(struct vmmfs_memory *memory)
 		vm_object_deallocate(object);
 }
 
-int
+static int
 vmmfs_memory_map_object(struct vmmfs_memory *memory,
 	struct vm_object *object, uint64_t gpa, uint64_t offset, uint64_t size,
 	vm_prot_t prot)
@@ -318,16 +324,6 @@ vmmfs_memory_map_object(struct vmmfs_memory *memory,
 		return (EINVAL);
 	return (vmmfs_memory_map_vmspace(memory->run_vmspace, object, gpa,
 	    offset, size, prot));
-}
-
-void
-vmmfs_memory_unmap(struct vmmfs_memory *memory, uint64_t gpa, uint64_t size)
-{
-	if (memory == NULL || memory->run_vmspace == NULL || size == 0 ||
-	    (gpa & PAGE_MASK) != 0 || (size & PAGE_MASK) != 0 ||
-	    gpa > VMMFS_GPA_MAX - size)
-		return;
-	(void)vm_map_remove(&memory->run_vmspace->vm_map, gpa, gpa + size);
 }
 
 static int

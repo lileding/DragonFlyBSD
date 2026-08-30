@@ -35,6 +35,8 @@
 #include "vmmfs_boot.h"
 #include "vmmfs_loader.h"
 #include "vmmfs_machine.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 
 #define VMMFS_LOADER_MODE 0644
 #define VMMFS_LOADER_WAIT_TICKS (hz * 10)
@@ -152,6 +154,9 @@ static struct vop_ops vmmfs_loader_file_vops = {
 
 static struct vop_ops *vmmfs_loader_file_vops_pointer =
 	&vmmfs_loader_file_vops;
+
+int vmmfs_loader_module_init(void);
+int vmmfs_loader_module_fini(void);
 
 static struct fileops vmmfs_loader_fileops = {
 	.fo_read = badfo_readwrite,
@@ -941,13 +946,13 @@ vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader,
 	*vnodep = NULL;
 	bzero(loader, sizeof(*loader));
 	vmmfs_node_setup(&loader->node, &machine->branch, vmmfs_loader_drop);
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (mount == NULL || mount->loader_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
 	loader->inode = atomic_fetchadd_int(&mount->next_inode, 1);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->loader_vops, VREG, &loader->node, vnodep);
 	if (error == 0)
 		return (0);

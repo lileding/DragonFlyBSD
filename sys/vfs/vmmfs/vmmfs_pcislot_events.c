@@ -20,6 +20,10 @@
 #include <machine/cpufunc.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_events.h"
@@ -75,7 +79,7 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 		return (EINVAL);
 	*vnodep = NULL;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (mount->pcislot_events_vops == NULL)
 		return (ENXIO);
 	bzero(state_node, sizeof(*state_node));
@@ -86,7 +90,7 @@ vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
 	state_node->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	vmmfs_node_setup(&state_node->node, &slot->branch,
 	    vmmfs_pcislot_events_drop);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_events_vops, VREG, &state_node->node, vnodep);
 	if (error != 0)
 		vmmfs_node_drop(&state_node->node);

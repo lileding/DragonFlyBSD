@@ -10,11 +10,8 @@
 #include <sys/types.h>
 #include <sys/vmmfs.h>
 
-#include "vmmfs_machine.h"
-#include "vmmfs_root.h"
-#include "vmmfs_parent.h"
-
 struct mount;
+struct vmmfs_root;
 struct vop_ops;
 struct vnode;
 
@@ -43,7 +40,5 @@ struct vmmfs_mount {
 };
 
 MALLOC_DECLARE(M_VMMFS);
-
-/* Releases a vnode that was never made reachable from the namespace. */
 
 #endif /* VMMFS_H */

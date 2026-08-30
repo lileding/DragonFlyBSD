@@ -19,9 +19,24 @@
 #include <vm/vm.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_config.h"
+
+struct vmmfs_pcislot_config_request {
+	TAILQ_ENTRY(vmmfs_pcislot_config_request) entry;
+	struct vmmfs_vcpu_thread *thread;
+	vmm_vcpu_t vcpu;
+	struct vmmfs_pci_config_request request;
+	uint64_t response_value;
+	uint32_t response_status;
+	bool delivered;
+	bool completed;
+};
 #include "vmmfs_pcislot_resource.h"
 #include "vmmfs_vcpu.h"
 
@@ -98,7 +113,7 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 		return (EINVAL);
 	*vnodep = NULL;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (mount->pcislot_config_vops == NULL)
 		return (ENXIO);
 	bzero(config, sizeof(*config));
@@ -108,7 +123,7 @@ vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
 	SLIST_INIT(&config->kq.ki_note);
 	vmmfs_node_setup(&config->node, &slot->branch,
 	    vmmfs_pcislot_config_drop);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_config_vops, VREG, &config->node, vnodep);
 	if (error != 0)
 		vmmfs_node_drop(&config->node);
@@ -197,6 +212,7 @@ vmmfs_pcislot_config_memory(struct vmmfs_pcislot_config *config,
 	struct vmmfs_pci_config_response response;
 	uint64_t value;
 	uint64_t offset;
+	uint64_t gpa;
 	bool write;
 	int error;
 
@@ -205,8 +221,11 @@ vmmfs_pcislot_config_memory(struct vmmfs_pcislot_config *config,
 	    exit->reason != VMM_CPUEXIT_MEMORY)
 		return (ENOENT);
 	write = (exit->u.mem.prot & VM_PROT_WRITE) != 0;
+	error = vmmfs_pcislot_resource_gpa(resource, &gpa);
+	if (error != 0)
+		return (error);
 	error = vmmfs_pcislot_config_match(config, resource,
-	    VMMFS_PCI_CONFIG_MMIO, exit->u.mem.gpa - resource->gpa,
+	    VMMFS_PCI_CONFIG_MMIO, exit->u.mem.gpa - gpa,
 	    exit->u.mem.width, &offset);
 	if (error == EINVAL) {
 		value = vmmfs_pcislot_config_absent_value(exit->u.mem.width);
@@ -241,6 +260,7 @@ vmmfs_pcislot_config_io(struct vmmfs_pcislot_config *config,
 	uint64_t mask;
 	uint64_t value;
 	uint64_t offset;
+	uint64_t gpa;
 	bool write;
 	int error;
 
@@ -248,8 +268,11 @@ vmmfs_pcislot_config_io(struct vmmfs_pcislot_config *config,
 	    resource == NULL || state == NULL || exit == NULL ||
 	    exit->reason != VMM_CPUEXIT_IO || exit->u.io.str || exit->u.io.rep)
 		return (ENOENT);
+	error = vmmfs_pcislot_resource_gpa(resource, &gpa);
+	if (error != 0)
+		return (error);
 	error = vmmfs_pcislot_config_match(config, resource,
-	    VMMFS_PCI_CONFIG_PIO, exit->u.io.port - resource->gpa,
+	    VMMFS_PCI_CONFIG_PIO, exit->u.io.port - gpa,
 	    (enum vmm_io_width)exit->u.io.operand_size, &offset);
 	write = !exit->u.io.in;
 	if (error == EINVAL) {
@@ -610,11 +633,15 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	bool notify;
 	bool reset_requested;
 	bool stop_requested;
+	uint16_t resource_index;
 	int error;
 
 	if (config == NULL || thread == NULL || thread->group == NULL ||
 	    thread->vcpu == NULL || resource == NULL || response == NULL)
 		return (EINVAL);
+	error = vmmfs_pcislot_resource_index(resource, &resource_index);
+	if (error != 0)
+		return (error);
 	bzero(response, sizeof(*response));
 	request = kmalloc(sizeof(*request), M_VMMFS, M_WAITOK | M_ZERO);
 	lwkt_gettoken(&config->token);
@@ -638,7 +665,7 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	request->request.sequence = ++config->next_sequence;
 	request->request.offset = offset;
 	request->request.value = value;
-	request->request.bar = resource->index;
+	request->request.bar = resource_index;
 	request->request.space = space;
 	request->request.width = width;
 	request->request.operation = operation;
@@ -700,15 +727,20 @@ vmmfs_pcislot_config_match(struct vmmfs_pcislot_config *config,
 	const struct vmmfs_pcislot_config_register *register_value;
 	const struct vmmfs_pcislot_descriptor_value *value;
 	unsigned int index;
+	uint16_t resource_index;
+	int error;
 
 	if (config == NULL || resource == NULL || match_offset == NULL ||
 	    (width != VMM_IO_WIDTH_8 && width != VMM_IO_WIDTH_16 &&
 	    width != VMM_IO_WIDTH_32 && width != VMM_IO_WIDTH_64))
 		return (EINVAL);
+	error = vmmfs_pcislot_resource_index(resource, &resource_index);
+	if (error != 0)
+		return (error);
 	value = &vmmfs_pcislot_config_slot(config)->descriptor.value;
 	for (index = 0; index < VMMFS_PCISLOT_MAX_CONFIGS; ++index) {
 		register_value = &value->configs[index];
-		if (!register_value->present || register_value->bar != resource->index ||
+		if (!register_value->present || register_value->bar != resource_index ||
 		    register_value->space != space)
 			continue;
 		if (!vmmfs_pcislot_config_overlap(offset, width,

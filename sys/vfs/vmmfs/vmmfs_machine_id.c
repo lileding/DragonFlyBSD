@@ -16,6 +16,10 @@
 #include <machine/atomic.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_machine_id.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 #include "vmmfs_machine_id.h"
 
 #define VMMFS_MACHINE_ID_MODE 0444
@@ -54,7 +58,7 @@ vmmfs_machine_id_init(struct vmmfs_machine *machine,
 		return (EINVAL);
 	*vnodep = NULL;
 	bzero(identity, sizeof(*identity));
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (state->machine_id_vops == NULL)
 		return (ENXIO);
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
@@ -63,7 +67,7 @@ vmmfs_machine_id_init(struct vmmfs_machine *machine,
 	vmmfs_node_setup(&identity->node, &machine->branch, vmmfs_machine_id_drop);
 	identity->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	machine->id = value;
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->machine_id_vops, VREG, &identity->node, vnodep);
 	if (error == 0)
 		return (0);

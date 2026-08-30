@@ -44,8 +44,6 @@ struct vmmfs_vcpu {
 	bool reset_requested;
 };
 
-extern struct vop_ops vmmfs_vcpu_vops;
-
 int vmmfs_vcpu_init(struct vmmfs_machine *, struct vmmfs_vcpu *,
 	struct vnode **);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,

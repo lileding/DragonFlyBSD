@@ -12,8 +12,15 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
-#include "vmmfs_machine_id.h"
 #include "vmmfs_boot.h"
+#include "vmmfs_events.h"
+#include "vmmfs_loader.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_memory.h"
+#include "vmmfs_root.h"
+#include "vmmfs_stopped.h"
+#include "vmmfs_vcpu.h"
+#include "vmmfs_machine_id.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_config.h"
@@ -22,6 +29,28 @@
 #include "vmmfs_pcislot_events.h"
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
+
+extern struct vop_ops vmmfs_root_vops;
+extern struct vop_ops vmmfs_machine_vops;
+extern struct vop_ops vmmfs_machine_id_vops;
+extern struct vop_ops vmmfs_vcpu_vops;
+extern struct vop_ops vmmfs_memory_vops;
+extern struct vop_ops vmmfs_loader_vops;
+extern struct vop_ops vmmfs_boot_vops;
+extern struct vop_ops vmmfs_stopped_vops;
+extern struct vop_ops vmmfs_events_vops;
+extern struct vop_ops vmmfs_serialroot_vops;
+extern struct vop_ops vmmfs_serialport_vops;
+extern struct vop_ops vmmfs_pciroot_vops;
+extern struct vop_ops vmmfs_pcislot_vops;
+extern struct vop_ops vmmfs_pcislot_descriptor_vops;
+extern struct vop_ops vmmfs_pcislot_config_vops;
+extern struct vop_ops vmmfs_pcislot_resource_vops;
+extern struct vop_ops vmmfs_pcislot_events_vops;
+
+extern int vmmfs_boot_module_fini(void);
+extern int vmmfs_loader_module_init(void);
+extern int vmmfs_loader_module_fini(void);
 
 static int vmmfs_mount(struct mount *, char *, caddr_t, struct ucred *);
 static int vmmfs_ncreate(struct vop_ncreate_args *);
@@ -123,12 +152,9 @@ vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 	if (root == NULL)
 		return (ENXIO);
 
-	lwkt_gettoken(&root->branch.token);
-	vp = state->root_vnode;
-	lwkt_reltoken(&root->branch.token);
+	vp = vmmfs_root_vnode(root);
 	if (vp == NULL)
 		return (ENOENT);
-	vhold(vp);
 	error = vget(vp, LK_EXCLUSIVE | LK_RETRY);
 	vdrop(vp);
 	if (error != 0)
@@ -243,12 +269,8 @@ vmmfs_unmount(struct mount *mount, int flags)
 	root = state->root;
 	if (root == NULL)
 		return (ENXIO);
-	lwkt_gettoken(&root->branch.token);
-	if (!RB_EMPTY(&root->machines)) {
-		lwkt_reltoken(&root->branch.token);
+	if (!vmmfs_root_empty(root))
 		return (EBUSY);
-	}
-	lwkt_reltoken(&root->branch.token);
 	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)

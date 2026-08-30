@@ -10,6 +10,7 @@
 #include <sys/systm.h>
 
 #include "vmmfs.h"
+#include "vmmfs_parent.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_rtc.h"
 

@@ -18,6 +18,10 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_resource.h"
 
@@ -88,8 +92,7 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 		return (EINVAL);
 	*slotp = NULL;
 	*vnodep = NULL;
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(
-	    vmmfs_pciroot_machine(pciroot))->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(vmmfs_pciroot_machine(pciroot)));
 	if (mount->pcislot_vops == NULL)
 		return (ENXIO);
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
@@ -109,8 +112,7 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	    &slot->descriptor_vnode);
 	if (error != 0)
 		goto fail_config;
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(
-	    vmmfs_pciroot_machine(pciroot))->mount, &mount->pcislot_vops,
+	error = vmmfs_vnode_create_regular(mount->mount, &mount->pcislot_vops,
 	    VDIR, &slot->branch.node, vnodep);
 	if (error != 0)
 		goto fail_descriptor;
@@ -534,7 +536,6 @@ static int
 vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 {
 	struct vmmfs_pcislot *slot;
-	struct vmmfs_pcislot_resource *resource;
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
@@ -562,10 +563,14 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	    bcmp(ncp->nc_name, "descriptor", sizeof("descriptor") - 1) == 0)
 		vnode = slot->descriptor_vnode;
 	else {
-		resource = vmmfs_pcislot_resources_find(slot->descriptor.resources,
-		    ncp->nc_name, ncp->nc_nlen);
-		vnode = resource == NULL ? NULL :
-            vmmfs_pcislot_resources_vnode(slot->descriptor.resources, resource);
+		error = vmmfs_pcislot_resources_lookup(slot->descriptor.resources,
+		    ncp->nc_name, ncp->nc_nlen, &vnode);
+		if (error != 0 && error != ENOENT) {
+			lwkt_reltoken(&slot->branch.token);
+			return (error);
+		}
+		if (error == ENOENT)
+			vnode = NULL;
 	}
 	if (vnode != NULL)
 		vhold(vnode);
@@ -667,8 +672,9 @@ static int
 vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	struct vmmfs_pcislot_item *item)
 {
-	struct vmmfs_pcislot_resource *resource;
+	struct vmmfs_pcislot_resources *resources;
 	size_t name_length;
+	int error;
 
 	lwkt_gettoken(&slot->branch.token);
 	if (slot->branch.node.dead) {
@@ -681,9 +687,9 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	}
 	if (slot->descriptor.committed) {
 		if (index == 0) {
-		item->inode = slot->events.inode;
-		item->type = DT_REG;
-		bcopy("events", item->name, sizeof("events"));
+			item->inode = slot->events.inode;
+			item->type = DT_REG;
+			bcopy("events", item->name, sizeof("events"));
 			lwkt_reltoken(&slot->branch.token);
 			return (0);
 		}
@@ -699,29 +705,25 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	}
 	if (slot->descriptor_vnode != NULL) {
 		if (index == 0) {
-		item->inode = slot->descriptor.inode;
-		item->type = DT_REG;
-		bcopy("descriptor", item->name, sizeof("descriptor"));
+			item->inode = slot->descriptor.inode;
+			item->type = DT_REG;
+			bcopy("descriptor", item->name, sizeof("descriptor"));
 			lwkt_reltoken(&slot->branch.token);
 			return (0);
 		}
 		--index;
 	}
-	if (slot->descriptor.resources == NULL ||
-	    index >= slot->descriptor.resources->count) {
+	resources = slot->descriptor.resources;
+	if (resources == NULL) {
 		lwkt_reltoken(&slot->branch.token);
 		return (ENOENT);
 	}
-	resource = &slot->descriptor.resources->items[index];
-	item->inode = resource->inode;
-	item->type = DT_REG;
-	if (vmmfs_pcislot_resource_name(resource, item->name,
-	    sizeof(item->name), &name_length) != 0) {
-		lwkt_reltoken(&slot->branch.token);
-		return (EIO);
-	}
+	error = vmmfs_pcislot_resources_read_item(resources, index,
+	    &item->inode, item->name, sizeof(item->name), &name_length);
+	if (error == 0)
+		item->type = DT_REG;
 	lwkt_reltoken(&slot->branch.token);
-	return (0);
+	return (error);
 }
 
 static int
@@ -1107,8 +1109,6 @@ vmmfs_pcislot_type0_cap_write(struct vmmfs_pcislot *slot, uint16_t offset,
 		} else if (msix) {
 			resources = slot->descriptor.resources;
 			if (resources != NULL) {
-				vmmfs_pcislot_resources_trace_msix_control(resources,
-				    index);
 				return (vmmfs_pcislot_resources_msix_unmask(resources,
 				    index));
 			}

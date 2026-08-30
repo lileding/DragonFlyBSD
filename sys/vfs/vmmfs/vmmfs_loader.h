@@ -17,11 +17,8 @@ struct vmmfs_loader;
 struct vmmfs_boot;
 struct ucred;
 
-extern struct vop_ops vmmfs_loader_vops;
 int vmmfs_loader_init(struct vmmfs_machine *, struct vmmfs_loader *,
 	struct vnode **);
-int vmmfs_loader_module_init(void);
-int vmmfs_loader_module_fini(void);
 int vmmfs_loader_run(struct vmmfs_loader *, const char *,
 	struct vmmfs_boot *, struct ucred *);
 

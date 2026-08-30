@@ -20,8 +20,17 @@
 #include <machine/atomic.h>
 
 #include "vmmfs.h"
+#include "vmmfs_parent.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
+
+struct vmmfs_pcislot_auth {
+	struct vmmfs_pcislot *slot;
+	ino_t slot_inode;
+	uint64_t generation;
+	volatile u_int valid;
+	volatile u_int references;
+};
 
 static int vmmfs_pcislot_auth_readwrite(struct file *, struct uio *,
 	struct ucred *, int);

@@ -26,6 +26,8 @@
 #include "vmmfs.h"
 #include "vmmfs_boot.h"
 #include "vmmfs_machine.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 
 #define VMMFS_BOOT_MODE 0600
 
@@ -65,6 +67,8 @@ static void vmmfs_boot_session_drop_pager(struct vmmfs_boot_session *);
 static struct vmmfs_boot_session *vmmfs_boot_take_session(
 	struct vmmfs_boot *, struct vnode **);
 static bool vmmfs_boot_cancel_unsubmitted(struct vmmfs_boot *);
+
+int vmmfs_boot_module_fini(void);
 
 struct vop_ops vmmfs_boot_vops = {
 	.vop_default = vop_defaultop,
@@ -115,7 +119,7 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot,
 		return (EINVAL);
 	*vnodep = NULL;
 	bzero(boot, sizeof(*boot));
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
 	vmmfs_node_setup(&boot->node, &machine->branch, vmmfs_boot_drop);
@@ -128,7 +132,7 @@ vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot,
 		goto fail;
 	}
 	boot->dev->si_drv1 = boot;
-	error = vmmfs_vnode_create_cdev(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_cdev(mount->mount,
 	    &mount->boot_vops, boot->dev, &boot->node, vnodep);
 	if (error == 0)
 		return (0);

@@ -33,8 +33,6 @@ struct vmmfs_pcislot_events {
 	bool closed;
 };
 
-extern struct vop_ops vmmfs_pcislot_events_vops;
-
 int vmmfs_pcislot_events_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_events *, struct vnode **);
 void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);

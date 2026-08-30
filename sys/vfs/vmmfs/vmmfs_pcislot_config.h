@@ -19,20 +19,10 @@ struct vmm_cpuexit;
 struct vmm_cpustate;
 struct vmmfs_pcislot;
 struct vmmfs_pcislot_resource;
+struct vmmfs_pcislot_config_request;
 struct vmmfs_vcpu_thread;
 struct vnode;
 struct vop_ops;
-
-struct vmmfs_pcislot_config_request {
-	TAILQ_ENTRY(vmmfs_pcislot_config_request) entry;
-	struct vmmfs_vcpu_thread *thread;
-	vmm_vcpu_t vcpu;
-	struct vmmfs_pci_config_request request;
-	uint64_t response_value;
-	uint32_t response_status;
-	bool delivered;
-	bool completed;
-};
 
 TAILQ_HEAD(vmmfs_pcislot_config_request_queue,
 	    vmmfs_pcislot_config_request);
@@ -50,8 +40,6 @@ struct vmmfs_pcislot_config {
 	bool powered;
 	bool closed;
 };
-
-extern struct vop_ops vmmfs_pcislot_config_vops;
 
 int vmmfs_pcislot_config_init(struct vmmfs_pcislot *,
 	struct vmmfs_pcislot_config *, struct vnode **);

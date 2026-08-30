@@ -64,13 +64,9 @@ struct vmmfs_machine {
 	struct vnode *events_vnode;
 };
 
-extern struct vop_ops vmmfs_machine_vops;
-
-int vmmfs_machine_compare(struct vmmfs_machine *, struct vmmfs_machine *);
 int vmmfs_machine_create(struct vmmfs_root *, const char *, size_t,
 	struct vmmfs_machine **, struct vnode **);
 /* Marks the machine and fixed children unavailable without revoking vnodes. */
-void vmmfs_machine_deactivate_begin(struct vmmfs_machine *);
 void vmmfs_machine_deactivate(struct vmmfs_machine *);
 void vmmfs_machine_hold(struct vmmfs_machine *);
 void vmmfs_machine_put(struct vmmfs_machine *);

@@ -9,14 +9,7 @@
 #include <sys/types.h>
 
 struct vmmfs_pcislot;
-
-struct vmmfs_pcislot_auth {
-	struct vmmfs_pcislot *slot;
-	ino_t slot_inode;
-	uint64_t generation;
-	volatile u_int valid;
-	volatile u_int references;
-};
+struct vmmfs_pcislot_auth;
 
 int vmmfs_pcislot_auth_create(struct vmmfs_pcislot *, uint64_t,
 	struct vmmfs_pcislot_auth **);

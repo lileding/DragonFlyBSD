@@ -14,15 +14,32 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <sys/tree.h>
 #include <sys/vnode.h>
 
 #include <machine/atomic.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_node.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
 
 #define VMMFS_SERIALROOT_MODE 0555
+
+struct vmmfs_serialroot_port {
+	RB_ENTRY(vmmfs_serialroot_port) entry;
+	struct vmmfs_serialport *port;
+	struct vnode *vnode;
+};
+
+RB_HEAD(vmmfs_serialport_tree, vmmfs_serialroot_port);
+
+struct vmmfs_serialroot_registry {
+	struct vmmfs_serialport_tree ports;
+};
 
 struct vmmfs_serialroot_item {
 	ino_t inode;
@@ -42,6 +59,8 @@ static int vmmfs_serialroot_read_item(struct vmmfs_serialroot *, uint64_t,
 	struct vmmfs_serialroot_item *);
 static int vmmfs_serialroot_port_compare(struct vmmfs_serialroot_port *,
 	struct vmmfs_serialroot_port *);
+RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
+	vmmfs_serialroot_port_compare);
 static struct vmmfs_serialroot_port *vmmfs_serialroot_find_locked(
 	struct vmmfs_serialroot *, const char *);
 static void vmmfs_serialroot_drop(struct vmmfs_node *);
@@ -80,20 +99,25 @@ vmmfs_serialroot_init(struct vmmfs_machine *machine,
 	struct vmmfs_serialroot *serialroot, struct vnode **vnodep)
 {
 	struct vmmfs_mount *state;
+	struct vmmfs_serialroot_registry *registry;
 	int error;
 
 	if (machine == NULL || serialroot == NULL || vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (state->serialroot_vops == NULL)
 		return (ENXIO);
 	bzero(serialroot, sizeof(*serialroot));
+	registry = kmalloc(sizeof(*registry), M_VMMFS, M_WAITOK | M_ZERO);
+	if (registry == NULL)
+		return (ENOMEM);
+	serialroot->registry = registry;
 	serialroot->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	RB_INIT(&serialroot->ports);
+	RB_INIT(&serialroot->registry->ports);
 	vmmfs_branch_init(&serialroot->branch, &machine->branch,
 	    vmmfs_serialroot_drop);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->serialroot_vops, VDIR, &serialroot->branch.node, vnodep);
 	if (error != 0)
 		vmmfs_node_drop(&serialroot->branch.node);
@@ -108,7 +132,10 @@ vmmfs_serialroot_drop(struct vmmfs_node *node)
 	serialroot = (struct vmmfs_serialroot *)node;
 	KKASSERT(serialroot != NULL);
 	KKASSERT(serialroot->branch.references == 0);
-	KKASSERT(RB_EMPTY(&serialroot->ports));
+	KKASSERT(serialroot->registry != NULL);
+	KKASSERT(RB_EMPTY(&serialroot->registry->ports));
+	kfree(serialroot->registry, M_VMMFS);
+	serialroot->registry = NULL;
 }
 
 void
@@ -121,7 +148,7 @@ vmmfs_serialroot_deactivate_begin(struct vmmfs_serialroot *serialroot)
 		return;
 	lwkt_gettoken(&serialroot->branch.token);
 	vmmfs_node_default_deactivate(&serialroot->branch.node);
-	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports) {
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		port = entry->port;
 		lwkt_gettoken(&port->token);
 		port->destroying = true;
@@ -153,9 +180,9 @@ vmmfs_serialroot_deactivate_ports(struct vmmfs_serialroot *serialroot)
 		return;
 	for (;;) {
 		lwkt_gettoken(&serialroot->branch.token);
-		entry = RB_ROOT(&serialroot->ports);
+		entry = RB_ROOT(&serialroot->registry->ports);
 		if (entry != NULL)
-			RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, entry);
+			RB_REMOVE(vmmfs_serialport_tree, &serialroot->registry->ports, entry);
 		lwkt_reltoken(&serialroot->branch.token);
 		if (entry == NULL)
 			break;
@@ -174,7 +201,7 @@ vmmfs_serialroot_start(struct vmmfs_serialroot *serialroot,
 
 	if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL || machine == NULL)
 		return (EINVAL);
-	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports) {
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		port = entry->port;
 		error = vmmfs_serialport_start(port, machine);
 		if (error != 0) {
@@ -196,13 +223,53 @@ vmmfs_serialroot_stop(struct vmmfs_serialroot *serialroot)
 	if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL)
 		return (EINVAL);
 	result = 0;
-	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports) {
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		port = entry->port;
 		error = vmmfs_serialport_stop(port);
 		if (result == 0 && error != 0)
 			result = error;
 	}
 	return (result);
+}
+
+size_t
+vmmfs_serialroot_port_count(struct vmmfs_serialroot *serialroot)
+{
+	struct vmmfs_serialroot_port *entry;
+	size_t count;
+
+	if (serialroot == NULL || serialroot->registry == NULL)
+		return (0);
+	lwkt_gettoken(&serialroot->branch.token);
+	count = 0;
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports)
+		++count;
+	lwkt_reltoken(&serialroot->branch.token);
+	return (count);
+}
+
+int
+vmmfs_serialroot_port_info(struct vmmfs_serialroot *serialroot,
+	size_t index, struct vmmfs_serialport_info *info)
+{
+	struct vmmfs_serialroot_port *entry;
+	size_t current;
+
+	if (serialroot == NULL || serialroot->registry == NULL || info == NULL)
+		return (EINVAL);
+	lwkt_gettoken(&serialroot->branch.token);
+	current = 0;
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
+		if (current++ != index)
+			continue;
+		info->number = entry->port->number;
+		info->base = entry->port->base;
+		info->gsi = entry->port->gsi;
+		lwkt_reltoken(&serialroot->branch.token);
+		return (0);
+	}
+	lwkt_reltoken(&serialroot->branch.token);
+	return (ENOENT);
 }
 
 static int
@@ -293,7 +360,7 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		goto failed_locked;
 	entry->port = port;
 	entry->vnode = vnode;
-	KKASSERT(RB_INSERT(vmmfs_serialport_tree, &serialroot->ports, entry) == NULL);
+	KKASSERT(RB_INSERT(vmmfs_serialport_tree, &serialroot->registry->ports, entry) == NULL);
 	lwkt_reltoken(&serialroot->branch.token);
 	lwkt_reltoken(&machine->branch.token);
 
@@ -301,7 +368,7 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 	if (error != 0) {
 		lwkt_gettoken(&machine->branch.token);
 		lwkt_gettoken(&serialroot->branch.token);
-		RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, entry);
+		RB_REMOVE(vmmfs_serialport_tree, &serialroot->registry->ports, entry);
 		lwkt_reltoken(&serialroot->branch.token);
 		lwkt_reltoken(&machine->branch.token);
 		vmmfs_serialroot_deactivate_port(port, vnode);
@@ -386,7 +453,7 @@ vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
 		vrele(vnode);
 		return (entry == NULL || entry->port != port ? ENOENT : EBUSY);
 	}
-	RB_REMOVE(vmmfs_serialport_tree, &serialroot->ports, entry);
+	RB_REMOVE(vmmfs_serialport_tree, &serialroot->registry->ports, entry);
 	lwkt_reltoken(&serialroot->branch.token);
 	lwkt_reltoken(&machine->branch.token);
 
@@ -516,7 +583,7 @@ vmmfs_serialroot_find_locked(struct vmmfs_serialroot *serialroot,
 {
 	struct vmmfs_serialroot_port *entry;
 
-	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports) {
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		if (strcmp(entry->port->name, name) == 0)
 			return (entry);
 	}
@@ -532,7 +599,7 @@ vmmfs_serialroot_read_item(struct vmmfs_serialroot *serialroot,
 
 	lwkt_gettoken(&serialroot->branch.token);
 	current = 0;
-	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->ports) {
+	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		if (current++ != index)
 			continue;
 		item->inode = entry->port->inode;

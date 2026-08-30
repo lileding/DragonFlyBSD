@@ -12,6 +12,7 @@
 
 struct cdev;
 struct vm_object;
+struct vmm_cpustate;
 struct vmmfs_machine;
 struct vmmfs_boot_session;
 struct vnode;
@@ -24,9 +25,6 @@ struct vmmfs_boot {
 	struct vmmfs_boot_session *session;
 };
 
-extern struct vop_ops vmmfs_boot_vops;
-
-int vmmfs_boot_module_fini(void);
 int vmmfs_boot_init(struct vmmfs_machine *, struct vmmfs_boot *,
 	struct vnode **);
 int vmmfs_boot_arm_locked(struct vmmfs_boot *, struct vm_object *, uint64_t);

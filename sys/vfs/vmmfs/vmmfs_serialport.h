@@ -60,8 +60,6 @@ struct vmmfs_serialport {
 	struct vmmfs_serialring host_to_guest;
 };
 
-extern struct vop_ops vmmfs_serialport_vops;
-
 int vmmfs_serialport_create(struct vmmfs_serialroot *, const char *, size_t,
 	struct vmmfs_serialport **, struct vnode **);
 int vmmfs_serialport_start(struct vmmfs_serialport *, vmm_machine_t);

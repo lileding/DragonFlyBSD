@@ -46,8 +46,6 @@ struct vmmfs_pcislot {
 	struct vnode *events_vnode;
 };
 
-extern struct vop_ops vmmfs_pcislot_vops;
-
 int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 	struct vmmfs_pcislot **, struct vnode **);
 void vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *);

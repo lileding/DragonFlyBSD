@@ -8,7 +8,6 @@
 
 #include "vmmfs_branch.h"
 
-#include <sys/tree.h>
 #include <sys/types.h>
 
 #include <dev/virtual/vmm/vmm.h>
@@ -17,7 +16,6 @@ struct vmmfs_machine;
 struct vmmfs_pcislot;
 struct vmmfs_vcpu_thread;
 struct vnode;
-struct vop_ops;
 
 /*
  * The sole VMMFS x64 platform ABI follows the Cloud Hypervisor layout:
@@ -33,20 +31,12 @@ struct vop_ops;
 #define VMMFS_PCI_PIO_GPA 0x1000U
 #define VMMFS_PCI_PIO_END 0xc000U
 
-struct vmmfs_pciroot_slot {
-	RB_ENTRY(vmmfs_pciroot_slot) entry;
-	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
-};
-
-RB_HEAD(vmmfs_pcislot_tree, vmmfs_pciroot_slot);
-RB_PROTOTYPE(vmmfs_pcislot_tree, vmmfs_pciroot_slot, entry,
-	vmmfs_pciroot_slot_compare);
+struct vmmfs_pciroot_registry;
 
 struct vmmfs_pciroot {
 	struct vmmfs_branch branch;
 	ino_t inode;
-	struct vmmfs_pcislot_tree slots;
+	struct vmmfs_pciroot_registry *registry;
 	vmm_machine_t runtime_machine;
 	uint64_t mmio_next;
 	uint32_t pio_next;
@@ -58,8 +48,6 @@ struct vmmfs_pciroot {
 	vmm_io_t ecam_read;
 	vmm_io_t ecam_write;
 };
-
-extern struct vop_ops vmmfs_pciroot_vops;
 
 int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *, struct vnode **);
 void vmmfs_pciroot_deactivate_begin(struct vmmfs_pciroot *);

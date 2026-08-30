@@ -21,6 +21,9 @@
 #include <machine/atomic.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_machine.h"
 #include "vmmfs_node.h"
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
@@ -140,8 +143,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
         portp == NULL || vnodep == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
-    state = (struct vmmfs_mount *)vmmfs_machine_root(
-        vmmfs_serialroot_machine(serialroot))->mount->mnt_data;
+    state = vmmfs_root_state(vmmfs_machine_root(vmmfs_serialroot_machine(serialroot)));
     if (state->serialport_vops == NULL)
         return ENXIO;
     *portp = NULL;
@@ -174,7 +176,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     vmmfs_node_setup(&port->node, &serialroot->branch,
         vmmfs_serialport_drop);
     error = vmmfs_vnode_create_cdev(
-        vmmfs_machine_root(vmmfs_serialroot_machine(serialroot))->mount,
+        state->mount,
         &state->serialport_vops, port->dev, &port->node, vnodep);
     if (error != 0) {
         lwkt_gettoken(&port->token);

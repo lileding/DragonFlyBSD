@@ -33,8 +33,6 @@ struct vmmfs_events {
 	bool closed;
 };
 
-extern struct vop_ops vmmfs_events_vops;
-
 int vmmfs_events_init(struct vmmfs_machine *, struct vmmfs_events *,
 	struct vnode **);
 void vmmfs_events_revoke(struct vmmfs_events *);

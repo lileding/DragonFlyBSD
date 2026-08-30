@@ -9,7 +9,7 @@
 
 #include "vmmfs_branch.h"
 
-void
+static void
 vmmfs_branch_drop(struct vmmfs_node *node)
 {
 	KKASSERT(node != NULL);

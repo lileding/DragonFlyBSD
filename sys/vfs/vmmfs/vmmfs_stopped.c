@@ -14,6 +14,11 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_stopped.h"
+#include "vmmfs_root.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_node.h"
+#include "vmmfs_machine.h"
 
 #define VMMFS_STOPPED_MODE 0644
 
@@ -53,13 +58,13 @@ vmmfs_stopped_create(struct vmmfs_machine *machine,
 		return (EINVAL);
 	*stoppedp = NULL;
 	*vnodep = NULL;
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (state->stopped_vops == NULL)
 		return (ENXIO);
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
 	vmmfs_node_setup(&stopped->node, &machine->branch, vmmfs_stopped_drop);
 	stopped->inode = atomic_fetchadd_int(&state->next_inode, 1);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->stopped_vops, VREG, &stopped->node, vnodep);
 	if (error != 0) {
 	vmmfs_node_drop(&stopped->node);

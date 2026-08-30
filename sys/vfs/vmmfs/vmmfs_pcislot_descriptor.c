@@ -20,6 +20,8 @@
 #include <sys/libkern.h>
 #include "vmmfs.h"
 #include "vmmfs_machine.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_descriptor.h"
@@ -123,7 +125,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 		return (EINVAL);
 	*vnodep = NULL;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(machine));
 	if (mount->pcislot_descriptor_vops == NULL)
 		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
@@ -136,7 +138,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 	descriptor->inode = atomic_fetchadd_int(&mount->next_inode, 1);
 	vmmfs_node_setup(&descriptor->node, &slot->branch,
 	    vmmfs_pcislot_descriptor_drop);
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_descriptor_vops, VREG, &descriptor->node, vnodep);
 	if (error != 0)
 		vmmfs_node_drop(&descriptor->node);
@@ -177,22 +179,6 @@ vmmfs_pcislot_descriptor_drop(struct vmmfs_node *node)
 	vmmfs_node_parent_put(node);
 	bzero(descriptor, sizeof(*descriptor));
 }
-
-bool
-vmmfs_pcislot_descriptor_busy(struct vmmfs_pcislot_descriptor *descriptor)
-{
-	struct vmmfs_pcislot *slot;
-	bool busy;
-
-	if (descriptor == NULL ||
-	    (slot = vmmfs_pcislot_descriptor_slot(descriptor)) == NULL)
-		return (false);
-	lwkt_gettoken(&slot->branch.token);
-	busy = descriptor->updating;
-	lwkt_reltoken(&slot->branch.token);
-	return (busy);
-}
-
 static int
 vmmfs_pcislot_descriptor_access(struct vop_access_args *ap)
 {

@@ -28,6 +28,8 @@
 #include <vm/vm_pager.h>
 
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_parent.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_memory.h"
 #include "vmmfs_pcislot.h"
@@ -36,6 +38,65 @@
 #include "vmmfs_node.h"
 #include "vmmfs_pcislot_resource.h"
 #include "vmmfs_vcpu.h"
+
+enum vmmfs_pcislot_resource_kind {
+	VMMFS_PCISLOT_RESOURCE_BAR,
+	VMMFS_PCISLOT_RESOURCE_PIO,
+	VMMFS_PCISLOT_RESOURCE_ROM,
+	VMMFS_PCISLOT_RESOURCE_DMA,
+	VMMFS_PCISLOT_RESOURCE_KICK,
+	VMMFS_PCISLOT_RESOURCE_INTX,
+	VMMFS_PCISLOT_RESOURCE_MSI,
+	VMMFS_PCISLOT_RESOURCE_MSIX,
+};
+
+struct vmmfs_pcislot_resource_trap {
+	uint64_t base;
+	uint64_t size;
+	vmm_io_t read_io;
+	vmm_io_t write_io;
+};
+
+struct vmmfs_pcislot_resource {
+	struct vmmfs_node node;
+	ino_t inode;
+	enum vmmfs_pcislot_resource_kind kind;
+	uint16_t index;
+	uint16_t capability;
+	uint16_t vector;
+	struct lwkt_token token;
+	struct kqinfo read_kq;
+	struct vm_object *backing_object;
+	struct vm_object *pager_object;
+	struct vmspace *vmspace;
+	struct cdev *dev;
+	struct vmmfs_pcislot_resource_trap *traps;
+	struct vmmfs_pci_kick *kicks;
+	uint64_t gpa;
+	uint64_t size;
+	uint64_t mapping_size;
+	size_t trap_count;
+	size_t kick_head;
+	size_t kick_count;
+	size_t kick_capacity;
+	uint64_t sequence;
+	bool mapped;
+	bool revoked;
+	bool bus_master_enabled;
+	bool intx_asserted;
+};
+
+struct vmmfs_pcislot_resources {
+	struct vmmfs_branch branch;
+	vmm_machine_t machine;
+	uint64_t descriptor_generation;
+	bool powered;
+	bool destroying;
+	size_t count;
+	struct vnode **vnodes;
+	size_t initialized_count;
+	struct vmmfs_pcislot_resource items[];
+};
 
 #define VMMFS_PCISLOT_RESOURCE_MODE 0600
 #define VMMFS_PCISLOT_KICK_INITIAL 64
@@ -125,6 +186,10 @@ static int vmmfs_pcislot_resource_raise_msix(
 static void vmmfs_pcislot_resource_msix_trace(
 	struct vmmfs_pcislot_resource *, uint16_t, uint32_t, uint64_t, uint32_t,
 	uint64_t, const char *, int);
+static int vmmfs_pcislot_resource_name(
+	const struct vmmfs_pcislot_resource *, char *, size_t, size_t *);
+static void vmmfs_pcislot_resources_trace_msix_control(
+	struct vmmfs_pcislot_resources *, unsigned int);
 
 static struct dev_ops vmmfs_pcislot_resource_dev_ops = {
 	{ "vmmfs_pci", 0, D_MPSAFE },
@@ -184,7 +249,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	    resourcesp == NULL || generation == 0)
 		return (EINVAL);
 	*resourcesp = NULL;
-	mount = (struct vmmfs_mount *)vmmfs_machine_root(vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)))->mount->mnt_data;
+	mount = vmmfs_root_state(vmmfs_machine_root(vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot))));
 	if (mount->pcislot_resource_vops == NULL)
 		return (ENXIO);
 	count = 1;
@@ -447,61 +512,85 @@ vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *resources)
 	resources->machine = NULL;
 }
 
-struct vmmfs_pcislot_resource *
-vmmfs_pcislot_resources_find(struct vmmfs_pcislot_resources *resources,
-	const char *name, size_t length)
+int
+vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
+	const char *name, size_t length, struct vnode **vnodep)
 {
 	char candidate[32];
-	struct vmmfs_pcislot_resource *resource;
 	size_t candidate_length;
 	size_t index;
+	int error;
 
-	if (resources == NULL || name == NULL)
-		return (NULL);
+	if (resources == NULL || name == NULL || vnodep == NULL)
+		return (EINVAL);
+	*vnodep = NULL;
 	lwkt_gettoken(&resources->branch.token);
-	if (resources->destroying) {
-		lwkt_reltoken(&resources->branch.token);
-		return (NULL);
+	if (resources->destroying || resources->vnodes == NULL) {
+		error = ENOENT;
+		goto done;
 	}
 	for (index = 0; index < resources->count; ++index) {
-		if (vmmfs_pcislot_resource_name(&resources->items[index], candidate,
-		    sizeof(candidate), &candidate_length) != 0)
+		if (vmmfs_pcislot_resource_name(&resources->items[index],
+		    candidate, sizeof(candidate), &candidate_length) != 0)
 			continue;
 		if (candidate_length == length &&
 		    bcmp(candidate, name, length) == 0) {
-			resource = &resources->items[index];
-			lwkt_reltoken(&resources->branch.token);
-			return (resource);
+			*vnodep = resources->vnodes[index];
+			error = *vnodep == NULL ? ENOENT : 0;
+			goto done;
 		}
 	}
+	error = ENOENT;
+done:
 	lwkt_reltoken(&resources->branch.token);
-	return (NULL);
-}
-
-struct vnode *
-vmmfs_pcislot_resources_vnode(struct vmmfs_pcislot_resources *resources,
-	const struct vmmfs_pcislot_resource *resource)
-{
-	struct vnode *vnode;
-	size_t index;
-
-	if (resources == NULL || resource == NULL ||
-	    resource < resources->items ||
-	    resource >= resources->items + resources->count) {
-		return (NULL);
-	}
-	lwkt_gettoken(&resources->branch.token);
-	if (resources->destroying || resources->vnodes == NULL) {
-		lwkt_reltoken(&resources->branch.token);
-		return (NULL);
-	}
-	index = (size_t)(resource - resources->items);
-	vnode = resources->vnodes[index];
-	lwkt_reltoken(&resources->branch.token);
-	return (vnode);
+	return (error);
 }
 
 int
+vmmfs_pcislot_resources_read_item(struct vmmfs_pcislot_resources *resources,
+	uint64_t index, ino_t *inode, char *name, size_t capacity,
+	size_t *name_length)
+{
+	struct vmmfs_pcislot_resource *resource;
+	int error;
+
+	if (resources == NULL || inode == NULL || name == NULL ||
+	    name_length == NULL)
+		return (EINVAL);
+	lwkt_gettoken(&resources->branch.token);
+	if (resources->destroying || index >= resources->count) {
+		lwkt_reltoken(&resources->branch.token);
+		return (ENOENT);
+	}
+	resource = &resources->items[index];
+	*inode = resource->inode;
+	error = vmmfs_pcislot_resource_name(resource, name, capacity,
+	    name_length);
+	lwkt_reltoken(&resources->branch.token);
+	return (error);
+}
+
+int
+vmmfs_pcislot_resource_index(const struct vmmfs_pcislot_resource *resource,
+	uint16_t *index)
+{
+	if (resource == NULL || index == NULL)
+		return (EINVAL);
+	*index = resource->index;
+	return (0);
+}
+
+int
+vmmfs_pcislot_resource_gpa(const struct vmmfs_pcislot_resource *resource,
+	uint64_t *gpa)
+{
+	if (resource == NULL || gpa == NULL)
+		return (EINVAL);
+	*gpa = resource->gpa;
+	return (0);
+}
+
+static int
 vmmfs_pcislot_resource_name(const struct vmmfs_pcislot_resource *resource,
 	char *buffer, size_t capacity, size_t *length)
 {
@@ -674,6 +763,7 @@ vmmfs_pcislot_resources_msix_unmask(struct vmmfs_pcislot_resources *resources,
 	cap = &vmmfs_pcislot_resources_slot(resources)->descriptor.value.caps[capability];
 	if (!cap->present || cap->kind != VMMFS_PCISLOT_CAP_MSIX)
 		return (EINVAL);
+	vmmfs_pcislot_resources_trace_msix_control(resources, capability);
 	pba = vmmfs_pcislot_resource_bar(resources, cap->pba_bar);
 	if (pba == NULL || pba->backing_object == NULL)
 		return (ENXIO);
@@ -701,7 +791,7 @@ vmmfs_pcislot_resources_msix_unmask(struct vmmfs_pcislot_resources *resources,
 	return (0);
 }
 
-void
+static void
 vmmfs_pcislot_resources_trace_msix_control(
 	struct vmmfs_pcislot_resources *resources, unsigned int capability)
 {

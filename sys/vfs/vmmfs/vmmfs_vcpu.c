@@ -24,6 +24,13 @@
 #include <machine/cpu.h>
 
 #include "vmmfs.h"
+#include "vmmfs_events.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_node.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_pciroot.h"
+#include "vmmfs_root.h"
+#include "vmmfs_vcpu.h"
 
 #define VMMFS_VCPU_MODE 0644
 
@@ -127,13 +134,13 @@ vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu,
 	bzero(vcpu, sizeof(*vcpu));
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
 	vmmfs_node_setup(&vcpu->node, &machine->branch, vmmfs_vcpu_drop);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	vcpu->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	if (state->vcpu_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->vcpu_vops, VREG, &vcpu->node, vnodep);
 	if (error == 0)
 		return (0);

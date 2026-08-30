@@ -19,6 +19,9 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_root.h"
 #include "vmmfs_platform_x64.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_serialport.h"
@@ -81,11 +84,14 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	*vnodep = NULL;
 	vnode = NULL;
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_branch_init(&machine->branch, &root->branch,
+	vmmfs_branch_init(&machine->branch, vmmfs_root_branch(root),
 	    vmmfs_machine_drop);
 	machine->branch.node.deactivate = vmmfs_machine_deactivate_node;
-	machine->inode = atomic_fetchadd_int(
-	    &((struct vmmfs_mount *)root->mount->mnt_data)->next_inode, 1);
+	machine->inode = vmmfs_root_allocate_inode(root);
+	if (machine->inode == 0) {
+		error = ENXIO;
+		goto fail;
+	}
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
 	error = vmmfs_machine_id_init(machine, &machine->id_node,
@@ -129,12 +135,12 @@ vmmfs_machine_create(struct vmmfs_root *root, const char *name,
 	    &machine->events_vnode);
 	if (error != 0)
 		goto fail;
-	state = (struct vmmfs_mount *)root->mount->mnt_data;
+	state = vmmfs_root_state(root);
 	if (state == NULL || state->machine_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(root->mount, &state->machine_vops,
+	error = vmmfs_vnode_create_regular(state->mount, &state->machine_vops,
 	    VDIR, &machine->branch.node, &vnode);
 	if (error != 0)
 		goto fail;
@@ -273,7 +279,7 @@ vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *machine)
 		vmmfs_node_default_deactivate(&machine->stopped->node);
 }
 
-void
+static void
 vmmfs_machine_deactivate_begin(struct vmmfs_machine *machine)
 {
 	if (machine == NULL)
@@ -384,12 +390,8 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	root = vmmfs_machine_root(machine);
 	root_counted = machine->root_counted;
 	KKASSERT(root != NULL);
-	if (root_counted) {
-		lwkt_gettoken(&root->branch.token);
-		KKASSERT(root->machine_count != 0);
-		--root->machine_count;
-		lwkt_reltoken(&root->branch.token);
-	}
+	if (root_counted)
+		vmmfs_root_machine_dropped(root);
 	if (machine->rtc.machine != NULL)
 		vmmfs_rtc_fini(&machine->rtc);
 	if (machine->platform.machine != NULL)
@@ -577,11 +579,7 @@ vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 		return (ENOENT);
 	}
 	lwkt_reltoken(&machine->branch.token);
-	lwkt_gettoken(&root->branch.token);
-	vnode = ((struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data)->root_vnode;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&root->branch.token);
+	vnode = vmmfs_root_vnode(root);
 	if (vnode == NULL)
 		return (ENOENT);
 	if (vget(vnode, LK_EXCLUSIVE | LK_RETRY) != 0) {

@@ -18,6 +18,10 @@
 
 #include <machine/cpufunc.h>
 #include "vmmfs.h"
+#include "vmmfs_root.h"
+#include "vmmfs_parent.h"
+#include "vmmfs_machine.h"
+#include "vmmfs_events.h"
 
 #define VMMFS_EVENTS_MODE 0644
 #define VMMFS_EVENTS_LINE_SIZE 512
@@ -75,13 +79,13 @@ vmmfs_events_init(struct vmmfs_machine *machine, struct vmmfs_events *events,
 	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
-	state = (struct vmmfs_mount *)vmmfs_machine_root(machine)->mount->mnt_data;
+	state = vmmfs_root_state(vmmfs_machine_root(machine));
 	events->inode = atomic_fetchadd_int(&state->next_inode, 1);
 	if (state->events_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(vmmfs_machine_root(machine)->mount,
+	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->events_vops, VREG, &events->node, vnodep);
 	if (error == 0)
 		return (0);
