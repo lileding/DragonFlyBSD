@@ -311,7 +311,8 @@ vmmfs_boot_getattr_lite(struct vop_getattr_lite_args *ap)
 	uint64_t size;
 
 	boot = ap->a_vp->v_data;
-	if (boot == NULL || vmmfs_boot_machine(boot) == NULL)
+	if (boot == NULL || boot->node.dead ||
+	    vmmfs_boot_machine(boot) == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&vmmfs_boot_machine(boot)->branch.token);
 	size = vmmfs_boot_machine(boot)->memory.size;
@@ -335,7 +336,8 @@ vmmfs_boot_open(struct vop_open_args *ap)
 	int error;
 
 	boot = ap->a_vp->v_data;
-	if (boot == NULL || vmmfs_boot_machine(boot) == NULL)
+	if (boot == NULL || boot->node.dead ||
+	    vmmfs_boot_machine(boot) == NULL)
 		return (ENOENT);
 	if ((ap->a_mode & FWRITE) == 0)
 		return (EACCES);
