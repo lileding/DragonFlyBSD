@@ -17,8 +17,8 @@ struct vmspace;
 struct vmmfs_machine;
 struct vmmfs_memory;
 
-int vmmfs_memory_init(struct vmmfs_machine *, struct vmmfs_memory *,
-	struct vnode **);
+int vmmfs_memory_init(struct vmmfs_mount *, struct vmmfs_branch *,
+	struct vmmfs_memory *, struct vnode **);
 int vmmfs_memory_prepare(struct vmmfs_memory *, uint64_t);
 int vmmfs_memory_map(struct vmmfs_memory *);
 int vmmfs_memory_snapshot(struct vmmfs_memory *);

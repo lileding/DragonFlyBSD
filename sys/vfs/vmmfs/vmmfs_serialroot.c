@@ -90,17 +90,23 @@ RB_GENERATE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
 	vmmfs_serialroot_port_compare);
 
 int
-vmmfs_serialroot_init(struct vmmfs_machine *machine,
+vmmfs_serialroot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_serialroot *serialroot, struct vnode **vnodep)
 {
 	struct vmmfs_mount *state;
+	struct vmmfs_machine *machine;
+	struct vmmfs_root *root;
 	struct vmmfs_serialroot_registry *registry;
 	int error;
 
-	if (machine == NULL || serialroot == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || serialroot == NULL || vnodep == NULL)
+		return (EINVAL);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	state = machine->mount;
+	machine = (struct vmmfs_machine *)parent;
+	state = mount;
 	if (state->serialroot_vops == NULL)
 		return (ENXIO);
 	bzero(serialroot, sizeof(*serialroot));
@@ -108,9 +114,9 @@ vmmfs_serialroot_init(struct vmmfs_machine *machine,
 	if (registry == NULL)
 		return (ENOMEM);
 	serialroot->registry = registry;
-	serialroot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	serialroot->inode = vmmfs_root_allocate_inode(root);
 	RB_INIT(&serialroot->registry->ports);
-	vmmfs_branch_init(&serialroot->branch, &machine->branch,
+	vmmfs_branch_init(&serialroot->branch, parent,
 	    vmmfs_serialroot_drop);
 	serialroot->branch.node.deactivate = vmmfs_serialroot_deactivate;
 	vmmfs_node_set_metadata(&serialroot->branch.node, serialroot->inode,
@@ -291,8 +297,10 @@ vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
 		error = EEXIST;
 		goto failed_locked;
 	}
-	error = vmmfs_serialport_create(serialroot, name, ncp->nc_nlen,
-	    &port, &vnode);
+	error = vmmfs_serialport_create(machine->mount, &serialroot->branch, name,
+	    ncp->nc_nlen, &vnode);
+	if (error == 0)
+		port = vnode->v_data;
 	if (error != 0)
 		goto failed_locked;
 	entry->port = port;

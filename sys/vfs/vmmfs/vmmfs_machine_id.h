@@ -22,7 +22,7 @@ struct vmmfs_machine_id {
 	ino_t inode;
 };
 
-int vmmfs_machine_id_init(struct vmmfs_machine *,
+int vmmfs_machine_id_init(struct vmmfs_mount *, struct vmmfs_branch *,
 	struct vmmfs_machine_id *, struct vnode **);
 
 #endif /* VMMFS_MACHINE_ID_H */

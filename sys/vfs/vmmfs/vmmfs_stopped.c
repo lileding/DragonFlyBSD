@@ -43,32 +43,32 @@ struct vop_ops vmmfs_stopped_vops = {
 };
 
 int
-vmmfs_stopped_create(struct vmmfs_machine *machine,
-	struct vmmfs_stopped **stoppedp, struct vnode **vnodep)
+vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	struct vnode **vnodep)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_root *root;
 	struct vmmfs_stopped *stopped;
 	int error;
 
-	if (machine == NULL || stoppedp == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || vnodep == NULL)
+		return (ENXIO);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
 		return (EINVAL);
-	*stoppedp = NULL;
 	*vnodep = NULL;
-	state = machine->mount;
-	if (state->stopped_vops == NULL)
+	if (mount->stopped_vops == NULL)
 		return (ENXIO);
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_node_setup(&stopped->node, &machine->branch, vmmfs_stopped_drop);
-	stopped->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_setup(&stopped->node, parent, vmmfs_stopped_drop);
+	stopped->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&stopped->node, stopped->inode,
 	    VMMFS_STOPPED_MODE, 0);
-	error = vmmfs_vnode_create_regular(state->mount,
-	    &state->stopped_vops, VREG, &stopped->node, vnodep);
+	error = vmmfs_vnode_create_regular(mount->mount,
+	    &mount->stopped_vops, VREG, &stopped->node, vnodep);
 	if (error != 0) {
 	vmmfs_node_drop(&stopped->node);
 		return (error);
 	}
-	*stoppedp = stopped;
 	return (0);
 }
 

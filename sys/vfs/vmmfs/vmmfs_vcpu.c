@@ -119,28 +119,30 @@ vmmfs_vcpu_store(struct vmmfs_vcpu *vcpu, const char *buffer, size_t length)
 }
 
 int
-vmmfs_vcpu_init(struct vmmfs_machine *machine, struct vmmfs_vcpu *vcpu,
-	struct vnode **vnodep)
+vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	struct vmmfs_vcpu *vcpu, struct vnode **vnodep)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_root *root;
 	int error;
 
-	if (machine == NULL || vcpu == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || vcpu == NULL || vnodep == NULL)
 		return (EINVAL);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	*vnodep = NULL;
 	bzero(vcpu, sizeof(*vcpu));
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
-	vmmfs_node_setup(&vcpu->node, &machine->branch, vmmfs_vcpu_drop);
-	state = machine->mount;
-	vcpu->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_setup(&vcpu->node, parent, vmmfs_vcpu_drop);
+	vcpu->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&vcpu->node, vcpu->inode, VMMFS_VCPU_MODE,
 	    vmmfs_node_decimal_size(vcpu->count));
-	if (state->vcpu_vops == NULL) {
+	if (mount->vcpu_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(state->mount,
-	    &state->vcpu_vops, VREG, &vcpu->node, vnodep);
+	error = vmmfs_vnode_create_regular(mount->mount,
+	    &mount->vcpu_vops, VREG, &vcpu->node, vnodep);
 	if (error == 0)
 		return (0);
 
@@ -716,7 +718,7 @@ out:
 		    thread->index, error);
 	}
 	if (!vmmfs_vcpu_is_stop_requested(vcpu))
-		(void)vmmfs_machine_stop_request(vmmfs_vcpu_machine(vcpu), "guest-exit");
+		(void)vmmfs_machine_request_stop(vmmfs_vcpu_machine(vcpu), "guest-exit");
 	vmmfs_vcpu_thread_stop(thread);
 }
 

@@ -44,8 +44,8 @@ struct vmmfs_vcpu {
 	bool reset_requested;
 };
 
-int vmmfs_vcpu_init(struct vmmfs_machine *, struct vmmfs_vcpu *,
-	struct vnode **);
+int vmmfs_vcpu_init(struct vmmfs_mount *, struct vmmfs_branch *,
+	struct vmmfs_vcpu *, struct vnode **);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);
 int vmmfs_vcpu_reset(struct vmmfs_vcpu *, vmm_machine_t,

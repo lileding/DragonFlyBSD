@@ -62,29 +62,30 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 };
 
 int
-vmmfs_pcislot_events_init(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_pcislot_events *state_node, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_mount *mount;
+	struct vmmfs_root *root;
+	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL ||
-	    state_node == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || state_node == NULL || vnodep == NULL)
 		return (EINVAL);
-	*vnodep = NULL;
+	slot = (struct vmmfs_pcislot *)parent;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = machine->mount;
-	if (mount->pcislot_events_vops == NULL)
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (machine == NULL || root == NULL)
+		return (ENXIO);
+	*vnodep = NULL;
 		return (ENXIO);
 	bzero(state_node, sizeof(*state_node));
 	lwkt_token_init(&state_node->token, "vmmfspcievents");
 	SLIST_INIT(&state_node->kq.ki_note);
 	state_node->buffer = kmalloc(VMMFS_PCISLOT_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
-	state_node->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
-	vmmfs_node_setup(&state_node->node, &slot->branch,
+	state_node->inode = vmmfs_root_allocate_inode(root);
+	vmmfs_node_setup(&state_node->node, parent,
 	    vmmfs_pcislot_events_drop);
 	vmmfs_node_set_metadata(&state_node->node, state_node->inode,
 	    VMMFS_PCISLOT_EVENTS_MODE, 0);

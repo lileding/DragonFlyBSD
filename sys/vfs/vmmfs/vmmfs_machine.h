@@ -66,8 +66,8 @@ struct vmmfs_machine {
 	struct vnode *events_vnode;
 };
 
-int vmmfs_machine_create(struct vmmfs_branch *, struct vmmfs_mount *,
-	ino_t, const char *, size_t, struct vmmfs_machine **, struct vnode **);
+int vmmfs_machine_create(struct vmmfs_mount *, struct vmmfs_branch *,
+	const char *, size_t, struct vnode **);
 
 /* Requests a warm reset without rerunning the loader. */
 int vmmfs_machine_reset(struct vmmfs_machine *);

@@ -64,7 +64,7 @@ struct vop_ops vmmfs_machine_vops = {
 };
 
 int
-vmmfs_machine_create(struct vmmfs_branch *parent, struct vmmfs_mount *mount,
+vmmfs_machine_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	const char *name, size_t namelen, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
@@ -90,30 +90,30 @@ vmmfs_machine_create(struct vmmfs_branch *parent, struct vmmfs_mount *mount,
 	    VMMFS_MACHINE_MODE, 0);
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
-	error = vmmfs_machine_id_init(machine, &machine->id_node,
+	error = vmmfs_machine_id_init(mount, &machine->branch, &machine->id_node,
 	    &machine->id_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_vcpu_init(machine, &machine->vcpu,
+	error = vmmfs_vcpu_init(mount, &machine->branch, &machine->vcpu,
 	    &machine->vcpu_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_memory_init(machine, &machine->memory,
+	error = vmmfs_memory_init(mount, &machine->branch, &machine->memory,
 	    &machine->memory_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_loader_init(machine, &machine->loader,
+	error = vmmfs_loader_init(mount, &machine->branch, &machine->loader,
 	    &machine->loader_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_boot_init(machine, &machine->boot,
+	error = vmmfs_boot_init(mount, &machine->branch, &machine->boot,
 	    &machine->boot_vnode);
 	if (error != 0)
 		goto fail;
 	error = vmmfs_machine_create_stopped(machine);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_pciroot_init(machine, &machine->pciroot,
+	error = vmmfs_pciroot_init(mount, &machine->branch, &machine->pciroot,
 	    &machine->pciroot_vnode);
 	if (error != 0)
 		goto fail;
@@ -123,11 +123,11 @@ vmmfs_machine_create(struct vmmfs_branch *parent, struct vmmfs_mount *mount,
 	error = vmmfs_rtc_init(machine, &machine->rtc);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_serialroot_init(machine, &machine->serialroot,
+	error = vmmfs_serialroot_init(mount, &machine->branch, &machine->serialroot,
 	    &machine->serialroot_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_events_init(machine, &machine->events,
+	error = vmmfs_events_init(mount, &machine->branch, &machine->events,
 	    &machine->events_vnode);
 	if (error != 0)
 		goto fail;
@@ -216,9 +216,10 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	struct vnode *stopped_vnode;
 	int error;
 
-	error = vmmfs_stopped_create(machine, &stopped, &stopped_vnode);
+	error = vmmfs_stopped_create(machine->mount, &machine->branch, &stopped_vnode);
 	if (error != 0)
 		return (error);
+	stopped = stopped_vnode->v_data;
 	lwkt_gettoken(&machine->branch.token);
 	if (machine->branch.node.dead || machine->machine != NULL) {
 		lwkt_reltoken(&machine->branch.token);

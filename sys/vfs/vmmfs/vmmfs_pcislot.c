@@ -78,40 +78,44 @@ struct vop_ops vmmfs_pcislot_vops = {
 };
 
 int
-vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
-	struct vmmfs_pcislot **slotp, struct vnode **vnodep)
+vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	uint16_t bdf,
+	struct vnode **vnodep)
 {
-	struct vmmfs_mount *mount;
+	struct vmmfs_root *root;
 	struct vmmfs_machine *machine;
+	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL ||
-	    slotp == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL ||
+	vnodep == NULL)
 		return (EINVAL);
-	*slotp = NULL;
 	*vnodep = NULL;
+	pciroot = (struct vmmfs_pciroot *)parent;
 	machine = vmmfs_pciroot_machine(pciroot);
-	mount = machine == NULL ? NULL : machine->mount;
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	if (mount == NULL || mount->pcislot_vops == NULL)
 		return (ENXIO);
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
-	slot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	slot->inode = vmmfs_root_allocate_inode(root);
 	slot->bdf = bdf;
-	vmmfs_branch_init(&slot->branch, &pciroot->branch,
+	vmmfs_branch_init(&slot->branch, parent,
 	    vmmfs_pcislot_drop);
 	slot->branch.node.deactivate = vmmfs_pcislot_deactivate;
 	vmmfs_node_set_metadata(&slot->branch.node, slot->inode,
 	    VMMFS_PCISLOT_MODE, 0);
-	error = vmmfs_pcislot_events_init(slot, &slot->events,
+	error = vmmfs_pcislot_events_init(mount, &slot->branch, &slot->events,
 	    &slot->events_vnode);
 	if (error != 0)
 		goto fail_slot;
-	error = vmmfs_pcislot_config_init(slot, &slot->config,
+	error = vmmfs_pcislot_config_init(mount, &slot->branch, &slot->config,
 	    &slot->config_vnode);
 	if (error != 0)
 		goto fail_events;
-	error = vmmfs_pcislot_descriptor_init(slot, &slot->descriptor,
+	error = vmmfs_pcislot_descriptor_init(mount, &slot->branch, &slot->descriptor,
 	    &slot->descriptor_vnode);
 	if (error != 0)
 		goto fail_config;
@@ -122,7 +126,6 @@ vmmfs_pcislot_create(struct vmmfs_pciroot *pciroot, uint16_t bdf,
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
 	    "bdf=0000:%02x:%02x.%x", bdf >> 8, (bdf >> 3) & 0x1f,
 	    bdf & 0x7);
-	*slotp = slot;
 	return (0);
 
 fail_descriptor:

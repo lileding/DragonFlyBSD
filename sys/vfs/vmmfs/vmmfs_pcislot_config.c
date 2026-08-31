@@ -95,28 +95,29 @@ struct vop_ops vmmfs_pcislot_config_vops = {
 };
 
 int
-vmmfs_pcislot_config_init(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_config_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_pcislot_config *config, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_mount *mount;
+	struct vmmfs_root *root;
+	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL ||
-	    config == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || config == NULL || vnodep == NULL)
 		return (EINVAL);
-	*vnodep = NULL;
+	slot = (struct vmmfs_pcislot *)parent;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = machine->mount;
-	if (mount->pcislot_config_vops == NULL)
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (machine == NULL || root == NULL)
+		return (ENXIO);
+	*vnodep = NULL;
 		return (ENXIO);
 	bzero(config, sizeof(*config));
-	config->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	config->inode = vmmfs_root_allocate_inode(root);
 	lwkt_token_init(&config->token, "vmmfspcicfg");
 	TAILQ_INIT(&config->requests);
 	SLIST_INIT(&config->kq.ki_note);
-	vmmfs_node_setup(&config->node, &slot->branch,
+	vmmfs_node_setup(&config->node, parent,
 	    vmmfs_pcislot_config_drop);
 	vmmfs_node_set_metadata(&config->node, config->inode,
 	    VMMFS_PCISLOT_CONFIG_MODE, 0);

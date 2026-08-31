@@ -925,24 +925,26 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
 }
 
 int
-vmmfs_loader_init(struct vmmfs_machine *machine, struct vmmfs_loader *loader,
+vmmfs_loader_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	struct vmmfs_loader *loader,
 	struct vnode **vnodep)
 {
-	struct vmmfs_mount *mount;
+	struct vmmfs_root *root;
 	int error;
 
-	if (machine == NULL || loader == NULL || vnodep == NULL ||
-	    vmmfs_machine_root(machine) == NULL)
+	if (mount == NULL || parent == NULL || loader == NULL || vnodep == NULL)
 		return (EINVAL);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	*vnodep = NULL;
 	bzero(loader, sizeof(*loader));
-	vmmfs_node_setup(&loader->node, &machine->branch, vmmfs_loader_drop);
-	mount = machine->mount;
+	vmmfs_node_setup(&loader->node, parent, vmmfs_loader_drop);
 	if (mount == NULL || mount->loader_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	loader->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	loader->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&loader->node, loader->inode,
 	    VMMFS_LOADER_MODE, 1);
 	error = vmmfs_vnode_create_regular(mount->mount,

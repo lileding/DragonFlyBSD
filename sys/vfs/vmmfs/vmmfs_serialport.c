@@ -123,11 +123,12 @@ struct vop_ops vmmfs_serialport_vops = {
 };
 
 int
-vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
-    const char *name, size_t namelen, struct vmmfs_serialport **portp,
-    struct vnode **vnodep)
+vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+    const char *name, size_t namelen, struct vnode **vnodep)
 {
+    struct vmmfs_serialroot *serialroot;
     struct vmmfs_mount *state;
+    struct vmmfs_root *root;
     struct vmmfs_machine *machine;
     struct vmmfs_serialport *port;
     cdev_t dev;
@@ -137,18 +138,20 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     uint32_t unit;
     int error;
 
-    if (serialroot == NULL || vmmfs_serialroot_machine(serialroot) == NULL ||
-        portp == NULL || vnodep == NULL ||
+    if (mount == NULL || parent == NULL || vnodep == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
+    serialroot = (struct vmmfs_serialroot *)parent;
     machine = vmmfs_serialroot_machine(serialroot);
-    state = machine == NULL ? NULL : machine->mount;
-    if (state == NULL || state->serialport_vops == NULL)
+    root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+    if (machine == NULL || root == NULL)
         return ENXIO;
-    *portp = NULL;
+    state = mount;
+    if (state->serialport_vops == NULL)
+        return ENXIO;
     *vnodep = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
-    port->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+    port->inode = vmmfs_root_allocate_inode(root);
     bcopy(name, port->name, namelen);
     port->name[namelen] = '\0';
     port->number = number;
@@ -172,7 +175,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->tty.t_stop = nottystop;
     port->tty.t_param = vmmfs_serialport_tty_param;
     port->dev = dev;
-    vmmfs_node_setup(&port->node, &serialroot->branch,
+    vmmfs_node_setup(&port->node, parent,
         vmmfs_serialport_drop);
     port->node.deactivate = vmmfs_serialport_deactivate;
     vmmfs_node_set_metadata(&port->node, port->inode,
@@ -187,7 +190,6 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
         vmmfs_node_drop(&port->node);
         return error;
     }
-    *portp = port;
     return 0;
 
 fail_token:

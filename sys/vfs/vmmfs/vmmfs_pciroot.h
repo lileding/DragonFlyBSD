@@ -49,7 +49,8 @@ struct vmmfs_pciroot {
 	vmm_io_t ecam_write;
 };
 
-int vmmfs_pciroot_init(struct vmmfs_machine *, struct vmmfs_pciroot *, struct vnode **);
+int vmmfs_pciroot_init(struct vmmfs_mount *, struct vmmfs_branch *,
+	struct vmmfs_pciroot *, struct vnode **);
 void vmmfs_pciroot_deactivate_slots(struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);

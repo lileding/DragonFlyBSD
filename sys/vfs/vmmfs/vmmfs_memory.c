@@ -114,27 +114,29 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 }
 
 int
-vmmfs_memory_init(struct vmmfs_machine *machine, struct vmmfs_memory *memory,
-	struct vnode **vnodep)
+vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	struct vmmfs_memory *memory, struct vnode **vnodep)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_root *root;
 	int error;
 
-	if (machine == NULL || memory == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || memory == NULL || vnodep == NULL)
 		return (EINVAL);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	*vnodep = NULL;
 	bzero(memory, sizeof(*memory));
-	vmmfs_node_setup(&memory->node, &machine->branch, vmmfs_memory_drop);
-	state = machine->mount;
-	memory->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_setup(&memory->node, parent, vmmfs_memory_drop);
+	memory->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&memory->node, memory->inode,
 	    VMMFS_MEMORY_MODE, vmmfs_node_decimal_size(memory->size));
-	if (state->memory_vops == NULL) {
+	if (mount->memory_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	error = vmmfs_vnode_create_regular(state->mount,
-	    &state->memory_vops, VREG, &memory->node, vnodep);
+	error = vmmfs_vnode_create_regular(mount->mount,
+	    &mount->memory_vops, VREG, &memory->node, vnodep);
 	if (error == 0)
 		return (0);
 

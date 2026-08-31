@@ -28,7 +28,8 @@ struct vmmfs_serialport_info {
 	unsigned int gsi;
 };
 
-int vmmfs_serialroot_init(struct vmmfs_machine *, struct vmmfs_serialroot *, struct vnode **);
+int vmmfs_serialroot_init(struct vmmfs_mount *, struct vmmfs_branch *,
+	struct vmmfs_serialroot *, struct vnode **);
 void vmmfs_serialroot_deactivate_ports(struct vmmfs_serialroot *);
 int vmmfs_serialroot_start(struct vmmfs_serialroot *, vmm_machine_t);
 int vmmfs_serialroot_stop(struct vmmfs_serialroot *);

@@ -107,21 +107,22 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 };
 
 int
-vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_pcislot_descriptor *descriptor, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_mount *mount;
+	struct vmmfs_root *root;
+	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL ||
-	    descriptor == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || descriptor == NULL || vnodep == NULL)
 		return (EINVAL);
-	*vnodep = NULL;
+	slot = (struct vmmfs_pcislot *)parent;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = machine->mount;
-	if (mount->pcislot_descriptor_vops == NULL)
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (machine == NULL || root == NULL)
+		return (ENXIO);
+	*vnodep = NULL;
 		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
 	lwkt_gettoken(&machine->branch.token);
@@ -130,8 +131,8 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *slot,
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->branch.token);
-	descriptor->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
-	vmmfs_node_setup(&descriptor->node, &slot->branch,
+	descriptor->inode = vmmfs_root_allocate_inode(root);
+	vmmfs_node_setup(&descriptor->node, parent,
 	    vmmfs_pcislot_descriptor_drop);
 	vmmfs_node_set_metadata(&descriptor->node, descriptor->inode,
 	    VMMFS_PCISLOT_DESCRIPTOR_MODE, 0);

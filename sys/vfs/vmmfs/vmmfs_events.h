@@ -33,8 +33,8 @@ struct vmmfs_events {
 	bool closed;
 };
 
-int vmmfs_events_init(struct vmmfs_machine *, struct vmmfs_events *,
-	struct vnode **);
+int vmmfs_events_init(struct vmmfs_mount *, struct vmmfs_branch *,
+	struct vmmfs_events *, struct vnode **);
 void vmmfs_events_revoke(struct vmmfs_events *);
 void vmmfs_events_log(struct vmmfs_events *, enum vmmfs_machine_event,
 	const char *, ...);

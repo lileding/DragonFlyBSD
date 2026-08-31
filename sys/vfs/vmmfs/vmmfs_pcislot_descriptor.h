@@ -143,7 +143,8 @@ struct vmmfs_pcislot_descriptor {
 	struct vmmfs_pcislot_resources *resources;
 };
 
-int vmmfs_pcislot_descriptor_init(struct vmmfs_pcislot *,
-	struct vmmfs_pcislot_descriptor *, struct vnode **);
+int vmmfs_pcislot_descriptor_init(struct vmmfs_mount *,
+	struct vmmfs_branch *, struct vmmfs_pcislot_descriptor *,
+	struct vnode **);
 
 #endif /* VMMFS_PCISLOT_DESCRIPTOR_H */

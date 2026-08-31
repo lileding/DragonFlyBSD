@@ -43,30 +43,34 @@ struct vop_ops vmmfs_machine_id_vops = {
 };
 
 int
-vmmfs_machine_id_init(struct vmmfs_machine *machine,
+vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_machine_id *identity, struct vnode **vnodep)
 {
-	struct vmmfs_mount *state;
+	struct vmmfs_machine *machine;
+	struct vmmfs_root *root;
 	u_int value;
 	int error;
 
-	if (machine == NULL || identity == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || identity == NULL || vnodep == NULL)
 		return (EINVAL);
+	machine = (struct vmmfs_machine *)parent;
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	*vnodep = NULL;
 	bzero(identity, sizeof(*identity));
-	state = machine->mount;
-	if (state->machine_id_vops == NULL)
+	if (mount->machine_id_vops == NULL)
 		return (ENXIO);
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
 	if (value > VMMFS_MACHINE_ID_MAX)
 		return (ENOSPC);
-	vmmfs_node_setup(&identity->node, &machine->branch, vmmfs_machine_id_drop);
-	identity->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_setup(&identity->node, parent, vmmfs_machine_id_drop);
+	identity->inode = vmmfs_root_allocate_inode(root);
 	machine->id = value;
 	vmmfs_node_set_metadata(&identity->node, identity->inode,
 	    VMMFS_MACHINE_ID_MODE, vmmfs_node_decimal_size(value));
-	error = vmmfs_vnode_create_regular(state->mount,
-	    &state->machine_id_vops, VREG, &identity->node, vnodep);
+	error = vmmfs_vnode_create_regular(mount->mount,
+	    &mount->machine_id_vops, VREG, &identity->node, vnodep);
 	if (error == 0)
 		return (0);
 	identity->inode = 0;

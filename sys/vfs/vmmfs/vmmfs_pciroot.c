@@ -125,16 +125,22 @@ RB_GENERATE(vmmfs_pcislot_tree, vmmfs_pciroot_slot, entry,
 	vmmfs_pciroot_slot_compare);
 
 int
-vmmfs_pciroot_init(struct vmmfs_machine *machine,
+vmmfs_pciroot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_pciroot *pciroot, struct vnode **vnodep)
 {
 	struct vmmfs_mount *state;
+	struct vmmfs_machine *machine;
+	struct vmmfs_root *root;
 	int error;
 
-	if (machine == NULL || pciroot == NULL || vnodep == NULL)
+	if (mount == NULL || parent == NULL || pciroot == NULL || vnodep == NULL)
+		return (EINVAL);
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	state = machine->mount;
+	machine = (struct vmmfs_machine *)parent;
+	state = mount;
 	if (state->pciroot_vops == NULL)
 		return (ENXIO);
 	bzero(pciroot, sizeof(*pciroot));
@@ -142,11 +148,11 @@ vmmfs_pciroot_init(struct vmmfs_machine *machine,
 	    M_WAITOK | M_ZERO);
 	if (pciroot->registry == NULL)
 		return (ENOMEM);
-	vmmfs_branch_init(&pciroot->branch, &machine->branch,
+	vmmfs_branch_init(&pciroot->branch, parent,
 	    vmmfs_pciroot_drop);
 	pciroot->branch.node.deactivate = vmmfs_pciroot_deactivate;
 	pciroot->branch.ops = &vmmfs_pciroot_branch_ops;
-	pciroot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	pciroot->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&pciroot->branch.node, pciroot->inode,
 	    VMMFS_PCIROOT_MODE, 0);
 	RB_INIT(&pciroot->registry->slots);
@@ -754,7 +760,9 @@ vmmfs_pciroot_create_item(struct vmmfs_branch *branch, struct mount *mount,
 		error = EEXIST;
 		goto failed_locked;
 	}
-	error = vmmfs_pcislot_create(pciroot, bdf, &slot, &vnode);
+	error = vmmfs_pcislot_create(machine->mount, &pciroot->branch, bdf, &vnode);
+	if (error == 0)
+		slot = vnode->v_data;
 	if (error != 0)
 		goto failed_locked;
 	entry->slot = slot;

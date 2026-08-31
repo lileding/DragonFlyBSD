@@ -103,23 +103,27 @@ vmmfs_boot_module_fini(void)
 }
 
 int
-vmmfs_boot_init(struct vmmfs_machine *machine, struct vmmfs_boot *boot,
+vmmfs_boot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+	struct vmmfs_boot *boot,
 	struct vnode **vnodep)
 {
-	struct vmmfs_mount *mount;
+	struct vmmfs_machine *machine;
+	struct vmmfs_root *root;
 	uint32_t serial;
 	int error;
 
-	if (machine == NULL || boot == NULL || vnodep == NULL ||
-	    vmmfs_machine_root(machine) == NULL)
+	if (mount == NULL || parent == NULL || boot == NULL || vnodep == NULL)
 		return (EINVAL);
+	machine = (struct vmmfs_machine *)parent;
+	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
+	if (root == NULL)
+		return (ENXIO);
 	*vnodep = NULL;
 	bzero(boot, sizeof(*boot));
-	mount = machine->mount;
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
-	vmmfs_node_setup(&boot->node, &machine->branch, vmmfs_boot_drop);
-	boot->inode = vmmfs_root_allocate_inode(vmmfs_machine_root(machine));
+	vmmfs_node_setup(&boot->node, parent, vmmfs_boot_drop);
+	boot->inode = vmmfs_root_allocate_inode(root);
 	vmmfs_node_set_metadata(&boot->node, boot->inode, VMMFS_BOOT_MODE,
 	    machine->memory.size);
 	serial = atomic_fetchadd_int(&vmmfs_boot_dev_serial, 1);
@@ -291,7 +295,7 @@ vmmfs_boot_open(struct vop_open_args *ap)
 	vnode = ap->a_vp;
 	dev = vnode->v_rdev;
 	if (dev == NULL) {
-		(void)vmmfs_machine_stop_request(vmmfs_boot_machine(boot), "boot-open");
+		(void)vmmfs_machine_request_stop(vmmfs_boot_machine(boot), "boot-open");
 		return (ENXIO);
 	}
 	vsetflags(vnode, VNOTSEEKABLE);
@@ -300,7 +304,7 @@ vmmfs_boot_open(struct vop_open_args *ap)
 		vnode);
 	vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
 	if (error != 0) {
-		(void)vmmfs_machine_stop_request(vmmfs_boot_machine(boot), "boot-open");
+		(void)vmmfs_machine_request_stop(vmmfs_boot_machine(boot), "boot-open");
 		return (error);
 	}
 	return (vop_stdopen(ap));
