@@ -73,7 +73,7 @@ int vmmfs_machine_create(struct vmmfs_branch *, struct vmmfs_mount *,
 int vmmfs_machine_reset(struct vmmfs_machine *);
 
 /* Requests terminal power-off from an external VOP or a guest runtime event. */
-int vmmfs_machine_stop_request(struct vmmfs_machine *, const char *);
+int vmmfs_machine_request_stop(struct vmmfs_machine *, const char *);
 
 /* Starts a direct boot session and publishes its guest-memory mapping. */
 int vmmfs_machine_boot_start(struct vmmfs_machine *);

@@ -259,7 +259,6 @@ vmmfs_root_create_item(struct vmmfs_branch *branch, struct mount *mount,
 	struct vmmfs_root *root;
 	struct vmmfs_mount *state;
 	struct vmmfs_root_machine *entry;
-	struct vmmfs_machine *machine;
 	struct vnode *vnode;
 	int error;
 
@@ -280,8 +279,7 @@ vmmfs_root_create_item(struct vmmfs_branch *branch, struct mount *mount,
 		return (EEXIST);
 	}
 	/* The root token covers construction through the registry commit point. */
-	error = vmmfs_machine_create(&root->branch, state,
-	    vmmfs_root_allocate_inode(root), name, namelen, &machine, &vnode);
+	error = vmmfs_machine_create(&root->branch, state, name, namelen, &vnode);
 	if (error != 0) {
 		lwkt_reltoken(&root->branch.token);
 		kfree(entry, M_VMMFS);
