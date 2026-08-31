@@ -29,8 +29,7 @@
 
 static int vmmfs_events_kqfilter(struct vop_kqfilter_args *);
 static int vmmfs_events_read(struct vop_read_args *);
-static int vmmfs_events_setattr(struct vop_setattr_args *);
-static int vmmfs_events_write(struct vop_write_args *);
+static int vmmfs_events_store(struct vmmfs_node *, const char *, size_t);
 static void vmmfs_events_filter_detach(struct knote *);
 static int vmmfs_events_filter_read(struct knote *, long);
 static const char *vmmfs_machine_event_name(enum vmmfs_machine_event);
@@ -55,8 +54,8 @@ struct vop_ops vmmfs_events_vops = {
 	.vop_read = vmmfs_events_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_events_setattr,
-	.vop_write = vmmfs_events_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 int
@@ -74,13 +73,22 @@ vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	*vnodep = NULL;
 	bzero(events, sizeof(*events));
 	lwkt_token_init(&events->token, "vmmfsevents");
-	vmmfs_node_setup(&events->node, parent, vmmfs_events_drop);
+	events->node.parent = parent;
+	events->node.dead = false;
+	events->node.deactivate = vmmfs_node_default_deactivate;
+	events->node.drop = vmmfs_events_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	events->node.load_limit = 0;
+	events->node.store_limit = sizeof("reset\n") - 1;
+	events->node.load = NULL;
+	events->node.store = vmmfs_events_store;
 	SLIST_INIT(&events->kq.ki_note);
 	events->buffer = kmalloc(VMMFS_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
-	events->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&events->node, events->inode,
-	    VMMFS_EVENTS_MODE, 0);
+	events->node.inode = vmmfs_root_allocate_inode(root);
+	events->node.mode = VMMFS_EVENTS_MODE;
+	events->node.size = 0;
 	if (mount->events_vops == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -107,7 +115,7 @@ vmmfs_events_drop(struct vmmfs_node *node)
 	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
-	events->inode = 0;
+	events->node.inode = 0;
 	lwkt_token_uninit(&events->token);
 	vmmfs_node_parent_put(node);
 }
@@ -372,36 +380,18 @@ vmmfs_events_filter_detach(struct knote *knote)
 
 
 static int
-vmmfs_events_setattr(struct vop_setattr_args *ap)
-{
-	/* Accept the O_TRUNC size update performed before a control write. */
-	(void)ap;
-	return (0);
-}
-
-static int
-vmmfs_events_write(struct vop_write_args *ap)
+vmmfs_events_store(struct vmmfs_node *node, const char *buffer,
+	size_t length)
 {
 	struct vmmfs_events *events;
-	struct uio *uio;
-	char buffer[32];
-	size_t length;
-	int error;
 
-	events = ap->a_vp->v_data;
-	if (events == NULL)
+	events = (struct vmmfs_events *)node;
+	if (events == NULL || events->node.dead)
 		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset != 0 || uio->uio_resid == 0)
-		return (EINVAL);
-	length = (size_t)uio->uio_resid;
-	if (length >= sizeof(buffer))
-		return (E2BIG);
-	error = uiomove(buffer, length, uio);
-	if (error != 0)
-		return (error);
-	buffer[length] = '\0';
-	if (strcmp(buffer, "reset") != 0 && strcmp(buffer, "reset\n") != 0)
+	if (!((length == sizeof("reset") - 1 &&
+	    bcmp(buffer, "reset", length) == 0) ||
+	    (length == sizeof("reset\n") - 1 &&
+	    bcmp(buffer, "reset\n", length) == 0)))
 		return (EINVAL);
 	return (vmmfs_machine_reset(vmmfs_events_machine(events)));
 }

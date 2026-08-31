@@ -13,24 +13,12 @@
 #include <sys/namecache.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
+#include <sys/uio.h>
 #include <sys/vnode.h>
 
+#include "vmmfs.h"
 #include "vmmfs_node.h"
 #include "vmmfs_branch.h"
-
-void
-vmmfs_node_setup(struct vmmfs_node *node, struct vmmfs_branch *parent,
-	void (*drop)(struct vmmfs_node *))
-{
-	KKASSERT(node != NULL);
-	KKASSERT(drop != NULL);
-	node->parent = parent;
-	node->dead = false;
-	node->deactivate = vmmfs_node_default_deactivate;
-	node->drop = drop;
-	if (parent != NULL)
-		vmmfs_branch_hold(parent);
-}
 
 void
 vmmfs_node_parent_put(struct vmmfs_node *node)
@@ -50,17 +38,6 @@ vmmfs_node_default_deactivate(struct vmmfs_node *node)
 	KKASSERT(node != NULL);
 	node->dead = true;
 	return (0);
-}
-
-void
-vmmfs_node_set_metadata(struct vmmfs_node *node, ino_t inode,
-	mode_t mode, off_t size)
-{
-	KKASSERT(node != NULL);
-	KKASSERT(inode != 0);
-	node->inode = inode;
-	node->mode = mode;
-	node->size = size;
 }
 
 off_t
@@ -163,6 +140,79 @@ vmmfs_node_open(struct vop_open_args *ap)
 	if (node == NULL || node->dead)
 		return (ENOENT);
 	return (vop_stdopen(ap));
+}
+
+int
+vmmfs_node_read(struct vop_read_args *ap)
+{
+	struct vmmfs_node *node;
+	char *buffer;
+	size_t length;
+	off_t offset;
+	int error;
+
+	if (ap == NULL || ap->a_vp == NULL || ap->a_uio == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	if (ap->a_uio->uio_offset < 0)
+		return (EINVAL);
+	if (node->load == NULL)
+		return (0);
+	KKASSERT(node->load_limit != 0);
+	buffer = kmalloc(node->load_limit, M_VMMFS, M_WAITOK);
+	error = node->load(node, buffer, node->load_limit, &length);
+	if (error == 0 && length > node->load_limit)
+		error = EOVERFLOW;
+	if (error == 0) {
+		offset = ap->a_uio->uio_offset;
+		if ((size_t)offset < length)
+			error = uiomove(buffer + offset, length - (size_t)offset,
+			    ap->a_uio);
+	}
+	kfree(buffer, M_VMMFS);
+	return (error);
+}
+
+int
+vmmfs_node_setattr(struct vop_setattr_args *ap)
+{
+	/* Accept the O_TRUNC size update performed before a control write. */
+	(void)ap;
+	return (0);
+}
+
+int
+vmmfs_node_write(struct vop_write_args *ap)
+{
+	struct vmmfs_node *node;
+	char *buffer;
+	size_t length;
+	int error;
+
+	if (ap == NULL || ap->a_vp == NULL || ap->a_uio == NULL)
+		return (EINVAL);
+	node = ap->a_vp->v_data;
+	if (node == NULL || node->dead)
+		return (ENOENT);
+	if (node->store == NULL)
+		return (EROFS);
+	if (ap->a_uio->uio_offset != 0 ||
+	    (size_t)ap->a_uio->uio_resid > node->store_limit)
+		return (EINVAL);
+	length = (size_t)ap->a_uio->uio_resid;
+	buffer = length == 0 ? NULL : kmalloc(length, M_VMMFS, M_WAITOK);
+	if (length != 0) {
+		error = uiomove(buffer, length, ap->a_uio);
+		if (error != 0) {
+			kfree(buffer, M_VMMFS);
+			return (error);
+		}
+	}
+	error = node->store(node, buffer, length);
+	kfree(buffer, M_VMMFS);
+	return (error);
 }
 
 void

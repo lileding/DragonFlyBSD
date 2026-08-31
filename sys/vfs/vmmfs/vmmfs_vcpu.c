@@ -34,9 +34,6 @@
 
 #define VMMFS_VCPU_MODE 0644
 
-static int vmmfs_vcpu_read(struct vop_read_args *);
-static int vmmfs_vcpu_setattr(struct vop_setattr_args *);
-static int vmmfs_vcpu_write(struct vop_write_args *);
 static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *);
 static bool vmmfs_vcpu_is_reset_requested(struct vmmfs_vcpu *);
 static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *);
@@ -55,19 +52,22 @@ struct vop_ops vmmfs_vcpu_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_vcpu_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_vcpu_setattr,
-	.vop_write = vmmfs_vcpu_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 static int
-vmmfs_vcpu_load(struct vmmfs_vcpu *vcpu, char *buffer, size_t capacity,
+vmmfs_vcpu_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 	size_t *length)
 {
+	struct vmmfs_vcpu *vcpu;
 	uint32_t count;
 	int result;
+
+	vcpu = (struct vmmfs_vcpu *)node;
 
 	if (vcpu == NULL || vcpu->node.dead)
 		return (ENOENT);
@@ -82,11 +82,14 @@ vmmfs_vcpu_load(struct vmmfs_vcpu *vcpu, char *buffer, size_t capacity,
 }
 
 static int
-vmmfs_vcpu_store(struct vmmfs_vcpu *vcpu, const char *buffer, size_t length)
+vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 {
+	struct vmmfs_vcpu *vcpu;
 	uint64_t value;
 	size_t index;
 	unsigned int digit;
+
+	vcpu = (struct vmmfs_vcpu *)node;
 
 	if (length == 0)
 		return (EINVAL);
@@ -133,10 +136,19 @@ vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	*vnodep = NULL;
 	bzero(vcpu, sizeof(*vcpu));
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
-	vmmfs_node_setup(&vcpu->node, parent, vmmfs_vcpu_drop);
-	vcpu->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&vcpu->node, vcpu->inode, VMMFS_VCPU_MODE,
-	    vmmfs_node_decimal_size(vcpu->count));
+	vcpu->node.parent = parent;
+	vcpu->node.dead = false;
+	vcpu->node.deactivate = vmmfs_node_default_deactivate;
+	vcpu->node.drop = vmmfs_vcpu_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	vcpu->node.load_limit = 32;
+	vcpu->node.store_limit = 31;
+	vcpu->node.load = vmmfs_vcpu_load;
+	vcpu->node.store = vmmfs_vcpu_store;
+	vcpu->node.inode = vmmfs_root_allocate_inode(root);
+	vcpu->node.mode = VMMFS_VCPU_MODE;
+	vcpu->node.size = vmmfs_node_decimal_size(vcpu->count);
 	if (mount->vcpu_vops == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -165,7 +177,7 @@ vmmfs_vcpu_drop(struct vmmfs_node *node)
 	}
 	lwkt_reltoken(&vcpu->token);
 	lwkt_token_uninit(&vcpu->token);
-	vcpu->inode = 0;
+	vcpu->node.inode = 0;
 	vmmfs_node_parent_put(node);
 }
 
@@ -720,60 +732,4 @@ out:
 	if (!vmmfs_vcpu_is_stop_requested(vcpu))
 		(void)vmmfs_machine_request_stop(vmmfs_vcpu_machine(vcpu), "guest-exit");
 	vmmfs_vcpu_thread_stop(thread);
-}
-
-static int
-vmmfs_vcpu_read(struct vop_read_args *ap)
-{
-	struct vmmfs_vcpu *vcpu;
-	struct uio *uio;
-	char buffer[32];
-	size_t length;
-	off_t offset;
-	int error;
-
-	vcpu = ap->a_vp->v_data;
-	if (vcpu == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset < 0)
-		return (EINVAL);
-	error = vmmfs_vcpu_load(vcpu, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
-	offset = uio->uio_offset;
-	if ((size_t)offset >= length)
-		return (0);
-	return (uiomove(buffer + offset, length - (size_t)offset, uio));
-}
-
-static int
-vmmfs_vcpu_setattr(struct vop_setattr_args *ap)
-{
-	/* Accept the O_TRUNC size update performed before a control write. */
-	(void)ap;
-	return (0);
-}
-
-static int
-vmmfs_vcpu_write(struct vop_write_args *ap)
-{
-	struct vmmfs_vcpu *vcpu;
-	struct uio *uio;
-	char buffer[32];
-	size_t length;
-	int error;
-
-	vcpu = ap->a_vp->v_data;
-	if (vcpu == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset != 0 || uio->uio_resid == 0 ||
-	    (size_t)uio->uio_resid >= sizeof(buffer))
-		return (EINVAL);
-	length = (size_t)uio->uio_resid;
-	error = uiomove(buffer, length, uio);
-	if (error != 0)
-		return (error);
-	return (vmmfs_vcpu_store(vcpu, buffer, length));
 }

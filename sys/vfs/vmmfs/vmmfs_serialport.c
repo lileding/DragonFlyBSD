@@ -151,7 +151,7 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
         return ENXIO;
     *vnodep = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
-    port->inode = vmmfs_root_allocate_inode(root);
+    port->node.inode = vmmfs_root_allocate_inode(root);
     bcopy(name, port->name, namelen);
     port->name[namelen] = '\0';
     port->number = number;
@@ -175,11 +175,15 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
     port->tty.t_stop = nottystop;
     port->tty.t_param = vmmfs_serialport_tty_param;
     port->dev = dev;
-    vmmfs_node_setup(&port->node, parent,
-        vmmfs_serialport_drop);
+    port->node.parent = parent;
+    port->node.dead = false;
+    port->node.deactivate = vmmfs_node_default_deactivate;
+    port->node.drop = vmmfs_serialport_drop;
+    if (parent != NULL)
+        vmmfs_branch_hold(parent);
     port->node.deactivate = vmmfs_serialport_deactivate;
-    vmmfs_node_set_metadata(&port->node, port->inode,
-        VMMFS_SERIALPORT_MODE, 0);
+    port->node.mode = VMMFS_SERIALPORT_MODE;
+    port->node.size = 0;
     error = vmmfs_vnode_create_cdev(
         state->mount,
         &state->serialport_vops, port->dev, &port->node, vnodep);

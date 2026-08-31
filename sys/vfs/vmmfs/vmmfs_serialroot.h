@@ -18,7 +18,6 @@ struct vnode;
 
 struct vmmfs_serialroot {
 	struct vmmfs_branch branch;
-	ino_t inode;
 	struct vmmfs_serialroot_registry *registry;
 };
 

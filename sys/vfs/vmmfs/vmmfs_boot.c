@@ -122,10 +122,15 @@ vmmfs_boot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	bzero(boot, sizeof(*boot));
 	if (mount == NULL || mount->boot_vops == NULL)
 		return (ENXIO);
-	vmmfs_node_setup(&boot->node, parent, vmmfs_boot_drop);
-	boot->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&boot->node, boot->inode, VMMFS_BOOT_MODE,
-	    machine->memory.size);
+	boot->node.parent = parent;
+	boot->node.dead = false;
+	boot->node.deactivate = vmmfs_node_default_deactivate;
+	boot->node.drop = vmmfs_boot_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	boot->node.inode = vmmfs_root_allocate_inode(root);
+	boot->node.mode = VMMFS_BOOT_MODE;
+	boot->node.size = machine->memory.size;
 	serial = atomic_fetchadd_int(&vmmfs_boot_dev_serial, 1);
 	boot->dev = make_only_dev(&vmmfs_boot_dev_ops, serial, UID_ROOT,
 		GID_WHEEL, VMMFS_BOOT_MODE, "vmmfs_boot%d", serial);
@@ -163,7 +168,7 @@ vmmfs_boot_drop(struct vmmfs_node *node)
 		destroy_only_dev(boot->dev);
 		boot->dev = NULL;
 	}
-	boot->inode = 0;
+	boot->node.inode = 0;
 	vmmfs_node_parent_put(node);
 }
 

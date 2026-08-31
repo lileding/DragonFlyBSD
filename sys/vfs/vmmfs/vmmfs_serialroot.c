@@ -114,13 +114,13 @@ vmmfs_serialroot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	if (registry == NULL)
 		return (ENOMEM);
 	serialroot->registry = registry;
-	serialroot->inode = vmmfs_root_allocate_inode(root);
+	serialroot->branch.node.inode = vmmfs_root_allocate_inode(root);
 	RB_INIT(&serialroot->registry->ports);
 	vmmfs_branch_init(&serialroot->branch, parent,
 	    vmmfs_serialroot_drop);
 	serialroot->branch.node.deactivate = vmmfs_serialroot_deactivate;
-	vmmfs_node_set_metadata(&serialroot->branch.node, serialroot->inode,
-	    VMMFS_SERIALROOT_MODE, 0);
+	serialroot->branch.node.mode = VMMFS_SERIALROOT_MODE;
+	serialroot->branch.node.size = 0;
 	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->serialroot_vops, VDIR, &serialroot->branch.node, vnodep);
 	if (error != 0)
@@ -477,13 +477,13 @@ vmmfs_serialroot_readdir(struct vop_readdir_args *ap)
 	error = 0;
 	stop = 0;
 	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, serialroot->inode, DT_DIR, 1,
+		stop = vop_write_dirent(&error, uio, serialroot->branch.node.inode, DT_DIR, 1,
 		    ".");
 		if (!stop)
 			offset = 1;
 	}
 	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, vmmfs_serialroot_machine(serialroot)->inode,
+		stop = vop_write_dirent(&error, uio, vmmfs_serialroot_machine(serialroot)->branch.node.inode,
 		    DT_DIR, 2, "..");
 		if (!stop)
 			offset = 2;
@@ -536,7 +536,7 @@ vmmfs_serialroot_read_item(struct vmmfs_serialroot *serialroot,
 	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		if (current++ != index)
 			continue;
-		item->inode = entry->port->inode;
+		item->inode = entry->port->node.inode;
 		bcopy(entry->port->name, item->name, sizeof(item->name));
 		lwkt_reltoken(&serialroot->branch.token);
 		return (0);

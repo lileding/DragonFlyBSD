@@ -19,7 +19,6 @@ struct vop_ops;
 
 struct vmmfs_machine_id {
 	struct vmmfs_node node;
-	ino_t inode;
 };
 
 int vmmfs_machine_id_init(struct vmmfs_mount *, struct vmmfs_branch *,

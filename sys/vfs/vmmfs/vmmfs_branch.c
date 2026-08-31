@@ -23,7 +23,12 @@ vmmfs_branch_init(struct vmmfs_branch *branch, struct vmmfs_branch *parent,
 	KKASSERT(branch != NULL);
 	KKASSERT(drop != NULL);
 	bzero(branch, sizeof(*branch));
-	vmmfs_node_setup(&branch->node, parent, vmmfs_branch_drop);
+	branch->node.parent = parent;
+	branch->node.dead = false;
+	branch->node.deactivate = vmmfs_node_default_deactivate;
+	branch->node.drop = vmmfs_branch_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
 	branch->final_drop = drop;
 	lwkt_token_init(&branch->token, "vmmfsbranch");
 	branch->references = 1;

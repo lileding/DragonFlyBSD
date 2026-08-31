@@ -629,7 +629,7 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 	}
 	lwkt_reltoken(&platform->token);
 	if (power_off) {
-		if (vmmfs_machine_stop_request(platform->machine, "guest-s5") != 0)
+		if (vmmfs_machine_request_stop(platform->machine, "guest-s5") != 0)
 			vmmfs_events_log(&platform->machine->events,
 			    VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED, NULL);
 	}

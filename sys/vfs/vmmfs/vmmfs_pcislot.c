@@ -100,13 +100,13 @@ vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	if (mount == NULL || mount->pcislot_vops == NULL)
 		return (ENXIO);
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
-	slot->inode = vmmfs_root_allocate_inode(root);
+	slot->branch.node.inode = vmmfs_root_allocate_inode(root);
 	slot->bdf = bdf;
 	vmmfs_branch_init(&slot->branch, parent,
 	    vmmfs_pcislot_drop);
 	slot->branch.node.deactivate = vmmfs_pcislot_deactivate;
-	vmmfs_node_set_metadata(&slot->branch.node, slot->inode,
-	    VMMFS_PCISLOT_MODE, 0);
+	slot->branch.node.mode = VMMFS_PCISLOT_MODE;
+	slot->branch.node.size = 0;
 	error = vmmfs_pcislot_events_init(mount, &slot->branch, &slot->events,
 	    &slot->events_vnode);
 	if (error != 0)
@@ -626,12 +626,12 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	error = 0;
 	stop = 0;
 	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, slot->inode, DT_DIR, 1, ".");
+		stop = vop_write_dirent(&error, uio, slot->branch.node.inode, DT_DIR, 1, ".");
 		if (!stop)
 			offset = 1;
 	}
 	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, vmmfs_pcislot_pciroot(slot)->inode, DT_DIR,
+		stop = vop_write_dirent(&error, uio, vmmfs_pcislot_pciroot(slot)->branch.node.inode, DT_DIR,
 		    2, "..");
 		if (!stop)
 			offset = 2;
@@ -678,7 +678,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	}
 	if (slot->descriptor.committed) {
 		if (index == 0) {
-			item->inode = slot->events.inode;
+			item->inode = slot->events.node.inode;
 			item->type = DT_REG;
 			bcopy("events", item->name, sizeof("events"));
 			lwkt_reltoken(&slot->branch.token);
@@ -686,7 +686,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 		}
 		--index;
 		if (index == 0) {
-			item->inode = slot->config.inode;
+			item->inode = slot->config.node.inode;
 			item->type = DT_REG;
 			bcopy("config", item->name, sizeof("config"));
 			lwkt_reltoken(&slot->branch.token);
@@ -696,7 +696,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	}
 	if (slot->descriptor_vnode != NULL) {
 		if (index == 0) {
-			item->inode = slot->descriptor.inode;
+			item->inode = slot->descriptor.node.inode;
 			item->type = DT_REG;
 			bcopy("descriptor", item->name, sizeof("descriptor"));
 			lwkt_reltoken(&slot->branch.token);

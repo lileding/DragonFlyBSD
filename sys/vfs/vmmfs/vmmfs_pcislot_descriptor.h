@@ -134,7 +134,6 @@ struct vmmfs_pcislot_descriptor_value {
 
 struct vmmfs_pcislot_descriptor {
 	struct vmmfs_node node;
-	ino_t inode;
 	bool updating;
 	bool committed;
 	uint64_t generation;

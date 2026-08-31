@@ -31,15 +31,14 @@
 #define VMMFS_MEMORY_MODE 0644
 #define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 
-static int vmmfs_memory_read(struct vop_read_args *);
-static int vmmfs_memory_setattr(struct vop_setattr_args *);
-static int vmmfs_memory_write(struct vop_write_args *);
 static int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static void vmmfs_memory_drop(struct vmmfs_node *);
 static void vmmfs_memory_object_reference(struct vm_object *);
+static int vmmfs_memory_node_load(struct vmmfs_node *, char *, size_t, size_t *);
+static int vmmfs_memory_node_store(struct vmmfs_node *, const char *, size_t);
 
 struct vop_ops vmmfs_memory_vops = {
 	.vop_default = vop_defaultop,
@@ -49,11 +48,11 @@ struct vop_ops vmmfs_memory_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_memory_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_memory_setattr,
-	.vop_write = vmmfs_memory_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 static int
@@ -113,6 +112,21 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	return (0);
 }
 
+static int
+vmmfs_memory_node_load(struct vmmfs_node *node, char *buffer,
+	size_t capacity, size_t *length)
+{
+	return (vmmfs_memory_load((struct vmmfs_memory *)node, buffer,
+	    capacity, length));
+}
+
+static int
+vmmfs_memory_node_store(struct vmmfs_node *node, const char *buffer,
+	size_t length)
+{
+	return (vmmfs_memory_store((struct vmmfs_memory *)node, buffer, length));
+}
+
 int
 vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_memory *memory, struct vnode **vnodep)
@@ -127,10 +141,19 @@ vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (ENXIO);
 	*vnodep = NULL;
 	bzero(memory, sizeof(*memory));
-	vmmfs_node_setup(&memory->node, parent, vmmfs_memory_drop);
-	memory->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&memory->node, memory->inode,
-	    VMMFS_MEMORY_MODE, vmmfs_node_decimal_size(memory->size));
+	memory->node.parent = parent;
+	memory->node.dead = false;
+	memory->node.deactivate = vmmfs_node_default_deactivate;
+	memory->node.drop = vmmfs_memory_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	memory->node.load_limit = 32;
+	memory->node.store_limit = 31;
+	memory->node.load = vmmfs_memory_node_load;
+	memory->node.store = vmmfs_memory_node_store;
+	memory->node.inode = vmmfs_root_allocate_inode(root);
+	memory->node.mode = VMMFS_MEMORY_MODE;
+	memory->node.size = vmmfs_node_decimal_size(memory->size);
 	if (mount->memory_vops == NULL) {
 		error = ENXIO;
 		goto fail;
@@ -154,7 +177,7 @@ vmmfs_memory_drop(struct vmmfs_node *node)
 	KKASSERT(memory != NULL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		panic("vmmfs_memory_drop: runtime memory is still active");
-	memory->inode = 0;
+	memory->node.inode = 0;
 	vmmfs_node_parent_put(node);
 }
 
@@ -360,60 +383,4 @@ vmmfs_memory_object_reference(struct vm_object *object)
 	vm_object_hold(object);
 	vm_object_reference_locked(object);
 	vm_object_drop(object);
-}
-
-static int
-vmmfs_memory_read(struct vop_read_args *ap)
-{
-	struct vmmfs_memory *memory;
-	struct uio *uio;
-	char buffer[32];
-	size_t length;
-	off_t offset;
-	int error;
-
-	memory = ap->a_vp->v_data;
-	if (memory == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset < 0)
-		return (EINVAL);
-	error = vmmfs_memory_load(memory, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
-	offset = uio->uio_offset;
-	if ((size_t)offset >= length)
-		return (0);
-	return (uiomove(buffer + offset, length - (size_t)offset, uio));
-}
-
-static int
-vmmfs_memory_setattr(struct vop_setattr_args *ap)
-{
-	/* Accept the O_TRUNC size update performed before a control write. */
-	(void)ap;
-	return (0);
-}
-
-static int
-vmmfs_memory_write(struct vop_write_args *ap)
-{
-	struct vmmfs_memory *memory;
-	struct uio *uio;
-	char buffer[32];
-	size_t length;
-	int error;
-
-	memory = ap->a_vp->v_data;
-	if (memory == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset != 0 || uio->uio_resid == 0 ||
-	    (size_t)uio->uio_resid >= sizeof(buffer))
-		return (EINVAL);
-	length = (size_t)uio->uio_resid;
-	error = uiomove(buffer, length, uio);
-	if (error != 0)
-		return (error);
-	return (vmmfs_memory_store(memory, buffer, length));
 }

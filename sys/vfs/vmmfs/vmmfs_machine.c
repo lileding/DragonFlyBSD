@@ -85,9 +85,9 @@ vmmfs_machine_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	vmmfs_branch_init(&machine->branch, parent, vmmfs_machine_drop);
 	machine->branch.node.deactivate = vmmfs_machine_deactivate;
 	machine->mount = mount;
-	machine->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&machine->branch.node, machine->inode,
-	    VMMFS_MACHINE_MODE, 0);
+	machine->branch.node.inode = vmmfs_root_allocate_inode(root);
+	machine->branch.node.mode = VMMFS_MACHINE_MODE;
+	machine->branch.node.size = 0;
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
 	error = vmmfs_machine_id_init(mount, &machine->branch, &machine->id_node,
@@ -658,7 +658,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	error = 0;
 	stop = 0;
 	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, machine->inode, DT_DIR, 1,
+		stop = vop_write_dirent(&error, uio, machine->branch.node.inode, DT_DIR, 1,
 		    ".");
 		if (!stop)
 			offset = 1;
@@ -670,37 +670,37 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 			offset = 2;
 	}
 	if (!stop && offset == 2) {
-		stop = vop_write_dirent(&error, uio, machine->id_node.inode,
+		stop = vop_write_dirent(&error, uio, machine->id_node.node.inode,
 		    DT_REG, sizeof("id") - 1, "id");
 		if (!stop)
 			offset = 3;
 	}
 	if (!stop && offset == 3) {
-		stop = vop_write_dirent(&error, uio, machine->vcpu.inode,
+		stop = vop_write_dirent(&error, uio, machine->vcpu.node.inode,
 		    DT_REG, sizeof("vcpu") - 1, "vcpu");
 		if (!stop)
 			offset = 4;
 	}
 	if (!stop && offset == 4) {
-		stop = vop_write_dirent(&error, uio, machine->memory.inode,
+		stop = vop_write_dirent(&error, uio, machine->memory.node.inode,
 		    DT_REG, sizeof("mem") - 1, "mem");
 		if (!stop)
 			offset = 5;
 	}
 	if (!stop && offset == 5) {
-		stop = vop_write_dirent(&error, uio, machine->loader.inode,
+		stop = vop_write_dirent(&error, uio, machine->loader.node.inode,
 		    DT_REG, sizeof("loader") - 1, "loader");
 		if (!stop)
 			offset = 6;
 	}
 	if (!stop && offset == 6) {
-		stop = vop_write_dirent(&error, uio, machine->boot.inode,
+		stop = vop_write_dirent(&error, uio, machine->boot.node.inode,
 		    DT_CHR, sizeof("boot") - 1, "boot");
 		if (!stop)
 			offset = 7;
 	}
 	if (!stop && offset == 7) {
-		stop = vop_write_dirent(&error, uio, machine->events.inode,
+		stop = vop_write_dirent(&error, uio, machine->events.node.inode,
 		    DT_REG, sizeof("events") - 1, "events");
 		if (!stop)
 			offset = 8;
@@ -709,7 +709,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 		lwkt_gettoken(&machine->branch.token);
 		stopped = machine->stopped;
 		present = stopped != NULL;
-		inode = present ? stopped->inode : 0;
+		inode = present ? stopped->node.inode : 0;
 		lwkt_reltoken(&machine->branch.token);
 		if (present) {
 			stop = vop_write_dirent(&error, uio, inode, DT_REG,
@@ -720,7 +720,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	}
 	if (!stop && offset == 9) {
 		lwkt_gettoken(&machine->branch.token);
-		inode = machine->pciroot.inode;
+		inode = machine->pciroot.branch.node.inode;
 		lwkt_reltoken(&machine->branch.token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("pci") - 1, "pci");
@@ -729,7 +729,7 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	}
 	if (!stop && offset == 10) {
 		lwkt_gettoken(&machine->branch.token);
-		inode = machine->serialroot.inode;
+		inode = machine->serialroot.branch.node.inode;
 		lwkt_reltoken(&machine->branch.token);
 		stop = vop_write_dirent(&error, uio, inode, DT_DIR,
 		    sizeof("serial") - 1, "serial");

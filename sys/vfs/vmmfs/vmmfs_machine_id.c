@@ -26,7 +26,7 @@
 
 static volatile u_int vmmfs_machine_next_id;
 
-static int vmmfs_machine_id_read(struct vop_read_args *);
+static int vmmfs_machine_id_load(struct vmmfs_node *, char *, size_t, size_t *);
 static void vmmfs_machine_id_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_machine_id_vops = {
@@ -37,9 +37,11 @@ struct vop_ops vmmfs_machine_id_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_machine_id_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 int
@@ -64,16 +66,25 @@ vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
 	if (value > VMMFS_MACHINE_ID_MAX)
 		return (ENOSPC);
-	vmmfs_node_setup(&identity->node, parent, vmmfs_machine_id_drop);
-	identity->inode = vmmfs_root_allocate_inode(root);
+	identity->node.parent = parent;
+	identity->node.dead = false;
+	identity->node.deactivate = vmmfs_node_default_deactivate;
+	identity->node.drop = vmmfs_machine_id_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	identity->node.load_limit = sizeof("999999\n");
+	identity->node.store_limit = 0;
+	identity->node.load = vmmfs_machine_id_load;
+	identity->node.store = NULL;
+	identity->node.inode = vmmfs_root_allocate_inode(root);
 	machine->id = value;
-	vmmfs_node_set_metadata(&identity->node, identity->inode,
-	    VMMFS_MACHINE_ID_MODE, vmmfs_node_decimal_size(value));
+	identity->node.mode = VMMFS_MACHINE_ID_MODE;
+	identity->node.size = vmmfs_node_decimal_size(value);
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->machine_id_vops, VREG, &identity->node, vnodep);
 	if (error == 0)
 		return (0);
-	identity->inode = 0;
+	identity->node.inode = 0;
 	machine->id = 0;
 	vmmfs_machine_id_drop(&identity->node);
 	return (error);
@@ -86,29 +97,24 @@ vmmfs_machine_id_drop(struct vmmfs_node *node)
 
 	identity = (struct vmmfs_machine_id *)node;
 	KKASSERT(identity != NULL);
-	identity->inode = 0;
+	identity->node.inode = 0;
 	vmmfs_node_parent_put(node);
 }
 
 static int
-vmmfs_machine_id_read(struct vop_read_args *ap)
+vmmfs_machine_id_load(struct vmmfs_node *node, char *buffer,
+	size_t capacity, size_t *length)
 {
 	struct vmmfs_machine_id *identity;
-	char text[sizeof("999999\n")];
-	off_t offset;
 	int error;
 
-	identity = ap->a_vp->v_data;
+	identity = (struct vmmfs_machine_id *)node;
 	if (identity == NULL || identity->node.dead)
 		return (ENOENT);
-	if (ap->a_uio->uio_offset < 0)
-		return (EINVAL);
-	offset = ap->a_uio->uio_offset;
-	error = ksnprintf(text, sizeof(text), "%06u\n", vmmfs_machine_id_machine(identity)->id);
-	if (error < 0 || (size_t)error >= sizeof(text))
+	error = ksnprintf(buffer, capacity, "%06u\n",
+	    vmmfs_machine_id_machine(identity)->id);
+	if (error < 0 || (size_t)error >= capacity)
 		return (EOVERFLOW);
-	if (offset >= error)
-		return (0);
-	return (uiomove(text + (size_t)offset,
-	    (size_t)error - (size_t)offset, ap->a_uio));
+	*length = (size_t)error;
+	return (0);
 }

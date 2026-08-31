@@ -84,11 +84,15 @@ vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent
 	SLIST_INIT(&state_node->kq.ki_note);
 	state_node->buffer = kmalloc(VMMFS_PCISLOT_EVENTS_BUFFER_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);
-	state_node->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_setup(&state_node->node, parent,
-	    vmmfs_pcislot_events_drop);
-	vmmfs_node_set_metadata(&state_node->node, state_node->inode,
-	    VMMFS_PCISLOT_EVENTS_MODE, 0);
+	state_node->node.inode = vmmfs_root_allocate_inode(root);
+	state_node->node.parent = parent;
+	state_node->node.dead = false;
+	state_node->node.deactivate = vmmfs_node_default_deactivate;
+	state_node->node.drop = vmmfs_pcislot_events_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	state_node->node.mode = VMMFS_PCISLOT_EVENTS_MODE;
+	state_node->node.size = 0;
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_events_vops, VREG, &state_node->node, vnodep);
 	if (error != 0)
@@ -106,7 +110,7 @@ vmmfs_pcislot_events_drop(struct vmmfs_node *node)
 	vmmfs_pcislot_events_revoke(state_node);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
-	state_node->inode = 0;
+	state_node->node.inode = 0;
 	lwkt_token_uninit(&state_node->token);
 	vmmfs_node_parent_put(node);
 }

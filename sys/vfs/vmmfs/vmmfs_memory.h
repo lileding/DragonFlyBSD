@@ -28,7 +28,6 @@ void vmmfs_memory_reset_commit(struct vmmfs_memory *, struct vmspace *);
 void vmmfs_memory_release(struct vmmfs_memory *);
 struct vmmfs_memory {
 	struct vmmfs_node node;
-	ino_t inode;
 	struct vm_object *object;
 	struct vmspace *boot_vmspace;
 	struct vmspace *run_vmspace;

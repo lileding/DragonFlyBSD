@@ -22,7 +22,6 @@ struct vop_ops;
 
 struct vmmfs_events {
 	struct vmmfs_node node;
-	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;
 	char *buffer;

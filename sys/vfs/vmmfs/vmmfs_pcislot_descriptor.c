@@ -73,9 +73,8 @@
 #define VMMFS_DESCRIPTOR_ECAP_DATA 0x08
 
 static int vmmfs_pcislot_descriptor_open(struct vop_open_args *);
-static int vmmfs_pcislot_descriptor_read(struct vop_read_args *);
-static int vmmfs_pcislot_descriptor_setattr(struct vop_setattr_args *);
-static int vmmfs_pcislot_descriptor_write(struct vop_write_args *);
+static int vmmfs_pcislot_descriptor_load(struct vmmfs_node *, char *, size_t, size_t *);
+static int vmmfs_pcislot_descriptor_store(struct vmmfs_node *, const char *, size_t);
 static int vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *,
 	const char *, size_t, struct vmmfs_pcislot_descriptor_value *);
 static int vmmfs_pcislot_descriptor_parse_number(const char *, size_t,
@@ -99,11 +98,11 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_pcislot_descriptor_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_pcislot_descriptor_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_pcislot_descriptor_setattr,
-	.vop_write = vmmfs_pcislot_descriptor_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 int
@@ -123,6 +122,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_branch *pa
 	if (machine == NULL || root == NULL)
 		return (ENXIO);
 	*vnodep = NULL;
+	if (mount->pcislot_descriptor_vops == NULL)
 		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
 	lwkt_gettoken(&machine->branch.token);
@@ -131,11 +131,19 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_branch *pa
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->branch.token);
-	descriptor->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_setup(&descriptor->node, parent,
-	    vmmfs_pcislot_descriptor_drop);
-	vmmfs_node_set_metadata(&descriptor->node, descriptor->inode,
-	    VMMFS_PCISLOT_DESCRIPTOR_MODE, 0);
+	descriptor->node.inode = vmmfs_root_allocate_inode(root);
+	descriptor->node.parent = parent;
+	descriptor->node.dead = false;
+	descriptor->node.deactivate = vmmfs_node_default_deactivate;
+	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	descriptor->node.load_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX;
+	descriptor->node.store_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX - 1;
+	descriptor->node.load = vmmfs_pcislot_descriptor_load;
+	descriptor->node.store = vmmfs_pcislot_descriptor_store;
+	descriptor->node.mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
+	descriptor->node.size = 0;
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_descriptor_vops, VREG, &descriptor->node, vnodep);
 	if (error != 0)
@@ -203,52 +211,31 @@ vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
 }
 
 static int
-vmmfs_pcislot_descriptor_read(struct vop_read_args *ap)
+vmmfs_pcislot_descriptor_load(struct vmmfs_node *node, char *buffer,
+	size_t capacity, size_t *lengthp)
 {
 	struct vmmfs_pcislot_descriptor *descriptor;
 	struct vmmfs_pcislot *slot;
-	char *buffer;
-	size_t length;
-	off_t offset;
-	int error;
 
-	descriptor = ap->a_vp->v_data;
-	if (descriptor == NULL || vmmfs_pcislot_descriptor_slot(descriptor) == NULL ||
-	    vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor))) == NULL)
+	descriptor = (struct vmmfs_pcislot_descriptor *)node;
+	if (descriptor == NULL ||
+	    (slot = vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
+	    vmmfs_pcislot_pciroot(slot) == NULL ||
+	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL)
 		return (ENOENT);
-	if (ap->a_uio->uio_offset < 0)
-		return (EINVAL);
-	slot = vmmfs_pcislot_descriptor_slot(descriptor);
-	if (descriptor->node.dead)
-		return (ENOENT);
-	buffer = kmalloc(VMMFS_PCISLOT_DESCRIPTOR_MAX, M_VMMFS, M_WAITOK);
+	if (capacity < VMMFS_PCISLOT_DESCRIPTOR_MAX)
+		return (EOVERFLOW);
 	lwkt_gettoken(&slot->branch.token);
-	length = descriptor->committed ? descriptor->value.length : 0;
-	if (length != 0)
-		bcopy(descriptor->value.text, buffer, length);
+	*lengthp = descriptor->committed ? descriptor->value.length : 0;
+	if (*lengthp != 0)
+		bcopy(descriptor->value.text, buffer, *lengthp);
 	lwkt_reltoken(&slot->branch.token);
-	offset = ap->a_uio->uio_offset;
-	if ((size_t)offset >= length) {
-		kfree(buffer, M_VMMFS);
-		return (0);
-	}
-	error = uiomove(buffer + offset, length - (size_t)offset, ap->a_uio);
-	kfree(buffer, M_VMMFS);
-	return (error);
-}
-
-
-static int
-vmmfs_pcislot_descriptor_setattr(struct vop_setattr_args *ap)
-{
-	/* Accept the O_TRUNC size update before a descriptor write transaction. */
-	(void)ap;
 	return (0);
 }
 
 static int
-vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
+vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
+	size_t length)
 {
 	struct vmmfs_pcislot_descriptor *descriptor;
 	struct vmmfs_pcislot_descriptor_value *value;
@@ -259,14 +246,12 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_pcislot *slot;
 	char *buffer;
-	size_t length;
 	uint64_t generation;
 	bool removing;
 	bool updating;
 	bool committed;
 	int error;
-
-	descriptor = ap->a_vp->v_data;
+	descriptor = (struct vmmfs_pcislot_descriptor *)node;
 	if (descriptor == NULL ||
 	    (slot = vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
 	    (pciroot = vmmfs_pcislot_pciroot(slot)) == NULL ||
@@ -274,10 +259,6 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 		return (ENOENT);
 	if (descriptor->node.dead)
 		return (ENOENT);
-	if (ap->a_uio->uio_offset != 0 ||
-	    ap->a_uio->uio_resid >= VMMFS_PCISLOT_DESCRIPTOR_MAX)
-		return (EINVAL);
-	length = (size_t)ap->a_uio->uio_resid;
 	buffer = NULL;
 	value = NULL;
 	new_auth = NULL;
@@ -285,12 +266,10 @@ vmmfs_pcislot_descriptor_write(struct vop_write_args *ap)
 	removing = length == 0;
 	if (!removing) {
 		buffer = kmalloc(length, M_VMMFS, M_WAITOK);
+		bcopy(text, buffer, length);
 		value = kmalloc(sizeof(*value), M_VMMFS, M_WAITOK | M_ZERO);
-		error = uiomove(buffer, length, ap->a_uio);
-		if (error != 0)
-			goto failed;
-		error = vmmfs_pcislot_descriptor_parse(vmmfs_pcislot_descriptor_slot(descriptor), buffer,
-		    length, value);
+		error = vmmfs_pcislot_descriptor_parse(
+		    vmmfs_pcislot_descriptor_slot(descriptor), buffer, length, value);
 		if (error != 0)
 			goto failed;
 	}

@@ -22,9 +22,6 @@
 
 #define VMMFS_STOPPED_MODE 0644
 
-static int vmmfs_stopped_read(struct vop_read_args *);
-static int vmmfs_stopped_setattr(struct vop_setattr_args *);
-static int vmmfs_stopped_write(struct vop_write_args *);
 static void vmmfs_stopped_drop(struct vmmfs_node *);
 
 struct vop_ops vmmfs_stopped_vops = {
@@ -35,11 +32,11 @@ struct vop_ops vmmfs_stopped_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_stopped_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_stopped_setattr,
-	.vop_write = vmmfs_stopped_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 int
@@ -59,10 +56,19 @@ vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	if (mount->stopped_vops == NULL)
 		return (ENXIO);
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
-	vmmfs_node_setup(&stopped->node, parent, vmmfs_stopped_drop);
-	stopped->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&stopped->node, stopped->inode,
-	    VMMFS_STOPPED_MODE, 0);
+	stopped->node.parent = parent;
+	stopped->node.dead = false;
+	stopped->node.deactivate = vmmfs_node_default_deactivate;
+	stopped->node.drop = vmmfs_stopped_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	stopped->node.load_limit = 0;
+	stopped->node.store_limit = 0;
+	stopped->node.load = NULL;
+	stopped->node.store = NULL;
+	stopped->node.inode = vmmfs_root_allocate_inode(root);
+	stopped->node.mode = VMMFS_STOPPED_MODE;
+	stopped->node.size = 0;
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->stopped_vops, VREG, &stopped->node, vnodep);
 	if (error != 0) {
@@ -81,29 +87,4 @@ vmmfs_stopped_drop(struct vmmfs_node *node)
 	KKASSERT(stopped != NULL);
 	vmmfs_node_parent_put(node);
 	kfree(stopped, M_VMMFS);
-}
-
-static int
-vmmfs_stopped_read(struct vop_read_args *ap)
-{
-	if (ap->a_vp->v_data == NULL)
-		return (ENOENT);
-	if (ap->a_uio->uio_offset < 0)
-		return (EINVAL);
-	return (0);
-}
-
-
-static int
-vmmfs_stopped_setattr(struct vop_setattr_args *ap)
-{
-	(void)ap;
-	return (0);
-}
-
-static int
-vmmfs_stopped_write(struct vop_write_args *ap)
-{
-	(void)ap;
-	return (EOPNOTSUPP);
 }

@@ -35,7 +35,6 @@ struct vmmfs_pcislot_type0 {
 
 struct vmmfs_pcislot {
 	struct vmmfs_branch branch;
-	ino_t inode;
 	uint16_t bdf;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;

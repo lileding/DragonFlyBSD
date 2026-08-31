@@ -30,7 +30,6 @@ struct vmmfs_vcpu_thread {
 
 struct vmmfs_vcpu {
 	struct vmmfs_node node;
-	ino_t inode;
 	struct vmmfs_vcpu_thread *threads;
 	vmm_machine_t runtime_machine;
 	/* Protects requests and the vCPU thread barriers. */

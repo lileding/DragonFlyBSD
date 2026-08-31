@@ -21,7 +21,6 @@ struct vop_ops;
 struct vmmfs_boot {
 	struct vmmfs_node node;
 	cdev_t dev;
-	ino_t inode;
 	struct vmmfs_boot_session *session;
 };
 

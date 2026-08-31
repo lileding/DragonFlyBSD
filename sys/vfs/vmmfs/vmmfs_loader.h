@@ -24,7 +24,6 @@ int vmmfs_loader_run(struct vmmfs_loader *, const char *,
 
 struct vmmfs_loader {
 	struct vmmfs_node node;
-	ino_t inode;
 	/* A NUL-terminated, one-page shell script executed with boot fd 3. */
 	char script[PAGE_SIZE];
 };

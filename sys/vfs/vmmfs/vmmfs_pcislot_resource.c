@@ -59,7 +59,6 @@ struct vmmfs_pcislot_resource_trap {
 
 struct vmmfs_pcislot_resource {
 	struct vmmfs_node node;
-	ino_t inode;
 	enum vmmfs_pcislot_resource_kind kind;
 	uint16_t index;
 	uint16_t capability;
@@ -334,16 +333,19 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	KKASSERT(index == count);
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
-		resource->inode = vmmfs_root_allocate_inode(
+		resource->node.inode = vmmfs_root_allocate_inode(
 		    vmmfs_machine_root(machine_owner));
 		lwkt_token_init(&resource->token, "vmmfspcires");
 		++resources->initialized_count;
 		SLIST_INIT(&resource->read_kq.ki_note);
-		vmmfs_node_setup(&resource->node, &resources->branch,
-		    vmmfs_pcislot_resource_drop);
-		vmmfs_node_set_metadata(&resource->node, resource->inode,
-		    VMMFS_PCISLOT_RESOURCE_MODE,
-		    vmmfs_pcislot_resource_mappable(resource) ? (off_t)resource->size : 0);
+		resource->node.parent = &resources->branch;
+		resource->node.dead = false;
+		resource->node.deactivate = vmmfs_node_default_deactivate;
+		resource->node.drop = vmmfs_pcislot_resource_drop;
+		vmmfs_branch_hold(&resources->branch);
+		resource->node.mode = VMMFS_PCISLOT_RESOURCE_MODE;
+		resource->node.size = vmmfs_pcislot_resource_mappable(resource) ?
+		    (off_t)resource->size : 0;
 		error = vmmfs_pcislot_resource_create_mapping(resource);
 		if (error != 0)
 			goto fail;
@@ -552,7 +554,7 @@ vmmfs_pcislot_resources_read_item(struct vmmfs_pcislot_resources *resources,
 		return (ENOENT);
 	}
 	resource = &resources->items[index];
-	*inode = resource->inode;
+	*inode = resource->node.inode;
 	error = vmmfs_pcislot_resource_name(resource, name, capacity,
 	    name_length);
 	lwkt_reltoken(&resources->branch.token);

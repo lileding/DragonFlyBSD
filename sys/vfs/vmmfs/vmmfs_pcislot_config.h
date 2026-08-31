@@ -29,7 +29,6 @@ TAILQ_HEAD(vmmfs_pcislot_config_request_queue,
 
 struct vmmfs_pcislot_config {
 	struct vmmfs_node node;
-	ino_t inode;
 	struct lwkt_token token;
 	struct kqinfo kq;
 	struct file *responder;

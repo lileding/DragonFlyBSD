@@ -39,7 +39,6 @@ RB_PROTOTYPE(vmmfs_machine_tree, vmmfs_root_machine, entry,
 
 struct vmmfs_root {
 	struct vmmfs_branch branch;
-	ino_t inode;
 	volatile u_int next_inode;
 	struct vmmfs_machine_tree machines;
 };
@@ -116,10 +115,10 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 	root->branch.node.deactivate = vmmfs_root_deactivate;
 	root->branch.ops = &vmmfs_root_branch_ops;
 	root->next_inode = 1;
-	root->inode = vmmfs_root_allocate_inode(root);
-	state->root_inode = root->inode;
-	vmmfs_node_set_metadata(&root->branch.node, root->inode,
-	    VMMFS_ROOT_MODE, 0);
+	root->branch.node.inode = vmmfs_root_allocate_inode(root);
+	state->root_inode = root->branch.node.inode;
+	root->branch.node.mode = VMMFS_ROOT_MODE;
+	root->branch.node.size = 0;
 	RB_INIT(&root->machines);
 	error = vmmfs_vnode_create_regular(mount, &state->root_vops, VDIR,
 		&root->branch.node, &vnode);

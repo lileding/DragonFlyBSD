@@ -32,7 +32,6 @@ struct vmmfs_serialring {
 
 struct vmmfs_serialport {
 	struct vmmfs_node node;
-	ino_t inode;
 	char name[sizeof("com4")];
 	uint8_t number;
 	uint16_t base;

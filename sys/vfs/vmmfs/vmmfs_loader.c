@@ -116,10 +116,9 @@ static int vmmfs_loader_file_close(struct file *);
 static int vmmfs_loader_file_seek(struct file *, off_t, int, off_t *);
 static void vmmfs_loader_file_disarm(struct file *);
 
-static int vmmfs_loader_read(struct vop_read_args *);
-static int vmmfs_loader_setattr(struct vop_setattr_args *);
-static int vmmfs_loader_write(struct vop_write_args *);
 static void vmmfs_loader_drop(struct vmmfs_node *);
+static int vmmfs_loader_node_load(struct vmmfs_node *, char *, size_t, size_t *);
+static int vmmfs_loader_node_store(struct vmmfs_node *, const char *, size_t);
 
 struct vop_ops vmmfs_loader_vops = {
 	.vop_default = vop_defaultop,
@@ -129,11 +128,11 @@ struct vop_ops vmmfs_loader_vops = {
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_loader_read,
+	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_loader_setattr,
-	.vop_write = vmmfs_loader_write,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
 };
 
 static struct vop_ops vmmfs_loader_file_vops = {
@@ -924,6 +923,21 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
 	return (0);
 }
 
+static int
+vmmfs_loader_node_load(struct vmmfs_node *node, char *buffer,
+	size_t capacity, size_t *length)
+{
+	return (vmmfs_loader_load((struct vmmfs_loader *)node, buffer,
+	    capacity, length));
+}
+
+static int
+vmmfs_loader_node_store(struct vmmfs_node *node, const char *buffer,
+	size_t length)
+{
+	return (vmmfs_loader_store((struct vmmfs_loader *)node, buffer, length));
+}
+
 int
 vmmfs_loader_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	struct vmmfs_loader *loader,
@@ -939,14 +953,23 @@ vmmfs_loader_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (ENXIO);
 	*vnodep = NULL;
 	bzero(loader, sizeof(*loader));
-	vmmfs_node_setup(&loader->node, parent, vmmfs_loader_drop);
+	loader->node.parent = parent;
+	loader->node.dead = false;
+	loader->node.deactivate = vmmfs_node_default_deactivate;
+	loader->node.drop = vmmfs_loader_drop;
+	if (parent != NULL)
+		vmmfs_branch_hold(parent);
+	loader->node.load_limit = PAGE_SIZE + 1;
+	loader->node.store_limit = PAGE_SIZE - 1;
+	loader->node.load = vmmfs_loader_node_load;
+	loader->node.store = vmmfs_loader_node_store;
 	if (mount == NULL || mount->loader_vops == NULL) {
 		error = ENXIO;
 		goto fail;
 	}
-	loader->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&loader->node, loader->inode,
-	    VMMFS_LOADER_MODE, 1);
+	loader->node.inode = vmmfs_root_allocate_inode(root);
+	loader->node.mode = VMMFS_LOADER_MODE;
+	loader->node.size = 1;
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->loader_vops, VREG, &loader->node, vnodep);
 	if (error == 0)
@@ -964,62 +987,6 @@ vmmfs_loader_drop(struct vmmfs_node *node)
 
 	loader = (struct vmmfs_loader *)node;
 	KKASSERT(loader != NULL);
-	loader->inode = 0;
+	loader->node.inode = 0;
 	vmmfs_node_parent_put(node);
-}
-
-
-static int
-vmmfs_loader_read(struct vop_read_args *ap)
-{
-	struct vmmfs_loader *loader;
-	struct uio *uio;
-	char buffer[PAGE_SIZE + 1];
-	size_t length;
-	off_t offset;
-	int error;
-
-	loader = ap->a_vp->v_data;
-	if (loader == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset < 0)
-		return (EINVAL);
-	error = vmmfs_loader_load(loader, buffer, sizeof(buffer), &length);
-	if (error != 0)
-		return (error);
-	offset = uio->uio_offset;
-	if ((size_t)offset >= length)
-		return (0);
-	return (uiomove(buffer + offset, length - (size_t)offset, uio));
-}
-
-static int
-vmmfs_loader_setattr(struct vop_setattr_args *ap)
-{
-	(void)ap;
-	return (0);
-}
-
-static int
-vmmfs_loader_write(struct vop_write_args *ap)
-{
-	struct vmmfs_loader *loader;
-	struct uio *uio;
-	char buffer[PAGE_SIZE];
-	size_t length;
-	int error;
-
-	loader = ap->a_vp->v_data;
-	if (loader == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset != 0 || uio->uio_resid == 0 ||
-	    (size_t)uio->uio_resid >= sizeof(buffer))
-		return (EINVAL);
-	length = (size_t)uio->uio_resid;
-	error = uiomove(buffer, length, uio);
-	if (error != 0)
-		return (error);
-	return (vmmfs_loader_store(loader, buffer, length));
 }

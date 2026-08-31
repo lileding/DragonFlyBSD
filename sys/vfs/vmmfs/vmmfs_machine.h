@@ -37,7 +37,6 @@ struct vmmfs_machine {
 	struct vmmfs_mount *mount;
 	/* Borrowed from the root registry while this directory is published. */
 	struct vnode *vnode;
-	ino_t inode;
 	char name[NAME_MAX + 1];
 	uint32_t id;
 	struct vmmfs_machine_id id_node;

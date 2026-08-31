@@ -35,7 +35,6 @@ struct vmmfs_pciroot_registry;
 
 struct vmmfs_pciroot {
 	struct vmmfs_branch branch;
-	ino_t inode;
 	struct vmmfs_pciroot_registry *registry;
 	vmm_machine_t runtime_machine;
 	uint64_t mmio_next;

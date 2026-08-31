@@ -152,9 +152,9 @@ vmmfs_pciroot_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	    vmmfs_pciroot_drop);
 	pciroot->branch.node.deactivate = vmmfs_pciroot_deactivate;
 	pciroot->branch.ops = &vmmfs_pciroot_branch_ops;
-	pciroot->inode = vmmfs_root_allocate_inode(root);
-	vmmfs_node_set_metadata(&pciroot->branch.node, pciroot->inode,
-	    VMMFS_PCIROOT_MODE, 0);
+	pciroot->branch.node.inode = vmmfs_root_allocate_inode(root);
+	pciroot->branch.node.mode = VMMFS_PCIROOT_MODE;
+	pciroot->branch.node.size = 0;
 	RB_INIT(&pciroot->registry->slots);
 	error = vmmfs_vnode_create_regular(state->mount,
 	    &state->pciroot_vops, VDIR, &pciroot->branch.node, vnodep);
@@ -712,7 +712,7 @@ vmmfs_pciroot_read_item(struct vmmfs_branch *branch, uint64_t index,
 		if (current++ != index)
 			continue;
 		item->vnode = entry->vnode;
-		item->inode = entry->slot->inode;
+		item->inode = entry->slot->branch.node.inode;
 		vmmfs_pciroot_format_bdf(entry->slot->bdf, item->name,
 		    sizeof(item->name));
 		vhold(item->vnode);
