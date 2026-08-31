@@ -39,8 +39,6 @@ vmmfs_node_parent(const struct vmmfs_node *node)
 	((struct vmmfs_machine *)vmmfs_node_parent(&(identity)->node))
 #define vmmfs_memory_machine(memory) \
 	((struct vmmfs_machine *)vmmfs_node_parent(&(memory)->node))
-#define vmmfs_stopped_machine(stopped) \
-	((struct vmmfs_machine *)vmmfs_node_parent(&(stopped)->node))
 #define vmmfs_vcpu_machine(vcpu) \
 	((struct vmmfs_machine *)vmmfs_node_parent(&(vcpu)->node))
 #define vmmfs_pcislot_config_slot(config) \
@@ -49,8 +47,6 @@ vmmfs_node_parent(const struct vmmfs_node *node)
 	((struct vmmfs_pcislot *)vmmfs_node_parent(&(descriptor)->node))
 #define vmmfs_pcislot_events_slot(events) \
 	((struct vmmfs_pcislot *)vmmfs_node_parent(&(events)->node))
-#define vmmfs_serialport_serialroot(port) \
-	((struct vmmfs_serialroot *)vmmfs_node_parent(&(port)->node))
 #define vmmfs_pcislot_resource_resources(resource) \
 	((struct vmmfs_pcislot_resources *)vmmfs_node_parent(&(resource)->node))
 #define vmmfs_pcislot_resources_slot(resources) \

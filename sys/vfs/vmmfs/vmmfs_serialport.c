@@ -80,6 +80,7 @@ static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
     const struct vmm_io_write *);
 static void vmmfs_serialport_drop(struct vmmfs_node *);
 static int vmmfs_serialport_deactivate(struct vmmfs_node *);
+static void vmmfs_serialport_revoke(struct vmmfs_serialport *);
 static void vmmfs_serialport_irq_update(struct vmmfs_serialport *);
 static bool vmmfs_serialport_irq_pending_locked(
     const struct vmmfs_serialport *);
@@ -284,7 +285,7 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     vmmfs_node_parent_put(node);
     kfree(port, M_VMMFS);
 }
-void
+static void
 vmmfs_serialport_revoke(struct vmmfs_serialport *port)
 {
     cdev_t dev;
