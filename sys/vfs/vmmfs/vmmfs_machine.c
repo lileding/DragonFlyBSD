@@ -43,7 +43,7 @@ static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *, struct vnode *);
-static void vmmfs_machine_deactivate(struct vmmfs_node *);
+static int vmmfs_machine_deactivate(struct vmmfs_node *);
 static void vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *);
 static void vmmfs_machine_invalidate_children(struct vmmfs_machine *);
 
@@ -264,30 +264,22 @@ vmmfs_machine_cleanup_stopped(struct vmmfs_machine *machine)
 static void
 vmmfs_machine_deactivate_fixed_locked(struct vmmfs_machine *machine)
 {
-	vmmfs_node_default_deactivate(&machine->id_node.node);
-	vmmfs_node_default_deactivate(&machine->vcpu.node);
-	vmmfs_node_default_deactivate(&machine->memory.node);
-	vmmfs_node_default_deactivate(&machine->loader.node);
-	vmmfs_node_default_deactivate(&machine->boot.node);
-	vmmfs_node_default_deactivate(&machine->events.node);
-	vmmfs_pciroot_deactivate_begin(&machine->pciroot);
-	vmmfs_serialroot_deactivate_begin(&machine->serialroot);
+	(void)vmmfs_node_default_deactivate(&machine->id_node.node);
+	(void)vmmfs_node_default_deactivate(&machine->vcpu.node);
+	(void)vmmfs_node_default_deactivate(&machine->memory.node);
+	(void)vmmfs_node_default_deactivate(&machine->loader.node);
+	(void)vmmfs_node_default_deactivate(&machine->boot.node);
+	(void)vmmfs_node_default_deactivate(&machine->events.node);
+	KKASSERT(machine->pciroot.branch.node.deactivate(
+	    &machine->pciroot.branch.node) == 0);
+	KKASSERT(machine->serialroot.branch.node.deactivate(
+	    &machine->serialroot.branch.node) == 0);
 	if (machine->stopped != NULL)
-		vmmfs_node_default_deactivate(&machine->stopped->node);
+		(void)vmmfs_node_default_deactivate(&machine->stopped->node);
 }
 
-static void
-vmmfs_machine_deactivate_begin(struct vmmfs_machine *machine)
-{
-	if (machine == NULL)
-		return;
-	lwkt_gettoken(&machine->branch.token);
-	vmmfs_node_default_deactivate(&machine->branch.node);
-	vmmfs_machine_deactivate_fixed_locked(machine);
-	lwkt_reltoken(&machine->branch.token);
-}
 
-static void
+static int
 vmmfs_machine_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_machine *machine;
@@ -304,9 +296,20 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 
 	machine = (struct vmmfs_machine *)node;
 	if (machine == NULL)
-		return;
-	vmmfs_machine_deactivate_begin(machine);
-	KKASSERT(machine->machine == NULL);
+		return (EINVAL);
+	lwkt_gettoken(&machine->branch.token);
+	if (machine->branch.node.dead) {
+		lwkt_reltoken(&machine->branch.token);
+		return (0);
+	}
+	if (machine->machine != NULL) {
+		lwkt_reltoken(&machine->branch.token);
+		return (EBUSY);
+	}
+	(void)vmmfs_node_default_deactivate(&machine->branch.node);
+	vmmfs_machine_deactivate_fixed_locked(machine);
+	lwkt_reltoken(&machine->branch.token);
+	vmmfs_machine_invalidate_children(machine);
 	vmmfs_machine_wake_waiters(machine);
 
 	/* Detach every parent-owned vnode Arc before any VFS operation. */
@@ -331,20 +334,32 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 	machine->serialroot_vnode = NULL;
 	pciroot_vnode = machine->pciroot_vnode;
 	machine->pciroot_vnode = NULL;
+	machine->vnode = NULL;
 	lwkt_reltoken(&machine->branch.token);
 
 	vmmfs_pciroot_deactivate_slots(&machine->pciroot);
 	vmmfs_serialroot_deactivate_ports(&machine->serialroot);
-	vmmfs_vnode_deactivate(events_vnode);
-	if (stopped != NULL)
-	vmmfs_vnode_deactivate(stopped_vnode);
-	vmmfs_vnode_deactivate(boot_vnode);
-	vmmfs_vnode_deactivate(loader_vnode);
-	vmmfs_vnode_deactivate(memory_vnode);
-	vmmfs_vnode_deactivate(vcpu_vnode);
-	vmmfs_vnode_deactivate(id_vnode);
-	vmmfs_vnode_deactivate(serialroot_vnode);
-	vmmfs_vnode_deactivate(pciroot_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(events_vnode) == 0);
+	vrele(events_vnode);
+	if (stopped != NULL) {
+		KKASSERT(vmmfs_vnode_deactivate(stopped_vnode) == 0);
+		vrele(stopped_vnode);
+	}
+	KKASSERT(vmmfs_vnode_deactivate(boot_vnode) == 0);
+	vrele(boot_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(loader_vnode) == 0);
+	vrele(loader_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(memory_vnode) == 0);
+	vrele(memory_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(vcpu_vnode) == 0);
+	vrele(vcpu_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(id_vnode) == 0);
+	vrele(id_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(serialroot_vnode) == 0);
+	vrele(serialroot_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(pciroot_vnode) == 0);
+	vrele(pciroot_vnode);
+	return (0);
 }
 
 static void
@@ -790,7 +805,8 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	machine->stopped = NULL;
 	machine->stopped_vnode = NULL;
 	lwkt_reltoken(&machine->branch.token);
-	vmmfs_vnode_deactivate(stopped_vnode);
+	KKASSERT(vmmfs_vnode_deactivate(stopped_vnode) == 0);
+	vrele(stopped_vnode);
 	vmmfs_machine_invalidate_children(machine);
 
 	error = vmmfs_memory_map(&machine->memory);

@@ -20,12 +20,12 @@ struct vmmfs_node {
 	mode_t mode;
 	off_t size;
 	bool dead;
-	void (*deactivate)(struct vmmfs_node *);
+	int (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
 };
 
 void vmmfs_node_parent_put(struct vmmfs_node *);
-void vmmfs_node_default_deactivate(struct vmmfs_node *);
+int vmmfs_node_default_deactivate(struct vmmfs_node *);
 void vmmfs_node_set_metadata(struct vmmfs_node *, ino_t, mode_t, off_t);
 off_t vmmfs_node_decimal_size(uint64_t);
 int vmmfs_node_open(struct vop_open_args *);
@@ -46,10 +46,10 @@ int vmmfs_vnode_create_regular(struct mount *, struct vop_ops **,
 int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
 	struct cdev *, struct vmmfs_node *, struct vnode **);
 
-/* Revokes, removes, finalizes, and releases one parent-owned vnode Arc. */
-void vmmfs_vnode_deactivate(struct vnode *);
+/* Stops one namespace object and revokes its open file descriptors. */
+int vmmfs_vnode_deactivate(struct vnode *);
 
-/* Drops an unpublished vnode after clearing its semantic node binding. */
+/* Drops a vnode that was never attached to the namespace. */
 void vmmfs_vnode_discard(struct vnode *);
 
 

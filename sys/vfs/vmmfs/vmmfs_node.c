@@ -44,11 +44,12 @@ vmmfs_node_parent_put(struct vmmfs_node *node)
 		vmmfs_branch_put(parent);
 }
 
-void
+int
 vmmfs_node_default_deactivate(struct vmmfs_node *node)
 {
 	KKASSERT(node != NULL);
 	node->dead = true;
+	return (0);
 }
 
 void
@@ -244,20 +245,23 @@ vmmfs_vnode_discard(struct vnode *vnode)
 	vrele(vnode);
 }
 
-void
+int
 vmmfs_vnode_deactivate(struct vnode *vnode)
 {
 	struct vmmfs_node *node;
+	int error;
 
 	if (vnode == NULL)
-		return;
+		return (0);
 	node = vnode->v_data;
-	if (node != NULL && node->deactivate != NULL)
-		node->deactivate(node);
+	if (node == NULL || node->deactivate == NULL)
+		return (ENOENT);
+	error = node->deactivate(node);
+	if (error != 0)
+		return (error);
 	(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
-	cache_inval_vp(vnode, CINV_DESTROY | CINV_CHILDREN);
-	vfinalize(vnode);
-	vrele(vnode);
+	cache_inval_vp(vnode, CINV_CHILDREN);
+	return (0);
 }
 
 

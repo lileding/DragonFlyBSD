@@ -13,7 +13,6 @@ struct vnode;
 struct vmmfs_root;
 
 int vmmfs_root_create(struct mount *, struct vnode **);
-bool vmmfs_root_empty(struct vmmfs_root *);
 ino_t vmmfs_root_allocate_inode(struct vmmfs_root *);
 
 #endif /* VMMFS_ROOT_H */

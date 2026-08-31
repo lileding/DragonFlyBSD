@@ -246,7 +246,6 @@ static int
 vmmfs_unmount(struct mount *mount, int flags)
 {
 	struct vmmfs_mount *state;
-	struct vmmfs_root *root;
 	struct vnode *root_vnode;
 	int error;
 
@@ -256,17 +255,14 @@ vmmfs_unmount(struct mount *mount, int flags)
 	root_vnode = state->root_vnode;
 	if (root_vnode == NULL)
 		return (ENXIO);
-	root = root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
-	if (!vmmfs_root_empty(root))
-		return (EBUSY);
+	error = vmmfs_vnode_deactivate(root_vnode);
+	if (error != 0)
+		return (error);
 	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0)
 		return (error);
 	state->root_vnode = NULL;
-	vmmfs_vnode_deactivate(root_vnode);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);

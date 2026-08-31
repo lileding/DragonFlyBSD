@@ -79,6 +79,7 @@ static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
     const struct vmm_io_write *);
 static void vmmfs_serialport_drop(struct vmmfs_node *);
+static int vmmfs_serialport_deactivate(struct vmmfs_node *);
 static void vmmfs_serialport_irq_update(struct vmmfs_serialport *);
 static bool vmmfs_serialport_irq_pending_locked(
     const struct vmmfs_serialport *);
@@ -173,6 +174,7 @@ vmmfs_serialport_create(struct vmmfs_serialroot *serialroot,
     port->dev = dev;
     vmmfs_node_setup(&port->node, &serialroot->branch,
         vmmfs_serialport_drop);
+    port->node.deactivate = vmmfs_serialport_deactivate;
     vmmfs_node_set_metadata(&port->node, port->inode,
         VMMFS_SERIALPORT_MODE, 0);
     error = vmmfs_vnode_create_cdev(
@@ -192,6 +194,44 @@ fail_token:
     lwkt_token_uninit(&port->token);
     kfree(port, M_VMMFS);
     return error;
+}
+
+static int
+vmmfs_serialport_deactivate(struct vmmfs_node *node)
+{
+    struct vmmfs_serialport *port;
+    struct vmmfs_serialroot *serialroot;
+    struct vmmfs_machine *machine;
+
+    port = (struct vmmfs_serialport *)node;
+    if (port == NULL)
+        return (EINVAL);
+    serialroot = (struct vmmfs_serialroot *)port->node.parent;
+    if (serialroot == NULL)
+        return (EINVAL);
+    machine = vmmfs_serialroot_machine(serialroot);
+    if (machine == NULL)
+        return (EINVAL);
+
+    lwkt_gettoken(&machine->branch.token);
+    lwkt_gettoken(&port->token);
+    if (port->node.dead) {
+        lwkt_reltoken(&port->token);
+        lwkt_reltoken(&machine->branch.token);
+        return (0);
+    }
+    if (machine->machine != NULL) {
+        lwkt_reltoken(&port->token);
+        lwkt_reltoken(&machine->branch.token);
+        return (EBUSY);
+    }
+    (void)vmmfs_node_default_deactivate(&port->node);
+    port->destroying = true;
+    lwkt_reltoken(&port->token);
+    lwkt_reltoken(&machine->branch.token);
+
+    vmmfs_serialport_revoke(port);
+    return (0);
 }
 
 static void

@@ -24,8 +24,6 @@ struct vmmfs_pcislot_resources;
 int vmmfs_pcislot_resources_create(struct vmmfs_pcislot *,
 	vmm_machine_t, const struct vmmfs_pcislot_descriptor_value *, uint64_t,
 	struct vmmfs_pcislot_resources **);
-void vmmfs_pcislot_resources_deactivate_begin(
-	struct vmmfs_pcislot_resources *);
 void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *);
 int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
 	vmm_machine_t);

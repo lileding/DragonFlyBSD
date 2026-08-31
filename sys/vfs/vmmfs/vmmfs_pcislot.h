@@ -48,7 +48,6 @@ struct vmmfs_pcislot {
 
 int vmmfs_pcislot_create(struct vmmfs_pciroot *, uint16_t,
 	struct vmmfs_pcislot **, struct vnode **);
-void vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
 int vmmfs_pcislot_reset(struct vmmfs_pcislot *);

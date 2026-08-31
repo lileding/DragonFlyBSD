@@ -365,20 +365,6 @@ fail:
 	return (error);
 }
 
-void
-vmmfs_pcislot_resources_deactivate_begin(
-	struct vmmfs_pcislot_resources *resources)
-{
-	size_t index;
-
-	if (resources == NULL)
-		return;
-	lwkt_gettoken(&resources->branch.token);
-	vmmfs_node_default_deactivate(&resources->branch.node);
-	for (index = 0; index < resources->initialized_count; ++index)
-		vmmfs_node_default_deactivate(&resources->items[index].node);
-	lwkt_reltoken(&resources->branch.token);
-}
 
 void
 vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
@@ -390,12 +376,14 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 
 	if (resources == NULL)
 		return;
-	vmmfs_pcislot_resources_deactivate_begin(resources);
 	lwkt_gettoken(&resources->branch.token);
 	if (resources->destroying) {
 		lwkt_reltoken(&resources->branch.token);
 		return;
 	}
+	(void)vmmfs_node_default_deactivate(&resources->branch.node);
+	for (index = 0; index < resources->initialized_count; ++index)
+		(void)vmmfs_node_default_deactivate(&resources->items[index].node);
 	resources->destroying = true;
 	resources->powered = false;
 	lwkt_reltoken(&resources->branch.token);
@@ -420,7 +408,8 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 			resources->vnodes[index] = NULL;
 		lwkt_reltoken(&resources->branch.token);
 		if (vnode != NULL) {
-			vmmfs_vnode_deactivate(vnode);
+			KKASSERT(vmmfs_vnode_deactivate(vnode) == 0);
+			vrele(vnode);
 		} else {
 			vmmfs_node_drop(&resource->node);
 		}
