@@ -37,8 +37,8 @@ struct vmmfs_platform_x64 {
 	vmm_io_t timer_read;
 	vmm_io_t fch_pm_read;
 	vmm_io_t fch_pm_write;
-	vmm_io_t fallback_read;
-	vmm_io_t fallback_write;
+	vmm_io_t i8042_read;
+	vmm_io_t i8042_write;
 };
 
 int vmmfs_platform_x64_init(struct vmmfs_machine *,

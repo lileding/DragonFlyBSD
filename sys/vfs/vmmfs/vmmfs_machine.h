@@ -40,8 +40,13 @@ struct vmmfs_machine {
 	char name[NAME_MAX + 1];
 	uint32_t id;
 	struct vmmfs_machine_id id_node;
-	/* NULL is stopped.  A non-NULL instance owns the running topology. */
+	/*
+	 * NULL is stopped.  A non-NULL instance owns the running topology.
+	 * runtime_released marks the retry window before stopped is republished.
+	 */
 	vmm_machine_t machine;
+	bool runtime_releasing;
+	bool runtime_released;
 	struct vmm_cpustate boot_state;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;

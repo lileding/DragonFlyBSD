@@ -410,26 +410,24 @@ vmmfs_platform_x64_start(struct vmmfs_platform_x64 *platform,
 	if (error != 0)
 		goto fail_fch_pm_read;
 	/*
-	 * VMMFS has no userspace monitor to complete unrelated legacy PIO
-	 * probes.  Specific devices were registered before this catch-all range,
-	 * so an unclaimed scalar read observes an absent device and a write is
-	 * discarded.
+	 * Preserve only the architectural i8042 reset-control port.  Other
+	 * unclaimed PIO exits are completed by the VCPU frontend.
 	 */
-	error = vmm_machine_trap_pio_read(machine, 0, 0x10000U,
-	    vmmfs_platform_x64_read, platform, &platform->fallback_read);
+	error = vmm_machine_trap_pio_read(machine, VMMFS_PLATFORM_X64_I8042_COMMAND_PORT, 1,
+	    vmmfs_platform_x64_read, platform, &platform->i8042_read);
 	if (error != 0)
 		goto fail_fch_pm_write;
-	error = vmm_machine_trap_pio_write(machine, 0, 0x10000U,
-	    vmmfs_platform_x64_write, platform, &platform->fallback_write);
+	error = vmm_machine_trap_pio_write(machine, VMMFS_PLATFORM_X64_I8042_COMMAND_PORT, 1,
+	    vmmfs_platform_x64_write, platform, &platform->i8042_write);
 	if (error != 0)
-		goto fail_fallback_read;
+		goto fail_i8042_read;
 	platform->tsc_base = rdtsc();
 	platform->runtime_machine = machine;
 	return (0);
 
-fail_fallback_read:
-	(void)vmm_machine_untrap(machine, platform->fallback_read);
-	platform->fallback_read = NULL;
+fail_i8042_read:
+	(void)vmm_machine_untrap(machine, platform->i8042_read);
+	platform->i8042_read = NULL;
 fail_fch_pm_write:
 	(void)vmm_machine_untrap(machine, platform->fch_pm_write);
 	platform->fch_pm_write = NULL;
@@ -462,8 +460,8 @@ vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 	vmm_io_t delay_write;
 	vmm_io_t fch_pm_read;
 	vmm_io_t fch_pm_write;
-	vmm_io_t fallback_read;
-	vmm_io_t fallback_write;
+	vmm_io_t i8042_read;
+	vmm_io_t i8042_write;
 	vmm_io_t power_read;
 	vmm_io_t power_write;
 	vmm_io_t timer_read;
@@ -479,8 +477,8 @@ vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 	delay_write = platform->delay_write;
 	fch_pm_read = platform->fch_pm_read;
 	fch_pm_write = platform->fch_pm_write;
-	fallback_read = platform->fallback_read;
-	fallback_write = platform->fallback_write;
+	i8042_read = platform->i8042_read;
+	i8042_write = platform->i8042_write;
 	power_read = platform->power_read;
 	power_write = platform->power_write;
 	timer_read = platform->timer_read;
@@ -489,19 +487,19 @@ vmmfs_platform_x64_stop(struct vmmfs_platform_x64 *platform)
 	platform->delay_write = NULL;
 	platform->fch_pm_read = NULL;
 	platform->fch_pm_write = NULL;
-	platform->fallback_read = NULL;
-	platform->fallback_write = NULL;
+	platform->i8042_read = NULL;
+	platform->i8042_write = NULL;
 	platform->power_read = NULL;
 	platform->power_write = NULL;
 	platform->timer_read = NULL;
 	result = 0;
-	if (fallback_write != NULL) {
-		error = vmm_machine_untrap(machine, fallback_write);
+	if (i8042_write != NULL) {
+		error = vmm_machine_untrap(machine, i8042_write);
 		if (error != 0)
 			result = error;
 	}
-	if (fallback_read != NULL) {
-		error = vmm_machine_untrap(machine, fallback_read);
+	if (i8042_read != NULL) {
+		error = vmm_machine_untrap(machine, i8042_read);
 		if (result == 0)
 			result = error;
 	}

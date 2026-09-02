@@ -22,6 +22,7 @@
 
 #include <machine/atomic.h>
 #include <machine/cpu.h>
+#include <vm/vm.h>
 
 #include "vmmfs.h"
 #include "vmmfs_events.h"
@@ -41,6 +42,10 @@ static int vmmfs_vcpu_thread_start(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_wait_start(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *);
+static int vmmfs_vcpu_complete_absent_io(struct vmmfs_vcpu_thread *,
+	struct vmm_cpustate *, const struct vmm_cpuexit *);
+static int vmmfs_vcpu_complete_absent_memory(struct vmmfs_vcpu_thread *,
+	const struct vmm_cpuexit *);
 static void vmmfs_vcpu_thread_main(void *, struct trapframe *);
 static void vmmfs_vcpu_drop(struct vmmfs_node *);
 
@@ -532,6 +537,12 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 		wakeup(vcpu);
 		exit1(0);
 	}
+	lwkt_reltoken(&vcpu->token);
+
+	/* Keep the vCPU lifetime gate closed until runtime publication completes. */
+	vmmfs_machine_vcpu_stopped(machine);
+
+	lwkt_gettoken(&vcpu->token);
 	threads = vcpu->threads;
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
@@ -543,7 +554,6 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	vcpu->reset_requested = false;
 	lwkt_reltoken(&vcpu->token);
 	kfree(threads, M_VMMFS);
-	vmmfs_machine_vcpu_stopped(machine);
 	exit1(0);
 }
 
@@ -602,6 +612,54 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 	}
 	vmmfs_events_log(&vmmfs_vcpu_machine(vcpu)->events,
 	    VMMFS_MACHINE_EVENT_RESET_COMPLETED, NULL);
+}
+
+static int
+vmmfs_vcpu_complete_absent_io(struct vmmfs_vcpu_thread *thread,
+	struct vmm_cpustate *state, const struct vmm_cpuexit *exit)
+{
+	uint64_t mask;
+
+	if (thread == NULL || state == NULL || exit == NULL ||
+	    exit->reason != VMM_CPUEXIT_IO)
+		return (EINVAL);
+	if (exit->u.io.npc == 0) {
+		/* A VMM exit without a continuation address is an internal failure. */
+		return (EIO);
+	}
+	if (exit->u.io.operand_size != 1 && exit->u.io.operand_size != 2 &&
+	    exit->u.io.operand_size != 4)
+		return (EOPNOTSUPP);
+	if (exit->u.io.str || exit->u.io.rep) {
+		/*
+		 * String-I/O transfer semantics are not implemented yet.  Inject #GP
+		 * rather than silently advancing an unclaimed port access.
+		 */
+		return (EOPNOTSUPP);
+	}
+	if (exit->u.io.in) {
+		mask = (1ULL << (exit->u.io.operand_size * NBBY)) - 1;
+		state->gprs[VMM_X64_GPR_RAX] =
+		    (state->gprs[VMM_X64_GPR_RAX] & ~mask) | mask;
+	}
+	state->gprs[VMM_X64_GPR_RIP] = exit->u.io.npc;
+	return (0);
+}
+
+static int
+vmmfs_vcpu_complete_absent_memory(struct vmmfs_vcpu_thread *thread,
+	const struct vmm_cpuexit *exit)
+{
+	uint64_t value;
+
+	if (thread == NULL || thread->vcpu == NULL || exit == NULL ||
+	    exit->reason != VMM_CPUEXIT_MEMORY)
+		return (EINVAL);
+	if (exit->u.mem.prot & VM_PROT_WRITE)
+		return (vmm_vcpu_complete_mmio_write(thread->vcpu));
+	value = UINT64_MAX;
+	return (vmm_vcpu_complete_mmio_read(thread->vcpu, &value,
+	    exit->u.mem.width));
 }
 
 static void
@@ -699,12 +757,19 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 		case VMM_CPUEXIT_IO:
 			error = vmmfs_pciroot_io(&vmmfs_vcpu_machine(vcpu)->pciroot,
 			    thread, &thread->state, exit);
+			if (error == ENOENT)
+				error = vmmfs_vcpu_complete_absent_io(thread,
+				    &thread->state, exit);
+			if (error == EOPNOTSUPP)
+				error = vmm_vcpu_inject(thread->vcpu, &exception);
 			if (error == 0)
 				continue;
 			goto out;
 		case VMM_CPUEXIT_MEMORY:
 			error = vmmfs_pciroot_memory(&vmmfs_vcpu_machine(vcpu)->pciroot,
 			    thread, exit);
+			if (error == ENOENT)
+				error = vmmfs_vcpu_complete_absent_memory(thread, exit);
 			if (error == 0)
 				continue;
 			goto out;

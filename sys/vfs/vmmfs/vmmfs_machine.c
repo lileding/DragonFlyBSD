@@ -38,6 +38,7 @@ static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_prepare_start(struct vmmfs_machine *, char *,
 	uint32_t *);
 static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
+static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *);
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
@@ -221,7 +222,8 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 		return (error);
 	stopped = stopped_vnode->v_data;
 	lwkt_gettoken(&machine->branch.token);
-	if (machine->branch.node.dead || machine->machine != NULL) {
+	if (machine->branch.node.dead ||
+	    (machine->machine != NULL && !machine->runtime_released)) {
 		lwkt_reltoken(&machine->branch.token);
 		vmmfs_vnode_discard(stopped_vnode);
 		vmmfs_node_drop(&stopped->node);
@@ -233,8 +235,22 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 		vmmfs_node_drop(&stopped->node);
 		return (0);
 	}
+	/*
+	 * A stop before VCPU startup has no worker to consume these requests.
+	 * stopped publication is the common endpoint for both that path and a
+	 * released-runtime retry, so clear them while no VCPU threads exist.
+	 */
+	lwkt_gettoken(&machine->vcpu.token);
+	if (machine->vcpu.threads == NULL) {
+		machine->vcpu.stop_requested = false;
+		machine->vcpu.reset_requested = false;
+	}
+	lwkt_reltoken(&machine->vcpu.token);
 	machine->stopped = stopped;
 	machine->stopped_vnode = stopped_vnode;
+	machine->machine = NULL;
+	machine->runtime_releasing = false;
+	machine->runtime_released = false;
 	lwkt_reltoken(&machine->branch.token);
 	vmmfs_machine_invalidate_children(machine);
 	return (0);
@@ -283,10 +299,14 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 		lwkt_reltoken(&machine->branch.token);
 		return (0);
 	}
-	if (machine->machine != NULL) {
+	lwkt_gettoken(&machine->vcpu.token);
+	if (machine->machine != NULL || machine->vcpu.active_count != 0 ||
+	    machine->vcpu.threads != NULL) {
+		lwkt_reltoken(&machine->vcpu.token);
 		lwkt_reltoken(&machine->branch.token);
 		return (EBUSY);
 	}
+	lwkt_reltoken(&machine->vcpu.token);
 	(void)vmmfs_node_default_deactivate(&machine->branch.node);
 	(void)vmmfs_node_default_deactivate(&machine->id_node.node);
 	(void)vmmfs_node_default_deactivate(&machine->vcpu.node);
@@ -422,7 +442,7 @@ vmmfs_machine_request_stop(struct vmmfs_machine *machine, const char *reason)
 	if (boot_pending) {
 		vmmfs_events_log(&machine->events,
 		    VMMFS_MACHINE_EVENT_STOP_REQUESTED, "reason=%s", reason);
-		return (vmmfs_machine_release_runtime(machine));
+		return (vmmfs_machine_release_to_stopped(machine));
 	}
 	vmmfs_vcpu_request_stop(&machine->vcpu);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOP_REQUESTED,
@@ -783,6 +803,8 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 	error = vmmfs_memory_prepare(&machine->memory, memory_size);
 	if (error != 0)
 		goto failed_locked;
+	machine->runtime_releasing = false;
+	machine->runtime_released = false;
 	error = vmm_machine_create(machine->memory.run_vmspace, &runtime_machine);
 	if (error != 0)
 		goto failed_locked;
@@ -848,7 +870,7 @@ vmmfs_machine_prepare_start(struct vmmfs_machine *machine,
 failed_locked:
 	lwkt_reltoken(&machine->branch.token);
 failed:
-	release_error = vmmfs_machine_release_runtime(machine);
+	release_error = vmmfs_machine_release_to_stopped(machine);
 	if (release_error != 0)
 		error = release_error;
 	return (error);
@@ -880,7 +902,7 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	return (0);
 
 failed_runtime:
-	release_error = vmmfs_machine_release_runtime(machine);
+	release_error = vmmfs_machine_release_to_stopped(machine);
 	if (release_error != 0)
 		error = release_error;
 failed:
@@ -926,7 +948,7 @@ vmmfs_machine_boot_abort(struct vmmfs_machine *machine)
 	lwkt_reltoken(&machine->branch.token);
 	if (!running)
 		return (0);
-	error = vmmfs_machine_release_runtime(machine);
+	error = vmmfs_machine_release_to_stopped(machine);
 	if (error != 0)
 		return (error);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_FAILED,
@@ -966,7 +988,7 @@ vmmfs_machine_boot_submit(struct vmmfs_machine *machine,
 	return (0);
 
 failed:
-	release_error = vmmfs_machine_release_runtime(machine);
+	release_error = vmmfs_machine_release_to_stopped(machine);
 	if (release_error != 0)
 		error = release_error;
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_BOOT_FAILED,
@@ -982,36 +1004,51 @@ vmmfs_machine_release_runtime(struct vmmfs_machine *machine)
 
 	lwkt_gettoken(&machine->branch.token);
 	runtime_machine = machine->machine;
+	if (runtime_machine == NULL) {
+		lwkt_reltoken(&machine->branch.token);
+		return (0);
+	}
+	if (machine->runtime_releasing) {
+		lwkt_reltoken(&machine->branch.token);
+		return (EBUSY);
+	}
+	if (machine->runtime_released) {
+		lwkt_reltoken(&machine->branch.token);
+		return (0);
+	}
+	machine->runtime_releasing = true;
 	lwkt_reltoken(&machine->branch.token);
 	vmmfs_boot_revoke(&machine->boot);
 	(void)vmmfs_platform_x64_stop(&machine->platform);
 	(void)vmmfs_serialroot_stop(&machine->serialroot);
 	(void)vmmfs_pciroot_stop(&machine->pciroot);
 	(void)vmmfs_rtc_stop(&machine->rtc);
-	if (runtime_machine != NULL) {
-		error = vmm_machine_destroy(runtime_machine);
-		if (error != 0) {
-			return (error);
-		}
+	error = vmm_machine_destroy(runtime_machine);
+	if (error != 0) {
+		lwkt_gettoken(&machine->branch.token);
+		machine->runtime_releasing = false;
+		lwkt_reltoken(&machine->branch.token);
+		return (error);
 	}
 	vmmfs_memory_release(&machine->memory);
-	/* A pre-vCPU stop has no worker to clear these request bits. */
-	lwkt_gettoken(&machine->vcpu.token);
-	if (machine->vcpu.active_count == 0 && machine->vcpu.threads == NULL) {
-		machine->vcpu.stop_requested = false;
-		machine->vcpu.reset_requested = false;
-	}
-	lwkt_reltoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->branch.token);
 	KKASSERT(machine->machine == runtime_machine);
-	machine->machine = NULL;
+	machine->runtime_releasing = false;
+	machine->runtime_released = true;
 	lwkt_reltoken(&machine->branch.token);
-	error = vmmfs_machine_create_stopped(machine);
-	if (error != 0)
-		return (error);
 	return (0);
 }
 
+static int
+vmmfs_machine_release_to_stopped(struct vmmfs_machine *machine)
+{
+	int error;
+
+	error = vmmfs_machine_release_runtime(machine);
+	if (error != 0)
+		return (error);
+	return (vmmfs_machine_create_stopped(machine));
+}
 void
 vmmfs_machine_vcpu_stopped(struct vmmfs_machine *machine)
 {
@@ -1019,8 +1056,12 @@ vmmfs_machine_vcpu_stopped(struct vmmfs_machine *machine)
 
 	if (machine == NULL)
 		return;
-	error = vmmfs_machine_release_runtime(machine);
-	KKASSERT(error == 0);
+	error = vmmfs_machine_release_to_stopped(machine);
+	if (error != 0) {
+		vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_VCPU_FAILED,
+		    "index=0 stopped-publish-error=%d", error);
+		return;
+	}
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
 	    "reason=vcpu");
 }
