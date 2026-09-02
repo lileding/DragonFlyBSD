@@ -70,14 +70,12 @@ struct vmmfs_pcislot_resource {
 	struct vmspace *vmspace;
 	struct cdev *dev;
 	struct vmmfs_pcislot_resource_trap *traps;
-	struct vmmfs_pci_kick *kicks;
+	struct vmmfs_pci_kick kick;
 	uint64_t gpa;
 	uint64_t size;
 	uint64_t mapping_size;
 	size_t trap_count;
-	size_t kick_head;
-	size_t kick_count;
-	size_t kick_capacity;
+	bool kick_pending;
 	uint64_t sequence;
 	bool mapped;
 	bool revoked;
@@ -98,7 +96,6 @@ struct vmmfs_pcislot_resources {
 };
 
 #define VMMFS_PCISLOT_RESOURCE_MODE 0600
-#define VMMFS_PCISLOT_KICK_INITIAL 64
 
 static uint32_t vmmfs_pcislot_resource_serial;
 static int vmmfs_msix_trace;
@@ -159,10 +156,10 @@ static void vmmfs_pcislot_resource_remove_traps(
 	struct vmmfs_pcislot_resource *);
 static int vmmfs_pcislot_resource_queue_kick(
 	struct vmmfs_pcislot_resource *, uint64_t, enum vmm_io_width,
-	uint64_t, bool);
+	uint64_t);
 static int vmmfs_pcislot_resource_doorbell(
 	struct vmmfs_pcislot_resource *, uint64_t, enum vmm_io_width,
-	uint64_t, bool);
+	uint64_t);
 static struct vmmfs_pcislot_resource *vmmfs_pcislot_resource_bar(
 	struct vmmfs_pcislot_resources *, unsigned int);
 static uint16_t vmmfs_pcislot_resource_read16(const uint8_t *, uint16_t);
@@ -836,7 +833,7 @@ vmmfs_pcislot_resources_memory(struct vmmfs_pcislot_resources *resources,
 			return (error);
 		if (write) {
 			error = vmmfs_pcislot_resource_doorbell(resource,
-			    exit->u.mem.gpa, exit->u.mem.width, exit->u.mem.value, true);
+			    exit->u.mem.gpa, exit->u.mem.width, exit->u.mem.value);
 			if (error == 0)
 				return (vmm_vcpu_complete_mmio_write(vcpu));
 			if (error != ENOENT)
@@ -903,7 +900,7 @@ vmmfs_pcislot_resources_io(struct vmmfs_pcislot_resources *resources,
 		} else {
 			error = vmmfs_pcislot_resource_doorbell(resource,
 			    exit->u.io.port, (enum vmm_io_width)exit->u.io.operand_size,
-			    state->gprs[VMM_X64_GPR_RAX], true);
+			    state->gprs[VMM_X64_GPR_RAX]);
 			if (error == ENOENT)
 				error = vmmfs_pcislot_resource_object_write(resource,
 				    exit->u.io.port - resource->gpa,
@@ -953,8 +950,6 @@ vmmfs_pcislot_resources_drop(struct vmmfs_node *node)
 			vmspace_rel(resource->vmspace);
 		if (resource->dev != NULL)
 			destroy_only_dev(resource->dev);
-		if (resource->kicks != NULL)
-			kfree(resource->kicks, M_VMMFS);
 		if (resource->traps != NULL)
 			kfree(resource->traps, M_VMMFS);
 		lwkt_token_uninit(&resource->token);
@@ -1213,59 +1208,21 @@ vmmfs_pcislot_resource_remove_traps(struct vmmfs_pcislot_resource *resource)
 
 static int
 vmmfs_pcislot_resource_queue_kick(struct vmmfs_pcislot_resource *resource,
-	uint64_t offset, enum vmm_io_width width, uint64_t value, bool grow)
+	uint64_t offset, enum vmm_io_width width, uint64_t value)
 {
-	struct vmmfs_pci_kick *kicks;
-	size_t capacity;
-	size_t index;
-	size_t old_index;
 	bool notify;
 
-	for (;;) {
-		lwkt_gettoken(&resource->token);
-		if (!vmmfs_pcislot_resource_enabled(resource)) {
-			lwkt_reltoken(&resource->token);
-			return (ENXIO);
-		}
-		if (resource->kick_count < resource->kick_capacity)
-			break;
-		if (!grow) {
-			lwkt_reltoken(&resource->token);
-			return (ENOENT);
-		}
-		capacity = resource->kick_capacity == 0 ?
-		    VMMFS_PCISLOT_KICK_INITIAL : resource->kick_capacity * 2;
+	lwkt_gettoken(&resource->token);
+	if (!vmmfs_pcislot_resource_enabled(resource)) {
 		lwkt_reltoken(&resource->token);
-		if (capacity < resource->kick_capacity ||
-		    capacity > SIZE_MAX / sizeof(*kicks))
-			return (EOVERFLOW);
-		kicks = kmalloc(capacity * sizeof(*kicks), M_VMMFS, M_WAITOK | M_ZERO);
-		lwkt_gettoken(&resource->token);
-		if (resource->kick_count < resource->kick_capacity) {
-			lwkt_reltoken(&resource->token);
-			kfree(kicks, M_VMMFS);
-			continue;
-		}
-		for (index = 0; index < resource->kick_count; ++index) {
-			old_index = (resource->kick_head + index) % resource->kick_capacity;
-			kicks[index] = resource->kicks[old_index];
-		}
-		if (resource->kicks != NULL)
-			kfree(resource->kicks, M_VMMFS);
-		resource->kicks = kicks;
-		resource->kick_head = 0;
-		resource->kick_capacity = capacity;
-		break;
+		return (ENXIO);
 	}
-	notify = resource->kick_count == 0;
-	index = (resource->kick_head + resource->kick_count) %
-	    resource->kick_capacity;
-	resource->kicks[index].offset = offset;
-	resource->kicks[index].value = value;
-	resource->kicks[index].width = width;
-	bzero(resource->kicks[index].reserved,
-	    sizeof(resource->kicks[index].reserved));
-	++resource->kick_count;
+	notify = !resource->kick_pending;
+	resource->kick.offset = offset;
+	resource->kick.value = value;
+	resource->kick.width = width;
+	bzero(resource->kick.reserved, sizeof(resource->kick.reserved));
+	resource->kick_pending = true;
 	++resource->sequence;
 	lwkt_reltoken(&resource->token);
 	if (notify)
@@ -1276,7 +1233,7 @@ vmmfs_pcislot_resource_queue_kick(struct vmmfs_pcislot_resource *resource,
 
 static int
 vmmfs_pcislot_resource_doorbell(struct vmmfs_pcislot_resource *resource,
-	uint64_t address, enum vmm_io_width width, uint64_t value, bool grow)
+	uint64_t address, enum vmm_io_width width, uint64_t value)
 {
 	const struct vmmfs_pcislot_descriptor_value *descriptor;
 	const struct vmmfs_pcislot_doorbell *doorbell;
@@ -1300,7 +1257,7 @@ vmmfs_pcislot_resource_doorbell(struct vmmfs_pcislot_resource *resource,
 			if (kick->kind == VMMFS_PCISLOT_RESOURCE_KICK &&
 			    kick->index == index)
 				return (vmmfs_pcislot_resource_queue_kick(kick,
-				    address - base, width, value, grow));
+				    address - base, width, value));
 		}
 		return (ENOENT);
 	}
@@ -1622,7 +1579,7 @@ vmmfs_pcislot_resource_read(struct vop_read_args *ap)
 		return (EINVAL);
 	for (;;) {
 		lwkt_gettoken(&resource->token);
-		if (resource->kick_count != 0)
+		if (resource->kick_pending)
 			break;
 		if (resource->revoked) {
 			lwkt_reltoken(&resource->token);
@@ -1638,9 +1595,8 @@ vmmfs_pcislot_resource_read(struct vop_read_args *ap)
 		if (error != 0)
 			return (error);
 	}
-	kick = resource->kicks[resource->kick_head];
-	resource->kick_head = (resource->kick_head + 1) % resource->kick_capacity;
-	--resource->kick_count;
+	kick = resource->kick;
+	resource->kick_pending = false;
 	lwkt_reltoken(&resource->token);
 	return (uiomove((caddr_t)&kick, sizeof(kick), uio));
 }
@@ -1851,7 +1807,8 @@ vmmfs_pcislot_resource_filter_read(struct knote *knote, long hint)
 	if (resource == NULL)
 		return (0);
 	lwkt_gettoken(&resource->token);
-	knote->kn_data = resource->kick_count * sizeof(struct vmmfs_pci_kick);
+	knote->kn_data = resource->kick_pending ?
+	    sizeof(struct vmmfs_pci_kick) : 0;
 	if (resource->revoked)
 		knote->kn_flags |= EV_EOF;
 	lwkt_reltoken(&resource->token);
@@ -1864,7 +1821,7 @@ vmmfs_pcislot_resource_mmio_write(vmm_vcpu_t vcpu, void *argument,
 {
 	(void)vcpu;
 	return (vmmfs_pcislot_resource_doorbell(argument, write->address,
-	    write->width, write->value, false));
+	    write->width, write->value));
 }
 
 static int
@@ -1873,7 +1830,7 @@ vmmfs_pcislot_resource_pio_write(vmm_vcpu_t vcpu, void *argument,
 {
 	(void)vcpu;
 	return (vmmfs_pcislot_resource_doorbell(argument, write->address,
-	    write->width, write->value, false));
+	    write->width, write->value));
 }
 
 static int

@@ -64,9 +64,10 @@ enum vmmfs_pci_event {
 };
 
 /*
- * One exact guest doorbell write.  The named kickN node determines the
- * declared doorbell range; offset is relative to that range.  width is one
- * of 1, 2, 4, or 8 and value contains its low width bytes.
+ * The latest pending guest doorbell write.  The named kickN node determines
+ * the declared doorbell range; offset is relative to that range.  width is
+ * one of 1, 2, 4, or 8 and value contains its low width bytes.  A kick is an
+ * advisory rescan notification and may replace an unread earlier record.
  */
 struct vmmfs_pci_kick {
 	uint64_t	offset;
