@@ -78,7 +78,6 @@ vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent
 	if (machine == NULL || root == NULL)
 		return (ENXIO);
 	*vnodep = NULL;
-		return (ENXIO);
 	bzero(state_node, sizeof(*state_node));
 	lwkt_token_init(&state_node->token, "vmmfspcievents");
 	SLIST_INIT(&state_node->kq.ki_note);

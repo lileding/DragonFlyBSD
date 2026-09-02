@@ -111,7 +111,6 @@ vmmfs_pcislot_config_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent
 	if (machine == NULL || root == NULL)
 		return (ENXIO);
 	*vnodep = NULL;
-		return (ENXIO);
 	bzero(config, sizeof(*config));
 	config->node.inode = vmmfs_root_allocate_inode(root);
 	lwkt_token_init(&config->token, "vmmfspcicfg");
