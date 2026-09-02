@@ -28,3 +28,10 @@ cscope.*
 # *.a
 # !/bin/csh/USD.doc/csh.a
 # *.o
+
+# Local VMMFS language-server and analysis artifacts.
+/sys/vfs/vmmfs/.cache/
+/sys/vfs/vmmfs/__pycache__/
+/sys/vfs/vmmfs/.codex-*.c
+/sys/vfs/vmmfs/callchain.txt
+/sys/vfs/vmmfs/lsp_callchain.py
