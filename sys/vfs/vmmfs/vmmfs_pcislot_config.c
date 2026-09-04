@@ -635,8 +635,20 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 		tsleep_interlock(thread->vcpu, 0);
 		lwkt_reltoken(&thread->group->token);
 		error = tsleep(thread->vcpu, PINTERLOCKED, "vmmfspcicfg", 0);
-		if (error != 0)
+		if (error != 0) {
+			lwkt_gettoken(&config->token);
+			lwkt_gettoken(&thread->group->token);
+			if (thread->config_request == request) {
+				thread->config_request = NULL;
+				thread->config_done = false;
+			}
+			lwkt_reltoken(&thread->group->token);
+			TAILQ_REMOVE(&config->requests, request, entry);
+			lwkt_reltoken(&config->token);
+			kfree(request, M_VMMFS);
+			vmmfs_pcislot_config_wake_next(config);
 			return (error);
+		}
 	}
 
 	lwkt_gettoken(&config->token);

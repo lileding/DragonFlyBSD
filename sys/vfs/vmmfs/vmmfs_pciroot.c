@@ -205,21 +205,22 @@ vmmfs_pciroot_deactivate_slots(struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_pciroot_slot *entry;
 	struct vnode *vnode;
+	int error;
 
 	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
 		return;
 	for (;;) {
 		lwkt_gettoken(&pciroot->branch.token);
 		entry = RB_ROOT(&pciroot->registry->slots);
-		vnode = entry == NULL ? NULL : entry->vnode;
+		if (entry != NULL)
+			RB_REMOVE(vmmfs_pcislot_tree, &pciroot->registry->slots, entry);
 		lwkt_reltoken(&pciroot->branch.token);
 		if (entry == NULL)
 			break;
-		KKASSERT(vmmfs_vnode_deactivate(vnode) == 0);
-		lwkt_gettoken(&pciroot->branch.token);
-		KKASSERT(RB_ROOT(&pciroot->registry->slots) == entry);
-		RB_REMOVE(vmmfs_pcislot_tree, &pciroot->registry->slots, entry);
-		lwkt_reltoken(&pciroot->branch.token);
+		vnode = entry->vnode;
+		error = vmmfs_vnode_deactivate(vnode);
+		if (error != 0)
+			kprintf("vmmfs: PCI slot deactivate failed: %d\n", error);
 		vrele(vnode);
 		kfree(entry, M_VMMFS);
 	}

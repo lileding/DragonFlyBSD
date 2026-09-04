@@ -47,6 +47,7 @@ struct vmmfs_machine {
 	vmm_machine_t machine;
 	bool runtime_releasing;
 	bool runtime_released;
+	u_int runtime_references;
 	struct vmm_cpustate boot_state;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
