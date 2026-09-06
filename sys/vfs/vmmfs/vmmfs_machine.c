@@ -27,6 +27,7 @@
 #include "vmmfs_platform_x64.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_serialport.h"
+#include "vmmfs_stopped.h"
 
 #define VMMFS_MACHINE_MODE 0555
 
@@ -237,13 +238,12 @@ vmmfs_machine_prepare_stopped(struct vmmfs_machine *machine)
 		vmmfs_node_put(&stopped->node);
 		return (EBUSY);
 	}
-	if (machine->stopped != NULL) {
+	if (machine->stopped_vnode != NULL) {
 		lwkt_reltoken(&machine->node.token);
 		vmmfs_vnode_discard(stopped_vnode);
 		vmmfs_node_put(&stopped->node);
 		return (0);
 	}
-	machine->stopped = stopped;
 	machine->stopped_vnode = stopped_vnode;
 	lwkt_reltoken(&machine->node.token);
 	return (0);
@@ -287,7 +287,6 @@ vmmfs_machine_cleanup_stopped(struct vmmfs_machine *machine)
 
 	lwkt_gettoken(&machine->node.token);
 	vnode = machine->stopped_vnode;
-	machine->stopped = NULL;
 	machine->stopped_vnode = NULL;
 	lwkt_reltoken(&machine->node.token);
 	if (vnode == NULL)
@@ -339,7 +338,6 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 		vrele(vnode);
 	}
 	lwkt_gettoken(&node->token);
-	machine->stopped = NULL;
 	machine->vnode = NULL;
 	lwkt_reltoken(&node->token);
 	return (0);
@@ -359,7 +357,7 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	KKASSERT(machine->memory.node.drop == NULL);
 	KKASSERT(machine->loader.node.drop == NULL);
 	KKASSERT(machine->boot.node.drop == NULL);
-	KKASSERT(machine->stopped == NULL);
+	KKASSERT(machine->stopped_vnode == NULL);
 	KKASSERT(machine->events.node.drop == NULL);
 	KKASSERT(machine->pciroot.node.drop == NULL);
 	KKASSERT(machine->serialroot.node.drop == NULL);
@@ -678,7 +676,7 @@ static int
 vmmfs_machine_readdir(struct vop_readdir_args *ap)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_stopped *stopped;
+	struct vmmfs_node *stopped;
 	struct vmmfs_mount *mount;
 	struct uio *uio;
 	off_t offset;
@@ -752,10 +750,11 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	}
 	if (!stop && offset == 8) {
 		lwkt_gettoken(&machine->node.token);
-		stopped = machine->stopped;
+		stopped = machine->stopped_vnode == NULL ? NULL :
+		    machine->stopped_vnode->v_data;
 		present = stopped != NULL && (machine->machine == NULL ||
 		    machine->launch_vnode != NULL);
-		inode = present ? stopped->node.inode : 0;
+		inode = present ? stopped->inode : 0;
 		lwkt_reltoken(&machine->node.token);
 		if (present) {
 			stop = vop_write_dirent(&error, uio, inode, DT_REG,

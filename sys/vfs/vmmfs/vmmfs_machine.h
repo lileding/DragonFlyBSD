@@ -23,7 +23,6 @@
 #include "vmmfs_platform_x64.h"
 #include "vmmfs_rtc.h"
 #include "vmmfs_serialroot.h"
-#include "vmmfs_stopped.h"
 #include "vmmfs_vcpu.h"
 
 struct mount;
@@ -56,7 +55,6 @@ struct vmmfs_machine {
 	struct vmmfs_memory memory;
 	struct vmmfs_loader loader;
 	struct vmmfs_boot boot;
-	struct vmmfs_stopped *stopped;
 	struct vmmfs_pciroot pciroot;
 	struct vmmfs_platform_x64 platform;
 	struct vmmfs_rtc rtc;
