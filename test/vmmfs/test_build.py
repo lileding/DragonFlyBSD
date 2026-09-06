@@ -10,6 +10,28 @@ import unittest
 MODULE = Path(__file__).resolve().parents[2] / "sys/vfs/vmmfs"
 
 class BuildDependencies(unittest.TestCase):
+
+    def test_clean_build_has_no_installed_header_fallback(self):
+        for prepared in (False, True):
+            for staged in (False, True):
+                with self.subTest(prepared=prepared, staged=staged):
+                    with tempfile.TemporaryDirectory(prefix="vmmfs-includes-") as directory:
+                        build = Path(directory)
+                        if prepared:
+                            (build / "dragonfly").symlink_to(MODULE.parents[1])
+                        destination = str(build / "install") if staged else ""
+                        result = subprocess.run(
+                            ["make", "-f", str(MODULE / "Makefile"),
+                             "SYSDIR=" + str(MODULE.parents[1]),
+                             "DESTDIR=" + destination, "-V", "${CFLAGS}"],
+                            cwd=build, capture_output=True, text=True, check=True)
+                        flags = shlex.split(result.stdout)
+                        self.assertIn("-nostdinc", flags)
+                        self.assertIn("-Idragonfly", flags)
+                        self.assertIn("-Idragonfly/../include", flags)
+                        self.assertNotIn("-I" + destination + "/usr/include", flags,
+                                         "clean builds must not fall back to installed headers")
+
     def test_private_headers_are_self_contained(self):
         result = subprocess.run(
             ["make", "-V", "${CC}", "-V", "${CFLAGS}"], cwd=MODULE,

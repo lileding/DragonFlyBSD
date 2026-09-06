@@ -14,5 +14,8 @@ COPTS+= -fno-asynchronous-unwind-tables
 COPTS+= -fno-unwind-tables
 .include <bsd.kmod.mk>
 
+# Never fall back to installed headers before the source links exist.
+CFLAGS:= ${CFLAGS:N-I${DESTDIR}/usr/include}
+
 # kmod.mk supplies this only when .depend is absent.
 ${OBJS}: ${SRCS:M*.h}
