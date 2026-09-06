@@ -141,8 +141,7 @@ struct vmmfs_pcislot_descriptor {
 	struct vmmfs_pcislot_auth *auth;
 };
 
-int vmmfs_pcislot_descriptor_init(struct vmmfs_mount *,
-	struct vmmfs_node *, struct vmmfs_pcislot_descriptor *,
+int vmmfs_pcislot_descriptor_init(struct vmmfs_node *, struct vmmfs_pcislot_descriptor *,
 	struct vnode **);
 
 #endif /* VMMFS_PCISLOT_DESCRIPTOR_H */

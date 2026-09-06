@@ -18,6 +18,7 @@ HARNESS = COMMON + r"""
 #define bcopy(s,d,n) memcpy((d),(s),(n))
 struct token { bool initialized; unsigned held; };
 struct vmmfs_node {
+    struct vmmfs_mount *mount;
     struct vmmfs_node *parent; struct token token;
     unsigned references; bool dead; unsigned inode, mode, size;
     int (*deactivate)(struct vmmfs_node *);
@@ -29,7 +30,7 @@ struct vmmfs_mount { struct vnode *root_vnode; void *mount, *machine_vops, *pcis
 struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
-    struct vmmfs_node node; struct vmmfs_mount *mount;
+    struct vmmfs_node node;
     char name[256]; struct vnode *vnode;
     struct child id_node, vcpu, memory, loader, boot, pciroot, serialroot, events;
     struct child *stopped; struct component rtc, platform;
@@ -70,10 +71,10 @@ static void child_drop(struct vmmfs_node *n) {
     --child_live;
 }
 static bool fail(void) { return ++stage == fail_at; }
-static int child_init(struct vmmfs_mount *m, struct vmmfs_node *p,
+static int child_init(struct vmmfs_node *p,
     struct child *c, struct vnode **vp) {
-    assert(m); *vp = NULL;
-    c->node.parent = p; c->node.references = 1; c->node.drop = child_drop;
+    assert(p->mount); *vp = NULL;
+    c->node.parent = p; c->node.mount = p->mount; c->node.references = 1; c->node.drop = child_drop;
     lwkt_token_init(&c->node.token, "child");
     vmmfs_node_hold(p); ++child_live;
     /* A failed init must return its own parent reference before returning. */
@@ -108,7 +109,7 @@ static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
 }
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *m) {
     struct child *s = calloc(1,sizeof(*s));
-    int error = child_init(m->mount, &m->node, s, &m->stopped_vnode);
+    int error = child_init(&m->node, s, &m->stopped_vnode);
     if (error) free(s); else m->stopped = s;
     return error;
 }
@@ -153,15 +154,15 @@ int main(void) {
     struct vmmfs_root root;
     struct vnode root_vnode = { &root };
     struct vmmfs_mount mount = { &root_vnode, &root, &root, &root };
-    struct vmmfs_node parent = { .references = 1 };
+    struct vmmfs_node parent = { .references = 1, .mount = &mount };
     struct vnode *result;
     for (unsigned kind = 0; kind < 2; ++kind) {
         unsigned limit = kind == 0 ? 12 : 4;
         for (fail_at = 1; fail_at <= limit; ++fail_at) {
             stage = object_drops = 0; result = (void *)1;
             int error = kind == 0 ?
-                vmmfs_machine_create(&mount, &parent, "test", 4, &result) :
-                vmmfs_pcislot_create(&mount, &parent, 8, &result);
+                vmmfs_machine_create(&parent, "test", 4, &result) :
+                vmmfs_pcislot_create(&parent, 8, &result);
             assert(error == ENFILE && stage == fail_at && result == NULL);
             assert(parent.references == 1 && objects == 0 && vnodes == 0);
             assert(child_live == 0 && token_live == 0 && component_live == 0);
@@ -184,6 +185,7 @@ typedef long off_t;
 #define GID_WHEEL 0
 struct token { bool initialized; };
 struct vmmfs_node {
+    struct vmmfs_mount *mount;
     struct vmmfs_node *parent; struct token token; unsigned references;
     unsigned mode, inode; uint64_t size;
     int (*deactivate)(struct vmmfs_node *);
@@ -251,13 +253,15 @@ int main(void) {
     struct vmmfs_node parent = { .references = 1 };
     struct vnode root = { &parent };
     struct vmmfs_mount mount = { &parent, &parent, &root };
+    parent.mount = &mount;
     struct vnode *result;
     for (fail_at = 0; fail_at <= 2; ++fail_at) {
         dropped = 0; result = (void *)1;
-        int error = vmmfs_launch_create(&mount, &parent, 4096, &result);
+        int error = vmmfs_launch_create(&parent, 4096, &result);
         if (fail_at == 0) {
             assert(error == 0 && result != NULL && parent.references == 2);
             struct vmmfs_launch *launch = result->v_data;
+            assert(launch->node.mount == parent.mount);
             assert(launch->result == EINPROGRESS && launch->node.size == 4096);
             /* A not-yet-published candidate has no pager; final put owns cdev. */
             struct vm_object backing = { 2 };

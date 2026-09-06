@@ -111,21 +111,15 @@ struct vop_ops vmmfs_pcislot_config_vops = {
 };
 
 int
-vmmfs_pcislot_config_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	struct vmmfs_pcislot_config *config, struct vnode **vnodep)
 {
-	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
-	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (mount == NULL || parent == NULL || config == NULL || vnodep == NULL)
+	if (parent == NULL || config == NULL || vnodep == NULL)
 		return (EINVAL);
-	slot = (struct vmmfs_pcislot *)parent;
-	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (machine == NULL || root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(config, sizeof(*config));
 	config->node.inode = vmmfs_root_allocate_inode(root);
@@ -133,17 +127,17 @@ vmmfs_pcislot_config_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	TAILQ_INIT(&config->requests);
 	SLIST_INIT(&config->kq.ki_note);
 	config->node.parent = parent;
+	config->node.mount = parent->mount;
 	config->node.dead = false;
 	config->node.references = 1;
 	lwkt_token_init(&config->node.token, "vmmfsnode");
 	config->node.deactivate = vmmfs_pcislot_config_deactivate;
 	config->node.drop = vmmfs_pcislot_config_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	config->node.mode = VMMFS_PCISLOT_CONFIG_MODE;
 	config->node.size = 0;
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->pcislot_config_vops, VREG, &config->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->pcislot_config_vops, VREG, &config->node, vnodep);
 	if (error != 0)
 		vmmfs_node_put(&config->node);
 	return (error);

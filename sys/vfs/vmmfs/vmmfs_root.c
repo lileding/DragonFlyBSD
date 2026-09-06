@@ -104,11 +104,10 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 		return (EINVAL);
 	*vnodep = NULL;
 	state = (struct vmmfs_mount *)mount->mnt_data;
-	if (state == NULL || state->root_vops == NULL)
-		return (ENXIO);
 	root = kmalloc(sizeof(*root), M_VMMFS, M_WAITOK | M_ZERO);
 	atomic_add_int(&vmmfs_root_count, 1);
 	root->node.parent = NULL;
+	root->node.mount = state;
 	root->node.references = 1;
 	lwkt_token_init(&root->node.token, "vmmfsnode");
 	root->node.drop = vmmfs_root_drop;
@@ -265,7 +264,6 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	const char *name, size_t namelen, struct vnode **vnodep)
 {
 	struct vmmfs_root *root = (struct vmmfs_root *)node;
-	struct vmmfs_mount *state = (struct vmmfs_mount *)mount->mnt_data;
 	struct vmmfs_root_machine *entry;
 	struct vnode *vnode;
 	int error, cleanup_error;
@@ -274,7 +272,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 		return (ENAMETOOLONG);
 	*vnodep = NULL;
 	entry = kmalloc(sizeof(*entry), M_VMMFS, M_WAITOK | M_ZERO);
-	error = vmmfs_machine_create(state, node, name, namelen, &vnode);
+	error = vmmfs_machine_create(node, name, namelen, &vnode);
 	if (error != 0) {
 		kfree(entry, M_VMMFS);
 		return (error);

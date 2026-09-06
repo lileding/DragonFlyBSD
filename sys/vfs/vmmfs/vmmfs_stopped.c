@@ -67,30 +67,26 @@ vmmfs_stopped_setattr(struct vop_setattr_args *ap)
 }
 
 int
-vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_stopped_create(struct vmmfs_node *parent,
 	struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
 	struct vmmfs_stopped *stopped;
 	int error;
 
-	if (mount == NULL || parent == NULL || vnodep == NULL)
+	if (parent == NULL || vnodep == NULL)
 		return (ENXIO);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (EINVAL);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
-	if (mount->stopped_vops == NULL)
-		return (ENXIO);
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
 	stopped->node.parent = parent;
+	stopped->node.mount = parent->mount;
 	stopped->node.dead = false;
 	stopped->node.references = 1;
 	lwkt_token_init(&stopped->node.token, "vmmfsnode");
 	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	stopped->node.drop = vmmfs_stopped_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	stopped->node.load_limit = 0;
 	stopped->node.store_limit = 0;
 	stopped->node.load = NULL;
@@ -98,8 +94,8 @@ vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	stopped->node.inode = vmmfs_root_allocate_inode(root);
 	stopped->node.mode = VMMFS_STOPPED_MODE;
 	stopped->node.size = 0;
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->stopped_vops, VREG, &stopped->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->stopped_vops, VREG, &stopped->node, vnodep);
 	if (error != 0) {
 		vmmfs_node_put(&stopped->node);
 		return (error);

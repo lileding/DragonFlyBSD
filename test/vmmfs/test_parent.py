@@ -209,7 +209,7 @@ struct vmmfs_vcpu { struct vmmfs_node node; };
 struct vmmfs_events { struct vmmfs_node node; };
 struct vmmfs_machine {
     struct vmmfs_node node;
-    void *machine, *mount;
+    void *machine;
     struct vnode *launch_vnode, *stopped_vnode, *vcpu_vnode, *events_vnode;
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
@@ -230,9 +230,9 @@ static void vmmfs_node_put(struct vmmfs_node *n) {
     assert(n->references != 0);
     if (--n->references == 0) { free(n); --allocated; }
 }
-static int vmmfs_stopped_create(void *mount, struct vmmfs_node *parent,
+static int vmmfs_stopped_create(struct vmmfs_node *parent,
     struct vnode **out) {
-    (void)mount; assert(parent->token.held == 0);
+    assert(parent->token.held == 0);
     struct vmmfs_stopped *s = calloc(1, sizeof(*s)); assert(s);
     s->node.references = 1; candidate.v_data = s; candidate.refs = 1;
     *out = &candidate; ++allocated; return 0;

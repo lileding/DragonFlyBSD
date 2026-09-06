@@ -77,7 +77,7 @@ struct vop_ops vmmfs_pcislot_vops = {
 };
 
 int
-vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_pcislot_create(struct vmmfs_node *parent,
 	uint16_t bdf,
 	struct vnode **vnodep)
 {
@@ -85,41 +85,36 @@ vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (mount == NULL || parent == NULL ||
-	vnodep == NULL)
+	if (parent == NULL || vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
-	if (mount == NULL || mount->pcislot_vops == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
 	slot->node.inode = vmmfs_root_allocate_inode(root);
 	slot->bdf = bdf;
 	slot->node.parent = parent;
+	slot->node.mount = parent->mount;
 	slot->node.references = 1;
 	lwkt_token_init(&slot->node.token, "vmmfsnode");
 	slot->node.drop = vmmfs_pcislot_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	slot->node.deactivate = vmmfs_pcislot_deactivate;
 	slot->node.mode = VMMFS_PCISLOT_MODE;
 	slot->node.size = 0;
-	error = vmmfs_pcislot_events_init(mount, &slot->node, &slot->events,
+	error = vmmfs_pcislot_events_init(&slot->node, &slot->events,
 	    &slot->events_vnode);
 	if (error != 0)
 		goto fail_slot;
-	error = vmmfs_pcislot_config_init(mount, &slot->node, &slot->config,
+	error = vmmfs_pcislot_config_init(&slot->node, &slot->config,
 	    &slot->config_vnode);
 	if (error != 0)
 		goto fail_events;
-	error = vmmfs_pcislot_descriptor_init(mount, &slot->node, &slot->descriptor,
+	error = vmmfs_pcislot_descriptor_init(&slot->node, &slot->descriptor,
 	    &slot->descriptor_vnode);
 	if (error != 0)
 		goto fail_config;
-	error = vmmfs_vnode_create_regular(mount->mount, &mount->pcislot_vops,
-	    VDIR, &slot->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->pcislot_vops, VDIR, &slot->node, vnodep);
 	if (error != 0)
 		goto fail_descriptor;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
@@ -227,8 +222,7 @@ vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
 {
 	int error;
 
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL || machine == NULL ||
-	    slot->node.dead ||
+	if (slot == NULL || machine == NULL || slot->node.dead ||
 	    !slot->descriptor.committed || slot->resources != NULL ||
 	    slot->type0.powered)
 		return (EINVAL);
@@ -283,9 +277,7 @@ vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
 	 * down the previous vmm_machine.  Rebuild it rather than treating that
 	 * derived state as a failed reset precondition.
 	 */
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    slot->node.dead ||
-	    !slot->descriptor.committed)
+	if (slot == NULL || slot->node.dead || !slot->descriptor.committed)
 		return (EINVAL);
 	resources = slot->resources;
 	if (resources == NULL)
@@ -510,8 +502,6 @@ vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	if (slot == NULL || slot->node.dead)
 		return (ENOENT);
 	pciroot = vmmfs_pcislot_pciroot(slot);
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
-		return (ENOENT);
 	lwkt_gettoken(&pciroot->node.token);
 	vnode = vmmfs_pciroot_machine(pciroot)->pciroot_vnode;
 	if (vnode != NULL)
@@ -550,7 +540,7 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	int error;
 
 	slot = ap->a_dvp->v_data;
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL)
+	if (slot == NULL)
 		return (ENOENT);
 	ncp = ap->a_nch->ncp;
 	lwkt_gettoken(&slot->node.token);
@@ -791,8 +781,6 @@ vmmfs_pcislot_type0_allocate_bar(struct vmmfs_pcislot *slot,
 	if (!bar->present)
 		return (0);
 	pciroot = vmmfs_pcislot_pciroot(slot);
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
-		return (EINVAL);
 	lwkt_gettoken(&pciroot->node.token);
 	if (bar->type == VMMFS_PCISLOT_BAR_IO) {
 		limit = VMMFS_PCI_PIO_END;
@@ -842,8 +830,6 @@ vmmfs_pcislot_type0_allocate_rom(struct vmmfs_pcislot *slot)
 	if (slot == NULL || !slot->descriptor.value.rom_present)
 		return (0);
 	pciroot = vmmfs_pcislot_pciroot(slot);
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
-		return (EINVAL);
 	lwkt_gettoken(&pciroot->node.token);
 	error = vmmfs_pcislot_type0_align(pciroot->mmio_next,
 	    slot->descriptor.value.rom_size, &base);

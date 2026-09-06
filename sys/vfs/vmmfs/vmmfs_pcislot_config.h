@@ -41,7 +41,7 @@ struct vmmfs_pcislot_config {
 	bool closed;
 };
 
-int vmmfs_pcislot_config_init(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_pcislot_config_init(struct vmmfs_node *,
 	struct vmmfs_pcislot_config *, struct vnode **);
 void vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *,
 	uint64_t, bool);

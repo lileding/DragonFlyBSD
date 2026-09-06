@@ -33,7 +33,7 @@ struct vmmfs_pcislot_events {
 	bool closed;
 };
 
-int vmmfs_pcislot_events_init(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_pcislot_events_init(struct vmmfs_node *,
 	struct vmmfs_pcislot_events *, struct vnode **);
 void vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *,

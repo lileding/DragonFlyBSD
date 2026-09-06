@@ -127,13 +127,11 @@ struct vop_ops vmmfs_serialport_vops = {
 };
 
 int
-vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_serialport_create(struct vmmfs_node *parent,
     const char *name, size_t namelen, struct vnode **vnodep)
 {
     struct vmmfs_serialroot *serialroot;
-    struct vmmfs_mount *state;
     struct vmmfs_root *root;
-    struct vmmfs_machine *machine;
     struct vmmfs_serialport *port;
     cdev_t dev;
     uint8_t number;
@@ -142,17 +140,11 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
     uint32_t unit;
     int error;
 
-    if (mount == NULL || parent == NULL || vnodep == NULL ||
+    if (parent == NULL || vnodep == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
     serialroot = (struct vmmfs_serialroot *)parent;
-    machine = vmmfs_serialroot_machine(serialroot);
-    root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-    if (machine == NULL || root == NULL)
-        return ENXIO;
-    state = mount;
-    if (state->serialport_vops == NULL)
-        return ENXIO;
+    root = parent->mount->root_vnode->v_data;
     *vnodep = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
     port->node.inode = vmmfs_root_allocate_inode(root);
@@ -180,18 +172,18 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
     port->tty.t_param = vmmfs_serialport_tty_param;
     port->dev = dev;
     port->node.parent = parent;
+    port->node.mount = parent->mount;
     port->node.dead = false;
     port->node.references = 1;
     lwkt_token_init(&port->node.token, "vmmfsnode");
     port->node.drop = vmmfs_serialport_drop;
-    if (parent != NULL)
-        vmmfs_node_hold(parent);
+    vmmfs_node_hold(parent);
     port->node.deactivate = vmmfs_serialport_deactivate;
     port->node.mode = VMMFS_SERIALPORT_MODE;
     port->node.size = 0;
     error = vmmfs_vnode_create_cdev(
-        state->mount,
-        &state->serialport_vops, port->dev, &port->node, vnodep);
+        parent->mount->mount,
+        &parent->mount->serialport_vops, port->dev, &port->node, vnodep);
     if (error != 0) {
         lwkt_gettoken(&port->token);
         port->destroying = true;

@@ -251,8 +251,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	vmm_machine_t machine, const struct vmmfs_pcislot_descriptor_value *value,
 	uint64_t generation, struct vmmfs_pcislot_resources **resourcesp)
 {
-	struct vmmfs_mount *mount;
-	struct vmmfs_machine *machine_owner;
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_pcislot_resource *resource;
 	size_t count;
@@ -265,15 +263,10 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	unsigned int msix_index;
 	int error;
 
-	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL || machine == NULL || value == NULL ||
+	if (slot == NULL || machine == NULL || value == NULL ||
 	    resourcesp == NULL || generation == 0)
 		return (EINVAL);
 	*resourcesp = NULL;
-	machine_owner = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	mount = machine_owner == NULL ? NULL : machine_owner->mount;
-	if (mount == NULL || mount->pcislot_resource_vops == NULL)
-		return (ENXIO);
 	count = 1;
 	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
 		if (value->bars[bar].present)
@@ -298,6 +291,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	resources = kmalloc(sizeof(*resources) + count * sizeof(resources->items[0]),
 	    M_VMMFS, M_WAITOK | M_ZERO);
 	resources->node.parent = &slot->node;
+	resources->node.mount = slot->node.mount;
 	resources->node.references = 1;
 	lwkt_token_init(&resources->node.token, "vmmfsnode");
 	resources->node.drop = vmmfs_pcislot_resources_drop;
@@ -363,12 +357,13 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
 		resource->node.inode = vmmfs_root_allocate_inode(
-		    vmmfs_machine_root(machine_owner));
+		    slot->node.mount->root_vnode->v_data);
 		lwkt_token_init(&resource->token, "vmmfspcires");
 		++resources->initialized_count;
 		SLIST_INIT(&resource->read_kq.ki_note);
 		SLIST_INIT(&resource->objects);
 		resource->node.parent = &resources->node;
+		resource->node.mount = resources->node.mount;
 		resource->node.dead = false;
 		resource->node.references = 1;
 		lwkt_token_init(&resource->node.token, "vmmfsnode");
@@ -384,7 +379,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	}
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
-		error = vmmfs_pcislot_resource_create_vnode(resource, mount,
+		error = vmmfs_pcislot_resource_create_vnode(resource, slot->node.mount,
 		    &resources->vnodes[index]);
 		if (error != 0)
 			goto fail;
@@ -466,8 +461,7 @@ vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *resources,
 	int error;
 
 	if (resources == NULL || machine == NULL || resources->destroying ||
-	    !resources->powered || vmmfs_pcislot_resources_slot(resources) == NULL ||
-	    vmmfs_pcislot_pciroot(vmmfs_pcislot_resources_slot(resources)) == NULL)
+	    !resources->powered)
 		return (EINVAL);
 	if (resources->machine != NULL)
 		return (EBUSY);

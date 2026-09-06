@@ -119,35 +119,27 @@ RB_GENERATE(vmmfs_pcislot_tree, vmmfs_pciroot_slot, entry,
 	vmmfs_pciroot_slot_compare);
 
 int
-vmmfs_pciroot_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_pciroot_init(struct vmmfs_node *parent,
 	struct vmmfs_pciroot *pciroot, struct vnode **vnodep)
 {
-	struct vmmfs_mount *state;
-	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
 	int error;
 
-	if (mount == NULL || parent == NULL || pciroot == NULL || vnodep == NULL)
+	if (parent == NULL || pciroot == NULL || vnodep == NULL)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (EINVAL);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
-	machine = (struct vmmfs_machine *)parent;
-	state = mount;
-	if (state->pciroot_vops == NULL)
-		return (ENXIO);
 	bzero(pciroot, sizeof(*pciroot));
 	pciroot->registry = kmalloc(sizeof(*pciroot->registry), M_VMMFS,
 	    M_WAITOK | M_ZERO);
 	if (pciroot->registry == NULL)
 		return (ENOMEM);
 	pciroot->node.parent = parent;
+	pciroot->node.mount = parent->mount;
 	pciroot->node.references = 1;
 	lwkt_token_init(&pciroot->node.token, "vmmfsnode");
 	pciroot->node.drop = vmmfs_pciroot_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	pciroot->node.deactivate = vmmfs_pciroot_deactivate;
 	pciroot->node.get_item = vmmfs_pciroot_get_item;
 	pciroot->node.read_item = vmmfs_pciroot_read_item;
@@ -157,8 +149,8 @@ vmmfs_pciroot_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	pciroot->node.mode = VMMFS_PCIROOT_MODE;
 	pciroot->node.size = 0;
 	RB_INIT(&pciroot->registry->slots);
-	error = vmmfs_vnode_create_regular(state->mount,
-	    &state->pciroot_vops, VDIR, &pciroot->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->pciroot_vops, VDIR, &pciroot->node, vnodep);
 	if (error != 0)
 		vmmfs_node_put(&pciroot->node);
 	return (error);
@@ -267,8 +259,7 @@ vmmfs_pciroot_start(struct vmmfs_pciroot *pciroot, vmm_machine_t machine)
 	struct vmmfs_pciroot_slot *entry;
 	int error;
 
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL ||
-	    machine == NULL)
+	if (pciroot == NULL || machine == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine != NULL) {
@@ -368,7 +359,7 @@ vmmfs_pciroot_reset(struct vmmfs_pciroot *pciroot)
 	vmm_io_t ecam_write;
 	int error;
 
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
+	if (pciroot == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&pciroot->node.token);
 	machine = pciroot->runtime_machine;
@@ -436,7 +427,7 @@ vmmfs_pciroot_stop(struct vmmfs_pciroot *pciroot)
 	int error;
 	int result;
 
-	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
+	if (pciroot == NULL)
 		return (EINVAL);
 	lwkt_gettoken(&pciroot->node.token);
 	machine = pciroot->runtime_machine;
@@ -662,8 +653,6 @@ vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	if (pciroot == NULL || pciroot->node.dead)
 		return (ENOENT);
 	machine = vmmfs_pciroot_machine(pciroot);
-	if (machine == NULL)
-		return (ENOENT);
 	lwkt_gettoken(&machine->node.token);
 	vnode = machine->vnode;
 	if (vnode != NULL)
@@ -692,8 +681,7 @@ vmmfs_pciroot_get_item(struct vmmfs_node *node, const char *name,
 		return (EINVAL);
 	*vnodep = NULL;
 	pciroot = (struct vmmfs_pciroot *)node;
-	if (pciroot->node.dead ||
-	    vmmfs_pciroot_machine(pciroot) == NULL)
+	if (pciroot->node.dead)
 		return (ENOENT);
 	if (vmmfs_pciroot_parse_bdf(name, namelen, &bdf) != 0)
 		return (ENOENT);
@@ -752,7 +740,6 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 {
 	struct vmmfs_pciroot *root = (struct vmmfs_pciroot *)node;
 	struct vmmfs_machine *machine = vmmfs_pciroot_machine(root);
-	struct vmmfs_mount *state = (struct vmmfs_mount *)mount->mnt_data;
 	struct vmmfs_pciroot_slot *entry;
 	struct vnode *vnode;
 	uint16_t bdf;
@@ -763,7 +750,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	if (error != 0)
 		return (error);
 	entry = kmalloc(sizeof(*entry), M_VMMFS, M_WAITOK | M_ZERO);
-	error = vmmfs_pcislot_create(state, node, bdf, &vnode);
+	error = vmmfs_pcislot_create(node, bdf, &vnode);
 	if (error != 0) {
 		kfree(entry, M_VMMFS);
 		return (error);

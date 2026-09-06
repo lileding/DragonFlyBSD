@@ -198,14 +198,12 @@ vmmfs_platform_x64_prepare(struct vmmfs_platform_x64 *platform,
 	int error;
 
 	if (platform == NULL || platform->machine == NULL || memory == NULL ||
-	    memory->object == NULL ||
-	    vmmfs_memory_machine(memory) == NULL || pciroot == NULL || serialroot == NULL ||
+	    memory->object == NULL || pciroot == NULL || serialroot == NULL ||
 	    platform->machine != vmmfs_memory_machine(memory) ||
 	    vmmfs_pciroot_machine(pciroot) != vmmfs_memory_machine(memory) ||
-	    vmmfs_serialroot_machine(serialroot) != vmmfs_memory_machine(memory) || vcpu_count == 0 ||
-	    vcpu_count > UINT8_MAX + 1U ||
-	    memory->size <
-	    VMMFS_PLATFORM_X64_ACPI_GPA + VMMFS_PLATFORM_X64_ACPI_SIZE)
+	    vmmfs_serialroot_machine(serialroot) != vmmfs_memory_machine(memory) ||
+	    vcpu_count == 0 || vcpu_count > UINT8_MAX + 1U ||
+	    memory->size < VMMFS_PLATFORM_X64_ACPI_GPA + VMMFS_PLATFORM_X64_ACPI_SIZE)
 		return EINVAL;
 	tables = kmalloc(VMMFS_PLATFORM_X64_ACPI_SIZE, M_VMMFS,
 	    M_WAITOK | M_ZERO);

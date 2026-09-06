@@ -72,28 +72,26 @@ struct vop_ops vmmfs_events_vops = {
 };
 
 int
-vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_events_init(struct vmmfs_node *parent,
 	struct vmmfs_events *events, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (mount == NULL || parent == NULL || events == NULL || vnodep == NULL)
+	if (parent == NULL || events == NULL || vnodep == NULL)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(events, sizeof(*events));
 	lwkt_token_init(&events->token, "vmmfsevents");
 	events->node.parent = parent;
+	events->node.mount = parent->mount;
 	events->node.dead = false;
 	events->node.references = 1;
 	lwkt_token_init(&events->node.token, "vmmfsnode");
 	events->node.deactivate = vmmfs_events_deactivate;
 	events->node.drop = vmmfs_events_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	events->node.load_limit = 0;
 	events->node.store_limit = sizeof("reset\n") - 1;
 	events->node.load = NULL;
@@ -104,16 +102,11 @@ vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	events->node.inode = vmmfs_root_allocate_inode(root);
 	events->node.mode = VMMFS_EVENTS_MODE;
 	events->node.size = 0;
-	if (mount->events_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->events_vops, VREG, &events->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->events_vops, VREG, &events->node, vnodep);
 	if (error == 0)
 		return (0);
 
-fail:
 	vmmfs_node_put(&events->node);
 	return (error);
 }

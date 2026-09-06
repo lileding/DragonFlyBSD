@@ -49,7 +49,7 @@ vmmfs_node_access(struct vop_access_args *ap)
 	struct vmmfs_node *node;
 	int error;
 
-	if (ap == NULL || ap->a_vp == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -70,7 +70,7 @@ vmmfs_node_getattr(struct vop_getattr_args *ap)
 	struct vmmfs_node *node;
 	struct vattr *vattr;
 
-	if (ap == NULL || ap->a_vp == NULL || ap->a_vap == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -104,7 +104,7 @@ vmmfs_node_getattr_lite(struct vop_getattr_lite_args *ap)
 	struct vmmfs_node *node;
 	struct vattr_lite *vattr;
 
-	if (ap == NULL || ap->a_vp == NULL || ap->a_lvap == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -131,7 +131,7 @@ vmmfs_node_inactive(struct vop_inactive_args *ap)
 {
 	struct vmmfs_node *node;
 
-	if (ap == NULL || ap->a_vp == NULL)
+	if (ap == NULL)
 		return (0);
 	node = ap->a_vp->v_data;
 	if (node != NULL && node->dead && node->drop != NULL)
@@ -145,7 +145,7 @@ vmmfs_node_open(struct vop_open_args *ap)
 	struct vmmfs_node *node;
 	int error;
 
-	if (ap == NULL || ap->a_vp == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -169,7 +169,7 @@ vmmfs_node_read(struct vop_read_args *ap)
 	off_t offset;
 	int error;
 
-	if (ap == NULL || ap->a_vp == NULL || ap->a_uio == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -208,7 +208,7 @@ vmmfs_node_setattr(struct vop_setattr_args *ap)
 	struct vattr *vattr;
 	int error;
 
-	if (ap == NULL || ap->a_vp == NULL || ap->a_vap == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
@@ -243,7 +243,7 @@ vmmfs_node_write(struct vop_write_args *ap)
 	size_t length;
 	int error;
 
-	if (ap == NULL || ap->a_vp == NULL || ap->a_uio == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	node = ap->a_vp->v_data;
 	if (node == NULL)

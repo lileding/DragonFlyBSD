@@ -69,61 +69,57 @@ struct vop_ops vmmfs_machine_vops = {
 };
 
 int
-vmmfs_machine_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_machine_create(struct vmmfs_node *parent,
 	const char *name, size_t namelen, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
-	struct vmmfs_mount *state;
 	struct vmmfs_root *root;
 	struct vnode *vnode;
 	int error;
 
-	if (parent == NULL || mount == NULL || name == NULL || vnodep == NULL ||
-	    namelen == 0 || namelen > NAME_MAX)
+	if (parent == NULL || name == NULL || vnodep == NULL || namelen == 0 ||
+	    namelen > NAME_MAX)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = (struct vmmfs_root *)parent;
 	*vnodep = NULL;
 	vnode = NULL;
 	machine = kmalloc(sizeof(*machine), M_VMMFS, M_WAITOK | M_ZERO);
 	machine->node.parent = parent;
+	machine->node.mount = parent->mount;
 	machine->node.references = 1;
 	lwkt_token_init(&machine->node.token, "vmmfsnode");
 	machine->node.drop = vmmfs_machine_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	machine->node.deactivate = vmmfs_machine_deactivate;
-	machine->mount = mount;
 	machine->node.inode = vmmfs_root_allocate_inode(root);
 	machine->node.mode = VMMFS_MACHINE_MODE;
 	machine->node.size = 0;
 	bcopy(name, machine->name, namelen);
 	machine->name[namelen] = 0;
-	error = vmmfs_machine_id_init(mount, &machine->node, &machine->id_node,
+	error = vmmfs_machine_id_init(&machine->node, &machine->id_node,
 	    &machine->id_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_vcpu_init(mount, &machine->node, &machine->vcpu,
+	error = vmmfs_vcpu_init(&machine->node, &machine->vcpu,
 	    &machine->vcpu_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_memory_init(mount, &machine->node, &machine->memory,
+	error = vmmfs_memory_init(&machine->node, &machine->memory,
 	    &machine->memory_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_loader_init(mount, &machine->node, &machine->loader,
+	error = vmmfs_loader_init(&machine->node, &machine->loader,
 	    &machine->loader_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_boot_init(mount, &machine->node, &machine->boot,
+	error = vmmfs_boot_init(&machine->node, &machine->boot,
 	    &machine->boot_vnode);
 	if (error != 0)
 		goto fail;
 	error = vmmfs_machine_create_stopped(machine);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_pciroot_init(mount, &machine->node, &machine->pciroot,
+	error = vmmfs_pciroot_init(&machine->node, &machine->pciroot,
 	    &machine->pciroot_vnode);
 	if (error != 0)
 		goto fail;
@@ -133,21 +129,16 @@ vmmfs_machine_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	error = vmmfs_rtc_init(machine, &machine->rtc);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_serialroot_init(mount, &machine->node, &machine->serialroot,
+	error = vmmfs_serialroot_init(&machine->node, &machine->serialroot,
 	    &machine->serialroot_vnode);
 	if (error != 0)
 		goto fail;
-	error = vmmfs_events_init(mount, &machine->node, &machine->events,
+	error = vmmfs_events_init(&machine->node, &machine->events,
 	    &machine->events_vnode);
 	if (error != 0)
 		goto fail;
-	state = machine->mount;
-	if (state == NULL || state->machine_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
-	error = vmmfs_vnode_create_regular(state->mount, &state->machine_vops,
-	    VDIR, &machine->node, &vnode);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->machine_vops, VDIR, &machine->node, &vnode);
 	if (error != 0)
 		goto fail;
 	machine->vnode = vnode;
@@ -226,7 +217,7 @@ vmmfs_machine_prepare_stopped(struct vmmfs_machine *machine)
 	struct vnode *stopped_vnode;
 	int error;
 
-	error = vmmfs_stopped_create(machine->mount, &machine->node,
+	error = vmmfs_stopped_create(&machine->node,
 	    &stopped_vnode);
 	if (error != 0)
 		return (error);
@@ -265,7 +256,7 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	lwkt_reltoken(&machine->node.token);
 	if (vcpu_vnode == NULL)
 		return (EBUSY);
-	error = vmmfs_stopped_create(machine->mount, &machine->node, &vnode);
+	error = vmmfs_stopped_create(&machine->node, &vnode);
 	if (error != 0) {
 		vrele(vcpu_vnode);
 		return (error);
@@ -840,6 +831,7 @@ vmmfs_machine_boot(struct vmmfs_machine *machine, struct vnode **vnodep)
 	*vnodep = NULL;
 	bzero(&memory, sizeof(memory));
 	memory.node.parent = &machine->node;
+	memory.node.mount = machine->node.mount;
 	lwkt_gettoken(&machine->node.token);
 	if (machine->node.dead || machine->vcpu_vnode == NULL) {
 		lwkt_reltoken(&machine->node.token);
@@ -854,7 +846,7 @@ vmmfs_machine_boot(struct vmmfs_machine *machine, struct vnode **vnodep)
 	vnode = NULL;
 
 	/* Private candidates may sleep; no shared topology is changed yet. */
-	error = vmmfs_launch_create(machine->mount, &machine->node,
+	error = vmmfs_launch_create(&machine->node,
 	    memory.size, &vnode);
 	if (error != 0)
 		goto finished;

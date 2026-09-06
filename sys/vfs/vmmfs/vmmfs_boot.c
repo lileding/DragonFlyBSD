@@ -47,7 +47,7 @@ static struct dev_ops vmmfs_boot_dev_ops = {
 };
 
 int
-vmmfs_boot_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_boot_init(struct vmmfs_node *parent,
 	struct vmmfs_boot *boot,
 	struct vnode **vnodep)
 {
@@ -56,24 +56,20 @@ vmmfs_boot_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	uint32_t serial;
 	int error;
 
-	if (mount == NULL || parent == NULL || boot == NULL || vnodep == NULL)
+	if (parent == NULL || boot == NULL || vnodep == NULL)
 		return (EINVAL);
 	machine = (struct vmmfs_machine *)parent;
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(boot, sizeof(*boot));
-	if (mount == NULL || mount->boot_vops == NULL)
-		return (ENXIO);
 	boot->node.parent = parent;
+	boot->node.mount = parent->mount;
 	boot->node.dead = false;
 	boot->node.references = 1;
 	lwkt_token_init(&boot->node.token, "vmmfsnode");
 	boot->node.deactivate = vmmfs_boot_deactivate;
 	boot->node.drop = vmmfs_boot_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	boot->node.inode = vmmfs_root_allocate_inode(root);
 	boot->node.mode = VMMFS_BOOT_MODE;
 	boot->node.size = machine->memory.size;
@@ -85,8 +81,8 @@ vmmfs_boot_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 		goto fail;
 	}
 	boot->dev->si_drv1 = boot;
-	error = vmmfs_vnode_create_cdev(mount->mount,
-	    &mount->boot_vops, boot->dev, &boot->node, vnodep);
+	error = vmmfs_vnode_create_cdev(parent->mount->mount,
+	    &parent->mount->boot_vops, boot->dev, &boot->node, vnodep);
 	if (error == 0)
 		return (0);
 

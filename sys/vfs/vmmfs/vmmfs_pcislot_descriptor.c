@@ -129,7 +129,7 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 };
 
 int
-vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	struct vmmfs_pcislot_descriptor *descriptor, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
@@ -137,16 +137,12 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_node *pare
 	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (mount == NULL || parent == NULL || descriptor == NULL || vnodep == NULL)
+	if (parent == NULL || descriptor == NULL || vnodep == NULL)
 		return (EINVAL);
 	slot = (struct vmmfs_pcislot *)parent;
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (machine == NULL || root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
-	if (mount->pcislot_descriptor_vops == NULL)
-		return (ENXIO);
 	bzero(descriptor, sizeof(*descriptor));
 	lwkt_gettoken(&machine->node.token);
 	if (machine->machine != NULL) {
@@ -156,21 +152,22 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_mount *mount, struct vmmfs_node *pare
 	lwkt_reltoken(&machine->node.token);
 	descriptor->node.inode = vmmfs_root_allocate_inode(root);
 	descriptor->node.parent = parent;
+	descriptor->node.mount = parent->mount;
 	descriptor->node.dead = false;
 	descriptor->node.references = 1;
 	lwkt_token_init(&descriptor->node.token, "vmmfsnode");
 	descriptor->node.deactivate = vmmfs_pcislot_descriptor_deactivate;
 	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	descriptor->node.load_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX;
 	descriptor->node.store_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX - 1;
 	descriptor->node.load = vmmfs_pcislot_descriptor_load;
 	descriptor->node.store = vmmfs_pcislot_descriptor_store;
 	descriptor->node.mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
 	descriptor->node.size = 0;
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->pcislot_descriptor_vops, VREG, &descriptor->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->pcislot_descriptor_vops, VREG, &descriptor->node,
+	    vnodep);
 	if (error != 0)
 		vmmfs_node_put(&descriptor->node);
 	return (error);
@@ -193,9 +190,7 @@ vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
 	struct vmmfs_machine *machine;
 
 	descriptor = ap->a_vp->v_data;
-	if (descriptor == NULL || vmmfs_pcislot_descriptor_slot(descriptor) == NULL ||
-	    vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor))) == NULL)
+	if (descriptor == NULL)
 		return (ENOENT);
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor)));
 	if (descriptor->node.dead)
@@ -219,11 +214,9 @@ vmmfs_pcislot_descriptor_load(struct vmmfs_node *node, char *buffer,
 	struct vmmfs_pcislot *slot;
 
 	descriptor = (struct vmmfs_pcislot_descriptor *)node;
-	if (descriptor == NULL ||
-	    (slot = vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
-	    vmmfs_pcislot_pciroot(slot) == NULL ||
-	    vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot)) == NULL)
+	if (descriptor == NULL)
 		return (ENOENT);
+	slot = vmmfs_pcislot_descriptor_slot(descriptor);
 	if (capacity < VMMFS_PCISLOT_DESCRIPTOR_MAX)
 		return (EOVERFLOW);
 	lwkt_gettoken(&slot->node.token);
@@ -252,11 +245,11 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	bool committed;
 	int error;
 	descriptor = (struct vmmfs_pcislot_descriptor *)node;
-	if (descriptor == NULL ||
-	    (slot = vmmfs_pcislot_descriptor_slot(descriptor)) == NULL ||
-	    (pciroot = vmmfs_pcislot_pciroot(slot)) == NULL ||
-	    (machine = vmmfs_pciroot_machine(pciroot)) == NULL)
+	if (descriptor == NULL)
 		return (ENOENT);
+	slot = vmmfs_pcislot_descriptor_slot(descriptor);
+	pciroot = vmmfs_pcislot_pciroot(slot);
+	machine = vmmfs_pciroot_machine(pciroot);
 	if (descriptor->node.dead)
 		return (ENOENT);
 	buffer = NULL;

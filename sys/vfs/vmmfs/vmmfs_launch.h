@@ -27,7 +27,7 @@ struct vmmfs_launch {
 extern struct vop_ops vmmfs_launch_vops;
 
 /* Returns one vnode reference; the caller either publishes it or releases it. */
-int vmmfs_launch_create(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_launch_create(struct vmmfs_node *,
 	uint64_t, struct vnode **);
 int vmmfs_launch_map(struct vmmfs_launch *, struct vm_object *);
 /* Each file owns its vnode reference.  Final close aborts only its launch. */

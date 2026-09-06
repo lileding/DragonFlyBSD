@@ -11,6 +11,7 @@
 #include <sys/vnode.h>
 
 struct mount;
+struct vmmfs_mount;
 struct cdev;
 struct vop_ops;
 struct vmmfs_node;
@@ -38,6 +39,7 @@ struct vmmfs_node_item {
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
 	struct vmmfs_node *parent;
+	struct vmmfs_mount *mount;
 	struct lwkt_token token;
 	u_int references;
 	ino_t inode;

@@ -42,7 +42,7 @@ struct vmmfs_vcpu {
 	bool reset_requested;
 };
 
-int vmmfs_vcpu_init(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_vcpu_init(struct vmmfs_node *,
 	struct vmmfs_vcpu *, struct vnode **);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);

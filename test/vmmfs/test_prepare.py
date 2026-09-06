@@ -261,7 +261,7 @@ struct vmmfs_machine {
         void *threads;
         bool stop_requested, reset_requested;
     } vcpu;
-    void *machine, *mount;
+    void *machine;
     struct vnode *stopped_vnode, *vcpu_vnode;
     bool runtime_releasing, runtime_released;
 };
@@ -293,9 +293,9 @@ static void lwkt_reltoken(struct token *token) {
         assert(!machine.node.token.held);
     token->held = false;
 }
-static int vmmfs_stopped_create(void *mount, struct vmmfs_node *parent,
+static int vmmfs_stopped_create(struct vmmfs_node *parent,
     struct vnode **out) {
-    (void)mount; assert(parent == &machine.node);
+    assert(parent == &machine.node);
     assert(!machine.node.token.held && !machine.vcpu.token.held);
     if (mode == 1) return ENOMEM;
     assert(allocated == 0); ++allocated;
@@ -376,14 +376,14 @@ int main(void) {
     def test_private_prepare_retains_vcpu(self):
         run_c(COMMON + r"""
 struct token { int valid, held; };
-struct vmmfs_node { struct token token; struct vmmfs_node *parent; bool dead; };
+struct vmmfs_node { struct vmmfs_mount *mount; struct token token; struct vmmfs_node *parent; bool dead; };
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_memory { struct vmmfs_node node; uint64_t size; void *object, *run_vmspace; bool mapped; };
 struct cpu { struct token token; void *threads; unsigned active_count, count; };
 typedef void *vmm_machine_t;
 struct vmmfs_machine {
     struct vmmfs_node node; struct vmmfs_memory memory; struct cpu vcpu;
-    void *mount; vmm_machine_t machine; struct vnode *vcpu_vnode, *launch_vnode;
+    vmm_machine_t machine; struct vnode *vcpu_vnode, *launch_vnode;
     bool runtime_releasing, runtime_released; unsigned runtime_references;
     int platform, pciroot, serialroot, rtc;
 };
@@ -402,11 +402,11 @@ static void vrele(struct vnode *v) {
 #define bzero(p,n) memset(p,0,n)
 static void kprintf(const char *fmt, int e) { (void)fmt; (void)e; }
 static int next(void) { return ++stage == fail_stage ? ENOMEM : 0; }
-static int vmmfs_launch_create(void *m, struct vmmfs_node *parent, uint64_t size,
+static int vmmfs_launch_create(struct vmmfs_node *parent, uint64_t size,
     struct vnode **v) {
-    (void)m; (void)size;
+    (void)size;
     int error = next(); if (error) return error;
-    launch.node.parent = parent; launch_vnode.v_data = &launch;
+    launch.node.parent = parent; launch.node.mount = parent->mount; launch_vnode.v_data = &launch;
     launch_vnode.refs = 1; *v = &launch_vnode;
     return 0;
 }

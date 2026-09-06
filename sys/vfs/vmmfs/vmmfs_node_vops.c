@@ -136,7 +136,7 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 	struct vnode *vnode;
 	int error;
 
-	if (ap == NULL || ap->a_vap == NULL)
+	if (ap == NULL)
 		return (EINVAL);
 	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)

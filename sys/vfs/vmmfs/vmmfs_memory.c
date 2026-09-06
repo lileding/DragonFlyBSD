@@ -126,27 +126,25 @@ vmmfs_memory_store(struct vmmfs_node *node, const char *buffer, size_t length)
 }
 
 int
-vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_memory_init(struct vmmfs_node *parent,
 	struct vmmfs_memory *memory, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (mount == NULL || parent == NULL || memory == NULL || vnodep == NULL)
+	if (parent == NULL || memory == NULL || vnodep == NULL)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(memory, sizeof(*memory));
 	memory->node.parent = parent;
+	memory->node.mount = parent->mount;
 	memory->node.dead = false;
 	memory->node.references = 1;
 	lwkt_token_init(&memory->node.token, "vmmfsnode");
 	memory->node.deactivate = vmmfs_memory_deactivate;
 	memory->node.drop = vmmfs_memory_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	memory->node.load_limit = 32;
 	memory->node.store_limit = 31;
 	memory->node.load = vmmfs_memory_load;
@@ -154,16 +152,11 @@ vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	memory->node.inode = vmmfs_root_allocate_inode(root);
 	memory->node.mode = VMMFS_MEMORY_MODE;
 	memory->node.size = vmmfs_node_decimal_size(memory->size);
-	if (mount->memory_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->memory_vops, VREG, &memory->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->memory_vops, VREG, &memory->node, vnodep);
 	if (error == 0)
 		return (0);
 
-fail:
 	vmmfs_node_put(&memory->node);
 	return (error);
 }
@@ -188,7 +181,7 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)
 	struct vm_object *object;
 	struct vmspace *vmspace;
 
-	if (memory == NULL || vmmfs_memory_machine(memory) == NULL)
+	if (memory == NULL)
 		return (EINVAL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL ||
 	    memory->run_vmspace != NULL)

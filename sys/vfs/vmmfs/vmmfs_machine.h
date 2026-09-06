@@ -34,7 +34,6 @@ struct vmmfs_launch;
 
 struct vmmfs_machine {
 	struct vmmfs_node node;
-	struct vmmfs_mount *mount;
 	/* Borrowed from the root registry while this directory is published. */
 	struct vnode *vnode;
 	char name[NAME_MAX + 1];
@@ -72,7 +71,7 @@ struct vmmfs_machine {
 	struct vnode *events_vnode;
 };
 
-int vmmfs_machine_create(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_machine_create(struct vmmfs_node *,
 	const char *, size_t, struct vnode **);
 
 /* Requests a warm reset without rerunning the loader. */

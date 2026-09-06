@@ -146,28 +146,26 @@ vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 }
 
 int
-vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_vcpu_init(struct vmmfs_node *parent,
 	struct vmmfs_vcpu *vcpu, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (mount == NULL || parent == NULL || vcpu == NULL || vnodep == NULL)
+	if (parent == NULL || vcpu == NULL || vnodep == NULL)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(vcpu, sizeof(*vcpu));
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
 	vcpu->node.parent = parent;
+	vcpu->node.mount = parent->mount;
 	vcpu->node.dead = false;
 	vcpu->node.references = 1;
 	lwkt_token_init(&vcpu->node.token, "vmmfsnode");
 	vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 	vcpu->node.drop = vmmfs_vcpu_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	vcpu->node.load_limit = 32;
 	vcpu->node.store_limit = 31;
 	vcpu->node.load = vmmfs_vcpu_load;
@@ -175,16 +173,11 @@ vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	vcpu->node.inode = vmmfs_root_allocate_inode(root);
 	vcpu->node.mode = VMMFS_VCPU_MODE;
 	vcpu->node.size = vmmfs_node_decimal_size(vcpu->count);
-	if (mount->vcpu_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->vcpu_vops, VREG, &vcpu->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->vcpu_vops, VREG, &vcpu->node, vnodep);
 	if (error == 0)
 		return (0);
 
-fail:
 	vmmfs_node_put(&vcpu->node);
 	return (error);
 }

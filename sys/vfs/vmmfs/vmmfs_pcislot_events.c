@@ -75,21 +75,15 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 };
 
 int
-vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	struct vmmfs_pcislot_events *state_node, struct vnode **vnodep)
 {
-	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
-	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (mount == NULL || parent == NULL || state_node == NULL || vnodep == NULL)
+	if (parent == NULL || state_node == NULL || vnodep == NULL)
 		return (EINVAL);
-	slot = (struct vmmfs_pcislot *)parent;
-	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (machine == NULL || root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(state_node, sizeof(*state_node));
 	lwkt_token_init(&state_node->token, "vmmfspcievents");
@@ -98,17 +92,18 @@ vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	    M_WAITOK | M_ZERO);
 	state_node->node.inode = vmmfs_root_allocate_inode(root);
 	state_node->node.parent = parent;
+	state_node->node.mount = parent->mount;
 	state_node->node.dead = false;
 	state_node->node.references = 1;
 	lwkt_token_init(&state_node->node.token, "vmmfsnode");
 	state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	state_node->node.drop = vmmfs_pcislot_events_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	state_node->node.mode = VMMFS_PCISLOT_EVENTS_MODE;
 	state_node->node.size = 0;
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->pcislot_events_vops, VREG, &state_node->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->pcislot_events_vops, VREG, &state_node->node,
+	    vnodep);
 	if (error != 0)
 		vmmfs_node_put(&state_node->node);
 	return (error);

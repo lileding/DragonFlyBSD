@@ -280,45 +280,38 @@ vmmfs_loader_store(struct vmmfs_node *node, const char *buffer,
 }
 
 int
-vmmfs_loader_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_loader_init(struct vmmfs_node *parent,
 	struct vmmfs_loader *loader,
 	struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (mount == NULL || parent == NULL || loader == NULL || vnodep == NULL)
+	if (parent == NULL || loader == NULL || vnodep == NULL)
 		return (EINVAL);
-	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
-	if (root == NULL)
-		return (ENXIO);
+	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(loader, sizeof(*loader));
 	loader->node.parent = parent;
+	loader->node.mount = parent->mount;
 	loader->node.dead = false;
 	loader->node.references = 1;
 	lwkt_token_init(&loader->node.token, "vmmfsnode");
 	loader->node.deactivate = vmmfs_loader_deactivate;
 	loader->node.drop = vmmfs_loader_drop;
-	if (parent != NULL)
-		vmmfs_node_hold(parent);
+	vmmfs_node_hold(parent);
 	loader->node.load_limit = PAGE_SIZE + 1;
 	loader->node.store_limit = PAGE_SIZE - 1;
 	loader->node.load = vmmfs_loader_load;
 	loader->node.store = vmmfs_loader_store;
-	if (mount == NULL || mount->loader_vops == NULL) {
-		error = ENXIO;
-		goto fail;
-	}
 	loader->node.inode = vmmfs_root_allocate_inode(root);
 	loader->node.mode = VMMFS_LOADER_MODE;
 	loader->node.size = 1;
-	error = vmmfs_vnode_create_regular(mount->mount,
-	    &mount->loader_vops, VREG, &loader->node, vnodep);
+	error = vmmfs_vnode_create_regular(parent->mount->mount,
+	    &parent->mount->loader_vops, VREG, &loader->node, vnodep);
 	if (error == 0)
 		return (0);
 
-fail:
 	vmmfs_node_put(&loader->node);
 	return (error);
 }

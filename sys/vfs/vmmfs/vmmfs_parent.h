@@ -8,7 +8,6 @@
 
 #include "vmmfs_node.h"
 
-struct vmmfs_root;
 struct vmmfs_machine;
 struct vmmfs_pciroot;
 struct vmmfs_pcislot;
@@ -18,11 +17,9 @@ struct vmmfs_serialroot;
 static __inline struct vmmfs_node *
 vmmfs_node_parent(const struct vmmfs_node *node)
 {
-	return (node == NULL || node->parent == NULL ? NULL : node->parent);
+	return (node == NULL ? NULL : node->parent);
 }
 
-#define vmmfs_machine_root(machine) \
-	((struct vmmfs_root *)vmmfs_node_parent(&(machine)->node))
 #define vmmfs_pciroot_machine(pciroot) \
 	((struct vmmfs_machine *)vmmfs_node_parent(&(pciroot)->node))
 #define vmmfs_serialroot_machine(serialroot) \

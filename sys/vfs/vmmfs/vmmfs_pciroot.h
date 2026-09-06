@@ -49,7 +49,7 @@ struct vmmfs_pciroot {
 	vmm_io_t ecam_write;
 };
 
-int vmmfs_pciroot_init(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_pciroot_init(struct vmmfs_node *,
 	struct vmmfs_pciroot *, struct vnode **);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);

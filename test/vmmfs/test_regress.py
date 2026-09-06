@@ -1159,6 +1159,7 @@ int main(void) {
 typedef unsigned int u_int;
 struct vnode { void *v_data; };
 struct vmmfs_node {
+    struct vmmfs_mount *mount;
     struct vmmfs_node *parent;
     bool dead;
     unsigned references, inode, mode, size, load_limit, store_limit;
@@ -1209,7 +1210,8 @@ int main(void) {
     struct vmmfs_machine machine = {0};
     struct vmmfs_machine_id identity;
     machine.node.references = 1;
-    assert(vmmfs_machine_id_init(&mount, &machine.node, &identity, &vnode) == ENOMEM);
+    machine.node.mount = &mount;
+    assert(vmmfs_machine_id_init(&machine.node, &identity, &vnode) == ENOMEM);
     assert(vnode == NULL && machine.id == 0);
     assert(tokens == 0 && drops == 1);
     assert(machine.node.references == 1);

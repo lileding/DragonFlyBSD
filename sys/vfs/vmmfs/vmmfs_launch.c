@@ -76,25 +76,26 @@ static struct cdev_pager_ops vmmfs_launch_pager_ops = {
 
 
 int
-vmmfs_launch_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
+vmmfs_launch_create(struct vmmfs_node *parent,
 	uint64_t size, struct vnode **vnodep)
 {
 	struct vmmfs_launch *launch;
 	u_int serial;
 	int error;
 
-	if (size == 0 || (off_t)size <= 0 || mount->launch_vops == NULL)
+	if (size == 0 || (off_t)size <= 0)
 		return (EINVAL);
 	*vnodep = NULL;
 	launch = kmalloc(sizeof(*launch), M_VMMFS, M_WAITOK | M_ZERO);
 	launch->node.parent = parent;
+	launch->node.mount = parent->mount;
 	launch->node.references = 1;
 	lwkt_token_init(&launch->node.token, "vmmfslaunch");
 	launch->node.deactivate = vmmfs_launch_deactivate;
 	launch->node.drop = vmmfs_launch_drop;
 	launch->node.mode = 0600;
 	launch->node.size = size;
-	launch->node.inode = vmmfs_root_allocate_inode(mount->root_vnode->v_data);
+	launch->node.inode = vmmfs_root_allocate_inode(parent->mount->root_vnode->v_data);
 	launch->result = EINPROGRESS;
 	vmmfs_node_hold(parent);
 	serial = atomic_fetchadd_int(&vmmfs_launch_serial, 1);
@@ -105,8 +106,8 @@ vmmfs_launch_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 		goto fail;
 	}
 	launch->dev->si_drv1 = launch;
-	error = vmmfs_vnode_create_cdev(mount->mount, &mount->launch_vops,
-	    launch->dev, &launch->node, vnodep);
+	error = vmmfs_vnode_create_cdev(parent->mount->mount,
+	    &parent->mount->launch_vops, launch->dev, &launch->node, vnodep);
 	if (error == 0)
 		return (0);
 fail:

@@ -23,6 +23,6 @@ struct vmmfs_boot {
 	cdev_t dev;
 };
 
-int vmmfs_boot_init(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_boot_init(struct vmmfs_node *,
 	struct vmmfs_boot *, struct vnode **);
 #endif /* VMMFS_BOOT_H */

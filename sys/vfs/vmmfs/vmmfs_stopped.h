@@ -19,7 +19,7 @@ struct vmmfs_stopped {
 	struct vmmfs_node node;
 };
 
-int vmmfs_stopped_create(struct vmmfs_mount *, struct vmmfs_node *,
+int vmmfs_stopped_create(struct vmmfs_node *,
 	struct vnode **);
 
 #endif /* VMMFS_STOPPED_H */
