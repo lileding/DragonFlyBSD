@@ -272,6 +272,86 @@ os.write(2, b"VMMFS_LOADER_STDERR\\n")
         fd = self.boot()
         os.close(fd)
 
+    def test_cancel_with_transferred_launch_still_open(self):
+        for cancel in ("signal", "stop") * 4:
+            with self.subTest(cancel=cancel):
+                with tempfile.TemporaryDirectory(prefix="vmmfs-launch-") as directory:
+                    address = str(pathlib.Path(directory) / "control")
+                    with closing(socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)) as server:
+                        server.bind(address)
+                        server.listen(1)
+                        server.settimeout(10)
+                        script = """
+import array, os, socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as peer:
+    peer.connect(sys.argv[1])
+    peer.sendmsg([b"L"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                          array.array("i", [3]))])
+    os.close(3)
+    peer.sendall(b"C")
+"""
+                        store(self.machine / "loader",
+                              "exec " + shlex.quote(sys.executable) + " -c " +
+                              shlex.quote(script) + " " + shlex.quote(address))
+                        process = subprocess.Popen(
+                            ["/bin/rm", str(self.machine / "stopped")],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        old = current = -1
+                        try:
+                            peer, _ = server.accept()
+                            with closing(peer):
+                                peer.settimeout(10)
+                                data, controls, flags, _ = peer.recvmsg(
+                                    1, socket.CMSG_SPACE(array.array("i").itemsize))
+                                rights = array.array("i")
+                                for level, kind, payload in controls:
+                                    self.assertEqual((level, kind),
+                                                     (socket.SOL_SOCKET, socket.SCM_RIGHTS))
+                                    rights.frombytes(payload)
+                                self.assertEqual(len(rights), 1)
+                                old = rights[0]
+                                self.assertEqual(data, b"L")
+                                self.assertEqual(flags & (socket.MSG_TRUNC |
+                                                          socket.MSG_CTRUNC), 0)
+                                # The loader has dropped fd 3, but this process
+                                # still owns the transferred launch file.
+                                self.assertEqual(peer.recv(1), b"C")
+                            self.assertIsNone(process.poll(), "rm did not await submission")
+                            self.assertEqual(os.fstat(old).st_size, 67108864)
+                            with self.assertRaises(OSError) as failure:
+                                self.boot()
+                            self.assertEqual(failure.exception.errno, errno.EBUSY)
+                            if cancel == "signal":
+                                process.send_signal(signal.SIGINT)
+                            else:
+                                subprocess.run(
+                                    ["touch", str(self.machine / "stopped")],
+                                    check=True, timeout=10)
+                            output, error = process.communicate(timeout=10)
+                            self.assertNotEqual(process.returncode, 0, (output, error))
+                            self.assertTrue((self.machine / "stopped").exists())
+                            current = self.boot()
+                            with self.assertRaises(OSError) as failure:
+                                os.write(old, b"x")
+                            self.assertIn(failure.exception.errno,
+                                          (errno.EBADF, errno.EPIPE, errno.EINVAL))
+                            os.close(old)
+                            old = -1
+                            self.assertEqual(os.fstat(current).st_size, 67108864)
+                            with self.assertRaises(OSError) as failure:
+                                self.boot()
+                            self.assertEqual(failure.exception.errno, errno.EBUSY)
+                        finally:
+                            for fd in (old, current):
+                                if fd >= 0:
+                                    os.close(fd)
+                            if process.poll() is None:
+                                process.kill()
+                                process.communicate(timeout=10)
+                            process.stdout.close()
+                            process.stderr.close()
+                        self.assertTrue((self.machine / "stopped").exists())
+
     def test_dup_keeps_launch_until_last_close(self):
         fd = self.boot()
         duplicate = os.dup(fd)
