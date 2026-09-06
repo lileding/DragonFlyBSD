@@ -19,6 +19,7 @@ HARNESS = COMMON + r"""
 struct token { bool initialized; unsigned held; };
 struct vmmfs_node {
     struct vmmfs_mount *mount;
+    struct vnode *vnode;
     struct vmmfs_node *parent; struct token token;
     unsigned references; bool dead; unsigned inode, mode, size;
     int (*deactivate)(struct vmmfs_node *);
@@ -31,7 +32,7 @@ struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
     struct vmmfs_node node;
-    char name[256]; struct vnode *self_vnode;
+    char name[256];
     struct child id_node, vcpu, memory, loader, boot, pciroot, serialroot, events;
     struct child *stopped; struct component rtc, platform;
     struct vnode *id_vnode, *vcpu_vnode, *memory_vnode, *loader_vnode;
@@ -80,6 +81,7 @@ static int child_init(struct vmmfs_node *p,
     /* A failed init must return its own parent reference before returning. */
     if (fail()) { vmmfs_node_put(&c->node); return ENFILE; }
     *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = &c->node; ++vnodes;
+    c->node.vnode = *vp;
     return 0;
 }
 #define vmmfs_machine_id_init child_init
@@ -98,6 +100,7 @@ static int child_init(struct vmmfs_node *p,
 static void vmmfs_vnode_discard(struct vnode *v) {
     if (!v) return;
     /* Detached unpublished vnode no longer owns v_data; caller puts the node. */
+    ((struct vmmfs_node *)v->v_data)->vnode = NULL;
     assert(vnodes); --vnodes; v->v_data = NULL; free(v);
 }
 static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
@@ -105,7 +108,8 @@ static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
     (void)m; assert(ops && type == VDIR && n);
     *vp = NULL;
     if (fail()) return ENFILE;
-    *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = n; ++vnodes; return 0;
+    *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = n; n->vnode = *vp;
+    ++vnodes; return 0;
 }
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *m) {
     struct child *s = calloc(1,sizeof(*s));

@@ -32,7 +32,6 @@
 #define VMMFS_MACHINE_MODE 0555
 
 static int vmmfs_machine_ncreate(struct vop_ncreate_args *);
-static int vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_machine_nremove(struct vop_nremove_args *);
 static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
@@ -56,7 +55,7 @@ struct vop_ops vmmfs_machine_vops = {
 	.vop_getattr = vmmfs_node_getattr,
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_ncreate = vmmfs_machine_ncreate,
-	.vop_nlookupdotdot = vmmfs_machine_nlookupdotdot,
+	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
 	.vop_nremove = vmmfs_machine_nremove,
 	.vop_nresolve = vmmfs_machine_nresolve,
 	.vop_nrmdir = vmmfs_machine_nrmdir,
@@ -140,7 +139,6 @@ vmmfs_machine_create(struct vmmfs_node *parent,
 	    &parent->mount->machine_vops, VDIR, &machine->node, &vnode);
 	if (error != 0)
 		goto fail;
-	machine->self_vnode = vnode;
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_CREATED, NULL);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
 	    "reason=create");
@@ -292,7 +290,7 @@ done:
 	}
 	if (error == 0) {
 		lwkt_gettoken(&machine->node.token);
-		vnode = machine->self_vnode;
+		vnode = machine->node.vnode;
 		if (vnode != NULL)
 			vhold(vnode);
 		lwkt_reltoken(&machine->node.token);
@@ -359,7 +357,6 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 
 	(void)vmmfs_vnode_deactivate(machine->events_vnode);
 	vrele(machine->events_vnode);
-	machine->self_vnode = NULL;
 	return (0);
 }
 
@@ -381,7 +378,7 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	KKASSERT(machine->pciroot.node.drop == NULL);
 	KKASSERT(machine->serialroot.node.drop == NULL);
 	KKASSERT(machine->pciroot.runtime_machine == NULL);
-	KKASSERT(machine->self_vnode == NULL);
+	KKASSERT(machine->node.vnode == NULL);
 	if (machine->rtc.machine != NULL)
 		vmmfs_rtc_fini(&machine->rtc);
 	if (machine->platform.machine != NULL)
@@ -528,38 +525,6 @@ vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 		return (error);
 	cache_setunresolved(ap->a_nch);
 	*ap->a_vpp = vnode;
-	return (0);
-}
-
-static int
-vmmfs_machine_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
-{
-	struct vmmfs_machine *machine;
-	struct vmmfs_mount *mount;
-	struct vnode *vnode;
-	int error;
-
-	machine = ap->a_dvp->v_data;
-	mount = (struct vmmfs_mount *)ap->a_dvp->v_mount->mnt_data;
-	if (machine == NULL || mount == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead) {
-		lwkt_reltoken(&machine->node.token);
-		return (ENOENT);
-	}
-	vnode = mount->root_vnode;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&machine->node.token);
-	if (vnode == NULL)
-		return (ENOENT);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	*ap->a_vpp = vnode;
-	vn_unlock(vnode);
 	return (0);
 }
 

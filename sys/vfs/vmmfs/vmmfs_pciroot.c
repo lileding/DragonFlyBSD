@@ -49,7 +49,6 @@ struct vmmfs_pciroot_registry {
 	struct vmmfs_pcislot_tree slots;
 };
 
-static int vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_pciroot_parse_bdf(const char *, size_t, uint16_t *);
 static int vmmfs_pciroot_parse_hex(char, unsigned int *);
 static void vmmfs_pciroot_format_bdf(uint16_t, char *, size_t);
@@ -97,7 +96,7 @@ struct vop_ops vmmfs_pciroot_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_node_getattr,
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_nlookupdotdot = vmmfs_pciroot_nlookupdotdot,
+	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
 	.vop_nmkdir = vmmfs_node_nmkdir,
 	.vop_nresolve = vmmfs_node_nresolve,
 	.vop_nrmdir = vmmfs_node_nrmdir,
@@ -629,34 +628,6 @@ vmmfs_pciroot_io(struct vmmfs_pciroot *pciroot,
 		    (state->gprs[VMM_X64_GPR_RAX] & ~mask) | (value & mask);
 	}
 	state->gprs[VMM_X64_GPR_RIP] = exit->u.io.npc;
-	return (0);
-}
-
-static int
-vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
-{
-	struct vmmfs_pciroot *pciroot;
-	struct vmmfs_machine *machine;
-	struct vnode *vnode;
-	int error;
-
-	pciroot = ap->a_dvp->v_data;
-	if (pciroot == NULL || pciroot->node.dead)
-		return (ENOENT);
-	machine = vmmfs_pciroot_machine(pciroot);
-	lwkt_gettoken(&machine->node.token);
-	vnode = machine->self_vnode;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&machine->node.token);
-	if (vnode == NULL)
-		return (ENOENT);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	*ap->a_vpp = vnode;
-	vn_unlock(vnode);
 	return (0);
 }
 

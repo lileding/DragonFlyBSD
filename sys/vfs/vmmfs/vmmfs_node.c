@@ -298,6 +298,39 @@ vmmfs_node_put(struct vmmfs_node *node)
 
 
 int
+vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
+{
+	struct vmmfs_node *node;
+	struct vmmfs_node *parent;
+	struct vnode *vnode;
+	int error;
+
+	node = ap->a_dvp->v_data;
+	if (node == NULL)
+		return (ENOENT);
+	lwkt_gettoken(&node->token);
+	parent = node->parent;
+	lwkt_gettoken(&parent->token);
+	vnode = parent->vnode;
+	/* Acquiring the parent token may have allowed this node to close. */
+	if (node->dead || parent->dead || vnode == NULL) {
+		lwkt_reltoken(&parent->token);
+		lwkt_reltoken(&node->token);
+		return (ENOENT);
+	}
+	vhold(vnode);
+	lwkt_reltoken(&parent->token);
+	lwkt_reltoken(&node->token);
+	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
+	vdrop(vnode);
+	if (error != 0)
+		return (error);
+	*ap->a_vpp = vnode;
+	vn_unlock(vnode);
+	return (0);
+}
+
+int
 vmmfs_vnode_create_regular(struct mount *mount, struct vop_ops **vops,
 	enum vtype type, struct vmmfs_node *node, struct vnode **vnodep)
 {
@@ -310,6 +343,7 @@ vmmfs_vnode_create_regular(struct mount *mount, struct vop_ops **vops,
 	if (error != 0)
 		return (error);
 	vnode->v_data = node;
+	node->vnode = vnode;
 	vnode->v_ops = vops;
 	vnode->v_type = type;
 	vx_downgrade(vnode);
@@ -345,6 +379,7 @@ vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
 	}
 	vnode->v_umajor = dev->si_umajor;
 	vnode->v_uminor = dev->si_uminor;
+	node->vnode = vnode;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
 	*vnodep = vnode;
@@ -354,10 +389,16 @@ vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
 void
 vmmfs_vnode_discard(struct vnode *vnode)
 {
+	struct vmmfs_node *node;
+
 	if (vnode == NULL)
 		return;
 	vx_get(vnode);
+	node = vnode->v_data;
+	lwkt_gettoken(&node->token);
+	node->vnode = NULL;
 	vnode->v_data = NULL;
+	lwkt_reltoken(&node->token);
 	vnode->v_type = VBAD;
 	vx_put(vnode);
 	vrele(vnode);
@@ -403,8 +444,12 @@ vmmfs_node_reclaim(struct vop_reclaim_args *ap)
 
 	vnode = ap->a_vp;
 	node = vnode->v_data;
-	vnode->v_data = NULL;
-	if (node != NULL)
+	if (node != NULL) {
+		lwkt_gettoken(&node->token);
+		node->vnode = NULL;
+		vnode->v_data = NULL;
+		lwkt_reltoken(&node->token);
 		vmmfs_node_put(node);
+	}
 	return (0);
 }

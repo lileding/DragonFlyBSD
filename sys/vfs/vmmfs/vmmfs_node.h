@@ -39,6 +39,8 @@ struct vmmfs_node_item {
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
 	struct vmmfs_node *parent;
+	/* Non-owning backlink, cleared under token before vnode detachment. */
+	struct vnode *vnode;
 	struct vmmfs_mount *mount;
 	struct lwkt_token token;
 	u_int references;
@@ -67,6 +69,7 @@ void vmmfs_node_hold(struct vmmfs_node *);
 void vmmfs_node_put(struct vmmfs_node *);
 int vmmfs_node_nmkdir(struct vop_nmkdir_args *);
 int vmmfs_node_nresolve(struct vop_nresolve_args *);
+int vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *);
 int vmmfs_node_nrmdir(struct vop_nrmdir_args *);
 int vmmfs_node_readdir(struct vop_readdir_args *);
 off_t vmmfs_node_decimal_size(uint64_t);

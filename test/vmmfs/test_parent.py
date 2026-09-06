@@ -70,7 +70,7 @@ class MachineTeardown(unittest.TestCase):
     def test_machine_veto_is_final_for_all_children(self):
         run_c(COMMON + r"""
 struct token { unsigned held, acquired; };
-struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_node { struct token token; bool dead; struct vnode *vnode; };
 struct vnode { unsigned refs, index; };
 struct vmmfs_machine {
     struct vmmfs_node node;
@@ -78,7 +78,7 @@ struct vmmfs_machine {
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
     struct { struct token token; unsigned active_count; void *threads; } vcpu;
-    struct vnode *self_vnode, *id_vnode, *vcpu_vnode, *memory_vnode;
+    struct vnode *id_vnode, *vcpu_vnode, *memory_vnode;
     struct vnode *loader_vnode, *boot_vnode, *stopped_vnode;
     struct vnode *pciroot_vnode, *serialroot_vnode, *events_vnode;
 };
@@ -117,7 +117,7 @@ int main(void) {
             memset(&machine, 0, sizeof(machine));
             machine.node.token.held = 1;
             machine.node.dead = true; /* Set by the generic caller. */
-            machine.self_vnode = &parent;
+            machine.node.vnode = &parent;
             called = dropped = 0;
             child_error = errors[trial];
             for (index = 0; index < NELEM(children); ++index) {
@@ -127,13 +127,14 @@ int main(void) {
             }
             machine.machine = &machine;
             assert(vmmfs_machine_deactivate(&machine.node) == EBUSY);
-            assert(called == 0 && dropped == 0 && machine.self_vnode == &parent);
+            assert(called == 0 && dropped == 0 && machine.node.vnode == &parent);
             assert(machine.node.token.held == 1);
             assert(machine.node.dead && machine.node.token.acquired == 0);
             machine.machine = NULL;
             assert(vmmfs_machine_deactivate(&machine.node) == 0);
             assert(machine.node.dead && machine.node.token.acquired == 0);
-            assert(called == 9 && dropped == 9 && machine.self_vnode == NULL);
+            /* Deactivation does not detach the vnode backlink. */
+            assert(called == 9 && dropped == 9 && machine.node.vnode == &parent);
             for (index = 0; index < NELEM(children); ++index)
                 assert(children[index].refs == 0);
             assert(machine.node.token.held == 1);

@@ -47,7 +47,6 @@ struct vmmfs_serialroot_item {
 };
 
 static int vmmfs_serialroot_ncreate(struct vop_ncreate_args *);
-static int vmmfs_serialroot_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_serialroot_nremove(struct vop_nremove_args *);
 static int vmmfs_serialroot_get_item(struct vmmfs_node *, const char *,
 	size_t, struct vnode **);
@@ -71,7 +70,7 @@ struct vop_ops vmmfs_serialroot_vops = {
 	.vop_getattr = vmmfs_node_getattr,
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
 	.vop_ncreate = vmmfs_serialroot_ncreate,
-	.vop_nlookupdotdot = vmmfs_serialroot_nlookupdotdot,
+	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
 	.vop_nremove = vmmfs_serialroot_nremove,
 	.vop_nresolve = vmmfs_serialroot_nresolve,
 	.vop_open = vmmfs_node_open,
@@ -364,34 +363,6 @@ failed:
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED,
 	    "name=%.*s error=%d", (int)ncp->nc_nlen, ncp->nc_name, error);
 	return (error);
-}
-
-static int
-vmmfs_serialroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
-{
-	struct vmmfs_serialroot *serialroot;
-	struct vmmfs_machine *machine;
-	struct vnode *vnode;
-	int error;
-
-	serialroot = ap->a_dvp->v_data;
-	if (serialroot == NULL || serialroot->node.dead)
-		return (ENOENT);
-	machine = vmmfs_serialroot_machine(serialroot);
-	lwkt_gettoken(&machine->node.token);
-	vnode = machine->self_vnode;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&machine->node.token);
-	if (vnode == NULL)
-		return (ENOENT);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	*ap->a_vpp = vnode;
-	vn_unlock(vnode);
-	return (0);
 }
 
 static int

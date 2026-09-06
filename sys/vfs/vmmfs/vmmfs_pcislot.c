@@ -33,7 +33,6 @@ struct vmmfs_pcislot_item {
 	char name[32];
 };
 
-static int vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *);
 static int vmmfs_pcislot_nremove(struct vop_nremove_args *);
 static int vmmfs_pcislot_nresolve(struct vop_nresolve_args *);
 static int vmmfs_pcislot_open(struct vop_open_args *);
@@ -66,7 +65,7 @@ struct vop_ops vmmfs_pcislot_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_node_getattr,
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_nlookupdotdot = vmmfs_pcislot_nlookupdotdot,
+	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
 	.vop_nremove = vmmfs_pcislot_nremove,
 	.vop_nresolve = vmmfs_pcislot_nresolve,
 	.vop_open = vmmfs_pcislot_open,
@@ -471,34 +470,6 @@ vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 	if (vmmfs_pcislot_type0_cap_write(slot, offset, width, value) == 0)
 		return (0);
 	(void)vcpu;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
-{
-	struct vmmfs_pcislot *slot;
-	struct vmmfs_pciroot *pciroot;
-	struct vnode *vnode;
-	int error;
-
-	slot = ap->a_dvp->v_data;
-	if (slot == NULL || slot->node.dead)
-		return (ENOENT);
-	pciroot = vmmfs_pcislot_pciroot(slot);
-	lwkt_gettoken(&pciroot->node.token);
-	vnode = vmmfs_pciroot_machine(pciroot)->pciroot_vnode;
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&pciroot->node.token);
-	if (vnode == NULL)
-		return (ENOENT);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	*ap->a_vpp = vnode;
-	vn_unlock(vnode);
 	return (0);
 }
 

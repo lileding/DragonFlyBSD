@@ -251,7 +251,7 @@ int main(void) {
     def test_stopped_publication_token_order(self):
         run_c(COMMON + r"""
 struct token { bool held, live; };
-struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_node { struct token token; bool dead; struct vnode *vnode; };
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_machine {
@@ -262,7 +262,7 @@ struct vmmfs_machine {
         bool stop_requested, reset_requested;
     } vcpu;
     void *machine;
-    struct vnode *stopped_vnode, *vcpu_vnode, *self_vnode;
+    struct vnode *stopped_vnode, *vcpu_vnode;
     bool runtime_releasing, runtime_released;
 };
 static struct vmmfs_machine machine;
@@ -347,7 +347,7 @@ static int
 int main(void) {
     for (mode = 0; mode < 14; ++mode) {
         memset(&machine, 0, sizeof(machine));
-        machine.self_vnode = &self_vnode;
+        machine.node.vnode = &self_vnode;
         invalidated = 0;
         assert(allocated == 0);
         machine.vcpu.token.live = mode != 13;
