@@ -10,25 +10,19 @@
 #include "vmmfs_node.h"
 
 
+struct vmmfs_mount;
 struct cdev;
 struct vm_object;
 struct vmm_cpustate;
 struct vmmfs_machine;
-struct vmmfs_boot_session;
 struct vnode;
 struct vop_ops;
 
 struct vmmfs_boot {
 	struct vmmfs_node node;
 	cdev_t dev;
-	struct vmmfs_boot_session *session;
 };
 
-int vmmfs_boot_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_boot_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_boot *, struct vnode **);
-int vmmfs_boot_arm_locked(struct vmmfs_boot *, struct vm_object *, uint64_t);
-int vmmfs_boot_submit(struct vmmfs_boot *, const struct vmm_cpustate *);
-void vmmfs_boot_revoke(struct vmmfs_boot *);
-bool vmmfs_boot_is_active(struct vmmfs_boot *);
-
 #endif /* VMMFS_BOOT_H */

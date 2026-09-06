@@ -59,7 +59,6 @@ static void vmmfs_pcislot_type0_refresh_bar(struct vmmfs_pcislot *,
 	unsigned int);
 static void vmmfs_pcislot_drop(struct vmmfs_node *);
 static int vmmfs_pcislot_deactivate(struct vmmfs_node *);
-static void vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *);
 
 struct vop_ops vmmfs_pcislot_vops = {
 	.vop_default = vop_defaultop,
@@ -78,13 +77,11 @@ struct vop_ops vmmfs_pcislot_vops = {
 };
 
 int
-vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	uint16_t bdf,
 	struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
-	struct vmmfs_machine *machine;
-	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_pcislot *slot;
 	int error;
 
@@ -92,35 +89,37 @@ vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	pciroot = (struct vmmfs_pciroot *)parent;
-	machine = vmmfs_pciroot_machine(pciroot);
 	root = mount->root_vnode == NULL ? NULL : mount->root_vnode->v_data;
 	if (root == NULL)
 		return (ENXIO);
 	if (mount == NULL || mount->pcislot_vops == NULL)
 		return (ENXIO);
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
-	slot->branch.node.inode = vmmfs_root_allocate_inode(root);
+	slot->node.inode = vmmfs_root_allocate_inode(root);
 	slot->bdf = bdf;
-	vmmfs_branch_init(&slot->branch, parent,
-	    vmmfs_pcislot_drop);
-	slot->branch.node.deactivate = vmmfs_pcislot_deactivate;
-	slot->branch.node.mode = VMMFS_PCISLOT_MODE;
-	slot->branch.node.size = 0;
-	error = vmmfs_pcislot_events_init(mount, &slot->branch, &slot->events,
+	slot->node.parent = parent;
+	slot->node.references = 1;
+	lwkt_token_init(&slot->node.token, "vmmfsnode");
+	slot->node.drop = vmmfs_pcislot_drop;
+	if (parent != NULL)
+		vmmfs_node_hold(parent);
+	slot->node.deactivate = vmmfs_pcislot_deactivate;
+	slot->node.mode = VMMFS_PCISLOT_MODE;
+	slot->node.size = 0;
+	error = vmmfs_pcislot_events_init(mount, &slot->node, &slot->events,
 	    &slot->events_vnode);
 	if (error != 0)
 		goto fail_slot;
-	error = vmmfs_pcislot_config_init(mount, &slot->branch, &slot->config,
+	error = vmmfs_pcislot_config_init(mount, &slot->node, &slot->config,
 	    &slot->config_vnode);
 	if (error != 0)
 		goto fail_events;
-	error = vmmfs_pcislot_descriptor_init(mount, &slot->branch, &slot->descriptor,
+	error = vmmfs_pcislot_descriptor_init(mount, &slot->node, &slot->descriptor,
 	    &slot->descriptor_vnode);
 	if (error != 0)
 		goto fail_config;
 	error = vmmfs_vnode_create_regular(mount->mount, &mount->pcislot_vops,
-	    VDIR, &slot->branch.node, vnodep);
+	    VDIR, &slot->node, vnodep);
 	if (error != 0)
 		goto fail_descriptor;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
@@ -131,18 +130,18 @@ vmmfs_pcislot_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 fail_descriptor:
 	vmmfs_vnode_discard(slot->descriptor_vnode);
 	slot->descriptor_vnode = NULL;
-	vmmfs_node_drop(&slot->descriptor.node);
+	vmmfs_node_put(&slot->descriptor.node);
 fail_config:
 	vmmfs_vnode_discard(slot->config_vnode);
 	slot->config_vnode = NULL;
-	vmmfs_node_drop(&slot->config.node);
+	vmmfs_node_put(&slot->config.node);
 fail_events:
 	vmmfs_vnode_discard(slot->events_vnode);
 	slot->events_vnode = NULL;
-	vmmfs_node_drop(&slot->events.node);
+	vmmfs_node_put(&slot->events.node);
 fail_slot:
-	(void)vmmfs_node_default_deactivate(&slot->branch.node);
-	vmmfs_node_drop(&slot->branch.node);
+	slot->node.dead = true;
+	vmmfs_node_put(&slot->node);
 	return (error);
 }
 
@@ -153,8 +152,11 @@ vmmfs_pcislot_drop(struct vmmfs_node *node)
 
 	slot = (struct vmmfs_pcislot *)node;
 	KKASSERT(slot != NULL);
-	KKASSERT(slot->branch.node.dead);
-	KKASSERT(slot->branch.references == 0);
+	KKASSERT(slot->node.dead);
+	KKASSERT(slot->node.references == 0);
+	KKASSERT(slot->entry == NULL);
+	KKASSERT(!slot->topology_reference);
+	KKASSERT(slot->resources == NULL);
 	KKASSERT(slot->descriptor.node.drop == NULL);
 	KKASSERT(slot->config.node.drop == NULL);
 	KKASSERT(slot->events.node.drop == NULL);
@@ -165,83 +167,69 @@ vmmfs_pcislot_drop(struct vmmfs_node *node)
 static int
 vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 {
-	struct vmmfs_pcislot *slot;
+	struct vmmfs_pcislot *slot = (struct vmmfs_pcislot *)node;
 	struct vmmfs_machine *machine;
+	struct vnode **children[] = {
+		&slot->descriptor_vnode, &slot->config_vnode, &slot->events_vnode
+	};
+	struct vnode *vnode;
+	size_t index;
+	int error;
+	bool registered;
+	struct vmmfs_node *parent = node->parent;
 
-	slot = (struct vmmfs_pcislot *)node;
-	if (slot == NULL)
-		return (EINVAL);
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	if (machine == NULL)
-		return (EINVAL);
-
-	lwkt_gettoken(&machine->branch.token);
-	lwkt_gettoken(&slot->branch.token);
-	if (slot->branch.node.dead) {
-		lwkt_reltoken(&slot->branch.token);
-		lwkt_reltoken(&machine->branch.token);
-		return (0);
+	lwkt_gettoken(&node->token);
+	lwkt_gettoken(&parent->token);
+	lwkt_gettoken(&machine->node.token);
+	registered = slot->entry != NULL;
+	error = registered && ((machine->node.dead && !parent->dead) ||
+	    machine->machine != NULL) ? EBUSY : 0;
+	/* The parent returns this reservation after removing the registry entry. */
+	if (registered && error == 0) {
+		slot->topology_reference = true;
+		++machine->runtime_references;
 	}
-	if (machine->machine != NULL) {
-		lwkt_reltoken(&slot->branch.token);
-		lwkt_reltoken(&machine->branch.token);
-		return (EBUSY);
+	lwkt_reltoken(&machine->node.token);
+	lwkt_reltoken(&parent->token);
+	lwkt_reltoken(&node->token);
+	if (error != 0)
+		return (error);
+	vmmfs_pcislot_power_off(slot);
+	for (index = 0; index < NELEM(children); ++index) {
+		lwkt_gettoken(&node->token);
+		vnode = *children[index];
+		lwkt_reltoken(&node->token);
+		if (vnode == NULL)
+			continue;
+		error = vmmfs_vnode_deactivate(vnode);
+		if (error != 0) {
+			if (registered) {
+				lwkt_gettoken(&machine->node.token);
+				KKASSERT(machine->runtime_references != 0);
+				slot->topology_reference = false;
+				--machine->runtime_references;
+				lwkt_reltoken(&machine->node.token);
+			}
+			return (error);
+		}
+		lwkt_gettoken(&node->token);
+		*children[index] = NULL;
+		lwkt_reltoken(&node->token);
+		vrele(vnode);
 	}
-	(void)vmmfs_node_default_deactivate(&slot->branch.node);
-	(void)vmmfs_node_default_deactivate(&slot->descriptor.node);
-	(void)vmmfs_node_default_deactivate(&slot->config.node);
-	(void)vmmfs_node_default_deactivate(&slot->events.node);
-	lwkt_reltoken(&slot->branch.token);
-	lwkt_reltoken(&machine->branch.token);
-
-	vmmfs_pcislot_deactivate_children(slot);
 	return (0);
 }
 
-static void
-vmmfs_pcislot_deactivate_children(struct vmmfs_pcislot *slot)
-{
-	struct vnode *descriptor_vnode;
-	struct vnode *config_vnode;
-	struct vnode *events_vnode;
 
-	if (slot == NULL)
-		return;
-	vmmfs_pcislot_power_off(slot);
-	vmmfs_pcislot_config_revoke(&slot->config);
-	vmmfs_pcislot_events_revoke(&slot->events);
-
-	/* Detach the slot-owned fixed-child Arcs before VFS revoke. */
-	lwkt_gettoken(&slot->branch.token);
-	descriptor_vnode = slot->descriptor_vnode;
-	slot->descriptor_vnode = NULL;
-	config_vnode = slot->config_vnode;
-	slot->config_vnode = NULL;
-	events_vnode = slot->events_vnode;
-	slot->events_vnode = NULL;
-	lwkt_reltoken(&slot->branch.token);
-
-	if (descriptor_vnode != NULL) {
-		KKASSERT(vmmfs_vnode_deactivate(descriptor_vnode) == 0);
-		vrele(descriptor_vnode);
-	}
-	if (config_vnode != NULL) {
-		KKASSERT(vmmfs_vnode_deactivate(config_vnode) == 0);
-		vrele(config_vnode);
-	}
-	if (events_vnode != NULL) {
-		KKASSERT(vmmfs_vnode_deactivate(events_vnode) == 0);
-		vrele(events_vnode);
-	}
-}
 int
 vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
 {
 	int error;
 
 	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL || machine == NULL ||
-	    slot->branch.node.dead ||
-	    !slot->descriptor.committed || slot->descriptor.resources != NULL ||
+	    slot->node.dead ||
+	    !slot->descriptor.committed || slot->resources != NULL ||
 	    slot->type0.powered)
 		return (EINVAL);
 	error = vmmfs_pcislot_type0_build(slot);
@@ -249,7 +237,7 @@ vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
 		return (error);
 	error = vmmfs_pcislot_resources_create(slot, machine,
 	    &slot->descriptor.value, slot->descriptor.generation,
-	    &slot->descriptor.resources);
+	    &slot->resources);
 	if (error != 0) {
 		bzero(&slot->type0, sizeof(slot->type0));
 		return (error);
@@ -272,11 +260,11 @@ vmmfs_pcislot_power_off(struct vmmfs_pcislot *slot)
 	vmmfs_pcislot_config_power_off(&slot->config);
 
 	/* The slot owns the active generation reference. */
-	lwkt_gettoken(&slot->branch.token);
-	resources = slot->descriptor.resources;
-	slot->descriptor.resources = NULL;
+	lwkt_gettoken(&slot->node.token);
+	resources = slot->resources;
+	slot->resources = NULL;
 	bzero(&slot->type0, sizeof(slot->type0));
-	lwkt_reltoken(&slot->branch.token);
+	lwkt_reltoken(&slot->node.token);
 
 	vmmfs_pcislot_resources_deactivate(resources);
 	vmmfs_pciroot_invalidate_slot(vmmfs_pcislot_pciroot(slot), slot);
@@ -286,6 +274,7 @@ int
 vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
 {
 	struct vmmfs_pcislot_resources *resources;
+	unsigned int bar;
 	int error;
 
 	/*
@@ -295,10 +284,10 @@ vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
 	 * derived state as a failed reset precondition.
 	 */
 	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL ||
-	    slot->branch.node.dead ||
+	    slot->node.dead ||
 	    !slot->descriptor.committed)
 		return (EINVAL);
-	resources = slot->descriptor.resources;
+	resources = slot->resources;
 	if (resources == NULL)
 		return (ENXIO);
 
@@ -314,6 +303,21 @@ vmmfs_pcislot_reset(struct vmmfs_pcislot *slot)
 	error = vmmfs_pcislot_type0_build(slot);
 	if (error != 0)
 		return (error);
+	/* Decode is off; synchronize the retained resources before rebind. */
+	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
+		if (!slot->descriptor.value.bars[bar].present)
+			continue;
+		error = vmmfs_pcislot_resources_bar_relocate(resources, bar,
+		    slot->type0.bar_address[bar]);
+		if (error != 0)
+			return (error);
+	}
+	if (slot->descriptor.value.rom_present) {
+		error = vmmfs_pcislot_resources_rom_relocate(resources,
+		    slot->type0.rom_address);
+		if (error != 0)
+			return (error);
+	}
 	vmmfs_pcislot_config_power_on(&slot->config,
 	    slot->descriptor.generation);
 	slot->type0.powered = true;
@@ -403,7 +407,7 @@ vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 		old = (old & ~mask) | ((value << ((offset > 0x04 ? offset - 0x04 : 0) * 8)) & mask);
 		vmmfs_pcislot_type0_write16(slot->type0.bytes, 0x04, old);
 		slot->type0.bus_master_enabled = (old & 0x0004) != 0;
-		resources = slot->descriptor.resources;
+		resources = slot->resources;
 		if (resources == NULL)
 			return (ENXIO);
 		return (vmmfs_pcislot_resources_set_decode(resources,
@@ -445,7 +449,7 @@ vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 			}
 			vmmfs_pcislot_type0_write32(slot->type0.bytes, dword, old);
 			vmmfs_pcislot_type0_refresh_bar(slot, owner);
-			resources = slot->descriptor.resources;
+			resources = slot->resources;
 			if (resources != NULL) {
 				int error;
 
@@ -467,10 +471,11 @@ vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 		else {
 			slot->type0.rom_probe = false;
 			vmmfs_pcislot_type0_write32(slot->type0.bytes, 0x30,
-			    old & ~((uint32_t)slot->descriptor.value.rom_size - 1));
+			    (old & ~((uint32_t)slot->descriptor.value.rom_size - 1)) |
+				    (old & 1U));
 			slot->type0.rom_address = vmmfs_pcislot_type0_read32(
 			    slot->type0.bytes, 0x30) & ~1ULL;
-			resources = slot->descriptor.resources;
+			resources = slot->resources;
 			if (resources != NULL) {
 				int error;
 
@@ -502,16 +507,16 @@ vmmfs_pcislot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	int error;
 
 	slot = ap->a_dvp->v_data;
-	if (slot == NULL || slot->branch.node.dead)
+	if (slot == NULL || slot->node.dead)
 		return (ENOENT);
 	pciroot = vmmfs_pcislot_pciroot(slot);
 	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&pciroot->branch.token);
+	lwkt_gettoken(&pciroot->node.token);
 	vnode = vmmfs_pciroot_machine(pciroot)->pciroot_vnode;
 	if (vnode != NULL)
 		vhold(vnode);
-	lwkt_reltoken(&pciroot->branch.token);
+	lwkt_reltoken(&pciroot->node.token);
 	if (vnode == NULL)
 		return (ENOENT);
 	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
@@ -539,6 +544,7 @@ static int
 vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 {
 	struct vmmfs_pcislot *slot;
+	struct vmmfs_pcislot_resources *resources;
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
@@ -547,13 +553,13 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	if (slot == NULL || vmmfs_pcislot_pciroot(slot) == NULL)
 		return (ENOENT);
 	ncp = ap->a_nch->ncp;
-	lwkt_gettoken(&slot->branch.token);
-	if (slot->branch.node.dead) {
-		lwkt_reltoken(&slot->branch.token);
+	lwkt_gettoken(&slot->node.token);
+	if (slot->node.dead) {
+		lwkt_reltoken(&slot->node.token);
 		return (ENOENT);
 	}
 	if (slot->descriptor.updating) {
-		lwkt_reltoken(&slot->branch.token);
+		lwkt_reltoken(&slot->node.token);
 		return (EBUSY);
 	}
 	if (ncp->nc_nlen == sizeof("events") - 1 &&
@@ -566,18 +572,24 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	    bcmp(ncp->nc_name, "descriptor", sizeof("descriptor") - 1) == 0)
 		vnode = slot->descriptor_vnode;
 	else {
-		error = vmmfs_pcislot_resources_lookup(slot->descriptor.resources,
-		    ncp->nc_name, ncp->nc_nlen, &vnode);
-		if (error != 0 && error != ENOENT) {
-			lwkt_reltoken(&slot->branch.token);
-			return (error);
+		resources = slot->resources;
+		if (resources != NULL)
+			vmmfs_node_hold((struct vmmfs_node *)resources);
+		lwkt_reltoken(&slot->node.token);
+		vnode = NULL;
+		if (resources != NULL) {
+			error = vmmfs_pcislot_resources_lookup(resources,
+			    ncp->nc_name, ncp->nc_nlen, &vnode);
+			vmmfs_node_put((struct vmmfs_node *)resources);
+			if (error != 0 && error != ENOENT)
+				return (error);
 		}
-		if (error == ENOENT)
-			vnode = NULL;
+		goto resolved;
 	}
 	if (vnode != NULL)
 		vhold(vnode);
-	lwkt_reltoken(&slot->branch.token);
+	lwkt_reltoken(&slot->node.token);
+resolved:
 	if (vnode == NULL) {
 		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
@@ -596,7 +608,7 @@ static int
 vmmfs_pcislot_open(struct vop_open_args *ap)
 {
 	if (ap->a_vp->v_data == NULL ||
-	    ((struct vmmfs_pcislot *)ap->a_vp->v_data)->branch.node.dead)
+	    ((struct vmmfs_pcislot *)ap->a_vp->v_data)->node.dead)
 		return (ENOENT);
 	return (vop_stdopen(ap));
 }
@@ -613,7 +625,7 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	int stop;
 
 	slot = ap->a_vp->v_data;
-	if (slot == NULL || slot->branch.node.dead)
+	if (slot == NULL || slot->node.dead)
 		return (ENOENT);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -626,12 +638,12 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	error = 0;
 	stop = 0;
 	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, slot->branch.node.inode, DT_DIR, 1, ".");
+		stop = vop_write_dirent(&error, uio, slot->node.inode, DT_DIR, 1, ".");
 		if (!stop)
 			offset = 1;
 	}
 	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, vmmfs_pcislot_pciroot(slot)->branch.node.inode, DT_DIR,
+		stop = vop_write_dirent(&error, uio, vmmfs_pcislot_pciroot(slot)->node.inode, DT_DIR,
 		    2, "..");
 		if (!stop)
 			offset = 2;
@@ -667,13 +679,13 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	size_t name_length;
 	int error;
 
-	lwkt_gettoken(&slot->branch.token);
-	if (slot->branch.node.dead) {
-		lwkt_reltoken(&slot->branch.token);
+	lwkt_gettoken(&slot->node.token);
+	if (slot->node.dead) {
+		lwkt_reltoken(&slot->node.token);
 		return (ENOENT);
 	}
 	if (slot->descriptor.updating) {
-		lwkt_reltoken(&slot->branch.token);
+		lwkt_reltoken(&slot->node.token);
 		return (EBUSY);
 	}
 	if (slot->descriptor.committed) {
@@ -681,7 +693,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 			item->inode = slot->events.node.inode;
 			item->type = DT_REG;
 			bcopy("events", item->name, sizeof("events"));
-			lwkt_reltoken(&slot->branch.token);
+			lwkt_reltoken(&slot->node.token);
 			return (0);
 		}
 		--index;
@@ -689,7 +701,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 			item->inode = slot->config.node.inode;
 			item->type = DT_REG;
 			bcopy("config", item->name, sizeof("config"));
-			lwkt_reltoken(&slot->branch.token);
+			lwkt_reltoken(&slot->node.token);
 			return (0);
 		}
 		--index;
@@ -699,21 +711,23 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 			item->inode = slot->descriptor.node.inode;
 			item->type = DT_REG;
 			bcopy("descriptor", item->name, sizeof("descriptor"));
-			lwkt_reltoken(&slot->branch.token);
+			lwkt_reltoken(&slot->node.token);
 			return (0);
 		}
 		--index;
 	}
-	resources = slot->descriptor.resources;
+	resources = slot->resources;
 	if (resources == NULL) {
-		lwkt_reltoken(&slot->branch.token);
+		lwkt_reltoken(&slot->node.token);
 		return (ENOENT);
 	}
+	vmmfs_node_hold((struct vmmfs_node *)resources);
+	lwkt_reltoken(&slot->node.token);
 	error = vmmfs_pcislot_resources_read_item(resources, index,
 	    &item->inode, item->name, sizeof(item->name), &name_length);
+	vmmfs_node_put((struct vmmfs_node *)resources);
 	if (error == 0)
 		item->type = DT_REG;
-	lwkt_reltoken(&slot->branch.token);
 	return (error);
 }
 
@@ -779,7 +793,7 @@ vmmfs_pcislot_type0_allocate_bar(struct vmmfs_pcislot *slot,
 	pciroot = vmmfs_pcislot_pciroot(slot);
 	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&pciroot->branch.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (bar->type == VMMFS_PCISLOT_BAR_IO) {
 		limit = VMMFS_PCI_PIO_END;
 		error = vmmfs_pcislot_type0_align(pciroot->pio_next, bar->size,
@@ -797,7 +811,7 @@ vmmfs_pcislot_type0_allocate_bar(struct vmmfs_pcislot *slot,
 		if (error == 0)
 			pciroot->mmio_next = base + bar->size;
 	}
-	lwkt_reltoken(&pciroot->branch.token);
+	lwkt_reltoken(&pciroot->node.token);
 	if (error != 0)
 		return (error);
 	slot->type0.bar_address[index] = base;
@@ -830,7 +844,7 @@ vmmfs_pcislot_type0_allocate_rom(struct vmmfs_pcislot *slot)
 	pciroot = vmmfs_pcislot_pciroot(slot);
 	if (pciroot == NULL || vmmfs_pciroot_machine(pciroot) == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&pciroot->branch.token);
+	lwkt_gettoken(&pciroot->node.token);
 	error = vmmfs_pcislot_type0_align(pciroot->mmio_next,
 	    slot->descriptor.value.rom_size, &base);
 	if (error == 0 && (base >= VMMFS_PCI_ECAM_GPA ||
@@ -838,7 +852,7 @@ vmmfs_pcislot_type0_allocate_rom(struct vmmfs_pcislot *slot)
 		error = ENOSPC;
 	if (error == 0)
 		pciroot->mmio_next = base + slot->descriptor.value.rom_size;
-	lwkt_reltoken(&pciroot->branch.token);
+	lwkt_reltoken(&pciroot->node.token);
 	if (error != 0)
 		return (error);
 	slot->type0.rom_address = base;
@@ -1098,7 +1112,7 @@ vmmfs_pcislot_type0_cap_write(struct vmmfs_pcislot *slot, uint16_t offset,
 				slot->type0.bytes[base + 2] |= maximum << 4;
 			}
 		} else if (msix) {
-			resources = slot->descriptor.resources;
+			resources = slot->resources;
 			if (resources != NULL) {
 				return (vmmfs_pcislot_resources_msix_unmask(resources,
 				    index));

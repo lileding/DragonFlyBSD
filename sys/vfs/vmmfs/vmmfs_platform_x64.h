@@ -12,6 +12,7 @@
 #define VMMFS_PLATFORM_X64_H
 
 #include <sys/types.h>
+#include <sys/thread.h>
 
 #include <dev/virtual/vmm/vmm.h>
 

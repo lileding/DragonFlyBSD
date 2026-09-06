@@ -12,7 +12,7 @@
 #include <sys/vnode.h>
 
 #include "vmmfs.h"
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 #include "vmmfs_boot.h"
 #include "vmmfs_events.h"
 #include "vmmfs_loader.h"
@@ -49,8 +49,7 @@ extern struct vop_ops vmmfs_pcislot_config_vops;
 extern struct vop_ops vmmfs_pcislot_resource_vops;
 extern struct vop_ops vmmfs_pcislot_events_vops;
 
-extern int vmmfs_boot_module_fini(void);
-extern int vmmfs_loader_module_fini(void);
+#include "vmmfs_launch.h"
 
 static int vmmfs_mount(struct mount *, char *, caddr_t, struct ucred *);
 static int vmmfs_ncreate(struct vop_ncreate_args *);
@@ -95,13 +94,8 @@ vmmfs_ncreate(struct vop_ncreate_args *ap)
 static int
 vmmfs_vfs_uninit(struct vfsconf *configuration)
 {
-	int error;
-
 	(void)configuration;
-	error = vmmfs_boot_module_fini();
-	if (error != 0)
-		return (error);
-	return (vmmfs_loader_module_fini());
+	return (vmmfs_root_module_fini());
 }
 
 static int
@@ -192,6 +186,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	vfs_add_vnodeops(mount, &vmmfs_memory_vops, &state->memory_vops);
 	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
 	vfs_add_vnodeops(mount, &vmmfs_boot_vops, &state->boot_vops);
+	vfs_add_vnodeops(mount, &vmmfs_launch_vops, &state->launch_vops);
 	vfs_add_vnodeops(mount, &vmmfs_stopped_vops,
 	    &state->stopped_vops);
 	vfs_add_vnodeops(mount, &vmmfs_events_vops,
@@ -214,8 +209,10 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_events_vops);
 	error = vmmfs_root_create(mount, &root_vnode);
 	if (error != 0) {
+		vfs_rm_vnodeops(mount, NULL, &state->launch_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
@@ -260,8 +257,15 @@ vmmfs_unmount(struct mount *mount, int flags)
 		return (error);
 	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
-	if (error != 0)
+	if (error != 0) {
+		struct vmmfs_node *root = root_vnode->v_data;
+
+		/* Root has no children or private teardown to roll back. */
+		lwkt_gettoken(&root->token);
+		root->dead = false;
+		lwkt_reltoken(&root->token);
 		return (error);
+	}
 	state->root_vnode = NULL;
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
@@ -274,6 +278,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->launch_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);

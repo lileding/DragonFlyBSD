@@ -14,6 +14,7 @@
 
 #include <sys/vmmfs.h>
 
+struct vmmfs_mount;
 struct file;
 struct vmm_cpuexit;
 struct vmm_cpustate;
@@ -40,9 +41,8 @@ struct vmmfs_pcislot_config {
 	bool closed;
 };
 
-int vmmfs_pcislot_config_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_pcislot_config_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_pcislot_config *, struct vnode **);
-void vmmfs_pcislot_config_revoke(struct vmmfs_pcislot_config *);
 void vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *,
 	uint64_t, bool);
 void vmmfs_pcislot_config_power_on(struct vmmfs_pcislot_config *, uint64_t);

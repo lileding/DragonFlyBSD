@@ -47,6 +47,19 @@ static struct filterops vmmfs_pcislot_events_read_filterops = {
 	vmmfs_pcislot_events_filter_read,
 };
 
+static int
+vmmfs_pcislot_events_deactivate(struct vmmfs_node *node)
+{
+	struct vmmfs_pcislot_events *state_node = (struct vmmfs_pcislot_events *)node;
+
+	lwkt_gettoken(&state_node->token);
+	state_node->closed = true;
+	lwkt_reltoken(&state_node->token);
+	wakeup(state_node);
+	KNOTE(&state_node->kq.ki_note, 0);
+	return (0);
+}
+
 struct vop_ops vmmfs_pcislot_events_vops = {
 	.vop_default = vop_defaultop,
 	.vop_access = vmmfs_node_access,
@@ -62,7 +75,7 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 };
 
 int
-vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_pcislot_events *state_node, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
@@ -86,16 +99,18 @@ vmmfs_pcislot_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent
 	state_node->node.inode = vmmfs_root_allocate_inode(root);
 	state_node->node.parent = parent;
 	state_node->node.dead = false;
-	state_node->node.deactivate = vmmfs_node_default_deactivate;
+	state_node->node.references = 1;
+	lwkt_token_init(&state_node->node.token, "vmmfsnode");
+	state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	state_node->node.drop = vmmfs_pcislot_events_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	state_node->node.mode = VMMFS_PCISLOT_EVENTS_MODE;
 	state_node->node.size = 0;
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->pcislot_events_vops, VREG, &state_node->node, vnodep);
 	if (error != 0)
-		vmmfs_node_drop(&state_node->node);
+		vmmfs_node_put(&state_node->node);
 	return (error);
 }
 
@@ -106,25 +121,14 @@ vmmfs_pcislot_events_drop(struct vmmfs_node *node)
 
 	state_node = (struct vmmfs_pcislot_events *)node;
 	KKASSERT(state_node != NULL);
-	vmmfs_pcislot_events_revoke(state_node);
 	kfree(state_node->buffer, M_VMMFS);
 	state_node->buffer = NULL;
 	state_node->node.inode = 0;
 	lwkt_token_uninit(&state_node->token);
-	vmmfs_node_parent_put(node);
+
 }
 
-void
-vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *state_node)
-{
-	if (state_node == NULL)
-		return;
-	lwkt_gettoken(&state_node->token);
-	state_node->closed = true;
-	lwkt_reltoken(&state_node->token);
-	wakeup(state_node);
-	KNOTE(&state_node->kq.ki_note, 0);
-}
+
 
 void
 vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *state_node)
@@ -236,35 +240,49 @@ vmmfs_pci_event_name(enum vmmfs_pci_event event)
 static int
 vmmfs_pcislot_events_kqfilter(struct vop_kqfilter_args *ap)
 {
-	struct vmmfs_pcislot_events *events;
+	struct vmmfs_pcislot_events *events = ap->a_vp->v_data;
+	int error = 0;
 
-	events = ap->a_vp->v_data;
-	if (events == NULL || vmmfs_pcislot_events_slot(events) == NULL ||
-	    (events)->node.dead)
+	if (events == NULL)
 		return (ENOENT);
 	if (ap->a_kn->kn_filter != EVFILT_READ)
 		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->node.token);
 	lwkt_gettoken(&events->token);
-	ap->a_kn->kn_fop = &vmmfs_pcislot_events_read_filterops;
-	ap->a_kn->kn_hook = (caddr_t)events;
-	knote_insert(&events->kq.ki_note, ap->a_kn);
+	if (events->node.dead || events->closed)
+		error = ENOENT;
+	else {
+		ap->a_kn->kn_fop = &vmmfs_pcislot_events_read_filterops;
+		ap->a_kn->kn_hook = (caddr_t)events;
+		knote_insert(&events->kq.ki_note, ap->a_kn);
+	}
 	lwkt_reltoken(&events->token);
-	return (0);
+	lwkt_reltoken(&events->node.token);
+	return (error);
 }
 
 static int
 vmmfs_pcislot_events_open(struct vop_open_args *ap)
 {
-	struct vmmfs_pcislot_events *events;
+	struct vmmfs_pcislot_events *events = ap->a_vp->v_data;
+	struct vmmfs_pcislot *slot;
+	int error;
 
-	events = ap->a_vp->v_data;
-	if (events == NULL || vmmfs_pcislot_events_slot(events) == NULL)
+	if (events == NULL)
 		return (ENOENT);
-	if ((events)->node.dead)
-		return (ENXIO);
-	if (vmmfs_pcislot_auth_check(vmmfs_pcislot_events_slot(events)) != 0)
-		return (EACCES);
-	return (vop_stdopen(ap));
+	lwkt_gettoken(&events->node.token);
+	slot = vmmfs_pcislot_events_slot(events);
+	lwkt_gettoken(&slot->node.token);
+	error = vmmfs_pcislot_auth_check(slot);
+	lwkt_reltoken(&slot->node.token);
+	if (error != 0)
+		error = EACCES;
+	else if (events->node.dead)
+		error = ENXIO;
+	else
+		error = vop_stdopen(ap);
+	lwkt_reltoken(&events->node.token);
+	return (error);
 }
 
 static int
@@ -287,19 +305,28 @@ vmmfs_pcislot_events_read(struct vop_read_args *ap)
 	if (uio->uio_resid == 0)
 		return (0);
 	for (;;) {
+		lwkt_gettoken(&state_node->node.token);
 		lwkt_gettoken(&state_node->token);
+		if (state_node->node.dead) {
+			lwkt_reltoken(&state_node->token);
+			lwkt_reltoken(&state_node->node.token);
+			return (ENXIO);
+		}
 		if (state_node->length != 0)
 			break;
 		if (state_node->closed) {
 			lwkt_reltoken(&state_node->token);
+			lwkt_reltoken(&state_node->node.token);
 			return (ENXIO);
 		}
 		if (ap->a_ioflag & IO_NDELAY) {
 			lwkt_reltoken(&state_node->token);
+			lwkt_reltoken(&state_node->node.token);
 			return (EAGAIN);
 		}
 		tsleep_interlock(state_node, PCATCH);
 		lwkt_reltoken(&state_node->token);
+		lwkt_reltoken(&state_node->node.token);
 		error = tsleep(state_node, PINTERLOCKED | PCATCH, "vmmpcievents", 0);
 		if (error != 0)
 			return (error);
@@ -317,6 +344,7 @@ vmmfs_pcislot_events_read(struct vop_read_args *ap)
 	    VMMFS_PCISLOT_EVENTS_BUFFER_SIZE;
 	state_node->length -= length;
 	lwkt_reltoken(&state_node->token);
+	lwkt_reltoken(&state_node->node.token);
 	return (uiomove(buffer, length, uio));
 }
 
@@ -329,16 +357,11 @@ vmmfs_pcislot_events_filter_read(struct knote *knote, long hint)
 	events = (struct vmmfs_pcislot_events *)knote->kn_hook;
 	if (events == NULL)
 		return (0);
+	/* Existing knotes follow the stream's data-plane close, not admission. */
 	lwkt_gettoken(&events->token);
-	if (vmmfs_pcislot_events_slot(events) == NULL || vmmfs_pcislot_pciroot(vmmfs_pcislot_events_slot(events)) == NULL ||
-	    (events)->node.dead) {
-		knote->kn_data = 0;
+	knote->kn_data = events->length;
+	if (events->closed)
 		knote->kn_flags |= EV_EOF;
-	} else {
-		knote->kn_data = events->length;
-		if (events->closed)
-			knote->kn_flags |= EV_EOF;
-	}
 	lwkt_reltoken(&events->token);
 	return (knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0);
 }

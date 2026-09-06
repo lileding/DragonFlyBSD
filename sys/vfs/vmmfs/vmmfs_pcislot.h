@@ -9,13 +9,15 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_config.h"
 #include "vmmfs_pcislot_events.h"
 
+struct vmmfs_mount;
+struct vmmfs_pcislot_resources;
 struct vnode;
 struct vop_ops;
 
@@ -34,18 +36,24 @@ struct vmmfs_pcislot_type0 {
 };
 
 struct vmmfs_pcislot {
-	struct vmmfs_branch branch;
+	struct vmmfs_node node;
+	/* Registry ownership; protected by the parent node token. */
+	struct vmmfs_pciroot_slot *entry;
 	uint16_t bdf;
+	/* Owned until registry detach; protected by the machine node token. */
+	bool topology_reference;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;
 	struct vmmfs_pcislot_type0 type0;
+	/* Current powered generation; protected by the slot token. */
+	struct vmmfs_pcislot_resources *resources;
 	struct vnode *descriptor_vnode;
 	struct vnode *config_vnode;
 	struct vnode *events_vnode;
 };
 
-int vmmfs_pcislot_create(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_pcislot_create(struct vmmfs_mount *, struct vmmfs_node *,
 	uint16_t, struct vnode **);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);

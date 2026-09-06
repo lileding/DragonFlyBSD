@@ -10,6 +10,7 @@
 
 #include <sys/types.h>
 
+struct vmmfs_mount;
 struct vmmfs_machine;
 struct vnode;
 struct vop_ops;
@@ -21,7 +22,7 @@ struct vmmfs_machine_id {
 	struct vmmfs_node node;
 };
 
-int vmmfs_machine_id_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_machine_id_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_machine_id *, struct vnode **);
 
 #endif /* VMMFS_MACHINE_ID_H */

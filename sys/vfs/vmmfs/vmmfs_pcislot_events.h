@@ -16,6 +16,7 @@
 
 #define VMMFS_PCISLOT_EVENTS_BUFFER_SIZE (16 * 1024)
 
+struct vmmfs_mount;
 struct vmmfs_pcislot;
 struct vnode;
 struct vop_ops;
@@ -32,9 +33,8 @@ struct vmmfs_pcislot_events {
 	bool closed;
 };
 
-int vmmfs_pcislot_events_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_pcislot_events_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_pcislot_events *, struct vnode **);
-void vmmfs_pcislot_events_revoke(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *);
 void vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *,
 	enum vmmfs_pci_event, const char *, ...);

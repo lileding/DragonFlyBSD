@@ -6,7 +6,7 @@
 #ifndef VMMFS_PARENT_H
 #define VMMFS_PARENT_H
 
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 
 struct vmmfs_root;
 struct vmmfs_machine;
@@ -18,19 +18,17 @@ struct vmmfs_serialroot;
 static __inline struct vmmfs_node *
 vmmfs_node_parent(const struct vmmfs_node *node)
 {
-	return (node == NULL || node->parent == NULL ? NULL : &node->parent->node);
+	return (node == NULL || node->parent == NULL ? NULL : node->parent);
 }
 
 #define vmmfs_machine_root(machine) \
-	((struct vmmfs_root *)vmmfs_node_parent(&(machine)->branch.node))
+	((struct vmmfs_root *)vmmfs_node_parent(&(machine)->node))
 #define vmmfs_pciroot_machine(pciroot) \
-	((struct vmmfs_machine *)vmmfs_node_parent(&(pciroot)->branch.node))
+	((struct vmmfs_machine *)vmmfs_node_parent(&(pciroot)->node))
 #define vmmfs_serialroot_machine(serialroot) \
-	((struct vmmfs_machine *)vmmfs_node_parent(&(serialroot)->branch.node))
+	((struct vmmfs_machine *)vmmfs_node_parent(&(serialroot)->node))
 #define vmmfs_pcislot_pciroot(slot) \
-	((struct vmmfs_pciroot *)vmmfs_node_parent(&(slot)->branch.node))
-#define vmmfs_boot_machine(boot) \
-	((struct vmmfs_machine *)vmmfs_node_parent(&(boot)->node))
+	((struct vmmfs_pciroot *)vmmfs_node_parent(&(slot)->node))
 #define vmmfs_events_machine(events) \
 	((struct vmmfs_machine *)vmmfs_node_parent(&(events)->node))
 #define vmmfs_loader_machine(loader) \
@@ -50,6 +48,6 @@ vmmfs_node_parent(const struct vmmfs_node *node)
 #define vmmfs_pcislot_resource_resources(resource) \
 	((struct vmmfs_pcislot_resources *)vmmfs_node_parent(&(resource)->node))
 #define vmmfs_pcislot_resources_slot(resources) \
-	((struct vmmfs_pcislot *)vmmfs_node_parent(&(resources)->branch.node))
+	((struct vmmfs_pcislot *)vmmfs_node_parent(&(resources)->node))
 
 #endif /* VMMFS_PARENT_H */

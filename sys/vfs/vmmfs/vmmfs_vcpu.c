@@ -38,6 +38,7 @@
 static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *);
 static bool vmmfs_vcpu_is_reset_requested(struct vmmfs_vcpu *);
 static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *);
+static void vmmfs_vcpu_thread_kick(struct vmmfs_vcpu_thread *);
 static int vmmfs_vcpu_thread_start(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_wait_start(struct vmmfs_vcpu_thread *);
 static void vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *);
@@ -48,6 +49,18 @@ static int vmmfs_vcpu_complete_absent_memory(struct vmmfs_vcpu_thread *,
 	const struct vmm_cpuexit *);
 static void vmmfs_vcpu_thread_main(void *, struct trapframe *);
 static void vmmfs_vcpu_drop(struct vmmfs_node *);
+
+static int
+vmmfs_vcpu_deactivate(struct vmmfs_node *node)
+{
+	struct vmmfs_vcpu *vcpu = (struct vmmfs_vcpu *)node;
+	int error;
+
+	lwkt_gettoken(&vcpu->token);
+	error = vcpu->active_count != 0 || vcpu->threads != NULL ? EBUSY : 0;
+	lwkt_reltoken(&vcpu->token);
+	return (error);
+}
 
 struct vop_ops vmmfs_vcpu_vops = {
 	.vop_default = vop_defaultop,
@@ -76,9 +89,9 @@ vmmfs_vcpu_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 
 	if (vcpu == NULL || vcpu->node.dead)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->branch.token);
+	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 	count = vcpu->count;
-	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->branch.token);
+	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 	result = ksnprintf(buffer, capacity, "%u\n", count);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -115,19 +128,19 @@ vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 
 	if (vcpu->node.dead)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->branch.token);
+	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 	if (vmmfs_vcpu_machine(vcpu)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->branch.token);
+		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 		return (EBUSY);
 	}
 	vcpu->count = (uint32_t)value;
 	vcpu->node.size = vmmfs_node_decimal_size(value);
-	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->branch.token);
+	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 	return (0);
 }
 
 int
-vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_vcpu *vcpu, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
@@ -143,10 +156,12 @@ vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
 	vcpu->node.parent = parent;
 	vcpu->node.dead = false;
-	vcpu->node.deactivate = vmmfs_node_default_deactivate;
+	vcpu->node.references = 1;
+	lwkt_token_init(&vcpu->node.token, "vmmfsnode");
+	vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 	vcpu->node.drop = vmmfs_vcpu_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	vcpu->node.load_limit = 32;
 	vcpu->node.store_limit = 31;
 	vcpu->node.load = vmmfs_vcpu_load;
@@ -164,7 +179,7 @@ vmmfs_vcpu_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (0);
 
 fail:
-	vmmfs_node_drop(&vcpu->node);
+	vmmfs_node_put(&vcpu->node);
 	return (error);
 }
 
@@ -183,7 +198,7 @@ vmmfs_vcpu_drop(struct vmmfs_node *node)
 	lwkt_reltoken(&vcpu->token);
 	lwkt_token_uninit(&vcpu->token);
 	vcpu->node.inode = 0;
-	vmmfs_node_parent_put(node);
+
 }
 
 
@@ -283,13 +298,8 @@ failed:
 	}
 	for (index = 0; index < count; ++index) {
 		thread = &vcpu->threads[index];
-		if (thread->vcpu != NULL) {
-			int destroy_error;
-
-			destroy_error = vmm_vcpu_destroy(thread->vcpu);
-			KKASSERT(destroy_error == 0);
-			thread->vcpu = NULL;
-		}
+		if (thread->vcpu != NULL)
+			vmmfs_vcpu_thread_destroy(thread);
 	}
 	lwkt_gettoken(&vcpu->token);
 	threads = vcpu->threads;
@@ -320,7 +330,7 @@ vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 		if (vcpu->threads == NULL)
 			break;
 		if (vcpu->threads[index].vcpu != NULL)
-			(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+			vmmfs_vcpu_thread_kick(&vcpu->threads[index]);
 	}
 	lwkt_reltoken(&vcpu->token);
 	wakeup(vcpu);
@@ -342,7 +352,7 @@ vmmfs_vcpu_request_reset(struct vmmfs_vcpu *vcpu)
 	if (vcpu->threads != NULL) {
 		for (index = 0; index < vcpu->count; ++index) {
 			if (vcpu->threads[index].vcpu != NULL)
-				(void)vmm_vcpu_kick(vcpu->threads[index].vcpu);
+				vmmfs_vcpu_thread_kick(&vcpu->threads[index]);
 		}
 	}
 	lwkt_reltoken(&vcpu->token);
@@ -354,6 +364,7 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	const struct vmm_cpustate *bsp_state)
 {
 	struct vmmfs_vcpu_thread *thread;
+	vmm_vcpu_t created_vcpu;
 	uint32_t index;
 	int error;
 
@@ -367,10 +378,13 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 		bzero(&thread->state, sizeof(thread->state));
 		if (index == 0)
 			thread->state = *bsp_state;
-		error = vmm_vcpu_create(machine, &thread->state, &thread->vcpu);
+		error = vmm_vcpu_create(machine, &thread->state, &created_vcpu);
 		if (error != 0)
 			goto failed;
-		error = vmm_vcpu_set_memory_exit_mode(thread->vcpu,
+		lwkt_gettoken(&vcpu->token);
+		thread->vcpu = created_vcpu;
+		lwkt_reltoken(&vcpu->token);
+		error = vmm_vcpu_set_memory_exit_mode(created_vcpu,
 		    VMM_MEMORY_EXIT_EMULATE);
 		if (error != 0)
 			goto failed;
@@ -391,10 +405,7 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 failed:
 	for (index = 0; index < vcpu->count; ++index) {
 		thread = &vcpu->threads[index];
-		if (thread->vcpu == NULL)
-			continue;
-		(void)vmm_vcpu_destroy(thread->vcpu);
-		thread->vcpu = NULL;
+		vmmfs_vcpu_thread_destroy(thread);
 	}
 	return (error);
 }
@@ -429,15 +440,49 @@ vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *thread)
 
 	lwkt_gettoken(&thread->group->token);
 	vcpu = thread->vcpu;
+	thread->vcpu = NULL;
 	lwkt_reltoken(&thread->group->token);
 	if (vcpu == NULL)
 		return;
+	/* A token may be yielded inside kick; drain its pinned users first. */
+	for (;;) {
+		tsleep_interlock(thread, 0);
+		lwkt_gettoken(&thread->group->token);
+		if (thread->kick_count == 0) {
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
+			lwkt_reltoken(&thread->group->token);
+			break;
+		}
+		lwkt_reltoken(&thread->group->token);
+		(void)tsleep(thread, PINTERLOCKED, "vmmfskick", 0);
+	}
 	error = vmm_vcpu_destroy(vcpu);
-	KKASSERT(error == 0);
+	if (error != 0)
+		panic("vmmfs: stopped vCPU destruction failed: %d", error);
+}
+
+static void
+vmmfs_vcpu_thread_kick(struct vmmfs_vcpu_thread *thread)
+{
+	vmm_vcpu_t vcpu;
+	int error;
+
 	lwkt_gettoken(&thread->group->token);
-	KKASSERT(thread->vcpu == vcpu);
-	thread->vcpu = NULL;
+	vcpu = thread->vcpu;
+	if (vcpu != NULL)
+		++thread->kick_count;
 	lwkt_reltoken(&thread->group->token);
+	if (vcpu == NULL)
+		return;
+	error = vmm_vcpu_kick(vcpu);
+	lwkt_gettoken(&thread->group->token);
+	--thread->kick_count;
+	lwkt_reltoken(&thread->group->token);
+	wakeup(thread);
+	if (error != 0)
+		kprintf("vmmfs: vCPU kick failed: %d\n", error);
 }
 
 static int
@@ -639,7 +684,9 @@ vmmfs_vcpu_complete_absent_io(struct vmmfs_vcpu_thread *thread,
 	}
 	if (exit->u.io.in) {
 		mask = (1ULL << (exit->u.io.operand_size * NBBY)) - 1;
+		/* An IN to EAX zero-extends; AL/AX preserve the upper bits. */
 		state->gprs[VMM_X64_GPR_RAX] =
+		    exit->u.io.operand_size == 4 ? mask :
 		    (state->gprs[VMM_X64_GPR_RAX] & ~mask) | mask;
 	}
 	state->gprs[VMM_X64_GPR_RIP] = exit->u.io.npc;

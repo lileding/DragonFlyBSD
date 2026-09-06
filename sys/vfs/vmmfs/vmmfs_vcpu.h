@@ -13,19 +13,18 @@
 
 #include <dev/virtual/vmm/vmm.h>
 
+struct vmmfs_mount;
 struct vmmfs_machine;
-struct vmmfs_pcislot_config_request;
 struct vnode;
 struct vop_ops;
 
 struct vmmfs_vcpu_thread {
 	struct vmmfs_vcpu *group;
 	vmm_vcpu_t vcpu;
+	unsigned int kick_count;
 	struct vmm_cpustate state;
 	uint32_t index;
 	bool halted_logged;
-	struct vmmfs_pcislot_config_request *config_request;
-	bool config_done;
 };
 
 struct vmmfs_vcpu {
@@ -43,7 +42,7 @@ struct vmmfs_vcpu {
 	bool reset_requested;
 };
 
-int vmmfs_vcpu_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_vcpu_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_vcpu *, struct vnode **);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);

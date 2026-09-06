@@ -6,21 +6,40 @@
 #ifndef VMMFS_NODE_H
 #define VMMFS_NODE_H
 
+#include <sys/param.h>
+#include <sys/thread.h>
 #include <sys/vnode.h>
 
 struct mount;
 struct cdev;
 struct vop_ops;
-struct vmmfs_branch;
 struct vmmfs_node;
+struct vmmfs_node_item;
 
 typedef int (*vmmfs_node_load_t)(struct vmmfs_node *, char *, size_t,
 	size_t *);
 typedef int (*vmmfs_node_store_t)(struct vmmfs_node *, const char *, size_t);
+typedef int (*vmmfs_node_get_item_t)(struct vmmfs_node *, const char *,
+	size_t, struct vnode **);
+typedef int (*vmmfs_node_read_item_t)(struct vmmfs_node *, uint64_t,
+	struct vmmfs_node_item *);
+/* Success returns a vnode reference in addition to the registry reference. */
+typedef int (*vmmfs_node_create_item_t)(struct vmmfs_node *, struct mount *,
+	const char *, size_t, struct vnode **);
+typedef void (*vmmfs_node_remove_item_t)(struct vmmfs_node *, const char *,
+	size_t);
+
+struct vmmfs_node_item {
+	struct vnode *vnode;
+	ino_t inode;
+	char name[NAME_MAX + 1];
+};
 
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
-	struct vmmfs_branch *parent;
+	struct vmmfs_node *parent;
+	struct lwkt_token token;
+	u_int references;
 	ino_t inode;
 	mode_t mode;
 	off_t size;
@@ -31,10 +50,19 @@ struct vmmfs_node {
 	size_t store_limit;
 	vmmfs_node_load_t load;
 	vmmfs_node_store_t store;
+	vmmfs_node_get_item_t get_item;
+	vmmfs_node_read_item_t read_item;
+	vmmfs_node_create_item_t create_item;
+	vmmfs_node_remove_item_t remove_item;
 };
 
-void vmmfs_node_parent_put(struct vmmfs_node *);
-int vmmfs_node_default_deactivate(struct vmmfs_node *);
+/* Object references do not imply that its vnode or service remains active. */
+void vmmfs_node_hold(struct vmmfs_node *);
+void vmmfs_node_put(struct vmmfs_node *);
+int vmmfs_node_nmkdir(struct vop_nmkdir_args *);
+int vmmfs_node_nresolve(struct vop_nresolve_args *);
+int vmmfs_node_nrmdir(struct vop_nrmdir_args *);
+int vmmfs_node_readdir(struct vop_readdir_args *);
 off_t vmmfs_node_decimal_size(uint64_t);
 int vmmfs_node_open(struct vop_open_args *);
 int vmmfs_node_access(struct vop_access_args *);
@@ -59,9 +87,6 @@ int vmmfs_vnode_deactivate(struct vnode *);
 /* Drops a vnode that was never attached to the namespace. */
 void vmmfs_vnode_discard(struct vnode *);
 
-
-/* Runs a terminal object destructor exactly once. */
-void vmmfs_node_drop(struct vmmfs_node *);
 
 /* Common VOP_RECLAIM handoff for every VMMFS namespace vnode. */
 int vmmfs_node_reclaim(struct vop_reclaim_args *);

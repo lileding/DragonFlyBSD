@@ -20,7 +20,6 @@
 #include "vmmfs_machine_id.h"
 #include "vmmfs_parent.h"
 #include "vmmfs_root.h"
-#include "vmmfs_machine_id.h"
 
 #define VMMFS_MACHINE_ID_MODE 0444
 
@@ -28,6 +27,13 @@ static volatile u_int vmmfs_machine_next_id;
 
 static int vmmfs_machine_id_load(struct vmmfs_node *, char *, size_t, size_t *);
 static void vmmfs_machine_id_drop(struct vmmfs_node *);
+
+static int
+vmmfs_machine_id_deactivate(struct vmmfs_node *node)
+{
+	(void)node;
+	return (0);
+}
 
 struct vop_ops vmmfs_machine_id_vops = {
 	.vop_default = vop_defaultop,
@@ -45,7 +51,7 @@ struct vop_ops vmmfs_machine_id_vops = {
 };
 
 int
-vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_machine_id *identity, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine;
@@ -68,10 +74,12 @@ vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (ENOSPC);
 	identity->node.parent = parent;
 	identity->node.dead = false;
-	identity->node.deactivate = vmmfs_node_default_deactivate;
+	identity->node.references = 1;
+	lwkt_token_init(&identity->node.token, "vmmfsnode");
+	identity->node.deactivate = vmmfs_machine_id_deactivate;
 	identity->node.drop = vmmfs_machine_id_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	identity->node.load_limit = sizeof("999999\n");
 	identity->node.store_limit = 0;
 	identity->node.load = vmmfs_machine_id_load;
@@ -86,7 +94,7 @@ vmmfs_machine_id_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (0);
 	identity->node.inode = 0;
 	machine->id = 0;
-	vmmfs_machine_id_drop(&identity->node);
+	vmmfs_node_put(&identity->node);
 	return (error);
 }
 
@@ -98,7 +106,7 @@ vmmfs_machine_id_drop(struct vmmfs_node *node)
 	identity = (struct vmmfs_machine_id *)node;
 	KKASSERT(identity != NULL);
 	identity->node.inode = 0;
-	vmmfs_node_parent_put(node);
+
 }
 
 static int

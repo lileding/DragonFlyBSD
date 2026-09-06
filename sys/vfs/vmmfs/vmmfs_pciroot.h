@@ -6,12 +6,13 @@
 #ifndef VMMFS_PCIROOT_H
 #define VMMFS_PCIROOT_H
 
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 
 #include <sys/types.h>
 
 #include <dev/virtual/vmm/vmm.h>
 
+struct vmmfs_mount;
 struct vmmfs_machine;
 struct vmmfs_pcislot;
 struct vmmfs_vcpu_thread;
@@ -34,7 +35,7 @@ struct vnode;
 struct vmmfs_pciroot_registry;
 
 struct vmmfs_pciroot {
-	struct vmmfs_branch branch;
+	struct vmmfs_node node;
 	struct vmmfs_pciroot_registry *registry;
 	vmm_machine_t runtime_machine;
 	uint64_t mmio_next;
@@ -48,9 +49,8 @@ struct vmmfs_pciroot {
 	vmm_io_t ecam_write;
 };
 
-int vmmfs_pciroot_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_pciroot_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_pciroot *, struct vnode **);
-void vmmfs_pciroot_deactivate_slots(struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);
 int vmmfs_pciroot_stop(struct vmmfs_pciroot *);

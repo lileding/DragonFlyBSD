@@ -11,7 +11,7 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 #include <dev/virtual/vmm/vmm.h>
 
 #include "vmmfs_events.h"
@@ -31,9 +31,10 @@ struct vnode;
 struct vop_ops;
 struct vmmfs_mount;
 struct ucred;
+struct vmmfs_launch;
 
 struct vmmfs_machine {
-	struct vmmfs_branch branch;
+	struct vmmfs_node node;
 	struct vmmfs_mount *mount;
 	/* Borrowed from the root registry while this directory is published. */
 	struct vnode *vnode;
@@ -45,8 +46,10 @@ struct vmmfs_machine {
 	 * runtime_released marks the retry window before stopped is republished.
 	 */
 	vmm_machine_t machine;
+	struct vnode *launch_vnode;
 	bool runtime_releasing;
 	bool runtime_released;
+	/* Admitted runtime work, or topology removal until registry detach. */
 	u_int runtime_references;
 	struct vmm_cpustate boot_state;
 	struct vmmfs_vcpu vcpu;
@@ -71,7 +74,7 @@ struct vmmfs_machine {
 	struct vnode *events_vnode;
 };
 
-int vmmfs_machine_create(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_machine_create(struct vmmfs_mount *, struct vmmfs_node *,
 	const char *, size_t, struct vnode **);
 
 /* Requests a warm reset without rerunning the loader. */
@@ -80,15 +83,11 @@ int vmmfs_machine_reset(struct vmmfs_machine *);
 /* Requests terminal power-off from an external VOP or a guest runtime event. */
 int vmmfs_machine_request_stop(struct vmmfs_machine *, const char *);
 
-/* Starts a direct boot session and publishes its guest-memory mapping. */
-int vmmfs_machine_boot_start(struct vmmfs_machine *);
-
-/* Releases a direct boot whose final session fd closed before submission. */
-int vmmfs_machine_boot_abort(struct vmmfs_machine *);
-
-/* Consumes the one direct-boot BSP state submission and starts the vCPUs. */
-int vmmfs_machine_boot_submit(struct vmmfs_machine *,
-	const struct vmm_cpustate *);
+/* Atomically admits a private launch and prepares its platform. */
+int vmmfs_machine_boot(struct vmmfs_machine *, struct vnode **);
+/* Only the current launch may start or abort the admitted runtime. */
+int vmmfs_machine_run(struct vmmfs_launch *);
+int vmmfs_machine_abort(struct vmmfs_launch *);
 
 /* The BSP invokes these after every other vCPU has reached its barrier. */
 int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);

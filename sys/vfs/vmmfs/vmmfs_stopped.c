@@ -23,6 +23,14 @@
 #define VMMFS_STOPPED_MODE 0644
 
 static void vmmfs_stopped_drop(struct vmmfs_node *);
+static int vmmfs_stopped_setattr(struct vop_setattr_args *);
+
+static int
+vmmfs_stopped_deactivate(struct vmmfs_node *node)
+{
+	(void)node;
+	return (0);
+}
 
 struct vop_ops vmmfs_stopped_vops = {
 	.vop_default = vop_defaultop,
@@ -35,12 +43,31 @@ struct vop_ops vmmfs_stopped_vops = {
 	.vop_read = vmmfs_node_read,
 	.vop_inactive = vmmfs_node_inactive,
 	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_node_setattr,
+	.vop_setattr = vmmfs_stopped_setattr,
 	.vop_write = vmmfs_node_write,
 };
 
+static int
+vmmfs_stopped_setattr(struct vop_setattr_args *ap)
+{
+	struct vmmfs_node *node = ap->a_vp->v_data;
+	struct vmmfs_machine *machine;
+
+	if (node == NULL)
+		return (ENOENT);
+	lwkt_gettoken(&node->token);
+	if (node->dead) {
+		lwkt_reltoken(&node->token);
+		return (ENOENT);
+	}
+	machine = (struct vmmfs_machine *)node->parent;
+	lwkt_reltoken(&node->token);
+	/* LOADING still has a stopped vnode, so touch reaches setattr. */
+	return (vmmfs_machine_request_stop(machine, "external"));
+}
+
 int
-vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
@@ -58,10 +85,12 @@ vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
 	stopped->node.parent = parent;
 	stopped->node.dead = false;
-	stopped->node.deactivate = vmmfs_node_default_deactivate;
+	stopped->node.references = 1;
+	lwkt_token_init(&stopped->node.token, "vmmfsnode");
+	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	stopped->node.drop = vmmfs_stopped_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	stopped->node.load_limit = 0;
 	stopped->node.store_limit = 0;
 	stopped->node.load = NULL;
@@ -72,7 +101,7 @@ vmmfs_stopped_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	error = vmmfs_vnode_create_regular(mount->mount,
 	    &mount->stopped_vops, VREG, &stopped->node, vnodep);
 	if (error != 0) {
-	vmmfs_node_drop(&stopped->node);
+		vmmfs_node_put(&stopped->node);
 		return (error);
 	}
 	return (0);
@@ -85,6 +114,6 @@ vmmfs_stopped_drop(struct vmmfs_node *node)
 
 	stopped = (struct vmmfs_stopped *)node;
 	KKASSERT(stopped != NULL);
-	vmmfs_node_parent_put(node);
+
 	kfree(stopped, M_VMMFS);
 }

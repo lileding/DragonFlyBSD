@@ -10,6 +10,7 @@
 
 #include <sys/types.h>
 
+struct vmmfs_mount;
 struct vmmfs_machine;
 struct vnode;
 struct vop_ops;
@@ -18,7 +19,7 @@ struct vmmfs_stopped {
 	struct vmmfs_node node;
 };
 
-int vmmfs_stopped_create(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_stopped_create(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vnode **);
 
 #endif /* VMMFS_STOPPED_H */

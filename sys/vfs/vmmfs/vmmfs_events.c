@@ -42,6 +42,19 @@ static struct filterops vmmfs_events_read_filterops = {
 	vmmfs_events_filter_read,
 };
 
+static int
+vmmfs_events_deactivate(struct vmmfs_node *node)
+{
+	struct vmmfs_events *events = (struct vmmfs_events *)node;
+
+	lwkt_gettoken(&events->token);
+	events->closed = true;
+	lwkt_reltoken(&events->token);
+	wakeup(events);
+	KNOTE(&events->kq.ki_note, 0);
+	return (0);
+}
+
 struct vop_ops vmmfs_events_vops = {
 	.vop_default = vop_defaultop,
 	.vop_access = vmmfs_node_access,
@@ -59,7 +72,7 @@ struct vop_ops vmmfs_events_vops = {
 };
 
 int
-vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_events *events, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
@@ -75,10 +88,12 @@ vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	lwkt_token_init(&events->token, "vmmfsevents");
 	events->node.parent = parent;
 	events->node.dead = false;
-	events->node.deactivate = vmmfs_node_default_deactivate;
+	events->node.references = 1;
+	lwkt_token_init(&events->node.token, "vmmfsnode");
+	events->node.deactivate = vmmfs_events_deactivate;
 	events->node.drop = vmmfs_events_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	events->node.load_limit = 0;
 	events->node.store_limit = sizeof("reset\n") - 1;
 	events->node.load = NULL;
@@ -99,39 +114,23 @@ vmmfs_events_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (0);
 
 fail:
-	vmmfs_node_drop(&events->node);
+	vmmfs_node_put(&events->node);
 	return (error);
 }
 
 static void
 vmmfs_events_drop(struct vmmfs_node *node)
 {
-	struct vmmfs_events *events;
+	struct vmmfs_events *events = (struct vmmfs_events *)node;
 
-	events = (struct vmmfs_events *)node;
-	KKASSERT(events != NULL);
-	lwkt_gettoken(&events->token);
-	lwkt_reltoken(&events->token);
-	vmmfs_events_revoke(events);
 	kfree(events->buffer, M_VMMFS);
 	events->buffer = NULL;
 	events->node.inode = 0;
 	lwkt_token_uninit(&events->token);
-	vmmfs_node_parent_put(node);
 }
 
 
-void
-vmmfs_events_revoke(struct vmmfs_events *events)
-{
-	if (events == NULL)
-		return;
-	lwkt_gettoken(&events->token);
-	events->closed = true;
-	lwkt_reltoken(&events->token);
-	wakeup(events);
-	KNOTE(&events->kq.ki_note, 0);
-}
+
 
 void
 vmmfs_events_log(struct vmmfs_events *events, enum vmmfs_machine_event event,
@@ -273,74 +272,78 @@ vmmfs_machine_event_name(enum vmmfs_machine_event event)
 static int
 vmmfs_events_kqfilter(struct vop_kqfilter_args *ap)
 {
-	struct vmmfs_events *events;
+	struct vmmfs_events *events = ap->a_vp->v_data;
 
-	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
 	if (ap->a_kn->kn_filter != EVFILT_READ)
 		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->node.token);
 	lwkt_gettoken(&events->token);
+	if (events->node.dead || events->closed) {
+		lwkt_reltoken(&events->token);
+		lwkt_reltoken(&events->node.token);
+		return (ENXIO);
+	}
 	ap->a_kn->kn_fop = &vmmfs_events_read_filterops;
 	ap->a_kn->kn_hook = (caddr_t)events;
 	knote_insert(&events->kq.ki_note, ap->a_kn);
 	lwkt_reltoken(&events->token);
+	lwkt_reltoken(&events->node.token);
 	return (0);
 }
 
 static int
 vmmfs_events_read(struct vop_read_args *ap)
 {
-	struct vmmfs_events *events;
-	struct uio *uio;
+	struct vmmfs_events *events = ap->a_vp->v_data;
+	struct uio *uio = ap->a_uio;
 	char buffer[VMMFS_EVENTS_READ_SIZE];
-	size_t index;
-	size_t length;
-	size_t i;
+	size_t length, index, i;
 	int error;
 
-	events = ap->a_vp->v_data;
 	if (events == NULL)
 		return (ENOENT);
-	if (events->node.dead)
-		return (ENXIO);
-	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
 		return (EINVAL);
-	if (uio->uio_resid == 0)
-		return (0);
-
 	for (;;) {
+		lwkt_gettoken(&events->node.token);
 		lwkt_gettoken(&events->token);
-		if (events->length != 0)
+		if (events->node.dead || events->closed) {
+			error = ENXIO;
 			break;
-		if (events->closed) {
+		}
+		if (uio->uio_resid == 0) {
+			error = 0;
+			break;
+		}
+		if (events->length != 0) {
+			length = MIN(events->length, sizeof(buffer));
+			length = MIN(length, (size_t)uio->uio_resid);
+			for (i = 0; i < length; ++i) {
+				index = (events->start + i) % VMMFS_EVENTS_BUFFER_SIZE;
+				buffer[i] = events->buffer[index];
+			}
+			events->start = (events->start + length) % VMMFS_EVENTS_BUFFER_SIZE;
+			events->length -= length;
 			lwkt_reltoken(&events->token);
-			return (ENXIO);
+			lwkt_reltoken(&events->node.token);
+			return (uiomove(buffer, length, uio));
 		}
 		if (ap->a_ioflag & IO_NDELAY) {
-			lwkt_reltoken(&events->token);
-			return (EAGAIN);
+			error = EAGAIN;
+			break;
 		}
 		tsleep_interlock(events, PCATCH);
 		lwkt_reltoken(&events->token);
+		lwkt_reltoken(&events->node.token);
 		error = tsleep(events, PINTERLOCKED | PCATCH, "vmmevents", 0);
 		if (error != 0)
 			return (error);
 	}
-	length = events->length;
-	if (length > sizeof(buffer))
-		length = sizeof(buffer);
-	if (length > (size_t)uio->uio_resid)
-		length = (size_t)uio->uio_resid;
-	for (i = 0; i < length; ++i) {
-		index = (events->start + i) % VMMFS_EVENTS_BUFFER_SIZE;
-		buffer[i] = events->buffer[index];
-	}
-	events->start = (events->start + length) % VMMFS_EVENTS_BUFFER_SIZE;
-	events->length -= length;
 	lwkt_reltoken(&events->token);
-	return (uiomove(buffer, length, uio));
+	lwkt_reltoken(&events->node.token);
+	return (error);
 }
 
 static int
@@ -353,14 +356,9 @@ vmmfs_events_filter_read(struct knote *knote, long hint)
 	if (events == NULL)
 		return (0);
 	lwkt_gettoken(&events->token);
-	if (vmmfs_events_machine(events) == NULL || events->node.dead) {
-		knote->kn_data = 0;
+	knote->kn_data = events->length;
+	if (events->closed)
 		knote->kn_flags |= EV_EOF;
-	} else {
-		knote->kn_data = events->length;
-		if (events->closed)
-			knote->kn_flags |= EV_EOF;
-	}
 	lwkt_reltoken(&events->token);
 	return (knote->kn_data != 0 || (knote->kn_flags & EV_EOF) != 0);
 }

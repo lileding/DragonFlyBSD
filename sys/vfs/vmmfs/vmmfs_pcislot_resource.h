@@ -28,6 +28,7 @@ void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *);
 int vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *,
 	vmm_machine_t);
 void vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *);
+/* Returns a held vnode; the caller must vdrop() after vget(). */
 int vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *,
 	const char *, size_t, struct vnode **);
 int vmmfs_pcislot_resources_read_item(struct vmmfs_pcislot_resources *,

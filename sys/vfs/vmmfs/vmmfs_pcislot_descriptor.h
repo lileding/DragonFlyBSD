@@ -20,8 +20,8 @@
 #define VMMFS_PCISLOT_MAX_ECAPS 32
 #define VMMFS_PCISLOT_CAP_DATA_MAX 4096
 
+struct vmmfs_mount;
 struct vmmfs_pcislot;
-struct vmmfs_pcislot_resources;
 struct vmmfs_pcislot_auth;
 struct vnode;
 struct vop_ops;
@@ -139,11 +139,10 @@ struct vmmfs_pcislot_descriptor {
 	uint64_t generation;
 	struct vmmfs_pcislot_descriptor_value value;
 	struct vmmfs_pcislot_auth *auth;
-	struct vmmfs_pcislot_resources *resources;
 };
 
 int vmmfs_pcislot_descriptor_init(struct vmmfs_mount *,
-	struct vmmfs_branch *, struct vmmfs_pcislot_descriptor *,
+	struct vmmfs_node *, struct vmmfs_pcislot_descriptor *,
 	struct vnode **);
 
 #endif /* VMMFS_PCISLOT_DESCRIPTOR_H */

@@ -66,6 +66,9 @@ static d_open_t vmmfs_serialport_dev_open;
 static d_close_t vmmfs_serialport_dev_close;
 static d_ioctl_t vmmfs_serialport_dev_ioctl;
 static void vmmfs_serialport_tty_start(struct tty *);
+static void vmmfs_serialport_tty_unhold(struct tty *);
+static void vmmfs_serialport_tty_retire(struct vmmfs_serialport *);
+static void vmmfs_serialport_tty_release(void *, int);
 static int vmmfs_serialport_tty_param(struct tty *, struct termios *);
 
 static int vmmfs_serialport_open(struct vop_open_args *);
@@ -124,7 +127,7 @@ struct vop_ops vmmfs_serialport_vops = {
 };
 
 int
-vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_node *parent,
     const char *name, size_t namelen, struct vnode **vnodep)
 {
     struct vmmfs_serialroot *serialroot;
@@ -178,10 +181,11 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
     port->dev = dev;
     port->node.parent = parent;
     port->node.dead = false;
-    port->node.deactivate = vmmfs_node_default_deactivate;
+    port->node.references = 1;
+    lwkt_token_init(&port->node.token, "vmmfsnode");
     port->node.drop = vmmfs_serialport_drop;
     if (parent != NULL)
-        vmmfs_branch_hold(parent);
+        vmmfs_node_hold(parent);
     port->node.deactivate = vmmfs_serialport_deactivate;
     port->node.mode = VMMFS_SERIALPORT_MODE;
     port->node.size = 0;
@@ -192,9 +196,14 @@ vmmfs_serialport_create(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
         lwkt_gettoken(&port->token);
         port->destroying = true;
         lwkt_reltoken(&port->token);
-        vmmfs_node_drop(&port->node);
+        vmmfs_node_put(&port->node);
         return error;
     }
+    /* The session may retain the TTY after its vnode has been reclaimed. */
+    TASK_INIT(&port->tty_release_task, 0, vmmfs_serialport_tty_release, port);
+    port->tty.t_sc = port;
+    port->tty.t_unhold = vmmfs_serialport_tty_unhold;
+    vmmfs_node_hold(&port->node);
     return 0;
 
 fail_token:
@@ -206,72 +215,73 @@ fail_token:
 static int
 vmmfs_serialport_deactivate(struct vmmfs_node *node)
 {
-    struct vmmfs_serialport *port;
-    struct vmmfs_serialroot *serialroot;
-    struct vmmfs_machine *machine;
+    struct vmmfs_serialport *port = (struct vmmfs_serialport *)node;
+    struct vmmfs_node *parent = node->parent;
+    struct vmmfs_machine *machine =
+        vmmfs_serialroot_machine((struct vmmfs_serialroot *)parent);
+    int error;
+    bool registered;
 
-    port = (struct vmmfs_serialport *)node;
-    if (port == NULL)
-        return (EINVAL);
-    serialroot = (struct vmmfs_serialroot *)port->node.parent;
-    if (serialroot == NULL)
-        return (EINVAL);
-    machine = vmmfs_serialroot_machine(serialroot);
-    if (machine == NULL)
-        return (EINVAL);
-
-    lwkt_gettoken(&machine->branch.token);
+    lwkt_gettoken(&node->token);
+    lwkt_gettoken(&parent->token);
+    lwkt_gettoken(&machine->node.token);
+    registered = port->entry != NULL;
+    /* A rejected private candidate is not part of the running topology. */
+    error = registered && ((machine->node.dead && !parent->dead) ||
+        machine->machine != NULL) ? EBUSY : 0;
+    /* Keep boot excluded until the parent detaches this registered port. */
+    if (registered && error == 0) {
+        port->topology_reference = true;
+        ++machine->runtime_references;
+    }
+    lwkt_reltoken(&machine->node.token);
+    lwkt_reltoken(&parent->token);
+    lwkt_reltoken(&node->token);
+    if (error != 0)
+        return (error);
     lwkt_gettoken(&port->token);
-    if (port->node.dead) {
-        lwkt_reltoken(&port->token);
-        lwkt_reltoken(&machine->branch.token);
-        return (0);
-    }
-    if (machine->machine != NULL) {
-        lwkt_reltoken(&port->token);
-        lwkt_reltoken(&machine->branch.token);
-        return (EBUSY);
-    }
-    (void)vmmfs_node_default_deactivate(&port->node);
     port->destroying = true;
     lwkt_reltoken(&port->token);
-    lwkt_reltoken(&machine->branch.token);
-
     vmmfs_serialport_revoke(port);
+    lwkt_gettoken(&port->token);
+    while (port->control_count != 0) {
+        tsleep_interlock(port, 0);
+        lwkt_reltoken(&port->token);
+        /* Admitted open/ioctl calls finish before the TTY is closed. */
+        error = tsleep(port, PINTERLOCKED, "vmmserstop", 0);
+        if (error != 0)
+            kprintf("vmmfs: serial control drain: %d\n", error);
+        lwkt_gettoken(&port->token);
+    }
+    lwkt_reltoken(&port->token);
+    lwkt_gettoken(&port->tty.t_token);
+    if ((port->tty.t_state & TS_ISOPEN) != 0) {
+        error = (*linesw[port->tty.t_line].l_close)(&port->tty, 0);
+        if (error != 0)
+            kprintf("vmmfs: serial line close: %d\n", error);
+        ttyclose(&port->tty);
+    }
+    vmmfs_serialport_tty_retire(port);
+    lwkt_reltoken(&port->tty.t_token);
     return (0);
 }
 
 static void
 vmmfs_serialport_drop(struct vmmfs_node *node)
 {
-    struct vmmfs_serialport *port;
-    cdev_t dev;
+    struct vmmfs_serialport *port = (struct vmmfs_serialport *)node;
+    cdev_t dev = port->dev;
 
-    port = (struct vmmfs_serialport *)node;
-    KKASSERT(port != NULL);
-    lwkt_gettoken(&port->token);
     KKASSERT(port->destroying);
+    KKASSERT(port->entry == NULL);
+    KKASSERT(!port->topology_reference);
     KKASSERT(port->machine == NULL);
     KKASSERT(!port->stopping);
-    port->destroying = true;
-    dev = port->dev;
-    lwkt_reltoken(&port->token);
-    lwkt_gettoken(&port->token);
-    while (port->opening_count != 0) {
-        tsleep_interlock(port, 0);
-        if (port->opening_count != 0) {
-            lwkt_reltoken(&port->token);
-            (void)tsleep(port, PINTERLOCKED, "vmmserdestroy", 0);
-            lwkt_gettoken(&port->token);
-        }
-    }
-    lwkt_reltoken(&port->token);
-    vmmfs_serialport_revoke(port);
+    KKASSERT(port->control_count == 0);
     lwkt_gettoken(&port->tty.t_token);
-    if ((port->tty.t_state & TS_ISOPEN) != 0) {
-        (*linesw[port->tty.t_line].l_close)(&port->tty, 0);
-        ttyclose(&port->tty);
-    }
+    KKASSERT((port->tty.t_state & TS_ISOPEN) == 0);
+    KKASSERT(port->tty.t_refs == 0);
+    KKASSERT(port->tty.t_unhold == NULL);
     ttyunregister(&port->tty);
     lwkt_reltoken(&port->tty.t_token);
     if (dev != NULL) {
@@ -282,7 +292,6 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     port->dev = NULL;
     lwkt_token_uninit(&port->tty.t_token);
     lwkt_token_uninit(&port->token);
-    vmmfs_node_parent_put(node);
     kfree(port, M_VMMFS);
 }
 static void
@@ -311,7 +320,8 @@ vmmfs_serialport_revoke(struct vmmfs_serialport *port)
     if (deassert)
         (void)vmm_machine_set_irq(machine, port->gsi, false);
     if (dev != NULL)
-        KKASSERT(dev_drevoke(dev) == 0);
+        if (dev_drevoke(dev) != 0)
+            kprintf("vmmfs: dev_drevoke failed\n");
 }
 int
 vmmfs_serialport_start(struct vmmfs_serialport *port, vmm_machine_t machine)
@@ -383,19 +393,22 @@ vmmfs_serialport_open(struct vop_open_args *ap)
     struct vmmfs_serialport *port;
     struct vnode *vnode;
     cdev_t dev;
-    int error;
+    int error, close_error;
 
     port = ap->a_vp->v_data;
     if (port == NULL)
         return ENOENT;
     vnode = ap->a_vp;
+    lwkt_gettoken(&port->node.token);
     lwkt_gettoken(&port->token);
-    if (port->destroying || port->closed) {
+    if (port->node.dead || port->destroying || port->closed) {
         lwkt_reltoken(&port->token);
+        lwkt_reltoken(&port->node.token);
         return ENXIO;
     }
-    ++port->opening_count;
+    ++port->control_count;
     lwkt_reltoken(&port->token);
+    lwkt_reltoken(&port->node.token);
     dev = vnode->v_rdev;
     if (dev == NULL) {
         error = ENXIO;
@@ -409,22 +422,29 @@ vmmfs_serialport_open(struct vop_open_args *ap)
         vnode);
     vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
     if (error == 0) {
+        lwkt_gettoken(&port->node.token);
         lwkt_gettoken(&port->token);
-        if (port->destroying || port->closed) {
+        if (port->node.dead || port->destroying || port->closed) {
             lwkt_reltoken(&port->token);
+            lwkt_reltoken(&port->node.token);
             vn_unlock(vnode);
-            (void)dev_dclose(dev, ap->a_mode, S_IFCHR, *ap->a_fpp);
+            close_error = dev_dclose(dev, ap->a_mode, S_IFCHR,
+                *ap->a_fpp);
+            if (close_error != 0)
+                kprintf("vmmfs: serial rejected open close: %d\n",
+                    close_error);
             vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
             error = ENXIO;
         } else {
             lwkt_reltoken(&port->token);
             error = vop_stdopen(ap);
+            lwkt_reltoken(&port->node.token);
         }
     }
 done:
     lwkt_gettoken(&port->token);
-    KKASSERT(port->opening_count != 0);
-    --port->opening_count;
+    KKASSERT(port->control_count != 0);
+    --port->control_count;
     lwkt_reltoken(&port->token);
     wakeup(port);
     return error;
@@ -453,18 +473,27 @@ vmmfs_serialport_close(struct vop_close_args *ap)
 static int
 vmmfs_serialport_read(struct vop_read_args *ap)
 {
+    struct vmmfs_serialport *port;
     struct vnode *vnode;
     cdev_t dev;
     int error;
 
     vnode = ap->a_vp;
+    port = vnode->v_data;
     dev = vnode->v_rdev;
-    if (dev == NULL)
+    if (port == NULL || dev == NULL)
         return EBADF;
-    if (ap->a_uio->uio_resid == 0)
-        return 0;
     vn_unlock(vnode);
-    error = dev_dread(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
+    lwkt_gettoken(&port->node.token);
+    lwkt_gettoken(&port->tty.t_token);
+    if (port->node.dead)
+        error = ENXIO;
+    else if (ap->a_uio->uio_resid == 0)
+        error = 0;
+    else
+        error = dev_dread(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
+    lwkt_reltoken(&port->tty.t_token);
+    lwkt_reltoken(&port->node.token);
     vn_lock(vnode, LK_SHARED | LK_RETRY);
     return error;
 }
@@ -472,18 +501,27 @@ vmmfs_serialport_read(struct vop_read_args *ap)
 static int
 vmmfs_serialport_write(struct vop_write_args *ap)
 {
+    struct vmmfs_serialport *port;
     struct vnode *vnode;
     cdev_t dev;
     int error;
 
     vnode = ap->a_vp;
+    port = vnode->v_data;
     dev = vnode->v_rdev;
-    if (dev == NULL)
+    if (port == NULL || dev == NULL)
         return EBADF;
-    if (ap->a_uio->uio_resid == 0)
-        return 0;
     vn_unlock(vnode);
-    error = dev_dwrite(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
+    lwkt_gettoken(&port->node.token);
+    lwkt_gettoken(&port->tty.t_token);
+    if (port->node.dead)
+        error = ENXIO;
+    else if (ap->a_uio->uio_resid == 0)
+        error = 0;
+    else
+        error = dev_dwrite(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
+    lwkt_reltoken(&port->tty.t_token);
+    lwkt_reltoken(&port->node.token);
     vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
     return error;
 }
@@ -505,14 +543,22 @@ vmmfs_serialport_ioctl(struct vop_ioctl_args *ap)
 static int
 vmmfs_serialport_kqfilter(struct vop_kqfilter_args *ap)
 {
+    struct vmmfs_serialport *port;
     struct vnode *vnode;
     cdev_t dev;
+    int error;
 
     vnode = ap->a_vp;
+    port = vnode->v_data;
     dev = vnode->v_rdev;
-    if (dev == NULL)
+    if (port == NULL || dev == NULL)
         return EBADF;
-    return dev_dkqfilter(dev, ap->a_kn, NULL);
+    lwkt_gettoken(&port->node.token);
+    lwkt_gettoken(&port->tty.t_token);
+    error = port->node.dead ? ENXIO : dev_dkqfilter(dev, ap->a_kn, NULL);
+    lwkt_reltoken(&port->tty.t_token);
+    lwkt_reltoken(&port->node.token);
+    return error;
 }
 
 
@@ -860,18 +906,35 @@ vmmfs_serialport_dev_close(struct dev_close_args *ap)
 static int
 vmmfs_serialport_dev_ioctl(struct dev_ioctl_args *ap)
 {
+    struct vmmfs_serialport *port;
     struct tty *tty;
     int error;
 
+    port = ap->a_head.a_dev->si_drv1;
     tty = ap->a_head.a_dev->si_tty;
-    if (tty == NULL)
+    if (port == NULL || tty == NULL)
         return ENXIO;
+    lwkt_gettoken(&port->node.token);
+    lwkt_gettoken(&port->token);
+    if (port->node.dead || port->closed || port->destroying) {
+        lwkt_reltoken(&port->token);
+        lwkt_reltoken(&port->node.token);
+        return ENXIO;
+    }
+    ++port->control_count;
+    lwkt_reltoken(&port->token);
+    lwkt_reltoken(&port->node.token);
     lwkt_gettoken(&tty->t_token);
     error = (*linesw[tty->t_line].l_ioctl)(tty, ap->a_cmd, ap->a_data,
         ap->a_fflag, ap->a_cred);
     if (error == ENOIOCTL)
         error = ttioctl(tty, ap->a_cmd, ap->a_data, ap->a_fflag);
     lwkt_reltoken(&tty->t_token);
+    lwkt_gettoken(&port->token);
+    KKASSERT(port->control_count != 0);
+    --port->control_count;
+    lwkt_reltoken(&port->token);
+    wakeup(port);
     return error == ENOIOCTL ? ENOTTY : error;
 }
 
@@ -914,4 +977,55 @@ vmmfs_serialport_tty_start(struct tty *tty)
     lwkt_reltoken(&tty->t_token);
     if (update_irq)
         vmmfs_serialport_irq_update(port);
+}
+
+/*
+ * ttyunhold still owns t_token after this callback returns.  Transfer the
+ * TTY's node reference to the shared taskqueue instead of freeing it here.
+ */
+static void
+vmmfs_serialport_tty_unhold(struct tty *tty)
+{
+    struct vmmfs_serialport *port = tty->t_sc;
+
+    KKASSERT(tty->t_refs != 0);
+    --tty->t_refs;
+    vmmfs_serialport_tty_retire(port);
+}
+
+/* Called with the TTY token held, after closing admission or dropping a session. */
+static void
+vmmfs_serialport_tty_retire(struct vmmfs_serialport *port)
+{
+    struct tty *tty = &port->tty;
+    bool drained;
+    int error;
+
+    lwkt_gettoken(&port->token);
+    drained = port->destroying && port->control_count == 0;
+    lwkt_reltoken(&port->token);
+    if (!drained || tty->t_refs != 0 || tty->t_unhold == NULL)
+        return;
+    tty->t_unhold = NULL;
+    error = taskqueue_enqueue(taskqueue_thread[mycpuid],
+        &port->tty_release_task);
+    if (error != 0) {
+        /* A stopped system queue cannot consume the reference.  Retain it. */
+        tty->t_unhold = vmmfs_serialport_tty_unhold;
+        kprintf("vmmfs: serial TTY release enqueue: %d\n", error);
+    }
+}
+
+static void
+vmmfs_serialport_tty_release(void *context, int pending)
+{
+    struct vmmfs_serialport *port = context;
+
+    (void)pending;
+    /* Cross the token held by ttyunhold before releasing embedded storage. */
+    lwkt_gettoken(&port->tty.t_token);
+    KKASSERT(port->tty.t_refs == 0);
+    KKASSERT(port->tty.t_unhold == NULL);
+    lwkt_reltoken(&port->tty.t_token);
+    vmmfs_node_put(&port->node);
 }

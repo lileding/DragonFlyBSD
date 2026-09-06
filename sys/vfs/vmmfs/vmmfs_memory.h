@@ -12,12 +12,13 @@
 
 #include <vm/vm.h>
 
+struct vmmfs_mount;
 struct vm_object;
 struct vmspace;
 struct vmmfs_machine;
 struct vmmfs_memory;
 
-int vmmfs_memory_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_memory_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_memory *, struct vnode **);
 int vmmfs_memory_prepare(struct vmmfs_memory *, uint64_t);
 int vmmfs_memory_map(struct vmmfs_memory *);

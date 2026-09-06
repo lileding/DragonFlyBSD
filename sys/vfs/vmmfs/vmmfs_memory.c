@@ -40,6 +40,13 @@ static void vmmfs_memory_object_reference(struct vm_object *);
 static int vmmfs_memory_node_load(struct vmmfs_node *, char *, size_t, size_t *);
 static int vmmfs_memory_node_store(struct vmmfs_node *, const char *, size_t);
 
+static int
+vmmfs_memory_deactivate(struct vmmfs_node *node)
+{
+	(void)node;
+	return (0);
+}
+
 struct vop_ops vmmfs_memory_vops = {
 	.vop_default = vop_defaultop,
 	.vop_access = vmmfs_node_access,
@@ -64,9 +71,9 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 
 	if (memory == NULL || memory->node.dead)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_memory_machine(memory)->branch.token);
+	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
 	size = memory->size;
-	lwkt_reltoken(&vmmfs_memory_machine(memory)->branch.token);
+	lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -100,15 +107,15 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 
 	if (memory->node.dead)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_memory_machine(memory)->branch.token);
+	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
 	if (vmmfs_memory_machine(memory)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_memory_machine(memory)->branch.token);
+		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
 		return (EBUSY);
 	}
 	memory->size = value;
 	memory->node.size = vmmfs_node_decimal_size(value);
 	vmmfs_memory_machine(memory)->boot.node.size = (off_t)value;
-	lwkt_reltoken(&vmmfs_memory_machine(memory)->branch.token);
+	lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
 	return (0);
 }
 
@@ -128,7 +135,7 @@ vmmfs_memory_node_store(struct vmmfs_node *node, const char *buffer,
 }
 
 int
-vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
+vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_memory *memory, struct vnode **vnodep)
 {
 	struct vmmfs_root *root;
@@ -143,10 +150,12 @@ vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 	bzero(memory, sizeof(*memory));
 	memory->node.parent = parent;
 	memory->node.dead = false;
-	memory->node.deactivate = vmmfs_node_default_deactivate;
+	memory->node.references = 1;
+	lwkt_token_init(&memory->node.token, "vmmfsnode");
+	memory->node.deactivate = vmmfs_memory_deactivate;
 	memory->node.drop = vmmfs_memory_drop;
 	if (parent != NULL)
-		vmmfs_branch_hold(parent);
+		vmmfs_node_hold(parent);
 	memory->node.load_limit = 32;
 	memory->node.store_limit = 31;
 	memory->node.load = vmmfs_memory_node_load;
@@ -164,7 +173,7 @@ vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_branch *parent,
 		return (0);
 
 fail:
-	vmmfs_node_drop(&memory->node);
+	vmmfs_node_put(&memory->node);
 	return (error);
 }
 
@@ -178,7 +187,7 @@ vmmfs_memory_drop(struct vmmfs_node *node)
 	if (memory->object != NULL || memory->boot_vmspace != NULL || memory->run_vmspace != NULL)
 		panic("vmmfs_memory_drop: runtime memory is still active");
 	memory->node.inode = 0;
-	vmmfs_node_parent_put(node);
+
 }
 
 

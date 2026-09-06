@@ -11,29 +11,29 @@
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
-#include "vmmfs_branch.h"
+#include "vmmfs_node.h"
 
 static int
-vmmfs_branch_vop_branch(struct vnode *vnode, struct vmmfs_branch **branchp)
+vmmfs_node_vop_branch(struct vnode *vnode, struct vmmfs_node **branchp)
 {
-	struct vmmfs_branch *branch;
+	struct vmmfs_node *node;
 
 	if (vnode == NULL || branchp == NULL)
 		return (EINVAL);
 	if (vnode->v_type != VDIR)
 		return (ENOTDIR);
-	branch = vnode->v_data;
-	if (branch == NULL || branch->ops == NULL)
+	node = vnode->v_data;
+	if (node == NULL)
 		return (ENXIO);
-	*branchp = branch;
+	*branchp = node;
 	return (0);
 }
 
 int
-vmmfs_branch_readdir(struct vop_readdir_args *ap)
+vmmfs_node_readdir(struct vop_readdir_args *ap)
 {
-	struct vmmfs_branch *branch;
-	struct vmmfs_branch_item item;
+	struct vmmfs_node *node;
+	struct vmmfs_node_item item;
 	struct uio *uio;
 	off_t offset;
 	ino_t parent_inode;
@@ -43,10 +43,10 @@ vmmfs_branch_readdir(struct vop_readdir_args *ap)
 
 	if (ap == NULL)
 		return (EINVAL);
-	error = vmmfs_branch_vop_branch(ap->a_vp, &branch);
+	error = vmmfs_node_vop_branch(ap->a_vp, &node);
 	if (error != 0)
 		return (error);
-	if (branch->ops->read_item == NULL)
+	if (node->read_item == NULL)
 		return (EOPNOTSUPP);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -55,13 +55,13 @@ vmmfs_branch_readdir(struct vop_readdir_args *ap)
 		*ap->a_ncookies = 0;
 		*ap->a_cookies = NULL;
 	}
-	parent_inode = branch->node.parent == NULL ? branch->node.inode :
-	    branch->node.parent->node.inode;
+	parent_inode = node->parent == NULL ? node->inode :
+	    node->parent->inode;
 	offset = uio->uio_offset;
 	error = 0;
 	stop = 0;
 	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, branch->node.inode, DT_DIR,
+		stop = vop_write_dirent(&error, uio, node->inode, DT_DIR,
 		    1, ".");
 		if (!stop)
 			offset = 1;
@@ -74,7 +74,7 @@ vmmfs_branch_readdir(struct vop_readdir_args *ap)
 	}
 	index = offset - 2;
 	while (!stop) {
-		error = branch->ops->read_item(branch, index, &item);
+		error = node->read_item(node, index, &item);
 		if (error == ENOENT) {
 			error = 0;
 			break;
@@ -97,22 +97,22 @@ vmmfs_branch_readdir(struct vop_readdir_args *ap)
 }
 
 int
-vmmfs_branch_nresolve(struct vop_nresolve_args *ap)
+vmmfs_node_nresolve(struct vop_nresolve_args *ap)
 {
-	struct vmmfs_branch *branch;
+	struct vmmfs_node *node;
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
 
 	if (ap == NULL)
 		return (EINVAL);
-	error = vmmfs_branch_vop_branch(ap->a_dvp, &branch);
+	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)
 		return (error);
-	if (branch->ops->get_item == NULL)
+	if (node->get_item == NULL)
 		return (EOPNOTSUPP);
 	ncp = ap->a_nch->ncp;
-	error = branch->ops->get_item(branch, ncp->nc_name, ncp->nc_nlen,
+	error = node->get_item(node, ncp->nc_name, ncp->nc_nlen,
 	    &vnode);
 	if (error != 0) {
 		cache_setvp(ap->a_nch, NULL);
@@ -129,24 +129,24 @@ vmmfs_branch_nresolve(struct vop_nresolve_args *ap)
 }
 
 int
-vmmfs_branch_nmkdir(struct vop_nmkdir_args *ap)
+vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 {
-	struct vmmfs_branch *branch;
+	struct vmmfs_node *node;
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
 
 	if (ap == NULL || ap->a_vap == NULL)
 		return (EINVAL);
-	error = vmmfs_branch_vop_branch(ap->a_dvp, &branch);
+	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)
 		return (error);
-	if (branch->ops->create_item == NULL || branch->ops->remove_item == NULL)
+	if (node->create_item == NULL || node->remove_item == NULL)
 		return (EOPNOTSUPP);
 	if (ap->a_vap->va_type != VDIR)
 		return (EINVAL);
 	ncp = ap->a_nch->ncp;
-	error = branch->ops->create_item(branch, ap->a_dvp->v_mount,
+	error = node->create_item(node, ap->a_dvp->v_mount,
 	    ncp->nc_name, ncp->nc_nlen, &vnode);
 	if (error != 0)
 		return (error);
@@ -154,31 +154,36 @@ vmmfs_branch_nmkdir(struct vop_nmkdir_args *ap)
 		return (ENOMEM);
 	error = vget(vnode, LK_EXCLUSIVE);
 	if (error != 0) {
-		if (vmmfs_vnode_deactivate(vnode) != 0)
-			panic("vmmfs_branch_nmkdir: created child cannot deactivate");
-		branch->ops->remove_item(branch, ncp->nc_name, ncp->nc_nlen);
+		/*
+		 * The child is already discoverable.  If another operation has
+		 * made it busy, retain the registry entry for normal resolution.
+		 */
+		if (vmmfs_vnode_deactivate(vnode) == 0)
+			node->remove_item(node, ncp->nc_name, ncp->nc_nlen);
+		vrele(vnode); /* create_item reference. */
 		return (error);
 	}
 	*ap->a_vpp = vnode;
 	cache_setunresolved(ap->a_nch);
 	cache_setvp(ap->a_nch, vnode);
+	vrele(vnode); /* vget reference is returned to the VOP caller. */
 	return (0);
 }
 
 int
-vmmfs_branch_nrmdir(struct vop_nrmdir_args *ap)
+vmmfs_node_nrmdir(struct vop_nrmdir_args *ap)
 {
-	struct vmmfs_branch *branch;
+	struct vmmfs_node *node;
 	struct namecache *ncp;
 	struct vnode *vnode;
 	int error;
 
 	if (ap == NULL)
 		return (EINVAL);
-	error = vmmfs_branch_vop_branch(ap->a_dvp, &branch);
+	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)
 		return (error);
-	if (branch->ops->remove_item == NULL)
+	if (node->remove_item == NULL)
 		return (EOPNOTSUPP);
 	ncp = ap->a_nch->ncp;
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vnode);
@@ -191,7 +196,7 @@ vmmfs_branch_nrmdir(struct vop_nrmdir_args *ap)
 	}
 	error = vmmfs_vnode_deactivate(vnode);
 	if (error == 0) {
-		branch->ops->remove_item(branch, ncp->nc_name, ncp->nc_nlen);
+		node->remove_item(node, ncp->nc_name, ncp->nc_nlen);
 		cache_unlink(ap->a_nch);
 	}
 	vrele(vnode);

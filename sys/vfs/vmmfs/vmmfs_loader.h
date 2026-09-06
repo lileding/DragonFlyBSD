@@ -12,15 +12,15 @@
 
 #include <dev/virtual/vmm/vmm.h>
 
+struct vmmfs_mount;
 struct vmmfs_machine;
 struct vmmfs_loader;
-struct vmmfs_boot;
+struct vnode;
 struct ucred;
 
-int vmmfs_loader_init(struct vmmfs_mount *, struct vmmfs_branch *,
+int vmmfs_loader_init(struct vmmfs_mount *, struct vmmfs_node *,
 	struct vmmfs_loader *, struct vnode **);
-int vmmfs_loader_run(struct vmmfs_loader *, const char *,
-	struct vmmfs_boot *, struct ucred *);
+int vmmfs_loader_run(struct vmmfs_loader *, struct vnode *, struct ucred *);
 
 struct vmmfs_loader {
 	struct vmmfs_node node;
