@@ -16,6 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("root", type=Path)
 parser.add_argument("--cpus", type=int, default=1)
 parser.add_argument("--reset", action="store_true")
+parser.add_argument("--reset-count", type=int, default=1)
 parser.add_argument("--stop-during-reset", action="store_true")
 parser.add_argument("--boot", action="store_true")
 parser.add_argument("--network", action="store_true")
@@ -27,6 +28,9 @@ parser.add_argument("--io-reset", action="store_true")
 parser.add_argument("--trace-reset", action="store_true")
 parser.add_argument("--image", default="/var/tmp/vmmfs-refactor-alpine.img")
 args = parser.parse_args()
+if args.reset_count < 1 or (args.reset_count != 1 and
+                          (not args.reset or args.stop_during_reset)):
+    parser.error("--reset-count > 1 requires --reset without --stop-during-reset")
 if args.bme and not args.network:
     parser.error("--bme requires --network")
 if args.stop_during_reset and not args.reset:
@@ -350,7 +354,43 @@ try:
             snapshot = subprocess.run(["fstat", "-p", str(backend.pid)],
                                       capture_output=True, text=True, check=True)
             print(snapshot.stdout, flush=True)
-        store(machine / "events", "reset")
+        if args.reset_count == 1:
+            store(machine / "events", "reset")
+        else:
+            eventfd = os.open(machine / "events", os.O_RDONLY | os.O_NONBLOCK)
+            evidence = bytearray()
+            try:
+                while True:
+                    try:
+                        data = os.read(eventfd, 65536)
+                    except BlockingIOError:
+                        break
+                    if not data:
+                        break
+                for iteration in range(args.reset_count):
+                    boundary = len(evidence)
+                    store(machine / "events", "reset")
+                    deadline = time.monotonic() + 20
+                    while b"machine reset completed\n" not in evidence[boundary:]:
+                        try:
+                            data = os.read(eventfd, 65536)
+                        except BlockingIOError:
+                            data = b""
+                        evidence.extend(data)
+                        current = evidence[boundary:]
+                        if b"machine reset failed" in current or b"machine stopped" in current:
+                            raise RuntimeError("reset sequence failed: %r" % bytes(current))
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("reset %d did not complete" % (iteration + 1))
+                        pump(0)
+                        if not data:
+                            time.sleep(0.001)
+                    print("PASS reset completion %d/%d" %
+                          (iteration + 1, args.reset_count), flush=True)
+            finally:
+                (log_directory / "repeat-reset.events").write_bytes(evidence)
+                os.close(eventfd)
+        received.clear()
         login()
         command("printf '\\137RESET_OK\\n'", rb"_RESET_OK\r?\n")
         command("test $(getconf _NPROCESSORS_ONLN) -eq " + str(args.cpus) +

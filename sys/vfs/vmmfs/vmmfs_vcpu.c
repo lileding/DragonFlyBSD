@@ -364,41 +364,31 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 	const struct vmm_cpustate *bsp_state)
 {
 	struct vmmfs_vcpu_thread *thread;
-	vmm_vcpu_t created_vcpu;
+	vmm_vcpu_t *created;
 	uint32_t index;
 	int error, destroy_error;
 
 	if (vcpu == NULL || machine == NULL || bsp_state == NULL ||
-	    vcpu->threads == NULL)
+	    vcpu->threads == NULL || vcpu->count == 0)
 		return (EINVAL);
+	created = kmalloc(sizeof(*created) * vcpu->count, M_VMMFS,
+	    M_WAITOK | M_ZERO);
 	for (index = 0; index < vcpu->count; ++index) {
 		thread = &vcpu->threads[index];
-		if (thread->vcpu != NULL)
-			return (EBUSY);
+		if (thread->vcpu != NULL) {
+			error = EBUSY;
+			goto failed;
+		}
 		bzero(&thread->state, sizeof(thread->state));
 		if (index == 0)
 			thread->state = *bsp_state;
-		error = vmm_vcpu_create(machine, &thread->state, &created_vcpu);
+		error = vmm_vcpu_create(machine, &thread->state, &created[index]);
 		if (error != 0)
 			goto failed;
-		/* Stop may release the AP barrier; keep its new CPU private. */
-		error = vmm_vcpu_set_memory_exit_mode(created_vcpu,
+		error = vmm_vcpu_set_memory_exit_mode(created[index],
 		    VMM_MEMORY_EXIT_EMULATE);
-		if (error == 0) {
-			lwkt_gettoken(&vcpu->token);
-			if (vcpu->stop_requested)
-				error = EINTR;
-			else
-				thread->vcpu = created_vcpu;
-			lwkt_reltoken(&vcpu->token);
-		}
-		if (error != 0) {
-			destroy_error = vmm_vcpu_destroy(created_vcpu);
-			if (destroy_error != 0)
-				panic("vmmfs: private reset vCPU destroy: %d",
-				    destroy_error);
+		if (error != 0)
 			goto failed;
-		}
 	}
 	lwkt_gettoken(&vcpu->token);
 	if (vcpu->stop_requested) {
@@ -406,18 +396,30 @@ vmmfs_vcpu_reset(struct vmmfs_vcpu *vcpu, vmm_machine_t machine,
 		error = EINTR;
 		goto failed;
 	}
+	/*
+	 * A published vCPU releases its AP from the previous reset barrier,
+	 * even if another reset arrives before that AP next runs.
+	 */
+	for (index = 0; index < vcpu->count; ++index)
+		vcpu->threads[index].vcpu = created[index];
 	vcpu->runtime_machine = machine;
 	vcpu->reset_requested = false;
 	vcpu->reset_waiting = 0;
 	lwkt_reltoken(&vcpu->token);
+	kfree(created, M_VMMFS);
 	wakeup(vcpu);
 	return (0);
 
 failed:
 	for (index = 0; index < vcpu->count; ++index) {
-		thread = &vcpu->threads[index];
-		vmmfs_vcpu_thread_destroy(thread);
+		if (created[index] == NULL)
+			continue;
+		destroy_error = vmm_vcpu_destroy(created[index]);
+		if (destroy_error != 0)
+			panic("vmmfs: private reset vCPU destroy: %d",
+			    destroy_error);
 	}
+	kfree(created, M_VMMFS);
 	return (error);
 }
 
@@ -629,7 +631,7 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 		for (;;) {
 			tsleep_interlock(vcpu, 0);
 			lwkt_gettoken(&vcpu->token);
-			if (!vcpu->reset_requested || vcpu->stop_requested) {
+			if (thread->vcpu != NULL || vcpu->stop_requested) {
 				crit_enter();
 				tsleep_remove(curthread);
 				crit_exit();

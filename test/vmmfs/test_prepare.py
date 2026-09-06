@@ -1,12 +1,115 @@
 #!/usr/bin/env python3
-"""Exercise private PREPARE against concurrent machine deactivation."""
+"""Exercise private runtime construction and worker handoffs."""
 import unittest
 from test_regress import COMMON, function, run_c
 
 class PrepareLifetime(unittest.TestCase):
 
+    def test_ap_finishes_previous_barrier_before_a_second_reset(self):
+        run_c(COMMON + r"""
+struct token { unsigned held; };
+struct vmmfs_vcpu;
+struct vmmfs_vcpu_thread {
+    struct vmmfs_vcpu *group;
+    unsigned index;
+    void *vcpu;
+};
+struct vmmfs_vcpu {
+    struct token token;
+    struct vmmfs_vcpu_thread *threads;
+    unsigned count, reset_waiting;
+    bool reset_requested, stop_requested;
+};
+static struct vmmfs_vcpu group;
+static struct vmmfs_vcpu_thread threads[4];
+static unsigned announced, finished;
+static int identities[4];
+static bool rebuilding;
+static void *curthread;
+#define PINTERLOCKED 0
+#define VMMFS_MACHINE_EVENT_RESET_FAILED 0
+#define VMMFS_MACHINE_EVENT_RESET_COMPLETED 1
+struct vmmfs_machine { int events; };
+static struct vmmfs_machine machine;
+static void vmmfs_vcpu_request_reset(struct vmmfs_vcpu *);
+static void lwkt_gettoken(struct token *t) { ++t->held; }
+static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *thread) {
+    assert(thread->vcpu != NULL);
+    thread->vcpu = NULL;
+}
+static void vmmfs_vcpu_thread_kick(struct vmmfs_vcpu_thread *thread) {
+    assert(thread->vcpu != NULL);
+}
+static void wakeup(void *channel) {
+    assert(channel == &group);
+    if (rebuilding) return;
+    ++announced;
+    /* Other APs already reached this barrier; BSP commits the new set. */
+    rebuilding = true;
+    group.reset_waiting = 0;
+    group.reset_requested = false;
+    for (unsigned index = 0; index < group.count; ++index)
+        threads[index].vcpu = &identities[index];
+    /* A new request arrives before this AP reevaluates its old wait. */
+    vmmfs_vcpu_request_reset(&group);
+    /* Earlier APs may already have joined the next barrier. */
+    for (unsigned index = 1; index < announced; ++index)
+        threads[index].vcpu = NULL;
+    group.reset_waiting = announced - 1;
+    rebuilding = false;
+}
+static void tsleep_interlock(void *p, int flags) { (void)flags; assert(p == &group); }
+static void crit_enter(void) {}
+static void crit_exit(void) {}
+static void tsleep_remove(void *p) { (void)p; ++finished; }
+static int tsleep(void *p, int flags, const char *name, int time) {
+    (void)p; (void)flags; (void)name; (void)time;
+    assert(!"AP slept across an already committed reset");
+    return 0;
+}
+static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *p) {
+    return p->stop_requested;
+}
+static struct vmmfs_machine *vmmfs_vcpu_machine(struct vmmfs_vcpu *p) {
+    (void)p; return &machine;
+}
+static int vmmfs_machine_vcpu_reset(struct vmmfs_machine *p) {
+    (void)p; assert(!"test must use the AP path"); return 0;
+}
+static void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *p) { p->stop_requested = true; }
+static void vmmfs_events_log(int *events, int verb, const char *format, ...) {
+    (void)events; (void)verb; (void)format;
+}
+void
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_request_reset") + r"""
+static void
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_thread_reset") + r"""
+int main(void) {
+    group.threads = threads; group.count = 4;
+    for (unsigned index = 0; index < 4; ++index) {
+        threads[index].group = &group; threads[index].index = index;
+        threads[index].vcpu = &identities[index];
+    }
+    /* Every AP must leave its old barrier even after another AP joins anew. */
+    for (unsigned index = 1; index < 4; ++index) {
+        group.reset_requested = true;
+        vmmfs_vcpu_thread_reset(&threads[index]);
+        assert(threads[index].vcpu == &identities[index]);
+        assert(group.reset_requested && !group.stop_requested);
+        assert(group.reset_waiting == index - 1);
+    }
+    assert(announced == 3 && finished == 3 && group.token.held == 0);
+    return 0;
+}
+""")
+
     def test_reset_stop_cannot_destroy_a_candidate_under_configuration(self):
         run_c(COMMON + r"""
+#include <stdlib.h>
+#define M_VMMFS 0
+#define M_WAITOK 0
+#define M_ZERO 0
 #define bzero(p, n) memset(p, 0, n)
 #define VMM_MEMORY_EXIT_EMULATE 1
 struct token { unsigned held; };
@@ -32,6 +135,15 @@ static struct vmmfs_vcpu_thread threads[4];
 static struct instance instances[4];
 static unsigned mode, target, created, destroyed, configured;
 static bool injected;
+static unsigned allocations;
+static void *kmalloc(size_t size, int type, int flags) {
+    (void)type; (void)flags; ++allocations;
+    return calloc(1, size);
+}
+static void kfree(void *pointer, int type) {
+    (void)type; assert(pointer != NULL && allocations == 1);
+    --allocations; free(pointer);
+}
 static void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *);
 static void stop_and_run_aps(void);
 static void lwkt_gettoken(struct token *token) { ++token->held; }
@@ -82,6 +194,8 @@ static int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
 }
 static int vmm_vcpu_set_memory_exit_mode(vmm_vcpu_t cpu, unsigned value) {
     assert(value == VMM_MEMORY_EXIT_EMULATE);
+    for (unsigned index = 0; index < group.count; ++index)
+        assert(threads[index].vcpu == NULL);
     if (mode == 4 && cpu->index == target) stop_and_run_aps();
     /* If reset published too soon, the AP has already freed this CPU. */
     assert(cpu->live);
@@ -114,12 +228,18 @@ int main(void) {
                 assert(group.runtime_machine == &group);
                 for (unsigned index = 0; index < 4; ++index)
                     vmmfs_vcpu_thread_destroy(&threads[index]);
+            } else if (mode == 5) {
+                /* Publication already committed; stop is worker-owned. */
+                assert(error == 0 && group.stop_requested);
+                assert(created == 4 && configured == 4);
+                assert(group.runtime_machine == &group);
+                vmmfs_vcpu_thread_destroy(&threads[0]);
             } else {
                 assert(error == (mode == 1 ? ENOMEM : mode == 2 ? EIO : EINTR));
                 for (unsigned index = 0; index < 4; ++index)
                     assert(threads[index].vcpu == NULL);
             }
-            assert(created == destroyed);
+            assert(created == destroyed && allocations == 0);
             for (unsigned index = 0; index < 4; ++index)
                 assert(!instances[index].live);
         }
