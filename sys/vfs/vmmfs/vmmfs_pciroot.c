@@ -205,28 +205,19 @@ vmmfs_pciroot_deactivate(struct vmmfs_node *node)
 	int error;
 
 	for (;;) {
-		lwkt_gettoken(&node->token);
 		entry = RB_ROOT(&root->registry->slots);
-		vnode = entry == NULL ? NULL : entry->vnode;
-		if (vnode != NULL)
-			vref(vnode);
-		lwkt_reltoken(&node->token);
-		if (vnode == NULL)
+		if (entry == NULL)
 			return (0);
-		error = vmmfs_vnode_deactivate(vnode);
-		if (error != 0) {
-			/* Another remover may already have released the entry. */
-			vrele(vnode);
-			return (error);
-		}
-		/* Only the successful deactivate caller may detach this entry. */
-		lwkt_gettoken(&node->token);
+		vnode = entry->vnode;
+		/* Detach before cleanup can sleep; retain the registry vnode ref. */
 		RB_REMOVE(vmmfs_pcislot_tree, &root->registry->slots, entry);
 		vmmfs_pciroot_release_entry(root, entry);
-		lwkt_reltoken(&node->token);
-		vrele(vnode); /* Registry reference. */
-		vrele(vnode); /* Lookup reference. */
 		kfree(entry, M_VMMFS);
+		error = vmmfs_vnode_deactivate(vnode);
+		/* EBUSY here means another caller has already closed the gate. */
+		if (error != 0 && error != EBUSY)
+			kprintf("vmmfs: PCI slot close: %d\n", error);
+		vrele(vnode);
 	}
 }
 
@@ -654,7 +645,7 @@ vmmfs_pciroot_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 		return (ENOENT);
 	machine = vmmfs_pciroot_machine(pciroot);
 	lwkt_gettoken(&machine->node.token);
-	vnode = machine->vnode;
+	vnode = machine->self_vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&machine->node.token);

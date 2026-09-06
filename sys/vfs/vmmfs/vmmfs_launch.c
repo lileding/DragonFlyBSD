@@ -280,9 +280,11 @@ vmmfs_launch_deactivate(struct vmmfs_node *node)
 	int error;
 
 	error = vmmfs_machine_abort(launch);
-	if (error == 0)
-		vmmfs_launch_revoke(launch);
-	return (error);
+	if (error != 0)
+		kprintf("vmmfs: launch close abort: %d\n", error);
+	/* Abort may have waited; cleanup errors must not reopen this handle. */
+	vmmfs_launch_revoke(launch);
+	return (0);
 }
 
 void

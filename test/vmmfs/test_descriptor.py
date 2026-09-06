@@ -130,10 +130,13 @@ static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth) {
     if (auth==&old_auth) {
         ++revoked;
         if (mode==2) boot_attempt();
-        if (mode==3) slot.node.dead=true; /* Concurrent deactivate will veto updating. */
+        if (mode==3) slot.node.dead=true; /* Concurrent close drains this update. */
     }
 }
-void wakeup(void *p) { assert(p==&machine && machine.runtime_references==(mode==8)); }
+void wakeup(void *p) {
+    assert((p==&machine || p==&slot.descriptor) && !slot.descriptor.updating);
+    assert(machine.runtime_references==(mode==8));
+}
 static void vmmfs_pcislot_events_reset(int *events) {
     assert(events==&slot.events); ++notifications;
     assert(slot.descriptor.updating && machine.runtime_references==1+(mode==8));

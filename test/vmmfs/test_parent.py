@@ -21,8 +21,7 @@ static unsigned mode, release_count;
 #define RB_ROOT(p) (*(p))
 #define RB_REMOVE(type, p, entry) do { assert(*(p) == (entry)); *(p) = NULL; } while (0)
 #define RB_INSERT(type, p, entry) do { assert(*(p) == NULL); *(p) = (entry); } while (0)
-static void lwkt_gettoken(struct token *t) { ++t->held; }
-static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+#define kprintf printf
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
 static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
 static void kfree(void *p, int tag) { (void)tag; assert(p); free(p); }
@@ -30,36 +29,24 @@ static void RELEASE(struct ROOT_TYPE *r, struct ENTRY *e) {
     assert(r->node.token.held); assert(e->vnode == &vnode); ++release_count;
 }
 static int vmmfs_vnode_deactivate(struct vnode *v) {
-    struct ENTRY *entry = registry.MEMBER;
-    assert(v == &vnode && v->refs == 2);
-    assert(entry != NULL); /* Veto cannot resurrect an entry already removed. */
-    if (mode == 2) {
-        registry.MEMBER = NULL;
-        vrele(entry->vnode); free(entry);
-        return EBUSY;
-    }
+    assert(root.node.token.held == 1);
+    assert(v == &vnode && v->refs == 1 && registry.MEMBER == NULL);
+    /* A previously admitted remover may already be closing this child. */
     return mode == 1 ? EBUSY : 0;
 }
 static int
 FUNCTION
 int main(void) {
     root.registry = &registry;
-    for (mode = 0; mode != 3; ++mode) {
+    root.node.token.held = 1;
+    for (mode = 0; mode != 2; ++mode) {
         registry.MEMBER = malloc(sizeof(*registry.MEMBER));
         registry.MEMBER->vnode = &vnode;
         vnode.refs = 1; release_count = 0;
         int error = DEACTIVATE(&root.node);
-        assert(root.node.token.held == 0);
-        if (mode == 1) {
-            assert(error == EBUSY && registry.MEMBER != NULL);
-            assert(vnode.refs == 1 && release_count == 0);
-            free(registry.MEMBER); registry.MEMBER = NULL;
-            vrele(&vnode);
-        } else {
-            assert(error == (mode == 2 ? EBUSY : 0));
-            assert(registry.MEMBER == NULL && vnode.refs == 0);
-            assert(release_count == (mode == 0 ? 1 : 0));
-        }
+        assert(root.node.token.held == 1);
+        assert(error == 0 && registry.MEMBER == NULL && vnode.refs == 0);
+        assert(release_count == 1);
     }
     return 0;
 }
@@ -72,131 +59,89 @@ int main(void) {
             source = source.replace(token, value)
         run_c(source)
 
-    def test_pci_parent_preserves_registry_until_deactivation(self):
+    def test_pci_parent_detaches_before_blocking_cleanup(self):
         self.check_parent("pciroot", "slots", "vmmfs_pciroot_slot")
 
-    def test_serial_parent_preserves_registry_until_deactivation(self):
+    def test_serial_parent_detaches_before_blocking_cleanup(self):
         self.check_parent("serialroot", "ports", "vmmfs_serialroot_port")
 
 
 class MachineTeardown(unittest.TestCase):
-    def test_partial_veto_does_not_leave_stopped_alias(self):
-        source = COMMON + r"""
-#include <sys/types.h>
-#include <sys/mman.h>
-#include <unistd.h>
-struct token { unsigned held; bool live; };
-struct vmmfs_node { struct token token; bool dead; ino_t inode; };
-struct mount { void *mnt_data; };
-struct vnode { void *v_data; struct mount *v_mount; unsigned refs; };
-struct child { struct vmmfs_node node; };
-struct vmmfs_stopped { struct vmmfs_node node; };
-struct vmmfs_mount { ino_t root_inode; };
+    def test_machine_veto_is_final_for_all_children(self):
+        run_c(COMMON + r"""
+struct token { unsigned held, acquired; };
+struct vmmfs_node { struct token token; bool dead; };
+struct vnode { unsigned refs, index; };
 struct vmmfs_machine {
     struct vmmfs_node node;
     void *machine;
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
-    struct { struct vmmfs_node node; struct token token;
-        unsigned active_count; void *threads; } vcpu;
-    struct child id_node, memory, loader, boot, pciroot, serialroot, events;
-    /* Retain the old alias in the harness so the pre-fix body can be tested. */
-    struct vmmfs_stopped *stopped;
-    struct vnode *vnode, *launch_vnode, *id_vnode, *vcpu_vnode, *memory_vnode;
-    struct vnode *loader_vnode, *boot_vnode, *stopped_vnode, *pciroot_vnode;
-    struct vnode *serialroot_vnode, *events_vnode;
+    struct { struct token token; unsigned active_count; void *threads; } vcpu;
+    struct vnode *self_vnode, *id_vnode, *vcpu_vnode, *memory_vnode;
+    struct vnode *loader_vnode, *boot_vnode, *stopped_vnode;
+    struct vnode *pciroot_vnode, *serialroot_vnode, *events_vnode;
 };
-struct uio { off_t uio_offset; };
-struct vop_readdir_args {
-    struct vnode *a_vp; struct uio *a_uio; int *a_ncookies, *a_eofflag;
-    void **a_cookies;
-};
-#define NELEM(a) (sizeof(a)/sizeof((a)[0]))
-#define DT_DIR 4
-#define DT_REG 8
-#define DT_CHR 2
+#define NELEM(a) (sizeof(a) / sizeof((a)[0]))
 static struct vmmfs_machine machine;
-static struct vnode stopped_vnode, pci_vnode, vcpu_vnode;
-static void *stopped_page;
-static size_t page_size;
-static bool veto = true, saw_stopped;
-static unsigned stopped_drops, pci_drops, vcpu_drops;
-static void lwkt_gettoken(struct token *t) { assert(t->live); ++t->held; }
-static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+static struct vnode children[9], parent;
+static unsigned called, dropped, veto_index;
+static int child_error;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
 static int vmmfs_vnode_deactivate(struct vnode *v) {
-    assert(machine.node.token.held == 0 && machine.vcpu.token.held == 0);
-    assert(v == &stopped_vnode || v == &pci_vnode || v == &vcpu_vnode);
-    return v == &pci_vnode && veto ? EBUSY : 0;
+    assert(machine.node.dead);
+    assert(machine.node.token.acquired == 0);
+    assert(v != NULL && v->refs != 0);
+    assert(machine.node.token.held == 1);
+    assert(v->index == called++);
+    return v->index == veto_index ? child_error : 0;
 }
 static void vrele(struct vnode *v) {
-    assert(v->refs != 0 && !machine.node.token.held);
-    if (--v->refs != 0) return;
-    if (v == &vcpu_vnode) {
-        assert(machine.vcpu_vnode == NULL);
-        machine.vcpu.token.live = false;
-        ++vcpu_drops;
-    } else if (v == &stopped_vnode) {
-        assert(machine.stopped_vnode == NULL);
-        /* Model immediate reclaim: any later object dereference must fault. */
-        assert(mprotect(stopped_page, page_size, PROT_NONE) == 0);
-        ++stopped_drops;
-    } else {
-        assert(v == &pci_vnode && machine.pciroot_vnode == NULL);
-        ++pci_drops;
-    }
-    v->v_data = NULL;
-}
-static int vop_write_dirent(int *error, struct uio *uio, ino_t inode,
-    unsigned type, unsigned length, const char *name) {
-    (void)uio; (void)type; (void)length;
-    *error = 0;
-    if (!strcmp(name, "stopped")) {
-        assert(inode == 42); saw_stopped = true;
-    }
-    return 0;
+    assert(v != NULL && v->refs != 0);
+    assert(machine.node.token.held == 1);
+    if (--v->refs == 0)
+        ++dropped;
 }
 static int
-""" + function("vmmfs_machine.c", "vmmfs_machine_deactivate") + "\nstatic int\n" + function(
-            "vmmfs_machine.c", "vmmfs_machine_readdir") + r"""
+""" + function("vmmfs_machine.c", "vmmfs_machine_deactivate") + r"""
 int main(void) {
-    struct vmmfs_mount state = { .root_inode=1 };
-    struct mount mount = { &state };
-    struct vnode parent = { .v_data=&machine, .v_mount=&mount, .refs=1 };
-    struct uio uio = { .uio_offset=8 };
-    struct vop_readdir_args ap = { .a_vp=&parent, .a_uio=&uio };
-    machine.node.token.live = machine.vcpu.token.live = true;
-    vcpu_vnode.refs = 1;
-    vcpu_vnode.v_data = &machine.vcpu;
-    machine.vcpu_vnode = &vcpu_vnode;
-    page_size = (size_t)sysconf(_SC_PAGESIZE);
-    stopped_page = mmap(NULL, page_size, PROT_READ|PROT_WRITE,
-        MAP_PRIVATE|MAP_ANON, -1, 0);
-    assert(stopped_page != MAP_FAILED);
-    machine.stopped = stopped_page;
-    machine.stopped->node.inode = 42;
-    stopped_vnode.v_data = stopped_page; stopped_vnode.refs = 1;
-    pci_vnode.refs = 1;
-    machine.stopped_vnode = &stopped_vnode;
-    machine.pciroot_vnode = &pci_vnode; machine.vnode = &parent;
-    assert(vmmfs_machine_readdir(&ap) == 0 && saw_stopped);
-    machine.node.dead = true; /* Generic deactivate closes admission first. */
-    assert(vmmfs_machine_deactivate(&machine.node) == EBUSY);
-    assert(stopped_drops == 1 && pci_drops == 0 && machine.vnode == &parent);
-    assert(machine.stopped_vnode == NULL && machine.pciroot_vnode == &pci_vnode);
-    assert(vcpu_drops == 1 && !machine.vcpu.token.live);
-    machine.node.dead = false; /* Generic wrapper restores the gate on veto. */
-    saw_stopped = false; uio.uio_offset = 8;
-    assert(vmmfs_machine_readdir(&ap) == 0 && !saw_stopped);
-    veto = false; machine.node.dead = true;
-    assert(vmmfs_machine_deactivate(&machine.node) == 0);
-    assert(stopped_drops == 1 && pci_drops == 1 && machine.vnode == NULL);
-    assert(!machine.node.token.held && !machine.vcpu.token.held);
-    assert(munmap(stopped_page, page_size) == 0);
+    struct vnode **fields[] = {
+        &machine.id_vnode, &machine.vcpu_vnode, &machine.memory_vnode,
+        &machine.loader_vnode, &machine.boot_vnode, &machine.stopped_vnode,
+        &machine.pciroot_vnode, &machine.serialroot_vnode, &machine.events_vnode
+    };
+    const int errors[] = { 0, EBUSY };
+    unsigned trial, index;
+    for (trial = 0; trial < NELEM(errors); ++trial) {
+        for (veto_index = 0; veto_index < NELEM(children); ++veto_index) {
+            memset(&machine, 0, sizeof(machine));
+            machine.node.token.held = 1;
+            machine.node.dead = true; /* Set by the generic caller. */
+            machine.self_vnode = &parent;
+            called = dropped = 0;
+            child_error = errors[trial];
+            for (index = 0; index < NELEM(children); ++index) {
+                children[index].index = index;
+                children[index].refs = 1;
+                *fields[index] = &children[index];
+            }
+            machine.machine = &machine;
+            assert(vmmfs_machine_deactivate(&machine.node) == EBUSY);
+            assert(called == 0 && dropped == 0 && machine.self_vnode == &parent);
+            assert(machine.node.token.held == 1);
+            assert(machine.node.dead && machine.node.token.acquired == 0);
+            machine.machine = NULL;
+            assert(vmmfs_machine_deactivate(&machine.node) == 0);
+            assert(machine.node.dead && machine.node.token.acquired == 0);
+            assert(called == 9 && dropped == 9 && machine.self_vnode == NULL);
+            for (index = 0; index < NELEM(children); ++index)
+                assert(children[index].refs == 0);
+            assert(machine.node.token.held == 1);
+        }
+    }
     return 0;
 }
-"""
-        run_c(source)
+""")
 
     def test_stop_admission_rejects_retired_siblings(self):
         run_c(COMMON + r"""

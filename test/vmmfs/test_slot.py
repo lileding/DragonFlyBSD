@@ -44,6 +44,11 @@ static struct vmmfs_pcislot_resources resources;
 static unsigned revoked, notifications, auth_revoked;
 static void lwkt_gettoken(struct token *t) { assert(!t->held); ++t->held; }
 static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+#define kprintf printf
+int tsleep(void *p, int flags, const char *name, int timeout) {
+    (void)p; (void)flags; (void)name; (void)timeout;
+    assert(0); return 0;
+}
 #define vmmfs_pcislot_pciroot(s) (s)
 #define vmmfs_pcislot_descriptor_slot(d) ((struct vmmfs_pcislot *)(d)->node.parent)
 #define bzero(p,n) memset((p),0,(n))
@@ -63,7 +68,7 @@ static void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *r
     r->dead = true; assert(r->references == 2); --r->references; ++revoked;
 }
 static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth) {
-    assert(!slot.node.token.held && !slot.descriptor.node.token.held);
+    assert(!slot.node.token.held && slot.descriptor.node.token.held == 1);
     if (auth != NULL) { assert(auth->references == 1); --auth->references; ++auth_revoked; }
 }
 void
@@ -74,10 +79,7 @@ int main(void) {
     struct vmmfs_pcislot_auth auth = { 1 };
     slot.descriptor.node.parent = &slot;
     slot.descriptor.auth = &auth; slot.descriptor.committed = true;
-    slot.descriptor.updating = true;
-    assert(vmmfs_pcislot_descriptor_deactivate(&slot.descriptor.node) == EBUSY);
-    assert(auth.references == 1 && slot.descriptor.auth == &auth);
-    slot.descriptor.updating = false;
+    slot.descriptor.node.token.held = 1;
     /* Descriptor owns auth, not its sibling powered collection. */
     slot.resources = &resources; resources.references = 2;
     assert(vmmfs_pcislot_descriptor_deactivate(&slot.descriptor.node) == 0);

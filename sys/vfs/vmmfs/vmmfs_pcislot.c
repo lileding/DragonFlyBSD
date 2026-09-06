@@ -164,55 +164,39 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot *slot = (struct vmmfs_pcislot *)node;
 	struct vmmfs_machine *machine;
-	struct vnode **children[] = {
-		&slot->descriptor_vnode, &slot->config_vnode, &slot->events_vnode
-	};
-	struct vnode *vnode;
-	size_t index;
 	int error;
-	bool registered;
 	struct vmmfs_node *parent = node->parent;
 
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
-	lwkt_gettoken(&node->token);
-	lwkt_gettoken(&parent->token);
-	lwkt_gettoken(&machine->node.token);
-	registered = slot->entry != NULL;
-	error = registered && ((machine->node.dead && !parent->dead) ||
-	    machine->machine != NULL) ? EBUSY : 0;
-	/* The parent returns this reservation after removing the registry entry. */
-	if (registered && error == 0) {
-		slot->topology_reference = true;
-		++machine->runtime_references;
-	}
-	lwkt_reltoken(&machine->node.token);
-	lwkt_reltoken(&parent->token);
-	lwkt_reltoken(&node->token);
-	if (error != 0)
-		return (error);
-	vmmfs_pcislot_power_off(slot);
-	for (index = 0; index < NELEM(children); ++index) {
-		lwkt_gettoken(&node->token);
-		vnode = *children[index];
-		lwkt_reltoken(&node->token);
-		if (vnode == NULL)
-			continue;
-		error = vmmfs_vnode_deactivate(vnode);
-		if (error != 0) {
-			if (registered) {
-				lwkt_gettoken(&machine->node.token);
-				KKASSERT(machine->runtime_references != 0);
-				slot->topology_reference = false;
-				--machine->runtime_references;
-				lwkt_reltoken(&machine->node.token);
-			}
-			return (error);
+	/* Veto must not sleep and expose a provisional dead gate. */
+	if (!lwkt_trytoken(&parent->token))
+		return (EBUSY);
+	if (slot->entry != NULL && !parent->dead) {
+		if (!lwkt_trytoken(&machine->node.token)) {
+			lwkt_reltoken(&parent->token);
+			return (EBUSY);
 		}
-		lwkt_gettoken(&node->token);
-		*children[index] = NULL;
-		lwkt_reltoken(&node->token);
-		vrele(vnode);
+		error = machine->node.dead || machine->machine != NULL ? EBUSY : 0;
+		if (error == 0) {
+			/* The parent releases this when it detaches the slot. */
+			slot->topology_reference = true;
+			++machine->runtime_references;
+		}
+		lwkt_reltoken(&machine->node.token);
+		lwkt_reltoken(&parent->token);
+		if (error != 0)
+			return (error);
+	} else {
+		lwkt_reltoken(&parent->token);
 	}
+	/* Detached candidates and children of a closing root cannot veto. */
+	vmmfs_pcislot_power_off(slot);
+	(void)vmmfs_vnode_deactivate(slot->descriptor_vnode);
+	vrele(slot->descriptor_vnode);
+	(void)vmmfs_vnode_deactivate(slot->config_vnode);
+	vrele(slot->config_vnode);
+	(void)vmmfs_vnode_deactivate(slot->events_vnode);
+	vrele(slot->events_vnode);
 	return (0);
 }
 

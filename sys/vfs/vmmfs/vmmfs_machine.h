@@ -35,7 +35,7 @@ struct vmmfs_launch;
 struct vmmfs_machine {
 	struct vmmfs_node node;
 	/* Borrowed from the root registry while this directory is published. */
-	struct vnode *vnode;
+	struct vnode *self_vnode;
 	char name[NAME_MAX + 1];
 	uint32_t id;
 	struct vmmfs_machine_id id_node;

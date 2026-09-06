@@ -57,9 +57,14 @@ vmmfs_vcpu_deactivate(struct vmmfs_node *node)
 	int error;
 
 	lwkt_gettoken(&vcpu->token);
-	error = vcpu->active_count != 0 || vcpu->threads != NULL ? EBUSY : 0;
+	/* Runtime is gone; the BSP may still be finishing its last callbacks. */
+	while (vcpu->active_count != 0 || vcpu->threads != NULL) {
+		error = tsleep(vcpu, 0, "vmmvcpudrain", 0);
+		if (error != 0)
+			kprintf("vmmfs: vCPU close drain: %d\n", error);
+	}
 	lwkt_reltoken(&vcpu->token);
-	return (error);
+	return (0);
 }
 
 struct vop_ops vmmfs_vcpu_vops = {
@@ -609,6 +614,7 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	vcpu->start_failed = false;
 	vcpu->stop_requested = false;
 	vcpu->reset_requested = false;
+	wakeup(vcpu);
 	lwkt_reltoken(&vcpu->token);
 	kfree(threads, M_VMMFS);
 	exit1(0);

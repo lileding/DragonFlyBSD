@@ -31,7 +31,7 @@ struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
     struct vmmfs_node node;
-    char name[256]; struct vnode *vnode;
+    char name[256]; struct vnode *self_vnode;
     struct child id_node, vcpu, memory, loader, boot, pciroot, serialroot, events;
     struct child *stopped; struct component rtc, platform;
     struct vnode *id_vnode, *vcpu_vnode, *memory_vnode, *loader_vnode;

@@ -46,6 +46,10 @@ struct vmmfs_node {
 	mode_t mode;
 	off_t size;
 	bool dead;
+	/*
+	 * Called with token held and dead set. Veto must not block or change
+	 * resources. Once cleanup can block, it must complete without veto.
+	 */
 	int (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
 	size_t load_limit;
@@ -83,7 +87,11 @@ int vmmfs_vnode_create_regular(struct mount *, struct vop_ops **,
 int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
 	struct cdev *, struct vmmfs_node *, struct vnode **);
 
-/* Stops one namespace object and revokes its open file descriptors. */
+/*
+ * Closes admission and revokes file descriptors; does not consume the
+ * caller's vnode reference. A NULL callback accepts closure. A veto restores
+ * admission under the same token; an already closed gate returns EBUSY.
+ */
 int vmmfs_vnode_deactivate(struct vnode *);
 
 /* Drops a vnode that was never attached to the namespace. */

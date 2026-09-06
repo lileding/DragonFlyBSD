@@ -262,12 +262,12 @@ struct vmmfs_machine {
         bool stop_requested, reset_requested;
     } vcpu;
     void *machine;
-    struct vnode *stopped_vnode, *vcpu_vnode;
+    struct vnode *stopped_vnode, *vcpu_vnode, *self_vnode;
     bool runtime_releasing, runtime_released;
 };
 static struct vmmfs_machine machine;
 static struct vmmfs_stopped candidate;
-static struct vnode candidate_vnode, existing_vnode, cpu_vnode;
+static struct vnode candidate_vnode, existing_vnode, cpu_vnode, self_vnode;
 static unsigned mode, invalidated, allocated;
 static int replacement;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
@@ -279,7 +279,8 @@ static void vrele(struct vnode *v) {
 static void lwkt_gettoken(struct token *token) {
     assert(!token->held);
     if (token == &machine.node.token)
-        assert(machine.vcpu.token.held || allocated == 0);
+        assert(machine.vcpu.token.held || allocated == 0 ||
+            (machine.machine == NULL && machine.stopped_vnode != NULL));
     else {
         assert(token == &machine.vcpu.token);
         assert(token->live);
@@ -323,17 +324,30 @@ static void vmmfs_vnode_discard(struct vnode *vnode) {
 static void vmmfs_node_put(struct vmmfs_node *node) {
     assert(node == &candidate.node && allocated == 1); --allocated;
 }
-static void vmmfs_machine_invalidate_children(struct vmmfs_machine *m) {
-    assert(m == &machine && m->machine == NULL);
-    assert(m->stopped_vnode != NULL);
-    assert(!m->node.token.held && !m->vcpu.token.held);
+#define CINV_CHILDREN 1
+static void vhold(struct vnode *vnode) {
+    assert(vnode == &self_vnode && machine.node.token.held);
+    assert(vnode->refs == 0);
+    ++vnode->refs;
+}
+static void cache_inval_vp(struct vnode *vnode, int flags) {
+    assert(vnode == &self_vnode && vnode->refs == 1);
+    assert(flags == CINV_CHILDREN && machine.machine == NULL);
+    assert(machine.stopped_vnode != NULL);
+    assert(!machine.node.token.held && !machine.vcpu.token.held);
     ++invalidated;
+}
+static void vdrop(struct vnode *vnode) {
+    assert(vnode == &self_vnode && vnode->refs == 1);
+    assert(!machine.node.token.held);
+    --vnode->refs;
 }
 static int
 """ + function("vmmfs_machine.c", "vmmfs_machine_create_stopped") + r"""
 int main(void) {
     for (mode = 0; mode < 14; ++mode) {
         memset(&machine, 0, sizeof(machine));
+        machine.self_vnode = &self_vnode;
         invalidated = 0;
         assert(allocated == 0);
         machine.vcpu.token.live = mode != 13;
@@ -348,6 +362,7 @@ int main(void) {
         if (mode == 9) machine.stopped_vnode = &existing_vnode;
         int error = vmmfs_machine_create_stopped(&machine);
         assert(!machine.node.token.held && !machine.vcpu.token.held);
+        assert(self_vnode.refs == 0);
         assert(machine.node.dead == (mode == 2 || mode == 7 || mode == 8 || mode == 12));
         assert(cpu_vnode.refs == (mode >= 11 ? 0 : 1));
         assert(machine.vcpu.token.live == (mode < 11));

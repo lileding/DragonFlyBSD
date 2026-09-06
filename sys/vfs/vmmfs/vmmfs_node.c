@@ -372,8 +372,6 @@ vmmfs_vnode_deactivate(struct vnode *vnode)
 	if (vnode == NULL)
 		return (0);
 	node = vnode->v_data;
-	if (node == NULL || node->deactivate == NULL)
-		return (ENOENT);
 	vref(vnode);
 	lwkt_gettoken(&node->token);
 	if (node->dead) {
@@ -383,16 +381,14 @@ vmmfs_vnode_deactivate(struct vnode *vnode)
 		return (EBUSY);
 	}
 	node->dead = true;
-	lwkt_reltoken(&node->token);
-	error = node->deactivate(node);
+	error = node->deactivate != NULL ? node->deactivate(node) : 0;
 	if (error != 0) {
-		lwkt_gettoken(&node->token);
 		node->dead = false;
-		lwkt_reltoken(&node->token);
 	} else {
 		(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
 		cache_inval_vp(vnode, CINV_CHILDREN);
 	}
+	lwkt_reltoken(&node->token);
 	vrele(vnode);
 	return (error);
 }

@@ -1499,13 +1499,14 @@ static int calls, revoked, veto;
 #define vrele(p) (--(p)->refs)
 #define DTYPE_VNODE 1
 #define CINV_CHILDREN 1
-#define fdrevoke(v, t, c) ((void)(v), (void)(t), (void)(c), ++revoked, 0)
-#define cache_inval_vp(v, f) ((void)(v), (void)(f))
+#define fdrevoke(v, t, c) (assert((v)->v_data->token.held == 1), (void)(t), (void)(c), ++revoked, 0)
+#define cache_inval_vp(v, f) (assert((v)->v_data->token.held == 1), (void)(f))
 int vmmfs_vnode_deactivate(struct vnode *);
 static int deactivate(struct vmmfs_node *node) {
-    assert(node->dead && node->token.held == 0);
+    assert(node->dead && node->token.held == 1);
     ++calls;
     assert(vmmfs_vnode_deactivate(current) == EBUSY);
+    assert(node->token.held == 1);
     return veto;
 }
 int
@@ -1522,6 +1523,14 @@ int main(void) {
     assert(node.dead && calls == 2 && revoked == 1 && vnode.refs == 1);
     assert(vmmfs_vnode_deactivate(&vnode) == EBUSY);
     assert(calls == 2 && revoked == 1);
+    assert(node.token.held == 0);
+    struct vmmfs_node passive = {{0}, false, NULL};
+    struct vnode passive_vnode = {&passive, 1};
+    assert(vmmfs_vnode_deactivate(&passive_vnode) == 0);
+    assert(passive.dead && passive.token.held == 0);
+    assert(calls == 2 && revoked == 2 && passive_vnode.refs == 1);
+    assert(vmmfs_vnode_deactivate(&passive_vnode) == EBUSY);
+    assert(revoked == 2 && passive_vnode.refs == 1);
     return 0;
 }
 """)

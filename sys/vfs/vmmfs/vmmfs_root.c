@@ -162,9 +162,7 @@ vmmfs_root_deactivate(struct vmmfs_node *node)
 	struct vmmfs_root *root = (struct vmmfs_root *)node;
 	int error;
 
-	lwkt_gettoken(&node->token);
 	error = RB_EMPTY(&root->machines) ? 0 : EBUSY;
-	lwkt_reltoken(&node->token);
 	return (error);
 }
 

@@ -96,19 +96,18 @@ vmmfs_pcislot_descriptor_deactivate(struct vmmfs_node *node)
 	    (struct vmmfs_pcislot_descriptor *)node;
 	struct vmmfs_pcislot *slot = vmmfs_pcislot_descriptor_slot(descriptor);
 	struct vmmfs_pcislot_auth *auth;
+	int error;
 
-	lwkt_gettoken(&node->token);
 	lwkt_gettoken(&slot->node.token);
-	if (descriptor->updating) {
-		lwkt_reltoken(&slot->node.token);
-		lwkt_reltoken(&node->token);
-		return (EBUSY);
+	while (descriptor->updating) {
+		error = tsleep(descriptor, 0, "vmmdescdrain", 0);
+		if (error != 0)
+			kprintf("vmmfs: descriptor close drain: %d\n", error);
 	}
 	auth = descriptor->auth;
 	descriptor->auth = NULL;
 	descriptor->committed = false;
 	lwkt_reltoken(&slot->node.token);
-	lwkt_reltoken(&node->token);
 	vmmfs_pcislot_auth_revoke(auth);
 	return (0);
 }
@@ -350,6 +349,7 @@ finished:
 		--machine->runtime_references;
 		lwkt_reltoken(&machine->node.token);
 		lwkt_reltoken(&slot->node.token);
+		wakeup(descriptor);
 		wakeup(machine);
 	}
 	if (value != NULL)

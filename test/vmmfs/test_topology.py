@@ -64,22 +64,31 @@ static struct vmmfs_pciroot root;
 static struct vmmfs_pcislot slot;
 static struct vnode vnode = { &slot }, child;
 static struct registry registry;
-static int veto;
+static unsigned closed;
+static struct token *contended;
 static bool registered;
 #define NELEM(a) (sizeof(a) / sizeof((a)[0]))
 #define ksnprintf snprintf
 #define M_VMMFS 0
 #define RB_REMOVE(type, head, entry) do { assert(*(head) == (entry)); *(head) = NULL; } while (0)
 static void lwkt_gettoken(struct token *t) { ++t->held; }
+static bool lwkt_trytoken(struct token *t) {
+    if (t == contended) return false;
+    ++t->held; return true;
+}
 static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
 static struct vmmfs_pciroot *vmmfs_pcislot_pciroot(struct vmmfs_pcislot *s) { (void)s; return &root; }
 static struct vmmfs_machine *vmmfs_pciroot_machine(struct vmmfs_pciroot *r) { (void)r; return &machine; }
 static void vrele(struct vnode *v) { (void)v; }
 static void kfree(void *p, int tag) { (void)tag; free(p); }
 static void vmmfs_pcislot_power_off(struct vmmfs_pcislot *s) {
-    (void)s; assert(machine.runtime_references == (registered ? 1U : 0U));
+    assert(s->node.dead && s->node.token.held == 1);
+    assert(machine.runtime_references == (registered && !root.node.dead ? 1U : 0U));
 }
-static int vmmfs_vnode_deactivate(struct vnode *v) { (void)v; return veto; }
+static int vmmfs_vnode_deactivate(struct vnode *v) {
+    assert(v == &child && slot.node.token.held == 1);
+    ++closed; return 0;
+}
 static int vmmfs_pciroot_parse_bdf(const char *n, size_t l, uint16_t *b) {
     (void)n; (void)l; *b = 8; return 0;
 }
@@ -91,6 +100,8 @@ static int
               function("vmmfs_pciroot.c", "vmmfs_pciroot_release_entry") + "\nstatic void\n" + function("vmmfs_pciroot.c", "vmmfs_pciroot_remove_item") + r"""
 int main(void) {
     slot.node.parent = &root.node; slot.bdf = 8;
+    slot.node.token.held = 1; slot.node.dead = true;
+    slot.descriptor_vnode = slot.config_vnode = slot.events_vnode = &child;
     root.registry = &registry;
     registered = true; slot.entry = &slot; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
@@ -98,13 +109,18 @@ int main(void) {
     machine.machine = NULL; machine.node.dead = true;
     assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
     assert(machine.runtime_references == 0);
-    root.node.dead = true; slot.descriptor_vnode = &child; veto = EBUSY;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
+    root.node.dead = true;
+    assert(vmmfs_pcislot_deactivate(&slot.node) == 0 && closed == 3);
     assert(machine.runtime_references == 0 && !slot.topology_reference);
     root.node.dead = false; machine.node.dead = false;
+    contended = &root.node.token;
     assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
-    assert(machine.runtime_references == 0);
-    veto = 0;
+    assert(machine.runtime_references == 0 && closed == 3);
+    contended = &machine.node.token;
+    assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
+    assert(machine.runtime_references == 0 && closed == 3);
+    assert(root.node.token.held == 0 && machine.node.token.held == 0);
+    contended = NULL;
     assert(vmmfs_pcislot_deactivate(&slot.node) == 0);
     assert(machine.runtime_references == 1);
     registry.slots = malloc(sizeof(*registry.slots));

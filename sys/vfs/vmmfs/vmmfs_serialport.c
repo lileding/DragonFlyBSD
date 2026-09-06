@@ -212,25 +212,28 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
     struct vmmfs_machine *machine =
         vmmfs_serialroot_machine((struct vmmfs_serialroot *)parent);
     int error;
-    bool registered;
 
-    lwkt_gettoken(&node->token);
-    lwkt_gettoken(&parent->token);
-    lwkt_gettoken(&machine->node.token);
-    registered = port->entry != NULL;
-    /* A rejected private candidate is not part of the running topology. */
-    error = registered && ((machine->node.dead && !parent->dead) ||
-        machine->machine != NULL) ? EBUSY : 0;
-    /* Keep boot excluded until the parent detaches this registered port. */
-    if (registered && error == 0) {
-        port->topology_reference = true;
-        ++machine->runtime_references;
+    /* Veto must not sleep and expose a provisional dead gate. */
+    if (!lwkt_trytoken(&parent->token))
+        return (EBUSY);
+    if (port->entry != NULL && !parent->dead) {
+        if (!lwkt_trytoken(&machine->node.token)) {
+            lwkt_reltoken(&parent->token);
+            return (EBUSY);
+        }
+        error = machine->node.dead || machine->machine != NULL ? EBUSY : 0;
+        if (error == 0) {
+            /* Keep boot excluded until the parent detaches the port. */
+            port->topology_reference = true;
+            ++machine->runtime_references;
+        }
+        lwkt_reltoken(&machine->node.token);
+        lwkt_reltoken(&parent->token);
+        if (error != 0)
+            return (error);
+    } else {
+        lwkt_reltoken(&parent->token);
     }
-    lwkt_reltoken(&machine->node.token);
-    lwkt_reltoken(&parent->token);
-    lwkt_reltoken(&node->token);
-    if (error != 0)
-        return (error);
     lwkt_gettoken(&port->token);
     port->destroying = true;
     lwkt_reltoken(&port->token);
