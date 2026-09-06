@@ -336,6 +336,11 @@ PIO excludes width 8. Read values and write values use only their low width
 bytes.
 
 The backend reads config requests in order and responds only to the FIFO head.
+Each read must provide room for exactly one complete request. If copying the
+request to the backend fails, the same still-pending request becomes readable
+again and read readiness is notified. A retry must read a complete record; a
+partial copy is not a valid request. This recovery must not revive a completed
+or cancelled request, change a replacement request, or reopen a closed responder.
 VMMFS rejects a malformed, stale, or out-of-order response. A matching response
 completes the guest instruction. Backend disappearance, a revoked generation,
 or a non-success response is represented as a device-absent completion: reads

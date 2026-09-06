@@ -59,6 +59,104 @@ COMMON = """
 
 
 class Regressions(unittest.TestCase):
+
+    def test_config_copy_failure_retries_only_the_same_live_request(self):
+        run_c(COMMON + r"""
+#include <sys/queue.h>
+typedef char *caddr_t;
+struct token { unsigned held; };
+struct vmmfs_pci_config_request { uint64_t generation, sequence, value; };
+struct vmmfs_pcislot_config_request {
+    TAILQ_ENTRY(vmmfs_pcislot_config_request) entry;
+    struct vmmfs_pci_config_request request;
+    bool delivered, completed;
+};
+TAILQ_HEAD(requests, vmmfs_pcislot_config_request);
+struct vmmfs_pcislot_config {
+    struct { struct token token; bool dead; } node;
+    struct token token;
+    struct { int ki_note; } kq;
+    bool closed;
+    void *responder;
+    struct requests requests;
+};
+struct vnode { void *v_data; };
+struct uio { size_t uio_resid; };
+struct vop_read_args {
+    struct vnode *a_vp; struct uio *a_uio; void *a_fp; int a_ioflag;
+};
+#define IO_NDELAY 1
+#define PINTERLOCKED 0
+static struct vmmfs_pcislot_config config;
+static struct vmmfs_pcislot_config_request request, next;
+static unsigned mode, copies, notifications;
+static int copy_error;
+static void lwkt_gettoken(struct token *t) { ++t->held; }
+static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+#define KNOTE(list, hint) ((void)(list), (void)(hint))
+static void tsleep_interlock(void *p, int flags) { (void)p; (void)flags; assert(0); }
+static int tsleep(void *p, int flags, const char *name, int timeout) {
+    (void)p; (void)flags; (void)name; (void)timeout; assert(0); return 0;
+}
+static void
+vmmfs_pcislot_config_wake_next(struct vmmfs_pcislot_config *c) {
+    assert(c == &config && !c->token.held && !c->node.token.held);
+    ++notifications;
+}
+static int uiomove(caddr_t data, size_t size, struct uio *uio) {
+    struct vmmfs_pci_config_request *record = (void *)data;
+    assert(!config.token.held && !config.node.token.held);
+    assert(size == sizeof(*record) && size == uio->uio_resid);
+    assert(record->generation == 11 && record->sequence == 22);
+    ++copies;
+    if (mode == 2 || mode == 3 || mode == 7) {
+        TAILQ_REMOVE(&config.requests, &request, entry);
+        memset(&request, 0xa5, sizeof(request));
+        if (mode != 7) {
+            next.request.generation = mode == 3 ? 12 : 11;
+            next.request.sequence = mode == 3 ? 22 : 23;
+            next.delivered = true;
+            TAILQ_INSERT_TAIL(&config.requests, &next, entry);
+        }
+    } else if (mode == 4) request.completed = true;
+    else if (mode == 5) config.node.dead = config.closed = true;
+    else if (mode == 6) config.responder = &next;
+    return copy_error;
+}
+static int
+""" + function("vmmfs_pcislot_config.c", "vmmfs_pcislot_config_read") + r"""
+int main(void) {
+    struct vnode vnode = { &config };
+    struct uio uio = { sizeof(struct vmmfs_pci_config_request) };
+    struct vop_read_args args = { &vnode, &uio, &config, IO_NDELAY };
+    for (mode = 0; mode < 8; ++mode) {
+        memset(&config, 0, sizeof(config));
+        memset(&request, 0, sizeof(request)); memset(&next, 0, sizeof(next));
+        TAILQ_INIT(&config.requests);
+        request.request.generation = 11; request.request.sequence = 22;
+        TAILQ_INSERT_TAIL(&config.requests, &request, entry);
+        config.responder = &config;
+        copies = notifications = 0;
+        copy_error = mode == 0 ? 0 : EFAULT;
+        assert(vmmfs_pcislot_config_read(&args) == copy_error);
+        assert(copies == 1 && !config.token.held && !config.node.token.held);
+        if (mode == 1) {
+            assert(!request.delivered && notifications == 1);
+            copy_error = 0;
+            assert(vmmfs_pcislot_config_read(&args) == 0);
+            assert(request.delivered && copies == 2);
+        } else {
+            assert(notifications == 0);
+            if (mode == 2 || mode == 3) assert(next.delivered);
+            else if (mode == 7) assert(TAILQ_EMPTY(&config.requests));
+            else assert(request.delivered);
+        }
+    }
+    return 0;
+}
+""")
+
+
     def test_parent_views_have_consumers(self):
         header = (SOURCE / "vmmfs_parent.h").read_text()
         source = "\n".join(path.read_text() for path in SOURCE.glob("*.c"))

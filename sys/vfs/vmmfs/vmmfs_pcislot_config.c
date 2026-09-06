@@ -423,6 +423,7 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
 	struct vmmfs_pcislot_config_request *request;
 	struct vmmfs_pci_config_request record;
+	bool retry;
 	int error;
 
 	if (config == NULL)
@@ -449,7 +450,25 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 			lwkt_reltoken(&config->token);
 			lwkt_reltoken(&config->node.token);
 			KNOTE(&config->kq.ki_note, 0);
-			return (uiomove((caddr_t)&record, sizeof(record), ap->a_uio));
+			error = uiomove((caddr_t)&record, sizeof(record), ap->a_uio);
+			if (error == 0)
+				return (0);
+			/* The worker may have removed this request while copyout slept. */
+			lwkt_gettoken(&config->node.token);
+			lwkt_gettoken(&config->token);
+			request = TAILQ_FIRST(&config->requests);
+			retry = !config->node.dead && !config->closed &&
+			    config->responder == ap->a_fp && request != NULL &&
+			    !request->completed &&
+			    request->request.generation == record.generation &&
+			    request->request.sequence == record.sequence;
+			if (retry)
+				request->delivered = false;
+			lwkt_reltoken(&config->token);
+			lwkt_reltoken(&config->node.token);
+			if (retry)
+				vmmfs_pcislot_config_wake_next(config);
+			return (error);
 		}
 		if ((ap->a_ioflag & IO_NDELAY) != 0) {
 			lwkt_reltoken(&config->token);
