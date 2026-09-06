@@ -4,6 +4,130 @@ import unittest
 from test_regress import COMMON, function, run_c
 
 class PrepareLifetime(unittest.TestCase):
+
+    def test_reset_stop_cannot_destroy_a_candidate_under_configuration(self):
+        run_c(COMMON + r"""
+#define bzero(p, n) memset(p, 0, n)
+#define VMM_MEMORY_EXIT_EMULATE 1
+struct token { unsigned held; };
+struct vmm_cpustate { unsigned marker; };
+struct instance { bool live; unsigned index; };
+typedef struct instance *vmm_vcpu_t;
+typedef void *vmm_machine_t;
+struct vmmfs_vcpu;
+struct vmmfs_vcpu_thread {
+    struct vmmfs_vcpu *group;
+    struct vmm_cpustate state;
+    vmm_vcpu_t vcpu;
+};
+struct vmmfs_vcpu {
+    struct token token;
+    struct vmmfs_vcpu_thread *threads;
+    unsigned count, reset_waiting;
+    bool reset_requested, stop_requested;
+    vmm_machine_t runtime_machine;
+};
+static struct vmmfs_vcpu group;
+static struct vmmfs_vcpu_thread threads[4];
+static struct instance instances[4];
+static unsigned mode, target, created, destroyed, configured;
+static bool injected;
+static void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *);
+static void stop_and_run_aps(void);
+static void lwkt_gettoken(struct token *token) { ++token->held; }
+static void lwkt_reltoken(struct token *token) {
+    assert(token->held); --token->held;
+    if (!token->held && mode == 5 && !injected &&
+        threads[target].vcpu != NULL)
+        stop_and_run_aps();
+}
+static void wakeup(void *channel) { assert(channel == &group); }
+static void vmmfs_vcpu_thread_kick(struct vmmfs_vcpu_thread *thread) {
+    assert(group.token.held && thread->vcpu != NULL && thread->vcpu->live);
+}
+static int vmm_vcpu_destroy(vmm_vcpu_t cpu) {
+    assert(cpu != NULL && cpu->live);
+    cpu->live = false; ++destroyed;
+    return 0;
+}
+static void vmmfs_vcpu_thread_destroy(struct vmmfs_vcpu_thread *thread) {
+    vmm_vcpu_t cpu = thread->vcpu;
+    thread->vcpu = NULL;
+    if (cpu != NULL) assert(vmm_vcpu_destroy(cpu) == 0);
+}
+static void stop_and_run_aps(void) {
+    assert(!group.token.held);
+    injected = true;
+    vmmfs_vcpu_request_stop(&group);
+    assert(group.stop_requested && !group.reset_requested);
+    /* AP reset waiters may now leave their barriers and stop. */
+    for (unsigned index = 1; index < group.count; ++index)
+        vmmfs_vcpu_thread_destroy(&threads[index]);
+}
+static int vmm_vcpu_create(vmm_machine_t machine, struct vmm_cpustate *state,
+                           vmm_vcpu_t *result) {
+    assert(machine == &group);
+    unsigned index;
+    for (index = 0; index < group.count; ++index)
+        if (state == &threads[index].state) break;
+    assert(index < group.count);
+    assert(state->marker == (index == 0 ? 42U : 0U));
+    if (mode == 1 && index == target) return ENOMEM;
+    assert(!instances[index].live);
+    instances[index].index = index;
+    instances[index].live = true;
+    *result = &instances[index]; ++created;
+    if (mode == 3 && index == target) stop_and_run_aps();
+    return 0;
+}
+static int vmm_vcpu_set_memory_exit_mode(vmm_vcpu_t cpu, unsigned value) {
+    assert(value == VMM_MEMORY_EXIT_EMULATE);
+    if (mode == 4 && cpu->index == target) stop_and_run_aps();
+    /* If reset published too soon, the AP has already freed this CPU. */
+    assert(cpu->live);
+    ++configured;
+    return mode == 2 && cpu->index == target ? EIO : 0;
+}
+void
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_request_stop") + r"""
+int
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_reset") + r"""
+int main(void) {
+    struct vmm_cpustate state = { 42 };
+    for (mode = 0; mode <= 5; ++mode) {
+        for (target = 0; target < 4; ++target) {
+            memset(&group, 0, sizeof(group));
+            memset(threads, 0, sizeof(threads));
+            memset(instances, 0, sizeof(instances));
+            group.count = 4; group.threads = threads;
+            group.reset_requested = true; group.reset_waiting = 3;
+            for (unsigned index = 0; index < 4; ++index) {
+                threads[index].group = &group;
+                threads[index].state.marker = 99;
+            }
+            created = destroyed = configured = 0; injected = false;
+            int error = vmmfs_vcpu_reset(&group, &group, &state);
+            assert(group.token.held == 0);
+            if (mode == 0) {
+                assert(error == 0 && created == 4 && configured == 4);
+                assert(!group.reset_requested && group.reset_waiting == 0);
+                assert(group.runtime_machine == &group);
+                for (unsigned index = 0; index < 4; ++index)
+                    vmmfs_vcpu_thread_destroy(&threads[index]);
+            } else {
+                assert(error == (mode == 1 ? ENOMEM : mode == 2 ? EIO : EINTR));
+                for (unsigned index = 0; index < 4; ++index)
+                    assert(threads[index].vcpu == NULL);
+            }
+            assert(created == destroyed);
+            for (unsigned index = 0; index < 4; ++index)
+                assert(!instances[index].live);
+        }
+    }
+    return 0;
+}
+""")
+
     def test_stopped_publication_token_order(self):
         run_c(COMMON + r"""
 struct token { bool held; };

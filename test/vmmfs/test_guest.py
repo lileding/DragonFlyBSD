@@ -16,6 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("root", type=Path)
 parser.add_argument("--cpus", type=int, default=1)
 parser.add_argument("--reset", action="store_true")
+parser.add_argument("--stop-during-reset", action="store_true")
 parser.add_argument("--boot", action="store_true")
 parser.add_argument("--network", action="store_true")
 parser.add_argument("--console", action="store_true")
@@ -28,6 +29,8 @@ parser.add_argument("--image", default="/var/tmp/vmmfs-refactor-alpine.img")
 args = parser.parse_args()
 if args.bme and not args.network:
     parser.error("--bme requires --network")
+if args.stop_during_reset and not args.reset:
+    parser.error("--stop-during-reset requires --reset")
 if args.trace_reset and not args.reset:
     parser.error("--trace-reset requires --reset")
 if args.io_reset and not args.reset:
@@ -291,7 +294,53 @@ try:
                 "printf '\\137IO_ACTIVE=%s\\n' $((after-before))",
                 rb"_IO_ACTIVE=[1-9][0-9]*\r?\n")
         print("PASS direct-read workload active before reset", flush=True)
-    if args.reset:
+    if args.stop_during_reset:
+        print("STAGE stop after reset starts", flush=True)
+        eventfd = os.open(machine / "events", os.O_RDONLY | os.O_NONBLOCK)
+        evidence = bytearray()
+        try:
+            while True:
+                try:
+                    evidence.extend(os.read(eventfd, 65536))
+                except BlockingIOError:
+                    break
+            boundary = len(evidence)
+            store(machine / "events", "reset")
+            deadline = time.monotonic() + 20
+            while b"machine reset started" not in evidence[boundary:]:
+                try:
+                    evidence.extend(os.read(eventfd, 65536))
+                except BlockingIOError:
+                    time.sleep(0.001)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("reset did not reach its rebuild path")
+            already_completed = b"machine reset completed" in evidence[boundary:]
+            fd = os.open(machine / "stopped", os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            print("STOP_SUBMITTED reset_completed_observed=%s" %
+                  already_completed, flush=True)
+            while b"machine stopped reason=vcpu" not in evidence[boundary:]:
+                try:
+                    evidence.extend(os.read(eventfd, 65536))
+                except BlockingIOError:
+                    time.sleep(0.001)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("reset/stop did not finish BSP teardown")
+            wait_stopped()
+            transitions = bytes(evidence[boundary:])
+            stopped_at = transitions.find(b"machine stop requested reason=external")
+            completed_at = transitions.find(b"machine reset completed")
+            if stopped_at < 0 or (completed_at >= 0 and completed_at < stopped_at):
+                raise RuntimeError("stop missed the reset interval; no concurrency coverage")
+            errors = re.findall(rb"machine reset failed error=([0-9]+)", transitions)
+            if any(int(error) != errno.EINTR for error in errors):
+                raise RuntimeError("reset failed for a reason other than the requested stop")
+            print("PASS stop after reset started; BSP teardown completed", flush=True)
+        finally:
+            (log_directory / "reset-stop.events").write_bytes(evidence)
+            print(evidence.decode(errors="replace"), end="", flush=True)
+            os.close(eventfd)
+    elif args.reset:
         print("STAGE request reset", flush=True)
         if args.trace_reset:
             subprocess.run(["ktrace", "-t", "cnis", "-f",
@@ -320,14 +369,15 @@ try:
         if args.console:
             check_console("reset")
         print("PASS warm reset, CPUs and device I/O", flush=True)
-    print("STAGE guest poweroff", flush=True)
-    os.write(serial, b"poweroff\n")
-    deadline = time.monotonic() + 45
-    while not (machine / "stopped").exists():
-        if time.monotonic() >= deadline:
-            raise RuntimeError("guest poweroff did not stop machine")
-        pump()
-    print("PASS guest poweroff", flush=True)
+    if not args.stop_during_reset:
+        print("STAGE guest poweroff", flush=True)
+        os.write(serial, b"poweroff\n")
+        deadline = time.monotonic() + 45
+        while not (machine / "stopped").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("guest poweroff did not stop machine")
+            pump()
+        print("PASS guest poweroff", flush=True)
 finally:
     print("STAGE cleanup", flush=True)
     if backend is not None:
