@@ -15,6 +15,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("root", type=Path)
 parser.add_argument("guest", choices=("efi", "dragonfly"))
 parser.add_argument("--named-boot", action="store_true")
+parser.add_argument("--trace-backend", action="store_true")
 args = parser.parse_args()
 project = Path("/home/lileding/projects/dfly-vmm")
 machine = args.root / ("compat-" + args.guest)
@@ -100,6 +101,10 @@ try:
         slot = machine / "pci" / bdf
         slot.mkdir()
         command += ["--device", str(slot) + "," + spec]
+    if args.trace_backend:
+        trace = logs / "backend.ktrace"
+        command = ["ktrace", "-i", "-t", "ci", "-f", str(trace)] + command
+        print("BACKEND_TRACE " + str(trace), flush=True)
     backend = subprocess.Popen(command, stdout=backend_log, stderr=backend_log)
     deadline = time.monotonic() + 20
     while any((machine / "pci" / bdf / "descriptor").stat().st_size == 0 for bdf, _ in specs):
