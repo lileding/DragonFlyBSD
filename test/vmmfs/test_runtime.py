@@ -553,6 +553,42 @@ except OSError as error:
             self.assertFalse(machine.exists())
 
 
+    def test_duplicate_collection_create_has_one_owner(self):
+        for parent, name in ((ROOT, "duplicate-machine"),
+                             (self.machine / "pci", "0000:00:01.0")):
+            path = parent / name
+            previous_inode = None
+            for iteration in range(10):
+                with self.subTest(parent=str(parent), iteration=iteration):
+                    barrier = threading.Barrier(4)
+                    outcomes = []
+
+                    def create():
+                        try:
+                            barrier.wait(timeout=5)
+                            path.mkdir()
+                            outcomes.append(0)
+                        except OSError as error:
+                            outcomes.append(error.errno)
+                        except BaseException as error:
+                            outcomes.append(error)
+
+                    workers = [threading.Thread(target=create) for _ in range(4)]
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join(timeout=10)
+                        self.assertFalse(worker.is_alive(), "duplicate mkdir blocked")
+                    self.assertEqual(outcomes.count(0), 1, outcomes)
+                    self.assertEqual(outcomes.count(errno.EEXIST), 3, outcomes)
+                    # Rejected private candidates must not damage the winner.
+                    inode = path.stat().st_ino
+                    self.assertNotEqual(inode, previous_inode)
+                    self.assertTrue(list(path.iterdir()))
+                    path.rmdir()
+                    self.assertFalse(path.exists())
+                    previous_inode = inode
+
     def test_create_during_parent_removal(self):
         for iteration in range(30):
             machine = ROOT / ("create-race-" + str(iteration))
