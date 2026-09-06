@@ -1552,7 +1552,7 @@ struct vmmfs_machine {
     struct vmm_cpustate boot_state;
     unsigned runtime_references;
 };
-static int cleanup_count, start_count, snapshot_error, race_abort;
+static int cleanup_count, start_count, snapshot_error, start_error, race_abort;
 static int event_refs, event_count, last_event, last_error;
 #define lwkt_gettoken(t) (++(t)->held)
 #define lwkt_reltoken(t) (--(t)->held)
@@ -1585,7 +1585,7 @@ static int vmmfs_vcpu_start(void *c, unsigned n, vmm_machine_t m,
     (void)c;
     assert(n == 4 && m != NULL && state->marker == 42);
     ++start_count;
-    return 0;
+    return start_error;
 }
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *m) { (void)m; }
 static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *m) {
@@ -1635,6 +1635,20 @@ int main(void) {
     assert(cleanup_count == 2 && start_count == 1 && vp.refs == 0);
     assert(!l.node.token.held && !m.node.token.held);
     assert(event_count == 3 && event_refs == 0);
+    /* A failed VCPU constructor must complete the same launch exactly once. */
+    m.launch_vnode = &vp; vp.refs = 1; m.machine = &m;
+    l.result = EINPROGRESS;
+    snapshot_error = 0; start_error = ENOMEM;
+    assert(vmmfs_machine_run(&l) == ENOMEM);
+    assert(cleanup_count == 3 && start_count == 2 && vp.refs == 0);
+    assert(m.machine == NULL && m.launch_vnode == NULL);
+    assert(m.runtime_references == 0 && l.result == ENOMEM);
+    assert(event_count == 4 && event_refs == 0);
+    assert(vmmfs_machine_abort(&l) == 0);
+    assert(vmmfs_machine_run(&l) == EPIPE);
+    assert(cleanup_count == 3 && event_count == 4 && vp.refs == 0);
+    assert(!l.node.token.held && !m.node.token.held);
+
 }
 """)
 
