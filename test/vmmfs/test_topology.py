@@ -4,6 +4,48 @@ import unittest
 from test_regress import COMMON, function, run_c
 
 class Topology(unittest.TestCase):
+
+    def test_bdf_fields_do_not_alias(self):
+        run_c(COMMON + r"""
+#define bcmp memcmp
+#define ksnprintf snprintf
+static int
+""" + function("vmmfs_pciroot.c", "vmmfs_pciroot_parse_hex") + r"""
+static int
+""" + function("vmmfs_pciroot.c", "vmmfs_pciroot_parse_bdf") + r"""
+static void
+""" + function("vmmfs_pciroot.c", "vmmfs_pciroot_format_bdf") + r"""
+int main(void) {
+    char name[32], formatted[32];
+    uint16_t bdf;
+    for (unsigned bus = 0; bus < 256; ++bus) {
+        for (unsigned device = 0; device < 32; ++device) {
+            for (unsigned function = 0; function < 16; ++function) {
+                snprintf(name, sizeof(name), "0000:%02x:%02x.%x",
+                         bus, device, function);
+                int error = vmmfs_pciroot_parse_bdf(name, strlen(name), &bdf);
+                if (function >= 8 || (bus == 0 && device == 0 && function == 0)) {
+                    assert(error == EINVAL);
+                } else {
+                    assert(error == 0);
+                    assert(bdf == ((bus << 8) | (device << 3) | function));
+                    vmmfs_pciroot_format_bdf(bdf, formatted, sizeof(formatted));
+                    assert(strcmp(name, formatted) == 0);
+                }
+            }
+        }
+    }
+    const char *invalid[] = {
+        "0001:00:01.0", "0000:00:20.0", "0000:00:ff.0",
+        "0000:00:01.00", "0000:00:01.g", "0000:00.01"
+    };
+    for (unsigned index = 0; index < sizeof(invalid)/sizeof(invalid[0]); ++index)
+        assert(vmmfs_pciroot_parse_bdf(invalid[index],
+                                     strlen(invalid[index]), &bdf) == EINVAL);
+    return 0;
+}
+""")
+
     def test_slot_removal_reservation(self):
         run_c(COMMON + r"""
 #include <stdlib.h>

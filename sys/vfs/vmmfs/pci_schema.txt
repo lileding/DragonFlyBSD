@@ -11,6 +11,10 @@ A descriptor describes one PCIe Type-0 endpoint function.  The slot directory
 name supplies its BDF; a descriptor never supplies a BDF.  VMMFS supplies the
 PCIe root complex, ECAM, bridge topology, and bus-number policy.
 
+Slot names have the form 0000:bb:dd.f in hexadecimal: bus 00..ff,
+device 00..1f, and function 0..7.  The root host bridge reserves
+0000:00:00.0.  Out-of-range fields are rejected, not truncated or aliased.
+
 Version 1 supports PCI and PCIe Type-0 endpoint functions: memory and I/O
 BARs, option ROMs, INTx, MSI, MSI-X, conventional capabilities, and PCIe
 extended capabilities.  It does not describe PCI-to-PCI bridges, CardBus,

@@ -853,7 +853,7 @@ vmmfs_pciroot_parse_bdf(const char *name, size_t namelen, uint16_t *bdfp)
 		return (error);
 	device = (device << 4) | value;
 	error = vmmfs_pciroot_parse_hex(name[11], &function);
-	if (error != 0 || device >= 32)
+	if (error != 0 || device >= 32 || function >= 8)
 		return (EINVAL);
 	*bdfp = (uint16_t)((bus << 8) | (device << 3) | function);
 	if (*bdfp == 0)

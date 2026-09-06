@@ -633,6 +633,28 @@ except OSError as error:
                 self.assertTrue((machine / "stopped").exists())
                 machine.rmdir()
 
+    def test_pci_function_names_cannot_alias_another_slot(self):
+        pci = self.machine / "pci"
+        slot = pci / "0000:00:01.0"
+        slot.mkdir()
+        try:
+            for function in "89abcdef":
+                alias = pci / ("0000:00:00." + function)
+                with self.subTest(function=function):
+                    with self.assertRaises(OSError) as failure:
+                        alias.mkdir()
+                    self.assertEqual(failure.exception.errno, errno.EINVAL)
+                    with self.assertRaises(OSError) as failure:
+                        os.stat(alias / "descriptor")
+                    self.assertIn(failure.exception.errno, (errno.EINVAL, errno.ENOENT))
+                    with self.assertRaises(OSError) as failure:
+                        alias.rmdir()
+                    self.assertIn(failure.exception.errno, (errno.EINVAL, errno.ENOENT))
+                    self.assertTrue((slot / "descriptor").exists())
+            self.assertEqual([path.name for path in pci.iterdir()], [slot.name])
+        finally:
+            slot.rmdir()
+
     def test_namespace_children(self):
 
         slot = self.machine / "pci" / "0000:00:01.0"
