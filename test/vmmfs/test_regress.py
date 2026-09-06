@@ -1590,41 +1590,69 @@ struct vmmfs_launch { struct vmmfs_node node; int result; };
 #define PCATCH 1
 #define PINTERLOCKED 2
 #define curthread NULL
-static int sleep_error, abort_count, sleep_count, reservation;
+static unsigned mode, sleep_count, abort_count, reservation, removals;
+static struct vmmfs_launch launch;
 #define crit_enter() ((void)0)
 #define crit_exit() ((void)0)
 #define lwkt_gettoken(t) (++(t)->held)
 #define lwkt_reltoken(t) (--(t)->held)
-#define tsleep_interlock(c, f) ((void)(c), (void)(f), reservation = 1)
-#define tsleep_remove(c) ((void)(c), reservation = 0)
-static int tsleep(void *c, int f, const char *name, int ticks) {
-    struct vmmfs_launch *launch = c;
-    (void)name;
-    assert(ticks == 0 && (f & PCATCH));
+static void tsleep_interlock(void *channel, int flags) {
+    assert(channel == &launch && !reservation);
+    assert(flags == (abort_count ? 0 : PCATCH));
+    reservation = 1;
+    /* Completion after reservation but before the result check. */
+    if (mode == 7) launch.result = 0;
+}
+static void tsleep_remove(void *channel) {
+    (void)channel;
     assert(reservation);
     reservation = 0;
-    ++sleep_count;
-    if (sleep_error == 0) launch->result = 0;
-    return sleep_error;
+    ++removals;
 }
-static int vmmfs_machine_abort(struct vmmfs_launch *launch) {
-    ++abort_count;
-    launch->result = ECANCELED;
+static int tsleep(void *channel, int flags, const char *name, int ticks) {
+    (void)name;
+    assert(channel == &launch && ticks == 0 && !launch.node.token.held);
+    assert(reservation && (flags & PINTERLOCKED));
+    assert(flags == (PINTERLOCKED | (abort_count ? 0 : PCATCH)));
+    reservation = 0;
+    ++sleep_count;
+    assert(sleep_count <= 3);
+    if (sleep_count == 1 && mode <= 4)
+        return EINTR;
+    if (mode == 5 && sleep_count == 1)
+        return 0; /* Spurious wakeup must not finish the wait. */
+    launch.result = mode == 2 ? EINVAL : 0;
+    return 0;
+}
+static int vmmfs_machine_abort(struct vmmfs_launch *argument) {
+    assert(argument == &launch && !launch.node.token.held && !reservation);
+    assert(++abort_count == 1);
+    if (mode == 0)
+        launch.result = ECANCELED; /* Cancellation won ownership. */
+    else if (mode == 3)
+        return EIO; /* Cleanup failure is not reported as a signal. */
+    else if (mode == 4)
+        launch.result = 0; /* Run completed while abort checked identity. */
+    /* Modes 1/2: run owns identity but has not yet reported its result. */
     return 0;
 }
 int
 """ + function("vmmfs_launch.c", "vmmfs_launch_wait") + """
 int main(void) {
-    struct vmmfs_launch launch = { .result = EINPROGRESS };
-    sleep_error = EINTR;
-    assert(vmmfs_launch_wait(&launch) == EINTR);
-    assert(abort_count == 1 && !reservation && !launch.node.token.held);
-    launch.result = EINPROGRESS;
-    sleep_error = 0;
-    assert(vmmfs_launch_wait(&launch) == 0);
-    assert(abort_count == 1 && sleep_count == 2 && !reservation);
-    assert(vmmfs_launch_wait(&launch) == 0);
-    assert(sleep_count == 2);
+    for (mode = 0; mode < 9; ++mode) {
+        launch.result = mode == 8 ? ENOMEM : EINPROGRESS;
+        sleep_count = abort_count = reservation = removals = 0;
+        int error = vmmfs_launch_wait(&launch);
+        int expected = mode == 0 ? EINTR : mode == 2 ? EINVAL :
+            mode == 3 ? EIO : mode == 8 ? ENOMEM : 0;
+        assert(error == expected && !reservation && !launch.node.token.held);
+        assert(abort_count == (mode <= 4));
+        unsigned expected_sleeps = mode >= 7 ? 0 :
+            mode == 1 || mode == 2 || mode == 5 ? 2 : 1;
+        assert(sleep_count == expected_sleeps);
+        assert(removals == (mode != 3));
+    }
+    return 0;
 }
 """)
 
