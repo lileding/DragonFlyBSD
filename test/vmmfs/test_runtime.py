@@ -667,5 +667,106 @@ except OSError as error:
         port.unlink()
 
 
+
+    def test_launch_revoke_covers_inherited_aliases(self):
+        self._check_launch_aliases(("primary", "alias", "read", "split", "protected"))
+
+    @unittest.skipUnless(os.environ.get("VMMFS_TEST_MLOCK") == "1",
+                         "host MGTDEVICE wiring fault panics before pager callback; "
+                         "enable VMMFS_TEST_MLOCK=1 only for kernel regression testing")
+    def test_launch_revoke_covers_wired_aliases(self):
+        self._check_launch_aliases(("wired",))
+
+    def _check_launch_aliases(self, probes):
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                              ctypes.c_int, ctypes.c_int, ctypes.c_int64]
+        libc.mmap.restype = ctypes.c_void_p
+        for name in ("munmap", "mlock"):
+            getattr(libc, name).argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            getattr(libc, name).restype = ctypes.c_int
+        libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.mprotect.restype = ctypes.c_int
+        page = mmap.PAGESIZE
+        size = 3 * page
+        protections = mmap.PROT_READ | mmap.PROT_WRITE
+        for abort in ("close", "bad-write"):
+            for probe in probes:
+                with self.subTest(abort=abort, probe=probe):
+                    fd = self.boot()
+                    print("LAUNCH_ALIAS abort=%s probe=%s" % (abort, probe), flush=True)
+                    mappings = []
+                    child = None
+                    parent_socket, child_socket = socket.socketpair()
+                    try:
+                        # Raw mmap must not duplicate the fd: final close is under test.
+                        for _ in range(2):
+                            address = libc.mmap(None, size, protections, mmap.MAP_SHARED, fd, 0)
+                            self.assertNotEqual(address, ctypes.c_void_p(-1).value,
+                                                ctypes.get_errno())
+                            mappings.append(address)
+                        ctypes.c_ubyte.from_address(mappings[0] + page).value = 42
+                        self.assertEqual(ctypes.c_ubyte.from_address(
+                            mappings[1] + page).value, 42)
+                        child = os.fork()
+                        if child == 0:
+                            parent_socket.close()
+                            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                            signal.alarm(15)
+                            os.close(fd)
+                            address = mappings[0 if probe == "primary" else 1] + page
+                            if probe == "wired" and libc.mlock(address, page) != 0:
+                                os._exit(101)
+                            # Clip the map on both sides of the page being probed.
+                            if probe == "split":
+                                if libc.munmap(mappings[1], page) != 0:
+                                    os._exit(102)
+                                if libc.munmap(mappings[1] + 2 * page, page) != 0:
+                                    os._exit(103)
+                            if probe == "protected" and libc.mprotect(address, page, 0) != 0:
+                                os._exit(104)
+                            if probe == "read" and libc.mprotect(address, page, mmap.PROT_READ) != 0:
+                                os._exit(105)
+                            child_socket.sendall(b"R")
+                            if child_socket.recv(1) != b"G":
+                                os._exit(106)
+                            # PROT_NONE cannot be the reason for the expected signal.
+                            if probe == "protected" and libc.mprotect(address, page, protections) != 0:
+                                os._exit(107)
+                            value = ctypes.c_ubyte.from_address(address)
+                            if probe == "read":
+                                result = value.value
+                                os._exit(100 if result == 42 else 108)
+                            value.value = 43
+                            os._exit(100)
+                        child_socket.close()
+                        parent_socket.settimeout(10)
+                        self.assertEqual(parent_socket.recv(1), b"R")
+                        if abort == "bad-write":
+                            with self.assertRaises(OSError) as failure:
+                                os.write(fd, b"x")
+                            self.assertEqual(failure.exception.errno, errno.EINVAL)
+                        os.close(fd)
+                        fd = -1
+                        self.assertTrue((self.machine / "stopped").exists())
+                        parent_socket.sendall(b"G")
+                        _, status = os.waitpid(child, 0)
+                        child = None
+                        self.assertTrue(os.WIFSIGNALED(status), status)
+                        self.assertIn(os.WTERMSIG(status), (signal.SIGBUS, signal.SIGSEGV))
+                        # Parent still retains both mappings from the old launch.
+                        os.close(self.boot())
+                    finally:
+                        parent_socket.close()
+                        child_socket.close()
+                        if fd >= 0:
+                            os.close(fd)
+                        if child is not None:
+                            os.waitpid(child, 0)  # Child has a bounded alarm.
+                        for address in mappings:
+                            self.assertEqual(libc.munmap(address, size), 0,
+                                             ctypes.get_errno())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
