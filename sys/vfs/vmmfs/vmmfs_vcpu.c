@@ -87,9 +87,13 @@ vmmfs_vcpu_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 
 	vcpu = (struct vmmfs_vcpu *)node;
 
-	if (vcpu == NULL || vcpu->node.dead)
+	if (vcpu == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+	if (vcpu->node.dead) {
+		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+		return (ENOENT);
+	}
 	count = vcpu->count;
 	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 	result = ksnprintf(buffer, capacity, "%u\n", count);
@@ -126,9 +130,11 @@ vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 		value = value * 10 + digit;
 	}
 
-	if (vcpu->node.dead)
-		return (ENOENT);
 	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+	if (vcpu->node.dead) {
+		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+		return (ENOENT);
+	}
 	if (vmmfs_vcpu_machine(vcpu)->machine != NULL) {
 		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
 		return (EBUSY);

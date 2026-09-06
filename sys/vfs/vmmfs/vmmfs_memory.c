@@ -68,9 +68,13 @@ vmmfs_memory_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 	uint64_t size;
 	int result;
 
-	if (memory == NULL || memory->node.dead)
+	if (memory == NULL)
 		return (ENOENT);
 	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
+	if (memory->node.dead) {
+		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
+		return (ENOENT);
+	}
 	size = memory->size;
 	lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
@@ -105,9 +109,11 @@ vmmfs_memory_store(struct vmmfs_node *node, const char *buffer, size_t length)
 		value = value * 10 + digit;
 	}
 
-	if (memory->node.dead)
-		return (ENOENT);
 	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
+	if (memory->node.dead) {
+		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
+		return (ENOENT);
+	}
 	if (vmmfs_memory_machine(memory)->machine != NULL) {
 		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
 		return (EBUSY);

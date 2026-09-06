@@ -68,6 +68,7 @@ class Regressions(unittest.TestCase):
 #define bcopy(s, d, n) memcpy(d, s, n)
 struct token { unsigned held; };
 struct vmmfs_node { struct token token; bool dead; off_t size; };
+struct vmmfs_vcpu { struct vmmfs_node node; uint32_t count; };
 struct vmmfs_memory { struct vmmfs_node node; uint64_t size; };
 struct vmmfs_loader { struct vmmfs_node node; char script[PAGE_SIZE]; };
 struct vmmfs_machine {
@@ -76,9 +77,24 @@ struct vmmfs_machine {
     struct { struct vmmfs_node node; } boot;
 };
 static struct vmmfs_machine machine;
-static void lwkt_gettoken(struct token *token) { ++token->held; }
+static struct vmmfs_node *deactivate_on_parent_lock;
+static void lwkt_gettoken(struct token *token) {
+    assert(token == &machine.node.token);
+    if (deactivate_on_parent_lock != NULL) {
+        /* Contention can release the caller's child token before reacquisition. */
+        assert(deactivate_on_parent_lock->token.held == 1);
+        deactivate_on_parent_lock->token.held = 0;
+        deactivate_on_parent_lock->dead = true;
+        deactivate_on_parent_lock->token.held = 1;
+        deactivate_on_parent_lock = NULL;
+    }
+    ++token->held;
+}
 static void lwkt_reltoken(struct token *token) {
     assert(token->held); --token->held;
+}
+static struct vmmfs_machine *vmmfs_vcpu_machine(struct vmmfs_vcpu *vcpu) {
+    assert(vcpu->node.token.held == 1); return &machine;
 }
 static struct vmmfs_machine *vmmfs_memory_machine(struct vmmfs_memory *memory) {
     assert(memory->node.token.held == 1); return &machine;
@@ -89,6 +105,10 @@ static struct vmmfs_machine *vmmfs_loader_machine(struct vmmfs_loader *loader) {
 off_t
 """ + function("vmmfs_node.c", "vmmfs_node_decimal_size") + """
 static int
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_load") + """
+static int
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_store") + """
+static int
 """ + function("vmmfs_memory.c", "vmmfs_memory_load") + """
 static int
 """ + function("vmmfs_memory.c", "vmmfs_memory_store") + """
@@ -97,6 +117,7 @@ static int
 static int
 """ + function("vmmfs_loader.c", "vmmfs_loader_store") + r"""
 int main(void) {
+    struct vmmfs_vcpu vcpu = { .node.token.held = 1, .count = 4 };
     struct vmmfs_memory memory = { .node.token.held = 1 };
     struct vmmfs_loader loader = { .node.token.held = 1 };
     char buffer[PAGE_SIZE + 1];
@@ -144,6 +165,34 @@ int main(void) {
     loader.node.dead = true;
     assert(vmmfs_loader_store((void *)&loader, "other", 5) == ENOENT);
     assert(vmmfs_loader_load((void *)&loader, buffer, sizeof(buffer), &length) == ENOENT);
+    /* A node can be deactivated while its work waits for the parent token. */
+    memory.node.dead = false;
+    deactivate_on_parent_lock = &memory.node;
+    assert(vmmfs_memory_store((void *)&memory, "8192", 4) == ENOENT);
+    assert(deactivate_on_parent_lock == NULL && !machine.node.token.held);
+    assert(memory.size == 4096 && machine.boot.node.size == 4096);
+    memory.node.dead = false;
+    deactivate_on_parent_lock = &memory.node;
+    length = 123;
+    assert(vmmfs_memory_load((void *)&memory, buffer, sizeof(buffer), &length) == ENOENT);
+    assert(deactivate_on_parent_lock == NULL && length == 123);
+    loader.node.dead = false;
+    deactivate_on_parent_lock = &loader.node;
+    assert(vmmfs_loader_store((void *)&loader, "other", 5) == ENOENT);
+    assert(deactivate_on_parent_lock == NULL && loader.node.size == PAGE_SIZE);
+    assert(loader.script[0] == 'x' && loader.script[PAGE_SIZE - 1] == 0);
+    deactivate_on_parent_lock = &vcpu.node;
+    assert(vmmfs_vcpu_store((void *)&vcpu, "8", 1) == ENOENT);
+    assert(deactivate_on_parent_lock == NULL && vcpu.count == 4);
+    vcpu.node.dead = false;
+    deactivate_on_parent_lock = &vcpu.node;
+    assert(vmmfs_vcpu_load((void *)&vcpu, buffer, sizeof(buffer), &length) == ENOENT);
+    assert(deactivate_on_parent_lock == NULL && length == 123);
+    vcpu.node.dead = false;
+    assert(vmmfs_vcpu_store((void *)&vcpu, "8", 1) == 0);
+    assert(vcpu.count == 8 && vcpu.node.size == 2);
+    assert(vmmfs_vcpu_load((void *)&vcpu, buffer, sizeof(buffer), &length) == 0);
+    assert(length == 2 && memcmp(buffer, "8\n", 2) == 0);
     assert(!machine.node.token.held);
     return 0;
 }

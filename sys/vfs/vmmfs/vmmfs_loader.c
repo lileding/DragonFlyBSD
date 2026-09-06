@@ -263,9 +263,11 @@ vmmfs_loader_store(struct vmmfs_node *node, const char *buffer,
 		--length;
 	if (length == 0 || length >= sizeof(loader->script))
 		return (ENAMETOOLONG);
-	if (loader->node.dead)
-		return (ENOENT);
 	lwkt_gettoken(&vmmfs_loader_machine(loader)->node.token);
+	if (loader->node.dead) {
+		lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
+		return (ENOENT);
+	}
 	if (vmmfs_loader_machine(loader)->machine != NULL) {
 		lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
 		return (EBUSY);
