@@ -250,9 +250,9 @@ int main(void) {
 
     def test_stopped_publication_token_order(self):
         run_c(COMMON + r"""
-struct token { bool held; };
+struct token { bool held, live; };
 struct vmmfs_node { struct token token; bool dead; };
-struct vnode { void *v_data; };
+struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_machine {
     struct vmmfs_node node;
@@ -262,20 +262,27 @@ struct vmmfs_machine {
         bool stop_requested, reset_requested;
     } vcpu;
     void *machine, *mount;
-    struct vnode *stopped_vnode;
+    struct vnode *stopped_vnode, *vcpu_vnode;
     bool runtime_releasing, runtime_released;
 };
 static struct vmmfs_machine machine;
 static struct vmmfs_stopped candidate;
-static struct vnode candidate_vnode, existing_vnode;
+static struct vnode candidate_vnode, existing_vnode, cpu_vnode;
 static unsigned mode, invalidated, allocated;
 static int replacement;
+#define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
+static void vrele(struct vnode *v) {
+    assert(v == &cpu_vnode && v->refs);
+    assert(!machine.node.token.held && !machine.vcpu.token.held);
+    if (--v->refs == 0) machine.vcpu.token.live = false;
+}
 static void lwkt_gettoken(struct token *token) {
     assert(!token->held);
     if (token == &machine.node.token)
-        assert(machine.vcpu.token.held);
+        assert(machine.vcpu.token.held || allocated == 0);
     else {
         assert(token == &machine.vcpu.token);
+        assert(token->live);
         assert(!machine.node.token.held);
     }
     token->held = true;
@@ -297,6 +304,15 @@ static int vmmfs_stopped_create(void *mount, struct vmmfs_node *parent,
         /* Another completion and boot won while allocation was blocked. */
         machine.machine = &replacement; machine.runtime_released = false;
     }
+    if (mode == 11 || mode == 12) {
+        /* A competing completion publishes STOPPED, then rmdir drops the
+         * vCPU child while this completion's candidate allocation sleeps.
+         * Mode 11 is a later child veto; mode 12 is full deactivation. */
+        machine.machine = NULL; machine.runtime_released = false;
+        machine.vcpu_vnode = NULL;
+        machine.node.dead = mode == 12;
+        vrele(&cpu_vnode);
+    }
     return 0;
 }
 static void vmmfs_vnode_discard(struct vnode *vnode) {
@@ -316,10 +332,13 @@ static void vmmfs_machine_invalidate_children(struct vmmfs_machine *m) {
 static int
 """ + function("vmmfs_machine.c", "vmmfs_machine_create_stopped") + r"""
 int main(void) {
-    for (mode = 0; mode < 11; ++mode) {
+    for (mode = 0; mode < 14; ++mode) {
         memset(&machine, 0, sizeof(machine));
         invalidated = 0;
         assert(allocated == 0);
+        machine.vcpu.token.live = mode != 13;
+        cpu_vnode.refs = mode == 13 ? 0 : 1;
+        machine.vcpu_vnode = mode == 13 ? NULL : &cpu_vnode;
         machine.vcpu.stop_requested = machine.vcpu.reset_requested = true;
         machine.node.dead = mode == 2 || mode == 7 || mode == 8;
         machine.runtime_releasing = mode == 3;
@@ -329,8 +348,10 @@ int main(void) {
         if (mode == 9) machine.stopped_vnode = &existing_vnode;
         int error = vmmfs_machine_create_stopped(&machine);
         assert(!machine.node.token.held && !machine.vcpu.token.held);
-        assert(machine.node.dead == (mode == 2 || mode == 7 || mode == 8));
-        if ((mode >= 1 && mode <= 4) || mode == 10) {
+        assert(machine.node.dead == (mode == 2 || mode == 7 || mode == 8 || mode == 12));
+        assert(cpu_vnode.refs == (mode >= 11 ? 0 : 1));
+        assert(machine.vcpu.token.live == (mode < 11));
+        if ((mode >= 1 && mode <= 4) || mode >= 10) {
             assert(error == (mode == 1 ? ENOMEM : EBUSY));
             assert(invalidated == 0);
             assert(!machine.stopped_vnode && !allocated);

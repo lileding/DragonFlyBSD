@@ -254,16 +254,27 @@ static int
 vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 {
 	struct vmmfs_stopped *stopped;
-	struct vnode *vnode;
+	struct vnode *vnode, *vcpu_vnode;
 	int error;
 
+	/* Candidate allocation may sleep past another completion and rmdir. */
+	lwkt_gettoken(&machine->node.token);
+	vcpu_vnode = machine->vcpu_vnode;
+	if (vcpu_vnode != NULL)
+		vref(vcpu_vnode);
+	lwkt_reltoken(&machine->node.token);
+	if (vcpu_vnode == NULL)
+		return (EBUSY);
 	error = vmmfs_stopped_create(machine->mount, &machine->node, &vnode);
-	if (error != 0)
+	if (error != 0) {
+		vrele(vcpu_vnode);
 		return (error);
+	}
 	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->node.token);
 	/* Completing a retired runtime is not a new admission through dead. */
-	if ((machine->node.dead && !machine->runtime_released) ||
+	if (machine->vcpu_vnode != vcpu_vnode ||
+	    (machine->node.dead && !machine->runtime_released) ||
 	    machine->runtime_releasing ||
 	    (machine->machine != NULL && !machine->runtime_released)) {
 		error = EBUSY;
@@ -291,6 +302,7 @@ done:
 	}
 	if (error == 0)
 		vmmfs_machine_invalidate_children(machine);
+	vrele(vcpu_vnode);
 	return (error);
 }
 
