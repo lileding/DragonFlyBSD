@@ -253,18 +253,25 @@ vmmfs_machine_prepare_stopped(struct vmmfs_machine *machine)
 static int
 vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 {
+	struct vmmfs_stopped *stopped;
+	struct vnode *vnode;
 	int error;
 
-	error = vmmfs_machine_prepare_stopped(machine);
+	error = vmmfs_stopped_create(machine->mount, &machine->node, &vnode);
 	if (error != 0)
 		return (error);
 	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || machine->runtime_releasing ||
+	/* Completing a retired runtime is not a new admission through dead. */
+	if ((machine->node.dead && !machine->runtime_released) ||
+	    machine->runtime_releasing ||
 	    (machine->machine != NULL && !machine->runtime_released)) {
-		lwkt_reltoken(&machine->node.token);
-		lwkt_reltoken(&machine->vcpu.token);
-		return (EBUSY);
+		error = EBUSY;
+		goto done;
+	}
+	if (machine->stopped_vnode == NULL) {
+		machine->stopped_vnode = vnode;
+		vnode = NULL;
 	}
 	/* A stop before VCPU startup has no worker to consume requests. */
 	if (machine->vcpu.threads == NULL) {
@@ -274,10 +281,17 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	machine->machine = NULL;
 	machine->runtime_releasing = false;
 	machine->runtime_released = false;
+done:
 	lwkt_reltoken(&machine->node.token);
 	lwkt_reltoken(&machine->vcpu.token);
-	vmmfs_machine_invalidate_children(machine);
-	return (0);
+	if (vnode != NULL) {
+		stopped = vnode->v_data;
+		vmmfs_vnode_discard(vnode);
+		vmmfs_node_put(&stopped->node);
+	}
+	if (error == 0)
+		vmmfs_machine_invalidate_children(machine);
+	return (error);
 }
 
 static void
