@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Verify detached PCI auth files retain the VMMFS module, including SCM_RIGHTS."""
+import argparse
 import array
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import errno
 import os
 from pathlib import Path
 import socket
 import subprocess
-import sys
+import threading
+import time
 
-root = Path(sys.argv[1])
+parser = argparse.ArgumentParser()
+parser.add_argument("root", type=Path)
+parser.add_argument("--race", action="store_true")
+args = parser.parse_args()
+root = args.root
 machine = root / "auth-lifetime"
 libc = ctypes.CDLL(None, use_errno=True)
 libc.kldfind.argtypes = [ctypes.c_char_p]
@@ -26,6 +33,26 @@ def unload(expected):
     error = ctypes.get_errno() if result != 0 else 0
     assert error == expected, (result, error, expected)
     print("PASS kldunload errno=%d" % error, flush=True)
+
+
+
+def unload_until_closed(module, ready, closing):
+    attempts = 0
+    deadline = time.monotonic() + 10
+    try:
+        while time.monotonic() < deadline:
+            result = libc.kldunload(module)
+            error = ctypes.get_errno() if result != 0 else 0
+            if error == 0:
+                assert closing.is_set(), "unloaded while the auth file was held"
+                return attempts
+            if error != errno.EBUSY:
+                raise OSError(error, "concurrent kldunload")
+            attempts += 1
+            ready.set()
+        raise TimeoutError("module still busy after the close/unload race")
+    finally:
+        ready.set()
 
 
 def descriptors():
@@ -75,11 +102,31 @@ try:
     auth = rights[0]
     os.fstat(auth)
     unload(errno.EBUSY)
-    os.close(auth)
-    auth = None
+    if args.race:
+        module = libc.kldfind(b"vmmfs")
+        assert module > 0
+        ready, closing = threading.Event(), threading.Event()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(unload_until_closed, module, ready, closing)
+            try:
+                if not ready.wait(5):
+                    raise TimeoutError("unload worker did not start")
+                if result.done():
+                    result.result()
+                    raise AssertionError("unload completed before close")
+                closing.set()
+            finally:
+                fd, auth = auth, None
+                os.close(fd)
+            attempts = result.result(timeout=15)
+        assert libc.kldfind(b"vmmfs") == -1
+        print("PASS concurrent close/unload busy_attempts=%d" % attempts, flush=True)
+    else:
+        os.close(auth)
+        auth = None
+        unload(0)
     sender.close()
     receiver.close()
-    unload(0)
 finally:
     if auth is not None:
         os.close(auth)
