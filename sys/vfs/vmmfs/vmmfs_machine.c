@@ -257,23 +257,24 @@ vmmfs_machine_create_stopped(struct vmmfs_machine *machine)
 	error = vmmfs_machine_prepare_stopped(machine);
 	if (error != 0)
 		return (error);
+	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->node.token);
 	if (machine->node.dead || machine->runtime_releasing ||
 	    (machine->machine != NULL && !machine->runtime_released)) {
 		lwkt_reltoken(&machine->node.token);
+		lwkt_reltoken(&machine->vcpu.token);
 		return (EBUSY);
 	}
 	/* A stop before VCPU startup has no worker to consume requests. */
-	lwkt_gettoken(&machine->vcpu.token);
 	if (machine->vcpu.threads == NULL) {
 		machine->vcpu.stop_requested = false;
 		machine->vcpu.reset_requested = false;
 	}
-	lwkt_reltoken(&machine->vcpu.token);
 	machine->machine = NULL;
 	machine->runtime_releasing = false;
 	machine->runtime_released = false;
 	lwkt_reltoken(&machine->node.token);
+	lwkt_reltoken(&machine->vcpu.token);
 	vmmfs_machine_invalidate_children(machine);
 	return (0);
 }

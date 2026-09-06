@@ -4,6 +4,77 @@ import unittest
 from test_regress import COMMON, function, run_c
 
 class PrepareLifetime(unittest.TestCase):
+    def test_stopped_publication_token_order(self):
+        run_c(COMMON + r"""
+struct token { bool held; };
+struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_machine {
+    struct vmmfs_node node;
+    struct {
+        struct token token;
+        void *threads;
+        bool stop_requested, reset_requested;
+    } vcpu;
+    void *machine;
+    bool runtime_releasing, runtime_released;
+};
+static struct vmmfs_machine machine;
+static unsigned mode, invalidated;
+static void lwkt_gettoken(struct token *token) {
+    assert(!token->held);
+    if (token == &machine.node.token)
+        assert(machine.vcpu.token.held);
+    else {
+        assert(token == &machine.vcpu.token);
+        assert(!machine.node.token.held);
+    }
+    token->held = true;
+}
+static void lwkt_reltoken(struct token *token) {
+    assert(token->held);
+    if (token == &machine.vcpu.token)
+        assert(!machine.node.token.held);
+    token->held = false;
+}
+static int vmmfs_machine_prepare_stopped(struct vmmfs_machine *m) {
+    assert(m == &machine);
+    assert(!m->node.token.held && !m->vcpu.token.held);
+    return mode == 1 ? ENOMEM : 0;
+}
+static void vmmfs_machine_invalidate_children(struct vmmfs_machine *m) {
+    assert(m == &machine && m->machine == NULL);
+    assert(!m->node.token.held && !m->vcpu.token.held);
+    ++invalidated;
+}
+static int
+""" + function("vmmfs_machine.c", "vmmfs_machine_create_stopped") + r"""
+int main(void) {
+    for (mode = 0; mode < 7; ++mode) {
+        memset(&machine, 0, sizeof(machine));
+        invalidated = 0;
+        machine.vcpu.stop_requested = machine.vcpu.reset_requested = true;
+        machine.node.dead = mode == 2;
+        machine.runtime_releasing = mode == 3;
+        machine.machine = mode == 4 || mode == 6 ? &machine : NULL;
+        machine.runtime_released = mode == 6;
+        machine.vcpu.threads = mode == 5 ? &machine : NULL;
+        int error = vmmfs_machine_create_stopped(&machine);
+        assert(!machine.node.token.held && !machine.vcpu.token.held);
+        if (mode >= 1 && mode <= 4) {
+            assert(error == (mode == 1 ? ENOMEM : EBUSY));
+            assert(invalidated == 0);
+            assert(machine.vcpu.stop_requested && machine.vcpu.reset_requested);
+        } else {
+            assert(error == 0 && invalidated == 1);
+            assert(machine.machine == NULL);
+            assert(!machine.runtime_releasing && !machine.runtime_released);
+            assert(machine.vcpu.stop_requested == (mode == 5));
+            assert(machine.vcpu.reset_requested == (mode == 5));
+        }
+    }
+}
+""")
+
     def test_private_prepare_retains_vcpu(self):
         run_c(COMMON + r"""
 struct token { int valid, held; };
