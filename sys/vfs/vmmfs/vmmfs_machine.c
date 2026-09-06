@@ -232,7 +232,8 @@ vmmfs_machine_prepare_stopped(struct vmmfs_machine *machine)
 		return (error);
 	stopped = stopped_vnode->v_data;
 	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || machine->runtime_releasing) {
+	if (machine->node.dead || machine->vcpu_vnode == NULL ||
+	    machine->runtime_releasing) {
 		lwkt_reltoken(&machine->node.token);
 		vmmfs_vnode_discard(stopped_vnode);
 		vmmfs_node_put(&stopped->node);
@@ -308,18 +309,28 @@ vmmfs_machine_deactivate(struct vmmfs_node *node)
 		&machine->pciroot_vnode, &machine->serialroot_vnode,
 		&machine->events_vnode
 	};
-	struct vnode *vnode;
+	struct vnode *vnode, *vcpu_vnode;
 	size_t index;
 	int error;
 
-	lwkt_gettoken(&machine->vcpu.token);
+	/* A previous partial deactivate may already have reclaimed the vCPU node. */
+	lwkt_gettoken(&node->token);
+	vcpu_vnode = machine->vcpu_vnode;
+	if (vcpu_vnode != NULL)
+		vref(vcpu_vnode);
+	lwkt_reltoken(&node->token);
+	if (vcpu_vnode != NULL)
+		lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&node->token);
 	error = machine->machine != NULL || machine->runtime_releasing ||
 	    machine->runtime_released || machine->runtime_references != 0 ||
-	    machine->vcpu.active_count != 0 ||
-	    machine->vcpu.threads != NULL ? EBUSY : 0;
+	    (vcpu_vnode != NULL && (machine->vcpu.active_count != 0 ||
+	    machine->vcpu.threads != NULL)) ? EBUSY : 0;
 	lwkt_reltoken(&node->token);
-	lwkt_reltoken(&machine->vcpu.token);
+	if (vcpu_vnode != NULL) {
+		lwkt_reltoken(&machine->vcpu.token);
+		vrele(vcpu_vnode);
+	}
 	if (error != 0)
 		return (error);
 
@@ -432,7 +443,8 @@ vmmfs_machine_request_stop(struct vmmfs_machine *machine, const char *reason)
 	int error = 0;
 
 	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead) {
+	if (machine->node.dead || machine->vcpu_vnode == NULL ||
+	    machine->events_vnode == NULL) {
 		lwkt_reltoken(&machine->node.token);
 		return (ENOENT);
 	}
