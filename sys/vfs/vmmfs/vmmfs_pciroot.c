@@ -897,13 +897,13 @@ vmmfs_pciroot_config_address_read(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || !vmmfs_pciroot_config_contains(
 	    VMMFS_PCI_CONFIG_ADDRESS, read->address, read->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (ENOENT);
 	}
 	value = pciroot->config_address;
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	shift = (read->address - VMMFS_PCI_CONFIG_ADDRESS) * NBBY;
 	read->value = (value >> shift) &
 	    (UINT32_MAX >> ((sizeof(value) - read->width) * NBBY));
@@ -923,16 +923,16 @@ vmmfs_pciroot_config_address_write(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || !vmmfs_pciroot_config_contains(
 	    VMMFS_PCI_CONFIG_ADDRESS, write->address, write->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (ENOENT);
 	}
 	shift = (write->address - VMMFS_PCI_CONFIG_ADDRESS) * NBBY;
 	mask = (UINT32_MAX >> ((sizeof(mask) - write->width) * NBBY)) << shift;
 	pciroot->config_address = (pciroot->config_address & ~mask) |
 	    (((uint32_t)write->value << shift) & mask);
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	return (0);
 }
 
@@ -951,10 +951,10 @@ vmmfs_pciroot_config_data_read(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || !vmmfs_pciroot_config_contains(
 	    VMMFS_PCI_CONFIG_DATA, read->address, read->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL ||
 	    (pciroot->config_address & 0x80000000U) == 0) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		read->value = vmmfs_pciroot_absent_value(read->width);
 		return (0);
 	}
@@ -965,7 +965,7 @@ vmmfs_pciroot_config_data_read(vmm_vcpu_t vcpu, void *argument,
 	    (uint16_t)(read->address - VMMFS_PCI_CONFIG_DATA);
 	error = vmmfs_pciroot_config_read_locked(pciroot, vcpu, bdf, offset,
 	    read->width, &value);
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	if (error == ENOENT)
 		return (ENOENT);
 	if (error != 0)
@@ -988,10 +988,10 @@ vmmfs_pciroot_config_data_write(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || !vmmfs_pciroot_config_contains(
 	    VMMFS_PCI_CONFIG_DATA, write->address, write->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL ||
 	    (pciroot->config_address & 0x80000000U) == 0) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (0);
 	}
 	address = pciroot->config_address;
@@ -1001,10 +1001,10 @@ vmmfs_pciroot_config_data_write(vmm_vcpu_t vcpu, void *argument,
 	    (uint16_t)(write->address - VMMFS_PCI_CONFIG_DATA);
 	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
 	if (slot == NULL || !slot->type0.powered) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (0);
 	}
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	return (vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
 	    write->width, (uint32_t)write->value));
 }
@@ -1024,9 +1024,9 @@ vmmfs_pciroot_ecam_read(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || read == NULL ||
 	    !vmmfs_pciroot_ecam_contains(read->address, read->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		read->value = vmmfs_pciroot_absent_value(read->width);
 		return (0);
 	}
@@ -1036,7 +1036,7 @@ vmmfs_pciroot_ecam_read(vmm_vcpu_t vcpu, void *argument,
 	offset = relative & 0xfff;
 	error = vmmfs_pciroot_config_read_locked(pciroot, vcpu, bdf, offset,
 	    read->width, &value);
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	if (error == ENOENT)
 		return (ENOENT);
 	if (error != 0)
@@ -1059,9 +1059,9 @@ vmmfs_pciroot_ecam_write(vmm_vcpu_t vcpu, void *argument,
 	if (pciroot == NULL || write == NULL ||
 	    !vmmfs_pciroot_ecam_contains(write->address, write->width))
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_gettoken(&pciroot->node.token);
 	if (pciroot->runtime_machine == NULL) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (0);
 	}
 	relative = write->address - VMMFS_PCI_ECAM_GPA;
@@ -1070,10 +1070,10 @@ vmmfs_pciroot_ecam_write(vmm_vcpu_t vcpu, void *argument,
 	offset = relative & 0xfff;
 	slot = vmmfs_pciroot_find_locked(pciroot, bdf);
 	if (slot == NULL || !slot->type0.powered) {
-		lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+		lwkt_reltoken(&pciroot->node.token);
 		return (0);
 	}
-	lwkt_reltoken(&vmmfs_pciroot_machine(pciroot)->node.token);
+	lwkt_reltoken(&pciroot->node.token);
 	return (vmmfs_pcislot_type0_config_write(slot, vcpu, offset,
 	    write->width, (uint32_t)write->value));
 }
