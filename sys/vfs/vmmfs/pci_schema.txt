@@ -336,6 +336,12 @@ PIO excludes width 8. Read values and write values use only their low width
 bytes.
 
 The backend reads config requests in order and responds only to the FIFO head.
+When no request is readable, O_NONBLOCK returns EAGAIN. A blocking read is
+interruptible by signals under the normal syscall restart rules; interruption
+does not cancel a guest transaction, release the responder, or make its knotes
+report EOF. Closing or revoking the responder retains its existing cancellation
+semantics. This userspace read wait is distinct from the guest vCPU's internal
+completion wait described below.
 Each read must provide room for exactly one complete request. If copying the
 request to the backend fails, the same still-pending request becomes readable
 again and read readiness is notified. A retry must read a complete record; a

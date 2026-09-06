@@ -475,10 +475,10 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 			lwkt_reltoken(&config->node.token);
 			return (EAGAIN);
 		}
-		tsleep_interlock(config, 0);
+		tsleep_interlock(config, PCATCH);
 		lwkt_reltoken(&config->token);
 		lwkt_reltoken(&config->node.token);
-		error = tsleep(config, PINTERLOCKED, "vmmfspcicfg", 0);
+		error = tsleep(config, PINTERLOCKED | PCATCH, "vmmfspcicfg", 0);
 		if (error != 0)
 			return (error);
 	}

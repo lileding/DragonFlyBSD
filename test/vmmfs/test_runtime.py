@@ -34,6 +34,99 @@ def store(path, text):
 
 
 class Runtime(unittest.TestCase):
+    def test_config_blocked_read_signal_and_revoke(self):
+        slot = self.machine / "pci/0000:00:01.0"
+        slot.mkdir()
+        def open_fds():
+            result = set()
+            for fd in range(256):
+                try:
+                    fcntl.fcntl(fd, fcntl.F_GETFD)
+                    result.add(fd)
+                except OSError as error:
+                    if error.errno != errno.EBADF:
+                        raise
+            return result
+        auth = config = None
+        child = None
+        try:
+            before = open_fds()
+            store(slot / "descriptor",
+                  "version=1\nheader.type=endpoint\nvendor_id=0x1234\n"
+                  "device_id=1\nsubsystem_vendor_id=0x1234\nsubsystem_device_id=1\n"
+                  "class=0xff0000\nrevision=0\nintx.pin=none\n"
+                  "bar0.type=io\nbar0.size=4\nbar0.prefetchable=0\n"
+                  "config0.bar=0\nconfig0.offset=0\nconfig0.width=1\nconfig0.space=pio\n")
+            added = open_fds() - before
+            self.assertEqual(len(added), 1)
+            auth = added.pop()
+            config = os.open(slot / "config", os.O_RDWR | os.O_NONBLOCK)
+            with self.assertRaises(BlockingIOError):
+                os.read(config, 40)
+            with closing(select.kqueue()) as queue:
+                queue.control([select.kevent(config, filter=select.KQ_FILTER_READ,
+                                             flags=select.KQ_EV_ADD)], 0, 0)
+                self.assertEqual(queue.control(None, 1, 0), [])
+                for action in ("signal", "revoke"):
+                    child = subprocess.Popen(
+                        [sys.executable, "-c", """
+import ctypes, errno, fcntl, os, signal, sys
+fd = int(sys.argv[1])
+action = sys.argv[2]
+signal.signal(signal.SIGUSR1, lambda signum, frame: None)
+signal.siginterrupt(signal.SIGUSR1, True)
+fcntl.fcntl(fd, fcntl.F_SETFL, 0)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.read.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+libc.read.restype = ctypes.c_ssize_t
+buffer = ctypes.create_string_buffer(40)
+result = libc.read(fd, buffer, len(buffer))
+error = ctypes.get_errno()
+allowed = (errno.EINTR,) if action == 'signal' else (errno.ENXIO, errno.EBADF, errno.EIO)
+if result != -1 or error not in allowed:
+    raise RuntimeError('config read result=%d errno=%d' % (result, error))
+print(action, flush=True)
+""", str(config), action], pass_fds=(config,), stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE)
+                    deadline = time.monotonic() + 10
+                    while True:
+                        wait = subprocess.check_output(
+                            ["ps", "-p", str(child.pid), "-o", "wchan="],
+                            text=True).strip()
+                        # ps displays only the first eight characters here.
+                        if wait == "vmmfspci":
+                            break
+                        self.assertIsNone(child.poll())
+                        self.assertLess(time.monotonic(), deadline,
+                                        "config reader wait channel: %r" % wait)
+                        time.sleep(0.02)
+                    if action == "signal":
+                        child.send_signal(signal.SIGUSR1)
+                    else:
+                        slot.rmdir()
+                    output, error = child.communicate(timeout=10)
+                    self.assertEqual(child.returncode, 0, error.decode())
+                    self.assertEqual(output, (action + "\n").encode())
+                    if action == "signal":
+                        # Interrupted read does not release the responder or EOF its knote.
+                        fcntl.fcntl(config, fcntl.F_SETFL, os.O_NONBLOCK)
+                        with self.assertRaises(BlockingIOError):
+                            os.read(config, 40)
+                        self.assertEqual(queue.control(None, 1, 0), [])
+            self.assertFalse(slot.exists())
+        finally:
+            if child is not None and child.poll() is None:
+                # Deactivate wakes even a regression's uninterruptible reader.
+                if slot.exists():
+                    slot.rmdir()
+                child.kill()
+                child.communicate(timeout=10)
+            for fd in (config, auth):
+                if fd is not None:
+                    os.close(fd)
+            if slot.exists():
+                slot.rmdir()
+
     def setUp(self):
         self.machine = ROOT / ("control-" + self._testMethodName)
         self.machine.mkdir()

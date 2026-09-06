@@ -224,17 +224,27 @@ struct vop_read_args {
     struct vnode *a_vp; struct uio *a_uio; void *a_fp; int a_ioflag;
 };
 #define IO_NDELAY 1
-#define PINTERLOCKED 0
+#define PINTERLOCKED 2
+#define PCATCH 4
 static struct vmmfs_pcislot_config config;
 static struct vmmfs_pcislot_config_request request, next;
-static unsigned mode, copies, notifications;
+static unsigned mode, copies, notifications, sleeps;
 static int copy_error;
 static void lwkt_gettoken(struct token *t) { ++t->held; }
 static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
 #define KNOTE(list, hint) ((void)(list), (void)(hint))
-static void tsleep_interlock(void *p, int flags) { (void)p; (void)flags; assert(0); }
+static void tsleep_interlock(void *p, int flags) {
+    assert(p == &config && flags == PCATCH);
+    assert(config.node.token.held && config.token.held);
+}
 static int tsleep(void *p, int flags, const char *name, int timeout) {
-    (void)p; (void)flags; (void)name; (void)timeout; assert(0); return 0;
+    (void)name;
+    assert(p == &config && flags == (PINTERLOCKED | PCATCH) && !timeout);
+    assert(!config.node.token.held && !config.token.held);
+    ++sleeps;
+    if (mode == 10) { config.node.dead = config.closed = true; return 0; }
+    if (mode == 11 && sleeps == 1) return 0;
+    return EINTR;
 }
 static void
 vmmfs_pcislot_config_wake_next(struct vmmfs_pcislot_config *c) {
@@ -267,14 +277,24 @@ int main(void) {
     struct vnode vnode = { &config };
     struct uio uio = { sizeof(struct vmmfs_pci_config_request) };
     struct vop_read_args args = { &vnode, &uio, &config, IO_NDELAY };
-    for (mode = 0; mode < 8; ++mode) {
+    for (mode = 0; mode < 12; ++mode) {
         memset(&config, 0, sizeof(config));
         memset(&request, 0, sizeof(request)); memset(&next, 0, sizeof(next));
         TAILQ_INIT(&config.requests);
         request.request.generation = 11; request.request.sequence = 22;
-        TAILQ_INSERT_TAIL(&config.requests, &request, entry);
+        if (mode < 8) TAILQ_INSERT_TAIL(&config.requests, &request, entry);
         config.responder = &config;
-        copies = notifications = 0;
+        copies = notifications = sleeps = 0;
+        args.a_ioflag = mode < 8 || mode == 9 ? IO_NDELAY : 0;
+        if (mode >= 8) {
+            int expected = mode == 9 ? EAGAIN : mode == 10 ? ENXIO : EINTR;
+            assert(vmmfs_pcislot_config_read(&args) == expected);
+            assert(!config.token.held && !config.node.token.held);
+            assert(!copies && !notifications && TAILQ_EMPTY(&config.requests));
+            assert(config.responder == &config);
+            assert(sleeps == (mode == 9 ? 0 : mode == 11 ? 2 : 1));
+            continue;
+        }
         copy_error = mode == 0 ? 0 : EFAULT;
         assert(vmmfs_pcislot_config_read(&args) == copy_error);
         assert(copies == 1 && !config.token.held && !config.node.token.held);
