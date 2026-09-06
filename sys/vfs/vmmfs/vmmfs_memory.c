@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * vmmfs machine vCPU declaration node.
+ * vmmfs machine memory declaration node.
  */
 #include <sys/dirent.h>
 #include <sys/errno.h>
@@ -37,8 +37,6 @@ static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
 static void vmmfs_memory_drop(struct vmmfs_node *);
 static void vmmfs_memory_object_reference(struct vm_object *);
-static int vmmfs_memory_node_load(struct vmmfs_node *, char *, size_t, size_t *);
-static int vmmfs_memory_node_store(struct vmmfs_node *, const char *, size_t);
 
 static int
 vmmfs_memory_deactivate(struct vmmfs_node *node)
@@ -63,9 +61,10 @@ struct vop_ops vmmfs_memory_vops = {
 };
 
 static int
-vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
+vmmfs_memory_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 	size_t *length)
 {
+	struct vmmfs_memory *memory = (struct vmmfs_memory *)node;
 	uint64_t size;
 	int result;
 
@@ -82,8 +81,9 @@ vmmfs_memory_load(struct vmmfs_memory *memory, char *buffer, size_t capacity,
 }
 
 static int
-vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t length)
+vmmfs_memory_store(struct vmmfs_node *node, const char *buffer, size_t length)
 {
+	struct vmmfs_memory *memory = (struct vmmfs_memory *)node;
 	uint64_t value;
 	size_t index;
 	unsigned int digit;
@@ -119,21 +119,6 @@ vmmfs_memory_store(struct vmmfs_memory *memory, const char *buffer, size_t lengt
 	return (0);
 }
 
-static int
-vmmfs_memory_node_load(struct vmmfs_node *node, char *buffer,
-	size_t capacity, size_t *length)
-{
-	return (vmmfs_memory_load((struct vmmfs_memory *)node, buffer,
-	    capacity, length));
-}
-
-static int
-vmmfs_memory_node_store(struct vmmfs_node *node, const char *buffer,
-	size_t length)
-{
-	return (vmmfs_memory_store((struct vmmfs_memory *)node, buffer, length));
-}
-
 int
 vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 	struct vmmfs_memory *memory, struct vnode **vnodep)
@@ -158,8 +143,8 @@ vmmfs_memory_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 		vmmfs_node_hold(parent);
 	memory->node.load_limit = 32;
 	memory->node.store_limit = 31;
-	memory->node.load = vmmfs_memory_node_load;
-	memory->node.store = vmmfs_memory_node_store;
+	memory->node.load = vmmfs_memory_load;
+	memory->node.store = vmmfs_memory_store;
 	memory->node.inode = vmmfs_root_allocate_inode(root);
 	memory->node.mode = VMMFS_MEMORY_MODE;
 	memory->node.size = vmmfs_node_decimal_size(memory->size);

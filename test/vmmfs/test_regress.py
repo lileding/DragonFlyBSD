@@ -60,6 +60,95 @@ COMMON = """
 
 class Regressions(unittest.TestCase):
 
+    def test_control_properties_preserve_commit_and_admission(self):
+        run_c(COMMON + r"""
+#include <sys/types.h>
+#define PAGE_SIZE 4096
+#define ksnprintf snprintf
+#define bcopy(s, d, n) memcpy(d, s, n)
+struct token { unsigned held; };
+struct vmmfs_node { struct token token; bool dead; off_t size; };
+struct vmmfs_memory { struct vmmfs_node node; uint64_t size; };
+struct vmmfs_loader { struct vmmfs_node node; char script[PAGE_SIZE]; };
+struct vmmfs_machine {
+    struct vmmfs_node node;
+    void *machine;
+    struct { struct vmmfs_node node; } boot;
+};
+static struct vmmfs_machine machine;
+static void lwkt_gettoken(struct token *token) { ++token->held; }
+static void lwkt_reltoken(struct token *token) {
+    assert(token->held); --token->held;
+}
+static struct vmmfs_machine *vmmfs_memory_machine(struct vmmfs_memory *memory) {
+    assert(memory->node.token.held == 1); return &machine;
+}
+static struct vmmfs_machine *vmmfs_loader_machine(struct vmmfs_loader *loader) {
+    assert(loader->node.token.held == 1); return &machine;
+}
+off_t
+""" + function("vmmfs_node.c", "vmmfs_node_decimal_size") + """
+static int
+""" + function("vmmfs_memory.c", "vmmfs_memory_load") + """
+static int
+""" + function("vmmfs_memory.c", "vmmfs_memory_store") + """
+static int
+""" + function("vmmfs_loader.c", "vmmfs_loader_load") + """
+static int
+""" + function("vmmfs_loader.c", "vmmfs_loader_store") + r"""
+int main(void) {
+    struct vmmfs_memory memory = { .node.token.held = 1 };
+    struct vmmfs_loader loader = { .node.token.held = 1 };
+    char buffer[PAGE_SIZE + 1];
+    size_t length;
+    assert(vmmfs_memory_store((void *)&memory, "4096\n", 5) == 0);
+    assert(memory.size == 4096 && memory.node.size == 5);
+    assert(machine.boot.node.size == 4096 && !machine.node.token.held);
+    assert(vmmfs_memory_load((void *)&memory, buffer, sizeof(buffer), &length) == 0);
+    assert(length == 5 && memcmp(buffer, "4096\n", 5) == 0);
+    const char *invalid[] = { "", "\n", "-1", " 1", "1x", "1\n\n",
+        "18446744073709551616" };
+    for (unsigned index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        assert(vmmfs_memory_store((void *)&memory, invalid[index],
+            strlen(invalid[index])) == (index == 6 ? ERANGE : EINVAL));
+        assert(memory.size == 4096 && memory.node.size == 5 &&
+            machine.boot.node.size == 4096 && !machine.node.token.held);
+    }
+    assert(vmmfs_memory_load((void *)&memory, buffer, 5, &length) == EOVERFLOW);
+    machine.machine = &machine;
+    assert(vmmfs_memory_store((void *)&memory, "8192", 4) == EBUSY);
+    assert(memory.size == 4096 && machine.boot.node.size == 4096);
+    machine.machine = NULL;
+    memory.node.dead = true;
+    assert(vmmfs_memory_store((void *)&memory, "8192", 4) == ENOENT);
+    assert(vmmfs_memory_load((void *)&memory, buffer, sizeof(buffer), &length) == ENOENT);
+
+    assert(vmmfs_loader_store((void *)&loader, "exec loader\n", 12) == 0);
+    assert(strcmp(loader.script, "exec loader") == 0 && loader.node.size == 12);
+    assert(vmmfs_loader_load((void *)&loader, buffer, sizeof(buffer), &length) == 0);
+    assert(length == 12 && memcmp(buffer, "exec loader\n", 12) == 0);
+    assert(vmmfs_loader_store((void *)&loader, "", 0) == EINVAL);
+    assert(vmmfs_loader_store((void *)&loader, "\n", 1) == ENAMETOOLONG);
+    memset(buffer, 'x', PAGE_SIZE);
+    assert(vmmfs_loader_store((void *)&loader, buffer, PAGE_SIZE) == ENAMETOOLONG);
+    assert(strcmp(loader.script, "exec loader") == 0 && loader.node.size == 12);
+    machine.machine = &machine;
+    assert(vmmfs_loader_store((void *)&loader, "other", 5) == EBUSY);
+    assert(strcmp(loader.script, "exec loader") == 0 && loader.node.size == 12);
+    machine.machine = NULL;
+    assert(vmmfs_loader_store((void *)&loader, buffer, PAGE_SIZE - 1) == 0);
+    assert(loader.script[PAGE_SIZE - 1] == 0 && loader.node.size == PAGE_SIZE);
+    assert(vmmfs_loader_load((void *)&loader, buffer, PAGE_SIZE, &length) == EOVERFLOW);
+    assert(vmmfs_loader_load((void *)&loader, buffer, sizeof(buffer), &length) == 0);
+    assert(length == PAGE_SIZE && buffer[PAGE_SIZE - 1] == '\n');
+    loader.node.dead = true;
+    assert(vmmfs_loader_store((void *)&loader, "other", 5) == ENOENT);
+    assert(vmmfs_loader_load((void *)&loader, buffer, sizeof(buffer), &length) == ENOENT);
+    assert(!machine.node.token.held);
+    return 0;
+}
+""")
+
     def test_config_copy_failure_retries_only_the_same_live_request(self):
         run_c(COMMON + r"""
 #include <sys/queue.h>

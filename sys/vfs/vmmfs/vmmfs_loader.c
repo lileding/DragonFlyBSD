@@ -45,8 +45,6 @@ static int vmmfs_loader_exec_shell(const char *);
 static int vmmfs_loader_install_fd(struct file *, int);
 static void vmmfs_loader_set_process_cred(struct proc *, struct ucred *);
 static void vmmfs_loader_drop(struct vmmfs_node *);
-static int vmmfs_loader_node_load(struct vmmfs_node *, char *, size_t, size_t *);
-static int vmmfs_loader_node_store(struct vmmfs_node *, const char *, size_t);
 
 static int
 vmmfs_loader_deactivate(struct vmmfs_node *node)
@@ -238,9 +236,10 @@ vmmfs_loader_set_process_cred(struct proc *process, struct ucred *cred)
 }
 
 static int
-vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer,
+vmmfs_loader_load(struct vmmfs_node *node, char *buffer,
 	size_t capacity, size_t *length)
 {
+	struct vmmfs_loader *loader = (struct vmmfs_loader *)node;
 	int result;
 
 	if (loader == NULL || loader->node.dead)
@@ -253,9 +252,11 @@ vmmfs_loader_load(struct vmmfs_loader *loader, char *buffer,
 }
 
 static int
-vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
+vmmfs_loader_store(struct vmmfs_node *node, const char *buffer,
 	size_t length)
 {
+	struct vmmfs_loader *loader = (struct vmmfs_loader *)node;
+
 	if (length == 0)
 		return (EINVAL);
 	if (buffer[length - 1] == '\n')
@@ -274,21 +275,6 @@ vmmfs_loader_store(struct vmmfs_loader *loader, const char *buffer,
 	loader->node.size = (off_t)length + 1;
 	lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
 	return (0);
-}
-
-static int
-vmmfs_loader_node_load(struct vmmfs_node *node, char *buffer,
-	size_t capacity, size_t *length)
-{
-	return (vmmfs_loader_load((struct vmmfs_loader *)node, buffer,
-	    capacity, length));
-}
-
-static int
-vmmfs_loader_node_store(struct vmmfs_node *node, const char *buffer,
-	size_t length)
-{
-	return (vmmfs_loader_store((struct vmmfs_loader *)node, buffer, length));
 }
 
 int
@@ -316,8 +302,8 @@ vmmfs_loader_init(struct vmmfs_mount *mount, struct vmmfs_node *parent,
 		vmmfs_node_hold(parent);
 	loader->node.load_limit = PAGE_SIZE + 1;
 	loader->node.store_limit = PAGE_SIZE - 1;
-	loader->node.load = vmmfs_loader_node_load;
-	loader->node.store = vmmfs_loader_node_store;
+	loader->node.load = vmmfs_loader_load;
+	loader->node.store = vmmfs_loader_store;
 	if (mount == NULL || mount->loader_vops == NULL) {
 		error = ENXIO;
 		goto fail;
