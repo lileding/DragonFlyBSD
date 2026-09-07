@@ -214,7 +214,7 @@ static struct filterops vmmfs_pcislot_resource_read_filterops = {
 	vmmfs_pcislot_resource_filter_read,
 };
 
-static int
+static bool
 vmmfs_pcislot_resource_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot_resource *resource =
@@ -229,7 +229,7 @@ vmmfs_pcislot_resource_deactivate(struct vmmfs_node *node)
 	lwkt_reltoken(&resource->token);
 	if (pager != NULL)
 		vm_object_deallocate(pager);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_pcislot_resource_vops = {
@@ -367,7 +367,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		resource->node.dead = false;
 		resource->node.references = 1;
 		lockinit(&resource->node.lock, "vmmfsnode", 0, 0);
-		resource->node.deactivate = vmmfs_pcislot_resource_deactivate;
 		resource->node.drop = vmmfs_pcislot_resource_drop;
 		vmmfs_node_hold(&resources->node);
 		resource->node.mode = VMMFS_PCISLOT_RESOURCE_MODE;
@@ -382,6 +381,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		error = vmmfs_pcislot_resource_create_vnode(resource, slot->node.mount);
 		if (error != 0)
 			goto fail;
+		resource->node.deactivate = vmmfs_pcislot_resource_deactivate;
 	}
 	*resourcesp = resources;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_POWER_ON,
@@ -423,18 +423,16 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 		vnode = resource->node.vnode;
 		lwkt_reltoken(&resources->token);
 		if (vnode != NULL) {
-			if (vmmfs_vnode_deactivate(vnode) != 0)
-				kprintf("vmmfs: vmmfs_vnode_deactivate failed\n");
-			vrele(vnode);
+			(void)vmmfs_node_deactivate(&resource->node);
 		} else {
-			int error;
+			bool closed;
 
 			/*
 			 * Construction failed before vnode ownership.  Release the
 			 * pager's resource reference before dropping this private node.
 			 */
-			error = vmmfs_pcislot_resource_deactivate(&resource->node);
-			KKASSERT(error == 0);
+			closed = vmmfs_pcislot_resource_deactivate(&resource->node);
+			KKASSERT(closed);
 			vmmfs_node_put(&resource->node);
 		}
 	}
@@ -567,9 +565,8 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 		if (candidate_length == length &&
 		    bcmp(candidate, name, length) == 0) {
 			*vnodep = resources->items[index].node.vnode;
-			error = *vnodep == NULL ? ENOENT : 0;
-			if (error == 0)
-				vhold(*vnodep);
+			error = 0;
+			vhold(*vnodep);
 			goto done;
 		}
 	}

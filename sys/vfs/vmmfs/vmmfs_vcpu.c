@@ -50,7 +50,7 @@ static int vmmfs_vcpu_complete_absent_memory(struct vmmfs_vcpu_thread *,
 static void vmmfs_vcpu_thread_main(void *, struct trapframe *);
 static void vmmfs_vcpu_drop(struct vmmfs_node *);
 
-static int
+static bool
 vmmfs_vcpu_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_vcpu *vcpu = (struct vmmfs_vcpu *)node;
@@ -64,7 +64,7 @@ vmmfs_vcpu_deactivate(struct vmmfs_node *node)
 			kprintf("vmmfs: vCPU close drain: %d\n", error);
 	}
 	lwkt_reltoken(&vcpu->token);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_vcpu_vops = {
@@ -159,7 +159,6 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.dead = false;
 	vcpu->node.references = 1;
 	lockinit(&vcpu->node.lock, "vmmfsnode", 0, 0);
-	vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 	vcpu->node.drop = vmmfs_vcpu_drop;
 	vmmfs_node_hold(parent);
 	vcpu->node.load_limit = 32;
@@ -171,8 +170,10 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.size = vmmfs_node_decimal_size(vcpu->count);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->vcpu_vops, VREG, &vcpu->node);
-	if (error == 0)
+	if (error == 0) {
+		vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 		return (0);
+	}
 
 	vmmfs_node_put(&vcpu->node);
 	return (error);

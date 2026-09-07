@@ -28,11 +28,11 @@ static volatile u_int vmmfs_machine_next_id;
 static int vmmfs_machine_id_load(struct vmmfs_node *, char *, size_t, size_t *);
 static void vmmfs_machine_id_drop(struct vmmfs_node *);
 
-static int
+static bool
 vmmfs_machine_id_deactivate(struct vmmfs_node *node)
 {
 	(void)node;
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_machine_id_vops = {
@@ -72,7 +72,6 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.dead = false;
 	identity->node.references = 1;
 	lockinit(&identity->node.lock, "vmmfsnode", 0, 0);
-	identity->node.deactivate = vmmfs_machine_id_deactivate;
 	identity->node.drop = vmmfs_machine_id_drop;
 	vmmfs_node_hold(parent);
 	identity->node.load_limit = sizeof("999999\n");
@@ -85,8 +84,10 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.size = vmmfs_node_decimal_size(value);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->machine_id_vops, VREG, &identity->node);
-	if (error == 0)
+	if (error == 0) {
+		identity->node.deactivate = vmmfs_machine_id_deactivate;
 		return (0);
+	}
 	identity->node.inode = 0;
 	machine->id = 0;
 	vmmfs_node_put(&identity->node);

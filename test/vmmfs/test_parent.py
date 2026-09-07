@@ -9,7 +9,7 @@ class ParentTeardown(unittest.TestCase):
 #include <stdlib.h>
 struct token { unsigned held; };
 struct vmmfs_node { struct vnode *vnode; struct token token;  struct lock lock; bool dead;};
-struct vnode { unsigned refs; };
+struct vnode { unsigned refs; void *v_data; };
 struct CHILD_TYPE { struct vmmfs_node node; };
 struct ENTRY { struct CHILD_TYPE *CHILD; };
 struct registry { struct ENTRY *MEMBER; };
@@ -36,7 +36,14 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     /* A previously admitted remover may already be closing this child. */
     return mode == 1 ? EBUSY : 0;
 }
-static int
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
+}
+static bool
 FUNCTION
 int main(void) {
     root.registry = &registry;
@@ -44,10 +51,10 @@ int main(void) {
     for (mode = 0; mode != 2; ++mode) {
         registry.MEMBER = malloc(sizeof(*registry.MEMBER));
         child.node.vnode = &vnode; registry.MEMBER->CHILD = &child;
-        vnode.refs = 1; release_count = 0;
-        int error = DEACTIVATE(&root.node);
+        vnode.refs = 1; vnode.v_data = &child; release_count = 0;
+        bool closed = DEACTIVATE(&root.node);
         assert(root.token.held == 0);
-        assert(error == 0 && registry.MEMBER == NULL && vnode.refs == 0);
+        assert(closed && registry.MEMBER == NULL && vnode.refs == 0);
         assert(release_count == 1);
     }
     return 0;
@@ -100,13 +107,20 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(v->index == called++);
     return v->index == veto_index ? child_error : 0;
 }
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
+}
 static void vrele(struct vnode *v) {
     assert(v != NULL && v->refs != 0);
     assert(machine.token.held == 1);
     if (--v->refs == 0)
         ++dropped;
 }
-static int
+static bool
 """ + function("vmmfs_machine.c", "vmmfs_machine_deactivate") + r"""
 int main(void) {
     struct vnode **fields[] = {
@@ -114,7 +128,7 @@ int main(void) {
         &machine.loader.node.vnode, &machine.boot.node.vnode, &stopped.node.vnode,
         &machine.pciroot.node.vnode, &machine.serialroot.node.vnode, &machine.events.node.vnode
     };
-    const int errors[] = { 0, EBUSY };
+    const int errors[] = { 0 }; /* Children cannot veto machine teardown. */
     unsigned trial, index;
     for (trial = 0; trial < NELEM(errors); ++trial) {
         for (veto_index = 0; veto_index < NELEM(children); ++veto_index) {
@@ -130,12 +144,12 @@ int main(void) {
                 *fields[index] = &children[index];
             }
             machine.machine = &machine;
-            assert(vmmfs_machine_deactivate(&machine.node) == EBUSY);
+            assert(vmmfs_machine_deactivate(&machine.node) == false);
             assert(called == 0 && dropped == 0 && machine.node.vnode == &parent);
             assert(machine.token.held == 1);
             assert(machine.node.dead && machine.token.acquired == 0);
             machine.machine = NULL;
-            assert(vmmfs_machine_deactivate(&machine.node) == 0);
+            assert(vmmfs_machine_deactivate(&machine.node) == true);
             assert(machine.node.dead && machine.token.acquired == 0);
             /* Deactivation does not detach the vnode backlink. */
             assert(called == 9 && dropped == 9 && machine.node.vnode == &parent);
@@ -148,7 +162,7 @@ int main(void) {
 }
 """)
 
-    def test_stop_admission_rejects_retired_siblings(self):
+    def test_stop_uses_fixed_children_and_preserves_runtime_admission(self):
         run_c(COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
@@ -192,6 +206,10 @@ static void vmmfs_vnode_discard(struct vnode *v) {
     assert(v == &candidate && v->refs == 1);
     v->v_data = NULL; v->refs = 0; ++discarded;
 }
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    vmmfs_vnode_discard(n->vnode); vmmfs_node_put(n); return true;
+}
 static int vmmfs_machine_abort(void *launch) { (void)launch; assert(0); return 0; }
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *m) {
     (void)m; assert(0); return 0;
@@ -216,15 +234,11 @@ int main(void) {
     machine.vcpu.node.references = machine.events.node.references = 1;
     assert(vmmfs_machine_request_stop(&machine, "external") == 0 && logs == 1);
     assert(machine.vcpu.node.references == 1 && machine.events.node.references == 1);
-    /* A child veto may reopen machine admission after the vCPU was reclaimed. */
-    machine.vcpu.node.vnode = NULL; machine.vcpu.node.references = 0;
-    assert(vmmfs_machine_request_stop(&machine, "external") == ENOENT);
+    /* Fixed children remain usable; runtime release can still reject work. */
+    machine.runtime_releasing = true;
     assert(vmmfs_machine_prepare_stopped(&machine) == EBUSY);
     assert(!machine.stopped && allocated == 0 && discarded == 1);
-    /* Initial construction creates stopped before the events node exists. */
-    machine.vcpu.node.vnode = &cpu; machine.vcpu.node.references = 1;
-    machine.events.node.vnode = NULL; machine.events.node.references = 0;
-    assert(vmmfs_machine_request_stop(&machine, "external") == ENOENT);
+    machine.runtime_releasing = false;
     assert(vmmfs_machine_prepare_stopped(&machine) == 0);
     assert(machine.stopped->node.vnode == &candidate && allocated == 1);
     struct vmmfs_node *node = candidate.v_data;

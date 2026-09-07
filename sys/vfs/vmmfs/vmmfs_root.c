@@ -56,7 +56,7 @@ static int vmmfs_root_create_item(struct vmmfs_node *, struct mount *,
 	const char *, size_t, struct vnode **);
 static int vmmfs_root_remove_item(struct vmmfs_node *, const char *,
 	size_t);
-static int vmmfs_root_deactivate(struct vmmfs_node *);
+static bool vmmfs_root_deactivate(struct vmmfs_node *);
 static void vmmfs_root_drop(struct vmmfs_node *);
 
 
@@ -85,8 +85,6 @@ vmmfs_root_machine_compare(struct vmmfs_root_machine *left,
 
 	left_machine = left->machine;
 	right_machine = right->machine;
-	KKASSERT(left_machine != NULL);
-	KKASSERT(right_machine != NULL);
 	return (strcmp(left_machine->name, right_machine->name));
 }
 
@@ -113,7 +111,6 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_node **objectp)
 	lwkt_token_init(&root->token, "vmmfsnode");
 	lockinit(&root->node.lock, "vmmfsnode", 0, 0);
 	root->node.drop = vmmfs_root_drop;
-	root->node.deactivate = vmmfs_root_deactivate;
 	root->node.get_item = vmmfs_root_get_item;
 	root->node.read_item = vmmfs_root_read_item;
 	root->node.create_item = vmmfs_root_create_item;
@@ -131,10 +128,10 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_node **objectp)
 		vmmfs_node_put(&root->node);
 		return (error);
 	}
+	root->node.deactivate = vmmfs_root_deactivate;
 	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
 	if (error != 0) {
-		vmmfs_vnode_discard(vnode);
-		vmmfs_node_put(&root->node);
+		(void)vmmfs_node_deactivate(&root->node);
 		return (error);
 	}
 	vsetflags(vnode, VROOT);
@@ -159,14 +156,12 @@ vmmfs_root_allocate_inode(struct vmmfs_root *root)
 	return atomic_fetchadd_int(&root->next_inode, 1);
 }
 
-static int
+static bool
 vmmfs_root_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_root *root = (struct vmmfs_root *)node;
-	int error;
 
-	error = RB_EMPTY(&root->machines) ? 0 : EBUSY;
-	return (error);
+	return (RB_EMPTY(&root->machines));
 }
 
 
@@ -193,7 +188,6 @@ vmmfs_root_find_locked(struct vmmfs_root *root, const char *name,
 
 	RB_FOREACH(entry, vmmfs_machine_tree, &root->machines) {
 		machine = entry->machine;
-		KKASSERT(machine != NULL);
 		if (strlen(machine->name) == namelen &&
 		    bcmp(machine->name, name, namelen) == 0)
 			return (entry);
@@ -242,7 +236,6 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 			continue;
 		item->vnode = entry->machine->node.vnode;
 		machine = entry->machine;
-		KKASSERT(machine != NULL);
 		item->inode = machine->node.inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
 		vhold(item->vnode);
@@ -261,7 +254,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	struct vmmfs_root_machine *entry;
 	struct vnode *vnode;
 	struct vmmfs_machine *machine;
-	int error, cleanup_error;
+	int error;
 
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (ENAMETOOLONG);
@@ -283,10 +276,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	}
 	lwkt_reltoken(&root->token);
 	if (error != 0) {
-		cleanup_error = vmmfs_vnode_deactivate(vnode);
-		if (cleanup_error != 0)
-			kprintf("vmmfs: rejected machine cleanup: %d\n", cleanup_error);
-		vrele(vnode);
+		(void)vmmfs_node_deactivate(&machine->node);
 		kfree(entry, M_VMMFS);
 		return (error);
 	}

@@ -25,11 +25,11 @@
 static void vmmfs_stopped_drop(struct vmmfs_node *);
 static int vmmfs_stopped_setattr(struct vop_setattr_args *);
 
-static int
+static bool
 vmmfs_stopped_deactivate(struct vmmfs_node *node)
 {
 	(void)node;
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_stopped_vops = {
@@ -76,7 +76,6 @@ vmmfs_stopped_create(struct vmmfs_node *parent,
 	stopped->node.dead = false;
 	stopped->node.references = 1;
 	lockinit(&stopped->node.lock, "vmmfsnode", 0, 0);
-	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	stopped->node.drop = vmmfs_stopped_drop;
 	vmmfs_node_hold(parent);
 	stopped->node.load_limit = 0;
@@ -92,6 +91,7 @@ vmmfs_stopped_create(struct vmmfs_node *parent,
 		vmmfs_node_put(&stopped->node);
 		return (error);
 	}
+	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	*objectp = stopped;
 	return (0);
 }

@@ -82,7 +82,7 @@ int main(void) {
     slot.descriptor.node.token.held = 1;
     /* Descriptor owns auth, not its sibling powered collection. */
     slot.resources = &resources; resources.references = 2;
-    assert(vmmfs_pcislot_descriptor_deactivate(&slot.descriptor.node) == 0);
+    assert(vmmfs_pcislot_descriptor_deactivate(&slot.descriptor.node) == true);
     assert(slot.resources == &resources && resources.references == 2);
     assert(!slot.descriptor.committed && slot.descriptor.auth == NULL);
     assert(auth_revoked == 1 && revoked == 0);

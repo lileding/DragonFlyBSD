@@ -252,9 +252,12 @@ vmmfs_unmount(struct mount *mount, int flags)
 	root_vnode = (state->root != NULL ? state->root->vnode : NULL);
 	if (root_vnode == NULL)
 		return (ENXIO);
-	error = vmmfs_vnode_deactivate(root_vnode);
-	if (error != 0)
-		return (error);
+	/* Preserve the mount's base reference for vflush or failed-unmount retry. */
+	vref(root_vnode);
+	if (!vmmfs_node_deactivate(state->root)) {
+		vrele(root_vnode);
+		return (EBUSY);
+	}
 	/* root_create() retains the filesystem's base root-vnode reference. */
 	error = vflush(mount, 1, (flags & MNT_FORCE) ? FORCECLOSE : 0);
 	if (error != 0) {

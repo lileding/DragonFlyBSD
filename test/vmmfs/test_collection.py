@@ -16,7 +16,7 @@ class Collection(unittest.TestCase):
 enum { VDIR = 1, VREG };
 struct vnode;
 struct mount { int unused; };
-struct vmmfs_node {
+struct vmmfs_node { struct vnode *vnode;
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
     int (*create_item)(struct vmmfs_node *, struct mount *, const char *,
         size_t, struct vnode **);
@@ -38,6 +38,7 @@ struct vop_nrmdir_args {
     struct vnode *a_dvp; struct nchandle *a_nch; void *a_cred;
 };
 static struct vnode child, *registry;
+static struct vmmfs_node child_node;
 static int lookup_error, create_error, get_error, veto;
 static unsigned deactivations, removals, unlinks;
 static bool dead;
@@ -79,6 +80,13 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     if (veto) return veto;
     dead = true; return 0;
 }
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
+}
 static int get_item(struct vmmfs_node *node, const char *name, size_t length,
     struct vnode **out) {
     (void)node; assert(length == 5 && !memcmp(name, "child", 5));
@@ -92,13 +100,14 @@ static int create_item(struct vmmfs_node *node, struct mount *mount,
     *out = NULL;
     if (create_error) return create_error;
     assert(registry == NULL && child.refs == 0);
+    child_node.vnode = &child; child.v_data = &child_node;
     child.refs = 2; /* Registry and the independent create_item result. */
     registry = &child; *out = &child; return 0;
 }
 static int remove_item(struct vmmfs_node *node, const char *name,
     size_t length) {
     (void)node; assert(length == 5 && !memcmp(name, "child", 5));
-    assert(dead && registry == &child && child.refs >= 2);
+    assert(dead && registry == &child && child.refs >= 1);
     registry = NULL; ++removals; vrele(&child); return 0;
 }
 """ + bodies + r"""
@@ -166,7 +175,7 @@ int main(void) {
 enum { VDIR = 1, DT_DIR = 4 };
 struct vnode;
 struct vmmfs_node_item { struct vnode *vnode; ino_t inode; char name[16]; };
-struct vmmfs_node {
+struct vmmfs_node { struct vnode *vnode;
     struct vmmfs_node *parent; ino_t inode;
     int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
  struct lock lock; bool dead;};

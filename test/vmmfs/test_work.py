@@ -43,7 +43,7 @@ class Work(unittest.TestCase):
             self.assertIn("struct lwkt_token token;", fields, name)
         for path in SOURCE.glob("*.c"):
             self.assertNotIn("->node.token", path.read_text(), path.name)
-        for name in ("vmmfs_vnode_deactivate", "vmmfs_node_reclaim", "vmmfs_node_put"):
+        for name in ("vmmfs_node_deactivate", "vmmfs_node_reclaim", "vmmfs_node_put"):
             self.assertNotIn("lwkt_", function("vmmfs_node.c", name))
 
     def test_single_evaluation_and_errors(self):
@@ -98,9 +98,9 @@ int main(void) {
 struct lock { pthread_rwlock_t value; };
 struct token { int unused; };
 struct vmmfs_node {
-    struct lock lock; struct token token; bool dead;
+    struct lock lock; struct token token; bool dead; struct vnode *vnode;
     struct vmmfs_node *parent;
-    int (*deactivate)(struct vmmfs_node *);
+    bool (*deactivate)(struct vmmfs_node *);
     int (*load)(struct vmmfs_node *);
 };
 struct vnode { struct vmmfs_node *v_data; atomic_int refs; };
@@ -122,8 +122,7 @@ static int lockmgr(struct lock *lock, int operation) {
     exclusive = false;
     return pthread_rwlock_unlock(&lock->value);
 }
-static void vref(struct vnode *v) { atomic_fetch_add(&v->refs, 1); }
-static void vrele(struct vnode *v) { assert(atomic_fetch_sub(&v->refs, 1) > 1); }
+static void vrele(struct vnode *v) { assert(atomic_fetch_sub(&v->refs, 1) > 0); }
 static int fdrevoke(struct vnode *v, int type, void *cred) {
     (void)v; (void)type; (void)cred; assert(!exclusive); ++closed; return 0;
 }
@@ -137,18 +136,18 @@ static void rendezvous(void) {
 static int load(struct vmmfs_node *n) {
     assert(!n->dead); rendezvous(); assert(!n->dead); return 0;
 }
-static int close_node(struct vmmfs_node *n) {
+static bool close_node(struct vmmfs_node *n) {
     assert(n->dead && !exclusive); ++callback_count;
-    if (veto) { rendezvous(); return EBUSY; }
-    return 0;
+    if (veto) { rendezvous(); return false; }
+    return true;
 }
-""" + call_macro() + "\nint\n" + function(
-            "vmmfs_node.c", "vmmfs_vnode_deactivate") + r"""
+""" + call_macro() + "\nbool\n" + function(
+            "vmmfs_node.c", "vmmfs_node_deactivate") + r"""
 static void *reader(void *arg) {
     (void)arg; assert(VMMFS_CALL(&node, load) == 0); return NULL;
 }
 static void *closer(void *arg) {
-    (void)arg; assert(vmmfs_vnode_deactivate(&vnode) == EBUSY); return NULL;
+    (void)arg; assert(vmmfs_node_deactivate(&node) == false); return NULL;
 }
 static void await_entry(void) {
     pthread_mutex_lock(&mutex);
@@ -162,15 +161,15 @@ static void release_callback(void) {
 int main(void) {
     pthread_t thread;
     pthread_rwlock_init(&node.lock.value, NULL);
-    node.load = load; node.deactivate = close_node;
+    node.vnode = &vnode; node.load = load; node.deactivate = close_node;
     pthread_create(&thread, NULL, reader, NULL); await_entry();
     assert(pthread_rwlock_trywrlock(&node.lock.value) == EBUSY);
     release_callback(); pthread_join(thread, NULL);
     entered = proceed = 0; veto = 1;
     pthread_create(&thread, NULL, closer, NULL); await_entry();
     assert(VMMFS_CALL(&node, load) == ENOENT);
-    assert(vmmfs_vnode_deactivate(&vnode) == EBUSY);
-    assert(callback_count == 1 && atomic_load(&vnode.refs) == 2);
+    assert(vmmfs_node_deactivate(&node) == false);
+    assert(callback_count == 1 && atomic_load(&vnode.refs) == 1);
     assert(pthread_rwlock_tryrdlock(&node.lock.value) == 0);
     assert(node.dead);
     pthread_rwlock_unlock(&node.lock.value);
@@ -178,11 +177,11 @@ int main(void) {
     assert(!node.dead && !closed && callback_count == 1);
     assert(VMMFS_CALL(&node, load) == 0);
     veto = 0;
-    assert(vmmfs_vnode_deactivate(&vnode) == 0);
+    assert(vmmfs_node_deactivate(&node) == true);
     assert(node.dead && closed == 1 && callback_count == 2);
     assert(VMMFS_CALL(&node, load) == ENOENT);
-    assert(vmmfs_vnode_deactivate(&vnode) == EBUSY);
-    assert(callback_count == 2 && atomic_load(&vnode.refs) == 1);
+    assert(vmmfs_node_deactivate(&node) == false);
+    assert(callback_count == 2 && atomic_load(&vnode.refs) == 0);
     pthread_rwlock_destroy(&node.lock.value);
 }
 """

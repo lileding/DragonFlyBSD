@@ -48,7 +48,7 @@ static struct filterops vmmfs_pcislot_events_read_filterops = {
 	vmmfs_pcislot_events_filter_read,
 };
 
-static int
+static bool
 vmmfs_pcislot_events_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot_events *state_node = (struct vmmfs_pcislot_events *)node;
@@ -58,7 +58,7 @@ vmmfs_pcislot_events_deactivate(struct vmmfs_node *node)
 	lwkt_reltoken(&state_node->token);
 	wakeup(state_node);
 	KNOTE(&state_node->kq.ki_note, 0);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_pcislot_events_vops = {
@@ -96,7 +96,6 @@ vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	state_node->node.dead = false;
 	state_node->node.references = 1;
 	lockinit(&state_node->node.lock, "vmmfsnode", 0, 0);
-	state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	state_node->node.drop = vmmfs_pcislot_events_drop;
 	vmmfs_node_hold(parent);
 	state_node->node.mode = VMMFS_PCISLOT_EVENTS_MODE;
@@ -105,6 +104,8 @@ vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	    &parent->mount->pcislot_events_vops, VREG, &state_node->node);
 	if (error != 0)
 		vmmfs_node_put(&state_node->node);
+	else
+		state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	return (error);
 }
 
@@ -130,7 +131,7 @@ vmmfs_pcislot_events_reset(struct vmmfs_pcislot_events *state_node)
 	if (state_node == NULL)
 		return;
 	lwkt_gettoken(&state_node->token);
-	if (!state_node->closed && state_node->buffer != NULL) {
+	if (!state_node->closed) {
 		state_node->start = 0;
 		state_node->length = 0;
 	}
@@ -176,7 +177,7 @@ vmmfs_pcislot_events_log(struct vmmfs_pcislot_events *state_node,
 	}
 	text[length] = '\0';
 	lwkt_gettoken(&state_node->token);
-	if (state_node->closed || state_node->buffer == NULL) {
+	if (state_node->closed) {
 		lwkt_reltoken(&state_node->token);
 		return;
 	}

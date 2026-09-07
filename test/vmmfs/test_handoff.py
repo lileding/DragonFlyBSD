@@ -18,11 +18,11 @@ class CreateHandoff(unittest.TestCase):
         source = COMMON + r"""
 #define kprintf printf
 struct mount { int unused; };
-struct vnode { unsigned refs; struct mount *v_mount; };
+struct vnode { unsigned refs; struct mount *v_mount; void *v_data; };
 struct namecache { const char *nc_name; size_t nc_nlen; };
 struct nchandle { struct namecache *ncp; };
 struct vattr { int va_type; };
-struct vmmfs_node {
+struct vmmfs_node { struct vnode *vnode;
     int (*create_item)(struct vmmfs_node *, struct mount *,
         const char *, size_t, struct vnode **);
     int (*remove_item)(struct vmmfs_node *, const char *, size_t);
@@ -33,7 +33,7 @@ struct vop_nmkdir_args {
 };
 #define VDIR 1
 static unsigned mode, removed;
-static struct vmmfs_node parent;
+static struct vmmfs_node parent, child_node;
 static struct vnode child;
 static int vmmfs_node_vop_branch(struct vnode *v, struct vmmfs_node **n) {
     (void)v; *n = &parent; return 0;
@@ -42,6 +42,7 @@ static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
 static int create(struct vmmfs_node *n, struct mount *m,
     const char *name, size_t len, struct vnode **v) {
     (void)n; (void)m; (void)name; (void)len;
+    child_node.vnode = &child; child.v_data = &child_node;
     child.refs = 2; /* registry + create_item caller */
     *v = &child; return 0;
 }
@@ -63,12 +64,19 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(v->refs);
     return mode == 2 ? EBUSY : 0;
 }
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
+}
 static void cache_setunresolved(struct nchandle *n) { (void)n; }
 static void cache_setvp(struct nchandle *n, struct vnode *v) { (void)n; (void)v; }
 int
 """ + function("vmmfs_node_vops.c", "vmmfs_node_nmkdir") + r"""
 int main(void) {
-    struct vnode directory = { 1, NULL }, *result = NULL;
+    struct vnode directory = { .refs=1 }, *result = NULL;
     struct vattr attr = { VDIR };
     struct namecache name = { "child", 5 };
     struct nchandle handle = { &name };

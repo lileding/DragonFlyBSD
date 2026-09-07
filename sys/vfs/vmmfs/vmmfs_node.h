@@ -52,11 +52,12 @@ struct vmmfs_node {
 	off_t size;
 	bool dead;
 	/*
-	 * Called with dead set, without the lifecycle lock. A veto must leave
+	 * True agrees to closure; false vetoes. Called with dead set, without
+	 * the lifecycle lock. A veto must leave
 	 * resources unchanged; admission is restored under exclusive lock.
 	 * Once cleanup starts, it cannot veto.
 	 */
-	int (*deactivate)(struct vmmfs_node *);
+	bool (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
 	size_t load_limit;
 	size_t store_limit;
@@ -121,16 +122,12 @@ int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
 	struct cdev *, struct vmmfs_node *);
 
 /*
- * Closes admission and revokes file descriptors; does not consume the
- * caller's vnode reference. A NULL callback accepts closure. A veto restores
- * admission under exclusive lock; the callback and revocation run unlocked.
- * An already closed gate returns EBUSY, including while cleanup is in progress.
+ * Closes a complete object and consumes one caller-owned vnode reference.
+ * NULL objects and objects without a deactivate callback need no rollback.
+ * A veto (false) retains the reference; successful closure returns true.
+ * Constructors install the callback only after vnode ownership is established.
  */
-int vmmfs_vnode_deactivate(struct vnode *);
-
-/* Drops a vnode that was never attached to the namespace. */
-void vmmfs_vnode_discard(struct vnode *);
-
+bool vmmfs_node_deactivate(struct vmmfs_node *);
 
 /* Common VOP_RECLAIM handoff for every VMMFS namespace vnode. */
 int vmmfs_node_reclaim(struct vop_reclaim_args *);

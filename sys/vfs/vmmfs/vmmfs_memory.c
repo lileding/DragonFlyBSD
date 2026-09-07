@@ -38,11 +38,11 @@ static int vmmfs_memory_map_vmspace(struct vmspace *, struct vm_object *,
 static void vmmfs_memory_drop(struct vmmfs_node *);
 static void vmmfs_memory_object_reference(struct vm_object *);
 
-static int
+static bool
 vmmfs_memory_deactivate(struct vmmfs_node *node)
 {
 	(void)node;
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_memory_vops = {
@@ -133,7 +133,6 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.dead = false;
 	memory->node.references = 1;
 	lockinit(&memory->node.lock, "vmmfsnode", 0, 0);
-	memory->node.deactivate = vmmfs_memory_deactivate;
 	memory->node.drop = vmmfs_memory_drop;
 	vmmfs_node_hold(parent);
 	memory->node.load_limit = 32;
@@ -145,8 +144,10 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.size = vmmfs_node_decimal_size(memory->size);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->memory_vops, VREG, &memory->node);
-	if (error == 0)
+	if (error == 0) {
+		memory->node.deactivate = vmmfs_memory_deactivate;
 		return (0);
+	}
 
 	vmmfs_node_put(&memory->node);
 	return (error);

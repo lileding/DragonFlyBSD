@@ -57,7 +57,7 @@ static int vmmfs_pcislot_type0_align(uint64_t, uint64_t, uint64_t *);
 static void vmmfs_pcislot_type0_refresh_bar(struct vmmfs_pcislot *,
 	unsigned int);
 static void vmmfs_pcislot_drop(struct vmmfs_node *);
-static int vmmfs_pcislot_deactivate(struct vmmfs_node *);
+static bool vmmfs_pcislot_deactivate(struct vmmfs_node *);
 
 struct vop_ops vmmfs_pcislot_vops = {
 	.vop_default = vop_defaultop,
@@ -98,38 +98,32 @@ vmmfs_pcislot_create(struct vmmfs_node *parent,
 	lockinit(&slot->node.lock, "vmmfsnode", 0, 0);
 	slot->node.drop = vmmfs_pcislot_drop;
 	vmmfs_node_hold(parent);
-	slot->node.deactivate = vmmfs_pcislot_deactivate;
 	slot->node.mode = VMMFS_PCISLOT_MODE;
 	slot->node.size = 0;
 	error = vmmfs_pcislot_events_init(&slot->node, &slot->events);
 	if (error != 0)
-		goto fail_slot;
+		goto fail;
 	error = vmmfs_pcislot_config_init(&slot->node, &slot->config);
 	if (error != 0)
-		goto fail_events;
+		goto fail;
 	error = vmmfs_pcislot_descriptor_init(&slot->node, &slot->descriptor);
 	if (error != 0)
-		goto fail_config;
+		goto fail;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->pcislot_vops, VDIR, &slot->node);
 	if (error != 0)
-		goto fail_descriptor;
+		goto fail;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
 	    "bdf=0000:%02x:%02x.%x", bdf >> 8, (bdf >> 3) & 0x1f,
 	    bdf & 0x7);
+	slot->node.deactivate = vmmfs_pcislot_deactivate;
 	*objectp = slot;
 	return (0);
 
-fail_descriptor:
-	vmmfs_vnode_discard(slot->descriptor.node.vnode);
-	vmmfs_node_put(&slot->descriptor.node);
-fail_config:
-	vmmfs_vnode_discard(slot->config.node.vnode);
-	vmmfs_node_put(&slot->config.node);
-fail_events:
-	vmmfs_vnode_discard(slot->events.node.vnode);
-	vmmfs_node_put(&slot->events.node);
-fail_slot:
+fail:
+	(void)vmmfs_node_deactivate(&slot->descriptor.node);
+	(void)vmmfs_node_deactivate(&slot->config.node);
+	(void)vmmfs_node_deactivate(&slot->events.node);
 	vmmfs_node_put(&slot->node);
 	return (error);
 }
@@ -153,7 +147,7 @@ vmmfs_pcislot_drop(struct vmmfs_node *node)
 	kfree(slot, M_VMMFS);
 }
 
-static int
+static bool
 vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot *slot = (struct vmmfs_pcislot *)node;
@@ -165,11 +159,11 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
 	/* Veto must not sleep and expose a provisional dead gate. */
 	if (!lwkt_trytoken(&parent->token))
-		return (EBUSY);
+		return (false);
 	if (slot->entry != NULL) {
 		if (!lwkt_trytoken(&machine->token)) {
 			lwkt_reltoken(&parent->token);
-			return (EBUSY);
+			return (false);
 		}
 		error = machine->machine != NULL ? EBUSY : 0;
 		if (error == 0) {
@@ -180,19 +174,16 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&parent->token);
 		if (error != 0)
-			return (error);
+			return (error == 0);
 	} else {
 		lwkt_reltoken(&parent->token);
 	}
 	/* Detached candidates and children of a closing root cannot veto. */
 	vmmfs_pcislot_power_off(slot);
-	(void)vmmfs_vnode_deactivate(slot->descriptor.node.vnode);
-	vrele(slot->descriptor.node.vnode);
-	(void)vmmfs_vnode_deactivate(slot->config.node.vnode);
-	vrele(slot->config.node.vnode);
-	(void)vmmfs_vnode_deactivate(slot->events.node.vnode);
-	vrele(slot->events.node.vnode);
-	return (0);
+	(void)vmmfs_node_deactivate(&slot->descriptor.node);
+	(void)vmmfs_node_deactivate(&slot->config.node);
+	(void)vmmfs_node_deactivate(&slot->events.node);
+	return (true);
 }
 
 
@@ -647,16 +638,14 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 		}
 		--index;
 	}
-	if (slot->descriptor.node.vnode != NULL) {
-		if (index == 0) {
-			item->inode = slot->descriptor.node.inode;
-			item->type = DT_REG;
-			bcopy("descriptor", item->name, sizeof("descriptor"));
-			lwkt_reltoken(&slot->token);
-			return (0);
-		}
-		--index;
+	if (index == 0) {
+		item->inode = slot->descriptor.node.inode;
+		item->type = DT_REG;
+		bcopy("descriptor", item->name, sizeof("descriptor"));
+		lwkt_reltoken(&slot->token);
+		return (0);
 	}
+	--index;
 	resources = slot->resources;
 	if (resources == NULL) {
 		lwkt_reltoken(&slot->token);

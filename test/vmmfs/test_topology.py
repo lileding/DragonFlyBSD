@@ -89,13 +89,20 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(v == &child && slot.token.held == 1);
     ++closed; return 0;
 }
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
+}
 static int vmmfs_pciroot_parse_bdf(const char *n, size_t l, uint16_t *b) {
     (void)n; (void)l; *b = 8; return 0;
 }
 static struct vmmfs_pciroot_slot *vmmfs_pciroot_entry_find_locked(struct vmmfs_pciroot *r, uint16_t b) {
     (void)b; return r->registry->slots;
 }
-static int
+static bool
 """ + function("vmmfs_pcislot.c", "vmmfs_pcislot_deactivate") + "\nstatic void\n" +
               function("vmmfs_pciroot.c", "vmmfs_pciroot_release_entry") + "\nstatic int\n" + function("vmmfs_pciroot.c", "vmmfs_pciroot_remove_item") + r"""
 int main(void) {
@@ -104,32 +111,32 @@ int main(void) {
     slot.descriptor.node.vnode = slot.config.node.vnode = slot.events.node.vnode = &child;
     root.registry = &registry;
     registered = true; slot.entry = &slot; machine.machine = &machine;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == false);
     assert(machine.runtime_references == 0);
     machine.machine = NULL; machine.node.dead = true;
     /* Cascade detaches the entry before closing its child. */
     registered = false; slot.entry = NULL;
     root.node.dead = true;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == 0 && closed == 3);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == true && closed == 3);
     assert(machine.runtime_references == 0 && !slot.topology_reference);
     root.node.dead = false; machine.node.dead = false;
     registered = true; slot.entry = &slot;
     contended = &root.token;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == false);
     assert(machine.runtime_references == 0 && closed == 3);
     contended = &machine.token;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == false);
     assert(machine.runtime_references == 0 && closed == 3);
     assert(root.token.held == 0 && machine.token.held == 0);
     contended = NULL;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == 0);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == true);
     assert(machine.runtime_references == 1);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;
     vmmfs_pciroot_remove_item(&root.node, "0000:00:01.0", 12);
     assert(machine.runtime_references == 0 && registry.slots == NULL);
     registered = false; slot.entry = NULL; machine.machine = &machine;
-    assert(vmmfs_pcislot_deactivate(&slot.node) == 0);
+    assert(vmmfs_pcislot_deactivate(&slot.node) == true);
     assert(machine.runtime_references == 0);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;

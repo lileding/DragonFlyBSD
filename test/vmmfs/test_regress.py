@@ -720,6 +720,8 @@ int main(void) {
     assert(vmmfs_pcislot_nresolve(&args) == 0 && cached == 1);
     assert(bar.holds == 0 && resources.node.references == 1);
     assert(vmmfs_pcislot_read_item(&slot, 0, &item) == 0);
+    assert(strcmp(item.name, "descriptor") == 0);
+    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == 0);
     assert(item.inode == 42 && strcmp(item.name, "bar0") == 0);
 
     /* Detachment between parent and child locks cannot free the collection. */
@@ -727,12 +729,12 @@ int main(void) {
     assert(vmmfs_pcislot_nresolve(&args) == ENOENT && cached == 0);
     assert(resources.node.references == 0 && bar.holds == 0);
     assert(vmmfs_pcislot_nresolve(&args) == ENOENT);
-    assert(vmmfs_pcislot_read_item(&slot, 0, &item) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == ENOENT);
 
     resources.node.references = 1; resources.destroying = false;
     resources.items[0].node.vnode = &bar; slot.resources = &resources;
     retire_on_unlock = true;
-    assert(vmmfs_pcislot_read_item(&slot, 0, &item) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == ENOENT);
     assert(resources.node.references == 0);
     slot.descriptor.node.vnode = &bar; name.nc_name = "descriptor"; name.nc_nlen = 10;
     assert(vmmfs_pcislot_nresolve(&args) == 0 && bar.holds == 0);
@@ -1166,7 +1168,7 @@ struct vmmfs_node { struct vnode *vnode;
     bool dead;
     unsigned references, inode, mode, size, load_limit, store_limit;
     int token;
-    int (*deactivate)(struct vmmfs_node *);
+    bool (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
     int (*load)(struct vmmfs_node *, char *, size_t, size_t *);
     void *store;
@@ -1187,7 +1189,7 @@ static int tokens, drops;
 #define vmmfs_node_hold(p) (++(p)->references)
 #define vmmfs_root_allocate_inode(p) ((void)(p), 1)
 #define vmmfs_node_decimal_size(v) ((void)(v), 2)
-static int vmmfs_machine_id_deactivate(struct vmmfs_node *n) { (void)n; return 0; }
+static bool vmmfs_machine_id_deactivate(struct vmmfs_node *n) { (void)n; return true; }
 static int vmmfs_machine_id_load(struct vmmfs_node *n, char *b, size_t c, size_t *l) {
     (void)n; (void)b; (void)c; (void)l; return 0;
 }
@@ -1491,7 +1493,7 @@ class Deactivation(unittest.TestCase):
         run_c(COMMON + r"""
 struct token { int held; };
 struct vmmfs_node { struct vnode *vnode; struct token token; bool dead;
-    int (*deactivate)(struct vmmfs_node *);  struct lock lock;};
+    bool (*deactivate)(struct vmmfs_node *);  struct lock lock;};
 struct vnode { struct vmmfs_node *v_data; int refs; };
 static struct { void *p_ucred; } proc0;
 static struct vnode *current;
@@ -1504,36 +1506,35 @@ static int calls, revoked, veto;
 #define CINV_CHILDREN 1
 #define fdrevoke(v, t, c) (assert((v)->v_data->token.held == 0), (void)(t), (void)(c), ++revoked, 0)
 #define cache_inval_vp(v, f) (assert((v)->v_data->token.held == 0), (void)(f))
-int vmmfs_vnode_deactivate(struct vnode *);
-static int deactivate(struct vmmfs_node *node) {
+bool vmmfs_node_deactivate(struct vmmfs_node *);
+static bool deactivate(struct vmmfs_node *node) {
     assert(node->dead && node->token.held == 0);
     ++calls;
-    assert(vmmfs_vnode_deactivate(current) == EBUSY);
+    assert(vmmfs_node_deactivate(current->v_data) == false);
     assert(node->token.held == 0);
-    return veto;
+    return !veto;
 }
-int
-""" + function("vmmfs_node.c", "vmmfs_vnode_deactivate") + """
+bool
+""" + function("vmmfs_node.c", "vmmfs_node_deactivate") + """
 int main(void) {
     struct vmmfs_node node = { .deactivate=deactivate };
     struct vnode vnode = {&node, 1};
-    current = &vnode;
+    current = &vnode; node.vnode = &vnode;
     veto = EBUSY;
-    assert(vmmfs_vnode_deactivate(&vnode) == EBUSY);
+    assert(vmmfs_node_deactivate(&node) == false);
     assert(!node.dead && calls == 1 && revoked == 0 && vnode.refs == 1);
     veto = 0;
-    assert(vmmfs_vnode_deactivate(&vnode) == 0);
-    assert(node.dead && calls == 2 && revoked == 1 && vnode.refs == 1);
-    assert(vmmfs_vnode_deactivate(&vnode) == EBUSY);
+    assert(vmmfs_node_deactivate(&node) == true);
+    assert(node.dead && calls == 2 && revoked == 1 && vnode.refs == 0);
+    assert(vmmfs_node_deactivate(&node) == false);
     assert(calls == 2 && revoked == 1);
     assert(node.token.held == 0);
     struct vmmfs_node passive = {0};
     struct vnode passive_vnode = {&passive, 1};
-    assert(vmmfs_vnode_deactivate(&passive_vnode) == 0);
-    assert(passive.dead && passive.token.held == 0);
-    assert(calls == 2 && revoked == 2 && passive_vnode.refs == 1);
-    assert(vmmfs_vnode_deactivate(&passive_vnode) == EBUSY);
-    assert(revoked == 2 && passive_vnode.refs == 1);
+    passive.vnode = &passive_vnode;
+    assert(vmmfs_node_deactivate(&passive));
+    assert(!passive.dead && calls == 2 && revoked == 1 && passive_vnode.refs == 1);
+    assert(vmmfs_node_deactivate(NULL));
     return 0;
 }
 """)
@@ -1672,7 +1673,7 @@ int main(void) {
             "bool closed, powered, opening; void *responder; struct kq kq; };"
             for name in objects)
         bodies = "\n".join(
-            "static int\n" + function(name + ".c", name + "_deactivate")
+            "static bool\n" + function(name + ".c", name + "_deactivate")
             for name in objects)
         run_c(COMMON + r"""
 struct vmmfs_node { struct vnode *vnode; bool dead;  struct lock lock;};
@@ -1705,7 +1706,7 @@ static void vmmfs_pcislot_config_cancel_locked(struct vmmfs_pcislot_config *c,
 #define CHECK(value, callback) do { \
     object = &(value); closed = &(value).closed; token = &(value).token; \
     note = &(value).kq.ki_note; (value).node.dead = true; \
-    assert(callback(&(value).node) == 0); \
+    assert(callback(&(value).node)); \
     assert((value).closed && !(value).token.held); \
 } while (0)
 int main(void) {
@@ -1890,6 +1891,13 @@ static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *m) {
 }
 static int vmmfs_vnode_deactivate(struct vnode *vp) {
     return vmmfs_machine_abort(vp->v_data);
+}
+static void vrele(struct vnode *);
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n) return true;
+    struct vnode *v = n->vnode;
+    if (vmmfs_vnode_deactivate(v) != 0) return false;
+    vrele(v); return true;
 }
 static void vmmfs_launch_complete(struct vmmfs_launch *l, int e) {
     assert(event_refs == 1);

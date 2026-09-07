@@ -89,7 +89,7 @@ static bool vmmfs_pcislot_descriptor_ranges_overlap(uint64_t, uint64_t,
 	uint64_t, uint64_t);
 static void vmmfs_pcislot_descriptor_drop(struct vmmfs_node *);
 
-static int
+static bool
 vmmfs_pcislot_descriptor_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot_descriptor *descriptor =
@@ -109,7 +109,7 @@ vmmfs_pcislot_descriptor_deactivate(struct vmmfs_node *node)
 	descriptor->committed = false;
 	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(auth);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_pcislot_descriptor_vops = {
@@ -144,7 +144,6 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	descriptor->node.dead = false;
 	descriptor->node.references = 1;
 	lockinit(&descriptor->node.lock, "vmmfsnode", 0, 0);
-	descriptor->node.deactivate = vmmfs_pcislot_descriptor_deactivate;
 	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
 	vmmfs_node_hold(parent);
 	descriptor->node.load_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX;
@@ -157,6 +156,8 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	    &parent->mount->pcislot_descriptor_vops, VREG, &descriptor->node);
 	if (error != 0)
 		vmmfs_node_put(&descriptor->node);
+	else
+		descriptor->node.deactivate = vmmfs_pcislot_descriptor_deactivate;
 	return (error);
 }
 

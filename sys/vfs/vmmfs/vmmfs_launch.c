@@ -29,7 +29,7 @@
 
 static u_int vmmfs_launch_serial;
 
-static int vmmfs_launch_deactivate(struct vmmfs_node *);
+static bool vmmfs_launch_deactivate(struct vmmfs_node *);
 static void vmmfs_launch_drop(struct vmmfs_node *);
 static int vmmfs_launch_mmap(struct dev_mmap_single_args *);
 static int vmmfs_launch_pager_ctor(void *, vm_ooffset_t, vm_prot_t,
@@ -92,7 +92,6 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	launch->node.references = 1;
 	lwkt_token_init(&launch->token, "vmmfslaunch");
 	lockinit(&launch->node.lock, "vmmfsnode", 0, 0);
-	launch->node.deactivate = vmmfs_launch_deactivate;
 	launch->node.drop = vmmfs_launch_drop;
 	launch->node.mode = 0600;
 	launch->node.size = size;
@@ -110,6 +109,7 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	error = vmmfs_vnode_create_cdev(parent->mount->mount,
 	    &parent->mount->launch_vops, launch->dev, &launch->node);
 	if (error == 0) {
+		launch->node.deactivate = vmmfs_launch_deactivate;
 		*objectp = launch;
 		return (0);
 	}
@@ -281,7 +281,7 @@ vmmfs_launch_stat(struct file *file, struct stat *status, struct ucred *cred)
 	return (0);
 }
 
-static int
+static bool
 vmmfs_launch_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_launch *launch = (struct vmmfs_launch *)node;
@@ -292,7 +292,7 @@ vmmfs_launch_deactivate(struct vmmfs_node *node)
 		kprintf("vmmfs: launch close abort: %d\n", error);
 	/* Abort may have waited; cleanup errors must not reopen this handle. */
 	vmmfs_launch_revoke(launch);
-	return (0);
+	return (true);
 }
 
 void

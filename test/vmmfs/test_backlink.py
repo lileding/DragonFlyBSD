@@ -38,8 +38,6 @@ static int v_associate_rdev(struct vnode *v, struct cdev *d) {
 }
 static void vx_downgrade(struct vnode *v) { assert(v->locked); }
 static void vn_unlock(struct vnode *v) { assert(v->locked); v->locked = false; }
-static void vx_get(struct vnode *v) { assert(!v->locked); v->locked = true; }
-static void vx_put(struct vnode *v) { assert(v->locked); v->locked = false; }
 static void vrele(struct vnode *v) {
     assert(v->refs && !v->locked && !v->v_data && !node.vnode); --v->refs;
 }
@@ -50,8 +48,7 @@ static void vmmfs_node_put(struct vmmfs_node *n) {
 }
 int
 """ + function("vmmfs_node.c", "vmmfs_vnode_create_regular") + "\nint\n" +
-            function("vmmfs_node.c", "vmmfs_vnode_create_cdev") + "\nvoid\n" +
-            function("vmmfs_node.c", "vmmfs_vnode_discard") + "\nint\n" +
+            function("vmmfs_node.c", "vmmfs_vnode_create_cdev") + "\nint\n" +
             function("vmmfs_node.c", "vmmfs_node_reclaim") + r"""
 int main(void) {
     struct mount mount = {0}; struct vop_ops *ops = NULL;
@@ -75,9 +72,10 @@ int main(void) {
     assert(vmmfs_vnode_create_cdev(&mount, &ops, &dev, &node) == 0);
     vp = node.vnode;
     assert(node.vnode == vp && vp->refs == 1 && vp->v_data == &node);
-    vmmfs_vnode_discard(vp);
+    assert(vmmfs_node_reclaim(&args) == 0);
+    vrele(vp);
     assert(!node.vnode && !allocated.v_data && !allocated.refs);
-    assert(node.refs == 1 && node_puts == 1); /* Discard leaves the owner's node ref. */
+    assert(node.refs == 0 && node_puts == 2);
 }
 """)
 

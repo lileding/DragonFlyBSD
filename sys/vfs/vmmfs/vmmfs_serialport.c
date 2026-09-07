@@ -82,7 +82,7 @@ static int vmmfs_serialport_read_io(vmm_vcpu_t, void *,
 static int vmmfs_serialport_write_io(vmm_vcpu_t, void *,
     const struct vmm_io_write *);
 static void vmmfs_serialport_drop(struct vmmfs_node *);
-static int vmmfs_serialport_deactivate(struct vmmfs_node *);
+static bool vmmfs_serialport_deactivate(struct vmmfs_node *);
 static void vmmfs_serialport_revoke(struct vmmfs_serialport *);
 static void vmmfs_serialport_irq_update(struct vmmfs_serialport *);
 static bool vmmfs_serialport_irq_pending_locked(
@@ -178,7 +178,6 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     lockinit(&port->node.lock, "vmmfsnode", 0, 0);
     port->node.drop = vmmfs_serialport_drop;
     vmmfs_node_hold(parent);
-    port->node.deactivate = vmmfs_serialport_deactivate;
     port->node.mode = VMMFS_SERIALPORT_MODE;
     port->node.size = 0;
     error = vmmfs_vnode_create_cdev(
@@ -193,6 +192,7 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     port->tty.t_sc = port;
     port->tty.t_unhold = vmmfs_serialport_tty_unhold;
     vmmfs_node_hold(&port->node);
+    port->node.deactivate = vmmfs_serialport_deactivate;
     *objectp = port;
     return 0;
 
@@ -202,7 +202,7 @@ fail_token:
     return error;
 }
 
-static int
+static bool
 vmmfs_serialport_deactivate(struct vmmfs_node *node)
 {
     struct vmmfs_serialport *port = (struct vmmfs_serialport *)node;
@@ -214,11 +214,11 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
 
     /* Veto must not sleep and expose a provisional dead gate. */
     if (!lwkt_trytoken(&parent->token))
-        return (EBUSY);
+        return (false);
     if (port->entry != NULL) {
         if (!lwkt_trytoken(&machine->token)) {
             lwkt_reltoken(&parent->token);
-            return (EBUSY);
+            return (false);
         }
         error = machine->machine != NULL ? EBUSY : 0;
         if (error == 0) {
@@ -229,7 +229,7 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
         lwkt_reltoken(&machine->token);
         lwkt_reltoken(&parent->token);
         if (error != 0)
-            return (error);
+            return (error == 0);
     } else {
         lwkt_reltoken(&parent->token);
     }
@@ -257,7 +257,7 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
     }
     vmmfs_serialport_tty_retire(port);
     lwkt_reltoken(&port->tty.t_token);
-    return (0);
+    return (true);
 }
 
 static void

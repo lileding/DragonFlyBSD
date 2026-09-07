@@ -156,13 +156,14 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 		 * The child is already discoverable.  If another operation has
 		 * made it busy, retain the registry entry for normal resolution.
 		 */
-		if (vmmfs_vnode_deactivate(vnode) == 0) {
+		if (vmmfs_node_deactivate(vnode->v_data)) {
 			cleanup_error = VMMFS_CALL(node, remove_item,
 			    ncp->nc_name, ncp->nc_nlen);
 			if (cleanup_error != 0 && cleanup_error != ENOENT)
 				kprintf("vmmfs: mkdir rollback: %d\n", cleanup_error);
+		} else {
+			vrele(vnode); /* Veto retains the create_item reference. */
 		}
-		vrele(vnode); /* create_item reference. */
 		return (error);
 	}
 	*ap->a_vpp = vnode;
@@ -196,12 +197,12 @@ vmmfs_node_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vnode);
 		return (ENOTDIR);
 	}
-	error = vmmfs_vnode_deactivate(vnode);
-	if (error == 0) {
-		error = VMMFS_CALL(node, remove_item, ncp->nc_name, ncp->nc_nlen);
-		if (error == 0)
-			cache_unlink(ap->a_nch);
+	if (!vmmfs_node_deactivate(vnode->v_data)) {
+		vrele(vnode);
+		return (EBUSY);
 	}
-	vrele(vnode);
+	error = VMMFS_CALL(node, remove_item, ncp->nc_name, ncp->nc_nlen);
+	if (error == 0)
+		cache_unlink(ap->a_nch);
 	return (error);
 }

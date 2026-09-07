@@ -54,31 +54,31 @@ static void ttyclose(struct tty *t) { t->t_state = 0; }
 static void vmmfs_serialport_tty_retire(struct vmmfs_serialport *p) {
     assert(p == &port); ++retired;
 }
-static int
+static bool
 """ + function("vmmfs_serialport.c", "vmmfs_serialport_deactivate") + r"""
 int main(void) {
     port.node.parent = &root.node;
     port.node.dead = true; port.node.token.held = 1;
     port.entry = &port;
     machine.machine = &machine;
-    assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
+    assert(vmmfs_serialport_deactivate(&port.node) == false);
     machine.machine = NULL;
     contended = &root.token;
-    assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
+    assert(vmmfs_serialport_deactivate(&port.node) == false);
     contended = &machine.token;
-    assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
+    assert(vmmfs_serialport_deactivate(&port.node) == false);
     assert(!blocks && !revoked && !retired && !machine.runtime_references);
     assert(root.token.held == 0 && machine.token.held == 0);
     contended = NULL;
     port.control_count = 1; port.tty.t_state = TS_ISOPEN;
-    assert(vmmfs_serialport_deactivate(&port.node) == 0);
+    assert(vmmfs_serialport_deactivate(&port.node) == true);
     assert(machine.runtime_references == 1 && port.topology_reference);
     assert(revoked == 1 && retired == 1 && port.control_count == 0);
     /* Parent closure obeys the parent's admission decision, with no veto. */
     machine.runtime_references = 0; port.topology_reference = false;
     root.node.dead = true; machine.node.dead = true;
     port.entry = NULL; /* Parent detached the registry entry first. */
-    assert(vmmfs_serialport_deactivate(&port.node) == 0);
+    assert(vmmfs_serialport_deactivate(&port.node) == true);
     assert(!machine.runtime_references && revoked == 2 && retired == 2);
     assert(port.node.token.held == 1 && !port.token.held && !port.tty.t_token.held);
 }
@@ -101,15 +101,15 @@ int tsleep(void *channel, int flags, const char *name, int timeout) {
     (void)name; ++waited; cpu.active_count = 0; cpu.threads = NULL;
     return 0;
 }
-static int
+static bool
 """ + function("vmmfs_vcpu.c", "vmmfs_vcpu_deactivate") + r"""
 int main(void) {
     cpu.node.dead = true; cpu.node.token.held = 1;
     cpu.active_count = 1; cpu.threads = &cpu;
-    assert(vmmfs_vcpu_deactivate(&cpu.node) == 0);
+    assert(vmmfs_vcpu_deactivate(&cpu.node) == true);
     assert(waited == 1 && cpu.node.dead && cpu.node.token.held == 1);
     assert(cpu.token.held == 0);
-    assert(vmmfs_vcpu_deactivate(&cpu.node) == 0 && waited == 1);
+    assert(vmmfs_vcpu_deactivate(&cpu.node) == true && waited == 1);
 }
 """)
 
@@ -141,12 +141,12 @@ static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *a) {
     assert(a == &auth && descriptor.auth == NULL && !descriptor.committed);
     ++revoked;
 }
-static int
+static bool
 """ + function("vmmfs_pcislot_descriptor.c", "vmmfs_pcislot_descriptor_deactivate") + r"""
 int main(void) {
     descriptor.node.dead = true; descriptor.node.token.held = 1;
     descriptor.auth = &auth; descriptor.committed = descriptor.updating = true;
-    assert(vmmfs_pcislot_descriptor_deactivate(&descriptor.node) == 0);
+    assert(vmmfs_pcislot_descriptor_deactivate(&descriptor.node) == true);
     assert(waited == 1 && revoked == 1 && descriptor.node.dead);
     assert(descriptor.node.token.held == 1 && slot.token.held == 0);
 }
@@ -166,13 +166,13 @@ static int vmmfs_machine_abort(struct vmmfs_launch *l) {
 static void vmmfs_launch_revoke(struct vmmfs_launch *l) {
     assert(l->node.dead && l->token.held == 0); ++revoked;
 }
-static int
+static bool
 """ + function("vmmfs_launch.c", "vmmfs_launch_deactivate") + r"""
 int main(void) {
     struct vmmfs_launch launch = { .node = { .dead = true } };
     for (unsigned i = 0; i != 2; ++i) {
         result = i == 0 ? 0 : EIO;
-        assert(vmmfs_launch_deactivate(&launch.node) == 0);
+        assert(vmmfs_launch_deactivate(&launch.node) == true);
         assert(launch.node.dead && launch.token.held == 0);
     }
     assert(revoked == 2);

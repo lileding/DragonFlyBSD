@@ -81,7 +81,7 @@ static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
 static struct vmmfs_pciroot_slot *vmmfs_pciroot_entry_find_locked(
 	struct vmmfs_pciroot *, uint16_t);
 static void vmmfs_pciroot_drop(struct vmmfs_node *);
-static int vmmfs_pciroot_deactivate(struct vmmfs_node *);
+static bool vmmfs_pciroot_deactivate(struct vmmfs_node *);
 static uint32_t vmmfs_pciroot_absent_value(enum vmm_io_width);
 static int vmmfs_pciroot_hostbridge_read(uint16_t, enum vmm_io_width,
 	uint32_t *);
@@ -138,7 +138,6 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	lockinit(&pciroot->node.lock, "vmmfsnode", 0, 0);
 	pciroot->node.drop = vmmfs_pciroot_drop;
 	vmmfs_node_hold(parent);
-	pciroot->node.deactivate = vmmfs_pciroot_deactivate;
 	pciroot->node.get_item = vmmfs_pciroot_get_item;
 	pciroot->node.read_item = vmmfs_pciroot_read_item;
 	pciroot->node.create_item = vmmfs_pciroot_create_item;
@@ -151,6 +150,8 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	    &parent->mount->pciroot_vops, VDIR, &pciroot->node);
 	if (error != 0)
 		vmmfs_node_put(&pciroot->node);
+	else
+		pciroot->node.deactivate = vmmfs_pciroot_deactivate;
 	return (error);
 }
 
@@ -189,28 +190,25 @@ vmmfs_pciroot_release_entry(struct vmmfs_pciroot *root,
 	lwkt_reltoken(&machine->token);
 }
 
-static int
+static bool
 vmmfs_pciroot_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pciroot *root = (struct vmmfs_pciroot *)node;
 	struct vmmfs_pciroot_slot *entry;
 	struct vnode *vnode;
-	int error;
 
 	for (;;) {
 		entry = RB_ROOT(&root->registry->slots);
 		if (entry == NULL)
-			return (0);
+			return (true);
 		vnode = entry->slot->node.vnode;
 		/* Detach before cleanup can sleep; retain the registry vnode ref. */
 		RB_REMOVE(vmmfs_pcislot_tree, &root->registry->slots, entry);
 		vmmfs_pciroot_release_entry(root, entry);
 		kfree(entry, M_VMMFS);
-		error = vmmfs_vnode_deactivate(vnode);
-		/* EBUSY here means another caller has already closed the gate. */
-		if (error != 0 && error != EBUSY)
-			kprintf("vmmfs: PCI slot close: %d\n", error);
-		vrele(vnode);
+		/* An existing closer retains its own reference. */
+		if (!vmmfs_node_deactivate(vnode->v_data))
+			vrele(vnode);
 	}
 }
 
@@ -688,7 +686,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	struct vnode *vnode;
 	struct vmmfs_pcislot *slot;
 	uint16_t bdf;
-	int error, cleanup_error;
+	int error;
 
 	*vnodep = NULL;
 	error = vmmfs_pciroot_parse_bdf(name, namelen, &bdf);
@@ -716,10 +714,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&root->token);
 	if (error != 0) {
-		cleanup_error = vmmfs_vnode_deactivate(vnode);
-		if (cleanup_error != 0)
-			kprintf("vmmfs: rejected PCI slot cleanup: %d\n", cleanup_error);
-		vrele(vnode);
+		(void)vmmfs_node_deactivate(&slot->node);
 		kfree(entry, M_VMMFS);
 		return (error);
 	}

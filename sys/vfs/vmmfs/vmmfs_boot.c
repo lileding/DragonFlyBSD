@@ -24,11 +24,11 @@ static uint32_t vmmfs_boot_dev_serial;
 static int vmmfs_boot_open(struct vop_open_args *);
 static void vmmfs_boot_drop(struct vmmfs_node *);
 
-static int
+static bool
 vmmfs_boot_deactivate(struct vmmfs_node *node)
 {
 	(void)node;
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_boot_vops = {
@@ -65,7 +65,6 @@ vmmfs_boot_init(struct vmmfs_node *parent,
 	boot->node.dead = false;
 	boot->node.references = 1;
 	lockinit(&boot->node.lock, "vmmfsnode", 0, 0);
-	boot->node.deactivate = vmmfs_boot_deactivate;
 	boot->node.drop = vmmfs_boot_drop;
 	vmmfs_node_hold(parent);
 	boot->node.inode = vmmfs_root_allocate_inode(root);
@@ -81,8 +80,10 @@ vmmfs_boot_init(struct vmmfs_node *parent,
 	boot->dev->si_drv1 = boot;
 	error = vmmfs_vnode_create_cdev(parent->mount->mount,
 	    &parent->mount->boot_vops, boot->dev, &boot->node);
-	if (error == 0)
+	if (error == 0) {
+		boot->node.deactivate = vmmfs_boot_deactivate;
 		return (0);
+	}
 
 fail:
 	if (boot->dev != NULL) {

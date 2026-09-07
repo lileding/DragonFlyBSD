@@ -79,7 +79,7 @@ static struct filterops vmmfs_pcislot_config_write_filterops = {
 	vmmfs_pcislot_config_filter_write,
 };
 
-static int
+static bool
 vmmfs_pcislot_config_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_pcislot_config *config = (struct vmmfs_pcislot_config *)node;
@@ -93,7 +93,7 @@ vmmfs_pcislot_config_deactivate(struct vmmfs_node *node)
 	lwkt_reltoken(&config->token);
 	wakeup(config);
 	KNOTE(&config->kq.ki_note, 0);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_pcislot_config_vops = {
@@ -131,7 +131,6 @@ vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	config->node.dead = false;
 	config->node.references = 1;
 	lockinit(&config->node.lock, "vmmfsnode", 0, 0);
-	config->node.deactivate = vmmfs_pcislot_config_deactivate;
 	config->node.drop = vmmfs_pcislot_config_drop;
 	vmmfs_node_hold(parent);
 	config->node.mode = VMMFS_PCISLOT_CONFIG_MODE;
@@ -140,6 +139,8 @@ vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	    &parent->mount->pcislot_config_vops, VREG, &config->node);
 	if (error != 0)
 		vmmfs_node_put(&config->node);
+	else
+		config->node.deactivate = vmmfs_pcislot_config_deactivate;
 	return (error);
 }
 

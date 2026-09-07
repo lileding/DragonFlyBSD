@@ -60,7 +60,7 @@ RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
 static struct vmmfs_serialroot_port *vmmfs_serialroot_find_locked(
 	struct vmmfs_serialroot *, const char *);
 static void vmmfs_serialroot_drop(struct vmmfs_node *);
-static int vmmfs_serialroot_deactivate(struct vmmfs_node *);
+static bool vmmfs_serialroot_deactivate(struct vmmfs_node *);
 
 struct vop_ops vmmfs_serialroot_vops = {
 	.vop_default = vop_defaultop,
@@ -114,7 +114,6 @@ vmmfs_serialroot_init(struct vmmfs_node *parent,
 	lockinit(&serialroot->node.lock, "vmmfsnode", 0, 0);
 	serialroot->node.drop = vmmfs_serialroot_drop;
 	vmmfs_node_hold(parent);
-	serialroot->node.deactivate = vmmfs_serialroot_deactivate;
 	serialroot->node.get_item = vmmfs_serialroot_get_item;
 	serialroot->node.mode = VMMFS_SERIALROOT_MODE;
 	serialroot->node.size = 0;
@@ -122,6 +121,8 @@ vmmfs_serialroot_init(struct vmmfs_node *parent,
 	    &parent->mount->serialroot_vops, VDIR, &serialroot->node);
 	if (error != 0)
 		vmmfs_node_put(&serialroot->node);
+	else
+		serialroot->node.deactivate = vmmfs_serialroot_deactivate;
 	return (error);
 }
 
@@ -157,28 +158,25 @@ vmmfs_serialroot_release_entry(struct vmmfs_serialroot *root,
 	lwkt_reltoken(&machine->token);
 }
 
-static int
+static bool
 vmmfs_serialroot_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_serialroot *root = (struct vmmfs_serialroot *)node;
 	struct vmmfs_serialroot_port *entry;
 	struct vnode *vnode;
-	int error;
 
 	for (;;) {
 		entry = RB_ROOT(&root->registry->ports);
 		if (entry == NULL)
-			return (0);
+			return (true);
 		vnode = entry->port->node.vnode;
 		/* Detach before cleanup can sleep; retain the registry vnode ref. */
 		RB_REMOVE(vmmfs_serialport_tree, &root->registry->ports, entry);
 		vmmfs_serialroot_release_entry(root, entry);
 		kfree(entry, M_VMMFS);
-		error = vmmfs_vnode_deactivate(vnode);
-		/* EBUSY here means another caller has already closed the gate. */
-		if (error != 0 && error != EBUSY)
-			kprintf("vmmfs: serial port close: %d\n", error);
-		vrele(vnode);
+		/* An existing closer retains its own reference. */
+		if (!vmmfs_node_deactivate(vnode->v_data))
+			vrele(vnode);
 	}
 }
 
@@ -330,8 +328,7 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 	return (0);
 
 failed_vnode:
-	(void)vmmfs_vnode_deactivate(vnode);
-	vrele(vnode);
+	(void)vmmfs_node_deactivate(&port->node);
 failed_entry:
 	kfree(entry, M_VMMFS);
 failed:
@@ -378,15 +375,16 @@ vmmfs_serialroot_remove_port(struct vmmfs_serialroot *serialroot,
 	struct vmmfs_serialroot_port *entry;
 	struct vmmfs_serialport *port;
 	struct vnode *entry_vnode;
-	int error;
 
 	port = vnode->v_data;
 	if (port == NULL) {
 		return (ENOENT);
 	}
-	error = vmmfs_vnode_deactivate(vnode);
-	if (error != 0) {
-		return (error);
+	/* The caller retains its reference until remove_port returns. */
+	vref(vnode);
+	if (!vmmfs_node_deactivate(&port->node)) {
+		vrele(vnode);
+		return (EBUSY);
 	}
 	lwkt_gettoken(&serialroot->token);
 	entry = vmmfs_serialroot_find_locked(serialroot, port->name);

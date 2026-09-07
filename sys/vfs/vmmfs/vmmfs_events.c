@@ -43,7 +43,7 @@ static struct filterops vmmfs_events_read_filterops = {
 	vmmfs_events_filter_read,
 };
 
-static int
+static bool
 vmmfs_events_deactivate(struct vmmfs_node *node)
 {
 	struct vmmfs_events *events = (struct vmmfs_events *)node;
@@ -53,7 +53,7 @@ vmmfs_events_deactivate(struct vmmfs_node *node)
 	lwkt_reltoken(&events->token);
 	wakeup(events);
 	KNOTE(&events->kq.ki_note, 0);
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_events_vops = {
@@ -89,7 +89,6 @@ vmmfs_events_init(struct vmmfs_node *parent,
 	events->node.dead = false;
 	events->node.references = 1;
 	lockinit(&events->node.lock, "vmmfsnode", 0, 0);
-	events->node.deactivate = vmmfs_events_deactivate;
 	events->node.drop = vmmfs_events_drop;
 	vmmfs_node_hold(parent);
 	events->node.load_limit = 0;
@@ -104,8 +103,10 @@ vmmfs_events_init(struct vmmfs_node *parent,
 	events->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->events_vops, VREG, &events->node);
-	if (error == 0)
+	if (error == 0) {
+		events->node.deactivate = vmmfs_events_deactivate;
 		return (0);
+	}
 
 	vmmfs_node_put(&events->node);
 	return (error);
@@ -167,7 +168,7 @@ vmmfs_events_log(struct vmmfs_events *events, enum vmmfs_machine_event event,
 	text[length] = '\0';
 
 	lwkt_gettoken(&events->token);
-	if (events->closed || events->buffer == NULL) {
+	if (events->closed) {
 		lwkt_reltoken(&events->token);
 		return;
 	}

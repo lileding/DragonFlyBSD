@@ -46,11 +46,11 @@ static int vmmfs_loader_install_fd(struct file *, int);
 static void vmmfs_loader_set_process_cred(struct proc *, struct ucred *);
 static void vmmfs_loader_drop(struct vmmfs_node *);
 
-static int
+static bool
 vmmfs_loader_deactivate(struct vmmfs_node *node)
 {
 	(void)node;
-	return (0);
+	return (true);
 }
 
 struct vop_ops vmmfs_loader_vops = {
@@ -292,7 +292,6 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.dead = false;
 	loader->node.references = 1;
 	lockinit(&loader->node.lock, "vmmfsnode", 0, 0);
-	loader->node.deactivate = vmmfs_loader_deactivate;
 	loader->node.drop = vmmfs_loader_drop;
 	vmmfs_node_hold(parent);
 	loader->node.load_limit = PAGE_SIZE + 1;
@@ -304,8 +303,10 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.size = 1;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
 	    &parent->mount->loader_vops, VREG, &loader->node);
-	if (error == 0)
+	if (error == 0) {
+		loader->node.deactivate = vmmfs_loader_deactivate;
 		return (0);
+	}
 
 	vmmfs_node_put(&loader->node);
 	return (error);

@@ -348,60 +348,36 @@ vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
 	return (0);
 }
 
-void
-vmmfs_vnode_discard(struct vnode *vnode)
+
+
+bool
+vmmfs_node_deactivate(struct vmmfs_node *node)
 {
-	struct vmmfs_node *node;
+	struct vnode *vnode;
 
-	if (vnode == NULL)
-		return;
-	vx_get(vnode);
-	node = vnode->v_data;
-	(void)lockmgr(&node->lock, LK_EXCLUSIVE);
-	node->vnode = NULL;
-	vnode->v_data = NULL;
-	(void)lockmgr(&node->lock, LK_RELEASE);
-	vnode->v_type = VBAD;
-	vx_put(vnode);
-	vrele(vnode);
-}
-
-int
-vmmfs_vnode_deactivate(struct vnode *vnode)
-{
-	struct vmmfs_node *node;
-	int error;
-
-	if (vnode == NULL)
-		return (0);
-	node = vnode->v_data;
-	vref(vnode);
-	error = lockmgr(&node->lock, LK_EXCLUSIVE);
-	if (error != 0) {
-		vrele(vnode);
-		return (error);
-	}
+	if (node == NULL || node->deactivate == NULL)
+		return (true);
+	vnode = node->vnode;
+	if (lockmgr(&node->lock, LK_EXCLUSIVE) != 0)
+		return (false);
 	if (node->dead) {
 		(void)lockmgr(&node->lock, LK_RELEASE);
-		vrele(vnode);
-		/* A closed gate does not prove that the first callback completed. */
-		return (EBUSY);
+		/* The first callback may still be running. */
+		return (false);
 	}
 	node->dead = true;
 	(void)lockmgr(&node->lock, LK_RELEASE);
-
-	error = node->deactivate != NULL ? node->deactivate(node) : 0;
-	if (error != 0) {
-		/* Reopening cannot overlap a shared work invocation. */
+	if (!node->deactivate(node)) {
 		(void)lockmgr(&node->lock, LK_EXCLUSIVE);
 		node->dead = false;
 		(void)lockmgr(&node->lock, LK_RELEASE);
-	} else {
-		(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
-		cache_inval_vp(vnode, CINV_CHILDREN);
+		return (false);
 	}
+	(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
+	cache_inval_vp(vnode, CINV_CHILDREN);
+	/* Reclaim may drop the object synchronously; do not access it again. */
 	vrele(vnode);
-	return (error);
+	return (true);
 }
 
 

@@ -22,7 +22,7 @@ struct vmmfs_node {
     struct vnode *vnode;
     struct vmmfs_node *parent; struct token token;
     unsigned references; bool dead; unsigned inode, mode, size;
-    int (*deactivate)(struct vmmfs_node *);
+    bool (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
  struct lock lock;};
 struct vnode { void *v_data; };
@@ -47,6 +47,9 @@ struct vmmfs_pcislot {
 };
 static unsigned stage, fail_at, objects, vnodes, child_live, token_live;
 static unsigned component_live, object_drops;
+static bool defer_reclaim;
+static struct vmmfs_node *pending[16];
+static unsigned pending_count;
 static unsigned atomic_load_acq_int(unsigned *p) { return *p; }
 static void atomic_add_int(unsigned *p, int n) { *p += n; }
 static unsigned atomic_fetchadd_int(unsigned *p, int n) { unsigned old = *p; *p += n; return old; }
@@ -69,6 +72,7 @@ static void child_drop(struct vmmfs_node *n) {
     assert(n->references == 0 && n->drop == NULL && child_live);
     --child_live;
 }
+static bool child_close(struct vmmfs_node *n) { (void)n; return true; }
 static bool fail(void) { return ++stage == fail_at; }
 static int child_init(struct vmmfs_node *p,
     struct child *c) {
@@ -80,6 +84,7 @@ static int child_init(struct vmmfs_node *p,
     if (fail()) { vmmfs_node_put(&c->node); return ENFILE; }
     *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = &c->node; ++vnodes;
     c->node.vnode = *vp;
+    c->node.deactivate = child_close;
     return 0;
 }
 #define vmmfs_machine_id_init child_init
@@ -101,6 +106,17 @@ static void vmmfs_vnode_discard(struct vnode *v) {
     ((struct vmmfs_node *)v->v_data)->vnode = NULL;
     assert(vnodes); --vnodes; v->v_data = NULL; free(v);
 }
+static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
+    if (!n || !n->deactivate) return true;
+    assert(n->deactivate(n));
+    if (defer_reclaim) {
+        assert(pending_count < 16); pending[pending_count++] = n;
+    } else {
+        vmmfs_vnode_discard(n->vnode);
+        vmmfs_node_put(n);
+    }
+    return true;
+}
 static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
     struct vmmfs_node *n) {
     struct vnode **vp = &n->vnode;
@@ -110,16 +126,17 @@ static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
     *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = n; n->vnode = *vp;
     ++vnodes; return 0;
 }
+static void stopped_drop(struct vmmfs_node *n) { child_drop(n); free(n); }
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *m) {
     struct child *s = calloc(1,sizeof(*s));
     int error = child_init(&m->node, s);
-    if (error) free(s); else m->stopped = s;
+    if (error) free(s); else { s->node.drop = stopped_drop; m->stopped = s; }
     return error;
 }
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *m) {
     if (!m->stopped) return;
-    vmmfs_vnode_discard(m->stopped->node.vnode);
-    vmmfs_node_put(&m->stopped->node); free(m->stopped); m->stopped = NULL;
+    vmmfs_node_deactivate(&m->stopped->node);
+    m->stopped = NULL;
 }
 static int component_init(struct vmmfs_machine *m, struct component *c) {
     if (fail()) return ENFILE;
@@ -132,11 +149,11 @@ static void component_fini(struct component *c) {
 #define vmmfs_rtc_init component_init
 #define vmmfs_platform_x64_fini component_fini
 #define vmmfs_rtc_fini component_fini
-static int vmmfs_machine_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return 0; }
-static int vmmfs_pcislot_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return 0; }
+static bool vmmfs_machine_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
+static bool vmmfs_pcislot_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static void vmmfs_pcislot_drop(struct vmmfs_node *);
-static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *, struct vnode *);
+static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *);
 """
 
 class Constructors(unittest.TestCase):
@@ -160,6 +177,8 @@ int main(void) {
     struct vmmfs_node parent = { .references = 1, .mount = &mount };
     struct vmmfs_machine *machine;
     struct vmmfs_pcislot *slot;
+    for (unsigned deferred = 0; deferred < 2; ++deferred) {
+    defer_reclaim = deferred;
     for (unsigned kind = 0; kind < 2; ++kind) {
         unsigned limit = kind == 0 ? 12 : 4;
         for (fail_at = 1; fail_at <= limit; ++fail_at) {
@@ -168,10 +187,20 @@ int main(void) {
                 vmmfs_machine_create(&parent, "test", 4, &machine) :
                 vmmfs_pcislot_create(&parent, 8, &slot);
             assert(error == ENFILE && stage == fail_at && machine == NULL && slot == NULL);
+            if (pending_count) {
+                /* The failed parent remains alive until its children reclaim. */
+                assert(parent.references == 2 && objects == 1);
+                while (pending_count) {
+                    struct vmmfs_node *n = pending[--pending_count];
+                    vmmfs_vnode_discard(n->vnode);
+                    vmmfs_node_put(n);
+                }
+            }
             assert(parent.references == 1 && objects == 0 && vnodes == 0);
             assert(child_live == 0 && token_live == 0 && component_live == 0);
             assert(object_drops == 1);
         }
+    }
     }
 }
 """
@@ -192,7 +221,7 @@ struct vmmfs_node { struct vnode *vnode;
     struct vmmfs_mount *mount;
     struct vmmfs_node *parent; struct token token; unsigned references;
     unsigned mode, inode; uint64_t size;
-    int (*deactivate)(struct vmmfs_node *);
+    bool (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
  struct lock lock; bool dead;};
 struct cdev { void *si_drv1; };
@@ -242,7 +271,7 @@ static int vmmfs_vnode_create_cdev(void *m, void **ops, struct cdev *dev,
     if (fail_at == 2) return ENFILE;
     *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = n; ++vnodes; return 0;
 }
-static int vmmfs_launch_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return 0; }
+static bool vmmfs_launch_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
 static void vmmfs_launch_drop(struct vmmfs_node *);
 static void vmmfs_node_put(struct vmmfs_node *);
 """
