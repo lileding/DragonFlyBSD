@@ -52,7 +52,7 @@ int main(void) {
 
     def test_constructors_install_callback_after_vnode_creation(self):
         targets = {
-            "boot": "init", "events": "init", "launch": "create",
+            "boot": "init", "events": "init",
             "loader": "init", "machine": "create", "machine_id": "init",
             "memory": "init", "pciroot": "init", "pcislot": "create",
             "pcislot_config": "init", "pcislot_descriptor": "init",

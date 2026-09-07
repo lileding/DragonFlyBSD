@@ -196,7 +196,7 @@ vmmfs_vcpu_drop(struct vmmfs_node *node)
 
 
 int
-vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
+vmmfs_vcpu_prepare(struct vmmfs_vcpu *vcpu, uint32_t count,
 	vmm_machine_t machine,
 	const struct vmm_cpustate *bsp_state)
 {
@@ -256,10 +256,6 @@ vmmfs_vcpu_start(struct vmmfs_vcpu *vcpu, uint32_t count,
 		if (error != 0)
 			goto failed;
 	}
-	lwkt_gettoken(&vcpu->token);
-	vcpu->start_ready = true;
-	lwkt_reltoken(&vcpu->token);
-	wakeup(vcpu);
 	return (0);
 
 failed:
@@ -309,6 +305,18 @@ failed:
 	return (error);
 }
 
+/* Release only a fully prepared group; no guest runs during prepare. */
+void
+vmmfs_vcpu_run(struct vmmfs_vcpu *vcpu)
+{
+	lwkt_gettoken(&vcpu->token);
+	vcpu->start_ready = true;
+	lwkt_reltoken(&vcpu->token);
+	wakeup(vcpu);
+}
+
+
+
 void
 vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 {
@@ -337,7 +345,9 @@ vmmfs_vcpu_request_reset(struct vmmfs_vcpu *vcpu)
 	if (vcpu == NULL)
 		return;
 	lwkt_gettoken(&vcpu->token);
-	if (vcpu->stop_requested || vcpu->reset_requested) {
+	if (vcpu->threads == NULL || !vcpu->start_ready ||
+	    vcpu->threads[0].vcpu == NULL ||
+	    vcpu->stop_requested || vcpu->reset_requested) {
 		lwkt_reltoken(&vcpu->token);
 		return;
 	}
@@ -768,6 +778,12 @@ vmmfs_vcpu_thread_main(void *argument, struct trapframe *frame)
 				error = EIO;
 			goto out;
 		}
+
+		/* An in-kernel I/O callback may have requested stop/reset during run. */
+		if (vmmfs_vcpu_is_stop_requested(vcpu))
+			break;
+		if (vmmfs_vcpu_is_reset_requested(vcpu))
+			continue;
 
 		switch (exit->reason) {
 		case VMM_CPUEXIT_NONE:

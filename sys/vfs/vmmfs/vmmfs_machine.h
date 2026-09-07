@@ -40,12 +40,9 @@ struct vmmfs_machine {
 	struct vmmfs_machine_id id_node;
 	/*
 	 * NULL is stopped.  A non-NULL instance owns the running topology.
-	 * runtime_released marks the retry window before stopped is republished.
 	 */
 	vmm_machine_t machine;
-	struct vmmfs_launch *launch;
 	bool runtime_releasing;
-	bool runtime_released;
 	/* Admitted runtime work, or topology removal until registry detach. */
 	u_int runtime_references;
 	struct vmm_cpustate boot_state;
@@ -58,8 +55,8 @@ struct vmmfs_machine {
 	struct vmmfs_rtc rtc;
 	struct vmmfs_serialroot serialroot;
 	struct vmmfs_events events;
-	/* Owns the stopped node through its ordinary vnode reference. */
-	struct vmmfs_stopped *stopped;
+	/* Stable identity for the on-demand stopped projection. */
+	ino_t stopped_inode;
 };
 
 int vmmfs_machine_create(struct vmmfs_node *,
@@ -72,10 +69,10 @@ int vmmfs_machine_reset(struct vmmfs_machine *);
 int vmmfs_machine_request_stop(struct vmmfs_machine *, const char *);
 
 /* Atomically admits a private launch and prepares its platform. */
-int vmmfs_machine_boot(struct vmmfs_machine *, struct vmmfs_launch **);
-/* Only the current launch may start or abort the admitted runtime. */
-int vmmfs_machine_run(struct vmmfs_launch *);
-int vmmfs_machine_abort(struct vmmfs_launch *);
+int vmmfs_machine_boot(struct vmmfs_machine *,
+	void (*)(struct vmmfs_launch *), struct vmmfs_launch **);
+/* Complete stopped publication before allowing prepared guest workers to run. */
+void vmmfs_machine_post_launch(struct vmmfs_launch *);
 
 /* The BSP invokes these after every other vCPU has reached its barrier. */
 int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);

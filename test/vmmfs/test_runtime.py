@@ -366,7 +366,7 @@ os.write(2, b"VMMFS_LOADER_STDERR\\n")
         os.close(fd)
 
     def test_cancel_with_transferred_launch_still_open(self):
-        for cancel in ("signal", "stop") * 4:
+        for cancel in ("signal",) * 8:
             with self.subTest(cancel=cancel):
                 with tempfile.TemporaryDirectory(prefix="vmmfs-launch-") as directory:
                     address = str(pathlib.Path(directory) / "control")
@@ -457,23 +457,18 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as peer:
             os.close(duplicate)
         os.close(self.boot())
 
-    def test_touch_cancels_only_current_launch(self):
-        old = self.boot()
+    def test_touch_does_not_cancel_loading(self):
+        fd = self.boot()
         try:
             subprocess.run(["touch", str(self.machine / "stopped")], check=True,
                            timeout=10)
-            current = self.boot()
-            try:
-                os.close(old)
-                old = -1
-                with self.assertRaises(OSError) as failure:
-                    self.boot()
-                self.assertEqual(failure.exception.errno, errno.EBUSY)
-            finally:
-                os.close(current)
+            self.assertEqual(os.fstat(fd).st_size, 67108864)
+            with self.assertRaises(OSError) as failure:
+                self.boot()
+            self.assertEqual(failure.exception.errno, errno.EBUSY)
         finally:
-            if old >= 0:
-                os.close(old)
+            os.close(fd)
+        os.close(self.boot())
 
     def test_rmdir_veto_does_not_cancel_launch(self):
         fd = self.boot()

@@ -93,21 +93,25 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_launch *launch,
 		return (error);
 	}
 	process->launch = launch;
-	vmmfs_node_hold(&process->launch->node);
+	vmmfs_launch_hold(process->launch);
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
 	if (error != 0) {
 		fp_close(process->file);
-		vmmfs_node_put(&process->launch->node);
+		vmmfs_launch_put(process->launch);
 		kfree(process, M_VMMFS);
 		return (error);
 	}
+	/* Register while the child is still paused; exit automatically detaches it. */
+	error = fsetown(child->p_pid, &launch->loader_signal);
 	lwp = ONLY_LWP_IN_PROC(child);
 	vmmfs_loader_set_process_cred(child, cred);
 	cpu_set_fork_handler(lwp, vmmfs_loader_child, process);
 	start_forked_proc(curthread->td_lwp, child);
+	if (error != 0)
+		vmmfs_launch_cancel(launch);
 	/* The child owns process/file now.  Only the launch reports boot success. */
-	return (0);
+	return (error);
 }
 
 static void
@@ -127,16 +131,13 @@ vmmfs_loader_child(void *argument, struct trapframe *frame)
 	fp_close(process->file);
 	if (error == 0)
 		error = vmmfs_loader_exec_shell(process->script);
-	if (error != 0) {
-		int abort_error = vmmfs_machine_abort(launch);
-		if (abort_error != 0)
-			kprintf("vmmfs: loader abort: %d\n", abort_error);
-	}
+	if (error != 0)
+		vmmfs_launch_cancel(launch);
 	kfree(process, M_VMMFS);
 	lwp = curthread->td_lwp;
 	/* Scheduling may sleep; retain the launch until it has completed. */
 	lwp->lwp_proc->p_usched->acquire_curproc(lwp);
-	vmmfs_node_put(&launch->node);
+	vmmfs_launch_put(launch);
 	if (error != 0)
 		exit1(1);
 }

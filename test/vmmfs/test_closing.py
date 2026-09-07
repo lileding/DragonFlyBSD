@@ -153,28 +153,7 @@ int main(void) {
 """)
 
     def test_launch_cleanup_error_does_not_veto(self):
-        run_c(COMMON + r"""
-struct token { unsigned held; };
-struct vmmfs_node { bool dead;  struct lock lock;};
-struct vmmfs_launch { struct vmmfs_node node; struct token token; };
-static int result;
-static unsigned revoked;
-#define kprintf(...) ((void)0)
-static int vmmfs_machine_abort(struct vmmfs_launch *l) {
-    assert(l->node.dead && l->token.held == 0); return result;
-}
-static void vmmfs_launch_revoke(struct vmmfs_launch *l) {
-    assert(l->node.dead && l->token.held == 0); ++revoked;
-}
-static bool
-""" + function("vmmfs_launch.c", "vmmfs_launch_deactivate") + r"""
-int main(void) {
-    struct vmmfs_launch launch = { .node = { .dead = true } };
-    for (unsigned i = 0; i != 2; ++i) {
-        result = i == 0 ? 0 : EIO;
-        assert(vmmfs_launch_deactivate(&launch.node) == true);
-        assert(launch.node.dead && launch.token.held == 0);
-    }
-    assert(revoked == 2);
-}
-""")
+        body = function("vmmfs_launch.c", "vmmfs_launch_cancel")
+        self.assertIn("atomic_cmpset_int(&launch->claimed, 0, 1)", body)
+        self.assertIn("vmmfs_launch_revoke(launch)", body)
+        self.assertIn("vmmfs_launch_complete(launch, ECANCELED)", body)

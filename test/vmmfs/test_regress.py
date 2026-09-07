@@ -1150,7 +1150,7 @@ int main(void) {
         self.assertIn("vmmfs_root_module_fini()", uninit)
         child = function("vmmfs_loader.c", "vmmfs_loader_child")
         self.assertLess(child.index("acquire_curproc"),
-                        child.index("vmmfs_node_put(&launch->node)"))
+                        child.index("vmmfs_launch_put(launch)"))
 
 
     def test_identity_failed_vnode_releases_parent(self):
@@ -1289,7 +1289,7 @@ struct vmmfs_vcpu {
     struct token token;
     struct vmmfs_vcpu_thread *threads;
     unsigned int count;
-    bool stop_requested, reset_requested;
+    bool start_ready; bool stop_requested, reset_requested;
 };
 struct vmmfs_vcpu_thread {
     struct vmmfs_vcpu *group;
@@ -1324,11 +1324,12 @@ int main(void) {
     vmmfs_vcpu_request_stop(&group);
     assert(kicks == 1 && current->kick_count == 0);
     group.stop_requested = false;
-    vmmfs_vcpu_request_reset(&group);
+    group.start_ready = true; vmmfs_vcpu_request_reset(&group);
     assert(kicks == 2 && current->kick_count == 0);
     return 0;
 }
 """)
+
 
     def test_reset_synchronizes_resource_addresses(self):
         run_c(COMMON + """
@@ -1726,11 +1727,11 @@ int main(void) {
                 self.assertNotIn("->node.token", body)
 
     def test_control_tail_retains_events(self):
-        for name in ("vmmfs_machine_run", "vmmfs_machine_request_stop",
-                     "vmmfs_machine_reset"):
-            body = function("vmmfs_machine.c", name)
-            self.assertIn("vmmfs_node_hold(&machine->events.node)", body)
-            self.assertIn("vmmfs_node_put(&machine->events.node)", body)
+        body = function("vmmfs_machine.c", "vmmfs_machine_post_launch")
+        failure = body.split("} else {", 1)[1]
+        self.assertLess(failure.index("vmmfs_events_log"),
+                        failure.index("vmmfs_platform_x64_stop"))
+        self.assertNotIn("events", function("vmmfs_vcpu.c", "vmmfs_vcpu_run"))
 
     def test_mgtdevice_revoke_uses_mapping_owner(self):
         body = function("vmmfs_launch.c", "vmmfs_launch_revoke")
@@ -1753,7 +1754,8 @@ int main(void) {
         run_c(COMMON + r"""
 struct token { int held; };
 struct vmmfs_node { struct vnode *vnode; struct token token;  struct lock lock; bool dead;};
-struct vmmfs_launch { struct vmmfs_node node; struct token token; int result; };
+struct vmmfs_launch { struct vmmfs_node node; struct token token; int result; unsigned ready; };
+#define atomic_load_acq_int(p) (*(p))
 #define PCATCH 1
 #define PINTERLOCKED 2
 #define curthread NULL
@@ -1768,7 +1770,7 @@ static void tsleep_interlock(void *channel, int flags) {
     assert(flags == (abort_count ? 0 : PCATCH));
     reservation = 1;
     /* Completion after reservation but before the result check. */
-    if (mode == 7) launch.result = 0;
+    if (mode == 7 || (mode == 5 && abort_count)) { launch.result = 0; launch.ready = 1; }
 }
 static void tsleep_remove(void *channel) {
     (void)channel;
@@ -1783,169 +1785,123 @@ static int tsleep(void *channel, int flags, const char *name, int ticks) {
     assert(flags == (PINTERLOCKED | (abort_count ? 0 : PCATCH)));
     reservation = 0;
     ++sleep_count;
-    assert(sleep_count <= 3);
-    if (sleep_count == 1 && mode <= 4)
+    assert(sleep_count <= 2);
+    if (sleep_count == 1 && mode <= 5)
         return EINTR;
-    if (mode == 5 && sleep_count == 1)
-        return 0; /* Spurious wakeup must not finish the wait. */
-    launch.result = mode == 2 ? EINVAL : 0;
+    launch.result = mode == 2 ? EINVAL : 0; launch.ready = 1;
     return 0;
 }
-static int vmmfs_machine_abort(struct vmmfs_launch *argument) {
+static void vmmfs_launch_cancel(struct vmmfs_launch *argument) {
     assert(argument == &launch && !launch.token.held && !reservation);
     assert(++abort_count == 1);
-    if (mode == 0)
-        launch.result = ECANCELED; /* Cancellation won ownership. */
-    else if (mode == 3)
-        return EIO; /* Cleanup failure is not reported as a signal. */
-    else if (mode == 4)
-        launch.result = 0; /* Run completed while abort checked identity. */
-    /* Modes 1/2: run owns identity but has not yet reported its result. */
-    return 0;
+    if (mode == 0) { launch.result = ECANCELED; launch.ready = 1; }
+    if (mode == 3) { launch.result = EIO; launch.ready = 1; }
+    if (mode == 4) { launch.result = 0; launch.ready = 1; }
 }
+
 int
 """ + function("vmmfs_launch.c", "vmmfs_launch_wait") + r"""
 int main(void) {
     for (mode = 0; mode < 9; ++mode) {
-        launch.result = mode == 8 ? ENOMEM : EINPROGRESS;
+        launch.result = mode == 8 ? ENOMEM : EINPROGRESS; launch.ready = mode == 8;
         sleep_count = abort_count = reservation = removals = 0;
         int error = vmmfs_launch_wait(&launch);
         int expected = mode == 0 ? EINTR : mode == 2 ? EINVAL :
             mode == 3 ? EIO : mode == 8 ? ENOMEM : 0;
         assert(error == expected && !reservation && !launch.token.held);
-        assert(abort_count == (mode <= 4));
+        assert(abort_count == (mode <= 5));
         unsigned expected_sleeps = mode >= 7 ? 0 :
-            mode == 1 || mode == 2 || mode == 5 ? 2 : 1;
+            mode == 1 || mode == 2 ? 2 : 1;
         assert(sleep_count == expected_sleeps);
-        assert(removals == (mode != 3));
+        assert(removals == (mode == 0 || mode == 3 || mode == 4 ||
+            mode == 5 || mode >= 7));
     }
     return 0;
 }
 """)
 
+
     def test_run_abort_single_owner(self):
         run_c(COMMON + r"""
-struct token { int held; };
-struct vmmfs_node { struct vnode *vnode; struct token token; struct vmmfs_node *parent; bool dead;  struct lock lock;};
-struct vnode { void *v_data; int refs; };
-struct vmm_cpustate { int marker; };
-typedef void *vmm_machine_t;
+struct vnode { unsigned released; };
+struct cdev { void *si_drv1; };
+struct vmmfs_launch;
+struct vmmfs_vcpu { struct vmmfs_launch *launch; };
+struct vmmfs_machine { struct vmmfs_vcpu vcpu; };
 struct vmmfs_launch {
-    struct vmmfs_node node; struct token token;
-    struct vmm_cpustate cpustate;
+    struct vmmfs_machine *machine;
+    unsigned claimed, ready;
     int result;
+    void (*post_launch)(struct vmmfs_launch *);
+    struct vnode *vnode;
+    struct cdev *dev;
+    void *loader_signal;
 };
-struct vmmfs_machine {
-    struct vmmfs_node node; struct token token;
-    struct vmmfs_launch *launch;
-    vmm_machine_t machine;
-    struct { unsigned count; } vcpu;
-    int memory;
-    struct { struct vmmfs_node node; } events;
-    struct vmm_cpustate boot_state;
-    unsigned runtime_references;
-};
-static int cleanup_count, start_count, snapshot_error, start_error, race_abort;
-static int event_refs, event_count, last_event, last_error;
-#define lwkt_gettoken(t) (++(t)->held)
-#define lwkt_reltoken(t) (--(t)->held)
-#define VMMFS_MACHINE_EVENT_BOOT_COMPLETED 1
-#define VMMFS_MACHINE_EVENT_BOOT_FAILED 2
-#define vmmfs_node_hold(n) ((void)(n), ++event_refs)
-#define vmmfs_node_put(n) ((void)(n), --event_refs)
-#define vmmfs_events_log(events, verb, format, error) do {     assert(event_refs == 1);     ++event_count; last_event = (verb); last_error = (error); } while (0)
-static struct vmmfs_launch *active;
-int vmmfs_machine_run(struct vmmfs_launch *);
-int vmmfs_machine_abort(struct vmmfs_launch *);
-static void vmmfs_launch_revoke(struct vmmfs_launch *l) { (void)l; }
-static void vmmfs_machine_runtime_wait(struct vmmfs_machine *m) {
-    assert(m->runtime_references == 0);
+static unsigned callbacks, wakes, runs, revokes, kills;
+static int sigio_token;
+static struct { void *p_ucred; } proc0 = { &sigio_token };
+#define SIGKILL 9
+#define DTYPE_VNODE 1
+#define lwkt_gettoken(t) ((void)(t))
+#define lwkt_reltoken(t) ((void)(t))
+#define kprintf(...) assert(0)
+#define atomic_store_rel_int(p, v) (*(p) = (v))
+static int atomic_cmpset_int(unsigned *p, unsigned old, unsigned new) {
+    if (*p != old) return 0;
+    *p = new; return 1;
 }
-static void vmmfs_machine_runtime_put(struct vmmfs_machine *m) {
-    assert(m->runtime_references != 0);
-    --m->runtime_references;
+static void vmmfs_launch_cancel(struct vmmfs_launch *);
+static void vmmfs_launch_complete(struct vmmfs_launch *, int);
+static void pgsigio(void *p, int sig, int flags) {
+    (void)p; assert(sig == SIGKILL && flags == 0); ++kills;
 }
-static int vmmfs_memory_snapshot(int *memory) {
-    (void)memory;
-    if (race_abort) assert(vmmfs_machine_abort(active) == 0);
-    return snapshot_error;
+static void funsetown(void **p) { *p = NULL; }
+static void vmmfs_launch_revoke(struct vmmfs_launch *l) {
+    assert(l->claimed); ++revokes;
 }
-static int vmmfs_vcpu_start(void *c, unsigned n, vmm_machine_t m,
-                           const struct vmm_cpustate *state) {
-    (void)c;
-    assert(n == 4 && m != NULL && state->marker == 42);
-    ++start_count;
-    return start_error;
+static int fdrevoke(struct vnode *v, int type, void *ignored) {
+    (void)v; assert(ignored == proc0.p_ucred && ignored != NULL);
+    assert(type == DTYPE_VNODE); return 0;
 }
-static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *m) { (void)m; }
-static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *m) {
-    ++cleanup_count;
-    assert(m->runtime_references == 0);
-    m->machine = NULL;
-    return 0;
+static void destroy_only_dev(struct cdev *d) { assert(!d->si_drv1); }
+static void wakeup(struct vmmfs_launch *l) {
+    assert(l->ready && callbacks == 1 && !runs); ++wakes;
 }
-static int vmmfs_vnode_deactivate(struct vnode *vp) {
-    return vmmfs_machine_abort(vp->v_data);
+static void vmmfs_vcpu_run(struct vmmfs_vcpu *v) {
+    struct vmmfs_launch *l = v->launch;
+    assert(l->ready && callbacks == 1 && wakes == 1 && l->result == 0); ++runs;
 }
-static void vrele(struct vnode *);
-static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
-    if (!n) return true;
-    struct vnode *v = n->vnode;
-    if (vmmfs_vnode_deactivate(v) != 0) return false;
-    vrele(v); return true;
+static void vrele(struct vnode *v) { ++v->released; }
+static void callback(struct vmmfs_launch *l) {
+    assert(!l->ready); ++callbacks;
+    /* Completion can revoke the final file and reenter cancellation. */
+    vmmfs_launch_cancel(l);
 }
-static void vmmfs_launch_complete(struct vmmfs_launch *l, int e) {
-    assert(event_refs == 1);
-    assert(last_event == (e == 0 ? VMMFS_MACHINE_EVENT_BOOT_COMPLETED :
-                                  VMMFS_MACHINE_EVENT_BOOT_FAILED));
-    assert(last_error == e);
-    l->result = e;
-}
-static void vrele(struct vnode *vp) { assert(vp->refs > 0); --vp->refs; }
-int
-""" + function("vmmfs_machine.c", "vmmfs_machine_abort") + "\nint\n" +
-              function("vmmfs_machine.c", "vmmfs_machine_run") + r"""
+static void
+""" + function("vmmfs_launch.c", "vmmfs_launch_complete") + "\nstatic void\n" +
+            function("vmmfs_launch.c", "vmmfs_launch_cancel") + r"""
 int main(void) {
-    struct vmmfs_machine m = { .vcpu.count = 4 };
-    struct vmmfs_launch l = { .node.parent = &m.node,
-                              .cpustate.marker = 42, .result = EINPROGRESS };
-    struct vnode vp = { .v_data = &l, .refs = 1 };
-    active = &l;
-    m.machine = &m;
-    m.launch = &l; l.node.vnode = &vp;
-    race_abort = 1;
-    assert(vmmfs_machine_run(&l) == 0);
-    assert(start_count == 1 && cleanup_count == 0);
-    assert(event_count == 1 && event_refs == 0);
-    assert(l.result == 0 && m.launch == NULL && vp.refs == 0);
-    assert(vmmfs_machine_abort(&l) == 0);
-    assert(cleanup_count == 0 && event_count == 1);
-    assert(vmmfs_machine_run(&l) == EPIPE);
-    m.launch = &l; l.node.vnode = &vp; vp.refs = 1; l.result = EINPROGRESS;
-    assert(vmmfs_machine_abort(&l) == 0);
-    assert(cleanup_count == 1 && m.machine == NULL && l.result == ECANCELED);
-    assert(vmmfs_machine_run(&l) == EPIPE);
-    assert(event_count == 2 && event_refs == 0);
-    m.launch = &l; l.node.vnode = &vp; vp.refs = 1; m.machine = &m;
-    snapshot_error = ENOMEM;
-    assert(vmmfs_machine_run(&l) == ENOMEM);
-    assert(cleanup_count == 2 && start_count == 1 && vp.refs == 0);
-    assert(!l.token.held && !m.token.held);
-    assert(event_count == 3 && event_refs == 0);
-    /* A failed VCPU constructor must complete the same launch exactly once. */
-    m.launch = &l; l.node.vnode = &vp; vp.refs = 1; m.machine = &m;
-    l.result = EINPROGRESS;
-    snapshot_error = 0; start_error = ENOMEM;
-    assert(vmmfs_machine_run(&l) == ENOMEM);
-    assert(cleanup_count == 3 && start_count == 2 && vp.refs == 0);
-    assert(m.machine == NULL && m.launch == NULL);
-    assert(m.runtime_references == 0 && l.result == ENOMEM);
-    assert(event_count == 4 && event_refs == 0);
-    assert(vmmfs_machine_abort(&l) == 0);
-    assert(vmmfs_machine_run(&l) == EPIPE);
-    assert(cleanup_count == 3 && event_count == 4 && vp.refs == 0);
-    assert(!l.token.held && !m.token.held);
-
+    for (unsigned submit = 0; submit < 2; ++submit) {
+        struct vnode vnode = {0};
+        struct cdev dev = { &vnode };
+        struct vmmfs_launch l = { .vnode=&vnode, .dev=&dev, .post_launch=callback };
+        struct vmmfs_machine machine = { .vcpu.launch=&l };
+        l.machine=&machine;
+        callbacks=wakes=runs=revokes=kills=0;
+        if (submit) {
+            assert(atomic_cmpset_int(&l.claimed,0,1));
+            vmmfs_launch_cancel(&l); /* submit won; cancellation is a noop */
+            vmmfs_launch_complete(&l, 0);
+        } else {
+            vmmfs_launch_cancel(&l);
+            assert(!atomic_cmpset_int(&l.claimed,0,1));
+        }
+        vmmfs_launch_cancel(&l);
+        assert(callbacks==1 && wakes==1 && runs==submit);
+        assert(revokes==!submit && kills==!submit && vnode.released==1);
+        assert(l.ready && l.result==(submit ? 0 : ECANCELED));
+    }
+    return 0;
 }
 """)
 
@@ -1955,18 +1911,12 @@ int main(void) {
                                 r"bzero\(&\w+->node, sizeof\(\w+->node\)\)")
 
     def test_single_launch_protocol(self):
-        source = (SOURCE / "vmmfs_launch.h").read_text()
-        self.assertNotIn("phase", source)
-        source = (SOURCE / "vmmfs_loader.c").read_text()
-        self.assertNotIn("WAIT_TICKS", source)
-        self.assertNotIn("vmmfs_loader_file_state", source)
-        self.assertNotIn("vmmfs_loader_process_wait", source)
-        machine = (SOURCE / "vmmfs_machine.c").read_text()
-        for name in ("vmmfs_machine_run", "vmmfs_machine_abort"):
-            body = function("vmmfs_machine.c", name)
-            self.assertIn("machine->launch", body)
-            self.assertNotIn("machine->node.dead", body)
-        self.assertNotIn("vmmfs_boot_arm_locked", machine)
+        text = (SOURCE / "vmmfs_launch.h").read_text()
+        self.assertNotIn("struct vmmfs_node node", text)
+        self.assertIn("u_int claimed", text)
+        self.assertIn("u_int ready", text)
+        self.assertNotIn("vmmfs_machine_abort", (SOURCE / "vmmfs_machine.c").read_text())
+        self.assertNotIn("machine->launch", (SOURCE / "vmmfs_machine.c").read_text())
 
 
 if __name__ == "__main__":

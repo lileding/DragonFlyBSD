@@ -7,6 +7,8 @@ import unittest
 from refactor_mount import Client, Document, TARGETS, member, parent_mount, walk
 
 
+TARGETS = TARGETS - {"vmmfs_launch_create"}
+
 class MountInheritance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -44,8 +46,8 @@ class MountInheritance(unittest.TestCase):
                         self.assertIn("'struct vmmfs_node *'", node["children"][1]["arcana"])
                         calls.append(refs[0]["detail"])
         self.assertEqual(definitions, TARGETS)
-        self.assertEqual(len(declarations), 32)
-        self.assertEqual(len(calls), 17)
+        self.assertEqual(len(declarations), 30)
+        self.assertEqual(len(calls), 16)
 
     def test_mount_field_has_one_owner(self):
         found = []
@@ -82,7 +84,7 @@ class MountInheritance(unittest.TestCase):
                     value = "state" if target == "root->node.mount" else parent_mount(doc, rhs)
                     self.assertEqual(doc.code(statements[index + 1]), target + " = " + value)
                     inherited.append(target)
-        self.assertEqual(len(inherited), 19)
+        self.assertEqual(len(inherited), 18)
 
 
 if __name__ == "__main__":

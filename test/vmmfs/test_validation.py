@@ -5,6 +5,8 @@ from refactor_mount import Client, Document, TARGETS, walk
 from refactor_redundancy import ancestor, compact
 
 
+TARGETS = TARGETS - {"vmmfs_launch_create"}
+
 class ValidationBoundaries(unittest.TestCase):
     def test_ancestor_is_not_runtime_field(self):
         self.assertTrue(ancestor("vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot))"))

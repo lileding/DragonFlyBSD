@@ -47,9 +47,9 @@ static int vmmfs_loader_exec_shell(const char *script) {
     assert(script == process.script && installed == 1 && !install_error);
     ++executed; return exec_error;
 }
-static int vmmfs_machine_abort(struct vmmfs_launch *l) {
+static void vmmfs_launch_cancel(struct vmmfs_launch *l) {
     assert(l == &launch && l->node.references == 1);
-    ++aborted; return 0;
+    ++aborted;
 }
 #define kprintf(...) assert(0)
 static void kfree(void *p, int type) {
@@ -58,7 +58,8 @@ static void kfree(void *p, int type) {
 static void acquire(struct lwp *l) {
     assert(l == thread.td_lwp && launch.node.references == 1); ++acquired;
 }
-static void vmmfs_node_put(struct vmmfs_node *node) {
+static void vmmfs_launch_put(struct vmmfs_launch *l) {
+    struct vmmfs_node *node = &l->node;
     assert(node == &launch.node && node->references == 1 && acquired == 1);
     --node->references;
 }

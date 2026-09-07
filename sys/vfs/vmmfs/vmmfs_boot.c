@@ -113,23 +113,22 @@ vmmfs_boot_open(struct vop_open_args *ap)
 	struct vmmfs_machine *machine = (struct vmmfs_machine *)boot->node.parent;
 	struct vmmfs_launch *launch;
 	struct file *file, *original;
-	int error, abort_error;
+	int error;
 
 	if (ap->a_fpp == NULL || (ap->a_mode & FWRITE) == 0)
 		return (EACCES);
 	/* machine_boot owns admission and the single launch identity. */
-	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &launch));
+	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine,
+	    vmmfs_machine_post_launch, &launch));
 	if (error != 0)
 		return (error);
 	error = vmmfs_launch_open(launch, ap->a_cred, &file);
 	if (error != 0) {
-		abort_error = vmmfs_machine_abort(launch);
-		if (abort_error != 0)
-			error = abort_error;
-		vrele(launch->node.vnode);
+		vmmfs_launch_cancel(launch);
+		vmmfs_launch_put(launch);
 		return (error);
 	}
-	vrele(launch->node.vnode);
+	vmmfs_launch_put(launch);
 	/*
 	 * vn_open permits replacing the provisional file.  It releases the
 	 * fixed entry vnode itself; this file owns only the private launch vnode.
