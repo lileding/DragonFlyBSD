@@ -210,7 +210,7 @@ vmmfs_root_get_item(struct vmmfs_node *node, const char *name,
 	entry = vmmfs_root_find_locked(root, name, namelen);
 	if (entry != NULL) {
 		*vnodep = entry->machine->node.vnode;
-		vhold(*vnodep);
+		vref(*vnodep);
 	}
 	lwkt_reltoken(&root->token);
 	return (*vnodep != NULL ? 0 : ENOENT);
@@ -238,7 +238,7 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 		machine = entry->machine;
 		item->inode = machine->node.inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
-		vhold(item->vnode);
+		vref(item->vnode);
 		lwkt_reltoken(&root->token);
 		return (0);
 	}

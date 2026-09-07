@@ -50,15 +50,15 @@ static int remove_item(struct vmmfs_node *n, const char *name, size_t len) {
     (void)n; (void)name; (void)len;
     ++removed; vrele(&child); return 0;
 }
-static int vget(struct vnode *v, int flags) {
+static int vn_lock(struct vnode *v, int flags) {
     (void)flags;
     if (mode == 2) {
-        /* Parent completed deactivation while vget blocked. */
+        /* Parent completed deactivation while vn_lock blocked. */
         vrele(v); ++removed;
         return ENOENT;
     }
     if (mode == 1) return ENOENT;
-    ++v->refs; return 0;
+    return 0;
 }
 static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(v->refs);

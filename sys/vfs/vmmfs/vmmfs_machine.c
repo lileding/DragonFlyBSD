@@ -419,7 +419,7 @@ vmmfs_machine_touch_stopped(struct vmmfs_machine *machine,
 	lwkt_gettoken(&machine->token);
 	vnode = machine->stopped != NULL ? machine->stopped->node.vnode : NULL;
 	if (vnode != NULL)
-		vhold(vnode);
+		vref(vnode);
 	lwkt_reltoken(&machine->token);
 	if (vnode == NULL)
 		return (ENOENT);
@@ -448,10 +448,11 @@ vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
 	    vmmfs_machine_touch_stopped(machine, &vnode));
 	if (error != 0)
 		return (error);
-	error = vget(vnode, LK_EXCLUSIVE);
-	vdrop(vnode);
-	if (error != 0)
+	error = vn_lock(vnode, LK_EXCLUSIVE);
+	if (error != 0) {
+		vrele(vnode);
 		return (error);
+	}
 	cache_setunresolved(ap->a_nch);
 	*ap->a_vpp = vnode;
 	return (0);
@@ -493,7 +494,7 @@ vmmfs_machine_get_item(struct vmmfs_machine *machine,
 		vnode = machine->machine == NULL || machine->launch != NULL ?
 		    (machine->stopped != NULL ? machine->stopped->node.vnode : NULL) : NULL;
 		if (vnode != NULL)
-			vhold(vnode);
+			vref(vnode);
 		lwkt_reltoken(&machine->token);
 		if (vnode == NULL)
 			return (ENOENT);
@@ -502,7 +503,7 @@ vmmfs_machine_get_item(struct vmmfs_machine *machine,
 	} else {
 		return (ENOENT);
 	}
-	vhold(vnode);
+	vref(vnode);
 	*vnodep = vnode;
 	return (0);
 }
@@ -521,11 +522,6 @@ vmmfs_machine_nresolve(struct vop_nresolve_args *ap)
 		cache_setvp(ap->a_nch, NULL);
 		return (error);
 	}
-	error = vget(vnode, LK_EXCLUSIVE);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	vn_unlock(vnode);
 	cache_setvp(ap->a_nch, vnode);
 	vrele(vnode);
 	return (0);
@@ -824,11 +820,6 @@ vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
 	    vmmfs_machine_get_item(machine, "loader", 6, &loader_vnode));
 	if (error != 0)
 		return (error);
-	error = vget(loader_vnode, LK_SHARED | LK_RETRY);
-	vdrop(loader_vnode);
-	if (error != 0)
-		return (error);
-	vn_unlock(loader_vnode);
 	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &launch));
 	if (error != 0) {
 		vrele(loader_vnode);

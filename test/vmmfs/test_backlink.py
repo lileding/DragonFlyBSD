@@ -79,7 +79,7 @@ int main(void) {
 }
 """)
 
-    def test_parent_lookup_pins_under_token_and_handles_reclaim(self):
+    def test_parent_lookup_returns_reference_under_admission(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
 struct vnode;
@@ -98,41 +98,31 @@ void lwkt_gettoken(struct token *t) {
     ++t->held;
 }
 void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
-static void vhold(struct vnode *v) {
+static void vref(struct vnode *v) {
     assert(v == &parent_vnode && parent.lock.held && !child.lock.held);
-    assert(!parent.dead); ++v->holds;
+    assert(!parent.dead && v->refs == 1); ++v->refs;
 }
-static int vget(struct vnode *v, int flags) {
-    assert(v == &parent_vnode && v->holds == 1 && flags == (LK_EXCLUSIVE | LK_RETRY));
-    assert(!parent.lock.held && !child.lock.held); ++get_calls;
-    if (mode == 5) {
-        /* Hold preserves vnode storage, not its reclaimed filesystem data. */
-        parent.vnode = NULL; v->v_data = NULL; return ENOENT;
-    }
-    ++v->refs; v->locked = true; return 0;
-}
-static void vdrop(struct vnode *v) { assert(v->holds == 1); --v->holds; }
-static void vn_unlock(struct vnode *v) { assert(v->locked); v->locked = false; }
+
 int
 """ + function("vmmfs_node.c", "vmmfs_node_get_vnode") + "\nint\n" + function("vmmfs_node.c", "vmmfs_node_nlookupdotdot") + r"""
 int main(void) {
     struct vnode *result;
     struct vop_nlookupdotdot_args args = { &child_vnode, &result };
-    for (mode = 0; mode != 6; ++mode) {
+    for (mode = 0; mode != 5; ++mode) {
         memset(&child, 0, sizeof(child)); memset(&parent, 0, sizeof(parent));
         memset(&parent_vnode, 0, sizeof(parent_vnode));
         child.parent = &parent; child_vnode.v_data = &child;
         parent.vnode = mode == 3 ? NULL : &parent_vnode;
-        parent_vnode.v_data = &parent;
+        parent_vnode.v_data = &parent; parent_vnode.refs = 1;
         child.dead = mode == 1; parent.dead = mode == 2;
         result = NULL; get_calls = 0;
         int error = vmmfs_node_nlookupdotdot(&args);
         assert(!child.token.held && !parent.token.held && !parent_vnode.holds);
         if (mode == 0 || mode == 1 || mode == 4) {
-            assert(!error && result == &parent_vnode && result->refs == 1);
-            assert(!result->locked && get_calls == 1);
+            assert(!error && result == &parent_vnode && result->refs == 2);
+            assert(!result->locked && get_calls == 0);
         } else {
-            assert(error == ENOENT && result == NULL && !parent_vnode.refs);
+            assert(error == ENOENT && result == NULL && parent_vnode.refs == 1);
             assert(get_calls == (mode == 5));
         }
     }

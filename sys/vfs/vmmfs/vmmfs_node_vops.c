@@ -82,7 +82,7 @@ vmmfs_node_readdir(struct vop_readdir_args *ap)
 		if (error != 0)
 			break;
 		KKASSERT(item.vnode != NULL);
-		vdrop(item.vnode);
+		vrele(item.vnode);
 		stop = vop_write_dirent(&error, uio, item.inode, DT_DIR,
 		    (uint16_t)strlen(item.name), item.name);
 		if (!stop) {
@@ -117,11 +117,6 @@ vmmfs_node_nresolve(struct vop_nresolve_args *ap)
 		cache_setvp(ap->a_nch, NULL);
 		return (error);
 	}
-	error = vget(vnode, LK_EXCLUSIVE);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	vn_unlock(vnode);
 	cache_setvp(ap->a_nch, vnode);
 	vrele(vnode);
 	return (0);
@@ -150,7 +145,7 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 		return (error);
 	if (vnode == NULL)
 		return (ENOMEM);
-	error = vget(vnode, LK_EXCLUSIVE);
+	error = vn_lock(vnode, LK_EXCLUSIVE);
 	if (error != 0) {
 		/*
 		 * The child is already discoverable.  If another operation has
@@ -169,7 +164,6 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 	*ap->a_vpp = vnode;
 	cache_setunresolved(ap->a_nch);
 	cache_setvp(ap->a_nch, vnode);
-	vrele(vnode); /* vget reference is returned to the VOP caller. */
 	return (0);
 }
 

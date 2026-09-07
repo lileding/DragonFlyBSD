@@ -51,6 +51,11 @@ static int vget(struct vnode *v, int flags) {
     if (get_error) return get_error;
     assert(!v->locked); ++v->refs; v->locked = 1; return 0;
 }
+static int vn_lock(struct vnode *v, int flags) {
+    assert(flags == LK_EXCLUSIVE && v->refs);
+    if (get_error) return get_error;
+    assert(!v->locked); v->locked = 1; return 0;
+}
 static void vn_unlock(struct vnode *v) { assert(v->locked); v->locked = 0; }
 static void cache_setunresolved(struct nchandle *nch) {
     if (nch->ncp->vnode) vdrop(nch->ncp->vnode);
@@ -80,6 +85,7 @@ static int vmmfs_vnode_deactivate(struct vnode *v) {
     if (veto) return veto;
     dead = true; return 0;
 }
+static void vref(struct vnode *v) { assert(v->refs); ++v->refs; }
 static void vrele(struct vnode *);
 static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
     if (!n) return true;
@@ -92,7 +98,7 @@ static int get_item(struct vmmfs_node *node, const char *name, size_t length,
     (void)node; assert(length == 5 && !memcmp(name, "child", 5));
     *out = NULL;
     if (lookup_error) return lookup_error;
-    assert(registry == &child); vhold(registry); *out = registry; return 0;
+    assert(registry == &child); vref(registry); *out = registry; return 0;
 }
 static int create_item(struct vmmfs_node *node, struct mount *mount,
     const char *name, size_t length, struct vnode **out) {
@@ -134,11 +140,9 @@ int main(void) {
     assert(vmmfs_node_nmkdir(&mk) == ENOENT);
     assert(registry == &child && child.refs == 1 && !dead);
     assert(deactivations == 2 && removals == 1);
-    /* Lookup failure must release get_item's hold, not the registry ref. */
-    assert(vmmfs_node_nresolve(&resolve) == ENOENT);
-    assert(child.refs == 1 && !child.holds && name.vnode == NULL);
-    get_error = 0;
+    /* Lookup transfers a reference without acquiring a vnode lock. */
     assert(vmmfs_node_nresolve(&resolve) == 0 && name.vnode == &child);
+    get_error = 0;
     assert(child.refs == 1 && child.holds == 1 && !child.locked);
     assert(vmmfs_node_nrmdir(&rm) == EBUSY);
     assert(registry == &child && child.refs == 1 && child.holds == 1);
@@ -169,7 +173,7 @@ int main(void) {
 }
 """)
 
-    def test_readdir_copies_metadata_before_releasing_hold(self):
+    def test_readdir_copies_metadata_before_releasing_reference(self):
         run_c(COMMON + r"""
 #include <sys/types.h>
 enum { VDIR = 1, DT_DIR = 4 };
@@ -179,7 +183,7 @@ struct vmmfs_node { struct vnode *vnode;
     struct vmmfs_node *parent; ino_t inode;
     int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
  struct lock lock; bool dead;};
-struct vnode { int v_type; void *v_data; unsigned holds; };
+struct vnode { int v_type; void *v_data; unsigned refs; };
 struct uio { off_t uio_offset; };
 struct vop_readdir_args {
     struct vnode *a_vp; struct uio *a_uio;
@@ -187,20 +191,20 @@ struct vop_readdir_args {
 };
 static struct vnode child;
 static unsigned writes;
-static void vdrop(struct vnode *v) {
-    assert(v == &child && v->holds == 1); --v->holds; v->v_data = NULL;
+static void vrele(struct vnode *v) {
+    assert(v == &child && v->refs == 1); --v->refs; v->v_data = NULL;
 }
 static int read_item(struct vmmfs_node *node, uint64_t index,
     struct vmmfs_node_item *item) {
     (void)node;
     if (index) return ENOENT;
-    assert(child.holds == 0); child.holds = 1;
+    assert(child.refs == 0); child.refs = 1;
     item->vnode = &child; item->inode = 42; strcpy(item->name, "child");
     return 0;
 }
 static int vop_write_dirent(int *error, struct uio *uio, ino_t inode,
     unsigned type, uint16_t length, const char *name) {
-    (void)uio; assert(type == DT_DIR && !child.holds);
+    (void)uio; assert(type == DT_DIR && !child.refs);
     assert(inode == 42 && length == 5 && !strcmp(name, "child"));
     assert(child.v_data == NULL); ++writes; *error = 0; return 0;
 }
@@ -214,7 +218,7 @@ int main(void) {
     int eof = 0;
     struct vop_readdir_args ap = { .a_vp=&parent, .a_uio=&uio, .a_eofflag=&eof };
     assert(vmmfs_node_readdir(&ap) == 0);
-    assert(writes == 1 && eof == 1 && uio.uio_offset == 3 && !child.holds);
+    assert(writes == 1 && eof == 1 && uio.uio_offset == 3 && !child.refs);
     return 0;
 }
 """)

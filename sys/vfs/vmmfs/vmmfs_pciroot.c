@@ -641,7 +641,7 @@ vmmfs_pciroot_get_item(struct vmmfs_node *node, const char *name,
 	entry = vmmfs_pciroot_entry_find_locked(pciroot, bdf);
 	if (entry != NULL) {
 		*vnodep = entry->slot->node.vnode;
-		vhold(*vnodep);
+		vref(*vnodep);
 	}
 	lwkt_reltoken(&pciroot->token);
 	return (*vnodep == NULL ? ENOENT : 0);
@@ -668,7 +668,7 @@ vmmfs_pciroot_read_item(struct vmmfs_node *node, uint64_t index,
 		item->inode = entry->slot->node.inode;
 		vmmfs_pciroot_format_bdf(entry->slot->bdf, item->name,
 		    sizeof(item->name));
-		vhold(item->vnode);
+		vref(item->vnode);
 		lwkt_reltoken(&pciroot->token);
 		return (0);
 	}

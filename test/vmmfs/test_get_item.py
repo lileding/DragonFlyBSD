@@ -26,7 +26,7 @@ static void lwkt_gettoken(int *token) {
 static void lwkt_reltoken(int *token) {
     (void)token; assert(held); held = 0;
 }
-static void vhold(struct vnode *vnode) {
+static void vref(struct vnode *vnode) {
     assert(held == vnode->dynamic); ++vnode->holds;
 }
 static int

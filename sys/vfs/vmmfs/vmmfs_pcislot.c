@@ -509,7 +509,7 @@ vmmfs_pcislot_get_item(struct vmmfs_pcislot *slot,
 		goto resolved;
 	}
 	if (vnode != NULL)
-		vhold(vnode);
+		vref(vnode);
 	lwkt_reltoken(&slot->token);
 resolved:
 	if (vnode == NULL) {
@@ -533,11 +533,6 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 		cache_setvp(ap->a_nch, NULL);
 		return (error);
 	}
-	error = vget(vnode, LK_EXCLUSIVE);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
-	vn_unlock(vnode);
 	cache_setvp(ap->a_nch, vnode);
 	vrele(vnode);
 	return (0);

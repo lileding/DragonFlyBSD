@@ -528,9 +528,6 @@ static int vmmfs_machine_get_item(struct vmmfs_machine *m,
     if (*vnodep == NULL) return ENOENT;
     vref(*vnodep); return 0;
 }
-static int vget(struct vnode *v, int flags) { (void)flags; vref(v); return 0; }
-static void vdrop(struct vnode *v) { vrele(v); }
-static void vn_unlock(struct vnode *v) { (void)v; }
 static void remove_loader(void) {
     assert(machine.loader.node.vnode == &loader_vnode);
     machine.loader.node.dead = true;

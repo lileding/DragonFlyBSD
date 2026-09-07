@@ -673,20 +673,15 @@ void vmmfs_node_put(struct vmmfs_node *n) {
     assert(slot.token.held == 0);
     assert(n->references != 0); --n->references;
 }
-static void vhold(struct vnode *v) {
+static void vref(struct vnode *v) {
     assert(slot.token.held || resources.token.held); ++v->holds;
 }
-static void vdrop(struct vnode *v) { assert(v->holds != 0); --v->holds; }
-static int vget(struct vnode *v, int flags) {
-    (void)flags; assert(v->holds == 1);
-    assert(!slot.token.held && !resources.token.held); return 0;
-}
+static void vrele(struct vnode *v) { assert(v->holds != 0); --v->holds; }
 #define DT_REG 8
 #define bcmp(a,b,n) memcmp(a,b,n)
 #define bcopy(a,b,n) memcpy(b,a,n)
 #define vmmfs_pcislot_pciroot(s) (s)
 #define vn_unlock(v) ((void)(v))
-#define vrele(v) ((void)(v))
 #define cache_setvp(h,v) ((void)(h), cached = ((v) != NULL))
 static int vmmfs_pcislot_resource_name(struct vmmfs_pcislot_resource *r,
     char *name, size_t size, size_t *length) {
@@ -716,7 +711,7 @@ int main(void) {
 
     /* The child must be held before lookup releases its registry token. */
     assert(vmmfs_pcislot_resources_lookup(&resources, "bar0", 4, &found) == 0);
-    assert(found == &bar && bar.holds == 1); vdrop(found);
+    assert(found == &bar && bar.holds == 1); vrele(found);
     assert(vmmfs_pcislot_nresolve(&args) == 0 && cached == 1);
     assert(bar.holds == 0 && resources.node.references == 1);
     assert(vmmfs_pcislot_read_item(&slot, 0, &item) == 0);

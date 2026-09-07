@@ -270,7 +270,7 @@ vmmfs_node_get_vnode(struct vmmfs_node *node, struct vnode **vnodep)
 
 	if (vnode == NULL)
 		return (ENOENT);
-	vhold(vnode);
+	vref(vnode);
 	*vnodep = vnode;
 	return (0);
 }
@@ -286,12 +286,7 @@ vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	error = VMMFS_WORK(parent, vmmfs_node_get_vnode(parent, &vnode));
 	if (error != 0)
 		return (error);
-	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
-	vdrop(vnode);
-	if (error != 0)
-		return (error);
 	*ap->a_vpp = vnode;
-	vn_unlock(vnode);
 	return (0);
 }
 

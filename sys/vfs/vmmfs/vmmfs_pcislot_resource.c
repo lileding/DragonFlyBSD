@@ -566,7 +566,7 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 		    bcmp(candidate, name, length) == 0) {
 			*vnodep = resources->items[index].node.vnode;
 			error = 0;
-			vhold(*vnodep);
+			vref(*vnodep);
 			goto done;
 		}
 	}

@@ -22,6 +22,7 @@ struct vmmfs_node_item;
 typedef int (*vmmfs_node_load_t)(struct vmmfs_node *, char *, size_t,
 	size_t *);
 typedef int (*vmmfs_node_store_t)(struct vmmfs_node *, const char *, size_t);
+/* Lookup and enumeration return an ordinary vnode reference to the caller. */
 typedef int (*vmmfs_node_get_item_t)(struct vmmfs_node *, const char *,
 	size_t, struct vnode **);
 typedef int (*vmmfs_node_read_item_t)(struct vmmfs_node *, uint64_t,
