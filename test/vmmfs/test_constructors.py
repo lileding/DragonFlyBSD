@@ -153,7 +153,6 @@ static bool vmmfs_machine_deactivate(struct vmmfs_node *n) { (void)n; assert(0);
 static bool vmmfs_pcislot_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static void vmmfs_pcislot_drop(struct vmmfs_node *);
-static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *);
 """
 
 class Constructors(unittest.TestCase):
@@ -163,7 +162,6 @@ class Constructors(unittest.TestCase):
             ("vmmfs_node.c", "vmmfs_node_hold", "static void"),
             ("vmmfs_node.c", "vmmfs_node_put", "static void"),
             ("vmmfs_machine.c", "vmmfs_machine_drop", "static void"),
-            ("vmmfs_machine.c", "vmmfs_machine_cleanup_partial", "static void"),
             ("vmmfs_machine.c", "vmmfs_machine_create", "int"),
             ("vmmfs_pcislot.c", "vmmfs_pcislot_drop", "static void"),
             ("vmmfs_pcislot.c", "vmmfs_pcislot_create", "int"),

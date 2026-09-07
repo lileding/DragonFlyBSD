@@ -31,7 +31,10 @@ class Work(unittest.TestCase):
             for verb in verbs:
                 body = function('vmmfs_' + owner + '.c', 'vmmfs_' + owner + '_' + verb)
                 self.assertNotIn('dead', body, (owner, verb))
-        self.assertNotIn('dead', function('vmmfs_machine.c', 'vmmfs_machine_cleanup_partial'))
+        create = function('vmmfs_machine.c', 'vmmfs_machine_create')
+        self.assertNotIn('dead', create.split('\nfail:', 1)[1])
+        self.assertNotIn('vmmfs_machine_cleanup_partial',
+                         (SOURCE / 'vmmfs_machine.c').read_text())
 
     def test_data_tokens_belong_to_objects(self):
         node = (SOURCE / "vmmfs_node.h").read_text()

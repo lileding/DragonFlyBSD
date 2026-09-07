@@ -45,7 +45,6 @@ static void vmmfs_machine_runtime_put(struct vmmfs_machine *);
 static void vmmfs_machine_runtime_wait(struct vmmfs_machine *);
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
-static void vmmfs_machine_cleanup_partial(struct vmmfs_machine *);
 static bool vmmfs_machine_deactivate(struct vmmfs_node *);
 
 struct vop_ops vmmfs_machine_vops = {
@@ -137,13 +136,6 @@ vmmfs_machine_create(struct vmmfs_node *parent,
 	return (0);
 
 fail:
-	vmmfs_machine_cleanup_partial(machine);
-	return (error);
-}
-
-static void
-vmmfs_machine_cleanup_partial(struct vmmfs_machine *machine)
-{
 	(void)vmmfs_node_deactivate(&machine->events.node);
 	(void)vmmfs_node_deactivate(&machine->serialroot.node);
 	if (machine->rtc.machine != NULL)
@@ -158,6 +150,7 @@ vmmfs_machine_cleanup_partial(struct vmmfs_machine *machine)
 	(void)vmmfs_node_deactivate(&machine->vcpu.node);
 	(void)vmmfs_node_deactivate(&machine->id_node.node);
 	vmmfs_node_put(&machine->node);
+	return (error);
 }
 
 static int
@@ -470,7 +463,6 @@ vmmfs_machine_get_item(struct vmmfs_machine *machine,
 {
 	struct vnode *vnode;
 
-	lwkt_gettoken(&machine->token);
 	if (length == sizeof("id") - 1 &&
 	    bcmp(name, "id", sizeof("id") - 1) == 0)
 		vnode = machine->id_node.node.vnode;
@@ -496,19 +488,21 @@ vmmfs_machine_get_item(struct vmmfs_machine *machine,
 	    bcmp(name, "serial", sizeof("serial") - 1) == 0)
 		vnode = machine->serialroot.node.vnode;
 	else if (length == sizeof("stopped") - 1 &&
-	    bcmp(name, "stopped", sizeof("stopped") - 1) == 0)
+	    bcmp(name, "stopped", sizeof("stopped") - 1) == 0) {
+		lwkt_gettoken(&machine->token);
 		vnode = machine->machine == NULL || machine->launch != NULL ?
 		    (machine->stopped != NULL ? machine->stopped->node.vnode : NULL) : NULL;
-	else {
+		if (vnode != NULL)
+			vhold(vnode);
 		lwkt_reltoken(&machine->token);
+		if (vnode == NULL)
+			return (ENOENT);
+		*vnodep = vnode;
+		return (0);
+	} else {
 		return (ENOENT);
 	}
-	if (vnode != NULL)
-		vhold(vnode);
-	lwkt_reltoken(&machine->token);
-	if (vnode == NULL) {
-		return (ENOENT);
-	}
+	vhold(vnode);
 	*vnodep = vnode;
 	return (0);
 }
