@@ -58,7 +58,7 @@ static int vmmfs_pciroot_read_item(struct vmmfs_node *, uint64_t,
 	struct vmmfs_node_item *);
 static int vmmfs_pciroot_create_item(struct vmmfs_node *, struct mount *,
 	const char *, size_t, struct vnode **);
-static void vmmfs_pciroot_remove_item(struct vmmfs_node *, const char *,
+static int vmmfs_pciroot_remove_item(struct vmmfs_node *, const char *,
 	size_t);
 static int vmmfs_pciroot_config_address_read(vmm_vcpu_t, void *,
 	struct vmm_io_read *);
@@ -137,6 +137,7 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	pciroot->node.mount = parent->mount;
 	pciroot->node.references = 1;
 	lwkt_token_init(&pciroot->node.token, "vmmfsnode");
+	lockinit(&pciroot->node.lock, "vmmfsnode", 0, 0);
 	pciroot->node.drop = vmmfs_pciroot_drop;
 	vmmfs_node_hold(parent);
 	pciroot->node.deactivate = vmmfs_pciroot_deactivate;
@@ -746,7 +747,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	return (0);
 }
 
-static void
+static int
 vmmfs_pciroot_remove_item(struct vmmfs_node *node, const char *name,
 	size_t namelen)
 {
@@ -764,7 +765,7 @@ vmmfs_pciroot_remove_item(struct vmmfs_node *node, const char *name,
 	entry = vmmfs_pciroot_entry_find_locked(pciroot, bdf);
 	if (entry == NULL) {
 		lwkt_reltoken(&pciroot->node.token);
-		return;
+		return (ENOENT);
 	}
 	RB_REMOVE(vmmfs_pcislot_tree, &pciroot->registry->slots, entry);
 	vnode = entry->vnode;
@@ -772,6 +773,7 @@ vmmfs_pciroot_remove_item(struct vmmfs_node *node, const char *name,
 	kfree(entry, M_VMMFS);
 	lwkt_reltoken(&pciroot->node.token);
 	vrele(vnode);
+	return (0);
 }
 
 static int

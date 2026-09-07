@@ -297,6 +297,7 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.dead = false;
 	loader->node.references = 1;
 	lwkt_token_init(&loader->node.token, "vmmfsnode");
+	lockinit(&loader->node.lock, "vmmfsnode", 0, 0);
 	loader->node.deactivate = vmmfs_loader_deactivate;
 	loader->node.drop = vmmfs_loader_drop;
 	vmmfs_node_hold(parent);

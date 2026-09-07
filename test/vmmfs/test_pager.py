@@ -113,7 +113,7 @@ typedef struct vm_page { bool busy; bool pte; int contents; } *vm_page_t;
 struct vm_page_rb_tree { struct vm_page pages[2]; };
 struct vm_object { struct vm_page_rb_tree rb_memq; bool locked; int references; };
 struct token { bool held; };
-struct vmmfs_node { struct token token; };
+struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
 struct vmmfs_launch {
     struct vmmfs_node node;
     struct vm_object *pager_object, *backing_object;

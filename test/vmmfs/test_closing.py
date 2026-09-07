@@ -7,7 +7,7 @@ class Closing(unittest.TestCase):
     def test_serial_veto_does_not_block(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct vmmfs_node *parent; struct token token; bool dead; };
+struct vmmfs_node { struct vmmfs_node *parent; struct token token; bool dead;  struct lock lock;};
 struct tty { struct token t_token; unsigned t_state, t_line; };
 struct vmmfs_serialroot { struct vmmfs_node node; };
 struct vmmfs_machine { struct vmmfs_node node; void *machine;
@@ -89,7 +89,7 @@ int main(void) {
     def test_vcpu_close_drains_tail_without_veto(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
 struct vmmfs_vcpu { struct vmmfs_node node; struct token token;
     unsigned active_count; void *threads; };
 static struct vmmfs_vcpu cpu;
@@ -118,7 +118,7 @@ int main(void) {
     def test_descriptor_close_drains_commit(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
 struct vmmfs_pcislot { struct vmmfs_node node; };
 struct vmmfs_pcislot_auth { int unused; };
 struct vmmfs_pcislot_descriptor { struct vmmfs_node node;
@@ -157,7 +157,7 @@ int main(void) {
     def test_launch_cleanup_error_does_not_veto(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; };
+struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
 struct vmmfs_launch { struct vmmfs_node node; };
 static int result;
 static unsigned revoked;
@@ -171,7 +171,7 @@ static void vmmfs_launch_revoke(struct vmmfs_launch *l) {
 static int
 """ + function("vmmfs_launch.c", "vmmfs_launch_deactivate") + r"""
 int main(void) {
-    struct vmmfs_launch launch = {{{1}, true}};
+    struct vmmfs_launch launch = { .node = { .token = {1}, .dead = true } };
     for (unsigned i = 0; i != 2; ++i) {
         result = i == 0 ? 0 : EIO;
         assert(vmmfs_launch_deactivate(&launch.node) == 0);

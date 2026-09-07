@@ -53,7 +53,7 @@ static int vmmfs_root_get_item(struct vmmfs_node *, const char *, size_t,
 	struct vnode **);
 static int vmmfs_root_create_item(struct vmmfs_node *, struct mount *,
 	const char *, size_t, struct vnode **);
-static void vmmfs_root_remove_item(struct vmmfs_node *, const char *,
+static int vmmfs_root_remove_item(struct vmmfs_node *, const char *,
 	size_t);
 static int vmmfs_root_deactivate(struct vmmfs_node *);
 static void vmmfs_root_drop(struct vmmfs_node *);
@@ -110,6 +110,7 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 	root->node.mount = state;
 	root->node.references = 1;
 	lwkt_token_init(&root->node.token, "vmmfsnode");
+	lockinit(&root->node.lock, "vmmfsnode", 0, 0);
 	root->node.drop = vmmfs_root_drop;
 	root->node.deactivate = vmmfs_root_deactivate;
 	root->node.get_item = vmmfs_root_get_item;
@@ -298,7 +299,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	return (0);
 }
 
-static void
+static int
 vmmfs_root_remove_item(struct vmmfs_node *node, const char *name,
 	size_t namelen)
 {
@@ -316,4 +317,5 @@ vmmfs_root_remove_item(struct vmmfs_node *node, const char *name,
 	kfree(entry, M_VMMFS);
 	lwkt_reltoken(&root->node.token);
 	vrele(vnode);
+	return (0);
 }

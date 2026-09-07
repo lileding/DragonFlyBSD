@@ -142,6 +142,7 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.dead = false;
 	memory->node.references = 1;
 	lwkt_token_init(&memory->node.token, "vmmfsnode");
+	lockinit(&memory->node.lock, "vmmfsnode", 0, 0);
 	memory->node.deactivate = vmmfs_memory_deactivate;
 	memory->node.drop = vmmfs_memory_drop;
 	vmmfs_node_hold(parent);

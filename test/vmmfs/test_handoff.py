@@ -16,6 +16,7 @@ class CreateHandoff(unittest.TestCase):
 
     def test_nmkdir_balances_handoff_on_all_paths(self):
         source = COMMON + r"""
+#define kprintf printf
 struct mount { int unused; };
 struct vnode { unsigned refs; struct mount *v_mount; };
 struct namecache { const char *nc_name; size_t nc_nlen; };
@@ -24,14 +25,13 @@ struct vattr { int va_type; };
 struct vmmfs_node {
     int (*create_item)(struct vmmfs_node *, struct mount *,
         const char *, size_t, struct vnode **);
-    void (*remove_item)(struct vmmfs_node *, const char *, size_t);
-};
+    int (*remove_item)(struct vmmfs_node *, const char *, size_t);
+ struct lock lock; bool dead;};
 struct vop_nmkdir_args {
     struct vattr *a_vap; struct vnode *a_dvp;
     struct nchandle *a_nch; struct vnode **a_vpp;
 };
 #define VDIR 1
-#define LK_EXCLUSIVE 1
 static unsigned mode, removed;
 static struct vmmfs_node parent;
 static struct vnode child;
@@ -45,9 +45,9 @@ static int create(struct vmmfs_node *n, struct mount *m,
     child.refs = 2; /* registry + create_item caller */
     *v = &child; return 0;
 }
-static void remove_item(struct vmmfs_node *n, const char *name, size_t len) {
+static int remove_item(struct vmmfs_node *n, const char *name, size_t len) {
     (void)n; (void)name; (void)len;
-    ++removed; vrele(&child);
+    ++removed; vrele(&child); return 0;
 }
 static int vget(struct vnode *v, int flags) {
     (void)flags;

@@ -82,7 +82,7 @@ libc.read.restype = ctypes.c_ssize_t
 buffer = ctypes.create_string_buffer(40)
 result = libc.read(fd, buffer, len(buffer))
 error = ctypes.get_errno()
-allowed = (errno.EINTR,) if action == 'signal' else (errno.ENXIO, errno.EBADF, errno.EIO)
+allowed = (errno.EINTR,) if action == 'signal' else (errno.ENXIO, errno.EBADF, errno.EIO, errno.ENOENT)
 if result != -1 or error not in allowed:
     raise RuntimeError('config read result=%d errno=%d' % (result, error))
 print(action, flush=True)
@@ -581,7 +581,7 @@ try:
     data = os.read(fd, 1)
     raise RuntimeError("revoked read returned data or EOF: %r" % data)
 except OSError as error:
-    if error.errno not in (errno.ENXIO, errno.EBADF, errno.EIO):
+    if error.errno not in (errno.ENXIO, errno.EBADF, errno.EIO, errno.ENOENT):
         raise
     print("REVOKED", flush=True)
 """, str(fd)], pass_fds=(fd,), stdout=subprocess.PIPE,

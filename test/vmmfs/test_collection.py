@@ -12,15 +12,16 @@ class Collection(unittest.TestCase):
                            for name in names)
         run_c(COMMON + r"""
 #include <sys/types.h>
-enum { VDIR = 1, VREG, LK_EXCLUSIVE, LK_SHARED };
+#define kprintf printf
+enum { VDIR = 1, VREG };
 struct vnode;
 struct mount { int unused; };
 struct vmmfs_node {
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
     int (*create_item)(struct vmmfs_node *, struct mount *, const char *,
         size_t, struct vnode **);
-    void (*remove_item)(struct vmmfs_node *, const char *, size_t);
-};
+    int (*remove_item)(struct vmmfs_node *, const char *, size_t);
+ struct lock lock; bool dead;};
 struct vnode {
     int v_type; void *v_data; struct mount *v_mount;
     unsigned refs, holds, locked;
@@ -94,15 +95,15 @@ static int create_item(struct vmmfs_node *node, struct mount *mount,
     child.refs = 2; /* Registry and the independent create_item result. */
     registry = &child; *out = &child; return 0;
 }
-static void remove_item(struct vmmfs_node *node, const char *name,
+static int remove_item(struct vmmfs_node *node, const char *name,
     size_t length) {
     (void)node; assert(length == 5 && !memcmp(name, "child", 5));
     assert(dead && registry == &child && child.refs >= 2);
-    registry = NULL; ++removals; vrele(&child);
+    registry = NULL; ++removals; vrele(&child); return 0;
 }
 """ + bodies + r"""
 int main(void) {
-    struct vmmfs_node node = { get_item, create_item, remove_item };
+    struct vmmfs_node node = { .get_item=get_item, .create_item=create_item, .remove_item=remove_item };
     struct mount mount = { 0 };
     struct vnode parent = { .v_type=VDIR, .v_data=&node, .v_mount=&mount };
     struct namecache name = { .nc_name="child", .nc_nlen=5 };
@@ -168,7 +169,7 @@ struct vmmfs_node_item { struct vnode *vnode; ino_t inode; char name[16]; };
 struct vmmfs_node {
     struct vmmfs_node *parent; ino_t inode;
     int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
-};
+ struct lock lock; bool dead;};
 struct vnode { int v_type; void *v_data; unsigned holds; };
 struct uio { off_t uio_offset; };
 struct vop_readdir_args {

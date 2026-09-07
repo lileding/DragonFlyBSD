@@ -67,6 +67,7 @@ vmmfs_boot_init(struct vmmfs_node *parent,
 	boot->node.dead = false;
 	boot->node.references = 1;
 	lwkt_token_init(&boot->node.token, "vmmfsnode");
+	lockinit(&boot->node.lock, "vmmfsnode", 0, 0);
 	boot->node.deactivate = vmmfs_boot_deactivate;
 	boot->node.drop = vmmfs_boot_drop;
 	vmmfs_node_hold(parent);
@@ -119,7 +120,7 @@ vmmfs_boot_open(struct vop_open_args *ap)
 	if (ap->a_fpp == NULL || (ap->a_mode & FWRITE) == 0)
 		return (EACCES);
 	/* machine_boot owns admission and the single launch identity. */
-	error = vmmfs_machine_boot(machine, &vnode);
+	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &vnode));
 	if (error != 0)
 		return (error);
 	error = vmmfs_launch_open(vnode, ap->a_cred, &file);

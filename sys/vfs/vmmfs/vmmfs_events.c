@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/stdarg.h>
 #include <sys/systm.h>
+#include <sys/thread2.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -89,6 +90,7 @@ vmmfs_events_init(struct vmmfs_node *parent,
 	events->node.dead = false;
 	events->node.references = 1;
 	lwkt_token_init(&events->node.token, "vmmfsnode");
+	lockinit(&events->node.lock, "vmmfsnode", 0, 0);
 	events->node.deactivate = vmmfs_events_deactivate;
 	events->node.drop = vmmfs_events_drop;
 	vmmfs_node_hold(parent);
@@ -263,26 +265,56 @@ vmmfs_machine_event_name(enum vmmfs_machine_event event)
 }
 
 static int
+vmmfs_events_subscribe(struct vmmfs_events *events, struct knote *knote)
+{
+
+	if (knote->kn_filter != EVFILT_READ)
+		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->token);
+	if (events->closed) {
+		lwkt_reltoken(&events->token);
+		return (ENXIO);
+	}
+	knote->kn_fop = &vmmfs_events_read_filterops;
+	knote->kn_hook = (caddr_t)events;
+	knote_insert(&events->kq.ki_note, knote);
+	lwkt_reltoken(&events->token);
+	return (0);
+}
+
+static int
 vmmfs_events_kqfilter(struct vop_kqfilter_args *ap)
 {
 	struct vmmfs_events *events = ap->a_vp->v_data;
 
-	if (events == NULL)
-		return (ENOENT);
-	if (ap->a_kn->kn_filter != EVFILT_READ)
-		return (EOPNOTSUPP);
-	lwkt_gettoken(&events->node.token);
+	return (VMMFS_WORK(events, vmmfs_events_subscribe(events, ap->a_kn)));
+}
+
+static int
+vmmfs_events_read_data(struct vmmfs_events *events, char *buffer,
+	size_t capacity, size_t *lengthp)
+{
+	size_t length, index, i;
+
 	lwkt_gettoken(&events->token);
-	if (events->node.dead || events->closed) {
+	if (events->closed) {
 		lwkt_reltoken(&events->token);
-		lwkt_reltoken(&events->node.token);
 		return (ENXIO);
 	}
-	ap->a_kn->kn_fop = &vmmfs_events_read_filterops;
-	ap->a_kn->kn_hook = (caddr_t)events;
-	knote_insert(&events->kq.ki_note, ap->a_kn);
+	length = MIN(events->length, capacity);
+	if (length == 0) {
+		tsleep_interlock(events, PCATCH);
+		lwkt_reltoken(&events->token);
+		return (EAGAIN);
+	}
+	for (i = 0; i < length; ++i) {
+		index = (events->start + i) % VMMFS_EVENTS_BUFFER_SIZE;
+		buffer[i] = events->buffer[index];
+	}
+	events->start = (events->start + length) % VMMFS_EVENTS_BUFFER_SIZE;
+	events->length -= length;
 	lwkt_reltoken(&events->token);
-	lwkt_reltoken(&events->node.token);
+	*lengthp = length;
 	return (0);
 }
 
@@ -292,51 +324,30 @@ vmmfs_events_read(struct vop_read_args *ap)
 	struct vmmfs_events *events = ap->a_vp->v_data;
 	struct uio *uio = ap->a_uio;
 	char buffer[VMMFS_EVENTS_READ_SIZE];
-	size_t length, index, i;
+	size_t length;
 	int error;
 
-	if (events == NULL)
-		return (ENOENT);
 	if (uio->uio_offset < 0)
 		return (EINVAL);
+	if (uio->uio_resid == 0)
+		return (0);
 	for (;;) {
-		lwkt_gettoken(&events->node.token);
-		lwkt_gettoken(&events->token);
-		if (events->node.dead || events->closed) {
-			error = ENXIO;
+		error = VMMFS_WORK(events, vmmfs_events_read_data(events,
+		    buffer, MIN(sizeof(buffer), (size_t)uio->uio_resid), &length));
+		if (error != EAGAIN)
 			break;
-		}
-		if (uio->uio_resid == 0) {
-			error = 0;
-			break;
-		}
-		if (events->length != 0) {
-			length = MIN(events->length, sizeof(buffer));
-			length = MIN(length, (size_t)uio->uio_resid);
-			for (i = 0; i < length; ++i) {
-				index = (events->start + i) % VMMFS_EVENTS_BUFFER_SIZE;
-				buffer[i] = events->buffer[index];
-			}
-			events->start = (events->start + length) % VMMFS_EVENTS_BUFFER_SIZE;
-			events->length -= length;
-			lwkt_reltoken(&events->token);
-			lwkt_reltoken(&events->node.token);
-			return (uiomove(buffer, length, uio));
-		}
 		if (ap->a_ioflag & IO_NDELAY) {
-			error = EAGAIN;
-			break;
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
+			return (EAGAIN);
 		}
-		tsleep_interlock(events, PCATCH);
-		lwkt_reltoken(&events->token);
-		lwkt_reltoken(&events->node.token);
+		/* The work step armed the sleep before releasing its data token. */
 		error = tsleep(events, PINTERLOCKED | PCATCH, "vmmevents", 0);
 		if (error != 0)
 			return (error);
 	}
-	lwkt_reltoken(&events->token);
-	lwkt_reltoken(&events->node.token);
-	return (error);
+	return (error != 0 ? error : uiomove(buffer, length, uio));
 }
 
 static int

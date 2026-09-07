@@ -8,7 +8,7 @@ class ParentTeardown(unittest.TestCase):
         source = COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; };
+struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
 struct vnode { unsigned refs; };
 struct ENTRY { struct vnode *vnode; };
 struct registry { struct ENTRY *MEMBER; };
@@ -70,7 +70,7 @@ class MachineTeardown(unittest.TestCase):
     def test_machine_veto_is_final_for_all_children(self):
         run_c(COMMON + r"""
 struct token { unsigned held, acquired; };
-struct vmmfs_node { struct token token; bool dead; struct vnode *vnode; };
+struct vmmfs_node { struct token token; bool dead; struct vnode *vnode;  struct lock lock;};
 struct vnode { unsigned refs, index; };
 struct vmmfs_machine {
     struct vmmfs_node node;
@@ -148,7 +148,7 @@ int main(void) {
         run_c(COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; unsigned references; };
+struct vmmfs_node { struct token token; bool dead; unsigned references;  struct lock lock;};
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_vcpu { struct vmmfs_node node; };

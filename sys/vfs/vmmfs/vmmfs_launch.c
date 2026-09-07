@@ -91,6 +91,7 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	launch->node.mount = parent->mount;
 	launch->node.references = 1;
 	lwkt_token_init(&launch->node.token, "vmmfslaunch");
+	lockinit(&launch->node.lock, "vmmfsnode", 0, 0);
 	launch->node.deactivate = vmmfs_launch_deactivate;
 	launch->node.drop = vmmfs_launch_drop;
 	launch->node.mode = 0600;
@@ -158,20 +159,13 @@ vmmfs_launch_map(struct vmmfs_launch *launch, struct vm_object *object)
 	return (error);
 }
 
-int
-vmmfs_launch_open(struct vnode *vnode, struct ucred *cred, struct file **filep)
+static int
+vmmfs_launch_attach(struct vmmfs_launch *launch, struct vnode *vnode,
+	struct ucred *cred, struct file *file)
 {
-	struct vmmfs_launch *launch = vnode->v_data;
-	struct file *file;
-	int error;
-
-	error = falloc(NULL, &file, NULL);
-	if (error != 0)
-		return (error);
 	lwkt_gettoken(&launch->node.token);
-	if (launch->node.dead || launch->pager_object == NULL) {
+	if (launch->pager_object == NULL) {
 		lwkt_reltoken(&launch->node.token);
-		fp_close(file);
 		return (ECANCELED);
 	}
 	fsetcred(file, cred);
@@ -183,8 +177,44 @@ vmmfs_launch_open(struct vnode *vnode, struct ucred *cred, struct file **filep)
 	atomic_add_int(&vnode->v_opencount, 1);
 	atomic_add_int(&vnode->v_writecount, 1);
 	lwkt_reltoken(&launch->node.token);
-	*filep = file;
 	return (0);
+}
+
+int
+vmmfs_launch_open(struct vnode *vnode, struct ucred *cred, struct file **filep)
+{
+	struct vmmfs_launch *launch = vnode->v_data;
+	struct file *file;
+	int error;
+
+	error = falloc(NULL, &file, NULL);
+	if (error != 0)
+		return (error);
+	error = VMMFS_WORK(launch, vmmfs_launch_attach(launch, vnode, cred, file));
+	if (error != 0)
+		fp_close(file);
+	else
+		*filep = file;
+	return (error);
+}
+
+static int
+vmmfs_launch_submit(struct vmmfs_launch *launch,
+	const struct vmm_cpustate *state)
+{
+	int error;
+
+	lwkt_gettoken(&launch->node.token);
+	if (launch->pager_object == NULL) {
+		error = EPIPE;
+	} else {
+		launch->cpustate = *state;
+		/* Clear mmap admission before sleeping or accepting another writer. */
+		vmmfs_launch_revoke(launch);
+		error = 0;
+	}
+	lwkt_reltoken(&launch->node.token);
+	return (error);
 }
 
 static int
@@ -214,16 +244,8 @@ vmmfs_launch_write(struct file *file, struct uio *uio,
 			error = abort_error;
 		goto done;
 	}
-	lwkt_gettoken(&launch->node.token);
-	if (launch->node.dead || launch->pager_object == NULL) {
-		error = EPIPE;
-	} else {
-		launch->cpustate = state;
-		/* Clear mmap admission before sleeping or accepting another writer. */
-		vmmfs_launch_revoke(launch);
-		error = 0;
-	}
-	lwkt_reltoken(&launch->node.token);
+	error = VMMFS_WORK(launch, vmmfs_launch_submit(launch, &state));
+	/* Run consumes the identity and deactivates this node outside its read lock. */
 	if (error == 0)
 		error = vmmfs_machine_run(launch);
 done:
@@ -384,30 +406,38 @@ vmmfs_launch_revoke(struct vmmfs_launch *launch)
 }
 
 static int
-vmmfs_launch_mmap(struct dev_mmap_single_args *ap)
+vmmfs_launch_get_mapping(struct vmmfs_launch *launch, vm_ooffset_t offset,
+	vm_size_t size, struct vm_object **objectp)
 {
-	struct vmmfs_launch *launch = ap->a_head.a_dev->si_drv1;
 	struct vm_object *object;
-	vm_ooffset_t offset = *ap->a_offset;
-
-	if (launch == NULL || (ap->a_nprot & VM_PROT_EXECUTE) != 0)
-		return (EINVAL);
 	lwkt_gettoken(&launch->node.token);
 	object = launch->pager_object;
-	if (launch->node.dead || object == NULL)
+	if (object == NULL)
 		goto closed;
 	if (offset < 0 || offset >= launch->node.size ||
-	    ap->a_size > launch->node.size - offset) {
+	    size > launch->node.size - offset) {
 		lwkt_reltoken(&launch->node.token);
 		return (EINVAL);
 	}
 	vm_object_reference_quick(object);
-	*ap->a_object = object;
+	*objectp = object;
 	lwkt_reltoken(&launch->node.token);
 	return (0);
 closed:
 	lwkt_reltoken(&launch->node.token);
 	return (EBADF);
+}
+
+static int
+vmmfs_launch_mmap(struct dev_mmap_single_args *ap)
+{
+	struct vmmfs_launch *launch = ap->a_head.a_dev->si_drv1;
+	vm_ooffset_t offset = *ap->a_offset;
+
+	if (launch == NULL || (ap->a_nprot & VM_PROT_EXECUTE) != 0)
+		return (EINVAL);
+	return (VMMFS_WORK(launch, vmmfs_launch_get_mapping(launch, offset,
+	    ap->a_size, ap->a_object)));
 }
 
 static int

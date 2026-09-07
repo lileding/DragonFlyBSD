@@ -155,6 +155,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	descriptor->node.dead = false;
 	descriptor->node.references = 1;
 	lwkt_token_init(&descriptor->node.token, "vmmfsnode");
+	lockinit(&descriptor->node.lock, "vmmfsnode", 0, 0);
 	descriptor->node.deactivate = vmmfs_pcislot_descriptor_deactivate;
 	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
 	vmmfs_node_hold(parent);
@@ -183,26 +184,31 @@ vmmfs_pcislot_descriptor_drop(struct vmmfs_node *node)
 	bzero(descriptor, sizeof(*descriptor));
 }
 static int
-vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
+vmmfs_pcislot_descriptor_writable(struct vmmfs_pcislot_descriptor *descriptor)
 {
-	struct vmmfs_pcislot_descriptor *descriptor;
 	struct vmmfs_machine *machine;
 
-	descriptor = ap->a_vp->v_data;
-	if (descriptor == NULL)
-		return (ENOENT);
-	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(vmmfs_pcislot_descriptor_slot(descriptor)));
-	if (descriptor->node.dead)
-		return (ENOENT);
-	if ((ap->a_mode & FWRITE) == 0)
-		return (vop_stdopen(ap));
+	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(
+	    vmmfs_pcislot_descriptor_slot(descriptor)));
 	lwkt_gettoken(&machine->node.token);
 	if (machine->machine != NULL) {
 		lwkt_reltoken(&machine->node.token);
 		return (EBUSY);
 	}
 	lwkt_reltoken(&machine->node.token);
-	return (vop_stdopen(ap));
+	return (0);
+}
+
+static int
+vmmfs_pcislot_descriptor_open(struct vop_open_args *ap)
+{
+	struct vmmfs_pcislot_descriptor *descriptor = ap->a_vp->v_data;
+	int error = 0;
+
+	if ((ap->a_mode & FWRITE) != 0)
+		error = VMMFS_WORK(descriptor,
+		    vmmfs_pcislot_descriptor_writable(descriptor));
+	return (error == 0 ? vop_stdopen(ap) : error);
 }
 
 static int

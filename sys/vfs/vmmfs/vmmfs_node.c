@@ -54,13 +54,7 @@ vmmfs_node_access(struct vop_access_args *ap)
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead) {
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
 	error = vop_helper_access(ap, 0, 0, node->mode, 0);
-	lwkt_reltoken(&node->token);
 	return (error);
 }
 
@@ -75,11 +69,6 @@ vmmfs_node_getattr(struct vop_getattr_args *ap)
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead) {
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
 	vattr = ap->a_vap;
 	VATTR_NULL(vattr);
 	vattr->va_type = ap->a_vp->v_type;
@@ -94,7 +83,6 @@ vmmfs_node_getattr(struct vop_getattr_args *ap)
 	vattr->va_bytes = node->size;
 	vattr->va_flags = 0;
 	vattr->va_filerev = 0;
-	lwkt_reltoken(&node->token);
 	return (0);
 }
 
@@ -109,11 +97,6 @@ vmmfs_node_getattr_lite(struct vop_getattr_lite_args *ap)
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead) {
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
 	vattr = ap->a_lvap;
 	vattr->va_type = ap->a_vp->v_type;
 	vattr->va_mode = node->mode;
@@ -122,7 +105,6 @@ vmmfs_node_getattr_lite(struct vop_getattr_lite_args *ap)
 	vattr->va_gid = 0;
 	vattr->va_size = node->size;
 	vattr->va_flags = 0;
-	lwkt_reltoken(&node->token);
 	return (0);
 }
 
@@ -150,13 +132,7 @@ vmmfs_node_open(struct vop_open_args *ap)
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead) {
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
 	error = vop_stdopen(ap);
-	lwkt_reltoken(&node->token);
 	return (error);
 }
 
@@ -176,19 +152,11 @@ vmmfs_node_read(struct vop_read_args *ap)
 		return (ENOENT);
 	if (ap->a_uio->uio_offset < 0)
 		return (EINVAL);
-	lwkt_gettoken(&node->token);
-	if (node->dead || node->load == NULL) {
-		error = node->dead ? ENOENT : 0;
-		lwkt_reltoken(&node->token);
-		return (error);
-	}
-	lwkt_reltoken(&node->token);
+	if (node->load == NULL)
+		return (0);
 	KKASSERT(node->load_limit != 0);
 	buffer = kmalloc(node->load_limit, M_VMMFS, M_WAITOK);
-	lwkt_gettoken(&node->token);
-	error = node->dead ? ENOENT :
-	    node->load(node, buffer, node->load_limit, &length);
-	lwkt_reltoken(&node->token);
+	error = VMMFS_CALL(node, load, buffer, node->load_limit, &length);
 	if (error == 0 && length > node->load_limit)
 		error = EOVERFLOW;
 	if (error == 0) {
@@ -214,10 +182,7 @@ vmmfs_node_setattr(struct vop_setattr_args *ap)
 	if (node == NULL)
 		return (ENOENT);
 	vattr = ap->a_vap;
-	lwkt_gettoken(&node->token);
-	if (node->dead)
-		error = ENOENT;
-	else if (vattr->va_mode != (mode_t)VNOVAL ||
+	if (vattr->va_mode != (mode_t)VNOVAL ||
 	    vattr->va_uid != (uid_t)VNOVAL ||
 	    vattr->va_gid != (gid_t)VNOVAL ||
 	    vattr->va_flags != VNOVAL ||
@@ -231,7 +196,6 @@ vmmfs_node_setattr(struct vop_setattr_args *ap)
 	else
 		/* O_TRUNC prepares a control write; only store commits data. */
 		error = vattr->va_size == 0 ? 0 : EINVAL;
-	lwkt_reltoken(&node->token);
 	return (error);
 }
 
@@ -248,13 +212,8 @@ vmmfs_node_write(struct vop_write_args *ap)
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead || node->store == NULL) {
-		error = node->dead ? ENOENT : EROFS;
-		lwkt_reltoken(&node->token);
-		return (error);
-	}
-	lwkt_reltoken(&node->token);
+	if (node->store == NULL)
+		return (EROFS);
 	if (ap->a_uio->uio_offset != 0 ||
 	    (size_t)ap->a_uio->uio_resid > node->store_limit)
 		return (EINVAL);
@@ -267,9 +226,7 @@ vmmfs_node_write(struct vop_write_args *ap)
 			return (error);
 		}
 	}
-	lwkt_gettoken(&node->token);
-	error = node->dead ? ENOENT : node->store(node, buffer, length);
-	lwkt_reltoken(&node->token);
+	error = VMMFS_CALL(node, store, buffer, length);
 	if (buffer != NULL)
 		kfree(buffer, M_VMMFS);
 	return (error);
@@ -289,6 +246,7 @@ vmmfs_node_put(struct vmmfs_node *node)
 	drop = node->drop;
 	KKASSERT(drop != NULL);
 	node->drop = NULL;
+	lockuninit(&node->lock);
 	lwkt_token_uninit(&node->token);
 	drop(node);
 	if (parent != NULL)
@@ -297,30 +255,29 @@ vmmfs_node_put(struct vmmfs_node *node)
 
 
 
+static int
+vmmfs_node_get_vnode(struct vmmfs_node *node, struct vnode **vnodep)
+{
+	struct vnode *vnode = node->vnode;
+
+	if (vnode == NULL)
+		return (ENOENT);
+	vhold(vnode);
+	*vnodep = vnode;
+	return (0);
+}
+
 int
 vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
-	struct vmmfs_node *node;
-	struct vmmfs_node *parent;
+	struct vmmfs_node *node = ap->a_dvp->v_data;
+	struct vmmfs_node *parent = node->parent;
 	struct vnode *vnode;
 	int error;
 
-	node = ap->a_dvp->v_data;
-	if (node == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	parent = node->parent;
-	lwkt_gettoken(&parent->token);
-	vnode = parent->vnode;
-	/* Acquiring the parent token may have allowed this node to close. */
-	if (node->dead || parent->dead || vnode == NULL) {
-		lwkt_reltoken(&parent->token);
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
-	vhold(vnode);
-	lwkt_reltoken(&parent->token);
-	lwkt_reltoken(&node->token);
+	error = VMMFS_WORK(parent, vmmfs_node_get_vnode(parent, &vnode));
+	if (error != 0)
+		return (error);
 	error = vget(vnode, LK_EXCLUSIVE | LK_RETRY);
 	vdrop(vnode);
 	if (error != 0)
@@ -395,10 +352,12 @@ vmmfs_vnode_discard(struct vnode *vnode)
 		return;
 	vx_get(vnode);
 	node = vnode->v_data;
+	(void)lockmgr(&node->lock, LK_EXCLUSIVE);
 	lwkt_gettoken(&node->token);
 	node->vnode = NULL;
 	vnode->v_data = NULL;
 	lwkt_reltoken(&node->token);
+	(void)lockmgr(&node->lock, LK_RELEASE);
 	vnode->v_type = VBAD;
 	vx_put(vnode);
 	vrele(vnode);
@@ -414,22 +373,35 @@ vmmfs_vnode_deactivate(struct vnode *vnode)
 		return (0);
 	node = vnode->v_data;
 	vref(vnode);
+	error = lockmgr(&node->lock, LK_EXCLUSIVE);
+	if (error != 0) {
+		vrele(vnode);
+		return (error);
+	}
 	lwkt_gettoken(&node->token);
 	if (node->dead) {
 		lwkt_reltoken(&node->token);
+		(void)lockmgr(&node->lock, LK_RELEASE);
 		vrele(vnode);
 		/* A closed gate does not prove that the first callback completed. */
 		return (EBUSY);
 	}
 	node->dead = true;
+	lwkt_reltoken(&node->token);
+	(void)lockmgr(&node->lock, LK_RELEASE);
+
 	error = node->deactivate != NULL ? node->deactivate(node) : 0;
 	if (error != 0) {
+		/* Reopening cannot overlap a shared work invocation. */
+		(void)lockmgr(&node->lock, LK_EXCLUSIVE);
+		lwkt_gettoken(&node->token);
 		node->dead = false;
+		lwkt_reltoken(&node->token);
+		(void)lockmgr(&node->lock, LK_RELEASE);
 	} else {
 		(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
 		cache_inval_vp(vnode, CINV_CHILDREN);
 	}
-	lwkt_reltoken(&node->token);
 	vrele(vnode);
 	return (error);
 }
@@ -445,10 +417,12 @@ vmmfs_node_reclaim(struct vop_reclaim_args *ap)
 	vnode = ap->a_vp;
 	node = vnode->v_data;
 	if (node != NULL) {
+		(void)lockmgr(&node->lock, LK_EXCLUSIVE);
 		lwkt_gettoken(&node->token);
 		node->vnode = NULL;
 		vnode->v_data = NULL;
 		lwkt_reltoken(&node->token);
+		(void)lockmgr(&node->lock, LK_RELEASE);
 		vmmfs_node_put(node);
 	}
 	return (0);

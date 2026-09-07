@@ -7,6 +7,8 @@
 #define VMMFS_NODE_H
 
 #include <sys/param.h>
+#include <sys/errno.h>
+#include <sys/lock.h>
 #include <sys/thread.h>
 #include <sys/vnode.h>
 
@@ -27,7 +29,7 @@ typedef int (*vmmfs_node_read_item_t)(struct vmmfs_node *, uint64_t,
 /* Success returns a vnode reference in addition to the registry reference. */
 typedef int (*vmmfs_node_create_item_t)(struct vmmfs_node *, struct mount *,
 	const char *, size_t, struct vnode **);
-typedef void (*vmmfs_node_remove_item_t)(struct vmmfs_node *, const char *,
+typedef int (*vmmfs_node_remove_item_t)(struct vmmfs_node *, const char *,
 	size_t);
 
 struct vmmfs_node_item {
@@ -39,9 +41,12 @@ struct vmmfs_node_item {
 /* Every namespace object embeds this as its first field. */
 struct vmmfs_node {
 	struct vmmfs_node *parent;
-	/* Non-owning backlink, cleared under token before vnode detachment. */
+	/* Non-owning backlink, cleared under exclusive lock at detachment. */
 	struct vnode *vnode;
 	struct vmmfs_mount *mount;
+	/* Shared work admission versus exclusive deactivation. */
+	struct lock lock;
+	/* Serializes control-state mutations, not in-flight work lifetimes. */
 	struct lwkt_token token;
 	u_int references;
 	ino_t inode;
@@ -49,8 +54,9 @@ struct vmmfs_node {
 	off_t size;
 	bool dead;
 	/*
-	 * Called with token held and dead set. Veto must not block or change
-	 * resources. Once cleanup can block, it must complete without veto.
+	 * Called with dead set, without the lifecycle lock. A veto must leave
+	 * resources unchanged; admission is restored under exclusive lock.
+	 * Once cleanup starts, it cannot veto.
 	 */
 	int (*deactivate)(struct vmmfs_node *);
 	void (*drop)(struct vmmfs_node *);
@@ -63,6 +69,32 @@ struct vmmfs_node {
 	vmmfs_node_create_item_t create_item;
 	vmmfs_node_remove_item_t remove_item;
 };
+
+/*
+ * The caller pins object storage. Work holds shared admission until return;
+ * a callback must not deactivate itself or wait for its own deactivation.
+ * Helpers inherit the caller's protection. Lifecycle callbacks use their
+ * own ownership protocol and do not use this macro for new admission.
+ */
+#define VMMFS_WORK(object, ...) ({ \
+	__typeof__(object) _vmmfs_object = (object); \
+	struct vmmfs_node *_vmmfs_node = (struct vmmfs_node *)_vmmfs_object; \
+	int _vmmfs_error; \
+	_vmmfs_error = lockmgr(&_vmmfs_node->lock, LK_SHARED); \
+	if (_vmmfs_error == 0) { \
+		if (_vmmfs_node->dead) \
+			_vmmfs_error = ENOENT; \
+		else \
+			_vmmfs_error = (__VA_ARGS__); \
+		/* Releasing an acquired, non-cancelable lock cannot fail. */ \
+		(void)lockmgr(&_vmmfs_node->lock, LK_RELEASE); \
+	} \
+	_vmmfs_error; \
+})
+
+#define VMMFS_CALL(object, method, ...) \
+	VMMFS_WORK((object), _vmmfs_object->method == NULL ? EOPNOTSUPP : \
+	    _vmmfs_object->method(_vmmfs_object, ##__VA_ARGS__))
 
 /* Object references do not imply that its vnode or service remains active. */
 void vmmfs_node_hold(struct vmmfs_node *);
@@ -93,7 +125,8 @@ int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
 /*
  * Closes admission and revokes file descriptors; does not consume the
  * caller's vnode reference. A NULL callback accepts closure. A veto restores
- * admission under the same token; an already closed gate returns EBUSY.
+ * admission under exclusive lock; the callback and revocation run unlocked.
+ * An already closed gate returns EBUSY, including while cleanup is in progress.
  */
 int vmmfs_vnode_deactivate(struct vnode *);
 

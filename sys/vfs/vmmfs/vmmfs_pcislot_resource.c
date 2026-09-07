@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
+#include <sys/thread2.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -294,6 +295,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	resources->node.mount = slot->node.mount;
 	resources->node.references = 1;
 	lwkt_token_init(&resources->node.token, "vmmfsnode");
+	lockinit(&resources->node.lock, "vmmfsnode", 0, 0);
 	resources->node.drop = vmmfs_pcislot_resources_drop;
 	vmmfs_node_hold(&slot->node);
 	resources->machine = machine;
@@ -367,6 +369,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		resource->node.dead = false;
 		resource->node.references = 1;
 		lwkt_token_init(&resource->node.token, "vmmfsnode");
+		lockinit(&resource->node.lock, "vmmfsnode", 0, 0);
 		resource->node.deactivate = vmmfs_pcislot_resource_deactivate;
 		resource->node.drop = vmmfs_pcislot_resource_drop;
 		vmmfs_node_hold(&resources->node);
@@ -404,15 +407,19 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 
 	if (resources == NULL)
 		return;
+	/* This private group has no vnode, but owns published resource nodes. */
+	(void)lockmgr(&resources->node.lock, LK_EXCLUSIVE);
 	lwkt_gettoken(&resources->node.token);
 	if (resources->destroying) {
 		lwkt_reltoken(&resources->node.token);
+		(void)lockmgr(&resources->node.lock, LK_RELEASE);
 		return;
 	}
 	resources->node.dead = true;
 	resources->destroying = true;
 	resources->powered = false;
 	lwkt_reltoken(&resources->node.token);
+	(void)lockmgr(&resources->node.lock, LK_RELEASE);
 	vmmfs_pcislot_resources_unbind(resources);
 	for (index = 0; index < resources->initialized_count; ++index) {
 		resource = &resources->items[index];
@@ -1653,30 +1660,43 @@ vmmfs_pcislot_resource_close(struct vop_close_args *ap)
 }
 
 static int
-vmmfs_pcislot_resource_kqfilter(struct vop_kqfilter_args *ap)
+vmmfs_pcislot_resource_subscribe(struct vmmfs_pcislot_resource *resource,
+	struct knote *knote)
 {
-	struct vmmfs_pcislot_resource *resource;
 	int error;
 
-	resource = ap->a_vp->v_data;
-	if (resource == NULL)
-		return (ENXIO);
-	lwkt_gettoken(&resource->node.token);
 	lwkt_gettoken(&resource->token);
 	if (!vmmfs_pcislot_resource_enabled(resource)) {
 		error = ENXIO;
 	} else if (resource->kind != VMMFS_PCISLOT_RESOURCE_KICK ||
-	    ap->a_kn->kn_filter != EVFILT_READ) {
+	    knote->kn_filter != EVFILT_READ) {
 		error = EOPNOTSUPP;
 	} else {
-		ap->a_kn->kn_fop = &vmmfs_pcislot_resource_read_filterops;
-		ap->a_kn->kn_hook = (caddr_t)resource;
-		knote_insert(&resource->read_kq.ki_note, ap->a_kn);
+		knote->kn_fop = &vmmfs_pcislot_resource_read_filterops;
+		knote->kn_hook = (caddr_t)resource;
+		knote_insert(&resource->read_kq.ki_note, knote);
 		error = 0;
 	}
 	lwkt_reltoken(&resource->token);
-	lwkt_reltoken(&resource->node.token);
 	return (error);
+}
+
+static int
+vmmfs_pcislot_resource_kqfilter(struct vop_kqfilter_args *ap)
+{
+	struct vmmfs_pcislot_resource *resource = ap->a_vp->v_data;
+
+	return (VMMFS_WORK(resource,
+	    vmmfs_pcislot_resource_subscribe(resource, ap->a_kn)));
+}
+
+static int
+vmmfs_pcislot_resource_authorize(struct vmmfs_pcislot_resource *resource)
+{
+	if (vmmfs_pcislot_auth_check(vmmfs_pcislot_resources_slot(
+	    vmmfs_pcislot_resource_resources(resource))) != 0)
+		return (EACCES);
+	return (vmmfs_pcislot_resource_enabled(resource) ? 0 : ENXIO);
 }
 
 static int
@@ -1688,10 +1708,10 @@ vmmfs_pcislot_resource_open(struct vop_open_args *ap)
 	int error;
 
 	resource = ap->a_vp->v_data;
-	if (!vmmfs_pcislot_resource_enabled(resource))
-		return (ENXIO);
-	if (vmmfs_pcislot_auth_check(vmmfs_pcislot_resources_slot(vmmfs_pcislot_resource_resources(resource))) != 0)
-		return (EACCES);
+	error = VMMFS_WORK(resource,
+	    vmmfs_pcislot_resource_authorize(resource));
+	if (error != 0)
+		return (error);
 	if (!vmmfs_pcislot_resource_mappable(resource))
 		return (vop_stdopen(ap));
 	vnode = ap->a_vp;
@@ -1704,7 +1724,9 @@ vmmfs_pcislot_resource_open(struct vop_open_args *ap)
 	vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
 	if (error != 0)
 		return (error);
-	if (!vmmfs_pcislot_resource_enabled(resource)) {
+	error = VMMFS_WORK(resource,
+	    vmmfs_pcislot_resource_authorize(resource));
+	if (error != 0) {
 		vn_unlock(vnode);
 		(void)dev_dclose(dev, ap->a_mode, S_IFCHR, *ap->a_fpp);
 		vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
@@ -1714,105 +1736,70 @@ vmmfs_pcislot_resource_open(struct vop_open_args *ap)
 }
 
 static int
+vmmfs_pcislot_resource_receive(struct vmmfs_pcislot_resource *resource,
+	struct vmmfs_pci_kick *kick)
+{
+	int error = 0;
+
+	lwkt_gettoken(&resource->token);
+	if (!vmmfs_pcislot_resource_enabled(resource))
+		error = ENXIO;
+	else if (resource->kind != VMMFS_PCISLOT_RESOURCE_KICK)
+		error = EOPNOTSUPP;
+	else if (resource->kick_pending) {
+		*kick = resource->kick;
+		resource->kick_pending = false;
+	} else {
+		tsleep_interlock(resource, PCATCH);
+		error = EAGAIN;
+	}
+	lwkt_reltoken(&resource->token);
+	return (error);
+}
+
+static int
 vmmfs_pcislot_resource_read(struct vop_read_args *ap)
 {
-	struct vmmfs_pcislot_resource *resource;
+	struct vmmfs_pcislot_resource *resource = ap->a_vp->v_data;
 	struct vmmfs_pci_kick kick;
-	struct uio *uio;
 	int error;
 
-	resource = ap->a_vp->v_data;
-	if (resource == NULL)
-		return (ENXIO);
-	uio = ap->a_uio;
+	if (ap->a_uio->uio_resid != sizeof(kick))
+		return (EINVAL);
 	for (;;) {
-		lwkt_gettoken(&resource->node.token);
-		lwkt_gettoken(&resource->token);
-		if (!vmmfs_pcislot_resource_enabled(resource)) {
-			error = ENXIO;
+		error = VMMFS_WORK(resource,
+		    vmmfs_pcislot_resource_receive(resource, &kick));
+		if (error != EAGAIN)
 			break;
-		}
-		if (resource->kind != VMMFS_PCISLOT_RESOURCE_KICK) {
-			error = EOPNOTSUPP;
-			break;
-		}
-		if (uio->uio_resid != sizeof(kick)) {
-			error = EINVAL;
-			break;
-		}
-		if (resource->kick_pending) {
-			kick = resource->kick;
-			resource->kick_pending = false;
-			error = 0;
-			break;
-		}
 		if ((ap->a_ioflag & IO_NDELAY) != 0) {
-			error = EAGAIN;
-			break;
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
+			return (EAGAIN);
 		}
-		tsleep_interlock(resource, PCATCH);
-		lwkt_reltoken(&resource->token);
-		lwkt_reltoken(&resource->node.token);
 		error = tsleep(resource, PINTERLOCKED | PCATCH, "vmmfspcikick", 0);
 		if (error != 0)
 			return (error);
 	}
-	lwkt_reltoken(&resource->token);
-	lwkt_reltoken(&resource->node.token);
 	if (error == 0)
-		error = uiomove((caddr_t)&kick, sizeof(kick), uio);
+		error = uiomove((caddr_t)&kick, sizeof(kick), ap->a_uio);
 	return (error);
 }
 
 
 static int
-vmmfs_pcislot_resource_write(struct vop_write_args *ap)
+vmmfs_pcislot_resource_raise(struct vmmfs_pcislot_resource *resource,
+	bool asserted)
 {
-	struct vmmfs_pcislot_resource *resource;
 	struct vmmfs_pcislot_resources *resources;
 	struct vmmfs_vcpu *vcpu;
-	struct vmmfs_pci_intx intx;
-	struct vmmfs_pci_interrupt interrupt;
 	vmm_machine_t machine;
 	bool wake;
 	int error;
 
-	resource = ap->a_vp->v_data;
-	if (resource == NULL)
-		return (ENXIO);
-	lwkt_gettoken(&resource->node.token);
-	error = resource->node.dead ? ENXIO : 0;
-	lwkt_reltoken(&resource->node.token);
-	if (error != 0)
-		return (error);
-
-	/* User faults cannot pin the guest runtime or postpone power-off. */
-	if (resource->kind == VMMFS_PCISLOT_RESOURCE_INTX) {
-		if (ap->a_uio->uio_resid != sizeof(intx))
-			return (EINVAL);
-		error = uiomove((caddr_t)&intx, sizeof(intx), ap->a_uio);
-		if (error != 0)
-			return (error);
-		if (intx.asserted > 1 || bcmp(intx.reserved,
-		    "\0\0\0\0\0\0\0", sizeof(intx.reserved)) != 0)
-			return (EINVAL);
-	} else {
-		if (resource->kind != VMMFS_PCISLOT_RESOURCE_MSI &&
-		    resource->kind != VMMFS_PCISLOT_RESOURCE_MSIX)
-			return (EOPNOTSUPP);
-		if (ap->a_uio->uio_resid != sizeof(interrupt))
-			return (EINVAL);
-		error = uiomove((caddr_t)&interrupt, sizeof(interrupt), ap->a_uio);
-		if (error != 0)
-			return (error);
-		if (interrupt.reserved != 0)
-			return (EINVAL);
-	}
-
 	resources = vmmfs_pcislot_resource_resources(resource);
 	vcpu = &vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(
 	    vmmfs_pcislot_resources_slot(resources)))->vcpu;
-	lwkt_gettoken(&resource->node.token);
 	lwkt_gettoken(&resources->node.token);
 	lwkt_gettoken(&vcpu->token);
 	machine = NULL;
@@ -1827,14 +1814,13 @@ vmmfs_pcislot_resource_write(struct vop_write_args *ap)
 	}
 	lwkt_reltoken(&vcpu->token);
 	lwkt_reltoken(&resources->node.token);
-	lwkt_reltoken(&resource->node.token);
 	/* Reset discards completions while the old destination is unbound. */
 	if (error != 0 || machine == NULL)
 		return (error);
 
 	if (resource->kind == VMMFS_PCISLOT_RESOURCE_INTX) {
 		lwkt_gettoken(&resource->token);
-		resource->intx_asserted = intx.asserted != 0;
+		resource->intx_asserted = asserted != 0;
 		error = vmm_machine_set_irq(machine,
 		    vmmfs_pcislot_resources_slot(resources)->type0.intx_gsi,
 		    resource->intx_asserted);
@@ -1862,6 +1848,44 @@ vmmfs_pcislot_resource_write(struct vop_write_args *ap)
 }
 
 static int
+vmmfs_pcislot_resource_write(struct vop_write_args *ap)
+{
+	struct vmmfs_pcislot_resource *resource;
+	struct vmmfs_pci_intx intx;
+	struct vmmfs_pci_interrupt interrupt;
+	int error;
+
+	resource = ap->a_vp->v_data;
+	if (resource == NULL)
+		return (ENXIO);
+	/* User faults cannot pin the guest runtime or postpone power-off. */
+	if (resource->kind == VMMFS_PCISLOT_RESOURCE_INTX) {
+		if (ap->a_uio->uio_resid != sizeof(intx))
+			return (EINVAL);
+		error = uiomove((caddr_t)&intx, sizeof(intx), ap->a_uio);
+		if (error != 0)
+			return (error);
+		if (intx.asserted > 1 || bcmp(intx.reserved,
+		    "\0\0\0\0\0\0\0", sizeof(intx.reserved)) != 0)
+			return (EINVAL);
+	} else {
+		if (resource->kind != VMMFS_PCISLOT_RESOURCE_MSI &&
+		    resource->kind != VMMFS_PCISLOT_RESOURCE_MSIX)
+			return (EOPNOTSUPP);
+		if (ap->a_uio->uio_resid != sizeof(interrupt))
+			return (EINVAL);
+		error = uiomove((caddr_t)&interrupt, sizeof(interrupt), ap->a_uio);
+		if (error != 0)
+			return (error);
+		if (interrupt.reserved != 0)
+			return (EINVAL);
+	}
+
+	return (VMMFS_WORK(resource, vmmfs_pcislot_resource_raise(resource,
+	    resource->kind == VMMFS_PCISLOT_RESOURCE_INTX && intx.asserted != 0)));
+}
+
+static int
 vmmfs_pcislot_resource_dev_open(struct dev_open_args *ap)
 {
 	(void)ap;
@@ -1876,26 +1900,18 @@ vmmfs_pcislot_resource_dev_close(struct dev_close_args *ap)
 }
 
 static int
-vmmfs_pcislot_resource_dev_mmap_single(struct dev_mmap_single_args *ap)
+vmmfs_pcislot_resource_get_mapping(struct vmmfs_pcislot_resource *resource,
+	vm_ooffset_t offset, vm_size_t size, struct vm_object **objectp)
 {
-	struct vmmfs_pcislot_resource *resource;
 	struct vm_object *object;
-	vm_ooffset_t offset;
-
-	if (ap == NULL || ap->a_head.a_dev == NULL)
-		return (EINVAL);
-	resource = ap->a_head.a_dev->si_drv1;
-	if (resource == NULL || (ap->a_nprot & VM_PROT_EXECUTE) != 0)
-		return (EINVAL);
 	lwkt_gettoken(&resource->token);
 	if (!vmmfs_pcislot_resource_enabled(resource) ||
 	    resource->pager_object == NULL) {
 		lwkt_reltoken(&resource->token);
 		return (EINVAL);
 	}
-	offset = *ap->a_offset;
 	if (offset < 0 || offset > resource->mapping_size ||
-	    ap->a_size > resource->mapping_size - offset) {
+	    size > resource->mapping_size - offset) {
 		lwkt_reltoken(&resource->token);
 		return (EINVAL);
 	}
@@ -1909,8 +1925,23 @@ vmmfs_pcislot_resource_dev_mmap_single(struct dev_mmap_single_args *ap)
 	vm_object_reference_locked(object);
 	VM_OBJECT_UNLOCK(object);
 	lwkt_reltoken(&resource->token);
-	*ap->a_object = object;
+	*objectp = object;
 	return (0);
+}
+
+static int
+vmmfs_pcislot_resource_dev_mmap_single(struct dev_mmap_single_args *ap)
+{
+	struct vmmfs_pcislot_resource *resource;
+
+	if (ap == NULL || ap->a_head.a_dev == NULL)
+		return (EINVAL);
+	resource = ap->a_head.a_dev->si_drv1;
+	if (resource == NULL || (ap->a_nprot & VM_PROT_EXECUTE) != 0)
+		return (EINVAL);
+	return (VMMFS_WORK(resource,
+	    vmmfs_pcislot_resource_get_mapping(resource, *ap->a_offset,
+	    ap->a_size, ap->a_object)));
 }
 
 static int

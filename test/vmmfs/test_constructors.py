@@ -24,7 +24,7 @@ struct vmmfs_node {
     unsigned references; bool dead; unsigned inode, mode, size;
     int (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
-};
+ struct lock lock;};
 struct vnode { void *v_data; };
 struct vmmfs_root { int unused; };
 struct vmmfs_mount { struct vnode *root_vnode; void *mount, *machine_vops, *pcislot_vops; };
@@ -194,7 +194,7 @@ struct vmmfs_node {
     unsigned mode, inode; uint64_t size;
     int (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
-};
+ struct lock lock; bool dead;};
 struct cdev { void *si_drv1; };
 struct vnode { void *v_data; };
 struct vm_object { unsigned references; };

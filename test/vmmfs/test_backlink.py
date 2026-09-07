@@ -8,7 +8,7 @@ class Backlink(unittest.TestCase):
         run_c(COMMON + r"""
 struct token { unsigned held; };
 struct vnode;
-struct vmmfs_node { struct token token; struct vnode *vnode; unsigned refs; };
+struct vmmfs_node { struct token token; struct vnode *vnode; unsigned refs;  struct lock lock; bool dead;};
 struct mount { int unused; };
 struct vop_ops { int unused; };
 enum vtype { VDIR, VCHR, VBAD };
@@ -84,14 +84,12 @@ int main(void) {
 struct token { unsigned held; };
 struct vnode;
 struct vmmfs_node { struct token token; bool dead; struct vmmfs_node *parent;
-    struct vnode *vnode; };
+    struct vnode *vnode;  struct lock lock;};
 struct vnode { struct vmmfs_node *v_data; unsigned holds, refs; bool locked; };
 struct vop_nlookupdotdot_args { struct vnode *a_dvp; struct vnode **a_vpp; };
 static struct vmmfs_node parent, child;
 static struct vnode parent_vnode, child_vnode;
 static unsigned mode, get_calls;
-#define LK_EXCLUSIVE 1
-#define LK_RETRY 2
 void lwkt_gettoken(struct token *t) {
     if (t == &parent.token && mode == 4) {
         /* Contended parent acquisition releases and reacquires the child token. */
@@ -101,12 +99,12 @@ void lwkt_gettoken(struct token *t) {
 }
 void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
 static void vhold(struct vnode *v) {
-    assert(v == &parent_vnode && parent.token.held && child.token.held);
-    assert(!child.dead && !parent.dead); ++v->holds;
+    assert(v == &parent_vnode && parent.lock.held && !child.lock.held);
+    assert(!parent.dead); ++v->holds;
 }
 static int vget(struct vnode *v, int flags) {
     assert(v == &parent_vnode && v->holds == 1 && flags == (LK_EXCLUSIVE | LK_RETRY));
-    assert(!parent.token.held && !child.token.held); ++get_calls;
+    assert(!parent.lock.held && !child.lock.held); ++get_calls;
     if (mode == 5) {
         /* Hold preserves vnode storage, not its reclaimed filesystem data. */
         parent.vnode = NULL; v->v_data = NULL; return ENOENT;
@@ -116,7 +114,7 @@ static int vget(struct vnode *v, int flags) {
 static void vdrop(struct vnode *v) { assert(v->holds == 1); --v->holds; }
 static void vn_unlock(struct vnode *v) { assert(v->locked); v->locked = false; }
 int
-""" + function("vmmfs_node.c", "vmmfs_node_nlookupdotdot") + r"""
+""" + function("vmmfs_node.c", "vmmfs_node_get_vnode") + "\nint\n" + function("vmmfs_node.c", "vmmfs_node_nlookupdotdot") + r"""
 int main(void) {
     struct vnode *result;
     struct vop_nlookupdotdot_args args = { &child_vnode, &result };
@@ -130,7 +128,7 @@ int main(void) {
         result = NULL; get_calls = 0;
         int error = vmmfs_node_nlookupdotdot(&args);
         assert(!child.token.held && !parent.token.held && !parent_vnode.holds);
-        if (mode == 0) {
+        if (mode == 0 || mode == 1 || mode == 4) {
             assert(!error && result == &parent_vnode && result->refs == 1);
             assert(!result->locked && get_calls == 1);
         } else {

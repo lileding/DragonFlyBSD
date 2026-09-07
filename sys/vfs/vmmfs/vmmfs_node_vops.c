@@ -74,7 +74,7 @@ vmmfs_node_readdir(struct vop_readdir_args *ap)
 	}
 	index = offset - 2;
 	while (!stop) {
-		error = node->read_item(node, index, &item);
+		error = VMMFS_CALL(node, read_item, index, &item);
 		if (error == ENOENT) {
 			error = 0;
 			break;
@@ -112,8 +112,7 @@ vmmfs_node_nresolve(struct vop_nresolve_args *ap)
 	if (node->get_item == NULL)
 		return (EOPNOTSUPP);
 	ncp = ap->a_nch->ncp;
-	error = node->get_item(node, ncp->nc_name, ncp->nc_nlen,
-	    &vnode);
+	error = VMMFS_CALL(node, get_item, ncp->nc_name, ncp->nc_nlen, &vnode);
 	if (error != 0) {
 		cache_setvp(ap->a_nch, NULL);
 		return (error);
@@ -134,7 +133,7 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 	struct vmmfs_node *node;
 	struct namecache *ncp;
 	struct vnode *vnode;
-	int error;
+	int error, cleanup_error;
 
 	if (ap == NULL)
 		return (EINVAL);
@@ -146,8 +145,7 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 	if (ap->a_vap->va_type != VDIR)
 		return (EINVAL);
 	ncp = ap->a_nch->ncp;
-	error = node->create_item(node, ap->a_dvp->v_mount,
-	    ncp->nc_name, ncp->nc_nlen, &vnode);
+	error = VMMFS_CALL(node, create_item, ap->a_dvp->v_mount, ncp->nc_name, ncp->nc_nlen, &vnode);
 	if (error != 0)
 		return (error);
 	if (vnode == NULL)
@@ -158,8 +156,12 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 		 * The child is already discoverable.  If another operation has
 		 * made it busy, retain the registry entry for normal resolution.
 		 */
-		if (vmmfs_vnode_deactivate(vnode) == 0)
-			node->remove_item(node, ncp->nc_name, ncp->nc_nlen);
+		if (vmmfs_vnode_deactivate(vnode) == 0) {
+			cleanup_error = VMMFS_CALL(node, remove_item,
+			    ncp->nc_name, ncp->nc_nlen);
+			if (cleanup_error != 0 && cleanup_error != ENOENT)
+				kprintf("vmmfs: mkdir rollback: %d\n", cleanup_error);
+		}
 		vrele(vnode); /* create_item reference. */
 		return (error);
 	}
@@ -196,8 +198,9 @@ vmmfs_node_nrmdir(struct vop_nrmdir_args *ap)
 	}
 	error = vmmfs_vnode_deactivate(vnode);
 	if (error == 0) {
-		node->remove_item(node, ncp->nc_name, ncp->nc_nlen);
-		cache_unlink(ap->a_nch);
+		error = VMMFS_CALL(node, remove_item, ncp->nc_name, ncp->nc_nlen);
+		if (error == 0)
+			cache_unlink(ap->a_nch);
 	}
 	vrele(vnode);
 	return (error);

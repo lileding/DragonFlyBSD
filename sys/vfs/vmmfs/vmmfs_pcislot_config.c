@@ -13,6 +13,7 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+#include <sys/thread2.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -131,6 +132,7 @@ vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	config->node.dead = false;
 	config->node.references = 1;
 	lwkt_token_init(&config->node.token, "vmmfsnode");
+	lockinit(&config->node.lock, "vmmfsnode", 0, 0);
 	config->node.deactivate = vmmfs_pcislot_config_deactivate;
 	config->node.drop = vmmfs_pcislot_config_drop;
 	vmmfs_node_hold(parent);
@@ -334,48 +336,48 @@ vmmfs_pcislot_config_close(struct vop_close_args *ap)
 }
 
 static int
-vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *ap)
+vmmfs_pcislot_config_subscribe(struct vmmfs_pcislot_config *config,
+	struct knote *knote)
 {
-	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
 	int error = 0;
 
 	if (config == NULL)
 		return (ENOENT);
-	switch (ap->a_kn->kn_filter) {
+	switch (knote->kn_filter) {
 	case EVFILT_READ:
-		ap->a_kn->kn_fop = &vmmfs_pcislot_config_read_filterops;
+		knote->kn_fop = &vmmfs_pcislot_config_read_filterops;
 		break;
 	case EVFILT_WRITE:
-		ap->a_kn->kn_fop = &vmmfs_pcislot_config_write_filterops;
+		knote->kn_fop = &vmmfs_pcislot_config_write_filterops;
 		break;
 	default:
 		return (EOPNOTSUPP);
 	}
-	lwkt_gettoken(&config->node.token);
 	lwkt_gettoken(&config->token);
-	if (config->node.dead || config->closed)
+	if (config->closed)
 		error = ENOENT;
 	else {
-		ap->a_kn->kn_hook = (caddr_t)config;
-		knote_insert(&config->kq.ki_note, ap->a_kn);
+		knote->kn_hook = (caddr_t)config;
+		knote_insert(&config->kq.ki_note, knote);
 	}
 	lwkt_reltoken(&config->token);
-	lwkt_reltoken(&config->node.token);
 	return (error);
 }
 
 static int
-vmmfs_pcislot_config_open(struct vop_open_args *ap)
+vmmfs_pcislot_config_kqfilter(struct vop_kqfilter_args *ap)
 {
 	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
+
+	return (VMMFS_WORK(config,
+	    vmmfs_pcislot_config_subscribe(config, ap->a_kn)));
+}
+
+static int
+vmmfs_pcislot_config_claim(struct vmmfs_pcislot_config *config)
+{
 	struct vmmfs_pcislot *slot;
 	int error;
-
-	if (config == NULL)
-		return (ENOENT);
-	if ((ap->a_mode & (FREAD | FWRITE)) != (FREAD | FWRITE))
-		return (EINVAL);
-	lwkt_gettoken(&config->node.token);
 	slot = vmmfs_pcislot_config_slot(config);
 	lwkt_gettoken(&slot->node.token);
 	error = vmmfs_pcislot_auth_check(slot);
@@ -383,109 +385,177 @@ vmmfs_pcislot_config_open(struct vop_open_args *ap)
 	lwkt_gettoken(&config->token);
 	if (error != 0)
 		error = EACCES;
-	else if (config->node.dead || config->closed)
+	else if (config->closed)
 		error = ENOENT;
 	else if (config->opening || config->responder != NULL)
 		error = EBUSY;
 	else
 		config->opening = true;
 	lwkt_reltoken(&config->token);
-	lwkt_reltoken(&config->node.token);
 	if (error != 0)
 		return (error);
 
-	error = vop_stdopen(ap);
-	lwkt_gettoken(&config->node.token);
+	return (0);
+}
+
+static int
+vmmfs_pcislot_config_finish_open(struct vmmfs_pcislot_config *config,
+	struct file *file, int error)
+{
 	lwkt_gettoken(&config->token);
 	config->opening = false;
 	if (error == 0) {
-		if (config->node.dead || config->closed)
+		if (config->closed)
 			error = ENOENT;
-		else if (ap->a_fpp == NULL || *ap->a_fpp == NULL)
+		else if (file == NULL)
 			error = EIO;
 		else
-			config->responder = *ap->a_fpp;
+			config->responder = file;
 	}
 	lwkt_reltoken(&config->token);
-	lwkt_reltoken(&config->node.token);
 	return (error);
+}
+
+static int
+vmmfs_pcislot_config_open(struct vop_open_args *ap)
+{
+	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
+	int error;
+
+	if (config == NULL)
+		return (ENOENT);
+	if ((ap->a_mode & (FREAD | FWRITE)) != (FREAD | FWRITE))
+		return (EINVAL);
+	error = VMMFS_WORK(config, vmmfs_pcislot_config_claim(config));
+	if (error != 0)
+		return (error);
+	error = vop_stdopen(ap);
+	return (vmmfs_pcislot_config_finish_open(config,
+	    ap->a_fpp == NULL ? NULL : *ap->a_fpp, error));
+}
+
+static int
+vmmfs_pcislot_config_receive(struct vmmfs_pcislot_config *config,
+	struct file *file, struct vmmfs_pci_config_request *record)
+{
+	struct vmmfs_pcislot_config_request *request;
+	int error = 0;
+
+	lwkt_gettoken(&config->token);
+	if (config->closed)
+		error = ENXIO;
+	else if (config->responder != file)
+		error = EBADF;
+	else {
+		request = TAILQ_FIRST(&config->requests);
+		if (request != NULL && !request->delivered) {
+			*record = request->request;
+			request->delivered = true;
+		} else {
+			tsleep_interlock(config, PCATCH);
+			error = EAGAIN;
+		}
+	}
+	lwkt_reltoken(&config->token);
+	if (error == 0)
+		KNOTE(&config->kq.ki_note, 0);
+	return (error);
+}
+
+/* Completion of an admitted copyout: do not reopen admission on failure. */
+static void
+vmmfs_pcislot_config_redeliver(struct vmmfs_pcislot_config *config,
+	struct file *file, const struct vmmfs_pci_config_request *record)
+{
+	struct vmmfs_pcislot_config_request *request;
+	bool retry;
+
+	/* The worker may have removed this request while copyout slept. */
+	lwkt_gettoken(&config->token);
+	request = TAILQ_FIRST(&config->requests);
+	retry = !config->closed &&
+	    config->responder == file && request != NULL &&
+	    !request->completed &&
+	    request->request.generation == record->generation &&
+	    request->request.sequence == record->sequence;
+	if (retry)
+		request->delivered = false;
+	lwkt_reltoken(&config->token);
+	if (retry)
+		vmmfs_pcislot_config_wake_next(config);
 }
 
 static int
 vmmfs_pcislot_config_read(struct vop_read_args *ap)
 {
 	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
-	struct vmmfs_pcislot_config_request *request;
 	struct vmmfs_pci_config_request record;
-	bool retry;
 	int error;
 
-	if (config == NULL)
-		return (ENOENT);
 	if (ap->a_uio->uio_resid != sizeof(record))
 		return (EINVAL);
 	for (;;) {
-		lwkt_gettoken(&config->node.token);
-		lwkt_gettoken(&config->token);
-		error = 0;
-		if (config->node.dead || config->closed)
-			error = ENXIO;
-		else if (config->responder != ap->a_fp)
-			error = EBADF;
-		if (error != 0) {
-			lwkt_reltoken(&config->token);
-			lwkt_reltoken(&config->node.token);
-			return (error);
-		}
-		request = TAILQ_FIRST(&config->requests);
-		if (request != NULL && !request->delivered) {
-			record = request->request;
-			request->delivered = true;
-			lwkt_reltoken(&config->token);
-			lwkt_reltoken(&config->node.token);
-			KNOTE(&config->kq.ki_note, 0);
-			error = uiomove((caddr_t)&record, sizeof(record), ap->a_uio);
-			if (error == 0)
-				return (0);
-			/* The worker may have removed this request while copyout slept. */
-			lwkt_gettoken(&config->node.token);
-			lwkt_gettoken(&config->token);
-			request = TAILQ_FIRST(&config->requests);
-			retry = !config->node.dead && !config->closed &&
-			    config->responder == ap->a_fp && request != NULL &&
-			    !request->completed &&
-			    request->request.generation == record.generation &&
-			    request->request.sequence == record.sequence;
-			if (retry)
-				request->delivered = false;
-			lwkt_reltoken(&config->token);
-			lwkt_reltoken(&config->node.token);
-			if (retry)
-				vmmfs_pcislot_config_wake_next(config);
-			return (error);
-		}
+		error = VMMFS_WORK(config,
+		    vmmfs_pcislot_config_receive(config, ap->a_fp, &record));
+		if (error != EAGAIN)
+			break;
 		if ((ap->a_ioflag & IO_NDELAY) != 0) {
-			lwkt_reltoken(&config->token);
-			lwkt_reltoken(&config->node.token);
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
 			return (EAGAIN);
 		}
-		tsleep_interlock(config, PCATCH);
-		lwkt_reltoken(&config->token);
-		lwkt_reltoken(&config->node.token);
 		error = tsleep(config, PINTERLOCKED | PCATCH, "vmmfspcicfg", 0);
 		if (error != 0)
 			return (error);
 	}
+	if (error != 0)
+		return (error);
+	error = uiomove((caddr_t)&record, sizeof(record), ap->a_uio);
+	if (error != 0)
+		vmmfs_pcislot_config_redeliver(config, ap->a_fp, &record);
+	return (error);
 }
 
+
+static int
+vmmfs_pcislot_config_respond(struct vmmfs_pcislot_config *config,
+	struct file *file, const struct vmmfs_pci_config_response *response)
+{
+	struct vmmfs_pcislot_config_request *request;
+	vmm_vcpu_t vcpu = NULL;
+	int error = 0;
+
+	lwkt_gettoken(&config->token);
+	request = TAILQ_FIRST(&config->requests);
+	if (config->closed)
+		error = ENXIO;
+	else if (config->responder != file)
+		error = EBADF;
+	else if (request == NULL || !request->delivered || request->completed ||
+	    request->request.generation != response->generation ||
+	    request->request.sequence != response->sequence)
+		error = EINVAL;
+	else {
+		request->response_value = response->value;
+		request->response_status = response->status;
+		request->completed = true;
+		vcpu = request->vcpu;
+	}
+	lwkt_reltoken(&config->token);
+	if (error == 0) {
+		KNOTE(&config->kq.ki_note, 0);
+		/* The channel is only an address, not a borrowed vCPU object. */
+		wakeup(vcpu);
+	}
+	return (error);
+}
 
 static int
 vmmfs_pcislot_config_write(struct vop_write_args *ap)
 {
 	struct vmmfs_pcislot_config *config = ap->a_vp->v_data;
-	struct vmmfs_pcislot_config_request *request;
 	struct vmmfs_pci_config_response response;
-	vmm_vcpu_t vcpu = NULL;
 	int error;
 
 	if (config == NULL)
@@ -500,31 +570,8 @@ vmmfs_pcislot_config_write(struct vop_write_args *ap)
 	    VMMFS_PCI_CONFIG_UNSUPPORTED && response.status !=
 	    VMMFS_PCI_CONFIG_FAILURE))
 		return (EINVAL);
-	lwkt_gettoken(&config->node.token);
-	lwkt_gettoken(&config->token);
-	request = TAILQ_FIRST(&config->requests);
-	if (config->node.dead || config->closed)
-		error = ENXIO;
-	else if (config->responder != ap->a_fp)
-		error = EBADF;
-	else if (request == NULL || !request->delivered || request->completed ||
-	    request->request.generation != response.generation ||
-	    request->request.sequence != response.sequence)
-		error = EINVAL;
-	else {
-		request->response_value = response.value;
-		request->response_status = response.status;
-		request->completed = true;
-		vcpu = request->vcpu;
-	}
-	lwkt_reltoken(&config->token);
-	lwkt_reltoken(&config->node.token);
-	if (error == 0) {
-		KNOTE(&config->kq.ki_note, 0);
-		/* The channel is only an address, not a borrowed vCPU object. */
-		wakeup(vcpu);
-	}
-	return (error);
+	return (VMMFS_WORK(config,
+	    vmmfs_pcislot_config_respond(config, ap->a_fp, &response)));
 }
 
 static void

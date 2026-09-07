@@ -168,6 +168,7 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.dead = false;
 	vcpu->node.references = 1;
 	lwkt_token_init(&vcpu->node.token, "vmmfsnode");
+	lockinit(&vcpu->node.lock, "vmmfsnode", 0, 0);
 	vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 	vcpu->node.drop = vmmfs_vcpu_drop;
 	vmmfs_node_hold(parent);

@@ -70,7 +70,7 @@ int main(void) {
         run_c(COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; unsigned size; };
+struct vmmfs_node { struct token token; bool dead; unsigned size;  struct lock lock;};
 struct vmmfs_pcislot_auth { bool valid; unsigned references; };
 struct vmmfs_pcislot_descriptor_value { unsigned marker; size_t length; };
 struct vmmfs_pcislot_descriptor {

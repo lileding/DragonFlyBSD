@@ -176,6 +176,7 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     port->node.dead = false;
     port->node.references = 1;
     lwkt_token_init(&port->node.token, "vmmfsnode");
+    lockinit(&port->node.lock, "vmmfsnode", 0, 0);
     port->node.drop = vmmfs_serialport_drop;
     vmmfs_node_hold(parent);
     port->node.deactivate = vmmfs_serialport_deactivate;
@@ -382,6 +383,9 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
     return 0;
 }
 
+static int vmmfs_serialport_begin_io(struct vmmfs_serialport *);
+static void vmmfs_serialport_end_io(struct vmmfs_serialport *);
+
 static int
 vmmfs_serialport_open(struct vop_open_args *ap)
 {
@@ -394,16 +398,9 @@ vmmfs_serialport_open(struct vop_open_args *ap)
     if (port == NULL)
         return ENOENT;
     vnode = ap->a_vp;
-    lwkt_gettoken(&port->node.token);
-    lwkt_gettoken(&port->token);
-    if (port->node.dead || port->destroying || port->closed) {
-        lwkt_reltoken(&port->token);
-        lwkt_reltoken(&port->node.token);
-        return ENXIO;
-    }
-    ++port->control_count;
-    lwkt_reltoken(&port->token);
-    lwkt_reltoken(&port->node.token);
+    error = VMMFS_WORK(port, vmmfs_serialport_begin_io(port));
+    if (error != 0)
+        return error;
     dev = vnode->v_rdev;
     if (dev == NULL) {
         error = ENXIO;
@@ -417,11 +414,9 @@ vmmfs_serialport_open(struct vop_open_args *ap)
         vnode);
     vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
     if (error == 0) {
-        lwkt_gettoken(&port->node.token);
         lwkt_gettoken(&port->token);
-        if (port->node.dead || port->destroying || port->closed) {
+        if (port->destroying || port->closed) {
             lwkt_reltoken(&port->token);
-            lwkt_reltoken(&port->node.token);
             vn_unlock(vnode);
             close_error = dev_dclose(dev, ap->a_mode, S_IFCHR,
                 *ap->a_fpp);
@@ -433,15 +428,10 @@ vmmfs_serialport_open(struct vop_open_args *ap)
         } else {
             lwkt_reltoken(&port->token);
             error = vop_stdopen(ap);
-            lwkt_reltoken(&port->node.token);
         }
     }
 done:
-    lwkt_gettoken(&port->token);
-    KKASSERT(port->control_count != 0);
-    --port->control_count;
-    lwkt_reltoken(&port->token);
-    wakeup(port);
+    vmmfs_serialport_end_io(port);
     return error;
 }
 
@@ -466,6 +456,29 @@ vmmfs_serialport_close(struct vop_close_args *ap)
 }
 
 static int
+vmmfs_serialport_begin_io(struct vmmfs_serialport *port)
+{
+    int error = 0;
+
+    lwkt_gettoken(&port->token);
+    if (port->closed || port->destroying)
+        error = ENXIO;
+    else
+        ++port->control_count;
+    lwkt_reltoken(&port->token);
+    return error;
+}
+
+static void
+vmmfs_serialport_end_io(struct vmmfs_serialport *port)
+{
+    lwkt_gettoken(&port->token);
+    --port->control_count;
+    lwkt_reltoken(&port->token);
+    wakeup(port);
+}
+
+static int
 vmmfs_serialport_read(struct vop_read_args *ap)
 {
     struct vmmfs_serialport *port;
@@ -479,16 +492,20 @@ vmmfs_serialport_read(struct vop_read_args *ap)
     if (port == NULL || dev == NULL)
         return EBADF;
     vn_unlock(vnode);
-    lwkt_gettoken(&port->node.token);
+    error = VMMFS_WORK(port, vmmfs_serialport_begin_io(port));
+    if (error != 0)
+        goto done;
+    /* Revoke wakes this operation before waiting for control_count. */
     lwkt_gettoken(&port->tty.t_token);
-    if (port->node.dead)
+    if (port->closed || port->destroying)
         error = ENXIO;
     else if (ap->a_uio->uio_resid == 0)
         error = 0;
     else
         error = dev_dread(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
     lwkt_reltoken(&port->tty.t_token);
-    lwkt_reltoken(&port->node.token);
+    vmmfs_serialport_end_io(port);
+done:
     vn_lock(vnode, LK_SHARED | LK_RETRY);
     return error;
 }
@@ -507,16 +524,20 @@ vmmfs_serialport_write(struct vop_write_args *ap)
     if (port == NULL || dev == NULL)
         return EBADF;
     vn_unlock(vnode);
-    lwkt_gettoken(&port->node.token);
+    error = VMMFS_WORK(port, vmmfs_serialport_begin_io(port));
+    if (error != 0)
+        goto done;
+    /* Revoke wakes this operation before waiting for control_count. */
     lwkt_gettoken(&port->tty.t_token);
-    if (port->node.dead)
+    if (port->closed || port->destroying)
         error = ENXIO;
     else if (ap->a_uio->uio_resid == 0)
         error = 0;
     else
         error = dev_dwrite(dev, ap->a_uio, ap->a_ioflag, ap->a_fp);
     lwkt_reltoken(&port->tty.t_token);
-    lwkt_reltoken(&port->node.token);
+    vmmfs_serialport_end_io(port);
+done:
     vn_lock(vnode, LK_EXCLUSIVE | LK_RETRY);
     return error;
 }
@@ -536,24 +557,31 @@ vmmfs_serialport_ioctl(struct vop_ioctl_args *ap)
 }
 
 static int
+vmmfs_serialport_subscribe(struct vmmfs_serialport *port, cdev_t dev,
+    struct knote *knote)
+{
+    int error;
+
+    lwkt_gettoken(&port->tty.t_token);
+    error = port->closed ? ENXIO : dev_dkqfilter(dev, knote, NULL);
+    lwkt_reltoken(&port->tty.t_token);
+    return error;
+}
+
+static int
 vmmfs_serialport_kqfilter(struct vop_kqfilter_args *ap)
 {
     struct vmmfs_serialport *port;
     struct vnode *vnode;
     cdev_t dev;
-    int error;
 
     vnode = ap->a_vp;
     port = vnode->v_data;
     dev = vnode->v_rdev;
     if (port == NULL || dev == NULL)
         return EBADF;
-    lwkt_gettoken(&port->node.token);
-    lwkt_gettoken(&port->tty.t_token);
-    error = port->node.dead ? ENXIO : dev_dkqfilter(dev, ap->a_kn, NULL);
-    lwkt_reltoken(&port->tty.t_token);
-    lwkt_reltoken(&port->node.token);
-    return error;
+    return VMMFS_WORK(port,
+        vmmfs_serialport_subscribe(port, dev, ap->a_kn));
 }
 
 
@@ -909,27 +937,16 @@ vmmfs_serialport_dev_ioctl(struct dev_ioctl_args *ap)
     tty = ap->a_head.a_dev->si_tty;
     if (port == NULL || tty == NULL)
         return ENXIO;
-    lwkt_gettoken(&port->node.token);
-    lwkt_gettoken(&port->token);
-    if (port->node.dead || port->closed || port->destroying) {
-        lwkt_reltoken(&port->token);
-        lwkt_reltoken(&port->node.token);
-        return ENXIO;
-    }
-    ++port->control_count;
-    lwkt_reltoken(&port->token);
-    lwkt_reltoken(&port->node.token);
+    error = VMMFS_WORK(port, vmmfs_serialport_begin_io(port));
+    if (error != 0)
+        return error;
     lwkt_gettoken(&tty->t_token);
     error = (*linesw[tty->t_line].l_ioctl)(tty, ap->a_cmd, ap->a_data,
         ap->a_fflag, ap->a_cred);
     if (error == ENOIOCTL)
         error = ttioctl(tty, ap->a_cmd, ap->a_data, ap->a_fflag);
     lwkt_reltoken(&tty->t_token);
-    lwkt_gettoken(&port->token);
-    KKASSERT(port->control_count != 0);
-    --port->control_count;
-    lwkt_reltoken(&port->token);
-    wakeup(port);
+    vmmfs_serialport_end_io(port);
     return error == ENOIOCTL ? ENOTTY : error;
 }
 

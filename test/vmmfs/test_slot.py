@@ -23,7 +23,7 @@ class SlotOwnership(unittest.TestCase):
     def test_slot_detaches_resources_before_revoke(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; void *parent; };
+struct vmmfs_node { struct token token; void *parent;  struct lock lock; bool dead;};
 struct vmmfs_pcislot_auth { unsigned references; };
 struct vmmfs_pcislot_descriptor {
     struct vmmfs_node node;

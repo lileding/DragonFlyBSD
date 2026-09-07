@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/stdarg.h>
 #include <sys/systm.h>
+#include <sys/thread2.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
@@ -96,6 +97,7 @@ vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	state_node->node.dead = false;
 	state_node->node.references = 1;
 	lwkt_token_init(&state_node->node.token, "vmmfsnode");
+	lockinit(&state_node->node.lock, "vmmfsnode", 0, 0);
 	state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	state_node->node.drop = vmmfs_pcislot_events_drop;
 	vmmfs_node_hold(parent);
@@ -233,114 +235,112 @@ vmmfs_pci_event_name(enum vmmfs_pci_event event)
 }
 
 static int
+vmmfs_pcislot_events_subscribe(struct vmmfs_pcislot_events *events, struct knote *knote)
+{
+	int error = 0;
+
+	if (knote->kn_filter != EVFILT_READ)
+		return (EOPNOTSUPP);
+	lwkt_gettoken(&events->token);
+	if (events->closed)
+		error = ENOENT;
+	else {
+		knote->kn_fop = &vmmfs_pcislot_events_read_filterops;
+		knote->kn_hook = (caddr_t)events;
+		knote_insert(&events->kq.ki_note, knote);
+	}
+	lwkt_reltoken(&events->token);
+	return (error);
+}
+
+static int
 vmmfs_pcislot_events_kqfilter(struct vop_kqfilter_args *ap)
 {
 	struct vmmfs_pcislot_events *events = ap->a_vp->v_data;
-	int error = 0;
 
-	if (events == NULL)
-		return (ENOENT);
-	if (ap->a_kn->kn_filter != EVFILT_READ)
-		return (EOPNOTSUPP);
-	lwkt_gettoken(&events->node.token);
-	lwkt_gettoken(&events->token);
-	if (events->node.dead || events->closed)
-		error = ENOENT;
-	else {
-		ap->a_kn->kn_fop = &vmmfs_pcislot_events_read_filterops;
-		ap->a_kn->kn_hook = (caddr_t)events;
-		knote_insert(&events->kq.ki_note, ap->a_kn);
-	}
-	lwkt_reltoken(&events->token);
-	lwkt_reltoken(&events->node.token);
-	return (error);
+	return (VMMFS_WORK(events, vmmfs_pcislot_events_subscribe(events, ap->a_kn)));
+}
+
+static int
+vmmfs_pcislot_events_authorize(struct vmmfs_pcislot_events *events)
+{
+	struct vmmfs_pcislot *slot;
+	int error;
+	slot = vmmfs_pcislot_events_slot(events);
+	lwkt_gettoken(&slot->node.token);
+	error = vmmfs_pcislot_auth_check(slot);
+	lwkt_reltoken(&slot->node.token);
+	return (error == 0 ? 0 : EACCES);
 }
 
 static int
 vmmfs_pcislot_events_open(struct vop_open_args *ap)
 {
 	struct vmmfs_pcislot_events *events = ap->a_vp->v_data;
-	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (events == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&events->node.token);
-	slot = vmmfs_pcislot_events_slot(events);
-	lwkt_gettoken(&slot->node.token);
-	error = vmmfs_pcislot_auth_check(slot);
-	lwkt_reltoken(&slot->node.token);
-	if (error != 0)
-		error = EACCES;
-	else if (events->node.dead)
-		error = ENXIO;
-	else
-		error = vop_stdopen(ap);
-	lwkt_reltoken(&events->node.token);
-	return (error);
+	error = VMMFS_WORK(events, vmmfs_pcislot_events_authorize(events));
+	return (error == 0 ? vop_stdopen(ap) : error);
+}
+
+static int
+vmmfs_pcislot_events_read_data(struct vmmfs_pcislot_events *events, char *buffer,
+	size_t capacity, size_t *lengthp)
+{
+	size_t length, index, i;
+
+	lwkt_gettoken(&events->token);
+	if (events->closed) {
+		lwkt_reltoken(&events->token);
+		return (ENXIO);
+	}
+	length = MIN(events->length, capacity);
+	if (length == 0) {
+		tsleep_interlock(events, PCATCH);
+		lwkt_reltoken(&events->token);
+		return (EAGAIN);
+	}
+	for (i = 0; i < length; ++i) {
+		index = (events->start + i) % VMMFS_PCISLOT_EVENTS_BUFFER_SIZE;
+		buffer[i] = events->buffer[index];
+	}
+	events->start = (events->start + length) % VMMFS_PCISLOT_EVENTS_BUFFER_SIZE;
+	events->length -= length;
+	lwkt_reltoken(&events->token);
+	*lengthp = length;
+	return (0);
 }
 
 static int
 vmmfs_pcislot_events_read(struct vop_read_args *ap)
 {
-	struct vmmfs_pcislot_events *state_node;
-	struct uio *uio;
+	struct vmmfs_pcislot_events *events = ap->a_vp->v_data;
+	struct uio *uio = ap->a_uio;
 	char buffer[VMMFS_PCISLOT_EVENTS_READ_SIZE];
-	size_t index;
 	size_t length;
-	size_t i;
 	int error;
 
-	state_node = ap->a_vp->v_data;
-	if (state_node == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
 		return (EINVAL);
 	if (uio->uio_resid == 0)
 		return (0);
 	for (;;) {
-		lwkt_gettoken(&state_node->node.token);
-		lwkt_gettoken(&state_node->token);
-		if (state_node->node.dead) {
-			lwkt_reltoken(&state_node->token);
-			lwkt_reltoken(&state_node->node.token);
-			return (ENXIO);
-		}
-		if (state_node->length != 0)
+		error = VMMFS_WORK(events, vmmfs_pcislot_events_read_data(events,
+		    buffer, MIN(sizeof(buffer), (size_t)uio->uio_resid), &length));
+		if (error != EAGAIN)
 			break;
-		if (state_node->closed) {
-			lwkt_reltoken(&state_node->token);
-			lwkt_reltoken(&state_node->node.token);
-			return (ENXIO);
-		}
 		if (ap->a_ioflag & IO_NDELAY) {
-			lwkt_reltoken(&state_node->token);
-			lwkt_reltoken(&state_node->node.token);
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
 			return (EAGAIN);
 		}
-		tsleep_interlock(state_node, PCATCH);
-		lwkt_reltoken(&state_node->token);
-		lwkt_reltoken(&state_node->node.token);
-		error = tsleep(state_node, PINTERLOCKED | PCATCH, "vmmpcievents", 0);
+		/* The work step armed the sleep before releasing its data token. */
+		error = tsleep(events, PINTERLOCKED | PCATCH, "vmmpcievents", 0);
 		if (error != 0)
 			return (error);
 	}
-	length = state_node->length;
-	if (length > sizeof(buffer))
-		length = sizeof(buffer);
-	if (length > (size_t)uio->uio_resid)
-		length = (size_t)uio->uio_resid;
-	for (i = 0; i < length; ++i) {
-		index = (state_node->start + i) % VMMFS_PCISLOT_EVENTS_BUFFER_SIZE;
-		buffer[i] = state_node->buffer[index];
-	}
-	state_node->start = (state_node->start + length) %
-	    VMMFS_PCISLOT_EVENTS_BUFFER_SIZE;
-	state_node->length -= length;
-	lwkt_reltoken(&state_node->token);
-	lwkt_reltoken(&state_node->node.token);
-	return (uiomove(buffer, length, uio));
+	return (error != 0 ? error : uiomove(buffer, length, uio));
 }
 
 static int

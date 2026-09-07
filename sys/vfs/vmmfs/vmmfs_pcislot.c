@@ -95,6 +95,7 @@ vmmfs_pcislot_create(struct vmmfs_node *parent,
 	slot->node.mount = parent->mount;
 	slot->node.references = 1;
 	lwkt_token_init(&slot->node.token, "vmmfsnode");
+	lockinit(&slot->node.lock, "vmmfsnode", 0, 0);
 	slot->node.drop = vmmfs_pcislot_drop;
 	vmmfs_node_hold(parent);
 	slot->node.deactivate = vmmfs_pcislot_deactivate;
@@ -486,18 +487,13 @@ vmmfs_pcislot_nremove(struct vop_nremove_args *ap)
 }
 
 static int
-vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
+vmmfs_pcislot_get_item(struct vmmfs_pcislot *slot,
+	const char *name, size_t length, struct vnode **vnodep)
 {
-	struct vmmfs_pcislot *slot;
-	struct vmmfs_pcislot_resources *resources;
-	struct namecache *ncp;
 	struct vnode *vnode;
+	struct vmmfs_pcislot_resources *resources;
 	int error;
 
-	slot = ap->a_dvp->v_data;
-	if (slot == NULL)
-		return (ENOENT);
-	ncp = ap->a_nch->ncp;
 	lwkt_gettoken(&slot->node.token);
 	if (slot->node.dead) {
 		lwkt_reltoken(&slot->node.token);
@@ -507,14 +503,14 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 		lwkt_reltoken(&slot->node.token);
 		return (EBUSY);
 	}
-	if (ncp->nc_nlen == sizeof("events") - 1 &&
-	    bcmp(ncp->nc_name, "events", sizeof("events") - 1) == 0)
+	if (length == sizeof("events") - 1 &&
+	    bcmp(name, "events", sizeof("events") - 1) == 0)
 		vnode = slot->descriptor.committed ? slot->events_vnode : NULL;
-	else if (ncp->nc_nlen == sizeof("config") - 1 &&
-	    bcmp(ncp->nc_name, "config", sizeof("config") - 1) == 0)
+	else if (length == sizeof("config") - 1 &&
+	    bcmp(name, "config", sizeof("config") - 1) == 0)
 		vnode = slot->descriptor.committed ? slot->config_vnode : NULL;
-	else if (ncp->nc_nlen == sizeof("descriptor") - 1 &&
-	    bcmp(ncp->nc_name, "descriptor", sizeof("descriptor") - 1) == 0)
+	else if (length == sizeof("descriptor") - 1 &&
+	    bcmp(name, "descriptor", sizeof("descriptor") - 1) == 0)
 		vnode = slot->descriptor_vnode;
 	else {
 		resources = slot->resources;
@@ -523,8 +519,8 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 		lwkt_reltoken(&slot->node.token);
 		vnode = NULL;
 		if (resources != NULL) {
-			error = vmmfs_pcislot_resources_lookup(resources,
-			    ncp->nc_name, ncp->nc_nlen, &vnode);
+			error = VMMFS_WORK(resources, vmmfs_pcislot_resources_lookup(resources,
+			    name, length, &vnode));
 			vmmfs_node_put((struct vmmfs_node *)resources);
 			if (error != 0 && error != ENOENT)
 				return (error);
@@ -536,8 +532,25 @@ vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
 	lwkt_reltoken(&slot->node.token);
 resolved:
 	if (vnode == NULL) {
-		cache_setvp(ap->a_nch, NULL);
 		return (ENOENT);
+	}
+	*vnodep = vnode;
+	return (0);
+}
+
+static int
+vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
+{
+	struct vmmfs_pcislot *slot = ap->a_dvp->v_data;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vnode *vnode;
+	int error;
+
+	error = VMMFS_WORK(slot, vmmfs_pcislot_get_item(slot,
+	    ncp->nc_name, ncp->nc_nlen, &vnode));
+	if (error != 0) {
+		cache_setvp(ap->a_nch, NULL);
+		return (error);
 	}
 	error = vget(vnode, LK_EXCLUSIVE);
 	vdrop(vnode);
@@ -552,9 +565,6 @@ resolved:
 static int
 vmmfs_pcislot_open(struct vop_open_args *ap)
 {
-	if (ap->a_vp->v_data == NULL ||
-	    ((struct vmmfs_pcislot *)ap->a_vp->v_data)->node.dead)
-		return (ENOENT);
 	return (vop_stdopen(ap));
 }
 
@@ -570,7 +580,7 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	int stop;
 
 	slot = ap->a_vp->v_data;
-	if (slot == NULL || slot->node.dead)
+	if (slot == NULL)
 		return (ENOENT);
 	uio = ap->a_uio;
 	if (uio->uio_offset < 0)
@@ -595,7 +605,7 @@ vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
 	}
 	index = offset - 2;
 	while (!stop) {
-		error = vmmfs_pcislot_read_item(slot, index, &item);
+		error = VMMFS_WORK(slot, vmmfs_pcislot_read_item(slot, index, &item));
 		if (error == ENOENT) {
 			error = 0;
 			break;
@@ -668,8 +678,8 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 	}
 	vmmfs_node_hold((struct vmmfs_node *)resources);
 	lwkt_reltoken(&slot->node.token);
-	error = vmmfs_pcislot_resources_read_item(resources, index,
-	    &item->inode, item->name, sizeof(item->name), &name_length);
+	error = VMMFS_WORK(resources, vmmfs_pcislot_resources_read_item(resources, index,
+	    &item->inode, item->name, sizeof(item->name), &name_length));
 	vmmfs_node_put((struct vmmfs_node *)resources);
 	if (error == 0)
 		item->type = DT_REG;

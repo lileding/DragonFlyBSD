@@ -251,7 +251,7 @@ int main(void) {
     def test_stopped_publication_token_order(self):
         run_c(COMMON + r"""
 struct token { bool held, live; };
-struct vmmfs_node { struct token token; bool dead; struct vnode *vnode; };
+struct vmmfs_node { struct token token; bool dead; struct vnode *vnode;  struct lock lock;};
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_machine {
@@ -391,7 +391,7 @@ int main(void) {
     def test_private_prepare_retains_vcpu(self):
         run_c(COMMON + r"""
 struct token { int valid, held; };
-struct vmmfs_node { struct vmmfs_mount *mount; struct token token; struct vmmfs_node *parent; bool dead; };
+struct vmmfs_node { struct vmmfs_mount *mount; struct token token; struct vmmfs_node *parent; bool dead;  struct lock lock;};
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_memory { struct vmmfs_node node; uint64_t size; void *object, *run_vmspace; bool mapped; };
 struct cpu { struct token token; void *threads; unsigned active_count, count; };
@@ -493,7 +493,7 @@ int main(void) {
     def test_loader_handoff_retains_its_node(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; unsigned references; };
+struct vmmfs_node { struct token token; bool dead; unsigned references;  struct lock lock;};
 struct vmmfs_loader { struct vmmfs_node node; };
 struct vmmfs_launch { int unused; };
 struct vnode { unsigned references; void *v_data; };
@@ -517,6 +517,16 @@ static void vrele(struct vnode *vnode) {
         machine.loader.node.references = 0;
     }
 }
+static int vmmfs_machine_get_item(struct vmmfs_machine *m,
+    const char *name, size_t length, struct vnode **vnodep) {
+    assert(m->node.lock.held && length == 6 && !strcmp(name,"loader"));
+    *vnodep=m->loader_vnode;
+    if (*vnodep == NULL) return ENOENT;
+    vref(*vnodep); return 0;
+}
+static int vget(struct vnode *v, int flags) { (void)flags; vref(v); return 0; }
+static void vdrop(struct vnode *v) { vrele(v); }
+static void vn_unlock(struct vnode *v) { (void)v; }
 static void remove_loader(void) {
     assert(machine.loader_vnode == &loader_vnode);
     machine.loader.node.dead = true;

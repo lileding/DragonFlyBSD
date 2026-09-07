@@ -73,6 +73,7 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.dead = false;
 	identity->node.references = 1;
 	lwkt_token_init(&identity->node.token, "vmmfsnode");
+	lockinit(&identity->node.lock, "vmmfsnode", 0, 0);
 	identity->node.deactivate = vmmfs_machine_id_deactivate;
 	identity->node.drop = vmmfs_machine_id_drop;
 	vmmfs_node_hold(parent);

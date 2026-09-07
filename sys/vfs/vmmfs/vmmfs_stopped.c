@@ -51,19 +51,11 @@ static int
 vmmfs_stopped_setattr(struct vop_setattr_args *ap)
 {
 	struct vmmfs_node *node = ap->a_vp->v_data;
-	struct vmmfs_machine *machine;
+	struct vmmfs_machine *machine = (struct vmmfs_machine *)node->parent;
 
-	if (node == NULL)
-		return (ENOENT);
-	lwkt_gettoken(&node->token);
-	if (node->dead) {
-		lwkt_reltoken(&node->token);
-		return (ENOENT);
-	}
-	machine = (struct vmmfs_machine *)node->parent;
-	lwkt_reltoken(&node->token);
-	/* LOADING still has a stopped vnode, so touch reaches setattr. */
-	return (vmmfs_machine_request_stop(machine, "external"));
+	/* The request can consume this stopped vnode: do not lock the child. */
+	return (VMMFS_WORK(machine,
+	    vmmfs_machine_request_stop(machine, "external")));
 }
 
 int
@@ -84,6 +76,7 @@ vmmfs_stopped_create(struct vmmfs_node *parent,
 	stopped->node.dead = false;
 	stopped->node.references = 1;
 	lwkt_token_init(&stopped->node.token, "vmmfsnode");
+	lockinit(&stopped->node.lock, "vmmfsnode", 0, 0);
 	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	stopped->node.drop = vmmfs_stopped_drop;
 	vmmfs_node_hold(parent);

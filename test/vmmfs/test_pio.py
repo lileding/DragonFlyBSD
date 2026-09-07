@@ -147,7 +147,7 @@ enum vmm_io_width {
     VMM_IO_WIDTH_32=4, VMM_IO_WIDTH_64=8
 };
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; };
+struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
 struct vmmfs_machine { struct vmmfs_node node; };
 struct vmmfs_pcislot { struct { bool powered; } type0; };
 struct vmmfs_pciroot {
