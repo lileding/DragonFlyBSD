@@ -112,7 +112,7 @@ vmmfs_serialroot_init(struct vmmfs_node *parent,
 	serialroot->node.parent = parent;
 	serialroot->node.mount = parent->mount;
 	serialroot->node.references = 1;
-	lwkt_token_init(&serialroot->node.token, "vmmfsnode");
+	lwkt_token_init(&serialroot->token, "vmmfsnode");
 	lockinit(&serialroot->node.lock, "vmmfsnode", 0, 0);
 	serialroot->node.drop = vmmfs_serialroot_drop;
 	vmmfs_node_hold(parent);
@@ -139,6 +139,7 @@ vmmfs_serialroot_drop(struct vmmfs_node *node)
 	KKASSERT(RB_EMPTY(&serialroot->registry->ports));
 	kfree(serialroot->registry, M_VMMFS);
 	serialroot->registry = NULL;
+	lwkt_token_uninit(&serialroot->token);
 }
 
 static void
@@ -148,14 +149,14 @@ vmmfs_serialroot_release_entry(struct vmmfs_serialroot *root,
 	struct vmmfs_machine *machine = vmmfs_serialroot_machine(root);
 	struct vmmfs_serialport *port = entry->port;
 
-	lwkt_gettoken(&machine->node.token);
+	lwkt_gettoken(&machine->token);
 	port->entry = NULL;
 	if (port->topology_reference) {
 		KKASSERT(machine->runtime_references != 0);
 		port->topology_reference = false;
 		--machine->runtime_references;
 	}
-	lwkt_reltoken(&machine->node.token);
+	lwkt_reltoken(&machine->token);
 }
 
 static int
@@ -234,11 +235,11 @@ vmmfs_serialroot_port_count(struct vmmfs_serialroot *serialroot)
 
 	if (serialroot == NULL || serialroot->registry == NULL)
 		return (0);
-	lwkt_gettoken(&serialroot->node.token);
+	lwkt_gettoken(&serialroot->token);
 	count = 0;
 	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports)
 		++count;
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&serialroot->token);
 	return (count);
 }
 
@@ -251,7 +252,7 @@ vmmfs_serialroot_port_info(struct vmmfs_serialroot *serialroot,
 
 	if (serialroot == NULL || serialroot->registry == NULL || info == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&serialroot->node.token);
+	lwkt_gettoken(&serialroot->token);
 	current = 0;
 	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		if (current++ != index)
@@ -259,10 +260,10 @@ vmmfs_serialroot_port_info(struct vmmfs_serialroot *serialroot,
 		info->number = entry->port->number;
 		info->base = entry->port->base;
 		info->gsi = entry->port->gsi;
-		lwkt_reltoken(&serialroot->node.token);
+		lwkt_reltoken(&serialroot->token);
 		return (0);
 	}
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&serialroot->token);
 	return (ENOENT);
 }
 
@@ -284,19 +285,17 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 		return (EINVAL);
 	bcopy(input, name, length);
 	name[length] = 0;
-	lwkt_gettoken(&serialroot->node.token);
-	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || serialroot->node.dead) {
-		error = ENOENT;
-	} else if (machine->machine != NULL) {
+	lwkt_gettoken(&serialroot->token);
+	lwkt_gettoken(&machine->token);
+	if (machine->machine != NULL) {
 		error = EBUSY;
 	} else if (vmmfs_serialroot_find_locked(serialroot, name) != NULL) {
 		error = EEXIST;
 	} else {
 		error = 0;
 	}
-	lwkt_reltoken(&machine->node.token);
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&serialroot->token);
 	if (error != 0)
 		goto failed;
 
@@ -307,11 +306,9 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 		goto failed_entry;
 	port = vnode->v_data;
 
-	lwkt_gettoken(&serialroot->node.token);
-	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || serialroot->node.dead) {
-		error = ENOENT;
-	} else if (machine->machine != NULL) {
+	lwkt_gettoken(&serialroot->token);
+	lwkt_gettoken(&machine->token);
+	if (machine->machine != NULL) {
 		error = EBUSY;
 	} else if (vmmfs_serialroot_find_locked(serialroot, name) != NULL) {
 		error = EEXIST;
@@ -326,8 +323,8 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 			error = 0;
 		}
 	}
-	lwkt_reltoken(&machine->node.token);
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&serialroot->token);
 	if (error != 0)
 		goto failed_vnode;
 
@@ -394,16 +391,16 @@ vmmfs_serialroot_remove_port(struct vmmfs_serialroot *serialroot,
 	if (error != 0) {
 		return (error);
 	}
-	lwkt_gettoken(&serialroot->node.token);
+	lwkt_gettoken(&serialroot->token);
 	entry = vmmfs_serialroot_find_locked(serialroot, port->name);
 	if (entry == NULL || entry->port != port) {
-		lwkt_reltoken(&serialroot->node.token);
+		lwkt_reltoken(&serialroot->token);
 		return (ENOENT);
 	}
 	RB_REMOVE(vmmfs_serialport_tree, &serialroot->registry->ports, entry);
 	entry_vnode = entry->vnode;
 	vmmfs_serialroot_release_entry(serialroot, entry);
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&serialroot->token);
 	vrele(entry_vnode);
 	kfree(entry, M_VMMFS);
 	return (0);
@@ -448,15 +445,13 @@ vmmfs_serialroot_get_item(struct vmmfs_node *node, const char *name,
 		return (ENOENT);
 	bcopy(name, buffer, length);
 	buffer[length] = '\0';
-	lwkt_gettoken(&node->token);
-	if (!node->dead) {
-		entry = vmmfs_serialroot_find_locked(root, buffer);
-		if (entry != NULL) {
-			*vnodep = entry->vnode;
-			vhold(*vnodep);
-		}
+	lwkt_gettoken(&root->token);
+	entry = vmmfs_serialroot_find_locked(root, buffer);
+	if (entry != NULL) {
+		*vnodep = entry->vnode;
+		vhold(*vnodep);
 	}
-	lwkt_reltoken(&node->token);
+	lwkt_reltoken(&root->token);
 	return (*vnodep == NULL ? ENOENT : 0);
 }
 
@@ -564,16 +559,16 @@ vmmfs_serialroot_read_item(struct vmmfs_serialroot *serialroot,
 	struct vmmfs_serialroot_port *entry;
 	uint64_t current;
 
-	lwkt_gettoken(&serialroot->node.token);
+	lwkt_gettoken(&serialroot->token);
 	current = 0;
 	RB_FOREACH(entry, vmmfs_serialport_tree, &serialroot->registry->ports) {
 		if (current++ != index)
 			continue;
 		item->inode = entry->port->node.inode;
 		bcopy(entry->port->name, item->name, sizeof(item->name));
-		lwkt_reltoken(&serialroot->node.token);
+		lwkt_reltoken(&serialroot->token);
 		return (0);
 	}
-	lwkt_reltoken(&serialroot->node.token);
+	lwkt_reltoken(&serialroot->token);
 	return (ENOENT);
 }

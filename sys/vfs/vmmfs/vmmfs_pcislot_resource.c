@@ -94,6 +94,7 @@ struct vmmfs_pcislot_resource {
 
 struct vmmfs_pcislot_resources {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	vmm_machine_t machine;
 	u_int interrupt_users;
 	uint64_t descriptor_generation;
@@ -294,7 +295,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	resources->node.parent = &slot->node;
 	resources->node.mount = slot->node.mount;
 	resources->node.references = 1;
-	lwkt_token_init(&resources->node.token, "vmmfsnode");
+	lwkt_token_init(&resources->token, "vmmfsnode");
 	lockinit(&resources->node.lock, "vmmfsnode", 0, 0);
 	resources->node.drop = vmmfs_pcislot_resources_drop;
 	vmmfs_node_hold(&slot->node);
@@ -368,7 +369,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		resource->node.mount = resources->node.mount;
 		resource->node.dead = false;
 		resource->node.references = 1;
-		lwkt_token_init(&resource->node.token, "vmmfsnode");
 		lockinit(&resource->node.lock, "vmmfsnode", 0, 0);
 		resource->node.deactivate = vmmfs_pcislot_resource_deactivate;
 		resource->node.drop = vmmfs_pcislot_resource_drop;
@@ -409,25 +409,25 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 		return;
 	/* This private group has no vnode, but owns published resource nodes. */
 	(void)lockmgr(&resources->node.lock, LK_EXCLUSIVE);
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	if (resources->destroying) {
-		lwkt_reltoken(&resources->node.token);
+		lwkt_reltoken(&resources->token);
 		(void)lockmgr(&resources->node.lock, LK_RELEASE);
 		return;
 	}
 	resources->node.dead = true;
 	resources->destroying = true;
 	resources->powered = false;
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	(void)lockmgr(&resources->node.lock, LK_RELEASE);
 	vmmfs_pcislot_resources_unbind(resources);
 	for (index = 0; index < resources->initialized_count; ++index) {
 		resource = &resources->items[index];
-		lwkt_gettoken(&resources->node.token);
+		lwkt_gettoken(&resources->token);
 		vnode = resources->vnodes == NULL ? NULL : resources->vnodes[index];
 		if (resources->vnodes != NULL)
 			resources->vnodes[index] = NULL;
-		lwkt_reltoken(&resources->node.token);
+		lwkt_reltoken(&resources->token);
 		if (vnode != NULL) {
 			if (vmmfs_vnode_deactivate(vnode) != 0)
 				kprintf("vmmfs: vmmfs_vnode_deactivate failed\n");
@@ -449,9 +449,9 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 		    VMMFS_PCI_EVENT_POWER_OFF, "generation=%ju",
 		    (uintmax_t)resources->descriptor_generation);
 	}
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	resources->machine = NULL;
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	vmmfs_node_put(&resources->node);
 }
 
@@ -510,9 +510,9 @@ vmmfs_pcislot_resources_rebind(struct vmmfs_pcislot_resources *resources,
 			    machine);
 		return (error);
 	}
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	resources->machine = machine;
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	return (0);
 }
 
@@ -525,17 +525,17 @@ vmmfs_pcislot_resources_unbind(struct vmmfs_pcislot_resources *resources)
 
 	if (resources == NULL)
 		return;
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	machine = resources->machine;
 	resources->machine = NULL;
 	/* Close interrupt admission before draining operations that may fault. */
 	while (resources->interrupt_users != 0) {
 		tsleep_interlock(resources, 0);
-		lwkt_reltoken(&resources->node.token);
+		lwkt_reltoken(&resources->token);
 		(void)tsleep(resources, PINTERLOCKED, "vmmfspciirq", 0);
-		lwkt_gettoken(&resources->node.token);
+		lwkt_gettoken(&resources->token);
 	}
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	if (machine == NULL)
 		return;
 	for (index = 0; index < resources->count; ++index) {
@@ -561,7 +561,7 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 	if (resources == NULL || name == NULL || vnodep == NULL)
 		return (EINVAL);
 	*vnodep = NULL;
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	if (resources->destroying || resources->vnodes == NULL) {
 		error = ENOENT;
 		goto done;
@@ -581,7 +581,7 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 	}
 	error = ENOENT;
 done:
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	return (error);
 }
 
@@ -596,16 +596,16 @@ vmmfs_pcislot_resources_read_item(struct vmmfs_pcislot_resources *resources,
 	if (resources == NULL || inode == NULL || name == NULL ||
 	    name_length == NULL)
 		return (EINVAL);
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	if (resources->destroying || index >= resources->count) {
-		lwkt_reltoken(&resources->node.token);
+		lwkt_reltoken(&resources->token);
 		return (ENOENT);
 	}
 	resource = &resources->items[index];
 	*inode = resource->node.inode;
 	error = vmmfs_pcislot_resource_name(resource, name, capacity,
 	    name_length);
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	return (error);
 }
 
@@ -997,6 +997,7 @@ vmmfs_pcislot_resources_drop(struct vmmfs_node *node)
 	for (index = 0; index < resources->initialized_count; ++index)
 		KKASSERT(resources->items[index].node.drop == NULL);
 	kfree(resources->vnodes, M_VMMFS);
+	lwkt_token_uninit(&resources->token);
 	kfree(resources, M_VMMFS);
 }
 
@@ -1035,8 +1036,7 @@ vmmfs_pcislot_resource_mappable(const struct vmmfs_pcislot_resource *resource)
 static bool
 vmmfs_pcislot_resource_enabled(const struct vmmfs_pcislot_resource *resource)
 {
-	return resource != NULL && !resource->node.dead &&
-	    vmmfs_pcislot_resource_resources(resource) != NULL &&
+	return resource != NULL && vmmfs_pcislot_resource_resources(resource) != NULL &&
 	    vmmfs_pcislot_resource_resources(resource)->powered && !vmmfs_pcislot_resource_resources(resource)->destroying &&
 	    !resource->revoked;
 }
@@ -1800,7 +1800,7 @@ vmmfs_pcislot_resource_raise(struct vmmfs_pcislot_resource *resource,
 	resources = vmmfs_pcislot_resource_resources(resource);
 	vcpu = &vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(
 	    vmmfs_pcislot_resources_slot(resources)))->vcpu;
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	lwkt_gettoken(&vcpu->token);
 	machine = NULL;
 	if (!vmmfs_pcislot_resource_enabled(resource)) {
@@ -1813,7 +1813,7 @@ vmmfs_pcislot_resource_raise(struct vmmfs_pcislot_resource *resource,
 			++resources->interrupt_users;
 	}
 	lwkt_reltoken(&vcpu->token);
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	/* Reset discards completions while the old destination is unbound. */
 	if (error != 0 || machine == NULL)
 		return (error);
@@ -1836,12 +1836,12 @@ vmmfs_pcislot_resource_raise(struct vmmfs_pcislot_resource *resource,
 	    (vcpu->stop_requested || vcpu->reset_requested))
 		error = 0;
 	lwkt_reltoken(&vcpu->token);
-	lwkt_gettoken(&resources->node.token);
+	lwkt_gettoken(&resources->token);
 	if (error == ENOENT && resources->machine != machine)
 		error = 0;
 	KKASSERT(resources->interrupt_users != 0);
 	wake = --resources->interrupt_users == 0;
-	lwkt_reltoken(&resources->node.token);
+	lwkt_reltoken(&resources->token);
 	if (wake)
 		wakeup(resources);
 	return (error);

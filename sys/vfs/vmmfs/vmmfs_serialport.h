@@ -34,9 +34,9 @@ struct vmmfs_serialring {
 
 struct vmmfs_serialport {
 	struct vmmfs_node node;
-	/* Registry ownership; protected by the parent node token. */
+	/* Registry ownership; protected by the serialroot token. */
 	struct vmmfs_serialroot_port *entry;
-	/* Owned until registry detach; protected by the machine node token. */
+	/* Owned until registry detach; protected by the machine token. */
 	bool topology_reference;
 	char name[sizeof("com4")];
 	uint8_t number;

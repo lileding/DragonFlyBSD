@@ -115,7 +115,7 @@ struct vm_object { struct vm_page_rb_tree rb_memq; bool locked; int references; 
 struct token { bool held; };
 struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
 struct vmmfs_launch {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     struct vm_object *pager_object, *backing_object;
 };
 static struct vm_object pager, backing;
@@ -185,7 +185,7 @@ int main(void) {
         vmmfs_launch_revoke(&launch);
         assert(waits == in_flight && removals == 1);
         assert(!pager.locked && !backing.locked);
-        assert(!launch.node.token.held && pager.references == 0);
+        assert(!launch.token.held && pager.references == 0);
         /* Duplicate cleanup never touches the released pager. */
         vmmfs_launch_revoke(&launch);
         assert(removals == 1);

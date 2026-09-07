@@ -96,7 +96,6 @@ vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	state_node->node.mount = parent->mount;
 	state_node->node.dead = false;
 	state_node->node.references = 1;
-	lwkt_token_init(&state_node->node.token, "vmmfsnode");
 	lockinit(&state_node->node.lock, "vmmfsnode", 0, 0);
 	state_node->node.deactivate = vmmfs_pcislot_events_deactivate;
 	state_node->node.drop = vmmfs_pcislot_events_drop;
@@ -267,9 +266,9 @@ vmmfs_pcislot_events_authorize(struct vmmfs_pcislot_events *events)
 	struct vmmfs_pcislot *slot;
 	int error;
 	slot = vmmfs_pcislot_events_slot(events);
-	lwkt_gettoken(&slot->node.token);
+	lwkt_gettoken(&slot->token);
 	error = vmmfs_pcislot_auth_check(slot);
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&slot->token);
 	return (error == 0 ? 0 : EACCES);
 }
 

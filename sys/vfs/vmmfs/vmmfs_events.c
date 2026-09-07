@@ -89,7 +89,6 @@ vmmfs_events_init(struct vmmfs_node *parent,
 	events->node.mount = parent->mount;
 	events->node.dead = false;
 	events->node.references = 1;
-	lwkt_token_init(&events->node.token, "vmmfsnode");
 	lockinit(&events->node.lock, "vmmfsnode", 0, 0);
 	events->node.deactivate = vmmfs_events_deactivate;
 	events->node.drop = vmmfs_events_drop;
@@ -388,12 +387,13 @@ vmmfs_events_store(struct vmmfs_node *node, const char *buffer,
 	struct vmmfs_events *events;
 
 	events = (struct vmmfs_events *)node;
-	if (events == NULL || events->node.dead)
+	if (events == NULL)
 		return (ENOENT);
 	if (!((length == sizeof("reset") - 1 &&
 	    bcmp(buffer, "reset", length) == 0) ||
 	    (length == sizeof("reset\n") - 1 &&
 	    bcmp(buffer, "reset\n", length) == 0)))
 		return (EINVAL);
-	return (vmmfs_machine_reset(vmmfs_events_machine(events)));
+	return (VMMFS_WORK(vmmfs_events_machine(events),
+	    vmmfs_machine_reset(vmmfs_events_machine(events))));
 }

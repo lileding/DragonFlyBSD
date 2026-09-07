@@ -98,7 +98,7 @@ vmmfs_pcislot_descriptor_deactivate(struct vmmfs_node *node)
 	struct vmmfs_pcislot_auth *auth;
 	int error;
 
-	lwkt_gettoken(&slot->node.token);
+	lwkt_gettoken(&slot->token);
 	while (descriptor->updating) {
 		error = tsleep(descriptor, 0, "vmmdescdrain", 0);
 		if (error != 0)
@@ -107,7 +107,7 @@ vmmfs_pcislot_descriptor_deactivate(struct vmmfs_node *node)
 	auth = descriptor->auth;
 	descriptor->auth = NULL;
 	descriptor->committed = false;
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(auth);
 	return (0);
 }
@@ -131,30 +131,19 @@ int
 vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	struct vmmfs_pcislot_descriptor *descriptor, struct vnode **vnodep)
 {
-	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
-	struct vmmfs_pcislot *slot;
 	int error;
 
 	if (parent == NULL || descriptor == NULL || vnodep == NULL)
 		return (EINVAL);
-	slot = (struct vmmfs_pcislot *)parent;
-	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot));
 	root = parent->mount->root_vnode->v_data;
 	*vnodep = NULL;
 	bzero(descriptor, sizeof(*descriptor));
-	lwkt_gettoken(&machine->node.token);
-	if (machine->machine != NULL) {
-		lwkt_reltoken(&machine->node.token);
-		return (EBUSY);
-	}
-	lwkt_reltoken(&machine->node.token);
 	descriptor->node.inode = vmmfs_root_allocate_inode(root);
 	descriptor->node.parent = parent;
 	descriptor->node.mount = parent->mount;
 	descriptor->node.dead = false;
 	descriptor->node.references = 1;
-	lwkt_token_init(&descriptor->node.token, "vmmfsnode");
 	lockinit(&descriptor->node.lock, "vmmfsnode", 0, 0);
 	descriptor->node.deactivate = vmmfs_pcislot_descriptor_deactivate;
 	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
@@ -190,12 +179,12 @@ vmmfs_pcislot_descriptor_writable(struct vmmfs_pcislot_descriptor *descriptor)
 
 	machine = vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(
 	    vmmfs_pcislot_descriptor_slot(descriptor)));
-	lwkt_gettoken(&machine->node.token);
+	lwkt_gettoken(&machine->token);
 	if (machine->machine != NULL) {
-		lwkt_reltoken(&machine->node.token);
+		lwkt_reltoken(&machine->token);
 		return (EBUSY);
 	}
-	lwkt_reltoken(&machine->node.token);
+	lwkt_reltoken(&machine->token);
 	return (0);
 }
 
@@ -224,11 +213,11 @@ vmmfs_pcislot_descriptor_load(struct vmmfs_node *node, char *buffer,
 	slot = vmmfs_pcislot_descriptor_slot(descriptor);
 	if (capacity < VMMFS_PCISLOT_DESCRIPTOR_MAX)
 		return (EOVERFLOW);
-	lwkt_gettoken(&slot->node.token);
+	lwkt_gettoken(&slot->token);
 	*lengthp = descriptor->committed ? descriptor->value.length : 0;
 	if (*lengthp != 0)
 		bcopy(descriptor->value.text, buffer, *lengthp);
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&slot->token);
 	return (0);
 }
 
@@ -255,8 +244,6 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	slot = vmmfs_pcislot_descriptor_slot(descriptor);
 	pciroot = vmmfs_pcislot_pciroot(slot);
 	machine = vmmfs_pciroot_machine(pciroot);
-	if (descriptor->node.dead)
-		return (ENOENT);
 	buffer = NULL;
 	value = NULL;
 	new_auth = NULL;
@@ -271,19 +258,12 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 		if (error != 0)
 			goto failed;
 	}
-	lwkt_gettoken(&slot->node.token);
-	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || slot->node.dead ||
-	    descriptor->node.dead) {
-		lwkt_reltoken(&machine->node.token);
-		lwkt_reltoken(&slot->node.token);
-		error = ENOENT;
-		goto failed;
-	}
+	lwkt_gettoken(&slot->token);
+	lwkt_gettoken(&machine->token);
 	if (machine->machine != NULL || descriptor->updating ||
 	    descriptor->generation == UINT64_MAX) {
-		lwkt_reltoken(&machine->node.token);
-		lwkt_reltoken(&slot->node.token);
+		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&slot->token);
 		error = EBUSY;
 		goto failed;
 	}
@@ -292,8 +272,8 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	descriptor->updating = true;
 	updating = true;
 	generation = descriptor->generation + 1;
-	lwkt_reltoken(&machine->node.token);
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&slot->token);
 	if (!removing) {
 		error = vmmfs_pcislot_auth_create(slot, generation,
 		    &new_auth);
@@ -302,14 +282,12 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	}
 
 	/* Commit once; no fallible operation follows the ownership transfer. */
-	lwkt_gettoken(&slot->node.token);
-	lwkt_gettoken(&machine->node.token);
-	if (machine->node.dead || slot->node.dead ||
-	    descriptor->node.dead || machine->machine != NULL) {
-		error = (machine->node.dead || slot->node.dead ||
-		    descriptor->node.dead) ? ENOENT : EBUSY;
-		lwkt_reltoken(&machine->node.token);
-		lwkt_reltoken(&slot->node.token);
+	lwkt_gettoken(&slot->token);
+	lwkt_gettoken(&machine->token);
+	if (machine->machine != NULL) {
+		error = EBUSY;
+		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&slot->token);
 		goto failed;
 	}
 	old_auth = descriptor->auth;
@@ -325,8 +303,8 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	}
 	descriptor->generation = generation;
 	committed = !removing;
-	lwkt_reltoken(&machine->node.token);
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(old_auth);
 	vmmfs_pcislot_events_reset(&slot->events);
 	vmmfs_pcislot_config_descriptor_changed(&slot->config, generation,
@@ -348,13 +326,13 @@ failed:
 	vmmfs_pcislot_auth_revoke(new_auth);
 finished:
 	if (updating) {
-		lwkt_gettoken(&slot->node.token);
-		lwkt_gettoken(&machine->node.token);
+		lwkt_gettoken(&slot->token);
+		lwkt_gettoken(&machine->token);
 		descriptor->updating = false;
 		KKASSERT(machine->runtime_references != 0);
 		--machine->runtime_references;
-		lwkt_reltoken(&machine->node.token);
-		lwkt_reltoken(&slot->node.token);
+		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&slot->token);
 		wakeup(descriptor);
 		wakeup(machine);
 	}

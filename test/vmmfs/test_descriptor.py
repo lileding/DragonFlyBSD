@@ -77,10 +77,10 @@ struct vmmfs_pcislot_descriptor {
     struct vmmfs_node node; bool updating, committed; uint64_t generation;
     struct vmmfs_pcislot_descriptor_value value; struct vmmfs_pcislot_auth *auth;
 };
-struct vmmfs_machine { struct vmmfs_node node; void *machine; unsigned runtime_references; };
+struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine; unsigned runtime_references; };
 struct vmmfs_pciroot { int unused; };
 struct vmmfs_pcislot {
-    struct vmmfs_node node; struct vmmfs_pcislot_descriptor descriptor;
+    struct vmmfs_node node; struct token token; struct vmmfs_pcislot_descriptor descriptor;
     int events, config;
 };
 static struct vmmfs_machine machine;
@@ -121,7 +121,7 @@ static int vmmfs_pcislot_auth_create(struct vmmfs_pcislot *s,
     assert(s==&slot && generation==8 && slot.descriptor.updating);
     if (mode==1) boot_attempt();
     if (mode==5) return EMFILE;
-    if (mode==6) slot.node.dead=true;
+    if (mode==6) slot.node.dead=true; /* Parent close must drain admitted child work. */
     new_auth.valid=true; new_auth.references=1; *p=&new_auth; return 0;
 }
 static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth) {
@@ -168,8 +168,8 @@ int main(void) {
         slot.descriptor.generation=7; slot.descriptor.value.marker=1;
         allocations=revoked=boot_attempts=boot_rejected=notifications=0;
         int error=vmmfs_pcislot_descriptor_store(&slot.descriptor.node,"x",mode==7 ? 0 : 1);
-        if (mode>=4 && mode<=6) {
-            assert(error==(mode==4 ? EINVAL : mode==5 ? EMFILE : ENOENT));
+        if (mode==4 || mode==5) {
+            assert(error==(mode==4 ? EINVAL : EMFILE));
             assert(slot.descriptor.auth==&old_auth && old_auth.valid && old_auth.references==1);
             assert(slot.descriptor.generation==7 && slot.descriptor.value.marker==1);
             assert(revoked==0 && notifications==0 && !new_auth.valid);
@@ -182,7 +182,7 @@ int main(void) {
                 slot.descriptor.value.marker==2 && slot.descriptor.committed);
         }
         assert(allocations==0 && machine.runtime_references==(mode==8) && !slot.descriptor.updating);
-        assert(!slot.node.token.held && !machine.node.token.held);
+        assert(!slot.token.held && !machine.token.held);
     }
 }
 """)

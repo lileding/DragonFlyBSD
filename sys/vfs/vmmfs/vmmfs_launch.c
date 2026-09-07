@@ -90,7 +90,7 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	launch->node.parent = parent;
 	launch->node.mount = parent->mount;
 	launch->node.references = 1;
-	lwkt_token_init(&launch->node.token, "vmmfslaunch");
+	lwkt_token_init(&launch->token, "vmmfslaunch");
 	lockinit(&launch->node.lock, "vmmfsnode", 0, 0);
 	launch->node.deactivate = vmmfs_launch_deactivate;
 	launch->node.drop = vmmfs_launch_drop;
@@ -128,44 +128,28 @@ vmmfs_launch_drop(struct vmmfs_node *node)
 		launch->dev->si_drv1 = NULL;
 		destroy_only_dev(launch->dev);
 	}
+	lwkt_token_uninit(&launch->token);
 	kfree(launch, M_VMMFS);
 }
 
 int
 vmmfs_launch_map(struct vmmfs_launch *launch, struct vm_object *object)
 {
-	struct vm_object *pager;
-	int error;
-
 	vm_object_reference_quick(object);
-	lwkt_gettoken(&launch->node.token);
-	if (launch->node.dead || launch->backing_object != NULL) {
-		lwkt_reltoken(&launch->node.token);
-		vm_object_deallocate(object);
-		return (ECANCELED);
-	}
 	launch->backing_object = object;
-	pager = cdev_pager_allocate(launch, OBJT_MGTDEVICE,
+	launch->pager_object = cdev_pager_allocate(launch, OBJT_MGTDEVICE,
 	    &vmmfs_launch_pager_ops, launch->node.size,
 	    VM_PROT_READ | VM_PROT_WRITE, 0, proc0.p_ucred);
-	error = pager == NULL ? ENOMEM : 0;
-	if (launch->node.dead && pager != NULL) {
-		vm_object_deallocate(pager);
-		error = ECANCELED;
-	} else {
-		launch->pager_object = pager;
-	}
-	lwkt_reltoken(&launch->node.token);
-	return (error);
+	return (launch->pager_object == NULL ? ENOMEM : 0);
 }
 
 static int
 vmmfs_launch_attach(struct vmmfs_launch *launch, struct vnode *vnode,
 	struct ucred *cred, struct file *file)
 {
-	lwkt_gettoken(&launch->node.token);
+	lwkt_gettoken(&launch->token);
 	if (launch->pager_object == NULL) {
-		lwkt_reltoken(&launch->node.token);
+		lwkt_reltoken(&launch->token);
 		return (ECANCELED);
 	}
 	fsetcred(file, cred);
@@ -176,7 +160,7 @@ vmmfs_launch_attach(struct vmmfs_launch *launch, struct vnode *vnode,
 	vref(vnode);
 	atomic_add_int(&vnode->v_opencount, 1);
 	atomic_add_int(&vnode->v_writecount, 1);
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (0);
 }
 
@@ -204,7 +188,7 @@ vmmfs_launch_submit(struct vmmfs_launch *launch,
 {
 	int error;
 
-	lwkt_gettoken(&launch->node.token);
+	lwkt_gettoken(&launch->token);
 	if (launch->pager_object == NULL) {
 		error = EPIPE;
 	} else {
@@ -213,7 +197,7 @@ vmmfs_launch_submit(struct vmmfs_launch *launch,
 		vmmfs_launch_revoke(launch);
 		error = 0;
 	}
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (error);
 }
 
@@ -312,9 +296,9 @@ vmmfs_launch_deactivate(struct vmmfs_node *node)
 void
 vmmfs_launch_complete(struct vmmfs_launch *launch, int error)
 {
-	lwkt_gettoken(&launch->node.token);
+	lwkt_gettoken(&launch->token);
 	launch->result = error;
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	wakeup(launch);
 }
 
@@ -326,9 +310,9 @@ vmmfs_launch_wait(struct vmmfs_launch *launch)
 
 	for (;;) {
 		tsleep_interlock(launch, flags);
-		lwkt_gettoken(&launch->node.token);
+		lwkt_gettoken(&launch->token);
 		error = launch->result;
-		lwkt_reltoken(&launch->node.token);
+		lwkt_reltoken(&launch->token);
 		if (error != EINPROGRESS) {
 			crit_enter();
 			tsleep_remove(curthread);
@@ -375,10 +359,10 @@ vmmfs_launch_revoke(struct vmmfs_launch *launch)
 	struct vm_object *object;
 	bool retry;
 
-	lwkt_gettoken(&launch->node.token);
+	lwkt_gettoken(&launch->token);
 	object = launch->pager_object;
 	launch->pager_object = NULL;
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	if (object == NULL)
 		return;
 	/*
@@ -410,21 +394,21 @@ vmmfs_launch_get_mapping(struct vmmfs_launch *launch, vm_ooffset_t offset,
 	vm_size_t size, struct vm_object **objectp)
 {
 	struct vm_object *object;
-	lwkt_gettoken(&launch->node.token);
+	lwkt_gettoken(&launch->token);
 	object = launch->pager_object;
 	if (object == NULL)
 		goto closed;
 	if (offset < 0 || offset >= launch->node.size ||
 	    size > launch->node.size - offset) {
-		lwkt_reltoken(&launch->node.token);
+		lwkt_reltoken(&launch->token);
 		return (EINVAL);
 	}
 	vm_object_reference_quick(object);
 	*objectp = object;
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (0);
 closed:
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (EBADF);
 }
 
@@ -474,8 +458,8 @@ vmmfs_launch_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	if (launch == NULL || offset < 0 || offset >= launch->node.size ||
 	    (prot & VM_PROT_EXECUTE) != 0)
 		return (VM_PAGER_ERROR);
-	lwkt_gettoken(&launch->node.token);
-	if (launch->node.dead || launch->pager_object != object)
+	lwkt_gettoken(&launch->token);
+	if (launch->pager_object != object)
 		goto failed;
 	backing = launch->backing_object;
 	page = vm_page_grab(backing, OFF_TO_IDX(offset),
@@ -483,16 +467,16 @@ vmmfs_launch_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 	/* vm_page_grab may sleep and temporarily release the token. */
 	if (page == NULL)
 		goto failed;
-	if (launch->node.dead || launch->pager_object != object) {
+	if (launch->pager_object != object) {
 		vm_page_wakeup(page);
 		goto failed;
 	}
 	if (page->valid != VM_PAGE_BITS_ALL)
 		vm_page_zero_invalid(page, TRUE);
 	*page_result = page;
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (VM_PAGER_OK);
 failed:
-	lwkt_reltoken(&launch->node.token);
+	lwkt_reltoken(&launch->token);
 	return (VM_PAGER_ERROR);
 }

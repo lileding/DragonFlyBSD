@@ -94,13 +94,9 @@ vmmfs_vcpu_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 
 	if (vcpu == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
-	if (vcpu->node.dead) {
-		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->token);
 	count = vcpu->count;
-	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->token);
 	result = ksnprintf(buffer, capacity, "%u\n", count);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -135,18 +131,14 @@ vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 		value = value * 10 + digit;
 	}
 
-	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->node.token);
-	if (vcpu->node.dead) {
-		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_vcpu_machine(vcpu)->token);
 	if (vmmfs_vcpu_machine(vcpu)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+		lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->token);
 		return (EBUSY);
 	}
 	vcpu->count = (uint32_t)value;
 	vcpu->node.size = vmmfs_node_decimal_size(value);
-	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->node.token);
+	lwkt_reltoken(&vmmfs_vcpu_machine(vcpu)->token);
 	return (0);
 }
 
@@ -167,7 +159,6 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.mount = parent->mount;
 	vcpu->node.dead = false;
 	vcpu->node.references = 1;
-	lwkt_token_init(&vcpu->node.token, "vmmfsnode");
 	lockinit(&vcpu->node.lock, "vmmfsnode", 0, 0);
 	vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 	vcpu->node.drop = vmmfs_vcpu_drop;
@@ -195,12 +186,9 @@ vmmfs_vcpu_drop(struct vmmfs_node *node)
 
 	vcpu = (struct vmmfs_vcpu *)node;
 	KKASSERT(vcpu != NULL);
-	lwkt_gettoken(&vcpu->token);
 	if (vcpu->active_count != 0 || vcpu->threads != NULL) {
-		lwkt_reltoken(&vcpu->token);
 		panic("vmmfs_vcpu_drop: vCPU threads are still active");
 	}
-	lwkt_reltoken(&vcpu->token);
 	lwkt_token_uninit(&vcpu->token);
 	vcpu->node.inode = 0;
 

@@ -46,8 +46,6 @@ struct vmmfs_node {
 	struct vmmfs_mount *mount;
 	/* Shared work admission versus exclusive deactivation. */
 	struct lock lock;
-	/* Serializes control-state mutations, not in-flight work lifetimes. */
-	struct lwkt_token token;
 	u_int references;
 	ino_t inode;
 	mode_t mode;

@@ -175,7 +175,6 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     port->node.mount = parent->mount;
     port->node.dead = false;
     port->node.references = 1;
-    lwkt_token_init(&port->node.token, "vmmfsnode");
     lockinit(&port->node.lock, "vmmfsnode", 0, 0);
     port->node.drop = vmmfs_serialport_drop;
     vmmfs_node_hold(parent);
@@ -186,9 +185,6 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
         parent->mount->mount,
         &parent->mount->serialport_vops, port->dev, &port->node, vnodep);
     if (error != 0) {
-        lwkt_gettoken(&port->token);
-        port->destroying = true;
-        lwkt_reltoken(&port->token);
         vmmfs_node_put(&port->node);
         return error;
     }
@@ -209,7 +205,8 @@ static int
 vmmfs_serialport_deactivate(struct vmmfs_node *node)
 {
     struct vmmfs_serialport *port = (struct vmmfs_serialport *)node;
-    struct vmmfs_node *parent = node->parent;
+    struct vmmfs_serialroot *parent =
+	    (struct vmmfs_serialroot *)node->parent;
     struct vmmfs_machine *machine =
         vmmfs_serialroot_machine((struct vmmfs_serialroot *)parent);
     int error;
@@ -217,18 +214,18 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
     /* Veto must not sleep and expose a provisional dead gate. */
     if (!lwkt_trytoken(&parent->token))
         return (EBUSY);
-    if (port->entry != NULL && !parent->dead) {
-        if (!lwkt_trytoken(&machine->node.token)) {
+    if (port->entry != NULL) {
+        if (!lwkt_trytoken(&machine->token)) {
             lwkt_reltoken(&parent->token);
             return (EBUSY);
         }
-        error = machine->node.dead || machine->machine != NULL ? EBUSY : 0;
+        error = machine->machine != NULL ? EBUSY : 0;
         if (error == 0) {
             /* Keep boot excluded until the parent detaches the port. */
             port->topology_reference = true;
             ++machine->runtime_references;
         }
-        lwkt_reltoken(&machine->node.token);
+        lwkt_reltoken(&machine->token);
         lwkt_reltoken(&parent->token);
         if (error != 0)
             return (error);
@@ -268,7 +265,6 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     struct vmmfs_serialport *port = (struct vmmfs_serialport *)node;
     cdev_t dev = port->dev;
 
-    KKASSERT(port->destroying);
     KKASSERT(port->entry == NULL);
     KKASSERT(!port->topology_reference);
     KKASSERT(port->machine == NULL);

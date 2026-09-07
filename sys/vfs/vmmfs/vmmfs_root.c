@@ -41,6 +41,7 @@ RB_PROTOTYPE(vmmfs_machine_tree, vmmfs_root_machine, entry,
 
 struct vmmfs_root {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	u_int next_inode;
 	struct vmmfs_machine_tree machines;
 };
@@ -109,7 +110,7 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 	root->node.parent = NULL;
 	root->node.mount = state;
 	root->node.references = 1;
-	lwkt_token_init(&root->node.token, "vmmfsnode");
+	lwkt_token_init(&root->token, "vmmfsnode");
 	lockinit(&root->node.lock, "vmmfsnode", 0, 0);
 	root->node.drop = vmmfs_root_drop;
 	root->node.deactivate = vmmfs_root_deactivate;
@@ -176,6 +177,7 @@ vmmfs_root_drop(struct vmmfs_node *node)
 	root = (struct vmmfs_root *)node;
 	KKASSERT(root->node.references == 0);
 	KKASSERT(RB_EMPTY(&root->machines));
+	lwkt_token_uninit(&root->token);
 	kfree(root, M_VMMFS);
 	atomic_add_int(&vmmfs_root_count, -1);
 }
@@ -209,17 +211,13 @@ vmmfs_root_get_item(struct vmmfs_node *node, const char *name,
 		return (EINVAL);
 	*vnodep = NULL;
 	root = (struct vmmfs_root *)node;
-	lwkt_gettoken(&root->node.token);
-	if (node->dead) {
-		lwkt_reltoken(&root->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&root->token);
 	entry = vmmfs_root_find_locked(root, name, namelen);
 	if (entry != NULL) {
 		*vnodep = entry->vnode;
 		vhold(*vnodep);
 	}
-	lwkt_reltoken(&root->node.token);
+	lwkt_reltoken(&root->token);
 	return (*vnodep != NULL ? 0 : ENOENT);
 }
 
@@ -236,11 +234,7 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 		return (EINVAL);
 	root = (struct vmmfs_root *)node;
 	bzero(item, sizeof(*item));
-	lwkt_gettoken(&root->node.token);
-	if (node->dead) {
-		lwkt_reltoken(&root->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&root->token);
 	current = 0;
 	RB_FOREACH(entry, vmmfs_machine_tree, &root->machines) {
 		if (current++ != index)
@@ -251,10 +245,10 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 		item->inode = machine->node.inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
 		vhold(item->vnode);
-		lwkt_reltoken(&root->node.token);
+		lwkt_reltoken(&root->token);
 		return (0);
 	}
-	lwkt_reltoken(&root->node.token);
+	lwkt_reltoken(&root->token);
 	return (ENOENT);
 }
 
@@ -276,17 +270,15 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 		kfree(entry, M_VMMFS);
 		return (error);
 	}
-	lwkt_gettoken(&node->token);
-	if (node->dead)
-		error = ENOENT;
-	else if (vmmfs_root_find_locked(root, name, namelen) != NULL)
+	lwkt_gettoken(&root->token);
+	if (vmmfs_root_find_locked(root, name, namelen) != NULL)
 		error = EEXIST;
 	else {
 		entry->vnode = vnode;
 		RB_INSERT(vmmfs_machine_tree, &root->machines, entry);
 		vref(vnode); /* create_item caller, independent of registry. */
 	}
-	lwkt_reltoken(&node->token);
+	lwkt_reltoken(&root->token);
 	if (error != 0) {
 		cleanup_error = vmmfs_vnode_deactivate(vnode);
 		if (cleanup_error != 0)
@@ -309,13 +301,13 @@ vmmfs_root_remove_item(struct vmmfs_node *node, const char *name,
 
 	KKASSERT(node != NULL);
 	root = (struct vmmfs_root *)node;
-	lwkt_gettoken(&root->node.token);
+	lwkt_gettoken(&root->token);
 	entry = vmmfs_root_find_locked(root, name, namelen);
 	KKASSERT(entry != NULL);
 	RB_REMOVE(vmmfs_machine_tree, &root->machines, entry);
 	vnode = entry->vnode;
 	kfree(entry, M_VMMFS);
-	lwkt_reltoken(&root->node.token);
+	lwkt_reltoken(&root->token);
 	vrele(vnode);
 	return (0);
 }

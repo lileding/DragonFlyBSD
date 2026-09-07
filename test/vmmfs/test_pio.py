@@ -148,10 +148,10 @@ enum vmm_io_width {
 };
 struct token { unsigned held; };
 struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
-struct vmmfs_machine { struct vmmfs_node node; };
+struct vmmfs_machine { struct vmmfs_node node; struct token token; };
 struct vmmfs_pcislot { struct { bool powered; } type0; };
 struct vmmfs_pciroot {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     struct vmmfs_machine *machine;
     void *runtime_machine;
     uint32_t config_address;
@@ -165,24 +165,24 @@ static bool present = true;
 static unsigned reads, writes;
 #define vmmfs_pciroot_machine(r) ((r)->machine)
 static void lwkt_gettoken(struct token *token) {
-    assert(token == &root.node.token);
+    assert(token == &root.token);
     assert(token->held == 0);
     ++token->held;
 }
 static void lwkt_reltoken(struct token *token) {
-    assert(token == &root.node.token && token->held == 1);
+    assert(token == &root.token && token->held == 1);
     --token->held;
 }
 static struct vmmfs_pcislot *vmmfs_pciroot_find_locked(
     struct vmmfs_pciroot *r, uint16_t bdf) {
-    assert(r == &root && r->node.token.held);
+    assert(r == &root && r->token.held);
     assert(bdf == 8);
     return present ? &slot : NULL;
 }
 static int vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *r,
     vmm_vcpu_t cpu, uint16_t bdf, uint16_t offset,
     enum vmm_io_width width, uint32_t *value) {
-    assert(r == &root && r->node.token.held);
+    assert(r == &root && r->token.held);
     assert(cpu == &machine && bdf == 8 && offset == 0x40);
     (void)width;
     ++reads; *value = 0x12345678;
@@ -192,7 +192,7 @@ static int vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *s,
     vmm_vcpu_t cpu, uint16_t offset, enum vmm_io_width width,
     uint32_t value) {
     assert(s == &slot && cpu == &machine && offset == 0x40);
-    assert(root.node.token.held == 0 && machine.node.token.held == 0);
+    assert(root.token.held == 0 && machine.token.held == 0);
     assert(width == VMM_IO_WIDTH_32 && value == 0x12345678);
     ++writes;
     return 0;
@@ -225,7 +225,7 @@ int main(void) {
             assert(root.config_address == expected);
             assert(vmmfs_pciroot_config_address_read(&machine, &root, &r) == 0);
             assert(r.value == ((expected >> (offset*8)) & mask));
-            assert(root.node.token.held == 0);
+            assert(root.token.held == 0);
         }
     }
     for (unsigned ecam = 0; ecam != 2; ++ecam) {
@@ -240,7 +240,7 @@ int main(void) {
             vmmfs_pciroot_ecam_write : vmmfs_pciroot_config_data_write;
         assert(read(&machine, &root, &r) == 0 && r.value == 0x12345678);
         assert(write(&machine, &root, &w) == 0);
-        assert(root.node.token.held == 0);
+        assert(root.token.held == 0);
         unsigned before = writes;
         present = false;
         assert(write(&machine, &root, &w) == 0 && writes == before);
@@ -250,7 +250,7 @@ int main(void) {
         root.runtime_machine = NULL;
         assert(read(&machine, &root, &r) == 0 && r.value == UINT32_MAX);
         assert(write(&machine, &root, &w) == 0 && writes == before);
-        assert(root.node.token.held == 0);
+        assert(root.token.held == 0);
         root.runtime_machine = &machine;
     }
     assert(reads == 2 && writes == 2);
@@ -259,7 +259,7 @@ int main(void) {
     root.runtime_machine = NULL;
     assert(vmmfs_pciroot_config_address_read(&machine, &root, &r) == ENOENT);
     assert(vmmfs_pciroot_config_address_write(&machine, &root, &w) == ENOENT);
-    assert(root.node.token.held == 0 && machine.node.token.held == 0);
+    assert(root.token.held == 0 && machine.token.held == 0);
 }
 """
         run_c(source)

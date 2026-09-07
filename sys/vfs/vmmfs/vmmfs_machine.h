@@ -34,6 +34,7 @@ struct vmmfs_launch;
 
 struct vmmfs_machine {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	char name[NAME_MAX + 1];
 	uint32_t id;
 	struct vmmfs_machine_id id_node;

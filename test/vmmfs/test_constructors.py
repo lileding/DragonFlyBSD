@@ -31,16 +31,16 @@ struct vmmfs_mount { struct vnode *root_vnode; void *mount, *machine_vops, *pcis
 struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     char name[256];
     struct child id_node, vcpu, memory, loader, boot, pciroot, serialroot, events;
     struct child *stopped; struct component rtc, platform;
     struct vnode *id_vnode, *vcpu_vnode, *memory_vnode, *loader_vnode;
     struct vnode *boot_vnode, *stopped_vnode, *pciroot_vnode, *serialroot_vnode, *events_vnode;
 };
-struct vmmfs_pciroot { struct vmmfs_node node; };
+struct vmmfs_pciroot { struct vmmfs_node node; struct token token; };
 struct vmmfs_pcislot {
-    struct vmmfs_node node; unsigned bdf; void *entry, *resources;
+    struct vmmfs_node node; struct token token; unsigned bdf; void *entry, *resources;
     bool topology_reference;
     struct child descriptor, config, events;
     struct vnode *descriptor_vnode, *config_vnode, *events_vnode;
@@ -56,8 +56,6 @@ static void lwkt_token_init(struct token *t, const char *s) {
 static void lwkt_token_uninit(struct token *t) {
     assert(t->initialized && t->held == 0); t->initialized = false; --token_live;
 }
-static void lwkt_gettoken(struct token *t) { assert(t->initialized); ++t->held; }
-static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
 static void *kmalloc(size_t n, int tag, int flags) {
     (void)tag; (void)flags; ++objects; return calloc(1,n);
 }
@@ -76,7 +74,6 @@ static int child_init(struct vmmfs_node *p,
     struct child *c, struct vnode **vp) {
     assert(p->mount); *vp = NULL;
     c->node.parent = p; c->node.mount = p->mount; c->node.references = 1; c->node.drop = child_drop;
-    lwkt_token_init(&c->node.token, "child");
     vmmfs_node_hold(p); ++child_live;
     /* A failed init must return its own parent reference before returning. */
     if (fail()) { vmmfs_node_put(&c->node); return ENFILE; }
@@ -199,7 +196,7 @@ struct cdev { void *si_drv1; };
 struct vnode { void *v_data; };
 struct vm_object { unsigned references; };
 struct vmmfs_launch {
-    struct vmmfs_node node; struct cdev *dev;
+    struct vmmfs_node node; struct token token; struct cdev *dev;
     struct vm_object *pager_object, *backing_object; int result;
 };
 struct vmmfs_mount { void *mount, *launch_vops; struct vnode *root_vnode; };

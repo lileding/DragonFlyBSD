@@ -9,8 +9,8 @@ class Closing(unittest.TestCase):
 struct token { unsigned held; };
 struct vmmfs_node { struct vmmfs_node *parent; struct token token; bool dead;  struct lock lock;};
 struct tty { struct token t_token; unsigned t_state, t_line; };
-struct vmmfs_serialroot { struct vmmfs_node node; };
-struct vmmfs_machine { struct vmmfs_node node; void *machine;
+struct vmmfs_serialroot { struct vmmfs_node node; struct token token; };
+struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine;
     unsigned runtime_references; };
 struct vmmfs_serialport { struct vmmfs_node node; struct token token;
     void *entry; bool topology_reference, destroying; unsigned control_count;
@@ -63,15 +63,12 @@ int main(void) {
     machine.machine = &machine;
     assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
     machine.machine = NULL;
-    machine.node.dead = true;
+    contended = &root.token;
     assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
-    machine.node.dead = false;
-    contended = &root.node.token;
-    assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
-    contended = &machine.node.token;
+    contended = &machine.token;
     assert(vmmfs_serialport_deactivate(&port.node) == EBUSY);
     assert(!blocks && !revoked && !retired && !machine.runtime_references);
-    assert(root.node.token.held == 0 && machine.node.token.held == 0);
+    assert(root.token.held == 0 && machine.token.held == 0);
     contended = NULL;
     port.control_count = 1; port.tty.t_state = TS_ISOPEN;
     assert(vmmfs_serialport_deactivate(&port.node) == 0);
@@ -80,6 +77,7 @@ int main(void) {
     /* Parent closure obeys the parent's admission decision, with no veto. */
     machine.runtime_references = 0; port.topology_reference = false;
     root.node.dead = true; machine.node.dead = true;
+    port.entry = NULL; /* Parent detached the registry entry first. */
     assert(vmmfs_serialport_deactivate(&port.node) == 0);
     assert(!machine.runtime_references && revoked == 2 && retired == 2);
     assert(port.node.token.held == 1 && !port.token.held && !port.tty.t_token.held);
@@ -119,7 +117,7 @@ int main(void) {
         run_c(COMMON + r"""
 struct token { unsigned held; };
 struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
-struct vmmfs_pcislot { struct vmmfs_node node; };
+struct vmmfs_pcislot { struct vmmfs_node node; struct token token; };
 struct vmmfs_pcislot_auth { int unused; };
 struct vmmfs_pcislot_descriptor { struct vmmfs_node node;
     bool updating, committed; struct vmmfs_pcislot_auth *auth; };
@@ -135,7 +133,7 @@ static struct vmmfs_pcislot *vmmfs_pcislot_descriptor_slot(
 int tsleep(void *channel, int flags, const char *name, int timeout) {
     assert(channel == &descriptor && flags == 0 && timeout == 0);
     assert(descriptor.node.dead && descriptor.node.token.held == 1);
-    assert(slot.node.token.held == 1);
+    assert(slot.token.held == 1);
     (void)name; ++waited; descriptor.updating = false;
     return 0;
 }
@@ -150,32 +148,32 @@ int main(void) {
     descriptor.auth = &auth; descriptor.committed = descriptor.updating = true;
     assert(vmmfs_pcislot_descriptor_deactivate(&descriptor.node) == 0);
     assert(waited == 1 && revoked == 1 && descriptor.node.dead);
-    assert(descriptor.node.token.held == 1 && slot.node.token.held == 0);
+    assert(descriptor.node.token.held == 1 && slot.token.held == 0);
 }
 """)
 
     def test_launch_cleanup_error_does_not_veto(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
-struct vmmfs_launch { struct vmmfs_node node; };
+struct vmmfs_node { bool dead;  struct lock lock;};
+struct vmmfs_launch { struct vmmfs_node node; struct token token; };
 static int result;
 static unsigned revoked;
 #define kprintf(...) ((void)0)
 static int vmmfs_machine_abort(struct vmmfs_launch *l) {
-    assert(l->node.dead && l->node.token.held == 1); return result;
+    assert(l->node.dead && l->token.held == 0); return result;
 }
 static void vmmfs_launch_revoke(struct vmmfs_launch *l) {
-    assert(l->node.dead && l->node.token.held == 1); ++revoked;
+    assert(l->node.dead && l->token.held == 0); ++revoked;
 }
 static int
 """ + function("vmmfs_launch.c", "vmmfs_launch_deactivate") + r"""
 int main(void) {
-    struct vmmfs_launch launch = { .node = { .token = {1}, .dead = true } };
+    struct vmmfs_launch launch = { .node = { .dead = true } };
     for (unsigned i = 0; i != 2; ++i) {
         result = i == 0 ? 0 : EIO;
         assert(vmmfs_launch_deactivate(&launch.node) == 0);
-        assert(launch.node.dead && launch.node.token.held == 1);
+        assert(launch.node.dead && launch.token.held == 0);
     }
     assert(revoked == 2);
 }

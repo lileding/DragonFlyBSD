@@ -32,7 +32,7 @@ struct vmmfs_pcislot_descriptor {
 };
 struct vmmfs_pcislot_resources { unsigned references; bool dead; };
 struct vmmfs_pcislot {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     struct vmmfs_pcislot_descriptor descriptor;
     struct vmmfs_pcislot_resources *resources;
     struct { unsigned state; } type0;
@@ -54,21 +54,21 @@ int tsleep(void *p, int flags, const char *name, int timeout) {
 #define bzero(p,n) memset((p),0,(n))
 static void vmmfs_pciroot_invalidate_slot(struct vmmfs_pcislot *root,
     struct vmmfs_pcislot *s) {
-    assert(root == &slot && s == &slot && !s->node.token.held);
+    assert(root == &slot && s == &slot && !s->token.held);
     ++notifications;
 }
 static void vmmfs_pcislot_config_power_off(int *c) {
-    assert(c == &slot.config && !slot.node.token.held);
+    assert(c == &slot.config && !slot.token.held);
     slot.config_powered = false;
 }
 static void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *r) {
     if (r == NULL) return;
-    assert(r == &resources && slot.resources == NULL && !slot.node.token.held);
+    assert(r == &resources && slot.resources == NULL && !slot.token.held);
     assert(!slot.config_powered && slot.type0.state == 0);
     r->dead = true; assert(r->references == 2); --r->references; ++revoked;
 }
 static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth) {
-    assert(!slot.node.token.held && slot.descriptor.node.token.held == 1);
+    assert(!slot.token.held && slot.descriptor.node.token.held == 1);
     if (auth != NULL) { assert(auth->references == 1); --auth->references; ++auth_revoked; }
 }
 void

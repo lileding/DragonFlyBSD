@@ -112,11 +112,20 @@ int
 vmmfs_node_inactive(struct vop_inactive_args *ap)
 {
 	struct vmmfs_node *node;
+	bool recycle;
+	int error;
 
 	if (ap == NULL)
 		return (0);
 	node = ap->a_vp->v_data;
-	if (node != NULL && node->dead && node->drop != NULL)
+	if (node == NULL)
+		return (0);
+	error = lockmgr(&node->lock, LK_SHARED);
+	if (error != 0)
+		return (error);
+	recycle = node->dead && node->drop != NULL;
+	lockmgr(&node->lock, LK_RELEASE);
+	if (recycle)
 		(void)vrecycle(ap->a_vp);
 	return (0);
 }
@@ -247,7 +256,6 @@ vmmfs_node_put(struct vmmfs_node *node)
 	KKASSERT(drop != NULL);
 	node->drop = NULL;
 	lockuninit(&node->lock);
-	lwkt_token_uninit(&node->token);
 	drop(node);
 	if (parent != NULL)
 		vmmfs_node_put(parent);
@@ -353,10 +361,8 @@ vmmfs_vnode_discard(struct vnode *vnode)
 	vx_get(vnode);
 	node = vnode->v_data;
 	(void)lockmgr(&node->lock, LK_EXCLUSIVE);
-	lwkt_gettoken(&node->token);
 	node->vnode = NULL;
 	vnode->v_data = NULL;
-	lwkt_reltoken(&node->token);
 	(void)lockmgr(&node->lock, LK_RELEASE);
 	vnode->v_type = VBAD;
 	vx_put(vnode);
@@ -378,25 +384,20 @@ vmmfs_vnode_deactivate(struct vnode *vnode)
 		vrele(vnode);
 		return (error);
 	}
-	lwkt_gettoken(&node->token);
 	if (node->dead) {
-		lwkt_reltoken(&node->token);
 		(void)lockmgr(&node->lock, LK_RELEASE);
 		vrele(vnode);
 		/* A closed gate does not prove that the first callback completed. */
 		return (EBUSY);
 	}
 	node->dead = true;
-	lwkt_reltoken(&node->token);
 	(void)lockmgr(&node->lock, LK_RELEASE);
 
 	error = node->deactivate != NULL ? node->deactivate(node) : 0;
 	if (error != 0) {
 		/* Reopening cannot overlap a shared work invocation. */
 		(void)lockmgr(&node->lock, LK_EXCLUSIVE);
-		lwkt_gettoken(&node->token);
 		node->dead = false;
-		lwkt_reltoken(&node->token);
 		(void)lockmgr(&node->lock, LK_RELEASE);
 	} else {
 		(void)fdrevoke(vnode, DTYPE_VNODE, proc0.p_ucred);
@@ -418,10 +419,8 @@ vmmfs_node_reclaim(struct vop_reclaim_args *ap)
 	node = vnode->v_data;
 	if (node != NULL) {
 		(void)lockmgr(&node->lock, LK_EXCLUSIVE);
-		lwkt_gettoken(&node->token);
 		node->vnode = NULL;
 		vnode->v_data = NULL;
-		lwkt_reltoken(&node->token);
 		(void)lockmgr(&node->lock, LK_RELEASE);
 		vmmfs_node_put(node);
 	}

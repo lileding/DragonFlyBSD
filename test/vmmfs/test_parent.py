@@ -12,7 +12,7 @@ struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
 struct vnode { unsigned refs; };
 struct ENTRY { struct vnode *vnode; };
 struct registry { struct ENTRY *MEMBER; };
-struct ROOT_TYPE { struct vmmfs_node node; struct registry *registry; };
+struct ROOT_TYPE { struct vmmfs_node node; struct token token; struct registry *registry; };
 static struct ROOT_TYPE root;
 static struct registry registry;
 static struct vnode vnode;
@@ -26,10 +26,10 @@ static unsigned mode, release_count;
 static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
 static void kfree(void *p, int tag) { (void)tag; assert(p); free(p); }
 static void RELEASE(struct ROOT_TYPE *r, struct ENTRY *e) {
-    assert(r->node.token.held); assert(e->vnode == &vnode); ++release_count;
+    assert(r->node.dead); assert(e->vnode == &vnode); ++release_count;
 }
 static int vmmfs_vnode_deactivate(struct vnode *v) {
-    assert(root.node.token.held == 1);
+    assert(root.node.dead && root.token.held == 0);
     assert(v == &vnode && v->refs == 1 && registry.MEMBER == NULL);
     /* A previously admitted remover may already be closing this child. */
     return mode == 1 ? EBUSY : 0;
@@ -38,13 +38,13 @@ static int
 FUNCTION
 int main(void) {
     root.registry = &registry;
-    root.node.token.held = 1;
+    root.node.dead = true;
     for (mode = 0; mode != 2; ++mode) {
         registry.MEMBER = malloc(sizeof(*registry.MEMBER));
         registry.MEMBER->vnode = &vnode;
         vnode.refs = 1; release_count = 0;
         int error = DEACTIVATE(&root.node);
-        assert(root.node.token.held == 1);
+        assert(root.token.held == 0);
         assert(error == 0 && registry.MEMBER == NULL && vnode.refs == 0);
         assert(release_count == 1);
     }
@@ -73,7 +73,7 @@ struct token { unsigned held, acquired; };
 struct vmmfs_node { struct token token; bool dead; struct vnode *vnode;  struct lock lock;};
 struct vnode { unsigned refs, index; };
 struct vmmfs_machine {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     void *machine;
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
@@ -90,15 +90,15 @@ static int child_error;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
 static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(machine.node.dead);
-    assert(machine.node.token.acquired == 0);
+    assert(machine.token.acquired == 0);
     assert(v != NULL && v->refs != 0);
-    assert(machine.node.token.held == 1);
+    assert(machine.token.held == 1);
     assert(v->index == called++);
     return v->index == veto_index ? child_error : 0;
 }
 static void vrele(struct vnode *v) {
     assert(v != NULL && v->refs != 0);
-    assert(machine.node.token.held == 1);
+    assert(machine.token.held == 1);
     if (--v->refs == 0)
         ++dropped;
 }
@@ -115,7 +115,7 @@ int main(void) {
     for (trial = 0; trial < NELEM(errors); ++trial) {
         for (veto_index = 0; veto_index < NELEM(children); ++veto_index) {
             memset(&machine, 0, sizeof(machine));
-            machine.node.token.held = 1;
+            machine.token.held = 1;
             machine.node.dead = true; /* Set by the generic caller. */
             machine.node.vnode = &parent;
             called = dropped = 0;
@@ -128,16 +128,16 @@ int main(void) {
             machine.machine = &machine;
             assert(vmmfs_machine_deactivate(&machine.node) == EBUSY);
             assert(called == 0 && dropped == 0 && machine.node.vnode == &parent);
-            assert(machine.node.token.held == 1);
-            assert(machine.node.dead && machine.node.token.acquired == 0);
+            assert(machine.token.held == 1);
+            assert(machine.node.dead && machine.token.acquired == 0);
             machine.machine = NULL;
             assert(vmmfs_machine_deactivate(&machine.node) == 0);
-            assert(machine.node.dead && machine.node.token.acquired == 0);
+            assert(machine.node.dead && machine.token.acquired == 0);
             /* Deactivation does not detach the vnode backlink. */
             assert(called == 9 && dropped == 9 && machine.node.vnode == &parent);
             for (index = 0; index < NELEM(children); ++index)
                 assert(children[index].refs == 0);
-            assert(machine.node.token.held == 1);
+            assert(machine.token.held == 1);
         }
     }
     return 0;
@@ -154,7 +154,7 @@ struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_vcpu { struct vmmfs_node node; };
 struct vmmfs_events { struct vmmfs_node node; };
 struct vmmfs_machine {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     void *machine;
     struct vnode *launch_vnode, *stopped_vnode, *vcpu_vnode, *events_vnode;
     bool runtime_releasing, runtime_released;
@@ -225,7 +225,7 @@ int main(void) {
     struct vmmfs_node *node = candidate.v_data;
     machine.stopped_vnode = NULL;
     vmmfs_vnode_discard(&candidate); vmmfs_node_put(node);
-    assert(!allocated && logs == 1 && !machine.node.token.held);
+    assert(!allocated && logs == 1 && !machine.token.held);
     return 0;
 }
 """)

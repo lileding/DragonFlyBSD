@@ -70,13 +70,9 @@ vmmfs_memory_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 
 	if (memory == NULL)
 		return (ENOENT);
-	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
-	if (memory->node.dead) {
-		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_memory_machine(memory)->token);
 	size = memory->size;
-	lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
+	lwkt_reltoken(&vmmfs_memory_machine(memory)->token);
 	result = ksnprintf(buffer, capacity, "%llu\n", (unsigned long long)size);
 	if (result < 0 || (size_t)result >= capacity)
 		return (EOVERFLOW);
@@ -109,19 +105,15 @@ vmmfs_memory_store(struct vmmfs_node *node, const char *buffer, size_t length)
 		value = value * 10 + digit;
 	}
 
-	lwkt_gettoken(&vmmfs_memory_machine(memory)->node.token);
-	if (memory->node.dead) {
-		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_memory_machine(memory)->token);
 	if (vmmfs_memory_machine(memory)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
+		lwkt_reltoken(&vmmfs_memory_machine(memory)->token);
 		return (EBUSY);
 	}
 	memory->size = value;
 	memory->node.size = vmmfs_node_decimal_size(value);
 	vmmfs_memory_machine(memory)->boot.node.size = (off_t)value;
-	lwkt_reltoken(&vmmfs_memory_machine(memory)->node.token);
+	lwkt_reltoken(&vmmfs_memory_machine(memory)->token);
 	return (0);
 }
 
@@ -141,7 +133,6 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.mount = parent->mount;
 	memory->node.dead = false;
 	memory->node.references = 1;
-	lwkt_token_init(&memory->node.token, "vmmfsnode");
 	lockinit(&memory->node.lock, "vmmfsnode", 0, 0);
 	memory->node.deactivate = vmmfs_memory_deactivate;
 	memory->node.drop = vmmfs_memory_drop;

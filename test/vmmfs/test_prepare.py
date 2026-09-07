@@ -255,7 +255,7 @@ struct vmmfs_node { struct token token; bool dead; struct vnode *vnode;  struct 
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_machine {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     struct {
         struct token token;
         void *threads;
@@ -273,31 +273,31 @@ static int replacement;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
 static void vrele(struct vnode *v) {
     assert(v == &cpu_vnode && v->refs);
-    assert(!machine.node.token.held && !machine.vcpu.token.held);
+    assert(!machine.token.held && !machine.vcpu.token.held);
     if (--v->refs == 0) machine.vcpu.token.live = false;
 }
 static void lwkt_gettoken(struct token *token) {
     assert(!token->held);
-    if (token == &machine.node.token)
+    if (token == &machine.token)
         assert(machine.vcpu.token.held || allocated == 0 ||
             (machine.machine == NULL && machine.stopped_vnode != NULL));
     else {
         assert(token == &machine.vcpu.token);
         assert(token->live);
-        assert(!machine.node.token.held);
+        assert(!machine.token.held);
     }
     token->held = true;
 }
 static void lwkt_reltoken(struct token *token) {
     assert(token->held);
     if (token == &machine.vcpu.token)
-        assert(!machine.node.token.held);
+        assert(!machine.token.held);
     token->held = false;
 }
 static int vmmfs_stopped_create(struct vmmfs_node *parent,
     struct vnode **out) {
     assert(parent == &machine.node);
-    assert(!machine.node.token.held && !machine.vcpu.token.held);
+    assert(!machine.token.held && !machine.vcpu.token.held);
     if (mode == 1) return ENOMEM;
     assert(allocated == 0); ++allocated;
     candidate_vnode.v_data = &candidate; *out = &candidate_vnode;
@@ -306,19 +306,16 @@ static int vmmfs_stopped_create(struct vmmfs_node *parent,
         machine.machine = &replacement; machine.runtime_released = false;
     }
     if (mode == 11 || mode == 12) {
-        /* A competing completion publishes STOPPED, then rmdir drops the
-         * vCPU child while this completion's candidate allocation sleeps.
-         * Mode 11 is a later child veto; mode 12 is full deactivation. */
+        /* A competing completion finishes, but shared protection excludes
+         * rmdir while candidate allocation is in progress. */
+        assert(machine.node.lock.held);
         machine.machine = NULL; machine.runtime_released = false;
-        machine.vcpu_vnode = NULL;
-        machine.node.dead = mode == 12;
-        vrele(&cpu_vnode);
     }
     return 0;
 }
 static void vmmfs_vnode_discard(struct vnode *vnode) {
     assert(vnode == &candidate_vnode && vnode->v_data == &candidate);
-    assert(!machine.node.token.held && !machine.vcpu.token.held);
+    assert(!machine.token.held && !machine.vcpu.token.held);
     vnode->v_data = NULL;
 }
 static void vmmfs_node_put(struct vmmfs_node *node) {
@@ -326,20 +323,21 @@ static void vmmfs_node_put(struct vmmfs_node *node) {
 }
 #define CINV_CHILDREN 1
 static void vhold(struct vnode *vnode) {
-    assert(vnode == &self_vnode && machine.node.token.held);
+    assert(vnode == &self_vnode && machine.token.held);
     assert(vnode->refs == 0);
     ++vnode->refs;
 }
 static void cache_inval_vp(struct vnode *vnode, int flags) {
     assert(vnode == &self_vnode && vnode->refs == 1);
     assert(flags == CINV_CHILDREN && machine.machine == NULL);
+    assert(!machine.node.lock.held);
     assert(machine.stopped_vnode != NULL);
-    assert(!machine.node.token.held && !machine.vcpu.token.held);
+    assert(!machine.token.held && !machine.vcpu.token.held);
     ++invalidated;
 }
 static void vdrop(struct vnode *vnode) {
     assert(vnode == &self_vnode && vnode->refs == 1);
-    assert(!machine.node.token.held);
+    assert(!machine.token.held);
     --vnode->refs;
 }
 static int
@@ -361,12 +359,12 @@ int main(void) {
         machine.vcpu.threads = mode == 5 || mode == 8 ? &machine : NULL;
         if (mode == 9) machine.stopped_vnode = &existing_vnode;
         int error = vmmfs_machine_create_stopped(&machine);
-        assert(!machine.node.token.held && !machine.vcpu.token.held);
-        assert(self_vnode.refs == 0);
-        assert(machine.node.dead == (mode == 2 || mode == 7 || mode == 8 || mode == 12));
-        assert(cpu_vnode.refs == (mode >= 11 ? 0 : 1));
-        assert(machine.vcpu.token.live == (mode < 11));
-        if ((mode >= 1 && mode <= 4) || mode >= 10) {
+        assert(!machine.token.held && !machine.vcpu.token.held);
+        assert(self_vnode.refs == 0 && !machine.node.lock.held);
+        assert(machine.node.dead == (mode == 2 || mode == 7 || mode == 8));
+        assert(cpu_vnode.refs == (mode == 13 ? 0 : 1));
+        assert(machine.vcpu.token.live == (mode != 13));
+        if ((mode >= 1 && mode <= 4) || mode == 10 || mode == 13) {
             assert(error == (mode == 1 ? ENOMEM : EBUSY));
             assert(invalidated == 0);
             assert(!machine.stopped_vnode && !allocated);
@@ -397,12 +395,12 @@ struct vmmfs_memory { struct vmmfs_node node; uint64_t size; void *object, *run_
 struct cpu { struct token token; void *threads; unsigned active_count, count; };
 typedef void *vmm_machine_t;
 struct vmmfs_machine {
-    struct vmmfs_node node; struct vmmfs_memory memory; struct cpu vcpu;
+    struct vmmfs_node node; struct token token; struct vmmfs_memory memory; struct cpu vcpu;
     vmm_machine_t machine; struct vnode *vcpu_vnode, *launch_vnode;
     bool runtime_releasing, runtime_released; unsigned runtime_references;
     int platform, pciroot, serialroot, rtc;
 };
-struct vmmfs_launch { struct vmmfs_node node; };
+struct vmmfs_launch { struct vmmfs_node node; struct token token; };
 static struct vmmfs_machine machine;
 static struct vmmfs_launch launch;
 static struct vnode cpu_vnode, launch_vnode;
@@ -465,12 +463,12 @@ int main(void) {
     for (mode = 0; mode != 3; ++mode) {
         for (fail_stage = 0; fail_stage <= 12; ++fail_stage) {
             memset(&machine, 0, sizeof(machine)); memset(&launch_vnode, 0, sizeof(launch_vnode));
-            machine.node.token.valid = machine.vcpu.token.valid = 1;
+            machine.token.valid = machine.vcpu.token.valid = 1;
             machine.memory.size = 4096; machine.vcpu.count = 1;
             cpu_vnode.refs = 1; machine.vcpu_vnode = &cpu_vnode;
             stage = 0; struct vnode *result = NULL;
             int error = vmmfs_machine_boot(&machine, &result);
-            assert(machine.node.token.held == 0 && machine.vcpu.token.held == 0);
+            assert(machine.token.held == 0 && machine.vcpu.token.held == 0);
             assert(machine.runtime_references == 0);
             if (error == 0) {
                 assert(mode == 0 && fail_stage == 0 && result == &launch_vnode);
@@ -498,7 +496,7 @@ struct vmmfs_loader { struct vmmfs_node node; };
 struct vmmfs_launch { int unused; };
 struct vnode { unsigned references; void *v_data; };
 struct vmmfs_machine {
-    struct vmmfs_node node;
+    struct vmmfs_node node; struct token token;
     struct vmmfs_loader loader;
     struct vnode *loader_vnode;
 };
@@ -534,7 +532,7 @@ static void remove_loader(void) {
     vrele(&loader_vnode);
 }
 static int vmmfs_machine_boot(struct vmmfs_machine *m, struct vnode **result) {
-    assert(m == &machine && !m->node.token.held);
+    assert(m == &machine && !m->token.held);
     *result = NULL;
     if (mode == 1) {
         /* Cancellation and rmdir after boot's admission, before handoff. */
@@ -548,10 +546,11 @@ static int vmmfs_loader_run(struct vmmfs_loader *loader, struct vnode *vnode,
     struct ucred *cred) {
     (void)cred;
     assert(loader == &machine.loader && vnode == &launch_vnode);
-    if (mode == 3) remove_loader(); /* A sleeping allocation in loader_run. */
+    assert(loader->node.lock.held); /* Admission survives allocations in loader_run. */
     assert(loader->node.references != 0); /* Token must still be initialized. */
     ++runs;
-    return loader->node.dead ? EINVAL : mode == 4 ? ENOMEM : 0;
+    assert(!loader->node.dead);
+    return mode == 4 ? ENOMEM : 0;
 }
 static int vmmfs_launch_wait(struct vmmfs_launch *l) {
     assert(l == &launch); ++waits; return mode == 5 ? EINTR : 0;
@@ -571,13 +570,13 @@ int main(void) {
         aborts=runs=waits=0;
         if (mode == 6) remove_loader();
         int error = vmmfs_machine_start(&machine, NULL);
-        int expected = mode==1 || mode==3 ? EINVAL : mode==2 ? EBUSY :
+        int expected = mode==1 ? ENOENT : mode==2 ? EBUSY :
             mode==4 ? ENOMEM : mode==5 ? EINTR : mode==6 ? ENOENT : 0;
         assert(error==expected);
-        assert(aborts==(mode==1 || mode==3 || mode==4));
-        assert(waits==(mode==0 || mode==5));
-        assert(runs==(mode!=2 && mode!=6));
-        assert(!machine.node.token.held && !launch_vnode.references);
+        assert(aborts==(mode==1 || mode==4));
+        assert(waits==(mode==0 || mode==3 || mode==5));
+        assert(runs==(mode!=1 && mode!=2 && mode!=6));
+        assert(!machine.token.held && !launch_vnode.references);
         if (machine.loader_vnode != NULL) {
             assert(loader_vnode.references==1); remove_loader();
         }

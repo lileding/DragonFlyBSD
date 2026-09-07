@@ -75,7 +75,6 @@ vmmfs_stopped_create(struct vmmfs_node *parent,
 	stopped->node.mount = parent->mount;
 	stopped->node.dead = false;
 	stopped->node.references = 1;
-	lwkt_token_init(&stopped->node.token, "vmmfsnode");
 	lockinit(&stopped->node.lock, "vmmfsnode", 0, 0);
 	stopped->node.deactivate = vmmfs_stopped_deactivate;
 	stopped->node.drop = vmmfs_stopped_drop;

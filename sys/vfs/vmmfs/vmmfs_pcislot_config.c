@@ -131,7 +131,6 @@ vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	config->node.mount = parent->mount;
 	config->node.dead = false;
 	config->node.references = 1;
-	lwkt_token_init(&config->node.token, "vmmfsnode");
 	lockinit(&config->node.lock, "vmmfsnode", 0, 0);
 	config->node.deactivate = vmmfs_pcislot_config_deactivate;
 	config->node.drop = vmmfs_pcislot_config_drop;
@@ -379,9 +378,9 @@ vmmfs_pcislot_config_claim(struct vmmfs_pcislot_config *config)
 	struct vmmfs_pcislot *slot;
 	int error;
 	slot = vmmfs_pcislot_config_slot(config);
-	lwkt_gettoken(&slot->node.token);
+	lwkt_gettoken(&slot->token);
 	error = vmmfs_pcislot_auth_check(slot);
-	lwkt_reltoken(&slot->node.token);
+	lwkt_reltoken(&slot->token);
 	lwkt_gettoken(&config->token);
 	if (error != 0)
 		error = EACCES;
@@ -670,11 +669,9 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 		return (error);
 	bzero(response, sizeof(*response));
 	request = kmalloc(sizeof(*request), M_VMMFS, M_WAITOK | M_ZERO);
-	lwkt_gettoken(&config->node.token);
 	lwkt_gettoken(&config->token);
-	if (config->node.dead || config->closed || !config->powered || config->responder == NULL) {
+	if (config->closed || !config->powered || config->responder == NULL) {
 		lwkt_reltoken(&config->token);
-		lwkt_reltoken(&config->node.token);
 		response->status = VMMFS_PCI_CONFIG_UNSUPPORTED;
 		response->value = 0;
 		kfree(request, M_VMMFS);
@@ -682,7 +679,6 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	}
 	if (config->next_sequence == UINT64_MAX) {
 		lwkt_reltoken(&config->token);
-		lwkt_reltoken(&config->node.token);
 		response->status = VMMFS_PCI_CONFIG_FAILURE;
 		response->value = 0;
 		kfree(request, M_VMMFS);
@@ -700,7 +696,6 @@ vmmfs_pcislot_config_submit(struct vmmfs_pcislot_config *config,
 	notify = TAILQ_EMPTY(&config->requests);
 	TAILQ_INSERT_TAIL(&config->requests, request, entry);
 	lwkt_reltoken(&config->token);
-	lwkt_reltoken(&config->node.token);
 	if (notify)
 		vmmfs_pcislot_config_wake_next(config);
 

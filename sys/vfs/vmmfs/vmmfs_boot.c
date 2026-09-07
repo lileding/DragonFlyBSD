@@ -66,7 +66,6 @@ vmmfs_boot_init(struct vmmfs_node *parent,
 	boot->node.mount = parent->mount;
 	boot->node.dead = false;
 	boot->node.references = 1;
-	lwkt_token_init(&boot->node.token, "vmmfsnode");
 	lockinit(&boot->node.lock, "vmmfsnode", 0, 0);
 	boot->node.deactivate = vmmfs_boot_deactivate;
 	boot->node.drop = vmmfs_boot_drop;

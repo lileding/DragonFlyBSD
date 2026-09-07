@@ -14,6 +14,38 @@ def call_macro():
 
 
 class Work(unittest.TestCase):
+    def test_admitted_callbacks_do_not_repeat_dead_gate(self):
+        for owner, verbs in {
+            'root': ('get_item', 'read_item', 'create_item'),
+            'pciroot': ('get_item', 'read_item', 'create_item'),
+            'pcislot_descriptor': ('store',),
+            'machine': ('get_item',),
+            'pcislot': ('get_item', 'read_item'),
+            'serialroot': ('get_item', 'create_port'),
+            'vcpu': ('load', 'store'), 'memory': ('load', 'store'),
+            'launch': ('pager_fault',),
+            'pcislot_resource': ('enabled',),
+            'loader': ('load', 'store'), 'machine_id': ('load',),
+            'events': ('store',),
+        }.items():
+            for verb in verbs:
+                body = function('vmmfs_' + owner + '.c', 'vmmfs_' + owner + '_' + verb)
+                self.assertNotIn('dead', body, (owner, verb))
+        self.assertNotIn('dead', function('vmmfs_machine.c', 'vmmfs_machine_cleanup_partial'))
+
+    def test_data_tokens_belong_to_objects(self):
+        node = (SOURCE / "vmmfs_node.h").read_text()
+        self.assertNotIn("struct lwkt_token token;", node)
+        for name in ("root", "machine", "pciroot", "pcislot", "serialroot", "launch", "pcislot_resources"):
+            filename = {"root": "vmmfs_root.c", "pcislot_resources": "vmmfs_pcislot_resource.c"}.get(name, "vmmfs_" + name + ".h")
+            text = (SOURCE / filename).read_text()
+            fields = text.split("struct vmmfs_" + name + " {", 1)[1].split("};", 1)[0]
+            self.assertIn("struct lwkt_token token;", fields, name)
+        for path in SOURCE.glob("*.c"):
+            self.assertNotIn("->node.token", path.read_text(), path.name)
+        for name in ("vmmfs_vnode_deactivate", "vmmfs_node_reclaim", "vmmfs_node_put"):
+            self.assertNotIn("lwkt_", function("vmmfs_node.c", name))
+
     def test_single_evaluation_and_errors(self):
         run_c("#define VMMFS_TEST_CUSTOM_LOCK\n" + COMMON + r'''
 #define LK_SHARED 1
@@ -90,8 +122,6 @@ static int lockmgr(struct lock *lock, int operation) {
     exclusive = false;
     return pthread_rwlock_unlock(&lock->value);
 }
-static void lwkt_gettoken(struct token *t) { (void)t; }
-static void lwkt_reltoken(struct token *t) { (void)t; }
 static void vref(struct vnode *v) { atomic_fetch_add(&v->refs, 1); }
 static void vrele(struct vnode *v) { assert(atomic_fetch_sub(&v->refs, 1) > 1); }
 static int fdrevoke(struct vnode *v, int type, void *cred) {

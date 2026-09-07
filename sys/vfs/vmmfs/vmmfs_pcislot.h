@@ -9,6 +9,8 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
+#include <sys/thread.h>
+
 #include "vmmfs_node.h"
 #include "vmmfs_pciroot.h"
 #include "vmmfs_pcislot_descriptor.h"
@@ -37,10 +39,11 @@ struct vmmfs_pcislot_type0 {
 
 struct vmmfs_pcislot {
 	struct vmmfs_node node;
-	/* Registry ownership; protected by the parent node token. */
+	struct lwkt_token token;
+	/* Registry ownership; protected by the parent token. */
 	struct vmmfs_pciroot_slot *entry;
 	uint16_t bdf;
-	/* Owned until registry detach; protected by the machine node token. */
+	/* Owned until registry detach; protected by the machine token. */
 	bool topology_reference;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;

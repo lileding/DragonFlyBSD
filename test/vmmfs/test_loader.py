@@ -8,7 +8,8 @@ class Loader(unittest.TestCase):
     def test_inherited_files_closed_before_launch_install(self):
         run_c(COMMON + r"""
 struct vmmfs_node { unsigned references;  struct lock lock; bool dead;};
-struct vmmfs_launch { struct vmmfs_node node; };
+struct token { int unused; };
+struct vmmfs_launch { struct vmmfs_node node; struct token token; };
 struct file { unsigned references; };
 struct vmmfs_loader_process {
     char script[4096];

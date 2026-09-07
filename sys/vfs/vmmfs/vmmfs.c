@@ -261,9 +261,9 @@ vmmfs_unmount(struct mount *mount, int flags)
 		struct vmmfs_node *root = root_vnode->v_data;
 
 		/* Root has no children or private teardown to roll back. */
-		lwkt_gettoken(&root->token);
+		(void)lockmgr(&root->lock, LK_EXCLUSIVE);
 		root->dead = false;
-		lwkt_reltoken(&root->token);
+		(void)lockmgr(&root->lock, LK_RELEASE);
 		return (error);
 	}
 	state->root_vnode = NULL;

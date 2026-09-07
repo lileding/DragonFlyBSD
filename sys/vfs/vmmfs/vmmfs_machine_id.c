@@ -72,7 +72,6 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.mount = parent->mount;
 	identity->node.dead = false;
 	identity->node.references = 1;
-	lwkt_token_init(&identity->node.token, "vmmfsnode");
 	lockinit(&identity->node.lock, "vmmfsnode", 0, 0);
 	identity->node.deactivate = vmmfs_machine_id_deactivate;
 	identity->node.drop = vmmfs_machine_id_drop;
@@ -114,7 +113,7 @@ vmmfs_machine_id_load(struct vmmfs_node *node, char *buffer,
 	int error;
 
 	identity = (struct vmmfs_machine_id *)node;
-	if (identity == NULL || identity->node.dead)
+	if (identity == NULL)
 		return (ENOENT);
 	error = ksnprintf(buffer, capacity, "%06u\n",
 	    vmmfs_machine_id_machine(identity)->id);

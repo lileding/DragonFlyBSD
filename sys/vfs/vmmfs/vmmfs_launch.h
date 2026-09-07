@@ -6,6 +6,8 @@
 #ifndef VMMFS_LAUNCH_H
 #define VMMFS_LAUNCH_H
 
+#include <sys/thread.h>
+
 #include "vmmfs_node.h"
 #include <dev/virtual/vmm/vmm.h>
 
@@ -16,6 +18,7 @@ struct ucred;
 
 struct vmmfs_launch {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	struct cdev *dev;
 	struct vm_object *pager_object;
 	struct vm_object *backing_object;

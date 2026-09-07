@@ -6,6 +6,8 @@
 #ifndef VMMFS_SERIALROOT_H
 #define VMMFS_SERIALROOT_H
 
+#include <sys/thread.h>
+
 #include "vmmfs_node.h"
 
 #include <sys/types.h>
@@ -19,6 +21,7 @@ struct vnode;
 
 struct vmmfs_serialroot {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	struct vmmfs_serialroot_registry *registry;
 };
 

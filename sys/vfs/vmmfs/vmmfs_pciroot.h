@@ -6,6 +6,8 @@
 #ifndef VMMFS_PCIROOT_H
 #define VMMFS_PCIROOT_H
 
+#include <sys/thread.h>
+
 #include "vmmfs_node.h"
 
 #include <sys/types.h>
@@ -36,6 +38,7 @@ struct vmmfs_pciroot_registry;
 
 struct vmmfs_pciroot {
 	struct vmmfs_node node;
+	struct lwkt_token token;
 	struct vmmfs_pciroot_registry *registry;
 	vmm_machine_t runtime_machine;
 	uint64_t mmio_next;

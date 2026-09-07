@@ -73,19 +73,20 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vnode *vnode,
 	struct ucred *cred)
 {
 	struct vmmfs_loader_process *process;
+	struct vmmfs_machine *machine = (struct vmmfs_machine *)loader->node.parent;
 	struct proc *child;
 	struct lwp *lwp;
 	int error;
 
 	process = kmalloc(sizeof(*process), M_VMMFS, M_WAITOK | M_ZERO);
-	lwkt_gettoken(&loader->node.token);
-	if (loader->node.dead || loader->script[0] == '\0') {
-		lwkt_reltoken(&loader->node.token);
+	lwkt_gettoken(&machine->token);
+	if (loader->script[0] == '\0') {
+		lwkt_reltoken(&machine->token);
 		kfree(process, M_VMMFS);
 		return (EINVAL);
 	}
 	bcopy(loader->script, process->script, sizeof(process->script));
-	lwkt_reltoken(&loader->node.token);
+	lwkt_reltoken(&machine->token);
 	error = vmmfs_launch_open(vnode, cred, &process->file);
 	if (error != 0) {
 		kfree(process, M_VMMFS);
@@ -242,7 +243,7 @@ vmmfs_loader_load(struct vmmfs_node *node, char *buffer,
 	struct vmmfs_loader *loader = (struct vmmfs_loader *)node;
 	int result;
 
-	if (loader == NULL || loader->node.dead)
+	if (loader == NULL)
 		return (ENOENT);
 	result = ksnprintf(buffer, capacity, "%s\n", loader->script);
 	if (result < 0 || (size_t)result >= capacity)
@@ -263,19 +264,15 @@ vmmfs_loader_store(struct vmmfs_node *node, const char *buffer,
 		--length;
 	if (length == 0 || length >= sizeof(loader->script))
 		return (ENAMETOOLONG);
-	lwkt_gettoken(&vmmfs_loader_machine(loader)->node.token);
-	if (loader->node.dead) {
-		lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
-		return (ENOENT);
-	}
+	lwkt_gettoken(&vmmfs_loader_machine(loader)->token);
 	if (vmmfs_loader_machine(loader)->machine != NULL) {
-		lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
+		lwkt_reltoken(&vmmfs_loader_machine(loader)->token);
 		return (EBUSY);
 	}
 	bcopy(buffer, loader->script, length);
 	loader->script[length] = 0;
 	loader->node.size = (off_t)length + 1;
-	lwkt_reltoken(&vmmfs_loader_machine(loader)->node.token);
+	lwkt_reltoken(&vmmfs_loader_machine(loader)->token);
 	return (0);
 }
 
@@ -296,7 +293,6 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.mount = parent->mount;
 	loader->node.dead = false;
 	loader->node.references = 1;
-	lwkt_token_init(&loader->node.token, "vmmfsnode");
 	lockinit(&loader->node.lock, "vmmfsnode", 0, 0);
 	loader->node.deactivate = vmmfs_loader_deactivate;
 	loader->node.drop = vmmfs_loader_drop;
