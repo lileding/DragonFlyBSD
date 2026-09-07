@@ -77,15 +77,14 @@ struct vop_ops vmmfs_pcislot_events_vops = {
 
 int
 vmmfs_pcislot_events_init(struct vmmfs_node *parent,
-	struct vmmfs_pcislot_events *state_node, struct vnode **vnodep)
+	struct vmmfs_pcislot_events *state_node)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || state_node == NULL || vnodep == NULL)
+	if (parent == NULL || state_node == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(state_node, sizeof(*state_node));
 	lwkt_token_init(&state_node->token, "vmmfspcievents");
 	SLIST_INIT(&state_node->kq.ki_note);
@@ -103,8 +102,7 @@ vmmfs_pcislot_events_init(struct vmmfs_node *parent,
 	state_node->node.mode = VMMFS_PCISLOT_EVENTS_MODE;
 	state_node->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pcislot_events_vops, VREG, &state_node->node,
-	    vnodep);
+	    &parent->mount->pcislot_events_vops, VREG, &state_node->node);
 	if (error != 0)
 		vmmfs_node_put(&state_node->node);
 	return (error);

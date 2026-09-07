@@ -60,16 +60,16 @@ vmmfs_stopped_setattr(struct vop_setattr_args *ap)
 
 int
 vmmfs_stopped_create(struct vmmfs_node *parent,
-	struct vnode **vnodep)
+	struct vmmfs_stopped **objectp)
 {
 	struct vmmfs_root *root;
 	struct vmmfs_stopped *stopped;
 	int error;
 
-	if (parent == NULL || vnodep == NULL)
+	if (parent == NULL || objectp == NULL)
 		return (ENXIO);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
+	*objectp = NULL;
 	stopped = kmalloc(sizeof(*stopped), M_VMMFS, M_WAITOK | M_ZERO);
 	stopped->node.parent = parent;
 	stopped->node.mount = parent->mount;
@@ -87,11 +87,12 @@ vmmfs_stopped_create(struct vmmfs_node *parent,
 	stopped->node.mode = VMMFS_STOPPED_MODE;
 	stopped->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->stopped_vops, VREG, &stopped->node, vnodep);
+	    &parent->mount->stopped_vops, VREG, &stopped->node);
 	if (error != 0) {
 		vmmfs_node_put(&stopped->node);
 		return (error);
 	}
+	*objectp = stopped;
 	return (0);
 }
 

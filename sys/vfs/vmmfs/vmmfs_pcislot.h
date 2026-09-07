@@ -51,13 +51,10 @@ struct vmmfs_pcislot {
 	struct vmmfs_pcislot_type0 type0;
 	/* Current powered generation; protected by the slot token. */
 	struct vmmfs_pcislot_resources *resources;
-	struct vnode *descriptor_vnode;
-	struct vnode *config_vnode;
-	struct vnode *events_vnode;
 };
 
 int vmmfs_pcislot_create(struct vmmfs_node *,
-	uint16_t, struct vnode **);
+	uint16_t, struct vmmfs_pcislot **);
 int vmmfs_pcislot_power_on(struct vmmfs_pcislot *, vmm_machine_t);
 void vmmfs_pcislot_power_off(struct vmmfs_pcislot *);
 int vmmfs_pcislot_reset(struct vmmfs_pcislot *);

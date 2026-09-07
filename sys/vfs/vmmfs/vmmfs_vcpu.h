@@ -43,7 +43,7 @@ struct vmmfs_vcpu {
 };
 
 int vmmfs_vcpu_init(struct vmmfs_node *,
-	struct vmmfs_vcpu *, struct vnode **);
+	struct vmmfs_vcpu *);
 int vmmfs_vcpu_start(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);
 int vmmfs_vcpu_reset(struct vmmfs_vcpu *, vmm_machine_t,

@@ -9,10 +9,10 @@
 #include <sys/types.h>
 
 struct mount;
-struct vnode;
+struct vmmfs_node;
 struct vmmfs_root;
 
-int vmmfs_root_create(struct mount *, struct vnode **);
+int vmmfs_root_create(struct mount *, struct vmmfs_node **);
 ino_t vmmfs_root_allocate_inode(struct vmmfs_root *);
 /* VFS unregister must wait for the remaining descendant references. */
 int vmmfs_root_module_fini(void);

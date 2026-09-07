@@ -24,5 +24,5 @@ struct vmmfs_boot {
 };
 
 int vmmfs_boot_init(struct vmmfs_node *,
-	struct vmmfs_boot *, struct vnode **);
+	struct vmmfs_boot *);
 #endif /* VMMFS_BOOT_H */

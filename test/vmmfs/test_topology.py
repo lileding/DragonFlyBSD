@@ -51,11 +51,11 @@ int main(void) {
 #include <stdlib.h>
 struct token { unsigned held; };
 struct vnode { void *v_data; };
-struct vmmfs_node { struct vmmfs_node *parent; struct token token; bool dead;
+struct vmmfs_node { struct vnode *vnode; struct vmmfs_node *parent; struct token token; bool dead;
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);  struct lock lock;};
 struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine; unsigned runtime_references; };
 struct vmmfs_pcislot { struct vmmfs_node node; struct token token; unsigned bdf; bool topology_reference; void *entry;
-    struct vnode *descriptor_vnode, *config_vnode, *events_vnode; };
+    struct { struct vmmfs_node node; } descriptor, config, events; };
 struct vmmfs_pciroot_slot { struct vnode *vnode; struct vmmfs_pcislot *slot; };
 struct registry { struct vmmfs_pciroot_slot *slots; };
 struct vmmfs_pciroot { struct vmmfs_node node; struct token token; struct registry *registry; };
@@ -99,9 +99,9 @@ static int
 """ + function("vmmfs_pcislot.c", "vmmfs_pcislot_deactivate") + "\nstatic void\n" +
               function("vmmfs_pciroot.c", "vmmfs_pciroot_release_entry") + "\nstatic int\n" + function("vmmfs_pciroot.c", "vmmfs_pciroot_remove_item") + r"""
 int main(void) {
-    slot.node.parent = &root.node; slot.bdf = 8;
+    slot.node.parent = &root.node; slot.node.vnode = &vnode; slot.bdf = 8;
     slot.token.held = 1; slot.node.dead = true;
-    slot.descriptor_vnode = slot.config_vnode = slot.events_vnode = &child;
+    slot.descriptor.node.vnode = slot.config.node.vnode = slot.events.node.vnode = &child;
     root.registry = &registry;
     registered = true; slot.entry = &slot; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == EBUSY);
@@ -143,7 +143,7 @@ int main(void) {
     def test_serial_reservation_release(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
+struct vmmfs_node { struct vnode *vnode; struct token token;  struct lock lock; bool dead;};
 struct vmmfs_machine { struct vmmfs_node node; struct token token; unsigned runtime_references; };
 struct vmmfs_serialport { bool topology_reference; void *entry; };
 struct vmmfs_serialroot_port { struct vmmfs_serialport *port; };

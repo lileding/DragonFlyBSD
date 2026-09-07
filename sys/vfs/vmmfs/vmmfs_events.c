@@ -74,15 +74,14 @@ struct vop_ops vmmfs_events_vops = {
 
 int
 vmmfs_events_init(struct vmmfs_node *parent,
-	struct vmmfs_events *events, struct vnode **vnodep)
+	struct vmmfs_events *events)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || events == NULL || vnodep == NULL)
+	if (parent == NULL || events == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(events, sizeof(*events));
 	lwkt_token_init(&events->token, "vmmfsevents");
 	events->node.parent = parent;
@@ -104,7 +103,7 @@ vmmfs_events_init(struct vmmfs_node *parent,
 	events->node.mode = VMMFS_EVENTS_MODE;
 	events->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->events_vops, VREG, &events->node, vnodep);
+	    &parent->mount->events_vops, VREG, &events->node);
 	if (error == 0)
 		return (0);
 

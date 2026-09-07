@@ -119,15 +119,14 @@ vmmfs_memory_store(struct vmmfs_node *node, const char *buffer, size_t length)
 
 int
 vmmfs_memory_init(struct vmmfs_node *parent,
-	struct vmmfs_memory *memory, struct vnode **vnodep)
+	struct vmmfs_memory *memory)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || memory == NULL || vnodep == NULL)
+	if (parent == NULL || memory == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(memory, sizeof(*memory));
 	memory->node.parent = parent;
 	memory->node.mount = parent->mount;
@@ -145,7 +144,7 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.mode = VMMFS_MEMORY_MODE;
 	memory->node.size = vmmfs_node_decimal_size(memory->size);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->memory_vops, VREG, &memory->node, vnodep);
+	    &parent->mount->memory_vops, VREG, &memory->node);
 	if (error == 0)
 		return (0);
 

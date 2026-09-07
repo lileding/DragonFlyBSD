@@ -77,7 +77,7 @@ static struct cdev_pager_ops vmmfs_launch_pager_ops = {
 
 int
 vmmfs_launch_create(struct vmmfs_node *parent,
-	uint64_t size, struct vnode **vnodep)
+	uint64_t size, struct vmmfs_launch **objectp)
 {
 	struct vmmfs_launch *launch;
 	u_int serial;
@@ -85,7 +85,7 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 
 	if (size == 0 || (off_t)size <= 0)
 		return (EINVAL);
-	*vnodep = NULL;
+	*objectp = NULL;
 	launch = kmalloc(sizeof(*launch), M_VMMFS, M_WAITOK | M_ZERO);
 	launch->node.parent = parent;
 	launch->node.mount = parent->mount;
@@ -96,7 +96,7 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	launch->node.drop = vmmfs_launch_drop;
 	launch->node.mode = 0600;
 	launch->node.size = size;
-	launch->node.inode = vmmfs_root_allocate_inode(parent->mount->root_vnode->v_data);
+	launch->node.inode = vmmfs_root_allocate_inode((struct vmmfs_root *)parent->mount->root);
 	launch->result = EINPROGRESS;
 	vmmfs_node_hold(parent);
 	serial = atomic_fetchadd_int(&vmmfs_launch_serial, 1);
@@ -108,9 +108,11 @@ vmmfs_launch_create(struct vmmfs_node *parent,
 	}
 	launch->dev->si_drv1 = launch;
 	error = vmmfs_vnode_create_cdev(parent->mount->mount,
-	    &parent->mount->launch_vops, launch->dev, &launch->node, vnodep);
-	if (error == 0)
+	    &parent->mount->launch_vops, launch->dev, &launch->node);
+	if (error == 0) {
+		*objectp = launch;
 		return (0);
+	}
 fail:
 	vmmfs_node_put(&launch->node);
 	return (error);
@@ -165,9 +167,9 @@ vmmfs_launch_attach(struct vmmfs_launch *launch, struct vnode *vnode,
 }
 
 int
-vmmfs_launch_open(struct vnode *vnode, struct ucred *cred, struct file **filep)
+vmmfs_launch_open(struct vmmfs_launch *launch, struct ucred *cred, struct file **filep)
 {
-	struct vmmfs_launch *launch = vnode->v_data;
+	struct vnode *vnode = launch->node.vnode;
 	struct file *file;
 	int error;
 

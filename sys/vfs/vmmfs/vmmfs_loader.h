@@ -19,8 +19,9 @@ struct vnode;
 struct ucred;
 
 int vmmfs_loader_init(struct vmmfs_node *,
-	struct vmmfs_loader *, struct vnode **);
-int vmmfs_loader_run(struct vmmfs_loader *, struct vnode *, struct ucred *);
+	struct vmmfs_loader *);
+struct vmmfs_launch;
+int vmmfs_loader_run(struct vmmfs_loader *, struct vmmfs_launch *, struct ucred *);
 
 struct vmmfs_loader {
 	struct vmmfs_node node;

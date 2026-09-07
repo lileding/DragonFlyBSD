@@ -144,15 +144,14 @@ vmmfs_vcpu_store(struct vmmfs_node *node, const char *buffer, size_t length)
 
 int
 vmmfs_vcpu_init(struct vmmfs_node *parent,
-	struct vmmfs_vcpu *vcpu, struct vnode **vnodep)
+	struct vmmfs_vcpu *vcpu)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || vcpu == NULL || vnodep == NULL)
+	if (parent == NULL || vcpu == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(vcpu, sizeof(*vcpu));
 	lwkt_token_init(&vcpu->token, "vmmfsvcpu");
 	vcpu->node.parent = parent;
@@ -171,7 +170,7 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.mode = VMMFS_VCPU_MODE;
 	vcpu->node.size = vmmfs_node_decimal_size(vcpu->count);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->vcpu_vops, VREG, &vcpu->node, vnodep);
+	    &parent->mount->vcpu_vops, VREG, &vcpu->node);
 	if (error == 0)
 		return (0);
 

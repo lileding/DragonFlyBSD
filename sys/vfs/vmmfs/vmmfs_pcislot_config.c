@@ -113,15 +113,14 @@ struct vop_ops vmmfs_pcislot_config_vops = {
 
 int
 vmmfs_pcislot_config_init(struct vmmfs_node *parent,
-	struct vmmfs_pcislot_config *config, struct vnode **vnodep)
+	struct vmmfs_pcislot_config *config)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || config == NULL || vnodep == NULL)
+	if (parent == NULL || config == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(config, sizeof(*config));
 	config->node.inode = vmmfs_root_allocate_inode(root);
 	lwkt_token_init(&config->token, "vmmfspcicfg");
@@ -138,7 +137,7 @@ vmmfs_pcislot_config_init(struct vmmfs_node *parent,
 	config->node.mode = VMMFS_PCISLOT_CONFIG_MODE;
 	config->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pcislot_config_vops, VREG, &config->node, vnodep);
+	    &parent->mount->pcislot_config_vops, VREG, &config->node);
 	if (error != 0)
 		vmmfs_node_put(&config->node);
 	return (error);

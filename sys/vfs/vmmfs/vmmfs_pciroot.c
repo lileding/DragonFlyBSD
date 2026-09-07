@@ -38,7 +38,6 @@
 struct vmmfs_pciroot_slot {
 	RB_ENTRY(vmmfs_pciroot_slot) entry;
 	struct vmmfs_pcislot *slot;
-	struct vnode *vnode;
 };
 
 RB_HEAD(vmmfs_pcislot_tree, vmmfs_pciroot_slot);
@@ -119,15 +118,14 @@ RB_GENERATE(vmmfs_pcislot_tree, vmmfs_pciroot_slot, entry,
 
 int
 vmmfs_pciroot_init(struct vmmfs_node *parent,
-	struct vmmfs_pciroot *pciroot, struct vnode **vnodep)
+	struct vmmfs_pciroot *pciroot)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || pciroot == NULL || vnodep == NULL)
+	if (parent == NULL || pciroot == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(pciroot, sizeof(*pciroot));
 	pciroot->registry = kmalloc(sizeof(*pciroot->registry), M_VMMFS,
 	    M_WAITOK | M_ZERO);
@@ -150,7 +148,7 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	pciroot->node.size = 0;
 	RB_INIT(&pciroot->registry->slots);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pciroot_vops, VDIR, &pciroot->node, vnodep);
+	    &parent->mount->pciroot_vops, VDIR, &pciroot->node);
 	if (error != 0)
 		vmmfs_node_put(&pciroot->node);
 	return (error);
@@ -203,7 +201,7 @@ vmmfs_pciroot_deactivate(struct vmmfs_node *node)
 		entry = RB_ROOT(&root->registry->slots);
 		if (entry == NULL)
 			return (0);
-		vnode = entry->vnode;
+		vnode = entry->slot->node.vnode;
 		/* Detach before cleanup can sleep; retain the registry vnode ref. */
 		RB_REMOVE(vmmfs_pcislot_tree, &root->registry->slots, entry);
 		vmmfs_pciroot_release_entry(root, entry);
@@ -229,7 +227,7 @@ vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *pciroot,
 		return;
 	lwkt_gettoken(&pciroot->token);
 	entry = vmmfs_pciroot_entry_find_locked(pciroot, slot->bdf);
-	vnode = entry == NULL || entry->slot != slot ? NULL : entry->vnode;
+	vnode = entry == NULL || entry->slot != slot ? NULL : entry->slot->node.vnode;
 	if (vnode != NULL)
 		vhold(vnode);
 	lwkt_reltoken(&pciroot->token);
@@ -644,7 +642,7 @@ vmmfs_pciroot_get_item(struct vmmfs_node *node, const char *name,
 	lwkt_gettoken(&pciroot->token);
 	entry = vmmfs_pciroot_entry_find_locked(pciroot, bdf);
 	if (entry != NULL) {
-		*vnodep = entry->vnode;
+		*vnodep = entry->slot->node.vnode;
 		vhold(*vnodep);
 	}
 	lwkt_reltoken(&pciroot->token);
@@ -668,7 +666,7 @@ vmmfs_pciroot_read_item(struct vmmfs_node *node, uint64_t index,
 	RB_FOREACH(entry, vmmfs_pcislot_tree, &pciroot->registry->slots) {
 		if (current++ != index)
 			continue;
-		item->vnode = entry->vnode;
+		item->vnode = entry->slot->node.vnode;
 		item->inode = entry->slot->node.inode;
 		vmmfs_pciroot_format_bdf(entry->slot->bdf, item->name,
 		    sizeof(item->name));
@@ -688,6 +686,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	struct vmmfs_machine *machine = vmmfs_pciroot_machine(root);
 	struct vmmfs_pciroot_slot *entry;
 	struct vnode *vnode;
+	struct vmmfs_pcislot *slot;
 	uint16_t bdf;
 	int error, cleanup_error;
 
@@ -696,11 +695,12 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	if (error != 0)
 		return (error);
 	entry = kmalloc(sizeof(*entry), M_VMMFS, M_WAITOK | M_ZERO);
-	error = vmmfs_pcislot_create(node, bdf, &vnode);
+	error = vmmfs_pcislot_create(node, bdf, &slot);
 	if (error != 0) {
 		kfree(entry, M_VMMFS);
 		return (error);
 	}
+	vnode = slot->node.vnode;
 	lwkt_gettoken(&root->token);
 	lwkt_gettoken(&machine->token);
 	if (machine->machine != NULL)
@@ -708,8 +708,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 	else if (vmmfs_pciroot_entry_find_locked(root, bdf) != NULL)
 		error = EEXIST;
 	else {
-		entry->slot = vnode->v_data;
-		entry->vnode = vnode;
+		entry->slot = slot;
 		RB_INSERT(vmmfs_pcislot_tree, &root->registry->slots, entry);
 		entry->slot->entry = entry;
 		vref(vnode); /* create_item caller, independent of registry. */
@@ -749,7 +748,7 @@ vmmfs_pciroot_remove_item(struct vmmfs_node *node, const char *name,
 		return (ENOENT);
 	}
 	RB_REMOVE(vmmfs_pcislot_tree, &pciroot->registry->slots, entry);
-	vnode = entry->vnode;
+	vnode = entry->slot->node.vnode;
 	vmmfs_pciroot_release_entry(pciroot, entry);
 	kfree(entry, M_VMMFS);
 	lwkt_reltoken(&pciroot->token);

@@ -32,7 +32,6 @@
 struct vmmfs_serialroot_port {
 	RB_ENTRY(vmmfs_serialroot_port) entry;
 	struct vmmfs_serialport *port;
-	struct vnode *vnode;
 };
 
 RB_HEAD(vmmfs_serialport_tree, vmmfs_serialroot_port);
@@ -92,16 +91,15 @@ RB_GENERATE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
 
 int
 vmmfs_serialroot_init(struct vmmfs_node *parent,
-	struct vmmfs_serialroot *serialroot, struct vnode **vnodep)
+	struct vmmfs_serialroot *serialroot)
 {
 	struct vmmfs_root *root;
 	struct vmmfs_serialroot_registry *registry;
 	int error;
 
-	if (parent == NULL || serialroot == NULL || vnodep == NULL)
+	if (parent == NULL || serialroot == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(serialroot, sizeof(*serialroot));
 	registry = kmalloc(sizeof(*registry), M_VMMFS, M_WAITOK | M_ZERO);
 	if (registry == NULL)
@@ -121,7 +119,7 @@ vmmfs_serialroot_init(struct vmmfs_node *parent,
 	serialroot->node.mode = VMMFS_SERIALROOT_MODE;
 	serialroot->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->serialroot_vops, VDIR, &serialroot->node, vnodep);
+	    &parent->mount->serialroot_vops, VDIR, &serialroot->node);
 	if (error != 0)
 		vmmfs_node_put(&serialroot->node);
 	return (error);
@@ -171,7 +169,7 @@ vmmfs_serialroot_deactivate(struct vmmfs_node *node)
 		entry = RB_ROOT(&root->registry->ports);
 		if (entry == NULL)
 			return (0);
-		vnode = entry->vnode;
+		vnode = entry->port->node.vnode;
 		/* Detach before cleanup can sleep; retain the registry vnode ref. */
 		RB_REMOVE(vmmfs_serialport_tree, &root->registry->ports, entry);
 		vmmfs_serialroot_release_entry(root, entry);
@@ -301,10 +299,10 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 
 	entry = kmalloc(sizeof(*entry), M_VMMFS, M_WAITOK | M_ZERO);
 	error = vmmfs_serialport_create(&serialroot->node, name,
-	    length, &vnode);
+	    length, &port);
 	if (error != 0)
 		goto failed_entry;
-	port = vnode->v_data;
+	vnode = port->node.vnode;
 
 	lwkt_gettoken(&serialroot->token);
 	lwkt_gettoken(&machine->token);
@@ -314,7 +312,6 @@ vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
 		error = EEXIST;
 	} else {
 		entry->port = port;
-		entry->vnode = vnode;
 		if (RB_INSERT(vmmfs_serialport_tree, &serialroot->registry->ports,
 		    entry) != NULL)
 			error = EEXIST;
@@ -398,7 +395,7 @@ vmmfs_serialroot_remove_port(struct vmmfs_serialroot *serialroot,
 		return (ENOENT);
 	}
 	RB_REMOVE(vmmfs_serialport_tree, &serialroot->registry->ports, entry);
-	entry_vnode = entry->vnode;
+	entry_vnode = entry->port->node.vnode;
 	vmmfs_serialroot_release_entry(serialroot, entry);
 	lwkt_reltoken(&serialroot->token);
 	vrele(entry_vnode);
@@ -448,7 +445,7 @@ vmmfs_serialroot_get_item(struct vmmfs_node *node, const char *name,
 	lwkt_gettoken(&root->token);
 	entry = vmmfs_serialroot_find_locked(root, buffer);
 	if (entry != NULL) {
-		*vnodep = entry->vnode;
+		*vnodep = entry->port->node.vnode;
 		vhold(*vnodep);
 	}
 	lwkt_reltoken(&root->token);

@@ -101,7 +101,6 @@ struct vmmfs_pcislot_resources {
 	bool powered;
 	bool destroying;
 	size_t count;
-	struct vnode **vnodes;
 	size_t initialized_count;
 	struct vmmfs_pcislot_resource items[];
 };
@@ -154,7 +153,7 @@ static bool vmmfs_pcislot_resource_enabled(
 static int vmmfs_pcislot_resource_create_mapping(
 	struct vmmfs_pcislot_resource *);
 static int vmmfs_pcislot_resource_create_vnode(
-	struct vmmfs_pcislot_resource *, struct vmmfs_mount *, struct vnode **);
+	struct vmmfs_pcislot_resource *, struct vmmfs_mount *);
 static void vmmfs_pcislot_resource_drain(struct vm_object *,
 	struct vmmfs_pcislot_objects *);
 static int vmmfs_pcislot_resource_track_page(struct vmmfs_pcislot_resource *,
@@ -303,8 +302,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	resources->descriptor_generation = generation;
 	resources->powered = true;
 	resources->count = count;
-	resources->vnodes = kmalloc(count * sizeof(resources->vnodes[0]),
-	    M_VMMFS, M_WAITOK | M_ZERO);
 	index = 0;
 	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
 		if (!value->bars[bar].present)
@@ -360,7 +357,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
 		resource->node.inode = vmmfs_root_allocate_inode(
-		    slot->node.mount->root_vnode->v_data);
+		    (struct vmmfs_root *)slot->node.mount->root);
 		lwkt_token_init(&resource->token, "vmmfspcires");
 		++resources->initialized_count;
 		SLIST_INIT(&resource->read_kq.ki_note);
@@ -382,8 +379,7 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 	}
 	for (index = 0; index < count; ++index) {
 		resource = &resources->items[index];
-		error = vmmfs_pcislot_resource_create_vnode(resource, slot->node.mount,
-		    &resources->vnodes[index]);
+		error = vmmfs_pcislot_resource_create_vnode(resource, slot->node.mount);
 		if (error != 0)
 			goto fail;
 	}
@@ -424,9 +420,7 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 	for (index = 0; index < resources->initialized_count; ++index) {
 		resource = &resources->items[index];
 		lwkt_gettoken(&resources->token);
-		vnode = resources->vnodes == NULL ? NULL : resources->vnodes[index];
-		if (resources->vnodes != NULL)
-			resources->vnodes[index] = NULL;
+		vnode = resource->node.vnode;
 		lwkt_reltoken(&resources->token);
 		if (vnode != NULL) {
 			if (vmmfs_vnode_deactivate(vnode) != 0)
@@ -562,7 +556,7 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 		return (EINVAL);
 	*vnodep = NULL;
 	lwkt_gettoken(&resources->token);
-	if (resources->destroying || resources->vnodes == NULL) {
+	if (resources->destroying) {
 		error = ENOENT;
 		goto done;
 	}
@@ -572,7 +566,7 @@ vmmfs_pcislot_resources_lookup(struct vmmfs_pcislot_resources *resources,
 			continue;
 		if (candidate_length == length &&
 		    bcmp(candidate, name, length) == 0) {
-			*vnodep = resources->vnodes[index];
+			*vnodep = resources->items[index].node.vnode;
 			error = *vnodep == NULL ? ENOENT : 0;
 			if (error == 0)
 				vhold(*vnodep);
@@ -996,7 +990,6 @@ vmmfs_pcislot_resources_drop(struct vmmfs_node *node)
 	KKASSERT(resources->machine == NULL);
 	for (index = 0; index < resources->initialized_count; ++index)
 		KKASSERT(resources->items[index].node.drop == NULL);
-	kfree(resources->vnodes, M_VMMFS);
 	lwkt_token_uninit(&resources->token);
 	kfree(resources, M_VMMFS);
 }
@@ -1087,15 +1080,14 @@ vmmfs_pcislot_resource_create_mapping(struct vmmfs_pcislot_resource *resource)
 
 static int
 vmmfs_pcislot_resource_create_vnode(struct vmmfs_pcislot_resource *resource,
-	struct vmmfs_mount *mount, struct vnode **vnodep)
+	struct vmmfs_mount *mount)
 {
 	if (vmmfs_pcislot_resource_mappable(resource)) {
 		return (vmmfs_vnode_create_cdev(mount->mount,
-		    &mount->pcislot_resource_vops, resource->dev, &resource->node,
-		    vnodep));
+		    &mount->pcislot_resource_vops, resource->dev, &resource->node));
 	}
 	return (vmmfs_vnode_create_regular(mount->mount,
-	    &mount->pcislot_resource_vops, VREG, &resource->node, vnodep));
+	    &mount->pcislot_resource_vops, VREG, &resource->node));
 }
 
 /*

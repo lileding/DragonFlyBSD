@@ -27,7 +27,7 @@ struct vmmfs_node {
  struct lock lock;};
 struct vnode { void *v_data; };
 struct vmmfs_root { int unused; };
-struct vmmfs_mount { struct vnode *root_vnode; void *mount, *machine_vops, *pcislot_vops; };
+struct vmmfs_mount { void *root; void *mount, *machine_vops, *pcislot_vops; };
 struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
@@ -71,7 +71,8 @@ static void child_drop(struct vmmfs_node *n) {
 }
 static bool fail(void) { return ++stage == fail_at; }
 static int child_init(struct vmmfs_node *p,
-    struct child *c, struct vnode **vp) {
+    struct child *c) {
+    struct vnode **vp = &c->node.vnode;
     assert(p->mount); *vp = NULL;
     c->node.parent = p; c->node.mount = p->mount; c->node.references = 1; c->node.drop = child_drop;
     vmmfs_node_hold(p); ++child_live;
@@ -101,7 +102,8 @@ static void vmmfs_vnode_discard(struct vnode *v) {
     assert(vnodes); --vnodes; v->v_data = NULL; free(v);
 }
 static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
-    struct vmmfs_node *n, struct vnode **vp) {
+    struct vmmfs_node *n) {
+    struct vnode **vp = &n->vnode;
     (void)m; assert(ops && type == VDIR && n);
     *vp = NULL;
     if (fail()) return ENFILE;
@@ -110,13 +112,13 @@ static int vmmfs_vnode_create_regular(void *m, void **ops, int type,
 }
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *m) {
     struct child *s = calloc(1,sizeof(*s));
-    int error = child_init(&m->node, s, &m->stopped_vnode);
+    int error = child_init(&m->node, s);
     if (error) free(s); else m->stopped = s;
     return error;
 }
 static void vmmfs_machine_cleanup_stopped(struct vmmfs_machine *m) {
     if (!m->stopped) return;
-    vmmfs_vnode_discard(m->stopped_vnode); m->stopped_vnode = NULL;
+    vmmfs_vnode_discard(m->stopped->node.vnode);
     vmmfs_node_put(&m->stopped->node); free(m->stopped); m->stopped = NULL;
 }
 static int component_init(struct vmmfs_machine *m, struct component *c) {
@@ -156,15 +158,16 @@ int main(void) {
     struct vnode root_vnode = { &root };
     struct vmmfs_mount mount = { &root_vnode, &root, &root, &root };
     struct vmmfs_node parent = { .references = 1, .mount = &mount };
-    struct vnode *result;
+    struct vmmfs_machine *machine;
+    struct vmmfs_pcislot *slot;
     for (unsigned kind = 0; kind < 2; ++kind) {
         unsigned limit = kind == 0 ? 12 : 4;
         for (fail_at = 1; fail_at <= limit; ++fail_at) {
-            stage = object_drops = 0; result = (void *)1;
+            stage = object_drops = 0; machine = NULL; slot = NULL;
             int error = kind == 0 ?
-                vmmfs_machine_create(&parent, "test", 4, &result) :
-                vmmfs_pcislot_create(&parent, 8, &result);
-            assert(error == ENFILE && stage == fail_at && result == NULL);
+                vmmfs_machine_create(&parent, "test", 4, &machine) :
+                vmmfs_pcislot_create(&parent, 8, &slot);
+            assert(error == ENFILE && stage == fail_at && machine == NULL && slot == NULL);
             assert(parent.references == 1 && objects == 0 && vnodes == 0);
             assert(child_live == 0 && token_live == 0 && component_live == 0);
             assert(object_drops == 1);
@@ -185,7 +188,7 @@ typedef long off_t;
 #define UID_ROOT 0
 #define GID_WHEEL 0
 struct token { bool initialized; };
-struct vmmfs_node {
+struct vmmfs_node { struct vnode *vnode;
     struct vmmfs_mount *mount;
     struct vmmfs_node *parent; struct token token; unsigned references;
     unsigned mode, inode; uint64_t size;
@@ -199,7 +202,7 @@ struct vmmfs_launch {
     struct vmmfs_node node; struct token token; struct cdev *dev;
     struct vm_object *pager_object, *backing_object; int result;
 };
-struct vmmfs_mount { void *mount, *launch_vops; struct vnode *root_vnode; };
+struct vmmfs_mount { void *mount, *launch_vops; void *root; };
 static u_int vmmfs_launch_serial;
 static int vmmfs_launch_dev_ops;
 static unsigned fail_at, objects, devices, tokens, vnodes, dropped;
@@ -233,7 +236,8 @@ static void vm_object_deallocate(struct vm_object *o) {
     assert(o->references); --o->references;
 }
 static int vmmfs_vnode_create_cdev(void *m, void **ops, struct cdev *dev,
-    struct vmmfs_node *n, struct vnode **vp) {
+    struct vmmfs_node *n) {
+    struct vnode **vp = &n->vnode;
     (void)m; assert(ops && dev && dev->si_drv1 == n);
     if (fail_at == 2) return ENFILE;
     *vp = calloc(1,sizeof(**vp)); (*vp)->v_data = n; ++vnodes; return 0;
@@ -255,19 +259,19 @@ int main(void) {
     struct vnode root = { &parent };
     struct vmmfs_mount mount = { &parent, &parent, &root };
     parent.mount = &mount;
-    struct vnode *result;
+    struct vmmfs_launch *result;
     for (fail_at = 0; fail_at <= 2; ++fail_at) {
         dropped = 0; result = (void *)1;
         int error = vmmfs_launch_create(&parent, 4096, &result);
         if (fail_at == 0) {
             assert(error == 0 && result != NULL && parent.references == 2);
-            struct vmmfs_launch *launch = result->v_data;
+            struct vmmfs_launch *launch = result;
             assert(launch->node.mount == parent.mount);
             assert(launch->result == EINPROGRESS && launch->node.size == 4096);
             /* A not-yet-published candidate has no pager; final put owns cdev. */
             struct vm_object backing = { 2 };
             launch->backing_object = &backing;
-            free(result); --vnodes; vmmfs_node_put(&launch->node);
+            free(result->node.vnode); result->node.vnode = NULL; --vnodes; vmmfs_node_put(&launch->node);
             assert(backing.references == 1);
         } else {
             assert(error == (fail_at == 1 ? ENOMEM : ENFILE) && result == NULL);

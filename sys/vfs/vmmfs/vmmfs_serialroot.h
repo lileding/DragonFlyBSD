@@ -32,7 +32,7 @@ struct vmmfs_serialport_info {
 };
 
 int vmmfs_serialroot_init(struct vmmfs_node *,
-	struct vmmfs_serialroot *, struct vnode **);
+	struct vmmfs_serialroot *);
 int vmmfs_serialroot_start(struct vmmfs_serialroot *, vmm_machine_t);
 int vmmfs_serialroot_stop(struct vmmfs_serialroot *);
 size_t vmmfs_serialroot_port_count(struct vmmfs_serialroot *);

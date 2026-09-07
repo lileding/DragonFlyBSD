@@ -48,19 +48,17 @@ static struct dev_ops vmmfs_boot_dev_ops = {
 
 int
 vmmfs_boot_init(struct vmmfs_node *parent,
-	struct vmmfs_boot *boot,
-	struct vnode **vnodep)
+	struct vmmfs_boot *boot)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
 	uint32_t serial;
 	int error;
 
-	if (parent == NULL || boot == NULL || vnodep == NULL)
+	if (parent == NULL || boot == NULL)
 		return (EINVAL);
 	machine = (struct vmmfs_machine *)parent;
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(boot, sizeof(*boot));
 	boot->node.parent = parent;
 	boot->node.mount = parent->mount;
@@ -82,7 +80,7 @@ vmmfs_boot_init(struct vmmfs_node *parent,
 	}
 	boot->dev->si_drv1 = boot;
 	error = vmmfs_vnode_create_cdev(parent->mount->mount,
-	    &parent->mount->boot_vops, boot->dev, &boot->node, vnodep);
+	    &parent->mount->boot_vops, boot->dev, &boot->node);
 	if (error == 0)
 		return (0);
 
@@ -112,25 +110,25 @@ vmmfs_boot_open(struct vop_open_args *ap)
 {
 	struct vmmfs_boot *boot = ap->a_vp->v_data;
 	struct vmmfs_machine *machine = (struct vmmfs_machine *)boot->node.parent;
-	struct vnode *vnode;
+	struct vmmfs_launch *launch;
 	struct file *file, *original;
 	int error, abort_error;
 
 	if (ap->a_fpp == NULL || (ap->a_mode & FWRITE) == 0)
 		return (EACCES);
 	/* machine_boot owns admission and the single launch identity. */
-	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &vnode));
+	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &launch));
 	if (error != 0)
 		return (error);
-	error = vmmfs_launch_open(vnode, ap->a_cred, &file);
+	error = vmmfs_launch_open(launch, ap->a_cred, &file);
 	if (error != 0) {
-		abort_error = vmmfs_machine_abort(vnode->v_data);
+		abort_error = vmmfs_machine_abort(launch);
 		if (abort_error != 0)
 			error = abort_error;
-		vrele(vnode);
+		vrele(launch->node.vnode);
 		return (error);
 	}
-	vrele(vnode);
+	vrele(launch->node.vnode);
 	/*
 	 * vn_open permits replacing the provisional file.  It releases the
 	 * fixed entry vnode itself; this file owns only the private launch vnode.

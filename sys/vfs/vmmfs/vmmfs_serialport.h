@@ -67,7 +67,7 @@ struct vmmfs_serialport {
 };
 
 int vmmfs_serialport_create(struct vmmfs_node *,
-	const char *, size_t, struct vnode **);
+	const char *, size_t, struct vmmfs_serialport **);
 int vmmfs_serialport_start(struct vmmfs_serialport *, vmm_machine_t);
 int vmmfs_serialport_stop(struct vmmfs_serialport *);
 

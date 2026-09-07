@@ -69,7 +69,7 @@ struct vop_ops vmmfs_loader_vops = {
 };
 
 int
-vmmfs_loader_run(struct vmmfs_loader *loader, struct vnode *vnode,
+vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_launch *launch,
 	struct ucred *cred)
 {
 	struct vmmfs_loader_process *process;
@@ -87,12 +87,12 @@ vmmfs_loader_run(struct vmmfs_loader *loader, struct vnode *vnode,
 	}
 	bcopy(loader->script, process->script, sizeof(process->script));
 	lwkt_reltoken(&machine->token);
-	error = vmmfs_launch_open(vnode, cred, &process->file);
+	error = vmmfs_launch_open(launch, cred, &process->file);
 	if (error != 0) {
 		kfree(process, M_VMMFS);
 		return (error);
 	}
-	process->launch = vnode->v_data;
+	process->launch = launch;
 	vmmfs_node_hold(&process->launch->node);
 	error = fork1(curthread->td_lwp,
 	    RFFDG | RFPROC | RFPGLOCK | RFNOWAIT, &child);
@@ -278,16 +278,14 @@ vmmfs_loader_store(struct vmmfs_node *node, const char *buffer,
 
 int
 vmmfs_loader_init(struct vmmfs_node *parent,
-	struct vmmfs_loader *loader,
-	struct vnode **vnodep)
+	struct vmmfs_loader *loader)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || loader == NULL || vnodep == NULL)
+	if (parent == NULL || loader == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(loader, sizeof(*loader));
 	loader->node.parent = parent;
 	loader->node.mount = parent->mount;
@@ -305,7 +303,7 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.mode = VMMFS_LOADER_MODE;
 	loader->node.size = 1;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->loader_vops, VREG, &loader->node, vnodep);
+	    &parent->mount->loader_vops, VREG, &loader->node);
 	if (error == 0)
 		return (0);
 

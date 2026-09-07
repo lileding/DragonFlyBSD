@@ -53,7 +53,7 @@ struct vmmfs_pciroot {
 };
 
 int vmmfs_pciroot_init(struct vmmfs_node *,
-	struct vmmfs_pciroot *, struct vnode **);
+	struct vmmfs_pciroot *);
 int vmmfs_pciroot_start(struct vmmfs_pciroot *, vmm_machine_t);
 int vmmfs_pciroot_reset(struct vmmfs_pciroot *);
 int vmmfs_pciroot_stop(struct vmmfs_pciroot *);

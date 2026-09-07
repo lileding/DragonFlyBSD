@@ -297,12 +297,12 @@ vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 
 int
 vmmfs_vnode_create_regular(struct mount *mount, struct vop_ops **vops,
-	enum vtype type, struct vmmfs_node *node, struct vnode **vnodep)
+	enum vtype type, struct vmmfs_node *node)
 {
 	struct vnode *vnode;
 	int error;
 
-	if (mount == NULL || vops == NULL || node == NULL || vnodep == NULL)
+	if (mount == NULL || vops == NULL || node == NULL)
 		return (EINVAL);
 	error = getnewvnode(VT_SYNTH, mount, &vnode, 0, 0);
 	if (error != 0)
@@ -313,19 +313,17 @@ vmmfs_vnode_create_regular(struct mount *mount, struct vop_ops **vops,
 	vnode->v_type = type;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
-	*vnodep = vnode;
 	return (0);
 }
 
 int
 vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
-	struct cdev *dev, struct vmmfs_node *node, struct vnode **vnodep)
+	struct cdev *dev, struct vmmfs_node *node)
 {
 	struct vnode *vnode;
 	int error;
 
-	if (mount == NULL || vops == NULL || dev == NULL || node == NULL ||
-	    vnodep == NULL)
+	if (mount == NULL || vops == NULL || dev == NULL || node == NULL)
 		return (EINVAL);
 	error = getspecialvnode(VT_SYNTH, mount, vops, &vnode, 0, 0);
 	if (error != 0)
@@ -347,7 +345,6 @@ vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
 	node->vnode = vnode;
 	vx_downgrade(vnode);
 	vn_unlock(vnode);
-	*vnodep = vnode;
 	return (0);
 }
 

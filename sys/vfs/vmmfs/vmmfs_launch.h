@@ -31,10 +31,10 @@ extern struct vop_ops vmmfs_launch_vops;
 
 /* Returns one vnode reference; the caller either publishes it or releases it. */
 int vmmfs_launch_create(struct vmmfs_node *,
-	uint64_t, struct vnode **);
+	uint64_t, struct vmmfs_launch **);
 int vmmfs_launch_map(struct vmmfs_launch *, struct vm_object *);
 /* Each file owns its vnode reference.  Final close aborts only its launch. */
-int vmmfs_launch_open(struct vnode *, struct ucred *, struct file **);
+int vmmfs_launch_open(struct vmmfs_launch *, struct ucred *, struct file **);
 void vmmfs_launch_revoke(struct vmmfs_launch *);
 void vmmfs_launch_complete(struct vmmfs_launch *, int);
 /* No deadline.  An interrupt aborts this launch before returning the signal error. */

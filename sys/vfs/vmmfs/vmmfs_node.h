@@ -112,13 +112,13 @@ int vmmfs_node_read(struct vop_read_args *);
 int vmmfs_node_setattr(struct vop_setattr_args *);
 int vmmfs_node_write(struct vop_write_args *);
 
-/* Creates a regular vnode without storing it in the semantic node. */
+/* Creates a regular vnode and records it in node->vnode. */
 int vmmfs_vnode_create_regular(struct mount *, struct vop_ops **,
-	enum vtype, struct vmmfs_node *, struct vnode **);
+	enum vtype, struct vmmfs_node *);
 
-/* Creates a cdev-backed vnode without storing it in the semantic node. */
+/* Creates a cdev-backed vnode and records it in node->vnode. */
 int vmmfs_vnode_create_cdev(struct mount *, struct vop_ops **,
-	struct cdev *, struct vmmfs_node *, struct vnode **);
+	struct cdev *, struct vmmfs_node *);
 
 /*
  * Closes admission and revokes file descriptors; does not consume the

@@ -129,15 +129,14 @@ struct vop_ops vmmfs_pcislot_descriptor_vops = {
 
 int
 vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
-	struct vmmfs_pcislot_descriptor *descriptor, struct vnode **vnodep)
+	struct vmmfs_pcislot_descriptor *descriptor)
 {
 	struct vmmfs_root *root;
 	int error;
 
-	if (parent == NULL || descriptor == NULL || vnodep == NULL)
+	if (parent == NULL || descriptor == NULL)
 		return (EINVAL);
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(descriptor, sizeof(*descriptor));
 	descriptor->node.inode = vmmfs_root_allocate_inode(root);
 	descriptor->node.parent = parent;
@@ -155,8 +154,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	descriptor->node.mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
 	descriptor->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pcislot_descriptor_vops, VREG, &descriptor->node,
-	    vnodep);
+	    &parent->mount->pcislot_descriptor_vops, VREG, &descriptor->node);
 	if (error != 0)
 		vmmfs_node_put(&descriptor->node);
 	return (error);

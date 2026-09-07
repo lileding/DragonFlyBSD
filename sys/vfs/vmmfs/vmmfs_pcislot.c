@@ -78,16 +78,16 @@ struct vop_ops vmmfs_pcislot_vops = {
 int
 vmmfs_pcislot_create(struct vmmfs_node *parent,
 	uint16_t bdf,
-	struct vnode **vnodep)
+	struct vmmfs_pcislot **objectp)
 {
 	struct vmmfs_root *root;
 	struct vmmfs_pcislot *slot;
 	int error;
 
-	if (parent == NULL || vnodep == NULL)
+	if (parent == NULL || objectp == NULL)
 		return (EINVAL);
-	*vnodep = NULL;
-	root = parent->mount->root_vnode->v_data;
+	*objectp = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	slot = kmalloc(sizeof(*slot), M_VMMFS, M_WAITOK | M_ZERO);
 	slot->node.inode = vmmfs_root_allocate_inode(root);
 	slot->bdf = bdf;
@@ -101,38 +101,33 @@ vmmfs_pcislot_create(struct vmmfs_node *parent,
 	slot->node.deactivate = vmmfs_pcislot_deactivate;
 	slot->node.mode = VMMFS_PCISLOT_MODE;
 	slot->node.size = 0;
-	error = vmmfs_pcislot_events_init(&slot->node, &slot->events,
-	    &slot->events_vnode);
+	error = vmmfs_pcislot_events_init(&slot->node, &slot->events);
 	if (error != 0)
 		goto fail_slot;
-	error = vmmfs_pcislot_config_init(&slot->node, &slot->config,
-	    &slot->config_vnode);
+	error = vmmfs_pcislot_config_init(&slot->node, &slot->config);
 	if (error != 0)
 		goto fail_events;
-	error = vmmfs_pcislot_descriptor_init(&slot->node, &slot->descriptor,
-	    &slot->descriptor_vnode);
+	error = vmmfs_pcislot_descriptor_init(&slot->node, &slot->descriptor);
 	if (error != 0)
 		goto fail_config;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pcislot_vops, VDIR, &slot->node, vnodep);
+	    &parent->mount->pcislot_vops, VDIR, &slot->node);
 	if (error != 0)
 		goto fail_descriptor;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
 	    "bdf=0000:%02x:%02x.%x", bdf >> 8, (bdf >> 3) & 0x1f,
 	    bdf & 0x7);
+	*objectp = slot;
 	return (0);
 
 fail_descriptor:
-	vmmfs_vnode_discard(slot->descriptor_vnode);
-	slot->descriptor_vnode = NULL;
+	vmmfs_vnode_discard(slot->descriptor.node.vnode);
 	vmmfs_node_put(&slot->descriptor.node);
 fail_config:
-	vmmfs_vnode_discard(slot->config_vnode);
-	slot->config_vnode = NULL;
+	vmmfs_vnode_discard(slot->config.node.vnode);
 	vmmfs_node_put(&slot->config.node);
 fail_events:
-	vmmfs_vnode_discard(slot->events_vnode);
-	slot->events_vnode = NULL;
+	vmmfs_vnode_discard(slot->events.node.vnode);
 	vmmfs_node_put(&slot->events.node);
 fail_slot:
 	vmmfs_node_put(&slot->node);
@@ -191,12 +186,12 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 	}
 	/* Detached candidates and children of a closing root cannot veto. */
 	vmmfs_pcislot_power_off(slot);
-	(void)vmmfs_vnode_deactivate(slot->descriptor_vnode);
-	vrele(slot->descriptor_vnode);
-	(void)vmmfs_vnode_deactivate(slot->config_vnode);
-	vrele(slot->config_vnode);
-	(void)vmmfs_vnode_deactivate(slot->events_vnode);
-	vrele(slot->events_vnode);
+	(void)vmmfs_vnode_deactivate(slot->descriptor.node.vnode);
+	vrele(slot->descriptor.node.vnode);
+	(void)vmmfs_vnode_deactivate(slot->config.node.vnode);
+	vrele(slot->config.node.vnode);
+	(void)vmmfs_vnode_deactivate(slot->events.node.vnode);
+	vrele(slot->events.node.vnode);
 	return (0);
 }
 
@@ -500,13 +495,13 @@ vmmfs_pcislot_get_item(struct vmmfs_pcislot *slot,
 	}
 	if (length == sizeof("events") - 1 &&
 	    bcmp(name, "events", sizeof("events") - 1) == 0)
-		vnode = slot->descriptor.committed ? slot->events_vnode : NULL;
+		vnode = slot->descriptor.committed ? slot->events.node.vnode : NULL;
 	else if (length == sizeof("config") - 1 &&
 	    bcmp(name, "config", sizeof("config") - 1) == 0)
-		vnode = slot->descriptor.committed ? slot->config_vnode : NULL;
+		vnode = slot->descriptor.committed ? slot->config.node.vnode : NULL;
 	else if (length == sizeof("descriptor") - 1 &&
 	    bcmp(name, "descriptor", sizeof("descriptor") - 1) == 0)
-		vnode = slot->descriptor_vnode;
+		vnode = slot->descriptor.node.vnode;
 	else {
 		resources = slot->resources;
 		if (resources != NULL)
@@ -652,7 +647,7 @@ vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
 		}
 		--index;
 	}
-	if (slot->descriptor_vnode != NULL) {
+	if (slot->descriptor.node.vnode != NULL) {
 		if (index == 0) {
 			item->inode = slot->descriptor.node.inode;
 			item->type = DT_REG;

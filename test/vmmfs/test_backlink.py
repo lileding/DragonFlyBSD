@@ -59,19 +59,21 @@ int main(void) {
     struct vop_reclaim_args args = { &allocated };
     node.refs = 2; /* A child may retain the node after vnode reclaim. */
     allocation_error = ENFILE;
-    assert(vmmfs_vnode_create_regular(&mount, &ops, VDIR, &node, &vp) == ENFILE);
+    assert(vmmfs_vnode_create_regular(&mount, &ops, VDIR, &node) == ENFILE);
     assert(!node.vnode && !vp);
     allocation_error = 0;
-    assert(vmmfs_vnode_create_regular(&mount, &ops, VDIR, &node, &vp) == 0);
+    assert(vmmfs_vnode_create_regular(&mount, &ops, VDIR, &node) == 0);
+    vp = node.vnode;
     assert(node.vnode == vp && vp->v_data == &node && vp->refs == 1);
     assert(vmmfs_node_reclaim(&args) == 0);
     assert(node.refs == 1 && node_puts == 1 && !node.vnode && !allocated.v_data);
     assert(vmmfs_node_reclaim(&args) == 0 && node_puts == 1);
     association_error = EIO;
-    assert(vmmfs_vnode_create_cdev(&mount, &ops, &dev, &node, &vp) == EIO);
+    assert(vmmfs_vnode_create_cdev(&mount, &ops, &dev, &node) == EIO);
     assert(!node.vnode && !allocated.v_data && !allocated.refs && node_puts == 1);
     association_error = 0;
-    assert(vmmfs_vnode_create_cdev(&mount, &ops, &dev, &node, &vp) == 0);
+    assert(vmmfs_vnode_create_cdev(&mount, &ops, &dev, &node) == 0);
+    vp = node.vnode;
     assert(node.vnode == vp && vp->refs == 1 && vp->v_data == &node);
     vmmfs_vnode_discard(vp);
     assert(!node.vnode && !allocated.v_data && !allocated.refs);

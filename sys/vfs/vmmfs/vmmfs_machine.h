@@ -43,7 +43,7 @@ struct vmmfs_machine {
 	 * runtime_released marks the retry window before stopped is republished.
 	 */
 	vmm_machine_t machine;
-	struct vnode *launch_vnode;
+	struct vmmfs_launch *launch;
 	bool runtime_releasing;
 	bool runtime_released;
 	/* Admitted runtime work, or topology removal until registry detach. */
@@ -58,20 +58,12 @@ struct vmmfs_machine {
 	struct vmmfs_rtc rtc;
 	struct vmmfs_serialroot serialroot;
 	struct vmmfs_events events;
-	/* Machine-owned vnode references for its fixed namespace children. */
-	struct vnode *id_vnode;
-	struct vnode *vcpu_vnode;
-	struct vnode *memory_vnode;
-	struct vnode *loader_vnode;
-	struct vnode *boot_vnode;
-	struct vnode *stopped_vnode;
-	struct vnode *pciroot_vnode;
-	struct vnode *serialroot_vnode;
-	struct vnode *events_vnode;
+	/* Owns the stopped node through its ordinary vnode reference. */
+	struct vmmfs_stopped *stopped;
 };
 
 int vmmfs_machine_create(struct vmmfs_node *,
-	const char *, size_t, struct vnode **);
+	const char *, size_t, struct vmmfs_machine **);
 
 /* Requests a warm reset without rerunning the loader. */
 int vmmfs_machine_reset(struct vmmfs_machine *);
@@ -80,7 +72,7 @@ int vmmfs_machine_reset(struct vmmfs_machine *);
 int vmmfs_machine_request_stop(struct vmmfs_machine *, const char *);
 
 /* Atomically admits a private launch and prepares its platform. */
-int vmmfs_machine_boot(struct vmmfs_machine *, struct vnode **);
+int vmmfs_machine_boot(struct vmmfs_machine *, struct vmmfs_launch **);
 /* Only the current launch may start or abort the admitted runtime. */
 int vmmfs_machine_run(struct vmmfs_launch *);
 int vmmfs_machine_abort(struct vmmfs_launch *);

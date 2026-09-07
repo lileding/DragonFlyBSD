@@ -52,18 +52,17 @@ struct vop_ops vmmfs_machine_id_vops = {
 
 int
 vmmfs_machine_id_init(struct vmmfs_node *parent,
-	struct vmmfs_machine_id *identity, struct vnode **vnodep)
+	struct vmmfs_machine_id *identity)
 {
 	struct vmmfs_machine *machine;
 	struct vmmfs_root *root;
 	u_int value;
 	int error;
 
-	if (parent == NULL || identity == NULL || vnodep == NULL)
+	if (parent == NULL || identity == NULL)
 		return (EINVAL);
 	machine = (struct vmmfs_machine *)parent;
-	root = parent->mount->root_vnode->v_data;
-	*vnodep = NULL;
+	root = (struct vmmfs_root *)parent->mount->root;
 	bzero(identity, sizeof(*identity));
 	value = atomic_fetchadd_int(&vmmfs_machine_next_id, 1) + 1;
 	if (value > VMMFS_MACHINE_ID_MAX)
@@ -85,7 +84,7 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.mode = VMMFS_MACHINE_ID_MODE;
 	identity->node.size = vmmfs_node_decimal_size(value);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->machine_id_vops, VREG, &identity->node, vnodep);
+	    &parent->mount->machine_id_vops, VREG, &identity->node);
 	if (error == 0)
 		return (0);
 	identity->node.inode = 0;

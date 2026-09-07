@@ -34,7 +34,7 @@ struct vmmfs_events {
 };
 
 int vmmfs_events_init(struct vmmfs_node *,
-	struct vmmfs_events *, struct vnode **);
+	struct vmmfs_events *);
 void vmmfs_events_log(struct vmmfs_events *, enum vmmfs_machine_event,
 	const char *, ...);
 

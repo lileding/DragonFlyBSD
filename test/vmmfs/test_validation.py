@@ -8,7 +8,7 @@ from refactor_redundancy import ancestor, compact
 class ValidationBoundaries(unittest.TestCase):
     def test_ancestor_is_not_runtime_field(self):
         self.assertTrue(ancestor("vmmfs_pciroot_machine(vmmfs_pcislot_pciroot(slot))"))
-        self.assertFalse(ancestor("vmmfs_pciroot_machine(pciroot)->pciroot_vnode"))
+        self.assertFalse(ancestor("vmmfs_pciroot_machine(pciroot)->pciroot.node.vnode"))
         self.assertFalse(ancestor("vmmfs_pciroot_machine(pciroot)->memory.run_vmspace"))
         self.assertFalse(ancestor("vmmfs_pciroot_machine(pciroot) == other"))
 

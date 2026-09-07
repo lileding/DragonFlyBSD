@@ -23,6 +23,6 @@ struct vmmfs_machine_id {
 };
 
 int vmmfs_machine_id_init(struct vmmfs_node *,
-	struct vmmfs_machine_id *, struct vnode **);
+	struct vmmfs_machine_id *);
 
 #endif /* VMMFS_MACHINE_ID_H */

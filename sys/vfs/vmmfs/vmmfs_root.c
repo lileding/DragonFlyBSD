@@ -32,7 +32,7 @@ static u_int vmmfs_root_count;
 
 struct vmmfs_root_machine {
 	RB_ENTRY(vmmfs_root_machine) entry;
-	struct vnode *vnode;
+	struct vmmfs_machine *machine;
 };
 
 RB_HEAD(vmmfs_machine_tree, vmmfs_root_machine);
@@ -83,8 +83,8 @@ vmmfs_root_machine_compare(struct vmmfs_root_machine *left,
 	struct vmmfs_machine *left_machine;
 	struct vmmfs_machine *right_machine;
 
-	left_machine = left->vnode->v_data;
-	right_machine = right->vnode->v_data;
+	left_machine = left->machine;
+	right_machine = right->machine;
 	KKASSERT(left_machine != NULL);
 	KKASSERT(right_machine != NULL);
 	return (strcmp(left_machine->name, right_machine->name));
@@ -94,16 +94,16 @@ RB_GENERATE(vmmfs_machine_tree, vmmfs_root_machine, entry,
 	vmmfs_root_machine_compare);
 
 int
-vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
+vmmfs_root_create(struct mount *mount, struct vmmfs_node **objectp)
 {
 	struct vmmfs_mount *state;
 	struct vmmfs_root *root;
 	struct vnode *vnode;
 	int error;
 
-	if (mount == NULL || vnodep == NULL)
+	if (mount == NULL || objectp == NULL)
 		return (EINVAL);
-	*vnodep = NULL;
+	*objectp = NULL;
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	root = kmalloc(sizeof(*root), M_VMMFS, M_WAITOK | M_ZERO);
 	atomic_add_int(&vmmfs_root_count, 1);
@@ -125,7 +125,8 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 	root->node.size = 0;
 	RB_INIT(&root->machines);
 	error = vmmfs_vnode_create_regular(mount, &state->root_vops, VDIR,
-		&root->node, &vnode);
+		&root->node);
+	vnode = root->node.vnode;
 	if (error != 0) {
 		vmmfs_node_put(&root->node);
 		return (error);
@@ -139,7 +140,7 @@ vmmfs_root_create(struct mount *mount, struct vnode **vnodep)
 	vsetflags(vnode, VROOT);
 	vn_unlock(vnode);
 	vrele(vnode);
-	*vnodep = vnode;
+	*objectp = &root->node;
 	return (0);
 }
 
@@ -191,7 +192,7 @@ vmmfs_root_find_locked(struct vmmfs_root *root, const char *name,
 	struct vmmfs_machine *machine;
 
 	RB_FOREACH(entry, vmmfs_machine_tree, &root->machines) {
-		machine = entry->vnode->v_data;
+		machine = entry->machine;
 		KKASSERT(machine != NULL);
 		if (strlen(machine->name) == namelen &&
 		    bcmp(machine->name, name, namelen) == 0)
@@ -214,7 +215,7 @@ vmmfs_root_get_item(struct vmmfs_node *node, const char *name,
 	lwkt_gettoken(&root->token);
 	entry = vmmfs_root_find_locked(root, name, namelen);
 	if (entry != NULL) {
-		*vnodep = entry->vnode;
+		*vnodep = entry->machine->node.vnode;
 		vhold(*vnodep);
 	}
 	lwkt_reltoken(&root->token);
@@ -239,8 +240,8 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 	RB_FOREACH(entry, vmmfs_machine_tree, &root->machines) {
 		if (current++ != index)
 			continue;
-		item->vnode = entry->vnode;
-		machine = item->vnode->v_data;
+		item->vnode = entry->machine->node.vnode;
+		machine = entry->machine;
 		KKASSERT(machine != NULL);
 		item->inode = machine->node.inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
@@ -259,22 +260,24 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	struct vmmfs_root *root = (struct vmmfs_root *)node;
 	struct vmmfs_root_machine *entry;
 	struct vnode *vnode;
+	struct vmmfs_machine *machine;
 	int error, cleanup_error;
 
 	if (namelen == 0 || namelen > NAME_MAX)
 		return (ENAMETOOLONG);
 	*vnodep = NULL;
 	entry = kmalloc(sizeof(*entry), M_VMMFS, M_WAITOK | M_ZERO);
-	error = vmmfs_machine_create(node, name, namelen, &vnode);
+	error = vmmfs_machine_create(node, name, namelen, &machine);
 	if (error != 0) {
 		kfree(entry, M_VMMFS);
 		return (error);
 	}
+	vnode = machine->node.vnode;
 	lwkt_gettoken(&root->token);
 	if (vmmfs_root_find_locked(root, name, namelen) != NULL)
 		error = EEXIST;
 	else {
-		entry->vnode = vnode;
+		entry->machine = machine;
 		RB_INSERT(vmmfs_machine_tree, &root->machines, entry);
 		vref(vnode); /* create_item caller, independent of registry. */
 	}
@@ -305,7 +308,7 @@ vmmfs_root_remove_item(struct vmmfs_node *node, const char *name,
 	entry = vmmfs_root_find_locked(root, name, namelen);
 	KKASSERT(entry != NULL);
 	RB_REMOVE(vmmfs_machine_tree, &root->machines, entry);
-	vnode = entry->vnode;
+	vnode = entry->machine->node.vnode;
 	kfree(entry, M_VMMFS);
 	lwkt_reltoken(&root->token);
 	vrele(vnode);

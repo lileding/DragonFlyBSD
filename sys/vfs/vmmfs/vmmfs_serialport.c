@@ -128,7 +128,7 @@ struct vop_ops vmmfs_serialport_vops = {
 
 int
 vmmfs_serialport_create(struct vmmfs_node *parent,
-    const char *name, size_t namelen, struct vnode **vnodep)
+    const char *name, size_t namelen, struct vmmfs_serialport **objectp)
 {
     struct vmmfs_serialroot *serialroot;
     struct vmmfs_root *root;
@@ -140,12 +140,12 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     uint32_t unit;
     int error;
 
-    if (parent == NULL || vnodep == NULL ||
+    if (parent == NULL || objectp == NULL ||
         !vmmfs_serialport_name(name, namelen, &number, &base, &gsi))
         return EINVAL;
     serialroot = (struct vmmfs_serialroot *)parent;
-    root = parent->mount->root_vnode->v_data;
-    *vnodep = NULL;
+    root = (struct vmmfs_root *)parent->mount->root;
+    *objectp = NULL;
     port = kmalloc(sizeof(*port), M_VMMFS, M_WAITOK | M_ZERO);
     port->node.inode = vmmfs_root_allocate_inode(root);
     bcopy(name, port->name, namelen);
@@ -183,7 +183,7 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     port->node.size = 0;
     error = vmmfs_vnode_create_cdev(
         parent->mount->mount,
-        &parent->mount->serialport_vops, port->dev, &port->node, vnodep);
+        &parent->mount->serialport_vops, port->dev, &port->node);
     if (error != 0) {
         vmmfs_node_put(&port->node);
         return error;
@@ -193,6 +193,7 @@ vmmfs_serialport_create(struct vmmfs_node *parent,
     port->tty.t_sc = port;
     port->tty.t_unhold = vmmfs_serialport_tty_unhold;
     vmmfs_node_hold(&port->node);
+    *objectp = port;
     return 0;
 
 fail_token:

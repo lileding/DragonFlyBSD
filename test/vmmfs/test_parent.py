@@ -8,14 +8,16 @@ class ParentTeardown(unittest.TestCase):
         source = COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
-struct vmmfs_node { struct token token;  struct lock lock; bool dead;};
+struct vmmfs_node { struct vnode *vnode; struct token token;  struct lock lock; bool dead;};
 struct vnode { unsigned refs; };
-struct ENTRY { struct vnode *vnode; };
+struct CHILD_TYPE { struct vmmfs_node node; };
+struct ENTRY { struct CHILD_TYPE *CHILD; };
 struct registry { struct ENTRY *MEMBER; };
 struct ROOT_TYPE { struct vmmfs_node node; struct token token; struct registry *registry; };
 static struct ROOT_TYPE root;
 static struct registry registry;
 static struct vnode vnode;
+static struct CHILD_TYPE child;
 static unsigned mode, release_count;
 #define M_VMMFS 0
 #define RB_ROOT(p) (*(p))
@@ -26,7 +28,7 @@ static unsigned mode, release_count;
 static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
 static void kfree(void *p, int tag) { (void)tag; assert(p); free(p); }
 static void RELEASE(struct ROOT_TYPE *r, struct ENTRY *e) {
-    assert(r->node.dead); assert(e->vnode == &vnode); ++release_count;
+    assert(r->node.dead); assert(e->CHILD->node.vnode == &vnode); ++release_count;
 }
 static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(root.node.dead && root.token.held == 0);
@@ -41,7 +43,7 @@ int main(void) {
     root.node.dead = true;
     for (mode = 0; mode != 2; ++mode) {
         registry.MEMBER = malloc(sizeof(*registry.MEMBER));
-        registry.MEMBER->vnode = &vnode;
+        child.node.vnode = &vnode; registry.MEMBER->CHILD = &child;
         vnode.refs = 1; release_count = 0;
         int error = DEACTIVATE(&root.node);
         assert(root.token.held == 0);
@@ -53,7 +55,8 @@ int main(void) {
 """
         root = "vmmfs_" + kind
         source = source.replace("FUNCTION", function(root + ".c", root + "_deactivate"))
-        for token, value in (("ENTRY", entry_type), ("MEMBER", member),
+        for token, value in (("CHILD_TYPE", "vmmfs_pcislot" if kind == "pciroot" else "vmmfs_serialport"),
+                             ("CHILD", "slot" if kind == "pciroot" else "port"), ("ENTRY", entry_type), ("MEMBER", member),
                              ("ROOT_TYPE", root), ("RELEASE", root + "_release_entry"),
                              ("DEACTIVATE", root + "_deactivate")):
             source = source.replace(token, value)
@@ -72,19 +75,20 @@ class MachineTeardown(unittest.TestCase):
 struct token { unsigned held, acquired; };
 struct vmmfs_node { struct token token; bool dead; struct vnode *vnode;  struct lock lock;};
 struct vnode { unsigned refs, index; };
+struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_machine {
     struct vmmfs_node node; struct token token;
     void *machine;
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
-    struct { struct token token; unsigned active_count; void *threads; } vcpu;
-    struct vnode *id_vnode, *vcpu_vnode, *memory_vnode;
-    struct vnode *loader_vnode, *boot_vnode, *stopped_vnode;
-    struct vnode *pciroot_vnode, *serialroot_vnode, *events_vnode;
+    struct { struct vmmfs_node node; struct token token; unsigned active_count; void *threads; } vcpu;
+    struct { struct vmmfs_node node; } id_node, memory, loader, boot, pciroot, serialroot, events;
+    struct vmmfs_stopped *stopped;
 };
 #define NELEM(a) (sizeof(a) / sizeof((a)[0]))
 static struct vmmfs_machine machine;
 static struct vnode children[9], parent;
+static struct vmmfs_stopped stopped;
 static unsigned called, dropped, veto_index;
 static int child_error;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
@@ -106,16 +110,16 @@ static int
 """ + function("vmmfs_machine.c", "vmmfs_machine_deactivate") + r"""
 int main(void) {
     struct vnode **fields[] = {
-        &machine.id_vnode, &machine.vcpu_vnode, &machine.memory_vnode,
-        &machine.loader_vnode, &machine.boot_vnode, &machine.stopped_vnode,
-        &machine.pciroot_vnode, &machine.serialroot_vnode, &machine.events_vnode
+        &machine.id_node.node.vnode, &machine.vcpu.node.vnode, &machine.memory.node.vnode,
+        &machine.loader.node.vnode, &machine.boot.node.vnode, &stopped.node.vnode,
+        &machine.pciroot.node.vnode, &machine.serialroot.node.vnode, &machine.events.node.vnode
     };
     const int errors[] = { 0, EBUSY };
     unsigned trial, index;
     for (trial = 0; trial < NELEM(errors); ++trial) {
         for (veto_index = 0; veto_index < NELEM(children); ++veto_index) {
             memset(&machine, 0, sizeof(machine));
-            machine.token.held = 1;
+            machine.stopped = &stopped; machine.token.held = 1;
             machine.node.dead = true; /* Set by the generic caller. */
             machine.node.vnode = &parent;
             called = dropped = 0;
@@ -148,15 +152,16 @@ int main(void) {
         run_c(COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead; unsigned references;  struct lock lock;};
+struct vmmfs_node { struct vnode *vnode; struct token token; bool dead; unsigned references;  struct lock lock;};
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
 struct vmmfs_vcpu { struct vmmfs_node node; };
 struct vmmfs_events { struct vmmfs_node node; };
+struct vmmfs_launch { struct vmmfs_node node; };
 struct vmmfs_machine {
     struct vmmfs_node node; struct token token;
     void *machine;
-    struct vnode *launch_vnode, *stopped_vnode, *vcpu_vnode, *events_vnode;
+    struct vmmfs_launch *launch; struct vmmfs_stopped *stopped;
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
     struct vmmfs_vcpu vcpu;
@@ -177,11 +182,11 @@ static void vmmfs_node_put(struct vmmfs_node *n) {
     if (--n->references == 0) { free(n); --allocated; }
 }
 static int vmmfs_stopped_create(struct vmmfs_node *parent,
-    struct vnode **out) {
+    struct vmmfs_stopped **out) {
     assert(parent->token.held == 0);
     struct vmmfs_stopped *s = calloc(1, sizeof(*s)); assert(s);
     s->node.references = 1; candidate.v_data = s; candidate.refs = 1;
-    *out = &candidate; ++allocated; return 0;
+    s->node.vnode = &candidate; *out = s; ++allocated; return 0;
 }
 static void vmmfs_vnode_discard(struct vnode *v) {
     assert(v == &candidate && v->refs == 1);
@@ -207,23 +212,23 @@ int main(void) {
     struct vmmfs_machine machine = {0};
     struct vnode cpu = { .v_data=&machine.vcpu, .refs=1 };
     struct vnode events = { .v_data=&machine.events, .refs=1 };
-    machine.vcpu_vnode = &cpu; machine.events_vnode = &events;
+    machine.vcpu.node.vnode = &cpu; machine.events.node.vnode = &events;
     machine.vcpu.node.references = machine.events.node.references = 1;
     assert(vmmfs_machine_request_stop(&machine, "external") == 0 && logs == 1);
     assert(machine.vcpu.node.references == 1 && machine.events.node.references == 1);
     /* A child veto may reopen machine admission after the vCPU was reclaimed. */
-    machine.vcpu_vnode = NULL; machine.vcpu.node.references = 0;
+    machine.vcpu.node.vnode = NULL; machine.vcpu.node.references = 0;
     assert(vmmfs_machine_request_stop(&machine, "external") == ENOENT);
     assert(vmmfs_machine_prepare_stopped(&machine) == EBUSY);
-    assert(!machine.stopped_vnode && allocated == 0 && discarded == 1);
+    assert(!machine.stopped && allocated == 0 && discarded == 1);
     /* Initial construction creates stopped before the events node exists. */
-    machine.vcpu_vnode = &cpu; machine.vcpu.node.references = 1;
-    machine.events_vnode = NULL; machine.events.node.references = 0;
+    machine.vcpu.node.vnode = &cpu; machine.vcpu.node.references = 1;
+    machine.events.node.vnode = NULL; machine.events.node.references = 0;
     assert(vmmfs_machine_request_stop(&machine, "external") == ENOENT);
     assert(vmmfs_machine_prepare_stopped(&machine) == 0);
-    assert(machine.stopped_vnode == &candidate && allocated == 1);
+    assert(machine.stopped->node.vnode == &candidate && allocated == 1);
     struct vmmfs_node *node = candidate.v_data;
-    machine.stopped_vnode = NULL;
+    machine.stopped = NULL;
     vmmfs_vnode_discard(&candidate); vmmfs_node_put(node);
     assert(!allocated && logs == 1 && !machine.token.held);
     return 0;

@@ -132,7 +132,7 @@ vmmfs_root_vfs(struct mount *mount, struct vnode **vnode)
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	if (state == NULL)
 		return (ENXIO);
-	vp = state->root_vnode;
+	vp = (state->root != NULL ? state->root->vnode : NULL);
 	if (vp == NULL)
 		return (ENOENT);
 	vhold(vp);
@@ -149,7 +149,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	struct ucred *cred)
 {
 	struct vmmfs_mount *state;
-	struct vnode *root_vnode;
+	struct vmmfs_node *root;
 	size_t size;
 	int error;
 
@@ -207,7 +207,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_resource_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_events_vops,
 	    &state->pcislot_events_vops);
-	error = vmmfs_root_create(mount, &root_vnode);
+	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
 		vfs_rm_vnodeops(mount, NULL, &state->launch_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
@@ -231,7 +231,7 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		mount->mnt_data = NULL;
 		goto fail;
 	}
-	state->root_vnode = root_vnode;
+	state->root = root;
 	return (vmmfs_statfs(mount, &mount->mnt_stat, cred));
 
 fail:
@@ -249,7 +249,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 	state = (struct vmmfs_mount *)mount->mnt_data;
 	if (state == NULL)
 		return (ENXIO);
-	root_vnode = state->root_vnode;
+	root_vnode = (state->root != NULL ? state->root->vnode : NULL);
 	if (root_vnode == NULL)
 		return (ENXIO);
 	error = vmmfs_vnode_deactivate(root_vnode);
@@ -266,7 +266,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 		(void)lockmgr(&root->lock, LK_RELEASE);
 		return (error);
 	}
-	state->root_vnode = NULL;
+	state->root = NULL;
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
