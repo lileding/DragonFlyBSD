@@ -7,7 +7,7 @@ import unittest
 from refactor_mount import Client, Document, TARGETS, member, parent_mount, walk
 
 
-TARGETS = TARGETS - {"vmmfs_launch_create"}
+TARGETS = (TARGETS - {"vmmfs_launch_create", "vmmfs_stopped_create"}) | {"vmmfs_stopped_init"}
 
 class MountInheritance(unittest.TestCase):
     @classmethod
@@ -47,7 +47,7 @@ class MountInheritance(unittest.TestCase):
                         calls.append(refs[0]["detail"])
         self.assertEqual(definitions, TARGETS)
         self.assertEqual(len(declarations), 30)
-        self.assertEqual(len(calls), 16)
+        self.assertEqual(len(calls), 15)
 
     def test_mount_field_has_one_owner(self):
         found = []

@@ -248,20 +248,25 @@ int main(void) {
 }
 """)
 
-    def test_stopped_is_an_unowned_projection(self):
+    def test_stopped_is_a_persistent_child(self):
         from pathlib import Path
-        source = (Path(__file__).resolve().parents[2] / "sys/vfs/vmmfs/vmmfs_machine.c").read_text()
-        self.assertNotIn("vmmfs_machine_create_stopped", source)
-        self.assertNotIn("vmmfs_machine_cleanup_stopped", source)
-        self.assertNotIn("machine->stopped->", source)
-        for name in ("vmmfs_machine_create", "vmmfs_machine_deactivate"):
-            self.assertNotIn("vmmfs_stopped_create", function("vmmfs_machine.c", name))
-        inactive = function("vmmfs_stopped.c", "vmmfs_stopped_inactive")
-        self.assertIn("vrecycle(ap->a_vp)", inactive)
-        complete = function("vmmfs_machine.c", "vmmfs_machine_vcpu_stopped")
-        self.assertIn("cache_inval_vp", complete)
-        self.assertIn("machine->machine = NULL", complete)
-        self.assertNotIn("vmmfs_stopped_create", complete)
+        base = Path(__file__).resolve().parents[2] / "sys/vfs/vmmfs"
+        source = (base / "vmmfs_stopped.c").read_text()
+        self.assertNotIn("vmmfs_stopped_create", source)
+        self.assertNotIn("vmmfs_stopped_inactive", source)
+        self.assertIn(".vop_inactive = vmmfs_node_inactive", source)
+        init = function("vmmfs_stopped.c", "vmmfs_stopped_init")
+        self.assertNotIn("kmalloc", init)
+        self.assertIn("vmmfs_root_allocate_inode", init)
+        self.assertNotIn("kfree", function("vmmfs_stopped.c", "vmmfs_stopped_drop"))
+        self.assertIn("vmmfs_stopped_init", function("vmmfs_machine.c", "vmmfs_machine_create"))
+        self.assertIn("&machine->stopped.node", function("vmmfs_machine.c", "vmmfs_machine_deactivate"))
+        for name in ("vmmfs_machine_get_item", "vmmfs_machine_touch_stopped"):
+            body = function("vmmfs_machine.c", name)
+            self.assertNotIn("vmmfs_stopped_init", body)
+            self.assertNotIn("vmmfs_stopped_create", body)
+        for name in ("vmmfs_machine_post_launch", "vmmfs_machine_vcpu_stopped"):
+            self.assertIn("cache_inval_vp", function("vmmfs_machine.c", name))
 
     def test_empty_vmspace_claim_precedes_memory_prepare(self):
         body = function("vmmfs_machine.c", "vmmfs_machine_boot")

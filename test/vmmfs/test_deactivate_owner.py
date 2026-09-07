@@ -58,7 +58,7 @@ int main(void) {
             "pcislot_config": "init", "pcislot_descriptor": "init",
             "pcislot_events": "init", "root": "create",
             "serialport": "create", "serialroot": "init",
-            "stopped": "create", "vcpu": "init",
+            "stopped": "init", "vcpu": "init",
         }
         for object_name, verb in targets.items():
             with self.subTest(object=object_name):

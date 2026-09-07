@@ -16,6 +16,7 @@ HARNESS = COMMON + r"""
 #define VMMFS_MACHINE_EVENT_STOPPED 1
 #define VMMFS_PCI_EVENT_SLOT_CREATED 2
 #define bcopy(s,d,n) memcpy((d),(s),(n))
+struct vmmfs_node_item;
 struct token { bool initialized; unsigned held; };
 struct vmmfs_node {
     struct vmmfs_mount *mount;
@@ -24,6 +25,8 @@ struct vmmfs_node {
     unsigned references; bool dead; unsigned inode, mode, size;
     bool (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
+    int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
+    int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
  struct lock lock;};
 struct vnode { void *v_data; };
 struct vmmfs_root { int unused; };
@@ -34,7 +37,7 @@ struct vmmfs_machine {
     struct vmmfs_node node; struct token token;
     char name[256];
     struct child id_node, vcpu, memory, loader, boot, pciroot, serialroot, events;
-    unsigned stopped_inode; struct component rtc, platform;
+    struct child stopped; struct component rtc, platform;
     struct vnode *id_vnode, *vcpu_vnode, *memory_vnode, *loader_vnode;
     struct vnode *boot_vnode, *stopped_vnode, *pciroot_vnode, *serialroot_vnode, *events_vnode;
 };
@@ -92,6 +95,7 @@ static int child_init(struct vmmfs_node *p,
 #define vmmfs_memory_init child_init
 #define vmmfs_loader_init child_init
 #define vmmfs_boot_init child_init
+#define vmmfs_stopped_init child_init
 #define vmmfs_pciroot_init child_init
 #define vmmfs_serialroot_init child_init
 #define vmmfs_events_init child_init
@@ -137,6 +141,8 @@ static void component_fini(struct component *c) {
 #define vmmfs_rtc_init component_init
 #define vmmfs_platform_x64_fini component_fini
 #define vmmfs_rtc_fini component_fini
+static int vmmfs_machine_get_item(struct vmmfs_node *n, const char *s, size_t l, struct vnode **v) { (void)n; (void)s; (void)l; (void)v; return 0; }
+static int vmmfs_machine_read_item(struct vmmfs_node *n, uint64_t i, struct vmmfs_node_item *v) { (void)n; (void)i; (void)v; return 0; }
 static bool vmmfs_machine_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
 static bool vmmfs_pcislot_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }
 static void vmmfs_machine_drop(struct vmmfs_node *);
@@ -166,7 +172,7 @@ int main(void) {
     for (unsigned deferred = 0; deferred < 2; ++deferred) {
     defer_reclaim = deferred;
     for (unsigned kind = 0; kind < 2; ++kind) {
-        unsigned limit = kind == 0 ? 11 : 4;
+        unsigned limit = kind == 0 ? 12 : 4;
         for (fail_at = 1; fail_at <= limit; ++fail_at) {
             stage = object_drops = 0; machine = NULL; slot = NULL;
             int error = kind == 0 ?

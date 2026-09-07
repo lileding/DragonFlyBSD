@@ -664,11 +664,10 @@ vmmfs_pciroot_read_item(struct vmmfs_node *node, uint64_t index,
 	RB_FOREACH(entry, vmmfs_pcislot_tree, &pciroot->registry->slots) {
 		if (current++ != index)
 			continue;
-		item->vnode = entry->slot->node.vnode;
 		item->inode = entry->slot->node.inode;
 		vmmfs_pciroot_format_bdf(entry->slot->bdf, item->name,
 		    sizeof(item->name));
-		vref(item->vnode);
+		item->type = DT_DIR;
 		lwkt_reltoken(&pciroot->token);
 		return (0);
 	}

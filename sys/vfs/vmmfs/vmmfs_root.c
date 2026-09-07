@@ -234,11 +234,10 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 	RB_FOREACH(entry, vmmfs_machine_tree, &root->machines) {
 		if (current++ != index)
 			continue;
-		item->vnode = entry->machine->node.vnode;
 		machine = entry->machine;
 		item->inode = machine->node.inode;
 		bcopy(machine->name, item->name, sizeof(item->name));
-		vref(item->vnode);
+		item->type = DT_DIR;
 		lwkt_reltoken(&root->token);
 		return (0);
 	}

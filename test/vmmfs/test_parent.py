@@ -88,11 +88,11 @@ struct vmmfs_machine {
     bool runtime_releasing, runtime_released;
     unsigned runtime_references;
     struct { struct vmmfs_node node; struct token token; unsigned active_count; void *threads; } vcpu;
-    struct { struct vmmfs_node node; } id_node, memory, loader, boot, pciroot, serialroot, events;
+    struct { struct vmmfs_node node; } id_node, memory, loader, boot, stopped, pciroot, serialroot, events;
 };
 #define NELEM(a) (sizeof(a) / sizeof((a)[0]))
 static struct vmmfs_machine machine;
-static struct vnode children[8], parent;
+static struct vnode children[9], parent;
 static unsigned called, dropped, veto_index;
 static int child_error;
 #define vref(v) do { assert((v)->refs); ++(v)->refs; } while (0)
@@ -122,7 +122,7 @@ static bool
 int main(void) {
     struct vnode **fields[] = {
         &machine.id_node.node.vnode, &machine.vcpu.node.vnode, &machine.memory.node.vnode,
-        &machine.loader.node.vnode, &machine.boot.node.vnode,
+        &machine.loader.node.vnode, &machine.boot.node.vnode, &machine.stopped.node.vnode,
         &machine.pciroot.node.vnode, &machine.serialroot.node.vnode, &machine.events.node.vnode
     };
     const int errors[] = { 0 }; /* Children cannot veto machine teardown. */
@@ -149,7 +149,7 @@ int main(void) {
             assert(vmmfs_machine_deactivate(&machine.node) == true);
             assert(machine.node.dead && machine.token.acquired == 0);
             /* Deactivation does not detach the vnode backlink. */
-            assert(called == 8 && dropped == 8 && machine.node.vnode == &parent);
+            assert(called == 9 && dropped == 9 && machine.node.vnode == &parent);
             for (index = 0; index < NELEM(children); ++index)
                 assert(children[index].refs == 0);
             assert(machine.token.held == 1);

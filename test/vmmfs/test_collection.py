@@ -173,52 +173,60 @@ int main(void) {
 }
 """)
 
-    def test_readdir_copies_metadata_before_releasing_reference(self):
+    def test_readdir_metadata_types_holes_and_resume(self):
         run_c(COMMON + r"""
 #include <sys/types.h>
-enum { VDIR = 1, DT_DIR = 4 };
-struct vnode;
-struct vmmfs_node_item { struct vnode *vnode; ino_t inode; char name[16]; };
-struct vmmfs_node { struct vnode *vnode;
-    struct vmmfs_node *parent; ino_t inode;
+enum { VDIR = 1, DT_DIR = 4, DT_REG = 8, DT_CHR = 2 };
+struct vmmfs_node_item { ino_t inode; uint8_t type; char name[16]; };
+struct vmmfs_node { struct vmmfs_node *parent; ino_t inode;
     int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
- struct lock lock; bool dead;};
-struct vnode { int v_type; void *v_data; unsigned refs; };
+    struct lock lock; bool dead; };
+struct vnode { int v_type; void *v_data; };
 struct uio { off_t uio_offset; };
-struct vop_readdir_args {
-    struct vnode *a_vp; struct uio *a_uio;
-    int *a_ncookies, *a_eofflag; void **a_cookies;
-};
-static struct vnode child;
-static unsigned writes;
-static void vrele(struct vnode *v) {
-    assert(v == &child && v->refs == 1); --v->refs; v->v_data = NULL;
-}
+struct vop_readdir_args { struct vnode *a_vp; struct uio *a_uio;
+    int *a_ncookies, *a_eofflag; void **a_cookies; };
+static unsigned writes, limit = 3;
+static int terminal_error = ENOENT;
+static const char *names[] = { ".", "..", "file", "boot", "pci" };
+static const unsigned types[] = { DT_DIR, DT_DIR, DT_REG, DT_CHR, DT_DIR };
+static const ino_t inodes[] = { 7, 1, 42, 44, 45 };
 static int read_item(struct vmmfs_node *node, uint64_t index,
     struct vmmfs_node_item *item) {
     (void)node;
-    if (index) return ENOENT;
-    assert(child.refs == 0); child.refs = 1;
-    item->vnode = &child; item->inode = 42; strcpy(item->name, "child");
-    return 0;
+    if (index >= 4) return terminal_error;
+    item->name[0] = '\0';
+    if (index == 1) return 0;
+    unsigned n = index ? index + 1 : 2;
+    item->inode = inodes[n]; item->type = types[n];
+    strcpy(item->name, names[n]); return 0;
 }
 static int vop_write_dirent(int *error, struct uio *uio, ino_t inode,
     unsigned type, uint16_t length, const char *name) {
-    (void)uio; assert(type == DT_DIR && !child.refs);
-    assert(inode == 42 && length == 5 && !strcmp(name, "child"));
-    assert(child.v_data == NULL); ++writes; *error = 0; return 0;
+    (void)uio; *error = 0;
+    if (writes == limit) return 1;
+    assert(inode == inodes[writes] && type == types[writes]);
+    assert(length == strlen(names[writes]) && !strcmp(name,names[writes]));
+    ++writes; return 0;
 }
 static int
 """ + function("vmmfs_node_vops.c", "vmmfs_node_vop_branch") + "\nstatic int\n" + function(
             "vmmfs_node_vops.c", "vmmfs_node_readdir") + r"""
 int main(void) {
-    struct vmmfs_node node = { .inode=1, .read_item=read_item };
+    struct vmmfs_node ancestor = { .inode=1 };
+    struct vmmfs_node node = { .inode=7, .parent=&ancestor, .read_item=read_item };
     struct vnode parent = { .v_type=VDIR, .v_data=&node };
-    struct uio uio = { 2 };
+    struct uio uio = { 0 };
     int eof = 0;
     struct vop_readdir_args ap = { .a_vp=&parent, .a_uio=&uio, .a_eofflag=&eof };
     assert(vmmfs_node_readdir(&ap) == 0);
-    assert(writes == 1 && eof == 1 && uio.uio_offset == 3 && !child.refs);
+    assert(writes == 3 && eof == 0 && uio.uio_offset == 4);
+    limit = 10;
+    assert(vmmfs_node_readdir(&ap) == 0);
+    assert(writes == 5 && eof == 1 && uio.uio_offset == 6);
+    terminal_error = EIO;
+    assert(vmmfs_node_readdir(&ap) == EIO && !eof);
+    uio.uio_offset = -1;
+    assert(vmmfs_node_readdir(&ap) == EINVAL);
     return 0;
 }
 """)

@@ -81,10 +81,9 @@ vmmfs_node_readdir(struct vop_readdir_args *ap)
 		}
 		if (error != 0)
 			break;
-		KKASSERT(item.vnode != NULL);
-		vrele(item.vnode);
-		stop = vop_write_dirent(&error, uio, item.inode, DT_DIR,
-		    (uint16_t)strlen(item.name), item.name);
+		if (item.name[0] != '\0')
+			stop = vop_write_dirent(&error, uio, item.inode,
+			    item.type, (uint16_t)strlen(item.name), item.name);
 		if (!stop) {
 			offset++;
 			index++;

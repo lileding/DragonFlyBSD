@@ -24,6 +24,7 @@
 #include "vmmfs_rtc.h"
 #include "vmmfs_serialroot.h"
 #include "vmmfs_vcpu.h"
+#include "vmmfs_stopped.h"
 
 struct mount;
 struct vnode;
@@ -55,8 +56,7 @@ struct vmmfs_machine {
 	struct vmmfs_rtc rtc;
 	struct vmmfs_serialroot serialroot;
 	struct vmmfs_events events;
-	/* Stable identity for the on-demand stopped projection. */
-	ino_t stopped_inode;
+	struct vmmfs_stopped stopped;
 };
 
 int vmmfs_machine_create(struct vmmfs_node *,

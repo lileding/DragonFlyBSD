@@ -5,7 +5,7 @@ from refactor_mount import Client, Document, TARGETS, walk
 from refactor_redundancy import ancestor, compact
 
 
-TARGETS = TARGETS - {"vmmfs_launch_create"}
+TARGETS = (TARGETS - {"vmmfs_launch_create", "vmmfs_stopped_create"}) | {"vmmfs_stopped_init"}
 
 class ValidationBoundaries(unittest.TestCase):
     def test_ancestor_is_not_runtime_field(self):
